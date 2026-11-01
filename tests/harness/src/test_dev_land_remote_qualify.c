@@ -17,6 +17,7 @@
 
 #define DLQ_CX "bundle_sha256,bundle_verify,head,base,cx_check"
 #define DLQ_PLAIN "bundle_sha256,bundle_verify,head,base"
+#define DLQ_VERIFY "bundle_sha256,bundle_verify,head,base,agent_verify"
 
 struct dlq_fixture {
     struct dlt_rig r;
@@ -95,6 +96,17 @@ static void dlq_qualify(struct dlt_call *c, const struct dlq_fixture *f,
     (void)json_push_kv_str(&c->input, "receipts", receipts);
     if (require)
         (void)json_push_kv_int(&c->input, "require", require);
+    zcl_native_handle_dev_land_remote(&c->request, &c->reply);
+}
+
+static void dlq_qualify_check(struct dlt_call *c, const struct dlq_fixture *f,
+                              const char *receipts, const char *check)
+{
+    dlt_begin(c, "dev.land.qualify_offer");
+    (void)json_push_kv_str(&c->input, "offer", f->offer);
+    (void)json_push_kv_str(&c->input, "receipts", receipts);
+    if (check)
+        (void)json_push_kv_str(&c->input, "check", check);
     zcl_native_handle_dev_land_remote(&c->request, &c->reply);
 }
 
@@ -275,6 +287,73 @@ _test_next:;
     return failures;
 }
 
+/* qualify_offer --check: lab B's agent_verify receipt counts under
+ * check=verify only, lab C's cx_check receipt under the default only. */
+static int dlq_check_cases(void)
+{
+    int failures = 0;
+    struct dlq_fixture f;
+    struct dlt_call c;
+    char sb[900], sc[900], rb[900], rc[900], both[2000], bsign[65], csign[65];
+    if (!dlq_fixture(&f, "qualcheck")) {
+        printf("rig setup FAILED\n");
+        return 1;
+    }
+    (void)snprintf(sb, sizeof(sb), "%s/lab-b", f.r.base);
+    (void)snprintf(sc, sizeof(sc), "%s/lab-c", f.r.base);
+    (void)snprintf(rb, sizeof(rb), "%s/b.receipt.json", f.r.base);
+    (void)snprintf(rc, sizeof(rc), "%s/c.receipt.json", f.r.base);
+    (void)snprintf(both, sizeof(both), "%s,%s", rb, rc);
+    if (!dlq_sign(&f, sb, rb, DLQ_VERIFY, bsign) ||
+        !dlq_sign(&f, sc, rc, DLQ_CX, csign) || !dlq_allow(bsign) ||
+        !dlq_allow(csign)) {
+        printf("receipt setup FAILED\n");
+        dlt_done(&f.r);
+        return 1;
+    }
+
+    TEST("land.qualify_offer --check=verify: counts the agent_verify receipt "
+         "and rejects the cx_check one as QUALIFY_NOT_REVERIFIED") {
+        dlq_qualify_check(&c, &f, both, "verify");
+        ASSERT(dlq_ready(&c, 1, 0, 1));
+        ASSERT_STR_EQ(json_get_str(json_at(json_get(&c.reply.data, "signers"),
+                                           0)),
+                      bsign);
+        ASSERT(dlq_rej_row(&c, 1, 0, rc, "QUALIFY_NOT_REVERIFIED"));
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.qualify_offer --check=cx and the default do not count the "
+         "agent_verify receipt") {
+        dlq_qualify_check(&c, &f, both, "cx");
+        ASSERT(dlq_ready(&c, 1, 0, 1));
+        ASSERT_STR_EQ(json_get_str(json_at(json_get(&c.reply.data, "signers"),
+                                           0)),
+                      csign);
+        ASSERT(dlq_rej_row(&c, 1, 0, rb, "QUALIFY_NOT_REVERIFIED"));
+        dlt_end(&c);
+        dlq_qualify_check(&c, &f, rb, NULL);
+        ASSERT(dlt_refused(&c, "QUALIFY_SHORT"));
+        dlt_end(&c);
+        dlq_qualify_check(&c, &f, rc, "verify");
+        ASSERT(dlt_refused(&c, "QUALIFY_SHORT"));
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.qualify_offer: an unknown check refuses QUALIFY_BAD_ARGUMENT") {
+        dlq_qualify_check(&c, &f, rb, "bogus");
+        ASSERT(dlt_refused(&c, "QUALIFY_BAD_ARGUMENT"));
+        dlt_end(&c);
+        PASS();
+    }
+
+_test_next:;
+    dlt_done(&f.r);
+    return failures;
+}
+
 /* dev.land.receive on the queue host, with and without receive-policy. */
 static void dlq_receive(struct dlt_call *c, const struct dlq_fixture *f,
                         const char *lane, const char *offer,
@@ -426,5 +505,5 @@ _test_next:;
 int dlq_remote_cases(void);
 int dlq_remote_cases(void)
 {
-    return dlq_qualify_cases() + dlq_receive_cases();
+    return dlq_qualify_cases() + dlq_check_cases() + dlq_receive_cases();
 }

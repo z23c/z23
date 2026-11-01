@@ -924,6 +924,134 @@ static bool dlt_rv_fixture(const struct dlt_rig *r, const char *base_x,
     return dlt_write(p, "#!/bin/sh\nexit 0\n", 0755);
 }
 
+/* --check=verify: the fake admission rail (ZCL_LAND_REVERIFY_RUNNER) logs its
+ * argv, the scratch HEAD's files and whether the tree is clean (the commit
+ * was applied as a real commit), then passes, or while rn.fail exists fails
+ * with exit 3, or while rn.sleep exists outlives any bound (a grandchild
+ * `sleep`, so only a process-group kill ends it). */
+#define DLT_RV_RUNNER                                                        \
+    "#!/bin/sh\n"                                                            \
+    "d=$(dirname \"$0\")\n"                                                  \
+    "ch=$(git diff --name-only HEAD~1 HEAD | tr '\\n' ',')\n"                \
+    "st=$(git status --porcelain | wc -l | tr -d ' ')\n"                     \
+    "echo \"$* changed=$ch dirty=$st\" > \"$d/rn.log\"\n"                    \
+    "if [ -f \"$d/rn.sleep\" ]; then sleep 60; fi\n"                         \
+    "if [ -f \"$d/rn.fail\" ]; then\n"                                       \
+    "  echo 'agent-verify: FAILED step=test'; exit 3\n"                      \
+    "fi\n"                                                                   \
+    "echo 'agent-verify: OK'\n"
+
+static void dlt_rv_mode(struct dlt_call *c, const struct dlt_rig *r,
+                        const char *bundle, const char *offer,
+                        const char *receipt, const char *check,
+                        int timeout_s)
+{
+    dlt_begin(c, "dev.land.reverify_offer");
+    (void)json_push_kv_str(&c->input, "bundle", bundle);
+    (void)json_push_kv_str(&c->input, "offer", offer);
+    (void)json_push_kv_str(&c->input, "repo", r->queue);
+    if (check)
+        (void)json_push_kv_str(&c->input, "check", check);
+    if (receipt)
+        (void)json_push_kv_str(&c->input, "receipt_out", receipt);
+    if (timeout_s)
+        (void)json_push_kv_int(&c->input, "timeout_s", timeout_s);
+    dlt_cd(r->queue);
+    zcl_native_handle_dev_land_remote(&c->request, &c->reply);
+}
+
+/* b2/o2 is a commit touching two .c files: not a split, so --check=cx refuses
+ * it and only the general mode takes it. */
+static int dlt_rv_verify_cases(const struct dlt_rig *r, const char *tmp,
+                               const char *b2, const char *o2)
+{
+    int failures = 0;
+    struct dlt_call c;
+    char runner[900], log[900], fail[900], sleepf[900], rc[900], rc2[900];
+    char text[2048];
+    (void)snprintf(runner, sizeof(runner), "%s/rn.sh", r->base);
+    (void)snprintf(log, sizeof(log), "%s/rn.log", r->base);
+    (void)snprintf(fail, sizeof(fail), "%s/rn.fail", r->base);
+    (void)snprintf(sleepf, sizeof(sleepf), "%s/rn.sleep", r->base);
+    (void)snprintf(rc, sizeof(rc), "%s/rvv.receipt.json", r->base);
+    (void)snprintf(rc2, sizeof(rc2), "%s/rvv2.receipt.json", r->base);
+    if (!dlt_write(runner, DLT_RV_RUNNER, 0755)) {
+        printf("runner setup FAILED\n");
+        return 1;
+    }
+    (void)setenv("ZCL_LAND_REVERIFY_RUNNER", runner, 1);
+
+    TEST("land.reverify_offer --check=verify: a non-split commit with a "
+         "passing runner signs a receipt whose checks end in agent_verify") {
+        dlt_rv_mode(&c, r, b2, o2, rc, "verify", 0);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "check")), "verify");
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "receipt")), rc);
+        dlt_end(&c);
+        ASSERT(dlt_slurp(rc, text, sizeof(text)));
+        ASSERT(strstr(text, "bundle_sha256,bundle_verify,head,base,"
+                            "agent_verify\"") != NULL);
+        ASSERT(dlt_slurp(log, text, sizeof(text)));
+        ASSERT(strstr(text, "--wait --project z23 make agent-verify "
+                            "ONLY=@changed changed=tools/x.c,tools/y.c, "
+                            "dirty=0") != NULL);
+        dlt_vfy(&c, rc, o2);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "checks")),
+                      "bundle_sha256,bundle_verify,head,base,agent_verify");
+        dlt_end(&c);
+        ASSERT(dlt_rv_clean(r, tmp));
+        PASS();
+    }
+
+    TEST("land.reverify_offer --check=verify: a failing runner refuses "
+         "REVERIFY_VERIFY_FAILED with exit and tail, and writes no receipt") {
+        ASSERT(dlt_write(fail, "x\n", 0644));
+        dlt_rv_mode(&c, r, b2, o2, rc2, "verify", 0);
+        ASSERT(dlt_refused(&c, "REVERIFY_VERIFY_FAILED"));
+        ASSERT(strstr(c.reply.error.evidence, "exit=3") != NULL);
+        ASSERT(strstr(c.reply.error.evidence, "agent-verify: FAILED step=test") !=
+               NULL);
+        dlt_end(&c);
+        ASSERT(access(rc2, F_OK) != 0);
+        ASSERT(dlt_rv_clean(r, tmp));
+        ASSERT(remove(fail) == 0);
+        PASS();
+    }
+
+    TEST("land.reverify_offer --check=verify: a runner past timeout_s is "
+         "killed and refuses REVERIFY_VERIFY_TIMEOUT, leaving nothing") {
+        ASSERT(dlt_write(sleepf, "x\n", 0644));
+        dlt_rv_mode(&c, r, b2, o2, rc2, "verify", 1);
+        ASSERT(dlt_refused(&c, "REVERIFY_VERIFY_TIMEOUT"));
+        ASSERT(strstr(c.reply.error.evidence, "timeout_s=1") != NULL);
+        dlt_end(&c);
+        ASSERT(access(rc2, F_OK) != 0);
+        ASSERT(dlt_rv_clean(r, tmp));
+        ASSERT(remove(sleepf) == 0);
+        PASS();
+    }
+
+    TEST("land.reverify_offer: --check=cx is unchanged and still refuses a "
+         "non-split commit; an unknown check or bad timeout_s is refused") {
+        dlt_rv_mode(&c, r, b2, o2, rc2, "cx", 0);
+        ASSERT(dlt_refused(&c, "REVERIFY_NOT_A_SPLIT"));
+        dlt_end(&c);
+        dlt_rv_mode(&c, r, b2, o2, rc2, "bogus", 0);
+        ASSERT(dlt_refused(&c, "OFFER_BAD_ARGUMENT"));
+        dlt_end(&c);
+        dlt_rv_mode(&c, r, b2, o2, rc2, "verify", -5);
+        ASSERT(dlt_refused(&c, "OFFER_BAD_ARGUMENT"));
+        dlt_end(&c);
+        ASSERT(dlt_rv_clean(r, tmp));
+        PASS();
+    }
+
+_test_next:;
+    (void)unsetenv("ZCL_LAND_REVERIFY_RUNNER");
+    return failures;
+}
+
 static int dlt_reverify_cases(void)
 {
     static const char base_rows[] =
@@ -1069,6 +1197,7 @@ static int dlt_reverify_cases(void)
     }
 
 _test_next:;
+    failures += dlt_rv_verify_cases(&r, tmp, b2, o2);
     if (saved[0])
         (void)setenv("TMPDIR", saved, 1);
     else

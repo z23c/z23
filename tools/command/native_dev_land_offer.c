@@ -53,11 +53,28 @@
  *          receipt_out a pass is signed like attest_offer's with checks
  *          "bundle_sha256,bundle_verify,head,base,cx_check". Reply: data
  *          {commit, base, file, functions, verdict, receipt?}.
+ *          --check=verify (default --check=cx, the above, unchanged) is the
+ *          general mode for ANY offered commit, in
+ *          native_dev_land_offer_verify.c: after the same fetch and scratch
+ *          worktree the commit is cherry-picked as a real commit and
+ *          `make agent-verify ONLY=@changed` runs as one bounded child
+ *          (--timeout_s, default 3600, 1..86400; the process group is killed
+ *          on timeout) behind the host admission rail (devbuild --wait when
+ *          on PATH, else make directly; ZCL_TESTING builds may name a fake
+ *          with ZCL_LAND_REVERIFY_RUNNER). Fetched code executes only inside
+ *          that child, under this box's local policy; offers come only from
+ *          allowlisted authors. Refusals: REVERIFY_APPLY,
+ *          REVERIFY_VERIFY_FAILED (exit and output tail as evidence),
+ *          REVERIFY_VERIFY_TIMEOUT, REVERIFY_SETUP; no REVERIFY_NOT_A_SPLIT.
+ *          A pass is signed with checks "bundle_sha256,bundle_verify,head,
+ *          base,agent_verify". Reply: data {commit, base, check "verify",
+ *          verdict, receipt?}.
  * qualify_offer (read-only) takes absolute --offer, --receipts (comma list,
  *          1..32 absolute paths) and optional integer --require (default 1,
  *          1..16; QUALIFY_BAD_ARGUMENT otherwise). Each receipt first passes
  *          verify_offer_receipt's checks against the offer (same codes). It
- *          then counts only when its checks include cx_check and its signer
+ *          then counts only when its checks include cx_check (or, with
+ *          --check=verify, agent_verify; default --check=cx) and its signer
  *          is not this box's own key. A receipt that fails any check is
  *          skipped, not fatal: it is listed in data.rejected as
  *          [{"receipt": path, "code": code}] with its code (OFFER_RECEIPT_BAD,
@@ -338,6 +355,7 @@ static void dlr_check_offer(const struct zcl_command_request *req,
 #define DLR_RECEIPT_SCHEMA "zcl.dev_land_offer_receipt.v1"
 #define DLR_RECEIPT_CHECKS "bundle_sha256,bundle_verify,head,base"
 #define DLR_RECEIPT_CHECKS_CX DLR_RECEIPT_CHECKS ",cx_check"
+#define DLR_RECEIPT_CHECKS_VERIFY DLR_RECEIPT_CHECKS ",agent_verify"
 #define DLR_RECEIPT_VERDICT "ok"
 
 /* Hex fields as written; pub and sigb are signer and sig decoded (verify). */
@@ -485,7 +503,8 @@ static bool dlr_receipt_fields(const struct json_value *doc,
     return dlr_receipt_strs(doc, t) && dlr_hex_n(t->commit, 40) &&
            dlr_hex_n(t->base, 40) && dlr_hex_n(t->bsha, 64) &&
            (strcmp(t->checks, DLR_RECEIPT_CHECKS) == 0 ||
-            strcmp(t->checks, DLR_RECEIPT_CHECKS_CX) == 0) &&
+            strcmp(t->checks, DLR_RECEIPT_CHECKS_CX) == 0 ||
+            strcmp(t->checks, DLR_RECEIPT_CHECKS_VERIFY) == 0) &&
            strcmp(t->verdict, DLR_RECEIPT_VERDICT) == 0 &&
            zcl_hex_decode_lower(t->signer, t->pub, sizeof(t->pub)) &&
            zcl_hex_decode_lower(t->sig, t->sigb, sizeof(t->sigb));
@@ -592,6 +611,7 @@ struct dlr_qctx {
     struct dlr_qual *q;
     struct zcl_command_reply *reply;
     const char *offer;
+    const char *want; /* the checks string a counted receipt carries */
     uint8_t own[ZCL_DEV_PROOF_SIGNER_PUBKEY_BYTES];
     bool own_present;
 };
@@ -678,7 +698,7 @@ static void dlr_qual_count(struct dlr_qctx *x, const char *path,
 {
     struct dlr_qual *q = x->q;
     int i;
-    if (strcmp(t->checks, DLR_RECEIPT_CHECKS_CX) != 0) {
+    if (strcmp(t->checks, x->want) != 0) {
         dlr_qual_reject(x, path, "QUALIFY_NOT_REVERIFIED");
         return;
     }
@@ -725,12 +745,19 @@ static bool dlr_qual_each(struct dlr_qctx *x, const char *list)
     }
 }
 
+static const char *dlr_qual_want(bool verify)
+{
+    return verify ? DLR_RECEIPT_CHECKS_VERIFY : DLR_RECEIPT_CHECKS_CX;
+}
+
 /* Counts the distinct re-verified signers behind the offer; true when at
  * least `require` of them. Every refusal is in reply and q->code. */
-bool zcl_dlr_qualify(const char *offer, const char *receipts, int require,
-                     struct dlr_qual *q, struct zcl_command_reply *reply)
+bool zcl_dlr_qualify_for(const char *offer, const char *receipts, int require,
+                         bool verify, struct dlr_qual *q,
+                         struct zcl_command_reply *reply)
 {
-    struct dlr_qctx x = {.q = q, .reply = reply, .offer = offer};
+    struct dlr_qctx x = {.q = q, .reply = reply, .offer = offer,
+                         .want = dlr_qual_want(verify)};
     const char *why = NULL;
     char ev[256], rej[200];
     memset(q, 0, sizeof(*q));
@@ -776,10 +803,17 @@ bool zcl_dlr_qualify(const char *offer, const char *receipts, int require,
     return false;
 }
 
+bool zcl_dlr_qualify(const char *offer, const char *receipts, int require,
+                     struct dlr_qual *q, struct zcl_command_reply *reply)
+{
+    return zcl_dlr_qualify_for(offer, receipts, require, false, q, reply);
+}
+
 /* Read-only: the receipts are checked, nothing is written. */
 static void dlr_qualify_offer(const struct zcl_command_request *req,
                               struct zcl_command_reply *reply)
 {
+    bool verify;
     struct dlr_qual q;
     struct json_value list, one;
     const struct json_value *rq = req->input ? json_get(req->input, "require")
@@ -787,8 +821,12 @@ static void dlr_qualify_offer(const struct zcl_command_request *req,
     int require = rq && rq->type == JSON_INT ? (int)json_get_int(rq) : 1;
     if (rq && rq->type != JSON_INT)
         require = 0;
-    if (!zcl_dlr_qualify(zcl_dlr_str(req, "offer"), zcl_dlr_str(req, "receipts"),
-                         require, &q, reply))
+    if (!zcl_dlr_check_arg(req, DLR_QUALIFY_LEAF, "QUALIFY_BAD_ARGUMENT",
+                           &verify, reply))
+        return;
+    if (!zcl_dlr_qualify_for(zcl_dlr_str(req, "offer"),
+                             zcl_dlr_str(req, "receipts"), require, verify, &q,
+                             reply))
         return;
     json_init(&list);
     json_set_array(&list);
@@ -825,6 +863,8 @@ struct dlr_rv {
     char ref[64];
     char file[256];
     char funcs[DLR_FUNCS_MAX];
+    bool verify; /* --check=verify: the general mode */
+    int timeout_s;
 };
 
 static bool dlr_rv_fail(struct zcl_command_reply *reply, const char *code,
@@ -1114,14 +1154,20 @@ static bool dlr_rv_cx(struct dlr_rv *rv, struct zcl_command_reply *reply)
 static void dlr_rv_finish(struct dlr_rv *rv, const char *out,
                           struct zcl_command_reply *reply)
 {
+    const char *checks = rv->verify ? DLR_RECEIPT_CHECKS_VERIFY
+                                    : DLR_RECEIPT_CHECKS_CX;
     if (out)
-        dlr_attest_write(rv->o, out, DLR_RECEIPT_CHECKS_CX, reply);
+        dlr_attest_write(rv->o, out, checks, reply);
     else
         dlr_offer_ok(rv->o, reply);
-    if (reply->status == ZCL_COMMAND_STATUS_PASSED) {
-        (void)json_push_kv_str(&reply->data, "file", rv->file);
-        (void)json_push_kv_str(&reply->data, "functions", rv->funcs);
+    if (reply->status != ZCL_COMMAND_STATUS_PASSED)
+        return;
+    if (rv->verify) {
+        (void)json_push_kv_str(&reply->data, "check", "verify");
+        return;
     }
+    (void)json_push_kv_str(&reply->data, "file", rv->file);
+    (void)json_push_kv_str(&reply->data, "functions", rv->funcs);
 }
 
 /* Removes the scratch worktree and the temporary ref, whatever happened. */
@@ -1142,14 +1188,22 @@ static void dlr_rv_cleanup(const struct dlr_rv *rv)
         (void)platform_private_directory_remove_empty(rv->tmpdir);
 }
 
+/* The split mode: apply uncommitted, name the unit, run dev cx check. */
+static bool dlr_rv_cx_chain(struct dlr_rv *rv, struct zcl_command_reply *reply)
+{
+    return dlr_rv_apply(rv, reply) && dlr_rv_files(rv, reply) &&
+           dlr_rv_funcs(rv, reply) && dlr_rv_baseline(rv, reply) &&
+           dlr_rv_lint(rv, reply) && dlr_rv_cx(rv, reply);
+}
+
 static void dlr_rv_run(struct dlr_rv *rv, const char *out,
                        struct zcl_command_reply *reply)
 {
-    if (dlr_rv_fetch(rv, reply) && dlr_rv_worktree(rv, reply) &&
-        dlr_rv_apply(rv, reply) && dlr_rv_files(rv, reply) &&
-        dlr_rv_funcs(rv, reply) && dlr_rv_baseline(rv, reply) &&
-        dlr_rv_lint(rv, reply) &&
-        dlr_rv_cx(rv, reply))
+    if (!dlr_rv_fetch(rv, reply) || !dlr_rv_worktree(rv, reply))
+        return;
+    if (rv->verify ? zcl_dlr_verify_run(rv->wt, rv->o->commit, rv->timeout_s,
+                                        DLR_REVERIFY_LEAF, reply)
+                   : dlr_rv_cx_chain(rv, reply))
         dlr_rv_finish(rv, out, reply);
 }
 
@@ -1162,11 +1216,17 @@ static void dlr_reverify_offer(const struct zcl_command_request *req,
     const char *out = zcl_dlr_str(req, "receipt_out");
     struct dlr_offer *o;
     struct dlr_rv *rv;
+    bool verify;
+    int secs = 0;
     if (out && !platform_path_is_absolute(out)) {
         dlr_offer_fail(DLR_REVERIFY_LEAF, reply, "OFFER_BAD_ARGUMENT", "input",
                        "receipt_out must be an absolute path", out);
         return;
     }
+    if (!zcl_dlr_check_arg(req, DLR_REVERIFY_LEAF, "OFFER_BAD_ARGUMENT",
+                           &verify, reply) ||
+        (verify && !zcl_dlr_timeout_arg(req, DLR_REVERIFY_LEAF, &secs, reply)))
+        return;
     o = dlr_offer_checked(req, reply, DLR_REVERIFY_LEAF);
     if (!o)
         return;
@@ -1177,6 +1237,8 @@ static void dlr_reverify_offer(const struct zcl_command_request *req,
     } else {
         rv = zcl_calloc(1, sizeof(*rv), "dev_land_remote.reverify");
         rv->o = o;
+        rv->verify = verify;
+        rv->timeout_s = secs;
         dlr_rv_run(rv, out, reply);
         dlr_rv_cleanup(rv);
         free(rv);

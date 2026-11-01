@@ -80,6 +80,26 @@ bool zcl_dlr_check_offer_at(const char *root, const char *bundle,
 bool zcl_dlr_qualify(const char *offer, const char *receipts, int require,
                      struct dlr_qual *q, struct zcl_command_reply *reply);
 
+/* qualify_offer counting for one named check: verify false counts cx_check
+ * receipts (zcl_dlr_qualify), true agent_verify ones. */
+bool zcl_dlr_qualify_for(const char *offer, const char *receipts, int require,
+                         bool verify, struct dlr_qual *q,
+                         struct zcl_command_reply *reply);
+
+/* --check=cx|verify (*verify) and --timeout_s (*secs, default 3600) of
+ * reverify_offer and qualify_offer, and the general re-verification itself
+ * (native_dev_land_offer_verify.c): the cherry-pick as a real commit in the
+ * scratch worktree `wt`, then `make agent-verify ONLY=@changed` as a
+ * bounded child. A refusal is in reply under leaf. */
+bool zcl_dlr_check_arg(const struct zcl_command_request *req, const char *leaf,
+                       const char *code, bool *verify,
+                       struct zcl_command_reply *reply);
+bool zcl_dlr_timeout_arg(const struct zcl_command_request *req,
+                         const char *leaf, int *secs,
+                         struct zcl_command_reply *reply);
+bool zcl_dlr_verify_run(const char *wt, const char *commit, int secs,
+                        const char *leaf, struct zcl_command_reply *reply);
+
 /* check_offer, attest_offer, verify_offer_receipt, reverify_offer,
  * qualify_offer: true when path named one of them. */
 bool zcl_dlr_offer_dispatch(const char *path,

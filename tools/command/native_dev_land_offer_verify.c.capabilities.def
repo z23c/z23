@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_dev_land_offer_verify.c", CAP_FS_READ, "stats PATH entries for an executable devbuild; the git cherry-pick and the make agent-verify child (behind the host admission rail when present) run only inside the reverify scratch worktree through the spawn seam with an argv and no shell, time-bounded with the process group killed on timeout")

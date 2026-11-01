@@ -2527,13 +2527,19 @@ ZCL_COMMAND_DEV_COMMAND(
     "REVERIFY_CX_FAILED with the child's code and detail. The scratch "
     "worktree and ref are always removed. With receipt_out (absolute) a "
     "pass writes a receipt like attest_offer's, signed over checks "
-    "bundle_sha256,bundle_verify,head,base,cx_check. Returns commit, base, "
+    "bundle_sha256,bundle_verify,head,base,cx_check. --check=verify (default "
+    "cx) re-verifies ANY commit instead: it is cherry-picked as a real commit "
+    "and `make agent-verify ONLY=@changed` runs as a child behind the host "
+    "admission rail, bounded by timeout_s (default 3600, killed on timeout); "
+    "REVERIFY_VERIFY_FAILED or REVERIFY_VERIFY_TIMEOUT otherwise, and a pass "
+    "is signed over bundle_sha256,bundle_verify,head,base,agent_verify. "
+    "Returns commit, base, "
     "file, functions, verdict, receipt.",
     65536,
     "land,offer,reverify,cx,p2p",
     "zcl.land_reverify_offer_input.v1", "zcl.land_reverify_offer.v1",
-    "bundle,offer,repo,receipt_out", "bundle,offer",
-    "z23-dev dev land reverify_offer --bundle=/abs/x.bundle --offer=/abs/x.bundle.offer.json [--receipt_out=/abs/x.receipt.json]",
+    "bundle,offer,repo,receipt_out,check,timeout_s", "bundle,offer",
+    "z23-dev dev land reverify_offer --bundle=/abs/x.bundle --offer=/abs/x.bundle.offer.json [--receipt_out=/abs/x.receipt.json] [--check=cx|verify] [--timeout_s=N]",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
     ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_BACKGROUND,
@@ -2551,7 +2557,8 @@ ZCL_COMMAND_DEV_COMMAND(
     "Count the distinct labs that re-verified an offered commit",
     "Each of receipts (comma list of absolute paths) passes "
     "verify_offer_receipt's checks against offer, same codes, its path as "
-    "evidence. It counts only with cx_check in its checks and a signer other "
+    "evidence. It counts only with cx_check (check=verify: agent_verify) in "
+    "its checks and a signer other "
     "than this box's own key; a receipt that fails any check is skipped, "
     "not fatal, and listed in data.rejected as {receipt, code} (codes "
     "as above plus QUALIFY_NOT_REVERIFIED, QUALIFY_SIGNER_NOT_DISTINCT); a "
@@ -2564,8 +2571,8 @@ ZCL_COMMAND_DEV_COMMAND(
     65536,
     "land,offer,receipt,qualify,p2p",
     "zcl.land_qualify_offer_input.v1", "zcl.land_qualify_offer.v1",
-    "offer,receipts,require", "offer,receipts",
-    "z23-dev dev land qualify_offer --offer=/abs/x.bundle.offer.json --receipts=/abs/a.receipt.json[,/abs/b.receipt.json] [--require=N]",
+    "offer,receipts,require,check", "offer,receipts",
+    "z23-dev dev land qualify_offer --offer=/abs/x.bundle.offer.json --receipts=/abs/a.receipt.json[,/abs/b.receipt.json] [--require=N] [--check=cx|verify]",
     ZCL_COMMAND_EFFECT_READ, ZCL_COMMAND_RISK_READ,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
     ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST,
