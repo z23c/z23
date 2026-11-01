@@ -1002,6 +1002,96 @@ static bool msg_block_dos_positive(const struct validation_state *state,
     return validation_state_get_dos(state, dos) && *dos > 0;
 }
 
+/* Post-intake verdict bookkeeping: on a non-retryable reject, emit the
+ * reject event and mark the block seen unless the reject is self-suspected;
+ * every other verdict goes to msg_block_note_retryable. Returns true, with
+ * hex filled, when a self-suspected reject is held out of the dedup ring so
+ * the caller logs the hold. */
+static bool msg_block_note_reject_or_retry(struct msg_processor *mp,
+                                           struct p2p_node *node,
+                                           struct uint256 *hash,
+                                           const struct validation_state *state,
+                                           bool reject_nonretryable,
+                                           bool self_suspect,
+                                           char hex[65])
+{
+    uint256_get_hex(hash, hex);
+    if (!reject_nonretryable) {
+        msg_block_note_retryable(mp, hash, state);
+        return false;
+    }
+    event_emitf(EV_BLOCK_REJECTED, (uint32_t)node->id,
+                "hash=%s reason=%s", hex,
+                state->reject_reason[0] ? state->reject_reason : "unknown");
+    if (!self_suspect) {
+        /* rejected blocks: mark seen so the dedup ring
+         * short-circuits subsequent deliveries of the same bad block
+         * from other peers. Only the "received but skipped connect"
+         * case (SKIP_ALREADY_RUNNING, etc.) must stay UN-marked so
+         * it can retry; that path is validation_state_is_valid ==
+         * true but with no tip advance, handled below. */
+        block_mark_seen(hash);
+    }
+    return self_suspect;
+}
+
+/* When a block fails validation during IBD (likely a fork block),
+ * re-request headers from this peer starting at our current tip.
+ * This forces the peer to send us the correct chain of headers,
+ * which will include the valid block at the failed height. */
+static void msg_block_request_headers_if_rejected(struct msg_processor *mp,
+                                                  struct p2p_node *node,
+                                                  bool reject_nonretryable)
+{
+    if (reject_nonretryable)
+        msg_processor_request_invalid_block_headers(mp, node);
+}
+
+/* Run the post-accept bookkeeping only when the intake verdict is valid;
+ * returns the new tip when the block must also be relayed, else NULL. */
+static struct block_index *msg_block_note_accepted_if_valid(
+        struct msg_processor *mp, struct p2p_node *node,
+        struct uint256 *hash, const struct validation_state *state)
+{
+    if (validation_state_is_valid(state))
+        return msg_block_note_accepted(mp, node, hash);
+    return NULL;
+}
+
+/* Penalize an invalid block per the validator's DoS grade, or emit the
+ * suppression event when the reject was self-suspected; returns true (with
+ * dos filled) when the penalty was suppressed so the caller logs it. A
+ * valid verdict is left untouched. */
+static bool msg_block_suppress_or_penalize(struct msg_processor *mp,
+                                           struct p2p_node *node,
+                                           const struct validation_state *state,
+                                           bool self_suspect,
+                                           const char *rr, int *dos)
+{
+    *dos = 0;
+    if (validation_state_is_valid(state))
+        return false;
+    if (msg_block_dos_positive(state, dos)) {
+        if (!self_suspect) {
+            msg_block_penalize_invalid(mp, node, state, *dos, rr);
+            return false;
+        }
+        /* The fault is LOCAL, not the peer's: the block body is
+         * clean (re-derived via check_block) and on a strictly-
+         * more-work chain at/above H*. Banning would self-isolate
+         * from the honest majority, so we suppress ALL peer
+         * penalty here. The named self-isolation blocker is already
+         * emitted inside msg_block_reject_self_suspected(); this is
+         * the per-event suppression record. */
+        event_emitf(EV_BLOCK_REJECTED, (uint32_t)node->id,
+                    "dos=%d SUPPRESSED-self-suspect: %s", *dos, rr);
+        return true;
+    }
+    /* DoS=0 but invalid: orphan block or parent-failed.
+     * Don't penalize peer — this is normal during sync. */
+    return false;
+}
+
 bool process_block_msg(struct msg_processor *mp, struct p2p_node *node,
                        struct byte_stream *s)
 {
@@ -1064,107 +1154,72 @@ bool process_block_msg(struct msg_processor *mp, struct p2p_node *node,
         msg_block_classify_reject(mp, node, &blk, &hash, &state,
                                   &self_suspect);
 
-    if (reject_nonretryable) {
-        char hex[65];
-        uint256_get_hex(&hash, hex);
-        event_emitf(EV_BLOCK_REJECTED, (uint32_t)node->id,
-                    "hash=%s reason=%s", hex,
-                    state.reject_reason[0] ? state.reject_reason : "unknown");
+    char hex[65];
+    const bool held_retryable =
+        msg_block_note_reject_or_retry(mp, node, &hash, &state,
+                                       reject_nonretryable, self_suspect,
+                                       hex);
+    if (held_retryable) {
+        /* Body-valid more-work block we reject on LOCAL state: do NOT
+         * dedup it. Marking it seen would short-circuit every future
+         * delivery (block_already_seen at intake) and silently wedge
+         * the node below it forever. Leaving it out of the ring means
+         * the next delivery reprocesses it once our state heals. */
+        LOG_WARN("net",
+                 "holding block %s retryable (self-suspected local "
+                 "reject) — not dedup'ing so it reprocesses after heal",
+                 hex);
+    }
+    msg_block_request_headers_if_rejected(mp, node, reject_nonretryable);
 
-        if (!self_suspect) {
-            /* rejected blocks: mark seen so the dedup ring
-             * short-circuits subsequent deliveries of the same bad block
-             * from other peers. Only the "received but skipped connect"
-             * case (SKIP_ALREADY_RUNNING, etc.) must stay UN-marked so
-             * it can retry; that path is validation_state_is_valid ==
-             * true but with no tip advance, handled below. */
-            block_mark_seen(&hash);
-        } else {
-            /* Body-valid more-work block we reject on LOCAL state: do NOT
-             * dedup it. Marking it seen would short-circuit every future
-             * delivery (block_already_seen at intake) and silently wedge
-             * the node below it forever. Leaving it out of the ring means
-             * the next delivery reprocesses it once our state heals. */
-            LOG_WARN("net",
-                     "holding block %s retryable (self-suspected local "
-                     "reject) — not dedup'ing so it reprocesses after heal",
-                     hex);
+    struct block_index *new_tip =
+        msg_block_note_accepted_if_valid(mp, node, &hash, &state);
+    if (new_tip) {
+    /* Relay accepted block to all connected peers (not during IBD).
+     * At the tip, we act as a full relay node. During IBD, relaying
+     * would flood peers with old blocks they already have.
+     * BIP 130: peers that sent "sendheaders" get a direct headers
+     * message (saves an inv→getheaders round-trip at the tip). */
+        struct inv_item blk_inv;
+        inv_item_init_typed(&blk_inv, MSG_BLOCK, new_tip->phashBlock);
+        zcl_mutex_lock(&mp->net_mgr->cs_nodes);
+        for (size_t pi = 0; pi < mp->net_mgr->num_nodes; pi++) {
+            struct p2p_node *peer = mp->net_mgr->nodes[pi];
+            enum msg_block_relay_result relay =
+                msg_block_relay_to_peer(mp, node, peer, new_tip,
+                                        &blk_inv);
+            if (relay == MSG_BLOCK_RELAY_SOURCE_PROOF_FAILED) {
+                LOG_WARN("headers",
+                         "source-peer tip proof failed "
+                         "h=%d peer=%s",
+                         new_tip->nHeight,
+                         peer->addr_name);
+            } else if (relay == MSG_BLOCK_RELAY_SOURCE_PROOF_OK) {
+                LOG_INFO("headers",
+                         "source-peer verified tip proof "
+                         "h=%d peer=%s",
+                         new_tip->nHeight,
+                         peer->addr_name);
+            } else if (relay == MSG_BLOCK_RELAY_HEADER_FAILED_USE_INV) {
+                LOG_WARN("headers",
+                         "new-tip header announcement "
+                         "failed h=%d peer=%s; using inv",
+                         new_tip->nHeight,
+                         peer->addr_name);
+                p2p_node_push_inventory(peer, &blk_inv);
+            }
         }
-
-        /* When a block fails validation during IBD (likely a fork block),
-         * re-request headers from this peer starting at our current tip.
-         * This forces the peer to send us the correct chain of headers,
-         * which will include the valid block at the failed height. */
-        msg_processor_request_invalid_block_headers(mp, node);
-    } else {
-        msg_block_note_retryable(mp, &hash, &state);
+        zcl_mutex_unlock(&mp->net_mgr->cs_nodes);
     }
 
-    if (validation_state_is_valid(&state)) {
-        struct block_index *new_tip = msg_block_note_accepted(mp, node,
-                                                              &hash);
-        if (new_tip) {
-        /* Relay accepted block to all connected peers (not during IBD).
-         * At the tip, we act as a full relay node. During IBD, relaying
-         * would flood peers with old blocks they already have.
-         * BIP 130: peers that sent "sendheaders" get a direct headers
-         * message (saves an inv→getheaders round-trip at the tip). */
-            struct inv_item blk_inv;
-            inv_item_init_typed(&blk_inv, MSG_BLOCK, new_tip->phashBlock);
-            zcl_mutex_lock(&mp->net_mgr->cs_nodes);
-            for (size_t pi = 0; pi < mp->net_mgr->num_nodes; pi++) {
-                struct p2p_node *peer = mp->net_mgr->nodes[pi];
-                enum msg_block_relay_result relay =
-                    msg_block_relay_to_peer(mp, node, peer, new_tip,
-                                            &blk_inv);
-                if (relay == MSG_BLOCK_RELAY_SOURCE_PROOF_FAILED) {
-                    LOG_WARN("headers",
-                             "source-peer tip proof failed "
-                             "h=%d peer=%s",
-                             new_tip->nHeight,
-                             peer->addr_name);
-                } else if (relay == MSG_BLOCK_RELAY_SOURCE_PROOF_OK) {
-                    LOG_INFO("headers",
-                             "source-peer verified tip proof "
-                             "h=%d peer=%s",
-                             new_tip->nHeight,
-                             peer->addr_name);
-                } else if (relay == MSG_BLOCK_RELAY_HEADER_FAILED_USE_INV) {
-                    LOG_WARN("headers",
-                             "new-tip header announcement "
-                             "failed h=%d peer=%s; using inv",
-                             new_tip->nHeight,
-                             peer->addr_name);
-                    p2p_node_push_inventory(peer, &blk_inv);
-                }
-            }
-            zcl_mutex_unlock(&mp->net_mgr->cs_nodes);
-        }
-    } else {
-        int dos = 0;
-        if (msg_block_dos_positive(&state, &dos)) {
-            const char *rr = msg_block_reject_reason(&state);
-            if (self_suspect) {
-                /* The fault is LOCAL, not the peer's: the block body is
-                 * clean (re-derived via check_block) and on a strictly-
-                 * more-work chain at/above H*. Banning would self-isolate
-                 * from the honest majority, so we suppress ALL peer
-                 * penalty here. The named self-isolation blocker is already
-                 * emitted inside msg_block_reject_self_suspected(); this is
-                 * the per-event suppression record. */
-                event_emitf(EV_BLOCK_REJECTED, (uint32_t)node->id,
-                            "dos=%d SUPPRESSED-self-suspect: %s", dos, rr);
-                LOG_WARN("net",
-                         "Peer %s: NOT penalizing (self-suspected local "
-                         "reject, dos=%d): %s",
-                         node->addr_name, dos, rr);
-            } else {
-                msg_block_penalize_invalid(mp, node, &state, dos, rr);
-            }
-        } else {
-            /* DoS=0 but invalid: orphan block or parent-failed.
-             * Don't penalize peer — this is normal during sync. */
-        }
+    int dos = 0;
+    const char *rr = msg_block_reject_reason(&state);
+    if (msg_block_suppress_or_penalize(mp, node, &state, self_suspect,
+                                       rr, &dos)) {
+        LOG_WARN("net",
+                 "Peer %s: NOT penalizing (self-suspected local "
+                 "reject, dos=%d): %s",
+                 node->addr_name, dos, rr);
     }
 
     block_free(&blk);
