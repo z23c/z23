@@ -585,6 +585,71 @@ static enum coins_shielded_requirements_result anchor_result_map(
     }
 }
 
+/* Map an anchor lookup to a shielded-requirements result. Empty roots are found. */
+static enum coins_shielded_requirements_result anchor_requirement(
+    struct coins_view *base, enum coins_anchor_pool pool,
+    const struct uint256 *root, struct incremental_merkle_tree *tree_out)
+{
+    enum coins_anchor_lookup_result ar;
+    if (anchor_is_empty(pool, root, tree_out))
+        ar = COINS_ANCHOR_FOUND;
+    else
+        ar = coins_view_get_anchor(base, pool, root, tree_out);
+    return anchor_result_map(ar);
+}
+
+/* Allocate num_joinsplit intermediates into *out, NULL when the count is 0. */
+static enum coins_shielded_requirements_result alloc_sprout_intermediates(
+    size_t num_joinsplit, struct sprout_intermediate **out)
+{
+    *out = NULL;
+    if (num_joinsplit > 0) {
+        if (num_joinsplit > SIZE_MAX / sizeof(**out))
+            return COINS_SHIELDED_REQUIREMENTS_STORE_ERROR;
+        *out = zcl_calloc(num_joinsplit, sizeof(**out),
+                          "shielded_requirements_intermediates");
+        if (!*out)
+            return COINS_SHIELDED_REQUIREMENTS_STORE_ERROR;
+    }
+    return COINS_SHIELDED_REQUIREMENTS_OK;
+}
+
+/* Append this JoinSplit's commitments after its anchor is accepted. */
+static enum coins_shielded_requirements_result record_joinsplit_intermediate(
+    struct coins_view_cache *c, struct sprout_intermediate *intermediates,
+    size_t num_intermediates, const struct js_description *js,
+    size_t *num_out)
+{
+    struct incremental_merkle_tree tree;
+    bool found_intermediate = false;
+
+    *num_out = num_intermediates;
+    /* zclassicd's per-transaction `intermediates` map: an anchor made by
+     * an earlier JoinSplit of THIS transaction is valid, while a root made
+     * by an earlier transaction of the same block is not yet pushed. */
+    for (size_t j = 0; j < num_intermediates; j++) {
+        if (uint256_eq(&intermediates[j].root, &js->anchor)) {
+            tree = intermediates[j].tree;
+            found_intermediate = true;
+            break;
+        }
+    }
+    if (!found_intermediate) {
+        enum coins_shielded_requirements_result result =
+            anchor_requirement(&c->base, COINS_ANCHOR_SPROUT,
+                               &js->anchor, &tree);
+        if (result != COINS_SHIELDED_REQUIREMENTS_OK)
+            return result;
+    }
+
+    for (size_t j = 0; j < ZC_NUM_JS_OUTPUTS; j++)
+        incremental_tree_append(&tree, &js->commitments[j]);
+    incremental_tree_root(&tree, &intermediates[num_intermediates].root);
+    intermediates[num_intermediates].tree = tree;
+    *num_out = num_intermediates + 1;
+    return COINS_SHIELDED_REQUIREMENTS_OK;
+}
+
 enum coins_shielded_requirements_result
 coins_view_cache_check_shielded_requirements(
     struct coins_view_cache *c, const struct transaction *tx)
@@ -595,63 +660,24 @@ coins_view_cache_check_shielded_requirements(
         return COINS_SHIELDED_REQUIREMENTS_OK;
 
     struct sprout_intermediate *intermediates = NULL;
-    if (tx->num_joinsplit > 0) {
-        if (tx->num_joinsplit > SIZE_MAX / sizeof(*intermediates))
-            return COINS_SHIELDED_REQUIREMENTS_STORE_ERROR;
-        intermediates = zcl_calloc(tx->num_joinsplit,
-                                   sizeof(*intermediates),
-                                   "shielded_requirements_intermediates");
-        if (!intermediates)
-            return COINS_SHIELDED_REQUIREMENTS_STORE_ERROR;
-    }
+    enum coins_shielded_requirements_result result =
+        alloc_sprout_intermediates(tx->num_joinsplit, &intermediates);
+    if (result != COINS_SHIELDED_REQUIREMENTS_OK)
+        return result;
 
     size_t num_intermediates = 0;
-    enum coins_shielded_requirements_result result =
-        COINS_SHIELDED_REQUIREMENTS_OK;
     for (size_t i = 0; i < tx->num_joinsplit; i++) {
-        const struct js_description *js = &tx->v_joinsplit[i];
-        struct incremental_merkle_tree tree;
-        bool found_intermediate = false;
-
-        /* zclassicd's per-transaction `intermediates` map: an anchor made by
-         * an earlier JoinSplit of THIS transaction is valid, while a root made
-         * by an earlier transaction of the same block is not yet pushed. */
-        for (size_t j = 0; j < num_intermediates; j++) {
-            if (uint256_eq(&intermediates[j].root, &js->anchor)) {
-                tree = intermediates[j].tree;
-                found_intermediate = true;
-                break;
-            }
-        }
-        if (!found_intermediate) {
-            enum coins_anchor_lookup_result ar;
-            if (anchor_is_empty(COINS_ANCHOR_SPROUT, &js->anchor, &tree))
-                ar = COINS_ANCHOR_FOUND;
-            else
-                ar = coins_view_get_anchor(&c->base, COINS_ANCHOR_SPROUT,
-                                           &js->anchor, &tree);
-            result = anchor_result_map(ar);
-            if (result != COINS_SHIELDED_REQUIREMENTS_OK)
-                goto out;
-        }
-
-        for (size_t j = 0; j < ZC_NUM_JS_OUTPUTS; j++)
-            incremental_tree_append(&tree, &js->commitments[j]);
-        incremental_tree_root(&tree,
-                              &intermediates[num_intermediates].root);
-        intermediates[num_intermediates].tree = tree;
-        num_intermediates++;
+        result = record_joinsplit_intermediate(
+            c, intermediates, num_intermediates, &tx->v_joinsplit[i],
+            &num_intermediates);
+        if (result != COINS_SHIELDED_REQUIREMENTS_OK)
+            goto out;
     }
 
     for (size_t i = 0; i < tx->num_shielded_spend; i++) {
         const struct uint256 *root = &tx->v_shielded_spend[i].anchor;
-        enum coins_anchor_lookup_result ar;
-        if (anchor_is_empty(COINS_ANCHOR_SAPLING, root, NULL))
-            ar = COINS_ANCHOR_FOUND;
-        else
-            ar = coins_view_get_anchor(&c->base, COINS_ANCHOR_SAPLING,
-                                       root, NULL);
-        result = anchor_result_map(ar);
+        result = anchor_requirement(&c->base, COINS_ANCHOR_SAPLING,
+                                    root, NULL);
         if (result != COINS_SHIELDED_REQUIREMENTS_OK)
             goto out;
     }
