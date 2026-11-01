@@ -121,8 +121,6 @@ tools/dev/devloop_hotswap_build.c:hs_hotfork_build:38
 tools/dev/devloop_hotswap_build.c:zcl_devloop_hotswap_build:45
 tools/engine_unit.c:append_unit_receipt:25
 tools/engine_unit.c:compose_prompt:21
-tools/engine_unit.c:main:147
-tools/engine_unit.c:write_receipt:47
 tools/lint/lintc/gate_git_scan_a.c:check_equihash_params_run:26
 tools/lint/lintc/gate_git_scan_a.c:check_framework_filename_suffix_run:18
 tools/lint/lintc/gate_git_scan_a.c:check_no_stray_root_files_run:18

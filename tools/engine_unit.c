@@ -2331,6 +2331,111 @@ static bool receipt_push_fallback(struct json_value *doc,
     return ok;
 }
 
+static const char *receipt_requested_model(const struct unit_opts *o,
+                                           const struct engine_vendor *v)
+{
+    return o->model ? o->model : (v->default_model ? v->default_model : "");
+}
+
+/* Raw observations remain in the invocation chain and captured provider
+ * output. Compatibility fields must not look like per-run deltas. */
+static const struct engine_usage *receipt_usage_view(
+    const struct engine_usage *usage, bool totals_ambiguous,
+    struct engine_usage *additive_usage)
+{
+    if (!totals_ambiguous)
+        return usage;
+    *additive_usage = *usage;
+    additive_usage->tokens_known = false;
+    additive_usage->prompt_tokens_known = false;
+    additive_usage->completion_tokens_known = false;
+    additive_usage->cache_read_input_tokens_known = false;
+    additive_usage->cache_creation_input_tokens_known = false;
+    additive_usage->reasoning_tokens_known = false;
+    additive_usage->total_tokens_known = false;
+    additive_usage->cost_known = false;
+    return additive_usage;
+}
+
+static bool receipt_push_identity(struct json_value *doc,
+                                  const struct unit_opts *o,
+                                  const struct engine_vendor *v,
+                                  bool needs_operator, bool totals_ambiguous)
+{
+    return json_push_kv_str(doc, "schema", "zcl.engine_unit.v1") &&
+        json_push_kv_str(doc, "accounting_scope", "terminal_dispatch") &&
+        json_push_kv_str(doc, "usage_scope", totals_ambiguous
+            ? "non_additive_observation" : "terminal_dispatch") &&
+        json_push_kv_bool(doc, "resumed_session", o->resume_session_id != NULL) &&
+        json_push_kv_bool(doc, "needs_operator", needs_operator) &&
+        json_push_kv_str(doc, "engine", v->id) &&
+        json_push_kv_str(doc, "model", receipt_requested_model(o, v)) &&
+        json_push_kv_str(doc, "requested_model", receipt_requested_model(o, v));
+}
+
+static bool receipt_push_labels(struct json_value *doc,
+                                const struct unit_opts *o,
+                                size_t files_changed,
+                                bool files_changed_known)
+{
+    return json_push_kv_str(doc, "reasoning_effort",
+                            o->reasoning_effort ? o->reasoning_effort :
+                            ENGINE_REASONING_EFFORT_PROVIDER_DEFAULT) &&
+        json_push_kv_str(doc, "territory", o->territory ? o->territory : "") &&
+        json_push_kv_str(doc, "group", o->group ? o->group : "") &&
+        receipt_push_changed(doc, files_changed, files_changed_known);
+}
+
+static bool receipt_push_dispatch(struct json_value *doc,
+                                  const struct engine_gate_reading *g,
+                                  const struct engine_usage *usage,
+                                  int attempts,
+                                  int64_t dispatch_latency_ms,
+                                  int64_t proof_latency_ms)
+{
+    return json_push_kv_int(doc, "groups_ran", g->groups_ran) &&
+        json_push_kv_int(doc, "groups_failed", g->groups_failed) &&
+        json_push_kv_bool(doc, "cached", g->cached_mode) &&
+        json_push_kv_bool(doc, "cost_usd_known", usage->cost_known) &&
+        json_push_kv_real(doc, "cost_usd", usage->cost_usd) &&
+        json_push_kv_int(doc, "attempts", attempts) &&
+        json_push_kv_int(doc, "dispatch_failures",
+                         attempts > 0 ? attempts - 1 : 0) &&
+        json_push_kv_int(doc, "dispatch_latency_ms", dispatch_latency_ms) &&
+        json_push_kv_int(doc, "proof_latency_ms", proof_latency_ms);
+}
+
+static bool receipt_push_outcome(struct json_value *doc,
+                                 enum engine_verdict verdict,
+                                 size_t state_bytes, bool state_updated)
+{
+    return json_push_kv_str(doc, "verdict", engine_verdict_name(verdict)) &&
+        json_push_kv_int(doc, "state_bytes", (int64_t)state_bytes) &&
+        json_push_kv_bool(doc, "state_updated", state_updated);
+}
+
+static bool receipt_push_source(struct json_value *doc,
+                                const struct engine_cli_observation *observation,
+                                const char *reply_resolved_model,
+                                const struct engine_usage *usage,
+                                bool totals_ambiguous)
+{
+    if (observation && observation->known)
+        return receipt_push_observed(doc, observation, totals_ambiguous);
+    return receipt_push_fallback(doc, reply_resolved_model, usage);
+}
+
+static void receipt_emit(const struct unit_opts *o, const char *text)
+{
+    engine_emit(stdout, "%s", text);
+    if (o->state_dir && o->state_dir[0]) {
+        char path[1024];
+        if ((size_t)snprintf(path, sizeof(path), "%s/receipt.json",
+                             o->state_dir) < sizeof(path))
+            (void)engine_emit_file(path, text, strlen(text));
+    }
+}
+
 static void write_receipt(const struct unit_opts *o,
                           const struct engine_vendor *v,
                           const struct engine_usage *usage,
@@ -2350,68 +2455,27 @@ static void write_receipt(const struct unit_opts *o,
     char text[8192];
     char template_hex[65];
     unit_template_hex(o->kind, template_hex);
-    /* Raw observations remain in the invocation chain and captured provider
-     * output. Compatibility fields must not look like per-run deltas. */
     struct engine_usage additive_usage;
-    if (totals_ambiguous) {
-        additive_usage = *usage;
-        additive_usage.tokens_known = false;
-        additive_usage.prompt_tokens_known = false;
-        additive_usage.completion_tokens_known = false;
-        additive_usage.cache_read_input_tokens_known = false;
-        additive_usage.cache_creation_input_tokens_known = false;
-        additive_usage.reasoning_tokens_known = false;
-        additive_usage.total_tokens_known = false;
-        additive_usage.cost_known = false;
-        usage = &additive_usage;
-    }
+    usage = receipt_usage_view(usage, totals_ambiguous, &additive_usage);
     struct json_value doc;
     json_init(&doc);
     json_set_object(&doc);
-    bool ok = json_push_kv_str(&doc, "schema", "zcl.engine_unit.v1") &&
-        json_push_kv_str(&doc, "accounting_scope", "terminal_dispatch") &&
-        json_push_kv_str(&doc, "usage_scope", totals_ambiguous
-            ? "non_additive_observation" : "terminal_dispatch") &&
-        json_push_kv_bool(&doc, "resumed_session", o->resume_session_id != NULL) &&
-        json_push_kv_bool(&doc, "needs_operator", needs_operator) &&
-        json_push_kv_str(&doc, "engine", v->id) &&
-        json_push_kv_str(&doc, "model", o->model ? o->model :
-                         (v->default_model ? v->default_model : "")) &&
-        json_push_kv_str(&doc, "requested_model", o->model ? o->model :
-                         (v->default_model ? v->default_model : "")) &&
-        json_push_kv_str(&doc, "reasoning_effort",
-                         o->reasoning_effort ? o->reasoning_effort :
-                         ENGINE_REASONING_EFFORT_PROVIDER_DEFAULT) &&
-        json_push_kv_str(&doc, "territory", o->territory ? o->territory : "") &&
-        json_push_kv_str(&doc, "group", o->group ? o->group : "") &&
-        receipt_push_changed(&doc, files_changed, files_changed_known) &&
-        json_push_kv_int(&doc, "groups_ran", g->groups_ran) &&
-        json_push_kv_int(&doc, "groups_failed", g->groups_failed) &&
-        json_push_kv_bool(&doc, "cached", g->cached_mode) &&
-        json_push_kv_bool(&doc, "cost_usd_known", usage->cost_known) &&
-        json_push_kv_real(&doc, "cost_usd", usage->cost_usd) &&
-        json_push_kv_int(&doc, "attempts", attempts) &&
-        json_push_kv_int(&doc, "dispatch_failures",
-                         attempts > 0 ? attempts - 1 : 0) &&
-        json_push_kv_int(&doc, "dispatch_latency_ms", dispatch_latency_ms) &&
-        json_push_kv_int(&doc, "proof_latency_ms", proof_latency_ms) &&
-        json_push_kv_str(&doc, "verdict", engine_verdict_name(verdict)) &&
-        json_push_kv_int(&doc, "state_bytes", (int64_t)state_bytes) &&
-        json_push_kv_bool(&doc, "state_updated", state_updated) &&
+    bool ok = receipt_push_identity(&doc, o, v, needs_operator,
+                                    totals_ambiguous) &&
+        receipt_push_labels(&doc, o, files_changed, files_changed_known) &&
+        receipt_push_dispatch(&doc, g, usage, attempts, dispatch_latency_ms,
+                              proof_latency_ms) &&
+        receipt_push_outcome(&doc, verdict, state_bytes, state_updated) &&
         receipt_push_run_totals(&doc, compactions, template_hex, attempts,
-                                wall_ms, usage, observation, totals_ambiguous);
-    if (ok)
-        ok = receipt_push_counter(&doc,"prompt_tokens",
-                                  usage->prompt_tokens_known,
-                                  usage->prompt_tokens) &&
-             receipt_push_counter(&doc,"completion_tokens",
-                                  usage->completion_tokens_known,
-                                  usage->completion_tokens);
-    if (ok && observation && observation->known) {
-        ok = receipt_push_observed(&doc, observation, totals_ambiguous);
-    } else if (ok) {
-        ok = receipt_push_fallback(&doc, reply_resolved_model, usage);
-    }
+                                wall_ms, usage, observation, totals_ambiguous) &&
+        receipt_push_counter(&doc,"prompt_tokens",
+                             usage->prompt_tokens_known,
+                             usage->prompt_tokens) &&
+        receipt_push_counter(&doc,"completion_tokens",
+                             usage->completion_tokens_known,
+                             usage->completion_tokens) &&
+        receipt_push_source(&doc, observation, reply_resolved_model, usage,
+                            totals_ambiguous);
     const size_t n = ok ? json_write(&doc, text, sizeof(text) - 2u) :
                           sizeof(text);
     json_free(&doc);
@@ -2419,13 +2483,7 @@ static void write_receipt(const struct unit_opts *o,
         return;
     text[n] = '\n';
     text[n + 1u] = '\0';
-    engine_emit(stdout, "%s", text);
-    if (o->state_dir && o->state_dir[0]) {
-        char path[1024];
-        if ((size_t)snprintf(path, sizeof(path), "%s/receipt.json",
-                             o->state_dir) < sizeof(path))
-            (void)engine_emit_file(path, text, strlen(text));
-    }
+    receipt_emit(o, text);
 }
 
 /* The sequence, not the one-run snapshot above. One JSON line appended to
@@ -3013,112 +3071,261 @@ static const char *unit_vendor_refusal(const struct engine_vendor *v,
     return NULL;
 }
 
-int main(int argc, char **argv)
-{
+/* The state main's phases share: what was a pile of locals in main(). */
+struct unit_run {
     struct unit_opts o;
-    if (!parse_args(argc, argv, &o))
-        return 2;
-    if (!engine_reasoning_effort_valid(o.reasoning_effort))
+    const struct engine_vendor *v;
+    size_t invocation_capacity_needed;
+    char *task;
+    size_t task_len;
+    char task_sha3_hex[65];
+    char *brief;
+    char attempt_state[ENGINE_STATE_MAX_BYTES];
+    char attempt_label[32];
+    bool have_attempt_state;
+    char carried_preamble[2u * ENGINE_STATE_MAX_BYTES + 512u];
+    char *prompt;
+    char workdir[1024];
+    char turn_state[ENGINE_STATE_MAX_BYTES];
+    bool have_turn_state;
+    bool state_updated_last;
+    int compactions;
+    char gate_tail[4096];
+    bool have_gate_tail;
+    struct dispatch_result dr;
+    struct invocation_log invocations;
+    struct engine_gate_reading gate;
+    bool timed_out;
+    size_t changed;
+    enum engine_verdict verdict;
+    int64_t proof_latency_ms;
+    int64_t cumulative_proof_ms;
+    char *delivered;
+    char prompt_path[1024];
+    bool dispatch_failed;
+    bool changed_known;
+    enum engine_prompt_effect effect;
+    int64_t unit_started_ns;
+};
+
+/* Every setup check answers -1 to go on, or the exit code to stop with. */
+static int unit_early_modes(struct unit_opts *o)
+{
+    if (!engine_reasoning_effort_valid(o->reasoning_effort))
         return fail_setup("--reasoning-effort must be provider_default, low, "
                           "medium, high, or xhigh");
-    if (o.list) {
+    if (o->list) {
         list_engines();
         return 0;
     }
     /* Before --engine is required: a bare --probe covers every vendor, and
      * naming one narrows it rather than being the way in. */
-    if (o.probe) {
-        if (o.resume_session_id)
+    if (o->probe) {
+        if (o->resume_session_id)
             return fail_setup("--resume is not valid on --probe");
-        if (o.cli_turns_set)
+        if (o->cli_turns_set)
             return fail_setup("--max-turns is not valid on --probe");
-        return probe_all(&o);
+        return probe_all(o);
     }
+    return -1;
+}
+
+static const char *unit_cli_turns_failure(const struct unit_opts *o,
+                                          const struct engine_vendor *v)
+{
+    if (!o->cli_turns_set)
+        return NULL;
+    if (o->cli_turns < 1 || o->cli_turns > 256)
+        return "--max-turns must be between 1 and 256";
+    if (!engine_cli_accepts_turns(v))
+        return "selected engine does not consume --max-turns";
+    return NULL;
+}
+
+static int unit_pick_vendor(struct unit_run *u)
+{
+    struct unit_opts *o = &u->o;
     /* An unnamed engine resolves to the registry default rather than being a
      * usage error. The choice is still SAID OUT LOUD below: an operator who
      * did not pick an engine should learn which one they got from the run,
      * not from reading the table. */
-    const struct engine_vendor *v = o.engine_id ? engine_by_id(o.engine_id)
-                                                : engine_default();
+    const struct engine_vendor *v = o->engine_id ? engine_by_id(o->engine_id)
+                                                 : engine_default();
     if (!v)
-        return fail_setup(o.engine_id ? "unknown --engine; see --list"
-                                      : "this build has no default engine");
-    const char *option_why = unit_vendor_refusal(v, &o);
+        return fail_setup(o->engine_id ? "unknown --engine; see --list"
+                                       : "this build has no default engine");
+    u->v = v;
+    const char *option_why = unit_vendor_refusal(v, o);
     if (option_why)
         return fail_setup(option_why);
-    if (!engine_resume_session_id_valid(o.resume_session_id))
+    if (!engine_resume_session_id_valid(o->resume_session_id))
         return fail_setup("--resume needs a canonical lowercase hexadecimal "
                           "UUID");
-    if (o.resume_session_id && !v->resume_argv)
+    if (o->resume_session_id && !v->resume_argv)
         return fail_setup("selected engine accepts no --resume session");
-    if (o.cli_turns_set) {
-        if (o.cli_turns < 1 || o.cli_turns > 256)
-            return fail_setup("--max-turns must be between 1 and 256");
-        if (!engine_cli_accepts_turns(v))
-            return fail_setup("selected engine does not consume --max-turns");
-    }
-    if (!o.engine_id)
+    const char *turns_why = unit_cli_turns_failure(o, v);
+    if (turns_why)
+        return fail_setup(turns_why);
+    if (!o->engine_id)
         engine_emit(stdout, "engine_unit: no --engine given, using %s (%s)\n",
                     v->id, v->display);
-    if (!o.task_path)
+    return -1;
+}
+
+static int unit_check_required(const struct unit_opts *o)
+{
+    if (!o->task_path)
         return fail_setup("need --task FILE");
-    if (!o.group && !o.no_group)
+    if (!o->group && !o->no_group)
         return fail_setup("need --group NAME, or --no-group if this unit "
                           "truly cannot have one");
-    if (o.turns < 1 || o.turns > 10)
+    if (o->turns < 1 || o->turns > 10)
         return fail_setup("--rounds must be between 1 and 10");
+    return -1;
+}
+
+static int unit_check_capacity(struct unit_run *u)
+{
+    const struct engine_vendor *v = u->v;
     const size_t retry_attempts =
         (size_t)(v->max_retries < 0 ? 0 : v->max_retries) + 1u;
     const size_t possible_compactions =
-        v->wire == ENGINE_WIRE_LOCAL_CLI ? 0u : (size_t)o.turns - 1u;
-    const size_t invocation_capacity_needed =
-        (size_t)o.turns * retry_attempts + possible_compactions;
-    if (invocation_capacity_needed > ENGINE_RECEIPT_INVOCATIONS_MAX) {
+        v->wire == ENGINE_WIRE_LOCAL_CLI ? 0u : (size_t)u->o.turns - 1u;
+    u->invocation_capacity_needed =
+        (size_t)u->o.turns * retry_attempts + possible_compactions;
+    if (u->invocation_capacity_needed > ENGINE_RECEIPT_INVOCATIONS_MAX) {
         char why[192];
         (void)snprintf(why, sizeof(why),
                        "--rounds and %s's retry budget could require %zu "
                        "provider calls; receipt cap is %u",
-                       v->id, invocation_capacity_needed,
+                       v->id, u->invocation_capacity_needed,
                        (unsigned)ENGINE_RECEIPT_INVOCATIONS_MAX);
         return fail_setup(why);
     }
-    if (o.timeout_s < 1 || o.timeout_s > UNIT_MAX_TIMEOUT)
+    return -1;
+}
+
+static int unit_check_timeouts(const struct unit_opts *o)
+{
+    if (o->timeout_s < 1 || o->timeout_s > UNIT_MAX_TIMEOUT)
         return fail_setup("--timeout is outside its permitted range");
-    if (o.gate_timeout_s != 0
-        && (o.gate_timeout_s < 1 || o.gate_timeout_s > UNIT_MAX_TIMEOUT))
+    if (o->gate_timeout_s != 0
+        && (o->gate_timeout_s < 1 || o->gate_timeout_s > UNIT_MAX_TIMEOUT))
         return fail_setup("--gate-timeout is outside its permitted range");
+    return -1;
+}
 
-    size_t task_len = 0;
-    char *task = read_file(o.task_path, UNIT_MAX_TASK_BYTES, &task_len);
-    if (!task)
+static int unit_setup_check(struct unit_run *u)
+{
+    int rc = unit_early_modes(&u->o);
+    if (rc >= 0)
+        return rc;
+    rc = unit_pick_vendor(u);
+    if (rc >= 0)
+        return rc;
+    rc = unit_check_required(&u->o);
+    if (rc >= 0)
+        return rc;
+    rc = unit_check_capacity(u);
+    if (rc >= 0)
+        return rc;
+    return unit_check_timeouts(&u->o);
+}
+
+static void unit_release(struct unit_run *u)
+{
+    free(u->prompt);
+    free(u->task);
+    free(u->brief);
+}
+
+static int unit_read_task(struct unit_run *u)
+{
+    u->task = read_file(u->o.task_path, UNIT_MAX_TASK_BYTES, &u->task_len);
+    if (!u->task)
         return 2;
-    char task_sha3_hex[65];
-    {
-        uint8_t digest[32];
-        zcl_sha3_256((const unsigned char *)task, task_len, digest);
-        zcl_hex_encode(digest, 32, task_sha3_hex);
-    }
+    uint8_t digest[32];
+    zcl_sha3_256((const unsigned char *)u->task, u->task_len, digest);
+    zcl_hex_encode(digest, 32, u->task_sha3_hex);
+    return -1;
+}
 
+static int unit_resolve_kind(struct unit_run *u)
+{
+    struct unit_opts *o = &u->o;
     /* --kind wins over the task file's own header; see
      * engine_prompt_kind_from_header(). A kind that names no complete
      * template is refused HERE, before a prompt is composed and long before
      * money is spent, because the defect it produces — a section heading
      * with nothing under it — is invisible to the shape audit. */
-    if (!o.kind || !o.kind[0])
-        o.kind = engine_prompt_kind_from_header(task);
-    if (o.kind && o.kind[0]) {
-        const char *kind_failure = unit_kind_failure(v, o.kind);
+    if (!o->kind || !o->kind[0])
+        o->kind = engine_prompt_kind_from_header(u->task);
+    if (o->kind && o->kind[0]) {
+        const char *kind_failure = unit_kind_failure(u->v, o->kind);
         if (kind_failure) {
-            free(task);
+            free(u->task);
             return fail_setup(kind_failure);
         }
-        engine_emit(stdout, "  kind:       %s\n", o.kind);
+        engine_emit(stdout, "  kind:       %s\n", o->kind);
     } else {
         engine_emit(stdout,
                     "  kind:       none declared (no template bodies; pass "
                     "--kind or add a `kind:` header to the task file)\n");
     }
+    return -1;
+}
 
+static int unit_load_territory(struct unit_run *u)
+{
+    const struct unit_opts *o = &u->o;
+    /* Fail-closed: a named territory must resolve, or the unit does not go
+     * out. Dispatching with an unresolvable label is what this replaces. */
+    if (o->territory && o->territory[0]) {
+        char why[512] = { 0 };
+        u->brief = territory_brief_fetch(o->territory, why, sizeof(why));
+        if (!u->brief) {
+            free(u->task);
+            return fail_setup(why);
+        }
+        /* Say whether a stance was found. Silence here made "this territory
+         * has no authored stance" indistinguishable from "nobody looked",
+         * and most territories have none. */
+        const char *stance = persona_stance(o->territory);
+        engine_emit(stdout, "  territory:  %s (brief: %zu bytes, stance: %s)\n",
+                    o->territory, strlen(u->brief),
+                    stance ? "authored" : "none");
+    }
+    return -1;
+}
+
+static void unit_load_carry(struct unit_run *u)
+{
+    /* Cross-attempt carry: see load_attempt_state() above main(). Loaded
+     * before the very first prompt (including the --dry-run preview) so a
+     * preview shows exactly what would be dispatched. */
+    u->have_attempt_state =
+        load_attempt_state(u->o.state_dir, u->attempt_state,
+                           sizeof(u->attempt_state),
+                           u->attempt_label, sizeof(u->attempt_label));
+    if (u->have_attempt_state)
+        engine_emit(stdout,
+                    "  state:      carrying %zu byte(s) from attempt %s\n",
+                    strlen(u->attempt_state), u->attempt_label);
+
+    (void)build_carried_preamble(u->carried_preamble,
+                                 sizeof(u->carried_preamble),
+                                 u->have_attempt_state, u->attempt_state,
+                                 u->attempt_label, false, NULL);
+}
+
+static int unit_load_inputs(struct unit_run *u)
+{
+    int rc = unit_read_task(u);
+    if (rc >= 0)
+        return rc;
+    rc = unit_resolve_kind(u);
+    if (rc >= 0)
+        return rc;
     /* Task contract preflight: the ONE call, after the kind check and before
      * anything is composed or any effect. Obligations come ONLY from the
      * task bytes. `brief` (territory) and `carried_preamble` (state carried
@@ -3126,147 +3333,787 @@ int main(int argc, char **argv)
      * parsed for contract lines: a predecessor must not be able to add or
      * remove an obligation by writing `contract:`/`evidence:` into its
      * state. A refusal exits inside the call. */
-    contract_gate_or_exit(task, task_len, o.dry_run);
-
-    /* Fail-closed: a named territory must resolve, or the unit does not go
-     * out. Dispatching with an unresolvable label is what this replaces. */
-    char *brief = NULL;
-    if (o.territory && o.territory[0]) {
-        char why[512] = { 0 };
-        brief = territory_brief_fetch(o.territory, why, sizeof(why));
-        if (!brief) {
-            free(task);
-            return fail_setup(why);
-        }
-        /* Say whether a stance was found. Silence here made "this territory
-         * has no authored stance" indistinguishable from "nobody looked",
-         * and most territories have none. */
-        const char *stance = persona_stance(o.territory);
-        engine_emit(stdout, "  territory:  %s (brief: %zu bytes, stance: %s)\n",
-                    o.territory, strlen(brief),
-                    stance ? "authored" : "none");
-    }
-
-    /* Cross-attempt carry: see load_attempt_state() above main(). Loaded
-     * before the very first prompt (including the --dry-run preview) so a
-     * preview shows exactly what would be dispatched. */
-    char attempt_state[ENGINE_STATE_MAX_BYTES] = {0};
-    char attempt_label[32] = {0};
-    const bool have_attempt_state =
-        load_attempt_state(o.state_dir, attempt_state, sizeof(attempt_state),
-                           attempt_label, sizeof(attempt_label));
-    if (have_attempt_state)
-        engine_emit(stdout,
-                    "  state:      carrying %zu byte(s) from attempt %s\n",
-                    strlen(attempt_state), attempt_label);
-
-    char carried_preamble[2u * ENGINE_STATE_MAX_BYTES + 512u];
-    (void)build_carried_preamble(carried_preamble, sizeof(carried_preamble),
-                                 have_attempt_state, attempt_state,
-                                 attempt_label, false, NULL);
-
-    char *prompt = compose_prompt(&o, v, task, brief, carried_preamble, NULL);
-    if (!prompt) {
-        free(task);
-        free(brief);
+    contract_gate_or_exit(u->task, u->task_len, u->o.dry_run);
+    rc = unit_load_territory(u);
+    if (rc >= 0)
+        return rc;
+    unit_load_carry(u);
+    u->prompt = compose_prompt(&u->o, u->v, u->task, u->brief,
+                               u->carried_preamble, NULL);
+    if (!u->prompt) {
+        free(u->task);
+        free(u->brief);
         return 2;
     }
+    return -1;
+}
 
-    if (o.dry_run) {
-        /* Print exactly what this vendor would be handed, not what an
-         * HTTP vendor would be handed. A preview that shows the rules while
-         * the delivery omits them is worse than no preview: it is the thing
-         * an operator checks in order to be reassured. */
-        char *shown = engine_prompt_compose(v->wire, prompt, NULL);
-        engine_emit(stdout, "%s\n", shown ? shown : prompt);
-        /* The preview ends with the same verdict the dispatch path
-         * applies, so an operator sees a refusal here rather than
-         * discovering it after paying for a run. */
-        struct engine_prompt_audit audit;
-        bool shaped = shown
-                      && engine_prompt_audit_text(v->wire, shown, &audit);
-        uint8_t shape[32];
-        engine_prompt_shape_sha3(shape);
-        engine_emit(stdout,
-                    "\n[prompt shape %02x%02x%02x%02x%02x%02x%02x%02x: "
-                    "%zu of %zu required section(s) present — %s]\n",
-                    shape[0], shape[1], shape[2], shape[3],
-                    shape[4], shape[5], shape[6], shape[7],
-                    shaped ? audit.present : (size_t)0,
-                    shaped ? audit.required : (size_t)0,
-                    shaped ? "would dispatch"
-                           : "WOULD BE REFUSED");
-        free(shown);
-        free(prompt);
-        free(task);
-        free(brief);
-        return 0;
-    }
+static void unit_dry_run(const struct unit_run *u)
+{
+    const struct engine_vendor *v = u->v;
+    /* Print exactly what this vendor would be handed, not what an
+     * HTTP vendor would be handed. A preview that shows the rules while
+     * the delivery omits them is worse than no preview: it is the thing
+     * an operator checks in order to be reassured. */
+    char *shown = engine_prompt_compose(v->wire, u->prompt, NULL);
+    engine_emit(stdout, "%s\n", shown ? shown : u->prompt);
+    /* The preview ends with the same verdict the dispatch path
+     * applies, so an operator sees a refusal here rather than
+     * discovering it after paying for a run. */
+    struct engine_prompt_audit audit;
+    bool shaped = shown
+                  && engine_prompt_audit_text(v->wire, shown, &audit);
+    uint8_t shape[32];
+    engine_prompt_shape_sha3(shape);
+    engine_emit(stdout,
+                "\n[prompt shape %02x%02x%02x%02x%02x%02x%02x%02x: "
+                "%zu of %zu required section(s) present — %s]\n",
+                shape[0], shape[1], shape[2], shape[3],
+                shape[4], shape[5], shape[6], shape[7],
+                shaped ? audit.present : (size_t)0,
+                shaped ? audit.required : (size_t)0,
+                shaped ? "would dispatch"
+                       : "WOULD BE REFUSED");
+    free(shown);
+}
+
+static int unit_preflight_gate(struct unit_run *u)
+{
     /* The opt-in. Deliberately checked AFTER --dry-run so composing a prompt
      * is free, and BEFORE anything that costs money or writes a file. */
-    if (!o.yes_dispatch) {
-        free(prompt);
-        free(task);
-        free(brief);
+    if (!u->o.yes_dispatch) {
+        unit_release(u);
         return fail_setup(
             "refusing to dispatch without --yes-dispatch. This spends money "
             "and writes code; it is opted into per run, never defaulted on");
     }
-    if (!o.state_dir || !o.state_dir[0]) {
-        free(prompt);
-        free(task);
-        free(brief);
+    if (!u->o.state_dir || !u->o.state_dir[0]) {
+        unit_release(u);
         return fail_setup("--state-dir is required so every provider call "
                           "can reach the authoritative receipt chain");
     }
-    if (!receipt_plan_fits(&o, v, task_sha3_hex,
-                           invocation_capacity_needed)) {
-        free(prompt);
-        free(task);
-        free(brief);
+    if (!receipt_plan_fits(&u->o, u->v, u->task_sha3_hex,
+                           u->invocation_capacity_needed)) {
+        unit_release(u);
         return fail_setup("the complete worst-case invocation receipt would "
                           "exceed its 16 KiB bound; refusing before dispatch");
     }
+    return -1;
+}
 
+static int unit_preflight_workspace(struct unit_run *u)
+{
     char where[128] = {0};
-    if (!engine_secret_load(v, o.key_file, where, sizeof(where))) {
-        free(prompt);
-        free(task);
-        free(brief);
+    if (!engine_secret_load(u->v, u->o.key_file, where, sizeof(where))) {
+        unit_release(u);
         return fail_setup("no usable API key; see --help");
     }
-    engine_emit(stdout, "engine_unit: %s\n", v->display);
+    engine_emit(stdout, "engine_unit: %s\n", u->v->display);
     engine_emit(stdout, "  credential: %s\n", where);
 
-    char workdir[1024];
-    if (!state_dir_prepare(&o)) {
-        free(prompt);
-        free(task);
-        free(brief);
+    if (!state_dir_prepare(&u->o)) {
+        unit_release(u);
         engine_secret_clear();
         return 2;
     }
-    if (!dispatch_workspace_prepare(&o, workdir, sizeof(workdir))) {
-        free(prompt);
-        free(task);
-        free(brief);
+    if (!dispatch_workspace_prepare(&u->o, u->workdir, sizeof(u->workdir))) {
+        unit_release(u);
         engine_secret_clear();
         return 2;
     }
+    return -1;
+}
 
+static void unit_augment_task(struct unit_run *u)
+{
     /* task_sha3_hex above is the operator-authored task's own identity and
      * is deliberately computed BEFORE this: augmenting the task with file
      * contents that exist only in this worktree must never change what a
      * unit's task hashes as. */
-    {
-        char *augmented =
-            build_task_with_file_contents(task, task_len, workdir);
-        if (augmented) {
-            free(task);
-            task = augmented;
-            task_len = strlen(task);
+    char *augmented =
+        build_task_with_file_contents(u->task, u->task_len, u->workdir);
+    if (augmented) {
+        free(u->task);
+        u->task = augmented;
+        u->task_len = strlen(u->task);
+    }
+}
+
+static void unit_loop_init(struct unit_run *u)
+{
+    /* The first observation after external resume may already include usage
+     * from an earlier process. Preserve it, but never infer a dispatch delta. */
+    u->invocations.totals_ambiguous = u->o.resume_session_id != NULL;
+    u->verdict = ENGINE_VERDICT_REFUSED;
+    u->effect = engine_prompt_kind_effect(u->o.kind);
+    u->unit_started_ns = clock_now_monotonic_ns();
+}
+
+static void unit_refuse(struct unit_run *u)
+{
+    u->dispatch_failed = true;
+    u->verdict = ENGINE_VERDICT_REFUSED;
+}
+
+static bool unit_needs_compaction(const struct unit_run *u)
+{
+    const size_t carried_len = strlen(u->carried_preamble);
+    const size_t gate_tail_len = u->have_gate_tail ? strlen(u->gate_tail)
+                                                   : 0;
+    /* Rough but conservative: task and the territory brief are the
+     * two unbounded inputs left once carried state and gate
+     * feedback are accounted for; the fixed margin in
+     * engine_state_needs_compaction() covers the template bodies,
+     * headings and protocol text this estimate does not itemise. */
+    const size_t base_len = u->task_len + (u->brief ? strlen(u->brief) : 0);
+    return u->v->wire != ENGINE_WIRE_LOCAL_CLI
+           && engine_state_needs_compaction(carried_len, gate_tail_len,
+                                            base_len,
+                                            ENGINE_MAX_PROMPT_BYTES);
+}
+
+static bool unit_compaction_dispatch(const struct unit_run *u,
+                                     const char *comp_prompt,
+                                     struct dispatch_result *cdr,
+                                     bool *compacted)
+{
+    const struct engine_vendor *v = u->v;
+    if (v->wire == ENGINE_WIRE_OPENAI_CHAT) {
+        const struct engine_call ccall = {
+            .vendor            = v,
+            .model             = u->o.model,
+            .reasoning_effort  = u->o.reasoning_effort,
+            .system_prompt     = NULL,
+            .user_prompt       = comp_prompt,
+            .max_output_tokens = 2048,
+        };
+        size_t cbody_len = 0;
+        char *cbody = engine_request_alloc(&ccall, &cbody_len);
+        if (!cbody)
+            return false;
+        *compacted = dispatch_https(v, cbody, cbody_len,
+                                    u->o.timeout_s * 1000, cdr);
+        free(cbody);
+        return true;
+    }
+    if (v->wire == ENGINE_WIRE_LOCAL_FIXTURE) {
+        *compacted = dispatch_fixture(v, u->o.fixture_reply, cdr);
+        return true;
+    }
+    return false;
+}
+
+static void unit_compaction_absorb(struct unit_run *u, int turn,
+                                   bool compacted,
+                                   const struct dispatch_result *cdr)
+{
+    if (!compacted) {
+        engine_emit(stderr,
+                    "engine_unit: turn %d needed compaction and "
+                    "the compaction dispatch itself failed; "
+                    "continuing with the uncompacted state\n",
+                    turn);
+        return;
+    }
+    size_t extracted_len = 0;
+    if (engine_state_extract(cdr->reply.text,
+                             cdr->reply.text_len, u->turn_state,
+                             sizeof(u->turn_state),
+                             &extracted_len))
+        u->have_turn_state = true;
+    u->compactions++;
+    engine_emit(stdout,
+                "  compaction: turn %d's prompt would have "
+                "exceeded the budget; compacted to %zu "
+                "byte(s) of state\n",
+                turn, extracted_len);
+    (void)build_carried_preamble(
+        u->carried_preamble, sizeof(u->carried_preamble),
+        u->have_attempt_state, u->attempt_state, u->attempt_label,
+        u->have_turn_state, u->turn_state);
+}
+
+/* True when the turn loop must stop. */
+static bool unit_compact(struct unit_run *u, int turn)
+{
+    char comp_prompt[2u * ENGINE_STATE_MAX_BYTES + 8192u];
+    (void)engine_state_compaction_prompt(
+        comp_prompt, sizeof(comp_prompt),
+        u->have_turn_state ? u->turn_state
+                           : (u->have_attempt_state ? u->attempt_state
+                                                    : NULL),
+        u->have_gate_tail ? u->gate_tail : NULL);
+    struct dispatch_result cdr = {0};
+    bool compacted = false;
+    const int64_t compaction_started_ns = clock_now_monotonic_ns();
+    if (!invocation_log_has_room(&u->invocations)) {
+        u->dispatch_failed = true;
+        return true;
+    }
+    const bool compaction_dispatched =
+        unit_compaction_dispatch(u, comp_prompt, &cdr, &compacted);
+    const int64_t compaction_elapsed_ms =
+        (clock_now_monotonic_ns() - compaction_started_ns) /
+        1000000;
+    if (compaction_dispatched &&
+        !invocation_log_add(&u->invocations, "compaction", compacted,
+                            &cdr, compaction_elapsed_ms)) {
+        engine_reply_free(&cdr.reply);
+        u->dispatch_failed = true;
+        return true;
+    }
+    unit_compaction_absorb(u, turn, compacted, &cdr);
+    engine_reply_free(&cdr.reply);
+    return false;
+}
+
+/* True when the turn loop must stop. */
+static bool unit_prepare_turn(struct unit_run *u, int turn)
+{
+    engine_reply_free(&u->dr.reply);
+    memset(&u->dr, 0, sizeof(u->dr));
+    u->gate = (struct engine_gate_reading){0};
+    u->timed_out = false;
+
+    /* This turn's prompt: fold the compaction check into what it
+     * would carry BEFORE composing it, since compose_prompt() itself
+     * only knows how to refuse an over-long result, not shrink it. */
+    (void)build_carried_preamble(u->carried_preamble,
+                                 sizeof(u->carried_preamble),
+                                 u->have_attempt_state, u->attempt_state,
+                                 u->attempt_label, u->have_turn_state,
+                                 u->turn_state);
+    if (unit_needs_compaction(u) && unit_compact(u, turn))
+        return true;
+
+    if (u->dispatch_failed)
+        return true;
+
+    free(u->prompt);
+    u->prompt = compose_prompt(&u->o, u->v, u->task, u->brief,
+                               u->carried_preamble,
+                               u->have_gate_tail ? u->gate_tail : NULL);
+    if (!u->prompt) {
+        unit_refuse(u);
+        return true;
+    }
+    return false;
+}
+
+static void unit_audit_why(const struct engine_prompt_audit *audit, char *why,
+                           size_t cap)
+{
+    if (audit->missing)
+        snprintf(why, cap,
+                 "the composed prompt has no '%s' section",
+                 audit->missing);
+    else if (audit->misplaced)
+        snprintf(why, cap,
+                 "the composed prompt carries '%s' out of order",
+                 audit->misplaced);
+    else
+        snprintf(why, cap,
+                 "the composed prompt repeats '%s', which this "
+                 "engine already receives on its own channel",
+                 audit->repeated ? audit->repeated : "a section");
+}
+
+/* True when the turn loop must stop. */
+static bool unit_deliver(struct unit_run *u)
+{
+    const struct engine_vendor *v = u->v;
+    /* A CLI vendor reads this file and nothing else, so for a wire with
+     * no system channel of its own the rules have to be IN it. This is
+     * also the archived record of the dispatch, so it must be exactly
+     * what was delivered — an archive that differs from the delivery is
+     * an archive nobody can check a run against.
+     *
+     * A refusal here refuses the DISPATCH. Falling back to writing the
+     * prompt without the rules would be the original defect restored on
+     * an error path, which is where defects prefer to live. */
+    size_t delivered_len = 0;
+    u->delivered = engine_prompt_compose(v->wire, u->prompt, &delivered_len);
+    if (!u->delivered) {
+        free(u->prompt);
+        u->prompt = NULL;
+        engine_emit(stderr,
+                    "engine_unit: the composed prompt could not be "
+                    "prepared for this engine; refusing dispatch\n");
+        unit_refuse(u);
+        return true;
+    }
+
+    /* The prompt is checked against the declared shape before it is
+     * delivered. A prompt whose rules block, task, output protocol or
+     * judging section is missing is not a weaker prompt — it is a
+     * different job, and the work that comes back is evidence about
+     * something nobody asked for. Refusing costs one run; dispatching
+     * costs money and produces a receipt that means nothing. */
+    struct engine_prompt_audit audit;
+    if (!engine_prompt_audit_text(v->wire, u->delivered, &audit)) {
+        char why[256];
+        unit_audit_why(&audit, why, sizeof(why));
+        free(u->delivered);
+        u->delivered = NULL;
+        free(u->prompt);
+        u->prompt = NULL;
+        engine_emit(stderr, "engine_unit: %s\n", why);
+        unit_refuse(u);
+        return true;
+    }
+
+    memset(u->prompt_path, 0, sizeof(u->prompt_path));
+    if (u->o.state_dir && u->o.state_dir[0]
+        && (size_t)snprintf(u->prompt_path, sizeof(u->prompt_path),
+                            "%s/prompt.txt", u->o.state_dir)
+               < sizeof(u->prompt_path))
+        (void)engine_emit_file(u->prompt_path, u->delivered, delivered_len);
+    /* NOT freed here: a CLI vendor whose row takes the prompt as an
+     * ARGUMENT hands these exact bytes to exec, so they have to outlive
+     * the dispatch. The file above stays the archived record either
+     * way. */
+    return false;
+}
+
+/* True when the request body could not be built and the turn is refused. */
+static bool unit_body_refused(struct unit_run *u, char **body,
+                              size_t *body_len)
+{
+    /* Only an HTTP dialect has a request document. A CLI engine reads
+     * the prompt from the file written above and a fixture reads a
+     * canned reply, so building a body for either would produce a
+     * document nothing sends — and, for a vendor row with no default
+     * model, a body with a null model field in it. Build it where it is
+     * used and nowhere else. */
+    if (u->v->wire != ENGINE_WIRE_OPENAI_CHAT)
+        return false;
+    const struct engine_call call = {
+        .vendor            = u->v,
+        .model             = u->o.model,
+        .reasoning_effort  = u->o.reasoning_effort,
+        .system_prompt     = engine_system_rules(),
+        .user_prompt       = u->prompt,
+        .max_output_tokens = 65536,
+    };
+    *body = engine_request_alloc(&call, body_len);
+    if (*body)
+        return false;
+    free(u->delivered);
+    u->delivered = NULL;
+    free(u->prompt);
+    u->prompt = NULL;
+    engine_emit(stderr,
+                "engine_unit: could not build the request body\n");
+    unit_refuse(u);
+    return true;
+}
+
+/* True when the turn loop must stop. */
+static bool unit_send(struct unit_run *u)
+{
+    size_t body_len = 0;
+    char *body = NULL;
+    if (unit_body_refused(u, &body, &body_len))
+        return true;
+    free(u->prompt);
+    u->prompt = NULL;
+
+    const bool got = dispatch_with_retries(u->v, &u->o, body, body_len,
+                                           u->prompt_path, u->delivered,
+                                           u->workdir, &u->dr,
+                                           &u->invocations);
+    free(body);
+    free(u->delivered);
+    u->delivered = NULL;
+    unit_adopt_cli_cost(&u->dr);
+    if (!got) {
+        unit_refuse(u);
+        return true;
+    }
+    return false;
+}
+
+static void unit_report_reply(const struct unit_run *u)
+{
+    const struct engine_reply *reply = &u->dr.reply;
+    /* Archive the raw completion before any envelope parsing touches
+     * it. A FAIL(NO-CHANGE) verdict alone cannot say whether the model
+     * proposed nothing, proposed something the envelope parser refused,
+     * or never came back with the shape this harness expects —
+     * reply.txt lets a human read exactly what the model said and
+     * answer that by hand. */
+    if (u->o.state_dir && u->o.state_dir[0]) {
+        char reply_path[1024];
+        if ((size_t)snprintf(reply_path, sizeof(reply_path),
+                             "%s/reply.txt", u->o.state_dir)
+                   < sizeof(reply_path))
+            (void)engine_emit_file(reply_path,
+                                   reply->text ? reply->text : "",
+                                   reply->text_len);
+    }
+
+    if (reply->usage.tokens_known || reply->usage.cost_known)
+        engine_emit(stdout,
+                    "  spend:      prompt=%lld completion=%lld "
+                    "cost_usd=%s%.6f\n",
+                    (long long)reply->usage.prompt_tokens,
+                    (long long)reply->usage.completion_tokens,
+                    reply->usage.cost_known ? "" : "unreported:",
+                    reply->usage.cost_usd);
+    else
+        engine_emit(stdout, "  spend:      not reported by %s\n", u->v->id);
+}
+
+static bool unit_cost_capped(const struct unit_run *u)
+{
+    /* For an engine that edits in place the cap is checked after those
+     * edits exist. REFUSED here skips the apply and the gate, and nothing
+     * reverts the worktree: it keeps the edits for the caller to inspect
+     * or discard. */
+    if (u->o.max_cost_usd > 0.0 && u->dr.reply.usage.cost_known
+        && u->dr.reply.usage.cost_usd > u->o.max_cost_usd) {
+        engine_emit(stderr,
+                    "engine_unit: the reported spend exceeded "
+                    "--max-cost-usd; a CLI engine may have edited the "
+                    "worktree in place, and those edits were not "
+                    "reverted\n");
+        return true;
+    }
+    return false;
+}
+
+static void unit_parse_refused(struct unit_run *u, int turn,
+                               const char *applied_path)
+{
+    if (applied_path[0])
+        (void)engine_emit_file(applied_path,
+            "PARSE_REFUSED\nthe envelope parser rejected this "
+            "reply (a marker rule was violated or an "
+            "envelope was left open); see reply.txt for the exact text "
+            "and stderr of this run for which check fired.\n",
+            strlen("PARSE_REFUSED\nthe envelope parser rejected "
+                   "this reply (a marker rule was violated or an "
+                   "envelope was left open); see reply.txt for "
+                   "the exact text and stderr of this run for "
+                   "which check fired.\n"));
+    engine_emit(stderr,
+                "engine_unit: turn %d's reply was refused by the "
+                "envelope parser; nothing was applied\n", turn);
+    (void)snprintf(u->gate_tail, sizeof(u->gate_tail),
+                  "Your last reply was refused by the envelope "
+                  "parser (a marker rule was violated or an "
+                  "envelope was left open); nothing from it was "
+                  "applied. See the output protocol again and "
+                  "send the whole reply, corrected.");
+    u->have_gate_tail = true;
+}
+
+static void unit_note_parsed(const char *applied_path,
+                             const struct engine_patch *patch)
+{
+    char desc[4096];
+    const size_t n =
+        engine_patch_describe(patch, desc, sizeof(desc));
+    char header[128];
+    const int hn = snprintf(header, sizeof(header),
+                            "PARSED %zu file(s)\n",
+                            patch->count);
+    char buf[4096 + 128];
+    size_t used = 0;
+    if (hn > 0 && (size_t)hn < sizeof(buf)) {
+        memcpy(buf, header, (size_t)hn);
+        used = (size_t)hn;
+    }
+    if (n > 0 && used + n < sizeof(buf)) {
+        memcpy(buf + used, desc, n);
+        used += n;
+    } else if (patch->count == 0) {
+        static const char none[] =
+            "(the reply proposed no changes)\n";
+        if (used + sizeof(none) - 1 < sizeof(buf)) {
+            memcpy(buf + used, none, sizeof(none) - 1);
+            used += sizeof(none) - 1;
         }
     }
+    (void)engine_emit_file(applied_path, buf, used);
+}
+
+static void unit_shrink_refused(struct unit_run *u, int turn,
+                                const char *applied_path, const char *shrink)
+{
+    if (applied_path[0]) {
+        char msg[768];
+        const int mn = snprintf(msg, sizeof(msg),
+            "SHRINK_REFUSED\n%s\n", shrink);
+        if (mn > 0)
+            (void)engine_emit_file(applied_path, msg,
+                (size_t)mn < sizeof(msg) ? (size_t)mn
+                                          : sizeof(msg) - 1);
+    }
+    engine_emit(stderr,
+               "engine_unit: turn %d's reply was refused "
+               "before apply: %s\n", turn, shrink);
+    (void)snprintf(u->gate_tail, sizeof(u->gate_tail),
+                  "Your last reply was refused before "
+                  "anything was written: %s", shrink);
+    u->have_gate_tail = true;
+}
+
+/* Returns true when the apply itself failed; *refused is set when the reply
+ * was turned away before anything was written. */
+static bool unit_apply(struct unit_run *u, int turn, bool *refused)
+{
+    /* Apply. A CLI engine has already edited the worktree; an API
+     * engine's reply carries file bodies. Either way the NEXT step
+     * measures the diff. */
+    if (u->v->delivery != ENGINE_DELIVERS_ENVELOPE)
+        return false;
+    struct engine_patch patch;
+    char applied_path[1024] = {0};
+    if (u->o.state_dir && u->o.state_dir[0])
+        (void)snprintf(applied_path, sizeof(applied_path),
+                      "%s/applied.txt", u->o.state_dir);
+
+    if (!engine_patch_parse(u->dr.reply.text, u->dr.reply.text_len,
+                            &patch)) {
+        unit_parse_refused(u, turn, applied_path);
+        *refused = true;
+        return false;
+    }
+    engine_emit(stdout, "  reply:      %zu file(s) proposed\n",
+               patch.count);
+    if (applied_path[0])
+        unit_note_parsed(applied_path, &patch);
+    bool apply_failed = false;
+    const char *shrink = patch_shrink_reason(u->workdir, &patch);
+    if (shrink) {
+        unit_shrink_refused(u, turn, applied_path, shrink);
+        *refused = true;
+        engine_patch_free(&patch);
+    } else if (!apply_patch(u->workdir, &patch)) {
+        apply_failed = true;
+    }
+    engine_patch_free(&patch);
+    return apply_failed;
+}
+
+static void unit_add_proof_ms(struct unit_run *u)
+{
+    if (u->cumulative_proof_ms >= 0 && u->proof_latency_ms >= 0 &&
+        u->cumulative_proof_ms <= INT64_MAX - u->proof_latency_ms)
+        u->cumulative_proof_ms += u->proof_latency_ms;
+    else
+        u->cumulative_proof_ms = ENGINE_RECEIPT_UNREPORTED;
+}
+
+static void unit_run_proof(struct unit_run *u)
+{
+    char gate_log[1024] = {0};
+    if (u->o.state_dir && u->o.state_dir[0])
+        (void)snprintf(gate_log, sizeof(gate_log), "%s/gate.log",
+                      u->o.state_dir);
+    u->gate_tail[0] = '\0';
+    const int64_t proof_started_ns = clock_now_monotonic_ns();
+    (void)run_gate(&u->o, u->workdir, &u->gate, &u->timed_out,
+                  gate_log[0] ? gate_log : NULL, u->gate_tail,
+                  sizeof(u->gate_tail));
+    /* A concurrent worktree rewrote the build-epoch lease out from
+     * under this run (see env_epoch_race in engine/engine_verdict.h):
+     * the harness raced itself, not a fault in the model's reply.
+     * Retry the SAME gate once, on the SAME diff, before this is
+     * ever turned into a verdict — a race that clears on retry must
+     * never cost the unit a REFUSED that reads as the model's
+     * fault. */
+    if (u->gate.env_epoch_race) {
+        engine_emit(stdout,
+                    "  gate:       build-epoch race detected "
+                    "(environment, not the model); retrying the "
+                    "gate once\n");
+        (void)run_gate(&u->o, u->workdir, &u->gate, &u->timed_out,
+                      gate_log[0] ? gate_log : NULL, u->gate_tail,
+                      sizeof(u->gate_tail));
+    }
+    u->proof_latency_ms =
+        (clock_now_monotonic_ns() - proof_started_ns) / 1000000;
+    unit_add_proof_ms(u);
+    u->have_gate_tail = u->gate_tail[0] != '\0';
+    engine_emit(stdout,
+                "  gate:       verdict_line=%s mode=%s groups_ran=%ld "
+                "groups_failed=%ld\n",
+                u->gate.saw_verdict_line ? "yes" : "NO",
+                u->gate.cached_mode ? "cached" : "cold", u->gate.groups_ran,
+                u->gate.groups_failed);
+}
+
+static void unit_record_state(struct unit_run *u, int turn)
+{
+    /* Extract this turn's state independent of the envelope, per
+     * engine/engine_state.h. A CLI wire never decodes reply text, so
+     * there is nothing to extract from it — the model's own state, if
+     * it left one anywhere the CLI printed, is not read here; that is a
+     * scoping call, not an oversight: see the CLI OUTPUT PROTOCOL text,
+     * which tells it to edit the worktree and print nothing. */
+    size_t extracted_len = 0;
+    if (u->dr.reply.text
+        && engine_state_extract(u->dr.reply.text, u->dr.reply.text_len,
+                                u->turn_state, sizeof(u->turn_state),
+                                &extracted_len)) {
+        u->have_turn_state = true;
+        u->state_updated_last = true;
+    } else {
+        u->state_updated_last = false;
+        /* Carried forward unchanged: turn_state/have_turn_state are
+         * simply left as they were. */
+    }
+    if (u->o.state_dir && u->o.state_dir[0]) {
+        char state_path[1024];
+        if ((size_t)snprintf(state_path, sizeof(state_path),
+                             "%s/state.txt", u->o.state_dir)
+                   < sizeof(state_path))
+            (void)engine_emit_file(state_path,
+                                   u->have_turn_state ? u->turn_state : "",
+                                   u->have_turn_state ? strlen(u->turn_state)
+                                                      : 0);
+    }
+    engine_emit(stdout, "  state:      %zu byte(s), %s\n",
+               u->have_turn_state ? strlen(u->turn_state) : 0,
+               u->state_updated_last ? "updated by the model"
+                                     : "not updated by the model");
+    engine_emit(stdout, "  turn %d/%d:   %s\n", turn, u->o.turns,
+               engine_verdict_name(u->verdict));
+}
+
+/* The stages of one turn after the reply is in hand. True when the loop must
+ * stop. */
+static bool unit_judge(struct unit_run *u, int turn, bool refused)
+{
+    u->changed_known = true;
+    engine_emit(stdout,
+                "  diff:       %zu changed path(s) in the worktree\n",
+                u->changed);
+
+    u->proof_latency_ms = 0;
+    /* REPORT success is determined by effect, not by an unrelated gate.
+     * In particular, do not spend a group run after observing a report
+     * edit that is already a failure. */
+    if (unit_should_gate(u->effect, refused, u->o.no_group, u->changed))
+        unit_run_proof(u);
+
+    u->verdict = unit_turn_verdict(u->effect, refused, &u->dr.reply,
+                                   &u->gate, u->changed, u->timed_out,
+                                   !u->o.no_group, u->gate_tail,
+                                   sizeof(u->gate_tail), &u->have_gate_tail);
+    unit_record_state(u, turn);
+    return unit_turn_finished(u->verdict, turn, u->o.turns);
+}
+
+/* One pass of the turn loop. True when the loop must stop. */
+static bool unit_turn(struct unit_run *u, int turn)
+{
+    u->changed_known = false;
+    if (turn > 1 && unit_prepare_turn(u, turn))
+        return true;
+    if (unit_deliver(u) || unit_send(u))
+        return true;
+    unit_report_reply(u);
+    if (unit_cost_capped(u)) {
+        unit_refuse(u);
+        return true;
+    }
+    bool refused = false;
+    if (unit_apply(u, turn, &refused)) {
+        unit_refuse(u);
+        return true;
+    }
+    if (!worktree_changed_files(u->workdir, &u->changed)) {
+        engine_emit(stderr,
+                    "engine_unit: refusing verdict because git status "
+                    "could not establish a complete changed-file count\n");
+        unit_refuse(u);
+        return true;
+    }
+    return unit_judge(u, turn, refused);
+}
+
+static int unit_finish(struct unit_run *u)
+{
+    const int64_t unit_elapsed_ms =
+        (clock_now_monotonic_ns() - u->unit_started_ns) / 1000000;
+    const bool needs_operator =
+        u->have_turn_state
+        && engine_state_next_is_operator(u->turn_state,
+                                         strlen(u->turn_state));
+    if (needs_operator)
+        engine_emit(stdout,
+                    "engine_unit: needs_operator=true — the unit's state "
+                    "block names its next step as an operator action; see "
+                    "state.txt\n");
+    write_receipt(&u->o, u->v, &u->dr.reply.usage, &u->dr.cli_observation,
+                  u->dr.reply.model,
+                  &u->gate, u->changed, u->changed_known,
+                  u->dr.attempts, u->dr.dispatch_latency_ms,
+                  u->proof_latency_ms,
+                  unit_elapsed_ms,
+                  u->verdict,
+                  u->have_turn_state ? strlen(u->turn_state) : 0,
+                  u->state_updated_last, u->compactions, needs_operator,
+                  u->invocations.totals_ambiguous);
+    const bool durable_receipt = append_unit_receipt(
+        &u->o, u->v, &u->dr.reply.usage, &u->dr.cli_observation,
+        u->dr.reply.model, &u->gate,
+        u->changed, u->changed_known, u->dr.attempts,
+        u->dr.dispatch_latency_ms,
+        u->proof_latency_ms,
+        u->cumulative_proof_ms, unit_elapsed_ms, u->dr.http_status,
+        u->verdict, u->task_sha3_hex, &u->invocations);
+    if (!durable_receipt)
+        engine_emit(stderr,
+                    "engine_unit: authoritative invocation receipt was "
+                    "refused; this run cannot claim complete accounting\n");
+    unit_ledger_row(&u->o, u->v, &u->dr.reply.usage, &u->dr.cli_observation,
+                    u->dr.dispatch_latency_ms + u->proof_latency_ms,
+                    u->task_sha3_hex);
+    if (durable_receipt)
+        engine_emit(stdout, "engine_unit: %s\n",
+                    engine_verdict_name(u->verdict));
+    else
+        engine_emit(stdout, "engine_unit: RECEIPT_REFUSED (gate verdict %s)\n",
+                    engine_verdict_name(u->verdict));
+    engine_emit(stdout, "  review the diff before anything else: git -C %s diff\n",
+                u->workdir);
+    engine_reply_free(&u->dr.reply);
+    engine_secret_clear();
+    free(u->prompt);
+    free(u->delivered);
+    free(u->task);
+    free(u->brief);
+    return durable_receipt && !u->dispatch_failed &&
+                   engine_verdict_is_terminal(u->verdict) ? 0 : 1;
+}
+
+int main(int argc, char **argv)
+{
+    struct unit_run u = {0};
+    if (!parse_args(argc, argv, &u.o))
+        return 2;
+    int rc = unit_setup_check(&u);
+    if (rc >= 0)
+        return rc;
+    rc = unit_load_inputs(&u);
+    if (rc >= 0)
+        return rc;
+    if (u.o.dry_run) {
+        unit_dry_run(&u);
+        unit_release(&u);
+        return 0;
+    }
+    rc = unit_preflight_gate(&u);
+    if (rc >= 0)
+        return rc;
+    rc = unit_preflight_workspace(&u);
+    if (rc >= 0)
+        return rc;
+    unit_augment_task(&u);
 
     /* ── the turn loop ────────────────────────────────────────────────────
      *
@@ -3279,544 +4126,9 @@ int main(int argc, char **argv)
      * on a terminal verdict (PASS or REPORTED), or after the last turn; a
      * unit that never reaches one still gets judged and receipted there.
      */
-    char turn_state[ENGINE_STATE_MAX_BYTES] = {0};
-    bool have_turn_state = false;
-    bool state_updated_last = false;
-    int compactions = 0;
-    char gate_tail[4096] = {0};
-    bool have_gate_tail = false;
-
-    struct dispatch_result dr = {0};
-    /* The first observation after external resume may already include usage
-     * from an earlier process. Preserve it, but never infer a dispatch delta. */
-    struct invocation_log invocations = {
-        .totals_ambiguous = o.resume_session_id != NULL,
-    };
-    struct engine_gate_reading gate = {0};
-    bool timed_out = false;
-    size_t changed = 0;
-    enum engine_verdict verdict = ENGINE_VERDICT_REFUSED;
-    int64_t proof_latency_ms = 0;
-    int64_t cumulative_proof_ms = 0;
-    char *delivered = NULL;
-    char prompt_path[1024] = {0};
-    bool dispatch_failed = false;
-    bool changed_known = false;
-    const enum engine_prompt_effect effect = engine_prompt_kind_effect(o.kind);
-    const int64_t unit_started_ns = clock_now_monotonic_ns();
-
-    for (int turn = 1; turn <= o.turns; turn++) {
-        changed_known = false;
-        if (turn > 1) {
-            engine_reply_free(&dr.reply);
-            memset(&dr, 0, sizeof(dr));
-            gate = (struct engine_gate_reading){0};
-            timed_out = false;
-
-            /* This turn's prompt: fold the compaction check into what it
-             * would carry BEFORE composing it, since compose_prompt() itself
-             * only knows how to refuse an over-long result, not shrink it. */
-            (void)build_carried_preamble(carried_preamble,
-                                         sizeof(carried_preamble),
-                                         have_attempt_state, attempt_state,
-                                         attempt_label, have_turn_state,
-                                         turn_state);
-            const size_t carried_len = strlen(carried_preamble);
-            const size_t gate_tail_len = have_gate_tail ? strlen(gate_tail)
-                                                        : 0;
-            /* Rough but conservative: task and the territory brief are the
-             * two unbounded inputs left once carried state and gate
-             * feedback are accounted for; the fixed margin in
-             * engine_state_needs_compaction() covers the template bodies,
-             * headings and protocol text this estimate does not itemise. */
-            const size_t base_len = task_len + (brief ? strlen(brief) : 0);
-            if (v->wire != ENGINE_WIRE_LOCAL_CLI
-                && engine_state_needs_compaction(carried_len, gate_tail_len,
-                                                 base_len,
-                                                 ENGINE_MAX_PROMPT_BYTES)) {
-                char comp_prompt[2u * ENGINE_STATE_MAX_BYTES + 8192u];
-                (void)engine_state_compaction_prompt(
-                    comp_prompt, sizeof(comp_prompt),
-                    have_turn_state ? turn_state
-                                    : (have_attempt_state ? attempt_state
-                                                          : NULL),
-                    have_gate_tail ? gate_tail : NULL);
-                struct dispatch_result cdr = {0};
-                bool compacted = false;
-                bool compaction_dispatched = false;
-                const int64_t compaction_started_ns = clock_now_monotonic_ns();
-                if (!invocation_log_has_room(&invocations)) {
-                    dispatch_failed = true;
-                    break;
-                }
-                if (v->wire == ENGINE_WIRE_OPENAI_CHAT) {
-                    const struct engine_call ccall = {
-                        .vendor            = v,
-                        .model             = o.model,
-                        .reasoning_effort  = o.reasoning_effort,
-                        .system_prompt     = NULL,
-                        .user_prompt       = comp_prompt,
-                        .max_output_tokens = 2048,
-                    };
-                    size_t cbody_len = 0;
-                    char *cbody = engine_request_alloc(&ccall, &cbody_len);
-                    if (cbody) {
-                        compaction_dispatched = true;
-                        compacted = dispatch_https(v, cbody, cbody_len,
-                                                   o.timeout_s * 1000, &cdr);
-                        free(cbody);
-                    }
-                } else if (v->wire == ENGINE_WIRE_LOCAL_FIXTURE) {
-                    compaction_dispatched = true;
-                    compacted = dispatch_fixture(v, o.fixture_reply, &cdr);
-                }
-                const int64_t compaction_elapsed_ms =
-                    (clock_now_monotonic_ns() - compaction_started_ns) /
-                    1000000;
-                if (compaction_dispatched &&
-                    !invocation_log_add(&invocations, "compaction", compacted,
-                                        &cdr, compaction_elapsed_ms)) {
-                    engine_reply_free(&cdr.reply);
-                    dispatch_failed = true;
-                    break;
-                }
-                if (compacted) {
-                    size_t extracted_len = 0;
-                    if (engine_state_extract(cdr.reply.text,
-                                             cdr.reply.text_len, turn_state,
-                                             sizeof(turn_state),
-                                             &extracted_len))
-                        have_turn_state = true;
-                    compactions++;
-                    engine_emit(stdout,
-                                "  compaction: turn %d's prompt would have "
-                                "exceeded the budget; compacted to %zu "
-                                "byte(s) of state\n",
-                                turn, extracted_len);
-                    (void)build_carried_preamble(
-                        carried_preamble, sizeof(carried_preamble),
-                        have_attempt_state, attempt_state, attempt_label,
-                        have_turn_state, turn_state);
-                } else {
-                    engine_emit(stderr,
-                                "engine_unit: turn %d needed compaction and "
-                                "the compaction dispatch itself failed; "
-                                "continuing with the uncompacted state\n",
-                                turn);
-                }
-                engine_reply_free(&cdr.reply);
-            }
-
-            if (dispatch_failed)
-                break;
-
-            free(prompt);
-            prompt = compose_prompt(&o, v, task, brief, carried_preamble,
-                                    have_gate_tail ? gate_tail : NULL);
-            if (!prompt) {
-                dispatch_failed = true;
-                verdict = ENGINE_VERDICT_REFUSED;
-                break;
-            }
-        }
-
-        /* A CLI vendor reads this file and nothing else, so for a wire with
-         * no system channel of its own the rules have to be IN it. This is
-         * also the archived record of the dispatch, so it must be exactly
-         * what was delivered — an archive that differs from the delivery is
-         * an archive nobody can check a run against.
-         *
-         * A refusal here refuses the DISPATCH. Falling back to writing the
-         * prompt without the rules would be the original defect restored on
-         * an error path, which is where defects prefer to live. */
-        size_t delivered_len = 0;
-        delivered = engine_prompt_compose(v->wire, prompt, &delivered_len);
-        if (!delivered) {
-            free(prompt);
-            prompt = NULL;
-            engine_emit(stderr,
-                        "engine_unit: the composed prompt could not be "
-                        "prepared for this engine; refusing dispatch\n");
-            dispatch_failed = true;
-            verdict = ENGINE_VERDICT_REFUSED;
+    unit_loop_init(&u);
+    for (int turn = 1; turn <= u.o.turns; turn++)
+        if (unit_turn(&u, turn))
             break;
-        }
-
-        /* The prompt is checked against the declared shape before it is
-         * delivered. A prompt whose rules block, task, output protocol or
-         * judging section is missing is not a weaker prompt — it is a
-         * different job, and the work that comes back is evidence about
-         * something nobody asked for. Refusing costs one run; dispatching
-         * costs money and produces a receipt that means nothing. */
-        struct engine_prompt_audit audit;
-        if (!engine_prompt_audit_text(v->wire, delivered, &audit)) {
-            char why[256];
-            if (audit.missing)
-                snprintf(why, sizeof(why),
-                         "the composed prompt has no '%s' section",
-                         audit.missing);
-            else if (audit.misplaced)
-                snprintf(why, sizeof(why),
-                         "the composed prompt carries '%s' out of order",
-                         audit.misplaced);
-            else
-                snprintf(why, sizeof(why),
-                         "the composed prompt repeats '%s', which this "
-                         "engine already receives on its own channel",
-                         audit.repeated ? audit.repeated : "a section");
-            free(delivered);
-            delivered = NULL;
-            free(prompt);
-            prompt = NULL;
-            engine_emit(stderr, "engine_unit: %s\n", why);
-            dispatch_failed = true;
-            verdict = ENGINE_VERDICT_REFUSED;
-            break;
-        }
-
-        memset(prompt_path, 0, sizeof(prompt_path));
-        if (o.state_dir && o.state_dir[0]
-            && (size_t)snprintf(prompt_path, sizeof(prompt_path),
-                                "%s/prompt.txt", o.state_dir)
-                   < sizeof(prompt_path))
-            (void)engine_emit_file(prompt_path, delivered, delivered_len);
-        /* NOT freed here: a CLI vendor whose row takes the prompt as an
-         * ARGUMENT hands these exact bytes to exec, so they have to outlive
-         * the dispatch. The file above stays the archived record either
-         * way. */
-
-        /* Only an HTTP dialect has a request document. A CLI engine reads
-         * the prompt from the file written above and a fixture reads a
-         * canned reply, so building a body for either would produce a
-         * document nothing sends — and, for a vendor row with no default
-         * model, a body with a null model field in it. Build it where it is
-         * used and nowhere else. */
-        size_t body_len = 0;
-        char *body = NULL;
-        if (v->wire == ENGINE_WIRE_OPENAI_CHAT) {
-            const struct engine_call call = {
-                .vendor            = v,
-                .model             = o.model,
-                .reasoning_effort  = o.reasoning_effort,
-                .system_prompt     = engine_system_rules(),
-                .user_prompt       = prompt,
-                .max_output_tokens = 65536,
-            };
-            body = engine_request_alloc(&call, &body_len);
-            if (!body) {
-                free(delivered);
-                delivered = NULL;
-                free(prompt);
-                prompt = NULL;
-                engine_emit(stderr,
-                            "engine_unit: could not build the request body\n");
-                dispatch_failed = true;
-                verdict = ENGINE_VERDICT_REFUSED;
-                break;
-            }
-        }
-        free(prompt);
-        prompt = NULL;
-
-        const bool got = dispatch_with_retries(v, &o, body, body_len,
-                                               prompt_path, delivered,
-                                               workdir, &dr, &invocations);
-        free(body);
-        free(delivered);
-        delivered = NULL;
-        unit_adopt_cli_cost(&dr);
-        if (!got) {
-            dispatch_failed = true;
-            verdict = ENGINE_VERDICT_REFUSED;
-            break;
-        }
-
-        /* Archive the raw completion before any envelope parsing touches
-         * it. A FAIL(NO-CHANGE) verdict alone cannot say whether the model
-         * proposed nothing, proposed something the envelope parser refused,
-         * or never came back with the shape this harness expects —
-         * reply.txt lets a human read exactly what the model said and
-         * answer that by hand. */
-        if (o.state_dir && o.state_dir[0]) {
-            char reply_path[1024];
-            if ((size_t)snprintf(reply_path, sizeof(reply_path),
-                                 "%s/reply.txt", o.state_dir)
-                       < sizeof(reply_path))
-                (void)engine_emit_file(reply_path,
-                                       dr.reply.text ? dr.reply.text : "",
-                                       dr.reply.text_len);
-        }
-
-        if (dr.reply.usage.tokens_known || dr.reply.usage.cost_known)
-            engine_emit(stdout,
-                        "  spend:      prompt=%lld completion=%lld "
-                        "cost_usd=%s%.6f\n",
-                        (long long)dr.reply.usage.prompt_tokens,
-                        (long long)dr.reply.usage.completion_tokens,
-                        dr.reply.usage.cost_known ? "" : "unreported:",
-                        dr.reply.usage.cost_usd);
-        else
-            engine_emit(stdout, "  spend:      not reported by %s\n", v->id);
-
-        /* For an engine that edits in place the cap is checked after those
-         * edits exist. REFUSED here skips the apply and the gate, and nothing
-         * reverts the worktree: it keeps the edits for the caller to inspect
-         * or discard. */
-        if (o.max_cost_usd > 0.0 && dr.reply.usage.cost_known
-            && dr.reply.usage.cost_usd > o.max_cost_usd) {
-            engine_emit(stderr,
-                        "engine_unit: the reported spend exceeded "
-                        "--max-cost-usd; a CLI engine may have edited the "
-                        "worktree in place, and those edits were not "
-                        "reverted\n");
-            dispatch_failed = true;
-            verdict = ENGINE_VERDICT_REFUSED;
-            break;
-        }
-
-        /* Apply. A CLI engine has already edited the worktree; an API
-         * engine's reply carries file bodies. Either way the NEXT step
-         * measures the diff. */
-        bool refused = false;
-        bool apply_failed = false;
-        if (v->delivery == ENGINE_DELIVERS_ENVELOPE) {
-            struct engine_patch patch;
-            char applied_path[1024] = {0};
-            if (o.state_dir && o.state_dir[0])
-                (void)snprintf(applied_path, sizeof(applied_path),
-                              "%s/applied.txt", o.state_dir);
-
-            if (!engine_patch_parse(dr.reply.text, dr.reply.text_len,
-                                    &patch)) {
-                if (applied_path[0])
-                    (void)engine_emit_file(applied_path,
-                        "PARSE_REFUSED\nthe envelope parser rejected this "
-                        "reply (a marker rule was violated or an envelope "
-                        "was left open); see reply.txt for the exact text "
-                        "and stderr of this run for which check fired.\n",
-                        strlen("PARSE_REFUSED\nthe envelope parser rejected "
-                               "this reply (a marker rule was violated or an "
-                               "envelope was left open); see reply.txt for "
-                               "the exact text and stderr of this run for "
-                               "which check fired.\n"));
-                engine_emit(stderr,
-                            "engine_unit: turn %d's reply was refused by the "
-                            "envelope parser; nothing was applied\n", turn);
-                (void)snprintf(gate_tail, sizeof(gate_tail),
-                              "Your last reply was refused by the envelope "
-                              "parser (a marker rule was violated or an "
-                              "envelope was left open); nothing from it was "
-                              "applied. See the output protocol again and "
-                              "send the whole reply, corrected.");
-                have_gate_tail = true;
-                refused = true;
-            } else {
-                engine_emit(stdout, "  reply:      %zu file(s) proposed\n",
-                           patch.count);
-                if (applied_path[0]) {
-                    char desc[4096];
-                    const size_t n =
-                        engine_patch_describe(&patch, desc, sizeof(desc));
-                    char header[128];
-                    const int hn = snprintf(header, sizeof(header),
-                                            "PARSED %zu file(s)\n",
-                                            patch.count);
-                    char buf[4096 + 128];
-                    size_t used = 0;
-                    if (hn > 0 && (size_t)hn < sizeof(buf)) {
-                        memcpy(buf, header, (size_t)hn);
-                        used = (size_t)hn;
-                    }
-                    if (n > 0 && used + n < sizeof(buf)) {
-                        memcpy(buf + used, desc, n);
-                        used += n;
-                    } else if (patch.count == 0) {
-                        static const char none[] =
-                            "(the reply proposed no changes)\n";
-                        if (used + sizeof(none) - 1 < sizeof(buf)) {
-                            memcpy(buf + used, none, sizeof(none) - 1);
-                            used += sizeof(none) - 1;
-                        }
-                    }
-                    (void)engine_emit_file(applied_path, buf, used);
-                }
-                const char *shrink = patch_shrink_reason(workdir, &patch);
-                if (shrink) {
-                    if (applied_path[0]) {
-                        char msg[768];
-                        const int mn = snprintf(msg, sizeof(msg),
-                            "SHRINK_REFUSED\n%s\n", shrink);
-                        if (mn > 0)
-                            (void)engine_emit_file(applied_path, msg,
-                                (size_t)mn < sizeof(msg) ? (size_t)mn
-                                                          : sizeof(msg) - 1);
-                    }
-                    engine_emit(stderr,
-                               "engine_unit: turn %d's reply was refused "
-                               "before apply: %s\n", turn, shrink);
-                    (void)snprintf(gate_tail, sizeof(gate_tail),
-                                  "Your last reply was refused before "
-                                  "anything was written: %s", shrink);
-                    have_gate_tail = true;
-                    refused = true;
-                    engine_patch_free(&patch);
-                } else if (!apply_patch(workdir, &patch)) {
-                    apply_failed = true;
-                }
-                engine_patch_free(&patch);
-            }
-        }
-
-        if (apply_failed) {
-            dispatch_failed = true;
-            verdict = ENGINE_VERDICT_REFUSED;
-            break;
-        }
-
-        if (!worktree_changed_files(workdir, &changed)) {
-            engine_emit(stderr,
-                        "engine_unit: refusing verdict because git status "
-                        "could not establish a complete changed-file count\n");
-            dispatch_failed = true;
-            verdict = ENGINE_VERDICT_REFUSED;
-            break;
-        }
-        changed_known = true;
-        engine_emit(stdout,
-                    "  diff:       %zu changed path(s) in the worktree\n",
-                    changed);
-
-        proof_latency_ms = 0;
-        /* REPORT success is determined by effect, not by an unrelated gate.
-         * In particular, do not spend a group run after observing a report
-         * edit that is already a failure. */
-        if (unit_should_gate(effect, refused, o.no_group, changed)) {
-            char gate_log[1024] = {0};
-            if (o.state_dir && o.state_dir[0])
-                (void)snprintf(gate_log, sizeof(gate_log), "%s/gate.log",
-                              o.state_dir);
-            gate_tail[0] = '\0';
-            const int64_t proof_started_ns = clock_now_monotonic_ns();
-            (void)run_gate(&o, workdir, &gate, &timed_out,
-                          gate_log[0] ? gate_log : NULL, gate_tail,
-                          sizeof(gate_tail));
-            /* A concurrent worktree rewrote the build-epoch lease out from
-             * under this run (see env_epoch_race in engine/engine_verdict.h):
-             * the harness raced itself, not a fault in the model's reply.
-             * Retry the SAME gate once, on the SAME diff, before this is
-             * ever turned into a verdict — a race that clears on retry must
-             * never cost the unit a REFUSED that reads as the model's
-             * fault. */
-            if (gate.env_epoch_race) {
-                engine_emit(stdout,
-                            "  gate:       build-epoch race detected "
-                            "(environment, not the model); retrying the "
-                            "gate once\n");
-                (void)run_gate(&o, workdir, &gate, &timed_out,
-                              gate_log[0] ? gate_log : NULL, gate_tail,
-                              sizeof(gate_tail));
-            }
-            proof_latency_ms =
-                (clock_now_monotonic_ns() - proof_started_ns) / 1000000;
-            if (cumulative_proof_ms >= 0 && proof_latency_ms >= 0 &&
-                cumulative_proof_ms <= INT64_MAX - proof_latency_ms)
-                cumulative_proof_ms += proof_latency_ms;
-            else
-                cumulative_proof_ms = ENGINE_RECEIPT_UNREPORTED;
-            have_gate_tail = gate_tail[0] != '\0';
-            engine_emit(stdout,
-                        "  gate:       verdict_line=%s mode=%s groups_ran=%ld "
-                        "groups_failed=%ld\n",
-                        gate.saw_verdict_line ? "yes" : "NO",
-                        gate.cached_mode ? "cached" : "cold", gate.groups_ran,
-                        gate.groups_failed);
-        }
-
-        verdict = unit_turn_verdict(effect, refused, &dr.reply, &gate, changed,
-                                    timed_out, !o.no_group, gate_tail,
-                                    sizeof(gate_tail), &have_gate_tail);
-
-        /* Extract this turn's state independent of the envelope, per
-         * engine/engine_state.h. A CLI wire never decodes reply text, so
-         * there is nothing to extract from it — the model's own state, if
-         * it left one anywhere the CLI printed, is not read here; that is a
-         * scoping call, not an oversight: see the CLI OUTPUT PROTOCOL text,
-         * which tells it to edit the worktree and print nothing. */
-        size_t extracted_len = 0;
-        if (dr.reply.text
-            && engine_state_extract(dr.reply.text, dr.reply.text_len,
-                                    turn_state, sizeof(turn_state),
-                                    &extracted_len)) {
-            have_turn_state = true;
-            state_updated_last = true;
-        } else {
-            state_updated_last = false;
-            /* Carried forward unchanged: turn_state/have_turn_state are
-             * simply left as they were. */
-        }
-        if (o.state_dir && o.state_dir[0]) {
-            char state_path[1024];
-            if ((size_t)snprintf(state_path, sizeof(state_path),
-                                 "%s/state.txt", o.state_dir)
-                       < sizeof(state_path))
-                (void)engine_emit_file(state_path,
-                                       have_turn_state ? turn_state : "",
-                                       have_turn_state ? strlen(turn_state)
-                                                       : 0);
-        }
-        engine_emit(stdout, "  state:      %zu byte(s), %s\n",
-                   have_turn_state ? strlen(turn_state) : 0,
-                   state_updated_last ? "updated by the model"
-                                      : "not updated by the model");
-        engine_emit(stdout, "  turn %d/%d:   %s\n", turn, o.turns,
-                   engine_verdict_name(verdict));
-
-        if (unit_turn_finished(verdict, turn, o.turns))
-            break;
-    }
-
-    const int64_t unit_elapsed_ms =
-        (clock_now_monotonic_ns() - unit_started_ns) / 1000000;
-    const bool needs_operator =
-        have_turn_state
-        && engine_state_next_is_operator(turn_state, strlen(turn_state));
-    if (needs_operator)
-        engine_emit(stdout,
-                    "engine_unit: needs_operator=true — the unit's state "
-                    "block names its next step as an operator action; see "
-                    "state.txt\n");
-    write_receipt(&o, v, &dr.reply.usage, &dr.cli_observation, dr.reply.model,
-                  &gate, changed, changed_known,
-                  dr.attempts, dr.dispatch_latency_ms, proof_latency_ms,
-                  unit_elapsed_ms,
-                  verdict, have_turn_state ? strlen(turn_state) : 0,
-                  state_updated_last, compactions, needs_operator,
-                  invocations.totals_ambiguous);
-    const bool durable_receipt = append_unit_receipt(
-        &o, v, &dr.reply.usage, &dr.cli_observation, dr.reply.model, &gate,
-        changed, changed_known, dr.attempts, dr.dispatch_latency_ms,
-        proof_latency_ms,
-        cumulative_proof_ms, unit_elapsed_ms, dr.http_status, verdict,
-        task_sha3_hex, &invocations);
-    if (!durable_receipt)
-        engine_emit(stderr,
-                    "engine_unit: authoritative invocation receipt was "
-                    "refused; this run cannot claim complete accounting\n");
-    unit_ledger_row(&o, v, &dr.reply.usage, &dr.cli_observation,
-                    dr.dispatch_latency_ms + proof_latency_ms, task_sha3_hex);
-    if (durable_receipt)
-        engine_emit(stdout, "engine_unit: %s\n", engine_verdict_name(verdict));
-    else
-        engine_emit(stdout, "engine_unit: RECEIPT_REFUSED (gate verdict %s)\n",
-                    engine_verdict_name(verdict));
-    engine_emit(stdout, "  review the diff before anything else: git -C %s diff\n",
-                workdir);
-    engine_reply_free(&dr.reply);
-    engine_secret_clear();
-    free(prompt);
-    free(delivered);
-    free(task);
-    free(brief);
-    return durable_receipt && !dispatch_failed &&
-                   engine_verdict_is_terminal(verdict) ? 0 : 1;
+    return unit_finish(&u);
 }
