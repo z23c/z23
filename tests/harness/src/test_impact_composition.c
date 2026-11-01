@@ -7048,6 +7048,28 @@ static bool ic_fresh_edit_static(void)
                         "    return fresh_lone_help(x) + 1;\n}\n");
 }
 
+/* A prototype of a function the same file defines adds no symbol: a quarter
+ * of the test files declare their own entry this way (-Wmissing-prototypes). */
+static bool ic_fresh_edit_proto(void)
+{
+    return ic_fresh_add("tools/command/native_devagent_situation.c",
+                        "/* situation - declares its own entry */\n"
+                        "#include \"a.h\"\n\n"
+                        "int fresh_probe_run(int x);\n\n"
+                        "int fresh_probe_run(int x)\n{\n    return x + 41;\n}\n");
+}
+
+/* A prototype of a function the file does not define: `int T_(x);` may be
+ * a macro-typed object, so it is not admitted. */
+static bool ic_fresh_edit_proto_ext(void)
+{
+    return ic_fresh_add("tools/command/native_devagent_situation.c",
+                        "/* situation - declares something else */\n"
+                        "#include \"a.h\"\n\n"
+                        "int fresh_lone_ext(int x);\n\n"
+                        "int fresh_probe_run(int x)\n{\n    return x + 41;\n}\n");
+}
+
 /* A macro-typed object reads like a prototype: `unsigned T_(1) x;`. */
 static bool ic_fresh_edit_macro_object(void)
 {
@@ -7127,6 +7149,8 @@ static bool ic_fresh_fixture_build(void)
         {"freshuncalled", ic_fresh_edit_uncalled},
         {"freshstatic", ic_fresh_edit_static},
         {"freshmacroobj", ic_fresh_edit_macro_object},
+        {"freshproto", ic_fresh_edit_proto},
+        {"freshprotoext", ic_fresh_edit_proto_ext},
         {"freshobject", ic_fresh_edit_object},
         {"freshheader", ic_fresh_edit_header},
         {"freshdeleted", ic_fresh_edit_deleted},
@@ -7152,6 +7176,7 @@ static const struct ic_fresh_case ic_fresh_cases[] = {
     {"freshtest", 0, "devagent_start", NULL},   /* new test file, its own group */
     {"freshsidecar", 0, "devagent_situation", "package_capability_claim"},
     {"freshstatic", 0, "devagent_situation", NULL}, /* a private helper */
+    {"freshproto", 0, "devagent_situation", NULL},  /* its own prototype */
     {"freshmention", 'A', NULL, NULL},   /* an unchanged file names the stem */
     {"freshbasename", 'A', NULL, NULL},  /* defines a name the base tree holds */
     {"freshhook", 'A', NULL, NULL},      /* a constructor registers it unseen */
@@ -7163,6 +7188,7 @@ static const struct ic_fresh_case ic_fresh_cases[] = {
     {"fresharray", 'A', NULL, NULL},     /* char buf[sizeof(long)]; is an object */
     {"freshuncalled", 'A', NULL, NULL},  /* a public function no change calls */
     {"freshmacroobj", 'A', NULL, NULL},  /* unsigned T_(1) x; is an object */
+    {"freshprotoext", 'A', NULL, NULL},  /* a prototype it does not define */
     {"freshobject", 'A', NULL, NULL},    /* a public file-scope object */
     {"freshheader", 'A', NULL, NULL},    /* an added header beside it */
     {"freshdeleted", 'D', NULL, NULL},   /* a deletion beside it */
