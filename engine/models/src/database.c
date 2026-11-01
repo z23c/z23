@@ -392,28 +392,33 @@ static bool prepare_statements(struct node_db *ndb)
 #define ZCL_NODE_DB_MIDRANGE_MMAP      (64LL * 1024 * 1024)
 #define ZCL_NODE_DB_BUSY_TIMEOUT_MS 10000
 
-/* Test seam: when set, replaces the host-measured effective RAM. */
-static bool g_effective_ram_override_set;
-static int64_t g_effective_ram_override;
+/* Test seam: when set, replaces only the host-measured physical RAM. The
+ * cgroup cap below still runs, so tests keep the cgroup half of the
+ * contract. Single-threaded test use only. */
+static bool g_host_ram_override_set;
+static int64_t g_host_ram_override;
 
-void node_db_test_set_effective_ram(int64_t ram)
+void node_db_test_set_host_ram(int64_t ram)
 {
-    g_effective_ram_override = ram;
-    g_effective_ram_override_set = true;
+    g_host_ram_override = ram;
+    g_host_ram_override_set = true;
 }
 
-void node_db_test_clear_effective_ram(void)
+void node_db_test_clear_host_ram(void)
 {
-    g_effective_ram_override_set = false;
-    g_effective_ram_override = 0;
+    g_host_ram_override_set = false;
+    g_host_ram_override = 0;
 }
 
 static int64_t db_effective_ram_bytes(void)
 {
-    if (g_effective_ram_override_set)
-        return g_effective_ram_override;
-    hw_profile_init(NULL);
-    int64_t ram = hw_profile_ram_bytes();
+    int64_t ram;
+    if (g_host_ram_override_set) {
+        ram = g_host_ram_override;
+    } else {
+        hw_profile_init(NULL);
+        ram = hw_profile_ram_bytes();
+    }
     struct os_proc_mem mem;
     if (!os_proc_mem_read(&mem))
         return ram;

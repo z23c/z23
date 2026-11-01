@@ -2676,19 +2676,19 @@ static bool sqlite_test_server_turbo_cache(void)
         .sys_avail_bytes = 32LL * 1024 * 1024 * 1024,
     };
     os_proc_mem_set_override(&server);
-    node_db_test_set_effective_ram(16LL * 1024 * 1024 * 1024);
+    node_db_test_set_host_ram(64LL * 1024 * 1024 * 1024);
     struct node_db ndb;
     bool ok = node_db_open(&ndb, ":memory:") &&
               sqlite_test_turbo_cache(&ndb, 512 * 1024) &&
               node_db_normal_mode(&ndb) &&
               sqlite_test_cache_pages(&ndb) == -(64 * 1024);
     if (ndb.open) node_db_close(&ndb);
-    node_db_test_clear_effective_ram();
+    node_db_test_clear_host_ram();
     return ok;
 }
 
-/* Small effective RAM wins over a roomy cgroup and host: the open path must
- * take the 16 MiB budget cache, so the seam is what the PRAGMA reads. */
+/* A small host RAM under a roomy cgroup stays small (the cap only lowers):
+ * the open path must take the 16 MiB budget cache. */
 static bool sqlite_test_small_ram_seam(void)
 {
     struct os_proc_mem roomy = {
@@ -2700,12 +2700,12 @@ static bool sqlite_test_small_ram_seam(void)
         .sys_avail_bytes = 32LL * 1024 * 1024 * 1024,
     };
     os_proc_mem_set_override(&roomy);
-    node_db_test_set_effective_ram(2LL * 1024 * 1024 * 1024);
+    node_db_test_set_host_ram(2LL * 1024 * 1024 * 1024);
     struct node_db ndb;
     bool ok = node_db_open(&ndb, ":memory:") &&
               sqlite_test_cache_pages(&ndb) == -(16 * 1024);
     if (ndb.open) node_db_close(&ndb);
-    node_db_test_clear_effective_ram();
+    node_db_test_clear_host_ram();
     return ok;
 }
 
@@ -2738,7 +2738,7 @@ static void check_sqlite_47_sqlite_pragma_tuning_honors_constrained_(int *failur
         .sys_avail_bytes = 32LL * 1024 * 1024 * 1024,
     };
     os_proc_mem_set_override(&constrained);
-    node_db_test_set_effective_ram(4LL * 1024 * 1024 * 1024);
+    node_db_test_set_host_ram(64LL * 1024 * 1024 * 1024);
     struct node_db ndb;
     bool ok = node_db_open(&ndb, ":memory:");
     int64_t cache_pages = ok ? sqlite_test_cache_pages(&ndb) : 0;
@@ -2747,7 +2747,7 @@ static void check_sqlite_47_sqlite_pragma_tuning_honors_constrained_(int *failur
     cache_pages = sqlite_test_cache_pages(&ndb);
     ok = ok && node_db_recommended_mmap_bytes() == 0;
     if (ndb.open) node_db_close(&ndb);
-    node_db_test_clear_effective_ram();
+    node_db_test_clear_host_ram();
     ok = ok && sqlite_test_server_turbo_cache();
     ok = ok && sqlite_test_small_ram_seam();
     ok = ok && sqlite_test_unreadable_ram_turbo();
