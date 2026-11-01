@@ -22,7 +22,6 @@ core/consensus/src/script_interp.c:domain_consensus_verify_script:20
 core/consensus/src/script_standard.c:domain_consensus_script_solver:60
 core/math/src/core_io.c:parse_script:19
 core/math/src/core_io.c:script_to_asm_str:28
-core/modules/chain/src/mmb.c:mmb_prove:18
 core/modules/coins/src/utxo_commitment.c:utxo_commitment_boot_check_and_refresh:16
 core/modules/coins/src/utxo_commitment.c:utxo_commitment_compute_range:24
 core/modules/crypto/src/blake2b_avx2.c:finalize_states:18

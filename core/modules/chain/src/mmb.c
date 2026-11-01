@@ -297,6 +297,81 @@ bool mmb_deserialize(struct mmb *m, const uint8_t *buf, size_t len)
 
 /* ── Inclusion proofs ────────────────────────────────────── */
 
+/* Record the sibling hash when the target leaf takes part in a merge of
+ * stack entries a and b, setting the left/right bit for it. */
+static void record_target_merge_sibling(const uint8_t stack[][32],
+                                        uint8_t (*siblings)[32],
+                                        int *target_sp,
+                                        uint32_t *sib_count,
+                                        uint64_t *lr_bits,
+                                        uint32_t a, uint32_t b)
+{
+    if (*target_sp == (int)b) {
+        memcpy(siblings[*sib_count], stack[a], 32);
+        *lr_bits |= (1ULL << *sib_count);  /* target is right */
+        (*sib_count)++;
+        *target_sp = (int)a;
+    } else if (*target_sp == (int)a) {
+        memcpy(siblings[*sib_count], stack[b], 32);
+        /* target is left, bit stays 0 */
+        (*sib_count)++;
+    }
+}
+
+/* Merge the two rightmost stack entries if they have equal heights,
+ * updating the authentication path for the target leaf. */
+static void merge_rightmost_pair(uint8_t stack[][32],
+                                 uint32_t stack_heights[],
+                                 uint32_t *sp, int *target_sp,
+                                 uint32_t *sib_count, uint64_t *lr_bits,
+                                 uint8_t (*siblings)[32])
+{
+    if (*sp >= 2 && stack_heights[*sp - 2] == stack_heights[*sp - 1]) {
+        uint32_t a = *sp - 2, b = *sp - 1;
+        record_target_merge_sibling(stack, siblings, target_sp,
+                                    sib_count, lr_bits, a, b);
+        uint8_t merged[32];
+        mmb_hash_internal(stack[a], stack[b], merged);
+        memcpy(stack[a], merged, 32);
+        stack_heights[a]++;
+        (*sp)--;
+    }
+}
+
+/* Scan left for one deferred mergeable pair, merge it and shift the
+ * stack down, updating the authentication path for the target leaf. */
+static void merge_deferred_pair(uint8_t stack[][32],
+                                uint32_t stack_heights[],
+                                uint64_t stack_first[],
+                                uint32_t *sp, int *target_sp,
+                                uint32_t *sib_count, uint64_t *lr_bits,
+                                uint8_t (*siblings)[32])
+{
+    if (*sp < 2)
+        return;
+    for (uint32_t k = *sp - 1; k >= 1; k--) {
+        if (stack_heights[k - 1] == stack_heights[k]) {
+            uint32_t a = k - 1, b = k;
+            record_target_merge_sibling(stack, siblings, target_sp,
+                                        sib_count, lr_bits, a, b);
+            uint8_t merged[32];
+            mmb_hash_internal(stack[a], stack[b], merged);
+            memcpy(stack[a], merged, 32);
+            stack_heights[a]++;
+            /* Shift right */
+            for (uint32_t j = b; j < *sp - 1; j++) {
+                stack_heights[j] = stack_heights[j + 1];
+                memcpy(stack[j], stack[j + 1], 32);
+                stack_first[j] = stack_first[j + 1];
+            }
+            (*sp)--;
+            /* Adjust target_sp if it was shifted */
+            if (*target_sp > (int)b) (*target_sp)--;
+            break;
+        }
+    }
+}
+
 bool mmb_prove(const uint8_t (*all_leaf_hashes)[32],
                uint64_t num_leaves,
                uint64_t leaf_index,
@@ -334,56 +409,12 @@ bool mmb_prove(const uint8_t (*all_leaf_hashes)[32],
         sp++;
 
         /* Rightmost merge */
-        if (sp >= 2 && stack_heights[sp - 2] == stack_heights[sp - 1]) {
-            uint32_t a = sp - 2, b = sp - 1;
-            if (target_sp == (int)b) {
-                memcpy(proof->siblings[sib_count], stack[a], 32);
-                lr_bits |= (1ULL << sib_count);  /* target is right */
-                sib_count++;
-                target_sp = (int)a;
-            } else if (target_sp == (int)a) {
-                memcpy(proof->siblings[sib_count], stack[b], 32);
-                /* target is left, bit stays 0 */
-                sib_count++;
-            }
-            uint8_t merged[32];
-            mmb_hash_internal(stack[a], stack[b], merged);
-            memcpy(stack[a], merged, 32);
-            stack_heights[a]++;
-            sp--;
-        }
+        merge_rightmost_pair(stack, stack_heights, &sp, &target_sp,
+                             &sib_count, &lr_bits, proof->siblings);
 
         /* Deferred merge: scan left for one more mergeable pair */
-        if (sp >= 2) {
-            for (uint32_t k = sp - 1; k >= 1; k--) {
-                if (stack_heights[k - 1] == stack_heights[k]) {
-                    uint32_t a = k - 1, b = k;
-                    if (target_sp == (int)b) {
-                        memcpy(proof->siblings[sib_count], stack[a], 32);
-                        lr_bits |= (1ULL << sib_count);
-                        sib_count++;
-                        target_sp = (int)a;
-                    } else if (target_sp == (int)a) {
-                        memcpy(proof->siblings[sib_count], stack[b], 32);
-                        sib_count++;
-                    }
-                    uint8_t merged[32];
-                    mmb_hash_internal(stack[a], stack[b], merged);
-                    memcpy(stack[a], merged, 32);
-                    stack_heights[a]++;
-                    /* Shift right */
-                    for (uint32_t j = b; j < sp - 1; j++) {
-                        stack_heights[j] = stack_heights[j + 1];
-                        memcpy(stack[j], stack[j + 1], 32);
-                        stack_first[j] = stack_first[j + 1];
-                    }
-                    sp--;
-                    /* Adjust target_sp if it was shifted */
-                    if (target_sp > (int)b) target_sp--;
-                    break;
-                }
-            }
-        }
+        merge_deferred_pair(stack, stack_heights, stack_first, &sp,
+                            &target_sp, &sib_count, &lr_bits, proof->siblings);
     }
 
     proof->num_siblings = sib_count;
