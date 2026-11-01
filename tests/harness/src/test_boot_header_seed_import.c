@@ -182,13 +182,10 @@ static bool hsi_seed_artifact(const char *sdir, int n, int bad_row_at,
                               struct rom_artifact *out_art)
 {
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    block_map_init(&ms.map_block_index);
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
     hsi_build_chain(&ms, n, bad_row_at, bad_row_at < 0);
     if (!block_index_flat_anchor_prepare(&ms).ok) {
-        block_map_free(&ms.map_block_index);
-        active_chain_free(&ms.chain_active);
+        main_state_free(&ms);
         return false;
     }
     if (bad_row_at < 0) {
@@ -204,8 +201,7 @@ static bool hsi_seed_artifact(const char *sdir, int n, int bad_row_at,
         }
     }
     save_block_index_flat(sdir, &ms);
-    block_map_free(&ms.map_block_index);
-    active_chain_free(&ms.chain_active);
+    main_state_free(&ms);
 
     return rom_seed_register(sdir, "block_index.bin", NULL, out_art) == ROM_REG_OK;
 }
@@ -256,9 +252,7 @@ static int case_import_roundtrip(void)
 
         /* Import into a fresh client header index. */
         struct main_state cms;
-        memset(&cms, 0, sizeof(cms));
-        block_map_init(&cms.map_block_index);
-        active_chain_init(&cms.chain_active);
+        main_state_init(&cms);
 
         ASSERT(boot_header_seed_import_maybe(cdir, &cms));
 
@@ -306,8 +300,7 @@ static int case_import_roundtrip(void)
         /* Idempotent: a second call no-ops (root file present, ladder-owned). */
         ASSERT(!boot_header_seed_import_maybe(cdir, &cms));
 
-        block_map_free(&cms.map_block_index);
-        active_chain_free(&cms.chain_active);
+        main_state_free(&cms);
         fs_server_stop();
         test_rm_rf_recursive(cdir);
         char p[1200];
@@ -359,9 +352,7 @@ static int case_bad_row(void)
         int64_t q_before = block_index_flat_row_quarantined();
 
         struct main_state cms;
-        memset(&cms, 0, sizeof(cms));
-        block_map_init(&cms.map_block_index);
-        active_chain_init(&cms.chain_active);
+        main_state_init(&cms);
 
         /* Import CONTINUES past the bad row (never a whole-boot abort). */
         ASSERT(boot_header_seed_import_maybe(cdir, &cms));
@@ -378,8 +369,7 @@ static int case_bad_row(void)
         ASSERT(blocker_find_by_id_prefix("block_index.flat_row_quarantine",
                                          &found));
 
-        block_map_free(&cms.map_block_index);
-        active_chain_free(&cms.chain_active);
+        main_state_free(&cms);
         fs_server_stop();
         test_rm_rf_recursive(cdir);
         char p[1200];
@@ -410,9 +400,7 @@ static int case_sync_benchmark_headers_phase(void)
         sync_benchmark_init(nodir);
 
         struct main_state noop_ms;
-        memset(&noop_ms, 0, sizeof(noop_ms));
-        block_map_init(&noop_ms.map_block_index);
-        active_chain_init(&noop_ms.chain_active);
+        main_state_init(&noop_ms);
 
         /* Stat-miss no-op: no artifact staged, phase never begins. */
         ASSERT(!boot_header_seed_import_maybe(nodir, &noop_ms));
@@ -425,8 +413,7 @@ static int case_sync_benchmark_headers_phase(void)
         ASSERT(json_is_null(json_get(noop_timings, "headers")));
         json_free(&noop_dump);
 
-        block_map_free(&noop_ms.map_block_index);
-        active_chain_free(&noop_ms.chain_active);
+        main_state_free(&noop_ms);
 
         /* Real import: the phase stamps a non-negative elapsed_ms. */
         char sdir[PATH_MAX];
@@ -435,14 +422,11 @@ static int case_sync_benchmark_headers_phase(void)
         ASSERT(test_mkdtemp(cdir, sizeof(cdir), "hsi_bench_dst") != NULL);
 
         struct main_state seed_ms;
-        memset(&seed_ms, 0, sizeof(seed_ms));
-        block_map_init(&seed_ms.map_block_index);
-        active_chain_init(&seed_ms.chain_active);
+        main_state_init(&seed_ms);
         hsi_build_chain(&seed_ms, 8, -1, true);
         ASSERT(block_index_flat_anchor_prepare(&seed_ms).ok);
         save_block_index_flat(sdir, &seed_ms);
-        block_map_free(&seed_ms.map_block_index);
-        active_chain_free(&seed_ms.chain_active);
+        main_state_free(&seed_ms);
 
         char bundles_dir[PATH_MAX];
         snprintf(bundles_dir, sizeof(bundles_dir), "%s/bundles", cdir);
@@ -470,9 +454,7 @@ static int case_sync_benchmark_headers_phase(void)
         sync_benchmark_init(cdir);
 
         struct main_state cms;
-        memset(&cms, 0, sizeof(cms));
-        block_map_init(&cms.map_block_index);
-        active_chain_init(&cms.chain_active);
+        main_state_init(&cms);
 
         ASSERT(boot_header_seed_import_maybe(cdir, &cms));
 
@@ -487,8 +469,7 @@ static int case_sync_benchmark_headers_phase(void)
         ASSERT(json_get_int(headers) >= 0);
         json_free(&dump);
 
-        block_map_free(&cms.map_block_index);
-        active_chain_free(&cms.chain_active);
+        main_state_free(&cms);
         sync_benchmark_reset_for_test();
     } _test_next:;
     return failures;

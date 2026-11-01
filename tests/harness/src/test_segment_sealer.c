@@ -81,8 +81,7 @@ static int test_prune_after_seal_gate(void)
         if (i > 0) blocks[i].pprev = &blocks[i - 1];
     }
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
     active_chain_move_window_tip(&ms.chain_active, &blocks[NBLK - 1]);
 
     struct block_pruning_service psvc;
@@ -130,7 +129,7 @@ static int test_prune_after_seal_gate(void)
     SS_CHECK("prune-gate: blk00002.dat SURVIVES (never sealed/verified)",
              access(blk2, F_OK) == 0);
 
-    active_chain_free(&ms.chain_active);
+    main_state_free(&ms);
     free(blocks);
     free(hashes);
     test_rm_rf_recursive(dir);

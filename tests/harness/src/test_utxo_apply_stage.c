@@ -521,9 +521,7 @@ static int uv_setup(const char *tag, int n, enum uv_fail_kind fail_kind,
     memset(sc, 0, sizeof(*sc));
     sc->fail_kind = fail_kind;
     sc->upstream_fail_height = upstream_fail_height;
-    memset(ms, 0, sizeof(*ms));
-    active_chain_init(&ms->chain_active);
-    block_map_init(&ms->map_block_index);
+    main_state_init(ms);
     if (!synth_chain_uv_build(sc, n)) return 2;
     active_chain_move_window_tip(&ms->chain_active, &sc->blocks[n - 1]);
 
@@ -545,8 +543,7 @@ static void uv_teardown(const char *dir, struct main_state *ms,
                         struct synth_chain_uv *sc)
 {
     utxo_apply_stage_shutdown();
-    active_chain_free(&ms->chain_active);
-    block_map_free(&ms->map_block_index);
+    main_state_free(ms);
     synth_chain_uv_free(sc);
     projection_store_close();
     progress_store_close();

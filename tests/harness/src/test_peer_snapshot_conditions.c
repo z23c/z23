@@ -68,10 +68,9 @@ static void reset_peer_snapshot_conditions(struct connman *cm,
     snapshot_offer_ready_test_reset();
     memset(cm, 0, sizeof(*cm));
     memset(dm, 0, sizeof(*dm));
-    memset(ms, 0, sizeof(*ms));
+    main_state_init(ms);
     zcl_mutex_init(&cm->manager.cs_nodes);
     zcl_mutex_init(&dm->cs);
-    zcl_mutex_init(&ms->cs_main);
     static struct chain_params params;
     memset(&params, 0, sizeof(params));
     cm->params = &params;
@@ -132,6 +131,7 @@ static int run_peer_floor_connect_only_case(void)
     PEER_SNAPSHOT_CHECK("peer floor fires again once connect-only clears",
                         ok);
     cleanup_peer_snapshot_conditions();
+    main_state_free(&ms);
     return failures;
 }
 
@@ -169,6 +169,7 @@ static int run_peer_floor_kicks_unhealthy_slots_case(void)
     ok = ok && stuck.disconnect;
     PEER_SNAPSHOT_CHECK("peer floor kicks unhealthy outbound slots", ok);
     cleanup_peer_snapshot_conditions();
+    main_state_free(&ms);
     return failures;
 }
 
@@ -232,6 +233,7 @@ static int run_peer_floor_preserves_inbound_case(void)
         "peer floor keeps all inbound and requests an outbound dial",
         ok);
     cleanup_peer_snapshot_conditions();
+    main_state_free(&ms);
     return failures;
 }
 
@@ -253,6 +255,7 @@ static int run_peer_floor_honors_peerless_mode_case(void)
     ok = ok && peer_floor_violated_test_remedy_calls() == 0;
     PEER_SNAPSHOT_CHECK("peer floor honors peerless test mode", ok);
     cleanup_peer_snapshot_conditions();
+    main_state_free(&ms);
     return failures;
 }
 
@@ -291,6 +294,7 @@ static int run_sync_violation_rotates_peers_case(void)
     ok = ok && sync_violation_lag_test_remedy_calls() == 1;
     PEER_SNAPSHOT_CHECK("sync violation rotates peers and clears", ok);
     cleanup_peer_snapshot_conditions();
+    main_state_free(&ms);
     return failures;
 }
 
@@ -333,6 +337,7 @@ static int run_sync_violation_timer_resets_case(void)
     ok = ok && peer.disconnect;
     PEER_SNAPSHOT_CHECK("sync violation timer resets on local progress", ok);
     cleanup_peer_snapshot_conditions();
+    main_state_free(&ms);
     return failures;
 }
 
@@ -397,6 +402,7 @@ static int run_sync_violation_rearms_on_cooldown_case(void)
         "instead of latching forever",
         ok);
     cleanup_peer_snapshot_conditions();
+    main_state_free(&ms);
     return failures;
 }
 
@@ -433,6 +439,7 @@ static int run_snapshot_offer_reasserts_receive_case(void)
     ok = ok && snapshot_offer_ready_test_remedy_calls() == 1;
     PEER_SNAPSHOT_CHECK("snapshot offer ready reasserts snapshot receive", ok);
     cleanup_peer_snapshot_conditions();
+    main_state_free(&ms);
     return failures;
 }
 
@@ -472,6 +479,7 @@ static int run_snapshot_offer_ignores_at_tip_case(void)
     ok = ok && condition_engine_get_active_count() == 0;
     PEER_SNAPSHOT_CHECK("snapshot offer ready ignores at-tip state", ok);
     cleanup_peer_snapshot_conditions();
+    main_state_free(&ms);
     return failures;
 }
 
