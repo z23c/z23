@@ -65,26 +65,11 @@ bool contextual_check_tx_proofs_unverifiable(const struct transaction *tx,
     return false;
 }
 
-/* The original body, unchanged in every consensus respect. Returns false
- * for BOTH a genuine reject and a local inability to check; the two local
- * sites set *local_fault so the typed wrapper can tell them apart.
- *
- * NOTE: this stays a bool-returning function on purpose. The REJECT_IF /
- * REJECT_UNLESS macros expand to `return validation_state_dos(...)`, which
- * yields `false`. In an enum-returning function that `false` would silently
- * convert to 0 == CONTEXTUAL_CHECK_PASS and turn every macro reject into an
- * ACCEPT. Keeping the macros inside a bool function makes that mistake
- * unrepresentable. */
-static bool contextual_check_transaction_impl(
-                                   const struct transaction *tx,
-                                   struct validation_state *state,
-                                   const struct consensus_params *params,
-                                   int nHeight,
-                                   int dosLevel,
-                                   bool *local_fault)
+/* Run the Sapling structural checks and map a failure into validation_state. */
+static bool contextual_check_sapling_structural(
+        const struct transaction *tx, struct validation_state *state,
+        const struct consensus_params *params, int nHeight, int dosLevel)
 {
-    *local_fault = false;
-
     /* ── Pure height-aware Sapling/Overwinter structural checks ──
      * Delegates to domain/consensus/sapling_structural. Translates
      * the typed zcl_result + (reject_reason, dos) pair back into the
@@ -93,18 +78,23 @@ static bool contextual_check_transaction_impl(
      * REJECT_IF/REJECT_IF_DOS expansion exactly: each macro called
      * validation_state_dos(state, dos, false, REJECT_INVALID, reason,
      * false, NULL). */
-    {
-        struct domain_consensus_sapling_structural_failure f = {0};
-        struct zcl_result r =
-            domain_consensus_check_transaction_sapling_structural(
-                tx, params, nHeight, dosLevel, &f);
-        if (!r.ok) {
-            const char *reason = f.reject_reason ? f.reject_reason : "";
-            return validation_state_dos(state, f.dos, false, REJECT_INVALID,
-                                        reason, false, NULL);
-        }
+    struct domain_consensus_sapling_structural_failure f = {0};
+    struct zcl_result r =
+        domain_consensus_check_transaction_sapling_structural(
+            tx, params, nHeight, dosLevel, &f);
+    if (!r.ok) {
+        const char *reason = f.reject_reason ? f.reject_reason : "";
+        return validation_state_dos(state, f.dos, false, REJECT_INVALID,
+                                    reason, false, NULL);
     }
+    return true;
+}
 
+/* Return true unless Overwinter is active and the transaction is expired. */
+static bool contextual_check_overwinter_expiry(
+        const struct transaction *tx, struct validation_state *state,
+        const struct consensus_params *params, int nHeight, int dosLevel)
+{
     /* ── Overwinter expiry (uses domain locktime predicate) ───
      * Left in the wrapper because the dosLevel branch depends on
      * is_expired_tx(tx, nHeight - 1), which composes the pure
@@ -122,11 +112,15 @@ static bool contextual_check_transaction_impl(
             REJECT_IF_DOS(true, state, expiredDosLevel, "tx-overwinter-expired");
         }
     }
+    return true;
+}
 
-    /* ── Defer expensive shielded proofs below the local policy height ── */
-    bool skip_proofs = (g_deferred_proof_validation_below_height >= 0 &&
-                        nHeight <= g_deferred_proof_validation_below_height);
-
+/* Reject when shielded proofs are in scope but the verifying keys are absent. */
+static bool contextual_check_shielded_verify_available(
+        const struct transaction *tx, struct validation_state *state,
+        int nHeight, bool *local_fault)
+{
+    *local_fault = false;
     /* ── Can we actually CHECK the shielded proofs? ────────────────
      * Placed here deliberately: AFTER the structural and expiry rules, so
      * a transaction that is genuinely malformed or expired still earns a
@@ -147,11 +141,18 @@ static bool contextual_check_transaction_impl(
                                     "shielded-verify-unavailable",
                                     false, NULL);
     }
+    return true;
+}
 
+/* Null the sighash. When a shielded bundle is in scope, hash it or record a local fault. */
+static bool contextual_check_shielded_sighash(
+        const struct transaction *tx, struct validation_state *state,
+        const struct consensus_params *params, int nHeight, bool skip_proofs,
+        bool *local_fault, struct uint256 *data_to_be_signed)
+{
+    *local_fault = false;
+    uint256_set_null(data_to_be_signed);
     /* Compute sighash for shielded verification */
-    struct uint256 data_to_be_signed;
-    uint256_set_null(&data_to_be_signed);
-
     if (!skip_proofs &&
         (tx->num_joinsplit > 0 || tx->num_shielded_spend > 0 ||
          tx->num_shielded_output > 0))
@@ -168,21 +169,78 @@ static bool contextual_check_transaction_impl(
          * SIGHASH_SINGLE bound), so the only remaining failure modes are
          * ours. Same reason string and DoS score as before. */
         if (!signature_hash(&empty_script, tx, NOT_AN_INPUT, ht, 0,
-                            branch_id, NULL, &data_to_be_signed)) {
+                            branch_id, NULL, data_to_be_signed)) {
             *local_fault = true;
             return validation_state_dos(state, 100, false, REJECT_INVALID,
                                         "error-computing-signature-hash",
                                         false, NULL);
         }
     }
+    return true;
+}
 
+/* Verify the JoinSplit Ed25519 signature when those proofs are in scope. */
+static bool contextual_check_joinsplit_signature(
+        const struct transaction *tx, struct validation_state *state,
+        bool skip_proofs, const struct uint256 *data_to_be_signed)
+{
     /* ── JoinSplit Ed25519 signature ────────────────────────── */
     if (!skip_proofs && tx->num_joinsplit > 0) {
-        REJECT_UNLESS(ed25519_verify(tx->joinsplit_sig, data_to_be_signed.data,
+        REJECT_UNLESS(ed25519_verify(tx->joinsplit_sig, data_to_be_signed->data,
                                      32, tx->joinsplit_pubkey.data),
                       state, 100, "bad-txns-joinsplit-signature");
     }
+    return true;
+}
 
+/* Apply the Sapling description checks and free sctx before every return. */
+static bool contextual_check_sapling_descriptions(
+        const struct transaction *tx, struct validation_state *state,
+        void *sctx, const struct uint256 *data_to_be_signed)
+{
+    for (size_t i = 0; i < tx->num_shielded_spend; i++) {
+        const struct spend_description *sd = &tx->v_shielded_spend[i];
+        if (!zclassic_sapling_check_spend(
+                sctx, sd->cv.data, sd->anchor.data,
+                sd->nullifier.data, sd->rk.data,
+                sd->zkproof, sd->spend_auth_sig,
+                data_to_be_signed->data)) {
+            zclassic_sapling_verification_ctx_free(sctx);
+            return validation_state_dos(state, 100, false, REJECT_INVALID,
+                "bad-txns-sapling-spend-description-invalid", false, NULL);
+        }
+    }
+
+    for (size_t i = 0; i < tx->num_shielded_output; i++) {
+        const struct output_description *od = &tx->v_shielded_output[i];
+        if (!zclassic_sapling_check_output(
+                sctx, od->cv.data, od->cm.data,
+                od->ephemeral_key.data, od->zkproof)) {
+            zclassic_sapling_verification_ctx_free(sctx);
+            return validation_state_dos(state, 100, false, REJECT_INVALID,
+                "bad-txns-sapling-output-description-invalid", false, NULL);
+        }
+    }
+
+    if (!zclassic_sapling_final_check(
+            sctx, tx->value_balance,
+            tx->binding_sig, data_to_be_signed->data)) {
+        zclassic_sapling_verification_ctx_free(sctx);
+        return validation_state_dos(state, 100, false, REJECT_INVALID,
+            "bad-txns-sapling-binding-sig-invalid", false, NULL);
+    }
+
+    zclassic_sapling_verification_ctx_free(sctx);
+    return true;
+}
+
+/* When Sapling spends or outputs are in scope, require a verification context before checking them. */
+static bool contextual_check_sapling_proofs(
+        const struct transaction *tx, struct validation_state *state,
+        bool skip_proofs, bool *local_fault,
+        const struct uint256 *data_to_be_signed)
+{
+    *local_fault = false;
     /* ── Sapling Groth16 spend/output proofs + binding sig ──── */
     if (!skip_proofs &&
         (tx->num_shielded_spend > 0 || tx->num_shielded_output > 0)) {
@@ -196,42 +254,17 @@ static bool contextual_check_transaction_impl(
                                         "sapling-verification-ctx-init-failed",
                                         false, NULL);
         }
-
-        for (size_t i = 0; i < tx->num_shielded_spend; i++) {
-            const struct spend_description *sd = &tx->v_shielded_spend[i];
-            if (!zclassic_sapling_check_spend(
-                    sctx, sd->cv.data, sd->anchor.data,
-                    sd->nullifier.data, sd->rk.data,
-                    sd->zkproof, sd->spend_auth_sig,
-                    data_to_be_signed.data)) {
-                zclassic_sapling_verification_ctx_free(sctx);
-                return validation_state_dos(state, 100, false, REJECT_INVALID,
-                    "bad-txns-sapling-spend-description-invalid", false, NULL);
-            }
-        }
-
-        for (size_t i = 0; i < tx->num_shielded_output; i++) {
-            const struct output_description *od = &tx->v_shielded_output[i];
-            if (!zclassic_sapling_check_output(
-                    sctx, od->cv.data, od->cm.data,
-                    od->ephemeral_key.data, od->zkproof)) {
-                zclassic_sapling_verification_ctx_free(sctx);
-                return validation_state_dos(state, 100, false, REJECT_INVALID,
-                    "bad-txns-sapling-output-description-invalid", false, NULL);
-            }
-        }
-
-        if (!zclassic_sapling_final_check(
-                sctx, tx->value_balance,
-                tx->binding_sig, data_to_be_signed.data)) {
-            zclassic_sapling_verification_ctx_free(sctx);
-            return validation_state_dos(state, 100, false, REJECT_INVALID,
-                "bad-txns-sapling-binding-sig-invalid", false, NULL);
-        }
-
-        zclassic_sapling_verification_ctx_free(sctx);
+        return contextual_check_sapling_descriptions(tx, state, sctx,
+                                                     data_to_be_signed);
     }
+    return true;
+}
 
+/* Verify Sprout JoinSplit proofs when they are in scope. */
+static bool contextual_check_sprout_proofs(
+        const struct transaction *tx, struct validation_state *state,
+        bool skip_proofs)
+{
     /* ── Sprout JoinSplit zk-SNARK proofs (Groth16 + PHGR13) ── */
     for (size_t i = 0; !skip_proofs && i < tx->num_joinsplit; i++) {
         const struct js_description *js = &tx->v_joinsplit[i];
@@ -259,8 +292,54 @@ static bool contextual_check_transaction_impl(
                           state, 100, "bad-txns-joinsplit-phgr13-invalid");
         }
     }
-
     return true;
+}
+
+/* The original body, unchanged in every consensus respect. Returns false
+ * for BOTH a genuine reject and a local inability to check; the two local
+ * sites set *local_fault so the typed wrapper can tell them apart.
+ *
+ * NOTE: this stays a bool-returning function on purpose. The REJECT_IF /
+ * REJECT_UNLESS macros expand to `return validation_state_dos(...)`, which
+ * yields `false`. In an enum-returning function that `false` would silently
+ * convert to 0 == CONTEXTUAL_CHECK_PASS and turn every macro reject into an
+ * ACCEPT. Keeping the macros inside a bool function makes that mistake
+ * unrepresentable. */
+static bool contextual_check_transaction_impl(
+                                   const struct transaction *tx,
+                                   struct validation_state *state,
+                                   const struct consensus_params *params,
+                                   int nHeight,
+                                   int dosLevel,
+                                   bool *local_fault)
+{
+    *local_fault = false;
+
+    bool ok = contextual_check_sapling_structural(tx, state, params, nHeight,
+                                                  dosLevel);
+    ok = ok && contextual_check_overwinter_expiry(tx, state, params, nHeight,
+                                                  dosLevel);
+
+    /* ── Defer expensive shielded proofs below the local policy height ── */
+    bool skip_proofs = false;
+    if (ok)
+        skip_proofs = (g_deferred_proof_validation_below_height >= 0 &&
+                       nHeight <= g_deferred_proof_validation_below_height);
+
+    ok = ok && contextual_check_shielded_verify_available(tx, state, nHeight,
+                                                          local_fault);
+    if (ok) {
+        struct uint256 data_to_be_signed;
+        ok = contextual_check_shielded_sighash(tx, state, params, nHeight,
+                                               skip_proofs, local_fault,
+                                               &data_to_be_signed)
+             && contextual_check_joinsplit_signature(tx, state, skip_proofs,
+                                                     &data_to_be_signed)
+             && contextual_check_sapling_proofs(tx, state, skip_proofs,
+                                                local_fault, &data_to_be_signed)
+             && contextual_check_sprout_proofs(tx, state, skip_proofs);
+    }
+    return ok;
 }
 
 enum contextual_check_verdict contextual_check_transaction_verdict(
