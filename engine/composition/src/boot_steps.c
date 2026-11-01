@@ -907,6 +907,27 @@ static void boot_sapling_raise_tip_root_missing(int tip_height)
     LOG_ERROR("sapling_tree", "%s", reason);
 }
 
+/* Comparison endpoint for the Sapling tree check: the header tip, capped to
+ * the coins-applied frontier when the durable frontier is lower. */
+static const struct block_index *boot_sapling_check_endpoint(
+    struct main_state *st)
+{
+    const struct block_index *tip = active_chain_tip(&st->chain_active);
+    struct boot_derived_coins_best sap_dcb;
+    if (boot_derive_coins_best(&sap_dcb) && sap_dcb.height >= 0
+        && (!tip || sap_dcb.height < tip->nHeight)) {
+        const struct block_index *coins_tip =
+            active_chain_at(&st->chain_active, sap_dcb.height);
+        if (coins_tip) {
+            printf("Sapling tree check: using coins-applied height %d "
+                   "(header tip %d)\n", sap_dcb.height,
+                   tip ? tip->nHeight : -1);
+            tip = coins_tip;
+        }
+    }
+    return tip;
+}
+
 /* Verify the Sapling tree root against the coins-applied endpoint. */
 static void boot_step_verify_sapling_root(struct app_context *ctx,
                                           struct main_state *st,
@@ -933,19 +954,7 @@ static void boot_step_verify_sapling_root(struct app_context *ctx,
      * coins_applied_height - 1 (coins-best) when present and lower; the
      * rebuild itself independently re-derives the same coins-applied
      * endpoint if a mismatch here triggers it. */
-    const struct block_index *tip = active_chain_tip(&st->chain_active);
-    struct boot_derived_coins_best sap_dcb;
-    if (boot_derive_coins_best(&sap_dcb) && sap_dcb.height >= 0
-        && (!tip || sap_dcb.height < tip->nHeight)) {
-        const struct block_index *coins_tip =
-            active_chain_at(&st->chain_active, sap_dcb.height);
-        if (coins_tip) {
-            printf("Sapling tree check: using coins-applied height %d "
-                   "(header tip %d)\n", sap_dcb.height,
-                   tip ? tip->nHeight : -1);
-            tip = coins_tip;
-        }
-    }
+    const struct block_index *tip = boot_sapling_check_endpoint(st);
     static const uint8_t zeros[32] = {0};
     if (!tip || tip->nHeight <= 476969)
         return;
