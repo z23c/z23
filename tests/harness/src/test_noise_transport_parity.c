@@ -297,6 +297,16 @@ static bool stalls_on_classical_xx_peer(void)
 #define PROBE_BUDGET_BYTES (64 * 1024)
 #define PROBE_CANARY 0xA5
 
+/* GCC names an AddressSanitizer build with __SANITIZE_ADDRESS__; Clang
+ * reports it through __has_feature(address_sanitizer). */
+#if defined(__SANITIZE_ADDRESS__)
+#define NTP_UNDER_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define NTP_UNDER_ASAN 1
+#endif
+#endif
+
 struct stack_probe {
     bool ok;
     uintptr_t entry;
@@ -666,11 +676,12 @@ int test_noise_transport_parity(void)
         }
         ASSERT(refuses_old_prologue_peer());
         ASSERT(stalls_on_classical_xx_peer());
-#if !defined(__SANITIZE_ADDRESS__)
+#if !defined(NTP_UNDER_ASAN)
         /* AddressSanitizer pads every frame with redzones and may move locals
          * to its fake stack, so a stack-depth budget measures the
          * instrumentation, not the handshake. The fast and release runs of
-         * this group enforce the 64 KiB budget. */
+         * this group enforce the same 64 KiB budget, unchanged (the same
+         * convention as test_rss_trim.c:90 and test_rpc_safety.c:2047). */
         ASSERT(handshake_fits_small_stack());
 #endif
 
