@@ -198,7 +198,7 @@ static void sync_deserialize_note_witnesses(
     struct node_db *ndb, struct incremental_merkle_tree *tree,
     struct db_sapling_note *wnotes, int nw, const bool *has_witness,
     struct incremental_witness *witnesses, int *witness_idx,
-    int *num_with_witness)
+    int *num_with_witness, int expect_height)
 {
     for (int i = 0; i < nw; i++) {
         if (!has_witness[i]) continue;
@@ -209,6 +209,12 @@ static void sync_deserialize_note_witnesses(
                 wnotes[i].txid, wnotes[i].output_index,
                 &wblob, &wlen, &wh) || !wblob)
             continue;
+        if (wh != expect_height) {
+            /* Saved at another height by another path; appending this block
+             * would corrupt it. */
+            free(wblob);
+            continue;
+        }
         struct byte_stream ws;
         stream_init_from_data(&ws, wblob, wlen);
         if (incremental_witness_deserialize(&witnesses[*num_with_witness],
@@ -315,7 +321,7 @@ bool advance_wallet_witnesses(struct node_db *ndb,
         }
         sync_deserialize_note_witnesses(ndb, tree, wnotes, nw, has_witness,
                                         witnesses, witness_idx,
-                                        &num_with_witness);
+                                        &num_with_witness, height - 1);
     }
 
     bool ok = true;

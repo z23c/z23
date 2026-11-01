@@ -148,6 +148,22 @@ int test_wallet_witness_advance(void)
                      &ndb, txid, WA_RECV_HEIGHT + k, &tree));
     }
 
+    /* A walk that skipped heights (tree repaired forward, cursor behind)
+     * reaches a block whose parent is not the witness height. The stored
+     * witness must stay at its own height instead of being advanced across
+     * blocks it never saw and saved at a current-looking height. */
+    int stale_height = WA_RECV_HEIGHT + WA_BLOCKS - 1;
+    bool skipped = ok && wa_connect(&ndb, &tree, stale_height + 7, 1, other);
+    uint8_t *kept = NULL;
+    size_t kept_len = 0;
+    int kept_height = -1;
+    bool loaded = skipped &&
+        db_sapling_note_load_witness(&ndb, txid, 0, &kept, &kept_len,
+                                     &kept_height);
+    WA_CHECK("witness not advanced across skipped heights",
+             loaded && kept_height == stale_height);
+    free(kept);
+
     node_db_close(&ndb);
     failures += test_rm_rf_recursive(datadir) != 0;
     return failures;
