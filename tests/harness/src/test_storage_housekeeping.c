@@ -329,7 +329,13 @@ static int shk_case_stop_after_token_won(void)
     storage_housekeeping_stats(&before);
     uint64_t calls_before = storage_housekeeping_test_store_calls();
 
-    SHK_CHECK("after-token: token taken", storage_pacing_maintenance_begin());
+    bool held = storage_pacing_maintenance_begin();
+    SHK_CHECK("after-token: token taken", held);
+    if (!held) {
+        storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_SOLID);
+        test_cleanup_tmpdir(dir);
+        return failures;
+    }
     storage_housekeeping_test_set_after_token_hook(shk_hook_request_stop);
     struct zcl_result r = storage_housekeeping_start_deferred(dir);
     SHK_CHECK("after-token: deferred start ok", r.ok);
@@ -360,9 +366,15 @@ static int shk_case_stop_after_token_won(void)
               after.sweeps_finished == before.sweeps_finished);
     SHK_CHECK("after-token: no store call started",
               storage_housekeeping_test_store_calls() == calls_before);
-    SHK_CHECK("after-token: the token was handed back",
-              storage_pacing_maintenance_try_begin(0));
-    storage_pacing_maintenance_end();
+    bool regained = storage_pacing_maintenance_try_begin(0);
+    SHK_CHECK("after-token: the token was handed back", regained);
+    if (regained)
+        storage_pacing_maintenance_end();
+    /* The hook-stopped thread exited by itself before stop() ran; a fresh
+     * start/stop round trip still works afterwards. */
+    struct zcl_result again = storage_housekeeping_start_deferred(dir);
+    SHK_CHECK("after-token: restart after a self-exited thread", again.ok);
+    storage_housekeeping_stop();
 
     storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_SOLID);
     test_cleanup_tmpdir(dir);

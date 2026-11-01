@@ -43,6 +43,10 @@ static struct storage_housekeeping_stats g_stats = {
 };
 static pthread_t g_thread;
 static bool g_thread_running = false;
+/* Spawned with a caller-owned tid (thread_registry_spawn contract): it must be
+ * pthread_join'ed exactly once even when it exited on its own (stop latched,
+ * or process shutdown), so "joinable" is tracked apart from "running". */
+static bool g_thread_joinable = false;
 static bool g_stop_requested = false;
 /* True when the thread owes its first sweep at once (the deferred boot start)
  * instead of one tick after launch. Set under g_lock before the spawn. */
@@ -372,6 +376,18 @@ static struct zcl_result sh_start(const char *datadir, bool inline_boot_sweep)
         pthread_mutex_unlock(&g_lock);
         return ZCL_ERR(-1, "storage_housekeeping_start: already running");
     }
+    if (g_thread_joinable) {
+        /* The previous thread exited on its own and nobody joined it yet. */
+        pthread_t old = g_thread;
+        g_thread_joinable = false;
+        pthread_mutex_unlock(&g_lock);
+        pthread_join(old, NULL);
+        pthread_mutex_lock(&g_lock);
+        if (g_thread_running || g_thread_joinable) {
+            pthread_mutex_unlock(&g_lock);
+            return ZCL_ERR(-1, "storage_housekeeping_start: already running");
+        }
+    }
     snprintf(g_datadir, sizeof(g_datadir), "%s", datadir ? datadir : "");
     g_stop_requested = false;
     g_first_sweep_now = !inline_boot_sweep;
@@ -384,6 +400,7 @@ static struct zcl_result sh_start(const char *datadir, bool inline_boot_sweep)
         return ZCL_ERR(-2, "storage_housekeeping_start: "
                        "thread_registry_spawn failed (%d)", rc);
     }
+    g_thread_joinable = true;
     pthread_mutex_unlock(&g_lock);
 
     struct zcl_result sup = sh_register_supervisor();
@@ -422,12 +439,15 @@ void storage_housekeeping_stop(void)
         supervisor_set_deadline(sup_id, 0);
 
     pthread_mutex_lock(&g_lock);
-    if (!g_thread_running) {
+    if (!g_thread_joinable) {
         pthread_mutex_unlock(&g_lock);
         return;
     }
+    /* Join even a thread that already exited by itself; clearing joinable
+     * under the lock keeps a second stop() from joining it twice. */
     g_stop_requested = true;
     pthread_t thread = g_thread;
+    g_thread_joinable = false;
     pthread_mutex_unlock(&g_lock);
     pthread_join(thread, NULL);
 #ifdef ZCL_TESTING
