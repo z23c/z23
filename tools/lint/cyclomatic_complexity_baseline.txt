@@ -63,7 +63,6 @@ core/modules/sapling/src/groth16_prover.c:groth16_prove:63
 core/modules/sapling/src/incremental_merkle_tree.c:incremental_witness_root:16
 core/modules/sapling/src/incremental_merkle_tree.c:sapling_tree_flush_checkpoint:17
 core/modules/sapling/src/incremental_merkle_tree.c:sapling_tree_load_checkpoint:19
-core/modules/sapling/src/msm_parallel.c:fr_fft_parallel:21
 core/modules/sapling/src/params_fetch_session.c:state_load_and_reverify:25
 core/modules/sapling/src/params_init.c:params_load_first_locked:16
 core/modules/sapling/src/sapling.c:sapling_build_output_description:18
