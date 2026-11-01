@@ -337,7 +337,19 @@ static int shk_case_stop_after_token_won(void)
               shk_wait_sweeps(before.sweeps + 1));
 
     storage_pacing_maintenance_end();
-    storage_housekeeping_stop(); /* joins: the thread exits on the latched stop */
+    /* Do NOT call stop() yet: it would latch the flag itself and the thread
+     * could see it before winning the token, hiding the race. Wait until the
+     * hook-latched stop has ended the sweep, then join. */
+    bool ended = false;
+    for (int i = 0; i < 500 && !ended; i++) {
+        struct storage_housekeeping_stats s;
+        storage_housekeeping_stats(&s);
+        ended = s.sweeps_interrupted > before.sweeps_interrupted;
+        if (!ended)
+            platform_sleep_ms(20);
+    }
+    SHK_CHECK("after-token: the sweep ended on the hook-latched stop", ended);
+    storage_housekeeping_stop();
     storage_housekeeping_test_set_after_token_hook(NULL);
 
     struct storage_housekeeping_stats after;
