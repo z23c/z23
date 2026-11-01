@@ -2064,6 +2064,16 @@ static int test_sapling_mint_and_import_refuse_once_the_lock_is_published(void)
         ASSERT(!sapling_keystore_import_xsk(&f.w->sapling_keys, &xsk));
         memory_cleanse(&xsk, sizeof(xsk));
         ASSERT(f.w->sapling_keys.num_keys == n);
+        /* A scratch keystore that only derives public values is not the
+         * wallet's keystore and keeps working under a published lock. */
+        struct sapling_keystore *scratch = zcl_calloc(1, sizeof(*scratch), "wls_scratch");
+        ASSERT(scratch != NULL);
+        sapling_keystore_init(scratch);
+        bool scratch_ok = sapling_keystore_set_seed(scratch, f.seed) &&
+                          sapling_keystore_new_address(scratch, d, pk);
+        sapling_keystore_free(scratch);
+        free(scratch);
+        ASSERT(scratch_ok);
         wls_teardown(&f);
         PASS();
     } _test_next:;

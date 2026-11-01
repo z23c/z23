@@ -20,6 +20,7 @@ void sapling_keystore_init(struct sapling_keystore *sks)
     sks->has_seed = false;
     sks->next_child_index = 0;
     sks->locked = false;
+    sks->follows_wallet_lock = false;
     sks->num_unscannable = 0;
     sks->num_damaged = 0;
     sks->num_keys = 0;
@@ -178,7 +179,8 @@ bool sapling_keystore_new_address_transactional(
     /* The lock is published before the wipe sets sks->locked. The wipe runs
      * under this mutex, so a mint that passes the published-lock check is
      * wiped afterwards and one that starts later refuses. */
-    if (sks->locked || wallet_lock_is_locked()) {
+    if (sks->locked ||
+        (sks->follows_wallet_lock && wallet_lock_is_locked())) {
         zcl_mutex_unlock(&sks->cs);
         LOG_FAIL("sapling_keys",
                  "new_address: refused, keystore is locked");
@@ -414,7 +416,8 @@ bool sapling_keystore_import_xsk(struct sapling_keystore *sks,
 {
     zcl_mutex_lock(&sks->cs);
 
-    if (sks->locked || wallet_lock_is_locked()) {
+    if (sks->locked ||
+        (sks->follows_wallet_lock && wallet_lock_is_locked())) {
         zcl_mutex_unlock(&sks->cs);
         LOG_FAIL("sapling_keys", "import_xsk: refused, keystore is locked");
     }

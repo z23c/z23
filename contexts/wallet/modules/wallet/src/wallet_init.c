@@ -37,6 +37,7 @@ void wallet_init_zeroed(struct wallet *w)
     w->spend_zero_conf_change = true;
     w->best_block = NULL;
     sapling_keystore_init(&w->sapling_keys);
+    w->sapling_keys.follows_wallet_lock = true;
     w->best_block_height = 0;
     memset(&w->scan_retry, 0, sizeof(w->scan_retry));
     w->sapling_notes = NULL;

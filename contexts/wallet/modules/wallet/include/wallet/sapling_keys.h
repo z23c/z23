@@ -41,6 +41,10 @@ struct sapling_keystore {
      * remain on disk. Seed generation, address derivation and key import
      * refuse in this state, so nothing can replace the stored seed. */
     bool locked;
+    /* Set for the wallet's own keystore: a mint or import then also refuses
+     * once the process-wide lock is published, before the wipe sets locked.
+     * A scratch keystore that only derives public values leaves it clear. */
+    bool follows_wallet_lock;
     /* Stored rows with neither a readable spending key nor a stored full
      * viewing key. They cannot scan until the wallet is unlocked. */
     size_t num_unscannable;
