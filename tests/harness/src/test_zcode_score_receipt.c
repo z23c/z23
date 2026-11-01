@@ -420,7 +420,7 @@ static int test_score_happy_path(void)
         wire[12] = 0;
 
         char workspace[256];
-        test_make_tmpdir(workspace, sizeof(workspace), "zcode_score", "cas");
+        test_make_tmpdir(workspace, sizeof(workspace), "zcode_score", "scratch_cas");
         ASSERT(vcs_object_store_init(workspace));
         uint8_t task_wire[VCS_ZCODE_TASK_WIRE_BYTES];
         uint8_t candidate_wire[VCS_ZCODE_CANDIDATE_WIRE_BYTES];
@@ -505,6 +505,9 @@ static int test_score_happy_path(void)
         zcl_command_reply_init(&plan_reply, "zcl.zcode_score_test.v1");
         zcl_native_handle_zcode_package_dev_score_plan(&plan_request,
                                                        &plan_reply);
+        if (plan_reply.exit_code != ZCL_COMMAND_EXIT_OK)
+            printf("score plan refused: %s: %s (workspace %s)\n",
+                   plan_reply.error.code, plan_reply.error.message, workspace);
         ASSERT_EQ(plan_reply.exit_code, ZCL_COMMAND_EXIT_OK);
         ASSERT_EQ(json_get_int(json_get(&plan_reply.data, "score")), 4);
         ASSERT(!json_get_bool(json_get(&plan_reply.data, "persisted")));
@@ -1055,7 +1058,7 @@ static int test_patronage_intent_cross_validation(void)
     TEST("ZC23 patronage intent: CAS authorities rederive or fail closed") {
         char workspace[256];
         test_make_tmpdir(workspace, sizeof(workspace),
-                         "zcode_patronage", "cas");
+                         "zcode_patronage", "scratch_cas");
         ASSERT(vcs_object_store_init(workspace));
         uint8_t network[32], zid_pubkey[32], zid_secret[32];
         score_fill(network, 0xc1);
@@ -1566,7 +1569,7 @@ static int test_creation_attribution_cross_validation(void)
 
         char workspace[256];
         test_make_tmpdir(workspace, sizeof(workspace),
-                         "zcode_creation", "cross");
+                         "zcode_creation", "scratch_cross");
         uint8_t task_root[32], candidate_root[32], proof_set_root[32];
         uint8_t lane_root[32], score_root[32], proof_policy_root[32];
         ASSERT(score_store_vertical(
@@ -3788,7 +3791,7 @@ static int test_shadow_protocol_contract(void)
 
         char workspace[256];
         test_make_tmpdir(workspace, sizeof(workspace),
-                         "zcode_shadow_protocol", "four_epochs");
+                         "zcode_shadow_protocol", "scratch_four_epochs");
         ASSERT(vcs_object_store_init(workspace));
         uint8_t network[32], approved_root[32], covenant[32], policy_root[32];
         score_fill(network, 0xa5); score_fill(approved_root, 0xa6);
