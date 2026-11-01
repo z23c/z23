@@ -87,6 +87,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 /* src-private test hook (engine/reducer/jobs/src/reducer_frontier.c): lower
@@ -105,6 +106,13 @@ void reducer_frontier_test_set_compiled_anchor(int32_t height);
 /* How many sequential blocks PART 1 drives the reducer forward; deep enough
  * to surface a wedge that appears after several finalizations. */
 #define RFP_N 32
+
+/* Set in the forked variant: the displaced L branch is invalidated before the
+ * heavier W branch is installed, so the served tip sits on a failed block. */
+static bool g_rfp_invalidate_l;
+
+/* Lowest served height seen while the reorg converges. */
+static int g_rfp_min_tip = INT32_MAX;
 
 static int rfp_mkdir_p(const char *p)
 {
@@ -467,7 +475,8 @@ static int rfp_open_forward_progress_env(struct rfp_gate_env *e, bool *ready)
 
     /* ── (1) Fresh node-db / progress.kv at genesis, hermetic datadir ────── */
     rfp_mkdir_p("./test-tmp");
-    test_fmt_tmpdir(e->dir, sizeof(e->dir), "reducer_forward_progress_gate", "main");
+    test_fmt_tmpdir(e->dir, sizeof(e->dir), "reducer_forward_progress_gate",
+                    g_rfp_invalidate_l ? "invalidate" : "main");
     rfp_mkdir_p(e->dir);
 
     /* SetDataDir already clears the cache and populates cachedDataDirNet =
@@ -720,6 +729,8 @@ static void rfp_converge_w_reorg(struct rfp_gate_env *e,
             reducer_frontier_reconcile_light_test_clear_backoff();
             condition_engine_tick();
             int t = active_chain_height(&e->ms.chain_active);
+            if (t < g_rfp_min_tip)
+                g_rfp_min_tip = t;
             sqlite3 *pdb = progress_store_db();
             int l_live = 0, w_live = 0;
             for (int h = w->fork_h + 1; h <= RFP_N + 1; h++) {
@@ -766,6 +777,11 @@ static int rfp_assert_part2_reorg_coins(struct rfp_gate_env *e,
            (unsigned long long)reorg_after,
            (unsigned long long)tip_finalize_stage_reorg_detected_total());
 
+    /* A displaced tip that has not failed stays served until the W branch
+     * replaces it; only the invalidated variant may drop to the fork. */
+    RFP_CHECK("PART2: served tip never drops below the pre-reorg tip",
+              g_rfp_invalidate_l || g_rfp_min_tip >= RFP_N);
+    printf("reducer_forward_progress_gate: PART2 min served tip=%d\n", g_rfp_min_tip);
     RFP_CHECK("PART2: utxo_apply performed a reorg unwind",
               reorg_after > reorg_before);
     /* The reducer installs the FULL heavier W branch on first
@@ -871,6 +887,14 @@ static int rfp_run_part2_reorg(struct rfp_gate_env *e, struct rfp_part1 *p)
          * active_chain_move_window_tip reassembles chain[] along W's pprev
          * path, the structural reorg the reducer OBSERVES. */
         e->ms.pindex_best_header = w_tip;
+        if (g_rfp_invalidate_l) {
+            /* invalidateblock on the first displaced L block: it fails and
+             * every L descendant is FAILED_CHILD, as process_block_invalidate
+             * leaves them. */
+            p->bidx[F + 1]->nStatus |= BLOCK_FAILED_VALID;
+            for (int h = F + 2; h <= RFP_N + 1; h++)
+                p->bidx[h]->nStatus |= BLOCK_FAILED_CHILD;
+        }
         bool installed = active_chain_move_window_tip(&e->ms.chain_active,
                                                       w_tip);
         RFP_CHECK("PART2: heavier W branch installed on active chain",
@@ -927,8 +951,7 @@ static void rfp_teardown_forward_progress(struct rfp_gate_env *e,
            failures);
 }
 
-int test_reducer_forward_progress_gate(void);
-int test_reducer_forward_progress_gate(void)
+static int rfp_run_gate(void)
 {
     printf("\n=== reducer forward-progress + reorg gate "
            "(live-wedge repro: %d sequential blocks -> reducer -> tip+N; "
@@ -965,4 +988,36 @@ int test_reducer_forward_progress_gate(void)
 
     rfp_teardown_forward_progress(&env, &part1, failures);
     return failures;
+}
+
+int test_reducer_forward_progress_gate(void);
+int test_reducer_forward_progress_gate(void)
+{
+    if (!getenv("ZCL_STRESS_TESTS"))
+        return rfp_run_gate();  /* prints the SKIP line */
+
+    /* The process-globals the gate drives are deterministic only in a fresh
+     * process: run the invalidated-L variant in a forked child that has
+     * touched none of them, then the plain reorg in this process. */
+    fflush(stdout);
+    fflush(stderr);
+    pid_t pid = fork();
+    if (pid < 0) {
+        printf("reducer_forward_progress_gate: fork for the invalidate "
+               "variant failed... FAIL\n");
+        return 1;
+    }
+    if (pid == 0) {
+        g_rfp_invalidate_l = true;
+        int child_failures = rfp_run_gate();
+        fflush(stdout);
+        fflush(stderr);
+        _exit(child_failures ? 1 : 0);
+    }
+    int status = 0;
+    bool child_ok = waitpid(pid, &status, 0) == pid && WIFEXITED(status) &&
+                    WEXITSTATUS(status) == 0;
+    printf("reducer_forward_progress_gate: invalidated-L variant reaches the "
+           "W head... %s\n", child_ok ? "OK" : "FAIL");
+    return rfp_run_gate() + (child_ok ? 0 : 1);
 }

@@ -184,6 +184,17 @@ static bool finalized_row_active_match(sqlite3 *db, int row_height,
     return true;
 }
 
+/* Finalize only raises the published tip, so a tip on an invalidated block
+ * would stay served (block templates, anchors) after the window left it.
+ * Republish the durable tip then. A tip merely off the best chain keeps its
+ * height: repair windows are bounded by it. */
+static void republish_if_served_tip_failed(sqlite3 *db)
+{
+    struct block_index *served = active_chain_tip(&g_ms->chain_active);
+    if (served && block_has_any_failure(served))
+        (void)tip_finalize_stage_publish_durable_tip(db, "reorg_cursor_rewind");
+}
+
 static bool rewind_cursor_if_active_chain_reorged(sqlite3 *db)
 {
     if (!g_stage || !g_ms)
@@ -229,19 +240,16 @@ static bool rewind_cursor_if_active_chain_reorged(sqlite3 *db)
      * reorg window re-derives navigation indices above it. fork = rewind_to-1. */
     tip_finalize_hooks_reorg_clamp((int)rewind_to - 1);
 
-    /* Finalize only raises the published authority tip. Left on the abandoned
-     * block it keeps header_admit auditing against that block, so the stale
-     * sibling row is never repaired and the body is never refetched. Republish
-     * the durable tip the lowered cursor resolves to. */
-    (void)tip_finalize_stage_publish_durable_tip(db, "reorg_cursor_rewind");
+    republish_if_served_tip_failed(db);
+
 
     /* LOWER the external provable-tip cache (H*) on the reorg rewind. This is
-     * the #1 site: stage_set_cursor just dropped the tip_finalize cursor and the
-     * republish above lowered the served tip, but the H* cache is a separate
-     * value that only this refresh lowers. Without it the external readers
-     * (getblockcount / P2P start_height) would serve an unproven height
-     * across the reorg window. We hold progress_store_tx_lock here
-     * (tip_finalize_stage_step_once), and this is the SAME chokepoint every
+     * the #1 site: stage_set_cursor just dropped the tip_finalize cursor, but
+     * g_last_advance_height (and thus active_chain_height) is raise-only and
+     * stays stale-high until a new finalize republishes. Without this refresh
+     * the external readers (getblockcount / P2P start_height) would serve an
+     * unproven height across the reorg window. We hold progress_store_tx_lock
+     * here (tip_finalize_stage_step_once), and this is the SAME chokepoint every
      * other unwind path (process_block_invalidate, utxo_apply_delta_reorg,
      * process_block_self_heal) flows through via reducer_kick -> tip_finalize
      * drain, so refreshing here lowers the cache for ALL of them. */
