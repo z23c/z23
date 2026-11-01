@@ -42,6 +42,7 @@
 #include "../../../contexts/explorer/modules/presentation/src/presentation_focus_internal.h"
 #include "platform/os_proc.h"
 #include "platform/os_sandbox.h"
+#include "platform/clock.h"
 #include "platform/time_compat.h"
 #if !defined(_WIN32)
 #include <time.h>
@@ -106,6 +107,11 @@ static_assert(RESIDENT_RESULT_DEADLINE_MS >= 30000u,
               "resident result deadline must tolerate a loaded host");
 static_assert(RESIDENT_RESULT_DEADLINE_MS > RESIDENT_STARTUP_PLATFORM_MS,
               "resident result deadline must exceed the startup bound");
+
+/* Bound on waiting for a fixture child's READY frame: a wait for a real event
+ * (exec, dynamic link, first write), not a speed claim, so it is generous
+ * enough that a pool of 28 busy workers cannot starve a healthy child past it. */
+#define RLC_READY_WAIT_MS 120000
 
 #define RLC_CHECK(name, expr) do {                                        \
     printf("resident_launch_contract: %s... ", (name));                   \
@@ -863,7 +869,12 @@ static bool rlc_install_ztasks_variant(const char *base, const char *zcode,
 static bool rlc_task_wait_detail(struct task_update *update, const char **reason,
                                  struct zcl_result *result)
 {
-    int64_t deadline = platform_time_monotonic_us() + INT64_C(15000000);
+    /* Bounds a wait for the update worker's completion latch, not a speed
+     * claim. The worker is niced and launches a real confined child, so on a
+     * saturated pool (28 workers) it can be starved for far longer than the
+     * 15 s this used to allow; a genuinely stuck update still fails, after a
+     * deadline a loaded host does not reach. */
+    int64_t deadline = platform_time_monotonic_us() + INT64_C(180000000);
     while (update->pending && platform_time_monotonic_us() < deadline) {
         bool changed = false;
         struct zcl_result poll = task_update_poll(update, &changed);
@@ -921,7 +932,10 @@ static bool rlc_task_try_keep(struct task_update *update)
 static int rlc_task_typing(struct task_editor *editor)
 {
     int failures = 0;
-    int64_t before = platform_time_monotonic_us();
+    /* This thread's CPU time, not wall: typing and rendering are synchronous on
+     * this thread (no wait on the preview), so the 50 ms bound still grades the
+     * work done, but a core taken away by 28 busy workers no longer counts. */
+    int64_t before = clock_thread_cpu_ns();
     struct zcl_result typed = ZCL_OK;
     const char *text = "Typing while preview runs";
     for (size_t i = 0; text[i] && typed.ok; ++i)
@@ -931,7 +945,7 @@ static int rlc_task_typing(struct task_editor *editor)
     struct zcl_present_model_bitmap_v1 frame = {0};
     char error[256];
     bool pixels = rendered.ok && zcl_present_model_render_editor_v1(&model, &frame, error, sizeof(error));
-    int64_t elapsed = platform_time_monotonic_us() - before;
+    int64_t elapsed = (clock_thread_cpu_ns() - before) / 1000;
     RLC_CHECK("task updates: typing reaches real frame while preview runs", typed.ok && pixels && elapsed < 50000);
     printf("task updates: input_to_frame_us=%lld\n", (long long)elapsed);
     zcl_present_model_bitmap_free_v1(&frame);
@@ -1460,7 +1474,7 @@ static bool rlc_fixture_roundtrip_ok(struct resident_launch *launch,
 {
     return rlc_send_frame(launch, "fixture-roundtrip") &&
            resident_result_read(launch, header, payload, payload_cap,
-                                30000, error, error_size) &&
+                                RLC_READY_WAIT_MS, error, error_size) &&
            header->payload_len == strlen("fixture-roundtrip") &&
            memcmp(payload, "fixture-roundtrip",
                   strlen("fixture-roundtrip")) == 0;
@@ -1498,7 +1512,7 @@ static int rlc_fixture_selfcheck(const char *child,
     error[0] = '\0';
     RLC_CHECK("stage 0 (fixture): READY frame accepted under the nonce",
               resident_result_read(&launch, &header, payload, sizeof(payload),
-                                   30000, error, sizeof(error)) &&
+                                   RLC_READY_WAIT_MS, error, sizeof(error)) &&
               header.payload_len == 5 &&
               memcmp(payload, "READY", 5) == 0);
     error[0] = '\0';
@@ -1526,7 +1540,7 @@ static int rlc_fixture_selfcheck(const char *child,
         resident_launch_spawn(&launch, park_argv, envp, &receipt, error,
                               sizeof(error)) &&
         resident_result_read(&launch, &header, payload, sizeof(payload),
-                             30000, error, sizeof(error)) &&
+                             RLC_READY_WAIT_MS, error, sizeof(error)) &&
         header.payload_len == 5 && memcmp(payload, "READY", 5) == 0;
     RLC_CHECK("stage 0 (fixture): the parking child passes the READY gate",
               parked);

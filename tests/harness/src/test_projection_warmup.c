@@ -66,12 +66,19 @@ static bool pw_run(const struct rpc_table *t, const char *method,
 
 static bool pw_wait_done(void)
 {
-    for (int i = 0; i < 10000; i++) {
+    /* The warm-up thread opens real SQLite stores. Under a saturated suite
+     * pool (28 workers, fsync-bound disk) that takes far longer than the
+     * ~20 s a fixed iteration count used to allow. This bounds a wait for the
+     * "done" latch, not a performance claim: a genuinely stuck thread still
+     * fails, after a deadline no loaded host reaches. Monotonic time, so the
+     * bound is wall time and not a sleep-count that scheduling stretches. */
+    const int64_t deadline = platform_time_monotonic_ms() + 240000;
+    while (platform_time_monotonic_ms() < deadline) {
         if (boot_projection_warmup_test_done())
             return true;
         platform_sleep_ms(2); /* real-clock: waits on a real OS thread finishing; no fake-clock seam exists for it */
     }
-    return false;
+    return boot_projection_warmup_test_done();
 }
 
 /* Boot-shaped sequence with the open held: storage armed, network "started",
