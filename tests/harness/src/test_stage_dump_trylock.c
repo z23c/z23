@@ -665,20 +665,56 @@ static void *contest_d_thread(void *arg)
     return NULL;
 }
 
+static void contest_reset(struct contest *c)
+{
+    atomic_store(&c->csr_held, 0);
+    atomic_store(&c->ps_held, 0);
+    atomic_store(&c->i_waiting, 0);
+    atomic_store(&c->release_h, 0);
+    atomic_store(&c->i_done, 0);
+    atomic_store(&c->d_done, 0);
+    memset(&c->plain, 0, sizeof(c->plain));
+    memset(&c->reason, 0, sizeof(c->reason));
+}
+
+/* Wait for the latches that define the contested state. */
+static int contest_check_latch(struct contest *c, const char *tag,
+                               bool ingest_owns_ps)
+{
+    int failures = 0;
+    char name[160];
+    bool latched = contest_wait(c, &c->csr_held, 20);
+    if (ingest_owns_ps)
+        latched = latched && contest_wait(c, &c->ps_held, 20) &&
+                  contest_wait(c, &c->i_waiting, 20);
+    snprintf(name, sizeof(name),
+             "%s: latch reached (H holds CSR%s)", tag,
+             ingest_owns_ps ? ", I holds PS and waits for CSR" : ", PS free");
+    SD_CHECK(name, latched);
+    return failures;
+}
+
+static int contest_check_replies(const struct contest *c, const char *tag)
+{
+    int failures = 0;
+    char name[160];
+    snprintf(name, sizeof(name), "%s: dump returns true", tag);
+    SD_CHECK(name, c->plain.ret && c->reason.ret);
+    snprintf(name, sizeof(name),
+             "%s: reply is EXACTLY the busy shape (4 fixed fields, no "
+             "normal chain_evidence field), both keys", tag);
+    SD_CHECK(name, c->plain.exact_busy && c->reason.exact_busy &&
+                   !c->plain.any_normal && !c->reason.any_normal);
+    return failures;
+}
+
 static int contest_run(const char *tag, bool ingest_owns_ps)
 {
     int failures = 0;
     static struct contest c = {
         .mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER };
     char name[160];
-    atomic_store(&c.csr_held, 0);
-    atomic_store(&c.ps_held, 0);
-    atomic_store(&c.i_waiting, 0);
-    atomic_store(&c.release_h, 0);
-    atomic_store(&c.i_done, 0);
-    atomic_store(&c.d_done, 0);
-    memset(&c.plain, 0, sizeof(c.plain));
-    memset(&c.reason, 0, sizeof(c.reason));
+    contest_reset(&c);
 
     pthread_t th, ti, td;
     int rh = pthread_create(&th, NULL, contest_h_thread, &c);
@@ -689,14 +725,7 @@ static int contest_run(const char *tag, bool ingest_owns_ps)
         atomic_store(&c.release_h, 1);
         return failures + 1;
     }
-    bool latched = contest_wait(&c, &c.csr_held, 20);
-    if (ingest_owns_ps)
-        latched = latched && contest_wait(&c, &c.ps_held, 20) &&
-                  contest_wait(&c, &c.i_waiting, 20);
-    snprintf(name, sizeof(name),
-             "%s: latch reached (H holds CSR%s)", tag,
-             ingest_owns_ps ? ", I holds PS and waits for CSR" : ", PS free");
-    SD_CHECK(name, latched);
+    failures += contest_check_latch(&c, tag, ingest_owns_ps);
     int rd = pthread_create(&td, NULL, contest_d_thread, &c);
     SD_CHECK("contest: dumper thread starts", rd == 0);
 
@@ -706,28 +735,17 @@ static int contest_run(const char *tag, bool ingest_owns_ps)
              "%s: dumper answers within the bound while CSR is held "
              "(never queues behind the ingest)", tag);
     SD_CHECK(name, answered);
-    if (!answered)
-        printf("stage_dump_trylock: %s: dumper still blocked; releasing H "
-               "to recover\n", tag);
     contest_set(&c, &c.release_h);       /* now let the CSR holder go */
     pthread_join(th, NULL);
     if (ingest_owns_ps) {
-        bool done = contest_wait(&c, &c.i_done, 20);
         SD_CHECK("contest: the ingest completes after CSR is released",
-                 done);
+                 contest_wait(&c, &c.i_done, 20));
         pthread_join(ti, NULL);
     }
     if (rd == 0)
         pthread_join(td, NULL);
-    if (answered) {
-        snprintf(name, sizeof(name), "%s: dump returns true", tag);
-        SD_CHECK(name, c.plain.ret && c.reason.ret);
-        snprintf(name, sizeof(name),
-                 "%s: reply is EXACTLY the busy shape (4 fixed fields, no "
-                 "normal chain_evidence field), both keys", tag);
-        SD_CHECK(name, c.plain.exact_busy && c.reason.exact_busy &&
-                       !c.plain.any_normal && !c.reason.any_normal);
-    }
+    if (answered)
+        failures += contest_check_replies(&c, tag);
     return failures;
 }
 
