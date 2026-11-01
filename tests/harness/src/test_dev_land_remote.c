@@ -1257,6 +1257,7 @@ static int dlt_rv_verify_cases(const struct dlt_rig *r, const char *tmp,
         dlt_end(&c);
         dlt_rv_mode(&c, r, b2, o2, rc2, "", 0);
         ASSERT(dlt_refused(&c, "OFFER_BAD_ARGUMENT"));
+        ASSERT(strstr(c.reply.error.evidence, "input.check") != NULL);
         dlt_end(&c);
         ASSERT(dlt_rv_clean(r, tmp));
         PASS();
