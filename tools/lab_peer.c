@@ -17,6 +17,12 @@
  *       dev land reverify_offer -> a signed receipt (or a typed refusal) posted
  *       as kind result with ref = the offer post. STATE/handled.tsv makes a post
  *       processed once; a failed fetch is retryable, three attempts in all.
+ *       --check=cx (the default; nothing is passed) runs reverify_offer's split
+ *       check only, so a general offer is refused REVERIFY_NOT_A_SPLIT;
+ *       --check=verify passes --check=verify (make agent-verify ONLY=@changed
+ *       behind the admission rail) and waits LP_VERIFY_S + LP_VERIFY_MARGIN_S.
+ *       Any other value is a usage error (exit 2). collect's qualify_offer has
+ *       no check option and is unaffected.
  *   collect --state=DIR [--room=lab] [--require=1]
  *       board list -> the verdict=ok receipts answering each offers.tsv row
  *       -> STATE/receipts/<post>-<host12>.json -> dev land qualify_offer ->
@@ -81,6 +87,8 @@ enum {
     LP_QUICK_S = 60,
     LP_FETCH_S = 300,
     LP_CX_S = 2400,
+    LP_VERIFY_S = 3600,      /* reverify_offer --check=verify default --timeout_s */
+    LP_VERIFY_MARGIN_S = 300, /* admission wait and signing around that bound */
     LP_ONION_LEN = 62
 };
 
@@ -90,6 +98,7 @@ enum lp_opt {
     X(ROOM, "room", "lab") X(AGENT, "agent", "lab-peer")                     \
     X(REPO, "repo", NULL) X(AUTHORS, "authors", NULL) X(MAX, "max", "10")    \
     X(REQUIRE, "require", "1") X(Z23, "z23", "z23")                          \
+    X(CHECK, "check", NULL)                                                  \
     X(Z23DEV, "z23dev", "z23-dev")
 #define X(id, name, dflt) LP_O_##id,
     LP_OPTS(X)
@@ -458,7 +467,7 @@ static int lp_usage(void)
         "usage: z23-lab-peer offer --lane=DIR --commit=SHA --state=DIR "
         "[--room=lab] [--agent=NAME]\n"
         "       z23-lab-peer verify --state=DIR --repo=DIR --authors=FILE "
-        "[--room=lab] [--max=N]\n"
+        "[--room=lab] [--max=N] [--check=cx|verify]\n"
         "       z23-lab-peer collect --state=DIR [--room=lab] [--require=1]\n"
         "       (--z23=PROGRAM --z23dev=PROGRAM name the CLIs; see "
         "tools/lab_peer.c)\n",
@@ -979,9 +988,13 @@ static bool lp_reverify(const struct lp_ctx *c, const char *bundle,
         !lp_fmt(repo, sizeof(repo), "--repo=%s", c->v[LP_O_REPO]))
         return *retry = true, false;
     (void)unlink(receipt);
+    const bool general = c->v[LP_O_CHECK] && strcmp(c->v[LP_O_CHECK], "verify") == 0;
+    /* cx: the NULL slot ends argv, so the argv is byte-identical to before. */
     const char *const argv[] = {c->v[LP_O_Z23DEV], "dev", "land", "reverify_offer",
-                                b, o, repo, r, NULL};
-    if (!lp_run(argv, NULL, LP_CX_S + 60, &root)) {
+                                b, o, repo, r, general ? "--check=verify" : NULL,
+                                NULL};
+    const int wait_s = general ? LP_VERIFY_S + LP_VERIFY_MARGIN_S : LP_CX_S + 60;
+    if (!lp_run(argv, NULL, wait_s, &root)) {
         *retry = true;
         json_free(&root);
         return false;
@@ -1095,9 +1108,17 @@ static const char *lp_gate(const struct lp_ctx *c, const struct json_value *post
 }
 
 
+/* --check: absent or "cx" (reverify_offer's split check, no flag passed) or
+ * "verify" (its general agent-verify check); anything else is a usage error. */
+static bool lp_check_ok(const char *v)
+{
+    return !v || strcmp(v, "cx") == 0 || strcmp(v, "verify") == 0;
+}
+
 static bool lp_verify_args(struct lp_ctx *c, int64_t *max)
 {
     return c->v[LP_O_STATE] && c->v[LP_O_REPO] && c->v[LP_O_AUTHORS] &&
+           lp_check_ok(c->v[LP_O_CHECK]) &&
            lp_name(c->v[LP_O_ROOM], 32) && lp_name(c->v[LP_O_AGENT], 32) &&
            lp_decimal(c->v[LP_O_MAX], LP_VERIFY_MAX, max);
 }

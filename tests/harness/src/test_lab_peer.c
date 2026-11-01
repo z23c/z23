@@ -505,6 +505,48 @@ static int case_verify_posts_ok(void)
     return failures;
 }
 
+static int lpt_verify_run_check(const struct lpt *e, const char *check)
+{
+    char state[700], repo[700], authors[700];
+    (void)snprintf(state, sizeof(state), "--state=%s", e->state);
+    (void)snprintf(repo, sizeof(repo), "--repo=%s", e->repo);
+    (void)snprintf(authors, sizeof(authors), "--authors=%s", e->authors);
+    const char *const extra[] = {state, repo, authors, check, NULL};
+    return lpt_run(e, "verify", extra);
+}
+
+static int case_verify_check_option(void)
+{
+    int failures = 0;
+    struct lpt e;
+    TEST_CASE("lab_peer: verify passes no --check by default, --check=verify through") {
+        ASSERT(lpt_verify_env(&e, "verify_check_default"));
+        ASSERT_EQ(lpt_verify_run(&e), 0);
+        ASSERT_EQ(lpt_count(e.calls, "\treverify_offer\n"), 1);
+        ASSERT_EQ(lpt_count(e.calls, "--check"), 0);
+        ASSERT(lpt_verify_env(&e, "verify_check_cx"));
+        ASSERT_EQ(lpt_verify_run_check(&e, "--check=cx"), 0);
+        ASSERT_EQ(lpt_count(e.calls, "--check"), 0);
+        ASSERT(lpt_verify_env(&e, "verify_check_verify"));
+        ASSERT_EQ(lpt_verify_run_check(&e, "--check=verify"), 0);
+        ASSERT_EQ(lpt_count(e.calls, "\treverify_offer\n"), 1);
+        ASSERT_EQ(lpt_count(e.calls, "\t--check=verify\n"), 1);
+    } TEST_END
+    return failures;
+}
+
+static int case_verify_check_bad(void)
+{
+    int failures = 0;
+    struct lpt e;
+    TEST_CASE("lab_peer: verify refuses a bad --check value") {
+        ASSERT(lpt_verify_env(&e, "verify_check_bad"));
+        ASSERT_EQ(lpt_verify_run_check(&e, "--check=bogus"), 2);
+        ASSERT_EQ(lpt_count(e.calls, "reverify_offer"), 0);
+    } TEST_END
+    return failures;
+}
+
 static int case_verify_posts_refused(void)
 {
     int failures = 0;
@@ -918,6 +960,8 @@ int test_lab_peer(void)
     failures += case_offer_rerun_when_recorded();
     failures += case_verify_filters();
     failures += case_verify_posts_ok();
+    failures += case_verify_check_option();
+    failures += case_verify_check_bad();
     failures += case_verify_posts_refused();
     failures += case_verify_fetch_retry();
     failures += case_verify_follows_pages();
