@@ -393,13 +393,12 @@ static void cwr_drive_reorg_history(struct cwr_branch *L, struct cwr_branch *W,
     cwr_seed_base_coins(pdb, ext, 2);
 
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
     active_chain_move_window_tip(&ms.chain_active, &L->blocks[L->n - 1]);
 
     struct cwr_ctx ctx = { .active = L, .ext = ext, .n_ext = 2 };
     if (!utxo_apply_stage_init(&ms)) {
-        active_chain_free(&ms.chain_active);
+        main_state_free(&ms);
         return;
     }
     utxo_apply_stage_set_reader(cwr_reader, &ctx);
@@ -436,7 +435,7 @@ static void cwr_drive_reorg_history(struct cwr_branch *L, struct cwr_branch *W,
 
 done:
     utxo_apply_stage_shutdown();
-    active_chain_free(&ms.chain_active);
+    main_state_free(&ms);
 }
 
 /* ── Test phases (extracted from test_coins_wipe_rebuild_reorg) ──────── */
@@ -559,8 +558,7 @@ static int cwr_phase_c_linear_winner(struct cwr_branch *W,
         cwr_seed_base_coins(pdb, ext, 2);
 
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         active_chain_move_window_tip(&ms.chain_active, &W->blocks[W->n - 1]);
 
         struct cwr_ctx ctx = { .active = W, .ext = ext, .n_ext = 2 };
@@ -581,7 +579,7 @@ static int cwr_phase_c_linear_winner(struct cwr_branch *W,
         CWR_CHECK("C: commitment computed", C->have_commitment);
 
         utxo_apply_stage_shutdown();
-        active_chain_free(&ms.chain_active);
+        main_state_free(&ms);
         event_log_close(lg);
     }
     progress_store_close();

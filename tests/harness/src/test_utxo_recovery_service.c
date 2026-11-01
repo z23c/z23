@@ -413,8 +413,7 @@ static bool urs_frontier_fixture_setup(struct urs_frontier_fixture *fx,
         return false;
     }
     chain_params_select(CHAIN_MAIN);
-    block_map_init(&fx->ms.map_block_index);
-    active_chain_init(&fx->ms.chain_active);
+    main_state_init(&fx->ms);
     urs_build_segment(&fx->ms, seg_start, seg_len);
     coins_view_cache_init(&fx->cache, &fx->nv);
     fx->csr = csr_instance();
@@ -438,8 +437,7 @@ static void urs_frontier_fixture_teardown(struct urs_frontier_fixture *fx)
     if (fx->csr)
         csr_free(fx->csr);
     coins_view_cache_free(&fx->cache);
-    active_chain_free(&fx->ms.chain_active);
-    block_map_free(&fx->ms.map_block_index);
+    main_state_free(&fx->ms);
     if (fx->ndb.open)
         node_db_close(&fx->ndb);
     if (fx->pdb_open)
@@ -702,9 +700,7 @@ static int urs_case_cleanup_above_tip(void)
         memset(&ndb, 0, sizeof(ndb));
 
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         urs_build_chain(&ms, 50);  /* tip at h=49 */
 
         if (node_db_open(&ndb, db_path)) {
@@ -733,7 +729,7 @@ static int urs_case_cleanup_above_tip(void)
             URS_CHECK("urs: clean above tip (db open failed)", false);
         }
         unlink(db_path);
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
     }
 
     return failures;
@@ -753,9 +749,7 @@ static int urs_case_cleanup_limit(void)
         memset(&ndb, 0, sizeof(ndb));
 
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         urs_build_chain(&ms, 10);  /* tip at h=9 */
 
         if (node_db_open(&ndb, db_path)) {
@@ -821,7 +815,7 @@ static int urs_case_cleanup_limit(void)
             URS_CHECK("urs: clean above tip refuses (db open failed)", false);
         }
         unlink(db_path);
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
     }
 
     return failures;
@@ -841,9 +835,7 @@ static int urs_case_cleanup_coinbase(void)
         memset(&ndb, 0, sizeof(ndb));
 
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         urs_build_chain(&ms, 50);  /* tip at h=49 */
 
         if (node_db_open(&ndb, db_path)) {
@@ -872,7 +864,7 @@ static int urs_case_cleanup_coinbase(void)
                       false);
         }
         unlink(db_path);
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
     }
 
     return failures;
@@ -892,9 +884,7 @@ static int urs_case_cleanup_single_block_limit(void)
         memset(&ndb, 0, sizeof(ndb));
 
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         urs_build_chain(&ms, 50);  /* tip at h=49 */
 
         if (node_db_open(&ndb, db_path)) {
@@ -922,7 +912,7 @@ static int urs_case_cleanup_single_block_limit(void)
                       false);
         }
         unlink(db_path);
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
     }
 
     return failures;
@@ -952,9 +942,7 @@ static int urs_case_mirror_overshoot(void)
         memset(&ndb, 0, sizeof(ndb));
 
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         urs_build_chain(&ms, 50);  /* tip at h=49 */
 
         bool pdb_open = progress_store_open(progress_dir);
@@ -1018,7 +1006,7 @@ static int urs_case_mirror_overshoot(void)
             progress_store_close();
         test_cleanup_tmpdir(progress_dir);
         unlink(db_path);
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
     }
 
     return failures;
@@ -1049,9 +1037,7 @@ static int urs_case_kernel_overshoot(void)
         memset(&ndb, 0, sizeof(ndb));
 
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         urs_build_chain(&ms, 50);  /* tip at h=49 */
 
         bool pdb_open = progress_store_open(progress_dir);
@@ -1126,7 +1112,7 @@ static int urs_case_kernel_overshoot(void)
             progress_store_close();
         test_cleanup_tmpdir(progress_dir);
         unlink(db_path);
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
     }
 
     return failures;
@@ -1176,9 +1162,7 @@ static int urs_case_migrated_noop(void)
             node_db_state_set(&ndb, "leveldb_utxo_migrated", &one, 1);
 
             struct main_state ms;
-            memset(&ms, 0, sizeof(ms));
-            block_map_init(&ms.map_block_index);
-            active_chain_init(&ms.chain_active);
+            main_state_init(&ms);
 
             struct coins_view_cache cache;
             struct coins_view nv;
@@ -1202,7 +1186,7 @@ static int urs_case_migrated_noop(void)
                       ir.status.ok && !ir.imported && !ir.skip_activate);
 
             coins_view_cache_free(&cache);
-            block_map_free(&ms.map_block_index);
+            main_state_free(&ms);
             node_db_close(&ndb);
         } else {
             URS_CHECK("urs: LDB import skip (db open failed)", false);
@@ -1230,9 +1214,7 @@ static int urs_case_restore_genesis(void)
             const struct chain_params *params = chain_params_get();
 
             struct main_state ms;
-            memset(&ms, 0, sizeof(ms));
-            block_map_init(&ms.map_block_index);
-            active_chain_init(&ms.chain_active);
+            main_state_init(&ms);
 
             struct block_index *genesis = chainstate_insert_block_index(
                 (struct chainstate *)&ms,
@@ -1293,8 +1275,7 @@ static int urs_case_restore_genesis(void)
 
             csr_free(csr);
             coins_view_cache_free(&cache);
-            active_chain_free(&ms.chain_active);
-            block_map_free(&ms.map_block_index);
+            main_state_free(&ms);
             node_db_close(&ndb);
         } else {
             URS_CHECK("urs: no-UTXO restore commits genesis through CSR "
@@ -1327,9 +1308,7 @@ static int urs_case_finalized_floor(void)
             const struct chain_params *params = chain_params_get();
 
             struct main_state ms;
-            memset(&ms, 0, sizeof(ms));
-            block_map_init(&ms.map_block_index);
-            active_chain_init(&ms.chain_active);
+            main_state_init(&ms);
             urs_build_chain(&ms, 121);  /* active tip h=120 */
 
             struct uint256 scan_hash;
@@ -1379,8 +1358,7 @@ static int urs_case_finalized_floor(void)
 
             csr_free(csr);
             coins_view_cache_free(&cache);
-            active_chain_free(&ms.chain_active);
-            block_map_free(&ms.map_block_index);
+            main_state_free(&ms);
             node_db_close(&ndb);
         } else {
             URS_CHECK("urs: scan_fallback finalized-floor fixture", false);
@@ -1992,9 +1970,7 @@ static int urs_case_zero_tip(void)
 
     {
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         /* no chain built — tip is NULL */
 
         char db_path[256];
@@ -2011,7 +1987,7 @@ static int urs_case_zero_tip(void)
             URS_CHECK("urs: clean above tip no-op (db open failed)", false);
         }
         unlink(db_path);
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
     }
 
     return failures;

@@ -124,7 +124,7 @@ static void ma_worker_sleep(int ms) {
 static int test_worker_display_hint(void) {
     int failures = 0;
     static struct main_state ms;
-    zcl_mutex_init(&ms.cs_main);
+    main_state_init(&ms);
     struct metrics_context ctx = {.ms = &ms, .external_gauges = ma_end_tick, .external_gauges_ctx = &ctx};
     const clock_iface_t *saved_clock = clock_default();
     clock_set_default(&ma_clock);
@@ -141,7 +141,7 @@ static int test_worker_display_hint(void) {
         PASS();
     } _test_next:;
     clock_set_default(saved_clock);
-    zcl_mutex_destroy(&ms.cs_main);
+    main_state_free(&ms);
     return failures;
 }
 static const enum event_type ma_subscription_types[] = {
@@ -622,7 +622,7 @@ static int test_rss_tick(void) {
     int failures = 0;
     TEST("metric_alerts: tick publishes fresh RSS or unavailable with a diagnostic") {
         static struct main_state ms;
-        zcl_mutex_init(&ms.cs_main);
+        main_state_init(&ms);
         struct metrics_context ctx = {.ms = &ms, .external_gauges = ma_end_tick};
         ctx.external_gauges_ctx = &ctx;
         const clock_iface_t *saved_clock = clock_default();
@@ -631,7 +631,7 @@ static int test_rss_tick(void) {
         ma_read_fails = false;
         ma_mem.rss_bytes = 0;
         clock_set_default(saved_clock);
-        zcl_mutex_destroy(&ms.cs_main);
+        main_state_free(&ms);
         metrics_prometheus_reset();
         ASSERT(samples.values_ok && ma_read_attempts == 5);
         ASSERT(samples.diagnostics_ok && ma_diagnostic_ok);
@@ -644,7 +644,7 @@ static int test_rss_unavailable_episodes(void) {
     int failures = 0;
     TEST("metric_alerts: worker logs each RSS unavailable episode once and resets per session") {
         static struct main_state ms;
-        zcl_mutex_init(&ms.cs_main);
+        main_state_init(&ms);
         struct metrics_context ctx = {.ms = &ms};
         const clock_iface_t *saved_clock = clock_default();
         clock_set_default(&ma_clock);
@@ -667,7 +667,7 @@ static int test_rss_unavailable_episodes(void) {
         ma_read_fails = false;
         ma_mem.rss_bytes = 0;
         clock_set_default(saved_clock);
-        zcl_mutex_destroy(&ms.cs_main);
+        main_state_free(&ms);
         metrics_prometheus_reset();
         ASSERT(ma_episode_values_ok && ma_read_attempts == 12);
         ASSERT(ma_diagnostic_ok && ma_diagnostic_count == 4);

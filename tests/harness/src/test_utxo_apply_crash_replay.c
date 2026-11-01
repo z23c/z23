@@ -256,8 +256,7 @@ static void ucr_child_worker(const char *dir)
 
     struct ucr_chain cc;
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
     if (!ucr_chain_build(&cc, UCR_BLOCKS)) _exit(11);
     active_chain_move_window_tip(&ms.chain_active,
                                  &cc.blocks[UCR_BLOCKS - 1]);
@@ -675,7 +674,7 @@ static void ucr_hz_close(struct ucr_hz *z)
 {
     utxo_apply_stage_shutdown();
     if (z->open) {
-        active_chain_free(&z->ms.chain_active);
+        main_state_free(&z->ms);
         ucr_chain_free(&z->cc);
         progress_store_close();
         test_cleanup_tmpdir(z->dir);
@@ -691,11 +690,12 @@ static bool ucr_hz_start(struct ucr_hz *z, const char *tag, int apply_n)
     utxo_apply_stage_shutdown();
     test_make_tmpdir(z->dir, sizeof(z->dir), "utxo_apply", tag);
     if (!progress_store_open(z->dir)) return false;
+    /* Init before any return below: ucr_hz_close frees z->ms once open. */
     z->open = true;
+    main_state_init(&z->ms);
     if (!ucr_seed_proof_validate(progress_store_db(), UCR_HZ_N, true) ||
         !ucr_chain_build_mode(&z->cc, UCR_HZ_N, true))
         return false;
-    active_chain_init(&z->ms.chain_active);
     active_chain_move_window_tip(&z->ms.chain_active,
                                  &z->cc.blocks[UCR_HZ_N - 1]);
     if (!utxo_apply_stage_init(&z->ms)) return false;

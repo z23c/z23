@@ -258,13 +258,13 @@ static int bp_setup(const char *tag, int n, int upstream_fail_height,
                     size_t dir_out_size, struct main_state *ms,
                     struct synth_chain_bp *sc)
 {
+    /* First, so bp_teardown can main_state_free after any early return. */
+    main_state_init(ms);
     bp_fmt_tmpdir(dir_out, dir_out_size, tag);
     mkdir_p_bp("./test-tmp");
     mkdir_p_bp(dir_out);
     if (!progress_store_open(dir_out)) return 1;
 
-    memset(ms, 0, sizeof(*ms));
-    active_chain_init(&ms->chain_active);
     if (!synth_chain_bp_build(sc, n)) return 2;
     active_chain_move_window_tip(&ms->chain_active, &sc->blocks[n - 1]);
 
@@ -280,7 +280,7 @@ static void bp_teardown(const char *dir, struct main_state *ms,
                         struct synth_chain_bp *sc)
 {
     body_persist_stage_shutdown();
-    active_chain_free(&ms->chain_active);
+    main_state_free(ms);
     synth_chain_bp_free(sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);

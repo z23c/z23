@@ -321,13 +321,11 @@ static int sv_setup(const char *tag, int n, int upstream_fail_height,
                     char *dir_out, size_t dir_out_size,
                     struct main_state *ms, struct synth_chain_sv *sc)
 {
-    /* First, so sv_teardown is safe after any early return below (it frees
-     * the chain and destroys the mutex). A zeroed
-     * pthread mutex is only valid on Linux; Darwin needs it initialized. */
-    memset(ms, 0, sizeof(*ms));
+    /* First, so sv_teardown is safe after any early return below (it runs
+     * main_state_free). A zeroed pthread mutex is only valid on Linux;
+     * Darwin needs main_state_init to set cs_main up. */
+    main_state_init(ms);
     memset(sc, 0, sizeof(*sc));
-    zcl_mutex_init(&ms->cs_main);
-    active_chain_init(&ms->chain_active);
     test_fmt_tmpdir(dir_out, dir_out_size, "script_validate", tag);
     mkdir_p_sv("./test-tmp");
     mkdir_p_sv(dir_out);
@@ -350,8 +348,7 @@ static void sv_teardown(const char *dir, struct main_state *ms,
                         struct synth_chain_sv *sc)
 {
     script_validate_stage_shutdown();
-    active_chain_free(&ms->chain_active);
-    zcl_mutex_destroy(&ms->cs_main);
+    main_state_free(ms);
     synth_chain_sv_free(sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);

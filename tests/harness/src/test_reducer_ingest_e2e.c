@@ -536,6 +536,8 @@ static bool rie_env_open(struct rie_env *e, const char *tag,
                          const struct rie_ext_coin *ext, int n_ext)
 {
     memset(e, 0, sizeof(*e));
+    /* First, so rie_env_close can always main_state_free the state. */
+    main_state_init(&e->ms);
     test_make_tmpdir(e->dir, sizeof(e->dir), "reducer_ingest_e2e", tag);
 
     char log_path[512];
@@ -547,9 +549,6 @@ static bool rie_env_open(struct rie_env *e, const char *tag,
     if (!e->lg) return false;
 
     seed_base_coins(progress_store_db(), ext, n_ext);
-
-    active_chain_init(&e->ms.chain_active);
-    block_map_init(&e->ms.map_block_index);
 
     e->ctx.active = active;
     e->ctx.ext = ext;
@@ -573,8 +572,7 @@ static void rie_env_close(struct rie_env *e)
 {
     tip_finalize_stage_shutdown();
     utxo_apply_stage_shutdown();
-    active_chain_free(&e->ms.chain_active);
-    block_map_free(&e->ms.map_block_index);
+    main_state_free(&e->ms);
     if (e->lg) event_log_close(e->lg);
     progress_store_close();
     test_cleanup_tmpdir(e->dir);
