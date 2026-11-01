@@ -643,8 +643,15 @@ static int case_select(struct ms *m)
         ASSERT(has(m, "data.matches.*.path\\\":[\\\"core.status.brief\\\""));
         ASSERT(has(m, "data.matches.0.risk\\\":\\\"read\\\""));
         ASSERT(has(m, "data.nope\\\":null"));
-        ASSERT(has(m, "select_missing\\\":{\\\"data.nope\\\":{\\\"resolved\\\":\\\"data\\\""));
-        ASSERT(!has(m, "registry_digest\\\":"));
+        /* The whole projection, exact: no unselected field is projected.
+         * select_missing lists the data keys, registry_digest among them. */
+        ASSERT(has(m, "\"select\\\":{\\\"data.matches.*.path\\\":[\\\"core.status.brief\\\","
+                      "\\\"status\\\",\\\"dev.agent.queue\\\",\\\"fleet.objectives\\\","
+                      "\\\"app.market.moderation.status\\\"],\\\"data.matches.0.risk\\\":"
+                      "\\\"read\\\",\\\"data.nope\\\":null},\\\"select_missing\\\":"
+                      "{\\\"data.nope\\\":{\\\"resolved\\\":\\\"data\\\",\\\"keys\\\":"
+                      "[\\\"schema\\\",\\\"query\\\",\\\"registry_digest\\\",\\\"matches\\\","
+                      "\\\"count\\\",\\\"total_matches\\\",\\\"truncated\\\",\\\"next\\\"]}}}"));
         ASSERT(ms_tool(m, 41, "z23_run",
                        "{\"path\":\"discover.search\",\"input\":{\"query\":"
                        "\"status\"},\"select\":\"data\"}"));
@@ -1563,7 +1570,28 @@ static int case_select_missing(void)
                       "{\"ok\":true,\"status\":\"ok\",\"select\":"
                       "{\"data.rows.*.seq\":[null,null,null]},"
                       "\"select_missing\":{\"data.rows.*.seq\":"
-                      "{\"resolved\":\"data.rows\",\"length\":3}}}") == 0);
+                      "{\"resolved\":\"data.rows.*\",\"keys\":[\"a\"]}}}") == 0);
+        /* The next segment exists on no element: the deepest prefix is the
+         * wildcard itself, reported with the keys of the first element. */
+        ASSERT(sm_project("{\"ok\":true,\"status\":\"ok\",\"data\":{\"rows\":"
+                          "[{\"a\":1},{\"a\":2}]}}",
+                          "[\"data.rows.*.seq.z\"]", out, sizeof(out)));
+        ASSERT(strcmp(out,
+                      "{\"ok\":true,\"status\":\"ok\",\"select\":"
+                      "{\"data.rows.*.seq.z\":[null,null]},"
+                      "\"select_missing\":{\"data.rows.*.seq.z\":"
+                      "{\"resolved\":\"data.rows.*\",\"keys\":[\"a\"]}}}") == 0);
+        /* The next segment exists on some elements: element 0 has seq, so
+         * the deepest prefix is data.rows.*.seq, which wins over element 1's
+         * data.rows.*. */
+        ASSERT(sm_project("{\"ok\":true,\"status\":\"ok\",\"data\":{\"rows\":"
+                          "[{\"seq\":1},{\"a\":2}]}}",
+                          "[\"data.rows.*.seq.z\"]", out, sizeof(out)));
+        ASSERT(strcmp(out,
+                      "{\"ok\":true,\"status\":\"ok\",\"select\":"
+                      "{\"data.rows.*.seq.z\":[null,null]},"
+                      "\"select_missing\":{\"data.rows.*.seq.z\":"
+                      "{\"resolved\":\"data.rows.*.seq\"}}}") == 0);
         size_t at = (size_t)snprintf(reply, sizeof(reply),
                                      "{\"ok\":true,\"status\":\"ok\",\"data\":{");
         for (int i = 0; i < 40; i++)
