@@ -941,1105 +941,1321 @@ static int rs_case_rawsign_supplemental(void)
     return failures;
 }
 
+static int rs_case_wallet_freshness(bool *aborted)
+{
+    int failures = 0;
+
+    printf("rpc_safety: wallet freshness follows authoritative H*... ");
+    /* struct wallet embeds a ~40 MB tx table: heap it (as
+     * test_accept_to_mempool does) to fit the default main-thread stack. */
+    struct wallet *wallet = zcl_calloc(1, sizeof(*wallet),
+                                       "rpc-safety-wallet");
+    if (!wallet) {
+        printf("FAIL (wallet allocation)\n");
+        failures++;
+        *aborted = true;
+        return failures;
+    }
+    wallet_init(wallet);
+    wallet->best_block_height = 1;
+    wallet->map_wallet[0].used = true;
+    wallet->map_wallet[0].confirms = 1;
+    wallet->num_wallet_tx = 1;
+
+    struct main_state ms;
+    build_unresolved_tip_state(&ms, 3);
+    reducer_frontier_provable_tip_set(1);
+    struct wallet_rpc_context ctx = {
+        .wallet = wallet,
+        .main_state = &ms,
+    };
+    struct wallet_balance_freshness freshness;
+    (void)wallet_transparent_spendable_balance_diagnose(
+        &ctx, &freshness);
+    bool ok = freshness.chain_height == 1 &&
+              freshness.wallet_height == 1 &&
+              freshness.source &&
+              strcmp(freshness.source, "memory") == 0;
+
+    reducer_frontier_provable_tip_reset();
+    main_state_free(&ms);
+    wallet_free(wallet);
+    free(wallet);
+    if (ok) printf("OK\n");
+    else    { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+static int rs_case_fanout_preflight(bool *aborted)
+{
+    int failures = 0;
+
+    printf("rpc_safety: fanout preflight failure creates no address... ");
+    ensure_rpc_warmup_finished_once();
+    struct wallet *wallet = zcl_calloc(1, sizeof(*wallet),
+                                       "rpc-safety-wallet");
+    if (!wallet) {
+        printf("FAIL (wallet allocation)\n");
+        failures++;
+        *aborted = true;
+        return failures;
+    }
+    wallet_init(wallet);
+    struct main_state ms; main_state_init(&ms);
+    struct rpc_table tbl; rpc_table_init(&tbl);
+    register_vault_intent_rpc_commands(&tbl);
+    wallet_rpc_context_set_base(wallet, &ms, "/tmp", NULL, NULL, NULL);
+    wallet_rpc_context_set_node_db(NULL);
+    wallet_rpc_context_set_coins_tip(NULL);
+    size_t keys_before = wallet->keystore.num_keys;
+
+    struct json_value params, input, result;
+    json_init(&params); json_set_array(&params);
+    json_init(&input); json_set_object(&input);
+    json_init(&result);
+    (void)json_push_kv_str(&input, "wallet_scope", "dev");
+    (void)json_push_kv_int(&input, "recipient_value_zat", 1000);
+    (void)json_push_kv_int(&input, "maximum_fee_zat", 10000);
+    (void)json_push_kv_int(&input, "concurrency", 10);
+    (void)json_push_kv_str(&input, "idempotency_key", "rpc-safety-1");
+    (void)json_push_back(&params, &input);
+    bool handled = rpc_table_execute(
+        &tbl, "vault_intent_fanout_plan", &params, &result);
+    const char *code = json_get_str(json_get(&result, "code"));
+    bool ok = handled && !json_get_bool(json_get(&result, "ok")) &&
+        code && strcmp(code, "WALLET_UNAVAILABLE") == 0 &&
+        wallet->keystore.num_keys == keys_before &&
+        json_get(&result, "address") == NULL &&
+        json_get(&result, "effects") == NULL;
+    if (!ok)
+        printf("(handled=%d code=%s keys=%zu->%zu address=%d effects=%d) ",
+               (int)handled, code ? code : "NULL", keys_before,
+               wallet->keystore.num_keys,
+               json_get(&result, "address") != NULL,
+               json_get(&result, "effects") != NULL);
+    json_free(&params); json_free(&input); json_free(&result);
+    wallet_rpc_context_set_base(NULL, NULL, NULL, NULL, NULL, NULL);
+    wallet_rpc_context_set_node_db(NULL);
+    wallet_rpc_context_set_coins_tip(NULL);
+    main_state_free(&ms); wallet_free(wallet); free(wallet);
+    if (ok) printf("OK\n");
+    else    { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+/* Shared state for the "confirmed tx uses verified node/wallet locator"
+ * phases below. */
+struct rs_rawtx_fx {
+    char dir[256];
+    struct transaction shielded;
+    struct block body;
+    struct uint256 body_hash;
+    struct disk_block_pos pos;
+    struct main_state ms;
+    struct node_db ndb;
+    struct rpc_table tbl;
+    char txid_hex[65];
+    char block_hex[65];
+    struct wallet *owned_wallet;
+    bool ok;
+};
+
+static void rs_rawtx_build_block(struct rs_rawtx_fx *fx)
+{
+    transaction_init(&fx->shielded);
+    fx->shielded.overwintered = true;
+    fx->shielded.version = SAPLING_TX_VERSION;
+    fx->shielded.version_group_id = SAPLING_VERSION_GROUP_ID;
+    fx->shielded.expiry_height = 100;
+    fx->shielded.v_shielded_spend = zcl_calloc(
+        1, sizeof(*fx->shielded.v_shielded_spend),
+        "rpc_safety.shielded_spend");
+    fx->ok = fx->shielded.v_shielded_spend != NULL;
+    if (fx->ok) {
+        fx->shielded.num_shielded_spend = 1;
+        memset(fx->shielded.v_shielded_spend[0].nullifier.data, 0x73, 32);
+        transaction_compute_hash(&fx->shielded);
+    }
+
+    block_init(&fx->body);
+    fx->body.header.nVersion = 4;
+    fx->body.header.nTime = 1700000000;
+    fx->body.header.nBits = 0x2000ffff;
+    if (fx->ok) {
+        fx->body.vtx = zcl_calloc(1, sizeof(*fx->body.vtx),
+                                  "rpc_safety.rawtx_block");
+        fx->ok = fx->body.vtx != NULL;
+    }
+    if (fx->ok) {
+        fx->body.num_vtx = 1;
+        transaction_init(&fx->body.vtx[0]);
+        fx->ok = transaction_copy(&fx->body.vtx[0], &fx->shielded);
+    }
+
+    uint256_set_null(&fx->body_hash);
+    disk_block_pos_init(&fx->pos);
+    const unsigned char msg_start[4] = { 0x24, 0xe9, 0x27, 0x64 };
+    if (fx->ok) {
+        block_get_hash(&fx->body, &fx->body_hash);
+        fx->ok = write_block_to_disk(&fx->body, &fx->pos, fx->dir,
+                                     msg_start);
+    }
+}
+
+static void rs_rawtx_build_index(struct rs_rawtx_fx *fx)
+{
+    main_state_init(&fx->ms);
+    struct block_index *bi = NULL;
+    if (fx->ok) {
+        bi = chainstate_insert_block_index((struct chainstate *)&fx->ms,
+                                           &fx->body_hash);
+        fx->ok = bi != NULL;
+    }
+    if (fx->ok) {
+        bi->nHeight = 0;
+        bi->nFile = fx->pos.nFile;
+        bi->nDataPos = fx->pos.nPos;
+        bi->nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
+        bi->nTx = 1;
+        bi->nChainTx = 1;
+        fx->ok = active_chain_move_window_tip(&fx->ms.chain_active, bi);
+    }
+
+    memset(&fx->ndb, 0, sizeof(fx->ndb));
+    if (fx->ok)
+        fx->ok = node_db_open(&fx->ndb, ":memory:");
+    if (fx->ok) {
+        struct db_tx_index row;
+        memset(&row, 0, sizeof(row));
+        memcpy(row.txid, fx->shielded.hash.data, sizeof(row.txid));
+        memcpy(row.block_hash, fx->body_hash.data, sizeof(row.block_hash));
+        row.block_height = 0;
+        row.tx_index = 0;
+        row.file_num = fx->pos.nFile;
+        row.file_pos = (int)fx->pos.nPos;
+        fx->ok = db_tx_save(&fx->ndb, &row);
+    }
+
+    rpc_table_init(&fx->tbl);
+    if (fx->ok) {
+        rpc_rawtx_set_state(&fx->ms, NULL, NULL, fx->dir);
+        wallet_rpc_context_set_base(NULL, &fx->ms, fx->dir, NULL, NULL,
+                                    NULL);
+        wallet_rpc_context_set_node_db(&fx->ndb);
+        register_rawtransaction_rpc_commands(&fx->tbl);
+        rpc_blockchain_set_state(&fx->ms, NULL, fx->dir);
+        register_blockchain_rpc_commands(&fx->tbl);
+    }
+}
+
+/* One getrawtransaction call for the fixture txid; fx->ok folds in whether
+ * the result names the same txid, block hash and a single confirmation. */
+static void rs_rawtx_lookup(struct rs_rawtx_fx *fx)
+{
+    struct json_value params, result, txid_arg, verbose_arg;
+    json_init(&params);
+    json_set_array(&params);
+    json_init(&result);
+    json_init(&txid_arg);
+    json_init(&verbose_arg);
+    if (fx->ok) {
+        json_set_str(&txid_arg, fx->txid_hex);
+        json_set_int(&verbose_arg, 1);
+        (void)json_push_back(&params, &txid_arg);
+        (void)json_push_back(&params, &verbose_arg);
+        fx->ok = rpc_table_execute(&fx->tbl, "getrawtransaction", &params,
+                                   &result);
+    }
+    const char *got_txid = json_get_str(json_get(&result, "txid"));
+    const char *got_block = json_get_str(json_get(&result, "blockhash"));
+    const struct json_value *got_confirmations =
+        json_get(&result, "confirmations");
+    fx->ok = fx->ok && got_txid && strcmp(got_txid, fx->txid_hex) == 0 &&
+         got_block && strcmp(got_block, fx->block_hex) == 0 &&
+         got_confirmations && json_get_int(got_confirmations) == 1;
+
+    json_free(&params);
+    json_free(&result);
+    json_free(&txid_arg);
+    json_free(&verbose_arg);
+}
+
+static void rs_rawtx_first_lookup(struct rs_rawtx_fx *fx)
+{
+    if (fx->ok)
+        uint256_get_hex(&fx->shielded.hash, fx->txid_hex);
+    uint256_get_hex(&fx->body_hash, fx->block_hex);
+    rs_rawtx_lookup(fx);
+}
+
+static void rs_rawtx_wallet_row(struct rs_rawtx_fx *fx)
+{
+    /* The wallet projection is finalized before the global transaction
+     * catalog catches up; removing the catalog row reproduces that
+     * window, and chain lookup must still agree with wallet history. */
+    struct byte_stream wallet_raw;
+    stream_init(&wallet_raw, 512);
+    struct db_wallet_tx wallet_row;
+    memset(&wallet_row, 0, sizeof(wallet_row));
+    if (fx->ok) {
+        fx->ok = db_tx_delete(&fx->ndb, fx->shielded.hash.data) &&
+            transaction_serialize(&fx->shielded, &wallet_raw);
+    }
+    if (fx->ok) {
+        memcpy(wallet_row.txid, fx->shielded.hash.data,
+               sizeof(wallet_row.txid));
+        wallet_row.raw_tx = wallet_raw.data;
+        wallet_row.raw_tx_len = wallet_raw.size;
+        memcpy(wallet_row.block_hash, fx->body_hash.data,
+               sizeof(wallet_row.block_hash));
+        wallet_row.has_block = true;
+        wallet_row.block_height = 0;
+        wallet_row.time_received = 1700000000;
+        fx->ok = db_wallet_tx_save(&fx->ndb, &wallet_row);
+    }
+    fx->ok = fx->ok && db_wallet_tx_confirmed_count(&fx->ndb) == 1;
+
+    rs_rawtx_lookup(fx);
+    stream_free(&wallet_raw);
+}
+
+static void rs_rawtx_owned_wallet(struct rs_rawtx_fx *fx)
+{
+    /* The finalized in-memory wallet leads even the wallet SQLite row;
+     * lookup must stay exact. Heap the ~40 MB struct wallet. */
+    fx->owned_wallet = zcl_calloc(1, sizeof(*fx->owned_wallet),
+                                  "rpc-safety-owned-wallet");
+    fx->ok = fx->ok && fx->owned_wallet != NULL;
+    if (fx->owned_wallet)
+        wallet_init(fx->owned_wallet);
+    struct wallet_tx owned_wtx;
+    memset(&owned_wtx, 0, sizeof(owned_wtx));
+    if (fx->ok) {
+        fx->ok = db_wallet_tx_delete(&fx->ndb, fx->shielded.hash.data) &&
+            transaction_copy(&owned_wtx.tx, &fx->shielded);
+    }
+    fx->ok = fx->ok && db_wallet_tx_confirmed_count(&fx->ndb) == 0;
+    if (fx->ok) {
+        owned_wtx.hash_block = fx->body_hash;
+        owned_wtx.confirms = 1;
+        owned_wtx.used = true;
+        fx->ok = wallet_add_to_wallet(fx->owned_wallet, &owned_wtx);
+        transaction_free(&owned_wtx.tx);
+        wallet_rpc_context_set_base(fx->owned_wallet, &fx->ms, fx->dir,
+                                    NULL, NULL, NULL);
+        wallet_rpc_context_set_node_db(&fx->ndb);
+    }
+
+    rs_rawtx_lookup(fx);
+}
+
+static void rs_rawtx_no_indexes(struct rs_rawtx_fx *fx)
+{
+    /* A non-wallet peer must expose a just-confirmed transaction while
+     * every derived index is absent. */
+    if (fx->ok) {
+        wallet_rpc_context_set_base(NULL, &fx->ms, fx->dir,
+                                    NULL, NULL, NULL);
+        wallet_rpc_context_set_node_db(&fx->ndb);
+        fx->ok = db_wallet_tx_delete(&fx->ndb, fx->shielded.hash.data) &&
+            db_tx_delete(&fx->ndb, fx->shielded.hash.data);
+    }
+    rs_rawtx_lookup(fx);
+}
+
+static void rs_rawtx_block_txids(struct rs_rawtx_fx *fx)
+{
+    /* The sibling block lookup must expose the exact transaction ids,
+     * not only a count.  This is the recovery path when an operator has
+     * a confirmed block identity but not a working transaction index. */
+    struct json_value params, result, txid_arg, verbose_arg;
+    json_init(&params);
+    json_set_array(&params);
+    json_init(&result);
+    json_init(&txid_arg);
+    json_init(&verbose_arg);
+    if (fx->ok) {
+        reducer_frontier_provable_tip_set(0);
+        json_set_str(&txid_arg, fx->block_hex);
+        json_set_int(&verbose_arg, 1);
+        (void)json_push_back(&params, &txid_arg);
+        (void)json_push_back(&params, &verbose_arg);
+        fx->ok = rpc_table_execute(&fx->tbl, "getblock", &params, &result);
+    }
+    const struct json_value *block_txids = json_get(&result, "tx");
+    const char *block_txid =
+        block_txids && block_txids->type == JSON_ARR &&
+                json_size(block_txids) == 1
+            ? json_get_str(json_at(block_txids, 0)) : NULL;
+    fx->ok = fx->ok && json_get_int(json_get(&result, "size")) > 0 &&
+         json_get_int(json_get(&result, "tx_count")) == 1 &&
+         block_txid && strcmp(block_txid, fx->txid_hex) == 0;
+    json_free(&params);
+    json_free(&result);
+    json_free(&txid_arg);
+    json_free(&verbose_arg);
+}
+
+static void rs_rawtx_verbose_cases(struct rs_rawtx_fx *fx)
+{
+    struct json_value params, result, txid_arg, verbose_arg;
+
+    /* Internal callers use JSON booleans; legacy clients use numeric
+     * 0/1. Both forms select the same object/raw modes. Unrelated JSON
+     * types remain a named parameter refusal. */
+    static const struct {
+        bool boolean;
+        int value;
+        bool invalid_object;
+        bool expect_ok;
+        enum json_type expect_type;
+    } verbose_cases[] = {
+        {true,  1, false, true,  JSON_OBJ},
+        {true,  0, false, true,  JSON_STR},
+        {false, 1, false, true,  JSON_OBJ},
+        {false, 0, false, true,  JSON_STR},
+        {false, 0, true,  false, JSON_STR},
+    };
+    for (size_t i = 0; fx->ok && i < sizeof(verbose_cases) /
+                                  sizeof(verbose_cases[0]); i++) {
+        json_init(&params);
+        json_set_array(&params);
+        json_init(&result);
+        json_init(&txid_arg);
+        json_init(&verbose_arg);
+        json_set_str(&txid_arg, fx->block_hex);
+        if (verbose_cases[i].invalid_object)
+            json_set_object(&verbose_arg);
+        else if (verbose_cases[i].boolean)
+            json_set_bool(&verbose_arg, verbose_cases[i].value != 0);
+        else
+            json_set_int(&verbose_arg, verbose_cases[i].value);
+        (void)json_push_back(&params, &txid_arg);
+        (void)json_push_back(&params, &verbose_arg);
+        bool called = rpc_table_execute(&fx->tbl, "getblock", &params,
+                                        &result);
+        fx->ok = called == verbose_cases[i].expect_ok &&
+             result.type == verbose_cases[i].expect_type;
+        if (verbose_cases[i].invalid_object)
+            fx->ok = fx->ok && strstr(json_get_str(&result),
+                              "must be numeric") != NULL;
+        json_free(&params);
+        json_free(&result);
+        json_free(&txid_arg);
+        json_free(&verbose_arg);
+    }
+    reducer_frontier_provable_tip_reset();
+}
+
+static void rs_rawtx_cleanup(struct rs_rawtx_fx *fx)
+{
+    wallet_rpc_context_set_node_db(NULL);
+    wallet_rpc_context_set_base(NULL, NULL, NULL, NULL, NULL, NULL);
+    rpc_rawtx_set_state(NULL, NULL, NULL, NULL);
+    rpc_blockchain_set_state(NULL, NULL, NULL);
+    if (fx->ndb.open)
+        node_db_close(&fx->ndb);
+    main_state_free(&fx->ms);
+    block_free(&fx->body);
+    transaction_free(&fx->shielded);
+    if (fx->owned_wallet) {
+        wallet_free(fx->owned_wallet);
+        free(fx->owned_wallet);
+    }
+    test_rm_rf(fx->dir);
+}
+
+static int rs_case_rawtx_locator(void)
+{
+    int failures = 0;
+    struct rs_rawtx_fx fx;
+
+    printf("rpc_safety: confirmed tx uses verified node/wallet locator... ");
+    ensure_rpc_warmup_finished_once();
+    test_make_tmpdir(fx.dir, sizeof(fx.dir), "rpc_safety", "rawtx_node_db");
+    rs_rawtx_build_block(&fx);
+    rs_rawtx_build_index(&fx);
+    rs_rawtx_first_lookup(&fx);
+    rs_rawtx_wallet_row(&fx);
+    rs_rawtx_owned_wallet(&fx);
+    rs_rawtx_no_indexes(&fx);
+    rs_rawtx_block_txids(&fx);
+    rs_rawtx_verbose_cases(&fx);
+    rs_rawtx_cleanup(&fx);
+
+    if (fx.ok) printf("OK\n");
+    else    { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+/* Shared state for the "getbestblockhash follows provable tip" phases. */
+struct rs_tip_fx {
+    struct main_state ms;
+    struct block_index *blocks[4];
+    struct rpc_table tbl;
+    struct rpc_table health_tbl;
+    char hstar_hex[65];
+    char active_hex[65];
+    char want_merkle[65];
+    char want_nonce[65];
+    bool ok;
+};
+
+static void rs_tip_setup(struct rs_tip_fx *fx)
+{
+    test_reset_shared_globals();
+    ensure_rpc_warmup_finished_once();
+
+    fx->ok = rpc_safety_build_chain(&fx->ms, fx->blocks, 4);
+    rpc_blockchain_set_state(&fx->ms, NULL, "/tmp");
+    reducer_frontier_provable_tip_set(1);
+
+    rpc_table_init(&fx->tbl);
+    register_blockchain_rpc_commands(&fx->tbl);
+
+    rpc_table_init(&fx->health_tbl);
+    rpc_health_set_state(&fx->ms, NULL, NULL, NULL);
+    register_health_rpc_commands(&fx->health_tbl);
+
+    if (fx->blocks[1] && fx->blocks[1]->phashBlock)
+        uint256_get_hex(fx->blocks[1]->phashBlock, fx->hstar_hex);
+    if (fx->blocks[3] && fx->blocks[3]->phashBlock)
+        uint256_get_hex(fx->blocks[3]->phashBlock, fx->active_hex);
+}
+
+static void rs_tip_best_and_chaintip(struct rs_tip_fx *fx)
+{
+    struct json_value params = {0};
+    struct json_value result = {0};
+    json_init(&params);
+    json_set_array(&params);
+    json_init(&result);
+
+    fx->ok = fx->ok && rpc_table_execute(&fx->tbl, "getbestblockhash",
+                                         &params, &result);
+    fx->ok = fx->ok && result.type == JSON_STR &&
+         strcmp(json_get_str(&result), fx->hstar_hex) == 0 &&
+         strcmp(json_get_str(&result), fx->active_hex) != 0;
+    json_free(&result);
+
+    json_init(&result);
+    fx->ok = fx->ok && rpc_table_execute(&fx->tbl, "getchaintip", &params,
+                                         &result);
+    const struct json_value *tip_height = json_get(&result, "height");
+    const struct json_value *tip_hash = json_get(&result, "hash");
+    fx->ok = fx->ok && tip_height && json_get_int(tip_height) == 1;
+    fx->ok = fx->ok && tip_hash && tip_hash->type == JSON_STR &&
+         strcmp(json_get_str(tip_hash), fx->hstar_hex) == 0 &&
+         strcmp(json_get_str(tip_hash), fx->active_hex) != 0;
+    json_free(&result);
+    json_free(&params);
+}
+
+static void rs_tip_blockhash_header(struct rs_tip_fx *fx)
+{
+    struct json_value params = {0};
+    struct json_value result = {0};
+
+    init_single_int_param(&params, 1);
+    json_init(&result);
+    fx->ok = fx->ok && rpc_table_execute(&fx->tbl, "getblockhash", &params,
+                                         &result) &&
+         result.type == JSON_STR &&
+         strcmp(json_get_str(&result), fx->hstar_hex) == 0;
+    json_free(&result);
+    json_free(&params);
+
+    init_single_int_param(&params, 2);
+    json_init(&result);
+    fx->ok = fx->ok && !rpc_table_execute(&fx->tbl, "getblockhash", &params,
+                                          &result);
+    fx->ok = fx->ok && result.type == JSON_STR &&
+         strcmp(json_get_str(&result), fx->active_hex) != 0 &&
+         strstr(json_get_str(&result), "out of range") != NULL;
+    json_free(&result);
+    json_free(&params);
+
+    init_single_str_param(&params, fx->hstar_hex);
+    json_init(&result);
+    fx->ok = fx->ok && rpc_table_execute(&fx->tbl, "getblockheader", &params,
+                                         &result);
+    const struct json_value *header_height = json_get(&result, "height");
+    fx->ok = fx->ok && header_height && json_get_int(header_height) == 1;
+    json_free(&result);
+    json_free(&params);
+}
+
+static void rs_tip_slim_flat_prepare(struct rs_tip_fx *fx)
+{
+    /* Slim-flat condition: fixture index entries carry zero merkle/nonce
+     * (warm boot from the flat cache); with a durable header authority
+     * registered, getblockheader must hydrate both through the runtime
+     * port. Expectations are deserialized from the stub authority's
+     * bytes. The call also pins the era-bits difficulty against legacy
+     * zclassicd. */
+    rpc_safety_seed_known_header();
+    struct block_header want_hdr;
+    block_header_init(&want_hdr);
+    struct byte_stream hr;
+    stream_init_from_data(&hr, rpc_safety_hdr_bytes, rpc_safety_hdr_len);
+    fx->ok = fx->ok && block_header_deserialize(&want_hdr, &hr);
+    uint256_get_hex(&want_hdr.hashMerkleRoot, fx->want_merkle);
+    uint256_get_hex(&want_hdr.nNonce, fx->want_nonce);
+    if (fx->blocks[1])
+        fx->blocks[1]->nBits = 0x1c7397b0;
+    node_db_runtime_port_set(&rpc_safety_header_port);
+}
+
+static void rs_tip_slim_flat_check(struct rs_tip_fx *fx)
+{
+    struct json_value params = {0};
+    struct json_value result = {0};
+
+    init_single_str_param(&params, fx->hstar_hex);
+    json_init(&result);
+    fx->ok = fx->ok && rpc_table_execute(&fx->tbl, "getblockheader", &params,
+                                         &result);
+    const struct json_value *got_merkle = json_get(&result, "merkleroot");
+    const struct json_value *got_nonce = json_get(&result, "nonce");
+    const struct json_value *got_diff = json_get(&result, "difficulty");
+    fx->ok = fx->ok && got_merkle && got_merkle->type == JSON_STR &&
+         strcmp(json_get_str(got_merkle), fx->want_merkle) == 0;
+    fx->ok = fx->ok && got_nonce && got_nonce->type == JSON_STR &&
+         strcmp(json_get_str(got_nonce), fx->want_nonce) == 0;
+    /* legacy zclassicd renders 1161125.834138388 for bits 0x1c7397b0
+     * (oracle h=500000); allow 1e-9 relative for double formatting. */
+    const double want_diff = 1161125.834138388;
+    double diff_got = got_diff ? json_get_real(got_diff) : 0.0;
+    double diff_rel = (diff_got - want_diff) / want_diff;
+    if (diff_rel < 0) diff_rel = -diff_rel;
+    fx->ok = fx->ok && got_diff && got_diff->type == JSON_REAL &&
+         diff_rel < 1e-9;
+    json_free(&result);
+    json_free(&params);
+    node_db_runtime_port_set(NULL);
+}
+
+static void rs_tip_not_found(struct rs_tip_fx *fx)
+{
+    struct json_value params = {0};
+    struct json_value result = {0};
+
+    init_single_str_param(&params, fx->active_hex);
+    json_init(&result);
+    fx->ok = fx->ok && !rpc_table_execute(&fx->tbl, "getblockheader",
+                                          &params, &result);
+    fx->ok = fx->ok && result.type == JSON_STR &&
+         strstr(json_get_str(&result), "not found") != NULL;
+    json_free(&result);
+    json_free(&params);
+
+    init_single_str_param(&params, fx->hstar_hex);
+    json_init(&result);
+    fx->ok = fx->ok && !rpc_table_execute(&fx->tbl, "getblock", &params,
+                                          &result) &&
+         result.type == JSON_STR &&
+         strstr(json_get_str(&result), "body unavailable") != NULL;
+    json_free(&result);
+    json_free(&params);
+}
+
+static void rs_tip_sync(struct rs_tip_fx *fx)
+{
+    struct json_value params = {0};
+    struct json_value result = {0};
+
+    json_init(&params);
+    json_set_array(&params);
+    json_init(&result);
+    fx->ok = fx->ok && rpc_table_execute(&fx->health_tbl, "getsyncdetail",
+                                         &params, &result);
+    const struct json_value *chain = json_get(&result, "chain");
+    const struct json_value *chain_height = json_get(chain, "height");
+    const struct json_value *best_block = json_get(chain, "best_block");
+    fx->ok = fx->ok && chain && chain_height &&
+         json_get_int(chain_height) == 1;
+    fx->ok = fx->ok && best_block && best_block->type == JSON_STR &&
+         strcmp(json_get_str(best_block), fx->hstar_hex) == 0 &&
+         strcmp(json_get_str(best_block), fx->active_hex) != 0;
+    json_free(&result);
+    json_free(&params);
+
+    json_init(&params);
+    json_set_array(&params);
+    json_init(&result);
+    fx->ok = fx->ok && rpc_table_execute(&fx->health_tbl, "getsyncdiag",
+                                         &params, &result);
+    const struct json_value *diag_chain_height =
+        json_get(&result, "chain_height");
+    const struct json_value *diag_header_height =
+        json_get(&result, "best_header_height");
+    fx->ok = fx->ok && diag_chain_height &&
+         json_get_int(diag_chain_height) == 1;
+    fx->ok = fx->ok && diag_header_height &&
+         json_get_int(diag_header_height) == 3;
+    json_free(&result);
+    json_free(&params);
+}
+
+static void rs_tip_getblock_missing(struct rs_tip_fx *fx)
+{
+    struct json_value params = {0};
+    struct json_value result = {0};
+
+    init_single_str_param(&params, fx->active_hex);
+    json_init(&result);
+    fx->ok = fx->ok && !rpc_table_execute(&fx->tbl, "getblock", &params,
+                                          &result);
+    fx->ok = fx->ok && result.type == JSON_STR &&
+         strstr(json_get_str(&result), "not found") != NULL;
+
+    json_free(&params);
+    json_free(&result);
+}
+
+static int rs_case_getbestblockhash(void)
+{
+    int failures = 0;
+    struct rs_tip_fx fx = {0};
+
+    printf("rpc_safety: getbestblockhash follows provable tip... ");
+    rs_tip_setup(&fx);
+    rs_tip_best_and_chaintip(&fx);
+    rs_tip_blockhash_header(&fx);
+    rs_tip_slim_flat_prepare(&fx);
+    rs_tip_slim_flat_check(&fx);
+    rs_tip_not_found(&fx);
+    rs_tip_sync(&fx);
+    rs_tip_getblock_missing(&fx);
+    reducer_frontier_provable_tip_reset();
+    rpc_health_set_state(NULL, NULL, NULL, NULL);
+    rpc_blockchain_set_state(NULL, NULL, NULL);
+    main_state_free(&fx.ms);
+    test_reset_shared_globals();
+
+    if (fx.ok) printf("OK\n");
+    else    { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+/* Shared state for the "getblockhash resolves sparse H*" phases. */
+struct rs_sparse_fx {
+    struct main_state ms;
+    struct block_index *blocks[3];
+    struct node_db ndb;
+    bool ndb_open;
+    struct rpc_table tbl;
+    char hstar_hex[65];
+    char active_hex[65];
+    bool ok;
+};
+
+static void rs_sparse_setup(struct rs_sparse_fx *fx)
+{
+    test_reset_shared_globals();
+    ensure_rpc_warmup_finished_once();
+
+    fx->ndb_open = false;
+    fx->ok = rpc_safety_build_chain(&fx->ms, fx->blocks, 3);
+    if (fx->ok)
+        fx->ms.chain_active.chain[1] = NULL;
+    fx->ok = fx->ok && node_db_open(&fx->ndb, ":memory:");
+    fx->ndb_open = fx->ok;
+    fx->ok = fx->ok && rpc_safety_save_projected_block(&fx->ndb,
+                                                       fx->blocks[1]);
+
+    rpc_blockchain_set_state(&fx->ms, NULL, "/tmp");
+    rpc_blockchain_set_node_db(&fx->ndb);
+    reducer_frontier_provable_tip_set(1);
+
+    rpc_table_init(&fx->tbl);
+    register_blockchain_rpc_commands(&fx->tbl);
+
+    if (fx->blocks[1] && fx->blocks[1]->phashBlock)
+        uint256_get_hex(fx->blocks[1]->phashBlock, fx->hstar_hex);
+    if (fx->blocks[2] && fx->blocks[2]->phashBlock)
+        uint256_get_hex(fx->blocks[2]->phashBlock, fx->active_hex);
+}
+
+static void rs_sparse_calls(struct rs_sparse_fx *fx)
+{
+    struct json_value params = {0};
+    struct json_value result = {0};
+    json_init(&params);
+    json_set_array(&params);
+    json_init(&result);
+
+    fx->ok = fx->ok && rpc_table_execute(&fx->tbl, "getbestblockhash",
+                                         &params, &result);
+    fx->ok = fx->ok && result.type == JSON_STR &&
+         strcmp(json_get_str(&result), fx->hstar_hex) == 0 &&
+         strcmp(json_get_str(&result), fx->active_hex) != 0;
+    json_free(&result);
+    json_free(&params);
+
+    init_single_int_param(&params, 1);
+    json_init(&result);
+    fx->ok = fx->ok && rpc_table_execute(&fx->tbl, "getblockhash", &params,
+                                         &result) &&
+         result.type == JSON_STR &&
+         strcmp(json_get_str(&result), fx->hstar_hex) == 0 &&
+         strcmp(json_get_str(&result), fx->active_hex) != 0;
+    json_free(&result);
+    json_free(&params);
+
+    init_single_int_param(&params, 2);
+    json_init(&result);
+    fx->ok = fx->ok && !rpc_table_execute(&fx->tbl, "getblockhash", &params,
+                                          &result);
+    fx->ok = fx->ok && result.type == JSON_STR &&
+         strstr(json_get_str(&result), "out of range") != NULL;
+
+    json_free(&params);
+    json_free(&result);
+}
+
+static int rs_case_sparse_getblockhash(void)
+{
+    int failures = 0;
+    struct rs_sparse_fx fx = {0};
+
+    printf("rpc_safety: getblockhash resolves sparse H* from node db... ");
+    rs_sparse_setup(&fx);
+    rs_sparse_calls(&fx);
+    rpc_blockchain_set_state(NULL, NULL, NULL);
+    rpc_blockchain_set_node_db(NULL);
+    reducer_frontier_provable_tip_reset();
+    if (fx.ndb_open)
+        node_db_close(&fx.ndb);
+    main_state_free(&fx.ms);
+    test_reset_shared_globals();
+
+    if (fx.ok) printf("OK\n");
+    else    { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+/* Shared state for the "gettxoutsetinfo reports coin frontier" phases. */
+struct rs_coin_fx {
+    char dir[256];
+    struct main_state ms;
+    struct block_index *blocks[4];
+    struct rpc_table tbl;
+    char coin_hex[65];
+    char active_hex[65];
+    bool ok;
+};
+
+static void rs_coin_setup(struct rs_coin_fx *fx)
+{
+    test_reset_shared_globals();
+    ensure_rpc_warmup_finished_once();
+    progress_store_close();
+
+    test_make_tmpdir(fx->dir, sizeof(fx->dir), "rpc_safety", "coin_frontier");
+
+    fx->ok = rpc_safety_build_chain(&fx->ms, fx->blocks, 4);
+    fx->ok = fx->ok && progress_store_open(fx->dir);
+    sqlite3 *db = progress_store_db();
+    fx->ok = fx->ok && db && rpc_safety_seed_coin_frontier(db,
+                                                           fx->blocks[1]);
+
+    rpc_blockchain_set_state(&fx->ms, NULL, "/tmp");
+
+    rpc_table_init(&fx->tbl);
+    register_blockchain_rpc_commands(&fx->tbl);
+
+    if (fx->blocks[1] && fx->blocks[1]->phashBlock)
+        uint256_get_hex(fx->blocks[1]->phashBlock, fx->coin_hex);
+    if (fx->blocks[3] && fx->blocks[3]->phashBlock)
+        uint256_get_hex(fx->blocks[3]->phashBlock, fx->active_hex);
+}
+
+static void rs_coin_call(struct rs_coin_fx *fx)
+{
+    struct json_value params = {0};
+    struct json_value result = {0};
+    json_init(&params);
+    json_set_array(&params);
+    json_init(&result);
+
+    fx->ok = fx->ok && rpc_table_execute(&fx->tbl, "gettxoutsetinfo",
+                                         &params, &result);
+    const struct json_value *height = json_get(&result, "height");
+    const struct json_value *bestblock = json_get(&result, "bestblock");
+    const struct json_value *txs = json_get(&result, "transactions");
+    const struct json_value *outs = json_get(&result, "txouts");
+    fx->ok = fx->ok && height && json_get_int(height) == 1;
+    fx->ok = fx->ok && bestblock && bestblock->type == JSON_STR &&
+         strcmp(json_get_str(bestblock), fx->coin_hex) == 0 &&
+         strcmp(json_get_str(bestblock), fx->active_hex) != 0;
+    fx->ok = fx->ok && txs && json_get_int(txs) == 1;
+    fx->ok = fx->ok && outs && json_get_int(outs) == 1;
+
+    json_free(&params);
+    json_free(&result);
+}
+
+static int rs_case_txoutsetinfo(void)
+{
+    int failures = 0;
+    struct rs_coin_fx fx = {0};
+
+    printf("rpc_safety: gettxoutsetinfo reports coin frontier... ");
+    rs_coin_setup(&fx);
+    rs_coin_call(&fx);
+    rpc_blockchain_set_state(NULL, NULL, NULL);
+    progress_store_close();
+    test_cleanup_tmpdir(fx.dir);
+    main_state_free(&fx.ms);
+    test_reset_shared_globals();
+
+    if (fx.ok) printf("OK\n");
+    else    { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+/* Shared state for the "summary RPCs do not borrow unresolved active tip"
+ * phases. */
+struct rs_summary_fx {
+    struct main_state ms;
+    struct block_index *blocks[4];
+    struct connman cm;
+    struct rpc_table chain_tbl;
+    struct rpc_table misc_tbl;
+    struct rpc_table mining_tbl;
+    bool ok;
+};
+
+static void rs_summary_setup(struct rs_summary_fx *fx)
+{
+    test_reset_shared_globals();
+    ensure_rpc_warmup_finished_once();
+
+    fx->ok = rpc_safety_build_chain(&fx->ms, fx->blocks, 4);
+    if (fx->ok)
+        fx->ms.chain_active.chain[1] = NULL;
+    reducer_frontier_provable_tip_set(1);
+
+    memset(&fx->cm, 0, sizeof(fx->cm));
+    net_manager_init(&fx->cm.manager);
+    fx->cm.manager.num_nodes = 3;
+
+    rpc_table_init(&fx->chain_tbl);
+    rpc_blockchain_set_state(&fx->ms, NULL, "/tmp");
+    register_blockchain_rpc_commands(&fx->chain_tbl);
+
+    rpc_table_init(&fx->misc_tbl);
+    rpc_misc_set_state(&fx->ms);
+    rpc_net_set_connman(&fx->cm);
+    register_misc_rpc_commands(&fx->misc_tbl);
+
+    rpc_table_init(&fx->mining_tbl);
+    rpc_mining_set_state(&fx->ms, NULL, NULL);
+    register_mining_rpc_commands(&fx->mining_tbl);
+}
+
+static void rs_summary_calls(struct rs_summary_fx *fx)
+{
+    struct json_value params = {0};
+    struct json_value result = {0};
+    json_init(&params);
+    json_set_array(&params);
+    json_init(&result);
+
+    /* getblockchaininfo must NOT borrow the unresolved active tip
+     * (height 3): with the H* slot unresolved it returns a valid
+     * IBD-shaped object reporting the PROVABLE height (H* == 1) with
+     * initialblockdownload=true. */
+    fx->ok = fx->ok && rpc_table_execute(&fx->chain_tbl, "getblockchaininfo",
+                                         &params, &result);
+    {
+        const struct json_value *gbi_blocks = json_get(&result, "blocks");
+        const struct json_value *gbi_ibd =
+            json_get(&result, "initialblockdownload");
+        fx->ok = fx->ok && gbi_blocks && json_get_int(gbi_blocks) == 1;
+        fx->ok = fx->ok && gbi_ibd && json_get_bool(gbi_ibd);
+    }
+    json_free(&result);
+
+    json_init(&result);
+    fx->ok = fx->ok && rpc_table_execute(&fx->misc_tbl, "getinfo", &params,
+                                         &result);
+    const struct json_value *info_blocks = json_get(&result, "blocks");
+    const struct json_value *info_connections =
+        json_get(&result, "connections");
+    fx->ok = fx->ok && info_blocks && json_get_int(info_blocks) == 1;
+    fx->ok = fx->ok && info_connections &&
+         json_get_int(info_connections) == 3;
+    json_free(&result);
+
+    json_init(&result);
+    fx->ok = fx->ok && rpc_table_execute(&fx->mining_tbl, "getmininginfo",
+                                         &params, &result);
+    const struct json_value *mining_blocks = json_get(&result, "blocks");
+    fx->ok = fx->ok && mining_blocks && json_get_int(mining_blocks) == 1;
+
+    json_free(&params);
+    json_free(&result);
+}
+
+static int rs_case_summary_tip(void)
+{
+    int failures = 0;
+    struct rs_summary_fx fx = {0};
+
+    printf("rpc_safety: summary RPCs do not borrow unresolved active tip... ");
+    rs_summary_setup(&fx);
+    rs_summary_calls(&fx);
+    rpc_blockchain_set_state(NULL, NULL, NULL);
+    rpc_misc_set_state(NULL);
+    rpc_net_set_connman(NULL);
+    rpc_mining_set_state(NULL, NULL, NULL);
+    fx.cm.manager.num_nodes = 0;
+    net_manager_free(&fx.cm.manager);
+    reducer_frontier_provable_tip_reset();
+    main_state_free(&fx.ms);
+    test_reset_shared_globals();
+
+    if (fx.ok) printf("OK\n");
+    else    { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+/* Shared state for the "chainstate guard rejects unresolved active tip"
+ * phases. */
+struct rs_guard_fx {
+    struct main_state *ms;
+    struct coins_view_cache *coins_tip;
+    struct wallet *wallet;
+    struct node_db *ndb;
+    struct rpc_table *rawtx_tbl;
+    struct rpc_table *inspect_tbl;
+    struct rpc_table *wallet_diag_tbl;
+    struct rpc_table *wallet_rescan_tbl;
+    struct rpc_table *repair_tbl;
+    bool ok;
+};
+
+static void rs_guard_alloc(struct rs_guard_fx *fx)
+{
+    fx->ms = calloc(1, sizeof(*fx->ms));
+    fx->coins_tip = calloc(1, sizeof(*fx->coins_tip));
+    fx->wallet = calloc(1, sizeof(*fx->wallet));
+    fx->ndb = calloc(1, sizeof(*fx->ndb));
+    fx->rawtx_tbl = calloc(1, sizeof(*fx->rawtx_tbl));
+    fx->inspect_tbl = calloc(1, sizeof(*fx->inspect_tbl));
+    fx->wallet_diag_tbl = calloc(1, sizeof(*fx->wallet_diag_tbl));
+    fx->wallet_rescan_tbl = calloc(1, sizeof(*fx->wallet_rescan_tbl));
+    fx->repair_tbl = calloc(1, sizeof(*fx->repair_tbl));
+
+    fx->ok = fx->ms && fx->coins_tip && fx->wallet && fx->ndb &&
+             fx->rawtx_tbl && fx->inspect_tbl && fx->wallet_diag_tbl &&
+             fx->wallet_rescan_tbl && fx->repair_tbl;
+    if (fx->ok) {
+        build_unresolved_tip_state(fx->ms, 100);
+        wallet_init(fx->wallet);
+        fx->ndb->open = true;
+    }
+}
+
+static void rs_guard_free_all(struct rs_guard_fx *fx)
+{
+    free(fx->ms);
+    free(fx->coins_tip);
+    free(fx->wallet);
+    free(fx->ndb);
+    free(fx->rawtx_tbl);
+    free(fx->inspect_tbl);
+    free(fx->wallet_diag_tbl);
+    free(fx->wallet_rescan_tbl);
+    free(fx->repair_tbl);
+}
+
+static void rs_guard_register(struct rs_guard_fx *fx)
+{
+    rpc_table_init(fx->rawtx_tbl);
+    rpc_rawtx_set_state(fx->ms, NULL, fx->coins_tip, "/tmp");
+    register_rawtransaction_rpc_commands(fx->rawtx_tbl);
+
+    rpc_table_init(fx->inspect_tbl);
+    rpc_chain_inspect_set_state(fx->ms, "/tmp", NULL, fx->coins_tip, NULL);
+    register_chain_inspect_rpc_commands(fx->inspect_tbl);
+
+    wallet_rpc_context_set_base(fx->wallet, fx->ms, "/tmp", NULL, NULL,
+                                NULL);
+    wallet_rpc_context_set_node_db(NULL);
+    wallet_rpc_context_set_coins_tip(fx->coins_tip);
+
+    rpc_table_init(fx->wallet_diag_tbl);
+    register_wallet_diagnostic_rpc_commands(fx->wallet_diag_tbl);
+
+    wallet_rpc_context_set_node_db(NULL);
+    rpc_table_init(fx->wallet_rescan_tbl);
+    register_wallet_rescan_rpc_commands(fx->wallet_rescan_tbl);
+
+    rpc_table_init(fx->repair_tbl);
+    rpc_repair_set_state(fx->ms, fx->coins_tip, fx->ndb, "/tmp",
+                         chain_params_get());
+    register_repair_rpc_commands(fx->repair_tbl);
+    register_backfill_header_solutions_rpc_commands(fx->repair_tbl);
+}
+
+static void rs_guard_calls(struct rs_guard_fx *fx)
+{
+    struct json_value params = {0};
+    struct json_value result = {0};
+
+    init_single_str_param(
+        &params,
+        "0000000000000000000000000000000000000000000000000000000000000001");
+    json_init(&result);
+    fx->ok = !rpc_table_execute(fx->rawtx_tbl, "getrawtransaction", &params,
+                                &result) &&
+         result_is_chainstate_guard_error(&result, "getrawtransaction");
+    json_free(&params);
+    json_free(&result);
+
+    init_single_str_param(
+        &params,
+        "0000000000000000000000000000000000000000000000000000000000000002");
+    json_init(&result);
+    fx->ok = fx->ok && !rpc_table_execute(fx->inspect_tbl, "gettxdetail",
+                                          &params, &result) &&
+         result_is_chainstate_guard_error(&result, "gettxdetail");
+    json_free(&params);
+    json_free(&result);
+
+    init_single_str_param(
+        &params,
+        "0000000000000000000000000000000000000000000000000000000000000003");
+    json_init(&result);
+    fx->ok = fx->ok && !rpc_table_execute(fx->wallet_diag_tbl,
+                                          "getchaincoins", &params,
+                                          &result) &&
+         result_is_chainstate_guard_error(&result, "getchaincoins");
+    json_free(&params);
+    json_free(&result);
+
+    json_init(&params);
+    json_set_array(&params);
+    json_init(&result);
+    fx->ok = fx->ok && !rpc_table_execute(fx->wallet_rescan_tbl,
+                                          "syncwalletfromdb", &params,
+                                          &result) &&
+         result_is_chainstate_guard_error(&result, "syncwalletfromdb");
+    json_free(&params);
+    json_free(&result);
+
+    json_init(&params);
+    json_set_array(&params);
+    json_init(&result);
+    fx->ok = fx->ok && !rpc_table_execute(fx->repair_tbl, "repairutxos",
+                                          &params, &result) &&
+         result_is_chainstate_guard_error(&result, "repairutxos");
+    json_free(&params);
+    json_free(&result);
+}
+
+static int rs_case_chainstate_guard(bool *aborted)
+{
+    int failures = 0;
+    struct rs_guard_fx fx;
+
+    printf("rpc_safety: chainstate guard rejects unresolved active tip... ");
+    ensure_rpc_warmup_finished_once();
+    rs_guard_alloc(&fx);
+
+    if (!fx.ok) {
+        rs_guard_free_all(&fx);
+        printf("FAIL\n");
+        *aborted = true;
+        return failures + 1;
+    }
+
+    rs_guard_register(&fx);
+    rs_guard_calls(&fx);
+
+    main_state_free(fx.ms);
+    wallet_free(fx.wallet);
+    rs_guard_free_all(&fx);
+
+    if (fx.ok) printf("OK\n");
+    else    { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+/* Shared state for the "raw-sign P2SH 2-of-2" phases. */
+struct rs_p2sh_fx {
+    struct basic_keystore *ks;
+    struct rpc_table *tbl;
+    struct privkey keys[2];
+    struct pubkey pubs[2];
+    struct script redeem, p2sh;
+    char tx_hex[2048];
+    char p2sh_hex[2 * MAX_SCRIPT_SIZE + 1];
+    char redeem_hex[2 * MAX_SCRIPT_SIZE + 1];
+    struct transaction signed_tx;
+    bool ok;
+};
+
+static void rs_p2sh_keys(struct rs_p2sh_fx *fx)
+{
+    keystore_init(fx->ks);
+    rpc_table_init(fx->tbl);
+    rpc_rawtx_set_state(NULL, NULL, NULL, "/tmp");
+    rpc_rawtx_set_keystore(fx->ks);
+    register_rawtransaction_rpc_commands(fx->tbl);
+
+    for (size_t i = 0; i < 2 && fx->ok; i++) {
+        privkey_make_new(&fx->keys[i], true);
+        fx->ok = privkey_get_pubkey(&fx->keys[i], &fx->pubs[i]) &&
+             keystore_add_key(fx->ks, &fx->keys[i]);
+    }
+    script_for_multisig(&fx->redeem, 2, fx->pubs, 2);
+    struct script_id redeem_id;
+    script_id_from_script(&redeem_id, &fx->redeem);
+    script_for_p2sh(&fx->p2sh, &redeem_id);
+}
+
+static void rs_p2sh_build_tx(struct rs_p2sh_fx *fx)
+{
+    struct transaction tx;
+    transaction_init(&tx);
+    tx.overwintered = true;
+    tx.version = SAPLING_TX_VERSION;
+    tx.version_group_id = SAPLING_VERSION_GROUP_ID;
+    tx.vin = calloc(1, sizeof(*tx.vin));
+    tx.vout = calloc(1, sizeof(*tx.vout));
+    fx->ok = fx->ok && tx.vin && tx.vout;
+    if (fx->ok) {
+        tx.num_vin = 1;
+        tx.vin[0].prevout.n = 0;
+        tx.vin[0].sequence = UINT32_MAX;
+        tx.num_vout = 1;
+        tx.vout[0].value = 1000;
+        struct key_id recipient = {0};
+        script_for_p2pkh(&tx.vout[0].script_pub_key, &recipient);
+    }
+    size_t tx_hex_len = fx->ok ?
+        encode_hex_tx(&tx, fx->tx_hex, sizeof(fx->tx_hex)) : 0;
+    fx->ok = fx->ok && tx_hex_len > 0 && tx_hex_len < sizeof(fx->tx_hex);
+    transaction_free(&tx);
+
+    zcl_hex_encode(fx->p2sh.data, fx->p2sh.size, fx->p2sh_hex);
+    zcl_hex_encode(fx->redeem.data, fx->redeem.size, fx->redeem_hex);
+}
+
+static void rs_p2sh_sign(struct rs_p2sh_fx *fx)
+{
+    struct json_value params, prevs, prev, value, result;
+    json_init(&params); json_set_array(&params);
+    json_init(&value); json_set_str(&value, fx->tx_hex);
+    json_push_back(&params, &value); json_free(&value);
+    json_init(&prevs); json_set_array(&prevs);
+    json_init(&prev); json_set_object(&prev);
+    json_push_kv_str(&prev, "txid",
+        "0000000000000000000000000000000000000000000000000000000000000000");
+    json_push_kv_int(&prev, "vout", 0);
+    json_push_kv_str(&prev, "scriptPubKey", fx->p2sh_hex);
+    json_push_kv_real(&prev, "amount", 0.00022);
+    json_push_kv_str(&prev, "redeemScript", fx->redeem_hex);
+    json_push_back(&prevs, &prev); json_free(&prev);
+    json_push_back(&params, &prevs); json_free(&prevs);
+    json_init(&result);
+
+    fx->ok = fx->ok && rpc_table_execute(fx->tbl, "signrawtransaction",
+                                         &params, &result) &&
+         json_get_bool(json_get(&result, "complete"));
+    const char *signed_hex = json_get_str(json_get(&result, "hex"));
+    transaction_init(&fx->signed_tx);
+    fx->ok = fx->ok && signed_hex && decode_hex_tx(&fx->signed_tx,
+                                                   signed_hex) &&
+         fx->signed_tx.num_vin == 1;
+    json_free(&params);
+    json_free(&result);
+}
+
+static void rs_p2sh_check_script_sig(struct rs_p2sh_fx *fx)
+{
+    if (fx->ok) {
+        const struct script *ss = &fx->signed_tx.vin[0].script_sig;
+        size_t pos = 0;
+        fx->ok = ss->size > fx->redeem.size + 4 &&
+             ss->data[pos++] == OP_0;
+        for (size_t i = 0; i < 2 && fx->ok; i++) {
+            size_t sig_len = ss->data[pos++];
+            fx->ok = sig_len >= 70 && sig_len <= SIGNATURE_SIZE + 1 &&
+                 pos + sig_len <= ss->size;
+            pos += sig_len;
+        }
+        fx->ok = fx->ok && pos < ss->size &&
+             ss->data[pos++] == fx->redeem.size &&
+             pos + fx->redeem.size == ss->size &&
+             memcmp(ss->data + pos, fx->redeem.data, fx->redeem.size) == 0;
+    }
+    transaction_free(&fx->signed_tx);
+}
+
+static int rs_case_p2sh_2of2(void)
+{
+    int failures = 0;
+    struct rs_p2sh_fx fx = {0};
+
+    printf("rpc_safety: raw-sign P2SH 2-of-2 emits both signatures... ");
+    fx.ks = calloc(1, sizeof(*fx.ks));
+    fx.tbl = calloc(1, sizeof(*fx.tbl));
+    fx.ok = fx.ks && fx.tbl;
+    if (fx.ok) {
+        rs_p2sh_keys(&fx);
+        rs_p2sh_build_tx(&fx);
+        rs_p2sh_sign(&fx);
+        rs_p2sh_check_script_sig(&fx);
+        rpc_rawtx_set_keystore(NULL);
+        keystore_free(fx.ks);
+    }
+    for (size_t i = 0; i < 2; i++)
+        memory_cleanse(fx.keys[i].vch, sizeof(fx.keys[i].vch));
+    free(fx.ks);
+    free(fx.tbl);
+    if (fx.ok) printf("OK\n");
+    else    { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
 int test_rpc_safety(void);
 int test_rpc_safety(void)
 {
     int failures = 0;
+    bool aborted = false;
 
     failures += t_parse_amount_bounds();
     failures += t_parse_amount_int_money_range();
 
-    printf("rpc_safety: wallet freshness follows authoritative H*... ");
-    {
-        /* struct wallet embeds a ~40 MB tx table: heap it (as
-         * test_accept_to_mempool does) to fit the default main-thread stack. */
-        struct wallet *wallet = zcl_calloc(1, sizeof(*wallet),
-                                           "rpc-safety-wallet");
-        if (!wallet) {
-            printf("FAIL (wallet allocation)\n");
-            failures++;
-            return failures;
-        }
-        wallet_init(wallet);
-        wallet->best_block_height = 1;
-        wallet->map_wallet[0].used = true;
-        wallet->map_wallet[0].confirms = 1;
-        wallet->num_wallet_tx = 1;
+    failures += rs_case_wallet_freshness(&aborted);
+    if (aborted)
+        return failures;
 
-        struct main_state ms;
-        build_unresolved_tip_state(&ms, 3);
-        reducer_frontier_provable_tip_set(1);
-        struct wallet_rpc_context ctx = {
-            .wallet = wallet,
-            .main_state = &ms,
-        };
-        struct wallet_balance_freshness freshness;
-        (void)wallet_transparent_spendable_balance_diagnose(
-            &ctx, &freshness);
-        bool ok = freshness.chain_height == 1 &&
-                  freshness.wallet_height == 1 &&
-                  freshness.source &&
-                  strcmp(freshness.source, "memory") == 0;
-
-        reducer_frontier_provable_tip_reset();
-        main_state_free(&ms);
-        wallet_free(wallet);
-        free(wallet);
-        if (ok) printf("OK\n");
-        else    { printf("FAIL\n"); failures++; }
-    }
-
-    printf("rpc_safety: fanout preflight failure creates no address... ");
-    {
-        ensure_rpc_warmup_finished_once();
-        struct wallet *wallet = zcl_calloc(1, sizeof(*wallet),
-                                           "rpc-safety-wallet");
-        if (!wallet) {
-            printf("FAIL (wallet allocation)\n");
-            failures++;
-            return failures;
-        }
-        wallet_init(wallet);
-        struct main_state ms; main_state_init(&ms);
-        struct rpc_table tbl; rpc_table_init(&tbl);
-        register_vault_intent_rpc_commands(&tbl);
-        wallet_rpc_context_set_base(wallet, &ms, "/tmp", NULL, NULL, NULL);
-        wallet_rpc_context_set_node_db(NULL);
-        wallet_rpc_context_set_coins_tip(NULL);
-        size_t keys_before = wallet->keystore.num_keys;
-
-        struct json_value params, input, result;
-        json_init(&params); json_set_array(&params);
-        json_init(&input); json_set_object(&input);
-        json_init(&result);
-        (void)json_push_kv_str(&input, "wallet_scope", "dev");
-        (void)json_push_kv_int(&input, "recipient_value_zat", 1000);
-        (void)json_push_kv_int(&input, "maximum_fee_zat", 10000);
-        (void)json_push_kv_int(&input, "concurrency", 10);
-        (void)json_push_kv_str(&input, "idempotency_key", "rpc-safety-1");
-        (void)json_push_back(&params, &input);
-        bool handled = rpc_table_execute(
-            &tbl, "vault_intent_fanout_plan", &params, &result);
-        const char *code = json_get_str(json_get(&result, "code"));
-        bool ok = handled && !json_get_bool(json_get(&result, "ok")) &&
-            code && strcmp(code, "WALLET_UNAVAILABLE") == 0 &&
-            wallet->keystore.num_keys == keys_before &&
-            json_get(&result, "address") == NULL &&
-            json_get(&result, "effects") == NULL;
-        if (!ok)
-            printf("(handled=%d code=%s keys=%zu->%zu address=%d effects=%d) ",
-                   (int)handled, code ? code : "NULL", keys_before,
-                   wallet->keystore.num_keys,
-                   json_get(&result, "address") != NULL,
-                   json_get(&result, "effects") != NULL);
-        json_free(&params); json_free(&input); json_free(&result);
-        wallet_rpc_context_set_base(NULL, NULL, NULL, NULL, NULL, NULL);
-        wallet_rpc_context_set_node_db(NULL);
-        wallet_rpc_context_set_coins_tip(NULL);
-        main_state_free(&ms); wallet_free(wallet); free(wallet);
-        if (ok) printf("OK\n");
-        else    { printf("FAIL\n"); failures++; }
-    }
+    failures += rs_case_fanout_preflight(&aborted);
+    if (aborted)
+        return failures;
 
     failures += rs_case_reindex_replay();
     failures += rs_case_walletbackup_status();
     failures += rs_case_getrawmempool_live();
 
-    printf("rpc_safety: confirmed tx uses verified node/wallet locator... ");
-    {
-        ensure_rpc_warmup_finished_once();
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "rpc_safety", "rawtx_node_db");
-
-        struct transaction shielded;
-        transaction_init(&shielded);
-        shielded.overwintered = true;
-        shielded.version = SAPLING_TX_VERSION;
-        shielded.version_group_id = SAPLING_VERSION_GROUP_ID;
-        shielded.expiry_height = 100;
-        shielded.v_shielded_spend = zcl_calloc(
-            1, sizeof(*shielded.v_shielded_spend),
-            "rpc_safety.shielded_spend");
-        bool ok = shielded.v_shielded_spend != NULL;
-        if (ok) {
-            shielded.num_shielded_spend = 1;
-            memset(shielded.v_shielded_spend[0].nullifier.data, 0x73, 32);
-            transaction_compute_hash(&shielded);
-        }
-
-        struct block body;
-        block_init(&body);
-        body.header.nVersion = 4;
-        body.header.nTime = 1700000000;
-        body.header.nBits = 0x2000ffff;
-        if (ok) {
-            body.vtx = zcl_calloc(1, sizeof(*body.vtx),
-                                  "rpc_safety.rawtx_block");
-            ok = body.vtx != NULL;
-        }
-        if (ok) {
-            body.num_vtx = 1;
-            transaction_init(&body.vtx[0]);
-            ok = transaction_copy(&body.vtx[0], &shielded);
-        }
-
-        struct uint256 body_hash;
-        uint256_set_null(&body_hash);
-        struct disk_block_pos pos;
-        disk_block_pos_init(&pos);
-        const unsigned char msg_start[4] = { 0x24, 0xe9, 0x27, 0x64 };
-        if (ok) {
-            block_get_hash(&body, &body_hash);
-            ok = write_block_to_disk(&body, &pos, dir, msg_start);
-        }
-
-        struct main_state ms;
-        main_state_init(&ms);
-        struct block_index *bi = NULL;
-        if (ok) {
-            bi = chainstate_insert_block_index((struct chainstate *)&ms,
-                                               &body_hash);
-            ok = bi != NULL;
-        }
-        if (ok) {
-            bi->nHeight = 0;
-            bi->nFile = pos.nFile;
-            bi->nDataPos = pos.nPos;
-            bi->nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
-            bi->nTx = 1;
-            bi->nChainTx = 1;
-            ok = active_chain_move_window_tip(&ms.chain_active, bi);
-        }
-
-        struct node_db ndb;
-        memset(&ndb, 0, sizeof(ndb));
-        if (ok)
-            ok = node_db_open(&ndb, ":memory:");
-        if (ok) {
-            struct db_tx_index row;
-            memset(&row, 0, sizeof(row));
-            memcpy(row.txid, shielded.hash.data, sizeof(row.txid));
-            memcpy(row.block_hash, body_hash.data, sizeof(row.block_hash));
-            row.block_height = 0;
-            row.tx_index = 0;
-            row.file_num = pos.nFile;
-            row.file_pos = (int)pos.nPos;
-            ok = db_tx_save(&ndb, &row);
-        }
-
-        struct rpc_table tbl;
-        rpc_table_init(&tbl);
-        if (ok) {
-            rpc_rawtx_set_state(&ms, NULL, NULL, dir);
-            wallet_rpc_context_set_base(NULL, &ms, dir, NULL, NULL, NULL);
-            wallet_rpc_context_set_node_db(&ndb);
-            register_rawtransaction_rpc_commands(&tbl);
-            rpc_blockchain_set_state(&ms, NULL, dir);
-            register_blockchain_rpc_commands(&tbl);
-        }
-
-        struct json_value params, result, txid_arg, verbose_arg;
-        json_init(&params);
-        json_set_array(&params);
-        json_init(&result);
-        json_init(&txid_arg);
-        json_init(&verbose_arg);
-        char txid_hex[65] = "";
-        if (ok) {
-            uint256_get_hex(&shielded.hash, txid_hex);
-            json_set_str(&txid_arg, txid_hex);
-            json_set_int(&verbose_arg, 1);
-            (void)json_push_back(&params, &txid_arg);
-            (void)json_push_back(&params, &verbose_arg);
-            ok = rpc_table_execute(&tbl, "getrawtransaction", &params,
-                                   &result);
-        }
-        const char *got_txid = json_get_str(json_get(&result, "txid"));
-        const char *got_block = json_get_str(json_get(&result, "blockhash"));
-        const struct json_value *got_confirmations =
-            json_get(&result, "confirmations");
-        char block_hex[65] = "";
-        uint256_get_hex(&body_hash, block_hex);
-        ok = ok && got_txid && strcmp(got_txid, txid_hex) == 0 &&
-             got_block && strcmp(got_block, block_hex) == 0 &&
-             got_confirmations && json_get_int(got_confirmations) == 1;
-
-        json_free(&params);
-        json_free(&result);
-        json_free(&txid_arg);
-        json_free(&verbose_arg);
-
-        /* The wallet projection is finalized before the global transaction
-         * catalog catches up; removing the catalog row reproduces that
-         * window, and chain lookup must still agree with wallet history. */
-        struct byte_stream wallet_raw;
-        stream_init(&wallet_raw, 512);
-        struct db_wallet_tx wallet_row;
-        memset(&wallet_row, 0, sizeof(wallet_row));
-        if (ok) {
-            ok = db_tx_delete(&ndb, shielded.hash.data) &&
-                transaction_serialize(&shielded, &wallet_raw);
-        }
-        if (ok) {
-            memcpy(wallet_row.txid, shielded.hash.data,
-                   sizeof(wallet_row.txid));
-            wallet_row.raw_tx = wallet_raw.data;
-            wallet_row.raw_tx_len = wallet_raw.size;
-            memcpy(wallet_row.block_hash, body_hash.data,
-                   sizeof(wallet_row.block_hash));
-            wallet_row.has_block = true;
-            wallet_row.block_height = 0;
-            wallet_row.time_received = 1700000000;
-            ok = db_wallet_tx_save(&ndb, &wallet_row);
-        }
-        ok = ok && db_wallet_tx_confirmed_count(&ndb) == 1;
-
-        json_init(&params);
-        json_set_array(&params);
-        json_init(&result);
-        json_init(&txid_arg);
-        json_init(&verbose_arg);
-        if (ok) {
-            json_set_str(&txid_arg, txid_hex);
-            json_set_int(&verbose_arg, 1);
-            (void)json_push_back(&params, &txid_arg);
-            (void)json_push_back(&params, &verbose_arg);
-            ok = rpc_table_execute(&tbl, "getrawtransaction", &params,
-                                   &result);
-        }
-        got_txid = json_get_str(json_get(&result, "txid"));
-        got_block = json_get_str(json_get(&result, "blockhash"));
-        got_confirmations = json_get(&result, "confirmations");
-        ok = ok && got_txid && strcmp(got_txid, txid_hex) == 0 &&
-             got_block && strcmp(got_block, block_hex) == 0 &&
-             got_confirmations && json_get_int(got_confirmations) == 1;
-        json_free(&params);
-        json_free(&result);
-        json_free(&txid_arg);
-        json_free(&verbose_arg);
-        stream_free(&wallet_raw);
-
-        /* The finalized in-memory wallet leads even the wallet SQLite row;
-         * lookup must stay exact. Heap the ~40 MB struct wallet. */
-        struct wallet *owned_wallet = zcl_calloc(1, sizeof(*owned_wallet),
-                                                 "rpc-safety-owned-wallet");
-        ok = ok && owned_wallet != NULL;
-        if (owned_wallet)
-            wallet_init(owned_wallet);
-        struct wallet_tx owned_wtx;
-        memset(&owned_wtx, 0, sizeof(owned_wtx));
-        if (ok) {
-            ok = db_wallet_tx_delete(&ndb, shielded.hash.data) &&
-                transaction_copy(&owned_wtx.tx, &shielded);
-        }
-        ok = ok && db_wallet_tx_confirmed_count(&ndb) == 0;
-        if (ok) {
-            owned_wtx.hash_block = body_hash;
-            owned_wtx.confirms = 1;
-            owned_wtx.used = true;
-            ok = wallet_add_to_wallet(owned_wallet, &owned_wtx);
-            transaction_free(&owned_wtx.tx);
-            wallet_rpc_context_set_base(owned_wallet, &ms, dir,
-                                        NULL, NULL, NULL);
-            wallet_rpc_context_set_node_db(&ndb);
-        }
-
-        json_init(&params);
-        json_set_array(&params);
-        json_init(&result);
-        json_init(&txid_arg);
-        json_init(&verbose_arg);
-        if (ok) {
-            json_set_str(&txid_arg, txid_hex);
-            json_set_int(&verbose_arg, 1);
-            (void)json_push_back(&params, &txid_arg);
-            (void)json_push_back(&params, &verbose_arg);
-            ok = rpc_table_execute(&tbl, "getrawtransaction", &params,
-                                   &result);
-        }
-        got_txid = json_get_str(json_get(&result, "txid"));
-        got_block = json_get_str(json_get(&result, "blockhash"));
-        got_confirmations = json_get(&result, "confirmations");
-        ok = ok && got_txid && strcmp(got_txid, txid_hex) == 0 &&
-             got_block && strcmp(got_block, block_hex) == 0 &&
-             got_confirmations && json_get_int(got_confirmations) == 1;
-        json_free(&params);
-        json_free(&result);
-        json_free(&txid_arg);
-        json_free(&verbose_arg);
-
-        /* A non-wallet peer must expose a just-confirmed transaction while
-         * every derived index is absent. */
-        if (ok) {
-            wallet_rpc_context_set_base(NULL, &ms, dir,
-                                        NULL, NULL, NULL);
-            wallet_rpc_context_set_node_db(&ndb);
-            ok = db_wallet_tx_delete(&ndb, shielded.hash.data) &&
-                db_tx_delete(&ndb, shielded.hash.data);
-        }
-        json_init(&params);
-        json_set_array(&params);
-        json_init(&result);
-        json_init(&txid_arg);
-        json_init(&verbose_arg);
-        if (ok) {
-            json_set_str(&txid_arg, txid_hex);
-            json_set_int(&verbose_arg, 1);
-            (void)json_push_back(&params, &txid_arg);
-            (void)json_push_back(&params, &verbose_arg);
-            ok = rpc_table_execute(&tbl, "getrawtransaction", &params,
-                                   &result);
-        }
-        got_txid = json_get_str(json_get(&result, "txid"));
-        got_block = json_get_str(json_get(&result, "blockhash"));
-        got_confirmations = json_get(&result, "confirmations");
-        ok = ok && got_txid && strcmp(got_txid, txid_hex) == 0 &&
-             got_block && strcmp(got_block, block_hex) == 0 &&
-             got_confirmations && json_get_int(got_confirmations) == 1;
-        json_free(&params);
-        json_free(&result);
-        json_free(&txid_arg);
-        json_free(&verbose_arg);
-
-        /* The sibling block lookup must expose the exact transaction ids,
-         * not only a count.  This is the recovery path when an operator has
-         * a confirmed block identity but not a working transaction index. */
-        json_init(&params);
-        json_set_array(&params);
-        json_init(&result);
-        json_init(&txid_arg);
-        json_init(&verbose_arg);
-        if (ok) {
-            reducer_frontier_provable_tip_set(0);
-            json_set_str(&txid_arg, block_hex);
-            json_set_int(&verbose_arg, 1);
-            (void)json_push_back(&params, &txid_arg);
-            (void)json_push_back(&params, &verbose_arg);
-            ok = rpc_table_execute(&tbl, "getblock", &params, &result);
-        }
-        const struct json_value *block_txids = json_get(&result, "tx");
-        const char *block_txid =
-            block_txids && block_txids->type == JSON_ARR &&
-                    json_size(block_txids) == 1
-                ? json_get_str(json_at(block_txids, 0)) : NULL;
-        ok = ok && json_get_int(json_get(&result, "size")) > 0 &&
-             json_get_int(json_get(&result, "tx_count")) == 1 &&
-             block_txid && strcmp(block_txid, txid_hex) == 0;
-        json_free(&params);
-        json_free(&result);
-        json_free(&txid_arg);
-        json_free(&verbose_arg);
-
-        /* Internal callers use JSON booleans; legacy clients use numeric
-         * 0/1. Both forms select the same object/raw modes. Unrelated JSON
-         * types remain a named parameter refusal. */
-        static const struct {
-            bool boolean;
-            int value;
-            bool invalid_object;
-            bool expect_ok;
-            enum json_type expect_type;
-        } verbose_cases[] = {
-            {true,  1, false, true,  JSON_OBJ},
-            {true,  0, false, true,  JSON_STR},
-            {false, 1, false, true,  JSON_OBJ},
-            {false, 0, false, true,  JSON_STR},
-            {false, 0, true,  false, JSON_STR},
-        };
-        for (size_t i = 0; ok && i < sizeof(verbose_cases) /
-                                      sizeof(verbose_cases[0]); i++) {
-            json_init(&params);
-            json_set_array(&params);
-            json_init(&result);
-            json_init(&txid_arg);
-            json_init(&verbose_arg);
-            json_set_str(&txid_arg, block_hex);
-            if (verbose_cases[i].invalid_object)
-                json_set_object(&verbose_arg);
-            else if (verbose_cases[i].boolean)
-                json_set_bool(&verbose_arg, verbose_cases[i].value != 0);
-            else
-                json_set_int(&verbose_arg, verbose_cases[i].value);
-            (void)json_push_back(&params, &txid_arg);
-            (void)json_push_back(&params, &verbose_arg);
-            bool called = rpc_table_execute(&tbl, "getblock", &params,
-                                            &result);
-            ok = called == verbose_cases[i].expect_ok &&
-                 result.type == verbose_cases[i].expect_type;
-            if (verbose_cases[i].invalid_object)
-                ok = ok && strstr(json_get_str(&result),
-                                  "must be numeric") != NULL;
-            json_free(&params);
-            json_free(&result);
-            json_free(&txid_arg);
-            json_free(&verbose_arg);
-        }
-        reducer_frontier_provable_tip_reset();
-
-        wallet_rpc_context_set_node_db(NULL);
-        wallet_rpc_context_set_base(NULL, NULL, NULL, NULL, NULL, NULL);
-        rpc_rawtx_set_state(NULL, NULL, NULL, NULL);
-        rpc_blockchain_set_state(NULL, NULL, NULL);
-        if (ndb.open)
-            node_db_close(&ndb);
-        main_state_free(&ms);
-        block_free(&body);
-        transaction_free(&shielded);
-        if (owned_wallet) {
-            wallet_free(owned_wallet);
-            free(owned_wallet);
-        }
-        test_rm_rf(dir);
-
-        if (ok) printf("OK\n");
-        else    { printf("FAIL\n"); failures++; }
-    }
-
-    printf("rpc_safety: getbestblockhash follows provable tip... ");
-    {
-        test_reset_shared_globals();
-        ensure_rpc_warmup_finished_once();
-
-        struct main_state ms;
-        struct block_index *blocks[4] = {0};
-        bool ok = rpc_safety_build_chain(&ms, blocks, 4);
-        rpc_blockchain_set_state(&ms, NULL, "/tmp");
-        reducer_frontier_provable_tip_set(1);
-
-        struct rpc_table tbl;
-        rpc_table_init(&tbl);
-        register_blockchain_rpc_commands(&tbl);
-
-        struct rpc_table health_tbl;
-        rpc_table_init(&health_tbl);
-        rpc_health_set_state(&ms, NULL, NULL, NULL);
-        register_health_rpc_commands(&health_tbl);
-
-        struct json_value params = {0};
-        struct json_value result = {0};
-        json_init(&params);
-        json_set_array(&params);
-        json_init(&result);
-
-        ok = ok && rpc_table_execute(&tbl, "getbestblockhash", &params,
-                                     &result);
-        char hstar_hex[65] = {0};
-        char active_hex[65] = {0};
-        if (blocks[1] && blocks[1]->phashBlock)
-            uint256_get_hex(blocks[1]->phashBlock, hstar_hex);
-        if (blocks[3] && blocks[3]->phashBlock)
-            uint256_get_hex(blocks[3]->phashBlock, active_hex);
-        ok = ok && result.type == JSON_STR &&
-             strcmp(json_get_str(&result), hstar_hex) == 0 &&
-             strcmp(json_get_str(&result), active_hex) != 0;
-        json_free(&result);
-
-        json_init(&result);
-        ok = ok && rpc_table_execute(&tbl, "getchaintip", &params, &result);
-        const struct json_value *tip_height = json_get(&result, "height");
-        const struct json_value *tip_hash = json_get(&result, "hash");
-        ok = ok && tip_height && json_get_int(tip_height) == 1;
-        ok = ok && tip_hash && tip_hash->type == JSON_STR &&
-             strcmp(json_get_str(tip_hash), hstar_hex) == 0 &&
-             strcmp(json_get_str(tip_hash), active_hex) != 0;
-        json_free(&result);
-        json_free(&params);
-
-        init_single_int_param(&params, 1);
-        json_init(&result);
-        ok = ok && rpc_table_execute(&tbl, "getblockhash", &params,
-                                     &result) &&
-             result.type == JSON_STR &&
-             strcmp(json_get_str(&result), hstar_hex) == 0;
-        json_free(&result);
-        json_free(&params);
-
-        init_single_int_param(&params, 2);
-        json_init(&result);
-        ok = ok && !rpc_table_execute(&tbl, "getblockhash", &params,
-                                      &result);
-        ok = ok && result.type == JSON_STR &&
-             strcmp(json_get_str(&result), active_hex) != 0 &&
-             strstr(json_get_str(&result), "out of range") != NULL;
-        json_free(&result);
-        json_free(&params);
-
-        init_single_str_param(&params, hstar_hex);
-        json_init(&result);
-        ok = ok && rpc_table_execute(&tbl, "getblockheader", &params,
-                                     &result);
-        const struct json_value *header_height = json_get(&result, "height");
-        ok = ok && header_height && json_get_int(header_height) == 1;
-        json_free(&result);
-        json_free(&params);
-
-        /* Slim-flat condition: fixture index entries carry zero merkle/nonce
-         * (warm boot from the flat cache); with a durable header authority
-         * registered, getblockheader must hydrate both through the runtime
-         * port. Expectations are deserialized from the stub authority's
-         * bytes. The call also pins the era-bits difficulty against legacy
-         * zclassicd. */
-        rpc_safety_seed_known_header();
-        struct block_header want_hdr;
-        block_header_init(&want_hdr);
-        struct byte_stream hr;
-        stream_init_from_data(&hr, rpc_safety_hdr_bytes, rpc_safety_hdr_len);
-        ok = ok && block_header_deserialize(&want_hdr, &hr);
-        char want_merkle[65];
-        char want_nonce[65];
-        uint256_get_hex(&want_hdr.hashMerkleRoot, want_merkle);
-        uint256_get_hex(&want_hdr.nNonce, want_nonce);
-        if (blocks[1])
-            blocks[1]->nBits = 0x1c7397b0;
-        node_db_runtime_port_set(&rpc_safety_header_port);
-        init_single_str_param(&params, hstar_hex);
-        json_init(&result);
-        ok = ok && rpc_table_execute(&tbl, "getblockheader", &params,
-                                     &result);
-        const struct json_value *got_merkle = json_get(&result, "merkleroot");
-        const struct json_value *got_nonce = json_get(&result, "nonce");
-        const struct json_value *got_diff = json_get(&result, "difficulty");
-        ok = ok && got_merkle && got_merkle->type == JSON_STR &&
-             strcmp(json_get_str(got_merkle), want_merkle) == 0;
-        ok = ok && got_nonce && got_nonce->type == JSON_STR &&
-             strcmp(json_get_str(got_nonce), want_nonce) == 0;
-        /* legacy zclassicd renders 1161125.834138388 for bits 0x1c7397b0
-         * (oracle h=500000); allow 1e-9 relative for double formatting. */
-        const double want_diff = 1161125.834138388;
-        double diff_got = got_diff ? json_get_real(got_diff) : 0.0;
-        double diff_rel = (diff_got - want_diff) / want_diff;
-        if (diff_rel < 0) diff_rel = -diff_rel;
-        ok = ok && got_diff && got_diff->type == JSON_REAL &&
-             diff_rel < 1e-9;
-        json_free(&result);
-        json_free(&params);
-        node_db_runtime_port_set(NULL);
-
-        init_single_str_param(&params, active_hex);
-        json_init(&result);
-        ok = ok && !rpc_table_execute(&tbl, "getblockheader", &params,
-                                      &result);
-        ok = ok && result.type == JSON_STR &&
-             strstr(json_get_str(&result), "not found") != NULL;
-        json_free(&result);
-        json_free(&params);
-
-        init_single_str_param(&params, hstar_hex);
-        json_init(&result);
-        ok = ok && !rpc_table_execute(&tbl, "getblock", &params, &result) &&
-             result.type == JSON_STR &&
-             strstr(json_get_str(&result), "body unavailable") != NULL;
-        json_free(&result);
-        json_free(&params);
-
-        json_init(&params);
-        json_set_array(&params);
-        json_init(&result);
-        ok = ok && rpc_table_execute(&health_tbl, "getsyncdetail", &params,
-                                     &result);
-        const struct json_value *chain = json_get(&result, "chain");
-        const struct json_value *chain_height = json_get(chain, "height");
-        const struct json_value *best_block = json_get(chain, "best_block");
-        ok = ok && chain && chain_height && json_get_int(chain_height) == 1;
-        ok = ok && best_block && best_block->type == JSON_STR &&
-             strcmp(json_get_str(best_block), hstar_hex) == 0 &&
-             strcmp(json_get_str(best_block), active_hex) != 0;
-        json_free(&result);
-        json_free(&params);
-
-        json_init(&params);
-        json_set_array(&params);
-        json_init(&result);
-        ok = ok && rpc_table_execute(&health_tbl, "getsyncdiag", &params,
-                                     &result);
-        const struct json_value *diag_chain_height =
-            json_get(&result, "chain_height");
-        const struct json_value *diag_header_height =
-            json_get(&result, "best_header_height");
-        ok = ok && diag_chain_height &&
-             json_get_int(diag_chain_height) == 1;
-        ok = ok && diag_header_height &&
-             json_get_int(diag_header_height) == 3;
-        json_free(&result);
-        json_free(&params);
-
-        init_single_str_param(&params, active_hex);
-        json_init(&result);
-        ok = ok && !rpc_table_execute(&tbl, "getblock", &params, &result);
-        ok = ok && result.type == JSON_STR &&
-             strstr(json_get_str(&result), "not found") != NULL;
-
-        json_free(&params);
-        json_free(&result);
-        reducer_frontier_provable_tip_reset();
-        rpc_health_set_state(NULL, NULL, NULL, NULL);
-        rpc_blockchain_set_state(NULL, NULL, NULL);
-        main_state_free(&ms);
-        test_reset_shared_globals();
-
-        if (ok) printf("OK\n");
-        else    { printf("FAIL\n"); failures++; }
-    }
-
-    printf("rpc_safety: getblockhash resolves sparse H* from node db... ");
-    {
-        test_reset_shared_globals();
-        ensure_rpc_warmup_finished_once();
-
-        struct main_state ms;
-        struct block_index *blocks[3] = {0};
-        struct node_db ndb;
-        bool ndb_open = false;
-        bool ok = rpc_safety_build_chain(&ms, blocks, 3);
-        if (ok)
-            ms.chain_active.chain[1] = NULL;
-        ok = ok && node_db_open(&ndb, ":memory:");
-        ndb_open = ok;
-        ok = ok && rpc_safety_save_projected_block(&ndb, blocks[1]);
-
-        rpc_blockchain_set_state(&ms, NULL, "/tmp");
-        rpc_blockchain_set_node_db(&ndb);
-        reducer_frontier_provable_tip_set(1);
-
-        struct rpc_table tbl;
-        rpc_table_init(&tbl);
-        register_blockchain_rpc_commands(&tbl);
-
-        char hstar_hex[65] = {0};
-        char active_hex[65] = {0};
-        if (blocks[1] && blocks[1]->phashBlock)
-            uint256_get_hex(blocks[1]->phashBlock, hstar_hex);
-        if (blocks[2] && blocks[2]->phashBlock)
-            uint256_get_hex(blocks[2]->phashBlock, active_hex);
-
-        struct json_value params = {0};
-        struct json_value result = {0};
-        json_init(&params);
-        json_set_array(&params);
-        json_init(&result);
-
-        ok = ok && rpc_table_execute(&tbl, "getbestblockhash", &params,
-                                     &result);
-        ok = ok && result.type == JSON_STR &&
-             strcmp(json_get_str(&result), hstar_hex) == 0 &&
-             strcmp(json_get_str(&result), active_hex) != 0;
-        json_free(&result);
-        json_free(&params);
-
-        init_single_int_param(&params, 1);
-        json_init(&result);
-        ok = ok && rpc_table_execute(&tbl, "getblockhash", &params,
-                                     &result) &&
-             result.type == JSON_STR &&
-             strcmp(json_get_str(&result), hstar_hex) == 0 &&
-             strcmp(json_get_str(&result), active_hex) != 0;
-        json_free(&result);
-        json_free(&params);
-
-        init_single_int_param(&params, 2);
-        json_init(&result);
-        ok = ok && !rpc_table_execute(&tbl, "getblockhash", &params,
-                                      &result);
-        ok = ok && result.type == JSON_STR &&
-             strstr(json_get_str(&result), "out of range") != NULL;
-
-        json_free(&params);
-        json_free(&result);
-        rpc_blockchain_set_state(NULL, NULL, NULL);
-        rpc_blockchain_set_node_db(NULL);
-        reducer_frontier_provable_tip_reset();
-        if (ndb_open)
-            node_db_close(&ndb);
-        main_state_free(&ms);
-        test_reset_shared_globals();
-
-        if (ok) printf("OK\n");
-        else    { printf("FAIL\n"); failures++; }
-    }
-
-    printf("rpc_safety: gettxoutsetinfo reports coin frontier... ");
-    {
-        test_reset_shared_globals();
-        ensure_rpc_warmup_finished_once();
-        progress_store_close();
-
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "rpc_safety", "coin_frontier");
-
-        struct main_state ms;
-        struct block_index *blocks[4] = {0};
-        bool ok = rpc_safety_build_chain(&ms, blocks, 4);
-        ok = ok && progress_store_open(dir);
-        sqlite3 *db = progress_store_db();
-        ok = ok && db && rpc_safety_seed_coin_frontier(db, blocks[1]);
-
-        rpc_blockchain_set_state(&ms, NULL, "/tmp");
-
-        struct rpc_table tbl;
-        rpc_table_init(&tbl);
-        register_blockchain_rpc_commands(&tbl);
-
-        struct json_value params = {0};
-        struct json_value result = {0};
-        json_init(&params);
-        json_set_array(&params);
-        json_init(&result);
-
-        ok = ok && rpc_table_execute(&tbl, "gettxoutsetinfo", &params,
-                                     &result);
-        const struct json_value *height = json_get(&result, "height");
-        const struct json_value *bestblock = json_get(&result, "bestblock");
-        const struct json_value *txs = json_get(&result, "transactions");
-        const struct json_value *outs = json_get(&result, "txouts");
-        char coin_hex[65] = {0};
-        char active_hex[65] = {0};
-        if (blocks[1] && blocks[1]->phashBlock)
-            uint256_get_hex(blocks[1]->phashBlock, coin_hex);
-        if (blocks[3] && blocks[3]->phashBlock)
-            uint256_get_hex(blocks[3]->phashBlock, active_hex);
-        ok = ok && height && json_get_int(height) == 1;
-        ok = ok && bestblock && bestblock->type == JSON_STR &&
-             strcmp(json_get_str(bestblock), coin_hex) == 0 &&
-             strcmp(json_get_str(bestblock), active_hex) != 0;
-        ok = ok && txs && json_get_int(txs) == 1;
-        ok = ok && outs && json_get_int(outs) == 1;
-
-        json_free(&params);
-        json_free(&result);
-        rpc_blockchain_set_state(NULL, NULL, NULL);
-        progress_store_close();
-        test_cleanup_tmpdir(dir);
-        main_state_free(&ms);
-        test_reset_shared_globals();
-
-        if (ok) printf("OK\n");
-        else    { printf("FAIL\n"); failures++; }
-    }
-
-    printf("rpc_safety: summary RPCs do not borrow unresolved active tip... ");
-    {
-        test_reset_shared_globals();
-        ensure_rpc_warmup_finished_once();
-
-        struct main_state ms;
-        struct block_index *blocks[4] = {0};
-        bool ok = rpc_safety_build_chain(&ms, blocks, 4);
-        if (ok)
-            ms.chain_active.chain[1] = NULL;
-        reducer_frontier_provable_tip_set(1);
-
-        struct connman cm;
-        memset(&cm, 0, sizeof(cm));
-        net_manager_init(&cm.manager);
-        cm.manager.num_nodes = 3;
-
-        struct rpc_table chain_tbl;
-        rpc_table_init(&chain_tbl);
-        rpc_blockchain_set_state(&ms, NULL, "/tmp");
-        register_blockchain_rpc_commands(&chain_tbl);
-
-        struct rpc_table misc_tbl;
-        rpc_table_init(&misc_tbl);
-        rpc_misc_set_state(&ms);
-        rpc_net_set_connman(&cm);
-        register_misc_rpc_commands(&misc_tbl);
-
-        struct rpc_table mining_tbl;
-        rpc_table_init(&mining_tbl);
-        rpc_mining_set_state(&ms, NULL, NULL);
-        register_mining_rpc_commands(&mining_tbl);
-
-        struct json_value params = {0};
-        struct json_value result = {0};
-        json_init(&params);
-        json_set_array(&params);
-        json_init(&result);
-
-        /* getblockchaininfo must NOT borrow the unresolved active tip
-         * (height 3): with the H* slot unresolved it returns a valid
-         * IBD-shaped object reporting the PROVABLE height (H* == 1) with
-         * initialblockdownload=true. */
-        ok = ok && rpc_table_execute(&chain_tbl, "getblockchaininfo",
-                                     &params, &result);
-        {
-            const struct json_value *gbi_blocks = json_get(&result, "blocks");
-            const struct json_value *gbi_ibd =
-                json_get(&result, "initialblockdownload");
-            ok = ok && gbi_blocks && json_get_int(gbi_blocks) == 1;
-            ok = ok && gbi_ibd && json_get_bool(gbi_ibd);
-        }
-        json_free(&result);
-
-        json_init(&result);
-        ok = ok && rpc_table_execute(&misc_tbl, "getinfo", &params,
-                                     &result);
-        const struct json_value *info_blocks = json_get(&result, "blocks");
-        const struct json_value *info_connections =
-            json_get(&result, "connections");
-        ok = ok && info_blocks && json_get_int(info_blocks) == 1;
-        ok = ok && info_connections &&
-             json_get_int(info_connections) == 3;
-        json_free(&result);
-
-        json_init(&result);
-        ok = ok && rpc_table_execute(&mining_tbl, "getmininginfo", &params,
-                                     &result);
-        const struct json_value *mining_blocks = json_get(&result, "blocks");
-        ok = ok && mining_blocks && json_get_int(mining_blocks) == 1;
-
-        json_free(&params);
-        json_free(&result);
-        rpc_blockchain_set_state(NULL, NULL, NULL);
-        rpc_misc_set_state(NULL);
-        rpc_net_set_connman(NULL);
-        rpc_mining_set_state(NULL, NULL, NULL);
-        cm.manager.num_nodes = 0;
-        net_manager_free(&cm.manager);
-        reducer_frontier_provable_tip_reset();
-        main_state_free(&ms);
-        test_reset_shared_globals();
-
-        if (ok) printf("OK\n");
-        else    { printf("FAIL\n"); failures++; }
-    }
-
-    printf("rpc_safety: chainstate guard rejects unresolved active tip... ");
-    {
-        ensure_rpc_warmup_finished_once();
-
-        struct main_state *ms = calloc(1, sizeof(*ms));
-        struct coins_view_cache *coins_tip = calloc(1, sizeof(*coins_tip));
-        struct wallet *wallet = calloc(1, sizeof(*wallet));
-        struct node_db *ndb = calloc(1, sizeof(*ndb));
-        struct rpc_table *rawtx_tbl = calloc(1, sizeof(*rawtx_tbl));
-        struct rpc_table *inspect_tbl = calloc(1, sizeof(*inspect_tbl));
-        struct rpc_table *wallet_diag_tbl = calloc(1, sizeof(*wallet_diag_tbl));
-        struct rpc_table *wallet_rescan_tbl = calloc(1, sizeof(*wallet_rescan_tbl));
-        struct rpc_table *repair_tbl = calloc(1, sizeof(*repair_tbl));
-
-        bool ok = ms && coins_tip && wallet && ndb && rawtx_tbl &&
-                  inspect_tbl && wallet_diag_tbl && wallet_rescan_tbl &&
-                  repair_tbl;
-        if (ok) {
-            build_unresolved_tip_state(ms, 100);
-            wallet_init(wallet);
-            ndb->open = true;
-        }
-
-        if (!ok) {
-            free(ms);
-            free(coins_tip);
-            free(wallet);
-            free(ndb);
-            free(rawtx_tbl);
-            free(inspect_tbl);
-            free(wallet_diag_tbl);
-            free(wallet_rescan_tbl);
-            free(repair_tbl);
-            printf("FAIL\n");
-            return failures + 1;
-        }
-
-        rpc_table_init(rawtx_tbl);
-        rpc_rawtx_set_state(ms, NULL, coins_tip, "/tmp");
-        register_rawtransaction_rpc_commands(rawtx_tbl);
-
-        rpc_table_init(inspect_tbl);
-        rpc_chain_inspect_set_state(ms, "/tmp", NULL, coins_tip, NULL);
-        register_chain_inspect_rpc_commands(inspect_tbl);
-
-        wallet_rpc_context_set_base(wallet, ms, "/tmp", NULL, NULL, NULL);
-        wallet_rpc_context_set_node_db(NULL);
-        wallet_rpc_context_set_coins_tip(coins_tip);
-
-        rpc_table_init(wallet_diag_tbl);
-        register_wallet_diagnostic_rpc_commands(wallet_diag_tbl);
-
-        wallet_rpc_context_set_node_db(NULL);
-        rpc_table_init(wallet_rescan_tbl);
-        register_wallet_rescan_rpc_commands(wallet_rescan_tbl);
-
-        rpc_table_init(repair_tbl);
-        rpc_repair_set_state(ms, coins_tip, ndb, "/tmp",
-                             chain_params_get());
-        register_repair_rpc_commands(repair_tbl);
-        register_backfill_header_solutions_rpc_commands(repair_tbl);
-
-        struct json_value params = {0};
-        struct json_value result = {0};
-
-        init_single_str_param(
-            &params,
-            "0000000000000000000000000000000000000000000000000000000000000001");
-        json_init(&result);
-        ok = !rpc_table_execute(rawtx_tbl, "getrawtransaction", &params,
-                                &result) &&
-             result_is_chainstate_guard_error(&result, "getrawtransaction");
-        json_free(&params);
-        json_free(&result);
-
-        init_single_str_param(
-            &params,
-            "0000000000000000000000000000000000000000000000000000000000000002");
-        json_init(&result);
-        ok = ok && !rpc_table_execute(inspect_tbl, "gettxdetail", &params,
-                                      &result) &&
-             result_is_chainstate_guard_error(&result, "gettxdetail");
-        json_free(&params);
-        json_free(&result);
-
-        init_single_str_param(
-            &params,
-            "0000000000000000000000000000000000000000000000000000000000000003");
-        json_init(&result);
-        ok = ok && !rpc_table_execute(wallet_diag_tbl, "getchaincoins",
-                                      &params, &result) &&
-             result_is_chainstate_guard_error(&result, "getchaincoins");
-        json_free(&params);
-        json_free(&result);
-
-        json_init(&params);
-        json_set_array(&params);
-        json_init(&result);
-        ok = ok && !rpc_table_execute(wallet_rescan_tbl, "syncwalletfromdb",
-                                      &params, &result) &&
-             result_is_chainstate_guard_error(&result, "syncwalletfromdb");
-        json_free(&params);
-        json_free(&result);
-
-        json_init(&params);
-        json_set_array(&params);
-        json_init(&result);
-        ok = ok && !rpc_table_execute(repair_tbl, "repairutxos", &params,
-                                      &result) &&
-             result_is_chainstate_guard_error(&result, "repairutxos");
-        json_free(&params);
-        json_free(&result);
-
-        main_state_free(ms);
-        wallet_free(wallet);
-        free(ms);
-        free(coins_tip);
-        free(wallet);
-        free(ndb);
-        free(rawtx_tbl);
-        free(inspect_tbl);
-        free(wallet_diag_tbl);
-        free(wallet_rescan_tbl);
-        free(repair_tbl);
-
-        if (ok) printf("OK\n");
-        else    { printf("FAIL\n"); failures++; }
-    }
+    failures += rs_case_rawtx_locator();
+    failures += rs_case_getbestblockhash();
+    failures += rs_case_sparse_getblockhash();
+    failures += rs_case_txoutsetinfo();
+    failures += rs_case_summary_tip();
+
+    failures += rs_case_chainstate_guard(&aborted);
+    if (aborted)
+        return failures;
 
     failures += rs_case_rawsign_supplemental();
-
-    printf("rpc_safety: raw-sign P2SH 2-of-2 emits both signatures... ");
-    {
-        struct basic_keystore *ks = calloc(1, sizeof(*ks));
-        struct rpc_table *tbl = calloc(1, sizeof(*tbl));
-        struct privkey keys[2] = {0};
-        bool ok = ks && tbl;
-        if (ok) {
-            keystore_init(ks);
-            rpc_table_init(tbl);
-            rpc_rawtx_set_state(NULL, NULL, NULL, "/tmp");
-            rpc_rawtx_set_keystore(ks);
-            register_rawtransaction_rpc_commands(tbl);
-
-            struct pubkey pubs[2];
-            for (size_t i = 0; i < 2 && ok; i++) {
-                privkey_make_new(&keys[i], true);
-                ok = privkey_get_pubkey(&keys[i], &pubs[i]) &&
-                     keystore_add_key(ks, &keys[i]);
-            }
-            struct script redeem = {0}, p2sh = {0};
-            script_for_multisig(&redeem, 2, pubs, 2);
-            struct script_id redeem_id;
-            script_id_from_script(&redeem_id, &redeem);
-            script_for_p2sh(&p2sh, &redeem_id);
-
-            struct transaction tx;
-            transaction_init(&tx);
-            tx.overwintered = true;
-            tx.version = SAPLING_TX_VERSION;
-            tx.version_group_id = SAPLING_VERSION_GROUP_ID;
-            tx.vin = calloc(1, sizeof(*tx.vin));
-            tx.vout = calloc(1, sizeof(*tx.vout));
-            ok = ok && tx.vin && tx.vout;
-            if (ok) {
-                tx.num_vin = 1;
-                tx.vin[0].prevout.n = 0;
-                tx.vin[0].sequence = UINT32_MAX;
-                tx.num_vout = 1;
-                tx.vout[0].value = 1000;
-                struct key_id recipient = {0};
-                script_for_p2pkh(&tx.vout[0].script_pub_key, &recipient);
-            }
-            char tx_hex[2048] = {0};
-            size_t tx_hex_len = ok ?
-                encode_hex_tx(&tx, tx_hex, sizeof(tx_hex)) : 0;
-            ok = ok && tx_hex_len > 0 && tx_hex_len < sizeof(tx_hex);
-            transaction_free(&tx);
-
-            char p2sh_hex[2 * MAX_SCRIPT_SIZE + 1];
-            char redeem_hex[2 * MAX_SCRIPT_SIZE + 1];
-            zcl_hex_encode(p2sh.data, p2sh.size, p2sh_hex);
-            zcl_hex_encode(redeem.data, redeem.size, redeem_hex);
-
-            struct json_value params, prevs, prev, value, result;
-            json_init(&params); json_set_array(&params);
-            json_init(&value); json_set_str(&value, tx_hex);
-            json_push_back(&params, &value); json_free(&value);
-            json_init(&prevs); json_set_array(&prevs);
-            json_init(&prev); json_set_object(&prev);
-            json_push_kv_str(&prev, "txid",
-                "0000000000000000000000000000000000000000000000000000000000000000");
-            json_push_kv_int(&prev, "vout", 0);
-            json_push_kv_str(&prev, "scriptPubKey", p2sh_hex);
-            json_push_kv_real(&prev, "amount", 0.00022);
-            json_push_kv_str(&prev, "redeemScript", redeem_hex);
-            json_push_back(&prevs, &prev); json_free(&prev);
-            json_push_back(&params, &prevs); json_free(&prevs);
-            json_init(&result);
-
-            ok = ok && rpc_table_execute(tbl, "signrawtransaction", &params,
-                                         &result) &&
-                 json_get_bool(json_get(&result, "complete"));
-            const char *signed_hex = json_get_str(json_get(&result, "hex"));
-            struct transaction signed_tx;
-            transaction_init(&signed_tx);
-            ok = ok && signed_hex && decode_hex_tx(&signed_tx, signed_hex) &&
-                 signed_tx.num_vin == 1;
-            if (ok) {
-                const struct script *ss = &signed_tx.vin[0].script_sig;
-                size_t pos = 0;
-                ok = ss->size > redeem.size + 4 &&
-                     ss->data[pos++] == OP_0;
-                for (size_t i = 0; i < 2 && ok; i++) {
-                    size_t sig_len = ss->data[pos++];
-                    ok = sig_len >= 70 && sig_len <= SIGNATURE_SIZE + 1 &&
-                         pos + sig_len <= ss->size;
-                    pos += sig_len;
-                }
-                ok = ok && pos < ss->size &&
-                     ss->data[pos++] == redeem.size &&
-                     pos + redeem.size == ss->size &&
-                     memcmp(ss->data + pos, redeem.data, redeem.size) == 0;
-            }
-            transaction_free(&signed_tx);
-            json_free(&params);
-            json_free(&result);
-            rpc_rawtx_set_keystore(NULL);
-            keystore_free(ks);
-        }
-        for (size_t i = 0; i < 2; i++)
-            memory_cleanse(keys[i].vch, sizeof(keys[i].vch));
-        free(ks);
-        free(tbl);
-        if (ok) printf("OK\n");
-        else    { printf("FAIL\n"); failures++; }
-    }
+    failures += rs_case_p2sh_2of2();
 
     /* parse_amount arithmetic guards: see rs_check_parse_amount_guards. */
     failures += rs_check_parse_amount_guards();
