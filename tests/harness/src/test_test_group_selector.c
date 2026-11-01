@@ -2386,7 +2386,7 @@ static int test_runner_build_needs_selection(void)
             {"--only=test_jsonqq", 2, ""},
             {"--only=", 2, ""},
             {"--exact=test_jsonq,test_jsonqq", 2, ""},
-            {"--only=test_jsonq", 0, "jsonq build/bin/jsonq\n"},
+            {"--only=test_jsonq", 0, "jsonq build/bin/jsonq\nz23 build/bin/z23\n"},
             {"--only=test_hex_codec", 0, ""},
         };
         for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
