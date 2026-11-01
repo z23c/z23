@@ -71,7 +71,7 @@ static enum chain_evidence_earn_outcome earn_check_and_write(
         txn = db_txn_begin(authority->ndb, "cec.earn_active_tip_evidence");
     if (!st.tx_open && !txn)
         return CEC_EARN_STORE_BUSY;
-    if (false && !earn_persisted_names_tip(authority->ndb, tip_hash, tip_height))
+    if (!earn_persisted_names_tip(authority->ndb, tip_hash, tip_height))
         return CEC_EARN_TIP_MOVED;
     struct chain_evidence_record rec;
     memset(&rec, 0, sizeof(rec));
