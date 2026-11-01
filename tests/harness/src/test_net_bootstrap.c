@@ -271,7 +271,19 @@ static int check_addrman_save_load_roundtrip(void)
         size_t saved_size = addrman_size(&cm1.manager.addrman);
         ok = ok && saved_size == 3;
 
-        connman_save_addrman(&cm1);
+        /* The save reports success only when every durable write landed; an
+         * unwritable (missing) datadir must report failure so shutdown can
+         * retry instead of trusting it. */
+        ok = connman_save_addrman(&cm1) && ok;
+        {
+            char missing[sizeof(tmpdir) + 16];
+            snprintf(missing, sizeof(missing), "%s/no_such_dir", tmpdir);
+            const char *keep = cm1.datadir;
+            cm1.datadir = missing;
+            bool failed_save = connman_save_addrman(&cm1);
+            cm1.datadir = keep;
+            ok = ok && !failed_save;
+        }
         connman_load_addrman(&cm2);
 
         size_t loaded_size = addrman_size(&cm2.manager.addrman);

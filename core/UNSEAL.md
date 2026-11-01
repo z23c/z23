@@ -705,3 +705,7 @@ later lane flips it HARD.
 - 2026-11-01T21:04:12Z — REASON: Save peer state before the clean marker, not inside release-resources;  behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
   old ROOT: 014e91d505ced79a21656f7ccfa572d22f53e35a27a2ea1c0a15df2e6a9c2822
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-01T21:04:27Z — REASON: connman_save_addrman returns bool (behaviour-preserving) so shutdown can see a failed peer-state save;   owner-authorised via lead
+  old ROOT: a69296e429104c29f2caed0d20c835896e8814dfccaf432e35417b8c5ae0070f
+  by: owner unseal ritual (make core-unseal)

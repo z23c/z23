@@ -353,8 +353,13 @@ void connman_join(struct connman *cm);
 void connman_stop(struct connman *cm);
 void connman_free(struct connman *cm);
 
-/* Persist addrman to {datadir}/peers.dat. Call on shutdown. */
-void connman_save_addrman(struct connman *cm);
+/* Persist the banlist, addrman ({datadir}/peers.dat) and anchors. Call on
+ * shutdown. Returns true only when the banlist write, the peers.dat replace
+ * plus parent flush and the anchors save all succeeded; an empty addrman that
+ * writes no peers.dat counts as success, and so does a connman with no
+ * datadir (nothing to persist). The peers.dat SHA3 sidecar stays best-effort
+ * and never affects the result. Periodic callers may ignore it. */
+bool connman_save_addrman(struct connman *cm);
 
 /* Load addrman from {datadir}/peers.dat. Call before connman_start. */
 void connman_load_addrman(struct connman *cm);

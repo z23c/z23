@@ -2062,16 +2062,18 @@ bool connman_flush_anchors_if_changed(struct connman *cm)
     return true;
 }
 
-void connman_save_addrman(struct connman *cm)
+bool connman_save_addrman(struct connman *cm)
 {
-    if (!cm->datadir) return;
+    if (!cm->datadir) return true; /* nothing to persist is not a failure */
+    bool saved = true;
 
     /* Remember the datadir on net_manager itself so ban_addr()/
      * unban_addr()/clear_banned() (which only see a net_manager*, not
      * this connman*) can persist bans the moment they mutate, not just
      * at whatever cadence connman_save_addrman() is called. */
     cm->manager.datadir = cm->datadir;
-    (void)ban_db_write(&cm->manager, cm->datadir);
+    if (!ban_db_write(&cm->manager, cm->datadir))
+        saved = false;
 
     char path[512];
     snprintf(path, sizeof(path), "%s/peers.dat", cm->datadir);
@@ -2081,14 +2083,20 @@ void connman_save_addrman(struct connman *cm)
     zcl_mutex_lock(&cm->manager.addrman.cs);
     bool ok = addrman_serialize(&cm->manager.addrman, &s);
     zcl_mutex_unlock(&cm->manager.addrman.cs);
+    if (!ok)
+        saved = false;
 
     if (ok && s.size > 0) {
         char tmp_path[520];
         snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
         struct platform_private_file staged;
         platform_private_file_init(&staged);
-        if (platform_private_file_unlink_missing_ok(tmp_path) &&
-            platform_private_file_create(tmp_path, &staged)) {
+        bool created = platform_private_file_unlink_missing_ok(tmp_path) &&
+                       platform_private_file_create(tmp_path, &staged);
+        if (!created) {
+            saved = false;
+            LOG_WARN("addrman", "save: cannot create %s", tmp_path);
+        } else {
             if (platform_private_file_write_at(&staged, s.data, s.size, 0) &&
                 platform_private_file_truncate(&staged, s.size) &&
                 platform_private_file_replace(&staged, tmp_path, path) &&
@@ -2101,8 +2109,10 @@ void connman_save_addrman(struct connman *cm)
                 (void)aii_write_sidecar(cm->datadir);
                 printf("Saved %zu peers to %s (%zu bytes)\n",
                        addrman_size(&cm->manager.addrman), path, s.size);
-            } else
+            } else {
+                saved = false;
                 LOG_WARN("addrman", "save: durable private replace failed");
+            }
             platform_private_file_close(&staged);
             (void)platform_private_file_unlink_missing_ok(tmp_path);
         }
@@ -2118,6 +2128,7 @@ void connman_save_addrman(struct connman *cm)
     connman_collect_healthy_anchors(cm, &anchors);
     struct zcl_result ar = anchor_peers_save(cm->datadir, &anchors);
     if (!ar.ok) {
+        saved = false;
         LOG_WARN("anchor_peers", "anchors save failed: %s", ar.message);
     } else {
         /* Record what is now on disk so the dial scheduler's prompt flush
@@ -2126,6 +2137,7 @@ void connman_save_addrman(struct connman *cm)
         cm->last_saved_anchors = anchors;
         cm->last_anchor_flush_ts = (int64_t)platform_time_wall_time_t();
     }
+    return saved;
 }
 
 void connman_load_addrman(struct connman *cm)
