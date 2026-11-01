@@ -62,4 +62,12 @@ void bg_validation_note_verified_tip(struct bg_validation_service *svc,
 bool bg_validation_verified_tip(const struct bg_validation_service *svc,
                                 int *height, uint8_t hash[32]);
 
+#ifdef ZCL_TESTING
+typedef void (*bg_validation_authority_test_hook_fn)(void);
+/* Runs in the genesis publish after the evidence is judged ready and before
+ * the tip-bound mark: the window a same-height reorg must not slip through. */
+void bg_validation_authority_test_set_before_mark_hook(
+    bg_validation_authority_test_hook_fn fn);
+#endif
+
 #endif /* ZCL_BG_VALIDATION_AUTHORITY_H */

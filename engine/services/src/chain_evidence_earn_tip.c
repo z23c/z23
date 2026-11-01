@@ -20,6 +20,7 @@
 #include "models/db_txn.h"
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <string.h>
 
 static bool earn_persisted_names_tip(struct node_db *ndb,
@@ -104,9 +105,24 @@ static enum chain_evidence_earn_outcome earn_check_and_write_locked(
  * shared node_db handle), so the lock cannot live in the controller. */
 static pthread_mutex_t g_evidence_write_lock = PTHREAD_MUTEX_INITIALIZER;
 
+#ifdef ZCL_TESTING
+static _Atomic int g_write_lock_waiters;
+
+int chain_evidence_write_lock_test_waiters(void)
+{
+    return atomic_load(&g_write_lock_waiters);
+}
+#endif
+
 void chain_evidence_write_lock(void)
 {
+#ifdef ZCL_TESTING
+    atomic_fetch_add(&g_write_lock_waiters, 1);
+#endif
     pthread_mutex_lock(&g_evidence_write_lock);
+#ifdef ZCL_TESTING
+    atomic_fetch_sub(&g_write_lock_waiters, 1);
+#endif
 }
 
 void chain_evidence_write_unlock(void)

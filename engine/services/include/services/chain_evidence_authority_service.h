@@ -327,6 +327,8 @@ typedef void (*chain_evidence_earn_test_hook_fn)(
     struct chain_evidence_controller *authority);
 /* Runs after the earn's early check and before its transaction: the window
  * the in-transaction check closes. */
+/* Threads currently blocked in (or entering) chain_evidence_write_lock. */
+int chain_evidence_write_lock_test_waiters(void);
 typedef void (*chain_evidence_live_test_hook_fn)(void);
 /* Runs inside the live-advance evidence persist, after its transaction is
  * open (or joined) and before it writes: the parking point for the

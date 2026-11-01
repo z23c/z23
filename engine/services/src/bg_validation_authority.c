@@ -294,21 +294,92 @@ static bool bgv_auth_resolve_authority_root(
            root_len == 32;
 }
 
+/* The active tip (height and hash) at one instant, read under cs_main. */
+struct bgv_scan_tip {
+    int height;
+    struct uint256 hash;
+};
+
+static bool bgv_auth_capture_tip(struct bg_validation_service *svc,
+                                 struct bgv_scan_tip *out)
+{
+    zcl_mutex_lock(&svc->ms->cs_main);
+    struct block_index *tip = active_chain_tip(&svc->ms->chain_active);
+    bool ok = tip && tip->phashBlock;
+    if (ok) {
+        out->height = tip->nHeight;
+        out->hash = *tip->phashBlock;
+    }
+    zcl_mutex_unlock(&svc->ms->cs_main);
+    return ok;
+}
+
+static bool bgv_auth_same_tip(const struct bgv_scan_tip *a,
+                              const struct bgv_scan_tip *b)
+{
+    return a->height == b->height &&
+           memcmp(a->hash.data, b->hash.data, sizeof(a->hash.data)) == 0;
+}
+
+/* The tip captured before the coins-root scan must be the tip after it and,
+ * when the walk noted the block it last verified, that very block. A noted
+ * hash that differs means the walk's coverage is of another block at this
+ * height (same-height reorg). A walk with no note (resume past the tip)
+ * keeps the historical height contract; the earn still demands the note. */
+static bool bgv_auth_scan_tip_stable(
+    struct bg_validation_service *svc, const struct bgv_scan_tip *before,
+    char reason[192])
+{
+    struct bgv_scan_tip after;
+    if (!bgv_auth_capture_tip(svc, &after) ||
+        !bgv_auth_same_tip(before, &after)) {
+        snprintf(reason, 192, "active tip changed during the authority scan");
+        return false;
+    }
+    int noted_height = -1;
+    uint8_t noted[32];
+    if (bg_validation_verified_tip(svc, &noted_height, noted) &&
+        (noted_height != before->height ||
+         memcmp(noted, before->hash.data, sizeof(noted)) != 0)) {
+        snprintf(reason, 192,
+                 "completed walk's verified block is not the scanned tip");
+        return false;
+    }
+    return true;
+}
+
+#ifdef ZCL_TESTING
+static bg_validation_authority_test_hook_fn g_before_mark_hook;
+
+void bg_validation_authority_test_set_before_mark_hook(
+    bg_validation_authority_test_hook_fn fn)
+{
+    g_before_mark_hook = fn;
+}
+#endif
+
 /* Publish through the controller. The genesis path binds the publication to
- * the persisted tip of the snapshot the evidence was judged ready on, so a
- * tip that moved since answers the retryable CEC_REJECTED_TIP_MOVED instead
- * of a freeze; the assisted path is bound by its snapshot record instead. */
+ * the tip captured when the coins-root scan and the walk completed, so a tip
+ * that moved since answers the retryable CEC_REJECTED_TIP_MOVED instead of a
+ * freeze; the controller re-checks it inside its transaction under the
+ * evidence write lock. The assisted path is bound by its snapshot record. */
 static enum chain_evidence_controller_result bgv_auth_mark(
+    struct bg_validation_service *svc,
     struct chain_evidence_controller *authority,
-    const struct chain_evidence_controller_view *view, bool external_seeded,
+    const struct bgv_scan_tip *scanned, bool external_seeded,
     const struct uint256 *root)
 {
     if (external_seeded)
         return chain_evidence_controller_mark_fully_validated(authority, root);
-    if (!view->has_persisted_active_tip_hash)
+#ifdef ZCL_TESTING
+    if (g_before_mark_hook)
+        g_before_mark_hook();
+#endif
+    struct bgv_scan_tip now;
+    if (!bgv_auth_capture_tip(svc, &now) || !bgv_auth_same_tip(scanned, &now))
         return CEC_REJECTED_TIP_MOVED;
     return chain_evidence_controller_mark_fully_validated_at_tip(
-        authority, root, &view->persisted_active_tip_hash);
+        authority, root, &scanned->hash);
 }
 
 struct zcl_result bg_validation_authority_publish(
@@ -335,6 +406,9 @@ struct zcl_result bg_validation_authority_publish(
 
     bool root_ok = false;
     int chain_height_after = -1;
+    struct bgv_scan_tip scanned;
+    if (!bgv_auth_capture_tip(svc, &scanned))
+        return bgv_auth_refuse("no active tip to bind the authority to");
     bgv_auth_scan_locked_frontier(svc, pdb, &chain_height, &coins_height,
                                   root_bytes, &root_ok, &chain_height_after);
     if (!bgv_auth_frontier_stable(verified, chain_height, coins_height,
@@ -347,6 +421,8 @@ struct zcl_result bg_validation_authority_publish(
     }
     if (!root_ok)
         return bgv_auth_refuse("authoritative coins commitment failed");
+    if (!bgv_auth_scan_tip_stable(svc, &scanned, reason))
+        return bgv_auth_refuse(reason);
 
     struct chain_evidence_controller authority;
     struct chain_evidence_controller_view view;
@@ -370,7 +446,7 @@ struct zcl_result bg_validation_authority_publish(
     struct uint256 root;
     memcpy(root.data, authority_root_bytes, sizeof(root.data));
     enum chain_evidence_controller_result result =
-        bgv_auth_mark(&authority, &view, external_seeded, &root);
+        bgv_auth_mark(svc, &authority, &scanned, external_seeded, &root);
     if (result != CEC_OK) {
         snprintf(reason, sizeof(reason),
                  "CEC full-validation publication refused result=%s%s",

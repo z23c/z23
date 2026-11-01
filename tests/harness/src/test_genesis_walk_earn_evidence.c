@@ -471,22 +471,34 @@ static int test_two_thread_earn_waits_for_live_advance(void)
                                                       &f.blocks[4]));
     chain_evidence_live_test_set_after_begin_hook(hook_park_live_advance);
     pthread_t b, a;
-    failures += gw_check("start live-advance thread",
-                         pthread_create(&b, NULL, thread_live_advance, &f) ==
-                             0);
-    for (int i = 0; i < 500 && !atomic_load(&g_b_parked); i++)
+    bool b_started =
+        pthread_create(&b, NULL, thread_live_advance, &f) == 0;
+    failures += gw_check("start live-advance thread", b_started);
+    for (int i = 0; b_started && i < 500 && !atomic_load(&g_b_parked); i++)
         sleep_ms(10);
-    failures += gw_check("live advance parked inside its transaction",
-                         atomic_load(&g_b_parked) == 1);
-    failures += gw_check("start earn thread",
-                         pthread_create(&a, NULL, thread_earn_old_tip, &f) ==
-                             0);
-    sleep_ms(400);
-    failures += gw_check("earn waits while the live advance holds the write "
-                         "lock", atomic_load(&g_a_done) == 0);
+    bool parked = atomic_load(&g_b_parked) == 1;
+    failures += gw_check("live advance parked inside its transaction", parked);
+    bool a_started = false;
+    if (parked) {
+        a_started = pthread_create(&a, NULL, thread_earn_old_tip, &f) == 0;
+        failures += gw_check("start earn thread", a_started);
+    }
+    /* Prove the earn thread reached the lock while B is still parked. */
+    for (int i = 0; a_started && i < 500 &&
+                    chain_evidence_write_lock_test_waiters() < 1 &&
+                    !atomic_load(&g_a_done); i++)
+        sleep_ms(10);
+    failures += gw_check("earn thread is a waiter on the write lock while "
+                         "the live advance is parked",
+                         a_started &&
+                             chain_evidence_write_lock_test_waiters() >= 1);
+    failures += gw_check("earn has not completed while B holds the lock",
+                         atomic_load(&g_a_done) == 0);
     atomic_store(&g_b_release, 1);
-    pthread_join(b, NULL);
-    pthread_join(a, NULL);
+    if (b_started)
+        pthread_join(b, NULL);
+    if (a_started)
+        pthread_join(a, NULL);
     chain_evidence_live_test_set_after_begin_hook(NULL);
     failures += gw_check("earn refused after the advance committed",
                          !g_a_result.ok);
@@ -495,6 +507,57 @@ static int test_two_thread_earn_waits_for_live_advance(void)
     failures += gw_check("old tip's flags never reached the record",
                          gw_flags_unearned(&f));
     gw_free(&f);
+    return failures;
+}
+
+static struct gw_fixture *g_mark_fixture;
+static int g_mark_hook_mode;
+
+/* Between the scan/walk and the mark, a same-height rival (blocks[5]) takes
+ * over: either the active chain tip (mode 0) or the persisted tip record
+ * (mode 1). */
+static void hook_same_height_rival(void)
+{
+    struct gw_fixture *f = g_mark_fixture;
+    if (g_mark_hook_mode == 0) {
+        (void)active_chain_move_window_tip(&f->ms.chain_active,
+                                           &f->blocks[5]);
+    } else {
+        (void)node_db_state_set(&f->ndb, "cec.active_tip_hash",
+                                f->hashes[5].data, 32);
+    }
+}
+
+static int refused_retryable_unpublished(struct gw_fixture *f, int mode)
+{
+    int failures = 0;
+    g_mark_fixture = f;
+    g_mark_hook_mode = mode;
+    gw_walk_verified(f, GW_TIP, 0);
+    bg_validation_authority_test_set_before_mark_hook(hook_same_height_rival);
+    struct zcl_result r = bg_validation_authority_publish(&f->svc, false, true);
+    bg_validation_authority_test_set_before_mark_hook(NULL);
+    failures += gw_check("same-height rival before the mark refuses", !r.ok);
+    failures += gw_check("refusal is the retryable tip-moved class",
+                         strstr(r.message, "tip_moved") != NULL);
+    struct chain_evidence_controller_view v;
+    gw_view(f, &v);
+    failures += gw_check("not frozen, not published, no completion flag",
+                         v.state != CEC_CONTRADICTION_FROZEN &&
+                             v.state != CEC_FULLY_VALIDATED &&
+                             !v.active_tip_evidence.full_validation_complete);
+    return failures;
+}
+
+static int test_mark_refuses_same_height_rival_after_scan(void)
+{
+    int failures = 0;
+    for (int mode = 0; mode < 2; mode++) {
+        struct gw_fixture f;
+        failures += gw_check("fixture", gw_init(&f));
+        failures += refused_retryable_unpublished(&f, mode);
+        gw_free(&f);
+    }
     return failures;
 }
 
@@ -512,6 +575,7 @@ int test_genesis_walk_earn_evidence(void)
     failures += test_earn_refuses_when_tip_moves_before_write();
     failures += test_mark_at_tip_moved_is_retryable_not_frozen();
     failures += test_two_thread_earn_waits_for_live_advance();
+    failures += test_mark_refuses_same_height_rival_after_scan();
     if (failures == 0)
         printf("  all genesis_walk_earn_evidence tests passed\n");
     return failures;
