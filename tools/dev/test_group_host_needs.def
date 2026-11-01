@@ -385,6 +385,9 @@ ZCL_TEST_GROUP_BUILD_NEED("test_soak_runner", "build/bin/soak_runner", "soak_run
  * harness it regresses; absence fails. Selected local runs and the proof's
  * prefork build it through this row. */
 ZCL_TEST_GROUP_BUILD_NEED("test_crash_recovery", "build/bin/crash_recovery_test", "crash_recovery_test")
+/* tests/harness/src/test_zcl_rpc.c execs the zcl-rpc client it regresses;
+ * absence fails. */
+ZCL_TEST_GROUP_BUILD_NEED("test_zcl_rpc", "build/bin/zcl-rpc", "zcl-rpc")
 /* tests/harness/src/test_inspect_html.c execs build/bin/inspect_html and
  * self-skips where it is absent. The proof's prefork step builds the tool
  * for every selection that includes this group. */

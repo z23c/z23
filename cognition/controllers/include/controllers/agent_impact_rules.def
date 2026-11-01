@@ -825,6 +825,8 @@ AGENT_IMPACT_RULE("core/modules/coins/src/coins_view.c|core/modules/coins/includ
 AGENT_IMPACT_RULE("tools/export_snapshot.c|tests/harness/src/test_export_snapshot.c", "export_snapshot make_lint_gates")
 /* Crash-recovery CLI path refusal has its own executable regression group. */
 AGENT_IMPACT_RULE("tools/crash_recovery_test.c|tests/harness/src/test_crash_recovery.c", "crash_recovery make_lint_gates")
+/* zcl-rpc failure cases name themselves on stderr (tests/harness/src/test_zcl_rpc.c). */
+AGENT_IMPACT_RULE("tools/zcl-rpc.c|tests/harness/src/test_zcl_rpc.c", "zcl_rpc make_lint_gates")
 AGENT_IMPACT_RULE("core/modules/chain/src/utxo_root_ladder.c|core/modules/chain/include/chain/utxo_root_ladder.h|engine/models/src/utxo_root_ladder_verify.c|engine/models/include/models/utxo_root_ladder_verify.h|tools/gen_utxo_root_ladder.c|tests/harness/src/test_utxo_root_ladder.c", "utxo_root_ladder make_lint_gates")
 
 /* SHA3 UTXO trust-root checkpoint (compiled constants + the self-folded

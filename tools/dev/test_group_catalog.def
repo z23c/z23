@@ -241,6 +241,10 @@ ZCL_TEST_GROUP(soak_runner)
  * binary; absence fails. The selected runner and
  * proof build it through the BUILD_NEED row in test_group_host_needs.def. */
 ZCL_TEST_GROUP(crash_recovery)
+/* zcl-rpc client (tools/zcl-rpc.c -> build/bin/zcl-rpc): every failure of the
+ * HTTP exchange names its case on stderr and exits nonzero. Requires the
+ * binary; absence fails. */
+ZCL_TEST_GROUP(zcl_rpc)
 ZCL_TEST_GROUP(event)
 ZCL_TEST_GROUP(download)
 ZCL_TEST_GROUP(download_contention)
