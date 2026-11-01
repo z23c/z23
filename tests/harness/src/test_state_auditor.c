@@ -166,7 +166,7 @@ static bool sa_opret_fixture_init(struct sa_opret_fixture *f)
         if (h > 0) f->blocks[h].pprev = &f->blocks[h - 1];
     }
 
-    active_chain_init(&f->ms.chain_active);
+    main_state_init(&f->ms);
     active_chain_move_window_tip(&f->ms.chain_active,
                                  &f->blocks[SA_OPRET_HEIGHTS - 1]);
 
@@ -176,7 +176,7 @@ static bool sa_opret_fixture_init(struct sa_opret_fixture *f)
 
 static void sa_opret_fixture_free(struct sa_opret_fixture *f)
 {
-    active_chain_free(&f->ms.chain_active);
+    main_state_free(&f->ms);
     node_db_close(&f->ndb);
     char cmd[512];
     snprintf(cmd, sizeof(cmd), "rm -rf %s", f->datadir);

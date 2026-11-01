@@ -343,7 +343,7 @@ int test_utxo_apply_upstream_hole(void)
     struct main_state ms;
     struct uh_chain sc;
     memset(&sc, 0, sizeof(sc));
-    memset(&ms, 0, sizeof(ms));
+    main_state_init(&ms);
 
     test_fmt_tmpdir(dir, sizeof(dir), "utxo_apply_upstream_hole", "t6");
     uh_mkdir_p("./test-tmp");
@@ -351,7 +351,6 @@ int test_utxo_apply_upstream_hole(void)
     UH_CHECK("setup: progress store opens", progress_store_open(dir));
     sqlite3 *db = progress_store_db();
 
-    active_chain_init(&ms.chain_active);
     UH_CHECK("setup: synthetic chain builds", uh_chain_build(&sc, 3));
     active_chain_move_window_tip(&ms.chain_active, &sc.blocks[2]);
 
@@ -439,7 +438,7 @@ int test_utxo_apply_upstream_hole(void)
     UH_CHECK("heal: cursor at 3", utxo_apply_stage_cursor() == 3);
 
     utxo_apply_stage_shutdown();
-    active_chain_free(&ms.chain_active);
+    main_state_free(&ms);
     uh_chain_free(&sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);

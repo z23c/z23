@@ -295,9 +295,7 @@ static int bil_union_boot_case(void)
     struct node_db ndb;
     memset(&ndb, 0, sizeof(ndb));
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    block_map_init(&ms.map_block_index);
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
 
     bool ok = bil_union_boot_fixture(&ndb, &ms, hashes, N, PRE) &&
               (ms.map_block_index.size == (size_t)N);
@@ -309,7 +307,7 @@ static int bil_union_boot_case(void)
               "to header-only",
               ok && bil_union_fresh_row_clamped(&ms, hashes, N));
 
-    block_map_free(&ms.map_block_index);
+    main_state_free(&ms);
     if (ndb.db) sqlite3_close(ndb.db);
     failures += bil_flat_capacity_cases();
     return failures;
@@ -323,16 +321,14 @@ static int bil_genesis_cache_roundtrip(const char *dir, struct main_state *src,
     int failures = 0;
     struct block_index_flat_identity identity = {0};
     bool saved = save_block_index_flat_identity(dir, src, &identity).ok;
-    struct main_state again = {0};
-    block_map_init(&again.map_block_index);
-    active_chain_init(&again.chain_active);
+    struct main_state again;
+    main_state_init(&again);
     bool reloaded = saved && load_block_index_flat(dir, &again).ok;
     struct block_index *g = block_map_find(&again.map_block_index, hash);
     struct block_index *child = block_map_find(&again.map_block_index, child_hash);
     BIL_CHECK("bil: corrected cache roundtrip preserves bits and parent",
         reloaded && g && child && child->pprev == g && g->nBits == bits);
-    active_chain_free(&again.chain_active);
-    block_map_free(&again.map_block_index);
+    main_state_free(&again);
     return failures;
 }
 
@@ -346,11 +342,9 @@ static int bil_genesis_cache_case(int variant)
         return failures;
     }
     const struct chain_params *cp = chain_params_get();
-    struct main_state src = {0}, dst = {0};
-    block_map_init(&src.map_block_index);
-    block_map_init(&dst.map_block_index);
-    active_chain_init(&src.chain_active);
-    active_chain_init(&dst.chain_active);
+    struct main_state src, dst;
+    main_state_init(&src);
+    main_state_init(&dst);
     struct uint256 hash = cp->consensus.hashGenesisBlock;
     if (variant == 1) memset(hash.data, 0xff, 32);
     struct block_index *g = chainstate_insert_block_index(
@@ -389,10 +383,8 @@ static int bil_genesis_cache_case(int variant)
             BIL_CHECK("bil: foreign, high or parented genesis remains rejected", !loaded);
         }
     }
-    active_chain_free(&src.chain_active);
-    active_chain_free(&dst.chain_active);
-    block_map_free(&src.map_block_index);
-    block_map_free(&dst.map_block_index);
+    main_state_free(&src);
+    main_state_free(&dst);
     test_cleanup_tmpdir(dir);
     return failures;
 }
@@ -403,9 +395,8 @@ static int bil_genesis_cases(void)
     chain_params_select(CHAIN_REGTEST);
     for (int variant = 0; variant < 4; variant++)
         failures += bil_genesis_cache_case(variant);
-    struct main_state ms = {0};
-    block_map_init(&ms.map_block_index);
-    active_chain_init(&ms.chain_active);
+    struct main_state ms;
+    main_state_init(&ms);
     const struct chain_params *cp = chain_params_get();
     bool ok = load_block_index(&ms, cp, NULL, false).ok;
     struct block_index *g = block_map_find(&ms.map_block_index,
@@ -414,8 +405,7 @@ static int bil_genesis_cases(void)
     uint256_to_arith(&limit, &cp->consensus.powLimit);
     BIL_CHECK("bil: fresh genesis uses selected network bits",
         ok && g && g->nBits == arith_uint256_get_compact(&limit, false));
-    active_chain_free(&ms.chain_active);
-    block_map_free(&ms.map_block_index);
+    main_state_free(&ms);
     chain_params_select(CHAIN_MAIN);
     return failures;
 }
@@ -425,9 +415,7 @@ static int bil_flat_round_trip_case(void)
     int failures = 0;
     {
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         build_synthetic_chain(&ms, 100);
 
         char tmpdir[256];
@@ -462,9 +450,7 @@ static int bil_flat_round_trip_case(void)
         bool no_sidecar = (stat(sidecar_path, &st) != 0);
 
         struct main_state ms2;
-        memset(&ms2, 0, sizeof(ms2));
-        block_map_init(&ms2.map_block_index);
-        active_chain_init(&ms2.chain_active);
+        main_state_init(&ms2);
 
         bool loaded = file_ok && load_block_index_flat(tmpdir, &ms2).ok;
         bool count_ok = loaded && (ms2.map_block_index.size == ms.map_block_index.size);
@@ -493,8 +479,8 @@ static int bil_flat_round_trip_case(void)
         unlink(sidecar_path);
         unlink(path);
         rmdir(tmpdir);
-        block_map_free(&ms.map_block_index);
-        block_map_free(&ms2.map_block_index);
+        main_state_free(&ms);
+        main_state_free(&ms2);
     }
     return failures;
 }
@@ -504,9 +490,7 @@ static int bil_flat_pprev_link_case(void)
     int failures = 0;
     {
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         build_synthetic_chain(&ms, 50);
 
         char tmpdir[256];
@@ -517,9 +501,7 @@ static int bil_flat_pprev_link_case(void)
         save_block_index_flat(tmpdir, &ms);
 
         struct main_state ms2;
-        memset(&ms2, 0, sizeof(ms2));
-        block_map_init(&ms2.map_block_index);
-        active_chain_init(&ms2.chain_active);
+        main_state_init(&ms2);
         ZCL_TEST_SETUP(load_block_index_flat(tmpdir, &ms2));
 
         struct uint256 tip_hash = make_test_hash(49);
@@ -537,8 +519,8 @@ static int bil_flat_pprev_link_case(void)
         snprintf(path, sizeof(path), "%s/block_index.bin", tmpdir);
         unlink(path);
         rmdir(tmpdir);
-        block_map_free(&ms.map_block_index);
-        block_map_free(&ms2.map_block_index);
+        main_state_free(&ms);
+        main_state_free(&ms2);
     }
     return failures;
 }
@@ -548,9 +530,7 @@ static int bil_flat_scrambled_height_case(void)
     int failures = 0;
     {
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
 
         /* Ghost parent: a hash P points at that is not inserted. */
         struct uint256 ghost_hash = make_test_hash(900);
@@ -592,9 +572,7 @@ static int bil_flat_scrambled_height_case(void)
             save_block_index_flat(tmpdir, &ms);
 
         struct main_state ms2;
-        memset(&ms2, 0, sizeof(ms2));
-        block_map_init(&ms2.map_block_index);
-        active_chain_init(&ms2.chain_active);
+        main_state_init(&ms2);
         bool loaded = built && load_block_index_flat(tmpdir, &ms2).ok;
 
         struct block_index *P2 = loaded
@@ -625,8 +603,8 @@ static int bil_flat_scrambled_height_case(void)
         snprintf(path, sizeof(path), "%s/block_index.bin", tmpdir);
         unlink(path);
         rmdir(tmpdir);
-        block_map_free(&ms.map_block_index);
-        block_map_free(&ms2.map_block_index);
+        main_state_free(&ms);
+        main_state_free(&ms2);
     }
     return failures;
 }
@@ -651,11 +629,9 @@ static int bil_flat_bad_magic_case(void)
             fclose(f);
 
             struct main_state ms;
-            memset(&ms, 0, sizeof(ms));
-            block_map_init(&ms.map_block_index);
-            active_chain_init(&ms.chain_active);
+            main_state_init(&ms);
             ok = ok && !load_block_index_flat(tmpdir, &ms).ok;
-            block_map_free(&ms.map_block_index);
+            main_state_free(&ms);
         }
 
         BIL_CHECK("bil: flat file rejects bad magic", ok);
@@ -686,11 +662,9 @@ static int bil_flat_truncated_case(void)
             fclose(f);
 
             struct main_state ms;
-            memset(&ms, 0, sizeof(ms));
-            block_map_init(&ms.map_block_index);
-            active_chain_init(&ms.chain_active);
+            main_state_init(&ms);
             ok = ok && !load_block_index_flat(tmpdir, &ms).ok;
-            block_map_free(&ms.map_block_index);
+            main_state_free(&ms);
         }
 
         BIL_CHECK("bil: flat file rejects truncated file", ok);
@@ -706,9 +680,7 @@ static int bil_sqlite_round_trip_case(void)
     int failures = 0;
     {
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         build_synthetic_chain(&ms, 1500);
 
         struct node_db ndb;
@@ -747,20 +719,18 @@ static int bil_sqlite_round_trip_case(void)
             ok = ok && (saved >= 1500);
 
             struct main_state ms2;
-            memset(&ms2, 0, sizeof(ms2));
-            block_map_init(&ms2.map_block_index);
-            active_chain_init(&ms2.chain_active);
+            main_state_init(&ms2);
 
             ok = ok && load_block_index_sqlite(&ndb, &ms2).ok;
             ok = ok && (ms2.map_block_index.size >= 1500);
 
-            block_map_free(&ms2.map_block_index);
+            main_state_free(&ms2);
             sqlite3_close(ndb.db);
         }
 
         BIL_CHECK("bil: SQLite cache round-trip (1500 entries)", ok);
 
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
     }
     return failures;
 }
@@ -770,9 +740,7 @@ static int bil_sqlite_small_cache_case(void)
     int failures = 0;
     {
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         build_synthetic_chain(&ms, 500);
 
         struct node_db ndb;
@@ -802,19 +770,17 @@ static int bil_sqlite_small_cache_case(void)
             save_block_index_recent(&ndb, &ms);
 
             struct main_state ms2;
-            memset(&ms2, 0, sizeof(ms2));
-            block_map_init(&ms2.map_block_index);
-            active_chain_init(&ms2.chain_active);
+            main_state_init(&ms2);
 
             ok = ok && !load_block_index_sqlite(&ndb, &ms2).ok;
 
-            block_map_free(&ms2.map_block_index);
+            main_state_free(&ms2);
             sqlite3_close(ndb.db);
         }
 
         BIL_CHECK("bil: SQLite load rejects cache with < 1000 entries", ok);
 
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
     }
     return failures;
 }
@@ -824,9 +790,7 @@ static int bil_sqlite_envelope_tamper_case(void)
     int failures = 0;
     {
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         build_synthetic_chain(&ms, 1500);
 
         struct node_db ndb;
@@ -881,9 +845,7 @@ static int bil_sqlite_envelope_tamper_case(void)
                 block_index_cache_envelope_demotions_for_testing();
 
             struct main_state ms2;
-            memset(&ms2, 0, sizeof(ms2));
-            block_map_init(&ms2.map_block_index);
-            active_chain_init(&ms2.chain_active);
+            main_state_init(&ms2);
 
             struct zcl_result tampered = load_block_index_sqlite(&ndb, &ms2);
             ok = ok && !tampered.ok;
@@ -906,24 +868,22 @@ static int bil_sqlite_envelope_tamper_case(void)
             save_block_index_recent(&ndb, &ms);
 
             struct main_state ms3;
-            memset(&ms3, 0, sizeof(ms3));
-            block_map_init(&ms3.map_block_index);
-            active_chain_init(&ms3.chain_active);
+            main_state_init(&ms3);
 
             struct zcl_result rebuilt = load_block_index_sqlite(&ndb, &ms3);
             ok = ok && rebuilt.ok;
             ok = ok && ms3.map_block_index.size >= 1500;
             ok = ok && !blocker_exists("block_index_cache.integrity_demoted");
 
-            block_map_free(&ms3.map_block_index);
-            block_map_free(&ms2.map_block_index);
+            main_state_free(&ms3);
+            main_state_free(&ms2);
             sqlite3_close(ndb.db);
         }
 
         BIL_CHECK("bil: SQLite cache envelope detects tamper, demotes, "
                  "rebuilds clean", ok);
 
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
     }
     return failures;
 }
@@ -933,9 +893,7 @@ static int bil_flat_chain_work_case(void)
     int failures = 0;
     {
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         build_synthetic_chain(&ms, 20);
 
         struct uint256 tip_hash = make_test_hash(19);
@@ -952,9 +910,7 @@ static int bil_flat_chain_work_case(void)
         if (ok) save_block_index_flat(tmpdir, &ms);
 
         struct main_state ms2;
-        memset(&ms2, 0, sizeof(ms2));
-        block_map_init(&ms2.map_block_index);
-        active_chain_init(&ms2.chain_active);
+        main_state_init(&ms2);
 
         if (ok) ok = load_block_index_flat(tmpdir, &ms2).ok;
         if (ok) {
@@ -968,8 +924,8 @@ static int bil_flat_chain_work_case(void)
         snprintf(path, sizeof(path), "%s/block_index.bin", tmpdir);
         unlink(path);
         rmdir(tmpdir);
-        block_map_free(&ms.map_block_index);
-        block_map_free(&ms2.map_block_index);
+        main_state_free(&ms);
+        main_state_free(&ms2);
     }
     return failures;
 }
@@ -979,9 +935,7 @@ static int bil_embedded_corrupt_payload_case(void)
     int failures = 0;
     {
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         build_synthetic_chain(&ms, 30);
 
         char tmpdir[256];
@@ -1009,17 +963,15 @@ static int bil_embedded_corrupt_payload_case(void)
         }
 
         struct main_state ms2;
-        memset(&ms2, 0, sizeof(ms2));
-        block_map_init(&ms2.map_block_index);
-        active_chain_init(&ms2.chain_active);
+        main_state_init(&ms2);
         bool rejected = wrote && !load_block_index_flat(tmpdir, &ms2).ok;
 
         BIL_CHECK("bil: embedded format rejects corrupted payload", rejected);
 
         unlink(path);
         rmdir(tmpdir);
-        block_map_free(&ms.map_block_index);
-        block_map_free(&ms2.map_block_index);
+        main_state_free(&ms);
+        main_state_free(&ms2);
     }
     return failures;
 }
@@ -1029,9 +981,7 @@ static int bil_embedded_truncated_case(void)
     int failures = 0;
     {
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         build_synthetic_chain(&ms, 30);
 
         char tmpdir[256];
@@ -1050,17 +1000,15 @@ static int bil_embedded_truncated_case(void)
         if (tok) tok = (truncate(path, st.st_size / 2) == 0);
 
         struct main_state ms2;
-        memset(&ms2, 0, sizeof(ms2));
-        block_map_init(&ms2.map_block_index);
-        active_chain_init(&ms2.chain_active);
+        main_state_init(&ms2);
         bool rejected = tok && !load_block_index_flat(tmpdir, &ms2).ok;
 
         BIL_CHECK("bil: embedded format rejects truncated file", rejected);
 
         unlink(path);
         rmdir(tmpdir);
-        block_map_free(&ms.map_block_index);
-        block_map_free(&ms2.map_block_index);
+        main_state_free(&ms);
+        main_state_free(&ms2);
     }
     return failures;
 }
@@ -1089,16 +1037,14 @@ static int bil_embedded_header_only_case(void)
         if (f) { wrote = (fwrite(&hdr, sizeof(hdr), 1, f) == 1); fclose(f); }
 
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         bool rejected = wrote && !load_block_index_flat(tmpdir, &ms).ok;
 
         BIL_CHECK("bil: embedded format rejects header-only file", rejected);
 
         unlink(path);
         rmdir(tmpdir);
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
     }
     return failures;
 }
@@ -1108,9 +1054,7 @@ static int bil_legacy_two_file_case(void)
     int failures = 0;
     {
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         build_synthetic_chain(&ms, 40);
 
         char tmpdir[256];
@@ -1155,9 +1099,7 @@ static int bil_legacy_two_file_case(void)
             legacy_ok = bii_write_sidecar(tmpdir).ok;
 
         struct main_state ms2;
-        memset(&ms2, 0, sizeof(ms2));
-        block_map_init(&ms2.map_block_index);
-        active_chain_init(&ms2.chain_active);
+        main_state_init(&ms2);
         bool loaded = legacy_ok && load_block_index_flat(tmpdir, &ms2).ok;
         bool count_ok = loaded &&
             (ms2.map_block_index.size == ms.map_block_index.size);
@@ -1178,8 +1120,8 @@ static int bil_legacy_two_file_case(void)
         unlink(sidecar_path);
         unlink(path);
         rmdir(tmpdir);
-        block_map_free(&ms.map_block_index);
-        block_map_free(&ms2.map_block_index);
+        main_state_free(&ms);
+        main_state_free(&ms2);
     }
     return failures;
 }
@@ -1189,9 +1131,7 @@ static int bil_legacy_missing_sidecar_case(void)
     int failures = 0;
     {
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         build_synthetic_chain(&ms, 40);
 
         char tmpdir[256];
@@ -1232,9 +1172,7 @@ static int bil_legacy_missing_sidecar_case(void)
         /* The body still loads (legacy magic); bii_verify reports
          * SIDECAR_MISSING, which boot accepts. */
         struct main_state ms2;
-        memset(&ms2, 0, sizeof(ms2));
-        block_map_init(&ms2.map_block_index);
-        active_chain_init(&ms2.chain_active);
+        main_state_init(&ms2);
         bool loaded = legacy_ok && load_block_index_flat(tmpdir, &ms2).ok;
         bool missing_ok = loaded &&
             (bii_verify(tmpdir, NULL, NULL, NULL, 0) == BII_SIDECAR_MISSING);
@@ -1244,8 +1182,8 @@ static int bil_legacy_missing_sidecar_case(void)
 
         unlink(path);
         rmdir(tmpdir);
-        block_map_free(&ms.map_block_index);
-        block_map_free(&ms2.map_block_index);
+        main_state_free(&ms);
+        main_state_free(&ms2);
     }
     return failures;
 }
@@ -1447,9 +1385,7 @@ static int bil_seed_tip_oversized_walk(const struct chain_params *cp)
             sqlite3 *db2 = s2 ? progress_store_db() : NULL;
 
             struct main_state ms2;
-            memset(&ms2, 0, sizeof(ms2));
-            block_map_init(&ms2.map_block_index);
-            active_chain_init(&ms2.chain_active);
+            main_state_init(&ms2);
             bool tf2 = tip_finalize_stage_init(&ms2);
 
             int big_h = BLOCK_INDEX_LOADER_SEED_MAX_GAP + 10000; /* 60000 */
@@ -1479,7 +1415,7 @@ static int bil_seed_tip_oversized_walk(const struct chain_params *cp)
 
             tip_finalize_stage_shutdown();
             progress_store_close();
-            block_map_free(&ms2.map_block_index);
+            main_state_free(&ms2);
             test_cleanup_tmpdir(dir2);
         }
     }
@@ -1509,9 +1445,7 @@ static int bil_seed_tip_finalized_case(void)
          * rest of the chain HAVE_DATA + VALID_SCRIPTS + contiguous pprev. */
         const int N = 5;
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
 
         struct uint256 hashes[16];
         bil_seed_tip_build_chain(&ms, hashes, N, gen);
@@ -1528,7 +1462,7 @@ static int bil_seed_tip_finalized_case(void)
          * case opens its own, so the big_h anchor cannot clobber the cases above. */
         tip_finalize_stage_shutdown();
         progress_store_close();
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
         test_cleanup_tmpdir(dir);
 
         failures += bil_seed_tip_oversized_walk(cp);
@@ -1586,9 +1520,7 @@ static int bil_blocks_hydrate_case(void)
         }
 
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
 
         ok = ok && load_block_index_from_blocks_table(&ndb, &ms).ok;
         bool size_ok = ok && (ms.map_block_index.size == (size_t)N);
@@ -1603,7 +1535,7 @@ static int bil_blocks_hydrate_case(void)
         BIL_CHECK("bil: blocks-table hydrate clamps to header-only "
                   "(BLOCK_VALID_TREE, no HAVE_DATA)", valid_ok);
 
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
         if (ndb.db) sqlite3_close(ndb.db);
         free(hashes);
     }
@@ -1632,9 +1564,7 @@ static int bil_blocks_hydrate_liveness_case(void)
         }
 
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
 
         uint64_t marker_before = boot_progress_marker();
         ok = ok && load_block_index_from_blocks_table(&ndb, &ms).ok;
@@ -1642,7 +1572,7 @@ static int bil_blocks_hydrate_liveness_case(void)
                   "(>4096 rows, watchdog liveness)",
                   ok && boot_progress_marker() > marker_before);
 
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
         if (ndb.db) sqlite3_close(ndb.db);
         free(hashes);
     }
@@ -1736,9 +1666,7 @@ static int bil_blocks_hydrate_row_quarantine_case(void)
         ok = bil_blocks_hydrate_poison_row(&ndb, POISON_H, ok);
 
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
 
         blocker_clear("block_index.blocks_hydrate_quarantine");
         int64_t q_before = block_index_blocks_hydrate_quarantined();
@@ -1771,7 +1699,7 @@ static int bil_blocks_hydrate_row_quarantine_case(void)
                   neighbours_ok);
 
         blocker_clear("block_index.blocks_hydrate_quarantine");
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
         if (ndb.db) sqlite3_close(ndb.db);
         free(hashes);
     }
@@ -1814,9 +1742,7 @@ static int bil_blocks_hydrate_all_poisoned_case(void)
         }
 
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
 
         int64_t q_before = block_index_blocks_hydrate_quarantined();
         bool refused = ok && !load_block_index_from_blocks_table(&ndb, &ms).ok;
@@ -1828,7 +1754,7 @@ static int bil_blocks_hydrate_all_poisoned_case(void)
                   refused && q_delta == N && empty_map);
 
         blocker_clear("block_index.blocks_hydrate_quarantine");
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
         if (ndb.db) sqlite3_close(ndb.db);
         free(hashes);
     }
@@ -1986,9 +1912,7 @@ static int bil_runtime_row_quarantine_case(void)
         /* Active chain over the SAME hashes; HAVE_DATA set on the poison row so
          * the quarantine's in-memory clear is observable. */
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         struct block_index *bi_arr[5] = {0};
         ok = bil_runtime_chain_build(&ms, hashes, bi_arr, N, POISON_H, ok);
         ok = ok && active_chain_move_window_tip(&ms.chain_active, bi_arr[N - 1]);
@@ -2006,7 +1930,7 @@ static int bil_runtime_row_quarantine_case(void)
         failures += bil_runtime_height_fallback(&ndb, &ms, hashes, ok);
 
         blocker_clear("block_index.runtime_row_quarantine");
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
         if (ndb.db) sqlite3_close(ndb.db);
     }
     return failures;
@@ -2017,9 +1941,7 @@ static int bil_fast_restart_forward_case(void)
     int failures = 0;
     {
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         build_synthetic_chain(&ms, 20);
 
         struct uint256 tip_hash = make_test_hash(19);
@@ -2043,9 +1965,7 @@ static int bil_fast_restart_forward_case(void)
         if (ok) save_block_index_flat(tmpdir, &ms);
 
         struct main_state ms2;
-        memset(&ms2, 0, sizeof(ms2));
-        block_map_init(&ms2.map_block_index);
-        active_chain_init(&ms2.chain_active);
+        main_state_init(&ms2);
         if (ok) ok = load_block_index_flat(tmpdir, &ms2).ok;
 
         struct arith_uint256 zero = {0};
@@ -2061,8 +1981,8 @@ static int bil_fast_restart_forward_case(void)
         snprintf(path, sizeof(path), "%s/block_index.bin", tmpdir);
         unlink(path);
         rmdir(tmpdir);
-        block_map_free(&ms.map_block_index);
-        block_map_free(&ms2.map_block_index);
+        main_state_free(&ms);
+        main_state_free(&ms2);
     }
     return failures;
 }
@@ -2135,9 +2055,7 @@ static int bil_failed_bit_flat_low_checkpoint_case(void)
         checkpoints_set_rom_state_override_for_test(&ov);
 
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         build_synthetic_chain(&ms, 50);
 
         /* Stamp a STALE FAILED_VALID on the best-chain tip (h=49). */
@@ -2153,9 +2071,7 @@ static int bil_failed_bit_flat_low_checkpoint_case(void)
         if (ok) save_block_index_flat(tmpdir, &ms);
 
         struct main_state ms2;
-        memset(&ms2, 0, sizeof(ms2));
-        block_map_init(&ms2.map_block_index);
-        active_chain_init(&ms2.chain_active);
+        main_state_init(&ms2);
         if (ok) ok = load_block_index_flat(tmpdir, &ms2).ok;
 
         struct block_index *loaded =
@@ -2179,8 +2095,8 @@ static int bil_failed_bit_flat_low_checkpoint_case(void)
         snprintf(path, sizeof(path), "%s/block_index.bin", tmpdir);
         unlink(path);
         rmdir(tmpdir);
-        block_map_free(&ms.map_block_index);
-        block_map_free(&ms2.map_block_index);
+        main_state_free(&ms);
+        main_state_free(&ms2);
     }
     return failures;
 }
@@ -2190,9 +2106,7 @@ static int bil_failed_bit_flat_default_case(void)
     int failures = 0;
     {
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         build_synthetic_chain(&ms, 40);
 
         struct uint256 tip_hash = make_test_hash(39);
@@ -2207,9 +2121,7 @@ static int bil_failed_bit_flat_default_case(void)
         if (ok) save_block_index_flat(tmpdir, &ms);
 
         struct main_state ms2;
-        memset(&ms2, 0, sizeof(ms2));
-        block_map_init(&ms2.map_block_index);
-        active_chain_init(&ms2.chain_active);
+        main_state_init(&ms2);
         if (ok) ok = load_block_index_flat(tmpdir, &ms2).ok;
 
         struct block_index *loaded =
@@ -2229,8 +2141,8 @@ static int bil_failed_bit_flat_default_case(void)
         snprintf(path, sizeof(path), "%s/block_index.bin", tmpdir);
         unlink(path);
         rmdir(tmpdir);
-        block_map_free(&ms.map_block_index);
-        block_map_free(&ms2.map_block_index);
+        main_state_free(&ms);
+        main_state_free(&ms2);
     }
     return failures;
 }
@@ -2245,9 +2157,7 @@ static int bil_failed_bit_sqlite_case(void)
         checkpoints_set_rom_state_override_for_test(&ov);
 
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         build_synthetic_chain(&ms, 1200);
 
         struct uint256 tip_hash = make_test_hash(1199);
@@ -2271,9 +2181,7 @@ static int bil_failed_bit_sqlite_case(void)
             save_block_index_recent(&ndb, &ms);
 
             struct main_state ms2;
-            memset(&ms2, 0, sizeof(ms2));
-            block_map_init(&ms2.map_block_index);
-            active_chain_init(&ms2.chain_active);
+            main_state_init(&ms2);
             ok = load_block_index_sqlite(&ndb, &ms2).ok;
 
             struct block_index *loaded =
@@ -2285,11 +2193,11 @@ static int bil_failed_bit_sqlite_case(void)
             BIL_CHECK("bil: SQLite loader demotes a stale FAILED tip above the "
                       "checkpoint", ok && demoted);
 
-            block_map_free(&ms2.map_block_index);
+            main_state_free(&ms2);
             sqlite3_close(ndb.db);
         }
         checkpoints_reset_rom_state_override_for_test();
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
     }
     return failures;
 }
@@ -2317,9 +2225,7 @@ static long bil_status_kib(const char *key)
 static bool bil_peak_write_fixture(const char *dir, int rows)
 {
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    block_map_init(&ms.map_block_index);
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
     struct block_index *prev = NULL;
     for (int h = 0; h < rows; h++) {
         struct uint256 hash = make_test_hash(h);
@@ -2365,9 +2271,7 @@ static int bil_peak_load_child(const char *dir, int rows, int out_fd)
 {
     long rss_before = bil_status_kib("VmRSS");
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    block_map_init(&ms.map_block_index);
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
     bool ok = load_block_index_flat(dir, &ms).ok &&
               ms.map_block_index.size == (size_t)rows;
     long hwm = bil_status_kib("VmHWM");
@@ -2666,15 +2570,13 @@ int test_block_index_loader(void)
 
     {
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
 
         bool ok = !load_block_index_flat("/nonexistent/path", &ms).ok;
 
         BIL_CHECK("bil: load_block_index_flat returns false for missing file", ok);
 
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
     }
 
     /* ── 9. Embedded format: corrupted payload byte rejected ── */
@@ -2857,9 +2759,7 @@ static bool bil_probe_save_fixture(const char *tmpdir)
 {
     static struct block_index arena[100];
     struct main_state src;
-    memset(&src, 0, sizeof(src));
-    block_map_init(&src.map_block_index);
-    active_chain_init(&src.chain_active);
+    main_state_init(&src);
     bool ok = block_map_reserve(&src.map_block_index, 100);
     for (int i = 0; ok && i < 100; i++) {
         struct block_index *pi = &arena[i];
@@ -2877,7 +2777,7 @@ static bool bil_probe_save_fixture(const char *tmpdir)
     struct block_index_flat_identity identity = {0};
     if (ok)
         ok = save_block_index_flat_identity(tmpdir, &src, &identity).ok;
-    block_map_free(&src.map_block_index);
+    main_state_free(&src);
     return ok;
 }
 
@@ -2888,15 +2788,13 @@ static int bil_flat_probe_case(const char *tmpdir, size_t vacant,
     static struct block_index nodes_before[4096];
     int failures = 0;
     struct main_state ms2;
-    memset(&ms2, 0, sizeof(ms2));
-    block_map_init(&ms2.map_block_index);
-    active_chain_init(&ms2.chain_active);
+    main_state_init(&ms2);
     struct block_index *resident_arena = NULL;
     bool filled = bil_fill_map_to_capacity(&ms2, duplicates ? 0xAA : 0xBB,
                                            vacant, &resident_arena);
     if (!filled) {
         BIL_CHECK("bil: full-map fixture setup", false);
-        block_map_free(&ms2.map_block_index);
+        main_state_free(&ms2);
         return failures;
     }
     memcpy(before, ms2.map_block_index.buckets, sizeof(before));
@@ -2927,7 +2825,7 @@ static int bil_flat_probe_case(const char *tmpdir, size_t vacant,
     bool have_identity = block_index_flat_verified_identity(tmpdir, &identity);
     BIL_CHECK("bil: refused load does not retain verified flat identity",
               have_identity == duplicates);
-    block_map_free(&ms2.map_block_index);
+    main_state_free(&ms2);
     return failures;
 }
 

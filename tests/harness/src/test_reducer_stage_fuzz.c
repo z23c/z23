@@ -469,20 +469,19 @@ static bool adv_utxo_count(int height_after, int64_t *out_count, void *user)
     return true;
 }
 
-/* These synthetic states own only an active chain and cs_main. Match the
- * production recursive mutex contract: stage entry and index production may
- * acquire main recursively even in a single-threaded fixture. */
+/* These synthetic states own cs_main, the block map, the active chain and
+ * the sapling tree. Build them with main_state_init: a zero-filled pthread
+ * mutex is not valid on Darwin. Match the production recursive mutex
+ * contract: stage entry and index production may acquire main recursively
+ * even in a single-threaded fixture. */
 static void rf_main_init(struct main_state *ms)
 {
-    memset(ms, 0, sizeof(*ms));
-    zcl_mutex_init(&ms->cs_main);
-    active_chain_init(&ms->chain_active);
+    main_state_init(ms);
 }
 
 static void rf_main_free(struct main_state *ms)
 {
-    active_chain_free(&ms->chain_active);
-    zcl_mutex_destroy(&ms->cs_main);
+    main_state_free(ms);
 }
 
 /* ── per-stage fuzz drivers ───────────────────────────────────────────── */
@@ -497,6 +496,9 @@ static void fuzz_header_admit(uint64_t *rng, int iter)
 
     struct main_state ms;
     rf_main_init(&ms);
+    /* main_state_init defaults this to true; header_admit reads it, so keep
+     * the fuzz on the false value it has always run with. */
+    ms.fCheckpointsEnabled = false;
     int n = sm_range(rng, 1, 12);
     struct synth sc;
     if (!synth_build(&sc, n, false)) {

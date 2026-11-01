@@ -73,14 +73,12 @@ static void reset_sync_watchdog(struct connman *cm,
     local_header_refill_needed_test_reset();
     memset(cm, 0, sizeof(*cm));
     memset(dm, 0, sizeof(*dm));
-    memset(ms, 0, sizeof(*ms));
     zcl_mutex_init(&cm->manager.cs_nodes);
     zcl_mutex_init(&dm->cs);
-    zcl_mutex_init(&ms->cs_main);
-    /* active_chain_move_window_tip takes its own writer lock.  A zeroed
-     * pthread mutex happened to tolerate this fixture on POSIX, but a native
-     * Windows CRITICAL_SECTION must always be explicitly initialized. */
-    active_chain_init(&ms->chain_active);
+    /* main_state_init sets up cs_main (locked by active_chain_move_window_tip
+     * and the IBD latch) and the chain. A zero-filled mutex is not valid on
+     * Darwin or Windows, so never memset the state. */
+    main_state_init(ms);
     sync_monitor_init();
     sync_monitor_set_context(cm, dm, ms);
     condition_engine_set_main_state(ms);
@@ -423,6 +421,7 @@ static int sync_watchdog_case_header_stall(void)
         ok = ok && condition_engine_get_active_count() == 0;
         SYNC_WATCHDOG_CHECK("header stall kicks header fetch", ok);
         cleanup_sync_watchdog();
+        main_state_free(&ms);
     }
     return failures;
 }
@@ -460,6 +459,7 @@ static int sync_watchdog_case_sync_state_stuck(void)
         ok = ok && condition_engine_get_active_count() == 0;
         SYNC_WATCHDOG_CHECK("sync state stuck kicks FSM", ok);
         cleanup_sync_watchdog();
+        main_state_free(&ms);
     }
     return failures;
 }
@@ -491,6 +491,7 @@ static int sync_watchdog_case_starved_empty_window(void)
         SYNC_WATCHDOG_CHECK(
             "download queue starved ignores empty drained window", ok);
         cleanup_sync_watchdog();
+        main_state_free(&ms);
     }
     return failures;
 }
@@ -542,6 +543,7 @@ static int sync_watchdog_case_starved_refill_detail(void)
         dl_free(&dm);
         zcl_mutex_destroy(&dm.cs);
         cleanup_sync_watchdog();
+        main_state_free(&ms);
     }
     return failures;
 }
@@ -594,6 +596,7 @@ static int sync_watchdog_case_starved_ignores_capability_blocker(void)
         dl_free(&dm);
         zcl_mutex_destroy(&dm.cs);
         cleanup_sync_watchdog();
+        main_state_free(&ms);
     }
     return failures;
 }
@@ -665,6 +668,7 @@ static int sync_watchdog_case_starved_permanent_blocker(void)
         dl_free(&dm);
         zcl_mutex_destroy(&dm.cs);
         cleanup_sync_watchdog();
+        main_state_free(&ms);
     }
     return failures;
 }
@@ -735,6 +739,7 @@ static int sync_watchdog_case_starved_defer_episode(void)
         dl_free(&dm);
         zcl_mutex_destroy(&dm.cs);
         cleanup_sync_watchdog();
+        main_state_free(&ms);
     }
     return failures;
 }
@@ -785,6 +790,7 @@ static int sync_watchdog_case_starved_orphaned_requests(void)
         dl_free(&dm);
         zcl_mutex_destroy(&dm.cs);
         cleanup_sync_watchdog();
+        main_state_free(&ms);
     }
     return failures;
 }
@@ -832,6 +838,7 @@ static int sync_watchdog_case_starved_clears_leaving_download(void)
         dl_free(&dm);
         zcl_mutex_destroy(&dm.cs);
         cleanup_sync_watchdog();
+        main_state_free(&ms);
     }
     return failures;
 }
@@ -878,6 +885,7 @@ static int sync_watchdog_case_starved_clears_when_drained(void)
         dl_free(&dm);
         zcl_mutex_destroy(&dm.cs);
         cleanup_sync_watchdog();
+        main_state_free(&ms);
     }
     return failures;
 }
@@ -944,6 +952,7 @@ static int sync_watchdog_case_starved_pages_then_rearms(void)
         dl_free(&dm);
         zcl_mutex_destroy(&dm.cs);
         cleanup_sync_watchdog();
+        main_state_free(&ms);
     }
     return failures;
 }
@@ -997,6 +1006,7 @@ static int sync_watchdog_case_refill_rotates_peers(void)
         SYNC_WATCHDOG_CHECK(
             "local header refill rotates peers with detail json", ok);
         cleanup_sync_watchdog();
+        main_state_free(&ms);
     }
     return failures;
 }
@@ -1014,7 +1024,6 @@ static int sync_watchdog_case_refill_fork_body(void)
         zcl_mutex_destroy(&dm.cs);
         dl_init(&dm);
         sync_monitor_set_context(&cm, &dm, &ms);
-        block_map_init(&ms.map_block_index);
         bool ok = true;
         register_local_header_refill_needed();
 
@@ -1114,6 +1123,7 @@ static int sync_watchdog_case_refill_waits_for_outbound(void)
         ok = ok && lr.mirror_repair_gated;
         SYNC_WATCHDOG_CHECK("local header refill waits for outbound peer", ok);
         cleanup_sync_watchdog();
+        main_state_free(&ms);
     }
     return failures;
 }
@@ -1159,6 +1169,7 @@ static int sync_watchdog_case_refill_clears_on_tip_advance(void)
         SYNC_WATCHDOG_CHECK(
             "local header refill clears after active tip advances", ok);
         cleanup_sync_watchdog();
+        main_state_free(&ms);
     }
     return failures;
 }

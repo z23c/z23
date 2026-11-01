@@ -133,9 +133,7 @@ static enum boot_recovery_action csv_null_legacy_derived(int seed_h,
     char cmd[320];
 
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    block_map_init(&ms.map_block_index);
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
     csv_build_chain(&ms, 50);
 
     *seeded = false;
@@ -173,7 +171,7 @@ static enum boot_recovery_action csv_null_legacy_derived(int seed_h,
         csv_execute_verdict(&ms, &cache, pdir, &r, out);
 
     coins_view_cache_free(&cache);
-    block_map_free(&ms.map_block_index);
+    main_state_free(&ms);
     progress_store_close();
     snprintf(cmd, sizeof(cmd), "rm -rf '%s'", pdir);
     TEST_DISCARD(system(cmd));
@@ -236,9 +234,7 @@ int test_chain_state_validator(void)
 
     {
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         csv_build_chain(&ms, 100);
 
         struct coins_view_cache cache;
@@ -257,16 +253,14 @@ int test_chain_state_validator(void)
                   r.action == BOOT_OK && r.coins_height == 99);
 
         coins_view_cache_free(&cache);
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
     }
 
     /* ── 2. Empty coins, chain with blocks → reimport/wipe ── */
 
     {
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         csv_build_chain(&ms, 50);
 
         struct coins_view_cache cache;
@@ -282,7 +276,7 @@ int test_chain_state_validator(void)
                   r.action == BOOT_RECOVER_WIPE_WAIT);
 
         coins_view_cache_free(&cache);
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
     }
 
     failures += csv_derived_cases();
@@ -291,9 +285,7 @@ int test_chain_state_validator(void)
 
     {
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         /* No chain built — tip is NULL */
 
         struct coins_view_cache cache;
@@ -308,16 +300,14 @@ int test_chain_state_validator(void)
                   r.action == BOOT_OK);
 
         coins_view_cache_free(&cache);
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
     }
 
     /* ── 4. Chain at genesis, coins unknown → reset cursor via executor ── */
 
     {
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         csv_build_chain(&ms, 1);
 
         struct coins_view_cache cache;
@@ -340,16 +330,14 @@ int test_chain_state_validator(void)
                   uint256_eq(&after, &unknown));
 
         coins_view_cache_free(&cache);
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
     }
 
     /* ── 5. Coins behind chain → RESET_CHAIN ─────────── */
 
     {
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         csv_build_chain(&ms, 100);
 
         struct coins_view_cache cache;
@@ -372,7 +360,7 @@ int test_chain_state_validator(void)
                   r.coins_height == 50);
 
         coins_view_cache_free(&cache);
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
     }
 
     /* ── 5b. Coins behind chain BUT the chain tip IS the durable
@@ -392,9 +380,7 @@ int test_chain_state_validator(void)
          TEST_DISCARD(system(mkcmd));
 
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         csv_build_chain(&ms, 100);
         struct block_index *tip = active_chain_tip(&ms.chain_active);
 
@@ -434,7 +420,7 @@ int test_chain_state_validator(void)
                   seeded && r.action == BOOT_OK && r.coins_height == 99);
 
         coins_view_cache_free(&cache);
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
         progress_store_close();
          TEST_DISCARD(system(rmcmd));
     }
@@ -443,9 +429,7 @@ int test_chain_state_validator(void)
 
     {
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
 
         /* Build a chain longer than 1000 using a compact range */
         struct uint256 hashes[2];
@@ -499,16 +483,14 @@ int test_chain_state_validator(void)
                   uint256_eq(&after, &unknown));
 
         coins_view_cache_free(&cache);
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
     }
 
     /* ── 7. Chain at genesis, coins set to known block → RESET ── */
 
     {
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
 
         /* Insert a block at h=500 but don't set it as active tip */
         struct uint256 hash;
@@ -535,7 +517,7 @@ int test_chain_state_validator(void)
                   r.coins_height == 500);
 
         coins_view_cache_free(&cache);
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
     }
 
     printf("=== chain state validator: %d failures ===\n", failures);

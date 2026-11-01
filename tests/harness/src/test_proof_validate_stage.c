@@ -342,8 +342,7 @@ static int pv_setup(const char *tag, int n, int upstream_fail_height,
     test_make_tmpdir(dir_out, dir_out_size, "proof_validate", tag);
     if (!progress_store_open(dir_out)) return 1;
 
-    memset(ms, 0, sizeof(*ms));
-    active_chain_init(&ms->chain_active);
+    main_state_init(ms);
     if (!synth_chain_pv_build(sc, n)) return 2;
     active_chain_move_window_tip(&ms->chain_active, &sc->blocks[n - 1]);
 
@@ -359,7 +358,7 @@ static void pv_teardown(const char *dir, struct main_state *ms,
                         struct synth_chain_pv *sc)
 {
     proof_validate_stage_shutdown();
-    active_chain_free(&ms->chain_active);
+    main_state_free(ms);
     synth_chain_pv_free(sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
