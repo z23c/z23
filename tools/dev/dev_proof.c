@@ -2331,7 +2331,7 @@ static bool dp_split_public_object(const char *st)
     return !dp_split_private_start(st);
 }
 
-/* A public `;` statement: a prototype shape (no '=', no '[' or function
+/* A public `;` statement: a prototype shape (no '=', no '[', ',' or function
  * pointer before its name, the name's '(' the first and closed at the end)
  * is recorded by name; any other shape may be an object. `unsigned T_(1) x;`
  * does not end in ')', and `int T_(x);` is admitted only if the same text
@@ -2341,9 +2341,10 @@ static void dp_split_public_decl(struct dp_split_funcs *f, char *st)
     size_t n = strlen(st);
     while (n > 0 && st[n - 1] == ' ') st[--n] = '\0';
     const char *paren = strchr(st, '('), *bracket = strchr(st, '[');
-    const char *start, *end;
+    const char *comma = strchr(st, ','), *start, *end;
     if (!paren || strchr(st, '=') || strstr(st, "(*") || strstr(st, "( *") ||
-        (bracket && bracket < paren) || !dp_split_name(st, n, &start, &end) ||
+        (bracket && bracket < paren) || (comma && comma < paren) ||
+        !dp_split_name(st, n, &start, &end) ||
         (size_t)(end - start) >= DP_SPLIT_NAME_MAX ||
         f->decls >= DP_SPLIT_DECLS_MAX) {
         f->object = true;
