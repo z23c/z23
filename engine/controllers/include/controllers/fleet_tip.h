@@ -73,15 +73,20 @@ size_t fleet_tip_serve_at(const char *height_arg, uint8_t *response,
 bool fleet_tip_parse(const uint8_t *body, size_t len, int64_t ask_height,
                      struct fleet_tip *out);
 
-/* The cache, keyed by fleet_status_onion_key(). A machine's standing send
- * refusal is kept beside its tip, as the lowest height at which it named
- * another block (0 when none); a put leaves it alone. Persistence is the
- * caller's: see fleet_status_note_check(). */
+/* The tip cache, keyed by fleet_status_onion_key(). */
 void fleet_tip_cache_put(const char *key, const struct fleet_tip *tip);
 bool fleet_tip_cache_get(const char *key, struct fleet_tip *out);
+
+/* Standing send refusals, one per machine, keyed by the machine's box key as
+ * 64 lowercase hex digits (FLEET_TIP_REFUSAL_KEY_MAX with the NUL), so that
+ * a box admitted again under another onion keeps its refusal. A refusal is
+ * the lowest height at which the machine named another block, 0 when none.
+ * Persistence is the caller's: see fleet_status_note_check(). */
+#define FLEET_TIP_REFUSAL_KEY_MAX 65
 void fleet_tip_cache_raise_refusal(const char *key, int64_t height);
 void fleet_tip_cache_clear_refusal(const char *key);
 int64_t fleet_tip_cache_refusal(const char *key);
+
 /* Monotone time of the last ask of `key`, 0 when never asked. */
 int64_t fleet_tip_cache_last_try(const char *key);
 void fleet_tip_cache_note_try(const char *key, int64_t now);

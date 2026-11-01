@@ -9560,6 +9560,39 @@ static bool fst_hash_at(int64_t h, char hex[65], void *ctx)
 static const struct fleet_status_local g_fst_local = {
     .tip = FST_LOCAL, .hash_at = fst_hash_at };
 
+/* The box key of the roster machine at `onion` in the collected status. */
+static bool fst_box_of(const char *onion, uint8_t box[32])
+{
+    char want[BOOT_FLEET_ROSTER_ONION_MAX], have[BOOT_FLEET_ROSTER_ONION_MAX];
+    if (!fleet_status_onion_key(onion, want, sizeof want))
+        return false;
+    for (size_t i = 0; i < g_fst.machine_count; i++)
+        if (fleet_status_onion_key(g_fst.machines[i].onion, have,
+                                   sizeof have) &&
+            strcmp(want, have) == 0) {
+            memcpy(box, g_fst.machines[i].box, 32);
+            return true;
+        }
+    return false;
+}
+
+/* The standing refusal the cache holds for the machine at `onion`: its
+ * refused height, 0 when none. */
+static int64_t fst_refusal_of(const char *onion)
+{
+    static const char digits[] = "0123456789abcdef";
+    char key[FLEET_TIP_REFUSAL_KEY_MAX];
+    uint8_t box[32];
+    if (!fst_box_of(onion, box))
+        return -1;
+    for (size_t i = 0; i < 32; i++) {
+        key[2 * i] = digits[box[i] >> 4];
+        key[2 * i + 1] = digits[box[i] & 15];
+    }
+    key[64] = '\0';
+    return fleet_tip_cache_refusal(key);
+}
+
 /* A check of `onion` made at time `at` on the fleet_tip_now_secs() clock,
  * stored and settled as the background step does. `at_forked` is the block a
  * machine above our tip names at our tip height: ours, or a fork's. */
@@ -9567,6 +9600,7 @@ static void fst_check_above(const char *onion, int64_t h, bool forked,
                             bool has_at, bool at_forked, int64_t at)
 {
     char key[BOOT_FLEET_ROSTER_ONION_MAX];
+    uint8_t box[32];
     struct fleet_tip t;
     memset(&t, 0, sizeof t);
     t.height = h;
@@ -9575,10 +9609,11 @@ static void fst_check_above(const char *onion, int64_t h, bool forked,
     t.at_height = FST_LOCAL;
     fst_hash(FST_LOCAL, at_forked, t.at_hash);
     t.fetched_at = at;
-    if (!fleet_status_onion_key(onion, key, sizeof key))
+    if (!fleet_status_onion_key(onion, key, sizeof key) ||
+        !fst_box_of(onion, box))
         return;
     fleet_tip_cache_put(key, &t);
-    fleet_status_note_check(g_fst_db, key, &t, &g_fst_local);
+    fleet_status_note_check(g_fst_db, box, &t, &g_fst_local);
 }
 
 static void fst_check(const char *onion, int64_t h, bool forked, int64_t at)
@@ -10354,16 +10389,85 @@ static int test_fleet_status_standing_refusal(void)
         fst_close(&db);
         PASS();
     }
+    TEST("fleet status: a refusal follows a box admitted again under another "
+         "onion") {
+        char line[FLEET_ENROL_MACHINE_TEXT_MAX];
+        ASSERT(fst_open(&db, false, FST_ONCE));
+        fleet_status_collect(&db, FBD_NOW, &g_fst);
+        fst_check(FST_ALPHA, FST_LOCAL, true, FST_NOW - 5);
+        ASSERT(fst_line(FBR_ROOT, "alpha", 11, FST_ALPHA2,
+                        FBR_LINE_NOW + 3600, line, sizeof line));
+        fst_add_line(line, false);
+        fleet_status_collect(&db, FBD_NOW, &g_fst);
+        ASSERT_STR_EQ(fst_machine("alpha")->onion, FST_ALPHA2);
+        fst_peer(&peers[0], FST_ALPHA2, false);
+        fst_apply(peers, 1);
+        ASSERT_EQ(fst_machine("alpha")->agreement,
+                  FLEET_STATUS_MACHINE_DISAGREES);
+        ASSERT(g_fst.refuses_send);
+        fst_restart(&db);
+        fst_apply(peers, 1);
+        ASSERT(g_fst.refuses_send);
+        fst_close(&db);
+        PASS();
+    }
+    TEST("fleet status: an unreadable fleet root is unverifiable, holds a "
+         "send back and never reads as no fleet") {
+        ASSERT(fst_open(&db, false, FST_ONCE));
+        g_fbr.root_fail = true;
+        ASSERT(fleet_status_build(&db, NULL, &g_fst_local, FBD_NOW, FST_NOW,
+                                  &g_fst));
+        ASSERT(g_fst.unverifiable);
+        ASSERT(g_fst.member);
+        ASSERT_EQ(g_fst.verdict, FLEET_STATUS_UNCHECKED);
+        ASSERT(g_fst.refuses_send);
+        g_fbr.root_fail = false;
+        ASSERT(fleet_status_build(&db, NULL, &g_fst_local, FBD_NOW, FST_NOW,
+                                  &g_fst));
+        ASSERT(!g_fst.unverifiable);
+        ASSERT(!g_fst.refuses_send);
+        fst_close(&db);
+        PASS();
+    }
+    TEST("fleet status: the status build of the running node reloads a "
+         "stored refusal after a restart") {
+        ASSERT(fst_open(&db, false, FST_ONCE));
+        fleet_status_collect(&db, FBD_NOW, &g_fst);
+        fst_check(FST_ALPHA, FST_LOCAL, true, FST_NOW - 5);
+        fleet_tip_cache_reset(); /* the node restarts; node_state is kept */
+        ASSERT(fleet_status_build(&db, NULL, &g_fst_local, FBD_NOW, FST_NOW,
+                                  &g_fst));
+        ASSERT_EQ(g_fst.verdict, FLEET_STATUS_DISAGREE);
+        ASSERT(g_fst.refuses_send);
+        fst_close(&db);
+        PASS();
+    }
+    TEST("fleet status: a refusal whose first save failed is saved again by "
+         "the next status build") {
+        ASSERT(fst_open(&db, false, FST_ONCE));
+        fleet_status_collect(&db, FBD_NOW, &g_fst);
+        g_fst_db = NULL; /* no database: the save cannot happen */
+        fst_check(FST_ALPHA, FST_LOCAL, true, FST_NOW - 5);
+        g_fst_db = &db;
+        ASSERT_EQ(fst_refusal_of(FST_ALPHA), (int64_t)FST_LOCAL);
+        fleet_status_load_refusals(&db, &g_fst);
+        fleet_tip_cache_reset();
+        fleet_status_load_refusals(&db, &g_fst);
+        ASSERT_EQ(fst_refusal_of(FST_ALPHA), (int64_t)FST_LOCAL);
+        fst_close(&db);
+        PASS();
+    }
     TEST("fleet status: a check judged against no chain, no tip, no block "
          "or a block above the tip neither raises nor lifts a refusal") {
-        char key[BOOT_FLEET_ROSTER_ONION_MAX];
+        uint8_t box[32];
         struct fleet_tip fork, same, above;
         const struct fleet_status_local notip = {
             .tip = 0, .hash_at = fst_hash_at };
         const struct fleet_status_local noblock = {
             .tip = FST_LOCAL, .hash_at = fst_hash_none };
         ASSERT(fst_open(&db, false, FST_ONCE));
-        ASSERT(fleet_status_onion_key(FST_ALPHA, key, sizeof key));
+        fleet_status_collect(&db, FBD_NOW, &g_fst);
+        ASSERT(fst_box_of(FST_ALPHA, box));
         memset(&fork, 0, sizeof fork);
         fork.height = FST_LOCAL;
         fst_hash(FST_LOCAL, true, fork.hash);
@@ -10375,17 +10479,17 @@ static int test_fleet_status_standing_refusal(void)
         above.has_at = true;
         above.at_height = FST_LOCAL + 5; /* a height this node does not hold */
         fst_hash(above.at_height, true, above.at_hash);
-        fleet_status_note_check(&db, key, &fork, NULL);
-        fleet_status_note_check(&db, key, &fork, &notip);
-        fleet_status_note_check(&db, key, &fork, &noblock);
-        fleet_status_note_check(&db, key, &above, &g_fst_local);
-        ASSERT_EQ(fleet_tip_cache_refusal(key), (int64_t)0);
-        fleet_status_note_check(&db, key, &fork, &g_fst_local);
-        ASSERT_EQ(fleet_tip_cache_refusal(key), (int64_t)FST_LOCAL);
-        fleet_status_note_check(&db, key, &same, NULL);
-        fleet_status_note_check(&db, key, &same, &notip);
-        fleet_status_note_check(&db, key, &same, &noblock);
-        ASSERT_EQ(fleet_tip_cache_refusal(key), (int64_t)FST_LOCAL);
+        fleet_status_note_check(&db, box, &fork, NULL);
+        fleet_status_note_check(&db, box, &fork, &notip);
+        fleet_status_note_check(&db, box, &fork, &noblock);
+        fleet_status_note_check(&db, box, &above, &g_fst_local);
+        ASSERT_EQ(fst_refusal_of(FST_ALPHA), (int64_t)0);
+        fleet_status_note_check(&db, box, &fork, &g_fst_local);
+        ASSERT_EQ(fst_refusal_of(FST_ALPHA), (int64_t)FST_LOCAL);
+        fleet_status_note_check(&db, box, &same, NULL);
+        fleet_status_note_check(&db, box, &same, &notip);
+        fleet_status_note_check(&db, box, &same, &noblock);
+        ASSERT_EQ(fst_refusal_of(FST_ALPHA), (int64_t)FST_LOCAL);
         fst_close(&db);
         PASS();
     }
@@ -10536,6 +10640,10 @@ static int test_fleet_status_clock(void)
                    "stage %d refused)\n", got);
             goto _test_next;
         }
+#else
+        printf("SKIP (suspend skew not observed: no time namespaces on "
+               "this platform)\n");
+        goto _test_next;
 #endif
         PASS();
     }

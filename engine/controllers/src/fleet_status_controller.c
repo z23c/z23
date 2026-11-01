@@ -79,8 +79,14 @@ void fleet_status_collect(struct node_db *ndb, int64_t now,
     uint8_t root[32];
     bool present = false;
     memset(out, 0, sizeof *out);
-    if (zcl_fleet_roster_root(root, &present, NULL))
+    if (zcl_fleet_roster_root(root, &present, NULL)) {
         out->member = present;
+    } else {
+        /* A recorded root that cannot be read is unverifiable, never absent:
+         * the roster and the refusals stored against it cannot be told. */
+        out->member = true;
+        out->unverifiable = true;
+    }
     memory_cleanse(root, sizeof root);
     if (out->member)
         (void)boot_fleet_roster_each_machine(ndb, now, collect_visit, out);
@@ -172,6 +178,17 @@ static bool disagreement_refuses(const struct fleet_tip *t,
 
 /* ── the standing refusal ────────────────────────────────────────────── */
 
+/* The refusal key of a machine: its box key as lowercase hex. */
+static void box_key(const uint8_t box[32], char out[FLEET_TIP_REFUSAL_KEY_MAX])
+{
+    static const char digits[] = "0123456789abcdef";
+    for (size_t i = 0; i < 32; i++) {
+        out[2 * i] = digits[box[i] >> 4];
+        out[2 * i + 1] = digits[box[i] & 15];
+    }
+    out[64] = '\0';
+}
+
 /* The node_state name of the standing refusal of the machine `key`. */
 static bool refusal_name(const char *key, char *out, size_t cap)
 {
@@ -182,7 +199,7 @@ static bool refusal_name(const char *key, char *out, size_t cap)
 /* The refused height stored in `ndb` for `key`, 0 when none. */
 static int64_t refusal_load(struct node_db *ndb, const char *key)
 {
-    char name[BOOT_FLEET_ROSTER_ONION_MAX + 16];
+    char name[FLEET_TIP_REFUSAL_KEY_MAX + 16];
     int64_t height = 0;
     if (!ndb || !refusal_name(key, name, sizeof name) ||
         !node_db_state_get_int(ndb, name, &height) || height <= 0)
@@ -194,7 +211,7 @@ static int64_t refusal_load(struct node_db *ndb, const char *key)
  * leaves the in-memory refusal standing. */
 static void refusal_store(struct node_db *ndb, const char *key, int64_t height)
 {
-    char name[BOOT_FLEET_ROSTER_ONION_MAX + 16];
+    char name[FLEET_TIP_REFUSAL_KEY_MAX + 16];
     bool ok;
     if (!ndb || !refusal_name(key, name, sizeof name))
         return;
@@ -213,11 +230,13 @@ static int64_t checked_height(const struct fleet_tip *t,
     return a == FLEET_STATUS_PHONE_BEHIND ? t->at_height : t->height;
 }
 
-void fleet_status_note_check(struct node_db *ndb, const char *key,
+void fleet_status_note_check(struct node_db *ndb, const uint8_t box[32],
                              const struct fleet_tip *t,
                              const struct fleet_status_local *local)
 {
+    char key[FLEET_TIP_REFUSAL_KEY_MAX];
     enum fleet_status_agreement a = fleet_status_classify(t, local);
+    box_key(box, key);
     fleet_tip_cache_raise_refusal(key, refusal_load(ndb, key));
     switch (a) {
     case FLEET_STATUS_AGREES:
@@ -245,9 +264,14 @@ void fleet_status_load_refusals(struct node_db *ndb,
                                 const struct fleet_status *s)
 {
     for (size_t i = 0; s && i < s->machine_count; i++) {
-        char key[BOOT_FLEET_ROSTER_ONION_MAX];
-        if (fleet_status_onion_key(s->machines[i].onion, key, sizeof key))
-            fleet_tip_cache_raise_refusal(key, refusal_load(ndb, key));
+        char key[FLEET_TIP_REFUSAL_KEY_MAX];
+        int64_t stored, held;
+        box_key(s->machines[i].box, key);
+        stored = refusal_load(ndb, key);
+        fleet_tip_cache_raise_refusal(key, stored);
+        held = fleet_tip_cache_refusal(key);
+        if (held > 0 && held != stored)
+            refusal_store(ndb, key, held);
     }
 }
 
@@ -276,14 +300,15 @@ static void judge(struct fleet_status_machine *m,
  * check is and whether or not the machine is connected. */
 static void standing(struct fleet_status_machine *m)
 {
-    char key[BOOT_FLEET_ROSTER_ONION_MAX];
+    char key[FLEET_TIP_REFUSAL_KEY_MAX], onion[BOOT_FLEET_ROSTER_ONION_MAX];
     struct fleet_tip t;
-    if (!fleet_status_onion_key(m->onion, key, sizeof key) ||
-        fleet_tip_cache_refusal(key) <= 0)
+    box_key(m->box, key);
+    if (fleet_tip_cache_refusal(key) <= 0)
         return;
     m->agreement = FLEET_STATUS_MACHINE_DISAGREES;
     m->refusing = true;
-    if (m->tip_height == 0 && fleet_tip_cache_get(key, &t))
+    if (m->tip_height == 0 && fleet_status_onion_key(m->onion, onion, sizeof onion) &&
+        fleet_tip_cache_get(onion, &t))
         m->tip_height = t.height;
 }
 
@@ -342,6 +367,10 @@ void fleet_status_apply(struct fleet_status *s,
         standing(&s->machines[i]);
     s->verdict = verdict_of(s);
     s->refuses_send = refusal_of(s);
+    if (s->unverifiable) {
+        s->verdict = FLEET_STATUS_UNCHECKED;
+        s->refuses_send = true;
+    }
 }
 
 bool fleet_status_peer_on_roster(const struct fleet_status *s,

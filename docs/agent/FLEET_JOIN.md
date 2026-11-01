@@ -366,13 +366,18 @@ roster machine at or above this node's tip names a different block at a
 height this node holds. Once raised it stays, however old the check grows,
 whether or not later asks fail, whether the machine is connected or not and
 across a restart of the node (it is kept in `node_state` as
-`fleet_refusal.<onion>`), so a flooded onion, a dropped link or a killed
-process cannot lift it. Only a later check from that machine lifts it: one
+`fleet_refusal.<box key in hex>`, the machine's box key and not its onion, so
+a box admitted again under a new onion keeps it), so a flooded onion, a dropped
+link or a killed process cannot lift it. Only a later check from that machine lifts it: one
 that lands on this node's chain (`agrees`, `phone_behind` or
 `machine_behind`) at a height at or above the refused one. A machine that
 stays below that height lifts nothing. A refusing machine reads `disagree`
 and the verdict is `disagree` even while it is not connected. Failing to
 learn is never agreement.
+
+When the recorded fleet root cannot be read (a truncated operator file), the
+roster and the refusals against it cannot be told: the reply then has
+`member` true, verdict `unchecked` and `refuses_send` true, never `not_member`.
 
 ## What comes next
 

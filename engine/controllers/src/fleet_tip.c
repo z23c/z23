@@ -182,7 +182,6 @@ struct tip_entry {
     char key[BOOT_FLEET_ROSTER_ONION_MAX];
     bool used;
     bool has_tip;
-    int64_t refusal_height; /* 0: no standing refusal */
     int64_t last_try;
     struct fleet_tip tip;
 };
@@ -232,39 +231,68 @@ void fleet_tip_cache_put(const char *key, const struct fleet_tip *tip)
     pthread_mutex_unlock(&g_lock);
 }
 
+struct refusal_entry {
+    char key[FLEET_TIP_REFUSAL_KEY_MAX];
+    int64_t height; /* 0: the slot is free */
+};
+
+static struct refusal_entry g_refusals[BOOT_FLEET_ROSTER_MAX];
+static size_t g_refusal_next;
+
+/* The slot of `key`, else NULL. Locked. */
+static struct refusal_entry *refusal_find(const char *key)
+{
+    for (size_t i = 0; i < BOOT_FLEET_ROSTER_MAX; i++)
+        if (g_refusals[i].height > 0 && strcmp(g_refusals[i].key, key) == 0)
+            return &g_refusals[i];
+    return NULL;
+}
+
 void fleet_tip_cache_raise_refusal(const char *key, int64_t height)
 {
-    struct tip_entry *e;
-    if (!key || height <= 0)
+    struct refusal_entry *e;
+    if (!key || height <= 0 || strlen(key) >= FLEET_TIP_REFUSAL_KEY_MAX)
         return;
     pthread_mutex_lock(&g_lock);
-    e = entry_for(key);
-    if (e->refusal_height == 0 || height < e->refusal_height)
-        e->refusal_height = height;
+    e = refusal_find(key);
+    if (!e) {
+        for (size_t i = 0; i < BOOT_FLEET_ROSTER_MAX && !e; i++)
+            if (g_refusals[i].height == 0)
+                e = &g_refusals[i];
+        /* Full of boxes no longer on the roster: the oldest slot goes, and
+         * the stored refusal is reloaded by the next status build. */
+        if (!e)
+            e = &g_refusals[g_refusal_next++ % BOOT_FLEET_ROSTER_MAX];
+        (void)snprintf(e->key, sizeof e->key, "%s", key);
+        e->height = height;
+    } else if (height < e->height) {
+        e->height = height;
+    }
     pthread_mutex_unlock(&g_lock);
 }
 
 void fleet_tip_cache_clear_refusal(const char *key)
 {
-    struct tip_entry *e;
+    struct refusal_entry *e;
     if (!key)
         return;
     pthread_mutex_lock(&g_lock);
-    e = entry_for(key);
-    e->refusal_height = 0;
+    e = refusal_find(key);
+    if (e)
+        e->height = 0;
     pthread_mutex_unlock(&g_lock);
 }
 
 int64_t fleet_tip_cache_refusal(const char *key)
 {
-    const struct tip_entry *e;
+    const struct refusal_entry *e;
     int64_t height = 0;
     if (!key)
         return 0;
     pthread_mutex_lock(&g_lock);
-    e = entry_find(key);
+    e = refusal_find(key);
     if (e)
-        height = e->refusal_height;
+        height = e->height;
     pthread_mutex_unlock(&g_lock);
     return height;
 }
@@ -312,15 +340,17 @@ void fleet_tip_cache_reset(void)
 {
     pthread_mutex_lock(&g_lock);
     memset(g_entries, 0, sizeof g_entries);
+    memset(g_refusals, 0, sizeof g_refusals);
+    g_refusal_next = 0;
     pthread_mutex_unlock(&g_lock);
 }
 
 /* ── the schedule ────────────────────────────────────────────────────── */
 
 /* The connected machine asked longest ago that is due, as its cache key in
- * `key`; false when none. */
+ * `key` and its box key in `box`; false when none. */
 static bool pick_due(const struct fleet_status *s, int64_t now,
-                     char key[BOOT_FLEET_ROSTER_ONION_MAX])
+                     char key[BOOT_FLEET_ROSTER_ONION_MAX], uint8_t box[32])
 {
     int64_t oldest = 0;
     bool found = false;
@@ -335,6 +365,7 @@ static bool pick_due(const struct fleet_status *s, int64_t now,
             continue;
         if (!found || tried < oldest) {
             memcpy(key, k, sizeof k);
+            memcpy(box, s->machines[i].box, 32);
             oldest = tried;
             found = true;
         }
@@ -348,15 +379,16 @@ bool fleet_tip_poll_step(const struct fleet_status *s,
                          fleet_tip_fetch_fn fetch)
 {
     char key[BOOT_FLEET_ROSTER_ONION_MAX];
+    uint8_t box[32];
     struct fleet_tip t;
-    if (paused || !s || !s->member || !fetch || !pick_due(s, now, key))
+    if (paused || !s || !s->member || !fetch || !pick_due(s, now, key, box))
         return false;
     fleet_tip_cache_note_try(key, now);
     memset(&t, 0, sizeof t);
     if (fetch(key, local ? local->tip : 0, &t)) {
         t.fetched_at = now;
         fleet_tip_cache_put(key, &t);
-        fleet_status_note_check(ndb, key, &t, local);
+        fleet_status_note_check(ndb, box, &t, local);
     }
     return true;
 }
