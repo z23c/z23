@@ -3680,8 +3680,15 @@ TEST_ASAN_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) -O
 	$(ASAN_COMMON_SAN_FLAGS) \
 	-Wno-deprecated-declarations -Wno-format-truncation $(ZCL_WARN_MAYBE_UNINITIALIZED) $(ZCL_TEST_RETURN_TYPE_GATE)
 TEST_ASAN_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(ZCL_DEV_LINKER) $(ASAN_COMMON_SAN_FLAGS)
+# The one object that carries the real hot-swap loader in the test trees
+# (module mode, see the block that uses it below). Defined here so the ASan
+# epoch can key on its per-object flag: a flag change must move the epoch,
+# or an incremental build keeps the object compiled without it.
+HOTSWAP_TEST_LOADER_REL = engine/modules/hotswap/src/hotswap_activate.o
+HOTSWAP_TEST_LOADER_FLAGS = -DZCL_DEV_BUILD
 TEST_ASAN_EPOCH_COMPILE_FLAGS := $(strip $(TEST_ASAN_CFLAGS) \
 	adx-exception=$(ASAN_ADX_FRAME_POINTER_EXCEPTION_SRCS):$(ASAN_ADX_FRAME_POINTER_EXCEPTION_FLAGS) \
+	dev-loader=$(HOTSWAP_TEST_LOADER_REL):$(HOTSWAP_TEST_LOADER_FLAGS) \
 	$(ZCL_EPOCH_DEPFILE_ID))
 TEST_ASAN_EPOCH_LINK_FLAGS := $(strip $(TEST_ASAN_LDFLAGS) $(TOR_LIBS) $(LIBS) $(GTK_LIBS) $(WEBKIT_LIBS) cxx=$(CXX))
 ifneq ($(filter test-asan,$(ZCL_EPOCH_PROFILES)),)
@@ -11496,7 +11503,8 @@ TESTCACHE_TOOLKEY_CPPFLAGS = \
 # (2) test_parallel.o learns its own compile epoch, so the harness can REFUSE a
 #     module .so built under any other flag set. That is the mechanical half of
 #     "the module cannot diverge from the linked binary".
-HOTSWAP_TEST_LOADER_REL = engine/modules/hotswap/src/hotswap_activate.o
+# HOTSWAP_TEST_LOADER_REL and HOTSWAP_TEST_LOADER_FLAGS are defined beside the
+# test-asan epoch, which keys on them.
 TEST_FAST_OBJECT_CFLAGS = $(TEST_FAST_CFLAGS)
 $(TEST_FAST_OBJ_DIR)/$(HOTSWAP_TEST_LOADER_REL): TEST_FAST_OBJECT_CFLAGS += -DZCL_DEV_BUILD
 $(TEST_FAST_OBJ_DIR)/tests/harness/src/test_parallel.o: TEST_FAST_OBJECT_CFLAGS += \
@@ -11545,7 +11553,7 @@ TEST_ASAN_OBJECT_CFLAGS = $(TEST_ASAN_CFLAGS)
 # Module mode (see HOTSWAP_TEST_LOADER_REL above): the ASan test tree carries
 # the same REAL loader as the fast and release trees. Without this the binary
 # links the release refusal stub, and precheck refusals report stage=release.
-$(TEST_ASAN_OBJ_DIR)/$(HOTSWAP_TEST_LOADER_REL): TEST_ASAN_OBJECT_CFLAGS += -DZCL_DEV_BUILD
+$(TEST_ASAN_OBJ_DIR)/$(HOTSWAP_TEST_LOADER_REL): TEST_ASAN_OBJECT_CFLAGS += $(HOTSWAP_TEST_LOADER_FLAGS)
 TEST_ASAN_ADX_FRAME_POINTER_EXCEPTION_OBJS := $(addprefix $(TEST_ASAN_OBJ_DIR)/,$(ASAN_ADX_FRAME_POINTER_EXCEPTION_SRCS:.c=.o))
 $(TEST_ASAN_ADX_FRAME_POINTER_EXCEPTION_OBJS): TEST_ASAN_OBJECT_CFLAGS += $(ASAN_ADX_FRAME_POINTER_EXCEPTION_FLAGS)
 $(TEST_ASAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: TEST_ASAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
