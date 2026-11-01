@@ -11539,6 +11539,10 @@ $(TEST_REL_OBJ_DIR)/platform/modules/util/src/clientversion.o: $(BUILD_IDENTITY_
 # ASAN_COMMON_SAN_FLAGS (see the TEST_ASAN_* block above). -MMD -MP records
 # the project include closure; compiler search roots bind the rest.
 TEST_ASAN_OBJECT_CFLAGS = $(TEST_ASAN_CFLAGS)
+# Module mode (see HOTSWAP_TEST_LOADER_REL above): the ASan test tree carries
+# the same REAL loader as the fast and release trees. Without this the binary
+# links the release refusal stub, and precheck refusals report stage=release.
+$(TEST_ASAN_OBJ_DIR)/$(HOTSWAP_TEST_LOADER_REL): TEST_ASAN_OBJECT_CFLAGS += -DZCL_DEV_BUILD
 TEST_ASAN_ADX_FRAME_POINTER_EXCEPTION_OBJS := $(addprefix $(TEST_ASAN_OBJ_DIR)/,$(ASAN_ADX_FRAME_POINTER_EXCEPTION_SRCS:.c=.o))
 $(TEST_ASAN_ADX_FRAME_POINTER_EXCEPTION_OBJS): TEST_ASAN_OBJECT_CFLAGS += $(ASAN_ADX_FRAME_POINTER_EXCEPTION_FLAGS)
 $(TEST_ASAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: TEST_ASAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
