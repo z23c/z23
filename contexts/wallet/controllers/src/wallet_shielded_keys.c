@@ -79,6 +79,30 @@ bool rpc_z_exportkey(const struct json_value *params, bool help,
     return true;
 }
 
+bool wallet_shielded_import_refused(const struct wallet_rpc_context *ctx,
+                                    const struct zip32_xsk *xsk,
+                                    bool ignore_existing,
+                                    struct json_value *result)
+{
+    if (sapling_keystore_contains_xsk(&ctx->wallet->sapling_keys, xsk)) {
+        if (ignore_existing) {
+            json_set_null(result);
+            return true;
+        }
+        json_set_str(result, "Key already exists in wallet");
+        LOG_FAIL("wallet_shielded", "z_importkey: key already exists in wallet");
+    }
+    if (wallet_lock_is_locked() ||
+        sapling_keystore_is_locked(&ctx->wallet->sapling_keys)) {
+        json_set_str(result, "Error: wallet is locked - run walletunlock "
+                             "before importing keys. Key NOT imported.");
+        LOG_FAIL("wallet_shielded", "z_importkey: refused, wallet locked");
+    }
+    json_set_str(result, "Error: the Sapling keystore is full. "
+                         "Key NOT imported.");
+    LOG_FAIL("wallet_shielded", "z_importkey: refused, keystore full");
+}
+
 bool rpc_z_importkey(const struct json_value *params, bool help,
                               struct json_value *result)
 {
@@ -144,13 +168,10 @@ bool rpc_z_importkey(const struct json_value *params, bool help,
 
     /* Import into keystore */
     if (!sapling_keystore_import_xsk(&ctx->wallet->sapling_keys, &xsk)) {
+        bool ok = wallet_shielded_import_refused(ctx, &xsk, ignore_existing,
+                                                 result);
         memory_cleanse(&xsk, sizeof(xsk));
-        if (ignore_existing) {
-            json_set_null(result);
-            return true;
-        }
-        json_set_str(result, "Key already exists in wallet");
-        LOG_FAIL("wallet_shielded", "z_importkey: key already exists in wallet");
+        return ok;
     }
     memory_cleanse(&xsk, sizeof(xsk));
 

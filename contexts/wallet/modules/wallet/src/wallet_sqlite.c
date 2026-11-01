@@ -1074,8 +1074,7 @@ static bool wsql_used_entries_stored(struct wallet_sqlite *ws,
             return false;
     }
     if (!writes_secrets && w->sapling_keys.has_seed &&
-        !wallet_seed_state_row_present(
-            wallet_sqlite_sapling_seed_state(ws, NULL)))
+        !wsql_sapling_seed_row_exists(ws))
         return false;
     return true;
 }

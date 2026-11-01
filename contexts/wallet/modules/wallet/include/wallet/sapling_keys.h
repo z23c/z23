@@ -174,6 +174,10 @@ const struct sapling_key_entry *sapling_keystore_find_by_address(
 bool sapling_keystore_import_xsk(struct sapling_keystore *sks,
                                   const struct zip32_xsk *xsk);
 
+/* True when the keystore already holds the key that `xsk` derives. */
+bool sapling_keystore_contains_xsk(struct sapling_keystore *sks,
+                                   const struct zip32_xsk *xsk);
+
 /* Encode/decode extended spending key as bech32 (secret-extended-key-main).
  * xsk_bytes is 169 bytes: depth(1) parentFVKTag(4,LE) childIndex(4,LE)
  * chaincode(32) ask(32) nsk(32) ovk(32) dk(32). */

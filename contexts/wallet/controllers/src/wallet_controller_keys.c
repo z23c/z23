@@ -95,6 +95,26 @@ static bool wallet_readback_key(struct wallet_sqlite *ws,
     return ok;
 }
 
+struct zcl_result wallet_import_key_commit(const struct wallet_rpc_context *ctx,
+                                           const struct pubkey *pk,
+                                           const struct privkey *key,
+                                           bool existed)
+{
+    if (wallet_import_key(ctx->wallet, key))
+        return ZCL_OK;
+    bool locked = wallet_lock_is_locked();
+    if (ctx->wallet_db && !existed) {
+        /* Best-effort: delete the row this import wrote. Failure is
+         * tracked by the canary on next boot. */
+        struct zcl_result dr = wallet_sqlite_delete_key_r(ctx->wallet_db, pk);
+        if (!dr.ok)
+            LOG_WARN("wallet", "importprivkey: best-effort key rollback "
+                     "failed (code=%d): %s", dr.code, dr.message);
+    }
+    return locked ? ZCL_ERR(-1, "wallet is locked")
+                  : ZCL_ERR(-1, "keystore full");
+}
+
 bool rpc_importprivkey(const struct json_value *params, bool help,
                                 struct json_value *result)
 {
@@ -133,6 +153,10 @@ bool rpc_importprivkey(const struct json_value *params, bool help,
         LOG_FAIL("wallet", "importprivkey: failed to derive pubkey from privkey");
     }
 
+    /* A key the wallet already holds keeps its row if the import is refused. */
+    struct key_id import_kid = pubkey_get_id(&pk);
+    const bool existed = keystore_have_key(&ctx->wallet->keystore, &import_kid);
+
     /* Persist BEFORE mutating the keystore. If the write fails we have
      * not touched wallet state — simply error out. */
     if (ctx->wallet_db) {
@@ -161,19 +185,14 @@ bool rpc_importprivkey(const struct json_value *params, bool help,
     /* Persistence is verified — now it is safe to surface the key in
      * the keystore. A failure here (keystore full) rolls back the
      * just-persisted row so the two stay in sync. */
-    if (!wallet_import_key(ctx->wallet, &key)) {
-        if (ctx->wallet_db) {
-            /* Best-effort: delete the row we just wrote. Failure is
-             * tracked by the canary on next boot. */
-            struct zcl_result dr = wallet_sqlite_delete_key_r(ctx->wallet_db,
-                                                              &pk);
-            if (!dr.ok)
-                LOG_WARN("wallet", "importprivkey: best-effort key rollback "
-                         "failed (code=%d): %s", dr.code, dr.message);
-        }
+    struct zcl_result ic = wallet_import_key_commit(ctx, &pk, &key, existed);
+    if (!ic.ok) {
         memory_cleanse(key.vch, 32);
-        json_set_str(result, "Error adding key to wallet");
-        LOG_FAIL("wallet", "importprivkey: failed to add key to wallet (keystore full?)");
+        json_set_str(result, wallet_lock_is_locked()
+            ? "Error: wallet is locked - run walletunlock before importing keys"
+            : "Error adding key to wallet");
+        LOG_FAIL("wallet", "importprivkey: failed to add key to wallet: %s",
+                 ic.message);
     }
 
     if (ctx->wallet->time_first_key == 0)

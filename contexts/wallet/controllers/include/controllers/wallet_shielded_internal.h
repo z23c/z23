@@ -108,6 +108,15 @@ bool z_sendmany_shielded(
 /* wallet_shielded_keys.c — key/viewing-key import/export + memo */
 bool rpc_z_exportkey(const struct json_value *params, bool help,
                      struct json_value *result);
+/* Answer a z_importkey whose keystore import was refused. Returns true when
+ * the RPC succeeds because the key is already held and duplicates are
+ * ignored; otherwise sets `result` to the true reason (lock, full keystore
+ * or duplicate) and returns false. A key that is not held is never reported
+ * as imported. */
+bool wallet_shielded_import_refused(const struct wallet_rpc_context *ctx,
+                                    const struct zip32_xsk *xsk,
+                                    bool ignore_existing,
+                                    struct json_value *result);
 bool rpc_z_importkey(const struct json_value *params, bool help,
                      struct json_value *result);
 bool rpc_z_exportviewingkey(const struct json_value *params, bool help,

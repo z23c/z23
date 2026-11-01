@@ -25,4 +25,7 @@ void wsql_wipe_free(uint8_t *plain, size_t len);
 bool wsql_sapling_key_row_exists(struct wallet_sqlite *ws,
                                  const uint8_t ivk[32]);
 
+/* True when a Sapling seed row is stored; the seed is not opened. */
+bool wsql_sapling_seed_row_exists(struct wallet_sqlite *ws);
+
 #endif /* ZCL_WALLET_SQLITE_INTERNAL_H */

@@ -236,6 +236,16 @@ enum wallet_seed_state wallet_sqlite_sapling_seed_state(
     return st;
 }
 
+bool wsql_sapling_seed_row_exists(struct wallet_sqlite *ws)
+{
+    if (!ws || !ws->open) return false;
+    uint8_t blob[512];
+    size_t blob_len = 0;
+    enum wallet_seed_state st = wsql_seed_fetch(ws, blob, &blob_len);
+    memory_cleanse(blob, sizeof(blob));
+    return st == WALLET_SEED_PLAINTEXT || st == WALLET_SEED_MALFORMED;
+}
+
 bool wallet_sqlite_read_sapling_seed(struct wallet_sqlite *ws, uint8_t seed[32])
 {
     enum wallet_seed_state st = wallet_sqlite_sapling_seed_state(ws, seed);

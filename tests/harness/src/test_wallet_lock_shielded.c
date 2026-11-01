@@ -42,6 +42,9 @@
 #include "wallet/wallet_sqlite.h"
 
 #include <pthread.h>
+#ifdef __linux__
+#include <unistd.h>
+#endif
 #include <sqlite3.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -1083,11 +1086,22 @@ struct wls_midlock {
     bool started;
     bool ran_during_unlock;
     atomic_bool lock_done;
+    atomic_int tid;
 };
 
 static void *wls_lock_once(void *arg)
 {
     struct wls_midlock *m = arg;
+#ifdef __linux__
+    char self[64];
+    ssize_t len = readlink("/proc/thread-self", self, sizeof(self) - 1);
+    const char *slash = NULL;
+    if (len > 0) {
+        self[len] = 0;
+        slash = strrchr(self, '/');
+    }
+    atomic_store(&m->tid, slash ? atoi(slash + 1) : 0);
+#endif
     wallet_lock_lock(m->f->w);
     atomic_store(&m->lock_done, true);
     return NULL;
@@ -1097,7 +1111,8 @@ static void *wls_lock_once(void *arg)
 static int wls_lock_mid_reload(void *ctx)
 {
     struct wls_midlock *m = ctx;
-    if (m->started && atomic_load(&m->lock_done))
+    if (m->started && atomic_load(&m->lock_done) &&
+        sqlite3_stmt_busy(m->f->ws.stmt_zkey_read))
         m->ran_during_unlock = true;
     if (m->started || !sqlite3_stmt_busy(m->f->ws.stmt_zkey_read))
         return 0;
@@ -1791,13 +1806,46 @@ static void wls_nap_ms(long ms)
     while (nanosleep(&nap, &nap) != 0) { /* real-clock: waits on a real thread; no injected clock exists */ }
 }
 
-/* True when transparent keystore entry `i` is sealed. */
-static bool wls_entry_sealed(struct wallet *w, size_t i)
+/* True when the transparent key `kid` is held and sealed. */
+static bool wls_key_sealed(struct wallet *w, const struct key_id *kid)
 {
+    bool sealed = false;
     zcl_mutex_lock(&w->keystore.cs);
-    bool sealed = w->keystore.keys[i].sealed;
+    for (size_t i = 0; i < w->keystore.num_keys; i++)
+        if (w->keystore.keys[i].used &&
+            memcmp(w->keystore.keys[i].keyid.id.data, kid->id.data, 20) == 0)
+            sealed = w->keystore.keys[i].sealed;
     zcl_mutex_unlock(&w->keystore.cs);
     return sealed;
+}
+
+/* Wait until the lock thread has run as far as it can and sleeps on a mutex.
+ * Linux reads the thread state; elsewhere a fixed wait stands in. */
+static bool wls_wait_until_blocked(struct wls_midlock *m)
+{
+#ifdef __linux__
+    for (int i = 0; i < 5000; i++) {
+        int tid = atomic_load(&m->tid);
+        char path[64], buf[256];
+        if (tid != 0) {
+            snprintf(path, sizeof(path), "/proc/self/task/%d/stat", tid);
+            FILE *fp = fopen(path, "r");
+            size_t n = fp ? fread(buf, 1, sizeof(buf) - 1, fp) : 0;
+            if (fp)
+                fclose(fp);
+            buf[n] = 0;
+            const char *state = strrchr(buf, ')');
+            if (state && state[1] == ' ' && state[2] == 'S')
+                return true;
+        }
+        wls_nap_ms(1);
+    }
+    return false;
+#else
+    (void)m;
+    wls_nap_ms(2000);
+    return true;
+#endif
 }
 
 /* A mint that passed its lock check holds w->cs while it adds a key. The
@@ -1819,25 +1867,27 @@ static int test_lock_waits_for_a_mint_holding_the_wallet_mutex(void)
         held.fValid = true;
         held.fCompressed = true;
         struct pubkey held_pub;
+        struct key_id held_kid;
         ASSERT(keystore_add_key(&f.w->keystore, &held));
         ASSERT(privkey_get_pubkey(&held, &held_pub));
+        held_kid = pubkey_get_id(&held_pub);
         ASSERT(wallet_sqlite_write_key_r(&f.ws, &held_pub, &held).ok);
         size_t keys = wls_used_keys(f.w);
         struct wls_midlock m = { .f = &f };
         zcl_mutex_lock(&f.w->cs);
         ASSERT(pthread_create(&m.th, NULL, wls_lock_once, &m) == 0);
-        /* Wait for the published lock, then for the seal to reach the key
-         * held above. With the seal under w->cs it cannot, so the wait runs
-         * to its bound; a seal outside w->cs seals it at once. */
-        for (int i = 0; i < 2000 && !wls_locked(); i++)
+        /* Wait for the published lock, then for the lock thread to run as far
+         * as it can. With the seal under w->cs the held key is still
+         * unsealed at that point; a seal outside w->cs has sealed it. */
+        for (int i = 0; i < 5000 && !wls_locked(); i++)
             wls_nap_ms(1);
-        for (int i = 0; i < 2000 && !wls_entry_sealed(f.w, 0); i++)
-            wls_nap_ms(1);
-        bool locked = wls_locked();
-        bool added = locked && wls_mint_unstored_transparent(&f);
+        bool blocked = wls_locked() && wls_wait_until_blocked(&m);
+        bool held_sealed = wls_key_sealed(f.w, &held_kid);
+        bool added = blocked && wls_mint_unstored_transparent(&f);
         zcl_mutex_unlock(&f.w->cs);
         pthread_join(m.th, NULL);
-        ASSERT(locked && added);
+        ASSERT(blocked && added);
+        ASSERT(!held_sealed);
         ASSERT(wls_secrets_absent(f.w));
         ASSERT(f.w->keystore.keys[f.w->keystore.num_keys - 1].sealed);
         /* The refill that minted it: one pool entry, no stored row. */
@@ -1864,6 +1914,94 @@ static void wls_publish_lock_only(void)
         return;
     wallet_lock_lock(other);
     wls_free_wallet(other);
+}
+
+/* importprivkey stored the row, then the lock was published, then the
+ * keystore refused the key. A key the wallet already held keeps its row; a
+ * key this import introduced loses it. */
+static int test_refused_reimport_keeps_the_existing_key_row(void)
+{
+    int failures = 0;
+    struct wls_fixture f;
+    TEST("wallet_lock_shielded: a refused re-import keeps the row of a held key") {
+        ASSERT(wls_provision(&f, true, false));
+        ASSERT(wls_boot(&f));
+        struct privkey k;
+        struct pubkey pub;
+        privkey_init(&k);
+        memset(k.vch, 0x52, 32);
+        k.vch[6] = 0x33;
+        k.fValid = true;
+        k.fCompressed = true;
+        ASSERT(privkey_get_pubkey(&k, &pub));
+        ASSERT(keystore_add_key(&f.w->keystore, &k));
+        ASSERT(wallet_sqlite_write_key_r(&f.ws, &pub, &k).ok);
+        int rows = wls_count_rows(f.db, "SELECT COUNT(*) FROM wallet_keys");
+        ASSERT(rows > 0);
+        wls_publish_lock_only();
+        struct wallet_rpc_context ctx = { .wallet = f.w, .wallet_db = &f.ws };
+        struct zcl_result r = wallet_import_key_commit(&ctx, &pub, &k, true);
+        ASSERT(!r.ok);
+        ASSERT(strstr(r.message, "locked") != NULL);
+        ASSERT(wls_count_rows(f.db, "SELECT COUNT(*) FROM wallet_keys") == rows);
+        /* A key this import introduced is rolled back. */
+        r = wallet_import_key_commit(&ctx, &pub, &k, false);
+        ASSERT(!r.ok);
+        ASSERT(wls_count_rows(f.db, "SELECT COUNT(*) FROM wallet_keys") == rows - 1);
+        wls_teardown(&f);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* z_importkey: a refused import is a success only when the key is held. */
+static int test_refused_sapling_import_is_never_reported_as_added(void)
+{
+    int failures = 0;
+    struct wls_fixture f;
+    TEST("wallet_lock_shielded: a refused z_importkey reports the true reason") {
+        ASSERT(wls_provision(&f, true, true));
+        ASSERT(wls_boot(&f));
+        struct wallet_rpc_context ctx = { .wallet = f.w, .wallet_db = &f.ws };
+        uint8_t material[32];
+        memset(material, 0x44, sizeof(material));
+        struct zip32_xsk fresh;
+        zip32_xsk_master(&fresh, material, sizeof(material));
+        struct json_value r;
+        json_init(&r);
+        /* Lock published after the RPC checks: the import is refused. */
+        wls_publish_lock_only();
+        ASSERT(!wallet_shielded_import_refused(&ctx, &fresh, true, &r));
+        ASSERT(strstr(wls_str(&r), "locked") != NULL);
+        json_free(&r);
+        wls_teardown(&f);
+        /* A full keystore is not a duplicate either. */
+        ASSERT(wls_provision(&f, true, true));
+        ASSERT(wls_boot(&f));
+        ctx.wallet = f.w;
+        ctx.wallet_db = &f.ws;
+        size_t kept = f.w->sapling_keys.num_keys;
+        f.w->sapling_keys.num_keys = MAX_SAPLING_KEYS;
+        json_init(&r);
+        ASSERT(!wallet_shielded_import_refused(&ctx, &fresh, true, &r));
+        ASSERT(strstr(wls_str(&r), "full") != NULL);
+        json_free(&r);
+        f.w->sapling_keys.num_keys = kept;
+        /* A key the wallet holds is reported as already present. */
+        struct zip32_xsk held = f.w->sapling_keys.keys[0].xsk;
+        json_init(&r);
+        ASSERT(wallet_shielded_import_refused(&ctx, &held, true, &r));
+        json_free(&r);
+        json_init(&r);
+        ASSERT(!wallet_shielded_import_refused(&ctx, &held, false, &r));
+        ASSERT(strstr(wls_str(&r), "already exists") != NULL);
+        json_free(&r);
+        memory_cleanse(&held, sizeof(held));
+        memory_cleanse(&fresh, sizeof(fresh));
+        wls_teardown(&f);
+        PASS();
+    } _test_next:;
+    return failures;
 }
 
 static int test_sapling_mint_and_import_refuse_once_the_lock_is_published(void)
@@ -2039,6 +2177,8 @@ int test_wallet_lock_shielded(void)
     failures += test_locked_flush_needs_a_row_for_an_unwiped_sapling_entry();
     failures += test_locked_flush_needs_the_sapling_seed_row();
     failures += test_import_key_refuses_once_the_lock_is_published();
+    failures += test_refused_reimport_keeps_the_existing_key_row();
+    failures += test_refused_sapling_import_is_never_reported_as_added();
     wallet_lock_reset_for_test();
     return failures;
 }

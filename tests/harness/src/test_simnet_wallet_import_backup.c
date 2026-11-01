@@ -143,6 +143,7 @@ static bool ib_fixture_finish_secret(struct json_value *result, char *secret,
 #define wallet_ctx ib_shielded_wallet_ctx
 #define rpc_z_exportkey ib_rpc_z_exportkey
 #define rpc_z_importkey ib_rpc_z_importkey
+#define wallet_shielded_import_refused ib_wallet_shielded_import_refused
 #define rpc_z_exportviewingkey ib_rpc_z_exportviewingkey
 #define rpc_z_getmemo ib_rpc_z_getmemo
 #define sapling_decode_payment_address ib_fixture_decode_payment_address
@@ -156,6 +157,7 @@ static bool ib_fixture_finish_secret(struct json_value *result, char *secret,
 #undef sapling_encode_extended_spending_key
 #undef sapling_keystore_find_by_address
 #undef sapling_decode_payment_address
+#undef wallet_shielded_import_refused
 #undef rpc_z_getmemo
 #undef rpc_z_exportviewingkey
 #undef rpc_z_importkey

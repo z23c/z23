@@ -394,6 +394,21 @@ const struct sapling_key_entry *sapling_keystore_find_by_address(
     return NULL;
 }
 
+bool sapling_keystore_contains_xsk(struct sapling_keystore *sks,
+                                   const struct zip32_xsk *xsk)
+{
+    struct zip32_xfvk xfvk;
+    zip32_xsk_to_xfvk(&xfvk, xsk);
+    uint8_t ivk[32];
+    sapling_crh_ivk(xfvk.fvk.ak, xfvk.fvk.nk, ivk);
+    bool found = false;
+    zcl_mutex_lock(&sks->cs);
+    for (size_t i = 0; i < sks->num_keys && !found; i++)
+        found = sks->keys[i].used && memcmp(sks->keys[i].ivk, ivk, 32) == 0;
+    zcl_mutex_unlock(&sks->cs);
+    return found;
+}
+
 bool sapling_keystore_import_xsk(struct sapling_keystore *sks,
                                   const struct zip32_xsk *xsk)
 {

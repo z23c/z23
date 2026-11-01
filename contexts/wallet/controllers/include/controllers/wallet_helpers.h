@@ -134,6 +134,19 @@ struct zcl_result wallet_flush_from_context(
 struct zcl_result wallet_persist_commit_before_relay(
     const struct wallet_rpc_context *ctx, const struct wallet_tx *wtx);
 
+struct wallet_rpc_context;
+struct pubkey;
+struct privkey;
+
+/* Add an imported key whose row is already stored. When the keystore refuses,
+ * the row is deleted only if `existed` is false: a key the wallet already held
+ * keeps the row that belongs to it. The error names a lock separately from a
+ * full keystore. */
+struct zcl_result wallet_import_key_commit(const struct wallet_rpc_context *ctx,
+                                           const struct pubkey *pk,
+                                           const struct privkey *key,
+                                           bool existed);
+
 /* Compensate a transaction that was already flushed but cannot proceed to
  * relay (for example, an atomic shielded-note reservation failed). Removes
  * it from mempool, the in-memory wallet, and wallet_transactions. */
