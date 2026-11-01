@@ -1,5 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
 #include "test/test_core.h"
 #include "test/test_group_selector.h"
 #include "test/test_home_isolation.h"
@@ -3011,7 +3014,13 @@ static int test_runner_private_state(void)
                          attempt == 2 ? "" : home);
             ASSERT(n >= 0 && (size_t)n < sizeof(home_env));
             n = snprintf(command, sizeof(command),
-                "cd '%s' && env -u ZCL_TEST_CANONICAL_DATADIR -u ZCL_TEST_REAL_HOME %s %s %s='%s' "
+                /* Retention under the caller's cwd is this case's subject: pin
+                 * the nested runner to test-tmp. Left to inherit, it creates
+                 * its own tmpfs root when the outer guard has dropped
+                 * ZCL_TEST_TMPROOT, and removes it, evidence included, on a
+                 * green exit. test_tmpfs_inherited_root covers the tmpfs path. */
+                "cd '%s' && env -u ZCL_TEST_CANONICAL_DATADIR -u ZCL_TEST_REAL_HOME "
+                "-u ZCL_TEST_TMPROOT -u ZCL_TEST_TMPFS_ACTIVE ZCL_TEST_TMPFS=0 %s %s %s='%s' "
                 TGS_OVERSIZED_PROBE "=\"$(head -c 70000 /dev/zero | tr '\\0' x)\" ZCL_STATE_ROOT='%s' "
                 "ZCL_TEST_RUNNER_EXPECT_HOME='%s' "
                 "'%s' --jobs=2 --verbose --no-cache --state-isolation-probe "
@@ -3186,6 +3195,54 @@ static int test_tmpfs_early_exit_removed(void)
             ASSERT(strstr(out, "test_parallel: retained tmpfs root=") == NULL);
             ASSERT(tgs_tmpfs_roots_for(real) == 0);
         }
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Entries of dir whose names start with prefix, or -1 when unreadable. */
+static int tgs_count_prefixed(const char *dir, const char *prefix)
+{
+    DIR *d = opendir(dir);
+    if (!d) return -1;
+    int n = 0;
+    for (struct dirent *e; (e = readdir(d)) != NULL; )
+        if (strncmp(e->d_name, prefix, strlen(prefix)) == 0) n++;
+    closedir(d);
+    return n;
+}
+
+/* A nested runner that inherits a live outer tmpfs root (the runner exports
+ * it to every group) must put its attempt state inside it and leave the root
+ * alone: only the runner that created a root may remove it. */
+static int test_tmpfs_inherited_root(void)
+{
+    int failures = 0;
+    TEST("runner: an inherited tmpfs root holds the nested attempt state and survives") {
+        static char out[1024 * 1024];
+        char root[PATH_MAX], outer[PATH_MAX], real[PATH_MAX], exe[PATH_MAX];
+        char root_env[PATH_MAX + 32], active_env[PATH_MAX + 32], needle[PATH_MAX + 32];
+        test_make_tmpdir(root, sizeof(root), "tgs_tmpfs", "inherit");
+        int n = snprintf(outer, sizeof(outer), "%s/outer", root);
+        ASSERT(n > 0 && (size_t)n < sizeof(outer));
+        ASSERT(mkdir(outer, 0700) == 0 && realpath(outer, real) != NULL);
+        ASSERT(os_proc_exe_path(exe, sizeof(exe)));
+        ASSERT(snprintf(root_env, sizeof(root_env), "ZCL_TEST_TMPROOT=%s", real) > 0);
+        ASSERT(snprintf(active_env, sizeof(active_env), "ZCL_TEST_TMPFS_ACTIVE=%s", real) > 0);
+        ASSERT(snprintf(needle, sizeof(needle), "%s/runner-state-", real) > 0);
+        const char *env = tgs_fixture_executable("/usr/bin/env", "/bin/env");
+        ASSERT(env != NULL);
+        const char *args[] = {env, root_env, active_env, "ZCL_TEST_TMPFS=1",
+            "ZCL_TEST_TMPFS_MAX_MB=2048", exe, "--jobs=1", "--no-cache",
+            "--verbose", "--exact=test_hex_codec", NULL};
+        bool timed_out = false;
+        int rc = zcl_spawn_capture_merged_in_dir_observed(args, root, out, sizeof(out),
+                                                          60000, &timed_out);
+        ASSERT(!timed_out && rc == 0);
+        ASSERT(strstr(out, needle) != NULL);
+        ASSERT(strstr(out, "retained tmpfs root=") == NULL);
+        ASSERT(tgs_count_prefixed(real, "runner-state-") >= 1);
         ASSERT(test_rm_rf_recursive(root) == 0);
         PASS();
     } _test_next:;
@@ -3538,6 +3595,7 @@ int test_test_group_selector(void)
 #endif
 #if defined(__linux__)
     failures += test_tmpfs_fallback();
+    failures += test_tmpfs_inherited_root();
     failures += test_tmpfs_failure_retained();
     failures += test_tmpfs_early_exit_removed();
 #endif

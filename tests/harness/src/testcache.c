@@ -380,6 +380,10 @@ static bool trc_env_is_cache_control(const char *name, size_t namelen)
         "ZCL_TEST_CACHE", "ZCL_TEST_CACHE_DUMP",
         "ZCL_TESTCACHE_STORE_ROOT", "ZCL_LINT_TU_CACHE",
         "ZCL_DEV_OBSERVATION_STORE",
+        /* Where fixtures live, never what a group computes: the runner mints
+         * a fresh random tmpfs root per process, so keying on it would give
+         * every nested run a different input key. */
+        "ZCL_TEST_TMPROOT", "ZCL_TEST_TMPFS_ACTIVE",
     };
     for (size_t i = 0; i < sizeof(ctl) / sizeof(ctl[0]); i++)
         if (strlen(ctl[i]) == namelen && strncmp(name, ctl[i], namelen) == 0)

@@ -1770,7 +1770,8 @@ static int tc_capsule_live_revalidate(void)
 static int tc_non_test_controls_stable(void)
 {
     int failures = 0;
-    const char *const controls[] = { "ZCL_LINT_TU_CACHE" };
+    const char *const controls[] = { "ZCL_LINT_TU_CACHE", "ZCL_TEST_TMPROOT",
+                                     "ZCL_TEST_TMPFS_ACTIVE" };
     for (size_t i = 0; i < sizeof(controls) / sizeof(controls[0]); i++) {
         struct tc_envsave caller;
         uint8_t keys[2][32] = {{0}};
