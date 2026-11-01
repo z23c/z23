@@ -65,18 +65,60 @@ static char g_datadir[1024];
  * stop or registry shutdown is requested. A non-cancelable caller (a direct
  * storage_housekeeping_sweep(), which no stop request governs) keeps the
  * original blocking begin and always gets the token. */
+static bool sh_stop_seen(void)
+{
+    pthread_mutex_lock(&g_lock);
+    bool stop = g_stop_requested;
+    pthread_mutex_unlock(&g_lock);
+    return stop || thread_registry_shutdown_requested();
+}
+
+/* Test seams (ZCL_TESTING builds only; no-ops otherwise): a hook run right
+ * after the token is won and before the stop re-check, and a count of store
+ * calls actually started by a step. */
+#ifdef ZCL_TESTING
+static void (*g_after_token_hook)(void);
+static _Atomic uint64_t g_store_calls;
+void storage_housekeeping_test_set_after_token_hook(void (*hook)(void))
+{
+    g_after_token_hook = hook;
+}
+void storage_housekeeping_test_request_stop(void)
+{
+    pthread_mutex_lock(&g_lock);
+    g_stop_requested = true;
+    pthread_mutex_unlock(&g_lock);
+}
+uint64_t storage_housekeeping_test_store_calls(void)
+{
+    return atomic_load(&g_store_calls);
+}
+#define SH_NOTE_STORE_CALL() atomic_fetch_add(&g_store_calls, 1)
+#else
+#define SH_NOTE_STORE_CALL() ((void)0)
+#endif
+
 static bool sh_maintenance_begin(bool cancelable)
 {
     if (!cancelable)
         return storage_pacing_maintenance_begin();
     for (;;) {
-        pthread_mutex_lock(&g_lock);
-        bool stop = g_stop_requested;
-        pthread_mutex_unlock(&g_lock);
-        if (stop || thread_registry_shutdown_requested())
+        if (sh_stop_seen())
             return false; // raw-return-ok:stop_requested_interrupt
-        if (storage_pacing_maintenance_try_begin(200))
-            return true;
+        if (!storage_pacing_maintenance_try_begin(200))
+            continue;
+#ifdef ZCL_TESTING
+        if (g_after_token_hook)
+            g_after_token_hook();
+#endif
+        /* The token may have been won just after a stop was requested: look
+         * again before the caller starts a long store call, and hand the
+         * token back if so. */
+        if (sh_stop_seen()) {
+            storage_pacing_maintenance_end();
+            return false; // raw-return-ok:stop_requested_interrupt
+        }
+        return true;
     }
 }
 
@@ -96,6 +138,7 @@ static bool sweep_projection(const struct storage_pacing *pacing,
     };
     if (!sh_maintenance_begin(cancelable))
         return false; // raw-return-ok:stop_requested_interrupt
+    SH_NOTE_STORE_CALL();
     bool compacted = projection_store_compact_if_needed(
         pacing->compact_floor_bytes, pacing->compact_ratio_pct, NULL,
         &after);
@@ -116,6 +159,7 @@ static bool sweep_topology(const struct storage_pacing *pacing,
     int64_t wal_before = -1;
     if (!sh_maintenance_begin(cancelable))
         return false; // raw-return-ok:stop_requested_interrupt
+    SH_NOTE_STORE_CALL();
     bool truncated = topology_store_wal_checkpoint_if_over(
         pacing->wal_truncate_bytes, &wal_before);
     storage_pacing_maintenance_end();
@@ -136,6 +180,7 @@ static bool sweep_logs(const char *datadir, const struct storage_pacing *pacing,
         return true;
     if (!sh_maintenance_begin(cancelable))
         return false; // raw-return-ok:stop_requested_interrupt
+    SH_NOTE_STORE_CALL();
     int rotated = tor_logs_rotate(datadir, pacing->log_rotate_bytes);
     storage_pacing_maintenance_end();
 

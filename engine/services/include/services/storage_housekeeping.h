@@ -77,6 +77,15 @@ struct zcl_result storage_housekeeping_start(const char *datadir);
 struct zcl_result storage_housekeeping_start_deferred(const char *datadir);
 void storage_housekeeping_stop(void);
 
+#ifdef ZCL_TESTING
+/* Test seams: a hook run just after the service thread wins the maintenance
+ * token (before its stop re-check), a way to latch a stop request without
+ * joining, and the number of store calls the steps have started. */
+void storage_housekeeping_test_set_after_token_hook(void (*hook)(void));
+void storage_housekeeping_test_request_stop(void);
+uint64_t storage_housekeeping_test_store_calls(void);
+#endif
+
 void storage_housekeeping_stats(struct storage_housekeeping_stats *out);
 bool storage_housekeeping_dump_state_json(struct json_value *out,
                                           const char *key);

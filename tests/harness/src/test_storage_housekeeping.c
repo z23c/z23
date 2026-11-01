@@ -307,6 +307,56 @@ static int shk_case_stop_ends_sweep_blocked_on_token(void)
     return failures;
 }
 
+/* ── 1d. a token won just after stop was requested must not start a step ── */
+static void shk_hook_request_stop(void)
+{
+    storage_housekeeping_test_request_stop();
+}
+
+/* The token is held by this thread while the service thread waits for it.
+ * The hook latches a stop request at the instant the thread wins the token
+ * (after try_begin succeeded, before the re-check). The sweep must give the
+ * token back and count as interrupted, and no store call may have started.
+ * Red without the re-check: the step runs its store call anyway. */
+static int shk_case_stop_after_token_won(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "storage_housekeeping", "stopafter");
+    storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_ROTATIONAL);
+
+    struct storage_housekeeping_stats before;
+    storage_housekeeping_stats(&before);
+    uint64_t calls_before = storage_housekeeping_test_store_calls();
+
+    SHK_CHECK("after-token: token taken", storage_pacing_maintenance_begin());
+    storage_housekeeping_test_set_after_token_hook(shk_hook_request_stop);
+    struct zcl_result r = storage_housekeeping_start_deferred(dir);
+    SHK_CHECK("after-token: deferred start ok", r.ok);
+    SHK_CHECK("after-token: first sweep entered",
+              shk_wait_sweeps(before.sweeps + 1));
+
+    storage_pacing_maintenance_end();
+    storage_housekeeping_stop(); /* joins: the thread exits on the latched stop */
+    storage_housekeeping_test_set_after_token_hook(NULL);
+
+    struct storage_housekeeping_stats after;
+    storage_housekeeping_stats(&after);
+    SHK_CHECK("after-token: sweep counted as interrupted",
+              after.sweeps_interrupted == before.sweeps_interrupted + 1);
+    SHK_CHECK("after-token: sweep not counted as finished",
+              after.sweeps_finished == before.sweeps_finished);
+    SHK_CHECK("after-token: no store call started",
+              storage_housekeeping_test_store_calls() == calls_before);
+    SHK_CHECK("after-token: the token was handed back",
+              storage_pacing_maintenance_try_begin(0));
+    storage_pacing_maintenance_end();
+
+    storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_SOLID);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 /* ── 1. start/stop round trip on an empty datadir ── */
 static int shk_case_start_stop_round_trip(void)
 {
@@ -723,6 +773,7 @@ int test_storage_housekeeping(void)
     failures += shk_case_stop_with_tick_due(pacing);
     failures += shk_case_boot_start_not_blocked_by_held_lock();
     failures += shk_case_stop_ends_sweep_blocked_on_token();
+    failures += shk_case_stop_after_token_won();
 
     shk_restore_pacing();
     if (failures == 0)
