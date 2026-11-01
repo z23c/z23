@@ -301,6 +301,26 @@ bool chain_evidence_controller_snapshot_bounded(
     return snapshot_fill(authority, out, true);
 }
 
+/* Every node.db read of the snapshot, after the CSR tips are copied. */
+static void snapshot_fill_from_ndb(
+    struct chain_evidence_controller *authority,
+    struct chain_evidence_controller_view *out)
+{
+    /* A snapshot is an observation, never a reconciliation boundary. The
+     * mutating loader may clear/backfill stale freeze state and can submit a
+     * DB-service write; doing that while a diagnostic holds sqlite3_db_mutex
+     * self-deadlocks against the DB worker. Boot init owns those repairs. */
+    out->state = chain_evidence_controller_load_state_readonly(authority);
+    snapshot_load_persisted_markers(authority->ndb, out);
+    snapshot_load_persisted_enums(authority->ndb, out);
+    snapshot_load_evidence_records(authority->ndb, out);
+    snprintf(out->contradiction_reason, sizeof(out->contradiction_reason),
+             "%s", authority->contradiction_reason);
+    snapshot_classify_tip_evidence(out);
+    snapshot_classify_hash_agreement(authority->ndb, out);
+    snapshot_set_health_reason(out);
+}
+
 static bool snapshot_fill(struct chain_evidence_controller *authority,
                           struct chain_evidence_controller_view *out,
                           bool bounded)
@@ -310,21 +330,15 @@ static bool snapshot_fill(struct chain_evidence_controller *authority,
     snapshot_view_reset(out);
     if (!authority)
         return true;
-
-    /* A snapshot is an observation, never a reconciliation boundary. The
-     * mutating loader may clear/backfill stale freeze state and can submit a
-     * DB-service write; doing that while a diagnostic holds sqlite3_db_mutex
-     * self-deadlocks against the DB worker. Boot init owns those repairs. */
-    out->state = chain_evidence_controller_load_state_readonly(authority);
     if (!snapshot_copy_csr_tips(authority, out, bounded))
         return false;  // raw-return-ok:busy lock is the typed busy answer, not a fault
-    snapshot_load_persisted_markers(authority->ndb, out);
-    snapshot_load_persisted_enums(authority->ndb, out);
-    snapshot_load_evidence_records(authority->ndb, out);
-    snprintf(out->contradiction_reason, sizeof(out->contradiction_reason),
-             "%s", authority->contradiction_reason);
-    snapshot_classify_tip_evidence(out);
-    snapshot_classify_hash_agreement(authority->ndb, out);
-    snapshot_set_health_reason(out);
+    void *ndb_token = NULL;
+    /* Bounded: the whole node.db read section runs under a try-entered
+     * connection mutex (recursive, so each read re-enters without waiting);
+     * no PS or CSR lock is held here. */
+    if (bounded && !csr_ndb_try_enter(authority->ndb, &ndb_token))
+        return false;  // raw-return-ok:busy connection mutex is the typed busy answer
+    snapshot_fill_from_ndb(authority, out);
+    csr_ndb_leave(ndb_token);
     return true;
 }

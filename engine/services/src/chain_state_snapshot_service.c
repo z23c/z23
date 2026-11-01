@@ -10,6 +10,7 @@
 #include "storage/progress_store.h"
 
 #include <pthread.h>
+#include <sqlite3.h>
 #include <string.h>
 #include <time.h>
 
@@ -34,13 +35,40 @@ struct zcl_result csr_commit_tip_result(
 static bool csr_lock_bounded(struct chain_state_repository *csr)
 {
     struct timespec dl;
-    clock_gettime(CLOCK_REALTIME, &dl); // platform-ok: pthread_mutex_timedlock takes an absolute CLOCK_REALTIME deadline
+    /* platform-ok: pthread_mutex_timedlock takes an absolute CLOCK_REALTIME deadline */
+    if (clock_gettime(CLOCK_REALTIME, &dl) != 0)
+        return false;  // raw-return-ok:no clock means no deadline: answer busy, never wait unbounded
     dl.tv_nsec += CSR_SNAPSHOT_BOUNDED_WAIT_NS;
     if (dl.tv_nsec >= 1000000000L) {
         dl.tv_sec += 1;
         dl.tv_nsec -= 1000000000L;
     }
     return pthread_mutex_timedlock(&csr->lock, &dl) == 0;
+}
+
+/* Try-enter the node.db connection mutex (serialized build: the shared
+ * connection's mutex is recursive and an ingest statement can hold it for a
+ * long time).  While held, every sqlite call the observer makes on this
+ * connection re-enters it without waiting.  A busy mutex answers false.  A
+ * missing/closed db needs no mutex: *token stays NULL and true is returned. */
+bool csr_ndb_try_enter(struct node_db *ndb, void **token)
+{
+    *token = NULL;
+    if (!ndb || !ndb->open || !ndb->db)
+        return true;
+    sqlite3_mutex *mu = sqlite3_db_mutex(ndb->db);
+    if (!mu)
+        return true;
+    if (sqlite3_mutex_try(mu) != SQLITE_OK)
+        return false;  // raw-return-ok:busy connection mutex is the typed busy answer
+    *token = mu;
+    return true;
+}
+
+void csr_ndb_leave(void *token)
+{
+    if (token)
+        sqlite3_mutex_leave((sqlite3_mutex *)token);
 }
 
 /* Copy repository-owned memory under csr->lock (caller holds it). */
@@ -144,8 +172,14 @@ bool csr_snapshot_bounded(struct chain_state_repository *csr,
         progress_store_tx_unlock();
     }
     /* utxo_count is not part of any bounded observation: its COUNT(*) scan
-     * is skipped (left at -1) instead of racing the ingest's writes. */
+     * is skipped (left at -1) instead of racing the ingest's writes.  The
+     * sql_max read goes through the shared node.db connection, whose mutex an
+     * ingest statement can hold for long: try-enter it, busy answers false. */
+    void *ndb_token = NULL;
+    if (!csr_ndb_try_enter(ndb, &ndb_token))
+        return false;  // raw-return-ok:busy connection mutex is the typed busy answer
     out->sql_max_height = csr_internal_sqlite_max_block_height(ndb);
+    csr_ndb_leave(ndb_token);
     return true;
 }
 

@@ -55,6 +55,7 @@
 #include "jobs/validate_headers_stage.h"
 #include "services/chain_state_service.h"
 #include "json/json.h"
+#include "models/database.h"
 #include "storage/progress_store.h"
 
 #include <pthread.h>
@@ -591,10 +592,14 @@ static int case_chain_evidence_busy_ingest(void)
  *    succeeds and the dumper proceeds to the work behind it, exactly the state
  *    an ingest-in-flight leaves after the probe; CSR is held by H.
  *
- * In both, the dumper must answer the exact busy shape within the bound.  A
- * dumper that waits for CSR (the old blocking csr_snapshot) cannot answer
- * until H is released, so the bounded wait expires: the case then FAILS,
- * releases H on its own (so nothing hangs) and joins everything. */
+ * In both, the test asserts: the dumper returned while H still held CSR (a
+ * 5 s wait for it), each reply is EXACTLY the busy shape, and each call took
+ * under CONTEST_BOUND_MS (a generous 2 s; the code's own deadline is shorter
+ * but its exact value is not asserted).  A dumper that waits for CSR (the old
+ * blocking csr_snapshot) cannot answer until H is released, so the wait
+ * expires: the case then FAILS, releases H on its own (so nothing hangs) and
+ * joins everything. */
+#define CONTEST_BOUND_MS 2000L
 struct contest {
     _Atomic int csr_held;   /* H owns csr->lock */
     _Atomic int ps_held;    /* I owns progress_store_tx_lock */
@@ -604,6 +609,8 @@ struct contest {
     _Atomic int d_done;
     struct cev_reply plain; /* dump(NULL) */
     struct cev_reply reason;/* dump("health_reason") */
+    long plain_ms;          /* elapsed of dump(NULL) */
+    long reason_ms;         /* elapsed of dump("health_reason") */
     pthread_mutex_t mu;
     pthread_cond_t cv;
 };
@@ -655,12 +662,28 @@ static void *contest_i_thread(void *arg)
     return NULL;
 }
 
+static long cev_ms_since(const struct timespec *t0)
+{
+    struct timespec t1;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    return (long)((t1.tv_sec - t0->tv_sec) * 1000L +
+                  (t1.tv_nsec - t0->tv_nsec) / 1000000L);
+}
+
+static long cev_timed_dump(const char *key, struct cev_reply *r)
+{
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    cev_dump(key, r);
+    return cev_ms_since(&t0);
+}
+
 static void *contest_d_thread(void *arg)
 {
     struct contest *c = (struct contest *)arg;
     contest_wait(c, &c->csr_held, 60);
-    cev_dump(NULL, &c->plain);
-    cev_dump("health_reason", &c->reason);
+    c->plain_ms = cev_timed_dump(NULL, &c->plain);
+    c->reason_ms = cev_timed_dump("health_reason", &c->reason);
     contest_set(c, &c->d_done);
     return NULL;
 }
@@ -705,6 +728,11 @@ static int contest_check_replies(const struct contest *c, const char *tag)
              "normal chain_evidence field), both keys", tag);
     SD_CHECK(name, c->plain.exact_busy && c->reason.exact_busy &&
                    !c->plain.any_normal && !c->reason.any_normal);
+    snprintf(name, sizeof(name),
+             "%s: each busy reply came back in under %ld ms", tag,
+             CONTEST_BOUND_MS);
+    SD_CHECK(name, c->plain_ms >= 0 && c->plain_ms < CONTEST_BOUND_MS &&
+                   c->reason_ms >= 0 && c->reason_ms < CONTEST_BOUND_MS);
     return failures;
 }
 
@@ -722,7 +750,13 @@ static int contest_run(const char *tag, bool ingest_owns_ps)
                             : 0;
     SD_CHECK("contest: H and I threads start", rh == 0 && ri == 0);
     if (rh != 0 || ri != 0) {
-        atomic_store(&c.release_h, 1);
+        /* Release the latches and join every thread that did start. */
+        contest_set(&c, &c.csr_held);
+        contest_set(&c, &c.release_h);
+        if (rh == 0)
+            pthread_join(th, NULL);
+        if (ri == 0 && ingest_owns_ps)
+            pthread_join(ti, NULL);
         return failures + 1;
     }
     failures += contest_check_latch(&c, tag, ingest_owns_ps);
@@ -776,6 +810,91 @@ static int case_chain_evidence_ingest_contention(void)
     return failures;
 }
 
+/* node.db connection mutex: an ingest statement can own the shared serialized
+ * connection's mutex for a long time.  Thread M owns it (latched); the bounded
+ * snapshot must answer "busy" (false) rather than wait behind it, and well
+ * inside CONTEST_BOUND_MS. */
+struct ndb_contest {
+    struct node_db *ndb;
+    struct contest c;
+    _Atomic int snap_ret;
+    long snap_ms;
+};
+
+static void *ndb_holder_thread(void *arg)
+{
+    struct ndb_contest *n = (struct ndb_contest *)arg;
+    sqlite3_mutex *mu = sqlite3_db_mutex(n->ndb->db);
+    sqlite3_mutex_enter(mu);
+    contest_set(&n->c, &n->c.csr_held);
+    contest_wait(&n->c, &n->c.release_h, 60); /* watchdog */
+    sqlite3_mutex_leave(mu);
+    return NULL;
+}
+
+static void *ndb_snap_thread(void *arg)
+{
+    struct ndb_contest *n = (struct ndb_contest *)arg;
+    struct chain_state_view v;
+    struct timespec t0;
+    contest_wait(&n->c, &n->c.csr_held, 60);
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    atomic_store(&n->snap_ret, csr_snapshot_bounded(csr_instance(), &v));
+    n->snap_ms = cev_ms_since(&t0);
+    contest_set(&n->c, &n->c.d_done);
+    return NULL;
+}
+
+static int case_bounded_snapshot_ndb_mutex(void)
+{
+    int failures = 0;
+    static struct ndb_contest n = {
+        .c = { .mu = PTHREAD_MUTEX_INITIALIZER,
+               .cv = PTHREAD_COND_INITIALIZER } };
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    bool opened = sqlite3_open(":memory:", &ndb.db) == SQLITE_OK;
+    SD_CHECK("ndbmu: in-memory db opens", opened);
+    if (!opened)
+        return failures;
+    ndb.open = true;
+    struct chain_state_repository *csr = csr_instance();
+    bool was_initialized = csr->initialized;
+    if (!was_initialized)
+        csr_init(csr, NULL, NULL, NULL, NULL, NULL, NULL);
+    struct node_db *saved = csr->ndb;
+    csr->ndb = &ndb;
+    n.ndb = &ndb;
+    contest_reset(&n.c);
+    atomic_store(&n.snap_ret, -1);
+
+    pthread_t th, td;
+    int rh = pthread_create(&th, NULL, ndb_holder_thread, &n);
+    int rd = rh == 0 ? pthread_create(&td, NULL, ndb_snap_thread, &n) : -1;
+    SD_CHECK("ndbmu: threads start", rh == 0 && rd == 0);
+    bool answered = rd == 0 && contest_wait(&n.c, &n.c.d_done, 5);
+    SD_CHECK("ndbmu: bounded snapshot returns while the node.db connection "
+             "mutex is owned (never waits behind it)", answered);
+    contest_set(&n.c, &n.c.release_h);
+    if (rh == 0) {
+        contest_set(&n.c, &n.c.csr_held); /* unblock D if H never latched */
+        pthread_join(th, NULL);
+    }
+    if (rd == 0)
+        pthread_join(td, NULL);
+    if (answered) {
+        SD_CHECK("ndbmu: it answered busy (false)",
+                 atomic_load(&n.snap_ret) == 0);
+        SD_CHECK("ndbmu: it came back in under the bound",
+                 n.snap_ms >= 0 && n.snap_ms < CONTEST_BOUND_MS);
+    }
+    csr->ndb = saved;
+    if (!was_initialized)
+        csr_free(csr);
+    sqlite3_close(ndb.db);
+    return failures;
+}
+
 int test_stage_dump_trylock(void)
 {
     int failures = 0;
@@ -786,6 +905,7 @@ int test_stage_dump_trylock(void)
     failures += case_sovereignty_dump_busy_path();
     failures += case_chain_evidence_busy_ingest();
     failures += case_chain_evidence_ingest_contention();
+    failures += case_bounded_snapshot_ndb_mutex();
     if (failures == 0)
         printf("test_stage_dump_trylock: ALL PASSED\n");
     else
