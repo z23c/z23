@@ -161,6 +161,135 @@ static int rcn_check_in_memory(const char *tag, int height, const char *hex)
     return failures;
 }
 
+struct rcn_fixture {
+    struct node_db ndb;
+    struct main_state ms;
+    struct block_index b[3];
+    char hex[3][65];
+    struct rcn_holder h;
+};
+
+/* Chain 0..2 with real hashes (tip is height 2) plus a node.db row at the
+ * tip height for the DB-fallback phase. */
+static int rcn_fixture_build(struct rcn_fixture *f)
+{
+    int failures = 0;
+    for (int i = 0; i < 3; i++) {
+        block_index_init(&f->b[i]);
+        f->b[i].nHeight = i;
+        f->b[i].pprev = i ? &f->b[i - 1] : NULL;
+        f->b[i].nTime = 1700000000u + (uint32_t)i * 150u;
+        f->b[i].nBits = 0x1f07ffffu;
+        snprintf(f->hex[i], sizeof(f->hex[i]),
+                 "%064x", 0xabc000u + (unsigned)i);
+        uint256_set_hex(&f->b[i].hashBlock, f->hex[i]);
+        f->b[i].phashBlock = &f->b[i].hashBlock;
+    }
+    active_chain_move_window_tip(&f->ms.chain_active, &f->b[2]);
+    f->ms.pindex_best_header = &f->b[2];
+    reducer_frontier_provable_tip_set(2);
+    rpc_blockchain_set_state(&f->ms, NULL, NULL);
+    rpc_blockchain_set_node_db(&f->ndb);
+
+    static uint8_t sol[1] = { 1 };
+    struct db_block row;
+    memset(&row, 0, sizeof(row));
+    memcpy(row.hash, f->b[2].hashBlock.data, 32);
+    row.height = 2;
+    row.prev_hash[0] = 1;
+    row.merkle_root[0] = 1;
+    row.time = f->b[2].nTime;
+    row.bits = f->b[2].nBits;
+    row.status = 3;
+    row.solution = sol;
+    row.solution_len = sizeof(sol);
+    RCN_CHECK("fixture: node.db block row saved",
+              db_block_save(&f->ndb, &row));
+    return failures;
+}
+
+/* Phase 1: node.db mutex held, chain in memory. */
+static int rcn_phase_db_held(struct rcn_fixture *f)
+{
+    int failures = 0;
+    struct json_value res;
+    bool ok;
+    f->h.db_mutex = sqlite3_db_mutex(f->ndb.db);
+    f->h.cs = NULL;
+    if (rcn_hold_start(&f->h)) {
+        failures += rcn_check_in_memory("db held", 2, f->hex[2]);
+        rcn_call(rpc_getblockchaininfo, &res, &ok);
+        RCN_CHECK("db held: getblockchaininfo needs no node.db field",
+                  ok && !json_get(&res, "unavailable") &&
+                  json_get(&res, "initialblockdownload") != NULL);
+        json_free(&res);
+    } else {
+        RCN_CHECK("db held: helper acquired node.db mutex", false);
+    }
+    rcn_hold_stop(&f->h);
+    return failures;
+}
+
+/* Phase 2: tip hash only in node.db, mutex held, then released. */
+static int rcn_phase_db_only_hash(struct rcn_fixture *f)
+{
+    int failures = 0;
+    struct json_value res;
+    bool ok;
+    f->b[2].phashBlock = NULL;
+    if (rcn_hold_start(&f->h)) {
+        int64_t dt = rcn_call(rpc_getbestblockhash, &res, &ok);
+        RCN_CHECK("db-only hash, db held: getbestblockhash returns fast",
+                  dt < RCN_BOUND_MS);
+        RCN_CHECK("db-only hash, db held: unavailable, never a wrong hash",
+                  !ok && json_get_str(&res) != NULL &&
+                  strcmp(json_get_str(&res), f->hex[2]) != 0);
+        json_free(&res);
+    } else {
+        RCN_CHECK("db-only hash: helper acquired node.db mutex", false);
+    }
+    rcn_hold_stop(&f->h);
+    rcn_call(rpc_getbestblockhash, &res, &ok);
+    RCN_CHECK("db-only hash, released: full normal reply from node.db",
+              ok && rcn_str_is(&res, f->hex[2]));
+    json_free(&res);
+    f->b[2].phashBlock = &f->b[2].hashBlock;
+    return failures;
+}
+
+/* Phase 3: cs_main held (IBD latch not yet set), then released. */
+static int rcn_phase_cs_main_held(struct rcn_fixture *f)
+{
+    int failures = 0;
+    struct json_value res;
+    bool ok;
+    f->h.db_mutex = NULL;
+    f->h.cs = &f->ms.cs_main;
+    if (rcn_hold_start(&f->h)) {
+        int64_t dt = rcn_call(rpc_getblockchaininfo, &res, &ok);
+        RCN_CHECK("cs_main held: getblockchaininfo returns fast, tip correct",
+                  ok && dt < RCN_BOUND_MS &&
+                  json_get_int(json_get(&res, "blocks")) == 2 &&
+                  rcn_str_is(json_get(&res, "bestblockhash"), f->hex[2]));
+        RCN_CHECK("cs_main held: initialblockdownload marked unavailable",
+                  json_get(&res, "initialblockdownload") == NULL &&
+                  rcn_unavailable_lists(&res, "initialblockdownload"));
+        json_free(&res);
+        failures += rcn_check_in_memory("cs_main held", 2, f->hex[2]);
+    } else {
+        RCN_CHECK("cs_main held: helper acquired cs_main", false);
+    }
+    rcn_hold_stop(&f->h);
+    rcn_call(rpc_getblockchaininfo, &res, &ok);
+    RCN_CHECK("released: full normal getblockchaininfo",
+              ok && json_get(&res, "initialblockdownload") != NULL &&
+              !json_get(&res, "unavailable") &&
+              json_get(&res, "chainwork") != NULL &&
+              json_get(&res, "verificationprogress") != NULL);
+    json_free(&res);
+    return failures;
+}
+
 int test_rpc_chaininfo_nodb(void);
 int test_rpc_chaininfo_nodb(void)
 {
@@ -169,125 +298,19 @@ int test_rpc_chaininfo_nodb(void)
 
     test_reset_shared_globals();
 
-    struct node_db ndb;
-    memset(&ndb, 0, sizeof(ndb));
-    bool dbok = node_db_open(&ndb, ":memory:");
+    static struct rcn_fixture f;
+    memset(&f, 0, sizeof(f));
+    bool dbok = node_db_open(&f.ndb, ":memory:");
     RCN_CHECK("fixture: in-memory node_db opens", dbok);
     if (!dbok) return failures;
+    main_state_init(&f.ms);
 
-    struct main_state ms;
-    main_state_init(&ms);
-
-    /* Fixture chain 0..2 with real hashes; tip is height 2. */
-    struct block_index b[3];
-    char hex[3][65];
-    for (int i = 0; i < 3; i++) {
-        block_index_init(&b[i]);
-        b[i].nHeight = i;
-        b[i].pprev = i ? &b[i - 1] : NULL;
-        b[i].nTime = 1700000000u + (uint32_t)i * 150u;
-        b[i].nBits = 0x1f07ffffu;
-        snprintf(hex[i], sizeof(hex[i]),
-                 "%064x", 0xabc000u + (unsigned)i);
-        uint256_set_hex(&b[i].hashBlock, hex[i]);
-        b[i].phashBlock = &b[i].hashBlock;
-    }
-    active_chain_move_window_tip(&ms.chain_active, &b[2]);
-    ms.pindex_best_header = &b[2];
-    reducer_frontier_provable_tip_set(2);
-    rpc_blockchain_set_state(&ms, NULL, NULL);
-
-    /* node.db row at the tip height, for the DB-fallback phase. */
-    struct db_block row;
-    memset(&row, 0, sizeof(row));
-    uint256_get_hex(&b[2].hashBlock, hex[2]);
-    {
-        struct uint256 h2 = b[2].hashBlock;
-        memcpy(row.hash, h2.data, 32);
-        row.height = 2;
-        row.prev_hash[0] = 1;
-        row.merkle_root[0] = 1;
-        row.time = b[2].nTime;
-        row.bits = b[2].nBits;
-        row.status = 3;
-        static uint8_t sol[1] = { 1 };
-        row.solution = sol;
-        row.solution_len = sizeof(sol);
-    }
-    bool saved = db_block_save(&ndb, &row);
-    RCN_CHECK("fixture: node.db block row saved", saved);
-
-    struct rcn_holder h;
-    memset(&h, 0, sizeof(h));
-    struct json_value res;
-    bool ok;
-    int64_t dt;
-
-    /* ── Phase 1: node.db mutex held, chain in memory ─────────────── */
-    rpc_blockchain_set_state(&ms, NULL, NULL);
-    rpc_blockchain_set_node_db(&ndb);
-    h.db_mutex = sqlite3_db_mutex(ndb.db);
-    h.cs = NULL;
-    if (rcn_hold_start(&h)) {
-        failures += rcn_check_in_memory("db held", 2, hex[2]);
-        dt = rcn_call(rpc_getblockchaininfo, &res, &ok);
-        RCN_CHECK("db held: getblockchaininfo needs no node.db field",
-                  ok && !json_get(&res, "unavailable") &&
-                  json_get(&res, "initialblockdownload") != NULL);
-        json_free(&res);
-    } else {
-        RCN_CHECK("db held: helper acquired node.db mutex", false);
-    }
-    rcn_hold_stop(&h);
-
-    /* ── Phase 2: tip hash only in node.db, mutex held ────────────── */
-    b[2].phashBlock = NULL;
-    if (rcn_hold_start(&h)) {
-        dt = rcn_call(rpc_getbestblockhash, &res, &ok);
-        RCN_CHECK("db-only hash, db held: getbestblockhash returns fast",
-                  dt < RCN_BOUND_MS);
-        RCN_CHECK("db-only hash, db held: unavailable, never a wrong hash",
-                  !ok && !rcn_str_is(&res, "") &&
-                  json_get_str(&res) != NULL &&
-                  strcmp(json_get_str(&res), hex[2]) != 0);
-        json_free(&res);
-    } else {
-        RCN_CHECK("db-only hash: helper acquired node.db mutex", false);
-    }
-    rcn_hold_stop(&h);
-    dt = rcn_call(rpc_getbestblockhash, &res, &ok);
-    RCN_CHECK("db-only hash, released: full normal reply from node.db",
-              ok && rcn_str_is(&res, hex[2]));
-    json_free(&res);
-    b[2].phashBlock = &b[2].hashBlock;
-
-    /* ── Phase 3: cs_main held (IBD latch not yet set) ────────────── */
-    h.db_mutex = NULL;
-    h.cs = &ms.cs_main;
-    if (rcn_hold_start(&h)) {
-        dt = rcn_call(rpc_getblockchaininfo, &res, &ok);
-        RCN_CHECK("cs_main held: getblockchaininfo returns fast, tip correct",
-                  ok && dt < RCN_BOUND_MS &&
-                  json_get_int(json_get(&res, "blocks")) == 2 &&
-                  rcn_str_is(json_get(&res, "bestblockhash"), hex[2]));
-        RCN_CHECK("cs_main held: initialblockdownload marked unavailable",
-                  json_get(&res, "initialblockdownload") == NULL &&
-                  rcn_unavailable_lists(&res, "initialblockdownload"));
-        json_free(&res);
-        failures += rcn_check_in_memory("cs_main held", 2, hex[2]);
-    } else {
-        RCN_CHECK("cs_main held: helper acquired cs_main", false);
-    }
-    rcn_hold_stop(&h);
-    dt = rcn_call(rpc_getblockchaininfo, &res, &ok);
-    RCN_CHECK("released: full normal getblockchaininfo",
-              ok && json_get(&res, "initialblockdownload") != NULL &&
-              !json_get(&res, "unavailable") &&
-              json_get(&res, "chainwork") != NULL &&
-              json_get(&res, "verificationprogress") != NULL);
-    json_free(&res);
+    failures += rcn_fixture_build(&f);
+    failures += rcn_phase_db_held(&f);
+    failures += rcn_phase_db_only_hash(&f);
+    failures += rcn_phase_cs_main_held(&f);
 
     rpc_blockchain_set_node_db(NULL);
-    node_db_close(&ndb);
+    node_db_close(&f.ndb);
     return failures;
 }
