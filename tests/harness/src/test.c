@@ -2096,6 +2096,7 @@ static void run_full_suite_crypto_and_wallet(int *failures)
     *failures += test_seed_torn_import_gate();
     *failures += test_mirror_divergence_locator();
     *failures += test_log_throttle();
+    *failures += test_log_macros_in();
     *failures += test_reducer_frontier_reconcile_light();
     *failures += test_reducer_stage_fuzz();
     *failures += test_reducer_ingest_e2e();

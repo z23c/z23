@@ -353,16 +353,100 @@ static size_t sp_log_name(const struct sp_file *f, size_t i, size_t *paren)
     return k < f->n && f->code[k] == '(' ? j - i : 0;
 }
 
+/* Index of the "'" or '"' literal's closing quote at or after i (the NUL when
+ * unterminated). c[i] is the opening quote. */
+static size_t sp_quote_end(const char *c, size_t i)
+{
+    char q = c[i++];
+    while (c[i] && c[i] != q)
+        i += (c[i] == '\\' && c[i + 1]) ? 2 : 1;
+    return i;
+}
+
+/* Index of the ',' or ')' ending the argument that starts at i, at depth 0. */
+static size_t sp_arg_end(const char *c, size_t i)
+{
+    int depth = 0;
+    for (; c[i]; i++) {
+        if (c[i] == '"' || c[i] == '\'')
+            i = sp_quote_end(c, i);
+        else if (c[i] == '(')
+            depth++;
+        else if (c[i] == ')' && depth-- == 0)
+            return i;
+        else if (c[i] == ',' && depth == 0)
+            return i;
+        if (!c[i])
+            break;
+    }
+    return i;
+}
+
+/* For a normalized call NAME_IN(...): the index of the argument that names the
+ * function (1 for LOG_RETURN_IN, whose first argument is the value, else 0);
+ * -1 when NAME (nl bytes) is not an _IN form. */
+static int sp_in_argidx(const char *call, size_t nl)
+{
+    if (nl <= 3 || memcmp(call + nl - 3, "_IN", 3) != 0)
+        return -1;
+    return nl == 13 && memcmp(call, "LOG_RETURN_IN", 13) == 0;
+}
+
+/* Rewrites a normalized LOG_X_IN("F", args) call to the LOG_X(args) text the
+ * plain macro would have had inside F, storing F in *fn. Returns NULL (and
+ * *fn stays NULL) when the call is not an _IN form with a literal name, so it
+ * is then compared as written and fails closed. */
+static char *sp_in_rewrite(const char *call, char **fn)
+{
+    size_t nl = 0, p, a, e, s;
+    char *out;
+    while (sp_isid((unsigned char)call[nl]))
+        nl++;
+    int k = sp_in_argidx(call, nl);
+    for (p = nl; call[p] == ' '; p++)
+        ;
+    if (k < 0 || call[p] != '(')
+        return NULL;
+    a = ++p;
+    if (k == 1) {
+        a = sp_arg_end(call, a);
+        if (call[a] != ',')
+            return NULL;
+        for (a++; call[a] == ' '; a++)
+            ;
+    }
+    e = sp_arg_end(call, a);
+    if (e - a < 2 || call[a] != '"' || call[e - 1] != '"')
+        return NULL;
+    for (s = e + (call[e] == ','); call[s] == ' '; s++)
+        ;
+    out = malloc(nl + (p - nl) + (a - p) + strlen(call + s) + 1); // raw-alloc-ok:lint-runtime
+    if (!out)
+        return NULL;
+    memcpy(out, call, nl - 3);
+    memcpy(out + nl - 3, call + nl, p - nl + (a - p));
+    strcpy(out + p - 3 + (a - p), call + s);
+    *fn = sp_dup(call + a + 1, e - a - 2);
+    return out;
+}
+
 static void sp_add_log(struct sp_file *f, size_t i, size_t end, unsigned line)
 {
     char *call = sp_norm(f->code, f->lit, i, end);
-    const char *fn = sp_func_at(f, i);
+    char *infn = NULL;
+    char *re = call ? sp_in_rewrite(call, &infn) : NULL;
+    if (re) {
+        free(call);
+        call = re;
+    }
+    const char *fn = infn ? infn : sp_func_at(f, i);
     size_t cl = call ? strlen(call) : 0;
     char *key = call ? malloc(strlen(fn) + cl + 2) : NULL; // raw-alloc-ok:lint-runtime
     if (key)
         sprintf(key, "%s\t%s", fn, call);
     free(call);
     sp_add(&f->lg, key, sp_dup(fn, strlen(fn)), line, i);
+    free(infn);
 }
 
 static void sp_logs(struct sp_file *f)

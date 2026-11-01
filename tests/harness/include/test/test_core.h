@@ -1014,6 +1014,7 @@ int test_seed_integrity_gate(void);
 int test_seed_torn_import_gate(void);
 int test_mirror_divergence_locator(void);
 int test_log_throttle(void);
+int test_log_macros_in(void);
 int test_reducer_stage_fuzz(void);
 int test_process_block_revalidate(void);
 int test_domain_consensus_verify(void);

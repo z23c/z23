@@ -72,6 +72,127 @@ static bool seal_rewind_reset_rows_and_cursors(sqlite3 *db, int32_t F, int32_t C
            utxo_apply_frontier_set_in_tx(db, F);
 }
 
+/* Helpers split out of seal_rewind_to_nearest. The WARN lines inside them are
+ * LOG_WARN_IN so they still name seal_rewind_to_nearest. Each helper that ends
+ * a path returns true (the function's "clean refusal" result); the caller
+ * returns it immediately. */
+
+/* A store-level refusal: *out gets SEAL_REWIND_STORE_ERROR. */
+static bool seal_rewind_store_error(struct seal_rewind_result *out)
+{
+    out->refusal = SEAL_REWIND_STORE_ERROR;
+    return true;
+}
+
+/* Roll the open txn back, release the tx lock. */
+static void seal_rewind_abort_txn(sqlite3 *db)
+{
+    sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    progress_store_tx_unlock();
+}
+
+/* The utxo_apply cursor as a height, or -1 (after the WARN) when it is too
+ * large to be one. */
+static int64_t seal_rewind_read_cursor(sqlite3 *db)
+{
+    uint64_t cursor = stage_cursor_persisted(db, "utxo_apply", "seal_rewind");
+    if (cursor > (uint64_t)INT32_MAX) {
+        LOG_WARN_IN("seal_rewind_to_nearest", "seal_rewind",
+                    "[seal_rewind] utxo_apply cursor too large: %llu",
+                    (unsigned long long)cursor);
+        return -1;
+    }
+    return (int64_t)cursor;
+}
+
+/* BEGIN IMMEDIATE under the tx lock; on failure WARN, unlock, and return false
+ * with the store-error refusal set. */
+static bool seal_rewind_begin(sqlite3 *db, struct seal_rewind_result *out)
+{
+    char *err = NULL;
+    progress_store_tx_lock();
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) == SQLITE_OK)
+        return true;
+    LOG_WARN_IN("seal_rewind_to_nearest", "seal_rewind",
+                "[seal_rewind] BEGIN failed: %s", err ? err : "(no message)");
+    if (err) sqlite3_free(err);
+    progress_store_tx_unlock();
+    seal_rewind_store_error(out);
+    return false;
+}
+
+/* Unwind the inverse deltas [F, C-1]; on failure WARN, roll back and set the
+ * store-error refusal. out->unwound_heights is set either way. */
+static bool seal_rewind_unwind(sqlite3 *db, int32_t F, int32_t C,
+                               struct seal_rewind_result *out)
+{
+    int32_t unwound = 0;
+    int32_t h = 0;
+    bool ok = seal_rewind_unwind_inverse_deltas(db, F, C, &h, &unwound);
+    if (!ok) {
+        LOG_WARN_IN("seal_rewind_to_nearest", "seal_rewind",
+                    "[seal_rewind] inverse delta unwind failed h=%d "
+                    "(range [%d,%d])", h, F, C - 1);
+        seal_rewind_abort_txn(db);
+        seal_rewind_store_error(out);
+    }
+    out->unwound_heights = unwound;
+    return ok;
+}
+
+/* Recompute the coins commitment and require it to equal the seal's. On a
+ * recompute failure or a mismatch: WARN, roll back, set the refusal (store
+ * error / commitment mismatch plus the rejected event) and return false. */
+static bool seal_rewind_self_verify(sqlite3 *db, const struct seal_record *base,
+                                    int32_t H, struct seal_rewind_result *out)
+{
+    const int32_t G = base->height;
+    uint8_t got[32];
+    if (coins_kv_commitment(db, got) != 0) {
+        LOG_WARN_IN("seal_rewind_to_nearest", "seal_rewind",
+                    "[seal_rewind] coins commitment recompute failed at G=%d", G);
+        seal_rewind_abort_txn(db);
+        seal_rewind_store_error(out);
+        return false;
+    }
+    if (memcmp(got, base->coins_sha3, 32) != 0) {
+        LOG_WARN_IN("seal_rewind_to_nearest", "seal_rewind",
+                    "[seal_rewind] SELF-VERIFY FAILED at G=%d: re-derived coins "
+                    "set does not reproduce the seal's coins_sha3 — refusing the "
+                    "rewind (torn/forged seal)", G);
+        seal_rewind_abort_txn(db);
+        event_emitf(EV_BLOCK_REJECTED, 0,
+                    "seal_rewind self_verify_failed G=%d H=%d", G, H);
+        seal_rewind_refuse(out, SEAL_REWIND_COMMITMENT_MISMATCH);
+        return false;
+    }
+    out->coins_verified = true;
+    return true;
+}
+
+/* Reset rows and cursors, then COMMIT. On either failure: WARN, roll back,
+ * clear coins_verified, set the store-error refusal and return false. */
+static bool seal_rewind_reset_and_commit(sqlite3 *db, int32_t G, int32_t F,
+                                         int32_t C, struct seal_rewind_result *out)
+{
+    char *err = NULL;
+    bool reset_ok = seal_rewind_reset_rows_and_cursors(db, F, C);
+    if (reset_ok && sqlite3_exec(db, "COMMIT", NULL, NULL, &err) == SQLITE_OK)
+        return true;
+    if (!reset_ok) {
+        LOG_WARN_IN("seal_rewind_to_nearest", "seal_rewind",
+                    "[seal_rewind] reset writes failed at G=%d — rolling back", G);
+    } else {
+        LOG_WARN_IN("seal_rewind_to_nearest", "seal_rewind",
+                    "[seal_rewind] COMMIT failed: %s", err ? err : "(no message)");
+        if (err) sqlite3_free(err);
+    }
+    seal_rewind_abort_txn(db);
+    out->coins_verified = false;
+    seal_rewind_store_error(out);
+    return false;
+}
+
 bool seal_rewind_to_nearest(sqlite3 *db, int32_t H, int32_t floor,
                             struct seal_rewind_result *out)
 {
@@ -91,8 +212,7 @@ bool seal_rewind_to_nearest(sqlite3 *db, int32_t H, int32_t floor,
     if (!seal_kv_nearest_rewind_base(db, H, &base, &found)) {
         LOG_WARN("seal_rewind",
                  "[seal_rewind] nearest-base scan failed H=%d", H);
-        out->refusal = SEAL_REWIND_STORE_ERROR;
-        return true;
+        return seal_rewind_store_error(out);
     }
     if (!found)
         return seal_rewind_refuse(out, SEAL_REWIND_NO_BASE);
@@ -113,14 +233,9 @@ bool seal_rewind_to_nearest(sqlite3 *db, int32_t H, int32_t floor,
      * apply, so blocks [0, C) are applied and coins_applied_height == C. To
      * land at coins_applied_height == F we must inverse-apply blocks [F, C-1].
      * If F is at/above C there is nothing above the seal to unwind. */
-    uint64_t cursor = stage_cursor_persisted(db, "utxo_apply", "seal_rewind");
-    if (cursor > (uint64_t)INT32_MAX) {
-        LOG_WARN("seal_rewind",
-                 "[seal_rewind] utxo_apply cursor too large: %llu",
-                 (unsigned long long)cursor);
-        out->refusal = SEAL_REWIND_STORE_ERROR;
-        return true;
-    }
+    int64_t cursor = seal_rewind_read_cursor(db);
+    if (cursor < 0)
+        return seal_rewind_store_error(out);
     const int32_t C = (int32_t)cursor;
     out->cursor_before = C;
     /* The seal at G commits the set THROUGH block G (a checkpoint-height
@@ -132,65 +247,25 @@ bool seal_rewind_to_nearest(sqlite3 *db, int32_t H, int32_t floor,
 
     /* (3+4) Atomic reset. Ensure the stage tables exist first (a repair path
      * can reach here before stage init on a fresh datadir). */
-    if (!stage_table_ensure(db)) {
-        out->refusal = SEAL_REWIND_STORE_ERROR;
-        return true;
-    }
+    if (!stage_table_ensure(db))
+        return seal_rewind_store_error(out);
 
-    progress_store_tx_lock();
-    char *err = NULL;
-    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK) {
-        LOG_WARN("seal_rewind", "[seal_rewind] BEGIN failed: %s",
-                 err ? err : "(no message)");
-        if (err) sqlite3_free(err);
-        progress_store_tx_unlock();
-        out->refusal = SEAL_REWIND_STORE_ERROR;
+    if (!seal_rewind_begin(db, out))
         return true;
-    }
 
     /* Replay the retained inverse deltas for [F, C-1] into coins_kv, newest
      * first (disconnect order), so the set unwinds to coins_applied_height==F.
      * Read the delta rows BEFORE deleting them below. */
-    int32_t unwound = 0;
-    int32_t h = 0;
-    if (!seal_rewind_unwind_inverse_deltas(db, F, C, &h, &unwound)) {
-        LOG_WARN("seal_rewind",
-                 "[seal_rewind] inverse delta unwind failed h=%d "
-                 "(range [%d,%d])", h, F, C - 1);
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-        progress_store_tx_unlock();
-        out->unwound_heights = unwound;
-        out->refusal = SEAL_REWIND_STORE_ERROR;
+    if (!seal_rewind_unwind(db, F, C, out))
         return true;
-    }
-    out->unwound_heights = unwound;
 
     /* SELF-DERIVED PROOF: recompute the commitment over the re-derived coins set
      * and require it reproduce the seal's stored value. A mismatch means the
      * seal (or a delta) is torn/forged — REFUSE and roll back, leaving the
      * reducer untouched. This is what lets a torn anchor self-heal on any
      * datadir: an unverifiable base can never be installed. */
-    uint8_t got[32];
-    if (coins_kv_commitment(db, got) != 0) {
-        LOG_WARN("seal_rewind",
-                 "[seal_rewind] coins commitment recompute failed at G=%d", G);
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-        progress_store_tx_unlock();
-        out->refusal = SEAL_REWIND_STORE_ERROR;
+    if (!seal_rewind_self_verify(db, &base, H, out))
         return true;
-    }
-    if (memcmp(got, base.coins_sha3, 32) != 0) {
-        LOG_WARN("seal_rewind",
-                 "[seal_rewind] SELF-VERIFY FAILED at G=%d: re-derived coins "
-                 "set does not reproduce the seal's coins_sha3 — refusing the "
-                 "rewind (torn/forged seal)", G);
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-        progress_store_tx_unlock();
-        event_emitf(EV_BLOCK_REJECTED, 0,
-                    "seal_rewind self_verify_failed G=%d H=%d", G, H);
-        return seal_rewind_refuse(out, SEAL_REWIND_COMMITMENT_MISMATCH);
-    }
-    out->coins_verified = true;
 
     /* Verified. Drop the now-invalid reducer rows above the seal
      * (utxo_apply_log/delta + nullifiers + Sprout/Sapling anchors), force the
@@ -202,28 +277,11 @@ bool seal_rewind_to_nearest(sqlite3 *db, int32_t H, int32_t floor,
      * utxo_apply re-consumes them on the forward re-fold. tip_finalize_log rows
      * are NEVER deleted — only its cursor moves — preserving served-floor
      * evidence, exactly as the header-poison rewind does. */
-    if (!seal_rewind_reset_rows_and_cursors(db, F, C)) {
-        LOG_WARN("seal_rewind",
-                 "[seal_rewind] reset writes failed at G=%d — rolling back", G);
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-        progress_store_tx_unlock();
-        out->coins_verified = false;
-        out->refusal = SEAL_REWIND_STORE_ERROR;
+    if (!seal_rewind_reset_and_commit(db, G, F, C, out))
         return true;
-    }
-
-    if (sqlite3_exec(db, "COMMIT", NULL, NULL, &err) != SQLITE_OK) {
-        LOG_WARN("seal_rewind", "[seal_rewind] COMMIT failed: %s",
-                 err ? err : "(no message)");
-        if (err) sqlite3_free(err);
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-        progress_store_tx_unlock();
-        out->coins_verified = false;
-        out->refusal = SEAL_REWIND_STORE_ERROR;
-        return true;
-    }
     progress_store_tx_unlock();
 
+    const int32_t unwound = out->unwound_heights;
     out->rewound = true;
     out->refusal = SEAL_REWIND_OK;
     event_emitf(EV_SYNC_STATE_CHANGE, 0,
