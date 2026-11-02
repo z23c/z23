@@ -1074,78 +1074,109 @@ static uint32_t tor_peer_offences(struct sw_node *n, const uint8_t key[33])
         ? t.offence_total : 0;
 }
 
+struct tor_fixture {
+    struct p2p_node *a;   /* authenticated (Noise static 0x21) */
+    struct p2p_node *a2;  /* a, reconnected: same static, new connection */
+    struct p2p_node *b;   /* plain loopback inbound, no Noise */
+    struct p2p_node *b2;  /* another plain connection */
+    struct p2p_node *c;   /* authenticated, other static (0x22) */
+    uint8_t ka[33], ka2[33], kb[33], kb2[33], kc[33];
+};
+
+static bool tor_fixture_open(struct tor_fixture *f)
+{
+    memset(f, 0, sizeof(*f));
+    f->a = tor_peer_new(11, 40001);
+    f->a2 = tor_peer_new(13, 40003);
+    f->b = tor_peer_new(12, 40002);
+    f->b2 = tor_peer_new(99, 40002);
+    f->c = tor_peer_new(15, 40005);
+    if (!f->a || !f->a2 || !f->b || !f->b2 || !f->c)
+        return false;
+    return tor_peer_noise(f->a, 0x21) && tor_peer_noise(f->a2, 0x21) &&
+           tor_peer_noise(f->c, 0x22) &&
+           boot_zcode_swarm_peer_key(f->a, f->ka) &&
+           boot_zcode_swarm_peer_key(f->a2, f->ka2) &&
+           boot_zcode_swarm_peer_key(f->b, f->kb) &&
+           boot_zcode_swarm_peer_key(f->b2, f->kb2) &&
+           boot_zcode_swarm_peer_key(f->c, f->kc);
+}
+
+static void tor_fixture_close(struct tor_fixture *f)
+{
+    struct p2p_node *all[] = { f->a, f->a2, f->b, f->b2, f->c };
+    for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
+        if (all[i])
+            noise_transport_free(all[i]->transport);
+        free(all[i]);
+    }
+}
+
+static int bundle_tor_keys(const struct tor_fixture *f)
+{
+    int failures = 0;
+    SW_CHECK("tor inbound: loopback peers do not share one key",
+             memcmp(f->ka, f->kb, 33) != 0 && memcmp(f->kb, f->kc, 33) != 0 &&
+             memcmp(f->ka, f->kc, 33) != 0);
+    SW_CHECK("tor inbound: an authenticated identity survives a reconnect",
+             memcmp(f->ka, f->ka2, 33) == 0);
+    uint8_t again[33];
+    SW_CHECK("tor inbound: an unauthenticated key is stable for the session",
+             boot_zcode_swarm_peer_key(f->b, again) &&
+             memcmp(f->kb, again, 33) == 0);
+    SW_CHECK("tor inbound: another connection id is another key",
+             memcmp(f->kb, f->kb2, 33) != 0);
+    return failures;
+}
+
+static int bundle_tor_ban(struct sw_node *n, const struct sw_pkg *p,
+                          const struct tor_fixture *f)
+{
+    int failures = 0;
+    const uint64_t ha = boot_zcode_swarm_peer_id(f->a);
+    const uint64_t hb = boot_zcode_swarm_peer_id(f->b);
+    SW_CHECK("tor inbound: both peers join the engine",
+             vcs_swarm_engine_peer_add(n->engine, ha, f->ka) &&
+             vcs_swarm_engine_peer_add(n->engine, hb, f->kb));
+    bool banned = false;
+    for (uint32_t i = 0; i < VCS_POLICY_OFFENCE_DISCONNECT_THRESHOLD + 2 &&
+                         !banned; i++)
+        banned = tor_peer_misbehave(n, ha, p, i);
+    SW_CHECK("tor inbound: the flooding peer reaches the drop threshold",
+             banned && tor_peer_offences(n, f->ka) >=
+                 VCS_POLICY_OFFENCE_DISCONNECT_THRESHOLD);
+    SW_CHECK("tor inbound: the other peer carries no offence",
+             tor_peer_offences(n, f->kb) == 0);
+    SW_CHECK("tor inbound: the other peer is still served",
+             !tor_peer_misbehave(n, hb, p, 5000) &&
+             tor_peer_offences(n, f->kb) == 1);
+    const uint64_t ha2 = boot_zcode_swarm_peer_id(f->a2);
+    SW_CHECK("tor inbound: a reconnect with the same identity stays banned",
+             vcs_swarm_engine_peer_add(n->engine, ha2, f->ka2) &&
+             tor_peer_offences(n, f->ka2) >=
+                 VCS_POLICY_OFFENCE_DISCONNECT_THRESHOLD &&
+             tor_peer_misbehave(n, ha2, p, 6000));
+    SW_CHECK("tor inbound: a different identity starts clean",
+             tor_peer_offences(n, f->kc) == 0);
+    return failures;
+}
+
 static int bundle_case_inbound_tor_peers(void)
 {
     int failures = 0;
     struct sw_node n;
     struct sw_pkg p;
+    struct tor_fixture f;
     if (!sw_node_open(&n, "torinbound", sw_score_contributor) ||
         !sw_make_package(&p, 1, 3))
         return 1;
-    struct p2p_node *a = tor_peer_new(11, 40001);
-    struct p2p_node *b = tor_peer_new(12, 40002);
-    struct p2p_node *a2 = tor_peer_new(13, 40003); /* a, reconnected */
-    struct p2p_node *c = tor_peer_new(14, 40004);
-    struct p2p_node *c2 = tor_peer_new(15, 40005); /* other static key */
-    SW_CHECK("tor inbound: fixtures built",
-             a && b && a2 && c && c2 && tor_peer_noise(a, 0x21) &&
-             tor_peer_noise(a2, 0x21) && tor_peer_noise(c, 0x21) == true &&
-             tor_peer_noise(c2, 0x22));
-    uint8_t ka[33], kb[33], ka2[33], kc2[33];
-    SW_CHECK("tor inbound: every peer has a key",
-             boot_zcode_swarm_peer_key(a, ka) &&
-             boot_zcode_swarm_peer_key(b, kb) &&
-             boot_zcode_swarm_peer_key(a2, ka2) &&
-             boot_zcode_swarm_peer_key(c2, kc2));
-    SW_CHECK("tor inbound: loopback peers do not share one key",
-             memcmp(ka, kb, 33) != 0 && memcmp(kb, kc2, 33) != 0 &&
-             memcmp(ka, kc2, 33) != 0);
-    SW_CHECK("tor inbound: an authenticated identity survives a reconnect",
-             memcmp(ka, ka2, 33) == 0);
-    uint8_t kb_again[33];
-    SW_CHECK("tor inbound: an unauthenticated key is stable for the session",
-             boot_zcode_swarm_peer_key(b, kb_again) &&
-             memcmp(kb, kb_again, 33) == 0);
-    /* The unauthenticated b is keyed by connection id: id 12 is the same
-     * connection, id 99 is another. */
-    struct p2p_node *b_other = tor_peer_new(99, 40002);
-    uint8_t kb_other[33];
-    SW_CHECK("tor inbound: another connection id is another key",
-             b_other && boot_zcode_swarm_peer_key(b_other, kb_other) &&
-             memcmp(kb, kb_other, 33) != 0);
-
-    const uint64_t ha = boot_zcode_swarm_peer_id(a);
-    const uint64_t hb = boot_zcode_swarm_peer_id(b);
-    SW_CHECK("tor inbound: both peers join the engine",
-             vcs_swarm_engine_peer_add(n.engine, ha, ka) &&
-             vcs_swarm_engine_peer_add(n.engine, hb, kb));
-    bool banned = false;
-    for (uint32_t i = 0; i < VCS_POLICY_OFFENCE_DISCONNECT_THRESHOLD + 2 &&
-                         !banned; i++)
-        banned = tor_peer_misbehave(&n, ha, &p, i);
-    SW_CHECK("tor inbound: the flooding peer reaches the drop threshold",
-             banned && tor_peer_offences(&n, ka) >=
-                 VCS_POLICY_OFFENCE_DISCONNECT_THRESHOLD);
-    SW_CHECK("tor inbound: the other peer carries no offence",
-             tor_peer_offences(&n, kb) == 0);
-    SW_CHECK("tor inbound: the other peer is still served",
-             !tor_peer_misbehave(&n, hb, &p, 5000) &&
-             tor_peer_offences(&n, kb) == 1);
-    SW_CHECK("tor inbound: a reconnect with the same identity stays banned",
-             vcs_swarm_engine_peer_add(n.engine,
-                                       boot_zcode_swarm_peer_id(a2), ka2) &&
-             tor_peer_offences(&n, ka2) >=
-                 VCS_POLICY_OFFENCE_DISCONNECT_THRESHOLD &&
-             tor_peer_misbehave(&n, boot_zcode_swarm_peer_id(a2), &p, 6000));
-    SW_CHECK("tor inbound: a different identity starts clean",
-             tor_peer_offences(&n, kc2) == 0);
-
-    for (struct p2p_node **x = (struct p2p_node *[]){ a, b, a2, c, c2,
-                                                       b_other, NULL };
-         *x; x++) {
-        noise_transport_free((*x)->transport);
-        free(*x);
+    bool ok = tor_fixture_open(&f);
+    SW_CHECK("tor inbound: fixtures built and keyed", ok);
+    if (ok) {
+        failures += bundle_tor_keys(&f);
+        failures += bundle_tor_ban(&n, &p, &f);
     }
+    tor_fixture_close(&f);
     sw_free_package(&p);
     sw_node_close(&n);
     test_rm_rf_recursive(n.datadir);
