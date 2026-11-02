@@ -48,6 +48,7 @@
 #include "sim/simnet.h"
 #include "sim/simnet_sapling.h"
 #include "services/agent_spend_policy.h"
+#include "services/chain_evidence_authority_service.h"
 #include "services/wallet_recovery_service.h"
 #include "storage/coins_kv.h"
 #include "storage/nullifier_kv.h"
@@ -178,6 +179,9 @@ static bool wdr_restore(struct wdr *f)
 
 static void wdr_teardown(struct wdr *f)
 {
+    /* A health collect inside a send spawns the one-shot evidence helper,
+     * which holds node.db: join it before the database closes. */
+    chain_evidence_maintain_quiesce();
     wdr_close(f);
     free(f->tbl);
     f->tbl = NULL;
@@ -1911,6 +1915,7 @@ int test_simnet_wallet_diversified_send(void)
         PASS();
         failures += wds_spend_all(&f, &s, (const char (*)[128])addrs, snap);
     } _test_next:;
+    chain_evidence_maintain_quiesce();
     if (ms_open)
         main_state_free(&ms);
     if (trusted) {
