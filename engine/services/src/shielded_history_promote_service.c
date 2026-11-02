@@ -657,6 +657,82 @@ static void promote_clear_committed(struct shielded_promote_report *out)
         out->committed = false;
 }
 
+/* Read the target boundaries. On the nothing-to-promote case (cursors already
+ * zero) log it and clear committed. Returns the boundary read result: <0 read
+ * failed, 0 nothing to promote, >0 proceed. */
+static int promote_target_boundaries_or_done(struct sqlite3 *target,
+                                             struct shielded_promote_report *out,
+                                             int64_t *anchor_boundary,
+                                             int64_t *nullifier_boundary)
+{
+    int br = promote_read_target_boundaries(target, anchor_boundary,
+                                            nullifier_boundary);
+    if (br == 0) {
+        LOG_INFO_IN("shielded_history_promote_run", PROMOTE_SUBSYS,
+                    "target cursors already zero — shielded history complete, "
+                    "nothing to promote");
+        promote_clear_committed(out);
+    }
+    return br;
+}
+
+/* Producer preflight (G1, counts, G5), then the G3/G4 local-body cross-check
+ * (run before the transaction: a heavy independent read of both datadirs), then
+ * BEGIN IMMEDIATE under the progress-store tx lock. Returns 0 with the
+ * transaction open; 1 when the cross-check did not fully pass (src still open,
+ * report set: the caller logs and refuses); 2 when the preflight or BEGIN
+ * refused (already closed and published). */
+static int promote_preflight_and_begin(const struct shielded_promote_request *req,
+                                       struct sqlite3 *target, struct sqlite3 *src,
+                                       struct shielded_promote_report *out,
+                                       struct shielded_promote_report *report,
+                                       struct crosscheck_result *cc, bool *cc_ret)
+{
+    if (!promote_producer_preflight(src, req, out, report))
+        return 2;
+    *cc_ret = promote_run_crosscheck(req->target_copy_datadir,
+                                     req->producer_datadir,
+                                     req->checkpoint_height, cc);
+    if (!promote_crosscheck_passed(*cc_ret, cc, report))
+        return 1;
+
+    /* ── the ONE atomic transaction ── */
+    progress_store_tx_lock();
+    char *err = NULL;
+    if (sqlite3_exec(target, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK) {
+        LOG_WARN_IN("shielded_history_promote_run", PROMOTE_SUBSYS,
+                    "BEGIN IMMEDIATE failed: %s",
+                    err ? err : sqlite3_errmsg(target));
+        promote_free_exec_err(err);
+        progress_store_tx_unlock();
+        sqlite3_close(src);
+        promote_publish_report(out, report);
+        return 2;
+    }
+    promote_free_exec_err(err);
+    return 0;
+}
+
+/* COMMIT the one transaction. On failure: warn, roll back (which releases the
+ * tx lock) and publish the report. On success release the tx lock. */
+static bool promote_commit(struct sqlite3 *target,
+                           struct shielded_promote_report *out,
+                           const struct shielded_promote_report *report)
+{
+    char *err = NULL;
+    if (sqlite3_exec(target, "COMMIT", NULL, NULL, &err) != SQLITE_OK) {
+        LOG_WARN_IN("shielded_history_promote_run", PROMOTE_SUBSYS,
+                    "COMMIT failed: %s", err ? err : sqlite3_errmsg(target));
+        promote_free_exec_err(err);
+        promote_rollback(target);
+        promote_publish_report(out, report);
+        return false;  // raw-return-ok:COMMIT failure is logged by the LOG_WARN_IN above
+    }
+    promote_free_exec_err(err);
+    progress_store_tx_unlock();
+    return true;
+}
+
 bool shielded_history_promote_run(const struct shielded_promote_request *req,
                                   struct shielded_promote_report *out)
 {
@@ -672,17 +748,10 @@ bool shielded_history_promote_run(const struct shielded_promote_request *req,
         LOG_FAIL(PROMOTE_SUBSYS, "target schema ensure failed");
 
     int64_t anchor_boundary = 0, nullifier_boundary = 0;
-    int br = promote_read_target_boundaries(target, &anchor_boundary,
-                                            &nullifier_boundary);
-    if (br < 0)
-        return false;
-    if (br == 0) {
-        LOG_INFO(PROMOTE_SUBSYS,
-                 "target cursors already zero — shielded history complete, "
-                 "nothing to promote");
-        promote_clear_committed(out);
-        return true;
-    }
+    int br = promote_target_boundaries_or_done(target, out, &anchor_boundary,
+                                               &nullifier_boundary);
+    if (br <= 0)
+        return br == 0;
     report.anchor_boundary = anchor_boundary;
     report.nullifier_boundary = nullifier_boundary;
 
@@ -699,17 +768,14 @@ bool shielded_history_promote_run(const struct shielded_promote_request *req,
     if (open_rc == 2)
         LOG_FAIL(PROMOTE_SUBSYS, "cannot open producer %s read-only", src_path);
 
-    if (!promote_producer_preflight(src, req, out, &report))
-        return false;  // raw-return-ok:G1/count/G5 failures are logged inside the preflight calls
-
     /* G3/G4: the local-body cross-check is the trust root for the header-less
      * sprout frontiers + nullifier set. Run it BEFORE the transaction (a heavy
      * independent read of both datadirs); require a full PASS. */
     struct crosscheck_result cc = {0};
-    bool cc_ret = promote_run_crosscheck(req->target_copy_datadir,
-                                         req->producer_datadir,
-                                         req->checkpoint_height, &cc);
-    if (!promote_crosscheck_passed(cc_ret, &cc, &report)) {
+    bool cc_ret = false;
+    int tx_rc = promote_preflight_and_begin(req, target, src, out, &report,
+                                            &cc, &cc_ret);
+    if (tx_rc == 1) {
         sqlite3_close(src);
         promote_publish_report(out, &report);
         LOG_RETURN(false, PROMOTE_SUBSYS,
@@ -718,21 +784,8 @@ bool shielded_history_promote_run(const struct shielded_promote_request *req,
                    "nullifier install (wedge intact)", cc_ret, cc.sprout_ok,
                    cc.nullifiers_ok);
     }
-
-    /* ── the ONE atomic transaction ── */
-    progress_store_tx_lock();
-    char *err = NULL;
-    if (sqlite3_exec(target, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK) {
-        LOG_WARN(PROMOTE_SUBSYS, "BEGIN IMMEDIATE failed: %s",
-                 err ? err : sqlite3_errmsg(target));
-        promote_free_exec_err(err);
-        progress_store_tx_unlock();
-        sqlite3_close(src);
-        promote_publish_report(out, &report);
-        return false;
-    }
-    promote_free_exec_err(err);
-    err = NULL;
+    if (tx_rc != 0)
+        return false;  // raw-return-ok:G1/count/G5 failures are logged inside the preflight calls
 
     int stage = promote_install_stages(target, src, req, anchor_boundary,
                                        &report);
@@ -771,16 +824,8 @@ bool shielded_history_promote_run(const struct shielded_promote_request *req,
                    "intact");
     }
 
-    if (sqlite3_exec(target, "COMMIT", NULL, NULL, &err) != SQLITE_OK) {
-        LOG_WARN(PROMOTE_SUBSYS, "COMMIT failed: %s",
-                 err ? err : sqlite3_errmsg(target));
-        promote_free_exec_err(err);
-        promote_rollback(target);
-        promote_publish_report(out, &report);
-        return false;
-    }
-    promote_free_exec_err(err);
-    progress_store_tx_unlock();
+    if (!promote_commit(target, out, &report))
+        return false;  // raw-return-ok:COMMIT failure is logged by the LOG_WARN_IN in promote_commit
 
     /* Post-commit: verify the durable cursors are all zero, then refresh the two
      * permanent gap blockers so the reducer resumes folding. */
