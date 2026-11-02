@@ -299,8 +299,11 @@ static void ldb_import_stamp_seed(struct utxo_recovery_ctx *ctx,
                                   const struct uint256 *ldb_best,
                                   const uint8_t imported_root[32],
                                   uint64_t imported_count,
-                                  bool stamp_sha3)
+                                  bool sha3_root_valid,
+                                  bool checkpoint_match)
 {
+            bool stamp_sha3 = sha3_root_valid && checkpoint_match;
+
             /* DURABLE cold-import seed anchor for the path the ldb_import_found
              * branch does NOT take (normal --importblockindex + boot
              * auto-import). This gate (`imported_count > 100000`) is a
@@ -402,6 +405,19 @@ static void ldb_import_reopen_coins(struct utxo_recovery_ctx *ctx,
 /* ── LDB→SQLite UTXO import ─────────────────────────────────── */
 
 
+static void ldb_import_note_height(int ldb_height)
+{
+    if (ldb_height > 0)
+        printf("LDB import: height %d (from UTXO heights)\n",
+               ldb_height);
+}
+
+static void ldb_import_cleanup_source(const char *import_path_cleanup)
+{
+    if (import_path_cleanup[0])
+        (void)zcl_tree_remove(import_path_cleanup);  /* rm -rf temp, no shell */
+}
+
 struct utxo_import_result utxo_recovery_import_ldb(
     struct utxo_recovery_ctx *ctx)
 {
@@ -480,9 +496,7 @@ struct utxo_import_result utxo_recovery_import_ldb(
 
         /* Discover LDB height from imported UTXOs */
         int ldb_height = utxo_recovery_max_utxo_height(ctx);
-        if (ldb_height > 0)
-            printf("LDB import: height %d (from UTXO heights)\n",
-                   ldb_height);
+        ldb_import_note_height(ldb_height);
         res.height = ldb_height;
 
         struct uint256 ldb_best;
@@ -547,7 +561,7 @@ struct utxo_import_result utxo_recovery_import_ldb(
 
             ldb_import_stamp_seed(ctx, ldb_height, &ldb_best,
                                   imported_root, imported_count,
-                                  sha3_root_valid && checkpoint_match);
+                                  sha3_root_valid, checkpoint_match);
         }
 
         ldb_import_write_reimport_marker(ctx);
@@ -559,8 +573,7 @@ struct utxo_import_result utxo_recovery_import_ldb(
     }
 
 cleanup:
-    if (import_path_cleanup[0])
-        (void)zcl_tree_remove(import_path_cleanup);  /* rm -rf temp, no shell */
+    ldb_import_cleanup_source(import_path_cleanup);
 
     return res;
 }
@@ -892,6 +905,70 @@ static bool restore_block_hash_hex(const struct block_index *bi, char hex[65])
     return true;
 }
 
+static void restore_log_scan_fallback(enum restore_sf_outcome sf,
+                                      const struct block_index *scan_fallback,
+                                      int served_floor,
+                                      struct chain_restore_result res)
+{
+    if (sf == RESTORE_SF_FLOOR_REFUSED) {
+        /* The held floor is VERIFIED above: hash resolves at
+         * the recorded height on a trust-rooted chain. The
+         * boot consumer re-checks that agreement before any
+         * active-chain install. */
+        LOG_WARN_IN("utxo_recovery_restore_chain_tip", "utxo_recovery",
+                    "scan_fallback h=%d below durable finalized floor "
+                    "h=%d; refusing active-tip rollback",
+                    scan_fallback->nHeight, served_floor);
+    } else if (sf == RESTORE_SF_COMMIT_FAILED) {
+        LOG_WARN_IN("utxo_recovery_restore_chain_tip", "utxo_recovery",
+                    "%s", res.status.message);
+    }
+}
+
+static void restore_log_best_validation(const struct block_index *best,
+                                        bool best_backed)
+{
+    char best_hex[65] = {0};
+    char prev_hex[65] = {0};
+    bool merkle_null = block_index_merkle_is_null(best);
+    restore_format_best_hexes(best, best_hex, prev_hex);
+    LOG_INFO_IN("utxo_recovery_restore_chain_tip", "boot", "[boot] coins_best_block validation h=%d hash=%s " "status=%u file=%d pos=%u tx=%u chaintx=%lld bits=%u " "pprev_h=%d pprev=%s merkle_null=%d disk_backed=%d", best->nHeight, best_hex[0] ? best_hex : "<null>", best->nStatus, best->nFile, best->nDataPos, best->nTx, (long long)best->nChainTx, best->nBits, best->pprev ? best->pprev->nHeight : -1, prev_hex[0] ? prev_hex : "<null>", merkle_null ? 1 : 0, best_backed ? 1 : 0);
+}
+
+static void restore_log_tip_kind(const struct uint256 *best_hash,
+                                 const struct block_index *best,
+                                 const struct block_index *restore_tip,
+                                 int tip_kind)
+{
+    if (tip_kind == 1) {
+        char good_hex[65];
+        if (restore_block_hash_hex(restore_tip, good_hex)) {
+            char bad_hex[65];
+            uint256_get_hex(best_hash, bad_hex);
+            LOG_INFO_IN("utxo_recovery_restore_chain_tip", "boot", "[boot] coins_best_block %s at h=%d is not backed by " "real block data; using nearest consensus-backed " "ancestor h=%d hash=%s", bad_hex, best->nHeight, restore_tip->nHeight, good_hex);
+        }
+    } else if (tip_kind == 2) {
+        char parent_hex[65];
+        if (restore_block_hash_hex(restore_tip, parent_hex)) {
+            char bad_hex[65];
+            uint256_get_hex(best_hash, bad_hex);
+            LOG_INFO_IN("utxo_recovery_restore_chain_tip", "boot", "[boot] coins_best_block %s at h=%d is a disk-backed " "fork leaf with a competing disk-backed sibling; " "restoring common ancestor h=%d hash=%s so normal " "validation can choose the best branch", bad_hex, best->nHeight, restore_tip->nHeight, parent_hex);
+        }
+    }
+}
+
+static void restore_log_seed_anchor(const struct block_index *restore_tip,
+                                    const struct uint256 *seed_anchor_hash_p,
+                                    int seed_anchor_h)
+{
+    if (restore_tip_is_seed_anchor(restore_tip, seed_anchor_hash_p,
+                                   seed_anchor_h)) {
+        char sa_hex[65] = {0};
+        uint256_get_hex(restore_tip->phashBlock, sa_hex);
+        LOG_INFO_IN("utxo_recovery_restore_chain_tip", "boot", "[boot] restoring to provenance-matched cold-import seed anchor h=%d hash=%s", restore_tip->nHeight, sa_hex);
+    }
+}
+
 struct chain_restore_result utxo_recovery_restore_chain_tip(
     struct utxo_recovery_ctx *ctx,
     struct block_index *scan_fallback)
@@ -913,18 +990,7 @@ struct chain_restore_result utxo_recovery_restore_chain_tip(
         int served_floor = -1;
         enum restore_sf_outcome sf = restore_scan_fallback_tip(
             ctx, scan_fallback, &served_floor, &res);
-        if (sf == RESTORE_SF_FLOOR_REFUSED) {
-            /* The held floor is VERIFIED above: hash resolves at
-             * the recorded height on a trust-rooted chain. The
-             * boot consumer re-checks that agreement before any
-             * active-chain install. */
-            LOG_WARN("utxo_recovery",
-                     "scan_fallback h=%d below durable finalized floor "
-                     "h=%d; refusing active-tip rollback",
-                     scan_fallback->nHeight, served_floor);
-        } else if (sf == RESTORE_SF_COMMIT_FAILED) {
-            LOG_WARN("utxo_recovery", "%s", res.status.message);
-        }
+        restore_log_scan_fallback(sf, scan_fallback, served_floor, res);
         return res;
     }
 
@@ -981,32 +1047,12 @@ struct chain_restore_result utxo_recovery_restore_chain_tip(
         bool best_backed =
             chain_restore_block_is_consensus_backed_on_disk_seeded(
                 best, ctx->datadir, seed_anchor_hash_p, seed_anchor_h);
-        {
-            char best_hex[65] = {0};
-            char prev_hex[65] = {0};
-            bool merkle_null = block_index_merkle_is_null(best);
-            restore_format_best_hexes(best, best_hex, prev_hex);
-            LOG_INFO("boot", "[boot] coins_best_block validation h=%d hash=%s " "status=%u file=%d pos=%u tx=%u chaintx=%lld bits=%u " "pprev_h=%d pprev=%s merkle_null=%d disk_backed=%d", best->nHeight, best_hex[0] ? best_hex : "<null>", best->nStatus, best->nFile, best->nDataPos, best->nTx, (long long)best->nChainTx, best->nBits, best->pprev ? best->pprev->nHeight : -1, prev_hex[0] ? prev_hex : "<null>", merkle_null ? 1 : 0, best_backed ? 1 : 0);
-        }
+        restore_log_best_validation(best, best_backed);
         int tip_kind = 0;
         restore_tip = restore_select_backed_tip(ctx, best, best_backed,
                                                 seed_anchor_hash_p,
                                                 seed_anchor_h, &tip_kind);
-        if (tip_kind == 1) {
-            char good_hex[65];
-            if (restore_block_hash_hex(restore_tip, good_hex)) {
-                char bad_hex[65];
-                uint256_get_hex(&best_hash, bad_hex);
-                LOG_INFO("boot", "[boot] coins_best_block %s at h=%d is not backed by " "real block data; using nearest consensus-backed " "ancestor h=%d hash=%s", bad_hex, best->nHeight, restore_tip->nHeight, good_hex);
-            }
-        } else if (tip_kind == 2) {
-            char parent_hex[65];
-            if (restore_block_hash_hex(restore_tip, parent_hex)) {
-                char bad_hex[65];
-                uint256_get_hex(&best_hash, bad_hex);
-                LOG_INFO("boot", "[boot] coins_best_block %s at h=%d is a disk-backed " "fork leaf with a competing disk-backed sibling; " "restoring common ancestor h=%d hash=%s so normal " "validation can choose the best branch", bad_hex, best->nHeight, restore_tip->nHeight, parent_hex);
-            }
-        }
+        restore_log_tip_kind(&best_hash, best, restore_tip, tip_kind);
 
         if (!restore_tip) {
             LOG_INFO("boot", "[boot] coins_best_block found in index but no " "consensus-backed ancestor is available; waiting for P2P");
@@ -1015,12 +1061,8 @@ struct chain_restore_result utxo_recovery_restore_chain_tip(
 
         /* PART B success path: the restore target IS the provenance-matched
          * cold-import seed anchor — name it loudly for a copy-prove. */
-        if (restore_tip_is_seed_anchor(restore_tip, seed_anchor_hash_p,
-                                       seed_anchor_h)) {
-            char sa_hex[65] = {0};
-            uint256_get_hex(restore_tip->phashBlock, sa_hex);
-            LOG_INFO("boot", "[boot] restoring to provenance-matched cold-import seed anchor h=%d hash=%s", restore_tip->nHeight, sa_hex);
-        }
+        restore_log_seed_anchor(restore_tip, seed_anchor_hash_p,
+                                seed_anchor_h);
 
         struct block_index *committed = restore_tip;
         struct zcl_result crc = utxo_recovery_commit_tip(
