@@ -1882,8 +1882,12 @@ static int t_scan_positive_control(void)
     bool ran = wcr_restore_cli(dir, "", true, &run);
     WCR_CHECK("setup: a plaintext restore commits",
               ran && run.rc == 0 && wcr_data_bool(&run, "committed"));
-    WCR_CHECK("the seed scan finds the seed in a plaintext wallet",
-              wcr_count_in_tree(dir, (const char *)seed, 32) > 0);
+    size_t seed_unreadable = 0;
+    size_t seed_matches =
+        wcr_scan_tree(dir, (const char *)seed, 32, &seed_unreadable);
+    WCR_CHECK("the seed scan reads every file and finds the seed in a "
+              "plaintext wallet",
+              seed_unreadable == 0 && seed_matches > 0);
     size_t key_matches = 0;
     bool key_scanned = wcr_spending_key_scan(dir, seed, &key_matches);
     WCR_CHECK("the spending-key scan derives the key and reads every file",
