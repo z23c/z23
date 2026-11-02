@@ -22,69 +22,299 @@
 
 static const char DB_BLOCK_INDEX = 'b';
 
-bool disk_block_index_serialize(const struct disk_block_index *d,
-                                struct byte_stream *s)
+static bool disk_block_index_serialize_index_fields(const struct disk_block_index *d,
+                                                    struct byte_stream *s)
 {
-    if (!stream_write_varint(s, (uint64_t)d->nVersion))
-        LOG_FAIL("block_index_db", "serialize: write nVersion failed");
-    if (!stream_write_varint(s, (uint64_t)d->nHeight))
-        LOG_FAIL("block_index_db", "serialize: write nHeight failed");
-    if (!stream_write_varint(s, (uint64_t)d->nStatus))
-        LOG_FAIL("block_index_db", "serialize: write nStatus failed");
-    if (!stream_write_varint(s, (uint64_t)d->nTx))
-        LOG_FAIL("block_index_db", "serialize: write nTx failed");
+    if (!stream_write_varint(s, (uint64_t)d->nVersion)) {
+        LOG_ERROR_IN("disk_block_index_serialize", "block_index_db", "serialize: write nVersion failed");
+        return false;
+    }
+    if (!stream_write_varint(s, (uint64_t)d->nHeight)) {
+        LOG_ERROR_IN("disk_block_index_serialize", "block_index_db", "serialize: write nHeight failed");
+        return false;
+    }
+    if (!stream_write_varint(s, (uint64_t)d->nStatus)) {
+        LOG_ERROR_IN("disk_block_index_serialize", "block_index_db", "serialize: write nStatus failed");
+        return false;
+    }
+    if (!stream_write_varint(s, (uint64_t)d->nTx)) {
+        LOG_ERROR_IN("disk_block_index_serialize", "block_index_db", "serialize: write nTx failed");
+        return false;
+    }
+    return true;
+}
+
+static bool disk_block_index_serialize_status_fields(const struct disk_block_index *d,
+                                                     struct byte_stream *s)
+{
     if (d->nStatus & (BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO))
-        if (!stream_write_varint(s, (uint64_t)d->nFile))
-            LOG_FAIL("block_index_db", "serialize: write nFile failed");
+        if (!stream_write_varint(s, (uint64_t)d->nFile)) {
+            LOG_ERROR_IN("disk_block_index_serialize", "block_index_db", "serialize: write nFile failed");
+            return false;
+        }
     if (d->nStatus & BLOCK_HAVE_DATA)
-        if (!stream_write_varint(s, (uint64_t)d->nDataPos))
-            LOG_FAIL("block_index_db", "serialize: write nDataPos failed");
+        if (!stream_write_varint(s, (uint64_t)d->nDataPos)) {
+            LOG_ERROR_IN("disk_block_index_serialize", "block_index_db", "serialize: write nDataPos failed");
+            return false;
+        }
     if (d->nStatus & BLOCK_HAVE_UNDO)
-        if (!stream_write_varint(s, (uint64_t)d->nUndoPos))
-            LOG_FAIL("block_index_db", "serialize: write nUndoPos failed");
+        if (!stream_write_varint(s, (uint64_t)d->nUndoPos)) {
+            LOG_ERROR_IN("disk_block_index_serialize", "block_index_db", "serialize: write nUndoPos failed");
+            return false;
+        }
     if (d->nStatus & BLOCK_ACTIVATES_UPGRADE) {
         uint32_t branchId = (uint32_t)d->nCachedBranchId;
-        if (!stream_write_u32_le(s, branchId))
-            LOG_FAIL("block_index_db", "serialize: write branchId failed");
+        if (!stream_write_u32_le(s, branchId)) {
+            LOG_ERROR_IN("disk_block_index_serialize", "block_index_db", "serialize: write branchId failed");
+            return false;
+        }
     }
-    if (!stream_write_bytes(s, d->hashSproutAnchor.data, 32))
-        LOG_FAIL("block_index_db", "serialize: write hashSproutAnchor failed");
+    return true;
+}
 
-    if (!stream_write_i32_le(s, d->nVersion))
-        LOG_FAIL("block_index_db", "serialize: write header nVersion failed");
-    if (!stream_write_bytes(s, d->hashPrev.data, 32))
-        LOG_FAIL("block_index_db", "serialize: write hashPrev failed");
-    if (!stream_write_bytes(s, d->hashMerkleRoot.data, 32))
-        LOG_FAIL("block_index_db", "serialize: write hashMerkleRoot failed");
-    if (!stream_write_bytes(s, d->hashFinalSaplingRoot.data, 32))
-        LOG_FAIL("block_index_db", "serialize: write hashFinalSaplingRoot failed");
-    if (!stream_write_u32_le(s, d->nTime))
-        LOG_FAIL("block_index_db", "serialize: write nTime failed");
-    if (!stream_write_u32_le(s, d->nBits))
-        LOG_FAIL("block_index_db", "serialize: write nBits failed");
-    if (!stream_write_bytes(s, d->nNonce.data, 32))
-        LOG_FAIL("block_index_db", "serialize: write nNonce failed");
-    if (!stream_write_compact_size(s, d->nSolutionSize))
-        LOG_FAIL("block_index_db", "serialize: write nSolutionSize failed");
+static bool disk_block_index_serialize_header(const struct disk_block_index *d,
+                                              struct byte_stream *s)
+{
+    if (!stream_write_bytes(s, d->hashSproutAnchor.data, 32)) {
+        LOG_ERROR_IN("disk_block_index_serialize", "block_index_db", "serialize: write hashSproutAnchor failed");
+        return false;
+    }
+
+    if (!stream_write_i32_le(s, d->nVersion)) {
+        LOG_ERROR_IN("disk_block_index_serialize", "block_index_db", "serialize: write header nVersion failed");
+        return false;
+    }
+    if (!stream_write_bytes(s, d->hashPrev.data, 32)) {
+        LOG_ERROR_IN("disk_block_index_serialize", "block_index_db", "serialize: write hashPrev failed");
+        return false;
+    }
+    if (!stream_write_bytes(s, d->hashMerkleRoot.data, 32)) {
+        LOG_ERROR_IN("disk_block_index_serialize", "block_index_db", "serialize: write hashMerkleRoot failed");
+        return false;
+    }
+    if (!stream_write_bytes(s, d->hashFinalSaplingRoot.data, 32)) {
+        LOG_ERROR_IN("disk_block_index_serialize", "block_index_db", "serialize: write hashFinalSaplingRoot failed");
+        return false;
+    }
+    if (!stream_write_u32_le(s, d->nTime)) {
+        LOG_ERROR_IN("disk_block_index_serialize", "block_index_db", "serialize: write nTime failed");
+        return false;
+    }
+    if (!stream_write_u32_le(s, d->nBits)) {
+        LOG_ERROR_IN("disk_block_index_serialize", "block_index_db", "serialize: write nBits failed");
+        return false;
+    }
+    if (!stream_write_bytes(s, d->nNonce.data, 32)) {
+        LOG_ERROR_IN("disk_block_index_serialize", "block_index_db", "serialize: write nNonce failed");
+        return false;
+    }
+    return true;
+}
+
+static bool disk_block_index_serialize_solution_values(const struct disk_block_index *d,
+                                                       struct byte_stream *s)
+{
+    if (!stream_write_compact_size(s, d->nSolutionSize)) {
+        LOG_ERROR_IN("disk_block_index_serialize", "block_index_db", "serialize: write nSolutionSize failed");
+        return false;
+    }
     if (d->nSolutionSize > 0)
-        if (!stream_write_bytes(s, d->nSolution, d->nSolutionSize))
-            LOG_FAIL("block_index_db", "serialize: write nSolution failed");
+        if (!stream_write_bytes(s, d->nSolution, d->nSolutionSize)) {
+            LOG_ERROR_IN("disk_block_index_serialize", "block_index_db", "serialize: write nSolution failed");
+            return false;
+        }
 
     /* boost::optional wire format for nSproutValue */
     if (d->has_sprout_value) {
         uint8_t present = 1;
-        if (!stream_write_bytes(s, &present, 1))
-            LOG_FAIL("block_index_db", "serialize: write sprout present flag failed");
-        if (!stream_write_i64_le(s, d->nSproutValue))
-            LOG_FAIL("block_index_db", "serialize: write nSproutValue failed");
+        if (!stream_write_bytes(s, &present, 1)) {
+            LOG_ERROR_IN("disk_block_index_serialize", "block_index_db", "serialize: write sprout present flag failed");
+            return false;
+        }
+        if (!stream_write_i64_le(s, d->nSproutValue)) {
+            LOG_ERROR_IN("disk_block_index_serialize", "block_index_db", "serialize: write nSproutValue failed");
+            return false;
+        }
     } else {
         uint8_t absent = 0;
-        if (!stream_write_bytes(s, &absent, 1))
-            LOG_FAIL("block_index_db", "serialize: write sprout absent flag failed");
+        if (!stream_write_bytes(s, &absent, 1)) {
+            LOG_ERROR_IN("disk_block_index_serialize", "block_index_db", "serialize: write sprout absent flag failed");
+            return false;
+        }
     }
-    if (!stream_write_i64_le(s, d->nSaplingValue))
-        LOG_FAIL("block_index_db", "serialize: write nSaplingValue failed");
+    if (!stream_write_i64_le(s, d->nSaplingValue)) {
+        LOG_ERROR_IN("disk_block_index_serialize", "block_index_db", "serialize: write nSaplingValue failed");
+        return false;
+    }
+    return true;
+}
 
+bool disk_block_index_serialize(const struct disk_block_index *d,
+                                struct byte_stream *s)
+{
+    bool ok = disk_block_index_serialize_index_fields(d, s);
+    if (!ok)
+        return false;
+    ok = disk_block_index_serialize_status_fields(d, s);
+    if (!ok)
+        return false;
+    ok = disk_block_index_serialize_header(d, s);
+    if (!ok)
+        return false;
+    ok = disk_block_index_serialize_solution_values(d, s);
+    if (!ok)
+        return false;
+    return true;
+}
+
+static bool disk_block_index_deserialize_index_fields(struct disk_block_index *d,
+                                                      struct byte_stream *s)
+{
+    uint64_t v;
+    if (!stream_read_varint(s, &v)) {
+        LOG_ERROR_IN("disk_block_index_deserialize", "block_index_db", "deserialize: read nHeight failed");
+        return false;
+    }
+    d->nHeight = (int)v;
+    if (!stream_read_varint(s, &v)) {
+        LOG_ERROR_IN("disk_block_index_deserialize", "block_index_db", "deserialize: read nStatus failed");
+        return false;
+    }
+    d->nStatus = (unsigned int)v;
+    if (!stream_read_varint(s, &v)) {
+        LOG_ERROR_IN("disk_block_index_deserialize", "block_index_db", "deserialize: read nTx failed");
+        return false;
+    }
+    d->nTx = (unsigned int)v;
+    return true;
+}
+
+static bool disk_block_index_deserialize_status_fields(struct disk_block_index *d,
+                                                       struct byte_stream *s)
+{
+    uint64_t v;
+    if (d->nStatus & (BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO)) {
+        if (!stream_read_varint(s, &v)) {
+            LOG_ERROR_IN("disk_block_index_deserialize", "block_index_db", "deserialize: read nFile failed");
+            return false;
+        }
+        /* nFile is a small block-file index; a varint past INT_MAX would cast
+         * to a negative file number. Reject a corrupt record loudly here rather
+         * than relying on the downstream nFile<0 guards (mirrors the nHeight
+         * range check in the legacy reader). */
+        if (v > 0x7fffffffULL) {
+            LOG_ERROR_IN("disk_block_index_deserialize", "block_index_db", "deserialize: nFile out of range");
+            return false;
+        }
+        d->nFile = (int)v;
+    }
+    if (d->nStatus & BLOCK_HAVE_DATA) {
+        if (!stream_read_varint(s, &v)) {
+            LOG_ERROR_IN("disk_block_index_deserialize", "block_index_db", "deserialize: read nDataPos failed");
+            return false;
+        }
+        d->nDataPos = (unsigned int)v;
+    }
+    if (d->nStatus & BLOCK_HAVE_UNDO) {
+        if (!stream_read_varint(s, &v)) {
+            LOG_ERROR_IN("disk_block_index_deserialize", "block_index_db", "deserialize: read nUndoPos failed");
+            return false;
+        }
+        d->nUndoPos = (unsigned int)v;
+    }
+    if (d->nStatus & BLOCK_ACTIVATES_UPGRADE) {
+        uint32_t branchId;
+        if (!stream_read_u32_le(s, &branchId)) {
+            LOG_ERROR_IN("disk_block_index_deserialize", "block_index_db", "deserialize: read branchId failed");
+            return false;
+        }
+        d->nCachedBranchId = (int64_t)branchId;
+    }
+    return true;
+}
+
+static bool disk_block_index_deserialize_header(struct disk_block_index *d,
+                                                struct byte_stream *s)
+{
+    if (!stream_read_bytes(s, d->hashSproutAnchor.data, 32)) {
+        LOG_ERROR_IN("disk_block_index_deserialize", "block_index_db", "deserialize: read hashSproutAnchor failed");
+        return false;
+    }
+
+    if (!stream_read_i32_le(s, &d->nVersion)) {
+        LOG_ERROR_IN("disk_block_index_deserialize", "block_index_db", "deserialize: read nVersion failed");
+        return false;
+    }
+    if (!stream_read_bytes(s, d->hashPrev.data, 32)) {
+        LOG_ERROR_IN("disk_block_index_deserialize", "block_index_db", "deserialize: read hashPrev failed");
+        return false;
+    }
+    if (!stream_read_bytes(s, d->hashMerkleRoot.data, 32)) {
+        LOG_ERROR_IN("disk_block_index_deserialize", "block_index_db", "deserialize: read hashMerkleRoot failed");
+        return false;
+    }
+    if (!stream_read_bytes(s, d->hashFinalSaplingRoot.data, 32)) {
+        LOG_ERROR_IN("disk_block_index_deserialize", "block_index_db", "deserialize: read hashFinalSaplingRoot failed");
+        return false;
+    }
+    if (!stream_read_u32_le(s, &d->nTime)) {
+        LOG_ERROR_IN("disk_block_index_deserialize", "block_index_db", "deserialize: read nTime failed");
+        return false;
+    }
+    if (!stream_read_u32_le(s, &d->nBits)) {
+        LOG_ERROR_IN("disk_block_index_deserialize", "block_index_db", "deserialize: read nBits failed");
+        return false;
+    }
+    if (!stream_read_bytes(s, d->nNonce.data, 32)) {
+        LOG_ERROR_IN("disk_block_index_deserialize", "block_index_db", "deserialize: read nNonce failed");
+        return false;
+    }
+    return true;
+}
+
+static bool disk_block_index_deserialize_solution_values(struct disk_block_index *d,
+                                                         struct byte_stream *s,
+                                                         int stored_version)
+{
+    uint64_t sol_size;
+    if (!stream_read_compact_size(s, &sol_size)) {
+        LOG_ERROR_IN("disk_block_index_deserialize", "block_index_db", "deserialize: read solution size failed");
+        return false;
+    }
+    if (sol_size > MAX_SOLUTION_SIZE) {
+        LOG_ERROR_IN("disk_block_index_deserialize", "block_index_db", "deserialize: solution size %zu exceeds max", (size_t)sol_size);
+        return false;
+    }
+    d->nSolutionSize = (size_t)sol_size;
+    if (d->nSolutionSize > 0)
+        if (!stream_read_bytes(s, d->nSolution, d->nSolutionSize)) {
+            LOG_ERROR_IN("disk_block_index_deserialize", "block_index_db", "deserialize: read nSolution failed (size=%zu)", d->nSolutionSize);
+            return false;
+        }
+
+    d->has_sprout_value = false;
+    if (stored_version >= SPROUT_VALUE_VERSION) {
+        /* boost::optional wire format: 1-byte discriminant + value.
+         * 0x00 = none, 0x01 = present (followed by int64 LE). */
+        uint8_t sprout_present = 0;
+        if (!stream_read_bytes(s, &sprout_present, 1)) {
+            LOG_ERROR_IN("disk_block_index_deserialize", "block_index_db", "deserialize: read sprout present flag failed");
+            return false;
+        }
+        if (sprout_present) {
+            d->has_sprout_value = true;
+            if (!stream_read_i64_le(s, &d->nSproutValue)) {
+                LOG_ERROR_IN("disk_block_index_deserialize", "block_index_db", "deserialize: read nSproutValue failed");
+                return false;
+            }
+        }
+    }
+    if (stored_version >= SAPLING_VALUE_VERSION) {
+        if (!stream_read_i64_le(s, &d->nSaplingValue)) {
+            LOG_ERROR_IN("disk_block_index_deserialize", "block_index_db", "deserialize: read nSaplingValue failed");
+            return false;
+        }
+    }
     return true;
 }
 
@@ -96,87 +326,18 @@ bool disk_block_index_deserialize(struct disk_block_index *d,
         LOG_FAIL("block_index_db", "deserialize: read stored_version failed");
     int stored_version = (int)v;
 
-    if (!stream_read_varint(s, &v))
-        LOG_FAIL("block_index_db", "deserialize: read nHeight failed");
-    d->nHeight = (int)v;
-    if (!stream_read_varint(s, &v))
-        LOG_FAIL("block_index_db", "deserialize: read nStatus failed");
-    d->nStatus = (unsigned int)v;
-    if (!stream_read_varint(s, &v))
-        LOG_FAIL("block_index_db", "deserialize: read nTx failed");
-    d->nTx = (unsigned int)v;
-    if (d->nStatus & (BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO)) {
-        if (!stream_read_varint(s, &v))
-            LOG_FAIL("block_index_db", "deserialize: read nFile failed");
-        /* nFile is a small block-file index; a varint past INT_MAX would cast
-         * to a negative file number. Reject a corrupt record loudly here rather
-         * than relying on the downstream nFile<0 guards (mirrors the nHeight
-         * range check in the legacy reader). */
-        if (v > 0x7fffffffULL)
-            LOG_FAIL("block_index_db", "deserialize: nFile out of range");
-        d->nFile = (int)v;
-    }
-    if (d->nStatus & BLOCK_HAVE_DATA) {
-        if (!stream_read_varint(s, &v))
-            LOG_FAIL("block_index_db", "deserialize: read nDataPos failed");
-        d->nDataPos = (unsigned int)v;
-    }
-    if (d->nStatus & BLOCK_HAVE_UNDO) {
-        if (!stream_read_varint(s, &v))
-            LOG_FAIL("block_index_db", "deserialize: read nUndoPos failed");
-        d->nUndoPos = (unsigned int)v;
-    }
-    if (d->nStatus & BLOCK_ACTIVATES_UPGRADE) {
-        uint32_t branchId;
-        if (!stream_read_u32_le(s, &branchId))
-            LOG_FAIL("block_index_db", "deserialize: read branchId failed");
-        d->nCachedBranchId = (int64_t)branchId;
-    }
-    if (!stream_read_bytes(s, d->hashSproutAnchor.data, 32))
-        LOG_FAIL("block_index_db", "deserialize: read hashSproutAnchor failed");
-
-    if (!stream_read_i32_le(s, &d->nVersion))
-        LOG_FAIL("block_index_db", "deserialize: read nVersion failed");
-    if (!stream_read_bytes(s, d->hashPrev.data, 32))
-        LOG_FAIL("block_index_db", "deserialize: read hashPrev failed");
-    if (!stream_read_bytes(s, d->hashMerkleRoot.data, 32))
-        LOG_FAIL("block_index_db", "deserialize: read hashMerkleRoot failed");
-    if (!stream_read_bytes(s, d->hashFinalSaplingRoot.data, 32))
-        LOG_FAIL("block_index_db", "deserialize: read hashFinalSaplingRoot failed");
-    if (!stream_read_u32_le(s, &d->nTime))
-        LOG_FAIL("block_index_db", "deserialize: read nTime failed");
-    if (!stream_read_u32_le(s, &d->nBits))
-        LOG_FAIL("block_index_db", "deserialize: read nBits failed");
-    if (!stream_read_bytes(s, d->nNonce.data, 32))
-        LOG_FAIL("block_index_db", "deserialize: read nNonce failed");
-    uint64_t sol_size;
-    if (!stream_read_compact_size(s, &sol_size))
-        LOG_FAIL("block_index_db", "deserialize: read solution size failed");
-    if (sol_size > MAX_SOLUTION_SIZE)
-        LOG_FAIL("block_index_db", "deserialize: solution size %zu exceeds max", (size_t)sol_size);
-    d->nSolutionSize = (size_t)sol_size;
-    if (d->nSolutionSize > 0)
-        if (!stream_read_bytes(s, d->nSolution, d->nSolutionSize))
-            LOG_FAIL("block_index_db", "deserialize: read nSolution failed (size=%zu)", d->nSolutionSize);
-
-    d->has_sprout_value = false;
-    if (stored_version >= SPROUT_VALUE_VERSION) {
-        /* boost::optional wire format: 1-byte discriminant + value.
-         * 0x00 = none, 0x01 = present (followed by int64 LE). */
-        uint8_t sprout_present = 0;
-        if (!stream_read_bytes(s, &sprout_present, 1))
-            LOG_FAIL("block_index_db", "deserialize: read sprout present flag failed");
-        if (sprout_present) {
-            d->has_sprout_value = true;
-            if (!stream_read_i64_le(s, &d->nSproutValue))
-                LOG_FAIL("block_index_db", "deserialize: read nSproutValue failed");
-        }
-    }
-    if (stored_version >= SAPLING_VALUE_VERSION) {
-        if (!stream_read_i64_le(s, &d->nSaplingValue))
-            LOG_FAIL("block_index_db", "deserialize: read nSaplingValue failed");
-    }
-
+    bool ok = disk_block_index_deserialize_index_fields(d, s);
+    if (!ok)
+        return false;
+    ok = disk_block_index_deserialize_status_fields(d, s);
+    if (!ok)
+        return false;
+    ok = disk_block_index_deserialize_header(d, s);
+    if (!ok)
+        return false;
+    ok = disk_block_index_deserialize_solution_values(d, s, stored_version);
+    if (!ok)
+        return false;
     return true;
 }
 

@@ -55,8 +55,6 @@ engine/entry/main_cli_modes.c:mintutxocommitment_mode:26
 engine/jobs/src/stage_repair_coin_backfill.c:backfill_run:28
 engine/jobs/src/stage_repair_coin_backfill.c:coin_backfill_insert_tx:23
 engine/jobs/src/utxo_apply_delta_repair.c:utxo_apply_repair_value_overflow_hole:23
-engine/modules/storage/src/block_index_db.c:disk_block_index_deserialize:32
-engine/modules/storage/src/block_index_db.c:disk_block_index_serialize:29
 engine/modules/storage/src/coins_ram_boot_reconcile.c:coins_ram_reconcile_boot:31
 engine/services/src/node_db_import_service.c:node_db_import_service_run:29
 engine/services/src/property_grant_commit.c:commit_attempt:24
