@@ -11621,6 +11621,11 @@ TEST_TSAN_OBJECT_CFLAGS = $(TEST_TSAN_CFLAGS)
 # trees; without it the component receiver stories refuse with stage=release.
 $(TEST_TSAN_OBJ_DIR)/$(HOTSWAP_TEST_LOADER_REL): TEST_TSAN_OBJECT_CFLAGS += $(HOTSWAP_TEST_LOADER_FLAGS)
 $(TEST_TSAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: TEST_TSAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
+# Its own testcache keyspace, as for the ASan tree above: without the -D,
+# testcache.c falls back to __VERSION__, which pins the compiler but not the
+# sanitizer flags.
+$(TEST_TSAN_OBJ_DIR)/tests/harness/src/testcache.o: TEST_TSAN_OBJECT_CFLAGS += \
+  $(call TESTCACHE_TOOLKEY_CPPFLAGS,$(TEST_TSAN_PROFILE),TEST_TSAN_EPOCH_COMPILE_FLAGS)
 $(TEST_TSAN_OBJ_DIR)/tests/harness/src/test_arena_view.o: TEST_TSAN_OBJECT_CFLAGS += \
   $(ARENA_VIEW_INCLUDES)
 $(TEST_TSAN_OBJ_DIR)/%.o: %.c $(OBJECT_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(TEST_TSAN_LEASE)
