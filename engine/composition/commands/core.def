@@ -1537,7 +1537,7 @@ ZCL_COMMAND_READY_COMMAND(
     "no command prints it again, so write it down now. The reply is "
     "{phrase, words}; the seed is never included. It makes no wallet: "
     "pass the words to core.wallet.recovery.restore to build one. Owner "
-    "only, local only, never available to agents or MCP.",
+    "authority, local scope; the MCP policy refuses it.",
     0, "wallet,recovery,phrase,seed,mnemonic,new,generate",
     "zcl.wallet_recovery_new.input.v1", "zcl.wallet_recovery_new.v1",
     "", "",

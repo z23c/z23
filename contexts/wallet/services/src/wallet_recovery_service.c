@@ -681,7 +681,6 @@ static struct zcl_result wrc_target_gate(const struct wallet_recovery_request *r
     return ZCL_OK;
 }
 
-
 struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
                                       struct wallet_recovery_report *out)
 {

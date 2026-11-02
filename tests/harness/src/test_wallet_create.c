@@ -2068,11 +2068,177 @@ static int restore_tip_refused(void)
     return failures;
 }
 
-static int t_restore_at_local_tip(void)
+/* `core wallet recovery restore` as a plan: the same input as a commit with
+ * confirm false. */
+static bool wcr_restore_plan(const char *dir, const char *extra,
+                             struct wcr_run *run)
 {
-    return restore_tip_recorded() + restore_tip_edge() + restore_tip_refused();
+    char text[2048];
+    snprintf(text, sizeof(text),
+             "{\"datadir\":\"%s\",\"phrase\":\"%s\",\"confirm\":false%s}", dir,
+             WCR_RESTORE_PHRASE, extra);
+    const char *by_stdin[] = {"wallet", "recovery", "restore", "--input=-",
+                              "--format=json"};
+    memset(run, 0, sizeof(*run));
+    wallet_lock_reset_for_test();
+    setenv("ZCL_ALLOW_PLAINTEXT_WALLET", "1", 1);
+    bool ok = wcr_cli_args(by_stdin, 5, text, run);
+    unsetenv("ZCL_ALLOW_PLAINTEXT_WALLET");
+    return ok;
 }
 
+/* Run the commit input a plan returned, with the phrase typed back in as the
+ * plan asks. */
+static bool wcr_commit_plan(const struct wcr_run *plan, struct wcr_run *run)
+{
+    char commit[2048], text[2300];
+    const char *marker = "<your words>";
+    if (!wcr_field(plan, "commit_input", commit, sizeof(commit)))
+        return false;
+    char *at = strstr(commit, marker);
+    if (!at)
+        return false;
+    *at = '\0';
+    snprintf(text, sizeof(text), "%s%s%s", commit, WCR_RESTORE_PHRASE,
+             at + strlen(marker));
+    const char *by_stdin[] = {"wallet", "recovery", "restore", "--input=-",
+                              "--format=json"};
+    memset(run, 0, sizeof(*run));
+    wallet_lock_reset_for_test();
+    setenv("ZCL_ALLOW_PLAINTEXT_WALLET", "1", 1);
+    bool ok = wcr_cli_args(by_stdin, 5, text, run);
+    unsetenv("ZCL_ALLOW_PLAINTEXT_WALLET");
+    return ok;
+}
+
+/* The plan's commit input carries the flag, and running it records the tip. */
+static int restore_tip_plan_then_commit(void)
+{
+    int failures = 0;
+    char dir[1024];
+    struct wcr_run plan, run;
+    struct node_db ndb;
+    int64_t b = 0;
+    uint8_t hash[32];
+    WCR_CHECK("setup: a seeded datadir for a plan",
+              wcr_seeded_chain(dir, sizeof(dir), "tip_plan", false));
+    bool planned = wcr_restore_plan(dir, ",\"birthday_at_local_tip\":true",
+                                    &plan);
+    WCR_CHECK("a plan with the flag writes nothing and names the flag in its "
+              "commit input",
+              planned && plan.rc == 0 && !wcr_data_bool(&plan, "committed") &&
+              !wcr_wallet_rows_exist(dir) &&
+              strstr(plan.wire, "birthday_at_local_tip") != NULL);
+    bool ran = wcr_commit_plan(&plan, &run);
+    bool open = ran && run.rc == 0 && wcr_open(&ndb, dir);
+    WCR_CHECK("the commit input from the plan records the tip birthday",
+              open && db_wallet_birthday_get(&ndb, &b, hash) && b == 1000 &&
+              hash[0] == 0x09);
+    if (open)
+        node_db_close(&ndb);
+    return failures;
+}
+
+/* A plan is refused where a commit is, and writes nothing. */
+static int restore_tip_plan_refused(void)
+{
+    int failures = 0;
+    char dir[1024];
+    struct wcr_run run;
+    const int low[] = {1, 100};
+    WCR_CHECK("setup: a chain exactly at the margin for a plan",
+              wcr_chain_at(dir, sizeof(dir), "tip_plan_low", low, 2));
+    bool ran = wcr_restore_plan(dir, ",\"birthday_at_local_tip\":true", &run);
+    WCR_CHECK("a plan on a short chain is refused as NO_LOCAL_CHAIN",
+              ran && run.rc != 0 && wcr_error_is(&run, "NO_LOCAL_CHAIN") &&
+              !wcr_wallet_rows_exist(dir));
+    wcr_fixture(dir, sizeof(dir), "tip_plan_none");
+    ran = wcr_restore_plan(dir, ",\"birthday_at_local_tip\":true", &run);
+    WCR_CHECK("a plan on an empty datadir is refused and creates no node.db",
+              ran && wcr_error_is(&run, "NO_LOCAL_CHAIN") &&
+              !wcr_exists(dir, "node.db"));
+    return failures;
+}
+
+/* Without the flag nothing is recorded and the wallet reads unread from 0. */
+static int restore_default_no_birthday(void)
+{
+    int failures = 0;
+    char dir[1024];
+    struct wcr_run run;
+    struct node_db ndb;
+    int64_t b = 0;
+    uint8_t hash[32];
+    WCR_CHECK("setup: a seeded datadir without the flag",
+              wcr_seeded_chain(dir, sizeof(dir), "tip_default", false));
+    bool ran = wcr_restore_cli(dir, "", true, &run);
+    bool open = ran && run.rc == 0 && wcr_open(&ndb, dir);
+    WCR_CHECK("a restore without the flag records no birthday",
+              open && !db_wallet_birthday_get(&ndb, &b, hash) &&
+              !wcr_data_bool(&run, "birthday_recorded"));
+    if (open)
+        node_db_close(&ndb);
+    WCR_CHECK("and keeps the unread-from-0 marker", ran &&
+              wcr_unread_from_zero(dir));
+    return failures;
+}
+
+/* A refused restore prints neither the phrase on standard output nor on
+ * standard error. */
+static int restore_refusal_keeps_phrase_out(void)
+{
+    int failures = 0;
+    char dir[1024];
+    struct wcr_run run;
+    WCR_CHECK("setup: an empty datadir",
+              (wcr_fixture(dir, sizeof(dir), "tip_quiet"), true));
+    bool ran = wcr_restore_cli(dir, ",\"birthday_at_local_tip\":true", true,
+                               &run);
+    WCR_CHECK("a refused restore echoes the phrase on neither stream",
+              ran && run.rc != 0 && strstr(run.wire, WCR_RESTORE_PHRASE) == NULL &&
+              strstr(run.err, WCR_RESTORE_PHRASE) == NULL &&
+              strstr(run.err, "abandon abandon abandon") == NULL);
+    return failures;
+}
+
+/* The new leaf makes no wallet state anywhere it could look: its home is an
+ * empty directory and stays one. */
+static int recovery_new_makes_no_state(void)
+{
+    int failures = 0;
+    char dir[1024];
+    struct wcr_run run;
+    wcr_fixture(dir, sizeof(dir), "new_nostate");
+    const char *home = getenv("HOME");
+    char saved[1024] = "";
+    if (home)
+        snprintf(saved, sizeof(saved), "%s", home);
+    setenv("HOME", dir, 1);
+    bool ran = wcr_recovery_new(&run);
+    if (home)
+        setenv("HOME", saved, 1);
+    else
+        unsetenv("HOME");
+    size_t entries = 0;
+    DIR *d = opendir(dir);
+    for (struct dirent *e = d ? readdir(d) : NULL; e; e = readdir(d))
+        entries += strcmp(e->d_name, ".") && strcmp(e->d_name, "..");
+    if (d)
+        closedir(d);
+    WCR_CHECK("the new leaf answers ok", ran && run.rc == 0);
+    WCR_CHECK("it leaves its home directory empty: no node.db, wallet or file",
+              d && entries == 0 && !wcr_exists(dir, "node.db") &&
+              !wcr_exists(dir, ".zclassic-c23"));
+    return failures;
+}
+
+ static int t_restore_at_local_tip(void)
+{
+    return restore_tip_recorded() + restore_tip_edge() +
+           restore_tip_refused() + restore_tip_plan_then_commit() +
+           restore_tip_plan_refused() + restore_default_no_birthday() +
+           restore_refusal_keeps_phrase_out() + recovery_new_makes_no_state();
+}
 
 /* The key scans can find what they look for: a plaintext datadir holds the raw
  * seed, and the spending-key search finds it when it is stored. */
