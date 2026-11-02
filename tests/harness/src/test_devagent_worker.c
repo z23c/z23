@@ -1336,6 +1336,21 @@ static void wtx_rlimit_child(const struct wkr_caps *caps)
 #endif
 #endif
 
+/* AddressSanitizer maps its shadow (about 15 TB) as private writable memory,
+ * so it counts in VmData exactly as TSan's does: test_forked_exec_data_mb then
+ * returns more than WKR_MEM_MB_MAX (1 TiB) and zcl_devagent_worker_caps keeps
+ * no memory ceiling (it returns false, test_devagent_worker.c:1355 in the ASan
+ * sweep and again when run alone). The case prints the measured budget when it
+ * skips. GCC defines __SANITIZE_ADDRESS__; Clang reports it through
+ * __has_feature(address_sanitizer). */
+#if defined(__SANITIZE_ADDRESS__)
+#define WTX_UNDER_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define WTX_UNDER_ASAN 1
+#endif
+#endif
+
 static int wtx_rlimit_case(void)
 {
     int failures = 0;
@@ -1343,6 +1358,15 @@ static int wtx_rlimit_case(void)
     /* TSan's shadow mappings count in VmData, so test_forked_exec_data_mb
      * overshoots WKR_MEM_MB_MAX and the caps keep no memory ceiling. Skipped
      * under TSan only; every other build runs the case unchanged. */
+    return failures;
+#elif defined(WTX_UNDER_ASAN)
+    {
+        struct wkr_drive_opts o;
+        wtx_opts(&o, "wtx", "s-rlimit");
+        printf("confine: the memory ceiling case SKIP under AddressSanitizer "
+               "(measured mem_mb=%lld, over the 1 TiB WKR_MEM_MB_MAX)\n",
+               (long long)o.mem_mb);
+    }
     return failures;
 #else
     TEST("confine: the memory ceiling is RLIMIT_DATA and never RLIMIT_AS")
