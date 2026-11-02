@@ -70,9 +70,9 @@ static void set_step(struct wsu *w, enum wsu_step step, enum wsu_failure failure
 }
 
 /* A job begins, with the lock held: nothing of an earlier step may show, and the clock of seconds since setup began restarts. */
-static void work_begins_locked(struct wsu *w)
+static void work_begins_locked(struct wsu *w, enum wsu_phase first)
 {
-    w->phase = WSU_PHASE_NONE;
+    w->phase = first;
     w->tip_blocks = 0;
     w->stage[0] = 0;
     w->phase_since_s = w->env.wall_s ? w->env.wall_s(w->env.ctx) : 0;
@@ -156,7 +156,7 @@ bool wsu_retry_marker(struct wsu *w)
 {
     pthread_mutex_lock(&w->lock);
     bool ok = w->step == WSU_FAILED && w->failure == WSU_NOT_RECORDED && w->confirmed;
-    if (ok) { w->step = WSU_WORKING; w->failure = WSU_NO_FAILURE; work_begins_locked(w); }
+    if (ok) { w->step = WSU_WORKING; w->failure = WSU_NO_FAILURE; work_begins_locked(w, WSU_PHASE_SAVE); }
     pthread_mutex_unlock(&w->lock);
     return ok;
 }
@@ -222,15 +222,17 @@ static void tip_line(const struct wsu_view *v, char *out, size_t cap)
 void wsu_working_line(const struct wsu_view *v, char *out, size_t cap)
 {
     static const char *const fixed[] = {
-        [WSU_PHASE_NONE] = "Saving…",
+        [WSU_PHASE_NONE] = "Starting…",
         [WSU_PHASE_KEY] = "Confirm with your screen lock",
         [WSU_PHASE_PAUSE] = "Pausing your node to write the new wallet… (about 30 s)",
         [WSU_PHASE_WRITE] = "Writing your wallet…",
         [WSU_PHASE_RESTART] = "Starting your node again…",
-        [WSU_PHASE_CHECK] = "Checking your wallet…"
+        [WSU_PHASE_CHECK] = "Checking your wallet…",
+        [WSU_PHASE_ASIDE] = "Setting aside your old wallet…",
+        [WSU_PHASE_SAVE] = "Saving…"
     };
     if (v->phase == WSU_PHASE_TIP) tip_line(v, out, cap);
-    else snprintf(out, cap, "%s", v->phase <= WSU_PHASE_CHECK ? fixed[v->phase] : fixed[WSU_PHASE_NONE]);
+    else snprintf(out, cap, "%s", v->phase <= WSU_PHASE_SAVE ? fixed[v->phase] : fixed[WSU_PHASE_NONE]);
 }
 void wsu_elapsed_text(const struct wsu_view *v, char *out, size_t cap)
 {
@@ -241,7 +243,7 @@ bool wsu_recheck(struct wsu *w)
 {
     pthread_mutex_lock(&w->lock);
     bool ok = w->step == WSU_BLOCKED || (w->step == WSU_FAILED && (w->failure == WSU_UNKNOWN || w->failure == WSU_NO_BIRTHDAY || w->failure == WSU_ASIDE));
-    if (ok) { w->step = WSU_CHECKING; w->failure = WSU_NO_FAILURE; work_begins_locked(w); }
+    if (ok) { w->step = WSU_CHECKING; w->failure = WSU_NO_FAILURE; work_begins_locked(w, WSU_PHASE_NONE); }
     pthread_mutex_unlock(&w->lock);
     return ok;
 }
@@ -343,7 +345,7 @@ static bool begin_job(struct wsu *w, enum wsu_step from)
     pthread_mutex_lock(&w->lock);
     bool start = w->step == from;
     if (start && !w->protected) { w->step = WSU_FAILED; w->failure = WSU_UNPROTECTED; start = false; }
-    else if (start) { w->step = WSU_WORKING; w->failure = WSU_NO_FAILURE; work_begins_locked(w); }
+    else if (start) { w->step = WSU_WORKING; w->failure = WSU_NO_FAILURE; work_begins_locked(w, WSU_PHASE_NONE); }
     pthread_mutex_unlock(&w->lock);
     return start;
 }
@@ -393,8 +395,8 @@ static void create_succeeded(struct wsu *w, struct sun_created *created)
 /* Starts the node if needed and waits for a chain tip. False, with the step set, when there is none: no wallet is made. */
 static bool tip_ready(struct wsu *w, bool was_running)
 {
-    phase(w, WSU_PHASE_TIP);
     if (!was_running) (void)start_node(w);
+    phase(w, WSU_PHASE_TIP);
     if (wait_for_tip(w)) return true;
     if (!was_running) (void)stop_node(w);
     set_step(w, WSU_FAILED, WSU_NO_TIP);
@@ -445,7 +447,7 @@ bool wsu_confirm(struct wsu *w, const char *const *answers, size_t n)
         w->confirmed = true;
         w->step = WSU_WORKING;
         w->failure = WSU_NO_FAILURE;
-        work_begins_locked(w);
+        work_begins_locked(w, WSU_PHASE_SAVE);
     } else if (w->step == WSU_CONFIRM) {
         ++w->mismatches;
     }
@@ -685,7 +687,7 @@ void wsu_set_aside_job(struct wsu *w)
 {
     pthread_mutex_lock(&w->lock);
     bool go = w->step == WSU_NO_WALLET;
-    if (go) { w->step = WSU_WORKING; work_begins_locked(w); }
+    if (go) { w->step = WSU_WORKING; work_begins_locked(w, WSU_PHASE_ASIDE); }
     pthread_mutex_unlock(&w->lock);
     if (!go) return;
     enum wsu_failure failure = set_aside_key(w, w->env.wall_s(w->env.ctx));
@@ -758,7 +760,7 @@ void wsu_start_over_job(struct wsu *w)
 {
     pthread_mutex_lock(&w->lock);
     bool go = w->step == WSU_START_OVER;
-    if (go) { w->step = WSU_WORKING; w->failure = WSU_NO_FAILURE; work_begins_locked(w); }
+    if (go) { w->step = WSU_WORKING; w->failure = WSU_NO_FAILURE; work_begins_locked(w, WSU_PHASE_NONE); }
     pthread_mutex_unlock(&w->lock);
     if (!go) return;
     enum wsu_failure refusal = start_over_refusal(w);
@@ -768,6 +770,7 @@ void wsu_start_over_job(struct wsu *w)
         start_over_refused(w, refusal);
         return;
     }
+    phase(w, WSU_PHASE_ASIDE);
     enum wsu_failure failure = set_aside_all(w, w->env.wall_s(w->env.ctx));
     if (failure == WSU_NO_FAILURE) {
         pthread_mutex_lock(&w->lock);

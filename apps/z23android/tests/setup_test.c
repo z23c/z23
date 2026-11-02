@@ -28,8 +28,11 @@ static const char *dir;
 
 /* A rename that fails on chosen destinations, to prove that a set-aside that cannot go back says so. Other renames pass through. */
 static const char *fail_rename_to[2];
+static const struct wsu *rename_probe;
+static int rename_phase = -1;
 int rename(const char *from, const char *to)
 {
+    if (rename_probe && rename_phase < 0) rename_phase = (int)rename_probe->phase;
     for (size_t i = 0; i < 2; ++i)
         if (fail_rename_to[i] && !strcmp(to, fail_rename_to[i])) { errno = EIO; return -1; }
     return renameat(AT_FDCWD, from, AT_FDCWD, to);
@@ -418,6 +421,7 @@ struct fake {
     bool exiting, watch;
     int starts_refused, step_at_start, phase_key, phase_pause, phase_write, phase_restart;
     int64_t elapsed_at_pause;
+    int phase_waiting;
     char stage[48];
 };
 static struct fake *fake_of;
@@ -476,7 +480,13 @@ static void f_control(void *ctx, bool start)
     f->stop_at_ms = f->now_ms;
     f->running = f->exiting;
 }
-static void f_pause(void *ctx, unsigned ms) { struct fake *f = ctx; ++f->pauses; f->now_ms += ms; }
+static void f_pause(void *ctx, unsigned ms)
+{
+    struct fake *f = ctx;
+    ++f->pauses;
+    f->now_ms += ms;
+    if (f->watch) f->phase_waiting = (int)model_of->phase;
+}
 static bool f_random(void *ctx, uint8_t *out, size_t len) { return counter_random(&((struct fake *)ctx)->random_state, out, len); }
 static bool f_protect(void *ctx, bool on)
 {
@@ -1674,7 +1684,13 @@ static void working_line_tests(void)
     assert(!strcmp(line, "Starting your node again…"));
     v.phase = WSU_PHASE_NONE;
     wsu_working_line(&v, line, sizeof(line));
+    assert(!strcmp(line, "Starting…"));
+    v.phase = WSU_PHASE_SAVE;
+    wsu_working_line(&v, line, sizeof(line));
     assert(!strcmp(line, "Saving…"));
+    v.phase = WSU_PHASE_ASIDE;
+    wsu_working_line(&v, line, sizeof(line));
+    assert(!strcmp(line, "Setting aside your old wallet…"));
     v.phase = WSU_PHASE_KEY;
     wsu_working_line(&v, line, 12);
     assert(strlen(line) == 11);
@@ -1762,7 +1778,7 @@ static void saving_after_confirm_tests(void)
     assert(wsu_confirm(&w, right, 3));
     wsu_view_read(&w, &v);
     wsu_working_line(&v, line, sizeof(line));
-    assert(v.step == WSU_WORKING && v.phase == WSU_PHASE_NONE && v.tip_blocks == 0 && !strcmp(line, "Saving…"));
+    assert(v.step == WSU_WORKING && v.phase == WSU_PHASE_SAVE && v.tip_blocks == 0 && !strcmp(line, "Saving…"));
     wsu_destroy(&w);
 }
 
@@ -1862,6 +1878,30 @@ static void pick_tests(void)
     wsu_destroy(&w);
 }
 
+/* The sub-steps that follow a start, a wait and a set-aside name what is really going on. */
+static void phase_order_tests(void)
+{
+    struct fake f;
+    struct wsu w;
+    char node_dir[700];
+    /* A node that is off is started first, and the wait for the chain tip is named as such, not as a restart. */
+    fresh(&f, &w, false);
+    f.watch = true;
+    f.script.chain[0] = 0;
+    wsu_create_job(&w);
+    assert(w.failure == WSU_NO_TIP && f.phase_waiting == WSU_PHASE_TIP && f.starts == 1);
+    wsu_destroy(&w);
+    /* Start over names the set-aside, not the check before it. */
+    blocked_create(&f, &w, node_dir);
+    assert(wsu_ask_start_over(&w));
+    rename_probe = &w;
+    rename_phase = -1;
+    wsu_start_over_job(&w);
+    rename_probe = NULL;
+    assert(w.step == WSU_CHOICE && rename_phase == WSU_PHASE_ASIDE);
+    wsu_destroy(&w);
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2);
@@ -1915,6 +1955,7 @@ int main(int argc, char **argv)
     saving_after_confirm_tests();
     choices_tests();
     pick_tests();
+    phase_order_tests();
     slow_exit_tests();
     slow_exit_restore_tests();
     stuck_exit_late_tests();

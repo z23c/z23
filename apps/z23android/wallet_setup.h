@@ -80,7 +80,9 @@ enum wsu_phase {
     WSU_PHASE_PAUSE,     /* waiting for the node to exit so the wallet files are written safely */
     WSU_PHASE_WRITE,     /* the node writes the wallet */
     WSU_PHASE_RESTART,   /* starting the node again */
-    WSU_PHASE_CHECK      /* reading the wallet files or asking the node about the wallet */
+    WSU_PHASE_CHECK,     /* reading the wallet files or asking the node about the wallet */
+    WSU_PHASE_ASIDE,     /* moving the old wallet aside */
+    WSU_PHASE_SAVE       /* the words are confirmed; the setup is recorded */
 };
 enum wsu_failure {
     WSU_NO_FAILURE,
@@ -172,7 +174,7 @@ bool wsu_view_can_recheck(const struct wsu_view *v);
  * and names no height. */
 void wsu_words_intro(const struct wsu_view *v, char *out, size_t cap);
 /* The line a working screen shows: the sub-step in plain words, with the block the node has reached while waiting for the chain tip
- * or its boot stage while it has none. With no sub-step set, before the first and after the words are confirmed, it is "Saving…". */
+ * or its boot stage while it has none. With no sub-step set yet it is "Starting…"; after the words are confirmed it is "Saving…". */
 void wsu_working_line(const struct wsu_view *v, char *out, size_t cap);
 /* "2 min 05 s since setup began": the seconds of the job so far, so a long wait shows it is alive. */
 void wsu_elapsed_text(const struct wsu_view *v, char *out, size_t cap);
