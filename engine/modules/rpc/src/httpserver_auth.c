@@ -29,6 +29,7 @@ static char g_rpc_port_file[1024];
 static bool g_auth_required = false;
 static bool g_cookie_mode = false;
 static pthread_mutex_t g_cookie_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_cookie_rotate_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t g_cookie_rotate_thread;
 static bool g_cookie_rotate_started = false;
 static _Atomic bool g_cookie_rotate_running = false;
@@ -105,38 +106,63 @@ static bool rpc_cookie_write_secure(const char *path, const char *user,
     if (hook) hook();
     char body[sizeof(g_rpc_user) + sizeof(g_rpc_password) + 2];
     int n = snprintf(body, sizeof(body), "%s:%s", user, password);
+    char tmp[sizeof(g_cookie_file) + 8];
     struct platform_private_file file;
     platform_private_file_init(&file);
-    (void)platform_private_file_unlink_missing_ok(path);
+    /* Stage beside the cookie, flush and rename over it: a failed write
+     * leaves the previous cookie file intact. */
     bool ok = n > 0 && (size_t)n < sizeof(body) &&
-              platform_private_file_create(path, &file) &&
-              platform_private_file_write_at(&file, body, (size_t)n, 0);
+              snprintf(tmp, sizeof(tmp), "%s.tmp", path) < (int)sizeof(tmp);
+    if (ok) (void)platform_private_file_unlink_missing_ok(tmp);
+    ok = ok && platform_private_file_create(tmp, &file) &&
+         platform_private_file_write_at(&file, body, (size_t)n, 0) &&
+         platform_private_file_replace(&file, tmp, path);
     platform_private_file_close(&file);
     memory_cleanse(body, sizeof(body));
-    if (!ok) (void)platform_private_file_unlink_missing_ok(path);
+    if (!ok) (void)platform_private_file_unlink_missing_ok(tmp);
     return ok;
 }
 
 void rpc_http_cookie_rotate(void)
 {
+    /* Rotations are serialized by their own mutex so the file write can run
+     * without g_cookie_mutex, which every authenticated request takes. */
+    pthread_mutex_lock(&g_cookie_rotate_mutex);
     pthread_mutex_lock(&g_cookie_mutex);
     if (!g_cookie_mode || !g_auth_required) {
         pthread_mutex_unlock(&g_cookie_mutex);
+        pthread_mutex_unlock(&g_cookie_rotate_mutex);
+        return;
+    }
+    char user[sizeof(g_rpc_user)];
+    char file[sizeof(g_cookie_file)];
+    memcpy(user, g_rpc_user, sizeof(user));
+    memcpy(file, g_cookie_file, sizeof(file));
+    pthread_mutex_unlock(&g_cookie_mutex);
+
+    char fresh[sizeof(g_rpc_password)] = {0};
+    uint64_t r1 = GetRand(UINT64_MAX);
+    uint64_t r2 = GetRand(UINT64_MAX);
+    snprintf(fresh, sizeof(fresh), "%016llx%016llx",
+             (unsigned long long)r1, (unsigned long long)r2);
+
+    /* Disk first, memory second: auth never accepts a secret that is not
+     * durable. A failed write keeps the old secret in memory and on disk. */
+    if (file[0] && !rpc_cookie_write_secure(file, user, fresh)) {
+        fprintf(stderr, "RPC cookie rotation failed: cannot write %s; "
+                        "keeping the previous cookie\n", file);
+        memory_cleanse(fresh, sizeof(fresh));
+        pthread_mutex_unlock(&g_cookie_rotate_mutex);
         return;
     }
 
+    pthread_mutex_lock(&g_cookie_mutex);
     memory_cleanse(g_rpc_password_prev, sizeof(g_rpc_password_prev));
     memcpy(g_rpc_password_prev, g_rpc_password, sizeof(g_rpc_password));
-
-    uint64_t r1 = GetRand(UINT64_MAX);
-    uint64_t r2 = GetRand(UINT64_MAX);
-    snprintf(g_rpc_password, sizeof(g_rpc_password), "%016llx%016llx",
-             (unsigned long long)r1, (unsigned long long)r2);
-
-    if (g_cookie_file[0])
-        (void)rpc_cookie_write_secure(g_cookie_file, g_rpc_user,
-                                      g_rpc_password);
+    memcpy(g_rpc_password, fresh, sizeof(g_rpc_password));
     pthread_mutex_unlock(&g_cookie_mutex);
+    memory_cleanse(fresh, sizeof(fresh));
+    pthread_mutex_unlock(&g_cookie_rotate_mutex);
     printf("RPC cookie rotated\n");
 }
 
