@@ -109,7 +109,7 @@ test-voice:
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/speech-client.XXXXXX'); \
 	  trap 'rmdir "$$scratch"' 0; '$(BUILD_DIR)/speech-client-test' "$$scratch"
 
-test: prepare-quirc test-bridge test-voice test-host test-devkey test-dexgen test-watch test-scan test-qr-window test-payment test-wallet test-wallet-send test-qr-fuzz
+test: prepare-quirc test-bridge test-voice test-host test-devkey test-dexgen test-watch test-scan test-qr-window test-payment test-wallet test-wallet-send test-qr-fuzz test-setup
 	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../vendor/qrcodegen -I'$(QUIRC_DIR)' $(QUIRC_FLAGS) \
 	  tests/fleet_test.c fleet.c ../../vendor/qrcodegen/qrcodegen.c $(QUIRC_SOURCES) \
 	  -lm -o '$(BUILD_DIR)/fleet-test'
@@ -320,6 +320,20 @@ test-devkey:
 	@if $(MAKE) --no-print-directory check-probe DEVKEY_PROBE=ON 2>/dev/null; then echo "production manifest accepted DEVKEY_PROBE=ON" >&2; exit 1; fi
 	$(HOST_CC) $(HOST_WARNINGS) -I. tests/secure_window_test.c secure_window.c -o '$(BUILD_DIR)/secure-window-test'
 	'$(BUILD_DIR)/secure-window-test'
+
+# First-run wallet setup: the words, the state files, the node adapter and the wizard model over a fake device and node.
+# None of these files may log or write the words and the passphrase that pass through them.
+.PHONY: test-setup
+test-setup:
+	@mkdir -p '$(BUILD_DIR)'
+	$(HOST_CC) $(HOST_WARNINGS) -pthread -I. -I../../platform/modules/sha3/include -I../../platform/modules/json/include -I../../platform/modules/base/include \
+	  tests/setup_test.c setup_words.c setup_state.c setup_node.c wallet_setup.c device_key.c ../../platform/modules/sha3/src/sha3.c $(SPEECH_JSON) -o '$(BUILD_DIR)/setup-test'
+	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/setup-test.XXXXXX'); \
+	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/setup-test' "$$(cd "$$scratch" && pwd)"
+	@if grep -nE '(^|[^a-z_])(printf|fprintf|puts|fputs|perror|syslog)\(|nodelog|__android_log' setup_words.c setup_state.c setup_node.c wallet_setup.c; then \
+	  echo 'wallet setup must not log' >&2; exit 1; fi
+	@if grep -nE '(^|[^a-z_])(fopen|fwrite|fputs|open|write|creat|rename)\(' setup_words.c setup_node.c wallet_setup.c; then \
+	  echo 'the recovery words and the passphrase must not be written by the setup modules' >&2; exit 1; fi
 
 WALLET_SEND_INCLUDES := -I. -I../../platform/modules/json/include -I../../platform/modules/base/include \
   -I../../contexts/commons/packages/zutf8/include \
