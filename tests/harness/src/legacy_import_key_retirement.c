@@ -50,7 +50,6 @@ int legacy_import_key_retirement_cases(void);
 int legacy_import_key_retirement_cases(void)
 {
     enum { SLOTS = 1 };
-    int failures = 0;
     struct legacy_import_decrypt_file_ctx *d = calloc(SLOTS, sizeof(*d));
     bool filled = d != NULL;
     if (filled) {

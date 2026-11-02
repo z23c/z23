@@ -1227,7 +1227,6 @@ ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/zcode_work_context.c", C
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/zcode_work_node.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/zcode_workspace_manifest.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/zcode_write_scope.c", CAP_FS_WRITE, "")
-ZCL_MODULE_CAPABILITY("contexts/wallet/modules/wallet/src/wallet.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/wallet/modules/wallet/src/wallet_canary.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("contexts/wallet/modules/wallet/src/wallet_coin_selection.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/wallet/modules/wallet/src/wallet_keystore.c", CAP_WALLET|CAP_RANDOM, "runs PKCS5_PBKDF2_HMAC over the wallet passphrase to derive the key that wraps spending material, drawing RAND_bytes for the salt")
