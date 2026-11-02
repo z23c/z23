@@ -13,6 +13,7 @@
 #include "domain/encoding/base58.h"
 #include "domain/wallet/mnemonic.h"
 #include <stdio.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -105,6 +106,13 @@ static bool tgt_setup(void)
     char state[PLATFORM_TEMP_PATH_MAX + 16];
     if (!platform_temp_directory_create("z23-telegram-test", g_root, sizeof(g_root)))
         return false;
+    /* The state root refuses a path with a symlink component. On macOS the
+     * temp directory sits under /var, a symlink to /private/var, so use the
+     * resolved path (a no-op on Linux). */
+    char resolved[PATH_MAX];
+    if (!realpath(g_root, resolved) || strlen(resolved) >= sizeof(g_root))
+        return false;
+    snprintf(g_root, sizeof(g_root), "%s", resolved);
     snprintf(g_env, sizeof(g_env), "%s/telegram.env", g_root);
     snprintf(state, sizeof(state), "%s/state", g_root);
     memset(&g_fake, 0, sizeof(g_fake));
