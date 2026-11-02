@@ -47,7 +47,6 @@ engine/entry/main_cli_modes.c:importchainstate_mode:19
 engine/entry/main_cli_modes.c:mintutxocommitment_mode:26
 engine/jobs/src/stage_repair_coin_backfill.c:backfill_run:28
 engine/jobs/src/stage_repair_coin_backfill.c:coin_backfill_insert_tx:23
-engine/jobs/src/utxo_apply_delta_repair.c:utxo_apply_repair_value_overflow_hole:23
 engine/services/src/property_grant_commit.c:commit_attempt:24
 tests/harness/src/test_engine.c:case_cli_argv:71
 tests/harness/src/test_engine.c:case_cli_observation:33
