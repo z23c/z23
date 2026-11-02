@@ -530,3 +530,11 @@ ZCL_TEST_GROUP_BUILD_NEED("test_make_lint_gates_heavy_03",
  * fixture clone as real-lint (canonical file-purpose case). */
 ZCL_TEST_GROUP_BUILD_NEED("test_dev_land_shard_02",
                           "build/bin/z23-lint", "build/bin/z23-lint")
+
+/* E1 (file-size bands) is the one lint gate that is a compiled binary: shards
+ * 05 and 06 copy build/bin/file_size_policy into their sandbox and fail
+ * "gate_present == 1" in a sanitizer runner that never built it. */
+ZCL_TEST_GROUP_BUILD_NEED("test_make_lint_gates_shard_05",
+                          "build/bin/file_size_policy", "tools/file_size_policy")
+ZCL_TEST_GROUP_BUILD_NEED("test_make_lint_gates_shard_06",
+                          "build/bin/file_size_policy", "tools/file_size_policy")
