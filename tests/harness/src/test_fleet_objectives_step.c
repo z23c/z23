@@ -12,6 +12,7 @@
 #include "test/test_core.h"
 
 #include "command/native_command.h"
+#include "command/native_dev_cx.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "engine/engine_prompt.h"
@@ -65,6 +66,28 @@ static bool fst_mkdirs(const char *path)
     return mkdir(tmp, 0700) == 0 || errno == EEXIST;
 }
 
+/* Runs git in dir; false when it fails. */
+static bool fst_git(const char *dir, const char *a, const char *b,
+                    const char *c, const char *d)
+{
+    const char *argv[] = {"git", "-c", "user.name=t", "-c",
+                          "user.email=t@example.invalid", "-c",
+                          "commit.gpgsign=false", a, b, c, d, NULL};
+    char out[512];
+    return cx_run(dir, argv, out, sizeof(out), 30000, true) == 0;
+}
+
+/* The brief picks its file through dev.cx.next, which needs a checkout whose
+ * origin/main exists. */
+static bool fst_git_repo(const char *dir)
+{
+    return fst_git(dir, "init", "-q", NULL, NULL) &&
+           fst_git(dir, "add", "-A", NULL, NULL) &&
+           fst_git(dir, "commit", "--allow-empty", "-qm", "fixture") &&
+           fst_git(dir, "update-ref", "refs/remotes/origin/main", "HEAD",
+                   NULL);
+}
+
 /* Three over-cap pin rows in three small repo files; rss_mb 100 is met, so
  * the top unmet objective is the complexity card (runner_ok), and 2200
  * makes the node row (product, not runner_ok) the top one. */
@@ -94,7 +117,7 @@ static bool fst_fixture(struct fst_world *w, int rss_mb)
         if (!fst_write(file, "x\nx\nx\n"))
             return false;
     }
-    return true;
+    return fst_git_repo(w->repo);
 }
 
 static void fst_restore(struct fst_world *w)

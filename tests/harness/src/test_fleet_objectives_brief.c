@@ -12,6 +12,7 @@
 #include "test/test_core.h"
 
 #include "command/native_command.h"
+#include "command/native_dev_cx.h"
 #include "command/native_fleet_objectives.h"
 #include "command/work_card.h"
 #include "config/command_catalog.h"
@@ -96,6 +97,28 @@ static bool fob_repo_file(const struct fob_paths *p, const char *rel, int lines)
     return fob_write_n_lines(path, lines);
 }
 
+/* Runs git in dir (NULL = here); false when it fails. */
+static bool fob_git(const char *dir, const char *a, const char *b,
+                    const char *c, const char *d, const char *e)
+{
+    const char *argv[] = {"git", "-c", "user.name=t", "-c",
+                          "user.email=t@example.invalid", "-c",
+                          "commit.gpgsign=false", a, b, c, d, e, NULL};
+    char out[512];
+    return cx_run(dir, argv, out, sizeof(out), 30000, true) == 0;
+}
+
+/* Makes dir a git checkout with one commit that origin/main points at, as
+ * dev.cx.next requires: the brief picks its file through that selection. */
+static bool fob_git_repo(const char *dir)
+{
+    return fob_git(dir, "init", "-q", NULL, NULL, NULL) &&
+           fob_git(dir, "add", "-A", NULL, NULL, NULL) &&
+           fob_git(dir, "commit", "--allow-empty", "-qm", "fixture", NULL) &&
+           fob_git(dir, "update-ref", "refs/remotes/origin/main", "HEAD",
+                   NULL, NULL);
+}
+
 /* A node at 2200 MB (a product row over its 1024 target), one oversized lint
  * file, and three cyclomatic pin rows in three small repo files. Everything
  * else is unmeasured. */
@@ -116,7 +139,8 @@ static bool fob_fixture(const char *root, struct fob_paths *p)
            fob_repo_file(p, "apps/y.c", 10) &&
            fob_repo_file(p, "apps/z.c", 10) &&
            fob_write(p->baseline,
-                     "apps/x.c:f:16\napps/y.c:g:17\napps/z.c:h:18\n");
+                     "apps/x.c:f:16\napps/y.c:g:17\napps/z.c:h:18\n") &&
+           fob_git_repo(p->repo);
 }
 
 struct fob_call {
@@ -589,6 +613,42 @@ _test_next:;
     return failures;
 }
 
+/* A repo whose a.c (3 pins) would win on path order, and b.c (4 pins), the
+ * baseline outside it; then a live worktree changes a.c against origin/main. */
+static int fob_case_live(const char *root, const struct fob_paths *p)
+{
+    int failures = 0;
+    struct fob_paths q = *p;
+    char wt[700];
+    (void)snprintf(q.repo, sizeof(q.repo), "%s/live", root);
+    (void)snprintf(q.baseline, sizeof(q.baseline), "%s/live.txt", root);
+    (void)snprintf(wt, sizeof(wt), "%s/live-lane", root);
+    q.exclude[0] = '\0';
+    TEST("brief: the complexity card skips a file a live worktree changes "
+         "against origin/main") {
+        ASSERT(mkdir(q.repo, 0700) == 0);
+        ASSERT(fob_repo_file(&q, "apps/a.c", 10));
+        ASSERT(fob_repo_file(&q, "apps/b.c", 10));
+        ASSERT(fob_write(q.baseline,
+                         "apps/a.c:f:16\napps/a.c:g:16\napps/a.c:h:16\n"
+                         "apps/b.c:f:16\napps/b.c:g:16\napps/b.c:h:16\n"
+                         "apps/b.c:i:16\n"));
+        ASSERT(fob_git_repo(q.repo));
+        ASSERT(fob_narrow_picks(&q, "", "apps/a.c"));
+        ASSERT(fob_git(q.repo, "worktree", "add", "-q", "--detach", wt));
+        ASSERT(fob_narrow_picks(&q, "", "apps/a.c"));
+        {
+            char file[800];
+            (void)snprintf(file, sizeof(file), "%s/apps/a.c", wt);
+            ASSERT(fob_write_n_lines(file, 11));
+        }
+        ASSERT(fob_narrow_picks(&q, "", "apps/b.c"));
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 #define FOB_HARD_ID "baseline_hardening_banned_str"
 #define FOB_HARD_PATH "tools/lint/hardening_ratchet_baseline.txt"
 
@@ -709,6 +769,7 @@ int test_fleet_objectives_brief(void)
         failures += fob_case_refusals(&paths);
         failures += fob_case_protected(&paths);
         failures += fob_case_narrow(root, &paths);
+        failures += fob_case_live(root, &paths);
         failures += fob_case_baseline_row(&paths);
     }
     (void)unsetenv("ZCL_LAND_OBJECTIVES_DATADIR");

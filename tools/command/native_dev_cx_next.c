@@ -11,10 +11,12 @@
  *          whose only uncommitted edits are to unpinned files is idle. The
  *          worktree scan (native_dev_cx_scan.c) is handed the baseline rows
  *          and asks git status only about the pinned paths. Read-only; ports
- *          cx-swarm's picker. */
+ *          cx-swarm's picker. zcl_dev_cx_pick (native_dev_cx_next.h) is the
+ *          same selection for the objectives brief, in process. */
 
 #include "command/native_command.h"
 #include "command/native_dev_cx.h"
+#include "command/native_dev_cx_next.h"
 
 #include "base/safe_alloc.h"
 #include "json/json.h"
@@ -61,6 +63,11 @@ struct cx_args {
     char cwd[ZCL_CX_PATH_MAX];
     char exclude[ZCL_CX_PATH_MAX];
     char prefix[ZCL_CX_PATH_MAX];
+    char baseline[ZCL_CX_PATH_MAX]; /* "" = root/ZCL_CX_BASELINE_REL */
+    const char *exclude_csv;        /* in-process callers only */
+    bool (*allow)(const char *file, void *ctx);
+    void *allow_ctx;
+    bool pin_band;
 };
 
 struct cx_sets {
@@ -159,6 +166,8 @@ static enum cx_skip cx_classify(const char *root, const char *file,
         return CX_SKIP_CUSTODY;
     if (!cx_has_prefix(file, a->prefix))
         return CX_SKIP_PREFIX;
+    if (a->allow && !a->allow(file, a->allow_ctx))
+        return CX_SKIP_PREFIX;
     if (cx_set_has(&sets->excluded, file))
         return CX_SKIP_EXCLUDED;
     if (cx_set_has(&sets->changed, file))
@@ -198,16 +207,12 @@ static int cx_row_cmp(const void *x, const void *y)
     return c ? c : strcmp(a->fn, b->fn);
 }
 
-static struct cx_row *cx_load_rows(const char *root, size_t *count)
+static struct cx_row *cx_load_rows(const char *path, size_t *count)
 {
-    char path[ZCL_CX_PATH_MAX];
     struct cx_row *rows = NULL;
     size_t n = 0, cap = 0, len = 0;
     char *text;
     *count = 0;
-    if (snprintf(path, sizeof(path), "%s/%s", root, ZCL_CX_BASELINE_REL) >=
-        (int)sizeof(path))
-        return NULL;
     text = cx_read_file(path, &len);
     if (!text)
         return NULL;
@@ -242,11 +247,14 @@ struct cx_pick {
     const struct cx_row *rows;
     struct cx_unit unit;
     const char *file;
+    int band; /* 0 sorts first; only the pin_band order sets it */
 };
 
 static int cx_pick_cmp(const void *x, const void *y)
 {
     const struct cx_pick *a = x, *b = y;
+    if (a->band != b->band)
+        return a->band < b->band ? -1 : 1;
     if (a->unit.n != b->unit.n)
         return a->unit.n < b->unit.n ? -1 : 1;
     if (a->unit.max != b->unit.max)
@@ -288,6 +296,7 @@ static size_t cx_select(const struct cx_row *rows, size_t n, const char *root,
         picks[kept].file = rows[i].file;
         picks[kept].unit = (struct cx_unit){ i, j - i,
                                              cx_max_score(rows, i, j), lines };
+        picks[kept].band = a->pin_band && (j - i < 3 || j - i > 6);
         kept++;
     }
     skipped[CX_STALE_HOLDER] = sets->freed;
@@ -373,6 +382,47 @@ static bool cx_load_exclude(const char *path, struct cx_set *set)
     free(text);
     return ok;
 }
+/* Adds each non-empty token of the comma list csv (NULL = none). */
+static bool cx_add_csv(struct cx_set *set, const char *csv)
+{
+    while (csv && *csv) {
+        size_t len = strcspn(csv, ",");
+        if (len && !cx_set_add(set, csv, len))
+            return false;
+        csv += len + (csv[len] == ',' ? 1 : 0);
+    }
+    return true;
+}
+
+/* The baseline file: the caller's path as given, else root's pinned one. */
+static bool cx_baseline_path(const struct cx_args *a, const char *root,
+                             char *out, size_t cap)
+{
+    if (a->baseline[0])
+        return snprintf(out, cap, "%s", a->baseline) < (int)cap;
+    return snprintf(out, cap, "%s/%s", root, ZCL_CX_BASELINE_REL) < (int)cap;
+}
+
+/* Loads the exclude list and the baseline rows. */
+static bool cx_load_inputs(const struct cx_args *a, const char *root,
+                           struct cx_row **rows, size_t *nrows,
+                           struct cx_sets *sets, struct zcl_command_reply *reply)
+{
+    char base[ZCL_CX_PATH_MAX];
+    if (!cx_load_exclude(a->exclude, &sets->excluded) ||
+        !cx_add_csv(&sets->excluded, a->exclude_csv)) {
+        cx_fail(reply, "NEXT_EXCLUDE_UNREADABLE",
+                "exclude= must name a readable file of paths", a->exclude);
+        return false;
+    }
+    if (!cx_baseline_path(a, root, base, sizeof(base)) ||
+        (*rows = cx_load_rows(base, nrows), !*rows)) {
+        cx_fail(reply, "NEXT_BASELINE_UNREADABLE",
+                "the complexity baseline could not be read", root);
+        return false;
+    }
+    return true;
+}
 
 static bool cx_prepare(const struct cx_args *a, char *root, size_t cap,
                        struct cx_row **rows, size_t *nrows,
@@ -388,16 +438,12 @@ static bool cx_prepare(const struct cx_args *a, char *root, size_t cap,
     if (!cx_root_of(a->cwd, root, cap, buf))
         cx_fail(reply, "NEXT_NOT_IN_CHECKOUT",
                 "cwd is not inside a git checkout", a->cwd);
-    else if (!cx_load_exclude(a->exclude, &sets->excluded))
-        cx_fail(reply, "NEXT_EXCLUDE_UNREADABLE",
-                "exclude= must name a readable file of paths", a->exclude);
     else if (cx_git(root, "rev-parse", "--verify", "refs/remotes/origin/main",
                     buf) != 0)
         cx_fail(reply, "NEXT_NO_ORIGIN_MAIN",
                 "refs/remotes/origin/main is missing; fetch it first", root);
-    else if (*rows = cx_load_rows(root, nrows), !*rows)
-        cx_fail(reply, "NEXT_BASELINE_UNREADABLE",
-                "the complexity baseline could not be read", root);
+    else if (!cx_load_inputs(a, root, rows, nrows, sets, reply))
+        ok = false;
     else if (!cx_changed_files(root, *rows, *nrows, &sets->changed, &sets->stale, why,
                             sizeof(why)))
         cx_fail(reply, "NEXT_WORKTREE_SCAN",
@@ -408,34 +454,88 @@ static bool cx_prepare(const struct cx_args *a, char *root, size_t cap,
     return ok;
 }
 
+/* Selects and ranks the eligible files. The rows and the picks (which point
+ * into the rows) are returned for the caller to free, after it is done with
+ * them; the sets are freed here. */
+static size_t cx_run_select(const struct cx_args *a, struct cx_row **rows,
+                            struct cx_pick **out,
+                            size_t *skipped, struct zcl_command_reply *reply)
+{
+    struct cx_sets sets;
+    size_t n = 0, kept = 0;
+    char root[ZCL_CX_PATH_MAX];
+    memset(&sets, 0, sizeof(sets));
+    *rows = NULL;
+    *out = NULL;
+    if (cx_prepare(a, root, sizeof(root), rows, &n, &sets, reply)) {
+        *out = zcl_calloc(n, sizeof(**out), "dev_cx.picks");
+        if (!*out)
+            cx_fail(reply, "NEXT_BASELINE_UNREADABLE",
+                    "the complexity baseline could not be read", root);
+        else
+            kept = cx_select(*rows, n, root, &sets, a, *out, skipped);
+    }
+    cx_set_free(&sets.excluded);
+    cx_set_free(&sets.changed);
+    cx_set_free(&sets.stale);
+    return kept;
+}
+
 void zcl_native_handle_dev_cx_next(const struct zcl_command_request *request,
                                    struct zcl_command_reply *reply)
 {
     struct cx_args a;
-    struct cx_sets sets;
-    struct cx_row *rows = NULL;
-    struct cx_pick *picks = NULL;
-    size_t n = 0, kept, skipped[CX_SKIP_KINDS] = {0};
-    char root[ZCL_CX_PATH_MAX];
-    memset(&sets, 0, sizeof(sets));
+    struct cx_row *rows;
+    struct cx_pick *picks;
+    size_t kept, skipped[CX_SKIP_KINDS] = {0};
+    memset(&a, 0, sizeof(a));
     if (!cx_args_parse(request ? request->input : NULL, &a)) {
         cx_fail(reply, "NEXT_BAD_INPUT",
                 "count is 1..200; cwd, exclude and prefix are short strings",
                 "input");
         return;
     }
-    if (cx_prepare(&a, root, sizeof(root), &rows, &n, &sets, reply)) {
-        picks = zcl_calloc(n, sizeof(*picks), "dev_cx.picks");
-        if (!picks)
-            cx_fail(reply, "NEXT_BASELINE_UNREADABLE",
-                    "the complexity baseline could not be read", root);
-        else if (kept = cx_select(rows, n, root, &sets, &a, picks, skipped),
-                 !cx_emit(reply, picks, kept, &a, skipped))
-            cx_fail(reply, "NEXT_NO_MEMORY", "cannot build the reply", "");
+    kept = cx_run_select(&a, &rows, &picks, skipped, reply);
+    if (picks && !cx_emit(reply, picks, kept, &a, skipped))
+        cx_fail(reply, "NEXT_NO_MEMORY", "cannot build the reply", "");
+    free(picks);
+    free(rows);
+}
+
+int zcl_dev_cx_pick(const struct zcl_cx_pick_in *in,
+                    struct zcl_cx_pick_out *out)
+{
+    struct cx_args a;
+    struct cx_row *rows;
+    struct cx_pick *picks;
+    struct zcl_command_reply reply;
+    size_t kept, skipped[CX_SKIP_KINDS] = {0};
+    int rc = -1;
+    memset(&a, 0, sizeof(a));
+    memset(&reply, 0, sizeof(reply));
+    a.count = 1;
+    a.exclude_csv = in->exclude_csv;
+    a.allow = in->allow;
+    a.allow_ctx = in->allow_ctx;
+    a.pin_band = in->pin_band;
+    if (snprintf(a.cwd, sizeof(a.cwd), "%s", in->repo ? in->repo : "") >=
+            (int)sizeof(a.cwd) ||
+        (in->baseline &&
+         snprintf(a.baseline, sizeof(a.baseline), "%s", in->baseline) >=
+             (int)sizeof(a.baseline)))
+        return -1;
+    zcl_command_reply_init(&reply, "zcl.dev_cx_next.v1");
+    kept = cx_run_select(&a, &rows, &picks, skipped, &reply);
+    if (picks) {
+        rc = kept ? 0 : 1;
+        if (kept) {
+            (void)snprintf(out->file, sizeof(out->file), "%s", picks[0].file);
+            out->pins = (int)picks[0].unit.n;
+            out->max_score = picks[0].unit.max;
+        }
     }
     free(picks);
     free(rows);
-    cx_set_free(&sets.excluded);
-    cx_set_free(&sets.changed);
-    cx_set_free(&sets.stale);
+    zcl_command_reply_free(&reply);
+    return rc;
 }

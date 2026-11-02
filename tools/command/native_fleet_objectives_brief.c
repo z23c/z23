@@ -15,6 +15,7 @@
 #include "base/safe_alloc.h"
 #include "json/json.h"
 #include "util/log_macros.h"
+#include "command/native_dev_cx_next.h"
 #include "command/work_card.h"
 
 #include <stdio.h>
@@ -186,11 +187,6 @@ struct brief_file {
     int max_m;
 };
 
-struct brief_files {
-    struct brief_file *v;
-    size_t n, cap;
-};
-
 /* True when `path` matches a token of the comma list `csv`: by literal
  * prefix (the part before the first '*') or, when !prefix, exactly. */
 static bool brief_csv_has(const char *csv, const char *path, bool prefix)
@@ -225,60 +221,6 @@ static bool brief_parse_row(char *line, char **path, char **fn, int *m)
     return true;
 }
 
-static struct brief_file *brief_files_find(struct brief_files *f,
-                                           const char *path)
-{
-    if (f->n && strcmp(f->v[f->n - 1].path, path) == 0)
-        return &f->v[f->n - 1];
-    for (size_t i = 0; i < f->n; i++)
-        if (strcmp(f->v[i].path, path) == 0)
-            return &f->v[i];
-    return NULL;
-}
-
-/* Counts one more pin of `m` against `path`. False on allocation failure. */
-static bool brief_files_add(struct brief_files *f, const char *path, int m)
-{
-    struct brief_file *e = brief_files_find(f, path);
-    if (!e) {
-        if (strlen(path) >= sizeof(e->path))
-            return true;
-        if (f->n == f->cap) {
-            size_t cap = f->cap ? f->cap * 2 : 256;
-            struct brief_file *grown =
-                zcl_realloc(f->v, cap * sizeof(*grown), "brief_files");
-            if (!grown)
-                return false;
-            f->v = grown;
-            f->cap = cap;
-        }
-        e = &f->v[f->n++];
-        memset(e, 0, sizeof(*e));
-        memcpy(e->path, path, strlen(path) + 1);
-    }
-    e->pins++;
-    if (m > e->max_m)
-        e->max_m = m;
-    return true;
-}
-
-/* Reads the baseline into per-file pin counts. 0 ok, -1 unreadable or out
- * of memory. */
-static int brief_load_files(const char *baseline, struct brief_files *out)
-{
-    char line[1024], *path, *fn;
-    int m, rc = 0;
-    FILE *fp = fopen(baseline, "r");
-    if (!fp)
-        return -1;
-    while (rc == 0 && fgets(line, sizeof(line), fp))
-        if (brief_parse_row(line, &path, &fn, &m) &&
-            !brief_files_add(out, path, m))
-            rc = -1;
-    (void)fclose(fp);
-    return rc;
-}
-
 /* True when repo/path exists and has fewer than BRIEF_FILE_LINES_MAX lines. */
 static bool brief_file_small(const char *repo, const char *path)
 {
@@ -298,48 +240,43 @@ static bool brief_file_small(const char *repo, const char *path)
     return lines < BRIEF_FILE_LINES_MAX;
 }
 
-static bool brief_eligible(const struct brief_inputs *in, const char *owned,
-                           const char *path)
+/* The brief's own filter on the shared selection: the objective's owned
+ * paths, none of the forbidden ones, and never a tests/ file. */
+static bool brief_allowed(const char *path, void *owned)
 {
     return brief_csv_has(owned, path, true) &&
            !brief_csv_has(k_brief_forbidden, path, true) &&
-           strncmp(path, "tests/", 6) != 0 &&
+           strncmp(path, "tests/", 6) != 0;
+}
+
+/* A baseline-row card's file: allowed, not excluded, and under the size cap. */
+static bool brief_eligible(const struct brief_inputs *in, const char *owned,
+                           const char *path)
+{
+    return brief_allowed(path, (void *)owned) &&
            !brief_csv_has(in->exclude, path, false) &&
            brief_file_small(in->repo, path);
 }
 
-/* 3-6 pins first, then the lowest maximum M, then path order. */
-static bool brief_better(const struct brief_file *a, const struct brief_file *b)
-{
-    bool pa = a->pins >= 3 && a->pins <= 6;
-    bool pb = b->pins >= 3 && b->pins <= 6;
-    if (pa != pb)
-        return pa;
-    if (a->max_m != b->max_m)
-        return a->max_m < b->max_m;
-    return strcmp(a->path, b->path) < 0;
-}
-
-/* Chooses the one file for the complexity card. 0 found, 1 none eligible,
- * -1 baseline unreadable or out of memory. */
+/* Chooses the one file for the complexity card by dev.cx.next's rules (live
+ * worktrees, exclude, size, sealed paths), 3-6 pins first. 0 found, 1 none
+ * eligible, -1 the selection could not run. */
 static int brief_choose(const struct brief_inputs *in, const char *owned,
                         struct brief_file *best)
 {
-    struct brief_files files = {0};
-    bool found = false;
-    int rc = brief_load_files(in->baseline, &files);
-    for (size_t i = 0; rc == 0 && i < files.n; i++) {
-        const struct brief_file *f = &files.v[i];
-        if ((found && !brief_better(f, best)) ||
-            !brief_eligible(in, owned, f->path))
-            continue;
-        *best = *f;
-        found = true;
-    }
-    free(files.v);
+    struct zcl_cx_pick_in pick = {in->repo, in->baseline, in->exclude,
+                                  brief_allowed, (void *)owned, true};
+    struct zcl_cx_pick_out out;
+    int rc = zcl_dev_cx_pick(&pick, &out);
     if (rc != 0)
+        return rc;
+    memset(best, 0, sizeof(*best));
+    if (snprintf(best->path, sizeof(best->path), "%s", out.file) >=
+        (int)sizeof(best->path))
         return -1;
-    return found ? 0 : 1;
+    best->pins = out.pins;
+    best->max_m = out.max_score;
+    return 0;
 }
 
 /* Pushes `pins`: [{function, m}] for the rows of `file` in the baseline. */
@@ -697,7 +634,7 @@ static void brief_finish(struct zcl_command_reply *reply,
         brief_no_card(reply,
                       "no file is eligible for the complexity card: every "
                       "pinned file is protected, a test, missing, over 1300 "
-                      "lines or excluded",
+                      "lines, excluded or changed by a live worktree",
                       "NO_ELIGIBLE_FILE");
     else if (rc < 0 || !work ||
              !brief_build(&reply->data, next, work, in, narrow ? &file : NULL))
