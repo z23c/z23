@@ -830,7 +830,8 @@ static bool is_word_char(char ch)
 static bool is_method(const char *s, size_t n)
 {
     static const char *const methods[] = {
-        "sendtoaddress", "sendfrom", "sendmany", "z_sendmany", "z_shieldcoinbase",
+        "sendtoaddress", "sendfrom", "sendmany", "z_sendmany", "z_shieldaddress",
+        "z_shieldcoinbase",
         "z_mergetoaddress", "sendrawtransaction", "dumpprivkey", "dumpwallet",
         "z_exportkey", "z_exportwallet", "z_exportviewingkey", "backupwallet",
         "walletpassphrase"};

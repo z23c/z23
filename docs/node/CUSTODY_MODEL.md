@@ -526,6 +526,49 @@ them on chain. The reply is `{"address":"zs1..."}`.
 
 ---
 
+### 4.2 Sweeping a public address into the private balance
+
+`core.wallet.shielded.shield` (node RPC `z_shieldaddress`) moves every mature
+coin of one public key address into the wallet's own shielded address in one
+transaction with one Sapling output and no transparent output. A transaction
+that spends a coinbase output may not have a transparent output on the main and
+test networks (`bad-txns-coinbase-spend-has-transparent-outputs`; regtest does
+not enforce it), so the sweep must leave no change. It pays `total - fee`, so
+change is zero by construction.
+
+- **Destination.** The caller names none and no amount. The node uses the
+  receive address it most recently issued for the account (section 4.1 below),
+  or, when none was issued, the newest keystore address of the account. It
+  creates no address: a wallet with neither refuses `NO_PRIVATE_ADDRESS`. The
+  RPC refuses a `to` that differs from this address (`PLAN_TOKEN_MISMATCH`).
+- **Source.** `from` names a key address, or is omitted and the address with the
+  largest mature total is used. Coinbase counts only at depth 100
+  (`height <= tip - 100`, the wallet rule, one block stricter than consensus).
+  At most 256 coins are taken per transaction; the plan reports
+  `remaining_inputs` (mature coins left for a later sweep) and `maturing_zat`
+  (coinbase not yet mature, never touched).
+- **Plan.** Without `confirm`, a non-mutating plan with `from`, `to`,
+  `input_count`, `coinbase_input_count`, `total_zat`, `fee_zat`, `amount_zat`,
+  `remaining_inputs`, `maturing_zat` and a `plan_token` that binds wallet scope,
+  `from`, `to`, input count, total, fee and idempotency key. The plan works
+  while the wallet is locked; it spends nothing.
+- **Commit.** The commit reads the sweep again and refuses
+  `PLAN_TOKEN_MISMATCH` before any send when any bound value moved, then passes
+  the count and total to the node, which checks them a second time when it
+  builds, so a coin that arrives between the check and the build cannot change
+  what is sent. The same send-once record, fee check (`FEE_CHANGED`), sovereignty
+  guard and wallet lock guard as section 4.1 apply; a locked wallet refuses and
+  frees the key. `NOTHING_TO_SHIELD` (mature total not above the fee) and
+  `PROVING_UNAVAILABLE` also free the key.
+- **Visibility.** The transparent inputs, their total and the fee are public;
+  the shielded destination and the later private balance are not. Several
+  addresses are never combined in one transaction, so no new on-chain link
+  between two of the wallet's addresses is made.
+
+Tests: `wallet_shield_address` (selection, maturity boundary, the 256 cap, the
+`coinbase_protect` rule against the reducer's delta check, refusals, token
+binding, the build with a real output proof when proving parameters load).
+
 ## 5. What the agent grant bounds
 
 The grant is a row in `agent_sessions` (migration v36,

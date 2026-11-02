@@ -167,6 +167,7 @@ ZCL_MODULE_CAPABILITY("contexts/wallet/controllers/src/wallet_rescan_controller_
 ZCL_MODULE_CAPABILITY("contexts/wallet/controllers/src/wallet_scan.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/wallet/controllers/src/wallet_activity.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/wallet/controllers/src/wallet_shielded_activity_rpc.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("contexts/wallet/controllers/src/wallet_shield_address.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/wallet/controllers/src/wallet_shielded_send.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/wallet/controllers/src/wallet_shielded_send_shielded.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/wallet/controllers/src/wallet_view_coins.c", CAP_FS_WRITE, "")

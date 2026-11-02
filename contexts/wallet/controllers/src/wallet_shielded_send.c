@@ -148,7 +148,7 @@ static void z_sendmany_fill_t_outputs(struct wallet_rpc_context *ctx,
     }
 }
 
-static void z_sendmany_get_ovk(struct wallet_rpc_context *ctx, uint8_t *ovk)
+void z_sendmany_get_ovk(struct wallet_rpc_context *ctx, uint8_t *ovk)
 {
     zcl_mutex_lock(&ctx->wallet->sapling_keys.cs);
     if (ctx->wallet->sapling_keys.num_keys > 0) {
@@ -162,7 +162,7 @@ static void z_sendmany_get_ovk(struct wallet_rpc_context *ctx, uint8_t *ovk)
 
 /* Sapling output descriptions for the t->z path; *fail_idx is the output that
  * failed to build (set only when false is returned). */
-static bool z_sendmany_build_outputs(void *proving_ctx, struct wallet_tx *wtx,
+bool z_sendmany_build_outputs(void *proving_ctx, struct wallet_tx *wtx,
                                      const uint8_t *ovk,
                                      uint8_t (*z_diversifiers)[11],
                                      uint8_t (*z_pk_ds)[32],
@@ -188,7 +188,7 @@ static bool z_sendmany_build_outputs(void *proving_ctx, struct wallet_tx *wtx,
     return true;
 }
 
-static void z_sendmany_fill_inputs(struct wallet_tx *wtx,
+void z_sendmany_fill_inputs(struct wallet_tx *wtx,
                                    const struct db_wallet_utxo *db_selected,
                                    size_t num_selected)
 {
@@ -199,19 +199,11 @@ static void z_sendmany_fill_inputs(struct wallet_tx *wtx,
     }
 }
 
-enum z_sendmany_sign_status {
-    Z_SENDMANY_SIGN_OK = 0,
-    Z_SENDMANY_SIGN_NO_DEST,
-    Z_SENDMANY_SIGN_NO_KEY,
-    Z_SENDMANY_SIGN_SIGHASH,
-    Z_SENDMANY_SIGN_SIGN
-};
-
 /* Signs every selected transparent input under wallet->cs. The lock is
  * released, and the private key wiped once it was loaded, before any
  * failure status returns;
  * *fail_idx is the failing input (set only on a failure status). */
-static int z_sendmany_sign_inputs(struct wallet_rpc_context *ctx,
+int z_sendmany_sign_inputs(struct wallet_rpc_context *ctx,
                                   const struct chain_params *cp,
                                   struct wallet_tx *wtx,
                                   const struct db_wallet_utxo *db_selected,
@@ -342,6 +334,47 @@ bool z_sendmany_minconf(const struct json_value *params, int *min_conf)
         return false;
     }
     *min_conf = (int)json_get_int(v);
+    return true;
+}
+
+/* Admit a finished transaction to the wallet and pool, make it durable, sync
+ * it into node.db, relay it and answer its txid. Frees wtx->tx on every
+ * return. */
+bool z_sendmany_admit_relay(struct wallet_rpc_context *ctx,
+                            struct wallet_tx *wtx, struct json_value *result)
+{
+    struct zcl_result commit = wallet_commit_from_context(ctx, wtx);
+    if (!commit.ok) {
+        json_set_str(result, commit.message);
+        transaction_free(&wtx->tx);
+        LOG_FAIL("wallet_shielded", "z_sendmany: wallet commit failed "
+                                    "(code=%d): %s", commit.code,
+                                    commit.message);
+    }
+
+    struct zcl_result persisted =
+        wallet_persist_commit_before_relay(ctx, wtx);
+    if (!persisted.ok) {
+        json_set_str(result, persisted.message);
+        transaction_free(&wtx->tx);
+        LOG_FAIL("wallet_shielded",
+                 "z_sendmany: pre-relay durability failed (code=%d): %s",
+                 persisted.code, persisted.message);
+    }
+
+    if (wallet_ctx_db_ready(ctx))
+        node_db_sync_wallet_tx(ctx->node_db, &wtx->tx, ctx->wallet, 0);
+
+    if (!wallet_send_relay(ctx, wtx)) {
+        json_set_str(result, wallet_send_relay_failure_text());
+        transaction_free(&wtx->tx);
+        LOG_FAIL("wallet_shielded", "z_sendmany: private broadcast not queued");
+    }
+
+    char txid[65];
+    uint256_get_hex(&wtx->tx.hash, txid);
+    json_set_str(result, txid);
+    transaction_free(&wtx->tx);
     return true;
 }
 
@@ -772,39 +805,7 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
         return true;
     }
 
-    struct zcl_result commit = wallet_commit_from_context(ctx, &wtx);
-    if (!commit.ok) {
-        json_set_str(result, commit.message);
-        transaction_free(&wtx.tx);
-        LOG_FAIL("wallet_shielded", "z_sendmany: wallet commit failed "
-                                    "(code=%d): %s", commit.code,
-                                    commit.message);
-    }
-
-    struct zcl_result persisted =
-        wallet_persist_commit_before_relay(ctx, &wtx);
-    if (!persisted.ok) {
-        json_set_str(result, persisted.message);
-        transaction_free(&wtx.tx);
-        LOG_FAIL("wallet_shielded",
-                 "z_sendmany: pre-relay durability failed (code=%d): %s",
-                 persisted.code, persisted.message);
-    }
-
-    if (wallet_ctx_db_ready(ctx))
-        node_db_sync_wallet_tx(ctx->node_db, &wtx.tx, ctx->wallet, 0);
-
-    if (!wallet_send_relay(ctx, &wtx)) {
-        json_set_str(result, wallet_send_relay_failure_text());
-        transaction_free(&wtx.tx);
-        LOG_FAIL("wallet_shielded", "z_sendmany: private broadcast not queued");
-    }
-
-    char txid[65];
-    uint256_get_hex(&wtx.tx.hash, txid);
-    json_set_str(result, txid);
-    transaction_free(&wtx.tx);
-    return true;
+    return z_sendmany_admit_relay(ctx, &wtx, result);
 }
 
 static bool z_sendmany_plain(const struct json_value *params, bool help,

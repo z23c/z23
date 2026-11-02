@@ -179,6 +179,7 @@ static const struct rpc_timeout_method_budget k_method_budgets[] = {
     { "z_getnewaddress",           RPC_WALLET_MUTATION_TIMEOUT_MS },
     { "z_getreceiveaddress",       RPC_WALLET_MUTATION_TIMEOUT_MS },
     { "z_sendmany",                0 },
+    { "z_shieldaddress",           0 },
     { "rescanwitnesses",           0 },
     { "vault_intent_plan",         0 },
     { "vault_intent_fanout_plan",  0 },

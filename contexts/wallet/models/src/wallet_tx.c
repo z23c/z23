@@ -649,6 +649,112 @@ int db_wallet_utxo_select_coins_for_address_above(
     return count;
 }
 
+/* Every mature coin of one address, value DESC then outpoint, so a capped
+ * selection is the same on every run. Rows beyond `max` are counted, not read. */
+int db_wallet_utxo_select_all_for_address(
+    struct node_db *ndb, int current_height, const uint8_t address_hash[20],
+    int32_t floor_height, struct db_wallet_utxo *out, size_t max,
+    size_t *remaining)
+{
+    if (remaining)
+        *remaining = 0;
+    if (!ndb || !ndb->open || !address_hash || !out)
+        return 0;
+    sqlite3_stmt *s = NULL;
+    sqlite3_prepare_v2(ndb->db,
+        "SELECT txid,vout,value,address_hash,script,height,is_coinbase"
+        " FROM wallet_utxos"
+        " WHERE spent_txid IS NULL"
+        "   AND address_hash = ?"
+        "   AND (? < 0 OR height > ?)"
+        "   AND (is_coinbase=0 OR height <= ?)"
+        " ORDER BY value DESC, txid, vout",
+        -1, &s, NULL);
+    if (!s) LOG_RETURN(-1, "wallet_tx", "prepare failed: %s", sqlite3_errmsg(ndb->db));
+    AR_BIND_BLOB(s, 1, address_hash, 20);
+    AR_BIND_INT(s, 2, floor_height);
+    AR_BIND_INT(s, 3, floor_height);
+    AR_BIND_INT(s, 4, current_height - 100);
+    size_t count = 0, beyond = 0;
+    bool failed = false;
+    while (AR_STEP_ROW(s) && !failed) {
+        if (count >= max) {
+            beyond++;
+            continue;
+        }
+        db_wallet_utxo_read_row(s, 0, &out[count]);
+        failed = out[count].script_len > 0 && !out[count].script;
+        if (failed)
+            LOG_ERROR("wallet_tx", "select_all: script allocation failed");
+        count++;
+    }
+    AR_FINALIZE(s);
+    if (failed) {
+        for (size_t i = 0; i < count; i++)
+            db_wallet_utxo_free(&out[i]);
+        return -1;
+    }
+    if (remaining)
+        *remaining = beyond;
+    return (int)count;
+}
+
+/* Coinbase value of one address that is not yet spendable. */
+bool db_wallet_utxo_immature_for_address(struct node_db *ndb,
+                                         int current_height,
+                                         const uint8_t address_hash[20],
+                                         int32_t floor_height, int64_t *value)
+{
+    if (value)
+        *value = 0;
+    if (!ndb || !ndb->open || !address_hash || !value)
+        return false;
+    sqlite3_stmt *s = NULL;
+    sqlite3_prepare_v2(ndb->db,
+        "SELECT COALESCE(SUM(value),0) FROM wallet_utxos"
+        " WHERE spent_txid IS NULL AND address_hash = ?"
+        "   AND (? < 0 OR height > ?)"
+        "   AND is_coinbase=1 AND height > ?",
+        -1, &s, NULL);
+    if (!s) LOG_RETURN(false, "wallet_tx", "prepare failed: %s", sqlite3_errmsg(ndb->db));
+    AR_BIND_BLOB(s, 1, address_hash, 20);
+    AR_BIND_INT(s, 2, floor_height);
+    AR_BIND_INT(s, 3, floor_height);
+    AR_BIND_INT(s, 4, current_height - 100);
+    bool ok = AR_STEP_ROW(s);
+    if (ok)
+        *value = AR_COL_INT(s, 0);
+    AR_FINALIZE(s);
+    return ok;
+}
+
+/* The address with the largest mature total, ties by the lower hash. */
+bool db_wallet_utxo_largest_address(struct node_db *ndb, int current_height,
+                                    int32_t floor_height,
+                                    uint8_t address_hash[20])
+{
+    if (!ndb || !ndb->open || !address_hash)
+        return false;
+    sqlite3_stmt *s = NULL;
+    sqlite3_prepare_v2(ndb->db,
+        "SELECT address_hash FROM wallet_utxos"
+        " WHERE spent_txid IS NULL"
+        "   AND (? < 0 OR height > ?)"
+        "   AND (is_coinbase=0 OR height <= ?)"
+        " GROUP BY address_hash ORDER BY SUM(value) DESC, address_hash"
+        " LIMIT 1",
+        -1, &s, NULL);
+    if (!s) LOG_RETURN(false, "wallet_tx", "prepare failed: %s", sqlite3_errmsg(ndb->db));
+    AR_BIND_INT(s, 1, floor_height);
+    AR_BIND_INT(s, 2, floor_height);
+    AR_BIND_INT(s, 3, current_height - 100);
+    bool found = AR_STEP_ROW(s) && sqlite3_column_bytes(s, 0) == 20;
+    if (found)
+        AR_READ_BLOB(s, 0, address_hash, 20);
+    AR_FINALIZE(s);
+    return found;
+}
+
 bool db_wallet_utxo_delete(struct node_db *ndb,
                             const uint8_t txid[32], uint32_t vout)
 {

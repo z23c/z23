@@ -1349,6 +1349,39 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
     zcl_native_handle_wallet_shielded_send)
+ZCL_COMMAND_READY_COMMAND(
+    "core.wallet.shielded.shield", "core.wallet.shielded", "",
+    "Move one public address into the private balance",
+    "Plan/commit sweep of one public address into the wallet's own newest "
+    "shielded address, in one transaction with no transparent output. The "
+    "caller names no destination and no amount: the node takes every mature "
+    "coin of the address (at most 256; remaining_inputs counts the rest and "
+    "maturing_zat the coinbase not yet mature) and pays total minus the fee, "
+    "so there is no change. from may be omitted: the address with the largest "
+    "mature total is used. Without confirm, a non-mutating plan with from, to, "
+    "input_count, coinbase_input_count, total_zat, fee_zat, amount_zat, "
+    "remaining_inputs, maturing_zat and a plan_token that binds scope, from, "
+    "to, input_count, total, fee and idempotency key; with confirm:true, the "
+    "transaction id (stage=committed). The commit refuses with "
+    "PLAN_TOKEN_MISMATCH when the coins or the private address changed since "
+    "the plan, FEE_CHANGED when the wallet fee moved, NOTHING_TO_SHIELD when "
+    "the mature total does not exceed the fee, NO_PRIVATE_ADDRESS when the "
+    "wallet has no shielded address (it creates none), and PROVING_UNAVAILABLE "
+    "when the node cannot prove. idempotency_key is required and recorded "
+    "durably before anything is built: a repeat returns the earlier txid "
+    "(replayed=true), SEND_IN_PROGRESS or SEND_OUTCOME_UNKNOWN and never sends "
+    "again.", 0,
+    "shielded,shield,sweep,private,t2z",
+    "zcl.core_shielded_shield.input.v1", "zcl.shielded_shield.v1",
+    "wallet_scope,from,fee_zat,idempotency_key,plan_token,confirm", "",
+    "z23 core wallet shielded shield --input='{\"wallet_scope\":\"dev\",\"idempotency_key\":\"shield-2026-0001\"}'",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_HIGH,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_wallet_shielded_shield)
 ZCL_COMMAND_BRANCH("core.wallet.backup", "core.wallet", "Wallet backup",
                    ZCL_COMMAND_LAYER_CORE)
 ZCL_COMMAND_READY_READ(

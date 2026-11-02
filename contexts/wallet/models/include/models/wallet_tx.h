@@ -176,6 +176,29 @@ int db_wallet_utxo_select_coins_for_address_above(
     const uint8_t address_hash[20], int32_t floor_height,
     struct db_wallet_utxo *out, size_t max);
 
+/* Every mature coin of one address: unspent, mature coinbase only, above
+ * `floor_height` (-1 excludes nothing), value DESC then outpoint. At most `max`
+ * rows are written to `out`; `*remaining` counts the qualifying rows beyond
+ * them. Returns the rows written (caller frees each with db_wallet_utxo_free),
+ * or -1 with nothing written when a row could not be read. */
+int db_wallet_utxo_select_all_for_address(
+    struct node_db *ndb, int current_height, const uint8_t address_hash[20],
+    int32_t floor_height, struct db_wallet_utxo *out, size_t max,
+    size_t *remaining);
+
+/* Sum of the address's coinbase value that is not yet mature (above the
+ * floor). False on a query failure. */
+bool db_wallet_utxo_immature_for_address(struct node_db *ndb,
+                                         int current_height,
+                                         const uint8_t address_hash[20],
+                                         int32_t floor_height, int64_t *value);
+
+/* The address holding the largest mature total (ties: lower hash). False when
+ * no address holds a mature coin. */
+bool db_wallet_utxo_largest_address(struct node_db *ndb, int current_height,
+                                    int32_t floor_height,
+                                    uint8_t address_hash[20]);
+
 /* Delete a single wallet UTXO by outpoint. */
 bool db_wallet_utxo_delete(struct node_db *ndb,
                             const uint8_t txid[32], uint32_t vout);

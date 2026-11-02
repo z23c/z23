@@ -140,6 +140,47 @@ const char *z_sendmany_shielded_witness_gate(
 
 bool z_sendmany_minconf(const struct json_value *params, int *min_conf);
 
+/* Transparent-spend build steps shared by z_sendmany (t->t, t->z) and
+ * z_shieldaddress; defined in wallet_shielded_send.c. */
+enum z_sendmany_sign_status {
+    Z_SENDMANY_SIGN_OK = 0,
+    Z_SENDMANY_SIGN_NO_DEST,
+    Z_SENDMANY_SIGN_NO_KEY,
+    Z_SENDMANY_SIGN_SIGHASH,
+    Z_SENDMANY_SIGN_SIGN
+};
+
+/* OVK of the first shielded key, or random bytes when the wallet holds none. */
+void z_sendmany_get_ovk(struct wallet_rpc_context *ctx, uint8_t *ovk);
+
+/* One Sapling output description per recipient; *fail_idx names the output
+ * that failed (set only when false is returned). */
+bool z_sendmany_build_outputs(void *proving_ctx, struct wallet_tx *wtx,
+                              const uint8_t *ovk,
+                              uint8_t (*z_diversifiers)[11],
+                              uint8_t (*z_pk_ds)[32], const int64_t *z_amounts,
+                              uint8_t (*z_memos)[512], const bool *z_has_memo,
+                              size_t num_z_out, size_t *fail_idx);
+
+/* Copy the selected coins into wtx->tx.vin as unsigned inputs. */
+void z_sendmany_fill_inputs(struct wallet_tx *wtx,
+                            const struct db_wallet_utxo *db_selected,
+                            size_t num_selected);
+
+/* Sign every selected input under wallet->cs, wiping each private key after
+ * use; *fail_idx names the failing input (set only on a failure status). */
+int z_sendmany_sign_inputs(struct wallet_rpc_context *ctx,
+                           const struct chain_params *cp,
+                           struct wallet_tx *wtx,
+                           const struct db_wallet_utxo *db_selected,
+                           size_t num_selected, int height, size_t *fail_idx);
+
+/* Admit a finished transaction to the wallet and pool, make it durable, sync
+ * it into node.db, relay it and answer its txid in `result`. Frees wtx->tx on
+ * every return. */
+bool z_sendmany_admit_relay(struct wallet_rpc_context *ctx,
+                            struct wallet_tx *wtx, struct json_value *result);
+
 /* wallet_shielded_keys.c — key/viewing-key import/export + memo */
 bool rpc_z_exportkey(const struct json_value *params, bool help,
                      struct json_value *result);

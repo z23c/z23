@@ -10,6 +10,7 @@
  * controllers/wallet_shielded_internal.h. */
 
 #include "controllers/wallet_shielded_internal.h"
+#include "controllers/wallet_shield_address.h"
 #include "wallet/wallet_lock.h"
 
 /* Decode a 512-byte Sapling memo into a JSON field on `entry`, matching the
@@ -587,6 +588,7 @@ void register_wallet_shielded_rpc_commands(struct rpc_table *t)
         { "wallet", "z_getreceiveaddress", rpc_z_getreceiveaddress,  false },
         { "wallet", "z_listaddresses",     rpc_z_listaddresses,      false },
         { "wallet", "z_sendmany",          rpc_z_sendmany_checkpoint,         false },
+        { "wallet", "z_shieldaddress",     rpc_z_shieldaddress,      false },
         { "wallet", "z_getbalance",        rpc_z_getbalance,         false },
         { "wallet", "z_gettotalbalance",   rpc_z_gettotalbalance,    false },
         { "wallet", "z_listunspent",       rpc_z_listunspent,        false },
