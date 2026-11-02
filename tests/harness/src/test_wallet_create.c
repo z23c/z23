@@ -1704,24 +1704,21 @@ static void wcr_note_buffer_released(const void *buf, size_t bytes)
     wcr_released.zero[i] = wcr_all_zero(buf, bytes);
 }
 
-static int t_wallet_free_wipes_sapling_keys(void)
+/* A wallet holding a Sapling seed and spending key, and a BIP32 master key. */
+static bool wcr_make_keyed_wallet(struct wallet *w, const uint8_t seed[32])
 {
-    int failures = 0;
-    struct wallet *w = calloc(1, sizeof(*w));
-    uint8_t seed[32], div[ZC_DIVERSIFIER_SIZE], pk_d[32];
-    memset(seed, 0x5a, sizeof(seed));
-    bool made = w != NULL;
-    if (made) {
-        wallet_init(w);
-        made = sapling_keystore_set_seed(&w->sapling_keys, seed) &&
-               sapling_keystore_new_address(&w->sapling_keys, div, pk_d) &&
-               wallet_init_hd(w, seed, sizeof(seed));
-    }
-    /* 65 notes with a memo, randomness and ivk: the append that crosses 64
-     * grows the buffer, then wallet_free releases the grown one. */
-    memset(&wcr_released, 0, sizeof(wcr_released));
-    wallet_set_note_buffer_observer_for_test(wcr_note_buffer_released);
-    bool noted = made;
+    uint8_t div[ZC_DIVERSIFIER_SIZE], pk_d[32];
+    wallet_init(w);
+    return sapling_keystore_set_seed(&w->sapling_keys, seed) &&
+           sapling_keystore_new_address(&w->sapling_keys, div, pk_d) &&
+           wallet_init_hd(w, seed, 32);
+}
+
+/* 65 notes with a memo, randomness and ivk: the append that crosses 64 grows
+ * the buffer. */
+static bool wcr_add_notes(struct wallet *w)
+{
+    bool noted = true;
     for (uint32_t i = 0; noted && i < 65; i++) {
         struct sapling_received_note n;
         memset(&n, 0x5a, sizeof(n));
@@ -1730,6 +1727,13 @@ static int t_wallet_free_wipes_sapling_keys(void)
         n.output_index = i;
         noted = wallet_add_sapling_note(w, &n);
     }
+    return noted;
+}
+
+/* What a wallet holds before it is freed. */
+static int wcr_held_before_free(const struct wallet *w, bool made, bool noted)
+{
+    int failures = 0;
     WCR_CHECK("setup: a wallet holds a Sapling seed, a spending key and a BIP32 master key",
               made && w->has_master_key &&
               !wcr_all_zero(&w->master_key, sizeof(w->master_key)) &&
@@ -1744,9 +1748,13 @@ static int t_wallet_free_wipes_sapling_keys(void)
     WCR_CHECK("growing the note buffer cleanses the old one before freeing it",
               wcr_released.calls == 1 && wcr_released.zero[0] &&
               wcr_released.bytes[0] == 64 * sizeof(struct sapling_received_note));
-    if (made)
-        wallet_free(w);
-    wallet_set_note_buffer_observer_for_test(NULL);
+    return failures;
+}
+
+/* What the freed wallet's struct still holds. */
+static int wcr_held_after_free(const struct wallet *w, bool made)
+{
+    int failures = 0;
     WCR_CHECK("wallet_free cleanses the note buffer before freeing it",
               wcr_released.calls == 2 && wcr_released.zero[1] &&
               wcr_released.bytes[1] == 128 * sizeof(struct sapling_received_note));
@@ -1766,6 +1774,24 @@ static int t_wallet_free_wipes_sapling_keys(void)
     WCR_CHECK("wallet_free leaves no spending key in the struct",
               made && wcr_all_zero(&w->sapling_keys.keys[0].xsk,
                                    sizeof(w->sapling_keys.keys[0].xsk)));
+    return failures;
+}
+
+static int t_wallet_free_wipes_sapling_keys(void)
+{
+    int failures = 0;
+    struct wallet *w = calloc(1, sizeof(*w));
+    uint8_t seed[32];
+    memset(seed, 0x5a, sizeof(seed));
+    memset(&wcr_released, 0, sizeof(wcr_released));
+    wallet_set_note_buffer_observer_for_test(wcr_note_buffer_released);
+    bool made = w != NULL && wcr_make_keyed_wallet(w, seed);
+    bool noted = made && wcr_add_notes(w);
+    failures += wcr_held_before_free(w, made, noted);
+    if (made)
+        wallet_free(w);
+    wallet_set_note_buffer_observer_for_test(NULL);
+    failures += wcr_held_after_free(w, made);
     memory_cleanse(seed, sizeof(seed));
     free(w);
     return failures;
