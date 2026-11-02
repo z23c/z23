@@ -550,11 +550,13 @@ static int utxo_apply_reorg_find_fork(sqlite3 *db, struct main_state *ms,
     return fork;
 }
 
-/* Read the persisted cursor and run the divergence check on it. Writes the
- * raw cursor through *out_cursor and the clamped next-apply height through
- * *out_c (both defined on every return path) and returns 1 when an unwind
- * is needed, 0 when there is nothing to unwind (cursor 0 or no divergence),
- * -1 when the cursor is out of range, -2 on a delta read error. */
+/* Read the persisted cursor and run the divergence check on it. Always
+ * writes the raw cursor through *out_cursor (0 when none is persisted) and
+ * writes the next-apply height through *out_c only once the cursor is in
+ * range (otherwise *out_c stays 0). Returns 1 when the recorded branch
+ * diverged and an unwind is needed, 0 when there is nothing to unwind
+ * (cursor 0 or no divergence), -1 when the cursor is out of range, -2 on a
+ * delta read error. */
 static int utxo_apply_reorg_scan_needed(sqlite3 *db, struct main_state *ms,
                                         uint64_t *out_cursor, int *out_c)
 {
@@ -565,7 +567,7 @@ static int utxo_apply_reorg_scan_needed(sqlite3 *db, struct main_state *ms,
     if (cursor == 0)
         return 0;
     if (cursor > (uint64_t)INT32_MAX)
-        return -1;
+        return -1;  // raw-return-ok:caller logs the out-of-range cursor
     int C = (int)cursor;  /* next height to apply; [0, C) already applied */
 
     /* The stage is itself the tip authority (tip_finalize sets the in-mem
@@ -573,7 +575,10 @@ static int utxo_apply_reorg_scan_needed(sqlite3 *db, struct main_state *ms,
      * divergence detection + fork walk below run against that tip. */
 
     *out_c = C;
-    return utxo_apply_reorg_detect_divergence(db, ms, C) < 0 ? -2 : 1;
+    int diverged = utxo_apply_reorg_detect_divergence(db, ms, C);
+    if (diverged < 0)
+        return -2;
+    return diverged == 0 ? 0 : 1;
 }
 
 /* True when the fork walk found no fork and the finality floor is above
@@ -707,8 +712,8 @@ bool utxo_apply_reorg_unwind_if_needed(sqlite3 *db,
     utxo_apply_unwind_txn_sql(ua_batched, &ua_open, &ua_undo, &ua_done);
     char *err = NULL;
     if (sqlite3_exec(db, ua_open, NULL, NULL, &err) != SQLITE_OK) {
-        LOG_WARN("utxo_apply", "[utxo_apply] unwind BEGIN failed: %s", err ? err : "(no message)");
-        sqlite3_free(err);
+        LOG_WARN("utxo_apply", "[utxo_apply] unwind BEGIN failed: %s", utxo_apply_reorg_str_or(err, "(no message)"));
+        if (err) sqlite3_free(err);
         return false;
     }
     if (!utxo_apply_reorg_unwind_writes(db, C, fork_plus1)) {
@@ -716,8 +721,8 @@ bool utxo_apply_reorg_unwind_if_needed(sqlite3 *db,
         return false;
     }
     if (sqlite3_exec(db, ua_done, NULL, NULL, &err) != SQLITE_OK) {
-        LOG_WARN("utxo_apply", "[utxo_apply] unwind COMMIT failed: %s", err ? err : "(no message)");
-        sqlite3_free(err);
+        LOG_WARN("utxo_apply", "[utxo_apply] unwind COMMIT failed: %s", utxo_apply_reorg_str_or(err, "(no message)"));
+        if (err) sqlite3_free(err);
         sqlite3_exec(db, ua_undo, NULL, NULL, NULL);
         return false;
     }
