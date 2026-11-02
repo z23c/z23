@@ -113,6 +113,13 @@ static int save_path_case(void)
         d[0].results[0].txid[0] = 1;
         d[0].results[0].value = 7;
         memset(d[0].results[0].rcm, 0xa5, sizeof(d[0].results[0].rcm));
+        memset(d[0].results[0].ivk, 0x11, sizeof(d[0].results[0].ivk));
+        memset(d[0].results[0].diversifier, 0x22,
+               sizeof(d[0].results[0].diversifier));
+        memset(d[0].results[0].pk_d, 0x33, sizeof(d[0].results[0].pk_d));
+        memset(d[0].results[0].cm, 0x44, sizeof(d[0].results[0].cm));
+        memset(d[0].results[0].nullifier, 0x55,
+               sizeof(d[0].results[0].nullifier));
         memset(d[0].tw.sapling_notes, 0xa5,
                2 * sizeof(struct sapling_received_note));
     }
