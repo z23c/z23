@@ -304,6 +304,21 @@ static bool audit_row_above(sqlite3 *db, struct block_index *best_header,
     return true;
 }
 
+/* The fork point owns the audit when the tip failed, or when the window holds
+ * no child of it: a row above a tip that nothing extends would otherwise be
+ * rewound on every pass. */
+static bool fork_owns_audit(struct active_chain *chain,
+                            struct block_index *tip,
+                            struct block_index *fork)
+{
+    if (!fork)
+        return false;
+    if (block_has_any_failure(tip))
+        return true;
+    struct block_index *next = active_chain_at(chain, tip->nHeight + 1);
+    return !next || next->pprev != tip;
+}
+
 bool header_admit_forward_rewind_target(sqlite3 *db,
                                         struct block_index *best_header,
                                         struct active_chain *chain,
@@ -329,11 +344,12 @@ bool header_admit_forward_rewind_target(sqlite3 *db,
      * When it sits on an abandoned block, the replacement branch extends the
      * fork point below it, so audit the row above that point: a stale sibling
      * row is repaired and the replacement body requested. A failed tip is
-     * audited from the fork point alone: no row can extend it, so a row above
+     * audited from the fork point alone, as is a tip the window does not extend:
+     * no row can extend it, so a row above
      * it would be rewound on every pass. */
     struct block_index *tip = active_chain_tip(chain);
     struct block_index *fork = fork_point_below_tip(best_header, tip);
-    if (fork && block_has_any_failure(tip))
+    if (fork_owns_audit(chain, tip, fork))
         return audit_row_above(db, best_header, chain, cursor, fork,
                                out_target, out_reason);
     if (!audit_row_above(db, best_header, chain, cursor, tip, out_target,

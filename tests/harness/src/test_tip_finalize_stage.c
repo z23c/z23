@@ -2866,9 +2866,8 @@ static int case_reorg_stale_fork_point(bool failed)
         header_admit_stage_step_once();
     TF_CHECK("stale_fork: row 3 still names B1",
              header_admit_stage_has_record(3, &h1));
-    if (failed)
-        TF_CHECK("stale_fork_failed: no further header_admit rewind",
-                 header_admit_stage_reorg_rewind_total() == ha_settled);
+    TF_CHECK("stale_fork: no further header_admit rewind",
+             header_admit_stage_reorg_rewind_total() == ha_settled);
 
     header_admit_stage_shutdown();
     tf_teardown(dir, &ms, &sc);
