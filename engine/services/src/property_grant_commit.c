@@ -313,142 +313,165 @@ static bool commit_seal_receipt(
     return sealed;
 }
 
-/* One COMMIT attempt. Returns AUTHORITY_CHANGED when the store moved while the
- * catalog was being read outside the lock; property_grant_service_commit()
- * retries exactly once and then gives up rather than committing over a state
- * it cannot show was coherent. */
-static enum property_grant_reason commit_attempt(
-    const char *plan_id, const char *idempotency_key,
-    struct property_grant_commit_result *out)
+/* Lock held on entry, RELEASED on every true return. Runs commit_precheck()
+ * for one COMMIT attempt; true means the outcome ended the attempt — `*reason`
+ * is the answer and the unlock (and any log line) is done. False means
+ * PROCEED, lock still held. */
+static bool commit_precheck_report(
+    const char *plan_id, const struct property_grant_plan *plan,
+    const char *idempotency_key, int64_t now,
+    struct property_grant_commit_result *out,
+    enum property_grant_reason *reason)
 {
-    int64_t now = 0, height = 0;
-    pg_now(&now, &height);
-
-    pthread_mutex_lock(&g_pg_store.lock);
-
-    struct property_grant_plan *plan = pg_find_plan_locked(plan_id);
-    if (!plan) {
-        pthread_mutex_unlock(&g_pg_store.lock);
-        LOG_WARN(PGC_LOG, "commit: no plan %s", plan_id);
-        return PROPERTY_GRANT_PLAN_UNKNOWN;
-    }
-
+    *reason = PROPERTY_GRANT_OK;
     uint64_t seq = 0;
     char reused_grant[METAVERSE_GRANT_ID_LEN + 1];
     enum commit_pre pre = commit_precheck(plan, idempotency_key, now, out,
                                           &seq, reused_grant);
     if (pre == COMMIT_PRE_KEY_REUSED) {
         pthread_mutex_unlock(&g_pg_store.lock);
-        LOG_WARN(PGC_LOG,
-                 "commit: idempotency key on plan %s already names receipt %llu "
-                 "of grant %s, and that receipt records a different request — "
-                 "replaying it would report success for an action nobody "
-                 "asked for, and running this one would put two receipts under "
-                 "one key",
-                 plan_id, (unsigned long long)seq, reused_grant);
-        return PROPERTY_GRANT_IDEMPOTENCY_KEY_REUSED;
+        LOG_WARN_IN("commit_attempt", PGC_LOG,
+                    "commit: idempotency key on plan %s already names receipt %llu "
+                    "of grant %s, and that receipt records a different request — "
+                    "replaying it would report success for an action nobody "
+                    "asked for, and running this one would put two receipts under "
+                    "one key",
+                    plan_id, (unsigned long long)seq, reused_grant);
+        *reason = PROPERTY_GRANT_IDEMPOTENCY_KEY_REUSED;
+        return true;
     }
     if (pre == COMMIT_PRE_REPLAYED) {
         pthread_mutex_unlock(&g_pg_store.lock);
-        return PROPERTY_GRANT_OK;
+        return true;
     }
     if (pre == COMMIT_PRE_COMMITTED) {
         pthread_mutex_unlock(&g_pg_store.lock);
-        LOG_WARN(PGC_LOG, "commit: plan %s already committed (seq %llu)",
-                 plan_id, (unsigned long long)plan->receipt_seq);
-        return PROPERTY_GRANT_PLAN_ALREADY_COMMITTED;
+        LOG_WARN_IN("commit_attempt", PGC_LOG,
+                    "commit: plan %s already committed (seq %llu)",
+                    plan_id, (unsigned long long)plan->receipt_seq);
+        *reason = PROPERTY_GRANT_PLAN_ALREADY_COMMITTED;
+        return true;
     }
     if (pre == COMMIT_PRE_EXPIRED) {
         pthread_mutex_unlock(&g_pg_store.lock);
-        LOG_WARN(PGC_LOG, "commit: plan %s expired at %lld, now %lld", plan_id,
-                 (long long)plan->expires_unix, (long long)now);
-        return PROPERTY_GRANT_PLAN_EXPIRED;
+        LOG_WARN_IN("commit_attempt", PGC_LOG,
+                    "commit: plan %s expired at %lld, now %lld", plan_id,
+                    (long long)plan->expires_unix, (long long)now);
+        *reason = PROPERTY_GRANT_PLAN_EXPIRED;
+        return true;
     }
+    return false;
+}
+
+/* Lock held on entry, RELEASED on every true return. Re-checks 1-3 of one
+ * COMMIT attempt: the grant record as it is now, then the catalog's current
+ * ownership and revision. True means a re-check ended the attempt — `*reason`
+ * is the answer and the unlock and log line are done. False means all passed,
+ * lock held, `*planp` and `*gp` re-resolved and `*view_out` the catalog's
+ * answer. */
+static bool commit_reread_authority(
+    const char *plan_id, struct property_grant_plan **planp,
+    struct metaverse_grant **gp, struct metaverse_catalog_view *view_out,
+    enum property_grant_reason *reason)
+{
+    *reason = PROPERTY_GRANT_OK;
+    memset(view_out, 0, sizeof(*view_out));
 
     /* ── Re-check 1: the grant record AS IT IS NOW ──────────────────────── */
+    struct property_grant_plan *plan = *planp;
     struct metaverse_grant *g = pg_find_grant(plan->grant_id);
+    *gp = g;
     if (!g) {
         pthread_mutex_unlock(&g_pg_store.lock);
-        LOG_WARN(PGC_LOG, "commit: grant %s no longer in the store",
-                 plan->grant_id);
-        return PROPERTY_GRANT_GRANT_UNKNOWN;
+        LOG_WARN_IN("commit_attempt", PGC_LOG,
+                    "commit: grant %s no longer in the store",
+                    plan->grant_id);
+        *reason = PROPERTY_GRANT_GRANT_UNKNOWN;
+        return true;
     }
 
+    /* A local view value, so the commit messages below name `plan` and `view`
+     * exactly as commit_attempt's own locals did. */
     struct metaverse_catalog_view view;
-    enum commit_catalog cat = commit_read_catalog(plan_id, &plan, &g, &view);
+    enum commit_catalog cat = commit_read_catalog(plan_id, planp, gp, &view);
+    plan = *planp;
     if (cat == COMMIT_CAT_NO_LOOKUP) {
         pthread_mutex_unlock(&g_pg_store.lock);
-        LOG_WARN(PGC_LOG,
-                 "commit: no property catalog installed — refusing to commit "
-                 "an action whose current ownership cannot be confirmed");
-        return PROPERTY_GRANT_CATALOG_UNAVAILABLE;
+        LOG_WARN_IN("commit_attempt", PGC_LOG,
+                    "commit: no property catalog installed — refusing to commit "
+                    "an action whose current ownership cannot be confirmed");
+        *reason = PROPERTY_GRANT_CATALOG_UNAVAILABLE;
+        return true;
     }
     if (cat == COMMIT_CAT_MOVED) {
         pthread_mutex_unlock(&g_pg_store.lock);
-        LOG_WARN(PGC_LOG,
-                 "commit: the store moved while reading the catalog for plan "
-                 "%s — retrying", plan_id);
-        return PROPERTY_GRANT_AUTHORITY_CHANGED;
+        LOG_WARN_IN("commit_attempt", PGC_LOG,
+                    "commit: the store moved while reading the catalog for plan "
+                    "%s — retrying", plan_id);
+        *reason = PROPERTY_GRANT_AUTHORITY_CHANGED;
+        return true;
     }
     if (cat == COMMIT_CAT_VANISHED) {
         pthread_mutex_unlock(&g_pg_store.lock);
-        LOG_ERROR(PGC_LOG,
-                  "commit: plan or grant vanished at an unchanged authority "
-                  "generation (plan %s)", plan_id);
-        return PROPERTY_GRANT_AUTHORITY_CHANGED;
+        LOG_ERROR_IN("commit_attempt", PGC_LOG,
+                     "commit: plan or grant vanished at an unchanged authority "
+                     "generation (plan %s)", plan_id);
+        *reason = PROPERTY_GRANT_AUTHORITY_CHANGED;
+        return true;
     }
     if (cat == COMMIT_CAT_NOT_FOUND) {
         pthread_mutex_unlock(&g_pg_store.lock);
-        LOG_WARN(PGC_LOG, "commit: property not in the catalog (plan %s)",
-                 plan_id);
-        return PROPERTY_GRANT_PROPERTY_UNKNOWN;
+        LOG_WARN_IN("commit_attempt", PGC_LOG,
+                    "commit: property not in the catalog (plan %s)",
+                    plan_id);
+        *reason = PROPERTY_GRANT_PROPERTY_UNKNOWN;
+        return true;
     }
     if (cat == COMMIT_CAT_OWNER_MISMATCH) {
         pthread_mutex_unlock(&g_pg_store.lock);
-        LOG_WARN(PGC_LOG, "commit: controller changed since plan %s", plan_id);
-        return PROPERTY_GRANT_OWNER_MISMATCH;
+        LOG_WARN_IN("commit_attempt", PGC_LOG,
+                    "commit: controller changed since plan %s", plan_id);
+        *reason = PROPERTY_GRANT_OWNER_MISMATCH;
+        return true;
     }
     if (cat == COMMIT_CAT_STALE_REVISION) {
         pthread_mutex_unlock(&g_pg_store.lock);
-        LOG_WARN(PGC_LOG,
-                 "commit: stale revision — plan %s saw %lld, catalog now %lld",
-                 plan_id, (long long)plan->property_revision,
-                 (long long)view.revision);
-        return PROPERTY_GRANT_STALE_REVISION;
+        LOG_WARN_IN("commit_attempt", PGC_LOG,
+                    "commit: stale revision — plan %s saw %lld, catalog now %lld",
+                    plan_id, (long long)plan->property_revision,
+                    (long long)view.revision);
+        *reason = PROPERTY_GRANT_STALE_REVISION;
+        return true;
     }
+    *view_out = view;
+    return false;
+}
 
-    /* ── Re-check 4: the FULL capability check, run fresh ───────────────── */
-    struct metaverse_action_request req = plan->request;
-    req.now_unix = now;
-    req.height = height;
-
-    const struct metaverse_grant *anc[METAVERSE_GRANT_MAX_DEPTH];
-    size_t anc_count = 0;
-    enum metaverse_grant_verdict v = METAVERSE_GRANT_OK;
-    enum commit_cap cap = commit_check_capability(g, &req, anc, &anc_count, &v);
-    if (cap == COMMIT_CAP_MISSING_ANCESTOR) {
-        pthread_mutex_unlock(&g_pg_store.lock);
-        LOG_WARN(PGC_LOG, "commit: grant %s has a missing ancestor",
-                 g->grant_id);
-        return PROPERTY_GRANT_ANCESTOR_REVOKED;
-    }
-    if (cap == COMMIT_CAP_REFUSED) {
-        pthread_mutex_unlock(&g_pg_store.lock);
-        LOG_WARN(PGC_LOG, "commit: grant %s refused at commit time (%s)",
-                 g->grant_id, metaverse_grant_verdict_token(v));
-        return property_grant_reason_from_verdict(v);
-    }
+/* Lock held on entry, RELEASED on every return. The recording half of one
+ * COMMIT attempt whose re-checks all passed: capacity and signing key, the
+ * lineage resolve and copy, the all-or-none debit of grant and ancestors with
+ * a whole-record restore on every exit that mints no receipt, then the sealed
+ * receipt's append and the authority bump. */
+static enum property_grant_reason commit_charge_and_seal(
+    struct property_grant_plan *plan, struct metaverse_grant *g,
+    const struct metaverse_action_request *req, const char *idempotency_key,
+    size_t anc_count, int64_t revision, int64_t height, int64_t now,
+    struct property_grant_commit_result *out)
+{
+    memset(out, 0, sizeof(*out));
 
     /* ── Everything passed. Record the effect, then seal a receipt. ─────── */
     if (g_pg_store.receipt_count >= PROPERTY_GRANT_MAX_RECEIPTS) {
         pthread_mutex_unlock(&g_pg_store.lock);
-        LOG_ERROR(PGC_LOG, "commit: receipt store full (cap %d)",
-                  PROPERTY_GRANT_MAX_RECEIPTS);
+        LOG_ERROR_IN("commit_attempt", PGC_LOG,
+                     "commit: receipt store full (cap %d)",
+                     PROPERTY_GRANT_MAX_RECEIPTS);
         return PROPERTY_GRANT_STORE_FULL;
     }
     if (!pg_ensure_key()) {
         pthread_mutex_unlock(&g_pg_store.lock);
-        LOG_ERROR(PGC_LOG, "commit: no receipt signing key available");
+        LOG_ERROR_IN("commit_attempt", PGC_LOG,
+                     "commit: no receipt signing key available");
         return PROPERTY_GRANT_SIGNING_KEY_UNAVAILABLE;
     }
 
@@ -482,10 +505,10 @@ static enum property_grant_reason commit_attempt(
     if (!commit_resolve_lineage(g, anc_count, lineage, lineage_before, missing,
                                 acting)) {
         pthread_mutex_unlock(&g_pg_store.lock);
-        LOG_ERROR(PGC_LOG,
-                  "commit: ancestor %s of grant %s vanished between the "
-                  "capability check and the debit",
-                  missing, acting);
+        LOG_ERROR_IN("commit_attempt", PGC_LOG,
+                     "commit: ancestor %s of grant %s vanished between the "
+                     "capability check and the debit",
+                     missing, acting);
         return PROPERTY_GRANT_ANCESTOR_REVOKED;
     }
 
@@ -518,33 +541,33 @@ static enum property_grant_reason commit_attempt(
      * taken: property_grant_service_snapshot() takes the same mutex. */
     const struct metaverse_grant grant_before_effect = *g;
 
-    if (!metaverse_grant_record_commit(g, &req)) {
+    if (!metaverse_grant_record_commit(g, req)) {
         /* It can refuse AFTER having already rolled the rate window, so the
          * restore is not optional on this path either. */
         *g = grant_before_effect;
         pthread_mutex_unlock(&g_pg_store.lock);
-        LOG_ERROR(PGC_LOG,
-                  "commit: grant %s passed the check but rejected the debit",
-                  g->grant_id);
+        LOG_ERROR_IN("commit_attempt", PGC_LOG,
+                     "commit: grant %s passed the check but rejected the debit",
+                     g->grant_id);
         return PROPERTY_GRANT_BUDGET_EXCEEDED;
     }
 
     for (size_t i = 0; i < anc_count; i++) {
-        if (metaverse_grant_record_descendant_charge(lineage[i], &req))
+        if (metaverse_grant_record_descendant_charge(lineage[i], req))
             continue;
         for (size_t j = 0; j < i; j++) *lineage[j] = lineage_before[j];
         *g = grant_before_effect;
         pthread_mutex_unlock(&g_pg_store.lock);
-        LOG_WARN(PGC_LOG,
-                 "commit: grant %s may spend this, but its ancestor %s cannot "
-                 "— the cumulative ceiling binds the whole delegation subtree",
-                 grant_before_effect.grant_id, lineage_before[i].grant_id);
+        LOG_WARN_IN("commit_attempt", PGC_LOG,
+                    "commit: grant %s may spend this, but its ancestor %s cannot "
+                    "— the cumulative ceiling binds the whole delegation subtree",
+                    grant_before_effect.grant_id, lineage_before[i].grant_id);
         return PROPERTY_GRANT_BUDGET_EXCEEDED;
     }
 
     struct metaverse_receipt r;
-    if (!commit_seal_receipt(g, &req, idempotency_key, view.revision, height,
-                             now, &r)) {
+    if (!commit_seal_receipt(g, req, idempotency_key, revision, height, now,
+                             &r)) {
         /* No evidence, so no effect. The restore is byte-exact, which is why
          * this path does NOT bump the authority generation: the record is
          * genuinely unmutated, the receipt array is untouched, and the plan is
@@ -558,8 +581,9 @@ static enum property_grant_reason commit_attempt(
         *g = grant_before_effect;
         for (size_t i = 0; i < anc_count; i++) *lineage[i] = lineage_before[i];
         pthread_mutex_unlock(&g_pg_store.lock);
-        LOG_ERROR(PGC_LOG, "commit: could not seal receipt for grant %s",
-                  g->grant_id);
+        LOG_ERROR_IN("commit_attempt", PGC_LOG,
+                     "commit: could not seal receipt for grant %s",
+                     g->grant_id);
         return PROPERTY_GRANT_RECEIPT_SEAL_FAILED;
     }
 
@@ -576,6 +600,62 @@ static enum property_grant_reason commit_attempt(
     pg_bump_authority();
     pthread_mutex_unlock(&g_pg_store.lock);
     return PROPERTY_GRANT_OK;
+}
+
+/* One COMMIT attempt. Returns AUTHORITY_CHANGED when the store moved while the
+ * catalog was being read outside the lock; property_grant_service_commit()
+ * retries exactly once and then gives up rather than committing over a state
+ * it cannot show was coherent. */
+static enum property_grant_reason commit_attempt(
+    const char *plan_id, const char *idempotency_key,
+    struct property_grant_commit_result *out)
+{
+    int64_t now = 0, height = 0;
+    pg_now(&now, &height);
+
+    pthread_mutex_lock(&g_pg_store.lock);
+
+    struct property_grant_plan *plan = pg_find_plan_locked(plan_id);
+    if (!plan) {
+        pthread_mutex_unlock(&g_pg_store.lock);
+        LOG_WARN(PGC_LOG, "commit: no plan %s", plan_id);
+        return PROPERTY_GRANT_PLAN_UNKNOWN;
+    }
+
+    enum property_grant_reason reason = PROPERTY_GRANT_OK;
+    if (commit_precheck_report(plan_id, plan, idempotency_key, now, out,
+                               &reason))
+        return reason;
+
+    struct metaverse_grant *g = NULL;
+    struct metaverse_catalog_view view;
+    if (commit_reread_authority(plan_id, &plan, &g, &view, &reason))
+        return reason;
+
+    /* ── Re-check 4: the FULL capability check, run fresh ───────────────── */
+    struct metaverse_action_request req = plan->request;
+    req.now_unix = now;
+    req.height = height;
+
+    const struct metaverse_grant *anc[METAVERSE_GRANT_MAX_DEPTH];
+    size_t anc_count = 0;
+    enum metaverse_grant_verdict v = METAVERSE_GRANT_OK;
+    enum commit_cap cap = commit_check_capability(g, &req, anc, &anc_count, &v);
+    if (cap == COMMIT_CAP_MISSING_ANCESTOR) {
+        pthread_mutex_unlock(&g_pg_store.lock);
+        LOG_WARN(PGC_LOG, "commit: grant %s has a missing ancestor",
+                 g->grant_id);
+        return PROPERTY_GRANT_ANCESTOR_REVOKED;
+    }
+    if (cap == COMMIT_CAP_REFUSED) {
+        pthread_mutex_unlock(&g_pg_store.lock);
+        LOG_WARN(PGC_LOG, "commit: grant %s refused at commit time (%s)",
+                 g->grant_id, metaverse_grant_verdict_token(v));
+        return property_grant_reason_from_verdict(v);
+    }
+
+    return commit_charge_and_seal(plan, g, &req, idempotency_key, anc_count,
+                                  view.revision, height, now, out);
 }
 
 enum property_grant_reason property_grant_service_commit(
