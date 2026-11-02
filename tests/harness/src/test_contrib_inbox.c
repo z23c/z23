@@ -697,8 +697,52 @@ static int case_seen_unreadable(void)
 
 /* An events.log that cannot be appended fails the pass, after the current
  * post is finished safely (recorded as seen, escalated). */
+/* True when RLIMIT_FSIZE stops an O_APPEND write to a file already at the
+ * limit with EFBIG. Measured on macOS: the limit is checked against the
+ * descriptor offset (0 for an append) before the write moves to end of file,
+ * so the append succeeds and the case below cannot be set up there. The probe
+ * is the capability itself, run in a child with SIGXFSZ ignored. */
+static bool ci_fsize_stops_append(void)
+{
+    char dir[PATH_MAX], path[PATH_MAX + 16];
+    if (!test_mkdtemp(dir, sizeof(dir), "ci_fsize"))
+        return true; /* cannot probe: run the case and let it judge */
+    (void)snprintf(path, sizeof(path), "%s/probe", dir);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) {
+        (void)test_rm_rf_recursive(dir);
+        return true;
+    }
+    char fill[64];
+    memset(fill, 'x', sizeof(fill));
+    bool ok = write(fd, fill, sizeof(fill)) == (ssize_t)sizeof(fill);
+    (void)close(fd);
+    bool stops = true;
+    if (ok) {
+        struct rlimit old, lim;
+        (void)getrlimit(RLIMIT_FSIZE, &old);
+        lim = old;
+        lim.rlim_cur = sizeof(fill);
+        void (*const old_sig)(int) = signal(SIGXFSZ, SIG_IGN);
+        (void)setrlimit(RLIMIT_FSIZE, &lim);
+        fd = open(path, O_WRONLY | O_APPEND);
+        stops = fd < 0 || write(fd, "y\n", 2) < 0;
+        if (fd >= 0)
+            (void)close(fd);
+        (void)setrlimit(RLIMIT_FSIZE, &old);
+        (void)signal(SIGXFSZ, old_sig);
+    }
+    (void)test_rm_rf_recursive(dir);
+    return stops;
+}
+
 static int case_events_unwritable(void)
 {
+    if (!ci_fsize_stops_append()) {
+        printf("contrib_inbox: SKIP an events.log at the size limit: "
+               "RLIMIT_FSIZE does not stop an append here\n");
+        return 0;
+    }
     struct ci_env e;
     char g[65], fill[4097], p[800];
     ci_hex64(g, 'b');
