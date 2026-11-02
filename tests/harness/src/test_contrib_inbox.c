@@ -695,13 +695,12 @@ static int case_seen_unreadable(void)
     return failures;
 }
 
-/* An events.log that cannot be appended fails the pass, after the current
- * post is finished safely (recorded as seen, escalated). */
 /* True when RLIMIT_FSIZE stops an O_APPEND write to a file already at the
  * limit with EFBIG. Measured on macOS: the limit is checked against the
  * descriptor offset (0 for an append) before the write moves to end of file,
  * so the append succeeds and the case below cannot be set up there. The probe
- * is the capability itself, run in a child with SIGXFSZ ignored. */
+ * is the capability itself, run in this process with SIGXFSZ ignored and the
+ * limit restored afterwards. */
 static bool ci_fsize_stops_append(void)
 {
     char dir[PATH_MAX], path[PATH_MAX + 16];
@@ -736,6 +735,8 @@ static bool ci_fsize_stops_append(void)
     return stops;
 }
 
+/* An events.log that cannot be appended fails the pass, after the current
+ * post is finished safely (recorded as seen, escalated). */
 static int case_events_unwritable(void)
 {
     if (!ci_fsize_stops_append()) {

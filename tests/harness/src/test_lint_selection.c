@@ -20,7 +20,6 @@
 #include "lint/lintc/lintc.h"
 #include "lint/lintc/premise.h"
 #include "util/spawn.h"
-#include "platform/os_sandbox.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -471,16 +470,21 @@ static int lsel_ux_env_run(const struct lsel_ux *ux, char *env, size_t count,
 }
 
 /* unit-exec runs a unit only inside a Landlock domain and exits UNCONFINED (4)
- * where Landlock is unavailable (macOS has no equivalent), so a case that
- * needs a confined run to succeed or be refused by the domain cannot run
- * there. The probe is the capability itself, not the platform. */
+ * where Landlock is unavailable. macOS has no Landlock, so a case that needs
+ * a confined run to succeed or be refused by the domain cannot run there.
+ * Gated on the platform, not on a runtime probe: a Linux host must always
+ * assert, so a Linux host without Landlock fails these cases rather than
+ * skipping them (as test_confine.c and test_os_sandbox.c do). */
 static bool lsel_confinement(const char *what)
 {
-    if (os_sandbox_landlock_abi() >= 1)
-        return true;
-    printf("lint_selection: SKIP %s: Landlock is unavailable here, so "
+#if defined(__linux__)
+    (void)what;
+    return true;
+#else
+    printf("lint_selection: SKIP %s: no Landlock on this platform, so "
            "unit-exec exits UNCONFINED\n", what);
     return false;
+#endif
 }
 
 static int test_lsel_ux_env_bounds(void)
