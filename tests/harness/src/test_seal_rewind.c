@@ -363,6 +363,31 @@ static bool sw_build_chain(struct main_state *ms, struct block_index **out,
     return active_chain_move_window_tip(&ms->chain_active, out[n - 1]);
 }
 
+/* Production registers a chain authority (tip_finalize_stage), so
+ * active_chain_height/tip answer from it and never reach the progress-store
+ * SQL fallback. These tests register none, so asking is_initial_block_download
+ * with the store open would take cs_main and then tx_lock, the reverse of the
+ * stage's tx_lock then cs_main order (seal_candidate_hook_in_tx). Answer the
+ * question through a stub authority at the applied height, as production
+ * does, so the reverse edge is never taken. */
+static int64_t g_stub_auth_height;
+static int64_t stub_auth_get_height(void) { return g_stub_auth_height; }
+static bool stub_auth_is_authoritative(void) { return true; }
+
+static bool not_ibd_via_stub_authority(struct main_state *ms, int64_t height)
+{
+    struct active_chain_authority auth = {
+        .get_height = stub_auth_get_height,
+        .is_authoritative = stub_auth_is_authoritative,
+    };
+    g_stub_auth_height = height;
+    active_chain_register_authority(&auth);
+    bool not_ibd = !is_initial_block_download(ms);
+    struct active_chain_authority none = {0};
+    active_chain_register_authority(&none);
+    return not_ibd;
+}
+
 static int sw_test_production_hook_height(void)
 {
     /* ── (E) PRODUCTION HOOK KEYS THE SEAL BY THE APPLIED HEIGHT ──────────
@@ -384,7 +409,7 @@ static int sw_test_production_hook_height(void)
     static struct uint256 hashes[G + 1];
     bool chain_ok = sw_build_chain(&ms, b, hashes, G + 1);
     SW_CHECK("hook: chain built", chain_ok);
-    bool ibd_free = chain_ok && !is_initial_block_download(&ms);
+    bool ibd_free = chain_ok && not_ibd_via_stub_authority(&ms, G);
     SW_CHECK("hook: not IBD", ibd_free);
     if (!ibd_free) {
         main_state_free(&ms);

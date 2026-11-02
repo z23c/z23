@@ -3339,6 +3339,31 @@ static int uv_apply_candidate_anomaly_cases(void)
              utxo_apply_stage_select_idle_height() == 3195364);
     return failures;
 }
+/* Production registers a chain authority (tip_finalize_stage), so
+ * active_chain_height/tip answer from it and never reach the progress-store
+ * SQL fallback. These tests register none, so asking is_initial_block_download
+ * with the store open would take cs_main and then tx_lock, the reverse of the
+ * stage's tx_lock then cs_main order (seal_candidate_hook_in_tx). Answer the
+ * question through a stub authority at the applied height, as production
+ * does, so the reverse edge is never taken. */
+static int64_t g_stub_auth_height;
+static int64_t stub_auth_get_height(void) { return g_stub_auth_height; }
+static bool stub_auth_is_authoritative(void) { return true; }
+
+static bool not_ibd_via_stub_authority(struct main_state *ms, int64_t height)
+{
+    struct active_chain_authority auth = {
+        .get_height = stub_auth_get_height,
+        .is_authoritative = stub_auth_is_authoritative,
+    };
+    g_stub_auth_height = height;
+    active_chain_register_authority(&auth);
+    bool not_ibd = !is_initial_block_download(ms);
+    struct active_chain_authority none = {0};
+    active_chain_register_authority(&none);
+    return not_ibd;
+}
+
 
 
 /* ── Seal key height through the production apply step ────────────────
@@ -3365,7 +3390,7 @@ static int uv_seal_key_height_cases(void)
     memset(&tip->nChainWork, 0xFF, sizeof(tip->nChainWork));
     tip->nTime = (uint32_t)GetTime() + 3600u;
     tip->hashBlock = sc.hashes[G]; /* the seal reads the stored hash */
-    UV_CHECK("seal key: tip is past IBD", !is_initial_block_download(&ms));
+    UV_CHECK("seal key: tip is past IBD", not_ibd_via_stub_authority(&ms, G));
 
     sqlite3 *db = progress_store_db();
     struct seal_record r;
