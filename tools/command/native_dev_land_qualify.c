@@ -370,28 +370,55 @@ static bool dlq_line_starts(const char *text, const char *prefix)
     return false;
 }
 
+/* The lint preparation, in order: each is one make goal. The land qualify
+ * runs them through dlq_prepare, and reverify_offer --check=gate runs the same
+ * goals behind the admission rail. */
+static const char *const g_dlq_prepare_goals[] = {
+    "docs-capability-inventory", "dev-bin", "install-hooks", "lint-ready",
+};
+
+size_t zcl_dev_land_qualify_prepare_count(void)
+{
+    return sizeof(g_dlq_prepare_goals) / sizeof(g_dlq_prepare_goals[0]);
+}
+
+const char *zcl_dev_land_qualify_prepare_goal(size_t i)
+{
+    return i < zcl_dev_land_qualify_prepare_count() ? g_dlq_prepare_goals[i]
+                                                    : NULL;
+}
+
+void zcl_dev_land_qualify_first_fail(const char *text, char *out, size_t cap)
+{
+    dlq_first_fail(text, out, cap);
+}
+
+/* Lint passes only on a zero exit that printed its closing line. */
+bool zcl_dev_land_qualify_lint_passed(int rc, const char *text)
+{
+    return rc == 0 && text && strstr(text, "LINT: all checks passed");
+}
+
 /* Regenerate derived files, then build and install what lint needs. */
 static bool dlq_prepare(struct dlq *q)
 {
     char jobs[16] = "-j1";
-    const char *regen[] = { "docs-capability-inventory", NULL };
-    const char *build[] = { jobs, "dev-bin", NULL };
-    const char *hooks[] = { "install-hooks", NULL };
-    const char *ready[] = { "lint-ready", NULL };
-    const struct { const char *name; const char *const *goals; } steps[] = {
-        { "docs-capability-inventory", regen },
-        { "dev-bin", q->make_jobs[0] ? build + 1 : build },
-        { "install-hooks", hooks }, { "lint-ready", ready },
-    };
     if (!q->make_jobs[0])
         (void)platform_build_jobs_arg(jobs);
-    for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
+    for (size_t i = 0; i < zcl_dev_land_qualify_prepare_count(); i++) {
+        const char *name = g_dlq_prepare_goals[i];
+        const char *goals[3];
+        size_t n = 0;
         char *text = NULL;
-        int rc = dlq_make(q, steps[i].name, steps[i].goals, false, &text);
+        int rc;
+        if (!q->make_jobs[0] && strcmp(name, "dev-bin") == 0)
+            goals[n++] = jobs; /* only the build step gets the derived -jN */
+        goals[n++] = name;
+        goals[n] = NULL;
+        rc = dlq_make(q, name, goals, false, &text);
         free(text);
         if (rc != 0)
-            return dlq_refuse(q, ZCL_LAND_QUALIFY_STEP_FAILED, steps[i].name,
-                              NULL);
+            return dlq_refuse(q, ZCL_LAND_QUALIFY_STEP_FAILED, name, NULL);
     }
     return true;
 }
@@ -401,7 +428,7 @@ static bool dlq_lint(struct dlq *q)
     const char *goals[] = { "lint", NULL };
     char *text = NULL;
     int rc = dlq_make(q, "lint", goals, true, &text);
-    bool passed = rc == 0 && text && strstr(text, "LINT: all checks passed");
+    bool passed = zcl_dev_land_qualify_lint_passed(rc, text);
     if (!passed && text)
         dlq_first_fail(text, q->out->detail, sizeof(q->out->detail));
     free(text);

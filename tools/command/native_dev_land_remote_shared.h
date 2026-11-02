@@ -47,6 +47,10 @@ bool zcl_dlr_file_sha256(const char *path,
 bool zcl_dlr_json_write_new(const struct json_value *doc, const char *path);
 
 #define DLR_QUAL_RECEIPTS_MAX 32
+/* reverify_offer / qualify_offer --check: cx (the split check, the default),
+ * verify (agent-verify) or gate (full lint, then agent-verify). */
+enum zcl_dlr_check { ZCL_DLR_CHECK_CX, ZCL_DLR_CHECK_VERIFY, ZCL_DLR_CHECK_GATE };
+
 
 /* A receipt that did not count: its path (as given) and why. */
 struct dlr_qual_rej {
@@ -80,25 +84,28 @@ bool zcl_dlr_check_offer_at(const char *root, const char *bundle,
 bool zcl_dlr_qualify(const char *offer, const char *receipts, int require,
                      struct dlr_qual *q, struct zcl_command_reply *reply);
 
-/* qualify_offer counting for one named check: verify false counts cx_check
- * receipts (zcl_dlr_qualify), true agent_verify ones. */
+/* qualify_offer counting for one named check: cx counts cx_check receipts
+ * (zcl_dlr_qualify), verify agent_verify ones, gate lint+agent_verify ones. */
 bool zcl_dlr_qualify_for(const char *offer, const char *receipts, int require,
-                         bool verify, struct dlr_qual *q,
+                         enum zcl_dlr_check check, struct dlr_qual *q,
                          struct zcl_command_reply *reply);
 
-/* --check=cx|verify (*verify) and --timeout_s (*secs, default 3600) of
- * reverify_offer and qualify_offer, and the general re-verification itself
+/* --check=cx|verify|gate (*check) and --timeout_s (*secs, default 3600; 7200
+ * for gate, which covers lint plus agent-verify) of reverify_offer and
+ * qualify_offer, and the general re-verification itself
  * (native_dev_land_offer_verify.c): the cherry-pick as a real commit in the
- * scratch worktree `wt`, then `make agent-verify ONLY=@changed` as a
- * bounded child. A refusal is in reply under leaf. */
+ * scratch worktree `wt`, then, for gate, the lint preparation and full lint,
+ * then `make agent-verify ONLY=@changed`, each a bounded child behind the
+ * rail. A refusal is in reply under leaf. */
 bool zcl_dlr_check_arg(const struct zcl_command_request *req, const char *leaf,
-                       const char *code, bool *verify,
+                       const char *code, enum zcl_dlr_check *check,
                        struct zcl_command_reply *reply);
 bool zcl_dlr_timeout_arg(const struct zcl_command_request *req,
-                         const char *leaf, int *secs,
+                         const char *leaf, enum zcl_dlr_check check, int *secs,
                          struct zcl_command_reply *reply);
 bool zcl_dlr_verify_run(const char *wt, const char *commit, int secs,
-                        const char *leaf, struct zcl_command_reply *reply);
+                        enum zcl_dlr_check check, const char *leaf,
+                        struct zcl_command_reply *reply);
 
 /* The re-verification's test seam, set only by tests: `rail` names the
  * admission rail program (NULL: devbuild; it is still looked up and refused

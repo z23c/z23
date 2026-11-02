@@ -934,12 +934,15 @@ static bool dlt_rv_fixture(const struct dlt_rig *r, const char *base_x,
  * Makefile does, as g_rvf.mode says. The real timeout path is exercised by
  * delegating to the real spawn with a `sleep`. */
 enum dlt_rvf_mode { RVF_PASS, RVF_FAIL, RVF_TIMEOUT, RVF_EMPTY, RVF_BASE,
+                    RVF_LINTFAIL, RVF_LINTSILENT, RVF_PREPFAIL,
                     RVF_NOVERDICT };
 static struct {
     enum dlt_rvf_mode mode;
     int calls;
     char base[64];
     char seen[1500];
+    char log[4096]; /* every launch's argv, one line each */
+    int first_ms;   /* the first launch's timeout */
 } g_rvf;
 
 static void dlt_rvf_verdict(const char *cwd, const char *groups,
@@ -969,16 +972,61 @@ static void dlt_rvf_verdict(const char *cwd, const char *groups,
     (void)fclose(f);
 }
 
+static bool dlt_rvf_has(const char *const argv[], const char *word)
+{
+    for (size_t i = 0; argv[i]; i++)
+        if (strcmp(argv[i], word) == 0)
+            return true;
+    return false;
+}
+
+/* --check=gate's lint-preparation and lint launches (agent-verify keeps the
+ * path below): true with `*rc` and the capture set when argv is one of them. */
+static bool dlt_rvf_gate_step(const char *const argv[], char *buf, size_t cap,
+                              int *rc)
+{
+    static const char *const prep[] = {"docs-capability-inventory", "dev-bin",
+                                       "install-hooks", "lint-ready"};
+    *rc = 0;
+    (void)snprintf(buf, cap, "step ok\n");
+    for (size_t i = 0; i < sizeof(prep) / sizeof(prep[0]); i++)
+        if (dlt_rvf_has(argv, prep[i])) {
+            *rc = g_rvf.mode == RVF_PREPFAIL && i == 1 ? 4 : 0;
+            return true;
+        }
+    if (!dlt_rvf_has(argv, "lint"))
+        return false;
+    if (g_rvf.mode == RVF_LINTFAIL) {
+        (void)snprintf(buf, cap, "check-a ok\nFAIL check-no-real-clock-test-"
+                                 "deadline: sleep loop in t.c\nmore noise\n");
+        *rc = 2;
+    } else if (g_rvf.mode != RVF_LINTSILENT) {
+        (void)snprintf(buf, cap, "check-a ok\nLINT: all checks passed\n");
+    } else {
+        (void)snprintf(buf, cap, "check-a ok\nexit-0 but no closing line\n");
+    }
+    return true;
+}
+
 static int dlt_rvf_spawn(const char *const argv[], const char *cwd, char *buf,
                          size_t cap, int timeout_ms, bool *timed_out)
 {
     char names[512] = "", count[32] = "", dirty[256] = "", range[200];
+    int rc;
     size_t used = 0;
     g_rvf.calls++;
     g_rvf.seen[0] = '\0';
     for (size_t i = 0; argv[i] && used < sizeof(g_rvf.seen) - 80; i++)
         used += (size_t)snprintf(g_rvf.seen + used, sizeof(g_rvf.seen) - used,
                                  "%s ", argv[i]);
+    if (g_rvf.calls == 1)
+        g_rvf.first_ms = timeout_ms;
+    (void)snprintf(g_rvf.log + strlen(g_rvf.log),
+                   sizeof(g_rvf.log) - strlen(g_rvf.log), "%s\n", g_rvf.seen);
+    if (dlt_rvf_gate_step(argv, buf, cap, &rc)) {
+        *timed_out = false;
+        return rc;
+    }
     (void)snprintf(range, sizeof(range), "%s..HEAD", g_rvf.base);
     (void)DLT_GIT(names, sizeof(names), cwd, "diff", "--name-only",
                   g_rvf.base, "HEAD");
@@ -1120,6 +1168,23 @@ static int dlt_rv_verify_cases(const struct dlt_rig *r, const char *tmp,
         return 1;
     }
     zcl_dlr_verify_seam_set(&seam);
+    /* --check=gate: the lint preparation, full lint with the cold per-TU
+     * cache, then agent-verify, every launch through the rail with the
+     * host's derived -jN. */
+    char gjobs[16] = "-j1", pre[900], prefix[1600], lint[400], av[400];
+    (void)platform_build_jobs_arg(gjobs);
+    (void)snprintf(pre, sizeof(pre), "%s --wait --project z23 make %s", rail,
+                   gjobs);
+    (void)snprintf(prefix, sizeof(prefix),
+                   "%s docs-capability-inventory \n%s dev-bin \n"
+                   "%s install-hooks \n%s lint-ready \n",
+                   pre, pre, pre, pre);
+    (void)snprintf(lint, sizeof(lint),
+                   "%s --wait --project z23 env ZCL_LINT_TU_CACHE=0 make %s "
+                   "lint \n",
+                   rail, gjobs);
+    (void)snprintf(av, sizeof(av), "%s agent-verify ONLY=@changed \n", pre);
+
 
     TEST("land.reverify_offer --check=verify: a non-split commit through the "
          "rail passes, signs a receipt, and ran as a real clean commit") {
@@ -1229,6 +1294,102 @@ static int dlt_rv_verify_cases(const struct dlt_rig *r, const char *tmp,
         dlt_rv_mode(&c, r, b2, o2, rc2, "verify", 1);
         ASSERT(dlt_rv_refused(&c, r, tmp, "REVERIFY_VERIFY_TIMEOUT", rc2, 1));
         ASSERT(strstr(c.reply.error.evidence, "timeout_s=1") != NULL);
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.reverify_offer --check=gate: a pass runs exactly the prepare "
+         "steps, then cold full lint, then agent-verify, all with the derived "
+         "-jN, and signs the lint+agent_verify checks") {
+        g_rvf.mode = RVF_PASS;
+        g_rvf.calls = 0;
+        g_rvf.log[0] = '\0';
+        (void)unlink(rc); /* the verify case above signed one here */
+        dlt_rv_mode(&c, r, b2, o2, rc, "gate", 0);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "check")), "gate");
+        dlt_end(&c);
+        ASSERT(g_rvf.calls == 6);
+        ASSERT(g_rvf.first_ms == 7200 * 1000); /* the gate's own default */
+        (void)snprintf(want, sizeof(want), "%s%s%s", prefix, lint, av);
+        ASSERT_STR_EQ(g_rvf.log, want);
+        ASSERT(dlt_slurp(rc, text, sizeof(text)));
+        ASSERT(strstr(text, "bundle_sha256,bundle_verify,head,base,lint,"
+                            "agent_verify\"") != NULL);
+        dlt_vfy(&c, rc, o2);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "checks")),
+                      "bundle_sha256,bundle_verify,head,base,lint,"
+                      "agent_verify");
+        dlt_end(&c);
+        ASSERT(dlt_rv_clean(r, tmp));
+        (void)unlink(rc);
+        PASS();
+    }
+
+    TEST("land.reverify_offer --check=verify keeps its own default bound and "
+         "argv: no prepare, no lint, 3600 s") {
+        g_rvf.mode = RVF_PASS;
+        g_rvf.calls = 0;
+        g_rvf.log[0] = '\0';
+        dlt_rv_mode(&c, r, b2, o2, NULL, "verify", 0);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        dlt_end(&c);
+        ASSERT(g_rvf.calls == 1);
+        ASSERT(g_rvf.first_ms == 3600 * 1000);
+        ASSERT_STR_EQ(g_rvf.log, av);
+        PASS();
+    }
+
+    TEST("land.reverify_offer --check=gate: a lint failure refuses "
+         "REVERIFY_LINT_FAILED with the first FAIL line, and agent-verify "
+         "never runs") {
+        g_rvf.mode = RVF_LINTFAIL;
+        g_rvf.calls = 0;
+        g_rvf.log[0] = '\0';
+        dlt_rv_mode(&c, r, b2, o2, rc2, "gate", 0);
+        ASSERT(dlt_rv_refused(&c, r, tmp, "REVERIFY_LINT_FAILED", rc2, 5));
+        ASSERT(strstr(c.reply.error.evidence, "exit=2") != NULL);
+        ASSERT(strstr(c.reply.error.evidence,
+                      "FAIL check-no-real-clock-test-deadline") != NULL);
+        ASSERT(strstr(g_rvf.log, "agent-verify") == NULL);
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.reverify_offer --check=gate: lint exiting 0 without its "
+         "closing line is not a pass: REVERIFY_LINT_FAILED") {
+        g_rvf.mode = RVF_LINTSILENT;
+        g_rvf.calls = 0;
+        g_rvf.log[0] = '\0';
+        dlt_rv_mode(&c, r, b2, o2, rc2, "gate", 0);
+        ASSERT(dlt_rv_refused(&c, r, tmp, "REVERIFY_LINT_FAILED", rc2, 5));
+        ASSERT(strstr(c.reply.error.evidence, "no closing line") != NULL);
+        ASSERT(strstr(g_rvf.log, "agent-verify") == NULL);
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.reverify_offer --check=gate: a failing prepare step refuses "
+         "REVERIFY_PREPARE_FAILED naming it; no later step runs") {
+        g_rvf.mode = RVF_PREPFAIL;
+        g_rvf.calls = 0;
+        g_rvf.log[0] = '\0';
+        dlt_rv_mode(&c, r, b2, o2, rc2, "gate", 0);
+        ASSERT(dlt_rv_refused(&c, r, tmp, "REVERIFY_PREPARE_FAILED", rc2, 2));
+        ASSERT(strstr(c.reply.error.evidence, "step=dev-bin exit=4") != NULL);
+        ASSERT(strstr(g_rvf.log, "lint") == NULL);
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.reverify_offer --check=gate: no admission rail refuses "
+         "REVERIFY_NO_RAIL before any step") {
+        zcl_dlr_verify_seam_set(&norail);
+        g_rvf.calls = 0;
+        dlt_rv_mode(&c, r, b2, o2, rc2, "gate", 0);
+        zcl_dlr_verify_seam_set(&seam);
+        ASSERT(dlt_rv_refused(&c, r, tmp, "REVERIFY_NO_RAIL", rc2, 0));
         dlt_end(&c);
         PASS();
     }

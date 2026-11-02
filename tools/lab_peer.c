@@ -22,8 +22,12 @@
  *       --check=verify passes --check=verify (make agent-verify ONLY=@changed
  *       behind the admission rail) and waits LP_VERIFY_S + LP_VERIFY_MARGIN_S.
  *       Any other value is a usage error (exit 2). collect takes the same
- *       option and passes --check=verify to qualify_offer, which then counts
+ *       option and passes --check=verify (or gate) to qualify_offer, which then counts
  *       agent_verify receipts instead of cx_check ones.
+ *       --check=gate passes --check=gate: full lint (with the land queue's lint
+ *       preparation) plus agent-verify, so a signed receipt covers what the
+ *       land queue's gate runs; it waits LP_GATE_S + LP_VERIFY_MARGIN_S, and
+ *       collect counts only receipts whose checks carry lint and agent_verify.
  *   collect --state=DIR [--room=lab] [--require=1]
  *       board list -> the verdict=ok receipts answering each offers.tsv row
  *       -> STATE/receipts/<post>-<host12>.json -> dev land qualify_offer ->
@@ -89,6 +93,7 @@ enum {
     LP_FETCH_S = 300,
     LP_CX_S = 2400,
     LP_VERIFY_S = 3600,      /* reverify_offer --check=verify default --timeout_s */
+    LP_GATE_S = 7200,        /* --check=gate default --timeout_s: lint plus agent-verify */
     LP_VERIFY_MARGIN_S = 300, /* admission wait and signing around that bound */
     LP_ONION_LEN = 62
 };
@@ -332,15 +337,33 @@ static const char *lp_err_code(const struct json_value *root, const char *fallba
 }
 
 /* --check: absent or "cx" (reverify_offer's split check, no flag passed) or
- * "verify" (its general agent-verify check); anything else is a usage error. */
+ * "verify" (its general agent-verify check) or "gate" (full lint plus
+ * agent-verify); anything else is a usage error. */
 static bool lp_check_ok(const char *v)
 {
-    return !v || strcmp(v, "cx") == 0 || strcmp(v, "verify") == 0;
+    return !v || strcmp(v, "cx") == 0 || strcmp(v, "verify") == 0 ||
+           strcmp(v, "gate") == 0;
 }
 
-static bool lp_is_verify(const struct lp_ctx *c)
+/* The --check flag passed through to reverify_offer and qualify_offer:
+ * "--check=verify", "--check=gate", or NULL for cx (nothing is passed). */
+static const char *lp_check_flag(const struct lp_ctx *c)
 {
-    return c->v[LP_O_CHECK] && strcmp(c->v[LP_O_CHECK], "verify") == 0;
+    const char *v = c->v[LP_O_CHECK];
+    if (v && strcmp(v, "verify") == 0)
+        return "--check=verify";
+    return v && strcmp(v, "gate") == 0 ? "--check=gate" : NULL;
+}
+
+/* How long a reverify_offer child may run: the mode's own --timeout_s default
+ * plus the admission and signing margin. */
+static int lp_reverify_wait_s(const struct lp_ctx *c)
+{
+    const char *flag = lp_check_flag(c);
+    if (!flag)
+        return LP_CX_S + 60;
+    return (strcmp(flag, "--check=gate") == 0 ? LP_GATE_S : LP_VERIFY_S) +
+           LP_VERIFY_MARGIN_S;
 }
 
 /* ── options, state, output ────────────────────────────────────────────── */
@@ -480,7 +503,7 @@ static int lp_usage(void)
         "usage: z23-lab-peer offer --lane=DIR --commit=SHA --state=DIR "
         "[--room=lab] [--agent=NAME]\n"
         "       z23-lab-peer verify --state=DIR --repo=DIR --authors=FILE "
-        "[--room=lab] [--max=N] [--check=cx|verify]\n"
+        "[--room=lab] [--max=N] [--check=cx|verify|gate]\n"
         "       z23-lab-peer collect --state=DIR [--room=lab] [--require=1]\n"
         "       (--z23=PROGRAM --z23dev=PROGRAM name the CLIs; see "
         "tools/lab_peer.c)\n",
@@ -1023,12 +1046,11 @@ static bool lp_reverify(const struct lp_ctx *c, const char *bundle,
         !lp_fmt(repo, sizeof(repo), "--repo=%s", c->v[LP_O_REPO]))
         return *retry = true, false;
     (void)unlink(receipt);
-    const bool general = lp_is_verify(c);
     /* cx: the NULL slot ends argv, so the argv is byte-identical to before. */
     const char *const argv[] = {c->v[LP_O_Z23DEV], "dev", "land", "reverify_offer",
-                                b, o, repo, r, general ? "--check=verify" : NULL,
+                                b, o, repo, r, lp_check_flag(c),
                                 NULL};
-    const int wait_s = general ? LP_VERIFY_S + LP_VERIFY_MARGIN_S : LP_CX_S + 60;
+    const int wait_s = lp_reverify_wait_s(c);
     if (!lp_run(argv, NULL, wait_s, &root)) {
         *retry = true;
         json_free(&root);
@@ -1322,7 +1344,7 @@ static void lp_qualify(const struct lp_ctx *c, const struct lp_row *r,
         return;
     const char *const argv[] = {c->v[LP_O_Z23DEV], "dev", "land", "qualify_offer",
                                 offer, recs, req,
-                                lp_is_verify(c) ? "--check=verify" : NULL, NULL};
+                                lp_check_flag(c), NULL};
     if (lp_run(argv, NULL, LP_QUICK_S, &root))
         lp_qual_fill(&root, q);
     json_free(&root);

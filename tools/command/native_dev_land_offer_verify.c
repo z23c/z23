@@ -1,7 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * dev.land.reverify_offer --check=verify: the general re-verification of ANY
- * offered commit (native_dev_land_offer.c keeps the complexity-split mode,
+ * dev.land.reverify_offer --check=verify and --check=gate: the general
+ * re-verification of ANY offered commit (native_dev_land_offer.c keeps the
+ * complexity-split mode,
  * --check=cx, byte-identical and calls in here for the rest).
  *
  * In the scratch worktree reverify_offer already made (a detached worktree at
@@ -34,6 +35,24 @@
  * offered base as its base: REVERIFY_EMPTY_SELECTION or
  * REVERIFY_SELECTION_BASE otherwise, never a pass.
  *
+ * --check=gate (additive; verify and cx are untouched) makes the proof the one
+ * the land queue's gate runs: after the cherry-pick, through the same rail and
+ * in the same scratch worktree, (1) the lint preparation land qualify uses,
+ * its make goals taken from native_dev_land_qualify.c (docs-capability-
+ * inventory, dev-bin, install-hooks, lint-ready), each as
+ * `devbuild --wait --project z23 make -jN GOAL`; (2) full lint as
+ * `devbuild --wait --project z23 env ZCL_LINT_TU_CACHE=0 make -jN lint`, as
+ * the land proof runs it, passing only on exit 0 plus "LINT: all checks
+ * passed" (qualify's own test); (3) the agent-verify child above. Qualify's
+ * fetch, rebase and signed-tip steps are not run: the offered commit is a
+ * synthesized one. The default --timeout_s is 7200 (verify keeps 3600) and
+ * the one bound covers all three steps together. Added refusals:
+ * REVERIFY_LINT_FAILED (the first FAIL line, else the tail, as evidence;
+ * agent-verify then does not run), REVERIFY_PREPARE_FAILED (a preparation
+ * step's exit; REVERIFY_SETUP when it could not start), and a step past the
+ * bound is REVERIFY_VERIFY_TIMEOUT. A gate pass is signed with checks
+ * "bundle_sha256,bundle_verify,head,base,lint,agent_verify".
+ *
  * Trust: fetched code executes only inside this bounded build/test child,
  * under this box's local policy (the host rail, the time bound, the scratch
  * worktree that is always removed). Offers come only from allowlisted
@@ -43,21 +62,24 @@
  * REVERIFY_APPLY, REVERIFY_VERIFY_FAILED (the child's exit and the tail of
  * the verdict file as evidence), REVERIFY_VERIFY_TIMEOUT (the bound that was
  * hit), REVERIFY_EMPTY_SELECTION, REVERIFY_SELECTION_BASE, REVERIFY_SETUP
- * (the child could not be started). A bad --check or --timeout_s is
+ * (the child could not be started), and for gate REVERIFY_LINT_FAILED and
+ * REVERIFY_PREPARE_FAILED. A bad --check (cx, verify or gate) or --timeout_s is
  * OFFER_BAD_ARGUMENT (reverify_offer) or QUALIFY_BAD_ARGUMENT
  * (qualify_offer). A pass is signed with checks
- * "bundle_sha256,bundle_verify,head,base,agent_verify".
+ * "bundle_sha256,bundle_verify,head,base,agent_verify" (gate: see above).
  */
 
 #include "command/native_dev_land_remote_shared.h"
 
 #include "base/safe_alloc.h"
+#include "command/native_dev_land_qualify.h"
 #include "platform/logical_cpu.h"
 #include "util/spawn.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #define DLRV_OUT_MAX (256u * 1024u)
@@ -66,41 +88,45 @@
 /* with the "exit=N tail=" prefix this fits the 256-byte evidence field */
 #define DLRV_TAIL 200u
 #define DLRV_TIMEOUT_DEFAULT_S 3600
+#define DLRV_GATE_TIMEOUT_DEFAULT_S 7200
+#define DLRV_LINT_OUT_MAX (32u * 1024u * 1024u)
 #define DLRV_TIMEOUT_MAX_S 86400
 #define DLRV_GIT_MS (10 * 60 * 1000)
 
-/* --check: absent or "cx" is false (the split mode), "verify" is true;
- * anything else, a non-string or empty value included, refuses with `code`
- * naming input.check. */
+/* --check: absent or "cx" is the split mode, "verify" the agent-verify one,
+ * "gate" full lint plus agent-verify; anything else, a non-string or empty
+ * value included, refuses with `code` naming input.check. */
 bool zcl_dlr_check_arg(const struct zcl_command_request *req, const char *leaf,
-                       const char *code, bool *verify,
+                       const char *code, enum zcl_dlr_check *check,
                        struct zcl_command_reply *reply)
 {
     const struct json_value *v =
         req->input ? json_get(req->input, "check") : NULL;
     const char *c = zcl_dlr_str(req, "check");
-    *verify = false;
-    if (!v)
+    *check = ZCL_DLR_CHECK_CX;
+    if (!v || (c && strcmp(c, "cx") == 0))
         return true;
-    if (c && strcmp(c, "cx") == 0)
-        return true;
-    if (c && strcmp(c, "verify") == 0) {
-        *verify = true;
-        return true;
+    if (c && strcmp(c, "verify") == 0)
+        *check = ZCL_DLR_CHECK_VERIFY;
+    else if (c && strcmp(c, "gate") == 0)
+        *check = ZCL_DLR_CHECK_GATE;
+    else {
+        zcl_dlr_fail(reply, leaf, code, "input",
+                     "check is cx, verify or gate", "input.check");
+        return false;
     }
-    zcl_dlr_fail(reply, leaf, code, "input", "check is cx or verify",
-                 "input.check");
-    return false;
+    return true;
 }
 
-/* --timeout_s: an integer 1..86400, default 3600. */
+/* --timeout_s: an integer 1..86400, default 3600 (7200 for gate). */
 bool zcl_dlr_timeout_arg(const struct zcl_command_request *req,
-                         const char *leaf, int *secs,
+                         const char *leaf, enum zcl_dlr_check check, int *secs,
                          struct zcl_command_reply *reply)
 {
     const struct json_value *t = req->input ? json_get(req->input, "timeout_s")
                                             : NULL;
-    *secs = DLRV_TIMEOUT_DEFAULT_S;
+    *secs = check == ZCL_DLR_CHECK_GATE ? DLRV_GATE_TIMEOUT_DEFAULT_S
+                                        : DLRV_TIMEOUT_DEFAULT_S;
     if (!t)
         return true;
     if (t->type == JSON_INT && json_get_int(t) >= 1 &&
@@ -345,16 +371,172 @@ static bool dlrv_selection(const char *verdict, const char *base,
     return true;
 }
 
-/* The focused proof as a bounded child in the scratch worktree. */
-static bool dlrv_child(const char *wt, const char *rail, const char *base,
-                       int secs, const char *leaf,
-                       struct zcl_command_reply *reply)
+/* One run's context: the scratch worktree, the rail, the derived -jN and, for
+ * gate, the start of the single --timeout_s bound that lint preparation, full
+ * lint and agent-verify share. */
+struct dlrv_run {
+    const char *wt, *rail, *leaf;
+    char jobs[16];
+    int secs;
+    bool gate;
+    int64_t start_ms;
+    struct zcl_command_reply *reply;
+};
+
+static int64_t dlrv_now_ms(void)
 {
-    const char *argv[9];
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* Seconds left for the next child: the whole bound outside gate mode, the
+ * rest of it once the gate's earlier steps used some. 0 or less: none left. */
+static int dlrv_left_s(const struct dlrv_run *r)
+{
+    int64_t used;
+    if (!r->gate)
+        return r->secs;
+    used = (dlrv_now_ms() - r->start_ms) / 1000;
+    return used >= r->secs ? 0 : r->secs - (int)used;
+}
+
+static int dlrv_spawn(const char *const argv[], const char *wt, char *buf,
+                      size_t cap, int secs, bool *timed_out)
+{
+    return (g_seam.spawn ? g_seam.spawn
+                         : zcl_spawn_capture_merged_in_dir_observed)(
+        argv, wt, buf, cap, secs * 1000, timed_out);
+}
+
+/* The child argv: the rail, then `make -jN goal [extra]`, optionally under
+ * ZCL_LINT_TU_CACHE=0 (the land proof's cold per-TU lint cache). `av` holds
+ * DLRV_ARGV_MAX entries. */
+#define DLRV_ARGV_MAX 12u
+static void dlrv_argv(const struct dlrv_run *r, bool cold_lint,
+                      const char *goal, const char *extra, const char **av)
+{
     size_t n = 0;
+    av[n++] = r->rail;
+    av[n++] = "--wait";
+    av[n++] = "--project";
+    av[n++] = "z23";
+    if (cold_lint) {
+        av[n++] = "env";
+        av[n++] = "ZCL_LINT_TU_CACHE=0";
+    }
+    av[n++] = "make";
+    av[n++] = r->jobs;
+    av[n++] = goal;
+    if (extra)
+        av[n++] = extra;
+    av[n] = NULL;
+}
+
+/* A gate step that hit the shared time bound. */
+static bool dlrv_gate_timeout(const struct dlrv_run *r, const char *stage,
+                              const char *text)
+{
+    char ev[DLRV_TAIL + 64], tail[DLRV_TAIL + 8];
+    dlrv_tail(text, tail, sizeof(tail));
+    (void)snprintf(ev, sizeof(ev), "timeout_s=%d tail=%s", r->secs, tail);
+    zcl_dlr_fail(r->reply, r->leaf, "REVERIFY_VERIFY_TIMEOUT", stage,
+                 "a gate step (lint preparation or full lint) hit the time "
+                 "bound, which covers lint plus agent-verify, and was killed",
+                 ev);
+    return false;
+}
+
+/* One bounded gate step; false with the refusal in reply when it timed out,
+ * could not start or had no time left. On true `*rc` is its exit. */
+static bool dlrv_gate_step(const struct dlrv_run *r, const char *stage,
+                           const char **av, char *text, size_t cap, int *rc)
+{
+    bool timed_out = false;
+    int left = dlrv_left_s(r);
+    if (left < 1)
+        return dlrv_gate_timeout(r, stage, "");
+    *rc = dlrv_spawn(av, r->wt, text, cap, left, &timed_out);
+    if (timed_out)
+        return dlrv_gate_timeout(r, stage, text);
+    if (*rc < 0) {
+        zcl_dlr_fail(r->reply, r->leaf, "REVERIFY_SETUP", stage,
+                     "could not start the gate's verification child", "spawn");
+        return false;
+    }
+    return true;
+}
+
+/* The lint preparation land qualify runs, each goal behind the rail. */
+static bool dlrv_gate_prepare(const struct dlrv_run *r)
+{
+    const char *av[DLRV_ARGV_MAX];
+    char *text = zcl_calloc(1, DLRV_OUT_MAX, "dev_land_verify.prepare");
+    bool ok = text != NULL;
+    if (!ok)
+        zcl_dlr_fail(r->reply, r->leaf, "REVERIFY_SETUP", "prepare",
+                     "could not allocate the preparation buffer", "calloc");
+    for (size_t i = 0; ok && i < zcl_dev_land_qualify_prepare_count(); i++) {
+        const char *goal = zcl_dev_land_qualify_prepare_goal(i);
+        char ev[DLRV_TAIL + 96], tail[DLRV_TAIL + 8];
+        int rc = 0;
+        dlrv_argv(r, false, goal, NULL, av);
+        text[0] = '\0';
+        ok = dlrv_gate_step(r, "prepare", av, text, DLRV_OUT_MAX, &rc);
+        if (!ok || rc == 0)
+            continue;
+        dlrv_tail(text, tail, sizeof(tail));
+        (void)snprintf(ev, sizeof(ev), "step=%s exit=%d tail=%s", goal, rc,
+                       tail);
+        zcl_dlr_fail(r->reply, r->leaf, "REVERIFY_PREPARE_FAILED", "prepare",
+                     "a lint preparation step failed on the offered commit in "
+                     "a scratch worktree",
+                     ev);
+        ok = false;
+    }
+    free(text);
+    return ok;
+}
+
+/* Full lint with the land proof's cold cache; a pass is exit 0 plus lint's
+ * closing line, anything else REVERIFY_LINT_FAILED with the first FAIL line
+ * (else the tail) as evidence. */
+static bool dlrv_gate_lint(const struct dlrv_run *r)
+{
+    const char *av[DLRV_ARGV_MAX];
+    char fail[DLRV_TAIL + 8], ev[DLRV_TAIL + 96], tail[DLRV_TAIL + 8];
+    char *text = zcl_calloc(1, DLRV_LINT_OUT_MAX, "dev_land_verify.lint");
+    int rc = 0;
+    bool ok;
+    if (!text) {
+        zcl_dlr_fail(r->reply, r->leaf, "REVERIFY_SETUP", "lint",
+                     "could not allocate the lint buffer", "calloc");
+        return false;
+    }
+    dlrv_argv(r, true, "lint", NULL, av);
+    ok = dlrv_gate_step(r, "lint", av, text, DLRV_LINT_OUT_MAX, &rc);
+    if (ok && !zcl_dev_land_qualify_lint_passed(rc, text)) {
+        zcl_dev_land_qualify_first_fail(text, fail, sizeof(fail));
+        dlrv_tail(text, tail, sizeof(tail));
+        (void)snprintf(ev, sizeof(ev), "exit=%d %s=%s", rc,
+                       fail[0] ? "fail" : "tail", fail[0] ? fail : tail);
+        zcl_dlr_fail(r->reply, r->leaf, "REVERIFY_LINT_FAILED", "lint",
+                     "full lint did not pass on the offered commit in a "
+                     "scratch worktree",
+                     ev);
+        ok = false;
+    }
+    free(text);
+    return ok;
+}
+
+/* The focused proof as a bounded child in the scratch worktree. */
+static bool dlrv_child(const struct dlrv_run *r, const char *base)
+{
+    const char *argv[DLRV_ARGV_MAX];
     bool timed_out = false, pass;
-    int rc;
-    char jobs[16] = "-j1"; /* kept when the host count is unknown */
+    int rc, left = dlrv_left_s(r);
     char path[1100];
     char *text, *verdict;
     text = zcl_calloc(1, DLRV_OUT_MAX, "dev_land_verify.out");
@@ -362,43 +544,46 @@ static bool dlrv_child(const char *wt, const char *rail, const char *base,
     if (!text || !verdict) {
         free(verdict);
         free(text);
-        zcl_dlr_fail(reply, leaf, "REVERIFY_SETUP", "agent_verify",
+        zcl_dlr_fail(r->reply, r->leaf, "REVERIFY_SETUP", "agent_verify",
                      "could not allocate the verification buffers", "calloc");
         return false;
     }
-    argv[n++] = rail;
-    argv[n++] = "--wait";
-    argv[n++] = "--project";
-    argv[n++] = "z23";
-    (void)platform_build_jobs_arg(jobs);
-    argv[n++] = "make";
-    argv[n++] = jobs;
-    argv[n++] = "agent-verify";
-    argv[n++] = "ONLY=@changed";
-    argv[n] = NULL;
-    (void)snprintf(path, sizeof(path), "%s/%s", wt, DLRV_RC);
+    dlrv_argv(r, false, "agent-verify", "ONLY=@changed", argv);
+    (void)snprintf(path, sizeof(path), "%s/%s", r->wt, DLRV_RC);
     (void)unlink(path); /* never trust a verdict this run did not write */
-    rc = (g_seam.spawn ? g_seam.spawn
-                       : zcl_spawn_capture_merged_in_dir_observed)(
-        argv, wt, text, DLRV_OUT_MAX, secs * 1000, &timed_out);
-    dlrv_verdict(wt, verdict, DLRV_RC_MAX);
+    if (left < 1) {
+        timed_out = true;
+        rc = -1;
+    } else {
+        rc = dlrv_spawn(argv, r->wt, text, DLRV_OUT_MAX, left, &timed_out);
+    }
+    dlrv_verdict(r->wt, verdict, DLRV_RC_MAX);
     pass = rc == 0 && !timed_out && dlrv_last_line_ok(verdict);
     if (!pass)
-        (void)dlrv_report(rc, timed_out, verdict, text, secs, leaf, reply);
+        (void)dlrv_report(rc, timed_out, verdict, text, r->secs, r->leaf,
+                          r->reply);
     else
-        pass = dlrv_selection(verdict, base, leaf, reply);
+        pass = dlrv_selection(verdict, base, r->leaf, r->reply);
     free(verdict);
     free(text);
     return pass;
 }
 
-/* Apply, then the proof; false with the refusal in reply. */
+/* Apply, then (gate) the lint preparation and full lint, then the proof;
+ * false with the refusal in reply. */
 bool zcl_dlr_verify_run(const char *wt, const char *commit, int secs,
-                        const char *leaf, struct zcl_command_reply *reply)
+                        enum zcl_dlr_check check, const char *leaf,
+                        struct zcl_command_reply *reply)
 {
     char base[96];
-    const char *rail = dlrv_rail(leaf, reply); /* refused before any apply */
-    return rail != NULL &&
-           dlrv_apply(wt, commit, base, sizeof(base), leaf, reply) &&
-           dlrv_child(wt, rail, base, secs, leaf, reply);
+    struct dlrv_run r = {.wt = wt, .leaf = leaf, .jobs = "-j1", .secs = secs,
+                         .gate = check == ZCL_DLR_CHECK_GATE, .reply = reply};
+    r.rail = dlrv_rail(leaf, reply); /* refused before any apply */
+    if (!r.rail || !dlrv_apply(wt, commit, base, sizeof(base), leaf, reply))
+        return false;
+    (void)platform_build_jobs_arg(r.jobs); /* -j1 kept when unknown */
+    r.start_ms = dlrv_now_ms();
+    if (r.gate && !(dlrv_gate_prepare(&r) && dlrv_gate_lint(&r)))
+        return false;
+    return dlrv_child(&r, base);
 }

@@ -56,6 +56,16 @@ bool zcl_dev_land_qualify(const char *wt, bool signing_exempt,
  * unsigned_tip, tree_changed and the rest. */
 const char *zcl_dev_land_qualify_refusal(enum zcl_land_qualify_code code);
 
+/* The lint preparation the gates share (docs-capability-inventory, dev-bin,
+ * install-hooks, lint-ready): its make goals in order, NULL past the count.
+ * reverify_offer --check=gate runs them behind the admission rail. */
+size_t zcl_dev_land_qualify_prepare_count(void);
+const char *zcl_dev_land_qualify_prepare_goal(size_t i);
+/* Lint's verdict: a zero exit and "LINT: all checks passed" in `text`. */
+bool zcl_dev_land_qualify_lint_passed(int rc, const char *text);
+/* The first line of `text` that begins with FAIL, into out ("" when none). */
+void zcl_dev_land_qualify_first_fail(const char *text, char *out, size_t cap);
+
 #if defined(ZCL_TESTING)
 struct agent_impact_acc;
 /* Replace the path-to-groups router and the path-list capture cap so a test

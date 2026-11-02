@@ -18,6 +18,7 @@
 #define DLQ_CX "bundle_sha256,bundle_verify,head,base,cx_check"
 #define DLQ_PLAIN "bundle_sha256,bundle_verify,head,base"
 #define DLQ_VERIFY "bundle_sha256,bundle_verify,head,base,agent_verify"
+#define DLQ_GATE "bundle_sha256,bundle_verify,head,base,lint,agent_verify"
 
 struct dlq_fixture {
     struct dlt_rig r;
@@ -295,6 +296,7 @@ static int dlq_check_cases(void)
     struct dlq_fixture f;
     struct dlt_call c;
     char sb[900], sc[900], rb[900], rc[900], both[2000], bsign[65], csign[65];
+    char sd[900], rd[900], all3[3000], dsign[65];
     if (!dlq_fixture(&f, "qualcheck")) {
         printf("rig setup FAILED\n");
         return 1;
@@ -304,9 +306,13 @@ static int dlq_check_cases(void)
     (void)snprintf(rb, sizeof(rb), "%s/b.receipt.json", f.r.base);
     (void)snprintf(rc, sizeof(rc), "%s/c.receipt.json", f.r.base);
     (void)snprintf(both, sizeof(both), "%s,%s", rb, rc);
+    (void)snprintf(sd, sizeof(sd), "%s/lab-d", f.r.base);
+    (void)snprintf(rd, sizeof(rd), "%s/d.receipt.json", f.r.base);
+    (void)snprintf(all3, sizeof(all3), "%s,%s,%s", rb, rc, rd);
     if (!dlq_sign(&f, sb, rb, DLQ_VERIFY, bsign) ||
-        !dlq_sign(&f, sc, rc, DLQ_CX, csign) || !dlq_allow(bsign) ||
-        !dlq_allow(csign)) {
+        !dlq_sign(&f, sc, rc, DLQ_CX, csign) ||
+        !dlq_sign(&f, sd, rd, DLQ_GATE, dsign) || !dlq_allow(bsign) ||
+        !dlq_allow(csign) || !dlq_allow(dsign)) {
         printf("receipt setup FAILED\n");
         dlt_done(&f.r);
         return 1;
@@ -337,6 +343,30 @@ static int dlq_check_cases(void)
         ASSERT(dlt_refused(&c, "QUALIFY_SHORT"));
         dlt_end(&c);
         dlq_qualify_check(&c, &f, rc, "verify");
+        ASSERT(dlt_refused(&c, "QUALIFY_SHORT"));
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.qualify_offer --check=gate: counts only the lint+agent_verify "
+         "receipt; the verify and cx ones are QUALIFY_NOT_REVERIFIED") {
+        dlq_qualify_check(&c, &f, all3, "gate");
+        ASSERT(dlq_ready(&c, 1, 0, 1));
+        ASSERT_STR_EQ(json_get_str(json_at(json_get(&c.reply.data, "signers"),
+                                           0)),
+                      dsign);
+        dlt_end(&c);
+        dlq_qualify_check(&c, &f, both, "gate");
+        ASSERT(dlt_refused(&c, "QUALIFY_SHORT"));
+        dlt_end(&c);
+        /* the gate receipt does not count under verify, cx or the default */
+        dlq_qualify_check(&c, &f, rd, "verify");
+        ASSERT(dlt_refused(&c, "QUALIFY_SHORT"));
+        dlt_end(&c);
+        dlq_qualify_check(&c, &f, rd, "cx");
+        ASSERT(dlt_refused(&c, "QUALIFY_SHORT"));
+        dlt_end(&c);
+        dlq_qualify_check(&c, &f, rd, NULL);
         ASSERT(dlt_refused(&c, "QUALIFY_SHORT"));
         dlt_end(&c);
         PASS();

@@ -2537,13 +2537,18 @@ ZCL_COMMAND_DEV_COMMAND(
     "REVERIFY_EMPTY_SELECTION or REVERIFY_SELECTION_BASE when it selected no "
     "group or selected against another base, and a pass "
     "is signed over bundle_sha256,bundle_verify,head,base,agent_verify. "
+    "--check=gate adds full lint first: the lint preparation land qualify "
+    "uses, then `make lint` with ZCL_LINT_TU_CACHE=0, then the same "
+    "agent-verify; timeout_s then defaults to 7200 and covers all of it; "
+    "REVERIFY_LINT_FAILED or REVERIFY_PREPARE_FAILED otherwise, and a pass "
+    "is signed over bundle_sha256,bundle_verify,head,base,lint,agent_verify. "
     "Returns commit, base, "
     "file, functions, verdict, receipt.",
     65536,
     "land,offer,reverify,cx,p2p",
     "zcl.land_reverify_offer_input.v1", "zcl.land_reverify_offer.v1",
     "bundle,offer,repo,receipt_out,check,timeout_s", "bundle,offer",
-    "z23-dev dev land reverify_offer --bundle=/abs/x.bundle --offer=/abs/x.bundle.offer.json [--receipt_out=/abs/x.receipt.json] [--check=cx|verify] [--timeout_s=N]",
+    "z23-dev dev land reverify_offer --bundle=/abs/x.bundle --offer=/abs/x.bundle.offer.json [--receipt_out=/abs/x.receipt.json] [--check=cx|verify|gate] [--timeout_s=N]",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
     ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_BACKGROUND,
@@ -2561,7 +2566,8 @@ ZCL_COMMAND_DEV_COMMAND(
     "Count the distinct labs that re-verified an offered commit",
     "Each of receipts (comma list of absolute paths) passes "
     "verify_offer_receipt's checks against offer, same codes, its path as "
-    "evidence. It counts only with cx_check (check=verify: agent_verify) in "
+    "evidence. It counts only with cx_check (check=verify: agent_verify; "
+    "check=gate: lint and agent_verify) in "
     "its checks and a signer other "
     "than this box's own key; a receipt that fails any check is skipped, "
     "not fatal, and listed in data.rejected as {receipt, code} (codes "
@@ -2576,7 +2582,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "land,offer,receipt,qualify,p2p",
     "zcl.land_qualify_offer_input.v1", "zcl.land_qualify_offer.v1",
     "offer,receipts,require,check", "offer,receipts",
-    "z23-dev dev land qualify_offer --offer=/abs/x.bundle.offer.json --receipts=/abs/a.receipt.json[,/abs/b.receipt.json] [--require=N] [--check=cx|verify]",
+    "z23-dev dev land qualify_offer --offer=/abs/x.bundle.offer.json --receipts=/abs/a.receipt.json[,/abs/b.receipt.json] [--require=N] [--check=cx|verify|gate]",
     ZCL_COMMAND_EFFECT_READ, ZCL_COMMAND_RISK_READ,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
     ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST,

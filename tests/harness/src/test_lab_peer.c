@@ -562,7 +562,7 @@ static int case_verify_check_option(void)
 {
     int failures = 0;
     struct lpt e;
-    TEST_CASE("lab_peer: verify passes no --check by default, --check=verify through") {
+    TEST_CASE("lab_peer: verify passes no --check by default, --check=verify and --check=gate through") {
         ASSERT(lpt_verify_env(&e, "verify_check_default"));
         ASSERT_EQ(lpt_verify_run(&e), 0);
         ASSERT_EQ(lpt_count(e.calls, "\treverify_offer\n"), 1);
@@ -574,6 +574,11 @@ static int case_verify_check_option(void)
         ASSERT_EQ(lpt_verify_run_check(&e, "--check=verify"), 0);
         ASSERT_EQ(lpt_count(e.calls, "\treverify_offer\n"), 1);
         ASSERT_EQ(lpt_count(e.calls, "\t--check=verify\n"), 1);
+        ASSERT(lpt_verify_env(&e, "verify_check_gate"));
+        ASSERT_EQ(lpt_verify_run_check(&e, "--check=gate"), 0);
+        ASSERT_EQ(lpt_count(e.calls, "\treverify_offer\n"), 1);
+        ASSERT_EQ(lpt_count(e.calls, "\t--check=gate\n"), 1);
+        ASSERT_EQ(lpt_count(e.calls, "\t--check=verify\n"), 0);
     } TEST_END
     return failures;
 }
@@ -978,7 +983,7 @@ static int case_collect_check_option(void)
     int failures = 0;
     struct lpt_ids i;
     struct lpt e;
-    TEST_CASE("lab_peer: collect passes no --check by default, --check=verify to qualify_offer") {
+    TEST_CASE("lab_peer: collect passes no --check by default, --check=verify and --check=gate to qualify_offer") {
         lpt_ids(&i);
         ASSERT(lpt_collect_env(&e, &i, "collect_check_default", 1));
         ASSERT_EQ(lpt_collect_run(&e, "2"), 0);
@@ -991,6 +996,11 @@ static int case_collect_check_option(void)
         ASSERT_EQ(lpt_collect_run_check(&e, "--check=verify"), 0);
         ASSERT_EQ(lpt_count(e.calls, "\tqualify_offer\n"), 1);
         ASSERT_EQ(lpt_count(e.calls, "\t--check=verify\n"), 1);
+        ASSERT(lpt_collect_env(&e, &i, "collect_check_gate", 1));
+        ASSERT_EQ(lpt_collect_run_check(&e, "--check=gate"), 0);
+        ASSERT_EQ(lpt_count(e.calls, "\tqualify_offer\n"), 1);
+        ASSERT_EQ(lpt_count(e.calls, "\t--check=gate\n"), 1);
+        ASSERT_EQ(lpt_count(e.calls, "\t--check=verify\n"), 0);
     } TEST_END
     return failures;
 }
