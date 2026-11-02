@@ -3964,11 +3964,17 @@ templates-no-touch-selftest: $(VIEW_GEN_HEADERS)
 	}; \
 	echo "templates-no-touch-selftest: PASS"
 
-# Prove the stamp gate is exact in both directions with dry runs only (no file
-# is touched, so source metadata stays put): once settled, no generator is
-# scheduled for the headers or their stamps even if a header is older than an
-# input; and pretending (-W) that any single input changed schedules exactly
-# its generator, so no generated file can miss a regeneration.
+# Prove the stamp gate is exact in both directions. A toy Makefile pins the
+# shape; then the REAL rules ($(TMPL_STAMP), $(SITE_CSS_STAMP),
+# $(INSTALL_SH_STAMP), $(TUNNEL_EXPORT_BINDING_STAMP)) run for real in a
+# throwaway worktree under ~/.cache/development-scratch/z23/ (removed on exit),
+# so a typo in a real rule's prerequisites cannot pass: each header is built
+# once; a settled tree (headers aged) runs no generator and moves no stamp or
+# header; touching one real input (a .chtml, site.css, the install script, the
+# Makefile for the tunnel binding) reruns exactly that generator; deleting a
+# header regenerates it. Generator runs are counted through a logging wrapper
+# passed as TMPL_TOOL; the tunnel rule has no tool, so its stamp mtime is the
+# witness.
 .PHONY: gen-stamps-selftest
 gen-stamps-selftest:
 	@set -eu; \
@@ -3992,6 +3998,45 @@ gen-stamps-selftest:
 	rm -f "$$d/out.h"; mk; \
 	[ "$$(nruns)" = 3 ] && [ -e "$$d/out.h" ] || fail "missing output was not regenerated"; \
 	sleep 1; touch "$$d/gen.sh"; mk; [ "$$(nruns)" = 4 ] || fail "changed generator did not rerun"; \
+	root="$$(pwd)"; sc="$${GEN_STAMPS_SCRATCH:-$$HOME/.cache/development-scratch/z23}"; \
+	mkdir -p "$$sc"; w="$$(mktemp -d "$$sc/gen-stamps-selftest.XXXXXX")"; rmdir "$$w"; \
+	trap 'git -C "$$root" worktree remove --force "$$w" >/dev/null 2>&1 || :; rm -rf "$$d" "$$w"; git -C "$$root" worktree prune' EXIT HUP INT TERM; \
+	git -C "$$root" worktree add --detach "$$w" HEAD >/dev/null 2>&1 || fail "cannot create the scratch worktree"; \
+	cp Makefile "$$w/Makefile"; \
+	hdrs="$(TMPL_GEN) $(SITE_CSS_GEN) $(INSTALL_SH_GEN) $(TUNNEL_EXPORT_BINDING)"; \
+	stamps="$(TMPL_STAMP) $(SITE_CSS_STAMP) $(INSTALL_SH_STAMP) $(TUNNEL_EXPORT_BINDING_STAMP)"; \
+	chtml="$$(ls "$$w"/$(TMPL_DIR)/*.chtml | head -n 1)"; \
+	printf '%s\n' '#!/bin/sh' "echo \"\$$1\" >> '$$d/gen.log'" "exec '$$w/$(TMPL_TOOL)' \"\$$@\"" > "$$d/gen_logged"; \
+	chmod +x "$$d/gen_logged"; \
+	rmk() { (cd "$$w" && env -u MAKEFLAGS -u MAKELEVEL -u GIT_EDITOR -u GIT_OPTIONAL_LOCKS $(MAKE) --no-print-directory -s $$hdrs > "$$d/real.log" 2>&1) || { tail -n 20 "$$d/real.log" >&2; fail "real make failed"; }; }; \
+	lmk() { : > "$$d/gen.log"; (cd "$$w" && env -u MAKEFLAGS -u MAKELEVEL -u GIT_EDITOR -u GIT_OPTIONAL_LOCKS $(MAKE) --no-print-directory -s TMPL_TOOL="$$d/gen_logged" $$hdrs > "$$d/real.log" 2>&1) || { tail -n 20 "$$d/real.log" >&2; fail "real make failed"; }; }; \
+	snap() { for f in $$stamps $$hdrs; do stat -c '%y' "$$w/$$f" | tr -d ' :.+-'; done | tr '\n' ' '; }; \
+	expect() { what="$$1"; mask="$$2"; glog="$$3"; i=1; for b in $$before; do \
+	    a="$$(echo "$$after" | cut -d' ' -f$$i)"; m="$$(echo "$$mask" | cut -c$$i)"; \
+	    if [ "$$m" = 1 ]; then [ "$$a" != "$$b" ] || fail "$$what: file $$i did not change"; \
+	    else [ "$$a" = "$$b" ] || fail "$$what: file $$i changed but should not have"; fi; i=$$((i+1)); done; \
+	    [ "$$(tr '\n' ' ' < "$$d/gen.log" | sed 's/ $$//')" = "$$glog" ] || fail "$$what: generator runs were '$$(tr '\n' ' ' < "$$d/gen.log")', expected '$$glog'"; }; \
+	rmk; for f in $$stamps $$hdrs; do [ -e "$$w/$$f" ] || fail "real build did not produce $$f"; done; \
+	for h in $$hdrs; do touch -d '2001-01-01' "$$w/$$h"; done; \
+	before="$$(snap)"; lmk; lmk; after="$$(snap)"; \
+	expect "settled tree" 00000000 ""; \
+	sleep 1; touch "$$chtml"; before="$$(snap)"; lmk; after="$$(snap)"; \
+	expect "touched .chtml" 10000000 "$(TMPL_DIR)"; \
+	sleep 1; touch "$$w/$(SITE_CSS_SRC)"; before="$$(snap)"; lmk; after="$$(snap)"; \
+	expect "touched site.css" 01000000 "--single-css"; \
+	sleep 1; touch "$$w/$(INSTALL_SH_SRC)"; before="$$(snap)"; lmk; after="$$(snap)"; \
+	expect "touched install script" 00100000 "--single-text"; \
+	sleep 1; touch "$$w/Makefile"; before="$$(snap)"; lmk; after="$$(snap)"; \
+	expect "touched Makefile" 00010000 ""; \
+	for n in 1 2 3 4; do \
+	  h="$$(echo "$$hdrs" | cut -d' ' -f$$n)"; \
+	  case $$n in 1) g="$(TMPL_DIR)"; mask=10001000;; 2) g="--single-css"; mask=01000100;; \
+	    3) g="--single-text"; mask=00100010;; 4) g=""; mask=00010001;; esac; \
+	  sleep 1; rm -f "$$w/$$h"; \
+	  before="$$(for f in $$stamps $$hdrs; do if [ -e "$$w/$$f" ]; then stat -c '%y' "$$w/$$f" | tr -d ' :.+-'; else echo gone; fi; done | tr '\n' ' ')"; \
+	  lmk; [ -e "$$w/$$h" ] || fail "deleted $$h was not regenerated"; after="$$(snap)"; \
+	  expect "deleted $$h" "$$mask" "$$g"; \
+	done; \
 	echo "gen-stamps-selftest: PASS"
 
 # Focused parses must not pay for the commit stamp: BUILD_COMMIT is lazy, so a
