@@ -531,10 +531,32 @@ static void child_note(char stage[static 32], char error[static 160],
     if (why && !error[0]) (void)snprintf(error, 160, "%s", why);
 }
 
+/* An AddressSanitizer build leaves RLIMIT_AS unset. The runner is this very
+ * binary, and an ASan process has already mapped about 20 TB of shadow
+ * (measured VmSize=21476868232 KB), so a 4 GiB address-space cage set after
+ * the fork makes every later mmap fail: the leaf dies with "ERROR:
+ * AddressSanitizer failed to allocate ... ReserveShadowMemoryRange failed"
+ * and exits 1 before the candidate loads (test_reflex_runner,
+ * test_zcode_swarm_net_shard_01 in the ASan sweep). Only the address-space
+ * ceiling is dropped, and only when the sanitizer is compiled in; CPU,
+ * NOFILE, NPROC, FSIZE and CORE are unchanged, and every other build keeps
+ * the 4 GiB cage. GCC defines __SANITIZE_ADDRESS__; Clang reports it
+ * through __has_feature(address_sanitizer). */
+#if defined(__SANITIZE_ADDRESS__)
+#define RR_AS_BYTES OS_SANDBOX_RLIMIT_KEEP
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define RR_AS_BYTES OS_SANDBOX_RLIMIT_KEEP
+#endif
+#endif
+#ifndef RR_AS_BYTES
+#define RR_AS_BYTES (UINT64_C(4) << 30)
+#endif
+
 static bool child_rlimits(uint32_t timeout_ms)
 {
     struct os_sandbox_rlimits lim = {
-        .as_bytes = UINT64_C(4) << 30,
+        .as_bytes = RR_AS_BYTES,
         .cpu_seconds = (uint64_t)timeout_ms / 1000u + 2u,
         .nproc = OS_SANDBOX_RLIMIT_KEEP,
         .fsize_bytes = 0,

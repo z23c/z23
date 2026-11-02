@@ -1158,57 +1158,28 @@ static int t_component_receiver_binding(void)
 }
 #endif
 
-/* Under AddressSanitizer every case that runs a candidate in the confined
- * leaf cannot run. The leaf is this same binary re-exec'd as the runner and
- * caged with RLIMIT_AS = 4 GiB after the fork (child_rlimits in
- * tools/dev/devloop_reflex_runner_main.c). An ASan process maps terabytes of
- * shadow, so under the cage every later mmap (dlopen, malloc) fails and the
- * leaf exits 1 before it loads the candidate. Measured in the ASan sweep
- * (pfx-re.log): each of these cases reports exit=1 checks=0/0 dlopen=0us with
- * "observation frame missing", 12 failures; the sibling groups that run
- * inside the same cage under ASan die with "AddressSanitizer failed to
- * allocate ... ReserveShadowMemoryRange failed. Perhaps you're using
- * ulimit -v". The cage is a fail-closed refusal and stays; only the ASan
- * build skips these cases, every other build runs them unchanged. GCC
- * defines __SANITIZE_ADDRESS__; Clang reports it through
- * __has_feature(address_sanitizer). */
-#if defined(__SANITIZE_ADDRESS__)
-#define RR_UNDER_ASAN 1
-#elif defined(__has_feature)
-#if __has_feature(address_sanitizer)
-#define RR_UNDER_ASAN 1
-#endif
-#endif
-
-#if defined(RR_UNDER_ASAN)
-#define RR_CONFINED(call) \
-    ((void)(call), printf("reflex runner: " #call " SKIP under AddressSanitizer (RLIMIT_AS cage)\n"))
-#else
-#define RR_CONFINED(call) failures += call()
-#endif
-
 int test_reflex_runner(void);
 int test_reflex_runner(void)
 {
     printf("\n=== clean-zygote reflex runner: real candidate images ===\n");
     int failures = 0;
-    RR_CONFINED(t_hostile_candidate_sees_fresh_closed_world);
-    RR_CONFINED(t_green_then_regression_keeps_accepted_root);
-    RR_CONFINED(t_hang_and_crash_do_not_kill_runner);
-    RR_CONFINED(t_socket_and_wx_are_killed);
-    RR_CONFINED(t_kernel_escape_surfaces_are_denied);
+    failures += t_hostile_candidate_sees_fresh_closed_world();
+    failures += t_green_then_regression_keeps_accepted_root();
+    failures += t_hang_and_crash_do_not_kill_runner();
+    failures += t_socket_and_wx_are_killed();
+    failures += t_kernel_escape_surfaces_are_denied();
     failures += t_unverifiable_artifact_fails_closed();
-    RR_CONFINED(t_retained_artifact_fd);
-    RR_CONFINED(t_runner_stage_timings);
+    failures += t_retained_artifact_fd();
+    failures += t_runner_stage_timings();
     failures += t_fd_hygiene_without_close_range();
     failures += t_report_strings_validated_before_use();
     failures += t_report_frames_parse_by_name();
     failures += t_reap_is_bounded_after_eof();
-    RR_CONFINED(t_green_survives_leaf_close_without_close_range);
-    RR_CONFINED(t_hostile_story_duplicate_frame_is_red);
-    RR_CONFINED(t_leaf_closes_pipe_then_outlives_deadline);
-    RR_CONFINED(t_runner_resets_inherited_sigchld_ignore);
-    RR_CONFINED(t_component_receiver_binding);
+    failures += t_green_survives_leaf_close_without_close_range();
+    failures += t_hostile_story_duplicate_frame_is_red();
+    failures += t_leaf_closes_pipe_then_outlives_deadline();
+    failures += t_runner_resets_inherited_sigchld_ignore();
+    failures += t_component_receiver_binding();
     zcl_reflex_runner_shutdown();
     printf("=== reflex_runner: %d failures ===\n", failures);
     return failures;
