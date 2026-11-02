@@ -45,7 +45,7 @@ SELECT *`, so a backup taken from an encrypted wallet contains encrypted
 blobs and a backup taken from a plaintext wallet contains raw keys. The two
 layers use **independent passphrases**: `ZCL_WALLET_PASSPHRASE` wraps the rows,
 while `WALLET_BACKUP_PASSWORD` wraps every scheduled backup file
-(`wallet_backup_service.c`, ChaCha20-Poly1305 over the whole file). For an
+(encryption is `wallet_backup_encrypt_file` in `contexts/wallet/services/src/wallet_backup_crypto.c`, ChaCha20-Poly1305 over the whole file). For an
 operator who will not place the second secret in an environment,
 `core wallet backup now --input=-` also accepts an invocation-scoped
 `password`: it is stdin-only, is never retained in service configuration, and
@@ -56,10 +56,10 @@ warning and proceeds.
 **Export paths:** `dumpprivkey` / `z_exportkey` over authenticated JSON-RPC
 export directly; `core.wallet.address.export-key` is OWNER-gated and uses
 plan/commit on the typed surface
-(`contexts/wallet/controllers/src/wallet_native_handlers.c:390-451`). The
+(`contexts/wallet/controllers/src/wallet_native_handlers.c:452-515`). The
 typed form returns a non-revealing plan without `confirm:true`, warns that
 commit reveals the key, and returns the WIF in `reply.data.privkey` on commit. `rpc_dumpprivkey` logs failure context and addresses, not key bytes
-(`contexts/wallet/controllers/src/wallet_controller_keys.c:11-57`).
+(`contexts/wallet/controllers/src/wallet_controller_keys.c:20-77`).
 
 ### 2.1 The sixth place — twelve words on paper, if they exist
 
@@ -488,7 +488,7 @@ them on chain. The reply is `{"address":"zs1..."}`.
   issued address reports only the notes received at that address, but a send
   "from" an issued address may spend any unspent note of the account, not just
   that address's. Every owned shielded from address spends account-wide today
-  (`wallet_shielded_send_shielded.c:276,303`): the diversified addresses are
+  (`contexts/wallet/controllers/src/wallet_shielded_send.c:314-315, 383-386`): the diversified addresses are
   one account for spending.
 - **Restore.** The index record is not in the wallet backup, and a restored
   wallet has not read the chain, so it cannot know which addresses an earlier
@@ -511,10 +511,10 @@ them on chain. The reply is `{"address":"zs1..."}`.
 ## 5. What the agent grant bounds
 
 The grant is a row in `agent_sessions` (migration v36,
-`engine/models/src/database_migrate_features_v30_up.c:200-224`), minted by
+`engine/models/src/database_migrate_features_v30_up.c:177-209`), minted by
 `vault session create` for an existing principal, and presented per invocation
 as `ZCL_AGENT_SESSION=<32 hex chars>`
-(`tools/command/native_command.c:3530, 4333`).
+(`tools/command/native_command.c:4026-4030`; the presentation is set at `:5221`). The 32-character form is checked at `cognition/models/src/agent_session.c:49-51`.
 
 It bounds the following; spending checks also require determined custody state:
 
@@ -538,7 +538,7 @@ row (`cognition/models/include/models/agent_session.h`, the
 
 - `vault.session.*` is refused outright for any presented grant, matched on the
   branch prefix so a leaf added tomorrow is covered the day it is added
-  (`cognition/services/src/agent_spend_policy.c:asp_is_grant_surface`) →
+  (`cognition/services/src/agent_spend_policy.c:145-148` (`asp_is_grant_surface`)) →
   `POLICY_NO_GRANT_MINT`.
 - The policy classifies the **leaf**, from its registry spec, not the input's
   shape. A wallet-touching or mutating leaf it has no rule for is refused
@@ -552,9 +552,9 @@ row (`cognition/models/include/models/agent_session.h`, the
 - The gate runs **after** the lane/authority/capability checks, because it is
   the only one that writes; ahead of them, anyone who could reach it could
   drain a session's window with commands that were then denied anyway
-  (`engine/modules/kernel/src/command_registry_execute.c:184-188`).
+  (`engine/modules/kernel/src/command_registry_execute.c:217-222`; the lane, authority and capability refusals all run before the policy check).
 - A plan-stage preview enforces the caps and debits nothing; a handler that
-  reports no mutation gets the debit released.
+  reports no mutation gets the debit released (`engine/modules/kernel/src/command_registry_execute.c:201-206`).
 
 Through the operating system: **yes** — see §7.
 
@@ -564,11 +564,11 @@ Through the operating system: **yes** — see §7.
 
 | surface | rule | enforced in |
 |---|---|---|
-| `core storage query` (SELECT-only SQL) | `wallet_keys`, `wallet_sapling_keys`, `wallet_seed`, `agent_sessions`, `zswp_contracts` denied wholesale; `privkey`, `xsk`, `seed`, `session_id`, `secret`, … denied as columns | `engine/controllers/src/dbquery_controller.c` |
-| refusal `evidence` in a reply | the **redacted** grant id (first 8 chars + `…`), never the bearer token | `agent_session_redact_id`, asserted on rendered bytes |
-| `vault session list` | redacted ids only; the full token crosses the service boundary exactly once, out of mint | `services/agent_session_service.h` |
+| `core storage query` (SELECT-only SQL) | `wallet_keys`, `wallet_sapling_keys`, `wallet_seed`, `agent_sessions`, `zswp_contracts` denied wholesale; `privkey`, `xsk`, `seed`, `session_id`, `secret`, … denied as columns | `engine/controllers/src/dbquery_controller.c:130-142` |
+| refusal `evidence` in a reply | the **redacted** grant id (first 8 chars + `…`), never the bearer token | `agent_session_redact_id` (`cognition/services/include/services/agent_session_service.h:130`), asserted on rendered bytes |
+| `vault session list` | redacted ids only; the full token crosses the service boundary exactly once, out of mint | `cognition/services/include/services/agent_session_service.h` |
 | `ops state --subsystem=agent_sessions` | count only with no key; with a key it echoes back the session the caller already named | `agent_session_dump_state_json` |
-| `node.log` | no path formats a private key, WIF, seed or extended spending key | `wallet_controller_keys.c` logs the address only |
+| `node.log` | no path formats a private key, WIF, seed or extended spending key | `contexts/wallet/controllers/src/wallet_controller_keys.c` logs the address only |
 
 The denylist rule that actually holds is the **table** list, not the column
 list: `SELECT * FROM t` names no column, so a column-level rule cannot see it.
@@ -582,11 +582,11 @@ The grant is presented in the agent's own environment and the agent runs as the
 node's uid. Therefore an agent that does not cooperate can:
 
 - run `env -u ZCL_AGENT_SESSION z23 …` and be the unbounded local
-  operator (`tools/command/native_command.c:4319-4323` — `granted_capabilities=~0`,
+  operator (`tools/command/native_command.c:5207-5211` — `granted_capabilities=~0`,
   `authority_ceiling=OWNER`);
 - read `<datadir>/.cookie` and call `sendtoaddress` straight over JSON-RPC,
   below the kernel and below this policy entirely
-  (`engine/controllers/src/rpc_client.c:349-365`);
+  (`engine/controllers/src/rpc_client.c:398-425`);
 - read any wallet secret deliberately placed in its own environment, and—when
   it shares the node uid—may reach the node's user-scoped boot credential;
 - read the node's memory, where every spending key is resident.
