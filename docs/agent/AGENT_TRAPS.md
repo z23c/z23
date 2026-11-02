@@ -416,6 +416,19 @@ out.
   `git range-diff OLD_BASE..OLD_HEAD NEW_BASE..NEW_HEAD | grep '^    -+'` and
   account for each one before review.
 
+- **Text read through fx is cut at 400 columns.** fx used to cut every line
+  silently. It now ends a cut line with `…[fx: line cut at 400]`. Never write a
+  file assembled from fx output: edit on the host with `git apply`, or fetch
+  with `FX_COLS=1000000`. The lines restored by the fx cut-line repair are
+  `.claude/plugin/README.md:35` and `docs/dev/CODEBASE_MAP.md:533,534,943,952,967`.
+
+- **`dev land submit` refuses `WORKTREE_BUSY` when a clean worktree holds a
+  stale sequencer state from an abandoned `git cherry-pick --no-commit`.** `git
+  status` shows `Cherry-pick currently in progress`. Read
+  `$(git rev-parse --git-dir)/sequencer/todo`, then run `git cherry-pick --quit`,
+  which keeps HEAD, the index and the tree, and range-diff before resubmitting.
+  Measured 2026-11-02 on the S1 Send lane.
+
 - **A wedged Android node with a stripped binary can be diagnosed from `/proc`
   without root or a debugger.** The steps:
   1. Group futex waiters by address. Each thread in
