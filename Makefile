@@ -4294,7 +4294,13 @@ $(TEST_PARALLEL_FAST_CANDIDATE): | $(BIN_DIR)/fleet-board-bridge
 # The z23_fx group runs z23-fx in --print-argv mode; no ssh is started.
 $(TEST_PARALLEL_REL_CANDIDATE): | $(BIN_DIR)/z23-fx
 $(TEST_PARALLEL_FAST_CANDIDATE): | $(BIN_DIR)/z23-fx
+$(TEST_SANITIZER_CANDIDATES): | $(BIN_DIR)/fleet-board-bridge $(BIN_DIR)/z23-fx
 endif
+# The sanitizer runners are focused runners like the fast one: give them the
+# fast runner's tool prerequisites, so a group that execs one of these tools
+# fails under t-asan/t-tsan only for its own reasons (11-02 ASan sweep:
+# binary_ab_fallback's launcher cases exec build/bin/zcl-nodectl, never built).
+$(TEST_SANITIZER_CANDIDATES): | $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/z23-acme$(ZCL_HOST_EXEEXT)
 
 # Expanding the complete object list inside a recipe makes the recipe itself
 # one oversized `/bin/sh -c` argument on Linux.  GNU Make writes the exact,
@@ -5084,6 +5090,7 @@ $(SEM_REPLAY_BIN): $(SEM_REPLAY_SRCS) tools/dev/sem_replay.h \
 ifneq ($(ZCL_HOST_WINDOWS),1)
 $(TEST_PARALLEL_REL_CANDIDATE): | $(SEM_REPLAY_BIN)
 $(TEST_PARALLEL_FAST_CANDIDATE): | $(SEM_REPLAY_BIN)
+$(TEST_SANITIZER_CANDIDATES): | $(SEM_REPLAY_BIN)
 endif
 
 .PHONY: check-capability-closure
