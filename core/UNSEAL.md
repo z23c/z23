@@ -899,3 +899,7 @@ later lane flips it HARD.
 - 2026-11-02T19:05:59Z — REASON: equihash: free this round's merged rows on a PoW reject; behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
   old ROOT: e23bc5b69bf867c14bd27b4a7091f11d8838ad83251adf6f41ceff2e775bef54
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-02T19:13:38Z — REASON: Replace banned string calls in sealed core with bounded snprintf; behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
+  old ROOT: e29b2dfd5b8617428699494c884dff4f7635ea4b17f1869d356d44cf0e323771
+  by: owner unseal ritual (make core-unseal)

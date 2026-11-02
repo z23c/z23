@@ -316,6 +316,6 @@ void swap_compute_id(const char *my_addr, const char *counter_addr,
     sha3_256_finalize(&sha3, hash);
 
     for (int i = 0; i < 32; i++)
-        sprintf(out + i * 2, "%02x", hash[i]);
+        snprintf(out + i * 2, 65 - i * 2, "%02x", hash[i]);
     out[64] = '\0';
 }

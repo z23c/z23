@@ -12,7 +12,7 @@
 static void blob_get_hex(const uint8_t *data, unsigned int width, char *out)
 {
     for (unsigned int i = 0; i < width; i++)
-        sprintf(out + i * 2, "%02x", data[width - i - 1]);
+        snprintf(out + i * 2, 3, "%02x", data[width - i - 1]);
     out[width * 2] = '\0';
 }
 

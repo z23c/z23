@@ -795,7 +795,7 @@ static bool headers_try_disk_header(struct msg_processor *mp,
         if (iter->phashBlock)
             uint256_get_hex(iter->phashBlock, index_hex);
         else
-            strcpy(index_hex, "(missing)");
+            snprintf(index_hex, sizeof index_hex, "%s", "(missing)");
         LOG_WARN("headers",
                  "getheaders: disk header hash mismatch h=%d index=%s disk=%s",
                  iter->nHeight, index_hex, disk_hex);

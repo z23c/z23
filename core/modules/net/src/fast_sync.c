@@ -498,7 +498,7 @@ int64_t fast_sync_prebuild_snapshot(const char *datadir,
 
         char hex[65];
         for (int i = 0; i < 32; i++)
-            sprintf(hex + i*2, "%02x", sha3[i]);
+            snprintf(hex + i*2, sizeof hex - i*2, "%02x", sha3[i]);
         printf("[snapshot] Pre-serialized %lld UTXOs (%.1f MB), "
                "SHA3=%s — disk-backed metadata published\n",
                (long long)count, (double)sz / (1024.0 * 1024.0), hex);
@@ -566,7 +566,7 @@ bool fast_sync_dump_state_json(struct json_value *out, const char *key)
     if (root_valid) {
         char hex[65];
         for (int i = 0; i < 32; i++)
-            sprintf(hex + i * 2, "%02x", root[i]);
+            snprintf(hex + i * 2, sizeof hex - i * 2, "%02x", root[i]);
         json_push_kv_str(&uc, "root", hex);
     }
     json_push_kv(out, "utxo_root_cache", &uc);
@@ -595,7 +595,7 @@ bool fast_sync_dump_state_json(struct json_value *out, const char *key)
     if (snap_valid) {
         char hex[65];
         for (int i = 0; i < 32; i++)
-            sprintf(hex + i * 2, "%02x", sha3[i]);
+            snprintf(hex + i * 2, sizeof hex - i * 2, "%02x", sha3[i]);
         json_push_kv_str(&sc, "sha3", hex);
     }
     json_push_kv(out, "snapshot_cache", &sc);

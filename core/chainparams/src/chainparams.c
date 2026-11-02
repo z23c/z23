@@ -100,8 +100,8 @@ static void init_main_params(void)
     struct chain_params *p = &mainParams;
     memset(p, 0, sizeof(*p));
 
-    strcpy(p->strNetworkID, "main");
-    strcpy(p->strCurrencyUnits, "ZCL");
+    snprintf(p->strNetworkID, sizeof p->strNetworkID, "%s", "main");
+    snprintf(p->strCurrencyUnits, sizeof p->strCurrencyUnits, "%s", "ZCL");
     p->bip44CoinType = 147;
 
     p->consensus.fCoinbaseMustBeProtected = true;
@@ -324,10 +324,10 @@ static void init_main_params(void)
     p->base58Prefixes[B58_ZCVIEWING_KEY][2] = 0xD3;
     p->base58PrefixLengths[B58_ZCVIEWING_KEY] = 3;
 
-    strcpy(p->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS], "zs");
-    strcpy(p->bech32HRPs[BECH32_SAPLING_FULL_VIEWING_KEY], "zviews");
-    strcpy(p->bech32HRPs[BECH32_SAPLING_INCOMING_VIEWING_KEY], "zivks");
-    strcpy(p->bech32HRPs[BECH32_SAPLING_EXTENDED_SPEND_KEY], "secret-extended-key-main");
+    snprintf(p->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS], sizeof p->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS], "%s", "zs");
+    snprintf(p->bech32HRPs[BECH32_SAPLING_FULL_VIEWING_KEY], sizeof p->bech32HRPs[BECH32_SAPLING_FULL_VIEWING_KEY], "%s", "zviews");
+    snprintf(p->bech32HRPs[BECH32_SAPLING_INCOMING_VIEWING_KEY], sizeof p->bech32HRPs[BECH32_SAPLING_INCOMING_VIEWING_KEY], "%s", "zivks");
+    snprintf(p->bech32HRPs[BECH32_SAPLING_EXTENDED_SPEND_KEY], sizeof p->bech32HRPs[BECH32_SAPLING_EXTENDED_SPEND_KEY], "%s", "secret-extended-key-main");
 
     p->fMiningRequiresPeers = true;
     p->fDefaultConsistencyChecks = false;
@@ -524,7 +524,7 @@ static void init_main_params(void)
     };
     p->nFoundersRewardAddresses = 48;
     for (size_t i = 0; i < 48; i++)
-        strcpy(p->vFoundersRewardAddress[i], main_founders[i]);
+        snprintf(p->vFoundersRewardAddress[i], sizeof p->vFoundersRewardAddress[i], "%s", main_founders[i]);
 }
 
 /* Base58 prefixes shared by testnet and regtest (mainnet differs). */
@@ -573,8 +573,8 @@ static void init_test_params(void)
     struct chain_params *p = &testNetParams;
     memset(p, 0, sizeof(*p));
 
-    strcpy(p->strNetworkID, "test");
-    strcpy(p->strCurrencyUnits, "ZCT");
+    snprintf(p->strNetworkID, sizeof p->strNetworkID, "%s", "test");
+    snprintf(p->strCurrencyUnits, sizeof p->strCurrencyUnits, "%s", "ZCT");
     p->bip44CoinType = 1;
 
     p->consensus.fCoinbaseMustBeProtected = true;
@@ -631,10 +631,10 @@ static void init_test_params(void)
 
     apply_testnet_b58_prefixes(p);
 
-    strcpy(p->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS], "ztestsapling");
-    strcpy(p->bech32HRPs[BECH32_SAPLING_FULL_VIEWING_KEY], "zviewtestsapling");
-    strcpy(p->bech32HRPs[BECH32_SAPLING_INCOMING_VIEWING_KEY], "zivktestsapling");
-    strcpy(p->bech32HRPs[BECH32_SAPLING_EXTENDED_SPEND_KEY], "secret-extended-key-test");
+    snprintf(p->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS], sizeof p->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS], "%s", "ztestsapling");
+    snprintf(p->bech32HRPs[BECH32_SAPLING_FULL_VIEWING_KEY], sizeof p->bech32HRPs[BECH32_SAPLING_FULL_VIEWING_KEY], "%s", "zviewtestsapling");
+    snprintf(p->bech32HRPs[BECH32_SAPLING_INCOMING_VIEWING_KEY], sizeof p->bech32HRPs[BECH32_SAPLING_INCOMING_VIEWING_KEY], "%s", "zivktestsapling");
+    snprintf(p->bech32HRPs[BECH32_SAPLING_EXTENDED_SPEND_KEY], sizeof p->bech32HRPs[BECH32_SAPLING_EXTENDED_SPEND_KEY], "%s", "secret-extended-key-test");
 
     p->fMiningRequiresPeers = true;
     p->fDefaultConsistencyChecks = false;
@@ -659,8 +659,8 @@ static void init_regtest_params(void)
     struct chain_params *p = &regTestParams;
     memset(p, 0, sizeof(*p));
 
-    strcpy(p->strNetworkID, "regtest");
-    strcpy(p->strCurrencyUnits, "REG");
+    snprintf(p->strNetworkID, sizeof p->strNetworkID, "%s", "regtest");
+    snprintf(p->strCurrencyUnits, sizeof p->strCurrencyUnits, "%s", "REG");
     p->bip44CoinType = 1;
 
     p->consensus.fCoinbaseMustBeProtected = false;
@@ -717,10 +717,10 @@ static void init_regtest_params(void)
     /* Same as testnet prefixes */
     apply_testnet_b58_prefixes(p);
 
-    strcpy(p->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS], "zregtestsapling");
-    strcpy(p->bech32HRPs[BECH32_SAPLING_FULL_VIEWING_KEY], "zviewregtestsapling");
-    strcpy(p->bech32HRPs[BECH32_SAPLING_INCOMING_VIEWING_KEY], "zivkregtestsapling");
-    strcpy(p->bech32HRPs[BECH32_SAPLING_EXTENDED_SPEND_KEY], "secret-extended-key-regtest");
+    snprintf(p->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS], sizeof p->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS], "%s", "zregtestsapling");
+    snprintf(p->bech32HRPs[BECH32_SAPLING_FULL_VIEWING_KEY], sizeof p->bech32HRPs[BECH32_SAPLING_FULL_VIEWING_KEY], "%s", "zviewregtestsapling");
+    snprintf(p->bech32HRPs[BECH32_SAPLING_INCOMING_VIEWING_KEY], sizeof p->bech32HRPs[BECH32_SAPLING_INCOMING_VIEWING_KEY], "%s", "zivkregtestsapling");
+    snprintf(p->bech32HRPs[BECH32_SAPLING_EXTENDED_SPEND_KEY], sizeof p->bech32HRPs[BECH32_SAPLING_EXTENDED_SPEND_KEY], "%s", "secret-extended-key-regtest");
 
     p->fMiningRequiresPeers = false;
     p->fDefaultConsistencyChecks = true;
@@ -738,7 +738,7 @@ static void init_regtest_params(void)
     p->checkpointData.fTransactionsPerDay = 0;
 
     p->nFoundersRewardAddresses = 1;
-    strcpy(p->vFoundersRewardAddress[0], "t2FwcEhFdNXuFMv1tcYwaBJtYVtMj8b1uTg");
+    snprintf(p->vFoundersRewardAddress[0], sizeof p->vFoundersRewardAddress[0], "%s", "t2FwcEhFdNXuFMv1tcYwaBJtYVtMj8b1uTg");
 }
 
 static void ensure_initialized(void)

@@ -28,11 +28,6 @@ banned-str contexts/commons/packages/zlru/tests/test_zlru.c 2
 banned-str contexts/commons/packages/ztemplate/tests/test_ztemplate.c 1
 banned-str contexts/commons/packages/ztoml/tests/test_ztoml.c 1
 banned-str contexts/commons/packages/zxml/src/zxml.c 1
-banned-str core/chainparams/src/chainparams.c 20
-banned-str core/math/src/uint256.c 1
-banned-str core/modules/net/src/fast_sync.c 3
-banned-str core/modules/net/src/msg_headers.c 1
-banned-str core/modules/script/src/htlc.c 1
 banned-str tools/bench_fresh_sync.c 1
 banned-str tools/command/native_dev_train_keep.c 1
 banned-str tools/corpus_census.c 1
