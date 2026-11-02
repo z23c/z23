@@ -52,6 +52,12 @@ bool tor_write_torrc_ex(const char *datadir, uint16_t p2p_port,
          * on their own and the node never shuts down. Tor is ended by
          * tor_integration_stop(), not by a signal. */
         "__DisableSignalHandlers 1\n"
+        /* KIST asks the kernel for each socket's unsent bytes (ioctl
+         * SIOCOUTQNSD) on every scheduler run. Android denies that call to
+         * apps with EACCES, and Tor turns KIST off only on EINVAL, so a phone
+         * node retries the denied call several times a second. KISTLite
+         * schedules the same circuits without asking the kernel. */
+        "Schedulers KISTLite,Vanilla\n"
         "%s%s",
         bootstrap_port, datadir, datadir, datadir,
         reduced_padding ? "ReducedConnectionPadding 1\n" : "",

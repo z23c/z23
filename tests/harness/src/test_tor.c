@@ -1285,7 +1285,8 @@ static int test_tor_write_torrc_reduced_padding(void)
         "DataDirectory %s/tor_data\n"
         "Log notice file %s/" TOR_LOG_BASENAME "\n"
         "Log info [rend] file %s/" TOR_REND_LOG_BASENAME "\n"
-        "__DisableSignalHandlers 1\n",
+        "__DisableSignalHandlers 1\n"
+        "Schedulers KISTLite,Vanilla\n",
         tmpdir, tmpdir, tmpdir);
     snprintf(want_on, sizeof(want_on),
         "%sReducedConnectionPadding 1\n", want_off);

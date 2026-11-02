@@ -903,3 +903,7 @@ later lane flips it HARD.
 - 2026-11-02T19:13:38Z — REASON: Replace banned string calls in sealed core with bounded snprintf; behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
   old ROOT: e29b2dfd5b8617428699494c884dff4f7635ea4b17f1869d356d44cf0e323771
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-02T21:11:02Z — REASON: Tor scheduler: write Schedulers KISTLite,Vanilla in the generated torrc. KIST calls ioctl(SIOCOUTQNSD) on every socket each scheduler run; Android SELinux denies it to apps (EACCES), Tor only disables KIST on EINVAL, so the phone retries the denied call several times a second (2118 audit denials in one node logcat window; zcl_tor 0.07 to 0.10 core on two builds). Not a consensus predicate. Lead unseal under the owner grant of 2026-10-30; re-applied on the new main root after a seal conflict.
+  old ROOT: 47f5272a95a095a3c4a69e3fc53c4a795a4bdb4be7a56cd1f216a8e4d631b881
+  by: owner unseal ritual (make core-unseal)
