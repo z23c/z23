@@ -323,7 +323,7 @@ static void draw_confirm(JNIEnv *env, const struct wsu_view *v)
         (void)button_view(env, B_RETRY_WRITE, "Try again", GO_COLOR);
         (void)button_view(env, B_GIVE_UP, "Stop and check this phone", BUTTON_COLOR);
     } else if (all && v->write != WSU_WRITE_DONE) {
-        (void)text_view(env, "Saving your wallet…", 15.0f, SOFT);
+        (void)text_view(env, v->phase == WSU_PHASE_RESTART ? "Restarting your node…" : "Saving your wallet…", 15.0f, SOFT);
     } else if (all) {
         (void)button_view(env, B_CONFIRM, "Confirm", GO_COLOR);
     }

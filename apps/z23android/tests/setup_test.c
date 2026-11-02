@@ -432,6 +432,8 @@ struct fake {
     int64_t now_ms, stop_at_ms, wall_offset;
     bool exiting, watch;
     int starts_refused, step_at_start, phase_key, step_at_stop, step_at_write;
+    bool tap_on_start;
+    int tapped_write, tapped_phase, tapped_give_up, tapped_retry;
 };
 static struct fake *fake_of;
 static struct wsu *model_of;
@@ -478,6 +480,15 @@ static void f_control(void *ctx, bool start)
     if (start && f_running(f)) { ++f->starts_refused; return; }   /* the app refuses a start while the old process exists */
     if (start) {
         ++f->starts;
+        if (f->tap_on_start) {
+            f->tap_on_start = false;
+            wsu_view_read(model_of, &v);
+            f->tapped_write = v.write;
+            f->tapped_phase = v.phase;
+            zapp_words_cleanse(&v.words);
+            f->tapped_give_up = wsu_give_up_write(model_of);
+            f->tapped_retry = wsu_retry_write(model_of);
+        }
         f->running = true;
         if (f->watch) { wsu_view_read(model_of, &v); f->step_at_start = v.step; zapp_words_cleanse(&v.words); }
         return;
@@ -694,6 +705,25 @@ static void create_give_up_present_tests(void)
     script_say(&f.script, true, CREATED);
     create_all(&w);
     assert(w.write == WSU_WRITE_DONE && !wsu_give_up_write(&w) && w.held.count == 24);
+    wsu_destroy(&w);
+}
+/* While the node is starting after a failed write, Try again and the check are refused; afterwards they are accepted and the node runs. */
+static void create_buttons_wait_for_start_test(void)
+{
+    struct fake f;
+    struct wsu w;
+    fresh(&f, &w, true);
+    error_reply(&f.script, "NO_LOCAL_CHAIN");
+    f.tap_on_start = true;
+    create_all(&w);
+    assert(f.tapped_write == WSU_WRITE_RUNNING && f.tapped_phase == WSU_PHASE_RESTART && !f.tapped_give_up && !f.tapped_retry);
+    assert(w.write == WSU_WRITE_FAILED && w.write_failure == WSU_NO_TIP && f.running && f.starts == 1 && f.starts_refused == 0);
+    assert(wsu_give_up_write(&w) && w.step == WSU_CHECKING);
+    wsu_destroy(&w);
+    fresh(&f, &w, true);
+    error_reply(&f.script, "NO_LOCAL_CHAIN");
+    create_all(&w);
+    assert(wsu_retry_write(&w) && w.write == WSU_WRITE_PENDING);
     wsu_destroy(&w);
 }
 /* A failed phrase or random source leaves nothing held. */
@@ -2053,6 +2083,7 @@ int main(int argc, char **argv)
     create_failure_present_after_refusal_tests();
     create_give_up_tests();
     create_give_up_present_tests();
+    create_buttons_wait_for_start_test();
     create_words_failure_wipe_test();
     words_first_intro_tests();
     create_failure_busy_tests();

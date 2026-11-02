@@ -107,7 +107,7 @@ void wsu_view_read(struct wsu *w, struct wsu_view *out)
     out->birthday_unknown = !w->birthday.known;
     out->may_start_over = w->kind == ZAPP_KIND_CREATE && (!w->confirmed || !w->birthday.known);
     out->birthday_dropped = w->step == WSU_READING && !w->birthday_honoured;
-    if (w->step == WSU_WORKING || w->step == WSU_CHECKING) view_job_locked(w, out);
+    if (w->step == WSU_WORKING || w->step == WSU_CHECKING || w->write == WSU_WRITE_RUNNING) view_job_locked(w, out);
     if (w->failure == WSU_ASIDE_STUCK) memcpy(out->leftover, w->leftover, sizeof(out->leftover));
     if (w->step == WSU_WORDS || w->step == WSU_CONFIRM) view_words_locked(w, out);
     pthread_mutex_unlock(&w->lock);
@@ -452,8 +452,10 @@ void wsu_write_job(struct wsu *w)
     if (go) w->write = WSU_WRITE_RUNNING;
     pthread_mutex_unlock(&w->lock);
     if (!go) return;
-    write_ended(w, write_once(w, &restored), &restored);
+    /* The end is published only once the node is started again, so a screen that offers Try again or a check never races the start. */
+    enum sun_result result = write_once(w, &restored);
     (void)start_node(w);
+    write_ended(w, result, &restored);
 }
 bool wsu_retry_write(struct wsu *w)
 {
