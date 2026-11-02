@@ -3869,15 +3869,50 @@ $(BIN_DIR)/inspect_html: tools/inspect_html.c platform/modules/base/src/safe_all
 # target whose stdout is meant to be a machine-readable list. The echo is
 # suppressed; nothing is lost, because gen_templates itself reports what it
 # did (file counts, byte counts, "unchanged") on stderr either way.
-$(TMPL_GEN): $(TMPL_SRC) tools/gen_templates.c | $(TMPL_TOOL)
-	@$(TMPL_TOOL) $(TMPL_DIR) $@ $(TMPL_CSS_DIR)
+#
+# STAMP-GATED REGENERATION. gen_templates (and the tunnel binding below) leave
+# an unchanged output untouched on purpose: the source mutation token includes
+# inode/mtime/ctime, so a no-op regeneration must not rewrite metadata
+# (templates-no-touch-selftest). But a header whose mtime is older than one of
+# its inputs then stays "stale" forever: in every fresh worktree and after any
+# checkout that touches an input (or, for the tunnel binding, the Makefile),
+# EVERY make invocation re-ran the generator, rewrote the bootstrap marker,
+# restarted the parse and paid a second full source capture. The header rules
+# now take their stamp as an ORDER-ONLY prerequisite: the stamp (a file under
+# build/, outside the source inventory) is newer than the inputs exactly when
+# they were last regenerated, so a content-identical regeneration is paid once
+# and the stamp, not the header's mtime, records it. A changed input still
+# reruns the generator (stamp older than input), the header's mtime moves only
+# when its bytes change (so dependents rebuild exactly as before), and a
+# missing header drops the stamp and regenerates it.
+GEN_STAMP_DIR = build/identity/gen-stamps
+TMPL_STAMP = $(GEN_STAMP_DIR)/wallet_templates.stamp
+SITE_CSS_STAMP = $(GEN_STAMP_DIR)/site_css.stamp
+INSTALL_SH_STAMP = $(GEN_STAMP_DIR)/install_script.stamp
 
-$(SITE_CSS_GEN): $(SITE_CSS_SRC) tools/gen_templates.c | $(TMPL_TOOL)
-	@$(TMPL_TOOL) --single-css $< $@ site_css SITE_CSS_H
-
-$(INSTALL_SH_GEN): $(INSTALL_SH_SRC) tools/gen_templates.c | $(TMPL_TOOL)
+$(TMPL_STAMP): $(TMPL_SRC) tools/gen_templates.c | $(TMPL_TOOL)
 	@mkdir -p $(dir $@)
-	@$(TMPL_TOOL) --single-text $< $@ INSTALL_FROM_SOURCE_SH ZCL_VIEWS_INSTALL_SCRIPT_GEN_H
+	@$(TMPL_TOOL) $(TMPL_DIR) $(TMPL_GEN) $(TMPL_CSS_DIR)
+	@touch $@
+
+$(SITE_CSS_STAMP): $(SITE_CSS_SRC) tools/gen_templates.c | $(TMPL_TOOL)
+	@mkdir -p $(dir $@)
+	@$(TMPL_TOOL) --single-css $(SITE_CSS_SRC) $(SITE_CSS_GEN) site_css SITE_CSS_H
+	@touch $@
+
+$(INSTALL_SH_STAMP): $(INSTALL_SH_SRC) tools/gen_templates.c | $(TMPL_TOOL)
+	@mkdir -p $(dir $@) $(dir $(INSTALL_SH_GEN))
+	@$(TMPL_TOOL) --single-text $(INSTALL_SH_SRC) $(INSTALL_SH_GEN) INSTALL_FROM_SOURCE_SH ZCL_VIEWS_INSTALL_SCRIPT_GEN_H
+	@touch $@
+
+$(TMPL_GEN): | $(TMPL_STAMP)
+	@[ -e $@ ] || { rm -f $(TMPL_STAMP); $(MAKE) --no-print-directory $(TMPL_STAMP); }
+
+$(SITE_CSS_GEN): | $(SITE_CSS_STAMP)
+	@[ -e $@ ] || { rm -f $(SITE_CSS_STAMP); $(MAKE) --no-print-directory $(SITE_CSS_STAMP); }
+
+$(INSTALL_SH_GEN): | $(INSTALL_SH_STAMP)
+	@[ -e $@ ] || { rm -f $(INSTALL_SH_STAMP); $(MAKE) --no-print-directory $(INSTALL_SH_STAMP); }
 
 # Included near the top of this file. Updating it after its generated-header
 # prerequisites makes GNU Make restart before any ordinary target recipe runs.
@@ -3928,6 +3963,36 @@ templates-no-touch-selftest: $(VIEW_GEN_HEADERS)
 	    exit 1; \
 	}; \
 	echo "templates-no-touch-selftest: PASS"
+
+# Prove the stamp gate is exact in both directions with dry runs only (no file
+# is touched, so source metadata stays put): once settled, no generator is
+# scheduled for the headers or their stamps even if a header is older than an
+# input; and pretending (-W) that any single input changed schedules exactly
+# its generator, so no generated file can miss a regeneration.
+.PHONY: gen-stamps-selftest
+gen-stamps-selftest:
+	@set -eu; \
+	d="$$(mktemp -d)"; trap 'rm -rf "$$d"' EXIT HUP INT TERM; \
+	printf '%s\n' 'GEN = out.h' 'STAMP = out.stamp' \
+	  '$$(STAMP): in.txt gen.sh' '	@./gen.sh in.txt $$(GEN) && touch $$@' \
+	  '$$(GEN): | $$(STAMP)' '	@[ -e $$@ ] || { rm -f $$(STAMP); $$(MAKE) --no-print-directory $$(STAMP); }' \
+	  > "$$d/Makefile"; \
+	printf '%s\n' '#!/bin/sh' 'echo run >> runs.log' \
+	  'if [ -e "$$2" ] && cmp -s "$$1" "$$2"; then exit 0; fi; cp "$$1" "$$2"' > "$$d/gen.sh"; \
+	chmod +x "$$d/gen.sh"; \
+	fail() { echo "gen-stamps-selftest: FAIL: $$*" >&2; exit 1; }; \
+	nruns() { if [ -e "$$d/runs.log" ]; then wc -l < "$$d/runs.log" | tr -d ' '; else echo 0; fi; }; \
+	mk() { (cd "$$d" && $(MAKE) --no-print-directory -s out.h >/dev/null 2>&1) || fail "mini make failed"; }; \
+	echo one > "$$d/in.txt"; mk; [ "$$(nruns)" = 1 ] || fail "first build did not generate once"; \
+	touch -d '2001-01-01' "$$d/out.h"; \
+	mk; mk; [ "$$(nruns)" = 1 ] || fail "settled tree regenerated (header older than input, stamp fresh)"; \
+	sleep 1; echo two > "$$d/in.txt"; mk; \
+	[ "$$(nruns)" = 2 ] && cmp -s "$$d/in.txt" "$$d/out.h" || fail "changed input did not regenerate the output"; \
+	mk; [ "$$(nruns)" = 2 ] || fail "regenerated tree not settled"; \
+	rm -f "$$d/out.h"; mk; \
+	[ "$$(nruns)" = 3 ] && [ -e "$$d/out.h" ] || fail "missing output was not regenerated"; \
+	sleep 1; touch "$$d/gen.sh"; mk; [ "$$(nruns)" = 4 ] || fail "changed generator did not rerun"; \
+	echo "gen-stamps-selftest: PASS"
 
 # Focused parses must not pay for the commit stamp: BUILD_COMMIT is lazy, so a
 # test-door parse forks no rev-parse/update-index/diff-index. The PATH shim
@@ -16858,21 +16923,29 @@ TUNNEL_EXPORT_BINDING := tools/dev/native_tunnel_export_binding.h
 .PHONY: native-tunnel-export-binding check-native-tunnel-export-binding
 native-tunnel-export-binding: $(TUNNEL_EXPORT_BINDING)
 lint lint-fast: check-native-tunnel-export-binding
-$(TUNNEL_EXPORT_BINDING): tools/native_tunnel_sources.def Makefile
+# Stamp-gated like the view headers (see GEN_STAMP_DIR): this one depends on the
+# whole Makefile, so every Makefile edit or fresh checkout left the unchanged
+# header permanently older than its input and restarted every later parse.
+TUNNEL_EXPORT_BINDING_STAMP = $(GEN_STAMP_DIR)/native_tunnel_export_binding.stamp
+$(TUNNEL_EXPORT_BINDING): | $(TUNNEL_EXPORT_BINDING_STAMP)
+	@[ -e $@ ] || { rm -f $(TUNNEL_EXPORT_BINDING_STAMP); $(MAKE) --no-print-directory $(TUNNEL_EXPORT_BINDING_STAMP); }
+$(TUNNEL_EXPORT_BINDING_STAMP): tools/native_tunnel_sources.def Makefile
+	@mkdir -p $(dir $@)
 	@set -eu; descriptor_hash=$$(sha256sum tools/native_tunnel_sources.def | awk '{print $$1}'); \
 	test "$${#descriptor_hash}" -eq 64; \
 	mkdir -p "$(BUILD_DIR)"; \
 	tmp="$$(mktemp "$(BUILD_DIR)/native-tunnel-binding.XXXXXX")"; trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
 	device_id() { stat -c '%d' "$$1" 2>/dev/null || stat -f '%d' "$$1"; }; \
-	stage_device=$$(device_id "$$tmp"); target_device=$$(device_id "$(@D)"); \
+	stage_device=$$(device_id "$$tmp"); target_device=$$(device_id "$(dir $(TUNNEL_EXPORT_BINDING))"); \
 	case "$$stage_device:$$target_device" in *[!0-9:]*|:*|*:) echo 'tunnel binding: invalid filesystem identity' >&2; exit 1;; esac; \
 	test "$$stage_device" = "$$target_device" || { echo 'tunnel binding: staging and destination must share a filesystem' >&2; exit 1; }; \
 	printf '%s\n' '/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0' \
 	 ' * purpose: Generated exact tunnel descriptor binding; make native-tunnel-export-binding. */' \
 	 '#ifndef ZCL_NATIVE_TUNNEL_EXPORT_BINDING_H' '#define ZCL_NATIVE_TUNNEL_EXPORT_BINDING_H' \
 	 "#define TUNNEL_DESCRIPTOR_SHA256 \"$$descriptor_hash\"" '#endif' > "$$tmp"; \
-	if cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv -f "$$tmp" "$@"; fi; \
-	trap - EXIT HUP INT TERM
+	if cmp -s "$$tmp" "$(TUNNEL_EXPORT_BINDING)"; then rm -f "$$tmp"; else mv -f "$$tmp" "$(TUNNEL_EXPORT_BINDING)"; fi; \
+	trap - EXIT HUP INT TERM; \
+	touch "$@"
 check-native-tunnel-export-binding:
 	@set -eu; descriptor_hash=$$(sha256sum tools/native_tunnel_sources.def | awk '{print $$1}'); \
 	test "$${#descriptor_hash}" -eq 64; \

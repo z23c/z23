@@ -10969,6 +10969,25 @@ static int test_template_generator_concurrency(void)
     return failures;
 }
 
+static int test_generator_stamp_gate(void)
+{
+    int failures = 0;
+    TEST("dev platform: stamp-gated generators skip a settled tree and rerun on change") {
+        pid_t child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) {
+            execlp("make", "make", "-s", "gen-stamps-selftest", (char *)NULL);
+            _exit(127);
+        }
+        int status = 0;
+        ASSERT(waitpid(child, &status, 0) == child);
+        ASSERT(WIFEXITED(status));
+        ASSERT(WEXITSTATUS(status) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* The lint gates plant short-lived source files inside the production
  * tree while other groups run in the same checkout, so a fixture that
  * appears or vanishes during a whole-tree source-identity capture must not
@@ -12606,6 +12625,7 @@ static const struct dp_shard_case g_dp_cases[] = {
     DP_CASE(test_drive_focused_partial, 5),
     DP_CASE(test_hotfork_descriptor_boundary, 5),
     DP_CASE(test_template_generator_concurrency, 3),
+    DP_CASE(test_generator_stamp_gate, 3),
     DP_CASE(test_watch_session_stop_leaves_nothing, 3),
     DP_CASE(test_watch_session_orphaned_worker_stopped, 0),
     DP_CASE(test_watch_session_admit_attach_refuse, 5),
