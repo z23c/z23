@@ -551,7 +551,8 @@ static int64_t fac_duplicates(struct fac_jobs *j)
     tab = zcl_calloc(cap, sizeof(*tab), "dev_factory_dup");
     if (!tab)
         return -1;
-    qsort(j->v, j->n, sizeof(*j->v), fac_cmp_job_queued);
+    if (j->n > 1)
+        qsort(j->v, j->n, sizeof(*j->v), fac_cmp_job_queued);
     for (size_t i = 0; i < j->n; i++) {
         const struct fac_job *jb = &j->v[i];
         size_t s;
