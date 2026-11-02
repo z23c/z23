@@ -85,12 +85,10 @@ struct wallet;
  *    history_index.seed_height so a client knows where the history begins.
  *  - the projection hole scan stays off, because the skipped heights are an
  *    expected prefix, not a defect.
- *  - a wallet transaction or note below the seed height that node.db does not
- *    already hold is not discovered by this walk. A wallet whose birthday is
- *    below the seed keeps every row it already has and finds new activity
- *    from the seed onward; receipts it never recorded below the seed stay
- *    unknown to node.db until the option is turned off and the walk covers
- *    them.
+ *  - a wallet that holds keys and whose birthday floor is unknown or at or
+ *    below the seed is never skipped: its notes below the seed are found only
+ *    by this walk, so the option is ignored for that wallet and the pass
+ *    walks from the cursor, logging why.
  * With the option off nothing changes. */
 void node_db_catchup_set_from_seed(bool enabled);
 bool node_db_catchup_from_seed(void);
@@ -100,8 +98,13 @@ int node_db_catchup_seed_height(void);
 /* First height a pass walks: next, or seed_height + 1 when from_seed and that
  * is higher. */
 int node_db_catchup_first_height(int next, int seed_height, bool from_seed);
-/* node_db_catchup_first_height with the process option and the stored seed. */
-int node_db_catchup_start_height(int next);
+/* True when a wallet with wallet_keys keys may own notes at or below the seed:
+ * a seed exists and the wallet birthday floor (0 = unknown) is not above it. */
+bool node_db_catchup_prefix_needed(int seed_height, int wallet_keys,
+                                  int wallet_floor);
+/* node_db_catchup_first_height with the process option and the stored seed;
+ * the option is ignored when wallet_needs_prefix. */
+int node_db_catchup_start_height(int next, bool wallet_needs_prefix);
 /* True when the option is on and a seed height exists: heights below it are
  * absent by design. */
 bool node_db_catchup_seed_prefix_expected(void);

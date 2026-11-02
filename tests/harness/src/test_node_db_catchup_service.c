@@ -2,6 +2,7 @@
 
 #include "test/test_core.h"
 #include "services/node_db_catchup_service.h"
+#include "wallet/wallet.h"
 #include "services/node_db_catchup_lock_guard.h"
 #include "services/db_maintenance.h"
 #include "config/db_service.h"
@@ -2124,7 +2125,8 @@ static int ndc_seed_post(struct ndc_sap_fix *f, struct node_db *ndb, int rc,
 
 static int ndc_seed_case(struct ndc_sap_fix *f, const char *name, bool option,
                          int64_t activation, int cursor, int want_rc,
-                         bool want_low_rows)
+                         bool want_low_rows,
+                         struct wallet *w)
 {
     int failures = 0;
     /* activation and cursor are fixture-local heights; 0 means none. */
@@ -2140,7 +2142,7 @@ static int ndc_seed_case(struct ndc_sap_fix *f, const char *name, bool option,
                               (int)ndc_sap_h(cursor)));
     node_db_catchup_set_from_seed(option);
     failures += ndc_seed_pre(store, option, activation);
-    int rc = seeded ? node_db_catchup_service_run(&ndb, &f->ac, NULL, f->dir)
+    int rc = seeded ? node_db_catchup_service_run(&ndb, &f->ac, w, f->dir)
                     : -99;
     node_db_catchup_set_from_seed(false);
     printf("seed walk %s: rc=%d\n", name, rc);
@@ -2154,6 +2156,35 @@ static int ndc_seed_case(struct ndc_sap_fix *f, const char *name, bool option,
         progress_store_close();
     if (opened)
         node_db_close(&ndb);
+    return failures;
+}
+
+/* A wallet that holds a key and may own notes at or below the seed must not
+ * have that range skipped: the walk is what records its notes. A wallet whose
+ * birthday floor is above the seed is skipped as before. */
+static int ndc_seed_wallet_cases(struct ndc_sap_fix *f)
+{
+    int failures = 0;
+    struct wallet w;
+    wallet_init(&w);
+    w.keystore.keys[0].used = true;
+    w.keystore.num_keys = 1;
+    NDC_CHECK("seed walk: a wallet with an unknown birthday needs the prefix",
+              node_db_catchup_prefix_needed(2, 1, 0));
+    NDC_CHECK("seed walk: a wallet born above the seed does not",
+              !node_db_catchup_prefix_needed(2, 1, 3));
+    NDC_CHECK("seed walk: a wallet without keys does not",
+              !node_db_catchup_prefix_needed(2, 0, 0));
+    NDC_CHECK("seed walk: no seed needs no prefix",
+              !node_db_catchup_prefix_needed(-1, 1, 0));
+    /* Birthday unknown: height 1 and 2 are indexed despite the option. */
+    failures += ndc_seed_case(f, "wallet_below_seed", true, 2, 0, NDC_SAP_N,
+                              true, &w);
+    /* Birthday above the seed: the prefix is skipped. */
+    w.initial_scan_floor = (int)ndc_sap_h(3);
+    failures += ndc_seed_case(f, "wallet_above_seed", true, 2, 0, 2, false,
+                              &w);
+    wallet_free(&w);
     return failures;
 }
 
@@ -2174,14 +2205,17 @@ static int ndc_check_start_at_seed(void)
     if (f.built) {
         /* Default: all four heights are walked, as before. */
         failures += ndc_seed_case(&f, "default_off", false, 2, 0, NDC_SAP_N,
-                                  true);
+                                  true, NULL);
         /* Option on: heights 3 and 4 only; rows 1 and 2 are never written. */
-        failures += ndc_seed_case(&f, "from_seed", true, 2, 0, 2, false);
+        failures += ndc_seed_case(&f, "from_seed", true, 2, 0, 2, false, NULL);
         /* Option on, cursor already above the seed: unchanged. */
         failures += ndc_seed_case(&f, "cursor_above_seed", true, 2, 3, 1,
-                                  false);
+                                  false, NULL);
         /* Option on, store adopted from genesis: nothing to skip. */
-        failures += ndc_seed_case(&f, "no_seed", true, 0, 0, NDC_SAP_N, true);
+        failures += ndc_seed_case(&f, "no_seed", true, 0, 0, NDC_SAP_N, true,
+                                  NULL);
+        /* Option on, wallet with keys: the prefix is walked. */
+        failures += ndc_seed_wallet_cases(&f);
     }
     active_chain_free(&f.ac);
     test_cleanup_tmpdir(f.dir);
@@ -2438,6 +2472,23 @@ static int nt_check_missed_blocks(void)
     return failures;
 }
 
+/* A note below the reducer's oldest frontier cannot be replayed. It must not
+ * hold the other notes back: they reach the tip, and it is reported. */
+static int nt_check_note_below_history(void)
+{
+    NT_SCENARIO("tip_below_history", false, false)
+    enum { NT_OLD = 0x50 };
+    NDC_CHECK("the old note is recorded",
+              up && ndc_tip_note(&ndb, NT_OLD, &f.cm[10], 2));
+    NDC_CHECK("block 4 succeeds", up && nt_tip(&r, NT_A4));
+    NDC_CHECK("block 7 after a gap succeeds", up && nt_tip(&r, NT_A7));
+    NDC_CHECK("the newer note reaches 7", up && nt_current(&r, NT_NOTE, NT_A7));
+    NDC_CHECK("the old note is reported as needing a rescan",
+              up && node_db_sync_tip_witness_needs_rescan() == 1);
+    nt_close(&r, dir);
+    return failures;
+}
+
 /* An unreadable body leaves witnesses behind, the summary says so, and the
  * next call with the body readable repairs them. */
 static int nt_check_unreadable_body(void)
@@ -2565,7 +2616,8 @@ static int nt_check_long_reorg(void)
 static int ndc_check_tip_witnesses(void)
 {
     return nt_check_three_outputs() + nt_check_missed_blocks() +
-           nt_check_unreadable_body() + nt_check_reorg_disconnect() +
+           nt_check_unreadable_body() + nt_check_note_below_history() +
+           nt_check_reorg_disconnect() +
            nt_check_reorg_without_disconnect() + nt_check_long_reorg();
 }
 

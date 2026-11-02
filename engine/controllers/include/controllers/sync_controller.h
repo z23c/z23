@@ -212,6 +212,9 @@ bool node_db_sync_advance_tip_witnesses_async(struct node_db *ndb,
                                               const struct block *blk,
                                               const struct block_index *pindex,
                                               struct wallet *wallet);
+/* Wallet notes whose witness the last tip pass could not bring forward because
+ * the reducer holds no history old enough: they need a rescan. */
+int node_db_sync_tip_witness_needs_rescan(void);
 #ifdef ZCL_TESTING
 /* Number of queued tip witness jobs that have started running. */
 int node_db_sync_tip_witness_test_job_runs(void);

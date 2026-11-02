@@ -63,10 +63,41 @@ static bool tip_witness_tree_at(const struct block_index *bi,
     return true;
 }
 
+/* Lowest block the reducer history can replay: its frontier at start - 1 must
+ * exist, so the first replayable block is the adoption cursor plus one. 0 when
+ * the store holds history from genesis or cannot be read. */
+static int tip_witness_first_replayable(void)
+{
+    sqlite3 *rdb = progress_store_open_reader();
+    if (!rdb)
+        return 0;
+    int64_t activation = 0;
+    bool found = false;
+    bool ok = anchor_kv_activation_cursor(rdb, ANCHOR_POOL_SAPLING, &activation,
+                                          &found);
+    sqlite3_close(rdb);
+    return ok && found && activation > 0 && activation < INT32_MAX
+               ? (int)activation + 1
+               : 0;
+}
+
+/* Notes whose witness cannot be brought forward because the history they need
+ * is older than the reducer's oldest frontier. Reported, never replayed. */
+static _Atomic int g_tip_witness_needs_rescan;
+
+int node_db_sync_tip_witness_needs_rescan(void)
+{
+    return atomic_load(&g_tip_witness_needs_rescan);
+}
+
 /* Lowest block that must be replayed for some note to reach the parent of
- * height h, or h when none must. */
+ * height h, or h when none must. A note that needs a block below the reducer's
+ * oldest frontier cannot be replayed and must not hold the others back: it is
+ * counted as needing a rescan. */
 static int tip_witness_replay_start(struct node_db *ndb, int h)
 {
+    int first = tip_witness_first_replayable();
+    int unreplayable = 0;
     struct db_sapling_note *notes = NULL;
     int nw = db_sapling_note_list_unspent_alloc(ndb, &notes);
     int start = h;
@@ -81,10 +112,16 @@ static int tip_witness_replay_start(struct node_db *ndb, int h)
         int need = have ? wh + 1 : notes[i].block_height;
         if (have ? wh >= h - 1 : notes[i].block_height >= h)
             continue;
-        if (need >= 0 && need < start)
+        if (need >= 0 && need < first)
+            unreplayable++;
+        else if (need >= 0 && need < start)
             start = need;
     }
     free(notes);
+    int before = atomic_exchange(&g_tip_witness_needs_rescan, unreplayable);
+    if (unreplayable > 0 && before != unreplayable)
+        LOG_WARN("sync", "tip witnesses: %d wallet note(s) need a rescan "
+                 "(history below h=%d is not held)", unreplayable, first);
     return nw < 0 ? h : start;
 }
 

@@ -46,9 +46,15 @@ int node_db_catchup_first_height(int next, int seed_height, bool from_seed)
     return seed_height + 1;
 }
 
-int node_db_catchup_start_height(int next)
+bool node_db_catchup_prefix_needed(int seed_height, int wallet_keys,
+                                  int wallet_floor)
 {
-    bool on = node_db_catchup_from_seed();
+    return seed_height >= 0 && wallet_keys > 0 && wallet_floor <= seed_height;
+}
+
+int node_db_catchup_start_height(int next, bool wallet_needs_prefix)
+{
+    bool on = node_db_catchup_from_seed() && !wallet_needs_prefix;
     return node_db_catchup_first_height(
         next, on ? node_db_catchup_seed_height() : -1, on);
 }

@@ -802,23 +802,42 @@ static void catchup_print_summary(bool interrupted, int indexed,
     fflush(stdout);
 }
 
+/* True when the wallet holds keys and may own notes at or below the seed, so
+ * the walk must not skip that range: its scan is what records them. A wallet
+ * without a known birthday floor (0) is treated as older than the seed. */
+static bool catchup_wallet_needs_prefix(const struct wallet *w)
+{
+    int keys = catchup_count_wallet_keys(w);
+    if (w)
+        keys += (int)w->sapling_keys.num_keys;
+    return node_db_catchup_prefix_needed(node_db_catchup_seed_height(), keys,
+                                         w ? w->initial_scan_floor : 0);
+}
+
 /* First height a pass walks: the cursor next height, or with
  * -catchup-from-seed the first height above the shielded seed. */
-static int catchup_first_height(int db_tip)
+static int catchup_first_height(int db_tip, const struct wallet *w)
 {
-    return node_db_catchup_start_height(catchup_start_height(db_tip));
+    return node_db_catchup_start_height(catchup_start_height(db_tip),
+                                        catchup_wallet_needs_prefix(w));
 }
 
 /* The first height to walk, or -1 when the seed is at or above the tip and
  * there is nothing to walk. */
-static int catchup_walk_start(int db_tip, int chain_tip)
+static int catchup_walk_start(int db_tip, int chain_tip,
+                              const struct wallet *w)
 {
-    int start = catchup_first_height(db_tip);
+    int start = catchup_first_height(db_tip, w);
     if (start > chain_tip) {
         LOG_INFO("catchup", "catchup: seed height %d is at or above the tip %d "
                  "— nothing to walk", start - 1, chain_tip);
         return -1; // raw-return-ok:logged above; there is nothing to walk
     }
+    if (node_db_catchup_from_seed() && start == catchup_start_height(db_tip) &&
+        catchup_wallet_needs_prefix(w))
+        LOG_INFO("catchup", "catchup: -catchup-from-seed ignored: the wallet "
+                 "may hold notes at or below the shielded seed; walking from "
+                 "%d", start);
     if (start > catchup_start_height(db_tip))
         LOG_INFO("catchup", "catchup: -catchup-from-seed starts at %d, above "
                  "the shielded seed; heights %d..%d are not walked",
@@ -871,7 +890,7 @@ static void catchup_pass_init(struct catchup_pass *ps, struct node_db *ndb,
     ps->last_indexed_height = db_tip;
     ps->cb.last_committed_height = db_tip;
 
-    ps->start = catchup_first_height(db_tip);
+    ps->start = catchup_first_height(db_tip, w);
     ps->chain_tip = chain_tip;
     ps->total = chain_tip - ps->start + 1;
     catchup_active_begin(ps->start, chain_tip);
@@ -1300,6 +1319,7 @@ static void catchup_report_summary(const struct catchup_pass *ps)
  * chain tip. Both tip outputs are written on every path. */
 static int catchup_tips_need_work(struct node_db *ndb,
                                   const struct active_chain *chain,
+                                  const struct wallet *w,
                                   int *db_tip, int *chain_tip)
 {
     *db_tip = 0;
@@ -1310,7 +1330,7 @@ static int catchup_tips_need_work(struct node_db *ndb,
     *chain_tip = active_chain_height(chain);
     if (*db_tip >= *chain_tip)
         return 0;
-    return catchup_walk_start(*db_tip, *chain_tip) >= 0;
+    return catchup_walk_start(*db_tip, *chain_tip, w) >= 0;
 }
 
 /* Walk the pass from its start height through its chain tip, and end the
@@ -1363,7 +1383,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
 
     int db_tip = 0;
     int chain_tip = 0;
-    if (!catchup_tips_need_work(ndb, chain, &db_tip, &chain_tip))
+    if (!catchup_tips_need_work(ndb, chain, w, &db_tip, &chain_tip))
         return 0;
     if (!datadir)
         LOG_ERR("sync", "catchup: datadir is NULL (db_tip=%d, chain_tip=%d)",
