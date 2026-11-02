@@ -32,6 +32,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -356,11 +357,14 @@ static bool map_preflight_untouched(const char *dir, bool *verdict)
     struct map_file_state before[4], after[4];
     for (size_t i = 0; i < 4; i++)
         map_capture(dir, suffixes[i], &before[i]);
+    /* A non-empty -wal is read in place; the derived -shm read-marks and
+     * wal-index may be rewritten, the main file and the -wal never. */
+    bool shm_may_change = before[1].exists && before[1].st.st_size > 0;
     *verdict = boot_mint_anchor_normal_boot_preflight(dir);
     bool same = true;
     for (size_t i = 0; i < 4; i++) {
         map_capture(dir, suffixes[i], &after[i]);
-        same = same && map_state_same(&before[i], &after[i]);
+        same = same && (map_state_same(&before[i], &after[i]) || (shm_may_change && i == 2));
     }
     return same;
 }
@@ -388,33 +392,14 @@ static bool map_capture_preflight(const char *dir, bool *verdict, char *text, si
     return unchanged && restored && read_ok;
 }
 
-static bool map_copy_marks(const char *text, bool verdict)
-{
-    bool final = strstr(text, "mint_preflight.final_stability ") != NULL;
-    return strstr(text, "mint_preflight.temp_create ") &&
-        strstr(text, "mint_preflight.copy ") &&
-        strstr(text, "mint_preflight.copy_stability ") &&
-        strstr(text, "mint_preflight.copy_inspect ") &&
-        strstr(text, "mint_preflight.copy_open ") &&
-        strstr(text, "mint_preflight.copy_query_only ") &&
-        strstr(text, "mint_preflight.copy_gate ") &&
-        strstr(text, "mint_preflight.copy_close ") &&
-        strstr(text, "mint_preflight.cleanup_check ") &&
-        /* the private throwaway copy must never be fsynced: that flush cost
-         * 697 s of an 877 s warm restart on r1 */
-        !strstr(text, "mint_preflight.main_fsync") &&
-        !strstr(text, "mint_preflight.wal_fsync") &&
-        !strstr(text, "mint_preflight.live_inspect ") && final == verdict;
-}
-
-static bool map_marked_preflight(const char *dir, bool copy_path, bool *verdict)
+static bool map_marked_preflight(const char *dir, bool *verdict)
 {
     char text[4096];
     if (!map_capture_preflight(dir, verdict, text, sizeof text)) return false;
-    if (copy_path) return map_copy_marks(text, *verdict);
     return strstr(text, "mint_preflight.live_inspect ") &&
         (strstr(text, "mint_preflight.live_stability ") != NULL) == *verdict &&
         !strstr(text, "mint_preflight.temp_create ") &&
+        !strstr(text, "mint_preflight.main_copy") && !strstr(text, "mint_preflight.copy ") &&
         !strstr(text, "mint_preflight.copy_open ") &&
         !strstr(text, "mint_preflight.copy_query_only ") &&
         !strstr(text, "mint_preflight.copy_gate ") &&
@@ -436,7 +421,7 @@ static int test_normal_preflight_live_verdicts(void)
     if (db)
         sqlite3_close(db);
     MAP_CHECK("live: clean datadir is allowed and no byte/mtime changes",
-              map_marked_preflight(dir, false, &verdict) && verdict);
+              map_marked_preflight(dir, &verdict) && verdict);
 
     /* Empty -wal beside a clean main file takes the live path too. */
     char wal[600];
@@ -505,7 +490,7 @@ static int map_alternate_temp_root(const char *dir, sqlite3 *db)
             "DELETE FROM progress_meta WHERE key='" MINT_ANCHOR_IN_PROGRESS_KEY "'",
             NULL, NULL, NULL) == SQLITE_OK);
         MAP_CHECK("wal-only: ordinary WAL is allowed, source untouched",
-                  map_marked_preflight(dir, true, &verdict) && verdict);
+                  map_marked_preflight(dir, &verdict) && verdict);
         struct stat dir_stat;
         bool have_path = dir[0] == '/' && stat(dir, &dir_stat) == 0 && S_ISDIR(dir_stat.st_mode);
         MAP_CHECK("wal-only: datadir alias selected", have_path && setenv("TMPDIR", dir, 1) == 0);
@@ -640,7 +625,7 @@ static int test_normal_preflight_marker_only_in_wal(void)
     map_capture(dir, "-wal", &wal_state);
     MAP_CHECK("wal-only: -wal holds frames, main file does not have the marker", wal_state.exists && wal_state.st.st_size > 0);
     MAP_CHECK("wal-only: marker seen in the WAL is refused, nothing changes",
-              map_marked_preflight(dir, true, &verdict) && !verdict);
+              map_marked_preflight(dir, &verdict) && !verdict);
     failures += map_alternate_temp_root(dir, db);
     failures += map_failure_reasons(dir);
     if (db)
@@ -691,6 +676,62 @@ static int map_preflight_typed_refusal(void)
 }
 
 
+/* Build the state a kill -9 leaves: a child commits to the WAL with
+ * autocheckpoint off and dies without closing, so -wal holds frames the main
+ * file lacks and a stale -shm remains. */
+static bool map_crash_fixture(const char *dir, const char *marker_key)
+{
+    pid_t pid = fork();
+    if (pid < 0)
+        return false;
+    if (pid == 0) {
+        sqlite3 *db = map_open_kernel(dir, false);
+        bool ok = db && sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)", NULL, NULL, NULL) == SQLITE_OK &&
+                  map_put_marker(db, marker_key, "5a414d31");
+        _exit(ok ? 0 : 1);
+    }
+    int status = 0;
+    return waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+/* The preflight must read the WAL in place: no private copy, the main file and
+ * the -wal keep their exact bytes, inode, size and mtime/ctime. Only the
+ * derived -shm may be rebuilt. */
+static bool map_wal_read_in_place(const char *dir, bool *verdict)
+{
+    struct map_file_state main_before, wal_before, main_after, wal_after;
+    map_capture(dir, "", &main_before);
+    map_capture(dir, "-wal", &wal_before);
+    char text[4096];
+    bool marked = map_capture_preflight(dir, verdict, text, sizeof text);
+    map_capture(dir, "", &main_after);
+    map_capture(dir, "-wal", &wal_after);
+    return marked && wal_before.exists && wal_before.st.st_size > 0 && map_state_same(&main_before, &main_after) &&
+           map_state_same(&wal_before, &wal_after) && strstr(text, "mint_preflight.live_inspect ") &&
+           !strstr(text, "mint_preflight.temp_create ") && !strstr(text, "mint_preflight.main_copy") &&
+           !strstr(text, "mint_preflight.copy ");
+}
+
+static int test_normal_preflight_crashed_wal_read_in_place(void)
+{
+    int failures = 0;
+    char dir[256];
+    bool verdict = true;
+    test_fmt_tmpdir(dir, sizeof(dir), "mint_anchor_preflight", "crashed_wal");
+    mkdir_p("./test-tmp");
+    mkdir_p(dir);
+    MAP_CHECK("crashed: ordinary WAL fixture", map_crash_fixture(dir, "ordinary_serving_marker"));
+    MAP_CHECK("crashed: ordinary WAL allowed, read in place, main and wal untouched",
+              map_wal_read_in_place(dir, &verdict) && verdict);
+    map_cleanup_dir(dir);
+    mkdir_p(dir);
+    MAP_CHECK("crashed: producer marker fixture", map_crash_fixture(dir, MINT_ANCHOR_IN_PROGRESS_KEY));
+    MAP_CHECK("crashed: marker only in the WAL refused, read in place, main and wal untouched",
+              map_wal_read_in_place(dir, &verdict) && !verdict);
+    map_cleanup_dir(dir);
+    return failures;
+}
+
 #endif /* !_WIN32 */
 
 int test_mint_anchor_preflight(void);
@@ -707,6 +748,7 @@ int test_mint_anchor_preflight(void)
 #if !defined(_WIN32)
     failures += test_normal_preflight_live_verdicts();
     failures += test_normal_preflight_marker_only_in_wal();
+    failures += test_normal_preflight_crashed_wal_read_in_place();
     failures += map_preflight_typed_refusal();
 #endif
 

@@ -810,7 +810,7 @@ static bool inspect_via_copy(int dirfd, const char *kbase, struct preflight_sour
 
 /* The live read-only path is only sound when the WAL cannot hold committed
  * frames: SQLite's immutable=1 open never looks at the -wal or -shm, so a
- * non-empty WAL (kill -9, unclean stop) must take the copy path instead. */
+ * non-empty WAL (kill -9, unclean stop) takes the WAL-aware read-only open. */
 static bool live_inspect_eligible(const struct preflight_source_file *wal) {
     return !wal->exists || wal->identity.st_size == 0;
 }
@@ -821,7 +821,7 @@ static bool uri_char_plain(unsigned char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '/' || c == '.' || c == '_' || c == '-';
 }
 
-static bool live_uri_build(const char *datadir, const char *kbase, char *out, size_t cap) {
+static bool live_uri_build(const char *datadir, const char *kbase, const char *query, char *out, size_t cap) {
     size_t len = (size_t)snprintf(out, cap, "file:");
     char raw[PATH_MAX + 128];
     int n = snprintf(raw, sizeof(raw), "%s/%s", datadir, kbase);
@@ -839,13 +839,13 @@ static bool live_uri_build(const char *datadir, const char *kbase, char *out, si
             len += 3;
         }
     }
-    int tail = snprintf(out + len, cap - len, "?immutable=1");
-    return tail > 0 && (size_t)tail < cap - len;
+    int tail = snprintf(out + len, cap - len, "%s", query);
+    return tail >= 0 && (size_t)tail < cap - len;
 }
 
 static bool inspect_live_immutable(const char *datadir, const char *kbase, char *reason, size_t reason_size) {
     char uri[PATH_MAX * 3 + 256];
-    if (!live_uri_build(datadir, kbase, uri, sizeof(uri))) {
+    if (!live_uri_build(datadir, kbase, "?immutable=1", uri, sizeof(uri))) {
         preflight_reason_set(reason, reason_size, "inspect_read_failed what=live_uri_build file=%s", kbase);
         return false;
     }
@@ -853,17 +853,54 @@ static bool inspect_live_immutable(const char *datadir, const char *kbase, char 
                                  reason_size);
 }
 
+/* WAL path: a non-empty -wal may hold committed state the main file lacks, so
+ * the open must be WAL-aware. A READONLY connection with checkpoint-on-close
+ * disabled never writes the main file or the -wal (no checkpoint, no truncate,
+ * no restart); it only rebuilds the derived -shm wal-index. This replaces the
+ * 1.7 GB private copy. *opened is false when the live open itself could not be
+ * set up (for example an unwritable -shm), so the caller falls back to the
+ * copy path; a refusal verdict is never retried. */
+static bool inspect_live_wal(const char *datadir, const char *kbase, bool *opened, char *reason, size_t reason_size) {
+    *opened = false;
+    char uri[PATH_MAX * 3 + 256];
+    if (!live_uri_build(datadir, kbase, "", uri, sizeof(uri)))
+        return false;
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open_v2(uri, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_NOMUTEX, NULL);
+    bool ok = rc == SQLITE_OK && sqlite3_db_config(db, SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, 1, NULL) == SQLITE_OK &&
+              sqlite3_exec(db, "PRAGMA query_only=ON", NULL, NULL, NULL) == SQLITE_OK &&
+              sqlite3_exec(db, "SELECT count(*) FROM sqlite_schema", NULL, NULL, NULL) == SQLITE_OK;
+    *opened = ok;
+    if (!ok && db)
+        LOG_WARN(PREFLIGHT_SUBSYS, "live WAL-aware open failed (%s); falling back to a private copy", sqlite3_errmsg(db));
+    if (ok)
+        ok = mint_anchor_normal_boot_allowed(db, reason, reason_size);
+    if (db && sqlite3_close(db) != SQLITE_OK)
+        ok = false;
+    return ok;
+}
+
 static bool inspect_family(const char *datadir, int dirfd, const char *kbase, struct preflight_source_file files[3], char *reason,
                            size_t reason_size) {
     if (!datadir_is_not_tmp(dirfd, reason, reason_size))
         return false;
-    if (!live_inspect_eligible(&files[1]))
+    bool wal_path = !live_inspect_eligible(&files[1]);
+    /* A WAL with no -shm (rare: kill -9 normally leaves one) would make the live
+     * open create a new file in the datadir; keep the copy for that case so a
+     * refused preflight leaves the family exactly as found. */
+    if (wal_path && !files[2].exists)
         return inspect_via_copy(dirfd, kbase, files, reason, reason_size);
     int64_t phase = boot_clock_ms();
-    bool ok = inspect_live_immutable(datadir, kbase, reason, reason_size);
+    bool opened = true;
+    bool ok = wal_path ? inspect_live_wal(datadir, kbase, &opened, reason, reason_size)
+                       : inspect_live_immutable(datadir, kbase, reason, reason_size);
     phase = boot_submark("mint_preflight.live_inspect", phase);
+    if (wal_path && !opened)
+        return inspect_via_copy(dirfd, kbase, files, reason, reason_size);
     if (ok) {
-        for (size_t i = 0; ok && i < 3; i++)
+        /* The WAL-aware open rebuilds the derived -shm, so its identity is
+         * excluded; the main file and the -wal must be byte-identical. */
+        for (size_t i = 0; ok && i < (wal_path ? 2u : 3u); i++)
             ok = source_unchanged(dirfd, &files[i], "live", reason, reason_size);
         (void)boot_submark("mint_preflight.live_stability", phase);
     }
