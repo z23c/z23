@@ -157,35 +157,35 @@ serving, and normal block relay; snapshot offer construction and payload serving
 remain contained until the `coins_kv` payload-binding gate exists. It does not
 start explorer cache prewarming, store/market services, or file-service chunk
 manifests (`engine/composition/src/app_context.c:193-206,214-218`;
-`engine/composition/src/boot_snapshot_offer.c:411-412,583-598`).
+`engine/composition/src/boot_snapshot_offer.c:232-248,583-598`).
 Consensus snapshot export has no file-service profile check. In the offer
 worker, reaching the export block requires a non-empty datadir,
 `ZCL_PUBLISH_FASTSYNC_ON_BOOT` enabled, and a successful
 `snapshot_offer_state_is_sovereign_at` check
-(`engine/composition/src/boot_snapshot_offer.c:406-436`). In non-test builds,
+(`engine/composition/src/boot_snapshot_offer.c:608-632`). In non-test builds,
 the payload-authority check returns false, so no profile reaches that block
-(`engine/composition/src/boot_snapshot_offer.c:208-223,325-339`). If reached,
+(`engine/composition/src/boot_snapshot_offer.c:232-248,375-394`). If reached,
 the block attempts export unless `ZCL_EXPORT_CONSENSUS_SNAPSHOT_ON_BOOT` is
 exactly `0`; the bound export call also requires reading the sovereign block
-hash (`engine/composition/src/boot_snapshot_offer.c:451-478`). Enabling
+hash (`engine/composition/src/boot_snapshot_offer.c:452-473,653-664`). Enabling
 fast-sync publication accepts `1`, `true`, `yes`, or `on`
 (`engine/composition/src/boot_snapshot_offer.c:108-116`). Block-piece swarm
 publication is separate: offer-worker startup has no profile check, but is
 deferred in bootstrap receiver mode or when headers lead the active chain by
-more than 1000 blocks (`engine/composition/src/boot_services.c:1296-1312`).
+more than 1000 blocks (`engine/composition/src/boot_services.c:1231-1246`).
 The worker attempts block-piece publication on its default path, without a
 file-service profile check
-(`engine/composition/src/boot_snapshot_offer.c:411-425`).
+(`engine/composition/src/boot_snapshot_offer.c:702`).
 Publication requires enough bodies, header lag within the swarm limit, a
 non-empty datadir, and a successful active-chain manifest build
 (`engine/composition/src/boot_snapshot_offer.c:119-163`). For service-enabled
 boot, the Tor startup policy is independent of runtime profile: a real-Tor
 build requests onion hosting unless `-no-tor` is set
 (`engine/composition/src/app_context.c:132-148`;
-`engine/composition/src/boot.c:1561,3590-3609`). That flag is refused on
+`engine/composition/src/boot_services.c:224-226`). That flag is refused on
 canonical, soak, and standby lanes
 (`engine/composition/src/app_context.c:116-122,167-172`;
-`engine/composition/src/args.c:1112-1117`).
+`engine/composition/src/args.c:460`).
 
 Full, onion-node, and legacy-compat profiles keep the broader app surfaces. The
 explorer profile keeps explorer APIs and cache prewarming but still avoids store
@@ -290,10 +290,10 @@ this node's PoW header at the seed height. A wrong-chain anchor fails closed. If
 headers have not reached the seed height, the loader
 skips the seed and continues normal P2P IBD; a missing anchor below an
 already-synced header tip fails closed
-(`engine/composition/src/boot_refold_staged.c:1019-1075`). When the seed height
+(`engine/composition/src/boot_refold_staged.c:1129-1200`). When the seed height
 is above the coins-best active-chain window, the loader extends that window
 forward to the PoW-proven header tip
-(`active_chain_extend_window`, line 1017) instead of FATAL-ing "Run
+(`active_chain_extend_window`, line 1148) instead of FATAL-ing "Run
 --importblockindex". The artifact is **release-assisted borrowed state**:
 its payload digest authenticates bytes and the header match verifies chain
 location, but neither proves the UTXO/Sapling/Sprout/nullifier contents because
@@ -302,7 +302,7 @@ below (`-refold-from-anchor` / `-load-verify-boot`) folds forward from the
 verified compiled checkpoint instead of accepting this loader's borrowed
 tip-height seed; making it the cold-start default and deleting the
 borrowed-seed machinery is still open work — design
-`work/never-stuck-plan.md`, posture `HANDOFF.md`.
+`docs/work/never-stuck-plan.md`, posture `HANDOFF.md`.
 
 ### Fold from checkpoint (skip the from-genesis reducer fold)
 
@@ -369,7 +369,7 @@ under `platform/deploy/examples/`.
 ### Legacy chain oracle boundary
 
 All direct reads from local legacy `zclassicd` RPC go through
-`rpc/legacy_rpc_client.h` for transport and `rpc/legacy_chain_oracle.h` for
+`engine/modules/rpc/include/rpc/legacy_rpc_client.h` for transport and `engine/modules/rpc/include/rpc/legacy_chain_oracle.h` for
 typed chain data such as block hashes, MMB leaves, and chainwork. Boot-time MMB
 catchup, fast-sync offer construction, FlyClient proof fallback, and the
 zclassicd drift oracle share that transport instead of parsing JSON-RPC in
@@ -445,7 +445,7 @@ immutable for reorg refusal, snapshot eligibility, rolling SHA3 anchors,
 block-window reuse, and diagnostics. Steady-state reorgs of 10 blocks or less
 are allowed; 11-block reorgs are refused. IBD can still resolve deeper
 competition before a verified immutable anchor is installed. These decisions are
-centralized in `validation/sync_evidence_policy.h`. `COINBASE_MATURITY=100`
+centralized in `core/modules/validation/include/validation/sync_evidence_policy.h`. `COINBASE_MATURITY=100`
 remains a consensus spend-maturity rule and does not control reorg depth or
 immutable-prefix policy.
 
