@@ -533,6 +533,252 @@ static const struct db_migrate_ddl_step k_ddl_only_steps[] = {
 };
 enum { DDL_STEPS_THROUGH_V20 = 7, DDL_STEPS_TOTAL = 10 };
 
+static int db_migrate_v21_wallet_source(struct node_db *ndb, int floor_ver,
+                                        int *current_ver, int *applied)
+{
+    if (*current_ver < 21) {
+        /* v21: distinguish durable wallet notes from zclassicd view-only
+         * placeholders. Existing notes default to local, and only the
+         * wallet-view mirror path opts into source='view'. */
+        if (db_exec_tolerant(ndb->db,
+            "ALTER TABLE wallet_sapling_notes "
+            "ADD COLUMN source TEXT NOT NULL DEFAULT 'local'",
+            "v21: add wallet_sapling_notes.source",
+            "duplicate column name") != SQLITE_OK) {
+            LOG_ERROR_IN("node_db_migrate_features", "db",
+                         "v21 migration failed adding wallet_sapling_notes.source");
+            return -1;
+        }
+        if (db_exec_checked(ndb->db,
+            "CREATE INDEX IF NOT EXISTS idx_snote_view_address "
+            "ON wallet_sapling_notes(address) "
+            "WHERE spent_txid IS NULL AND source='view'",
+            "v21: idx_snote_view_address") != SQLITE_OK) {
+            LOG_ERROR_IN("node_db_migrate_features", "db",
+                         "v21 migration failed creating idx_snote_view_address");
+            return -1;
+        }
+        if (!node_db_exec(ndb,
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('021')")) {
+            LOG_ERROR_IN("node_db_migrate_features", "db",
+                         "v21 migration failed stamping schema_migrations");
+            return -1;
+        }
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 21, floor_ver);
+        *current_ver = 21;
+        (*applied)++;
+    }
+    return 0;
+}
+
+static int db_migrate_v22_hodl_indexes(struct node_db *ndb, int floor_ver,
+                                       int *current_ver, int *applied)
+{
+    if (*current_ver < 22) {
+        /* v22: covering indexes for HODL-history reconstruction. The
+         * background filler asks historical "alive at H" questions across
+         * tx_outputs/tx_inputs; these keep post-rebuild gap repair bounded. */
+        if (db_exec_checked(ndb->db,
+            "CREATE INDEX IF NOT EXISTS idx_txo_hodl_scan "
+            "ON tx_outputs(block_height, value, txid, vout)",
+            "v22: idx_txo_hodl_scan") != SQLITE_OK) {
+            LOG_ERROR_IN("node_db_migrate_features", "db",
+                         "v22 migration failed creating idx_txo_hodl_scan");
+            return -1;
+        }
+        if (db_exec_checked(ndb->db,
+            "CREATE INDEX IF NOT EXISTS idx_txi_prev_height "
+            "ON tx_inputs(prev_txid, prev_vout, block_height)",
+            "v22: idx_txi_prev_height") != SQLITE_OK) {
+            LOG_ERROR_IN("node_db_migrate_features", "db",
+                         "v22 migration failed creating idx_txi_prev_height");
+            return -1;
+        }
+        if (!node_db_exec(ndb,
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('022')")) {
+            LOG_ERROR_IN("node_db_migrate_features", "db",
+                         "v22 migration failed stamping schema_migrations");
+            return -1;
+        }
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 22, floor_ver);
+        *current_ver = 22;
+        (*applied)++;
+    }
+    return 0;
+}
+
+static int db_migrate_v23_hodl_repair(struct node_db *ndb, int floor_ver,
+                                      int *current_ver, int *applied)
+{
+    if (*current_ver < 23) {
+        /* v23: HODL history repair provenance. Existing rows default to
+         * calc_version=0/source_tip=-1, so the lazy filler refreshes them
+         * only after the explorer projection cursor proves source coverage. */
+        if (db_exec_checked(ndb->db,
+            "CREATE TABLE IF NOT EXISTS hodl_history ("
+            "height INTEGER PRIMARY KEY,"
+            "time INTEGER NOT NULL,"
+            "total_zat INTEGER NOT NULL DEFAULT 0 CHECK(total_zat >= 0),"
+            "older_1y_zat INTEGER NOT NULL DEFAULT 0 "
+            "  CHECK(older_1y_zat >= 0 AND older_1y_zat <= total_zat),"
+            "older_1y_pct REAL NOT NULL DEFAULT 0,"
+            "calc_version INTEGER NOT NULL DEFAULT 0,"
+            "source_tip_height INTEGER NOT NULL DEFAULT -1)",
+            "v23: create hodl_history if missing") != SQLITE_OK) {
+            LOG_ERROR_IN("node_db_migrate_features", "db",
+                         "v23 migration failed ensuring hodl_history table");
+            return -1;
+        }
+        if (db_exec_tolerant(ndb->db,
+            "ALTER TABLE hodl_history "
+            "ADD COLUMN calc_version INTEGER NOT NULL DEFAULT 0",
+            "v23: add hodl_history.calc_version",
+            "duplicate column name") != SQLITE_OK) {
+            LOG_ERROR_IN("node_db_migrate_features", "db",
+                         "v23 migration failed adding hodl_history.calc_version");
+            return -1;
+        }
+        if (db_exec_tolerant(ndb->db,
+            "ALTER TABLE hodl_history "
+            "ADD COLUMN source_tip_height INTEGER NOT NULL DEFAULT -1",
+            "v23: add hodl_history.source_tip_height",
+            "duplicate column name") != SQLITE_OK) {
+            LOG_ERROR_IN("node_db_migrate_features", "db",
+                         "v23 migration failed adding hodl_history.source_tip_height");
+            return -1;
+        }
+        if (db_exec_checked(ndb->db,
+            "CREATE INDEX IF NOT EXISTS idx_hodl_history_time "
+            "ON hodl_history(time)",
+            "v23: idx_hodl_history_time") != SQLITE_OK) {
+            LOG_ERROR_IN("node_db_migrate_features", "db",
+                         "v23 migration failed creating idx_hodl_history_time");
+            return -1;
+        }
+        if (!node_db_exec(ndb,
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('023')")) {
+            LOG_ERROR_IN("node_db_migrate_features", "db",
+                         "v23 migration failed stamping schema_migrations");
+            return -1;
+        }
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 23, floor_ver);
+        *current_ver = 23;
+        (*applied)++;
+    }
+    return 0;
+}
+
+static int db_migrate_v24_hodl_snapshots(struct node_db *ndb, int floor_ver,
+                                         int *current_ver, int *applied)
+{
+    if (*current_ver < 24) {
+        /* v24: HODL wave history stores the same alive-at-height snapshot for
+         * 6m/1y/2y/5y thresholds. Existing v19-v23 rows are left in place but
+         * have calc_version < HODL_HISTORY_SNAPSHOT_CALC_VERSION, so the lazy
+         * background filler recomputes them before the explorer reads them. */
+        if (db_exec_tolerant(ndb->db,
+            "ALTER TABLE hodl_history "
+            "ADD COLUMN older_6m_zat INTEGER NOT NULL DEFAULT 0 "
+            "CHECK(older_6m_zat >= 0 AND older_6m_zat <= total_zat)",
+            "v24: add hodl_history.older_6m_zat",
+            "duplicate column name") != SQLITE_OK) {
+            LOG_ERROR_IN("node_db_migrate_features", "db",
+                         "v24 migration failed adding hodl_history.older_6m_zat");
+            return -1;
+        }
+        if (db_exec_tolerant(ndb->db,
+            "ALTER TABLE hodl_history "
+            "ADD COLUMN older_2y_zat INTEGER NOT NULL DEFAULT 0 "
+            "CHECK(older_2y_zat >= 0 AND older_2y_zat <= total_zat)",
+            "v24: add hodl_history.older_2y_zat",
+            "duplicate column name") != SQLITE_OK) {
+            LOG_ERROR_IN("node_db_migrate_features", "db",
+                         "v24 migration failed adding hodl_history.older_2y_zat");
+            return -1;
+        }
+        if (db_exec_tolerant(ndb->db,
+            "ALTER TABLE hodl_history "
+            "ADD COLUMN older_5y_zat INTEGER NOT NULL DEFAULT 0 "
+            "CHECK(older_5y_zat >= 0 AND older_5y_zat <= total_zat)",
+            "v24: add hodl_history.older_5y_zat",
+            "duplicate column name") != SQLITE_OK) {
+            LOG_ERROR_IN("node_db_migrate_features", "db",
+                         "v24 migration failed adding hodl_history.older_5y_zat");
+            return -1;
+        }
+        if (db_exec_tolerant(ndb->db,
+            "ALTER TABLE hodl_history "
+            "ADD COLUMN older_6m_pct REAL NOT NULL DEFAULT 0",
+            "v24: add hodl_history.older_6m_pct",
+            "duplicate column name") != SQLITE_OK) {
+            LOG_ERROR_IN("node_db_migrate_features", "db",
+                         "v24 migration failed adding hodl_history.older_6m_pct");
+            return -1;
+        }
+        if (db_exec_tolerant(ndb->db,
+            "ALTER TABLE hodl_history "
+            "ADD COLUMN older_2y_pct REAL NOT NULL DEFAULT 0",
+            "v24: add hodl_history.older_2y_pct",
+            "duplicate column name") != SQLITE_OK) {
+            LOG_ERROR_IN("node_db_migrate_features", "db",
+                         "v24 migration failed adding hodl_history.older_2y_pct");
+            return -1;
+        }
+        if (db_exec_tolerant(ndb->db,
+            "ALTER TABLE hodl_history "
+            "ADD COLUMN older_5y_pct REAL NOT NULL DEFAULT 0",
+            "v24: add hodl_history.older_5y_pct",
+            "duplicate column name") != SQLITE_OK) {
+            LOG_ERROR_IN("node_db_migrate_features", "db",
+                         "v24 migration failed adding hodl_history.older_5y_pct");
+            return -1;
+        }
+        if (!node_db_exec(ndb,
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('024')")) {
+            LOG_ERROR_IN("node_db_migrate_features", "db",
+                         "v24 migration failed stamping schema_migrations");
+            return -1;
+        }
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 24, floor_ver);
+        *current_ver = 24;
+        (*applied)++;
+    }
+    return 0;
+}
+
+static int db_migrate_v25_znam_term(struct node_db *ndb, int floor_ver,
+                                    int *current_ver, int *applied)
+{
+    if (*current_ver < 25) {
+        /* v25: ZNAM registration term. expiry_height records when a name's
+         * registration lapses: set at REGISTER to reg_height +
+         * ZNAM_REGISTRATION_TERM_BLOCKS and extended by each RENEW.
+         * Overlay bookkeeping only — resolution
+         * does not reap expired names, so this never affects consensus.
+         * Existing rows default to 0 (pre-term); the ascending reindex
+         * refreshes them from their REGISTER anchor. */
+        if (db_exec_tolerant(ndb->db,
+            "ALTER TABLE znam_names "
+            "ADD COLUMN expiry_height INTEGER NOT NULL DEFAULT 0",
+            "v25: add znam_names.expiry_height",
+            "duplicate column name") != SQLITE_OK) {
+            LOG_ERROR_IN("node_db_migrate_features", "db",
+                         "v25 migration failed adding znam_names.expiry_height");
+            return -1;
+        }
+        if (!node_db_exec(ndb,
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('025')")) {
+            LOG_ERROR_IN("node_db_migrate_features", "db",
+                         "v25 migration failed stamping schema_migrations");
+            return -1;
+        }
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 25, floor_ver);
+        *current_ver = 25;
+        (*applied)++;
+    }
+    return 0;
+}
+
 int node_db_migrate_features(struct node_db *ndb, int *version, int *floor)
 {
     int applied = 0;
@@ -549,166 +795,21 @@ int node_db_migrate_features(struct node_db *ndb, int *version, int *floor)
         }
     }
 
-    if (current_ver < 21) {
-        /* v21: distinguish durable wallet notes from zclassicd view-only
-         * placeholders. Existing notes default to local, and only the
-         * wallet-view mirror path opts into source='view'. */
-        if (db_exec_tolerant(ndb->db,
-            "ALTER TABLE wallet_sapling_notes "
-            "ADD COLUMN source TEXT NOT NULL DEFAULT 'local'",
-            "v21: add wallet_sapling_notes.source",
-            "duplicate column name") != SQLITE_OK)
-            LOG_ERR("db", "v21 migration failed adding wallet_sapling_notes.source");
-        if (db_exec_checked(ndb->db,
-            "CREATE INDEX IF NOT EXISTS idx_snote_view_address "
-            "ON wallet_sapling_notes(address) "
-            "WHERE spent_txid IS NULL AND source='view'",
-            "v21: idx_snote_view_address") != SQLITE_OK)
-            LOG_ERR("db", "v21 migration failed creating idx_snote_view_address");
-        if (!node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('021')"))
-            LOG_ERR("db", "v21 migration failed stamping schema_migrations");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 21, floor_ver);
-        current_ver = 21;
-        applied++;
-    }
-
-    if (current_ver < 22) {
-        /* v22: covering indexes for HODL-history reconstruction. The
-         * background filler asks historical "alive at H" questions across
-         * tx_outputs/tx_inputs; these keep post-rebuild gap repair bounded. */
-        if (db_exec_checked(ndb->db,
-            "CREATE INDEX IF NOT EXISTS idx_txo_hodl_scan "
-            "ON tx_outputs(block_height, value, txid, vout)",
-            "v22: idx_txo_hodl_scan") != SQLITE_OK)
-            LOG_ERR("db", "v22 migration failed creating idx_txo_hodl_scan");
-        if (db_exec_checked(ndb->db,
-            "CREATE INDEX IF NOT EXISTS idx_txi_prev_height "
-            "ON tx_inputs(prev_txid, prev_vout, block_height)",
-            "v22: idx_txi_prev_height") != SQLITE_OK)
-            LOG_ERR("db", "v22 migration failed creating idx_txi_prev_height");
-        if (!node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('022')"))
-            LOG_ERR("db", "v22 migration failed stamping schema_migrations");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 22, floor_ver);
-        current_ver = 22;
-        applied++;
-    }
-
-    if (current_ver < 23) {
-        /* v23: HODL history repair provenance. Existing rows default to
-         * calc_version=0/source_tip=-1, so the lazy filler refreshes them
-         * only after the explorer projection cursor proves source coverage. */
-        if (db_exec_checked(ndb->db,
-            "CREATE TABLE IF NOT EXISTS hodl_history ("
-            "height INTEGER PRIMARY KEY,"
-            "time INTEGER NOT NULL,"
-            "total_zat INTEGER NOT NULL DEFAULT 0 CHECK(total_zat >= 0),"
-            "older_1y_zat INTEGER NOT NULL DEFAULT 0 "
-            "  CHECK(older_1y_zat >= 0 AND older_1y_zat <= total_zat),"
-            "older_1y_pct REAL NOT NULL DEFAULT 0,"
-            "calc_version INTEGER NOT NULL DEFAULT 0,"
-            "source_tip_height INTEGER NOT NULL DEFAULT -1)",
-            "v23: create hodl_history if missing") != SQLITE_OK)
-            LOG_ERR("db", "v23 migration failed ensuring hodl_history table");
-        if (db_exec_tolerant(ndb->db,
-            "ALTER TABLE hodl_history "
-            "ADD COLUMN calc_version INTEGER NOT NULL DEFAULT 0",
-            "v23: add hodl_history.calc_version",
-            "duplicate column name") != SQLITE_OK)
-            LOG_ERR("db", "v23 migration failed adding hodl_history.calc_version");
-        if (db_exec_tolerant(ndb->db,
-            "ALTER TABLE hodl_history "
-            "ADD COLUMN source_tip_height INTEGER NOT NULL DEFAULT -1",
-            "v23: add hodl_history.source_tip_height",
-            "duplicate column name") != SQLITE_OK)
-            LOG_ERR("db", "v23 migration failed adding hodl_history.source_tip_height");
-        if (db_exec_checked(ndb->db,
-            "CREATE INDEX IF NOT EXISTS idx_hodl_history_time "
-            "ON hodl_history(time)",
-            "v23: idx_hodl_history_time") != SQLITE_OK)
-            LOG_ERR("db", "v23 migration failed creating idx_hodl_history_time");
-        if (!node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('023')"))
-            LOG_ERR("db", "v23 migration failed stamping schema_migrations");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 23, floor_ver);
-        current_ver = 23;
-        applied++;
-    }
-
-    if (current_ver < 24) {
-        /* v24: HODL wave history stores the same alive-at-height snapshot for
-         * 6m/1y/2y/5y thresholds. Existing v19-v23 rows are left in place but
-         * have calc_version < HODL_HISTORY_SNAPSHOT_CALC_VERSION, so the lazy
-         * background filler recomputes them before the explorer reads them. */
-        if (db_exec_tolerant(ndb->db,
-            "ALTER TABLE hodl_history "
-            "ADD COLUMN older_6m_zat INTEGER NOT NULL DEFAULT 0 "
-            "CHECK(older_6m_zat >= 0 AND older_6m_zat <= total_zat)",
-            "v24: add hodl_history.older_6m_zat",
-            "duplicate column name") != SQLITE_OK)
-            LOG_ERR("db", "v24 migration failed adding hodl_history.older_6m_zat");
-        if (db_exec_tolerant(ndb->db,
-            "ALTER TABLE hodl_history "
-            "ADD COLUMN older_2y_zat INTEGER NOT NULL DEFAULT 0 "
-            "CHECK(older_2y_zat >= 0 AND older_2y_zat <= total_zat)",
-            "v24: add hodl_history.older_2y_zat",
-            "duplicate column name") != SQLITE_OK)
-            LOG_ERR("db", "v24 migration failed adding hodl_history.older_2y_zat");
-        if (db_exec_tolerant(ndb->db,
-            "ALTER TABLE hodl_history "
-            "ADD COLUMN older_5y_zat INTEGER NOT NULL DEFAULT 0 "
-            "CHECK(older_5y_zat >= 0 AND older_5y_zat <= total_zat)",
-            "v24: add hodl_history.older_5y_zat",
-            "duplicate column name") != SQLITE_OK)
-            LOG_ERR("db", "v24 migration failed adding hodl_history.older_5y_zat");
-        if (db_exec_tolerant(ndb->db,
-            "ALTER TABLE hodl_history "
-            "ADD COLUMN older_6m_pct REAL NOT NULL DEFAULT 0",
-            "v24: add hodl_history.older_6m_pct",
-            "duplicate column name") != SQLITE_OK)
-            LOG_ERR("db", "v24 migration failed adding hodl_history.older_6m_pct");
-        if (db_exec_tolerant(ndb->db,
-            "ALTER TABLE hodl_history "
-            "ADD COLUMN older_2y_pct REAL NOT NULL DEFAULT 0",
-            "v24: add hodl_history.older_2y_pct",
-            "duplicate column name") != SQLITE_OK)
-            LOG_ERR("db", "v24 migration failed adding hodl_history.older_2y_pct");
-        if (db_exec_tolerant(ndb->db,
-            "ALTER TABLE hodl_history "
-            "ADD COLUMN older_5y_pct REAL NOT NULL DEFAULT 0",
-            "v24: add hodl_history.older_5y_pct",
-            "duplicate column name") != SQLITE_OK)
-            LOG_ERR("db", "v24 migration failed adding hodl_history.older_5y_pct");
-        if (!node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('024')"))
-            LOG_ERR("db", "v24 migration failed stamping schema_migrations");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 24, floor_ver);
-        current_ver = 24;
-        applied++;
-    }
-
-    if (current_ver < 25) {
-        /* v25: ZNAM registration term. expiry_height records when a name's
-         * registration lapses: set at REGISTER to reg_height +
-         * ZNAM_REGISTRATION_TERM_BLOCKS and extended by each RENEW.
-         * Overlay bookkeeping only — resolution
-         * does not reap expired names, so this never affects consensus.
-         * Existing rows default to 0 (pre-term); the ascending reindex
-         * refreshes them from their REGISTER anchor. */
-        if (db_exec_tolerant(ndb->db,
-            "ALTER TABLE znam_names "
-            "ADD COLUMN expiry_height INTEGER NOT NULL DEFAULT 0",
-            "v25: add znam_names.expiry_height",
-            "duplicate column name") != SQLITE_OK)
-            LOG_ERR("db", "v25 migration failed adding znam_names.expiry_height");
-        if (!node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('025')"))
-            LOG_ERR("db", "v25 migration failed stamping schema_migrations");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 25, floor_ver);
-        current_ver = 25;
-        applied++;
-    }
+    if (db_migrate_v21_wallet_source(ndb, floor_ver, &current_ver,
+                                     &applied) < 0)
+        return -1;
+    if (db_migrate_v22_hodl_indexes(ndb, floor_ver, &current_ver,
+                                    &applied) < 0)
+        return -1;
+    if (db_migrate_v23_hodl_repair(ndb, floor_ver, &current_ver,
+                                   &applied) < 0)
+        return -1;
+    if (db_migrate_v24_hodl_snapshots(ndb, floor_ver, &current_ver,
+                                      &applied) < 0)
+        return -1;
+    if (db_migrate_v25_znam_term(ndb, floor_ver, &current_ver,
+                                 &applied) < 0)
+        return -1;
 
     for (size_t i = DDL_STEPS_THROUGH_V20; i < DDL_STEPS_TOTAL; i++) {
         if (current_ver < k_ddl_only_steps[i].version) {
