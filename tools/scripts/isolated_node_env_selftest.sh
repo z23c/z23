@@ -74,4 +74,18 @@ rm -f "$fixture/date-boundary"
 z23_tcp_port_listening() { return 0; }
 iso_wait_peer_listen 1 || fail 'listener lost at second boundary'
 unset -f date
-printf 'isolated-readiness selftest: PASS typed_rpc=true errors_refused=true portable_listener=true unobserved_refused=true\n'
+# Dead-sink guard: iso_init must refuse when anything LISTENs on the -connect
+# sink, and must still accept when the sink is dead. Subshells keep the
+# stubbed probe and the iso_init EXIT trap away from this selftest.
+sink_out="$fixture/sink.out"
+if ( ISO_NODE_BIN=/bin/true ISO_RPC_BIN=/bin/true
+     z23_tcp_port_listening() { [ "$1" = "$ISO_CONNECT_SINK" ] && return 0; return 1; }
+     iso_init ) >"$sink_out" 2>&1; then
+    fail 'iso_init accepted a LISTENING dead sink'
+fi
+grep -q 'dead -connect sink port 39999 is already LISTENING' "$sink_out" ||
+    fail 'listening dead sink refused without the sink message'
+( ISO_NODE_BIN=/bin/true ISO_RPC_BIN=/bin/true
+  z23_tcp_port_listening() { return 1; }
+  iso_init ) >/dev/null 2>&1 || fail 'iso_init refused a dead sink'
+printf 'isolated-readiness selftest: PASS typed_rpc=true errors_refused=true portable_listener=true unobserved_refused=true dead_sink_refused=true\n'
