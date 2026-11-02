@@ -1565,7 +1565,7 @@ ZCL_COMMAND_READY_COMMAND(
     "is never stored, logged or journaled, and no command prints it again. "
     "Refuses WALLET_ALREADY_PRESENT if the datadir holds any seed, key or "
     "note, and DATADIR_LOCKED while a node holds it; it never overwrites or "
-    "merges. Owner only, local only, never available to agents or MCP.",
+    "merges. Owner authority, local scope; the MCP policy refuses it.",
     0, "wallet,create,phrase,seed,mnemonic,shielded",
     "zcl.wallet_create.input.v1", "zcl.wallet_create.v1",
     "datadir,passphrase", "",
