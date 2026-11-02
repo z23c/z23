@@ -610,7 +610,7 @@ int test_https_sni_select(void)
 
     SN_CHECK("the front door starts on the default pair alone",
              https_server_start_on_port(def_cert, def_key, DEFAULT_CN,
-                                        (int)https_port, (int)http_port));
+                                        (int)https_port, (int)http_port, NULL));
     if (!https_server_is_running()) {
         printf("https_sni_select: SKIP (the listener did not come up on port "
                "%u; nothing further was asserted in this run)\n",

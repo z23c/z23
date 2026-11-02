@@ -976,4 +976,77 @@ static inline bool platform_socket_resolve_ip(const char *host,
     return found;
 }
 
+
+/* Fills a listen address for one literal bind address. NULL or empty selects
+ * the wildcard (INADDR_ANY, or in6addr_any when dual_stack). A literal IPv4
+ * address with dual_stack becomes its IPv4-mapped IPv6 form, so a dual-stack
+ * socket listens on that address only. Hostnames, zones and IPv4-mapped IPv6
+ * text are refused. The socket family to open is ss->ss_family. */
+static inline bool platform_socket_listen_address(
+    const char *text, uint16_t port, bool dual_stack,
+    struct sockaddr_storage *ss, socklen_t *length)
+{
+    if (!ss || !length)
+        return false;
+    memset(ss, 0, sizeof(*ss));
+    const bool wildcard = text == NULL || text[0] == '\0';
+    unsigned char v4[4] = {0};
+    unsigned char v6[16] = {0};
+    bool is_v4 = !dual_stack;
+    if (!wildcard) {
+        if (strlen(text) >= PLATFORM_IPV6_ADDRESS_TEXT_SIZE || strchr(text, '%'))
+            return false;
+        is_v4 = platform_socket_parse_address(AF_INET, text, v4) == 1;
+        if (!is_v4) {
+            static const unsigned char mapped[12] = {
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
+            if (platform_socket_parse_address(AF_INET6, text, v6) != 1 ||
+                memcmp(v6, mapped, sizeof(mapped)) == 0)
+                return false;
+        } else if (dual_stack) {
+            v6[10] = 0xff;
+            v6[11] = 0xff;
+            memcpy(v6 + 12, v4, 4);
+            is_v4 = false;
+        }
+    }
+    if (is_v4) {
+        struct sockaddr_in *a = (struct sockaddr_in *)ss;
+        a->sin_family = AF_INET;
+        a->sin_port = htons(port);
+        memcpy(&a->sin_addr, v4, 4);
+        *length = sizeof(*a);
+    } else {
+        struct sockaddr_in6 *a = (struct sockaddr_in6 *)ss;
+        a->sin6_family = AF_INET6;
+        a->sin6_port = htons(port);
+        memcpy(&a->sin6_addr, v6, 16);
+        *length = sizeof(*a);
+    }
+    return true;
+}
+
+/* Writes the numeric address and port a bound socket listens on. */
+static inline bool platform_socket_local_name(platform_socket_t sock,
+                                              char *text, size_t text_size,
+                                              uint16_t *port)
+{
+    struct sockaddr_storage ss;
+    socklen_t length = sizeof(ss);
+    if (sock == PLATFORM_SOCKET_INVALID || !text || text_size == 0 || !port ||
+        getsockname(sock, (struct sockaddr *)&ss, &length) != 0)
+        return false;
+    if (ss.ss_family == AF_INET) {
+        const struct sockaddr_in *a = (const struct sockaddr_in *)&ss;
+        *port = ntohs(a->sin_port);
+        return platform_socket_format_address(AF_INET, &a->sin_addr, text, text_size);
+    }
+    if (ss.ss_family == AF_INET6) {
+        const struct sockaddr_in6 *a = (const struct sockaddr_in6 *)&ss;
+        *port = ntohs(a->sin6_port);
+        return platform_socket_format_address(AF_INET6, &a->sin6_addr, text, text_size);
+    }
+    return false;
+}
+
 #endif

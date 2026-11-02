@@ -174,7 +174,7 @@ static uint16_t sfm_start_fs_server(const char *dir, const uint16_t *cand,
                                     size_t n)
 {
     for (size_t i = 0; i < n; i++) {
-        fs_server_start(dir, cand[i]);
+        fs_server_start(dir, cand[i], NULL);
         for (int w = 0; w < 40 && !fs_server_is_running(); w++)
             platform_sleep_ms(50); /* up to 2 s for bind+listen */
         if (fs_server_is_running())

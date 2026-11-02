@@ -825,3 +825,15 @@ later lane flips it HARD.
 - 2026-11-02T12:47:20Z — REASON: refactor(download): move assignment-window helpers to download_assign_windows.c; behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
   old ROOT: 3556c9082fe02d91fc69c29b9ff9fd2668fb997997283ff56727dc19ec50a90f
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-02T14:15:47Z — REASON: Honour -bind on the HTTPS front door, HTTP redirect and file-service listeners (core/modules/net/src/https_server.c, file_service.c), which bind every interface regardless of -bind; network exposure only, no consensus predicate; lead-run under the owner grant of 2026-10-30 (authority to unseal core for reviewed behaviour-scoped changes)
+  old ROOT: 62e3093c4c1176a9ff92053afe78e16ccce5945e023c9633550796a41815a19e
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-02T15:10:12Z — REASON: Follow-up to the 2026-11-02T14:15:47Z -bind listener change, same behaviour scope: split https_server_start_on_port and fs_server_thread under the complexity cap and define fs_server_listener_name once across platform arms; no consensus predicate; lead-run under the owner grant of 2026-10-30
+  old ROOT: b8a857dd77f2781977774a44d0d2ab545428fd0b4b9c3accf023ac217748c964
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-02T15:31:33Z — REASON: Follow-up to the 2026-11-02 -bind listener change, same behaviour scope: accept HTTPS and redirect clients into struct sockaddr_storage so an IPv6 -bind listener accepts on every platform (https_server.c accept loops); no consensus predicate; lead-run under the owner grant of 2026-10-30
+  old ROOT: bd48b1475612a54c9a4f6e6406bb4dbae0d46b8021b2f6f9f5fd0e654dcb334c
+  by: owner unseal ritual (make core-unseal)

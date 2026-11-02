@@ -170,7 +170,14 @@ bool fs_recv_chunk_private_until(struct fs_session *s, uint8_t **out,
                                  int64_t deadline_ms);
 
 /* High-level: serve files on configured port. Runs in its own thread. */
-void fs_server_start(const char *datadir, uint16_t port);
+/* bind_address is one literal IPv4 or IPv6 address; NULL or empty listens on
+ * every interface, dual-stack. An IPv4 address binds that address only.
+ * Returns false only when bind_address is unparsable, with nothing started;
+ * other start failures are logged. */
+bool fs_server_start(const char *datadir, uint16_t port, const char *bind_address);
+/* Numeric address and port the listener is bound to; false while it is not
+ * listening. */
+bool fs_server_listener_name(char *text, size_t text_size, uint16_t *port);
 void fs_server_stop(void);
 bool fs_server_is_running(void);
 uint16_t fs_server_get_port(void);

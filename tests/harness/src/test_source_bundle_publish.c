@@ -215,7 +215,7 @@ static void sbp_rm_tree(const char *path, int depth)
  * copy of this suite, or with anything else on the box. */
 static uint16_t sbp_serve(const char *datadir)
 {
-    fs_server_start(datadir, 0);
+    fs_server_start(datadir, 0, NULL);
     for (int w = 0; w < 40 && !fs_server_is_running(); w++)
         platform_sleep_ms(50);
     return fs_server_is_running() ? fs_server_get_port() : 0;

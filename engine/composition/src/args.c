@@ -61,6 +61,8 @@ void print_usage_all(const char *prog)
     printf("  -port=<port>        P2P port (default: 8033)\n");
     printf("  -bind=<address>     Listen only on one literal IPv4/IPv6 address\n");
     printf("                      No hostname, port, zone or mapped IPv6; bind failure aborts\n");
+    printf("                      Also confines the HTTPS explorer and redirect, the file service\n");
+    printf("                      and the RPC TLS listener; the RPC plain-text listener stays on 127.0.0.1\n");
     printf("  -rpcport=<port>     RPC port (default: 18232; 8232 is legacy zclassicd)\n");
     printf("  -addnode=<ip>       Add peer\n");
     printf("  -externalip=<ip[:port]>  Advertise this public P2P endpoint\n");

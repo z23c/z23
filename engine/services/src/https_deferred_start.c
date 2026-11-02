@@ -18,6 +18,7 @@ static char g_deferred_key[1024];
 static char g_deferred_host[256];
 static int g_deferred_https_port;
 static int g_deferred_http_port;
+static char g_deferred_bind[64];
 static _Atomic bool g_deferred_pending = false;
 
 static https_deferred_start_fn g_starter = NULL;
@@ -35,17 +36,20 @@ static struct zcl_result refuse_logged(struct zcl_result refusal)
 
 static bool start_with_stored_ports(const char *cert, const char *key,
                                     const char *host, int https_port,
-                                    int http_port)
+                                    int http_port, const char *bind_address)
 {
     if (g_starter)
-        return g_starter(cert, key, host, https_port, http_port);
-    return https_server_start_on_port(cert, key, host, https_port, http_port);
+        return g_starter(cert, key, host, https_port, http_port,
+                         bind_address);
+    return https_server_start_on_port(cert, key, host, https_port, http_port,
+                                      bind_address);
 }
 
 struct zcl_result https_deferred_start_set(const char *cert_path,
                                            const char *key_path,
                                            const char *hostname,
-                                           int https_port, int http_port)
+                                           int https_port, int http_port,
+                                           const char *bind_address)
 {
     if (!cert_path || !key_path)
         return refuse_logged(ZCL_ERR(-1, "deferred HTTPS start refused: "
@@ -57,7 +61,8 @@ struct zcl_result https_deferred_start_set(const char *cert_path,
                                      https_port, http_port));
     if (strlen(cert_path) >= sizeof(g_deferred_cert) ||
         strlen(key_path) >= sizeof(g_deferred_key) ||
-        (hostname && strlen(hostname) >= sizeof(g_deferred_host)))
+        (hostname && strlen(hostname) >= sizeof(g_deferred_host)) ||
+        (bind_address && strlen(bind_address) >= sizeof(g_deferred_bind)))
         return refuse_logged(ZCL_ERR(-1, "deferred HTTPS start refused: "
                                      "cert and key paths must be under %zu "
                                      "bytes and the hostname under %zu",
@@ -67,6 +72,8 @@ struct zcl_result https_deferred_start_set(const char *cert_path,
     snprintf(g_deferred_key, sizeof(g_deferred_key), "%s", key_path);
     snprintf(g_deferred_host, sizeof(g_deferred_host), "%s",
              hostname ? hostname : "");
+    snprintf(g_deferred_bind, sizeof(g_deferred_bind), "%s",
+             bind_address ? bind_address : "");
     g_deferred_https_port = https_port;
     g_deferred_http_port = http_port;
     atomic_store(&g_deferred_pending, true);
@@ -92,7 +99,8 @@ void https_deferred_start_check(void)
     if (!start_with_stored_ports(g_deferred_cert, g_deferred_key,
                                  g_deferred_host[0] ? g_deferred_host : NULL,
                                  g_deferred_https_port,
-                                 g_deferred_http_port)) {
+                                 g_deferred_http_port,
+                                 g_deferred_bind)) {
         LOG_ERROR(DEFERRED_TAG, "deferred HTTPS start failed on port %d",
                   g_deferred_https_port);
     }

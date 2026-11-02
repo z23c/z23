@@ -172,7 +172,7 @@ static void manifest_from_artifact(const struct rom_artifact *a,
 static uint16_t start_fixture_server(const char *dir)
 {
     /* OS-assigned port: suites in parallel worktrees must never collide. */
-    fs_server_start(dir, 0);
+    fs_server_start(dir, 0, NULL);
     for (int w = 0; w < 40 && !fs_server_is_running(); w++)
         platform_sleep_ms(50); /* up to 2 s for bind+listen */
     return fs_server_is_running() ? fs_server_get_port() : 0;

@@ -160,6 +160,21 @@ height. Anchor membership is checked independently on both paths.
   and outbound P2P keeps its SOCKS route. `make t-fast ONLY=private_listeners`
   starts a node and reads its listening sockets from `/proc/net/tcp` and
   `tcp6`. Nodes started without the option bind as before.
+- **Bind address:** `-bind=<address>` takes one literal IPv4 or IPv6 address
+  (no hostname, zone or mapped IPv6; an unparsable address fails startup). It
+  confines every public listener to that address:
+
+  | Listener | Without `-bind` | With `-bind=ADDR` |
+  |---|---|---|
+  | P2P | every interface, IPv4 and IPv6 | `ADDR` only; failure aborts startup |
+  | HTTPS explorer and HTTP redirect | every IPv4 interface | `ADDR` only |
+  | File service | every interface, dual-stack | `ADDR` only (an IPv4 `ADDR` binds that IPv4 address) |
+  | RPC TLS (`ZCL_RPC_TLS_CERT` and `ZCL_RPC_TLS_KEY` set) | every IPv4 interface | `ADDR` only |
+  | RPC plain-text | `127.0.0.1` | `127.0.0.1`, loopback by design |
+
+  `make t-fast ONLY=listener_bind` starts the HTTPS, redirect, file-service and
+  RPC TLS listeners on OS-assigned ports and compares each `getsockname()`
+  address with the expectation above.
 - **Operator-private HTTP routes:** `/api/wallet`, `/api/messages`, and
   `/api/swaps` are classified operator-private (`api_route_is_operator_private`,
   `core/modules/net/src/https_server.c`) and 403'd before dispatch on the

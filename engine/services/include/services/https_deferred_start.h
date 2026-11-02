@@ -12,15 +12,18 @@
 typedef bool (*https_deferred_start_fn)(const char *cert_path,
                                         const char *key_path,
                                         const char *hostname,
-                                        int https_port, int http_port);
+                                        int https_port, int http_port,
+                                        const char *bind_address);
 
 /* Queue an HTTPS start for when the node is synced. Refuses (returns a
  * non-ok result with the reason, nothing queued) when a path is NULL or a
- * port is outside 1..65535. */
+ * port is outside 1..65535. bind_address is stored with the ports and handed to the start; NULL or
+ * empty listens on every interface. */
 struct zcl_result https_deferred_start_set(const char *cert_path,
                                            const char *key_path,
                                            const char *hostname,
-                                           int https_port, int http_port);
+                                           int https_port, int http_port,
+                                           const char *bind_address);
 
 /* Start the queued server with the stored ports when it is pending and not
  * already running. Clears the pending flag before starting. */

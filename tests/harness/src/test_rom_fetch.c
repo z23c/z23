@@ -656,7 +656,7 @@ static int test_loopback_e2e(void)
         /* Start the real serve path on the fixture datadir; retry across a
          * few candidate ports in case one is already bound. */
                 uint16_t port = 0;
-        fs_server_start(sdir, 0); /* OS-assigned: no cross-checkout port collisions */
+        fs_server_start(sdir, 0, NULL); /* OS-assigned: no cross-checkout port collisions */
         for (int w = 0; w < 40 && !fs_server_is_running(); w++)
             platform_sleep_ms(50);
         if (fs_server_is_running())
@@ -779,7 +779,7 @@ static int test_rate_cap_retry(void)
         manifest_from_artifact(&art, &m);
 
                 uint16_t port = 0;
-        fs_server_start(sdir, 0); /* OS-assigned: no cross-checkout port collisions */
+        fs_server_start(sdir, 0, NULL); /* OS-assigned: no cross-checkout port collisions */
         for (int w = 0; w < 40 && !fs_server_is_running(); w++)
             platform_sleep_ms(50);
         if (fs_server_is_running())
@@ -849,7 +849,7 @@ static int test_parallel_download(void)
         manifest_from_artifact(&art, &m);
 
                 uint16_t port = 0;
-        fs_server_start(sdir, 0); /* OS-assigned: no cross-checkout port collisions */
+        fs_server_start(sdir, 0, NULL); /* OS-assigned: no cross-checkout port collisions */
         for (int w = 0; w < 40 && !fs_server_is_running(); w++)
             platform_sleep_ms(50);
         if (fs_server_is_running())
@@ -961,7 +961,7 @@ static int test_verified_multi_seeder(void)
         manifest_from_artifact(&art, &m);
 
                 uint16_t port = 0;
-        fs_server_start(sdir, 0); /* OS-assigned: no cross-checkout port collisions */
+        fs_server_start(sdir, 0, NULL); /* OS-assigned: no cross-checkout port collisions */
         for (int w = 0; w < 40 && !fs_server_is_running(); w++)
             platform_sleep_ms(50);
         if (fs_server_is_running())
@@ -1174,7 +1174,7 @@ static int test_verified_real_interrupt_resume(void)
         manifest_from_artifact(&art, &m);
 
         uint16_t port = 0;
-        fs_server_start(sdir, 0); /* OS-assigned: no cross-checkout collisions */
+        fs_server_start(sdir, 0, NULL); /* OS-assigned: no cross-checkout collisions */
         for (int w = 0; w < 40 && !fs_server_is_running(); w++)
             platform_sleep_ms(50);
         if (fs_server_is_running())
@@ -1257,7 +1257,7 @@ static int test_verified_real_interrupt_resume(void)
                (unsigned)done_at_cut, (unsigned)m.num_chunks);
 
         /* (2) THE RESUME. Same seeder, same port, same call. */
-        fs_server_start(sdir, port);
+        fs_server_start(sdir, port, NULL);
         for (int w = 0; w < 40 && !fs_server_is_running(); w++)
             platform_sleep_ms(50);
         ASSERT(fs_server_is_running());
@@ -1342,7 +1342,7 @@ static int test_verified_multi_seeder_hang_failover(void)
         manifest_from_artifact(&art, &m);
 
                 uint16_t port = 0;
-        fs_server_start(sdir, 0); /* OS-assigned: no cross-checkout port collisions */
+        fs_server_start(sdir, 0, NULL); /* OS-assigned: no cross-checkout port collisions */
         for (int w = 0; w < 40 && !fs_server_is_running(); w++)
             platform_sleep_ms(50);
         if (fs_server_is_running())
@@ -1484,7 +1484,7 @@ static int test_default_caps_parallel_multichunk(void)
         manifest_from_artifact(&art, &m);
 
                 uint16_t port = 0;
-        fs_server_start(sdir, 0); /* OS-assigned: no cross-checkout port collisions */
+        fs_server_start(sdir, 0, NULL); /* OS-assigned: no cross-checkout port collisions */
         for (int w = 0; w < 40 && !fs_server_is_running(); w++)
             platform_sleep_ms(50);
         if (fs_server_is_running())
@@ -1641,7 +1641,7 @@ static int test_dial_cost_of_a_download(void)
         manifest_from_artifact(&art, &m);
 
         uint16_t port = 0;
-        fs_server_start(sdir, 0);
+        fs_server_start(sdir, 0, NULL);
         for (int w = 0; w < 40 && !fs_server_is_running(); w++)
             platform_sleep_ms(50);
         if (fs_server_is_running())
@@ -1735,7 +1735,7 @@ static int test_dead_seed_is_dialled_once_per_job(void)
         manifest_from_artifact(&art, &m);
 
         uint16_t port = 0;
-        fs_server_start(sdir, 0);
+        fs_server_start(sdir, 0, NULL);
         for (int w = 0; w < 40 && !fs_server_is_running(); w++)
             platform_sleep_ms(50);
         if (fs_server_is_running())
@@ -1894,7 +1894,7 @@ static int test_bundle_handler_corrupted_refused(void)
         ASSERT(art.num_chunks == 1);
 
                 uint16_t port = 0;
-        fs_server_start(sdir, 0); /* OS-assigned: no cross-checkout port collisions */
+        fs_server_start(sdir, 0, NULL); /* OS-assigned: no cross-checkout port collisions */
         for (int w = 0; w < 40 && !fs_server_is_running(); w++)
             platform_sleep_ms(50);
         if (fs_server_is_running())
@@ -1992,7 +1992,7 @@ static int test_directory_discovery(void)
                                  NULL, &art) == ROM_REG_OK);
 
                 uint16_t port = 0;
-        fs_server_start(sdir, 0); /* OS-assigned: no cross-checkout port collisions */
+        fs_server_start(sdir, 0, NULL); /* OS-assigned: no cross-checkout port collisions */
         for (int w = 0; w < 40 && !fs_server_is_running(); w++)
             platform_sleep_ms(50);
         if (fs_server_is_running())

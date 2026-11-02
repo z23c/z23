@@ -9,6 +9,7 @@
  * overhead visible to observers, wire-speed on gigabit links. */
 
 #include "platform/time_compat.h"
+#include "platform/socket_compat.h"
 #include "platform/thread_compat.h"
 #include "platform/file_sync.h"
 #include "platform/barrier.h"
@@ -71,13 +72,23 @@ bool fs_parse_rom_list_request(const uint8_t *payload, uint32_t plen)
     return memcmp(payload, "RLS", 3) == 0;
 }
 
+static platform_socket_t fs_listen_fd_snapshot(void);
+
+bool fs_server_listener_name(char *text, size_t text_size, uint16_t *port)
+{
+    return platform_socket_local_name(fs_listen_fd_snapshot(), text, text_size,
+                                      port);
+}
+
 #if defined(_WIN32)
 
 #include <errno.h>
 #include <string.h>
 
-void fs_server_start(const char *datadir, uint16_t port)
-{ (void)datadir; (void)port; errno = ENOTSUP; }
+bool fs_server_start(const char *datadir, uint16_t port, const char *bind_address)
+{ (void)datadir; (void)port; (void)bind_address; errno = ENOTSUP; return true; }
+static platform_socket_t fs_listen_fd_snapshot(void)
+{ return PLATFORM_SOCKET_INVALID; }
 void fs_server_stop(void) {}
 bool fs_server_is_running(void) { return false; }
 uint16_t fs_server_get_port(void) { return 0; }
@@ -237,6 +248,8 @@ static bool g_fs_manifest_thread_started = false;
 static int g_fs_listen_fd = -1;
 static const char *g_fs_datadir = NULL;
 static uint16_t g_fs_port = FS_PORT;
+static struct sockaddr_storage g_fs_addr;
+static socklen_t g_fs_addr_len;
 static pthread_mutex_t g_fs_state_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 #define FS_SERVER_WORKERS 8
@@ -1157,7 +1170,7 @@ static void *fs_server_thread(void *arg)
 {
     (void)arg;
 
-    int listen_fd = socket(AF_INET6, SOCK_STREAM, 0);
+    int listen_fd = socket(g_fs_addr.ss_family, SOCK_STREAM, 0);
     if (listen_fd < 0)
         LOG_NULL("filesvc", "server_thread: socket() failed: %s", strerror(errno));
 
@@ -1166,13 +1179,7 @@ static void *fs_server_thread(void *arg)
     int zero = 0;
     setsockopt(listen_fd, IPPROTO_IPV6, IPV6_V6ONLY, &zero, sizeof(zero));
 
-    struct sockaddr_in6 addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin6_family = AF_INET6;
-    addr.sin6_port = htons(g_fs_port);
-    addr.sin6_addr = in6addr_any;
-
-    if (bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    if (bind(listen_fd, (struct sockaddr *)&g_fs_addr, g_fs_addr_len) < 0) {
         close(listen_fd);
         LOG_NULL("filesvc", "server_thread: bind port %d failed: %s", g_fs_port, strerror(errno));
     }
@@ -1257,6 +1264,15 @@ bool fs_server_is_running(void)
     return running;
 }
 
+static platform_socket_t fs_listen_fd_snapshot(void)
+{
+    pthread_mutex_lock(&g_fs_state_mutex);
+    platform_socket_t fd = g_fs_listen_fd >= 0 ? g_fs_listen_fd
+                                                : PLATFORM_SOCKET_INVALID;
+    pthread_mutex_unlock(&g_fs_state_mutex);
+    return fd;
+}
+
 uint16_t fs_server_get_port(void)
 {
     uint16_t port;
@@ -1325,18 +1341,29 @@ bool file_service_dump_state_json(struct json_value *out, const char *key)
     return true;
 }
 
-void fs_server_start(const char *datadir, uint16_t port)
+bool fs_server_start(const char *datadir, uint16_t port, const char *bind_address)
 {
+    struct sockaddr_storage listen_addr;
+    socklen_t listen_len = 0;
+    if (!platform_socket_listen_address(bind_address, port, true, &listen_addr,
+                                        &listen_len)) {
+        LOG_ERROR("filesvc", "the file service will not listen: bind address "
+                             "'%s' is not a literal IPv4 or IPv6 address",
+                  bind_address);
+        return false;
+    }
     unsigned started_workers = 0;
     pthread_mutex_lock(&g_fs_state_mutex);
     while (atomic_load(&g_fs_stopping))
         pthread_cond_wait(&g_fs_stop_cv, &g_fs_state_mutex);
     if (atomic_load(&g_fs_running) || g_fs_thread_started) {
         pthread_mutex_unlock(&g_fs_state_mutex);
-        return;
+        return true;
     }
     g_fs_datadir = datadir;
     g_fs_port = port;
+    g_fs_addr = listen_addr;
+    g_fs_addr_len = listen_len;
     atomic_store(&g_fs_running, true);
     atomic_store(&g_have_manifest, false);
     /* Fresh PoW gate + per-IP cap tables for this serving session. */
@@ -1374,7 +1401,7 @@ void fs_server_start(const char *datadir, uint16_t port)
         atomic_store(&g_fs_stopping, false);
         pthread_cond_broadcast(&g_fs_stop_cv);
         pthread_mutex_unlock(&g_fs_state_mutex);
-        return;
+        return true;
     }
     g_fs_thread_started = true;
     thread_liveness_register(&g_fs_server_liveness, "zcl_fs_server", 0, 0);
@@ -1389,6 +1416,7 @@ void fs_server_start(const char *datadir, uint16_t port)
         }
     }
     pthread_mutex_unlock(&g_fs_state_mutex);
+    return true;
 }
 
 void fs_server_stop(void)

@@ -2160,6 +2160,7 @@ static void run_full_suite_crypto_and_wallet(int *failures)
     *failures += test_block_log_file();
     *failures += test_block_log_legacy();
     *failures += test_https_deferred_start();
+    *failures += test_listener_bind();
     *failures += test_replay_verify();
     *failures += test_utxo_snapshot_inmem();
     *failures += test_hodl_history_port();

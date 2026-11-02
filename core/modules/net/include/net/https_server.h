@@ -1,18 +1,29 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Public HTTPS server for the block explorer.
- * Serves on 0.0.0.0:443 (TLS) + 0.0.0.0:80 (redirect).
+ * Serves TLS and an HTTP redirect on every IPv4 interface, or only on the
+ * -bind address when one is given.
  * No authentication — public read-only explorer. */
 
 #ifndef ZCL_NET_HTTPS_SERVER_H
 #define ZCL_NET_HTTPS_SERVER_H
 
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 bool https_server_start(const char *cert_path, const char *key_path,
                          const char *hostname);
+/* bind_address is one literal IPv4 or IPv6 address; NULL or empty listens on
+ * every IPv4 interface. An unparsable address fails the start. */
 bool https_server_start_on_port(const char *cert_path, const char *key_path,
-                                const char *hostname, int https_port, int http_port);
+                                const char *hostname, int https_port, int http_port,
+                                const char *bind_address);
+
+/* Numeric address and port the HTTPS listener (redirect false) or the HTTP
+ * redirect listener (redirect true) is bound to; false while not listening. */
+bool https_server_listener_name(bool redirect, char *text, size_t text_size,
+                                uint16_t *port);
 void https_server_stop(void);
 
 /* ── Certificate reload, without a restart ────────────────────────────

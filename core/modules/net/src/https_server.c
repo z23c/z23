@@ -113,6 +113,19 @@ static void client_queue_close_all(void)
     pthread_mutex_unlock(&g_client_queue_mutex);
 }
 
+/* Numeric address and port the HTTPS listener (redirect false) or the HTTP
+ * redirect listener (redirect true) is bound to; false while it is not
+ * listening. */
+bool https_server_listener_name(bool redirect, char *text, size_t text_size,
+                                uint16_t *port)
+{
+    pthread_mutex_lock(&g_https_state_mutex);
+    platform_socket_t fd = redirect ? g_http_fd : g_https_fd;
+    bool ok = platform_socket_local_name(fd, text, text_size, port);
+    pthread_mutex_unlock(&g_https_state_mutex);
+    return ok;
+}
+
 /* Written once by https_server_start_on_port() before any listener thread
  * exists, then read-only for the process lifetime — no lock needed. */
 const char *https_server_configured_hostname(void)
@@ -546,7 +559,7 @@ static void *https_listen_fn(void *arg)
             thread_liveness_beat(&g_https_listen_liveness, -1);
             continue;
         }
-        struct sockaddr_in client_addr;
+        struct sockaddr_storage client_addr;
         size_t addr_len = sizeof(client_addr);
         platform_socket_t client_fd = platform_socket_accept(
             g_https_listen_fd, (struct sockaddr *)&client_addr, &addr_len);
@@ -611,7 +624,7 @@ static void *http_listen_fn(void *arg)
             thread_liveness_beat(&g_http_listen_liveness, -1);
             continue;
         }
-        struct sockaddr_in client_addr;
+        struct sockaddr_storage client_addr;
         size_t addr_len = sizeof(client_addr);
         platform_socket_t client_fd = platform_socket_accept(
             g_http_listen_fd, (struct sockaddr *)&client_addr, &addr_len);
@@ -675,22 +688,24 @@ static void *https_worker_fn(void *arg)
 
 /* ── Bind helper ──────────────────────────────────────────── */
 
-static platform_socket_t bind_port(uint16_t port, bool any_addr)
+/* A NULL or empty bind_address listens on every IPv4 interface; otherwise the
+ * socket listens on that one literal address. */
+static platform_socket_t bind_port(uint16_t port, const char *bind_address)
 {
-    platform_socket_t fd = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+    struct sockaddr_storage addr;
+    socklen_t addr_len = 0;
+    if (!platform_socket_listen_address(bind_address, port, false, &addr,
+                                        &addr_len))
+        LOG_ERR("https", "bind address '%s' is not a literal IPv4 or IPv6 address",
+                bind_address);
+    platform_socket_t fd = platform_socket_open(addr.ss_family, SOCK_STREAM, 0,
                                                 true, false);
     if (fd == PLATFORM_SOCKET_INVALID)
         LOG_ERR("https", "socket() failed");
 
     (void)platform_socket_set_reuse_address(fd, true);
 
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = any_addr ? htonl(INADDR_ANY) : htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons(port);
-
-    if (platform_socket_bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+    if (platform_socket_bind(fd, (struct sockaddr *)&addr, addr_len) != 0) {
         platform_socket_close(fd);
         LOG_ERR("https", "bind port %u failed", port);
     }
@@ -738,7 +753,8 @@ static void https_spawn_http_listener(void)
 }
 
 bool https_server_start_on_port(const char *cert_path, const char *key_path,
-                                const char *hostname, int https_port, int http_port)
+                                const char *hostname, int https_port, int http_port,
+                                const char *bind_address)
 {
 #if !defined(_WIN32)
     signal(SIGPIPE, SIG_IGN);
@@ -778,7 +794,7 @@ bool https_server_start_on_port(const char *cert_path, const char *key_path,
     }
 
     /* Bind HTTPS port (iptables redirects 443→default 8443) */
-    g_https_fd = bind_port(https_port, true);
+    g_https_fd = bind_port((uint16_t)https_port, bind_address);
     if (g_https_fd == PLATFORM_SOCKET_INVALID) {
         SSL_CTX_free(ctx);
         pthread_mutex_unlock(&g_https_state_mutex);
@@ -787,7 +803,7 @@ bool https_server_start_on_port(const char *cert_path, const char *key_path,
     }
 
     /* Bind HTTP port for redirect */
-    g_http_fd = bind_port(http_port, true);
+    g_http_fd = bind_port((uint16_t)http_port, bind_address);
     if (g_http_fd == PLATFORM_SOCKET_INVALID) {
         fprintf(stderr, "HTTPS: cannot bind port %d, HTTP redirect won't work\n",  // obs-ok:bind-failure-non-fatal
                 http_port);
@@ -837,9 +853,10 @@ bool https_server_start_on_port(const char *cert_path, const char *key_path,
     https_spawn_http_listener();
     pthread_mutex_unlock(&g_https_state_mutex);
 
-    printf("HTTPS server listening on 0.0.0.0:%d (TLS)\n", https_port);
+    const char *shown = bind_address && bind_address[0] ? bind_address : "0.0.0.0";
+    printf("HTTPS server listening on %s:%d (TLS)\n", shown, https_port);
     if (g_http_fd != PLATFORM_SOCKET_INVALID)
-        printf("HTTP redirect on 0.0.0.0:%d -> https://%s\n", http_port, g_hostname);
+        printf("HTTP redirect on %s:%d -> https://%s\n", shown, http_port, g_hostname);
 
     return true;
 }
@@ -847,7 +864,8 @@ bool https_server_start_on_port(const char *cert_path, const char *key_path,
 bool https_server_start(const char *cert_path, const char *key_path,
                          const char *hostname)
 {
-    return https_server_start_on_port(cert_path, key_path, hostname, 8443, 8080);
+    return https_server_start_on_port(cert_path, key_path, hostname, 8443, 8080,
+                                      NULL);
 }
 
 /* Wake a listener blocked in accept(). A failed shutdown() is logged; the

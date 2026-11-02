@@ -111,6 +111,18 @@ void rpc_http_forbid_tls(bool forbid)
     atomic_store(&g_tls_forbidden, forbid);
 }
 
+static char g_tls_bind[PLATFORM_IPV6_ADDRESS_TEXT_SIZE];
+
+bool rpc_http_set_tls_bind(const char *address)
+{
+    struct sockaddr_storage probe;
+    socklen_t probe_len = 0;
+    if (!platform_socket_listen_address(address, 0, false, &probe, &probe_len))
+        return false;
+    snprintf(g_tls_bind, sizeof(g_tls_bind), "%s", address ? address : "");
+    return true;
+}
+
 /* ── TLS state ────────────────────────────────────────────────────── */
 static SSL_CTX *g_tls_ctx = NULL;
 static platform_socket_t g_tls_listen_fd = PLATFORM_SOCKET_INVALID;
@@ -464,27 +476,28 @@ static uint16_t rpc_tls_port_from_env(const char *env, uint16_t fallback)
     return (uint16_t)v;
 }
 
-/* Creates the TLS listen socket on all interfaces and puts it into
- * listen state. On open, bind or listen failure the socket is closed
- * and g_tls_listen_fd is left invalid so the caller can drop TLS and
- * keep the plain-text listener. */
+/* Creates the TLS listen socket on the -bind address, or on all IPv4
+ * interfaces without one, and puts it into listen state. On open, bind or
+ * listen failure the socket is closed and g_tls_listen_fd is left invalid so
+ * the caller can drop TLS and keep the plain-text listener. */
 static void rpc_tls_listen_socket_setup(void)
 {
-    /* Create TLS listen socket on all interfaces */
+    struct sockaddr_storage taddr;
+    socklen_t taddr_len = 0;
+    if (!platform_socket_listen_address(g_tls_bind, g_tls_port, false, &taddr,
+                                        &taddr_len)) {
+        fprintf(stderr, "RPC TLS: bind address '%s' is not a literal address\n",  // obs-ok:helper-context-logged
+                g_tls_bind);
+        return;
+    }
     g_tls_listen_fd = platform_socket_open(
-        AF_INET, SOCK_STREAM, 0, true, false);
+        taddr.ss_family, SOCK_STREAM, 0, true, false);
     if (g_tls_listen_fd != PLATFORM_SOCKET_INVALID) {
         char terr[32]; /* Winsock errors have no strerror() */
         (void)platform_socket_set_reuse_address(g_tls_listen_fd, true);
 
-        struct sockaddr_in taddr;
-        memset(&taddr, 0, sizeof(taddr));
-        taddr.sin_family = AF_INET;
-        taddr.sin_addr.s_addr = htonl(INADDR_ANY);
-        taddr.sin_port = htons(g_tls_port);
-
         if (platform_socket_bind(g_tls_listen_fd,
-                (struct sockaddr *)&taddr, sizeof(taddr)) < 0) {
+                (struct sockaddr *)&taddr, taddr_len) < 0) {
             fprintf(stderr, "RPC TLS: bind port %u failed: %s\n",  // obs-ok:helper-context-logged
                     g_tls_port, platform_socket_error_string(
                         platform_socket_last_error(), terr, sizeof(terr)));
@@ -540,6 +553,11 @@ static void rpc_tls_spawn_listener(void)
     }
 }
 
+bool rpc_http_tls_listener_name(char *text, size_t text_size, uint16_t *port)
+{
+    return platform_socket_local_name(g_tls_listen_fd, text, text_size, port);
+}
+
 bool rpc_http_start(const struct rpc_table *table, uint16_t port,
                      const char *rpc_user, const char *rpc_password,
                      const char *datadir)
@@ -582,7 +600,8 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
 
     /* Optional TLS listener for non-loopback RPC. Set ZCL_RPC_TLS_CERT
      * and ZCL_RPC_TLS_KEY to PEM file paths. TLS listener binds to
-     * 0.0.0.0 on rpcport+1 (or ZCL_RPC_TLS_PORT). Plain-text listener
+     * the -bind address (0.0.0.0 without one) on rpcport+1 (or
+     * ZCL_RPC_TLS_PORT). Plain-text listener
      * stays on 127.0.0.1 for local tools. */
     g_tls_ctx = NULL;
     g_tls_listen_fd = PLATFORM_SOCKET_INVALID;
@@ -617,7 +636,8 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
     g_running = true;
     printf("RPC server listening on 127.0.0.1:%u\n", port);
     if (g_tls_ctx)
-        printf("RPC TLS server listening on 0.0.0.0:%u\n", g_tls_port);
+        printf("RPC TLS server listening on %s:%u\n",
+               g_tls_bind[0] ? g_tls_bind : "0.0.0.0", g_tls_port);
 
     if (!rpc_http_spawn_workers())
         goto fail;

@@ -171,7 +171,7 @@ static void hsi_directory_json(char *out, size_t cap)
  * port collisions when suites run in parallel worktrees). */
 static uint16_t hsi_start_seeder(const char *sdir)
 {
-    fs_server_start(sdir, 0);
+    fs_server_start(sdir, 0, NULL);
     for (int w = 0; w < 40 && !fs_server_is_running(); w++)
         platform_sleep_ms(50);
     return fs_server_is_running() ? fs_server_get_port() : 0;

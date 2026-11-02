@@ -513,8 +513,8 @@ static int test_file_service_start_stop_and_lifetime(void)
         snprintf(blk, sizeof(blk), "%s/blocks/blk00000.dat", dir);
         test_file_write_bytes(blk, 4096, 0xCC);
         test_file_touch_age(blk, 7200);
-        fs_server_start(dir, 0);
-        fs_server_start(dir, 0);
+        fs_server_start(dir, 0, NULL);
+        fs_server_start(dir, 0, NULL);
         for (unsigned i = 0; i < 200 && fs_server_get_port() == 0; i++)
             platform_sleep_ms(5);
         ok = ok && fs_server_is_running();

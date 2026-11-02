@@ -78,7 +78,10 @@ static bool boot_file_service_start(void *ctx)
         printf("File service server deferred during fresh bootstrap receiver mode\n");
         return true;
     }
-    fs_server_start(svc->datadir, (uint16_t)svc->app_ctx->fs_port);
+    if (!fs_server_start(svc->datadir, (uint16_t)svc->app_ctx->fs_port,
+                         svc->app_ctx->p2p_bind_address))
+        LOG_FAIL("file_service", "-bind=%s is not a listen address",
+                 svc->app_ctx->p2p_bind_address);
     return true;
 }
 
@@ -145,6 +148,9 @@ static bool boot_rpc_http_start(void *ctx)
     /* The RPC TLS listener binds every interface; the loopback listener is the
      * only one a private-listeners node keeps. */
     rpc_http_forbid_tls(svc->app_ctx->private_listeners);
+    if (!rpc_http_set_tls_bind(svc->app_ctx->p2p_bind_address))
+        LOG_FAIL("rpc_http", "-bind=%s is not a listen address",
+                 svc->app_ctx->p2p_bind_address);
     if (!rpc_http_start(svc->rpc_table,
                         (uint16_t)svc->app_ctx->rpc_port,
                         svc->app_ctx->rpc_user,
@@ -411,7 +417,8 @@ static void boot_https_explorer_listen_or_defer(struct boot_svc_ctx *svc,
     if (near_tip) {
         https_server_start_on_port(serve_cert, serve_key, https_domain,
                                    svc->app_ctx->https_port,
-                                   svc->app_ctx->https_port - 363);
+                                   svc->app_ctx->https_port - 363,
+                                   svc->app_ctx->p2p_bind_address);
     } else {
         printf("HTTPS: deferred during IBD (chain=%d, headers=%d, "
                "behind=%d). Will start when near tip.\n",
@@ -420,7 +427,8 @@ static void boot_https_explorer_listen_or_defer(struct boot_svc_ctx *svc,
         ZCL_IGNORE_RESULT(https_deferred_start_set(serve_cert, serve_key,
                                                    https_domain,
                                                    svc->app_ctx->https_port,
-                                                   svc->app_ctx->https_port - 363),
+                                                   svc->app_ctx->https_port - 363,
+                                                   svc->app_ctx->p2p_bind_address),
                           "the set logs its own refusal; boot continues without the deferred start");
     }
 }

@@ -433,7 +433,7 @@ int test_acme_cert_reload(void)
 
     CR_CHECK("the front door starts on the first pair",
              https_server_start_on_port(a_cert, a_key, ALPHA, (int)https_port,
-                                        (int)http_port));
+                                        (int)http_port, NULL));
     if (!https_server_is_running()) {
         printf("acme_cert_reload: SKIP (the listener did not come up on port "
                "%u; nothing further was asserted in this run)\n",

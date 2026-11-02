@@ -16,9 +16,10 @@ static char g_key[1024];
 static char g_host[256];
 static int g_https_port;
 static int g_http_port;
+static char g_bind[64];
 
 static bool record_start(const char *cert, const char *key, const char *host,
-                         int https_port, int http_port)
+                         int https_port, int http_port, const char *bind_address)
 {
     g_starts++;
     snprintf(g_cert, sizeof(g_cert), "%s", cert);
@@ -26,6 +27,7 @@ static bool record_start(const char *cert, const char *key, const char *host,
     snprintf(g_host, sizeof(g_host), "%s", host ? host : "");
     g_https_port = https_port;
     g_http_port = http_port;
+    snprintf(g_bind, sizeof(g_bind), "%s", bind_address ? bind_address : "");
     return true;
 }
 
@@ -46,7 +48,7 @@ static int case_set_keeps_ports_pending(void)
     TEST_CASE("https_deferred_start: set keeps custom ports pending")
     {
         ASSERT(https_deferred_start_set("/d/fullchain.pem", "/d/privkey.pem",
-                                        "node.example", 18443, 18080).ok);
+                                        "node.example", 18443, 18080, NULL).ok);
         ASSERT(pending_now());
         ASSERT_EQ(g_starts, 0);
     }
@@ -65,23 +67,23 @@ static int case_bad_ports_refused(void)
         ASSERT_EQ(g_starts, 1);
         struct zcl_result refused_zero =
             https_deferred_start_set("/d/fullchain.pem", "/d/privkey.pem",
-                                     "node.example", 0, 18080);
+                                     "node.example", 0, 18080, NULL);
         ASSERT(!refused_zero.ok);
         ASSERT(refused_zero.message[0] != '\0');
         ASSERT(!pending_now());
         ASSERT(!https_deferred_start_set("/d/fullchain.pem", "/d/privkey.pem",
-                                         "node.example", 18443, 70000).ok);
+                                         "node.example", 18443, 70000, NULL).ok);
         ASSERT(!pending_now());
         /* A missing path, or one too long to keep whole, is refused too:
          * a truncated certificate path would start on the wrong file. */
         ASSERT(!https_deferred_start_set(NULL, "/d/privkey.pem",
-                                         "node.example", 18443, 18080).ok);
+                                         "node.example", 18443, 18080, NULL).ok);
         ASSERT(!pending_now());
         static char long_path[1100];
         memset(long_path, 'p', sizeof(long_path) - 1u);
         long_path[0] = '/';
         ASSERT(!https_deferred_start_set(long_path, "/d/privkey.pem",
-                                         "node.example", 18443, 18080).ok);
+                                         "node.example", 18443, 18080, NULL).ok);
         ASSERT(!pending_now());
         https_deferred_start_check();
         ASSERT_EQ(g_starts, 1);
@@ -97,9 +99,10 @@ static int case_check_uses_stored_ports(void)
     TEST_CASE("https_deferred_start: check starts with the stored ports")
     {
         ASSERT(https_deferred_start_set("/d/fullchain.pem", "/d/privkey.pem",
-                                        "node.example", 18443, 18080).ok);
+                                        "node.example", 18443, 18080, "127.0.0.1").ok);
         https_deferred_start_check();
         ASSERT_EQ(g_starts, 2);
+        ASSERT(strcmp(g_bind, "127.0.0.1") == 0);
         ASSERT(strcmp(g_cert, "/d/fullchain.pem") == 0);
         ASSERT(strcmp(g_key, "/d/privkey.pem") == 0);
         ASSERT(strcmp(g_host, "node.example") == 0);
@@ -131,7 +134,7 @@ static int case_second_check_no_double_start(void)
     TEST_CASE("https_deferred_start: a second check does not start twice")
     {
         ASSERT(https_deferred_start_set("/d/fullchain.pem", "/d/privkey.pem",
-                                        "node.example", 19443, 19080).ok);
+                                        "node.example", 19443, 19080, NULL).ok);
         https_deferred_start_check();
         https_deferred_start_check();
         ASSERT_EQ(g_starts, 3);

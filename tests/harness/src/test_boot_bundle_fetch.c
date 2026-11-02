@@ -424,7 +424,7 @@ static int case_e2e(void)
                                  NULL, &art) == ROM_REG_OK);
 
                 uint16_t port = 0;
-        fs_server_start(sdir, 0); /* OS-assigned: no cross-checkout port collisions */
+        fs_server_start(sdir, 0, NULL); /* OS-assigned: no cross-checkout port collisions */
         for (int w = 0; w < 40 && !fs_server_is_running(); w++)
             platform_sleep_ms(50);
         if (fs_server_is_running())
@@ -657,7 +657,7 @@ static int case_warm_landed(void)
         rom_seed_reset();
 
         /* (b)/(c) same-size flipped byte, and wrong size: must download. */
-        fs_server_start(sdir, 0);
+        fs_server_start(sdir, 0, NULL);
         for (int w = 0; w < 40 && !fs_server_is_running(); w++)
             platform_sleep_ms(50);
         ASSERT(fs_server_is_running() && fs_server_get_port() != 0);
@@ -1119,7 +1119,7 @@ static int case_discovery(void)
                                  NULL, &art) == ROM_REG_OK);
 
                 uint16_t port = 0;
-        fs_server_start(sdir, 0); /* OS-assigned: no cross-checkout port collisions */
+        fs_server_start(sdir, 0, NULL); /* OS-assigned: no cross-checkout port collisions */
         for (int w = 0; w < 40 && !fs_server_is_running(); w++)
             platform_sleep_ms(50);
         if (fs_server_is_running())
@@ -1203,7 +1203,7 @@ static int case_discovery_outcome_persists(void)
                                  NULL, &art) == ROM_REG_OK);
 
                 uint16_t port = 0;
-        fs_server_start(sdir, 0); /* OS-assigned: no cross-checkout port collisions */
+        fs_server_start(sdir, 0, NULL); /* OS-assigned: no cross-checkout port collisions */
         for (int w = 0; w < 40 && !fs_server_is_running(); w++)
             platform_sleep_ms(50);
         if (fs_server_is_running())
@@ -1251,7 +1251,7 @@ static int case_discovery_outcome_persists(void)
         ASSERT(sdir2 != NULL);
 
         uint16_t port2 = 0;
-        fs_server_start(sdir2, 0); /* OS-assigned: no cross-checkout port collisions */
+        fs_server_start(sdir2, 0, NULL); /* OS-assigned: no cross-checkout port collisions */
         for (int w = 0; w < 40 && !fs_server_is_running(); w++)
             platform_sleep_ms(50);
         if (fs_server_is_running())
@@ -1504,7 +1504,7 @@ static bool bbf_seeder_start(struct bbf_seeder *s)
     if (rom_seed_register(s->dir, "consensus-state-bundle-3056758.sqlite",
                           NULL, &s->art) != ROM_REG_OK)
         return false;
-    fs_server_start(s->dir, 0);
+    fs_server_start(s->dir, 0, NULL);
     for (int w = 0; w < 40 && !fs_server_is_running(); w++)
         platform_sleep_ms(50);
     if (!fs_server_is_running())

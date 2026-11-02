@@ -23,6 +23,16 @@ bool rpc_http_tls_active(void);
  * request. Call before rpc_http_start; the setting holds until changed. */
 void rpc_http_forbid_tls(bool forbid);
 
+/* Sets the literal IPv4 or IPv6 address the optional TLS listener binds, from
+ * -bind. NULL or empty keeps every IPv4 interface. Returns false, changing
+ * nothing, when the text is not a literal address. Call before rpc_http_start;
+ * the setting holds until changed. The plain-text listener stays on 127.0.0.1. */
+bool rpc_http_set_tls_bind(const char *address);
+
+/* Numeric address and port the TLS listener is bound to; false while it is
+ * not listening. */
+bool rpc_http_tls_listener_name(char *text, size_t text_size, uint16_t *port);
+
 /* Cookie rotation — call manually for testing; background thread calls
  * automatically every ZCL_RPC_COOKIE_ROTATE_SEC seconds (default 24h). */
 void rpc_http_cookie_rotate(void);
