@@ -87,7 +87,7 @@ static void view_words_locked(struct wsu *w, struct wsu_view *out)
 {
     out->write = w->write;
     out->write_failure = w->write_failure;
-    out->start_pending = w->words_first && !w->birthday.known;
+    out->start_pending = w->words_first;
     if (w->step == WSU_WORDS && w->protected) { out->words = w->held; out->start_height = w->birthday.known ? w->birthday.height : 0; }
     if (w->step != WSU_CONFIRM) return;
     memcpy(out->asked, w->asked, sizeof(out->asked));
@@ -205,6 +205,7 @@ static const struct { enum wsu_failure failure; const char *text; } failure_text
     {WSU_ASIDE, "The wallet could not be set aside, so nothing was changed."},
     {WSU_ASIDE_STUCK, "Some items could not be put back. Do not create a new wallet. They need their original names back:"},
     {WSU_UNPROTECTED, "This phone would not protect the screen from capture, so no wallet was made."},
+    {WSU_WALLET_THERE, "A wallet is already on this phone. Start over to make a new one, or restore your words."},
 };
 const char *wsu_failure_text(enum wsu_failure failure)
 {
@@ -356,6 +357,16 @@ static enum wsu_failure phrase_failure(struct wsu *w, struct zapp_words *phrase)
     enum sun_result result = sun_new_phrase(&w->node, phrase);
     return result == SUN_OK ? WSU_NO_FAILURE : failure_of_node(result);
 }
+/* The shown words, the phrase kept for the write and its passphrase are wiped, with the lock held. */
+static void close_words_locked(struct wsu *w)
+{
+    forget_choices_locked(w);
+    zapp_words_cleanse(&w->held);
+    zapp_words_cleanse(&w->phrase);
+    memory_cleanse(w->write_pass, sizeof(w->write_pass));
+    w->write = WSU_WRITE_NONE;
+    w->words_first = false;
+}
 /* The phrase is shown, and kept with its passphrase until the wallet is written: a failed write is tried again with the same
  * words, and no second phrase is ever made for one setup. False, nothing kept, when the questions cannot be drawn. */
 static bool words_shown(struct wsu *w, const struct zapp_words *phrase, const char *hex)
@@ -367,7 +378,6 @@ static bool words_shown(struct wsu *w, const struct zapp_words *phrase, const ch
     w->words_first = true;
     w->write = WSU_WRITE_PENDING;
     w->write_failure = WSU_NO_FAILURE;
-    w->write_maybe = false;
     w->mismatches = 0;
     memset(&w->birthday, 0, sizeof(w->birthday));
     bool ok = zapp_words_pick(w->held.count, w->env.random, w->env.ctx, ZAPP_WORDS_ASKED, w->asked) && offer_all_locked(w);
@@ -375,11 +385,7 @@ static bool words_shown(struct wsu *w, const struct zapp_words *phrase, const ch
         w->step = WSU_WORDS;
         w->failure = WSU_NO_FAILURE;
     } else {
-        forget_choices_locked(w);
-        zapp_words_cleanse(&w->held);
-        zapp_words_cleanse(&w->phrase);
-        memory_cleanse(w->write_pass, sizeof(w->write_pass));
-        w->write = WSU_WRITE_NONE;
+        close_words_locked(w);
     }
     pthread_mutex_unlock(&w->lock);
     return ok;
@@ -413,21 +419,26 @@ static enum sun_result write_once(struct wsu *w, struct sun_restored *restored)
     phase(w, WSU_PHASE_WRITE);
     return sun_restore_at_tip(&w->node, &w->phrase, w->write_pass, restored);
 }
-/* The write ended: kept as done, with the phrase and passphrase wiped, or as failed with its reason. A wallet an earlier attempt
- * may have written and now reports present is the same wallet: only this phrase and passphrase were ever offered. */
+/* The write ended: kept as done, with the phrase and passphrase wiped, or as failed with its reason. A wallet found present
+ * never counts as this one. */
 static void write_ended(struct wsu *w, enum sun_result result, const struct sun_restored *restored)
 {
-    bool already = result == SUN_ALREADY_PRESENT && w->write_maybe;
     pthread_mutex_lock(&w->lock);
-    if (result == SUN_OK || already) {
-        w->birthday.known = already || (restored->birthday_recorded && !restored->birthday_rejected);
+    if (result == SUN_ALREADY_PRESENT) {
+        /* A wallet that is already there is never this one, whatever an earlier attempt did: the shown words may not restore it, so
+         * they are closed and the owner goes on by Start over or Restore. */
+        close_words_locked(w);
+        w->kind = ZAPP_KIND_CREATE;
+        w->step = WSU_BLOCKED;
+        w->failure = WSU_WALLET_THERE;
+    } else if (result == SUN_OK) {
+        w->birthday.known = restored->birthday_recorded && !restored->birthday_rejected;
         w->write = WSU_WRITE_DONE;
         zapp_words_cleanse(&w->phrase);
         memory_cleanse(w->write_pass, sizeof(w->write_pass));
     } else {
         w->write = WSU_WRITE_FAILED;
         w->write_failure = failure_of_node(result);
-        w->write_maybe = w->write_maybe || result == SUN_UNKNOWN;
     }
     pthread_mutex_unlock(&w->lock);
 }
@@ -449,6 +460,19 @@ bool wsu_retry_write(struct wsu *w)
     pthread_mutex_lock(&w->lock);
     bool ok = w->write == WSU_WRITE_FAILED && (w->step == WSU_WORDS || w->step == WSU_CONFIRM);
     if (ok) { w->write = WSU_WRITE_PENDING; w->write_failure = WSU_NO_FAILURE; }
+    pthread_mutex_unlock(&w->lock);
+    return ok;
+}
+bool wsu_give_up_write(struct wsu *w)
+{
+    pthread_mutex_lock(&w->lock);
+    bool ok = w->write == WSU_WRITE_FAILED && (w->step == WSU_WORDS || w->step == WSU_CONFIRM);
+    if (ok) {
+        close_words_locked(w);
+        w->step = WSU_CHECKING;
+        w->failure = WSU_NO_FAILURE;
+        work_begins_locked(w, WSU_PHASE_NONE);
+    }
     pthread_mutex_unlock(&w->lock);
     return ok;
 }
@@ -728,7 +752,7 @@ bool wsu_ask_start_over(struct wsu *w)
     enum zapp_setup_kind kind = zapp_setup_kind_read(w->files);
     bool proved = words_proved(w);
     pthread_mutex_lock(&w->lock);
-    bool blocked = w->step == WSU_BLOCKED && (w->failure == WSU_NO_FAILURE || w->failure == WSU_COULD_NOT_CHECK || w->failure == WSU_NODE_BUSY);
+    bool blocked = w->step == WSU_BLOCKED && (w->failure == WSU_NO_FAILURE || w->failure == WSU_COULD_NOT_CHECK || w->failure == WSU_NODE_BUSY || w->failure == WSU_WALLET_THERE);
     bool ok = blocked || (w->step == WSU_FAILED && w->failure == WSU_NO_BIRTHDAY);
     enum wsu_failure why = kind != ZAPP_KIND_CREATE ? WSU_NOT_CREATE : proved ? WSU_ALREADY_CONFIRMED : WSU_NO_FAILURE;
     if (ok) { w->step = why == WSU_NO_FAILURE ? WSU_START_OVER : WSU_BLOCKED; w->failure = why; }

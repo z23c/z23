@@ -32,7 +32,7 @@ _Static_assert(ZAPP_FIELD_PRIVATE(ZAPP_FIELD_INPUT_WORDS | ZAPP_FIELD_FLAG_MULTI
 #define TYPED_MAX 640
 #define SUMMARY_MAX 8192
 
-enum button { B_CREATE, B_RESTORE_FORM, B_RESTORE, B_RESTORE_UNKNOWN, B_SEEN, B_CONFIRM, B_AGAIN, B_BACK, B_CONTINUE, B_RECHECK, B_SAVE_AGAIN, B_NEW_WALLET, B_START_OVER_ASK, B_START_OVER_GO, B_START_OVER_CANCEL, B_RETRY_WRITE, B_PICK };   /* B_PICK + 4 * position + slot: one of the words offered */
+enum button { B_CREATE, B_RESTORE_FORM, B_RESTORE, B_RESTORE_UNKNOWN, B_SEEN, B_CONFIRM, B_AGAIN, B_BACK, B_CONTINUE, B_RECHECK, B_SAVE_AGAIN, B_NEW_WALLET, B_START_OVER_ASK, B_START_OVER_GO, B_START_OVER_CANCEL, B_RETRY_WRITE, B_GIVE_UP, B_PICK };   /* B_PICK + 4 * position + slot: one of the words offered */
 enum job_kind { JOB_WRITE, JOB_CREATE, JOB_RESTORE, JOB_PROGRESS, JOB_FINISH, JOB_RESUME, JOB_ASIDE, JOB_START_OVER };
 struct job { enum job_kind kind; char text[TYPED_MAX]; int64_t height; };
 
@@ -321,6 +321,7 @@ static void draw_confirm(JNIEnv *env, const struct wsu_view *v)
     if (v->write == WSU_WRITE_FAILED) {
         (void)text_view(env, wsu_failure_text(v->write_failure), 15.0f, AMBER);
         (void)button_view(env, B_RETRY_WRITE, "Try again", GO_COLOR);
+        (void)button_view(env, B_GIVE_UP, "Stop and check this phone", BUTTON_COLOR);
     } else if (all && v->write != WSU_WRITE_DONE) {
         (void)text_view(env, "Saving your wallet…", 15.0f, SOFT);
     } else if (all) {
@@ -393,9 +394,9 @@ static void draw_interrupted(JNIEnv *env, const struct wsu_view *v)
         break;
     default:
         (void)text_view(env, "Setup was interrupted", 24.0f, WHITE);
-        (void)text_view(env, v->failure == WSU_UNKNOWN ? "Your node did not answer, so the app cannot tell whether a wallet exists." : "A wallet was started on this phone and its recovery words were not confirmed. The node has no command that shows them again. Receive stays closed until setup is confirmed.", 15.0f, AMBER);
+        if (v->failure != WSU_WALLET_THERE) (void)text_view(env, v->failure == WSU_UNKNOWN ? "Your node did not answer, so the app cannot tell whether a wallet exists." : "A wallet was started on this phone and its recovery words were not confirmed. The node has no command that shows them again. Receive stays closed until setup is confirmed.", 15.0f, AMBER);
         if (wsu_view_can_recheck(v)) (void)button_view(env, B_RECHECK, "Check again", BUTTON_COLOR);
-        if (v->may_start_over && (v->failure == WSU_NO_FAILURE || v->failure == WSU_COULD_NOT_CHECK || v->failure == WSU_NODE_BUSY))
+        if (v->may_start_over && (v->failure == WSU_NO_FAILURE || v->failure == WSU_COULD_NOT_CHECK || v->failure == WSU_NODE_BUSY || v->failure == WSU_WALLET_THERE))
             (void)button_view(env, B_START_OVER_ASK, "Start over", BUTTON_COLOR);
         if (v->failure != WSU_NO_FAILURE && v->failure != WSU_UNKNOWN) (void)text_view(env, wsu_failure_text(v->failure), 15.0f, AMBER);
         break;
@@ -597,6 +598,7 @@ static void press_check(enum button id)
     switch (id) {
     case B_SEEN: wsu_words_seen(&ui.model); break;
     case B_RETRY_WRITE: if (wsu_retry_write(&ui.model)) (void)spawn_job(JOB_WRITE, NULL, 0); break;
+    case B_GIVE_UP: (void)wsu_give_up_write(&ui.model); break;
     case B_CONFIRM: if (wsu_confirm_picked(&ui.model)) (void)spawn_job(JOB_FINISH, NULL, 0); break;
     case B_AGAIN: wsu_show_again(&ui.model); break;
     default: press_interrupted(id); break;

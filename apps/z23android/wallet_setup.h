@@ -111,7 +111,8 @@ enum wsu_failure {
     WSU_COULD_NOT_CHECK, /* The node did not say whether the wallet is empty. */
     WSU_ASIDE,          /* The wallet could not be set aside; what had moved was put back and nothing changed. */
     WSU_ASIDE_STUCK,    /* Items moved aside could not be put back: leftover names them, and no new wallet is offered. */
-    WSU_UNPROTECTED     /* The window could not be protected: nothing is shown and no wallet is made. */
+    WSU_UNPROTECTED,    /* The window could not be protected: nothing is shown and no wallet is made. */
+    WSU_WALLET_THERE    /* A create found a wallet already on the phone: the shown words are closed, and Start over or Restore is the way on. */
 };
 
 #define WSU_LEFTOVER_MAX 1100
@@ -143,7 +144,6 @@ struct wsu {
     char write_pass[SUN_PASSPHRASE_HEX + 1];
     enum wsu_write write;
     enum wsu_failure write_failure;
-    bool write_maybe;           /* an earlier attempt gave no usable answer, so it may have written the wallet */
     bool words_first;           /* the setup is a create whose words were shown before the wallet was written */
 };
 bool wsu_init(struct wsu *w, const struct wsu_env *env, const struct sun *node, const char *files);
@@ -175,7 +175,7 @@ struct wsu_view {
     int64_t elapsed_s;      /* seconds since the job began */
     enum wsu_write write;    /* with WORDS or CONFIRM: whether the wallet behind the words is written */
     enum wsu_failure write_failure;
-    bool start_pending;      /* with WORDS: the wallet records its start only when written, so no height is shown */
+    bool start_pending;      /* with WORDS: a words-first create, before and after the write; the wallet start is the node's own, so no height is shown */
 };
 void wsu_view_read(struct wsu *w, struct wsu_view *out);
 /* Whether the interrupted-setup screen offers Check again: the node did not answer, or was busy, or could not say whether the wallet is empty. */
@@ -208,6 +208,9 @@ void wsu_create_job(struct wsu *w);
 void wsu_write_job(struct wsu *w);
 /* A failed write to a new attempt with the same words, never a second phrase; the caller then runs wsu_write_job. */
 bool wsu_retry_write(struct wsu *w);
+/* A failed write the owner leaves: the words are closed and wiped, and the setup goes to the check of what the phone holds (the
+ * interrupted-setup path), where Start over and Back work. False unless the write has failed. */
+bool wsu_give_up_write(struct wsu *w);
 /* text is the typed words; birthday_height is 0 when the owner does not know it. */
 void wsu_restore_job(struct wsu *w, const char *text, int64_t birthday_height);
 /* answers are the typed words for the asked positions. True when they match: the words are wiped and the step is

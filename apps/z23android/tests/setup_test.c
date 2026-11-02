@@ -549,7 +549,7 @@ static void create_tests(void)
     create_all(&w);
     wsu_view_read(&w, &v);
     assert(v.step == WSU_WORDS && v.words.count == 24 && !strcmp(v.words.word[0], "alpha"));
-    assert(v.write == WSU_WRITE_DONE && !v.start_pending);
+    assert(v.write == WSU_WRITE_DONE && v.start_pending);
     assert(f.create_while_running == 0 && f.stops == 1 && f.starts == 1 && f.running);
     assert(strstr(f.script.input, "\"passphrase\":\"abababababababababababababababababababababababababababababababab\""));
     assert(zapp_setup_state(dir) == ZAPP_SETUP_INTERRUPTED);
@@ -605,11 +605,11 @@ static void create_failure_refused_tests(void)
 {
     struct fake f;
     struct wsu w;
-    /* The node refuses the write: the words stay, the key stays, the node runs, and the same phrase is written on a retry. */
+    /* The node cannot write yet: the words stay, the key stays, the node runs, and the same phrase is written on a retry. */
     fresh(&f, &w, true);
-    error_reply(&f.script, "WALLET_ALREADY_PRESENT");
+    error_reply(&f.script, "NO_LOCAL_CHAIN");
     create_all(&w);
-    assert(w.step == WSU_WORDS && w.write == WSU_WRITE_FAILED && w.write_failure == WSU_PRESENT && f.discards == 0 && f.running && f.starts == 1);
+    assert(w.step == WSU_WORDS && w.write == WSU_WRITE_FAILED && w.write_failure == WSU_NO_TIP && f.discards == 0 && f.running && f.starts == 1);
     assert(retryable_state(&f));
     script_say(&f.script, true, RESTORED_TIP);
     assert(wsu_retry_write(&w) && w.write == WSU_WRITE_PENDING);
@@ -623,16 +623,105 @@ static void create_failure_unknown_tests(void)
 {
     struct fake f;
     struct wsu w;
-    /* No usable answer: the wallet may exist. The key stays, the node (which was off) is started to sync, and a later "present" is ours. */
+    /* No usable answer: the wallet may exist. The key stays, the node (which was off) is started to sync, and nothing is claimed done. */
     fresh(&f, &w, false);
     script_say(&f.script, false, "The node did not answer.");
     create_all(&w);
     assert(w.step == WSU_WORDS && w.write_failure == WSU_UNKNOWN && f.discards == 0 && f.running);
     assert(zapp_setup_state(dir) == ZAPP_SETUP_INTERRUPTED);
+    /* A wallet that is there afterwards may be an older one: it is refused, the words are wiped, and the way on is Start over. */
     error_reply(&f.script, "WALLET_ALREADY_PRESENT");
     assert(wsu_retry_write(&w));
     wsu_write_job(&w);
-    assert(w.write == WSU_WRITE_DONE && w.birthday.known);
+    assert(w.write == WSU_WRITE_NONE && w.step == WSU_BLOCKED && w.failure == WSU_WALLET_THERE && !w.birthday.known);
+    assert(w.held.count == 0 && w.phrase.count == 0 && !w.write_pass[0] && !w.confirmed && !wsu_busy(&w));
+    assert(zapp_setup_state(dir) == ZAPP_SETUP_INTERRUPTED && f.discards == 0 && f.running);
+    assert(strstr(wsu_failure_text(WSU_WALLET_THERE), "already on this phone"));
+    assert(wsu_ask_start_over(&w) && w.step == WSU_START_OVER);
+    wsu_destroy(&w);
+}
+/* Not written on the first try, then present on the next: never done, and the second answer wipes the words too. */
+static void create_failure_present_after_refusal_tests(void)
+{
+    struct fake f;
+    struct wsu w;
+    fresh(&f, &w, true);
+    error_reply(&f.script, "NO_LOCAL_CHAIN");
+    create_all(&w);
+    assert(w.write == WSU_WRITE_FAILED && w.write_failure == WSU_NO_TIP && w.held.count == 24 && w.phrase.count == 24);
+    error_reply(&f.script, "WALLET_ALREADY_PRESENT");
+    assert(wsu_retry_write(&w));
+    wsu_write_job(&w);
+    assert(w.write != WSU_WRITE_DONE && w.step == WSU_BLOCKED && w.failure == WSU_WALLET_THERE);
+    assert(w.held.count == 0 && w.phrase.count == 0 && !w.write_pass[0] && !wsu_retry_write(&w));
+    wsu_destroy(&w);
+}
+/* A write that cannot succeed offers a way out: the held words are wiped and the phone is checked, after which Back works. */
+static void create_give_up_tests(void)
+{
+    struct fake f;
+    struct wsu w;
+    struct wsu_view v;
+    fresh(&f, &w, true);
+    error_reply(&f.script, "INVALID_PHRASE");
+    create_all(&w);
+    assert(w.write == WSU_WRITE_FAILED && w.held.count == 24 && wsu_busy(&w));
+    assert(wsu_give_up_write(&w) && w.step == WSU_CHECKING && w.write == WSU_WRITE_NONE && !wsu_busy(&w));
+    assert(w.held.count == 0 && w.phrase.count == 0 && !w.write_pass[0] && !wsu_give_up_write(&w));
+    snprintf(f.script.status, sizeof(f.script.status), "{\"ok\":false,\"error\":{\"code\":\"NO_NODE_DB\"}}");
+    f.script.status_ok = false;
+    wsu_resume_job(&w);
+    wsu_view_read(&w, &v);
+    assert(v.step == WSU_NO_WALLET && f.running && f.discards == 0 && !wsu_busy(&w));
+    wsu_destroy(&w);
+}
+static void create_give_up_present_tests(void)
+{
+    struct fake f;
+    struct wsu w;
+    /* A wallet found there is blocked, not claimed. */
+    fresh(&f, &w, true);
+    error_reply(&f.script, "NO_LOCAL_CHAIN");
+    create_all(&w);
+    assert(wsu_give_up_write(&w));
+    snprintf(f.script.status, sizeof(f.script.status), PRESENT_REPLY);
+    f.script.status_ok = true;
+    wsu_resume_job(&w);
+    assert(w.step == WSU_BLOCKED && w.held.count == 0 && w.phrase.count == 0 && !wsu_busy(&w));
+    wsu_destroy(&w);
+    /* Not offered while the write is pending or done. */
+    fresh(&f, &w, true);
+    script_say(&f.script, true, CREATED);
+    create_all(&w);
+    assert(w.write == WSU_WRITE_DONE && !wsu_give_up_write(&w) && w.held.count == 24);
+    wsu_destroy(&w);
+}
+/* A failed phrase or random source leaves nothing held. */
+static void create_words_failure_wipe_test(void)
+{
+    struct fake f;
+    struct wsu w;
+    fresh(&f, &w, true);
+    script_say(&f.script, true, CREATED);
+    w.env.random = failing_random;
+    wsu_create_job(&w);
+    assert(w.held.count == 0 && w.phrase.count == 0 && !w.write_pass[0] && w.write == WSU_WRITE_NONE);
+    wsu_destroy(&w);
+}
+/* A words-first create never states a start height, before or after the write. */
+static void words_first_intro_tests(void)
+{
+    struct fake f;
+    struct wsu w;
+    struct wsu_view v;
+    char line[400];
+    fresh(&f, &w, true);
+    script_say(&f.script, true, CREATED);
+    create_all(&w);
+    wsu_view_read(&w, &v);
+    assert(v.write == WSU_WRITE_DONE);
+    wsu_words_intro(&v, line, sizeof(line));
+    assert(!strstr(line, "start height") && !strstr(line, " 0"));
     wsu_destroy(&w);
 }
 static void create_failure_busy_tests(void)
@@ -1563,7 +1652,7 @@ static void slow_exit_tests(void)
     /* The write follows while the words stay up: the screen is on the words, not on Working, when the node is stopped and written. */
     wsu_write_job(&w);
     wsu_view_read(&w, &v);
-    assert(v.step == WSU_WORDS && v.write == WSU_WRITE_DONE && !v.start_pending);
+    assert(v.step == WSU_WORDS && v.write == WSU_WRITE_DONE && v.start_pending);
     assert(slow_exit_written(&f));
     zapp_words_cleanse(&v.words);
     wsu_destroy(&w);
@@ -1641,7 +1730,9 @@ static void failed_jobs_restart_node_tests(void)
         f.exit_after_ms = 30000;
         error_reply(&f.script, codes[i]);
         create_all(&w);
-        assert(w.step == WSU_WORDS && w.write == WSU_WRITE_FAILED && f.stops == 1 && f.starts == 1 && f.starts_refused == 0 && f.running);
+        bool there = !strcmp(codes[i], "WALLET_ALREADY_PRESENT");
+        assert(there ? (w.step == WSU_BLOCKED && w.write == WSU_WRITE_NONE) : (w.step == WSU_WORDS && w.write == WSU_WRITE_FAILED));
+        assert(f.stops == 1 && f.starts == 1 && f.starts_refused == 0 && f.running);
         wsu_destroy(&w);
         fresh(&f, &w, true);
         f.exit_after_ms = 30000;
@@ -1742,11 +1833,11 @@ static void leave_notice_tests(void)
 static void failure_text_tests(void)
 {
     static const char *const jargon[] = {"datadir", "RPC", "pid", "database", "JSON", "marker", "birthday"};
-    for (int a = WSU_DECLINED; a <= WSU_UNPROTECTED; ++a) {
+    for (int a = WSU_DECLINED; a <= WSU_WALLET_THERE; ++a) {
         const char *text = wsu_failure_text((enum wsu_failure)a);
         assert(text[0] && strlen(text) < 200 + (a == WSU_NO_BIRTHDAY ? 40 : 0));
         for (size_t j = 0; j < sizeof(jargon) / sizeof(jargon[0]); ++j) assert(!strstr(text, jargon[j]));
-        for (int b = a + 1; b <= WSU_UNPROTECTED; ++b) assert(strcmp(text, wsu_failure_text((enum wsu_failure)b)));
+        for (int b = a + 1; b <= WSU_WALLET_THERE; ++b) assert(strcmp(text, wsu_failure_text((enum wsu_failure)b)));
     }
     assert(!strcmp(wsu_failure_text(WSU_NODE_BUSY), "Your node is still stopping. Try again in a minute."));
     assert(strstr(wsu_failure_text(WSU_DECLINED), "nothing was changed") && strstr(wsu_failure_text(WSU_PRESENT), "Nothing was changed"));
@@ -1959,6 +2050,11 @@ int main(int argc, char **argv)
     create_failure_decline_tests();
     create_failure_refused_tests();
     create_failure_unknown_tests();
+    create_failure_present_after_refusal_tests();
+    create_give_up_tests();
+    create_give_up_present_tests();
+    create_words_failure_wipe_test();
+    words_first_intro_tests();
     create_failure_busy_tests();
     create_failure_second_tests();
     create_phrase_failure_test();
