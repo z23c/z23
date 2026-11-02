@@ -55,6 +55,7 @@
 #include "kernel/command_registry.h"
 #include "session/agent_broker.h"
 #include "devloop_reflex_runner.h"
+#include "test/runner_admission.h"
 #include "test/selection_build_needs.h"
 #include "test/test_group_selector.h"
 #include "test/test_home_isolation.h"
@@ -905,10 +906,19 @@ static void print_watchdog_kill(size_t idx, const char *name,
  * a worker several times heavier: 28 TSan workers reached 8.0 GiB and were
  * OOM-killed under a devbuild scope whose MemoryMax is 8 GiB, so ~300 MiB
  * would still admit 27 and not prevent it; 512 MiB admits 16. */
+/* gcc defines __SANITIZE_*; clang reports sanitizers only through
+ * __has_feature. */
 #if defined(__SANITIZE_THREAD__)
+#define RUNNER_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define RUNNER_TSAN 1
+#endif
+#endif
+#if defined(RUNNER_TSAN)
 #define RUNNER_WORKER_BYTES (INT64_C(512) * 1024 * 1024)
 #define RUNNER_WORKER_KIND "tsan"
-#elif defined(__SANITIZE_ADDRESS__)
+#elif defined(TP_ASAN)
 #define RUNNER_WORKER_BYTES (INT64_C(256) * 1024 * 1024)
 #define RUNNER_WORKER_KIND "asan"
 #else
@@ -926,50 +936,20 @@ static char g_jobs_reason[96] = "cpus";
  * this process (wait4 ru_maxrss; the static figure until then), and holds the
  * fork while the headroom would not cover it plus a reserve. With nothing
  * running it always admits one, so a group heavier than the whole cgroup
- * still runs, alone. Off Linux there is no cgroup and nothing changes. */
-#define RUNNER_ADMIT_RESERVE_BYTES (INT64_C(256) * 1024 * 1024)
-/* A just-forked child has not grown yet, so memory.current under-reports it;
- * its estimate stays charged this long. */
-#define RUNNER_ADMIT_RAMP_US INT64_C(3000000)
+ * still runs, alone. Off Linux there is no cgroup and nothing changes.
+ * The pure decisions live in test/runner_admission.h and are unit-tested by
+ * test_runner_admission. */
 
 /* Peak RSS seen so far: live (VmHWM, still rising) and finished (wait4). */
 [[maybe_unused]] static int64_t g_group_peak_bytes[sizeof(g_groups) / sizeof(g_groups[0])];
 [[maybe_unused]] static int64_t g_group_done_bytes[sizeof(g_groups) / sizeof(g_groups[0])];
 [[maybe_unused]] static int64_t g_pool_peak_bytes;
-[[maybe_unused]] static int64_t g_reaped_peak_bytes;
-/* A just-forked group may start ramping at once; no more than this many
- * young ones at a time, so the first wave cannot outrun the measurements. */
-#define RUNNER_ADMIT_MAX_YOUNG 3
 
-/* What a group is expected to peak at: its finished peak from an earlier run
- * in this process, else the larger of the static figure and 1.5x the heaviest
- * group seen so far (a sibling of a 2 GiB simnet group is not 512 MiB). */
 [[maybe_unused]] static int64_t group_memory_estimate(size_t idx)
 {
-    if (g_group_done_bytes[idx] > RUNNER_WORKER_BYTES)
-        return g_group_done_bytes[idx];
-    int64_t pool = g_pool_peak_bytes + g_pool_peak_bytes / 2;
-    return pool > RUNNER_WORKER_BYTES ? pool : RUNNER_WORKER_BYTES;
-}
-
-/* Pure: may a group estimated at estimate_bytes fork now? Admits when nothing
- * is running (never deadlock); else when the cgroup headroom, less the growth
- * the running groups are still expected to make (pending_bytes) and the
- * reserve, covers the estimate, and fewer than RUNNER_ADMIT_MAX_YOUNG groups
- * are still ramping. A negative headroom means no cgroup limit is known. */
-[[maybe_unused]] static bool runner_admit(int running, int young,
-                                          int64_t headroom_bytes,
-                                          int64_t pending_bytes,
-                                          int64_t estimate_bytes)
-{
-    if (running <= 0) return true;
-    if (young >= RUNNER_ADMIT_MAX_YOUNG) return false;
-    if (headroom_bytes >= 0) {
-        headroom_bytes -= pending_bytes;
-        if (headroom_bytes < 0) headroom_bytes = 0;
-    }
-    return platform_memory_admit(headroom_bytes, estimate_bytes,
-                                 RUNNER_ADMIT_RESERVE_BYTES);
+    return runner_admission_estimate(RUNNER_WORKER_BYTES,
+                                     g_group_done_bytes[idx],
+                                     g_pool_peak_bytes);
 }
 
 static bool phase_memory_admits(const struct child_slot *slots, int jobs,
@@ -984,15 +964,15 @@ static bool phase_memory_admits(const struct child_slot *slots, int jobs,
     for (int i = 0; i < jobs; i++) {
         if (slots[i].pid == ZCL_CHILD_NONE) continue;
         running++;
-        if (now - slots[i].start_us < RUNNER_ADMIT_RAMP_US) young++;
-        int64_t grow = group_memory_estimate(slots[i].group_idx) -
-                       g_group_peak_bytes[slots[i].group_idx];
-        if (grow > 0) pending += grow;
+        if (runner_admission_is_young(now, slots[i].start_us)) young++;
+        pending += runner_admission_pending(
+            group_memory_estimate(slots[i].group_idx),
+            g_group_peak_bytes[slots[i].group_idx]);
     }
     if (running == 0) return true;
     int64_t headroom = platform_cgroup_memory_headroom();
     int64_t estimate = group_memory_estimate(next_idx);
-    bool admit = runner_admit(running, young, headroom, pending, estimate);
+    bool admit = runner_admission_admit(running, young, headroom, pending, estimate);
     static size_t held_idx = (size_t)-1;
     if (!admit && held_idx != next_idx) {
         held_idx = next_idx;   /* once per held group, not once per poll */
@@ -1051,9 +1031,10 @@ static void phase_memory_sample(const struct child_slot *slots, int jobs)
         if (slots[i].pid == ZCL_CHILD_NONE) continue;
         running++;
         int64_t rss = proc_peak_rss_bytes(slots[i].pid);
-        if (rss > g_group_peak_bytes[slots[i].group_idx])
-            g_group_peak_bytes[slots[i].group_idx] = rss;
-        if (rss > g_pool_peak_bytes) g_pool_peak_bytes = rss;
+        runner_admission_note_peak(rss, false,
+                                   &g_group_peak_bytes[slots[i].group_idx],
+                                   &g_group_done_bytes[slots[i].group_idx],
+                                   &g_pool_peak_bytes);
     }
     int64_t headroom = platform_cgroup_memory_headroom();
     if (headroom < 0) return;
@@ -1570,8 +1551,10 @@ static void child_close(zcl_child_t child)
 #if !defined(_WIN32)
 static int find_slot_by_pid(struct child_slot *slots, int jobs, pid_t pid);
 #endif
-static int reap_any(struct child_slot *slots, int jobs, int *status)
+static int reap_any(struct child_slot *slots, int jobs, int *status,
+                    int64_t *peak_bytes)
 {
+    (void)peak_bytes;   /* only Linux wait4 reports a peak */
 #if defined(_WIN32)
     for (int i = 0; i < jobs; i++) {
         if (slots[i].pid == ZCL_CHILD_NONE) continue;
@@ -1586,7 +1569,7 @@ static int reap_any(struct child_slot *slots, int jobs, int *status)
     memset(&ru, 0, sizeof ru);
     pid_t done = wait4(-1, status, WNOHANG, &ru);
     if (done > 0)   /* Linux reports ru_maxrss in KiB */
-        g_reaped_peak_bytes = (int64_t)ru.ru_maxrss * 1024;
+        *peak_bytes = (int64_t)ru.ru_maxrss * 1024;
 #else
     pid_t done = waitpid(-1, status, WNOHANG);
 #endif
@@ -2013,21 +1996,17 @@ static void phase_watchdog_sweep(const struct phase_run *pr)
 }
 
 /* Record one reaped slot's exit status and capture into its group result. */
-static void phase_record_reaped(const struct phase_run *pr, int slot, int status)
+static void phase_record_reaped(const struct phase_run *pr, int slot, int status,
+                                int64_t peak_bytes)
 {
     size_t idx = pr->slots[slot].group_idx;
     struct group_result *r = &pr->results[idx];
     child_close(pr->slots[slot].pid);
-    if (g_reaped_peak_bytes >= (INT64_C(256) << 20))
+    if (peak_bytes >= (INT64_C(256) << 20))
         printf("test_parallel: peak RSS group=%s %lld MiB\n",
-               g_groups[idx].name, (long long)(g_reaped_peak_bytes >> 20));
-    if (g_reaped_peak_bytes > g_group_peak_bytes[idx])
-        g_group_peak_bytes[idx] = g_reaped_peak_bytes;
-    if (g_reaped_peak_bytes > g_group_done_bytes[idx])
-        g_group_done_bytes[idx] = g_reaped_peak_bytes;
-    if (g_reaped_peak_bytes > g_pool_peak_bytes)
-        g_pool_peak_bytes = g_reaped_peak_bytes;
-    g_reaped_peak_bytes = 0;
+               g_groups[idx].name, (long long)(peak_bytes >> 20));
+    runner_admission_note_peak(peak_bytes, true, &g_group_peak_bytes[idx],
+                               &g_group_done_bytes[idx], &g_pool_peak_bytes);
     r->status = status;
     if (WIFSIGNALED(status)) {
         r->signaled = 1;
@@ -2083,7 +2062,8 @@ static bool run_parallel_phase(
         phase_memory_sample(slots, jobs);
 
         int status = 0;
-        int slot = reap_any(slots, jobs, &status);
+        int64_t peak_bytes = 0;
+        int slot = reap_any(slots, jobs, &status, &peak_bytes);
         if (slot == -2) {
             struct timespec ts = {
                 .tv_sec = 0, .tv_nsec = 10 * 1000 * 1000,
@@ -2096,7 +2076,7 @@ static bool run_parallel_phase(
                 return false;
             continue;   /* reaped a slot-less child; nothing to record */
         }
-        phase_record_reaped(&pr, slot, status);
+        phase_record_reaped(&pr, slot, status, peak_bytes);
         remaining--;
         (*reaped)++;
     }

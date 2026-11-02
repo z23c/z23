@@ -1854,6 +1854,7 @@ static void run_full_suite_crypto_and_wallet(int *failures)
     *failures += test_chain_tip_watchdog_bounded_restart();
     *failures += test_blocker();
     *failures += test_cpu_topology();
+    *failures += test_runner_admission();
     *failures += test_hw_profile();
     { extern int test_platform_toolchain(void);
       *failures += test_platform_toolchain(); }

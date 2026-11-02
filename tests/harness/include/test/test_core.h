@@ -921,6 +921,7 @@ int test_chain_tip_watchdog_bounded_restart(void);
 int test_blocker(void);
 int test_blocker_handoff(void);
 int test_cpu_topology(void);
+int test_runner_admission(void);
 int test_hw_profile(void);
 int test_hw_bench(void);
 int test_log_level(void);
