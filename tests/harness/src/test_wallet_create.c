@@ -229,34 +229,62 @@ static size_t wcr_count(const char *hay, size_t hay_len, const char *needle,
     return n;
 }
 
-/* Occurrences of `needle` in every regular file under `dir`. */
+/* Occurrences of `needle` in every regular file under `dir`. A file or
+ * directory that cannot be read counts as one occurrence: a scan that skipped
+ * it would call it clean, and every caller asserts a count of zero. */
 static size_t wcr_count_in_tree(const char *dir, const char *needle,
                                 size_t nlen)
 {
     size_t total = 0;
     DIR *d = opendir(dir);
+    if (!d)
+        return 1;
     struct dirent *e;
-    while (d && (e = readdir(d)) != NULL) {
+    while ((e = readdir(d)) != NULL) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
             continue;
         char path[1400];
         snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
         struct stat st;
-        if (lstat(path, &st) != 0)
+        if (lstat(path, &st) != 0) {
+            total++;
             continue;
+        }
         if (S_ISDIR(st.st_mode)) {
             total += wcr_count_in_tree(path, needle, nlen);
             continue;
         }
-        FILE *f = S_ISREG(st.st_mode) ? fopen(path, "rb") : NULL;
+        if (!S_ISREG(st.st_mode))
+            continue;
+        FILE *f = fopen(path, "rb");
         char *buf = f ? malloc((size_t)st.st_size + 1) : NULL;
         if (buf && fread(buf, 1, (size_t)st.st_size, f) == (size_t)st.st_size)
             total += wcr_count(buf, (size_t)st.st_size, needle, nlen);
+        else
+            total++;
         free(buf);
         if (f) fclose(f);
     }
-    if (d) closedir(d);
+    closedir(d);
     return total;
+}
+
+/* Occurrences of the spending key scalars the phrase's seed derives, in every
+ * file under `dir`. An unreadable file counts, as above. */
+static size_t wcr_spending_key_in_tree(const char *dir, const uint8_t seed[32])
+{
+    struct sapling_keystore sks;
+    uint8_t div[ZC_DIVERSIFIER_SIZE], pk_d[32];
+    sapling_keystore_init(&sks);
+    size_t found = 1;
+    if (sapling_keystore_set_seed(&sks, seed) &&
+        sapling_keystore_new_address(&sks, div, pk_d)) {
+        const struct zip32_expsk *k = &sks.keys[0].xsk.expsk;
+        found = wcr_count_in_tree(dir, (const char *)k->ask, 32) +
+                wcr_count_in_tree(dir, (const char *)k->nsk, 32);
+    }
+    sapling_keystore_free(&sks);
+    return found;
 }
 
 static uint64_t wcr_file_hash(const char *path)
@@ -472,6 +500,8 @@ static int t_phrase_not_captured_and_encrypted(void)
     wcr_phrase_seed(phrase, seed);
     WCR_CHECK("the raw seed is in no file of the datadir",
               wcr_count_in_tree(dir, (const char *)seed, 32) == 0);
+    WCR_CHECK("the Sapling spending key scalars are in no file of the datadir",
+              wcr_spending_key_in_tree(dir, seed) == 0);
 
     struct node_db ndb;
     struct wallet_sqlite ws;
@@ -1286,6 +1316,10 @@ static bool wcr_seeded_chain(char *dir, size_t cap, const char *tag,
            (!from_genesis || wcr_block(dir, 0x01, 0, 3));
 }
 
+/* Set by a test that stands for a process serving a wallet: the helper below
+ * resets the lock module for each one-shot run and then marks it again. */
+static bool wcr_process_serves_wallet;
+
 /* `z23 core wallet recovery restore` on the production path. `extra` is the
  * rest of the input object (leading comma included), `via_stdin` selects
  * --input=- over --input=<json>. */
@@ -1297,6 +1331,8 @@ static bool wcr_restore_cli(const char *dir, const char *extra,
              "{\"datadir\":\"%s\",\"phrase\":\"%s\",\"confirm\":true%s}", dir,
              WCR_RESTORE_PHRASE, extra);
     wallet_lock_reset_for_test();
+    if (wcr_process_serves_wallet)
+        wallet_lock_note_live_wallet();
     memset(run, 0, sizeof(*run));
     /* Without a passphrase the at-rest policy needs the plaintext opt-in. */
     if (!strstr(extra, "passphrase"))
@@ -1343,6 +1379,8 @@ static int restore_passphrase_cases(void)
               wcr_data_bool(&run, "encrypted_at_rest"));
     WCR_CHECK("the raw seed is in no file of the datadir",
               wcr_count_in_tree(dir, (const char *)seed, 32) == 0);
+    WCR_CHECK("the Sapling spending key scalars are in no file of the datadir",
+              wcr_spending_key_in_tree(dir, seed) == 0);
     WCR_CHECK("neither the phrase nor the passphrase is in any file",
               wcr_count_in_tree(dir, WCR_RESTORE_PHRASE,
                                 strlen(WCR_RESTORE_PHRASE)) == 0 &&
@@ -1584,6 +1622,116 @@ static int t_locked_wallet(void)
     return failures;
 }
 
+/* A scan that cannot read a file must not call it clean. */
+static int t_unreadable_file_fails_scan(void)
+{
+    int failures = 0;
+    char dir[1024], path[1100];
+    wcr_fixture(dir, sizeof(dir), "unreadable");
+    snprintf(path, sizeof(path), "%s/hidden.bin", dir);
+    FILE *f = fopen(path, "wb");
+    bool wrote = f && fwrite("abcdefgh", 1, 8, f) == 8;
+    if (f)
+        fclose(f);
+    WCR_CHECK("setup: a readable file without the needle scans clean",
+              wrote && wcr_count_in_tree(dir, "zzzz", 4) == 0);
+    WCR_CHECK("a readable file with the needle is counted",
+              wcr_count_in_tree(dir, "cdef", 4) == 1);
+    if (geteuid() == 0) {
+        printf("wallet_create: an unreadable file is not scanned clean... "
+               "not exercised: root reads any file\n");
+        return failures;
+    }
+    bool locked = wrote && chmod(path, 0) == 0;
+    WCR_CHECK("an unreadable file fails the scan",
+              locked && wcr_count_in_tree(dir, "zzzz", 4) != 0);
+    (void)chmod(path, 0600);
+    return failures;
+}
+
+/* wallet_free wipes the Sapling seed and spending keys the wallet holds. The
+ * keystore lives inside the caller's struct, so its bytes are read before the
+ * struct itself is released. */
+static bool wcr_all_zero(const void *p, size_t n)
+{
+    const uint8_t *b = p;
+    for (size_t i = 0; i < n; i++)
+        if (b[i])
+            return false;
+    return true;
+}
+
+static int t_wallet_free_wipes_sapling_keys(void)
+{
+    int failures = 0;
+    struct wallet *w = calloc(1, sizeof(*w));
+    uint8_t seed[32], div[ZC_DIVERSIFIER_SIZE], pk_d[32];
+    memset(seed, 0x5a, sizeof(seed));
+    bool made = w != NULL;
+    if (made) {
+        wallet_init(w);
+        made = sapling_keystore_set_seed(&w->sapling_keys, seed) &&
+               sapling_keystore_new_address(&w->sapling_keys, div, pk_d);
+    }
+    WCR_CHECK("setup: a wallet holds a Sapling seed and a spending key",
+              made && !wcr_all_zero(w->sapling_keys.seed, 32) &&
+              !wcr_all_zero(&w->sapling_keys.keys[0].xsk.expsk,
+                            sizeof(w->sapling_keys.keys[0].xsk.expsk)));
+    if (made)
+        wallet_free(w);
+    WCR_CHECK("wallet_free leaves no Sapling seed in the struct",
+              made && wcr_all_zero(w->sapling_keys.seed, 32));
+    WCR_CHECK("wallet_free leaves no master key in the struct",
+              made && wcr_all_zero(&w->sapling_keys.master_xsk,
+                                   sizeof(w->sapling_keys.master_xsk)));
+    WCR_CHECK("wallet_free leaves no spending key in the struct",
+              made && wcr_all_zero(&w->sapling_keys.keys[0].xsk,
+                                   sizeof(w->sapling_keys.keys[0].xsk)));
+    memory_cleanse(seed, sizeof(seed));
+    free(w);
+    return failures;
+}
+
+/* Create and restore unlock, then force-lock, the process-wide lock. A process
+ * that serves a wallet refuses both before anything is read or written. */
+static int t_live_wallet_refused(void)
+{
+    int failures = 0;
+    char dir[1024], plan[1024];
+    struct wcr_run run;
+    wcr_fixture(dir, sizeof(dir), "live_create");
+    wallet_lock_reset_for_test();
+    wallet_lock_note_live_wallet();
+    wcr_process_serves_wallet = true;
+    bool ran = wcr_create(dir, WCR_PASS, &run);
+    WCR_CHECK("create in a process that serves a wallet is refused by name",
+              ran && run.rc != 0 &&
+              wcr_error_is(&run, "WALLET_LIVE_IN_PROCESS"));
+    WCR_CHECK("and writes nothing", !wcr_exists(dir, "node.db"));
+    WCR_CHECK("and leaves the process lock state alone",
+              wallet_lock_effective_passphrase() == NULL &&
+              !wallet_lock_encrypted_at_rest());
+    WCR_CHECK("setup: a seeded datadir for a restore",
+              wcr_seeded_chain(plan, sizeof(plan), "live_restore", false));
+    ran = wcr_restore_cli(plan, ",\"passphrase\":\"" WCR_PASS "\"", true,
+                          &run);
+    WCR_CHECK("restore in that process is refused by name",
+              ran && wcr_error_is(&run, "WALLET_LIVE_IN_PROCESS") &&
+              !wcr_wallet_rows_exist(plan));
+    char text[2048];
+    snprintf(text, sizeof(text), "{\"datadir\":\"%s\",\"phrase\":\"%s\"}",
+             plan, WCR_RESTORE_PHRASE);
+    const char *plan_args[] = {"wallet", "recovery", "restore", "--input=-",
+                               "--format=json"};
+    memset(&run, 0, sizeof(run));
+    ran = wcr_cli_args(plan_args, 5, text, &run);
+    WCR_CHECK("a plan, which locks nothing, is still answered",
+              ran && run.rc == 0 && !wcr_wallet_rows_exist(plan));
+    wcr_process_serves_wallet = false;
+    wallet_lock_reset_for_test();
+    return failures;
+}
+
 int test_wallet_create(void);
 int test_wallet_create(void)
 {
@@ -1601,6 +1749,9 @@ int test_wallet_create(void)
     failures += t_boot_guards();
     failures += t_locked_wallet();
     failures += t_restore_inputs();
+    failures += t_unreadable_file_fails_scan();
+    failures += t_wallet_free_wipes_sapling_keys();
+    failures += t_live_wallet_refused();
     if (failures == 0)
         printf("wallet_create: OK (all wallet creation gates pass)\n");
     else
