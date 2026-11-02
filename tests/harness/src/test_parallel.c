@@ -991,6 +991,36 @@ static bool phase_memory_admits(const struct child_slot *slots, int jobs,
 #endif
 }
 
+/* Diagnostic trail: one line when the cgroup headroom moved by 256 MiB or
+ * more since the last line, polled at most once a second. A runner killed by
+ * the memory ceiling leaves no other record of how it got there. */
+static void phase_memory_sample(const struct child_slot *slots, int jobs)
+{
+#if defined(__linux__)
+    if (RUNNER_WORKER_BYTES <= 0) return;
+    static int64_t last_us;
+    static int64_t last_headroom = -1;
+    int64_t now = platform_time_monotonic_us();
+    if (now - last_us < 1000000) return;
+    last_us = now;
+    int64_t headroom = platform_cgroup_memory_headroom();
+    if (headroom < 0) return;
+    int64_t delta = headroom - last_headroom;
+    if (last_headroom >= 0 && delta < (INT64_C(256) << 20) &&
+        -delta < (INT64_C(256) << 20))
+        return;
+    last_headroom = headroom;
+    int running = 0;
+    for (int i = 0; i < jobs; i++)
+        if (slots[i].pid != ZCL_CHILD_NONE) running++;
+    printf("test_parallel: memory headroom=%lld MiB running=%d\n",
+           (long long)(headroom >> 20), running);
+    fflush(stdout);
+#else
+    (void)slots; (void)jobs;
+#endif
+}
+
 static int get_nproc(void)
 {
     uint32_t n = platform_available_cpu_count();
@@ -1989,6 +2019,7 @@ static bool run_parallel_phase(
         if (!phase_dispatch_ready(&pr, &next_pos))
             return false;
         phase_watchdog_sweep(&pr);
+        phase_memory_sample(slots, jobs);
 
         int status = 0;
         int slot = reap_any(slots, jobs, &status);
