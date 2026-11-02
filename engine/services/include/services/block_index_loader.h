@@ -596,6 +596,9 @@ bool block_index_node_db_topup(struct main_state *ms,
 /* Test oracle: true makes the node.db top-up read its window with one
  * db_block_find_by_height per height (the pre-range-scan path). */
 extern bool g_node_db_topup_perheight_oracle;
+/* Rows the last node.db top-up read from node.db (0 when it resumed past a
+ * proven-clean prefix and the remainder was empty). */
+extern size_t g_node_db_topup_last_rows_seen;
 #endif
 
 #endif /* ZCL_SERVICES_BLOCK_INDEX_LOADER_H */

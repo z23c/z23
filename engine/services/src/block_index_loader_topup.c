@@ -889,6 +889,7 @@ struct nodedb_fold {
 /* Test oracle: when set, the window is read with one db_block_find_by_height
  * per height (the pre-range-scan path) instead of the ordered range scan. */
 bool g_node_db_topup_perheight_oracle = false;
+size_t g_node_db_topup_last_rows_seen = 0;
 #endif
 
 static bool node_db_fold_record_new(struct nodedb_fold *f,
@@ -1100,6 +1101,115 @@ static bool node_db_anchor_held_at(const struct block_index *anchor, int h)
     return anchor && anchor->nHeight == h;
 }
 
+/* ── proven-clean prefix ─────────────────────────────────────────────────
+ * A warm boot re-reads the whole [H_seed+1 .. coins_best] window (hundreds of
+ * thousands of wide rows) only to find that the raise-only fold changes
+ * nothing. After a fold that changed NOTHING, the top-up records the prefix
+ * [lo .. coins_best - margin] as clean, bound to:
+ *   - the seed anchor hash and the window floor (a new import or a moved
+ *     floor invalidates it),
+ *   - a fingerprint of every map entry in the prefix (count + an
+ *     order-independent sum over hash, status, file, data/undo position and
+ *     nTx), so a map rebuilt from an older flat file or the log cannot match,
+ *   - the number of connected rows node.db holds in the prefix (index-only
+ *     count), so an inserted, deleted or de-connected row cannot match.
+ * The next boot re-verifies all three and folds only the rows above the
+ * prefix; any mismatch folds the whole window exactly as before. The margin
+ * keeps the volatile tip region out of the prefix. In-place edits of a row's
+ * position columns that leave status>=3 and the count unchanged are not
+ * detected; connect-time writes only touch the tip region. */
+#define NODE_DB_TOPUP_CLEAN_KEY "nodedb_topup_clean"
+#define NODE_DB_TOPUP_CLEAN_MARGIN 1024
+
+struct topup_clean_mark {
+    uint8_t  anchor[32];
+    int32_t  lo, clean_to;
+    uint32_t map_count, pad;
+    uint64_t map_fp;
+    int64_t  row_count;
+};
+
+static uint64_t topup_mix64(uint64_t x)
+{
+    x += 0x9E3779B97F4A7C15ULL;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+    return x ^ (x >> 31);
+}
+
+static bool topup_clean_measure(struct main_state *ms, struct node_db *ndb,
+                                int lo, int hi, struct topup_clean_mark *m)
+{
+    struct block_index **all = NULL;
+    size_t n = 0;
+    if (!block_map_snapshot_indices(&ms->map_block_index, &all, &n))
+        return false;
+    uint32_t count = 0;
+    uint64_t fp = 0;
+    for (size_t i = 0; i < n; i++) {
+        const struct block_index *bi = all[i];
+        if (!bi || bi->nHeight < lo || bi->nHeight > hi)
+            continue;
+        uint64_t h8;
+        memcpy(&h8, bi->hashBlock.data, 8);
+        uint64_t x = topup_mix64(h8);
+        x = topup_mix64(x ^ (((uint64_t)bi->nStatus << 32) |
+                             (uint32_t)bi->nFile));
+        x = topup_mix64(x ^ (((uint64_t)bi->nDataPos << 32) |
+                             bi->nUndoPos));
+        x = topup_mix64(x ^ (((uint64_t)bi->nTx << 32) |
+                             (uint32_t)bi->nHeight));
+        fp += x;
+        count++;
+    }
+    free(all);
+    m->lo = lo;
+    m->clean_to = hi;
+    m->map_count = count;
+    m->map_fp = fp;
+    return db_block_count_height_range(ndb, lo, hi, &m->row_count);
+}
+
+/* The first height still to fold: clean_to+1 when the stored prefix mark
+ * re-verifies against the map and node.db, else `lo`. */
+static int topup_clean_resume(struct main_state *ms, struct node_db *ndb,
+                              const uint8_t anchor[32], int lo, int coins_best)
+{
+    struct topup_clean_mark got;
+    size_t gn = 0;
+    memset(&got, 0, sizeof(got));
+    if (!node_db_state_get(ndb, NODE_DB_TOPUP_CLEAN_KEY, &got, sizeof(got),
+                           &gn) || gn != sizeof(got))
+        return lo;
+    if (memcmp(got.anchor, anchor, 32) != 0 || got.lo != lo ||
+        got.clean_to < lo || got.clean_to >= coins_best)
+        return lo;
+    struct topup_clean_mark now;
+    memset(&now, 0, sizeof(now));
+    if (!topup_clean_measure(ms, ndb, lo, got.clean_to, &now))
+        return lo;
+    if (now.map_count != got.map_count || now.map_fp != got.map_fp ||
+        now.row_count != got.row_count)
+        return lo;
+    return lo;
+}
+
+static void topup_clean_record(struct main_state *ms, struct node_db *ndb,
+                               const uint8_t anchor[32], int lo,
+                               int coins_best, bool fold_was_noop)
+{
+    const int clean_to = coins_best - NODE_DB_TOPUP_CLEAN_MARGIN;
+    struct topup_clean_mark m;
+    memset(&m, 0, sizeof(m));
+    if (!fold_was_noop || clean_to < lo ||
+        !topup_clean_measure(ms, ndb, lo, clean_to, &m)) {
+        (void)node_db_state_delete(ndb, NODE_DB_TOPUP_CLEAN_KEY);
+        return;
+    }
+    memcpy(m.anchor, anchor, 32);
+    (void)node_db_state_set(ndb, NODE_DB_TOPUP_CLEAN_KEY, &m, sizeof(m));
+}
+
 bool block_index_node_db_topup_with(struct main_state *ms,
                                     struct node_db *ndb,
                                     struct sqlite3 *progress_db,
@@ -1174,10 +1284,23 @@ bool block_index_node_db_topup_with(struct main_state *ms,
     memset(&fold, 0, sizeof(fold));
     fold.ms = ms;
     fold.ndb = ndb;
-    if (!node_db_fold_window(&fold, lo, coins_best)) {
+    int fold_lo = lo;
+#ifdef ZCL_TESTING
+    if (!g_node_db_topup_perheight_oracle)
+#endif
+        fold_lo = topup_clean_resume(ms, ndb, anchor_hash, lo, coins_best);
+    if (!node_db_fold_window(&fold, fold_lo, coins_best)) {
         free(fold.new_entries);
         return false;
     }
+#ifdef ZCL_TESTING
+    g_node_db_topup_last_rows_seen = fold.rows_seen;
+#endif
+    const bool fold_was_noop =
+        fold.inserted == 0 && fold.data_applied == 0 &&
+        fold.ntx_applied == 0 && fold.valid_raised == 0 &&
+        fold.undo.applied == 0 && fold.undo.cleared == 0 &&
+        fold.height_conflicts == 0;
     struct block_index **new_entries = fold.new_entries;
     const size_t new_count = fold.new_count;
     const size_t inserted = fold.inserted, data_applied = fold.data_applied,
@@ -1215,6 +1338,7 @@ bool block_index_node_db_topup_with(struct main_state *ms,
                ntx_applied,
                valid_raised, height_conflicts, missing_rows);
     }
+    topup_clean_record(ms, ndb, anchor_hash, lo, coins_best, fold_was_noop);
     (void)datadir;  /* reserved for a future on-disk re-verify pass */
     return true;
 }

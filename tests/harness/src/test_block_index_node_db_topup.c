@@ -882,5 +882,121 @@ int test_block_index_node_db_topup(void)
     node_db_close(&fx.ndb);
     return failures + ndt_undo_topup_cases(dir) +
            ndt_range_equivalence_cases(dir) +
-           ndt_probe_scan_cases(dir);
+           ndt_probe_scan_cases(dir) +
+           ndt_clean_prefix_cases(dir);
+}
+
+/* ── Proven-clean prefix: a warm re-fold reads only the tip region ─────────
+ * A window whose fold changes nothing is recorded as clean up to
+ * coins_best - margin. The next top-up over an identical map must read only
+ * the rows above that prefix and leave the map exactly as a full fold does;
+ * a map the mark was not proven against, or a node.db whose row count moved,
+ * must fall back to the whole window. */
+#define NDT_CLEAN_SEED 5000
+#define NDT_CLEAN_BEST 8500
+#define NDT_CLEAN_MARGIN 1024
+
+static bool ndt_clean_build(struct node_db *ndb)
+{
+    bool ok = sqlite3_exec(ndb->db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK;
+    for (int h = NDT_CLEAN_SEED; ok && h <= NDT_CLEAN_BEST; h++)
+        ok &= ndt_range_row(ndb, h, false);
+    ok &= sqlite3_exec(ndb->db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+    struct uint256 sh;
+    ndt_hash_for(NDT_CLEAN_SEED, &sh);
+    ok &= node_db_state_set_int(ndb, "cold_import_seed_anchor_height",
+                                NDT_CLEAN_SEED);
+    ok &= node_db_state_set(ndb, "cold_import_seed_anchor_hash", sh.data, 32);
+    return ok;
+}
+
+static bool ndt_clean_topup(struct main_state *ms, struct node_db *ndb,
+                            sqlite3 *progress, const char *dir, bool oracle,
+                            size_t *rows_seen)
+{
+    char line[1024];
+    int64_t t = 0;
+    bool ok = ndt_range_run(ms, ndb, progress, dir, oracle, line,
+                            sizeof(line), &t);
+    *rows_seen = g_node_db_topup_last_rows_seen;
+    return ok;
+}
+
+static int ndt_clean_prefix_cases(const char *dir)
+{
+    int failures = 0;
+    char ndb_path[320], prog_path[320];
+    snprintf(ndb_path, sizeof(ndb_path), "%s/node_clean.db", dir);
+    snprintf(prog_path, sizeof(prog_path), "%s/progress_clean.db", dir);
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    sqlite3 *progress = NULL;
+    bool ready = node_db_open(&ndb, ndb_path) &&
+                 sqlite3_open(prog_path, &progress) == SQLITE_OK &&
+                 ndt_clean_build(&ndb) &&
+                 ndt_set_coins_best(progress, NDT_CLEAN_BEST);
+    NDT_CHECK("clean: fixture db built", ready);
+    struct main_state a, b, c;
+    main_state_init(&a);
+    main_state_init(&b);
+    main_state_init(&c);
+    ready = ready && ndt_insert_entry(&a, NDT_CLEAN_SEED) &&
+            ndt_insert_entry(&b, NDT_CLEAN_SEED) &&
+            ndt_insert_entry(&c, NDT_CLEAN_SEED);
+    const size_t window = NDT_CLEAN_BEST - NDT_CLEAN_SEED;
+    size_t r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0, ro = 0;
+    if (ready) {
+        /* Cold: inserts the window (not a no-op, so no mark yet). */
+        NDT_CHECK("clean: cold fold ok",
+                  ndt_clean_topup(&a, &ndb, progress, dir, false, &r1));
+        NDT_CHECK("clean: cold fold read the whole window", r1 == window);
+        /* Second fold changes nothing and records the prefix. */
+        NDT_CHECK("clean: no-op fold ok",
+                  ndt_clean_topup(&a, &ndb, progress, dir, false, &r2));
+        NDT_CHECK("clean: no-op fold read the whole window", r2 == window);
+        /* Third: the prefix re-verifies; only the tip region is read. */
+        NDT_CHECK("clean: warm fold ok",
+                  ndt_clean_topup(&a, &ndb, progress, dir, false, &r3));
+        printf("block_index_node_db_topup: clean prefix rows read: "
+               "cold=%zu noop=%zu warm=%zu\n", r1, r2, r3);
+        NDT_CHECK("clean: warm fold read only the tip region",
+                  r3 > 0 && r3 <= NDT_CLEAN_MARGIN);
+        /* The map the resumed fold leaves is the full fold's map. */
+        NDT_CHECK("clean: oracle full fold ok",
+                  ndt_clean_topup(&b, &ndb, progress, dir, true, &ro));
+        NDT_CHECK("clean: oracle read the whole window", ro == window);
+        NDT_CHECK("clean: resumed map size == full-fold map size",
+                  a.map_block_index.size == b.map_block_index.size);
+        int diffs = 0;
+        for (int h = NDT_CLEAN_SEED; h <= NDT_CLEAN_BEST + 5; h++) {
+            struct uint256 hh;
+            ndt_hash_for(h, &hh);
+            struct block_index *x = block_map_find(&a.map_block_index, &hh);
+            struct block_index *y = block_map_find(&b.map_block_index, &hh);
+            if ((x == NULL) != (y == NULL) || (x && !ndt_entries_equal(x, y)))
+                diffs++;
+        }
+        NDT_CHECK("clean: every entry identical to the full fold", diffs == 0);
+        /* A map the mark was not proven against must fold the whole window. */
+        NDT_CHECK("clean: foreign map fold ok",
+                  ndt_clean_topup(&c, &ndb, progress, dir, false, &r4));
+        NDT_CHECK("clean: foreign map read the whole window", r4 == window);
+        /* A node.db row the mark never saw forces the whole window too. */
+        NDT_CHECK("clean: refold records the mark again",
+                  ndt_clean_topup(&c, &ndb, progress, dir, false, &r4));
+        sqlite3_exec(ndb.db,
+                     "UPDATE blocks SET status=2 WHERE height=6000",
+                     NULL, NULL, NULL);
+        NDT_CHECK("clean: changed row count fold ok",
+                  ndt_clean_topup(&c, &ndb, progress, dir, false, &r5));
+        NDT_CHECK("clean: changed row count read the whole window",
+                  r5 == window - 1);
+    }
+    main_state_free(&a);
+    main_state_free(&b);
+    main_state_free(&c);
+    if (progress)
+        sqlite3_close(progress);
+    node_db_close(&ndb);
+    return failures;
 }

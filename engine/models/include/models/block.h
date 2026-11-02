@@ -66,6 +66,12 @@ bool db_block_scan_height_range(struct node_db *ndb, int lo, int hi,
 bool db_block_scan_height_range_probe(struct node_db *ndb, int lo, int hi,
                                       db_block_range_cb cb, void *ctx);
 
+/* Count of connected (status>=3) rows with height in [lo, hi], answered from
+ * the idx_blocks_height index alone (no table page is read). False on a
+ * closed db or a read error. */
+bool db_block_count_height_range(struct node_db *ndb, int lo, int hi,
+                                 int64_t *count_out);
+
 /* Load just the Equihash solution BLOB for a connected (status>=3) block
  * at `height` into `out` (up to `max` bytes), setting *out_len. The full
  * read helpers above deliberately drop the solution bytes (only the

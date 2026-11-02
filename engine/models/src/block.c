@@ -511,6 +511,24 @@ bool db_block_scan_height_range_probe(struct node_db *ndb, int lo, int hi,
         true, lo, hi, cb, ctx);
 }
 
+bool db_block_count_height_range(struct node_db *ndb, int lo, int hi,
+                                 int64_t *count_out)
+{
+    if (!ndb || !ndb->open || !count_out || lo > hi)
+        return false;
+    sqlite3_stmt *s = NULL;
+    AR_PREPARE_RET(ndb, s,
+        "SELECT COUNT(*) FROM blocks WHERE height BETWEEN ? AND ?"
+        " AND status>=3", false);
+    AR_BIND_INT(s, 1, lo);
+    AR_BIND_INT(s, 2, hi);
+    bool ok = AR_STEP_ROW(s);
+    if (ok)
+        *count_out = (int64_t)AR_COL_INT(s, 0);
+    AR_FINALIZE(s);
+    return ok;
+}
+
 /* ── Solution accessor ─────────────────────────────────────────── */
 
 /* Materialise the Equihash solution BLOB for a connected block.
