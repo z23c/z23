@@ -304,6 +304,42 @@ bool utxo_commitment_load_checkpoint_at_height(sqlite3 *db,
     return true;
 }
 
+/* True when the stored checkpoint loads and is stamped with mirror_height;
+ * always false when mirror_height is negative. */
+static bool utxo_commitment_boot_height_covers(sqlite3 *db,
+                                              int32_t mirror_height,
+                                              struct utxo_commitment *saved)
+{
+    int32_t saved_h = -1;
+    bool loaded = mirror_height >= 0 &&
+        utxo_commitment_load_checkpoint_at_height(db, saved, &saved_h);
+    return loaded && saved_h == mirror_height;
+}
+
+/* Return true when the recomputed utxos set matches saved. Otherwise try to
+ * save the recomputed set as the checkpoint, set *saved_ok to whether that
+ * save succeeded, set *out_refreshed only on success, and return false. */
+static bool utxo_commitment_boot_match_or_refresh(
+    sqlite3 *db, const struct utxo_commitment *saved, int32_t mirror_height,
+    struct utxo_commitment *computed, struct utxo_commitment *out_computed,
+    bool *out_refreshed, bool *saved_ok)
+{
+    *saved_ok = false;
+    utxo_commitment_init(computed);
+    utxo_commitment_compute_db(db, computed);
+    if (out_computed)
+        *out_computed = *computed;
+    if (utxo_commitment_equal(saved, computed))
+        return true;
+
+    *saved_ok = mirror_height >= 0
+        ? utxo_commitment_save_checkpoint_at_height(db, computed, mirror_height)
+        : utxo_commitment_save_checkpoint(db, computed);
+    if (*saved_ok && out_refreshed)
+        *out_refreshed = true;
+    return false;
+}
+
 bool utxo_commitment_boot_check_and_refresh(sqlite3 *db, int32_t mirror_height,
                                             struct utxo_commitment *out_computed,
                                             bool *out_refreshed)
@@ -317,10 +353,7 @@ bool utxo_commitment_boot_check_and_refresh(sqlite3 *db, int32_t mirror_height,
      * is accurate by construction — skip the O(n) `utxos` scan entirely. This
      * is the common case on a cleanly-shut-down node: no refresh, no scan. */
     struct utxo_commitment saved;
-    int32_t saved_h = -1;
-    if (mirror_height >= 0 &&
-        utxo_commitment_load_checkpoint_at_height(db, &saved, &saved_h) &&
-        saved_h == mirror_height) {
+    if (utxo_commitment_boot_height_covers(db, mirror_height, &saved)) {
         if (out_computed) *out_computed = saved;
         return true;
     }
@@ -333,16 +366,12 @@ bool utxo_commitment_boot_check_and_refresh(sqlite3 *db, int32_t mirror_height,
         return true; /* nothing stored yet — nothing to check */
 
     struct utxo_commitment computed;
-    utxo_commitment_init(&computed);
-    utxo_commitment_compute_db(db, &computed);
-    if (out_computed) *out_computed = computed;
-    if (utxo_commitment_equal(&saved, &computed))
+    bool saved_ok = false;
+    if (utxo_commitment_boot_match_or_refresh(db, &saved, mirror_height,
+                                              &computed, out_computed,
+                                              out_refreshed, &saved_ok))
         return true; /* accurate; just never got a height stamp — leave it */
 
-    bool saved_ok = mirror_height >= 0
-        ? utxo_commitment_save_checkpoint_at_height(db, &computed, mirror_height)
-        : utxo_commitment_save_checkpoint(db, &computed);
-    if (saved_ok && out_refreshed) *out_refreshed = true;
     LOG_INFO("utxo_cmt",
              "[utxo_cmt] XOR checkpoint stale (saved_count=%llu computed_count=%llu) "
              "— %s%s",
@@ -374,6 +403,85 @@ bool utxo_commitment_resync_from_db(sqlite3 *db,
 
 /* ── Bounded keyspace-window commitment (state_auditor) ────── */
 
+/* Initialize out, out_rows, out_min_height, and out_max_height when non-NULL. */
+static void utxo_commitment_range_reset_outs(struct utxo_commitment *out,
+                                             size_t *out_rows,
+                                             int32_t *out_min_height,
+                                             int32_t *out_max_height)
+{
+    if (out) utxo_commitment_init(out);
+    if (out_rows) *out_rows = 0;
+    if (out_min_height) *out_min_height = INT32_MAX;
+    if (out_max_height) *out_max_height = INT32_MIN;
+}
+
+/* True when db, out, txid_lo, and max_rows allow a range scan. */
+static bool utxo_commitment_range_args_ok(sqlite3 *db,
+                                          const struct utxo_commitment *out,
+                                          const uint8_t *txid_lo,
+                                          int max_rows)
+{
+    return db && out && txid_lo && max_rows > 0;
+}
+
+/* True only for the coins and utxos tables. */
+static bool utxo_commitment_range_table_ok(const char *table)
+{
+    return table != NULL
+        && (strcmp(table, "coins") == 0 || strcmp(table, "utxos") == 0);
+}
+
+/* Fold one row into the accumulator, height span, and row count; a row whose
+ * txid is NULL or shorter than 32 bytes is skipped. */
+static void utxo_commitment_range_fold_row(sqlite3_stmt *s,
+                                          struct utxo_commitment *out,
+                                          int32_t *out_min_height,
+                                          int32_t *out_max_height,
+                                          uint8_t last_txid[32],
+                                          size_t *n)
+{
+    const uint8_t *txid = (const uint8_t *)sqlite3_column_blob(s, 0);
+    if (!txid || sqlite3_column_bytes(s, 0) < 32)
+        return;
+    uint32_t vout = (uint32_t)sqlite3_column_int(s, 1);
+    int64_t value = sqlite3_column_int64(s, 2);
+    int32_t height = sqlite3_column_int(s, 3);
+
+    uint8_t h[32];
+    hash_utxo(h, txid, vout, value, height);
+    xor32(out->accumulator, h);
+    out->count++;
+    (*n)++;
+    memcpy(last_txid, txid, 32);
+    if (out_min_height && height < *out_min_height)
+        *out_min_height = height;
+    if (out_max_height && height > *out_max_height)
+        *out_max_height = height;
+}
+
+/* Fold the prepared rows, finalize the statement, publish the row count, and
+ * publish the last txid only when at least one row was folded. */
+static void utxo_commitment_range_scan(sqlite3_stmt *s,
+                                      struct utxo_commitment *out,
+                                      size_t *out_rows,
+                                      int32_t *out_min_height,
+                                      int32_t *out_max_height,
+                                      uint8_t *out_last_txid)
+{
+    size_t n = 0;
+    uint8_t last_txid[32] = {0};
+    while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+        utxo_commitment_range_fold_row(s, out, out_min_height, out_max_height,
+                                       last_txid, &n);
+    }
+    sqlite3_finalize(s);
+
+    if (out_rows)
+        *out_rows = n;
+    if (out_last_txid && n > 0)
+        memcpy(out_last_txid, last_txid, 32);
+}
+
 bool utxo_commitment_compute_range(sqlite3 *db, const char *table,
                                    const uint8_t txid_lo[32], int max_rows,
                                    struct utxo_commitment *out,
@@ -382,14 +490,13 @@ bool utxo_commitment_compute_range(sqlite3 *db, const char *table,
                                    int32_t *out_max_height,
                                    uint8_t out_last_txid[32])
 {
-    if (out) utxo_commitment_init(out);
-    if (out_rows) *out_rows = 0;
-    if (out_min_height) *out_min_height = INT32_MAX;
-    if (out_max_height) *out_max_height = INT32_MIN;
+    utxo_commitment_range_reset_outs(out, out_rows, out_min_height, out_max_height);
 
-    if (!db || !out || !txid_lo || max_rows <= 0)
+    bool args_ok = utxo_commitment_range_args_ok(db, out, txid_lo, max_rows);
+    if (!args_ok)
         return false;
-    if (!table || (strcmp(table, "coins") != 0 && strcmp(table, "utxos") != 0)) {
+    bool table_ok = utxo_commitment_range_table_ok(table);
+    if (!table_ok) {
         LOG_WARN("utxo_cmt", "compute_range: refusing unknown table '%s'",
                  table ? table : "(null)");
         return false;
@@ -407,28 +514,8 @@ bool utxo_commitment_compute_range(sqlite3 *db, const char *table,
     sqlite3_bind_blob(s, 1, txid_lo, 32, SQLITE_STATIC);
     sqlite3_bind_int(s, 2, max_rows);
 
-    size_t n = 0;
-    uint8_t last_txid[32] = {0};
-    while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-        const uint8_t *txid = (const uint8_t *)sqlite3_column_blob(s, 0);
-        if (!txid || sqlite3_column_bytes(s, 0) < 32) continue;
-        uint32_t vout = (uint32_t)sqlite3_column_int(s, 1);
-        int64_t value = sqlite3_column_int64(s, 2);
-        int32_t height = sqlite3_column_int(s, 3);
-
-        uint8_t h[32];
-        hash_utxo(h, txid, vout, value, height);
-        xor32(out->accumulator, h);
-        out->count++;
-        n++;
-        memcpy(last_txid, txid, 32);
-        if (out_min_height && height < *out_min_height) *out_min_height = height;
-        if (out_max_height && height > *out_max_height) *out_max_height = height;
-    }
-    sqlite3_finalize(s);
-
-    if (out_rows) *out_rows = n;
-    if (out_last_txid && n > 0) memcpy(out_last_txid, last_txid, 32);
+    utxo_commitment_range_scan(s, out, out_rows, out_min_height, out_max_height,
+                               out_last_txid);
     return true;
 }
 
