@@ -346,6 +346,11 @@ static int test_off_tick_write_and_prune_cadence(void)
         app_runtime_set_current(NULL);
         db_service_stop(&svc);
     }
+    /* db_service_stop() detaches node_db but does not close it: the handle
+     * opened above is owned by this test and must be closed here, after the
+     * worker that uses it has joined. node_db_close() tolerates a handle that
+     * never opened. */
+    node_db_close(&ndb);
     lms_parity_sample_test_reset(0, 0);
     printf("parity_sample off-tick: %d failures\n", failures);
     return failures;
