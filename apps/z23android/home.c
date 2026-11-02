@@ -148,6 +148,15 @@ bool zapp_home_offer_jump(bool offer, bool on_scan_screen, bool *seen)
     *seen = true;
     return true;
 }
+/* A readable name for an app whose launcher label came back empty: the declared name when there is one, else the last
+ * component of the package (the whole package when it ends in a dot), else "App". Writes only when label is empty. */
+void zapp_home_fallback_label(char *label, size_t cap, const char *declared, const char *package)
+{
+    if (!cap || label[0]) return;
+    const char *tail = package && strrchr(package, '.') ? strrchr(package, '.') + 1 : package;
+    if (!tail || !tail[0]) tail = package && package[0] ? package : "App";
+    snprintf(label, cap, "%s", declared && declared[0] ? declared : tail);
+}
 void zapp_home_fit_label(char *out, size_t cap, const char *text)
 {
     size_t length = strlen(text);

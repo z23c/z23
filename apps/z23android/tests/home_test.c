@@ -437,8 +437,26 @@ static void wallet_data_does_not_outlive_the_screens(void)
     }
     wallet_screens_shutdown();
 }
+static void fallback_labels(void)
+{
+    char label[ZAPP_APP_LABEL_CAP];
+    snprintf(label, sizeof(label), "%s", "Maps");
+    zapp_home_fallback_label(label, sizeof(label), "Declared", "org.z23.maps");
+    assert(!strcmp(label, "Maps"));
+    label[0] = 0;
+    zapp_home_fallback_label(label, sizeof(label), "Declared", "org.z23.maps");
+    assert(!strcmp(label, "Declared"));
+    label[0] = 0;
+    zapp_home_fallback_label(label, sizeof(label), "", "org.z23.wallet.tools");
+    assert(!strcmp(label, "tools"));
+    label[0] = 0;
+    zapp_home_fallback_label(label, sizeof(label), NULL, NULL);
+    assert(!strcmp(label, "App"));
+}
+
 int main(void)
 {
+    fallback_labels();
     dark_by_default();
     phone_card_golden();
     node_button_states();

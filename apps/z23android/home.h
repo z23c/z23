@@ -69,6 +69,9 @@ bool zapp_home_send_opened_from_wallet(bool origin_is_send, bool origin_is_walle
 /* Whether a touch released on the control it went down on. Controls are matched by position in the drawn list; on the Send
  * screen and the setup screens the position can hold another button after a redraw, so the button identity must match too. */
 bool zapp_home_same_press(size_t index_a, bool by_button_a, unsigned button_a, size_t index_b, bool by_button_b, unsigned button_b);
+/* A readable name for an app whose launcher label is empty: its declared name, else the last part of its package, else
+ * "App". Writes label only when it is empty. */
+void zapp_home_fallback_label(char *label, size_t cap, const char *declared, const char *package);
 /* Copies text into out (cap bytes), cutting on a character boundary when it does not fit. */
 void zapp_home_fit_label(char *out, size_t cap, const char *text);
 #endif

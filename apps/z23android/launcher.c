@@ -81,17 +81,41 @@ static bool resolve_names(JNIEnv *env, jobject info, struct zapp_app_entry *entr
     return info_cls && string_field(env, activity_info, info_cls, "packageName", entry->package, sizeof(entry->package)) &&
         string_field(env, activity_info, info_cls, "name", entry->activity, sizeof(entry->activity));
 }
-/* Reads the label of a ResolveInfo into out; false when the app has no readable label. */
-static bool resolve_label(JNIEnv *env, jobject info, jobject manager, char *out, size_t cap)
+/* Copies the text of a CharSequence into out, cut to fit. Leaves out empty when the sequence is NULL or unreadable. */
+static void char_sequence_into(JNIEnv *env, jobject sequence, char *out, size_t cap)
 {
-    jmethodID load = zj_method(env, info, "loadLabel", "(Landroid/content/pm/PackageManager;)Ljava/lang/CharSequence;");
-    jobject label = load ? (*env)->CallObjectMethod(env, info, load, manager) : NULL;
-    jmethodID to_string = zj_clean(env) && label ? zj_method(env, label, "toString", "()Ljava/lang/String;") : NULL;
-    jstring text = to_string ? (*env)->CallObjectMethod(env, label, to_string) : NULL;
+    jmethodID to_string = sequence && zj_clean(env) ? zj_method(env, sequence, "toString", "()Ljava/lang/String;") : NULL;
+    jstring text = to_string ? (*env)->CallObjectMethod(env, sequence, to_string) : NULL;
     const char *chars = zj_clean(env) && text ? (*env)->GetStringUTFChars(env, text, NULL) : NULL;
     if (chars) zapp_home_fit_label(out, cap, chars);
     if (chars) (*env)->ReleaseStringUTFChars(env, text, chars);
-    return zj_clean(env) && chars;
+    (void)zj_clean(env);
+}
+/* The value of an object field, or NULL when the field cannot be read. */
+static jobject object_field(JNIEnv *env, jobject object, const char *name, const char *sig)
+{
+    jclass cls = object && zj_clean(env) ? (*env)->GetObjectClass(env, object) : NULL;
+    jfieldID id = cls ? (*env)->GetFieldID(env, cls, name, sig) : NULL;
+    jobject value = id ? (*env)->GetObjectField(env, object, id) : NULL;
+    return zj_clean(env) ? value : NULL;
+}
+/* Reads the app's declared (non-localized) name into out, or leaves out empty when it has none. */
+static void resolve_declared(JNIEnv *env, jobject info, char *out, size_t cap)
+{
+    jobject activity_info = object_field(env, info, "activityInfo", "Landroid/content/pm/ActivityInfo;");
+    jobject app_info = object_field(env, activity_info, "applicationInfo", "Landroid/content/pm/ApplicationInfo;");
+    char_sequence_into(env, object_field(env, app_info, "nonLocalizedLabel", "Ljava/lang/CharSequence;"), out, cap);
+}
+/* Reads the label of a ResolveInfo into out. An empty label falls back to the declared name, then to the package's last
+ * part, so every listed app has a readable name. */
+static void resolve_label(JNIEnv *env, jobject info, jobject manager, const char *package, char *out, size_t cap)
+{
+    char declared[ZAPP_APP_LABEL_CAP] = "";
+    jmethodID load = zj_method(env, info, "loadLabel", "(Landroid/content/pm/PackageManager;)Ljava/lang/CharSequence;");
+    jobject label = load ? (*env)->CallObjectMethod(env, info, load, manager) : NULL;
+    char_sequence_into(env, label, out, cap);
+    if (!out[0]) resolve_declared(env, info, declared, sizeof(declared));
+    zapp_home_fallback_label(out, cap, declared, package);
 }
 static jobject resolve_icon(JNIEnv *env, jobject info, jobject manager)
 {
@@ -113,8 +137,8 @@ static bool read_entry(JNIEnv *env, jobject info, jobject manager, const char *o
     if ((*env)->PushLocalFrame(env, 16) != JNI_OK) { (void)zj_clean(env); return false; }
     jobject icon = NULL;
     memset(app, 0, sizeof(*app));
-    bool ok = resolve_names(env, info, &app->entry) && strcmp(app->entry.package, own) &&
-        resolve_label(env, info, manager, app->entry.label, sizeof(app->entry.label));
+    bool ok = resolve_names(env, info, &app->entry) && strcmp(app->entry.package, own);
+    if (ok) resolve_label(env, info, manager, app->entry.package, app->entry.label, sizeof(app->entry.label));
     if (ok && zapp_home_is_z23_app(app->entry.package)) app->entry.same_signature = same_signature(env, manager, own, app->entry.package);
     if (ok && icons) icon = resolve_icon(env, info, manager);
     if (icon && !zj_keep(env, &app->icon, icon)) app->icon = NULL;
