@@ -19,12 +19,19 @@
 #define PROBE_HOSTS 16u
 #define PROBE_BYTES 16384u
 #define BLOCKERS_SHOWN 6u
-static const char probe_command[] =
+/* The onion status page 1 has no port_mapping (the paged default view). Its next_cursor chain reaches
+ * port_mapping after a skipped oversize recent_dials page, so the probe follows at most three cursors. */
+#define ONION_PAGES 4u
+const char zapp_fleet_probe_command[] =
     "echo \"status=$(z23 status 2>/dev/null | head -n 1)\"; "
     "echo \"height=$(z23 getblockcount 2>/dev/null | head -n 1)\"; "
     "echo \"reference=$(zclassic-cli getblockcount 2>/dev/null | head -n 1)\"; "
     "echo \"uptime=$(uptime)\"; "
-    "echo \"onion=$(z23 core network onion status 2>/dev/null | head -n 1)\"; "
+    "p=$(z23 core network onion status 2>/dev/null | head -n 1); echo \"onion=$p\"; "
+    "c=$(printf '%s' \"$p\" | sed -n 's/.*\"next_cursor\":\\([0-9][0-9]*\\).*/\\1/p'); "
+    "for k in 2 3 4; do test -n \"$c\" || break; "
+    "p=$(z23 core network onion status --cursor=$c 2>/dev/null | head -n 1); echo \"onion_$k=$p\"; "
+    "c=$(printf '%s' \"$p\" | sed -n 's/.*\"next_cursor\":\\([0-9][0-9]*\\).*/\\1/p'); done; "
     "echo \"disk_kb=$(df -Pk \"$HOME\" | awk 'NR==2{print $4}')\"";
 static const char blockers_command[] = "z23 core sync blockers 2>/dev/null";
 
@@ -125,26 +132,46 @@ static int64_t p2p_route_port(const struct json_value *routes)
 /* The host's own P2P onion peer as "host:port", from the output of `z23 core network onion status`.
  * Empty unless the node reports its onion service and P2P publication ready and an installed p2p_tcp
  * route, and the result passes the same check the phone applies before it dials. */
-static void onion_peer(const char *reply, char *out, size_t cap)
+/* The p2p_tcp virtual port of one onion status page, 0 when the page has no installed route for it. */
+static int64_t page_p2p_port(const char *reply)
+{
+    struct json_value doc = {0};
+    int64_t port = 0;
+    if (reply && reply[0] && json_read(&doc, reply, strlen(reply)))
+        port = p2p_route_port(json_get(json_get(json_get(&doc, "data"), "port_mapping"), "routes"));
+    json_free(&doc);
+    return port;
+}
+/* The host's own P2P onion peer as "host:port". Page 0 carries the address and readiness; the port
+ * comes from the first page that carries an installed p2p_tcp route. Empty unless the node reports
+ * its onion service and P2P publication ready, and the result passes the same check the phone applies
+ * before it dials. */
+static void onion_peer(const char *const *pages, size_t count, char *out, size_t cap)
 {
     struct json_value doc = {0};
     out[0] = 0;
-    if (!reply || !json_read(&doc, reply, strlen(reply))) return;
+    if (!count || !pages[0] || !json_read(&doc, pages[0], strlen(pages[0]))) return;
     const struct json_value *data = json_get(&doc, "data");
     const char *address = json_get_str(json_get(data, "onion_address"));
     bool ready = json_get_bool(json_get(&doc, "ok")) && json_get_bool(json_get(data, "onion_service_ready")) &&
         json_get_bool(json_get(data, "p2p_publish_ready"));
+    int64_t port = 0;
+    for (size_t i = 0; !port && i < count; i++) port = page_p2p_port(pages[i]);
     char peer[ZAPP_ONION_PEER_MAX + 8];
-    int n = ready && address ? snprintf(peer, sizeof(peer), "%s:%lld", address,
-        (long long)p2p_route_port(json_get(json_get(data, "port_mapping"), "routes"))) : -1;
+    int n = ready && address ? snprintf(peer, sizeof(peer), "%s:%lld", address, (long long)port) : -1;
     if (n > 0 && (size_t)n < sizeof(peer) && (size_t)n < cap && zapp_onion_peer_valid(peer)) memcpy(out, peer, (size_t)n + 1);
     json_free(&doc);
 }
 static bool push_onion(struct json_value *row, const char *output)
 {
-    char reply[4096] = "", peer[ZAPP_ONION_PEER_MAX + 8];
-    output_value(output, "onion", reply, sizeof(reply));
-    onion_peer(reply, peer, sizeof(peer));
+    static const char *const keys[ONION_PAGES] = {"onion", "onion_2", "onion_3", "onion_4"};
+    char reply[ONION_PAGES][4096], peer[ZAPP_ONION_PEER_MAX + 8];
+    const char *pages[ONION_PAGES];
+    for (size_t i = 0; i < ONION_PAGES; i++) {
+        output_value(output, keys[i], reply[i], sizeof(reply[i]));
+        pages[i] = reply[i];
+    }
+    onion_peer(pages, ONION_PAGES, peer, sizeof(peer));
     return !peer[0] || json_push_kv_str(row, "onion", peer);
 }
 bool zapp_fleet_row(const char *label, const char *output, int64_t elapsed_ms, struct json_value *row)
@@ -230,7 +257,7 @@ bool zapp_fleet_probe(const struct zapp_fleet_host *hosts, size_t count, int tim
     if (!hosts || !count || count > PROBE_HOSTS || timeout_ms <= 0 || !out || !cap) return false;
     struct probe *p = calloc(count, sizeof(*p));
     if (!p) return false;
-    for (size_t i = 0; i < count; i++) { p[i].fd = -1; if (!spawn(&hosts[i], probe_command, &p[i])) p[i].pid = -1; }
+    for (size_t i = 0; i < count; i++) { p[i].fd = -1; if (!spawn(&hosts[i], zapp_fleet_probe_command, &p[i])) p[i].pid = -1; }
     int64_t start = now_ms();
     collect(p, count, start + timeout_ms);
     reap(p, count);

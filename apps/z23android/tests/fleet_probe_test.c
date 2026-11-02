@@ -82,6 +82,41 @@ static void check_onion(void)
     assert(!strstr(text, "onion\""));
     json_free(&row);
 }
+/* The probe's three onion status replies as the paged default view returns them: page 1 without
+ * port_mapping, the cursor-12 page that skips recent_dials, and the cursor-13 page with port_mapping. */
+static void onion_pages_row(const char *page1, const char *page3, char *text, size_t cap)
+{
+    static const char page2[] = "{\"ok\":true,\"data\":{\"_page\":{\"view\":\"normal\",\"total_fields\":15,"
+        "\"included\":0,\"truncated\":true,\"next_cursor\":13,\"skipped_oversize\":\"recent_dials\"}},\"next\":[]}";
+    char output[8192];
+    snprintf(output, sizeof(output), "status=node=ready synced=yes\nheight=5\nreference=5\nonion=%s\n"
+        "onion_2=%s\nonion_3=%s\ndisk_kb=1\n", page1, page2, page3);
+    struct json_value row = {0};
+    assert(zapp_fleet_row("r1", output, 5, &row) && json_write(&row, text, cap) < cap);
+    json_free(&row);
+}
+static void check_onion_pages(void)
+{
+    char page1[1024], page3[1024], text[1024];
+    char address[80];
+    snprintf(address, sizeof(address), "%s.onion", onion_address);
+    /* The real first page: readiness and address, no port_mapping, so no onion field. */
+    snprintf(page1, sizeof(page1), "{\"ok\":true,\"data\":{\"schema\":\"zcl.onion_status.v1\",\"bootstrap_state\":\"ready\","
+        "\"onion_service_ready\":true,\"onion_address\":\"%s\",\"p2p_publish_ready\":true,\"setup_state\":\"ready\","
+        "\"_page\":{\"view\":\"normal\",\"total_fields\":15,\"included\":12,\"truncated\":true,\"next_cursor\":12,"
+        "\"skipped_oversize\":\"recent_dials\"}},\"next\":[]}", address);
+    snprintf(page3, sizeof(page3), "{\"ok\":true,\"data\":{\"port_mapping\":{\"state\":\"installed\",\"complete\":true,"
+        "\"routes\":[{\"name\":\"application_dynhost\",\"virtual_port\":80,\"installed\":true},{\"name\":\"p2p_tcp\","
+        "\"virtual_port\":8033,\"target_host\":\"127.0.0.1\",\"target_port\":8033,\"installed\":true}]},\"_page\":"
+        "{\"view\":\"normal\",\"total_fields\":15,\"included\":2,\"truncated\":false}},\"next\":[]}");
+    onion_pages_row(page1, "", text, sizeof(text)); assert(!strstr(text, "onion\""));
+    char want[160];
+    snprintf(want, sizeof(want), "\"onion\":\"%s:8033\"", address);
+    onion_pages_row(page1, page3, text, sizeof(text)); assert(strstr(text, want));
+    /* The probe asks for the cursor chain that reaches port_mapping and never for recent_dials. */
+    assert(strstr(zapp_fleet_probe_command, "onion status --cursor=$c") && strstr(zapp_fleet_probe_command, "next_cursor"));
+    assert(!strstr(zapp_fleet_probe_command, "recent_dials"));
+}
 static void check_blockers(void)
 {
     char report[4096], want[2048], out[2048];
@@ -156,6 +191,7 @@ int main(void)
     check_parse();
     check_row();
     check_onion();
+    check_onion_pages();
     check_blockers();
     check_tool();
     check_wanted();
