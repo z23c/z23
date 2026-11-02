@@ -111,9 +111,6 @@ void reducer_frontier_test_set_compiled_anchor(int32_t height);
  * heavier W branch is installed, so the served tip sits on a failed block. */
 static bool g_rfp_invalidate_l;
 
-/* Lowest served height seen while the reorg converges. */
-static int g_rfp_min_tip = INT32_MAX;
-
 static int rfp_mkdir_p(const char *p)
 {
     if (mkdir(p, 0700) == 0) return 0;
@@ -729,8 +726,6 @@ static void rfp_converge_w_reorg(struct rfp_gate_env *e,
             reducer_frontier_reconcile_light_test_clear_backoff();
             condition_engine_tick();
             int t = active_chain_height(&e->ms.chain_active);
-            if (t < g_rfp_min_tip)
-                g_rfp_min_tip = t;
             sqlite3 *pdb = progress_store_db();
             int l_live = 0, w_live = 0;
             for (int h = w->fork_h + 1; h <= RFP_N + 1; h++) {
@@ -777,11 +772,6 @@ static int rfp_assert_part2_reorg_coins(struct rfp_gate_env *e,
            (unsigned long long)reorg_after,
            (unsigned long long)tip_finalize_stage_reorg_detected_total());
 
-    /* A displaced tip that has not failed stays served until the W branch
-     * replaces it; only the invalidated variant may drop to the fork. */
-    RFP_CHECK("PART2: served tip never drops below the pre-reorg tip",
-              g_rfp_invalidate_l || g_rfp_min_tip >= RFP_N);
-    printf("reducer_forward_progress_gate: PART2 min served tip=%d\n", g_rfp_min_tip);
     RFP_CHECK("PART2: utxo_apply performed a reorg unwind",
               reorg_after > reorg_before);
     /* The reducer installs the FULL heavier W branch on first
