@@ -23,6 +23,7 @@
 #include "command/native_fleet_bundle.h"
 
 #include "base/hex.h"
+#include "config/boot_zcode_swarm.h"
 #include "controllers/rpc_client.h"
 #include "controllers/rpc_params.h"
 #include "json/json.h"
@@ -39,6 +40,7 @@
 #define FBC_TIMEOUT_DEFAULT_S 300
 #define FBC_TIMEOUT_MAX_S 1800
 #define FBC_POLL_MS 2000
+#define FBC_BOUND_PEERS_MAX 4u
 #define FBC_OFFER_CMD "fleet.bundle.offer"
 #define FBC_FETCH_CMD "fleet.bundle.fetch"
 
@@ -306,6 +308,15 @@ static void fbc_fetch_resident(struct vcs_package_store *store,
 {
     in->args.now = (uint64_t)platform_time_wall_unix();
     in->args.day = (int64_t)(in->args.now / 86400u);
+    /* A named peer binds the download to it: the peer's ANNOUNCE inventory
+     * may be full, in which case a new offer is never announced to us. Not
+     * connected yet: fall back to discovery; the CLI poll retries. */
+    uint64_t bound[FBC_BOUND_PEERS_MAX];
+    if (in->peer) {
+        in->args.provider_count = boot_zcode_swarm_peers_for_onion(
+            in->peer, bound, FBC_BOUND_PEERS_MAX);
+        in->args.providers = bound;
+    }
     struct zcl_fleet_bundle_outcome o;
     if (zcl_fleet_bundle_fetch_step(store, vcs_swarm_engine_global(),
                                     &in->args, &o) ==
@@ -328,6 +339,8 @@ static void fbc_fwd_object(const struct fbc_fetch_in *in,
     (void)json_push_kv_str(fwd, "sha256", hex);
     (void)json_push_kv_int(fwd, "size", (int64_t)in->args.size);
     (void)json_push_kv_str(fwd, "out", in->args.out_path);
+    if (in->peer)
+        (void)json_push_kv_str(fwd, "peer", in->peer);
 }
 
 /* Read the node's peer list once and say whether the named onion is in it.

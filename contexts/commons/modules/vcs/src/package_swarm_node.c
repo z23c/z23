@@ -739,57 +739,6 @@ static void handle_announce(struct vcs_swarm_engine *engine,
     }
 }
 
-/* Public-hosting admission for one root.
- *
- * Every byte this node offers a stranger passes through here: the ANNOUNCE
- * that advertises a root and the WANT that asks for its manifest or its
- * chunks. Completeness is not enough. The root must match one of the
- * closed shapes in vcs/package_public_shape.h, and the shapes that carry
- * source for other people to build must re-derive their whole signed,
- * permissively licensed closure — dependency graph included — out of the
- * bytes we hold. Anything else is refused by name.
- *
- * Caching. A self-contained verdict is only invalidated by this package
- * changing, so it keys on the package's own generation. A verdict that
- * rested on the dependency graph can be falsified by a SIBLING package
- * being evicted or mutated, which that generation cannot see, so it keys
- * on the store-wide epoch as well. Getting this wrong would keep serving a
- * package whose dependencies this node can no longer hand over.
- *
- * Called with engine->lock held; takes the store lock beneath it, which is
- * the order the serve path already uses. */
-bool vcs_swarm_public_serveable(struct vcs_swarm_engine *engine,
-                                const uint8_t root[32], const char **rule_out)
-{
-    struct vcs_package_possession_receipt receipt;
-    memset(&receipt, 0, sizeof(receipt));
-    if (!vcs_package_store_possession_snapshot(engine->store, root,
-                                               &receipt)) {
-        if (rule_out) *rule_out = "not-tracked";
-        return false;
-    }
-    uint64_t epoch = vcs_package_store_mutation_epoch(engine->store);
-    struct swarm_public_entry *slot =
-        &engine->public_cache[root[0] % VCS_SWARM_PUBLIC_CACHE_SLOTS];
-    bool stale = !slot->used || memcmp(slot->root, root, 32) != 0 ||
-                 slot->generation != receipt.mutation_generation ||
-                 (slot->dep_scoped && slot->epoch != epoch);
-    if (stale) {
-        struct vcs_package_public_verdict verdict;
-        vcs_package_public_shape_classify(engine->store, root, &verdict);
-        memcpy(slot->root, root, 32);
-        slot->generation = receipt.mutation_generation;
-        slot->epoch = epoch;
-        slot->shape = verdict.shape;
-        slot->rule = verdict.rule;
-        slot->dep_scoped = verdict.dep_scoped;
-        slot->used = true;
-    }
-    if (rule_out)
-        *rule_out = slot->rule;
-    return slot->shape != VCS_PACKAGE_PUBLIC_REFUSED;
-}
-
 static void serve_manifest_want(struct vcs_swarm_engine *engine,
                                 struct swarm_peer *peer,
                                 const struct vcs_package_swarm_object *want,
@@ -802,7 +751,8 @@ static void serve_manifest_want(struct vcs_swarm_engine *engine,
                                             &wire_len) !=
         VCS_PACKAGE_STORE_OK) {
         free(wire);
-        return; /* not tracked here: silent, no offence */
+        SWARM_DROP(VCS_SWARM_DROP_MANIFEST_UNTRACKED, "manifest want: not tracked here");
+        return; /* no offence */
     }
     struct vcs_package_swarm_message msg;
     memset(&msg, 0, sizeof(msg));
@@ -866,27 +816,34 @@ static void serve_chunk_want(struct vcs_swarm_engine *engine,
                              const struct vcs_package_swarm_object *want,
                              int64_t day, struct vcs_swarm_frame_result *res)
 {
-    if (!serve_cache_load(engine, want->package_root))
-        return; /* untracked: silent */
+    if (!serve_cache_load(engine, want->package_root)) {
+        SWARM_DROP(VCS_SWARM_DROP_CHUNK_UNTRACKED, "chunk want: not tracked here");
+        return;
+    }
     const struct vcs_package_manifest *m = &engine->serve_manifest;
-    if (want->file_index >= m->count)
+    if (want->file_index >= m->count ||
+        want->chunk_index >= m->files[want->file_index].chunk_count) {
+        SWARM_DROP(VCS_SWARM_DROP_CHUNK_COORDINATE, "chunk want: index outside the manifest");
         return;
+    }
     const struct vcs_package_file *file = &m->files[want->file_index];
-    if (want->chunk_index >= file->chunk_count)
-        return;
     /* The WANT's expected hash must equal the manifest's commitment at
      * those coordinates — otherwise the requester is fishing for bytes
      * under a root it does not actually hold. Silent no-serve. */
     if (memcmp(file->chunk_hashes + (size_t)want->chunk_index * 32u,
-               want->expected_hash, 32) != 0)
+               want->expected_hash, 32) != 0) {
+        SWARM_DROP(VCS_SWARM_DROP_CHUNK_HASH, "chunk want: expected hash is not the manifest's");
         return;
+    }
     uint8_t *chunk = NULL;
     size_t chunk_len = 0;
     if (vcs_package_store_get_chunk_at(engine->store, want->package_root,
                                        want->file_index, want->chunk_index,
                                        &chunk, &chunk_len) !=
-        VCS_PACKAGE_STORE_OK)
-        return; /* we do not hold this chunk: silent */
+        VCS_PACKAGE_STORE_OK) {
+        SWARM_DROP(VCS_SWARM_DROP_CHUNK_MISSING, "chunk want: tracked but the chunk is not held");
+        return;
+    }
     struct vcs_package_swarm_message msg;
     memset(&msg, 0, sizeof(msg));
     msg.type = VCS_PACKAGE_SWARM_DATA;
@@ -961,8 +918,10 @@ static void handle_want(struct vcs_swarm_engine *engine,
     peer->seen_pos = (peer->seen_pos + 1) % VCS_SWARM_SEEN_IDS_PER_PEER;
     if (peer->seen_count < VCS_SWARM_SEEN_IDS_PER_PEER)
         peer->seen_count++;
-    if (!engine->store)
+    if (!engine->store) {
+        SWARM_DROP(VCS_SWARM_DROP_NO_STORE, "want dropped: the swarm engine has no package store");
         return;
+    }
     /* Public-hosting admission. Refusing is not an offence: the requester
      * has no way to know what this node will host, so it costs them
      * nothing but gets a named rule instead of silence. The rule is also
@@ -1502,8 +1461,10 @@ size_t vcs_swarm_engine_announce_to(struct vcs_swarm_engine *engine,
         /* Never emit an unremembered 65th distinct root. This session's
          * bounded dedupe inventory also protects a free peer's announce
          * allowance when the prioritized shelf changes between syncs. */
-        if (p->announced_count >= VCS_SWARM_MAX_LOCAL_ANNOUNCES)
+        if (p->announced_count >= VCS_SWARM_MAX_LOCAL_ANNOUNCES) {
+            SWARM_DROP(VCS_SWARM_DROP_ANNOUNCE_FULL, "announce: session inventory is full; newer roots reach this peer only by a fetch that names it");
             break;
+        }
         if (vcs_swarm_peer_was_announced(p, summaries[i].root))
             continue;
         /* Advertise only what this node would actually serve. Announcing a

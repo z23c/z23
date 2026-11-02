@@ -12,6 +12,7 @@
 #include <stdint.h>
 
 struct msg_processor;
+struct net_manager;
 struct p2p_node;
 struct vcs_swarm_engine;
 struct vcs_zcode_work_node;
@@ -28,5 +29,11 @@ void boot_zcode_swarm_sync_membership(
 void boot_zcode_swarm_send(struct msg_processor *mp, struct p2p_node *node,
                            const uint8_t *frame, size_t frame_len);
 enum peer_offence boot_zcode_swarm_offence(enum vcs_swarm_penalty penalty);
+/* Register and return the swarm handles of the connected peers whose
+ * address names the v3 `onion`. Caller holds nm->cs_nodes. */
+size_t boot_zcode_swarm_onion_peers(
+    struct net_manager *nm, struct vcs_swarm_engine *engine,
+    struct vcs_zcode_work_node *work, const char *onion, uint64_t *ids,
+    size_t max);
 
 #endif /* ZCL_CONFIG_BOOT_ZCODE_SWARM_MEMBERSHIP_H */

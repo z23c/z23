@@ -15,6 +15,8 @@
 
 #include "package_store_priv.h"
 
+#include "util/log_macros.h"
+
 #include <pthread.h>
 #include <string.h>
 
@@ -155,6 +157,31 @@ struct vcs_swarm_engine {
     bool serve_loaded;
     struct swarm_public_entry public_cache[VCS_SWARM_PUBLIC_CACHE_SLOTS];
 };
+
+/* Reasons a node stays silent toward a peer. Each is logged at most once
+ * per window (package_swarm_gate.c), with the repeats folded into a count. */
+enum vcs_swarm_drop {
+    VCS_SWARM_DROP_NO_STORE,         /* engine has no package store */
+    VCS_SWARM_DROP_MANIFEST_UNTRACKED,
+    VCS_SWARM_DROP_CHUNK_UNTRACKED,
+    VCS_SWARM_DROP_CHUNK_COORDINATE, /* file/chunk index out of range */
+    VCS_SWARM_DROP_CHUNK_HASH,       /* expected hash is not the manifest's */
+    VCS_SWARM_DROP_CHUNK_MISSING,    /* tracked but the chunk is not held */
+    VCS_SWARM_DROP_ANNOUNCE_FULL,    /* session announce inventory is full */
+    VCS_SWARM_DROP_COUNT
+};
+
+bool vcs_swarm_drop_due(enum vcs_swarm_drop why, uint64_t *suppressed);
+
+/* Log one rate-limited drop reason. `fmt` must not end in a period. */
+#define SWARM_DROP(why, fmt, ...)                                           \
+    do {                                                                    \
+        uint64_t drop_suppressed_;                                          \
+        if (vcs_swarm_drop_due((why), &drop_suppressed_))                   \
+            LOG_WARN("vcs.swarm", fmt " (repeats folded: %llu)"             \
+                     __VA_OPT__(,) __VA_ARGS__,                             \
+                     (unsigned long long)drop_suppressed_);                 \
+    } while (0)
 
 static inline bool vcs_swarm_peer_was_announced(const struct swarm_peer *peer,
                                                 const uint8_t root[32])

@@ -36,6 +36,7 @@
 #include "net/net.h"
 #include "net/peer_identity.h"
 #include "net/peer_scoring.h"
+#include "support/log_throttle.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
 #include "util/supervisor.h"
@@ -991,6 +992,44 @@ static void boot_zcode_swarm_finish_frame(
             P2P_DISCONNECT_SOURCE_APPLICATION, node->endpoint_generation);
 }
 
+/* A swarm frame the glue drops without an offence still names its reason
+ * in the log, once per window per reason. */
+static struct log_throttle s_drop_off_log;
+static struct log_throttle s_drop_key_log;
+
+static void boot_zcode_swarm_drop_log(struct log_throttle *t,
+                                      const char *reason)
+{
+    uint64_t suppressed = 0;
+    if (log_throttle_should_emit(t, 1, (int64_t)platform_time_wall_time_t(),
+                                 300, &suppressed))
+        LOG_WARN("net.zcode_swarm", "frame dropped: %s (repeats folded: "
+                 "%llu)", reason, (unsigned long long)suppressed);
+}
+
+/* Swarm handles of the connected, swarm-eligible peers whose address names
+ * `onion` (a v3 name, optional :port). The named peer is registered with the
+ * engine on the spot so a fetch can bind to it before the next membership
+ * sync. Returns the number written to ids[0..max). */
+size_t boot_zcode_swarm_peers_for_onion(const char *onion, uint64_t *ids,
+                                        size_t max)
+{
+    if (!onion || !ids || max == 0 || !s_lock_init)
+        return 0;
+    boot_zcode_swarm_lock();
+    struct net_manager *nm = s_svc && s_svc->msg_processor
+        ? s_svc->msg_processor->net_mgr : NULL;
+    size_t n = 0;
+    if (nm && s_engine && s_work) {
+        zcl_mutex_lock(&nm->cs_nodes);
+        n = boot_zcode_swarm_onion_peers(nm, s_engine, s_work, onion, ids,
+                                         max);
+        zcl_mutex_unlock(&nm->cs_nodes);
+    }
+    zcl_mutex_unlock(&s_lock);
+    return n;
+}
+
 bool boot_zcode_swarm_frame(struct msg_processor *mp, struct p2p_node *node,
                             const uint8_t *payload, size_t payload_len,
                             void *ctx)
@@ -1004,12 +1043,16 @@ bool boot_zcode_swarm_frame(struct msg_processor *mp, struct p2p_node *node,
         boot_zcode_swarm_ensure((struct boot_svc_ctx *)ctx);
     if (!engine) {
         zcl_mutex_unlock(&s_lock);
-        return true; /* hosting off: drop quietly (never an offence) */
+        boot_zcode_swarm_drop_log(&s_drop_off_log, "engine not running "
+            "(-packagehost off, no package store, or setup failed)");
+        return true; /* hosting off: never an offence */
     }
     uint8_t key[33];
     if (!boot_zcode_swarm_peer_key(node, key)) {
         zcl_mutex_unlock(&s_lock);
-        return true; /* no usable host identity: drop, never an offence */
+        boot_zcode_swarm_drop_log(&s_drop_key_log, "peer has no usable "
+            "host identity");
+        return true; /* never an offence */
     }
     (void)vcs_swarm_engine_peer_add(engine, boot_zcode_swarm_peer_id(node),
                                     key);

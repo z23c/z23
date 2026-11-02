@@ -297,8 +297,11 @@ static enum zcl_fleet_bundle_status zfb_progress(
         return zfb_refuse(out, "NO_ENGINE",
                           "no swarm engine is running (package hosting "
                           "disabled)", false, false);
-    enum vcs_swarm_fetch_result r =
-        vcs_swarm_engine_fetch(engine, args->root, args->day, args->now);
+    enum vcs_swarm_fetch_result r = args->provider_count
+        ? vcs_swarm_engine_fetch_from(engine, args->root, args->day,
+                                      args->now, args->providers,
+                                      args->provider_count)
+        : vcs_swarm_engine_fetch(engine, args->root, args->day, args->now);
     if (r != VCS_SWARM_FETCH_OK && r != VCS_SWARM_FETCH_ALREADY_COMPLETE)
         return zfb_refuse(out, zfb_fetch_code(r),
                           vcs_swarm_fetch_result_string(r), true, false);

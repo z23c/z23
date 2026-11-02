@@ -133,3 +133,27 @@ enum peer_offence boot_zcode_swarm_offence(enum vcs_swarm_penalty penalty)
         return PEER_OFFENCE_NONE;
     }
 }
+
+size_t boot_zcode_swarm_onion_peers(
+    struct net_manager *nm, struct vcs_swarm_engine *engine,
+    struct vcs_zcode_work_node *work, const char *onion, uint64_t *ids,
+    size_t max)
+{
+    /* A v3 name is 56 base32 characters plus ".onion"; a trailing :port is
+     * not part of the match. Caller holds nm->cs_nodes. */
+    enum { ONION_LEN = 62 };
+    if (!nm || !engine || !work || !onion || !ids || strlen(onion) < ONION_LEN)
+        return 0;
+    char host[ONION_LEN + 1];
+    memcpy(host, onion, ONION_LEN);
+    host[ONION_LEN] = '\0';
+    size_t n = 0;
+    for (size_t i = 0; i < nm->num_nodes && n < max; i++) {
+        struct p2p_node *node = nm->nodes[i];
+        if (!node || !strstr(node->addr_name, host) ||
+            !boot_zcode_swarm_add_peer(engine, work, node, false))
+            continue;
+        ids[n++] = boot_zcode_swarm_peer_id(node);
+    }
+    return n;
+}

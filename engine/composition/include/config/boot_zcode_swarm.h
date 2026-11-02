@@ -65,6 +65,12 @@ void boot_zcode_swarm_tick(struct msg_processor *mp, struct p2p_node *node,
  * on the caller. */
 void boot_zcode_swarm_request_tick(void);
 
+/* Handles of the connected swarm-eligible peers whose address names the v3
+ * `onion` (optional :port), registered with the engine so a fetch can bind
+ * to them at once. 0 when none is connected or hosting is off. */
+size_t boot_zcode_swarm_peers_for_onion(const char *onion, uint64_t *ids,
+                                        size_t max);
+
 /* Wire the hooks onto svc->msg_processor and arm the supervisor child
  * that clock-drives the swarm. Cheap; safe before the store opens (the
  * engine is created lazily on first use). */
