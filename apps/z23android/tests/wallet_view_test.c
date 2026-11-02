@@ -216,11 +216,11 @@ static void test_send_reasons(void)
 {
     static const struct { const char *reason; const char *line; } cases[] = {
         { "release_assisted: not_self_derived",
-          "Sending is paused until this node verifies the chain tip itself." },
+          "Sending is paused until your phone has checked the latest blocks on its own." },
         { "release_assisted",
-          "Sending is paused until this node verifies the chain tip itself." },
+          "Sending is paused until your phone has checked the latest blocks on its own." },
         { "progress_store_unavailable",
-          "Sending is paused because this node's progress store is not open." },
+          "Sending is paused because the wallet cannot save its progress right now." },
         { "something_new",
           "Sending is paused for a reason this app does not recognize." },
         { "",
@@ -237,6 +237,7 @@ static void test_send_reasons(void)
         assert(wallet_view_from_summary(json2, &v) && v.known);
         assert(!v.send_allowed);
         assert(!strcmp(v.send, cases[i].line));
+        assert(!strstr(v.send, " tip") && !strstr(v.send, "verif") && !strstr(v.send, "store") && !strstr(v.send, "release") && !strstr(v.send, "trust"));
     }
     /* Sending allowed: the send line is empty whatever reason text the node sent. */
     replace_once(json, sizeof(json), VALID_REPLY, "\"send_blocked_reason\":\"\"",
@@ -377,7 +378,7 @@ static void test_unready_total_and_hidden(void)
                  "\"schema\":\"zcl.wallet_summary.v1\",\"unready_zat\":0,\"unready\":\"0.00000000\","
                  "\"spendable_total_zat\":900000000,\"spendable_total\":\"9.00000000\",");
     assert(wallet_view_from_summary(json, &v) && !v.unready_line[0]);
-    assert(!strcmp(v.balance, "9 ZCL") && !strcmp(v.total_line, "One payment can use up to 1.23456789 ZCL, fee included"));
+    assert(!strcmp(v.balance, "9 ZCL") && !strcmp(v.total_line, "You can send up to 1.23456789 ZCL at once, fee included"));
     replace_once(json, sizeof(json), VALID_REPLY, schema,
                  "\"schema\":\"zcl.wallet_summary.v1\",\"spendable_total_zat\":123456789,\"spendable_total\":\"1.23456789\",");
     assert(wallet_view_from_summary(json, &v) && !v.total_line[0] && !v.unready_line[0] && !strcmp(v.balance, "1.23456789 ZCL"));
@@ -388,7 +389,7 @@ static void test_unready_total_and_hidden(void)
     assert_unknown(&v);
     replace_once(json, sizeof(json), VALID_REPLY, schema,
                  "\"schema\":\"zcl.wallet_summary.v1\",\"unready_zat\":null,\"unready\":null,");
-    assert(wallet_view_from_summary(json, &v) && v.known && !strcmp(v.unready_line, "Amount waiting on the wallet unknown"));
+    assert(wallet_view_from_summary(json, &v) && v.known && !strcmp(v.unready_line, "Funds received but not spendable yet: amount unknown"));
     replace_once(json, sizeof(json), VALID_REPLY, schema,
                  "\"schema\":\"zcl.wallet_summary.v1\",\"unready_zat\":5,\"unready\":\"0.5\",");
     assert(!wallet_view_from_summary(json, &v));
@@ -415,9 +416,9 @@ static void test_hidden_private_amounts(void)
         "\"current\":false,\"locked\":true,\"encrypted\":true,\"shielded_keys\":0,\"send_allowed\":false,"
         "\"send_blocked_reason\":\"progress_store_unavailable\"}}";
     assert(wallet_view_from_summary(hidden, &v) && v.known);
-    assert(!strcmp(v.balance, "Private balance hidden while the wallet is locked") && !strstr(v.balance, "ZCL"));
+    assert(!strcmp(v.balance, "Your private balance is hidden because the wallet is locked") && !strstr(v.balance, "ZCL"));
     assert(!v.pending[0] && !v.unready_line[0] && !v.total_line[0] && !v.current && v.scanning);
-    assert(!strcmp(v.sync, "Wallet locked, so private amounts are hidden"));
+    assert(!strcmp(v.sync, "The wallet is locked, so private amounts are not shown"));
     /* Blocks behind keep their own wording while locked: the public amounts may still change. */
     replace_once(json, sizeof(json), hidden, "\"blocks_behind\":0,", "\"blocks_behind\":500,");
     assert(wallet_view_from_summary(json, &v) && !strcmp(v.sync, "Catching up, 500 blocks behind: amounts may change"));

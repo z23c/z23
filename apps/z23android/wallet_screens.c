@@ -186,7 +186,7 @@ static void memo_items(struct wallet_screen *s, const char *raw)
  * how current it is. */
 static void funds_lines(struct wallet_screen *s, const struct data *d)
 {
-    line(s, "Spendable now");
+    line(s, "Balance");
     (void)add(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE, d->view.balance);
     if (d->view.pending[0]) line(s, d->view.pending);
     if (d->view.unready_line[0]) line(s, d->view.unready_line);

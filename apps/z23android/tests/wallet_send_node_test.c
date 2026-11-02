@@ -372,7 +372,7 @@ static void gate_reads_numbers_and_never_shows_node_text(void)
     fake_init(&f);
     summary_json(f.summary.text, sizeof(f.summary.text), false, "progress_store_unavailable", true, 0, 500000000ull);
     g = gate_of(&f, &ok);
-    assert(!g.send_allowed && strstr(g.blocked_reason, "progress store") && !strstr(g.blocked_reason, "progress_store_unavailable"));
+    assert(!g.send_allowed && strstr(g.blocked_reason, "save its progress") && !strstr(g.blocked_reason, "progress_store_unavailable"));
 }
 static void an_unencrypted_wallet_never_sends(void)
 {
@@ -520,7 +520,7 @@ static struct wss *screen_over(struct fake *f, struct wsn *n, struct host *h)
     memset(h, 0, sizeof(*h));
     h->f = f; h->now = 10000; h->key = WSS_KEY_OK;
     d.device = (struct wss_device_ops){h, d_unwrap};
-    d.host = (struct wss_host_ops){h, h_random, h_now, h_spawn, h_redraw, NULL, NULL, NULL};
+    d.host = (struct wss_host_ops){h, h_random, h_now, h_spawn, h_redraw, NULL, NULL, NULL, NULL};
     d.secure = (struct zapp_secure_ops){h, s_on, s_on, s_on, s_on, s_on};
     struct wss *s = wss_create(&d);
     assert(s);

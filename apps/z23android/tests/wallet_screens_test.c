@@ -1117,9 +1117,9 @@ static void send_note(const char *summary, const char *want)
 static void test_funds_send_paused(void)
 {
     send_note(SUMMARY_SEND("123456789", "1.23456789", "0", "0.00000000", "0", "0.00000000", "false", "progress_store_unavailable"),
-              "Sending is paused because this node's progress store is not open.");
+              "Sending is paused because the wallet cannot save its progress right now.");
     send_note(SUMMARY_SEND("123456789", "1.23456789", "0", "0.00000000", "0", "0.00000000", "false", "release_assisted: tip"),
-              "Sending is paused until this node verifies the chain tip itself.");
+              "Sending is paused until your phone has checked the latest blocks on its own.");
     send_note(SUMMARY_SEND("123456789", "1.23456789", "0", "0.00000000", "0", "0.00000000", "false", "something_new"),
               "Sending is paused for a reason this app does not recognize.");
     send_note(SUMMARY("123456789", "1.23456789", "0", "0.00000000", "0", "0.00000000"), NULL);
@@ -1270,7 +1270,7 @@ static void test_funds_plain_words(void)
     fake.summary = SUMMARY_ALL;
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
     struct wallet_screen *s = snap();
-    long label = find_text(s, "Spendable now"), amount = find(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE);
+    long label = find_text(s, "Balance"), amount = find(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE);
     CHECK(label >= 0 && amount == label + 1 && !strcmp(text_at(s, amount), "2 ZCL"));
     CHECK(has("0.5 ZCL pending in 2 payments. The next arrives in 7 confirmations."));
     CHECK(has("20 ZCL of mined coins maturing, not yet spendable"));
@@ -1342,20 +1342,20 @@ static void test_funds_unready(void)
     CHECK(!strcmp(text_at(snap(), find(snap(), WALLET_ITEM_AMOUNT, WALLET_ACT_NONE)), "0 ZCL"));
     fake.summary = SUMMARY_STATE("ok", PRIVATE_OK("100000000", "1.00000000", "\"unready_zat\":0,\"unready\":\"0.00000000\",\"spendable_total_zat\":900000000,\"spendable_total\":\"9.00000000\","), "0", "0.00000000");
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
-    CHECK(has("One payment can use up to 1 ZCL, fee included") && !has("catches up"));
+    CHECK(has("You can send up to 1 ZCL at once, fee included") && !has("catches up"));
     CHECK(!strcmp(text_at(snap(), find(snap(), WALLET_ITEM_AMOUNT, WALLET_ACT_NONE)), "9 ZCL"));
     fake.summary = SUMMARY_STATE("ok", PRIVATE_OK("100000000", "1.00000000", "\"unready_zat\":0,\"unready\":\"0.00000000\",\"spendable_total_zat\":100000000,\"spendable_total\":\"1.00000000\","), "0", "0.00000000");
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
     CHECK(!has("in one payment") && !has("catches up"));
     fake.summary = SUMMARY_STATE("ok", PRIVATE_OK("100000000", "1.00000000", "\"unready_zat\":null,\"unready\":null,"), "0", "0.00000000");
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
-    CHECK(has("Amount waiting on the wallet unknown") && has("1 ZCL") && !has("catches up"));
+    CHECK(has("Funds received but not spendable yet: amount unknown") && has("1 ZCL") && !has("catches up"));
     fake.summary = SUMMARY_STATE("ok", PRIVATE_OK("100000000", "1.00000000", "\"unready_zat\":5,\"unready\":\"0.5\","), "0", "0.00000000");   /* a malformed amount is no reply */
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
     CHECK(has("Balance unknown") && !has("catches up"));
     fake.summary = SUMMARY_STATE("keys_unavailable", PRIVATE_HIDDEN, "10000000", "0.10000000");
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
-    CHECK(has("Private balance hidden while the wallet is locked") && has("Up to date at block 3000000") && !has("Catching up") && has("0.1 ZCL public") && !has("catches up") && !has("0 ZCL") && !has("unknown"));
+    CHECK(has("Your private balance is hidden because the wallet is locked") && has("Up to date at block 3000000") && !has("Catching up") && has("0.1 ZCL public") && !has("catches up") && !has("0 ZCL") && !has("unknown"));
     wallet_screens_close();
 }
 

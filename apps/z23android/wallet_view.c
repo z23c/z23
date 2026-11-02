@@ -16,13 +16,13 @@
 #define TEXT_PENDING_UNKNOWN "Pending amount unknown"
 #define TEXT_PUBLIC_UNKNOWN "Public amount unknown"
 #define TEXT_IMMATURE_UNKNOWN "Maturing amount unknown"
-#define TEXT_UNREADY_UNKNOWN "Amount waiting on the wallet unknown"
-#define TEXT_HIDDEN "Private balance hidden while the wallet is locked"
+#define TEXT_UNREADY_UNKNOWN "Funds received but not spendable yet: amount unknown"
+#define TEXT_HIDDEN "Your private balance is hidden because the wallet is locked"
 #define TEXT_SYNC_UNKNOWN "Sync state unknown"
-#define TEXT_SYNC_LOCKED "Wallet locked, so private amounts are hidden"
+#define TEXT_SYNC_LOCKED "The wallet is locked, so private amounts are not shown"
 #define TEXT_SEND_UNAVAILABLE "Sending is unavailable until the wallet state loads."
-#define TEXT_SEND_RELEASE "Sending is paused until this node verifies the chain tip itself."
-#define TEXT_SEND_STORE "Sending is paused because this node's progress store is not open."
+#define TEXT_SEND_RELEASE "Sending is paused until your phone has checked the latest blocks on its own."
+#define TEXT_SEND_STORE "Sending is paused because the wallet cannot save its progress right now."
 #define TEXT_SEND_UNKNOWN "Sending is paused for a reason this app does not recognize."
 
 /* The fields of a well-formed reply. Every one is validated before any line is rendered. The
@@ -251,7 +251,7 @@ static void render_unready(const struct summary *s, struct wallet_view *out)
     else if (s->unready_state == P_VALUE && s->unready > 0 && amount_text(s->unready, amount, sizeof(amount)))
         snprintf(out->unready_line, sizeof(out->unready_line), "%s ZCL received, not spendable yet", amount);
     if (s->total_state == P_VALUE && s->total > s->spendable && amount_text(s->spendable, amount, sizeof(amount)))
-        snprintf(out->total_line, sizeof(out->total_line), "One payment can use up to %s ZCL, fee included", amount);
+        snprintf(out->total_line, sizeof(out->total_line), "You can send up to %s ZCL at once, fee included", amount);
 }
 
 static void render_immature(const struct summary *s, struct wallet_view *out)
