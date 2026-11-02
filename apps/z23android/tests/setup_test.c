@@ -1535,7 +1535,7 @@ static void slow_exit_tests(void)
 }
 
 /* A node that outlasts the bound fails the create with NODE_BUSY. It is not started a second time; it is started once it is gone. */
-static void stuck_exit_tests(void)
+static void stuck_exit_late_tests(void)
 {
     struct fake f;
     struct wsu w;
@@ -1547,7 +1547,11 @@ static void stuck_exit_tests(void)
     assert(w.step == WSU_FAILED && w.failure == WSU_NODE_BUSY && f.script.calls == 0 && f.discards == 1);
     assert(f.now_ms >= 250000 && f.starts == 1 && f.starts_refused == 0 && f.running);
     wsu_destroy(&w);
-
+}
+static void stuck_exit_forever_tests(void)
+{
+    struct fake f;
+    struct wsu w;
     /* Alive through both waits: no start is issued while the old process exists. */
     fresh(&f, &w, true);
     f.exit_after_ms = 4 * STOP_BOUND_MS;
@@ -1564,7 +1568,11 @@ static void stuck_exit_tests(void)
     wsu_create_job(&w);
     assert(w.step == WSU_WORDS && f.starts == 2 && f.starts_refused == 0 && f.running);
     wsu_destroy(&w);
-
+}
+static void stuck_exit_resume_tests(void)
+{
+    struct fake f;
+    struct wsu w;
     /* The check after an interrupted setup, the node still exiting at the end of the wait: the node still starts once it is gone. */
     fresh(&f, &w, true);
     touch("wallet_key.blob");
@@ -1596,6 +1604,11 @@ static void failed_jobs_restart_node_tests(void)
         assert(w.step == WSU_FAILED && f.stops == 1 && f.starts == 1 && f.starts_refused == 0 && f.running);
         wsu_destroy(&w);
     }
+}
+static void failed_jobs_other_tests(void)
+{
+    struct fake f;
+    struct wsu w;
     /* No answer at all. */
     fresh(&f, &w, true);
     script_say(&f.script, false, "The node did not answer.");
@@ -1666,8 +1679,11 @@ int main(int argc, char **argv)
     recheck_and_intro_tests();
     screen_lock_notice_test();
     slow_exit_tests();
-    stuck_exit_tests();
+    stuck_exit_late_tests();
+    stuck_exit_forever_tests();
+    stuck_exit_resume_tests();
     failed_jobs_restart_node_tests();
+    failed_jobs_other_tests();
     forget("wallet_setup_kind");
     forget("wallet_key.blob");
     forget("wallet_setup_done");
