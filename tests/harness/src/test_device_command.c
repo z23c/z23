@@ -657,6 +657,7 @@ static int psk_source_shapes(struct psk_command_fixture *psk)
         ASSERT(psk_command_input(&input, psk, "absent", psk->host.proposal, true));
         ASSERT(command_capture(&psk->host.profile, "commit", &input, &reply, false));
         ASSERT(reply_mutated(&reply, false));
+        json_free(&reply);
         ASSERT(unlink(psk->source) == 0);
         ASSERT(mkdir(psk->source, 0700) == 0);
         ASSERT(command_capture(&psk->host.profile, "commit", &input, &reply, false));

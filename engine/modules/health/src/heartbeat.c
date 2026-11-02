@@ -391,7 +391,9 @@ bool health_dump_state_json(struct json_value *out, const char *key)
         json_push_kv_bool(&e, "periodic", snaps[i].periodic);
         json_push_kv_bool(&e, "currently_stalled", snaps[i].currently_stalled);
         json_push_back(&entries, &e);
+        json_free(&e);
     }
     json_push_kv(out, "entries", &entries);
+    json_free(&entries);
     return true;
 }

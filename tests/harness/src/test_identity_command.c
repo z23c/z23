@@ -1186,6 +1186,14 @@ static int t_keygen(void)
     IDC_CHECK("pubkey vector: 0xaa seed gives the fixture pubkey",
               vreply.exit_code == ZCL_COMMAND_EXIT_OK &&
               strcmp(idc_str(&vreply, "pubkey"), vhex) == 0);
+    zcl_command_reply_free(&vreply);
+    json_free(&vin);
+    zcl_command_reply_free(&pin_reply);
+    json_free(&pin);
+    zcl_command_reply_free(&refused);
+    json_free(&again);
+    zcl_command_reply_free(&reply);
+    json_free(&input);
     return failures;
 }
 
