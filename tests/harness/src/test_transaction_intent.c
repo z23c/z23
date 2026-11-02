@@ -42,6 +42,7 @@
 #include "jobs/reducer_frontier.h"
 #include "storage/coins_kv.h"
 #include "core/uint256.h"
+#include "util/thread_registry.h"
 
 #include <sqlite3.h>
 #include <stdatomic.h>
@@ -952,6 +953,8 @@ static int ti_async_cases(void)
     }
 
 _test_next:;
+    /* Reap the registry-owned async intent workers the cases started. */
+    (void)thread_registry_join_all(5);
     return failures;
 }
 
