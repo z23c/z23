@@ -2537,11 +2537,9 @@ ZCL_COMMAND_DEV_COMMAND(
     "REVERIFY_EMPTY_SELECTION or REVERIFY_SELECTION_BASE when it selected no "
     "group or selected against another base, and a pass "
     "is signed over bundle_sha256,bundle_verify,head,base,agent_verify. "
-    "--check=gate adds full lint first: the lint preparation land qualify "
-    "uses, then `make lint` with ZCL_LINT_TU_CACHE=0, then the same "
-    "agent-verify; timeout_s then defaults to 7200 and covers all of it; "
-    "REVERIFY_LINT_FAILED or REVERIFY_PREPARE_FAILED otherwise, and a pass "
-    "is signed over bundle_sha256,bundle_verify,head,base,lint,agent_verify. "
+    "--check=gate adds the lint preparation and full lint first (timeout_s "
+    "7200; REVERIFY_LINT_FAILED, REVERIFY_PREPARE_FAILED), signed over "
+    "bundle_sha256,bundle_verify,head,base,lint,agent_verify. "
     "Returns commit, base, "
     "file, functions, verdict, receipt.",
     65536,

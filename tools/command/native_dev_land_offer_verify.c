@@ -73,13 +73,13 @@
 
 #include "base/safe_alloc.h"
 #include "command/native_dev_land_qualify.h"
+#include "platform/clock.h"
 #include "platform/logical_cpu.h"
 #include "util/spawn.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <unistd.h>
 
 #define DLRV_OUT_MAX (256u * 1024u)
@@ -385,10 +385,7 @@ struct dlrv_run {
 
 static int64_t dlrv_now_ms(void)
 {
-    struct timespec ts;
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
-        return 0;
-    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    return clock_now_monotonic_ns() / 1000000;
 }
 
 /* Seconds left for the next child: the whole bound outside gate mode, the
