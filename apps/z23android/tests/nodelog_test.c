@@ -55,11 +55,11 @@ static void filter_cases(void)
     assert(forwarded() == 10);
     assert(!strcmp(seen[0], "[boot-stage] init -> datadir_locked"));
     assert(strstr(seen[1], "[boot] block index rebuilt") && levels[1] == 0);
-    assert(strstr(seen[4], "WARN") && levels[4] == 1);
+    assert(!strcmp(seen[4], "WARN [net] dial()") && levels[4] == 1);
     assert(strstr(seen[5], "Tor: bootstrapping"));
     assert(strstr(seen[6], "bootstrap 45%"));
     assert(strstr(seen[7], "handshake complete") && levels[7] == 0);
-    assert(strstr(seen[8], "ERROR") && levels[8] == 1);
+    assert(!strcmp(seen[8], "ERROR [wallet] load()") && levels[8] == 1);
     assert(!strstr(seen[9], "seeded") && strstr(seen[9], "db_open"));
     for (int i = 0; i < count; i++) assert(!strstr(seen[i], "spending key") && !strstr(seen[i], "mnemonic"));
     assert(!strcmp(zapp_nodelog_stage(&l), "loading the wallet"));
@@ -69,6 +69,75 @@ static void filter_cases(void)
     assert(!strcmp(zapp_nodelog_stage(&l), "saving data and stopping"));
     zapp_nodelog_line(&l, "[boot-stage] a -> not_a_stage\n", 100);
     assert(!strcmp(zapp_nodelog_stage(&l), "saving data and stopping"));
+}
+
+/* A warning or error that matched only its level word reaches logcat as the level, the domain and the function, never its text. */
+static void level_lines_hide_their_text(void)
+{
+    static const char *const sensitive[] = {
+        "2026-11-02T00:16:08Z ERROR [native.wallet] contexts/wallet/send.c:88 wnh_send(): failed paying zs1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+        "2026-11-02T00:16:08Z WARN  [native.wallet] contexts/wallet/tx.c:12 note_scan(): txid 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef not found",
+        "2026-11-02T00:16:08Z FAIL  [wallet.spend] contexts/wallet/spend.c:7 spend_check(): amount 12.34567890 ZCL to t1abcdefghijklmnopqrstuvwxyz1234567 refused",
+        "2026-11-02T00:16:08Z FATAL [db] src/db.c:5 db_open_all(): cannot read t1abcdefghijklmnopqrstuvwxyz1234567",
+    };
+    static const char *const expected[] = {"ERROR [native.wallet] wnh_send()", "WARN [native.wallet] note_scan()", "FAIL [wallet.spend] spend_check()", "FATAL [db] db_open_all()"};
+    struct zapp_nodelog l;
+    count = 0;
+    zapp_nodelog_init(&l, sink, NULL);
+    for (size_t i = 0; i < sizeof(sensitive) / sizeof(sensitive[0]); i++) {
+        zapp_nodelog_line(&l, sensitive[i], (int64_t)i * 1000);
+        assert(count == (int)i + 1 && !strcmp(seen[i], expected[i]) && levels[i] == 1);
+        assert(!strstr(seen[i], "zs1") && !strstr(seen[i], "t1abc") && !strstr(seen[i], "0123") && !strstr(seen[i], "12.3"));
+    }
+    /* Without a readable domain or function only the level is forwarded. */
+    count = 0;
+    zapp_nodelog_line(&l, "ERROR spent 5.5 ZCL for zs1abcdef", 9000);
+    zapp_nodelog_line(&l, "WARN [bad domain] spent 5.5 ZCL", 9001);
+    zapp_nodelog_line(&l, "ERROR [x] file.c:1 f(): zs1abc", 9002);
+    assert(count == 3 && !strcmp(seen[0], "ERROR") && !strcmp(seen[1], "WARN") && !strcmp(seen[2], "ERROR [x] f()"));
+}
+
+/* Progress words in the text of a warning do not carry the text out, and a header that says INFO is information whatever its text holds. */
+static void progress_words_do_not_leak(void)
+{
+    struct zapp_nodelog l;
+    count = 0;
+    zapp_nodelog_init(&l, sink, NULL);
+    zapp_nodelog_line(&l, "2026-11-02T00:16:08Z ERROR [native.wallet] send.c:88 wnh_send(): paying zs1qqqq failed after handshake", 0);
+    zapp_nodelog_line(&l, "2026-11-02T00:16:08Z WARN [wallet] w.c:2 f(): tor bootstrap of zs1qqqq restore", 1);
+    zapp_nodelog_line(&l, "2026-11-02T00:16:08Z FAIL [boot] b.c:3 g(): [boot] zs1qqqq", 2);
+    assert(count == 3 && !strcmp(seen[0], "ERROR [native.wallet] wnh_send()") && !strcmp(seen[1], "WARN [wallet] f()") &&
+           !strcmp(seen[2], "FAIL [boot] g()"));
+    count = 0;
+    zapp_nodelog_line(&l, "2026-11-02T00:16:08Z INFO [wallet] w.c:1 f(): FAILED [zs1qqqq]", 3000);
+    zapp_nodelog_line(&l, "2026-11-02T00:16:08Z INFO [wallet] w.c:1 f(): ERROR zs1qqqq", 3001);
+    assert(count == 0);
+    /* A line that does not begin with a header still reaches logcat as its level and nothing else. */
+    zapp_nodelog_line(&l, "wallet.c:5 FATAL: could not open zs1qqqq", 3001);
+    assert(count == 1 && !strcmp(seen[0], "FATAL") && levels[0] == 1);
+    count = 0;
+    /* A word that only contains a level is not a level. */
+    zapp_nodelog_line(&l, "2026-11-02T00:16:08Z INFO [wallet] w.c:1 f(): WARNING ERRORS FAILED zs1qqqq", 3002);
+    assert(count == 0);
+    /* Tor progress needs the Tor domain or prefix; a wallet line with "restore" and "bootstrap" in a word is not it. */
+    zapp_nodelog_line(&l, "2026-11-02T00:16:08Z INFO [wallet] w.c:1 f(): restore bootstrap data", 3003);
+    assert(count == 0);
+    /* A handshake is progress only from the net domain or the node's own peer lines. */
+    zapp_nodelog_line(&l, "2026-11-02T00:16:08Z INFO [wallet] w.c:1 f(): paid zs1qqqq after handshake", 3009);
+    zapp_nodelog_line(&l, "error: paying zs1qqqq failed after handshake", 3010);
+    assert(count == 0);
+    zapp_nodelog_line(&l, "Peer 203.0.113.9:8033 handshake complete", 3011);
+    zapp_nodelog_line(&l, "Addnode 203.0.113.9:8033 handshake complete", 3012);
+    assert(count == 2 && !strncmp(seen[0], "Peer ", 5) && !strncmp(seen[1], "Addnode ", 8));
+    count = 0;
+    /* Level and progress words match whole words only, and the Tor domain alone is not progress. */
+    zapp_nodelog_line(&l, "ERRORS zs1qqqq", 3005);
+    zapp_nodelog_line(&l, "x.c:1 WARNED about zs1qqqq", 3006);
+    zapp_nodelog_line(&l, "2026-11-02T00:16:08Z INFO [net] w.c:1 f(): handshakes zs1qqqq", 3007);
+    zapp_nodelog_line(&l, "2026-11-02T00:16:08Z INFO [tor] circuit built", 3008);
+    assert(count == 0);
+    zapp_nodelog_line(&l, "2026-11-02T00:16:08Z INFO [tor] bootstrap 90%", 3004);
+    assert(count == 1 && strstr(seen[0], "bootstrap 90%"));
 }
 
 static void limit_cases(void)
@@ -89,7 +158,7 @@ static void limit_cases(void)
     /* Forwarded text is capped. */
     char big[2000];
     memset(big, 'x', sizeof(big));
-    memcpy(big, "ERROR ", 6);
+    memcpy(big, "[boot] ", 7);
     big[sizeof(big) - 1] = 0;
     count = 0;
     zapp_nodelog_line(&l, big, 9000);
@@ -112,7 +181,7 @@ static void tail_cases(const char *dir)
     assert(fputs("ERROR [boot] db failed\n", f) >= 0 && fclose(f) == 0);
     for (int i = 0; i < 40 && forwarded() < 2; i++) { struct timespec p = {.tv_nsec = 100000000}; nanosleep(&p, NULL); }
     zapp_nodelog_stop(&l);
-    assert(count == 2 && strstr(seen[0], "datadir_locked") && strstr(seen[1], "db failed"));
+    assert(count == 2 && strstr(seen[0], "datadir_locked") && !strcmp(seen[1], "ERROR [boot]"));
     assert(!strcmp(zapp_nodelog_stage(&l), "preparing cryptography"));
     assert(unlink(file) == 0);
 }
@@ -121,6 +190,8 @@ int main(int argc, char **argv)
 {
     assert(argc == 2);
     filter_cases();
+    level_lines_hide_their_text();
+    progress_words_do_not_leak();
     limit_cases();
     tail_cases(argv[1]);
     puts("nodelog tests passed");

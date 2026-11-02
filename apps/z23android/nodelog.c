@@ -29,11 +29,14 @@ static const struct { const char *name, *doing; } stages[] = {
 };
 #define STAGES (sizeof(stages) / sizeof(stages[0]))
 
-/* Lines containing any of these are forwarded. */
-static const char *const wanted[] = {"[boot-stage]", "[boot]", "WARN", "ERROR", "FAIL", "FATAL", "handshake"};
 /* A line holding any of these is never forwarded, whatever else it says. The node should not log
  * secrets; this keeps key material out of logcat even if one ever does. */
 static const char *const secret[] = {"priv", "seed", "mnemonic", "spending key"};
+/* The levels a node line names in its header. The first four are warnings: they are forwarded as their level, their
+ * [domain] and their function only, whatever the text says, because the text can carry an address, a transaction id or an
+ * amount. */
+static const char *const levels[] = {"WARN", "ERROR", "FAIL", "FATAL", "INFO", "DEBUG", "TRACE"};
+#define WARNING_LEVELS 4
 
 static bool has_any(const char *s, const char *const *words, size_t count)
 {
@@ -43,9 +46,99 @@ static bool has_any(const char *s, const char *const *words, size_t count)
 }
 #define HAS_ANY(s, list) has_any(s, list, sizeof(list) / sizeof(list[0]))
 
-static bool explains_progress(const char *s)
+/* What a node line's header names: "TIME LEVEL [domain] file:line function(): text". Every part after the level is optional. */
+struct header { size_t level; char domain[48], function[64]; };
+
+static bool word_char(char c)
 {
-    return HAS_ANY(s, wanted) || (strcasestr(s, "tor") && strcasestr(s, "bootstrap"));
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+static const char *skip_blanks(const char *s)
+{
+    while (*s == ' ' || *s == '\t') ++s;
+    return s;
+}
+/* Whether the whole word appears in s, with no letter, digit or underscore either side. */
+static bool has_word(const char *s, const char *word)
+{
+    size_t n = strlen(word);
+    for (const char *at = strstr(s, word); at; at = strstr(at + 1, word))
+        if ((at == s || !word_char(at[-1])) && !word_char(at[n])) return true;
+    return false;
+}
+/* The index in levels of the word that starts the token at p, or the count when none does. */
+static size_t level_at(const char *p)
+{
+    size_t token = strcspn(p, " \t");
+    for (size_t i = 0; i < sizeof(levels) / sizeof(levels[0]); i++)
+        if (strlen(levels[i]) == token && !strncmp(p, levels[i], token)) return i;
+    return sizeof(levels) / sizeof(levels[0]);
+}
+/* "[domain]" at p: copies the name and returns the text after it, or NULL. */
+static const char *read_domain(const char *p, char *out, size_t cap)
+{
+    if (*p != '[') return NULL;
+    size_t n = strspn(p + 1, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-");
+    if (n == 0 || n >= cap || p[1 + n] != ']') return NULL;
+    memcpy(out, p + 1, n);
+    out[n] = 0;
+    return p + 2 + n;
+}
+/* "file:line function():" at p: copies the function name, or leaves it empty. */
+static void read_function(const char *p, char *out, size_t cap)
+{
+    size_t place = strcspn(p, " \t");
+    if (place < 3 || p[place - 1] < '0' || p[place - 1] > '9' || !memchr(p, ':', place)) return;
+    p = skip_blanks(p + place);
+    size_t n = strspn(p, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_");
+    if (n == 0 || n >= cap || strncmp(p + n, "():", 3) != 0) return;
+    memcpy(out, p, n);
+    out[n] = 0;
+}
+/* Reads the header at the start of line: an optional time token (it starts with a digit), then a level word. False when the
+ * line does not begin that way. */
+static bool read_header(const char *line, struct header *h)
+{
+    const char *p = skip_blanks(line);
+    memset(h, 0, sizeof(*h));
+    if (*p >= '0' && *p <= '9') p = skip_blanks(p + strcspn(p, " \t"));
+    h->level = level_at(p);
+    if (h->level == sizeof(levels) / sizeof(levels[0])) return false;
+    p = skip_blanks(p + strlen(levels[h->level]));
+    const char *after = read_domain(p, h->domain, sizeof(h->domain));
+    if (after) read_function(skip_blanks(after), h->function, sizeof(h->function));
+    return true;
+}
+/* Whether the line is a warning, and which: by its header when it has one, otherwise by the first warning word anywhere in
+ * it. A header that says INFO makes the line information, whatever its text holds. */
+static bool warning_level(const char *line, bool has_header, struct header *h)
+{
+    if (has_header) return h->level < WARNING_LEVELS;
+    for (size_t i = 0; i < WARNING_LEVELS; i++)
+        if (has_word(line, levels[i])) { h->level = i; return true; }
+    return false;
+}
+static bool starts_with(const char *s, const char *prefix, bool any_case)
+{
+    size_t n = strlen(prefix);
+    return any_case ? strncasecmp(s, prefix, n) == 0 : strncmp(s, prefix, n) == 0;
+}
+/* Whether a line that is not a warning explains boot progress: a boot stage or timing, Tor bootstrap, or a peer handshake from
+ * the net domain or from the node's own headerless peer lines. A handshake word anywhere else is only text. */
+static bool explains_progress(const char *line, bool has_header, const struct header *h)
+{
+    bool domain_boot = has_header && !strcmp(h->domain, "boot"), domain_tor = has_header && !strcmp(h->domain, "tor");
+    if (starts_with(line, "[boot-stage] ", false) || starts_with(line, "[boot]", false) || domain_boot) return true;
+    if ((domain_tor || starts_with(line, "Tor:", true)) && strcasestr(line, "bootstrap")) return true;
+    bool net = (has_header && !strcmp(h->domain, "net")) || starts_with(line, "Peer ", false) || starts_with(line, "Addnode ", false);
+    return net && has_word(line, "handshake");
+}
+/* "LEVEL [domain] function()": the parts of the header that were read, and nothing of the text. */
+static void level_summary(const struct header *h, char *out, size_t cap)
+{
+    size_t used = (size_t)snprintf(out, cap, "%s", levels[h->level]);
+    if (h->domain[0] && used < cap) used += (size_t)snprintf(out + used, cap - used, " [%s]", h->domain);
+    if (h->domain[0] && h->function[0] && used < cap) snprintf(out + used, cap - used, " %s()", h->function);
 }
 
 /* "[boot-stage] a -> b" names the stage b the node has just entered. */
@@ -76,10 +169,15 @@ void zapp_nodelog_line(struct zapp_nodelog *l, const char *line, int64_t now_ms)
     char text[ZAPP_NODELOG_LINE_MAX + 1];
     snprintf(text, sizeof(text), "%s", line);
     text[strcspn(text, "\r\n")] = 0;
-    if (!text[0] || !explains_progress(text) || HAS_ANY(text, secret)) return;
+    if (!text[0] || HAS_ANY(text, secret)) return;
+    struct header header;
+    bool has_header = read_header(text, &header), warning = warning_level(text, has_header, &header);
+    bool progress = !warning && explains_progress(text, has_header, &header);
+    if (!warning && !progress) return;
     if (!take_slot(l, now_ms)) return;
-    bool bad = strstr(text, "WARN") || strstr(text, "ERROR") || strstr(text, "FAIL") || strstr(text, "FATAL");
-    l->sink(l->sink_arg, bad ? 1 : 0, text);
+    char summary[ZAPP_NODELOG_LINE_MAX + 1];
+    if (warning) level_summary(&header, summary, sizeof(summary));
+    l->sink(l->sink_arg, warning ? 1 : 0, warning ? summary : text);
 }
 
 static void logcat_sink(void *arg, int level, const char *text)

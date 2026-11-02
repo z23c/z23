@@ -431,10 +431,13 @@ change hosts or spend funds.
   prerequisite: a preview leaves them out unless `PREVIEW_PARAMS=1` (then
   `vendor/params` or `PARAMS_DIR` must hold them, as for `make apk`).
 - A developer sees why the phone node is stuck without root: the app forwards
-  the node console log's boot stage changes, `[boot]` timings, warnings,
-  errors and failures, Tor bootstrap progress and peer handshakes to logcat,
-  at most 20 lines a second. `adb logcat -s z23node` shows them. Lines naming
-  keys, seeds or mnemonics are never forwarded.
+  the node console log's boot stage changes, `[boot]` timings, Tor bootstrap
+  progress and peer handshakes to logcat as written, at most 20 lines a second.
+  A warning, error or failure that is not one of those is forwarded as its level,
+  its `[domain]` and its function name only (`ERROR [native.wallet] wnh_send()`),
+  never its text, which can carry an address, a transaction id or an amount.
+  `adb logcat -s z23node` shows them. Lines naming keys, seeds or mnemonics are
+  never forwarded.
 - The host defaults to `--app org.z23.nativeapp`. Pass
   `--app org.z23.voicepreview` when testing the preview package, or the pairing
   offer reopens the production app.
