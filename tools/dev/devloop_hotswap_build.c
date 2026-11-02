@@ -2041,18 +2041,29 @@ static int hs_hotswap_discover(struct hs_hotswap_run *r, bool have_baseline)
     return HS_SWAP_PROCEED;
 }
 
+/* Reads the cached dependency baseline for hotswap and hotfork alike and
+ * stamps the input and dependency-hash timings; true when one was read. */
+static bool hs_baseline_read(const char *root, const char *cached_dep,
+                             struct hs_dep *before, size_t *before_n,
+                             int64_t started,
+                             struct zcl_devloop_hotswap_build_receipt *receipt)
+{
+    int64_t dependency_started = platform_time_monotonic_us();
+    receipt->inputs_us = dependency_started - started;
+    bool have_baseline = hs_depfile_read(root, cached_dep, before, before_n,
+                                         true);
+    receipt->dependency_hash_us =
+        platform_time_monotonic_us() - dependency_started;
+    return have_baseline;
+}
+
 /* Reads the cached baseline, tries the warm cache, then compiles. */
 static int hs_hotswap_resolve(struct hs_hotswap_run *r)
 {
-    int64_t dependency_started = platform_time_monotonic_us();
-    r->receipt->inputs_us = dependency_started - r->started;
-    bool have_baseline = hs_depfile_read(r->root, r->cached_dep, r->before,
-                                         &r->before_n, true);
-    r->receipt->dependency_hash_us =
-        platform_time_monotonic_us() - dependency_started;
-    if (hs_hotswap_warm_lookup(r, have_baseline))
-        return HS_SWAP_CACHED;
-    return hs_hotswap_discover(r, have_baseline);
+    bool have = hs_baseline_read(r->root, r->cached_dep, r->before,
+                                 &r->before_n, r->started, r->receipt);
+    return hs_hotswap_warm_lookup(r, have) ? HS_SWAP_CACHED
+                                           : hs_hotswap_discover(r, have);
 }
 
 /* Publishes the dependency baseline and checks the closure held still. */
@@ -2945,15 +2956,10 @@ static int hs_hotfork_discover(struct hs_hotfork_run *r, bool have_baseline)
 /* Reads the cached baseline, tries the warm cache, then compiles. */
 static int hs_hotfork_resolve(struct hs_hotfork_run *r)
 {
-    int64_t dependency_started = platform_time_monotonic_us();
-    r->receipt->inputs_us = dependency_started - r->started;
-    bool have_baseline = hs_depfile_read(r->root, r->cached_dep, r->before,
-                                         &r->before_n, true);
-    r->receipt->dependency_hash_us =
-        platform_time_monotonic_us() - dependency_started;
-    if (hs_hotfork_warm_lookup(r, have_baseline))
-        return HS_FORK_CACHED;
-    return hs_hotfork_discover(r, have_baseline);
+    bool have = hs_baseline_read(r->root, r->cached_dep, r->before,
+                                 &r->before_n, r->started, r->receipt);
+    return hs_hotfork_warm_lookup(r, have) ? HS_FORK_CACHED
+                                           : hs_hotfork_discover(r, have);
 }
 
 /* Publishes the dependency baseline and checks the closure held still. */
