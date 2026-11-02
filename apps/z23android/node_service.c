@@ -10,7 +10,7 @@
 
 #define TAG "z23"
 #define SERVICE_CLASS "org.z23.nativeapp.NodeService"
-enum { NOTIFICATION_ID = 1, IMPORTANCE_LOW = 2, FLAG_IMMUTABLE = 0x04000000,
+enum { NOTIFICATION_ID = 1, IMPORTANCE_LOW = 2, VISIBILITY_SECRET = -1, FLAG_IMMUTABLE = 0x04000000,
        SERVICE_TYPE_SPECIAL_USE = 0x40000000, START_NOT_STICKY = 2 };
 
 /* True and cleared when a Java exception is pending. */
@@ -60,6 +60,7 @@ static void create_channel(JNIEnv *env, jobject service)
                                   jstr(env, "notification"));
     jobject channel = manager ? new_object(env, "android/app/NotificationChannel",
         "(Ljava/lang/String;Ljava/lang/CharSequence;I)V", jstr(env, "node"), jstr(env, "Node"), IMPORTANCE_LOW) : NULL;
+    if (channel) (void)call_void(env, channel, "setLockscreenVisibility", "(I)V", VISIBILITY_SECRET);
     if (channel) (void)call_void(env, manager, "createNotificationChannel", "(Landroid/app/NotificationChannel;)V", channel);
 }
 /* A PendingIntent that opens the app. */
@@ -112,6 +113,8 @@ static jobject build_notification(JNIEnv *env, jobject service)
     (void)call_object(env, b, "setSmallIcon", sig, app_icon(env, service));
     snprintf(sig, sizeof(sig), "(Z)%s", builder_class);
     (void)call_object(env, b, "setOngoing", sig, 1);
+    snprintf(sig, sizeof(sig), "(I)%s", builder_class);
+    if (!call_object(env, b, "setVisibility", sig, VISIBILITY_SECRET)) return NULL;
     if (tap) {
         snprintf(sig, sizeof(sig), "(Landroid/app/PendingIntent;)%s", builder_class);
         (void)call_object(env, b, "setContentIntent", sig, tap);
@@ -126,6 +129,7 @@ static jobject minimal_notification(JNIEnv *env, jobject service)
     if (!b) return NULL;
     snprintf(sig, sizeof(sig), "(I)%s", builder_class);
     (void)call_object(env, b, "setSmallIcon", sig, stock_icon(env));
+    (void)call_object(env, b, "setVisibility", sig, VISIBILITY_SECRET);
     return call_object(env, b, "build", "()Landroid/app/Notification;");
 }
 static bool enter_foreground(JNIEnv *env, jobject service)

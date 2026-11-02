@@ -269,6 +269,8 @@ launch:
 HOST_TEST_BASE := $(SPEECH_JSON) ../../platform/modules/sha3/src/sha3.c
 test-host:
 	@mkdir -p '$(BUILD_DIR)'
+	$(HOST_CC) $(HOST_WARNINGS) tests/surface_test.c -o '$(BUILD_DIR)/surface-test'
+	'$(BUILD_DIR)/surface-test'
 	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../contexts/commons/packages/zsha256/include tests/params_test.c params.c params_install.c params_job.c \
 	  ../../contexts/commons/packages/zsha256/src/zsha256.c -Wl,--wrap=fsync -Wl,--wrap=write -Wl,--wrap=pread -Wl,--wrap=close -Wl,--wrap=calloc -Wl,--wrap=free -Wl,--wrap=pthread_create -pthread -o '$(BUILD_DIR)/params-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/params-test.XXXXXX'); \

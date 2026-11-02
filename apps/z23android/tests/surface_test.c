@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static char *slurp(const char *path)
 {
@@ -40,7 +41,7 @@ static void manifest_blocks_extraction(void)
     assert(!strstr(m, "android:debuggable=\"true\""));
     free(m);
     char *r = slurp("res/xml/data_extraction_rules.xml");
-    static const char *const domains[] = {"root", "file", "database", "sharedpref", "external"};
+    static const char *const domains[] = {"root", "file", "database", "sharedpref", "external", "device_root", "device_file", "device_database", "device_sharedpref"};
     const char *sections[] = {"<cloud-backup", "<device-transfer"};
     const char *ends[] = {"</cloud-backup>", "</device-transfer>"};
     for (size_t s = 0; s < 2; s++) {
@@ -70,7 +71,23 @@ static void manifest_exports_only_the_launcher(void)
     free(m);
 }
 
-/* A file that creates an EditText also asks the keyboard not to learn from it and not to suggest. */
+/* Counts lines of src that contain every one of the needles. */
+static size_t lines_with(const char *src, const char *a, const char *b, const char *c)
+{
+    size_t n = 0;
+    for (const char *p = src; *p;) {
+        const char *eol = strchr(p, '\n');
+        size_t len = eol ? (size_t)(eol - p) : strlen(p);
+        char line[1024];
+        if (len >= sizeof(line)) len = sizeof(line) - 1;
+        memcpy(line, p, len); line[len] = 0;
+        if (strstr(line, a) && (!b || strstr(line, b)) && (!c || strstr(line, c))) n++;
+        p += eol ? len + 1 : len;
+    }
+    return n;
+}
+/* Every EditText a file creates is given a no-suggestions input type and IME_FLAG_NO_PERSONALIZED_LEARNING, and a failed
+ * flag call is not discarded. native_ui.c styles both of its fields through style_prompt. */
 static void text_entry_is_private(void)
 {
     DIR *dir = opendir(".");
@@ -80,22 +97,42 @@ static void text_entry_is_private(void)
         size_t n = strlen(e->d_name);
         if (n < 3 || strcmp(e->d_name + n - 2, ".c")) continue;
         char *src = slurp(e->d_name);
-        if (strstr(src, "android/widget/EditText")) {
-            fields++;
-            if (!strstr(src, "setImeOptions") || !strstr(src, "0x1000000")) { fprintf(stderr, "%s: EditText without IME_FLAG_NO_PERSONALIZED_LEARNING\n", e->d_name); abort(); }
-            if (!strstr(src, "setInputType")) { fprintf(stderr, "%s: EditText without an input type that disables suggestions\n", e->d_name); abort(); }
+        size_t created = count(src, "android/widget/EditText");
+        if (created) {
+            size_t ime = lines_with(src, "setImeOptions", "0x1000000", NULL) + lines_with(src, "setImeOptions", "IME_NO_LEARNING", NULL);
+            size_t type = lines_with(src, "setInputType", NULL, NULL);
+            size_t helper_calls = count(src, "style_prompt(env, ");
+            if (helper_calls) { ime = ime - 1 + helper_calls; type = type - 1 + helper_calls; }
+            fields += created;
+            if (ime < created) { fprintf(stderr, "%s: %zu EditText fields, %zu with IME_FLAG_NO_PERSONALIZED_LEARNING\n", e->d_name, created, ime); abort(); }
+            if (type < created) { fprintf(stderr, "%s: %zu EditText fields, %zu with an input type\n", e->d_name, created, type); abort(); }
+            if (lines_with(src, "(void)", "setImeOptions", NULL) || lines_with(src, "(void)", "setInputType", NULL)) {
+                fprintf(stderr, "%s: the result of an IME flag call is discarded\n", e->d_name); abort();
+            }
         }
         free(src);
     }
     closedir(dir);
-    assert(fields >= 4);
+    assert(fields >= 6);
 }
 
-int main(void)
+/* The node notification and its channel are secret on the lock screen. */
+static void node_notification_is_secret(void)
 {
+    char *src = slurp("node_service.c");
+    require(src, "VISIBILITY_SECRET = -1", "Notification.VISIBILITY_SECRET");
+    require(src, "\"setLockscreenVisibility\"", "channel lock screen visibility");
+    assert(lines_with(src, "\"setVisibility\"", "VISIBILITY_SECRET", NULL) >= 2);
+    free(src);
+}
+
+int main(int argc, char **argv)
+{
+    if (argc > 1 && chdir(argv[1])) { perror(argv[1]); return 1; }
     manifest_blocks_extraction();
     manifest_exports_only_the_launcher();
     text_entry_is_private();
+    node_notification_is_secret();
     puts("surface_test: ok");
     return 0;
 }

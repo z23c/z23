@@ -251,8 +251,8 @@ static bool build_caption(JNIEnv *env, jobject panel)
     (void)call_void(env, field, "setTextColor", "(I)V", COLOR_TEXT);
     (void)call_void(env, field, "setHintTextColor", "(I)V", (jint)0xff9e9e9e);
     (void)call_void(env, field, "setMaxLines", "(I)V", 2);
-    (void)call_void(env, field, "setInputType", "(I)V", 0xA0001);
-    (void)call_void(env, field, "setImeOptions", "(I)V", 0x1000000);
+    if (!call_void(env, field, "setInputType", "(I)V", 0xA0001) ||
+        !call_void(env, field, "setImeOptions", "(I)V", 0x1000000)) return false;
     jstring hint = make_string(env, "Caption (optional)");
     if (hint) (void)call_void(env, field, "setHint", "(Ljava/lang/CharSequence;)V", hint);
     return place_linear(env, panel, field, MATCH, 0.0f, 8);
