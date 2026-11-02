@@ -671,6 +671,56 @@ bool domain_consensus_eval_script(struct script_stack *stack,
     return set_script_success(serror);
 }
 
+/* True when the stack top is a true script value; SCRIPT_ERR_EVAL_FALSE otherwise. */
+static bool script_stack_top_is_true(struct script_stack *stack,
+                                     ScriptError *serror)
+{
+    if (stack->count == 0)
+        return set_script_error(serror, SCRIPT_ERR_EVAL_FALSE);
+    if (!cast_to_bool(stack_top(stack, -1)))
+        return set_script_error(serror, SCRIPT_ERR_EVAL_FALSE);
+    return true;
+}
+
+/* P2SH redeem-script execution when required, then the clean-stack rule. */
+static bool verify_p2sh_redeem_and_cleanstack(struct script_stack *stack,
+                                              struct script_stack *stack_copy,
+                                              const struct script *script_sig,
+                                              const struct script *script_pub_key,
+                                              unsigned int flags,
+                                              const struct sig_checker *checker,
+                                              uint32_t consensus_branch_id,
+                                              ScriptError *serror)
+{
+    if ((flags & SCRIPT_VERIFY_P2SH) &&
+        script_is_p2sh(script_pub_key)) {
+        if (!script_is_push_only(script_sig))
+            return set_script_error(serror, SCRIPT_ERR_SIG_PUSHONLY);
+        if (!stack_copy_active(stack, stack_copy))
+            return set_script_error(serror, SCRIPT_ERR_UNKNOWN_ERROR);
+        assert(stack->count > 0);
+        struct stack_item *serialized = stack_top(stack, -1);
+        struct script pubkey2;
+        script_set(&pubkey2, serialized->data, serialized->size);
+        stack_pop(stack);
+        bool eval_ok = domain_consensus_eval_script(
+            stack, &pubkey2, flags, checker, consensus_branch_id, serror);
+        if (!eval_ok)
+            return eval_ok;
+        bool top_true = script_stack_top_is_true(stack, serror);
+        if (!top_true)
+            return top_true;
+    }
+
+    if ((flags & SCRIPT_VERIFY_CLEANSTACK) != 0) {
+        assert((flags & SCRIPT_VERIFY_P2SH) != 0);
+        if (stack->count != 1)
+            return set_script_error(serror, SCRIPT_ERR_CLEANSTACK);
+    }
+
+    return set_script_success(serror);
+}
+
 bool domain_consensus_verify_script(const struct script *script_sig,
                                     const struct script *script_pub_key,
                                     unsigned int flags,
@@ -704,36 +754,11 @@ bool domain_consensus_verify_script(const struct script *script_sig,
                                        consensus_branch_id, serror))
         return false;
 
-    if (stack.count == 0)
-        return set_script_error(serror, SCRIPT_ERR_EVAL_FALSE);
-    if (!cast_to_bool(stack_top(&stack, -1)))
-        return set_script_error(serror, SCRIPT_ERR_EVAL_FALSE);
+    bool top_true = script_stack_top_is_true(&stack, serror);
+    if (!top_true)
+        return false;
 
-    if ((flags & SCRIPT_VERIFY_P2SH) &&
-        script_is_p2sh(script_pub_key)) {
-        if (!script_is_push_only(script_sig))
-            return set_script_error(serror, SCRIPT_ERR_SIG_PUSHONLY);
-        if (!stack_copy_active(&stack, &stack_copy))
-            return set_script_error(serror, SCRIPT_ERR_UNKNOWN_ERROR);
-        assert(stack.count > 0);
-        struct stack_item *serialized = stack_top(&stack, -1);
-        struct script pubkey2;
-        script_set(&pubkey2, serialized->data, serialized->size);
-        stack_pop(&stack);
-        if (!domain_consensus_eval_script(&stack, &pubkey2, flags, checker,
-                                           consensus_branch_id, serror))
-            return false;
-        if (stack.count == 0)
-            return set_script_error(serror, SCRIPT_ERR_EVAL_FALSE);
-        if (!cast_to_bool(stack_top(&stack, -1)))
-            return set_script_error(serror, SCRIPT_ERR_EVAL_FALSE);
-    }
-
-    if ((flags & SCRIPT_VERIFY_CLEANSTACK) != 0) {
-        assert((flags & SCRIPT_VERIFY_P2SH) != 0);
-        if (stack.count != 1)
-            return set_script_error(serror, SCRIPT_ERR_CLEANSTACK);
-    }
-
-    return set_script_success(serror);
+    return verify_p2sh_redeem_and_cleanstack(
+        &stack, &stack_copy, script_sig, script_pub_key, flags, checker,
+        consensus_branch_id, serror);
 }
