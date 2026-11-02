@@ -110,6 +110,15 @@ static bool log_row_hash_match(sqlite3 *db, int height,
     return true;
 }
 
+/* The best-header chain can hold a second entry for a block the block map
+ * already owns (same hash, different pointer), so blocks compare by hash. */
+static bool same_block(const struct block_index *a, const struct block_index *b)
+{
+    return a == b ||
+           (a && b && a->phashBlock && b->phashBlock &&
+            uint256_eq(a->phashBlock, b->phashBlock));
+}
+
 enum { FORK_WALK_MAX = 256 };
 
 /* The deepest ancestor of the published tip that the best-header chain still
@@ -124,7 +133,7 @@ static struct block_index *fork_point_below_tip(struct block_index *best_header,
     struct block_index *t = tip;
     for (int i = 0; t && i < FORK_WALK_MAX; i++) {
         if (t->nHeight <= best_header->nHeight &&
-            block_index_get_ancestor(best_header, t->nHeight) == t)
+            same_block(block_index_get_ancestor(best_header, t->nHeight), t))
             return t == tip ? NULL : t;
         t = t->pprev;
     }
@@ -304,19 +313,17 @@ static bool audit_row_above(sqlite3 *db, struct block_index *best_header,
     return true;
 }
 
-/* The fork point owns the audit when the tip failed, or when the window holds
- * no child of it: a row above a tip that nothing extends would otherwise be
- * rewound on every pass. */
+/* The fork point owns the audit when the window holds no child of the served
+ * tip: a row above a tip that nothing extends would otherwise be rewound on
+ * every pass. A failed tip never has a window child. */
 static bool fork_owns_audit(struct active_chain *chain,
                             struct block_index *tip,
                             struct block_index *fork)
 {
     if (!fork)
         return false;
-    if (block_has_any_failure(tip))
-        return true;
     struct block_index *next = active_chain_at(chain, tip->nHeight + 1);
-    return !next || next->pprev != tip;
+    return !next || !same_block(next->pprev, tip);
 }
 
 bool header_admit_forward_rewind_target(sqlite3 *db,

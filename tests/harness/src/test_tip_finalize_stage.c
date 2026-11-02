@@ -2875,6 +2875,58 @@ static int case_reorg_stale_fork_point(bool failed)
     return failures;
 }
 
+/* The best-header chain reaches the served tip T through a second entry with
+ * T hash (window_dup_data_rescued), and header_admit holds a stale sibling X at
+ * the next height whose block has an empty window slot. The tip is on the
+ * best-header chain, so the audit must not hand the repair to the shared
+ * parent: X is rewound exactly once and its row becomes Y. */
+static int case_reorg_stale_fork_duplicate(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_tf sc;
+    reducer_frontier_test_set_compiled_anchor(0);
+    TF_CHECK("stale_dup: setup",
+             tf_setup("stale_dup", 3, TF_FAIL_NONE, -1,
+                      dir, sizeof(dir), &ms, &sc) == 0);
+    TF_CHECK("stale_dup: drain finalizes rows 0..2",
+             tip_finalize_stage_drain(100) == 3);
+    TF_CHECK("stale_dup: header_admit init", header_admit_stage_init(&ms));
+
+    struct block_index x, y, dup;
+    struct uint256 hx, hy;
+    stale_fork_block(&x, &hx, &sc.blocks[3], 4, 0xf4, 40, BLOCK_VALID_HEADER);
+    TF_CHECK("stale_dup: X enters the block map",
+             test_block_map_insert(&ms.map_block_index, &hx, &x));
+    ms.pindex_best_header = &x;
+    TF_CHECK("stale_dup: header_admit logs the stale sibling X",
+             header_admit_stage_drain(100) == 5 &&
+             header_admit_stage_has_record(4, &hx));
+
+    dup = sc.blocks[3];
+    stale_fork_block(&y, &hy, &dup, 4, 0xf5, 41, BLOCK_VALID_HEADER);
+    TF_CHECK("stale_dup: Y enters the block map",
+             test_block_map_insert(&ms.map_block_index, &hy, &y));
+    ms.pindex_best_header = &y;
+    sqlite3 *db = progress_store_db();
+    TF_CHECK("stale_dup: downstream cursors sit past X",
+             seed_cursor_tf(db, "validate_headers", 5) &&
+             seed_cursor_tf(db, "body_fetch", 5));
+
+    uint64_t ha0 = header_admit_stage_reorg_rewind_total();
+    for (int i = 0; i < 4; i++)
+        header_admit_stage_step_once();
+    TF_CHECK("stale_dup: exactly one header_admit rewind",
+             header_admit_stage_reorg_rewind_total() == ha0 + 1);
+    TF_CHECK("stale_dup: row 4 becomes Y",
+             header_admit_stage_has_record(4, &hy) &&
+             !header_admit_stage_has_record(4, &hx));
+
+    header_admit_stage_shutdown();
+    tf_teardown(dir, &ms, &sc);
+    reducer_frontier_test_set_compiled_anchor(-1);
+    return failures;
+}
+
 /* The new block already has its body when the rewind fires: the same step
  * re-finalizes the fork row and publishes the new block, so the served tip
  * leaves the failed block for the new one and nothing rewinds again. */
@@ -3095,6 +3147,7 @@ int test_tip_finalize_stage(void)
     failures += case_reorg_stale_fork_point(true);
 
     failures += case_reorg_stale_fork_point(false);
+    failures += case_reorg_stale_fork_duplicate();
 
     failures += case_reorg_stale_row_body_first();
 
