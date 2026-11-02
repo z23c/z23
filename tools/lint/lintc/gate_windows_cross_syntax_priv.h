@@ -72,6 +72,10 @@ int wcs_cache_compile(const char *log, const char *rcf, const char *cc,
 int wcs_cache_counts(int *h, int *m, int *s);
 void wcs_cache_summary(void);
 
+/* cross-worktree shared-store proof (gate_windows_cross_syntax_selftest_shared.c) */
+int wcs_selftest_shared_store(const char *base, const char *stub,
+                              const char *flags);
+
 /* flow (main gate file) */
 int wcs_begin(int selftest_only);
 

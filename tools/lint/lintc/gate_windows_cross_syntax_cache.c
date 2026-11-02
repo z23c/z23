@@ -169,6 +169,16 @@ static int cache_gate_root(const char *gate, const char *cachedir, char *out,
         return ovf(snprintf(out, cap, "%s/%s", cachedir, gate), cap);
     if (ov && ov[0])
         return ovf(snprintf(out, cap, "%s/%s", ov, gate), cap);
+    /* Default: one store per host user, shared by every worktree, so a fresh
+     * worktree with the same bytes hits. The key (salt + source sha) holds
+     * no worktree path: sources and -I roots are repo-relative. */
+    const char *xdg = getenv("XDG_CACHE_HOME");
+    const char *home = getenv("HOME");
+    if (xdg && xdg[0] == '/')
+        return ovf(snprintf(out, cap, "%s/z23/lint-tu/%s", xdg, gate), cap);
+    if (home && home[0] == '/')
+        return ovf(snprintf(out, cap, "%s/.cache/z23/lint-tu/%s", home, gate),
+                   cap);
     return ovf(snprintf(out, cap, ".cache/lint-tu/%s", gate), cap);
 }
 

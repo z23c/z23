@@ -365,7 +365,8 @@ static int cache_proofs_synthetic(const char *base, const char *root,
     if (rc) return rc;
     rc = cps_warm(base, root, srclist, stub, flags, runs, &a);
     if (rc) return rc;
-    return cps_edits(base, root, srclist, stub, flags);
+    rc = cps_edits(base, root, srclist, stub, flags);
+    return rc ? rc : wcs_selftest_shared_store(base, stub, flags);
 }
 
 static int cache_proof_disabled(const char *base, const char *root,
@@ -551,7 +552,9 @@ static int cache_selftest(const char *cc, const char *flags_nul,
            "edits bust all 16, a\n      .c edit busts exactly 1 and "
            "reverting it hits again, a stored\n      FAIL replays as FAIL, "
            "ZCL_LINT_TU_CACHE=0 stores none, and\n"
-           "      %s replays a real TU byte-for-byte\n", cc);
+           "      %s replays a real TU byte-for-byte, and the default store lives\n"
+           "      under the host cache root so a second tree with the same bytes "
+           "hits\n      while a changed header there misses\n", cc);
     return 0;
 }
 
