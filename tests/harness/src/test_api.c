@@ -10,6 +10,7 @@
 
 #include "test/api_test_fixtures.h"
 #include "services/chain_state_service.h"
+#include "services/chain_evidence_authority_service.h"
 
 int test_api(void)
 {
@@ -39,6 +40,8 @@ int test_api(void)
     failures += api_resource_reads_focused_tests();
     failures += api_access_focused_tests();
 
+    /* Reap the one-shot evidence-maintenance thread health reads spawn. */
+    chain_evidence_maintain_quiesce();
     bool workers_stopped = api_test_stop_background_workers();
     printf("api: detached background workers stop before group return... %s\n",
            workers_stopped ? "OK" : "FAIL");

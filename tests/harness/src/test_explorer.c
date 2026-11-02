@@ -6,6 +6,8 @@
 #include "platform/clock.h"
 #include "test/test_core.h"
 #include "test/api_test_fixtures.h"
+#include "services/chain_evidence_authority_service.h"
+#include "util/thread_registry.h"
 #include "../../../contexts/explorer/controllers/src/explorer_controller_internal.h"
 #include "encoding/utilstrencodings.h"
 #include "core/uint256.h"
@@ -2341,5 +2343,9 @@ int test_explorer(void)
     failures += ex_case_38();
     failures += ex_case_39();
     failures += ex_case_40();
+    /* Reap the one-shot evidence-maintenance run and the registry-owned hodl
+     * refresh worker so no finished thread outlives the group unjoined. */
+    chain_evidence_maintain_quiesce();
+    (void)thread_registry_join_all(5);
     return failures;
 }

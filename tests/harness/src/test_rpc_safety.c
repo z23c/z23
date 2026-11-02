@@ -34,6 +34,7 @@
 #include "storage/progress_store.h"
 #include "support/cleanse.h"
 #include "util/safe_alloc.h"
+#include "util/thread_registry.h"
 #include "validation/main_state.h"
 #include "validation/txmempool.h"
 #include "wallet/wallet.h"
@@ -2260,6 +2261,8 @@ int test_rpc_safety(void)
     /* parse_amount arithmetic guards: see rs_check_parse_amount_guards. */
     failures += rs_check_parse_amount_guards();
     failures += rs_unlock_timeout_width();
+    /* Reap the registry-owned wallet auto-lock timers the unlock cases armed. */
+    (void)thread_registry_join_all(5);
 #if defined(__GLIBC__) && !defined(__SANITIZE_ADDRESS__)
     failures += t_listunspent_frees_filtered_rows();
 #endif

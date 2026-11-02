@@ -19,6 +19,7 @@
 #include "config/boot_bundle_fetch.h"
 #include "net/rom_fetch.h"
 #include "net/rom_seed.h"
+#include "util/thread_registry.h"
 #include "platform/time_compat.h"
 
 #include <fcntl.h>
@@ -179,5 +180,8 @@ int test_boot_bundle_landed(void)
     int failures = 0;
     failures += bl_case_offpath_and_stamp();
     failures += bl_case_corrupt_unstamped();
+    /* Reap the registry-owned reseed workers the cases spawned. */
+    boot_bundle_fetch_reseed_wait();
+    (void)thread_registry_join_all(5);
     return failures;
 }

@@ -35,6 +35,7 @@
 #include "chain/checkpoints.h"
 #include "net/rom_fetch.h"
 #include "net/rom_seed.h"
+#include "util/thread_registry.h"
 #include "net/file_service.h"
 #include "encoding/utilstrencodings.h"
 #include "json/json.h"
@@ -1747,6 +1748,9 @@ int test_boot_bundle_fetch(void)
     failures += case_manifest_probe_oom_spawns_nothing();
     failures += case_discovery();
     failures += case_discovery_outcome_persists();
+    /* Reap the registry-owned reseed workers the cases spawned. */
+    boot_bundle_fetch_reseed_wait();
+    (void)thread_registry_join_all(5);
     printf("=== boot_bundle_fetch: %d failure(s) ===\n", failures);
     return failures;
 }
