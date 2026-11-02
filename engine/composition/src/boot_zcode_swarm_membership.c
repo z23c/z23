@@ -14,6 +14,7 @@
 #include "vcs/zcode_work_node.h"
 
 #include "core/random.h"
+#include "crypto/common.h"
 #include "net/netaddr.h"
 #include "net/noise_transport.h"
 
@@ -74,9 +75,7 @@ bool boot_zcode_swarm_peer_key(const struct p2p_node *node, uint8_t out[33])
         }
         (void)pthread_once(&s_session_salt_once, boot_zcode_swarm_salt_init);
         unsigned char id[8];
-        uint64_t conn = (uint64_t)node->id;
-        for (size_t i = 0; i < sizeof(id); i++)
-            id[i] = (unsigned char)(conn >> (8 * i));
+        WriteLE64(id, (uint64_t)node->id);
         boot_zcode_swarm_key_hash(ZCODE_SWARM_KEY_DOMAIN_CONN, id, sizeof(id),
                                   s_session_salt, sizeof(s_session_salt), out);
         return true;
