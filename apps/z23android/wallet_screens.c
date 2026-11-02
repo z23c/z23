@@ -197,11 +197,16 @@ static void funds_lines(struct wallet_screen *s, const struct data *d)
     if (d->view.send[0]) note(s, d->view.send);
 }
 
-/* What a node that gave no answer is called: stopped when its process is known not to run, otherwise not answering. */
-static const char *silent_node_line(void)
+/* A node that gave no answer. A process known to run is starting or busy: Start would only be refused, so the owner is told to
+ * wait. Otherwise it is stopped, or not answering when the app cannot tell, and Start is offered. */
+static void silent_node_items(struct wallet_screen *s)
 {
-    bool stopped = st.env.node_running && !st.env.node_running(st.env.ctx);
-    return stopped ? "Node stopped. Start it to see your funds." : "The node is not answering. Start it to see your funds.";
+    if (st.env.node_running && st.env.node_running(st.env.ctx)) {
+        line(s, "Waiting for your node. It is running and shows your balance as soon as it answers; after a restart that takes a few minutes.");
+        return;
+    }
+    line(s, st.env.node_running ? "Node stopped. Start it to see your funds." : "The node is not answering. Start it to see your funds.");
+    button(s, WALLET_ACT_START_NODE, "Start node");
 }
 static void funds_items(struct wallet_screen *s)
 {
@@ -209,10 +214,8 @@ static void funds_items(struct wallet_screen *s)
     title(s, "Wallet");
     if (d->scan_note[0]) note(s, d->scan_note);
     if (!d->funds_loaded) line(s, "Loading…");
-    else if (d->node_silent) {
-        line(s, silent_node_line());
-        button(s, WALLET_ACT_START_NODE, "Start node");
-    } else funds_lines(s, d);
+    else if (d->node_silent) silent_node_items(s);
+    else funds_lines(s, d);
     if (d->fleet_loaded && !d->node_silent) line(s, d->fleet_fresh ? d->fleet : WALLET_FLEET_UNCHECKED);
     button(s, WALLET_ACT_RECEIVE, "Receive");
     button(s, WALLET_ACT_SEND, d->scan_note[0] ? "Scan again" : "Send");

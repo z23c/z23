@@ -298,9 +298,10 @@ static void funds_no_extra_lines(void)
 }
 static void funds_node_silent(void)
 {
-    fake.summary = NODE_UNAVAILABLE_ERROR;    /* a node that does not answer: one line and Start node, never a zero that was not read */
+    fake.summary = NODE_UNAVAILABLE_ERROR;    /* a stopped node that does not answer: one line and Start node, never a zero that was not read */
+    fake.node_up = false;
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
-    CHECK(has("The node is not answering. Start it to see your funds.") && !has("unknown") && !has("ZCL") && !has("could not be read"));
+    CHECK(has("Node stopped. Start it to see your funds.") && !has("unknown") && !has("ZCL") && !has("could not be read"));
     CHECK(find(snap(), WALLET_ITEM_AMOUNT, WALLET_ACT_NONE) < 0 && find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_START_NODE) >= 0);
     int silent_ops = fake.op_count;
     tap(WALLET_ACT_START_NODE, 0, WALLET_START_NODE);              /* the shell hands the start to the controller; nothing else runs */
@@ -308,18 +309,21 @@ static void funds_node_silent(void)
 
     fake.summary = "{\"ok\":false}\nThe command timed out.";                       /* so does one that takes too long */
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
-    CHECK(has("The node is not answering. Start it to see your funds.") && find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_START_NODE) >= 0);
+    CHECK(has("Node stopped. Start it to see your funds.") && find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_START_NODE) >= 0);
+    fake.node_up = true;
 }
-/* A node that gave no answer is "stopped" only when its process is known not to run; Start node is offered either way. */
-static void funds_node_stopped_or_not_answering(void)
+/* A node that gave no answer is "stopped", with Start node, only when its process is known not to run. A running process is
+ * starting or busy: the owner is told to wait and Start is not offered, because the controller would refuse it. */
+static void funds_node_stopped_or_starting(void)
 {
     fake.summary = NODE_UNAVAILABLE_ERROR;
     fake.node_up = false;
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
-    CHECK(has("Node stopped. Start it to see your funds.") && !has("not answering") && find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_START_NODE) >= 0);
+    CHECK(has("Node stopped. Start it to see your funds.") && !has("Waiting for your node") && find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_START_NODE) >= 0);
     fake.node_up = true;
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
-    CHECK(has("The node is not answering. Start it to see your funds.") && !has("Node stopped") && find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_START_NODE) >= 0);
+    CHECK(has("Waiting for your node. It is running") && !has("Node stopped") && !has("Start it") && !has("ZCL"));
+    CHECK(find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_START_NODE) < 0 && find(snap(), WALLET_ITEM_AMOUNT, WALLET_ACT_NONE) < 0);
 }
 static void funds_node_answers(void)
 {
@@ -351,7 +355,7 @@ static void test_funds_replies(void)
     start(false);
     funds_no_extra_lines();
     funds_node_silent();
-    funds_node_stopped_or_not_answering();
+    funds_node_stopped_or_starting();
     funds_node_answers();
     int before = fake.op_count;               /* Send opens the Send screen and starts nothing */
     tap(WALLET_ACT_SEND, 0, WALLET_SEND);
@@ -444,7 +448,7 @@ static void test_refresh_and_stale(void)
     fake.now += 1;
     fake.summary = NODE_UNAVAILABLE_ERROR;         /* the node stops answering */
     wallet_screens_tick();
-    CHECK(count_ops("summary") == 2 && has("not answering") && !has("Up to date"));
+    CHECK(count_ops("summary") == 2 && has("Waiting for your node") && !has("Up to date"));
     fake.summary = GOOD_SUMMARY;
     fake.now += WALLET_REFRESH_MS;
     wallet_screens_tick();
