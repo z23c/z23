@@ -34,6 +34,7 @@
 #include "sapling/zip32.h"
 #include "support/cleanse.h"
 #include "util/safe_alloc.h"
+#include "util/thread_registry.h"
 #include "wallet/keystore.h"
 #include "wallet/sapling_keys.h"
 #include "wallet/wallet.h"
@@ -56,6 +57,7 @@
 #define WLS_KEYS 3
 #define WLS_VALUE ((uint64_t)125000000)
 #define WLS_DUMP_CAP 65536
+#define WLS_JOIN_SECONDS 10
 
 static const char k_schema[] =
     "CREATE TABLE wallet_keys("
@@ -109,6 +111,14 @@ static int wls_sealed_rows(void)
 static bool wls_locked(void)
 {
     return !wallet_lock_is_unlocked();
+}
+
+/* The autolock timer is registry-owned (NULL out_tid), so a bounded join_all
+ * reaps it. Joining orders the timer's wipe before every secret inspection
+ * that follows; false means a registered thread outlived the bound. */
+static bool wls_join_timers(void)
+{
+    return thread_registry_join_all(WLS_JOIN_SECONDS) == 0;
 }
 
 static bool wls_zero(const void *p, size_t n)
@@ -523,6 +533,7 @@ static int test_timeout_and_refusal_paths_cleanse(void)
         ASSERT(wallet_lock_arm_timeout(f.w, 1).ok);
         struct timespec nap = { .tv_sec = 2, .tv_nsec = 500000000L };
         while (nanosleep(&nap, &nap) != 0) { /* retry interrupted sleep */ }
+        ASSERT(wls_join_timers());
         ASSERT(wls_locked());
         ASSERT(wls_secrets_absent(f.w));
         ASSERT(wls_viewing_intact(&f, f.w, WLS_KEYS));
