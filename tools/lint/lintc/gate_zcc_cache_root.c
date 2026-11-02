@@ -167,15 +167,27 @@ static int pk_find_cc(char out[PATH_MAX])
     return 1;
 }
 
-/* A byte copy of the real driver under the non-stock name x-gcc. A copy (not a
- * symlink, which resolves back to the stock name) is a launcher the name test
- * must not trust; COMPILER_PATH lets the relocated copy still find cc1. */
+/* A launcher under the non-stock name x-gcc. Not a symlink, which resolves
+ * back to the stock name: a launcher the name test must not trust. Elsewhere
+ * it is a byte copy of the real driver, with COMPILER_PATH so the relocated
+ * copy still finds cc1. On Apple, cc is an xcrun shim that dispatches on its
+ * own name and fails as x-gcc, so it is a sh launcher that execs the real
+ * driver (the Apple suite's own wrapper shape). */
 static const char *pk_make_xgcc(const char **cpath)
 {
-    char real[PATH_MAX], out[PATH_MAX] = "";
+    char real[PATH_MAX];
     if (pk_find_cc(real) || csr_mkdirs(zcw("portable.x")))
         return NULL;
     const char *dst = zcw("portable.x/x-gcc");
+#ifdef __APPLE__
+    (void)cpath;
+    if (strchr(real, '\'') ||
+        zc_put("portable.x/x-gcc",
+               zcf("#!/bin/sh\nexec '%s' \"$@\"\n", real)) ||
+        chmod(dst, 0755) != 0)
+        return NULL;
+#else
+    char out[PATH_MAX] = "";
     if (zc_copy(real, dst, 0) || chmod(dst, 0755) != 0)
         return NULL;
     const char *const qa[] = { real, "-print-prog-name=cc1", NULL };
@@ -188,6 +200,7 @@ static const char *pk_make_xgcc(const char **cpath)
         *slash = '\0';
         *cpath = zcf("COMPILER_PATH=%s", out);
     }
+#endif
     return dst;
 }
 
