@@ -204,6 +204,15 @@ node is stopped for it, and it refuses a datadir that already holds a wallet
 opt-in mints no wallet, so a seeded datadir that has only run that way accepts
 the restore.
 
+Create and restore unlock and then force-lock the process-wide wallet lock to
+write their datadir. A process that already serves a wallet of its own (boot
+marks it once the node's wallet is open) refuses both with
+`WALLET_LIVE_IN_PROCESS` (service code -69) before anything is read or
+written, so they cannot lock or re-key that wallet; a plan locks nothing and is
+still answered. Each runs in its own CLI process. `wallet_free` wipes the
+Sapling seed and spending keys of the wallet it releases, so a failed key
+rebuild leaves none in freed memory.
+
 `tests/harness/src/test_wallet_create.c` holds the proof.
 
 ---

@@ -48,6 +48,7 @@ static bool  g_force_locked;        /* an explicit lock — wins over env */
 static bool  g_unlock_loading;       /* an unlock published the passphrase and is
                                        still reading the key rows back */
 static bool  g_encrypted_at_rest;   /* the wallet uses WKS1 at-rest wrapping */
+static bool  g_live_wallet;         /* this process serves a wallet of its own */
 static uint64_t g_timeout_generation;
 #ifdef ZCL_TESTING
 /* Test-only seam, compiled out of production. When nonzero, the nth
@@ -170,6 +171,21 @@ void wallet_lock_note_encrypted_at_rest(void)
     pthread_mutex_lock(&g_mu);
     g_encrypted_at_rest = true;
     pthread_mutex_unlock(&g_mu);
+}
+
+void wallet_lock_note_live_wallet(void)
+{
+    pthread_mutex_lock(&g_mu);
+    g_live_wallet = true;
+    pthread_mutex_unlock(&g_mu);
+}
+
+bool wallet_lock_has_live_wallet(void)
+{
+    pthread_mutex_lock(&g_mu);
+    bool v = g_live_wallet;
+    pthread_mutex_unlock(&g_mu);
+    return v;
 }
 
 bool wallet_lock_encrypted_at_rest(void)
@@ -561,6 +577,7 @@ void wallet_lock_reset_for_test(void)
     g_unlock_entries = 0;
 #endif
     g_encrypted_at_rest = false;
+    g_live_wallet = false;
     g_timeout_generation++;
     pthread_mutex_unlock(&g_mu);
     wallet_sqlite_key_crypto_reset();

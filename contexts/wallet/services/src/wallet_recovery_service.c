@@ -571,6 +571,12 @@ static void wrc_settle_birthday(const struct wallet_recovery_request *req,
 static struct zcl_result wrc_check_request(
     const struct wallet_recovery_request *req)
 {
+    if (!req->dry_run && wallet_lock_has_live_wallet())
+        return ZCL_ERR(-69,
+            "this process already serves a wallet. Creating or restoring one "
+            "unlocks and then locks the whole process, which would lock or "
+            "re-key that wallet: run it in its own process. Nothing was "
+            "written");
     if (!req->datadir || !req->datadir[0])
         return ZCL_ERR(-63, "datadir path is empty");
     if (!req->phrase || !req->phrase[0])

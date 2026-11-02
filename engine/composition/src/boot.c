@@ -127,6 +127,7 @@
 #include "wallet/wallet.h"
 #include "wallet/wallet_sqlite.h"
 #include "wallet/wallet_keystore.h"
+#include "wallet/wallet_lock.h"
 #include "wallet/wallet_canary.h"
 #include "wallet/wallet_db.h"
 #include "sapling/params_init.h"
@@ -1340,6 +1341,8 @@ static void boot_wallet_open_persistence(struct app_context *ctx,
     if (g_node_db.open) {
         wsql_open_r = wallet_sqlite_open_r(&g_wallet_sqlite, g_node_db.db);
         sqlite_open = wsql_open_r.ok;
+        if (sqlite_open)
+            wallet_lock_note_live_wallet();
     }
     const int64_t held = boot_wallet_rows_at_risk(&g_node_db, pre_open_key_rows);
     if (!sqlite_open && held > 0) {

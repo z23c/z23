@@ -446,6 +446,7 @@ static const char *wrp_failure_code(int code, enum zcl_command_exit *ex)
         { -66, "NODE_DB_UNREADABLE", ZCL_COMMAND_EXIT_BLOCKED },
         { -67, "WALLET_AT_REST_UNDECIDED", ZCL_COMMAND_EXIT_BLOCKED },
         { -68, "PASSPHRASE_TOO_SHORT", ZCL_COMMAND_EXIT_INVALID },
+        { -69, "WALLET_LIVE_IN_PROCESS", ZCL_COMMAND_EXIT_BLOCKED },
     };
     for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
         if (map[i].code == code) {
@@ -608,6 +609,7 @@ static const char *wrp_create_failure_code(int code, enum zcl_command_exit *ex)
     case -62: return "WALLET_ALREADY_PRESENT";
     case -66: return "NODE_DB_UNREADABLE";
     case -68: *ex = ZCL_COMMAND_EXIT_INVALID; return "PASSPHRASE_TOO_SHORT";
+    case -69: return "WALLET_LIVE_IN_PROCESS";
     default:  *ex = ZCL_COMMAND_EXIT_FAILED; return "CREATE_FAILED";
     }
 }

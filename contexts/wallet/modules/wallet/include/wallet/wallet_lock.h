@@ -79,6 +79,13 @@ bool wallet_lock_copy_passphrase(char *out, size_t out_size);
 void wallet_lock_note_encrypted_at_rest(void);
 bool wallet_lock_encrypted_at_rest(void);
 
+/* Record that this process serves a wallet of its own (boot calls it once the
+ * node's wallet is open). Create and restore unlock and then force-lock the
+ * process-wide lock to write a different datadir; they refuse when this is
+ * set, so they cannot lock or re-key a running wallet. Idempotent. */
+void wallet_lock_note_live_wallet(void);
+bool wallet_lock_has_live_wallet(void);
+
 /* True when spending keys are accessible: a plaintext wallet is always
  * unlocked; an encrypted wallet is unlocked only while an effective
  * passphrase is available. */
