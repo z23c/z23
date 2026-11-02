@@ -651,6 +651,255 @@ static struct block_index *have_data_by_hash(struct block_map *m,
  * blocks; the lookahead lead is normally a handful. */
 #define ACTIVE_CHAIN_EXTEND_HAVE_DATA_MAX_GAP 8192
 
+/* The window's tip slot (chain[c->height]) can be NULL while c->height is a
+ * valid finalized height: a blocks-less snapshot boot RETRACTS the window to
+ * the seed (active_chain_move_window_tip) and then the boot's later
+ * window/grow churn leaves chain[seed] empty, even though the AUTHORITY
+ * (tip_finalize) still names that height as the finalized tip. The plain
+ * active_chain_cached_tip() reads the raw slot and returns NULL → the extend
+ * bails and the body-dependent fold starves at seed+1 forever (the
+ * blocks-less starter-pack climb stall: win_slot=(nil), ua_cursor=seed+1
+ * ok=0, tf_blocked=lookahead_tip_missing). active_chain_tip() instead
+ * re-resolves the tip from the authority's finalized hash via the block map,
+ * so it returns the real tip even when the slot is empty. Re-install it into
+ * the slot so the subsequent fill walk + every active_chain_at(c->height)
+ * downstream is coherent. SELF-HEAL only — never lowers the height, never
+ * publishes authority, and is a no-op when the slot is already correct. */
+static struct block_index *extend_window_have_data_anchor_tip(
+        struct active_chain *c)
+{
+    struct block_index *tip = active_chain_cached_tip(c);
+    if (!tip) {
+        tip = active_chain_tip(c);  /* authority-resolved, slot-independent */
+        if (!tip || tip->nHeight != c->height)
+            return NULL;            /* no coherent finalized tip to anchor on */
+        (void)active_chain_install_tip_slot(c, tip);  /* repair chain[height] */
+    }
+    return tip;
+}
+
+/* Liveness guard by BLOCK HASH, not pointer: best_header's ancestry at
+ * the finalized height must be the SAME BLOCK as the tip (hash), but a
+ * duplicate same-hash object must not defeat the fast-path ancestry walk
+ * — that pointer mismatch is exactly the live 3162167 wedge. */
+static bool extend_window_have_data_fast_applies(
+        struct block_index *best_header,
+        struct block_index *tip,
+        int anchor_height,
+        int lo)
+{
+    struct block_index *guard_anc =
+        best_header ? block_index_get_ancestor(best_header, anchor_height)
+                    : NULL;
+    return best_header && best_header->nHeight >= lo && guard_anc && tip &&
+           memcmp(guard_anc->hashBlock.data, tip->hashBlock.data, 32) == 0;
+}
+
+/* Advance cand along path[1..) until a block is missing, failed, or
+ * without have-data. */
+static struct block_index *extend_window_have_data_advance_cand(
+        struct block_map *m,
+        struct block_index **path,
+        int path_len,
+        struct block_index *cand)
+{
+    for (int i = 1; i < path_len; i++) {
+        struct block_index *anc = path[i];
+        if (!anc || block_has_any_failure(anc))
+            break;
+        /* Merge BLOCK_HAVE_DATA across same-hash duplicates: a bodiless
+         * ancestry twin whose block_map body copy exists must not stop the
+         * walk one block short. Fill with the body-bearing object so every
+         * body-dependent stage reading active_chain_at(h) sees the body. */
+        struct block_index *have = have_data_by_hash(m, anc);
+        if (!have)
+            break;
+        cand = have;
+    }
+    return cand;
+}
+
+static bool extend_window_have_data_fast(struct active_chain *c,
+                                         struct block_map *m,
+                                         struct block_index *best_header,
+                                         int lo,
+                                         int hi)
+{
+    /* Probe the immediate successor before walking the whole bounded
+     * header band. During catch-up every reducer stage calls this helper,
+     * while block ingress normally makes only the next few bodies visible.
+     * If H+1 is still body-missing, no later height can be contiguous, so
+     * 8 stages x 8192 ancestor/map probes is provably wasted work. The
+     * same-hash lookup preserves the duplicate-object rescue contract. */
+    struct block_index *next = block_index_get_ancestor(best_header, lo);
+    struct block_index *cand = have_data_by_hash(m, next);
+    if (!cand || block_has_any_failure(cand))
+        return true;
+
+    atomic_fetch_add_explicit(&g_window_extend_fast_hits, 1,
+                              memory_order_relaxed);
+
+    /* Seek to the top of the bounded band ONCE, then materialize its
+     * ancestry by following pprev. The former loop performed one skip-list
+     * seek per height (up to 8192 seeks per reducer batch), even though all
+     * requested heights are consecutive on the same ancestry. Besides
+     * being needlessly expensive, that cost sat inside the UTXO stage and
+     * obscured its actual apply time. A fixed-size stack buffer is bounded
+     * by ACTIVE_CHAIN_EXTEND_HAVE_DATA_MAX_GAP (64 KiB on 64-bit hosts),
+     * cannot OOM, and keeps this helper reentrant/thread-safe.
+     *
+     * Clamp to best_header: callers normally pass its height, but the old
+     * per-height loop simply stopped when asked above it. Preserving that
+     * behavior avoids turning a harmless over-large bound into an
+     * under-extension. Any malformed/non-consecutive pprev chain remains a
+     * safe no-op, just as a failed ancestor seek was before. */
+    struct block_index *path[ACTIVE_CHAIN_EXTEND_HAVE_DATA_MAX_GAP];
+    int path_hi = hi;
+    if (path_hi > best_header->nHeight)
+        path_hi = best_header->nHeight;
+    int path_len = path_hi - lo + 1;
+    struct block_index *walk =
+        block_index_get_ancestor(best_header, path_hi);
+    for (int i = path_len - 1; i >= 0; i--) {
+        if (!walk || walk->nHeight != lo + i)
+            return true;
+        path[i] = walk;
+        walk = walk->pprev;
+    }
+
+    cand = extend_window_have_data_advance_cand(m, path, path_len, cand);
+    return active_chain_fill_window(c, cand);
+}
+
+/* True when q is inside [lo, hi], has no failure, and nStatus has
+ * BLOCK_HAVE_DATA. */
+static bool extend_window_have_data_entry(const struct block_index *q,
+                                          int lo,
+                                          int hi)
+{
+    if (!q)
+        return false;
+    int h = q->nHeight;
+    if (h < lo || h > hi)
+        return false;
+    if (block_has_any_failure(q))
+        return false;
+    if (!(q->nStatus & BLOCK_HAVE_DATA))
+        return false;
+    return true;
+}
+
+/* Collect eligible (have-data, failure-free) block_index entries in
+ * (c->height, hi]. NOT gated on BLOCK_VALID_SCRIPTS — see the function
+ * comment: the body stages must see a have-data block BEFORE it is
+ * script-validated.
+ *
+ * The buffer is sized by a COUNT pass, not by `span = hi - lo + 1`: the map
+ * can hold MORE than one block_index at a given height (competing branches /
+ * forks within the gap window), so the count of in-range eligible entries
+ * legitimately exceeds the number of distinct heights. Sizing by `span`
+ * here was a heap overflow — `elig[n++]` ran past the allocation as soon as
+ * any forked sibling fell inside [lo, hi] (the reorg the forward-progress
+ * gate's PART 2 exercises). Count first, then fill exactly. */
+static struct block_index **extend_window_collect_have_data(
+        struct block_map *m,
+        int lo,
+        int hi,
+        int *out_n)
+{
+    *out_n = 0;
+    int n_eligible = 0;
+    {
+        size_t iter0 = 0;
+        struct block_index *q = NULL;
+        while (block_map_next(m, &iter0, NULL, &q)) {
+            if (!extend_window_have_data_entry(q, lo, hi))
+                continue;
+            n_eligible++;
+        }
+    }
+    if (n_eligible == 0)
+        return NULL; /* no have-data successor in range — leave window as-is */
+
+    struct block_index **elig =
+        zcl_malloc((size_t)n_eligible * sizeof(*elig), "achd_elig");
+    if (!elig)
+        return NULL; /* OOM -> no extension (safe; never a partial window) */
+    int n = 0;
+    size_t iter = 0;
+    struct block_index *p = NULL;
+    while (block_map_next(m, &iter, NULL, &p)) {
+        if (!extend_window_have_data_entry(p, lo, hi))
+            continue;
+        if (n >= n_eligible)
+            break; /* defensive: map cannot grow between the two passes here */
+        elig[n++] = p;
+    }
+    *out_n = n;
+    return elig;
+}
+
+/* Walk UP from the finalized tip, accepting the eligible child whose parent
+ * is the last accepted block BY BLOCK HASH (not by pointer). Contiguity is a
+ * CONSENSUS property — child.hashPrevBlock == parent.GetBlockHash() — so the
+ * test must be hash identity, not in-RAM object identity. A duplicate
+ * block_index object for the same hash (e.g. a tip slot installed from a
+ * snapshot seed vs the object header-ingest links pprev to) has a DIFFERENT
+ * pointer but the SAME hash; a pointer compare wrongly rejected it and wedged
+ * the forward fold at a body-present successor (live 3162167). Hash equality
+ * is a strict superset of the old pointer test (same object => same hash) and
+ * still skips real forks (different parent hash). */
+static struct block_index *extend_window_contiguous_successor(
+        struct block_index *tip,
+        struct block_index **elig,
+        int n)
+{
+    struct block_index *cand = tip;
+    bool advanced = true;
+    while (advanced) {
+        advanced = false;
+        for (int i = 0; i < n; i++) {
+            struct block_index *ch = elig[i];
+            if (ch && ch->pprev &&
+                memcmp(ch->pprev->hashBlock.data, cand->hashBlock.data, 32) == 0 &&
+                ch->nHeight == cand->nHeight + 1) {
+                cand = ch;
+                advanced = true;
+                break;
+            }
+        }
+    }
+    return cand;
+}
+
+/* ── SLOW PATH (fallback): best_header absent / below the window / off the
+ * finalized chain (reorg). Full-map scan + pprev-walk — the original, proven
+ * logic, exercised by the test suite with best_header=NULL. ── */
+static bool extend_window_have_data_slow(struct active_chain *c,
+                                         struct block_map *m,
+                                         struct block_index *tip,
+                                         int lo,
+                                         int hi)
+{
+    atomic_fetch_add_explicit(&g_window_extend_slow_hits, 1,
+                              memory_order_relaxed);
+
+    int n = 0;
+    struct block_index **elig =
+        extend_window_collect_have_data(m, lo, hi, &n);
+    if (!elig)
+        return true;
+
+    struct block_index *cand =
+        extend_window_contiguous_successor(tip, elig, n);
+    free(elig);
+
+    if (cand == tip || cand->nHeight <= c->height)
+        return true; /* no contiguous have-data successor — leave window as-is */
+
+    return active_chain_fill_window(c, cand);
+}
+
 /* Forward-extend the visible window ONLY along the CONTIGUOUS have-data
  * frontier above the finalized tip, bounded by max_height (the caller passes
  * the best-known header height so every upstream stage can see its next block,
@@ -693,27 +942,9 @@ bool active_chain_extend_window_have_data(struct active_chain *c,
     if (max_height <= c->height)
         return true; /* nothing persisted above the window — cheap no-op */
 
-    /* The window's tip slot (chain[c->height]) can be NULL while c->height is a
-     * valid finalized height: a blocks-less snapshot boot RETRACTS the window to
-     * the seed (active_chain_move_window_tip) and then the boot's later
-     * window/grow churn leaves chain[seed] empty, even though the AUTHORITY
-     * (tip_finalize) still names that height as the finalized tip. The plain
-     * active_chain_cached_tip() reads the raw slot and returns NULL → the extend
-     * bails and the body-dependent fold starves at seed+1 forever (the
-     * blocks-less starter-pack climb stall: win_slot=(nil), ua_cursor=seed+1
-     * ok=0, tf_blocked=lookahead_tip_missing). active_chain_tip() instead
-     * re-resolves the tip from the authority's finalized hash via the block map,
-     * so it returns the real tip even when the slot is empty. Re-install it into
-     * the slot so the subsequent fill walk + every active_chain_at(c->height)
-     * downstream is coherent. SELF-HEAL only — never lowers the height, never
-     * publishes authority, and is a no-op when the slot is already correct. */
-    struct block_index *tip = active_chain_cached_tip(c);
-    if (!tip) {
-        tip = active_chain_tip(c);  /* authority-resolved, slot-independent */
-        if (!tip || tip->nHeight != c->height)
-            return true;            /* no coherent finalized tip to anchor on */
-        (void)active_chain_install_tip_slot(c, tip);  /* repair chain[height] */
-    }
+    struct block_index *tip = extend_window_have_data_anchor_tip(c);
+    if (!tip)
+        return true;
 
     int lo = c->height + 1;
     int hi = max_height;
@@ -741,163 +972,10 @@ bool active_chain_extend_window_have_data(struct active_chain *c,
      * best_header left the finalized tip fails the guard and falls through to
      * the slow scan, which handles it via the pprev-walk. Never publishes
      * authority (active_chain_fill_window); under-extension is a safe stall. */
-    struct block_index *guard_anc =
-        best_header ? block_index_get_ancestor(best_header, c->height) : NULL;
-    if (best_header && best_header->nHeight >= lo && guard_anc && tip &&
-        memcmp(guard_anc->hashBlock.data, tip->hashBlock.data, 32) == 0) {
-        /* Liveness guard by BLOCK HASH, not pointer: best_header's ancestry at
-         * the finalized height must be the SAME BLOCK as the tip (hash), but a
-         * duplicate same-hash object must not defeat the fast-path ancestry walk
-         * — that pointer mismatch is exactly the live 3162167 wedge. */
-        /* Probe the immediate successor before walking the whole bounded
-         * header band. During catch-up every reducer stage calls this helper,
-         * while block ingress normally makes only the next few bodies visible.
-         * If H+1 is still body-missing, no later height can be contiguous, so
-         * 8 stages x 8192 ancestor/map probes is provably wasted work. The
-         * same-hash lookup preserves the duplicate-object rescue contract. */
-        struct block_index *next = block_index_get_ancestor(best_header, lo);
-        struct block_index *cand = have_data_by_hash(m, next);
-        if (!cand || block_has_any_failure(cand))
-            return true;
+    if (extend_window_have_data_fast_applies(best_header, tip, c->height, lo))
+        return extend_window_have_data_fast(c, m, best_header, lo, hi);
 
-        atomic_fetch_add_explicit(&g_window_extend_fast_hits, 1,
-                                  memory_order_relaxed);
-
-        /* Seek to the top of the bounded band ONCE, then materialize its
-         * ancestry by following pprev. The former loop performed one skip-list
-         * seek per height (up to 8192 seeks per reducer batch), even though all
-         * requested heights are consecutive on the same ancestry. Besides
-         * being needlessly expensive, that cost sat inside the UTXO stage and
-         * obscured its actual apply time. A fixed-size stack buffer is bounded
-         * by ACTIVE_CHAIN_EXTEND_HAVE_DATA_MAX_GAP (64 KiB on 64-bit hosts),
-         * cannot OOM, and keeps this helper reentrant/thread-safe.
-         *
-         * Clamp to best_header: callers normally pass its height, but the old
-         * per-height loop simply stopped when asked above it. Preserving that
-         * behavior avoids turning a harmless over-large bound into an
-         * under-extension. Any malformed/non-consecutive pprev chain remains a
-         * safe no-op, just as a failed ancestor seek was before. */
-        struct block_index *path[ACTIVE_CHAIN_EXTEND_HAVE_DATA_MAX_GAP];
-        int path_hi = hi;
-        if (path_hi > best_header->nHeight)
-            path_hi = best_header->nHeight;
-        int path_len = path_hi - lo + 1;
-        struct block_index *walk =
-            block_index_get_ancestor(best_header, path_hi);
-        for (int i = path_len - 1; i >= 0; i--) {
-            if (!walk || walk->nHeight != lo + i)
-                return true;
-            path[i] = walk;
-            walk = walk->pprev;
-        }
-
-        for (int i = 1; i < path_len; i++) {
-            struct block_index *anc = path[i];
-            if (!anc || block_has_any_failure(anc))
-                break;
-            /* Merge BLOCK_HAVE_DATA across same-hash duplicates: a bodiless
-             * ancestry twin whose block_map body copy exists must not stop the
-             * walk one block short. Fill with the body-bearing object so every
-             * body-dependent stage reading active_chain_at(h) sees the body. */
-            struct block_index *have = have_data_by_hash(m, anc);
-            if (!have)
-                break;
-            cand = have;
-        }
-        return active_chain_fill_window(c, cand);
-    }
-
-    /* ── SLOW PATH (fallback): best_header absent / below the window / off the
-     * finalized chain (reorg). Full-map scan + pprev-walk — the original, proven
-     * logic, exercised by the test suite with best_header=NULL. ── */
-    atomic_fetch_add_explicit(&g_window_extend_slow_hits, 1,
-                              memory_order_relaxed);
-
-    /* Collect eligible (have-data, failure-free) block_index entries in
-     * (c->height, hi]. NOT gated on BLOCK_VALID_SCRIPTS — see the function
-     * comment: the body stages must see a have-data block BEFORE it is
-     * script-validated.
-     *
-     * The buffer is sized by a COUNT pass, not by `span = hi - lo + 1`: the map
-     * can hold MORE than one block_index at a given height (competing branches /
-     * forks within the gap window), so the count of in-range eligible entries
-     * legitimately exceeds the number of distinct heights. Sizing by `span`
-     * here was a heap overflow — `elig[n++]` ran past the allocation as soon as
-     * any forked sibling fell inside [lo, hi] (the reorg the forward-progress
-     * gate's PART 2 exercises). Count first, then fill exactly. */
-    int n_eligible = 0;
-    {
-        size_t iter0 = 0;
-        struct block_index *q = NULL;
-        while (block_map_next(m, &iter0, NULL, &q)) {
-            if (!q)
-                continue;
-            int h = q->nHeight;
-            if (h < lo || h > hi)
-                continue;
-            if (block_has_any_failure(q))
-                continue;
-            if (!(q->nStatus & BLOCK_HAVE_DATA))
-                continue;
-            n_eligible++;
-        }
-    }
-    if (n_eligible == 0)
-        return true; /* no have-data successor in range — leave window as-is */
-
-    struct block_index **elig =
-        zcl_malloc((size_t)n_eligible * sizeof(*elig), "achd_elig");
-    if (!elig)
-        return true; /* OOM -> no extension (safe; never a partial window) */
-    int n = 0;
-    size_t iter = 0;
-    struct block_index *p = NULL;
-    while (block_map_next(m, &iter, NULL, &p)) {
-        if (!p)
-            continue;
-        int h = p->nHeight;
-        if (h < lo || h > hi)
-            continue;
-        if (block_has_any_failure(p))
-            continue;
-        if (!(p->nStatus & BLOCK_HAVE_DATA))
-            continue;
-        if (n >= n_eligible)
-            break; /* defensive: map cannot grow between the two passes here */
-        elig[n++] = p;
-    }
-
-    /* Walk UP from the finalized tip, accepting the eligible child whose parent
-     * is the last accepted block BY BLOCK HASH (not by pointer). Contiguity is a
-     * CONSENSUS property — child.hashPrevBlock == parent.GetBlockHash() — so the
-     * test must be hash identity, not in-RAM object identity. A duplicate
-     * block_index object for the same hash (e.g. a tip slot installed from a
-     * snapshot seed vs the object header-ingest links pprev to) has a DIFFERENT
-     * pointer but the SAME hash; a pointer compare wrongly rejected it and wedged
-     * the forward fold at a body-present successor (live 3162167). Hash equality
-     * is a strict superset of the old pointer test (same object => same hash) and
-     * still skips real forks (different parent hash). */
-    struct block_index *cand = tip;
-    bool advanced = true;
-    while (advanced) {
-        advanced = false;
-        for (int i = 0; i < n; i++) {
-            struct block_index *ch = elig[i];
-            if (ch && ch->pprev &&
-                memcmp(ch->pprev->hashBlock.data, cand->hashBlock.data, 32) == 0 &&
-                ch->nHeight == cand->nHeight + 1) {
-                cand = ch;
-                advanced = true;
-                break;
-            }
-        }
-    }
-    free(elig);
-
-    if (cand == tip || cand->nHeight <= c->height)
-        return true; /* no contiguous have-data successor — leave window as-is */
-
-    return active_chain_fill_window(c, cand);
+    return extend_window_have_data_slow(c, m, tip, lo, hi);
 }
 
 /* LANE D / SELF-HEAL (S3 sibling-adopt) — does eligible candidate `cand` beat
@@ -949,66 +1027,66 @@ bool active_chain_selection_candidate_beats_best(
     return block_has_any_failure(incumbent);
 }
 
-struct block_index *select_most_work_eligible(
-        struct active_chain *c,
-        struct block_map *m,
+/* If stats is non-NULL, zero it and set the refused-below-tip heights to -1. */
+static void select_most_work_reset_stats(
         struct most_work_selection_stats *stats)
 {
-    if (!c || !m)
-        return NULL;
     if (stats) {
         memset(stats, 0, sizeof(*stats));
         stats->refused_below_tip_height = -1;
         stats->refused_below_tip_tip_height = -1;
     }
+}
 
-    struct block_index *tip = active_chain_tip(c);
-    struct block_index *best = tip;
-
-    size_t iter = 0;
-    struct block_index *pindex = NULL;
-    while (block_map_next(m, &iter, NULL, &pindex)) {
-        if (!pindex)
-            continue;
-        if (block_has_any_failure(pindex)) {
-            if (stats) stats->skipped_failed++;
-            continue;
-        }
-        if (!block_index_is_valid(pindex, BLOCK_VALID_TREE)) {
-            if (stats) stats->skipped_invalid++;
-            continue;
-        }
-        if (pindex->nChainTx == 0 && !(pindex->nStatus & BLOCK_HAVE_DATA)) {
-            if (stats) stats->skipped_no_chaintx++;
-            continue;
-        }
-
-        if (active_chain_selection_candidate_beats_best(c, pindex, best)) {
-            /* Ancestry must be failure-free up to the current best/tip. */
-            bool chain_ok = true;
-            struct block_index *check = pindex;
-            int floor_h = best ? best->nHeight : -1;
-            while (check && check->nHeight > floor_h) {
-                if (block_has_any_failure(check)) {
-                    chain_ok = false;
-                    break;
-                }
-                if (!check->pprev && check->nHeight > 0)
-                    break; /* pprev unlinked (post-import) — stop, accept */
-                check = check->pprev;
-            }
-            if (chain_ok) {
-                best = pindex;
-            } else if (stats) {
-                stats->skipped_bad_ancestry++;
-            }
-        }
+/* False when pindex is null, failed, below BLOCK_VALID_TREE, or has
+ * nChainTx 0 and no BLOCK_HAVE_DATA. The last three increment stats. */
+static bool select_most_work_index_eligible(
+        struct block_index *pindex,
+        struct most_work_selection_stats *stats)
+{
+    if (!pindex)
+        return false;
+    if (block_has_any_failure(pindex)) {
+        if (stats) stats->skipped_failed++;
+        return false;
     }
+    bool tree_ok = block_index_is_valid(pindex, BLOCK_VALID_TREE);
+    if (!tree_ok) {
+        if (stats) stats->skipped_invalid++;
+        return false;
+    }
+    if (pindex->nChainTx == 0 && !(pindex->nStatus & BLOCK_HAVE_DATA)) {
+        if (stats) stats->skipped_no_chaintx++;
+        return false;
+    }
+    return true;
+}
 
-    /* Refuse a candidate strictly BELOW the current tip — the tip is
-     * canonical (matches find_most_work_chain's stale-fork guard). The
-     * window only ever grows forward; a lower-height higher-work fork is
-     * never selected here. */
+static bool select_most_work_ancestry_clean(struct block_index *pindex,
+                                            const struct block_index *best)
+{
+    /* Ancestry must be failure-free up to the current best/tip. */
+    struct block_index *check = pindex;
+    int floor_h = best ? best->nHeight : -1;
+    while (check && check->nHeight > floor_h) {
+        if (block_has_any_failure(check))
+            return false;
+        if (!check->pprev && check->nHeight > 0)
+            break; /* pprev unlinked (post-import) — stop, accept */
+        check = check->pprev;
+    }
+    return true;
+}
+
+/* Refuse a candidate strictly BELOW the current tip — the tip is
+ * canonical (matches find_most_work_chain's stale-fork guard). The
+ * window only ever grows forward; a lower-height higher-work fork is
+ * never selected here. */
+static struct block_index *select_most_work_refuse_below_tip(
+        struct block_index *tip,
+        struct block_index *best,
+        struct most_work_selection_stats *stats)
+{
     if (tip && best && best != tip && best->nHeight < tip->nHeight) {
         if (stats) {
             stats->refused_below_tip = true;
@@ -1017,8 +1095,36 @@ struct block_index *select_most_work_eligible(
         }
         return tip;
     }
-
     return best;
+}
+
+struct block_index *select_most_work_eligible(
+        struct active_chain *c,
+        struct block_map *m,
+        struct most_work_selection_stats *stats)
+{
+    if (!c || !m)
+        return NULL;
+    select_most_work_reset_stats(stats);
+
+    struct block_index *tip = active_chain_tip(c);
+    struct block_index *best = tip;
+
+    size_t iter = 0;
+    struct block_index *pindex = NULL;
+    while (block_map_next(m, &iter, NULL, &pindex)) {
+        if (!select_most_work_index_eligible(pindex, stats))
+            continue;
+        if (active_chain_selection_candidate_beats_best(c, pindex, best)) {
+            if (select_most_work_ancestry_clean(pindex, best)) {
+                best = pindex;
+            } else if (stats) {
+                stats->skipped_bad_ancestry++;
+            }
+        }
+    }
+
+    return select_most_work_refuse_below_tip(tip, best, stats);
 }
 
 struct block_index *active_chain_most_work_candidate(struct active_chain *c,
