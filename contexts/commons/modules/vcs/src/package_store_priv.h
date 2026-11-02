@@ -73,6 +73,9 @@ struct vcs_package_store {
     uint64_t hot_loads;       /* manifests parsed again after release */
     uint64_t hot_trim_passes; /* catalog passes that released manifests */
     bool catalog_incomplete; /* committed manifest could not be replayed */
+    uint32_t open_ms_sweep;     /* last open: temp sweep */
+    uint32_t open_ms_manifests; /* last open: manifest load */
+    uint32_t open_ms_cas;       /* last open: CAS listing and GC */
     uint8_t (*cas)[32]; /* present chunk hashes, ascending (bsearch) */
     size_t cas_count;
     size_t cas_cap;

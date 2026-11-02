@@ -16,6 +16,7 @@
 #include "base/hex.h"
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
+#include "platform/clock.h"
 #include "platform/directory_compat.h"
 #include "platform/positioned_file.h"
 
@@ -1128,8 +1129,14 @@ bool store_open_recover(struct vcs_package_store *store)
             LOG_FAIL(STORE_LOG, "layout mkdir %s%s", store->root,
                      k_dirs[i]);
     }
+    int64_t t0 = clock_now_monotonic_ns();
     store_sweep_temps(store, store->root);
-    if (!store_load_manifests(store))
+    int64_t t1 = clock_now_monotonic_ns();
+    store->open_ms_sweep = (uint32_t)((t1 - t0) / 1000000);
+    bool manifests_loaded = store_load_manifests(store);
+    int64_t t2 = clock_now_monotonic_ns();
+    store->open_ms_manifests = (uint32_t)((t2 - t1) / 1000000);
+    if (!manifests_loaded)
         LOG_FAIL(STORE_LOG, "load manifests under %s", store->root);
     /* A committed manifest is authority for its chunks. If even one cannot
      * be read and root-checked, no orphan decision is justified. Opening a
@@ -1141,7 +1148,11 @@ bool store_open_recover(struct vcs_package_store *store)
         store->root, &store->releases_quarantined_total);
     if (!replayed)
         LOG_FAIL(STORE_LOG, "release history recovery under %s", store->root);
-    if (!store_gc_cas(store) || !store_commit_sweep(store)) {
+    int64_t t3 = clock_now_monotonic_ns();
+    bool cas_ok = store_gc_cas(store) && store_commit_sweep(store);
+    store->open_ms_cas =
+        (uint32_t)((clock_now_monotonic_ns() - t3) / 1000000);
+    if (!cas_ok) {
         vcs_package_accept_free(replayed);
         LOG_FAIL(STORE_LOG, "CAS recovery under %s", store->root);
     }

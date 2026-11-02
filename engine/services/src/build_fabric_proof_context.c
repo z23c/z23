@@ -54,6 +54,13 @@ static struct vcs_package_store *bfpc_store_select(const char *datadir,
     char want[BFPC_PATH_MAX];
     int n = snprintf(want, sizeof(want), "%s/zcode", datadir);
     if (n <= 0 || (size_t)n >= sizeof(want)) return NULL;
+    /* Boot opens the node-global handle on another thread while this worker
+     * starts. A private open here would queue on the same store lock behind
+     * that sweep and then repeat it, so join the one global open instead
+     * (open_global is idempotent and serialized). A refusal falls through
+     * to the private handle below. */
+    if (vcs_package_store_hosting_enabled())
+        (void)vcs_package_store_open_global();
     struct vcs_package_store *global = vcs_package_store_global();
     const char *root = vcs_package_store_root_dir(global);
     if (global && root && strcmp(root, want) == 0) return global;
