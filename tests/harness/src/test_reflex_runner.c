@@ -239,6 +239,14 @@ static int t_green_then_regression_keeps_accepted_root(void)
 
 /* (c) + (d): a hang is killed at the deadline and a crash is red; the SAME
  * warm runner then serves the next candidate green. */
+#if defined(__SANITIZE_ADDRESS__)
+#define RR_UNDER_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define RR_UNDER_ASAN 1
+#endif
+#endif
+
 static int t_hang_and_crash_do_not_kill_runner(void)
 {
     int failures = 0;
@@ -262,7 +270,18 @@ static int t_hang_and_crash_do_not_kill_runner(void)
         ASSERT(rr_run(&segv, "segv", 1000));
         ASSERT(segv.out.available);
         ASSERT(!segv.out.green);
+#if defined(RR_UNDER_ASAN)
+        /* AddressSanitizer owns SIGSEGV: its handler reports the fault and
+         * exits 1, so the leaf is never signalled (measured in the t-asan
+         * run: signal=0 exit=1 "observation frame missing"). The case still
+         * proves the segfault is red and the runner survives it. GCC
+         * defines __SANITIZE_ADDRESS__; Clang reports it through
+         * __has_feature(address_sanitizer). */
+        ASSERT_EQ(segv.out.child_signal, 0);
+        ASSERT_EQ(segv.out.child_exit_code, 1);
+#else
         ASSERT_EQ(segv.out.child_signal, SIGSEGV);
+#endif
         ASSERT_EQ(segv.out.runner_pid, runner_pid);
 
         struct rr_case after;
