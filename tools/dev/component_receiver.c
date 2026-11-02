@@ -335,7 +335,20 @@ static bool cr_execute(int fd, const struct zcl_component_receiver_request *r,
     out->admitted = true;
     if (!zcl_reflex_runner_run_fd(fd, &r->execution, &out->runner))
         return cr_refuse(out, out->runner.reason);
-    if (!out->runner.green) return cr_refuse(out, "component story did not pass");
+    if (!out->runner.green) {
+        const struct zcl_reflex_runner_outcome *ro = &out->runner;
+        (void)snprintf(why, sizeof(why),
+            "component story did not pass: avail=%d complete=%d timeout=%d cancel=%d "
+            "seals=%d fresh=%d exit=%d sig=%d exec=%d wx=%d sandboxed=%d hash=%d "
+            "env=%u fds=%u reason=%.60s",
+            ro->available, ro->report_complete, ro->timed_out, ro->cancelled,
+            ro->seals_verified, ro->address_space_fresh, ro->child_exit_code,
+            ro->child_signal, ro->report.candidate_executed, ro->report.wx_installed,
+            ro->report.sandboxed, ro->report.hash_verified,
+            (unsigned)ro->env_inherited_count, (unsigned)ro->inherited_fd_count,
+            ro->reason);
+        return cr_refuse(out, why);
+    }
     return true;
 }
 #endif
