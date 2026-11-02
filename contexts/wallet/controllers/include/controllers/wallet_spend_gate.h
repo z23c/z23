@@ -21,6 +21,9 @@
  *                       reducer's per-block Sapling anchor ledger (or, at
  *                       proving time, a note witness root differs from the
  *                       header root at its witness height)
+ *   seed_floor_unrecorded the strict guard refused (borrowed history) and neither an
+ *                       assisted-install seam nor a reducer seed floor is
+ *                       recorded, so the floor would be the keystone alone
  *   floor_unknown       the Sapling anchor or nullifier activation cursor, the
  *                       assisted-install seam, the reducer seed floor or the
  *                       anchor ledger is unreadable, or the progress lock was
@@ -88,6 +91,12 @@ void wallet_spend_gate_shortfall_message(char *out, size_t cap, int64_t need,
 bool wallet_spend_gate_for_send(struct wallet_rpc_context *ctx,
                                 bool checkpoint_rule, int32_t *floor_height,
                                 struct json_value *result);
+
+/* Records what the send's note scan dropped, on this thread: a note otherwise
+ * spendable that was received at or before the floor, and one that had fewer
+ * confirmations than minconf. The two refusal texts below then name the real
+ * cause. Without a scan they name the floor. */
+void wallet_spend_gate_note_scan(bool floor_dropped, bool min_conf_dropped);
 
 /* Insufficient-funds refusal. Without a floor: plain_text, logging the
  * amounts as before. With a floor: the shortfall text, and no amount in the

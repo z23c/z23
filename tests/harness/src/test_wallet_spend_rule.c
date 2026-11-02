@@ -511,10 +511,22 @@ static bool wsr_seeded_store(const char *dir, bool self_folded,
     return ok;
 }
 
+/* A borrowed state with no seam and no seed floor recorded. */
+static bool wsr_bare_store_at(const char *dir, bool self_folded,
+                              int64_t anchor_cursor)
+{
+    return wsr_seeded_store(dir, self_folded, anchor_cursor, true);
+}
+
+static bool wsr_put_seed_floor(int32_t height, bool malformed);
+
+/* A borrowed state whose seed floor (0, below every cursor) is recorded, so
+ * the cursors and the keystone decide the floor. */
 static bool wsr_borrowed_store_at(const char *dir, bool self_folded,
                                   int64_t anchor_cursor)
 {
-    return wsr_seeded_store(dir, self_folded, anchor_cursor, true);
+    return wsr_bare_store_at(dir, self_folded, anchor_cursor) &&
+           wsr_put_seed_floor(0, false);
 }
 
 static bool wsr_borrowed_store(const char *dir, bool self_folded)
@@ -790,7 +802,7 @@ static int wsr_test_seed_floor(void)
 
     test_make_tmpdir(dir, sizeof(dir), "wallet_spend_rule", "coldimport");
     WSR_CHECK("cold-imported store: both cursors 0, no seam, seed floor 20",
-              wsr_borrowed_store_at(dir, false, 0) && wsr_add_tip_root() &&
+              wsr_bare_store_at(dir, false, 0) && wsr_add_tip_root() &&
                   wsr_put_seed_floor(20, false));
     reducer_frontier_provable_tip_set(WSR_TIP);
     floor = 99;
@@ -802,7 +814,7 @@ static int wsr_test_seed_floor(void)
 
     test_make_tmpdir(dir, sizeof(dir), "wallet_spend_rule", "badseed");
     WSR_CHECK("store with a malformed seed floor",
-              wsr_borrowed_store_at(dir, false, 12) && wsr_add_tip_root() &&
+              wsr_bare_store_at(dir, false, 12) && wsr_add_tip_root() &&
                   wsr_put_seed_floor(0, true));
     reducer_frontier_provable_tip_set(WSR_TIP);
     floor = 99;
@@ -816,6 +828,102 @@ static int wsr_test_seed_floor(void)
     checkpoints_reset_rom_state_override_for_test();
     checkpoints_reset_rom_state_rungs_override_for_test();
     main_state_free(&ms);
+    return failures;
+}
+
+/* A cold import whose seed floor was never written is refused; once the seed
+ * floor is written the spend is allowed only above it. */
+static int wsr_test_no_seed_floor(void)
+{
+    int failures = 0;
+    char dir[256];
+    char reason[WALLET_SPEND_REASON_MAX];
+    int32_t floor = 99;
+    struct wsr_chain c;
+    struct main_state ms;
+    struct rom_state_checkpoint cp;
+    struct rom_state_rung no_rungs[1];
+    memset(no_rungs, 0, sizeof(no_rungs));
+    wsr_build(&c, 0, WSR_TIP);
+    wsr_state(&ms, &c);
+    wsr_checkpoint(&cp, &c, WSR_KEY_H, WSR_FRONTIER_H);
+    checkpoints_set_rom_state_override_for_test(&cp);
+    checkpoints_set_rom_state_rungs_override_for_test(no_rungs, 0);
+    struct wallet_rpc_context ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.main_state = &ms;
+    sovereignty_spend_after_checkpoint_set(true);
+
+    test_make_tmpdir(dir, sizeof(dir), "wallet_spend_rule", "noseed");
+    WSR_CHECK("cold-imported store whose seed floor was never written: "
+              "cursors 0, no seam, no seed floor",
+              wsr_bare_store_at(dir, false, 0) && wsr_add_tip_root());
+    reducer_frontier_provable_tip_set(WSR_TIP);
+    floor = 99;
+    WSR_CHECK("a borrowed state with no seam and no seed floor is refused "
+              "rather than left to the keystone floor",
+              !wallet_spend_gate_check(&ctx, &floor, reason, sizeof(reason)) &&
+                  strcmp(reason, "seed_floor_unrecorded") == 0 &&
+                  floor == WALLET_SPEND_NO_FLOOR);
+    char verdict[48];
+    sovereignty_spend_rule_last_verdict(verdict, sizeof(verdict));
+    WSR_CHECK("the verdict records the same token",
+              strcmp(verdict, "seed_floor_unrecorded") == 0);
+    WSR_CHECK("writing the seed floor later allows the spend above it",
+              wsr_put_seed_floor(20, false) &&
+                  wallet_spend_gate_check(&ctx, &floor, reason,
+                                          sizeof(reason)) &&
+                  floor == 20 && !wallet_spend_gate_height_ok(floor, 20) &&
+                  !wallet_spend_gate_height_ok(floor, 0) &&
+                  wallet_spend_gate_height_ok(floor, 21));
+    progress_store_close();
+
+    sovereignty_spend_after_checkpoint_set(false);
+    reducer_frontier_provable_tip_reset();
+    checkpoints_reset_rom_state_override_for_test();
+    checkpoints_reset_rom_state_rungs_override_for_test();
+    main_state_free(&ms);
+    return failures;
+}
+
+/* The refusal and view texts name what the note scan dropped. */
+static int wsr_test_unusable_cause(void)
+{
+    int failures = 0;
+    char msg[224];
+    wallet_spend_gate_note_scan(true, false);
+    wallet_spend_gate_shortfall_message(msg, sizeof(msg), 1000, 400);
+    WSR_CHECK("floor cause: floor token and clause, not minconf",
+              strstr(msg, "insufficient_post_checkpoint_funds") &&
+                  strstr(msg, "at or before the floor") &&
+                  !strstr(msg, "minconf"));
+    WSR_CHECK("floor cause: the no-notes text names the floor",
+              strstr(wallet_spend_gate_no_notes_text(12),
+                     "at or before the floor") &&
+                  !strstr(wallet_spend_gate_no_notes_text(12), "minconf"));
+    wallet_spend_gate_note_scan(false, true);
+    struct json_value r = {0};
+    WSR_CHECK("minconf cause: a shielded shortfall names minconf",
+              !wallet_spend_gate_short_funds(&r, 12, 1000, 400, "shielded",
+                                             "plain") &&
+                  strstr(json_get_str(&r), "insufficient_confirmed_funds") &&
+                  strstr(json_get_str(&r), "minconf") &&
+                  strstr(json_get_str(&r), "short by 600 zat") &&
+                  !strstr(json_get_str(&r), "floor"));
+    WSR_CHECK("minconf cause: the no-notes text names minconf",
+              strstr(wallet_spend_gate_no_notes_text(12),
+                     "insufficient_confirmed_funds") &&
+                  !strstr(wallet_spend_gate_no_notes_text(12), "floor"));
+    json_free(&r);
+    wallet_spend_gate_note_scan(true, true);
+    wallet_spend_gate_shortfall_message(msg, sizeof(msg), 1000, 400);
+    WSR_CHECK("both causes: the text names the floor and minconf",
+              strstr(msg, "floor") && strstr(msg, "minconf"));
+    wallet_spend_gate_note_scan(false, false);
+    wallet_spend_gate_shortfall_message(msg, sizeof(msg), 1000, 400);
+    WSR_CHECK("no excluded note: neither floor nor minconf is blamed",
+              !strstr(msg, "not usable yet") && !strstr(msg, "at or before"));
+    wallet_spend_gate_note_scan(true, false);
     return failures;
 }
 
@@ -1412,6 +1520,27 @@ static int wsr_e2e_prove(struct wsr_e2e *e, const struct chain_params *cp)
     return failures;
 }
 
+/* A note under both the floor and a high minconf is refused naming both. */
+static int wsr_e2e_minconf(const char *from, const char *to,
+                           struct json_value *result)
+{
+    int failures = 0;
+    char body[512];
+    bool sent = false;
+    struct json_value mc = {0};
+    snprintf(body, sizeof(body),
+             "[\"%s\",[{\"address\":\"%s\",\"amount\":0.01}],100000]",
+             from, to);
+    WSR_CHECK("minconf params parse", json_read(&mc, body, strlen(body)));
+    const char *msg = wsr_e2e_rpc(&mc, result, &sent);
+    WSR_CHECK("a note under both the floor and a high minconf is refused "
+              "naming both causes",
+              !sent && msg && strstr(msg, "insufficient_post_checkpoint") &&
+                  strstr(msg, "minconf") && strstr(msg, "the floor"));
+    json_free(&mc);
+    return failures;
+}
+
 /* Refusals through the registered handler, then the send itself. */
 static int wsr_e2e_scenarios(struct wsr_e2e *e, const struct chain_params *cp,
                              const char *from, const char *to)
@@ -1434,6 +1563,10 @@ static int wsr_e2e_scenarios(struct wsr_e2e *e, const struct chain_params *cp,
                   strstr(msg, "not usable yet"));
     WSR_CHECK("the below-floor note stays unspent", wsr_e2e_contains(e,
                                                                      e->n[0].txid));
+    WSR_CHECK("the floor alone excluding the note: the reply does not blame "
+              "minconf",
+              !strstr(msg, "minconf"));
+    failures += wsr_e2e_minconf(from, to, &result);
 
     WSR_CHECK("note D saved: below the floor, its nullifier in the set at a "
               "height with no block body", wsr_e2e_note_d(e, true));
@@ -1601,6 +1734,8 @@ int test_wallet_spend_rule(void)
     failures += wsr_test_guard_boundaries();
     failures += wsr_test_floor_authority();
     failures += wsr_test_seed_floor();
+    failures += wsr_test_no_seed_floor();
+    failures += wsr_test_unusable_cause();
     failures += wsr_test_shield_form();
     failures += wsr_test_compiled_table();
     failures += wsr_test_rpc_selection();

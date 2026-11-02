@@ -411,21 +411,28 @@ int sovereignty_sapling_ledger_has_root(const uint8_t root[32])
  * of the two activation cursors, the assisted-install seam and the reducer seed
  * floor. Caller holds the progress lock. False when a read fails or a cursor
  * is absent. */
-static bool sov_history_top(sqlite3 *pdb, int64_t *top_out)
+/* The assisted-install seam and the reducer seed floor, each with whether it is
+ * recorded. False when either read fails. */
+static bool sov_read_seeded(sqlite3 *pdb, int32_t *seam, bool *seam_found,
+                            int32_t *seed, bool *seed_found)
+{
+    uint8_t cm[3][32];
+    return consensus_state_install_read_assisted_seam(
+               pdb, seam, cm[0], cm[1], cm[2], seam_found) &&
+           reducer_seed_floor_height_read(pdb, seed, seed_found);
+}
+
+static bool sov_history_top(sqlite3 *pdb, int64_t *top_out, bool *seeded)
 {
     int64_t anchor = -1, nullifier = -1;
     bool anchor_found = false, nullifier_found = false;
     int32_t seam = 0, seed = 0;
     bool seam_found = false, seed_found = false;
-    uint8_t seam_commitments[3][32];
     bool ok = anchor_kv_activation_cursor(pdb, ANCHOR_POOL_SAPLING, &anchor,
                                           &anchor_found) &&
               nullifier_kv_activation_cursor(pdb, &nullifier,
                                              &nullifier_found) &&
-              consensus_state_install_read_assisted_seam(
-                  pdb, &seam, seam_commitments[0], seam_commitments[1],
-                  seam_commitments[2], &seam_found) &&
-              reducer_seed_floor_height_read(pdb, &seed, &seed_found);
+              sov_read_seeded(pdb, &seam, &seam_found, &seed, &seed_found);
     if (!ok || !anchor_found || !nullifier_found || anchor < 0 ||
         nullifier < 0)
         return false; // raw-return-ok:cursor, seam or seed floor unreadable is floor_unknown
@@ -434,6 +441,8 @@ static bool sov_history_top(sqlite3 *pdb, int64_t *top_out)
         top = seam;
     if (seed_found && seed > top)
         top = seed;
+    if (seeded)
+        *seeded = seam_found || seed_found;
     *top_out = top;
     return true;
 }
@@ -445,7 +454,7 @@ bool sovereignty_history_cursor(int64_t *cursor_out)
         return false;
     if (!sov_progress_lock_bounded())
         return false; // raw-return-ok:sov_progress_lock_bounded logged the timeout
-    bool ok = sov_history_top(pdb, cursor_out);
+    bool ok = sov_history_top(pdb, cursor_out, NULL);
     progress_store_tx_unlock();
     return ok;
 }
@@ -828,4 +837,20 @@ bool sovereignty_dump_state_json(struct json_value *out, const char *key)
                    scan.self_folded);
 
     return true;
+}
+
+bool sovereignty_seeded_floor_recorded(bool *recorded)
+{
+    sqlite3 *pdb = progress_store_db();
+    int64_t top = 0;
+    if (!pdb || !recorded)
+        return false;
+    *recorded = false;
+    if (!sov_progress_lock_bounded())
+        return false; // raw-return-ok:sov_progress_lock_bounded logged the timeout
+    bool ok = sov_history_top(pdb, &top, recorded);
+    progress_store_tx_unlock();
+    if (!ok)
+        *recorded = false;
+    return ok;
 }

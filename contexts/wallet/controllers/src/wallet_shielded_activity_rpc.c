@@ -442,15 +442,18 @@ static const struct db_wallet_note_fact *wa_fact_of(
  * unknown height is at or below any floor. */
 static bool wa_send_candidate(const struct db_wallet_note_fact *fact, int tip,
                               int min_conf, int32_t spend_floor,
-                              const uint8_t (*sp)[32], size_t ns)
+                              const uint8_t (*sp)[32], size_t ns,
+                              bool *floor_dropped, bool *conf_dropped)
 {
-    if (!fact)
+    if (!fact || !wallet_note_is_spendable(fact, sp, ns, tip))
         return false;
     int confs = fact->block_height > 0 && fact->block_height <= tip
         ? tip - fact->block_height + 1 : 0;
-    return confs >= min_conf &&
-           wallet_spend_gate_height_ok(spend_floor, fact->block_height) &&
-           wallet_note_is_spendable(fact, sp, ns, tip);
+    bool conf_ok = confs >= min_conf;
+    bool floor_ok = wallet_spend_gate_height_ok(spend_floor, fact->block_height);
+    *conf_dropped |= !conf_ok;
+    *floor_dropped |= !floor_ok;
+    return conf_ok && floor_ok;
 }
 
 int wallet_send_spendable_notes(struct wallet_rpc_context *ctx,
@@ -477,12 +480,15 @@ int wallet_send_spendable_notes(struct wallet_rpc_context *ctx,
     int got = all ? db_sapling_note_list_unspent_for_ivk(
                         ctx->node_db, ivk, all, (size_t)total) : -1;
     int kept = got < 0 || !sp ? -1 : 0;
+    bool floor_dropped = false, conf_dropped = false;
     for (int i = 0; i < got && kept >= 0 && kept < cap; i++) {
         const struct db_wallet_note_fact *fact = wa_fact_of(f, &all[i]);
         if (wa_send_candidate(fact, st.view.tip_height, min_conf, spend_floor,
-                              (const uint8_t (*)[32])sp, ns))
+                              (const uint8_t (*)[32])sp, ns, &floor_dropped,
+                              &conf_dropped))
             out[kept++] = all[i];
     }
+    wallet_spend_gate_note_scan(floor_dropped, conf_dropped);
     free(all);
     free(sp);
     wa_state_free(&st);

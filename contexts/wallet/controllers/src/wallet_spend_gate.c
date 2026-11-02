@@ -127,6 +127,13 @@ static const char *gate_ledger(const struct block_index *tip)
     return found ? NULL : "anchor_root_mismatch";
 }
 
+/* False when the seam or seed floor cannot be read: unknown is not recorded. */
+static bool gate_seeded_floor_recorded(void)
+{
+    bool recorded = false;
+    return sovereignty_seeded_floor_recorded(&recorded) && recorded;
+}
+
 bool wallet_spend_gate_evaluate(const struct main_state *ms, int32_t hstar,
                                 int32_t *floor_height,
                                 char *reason, size_t reason_cap)
@@ -163,8 +170,8 @@ bool wallet_spend_gate_check(struct wallet_rpc_context *ctx,
     /* The strict guard reads a failed authority lookup as "not borrowed". With
      * the option on, no floor is granted unless the durable self-folded marker
      * reads true; otherwise the rule and its floor apply. */
-    if (sovereignty_guard_allow("wallet_spend", why, sizeof(why)) &&
-        (!option || sovereignty_self_folded_marker())) {
+    bool strict = sovereignty_guard_allow("wallet_spend", why, sizeof(why));
+    if (strict && (!option || sovereignty_self_folded_marker())) {
         gate_reason(reason, reason_cap, "");
         sovereignty_spend_rule_note_verdict("strict_guard");
         return true;
@@ -177,6 +184,13 @@ bool wallet_spend_gate_check(struct wallet_rpc_context *ctx,
     bool ok = wallet_spend_gate_evaluate(
         ctx ? ctx->main_state : NULL, reducer_frontier_external_tip_height(),
         &floor, token, sizeof(token));
+    /* A refused strict guard means borrowed history. Its excluded extent is the
+     * recorded seam or seed floor; with neither, the floor would fall back to
+     * the keystone height alone, so fail closed. */
+    if (ok && !strict && !gate_seeded_floor_recorded()) {
+        ok = false;
+        snprintf(token, sizeof(token), "seed_floor_unrecorded");
+    }
     gate_reason(reason, reason_cap, token);
     sovereignty_spend_rule_note_verdict(ok ? "allowed_after_floor" : token);
     if (!ok) {
@@ -205,16 +219,55 @@ bool wallet_spend_gate_height_ok(int32_t floor_height, int32_t height)
     return floor_height == WALLET_SPEND_NO_FLOOR || height > floor_height;
 }
 
-void wallet_spend_gate_shortfall_message(char *out, size_t cap, int64_t need,
-                                         int64_t have)
+/* What the last note scan of this thread dropped. Unscanned reads as the floor,
+ * the cause every earlier reply named. */
+static _Thread_local struct {
+    bool scanned;
+    bool floor_dropped;
+    bool conf_dropped;
+} g_scan;
+
+void wallet_spend_gate_note_scan(bool floor_dropped, bool min_conf_dropped)
+{
+    g_scan.scanned = true;
+    g_scan.floor_dropped = floor_dropped;
+    g_scan.conf_dropped = min_conf_dropped;
+}
+
+/* The unusable-funds clause, naming what the scan dropped. */
+static const char *gate_unusable_clause(bool shielded, const char **token)
+{
+    *token = "insufficient_post_checkpoint_funds";
+    if (!shielded || !g_scan.scanned || (g_scan.floor_dropped &&
+                                         !g_scan.conf_dropped))
+        return "funds received at or before the floor are not usable yet";
+    if (g_scan.floor_dropped)
+        return "funds at or before the floor and notes with fewer "
+               "confirmations than minconf are not usable yet";
+    if (g_scan.conf_dropped) {
+        *token = "insufficient_confirmed_funds";
+        return "notes with fewer confirmations than minconf are not usable "
+               "yet";
+    }
+    return "no note was excluded by the floor or minconf";
+}
+
+static void gate_shortfall(char *out, size_t cap, int64_t need, int64_t have,
+                           bool shielded)
 {
     if (!out || !cap)
         return;
-    snprintf(out, cap,
-             "Error: spend refused — insufficient_post_checkpoint_funds "
-             "(short by %lld zat; funds received at or before the floor are not "
-             "usable yet)",
-             (long long)(need > have ? need - have : 0));
+    const char *token = NULL;
+    const char *clause = gate_unusable_clause(shielded, &token);
+    snprintf(out, cap, "%s — %s (short by %lld zat; %s)",
+             WALLET_SPEND_REFUSAL_PREFIX, token,
+             (long long)(need > have ? need - have : 0), clause);
+}
+
+void wallet_spend_gate_shortfall_message(char *out, size_t cap, int64_t need,
+                                         int64_t have)
+{
+    gate_shortfall(out, cap, need, have, true);
 }
 
 bool wallet_spend_gate_for_send(struct wallet_rpc_context *ctx,
@@ -244,13 +297,14 @@ bool wallet_spend_gate_short_funds(struct json_value *result, int32_t floor,
                                    int64_t need, int64_t have,
                                    const char *tag, const char *plain_text)
 {
-    char msg[160];
+    char msg[224];
     if (floor == WALLET_SPEND_NO_FLOOR) {
         json_set_str(result, plain_text);
         LOG_FAIL("wallet_shielded", "z_sendmany: insufficient %s funds",
                  tag);
     }
-    wallet_spend_gate_shortfall_message(msg, sizeof(msg), need, have);
+    gate_shortfall(msg, sizeof(msg), need, have,
+                   strcmp(tag, "shielded") == 0);
     json_set_str(result, msg);
     LOG_FAIL("wallet_shielded",
              "z_sendmany: refused — insufficient post-checkpoint %s funds",
@@ -259,8 +313,12 @@ bool wallet_spend_gate_short_funds(struct json_value *result, int32_t floor,
 
 const char *wallet_spend_gate_no_notes_text(int32_t floor)
 {
-    return floor == WALLET_SPEND_NO_FLOOR
-        ? "No unspent shielded notes for this address"
-        : "Error: spend refused — insufficient_post_checkpoint_funds (funds "
-          "received at or before the floor are not usable yet)";
+    const char *token = NULL;
+    static _Thread_local char text[192];
+    if (floor == WALLET_SPEND_NO_FLOOR)
+        return "No unspent shielded notes for this address";
+    const char *clause = gate_unusable_clause(true, &token);
+    snprintf(text, sizeof(text), "%s — %s (%s)", WALLET_SPEND_REFUSAL_PREFIX,
+             token, clause);
+    return text;
 }

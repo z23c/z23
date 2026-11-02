@@ -837,7 +837,9 @@ static int cold_import_seed_commit(sqlite3 *progress_db,
         LOG_WARN_IN("block_index_loader_seed_stages_from_cold_import",
                  "block_index",
                  "cold-import seed: seed-floor declare failed H=%d "
-                 "(bg-validation will walk from genesis — slow, correct)", H);
+                 "(bg-validation will walk from genesis — slow, correct; spends "
+                 "under -spend-after-checkpoint stay refused: "
+                 "seed_floor_unrecorded)", H);
 
     /* (6) Self-check: the seed must have moved H* up to H. If not, the heal
      *     silently did nothing — keep the durable anchor so the next boot

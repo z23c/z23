@@ -118,6 +118,11 @@ int sovereignty_sapling_ledger_has_root(const uint8_t root[32]);
  * progress lock is not obtained within the bounded wait (default SOV_PROGRESS_WAIT_MS_DEFAULT ms). */
 bool sovereignty_history_cursor(int64_t *cursor_out);
 
+/* True when the call succeeded; *recorded is then true only when an
+ * assisted-install seam or a reducer seed floor is recorded. A borrowed state
+ * with neither has no seeded extent the spend rule can exclude. */
+bool sovereignty_seeded_floor_recorded(bool *recorded);
+
 /* True only when the coins set carries the durable self-folded marker, read
  * under the bounded progress lock. False when the marker is absent, the read
  * fails, or the lock is not obtained: callers then treat the tip as unproven. */

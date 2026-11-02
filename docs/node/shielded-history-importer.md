@@ -210,9 +210,10 @@ re-verifies, in order, and refuses with the first failing token:
 | `tip_not_descended` | the tip's ancestor at a baked checkpoint height has another hash |
 | `checkpoint_mismatch` | the header `hashFinalSaplingRoot` at the baked frontier height differs from the baked frontier root |
 | `anchor_root_mismatch` | the header Sapling root at the tip is absent from the reducer's per-block Sapling anchor ledger; or, before proving, a selected note's witness root differs from the header root at its witness height |
+| `seed_floor_unrecorded` | the strict guard refused (borrowed history) and neither an assisted-install seam nor a reducer seed floor is recorded, so the floor would be the keystone height alone |
 | `floor_unknown` | the Sapling anchor or nullifier activation cursor is absent, or the assisted-install seam, the reducer seed floor or the anchor ledger cannot be read, or the progress lock was not obtained within the bounded wait (5 s) |
 
-An assisted bundle install resets both cursors to 0 and records its seam height. A cold import declares the reducer seed floor, and `-import-complete-shielded` then sets both cursors to 0 with no seam. The floor includes the seam height when one is recorded and the seed floor when one is declared, so funds from before the seeded state stay out in every install mode (keystone seed, assisted bundle, cold import). An absent seam or seed floor is not an error; an unreadable one gives `floor_unknown`.
+An assisted bundle install resets both cursors to 0 and records its seam height. A cold import declares the reducer seed floor, and `-import-complete-shielded` then sets both cursors to 0 with no seam. The floor includes the seam height when one is recorded and the seed floor when one is declared, so funds from before the seeded state stay out in every install mode (keystone seed, assisted bundle, cold import). An unreadable seam or seed floor gives `floor_unknown`. When the strict guard refused and neither a seam nor a seed floor is recorded, the spend is refused with `seed_floor_unrecorded`; the floor is never left to the keystone height alone. A failed seed-floor write at cold import is logged and leaves spends refused this way.
 
 With the option on, the strict guard alone never removes the floor. It counts a
 failed authority read as "not borrowed", so no floor is applied only when the
@@ -226,7 +227,7 @@ activation cursor, nullifier activation cursor, assisted-install seam height, re
 or with an unknown height, is never selected, change included (change is a new
 output above the floor). A send that needs more than the post-floor funds
 refuses with `insufficient_post_checkpoint_funds` and the shortfall, and never
-spends partly; the reply says funds at or before the floor are not usable yet, not that they are absent. The shortfall goes to the caller only and is not logged.
+spends partly; the reply says funds at or before the floor are not usable yet, not that they are absent. When the send's `minconf` excluded the notes instead, the reply names `insufficient_confirmed_funds` and says the notes have fewer confirmations than `minconf`; when both excluded notes, it names both. The shortfall goes to the caller only and is not logged.
 The native send command is keyed, so a refusal of this rule frees the key and
 answers with `SEND_REFUSED_KEY_RELEASED`: the refusal came before anything was
 built, so nothing was sent and the caller may retry (any other
