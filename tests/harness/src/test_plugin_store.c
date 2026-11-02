@@ -24,6 +24,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1959,45 +1960,164 @@ static enum plugin_status pst_loop_worker(const char *plugdir, int64_t ms, _Atom
     return PLUGIN_OK;
 }
 
+/* Observer for one waiter. A queued waiter holds the ".lock.q" gate shared, so
+ * the gate shows a shared (READ) flock exactly while a waiter is
+ * announced. The thread snapshots the holders' cycle counter when it first sees
+ * one: cycles counted after that point passed a waiter that
+ * was already in the FIFO. Time the waiter spends descheduled before it
+ * enqueues is never counted, so host load cannot inflate the figure. */
+struct pst_gate_watch {
+    char gatepath[PATH_MAX];
+    _Atomic unsigned *cycles;
+    _Atomic bool stop;
+    _Atomic bool queued;
+    _Atomic unsigned at_queue;
+};
+
+/* True while some process holds the gate inode's flock shared (a queued waiter).
+ * The holders' own momentary exclusive gate test is a WRITE lock and is
+ * ignored, which a plain failed exclusive try could not tell apart. *known is
+ * false where /proc/locks is not readable. */
+static bool pst_gate_has_reader(unsigned long ino, bool *known)
+{
+    FILE *f = fopen("/proc/locks", "r");
+    char line[256];
+    bool found = false;
+    *known = f != NULL;
+    while (f && !found && fgets(line, sizeof(line), f)) {
+        char kind[16], rw[16];
+        unsigned long lino = 0;
+        if (strstr(line, "->") == NULL &&
+            sscanf(line, "%*s %15s %*s %15s %*d %*x:%*x:%lu", kind, rw, &lino) == 3)
+            found = strcmp(kind, "FLOCK") == 0 && strcmp(rw, "READ") == 0 && lino == ino;
+    }
+    if (f)
+        fclose(f);
+    return found;
+}
+
+static void *pst_gate_watch_thread(void *arg)
+{
+    struct pst_gate_watch *g = arg;
+    int fd = open(g->gatepath, O_RDWR | O_CLOEXEC);
+    struct stat st;
+    int misses = 0;
+    if (fd < 0 || fstat(fd, &st) != 0) {
+        if (fd >= 0)
+            close(fd);
+        return NULL;
+    }
+    while (!atomic_load(&g->stop)) {
+        bool known = false;
+        bool queued = pst_gate_has_reader((unsigned long)st.st_ino, &known);
+        if (!known) {
+            /* No /proc/locks: a failed exclusive try that persists across two
+             * probes is a waiter; the holders' own test is momentary. */
+            if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
+                flock(fd, LOCK_UN);
+                misses = 0;
+            } else {
+                queued = ++misses >= 2;
+            }
+            platform_sleep_ms(1);
+        }
+        if (queued) {
+            atomic_store(&g->at_queue, atomic_load(g->cycles));
+            atomic_store(&g->queued, true);
+            break;
+        }
+        sched_yield();
+    }
+    close(fd);
+    return NULL;
+}
+
+/* One waiter acquisition watched by the gate observer; returns the cycles that
+ * passed the queued waiter, or -1 if the acquire or the observer failed. */
+static int pst_fair_wait_once(const char *plugdir, struct pst_gate_watch *g, unsigned *passed)
+{
+    struct plugin_lock lk;
+    pthread_t th;
+    atomic_store(&g->stop, false);
+    atomic_store(&g->queued, false);
+    if (pthread_create(&th, NULL, pst_gate_watch_thread, g) != 0)
+        return -1;
+    enum plugin_status st = plugin_lock_acquire(plugdir, &lk);
+    /* The holder is blocked while we hold the lock, so this read is exact. */
+    unsigned now = atomic_load(g->cycles);
+    atomic_store(&g->stop, true);
+    pthread_join(th, NULL);
+    if (st != PLUGIN_OK)
+        return -1;
+    plugin_lock_release(&lk);
+    /* Never queued (the lock was free at the first try): nothing passed us. */
+    *passed = atomic_load(&g->queued) ? now - atomic_load(&g->at_queue) : 0;
+    return 0;
+}
+
+/* The whole fairness run. Plain returns, no assertions, so the caller can
+ * release the shared mapping on every path: 0 ok, 1 setup, 2 acquire or
+ * observer failure, 3 a holder child failed. *worst is the most cycles that
+ * passed any queued waiter. */
+static int pst_fair_run(_Atomic unsigned *cycles, unsigned *worst)
+{
+    enum { WAITS = 20 };
+    struct pst_fx fx;
+    struct pst_gate_watch g = {.cycles = cycles};
+    char plugdir[PATH_MAX];
+    int rc = 0;
+    if (!pst_fx_open(&fx, true))
+        return 1;
+    if (pst_install(&fx, "hello", "version a", &(struct pst_opts){0}) != PLUGIN_OK ||
+        !pst_plug_path(&fx, NULL, plugdir, sizeof(plugdir)) ||
+        !pst_plug_path(&fx, ".lock.q", g.gatepath, sizeof(g.gatepath))) {
+        pst_fx_close(&fx);
+        return 1;
+    }
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid < 0) {
+        pst_fx_close(&fx);
+        return 1;
+    }
+    if (pid == 0)
+        _exit((int)pst_loop_worker(plugdir, 3000, cycles));
+    for (int i = 0; i < WAITS && rc == 0; i++) {
+        unsigned passed = 0;
+        if (pst_fair_wait_once(plugdir, &g, &passed) != 0)
+            rc = 2;
+        else if (passed > *worst)
+            *worst = passed;
+        platform_sleep_ms(1);
+    }
+    if (pst_reap(pid) != (int)PLUGIN_OK && rc == 0)
+        rc = 3;
+    pst_fx_close(&fx);
+    return rc;
+}
+
 static int pst_case_lock_fairness(void)
 {
     int failures = 0;
     TEST_CASE("a waiter acquires the plugin lock while holders re-acquire in a tight loop") {
-        /* The plugin lock queues waiters behind a FIFO gate, so at most the one
-         * holder cycle already in flight may pass a waiter; MAX_PASSED allows
-         * four, far below the hundreds a starved waiter sees. Counting cycles
-         * instead of wall time keeps the check independent of host load: a
-         * descheduled holder passes fewer cycles, never more. */
-        enum { LOOPERS = 1, WAITS = 20, MAX_PASSED = 4 };
-        struct pst_fx fx;
-        char plugdir[PATH_MAX];
-        pid_t pids[LOOPERS];
+        /* The plugin lock queues waiters behind a FIFO gate, so once a waiter is
+         * announced at most the one holder cycle already in flight may pass it;
+         * MAX_PASSED allows four, far below the hundreds a starved waiter sees.
+         * The count starts when the observer sees the waiter on the gate, not
+         * when the waiter calls acquire, so a waiter that is descheduled before
+         * it enqueues (or a loaded host) cannot add cycles to the figure. A
+         * waiter that is descheduled after it enqueued still loses nothing it
+         * could not lose under FIFO: the holder's next cycle is gated. */
+        enum { MAX_PASSED = 4 };
+        unsigned worst = 0;
         _Atomic unsigned *cycles = mmap(NULL, sizeof(*cycles), PROT_READ | PROT_WRITE,
                                         MAP_SHARED | MAP_ANONYMOUS, -1, 0);
         ASSERT(cycles != MAP_FAILED);
         atomic_init(cycles, 0);
-        ASSERT(pst_fx_open(&fx, true) && pst_install(&fx, "hello", "version a", &(struct pst_opts){0}) == PLUGIN_OK);
-        ASSERT(pst_plug_path(&fx, NULL, plugdir, sizeof(plugdir)));
-        fflush(NULL);
-        for (int i = 0; i < LOOPERS; i++) {
-            pids[i] = fork();
-            if (pids[i] == 0)
-                _exit((int)pst_loop_worker(plugdir, 3000, cycles));
-        }
-        for (int i = 0; i < WAITS; i++) {
-            struct plugin_lock lk;
-            unsigned before = atomic_load(cycles);
-            ASSERT_EQ(plugin_lock_acquire(plugdir, &lk), PLUGIN_OK);
-            /* The holder is blocked while we hold the lock, so this read is exact. */
-            unsigned passed = atomic_load(cycles) - before;
-            plugin_lock_release(&lk);
-            ASSERT(passed <= MAX_PASSED);
-            platform_sleep_ms(1);
-        }
-        for (int i = 0; i < LOOPERS; i++)
-            ASSERT_EQ(pst_reap(pids[i]), (int)PLUGIN_OK);
-        munmap(cycles, sizeof(*cycles));
-        pst_fx_close(&fx);
+        int rc = pst_fair_run(cycles, &worst);
+        munmap(cycles, sizeof(*cycles)); /* every path of the run lands here */
+        ASSERT_EQ(rc, 0);
+        ASSERT(worst <= MAX_PASSED);
     } TEST_END
     return failures;
 }
