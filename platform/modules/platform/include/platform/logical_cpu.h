@@ -28,6 +28,16 @@ bool platform_cpu_max_parse(const char *text, uint32_t *cpus_out);
  * ancestors, in whole CPUs; UINT32_MAX when none applies or off Linux. */
 uint32_t platform_cpu_quota_limit(void);
 
+/* The same walk over an explicit cgroup directory: the tightest cpu.max from
+ * leaf_dir up to and including root_dir. Lets a test point it at a fake tree.
+ * UINT32_MAX when none applies, on bad arguments, or off Linux. */
+uint32_t platform_cpu_quota_walk(const char *leaf_dir, const char *root_dir);
+
+/* Workers that fit a memory budget: min(cpus, budget / per_worker_bytes), at
+ * least 1. A non-positive budget or estimate names no limit. Pure. */
+uint32_t platform_memory_worker_cap(uint32_t cpus, int64_t memory_budget_bytes,
+                                    int64_t per_worker_bytes);
+
 /* Count the logical processors this PROCESS is actually allowed to run on.
  *
  * platform_logical_cpu_count() answers "how big is the host", which is the

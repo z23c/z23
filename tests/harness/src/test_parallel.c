@@ -893,10 +893,42 @@ static void print_watchdog_kill(size_t idx, const char *name,
     fflush(stdout);
 }
 
+/* Peak resident bytes one runner worker (a test group plus its children) is
+ * budgeted under a sanitizer, used only to keep workers inside the cgroup
+ * memory ceiling. Unsanitized builds are not capped. TSan shadow memory makes
+ * a worker several times heavier: 28 TSan workers reached 8.0 GiB and were
+ * OOM-killed under a devbuild scope whose MemoryMax is 8 GiB, so ~300 MiB
+ * would still admit 27 and not prevent it; 512 MiB admits 16. */
+#if defined(__SANITIZE_THREAD__)
+#define RUNNER_WORKER_BYTES (INT64_C(512) * 1024 * 1024)
+#define RUNNER_WORKER_KIND "tsan"
+#elif defined(__SANITIZE_ADDRESS__)
+#define RUNNER_WORKER_BYTES (INT64_C(256) * 1024 * 1024)
+#define RUNNER_WORKER_KIND "asan"
+#else
+#define RUNNER_WORKER_BYTES INT64_C(0)
+#define RUNNER_WORKER_KIND ""
+#endif
+
+static char g_jobs_reason[96] = "cpus";
+
 static int get_nproc(void)
 {
     uint32_t n = platform_available_cpu_count();
-    return n > 1024u ? 1024 : (int)n;
+    if (n > 1024u) n = 1024u;
+    if (RUNNER_WORKER_BYTES > 0) {
+        int64_t budget = platform_build_memory_budget_bytes();
+        uint32_t capped =
+            platform_memory_worker_cap(n, budget, RUNNER_WORKER_BYTES);
+        if (capped < n) {
+            snprintf(g_jobs_reason, sizeof g_jobs_reason,
+                     "%s memory cap: %lld MiB / %lld MiB per worker, cpus %u",
+                     RUNNER_WORKER_KIND, (long long)(budget >> 20),
+                     (long long)(RUNNER_WORKER_BYTES >> 20), n);
+            n = capped;
+        }
+    }
+    return (int)n;
 }
 
 static bool activate_proof_contract(size_t idx)
@@ -3292,9 +3324,11 @@ static bool cli_parse_numeric(const char *a, struct run_opts *o)
 {
     if (strncmp(a, "--jobs=", 7) == 0) {
         o->jobs = atoi(a + 7);
+        snprintf(g_jobs_reason, sizeof g_jobs_reason, "explicit --jobs");
         if (o->jobs < 1) o->jobs = 1;
     } else if (strncmp(a, "-j", 2) == 0 && a[2]) {
         o->jobs = atoi(a + 2);
+        snprintf(g_jobs_reason, sizeof g_jobs_reason, "explicit -j");
         if (o->jobs < 1) o->jobs = 1;
     } else if (strncmp(a, "--timeout=", 10) == 0) {
         o->timeout_secs = atoi(a + 10);
@@ -3525,8 +3559,9 @@ static int run_select(struct run_ctx *c)
     if (!exact_selection_valid(o->only_exact, o->only)) return 2;
 
     setbuf(stdout, NULL);
-    printf("test_parallel: %zu groups, %d workers, %ds per-group timeout\n",
-           g_num_groups, o->jobs, o->timeout_secs);
+    printf("test_parallel: %zu groups, %d workers, %ds per-group timeout "
+           "(workers: %s)\n",
+           g_num_groups, o->jobs, o->timeout_secs, g_jobs_reason);
 
     c->results = calloc(g_num_groups, sizeof(*c->results));
     if (!c->results) {

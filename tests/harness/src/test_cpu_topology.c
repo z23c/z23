@@ -35,6 +35,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #if defined(__linux__)
 #include <sched.h>
@@ -183,6 +184,75 @@ static int cpt_cpu_quota_live_checks(void)
     return failures;
 }
 #endif
+
+/* A fake cgroup tree: root/a/b/c with cpu.max written at chosen levels. The
+ * limit is the minimum along the path, whichever level holds it. */
+#if defined(__linux__)
+static void cpt_write_cpu_max(const char *dir, const char *text)
+{
+    char path[640];
+    snprintf(path, sizeof path, "%s/cpu.max", dir);
+    FILE *f = fopen(path, "w");
+    if (f) {
+        fputs(text, f);
+        fclose(f);
+    }
+}
+
+static int cpt_cpu_quota_walk_checks(void)
+{
+    int failures = 0;
+    char root[400], a[480], b[520], c[560];
+    test_make_tmpdir(root, sizeof root, "cpu_quota", "walk");
+    snprintf(a, sizeof a, "%s/a", root);
+    snprintf(b, sizeof b, "%s/b", a);
+    snprintf(c, sizeof c, "%s/c", b);
+    (void)mkdir(a, 0700);
+    (void)mkdir(b, 0700);
+    (void)mkdir(c, 0700);
+
+    CPT_CHECK("no cpu.max anywhere is no limit",
+              platform_cpu_quota_walk(c, root) == UINT32_MAX);
+    cpt_write_cpu_max(c, "max 100000\n");
+    cpt_write_cpu_max(root, "max 100000\n");
+    CPT_CHECK("max at every level is no limit",
+              platform_cpu_quota_walk(c, root) == UINT32_MAX);
+    cpt_write_cpu_max(a, "800000 100000\n");
+    CPT_CHECK("a limit on an ancestor binds an unlimited leaf",
+              platform_cpu_quota_walk(c, root) == 8);
+    cpt_write_cpu_max(c, "2800000 100000\n");
+    CPT_CHECK("a wider leaf does not widen the ancestor limit",
+              platform_cpu_quota_walk(c, root) == 8);
+    cpt_write_cpu_max(b, "250000 100000\n");
+    CPT_CHECK("tightest of the path wins, rounded up",
+              platform_cpu_quota_walk(c, root) == 3);
+    cpt_write_cpu_max(root, "100000 100000\n");
+    CPT_CHECK("the root level is included",
+              platform_cpu_quota_walk(c, root) == 1);
+    CPT_CHECK("a null argument is no limit",
+              platform_cpu_quota_walk(NULL, root) == UINT32_MAX);
+
+    test_rm_rf_recursive(root);
+    return failures;
+}
+
+#endif
+
+static int cpt_memory_worker_cap_checks(void)
+{
+    int failures = 0;
+    const int64_t gib = INT64_C(1) << 30;
+    const int64_t mib = INT64_C(1) << 20;
+    CPT_CHECK("8 GiB at 512 MiB caps 28 cpus to 16",
+              platform_memory_worker_cap(28, 8 * gib, 512 * mib) == 16);
+    CPT_CHECK("a roomy budget leaves the cpu count",
+              platform_memory_worker_cap(8, 64 * gib, 512 * mib) == 8);
+    CPT_CHECK("no budget names no limit",
+              platform_memory_worker_cap(28, -1, 512 * mib) == 28);
+    CPT_CHECK("a starved budget still runs one worker",
+              platform_memory_worker_cap(28, 100 * mib, 512 * mib) == 1);
+    return failures;
+}
 
 /* The build-job derivation, graded through the PURE function so no particular
  * host CPU count or memory grant is needed. */
@@ -447,6 +517,10 @@ int test_cpu_topology(void)
 #if defined(__linux__)
     failures += cpt_cpu_quota_live_checks();
 #endif
+#if defined(__linux__)
+    failures += cpt_cpu_quota_walk_checks();
+#endif
+    failures += cpt_memory_worker_cap_checks();
     failures += cpt_build_job_count_checks();
 
     /* ── real /sys scan (or whatever this box/container actually has) ── */

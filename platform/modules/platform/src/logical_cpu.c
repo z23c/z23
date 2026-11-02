@@ -141,23 +141,52 @@ static uint32_t cpu_quota_at(const char *dir)
 
 /* Tightest cpu.max from this process's cgroup up to the cgroup root: a
  * parent's limit binds its children. UINT32_MAX when none applies. */
-static uint32_t cpu_quota_limit(void)
+static uint32_t cpu_quota_walk(const char *leaf, const char *root)
 {
     char dir[512];
-    if (!os_proc_cgroup_dir(dir, sizeof dir)) return UINT32_MAX;
+    if (!leaf || !root || snprintf(dir, sizeof dir, "%s", leaf) >= (int)sizeof dir)
+        return UINT32_MAX;
     uint32_t best = UINT32_MAX;
     for (;;) {
         uint32_t here = cpu_quota_at(dir);
         if (here < best) best = here;
-        if (strcmp(dir, CPU_QUOTA_CGROUP_ROOT) == 0) break;
+        if (strcmp(dir, root) == 0) break;
         char *slash = strrchr(dir, '/');
         if (!slash || slash == dir) break;
         *slash = '\0';
-        if (strlen(dir) < strlen(CPU_QUOTA_CGROUP_ROOT)) break;
+        if (strlen(dir) < strlen(root)) break;
     }
     return best;
 }
+
+static uint32_t cpu_quota_limit(void)
+{
+    char dir[512];
+    if (!os_proc_cgroup_dir(dir, sizeof dir)) return UINT32_MAX;
+    return cpu_quota_walk(dir, CPU_QUOTA_CGROUP_ROOT);
+}
 #endif
+
+uint32_t platform_cpu_quota_walk(const char *leaf_dir, const char *root_dir)
+{
+#if defined(__linux__)
+    return cpu_quota_walk(leaf_dir, root_dir);
+#else
+    (void)leaf_dir;
+    (void)root_dir;
+    return UINT32_MAX;
+#endif
+}
+
+uint32_t platform_memory_worker_cap(uint32_t cpus, int64_t memory_budget_bytes,
+                                    int64_t per_worker_bytes)
+{
+    uint32_t n = cpus > 0 ? cpus : UINT32_C(1);
+    if (memory_budget_bytes <= 0 || per_worker_bytes <= 0) return n;
+    int64_t by_memory = memory_budget_bytes / per_worker_bytes;
+    if (by_memory < 1) by_memory = 1;
+    return by_memory < (int64_t)n ? (uint32_t)by_memory : n;
+}
 
 /* One definition for every platform (check-arm-symbol-single), like the
  * availability count below. */
