@@ -139,6 +139,121 @@ int t_no_new_borrowed_seed_caller(void)
     return failures;
 }
 
+/* Results of the coin-backfill-caller case, asserted together by the case. */
+typedef struct {
+    int baseline_rc, planted, trip_rc, recover_after_new_rc;
+    int planted_domain, trip_domain_rc, recover_after_domain_rc;
+    int isolated_written, isolated_green_rc, append_dup, trip_dup_rc;
+    int restore_allowed, recover_after_dup_rc;
+} coin_backfill_results_t;
+
+/* Plant one caller fixture, run the gate, remove it, run the gate again. */
+static void coin_backfill_trip_phase(const char *dst, const char *body,
+                                     int *planted, int *trip_rc,
+                                     int *recover_rc)
+{
+    char path[PATH_MAX];
+    *planted = (repo_path(path, sizeof(path), dst) == 0 &&
+                write_file(path, body) == 0) ? 0 : -1;
+    *trip_rc = *planted == 0
+                   ? run_gate_script(COIN_BACKFILL_CALLER_SCRIPT_REL, NULL)
+                   : -1;
+    unlink_rel(dst);
+    *recover_rc = run_gate_script(COIN_BACKFILL_CALLER_SCRIPT_REL, NULL);
+}
+
+/* Isolated-root directory chain plus the two files written into it. */
+typedef struct {
+    char dirs[7][PATH_MAX]; /* root, engine, jobs, src, reducer, reducer/jobs,
+                               reducer/jobs/src */
+    char def_path[PATH_MAX];
+    char allowed_path[PATH_MAX];
+} coin_backfill_tree_t;
+
+static int coin_backfill_join(char *buf, size_t cap, const char *root,
+                              const char *rel)
+{
+    int n = snprintf(buf, cap, "%s%s", root, rel);
+    return n > 0 && n < (int)cap;
+}
+
+static int coin_backfill_tree_build(coin_backfill_tree_t *t)
+{
+    static const char *const dir_rel[7] = {
+        "", "/engine", "/engine/jobs", "/engine/jobs/src",
+        "/engine/reducer", "/engine/reducer/jobs",
+        "/engine/reducer/jobs/src"
+    };
+    char *root = t->dirs[0];
+    if (repo_path(root, PATH_MAX, COIN_BACKFILL_ROOT_REL) != 0)
+        return 0;
+    for (int i = 1; i < 7; i++)
+        if (!coin_backfill_join(t->dirs[i], PATH_MAX, root, dir_rel[i]))
+            return 0;
+    return coin_backfill_join(t->def_path, PATH_MAX, t->dirs[3],
+                              "/stage_repair_coin_backfill.c") &&
+           coin_backfill_join(t->allowed_path, PATH_MAX, t->dirs[6],
+                              "/stage_repair_reducer_frontier_coin.c");
+}
+
+static int coin_backfill_tree_mkdirs(const coin_backfill_tree_t *t)
+{
+    for (int i = 0; i < 7; i++)
+        if (!(mkdir(t->dirs[i], 0700) == 0 || errno == EEXIST))
+            return 0;
+    return 1;
+}
+
+static void coin_backfill_tree_remove(const coin_backfill_tree_t *t)
+{
+    (void)unlink(t->def_path);
+    (void)unlink(t->allowed_path);
+    for (int i = 6; i >= 0; i--)
+        (void)rmdir(t->dirs[i]);
+}
+
+static int coin_backfill_isolated_gate(const char *root)
+{
+    return run_gate_script_with_env(COIN_BACKFILL_CALLER_SCRIPT_REL,
+                                    "ZCL_COIN_BACKFILL_ROOT_FOR_TEST", root);
+}
+
+/* Isolated tree: green with the single dispatcher call, trips on a duplicate
+ * call, recovers once restored; the tree is removed afterwards. */
+static void coin_backfill_isolated_phase(coin_backfill_results_t *r)
+{
+    coin_backfill_tree_t t;
+    int paths_ok = coin_backfill_tree_build(&t);
+    int dirs_ok = paths_ok && coin_backfill_tree_mkdirs(&t);
+    const char *root = t.dirs[0];
+    const char *def_body =
+        "void stage_repair_coin_backfill_try(void) {}\n";
+    const char *allowed_body =
+        "void allowed_coin_backfill(void) {\n"
+        "    stage_repair_coin_backfill_try();\n"
+        "}\n";
+    r->isolated_written = dirs_ok &&
+        write_file(t.def_path, def_body) == 0 &&
+        write_file(t.allowed_path, allowed_body) == 0;
+    r->isolated_green_rc = r->isolated_written
+        ? coin_backfill_isolated_gate(root) : -1;
+    r->append_dup = r->isolated_written
+        ? write_file(t.allowed_path,
+                     "void allowed_coin_backfill(void) {\n"
+                     "    stage_repair_coin_backfill_try();\n"
+                     "    stage_repair_coin_backfill_try();\n"
+                     "}\n")
+        : -1;
+    r->trip_dup_rc = r->append_dup == 0 ? coin_backfill_isolated_gate(root)
+                                        : -1;
+    r->restore_allowed = r->append_dup == 0
+        ? write_file(t.allowed_path, allowed_body) : -1;
+    r->recover_after_dup_rc = r->restore_allowed == 0
+        ? coin_backfill_isolated_gate(root) : -1;
+    if (paths_ok)
+        coin_backfill_tree_remove(&t);
+}
+
 /* Sovereign-cure ratchet — stage_repair_coin_backfill_try is the public
  * borrowed-seed-era coin-backfill repair entry. New production callers widen
  * the repair fabric; the only allowed caller is the reducer-frontier dispatcher,
@@ -146,131 +261,38 @@ int t_no_new_borrowed_seed_caller(void)
 int t_no_new_coin_backfill_caller(void)
 {
     int failures = 0;
-    char path[PATH_MAX];
+    coin_backfill_results_t r;
+    memset(&r, 0, sizeof(r));
     unlink_rel(COIN_BACKFILL_CALLER_FIXTURE_DST);
     unlink_rel(COIN_BACKFILL_CALLER_DOMAIN_FIXTURE_DST);
-    int baseline_rc = run_gate_script(COIN_BACKFILL_CALLER_SCRIPT_REL, NULL);
-    int planted = (repo_path(path, sizeof(path),
-                             COIN_BACKFILL_CALLER_FIXTURE_DST) == 0 &&
-                   write_file(path,
-                              "void coin_backfill_caller_fixture(void) {\n"
-                              "    stage_repair_coin_backfill_try(0, 0, 0, 0, 0);\n"
-                              "}\n") == 0) ? 0 : -1;
-    int trip_rc = planted == 0
-                      ? run_gate_script(COIN_BACKFILL_CALLER_SCRIPT_REL, NULL)
-                      : -1;
-    unlink_rel(COIN_BACKFILL_CALLER_FIXTURE_DST);
-    int recover_after_new_rc =
-        run_gate_script(COIN_BACKFILL_CALLER_SCRIPT_REL, NULL);
-    int planted_domain =
-        (repo_path(path, sizeof(path),
-                   COIN_BACKFILL_CALLER_DOMAIN_FIXTURE_DST) == 0 &&
-         write_file(path,
-                    "void coin_backfill_domain_fixture(void) {\n"
-                    "    stage_repair_coin_backfill_try(0, 0, 0, 0, 0);\n"
-                    "}\n") == 0) ? 0 : -1;
-    int trip_domain_rc =
-        planted_domain == 0
-            ? run_gate_script(COIN_BACKFILL_CALLER_SCRIPT_REL, NULL)
-            : -1;
-    unlink_rel(COIN_BACKFILL_CALLER_DOMAIN_FIXTURE_DST);
-    int recover_after_domain_rc =
-        run_gate_script(COIN_BACKFILL_CALLER_SCRIPT_REL, NULL);
-
-    char root[PATH_MAX], engine_dir[PATH_MAX], jobs_dir[PATH_MAX];
-    char src_dir[PATH_MAX], reducer_dir[PATH_MAX], reducer_jobs_dir[PATH_MAX];
-    char reducer_src_dir[PATH_MAX], def_path[PATH_MAX], allowed_path[PATH_MAX];
-    int root_resolved = repo_path(root, sizeof(root), COIN_BACKFILL_ROOT_REL);
-    int engine_n = root_resolved == 0
-        ? snprintf(engine_dir, sizeof(engine_dir), "%s/engine", root) : -1;
-    int jobs_n = engine_n > 0 && engine_n < (int)sizeof(engine_dir)
-        ? snprintf(jobs_dir, sizeof(jobs_dir), "%s/engine/jobs", root) : -1;
-    int src_n = jobs_n > 0 && jobs_n < (int)sizeof(jobs_dir)
-        ? snprintf(src_dir, sizeof(src_dir), "%s/engine/jobs/src", root) : -1;
-    int reducer_n = src_n > 0 && src_n < (int)sizeof(src_dir)
-        ? snprintf(reducer_dir, sizeof(reducer_dir), "%s/engine/reducer", root)
-        : -1;
-    int reducer_jobs_n = reducer_n > 0 && reducer_n < (int)sizeof(reducer_dir)
-        ? snprintf(reducer_jobs_dir, sizeof(reducer_jobs_dir),
-                   "%s/engine/reducer/jobs", root) : -1;
-    int reducer_src_n = reducer_jobs_n > 0 &&
-                        reducer_jobs_n < (int)sizeof(reducer_jobs_dir)
-        ? snprintf(reducer_src_dir, sizeof(reducer_src_dir),
-                   "%s/engine/reducer/jobs/src", root) : -1;
-    int def_n = src_n > 0 && src_n < (int)sizeof(src_dir)
-        ? snprintf(def_path, sizeof(def_path),
-                   "%s/stage_repair_coin_backfill.c", src_dir) : -1;
-    int allowed_n = reducer_src_n > 0 &&
-                    reducer_src_n < (int)sizeof(reducer_src_dir) &&
-                    def_n > 0 && def_n < (int)sizeof(def_path)
-        ? snprintf(allowed_path, sizeof(allowed_path),
-                   "%s/stage_repair_reducer_frontier_coin.c",
-                   reducer_src_dir) : -1;
-    int paths_ok = allowed_n > 0 && allowed_n < (int)sizeof(allowed_path);
-    int dirs_ok = paths_ok &&
-        (mkdir(root, 0700) == 0 || errno == EEXIST) &&
-        (mkdir(engine_dir, 0700) == 0 || errno == EEXIST) &&
-        (mkdir(jobs_dir, 0700) == 0 || errno == EEXIST) &&
-        (mkdir(src_dir, 0700) == 0 || errno == EEXIST) &&
-        (mkdir(reducer_dir, 0700) == 0 || errno == EEXIST) &&
-        (mkdir(reducer_jobs_dir, 0700) == 0 || errno == EEXIST) &&
-        (mkdir(reducer_src_dir, 0700) == 0 || errno == EEXIST);
-    const char *def_body =
-        "void stage_repair_coin_backfill_try(void) {}\n";
-    const char *allowed_body =
-        "void allowed_coin_backfill(void) {\n"
-        "    stage_repair_coin_backfill_try();\n"
-        "}\n";
-    int isolated_written = dirs_ok &&
-        write_file(def_path, def_body) == 0 &&
-        write_file(allowed_path, allowed_body) == 0;
-    int isolated_green_rc = isolated_written
-        ? run_gate_script_with_env(COIN_BACKFILL_CALLER_SCRIPT_REL,
-                                   "ZCL_COIN_BACKFILL_ROOT_FOR_TEST", root)
-        : -1;
-    int append_dup = isolated_written
-        ? write_file(allowed_path,
-                     "void allowed_coin_backfill(void) {\n"
-                     "    stage_repair_coin_backfill_try();\n"
-                     "    stage_repair_coin_backfill_try();\n"
-                     "}\n")
-        : -1;
-    int trip_dup_rc = append_dup == 0
-        ? run_gate_script_with_env(COIN_BACKFILL_CALLER_SCRIPT_REL,
-                                   "ZCL_COIN_BACKFILL_ROOT_FOR_TEST", root)
-        : -1;
-    int restore_allowed = append_dup == 0
-        ? write_file(allowed_path, allowed_body) : -1;
-    int recover_after_dup_rc = restore_allowed == 0
-        ? run_gate_script_with_env(COIN_BACKFILL_CALLER_SCRIPT_REL,
-                                   "ZCL_COIN_BACKFILL_ROOT_FOR_TEST", root)
-        : -1;
-    if (paths_ok) {
-        (void)unlink(def_path);
-        (void)unlink(allowed_path);
-        (void)rmdir(reducer_src_dir);
-        (void)rmdir(reducer_jobs_dir);
-        (void)rmdir(reducer_dir);
-        (void)rmdir(src_dir);
-        (void)rmdir(jobs_dir);
-        (void)rmdir(engine_dir);
-        (void)rmdir(root);
-    }
+    r.baseline_rc = run_gate_script(COIN_BACKFILL_CALLER_SCRIPT_REL, NULL);
+    coin_backfill_trip_phase(COIN_BACKFILL_CALLER_FIXTURE_DST,
+                             "void coin_backfill_caller_fixture(void) {\n"
+                             "    stage_repair_coin_backfill_try(0, 0, 0, 0, 0);\n"
+                             "}\n",
+                             &r.planted, &r.trip_rc, &r.recover_after_new_rc);
+    coin_backfill_trip_phase(COIN_BACKFILL_CALLER_DOMAIN_FIXTURE_DST,
+                             "void coin_backfill_domain_fixture(void) {\n"
+                             "    stage_repair_coin_backfill_try(0, 0, 0, 0, 0);\n"
+                             "}\n",
+                             &r.planted_domain, &r.trip_domain_rc,
+                             &r.recover_after_domain_rc);
+    coin_backfill_isolated_phase(&r);
 
     TEST("[lint-gate] sovereign-cure no-new-coin-backfill-caller: clean, trips on new callers and duplicate dispatcher call, recovers") {
-        ASSERT(baseline_rc == 0);
-        ASSERT(planted == 0);
-        ASSERT(trip_rc != 0);
-        ASSERT(recover_after_new_rc == 0);
-        ASSERT(planted_domain == 0);
-        ASSERT(trip_domain_rc != 0);
-        ASSERT(recover_after_domain_rc == 0);
-        ASSERT(isolated_written);
-        ASSERT(isolated_green_rc == 0);
-        ASSERT(append_dup == 0);
-        ASSERT(trip_dup_rc != 0);
-        ASSERT(restore_allowed == 0);
-        ASSERT(recover_after_dup_rc == 0);
+        ASSERT(r.baseline_rc == 0);
+        ASSERT(r.planted == 0);
+        ASSERT(r.trip_rc != 0);
+        ASSERT(r.recover_after_new_rc == 0);
+        ASSERT(r.planted_domain == 0);
+        ASSERT(r.trip_domain_rc != 0);
+        ASSERT(r.recover_after_domain_rc == 0);
+        ASSERT(r.isolated_written);
+        ASSERT(r.isolated_green_rc == 0);
+        ASSERT(r.append_dup == 0);
+        ASSERT(r.trip_dup_rc != 0);
+        ASSERT(r.restore_allowed == 0);
+        ASSERT(r.recover_after_dup_rc == 0);
         PASS();
     } _test_next:;
     return failures;
