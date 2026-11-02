@@ -1854,7 +1854,10 @@ static int test_send_past_the_timer_still_persists(void)
 /* Sleep for `ms` milliseconds; a real thread race has no injected clock. */
 static void wls_nap_ms(long ms)
 {
-    struct timespec nap = { .tv_sec = 0, .tv_nsec = ms * 1000000L };
+    /* tv_nsec must stay below one second: the 2000 ms fixed wait used off
+     * Linux made nanosleep fail with EINVAL at once, and this loop then spun
+     * on the error forever (measured on macOS: 100% CPU, test timed out). */
+    struct timespec nap = { .tv_sec = ms / 1000, .tv_nsec = (ms % 1000) * 1000000L };
     while (nanosleep(&nap, &nap) != 0) { /* real-clock: waits on a real thread; no injected clock exists */ }
 }
 
