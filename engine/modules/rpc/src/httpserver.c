@@ -558,12 +558,28 @@ bool rpc_http_tls_listener_name(char *text, size_t text_size, uint16_t *port)
     return platform_socket_local_name(g_tls_listen_fd, text, text_size, port);
 }
 
+/* A phase of rpc_http_start that takes this long is named in the log: the
+ * service kernel only reports the whole start (one warm restart showed
+ * "started service=rpc_http elapsed_ms=30033"), which cannot say which
+ * step stalled. */
+#define RPC_HTTP_START_SLOW_PHASE_MS 500
+
+static void rpc_http_start_phase(const char *phase, int64_t *mark_ms)
+{
+    int64_t now = platform_time_monotonic_ms();
+    if (now - *mark_ms >= RPC_HTTP_START_SLOW_PHASE_MS)
+        LOG_WARN("rpc", "rpc_http_start: slow phase %s took %lld ms", phase,
+                 (long long)(now - *mark_ms));
+    *mark_ms = now;
+}
+
 bool rpc_http_start(const struct rpc_table *table, uint16_t port,
                      const char *rpc_user, const char *rpc_password,
                      const char *datadir)
 {
     if (rpc_http_already_started())
         return false;
+    int64_t phase_mark_ms = platform_time_monotonic_ms();
 
     int queue_wait_ms = RPC_HTTP_QUEUE_WAIT_MS_DEFAULT;
     {
@@ -577,17 +593,22 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
         .timeout = NULL,
         .metrics_http_enable = false,
     };
+    rpc_http_start_phase("queue_start", &phase_mark_ms);
     rpc_http_auth_configure(rpc_user, rpc_password, datadir, port);
+    rpc_http_start_phase("auth_configure", &phase_mark_ms);
     if (!rpc_loopback_listener_open(port))
         goto fail;
+    rpc_http_start_phase("listener_open", &phase_mark_ms);
 
     rpc_http_configure_middleware();
+    rpc_http_start_phase("middleware", &phase_mark_ms);
 
     rpc_http_init_rpc_timeout();
     if (!rpc_timeout_start_watchdog(&g_rpc_timeout)) {
         fprintf(stderr, "RPC server: rpc_timeout watchdog start failed\n");  // obs-ok:helper-context-logged
     }
     g_request_context.timeout = &g_rpc_timeout;
+    rpc_http_start_phase("timeout_watchdog", &phase_mark_ms);
 
     /* Optional GET /metrics Prometheus endpoint. Accept "1", "true",
      * "yes", "on" as truthy; anything else leaves it off. */
@@ -633,6 +654,7 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
         }
     }
 
+    rpc_http_start_phase("tls_setup", &phase_mark_ms);
     g_running = true;
     printf("RPC server listening on 127.0.0.1:%u\n", port);
     if (g_tls_ctx)
@@ -641,6 +663,7 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
 
     if (!rpc_http_spawn_workers())
         goto fail;
+    rpc_http_start_phase("spawn_workers", &phase_mark_ms);
 
     g_listen_thread_fd = g_listen_fd;
     if (thread_registry_spawn("zcl_rpc_listen", listen_thread_fn, NULL,
@@ -654,6 +677,7 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
     rpc_tls_spawn_listener();
 
     rpc_http_auth_start_rotation();
+    rpc_http_start_phase("listener_threads", &phase_mark_ms);
     return true;
 
 fail:
