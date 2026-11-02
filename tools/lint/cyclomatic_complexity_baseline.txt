@@ -27,8 +27,6 @@ core/modules/crypto_registry/src/crypto_registry.c:crypto_registry_register:16
 core/modules/net/src/addrman_codec.c:addrman_deserialize:19
 core/modules/net/src/download.c:dl_assign_to_peer:90
 core/modules/net/src/download.c:dl_queue_blocks_class:39
-core/modules/net/src/file_service_client.c:fs_client_sync:41
-core/modules/net/src/file_service_client.c:range_worker_fn:34
 core/modules/net/src/msg_headers.c:process_headers:70
 core/modules/net/src/msgprocessor_snapshot.c:mp_handle_zcl23_sync:174
 core/modules/net/src/msgprocessor_snapshot.c:mp_snapshot_maybe_offer:17
