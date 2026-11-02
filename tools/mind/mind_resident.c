@@ -271,29 +271,63 @@ static enum mind_preflight mind_serve_preflight(char *lock_path,
     return MIND_PREFLIGHT_OK;
 }
 
-static int mind_serve_posix(zcl_mind_stop_predicate stop, void *stop_opaque,
-                            long long max_cycles)
+/* Preflight, then the singleton lock. Returns the lock fd, or -1 once the
+ * refusal is logged; the serve entry turns -1 into its return of 1. */
+static int mind_serve_admit(char *lock_path, size_t lock_cap,
+                            struct zcl_mind_registry *reg)
 {
-    char lock_path[ZCL_MIND_PATH_MAX];
-    struct zcl_mind_registry reg;
     enum mind_preflight pre =
-        mind_serve_preflight(lock_path, sizeof(lock_path), &reg);
+        mind_serve_preflight(lock_path, lock_cap, reg);
     if (pre == MIND_PREFLIGHT_NO_STATE_DIR) {
-        LOG_ERROR("mind", "serve: cannot resolve the mind state directory");
-        return 1;
+        LOG_ERROR_IN("mind_serve_posix", "mind",
+                     "serve: cannot resolve the mind state directory");
+        return -1;
     }
     if (pre == MIND_PREFLIGHT_NO_CHECKOUT) {
         /* A mind with no registered checkout owns nothing. Starting anyway
          * would publish a heartbeat that claims a node is covered when no
          * index on it has an owner. */
-        LOG_ERROR("mind", "serve: no checkout registered; nothing to own");
-        return 1;
+        LOG_ERROR_IN("mind_serve_posix", "mind",
+                     "serve: no checkout registered; nothing to own");
+        return -1;
     }
     int lock_fd = mind_lock_acquire(lock_path);
-    if (lock_fd < 0) {
-        LOG_ERROR("mind", "serve: another mind already holds this node");
-        return 1;
+    if (lock_fd < 0)
+        LOG_ERROR_IN("mind_serve_posix", "mind",
+                     "serve: another mind already holds this node");
+    return lock_fd;
+}
+
+/* One pass over the checkouts: rebuild each stale generation, then claim it.
+ * A refused rebuild is logged and the claim still follows. */
+static void mind_cycle_checkouts(struct zcl_mind_heartbeat *beat, long long now)
+{
+    for (size_t i = 0; i < beat->checkout_count; i++) {
+        struct zcl_mind_checkout *c = &beat->checkouts[i];
+        if (!mind_checkout_rebuild_if_stale(c, now))
+            LOG_WARN_IN("mind_serve_posix", "mind",
+                        "serve: rebuild refused for %s", c->root);
+        mind_checkout_claim(beat, c, now);
     }
+}
+
+/* Stamp and publish the heartbeat for this cycle. A refused write is logged. */
+static void mind_publish_beat(struct zcl_mind_heartbeat *beat, long long now)
+{
+    beat->beat_unix = now;
+    if (!zcl_mind_heartbeat_write(beat))
+        LOG_WARN_IN("mind_serve_posix", "mind",
+                    "serve: heartbeat not published");
+}
+
+static int mind_serve_posix(zcl_mind_stop_predicate stop, void *stop_opaque,
+                            long long max_cycles)
+{
+    char lock_path[ZCL_MIND_PATH_MAX];
+    struct zcl_mind_registry reg;
+    int lock_fd = mind_serve_admit(lock_path, sizeof(lock_path), &reg);
+    if (lock_fd < 0)
+        return 1;
 
     mind_install_signals();
 
@@ -317,15 +351,8 @@ static int mind_serve_posix(zcl_mind_stop_predicate stop, void *stop_opaque,
     long long last_beat = 0;
     for (;;) {
         long long now = (long long)platform_time_wall_time_t();
-        for (size_t i = 0; i < beat.checkout_count; i++) {
-            struct zcl_mind_checkout *c = &beat.checkouts[i];
-            if (!mind_checkout_rebuild_if_stale(c, now))
-                LOG_WARN("mind", "serve: rebuild refused for %s", c->root);
-            mind_checkout_claim(&beat, c, now);
-        }
-        beat.beat_unix = now;
-        if (!zcl_mind_heartbeat_write(&beat))
-            LOG_WARN("mind", "serve: heartbeat not published");
+        mind_cycle_checkouts(&beat, now);
+        mind_publish_beat(&beat, now);
         last_beat = now;
         cycles++;
         if (mind_cycles_done(cycles, max_cycles))
