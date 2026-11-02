@@ -115,14 +115,14 @@ test: prepare-quirc test-bridge test-voice test-host test-devkey test-dexgen tes
 	  -lm -o '$(BUILD_DIR)/fleet-test'
 	'$(BUILD_DIR)/fleet-test'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread -I. -I../../platform/modules/json/include \
-	  -I../../platform/modules/base/include tests/operations_test.c operations.c private.c params.c rpc.c nodelog.c \
-	  ../../platform/modules/json/src/json.c ../../platform/modules/base/src/cleanse.c \
+	  -I../../platform/modules/base/include -I../../platform/modules/sha3/include tests/operations_test.c operations.c setup_state.c private.c params.c rpc.c nodelog.c \
+	  ../../platform/modules/sha3/src/sha3.c ../../platform/modules/json/src/json.c ../../platform/modules/base/src/cleanse.c \
 	  ../../platform/modules/base/src/safe_alloc.c -Wl,--wrap=clock_gettime \
 	  -o '$(BUILD_DIR)/operations-test'
 	'$(BUILD_DIR)/operations-test'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread -I. -I../../platform/modules/json/include \
-	  -I../../platform/modules/base/include tests/direct_test.c operations.c private.c params.c rpc.c nodelog.c \
-	  ../../platform/modules/json/src/json.c ../../platform/modules/base/src/cleanse.c \
+	  -I../../platform/modules/base/include -I../../platform/modules/sha3/include tests/direct_test.c operations.c setup_state.c private.c params.c rpc.c nodelog.c \
+	  ../../platform/modules/sha3/src/sha3.c ../../platform/modules/json/src/json.c ../../platform/modules/base/src/cleanse.c \
 	  ../../platform/modules/base/src/safe_alloc.c -o '$(BUILD_DIR)/direct-test'
 	'$(BUILD_DIR)/direct-test'
 	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../platform/modules/json/include \
@@ -191,8 +191,8 @@ test-wallet:
 	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) tests/wallet_screens_test.c wallet_screens.c payment_code.c wallet_view.c \
 	  ../../contexts/commons/packages/zutf8/src/zutf8.c $(SPEECH_JSON) -o '$(BUILD_DIR)/wallet-screens-test'
 	'$(BUILD_DIR)/wallet-screens-test'
-	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) tests/wallet_run_test.c operations.c private.c params.c rpc.c nodelog.c \
-	  $(SPEECH_JSON) -o '$(BUILD_DIR)/wallet-run-test'
+	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) tests/wallet_run_test.c operations.c setup_state.c private.c params.c rpc.c nodelog.c \
+	  ../../platform/modules/sha3/src/sha3.c $(SPEECH_JSON) -Wl,--wrap=posix_spawn -o '$(BUILD_DIR)/wallet-run-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/wallet-run.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; ZAPP_TEST_DIR="$$(cd "$$scratch" && pwd)" '$(BUILD_DIR)/wallet-run-test'
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/json_wipe_test.c $(SPEECH_JSON) -Wl,--wrap=realloc -Wl,--wrap=free \
@@ -334,6 +334,8 @@ test-setup:
 	  echo 'wallet setup must not log' >&2; exit 1; fi
 	@if grep -nE '(^|[^a-z_])(fopen|fwrite|fputs|open|write|creat|rename)\(' setup_words.c setup_node.c wallet_setup.c; then \
 	  echo 'the recovery words and the passphrase must not be written by the setup modules' >&2; exit 1; fi
+	@grep -q 'memory_cleanse(buffer, sizeof(buffer))' operations.c || { echo 'the command reader must wipe its read buffer' >&2; exit 1; }
+	@grep -q 'zapp_setup_state(r->files) != ZAPP_SETUP_READY' operations.c || { echo 'the receive command must be refused until setup is confirmed' >&2; exit 1; }
 
 WALLET_SEND_INCLUDES := -I. -I../../platform/modules/json/include -I../../platform/modules/base/include \
   -I../../contexts/commons/packages/zutf8/include \

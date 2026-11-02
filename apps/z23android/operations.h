@@ -28,6 +28,8 @@ struct zapp_runtime {
     struct zapp_nodelog log;
     /* The last direct node query failed and its reason is logged; cleared by the next success. */
     atomic_bool direct_reported;
+    /* A wallet setup command is running: the node is not started until it ends. */
+    atomic_bool setup_running;
 };
 bool zapp_runtime_init(struct zapp_runtime *r, const char *files, const char *libs, bool preview);
 void zapp_runtime_signal_stop(struct zapp_runtime *r);
@@ -68,6 +70,14 @@ bool zapp_wallet_run(struct zapp_runtime *r, const char *op, const char *arg, ch
  * killed after timeout_ms, and a commit never sooner than ZAPP_WALLET_COMMIT_MIN_MS. False when the step fails, is
  * killed, or does not exist; out then holds the node reply, which may still be a typed error, or a plain sentence. */
 bool zapp_wallet_send_run(struct zapp_runtime *r, const char *op, const char *input, unsigned timeout_ms, char *out, size_t cap);
+/* The setup of a wallet, run while the node is stopped: op is "create" or "restore" and input is the request, which holds
+ * the datadir and the passphrase (and, for a restore, the words). It goes to the command on standard input, never on the
+ * command line or in the environment, and is read as is: the caller cleanses it. Or op is "blockhash" and input is the
+ * JSON-RPC parameter array [height], answered by the running node over its local RPC port. A command is refused, with a
+ * plain sentence in out, while a node runs: it holds the files the wallet is written into. While one runs, zapp_node_start
+ * refuses. A command is killed after timeout_ms. */
+#define ZAPP_WALLET_SETUP_TIMEOUT_MAX_MS 900000u
+bool zapp_wallet_setup_run(struct zapp_runtime *r, const char *op, const char *input, unsigned timeout_ms, char *out, size_t cap);
 bool zapp_fleet_join_run(struct zapp_runtime *r, const char *token, char *out, size_t cap);
 /* True when the node has published its onion address: a valid Tor v3 hostname file. */
 bool zapp_onion_ready(const struct zapp_runtime *r);

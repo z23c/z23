@@ -18,6 +18,12 @@ bool zapp_controller_wallet_run(const char *op, const char *arg, char *out, size
 /* Runs one step of a send on the calling thread (see zapp_wallet_send_run), never on the controller worker. Safe from any
  * thread. */
 bool zapp_controller_send_run(const char *op, const char *input, unsigned timeout_ms, char *out, size_t cap);
+/* Runs one step of wallet setup on the calling thread (see zapp_wallet_setup_run), never on the controller worker. Safe from
+ * any thread. */
+bool zapp_controller_setup_run(const char *op, const char *input, unsigned timeout_ms, char *out, size_t cap);
+/* Starts or stops the node now, on the calling thread: wallet setup needs the node stopped while it writes the wallet,
+ * and started again when it is done. A stop only asks the node to exit; poll zapp_controller_node_running. */
+bool zapp_controller_node_control(bool start);
 /* True while the phone's thermal state has paused the node. */
 bool zapp_controller_node_paused(void);
 #endif

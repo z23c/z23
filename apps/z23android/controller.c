@@ -1017,6 +1017,26 @@ bool zapp_controller_send_run(const char *op, const char *input, unsigned timeou
     }
     return zapp_wallet_send_run(&c->runtime, op, input, timeout_ms, out, cap);
 }
+bool zapp_controller_setup_run(const char *op, const char *input, unsigned timeout_ms, char *out, size_t cap)
+{
+    pthread_mutex_lock(&startup_lock);
+    struct controller *c = current;
+    pthread_mutex_unlock(&startup_lock);
+    if (!c) {
+        if (out && cap) snprintf(out, cap, "{\"ok\":false,\"error\":{\"code\":\"NOT_RUN\",\"message\":\"The app is not ready.\"}}");
+        return false;
+    }
+    return zapp_wallet_setup_run(&c->runtime, op, input, timeout_ms, out, cap);
+}
+bool zapp_controller_node_control(bool start)
+{
+    char text[256];
+    pthread_mutex_lock(&startup_lock);
+    struct controller *c = current;
+    pthread_mutex_unlock(&startup_lock);
+    if (!c) return false;
+    return start ? zapp_node_start(&c->runtime, text, sizeof(text)) : zapp_node_stop(&c->runtime, text, sizeof(text));
+}
 bool zapp_controller_node_paused(void)
 {
     pthread_mutex_lock(&startup_lock);

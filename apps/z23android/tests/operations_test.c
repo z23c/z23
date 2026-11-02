@@ -58,9 +58,18 @@ static bool child_root_environment(void)
     return state && !strcmp(state, want) && preserved && !strcmp(preserved, "yes");
 }
 
+/* The wallet variables the app never passes on: a node must not make or fill a wallet from its environment. */
+static bool child_wallet_environment(void)
+{
+    static const char *const names[] = {"ZCL_WALLET_PASSPHRASE", "ZCL_ALLOW_PLAINTEXT_WALLET", "ZCL_RECOVERY_PHRASE",
+                                        "ZCL_WALLET_NO_PHRASE_BACKUP"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
+        if (getenv(names[i])) return false;
+    return true;
+}
 static bool child_environment(void)
 {
-    return child_fixed_environment() && child_root_environment();
+    return child_fixed_environment() && child_root_environment() && child_wallet_environment();
 }
 
 static volatile sig_atomic_t interrupted;
@@ -465,6 +474,8 @@ int main(int argc, char **argv)
     assert(setenv("ZAPP_TEST_STATE", "/tmp/private-state", 1) == 0);
     assert(setenv("ZCL_CATCHUP_DRAIN_BUDGET_MS", "77", 1) == 0);
     assert(setenv("ZCL_BIP_PAGE_CACHE_KIB", "999", 1) == 0);
+    assert(setenv("ZCL_WALLET_PASSPHRASE", "decoy", 1) == 0 && setenv("ZCL_ALLOW_PLAINTEXT_WALLET", "1", 1) == 0);
+    assert(setenv("ZCL_RECOVERY_PHRASE", "decoy words", 1) == 0 && setenv("ZCL_WALLET_NO_PHRASE_BACKUP", "1", 1) == 0);
     char *runner_home = getenv("HOME") ? strdup(getenv("HOME")) : NULL;
     assert(setenv("HOME", "/tmp/parent-home", 1) == 0);
     assert(setenv("ZAPP_TEST_HOME", "/tmp/parent-home", 1) == 0);

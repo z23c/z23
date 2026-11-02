@@ -6,6 +6,7 @@
 #include "json/json.h"
 #include "base/cleanse.h"
 #include "rpc.h"
+#include "setup_state.h"
 #include "wallet_screens.h"
 #ifdef __ANDROID__
 #include <android/log.h>
@@ -132,9 +133,19 @@ static int environment_count(size_t *count)
     return 0;
 }
 
+/* Variables that would let the node make or fill a wallet on its own: a wallet is made by the setup commands, with the
+ * passphrase on standard input, and by nothing the phone's environment can carry. */
+static const char *const wallet_variables[] = {"ZCL_WALLET_PASSPHRASE=", "ZCL_ALLOW_PLAINTEXT_WALLET=",
+                                                "ZCL_RECOVERY_PHRASE=", "ZCL_WALLET_NO_PHRASE_BACKUP="};
+static bool inherited_wallet_variable(const char *entry)
+{
+    for (size_t i = 0; i < sizeof(wallet_variables) / sizeof(wallet_variables[0]); ++i)
+        if (strncmp(entry, wallet_variables[i], strlen(wallet_variables[i])) == 0) return false;
+    return true;
+}
 static bool inherited_environment(const char *entry)
 {
-    return strncmp(entry, "XDG_STATE_HOME=", 15) != 0 &&
+    return inherited_wallet_variable(entry) && strncmp(entry, "XDG_STATE_HOME=", 15) != 0 &&
            strncmp(entry, "TMPDIR=", 7) != 0 &&
            strncmp(entry, "ZCL_CATCHUP_DRAIN_BUDGET_MS=",
                    sizeof("ZCL_CATCHUP_DRAIN_BUDGET_MS=") - 1) != 0 &&
@@ -312,9 +323,11 @@ static int spawn_node(struct zapp_runtime *r)
 bool zapp_node_start(struct zapp_runtime *r, char *out, size_t cap)
 {
     pthread_mutex_lock(&r->mutex);
-    if (r->preview || r->stopping || running_locked(r) || earlier_node(r)) {
+    bool setting_up = atomic_load(&r->setup_running);
+    if (r->preview || r->stopping || setting_up || running_locked(r) || earlier_node(r)) {
         snprintf(out, cap, "%s", r->preview ? "The preview app does not run a node. Use the main Z23 app." :
-                 r->stopping ? "App is closing." : "The local node is already running.");
+                 r->stopping ? "App is closing." : setting_up ? "Wallet setup is running. The node can start when it ends." :
+                 "The local node is already running.");
         pthread_mutex_unlock(&r->mutex); return false;
     }
     int rc = spawn_node(r);
@@ -388,6 +401,7 @@ static void pump_output(struct pump *p, char *out, size_t cap)
     } else if (n == 0 || (errno != EINTR && errno != EAGAIN)) {
         close(p->output); p->output = -1;
     }
+    memory_cleanse(buffer, sizeof(buffer));
 }
 
 static void pump_input(struct pump *p)
@@ -434,9 +448,11 @@ static bool pump_command(struct pump *p, char *out, size_t cap)
     return pump_success(p, ended, status);
 }
 
-static bool command_timed(struct zapp_runtime *r, const char *const *args, const char *input,
-                          unsigned timeout_ms, char *out, size_t cap)
+/* started is set when the process was spawned: a false return with started false means the command never ran. */
+static bool command_run(struct zapp_runtime *r, const char *const *args, const char *input,
+                        unsigned timeout_ms, char *out, size_t cap, bool *started)
 {
+    if (started) *started = false;
     if (!out || cap < 64) return false;
     out[0] = 0;
     int pipes[2], stdin_pipe[2];
@@ -457,8 +473,14 @@ static bool command_timed(struct zapp_runtime *r, const char *const *args, const
     pthread_mutex_unlock(&r->mutex);
     close(stdin_pipe[0]); close(pipes[1]);
     if (rc) { close(stdin_pipe[1]); close(pipes[0]); snprintf(out, cap, "Unable to run native Z23: %s", strerror(rc)); return false; }
+    if (started) *started = true;
     if (!pump.length) { close(pump.input); pump.input = -1; }
     return pump_command(&pump, out, cap);
+}
+static bool command_timed(struct zapp_runtime *r, const char *const *args, const char *input,
+                          unsigned timeout_ms, char *out, size_t cap)
+{
+    return command_run(r, args, input, timeout_ms, out, cap, NULL);
 }
 static bool command(struct zapp_runtime *r, const char *const *args, const char *input, char *out, size_t cap)
 {
@@ -571,6 +593,11 @@ bool zapp_wallet_run(struct zapp_runtime *r, const char *op, const char *arg, ch
         size_t n = 0;
         if (strcmp(op, wallet_commands[i].id) != 0) continue;
         if (r->preview) { snprintf(out, cap, "The preview app has no wallet."); return false; }
+        /* An address is shown only once the owner has proved they hold the recovery words. */
+        if (!strcmp(op, "receive") && zapp_setup_state(r->files) != ZAPP_SETUP_READY) {
+            snprintf(out, cap, "Finish wallet setup first: no address is shown until the recovery words are confirmed.");
+            return false;
+        }
         for (size_t a = 0; wallet_commands[i].args[a]; ++a) args[n++] = wallet_commands[i].args[a];
         if (!wallet_argument(wallet_commands[i].arg, arg, args, &n, value, sizeof(value), out, cap)) return false;
         return command(r, args, NULL, out, cap);
@@ -627,6 +654,61 @@ bool zapp_wallet_send_run(struct zapp_runtime *r, const char *op, const char *in
         return false;
     }
     return command_timed(r, c->args, input, send_timeout(op, timeout_ms), out, cap);
+}
+
+/* The wallet setup commands, by the id the setup adapter asks with. The datadir, the passphrase and the words are in the
+ * request on standard input, never in arguments. */
+static const struct { const char *id; const char *args[5]; } setup_commands[] = {
+    {"create", {"core", "wallet", "create"}},
+    {"restore", {"core", "wallet", "recovery", "restore"}},
+};
+static bool setup_rpc(struct zapp_runtime *r, const char *method, const char *params, char *out, size_t cap)
+{
+    char why[160] = "";
+    bool ok = zapp_rpc_call(r->directory, method, params, DIRECT_TIMEOUT_MS, out, cap, why, sizeof(why)) == ZAPP_RPC_OK;
+    if (!ok) snprintf(out, cap, "%s", why[0] ? why : "The node did not answer.");
+    return ok;
+}
+/* A refusal that ran nothing, in the node's own reply shape, so the app can tell it from a command that may have written. */
+static bool setup_not_run(char *out, size_t cap, const char *message)
+{
+    snprintf(out, cap, "{\"ok\":false,\"error\":{\"code\":\"NOT_RUN\",\"message\":\"%s\"}}", message);
+    return false;
+}
+/* The command runs only while no node holds the datadir; the flag is raised first, so a node that starts at the same
+ * moment is either seen here or refused by zapp_node_start. */
+static bool setup_command(struct zapp_runtime *r, const char *const *args, const char *input, unsigned timeout_ms, char *out, size_t cap)
+{
+    bool started = false, ok = false;
+    if (atomic_exchange(&r->setup_running, true)) return setup_not_run(out, cap, "Wallet setup is already running.");
+    if (zapp_node_running(r)) setup_not_run(out, cap, "Stop the node first: setup changes the wallet files the node holds.");
+    else {
+        ok = command_run(r, args, input, timeout_ms, out, cap, &started);
+        if (!ok && !started) setup_not_run(out, cap, "The wallet command could not be started.");
+    }
+    atomic_store(&r->setup_running, false);
+    return ok;
+}
+/* Whether the datadir holds a wallet, read-only, with or without a node. */
+static bool setup_status(struct zapp_runtime *r, const char *input, char *out, size_t cap)
+{
+    static const char *const args[] = {"core", "wallet", "recovery", "status", NULL};
+    return command_timed(r, args, input, COMMAND_TIMEOUT_MS, out, cap);
+}
+bool zapp_wallet_setup_run(struct zapp_runtime *r, const char *op, const char *input, unsigned timeout_ms, char *out, size_t cap)
+{
+    if (!r || !op || !input || !out || cap < 64) return false;
+    if (r->preview) return setup_not_run(out, cap, "The preview app has no wallet.");
+    if (!strcmp(op, "blockhash")) return setup_rpc(r, "getblockhash", input, out, cap);
+    if (!strcmp(op, "chaininfo")) return setup_rpc(r, "getblockchaininfo", input, out, cap);
+    if (!strcmp(op, "status")) return setup_status(r, input, out, cap);
+    for (size_t i = 0; i < sizeof(setup_commands) / sizeof(setup_commands[0]); ++i) {
+        if (strcmp(op, setup_commands[i].id) != 0) continue;
+        if (!timeout_ms || timeout_ms > ZAPP_WALLET_SETUP_TIMEOUT_MAX_MS)
+            return setup_not_run(out, cap, "This wallet command was given arguments it does not take.");
+        return setup_command(r, setup_commands[i].args, input, timeout_ms, out, cap);
+    }
+    return setup_not_run(out, cap, "This wallet command is not available in the phone's permission set.");
 }
 
 bool zapp_fleet_join_run(struct zapp_runtime *r, const char *token, char *out, size_t cap)
