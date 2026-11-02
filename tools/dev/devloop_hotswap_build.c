@@ -1816,6 +1816,346 @@ static bool hs_hotswap_publish(
     return true;
 }
 
+/* Working state of one hotswap build. The path arrays stay in the caller. */
+struct hs_hotswap_run {
+    struct hs_action_plan *plan;
+    const char *root, *owner, *safe, *compile_input, *cached_dep;
+    char *tmp_o, *tmp_d, *tmp_so;
+    char *cache_root, *cache_obj, *cache_so, *cache_hash;
+    struct zcl_action_root_t0 *compile_t0;
+    struct hs_dep *before, *after;
+    size_t before_n, after_n;
+    struct zcl_devloop_hotswap_build_receipt *receipt;
+    struct zcl_devloop_process_result *process;
+    char *why;
+    size_t why_len;
+    int64_t started;
+    int cache_fd;
+};
+
+/* Resolve outcomes: the build failed, goes on to link, or is satisfied by a
+ * verified cache entry. */
+enum { HS_SWAP_FAIL = -1, HS_SWAP_PROCEED = 0, HS_SWAP_CACHED = 1 };
+
+/* The owner TU for a source; sets service_island when it is a service. */
+static const char *hs_hotswap_owner(const char *source_tu,
+                                    bool *service_island)
+{
+    const char *owner = hotswap_island_owner_for_path(source_tu);
+    if (!owner) {
+        owner = zcl_hotswap_service_source_for_path(source_tu);
+        *service_island = owner != NULL;
+    }
+    return owner;
+}
+
+/* The canonical root and a regular owner file under it. */
+static bool hs_hotswap_source_file(const char *repo_root, const char *owner,
+                                   char root[PATH_MAX],
+                                   char source_path[PATH_MAX])
+{
+    return platform_directory_canonical_real(repo_root, root, PATH_MAX) &&
+           snprintf(source_path, PATH_MAX, "%s/%s", root, owner) <
+               (int)PATH_MAX && hs_regular(source_path, NULL);
+}
+
+/* Writes the unity source of an island that has member sources. */
+static bool hs_hotswap_unity_ready(
+    const char *root, const char *owner, bool service_island,
+    const char *safe, char unity[PATH_MAX], char *why, size_t why_len)
+{
+    const char *members = service_island
+        ? zcl_hotswap_shadow_members_for_service(owner)
+        : hotswap_island_members_for_source(owner);
+    /* The deterministic fake-compiler fixture tests cache publication, not
+     * the checkout-compiled member registry. Its isolated root deliberately
+     * carries only synthetic sources. */
+    if (service_island && getenv("ZCL_DEVLOOP_TEST_PROCESS"))
+        members = NULL;
+    return !((!service_island && !members) ||
+             (members && !hs_unity_source(root, owner, members, safe, unity,
+                                          why, why_len)));
+}
+
+/* Unlocks the cache entry and records the action root of a cache hit. */
+static void hs_hotswap_hit_exit(const struct hs_hotswap_run *r,
+                                bool unlink_dep)
+{
+    (void)flock(r->cache_fd, LOCK_UN);
+    (void)close(r->cache_fd);
+    (void)unlink(r->tmp_o);
+    if (unlink_dep)
+        (void)unlink(r->tmp_d);
+    (void)unlink(r->tmp_so);
+    zcl_devloop_action_root_hotswap(r->root, r->owner, r->plan->cc,
+                                    r->plan->cflags, r->plan->ldflags,
+                                    r->cached_dep, r->compile_t0,
+                                    r->plan->env, r->receipt);
+}
+
+/* Looks the baseline key up in the shared cache. True on a verified hit. */
+static bool hs_hotswap_warm_lookup(struct hs_hotswap_run *r,
+                                   bool have_baseline)
+{
+    struct zcl_devloop_hotswap_build_receipt *receipt = r->receipt;
+    if (have_baseline &&
+        hs_cache_key(r->plan, r->root, r->owner, r->before, r->before_n,
+                     &(const struct hs_key_action){ r->owner, NULL,
+                                                     r->cached_dep, NULL },
+                     receipt, receipt->artifact_cache_key) &&
+        hs_cache_root(r->cache_root)) {
+        int64_t lookup_started = platform_time_monotonic_us();
+        receipt->key_us = lookup_started - r->started;
+        r->cache_fd = hs_cache_lock(r->cache_root, receipt->artifact_cache_key,
+                                    r->cache_obj, r->cache_so, r->cache_hash);
+        bool cache_hit = r->cache_fd >= 0 &&
+            hs_cache_lookup(r->root, r->safe, r->cache_obj, r->cache_so,
+                            r->cache_hash, receipt);
+        receipt->lookup_us = platform_time_monotonic_us() - lookup_started;
+        if (cache_hit) {
+            receipt->artifact_cache_hit = true;
+            receipt->dependency_count = (uint32_t)r->before_n;
+            (void)snprintf(receipt->source_tu, sizeof(receipt->source_tu),
+                           "%s", r->owner);
+            receipt->publish_us = platform_time_monotonic_us() - r->started -
+                                  receipt->plan_load_us;
+            receipt->total_us = platform_time_monotonic_us() - r->started;
+            free(r->before);
+            free(r->after);
+            hs_hotswap_hit_exit(r, true);
+            return true;
+        }
+        if (r->cache_fd >= 0) {
+            /* A .so without its final hash marker, or a marker whose content
+             * does not verify, is a partial/corrupt entry. Under the per-key
+             * lock it cannot be a publisher still in flight. */
+            (void)unlink(r->cache_so);
+            (void)unlink(r->cache_obj);
+            (void)unlink(r->cache_hash);
+        }
+    }
+    return false;
+}
+
+/* Cold lookup under the freshly discovered key. */
+static int hs_hotswap_cold_probe(struct hs_hotswap_run *r)
+{
+    struct zcl_devloop_hotswap_build_receipt *receipt = r->receipt;
+    if (r->cache_fd >= 0 &&
+        hs_cache_lookup(r->root, r->safe, r->cache_obj, r->cache_so,
+                        r->cache_hash, receipt)) {
+        receipt->artifact_cache_hit = true;
+        receipt->dependency_count = (uint32_t)r->before_n;
+        (void)unlink(r->cached_dep);
+        if (rename(r->tmp_d, r->cached_dep) != 0) {
+            free(r->before);
+            free(r->after);
+            hs_why(r->why, r->why_len,
+                   "could not publish cold dependency baseline");
+            return HS_SWAP_FAIL;
+        }
+        r->tmp_d[0] = 0;
+        (void)snprintf(receipt->source_tu, sizeof(receipt->source_tu), "%s",
+                       r->owner);
+        receipt->publish_us = platform_time_monotonic_us() - r->started -
+                              receipt->plan_load_us - receipt->compile_us;
+        receipt->total_us = platform_time_monotonic_us() - r->started;
+        free(r->before);
+        free(r->after);
+        hs_hotswap_hit_exit(r, false);
+        return HS_SWAP_CACHED;
+    }
+    if (r->cache_fd >= 0) {
+        (void)unlink(r->cache_so);
+        (void)unlink(r->cache_obj);
+        (void)unlink(r->cache_hash);
+    }
+    return HS_SWAP_PROCEED;
+}
+
+/* Second compile of a cold build; its depfile is the stability proof. */
+static bool hs_hotswap_stable_compile(struct hs_hotswap_run *r)
+{
+    int64_t stable_compile_us = 0;
+    r->receipt->compiler_processes++;
+    zcl_action_root_t0_take(r->compile_t0);
+    bool ok = hs_run_compile(r->plan, r->root, r->owner, r->compile_input,
+                             r->tmp_o, r->tmp_d, r->process,
+                             &stable_compile_us, r->why, r->why_len) &&
+              hs_depfile_read(r->root, r->tmp_d, r->after, &r->after_n, true);
+    if (ok)
+        r->receipt->compile_us += stable_compile_us;
+    return ok;
+}
+
+/* First compile, then the cold baseline handling when none was cached. */
+static int hs_hotswap_discover(struct hs_hotswap_run *r, bool have_baseline)
+{
+    struct zcl_devloop_hotswap_build_receipt *receipt = r->receipt;
+    receipt->compiler_processes = 1;
+    zcl_action_root_t0_take(r->compile_t0);
+    if (!hs_run_compile(r->plan, r->root, r->owner, r->compile_input,
+                        r->tmp_o, r->tmp_d, r->process,
+                        &receipt->compile_us, r->why, r->why_len)) {
+        free(r->before);
+        free(r->after);
+        return HS_SWAP_FAIL;
+    }
+    if (!hs_depfile_read(r->root, r->tmp_d, r->after, &r->after_n, true)) {
+        free(r->before);
+        free(r->after);
+        hs_why(r->why, r->why_len, "compiler produced no valid bounded depfile");
+        return HS_SWAP_FAIL;
+    }
+    /* A cold watcher has no dependency baseline. Discover the exact closure,
+     * bind its cache key, then either reuse a verified artifact or compile a
+     * second time in this same bounded action. The second depfile proves that
+     * the accepted object was built from the closure just observed; requiring
+     * another filesystem save adds operator latency without adding evidence. */
+    if (!have_baseline) {
+        memcpy(r->before, r->after, r->after_n * sizeof(*r->after));
+        r->before_n = r->after_n;
+        /* No complete action root, no key: compile uncached (MISS). The
+         * second compile below still proves the discovered closure. */
+        bool keyed = hs_cache_key(
+                         r->plan, r->root, r->owner, r->before, r->before_n,
+                         &(const struct hs_key_action){ r->owner, NULL,
+                                                          r->tmp_d,
+                                                          r->compile_t0 },
+                         receipt, receipt->artifact_cache_key) &&
+                     hs_cache_root(r->cache_root);
+        r->cache_fd = keyed ? hs_cache_lock(r->cache_root,
+                                            receipt->artifact_cache_key,
+                                            r->cache_obj, r->cache_so,
+                                            r->cache_hash)
+                            : -1;
+        int cold = hs_hotswap_cold_probe(r);
+        if (cold != HS_SWAP_PROCEED)
+            return cold;
+        if (!hs_hotswap_stable_compile(r)) {
+            free(r->before);
+            free(r->after);
+            return HS_SWAP_FAIL;
+        }
+    }
+    return HS_SWAP_PROCEED;
+}
+
+/* Reads the cached baseline, tries the warm cache, then compiles. */
+static int hs_hotswap_resolve(struct hs_hotswap_run *r)
+{
+    int64_t dependency_started = platform_time_monotonic_us();
+    r->receipt->inputs_us = dependency_started - r->started;
+    bool have_baseline = hs_depfile_read(r->root, r->cached_dep, r->before,
+                                         &r->before_n, true);
+    r->receipt->dependency_hash_us =
+        platform_time_monotonic_us() - dependency_started;
+    if (hs_hotswap_warm_lookup(r, have_baseline))
+        return HS_SWAP_CACHED;
+    return hs_hotswap_discover(r, have_baseline);
+}
+
+/* Publishes the dependency baseline and checks the closure held still. */
+static bool hs_hotswap_prove(struct hs_hotswap_run *r)
+{
+    /* Publish the dependency proof for exact reuse by later saves. */
+    (void)unlink(r->cached_dep);
+    if (rename(r->tmp_d, r->cached_dep) != 0) {
+        free(r->before);
+        free(r->after);
+        hs_why(r->why, r->why_len, "could not publish dependency baseline");
+        return false;
+    }
+    r->tmp_d[0] = 0;
+    r->receipt->dependency_count = (uint32_t)r->after_n;
+    bool stable = hs_hotswap_dependencies_stable(
+        r->plan, r->root, r->owner, r->before, r->before_n, r->after,
+        r->after_n, r->cached_dep, r->compile_t0, r->receipt, r->why,
+        r->why_len);
+    free(r->before);
+    free(r->after);
+    return stable;
+}
+
+/* Publishes the artifact, stamps the receipt and releases the build. */
+static bool hs_hotswap_publish_phase(struct hs_hotswap_run *r)
+{
+    struct zcl_devloop_hotswap_build_receipt *receipt = r->receipt;
+    int64_t publish_started = platform_time_monotonic_us();
+    bool published = hs_hotswap_publish(
+        r->root, r->safe, r->cache_fd, r->cache_obj, r->cache_so,
+        r->cache_hash, r->tmp_o, r->tmp_so, receipt, r->why, r->why_len);
+    if (published) {
+        receipt->publish_us = platform_time_monotonic_us() - publish_started;
+        (void)snprintf(receipt->source_tu, sizeof(receipt->source_tu), "%s",
+                       r->owner);
+        receipt->total_us = platform_time_monotonic_us() - r->started;
+        (void)unlink(r->tmp_o);
+        (void)unlink(r->tmp_so);
+        if (r->cache_fd >= 0) {
+            (void)flock(r->cache_fd, LOCK_UN);
+            (void)close(r->cache_fd);
+        }
+        zcl_devloop_action_root_hotswap(r->root, r->owner, r->plan->cc,
+                                        r->plan->cflags, r->plan->ldflags,
+                                        r->cached_dep, r->compile_t0,
+                                        r->plan->env, receipt);
+    }
+    return published;
+}
+
+/* Hashes the candidate object, links it, then publishes. */
+static bool hs_hotswap_link_publish(struct hs_hotswap_run *r)
+{
+    r->receipt->linker_processes = 1;
+    if (!hs_sha256_file(r->tmp_o, r->receipt->candidate_object_sha256)) {
+        hs_why(r->why, r->why_len, "could not hash exact candidate object");
+        return false;
+    }
+    bool linked = hs_run_link(r->plan, r->root, r->tmp_o, r->tmp_so,
+                              r->process, &r->receipt->link_us, r->why,
+                              r->why_len);
+    return linked && hs_hotswap_publish_phase(r);
+}
+
+/* Cleans the partial outputs and records the failed action root. */
+static void hs_hotswap_fail(const struct hs_hotswap_run *r)
+{
+    const char *const partial[] = { r->tmp_o, r->tmp_d, r->tmp_so };
+    hs_unlink_nonempty(partial, 3);
+    if (r->cache_fd >= 0) {
+        (void)flock(r->cache_fd, LOCK_UN);
+        (void)close(r->cache_fd);
+    }
+    r->receipt->total_us = platform_time_monotonic_us() - r->started;
+    zcl_devloop_action_root_hotswap(r->root, r->owner, r->plan->cc,
+                                    r->plan->cflags, r->plan->ldflags, NULL,
+                                    r->compile_t0, r->plan->env, r->receipt);
+}
+
+/* The compiler input: the unity source when one was written, else the owner. */
+static const char *hs_hotswap_compile_input(const char *unity,
+                                            const char *owner)
+{
+    return unity[0] ? unity : owner;
+}
+
+/* Allocates the dependency baseline and result snapshots. */
+static bool hs_hotswap_alloc_deps(struct hs_hotswap_run *r)
+{
+    r->before = zcl_malloc(sizeof(*r->before) * HS_DEP_MAX,
+                           "hotswap dependency baseline");
+    r->after = zcl_malloc(sizeof(*r->after) * HS_DEP_MAX,
+                          "hotswap dependency result");
+    bool ok = r->before && r->after;
+    if (!ok) {
+        free(r->before);
+        free(r->after);
+        hs_why(r->why, r->why_len, "dependency snapshot allocation failed");
+    }
+    return ok;
+}
+
 bool zcl_devloop_hotswap_build(
     const char *repo_root, const char *source_tu,
     struct zcl_devloop_hotswap_build_receipt *receipt,
@@ -1824,12 +2164,8 @@ bool zcl_devloop_hotswap_build(
 {
     int64_t started = platform_time_monotonic_us();
     if (why && why_len) why[0] = 0;
-    const char *owner = hotswap_island_owner_for_path(source_tu);
     bool service_island = false;
-    if (!owner) {
-        owner = zcl_hotswap_service_source_for_path(source_tu);
-        service_island = owner != NULL;
-    }
+    const char *owner = hs_hotswap_owner(source_tu, &service_island);
     if (!hs_hotswap_source_allowed(repo_root, source_tu, owner, receipt,
                                    process)) {
         hs_why(why, why_len, "source is outside the compiled swappable allowlist");
@@ -1838,9 +2174,7 @@ bool zcl_devloop_hotswap_build(
     memset(receipt, 0, sizeof(*receipt));
     memset(process, 0, sizeof(*process));
     char root[PATH_MAX], source_path[PATH_MAX];
-    if (!platform_directory_canonical_real(repo_root, root, sizeof(root)) ||
-        snprintf(source_path, sizeof(source_path), "%s/%s", root, owner) >=
-            (int)sizeof(source_path) || !hs_regular(source_path, NULL)) {
+    if (!hs_hotswap_source_file(repo_root, owner, root, source_path)) {
         hs_why(why, why_len, "source path is not a regular checkout file");
         return false;
     }
@@ -1861,229 +2195,35 @@ bool zcl_devloop_hotswap_build(
     char cache_root[PATH_MAX] = {0}, cache_obj[PATH_MAX] = {0};
     char cache_so[PATH_MAX] = {0};
     char cache_hash[PATH_MAX] = {0};
-    int cache_fd = -1;
     struct zcl_action_root_t0 compile_t0 = {0};
+    struct hs_hotswap_run run = {
+        .plan = &plan, .root = root, .owner = owner, .safe = safe,
+        .cached_dep = cached_dep, .tmp_o = tmp_o, .tmp_d = tmp_d,
+        .tmp_so = tmp_so, .cache_root = cache_root, .cache_obj = cache_obj,
+        .cache_so = cache_so, .cache_hash = cache_hash,
+        .compile_t0 = &compile_t0, .receipt = receipt, .process = process,
+        .why = why, .why_len = why_len, .started = started, .cache_fd = -1,
+    };
     if (!hs_hotswap_temps(root, safe, cached_dep, tmp_o, tmp_d, tmp_so)) {
         hs_why(why, why_len, "could not allocate confined build temporaries");
         goto fail;
     }
-    const char *members = service_island
-        ? zcl_hotswap_shadow_members_for_service(owner)
-        : hotswap_island_members_for_source(owner);
-    /* The deterministic fake-compiler fixture tests cache publication, not
-     * the checkout-compiled member registry. Its isolated root deliberately
-     * carries only synthetic sources. */
-    if (service_island && getenv("ZCL_DEVLOOP_TEST_PROCESS"))
-        members = NULL;
-    if ((!service_island && !members) ||
-        (members && !hs_unity_source(root, owner, members, safe, unity,
-                                     why, why_len)))
+    if (!hs_hotswap_unity_ready(root, owner, service_island, safe, unity,
+                                why, why_len))
         goto fail;
-    const char *compile_input = unity[0] ? unity : owner;
+    run.compile_input = hs_hotswap_compile_input(unity, owner);
 
-    struct hs_dep *before = zcl_malloc(sizeof(*before) * HS_DEP_MAX,
-                                       "hotswap dependency baseline");
-    struct hs_dep *after = zcl_malloc(sizeof(*after) * HS_DEP_MAX,
-                                      "hotswap dependency result");
-    if (!before || !after) {
-        free(before);
-        free(after);
-        hs_why(why, why_len, "dependency snapshot allocation failed");
+    if (!hs_hotswap_alloc_deps(&run))
         goto fail;
-    }
-    size_t before_n = 0, after_n = 0;
-    int64_t dependency_started = platform_time_monotonic_us();
-    receipt->inputs_us = dependency_started - started;
-    bool have_baseline = hs_depfile_read(root, cached_dep, before, &before_n,
-                                         true);
-    receipt->dependency_hash_us =
-        platform_time_monotonic_us() - dependency_started;
-    if (have_baseline &&
-        hs_cache_key(&plan, root, owner, before, before_n,
-                     &(const struct hs_key_action){ owner, NULL, cached_dep,
-                                                     NULL },
-                     receipt, receipt->artifact_cache_key) &&
-        hs_cache_root(cache_root)) {
-        int64_t lookup_started = platform_time_monotonic_us();
-        receipt->key_us = lookup_started - started;
-        cache_fd = hs_cache_lock(cache_root, receipt->artifact_cache_key,
-                                 cache_obj, cache_so, cache_hash);
-        bool cache_hit = cache_fd >= 0 &&
-            hs_cache_lookup(root, safe, cache_obj, cache_so, cache_hash,
-                            receipt);
-        receipt->lookup_us = platform_time_monotonic_us() - lookup_started;
-        if (cache_hit) {
-            receipt->artifact_cache_hit = true;
-            receipt->dependency_count = (uint32_t)before_n;
-            (void)snprintf(receipt->source_tu, sizeof(receipt->source_tu),
-                           "%s", owner);
-            receipt->publish_us = platform_time_monotonic_us() - started -
-                                  receipt->plan_load_us;
-            receipt->total_us = platform_time_monotonic_us() - started;
-            free(before);
-            free(after);
-            (void)flock(cache_fd, LOCK_UN);
-            (void)close(cache_fd);
-            (void)unlink(tmp_o);
-            (void)unlink(tmp_d);
-            (void)unlink(tmp_so);
-            zcl_devloop_action_root_hotswap(root, owner, plan.cc, plan.cflags,
-                                            plan.ldflags, cached_dep,
-                                            &compile_t0, plan.env, receipt);
-            return true;
-        }
-        if (cache_fd >= 0) {
-            /* A .so without its final hash marker, or a marker whose content
-             * does not verify, is a partial/corrupt entry. Under the per-key
-             * lock it cannot be a publisher still in flight. */
-            (void)unlink(cache_so);
-            (void)unlink(cache_obj);
-            (void)unlink(cache_hash);
-        }
-    }
-    receipt->compiler_processes = 1;
-    zcl_action_root_t0_take(&compile_t0);
-    if (!hs_run_compile(&plan, root, owner, compile_input, tmp_o, tmp_d,
-                        process,
-                        &receipt->compile_us, why, why_len)) {
-        free(before);
-        free(after);
+    int resolved = hs_hotswap_resolve(&run);
+    if (resolved < 0 ||
+        (resolved == 0 && !(hs_hotswap_prove(&run) &&
+                            hs_hotswap_link_publish(&run))))
         goto fail;
-    }
-    if (!hs_depfile_read(root, tmp_d, after, &after_n, true)) {
-        free(before);
-        free(after);
-        hs_why(why, why_len, "compiler produced no valid bounded depfile");
-        goto fail;
-    }
-    /* A cold watcher has no dependency baseline. Discover the exact closure,
-     * bind its cache key, then either reuse a verified artifact or compile a
-     * second time in this same bounded action. The second depfile proves that
-     * the accepted object was built from the closure just observed; requiring
-     * another filesystem save adds operator latency without adding evidence. */
-    if (!have_baseline) {
-        memcpy(before, after, after_n * sizeof(*after));
-        before_n = after_n;
-        /* No complete action root, no key: compile uncached (MISS). The
-         * second compile below still proves the discovered closure. */
-        bool keyed = hs_cache_key(
-                         &plan, root, owner, before, before_n,
-                         &(const struct hs_key_action){ owner, NULL, tmp_d,
-                                                          &compile_t0 },
-                         receipt, receipt->artifact_cache_key) &&
-                     hs_cache_root(cache_root);
-        cache_fd = keyed ? hs_cache_lock(cache_root,
-                                         receipt->artifact_cache_key,
-                                         cache_obj, cache_so, cache_hash)
-                         : -1;
-        if (cache_fd >= 0 &&
-            hs_cache_lookup(root, safe, cache_obj, cache_so, cache_hash,
-                            receipt)) {
-            receipt->artifact_cache_hit = true;
-            receipt->dependency_count = (uint32_t)before_n;
-            (void)unlink(cached_dep);
-            if (rename(tmp_d, cached_dep) != 0) {
-                free(before);
-                free(after);
-                hs_why(why, why_len,
-                       "could not publish cold dependency baseline");
-                goto fail;
-            }
-            tmp_d[0] = 0;
-            (void)snprintf(receipt->source_tu,
-                           sizeof(receipt->source_tu), "%s", owner);
-            receipt->publish_us = platform_time_monotonic_us() - started -
-                                  receipt->plan_load_us -
-                                  receipt->compile_us;
-            receipt->total_us = platform_time_monotonic_us() - started;
-            free(before);
-            free(after);
-            (void)flock(cache_fd, LOCK_UN);
-            (void)close(cache_fd);
-            (void)unlink(tmp_o);
-            (void)unlink(tmp_so);
-            zcl_devloop_action_root_hotswap(root, owner, plan.cc, plan.cflags,
-                                            plan.ldflags, cached_dep,
-                                            &compile_t0, plan.env, receipt);
-            return true;
-        }
-        if (cache_fd >= 0) {
-            (void)unlink(cache_so);
-            (void)unlink(cache_obj);
-            (void)unlink(cache_hash);
-        }
-        int64_t stable_compile_us = 0;
-        receipt->compiler_processes++;
-        zcl_action_root_t0_take(&compile_t0);
-        if (!hs_run_compile(&plan, root, owner, compile_input, tmp_o, tmp_d,
-                            process, &stable_compile_us, why, why_len) ||
-            !hs_depfile_read(root, tmp_d, after, &after_n, true)) {
-            free(before);
-            free(after);
-            goto fail;
-        }
-        receipt->compile_us += stable_compile_us;
-    }
-    /* Publish the dependency proof for exact reuse by later saves. */
-    (void)unlink(cached_dep);
-    if (rename(tmp_d, cached_dep) != 0) {
-        free(before);
-        free(after);
-        hs_why(why, why_len, "could not publish dependency baseline");
-        goto fail;
-    }
-    tmp_d[0] = 0;
-    receipt->dependency_count = (uint32_t)after_n;
-    bool stable = hs_hotswap_dependencies_stable(
-        &plan, root, owner, before, before_n, after, after_n, cached_dep,
-        &compile_t0, receipt, why, why_len);
-    free(before);
-    free(after);
-    if (!stable) {
-        goto fail;
-    }
-    receipt->linker_processes = 1;
-    if (!hs_sha256_file(tmp_o, receipt->candidate_object_sha256)) {
-        hs_why(why, why_len, "could not hash exact candidate object");
-        goto fail;
-    }
-    if (!hs_run_link(&plan, root, tmp_o, tmp_so, process, &receipt->link_us,
-                     why, why_len))
-        goto fail;
-
-    int64_t publish_started = platform_time_monotonic_us();
-    if (!hs_hotswap_publish(root, safe, cache_fd, cache_obj, cache_so,
-                            cache_hash, tmp_o, tmp_so, receipt, why,
-                            why_len))
-        goto fail;
-    receipt->publish_us = platform_time_monotonic_us() - publish_started;
-    (void)snprintf(receipt->source_tu, sizeof(receipt->source_tu), "%s",
-                   owner);
-    receipt->total_us = platform_time_monotonic_us() - started;
-    (void)unlink(tmp_o);
-    (void)unlink(tmp_so);
-    if (cache_fd >= 0) {
-        (void)flock(cache_fd, LOCK_UN);
-        (void)close(cache_fd);
-    }
-    zcl_devloop_action_root_hotswap(root, owner, plan.cc, plan.cflags,
-                                    plan.ldflags, cached_dep,
-                                    &compile_t0, plan.env, receipt);
     return true;
 
 fail:
-    {
-        const char *const partial[] = { tmp_o, tmp_d, tmp_so };
-        hs_unlink_nonempty(partial, 3);
-    }
-    if (cache_fd >= 0) {
-        (void)flock(cache_fd, LOCK_UN);
-        (void)close(cache_fd);
-    }
-    receipt->total_us = platform_time_monotonic_us() - started;
-    zcl_devloop_action_root_hotswap(root, owner, plan.cc, plan.cflags,
-                                    plan.ldflags, NULL, &compile_t0, plan.env,
-                                    receipt);
+    hs_hotswap_fail(&run);
     return false;
 }
 
@@ -2575,6 +2715,314 @@ static bool hs_hotfork_publish(
     return true;
 }
 
+/* Working state of one HOT_FORK build. The path arrays stay in the caller. */
+struct hs_hotfork_run {
+    struct hs_action_plan *plan;
+    const struct hs_hotfork_def *def;
+    const char *root, *safe, *key_owner, *unity, *cached_dep;
+    const char *descriptor, *descriptor_obj, *descriptor_dep;
+    const char *version_script, *so;
+    char *candidate_obj, *dep;
+    char *cache_root, *cache_obj, *cache_so, *cache_hash;
+    struct zcl_action_root_t0 *compile_t0;
+    struct hs_dep *before, *after;
+    size_t before_n, after_n;
+    struct zcl_devloop_hotswap_build_receipt *receipt;
+    struct zcl_devloop_process_result *process;
+    char *why;
+    size_t why_len;
+    int64_t started;
+    int cache_fd;
+};
+
+/* Writes the capsule unity and derives its adapter root. */
+static bool hs_hotfork_unity_ready(
+    const struct hs_hotfork_def *def, const char *source_path,
+    const char *unity, char adapter_root[65], char *why, size_t why_len)
+{
+    char unity_text[ZCL_HOTFORK_UNITY_MAX];
+    int unity_n = hs_hotfork_unity_source(
+        def, source_path, unity_text, sizeof(unity_text));
+    if (unity_n <= 0 || unity_n >= (int)sizeof(unity_text)) {
+        hs_why(why, why_len, "HOT_FORK capsule unity did not resolve");
+        return false;
+    }
+    bool written = hs_write_generated(unity, unity_text, why, why_len);
+    if (written)
+        hs_sha3_root(unity_text, adapter_root);
+    return written;
+}
+
+/* Opens the shape check, then names the key owner and the cached depfile. */
+static bool hs_hotfork_identity(
+    const struct hs_action_plan *plan, const char *root,
+    const struct hs_hotfork_def *def, const char *safe,
+    const char *adapter_root, struct zcl_hotfork_shape *shape,
+    char *key_owner, size_t key_owner_len, char *cached_dep,
+    size_t cached_dep_len)
+{
+    /* The resident generation joins the key: a cached artifact is reused
+     * only inside the generation whose shape check admitted it. */
+    zcl_hotfork_shape_begin(shape, root, def->source_tu, def->sibling_tus,
+                            def->adapter_id, plan->cc, plan->compiler_id,
+                            plan->cflags);
+    return snprintf(key_owner, key_owner_len, "HOT_FORK:%s:%s:%s",
+                    def->source_tu, adapter_root, shape->generation) <
+               (int)key_owner_len &&
+           snprintf(cached_dep, cached_dep_len,
+                    "%s/build/hotswap-fast/%s-%s.hotfork.d", root, safe,
+                    adapter_root) < (int)cached_dep_len;
+}
+
+/* Unlocks the cache entry, records the action root and removes the
+ * temporaries of a build that ended well. */
+static void hs_hotfork_succeed(const struct hs_hotfork_run *r)
+{
+    if (r->cache_fd >= 0) {
+        (void)flock(r->cache_fd, LOCK_UN); (void)close(r->cache_fd);
+    }
+    zcl_devloop_action_root_hotfork(r->root, r->def->source_tu, r->plan->cc,
+                                    r->plan->cflags, r->unity, r->cached_dep,
+                                    r->compile_t0, r->plan->env, r->receipt);
+    const char *const built[] = { r->unity, r->descriptor, r->candidate_obj,
+                                  r->descriptor_obj, r->dep,
+                                  r->descriptor_dep, r->version_script,
+                                  r->so };
+    hs_unlink_nonempty(built, 8);
+}
+
+/* Counterpart of hs_hotfork_succeed for a build that failed. */
+static void hs_hotfork_fail(const struct hs_hotfork_run *r)
+{
+    if (r->cache_fd >= 0) {
+        (void)flock(r->cache_fd, LOCK_UN); (void)close(r->cache_fd);
+    }
+    zcl_devloop_action_root_hotfork(r->root, r->def->source_tu, r->plan->cc,
+                                    r->plan->cflags, r->unity, NULL,
+                                    r->compile_t0, r->plan->env, r->receipt);
+    const char *const partial[] = { r->unity, r->descriptor,
+                                    r->candidate_obj, r->descriptor_obj,
+                                    r->dep, r->descriptor_dep,
+                                    r->version_script, r->so };
+    hs_unlink_nonempty(partial, 8);
+    r->receipt->total_us = platform_time_monotonic_us() - r->started;
+}
+
+/* Resolve outcomes: the build failed, goes on to compile, or is satisfied by
+ * a verified cache entry. */
+enum { HS_FORK_FAIL = -1, HS_FORK_PROCEED = 0, HS_FORK_CACHED = 1 };
+
+/* Looks the baseline key up in the shared cache. True on a verified hit. */
+static bool hs_hotfork_warm_lookup(struct hs_hotfork_run *r,
+                                   bool have_baseline)
+{
+    struct zcl_devloop_hotswap_build_receipt *receipt = r->receipt;
+    if (have_baseline &&
+        hs_cache_key(r->plan, r->root, r->key_owner, r->before, r->before_n,
+                     &(const struct hs_key_action){ r->def->source_tu,
+                                                    r->unity, r->cached_dep,
+                                                    NULL },
+                     receipt, receipt->artifact_cache_key) &&
+        hs_cache_root_for("hotfork-v1", r->cache_root)) {
+        int64_t lookup_started = platform_time_monotonic_us();
+        receipt->key_us = lookup_started - r->started;
+        r->cache_fd = hs_cache_lock(r->cache_root, receipt->artifact_cache_key,
+                                    r->cache_obj, r->cache_so, r->cache_hash);
+        bool cache_hit = r->cache_fd >= 0 &&
+            hs_cache_lookup(r->root, r->safe, r->cache_obj, r->cache_so,
+                            r->cache_hash, receipt);
+        receipt->lookup_us = platform_time_monotonic_us() - lookup_started;
+        if (cache_hit) {
+            receipt->artifact_cache_hit = true;
+            receipt->dependency_count = (uint32_t)r->before_n;
+            (void)snprintf(receipt->source_tu, sizeof(receipt->source_tu),
+                           "%s", r->def->source_tu);
+            receipt->total_us = platform_time_monotonic_us() - r->started;
+            free(r->before); free(r->after);
+            return true;
+        }
+        if (r->cache_fd >= 0) {
+            (void)unlink(r->cache_obj); (void)unlink(r->cache_so);
+            (void)unlink(r->cache_hash);
+        }
+    }
+    return false;
+}
+
+/* Cold lookup under the freshly discovered key. */
+static int hs_hotfork_cold_probe(struct hs_hotfork_run *r)
+{
+    struct zcl_devloop_hotswap_build_receipt *receipt = r->receipt;
+    if (r->cache_fd >= 0 &&
+        hs_cache_lookup(r->root, r->safe, r->cache_obj, r->cache_so,
+                        r->cache_hash, receipt)) {
+        receipt->artifact_cache_hit = true;
+        receipt->dependency_count = (uint32_t)r->before_n;
+        (void)unlink(r->cached_dep);
+        if (rename(r->dep, r->cached_dep) != 0) {
+            free(r->before); free(r->after);
+            hs_why(r->why, r->why_len,
+                   "could not publish cold HOT_FORK dependency baseline");
+            return HS_FORK_FAIL;
+        }
+        r->dep[0] = 0;
+        (void)snprintf(receipt->source_tu, sizeof(receipt->source_tu),
+                       "%s", r->def->source_tu);
+        receipt->total_us = platform_time_monotonic_us() - r->started;
+        free(r->before); free(r->after);
+        return HS_FORK_CACHED;
+    }
+    if (r->cache_fd >= 0) {
+        (void)unlink(r->cache_obj); (void)unlink(r->cache_so);
+        (void)unlink(r->cache_hash);
+    }
+    return HS_FORK_PROCEED;
+}
+
+/* Second compile of a cold build; its depfile is the stability proof. */
+static bool hs_hotfork_stable_compile(struct hs_hotfork_run *r)
+{
+    int64_t stable_compile_us = 0;
+    r->receipt->compiler_processes++;
+    zcl_action_root_t0_take(r->compile_t0);
+    bool ok = hs_run_hotfork_compile(r->plan, r->root, r->unity,
+                                     r->candidate_obj, r->dep, r->process,
+                                     &stable_compile_us, r->why,
+                                     r->why_len) &&
+              hs_depfile_read(r->root, r->dep, r->after, &r->after_n, true);
+    if (ok)
+        r->receipt->compile_us += stable_compile_us;
+    return ok;
+}
+
+/* First compile, then the cold baseline handling when none was cached. */
+static int hs_hotfork_discover(struct hs_hotfork_run *r, bool have_baseline)
+{
+    struct zcl_devloop_hotswap_build_receipt *receipt = r->receipt;
+    receipt->compiler_processes = 1;
+    zcl_action_root_t0_take(r->compile_t0);
+    if (!hs_run_hotfork_compile(r->plan, r->root, r->unity, r->candidate_obj,
+                                r->dep, r->process, &receipt->compile_us,
+                                r->why, r->why_len) ||
+        !hs_depfile_read(r->root, r->dep, r->after, &r->after_n, true)) {
+        free(r->before); free(r->after);
+        return HS_FORK_FAIL;
+    }
+    /* A newly declared owner has no dependency baseline yet. Discover the
+     * exact closure once, snapshot it, then compile again inside this same
+     * bounded action. The second pass is the proof that no dependency moved
+     * while the accepted candidate object was produced; requiring a human or
+     * agent to save identical bytes twice is neither a safety property nor a
+     * useful first-edit experience. */
+    if (!have_baseline) {
+        memcpy(r->before, r->after, r->after_n * sizeof(*r->after));
+        r->before_n = r->after_n;
+        /* No complete action root, no key: compile uncached (MISS). */
+        bool keyed = hs_cache_key(
+                         r->plan, r->root, r->key_owner, r->before,
+                         r->before_n,
+                         &(const struct hs_key_action){ r->def->source_tu,
+                                                        r->unity, r->dep,
+                                                        r->compile_t0 },
+                         receipt, receipt->artifact_cache_key) &&
+                     hs_cache_root_for("hotfork-v1", r->cache_root);
+        r->cache_fd = keyed ? hs_cache_lock(r->cache_root,
+                                            receipt->artifact_cache_key,
+                                            r->cache_obj, r->cache_so,
+                                            r->cache_hash)
+                            : -1;
+        int cold = hs_hotfork_cold_probe(r);
+        if (cold != HS_FORK_PROCEED)
+            return cold;
+        if (!hs_hotfork_stable_compile(r)) {
+            free(r->before); free(r->after);
+            return HS_FORK_FAIL;
+        }
+    }
+    return HS_FORK_PROCEED;
+}
+
+/* Reads the cached baseline, tries the warm cache, then compiles. */
+static int hs_hotfork_resolve(struct hs_hotfork_run *r)
+{
+    int64_t dependency_started = platform_time_monotonic_us();
+    r->receipt->inputs_us = dependency_started - r->started;
+    bool have_baseline = hs_depfile_read(r->root, r->cached_dep, r->before,
+                                         &r->before_n, true);
+    r->receipt->dependency_hash_us =
+        platform_time_monotonic_us() - dependency_started;
+    if (hs_hotfork_warm_lookup(r, have_baseline))
+        return HS_FORK_CACHED;
+    return hs_hotfork_discover(r, have_baseline);
+}
+
+/* Publishes the dependency baseline and checks the closure held still. */
+static bool hs_hotfork_prove(struct hs_hotfork_run *r,
+                             struct zcl_hotfork_shape *shape)
+{
+    (void)unlink(r->cached_dep);
+    if (rename(r->dep, r->cached_dep) != 0) {
+        free(r->before); free(r->after);
+        hs_why(r->why, r->why_len,
+               "could not publish HOT_FORK dependency baseline");
+        return false;
+    }
+    r->dep[0] = 0;
+    r->receipt->dependency_count = (uint32_t)r->after_n;
+    bool stable = hs_hotfork_dependencies_stable(
+        r->plan, r->root, r->key_owner, r->def, r->unity, r->cached_dep,
+        r->before, r->before_n, r->after, r->after_n, r->compile_t0,
+        r->receipt, r->why, r->why_len);
+    free(r->before); free(r->after);
+    return zcl_hotfork_shape_admit(stable, shape, r->candidate_obj,
+                                   r->cached_dep, r->why, r->why_len);
+}
+
+/* Links the capsule shared object and hashes it. */
+static bool hs_hotfork_link_so(struct hs_hotfork_run *r)
+{
+    return hs_run_hotfork_link(r->plan, r->root, r->candidate_obj,
+                               r->descriptor_obj, r->version_script, r->so,
+                               r->process, &r->receipt->link_us, r->why,
+                               r->why_len) &&
+           hs_sha256_file(r->so, r->receipt->artifact_sha256);
+}
+
+/* Publishes the artifact and stamps the receipt; the phase is timed. */
+static bool hs_hotfork_publish_phase(struct hs_hotfork_run *r)
+{
+    int64_t publish_started = platform_time_monotonic_us();
+    bool published = hs_hotfork_publish(
+        r->root, r->safe, r->cache_fd, r->cache_obj, r->cache_so,
+        r->cache_hash, r->candidate_obj, r->so, r->receipt, r->why,
+        r->why_len);
+    if (published) {
+        r->receipt->publish_us = platform_time_monotonic_us() - publish_started;
+        (void)snprintf(r->receipt->source_tu, sizeof(r->receipt->source_tu),
+                       "%s", r->def->source_tu);
+        r->receipt->total_us = platform_time_monotonic_us() - r->started;
+    }
+    return published;
+}
+
+/* Hashes the candidate, emits the descriptor, links and publishes. */
+static bool hs_hotfork_link_publish(struct hs_hotfork_run *r)
+{
+    if (!hs_sha256_file(r->candidate_obj, r->receipt->candidate_object_sha256)) {
+        hs_why(r->why, r->why_len, "could not hash HOT_FORK candidate object");
+        return false;
+    }
+    bool emitted = hs_hotfork_emit_descriptor(
+        r->plan, r->root, r->def, r->descriptor, r->descriptor_obj,
+        r->descriptor_dep, r->version_script, r->process, r->receipt, r->why,
+        r->why_len);
+    if (emitted) {
+        r->receipt->compiler_processes++;
+        r->receipt->linker_processes = 1;
+    }
+    return emitted && hs_hotfork_link_so(r) && hs_hotfork_publish_phase(r);
+}
+
 static bool hs_hotfork_build(
     const char *repo_root, const struct hs_hotfork_def *def,
     struct zcl_devloop_hotswap_build_receipt *receipt,
@@ -2605,221 +3053,55 @@ static bool hs_hotfork_build(
     char version_script[PATH_MAX] = {0}, so[PATH_MAX] = {0};
     char cache_root[PATH_MAX] = {0}, cache_obj[PATH_MAX] = {0};
     char cache_so[PATH_MAX] = {0}, cache_hash[PATH_MAX] = {0};
-    int cache_fd = -1;
     struct zcl_action_root_t0 compile_t0 = {0};
+    struct hs_hotfork_run run = {
+        .plan = &plan, .def = def, .root = root, .safe = safe,
+        .key_owner = key_owner, .unity = unity, .cached_dep = cached_dep,
+        .descriptor = descriptor, .descriptor_obj = descriptor_obj,
+        .descriptor_dep = descriptor_dep, .version_script = version_script,
+        .so = so, .candidate_obj = candidate_obj, .dep = dep,
+        .cache_root = cache_root, .cache_obj = cache_obj,
+        .cache_so = cache_so, .cache_hash = cache_hash,
+        .compile_t0 = &compile_t0, .receipt = receipt, .process = process,
+        .why = why, .why_len = why_len, .started = started, .cache_fd = -1,
+    };
     if (!hs_hotfork_temps(root, unity, descriptor, candidate_obj,
                           descriptor_obj, dep, descriptor_dep,
                           version_script, so)) {
         hs_why(why, why_len, "could not allocate HOT_FORK build inputs");
         goto fail;
     }
-    char unity_text[ZCL_HOTFORK_UNITY_MAX];
-    int unity_n = hs_hotfork_unity_source(
-        def, source_path, unity_text, sizeof(unity_text));
-    if (unity_n <= 0 || unity_n >= (int)sizeof(unity_text)) {
-        hs_why(why, why_len, "HOT_FORK capsule unity did not resolve");
-        goto fail;
-    }
-    if (!hs_write_generated(unity, unity_text, why, why_len))
-        goto fail;
     char adapter_root[65];
-    hs_sha3_root(unity_text, adapter_root);
-    /* The resident generation joins the key: a cached artifact is reused
-     * only inside the generation whose shape check admitted it. */
+    if (!hs_hotfork_unity_ready(def, source_path, unity, adapter_root, why,
+                                why_len))
+        goto fail;
     struct zcl_hotfork_shape shape;
-    zcl_hotfork_shape_begin(&shape, root, def->source_tu, def->sibling_tus,
-                            def->adapter_id, plan.cc, plan.compiler_id,
-                            plan.cflags);
-    if (snprintf(key_owner, sizeof(key_owner), "HOT_FORK:%s:%s:%s",
-                 def->source_tu, adapter_root, shape.generation) >=
-            (int)sizeof(key_owner) ||
-        snprintf(cached_dep, sizeof(cached_dep),
-                 "%s/build/hotswap-fast/%s-%s.hotfork.d", root, safe,
-                 adapter_root) >= (int)sizeof(cached_dep)) {
+    if (!hs_hotfork_identity(&plan, root, def, safe, adapter_root, &shape,
+                             key_owner, sizeof(key_owner), cached_dep,
+                             sizeof(cached_dep))) {
         hs_why(why, why_len, "HOT_FORK adapter identity exceeds bound");
         goto fail;
     }
 
-    struct hs_dep *before = zcl_malloc(sizeof(*before) * HS_DEP_MAX,
-                                       "HOT_FORK dependency baseline");
-    struct hs_dep *after = zcl_malloc(sizeof(*after) * HS_DEP_MAX,
-                                      "HOT_FORK dependency result");
-    if (!before || !after) {
-        free(before); free(after);
+    run.before = zcl_malloc(sizeof(*run.before) * HS_DEP_MAX,
+                            "HOT_FORK dependency baseline");
+    run.after = zcl_malloc(sizeof(*run.after) * HS_DEP_MAX,
+                           "HOT_FORK dependency result");
+    if (!run.before || !run.after) {
+        free(run.before); free(run.after);
         hs_why(why, why_len, "HOT_FORK dependency allocation failed");
         goto fail;
     }
-    size_t before_n = 0, after_n = 0;
-    int64_t dependency_started = platform_time_monotonic_us();
-    receipt->inputs_us = dependency_started - started;
-    bool have_baseline = hs_depfile_read(root, cached_dep, before, &before_n,
-                                         true);
-    receipt->dependency_hash_us =
-        platform_time_monotonic_us() - dependency_started;
-    if (have_baseline &&
-        hs_cache_key(&plan, root, key_owner, before, before_n,
-                     &(const struct hs_key_action){ def->source_tu, unity,
-                                                    cached_dep, NULL },
-                     receipt, receipt->artifact_cache_key) &&
-        hs_cache_root_for("hotfork-v1", cache_root)) {
-        int64_t lookup_started = platform_time_monotonic_us();
-        receipt->key_us = lookup_started - started;
-        cache_fd = hs_cache_lock(cache_root, receipt->artifact_cache_key,
-                                 cache_obj, cache_so, cache_hash);
-        bool cache_hit = cache_fd >= 0 &&
-            hs_cache_lookup(root, safe, cache_obj, cache_so, cache_hash,
-                            receipt);
-        receipt->lookup_us = platform_time_monotonic_us() - lookup_started;
-        if (cache_hit) {
-            receipt->artifact_cache_hit = true;
-            receipt->dependency_count = (uint32_t)before_n;
-            (void)snprintf(receipt->source_tu, sizeof(receipt->source_tu),
-                           "%s", def->source_tu);
-            receipt->total_us = platform_time_monotonic_us() - started;
-            free(before); free(after);
-            goto success;
-        }
-        if (cache_fd >= 0) {
-            (void)unlink(cache_obj); (void)unlink(cache_so);
-            (void)unlink(cache_hash);
-        }
-    }
-    receipt->compiler_processes = 1;
-    zcl_action_root_t0_take(&compile_t0);
-    if (!hs_run_hotfork_compile(&plan, root, unity, candidate_obj, dep,
-                                process, &receipt->compile_us,
-                                why, why_len) ||
-        !hs_depfile_read(root, dep, after, &after_n, true)) {
-        free(before); free(after);
+    int resolved = hs_hotfork_resolve(&run);
+    if (resolved < 0 ||
+        (resolved == 0 && !(hs_hotfork_prove(&run, &shape) &&
+                            hs_hotfork_link_publish(&run))))
         goto fail;
-    }
-    /* A newly declared owner has no dependency baseline yet. Discover the
-     * exact closure once, snapshot it, then compile again inside this same
-     * bounded action. The second pass is the proof that no dependency moved
-     * while the accepted candidate object was produced; requiring a human or
-     * agent to save identical bytes twice is neither a safety property nor a
-     * useful first-edit experience. */
-    if (!have_baseline) {
-        memcpy(before, after, after_n * sizeof(*after));
-        before_n = after_n;
-        /* No complete action root, no key: compile uncached (MISS). */
-        bool keyed = hs_cache_key(
-                         &plan, root, key_owner, before, before_n,
-                         &(const struct hs_key_action){ def->source_tu,
-                                                        unity, dep,
-                                                        &compile_t0 },
-                         receipt, receipt->artifact_cache_key) &&
-                     hs_cache_root_for("hotfork-v1", cache_root);
-        cache_fd = keyed ? hs_cache_lock(cache_root,
-                                         receipt->artifact_cache_key,
-                                         cache_obj, cache_so, cache_hash)
-                         : -1;
-        if (cache_fd >= 0 &&
-            hs_cache_lookup(root, safe, cache_obj, cache_so, cache_hash,
-                            receipt)) {
-            receipt->artifact_cache_hit = true;
-            receipt->dependency_count = (uint32_t)before_n;
-            (void)unlink(cached_dep);
-            if (rename(dep, cached_dep) != 0) {
-                free(before); free(after);
-                hs_why(why, why_len,
-                       "could not publish cold HOT_FORK dependency baseline");
-                goto fail;
-            }
-            dep[0] = 0;
-            (void)snprintf(receipt->source_tu, sizeof(receipt->source_tu),
-                           "%s", def->source_tu);
-            receipt->total_us = platform_time_monotonic_us() - started;
-            free(before); free(after);
-            goto success;
-        }
-        if (cache_fd >= 0) {
-            (void)unlink(cache_obj); (void)unlink(cache_so);
-            (void)unlink(cache_hash);
-        }
-        int64_t stable_compile_us = 0;
-        receipt->compiler_processes++;
-        zcl_action_root_t0_take(&compile_t0);
-        if (!hs_run_hotfork_compile(&plan, root, unity, candidate_obj, dep,
-                                    process, &stable_compile_us,
-                                    why, why_len) ||
-            !hs_depfile_read(root, dep, after, &after_n, true)) {
-            free(before); free(after);
-            goto fail;
-        }
-        receipt->compile_us += stable_compile_us;
-    }
-    (void)unlink(cached_dep);
-    if (rename(dep, cached_dep) != 0) {
-        free(before); free(after);
-        hs_why(why, why_len, "could not publish HOT_FORK dependency baseline");
-        goto fail;
-    }
-    dep[0] = 0;
-    receipt->dependency_count = (uint32_t)after_n;
-    bool stable = hs_hotfork_dependencies_stable(
-        &plan, root, key_owner, def, unity, cached_dep, before, before_n,
-        after, after_n, &compile_t0, receipt, why, why_len);
-    free(before); free(after);
-    if (!zcl_hotfork_shape_admit(stable, &shape, candidate_obj, cached_dep,
-                                 why, why_len)) {
-        goto fail;
-    }
-    if (!hs_sha256_file(candidate_obj, receipt->candidate_object_sha256)) {
-        hs_why(why, why_len, "could not hash HOT_FORK candidate object");
-        goto fail;
-    }
-    if (!hs_hotfork_emit_descriptor(&plan, root, def, descriptor,
-                                    descriptor_obj, descriptor_dep,
-                                    version_script, process, receipt, why,
-                                    why_len))
-        goto fail;
-    receipt->compiler_processes++;
-    receipt->linker_processes = 1;
-    if (!hs_run_hotfork_link(&plan, root, candidate_obj, descriptor_obj,
-                             version_script, so, process, &receipt->link_us,
-                             why, why_len) ||
-        !hs_sha256_file(so, receipt->artifact_sha256))
-        goto fail;
-    int64_t publish_started = platform_time_monotonic_us();
-    if (!hs_hotfork_publish(root, safe, cache_fd, cache_obj, cache_so,
-                            cache_hash, candidate_obj, so, receipt, why,
-                            why_len))
-        goto fail;
-    receipt->publish_us = platform_time_monotonic_us() - publish_started;
-    (void)snprintf(receipt->source_tu, sizeof(receipt->source_tu), "%s",
-                   def->source_tu);
-    receipt->total_us = platform_time_monotonic_us() - started;
-
-success:
-    if (cache_fd >= 0) {
-        (void)flock(cache_fd, LOCK_UN); (void)close(cache_fd);
-    }
-    zcl_devloop_action_root_hotfork(root, def->source_tu, plan.cc, plan.cflags,
-                                    unity, cached_dep, &compile_t0, plan.env,
-                                    receipt);
-    {
-        const char *const built[] = { unity, descriptor, candidate_obj,
-                                      descriptor_obj, dep, descriptor_dep,
-                                      version_script, so };
-        hs_unlink_nonempty(built, 8);
-    }
+    hs_hotfork_succeed(&run);
     return true;
 
 fail:
-    if (cache_fd >= 0) {
-        (void)flock(cache_fd, LOCK_UN); (void)close(cache_fd);
-    }
-    zcl_devloop_action_root_hotfork(root, def->source_tu, plan.cc, plan.cflags,
-                                    unity, NULL, &compile_t0, plan.env,
-                                    receipt);
-    {
-        const char *const partial[] = { unity, descriptor, candidate_obj,
-                                        descriptor_obj, dep, descriptor_dep,
-                                        version_script, so };
-        hs_unlink_nonempty(partial, 8);
-    }
-    receipt->total_us = platform_time_monotonic_us() - started;
+    hs_hotfork_fail(&run);
     return false;
 }
 
