@@ -1210,6 +1210,26 @@ static void topup_clean_record(struct main_state *ms, struct node_db *ndb,
     (void)node_db_state_set(ndb, NODE_DB_TOPUP_CLEAN_KEY, &m, sizeof(m));
 }
 
+/* First height to fold: the whole window under the per-height test oracle,
+ * else the first height above a re-verified clean prefix. */
+static int node_db_fold_start(struct main_state *ms, struct node_db *ndb,
+                              const uint8_t anchor[32], int lo, int coins_best)
+{
+#ifdef ZCL_TESTING
+    if (g_node_db_topup_perheight_oracle)
+        return lo;
+#endif
+    return topup_clean_resume(ms, ndb, anchor, lo, coins_best);
+}
+
+/* True when the fold neither inserted nor raised anything. */
+static bool node_db_fold_changed_nothing(const struct nodedb_fold *f)
+{
+    return f->inserted == 0 && f->data_applied == 0 && f->ntx_applied == 0 &&
+           f->valid_raised == 0 && f->undo.applied == 0 &&
+           f->undo.cleared == 0 && f->height_conflicts == 0;
+}
+
 bool block_index_node_db_topup_with(struct main_state *ms,
                                     struct node_db *ndb,
                                     struct sqlite3 *progress_db,
@@ -1284,23 +1304,16 @@ bool block_index_node_db_topup_with(struct main_state *ms,
     memset(&fold, 0, sizeof(fold));
     fold.ms = ms;
     fold.ndb = ndb;
-    int fold_lo = lo;
-#ifdef ZCL_TESTING
-    if (!g_node_db_topup_perheight_oracle)
-#endif
-        fold_lo = topup_clean_resume(ms, ndb, anchor_hash, lo, coins_best);
-    if (!node_db_fold_window(&fold, fold_lo, coins_best)) {
+    if (!node_db_fold_window(&fold,
+            node_db_fold_start(ms, ndb, anchor_hash, lo, coins_best),
+            coins_best)) {
         free(fold.new_entries);
         return false;
     }
 #ifdef ZCL_TESTING
     g_node_db_topup_last_rows_seen = fold.rows_seen;
 #endif
-    const bool fold_was_noop =
-        fold.inserted == 0 && fold.data_applied == 0 &&
-        fold.ntx_applied == 0 && fold.valid_raised == 0 &&
-        fold.undo.applied == 0 && fold.undo.cleared == 0 &&
-        fold.height_conflicts == 0;
+    const bool fold_was_noop = node_db_fold_changed_nothing(&fold);
     struct block_index **new_entries = fold.new_entries;
     const size_t new_count = fold.new_count;
     const size_t inserted = fold.inserted, data_applied = fold.data_applied,
