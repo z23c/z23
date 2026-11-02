@@ -369,6 +369,65 @@ static bool snapshot_advance_refs(struct vcs_repo *r, const struct vcs_commit *c
     return ok;
 }
 
+/* Hash the sealed-path set of the manifest into sealset. The manifest is
+ * freed on every path. */
+static int snapshot_sealset(struct vcs_repo *r, struct vcs_manifest *m,
+                            uint8_t sealset[32])
+{
+    char **globs = NULL;
+    size_t nglobs = 0;
+    if (!vcs_seal_load_globs(r->root, &globs, &nglobs)) {
+        vcs_manifest_free(m);
+        LOG_ERROR_IN("vcs_snapshot", "vcs", "load globs");
+        return -1;
+    }
+    bool sh = vcs_sealset_hash(m, globs, nglobs, sealset);
+    vcs_seal_free_globs(globs, nglobs);
+    vcs_manifest_free(m);
+    if (!sh) {
+        LOG_ERROR_IN("vcs_snapshot", "vcs", "sealset_hash");
+        return -1;
+    }
+    return 0;
+}
+
+/* Serialize the commit, append its durable record, then store the by-id
+ * object; commit_id receives the commit id. */
+static int snapshot_write_commit(struct vcs_repo *r, struct vcs_commit *c,
+                                 uint8_t commit_id[32])
+{
+    uint8_t record[VCS_COMMIT_RECORD_BYTES];
+    if (!vcs_commit_serialize(c, record)) {
+        LOG_ERROR_IN("vcs_snapshot", "vcs", "serialize commit");
+        return -1;
+    }
+    if (!vcs_commit_id(c, commit_id)) {
+        LOG_ERROR_IN("vcs_snapshot", "vcs", "commit_id");
+        return -1;
+    }
+
+    /* Append the durable commit record, then store the by-id object. */
+    if (event_log_append(r->log, EV_VCS_COMMIT, record, sizeof(record)) == UINT64_MAX) {
+        LOG_ERROR_IN("vcs_snapshot", "vcs", "append commits.log");
+        return -1;
+    }
+    uint8_t pre[VCS_COMMIT_PREIMAGE_BYTES];
+    if (!vcs_commit_preimage(c, pre)) {
+        LOG_ERROR_IN("vcs_snapshot", "vcs", "commit preimage");
+        return -1;
+    }
+    uint8_t obj_id[32];
+    if (!vcs_object_put(r->root, pre, sizeof(pre), VCS_TAG_COMMIT, obj_id)) {
+        LOG_ERROR_IN("vcs_snapshot", "vcs", "put commit object");
+        return -1;
+    }
+    if (memcmp(obj_id, commit_id, 32) != 0) {
+        LOG_ERROR_IN("vcs_snapshot", "vcs", "commit id mismatch");
+        return -1;
+    }
+    return 0;
+}
+
 int vcs_snapshot(struct vcs_repo *r, const struct vcs_snapshot_meta *meta,
                  uint8_t out_commit_id[32])
 {
@@ -388,15 +447,9 @@ int vcs_snapshot(struct vcs_repo *r, const struct vcs_snapshot_meta *meta,
     if (!manifest_store(r->root, &m, tree_hash)) { vcs_manifest_free(&m); LOG_ERR("vcs", "store manifest"); }
 
     /* Seal check over the sealed-path set. */
-    char **globs = NULL;
-    size_t nglobs = 0;
-    if (!vcs_seal_load_globs(r->root, &globs, &nglobs)) { vcs_manifest_free(&m); LOG_ERR("vcs", "load globs"); }
     uint8_t sealset[32];
-    bool sh = vcs_sealset_hash(&m, globs, nglobs, sealset);
-    vcs_seal_free_globs(globs, nglobs);
-    vcs_manifest_free(&m);
-    if (!sh)
-        LOG_ERR("vcs", "sealset_hash");
+    if (snapshot_sealset(r, &m, sealset) != 0)
+        return -1;
 
     enum vcs_seal_result sr = vcs_seal_check(r->idx, sealset);
     if (sr == VCS_SEAL_REFUSED)
@@ -410,24 +463,9 @@ int vcs_snapshot(struct vcs_repo *r, const struct vcs_snapshot_meta *meta,
     if (!snapshot_load_parent(r, &c))
         LOG_ERR("vcs", "ref_get HEAD");
 
-    uint8_t record[VCS_COMMIT_RECORD_BYTES];
-    if (!vcs_commit_serialize(&c, record))
-        LOG_ERR("vcs", "serialize commit");
     uint8_t commit_id[32];
-    if (!vcs_commit_id(&c, commit_id))
-        LOG_ERR("vcs", "commit_id");
-
-    /* Append the durable commit record, then store the by-id object. */
-    if (event_log_append(r->log, EV_VCS_COMMIT, record, sizeof(record)) == UINT64_MAX)
-        LOG_ERR("vcs", "append commits.log");
-    uint8_t pre[VCS_COMMIT_PREIMAGE_BYTES];
-    if (!vcs_commit_preimage(&c, pre))
-        LOG_ERR("vcs", "commit preimage");
-    uint8_t obj_id[32];
-    if (!vcs_object_put(r->root, pre, sizeof(pre), VCS_TAG_COMMIT, obj_id))
-        LOG_ERR("vcs", "put commit object");
-    if (memcmp(obj_id, commit_id, 32) != 0)
-        LOG_ERR("vcs", "commit id mismatch");
+    if (snapshot_write_commit(r, &c, commit_id) != 0)
+        return -1;
 
     /* Advance HEAD / anchor / seal_pin in one transaction. */
     if (!vcs_index_begin(r->idx))
