@@ -127,7 +127,7 @@ static enum sun_result result_of(const struct reply *r)
         {"DATADIR_LOCKED", SUN_NODE_RUNNING}, {"WALLET_ALREADY_PRESENT", SUN_ALREADY_PRESENT},
         {"INVALID_PHRASE", SUN_INVALID_PHRASE}, {"NODE_DB_UNREADABLE", SUN_STORAGE},
         {"PASSPHRASE_TOO_SHORT", SUN_REFUSED}, {"MISSING_PHRASE", SUN_REFUSED}, {"MISSING_DATADIR", SUN_REFUSED},
-        {"NOT_RUN", SUN_NOT_RUN}, {"BAD_BIRTHDAY", SUN_REFUSED}, {"STDIN_REQUIRED", SUN_REFUSED}, {"WALLET_AT_REST_UNDECIDED", SUN_REFUSED},
+        {"NO_LOCAL_CHAIN", SUN_NO_CHAIN}, {"BIRTHDAY_CONFLICT", SUN_REFUSED}, {"NOT_RUN", SUN_NOT_RUN}, {"BAD_BIRTHDAY", SUN_REFUSED}, {"STDIN_REQUIRED", SUN_REFUSED}, {"WALLET_AT_REST_UNDECIDED", SUN_REFUSED},
     };
     if (!r->parsed || r->ok || !r->code) return SUN_UNKNOWN;
     for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); ++i)
@@ -175,27 +175,28 @@ enum sun_result sun_create(const struct sun *node, const char *passphrase, struc
 }
 
 static bool restore_request(const struct sun *node, const struct zapp_words *words, const char *passphrase,
-                            const struct sun_birthday *birthday, char *input, size_t cap)
+                            const struct sun_birthday *birthday, bool at_tip, char *input, size_t cap)
 {
     char phrase[ZAPP_WORDS_MAX * (ZAPP_WORD_LETTERS + 1)];
     struct json_value doc = {0};
     if (!zapp_words_join(words, phrase, sizeof(phrase))) return false;
     bool ok = request_base(&doc, node, passphrase) && json_push_kv_str(&doc, "phrase", phrase) &&
               json_push_kv_bool(&doc, "confirm", true) && json_push_kv_bool(&doc, "shielded_only", true) &&
-              (!birthday || !birthday->known || push_birthday(&doc, birthday));
+              (!birthday || !birthday->known || push_birthday(&doc, birthday)) &&
+              (!at_tip || json_push_kv_bool(&doc, "birthday_at_local_tip", true));
     memory_cleanse(phrase, sizeof(phrase));
     if (!ok) { doc_wipe(&doc); return false; }
     return write_request(&doc, input, cap);
 }
 
-enum sun_result sun_restore(const struct sun *node, const struct zapp_words *words, const char *passphrase,
-                            const struct sun_birthday *birthday, struct sun_restored *out)
+static enum sun_result restore_call(const struct sun *node, const struct zapp_words *words, const char *passphrase,
+                                     const struct sun_birthday *birthday, bool at_tip, struct sun_restored *out)
 {
     char input[SUN_INPUT_MAX], text[SUN_REPLY_MAX];
     struct reply r;
     memset(out, 0, sizeof(*out));
     if (!passphrase_valid(passphrase) || !node->datadir[0]) return SUN_REFUSED;
-    if (!restore_request(node, words, passphrase, birthday, input, sizeof(input))) { memory_cleanse(input, sizeof(input)); return SUN_REFUSED; }
+    if (!restore_request(node, words, passphrase, birthday, at_tip, input, sizeof(input))) { memory_cleanse(input, sizeof(input)); return SUN_REFUSED; }
     text[0] = 0;
     (void)node->runner.run(node->runner.ctx, "restore", input, SUN_RESTORE_TIMEOUT_MS, text, sizeof(text));
     memory_cleanse(input, sizeof(input));
@@ -205,6 +206,32 @@ enum sun_result sun_restore(const struct sun *node, const struct zapp_words *wor
         out->birthday_recorded = flag_of(r.data, "birthday_recorded");
         out->birthday_rejected = flag_of(r.data, "birthday_rejected");
     }
+    reply_free(&r);
+    memory_cleanse(text, sizeof(text));
+    return result;
+}
+
+enum sun_result sun_restore(const struct sun *node, const struct zapp_words *words, const char *passphrase,
+                            const struct sun_birthday *birthday, struct sun_restored *out)
+{
+    return restore_call(node, words, passphrase, birthday, false, out);
+}
+enum sun_result sun_restore_at_tip(const struct sun *node, const struct zapp_words *words, const char *passphrase, struct sun_restored *out)
+{
+    return restore_call(node, words, passphrase, NULL, true, out);
+}
+
+enum sun_result sun_new_phrase(const struct sun *node, struct zapp_words *out)
+{
+    char text[SUN_REPLY_MAX];
+    struct reply r;
+    memset(out, 0, sizeof(*out));
+    text[0] = 0;
+    (void)node->runner.run(node->runner.ctx, "newphrase", "{}", SUN_QUERY_TIMEOUT_MS, text, sizeof(text));
+    reply_read(&r, text);
+    bool made = r.parsed && r.ok && r.data && zapp_words_parse(text_of(r.data, "phrase"), out);
+    enum sun_result result = made ? SUN_OK : r.parsed && !r.ok ? result_of(&r) : SUN_NOT_RUN;
+    if (result != SUN_OK) memory_cleanse(out, sizeof(*out));
     reply_free(&r);
     memory_cleanse(text, sizeof(text));
     return result;

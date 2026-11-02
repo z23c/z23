@@ -24,6 +24,8 @@ static const char *dir;
 /* Replies of `core wallet recovery status` as wallet_recovery_native_handlers.c builds them at 5822e3f535: keys_before and
  * wallet_already_present at :109-112, seed_state at :249. */
 #define PRESENT_REPLY "{\"ok\":true,\"data\":{\"keys_before\":1,\"wallet_already_present\":true,\"seed_state\":\"present-encrypted-unlocked\",\"recoverable_from_phrase\":true}}"
+#define RESTORED_TIP "{\"ok\":true,\"data\":{\"recovered\":true,\"birthday_recorded\":true,\"birthday_rejected\":false}}"
+#define RESTORED_NO_TIP "{\"ok\":true,\"data\":{\"recovered\":true,\"birthday_recorded\":false,\"birthday_rejected\":false}}"
 #define EMPTY_REPLY "{\"ok\":true,\"data\":{\"keys_before\":0,\"wallet_already_present\":false,\"seed_state\":\"none\",\"recoverable_from_phrase\":false}}"
 
 /* A rename that fails on chosen destinations, to prove that a set-aside that cannot go back says so. Other renames pass through. */
@@ -182,6 +184,8 @@ struct script {
     char chain[256], status[512];
     bool status_ok;
     int status_calls, status_while_running;
+    int phrase_calls;
+    bool phrase_fail;
     const bool *node_flag;
     char op[16], input[SUN_INPUT_MAX];
     unsigned timeout;
@@ -192,11 +196,19 @@ static bool script_run(void *ctx, const char *op, const char *input, unsigned ti
     struct script *s = ctx;
     if (!strcmp(op, "chaininfo")) { ++s->chain_calls; snprintf(out, cap, "%s", s->chain); return s->chain[0] != 0; }
     if (!strcmp(op, "status")) { ++s->status_calls; s->status_while_running += s->node_flag && *s->node_flag; snprintf(s->op, sizeof(s->op), "%s", op); snprintf(s->input, sizeof(s->input), "%s", input); snprintf(out, cap, "%s", s->status); return s->status_ok; }
+    if (!strcmp(op, "newphrase")) {
+        ++s->phrase_calls;
+        snprintf(out, cap, "%s", s->phrase_fail ? "The node did not answer." : "{\"ok\":true,\"data\":{\"phrase\":\"" PHRASE "\",\"words\":24}}");
+        return !s->phrase_fail;
+    }
     ++s->calls;
     snprintf(s->op, sizeof(s->op), "%s", op);
     snprintf(s->input, sizeof(s->input), "%s", input);
     s->timeout = timeout;
     snprintf(out, cap, "%s", s->reply);
+    /* A script written for the old create reply (CREATED) stands for a restore that succeeded, with or without a recorded start. */
+    if (!strcmp(op, "restore") && strstr(s->reply, "\"phrase\":\""))
+        snprintf(out, cap, "%s", strstr(s->reply, "\"birthday_recorded\":true") ? RESTORED_TIP : RESTORED_NO_TIP);
     return s->hook ? s->hook(s, op) : s->ran_ok;
 }
 static void script_say(struct script *s, bool ok, const char *text) { s->ran_ok = ok; snprintf(s->reply, sizeof(s->reply), "%s", text); }
@@ -419,17 +431,14 @@ struct fake {
     unsigned exit_after_ms;
     int64_t now_ms, stop_at_ms, wall_offset;
     bool exiting, watch;
-    int starts_refused, step_at_start, phase_key, phase_pause, phase_write, phase_restart;
-    int64_t elapsed_at_pause;
-    int phase_waiting;
-    char stage[48];
+    int starts_refused, step_at_start, phase_key, step_at_stop, step_at_write;
 };
 static struct fake *fake_of;
 static struct wsu *model_of;
 static bool fake_hook(struct script *s, const char *op)
 {
     struct fake *f = fake_of;
-    if (!strcmp(op, "create") && f->watch) { struct wsu_view v; wsu_view_read(model_of, &v); f->phase_write = v.phase; }
+    if (!strcmp(op, "restore") && f->watch) f->step_at_write = (int)model_of->step;
     if (!strcmp(op, "create")) { f->create_while_running += f->running; f->kind_at_create = (int)zapp_setup_kind_read(dir); }
     if (!strcmp(op, "restore")) { f->restore_while_running += f->running; f->kind_at_restore = (int)zapp_setup_kind_read(dir); }
     return s->ran_ok;
@@ -470,11 +479,11 @@ static void f_control(void *ctx, bool start)
     if (start) {
         ++f->starts;
         f->running = true;
-        if (f->watch) { wsu_view_read(model_of, &v); f->phase_restart = (int)model_of->phase; f->step_at_start = v.step; zapp_words_cleanse(&v.words); }
+        if (f->watch) { wsu_view_read(model_of, &v); f->step_at_start = v.step; zapp_words_cleanse(&v.words); }
         return;
     }
     ++f->stops;
-    if (f->watch) { f->wall_offset += 7; wsu_view_read(model_of, &v); f->phase_pause = v.phase; f->elapsed_at_pause = v.elapsed_s; }
+    if (f->watch) f->step_at_stop = (int)model_of->step;
     if (!f->stops_when_asked) return;
     f->exiting = f->exit_after_ms > 0;
     f->stop_at_ms = f->now_ms;
@@ -485,7 +494,6 @@ static void f_pause(void *ctx, unsigned ms)
     struct fake *f = ctx;
     ++f->pauses;
     f->now_ms += ms;
-    if (f->watch) f->phase_waiting = (int)model_of->phase;
 }
 static bool f_random(void *ctx, uint8_t *out, size_t len) { return counter_random(&((struct fake *)ctx)->random_state, out, len); }
 static bool f_protect(void *ctx, bool on)
@@ -495,7 +503,6 @@ static bool f_protect(void *ctx, bool on)
 }
 static enum wsu_idle f_idle(void *ctx) { return ((struct fake *)ctx)->idle; }
 static int64_t f_wall(void *ctx) { return 1793534400 + ((struct fake *)ctx)->wall_offset; }
-static void f_stage(void *ctx, char *out, size_t cap) { snprintf(out, cap, "%s", ((struct fake *)ctx)->stage); }
 static bool f_progress(void *ctx, int64_t *scanned, int64_t *tip)
 {
     struct fake *f = ctx;
@@ -519,12 +526,18 @@ static void fresh(struct fake *f, struct wsu *w, bool running)
     f->script.hook = fake_hook;
     snprintf(f->script.chain, sizeof(f->script.chain), "%s", CHAIN);
     struct sun node = node_of(&f->script);
-    struct wsu_env env = {f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_wall, f_stage};
+    struct wsu_env env = {f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_wall};
     model_of = w;
     assert(wsu_init(w, &env, &node, dir));
     assert(wsu_open(w));
 }
 
+/* The create as the app runs it: the words first, then the wallet written behind them. */
+static void create_all(struct wsu *w)
+{
+    wsu_create_job(w);
+    wsu_write_job(w);
+}
 static void create_tests(void)
 {
     struct fake f;
@@ -533,10 +546,10 @@ static void create_tests(void)
     fresh(&f, &w, true);
     assert(w.step == WSU_CHOICE);
     script_say(&f.script, true, CREATED);
-    wsu_create_job(&w);
+    create_all(&w);
     wsu_view_read(&w, &v);
     assert(v.step == WSU_WORDS && v.words.count == 24 && !strcmp(v.words.word[0], "alpha"));
-    assert(v.start_height == 2999000);
+    assert(v.write == WSU_WRITE_DONE && !v.start_pending);
     assert(f.create_while_running == 0 && f.stops == 1 && f.starts == 1 && f.running);
     assert(strstr(f.script.input, "\"passphrase\":\"abababababababababababababababababababababababababababababababab\""));
     assert(zapp_setup_state(dir) == ZAPP_SETUP_INTERRUPTED);
@@ -567,116 +580,122 @@ static void create_tests(void)
     wsu_destroy(&w);
 
 }
-static void create_failure_tests(void)
+static void create_failure_decline_tests(void)
 {
     struct fake f;
     struct wsu w;
     /* The owner declines: no node call, no key to discard, back to a failed state. */
     fresh(&f, &w, true);
     f.wrap_status = ZAPP_DEVKEY_DECLINED;
-    wsu_create_job(&w);
+    create_all(&w);
     assert(w.step == WSU_FAILED && w.failure == WSU_DECLINED && f.script.calls == 0 && f.stops == 0);
     wsu_back(&w);
     assert(w.step == WSU_CHOICE);
     f.wrap_status = ZAPP_DEVKEY_NO_SCREEN_LOCK;
-    wsu_create_job(&w);
+    create_all(&w);
     assert(w.failure == WSU_NO_SCREEN_LOCK);
     wsu_destroy(&w);
-
-    /* The node refuses: nothing was written, so the key is discarded and a running node runs again. */
+}
+/* The failed write left the setup interrupted with its key, and exactly one phrase was asked for. */
+static bool retryable_state(const struct fake *f)
+{
+    return zapp_setup_state(dir) == ZAPP_SETUP_INTERRUPTED && exists_in(dir, "wallet_key.blob") && f->script.phrase_calls == 1;
+}
+static void create_failure_refused_tests(void)
+{
+    struct fake f;
+    struct wsu w;
+    /* The node refuses the write: the words stay, the key stays, the node runs, and the same phrase is written on a retry. */
     fresh(&f, &w, true);
     error_reply(&f.script, "WALLET_ALREADY_PRESENT");
-    wsu_create_job(&w);
-    assert(w.step == WSU_FAILED && w.failure == WSU_PRESENT && f.discards == 1 && f.running && f.starts == 1);
-    assert(zapp_setup_state(dir) == ZAPP_SETUP_NEEDED);
+    create_all(&w);
+    assert(w.step == WSU_WORDS && w.write == WSU_WRITE_FAILED && w.write_failure == WSU_PRESENT && f.discards == 0 && f.running && f.starts == 1);
+    assert(retryable_state(&f));
+    script_say(&f.script, true, RESTORED_TIP);
+    assert(wsu_retry_write(&w) && w.write == WSU_WRITE_PENDING);
+    wsu_write_job(&w);
+    assert(w.write == WSU_WRITE_DONE && f.script.phrase_calls == 1 && f.wraps == 1 && f.stops == 2 && f.starts == 2 && f.running);
+    assert(strstr(f.script.input, "\"phrase\":\"" PHRASE "\"") && strstr(f.script.input, "\"birthday_at_local_tip\":true"));
+    assert(!wsu_retry_write(&w) && w.phrase.count == 0 && !w.write_pass[0]);
     wsu_destroy(&w);
-
-    /* No usable answer: the wallet may exist, so the key stays. */
+}
+static void create_failure_unknown_tests(void)
+{
+    struct fake f;
+    struct wsu w;
+    /* No usable answer: the wallet may exist. The key stays, the node (which was off) is started to sync, and a later "present" is ours. */
     fresh(&f, &w, false);
     script_say(&f.script, false, "The node did not answer.");
-    wsu_create_job(&w);
-    assert(w.step == WSU_FAILED && w.failure == WSU_UNKNOWN && f.discards == 0 && !f.running);
+    create_all(&w);
+    assert(w.step == WSU_WORDS && w.write_failure == WSU_UNKNOWN && f.discards == 0 && f.running);
     assert(zapp_setup_state(dir) == ZAPP_SETUP_INTERRUPTED);
+    error_reply(&f.script, "WALLET_ALREADY_PRESENT");
+    assert(wsu_retry_write(&w));
+    wsu_write_job(&w);
+    assert(w.write == WSU_WRITE_DONE && w.birthday.known);
     wsu_destroy(&w);
-
-    /* The node does not stop: create is never attempted. */
+}
+static void create_failure_busy_tests(void)
+{
+    struct fake f;
+    struct wsu w;
+    /* The node does not stop: the wallet is never written, the key stays, and the retry tries again. */
     fresh(&f, &w, true);
     f.stops_when_asked = false;
     script_say(&f.script, true, CREATED);
-    wsu_create_job(&w);
-    assert(w.failure == WSU_NODE_BUSY && f.script.calls == 0 && f.discards == 1);
+    create_all(&w);
+    assert(w.write_failure == WSU_NODE_BUSY && f.script.calls == 0 && f.discards == 0 && w.step == WSU_WORDS);
     wsu_destroy(&w);
-
+}
+static void create_failure_second_tests(void)
+{
+    struct fake f;
+    struct wsu w;
     /* A second create while one ran is ignored. */
     fresh(&f, &w, false);
     script_say(&f.script, true, CREATED);
-    wsu_create_job(&w);
+    create_all(&w);
     f.wraps = 0;
-    wsu_create_job(&w);
-    assert(f.wraps == 0 && w.step == WSU_WORDS);
+    create_all(&w);
+    assert(f.wraps == 0 && w.step == WSU_WORDS && f.script.phrase_calls == 1);
+    wsu_destroy(&w);
+}
+
+/* The node cannot make a phrase: nothing was written, so the key is discarded and no node call is left over. */
+static void create_phrase_failure_test(void)
+{
+    struct fake f;
+    struct wsu w;
+    fresh(&f, &w, true);
+    f.script.phrase_fail = true;
+    create_all(&w);
+    assert(w.step == WSU_FAILED && w.failure == WSU_NOT_RUN && f.discards == 1 && f.stops == 0 && f.starts == 0 && f.running);
+    assert(zapp_setup_state(dir) == ZAPP_SETUP_NEEDED && w.write == WSU_WRITE_NONE);
     wsu_destroy(&w);
 }
 
 /* No chain tip, no wallet: the key is never made and create is never run. A node that was not running is stopped again. */
-static void create_tip_tests(void)
-{
-    struct fake f;
-    struct wsu w;
-    fresh(&f, &w, false);
-    f.script.chain[0] = 0;
-    script_say(&f.script, true, CREATED);
-    wsu_create_job(&w);
-    assert(w.step == WSU_FAILED && w.failure == WSU_NO_TIP && f.wraps == 0 && f.script.calls == 0 && f.discards == 0);
-    assert(f.starts == 1 && f.stops == 1 && !f.running && f.script.chain_calls > 0);
-    wsu_destroy(&w);
-    fresh(&f, &w, true);
-    snprintf(f.script.chain, sizeof(f.script.chain), "{\"result\":{\"headers\":3000000,\"blocks\":0}}");
-    wsu_create_job(&w);
-    assert(w.failure == WSU_NO_TIP && f.wraps == 0 && f.stops == 0 && f.running);
-    wsu_destroy(&w);
-}
 /* Only a tip above the node's birthday margin gives the new wallet a start height. */
-static void create_tip_margin_tests(void)
-{
-    struct fake f;
-    struct wsu w;
-    static const struct { const char *chain; bool created; } tips[] = {
-        {"{\"result\":{\"headers\":40,\"blocks\":40}}", false},
-        {"{\"result\":{\"headers\":100,\"blocks\":100}}", false},
-        {"{\"result\":{\"headers\":3000000,\"blocks\":100}}", false},
-        {"{\"result\":{\"headers\":100,\"blocks\":3000000}}", false},
-        {"{\"result\":{\"headers\":101,\"blocks\":101}}", true},
-    };
-    for (size_t i = 0; i < sizeof(tips) / sizeof(tips[0]); ++i) {
-        fresh(&f, &w, true);
-        snprintf(f.script.chain, sizeof(f.script.chain), "%s", tips[i].chain);
-        script_say(&f.script, true, CREATED);
-        wsu_create_job(&w);
-        if (tips[i].created) assert(w.step == WSU_WORDS && f.script.calls == 1);
-        else assert(w.step == WSU_FAILED && w.failure == WSU_NO_TIP && f.wraps == 0 && f.script.calls == 0);
-        wsu_destroy(&w);
-    }
-}
 /* A stray refusal before the real reply leaves the result unknown: the key and the wrapped blob stay, since the node may have made the wallet. */
 static void create_stray_refusal_keeps_key_test(void)
 {
     struct fake f;
     struct wsu w;
     fresh(&f, &w, true);
-    script_say(&f.script, true, "{\"ok\":false,\"error\":{\"code\":\"DATADIR_LOCKED\"}}\n" CREATED "\n");
-    wsu_create_job(&w);
-    assert(w.step == WSU_FAILED && w.failure == WSU_UNKNOWN && f.discards == 0 && f.key_deletes == 0 && exists_in(dir, "wallet_key.blob"));
+    script_say(&f.script, true, "{\"ok\":false,\"error\":{\"code\":\"DATADIR_LOCKED\"}}\n" RESTORED_TIP "\n");
+    create_all(&w);
+    assert(w.step == WSU_WORDS && w.write_failure == WSU_UNKNOWN && f.discards == 0 && f.key_deletes == 0 && exists_in(dir, "wallet_key.blob"));
     wsu_destroy(&w);
 }
-/* A node started for the tip is stopped again when the owner then declines to authenticate. */
+/* The owner declines to authenticate: the node is not touched at all. */
 static void create_declined_stops_node_test(void)
 {
     struct fake f;
     struct wsu w;
     fresh(&f, &w, false);
     f.wrap_status = ZAPP_DEVKEY_DECLINED;
-    wsu_create_job(&w);
-    assert(w.step == WSU_FAILED && w.failure == WSU_DECLINED && f.starts == 1 && f.stops == 1 && !f.running);
+    create_all(&w);
+    assert(w.step == WSU_FAILED && w.failure == WSU_DECLINED && f.starts == 0 && f.stops == 0 && !f.running && f.script.phrase_calls == 0);
     wsu_destroy(&w);
 }
 /* A wallet that recorded no start height shows its words, and setup stays unfinished. */
@@ -687,7 +706,7 @@ static void create_no_start_tests(void)
     struct wsu_view v;
     fresh(&f, &w, true);
     script_say(&f.script, true, "{\"ok\":true,\"data\":{\"phrase\":\"" PHRASE "\",\"birthday_recorded\":false}}");
-    wsu_create_job(&w);
+    create_all(&w);
     wsu_view_read(&w, &v);
     assert(v.step == WSU_WORDS && v.words.count == 24 && v.start_height == 0);
     wsu_words_seen(&w);
@@ -785,7 +804,7 @@ static void blocked_create(struct fake *f, struct wsu *w, char node_dir[700])
     struct sun node;
     struct sun_runner runner = {&f->script, script_run};
     sun_init(&node, &runner, node_dir);
-    struct wsu_env env = {f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_wall, f_stage};
+    struct wsu_env env = {f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_wall};
     assert(wsu_init(w, &env, &node, dir) && wsu_open(w));
     wsu_resume_job(w);
     assert(w->step == WSU_BLOCKED && w->failure == WSU_NO_FAILURE);
@@ -970,7 +989,7 @@ static void start_over_stuck_tests(void)
     assert(!wsu_recheck(&w));
     wsu_back(&w);
     int wraps = f.wraps;
-    wsu_create_job(&w);
+    create_all(&w);
     wsu_open_restore(&w);
     assert(w.step == WSU_FAILED && w.failure == WSU_ASIDE_STUCK && f.wraps == wraps);
     wsu_destroy(&w);
@@ -1002,7 +1021,7 @@ static void field_tests(void)
 static void init_with(struct fake *f, struct wsu *w)
 {
     struct sun node = node_of(&f->script);
-    struct wsu_env env = {f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_wall, f_stage};
+    struct wsu_env env = {f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_wall};
     assert(wsu_init(w, &env, &node, dir));
     assert(wsu_open(w));
 }
@@ -1017,7 +1036,7 @@ static void restore_blocked_tests(void)
     wsu_destroy(&w);
     init_with(&f, &w);
     assert(w.step == WSU_CHECKING && zapp_setup_state(dir) == ZAPP_SETUP_INTERRUPTED);
-    wsu_create_job(&w);
+    create_all(&w);
     wsu_open_restore(&w);
     assert(w.step == WSU_CHECKING && f.wraps == 0);
     /* The restore reached the node and the app died before the marker: setup completes. */
@@ -1145,16 +1164,16 @@ static void key_kept_tests(void)
     assert(wsu_ask_start_over(&w) && w.step == WSU_START_OVER);
     wsu_start_over_job(&w);
     assert(w.step == WSU_CHOICE && holds(dir, "wallet_key.blob.unused-20261101T120000Z", "x") && f.key_deletes == 0);
-    script_say(&f.script, false, "{\"ok\":false,\"error\":{\"code\":\"INVALID_PHRASE\"}}");
-    wsu_create_job(&w);
+    f.script.phrase_fail = true;
+    create_all(&w);
     assert(w.step == WSU_FAILED && f.discards == 1);
     assert(!exists_in(dir, "wallet_key.blob") && holds(dir, "wallet_key.blob.unused-20261101T120000Z", "x") && f.key_deletes == 0);
     wsu_destroy(&w);
 
     /* With no other blob the failed create's key is deleted with its blob. */
     fresh(&f, &w, true);
-    script_say(&f.script, false, "{\"ok\":false,\"error\":{\"code\":\"INVALID_PHRASE\"}}");
-    wsu_create_job(&w);
+    f.script.phrase_fail = true;
+    create_all(&w);
     assert(w.step == WSU_FAILED && f.discards == 1 && f.key_deletes == 1 && !exists_in(dir, "wallet_key.blob"));
     wsu_destroy(&w);
 }
@@ -1170,7 +1189,7 @@ static void confirmed_record_tests(void)
     char block[600];
     fresh(&f, &w, true);
     script_say(&f.script, true, CREATED_NO_BIRTHDAY);
-    wsu_create_job(&w);
+    create_all(&w);
     wsu_words_seen(&w);
     wsu_view_read(&w, &v);
     struct zapp_words all;
@@ -1237,7 +1256,7 @@ static void confirmed_no_start_restart_tests(struct fake *fp)
     struct sun node;
     struct sun_runner runner = {&f.script, script_run};
     sun_init(&node, &runner, node_dir);
-    struct wsu_env env = {&f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_wall, f_stage};
+    struct wsu_env env = {&f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_wall};
     assert(wsu_init(&w, &env, &node, dir) && wsu_open(&w));
     wsu_resume_job(&w);
     assert(w.step == WSU_FAILED && w.failure == WSU_NO_BIRTHDAY && !w.birthday.known && w.confirmed);
@@ -1270,7 +1289,7 @@ static void confirmed_restart_tests(void)
     char node_dir[700], block[600];
     fresh(&f, &w, true);
     script_say(&f.script, true, CREATED);
-    wsu_create_job(&w);
+    create_all(&w);
     wsu_words_seen(&w);
     wsu_view_read(&w, &v);
     struct zapp_words all;
@@ -1288,7 +1307,7 @@ static void confirmed_restart_tests(void)
     struct sun node;
     struct sun_runner runner = {&f.script, script_run};
     sun_init(&node, &runner, node_dir);
-    struct wsu_env env = {&f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_wall, f_stage};
+    struct wsu_env env = {&f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_wall};
     /* The marker still cannot be written after the restart: not "words never confirmed", and Save again is offered. */
     assert(wsu_init(&w, &env, &node, dir) && wsu_open(&w));
     wsu_resume_job(&w);
@@ -1387,7 +1406,7 @@ static void marker_retry_tests(void)
     snprintf(block, sizeof(block), "%s/wallet_setup_done.tmp", dir);
     fresh(&f, &w, true);
     script_say(&f.script, true, CREATED);
-    wsu_create_job(&w);
+    create_all(&w);
     wsu_words_seen(&w);
     wsu_view_read(&w, &v);
     struct zapp_words all;
@@ -1425,8 +1444,8 @@ static void kind_and_not_run_tests(void)
     struct wsu w;
     fresh(&f, &w, true);
     script_say(&f.script, true, CREATED);
-    wsu_create_job(&w);
-    assert(f.kind_at_create == ZAPP_KIND_CREATE);
+    create_all(&w);
+    assert(f.kind_at_restore == ZAPP_KIND_CREATE);
     wsu_destroy(&w);
     fresh(&f, &w, true);
     wsu_open_restore(&w);
@@ -1436,11 +1455,9 @@ static void kind_and_not_run_tests(void)
     wsu_destroy(&w);
     fresh(&f, &w, true);
     error_reply(&f.script, "NOT_RUN");
-    wsu_create_job(&w);
-    assert(w.step == WSU_FAILED && w.failure == WSU_NOT_RUN && f.discards == 1 && f.running && zapp_setup_state(dir) == ZAPP_SETUP_NEEDED);
-    assert(zapp_setup_kind_read(dir) == ZAPP_KIND_NONE);
-    wsu_back(&w);
-    assert(w.step == WSU_CHOICE);
+    create_all(&w);
+    assert(w.step == WSU_WORDS && w.write_failure == WSU_NOT_RUN && f.discards == 0 && f.running);
+    assert(wsu_retry_write(&w));
     wsu_destroy(&w);
 }
 /* Without every window protection nothing is shown and no wallet is made. */
@@ -1454,12 +1471,12 @@ static void protection_tests(void)
     f.protect_ok = false;
     assert(!wsu_open(&w));
     script_say(&f.script, true, CREATED);
-    wsu_create_job(&w);
+    create_all(&w);
     assert(w.step == WSU_FAILED && w.failure == WSU_UNPROTECTED && f.wraps == 0 && f.script.calls == 0);
     wsu_destroy(&w);
     fresh(&f, &w, true);
     script_say(&f.script, true, CREATED);
-    wsu_create_job(&w);
+    create_all(&w);
     wsu_view_read(&w, &v);
     assert(v.protected && v.words.count == 24);
     wsu_close(&w);
@@ -1521,6 +1538,12 @@ static void recheck_and_intro_tests(void)
 
 #define STOP_BOUND_MS 180000u
 /* A node that takes 60 s to exit once asked: create waits for the process, writes the wallet and shows the words before the node starts. */
+/* The node took its 60 s, was stopped once and started once with the words still on screen. */
+static bool slow_exit_written(const struct fake *f)
+{
+    bool node = f->now_ms >= 60000 && f->stops == 1 && f->starts == 1 && f->starts_refused == 0 && f->running && f->create_while_running == 0;
+    return node && f->step_at_stop == WSU_WORDS && f->step_at_write == WSU_WORDS && f->script.calls == 1;
+}
 static void slow_exit_tests(void)
 {
     struct fake f;
@@ -1529,15 +1552,19 @@ static void slow_exit_tests(void)
     fresh(&f, &w, true);
     f.exit_after_ms = 60000;
     f.watch = true;
-    script_say(&f.script, true, CREATED);
+    script_say(&f.script, true, RESTORED_TIP);
     wsu_create_job(&w);
     wsu_view_read(&w, &v);
-    assert(v.step == WSU_WORDS && v.words.count == 24 && v.failure == WSU_NO_FAILURE);
-    assert(f.now_ms >= 60000 && f.stops == 1 && f.starts == 1 && f.starts_refused == 0 && f.running);
-    assert(f.create_while_running == 0 && f.script.calls == 1);
-    /* Each sub-step was named while it ran, the pause with the seconds since the job began, and the words were on screen before the node started. */
-    assert(f.phase_key == WSU_PHASE_KEY && f.phase_pause == WSU_PHASE_PAUSE && f.phase_write == WSU_PHASE_WRITE && f.phase_restart == WSU_PHASE_RESTART);
-    assert(f.elapsed_at_pause == 7 && f.step_at_start == WSU_WORDS);
+    /* The words are on screen before the node is stopped, started or asked for anything but a phrase. */
+    assert(v.step == WSU_WORDS && v.words.count == 24 && v.failure == WSU_NO_FAILURE && v.write == WSU_WRITE_PENDING && v.start_pending);
+    assert(f.stops == 0 && f.starts == 0 && f.script.calls == 0 && f.script.phrase_calls == 1 && f.now_ms == 0 && f.running);
+    assert(f.phase_key == WSU_PHASE_KEY);
+    zapp_words_cleanse(&v.words);
+    /* The write follows while the words stay up: the screen is on the words, not on Working, when the node is stopped and written. */
+    wsu_write_job(&w);
+    wsu_view_read(&w, &v);
+    assert(v.step == WSU_WORDS && v.write == WSU_WRITE_DONE && !v.start_pending);
+    assert(slow_exit_written(&f));
     zapp_words_cleanse(&v.words);
     wsu_destroy(&w);
 }
@@ -1564,8 +1591,8 @@ static void stuck_exit_late_tests(void)
     fresh(&f, &w, true);
     f.exit_after_ms = 250000;
     script_say(&f.script, true, CREATED);
-    wsu_create_job(&w);
-    assert(w.step == WSU_FAILED && w.failure == WSU_NODE_BUSY && f.script.calls == 0 && f.discards == 1);
+    create_all(&w);
+    assert(w.step == WSU_WORDS && w.write == WSU_WRITE_FAILED && w.write_failure == WSU_NODE_BUSY && f.script.calls == 0 && f.discards == 0);
     assert(f.now_ms >= 250000 && f.starts == 1 && f.starts_refused == 0 && f.running);
     wsu_destroy(&w);
 }
@@ -1577,17 +1604,16 @@ static void stuck_exit_forever_tests(void)
     fresh(&f, &w, true);
     f.exit_after_ms = 4 * STOP_BOUND_MS;
     script_say(&f.script, true, CREATED);
-    wsu_create_job(&w);
-    assert(w.step == WSU_FAILED && w.failure == WSU_NODE_BUSY && f.script.calls == 0);
+    create_all(&w);
+    assert(w.step == WSU_WORDS && w.write_failure == WSU_NODE_BUSY && f.script.calls == 0);
     assert(f.now_ms >= 2 * STOP_BOUND_MS && f.now_ms < 3 * STOP_BOUND_MS && f.starts == 0 && f.starts_refused == 0);
-    /* Once the process is gone, the next try starts the node and creates the wallet. */
+    /* Once the process is gone, the retry writes the same phrase and starts the node. */
     f.now_ms += 4 * STOP_BOUND_MS;
     assert(!f_running(&f));
     f.exit_after_ms = 0;
-    wsu_back(&w);
-    assert(w.step == WSU_CHOICE);
-    wsu_create_job(&w);
-    assert(w.step == WSU_WORDS && f.starts == 2 && f.starts_refused == 0 && f.running);
+    assert(wsu_retry_write(&w));
+    wsu_write_job(&w);
+    assert(w.write == WSU_WRITE_DONE && f.starts == 1 && f.starts_refused == 0 && f.running && f.script.phrase_calls == 1);
     wsu_destroy(&w);
 }
 static void stuck_exit_resume_tests(void)
@@ -1614,8 +1640,8 @@ static void failed_jobs_restart_node_tests(void)
         fresh(&f, &w, true);
         f.exit_after_ms = 30000;
         error_reply(&f.script, codes[i]);
-        wsu_create_job(&w);
-        assert(w.step == WSU_FAILED && f.stops == 1 && f.starts == 1 && f.starts_refused == 0 && f.running);
+        create_all(&w);
+        assert(w.step == WSU_WORDS && w.write == WSU_WRITE_FAILED && f.stops == 1 && f.starts == 1 && f.starts_refused == 0 && f.running);
         wsu_destroy(&w);
         fresh(&f, &w, true);
         f.exit_after_ms = 30000;
@@ -1633,23 +1659,23 @@ static void failed_jobs_other_tests(void)
     /* No answer at all. */
     fresh(&f, &w, true);
     script_say(&f.script, false, "The node did not answer.");
-    wsu_create_job(&w);
-    assert(w.step == WSU_FAILED && w.failure == WSU_UNKNOWN && f.starts == 1 && f.running);
+    create_all(&w);
+    assert(w.step == WSU_WORDS && w.write_failure == WSU_UNKNOWN && f.starts == 1 && f.running);
     wsu_destroy(&w);
     /* The kind record cannot be written: the node was never asked to stop and keeps running. */
     fresh(&f, &w, true);
     char block[600];
     snprintf(block, sizeof(block), "%s/wallet_setup_kind", dir);
     assert(mkdir(block, 0700) == 0);
-    wsu_create_job(&w);
-    assert(w.step == WSU_FAILED && f.stops == 0 && f.running);
+    create_all(&w);
+    assert(w.step == WSU_WORDS && w.write == WSU_WRITE_FAILED && f.stops == 0 && f.running);
     assert(rmdir(block) == 0);
     wsu_destroy(&w);
-    /* The owner declines the screen lock after the node had to be started for the chain tip: it is stopped again, as before. */
+    /* The owner declines the screen lock: the node, which was off, is left alone. */
     fresh(&f, &w, false);
     f.wrap_status = ZAPP_DEVKEY_DECLINED;
-    wsu_create_job(&w);
-    assert(w.failure == WSU_DECLINED && f.starts == 1 && f.stops == 1 && !f.running);
+    create_all(&w);
+    assert(w.failure == WSU_DECLINED && f.starts == 0 && f.stops == 0 && !f.running);
     wsu_destroy(&w);
 }
 
@@ -1659,17 +1685,6 @@ static void working_line_tests(void)
     struct wsu_view v;
     char line[320];
     memset(&v, 0, sizeof(v));
-    v.phase = WSU_PHASE_TIP;
-    v.tip_blocks = 2999990;
-    wsu_working_line(&v, line, sizeof(line));
-    assert(!strcmp(line, "Waiting for your node to reach the latest block (block 2999990)…"));
-    v.tip_blocks = 0;
-    snprintf(v.stage, sizeof(v.stage), "opening the database");
-    wsu_working_line(&v, line, sizeof(line));
-    assert(!strcmp(line, "Waiting for your node to start: opening the database…"));
-    v.stage[0] = 0;
-    wsu_working_line(&v, line, sizeof(line));
-    assert(!strcmp(line, "Waiting for your node to start…"));
     v.phase = WSU_PHASE_KEY;
     wsu_working_line(&v, line, sizeof(line));
     assert(!strcmp(line, "Confirm with your screen lock"));
@@ -1735,28 +1750,9 @@ static void failure_text_tests(void)
     }
     assert(!strcmp(wsu_failure_text(WSU_NODE_BUSY), "Your node is still stopping. Try again in a minute."));
     assert(strstr(wsu_failure_text(WSU_DECLINED), "nothing was changed") && strstr(wsu_failure_text(WSU_PRESENT), "Nothing was changed"));
-    assert(strstr(wsu_failure_text(WSU_UNKNOWN), "a wallet may have been started") && strstr(wsu_failure_text(WSU_NO_TIP), "none was made"));
+    assert(strstr(wsu_failure_text(WSU_UNKNOWN), "a wallet may have been started") && strstr(wsu_failure_text(WSU_NO_TIP), "keeps syncing"));
     assert(strstr(wsu_failure_text(WSU_NO_BIRTHDAY), "nothing is deleted") && strstr(wsu_failure_text(WSU_ASIDE_STUCK), "Do not create a new wallet"));
     assert(!wsu_failure_text(WSU_NO_FAILURE)[0]);
-}
-
-/* The model keeps the block the node reports while the job waits, and the boot stage while it reports none. */
-static void tip_progress_tests(void)
-{
-    struct fake f;
-    struct wsu w;
-    fresh(&f, &w, true);
-    snprintf(f.stage, sizeof(f.stage), "opening the database");
-    f.script.chain[0] = 0;
-    wsu_create_job(&w);
-    assert(w.step == WSU_FAILED && w.failure == WSU_NO_TIP && f.now_ms == 120 * 5000);
-    assert(w.tip_blocks == 0 && !strcmp(w.stage, "opening the database"));
-    wsu_destroy(&w);
-    fresh(&f, &w, true);
-    snprintf(f.script.chain, sizeof(f.script.chain), "{\"result\":{\"headers\":50,\"blocks\":40},\"error\":null}");
-    wsu_create_job(&w);
-    assert(w.failure == WSU_NO_TIP && w.tip_blocks == 40 && !w.stage[0]);
-    wsu_destroy(&w);
 }
 
 /* After the words are confirmed the screen says Saving and shows nothing of the steps before it. */
@@ -1768,8 +1764,8 @@ static void saving_after_confirm_tests(void)
     char line[200];
     fresh(&f, &w, true);
     script_say(&f.script, true, CREATED);
-    wsu_create_job(&w);
-    assert(w.step == WSU_WORDS && w.phase == WSU_PHASE_RESTART && w.tip_blocks == 2999990);
+    create_all(&w);
+    assert(w.step == WSU_WORDS);
     wsu_words_seen(&w);
     wsu_view_read(&w, &v);
     struct zapp_words all;
@@ -1778,7 +1774,7 @@ static void saving_after_confirm_tests(void)
     assert(wsu_confirm(&w, right, 3));
     wsu_view_read(&w, &v);
     wsu_working_line(&v, line, sizeof(line));
-    assert(v.step == WSU_WORKING && v.phase == WSU_PHASE_SAVE && v.tip_blocks == 0 && !strcmp(line, "Saving…"));
+    assert(v.step == WSU_WORKING && v.phase == WSU_PHASE_SAVE && !strcmp(line, "Saving…"));
     wsu_destroy(&w);
 }
 
@@ -1848,7 +1844,7 @@ static void pick_random_failure_tests(void)
     struct zapp_words all;
     fresh(&f, &w, true);
     script_say(&f.script, true, CREATED);
-    wsu_create_job(&w);
+    create_all(&w);
     wsu_words_seen(&w);
     wsu_view_read(&w, &v);
     assert(zapp_words_parse(PHRASE, &all));
@@ -1863,6 +1859,35 @@ static void pick_random_failure_tests(void)
     wsu_destroy(&w);
 }
 
+/* The check can be answered while the wallet is still being written, but Confirm completes only once the write is done, and a
+ * confirm that waits counts no mismatch. */
+static void confirm_waits_for_write_tests(void)
+{
+    struct fake f;
+    struct wsu w;
+    struct wsu_view v;
+    struct zapp_words all;
+    fresh(&f, &w, true);
+    script_say(&f.script, true, RESTORED_TIP);
+    wsu_create_job(&w);
+    wsu_words_seen(&w);
+    assert(zapp_words_parse(PHRASE, &all));
+    wsu_view_read(&w, &v);
+    for (size_t i = 0; i < ZAPP_WORDS_ASKED; ++i) {
+        size_t s = 0;
+        while (strcmp(v.choice[i][s], all.word[v.asked[i]])) ++s;
+        assert(wsu_pick(&w, i, s));
+    }
+    assert(w.write == WSU_WRITE_PENDING && !wsu_confirm_picked(&w) && w.step == WSU_CONFIRM && w.mismatches == 0 && w.held.count == 24);
+    const char *right[3] = {all.word[v.asked[0]], all.word[v.asked[1]], all.word[v.asked[2]]};
+    assert(!wsu_confirm(&w, right, 3) && w.step == WSU_CONFIRM && w.mismatches == 0);
+    wsu_write_job(&w);
+    assert(w.write == WSU_WRITE_DONE && wsu_confirm_picked(&w) && w.step == WSU_WORKING && w.held.count == 0);
+    wsu_finish_job(&w);
+    assert(w.step == WSU_DONE && zapp_setup_state(dir) == ZAPP_SETUP_READY);
+    wsu_destroy(&w);
+}
+
 /* The model offers choices for each asked position, counts a wrong pick, offers new decoys for that position and keeps right picks. */
 static void pick_tests(void)
 {
@@ -1871,7 +1896,7 @@ static void pick_tests(void)
     struct wsu_view v;
     fresh(&f, &w, true);
     script_say(&f.script, true, CREATED);
-    wsu_create_job(&w);
+    create_all(&w);
     assert(w.step == WSU_WORDS);
     wsu_words_seen(&w);
     wsu_view_read(&w, &v);
@@ -1908,13 +1933,6 @@ static void phase_order_tests(void)
     struct fake f;
     struct wsu w;
     char node_dir[700];
-    /* A node that is off is started first, and the wait for the chain tip is named as such, not as a restart. */
-    fresh(&f, &w, false);
-    f.watch = true;
-    f.script.chain[0] = 0;
-    wsu_create_job(&w);
-    assert(w.failure == WSU_NO_TIP && f.phase_waiting == WSU_PHASE_TIP && f.starts == 1);
-    wsu_destroy(&w);
     /* Start over names the set-aside, not the check before it. */
     blocked_create(&f, &w, node_dir);
     assert(wsu_ask_start_over(&w));
@@ -1938,9 +1956,12 @@ int main(int argc, char **argv)
     node_restore_tests();
     node_hash_tests();
     create_tests();
-    create_failure_tests();
-    create_tip_tests();
-    create_tip_margin_tests();
+    create_failure_decline_tests();
+    create_failure_refused_tests();
+    create_failure_unknown_tests();
+    create_failure_busy_tests();
+    create_failure_second_tests();
+    create_phrase_failure_test();
     create_declined_stops_node_test();
     create_stray_refusal_keeps_key_test();
     create_no_start_tests();
@@ -1975,10 +1996,10 @@ int main(int argc, char **argv)
     working_line_tests();
     leave_notice_tests();
     failure_text_tests();
-    tip_progress_tests();
     saving_after_confirm_tests();
     choices_tests();
     pick_tests();
+    confirm_waits_for_write_tests();
     pick_random_failure_tests();
     phase_order_tests();
     slow_exit_tests();

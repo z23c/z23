@@ -1071,13 +1071,6 @@ bool zapp_controller_node_pause_for_setup(void)
     pthread_mutex_unlock(&startup_lock);
     return c && zapp_node_stop_for_setup(&c->runtime, text, sizeof(text));
 }
-void zapp_controller_node_stage(char *out, size_t cap)
-{
-    pthread_mutex_lock(&startup_lock);
-    struct controller *c = current;
-    pthread_mutex_unlock(&startup_lock);
-    snprintf(out, cap, "%s", c ? zapp_node_stage(&c->runtime) : "");
-}
 bool zapp_controller_prover_ready(char *why, size_t cap)
 {
     pthread_mutex_lock(&startup_lock);

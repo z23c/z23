@@ -673,9 +673,11 @@ bool zapp_wallet_send_run(struct zapp_runtime *r, const char *op, const char *in
 
 /* The wallet setup commands, by the id the setup adapter asks with. The datadir, the passphrase and the words are in the
  * request on standard input, never in arguments. */
-static const struct { const char *id; const char *args[5]; } setup_commands[] = {
-    {"create", {"core", "wallet", "create"}},
-    {"restore", {"core", "wallet", "recovery", "restore"}},
+/* stateless: needs no datadir and no stopped node, so it runs while a node does. */
+static const struct { const char *id; const char *args[5]; bool stateless; } setup_commands[] = {
+    {"create", {"core", "wallet", "create"}, false},
+    {"restore", {"core", "wallet", "recovery", "restore"}, false},
+    {"newphrase", {"core", "wallet", "recovery", "new"}, true},
 };
 static bool setup_rpc(struct zapp_runtime *r, const char *method, const char *params, char *out, size_t cap)
 {
@@ -704,6 +706,14 @@ static bool setup_command(struct zapp_runtime *r, const char *const *args, const
     atomic_store(&r->setup_running, false);
     return ok;
 }
+/* A command that touches no wallet files: it runs beside a node and takes no part in the flag that keeps a node from starting. */
+static bool setup_stateless(struct zapp_runtime *r, const char *const *args, const char *input, unsigned timeout_ms, char *out, size_t cap)
+{
+    bool started = false;
+    bool ok = command_run(r, args, input, timeout_ms, out, cap, &started);
+    if (!ok && !started) setup_not_run(out, cap, "The wallet command could not be started.");
+    return ok;
+}
 /* Whether the datadir holds a wallet, read-only, with or without a node. */
 static bool setup_status(struct zapp_runtime *r, const char *input, char *out, size_t cap)
 {
@@ -721,6 +731,7 @@ bool zapp_wallet_setup_run(struct zapp_runtime *r, const char *op, const char *i
         if (strcmp(op, setup_commands[i].id) != 0) continue;
         if (!timeout_ms || timeout_ms > ZAPP_WALLET_SETUP_TIMEOUT_MAX_MS)
             return setup_not_run(out, cap, "This wallet command was given arguments it does not take.");
+        if (setup_commands[i].stateless) return setup_stateless(r, setup_commands[i].args, input, timeout_ms, out, cap);
         return setup_command(r, setup_commands[i].args, input, timeout_ms, out, cap);
     }
     return setup_not_run(out, cap, "This wallet command is not available in the phone's permission set.");

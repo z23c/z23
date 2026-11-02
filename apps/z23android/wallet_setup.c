@@ -10,8 +10,6 @@
  * bounds the wait for a node to exit, before create or restore and again before the node is started. */
 #define STOP_WAIT_MS 180000u
 #define STOP_POLL_MS 250u
-#define TIP_POLLS 120u
-#define TIP_POLL_MS 5000u
 #define IDLE_POLLS 24u
 #define IDLE_POLL_MS 5000u
 #define CONFIRM_TRIES 5u
@@ -55,6 +53,8 @@ static void forget_choices_locked(struct wsu *w)
 void wsu_destroy(struct wsu *w)
 {
     zapp_words_cleanse(&w->held);
+    zapp_words_cleanse(&w->phrase);
+    memory_cleanse(w->write_pass, sizeof(w->write_pass));
     forget_choices_locked(w);
     pthread_mutex_destroy(&w->lock);
     memset(w, 0, sizeof(*w));
@@ -73,9 +73,27 @@ static void set_step(struct wsu *w, enum wsu_step step, enum wsu_failure failure
 static void work_begins_locked(struct wsu *w, enum wsu_phase first)
 {
     w->phase = first;
-    w->tip_blocks = 0;
-    w->stage[0] = 0;
     w->phase_since_s = w->env.wall_s ? w->env.wall_s(w->env.ctx) : 0;
+}
+/* The parts of the view that belong to a running job, with the lock held. */
+static void view_job_locked(struct wsu *w, struct wsu_view *out)
+{
+    int64_t gone = w->env.wall_s && w->phase_since_s ? w->env.wall_s(w->env.ctx) - w->phase_since_s : 0;
+    out->phase = w->phase;
+    out->elapsed_s = gone > 0 ? gone : 0;
+}
+/* The parts of the view that belong to the words and their check, with the lock held. */
+static void view_words_locked(struct wsu *w, struct wsu_view *out)
+{
+    out->write = w->write;
+    out->write_failure = w->write_failure;
+    out->start_pending = w->words_first && !w->birthday.known;
+    if (w->step == WSU_WORDS && w->protected) { out->words = w->held; out->start_height = w->birthday.known ? w->birthday.height : 0; }
+    if (w->step != WSU_CONFIRM) return;
+    memcpy(out->asked, w->asked, sizeof(out->asked));
+    memcpy(out->choice, w->choice, sizeof(out->choice));
+    memcpy(out->picked, w->picked, sizeof(out->picked));
+    out->wrong_position = w->wrong ? w->asked[w->wrong - 1] + 1 : 0;
 }
 void wsu_view_read(struct wsu *w, struct wsu_view *out)
 {
@@ -89,21 +107,9 @@ void wsu_view_read(struct wsu *w, struct wsu_view *out)
     out->birthday_unknown = !w->birthday.known;
     out->may_start_over = w->kind == ZAPP_KIND_CREATE && (!w->confirmed || !w->birthday.known);
     out->birthday_dropped = w->step == WSU_READING && !w->birthday_honoured;
-    if (w->step == WSU_WORKING || w->step == WSU_CHECKING) {
-        int64_t gone = w->env.wall_s && w->phase_since_s ? w->env.wall_s(w->env.ctx) - w->phase_since_s : 0;
-        out->phase = w->phase;
-        out->elapsed_s = gone > 0 ? gone : 0;
-        out->tip_blocks = w->tip_blocks;
-        memcpy(out->stage, w->stage, sizeof(out->stage));
-    }
+    if (w->step == WSU_WORKING || w->step == WSU_CHECKING) view_job_locked(w, out);
     if (w->failure == WSU_ASIDE_STUCK) memcpy(out->leftover, w->leftover, sizeof(out->leftover));
-    if (w->step == WSU_WORDS && w->protected) { out->words = w->held; out->start_height = w->birthday.known ? w->birthday.height : 0; }
-    if (w->step == WSU_CONFIRM) {
-        memcpy(out->asked, w->asked, sizeof(out->asked));
-        memcpy(out->choice, w->choice, sizeof(out->choice));
-        memcpy(out->picked, w->picked, sizeof(out->picked));
-        out->wrong_position = w->wrong ? w->asked[w->wrong - 1] + 1 : 0;
-    }
+    if (w->step == WSU_WORDS || w->step == WSU_CONFIRM) view_words_locked(w, out);
     pthread_mutex_unlock(&w->lock);
 }
 
@@ -168,7 +174,9 @@ bool wsu_view_can_recheck(const struct wsu_view *v)
 void wsu_words_intro(const struct wsu_view *v, char *out, size_t cap)
 {
     static const char tail[] = "They are shown once, and they are the only way to recover this wallet. Never type them anywhere else and never share them.";
-    if (v->birthday_unknown)
+    if (v->start_pending)
+        snprintf(out, cap, "Write down these words, on paper, in this order. %s", tail);
+    else if (v->birthday_unknown)
         snprintf(out, cap, "Write down these words, on paper, in this order. The wallet did not record where it starts, so the words are all there is to write. %s", tail);
     else
         snprintf(out, cap, "Write down these words and start height %lld, on paper, in this order. %s", (long long)v->start_height, tail);
@@ -187,7 +195,7 @@ static const struct { enum wsu_failure failure; const char *text; } failure_text
     {WSU_REFUSED, "Your node refused the request. Nothing was changed. Try again."},
     {WSU_UNKNOWN, "Your node gave no clear answer, so a wallet may have been started. Its words cannot be shown again. Tap Check again."},
     {WSU_NOT_RECORDED, "The wallet exists, but the app could not record that setup finished. Tap Save again."},
-    {WSU_NO_TIP, "Your node has not caught up enough to start a wallet, so none was made. Check your connection and try again."},
+    {WSU_NO_TIP, "Your node has not read enough of the chain yet to save the wallet. It keeps syncing. Try again in a few minutes."},
     {WSU_NO_BIRTHDAY, "Your words were confirmed, but the wallet has no start block, so setup is not finished. Tap Check again, or Start over to set it aside; nothing is deleted."},
     {WSU_NOT_RUN, "The wallet could not start, so nothing was changed. Try again."},
     {WSU_NOT_CREATE, "Start over is only for a new wallet. This one was restored from words."},
@@ -209,16 +217,6 @@ void wsu_leave_notice(const struct wsu_view *v, char *out, size_t cap)
     bool words = v->step == WSU_WORDS || v->step == WSU_CONFIRM;
     snprintf(out, cap, "%s", words ? "Finish setup first. The recovery words are shown only once." : "Setting up. You can leave the app and come back.");
 }
-/* The block the node has reached, or what it is doing while it has none. */
-static void tip_line(const struct wsu_view *v, char *out, size_t cap)
-{
-    if (v->tip_blocks > 0)
-        snprintf(out, cap, "Waiting for your node to reach the latest block (block %lld)…", (long long)v->tip_blocks);
-    else if (v->stage[0])
-        snprintf(out, cap, "Waiting for your node to start: %s…", v->stage);
-    else
-        snprintf(out, cap, "Waiting for your node to start…");
-}
 void wsu_working_line(const struct wsu_view *v, char *out, size_t cap)
 {
     static const char *const fixed[] = {
@@ -231,8 +229,7 @@ void wsu_working_line(const struct wsu_view *v, char *out, size_t cap)
         [WSU_PHASE_ASIDE] = "Setting aside your old wallet…",
         [WSU_PHASE_SAVE] = "Saving…"
     };
-    if (v->phase == WSU_PHASE_TIP) tip_line(v, out, cap);
-    else snprintf(out, cap, "%s", v->phase <= WSU_PHASE_SAVE ? fixed[v->phase] : fixed[WSU_PHASE_NONE]);
+    snprintf(out, cap, "%s", v->phase <= WSU_PHASE_SAVE ? fixed[v->phase] : fixed[WSU_PHASE_NONE]);
 }
 void wsu_elapsed_text(const struct wsu_view *v, char *out, size_t cap)
 {
@@ -267,6 +264,7 @@ static enum wsu_failure failure_of_node(enum sun_result result)
 {
     switch (result) {
     case SUN_NODE_RUNNING: return WSU_NODE_BUSY;
+    case SUN_NO_CHAIN: return WSU_NO_TIP;
     case SUN_ALREADY_PRESENT: return WSU_PRESENT;
     case SUN_INVALID_PHRASE: return WSU_BAD_PHRASE;
     case SUN_STORAGE: return WSU_STORAGE;
@@ -350,97 +348,116 @@ static bool begin_job(struct wsu *w, enum wsu_step from)
     return start;
 }
 
-/* Keeps what the screen shows while it waits: the node's height, or its boot stage while it gives none. */
-static void note_tip(struct wsu *w, bool answered, int64_t blocks)
-{
-    char stage[sizeof(w->stage)] = "";
-    if (!answered && w->env.node_stage) w->env.node_stage(w->env.ctx, stage, sizeof(stage));
-    pthread_mutex_lock(&w->lock);
-    w->tip_blocks = answered ? blocks : 0;
-    memcpy(w->stage, stage, sizeof(stage));
-    pthread_mutex_unlock(&w->lock);
-}
-/* The new wallet starts reading at the node's chain tip, and the node records that start only above SUN_BIRTHDAY_MARGIN blocks,
- * so a node that has not reached that height makes no wallet. */
-static bool wait_for_tip(struct wsu *w)
-{
-    for (unsigned i = 0; i < TIP_POLLS; ++i) {
-        int64_t headers = 0, blocks = 0;
-        bool answered = sun_chain_tip(&w->node, &headers, &blocks);
-        note_tip(w, answered, blocks);
-        if (answered && headers > SUN_BIRTHDAY_MARGIN && blocks > SUN_BIRTHDAY_MARGIN) return true;
-        w->env.pause_ms(w->env.ctx, TIP_POLL_MS);
-    }
-    return false;
-}
+/* ---- create: the words first, the wallet written behind them ---- */
 
-static void create_succeeded(struct wsu *w, struct sun_created *created)
+/* A new phrase from the node, which needs no datadir and no stopped node. Nothing is written anywhere. */
+static enum wsu_failure phrase_failure(struct wsu *w, struct zapp_words *phrase)
+{
+    enum sun_result result = sun_new_phrase(&w->node, phrase);
+    return result == SUN_OK ? WSU_NO_FAILURE : failure_of_node(result);
+}
+/* The phrase is shown, and kept with its passphrase until the wallet is written: a failed write is tried again with the same
+ * words, and no second phrase is ever made for one setup. False, nothing kept, when the questions cannot be drawn. */
+static bool words_shown(struct wsu *w, const struct zapp_words *phrase, const char *hex)
 {
     pthread_mutex_lock(&w->lock);
-    w->held = created->words;
-    w->birthday = created->birthday;
+    w->held = *phrase;
+    w->phrase = *phrase;
+    memcpy(w->write_pass, hex, SUN_PASSPHRASE_HEX + 1);
+    w->words_first = true;
+    w->write = WSU_WRITE_PENDING;
+    w->write_failure = WSU_NO_FAILURE;
+    w->write_maybe = false;
     w->mismatches = 0;
-    if (!zapp_words_pick(w->held.count, w->env.random, w->env.ctx, ZAPP_WORDS_ASKED, w->asked) || !offer_all_locked(w)) {
-        forget_choices_locked(w);
-        zapp_words_cleanse(&w->held);
-        w->step = WSU_FAILED;
-        w->failure = WSU_UNKNOWN;
-    } else {
+    memset(&w->birthday, 0, sizeof(w->birthday));
+    bool ok = zapp_words_pick(w->held.count, w->env.random, w->env.ctx, ZAPP_WORDS_ASKED, w->asked) && offer_all_locked(w);
+    if (ok) {
         w->step = WSU_WORDS;
         w->failure = WSU_NO_FAILURE;
+    } else {
+        forget_choices_locked(w);
+        zapp_words_cleanse(&w->held);
+        zapp_words_cleanse(&w->phrase);
+        memory_cleanse(w->write_pass, sizeof(w->write_pass));
+        w->write = WSU_WRITE_NONE;
     }
     pthread_mutex_unlock(&w->lock);
-}
-
-/* Starts the node if needed and waits for a chain tip. False, with the step set, when there is none: no wallet is made. */
-static bool tip_ready(struct wsu *w, bool was_running)
-{
-    if (!was_running) (void)start_node(w);
-    phase(w, WSU_PHASE_TIP);
-    if (wait_for_tip(w)) return true;
-    if (!was_running) (void)stop_node(w);
-    set_step(w, WSU_FAILED, WSU_NO_TIP);
-    return false;
-}
-/* Records the kind first, so a restart can tell what was begun, then runs create with no node holding the files. */
-static enum sun_result create_run(struct wsu *w, const char *hex, struct sun_created *created)
-{
-    if (!zapp_setup_kind_write(w->files, ZAPP_KIND_CREATE)) return SUN_REFUSED;
-    if (!stop_node(w)) return SUN_NODE_RUNNING;
-    phase(w, WSU_PHASE_WRITE);
-    return sun_create(&w->node, hex, created);
+    return ok;
 }
 
 void wsu_create_job(struct wsu *w)
 {
     uint8_t secret[ZAPP_DEVKEY_SECRET];
     char hex[SUN_PASSPHRASE_HEX + 1];
-    struct sun_created created;
-    memset(&created, 0, sizeof(created));
+    struct zapp_words phrase;
+    memset(&phrase, 0, sizeof(phrase));
     if (!begin_job(w, WSU_CHOICE)) return;
-    bool was_running = w->env.node_running(w->env.ctx);
-    if (!tip_ready(w, was_running)) return;
     phase(w, WSU_PHASE_KEY);
     enum wsu_failure failure = new_passphrase(w, secret, hex);
-    if (failure != WSU_NO_FAILURE) {
-        if (!was_running) (void)stop_node(w);
-        set_step(w, WSU_FAILED, failure);
-        goto out;
-    }
-    enum sun_result result = create_run(w, hex, &created);
-    if (result != SUN_OK) { end_failed(w, failure_of_node(result), was_running); goto out; }
-    create_succeeded(w, &created);
-    (void)start_node(w);
+    if (failure != WSU_NO_FAILURE) { set_step(w, WSU_FAILED, failure); goto out; }
+    failure = phrase_failure(w, &phrase);
+    if (failure == WSU_NO_FAILURE && !words_shown(w, &phrase, hex)) failure = WSU_NOT_RUN;
+    if (failure != WSU_NO_FAILURE) end_failed(w, failure, false);
 out:
     memory_cleanse(secret, sizeof(secret));
     memory_cleanse(hex, sizeof(hex));
-    memory_cleanse(&created, sizeof(created));
+    zapp_words_cleanse(&phrase);
+}
+
+/* Records the kind first, so a restart can tell what was begun, then restores the phrase with no node holding the files. The wallet
+ * starts at the datadir's own chain tip, which is sound because the phrase was made moments ago. */
+static enum sun_result write_once(struct wsu *w, struct sun_restored *restored)
+{
+    if (!zapp_setup_kind_write(w->files, ZAPP_KIND_CREATE)) return SUN_REFUSED;
+    if (!stop_node(w)) return SUN_NODE_RUNNING;
+    phase(w, WSU_PHASE_WRITE);
+    return sun_restore_at_tip(&w->node, &w->phrase, w->write_pass, restored);
+}
+/* The write ended: kept as done, with the phrase and passphrase wiped, or as failed with its reason. A wallet an earlier attempt
+ * may have written and now reports present is the same wallet: only this phrase and passphrase were ever offered. */
+static void write_ended(struct wsu *w, enum sun_result result, const struct sun_restored *restored)
+{
+    bool already = result == SUN_ALREADY_PRESENT && w->write_maybe;
+    pthread_mutex_lock(&w->lock);
+    if (result == SUN_OK || already) {
+        w->birthday.known = already || (restored->birthday_recorded && !restored->birthday_rejected);
+        w->write = WSU_WRITE_DONE;
+        zapp_words_cleanse(&w->phrase);
+        memory_cleanse(w->write_pass, sizeof(w->write_pass));
+    } else {
+        w->write = WSU_WRITE_FAILED;
+        w->write_failure = failure_of_node(result);
+        w->write_maybe = w->write_maybe || result == SUN_UNKNOWN;
+    }
+    pthread_mutex_unlock(&w->lock);
+}
+
+void wsu_write_job(struct wsu *w)
+{
+    struct sun_restored restored;
+    memset(&restored, 0, sizeof(restored));
+    pthread_mutex_lock(&w->lock);
+    bool go = w->write == WSU_WRITE_PENDING;
+    if (go) w->write = WSU_WRITE_RUNNING;
+    pthread_mutex_unlock(&w->lock);
+    if (!go) return;
+    write_ended(w, write_once(w, &restored), &restored);
+    (void)start_node(w);
+}
+bool wsu_retry_write(struct wsu *w)
+{
+    pthread_mutex_lock(&w->lock);
+    bool ok = w->write == WSU_WRITE_FAILED && (w->step == WSU_WORDS || w->step == WSU_CONFIRM);
+    if (ok) { w->write = WSU_WRITE_PENDING; w->write_failure = WSU_NO_FAILURE; }
+    pthread_mutex_unlock(&w->lock);
+    return ok;
 }
 
 bool wsu_confirm(struct wsu *w, const char *const *answers, size_t n)
 {
     pthread_mutex_lock(&w->lock);
-    bool right = w->step == WSU_CONFIRM && n == ZAPP_WORDS_ASKED && zapp_words_match(&w->held, w->asked, answers, n);
+    bool ready = !w->words_first || w->write == WSU_WRITE_DONE;
+    bool right = w->step == WSU_CONFIRM && n == ZAPP_WORDS_ASKED && ready && zapp_words_match(&w->held, w->asked, answers, n);
     if (right) {
         forget_choices_locked(w);
         zapp_words_cleanse(&w->held);
@@ -448,7 +465,7 @@ bool wsu_confirm(struct wsu *w, const char *const *answers, size_t n)
         w->step = WSU_WORKING;
         w->failure = WSU_NO_FAILURE;
         work_begins_locked(w, WSU_PHASE_SAVE);
-    } else if (w->step == WSU_CONFIRM) {
+    } else if (w->step == WSU_CONFIRM && ready) {
         ++w->mismatches;
     }
     pthread_mutex_unlock(&w->lock);

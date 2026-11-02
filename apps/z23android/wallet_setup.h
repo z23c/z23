@@ -54,8 +54,6 @@ struct wsu_env {
     enum wsu_idle (*wallet_idle)(void *ctx);
     /* Seconds since the epoch, for the names of files set aside. */
     int64_t (*wall_s)(void *ctx);
-    /* The node's boot stage as a short plain phrase, or empty. */
-    void (*node_stage)(void *ctx, char *out, size_t cap);
 };
 
 enum wsu_step {
@@ -75,7 +73,6 @@ enum wsu_step {
 /* What a working screen is doing; each has one plain line (wsu_working_line). */
 enum wsu_phase {
     WSU_PHASE_NONE,
-    WSU_PHASE_TIP,       /* waiting for the node to reach the chain tip */
     WSU_PHASE_KEY,       /* securing the key; the phone may ask for the screen lock */
     WSU_PHASE_PAUSE,     /* waiting for the node to exit so the wallet files are written safely */
     WSU_PHASE_WRITE,     /* the node writes the wallet */
@@ -83,6 +80,14 @@ enum wsu_phase {
     WSU_PHASE_CHECK,     /* reading the wallet files or asking the node about the wallet */
     WSU_PHASE_ASIDE,     /* moving the old wallet aside */
     WSU_PHASE_SAVE       /* the words are confirmed; the setup is recorded */
+};
+/* The wallet behind the shown words of a create: written in the background while the words and the check are on screen. */
+enum wsu_write {
+    WSU_WRITE_NONE,      /* no create is under way */
+    WSU_WRITE_PENDING,   /* the words are shown and the write has not started */
+    WSU_WRITE_RUNNING,
+    WSU_WRITE_DONE,
+    WSU_WRITE_FAILED     /* write_failure says why; the same words are written again on a retry */
 };
 enum wsu_failure {
     WSU_NO_FAILURE,
@@ -133,9 +138,13 @@ struct wsu {
     char leftover[WSU_LEFTOVER_MAX];   /* with ASIDE_STUCK: the paths that stay moved aside, one per line */
     enum wsu_phase phase;     /* the sub-step of the running job */
     int64_t phase_since_s;
-    int64_t tip_blocks;       /* the last block the node reported while waiting, or 0 */
-    char stage[48];           /* the node's boot stage while it reports no chain tip */
     bool paused_node;         /* setup asked the node to exit and has not started it again */
+    struct zapp_words phrase;   /* a create: the words being written, wiped when the write is done */
+    char write_pass[SUN_PASSPHRASE_HEX + 1];
+    enum wsu_write write;
+    enum wsu_failure write_failure;
+    bool write_maybe;           /* an earlier attempt gave no usable answer, so it may have written the wallet */
+    bool words_first;           /* the setup is a create whose words were shown before the wallet was written */
 };
 bool wsu_init(struct wsu *w, const struct wsu_env *env, const struct sun *node, const char *files);
 void wsu_destroy(struct wsu *w);
@@ -164,8 +173,9 @@ struct wsu_view {
     char leftover[WSU_LEFTOVER_MAX];
     enum wsu_phase phase;   /* with WORKING or CHECKING */
     int64_t elapsed_s;      /* seconds since the job began */
-    int64_t tip_blocks;
-    char stage[48];
+    enum wsu_write write;    /* with WORDS or CONFIRM: whether the wallet behind the words is written */
+    enum wsu_failure write_failure;
+    bool start_pending;      /* with WORDS: the wallet records its start only when written, so no height is shown */
 };
 void wsu_view_read(struct wsu *w, struct wsu_view *out);
 /* Whether the interrupted-setup screen offers Check again: the node did not answer, or was busy, or could not say whether the wallet is empty. */
@@ -173,8 +183,7 @@ bool wsu_view_can_recheck(const struct wsu_view *v);
 /* The sentence above the recovery words. With a recorded start height it names the height; when the wallet recorded none it says so
  * and names no height. */
 void wsu_words_intro(const struct wsu_view *v, char *out, size_t cap);
-/* The line a working screen shows: the sub-step in plain words, with the block the node has reached while waiting for the chain tip
- * or its boot stage while it has none. With no sub-step set yet it is "Starting…"; after the words are confirmed it is "Saving…". */
+/* The line a working screen shows: the sub-step in plain words. With no sub-step set yet it is "Starting…"; after the words are confirmed it is "Saving…". */
 void wsu_working_line(const struct wsu_view *v, char *out, size_t cap);
 /* "2 min 05 s since setup began": the seconds of the job so far, so a long wait shows it is alive. */
 void wsu_elapsed_text(const struct wsu_view *v, char *out, size_t cap);
@@ -191,7 +200,14 @@ void wsu_show_again(struct wsu *w);     /* CONFIRM to WORDS */
 bool wsu_busy(struct wsu *w);           /* A job runs, or words are held: leaving would lose them. */
 
 /* Jobs, for the worker thread. */
+/* Asks for the fingerprint, then a new phrase from the node, and shows the words at once: nothing is stopped, started or written yet.
+ * wsu_write_job then writes the wallet behind them. */
 void wsu_create_job(struct wsu *w);
+/* On the worker, after the words are shown (or again after wsu_retry_write): records the kind, waits for the node to exit, restores the
+ * phrase into the datadir at its own chain tip and starts the node. The node runs again on every path. */
+void wsu_write_job(struct wsu *w);
+/* A failed write to a new attempt with the same words, never a second phrase; the caller then runs wsu_write_job. */
+bool wsu_retry_write(struct wsu *w);
 /* text is the typed words; birthday_height is 0 when the owner does not know it. */
 void wsu_restore_job(struct wsu *w, const char *text, int64_t birthday_height);
 /* answers are the typed words for the asked positions. True when they match: the words are wiped and the step is

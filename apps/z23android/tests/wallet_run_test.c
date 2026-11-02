@@ -122,6 +122,8 @@ static void setup_commands_run(struct zapp_runtime *r)
     assert(!command_line_holds(got, SECRET) && !command_line_holds(got, "words") && strstr(got, SECRET));
     assert(zapp_wallet_setup_run(r, "restore", request, 60000, got, sizeof(got)));
     assert(command_line_holds(got, "core wallet recovery restore -datadir=") && !command_line_holds(got, SECRET) && strstr(got, SECRET));
+    /* The new phrase needs no wallet files: it is asked for with nothing on standard input but an empty request. */
+    assert(zapp_wallet_setup_run(r, "newphrase", "{}", 60000, got, sizeof(got)) && command_line_holds(got, "core wallet recovery new -datadir="));
 }
 /* Arguments the command does not take, and every other command, are refused without running anything. */
 static void setup_refusals_run(struct zapp_runtime *r)
@@ -155,6 +157,7 @@ static void setup_node_running_run(struct zapp_runtime *r)
     assert(strstr(got, "\"code\":\"NOT_RUN\""));
     assert(zapp_wallet_setup_run(r, "status", "{}", 0, got, sizeof(got)) && command_line_holds(got, "core wallet recovery status"));
     assert(!zapp_wallet_setup_run(r, "restore", "{}", 60000, got, sizeof(got)) && strstr(got, "Stop the node first") && !strstr(got, "argv"));
+    assert(zapp_wallet_setup_run(r, "newphrase", "{}", 60000, got, sizeof(got)) && command_line_holds(got, "core wallet recovery new") && !atomic_load(&r->setup_running));
     assert(kill(sleeper, SIGKILL) == 0 && waitpid(sleeper, NULL, 0) == sleeper);
     r->node = 0;
     assert(!atomic_load(&r->setup_running));

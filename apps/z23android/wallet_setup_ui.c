@@ -32,8 +32,8 @@ _Static_assert(ZAPP_FIELD_PRIVATE(ZAPP_FIELD_INPUT_WORDS | ZAPP_FIELD_FLAG_MULTI
 #define TYPED_MAX 640
 #define SUMMARY_MAX 8192
 
-enum button { B_CREATE, B_RESTORE_FORM, B_RESTORE, B_RESTORE_UNKNOWN, B_SEEN, B_CONFIRM, B_AGAIN, B_BACK, B_CONTINUE, B_RECHECK, B_SAVE_AGAIN, B_NEW_WALLET, B_START_OVER_ASK, B_START_OVER_GO, B_START_OVER_CANCEL, B_PICK };   /* B_PICK + 4 * position + slot: one of the words offered */
-enum job_kind { JOB_CREATE, JOB_RESTORE, JOB_PROGRESS, JOB_FINISH, JOB_RESUME, JOB_ASIDE, JOB_START_OVER };
+enum button { B_CREATE, B_RESTORE_FORM, B_RESTORE, B_RESTORE_UNKNOWN, B_SEEN, B_CONFIRM, B_AGAIN, B_BACK, B_CONTINUE, B_RECHECK, B_SAVE_AGAIN, B_NEW_WALLET, B_START_OVER_ASK, B_START_OVER_GO, B_START_OVER_CANCEL, B_RETRY_WRITE, B_PICK };   /* B_PICK + 4 * position + slot: one of the words offered */
+enum job_kind { JOB_WRITE, JOB_CREATE, JOB_RESTORE, JOB_PROGRESS, JOB_FINISH, JOB_RESUME, JOB_ASIDE, JOB_START_OVER };
 struct job { enum job_kind kind; char text[TYPED_MAX]; int64_t height; };
 
 static struct {
@@ -134,11 +134,6 @@ static void env_control(void *ctx, bool start)
     (void)ctx;
     (void)(start ? zapp_controller_node_control(true) : zapp_controller_node_pause_for_setup());
 }
-static void env_stage(void *ctx, char *out, size_t cap)
-{
-    (void)ctx;
-    zapp_controller_node_stage(out, cap);
-}
 static void env_pause(void *ctx, unsigned ms)
 {
     struct timespec step = {.tv_sec = ms / 1000u, .tv_nsec = (long)(ms % 1000u) * 1000000L};
@@ -202,7 +197,8 @@ static bool setup_runner(void *ctx, const char *op, const char *input, unsigned 
 static void run_job(struct job *job)
 {
     if (!ui.model_ready) return;
-    if (job->kind == JOB_CREATE) wsu_create_job(&ui.model);
+    if (job->kind == JOB_CREATE) { wsu_create_job(&ui.model); woken(); wsu_write_job(&ui.model); }
+    else if (job->kind == JOB_WRITE) wsu_write_job(&ui.model);
     else if (job->kind == JOB_RESTORE) wsu_restore_job(&ui.model, job->text, job->height);
     else if (job->kind == JOB_FINISH) wsu_finish_job(&ui.model);
     else if (job->kind == JOB_ASIDE) wsu_set_aside_job(&ui.model);
@@ -322,7 +318,14 @@ static void draw_confirm(JNIEnv *env, const struct wsu_view *v)
         snprintf(hint, sizeof(hint), "That is not word %zu. Check your paper.", v->wrong_position);
         (void)text_view(env, hint, 15.0f, AMBER);
     }
-    if (all) (void)button_view(env, B_CONFIRM, "Confirm", GO_COLOR);
+    if (v->write == WSU_WRITE_FAILED) {
+        (void)text_view(env, wsu_failure_text(v->write_failure), 15.0f, AMBER);
+        (void)button_view(env, B_RETRY_WRITE, "Try again", GO_COLOR);
+    } else if (all && v->write != WSU_WRITE_DONE) {
+        (void)text_view(env, "Saving your wallet…", 15.0f, SOFT);
+    } else if (all) {
+        (void)button_view(env, B_CONFIRM, "Confirm", GO_COLOR);
+    }
     (void)button_view(env, B_AGAIN, "Show the words again", BUTTON_COLOR);
 }
 static void draw_form(JNIEnv *env, const struct wsu_view *v)
@@ -482,7 +485,7 @@ bool zapp_setup_ui_open(JNIEnv *env)
     if (!ui.model_ready) {
         struct sun node;
         char datadir[600];
-        struct wsu_env host = {NULL, env_wrap_new, env_discard, env_running, env_control, env_pause, host_random, env_progress, env_protect, env_idle, env_wall, env_stage};
+        struct wsu_env host = {NULL, env_wrap_new, env_discard, env_running, env_control, env_pause, host_random, env_progress, env_protect, env_idle, env_wall};
         snprintf(datadir, sizeof(datadir), "%s/node", ui.activity->internalDataPath);
         sun_init(&node, &(struct sun_runner){NULL, setup_runner}, datadir);
         ui.model_ready = wsu_init(&ui.model, &host, &node, ui.activity->internalDataPath);
@@ -587,21 +590,29 @@ static void press_interrupted(enum button id)
 }
 
 /* The buttons that start a job or move the model. */
-static void press_model(JNIEnv *env, enum button id)
+/* The buttons of the words and their check. */
+static void press_check(enum button id)
 {
     if (id >= B_PICK) { (void)wsu_pick(&ui.model, (size_t)(id - B_PICK) / ZAPP_WORD_CHOICES, (size_t)(id - B_PICK) % ZAPP_WORD_CHOICES); return; }
+    switch (id) {
+    case B_SEEN: wsu_words_seen(&ui.model); break;
+    case B_RETRY_WRITE: if (wsu_retry_write(&ui.model)) (void)spawn_job(JOB_WRITE, NULL, 0); break;
+    case B_CONFIRM: if (wsu_confirm_picked(&ui.model)) (void)spawn_job(JOB_FINISH, NULL, 0); break;
+    case B_AGAIN: wsu_show_again(&ui.model); break;
+    default: press_interrupted(id); break;
+    }
+}
+static void press_model(JNIEnv *env, enum button id)
+{
     switch (id) {
     case B_CREATE: (void)spawn_job(JOB_CREATE, NULL, 0); break;
     case B_RESTORE_FORM: wsu_open_restore(&ui.model); break;
     case B_RESTORE: start_restore(env, true); break;
     case B_RESTORE_UNKNOWN: start_restore(env, false); break;
-    case B_SEEN: wsu_words_seen(&ui.model); break;
-    case B_CONFIRM: if (wsu_confirm_picked(&ui.model)) (void)spawn_job(JOB_FINISH, NULL, 0); break;
-    case B_AGAIN: wsu_show_again(&ui.model); break;
     case B_BACK: wsu_back(&ui.model); break;
     case B_SAVE_AGAIN: if (wsu_retry_marker(&ui.model)) (void)spawn_job(JOB_FINISH, NULL, 0); break;
     case B_CONTINUE: break;
-    default: press_interrupted(id); break;
+    default: press_check(id); break;
     }
 }
 enum zapp_setup_outcome zapp_setup_ui_press(JNIEnv *env, size_t button)
