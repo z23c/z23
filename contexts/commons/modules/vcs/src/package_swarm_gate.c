@@ -80,3 +80,70 @@ bool vcs_swarm_public_serveable(struct vcs_swarm_engine *engine,
         *rule_out = slot->rule;
     return slot->shape != VCS_PACKAGE_PUBLIC_REFUSED;
 }
+
+/* ── sender side of the ANNOUNCE contract ────────────────────────────── */
+
+/* The receiver (handle_announce) counts each NEW unique root against an
+ * hourly budget (VCS_SWARM_ANNOUNCE_WINDOW_TICKS) and treats the next one as
+ * ANNOUNCE_FLOOD; a root it already holds is a free keep-alive and its
+ * advertisement lasts the whole session. There is no withdraw frame, so the
+ * sender keeps to the same budget and rotates its remembered inventory:
+ *   - never more than VCS_SWARM_MAX_LOCAL_ANNOUNCES sends per window; the
+ *     window is the receiver's plus a margin for its later start;
+ *   - when the remembered inventory is full, a newer root takes the slot of
+ *     an entry that is no longer on the current shelf, but only once the
+ *     window has rolled and budget is back. The evicted root stays
+ *     advertised on the receiver until the session ends; a new session
+ *     starts from the current shelf, pins and newest first. */
+#define SWARM_ANNOUNCE_WINDOW_MARGIN 60u
+
+static bool announce_budget_open(struct vcs_swarm_engine *engine,
+                                 struct swarm_peer *peer)
+{
+    uint64_t clock = engine->clock;
+    if (clock != 0 && peer->ann_win_start == 0) {
+        peer->ann_win_start = clock; /* adopt: only ever shortens nothing */
+    } else if (clock != 0 &&
+               clock >= peer->ann_win_start +
+                            VCS_SWARM_ANNOUNCE_WINDOW_TICKS +
+                            SWARM_ANNOUNCE_WINDOW_MARGIN) {
+        peer->ann_win_start = clock;
+        peer->ann_win_sent = 0;
+    }
+    return peer->ann_win_sent < VCS_SWARM_MAX_LOCAL_ANNOUNCES;
+}
+
+int vcs_swarm_announce_plan(struct vcs_swarm_engine *engine,
+                            struct swarm_peer *peer, const uint8_t root[32],
+                            const struct vcs_package_store_summary *shelf,
+                            size_t shelf_n)
+{
+    if (!announce_budget_open(engine, peer)) {
+        SWARM_DROP(VCS_SWARM_DROP_ANNOUNCE_FULL,
+                   "announce deferred: this peer's hourly unique-root budget "
+                   "is spent; it resumes when the window rolls");
+        return -1;
+    }
+    if (peer->announced_count < VCS_SWARM_MAX_LOCAL_ANNOUNCES)
+        return (int)peer->announced_count;
+    for (size_t i = 0; i < peer->announced_count; i++) {
+        bool on_shelf = false;
+        for (size_t s = 0; s < shelf_n && !on_shelf; s++)
+            on_shelf = memcmp(peer->announced[i], shelf[s].root, 32) == 0;
+        if (!on_shelf && memcmp(peer->announced[i], root, 32) != 0)
+            return (int)i;
+    }
+    SWARM_DROP(VCS_SWARM_DROP_ANNOUNCE_FULL,
+               "announce skipped: session inventory is full and every "
+               "remembered root is still on the shelf");
+    return -1;
+}
+
+void vcs_swarm_announce_commit(struct swarm_peer *peer, int slot,
+                               const uint8_t root[32])
+{
+    memcpy(peer->announced[slot], root, 32);
+    if ((size_t)slot == peer->announced_count)
+        peer->announced_count++;
+    peer->ann_win_sent++;
+}

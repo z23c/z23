@@ -85,6 +85,10 @@ struct swarm_peer {
      * call it on every membership sync without flooding the peer). */
     uint8_t announced[VCS_SWARM_MAX_LOCAL_ANNOUNCES][32];
     size_t announced_count;
+    /* Sender-side accounting of the receiver's hourly unique-root budget:
+     * roots sent since ann_win_start (engine clock; 0 = not yet known). */
+    uint64_t ann_win_start;
+    uint32_t ann_win_sent;
     uint32_t inflight;
     uint64_t burst_start;
     uint32_t burst_count;
@@ -139,6 +143,7 @@ struct vcs_swarm_engine {
     struct swarm_outbound outq[VCS_SWARM_OUTBOUND_MAX];
     size_t outq_pos;
     size_t outq_count;
+    uint64_t clock; /* newest wall time seen by tick/handle_frame; 0 = none */
     uint64_t last_tick;
     bool ticked;
     /* Touched only by the tick: the disk generation whose catalog refresh was
@@ -172,6 +177,18 @@ enum vcs_swarm_drop {
 };
 
 bool vcs_swarm_drop_due(enum vcs_swarm_drop why, uint64_t *suppressed);
+
+/* Sender side of the ANNOUNCE contract (package_swarm_gate.c). The receiver
+ * admits 64 new unique roots per hour per session and bans the sender for
+ * more. plan returns the announced[] slot `root` may take (append or an
+ * evicted entry that is not on `shelf`), or -1 when the session or the hour
+ * budget is spent; commit records the send. Caller holds engine->lock. */
+int vcs_swarm_announce_plan(struct vcs_swarm_engine *engine,
+                            struct swarm_peer *peer, const uint8_t root[32],
+                            const struct vcs_package_store_summary *shelf,
+                            size_t shelf_n);
+void vcs_swarm_announce_commit(struct swarm_peer *peer, int slot,
+                               const uint8_t root[32]);
 
 /* Log one rate-limited drop reason. `fmt` must not end in a period. */
 #define SWARM_DROP(why, fmt, ...)                                           \

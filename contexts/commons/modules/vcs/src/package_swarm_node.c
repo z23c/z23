@@ -1458,13 +1458,6 @@ size_t vcs_swarm_engine_announce_to(struct vcs_swarm_engine *engine,
     struct swarm_peer *p = &engine->peers[slot];
     size_t queued = 0;
     for (size_t i = 0; i < n; i++) {
-        /* Never emit an unremembered 65th distinct root. This session's
-         * bounded dedupe inventory also protects a free peer's announce
-         * allowance when the prioritized shelf changes between syncs. */
-        if (p->announced_count >= VCS_SWARM_MAX_LOCAL_ANNOUNCES) {
-            SWARM_DROP(VCS_SWARM_DROP_ANNOUNCE_FULL, "announce: session inventory is full; newer roots reach this peer only by a fetch that names it");
-            break;
-        }
         if (vcs_swarm_peer_was_announced(p, summaries[i].root))
             continue;
         /* Advertise only what this node would actually serve. Announcing a
@@ -1472,6 +1465,12 @@ size_t vcs_swarm_engine_announce_to(struct vcs_swarm_engine *engine,
          * spends the peer's request budget on an answer that cannot come. */
         if (!vcs_swarm_public_serveable(engine, summaries[i].root, NULL))
             continue;
+        /* Never emit an over-budget or unremembered root: the receiver
+         * bans for it. A full session rotates a stale entry out instead. */
+        int keep = vcs_swarm_announce_plan(engine, p, summaries[i].root,
+                                           summaries, n);
+        if (keep < 0)
+            break;
         struct vcs_package_swarm_message msg;
         memset(&msg, 0, sizeof(msg));
         msg.type = VCS_PACKAGE_SWARM_ANNOUNCE;
@@ -1482,9 +1481,7 @@ size_t vcs_swarm_engine_announce_to(struct vcs_swarm_engine *engine,
         msg.body.announce.total_chunks = summaries[i].total_chunks;
         if (!vcs_swarm_queue_frame(engine, peer, &msg))
             break;
-        if (p->announced_count < VCS_SWARM_MAX_LOCAL_ANNOUNCES)
-            memcpy(p->announced[p->announced_count++], summaries[i].root,
-                   32);
+        vcs_swarm_announce_commit(p, keep, summaries[i].root);
         queued++;
     }
     pthread_mutex_unlock(&engine->lock);
@@ -1528,6 +1525,8 @@ struct vcs_swarm_frame_result vcs_swarm_engine_handle_frame(
         return res;
     }
     pthread_mutex_lock(&engine->lock);
+    if (now > engine->clock)
+        engine->clock = now;
     int slot = peer_slot(engine, peer);
     if (slot < 0) {
         pthread_mutex_unlock(&engine->lock);
@@ -1809,6 +1808,8 @@ void vcs_swarm_engine_tick(struct vcs_swarm_engine *engine, int64_t day,
         return;
     vcs_swarm_refresh_moved_store(engine, now);
     pthread_mutex_lock(&engine->lock);
+    if (now > engine->clock)
+        engine->clock = now;
     if (engine->ticked && engine->last_tick == now) {
         pthread_mutex_unlock(&engine->lock);
         return;

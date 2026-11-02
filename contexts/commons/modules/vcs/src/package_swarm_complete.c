@@ -114,16 +114,24 @@ static void announce_completed_root(struct vcs_swarm_engine *engine,
     memset(&msg, 0, sizeof(msg));
     msg.type = VCS_PACKAGE_SWARM_ANNOUNCE;
     msg.body.announce = body;
+    /* Same per-session cap and hourly accounting as announce_to: an ANNOUNCE
+     * past the receiver's budget is an unremembered root and gets us banned. */
+    struct vcs_package_store_summary shelf[VCS_SWARM_MAX_LOCAL_ANNOUNCES];
+    size_t shelf_n = vcs_package_store_list_announce_summaries(
+        engine->store, shelf, VCS_SWARM_MAX_LOCAL_ANNOUNCES);
     for (size_t i = 0; i < VCS_SWARM_MAX_PEERS; i++) {
         struct swarm_peer *peer = &engine->peers[i];
         if (!peer->used)
             continue;
         if (vcs_swarm_peer_was_announced(peer, root))
             continue;
+        int keep = vcs_swarm_announce_plan(engine, peer, root, shelf,
+                                           shelf_n);
+        if (keep < 0)
+            continue;
         if (!vcs_swarm_queue_frame(engine, peer->id, &msg))
             break;
-        if (peer->announced_count < VCS_SWARM_MAX_LOCAL_ANNOUNCES)
-            memcpy(peer->announced[peer->announced_count++], root, 32);
+        vcs_swarm_announce_commit(peer, keep, root);
     }
 }
 

@@ -545,6 +545,154 @@ static int bundle_case_full_session_bound_fetch(void)
     return failures;
 }
 
+/* Deliver every queued frame of `from` to `to` at `now`. Returns the number
+ * of frames; *penalised counts those the receiver would score as offences. */
+static size_t bundle_drain_scored(struct sw_node *from, uint64_t from_handle,
+                                  struct sw_node *to, uint64_t to_handle,
+                                  uint64_t now, size_t *penalised,
+                                  uint8_t last_root[32])
+{
+    uint8_t frame[VCS_SWARM_OUTBOUND_FRAME_MAX];
+    size_t frame_len = 0, frames = 0;
+    uint64_t target = 0;
+    while (vcs_swarm_engine_next_outbound(from->engine, from_handle, &target,
+                                          frame, &frame_len)) {
+        struct vcs_swarm_frame_result r = vcs_swarm_engine_handle_frame(
+            to->engine, to_handle, frame, frame_len, SW_DAY, now);
+        frames++;
+        if (r.penalty != VCS_SWARM_PENALTY_NONE)
+            (*penalised)++;
+        struct vcs_package_swarm_message msg;
+        if (last_root && vcs_package_swarm_parse(frame, frame_len, &msg) &&
+            msg.type == VCS_PACKAGE_SWARM_ANNOUNCE)
+            memcpy(last_root, msg.body.announce.package_root, 32);
+        if (r.reply && r.reply_len > 0) {
+            struct vcs_swarm_frame_result back = vcs_swarm_engine_handle_frame(
+                from->engine, from_handle, r.reply, r.reply_len, SW_DAY, now);
+            free(back.reply);
+        }
+        free(r.reply);
+    }
+    return frames;
+}
+
+static bool bundle_put_shelf(struct sw_node *n, uint8_t tag, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        uint8_t bytes[] = { tag, (uint8_t)i }, root[32];
+        if (vcs_bundle_put_to_no_evict(n->store, bytes, sizeof bytes, root) !=
+            VCS_BUNDLE_OK)
+            return false;
+    }
+    return true;
+}
+
+/* A node whose session already announced 64 roots completes a 65th: the
+ * ANNOUNCE for it must not go out (the receiver would ban for it). */
+static int bundle_case_complete_on_full_session(void)
+{
+    int failures = 0;
+    struct bundle_pair p;
+    struct zcl_fleet_bundle_outcome offered, o;
+    uint8_t *orig = NULL;
+    if (!bundle_pair_open(&p, "bcf")) {
+        printf("  zcode_swarm: bundle complete-on-full fixture... FAIL\n");
+        bundle_pair_close(&p);
+        return 1;
+    }
+    size_t penalised = 0;
+    SW_CHECK("complete on full: the downloader shelf of 64 is announced",
+             bundle_put_shelf(&p.leech, 0xd4, VCS_SWARM_MAX_LOCAL_ANNOUNCES) &&
+             vcs_swarm_engine_announce_to(p.leech.engine,
+                                          BUNDLE_LEECH_HANDLE) ==
+                 VCS_SWARM_MAX_LOCAL_ANNOUNCES &&
+             bundle_drain_scored(&p.leech, BUNDLE_LEECH_HANDLE, &p.seed,
+                                 BUNDLE_SEEDER_HANDLE, 1, &penalised,
+                                 NULL) == VCS_SWARM_MAX_LOCAL_ANNOUNCES &&
+             penalised == 0);
+    char out_path[1200];
+    bundle_make_path(out_path, sizeof(out_path), &p.leech, "got.bundle");
+    struct zcl_fleet_bundle_fetch_args a;
+    bool fetched = false;
+    uint8_t announced_root[32] = { 0 };
+    static const uint8_t zero32[32] = { 0 };
+    if (bundle_offer(&p, 3000, &offered, &orig)) {
+        bundle_args(&a, &offered, out_path);
+        for (int round = 0; round < BUNDLE_ROUNDS && !fetched; round++) {
+            a.day = SW_DAY;
+            a.now = (uint64_t)(round + 2);
+            fetched = zcl_fleet_bundle_fetch_step(p.leech.store, p.leech.engine,
+                                                  &a, &o) ==
+                      ZCL_FLEET_BUNDLE_DONE;
+            vcs_swarm_engine_tick(p.leech.engine, SW_DAY, a.now);
+            (void)bundle_drain_scored(&p.leech, BUNDLE_LEECH_HANDLE, &p.seed,
+                                      BUNDLE_SEEDER_HANDLE, a.now, &penalised,
+                                      announced_root);
+        }
+    }
+    SW_CHECK("complete on full: the 65th root is fetched", fetched);
+    SW_CHECK("complete on full: no over-cap ANNOUNCE leaves the downloader",
+             memcmp(announced_root, zero32, 32) == 0);
+    SW_CHECK("complete on full: the receiver scores no offence",
+             penalised == 0);
+    free(orig);
+    bundle_pair_close(&p);
+    return failures;
+}
+
+/* A newer root reaches a peer whose session is full, once the receiver's
+ * hourly window has rolled, and the receiver never sees an over-cap root. */
+static int bundle_case_rotation_on_full_session(void)
+{
+    int failures = 0;
+    struct bundle_pair p;
+    if (!bundle_pair_open(&p, "brt")) {
+        printf("  zcode_swarm: bundle rotation fixture... FAIL\n");
+        bundle_pair_close(&p);
+        return 1;
+    }
+    enum { T0 = 1000000, WINDOW = 3600 };
+    size_t penalised = 0;
+    uint8_t pin[32], got[32];
+    SW_CHECK("rotation: 64 roots announced in the first window",
+             bundle_put_shelf(&p.seed, 0xe5, VCS_SWARM_MAX_LOCAL_ANNOUNCES) &&
+             (vcs_swarm_engine_tick(p.seed.engine, SW_DAY, T0), true) &&
+             vcs_swarm_engine_announce_to(p.seed.engine,
+                                          BUNDLE_SEEDER_HANDLE) ==
+                 VCS_SWARM_MAX_LOCAL_ANNOUNCES &&
+             bundle_drain_scored(&p.seed, BUNDLE_SEEDER_HANDLE, &p.leech,
+                                 BUNDLE_LEECH_HANDLE, T0, &penalised,
+                                 NULL) == VCS_SWARM_MAX_LOCAL_ANNOUNCES &&
+             penalised == 0);
+    uint8_t bytes[] = { 0xe5, 200 };
+    SW_CHECK("rotation: a newly pinned root is admitted",
+             vcs_bundle_put_to_no_evict(p.seed.store, bytes, sizeof bytes,
+                                        pin) == VCS_BUNDLE_OK &&
+             vcs_package_store_pin(p.seed.store, pin, true) ==
+                 VCS_PACKAGE_STORE_OK);
+    SW_CHECK("rotation: inside the window nothing over the cap is sent",
+             vcs_swarm_engine_announce_to(p.seed.engine,
+                                          BUNDLE_SEEDER_HANDLE) == 0);
+    vcs_swarm_engine_tick(p.seed.engine, SW_DAY, T0 + WINDOW + 10);
+    SW_CHECK("rotation: before the margin has passed nothing is sent",
+             vcs_swarm_engine_announce_to(p.seed.engine,
+                                          BUNDLE_SEEDER_HANDLE) == 0);
+    vcs_swarm_engine_tick(p.seed.engine, SW_DAY, T0 + WINDOW + 120);
+    size_t frames = 0;
+    memset(got, 0, sizeof got);
+    SW_CHECK("rotation: after the window the newer root is announced",
+             vcs_swarm_engine_announce_to(p.seed.engine,
+                                          BUNDLE_SEEDER_HANDLE) >= 1 &&
+             (frames = bundle_drain_scored(&p.seed, BUNDLE_SEEDER_HANDLE,
+                                           &p.leech, BUNDLE_LEECH_HANDLE,
+                                           T0 + WINDOW + 120, &penalised,
+                                           got)) >= 1 &&
+             memcmp(got, pin, 32) == 0 && frames <= 64);
+    SW_CHECK("rotation: the receiver scores no offence", penalised == 0);
+    bundle_pair_close(&p);
+    return failures;
+}
+
 static int bundle_case_priority_after_eviction(void)
 {
     int failures = 0;
@@ -764,6 +912,8 @@ int t_swarm_bundle_transfer(void)
     failures += bundle_case_announce_priority();
     failures += bundle_case_priority_after_eviction();
     failures += bundle_case_full_session_bound_fetch();
+    failures += bundle_case_complete_on_full_session();
+    failures += bundle_case_rotation_on_full_session();
     failures += bundle_case_timeout_messages();
     failures += bundle_case_summary_fits();
     failures += bundle_case_timeout_facts();
