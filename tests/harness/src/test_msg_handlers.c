@@ -64,6 +64,16 @@ static void test_msg_sync_to_idle(void)
     (void)sync_set_state(SYNC_IDLE, "msg_handlers cleanup");
 }
 
+/* The grouped tests share the process-wide download manager. dl_init
+ * overwrites its buffers without freeing them, so release the previous
+ * set first, and release the last set when the group finishes. */
+static void test_msg_dl_reset(void)
+{
+    struct download_manager *dm = get_download_mgr();
+    dl_free(dm);
+    dl_init(dm);
+}
+
 static void test_msg_sync_to_blocks_download(void)
 {
     test_msg_sync_to_idle();
@@ -454,7 +464,7 @@ static int test_process_block_msg_scores_unrequested(void)
         peer_scoring_init();
         /* Hermetic: a prior test in this forked process may have left the
          * process-wide download manager in a drain/timeout grace window. */
-        dl_init(get_download_mgr());
+        test_msg_dl_reset();
 
         struct block blk;
         block_init(&blk);
@@ -500,7 +510,7 @@ static int test_process_block_msg_no_score_when_requested(void)
     TEST("msg_handlers: process_block_msg does NOT score a block we "
          "actually asked this peer for") {
         peer_scoring_init();
-        dl_init(get_download_mgr());
+        test_msg_dl_reset();
 
         struct block blk;
         block_init(&blk);
@@ -548,7 +558,7 @@ static int test_process_block_msg_no_score_when_requested_from_peer_zero(void)
     TEST("msg_handlers: peer id zero remains a requested block, not the "
          "not-found sentinel") {
         peer_scoring_init();
-        dl_init(get_download_mgr());
+        test_msg_dl_reset();
 
         struct block blk;
         block_init(&blk);
@@ -595,7 +605,7 @@ static int test_process_block_msg_no_score_within_settle_grace(void)
          "post-drain/timeout grace window (honest-but-late delivery)") {
         peer_scoring_init();
         struct download_manager *dm = get_download_mgr();
-        dl_init(dm);
+        test_msg_dl_reset();
         /* A drain or timeout reassignment force-clears in-flight state, so a
          * requested body can arrive with no trace it was asked for. */
         (void)dl_drain_for_backpressure(dm);
@@ -643,7 +653,7 @@ static int test_process_block_msg_no_score_during_shutdown(void)
     TEST("msg_handlers: process_block_msg withholds unrequested scoring "
          "during orderly shutdown") {
         peer_scoring_init();
-        dl_init(get_download_mgr());
+        test_msg_dl_reset();
         thread_registry_reset_for_test();
         thread_registry_request_shutdown();
 
@@ -1805,7 +1815,7 @@ static bool pin_reject_marks_seen(enum pin_reject_mode mode)
     }
 
     peer_scoring_init();
-    dl_init(get_download_mgr());
+    test_msg_dl_reset();
     struct net_manager nm;
     net_manager_init(&nm);
     struct msg_processor mp;
@@ -1969,5 +1979,6 @@ int test_msg_handlers(void)
     failures += test_pin_reject_more_work_marks_seen();
     failures += test_msg_build_identity_prefix_branches();
 
+    dl_free(get_download_mgr());
     return failures;
 }
