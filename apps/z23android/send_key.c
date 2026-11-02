@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include "send_key.h"
 #include "base/cleanse.h"
+#include "wallet_send.h"
 #include "sha3/sha3.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -90,6 +91,9 @@ static void put_be(uint8_t *out, uint64_t v, size_t bytes)
 {
     for (size_t i = 0; i < bytes; ++i) out[i] = (uint8_t)(v >> (8 * (bytes - 1 - i)));
 }
+/* The key the request derives is the key the flow carries: the two lengths must not drift apart. */
+_Static_assert(ZAPP_SEND_KEY_HEX == WS_KEY_HEX, "send key length");
+
 bool zapp_send_key_derive(const struct zapp_send_id *id, const struct zapp_payment *pay, char out[ZAPP_SEND_KEY_HEX + 1])
 {
     static const char hex[] = "0123456789abcdef";

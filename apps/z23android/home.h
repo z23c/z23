@@ -63,6 +63,9 @@ const char *zapp_home_send_notice(enum zapp_scan_kind kind, const char *scan_tex
 /* Whether Back from Send returns to the wallet: Send was opened from the wallet, directly or through a scan begun there. A scan
  * begun on Send keeps the place Send was first opened from. */
 bool zapp_home_send_opened_from_wallet(bool origin_is_send, bool origin_is_wallet, bool was_from_wallet);
+/* Whether a touch released on the control it went down on. Controls are matched by position in the drawn list; on the Send
+ * screen and the setup screens the position can hold another button after a redraw, so the button identity must match too. */
+bool zapp_home_same_press(size_t index_a, bool by_button_a, unsigned button_a, size_t index_b, bool by_button_b, unsigned button_b);
 /* Copies text into out (cap bytes), cutting on a character boundary when it does not fit. */
 void zapp_home_fit_label(char *out, size_t cap, const char *text);
 #endif

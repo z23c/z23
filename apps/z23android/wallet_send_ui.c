@@ -451,10 +451,10 @@ void zapp_send_ui_dropped(JNIEnv *env)
 
 /* ---- input ---- */
 
-bool zapp_send_ui_hit(JNIEnv *env, float x, float y, size_t *button)
+bool zapp_send_ui_hit(JNIEnv *env, float x, float y, size_t *button, unsigned *id)
 {
     for (size_t i = 0; i < ui.button_count; ++i)
-        if (zj_hit(env, ui.buttons[i], x, y)) { *button = i; return true; }
+        if (zj_hit(env, ui.buttons[i], x, y)) { *button = i; *id = (unsigned)ui.button_id[i]; return true; }
     return false;
 }
 /* The text of a field, or false when it cannot be read or does not fit. */

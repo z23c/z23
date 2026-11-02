@@ -482,6 +482,7 @@ static void validate_accepts_only_a_valid_reply(void)
     valid = true;
     assert(ops.validate_address(ops.ctx, "zs1\"],\"x", &valid) && !valid && !f.calls[0]);
     assert(ops.validate_address(ops.ctx, "", &valid) && !valid && !f.calls[0]);
+    assert(ops.validate_address(ops.ctx, "zs1\\x", &valid) && !valid && !f.calls[0]);   /* a backslash too */
 }
 
 /* ---- the whole flow over the adapter ---- */

@@ -188,7 +188,7 @@ static bool validate_address(void *ctx, const char *address, bool *valid)
     char params[ZAPP_PAY_ADDRESS_MAX + 8], text[WSN_REPLY_MAX];
     struct json_value root = {0};
     *valid = false;
-    if (!address_chars(address)) return true;
+    if (!address_chars(address)) return true;   /* letters and digits only: the text needs no JSON escaping */
     snprintf(params, sizeof(params), "[\"%s\"]", address);
     text[0] = 0;
     bool ran = n->runner.run(n->runner.ctx, "validateaddress", params, WSN_STEP_TIMEOUT_MS, text, sizeof(text));

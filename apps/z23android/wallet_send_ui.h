@@ -51,7 +51,7 @@ bool zapp_send_ui_leave(JNIEnv *env);
 /* A touch was dropped because another window was drawing over the app. */
 void zapp_send_ui_dropped(JNIEnv *env);
 /* The button under a window point, or false. */
-bool zapp_send_ui_hit(JNIEnv *env, float x, float y, size_t *button);
+bool zapp_send_ui_hit(JNIEnv *env, float x, float y, size_t *button, unsigned *id);
 /* Performs the button, then redraws. */
 enum zapp_send_outcome zapp_send_ui_press(JNIEnv *env, size_t button);
 

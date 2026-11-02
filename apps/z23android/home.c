@@ -140,3 +140,8 @@ bool zapp_home_send_opened_from_wallet(bool origin_is_send, bool origin_is_walle
 {
     return origin_is_send ? was_from_wallet : origin_is_wallet;
 }
+bool zapp_home_same_press(size_t index_a, bool by_button_a, unsigned button_a, size_t index_b, bool by_button_b, unsigned button_b)
+{
+    if (index_a != index_b || by_button_a != by_button_b) return false;
+    return !by_button_a || button_a == button_b;
+}

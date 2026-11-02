@@ -177,6 +177,10 @@ static void scan_destinations(void)
     assert(!strcmp(zapp_home_send_notice(ZAPP_SCAN_PAY_REFUSED, "", "result"), "result"));
     assert(!strcmp(zapp_home_send_notice(ZAPP_SCAN_TEXT, "", ""), "That is not a payment code."));
     assert(!strcmp(zapp_home_send_notice(ZAPP_SCAN_TEXT, "plain", NULL), "That is not a payment code."));
+    /* A press ends on the control it began on: the same position is not enough on Send, where a redraw can put another button there. */
+    assert(zapp_home_same_press(2, false, 0, 2, false, 0) && !zapp_home_same_press(2, false, 0, 3, false, 0));
+    assert(zapp_home_same_press(0, true, 7, 0, true, 7) && !zapp_home_same_press(0, true, 7, 0, true, 8));
+    assert(!zapp_home_same_press(0, true, 7, 0, false, 7));
     /* Back from Send returns to where Send was opened: the wallet, directly or through a scan begun there, else Home. */
     assert(zapp_home_send_opened_from_wallet(false, true, false) && !zapp_home_send_opened_from_wallet(false, false, true));
     assert(zapp_home_send_opened_from_wallet(true, false, true) && !zapp_home_send_opened_from_wallet(true, false, false));

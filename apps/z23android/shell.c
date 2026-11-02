@@ -30,7 +30,7 @@ enum command { CMD_HOME, CMD_APPS, CMD_SETTINGS, CMD_HOME_SETTINGS, CMD_LAYOUT, 
 enum target_kind { TARGET_NONE, TARGET_NAV, TARGET_ROW, TARGET_TILE, TARGET_WALLET, TARGET_SEND };
 
 struct nav { jobject view; enum command command; size_t arg; };
-struct target { enum target_kind kind; size_t index; char id[ZAPP_NAME_CAP]; size_t card; };
+struct target { enum target_kind kind; size_t index; char id[ZAPP_NAME_CAP]; size_t card; unsigned button; };
 
 static struct {
     jobject activity, roots[SCREEN_COUNT];
@@ -501,7 +501,7 @@ static bool find_target(JNIEnv *env, float x, float y, struct target *target)
     for (size_t i = 0; i < shell.nav_count; ++i)
         if (zj_hit(env, shell.navs[i].view, x, y)) { target->kind = TARGET_NAV; target->index = i; return true; }
     if (shell.current == SCREEN_WALLET && zapp_wallet_ui_hit(env, x, y, &target->index)) { target->kind = TARGET_WALLET; return true; }
-    if (shell.current == SCREEN_SEND && zapp_send_ui_hit(env, x, y, &target->index)) { target->kind = TARGET_SEND; return true; }
+    if (shell.current == SCREEN_SEND && zapp_send_ui_hit(env, x, y, &target->index, &target->button)) { target->kind = TARGET_SEND; return true; }
     for (size_t i = 0; shell.current == SCREEN_APPS && i < shell.row_count; ++i)
         if (zj_hit(env, shell.rows[i], x, y)) { target->kind = TARGET_ROW; target->index = i; return true; }
     if (shell.current == SCREEN_HOME && zapp_surface_hit(env, x, y, target->id, &target->card)) {
@@ -512,7 +512,8 @@ static bool find_target(JNIEnv *env, float x, float y, struct target *target)
 }
 static bool same_target(const struct target *a, const struct target *b)
 {
-    return a->kind == b->kind && a->index == b->index && !strcmp(a->id, b->id);
+    return a->kind == b->kind && !strcmp(a->id, b->id) &&
+           zapp_home_same_press(a->index, a->kind == TARGET_SEND, a->button, b->index, b->kind == TARGET_SEND, b->button);
 }
 static void run_wallet(JNIEnv *env, size_t button)
 {
