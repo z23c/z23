@@ -7,6 +7,7 @@
 
 #include "controllers/wallet_shielded_internal.h"
 #include "controllers/wallet_activity.h"
+#include "controllers/wallet_spend_gate.h"
 #include "controllers/sovereignty_controller.h"
 #include "jobs/reducer_frontier.h"
 #include "primitives/transaction.h"
@@ -436,8 +437,25 @@ static const struct db_wallet_note_fact *wa_fact_of(
     return NULL;
 }
 
+/* One note the send may use: confirmed deep enough, spendable by the wallet
+ * summary's rule, and above the phone spend floor. The stricter limit wins; an
+ * unknown height is at or below any floor. */
+static bool wa_send_candidate(const struct db_wallet_note_fact *fact, int tip,
+                              int min_conf, int32_t spend_floor,
+                              const uint8_t (*sp)[32], size_t ns)
+{
+    if (!fact)
+        return false;
+    int confs = fact->block_height > 0 && fact->block_height <= tip
+        ? tip - fact->block_height + 1 : 0;
+    return confs >= min_conf &&
+           wallet_spend_gate_height_ok(spend_floor, fact->block_height) &&
+           wallet_note_is_spendable(fact, sp, ns, tip);
+}
+
 int wallet_send_spendable_notes(struct wallet_rpc_context *ctx,
                                 const uint8_t ivk[32], int min_conf,
+                                int32_t spend_floor,
                                 struct db_sapling_note *out, int cap)
 {
     struct json_value unused;
@@ -461,12 +479,8 @@ int wallet_send_spendable_notes(struct wallet_rpc_context *ctx,
     int kept = got < 0 || !sp ? -1 : 0;
     for (int i = 0; i < got && kept >= 0 && kept < cap; i++) {
         const struct db_wallet_note_fact *fact = wa_fact_of(f, &all[i]);
-        int confs = fact && fact->block_height > 0 &&
-                    fact->block_height <= st.view.tip_height
-            ? st.view.tip_height - fact->block_height + 1 : 0;
-        if (fact && confs >= min_conf &&
-            wallet_note_is_spendable(fact, (const uint8_t (*)[32])sp, ns,
-                                     st.view.tip_height))
+        if (wa_send_candidate(fact, st.view.tip_height, min_conf, spend_floor,
+                              (const uint8_t (*)[32])sp, ns))
             out[kept++] = all[i];
     }
     free(all);

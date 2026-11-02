@@ -22,6 +22,7 @@
 #include "controllers/wallet_controller.h"
 #include "controllers/wallet_helpers.h"
 #include "controllers/wallet_shielded_internal.h"
+#include "controllers/wallet_spend_gate.h"
 #include "chain/chainparams.h"
 #include "core/uint256.h"
 #include "json/json.h"
@@ -849,7 +850,7 @@ static int test_lock_during_send_cannot_sign_with_wiped_key(void)
                                     (const uint8_t (*)[11])zd,
                                     (const uint8_t (*)[32])zp, za,
                                     (const uint8_t (*)[512])zm, zh, 1, 0, NULL,
-                                    &r));
+                                    &r, WALLET_SPEND_NO_FLOOR));
         ASSERT(strstr(wls_str(&r), "locked") == NULL);
         json_free(&r);
 
@@ -860,7 +861,7 @@ static int test_lock_during_send_cannot_sign_with_wiped_key(void)
                                     (const uint8_t (*)[11])zd,
                                     (const uint8_t (*)[32])zp, za,
                                     (const uint8_t (*)[512])zm, zh, 1, 0, NULL,
-                                    &r));
+                                    &r, WALLET_SPEND_NO_FLOOR));
         ASSERT(strstr(wls_str(&r), "locked") != NULL);
         json_free(&r);
         ASSERT(wls_secrets_absent(f.w));
@@ -1358,7 +1359,7 @@ static int test_one_damaged_row_does_not_block_the_rest(void)
                                         (const uint8_t (*)[11])zd,
                                         (const uint8_t (*)[32])zp, za,
                                         (const uint8_t (*)[512])zm, zh, 1, 0,
-                                        NULL, &r));
+                                        NULL, &r, WALLET_SPEND_NO_FLOOR));
             ASSERT((strstr(wls_str(&r), "decrypted") != NULL) == (i == 1));
             ASSERT(strstr(wls_str(&r), "wallet is locked") == NULL);
             json_free(&r);

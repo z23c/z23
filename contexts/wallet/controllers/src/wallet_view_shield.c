@@ -3,6 +3,7 @@
 #include "platform/time_compat.h"
 #include "controllers/wallet_view_internal.h"
 #include "controllers/wallet_controller.h"
+#include "controllers/sovereignty_controller.h"
 #include "views/wallet_view_shield_view.h"
 #include "util/log_macros.h"
 
@@ -256,6 +257,26 @@ size_t serve_shield_confirm(uint8_t *r, size_t max,
             (char *)r + off, max - off);
         wv_emit_footer(r, max, &off);
         return off;
+    }
+
+    /* Sovereign guard: this form spends through z_sendmany, so it refuses
+     * under the same strict rule as the wallet send form. The
+     * spend-after-checkpoint rule does not extend to it. */
+    {
+        char sov_reason[96] = {0};
+        if (!sovereignty_guard_allow("wallet_spend", sov_reason,
+                                     sizeof(sov_reason))) {
+            LOG_WARN("wallet_view", "shield/confirm: spend refused: %s",
+                     sov_reason);
+            struct template_var sv[] = {{ "message",
+                "Spend refused — tip is release_assisted (borrowed "
+                "shielded history, not self-folded). Shielding is not "
+                "released until the node has folded its own history." }};
+            off += template_render(TMPL_SHIELD_ERROR, sv, 1,
+                (char *)r + off, max - off);
+            wv_emit_footer(r, max, &off);
+            return off;
+        }
     }
 
     /* Look up a z-address from the wallet to use as destination */

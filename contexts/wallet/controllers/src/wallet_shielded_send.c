@@ -8,6 +8,7 @@
  * transparent-spend handling stays inline with the RPC validation flow. */
 
 #include "controllers/wallet_shielded_internal.h"
+#include "controllers/wallet_spend_gate.h"
 #include "wallet/wallet_lock.h"
 #include "controllers/wallet_send_once.h"
 
@@ -90,15 +91,16 @@ static int z_sendmany_parse_memo(const struct json_value *r, uint8_t *memo,
 /* Coin selection rows for the from-address; *num_selected / *selected_value
  * accumulate onto the caller's initial values. */
 static void z_sendmany_select_coins(struct wallet_rpc_context *ctx,
-                                    int64_t target, int tip,
+                                    int64_t target, int tip, int32_t floor,
                                     const uint8_t *from_addr_hash,
                                     struct db_wallet_utxo *db_selected,
                                     size_t *num_selected,
                                     int64_t *selected_value)
 {
     if (wallet_ctx_db_ready(ctx)) {
-        int n_sel = db_wallet_utxo_select_coins_for_address(ctx->node_db,
-            target, tip, from_addr_hash, db_selected, 256);
+        int n_sel = db_wallet_utxo_select_coins_for_address_above(
+            ctx->node_db, target, tip, from_addr_hash, floor, db_selected,
+            256);
         for (int i = 0; i < n_sel; i++) {
             (*num_selected)++;
             *selected_value += db_selected[i].value;
@@ -344,7 +346,7 @@ bool z_sendmany_minconf(const struct json_value *params, int *min_conf)
 
 static bool z_sendmany_run(const struct json_value *params, bool help,
                            struct wallet_tx *prepared,
-                           struct json_value *result)
+                           struct json_value *result, bool checkpoint_rule)
 {
     struct wallet_rpc_context *ctx = wallet_ctx();
     RPC_HELP(help, result,
@@ -357,17 +359,13 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
      * while the tip is release_assisted (borrowed shielded history, not
      * self-folded). Wallet viewing, balance, and receive stay unaffected —
      * only this spend entry is gated. */
-    {
-        char sov_reason[96] = {0};
-        if (!sovereignty_guard_allow("wallet_spend", sov_reason,
-                                     sizeof(sov_reason))) {
-            json_set_str(result, "Error: spend refused — tip is "
-                                 "release_assisted (borrowed shielded "
-                                 "history, not self-folded)");
-            LOG_FAIL("wallet_shielded", "z_sendmany: refused — %s",
-                     sov_reason);
-        }
-    }
+    int32_t spend_floor = WALLET_SPEND_NO_FLOOR;
+    /* Only the registered z_sendmany handler may use the phone rule
+     * (-spend-after-checkpoint); in-process callers keep the strict guard
+     * and stay refused. */
+    if (!wallet_spend_gate_for_send(ctx, checkpoint_rule, &spend_floor,
+                                    result))
+        return false;
 
     /* At-rest lock gate (wallet_lock): an encrypted wallet with no passphrase
      * loaded cannot spend — its spending keys are not decryptable/resident.
@@ -497,7 +495,7 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
                                    t_dests, t_amounts, num_t_out,
                                    z_diversifiers, z_pk_ds, z_amounts,
                                    z_memos, z_has_memo, num_z_out,
-                                   min_conf, prepared, result);
+                                   min_conf, prepared, result, spend_floor);
     }
 
 
@@ -545,15 +543,18 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
     size_t num_selected = 0;
     int64_t selected_value = 0;
 
-    z_sendmany_select_coins(ctx, total_amount + fee, tip, from_addr_hash,
-                            db_selected, &num_selected, &selected_value);
+    z_sendmany_select_coins(ctx, total_amount + fee, tip, spend_floor,
+                            from_addr_hash, db_selected, &num_selected,
+                            &selected_value);
 
     if (selected_value < total_amount + fee) {
         for (size_t i = 0; i < num_selected; i++)
             db_wallet_utxo_free(&db_selected[i]);
-        json_set_str(result, "Insufficient funds from specified address");
-        LOG_FAIL("wallet_shielded", "z_sendmany: insufficient transparent funds: have=%lld need=%lld",
-                 (long long)selected_value, (long long)(total_amount + fee));
+        /* With a phone-rule floor nothing at or below it was considered and
+         * nothing is spent partly; the shortfall is not logged. */
+        return wallet_spend_gate_short_funds(
+            result, spend_floor, total_amount + fee, selected_value,
+            "transparent", "Insufficient funds from specified address");
     }
 
     /* Build transaction */
@@ -804,13 +805,29 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
 static bool z_sendmany_plain(const struct json_value *params, bool help,
                              struct json_value *result)
 {
-    return z_sendmany_run(params, help, NULL, result);
+    return z_sendmany_run(params, help, NULL, result, false);
+}
+
+static bool z_sendmany_checkpoint_plain(const struct json_value *params,
+                                        bool help, struct json_value *result)
+{
+    return z_sendmany_run(params, help, NULL, result, true);
 }
 
 bool rpc_z_sendmany(const struct json_value *params, bool help,
                     struct json_value *result)
 {
     return wallet_send_once_dispatch(params, help, z_sendmany_plain, result);
+}
+
+/* The registered z_sendmany handler (and so core.wallet.shielded.send, which
+ * calls it through the RPC table): the only entry that honours the phone
+ * rule. It keeps the send-once record of the plain handler. */
+bool rpc_z_sendmany_checkpoint(const struct json_value *params, bool help,
+                               struct json_value *result)
+{
+    return wallet_send_once_dispatch(params, help, z_sendmany_checkpoint_plain,
+                                     result);
 }
 
 bool z_sendmany_prepare(const struct json_value *params,
@@ -820,5 +837,5 @@ bool z_sendmany_prepare(const struct json_value *params,
     if (!prepared || !result)
         LOG_FAIL("wallet_shielded", "z_sendmany_prepare: NULL output");
     memset(prepared, 0, sizeof(*prepared));
-    return z_sendmany_run(params, false, prepared, result);
+    return z_sendmany_run(params, false, prepared, result, false);
 }

@@ -14,6 +14,7 @@
 #include "controllers/wallet_native_handlers.h"
 #include "controllers/wallet_shielded_controller.h"
 #include "controllers/wallet_send_once.h"
+#include "controllers/wallet_spend_gate.h"
 
 #include "json/json.h"
 #include "controllers/rpc_client.h"
@@ -121,10 +122,17 @@ static bool wnh_call_rpc_common(struct zcl_command_reply *reply,
     free(raw);
     const char *emsg = NULL;
     if (wnh_body_is_error(out, &emsg)) {
-        LOG_ERROR(WNH_TAG, "RPC %s reported an error: %s", method,
-                  emsg && emsg[0] ? emsg : "(no message)");
+        /* A spend-rule refusal can carry a shortfall: the reply keeps it, the
+         * log gets fixed text. */
+        if (emsg && strncmp(emsg, WALLET_SPEND_REFUSAL_PREFIX,
+                            strlen(WALLET_SPEND_REFUSAL_PREFIX)) == 0)
+            LOG_ERROR(WNH_TAG, "RPC %s refused by the spend rule", method);
+        else
+            LOG_ERROR(WNH_TAG, "RPC %s reported an error: %s", method,
+                      emsg && emsg[0] ? emsg : "(no message)");
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_FAILED, "WALLET_RPC_ERROR",
+                               ZCL_COMMAND_EXIT_FAILED,
+                               "WALLET_RPC_ERROR",
                                "execute", false, false,
                                emsg && emsg[0] ? emsg
                                                : "wallet RPC reported an error",
@@ -908,6 +916,31 @@ static void wnh_send_outcome_unknown(struct zcl_command_reply *reply,
              tx && tx[0] ? tx : "z_sendmany");
 }
 
+/* The node freed the key before it built anything: nothing was sent. A
+ * spend-rule refusal can carry a shortfall, so its log line is fixed text. */
+static void wnh_shielded_send_released(struct zcl_command_reply *reply,
+                                       const struct json_value *body)
+{
+    char why[384];
+    const char *node = json_get_str(json_get(body, "message"));
+    (void)snprintf(why, sizeof(why),
+                   "refused before any send was recorded; nothing was sent "
+                   "and the idempotency_key is free to retry: %s",
+                   node ? node : "no reason given");
+    if (node && strncmp(node, WALLET_SPEND_REFUSAL_PREFIX,
+                        strlen(WALLET_SPEND_REFUSAL_PREFIX)) == 0) {
+        LOG_ERROR(WNH_TAG, "%s: refused by the spend rule",
+                  WALLET_SEND_ONCE_CODE_RELEASED);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_FAILED,
+                               WALLET_SEND_ONCE_CODE_RELEASED, "handle",
+                               false, false, why, "z_sendmany");
+    } else {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED,
+                 WALLET_SEND_ONCE_CODE_RELEASED, why, "z_sendmany");
+    }
+}
+
 /* Refuse a send whose node-side record says it must not run again. Returns
  * true when the body is a committed send to render. */
 static bool wnh_shielded_send_state_ok(struct zcl_command_reply *reply,
@@ -917,14 +950,7 @@ static bool wnh_shielded_send_state_ok(struct zcl_command_reply *reply,
     if (state && strcmp(state, "committed") == 0)
         return true;
     if (state && strcmp(state, WALLET_SEND_ONCE_STATE_RELEASED) == 0) {
-        char why[160];
-        const char *node = json_get_str(json_get(body, "message"));
-        (void)snprintf(why, sizeof(why),
-                       "refused before any send was recorded; nothing was sent "
-                       "and the idempotency_key is free to retry: %s",
-                       node ? node : "no reason given");
-        wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, WALLET_SEND_ONCE_CODE_RELEASED,
-                 why, "z_sendmany");
+        wnh_shielded_send_released(reply, body);
     } else if (state && strcmp(state, "in_progress") == 0) {
         wnh_fail(reply, ZCL_COMMAND_EXIT_TRANSIENT, "SEND_IN_PROGRESS",
                  "a send with this idempotency_key is still running; repeat "

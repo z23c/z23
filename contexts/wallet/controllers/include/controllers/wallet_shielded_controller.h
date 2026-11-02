@@ -22,6 +22,12 @@ void register_wallet_shielded_rpc_commands(struct rpc_table *t);
 bool rpc_z_sendmany(const struct json_value *params, bool help,
                     struct json_value *result);
 
+/* Registered z_sendmany handler: same as rpc_z_sendmany, plus the phone rule
+ * (-spend-after-checkpoint, controllers/wallet_spend_gate.h). In-process
+ * callers use rpc_z_sendmany and stay on the strict guard. */
+bool rpc_z_sendmany_checkpoint(const struct json_value *params, bool help,
+                               struct json_value *result);
+
 /* Build/sign without admitting, spending, persisting, or relaying. Ownership
  * of the initialized transaction moves to `prepared` on success. The vault
  * stores those exact bytes with its reservation before idempotent commit. */

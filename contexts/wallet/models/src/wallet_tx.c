@@ -612,6 +612,15 @@ int db_wallet_utxo_select_coins_for_address(struct node_db *ndb, int64_t target,
                                             struct db_wallet_utxo *out,
                                             size_t max)
 {
+    return db_wallet_utxo_select_coins_for_address_above(
+        ndb, target, current_height, address_hash, -1, out, max);
+}
+
+int db_wallet_utxo_select_coins_for_address_above(
+    struct node_db *ndb, int64_t target, int current_height,
+    const uint8_t address_hash[20], int32_t floor_height,
+    struct db_wallet_utxo *out, size_t max)
+{
     if (!ndb->open || !address_hash) return 0;
     sqlite3_stmt *s = NULL;
     sqlite3_prepare_v2(ndb->db,
@@ -619,12 +628,15 @@ int db_wallet_utxo_select_coins_for_address(struct node_db *ndb, int64_t target,
         " FROM wallet_utxos"
         " WHERE spent_txid IS NULL"
         "   AND address_hash = ?"
+        "   AND (? < 0 OR height > ?)"
         "   AND (is_coinbase=0 OR height <= ?)"
         " ORDER BY value DESC",
         -1, &s, NULL);
     if (!s) LOG_RETURN(0, "wallet_tx", "prepare failed: %s", sqlite3_errmsg(ndb->db));
     AR_BIND_BLOB(s, 1, address_hash, 20);
-    AR_BIND_INT(s, 2, current_height - 100);
+    AR_BIND_INT(s, 2, floor_height);
+    AR_BIND_INT(s, 3, floor_height);
+    AR_BIND_INT(s, 4, current_height - 100);
     int count = 0;
     int64_t total = 0;
     while (AR_STEP_ROW(s) && (size_t)count < max) {

@@ -168,6 +168,14 @@ int db_wallet_utxo_select_coins_for_address(struct node_db *ndb, int64_t target,
                                             struct db_wallet_utxo *out,
                                             size_t max);
 
+/* Same selection, excluding every coin received at or below `floor_height`
+ * (height > floor_height only). A floor of -1 excludes nothing. Used by the
+ * phone spend rule (controllers/wallet_spend_gate.h). */
+int db_wallet_utxo_select_coins_for_address_above(
+    struct node_db *ndb, int64_t target, int current_height,
+    const uint8_t address_hash[20], int32_t floor_height,
+    struct db_wallet_utxo *out, size_t max);
+
 /* Delete a single wallet UTXO by outpoint. */
 bool db_wallet_utxo_delete(struct node_db *ndb,
                             const uint8_t txid[32], uint32_t vout);

@@ -121,20 +121,22 @@ bool z_sendmany_shielded(
     const uint8_t (*z_diversifiers)[11], const uint8_t (*z_pk_ds)[32],
     const int64_t *z_amounts, const uint8_t (*z_memos)[512],
     const bool *z_has_memo, size_t num_z_out, int min_conf,
-    struct wallet_tx *prepared, struct json_value *result);
+    struct wallet_tx *prepared, struct json_value *result,
+    int32_t spend_floor);
 
 /* Witness stage of a shielded send: loads the selected notes witnesses at
  * the authoritative tip and checks the anchor they produce against the
  * chain Sapling root at that tip. Returns the refusal text, or NULL with
  * *witnesses_out (caller frees) and anchor set. Allocates nothing before a
- * refusal on the boot blocker, and nothing is marked spent here. */
+ * refusal on the boot blocker, and nothing is marked spent here. Under the phone
+ * rule (spend_floor set) a witness root must equal the header root. */
 struct incremental_witness;
 struct db_sapling_note;
 const char *z_sendmany_shielded_witness_gate(
     struct wallet_rpc_context *ctx, const struct db_sapling_note *selected,
     size_t num, int authoritative_tip,
     struct incremental_witness **witnesses_out, uint8_t anchor[32],
-    size_t *fail_i, int *fail_height);
+    size_t *fail_i, int *fail_height, int32_t spend_floor);
 
 bool z_sendmany_minconf(const struct json_value *params, int *min_conf);
 

@@ -528,7 +528,7 @@ static void send_try(struct rig *r, size_t key, int64_t amount, int min_conf,
     (void)z_sendmany_shielded(wallet_ctx(), chain_params_get(),
                               &r->wallet->sapling_keys.keys[key], amount,
                               NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, 0,
-                              min_conf, NULL, res);
+                              min_conf, NULL, res, -1);
     wallet_rpc_context_set_base(r->wallet, NULL, r->dir, &r->ws, NULL, NULL);
     free(ms);
 }

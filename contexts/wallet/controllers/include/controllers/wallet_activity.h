@@ -84,11 +84,13 @@ uint8_t (*wallet_note_spenders(const struct db_wallet_note_fact *notes,
 
 /* The notes z_sendmany selects from: up to `cap` of one key's unspent notes,
  * largest first, that wallet_note_is_spendable accepts and that have at least
- * `min_conf` confirmations (an extra floor, never a bypass). Filtering comes
- * before the cap. Returns the count, or -1 when the wallet state cannot be
- * read. */
+ * `min_conf` confirmations (an extra floor, never a bypass) and, when
+ * `spend_floor` is not negative, were received above that height (the phone
+ * spend rule; both limits apply). Filtering comes before the cap. Returns the
+ * count, or -1 when the wallet state cannot be read. */
 int wallet_send_spendable_notes(struct wallet_rpc_context *ctx,
                                 const uint8_t ivk[32], int min_conf,
+                                int32_t spend_floor,
                                 struct db_sapling_note *out, int cap);
 
 /* Sum the wallet's holdings. Only notes whose ivk appears in `ivks` count; a

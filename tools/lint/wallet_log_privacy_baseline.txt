@@ -6,4 +6,4 @@ contexts/wallet/controllers/src/wallet_native_read_bodies.c::zcl_native_z_getbal
 contexts/wallet/controllers/src/wallet_shielded_keys.c::rpc_z_exportkey:2
 contexts/wallet/controllers/src/wallet_shielded_keys.c::rpc_z_exportviewingkey:2
 contexts/wallet/controllers/src/wallet_shielded_keys.c::rpc_z_getmemo:3
-contexts/wallet/controllers/src/wallet_shielded_send.c::z_sendmany_run:6
+contexts/wallet/controllers/src/wallet_shielded_send.c::z_sendmany_run:5

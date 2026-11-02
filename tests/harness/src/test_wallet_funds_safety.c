@@ -19,6 +19,7 @@
 #include "models/database.h"
 #include "models/wallet_tx.h"
 #include "controllers/wallet_shielded_internal.h"
+#include "controllers/wallet_spend_gate.h"
 #include "controllers/wallet_view_internal.h"
 #include "controllers/sync_controller.h"
 #include "json/json.h"
@@ -637,7 +638,7 @@ static int wfs_view_note_spend_attempt(struct wfs_view_state *vs)
         sent = z_sendmany_shielded(&ctx, vs->cp, vs->key1, 1,
                                    NULL, NULL, 0,
                                    NULL, NULL, NULL, NULL, NULL, 0,
-                                   0, NULL, &result);
+                                   0, NULL, &result, -1);
     } else {
         json_set_str(&result, "setup failed");
     }
@@ -784,7 +785,8 @@ static const char *wfs_gate_run(struct wfs_gate *g, bool *passed)
     size_t fi = 0;
     int fh = 0;
     const char *r = z_sendmany_shielded_witness_gate(
-        &g->ctx, &g->note, 1, WFS_GATE_TIP, &w, anchor, &fi, &fh);
+        &g->ctx, &g->note, 1, WFS_GATE_TIP, &w, anchor, &fi, &fh,
+        WALLET_SPEND_NO_FLOOR);
     *passed = r == NULL && w != NULL &&
               memcmp(anchor, g->witness_root.data, 32) == 0;
     free(w);

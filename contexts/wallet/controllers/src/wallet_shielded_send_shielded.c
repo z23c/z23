@@ -8,6 +8,7 @@
 
 #include "controllers/wallet_shielded_internal.h"
 #include "controllers/wallet_activity.h"
+#include "controllers/wallet_spend_gate.h"
 #include "jobs/reducer_frontier.h"
 #include "validation/chainstate.h"
 #include "wallet/wallet_lock.h"
@@ -62,8 +63,26 @@ int wallet_note_witness_status(struct node_db *ndb, const uint8_t txid[32],
     return ok ? 0 : 3;
 }
 
+enum {
+    Z_SENDMANY_WITNESS_TREE_UNVERIFIED = 4,
+    Z_SENDMANY_WITNESS_ROOT_MISMATCH = 5
+};
+
+/* Phone rule: a note witness root must equal the header Sapling root at the
+ * witness height (the external tip). A mismatch would fail on the network;
+ * refuse on the device before any proving. */
+static bool z_sendmany_shielded_header_root_ok(
+    const struct main_state *ms, int tip, struct incremental_witness *witness)
+{
+    struct uint256 root;
+    incremental_witness_root(witness, &root);
+    return wallet_spend_gate_witness_root_ok(ms, tip, root.data);
+}
+
 /* Load and deserialize the witness of every selected note. Returns 0 on
  * success; otherwise 1 (not available), 2 (stale) or 3 (deserialize failed),
+ * (or Z_SENDMANY_WITNESS_ROOT_MISMATCH under the phone rule: a witness root
+ * differs from the header root),
  * with the failing note index in *fail_i and, for 2 (stale) only, the
  * stored witness height in *fail_height.
  * On failure the witnesses array is already freed. */
@@ -71,7 +90,8 @@ static int z_sendmany_shielded_load_witnesses(
     struct wallet_rpc_context *ctx,
     const struct db_sapling_note *selected_notes, size_t num_sel_notes,
     struct incremental_witness *witnesses,
-    int authoritative_tip, size_t *fail_i, int *fail_height)
+    int authoritative_tip, size_t *fail_i, int *fail_height,
+    const struct main_state *ms, int32_t spend_floor)
 {
         for (size_t i = 0; i < num_sel_notes; i++) {
             int wheight = 0;
@@ -86,11 +106,16 @@ static int z_sendmany_shielded_load_witnesses(
                     *fail_height = wheight;
                 return st;
             }
+            if (spend_floor != WALLET_SPEND_NO_FLOOR &&
+                !z_sendmany_shielded_header_root_ok(ms, authoritative_tip,
+                                                    &witnesses[i])) {
+                free(witnesses);
+                *fail_i = i;
+                return Z_SENDMANY_WITNESS_ROOT_MISMATCH;
+            }
         }
         return 0;
 }
-
-enum { Z_SENDMANY_WITNESS_TREE_UNVERIFIED = 4 };
 
 /* The refusal text for a witness load status, NULL when the load succeeded. */
 static const char *z_sendmany_shielded_witness_refusal(int wstat)
@@ -102,6 +127,9 @@ static const char *z_sendmany_shielded_witness_refusal(int wstat)
     case Z_SENDMANY_WITNESS_TREE_UNVERIFIED:
         return "Shielded spends are refused: the block index has no Sapling "
                "root at the tip";
+    case Z_SENDMANY_WITNESS_ROOT_MISMATCH:
+        return "Error: spend refused — spend-after-checkpoint check failed: "
+               "anchor_root_mismatch";
     default: return NULL;
     }
 }
@@ -250,7 +278,7 @@ const char *z_sendmany_shielded_witness_gate(
     struct wallet_rpc_context *ctx, const struct db_sapling_note *selected,
     size_t num, int authoritative_tip,
     struct incremental_witness **witnesses_out, uint8_t anchor[32],
-    size_t *fail_i, int *fail_height)
+    size_t *fail_i, int *fail_height, int32_t spend_floor)
 {
     *witnesses_out = NULL;
     if (blocker_exists(BLOCKER_ID_SAPLING_TIP_ROOT_MISSING))
@@ -261,7 +289,10 @@ const char *z_sendmany_shielded_witness_gate(
     if (!witnesses)
         return "Out of memory";
     int wstat = z_sendmany_shielded_load_witnesses(
-        ctx, selected, num, witnesses, authoritative_tip, fail_i, fail_height);
+        ctx, selected, num, witnesses, authoritative_tip, fail_i, fail_height,
+        ctx->main_state, spend_floor);
+    if (wstat == Z_SENDMANY_WITNESS_ROOT_MISMATCH)
+        sovereignty_spend_rule_note_verdict("anchor_root_mismatch");
     if (wstat != 0)
         return z_sendmany_shielded_witness_refusal(wstat);
     const char *refusal = z_sendmany_shielded_anchor_refusal(
@@ -345,7 +376,7 @@ static const char *z_sendmany_shielded_sign(
  * with the error set on result. */
 static int z_sendmany_shielded_load_notes(
     struct wallet_rpc_context *ctx, const struct chain_params *cp,
-    const struct sapling_key_entry *from_z_key, int min_conf,
+    const struct sapling_key_entry *from_z_key, int min_conf, int32_t spend_floor,
     struct db_sapling_note *notes, struct json_value *result)
 {
     if (min_conf < 0) {
@@ -395,11 +426,19 @@ static int z_sendmany_shielded_load_notes(
      * min_conf as an extra confirmation floor: a note that fails is
      * skipped, so the send accepts what the summary reports. */
     num_notes = wallet_send_spendable_notes(
-        ctx, from_z_key->ivk, min_conf, notes, WALLET_SEND_MAX_NOTES);
+        ctx, from_z_key->ivk, min_conf, spend_floor, notes,
+        WALLET_SEND_MAX_NOTES);
     if (num_notes < 0) {
         json_set_str(result, "Spendable note state is unavailable");
         LOG_ERR("wallet_shielded",
                  "z_sendmany: spendable note filter failed");
+    }
+    /* Phone rule: the loader above dropped every note received at or below
+     * the floor, before the 256-note cap. */
+    if (num_notes == 0 && spend_floor != WALLET_SPEND_NO_FLOOR) {
+        json_set_str(result, wallet_spend_gate_no_notes_text(spend_floor));
+        LOG_ERR("wallet_shielded",
+                 "z_sendmany: no notes remain above the spend floor");
     }
     return num_notes;
 }
@@ -416,7 +455,8 @@ static bool z_sendmany_shielded_with_key(
     const uint8_t (*z_diversifiers)[11], const uint8_t (*z_pk_ds)[32],
     const int64_t *z_amounts, const uint8_t (*z_memos)[512],
     const bool *z_has_memo, size_t num_z_out, int min_conf,
-    struct wallet_tx *prepared, struct json_value *result)
+    struct wallet_tx *prepared, struct json_value *result,
+    int32_t spend_floor)
 {
         if (!wallet_ctx_db_ready(ctx)) {
             json_set_str(result,
@@ -429,7 +469,7 @@ static bool z_sendmany_shielded_with_key(
 
         struct db_sapling_note notes[256];
         int num_notes = z_sendmany_shielded_load_notes(
-            ctx, cp, from_z_key, min_conf, notes, result);
+            ctx, cp, from_z_key, min_conf, spend_floor, notes, result);
         if (num_notes < 0)
             return false;
 
@@ -440,10 +480,10 @@ static bool z_sendmany_shielded_with_key(
         z_sendmany_shielded_select_notes(notes, num_notes, total_amount + fee,
                                          selected_notes, &num_sel_notes,
                                          &notes_total);
-        if (notes_total < total_amount + fee) {
-            json_set_str(result, "Insufficient shielded funds");
-            LOG_FAIL("wallet_shielded", "z_sendmany: insufficient shielded funds");
-        }
+        if (notes_total < total_amount + fee)
+            return wallet_spend_gate_short_funds(
+                result, spend_floor, total_amount + fee, notes_total,
+                "shielded", "Insufficient shielded funds");
 
         /* Wallet proving is a capability, not an assumption. The backend is
          * exposed only after a real Spend + Output + binding bundle passes the
@@ -474,7 +514,7 @@ static bool z_sendmany_shielded_with_key(
         int wheight = 0;
         const char *wrefusal = z_sendmany_shielded_witness_gate(
             ctx, selected_notes, num_sel_notes, authoritative_tip,
-            &witnesses, anchor, &i, &wheight);
+            &witnesses, anchor, &i, &wheight, spend_floor);
         if (wrefusal) {
             json_set_str(result, wrefusal);
             LOG_FAIL("wallet_shielded", // wallet-log-ok:note-index-label
@@ -688,7 +728,8 @@ bool z_sendmany_shielded(
     const uint8_t (*z_diversifiers)[11], const uint8_t (*z_pk_ds)[32],
     const int64_t *z_amounts, const uint8_t (*z_memos)[512],
     const bool *z_has_memo, size_t num_z_out, int min_conf,
-    struct wallet_tx *prepared, struct json_value *result)
+    struct wallet_tx *prepared, struct json_value *result,
+    int32_t spend_floor)
 {
     struct sapling_key_entry key_copy;
     if (!ctx || !ctx->wallet ||
@@ -707,7 +748,7 @@ bool z_sendmany_shielded(
     bool ok = z_sendmany_shielded_with_key(
         ctx, cp, &key_copy, total_amount, t_dests, t_amounts, num_t_out,
         z_diversifiers, z_pk_ds, z_amounts, z_memos, z_has_memo, num_z_out,
-        min_conf, prepared, result);
+        min_conf, prepared, result, spend_floor);
     memory_cleanse(&key_copy, sizeof(key_copy));
     return ok;
 }
