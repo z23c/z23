@@ -441,6 +441,15 @@ _test_next:;
 static int liv_case_drive(void)
 {
     int failures = 0;
+    /* macOS refuses every finite RLIMIT_DATA, so the worker refuses to
+     * launch an executor there (typed memory-ceiling-unavailable, asserted
+     * in test_devagent_worker.c). This case needs a launch: skip, loudly. */
+    if (zcl_devagent_worker_memory_ceiling_refusal() != NULL) {
+        printf("liveness: C starts while A waits on owner... SKIP: launch "
+               "needs the heap ceiling (%s)\n",
+               zcl_devagent_worker_memory_ceiling_refusal());
+        return 0;
+    }
     TEST("liveness: C starts while A waits on owner and B is not running") {
         struct wkr_drive_opts o;
         char qpath[1200];

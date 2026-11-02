@@ -836,10 +836,24 @@ static bool gtx_skip_asan(const char *name)
 #endif
 }
 
+/* A case that expects the executor to run needs a host that can hold the
+ * RLIMIT_DATA heap ceiling. macOS refuses every finite RLIMIT_DATA, so the
+ * worker refuses the launch with a typed reason (test_devagent_worker.c
+ * asserts that refusal); the cases that expect a launch skip there, loudly. */
+static bool gtx_skip_no_ceiling(const char *name)
+{
+    const char *why = zcl_devagent_worker_memory_ceiling_refusal();
+    if (!why)
+        return false;
+    printf("worker guards: %s SKIP: launch needs the heap ceiling (%s)\n",
+           name, why);
+    return true;
+}
+
 static int gtx_case_e1(void)
 {
     int failures = 0;
-    if (gtx_skip_asan("gtx_case_e1"))
+    if (gtx_skip_asan("gtx_case_e1") || gtx_skip_no_ceiling("gtx_case_e1"))
         return 0;
 
     TEST("(e) submitted:false restarts to exactly-once")
@@ -1171,6 +1185,8 @@ static int gtx_case_brief(int mode)
     int failures = 0;
     if (gtx_skip_asan("gtx_case_brief"))
         return 0;
+    if (mode == 0 && gtx_skip_no_ceiling("gtx_case_brief"))
+        return 0;
     bool isolated = false;
     char local[PATH_MAX] = "", localdir[PATH_MAX] = "";
     char outside[PATH_MAX] = "";
@@ -1225,6 +1241,8 @@ static int gtx_case_brief_text(int mode)
     };
     int failures = 0;
     bool isolated = false;
+    if (mode == 0 && gtx_skip_no_ceiling("gtx_case_brief_text"))
+        return 0;
     TEST("contained brief validates measured bytes before string composition")
     {
         struct rcv_drive_opts ro;
@@ -1264,6 +1282,8 @@ static int gtx_case_brief_resolution(int mode)
 {
     int failures = 0;
     if (gtx_skip_asan("gtx_case_brief_resolution"))
+        return 0;
+    if (mode != 2 && gtx_skip_no_ceiling("gtx_case_brief_resolution"))
         return 0;
     bool isolated = false;
     char link[PATH_MAX] = "";
