@@ -81,6 +81,8 @@ set -eu
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=tools/scripts/port_probe.sh
+. "$SCRIPT_DIR/scripts/port_probe.sh"
 NODE_BIN="${ZCL_NODE_BIN:-$REPO_ROOT/build/bin/zclassic23}"
 RPC_BIN="${ZCL_RPC_BIN:-$REPO_ROOT/build/bin/zcl-rpc}"
 
@@ -161,6 +163,22 @@ if [ -e "$COPY_DIR" ]; then
 fi
 
 skip() { echo "anchor-snapshot-copy-prove: SKIP ($*)"; exit 2; }
+
+# A live listener on the dead -connect sink would be dialled, so the proof
+# would pass against a real peer. z23_tcp_port_listening rc 0 = listening,
+# 1 = free; any other rc = unobserved, which refuses too.
+assert_sink_free() {
+    local rc=0
+    if z23_tcp_port_listening 39999; then
+        echo "anchor-snapshot-copy-prove: FAIL (dead -connect sink 39999 is LISTENING — a live peer would be dialled)" >&2
+        exit 2
+    else
+        rc=$?
+    fi
+    [ "$rc" -eq 1 ] && return 0
+    echo "anchor-snapshot-copy-prove: FAIL (dead -connect sink 39999 availability is UNOBSERVED)" >&2
+    exit 2
+}
 
 echo "======================================================================"
 echo "  anchor-snapshot-copy-prove plan"
@@ -250,6 +268,7 @@ fi
 if [ -n "$TAIL_PEER" ]; then
     BOOT_PEER_ARGS="-addnode=$TAIL_PEER"
 else
+    assert_sink_free
     BOOT_PEER_ARGS="-connect=127.0.0.1:39999"
 fi
 NODE_ISO_ARGS="-fsport=$FSPORT -httpsport=$HTTPSPORT $BOOT_PEER_ARGS -nolegacyimport -nofilesync -nobgvalidation"

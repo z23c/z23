@@ -164,6 +164,8 @@ set -eu
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=tools/scripts/port_probe.sh
+. "$SCRIPT_DIR/scripts/port_probe.sh"
 NODE_BIN="${ZCL_NODE_BIN:-$REPO_ROOT/build/bin/zclassic23}"
 RPC_BIN="${ZCL_RPC_BIN:-$REPO_ROOT/build/bin/zcl-rpc}"
 
@@ -416,6 +418,17 @@ mkdir -p "$ISO_HOME"
 if [ "$MODE" = "import" ] && [ -n "$TAIL_PEER" ]; then
     BOOT_PEER_ARGS="-addnode=$TAIL_PEER"
 else
+    # A live listener on the dead -connect sink would be dialled, so the copy
+    # proof would pass against a real peer. Refuse before the node boots.
+    _sink_rc=0
+    if z23_tcp_port_listening 39999; then
+        echo "import-copy-prove: FAIL (dead -connect sink 39999 is LISTENING — a live peer would be dialled)" >&2
+        exit 2
+    else
+        _sink_rc=$?
+    fi
+    [ "$_sink_rc" -eq 1 ] ||
+        { echo "import-copy-prove: FAIL (dead -connect sink 39999 availability is UNOBSERVED)" >&2; exit 2; }
     BOOT_PEER_ARGS="-connect=127.0.0.1:39999"
 fi
 # The canonical source datadir persists wallet_identity.operator_lane=canonical.

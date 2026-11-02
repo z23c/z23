@@ -1,10 +1,11 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 # Cross-host TCP LISTEN preflight.  Binding remains the final authority.
+# POSIX sh: both bash and /bin/sh scripts source this file.
 
 z23_tcp_port_listening()
 {
-    local port="${1:-}" output="" diagnostic="" rc=0 failures=""
+    local port="${1:-}" output="" diagnostic="" rc=0 failures="" line=""
     case "$port" in
         ''|*[!0-9]*)
             printf 'z23-port-probe: UNOBSERVED port=%s reason=invalid_port\n' \
@@ -55,9 +56,15 @@ z23_tcp_port_listening()
             rc=$?
         fi
         if [ "$rc" -eq 0 ]; then
-            if [[ "$output" =~ [.:]${port}[[:space:]].*LISTEN ]]; then
-                return 0
-            fi
+            # One line at a time, with no external tool: a probe run under a
+            # pinned PATH may hold nothing but netstat.
+            while IFS= read -r line; do
+                case "$line" in
+                    *[.:]"$port"[[:space:]]*LISTEN*) return 0 ;;
+                esac
+            done <<EOF_Z23_NETSTAT
+$output
+EOF_Z23_NETSTAT
             return 1
         fi
         failures="${failures:+$failures,}netstat_exit_$rc"
@@ -71,7 +78,7 @@ z23_tcp_port_listening()
 
 z23_port_probe_selftest()
 (
-    local work old_path rc output failures=0
+    local self="${1:?port_probe selftest needs its own path}" work old_path rc output failures=0
     work="$(mktemp -d "${TMPDIR:-/tmp}/z23-port-probe.XXXXXX")" || return 2
     old_path="$PATH"
     trap 'PATH="$old_path"; rm -rf -- "$work"' EXIT
@@ -119,75 +126,83 @@ EOF_NETSTAT
                 "$name" "$rc" "$want" "$output" >&2
             failures=$((failures + 1))
         fi
-        if [ "$want" -eq 2 ] && ! grep -Fq 'UNOBSERVED' <<<"$output"; then
-            printf 'port-probe selftest FAIL: %s lacked named UNOBSERVED\n' \
-                "$name" >&2
-            failures=$((failures + 1))
+        if [ "$want" -eq 2 ]; then
+            case "$output" in
+                *UNOBSERVED*) ;;
+                *)
+                    printf 'port-probe selftest FAIL: %s lacked named UNOBSERVED\n' \
+                        "$name" >&2
+                    failures=$((failures + 1)) ;;
+            esac
         fi
     }
 
     z23_probe_require_output()
     {
         local name="$1" needle="$2"
-        if ! grep -Fq "$needle" <<<"$output"; then
-            printf 'port-probe selftest FAIL: %s lacked %s output=%s\n' \
-                "$name" "$needle" "$output" >&2
-            failures=$((failures + 1))
-        fi
+        case "$output" in
+            *"$needle"*) ;;
+            *)
+                printf 'port-probe selftest FAIL: %s lacked %s output=%s\n' \
+                    "$name" "$needle" "$output" >&2
+                failures=$((failures + 1)) ;;
+        esac
     }
 
     z23_probe_expect ss-listen 0 "$work/ss" \
-        /usr/bin/env Z23_FAKE_SS_MODE=listen /bin/bash -c \
-        'source "$1"; z23_tcp_port_listening 39070' _ "${BASH_SOURCE[0]}"
+        /usr/bin/env Z23_FAKE_SS_MODE=listen /bin/sh -c \
+        '. "$1"; z23_tcp_port_listening 39070' _ "$self"
     z23_probe_expect ss-free 1 "$work/ss" \
-        /usr/bin/env Z23_FAKE_SS_MODE=free /bin/bash -c \
-        'source "$1"; z23_tcp_port_listening 39070' _ "${BASH_SOURCE[0]}"
+        /usr/bin/env Z23_FAKE_SS_MODE=free /bin/sh -c \
+        '. "$1"; z23_tcp_port_listening 39070' _ "$self"
     z23_probe_expect ss-error 2 "$work/ss" \
-        /usr/bin/env Z23_FAKE_SS_MODE=error /bin/bash -c \
-        'source "$1"; z23_tcp_port_listening 39070' _ "${BASH_SOURCE[0]}"
+        /usr/bin/env Z23_FAKE_SS_MODE=error /bin/sh -c \
+        '. "$1"; z23_tcp_port_listening 39070' _ "$self"
     z23_probe_require_output ss-error 'reason=ss_exit_7'
     z23_probe_expect lsof-listen 0 "$work/lsof" \
-        /usr/bin/env Z23_FAKE_LSOF_MODE=listen /bin/bash -c \
-        'source "$1"; z23_tcp_port_listening 39070' _ "${BASH_SOURCE[0]}"
+        /usr/bin/env Z23_FAKE_LSOF_MODE=listen /bin/sh -c \
+        '. "$1"; z23_tcp_port_listening 39070' _ "$self"
     z23_probe_expect lsof-free 1 "$work/lsof" \
-        /usr/bin/env Z23_FAKE_LSOF_MODE=free /bin/bash -c \
-        'source "$1"; z23_tcp_port_listening 39070' _ "${BASH_SOURCE[0]}"
+        /usr/bin/env Z23_FAKE_LSOF_MODE=free /bin/sh -c \
+        '. "$1"; z23_tcp_port_listening 39070' _ "$self"
     z23_probe_expect lsof-error 2 "$work/lsof" \
-        /usr/bin/env Z23_FAKE_LSOF_MODE=error /bin/bash -c \
-        'source "$1"; z23_tcp_port_listening 39070' _ "${BASH_SOURCE[0]}"
+        /usr/bin/env Z23_FAKE_LSOF_MODE=error /bin/sh -c \
+        '. "$1"; z23_tcp_port_listening 39070' _ "$self"
     z23_probe_expect netstat-listen 0 "$work/netstat" \
-        /usr/bin/env Z23_FAKE_NETSTAT_MODE=listen /bin/bash -c \
-        'source "$1"; z23_tcp_port_listening 39070' _ "${BASH_SOURCE[0]}"
+        /usr/bin/env Z23_FAKE_NETSTAT_MODE=listen /bin/sh -c \
+        '. "$1"; z23_tcp_port_listening 39070' _ "$self"
     z23_probe_expect netstat-win-listen 0 "$work/netstat" \
-        /usr/bin/env Z23_FAKE_NETSTAT_MODE=winlisten /bin/bash -c \
-        'source "$1"; z23_tcp_port_listening 39070' _ "${BASH_SOURCE[0]}"
+        /usr/bin/env Z23_FAKE_NETSTAT_MODE=winlisten /bin/sh -c \
+        '. "$1"; z23_tcp_port_listening 39070' _ "$self"
     z23_probe_expect netstat-free 1 "$work/netstat" \
-        /usr/bin/env Z23_FAKE_NETSTAT_MODE=free /bin/bash -c \
-        'source "$1"; z23_tcp_port_listening 39070' _ "${BASH_SOURCE[0]}"
+        /usr/bin/env Z23_FAKE_NETSTAT_MODE=free /bin/sh -c \
+        '. "$1"; z23_tcp_port_listening 39070' _ "$self"
     z23_probe_expect netstat-error 2 "$work/netstat" \
-        /usr/bin/env Z23_FAKE_NETSTAT_MODE=error /bin/bash -c \
-        'source "$1"; z23_tcp_port_listening 39070' _ "${BASH_SOURCE[0]}"
+        /usr/bin/env Z23_FAKE_NETSTAT_MODE=error /bin/sh -c \
+        '. "$1"; z23_tcp_port_listening 39070' _ "$self"
     z23_probe_require_output netstat-error 'reason=netstat_exit_6'
-    z23_probe_expect no-backend 2 "$work/none" /bin/bash -c \
-        'source "$1"; z23_tcp_port_listening 39070' _ "${BASH_SOURCE[0]}"
-    z23_probe_expect invalid-text 2 "$work/none" /bin/bash -c \
-        'source "$1"; z23_tcp_port_listening nope' _ "${BASH_SOURCE[0]}"
-    z23_probe_expect invalid-zero 2 "$work/none" /bin/bash -c \
-        'source "$1"; z23_tcp_port_listening 0' _ "${BASH_SOURCE[0]}"
-    z23_probe_expect invalid-high 2 "$work/none" /bin/bash -c \
-        'source "$1"; z23_tcp_port_listening 65536' _ "${BASH_SOURCE[0]}"
-    z23_probe_expect invalid-overflow 2 "$work/none" /bin/bash -c \
-        'source "$1"; z23_tcp_port_listening 999999999999999999999999' _ \
-        "${BASH_SOURCE[0]}"
+    z23_probe_expect no-backend 2 "$work/none" /bin/sh -c \
+        '. "$1"; z23_tcp_port_listening 39070' _ "$self"
+    z23_probe_expect invalid-text 2 "$work/none" /bin/sh -c \
+        '. "$1"; z23_tcp_port_listening nope' _ "$self"
+    z23_probe_expect invalid-zero 2 "$work/none" /bin/sh -c \
+        '. "$1"; z23_tcp_port_listening 0' _ "$self"
+    z23_probe_expect invalid-high 2 "$work/none" /bin/sh -c \
+        '. "$1"; z23_tcp_port_listening 65536' _ "$self"
+    z23_probe_expect invalid-overflow 2 "$work/none" /bin/sh -c \
+        '. "$1"; z23_tcp_port_listening 999999999999999999999999' _ \
+        "$self"
 
     [ "$failures" -eq 0 ] || return 1
     printf 'port-probe selftest: PASS backends=ss,lsof,netstat tri_state=true\n'
 )
 
-if [ "${BASH_SOURCE[0]}" = "$0" ]; then
-    set -euo pipefail
-    case "${1:-}" in
-        --selftest) z23_port_probe_selftest ;;
-        *) printf 'usage: %s --selftest\n' "$0" >&2; exit 2 ;;
-    esac
-fi
+# Run only when executed as this file, never when a script sources it.
+case "${0##*/}" in
+    port_probe.sh)
+        set -eu
+        case "${1:-}" in
+            --selftest) z23_port_probe_selftest "$0" ;;
+            *) printf 'usage: %s --selftest\n' "$0" >&2; exit 2 ;;
+        esac ;;
+esac

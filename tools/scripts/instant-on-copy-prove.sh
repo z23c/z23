@@ -75,6 +75,8 @@ if command -v git >/dev/null 2>&1; then
 fi
 NODE_BIN="${ZCL_NODE_BIN:-$REPO_ROOT/build/bin/zclassic23}"
 RPC_BIN="${ZCL_RPC_BIN:-$REPO_ROOT/build/bin/zcl-rpc}"
+# shellcheck source=tools/scripts/port_probe.sh
+. "$SELF_DIR/port_probe.sh"
 
 # ── Defaults ────────────────────────────────────────────────────────────────
 CHECKPOINT=3056758                 # REDUCER_FRONTIER_TRUSTED_ANCHOR (mainnet)
@@ -123,6 +125,20 @@ done
 [ -n "$EXPECT_CLIMB_PAST" ] || EXPECT_CLIMB_PAST="$CHECKPOINT"
 
 fail_env() { echo "instant-on-copy-prove: $1" >&2; exit 2; }
+
+# A live listener on the dead -connect sink would be dialled, so the instant-on
+# proof would pass against a real peer. z23_tcp_port_listening rc 0 = listening,
+# 1 = free; any other rc = unobserved, which refuses too.
+assert_sink_free() {
+    local rc=0
+    if z23_tcp_port_listening 39999; then
+        fail_env "dead -connect sink 39999 is LISTENING — a live peer would be dialled"
+    else
+        rc=$?
+    fi
+    [ "$rc" -eq 1 ] && return 0
+    fail_env "dead -connect sink 39999 availability is UNOBSERVED"
+}
 
 [ -x "$NODE_BIN" ] || fail_env "node binary not built at $NODE_BIN (run 'make' or set ZCL_NODE_BIN)"
 [ -x "$RPC_BIN" ]  || fail_env "rpc binary not built at $RPC_BIN (run 'make zcl-rpc' or set ZCL_RPC_BIN)"
@@ -437,6 +453,9 @@ mkdir -p "$STAGE_DIR" || fail_env "cannot create stage dir $STAGE_DIR"
 BUNDLE_STAGED=$(stage_readonly "$BUNDLE_RESOLVED" "bundle.sqlite")
 [ -n "$BUNDLE_STAGED" ] && [ -f "$BUNDLE_STAGED" ] || fail_env "could not stage a read-only bundle copy under $STAGE_DIR"
 
+if [ "$CONNECT" = "127.0.0.1:39999" ]; then
+    assert_sink_free
+fi
 [ "$POSITIVE_ONLY" = "1" ] || run_negative
 [ "$NEGATIVE_ONLY" = "1" ] || run_positive
 

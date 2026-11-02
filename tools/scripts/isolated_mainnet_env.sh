@@ -89,6 +89,9 @@ ISO_PARAMS_DIR=""
 ISO_NODE_BIN="${ISO_NODE_BIN:-./build/bin/zclassic23}"
 ISO_RPC_BIN="${ISO_RPC_BIN:-./build/bin/zcl-rpc}"
 
+# shellcheck source=tools/scripts/port_probe.sh
+. "$(cd "${BASH_SOURCE[0]%/*}" && pwd)/port_probe.sh"
+
 # iso_die: a fatal isolation-setup problem (missing tooling, port collision,
 # an unsafe datadir path, ...). Full detail always goes to stderr (captured
 # by the journal same as before). When the sourcing script defines `blocked`
@@ -126,6 +129,20 @@ iso_assert_port_free() {
         iso_die "port $p is already LISTENING — refusing (operator port math is wrong)"
     fi
     return 0
+}
+
+# Abort if the dead -connect sink LISTENs: a live listener there would be
+# dialled and the replay would pass against a real peer. z23_tcp_port_listening
+# rc 0 = listening, 1 = free; any other rc = unobserved, which refuses too.
+iso_assert_sink_free() {
+    local rc=0
+    if z23_tcp_port_listening "$ISO_CONNECT_SINK"; then
+        iso_die "dead -connect sink $ISO_CONNECT_SINK is LISTENING — refusing (a live peer would be dialled)"
+    else
+        rc=$?
+    fi
+    [ "$rc" -eq 1 ] && return 0
+    iso_die "dead -connect sink $ISO_CONNECT_SINK availability is UNOBSERVED — refusing"
 }
 
 # Abort if the throwaway-datadir parent is missing, relative, a live
@@ -248,6 +265,7 @@ iso_init() {
     for p in "$ISO_PORT" "$ISO_RPCPORT" "$ISO_FSPORT" "$ISO_HTTPSPORT"; do
         iso_assert_port_free "$p"
     done
+    iso_assert_sink_free
 
     echo "isolated_mainnet_env: datadir=$ISO_DD ports{p2p=$ISO_PORT rpc=$ISO_RPCPORT fs=$ISO_FSPORT https=$ISO_HTTPSPORT} sink=$ISO_CONNECT_SINK"
 }

@@ -104,6 +104,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# shellcheck source=tools/scripts/port_probe.sh
+. "$REPO_ROOT/tools/scripts/port_probe.sh"
 NODE_BIN="${ZCL_NODE_BIN:-$REPO_ROOT/build/bin/zclassic23}"
 RPC_BIN="${ZCL_RPC_BIN:-$REPO_ROOT/build/bin/zcl-rpc}"
 JSONQ="${JSONQ:-$REPO_ROOT/build/bin/jsonq}"
@@ -156,6 +158,19 @@ sa_assert_port_free() {
         sa_die "port $p is already LISTENING — refusing (operator port math is wrong)"
     fi
     return 0
+}
+# A live listener on the dead -connect sink would be dialled, so the fixture
+# would pass against a real peer. z23_tcp_port_listening rc 0 = listening,
+# 1 = free; any other rc = unobserved, which refuses too.
+sa_assert_sink_free() {
+    local rc=0
+    if z23_tcp_port_listening "$DEAD_SINK"; then
+        sa_die "dead -connect sink $DEAD_SINK is LISTENING — refusing (a live peer would be dialled)"
+    else
+        rc=$?
+    fi
+    [ "$rc" -eq 1 ] && return 0
+    sa_die "dead -connect sink $DEAD_SINK availability is UNOBSERVED — refusing"
 }
 
 sa_kill_group() {
@@ -756,6 +771,7 @@ for p in "$A_PORT" "$A_RPC" "$A_FS" "$A_HTTPS" \
          "$B_PORT" "$B_RPC" "$B_FS" "$B_HTTPS" "$DEAD_SINK"; do
     sa_assert_not_live_port "$p"
 done
+sa_assert_sink_free
 
 SA_DD_A="$(mktemp -d "$REPO_ROOT/test-tmp/zcl23-sciacc-A-XXXXXX")" || sa_die "mktemp A failed"
 SA_DD_B="$(mktemp -d "$REPO_ROOT/test-tmp/zcl23-sciacc-B-XXXXXX")" || sa_die "mktemp B failed"

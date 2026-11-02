@@ -20,6 +20,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# shellcheck source=tools/scripts/port_probe.sh
+. "$REPO_ROOT/tools/scripts/port_probe.sh"
 NODE_BIN="${ZCL_NODE_BIN:-$REPO_ROOT/build/bin/zclassic23}"
 RPC_BIN="${ZCL_RPC_BIN:-$REPO_ROOT/build/bin/zcl-rpc}"
 MKT_HELPER="${ZCL_MARKET_HELPER:-$REPO_ROOT/build/bin/z23-market-acceptance-helper}"
@@ -79,6 +81,20 @@ mkt_assert_port() {
     [ -n "$(ss -tlnH "sport = :$p" 2>/dev/null)" ] &&
         mkt_die "port $p is already listening"
     return 0
+}
+
+# A live listener on the dead -connect sink would be dialled, so the fixture
+# would pass against a real peer. z23_tcp_port_listening rc 0 = listening,
+# 1 = free; any other rc = unobserved, which refuses too.
+mkt_assert_sink_free() {
+    local rc=0
+    if z23_tcp_port_listening "$DEAD_SINK"; then
+        mkt_die "dead -connect sink $DEAD_SINK is LISTENING — refusing (a live peer would be dialled)"
+    else
+        rc=$?
+    fi
+    [ "$rc" -eq 1 ] && return 0
+    mkt_die "dead -connect sink $DEAD_SINK availability is UNOBSERVED — refusing"
 }
 
 mkt_kill_group() {
@@ -541,6 +557,7 @@ mkt_assert_tx_network() {
 for port in $A_PORT $A_RPC $A_FS $A_HTTPS $B_PORT $B_RPC $B_FS $B_HTTPS; do
     mkt_assert_port "$port"
 done
+mkt_assert_sink_free
 [ -x "$NODE_BIN" ] && [ -x "$RPC_BIN" ] && [ -x "$MKT_HELPER" ] ||
     mkt_die "build node, RPC, and market acceptance helper binaries first"
 mkdir -p "$REPO_ROOT/test-tmp"
