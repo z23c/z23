@@ -462,6 +462,274 @@ static bool rf_purge_utxo_suffix_wanted(int lowest_stale_utxo_unapplied,
     return lowest_stale_utxo_unapplied >= 0 && apply;
 }
 
+/* Read the live coins frontier under the caller's progress-store lock and,
+ * when the purge window is non-empty, snapshot its canonical hashes. Returns
+ * false only when that read fails. */
+static bool rf_purge_prepare_canonical_window(
+    sqlite3 *db, struct main_state *ms,
+    struct stage_reducer_frontier_reconcile_result *out,
+    struct rf_canonical_hash *canon, int *lo, int *hi,
+    bool *frontier_known, bool *ran_window)
+{
+    *lo = 0;
+    *hi = -1;
+    *frontier_known = false;
+    *ran_window = false;
+    /* Re-read the coin frontier under this writer lock: a raced, lower
+     * snapshot once stranded a future kernel suffix. Dry-run only observes. */
+    if (!rf_purge_read_live_frontier(db, out)) {
+        LOG_WARN_IN("stage_reducer_frontier_purge_noncanonical",
+                 "stage_repair",
+                 "purge_noncanonical: live coins frontier read failed");
+        return false;
+    }
+    int tip_h = active_chain_height(&ms->chain_active);
+    if (!rf_purge_window(out, tip_h, lo, hi)) {
+        *lo = 0;
+        *hi = -1;
+        return true;
+    }
+    *frontier_known = rf_purge_frontier_known(out);
+    rf_purge_snapshot_canonical(ms, canon, *lo, *hi);
+    *ran_window = true;
+    return true;
+}
+
+/* Probe hash-log rows at height h and delete a non-canonical row when purging
+ * is allowed. Sets *stale_here. Returns false on a scan or delete failure. */
+static bool rf_purge_scan_hash_logs_at(
+    sqlite3 *db, int h, bool apply, bool purge_allowed,
+    const struct rf_canonical_hash *ch,
+    struct stage_reducer_frontier_reconcile_result *out,
+    bool *tx_open, bool *stale_here)
+{
+    *stale_here = false;
+    static const struct {
+        const char *table;
+        const char *hash_col;
+    } hash_logs[] = {
+        { "script_validate_log",  "block_hash" },
+        { "proof_validate_log",   "block_hash" },
+        { "validate_headers_log", "hash" },
+        { "body_fetch_log",       "hash" },
+    };
+    for (size_t t = 0; t < sizeof(hash_logs) / sizeof(hash_logs[0]); t++) {
+        char sql[160];
+        snprintf(sql, sizeof(sql),
+                 "SELECT %s FROM %s WHERE height = ?",
+                 hash_logs[t].hash_col, hash_logs[t].table);
+        sqlite3_stmt *st = NULL;
+        if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) {
+            LOG_WARN_IN("stage_reducer_frontier_purge_noncanonical",
+                        "stage_repair", "purge_noncanonical: prepare %s: %s",
+                        hash_logs[t].table, sqlite3_errmsg(db));
+            return false;
+        }
+        sqlite3_bind_int64(st, 1, h);
+        int step_rc = sqlite3_step(st);  // raw-sql-ok:progress-kv-kernel-store
+        bool mismatch = rf_purge_probe_mismatch(st, step_rc, ch);
+        if (rf_purge_scan_step_failed(step_rc)) {
+            LOG_WARN_IN("stage_reducer_frontier_purge_noncanonical",
+                        "stage_repair",
+                        "purge_noncanonical: scan %s h=%d rc=%d: %s",
+                        hash_logs[t].table, h, step_rc, sqlite3_errmsg(db));
+            sqlite3_finalize(st);
+            return false;
+        }
+        sqlite3_finalize(st);
+        if (!mismatch)
+            continue;
+        *stale_here = true;
+        rf_purge_note_noncanonical(out, h);
+        if (!rf_purge_delete_wanted(purge_allowed, apply))
+            continue;
+        bool began = rf_purge_tx_begin(db, tx_open);
+        if (!began)
+            return began;
+        sqlite3_stmt *del = NULL;
+        if (rf_purge_delete_height_prepare(db, hash_logs[t].table, h,
+                                           &del) != SQLITE_OK) {
+            LOG_WARN_IN("stage_reducer_frontier_purge_noncanonical",
+                        "stage_repair", "purge_noncanonical: del prepare %s: %s",
+                        hash_logs[t].table, sqlite3_errmsg(db));
+            return false;
+        }
+        int rc = sqlite3_step(del);  // raw-sql-ok:progress-kv-kernel-store
+        sqlite3_finalize(del);
+        if (rc != SQLITE_DONE) {
+            LOG_WARN_IN("stage_reducer_frontier_purge_noncanonical",
+                        "stage_repair", "purge_noncanonical: delete %s h=%d rc=%d",
+                        hash_logs[t].table, h, rc);
+            return false;
+        }
+        out->noncanonical_purged++;
+    }
+    return true;
+}
+
+/* Delete hashless downstream rows at a stale height when purging is allowed.
+ * Returns false when a delete step fails. */
+static bool rf_purge_delete_dep_logs_at(
+    sqlite3 *db, int h, bool stale_here, bool apply, bool purge_allowed,
+    struct stage_reducer_frontier_reconcile_result *out)
+{
+    static const char *const dep_logs[] = {
+        "proof_validate_log", "body_persist_log", "tip_finalize_log",
+    };
+    if (!rf_purge_dep_wanted(stale_here, apply, purge_allowed))
+        return true;
+    /* Hashless downstream rows at this height describe the same
+     * wrong block — transitively stale. */
+    for (size_t t = 0; t < sizeof(dep_logs) / sizeof(dep_logs[0]); t++) {
+        sqlite3_stmt *st = NULL;
+        if (rf_purge_delete_height_prepare(db, dep_logs[t], h, &st) !=
+            SQLITE_OK)
+            continue; /* table may not exist yet; holes self-heal */
+        int dep_rc = sqlite3_step(st);  // raw-sql-ok:progress-kv-kernel-store
+        int dep_changed = rf_purge_dep_changed(db, dep_rc);
+        if (dep_rc == SQLITE_DONE && dep_changed > 0) {
+            out->noncanonical_purged++;
+            /* Keep the published row counter honest (stage_log_rows.h). */
+            stage_log_rows_note_delete(dep_logs[t], (int64_t)dep_changed);
+        } else if (dep_rc != SQLITE_DONE) {
+            LOG_WARN_IN("stage_reducer_frontier_purge_noncanonical",
+                        "stage_repair",
+                        "purge_noncanonical: delete %s h=%d rc=%d: %s",
+                        dep_logs[t], h, dep_rc, sqlite3_errmsg(db));
+            sqlite3_finalize(st);
+            return false;
+        }
+        sqlite3_finalize(st);
+    }
+    return true;
+}
+
+/* Clamp script and proof cursors to the lowest purged unapplied height, and
+ * reconcile a purged utxo_apply suffix. Returns false when that fails. */
+static bool rf_purge_clamp_purged_cursors(
+    sqlite3 *db, bool apply, int hi, int lowest_stale_unapplied,
+    int lowest_stale_utxo_unapplied, bool *tx_open,
+    struct stage_reducer_frontier_reconcile_result *out)
+{
+    /* The deletes above turned the stale heights into rowless holes. A
+     * script_validate / proof_validate cursor left ABOVE such a height would
+     * strand it forever: the forward stages only walk up, and the refill
+     * scans key on upstream anchor rows (body_persist_log / script_validate_
+     * log) this same pass just deleted, so they read no hole. Clamp both cursors to the lowest purged
+     * height in the unapplied domain, in the SAME transaction as the deletes
+     * — both log stores are INSERT OR REPLACE, the forward re-walk rewrites
+     * fresh verdicts from the persisted canonical bodies and deletes nothing.
+     * validate_headers / body_fetch / body_persist / tip_finalize cursors
+     * stay with their existing caller-side reconciles (header_admit-keyed
+     * scans survive the purge). A branch-mismatched UTXO row is the exception:
+     * it is removed only at/above the durable coins frontier, then utxo_apply is
+     * aligned to that exact next-unapplied height so no coin can double-apply. */
+    if (lowest_stale_unapplied >= 0) {
+        bool clamped_ok = rf_purge_clamp_script_proof(
+            db, apply, lowest_stale_unapplied, tx_open, out);
+        if (!clamped_ok)
+            return clamped_ok;
+        if (rf_purge_script_proof_clamped(out))
+            LOG_WARN_IN("stage_reducer_frontier_purge_noncanonical",
+                     "stage_repair",
+                     "[stage_repair] purge_noncanonical clamped "
+                     "script_validate=%d->%d proof_validate=%d->%d to purged "
+                     "rowless height h=%d (hstar=%d coins_applied=%d)%s",
+                     out->script_validate_cursor_before,
+                     out->script_validate_cursor_after,
+                     out->proof_validate_cursor_before,
+                     out->proof_validate_cursor_after,
+                     lowest_stale_unapplied, out->hstar,
+                     out->coins_applied_height, apply ? "" : "; dry-run");
+    }
+    if (rf_purge_utxo_suffix_wanted(lowest_stale_utxo_unapplied, apply)) {
+        int before = -1;
+        int after = -1;
+        int target = out->coins_applied_height;
+        int suffix_last = target;
+        bool suffix_ok = rf_purge_utxo_suffix(db, hi, out, tx_open, &before,
+                                              &after, &suffix_last);
+        if (!suffix_ok)
+            return suffix_ok;
+        LOG_WARN_IN("stage_reducer_frontier_purge_noncanonical",
+                 "stage_repair",
+                 "[stage_repair] purge_noncanonical reconciled utxo_apply "
+                 "kernel suffix=[%d,%d] cursor=%d->%d to live durable coins "
+                 "frontier after mixed-fork delta at h=%d",
+                 target, suffix_last, before, after,
+                 lowest_stale_utxo_unapplied);
+    }
+    return true;
+}
+
+/* Log replay-domain evidence and the noncanonical summary. Emits nothing
+ * when the purge window was empty. */
+static void rf_purge_warn_noncanonical(
+    bool apply, int lo, int hi, bool ran_window,
+    int lowest_stale_replay_domain,
+    const struct stage_reducer_frontier_reconcile_result *out)
+{
+    if (!ran_window)
+        return;
+    if (lowest_stale_replay_domain >= 0)
+        LOG_WARN_IN("stage_reducer_frontier_purge_noncanonical",
+                 "stage_repair",
+                 "[stage_repair] purge_noncanonical left noncanonical evidence "
+                 "below/without the coins frontier (lowest=%d "
+                 "coins_applied=%d found=%d): purge refused because no "
+                 "forward refill can prove the rowless hole is safe; "
+                 "stale-script replay domain%s",
+                 lowest_stale_replay_domain, out->coins_applied_height,
+                 out->coins_applied_found, apply ? "" : "; dry-run");
+    if (out->noncanonical_found > 0)
+        LOG_WARN_IN("stage_reducer_frontier_purge_noncanonical",
+                 "stage_repair",
+                 "[stage_repair] non-canonical stage-log rows: found=%d "
+                 "purged=%d lowest=%d window=[%d,%d] (relabel/reorg residue"
+                 "%s)", out->noncanonical_found, out->noncanonical_purged,
+                 out->lowest_noncanonical, lo, hi,
+                 apply ? "" : "; dry-run");
+}
+
+/* Commit an open purge transaction, or roll it back when the pass failed,
+ * and force a rollback if one is still open. Returns ok, false after a
+ * failed commit. */
+static bool rf_purge_close_transaction(sqlite3 *db, bool ok, bool tx_open)
+{
+    if (tx_open) {
+        if (ok) {
+            char *err = NULL;
+            if (sqlite3_exec(db, "COMMIT", NULL, NULL, &err) != SQLITE_OK) {
+                LOG_WARN_IN("stage_reducer_frontier_purge_noncanonical",
+                         "stage_repair",
+                         "purge_noncanonical: COMMIT failed: %s",
+                         err ? err : "(no message)");
+                if (err) sqlite3_free(err);
+                sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+                ok = false;
+            }
+        } else {
+            /* All-or-nothing: a failed pass rolls the deletes back too, so
+             * no rowless height is ever left with a cursor above it. */
+            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        }
+        /* Belt-and-braces: if COMMIT and ROLLBACK BOTH failed (I/O-error
+         * class), the shared progress.kv connection would be left inside a
+         * transaction and every later BEGIN IMMEDIATE on it would fail
+         * ("cannot start a transaction within a transaction"), turning one
+         * purge hiccup into a whole-fold-drive JOB_FATAL. Force it closed
+         * (same recovery stage_batch_end uses). */
+        if (!sqlite3_get_autocommit(db)) {
+            LOG_WARN_IN("stage_reducer_frontier_purge_noncanonical",
+                     "stage_repair",
+                     "purge_noncanonical: transaction still open after "
+                     "COMMIT/ROLLBACK failure — forcing ROLLBACK");
+            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        }
+    }
+    return ok;
+}
+
 bool stage_reducer_frontier_purge_noncanonical(
     sqlite3 *db,
     struct main_state *ms,
@@ -488,44 +756,24 @@ bool stage_reducer_frontier_purge_noncanonical(
     int lowest_stale_unapplied = -1;
     int lowest_stale_utxo_unapplied = -1;
     int lowest_stale_replay_domain = -1;
+    int lo = 0;
+    int hi = -1;
+    bool frontier_known = false;
+    bool ran_window = false;
     progress_store_tx_lock();
 
-    /* Re-read the coin frontier under this writer lock: a raced, lower
-     * snapshot once stranded a future kernel suffix. Dry-run only observes. */
-    if (!rf_purge_read_live_frontier(db, out)) {
-        LOG_WARN("stage_repair",
-                 "purge_noncanonical: live coins frontier read failed");
+    if (!rf_purge_prepare_canonical_window(db, ms, out, canon, &lo, &hi,
+                                           &frontier_known, &ran_window)) {
         ok = false;
         goto done_locked;
     }
 
-    int tip_h = active_chain_height(&ms->chain_active);
-    int lo = 0;
-    int hi = -1;
-    if (!rf_purge_window(out, tip_h, &lo, &hi))
-        goto done_locked;
-    bool frontier_known = rf_purge_frontier_known(out);
-
-    rf_purge_snapshot_canonical(ms, canon, lo, hi);
-
-    static const struct {
-        const char *table;
-        const char *hash_col;
-    } hash_logs[] = {
-        { "script_validate_log",  "block_hash" },
-        { "proof_validate_log",   "block_hash" },
-        { "validate_headers_log", "hash" },
-        { "body_fetch_log",       "hash" },
-    };
-    static const char *const dep_logs[] = {
-        "proof_validate_log", "body_persist_log", "tip_finalize_log",
-    };
-
     for (int h = lo; h <= hi; h++) {
         const struct rf_canonical_hash *ch = &canon[h - lo];
         bool skip_height = false;
-        if (!rf_purge_height_skip(db, h, ch, frontier_known, out,
-                                  &skip_height)) {
+        bool height_ok = rf_purge_height_skip(db, h, ch, frontier_known, out,
+                                              &skip_height);
+        if (!height_ok) {
             ok = false;
             goto done_locked;
         }
@@ -534,190 +782,41 @@ bool stage_reducer_frontier_purge_noncanonical(
         bool purge_allowed = rf_purge_allowed(frontier_known, h, out);
 
         bool stale_here = false;
-        for (size_t t = 0; t < sizeof(hash_logs) / sizeof(hash_logs[0]); t++) {
-            char sql[160];
-            snprintf(sql, sizeof(sql),
-                     "SELECT %s FROM %s WHERE height = ?",
-                     hash_logs[t].hash_col, hash_logs[t].table);
-            sqlite3_stmt *st = NULL;
-            if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) {
-                LOG_WARN("stage_repair", "purge_noncanonical: prepare %s: %s",
-                         hash_logs[t].table, sqlite3_errmsg(db));
-                ok = false;
-                goto done_locked;
-            }
-            sqlite3_bind_int64(st, 1, h);
-            int step_rc = sqlite3_step(st);  // raw-sql-ok:progress-kv-kernel-store
-            bool mismatch = rf_purge_probe_mismatch(st, step_rc, ch);
-            if (rf_purge_scan_step_failed(step_rc)) {
-                LOG_WARN("stage_repair",
-                         "purge_noncanonical: scan %s h=%d rc=%d: %s",
-                         hash_logs[t].table, h, step_rc, sqlite3_errmsg(db));
-                sqlite3_finalize(st);
-                ok = false;
-                goto done_locked;
-            }
-            sqlite3_finalize(st);
-            if (!mismatch)
-                continue;
-            stale_here = true;
-            rf_purge_note_noncanonical(out, h);
-            if (!rf_purge_delete_wanted(purge_allowed, apply))
-                continue;
-            if (!rf_purge_tx_begin(db, &tx_open)) {
-                ok = false;
-                goto done_locked;
-            }
-            sqlite3_stmt *del = NULL;
-            if (rf_purge_delete_height_prepare(db, hash_logs[t].table, h,
-                                               &del) != SQLITE_OK) {
-                LOG_WARN("stage_repair", "purge_noncanonical: del prepare %s: %s",
-                         hash_logs[t].table, sqlite3_errmsg(db));
-                ok = false;
-                goto done_locked;
-            }
-            int rc = sqlite3_step(del);  // raw-sql-ok:progress-kv-kernel-store
-            sqlite3_finalize(del);
-            if (rc != SQLITE_DONE) {
-                LOG_WARN("stage_repair", "purge_noncanonical: delete %s h=%d rc=%d",
-                         hash_logs[t].table, h, rc);
-                ok = false;
-                goto done_locked;
-            }
-            out->noncanonical_purged++;
-        }
-        if (!rf_purge_utxo_branch(db, h, apply, purge_allowed, ch, out,
-                                  &tx_open, &lowest_stale_utxo_unapplied,
-                                  &stale_here)) {
+        bool hash_ok = rf_purge_scan_hash_logs_at(
+            db, h, apply, purge_allowed, ch, out, &tx_open, &stale_here);
+        if (!hash_ok) {
             ok = false;
             goto done_locked;
         }
-        if (rf_purge_dep_wanted(stale_here, apply, purge_allowed)) {
-            /* Hashless downstream rows at this height describe the same
-             * wrong block — transitively stale. */
-            for (size_t t = 0; t < sizeof(dep_logs) / sizeof(dep_logs[0]); t++) {
-                sqlite3_stmt *st = NULL;
-                if (rf_purge_delete_height_prepare(db, dep_logs[t], h, &st) !=
-                    SQLITE_OK)
-                    continue; /* table may not exist yet; holes self-heal */
-                int dep_rc = sqlite3_step(st);  // raw-sql-ok:progress-kv-kernel-store
-                int dep_changed = rf_purge_dep_changed(db, dep_rc);
-                if (dep_rc == SQLITE_DONE && dep_changed > 0) {
-                    out->noncanonical_purged++;
-                    /* Keep the published row counter honest (stage_log_rows.h). */
-                    stage_log_rows_note_delete(dep_logs[t], (int64_t)dep_changed);
-                } else if (dep_rc != SQLITE_DONE) {
-                    LOG_WARN("stage_repair",
-                             "purge_noncanonical: delete %s h=%d rc=%d: %s",
-                             dep_logs[t], h, dep_rc, sqlite3_errmsg(db));
-                    sqlite3_finalize(st);
-                    ok = false;
-                    goto done_locked;
-                }
-                sqlite3_finalize(st);
-            }
+        bool utxo_ok = rf_purge_utxo_branch(
+            db, h, apply, purge_allowed, ch, out, &tx_open,
+            &lowest_stale_utxo_unapplied, &stale_here);
+        if (!utxo_ok) {
+            ok = false;
+            goto done_locked;
+        }
+        bool dep_ok = rf_purge_delete_dep_logs_at(
+            db, h, stale_here, apply, purge_allowed, out);
+        if (!dep_ok) {
+            ok = false;
+            goto done_locked;
         }
         rf_purge_note_stale_height(stale_here, purge_allowed, h,
                                    &lowest_stale_unapplied,
                                    &lowest_stale_replay_domain);
     }
 
-    /* The deletes above turned the stale heights into rowless holes. A
-     * script_validate / proof_validate cursor left ABOVE such a height would
-     * strand it forever: the forward stages only walk up, and the refill
-     * scans key on upstream anchor rows (body_persist_log / script_validate_
-     * log) this same pass just deleted, so they read no hole. Clamp both cursors to the lowest purged
-     * height in the unapplied domain, in the SAME transaction as the deletes
-     * — both log stores are INSERT OR REPLACE, the forward re-walk rewrites
-     * fresh verdicts from the persisted canonical bodies and deletes nothing.
-     * validate_headers / body_fetch / body_persist / tip_finalize cursors
-     * stay with their existing caller-side reconciles (header_admit-keyed
-     * scans survive the purge). A branch-mismatched UTXO row is the exception:
-     * it is removed only at/above the durable coins frontier, then utxo_apply is
-     * aligned to that exact next-unapplied height so no coin can double-apply. */
-    if (lowest_stale_unapplied >= 0) {
-        if (!rf_purge_clamp_script_proof(db, apply, lowest_stale_unapplied,
-                                         &tx_open, out)) {
-            ok = false;
-            goto done_locked;
-        }
-        if (rf_purge_script_proof_clamped(out))
-            LOG_WARN("stage_repair",
-                     "[stage_repair] purge_noncanonical clamped "
-                     "script_validate=%d->%d proof_validate=%d->%d to purged "
-                     "rowless height h=%d (hstar=%d coins_applied=%d)%s",
-                     out->script_validate_cursor_before,
-                     out->script_validate_cursor_after,
-                     out->proof_validate_cursor_before,
-                     out->proof_validate_cursor_after,
-                     lowest_stale_unapplied, out->hstar,
-                     out->coins_applied_height, apply ? "" : "; dry-run");
+    if (!rf_purge_clamp_purged_cursors(db, apply, hi, lowest_stale_unapplied,
+                                       lowest_stale_utxo_unapplied, &tx_open,
+                                       out)) {
+        ok = false;
+        goto done_locked;
     }
-    if (rf_purge_utxo_suffix_wanted(lowest_stale_utxo_unapplied, apply)) {
-        int before = -1;
-        int after = -1;
-        int target = out->coins_applied_height;
-        int suffix_last = target;
-        if (!rf_purge_utxo_suffix(db, hi, out, &tx_open, &before, &after,
-                                  &suffix_last)) {
-            ok = false;
-            goto done_locked;
-        }
-        LOG_WARN("stage_repair",
-                 "[stage_repair] purge_noncanonical reconciled utxo_apply "
-                 "kernel suffix=[%d,%d] cursor=%d->%d to live durable coins "
-                 "frontier after mixed-fork delta at h=%d",
-                 target, suffix_last, before, after,
-                 lowest_stale_utxo_unapplied);
-    }
-    if (lowest_stale_replay_domain >= 0)
-        LOG_WARN("stage_repair",
-                 "[stage_repair] purge_noncanonical left noncanonical evidence "
-                 "below/without the coins frontier (lowest=%d "
-                 "coins_applied=%d found=%d): purge refused because no "
-                 "forward refill can prove the rowless hole is safe; "
-                 "stale-script replay domain%s",
-                 lowest_stale_replay_domain, out->coins_applied_height,
-                 out->coins_applied_found, apply ? "" : "; dry-run");
-
-    if (out->noncanonical_found > 0)
-        LOG_WARN("stage_repair",
-                 "[stage_repair] non-canonical stage-log rows: found=%d "
-                 "purged=%d lowest=%d window=[%d,%d] (relabel/reorg residue"
-                 "%s)", out->noncanonical_found, out->noncanonical_purged,
-                 out->lowest_noncanonical, lo, hi,
-                 apply ? "" : "; dry-run");
+    rf_purge_warn_noncanonical(apply, lo, hi, ran_window,
+                               lowest_stale_replay_domain, out);
 
 done_locked:
-    if (tx_open) {
-        if (ok) {
-            char *err = NULL;
-            if (sqlite3_exec(db, "COMMIT", NULL, NULL, &err) != SQLITE_OK) {
-                LOG_WARN("stage_repair",
-                         "purge_noncanonical: COMMIT failed: %s",
-                         err ? err : "(no message)");
-                if (err) sqlite3_free(err);
-                sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-                ok = false;
-            }
-        } else {
-            /* All-or-nothing: a failed pass rolls the deletes back too, so
-             * no rowless height is ever left with a cursor above it. */
-            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-        }
-        /* Belt-and-braces: if COMMIT and ROLLBACK BOTH failed (I/O-error
-         * class), the shared progress.kv connection would be left inside a
-         * transaction and every later BEGIN IMMEDIATE on it would fail
-         * ("cannot start a transaction within a transaction"), turning one
-         * purge hiccup into a whole-fold-drive JOB_FATAL. Force it closed
-         * (same recovery stage_batch_end uses). */
-        if (!sqlite3_get_autocommit(db)) {
-            LOG_WARN("stage_repair",
-                     "purge_noncanonical: transaction still open after "
-                     "COMMIT/ROLLBACK failure — forcing ROLLBACK");
-            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-        }
-    }
+    ok = rf_purge_close_transaction(db, ok, tx_open);
     progress_store_tx_unlock();
     free(canon);
     return ok;
