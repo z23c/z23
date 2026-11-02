@@ -19,6 +19,7 @@
 
 
 #include "test/syncdiag_rpc_fixture.h"
+#include "services/chain_evidence_authority_service.h"
 
 int test_syncdiag_rpc(void)
 {
@@ -38,6 +39,8 @@ int test_syncdiag_rpc(void)
     failures += syncdiag_cases_agent_ops();
     failures += syncdiag_cases_agent_interface();
     failures += syncdiag_cases_operator();
+    /* Reap the one-shot evidence-maintenance thread healthcheck reads spawn. */
+    chain_evidence_maintain_quiesce();
 
     syncdiag_reset_rpc_globals_for_test();
     agent_security_posture_test_override_review_required(-1);

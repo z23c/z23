@@ -22,6 +22,7 @@
 #include "test/test_core.h"
 #include "controllers/agent_security_posture.h"
 #include "services/soak_attestation_service.h"
+#include "services/chain_evidence_authority_service.h"
 #include "services/sync_benchmark_service.h"
 #include "platform/clock.h"
 #include "json/json.h"
@@ -865,5 +866,7 @@ int test_soak_attestation(void)
     failures += test_sync_benchmark_derived_monotonic();
     failures += test_sync_benchmark_no_datadir_no_write();
     failures += test_sync_benchmark_private_replacement();
+    /* Reap the one-shot evidence-maintenance thread the health sample spawns. */
+    chain_evidence_maintain_quiesce();
     return failures;
 }
