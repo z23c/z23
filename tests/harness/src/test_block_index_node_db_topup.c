@@ -857,6 +857,8 @@ static int ndt_null_db_noop_checks(const char *dir, struct node_db *ndb,
     return failures;
 }
 
+static int ndt_clean_prefix_cases(const char *dir);
+
 int test_block_index_node_db_topup(void)
 {
     printf("\n=== block_index node.db forward-extent top-up tests ===\n");
