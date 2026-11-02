@@ -489,3 +489,44 @@ ZCL_TEST_GROUP_BUILD_NEED("test_consensus_state_snapshot_install",
                           "build/hotswap/zcl_offline_policy_preload.so",
                           "test-offline-policy-preload")
 #endif
+
+/* test_dev_orient runs ./build/bin/z23-lint check-orient-facts in its gate
+ * case, and test_dev_cx copies build/bin/z23-lint into each fixture lane. A
+ * sanitizer runner that has not built it exits 127 (orient) or aborts on the
+ * fixture's "z23-lint is missing" guard (cx). */
+ZCL_TEST_GROUP_BUILD_NEED("test_dev_orient", "build/bin/z23-lint",
+                          "build/bin/z23-lint")
+ZCL_TEST_GROUP_BUILD_NEED("test_dev_cx", "build/bin/z23-lint",
+                          "build/bin/z23-lint")
+
+/* The lint-gate selftests exec the gate scripts and ./build/bin/z23-lint
+ * directly (bypassing make), so a sanitizer runner that never built it sees
+ * exit 127 at every baseline step. The fast runner gets it from the proof
+ * pre-fork bundle (dev-proof-bundle-prefork); declare it per group here. */
+ZCL_TEST_GROUP_BUILD_NEED("test_make_lint_gates",
+                          "build/bin/z23-lint", "build/bin/z23-lint")
+ZCL_TEST_GROUP_BUILD_NEED("test_make_lint_gates_shard_01",
+                          "build/bin/z23-lint", "build/bin/z23-lint")
+ZCL_TEST_GROUP_BUILD_NEED("test_make_lint_gates_shard_02",
+                          "build/bin/z23-lint", "build/bin/z23-lint")
+ZCL_TEST_GROUP_BUILD_NEED("test_make_lint_gates_shard_03",
+                          "build/bin/z23-lint", "build/bin/z23-lint")
+ZCL_TEST_GROUP_BUILD_NEED("test_make_lint_gates_shard_04",
+                          "build/bin/z23-lint", "build/bin/z23-lint")
+ZCL_TEST_GROUP_BUILD_NEED("test_make_lint_gates_shard_05",
+                          "build/bin/z23-lint", "build/bin/z23-lint")
+ZCL_TEST_GROUP_BUILD_NEED("test_make_lint_gates_shard_06",
+                          "build/bin/z23-lint", "build/bin/z23-lint")
+ZCL_TEST_GROUP_BUILD_NEED("test_make_lint_gates_shard_07",
+                          "build/bin/z23-lint", "build/bin/z23-lint")
+ZCL_TEST_GROUP_BUILD_NEED("test_make_lint_gates_shard_08",
+                          "build/bin/z23-lint", "build/bin/z23-lint")
+ZCL_TEST_GROUP_BUILD_NEED("test_make_lint_gates_realroot",
+                          "build/bin/z23-lint", "build/bin/z23-lint")
+ZCL_TEST_GROUP_BUILD_NEED("test_make_lint_gates_heavy_03",
+                          "build/bin/z23-lint", "build/bin/z23-lint")
+
+/* test_dev_land_precheck.c copies the candidate's build/bin/z23-lint into its
+ * fixture clone as real-lint (canonical file-purpose case). */
+ZCL_TEST_GROUP_BUILD_NEED("test_dev_land_shard_02",
+                          "build/bin/z23-lint", "build/bin/z23-lint")
