@@ -11,7 +11,8 @@
  * already recorded); verify ignores a non-allowlisted host, a malformed root, a
  * mismatched offer JSON, an expired post and an already handled post; verify
  * posts ok and refused results with ref; a failed fetch is retried then given
- * up; the board list is followed across pages and a capped listing is reported;
+ * up; a repo lacking the offer's base gets one fetch (then the offer runs, or
+ * BASE_UNKNOWN is retried and never posted); the board list is followed across pages and a capped listing is reported;
  * a nonzero exit is a failure; unreadable or unwritable state, or an unreadable
  * allowlist, stops the run with a typed code; collect writes the receipts and
  * one qualified.tsv row per offer, ignores a refused or mismatched result, and
@@ -95,6 +96,35 @@ static bool lpt_run_has(const char *needle)
     return strstr(g_run, needle) != NULL;
 }
 
+static bool lpt_base_state(const struct lpt *e, bool present, bool fetch_gives);
+
+/* A stub git first on PATH (the tool runs "git -C repo ..." by argv; the one
+ * script here is the stub, the tool itself starts no shell): cat-file succeeds
+ * once base.present exists; fetch logs a line to fetch.log and, if fetch.gives
+ * exists, makes the base present. The default is base present. */
+static bool lpt_stub_git(const struct lpt *e)
+{
+    static const char script[] =
+        "#!/bin/sh\n"
+        "d=\"$(dirname \"$0\")/..\"\n"
+        "case \"$3\" in\n"
+        "cat-file) [ -e \"$d/base.present\" ] ;;\n"
+        "fetch) echo fetch >> \"$d/fetch.log\"\n"
+        "  [ -e \"$d/fetch.gives\" ] && : > \"$d/base.present\"; exit 0 ;;\n"
+        "*) exit 1 ;;\n"
+        "esac\n";
+    static char old_path[4096];
+    char dir[700], path[800], np[5000];
+    const char *cur = getenv("PATH");
+    if (!old_path[0])
+        (void)snprintf(old_path, sizeof(old_path), "%s", cur ? cur : "/usr/bin:/bin");
+    (void)snprintf(dir, sizeof(dir), "%s/bin", e->d);
+    (void)snprintf(path, sizeof(path), "%s/git", dir);
+    (void)snprintf(np, sizeof(np), "%s:%s", dir, old_path);
+    return mkdir(dir, 0700) == 0 && lpt_wf(path, script) && chmod(path, 0700) == 0 &&
+           lpt_base_state(e, true, false) && setenv("PATH", np, 1) == 0;
+}
+
 /* The scratch dir, canned-reply dir, state dir, lane dir and the two fake
  * programs: symlinks to the C fake, which finds its files beside its own name. */
 static bool lpt_setup(struct lpt *e, const char *tag)
@@ -113,7 +143,20 @@ static bool lpt_setup(struct lpt *e, const char *tag)
     (void)snprintf(e->repo, sizeof(e->repo), "%s/repo", e->d);
     return mkdir(e->resp, 0700) == 0 && mkdir(e->lane, 0700) == 0 &&
            mkdir(e->repo, 0700) == 0 && mkdir(e->state, 0700) == 0 &&
-           symlink(fake, e->z23) == 0 && symlink(fake, e->z23dev) == 0;
+           symlink(fake, e->z23) == 0 && symlink(fake, e->z23dev) == 0 &&
+           lpt_stub_git(e);
+}
+
+/* The base-missing cases: the repo lacks the base (and a fetch may supply it). */
+static bool lpt_base_state(const struct lpt *e, bool present, bool fetch_gives)
+{
+    char p[700];
+    (void)snprintf(p, sizeof(p), "%s/base.present", e->d);
+    (void)unlink(p);
+    if (present && !lpt_wf(p, "1\n"))
+        return false;
+    (void)snprintf(p, sizeof(p), "%s/fetch.gives", e->d);
+    return !fetch_gives || lpt_wf(p, "1\n");
 }
 
 /* Writes resp.<key> (the fake's canned reply). */
@@ -594,6 +637,61 @@ static int case_verify_fetch_retry(void)
     return failures;
 }
 
+static int case_verify_base_fetched(void)
+{
+    int failures = 0;
+    struct lpt e;
+    char fl[800];
+    TEST_CASE("lab_peer: a stale repo gets one fetch and the offer is processed") {
+        ASSERT(lpt_verify_env(&e, "verify_base_fetch"));
+        ASSERT(lpt_base_state(&e, false, true));
+        (void)snprintf(fl, sizeof(fl), "%s/fetch.log", e.d);
+        ASSERT_EQ(lpt_verify_run(&e), 0);
+        ASSERT_EQ(lpt_count(fl, "fetch\n"), 1);
+        ASSERT_EQ(lpt_count(e.calls, "\treverify_offer\n"), 1);
+        ASSERT_EQ(lpt_count(e.calls, "\tresult\n"), 1);
+        ASSERT(lpt_file_has(e.calls, "verdict=ok"));
+    } TEST_END
+    return failures;
+}
+
+static int case_verify_base_known_no_fetch(void)
+{
+    int failures = 0;
+    struct lpt e;
+    char fl[800];
+    TEST_CASE("lab_peer: an offer whose base exists runs no fetch") {
+        ASSERT(lpt_verify_env(&e, "verify_base_known"));
+        (void)snprintf(fl, sizeof(fl), "%s/fetch.log", e.d);
+        ASSERT_EQ(lpt_verify_run(&e), 0);
+        ASSERT(!lpt_exists(fl));
+        ASSERT_EQ(lpt_count(e.calls, "\tresult\n"), 1);
+    } TEST_END
+    return failures;
+}
+
+static int case_verify_base_unknown(void)
+{
+    int failures = 0;
+    struct lpt e;
+    char fl[800], handled[800];
+    TEST_CASE("lab_peer: a base still missing is BASE_UNKNOWN, retryable, not posted") {
+        ASSERT(lpt_verify_env(&e, "verify_base_unknown"));
+        ASSERT(lpt_base_state(&e, false, false));
+        (void)snprintf(fl, sizeof(fl), "%s/fetch.log", e.d);
+        (void)snprintf(handled, sizeof(handled), "%s/handled.tsv", e.state);
+        ASSERT_EQ(lpt_verify_run(&e), 0);
+        ASSERT_EQ(lpt_count(fl, "fetch\n"), 1);
+        ASSERT_EQ(lpt_count(handled, "\tretry\tBASE_UNKNOWN\t"), 1);
+        ASSERT_EQ(lpt_count(e.calls, "\tresult\n"), 0);
+        ASSERT_EQ(lpt_count(e.calls, "\treverify_offer\n"), 0);
+        ASSERT(lpt_base_state(&e, false, true));
+        ASSERT_EQ(lpt_verify_run(&e), 0);
+        ASSERT_EQ(lpt_count(e.calls, "\tresult\n"), 1);
+    } TEST_END
+    return failures;
+}
+
 static int case_verify_follows_pages(void)
 {
     int failures = 0;
@@ -1008,6 +1106,9 @@ int test_lab_peer(void)
     failures += case_verify_check_bad();
     failures += case_verify_posts_refused();
     failures += case_verify_fetch_retry();
+    failures += case_verify_base_fetched();
+    failures += case_verify_base_known_no_fetch();
+    failures += case_verify_base_unknown();
     failures += case_verify_follows_pages();
     failures += case_verify_reports_truncation();
     failures += case_verify_nonzero_exit();

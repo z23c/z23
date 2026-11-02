@@ -14,7 +14,7 @@
  *   verify  --state=DIR --repo=DIR --authors=FILE [--room=lab] [--max=N]
  *       board list -> for each offer post from an allowlisted key that is
  *       unexpired, well-formed and not yet handled: fleet bundle fetch ->
- *       dev land reverify_offer -> a signed receipt (or a typed refusal) posted
+ *       base check (one git fetch if --repo lacks it, else BASE_UNKNOWN, retry) -> dev land reverify_offer -> a signed receipt (or a typed refusal) posted
  *       as kind result with ref = the offer post. STATE/handled.tsv makes a post
  *       processed once; a failed fetch is retryable, three attempts in all.
  *       --check=cx (the default; nothing is passed) runs reverify_offer's split
@@ -986,6 +986,28 @@ static bool lp_fetch(const struct lp_ctx *c, const struct lp_parsed *o,
     return ok;
 }
 
+/* One git command in --repo, by argv (no shell); true on exit 0 in time. */
+static bool lp_git(const struct lp_ctx *c, int timeout_s, const char *a,
+                   const char *b, const char *d)
+{
+    char out[256];
+    bool to = false;
+    const char *const argv[] = {"git", "-C", c->v[LP_O_REPO], a, b, d, NULL};
+    return zcl_spawn_capture_observed(argv, out, sizeof(out), timeout_s * 1000, &to) == 0 && !to;
+}
+
+/* Step 5b: the base must be in --repo; a stale repo gets one origin fetch. */
+static bool lp_have_base(const struct lp_ctx *c, const char *base)
+{
+    char rev[80];
+    if (!lp_fmt(rev, sizeof(rev), "%s^{commit}", base))
+        return false;
+    if (lp_git(c, LP_QUICK_S, "cat-file", "-e", rev))
+        return true;
+    (void)lp_git(c, LP_FETCH_S, "fetch", "--quiet", "origin");
+    return lp_git(c, LP_QUICK_S, "cat-file", "-e", rev);
+}
+
 /* Step 6: reverify; true on a pass with the one-line receipt in line, else
  * code holds the typed refusal (and *retry is set for a non-answer). */
 static bool lp_reverify(const struct lp_ctx *c, const char *bundle,
@@ -1076,6 +1098,10 @@ static void lp_process(struct lp_ctx *c, const char *id, const struct lp_parsed 
     }
     if (!lp_fetch(c, o, p.bundle)) {
         lp_fail(c, id, "FETCH_FAILED", prior, t0);
+        return;
+    }
+    if (!lp_have_base(c, o->base)) {
+        lp_fail(c, id, "BASE_UNKNOWN", prior, t0);
         return;
     }
     const bool ok = lp_reverify(c, p.bundle, p.offer, p.receipt, line,
