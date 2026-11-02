@@ -38,6 +38,8 @@ struct stl_bs {
 };
 
 static struct stl_bs g_bs;
+/* Nested-suite marker state (see stl_nested_state): 0 unset, 1 honoured, 2 refused. */
+static int g_nested;
 
 static void stl_fail_add(struct stl_bs *bs, const char *what)
 {
@@ -119,7 +121,9 @@ static void stl_helper_selftest(struct stl_bs *bs, int build_only)
 }
 
 /* Hash of every input the X11 selftest reads; empty (always run) on any
- * hashing failure. */
+ * hashing failure. The lint binary contributes its digest only: sha256sum's
+ * own output would add the binary's absolute path and give every worktree a
+ * different key. */
 static void stl_x11_key(struct stl_bs *bs)
 {
     char exe[STL_PATH], qexe[STL_PATH * 2], kin[STL_PATH], qkin[STL_PATH * 2];
@@ -131,7 +135,7 @@ static void stl_x11_key(struct stl_bs *bs)
         sh_single_quote(kin, qkin, sizeof qkin) != 0)
         return;
     if (ovf(snprintf(cmd, sizeof cmd,
-        "{ sha256sum %s %s && find vendor/x11/include -type f | LC_ALL=C sort | xargs sha256sum"
+        "{ sha256sum %s && sha256sum %s | cut -c1-64 && find vendor/x11/include -type f | LC_ALL=C sort | xargs sha256sum"
         " && cc --version && awk '/^NATIVE_UI_DRIVER_BIN = /{a=1} a{if(/^# Crash recovery/)exit;print}'"
         " Makefile; } >%s 2>/dev/null && sha256sum %s | cut -c1-64",
         k_x11_suite_files, qexe, qkin, qkin), sizeof cmd))
@@ -141,29 +145,58 @@ static void stl_x11_key(struct stl_bs *bs)
         bs->key[0] = '\0';
 }
 
-static int stl_stamp_matches(const struct stl_bs *bs)
+/* True when the file at path holds exactly key (trailing newlines ignored). */
+static int stl_stamp_file_has(const char *path, const char *key)
 {
     char have[128] = "";
-    FILE *f = fopen(k_x11_stamp, "r");
-    if (!f || !bs->key[0]) {
-        if (f)
-            fclose(f);
+    FILE *f = fopen(path, "r");
+    if (!f)
         return 0;
-    }
     size_t n = fread(have, 1, sizeof have - 1, f);
     fclose(f);
     have[n] = '\0';
     while (n && have[n - 1] == '\n')
         have[--n] = '\0';
-    return strcmp(have, bs->key) == 0;
+    return strcmp(have, key) == 0;
+}
+
+/* A fresh worktree has no build/lint-stamps, so the per-tree stamp alone made
+ * every fresh stack worktree re-run the whole X11 suite. The key already
+ * hashes every input (suite sources, the lint binary, vendored X11 headers,
+ * the compiler, the Makefile section), so a pass recorded under the same key
+ * in any tree on this host still proves the same thing. The shared stamp is
+ * one file per key under the user cache dir; it is never consulted in a
+ * nested fixture run, and its absence or any I/O failure is just a miss. */
+static int stl_shared_stamp_path(const struct stl_bs *bs, char *out, size_t cap)
+{
+    const char *xdg = getenv("XDG_CACHE_HOME");
+    const char *home = getenv("HOME");
+    if (g_nested || !bs->key[0])
+        return -1;
+    if (xdg && xdg[0] == '/')
+        return ovf(snprintf(out, cap, "%s/z23/lint-stamps/standalone-x11.%s", xdg, bs->key), cap)
+                   ? -1 : 0;
+    if (home && home[0] == '/')
+        return ovf(snprintf(out, cap, "%s/.cache/z23/lint-stamps/standalone-x11.%s", home,
+                            bs->key), cap) ? -1 : 0;
+    return -1;
+}
+
+static int stl_stamp_matches(const struct stl_bs *bs)
+{
+    char shared[STL_PATH];
+    if (!bs->key[0])
+        return 0;
+    if (stl_stamp_file_has(k_x11_stamp, bs->key))
+        return 1;
+    return stl_shared_stamp_path(bs, shared, sizeof shared) == 0 &&
+           stl_stamp_file_has(shared, bs->key);
 }
 
 /* The suite exports its fixture root in k_stl_x11_nested so the gates it
  * launches stub the suite out. The marker counts only when it names the
  * tree this gate is checking; any other value is an inherited fake and is
  * refused, never skipped. 0 = unset, 1 = honoured, 2 = refused. */
-static int g_nested;
-
 static int stl_nested_state(void)
 {
     const char *v = getenv(k_stl_x11_nested);
@@ -274,8 +307,12 @@ static void stl_x11_finish(struct stl_bs *bs)
     bs->xpid = 0;
     if (rc == 0) {
         stl_copy_to(stdout, bs->xlog);
-        if (bs->key[0])
+        if (bs->key[0]) {
+            char shared[STL_PATH];
             csr_write(k_x11_stamp, bs->key);
+            if (stl_shared_stamp_path(bs, shared, sizeof shared) == 0)
+                csr_write(shared, bs->key);
+        }
         return;
     }
     stl_copy_to(stderr, bs->xlog);
