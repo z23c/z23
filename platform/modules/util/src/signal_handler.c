@@ -471,6 +471,13 @@ int signal_handler_install(void)
     ss.ss_flags = 0;
     if (sigaltstack(&ss, NULL) != 0) return -1;
 
+    /* glibc's first backtrace() dlopens libgcc_s (malloc, dl locks), which is
+     * not async-signal-safe and can deadlock a crashing node. Prime it here,
+     * outside any signal, so the handler's backtrace() only walks frames. */
+    {
+        void *prime[4];
+        (void)backtrace(prime, 4);
+    }
 #endif
 
     struct sigaction sa;
