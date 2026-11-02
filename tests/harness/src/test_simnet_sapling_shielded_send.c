@@ -770,9 +770,11 @@ static int build_and_verify(uint64_t seed, bool verify_ok,
      * Ownership of tz's vin/vout transfers to simnet (freed in the mint); the
      * shielded-output array is caller-owned per the harness contract, so we
      * free it ourselves once the mint has consumed it. */
+    /* simnet_mint_txs() re-inits the caller slot, so keep the array pointer. */
+    struct output_description *tz_out_arr = tz.v_shielded_output;
     SS_CHECK("mint t->z (tree append + root stamp + connect_block)",
              simnet_mint_txs(&s, &tz, 1));
-    free(tz.v_shielded_output);
+    free(tz_out_arr);
     tz.v_shielded_output = NULL;
     tz.num_shielded_output = 0;
     SS_CHECK("tree has 1 note after t->z", simnet_sapling_tree_size(&s) == 1);
@@ -865,12 +867,14 @@ static int build_and_verify(uint64_t seed, bool verify_ok,
      * connect_block. Ownership of zz's vin/vout transfers to simnet; the
      * caller-owned shielded spend/output arrays are freed here after the mint
      * has consumed them (harness frees vin/vout only). */
+    struct spend_description *zz_spend_arr = zz.v_shielded_spend;
+    struct output_description *zz_out_arr = zz.v_shielded_output;
     SS_CHECK("mint z->z (tree append + root stamp + connect_block)",
              simnet_mint_txs(&s, &zz, 1));
-    free(zz.v_shielded_spend);
+    free(zz_spend_arr);
     zz.v_shielded_spend = NULL;
     zz.num_shielded_spend = 0;
-    free(zz.v_shielded_output);
+    free(zz_out_arr);
     zz.v_shielded_output = NULL;
     zz.num_shielded_output = 0;
     SS_CHECK("tree has 2 notes after z->z", simnet_sapling_tree_size(&s) == 2);

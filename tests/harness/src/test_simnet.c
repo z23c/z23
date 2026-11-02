@@ -1181,6 +1181,7 @@ static int sim_test_znam_bad_record(struct simnet *sim,
                          bad_btc_record, sizeof(bad_btc_record));
     SN_CHECK("ZNAM non-owner SET_RECORD is ignored by projection",
              indexed_znam_bad_record && !bad_record_leaked);
+    transaction_free(&znam_bad_record_projection);
     return failures;
 }
 
@@ -1279,6 +1280,7 @@ static int sim_test_znam_bad_text(struct simnet *sim,
                          bad_email_record, sizeof(bad_email_record));
     SN_CHECK("ZNAM non-owner SET_TEXT is ignored by projection",
              indexed_znam_bad_text && !bad_text_leaked);
+    transaction_free(&znam_bad_text_projection);
     return failures;
 }
 

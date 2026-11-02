@@ -1325,12 +1325,14 @@ static int act3_mint_note(struct act3_ctx *c)
             memcpy(c->note_cm_u256.data, c->note_cm, 32);
         }
 
+        /* simnet_mint_txs() re-inits tz, so keep the output array pointer. */
+        struct output_description *tz_out_arr = tz.v_shielded_output;
         DR_CHECK("act3: mint it (tree append + connect_block)",
                  ok && simnet_mint_txs(&c->s, &tz, 1));
         c->have_note = dec && simnet_sapling_tree_size(&c->s) == 1;
         DR_CHECK("act3: the note is at tree position 0", c->have_note);
 
-        free(tz.v_shielded_output);
+        free(tz_out_arr);
         tz.v_shielded_output = NULL;
         tz.num_shielded_output = 0;
         transaction_free(&tz);

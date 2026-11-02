@@ -1575,9 +1575,11 @@ static bool wds_pay(struct simnet *s,
     ok = ok && wds_verify(&tz, cp, height);
     ok = ok && transaction_copy(copy_out, &tz);
     transaction_compute_hash(copy_out);
+    /* simnet_mint_txs() re-inits tz, so keep the output array pointer. */
+    struct output_description *tz_out_arr = tz.v_shielded_output;
     ok = ok && simnet_mint_txs(s, &tz, 1);
     zclassic_sapling_proving_ctx_free(pctx);
-    free(tz.v_shielded_output);
+    free(tz_out_arr);
     return ok;
 }
 
@@ -1729,6 +1731,8 @@ static int wds_spend_all(struct wdr *f, struct simnet *s,
             ASSERT(from_default.tx.num_shielded_spend >= 1);
             ASSERT(wds_verify(&from_default.tx, cp,
                               simnet_tip_height(s) + 1));
+            transaction_free(&single.tx);
+            transaction_free(&from_default.tx);
         }
 
         /* 5.5 ZCL exceeds any two of the notes (1+2+3 ZCL less fees). */
@@ -1786,11 +1790,13 @@ static int wds_spend_all(struct wdr *f, struct simnet *s,
         transaction_init(&mint);
         ASSERT(transaction_copy(&mint, tx));
         transaction_compute_hash(&mint);
+        struct spend_description *mint_spend_arr = mint.v_shielded_spend;
+        struct output_description *mint_out_arr = mint.v_shielded_output;
         ASSERT(simnet_mint_txs(s, &mint, 1));
         ASSERT_EQ(simnet_tip_height(s), height);
         ASSERT_EQ((int)simnet_sapling_tree_size(s), WDR_PAYERS + 2);
-        free(mint.v_shielded_spend);
-        free(mint.v_shielded_output);
+        free(mint_spend_arr);
+        free(mint_out_arr);
         transaction_free(tx);
         memory_cleanse(&acct, sizeof(acct));
         memory_cleanse(&pxsk, sizeof(pxsk));

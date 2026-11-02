@@ -382,6 +382,7 @@ bool rpc_z_listunspent(const struct json_value *params, bool help,
             wallet_memo_to_json(&entry, n->memo, n->memo_len);
 
             json_push_back(result, &entry);
+            json_free(&entry);
         }
         free(db_notes);
     }

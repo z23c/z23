@@ -1142,18 +1142,23 @@ static void keyed_params(struct json_value *params, const char *key)
     json_init(&v);
     json_set_str(&v, WSO_FROM);
     (void)json_push_back(params, &v);
+    json_free(&v);
     json_init(&v);
     json_set_array(&v);
     (void)json_push_back(params, &v);
+    json_free(&v);
     json_init(&v);
     json_set_int(&v, 1);
     (void)json_push_back(params, &v);
+    json_free(&v);
     json_init(&v);
     json_set_str(&v, "0.0000025");
     (void)json_push_back(params, &v);
+    json_free(&v);
     json_init(&v);
     json_set_str(&v, key);
     (void)json_push_back(params, &v);
+    json_free(&v);
 }
 
 static int case_real_commit(void)

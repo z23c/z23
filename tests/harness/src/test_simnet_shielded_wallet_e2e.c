@@ -297,9 +297,11 @@ static int part_a_t_to_z(struct simnet *s, struct we_id *id,
              dec && memcmp(dmemo, memo, 512) == 0);
 
     /* Mint: append note0 to the tree, advance tip. */
+    /* simnet_mint_txs() re-inits tz, so keep the output array pointer. */
+    struct output_description *tz_out_arr = tz.v_shielded_output;
     WE_CHECK("t->z: mint (tree append + connect_block)",
              built && simnet_mint_txs(s, &tz, 1));
-    free(tz.v_shielded_output);
+    free(tz_out_arr);
     tz.v_shielded_output = NULL;
     tz.num_shielded_output = 0;
     WE_CHECK("t->z: tree has 1 note", simnet_sapling_tree_size(s) == 1);
@@ -471,10 +473,13 @@ static int part_a_z_to_z(struct simnet *s, struct we_id *id,
                                       shielded_value, ar, ready, out_built, n1);
     failures += part_a_zz_nullifier(&zz, zz_height, ready, zz_spend_nf);
 
+    /* simnet_mint_txs() re-inits zz, so keep the array pointers. */
+    struct spend_description *zz_spend_arr = zz.v_shielded_spend;
+    struct output_description *zz_out_arr = zz.v_shielded_output;
     WE_CHECK("z->z: mint (tree append + connect_block)",
              ready && simnet_mint_txs(s, &zz, 1));
-    free(zz.v_shielded_spend);  zz.v_shielded_spend  = NULL; zz.num_shielded_spend  = 0;
-    free(zz.v_shielded_output); zz.v_shielded_output = NULL; zz.num_shielded_output = 0;
+    free(zz_spend_arr);  zz.v_shielded_spend  = NULL; zz.num_shielded_spend  = 0;
+    free(zz_out_arr); zz.v_shielded_output = NULL; zz.num_shielded_output = 0;
     WE_CHECK("z->z: tree has 2 notes", simnet_sapling_tree_size(s) == 2);
 
     n1->have = simnet_sapling_tree_size(s) == 2 &&
@@ -573,9 +578,11 @@ static int part_a_z_to_t(struct simnet *s, struct we_id *id,
     bool zt_verified = spend_built && we_verify(&zt, cp, zt_height);
     WE_CHECK("z->t: consensus verifier ACCEPTS", zt_verified);
 
+    /* simnet_mint_txs() re-inits zt, so keep the spend array pointer. */
+    struct spend_description *zt_spend_arr = zt.v_shielded_spend;
     failures += part_a_zt_mint_check(s, &zt, shielded_value, zt_verified);
 
-    free(zt.v_shielded_spend); zt.v_shielded_spend = NULL; zt.num_shielded_spend = 0;
+    free(zt_spend_arr); zt.v_shielded_spend = NULL; zt.num_shielded_spend = 0;
     transaction_free(&zt);
     zclassic_sapling_proving_ctx_free(pctx);
     return failures;

@@ -163,6 +163,7 @@ static bool rpc_getwalletinfo(const struct json_value *params, bool help,
                       (int64_t)ctx->wallet->sapling_keys.num_damaged);
     json_push_kv_str (&persistence, "last_error",        h.last_error);
     json_push_kv(result, "persistence", &persistence);
+    json_free(&persistence);
 
     /* Encryption-at-rest lock posture (wallet_lock). Surfaces whether the
      * wallet wraps keys at rest and whether it is currently unlocked, so an
@@ -172,6 +173,7 @@ static bool rpc_getwalletinfo(const struct json_value *params, bool help,
     json_set_object(&lock);
     wallet_lock_status_json(&lock);
     json_push_kv(result, "lock", &lock);
+    json_free(&lock);
 
     wallet_readiness_append_sapling(result);
     wallet_readiness_append_scan(result);

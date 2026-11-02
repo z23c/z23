@@ -132,6 +132,7 @@ static bool sst_write_output_block_rooted(const char *dir,
     bool ok = write_block_to_disk(&blk, pos_out, dir, msg);
     if (hash_out)
         block_get_hash(&blk, hash_out);
+    block_free(&blk);
     return ok;
 }
 

@@ -960,5 +960,6 @@ bool sd_lanes_scenario(struct sd_agent_ops_ctx *ctx)
     ok = sd_lanes_fs_and_lane_list(&lanes) && ok;
     ok = sd_lanes_canonical_and_dev(&lanes) && ok;
     ok = sd_lanes_dev_deployment_safety(&lanes) && ok;
+    json_free(&lanes);
     return ok;
 }
