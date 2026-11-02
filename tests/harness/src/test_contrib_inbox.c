@@ -6,8 +6,9 @@
  * the only model. Each case runs in its own temp state dir, responder checkout
  * and lock file, so nothing reaches a live node, a timer or a real model.
  *
- * Scenarios: maintainer and own posts are ignored, a helper agent on a
- * maintainer host is answered; a need is acknowledged and never modelled; a
+ * Scenarios: maintainer and own posts are ignored (any post from a maintainer
+ * host, and any maintainer agent on any host, lead included); a contributor
+ * post is answered; a need is acknowledged and never modelled; a
  * question is answered once; an answer with an IPv4, or an unknown 64-hex, is
  * refused; a known 64-hex passes; an ESCALATE reply is queued; a repeat pass
  * posts nothing new; the daily cap stops model calls; four posts per pass at
@@ -331,6 +332,7 @@ static int case_maintainer_ignored(void)
     return failures;
 }
 
+/* A post from a maintainer host is ours whatever agent it names. */
 static int case_helper_on_maint_host(void)
 {
     struct ci_env e;
@@ -343,7 +345,53 @@ static int case_helper_on_maint_host(void)
     CI_CHECK("a fixture answer for the helper is staged",
              ci_model_reply(&e, "ANSWER: see the gate at tools/lint/run_lint.sh"));
     CI_CHECK("the pass exits 0", ci_pass(&e) == 0);
-    CI_CHECK("the helper post is answered", ci_has_events(&e, "ANSWERED"));
+    CI_CHECK("the helper post on a maintainer host is never announced",
+             !ci_has_events(&e, "NEW "));
+    CI_CHECK("the helper post on a maintainer host is never answered",
+             !ci_has_events(&e, "ANSWERED") && !ci_has_events(&e, "DRY post"));
+    return failures;
+}
+
+/* The lead's post from a maintainer host is never acknowledged (post 508de1ec21
+ * was a lead post on r1's host, acknowledged in error). */
+static int case_lead_on_maint_host_ignored(void)
+{
+    struct ci_env e;
+    char l[65];
+    ci_hex64(l, 'e');
+    int failures = 0;
+    CI_CHECK("a lead post on a maintainer host is staged",
+             ci_setup_list_one(&e, "leadpost", l, CI_MAINT, "lead",
+                               "question", "maintainer status update"));
+    CI_CHECK("the pass exits 0", ci_pass(&e) == 0);
+    CI_CHECK("the lead post is never announced", !ci_has_events(&e, "NEW "));
+    CI_CHECK("the lead post is never acknowledged",
+             !ci_has_events(&e, "Received") && ci_events_count(&e, "DRY post") == 0);
+    return failures;
+}
+
+/* A maintainer agent is ours on any host, so the tool never acknowledges its
+ * own posts even when they arrive from a host that is not a maintainer host. */
+static int case_own_agent_any_host_ignored(void)
+{
+    struct ci_env e;
+    char o[65], p[65];
+    ci_hex64(o, 'f');
+    ci_hex64(p, '1');
+    int failures = 0;
+    char own[2048], lead[2048];
+    const char *list[2] = { own, lead };
+    if (!ci_setup(&e, "ownany"))
+        return 1;
+    ci_entry(own, sizeof(own), o, CI_OUTSIDE, "claude-r1-responder", "note",
+             "our own received note");
+    ci_entry(lead, sizeof(lead), p, CI_OUTSIDE, "lead", "question",
+             "lead words from an outside host");
+    CI_CHECK("own and lead posts from an outside host are staged", ci_list(&e, list, 2));
+    CI_CHECK("the pass exits 0", ci_pass(&e) == 0);
+    CI_CHECK("own and lead posts from an outside host are never announced",
+             !ci_has_events(&e, "NEW "));
+    CI_CHECK("no post is made for them", ci_events_count(&e, "DRY post") == 0);
     return failures;
 }
 
@@ -939,6 +987,8 @@ int test_contrib_inbox(void)
     }
     failures += case_maintainer_ignored();
     failures += case_helper_on_maint_host();
+    failures += case_lead_on_maint_host_ignored();
+    failures += case_own_agent_any_host_ignored();
     failures += case_need_acknowledged();
     failures += case_question_answered();
     failures += case_refusals();

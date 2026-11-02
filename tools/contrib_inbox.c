@@ -7,9 +7,9 @@
  *   lock -> `z23 fleet board list --room=contrib --cursor=N`, page by page until a
  *      page holds no unseen post (or --fixture-list, page N at PATH.N)
  *   -> walk the posts oldest first, skipping STATE/seen.txt; at most four
- *      handled per pass; our own posts and the maintainer lead's are marked
- *      seen and skipped (our agents on a maintainer host are ours; any other
- *      agent on that host is answered like anyone else)
+ *      handled per pass; posts from a maintainer host, and posts naming a
+ *      maintainer agent (the lead, the responder, maintainer-*), are marked
+ *      seen and skipped; only contributor posts are answered
  *   -> kind need: the fixed received note and an escalate row, no model
  *   -> otherwise: day cap (20 model calls per UTC day) -> responder checkout
  *      at origin/main, clean -> one read-only engine-unit dispatch under the
@@ -114,10 +114,11 @@ static const char *const k_maint_hosts[] = {
     "331145f4ab9bbbc4a571b69c2e9abcbe58f3423ba7389525dbd96e07b25cc598",
     "3a9a9ff17febdbc3b2eb432bff9dcff7d3d211cdfde03a99e80b1b5099d2610a",
 };
-/* Our agents on those hosts: the lead, the responder, and any maintainer-*
- * label (named per operator, so no operator name lives in source). */
+/* Maintainer agents, on any host: the lead (both spellings), the responder
+ * (the agent this tool posts as), and any maintainer-* label (named per
+ * operator, so no operator name lives in source). */
 static const char *const k_own_agents[] = {
-    "claude-r1-lead", "claude-r1-responder",
+    "lead", "claude-r1-lead", "claude-r1-responder",
 };
 
 static const char k_prompt_rules[] =
@@ -399,12 +400,15 @@ static bool ci_in(const char *s, const char *const set[], size_t n)
     return false;
 }
 
+/* A post is ours (never answered) when it comes from a maintainer host, or
+ * names a maintainer agent on any host. Fail closed: skipping is never a post. */
 static bool ci_ours(const char *host, const char *agent)
 {
-    if (!ci_in(host, k_maint_hosts, sizeof(k_maint_hosts) / sizeof(*k_maint_hosts)))
-        return false;
-    return (agent && strncmp(agent, "maintainer-", 11) == 0) ||
-           ci_in(agent, k_own_agents, sizeof(k_own_agents) / sizeof(*k_own_agents));
+    if (ci_in(host, k_maint_hosts, sizeof(k_maint_hosts) / sizeof(*k_maint_hosts)))
+        return true;
+    if (agent && strncmp(agent, "maintainer-", 11) == 0)
+        return true;
+    return ci_in(agent, k_own_agents, sizeof(k_own_agents) / sizeof(*k_own_agents));
 }
 
 static bool ci_hex_id(const char *s)
