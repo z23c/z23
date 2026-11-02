@@ -78,14 +78,14 @@ unset -f date
 # sink, and must still accept when the sink is dead. Subshells keep the
 # stubbed probe and the iso_init EXIT trap away from this selftest.
 sink_out="$fixture/sink.out"
-if ( ISO_NODE_BIN=/bin/true ISO_RPC_BIN=/bin/true
+if ( ISO_NODE_BIN="$ISO_JSONQ_BIN" ISO_RPC_BIN="$ISO_JSONQ_BIN"
      z23_tcp_port_listening() { [ "$1" = "$ISO_CONNECT_SINK" ] && return 0; return 1; }
      iso_init ) >"$sink_out" 2>&1; then
     fail 'iso_init accepted a LISTENING dead sink'
 fi
 grep -q 'dead -connect sink port 39999 is already LISTENING' "$sink_out" ||
     fail 'listening dead sink refused without the sink message'
-( ISO_NODE_BIN=/bin/true ISO_RPC_BIN=/bin/true
+( ISO_NODE_BIN="$ISO_JSONQ_BIN" ISO_RPC_BIN="$ISO_JSONQ_BIN"
   z23_tcp_port_listening() { return 1; }
   iso_init ) >/dev/null 2>&1 || fail 'iso_init refused a dead sink'
 printf 'isolated-readiness selftest: PASS typed_rpc=true errors_refused=true portable_listener=true unobserved_refused=true dead_sink_refused=true\n'

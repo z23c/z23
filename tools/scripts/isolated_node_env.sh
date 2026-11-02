@@ -19,6 +19,8 @@
 #      bound — a collision means the operator's port math is wrong; we
 #      abort loud rather than silently dodging onto another port. This
 #      LISTEN check refuses unavailable observations; bind remains final.
+#      The dead -connect sink (ISO_CONNECT_SINK) gets the same LISTEN
+#      refusal: a live listener there would be dialled, not stay dead.
 #   4. Install an EXIT/INT/TERM cleanup trap that kills the spawned
 #      node's whole PROCESS GROUP and rm -rf's the /tmp datadir (only
 #      after re-asserting the datadir is under /tmp and non-empty).
@@ -172,6 +174,21 @@ iso_assert_port_free() {
     iso_die "port $p availability is UNOBSERVED — refusing"
 }
 
+# Abort if anything is LISTENING on the dead -connect sink. The sink must stay
+# dead: a live listener there (e.g. a lab Tor SOCKS) would be dialled and the
+# fixture would pass against a real peer. Same probe and refusal shape as the
+# own-port check above.
+iso_assert_sink_free() {
+    local p="$1" rc
+    if z23_tcp_port_listening "$p"; then
+        iso_die "dead -connect sink port $p is already LISTENING — refusing (a real listener would be dialled)"
+    else
+        rc=$?
+    fi
+    [ "$rc" -eq 1 ] && return 0
+    iso_die "dead -connect sink port $p availability is UNOBSERVED — refusing"
+}
+
 # ── Cleanup: kill the process group + remove the /tmp datadir ───────
 iso_cleanup() {
     # Idempotent: the EXIT trap fires once even with INT/TERM chained.
@@ -296,6 +313,7 @@ iso_init() {
     for p in "$ISO_PORT" "$ISO_RPCPORT" "$ISO_FSPORT" "$ISO_HTTPSPORT"; do
         iso_assert_port_free "$p"
     done
+    iso_assert_sink_free "$ISO_CONNECT_SINK"
 
     echo "isolated_node_env: datadir=$ISO_DD ports{p2p=$ISO_PORT rpc=$ISO_RPCPORT fs=$ISO_FSPORT https=$ISO_HTTPSPORT} sink=$ISO_CONNECT_SINK"
 }
