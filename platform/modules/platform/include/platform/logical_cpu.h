@@ -38,6 +38,26 @@ uint32_t platform_cpu_quota_walk(const char *leaf_dir, const char *root_dir);
 uint32_t platform_memory_worker_cap(uint32_t cpus, int64_t memory_budget_bytes,
                                     int64_t per_worker_bytes);
 
+/* Bytes still free under the tightest cgroup v2 memory.max from leaf_dir up
+ * to and including root_dir: min over levels of (memory.max - used), where
+ * used is memory.current less the inactive file cache (memory.stat
+ * inactive_file) when readable, since the kernel reclaims that before it
+ * kills anything. A level with "max", no file, or unparseable text names no
+ * limit. -1 when no level names one, on bad arguments, or off Linux. May be
+ * 0 (never negative once a limit exists). Lets a test use a fake tree. */
+int64_t platform_cgroup_memory_headroom_walk(const char *leaf_dir,
+                                             const char *root_dir);
+
+/* The same walk over this process's own cgroup. -1 when unlimited, unknown
+ * or off Linux. */
+int64_t platform_cgroup_memory_headroom(void);
+
+/* Whether a worker estimated at estimate_bytes may start: headroom_bytes
+ * (from the functions above) must cover the estimate plus reserve_bytes. A
+ * negative headroom (no limit known) always admits. Pure. */
+bool platform_memory_admit(int64_t headroom_bytes, int64_t estimate_bytes,
+                           int64_t reserve_bytes);
+
 /* Count the logical processors this PROCESS is actually allowed to run on.
  *
  * platform_logical_cpu_count() answers "how big is the host", which is the

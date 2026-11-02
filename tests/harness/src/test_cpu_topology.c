@@ -238,6 +238,68 @@ static int cpt_cpu_quota_walk_checks(void)
 
 #endif
 
+/* Memory admission over a fake cgroup tree: headroom is the tightest
+ * (memory.max - memory.current + inactive_file) along the path. */
+#if defined(__linux__)
+static void cpt_write_file(const char *dir, const char *name, const char *text)
+{
+    char path[640];
+    snprintf(path, sizeof path, "%s/%s", dir, name);
+    FILE *f = fopen(path, "w");
+    if (f) {
+        fputs(text, f);
+        fclose(f);
+    }
+}
+
+static int cpt_memory_headroom_checks(void)
+{
+    int failures = 0;
+    const int64_t mib = INT64_C(1) << 20;
+    char root[400], a[480], b[520];
+    test_make_tmpdir(root, sizeof root, "mem_headroom", "walk");
+    snprintf(a, sizeof a, "%s/a", root);
+    snprintf(b, sizeof b, "%s/b", a);
+    (void)mkdir(a, 0700);
+    (void)mkdir(b, 0700);
+
+    CPT_CHECK("no memory files is no limit",
+              platform_cgroup_memory_headroom_walk(b, root) == -1);
+    cpt_write_file(a, "memory.max", "8589934592\n");     /* 8192 MiB */
+    cpt_write_file(a, "memory.current", "3221225472\n"); /* 3072 MiB */
+    CPT_CHECK("headroom is max minus current",
+              platform_cgroup_memory_headroom_walk(b, root) == 5120 * mib);
+    cpt_write_file(a, "memory.stat", "anon 1\ninactive_file 1073741824\n");
+    CPT_CHECK("inactive file cache counts as free",
+              platform_cgroup_memory_headroom_walk(b, root) == 6144 * mib);
+    cpt_write_file(b, "memory.max", "max\n");
+    cpt_write_file(b, "memory.current", "999\n");
+    CPT_CHECK("a max level adds no limit of its own",
+              platform_cgroup_memory_headroom_walk(b, root) == 6144 * mib);
+    cpt_write_file(b, "memory.max", "1073741824\n");
+    cpt_write_file(b, "memory.current", "1048576000\n");
+    CPT_CHECK("the tightest level wins",
+              platform_cgroup_memory_headroom_walk(b, root) == 24 * mib);
+    cpt_write_file(b, "memory.current", "2147483648\n");
+    CPT_CHECK("over the limit is zero headroom, not negative",
+              platform_cgroup_memory_headroom_walk(b, root) == 0);
+    CPT_CHECK("a null argument is no limit",
+              platform_cgroup_memory_headroom_walk(NULL, root) == -1);
+
+    CPT_CHECK("room for estimate plus reserve admits",
+              platform_memory_admit(1000 * mib, 512 * mib, 256 * mib));
+    CPT_CHECK("headroom short of estimate plus reserve refuses",
+              !platform_memory_admit(700 * mib, 512 * mib, 256 * mib));
+    CPT_CHECK("unknown headroom admits",
+              platform_memory_admit(-1, 512 * mib, 256 * mib));
+    CPT_CHECK("zero headroom refuses a real estimate",
+              !platform_memory_admit(0, 512 * mib, 256 * mib));
+
+    test_rm_rf_recursive(root);
+    return failures;
+}
+#endif
+
 static int cpt_memory_worker_cap_checks(void)
 {
     int failures = 0;
@@ -521,6 +583,9 @@ int test_cpu_topology(void)
     failures += cpt_cpu_quota_walk_checks();
 #endif
     failures += cpt_memory_worker_cap_checks();
+#if defined(__linux__)
+    failures += cpt_memory_headroom_checks();
+#endif
     failures += cpt_build_job_count_checks();
 
     /* ── real /sys scan (or whatever this box/container actually has) ── */

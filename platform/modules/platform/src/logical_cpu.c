@@ -188,6 +188,114 @@ uint32_t platform_memory_worker_cap(uint32_t cpus, int64_t memory_budget_bytes,
     return by_memory < (int64_t)n ? (uint32_t)by_memory : n;
 }
 
+#if defined(__linux__)
+/* A non-negative decimal from the first line of a cgroup file; false for
+ * "max", empty, malformed or unreadable text. */
+static bool cgroup_read_u64(const char *dir, const char *name, uint64_t *out)
+{
+    char path[640];
+    char text[64];
+    if (snprintf(path, sizeof path, "%s/%s", dir, name) >= (int)sizeof path)
+        return false;
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    bool got = fgets(text, sizeof text, f) != NULL;
+    fclose(f);
+    if (!got) return false;
+    const char *p = text;
+    uint64_t v = 0;
+    if (*p < '0' || *p > '9') return false;
+    for (; *p >= '0' && *p <= '9'; p++) {
+        uint64_t d = (uint64_t)(*p - '0');
+        if (v > (UINT64_MAX - d) / 10) return false;
+        v = v * 10 + d;
+    }
+    if (*p != '\0' && *p != '\n') return false;
+    *out = v;
+    return true;
+}
+
+/* inactive_file from memory.stat, 0 when absent. */
+static uint64_t cgroup_inactive_file(const char *dir)
+{
+    char path[640];
+    char line[128];
+    if (snprintf(path, sizeof path, "%s/memory.stat", dir) >= (int)sizeof path)
+        return 0;
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    uint64_t v = 0;
+    while (fgets(line, sizeof line, f)) {
+        if (strncmp(line, "inactive_file ", 14) != 0) continue;
+        const char *p = line + 14;
+        uint64_t n = 0;
+        while (*p >= '0' && *p <= '9') n = n * 10 + (uint64_t)(*p++ - '0');
+        v = n;
+        break;
+    }
+    fclose(f);
+    return v;
+}
+
+static int64_t cgroup_headroom_at(const char *dir)
+{
+    uint64_t max = 0;
+    uint64_t cur = 0;
+    if (!cgroup_read_u64(dir, "memory.max", &max) || max > INT64_MAX)
+        return -1;
+    if (!cgroup_read_u64(dir, "memory.current", &cur)) return -1;
+    uint64_t file = cgroup_inactive_file(dir);
+    uint64_t used = cur > file ? cur - file : 0;
+    return used >= max ? 0 : (int64_t)(max - used);
+}
+#endif
+
+int64_t platform_cgroup_memory_headroom_walk(const char *leaf_dir,
+                                             const char *root_dir)
+{
+#if defined(__linux__)
+    char dir[512];
+    if (!leaf_dir || !root_dir ||
+        snprintf(dir, sizeof dir, "%s", leaf_dir) >= (int)sizeof dir)
+        return -1;
+    int64_t best = -1;
+    for (;;) {
+        int64_t here = cgroup_headroom_at(dir);
+        if (here >= 0 && (best < 0 || here < best)) best = here;
+        if (strcmp(dir, root_dir) == 0) break;
+        char *slash = strrchr(dir, '/');
+        if (!slash || slash == dir) break;
+        *slash = '\0';
+        if (strlen(dir) < strlen(root_dir)) break;
+    }
+    return best;
+#else
+    (void)leaf_dir;
+    (void)root_dir;
+    return -1;
+#endif
+}
+
+int64_t platform_cgroup_memory_headroom(void)
+{
+#if defined(__linux__)
+    char dir[512];
+    if (!os_proc_cgroup_dir(dir, sizeof dir)) return -1;
+    return platform_cgroup_memory_headroom_walk(dir, CPU_QUOTA_CGROUP_ROOT);
+#else
+    return -1;
+#endif
+}
+
+bool platform_memory_admit(int64_t headroom_bytes, int64_t estimate_bytes,
+                           int64_t reserve_bytes)
+{
+    if (headroom_bytes < 0) return true;
+    if (estimate_bytes < 0) estimate_bytes = 0;
+    if (reserve_bytes < 0) reserve_bytes = 0;
+    return headroom_bytes - reserve_bytes >= estimate_bytes;
+}
+
 /* One definition for every platform (check-arm-symbol-single), like the
  * availability count below. */
 uint32_t platform_cpu_quota_limit(void)

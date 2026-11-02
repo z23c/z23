@@ -37,6 +37,11 @@
 
 #define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 700
+#if defined(__linux__)
+/* wait4() reports the reaped child's peak RSS; glibc hides it behind
+ * _DEFAULT_SOURCE once _POSIX_C_SOURCE pins the feature set. */
+#define _DEFAULT_SOURCE 1
+#endif
 
 #include "platform/time_compat.h"
 #include "platform/directory_compat.h"
@@ -279,6 +284,7 @@ struct child_slot {
     zcl_child_t pid;     /* ZCL_CHILD_NONE if slot is free */
     size_t group_idx;    /* index into g_groups for the running group */
     char out_path[128];  /* tempfile path for this child's stdout+stderr */
+    int64_t start_us;    /* monotonic start, for the memory admission ramp */
 };
 
 /* The reap accounting below is written against the waitpid() status word.
@@ -912,6 +918,68 @@ static void print_watchdog_kill(size_t idx, const char *name,
 
 static char g_jobs_reason[96] = "cpus";
 
+/* Memory-aware admission. The static per-worker figure above only bounds the
+ * worker count; a heavy group (test_si under TSan) is several times a light
+ * one, so 16 admitted workers still reached the cgroup ceiling. The runner
+ * therefore also reads the headroom under its own cgroup's memory.max before
+ * each fork, charges the group its measured peak RSS from an earlier run in
+ * this process (wait4 ru_maxrss; the static figure until then), and holds the
+ * fork while the headroom would not cover it plus a reserve. With nothing
+ * running it always admits one, so a group heavier than the whole cgroup
+ * still runs, alone. Off Linux there is no cgroup and nothing changes. */
+#define RUNNER_ADMIT_RESERVE_BYTES (INT64_C(256) * 1024 * 1024)
+/* A just-forked child has not grown yet, so memory.current under-reports it;
+ * its estimate stays charged this long. */
+#define RUNNER_ADMIT_RAMP_US INT64_C(3000000)
+
+[[maybe_unused]] static int64_t g_group_peak_bytes[sizeof(g_groups) / sizeof(g_groups[0])];
+[[maybe_unused]] static int64_t g_reaped_peak_bytes;
+
+[[maybe_unused]] static int64_t group_memory_estimate(size_t idx)
+{
+    int64_t learned = g_group_peak_bytes[idx];
+    return learned > RUNNER_WORKER_BYTES ? learned : RUNNER_WORKER_BYTES;
+}
+
+/* Pure: may a group estimated at estimate_bytes fork now? Admits when nothing
+ * is running (never deadlock) or when headroom_bytes, less the estimates of
+ * still-ramping children and the reserve, covers the estimate. A negative
+ * headroom means no cgroup limit is known. */
+[[maybe_unused]] static bool runner_admit(int running, int64_t headroom_bytes,
+                         int64_t ramping_bytes, int64_t estimate_bytes)
+{
+    if (running <= 0) return true;
+    if (headroom_bytes >= 0) {
+        headroom_bytes -= ramping_bytes;
+        if (headroom_bytes < 0) headroom_bytes = 0;
+    }
+    return platform_memory_admit(headroom_bytes, estimate_bytes,
+                                 RUNNER_ADMIT_RESERVE_BYTES);
+}
+
+static bool phase_memory_admits(const struct child_slot *slots, int jobs,
+                                size_t next_idx)
+{
+#if defined(__linux__)
+    if (RUNNER_WORKER_BYTES <= 0) return true;
+    int running = 0;
+    int64_t ramping = 0;
+    int64_t now = platform_time_monotonic_us();
+    for (int i = 0; i < jobs; i++) {
+        if (slots[i].pid == ZCL_CHILD_NONE) continue;
+        running++;
+        if (now - slots[i].start_us < RUNNER_ADMIT_RAMP_US)
+            ramping += group_memory_estimate(slots[i].group_idx);
+    }
+    if (running == 0) return true;
+    return runner_admit(running, platform_cgroup_memory_headroom(), ramping,
+                        group_memory_estimate(next_idx));
+#else
+    (void)slots; (void)jobs; (void)next_idx;
+    return true;
+#endif
+}
+
 static int get_nproc(void)
 {
     uint32_t n = platform_available_cpu_count();
@@ -1415,7 +1483,15 @@ static int reap_any(struct child_slot *slots, int jobs, int *status)
     }
     return -2;
 #else
+#if defined(__linux__)
+    struct rusage ru;
+    memset(&ru, 0, sizeof ru);
+    pid_t done = wait4(-1, status, WNOHANG, &ru);
+    if (done > 0)   /* Linux reports ru_maxrss in KiB */
+        g_reaped_peak_bytes = (int64_t)ru.ru_maxrss * 1024;
+#else
     pid_t done = waitpid(-1, status, WNOHANG);
+#endif
     if (done == 0) return -2;
     if (done < 0) {
         if (errno == EINTR) return -2;
@@ -1789,6 +1865,7 @@ static bool phase_dispatch_ready(const struct phase_run *pr, size_t *next_pos)
         }
         int slot = find_free_slot(pr->slots, pr->jobs);
         if (slot < 0) break;
+        if (!phase_memory_admits(pr->slots, pr->jobs, next_idx)) break;
         make_tempfile_path(pr->slots[slot].out_path,
                            sizeof(pr->slots[slot].out_path),
                            next_idx, pr->parent_pid);
@@ -1798,6 +1875,7 @@ static bool phase_dispatch_ready(const struct phase_run *pr, size_t *next_pos)
                         &pr->slots[slot].pid) != 0)
             return false;
         pr->slots[slot].group_idx = next_idx;
+        pr->slots[slot].start_us = platform_time_monotonic_us();
         if (pr->verbose) {
             const char *label = pr->phase == POOL_PHASE_QUIET_LINT
                 ? "quiet" : "dispatch";
@@ -1842,6 +1920,9 @@ static void phase_record_reaped(const struct phase_run *pr, int slot, int status
     size_t idx = pr->slots[slot].group_idx;
     struct group_result *r = &pr->results[idx];
     child_close(pr->slots[slot].pid);
+    if (g_reaped_peak_bytes > g_group_peak_bytes[idx])
+        g_group_peak_bytes[idx] = g_reaped_peak_bytes;
+    g_reaped_peak_bytes = 0;
     r->status = status;
     if (WIFSIGNALED(status)) {
         r->signaled = 1;
