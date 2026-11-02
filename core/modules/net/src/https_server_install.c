@@ -66,6 +66,20 @@ static bool public_install_prefix_ok(const char *root_real,
         return false;
     return true;
 }
+
+/* A trailing slash names a directory. Linux realpath() refuses it on a
+ * regular file (ENOTDIR); macOS realpath() resolves it to the file
+ * (measured on macOS arm64), so the refusal is made here, not left to the
+ * platform. The bare "/" is the front-door shim and is exempt. */
+static bool public_install_slash_ok(const char *url, const char *file_real)
+{
+    size_t url_len = strlen(url);
+    struct stat st;
+
+    if (url_len <= 1 || url[url_len - 1] != '/')
+        return true;
+    return stat(file_real, &st) == 0 && S_ISDIR(st.st_mode);
+}
 #endif
 
 static bool public_install_filepath_under_root(const char *root,
@@ -98,6 +112,8 @@ static bool public_install_filepath_under_root(const char *root,
     if (n < 0 || n >= (int)sizeof(filepath))
         return false;
     if (!realpath(filepath, file_real))
+        return false;
+    if (!public_install_slash_ok(url, file_real))
         return false;
     if (!public_install_prefix_ok(root_real, file_real))
         return false;

@@ -793,3 +793,7 @@ later lane flips it HARD.
 - 2026-11-02T08:22:47Z — REASON: refactor(addrman_codec): split 1 function(s) under the complexity cap (grok); behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
   old ROOT: 629f667a565d680a4513f350e975ec8308b99f39809f6bcccd1192a57da04506
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-02T08:23:08Z — REASON: https install: refuse a trailing-slash URL that resolves to a file; behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
+  old ROOT: 42698d56c56d5f87d7ad573076f8138fc7aa52a2171e5d22ef76b43f0a4aa51e
+  by: owner unseal ritual (make core-unseal)
