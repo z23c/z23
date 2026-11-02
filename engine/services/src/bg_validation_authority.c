@@ -155,6 +155,22 @@ static bool bgv_auth_record_needs_earning(
            !chain_evidence_record_has_block_index_required(rec);
 }
 
+/* The record was earned under an earlier build (all four flags) but the
+ * controller never left EMPTY / HEADERS_WORK_VALIDATED: the same earn call,
+ * with its tip-by-hash checks and in-transaction state advance, finishes the
+ * job. Re-earning set flags is idempotent. */
+static bool bgv_auth_earned_but_not_following(
+    const struct chain_evidence_controller_view *view)
+{
+    const struct chain_evidence_record *rec = &view->active_tip_evidence;
+    return (view->state == CEC_EMPTY ||
+            view->state == CEC_HEADERS_WORK_VALIDATED) &&
+           rec->source_class == CEC_SOURCE_CLASS_LOCAL_IMPORT &&
+           rec->publish_state == CEC_PUBLISH_LOCAL_EVIDENCE &&
+           rec->header_ancestry_linked && rec->chainwork_recomputed &&
+           chain_evidence_record_has_block_index_required(rec);
+}
+
 /* Genesis path only: earn the two flags live advance and boot reconcile leave
  * false, for the exact tip the walk verified. Each is set from a check that
  * ran on that tip by hash: bytes from the walk (its body read is hash-checked
@@ -168,7 +184,8 @@ static bool bgv_auth_genesis_tip_prepare(
     char reason[192])
 {
     if (external_seeded || view->snapshot_evidence_loaded ||
-        !bgv_auth_record_needs_earning(view))
+        (!bgv_auth_record_needs_earning(view) &&
+         !bgv_auth_earned_but_not_following(view)))
         return true;
     /* Tip read, hash comparison and best-work evaluation under ONE cs_main
      * hold, so the tip judged best is the tip read. cs_main is released

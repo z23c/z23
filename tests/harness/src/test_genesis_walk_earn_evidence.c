@@ -587,6 +587,71 @@ static int test_earn_does_not_advance_snapshot_state(void)
     return failures;
 }
 
+/* A node whose record was ALREADY earned under an older build (all four
+ * flags) but whose controller never left the pre-follow state. */
+static int test_pre_earned_record_advances_pre_follow_state(void)
+{
+    int failures = 0;
+    struct gw_fixture f;
+    if (!gw_init(&f))
+        return gw_check("fixture", false);
+    failures += gw_check("pre-earn while tip_following", gw_earn_tip(&f, true, true).ok);
+    failures += gw_check("fixture state set", gw_set_state(&f, "empty"));
+    failures += gw_check("controller is empty", gw_state(&f) == CEC_EMPTY);
+    struct chain_evidence_controller_view v;
+    gw_view(&f, &v);
+    failures += gw_check("record already carries both flags",
+             v.active_tip_evidence.nakamoto_selected_best_work &&
+             v.active_tip_evidence.block_bytes_hash_checked);
+    gw_walk_verified(&f, GW_TIP, 0);
+    failures += gw_check("publish succeeds", bg_validation_authority_publish(
+                              &f.svc, false, true).ok);
+    failures += gw_check("posture review-free", gw_posture_review_free(&f));
+    gw_free(&f);
+    return failures;
+}
+
+/* Pre-earned record whose persisted tip is a different hash: stays EMPTY. */
+static int test_pre_earned_other_hash_stays_empty(void)
+{
+    int failures = 0;
+    struct gw_fixture f;
+    if (!gw_init(&f))
+        return gw_check("fixture", false);
+    failures += gw_check("pre-earn", gw_earn_tip(&f, true, true).ok);
+    failures += gw_check("fixture state set", gw_set_state(&f, "empty"));
+    failures += gw_check("persisted tip moved off the walk's tip",
+             node_db_state_set(&f.ndb, "cec.active_tip_hash",
+                               f.hashes[4].data, 32) &&
+             node_db_state_set_int(&f.ndb, "cec.active_tip_height",
+                                   f.blocks[4].nHeight));
+    gw_walk_verified(&f, GW_TIP, 0);
+    failures += gw_check("publish refuses",
+             !bg_validation_authority_publish(&f.svc, false, true).ok);
+    failures += gw_check("state stays empty", gw_state(&f) == CEC_EMPTY);
+    gw_free(&f);
+    return failures;
+}
+
+/* Pre-earned record under the snapshot state: untouched. */
+static int test_pre_earned_snapshot_state_untouched(void)
+{
+    int failures = 0;
+    struct gw_fixture f;
+    if (!gw_init(&f))
+        return gw_check("fixture", false);
+    failures += gw_check("pre-earn", gw_earn_tip(&f, true, true).ok);
+    failures += gw_check("fixture state set",
+                         gw_set_state(&f, "snapshot_utxo_hash_verified"));
+    gw_walk_verified(&f, GW_TIP, 0);
+    failures += gw_check("publish refuses",
+             !bg_validation_authority_publish(&f.svc, false, true).ok);
+    failures += gw_check("snapshot state untouched",
+             gw_state(&f) == CEC_SNAPSHOT_UTXO_HASH_VERIFIED);
+    gw_free(&f);
+    return failures;
+}
+
 /* Two real threads over the one shared handle. B is the live advance: it
  * opens its transaction and parks (hook) before writing the new tip. A is
  * the genesis walk's earn for the OLD tip. The evidence write lock must
@@ -753,6 +818,9 @@ int test_genesis_walk_earn_evidence(void)
     failures += test_earn_advances_empty_to_tip_following();
     failures += test_earn_missing_flag_or_other_hash_keeps_empty();
     failures += test_earn_does_not_advance_snapshot_state();
+    failures += test_pre_earned_record_advances_pre_follow_state();
+    failures += test_pre_earned_other_hash_stays_empty();
+    failures += test_pre_earned_snapshot_state_untouched();
     failures += test_mark_refuses_same_height_rival_after_scan();
     if (failures == 0)
         printf("  all genesis_walk_earn_evidence tests passed\n");
