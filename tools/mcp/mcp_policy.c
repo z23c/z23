@@ -170,6 +170,34 @@ bool mcp_policy_fleet_write(const struct zcl_command_spec *spec)
     return false;
 }
 
+/* Read leaves that return wallet amounts without declaring the wallet
+ * request capability: the metaverse custody reports and the agent grant and
+ * spend telemetry and the store purchase history. */
+bool mcp_policy_wallet_data(const struct zcl_command_spec *spec)
+{
+    static const char *const leaves[] = {
+        "metaverse.agent.money", "metaverse.agent.liquidity",
+        "ops.telemetry.agents.grants", "ops.telemetry.agents.activity",
+        "app.store.purchases"};
+    if (!spec)
+        return false;
+    if (spec->required_capabilities & ZCL_COMMAND_CAP_WALLET_REQUEST)
+        return true;
+    for (size_t i = 0; i < sizeof(leaves) / sizeof(leaves[0]); i++)
+        if (spec->path && strcmp(spec->path, leaves[i]) == 0)
+            return true;
+    return false;
+}
+
+bool mcp_policy_wallet_read(const struct zcl_command_spec *spec)
+{
+    return mcp_policy_wallet_data(spec) && spec->mode != ZCL_COMMAND_MODE_BRANCH &&
+           spec->effect == ZCL_COMMAND_EFFECT_READ &&
+           spec->risk != ZCL_COMMAND_RISK_WALLET &&
+           spec->risk != ZCL_COMMAND_RISK_CORE_RECOVERY &&
+           spec->authority != ZCL_COMMAND_AUTH_OWNER;
+}
+
 bool mcp_policy_allows(const struct zcl_command_spec *spec,
                        const struct zcl_command_registry *registry,
                        const struct json_value *input,
@@ -190,6 +218,11 @@ bool mcp_policy_allows(const struct zcl_command_spec *spec,
         if (spec->authority == ZCL_COMMAND_AUTH_OWNER)
             return refuse(why, "READ_REFUSED_OWNER_AUTHORITY",
                           "owner-authority commands are not available here", spec);
+        if (mcp_policy_wallet_data(spec))
+            return refuse(why, "READ_REFUSED_WALLET_DATA",
+                          "wallet data is withheld from MCP clients by default; "
+                          "the owner can start the server with --wallet-reads "
+                          "to allow it", spec);
         return true;
     }
     if (spec->risk == ZCL_COMMAND_RISK_WALLET)

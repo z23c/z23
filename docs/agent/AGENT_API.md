@@ -1514,7 +1514,7 @@ archive bytes for the same node action.
 
 ## Local MCP adapter
 
-`z23 mcp serve [--checkout=<absolute git toplevel>] [--fleet-writes]` is a local stdio MCP server
+`z23 mcp serve [--checkout=<absolute git toplevel>] [--fleet-writes] [--wallet-reads]` is a local stdio MCP server
 for agent harnesses that launch their own tools (Claude Code, Codex). It
 speaks newline-delimited JSON-RPC on stdin/stdout, handles one request at a
 time and logs to stderr only. Four tools keep the MCP tool listing near 2 KB:
@@ -1537,7 +1537,8 @@ scope is described in [WIKI.md](WIKI.md#from-an-agent-harness).
   the dirty flag and the code index `source_root_sha3` (when an index exists)
   and reports them in `instructions`; tool calls are refused until that
   succeeds.
-- `z23_run` runs a registry command in process. Reads run directly. A mutation
+- `z23_run` runs a registry command in process. Reads run directly, except
+  wallet-data reads (next item). A mutation
   is refused when its risk is wallet or core recovery, its authority is owner
   or its layer is core (`MUTATION_REFUSED_*`). Any other mutation runs only
   through a confirmation flow its own spec declares: a commit needs every
@@ -1553,6 +1554,21 @@ scope is described in [WIKI.md](WIKI.md#from-an-agent-harness).
   mutation in the registry.
   Never-remote commands are allowed here: the adapter is a local operator
   surface.
+- Wallet-data reads are refused by default (`READ_REFUSED_WALLET_DATA`; the
+  reply names the leaf and carries no wallet data). The refused leaves are every
+  read that declares the wallet request capability, among them `status`,
+  `core.wallet.status`, `core.wallet.balance`, `core.wallet.address.list`,
+  `core.wallet.utxo.list`, `core.wallet.transaction.list`,
+  `core.wallet.transaction.get`, `core.wallet.shielded.balance`,
+  `core.wallet.shielded.notes` and the `vault.*` reads except `vault.routes`, plus
+  `metaverse.agent.money`, `metaverse.agent.liquidity` and
+  `ops.telemetry.agents.grants` / `.activity` and `app.store.purchases`, which
+  return amounts or purchase history without
+  the capability. For node health use `ops.health` or `ops.state`, not
+  `status`, which returns wallet amounts. Results land in the agent's transcript and with its model
+  provider, so the owner opts in with `--wallet-reads` (off by default),
+  which admits those reads only; wallet-risk, core-recovery and
+  owner-authority leaves stay refused. The native CLI and RPC are unchanged.
 - `--fleet-writes` (off by default) lets `z23_run` run four fleet
   collaboration writes with no plan or confirm flow: `fleet.board.post`,
   `fleet.wiki.write`, `fleet.bundle.offer` and `fleet.bundle.fetch`, each only

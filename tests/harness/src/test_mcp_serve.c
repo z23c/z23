@@ -19,9 +19,11 @@
 
 #include "test/test_core.h"
 
+#include "config/command_catalog.h"
 #include "mcp/mcp_policy.h"
 #include "mcp/mcp_rpc.h"
 #include "json/json.h"
+#include "kernel/command_registry.h"
 #include "util/spawn.h"
 
 #if !defined(_WIN32)
@@ -1435,6 +1437,61 @@ static int case_fleet_writes(const char *home, const char *checkout)
     return failures;
 }
 
+#define MS_WALLET_ARGS "{\"path\":\"core.wallet.balance\",\"input\":{}}"
+
+/* Wallet-data reads are refused on a default server without running the leaf
+ * and run on a server started with --wallet-reads; a port nothing listens on
+ * makes the admitted read fail fast after the policy has passed it. */
+static int case_wallet_reads(const char *home, const char *checkout)
+{
+    int failures = 0;
+    char dd[PATH_MAX + 16], err[PATH_MAX + 32];
+    snprintf(dd, sizeof(dd), "%s/walletdd", home);
+    snprintf(err, sizeof(err), "%s/err_wallet.txt", home);
+    (void)mkdir(dd, 0700);
+    TEST_CASE("wallet-data reads are refused by default and run with --wallet-reads") {
+        static const char *const leaves[] = {
+            "core.wallet.status", "core.wallet.balance",
+            "core.wallet.address.list", "core.wallet.utxo.list",
+            "core.wallet.transaction.list", "core.wallet.shielded.balance",
+            "core.wallet.shielded.notes", "status", "vault.list"};
+        struct ms m;
+        char args[160];
+        int dead = 0;
+        pid_t gone = ms_stub_start(dd, &dead);
+        ASSERT(gone > 0);
+        kill(gone, SIGKILL);
+        waitpid(gone, NULL, 0);
+        ASSERT(ms_start_node(&m, home, checkout, dd, dead, err));
+        for (size_t i = 0; i < sizeof(leaves) / sizeof(leaves[0]); i++) {
+            snprintf(args, sizeof(args), "{\"path\":\"%s\",\"input\":{}}",
+                     leaves[i]);
+            ASSERT(ms_tool(&m, 2, "z23_run", args));
+            ASSERT(has(&m, "READ_REFUSED_WALLET_DATA"));
+            ASSERT(has(&m, leaves[i]));
+            ASSERT(has(&m, "--wallet-reads"));
+            ASSERT(!has(&m, "NODE_UNAVAILABLE"));
+        }
+        ASSERT_EQ(ms_finish(&m), 0);
+
+        ASSERT(ms_start_node_opt(&m, home, checkout, dd, dead, err,
+                                 "--wallet-reads"));
+        ASSERT(ms_tool(&m, 2, "z23_run", MS_WALLET_ARGS));
+        ASSERT(!has(&m, "READ_REFUSED_WALLET_DATA"));
+        ASSERT(has(&m, "REQUEST_FAILED"));
+        /* The flag does not admit wallet-risk mutations or owner reads. */
+        ASSERT(ms_tool(&m, 4, "z23_run",
+                       "{\"path\":\"app.tokens.create\",\"input\":"
+                       "{\"wallet_scope\":\"dev\",\"ticker\":\"DEMO\"}}"));
+        ASSERT(has(&m, "MUTATION_REFUSED_WALLET_RISK"));
+        ASSERT(ms_tool(&m, 5, "z23_run",
+                       "{\"path\":\"core.wallet.recovery.status\",\"input\":{}}"));
+        ASSERT(has(&m, "READ_REFUSED_OWNER_AUTHORITY"));
+        ASSERT_EQ(ms_finish(&m), 0);
+    } TEST_END
+    return failures;
+}
+
 /* Directory queries match broadly and must not crowd out the stem lesson; a
  * node that accepts and never answers must not hold the brief past its
  * deadline. */
@@ -1636,6 +1693,131 @@ static int case_policy_reads(void)
     } TEST_END
     return failures;
 }
+
+static bool ms_has_prefix(const char *s, const char *prefix)
+{
+    return strncmp(s, prefix, strlen(prefix)) == 0;
+}
+
+/* Wallet-data reads: refused by the plain policy, admitted only by the
+ * --wallet-reads check, and never for a wallet-risk or owner-authority leaf. */
+static int case_policy_wallet_data(void)
+{
+    int failures = 0;
+    TEST_CASE("a read leaf with the wallet capability is refused unless --wallet-reads admits it") {
+        struct zcl_command_spec spec = {0};
+        struct mcp_refusal why = {0};
+        spec.path = "core.wallet.balance";
+        spec.mode = ZCL_COMMAND_MODE_SYNC;
+        spec.effect = ZCL_COMMAND_EFFECT_READ;
+        spec.risk = ZCL_COMMAND_RISK_READ;
+        spec.authority = ZCL_COMMAND_AUTH_OPERATOR;
+        spec.layer = ZCL_COMMAND_LAYER_CORE;
+        spec.required_capabilities = ZCL_COMMAND_CAP_WALLET_REQUEST;
+        ASSERT(!mcp_policy_allows(&spec, NULL, NULL, &why));
+        ASSERT(why.code && strcmp(why.code, "READ_REFUSED_WALLET_DATA") == 0);
+        ASSERT(why.detail && strcmp(why.detail, "core.wallet.balance") == 0);
+        ASSERT(why.message && strstr(why.message, "--wallet-reads") != NULL);
+        ASSERT(mcp_policy_wallet_read(&spec));
+        spec.authority = ZCL_COMMAND_AUTH_OWNER;
+        ASSERT(!mcp_policy_wallet_read(&spec));
+        spec.authority = ZCL_COMMAND_AUTH_OPERATOR;
+        spec.risk = ZCL_COMMAND_RISK_WALLET;
+        ASSERT(!mcp_policy_wallet_read(&spec));
+        spec.risk = ZCL_COMMAND_RISK_READ;
+        spec.effect = ZCL_COMMAND_EFFECT_MUTATE;
+        ASSERT(!mcp_policy_wallet_read(&spec));
+        spec.effect = ZCL_COMMAND_EFFECT_READ;
+        spec.required_capabilities = 0;
+        ASSERT(mcp_policy_allows(&spec, NULL, NULL, &why));
+        ASSERT(!mcp_policy_wallet_read(&spec));
+        /* Amount-bearing leaves that declare no wallet capability. */
+        spec.path = "metaverse.agent.money";
+        ASSERT(!mcp_policy_allows(&spec, NULL, NULL, &why));
+        ASSERT(why.code && strcmp(why.code, "READ_REFUSED_WALLET_DATA") == 0);
+        ASSERT(mcp_policy_wallet_read(&spec));
+    } TEST_END
+    return failures;
+}
+
+/* One read leaf of the registry: a wallet or vault path carries the
+ * capability, a wallet-data leaf is refused by default, and a leaf that is
+ * not wallet data is never refused under the wallet-data code. */
+static bool ms_wallet_leaf_ok(const struct zcl_command_spec *spec,
+                              const struct zcl_command_registry *reg)
+{
+    struct mcp_refusal why = {0};
+    /* The fleet roster and the vault route table carry no funds. */
+    bool wallet_path = (ms_has_prefix(spec->path, "core.wallet.") &&
+                        !ms_has_prefix(spec->path, "core.wallet.fleet.")) ||
+                       (ms_has_prefix(spec->path, "vault.") &&
+                        strcmp(spec->path, "vault.routes") != 0);
+    bool refused = !mcp_policy_allows(spec, reg, NULL, &why);
+    if (wallet_path && !mcp_policy_wallet_data(spec)) {
+        printf("  wallet-path read without the wallet capability: %s\n",
+               spec->path);
+        return false;
+    }
+    if (mcp_policy_wallet_data(spec))
+        /* The flag admits exactly the leaves the plain policy would
+         * otherwise allow on risk and authority. */
+        return refused && why.code &&
+               mcp_policy_wallet_read(spec) ==
+                   (spec->risk != ZCL_COMMAND_RISK_WALLET &&
+                    spec->risk != ZCL_COMMAND_RISK_CORE_RECOVERY &&
+                    spec->authority != ZCL_COMMAND_AUTH_OWNER);
+    return !mcp_policy_wallet_read(spec) &&
+           (!refused ||
+            (why.code && strcmp(why.code, "READ_REFUSED_WALLET_DATA") != 0));
+}
+
+/* Every read leaf in the real registry that can return wallet-private data
+ * is refused by default. The paths below must exist, stay reads and be
+ * recognised; a wallet or vault read that is missing the capability bit
+ * fails the prefix sweep. */
+static int case_policy_wallet_catalog(void)
+{
+    static const char *const expected[] = {
+        "status", "core.wallet.status", "core.wallet.balance",
+        "core.wallet.address.list", "core.wallet.address.public-key",
+        "core.wallet.address.by-label", "core.wallet.utxo.list",
+        "core.wallet.transaction.list", "core.wallet.transaction.get",
+        "core.wallet.transaction.multisig.compose",
+        "core.wallet.shielded.balance", "core.wallet.shielded.notes",
+        "core.wallet.security.status", "core.wallet.backup.status",
+        "core.wallet.audit", "vault.list", "vault.show", "vault.encumbered",
+        "vault.intent.status", "vault.intent.list", "vault.session.list",
+        "yardsale.seller.status", "metaverse.agent.money",
+        "metaverse.agent.liquidity", "ops.telemetry.agents.grants",
+        "ops.telemetry.agents.activity", "app.store.purchases"};
+    int failures = 0;
+    TEST_CASE("every wallet-data read leaf in the registry is refused by default") {
+        const struct zcl_command_registry *reg = zcl_command_catalog();
+        size_t refused = 0;
+        ASSERT(reg != NULL);
+        for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); i++) {
+            const struct zcl_command_spec *spec =
+                zcl_command_registry_find(reg, expected[i], NULL);
+            struct mcp_refusal why = {0};
+            ASSERT(spec != NULL);
+            ASSERT(spec->effect == ZCL_COMMAND_EFFECT_READ);
+            ASSERT(mcp_policy_wallet_data(spec));
+            ASSERT(!mcp_policy_allows(spec, reg, NULL, &why));
+            ASSERT(why.code != NULL);
+            ASSERT(why.detail && strcmp(why.detail, expected[i]) == 0);
+        }
+        for (size_t i = 0; i < reg->count; i++) {
+            const struct zcl_command_spec *spec = &reg->commands[i];
+            if (spec->mode == ZCL_COMMAND_MODE_BRANCH ||
+                spec->effect != ZCL_COMMAND_EFFECT_READ)
+                continue;
+            ASSERT(ms_wallet_leaf_ok(spec, reg));
+            refused += mcp_policy_wallet_data(spec) ? 1 : 0;
+        }
+        ASSERT(refused >= sizeof(expected) / sizeof(expected[0]));
+    } TEST_END
+    return failures;
+}
 #endif /* !_WIN32 */
 
 int test_mcp_serve(void)
@@ -1648,6 +1830,8 @@ int test_mcp_serve(void)
     failures += case_units();
     failures += case_select_missing();
     failures += case_policy_reads();
+    failures += case_policy_wallet_data();
+    failures += case_policy_wallet_catalog();
     failures += case_unit_version();
     failures += case_policy_mutations();
     failures += case_policy_idempotency();
@@ -1680,6 +1864,7 @@ int test_mcp_serve(void)
     failures += case_session(home, checkout);
     failures += case_wiki_search(home, checkout);
     failures += case_fleet_writes(home, checkout);
+    failures += case_wallet_reads(home, checkout);
     failures += case_guide_lessons(home, checkout);
     TEST_DISCARD(test_rm_rf_recursive(home));
 #endif

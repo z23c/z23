@@ -45,6 +45,19 @@ bool mcp_policy_allows(const struct zcl_command_spec *spec,
  * policy. */
 bool mcp_policy_fleet_write(const struct zcl_command_spec *spec);
 
+/* True when the leaf can return wallet-private data: it declares the wallet
+ * request capability, or it is one of the named amount-bearing leaves that do
+ * not (metaverse custody reports, agent grant and spend telemetry, store purchases).
+ * mcp_policy_allows refuses such read leaves with READ_REFUSED_WALLET_DATA. */
+bool mcp_policy_wallet_data(const struct zcl_command_spec *spec);
+
+/* The wallet-data read leaves `z23 mcp serve --wallet-reads` runs: a runnable
+ * read-effect leaf for which mcp_policy_wallet_data holds that is neither
+ * wallet-risk, core-recovery nor owner authority. Off by default: wallet data
+ * lands in the agent transcript and with its model provider, so only the
+ * owner opts in. */
+bool mcp_policy_wallet_read(const struct zcl_command_spec *spec);
+
 #ifdef __cplusplus
 }
 #endif

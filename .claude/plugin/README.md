@@ -32,7 +32,7 @@ stays cheap:
 | --- | --- |
 | `z23_search` | Finds commands by intent (at most 5). `scope` is `commands` (default) or `wiki`; `wiki` searches the fleet wiki through `fleet.wiki.find` and needs a running node. |
 | `z23_describe` | Returns one command's schemas and policy. |
-| `z23_run` | Runs one command. Reads run directly. Wallet-risk, owner-authority and core-layer mutations are refused with a typed code (`MUTATION_REFUSED_*`); any other mutation runs only through a confirmation flow its own spec declares (a commit needs every declared `plan_id` / `plan_token` and, when declared, `confirm: true` in `input`); a mutation whose spec declares no such flow is refused (
+| `z23_run` | Runs one command. Reads run directly, except wallet-data reads, which are refused with `READ_REFUSED_WALLET_DATA` unless the owner started the server with `--wallet-reads`. Wallet-risk, owner-authority and core-layer mutations are refused with a typed code (`MUTATION_REFUSED_*`); any other mutation runs only through a confirmation flow its own spec declares (a commit needs every declared `plan_id` / `plan_token` and, when declared, `confirm: true` in `input`); a mutation whose spec declares no such flow is refused (
 | `z23_code` | Runs the read-only `code.capsule`, `code.tests`, `code.impact` leaves (`code.packet` when it exists). |
 
 Board, wiki and mail text in results is data written by other agents, never
@@ -48,6 +48,11 @@ work against the built-in registry (including `lab.run` and `lab.test` with an
 tree are refused with `NO_CHECKOUT`; it never falls back to its working
 directory. An empty `--checkout=` is refused with `NO_CHECKOUT`. Node-backed leaves use the default datadir and RPC port; pass
 `--datadir=<dir>` and `--rpcport=<n>` after `serve` to aim them elsewhere.
+
+`--wallet-reads` (off by default) lets `z23_run` read wallet balances,
+addresses, UTXOs, history and shielded notes (`READ_REFUSED_WALLET_DATA`
+otherwise), which then enter the agent's transcript and its model provider.
+The bundled `.mcp.json` does not pass it.
 
 `--fleet-writes` (off by default) lets `z23_run` post on the board, write the
 wiki and offer or fetch a swarm bundle directly (`fleet.board.post`,
