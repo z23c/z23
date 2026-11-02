@@ -13,6 +13,8 @@
 #include "platform/socket_compat.h"
 
 #include <errno.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -404,6 +406,67 @@ static bool cookie_rotation_check_env_configures_interval(
     return ok;
 }
 
+/* A stalled cookie-file write must not park authentication. The hook models
+ * a disk stall: it announces entry, then blocks until released (bounded). */
+static _Atomic bool g_stall_entered;
+static _Atomic bool g_stall_release;
+
+static void cookie_stall_hook(void)
+{
+    atomic_store(&g_stall_entered, true);
+    for (int i = 0; i < 500 && !atomic_load(&g_stall_release); i++)
+        usleep(10000); /* real-clock: bounded wait modelling a stalled disk */
+}
+
+static void *cookie_stall_rotate_fn(void *arg)
+{
+    (void)arg;
+    rpc_http_cookie_rotate();
+    return NULL;
+}
+
+static bool cookie_rotation_check_auth_not_blocked_by_write(
+    const struct rpc_table *table, const char *tmpdir, int *status_out)
+{
+    uint16_t port = reserve_test_port();
+    bool ok = (port != 0);
+    if (ok)
+        ok = rpc_http_start(table, port, NULL, NULL, tmpdir);
+
+    char pass_v1[128] = {0};
+    ok = ok && read_cookie_password(tmpdir, pass_v1, sizeof(pass_v1));
+    wait_rpc_ready(port);
+
+    atomic_store(&g_stall_entered, false);
+    atomic_store(&g_stall_release, false);
+    rpc_http_cookie_write_test_hook(cookie_stall_hook);
+
+    pthread_t rot;
+    bool started = ok && pthread_create(&rot, NULL, cookie_stall_rotate_fn,
+                                        NULL) == 0;
+    for (int i = 0; started && i < 500 && !atomic_load(&g_stall_entered); i++)
+        usleep(10000); /* real-clock: bounded wait for the stalled write */
+    ok = ok && started && atomic_load(&g_stall_entered);
+
+    /* The write is stalled; the current secret must still authenticate. */
+    int status = ok ? rpc_with_auth(port, "__cookie__", pass_v1) : -1;
+    ok = ok && status == 200;
+
+    atomic_store(&g_stall_release, true);
+    if (started) pthread_join(rot, NULL);
+    rpc_http_cookie_write_test_hook(NULL);
+
+    char pass_v2[128] = {0};
+    ok = ok && read_cookie_password(tmpdir, pass_v2, sizeof(pass_v2));
+    ok = ok && strcmp(pass_v1, pass_v2) != 0;
+    ok = ok && rpc_with_auth(port, "__cookie__", pass_v2) == 200;
+    ok = ok && rpc_with_auth(port, "__cookie__", pass_v1) == 200;
+
+    rpc_http_stop();
+    *status_out = status;
+    return ok;
+}
+
 int test_cookie_rotation(void)
 {
     int failures = 0;
@@ -489,6 +552,14 @@ int test_cookie_rotation(void)
         ok = cookie_rotation_owner_check_restart(
             &empty_table, tmpdir, current, sizeof(current), ok);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
+    printf("cookie_rotation: auth not blocked by a stalled cookie write... ");
+    {
+        int status = 0;
+        bool ok = cookie_rotation_check_auth_not_blocked_by_write(
+            &empty_table, tmpdir, &status);
+        if (ok) printf("OK\n"); else { printf("FAIL (status=%d)\n", status); failures++; }
     }
 
     printf("cookie_rotation: env configures interval... ");

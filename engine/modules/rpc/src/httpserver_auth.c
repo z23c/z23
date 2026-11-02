@@ -91,9 +91,18 @@ bool rpc_http_auth_check(const char *auth_header)
     return ok;
 }
 
+static void (*_Atomic g_cookie_write_hook)(void);
+
+void rpc_http_cookie_write_test_hook(void (*hook)(void))
+{
+    atomic_store(&g_cookie_write_hook, hook);
+}
+
 static bool rpc_cookie_write_secure(const char *path, const char *user,
                                     const char *password)
 {
+    void (*hook)(void) = atomic_load(&g_cookie_write_hook);
+    if (hook) hook();
     char body[sizeof(g_rpc_user) + sizeof(g_rpc_password) + 2];
     int n = snprintf(body, sizeof(body), "%s:%s", user, password);
     struct platform_private_file file;

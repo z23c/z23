@@ -38,6 +38,10 @@ bool rpc_http_tls_listener_name(char *text, size_t text_size, uint16_t *port);
 void rpc_http_cookie_rotate(void);
 int  rpc_http_cookie_rotate_sec(void);
 
+/* test surface: hook run at the start of every cookie-file write, before any
+ * file IO. A test blocks inside it to model a stalled disk. NULL clears it. */
+void rpc_http_cookie_write_test_hook(void (*hook)(void));
+
 /* test surface: builds the standard JSON-RPC response envelope
  * used by the HTTP server. Safe to call on stack-dirtied / uninitialized
  * `response` storage. Production code also routes through this helper. */
