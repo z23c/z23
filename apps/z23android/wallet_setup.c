@@ -224,7 +224,7 @@ void wsu_working_line(const struct wsu_view *v, char *out, size_t cap)
     static const char *const fixed[] = {
         [WSU_PHASE_NONE] = "Starting…",
         [WSU_PHASE_KEY] = "Confirm with your screen lock",
-        [WSU_PHASE_PAUSE] = "Pausing your node to write the new wallet… (about 30 s)",
+        [WSU_PHASE_PAUSE] = "Pausing your node to write the new wallet… (under a minute)",
         [WSU_PHASE_WRITE] = "Writing your wallet…",
         [WSU_PHASE_RESTART] = "Starting your node again…",
         [WSU_PHASE_CHECK] = "Checking your wallet…",
@@ -467,7 +467,10 @@ bool wsu_pick(struct wsu *w, size_t index, size_t slot)
         ++w->mismatches;
         w->wrong = (unsigned)index + 1;
         memset(w->picked[index], 0, sizeof(w->picked[index]));
-        (void)offer_locked(w, index);
+        char old[ZAPP_WORD_CHOICES][ZAPP_WORD_LETTERS + 1];
+        memcpy(old, w->choice[index], sizeof(old));
+        if (!offer_locked(w, index)) memcpy(w->choice[index], old, sizeof(old));   /* the same words again, never blank buttons */
+        memory_cleanse(old, sizeof(old));
     }
     pthread_mutex_unlock(&w->lock);
     return right;

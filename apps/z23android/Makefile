@@ -336,7 +336,8 @@ test-setup:
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/setup-test.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/setup-test' "$$(cd "$$scratch" && pwd)"
 	@sed -n '/^static const char \*const bip39_english\[2048\] = {$$/,/^};$$/p' ../../contexts/wallet/domain/src/mnemonic.c | sed '1d;$$d' > '$(BUILD_DIR)/wordlist.expect'; \
-	  sed -n '/^const char \*const zapp_wordlist/,/^};$$/p' setup_wordlist.c | sed '1d;$$d' | cmp -s - '$(BUILD_DIR)/wordlist.expect' || { echo "setup_wordlist.c differs from the wordlist of mnemonic.c" >&2; exit 1; }
+	  sed -n '/^const char \*const zapp_wordlist/,/^};$$/p' setup_wordlist.c | sed '1d;$$d' > '$(BUILD_DIR)/wordlist.ours'; \
+	  [ "$$(wc -l < '$(BUILD_DIR)/wordlist.expect')" -eq 2048 ] && [ "$$(wc -l < '$(BUILD_DIR)/wordlist.ours')" -eq 2048 ] && cmp -s '$(BUILD_DIR)/wordlist.ours' '$(BUILD_DIR)/wordlist.expect' || { echo "setup_wordlist.c is not the 2048 words of mnemonic.c" >&2; exit 1; }
 	@if grep -nE '(^|[^a-z_])(printf|fprintf|puts|fputs|perror|syslog)\(|nodelog|__android_log' setup_words.c setup_state.c setup_node.c wallet_setup.c wallet_setup_ui.c; then \
 	  echo 'wallet setup must not log' >&2; exit 1; fi
 	@if grep -nE '(^|[^a-z_])(fopen|fwrite|fputs|open|write|creat|rename)\(' setup_words.c setup_node.c wallet_setup.c wallet_setup_ui.c; then \

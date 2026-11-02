@@ -1675,7 +1675,7 @@ static void working_line_tests(void)
     assert(!strcmp(line, "Confirm with your screen lock"));
     v.phase = WSU_PHASE_PAUSE;
     wsu_working_line(&v, line, sizeof(line));
-    assert(!strcmp(line, "Pausing your node to write the new wallet… (about 30 s)"));
+    assert(!strcmp(line, "Pausing your node to write the new wallet… (under a minute)"));
     v.phase = WSU_PHASE_WRITE;
     wsu_working_line(&v, line, sizeof(line));
     assert(!strcmp(line, "Writing your wallet…"));
@@ -1839,6 +1839,30 @@ static void pick_all_right(struct wsu *w, const struct zapp_words *all)
     assert(!v.choice[0][0][0] && !v.picked[0][0] && !wsu_pick(w, 0, 0));
 }
 
+/* A random source that fails after a wrong tap leaves the same words on the buttons, never blanks. */
+static void pick_random_failure_tests(void)
+{
+    struct fake f;
+    struct wsu w;
+    struct wsu_view v;
+    struct zapp_words all;
+    fresh(&f, &w, true);
+    script_say(&f.script, true, CREATED);
+    wsu_create_job(&w);
+    wsu_words_seen(&w);
+    wsu_view_read(&w, &v);
+    assert(zapp_words_parse(PHRASE, &all));
+    size_t slot = 0;
+    while (!strcmp(v.choice[1][slot], all.word[v.asked[1]])) ++slot;
+    char before[ZAPP_WORD_CHOICES][ZAPP_WORD_LETTERS + 1];
+    memcpy(before, v.choice[1], sizeof(before));
+    w.env.random = failing_random;
+    assert(!wsu_pick(&w, 1, slot));
+    wsu_view_read(&w, &v);
+    assert(v.mismatches == 1 && v.wrong_position == v.asked[1] + 1 && !memcmp(before, v.choice[1], sizeof(before)));
+    wsu_destroy(&w);
+}
+
 /* The model offers choices for each asked position, counts a wrong pick, offers new decoys for that position and keeps right picks. */
 static void pick_tests(void)
 {
@@ -1955,6 +1979,7 @@ int main(int argc, char **argv)
     saving_after_confirm_tests();
     choices_tests();
     pick_tests();
+    pick_random_failure_tests();
     phase_order_tests();
     slow_exit_tests();
     slow_exit_restore_tests();
