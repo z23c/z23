@@ -31,6 +31,7 @@ int test_zcl_rpc(void)
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <sys/socket.h>
@@ -82,7 +83,20 @@ static int zrpc_listen(int *port_out)
  * fd stays open for the whole run, so no other process can take the port. */
 static int zrpc_refusing(int *port_out)
 {
+#if defined(__APPLE__)
+    /* Measured on macOS: a connect to a bound-but-not-listening loopback
+     * port gets no RST; the SYN is dropped and connect fails with ETIMEDOUT
+     * after the full timeout, so zcl-rpc would name a timeout, not a refusal.
+     * Release the port instead: nothing is bound there, the kernel answers
+     * the SYN with an RST, and ephemeral ports are not handed out again at
+     * once. The caller's close() lands on a placeholder descriptor. */
+    int fd = zrpc_bind(port_out, false);
+    if (fd < 0) return -1;
+    close(fd);
+    return open("/dev/null", O_RDONLY);
+#else
     return zrpc_bind(port_out, false);
+#endif
 }
 
 /* A datadir holding only a cookie, so zcl-rpc authenticates without
