@@ -124,9 +124,11 @@ static const char *fr_frame(struct zcl_codec_reader *c, size_t max,
     size_t left = zcl_codec_reader_remaining(c);
     if (left == 0) return ZCL_FR_WHY_FIELD_MISSING;
     if (left < 8u) return ZCL_FR_WHY_TRUNCATED;
-    uint64_t n = zcl_read_u64_le(zcl_codec_take(c, 8u));
+    /* Peek the length; nothing advances before a refusal. */
+    uint64_t n = zcl_read_u64_le(c->buffer + c->position);
     if (n > max) return ZCL_FR_WHY_OVERSIZE;
     if (n > left - 8u) return ZCL_FR_WHY_TRUNCATED;
+    (void)zcl_codec_take(c, 8u);
     *out = zcl_codec_take(c, (size_t)n);
     *len = (size_t)n;
     return NULL;

@@ -65,7 +65,6 @@ static bool batch_read_field(struct batch_decode *reader,
     field->length = length;
     return true;
 }
-}
 
 static bool batch_field_equal(const struct zcc_epoch_batch_bytes *left,
                               const struct zcc_epoch_batch_bytes *right)
