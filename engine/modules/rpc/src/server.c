@@ -17,7 +17,7 @@
 static bool rpc_in_warmup = true;
 static char warmup_status[256] = "RPC server started";
 static zcl_mutex_t cs_warmup;
-static bool cs_warmup_inited = false;
+static zcl_once_t cs_warmup_once = ZCL_ONCE_INIT;
 static void rpc_ready_set_all(void);
 static void rpc_ready_clear_all(void);
 
@@ -25,12 +25,16 @@ static void rpc_ready_clear_all(void);
  * only when every real class is). All clear until warmup finishes. */
 static atomic_bool class_ready[RPC_READY_CLASS_COUNT];
 
+static void warmup_mutex_init_once(void)
+{
+    zcl_mutex_init(&cs_warmup);
+}
+
+/* Callable from any thread (RPC workers and the init thread race to the
+ * first use): the once guard orders init before every later lock. */
 static void ensure_warmup_mutex(void)
 {
-    if (!cs_warmup_inited) {
-        zcl_mutex_init(&cs_warmup);
-        cs_warmup_inited = true;
-    }
+    (void)zcl_once_call(&cs_warmup_once, warmup_mutex_init_once);
 }
 
 void json_request_init(struct json_request *req)
