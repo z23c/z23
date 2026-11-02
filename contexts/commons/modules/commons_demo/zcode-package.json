@@ -8,17 +8,17 @@
   "source_dir": "src",
   "dependencies": [
     {
-      "root": "5ed73f266819c98c6ebb871c3c6c3b73ac713e000008251fe2f1f7d92671c218",
+      "root": "bba848117874ece6474e20ff50c40df773255bf1e0a0075eab7a76ebe45992de",
       "name": "zclassic23/base",
       "semver": "0.1.0-dev.1"
     },
     {
-      "root": "c74e3ed62903944c5175e4105413b209b6c70b6b645128e70024dce5f861afba",
+      "root": "a80952999c63da7aa3c2dd29042631a43a4f5efa8a0d2acabfe3809b0049c4e5",
       "name": "zclassic23/codec",
       "semver": "0.1.0-dev.1"
     },
     {
-      "root": "86c4f007431024a83efd46aeaecdd747e7b5ac5c18f7ac962b86e3be1443e533",
+      "root": "af4b820314bd018ac41abd43e18283b0d0202a46937368287f1e474890af270d",
       "name": "zclassic23/json",
       "semver": "0.1.0-alpha.1"
     }

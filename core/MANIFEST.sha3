@@ -38,7 +38,7 @@
 #       pair — the sealed core's identity, mirrored into
 #       hotswap/core_seal_root.h. FROZEN: SECTION/TREE are additive and
 #       do not enter this preimage.
-0fc48cb4c09f204950da5b95ab96017696a7fbea38ad973b45941fce1ddabe08  core/UNSEAL.md
+0acf7f2f3d49eff585ddc3b1cd9259a422b99381056dd70961a5e768f4a48dd1  core/UNSEAL.md
 0154dee8b452e80f28e6d9c915483ab19cf93ee834518edc355885204dad4119  core/chainparams/include/chain/chainparams.h
 76417939b54d9b0d0b2309c66b90fd20a510de3492bb6f97a11f4198292aa01f  core/chainparams/include/chain/chainparamsbase.h
 1b38019875d5bb928f13ca3ac4f2d93f346c4a12699fbb41265f23cc3d7ee8c2  core/chainparams/include/chain/checkpoints.h
@@ -190,7 +190,7 @@ ac3b4e1b7a1b0013906b2a566bd2005c23b8c0a7271947b9d31ed1d6b1f46d98  core/modules/c
 8bb19631ee188a535626d2dcc193e61cefef32d2fd28d184373ee02ca0ea2549  core/modules/crypto/src/simd_dispatch.c
 0851e6d0e1f4cbdece96bbd068174316ce7d613676d24b2fb93e53b7ff2bc02e  core/modules/crypto/src/x25519_safe.c
 85027f8f7326ab0fb372052bf603ffc4b57f6caccb909452c7298046523ac632  core/modules/crypto/tests/test_sha3_crypt.c
-6584602f52f615e4e1e1e72bfc5c72a68c318a97e40b47db917d4c118386ce98  core/modules/crypto/zcode-package.json
+10e38b5cca68ba541153d8ba9c85a43cdce82101f56621e63b0bfb632e7a9ff3  core/modules/crypto/zcode-package.json
 b452a7b6af6dfae45488fc13abd926f60dd133939f86bf57f8d1122a0083ccb7  core/modules/crypto_registry/include/crypto_registry/crypto_registry.h
 bdbc241e01c8693a34866e9f1013175712b878f780a0c135c126f031422a0d19  core/modules/crypto_registry/src/crypto_registry.c
 510acc76d37b2c5c1cca410e6f500fa103f57e1de4b9af565c8d351664f03c7e  core/modules/crypto_registry/src/scheme_blake2b.c
@@ -605,7 +605,7 @@ e84a4566fb4a01985ccbec9a4d3136a278422e1efe4f00cb8d0cf01480531064  core/params/in
 5ed0e4562789e7ea0bd9ff1238a27172669074b3d26201195aafffe1f863558e  core/params/module.cfg
 4d62b9a9b8824925e2f7efebca536ff924a96c7464067472cb07b9dd57e356dc  core/params/src/params.c
 9907071da9b95e13d236ac70fe8fa95612c7873ff9a88102d988c83ba8492b89  core/params/src/upgrades.c
-SECTION  567  4  4b47f86be399099f7a4b5fc5896fe9a9751758de80b5789ab8cb03f627d3df53  core
+SECTION  567  4  d7bac7032eb807fa563cae8b2e743bbd3fc73fd46de1f6c923c4ab47e7039a02  core
 SECTION  12  16  8f1a4eb8e2634b666158a5f9613906f708e252178a13d6e27e374d72425c4ba5  core/chainparams
 SECTION  6  24  63dff36c30ea1f9c45ed358d05006795f91e44b502d1d1b1196fc4a2cca2570b  core/chainparams/include
 SECTION  6  30  c247859f7b026dc314874fe7f2bfda58f885c05c44ff2fd601ebc3ce25ebeb48  core/chainparams/include/chain
@@ -619,7 +619,7 @@ SECTION  10  9  4a12df854665934805645f7b11b9ce279b93b7568fe58dde37f68d84913813da
 SECTION  5  17  3d74828940990b6914192791641041d1ad63de1b84d7693d2533f1c9b29a7edd  core/math/include
 SECTION  5  22  13bc29100524578193cb79036f24fe9e1d8538c0f45dcc4dd87956a25f4f2b38  core/math/include/core
 SECTION  5  13  bed7851826222b99834c6ee74bb3e7ce6155798a5ef78c798fe2f836bbf30862  core/math/src
-SECTION  501  12  8d7c1b2681b7a38bbaa1f463efc93c720a4853a50604e03790126f982a46c1f8  core/modules
+SECTION  501  12  310a039a798691d3dcded5d9ededfeff3810dc6a3607dce448517cd782e0f90c  core/modules
 SECTION  6  18  ac31397c188f3b23c7c5fe7eab8d30978ae4009a7098e938da44255a9e7fb2a1  core/modules/bloom
 SECTION  3  26  25f9f764136ebc796a9aaed6dc708deba3347052954808e4efacd66eed7255c6  core/modules/bloom/include
 SECTION  3  32  2648501012a71f5658485e08ef8fb567f46f716f1fd96cbfcb93666c234a6686  core/modules/bloom/include/bloom
@@ -636,7 +636,7 @@ SECTION  6  17  9f93a9d826d9998bae5496b332226098a2ed5ff28255d01b62451433c203300d
 SECTION  4  25  4f0656acb8d6958bb8411ddb13b248dec101a956c7350c21da2f52f99855a23c  core/modules/core/include
 SECTION  4  30  78f0863bca31bf01ed54641dc935515e10aa3f1dc7e2ccbeaa6c6ad379fc7326  core/modules/core/include/core
 SECTION  2  21  549a6085d3be922026f17bfe86e1192b090ee8b18c8cccd272c941c9007750ab  core/modules/core/src
-SECTION  59  19  a687b15f9fef244fb57c3c4293c1b6783fd075f7aa91e5727ea95716a163d4d0  core/modules/crypto
+SECTION  59  19  fc065710addf81645147b8f9ab5fe0acd518f2d9285fe7a66e58001ab48d75f3  core/modules/crypto
 SECTION  26  27  07ecb83b683b9081461a210996c20897a2f1ef17578840fc33bd59ca44076eb9  core/modules/crypto/include
 SECTION  26  34  7ab869fb72b0c7e6a656b4636eda55bfc1e595ae0110d649b9b2e4a79a8a3688  core/modules/crypto/include/crypto
 SECTION  30  23  e147b6eba64012ecc16087af8cdd753d4311c5c2c69175885ba5df97da95f07b  core/modules/crypto/src
@@ -685,5 +685,5 @@ SECTION  7  11  9b023bcd18300a51052f45e69609bb741b2832e3ce6e6a02fd21a12ea94647c0
 SECTION  4  19  e07dc0f2326862830b48105e02648f8d76dfeee9a859b7c56679c461e2cca7f1  core/params/include
 SECTION  4  29  5680a2f2d804163e77f94854ee18838480d785b74b297265f2f8a77db9d02242  core/params/include/consensus
 SECTION  2  15  8fdd673c41b8758e48c6fb225c15d7bbdf79f6816066a1d0c793d4bee2c5f6b1  core/params/src
-TREE  9569dbacd4b69766d7d43e7346a8b35137626257e179e800f261588662f2e05b
-ROOT  7d0194ae6bc82e0756d0e9f5cad1f8bb4f5dd4d0565aa52f500301196a536969
+TREE  24f6bbbf6bd4a1a188d02e1e33559d0efc6a4f6f7a91ffae0a2f41d8da8b6244
+ROOT  ab1bb4862a23a11bfd53b8cf107f12c5f77f743fff77de2547e964f7169e282a
