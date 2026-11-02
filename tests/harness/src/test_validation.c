@@ -1837,7 +1837,8 @@ static int test_validation_block_map_init_and_iterate(void)
         memset(h2.data, 0x22, 32);
         memset(h3.data, 0x33, 32);
 
-        /* block_map_free calls free() on each index, so heap-allocate */
+        /* block_map_free does not own the entries: the test heap-allocates
+         * them and frees them itself after the map is released. */
         struct block_index *bi1 = zcl_calloc(1, sizeof(struct block_index), "test_block_index");
         struct block_index *bi2 = zcl_calloc(1, sizeof(struct block_index), "test_block_index");
         bi1->nHeight = 100;
@@ -1850,7 +1851,9 @@ static int test_validation_block_map_init_and_iterate(void)
         ok = ok && (block_map_find(&m, &h2) == bi2);
         ok = ok && (block_map_find(&m, &h3) == NULL); /* not found */
 
-        block_map_free(&m); /* frees bi1, bi2 */
+        block_map_free(&m);
+        free(bi1);
+        free(bi2);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
@@ -1877,6 +1880,8 @@ static int test_validation_block_map_init_and_iterate(void)
             count++;
 
         block_map_free(&m);
+        free(bi1);
+        free(bi2);
         bool ok = (count == 2);
         if (ok) printf("OK (%d entries)\n", count);
         else { printf("FAIL (%d entries, expected 2)\n", count); failures++; }
@@ -1916,6 +1921,8 @@ static int test_validation_block_map_snapshot(void)
         ok = ok && snapshot_count == 2 && saw1 && saw2;
         free(snapshot);
         block_map_free(&m);
+        free(bi1);
+        free(bi2);
 
         if (ok) printf("OK (%zu entries)\n", snapshot_count);
         else { printf("FAIL\n"); failures++; }
