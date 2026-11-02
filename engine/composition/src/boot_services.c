@@ -1472,9 +1472,10 @@ bool app_init_services(struct app_context *ctx, const struct chain_params *param
      * before dying, disarming the fallback. No-op when launched directly
      * (launcher env unset). The frontend start runs on its own thread, so
      * wait for it first: a crash in frontend start must still block promotion
-     * (a degraded frontend still promotes, as before). */
-    if (boot_frontend_async_gate_ready("A/B promote"))
-        binary_ab_promote_on_ready_env();
+     * (a degraded frontend still promotes, as before). The promote waits for
+     * the WHOLE frontend start, but off this thread: holding it here put the
+     * explorer, Tor and package-store start (~30 s on r1) in front of READY. */
+    boot_frontend_async_after_done(binary_ab_promote_on_ready_env);
     return true;
 }
 

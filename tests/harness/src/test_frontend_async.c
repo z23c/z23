@@ -129,6 +129,81 @@ static int fa_ready_gate(void)
     return f;
 }
 
+static atomic_int fa_tail_hold;
+static atomic_int fa_promoted;
+
+/* rpc_http bound, then the slow services behind it (explorer, package store)
+ * are still starting. */
+static bool fa_split_body(struct boot_svc_ctx *svc)
+{
+    (void)svc;
+    set_rpc_warmup_finished();
+    boot_frontend_async_note_rpc_bound();
+    atomic_store(&fa_ran, 1);
+    while (atomic_load(&fa_tail_hold))
+        platform_sleep_ms(2);
+    return true;
+}
+
+static void fa_promote(void)
+{
+    atomic_fetch_add(&fa_promoted, 1);
+}
+
+/* Serving (READY) waits for rpc_http's bind and NOT for the services started
+ * behind it on the frontend thread; the A/B promote still waits for all of
+ * them, and runs on the frontend thread, not the boot thread. */
+static int fa_serving_before_tail(void)
+{
+    int f = 0;
+    set_rpc_warmup_started("frontend starting");
+    atomic_store(&fa_ran, 0);
+    atomic_store(&fa_promoted, 0);
+    atomic_store(&fa_tail_hold, 1);
+    boot_frontend_async_test_body(fa_split_body);
+    boot_frontend_async_start(&fa_svc);
+    f += fa_check(boot_frontend_async_wait_serving(20000),
+                  "serving once rpc bound, tail still starting");
+    f += fa_check(atomic_load(&fa_ran) == 1, "rpc bound ran");
+    f += fa_check(!boot_frontend_async_done(), "tail still running at serving");
+    if (f == 0)
+        f += fa_check(boot_frontend_async_gate_ready("READY"),
+                      "READY gate passes before the tail finishes");
+    boot_frontend_async_after_done(fa_promote);
+    f += fa_check(atomic_load(&fa_promoted) == 0,
+                  "promote waits for the whole frontend start");
+    atomic_store(&fa_tail_hold, 0);
+    f += fa_check(boot_frontend_async_wait_done(20000), "tail finishes");
+    for (int i = 0; i < 1000 && atomic_load(&fa_promoted) == 0; i++)
+        platform_sleep_ms(5);
+    f += fa_check(atomic_load(&fa_promoted) == 1,
+                  "promote ran once the frontend start finished");
+    boot_frontend_async_after_done(fa_promote); /* already done: runs now */
+    f += fa_check(atomic_load(&fa_promoted) == 2, "late promote runs inline");
+    boot_frontend_async_stop();
+    atomic_store(&fa_tail_hold, 0);
+    return f;
+}
+
+/* A start that never binds rpc_http must not report serving: the gate holds
+ * until the body is done (degraded). */
+static int fa_unbound_waits_for_done(void)
+{
+    int f = 0;
+    set_rpc_warmup_started("frontend starting");
+    atomic_store(&fa_ran, 0);
+    boot_frontend_async_test_body(fa_ok_body);
+    boot_frontend_async_test_hold(true);
+    boot_frontend_async_start(&fa_svc);
+    f += fa_check(!boot_frontend_async_wait_serving(60),
+                  "not serving while nothing is bound");
+    boot_frontend_async_test_hold(false);
+    f += fa_check(boot_frontend_async_wait_serving(20000),
+                  "serving once the body finished");
+    boot_frontend_async_stop();
+    return f;
+}
+
 /* A shutdown request while the body is held ends the wait promptly with "not
  * done" (so READY and the promote are skipped), and touches nothing the thread
  * uses: the thread is still running, and stop still joins it. */
@@ -164,6 +239,8 @@ int test_frontend_async(void)
     failures += fa_held_then_released(&t);
     failures += fa_stop_while_held();
     failures += fa_ready_gate();
+    failures += fa_serving_before_tail();
+    failures += fa_unbound_waits_for_done();
     failures += fa_shutdown_while_held();
 
 

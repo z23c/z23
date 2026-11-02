@@ -451,9 +451,21 @@ bool boot_frontend_async_done(void);
 /* Bounded wait for the start body to finish (success or degraded). False on
  * timeout or a shutdown request. */
 bool boot_frontend_async_wait_done(int64_t timeout_ms);
-/* The READY / A/B-promote gate: true once the frontend start finished; false
- * only when a shutdown was requested first (then report neither). */
+/* rpc_http bound its listeners (called from its start hook). Serving needs
+ * only this; the explorer, miner, Tor and package store that start after it
+ * on the same thread (21 s of zcode_store, 8 s of explorer on r1) do not. */
+void boot_frontend_async_note_rpc_bound(void);
+/* Bounded wait until RPC is bound or the start body finished (a failed bind
+ * degrades and finishes). False on timeout or a shutdown request. */
+bool boot_frontend_async_wait_serving(int64_t timeout_ms);
+/* The READY gate: true once RPC is bound or the frontend start finished;
+ * false only when a shutdown was requested first (then report no READY). */
 bool boot_frontend_async_gate_ready(const char *what);
+/* Run fn once the whole frontend start has finished: now if it already has,
+ * otherwise on the frontend thread as its last act. Skipped on shutdown.
+ * Used for the A/B promote, which must still follow a complete frontend
+ * start but must not hold the boot thread (and so READY) while it waits. */
+void boot_frontend_async_after_done(void (*fn)(void));
 #ifdef ZCL_TESTING
 void boot_frontend_async_test_hold(bool hold);
 void boot_frontend_async_test_body(bool (*body)(struct boot_svc_ctx *));
