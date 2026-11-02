@@ -2632,6 +2632,7 @@ static int zwn_test_golden(enum zwn_golden_mode mode,
                            const struct chain_params *params)
 {
     int failures = 0;
+    struct zwn_golden_run run = {0};
     struct zwn_fixture fixture = {0};
     const char *name =
         mode == ZWN_GOLDEN_PLAIN
@@ -2650,7 +2651,7 @@ static int zwn_test_golden(enum zwn_golden_mode mode,
         size_t file_count = mode == ZWN_GOLDEN_PLAIN ? 6 : 12;
         struct zwn_pkg pkg;
         ASSERT(zwn_make_package(&pkg, file_count, 0x11));
-        struct zwn_golden_run run = {
+        run = (struct zwn_golden_run){
             .mode = mode,
             .params = params,
             .fixture = &fixture,
@@ -2676,6 +2677,9 @@ static int zwn_t_sovereign_source_build(const struct chain_params *params)
 {
     int failures = 0;
     struct zwn_fixture fixture = {0};
+    struct zwn_node a, b, a2;
+    struct zwn_link a_a2, a2_a;
+    struct zwn_link a_b, b_a, a2_b, b_a2;
     TEST("proven C23 source: two providers feed a fresh Git-free checkout "
          "whose rebuilt binary matches the publisher SHA3") {
         char publisher[512], consumer_cas[512], checkout[512], checkout2[512];
@@ -2992,7 +2996,6 @@ static int zwn_t_sovereign_source_build(const struct chain_params *params)
         ASSERT(zwn_make_evidence_package(
             &workspace_carrier, evidence_wires, evidence_lengths));
 
-        struct zwn_node a, b, a2;
         const struct zwn_node_spec provider_nodes[] = {
             {&a, "sa"}, {&a2, "sa2"},
         };
@@ -3007,7 +3010,6 @@ static int zwn_t_sovereign_source_build(const struct chain_params *params)
         ASSERT(vcs_package_store_pin(
                    a.store, workspace_carrier.root, true) ==
                VCS_PACKAGE_STORE_OK);
-        struct zwn_link a_a2, a2_a;
         const struct zwn_link_spec provider_links[] = {
             {&a, &a_a2, {10, 1, 1, 2}, "source-server-b"},
             {&a2, &a2_a, {10, 1, 1, 1}, "source-server-a"},
@@ -3053,7 +3055,6 @@ static int zwn_t_sovereign_source_build(const struct chain_params *params)
         ASSERT(zwn_fixture_nodes(&fixture, params, consumer_node,
                                  sizeof(consumer_node) /
                                      sizeof(consumer_node[0])));
-        struct zwn_link a_b, b_a, a2_b, b_a2;
         const struct zwn_link_spec consumer_links[] = {
             {&a, &a_b, {5, 6, 7, 8}, "source-b"},
             {&b, &b_a, {1, 2, 3, 4}, "source-a"},
@@ -3772,6 +3773,10 @@ static int zwn_t_package_lifecycle(const struct chain_params *params)
 {
     int failures = 0;
     struct zwn_fixture fixture = {0};
+    struct zwn_node a, b, c, d;
+    struct zwn_link a_b, b_a;
+    struct zwn_link b_c, c_b;
+    struct zwn_link c_d, d_c;
     const struct zwn_package_scenario scenario = zwn_package_scenarios[0];
     /* This case builds and rebuilds the full commons package graph across
      * four in-process nodes (cold, restart-free repeat, source edit, header
@@ -3814,7 +3819,6 @@ static int zwn_t_package_lifecycle(const struct chain_params *params)
                 &graph_transport[i - 1u]));
         }
 
-        struct zwn_node a, b, c, d;
         const struct zwn_node_spec nodes[] = {
             {&a, "pkg-a"}, {&b, "pkg-b"},
             {&c, "pkg-c"}, {&d, "pkg-d"},
@@ -3846,7 +3850,6 @@ static int zwn_t_package_lifecycle(const struct chain_params *params)
         ASSERT(!vcs_package_store_package_status(
             b.store, transport.package_root, &status));
 
-        struct zwn_link a_b, b_a;
         const struct zwn_link_spec a_b_links[] = {
             {&a, &a_b, {10, 0, 0, 1}, "package-b"},
             {&b, &b_a, {10, 0, 0, 2}, "package-a"},
@@ -3969,7 +3972,6 @@ static int zwn_t_package_lifecycle(const struct chain_params *params)
         zwn_fixture_release_link(&fixture, &b_a);
         zwn_fixture_release_node(&fixture, &a);
 
-        struct zwn_link b_c, c_b;
         const struct zwn_link_spec b_c_links[] = {
             {&b, &b_c, {10, 0, 0, 3}, "package-c"},
             {&c, &c_b, {10, 0, 0, 4}, "package-b"},
@@ -4065,7 +4067,6 @@ static int zwn_t_package_lifecycle(const struct chain_params *params)
 
         /* C is another ordinary provider. D fetches and imports the same
          * graph without A or any repository/registry contact. */
-        struct zwn_link c_d, d_c;
         const struct zwn_link_spec c_d_links[] = {
             {&c, &c_d, {10, 0, 0, 5}, "package-d"},
             {&d, &d_c, {10, 0, 0, 6}, "package-c"},
@@ -4386,19 +4387,19 @@ static int zwn_t_malicious(const struct chain_params *params)
 {
     int failures = 0;
     struct zwn_fixture fixture = {0};
+    struct zwn_node a, b;
+    struct zwn_link a_b, b_a;
     TEST("malicious server: wrong-hash chunks -> INVALID_CHUNK offence on "
          "the real peer object, no credit, nothing stored, named failure") {
         struct zwn_pkg pkg;
         ASSERT(zwn_make_package(&pkg, 4, 0x22));
 
-        struct zwn_node a, b;
         const struct zwn_node_spec nodes[] = {{&a, "ma"}, {&b, "mb"}};
         ASSERT(zwn_fixture_nodes(&fixture, params, nodes,
                                  sizeof(nodes) / sizeof(nodes[0])));
         ASSERT(zwn_store_package(a.store, &pkg));
         a.tamper_chunks = true;
 
-        struct zwn_link a_b, b_a;
         const struct zwn_link_spec links[] = {
             {&a, &a_b, {5, 6, 7, 8}, "peer-b"},
             {&b, &b_a, {1, 2, 3, 4}, "peer-a"},
@@ -4464,12 +4465,13 @@ static int zwn_t_corrupt_provider_repair(const struct chain_params *params)
 {
     int failures = 0;
     struct zwn_fixture fixture = {0};
+    struct zwn_node bad, good, consumer;
+    struct zwn_link bad_c, c_bad, good_c, c_good;
     TEST("corrupt provider: rejected bytes never enter CAS and the same "
          "exact-root download repairs from an honest alternate") {
         struct zwn_pkg pkg;
         ASSERT(zwn_make_package(&pkg, 6, 0x27));
 
-        struct zwn_node bad, good, consumer;
         const struct zwn_node_spec nodes[] = {
             {&bad, "cpr-bad"}, {&good, "cpr-good"},
             {&consumer, "cpr-consumer"},
@@ -4480,7 +4482,6 @@ static int zwn_t_corrupt_provider_repair(const struct chain_params *params)
         ASSERT(zwn_store_package(good.store, &pkg));
         bad.tamper_chunks = true;
 
-        struct zwn_link bad_c, c_bad, good_c, c_good;
         const struct zwn_link_spec links[] = {
             {&bad, &bad_c, {10, 3, 0, 1}, "consumer"},
             {&consumer, &c_bad, {10, 3, 0, 2}, "bad-provider"},
@@ -4559,12 +4560,13 @@ static int zwn_t_corrupt_local_repair(const struct chain_params *params)
 {
     int failures = 0;
     struct zwn_fixture fixture = {0};
+    struct zwn_node a, b, a2;
+    struct zwn_link a_b, b_a, a2_b, b_a2;
     TEST("corrupt local chunk: quarantine then repair from the surviving "
          "provider over real zpkgswm frames") {
         struct zwn_pkg pkg;
         ASSERT(zwn_make_package(&pkg, 6, 0x2a));
 
-        struct zwn_node a, b, a2;
         const struct zwn_node_spec nodes[] = {
             {&a, "ca"}, {&a2, "ca2"}, {&b, "cb"},
         };
@@ -4573,7 +4575,6 @@ static int zwn_t_corrupt_local_repair(const struct chain_params *params)
         ASSERT(zwn_store_package(a.store, &pkg));
         ASSERT(zwn_store_package(a2.store, &pkg));
 
-        struct zwn_link a_b, b_a, a2_b, b_a2;
         const struct zwn_link_spec links[] = {
             {&a, &a_b, {5, 6, 7, 8}, "peer-b"},
             {&b, &b_a, {1, 2, 3, 4}, "peer-a"},
@@ -4652,16 +4653,16 @@ static int zwn_t_unrequested(const struct chain_params *params)
 {
     int failures = 0;
     struct zwn_fixture fixture = {0};
+    struct zwn_node a, b;
+    struct zwn_link a_b, b_a;
     TEST("unrequested DATA: UNREQUESTED offence on the wire, no credit") {
         struct zwn_pkg pkg;
         ASSERT(zwn_make_package(&pkg, 2, 0x33));
 
-        struct zwn_node a, b;
         const struct zwn_node_spec nodes[] = {{&a, "ua"}, {&b, "ub"}};
         ASSERT(zwn_fixture_nodes(&fixture, params, nodes,
                                  sizeof(nodes) / sizeof(nodes[0])));
 
-        struct zwn_link a_b, b_a;
         const struct zwn_link_spec links[] = {
             {&a, &a_b, {5, 6, 7, 8}, "peer-b"},
             {&b, &b_a, {1, 2, 3, 4}, "peer-a"},
@@ -4721,13 +4722,14 @@ static int zwn_t_quota_exhaustion(const struct chain_params *params)
 {
     int failures = 0;
     struct zwn_fixture fixture = {0};
+    struct zwn_node a, b;
+    struct zwn_link a_b, b_a;
     TEST("quota exhaustion: named terminal failure, no partial completion, "
          "raised quota completes the same fetch") {
         struct zwn_pkg pkg;
         ASSERT(zwn_make_package(&pkg, 6, 0x55));
         ASSERT(pkg.total_bytes > 0 && pkg.total_bytes < 4096);
 
-        struct zwn_node a, b;
         const struct zwn_node_spec nodes[] = {{&a, "qa"}, {&b, "qb"}};
         ASSERT(zwn_fixture_nodes(&fixture, params, nodes,
                                  sizeof(nodes) / sizeof(nodes[0])));
@@ -4745,7 +4747,6 @@ static int zwn_t_quota_exhaustion(const struct chain_params *params)
                                            zwn_score, NULL);
         ASSERT(b.engine != NULL);
 
-        struct zwn_link a_b, b_a;
         const struct zwn_link_spec links[] = {
             {&a, &a_b, {5, 6, 7, 8}, "peer-b"},
             {&b, &b_a, {1, 2, 3, 4}, "peer-a"},
@@ -4832,6 +4833,8 @@ static int zwn_t_deterministic_replay(const struct chain_params *params)
     int failures = 0;
     struct zwn_fixture fx1 = {0};
     struct zwn_fixture fx2 = {0};
+    struct zwn_node a1, b1, a2, b2;
+    struct zwn_link a1_b, b1_a, a2_b, b2_a;
     TEST("deterministic seed replay: twin topologies stay identical "
          "round for round") {
         struct zwn_pkg p1, p2;
@@ -4840,7 +4843,6 @@ static int zwn_t_deterministic_replay(const struct chain_params *params)
         ASSERT(p1.total_bytes == p2.total_bytes);
         ASSERT(memcmp(p1.root, p2.root, 32) == 0);
 
-        struct zwn_node a1, b1, a2, b2;
         const struct zwn_node_spec nodes1[] = {{&a1, "t1a"}, {&b1, "t1b"}};
         const struct zwn_node_spec nodes2[] = {{&a2, "t2a"}, {&b2, "t2b"}};
         ASSERT(zwn_fixture_nodes(&fx1, params, nodes1,
@@ -4850,7 +4852,6 @@ static int zwn_t_deterministic_replay(const struct chain_params *params)
         ASSERT(zwn_store_package(a1.store, &p1));
         ASSERT(zwn_store_package(a2.store, &p2));
 
-        struct zwn_link a1_b, b1_a, a2_b, b2_a;
         const struct zwn_link_spec links1[] = {
             {&a1, &a1_b, {5, 6, 7, 8}, "peer-b"},
             {&b1, &b1_a, {1, 2, 3, 4}, "peer-a"},
@@ -5193,12 +5194,14 @@ static int zwn_t_late_joiner_announce_discovery(
 {
     int failures = 0;
     struct zwn_fixture fixture = {0};
+    struct zwn_node a, b, c;
+    struct zwn_link a_b, b_a;
+    struct zwn_link b_c, c_b;
     TEST("late joiner finds the surviving holder by announcement and "
          "fetches with no provider handle") {
         struct zwn_pkg pkg;
         ASSERT(zwn_make_package(&pkg, 4, 0x3c));
 
-        struct zwn_node a, b, c;
         const struct zwn_node_spec holders[] = {{&a, "lj-a"}, {&b, "lj-b"}};
         ASSERT(zwn_fixture_nodes(&fixture, params, holders, 2));
         ASSERT(zwn_store_package(a.store, &pkg));
@@ -5206,7 +5209,6 @@ static int zwn_t_late_joiner_announce_discovery(
 
         /* A held the package redundantly with B, then vanishes before the
          * late joiner exists. */
-        struct zwn_link a_b, b_a;
         const struct zwn_link_spec a_b_links[] = {
             {&a, &a_b, {12, 0, 0, 1}, "lj-b"},
             {&b, &b_a, {12, 0, 0, 2}, "lj-a"},
@@ -5220,7 +5222,6 @@ static int zwn_t_late_joiner_announce_discovery(
 
         const struct zwn_node_spec joiner[] = {{&c, "lj-c"}};
         ASSERT(zwn_fixture_nodes(&fixture, params, joiner, 1));
-        struct zwn_link b_c, c_b;
         const struct zwn_link_spec b_c_links[] = {
             {&b, &b_c, {12, 0, 0, 3}, "lj-c"},
             {&c, &c_b, {12, 0, 0, 4}, "lj-b"},
@@ -5450,6 +5451,8 @@ static int zwn_t_attestation_flight(const struct chain_params *params)
 {
     int failures = 0;
     struct zwn_fixture fixture = {0};
+    struct zwn_node a, b;
+    struct zwn_link a_b, b_a;
     TEST("attestation flight: A offers a signed attestation, B resolves "
          "the pointer, pulls the bytes over real zpkgswm frames, "
          "re-derives the same transport root, and both nodes end holding "
@@ -5463,13 +5466,11 @@ static int zwn_t_attestation_flight(const struct chain_params *params)
         ASSERT(zwn_att_wire(pkg.root, 0x31, wire, &wire_len, id));
         ASSERT(wire_len > 0 && wire_len <= VCS_BLOB_MAX_BYTES);
 
-        struct zwn_node a, b;
         const struct zwn_node_spec nodes[] = {
             {&a, "att-a"}, {&b, "att-b"},
         };
         ASSERT(zwn_fixture_nodes(&fixture, params, nodes,
                                  sizeof(nodes) / sizeof(nodes[0])));
-        struct zwn_link a_b, b_a;
         const struct zwn_link_spec links[] = {
             {&a, &a_b, {10, 4, 0, 1}, "att-peer-b"},
             {&b, &b_a, {10, 4, 0, 2}, "att-peer-a"},
@@ -5968,17 +5969,17 @@ static int zwn_t_shared_focus_flight(const struct chain_params *params)
 {
     int failures = 0;
     struct zwn_fixture fixture = {0};
+    struct zwn_node a, b;
+    struct zwn_link a_b, b_a;
     uint8_t *claim_set_wire = NULL;
     TEST("shared focus flight: two node engines derive one focus, exchange "
          "disjoint claims and rooted reports over real zpkgswm frames, "
          "then the successor validates the handoff without prose") {
-        struct zwn_node a, b;
         const struct zwn_node_spec nodes[] = {
             {&a, "focus-a"}, {&b, "focus-b"},
         };
         ASSERT(zwn_fixture_nodes(&fixture, params, nodes,
                                  sizeof(nodes) / sizeof(nodes[0])));
-        struct zwn_link a_b, b_a;
         const struct zwn_link_spec links[] = {
             {&a, &a_b, {10, 7, 0, 1}, "focus-peer-b"},
             {&b, &b_a, {10, 7, 0, 2}, "focus-peer-a"},
@@ -6576,6 +6577,8 @@ static int zwn_t_task_flight(const struct chain_params *params)
 {
     int failures = 0;
     struct zwn_fixture fixture = {0};
+    struct zwn_node a, b;
+    struct zwn_link a_b, b_a;
     TEST("task flight: A posts a dev task as the three-file carrier, B "
          "resolves the pointer, pulls the context over real zpkgswm "
          "frames, and re-verifies it against exactly the task root — "
@@ -6585,13 +6588,11 @@ static int zwn_t_task_flight(const struct chain_params *params)
             "green or the work is worth nothing";
         uint8_t task_root[32], context_root[32];
 
-        struct zwn_node a, b;
         const struct zwn_node_spec nodes[] = {
             {&a, "task-a"}, {&b, "task-b"},
         };
         ASSERT(zwn_fixture_nodes(&fixture, params, nodes,
                                  sizeof(nodes) / sizeof(nodes[0])));
-        struct zwn_link a_b, b_a;
         const struct zwn_link_spec links[] = {
             {&a, &a_b, {10, 4, 0, 1}, "task-peer-b"},
             {&b, &b_a, {10, 4, 0, 2}, "task-peer-a"},
@@ -6671,16 +6672,16 @@ static int zwn_t_task_hostile_pointer(const struct chain_params *params)
 {
     int failures = 0;
     struct zwn_fixture fixture = {0};
+    struct zwn_node a, b;
+    struct zwn_link a_b, b_a;
     TEST("hostile task pointer: a context proving a DIFFERENT task, "
          "resolved and fetched under the task root B asked about, is "
          "refused task-mismatch and nothing is admitted") {
-        struct zwn_node a, b;
         const struct zwn_node_spec nodes[] = {
             {&a, "taskhostile-a"}, {&b, "taskhostile-b"},
         };
         ASSERT(zwn_fixture_nodes(&fixture, params, nodes,
                                  sizeof(nodes) / sizeof(nodes[0])));
-        struct zwn_link a_b, b_a;
         const struct zwn_link_spec links[] = {
             {&a, &a_b, {10, 4, 0, 1}, "taskhostile-peer-b"},
             {&b, &b_a, {10, 4, 0, 2}, "taskhostile-peer-a"},
@@ -6749,6 +6750,8 @@ static int zwn_t_attestation_hostile_pointer(
 {
     int failures = 0;
     struct zwn_fixture fixture = {0};
+    struct zwn_node a, b;
+    struct zwn_link a_b, b_a;
     TEST("hostile pointer: an attestation about a DIFFERENT package, "
          "delivered under the root B asked about, is refused ERR_BINDING "
          "and files NOTHING") {
@@ -6765,13 +6768,11 @@ static int zwn_t_attestation_hostile_pointer(
         uint8_t id[VCS_PACKAGE_ATTEST_ID_BYTES];
         ASSERT(zwn_att_wire(other.root, 0x41, wire, &wire_len, id));
 
-        struct zwn_node a, b;
         const struct zwn_node_spec nodes[] = {
             {&a, "hp-a"}, {&b, "hp-b"},
         };
         ASSERT(zwn_fixture_nodes(&fixture, params, nodes,
                                  sizeof(nodes) / sizeof(nodes[0])));
-        struct zwn_link a_b, b_a;
         const struct zwn_link_spec links[] = {
             {&a, &a_b, {10, 5, 0, 1}, "hp-peer-b"},
             {&b, &b_a, {10, 5, 0, 2}, "hp-peer-a"},
@@ -6850,6 +6851,8 @@ static int zwn_t_attestation_corrupt_wire(const struct chain_params *params)
 {
     int failures = 0;
     struct zwn_fixture fixture = {0};
+    struct zwn_node a, b;
+    struct zwn_link a_b, b_a;
     TEST("corrupt attestation wire: a flipped byte is refused at B "
          "whether it is re-rooted by the sender or flipped in flight, "
          "and files NOTHING either way") {
@@ -6861,13 +6864,11 @@ static int zwn_t_attestation_corrupt_wire(const struct chain_params *params)
         uint8_t id[VCS_PACKAGE_ATTEST_ID_BYTES];
         ASSERT(zwn_att_wire(pkg.root, 0x51, wire, &wire_len, id));
 
-        struct zwn_node a, b;
         const struct zwn_node_spec nodes[] = {
             {&a, "cw-a"}, {&b, "cw-b"},
         };
         ASSERT(zwn_fixture_nodes(&fixture, params, nodes,
                                  sizeof(nodes) / sizeof(nodes[0])));
-        struct zwn_link a_b, b_a;
         const struct zwn_link_spec links[] = {
             {&a, &a_b, {10, 6, 0, 1}, "cw-peer-b"},
             {&b, &b_a, {10, 6, 0, 2}, "cw-peer-a"},
