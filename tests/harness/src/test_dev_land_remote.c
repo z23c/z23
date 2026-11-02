@@ -15,6 +15,7 @@
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
+#include "platform/logical_cpu.h"
 #include "platform/state_root.h"
 #include "util/spawn.h"
 #include "zsha256/zsha256.h"
@@ -1133,11 +1134,15 @@ static int dlt_rv_verify_cases(const struct dlt_rig *r, const char *tmp,
         ASSERT(dlt_slurp(rc, text, sizeof(text)));
         ASSERT(strstr(text, "bundle_sha256,bundle_verify,head,base,"
                             "agent_verify\"") != NULL);
+        /* The child gets the host's parallel job count, as the land
+         * qualify build does: serial, a re-verify took 38+ minutes. */
+        char jobs[16] = "-j1";
+        (void)platform_build_jobs_arg(jobs);
         (void)snprintf(want, sizeof(want),
-                       "%s --wait --project z23 make agent-verify "
+                       "%s --wait --project z23 make %s agent-verify "
                        "ONLY=@changed n=1 changed=" DLT_RV_BASELINE
                        ",tools/x.c,tools/y.c, dirty=0",
-                       rail);
+                       rail, jobs);
         ASSERT_STR_EQ(g_rvf.seen, want);
         dlt_vfy(&c, rc, o2);
         ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);

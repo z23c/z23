@@ -12,8 +12,12 @@
  * with a typed refusal, REVERIFY_MERGE (a merge commit) or REVERIFY_NOT_SINGLE
  * (any count but one); a conflict is REVERIFY_APPLY. The focused proof the
  * land queue uses then runs
- * as one child: `devbuild --wait --project z23 make agent-verify
- * ONLY=@changed`, which already includes the fast lint step. The admission
+ * as one child: `devbuild --wait --project z23 make -jN agent-verify
+ * ONLY=@changed`, which already includes the fast lint step. -jN is
+ * platform_build_jobs_arg()'s count (CPUs and memory budget, capped by
+ * ZCL_BUILD_MAX_JOBS), as for the land qualify build: without it the
+ * top-level make built serially, one or two compiles at a time, and a peer
+ * re-verify took 38+ minutes beside a -j28 gate on the same host. The admission
  * rail is mandatory: with no devbuild installed the run refuses
  * REVERIFY_NO_RAIL before anything is applied or built; there is no direct
  * make. Tests reach it only through the zcl_dlr_verify_seam_set() seam.
@@ -48,6 +52,7 @@
 #include "command/native_dev_land_remote_shared.h"
 
 #include "base/safe_alloc.h"
+#include "platform/logical_cpu.h"
 #include "util/spawn.h"
 
 #include <stdio.h>
@@ -345,10 +350,11 @@ static bool dlrv_child(const char *wt, const char *rail, const char *base,
                        int secs, const char *leaf,
                        struct zcl_command_reply *reply)
 {
-    const char *argv[8];
+    const char *argv[9];
     size_t n = 0;
     bool timed_out = false, pass;
     int rc;
+    char jobs[16] = "-j1"; /* kept when the host count is unknown */
     char path[1100];
     char *text, *verdict;
     text = zcl_calloc(1, DLRV_OUT_MAX, "dev_land_verify.out");
@@ -364,7 +370,9 @@ static bool dlrv_child(const char *wt, const char *rail, const char *base,
     argv[n++] = "--wait";
     argv[n++] = "--project";
     argv[n++] = "z23";
+    (void)platform_build_jobs_arg(jobs);
     argv[n++] = "make";
+    argv[n++] = jobs;
     argv[n++] = "agent-verify";
     argv[n++] = "ONLY=@changed";
     argv[n] = NULL;
