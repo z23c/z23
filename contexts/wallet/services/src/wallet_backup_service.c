@@ -143,6 +143,68 @@ static bool wbs_canonical_backup_path(const char *backup_dir,
            strcmp(leaf + leaf_len - suffix_len,
                   WALLET_BACKUP_FILENAME_SUFFIX_ENC) == 0;
 }
+/* Validate one open backup candidate: private handle, snapshotted, non-empty
+ * and size-bounded, with a canonical path that passes the backup-root name
+ * policy. */
+static bool wbs_backup_candidate_ok(
+    const struct platform_positioned_file *file, const char *backup_dir,
+    struct platform_positioned_file_snapshot *before,
+    char *canonical, size_t canonical_cap)
+{
+    memset(before, 0, sizeof(*before));
+    canonical[0] = '\0';
+    return platform_positioned_file_is_private(file) &&
+           platform_positioned_file_snapshot(file, before) &&
+           before->size != 0 && before->size <= INT64_MAX &&
+           platform_positioned_file_path(file, canonical, canonical_cap) &&
+           wbs_canonical_backup_path(backup_dir, canonical);
+}
+/* Positioned-read `size` bytes of `file` into `sha`; returns the count of
+ * bytes hashed, which falls short of `size` when a read fails. */
+static uint64_t wbs_hash_file_bytes(
+    const struct platform_positioned_file *file, uint64_t size,
+    struct sha3_256_ctx *sha)
+{
+    uint8_t buf[65536];
+    uint64_t total = 0;
+    while (total < size) {
+        size_t wanted = size - total > sizeof(buf)
+            ? sizeof(buf) : (size_t)(size - total);
+        int64_t n = platform_positioned_file_read(
+            file, buf, wanted, total);
+        if (n > 0) {
+            sha3_256_write(sha, buf, (size_t)n);
+            total += (uint64_t)n;
+            continue;
+        }
+        break;
+    }
+    return total;
+}
+/* Re-snapshot `file` and confirm it still matches `before` field-wise and
+ * that `total` hashed bytes cover the whole snapshot size. */
+static bool wbs_snapshot_stable(
+    const struct platform_positioned_file *file,
+    const struct platform_positioned_file_snapshot *before, uint64_t total)
+{
+    struct platform_positioned_file_snapshot after;
+    return platform_positioned_file_snapshot(file, &after) &&
+           wbs_same_snapshot(before, &after) &&
+           total == before->size;
+}
+/* Finalize the verified digest into `out`, record the byte count in
+ * `size_out` and copy the canonical path into `canonical_out`; false when
+ * the copy does not fit. */
+static bool wbs_store_hash_result(struct sha3_256_ctx *sha, uint64_t total,
+                                  uint8_t out[32], int64_t *size_out,
+                                  const char *canonical,
+                                  char *canonical_out, size_t canonical_cap)
+{
+    sha3_256_finalize(sha, out);
+    *size_out = (int64_t)total;
+    int copied = snprintf(canonical_out, canonical_cap, "%s", canonical);
+    return copied > 0 && (size_t)copied < canonical_cap;
+}
 /* Hash through one private, no-reparse handle and prove its canonical handle
  * path is a direct policy-named child of the validated backup root. */
 static bool wbs_hash_regular_file(const char *backup_dir, const char *path,
@@ -156,46 +218,22 @@ static bool wbs_hash_regular_file(const char *backup_dir, const char *path,
     platform_positioned_file_init(&file);
     if (!platform_positioned_file_open(&file, path))
         return false; /* raw-return-ok:unreadable receipt is not authority */
-    struct platform_positioned_file_snapshot before, after;
+    struct platform_positioned_file_snapshot before;
     char canonical[WALLET_BACKUP_RECEIPT_PATH_MAX];
-    if (!platform_positioned_file_is_private(&file) ||
-        !platform_positioned_file_snapshot(&file, &before) ||
-        before.size == 0 || before.size > INT64_MAX ||
-        !platform_positioned_file_path(&file, canonical, sizeof(canonical)) ||
-        !wbs_canonical_backup_path(backup_dir, canonical)) {
+    if (!wbs_backup_candidate_ok(&file, backup_dir, &before,
+                                 canonical, sizeof(canonical))) {
         platform_positioned_file_close(&file);
         return false; /* raw-return-ok:not a stable regular backup file */
     }
     struct sha3_256_ctx sha;
     sha3_256_init(&sha);
-    uint8_t buf[65536];
-    uint64_t total = 0;
-    bool ok = true;
-    while (total < before.size) {
-        size_t wanted = before.size - total > sizeof(buf)
-            ? sizeof(buf) : (size_t)(before.size - total);
-        int64_t n = platform_positioned_file_read(
-            &file, buf, wanted, total);
-        if (n > 0) {
-            sha3_256_write(&sha, buf, (size_t)n);
-            total += (uint64_t)n;
-            continue;
-        }
-        ok = false;
-        break;
-    }
-    if (!platform_positioned_file_snapshot(&file, &after) ||
-        !wbs_same_snapshot(&before, &after) || total != before.size)
-        ok = false;
+    uint64_t total = wbs_hash_file_bytes(&file, before.size, &sha);
+    bool ok = wbs_snapshot_stable(&file, &before, total);
     platform_positioned_file_close(&file);
     if (!ok)
         return false; /* raw-return-ok:file changed or read failed */
-    sha3_256_finalize(&sha, out);
-    *size_out = (int64_t)total;
-    int copied = snprintf(canonical_out, canonical_cap, "%s", canonical);
-    if (copied <= 0 || (size_t)copied >= canonical_cap)
-        return false;
-    return true;
+    return wbs_store_hash_result(&sha, total, out, size_out,
+                                 canonical, canonical_out, canonical_cap);
 }
 static void wbs_clear_encrypted_authority_locked(void)
 {
