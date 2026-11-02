@@ -53,6 +53,8 @@ extern char dc_scan_files[DC_FILES][DC_FILE];
 extern int dc_scan_n;
 extern int dc_external;
 extern int dc_gate_timeout;
+extern int dc_gate_cpu;
+extern int dc_verdict_wait;
 extern int dc_table_override;
 extern char dc_table_path[DC_PATH];
 

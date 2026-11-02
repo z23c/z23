@@ -40,7 +40,9 @@ int dc_viol_n = 0;
 char dc_scan_files[DC_FILES][DC_FILE];
 int dc_scan_n = 0;
 int dc_external = 0;
-int dc_gate_timeout = 180;
+int dc_gate_timeout = 1200;
+int dc_gate_cpu = 180;
+int dc_verdict_wait = 180;
 int dc_table_override = 0;
 char dc_table_path[DC_PATH];
 
@@ -522,9 +524,15 @@ static void dc_print_help(void)
 
 int check_doc_claims_run(int argc, char **argv)
 {
-    dc_gate_timeout = atoi(env_or("ZCL_DOC_CLAIMS_GATE_TIMEOUT", "180"));
+    dc_gate_timeout = atoi(env_or("ZCL_DOC_CLAIMS_GATE_TIMEOUT", "1200"));
+    dc_gate_cpu = atoi(env_or("ZCL_DOC_CLAIMS_GATE_CPU", "180"));
+    dc_verdict_wait = atoi(env_or("ZCL_DOC_CLAIMS_VERDICT_WAIT", "180"));
     if (dc_gate_timeout <= 0)
-        dc_gate_timeout = 180;
+        dc_gate_timeout = 1200;
+    if (dc_verdict_wait <= 0)
+        dc_verdict_wait = 180;
+    if (dc_gate_cpu <= 0)
+        dc_gate_cpu = 180;
     int prc = dc_parse_args(argc, argv);
     if (prc == 1) {
         dc_print_help();

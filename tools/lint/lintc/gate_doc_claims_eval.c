@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -147,7 +148,10 @@ int dc_run_capture(char *const argv[], char *out, size_t cap, size_t *len,
     return over ? -2 : 0;
 }
 
-/* Runs "timeout N bash -c cd ROOT && ZCL_LINT_PRODUCTION_SCAN=1 cmd". */
+/* Runs "timeout N bash -c cd ROOT && ZCL_LINT_PRODUCTION_SCAN=1 cmd". N is the
+ * wall backstop for a gate blocked forever; RLIMIT_CPU (dc_gate_cpu seconds,
+ * inherited by every descendant) ends a spinning one. A slow host spends
+ * wall time, not CPU, so it does not fail a correct gate. */
 static int dc_run_gate(const char *cmd)
 {
     char full[DC_CMD + DC_PATH + 64], ts[16];
@@ -169,6 +173,12 @@ static int dc_run_gate(const char *cmd)
     }
     if (pid == 0) {
         close(fds[0]);
+        struct rlimit rl = { (rlim_t)dc_gate_cpu, (rlim_t)dc_gate_cpu + 5 };
+        if (setrlimit(RLIMIT_CPU, &rl)) {
+            fputs("check-doc-claims: setrlimit(RLIMIT_CPU) failed; gate not run\n",
+                  stderr);
+            _exit(127);
+        }
         int dn = open("/dev/null", O_WRONLY);
         if (dn >= 0) {
             dup2(dn, 1);
@@ -291,7 +301,7 @@ static int dc_requested_omits(const char *dir, const char *g)
     return found ? 0 : 1;
 }
 
-/* Polls dir/<g>.rc up to dc_gate_timeout seconds. 1 when a valid numeric
+/* Polls dir/<g>.rc up to dc_verdict_wait seconds. 1 when a valid numeric
  * verdict was read into *rc; 0 means fall through and run the gate. */
 static int dc_wait_verdict(const char *dir, const char *g, int *rc)
 {
@@ -300,7 +310,7 @@ static int dc_wait_verdict(const char *dir, const char *g, int *rc)
         return 0;
     int64_t start = clock_now_monotonic_ns();
     struct timespec nap = { 0, 200 * 1000 * 1000 };
-    while (clock_now_monotonic_ns() - start < (int64_t)dc_gate_timeout * 1000000000LL) {
+    while (clock_now_monotonic_ns() - start < (int64_t)dc_verdict_wait * 1000000000LL) {
         FILE *f = fopen(path, "r");
         if (f) {
             char buf[64];

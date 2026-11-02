@@ -830,8 +830,12 @@ Z23_FLAG("ZCL_DISCARD_GATE_FILE_FLOOR", "env_build", "1", "-",
           "undocumented; first use tools/lint/lintc/gate_discarded_status.c:auto")
 Z23_FLAG("ZCL_DISCARD_GATE_SCAN_GLOB", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_discarded_status.c:auto")
-Z23_FLAG("ZCL_DOC_CLAIMS_GATE_TIMEOUT", "env_build", "180", "-",
-          "undocumented; first use tools/lint/lintc/gate_doc_claims.c:auto")
+Z23_FLAG("ZCL_DOC_CLAIMS_GATE_CPU", "env_build", "180", "-",
+          "CPU-seconds limit (RLIMIT_CPU) for each gate-passes claim; first use tools/lint/lintc/gate_doc_claims.c:auto")
+Z23_FLAG("ZCL_DOC_CLAIMS_GATE_TIMEOUT", "env_build", "1200", "-",
+          "wall-clock backstop seconds for each gate-passes claim; first use tools/lint/lintc/gate_doc_claims.c:auto")
+Z23_FLAG("ZCL_DOC_CLAIMS_VERDICT_WAIT", "env_build", "180", "-",
+          "seconds to poll the lint driver verdict file before running the gate; first use tools/lint/lintc/gate_doc_claims.c:auto")
 Z23_FLAG("ZCL_DOC_INLINE_PATHS_BASELINE", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_doc_inline_paths.c:717")
 Z23_FLAG("ZCL_DOC_INLINE_PATHS_GLOB", "env_build", "-", "-",

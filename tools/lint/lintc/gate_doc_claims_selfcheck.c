@@ -249,7 +249,7 @@ static int dc_st_case_reuse(const char *vr, int *fail)
 
 static int dc_st_case_fallback(const char *vr, int *fail)
 {
-    int got, old_t = dc_gate_timeout;
+    int got, old_t = dc_verdict_wait;
     char p[ST_PATH];
     if (dc_st_table_write(vr, "zzz_verdict_fallback_gate", "exit 42"))
         return 2;
@@ -258,14 +258,52 @@ static int dc_st_case_fallback(const char *vr, int *fail)
         return 2;
     unlink(p);
     dc_memo_forget("zzz_verdict_fallback_gate");
-    dc_gate_timeout = 1;
+    dc_verdict_wait = 1;
     got = dc_gate_rc("zzz_verdict_fallback_gate");
-    dc_gate_timeout = old_t;
+    dc_verdict_wait = old_t;
     if (got == 42)
         return 0;
     fprintf(stderr, "FAIL: check_doc_claims verdict-reuse self-check broken"
             " — with no\n      recorded verdict, gate_rc must still run the "
             "gate itself\n      (fail-closed); got '%d', wanted 42.\n", got);
+    *fail = 2;
+    return 0;
+}
+
+/* A gate that spins past the CPU budget dies by signal, not by the wall
+ * backstop; one that sleeps past a shortened backstop reports 124. Wall time
+ * is not asserted: a loaded host stretches it. */
+static int dc_st_case_budget(const char *vr, int *fail)
+{
+    int old_t = dc_gate_timeout, old_c = dc_gate_cpu, old_v = dc_verdict_wait;
+    int spin, slp;
+    if (dc_st_table_write(vr, "zzz_budget_spin_gate",
+                          "sh -c 'while :; do :; done'"))
+        return 2;
+    dc_memo_forget("zzz_budget_spin_gate");
+    dc_gate_timeout = 120;
+    dc_gate_cpu = 1;
+    spin = dc_gate_rc("zzz_budget_spin_gate");
+    dc_gate_timeout = 1;
+    dc_gate_cpu = 100;
+    if (dc_st_table_write(vr, "zzz_budget_sleep_gate", "sleep 30")) {
+        dc_gate_timeout = old_t;
+        dc_gate_cpu = old_c;
+        dc_verdict_wait = old_v;
+        return 2;
+    }
+    dc_memo_forget("zzz_budget_sleep_gate");
+    slp = dc_gate_rc("zzz_budget_sleep_gate");
+    dc_gate_timeout = old_t;
+    dc_gate_cpu = old_c;
+    dc_verdict_wait = old_v;
+    if (spin > 128 && spin != 124 && slp == 124)
+        return 0;
+    fprintf(stderr, "FAIL: check_doc_claims budget self-check broken — a "
+            "CPU-bound gate\n      must die by signal at the CPU budget (got "
+            "%d, wanted a status above 128 other than 124)\n      and a "
+            "sleeping gate must hit the wall backstop (got %d, wanted "
+            "124).\n", spin, slp);
     *fail = 2;
     return 0;
 }
@@ -288,7 +326,7 @@ static int dc_st_case_unlisted(const char *vr, int *fail)
 
 static int dc_st_case_absent(const char *vr, int *fail)
 {
-    int got, old_t = dc_gate_timeout;
+    int got, old_t = dc_verdict_wait;
     char p[ST_PATH];
     if (ovf(snprintf(p, sizeof p, "%s/requested.list", vr), sizeof p))
         return 2;
@@ -297,11 +335,11 @@ static int dc_st_case_absent(const char *vr, int *fail)
     if (dc_st_table_write(vr, "zzz_verdict_absent_gate", "exit 43"))
         return 2;
     dc_memo_forget("zzz_verdict_absent_gate");
-    dc_gate_timeout = 30;
+    dc_verdict_wait = 30;
     int64_t t0 = clock_now_monotonic_ns();
     got = dc_gate_rc("zzz_verdict_absent_gate");
     long el = (long)((clock_now_monotonic_ns() - t0) / 1000000000LL);
-    dc_gate_timeout = old_t;
+    dc_verdict_wait = old_t;
     if (got == 43 && el <= 5)
         return 0;
     fprintf(stderr, "FAIL: check_doc_claims verdict-reuse self-check broken"
@@ -477,6 +515,8 @@ static int dc_st_verdict(const char *vr, int *fail)
         rc = dc_st_case_unlisted(vr, fail);
     if (!rc)
         rc = dc_st_case_absent(vr, fail);
+    if (!rc)
+        rc = dc_st_case_budget(vr, fail);
     if (!rc)
         rc = dc_st_case_listed(vr, fail);
     if (!rc)
