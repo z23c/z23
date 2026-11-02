@@ -677,8 +677,9 @@ static int map_preflight_typed_refusal(void)
 
 
 /* Build the state a kill -9 leaves: a child commits to the WAL with
- * autocheckpoint off and dies without closing, so -wal holds frames the main
- * file lacks and a stale -shm remains. */
+ * autocheckpoint off (map_open_kernel(dir, false) sets wal_autocheckpoint=0)
+ * and dies without closing, so -wal holds frames the main file lacks and a
+ * stale -shm remains. */
 static bool map_crash_fixture(const char *dir, const char *marker_key)
 {
     pid_t pid = fork();
@@ -732,6 +733,61 @@ static int test_normal_preflight_crashed_wal_read_in_place(void)
     return failures;
 }
 
+/* The copy fallback must keep its timing marks and must never fsync the
+ * throwaway copy (that flush cost 697 s of an 877 s warm restart on r1), and
+ * it must reach the same verdict as the in-place read. */
+static bool map_copy_marks(const char *text, bool verdict)
+{
+    bool final = strstr(text, "mint_preflight.final_stability ") != NULL;
+    return strstr(text, "mint_preflight.temp_create ") &&
+        strstr(text, "mint_preflight.copy ") &&
+        strstr(text, "mint_preflight.copy_stability ") &&
+        strstr(text, "mint_preflight.copy_inspect ") &&
+        strstr(text, "mint_preflight.cleanup_check ") &&
+        !strstr(text, "mint_preflight.main_fsync") &&
+        !strstr(text, "mint_preflight.wal_fsync") &&
+        !strstr(text, "mint_preflight.live_inspect ") && final == verdict;
+}
+
+static bool map_copy_fallback(const char *dir, bool *verdict)
+{
+    char text[4096];
+    return map_capture_preflight(dir, verdict, text, sizeof text) && map_copy_marks(text, *verdict);
+}
+
+static void map_remove_shm(const char *dir)
+{
+    char shm[600];
+    snprintf(shm, sizeof(shm), "%s/consensus.db-shm", dir);
+    (void)unlink(shm);
+}
+
+/* A WAL with frames but no -shm takes the copy path (the live open would
+ * create a file in the datadir). Same verdicts as the in-place read. The
+ * live-open-failure fallback is not forced here: an unreadable -shm is refused
+ * earlier by source_open (fail closed) and no other fixture fails the open. */
+static int test_normal_preflight_copy_fallbacks(void)
+{
+    int failures = 0;
+    char dir[256];
+    bool verdict = true;
+    test_fmt_tmpdir(dir, sizeof(dir), "mint_anchor_preflight", "copy_fallback");
+    mkdir_p("./test-tmp");
+    mkdir_p(dir);
+    MAP_CHECK("no-shm: ordinary WAL fixture", map_crash_fixture(dir, "ordinary_serving_marker"));
+    map_remove_shm(dir);
+    MAP_CHECK("no-shm: ordinary WAL allowed via copy, no fsync, source untouched",
+              map_copy_fallback(dir, &verdict) && verdict);
+    map_cleanup_dir(dir);
+    mkdir_p(dir);
+    MAP_CHECK("no-shm: producer marker fixture", map_crash_fixture(dir, MINT_ANCHOR_IN_PROGRESS_KEY));
+    map_remove_shm(dir);
+    MAP_CHECK("no-shm: marker only in the WAL refused via copy, no fsync, source untouched",
+              map_copy_fallback(dir, &verdict) && !verdict);
+    map_cleanup_dir(dir);
+    return failures;
+}
+
 #endif /* !_WIN32 */
 
 int test_mint_anchor_preflight(void);
@@ -749,6 +805,7 @@ int test_mint_anchor_preflight(void)
     failures += test_normal_preflight_live_verdicts();
     failures += test_normal_preflight_marker_only_in_wal();
     failures += test_normal_preflight_crashed_wal_read_in_place();
+    failures += test_normal_preflight_copy_fallbacks();
     failures += map_preflight_typed_refusal();
 #endif
 
