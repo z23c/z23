@@ -3823,7 +3823,8 @@ static void report_tally(struct run_ctx *c)
  * and is a cold run; a run with one hit is not, and says so. */
 static void report_verdict_build(struct run_ctx *c)
 {
-    bool served_from_cache = (c->cached_count > 0);
+    size_t cached_count = c->cached_count;
+    bool served_from_cache = (cached_count > 0);
     c->verdict = (struct suite_verdict){
         .mode          = served_from_cache ? "cached" : "cold",
         .groups_total  = g_num_groups,
