@@ -3496,3 +3496,4 @@ AGENT_IMPACT_RULE("tools/command/native_telegram.h|tools/command/native_telegram
 AGENT_IMPACT_RULE("contexts/clips/modules/clips_codec/*|tests/harness/src/test_clips_record.c|tests/harness/src/test_clips_manifest.c", "clips_record clips_manifest make_lint_gates")
 AGENT_IMPACT_RULE("contexts/clips/modules/clips_rating/*|tests/harness/src/test_clips_rating.c", "clips_rating make_lint_gates")
 AGENT_IMPACT_RULE("tools/lab_peer.c|tools/lab_peer_fake.c|tests/harness/src/test_lab_peer.c", "lab_peer make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/base/include/base/log_macros.h|platform/modules/util/include/util/log_macros.h|tests/harness/src/test_log_macros_in_base.c", "log_macros_in_base log_macros_in")

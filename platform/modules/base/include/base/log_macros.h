@@ -112,28 +112,46 @@ void zcl_fuzz_discard_log(const char *fmt, ...)
  *   LOG_WARN("net", "short write peer=%d", id);
  */
 
-/* Log a warning and continue (no return). */
-#define LOG_WARN(domain, fmt, ...) do { \
+/* Explicit-name forms of the three non-returning logs. LOG_X_IN(fn, ...)
+ * prints exactly the line LOG_X prints from a function named fn (file:line
+ * differ, as after any edit). RULE: only these three non-returning forms
+ * have an _IN form. The returning macros above (LOG_FAIL, LOG_ERR, LOG_NULL,
+ * LOG_RETURN, GUARD*) return from the function that holds them, so they
+ * cannot move into a helper. A helper split out of a function logs through
+ * LOG_X_IN("orig", ...) so the line keeps the original function's name. */
+
+/* Log a warning and continue (no return). Names fn. */
+#define LOG_WARN_IN(fn, domain, fmt, ...) do { \
     ZCL_LOG_EMIT_AT(ZCL_LOG_WARN, "[%s] %s:%d %s(): " fmt "\n", \
-            (domain), __FILE__, __LINE__, __func__ __VA_OPT__(,) __VA_ARGS__); \
+            (domain), __FILE__, __LINE__, (fn) __VA_OPT__(,) __VA_ARGS__); \
 } while (0)
 
-/* Log an informational line and continue (no return). */
-#define LOG_INFO(domain, fmt, ...) do { \
+/* Log an informational line and continue (no return). Names fn. */
+#define LOG_INFO_IN(fn, domain, fmt, ...) do { \
     ZCL_LOG_EMIT_AT(ZCL_LOG_INFO, "[%s] %s:%d %s(): " fmt "\n", \
-            (domain), __FILE__, __LINE__, __func__ __VA_OPT__(,) __VA_ARGS__); \
+            (domain), __FILE__, __LINE__, (fn) __VA_OPT__(,) __VA_ARGS__); \
 } while (0)
 
-/* Log an ERROR-level line and continue (no return). The returning error
+/* Log an ERROR-level line and continue (no return). Names fn; no origin
+ * token (the base ERROR body is the same as WARN/INFO). The returning error
  * macros above (LOG_ERR/LOG_FAIL/LOG_NULL) abort the caller; this one is for
  * a diagnostic that must record ERROR-severity context yet fall through to a
  * caller-chosen result (e.g. a bool capture that returns its own flag, or a
  * best-effort path that logs every number before continuing). Completes the
  * non-returning WARN/INFO pair at ERROR rank. */
-#define LOG_ERROR(domain, fmt, ...) do { \
+#define LOG_ERROR_IN(fn, domain, fmt, ...) do { \
     ZCL_LOG_EMIT_AT(ZCL_LOG_ERROR, "[%s] %s:%d %s(): " fmt "\n", \
-            (domain), __FILE__, __LINE__, __func__ __VA_OPT__(,) __VA_ARGS__); \
+            (domain), __FILE__, __LINE__, (fn) __VA_OPT__(,) __VA_ARGS__); \
 } while (0)
+
+/* The plain forms: each is its _IN form named by __func__, so the body above
+ * is the only copy of each. */
+#define LOG_WARN(domain, fmt, ...) \
+    LOG_WARN_IN(__func__, domain, fmt __VA_OPT__(,) __VA_ARGS__)
+#define LOG_INFO(domain, fmt, ...) \
+    LOG_INFO_IN(__func__, domain, fmt __VA_OPT__(,) __VA_ARGS__)
+#define LOG_ERROR(domain, fmt, ...) \
+    LOG_ERROR_IN(__func__, domain, fmt __VA_OPT__(,) __VA_ARGS__)
 
 /* ── Guards: check condition, log + return on failure ─────────── */
 

@@ -72,12 +72,15 @@ static inline const char *zcl_log_origin_basename(const char *path)
     ZCL_LOG_EMIT_AT(level, "[%s] %s:%d %s(): " fmt "\n", \
             (domain), __FILE__, __LINE__, (fn) __VA_OPT__(,) __VA_ARGS__)
 
+#undef LOG_WARN_IN
 #define LOG_WARN_IN(fn, domain, fmt, ...) do { \
     ZCL_LOG_LEVEL_IN(ZCL_LOG_WARN, fn, domain, fmt __VA_OPT__(,) __VA_ARGS__); \
 } while (0)
+#undef LOG_INFO_IN
 #define LOG_INFO_IN(fn, domain, fmt, ...) do { \
     ZCL_LOG_LEVEL_IN(ZCL_LOG_INFO, fn, domain, fmt __VA_OPT__(,) __VA_ARGS__); \
 } while (0)
+#undef LOG_ERROR_IN
 #define LOG_ERROR_IN(fn, domain, fmt, ...) do { \
     ZCL_LOG_ERROR_ORIGIN_IN(fn, domain, fmt __VA_OPT__(,) __VA_ARGS__); \
 } while (0)
