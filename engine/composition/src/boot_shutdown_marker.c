@@ -2,6 +2,7 @@
 
 #include "config/boot_shutdown_marker.h"
 
+#include "config/boot_block_files_fingerprint.h"
 #include "base/hex.h"
 #include "event/event.h"
 #include "platform/file_metadata.h"
@@ -68,6 +69,23 @@ static bool marker_snapshot_equal(
 
 /* ── Pure format/parse/decide helpers ─────────────────────────────── */
 
+/* Block-file fingerprint (optional; an older binary ignores the keys).
+ * Returns the new length, or a negative or >= n value on overflow. */
+static int marker_append_block_files(char *buf, size_t n, int off,
+                                     const struct shutdown_clean_binding *b)
+{
+    if (!b->bf_valid)
+        return off;
+    char bf_hex[65];
+    zcl_hex_encode(b->bf_sha3, 32, bf_hex);
+    int add = snprintf(buf + off, n - (size_t)off,
+                       "block_files=%u\nblock_files_sha3=%s\n", b->bf_count,
+                       bf_hex);
+    if (add < 0 || (size_t)add >= n - (size_t)off)
+        return add < 0 ? add : (int)n;
+    return off + add;
+}
+
 int boot_shutdown_marker_format(char *buf, size_t n, int64_t unix_seconds,
                                 const struct shutdown_clean_binding *b)
 {
@@ -132,7 +150,8 @@ int boot_shutdown_marker_format(char *buf, size_t n, int64_t unix_seconds,
             return off2;
         off += off2;
     }
-    return off;
+
+    return marker_append_block_files(buf, n, off, b);
 }
 
 /* Return the value string for `key=` if present on any line of [text,text+len),
@@ -278,6 +297,13 @@ bool boot_shutdown_marker_parse(const char *text, size_t len,
     if (marker_value_equals(text, len, "fast_restart", "1"))
         out->fr_valid = marker_parse_fast_restart(text, len, out);
     /* consensus.db identity (optional): all three keys or no binding. */
+    /* Block-file fingerprint (optional): both keys or no fingerprint. */
+    out->bf_valid = marker_parse_u32(text, len, "block_files", &out->bf_count) &&
+                    marker_parse_hash(text, len, "block_files_sha3", out->bf_sha3);
+    if (!out->bf_valid) {
+        out->bf_count = 0;
+        memset(out->bf_sha3, 0, sizeof(out->bf_sha3));
+    }
     out->cdb_valid =
         marker_parse_i64(text, len, "consensus_db_size", true,
                          &out->cdb_size) &&
@@ -496,7 +522,7 @@ static void boot_shutdown_marker_cache_locked(
     struct platform_private_file *marker)
 {
     uint64_t marker_size = 0;
-    char buf[1024];
+    char buf[2048];
     if (!platform_private_file_size(marker, &marker_size) || marker_size == 0 ||
         marker_size >= sizeof(buf) ||
         !platform_private_file_read_at(marker, buf, (size_t)marker_size, 0))
@@ -588,8 +614,8 @@ static void boot_shutdown_marker_build_cdb(
 }
 
 static void boot_shutdown_marker_build_binding(
-    const char *node_db_path, const char *consensus_db_path,
-    struct shutdown_clean_binding *binding)
+    const char *datadir, const char *node_db_path,
+    const char *consensus_db_path, struct shutdown_clean_binding *binding)
 {
     struct node_db_file_identity identity;
     memset(binding, 0, sizeof(*binding));
@@ -613,6 +639,14 @@ static void boot_shutdown_marker_build_binding(
         binding->fr_block_index_count = g_fr_facts.block_index_count;
         binding->fr_mmb_leaves = g_fr_facts.mmb_leaves;
         binding->fr_sapling_ckpt_height = g_fr_facts.sapling_ckpt_height;
+        /* Taken last, after the block writers have stopped: a later boot
+         * that finds the same files may skip its block-file scan. */
+        struct boot_block_files_fingerprint fp;
+        if (boot_block_files_fingerprint_read(datadir, &fp)) {
+            binding->bf_valid = true;
+            binding->bf_count = fp.count;
+            memcpy(binding->bf_sha3, fp.sha3, sizeof(fp.sha3));
+        }
     }
 }
 
@@ -673,9 +707,10 @@ bool boot_shutdown_marker_write_clean(const char *datadir)
      * file. If node.db is missing/unreadable we still write a legacy
      * timestamp-only marker (no skip binding) — identical to prior behavior. */
     struct shutdown_clean_binding b;
-    boot_shutdown_marker_build_binding(node_db_path, consensus_db_path, &b);
+    boot_shutdown_marker_build_binding(datadir, node_db_path, consensus_db_path,
+                                      &b);
 
-    char content[1024];
+    char content[2048];
     int clen = boot_shutdown_marker_format(content, sizeof(content),
                                            (int64_t)platform_time_wall_time_t(),
                                            &b);

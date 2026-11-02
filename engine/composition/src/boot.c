@@ -18,6 +18,7 @@
 #include "config/boot_postmortem.h"
 #include "config/boot_error.h"
 #include "config/boot_refusal_reports.h"
+#include "config/boot_block_files_fingerprint.h"
 #include "config/boot_shutdown_marker.h"
 #include "util/shutdown_stagewatch.h"
 #include "config/boot_fast_restart.h"
@@ -2742,13 +2743,33 @@ static bool boot_scan_block_files_needed(const struct boot_index_scan *sc)
                 sc->best_header->nHeight);
 }
 
+/* True when a verified fast restart found the block files exactly as the
+ * clean shutdown left them, so a scan could not find a record the index
+ * lacks. Any doubt returns false and the scan runs. */
+static bool boot_scan_block_files_unchanged(const char *datadir,
+                                            bool fast_restart, int cleared)
+{
+    struct shutdown_clean_binding recorded;
+    struct boot_block_files_fingerprint now;
+    if (!fast_restart || cleared != 0 || !datadir ||
+        !boot_shutdown_marker_peek_fast_restart_binding(&recorded) ||
+        !boot_block_files_fingerprint_read(datadir, &now) ||
+        !boot_block_files_scan_may_skip(fast_restart, &recorded, &now))
+        return false;
+    printf("[boot] block-file scan skipped: fast restart taken, %u block files "
+           "unchanged since the clean shutdown\n", now.count);
+    return true;
+}
+
 /* Mark on-disk block data (flat save gated on mutation), then the ladder. */
 static void boot_step_scan_block_files(struct app_context *ctx,
                                        const struct chain_params *params,
                                        const struct boot_index_scan *sc,
-                                       int cleared)
+                                       int cleared, bool fast_restart)
 {
     if (!boot_scan_block_files_needed(sc))
+        return;
+    if (boot_scan_block_files_unchanged(ctx->datadir, fast_restart, cleared))
         return;
     bool have_block_files = false;
     for (int ci = 0; ci < 3 && !have_block_files; ci++) {
@@ -2848,7 +2869,8 @@ static bool boot_seq_reconcile_chain_state(struct app_context *ctx,
     int64_t t_part = boot_submark("blkidx.utxo_recovery", t_reconcile_sub);
     int stale_cleared = boot_step_clear_stale_have_data(scan.max_have_data_h);
     t_part = boot_submark("blkidx.clear_stale_have_data", t_part);
-    boot_step_scan_block_files(ctx, s->params, &scan, stale_cleared);
+    boot_step_scan_block_files(ctx, s->params, &scan, stale_cleared,
+                               fast_restart);
     (void)boot_submark("blkidx.scan_block_files", t_part);
     (void)boot_submark("blkidx.validate_recover", t_reconcile_sub);
     boot_topmark("block_index_reconcile", t_reconcile_blockindex);

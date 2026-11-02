@@ -2,6 +2,7 @@
 
 #include "test/test_core.h"
 
+#include "config/boot_block_files_fingerprint.h"
 #include "config/boot_shutdown_marker.h"
 #include "config/boot_fast_restart.h"
 #include "event/event.h"
@@ -12,7 +13,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #define BSM_CHECK(name, expr) do {                                      \
@@ -410,6 +413,159 @@ static int bsm_check_evaluate_verdicts(void)
     return failures;
 }
 
+/* ── Block-file fingerprint: recorded at shutdown, gates the boot scan ── */
+
+static bool bsm_bf_make_file(const char *dir, const char *name,
+                             const char *text)
+{
+    char path[600];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    return bsm_write_file(path, text);
+}
+
+static bool bsm_bf_append(const char *dir, const char *name)
+{
+    char path[600];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    FILE *f = fopen(path, "ab");
+    bool ok = f && fwrite("x", 1, 1, f) == 1;
+    if (f) fclose(f);
+    return ok;
+}
+
+static bool bsm_bf_set_mtime(const char *dir, const char *name, long sec)
+{
+    char path[600];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    struct timespec ts[2] = {{.tv_sec = sec}, {.tv_sec = sec}};
+    return utimensat(AT_FDCWD, path, ts, 0) == 0;
+}
+
+static int bsm_check_block_file_fingerprint(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "boot_shutdown_marker", "bfp");
+    char blocks[300];
+    snprintf(blocks, sizeof(blocks), "%s/blocks", dir);
+    bool setup = mkdir(blocks, 0700) == 0 &&
+                 bsm_bf_make_file(blocks, "blk00000.dat", "aaaa") &&
+                 bsm_bf_make_file(blocks, "blk00001.dat", "bbbbbb");
+
+    struct boot_block_files_fingerprint at_shutdown, now;
+    BSM_CHECK("fingerprint: reads two block files",
+              setup && boot_block_files_fingerprint_read(dir, &at_shutdown) &&
+              at_shutdown.count == 2);
+
+    struct shutdown_clean_binding rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.fr_valid = true;
+    rec.bf_valid = true;
+    rec.bf_count = at_shutdown.count;
+    memcpy(rec.bf_sha3, at_shutdown.sha3, 32);
+
+    BSM_CHECK("scan skip: unchanged files after a taken fast restart",
+              boot_block_files_fingerprint_read(dir, &now) &&
+              boot_block_files_scan_may_skip(true, &rec, &now));
+    BSM_CHECK("scan skip: refused when fast restart was not taken",
+              !boot_block_files_scan_may_skip(false, &rec, &now));
+
+    struct shutdown_clean_binding old_marker = rec;
+    old_marker.bf_valid = false;
+    BSM_CHECK("scan skip: refused for a marker without a fingerprint",
+              !boot_block_files_scan_may_skip(true, &old_marker, &now));
+    BSM_CHECK("scan skip: refused without a recorded binding or fingerprint",
+              !boot_block_files_scan_may_skip(true, NULL, &now) &&
+              !boot_block_files_scan_may_skip(true, &rec, NULL));
+
+    BSM_CHECK("scan skip: one file grown means scan",
+              bsm_bf_append(blocks, "blk00001.dat") &&
+              boot_block_files_fingerprint_read(dir, &now) &&
+              !boot_block_files_scan_may_skip(true, &rec, &now));
+
+    (void)bsm_bf_make_file(blocks, "blk00001.dat", "bbbbbb");
+    BSM_CHECK("scan skip: same size, different mtime means scan",
+              bsm_bf_set_mtime(blocks, "blk00001.dat", 1000000000L) &&
+              boot_block_files_fingerprint_read(dir, &now) &&
+              !boot_block_files_scan_may_skip(true, &rec, &now));
+
+    BSM_CHECK("scan skip: an extra block file means scan",
+              bsm_bf_make_file(blocks, "blk00002.dat", "c") &&
+              boot_block_files_fingerprint_read(dir, &now) &&
+              now.count == 3 &&
+              !boot_block_files_scan_may_skip(true, &rec, &now));
+
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int bsm_check_block_file_marker_roundtrip(void)
+{
+    int failures = 0;
+    struct shutdown_clean_binding b;
+    memset(&b, 0, sizeof(b));
+    b.valid = true;
+    b.node_db_size = 10;
+    b.fr_valid = true;
+    b.fr_tip_height = 5;
+    b.bf_valid = true;
+    b.bf_count = 35;
+    for (int i = 0; i < 32; i++) b.bf_sha3[i] = (uint8_t)(i * 7 + 1);
+    char buf[2048];
+    int n = boot_shutdown_marker_format(buf, sizeof(buf), 1713100000LL, &b);
+    struct shutdown_clean_binding got;
+    BSM_CHECK("marker: block-file fingerprint round-trips",
+              n > 0 && boot_shutdown_marker_parse(buf, (size_t)n, &got) &&
+              got.bf_valid && got.bf_count == 35 &&
+              memcmp(got.bf_sha3, b.bf_sha3, 32) == 0 && got.fr_valid);
+
+    b.bf_valid = false;
+    n = boot_shutdown_marker_format(buf, sizeof(buf), 1713100000LL, &b);
+    BSM_CHECK("marker: old marker without the keys parses with no fingerprint",
+              n > 0 && boot_shutdown_marker_parse(buf, (size_t)n, &got) &&
+              got.valid && got.fr_valid && !got.bf_valid &&
+              !boot_block_files_scan_may_skip(true, &got, &(struct boot_block_files_fingerprint){.count = 35}));
+    return failures;
+}
+
+/* The shutdown writer records the fingerprint and the next boot reads it. */
+static int bsm_check_block_file_shutdown_wiring(void)
+{
+    int failures = 0;
+    struct bsm_marker_write w;
+    bsm_prepare_marker_datadir(&w);
+    char blocks[600], node_db[600];
+    snprintf(blocks, sizeof(blocks), "%s/blocks", w.dir);
+    snprintf(node_db, sizeof(node_db), "%s/node.db", w.dir);
+    uint8_t header[4096] = "SQLite format 3";
+    FILE *f = fopen(node_db, "wb");
+    bool setup = f && fwrite(header, 1, sizeof(header), f) == sizeof(header);
+    if (f) fclose(f);
+    setup = setup && mkdir(blocks, 0700) == 0 &&
+            bsm_bf_make_file(blocks, "blk00000.dat", "data");
+
+    boot_shutdown_marker_reset_for_test();
+    struct fast_restart_shutdown_facts facts;
+    memset(&facts, 0, sizeof(facts));
+    facts.valid = true;
+    facts.tip_height = 9;
+    facts.coins_best_height = 9;
+    boot_shutdown_marker_set_fast_restart_facts(&facts);
+    bool wrote = setup && boot_shutdown_marker_write_clean(w.dir);
+    boot_shutdown_marker_reset_for_test();
+    bool unclean = boot_shutdown_marker_detect_unclean(w.dir);
+    struct shutdown_clean_binding peeked;
+    bool have = boot_shutdown_marker_peek_fast_restart_binding(&peeked);
+    struct boot_block_files_fingerprint now;
+    BSM_CHECK("shutdown marker records the block-file fingerprint",
+              wrote && !unclean && have && peeked.bf_valid &&
+              boot_block_files_fingerprint_read(w.dir, &now) &&
+              boot_block_files_scan_may_skip(true, &peeked, &now));
+    boot_shutdown_marker_reset_for_test();
+    test_rm_rf_recursive(w.dir);
+    return failures;
+}
+
 int test_boot_shutdown_marker(void)
 {
     int failures = 0;
@@ -436,6 +592,9 @@ int test_boot_shutdown_marker(void)
     failures += bsm_check_v2_only_marker();
     failures += bsm_check_detect_caches_fr_binding();
     failures += bsm_check_evaluate_verdicts();
+    failures += bsm_check_block_file_marker_roundtrip();
+    failures += bsm_check_block_file_fingerprint();
+    failures += bsm_check_block_file_shutdown_wiring();
 
     return failures;
 }

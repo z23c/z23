@@ -54,6 +54,11 @@ extern "C" {
  *   node_db_version_valid_for=<u32>     (header bytes 92..95, big-endian)
  *   schema_version=<int>
  *   wal_checkpointed=1
+ *
+ * Optional keys (an older binary ignores them; a marker without them keeps
+ * every skip below disabled):
+ *   block_files=<count>
+ *   block_files_sha3=<64 hex>     (fingerprint of the blocks/ files)
  */
 bool boot_shutdown_marker_detect_unclean(const char *datadir);
 bool boot_shutdown_marker_write_clean(const char *datadir);
@@ -104,6 +109,14 @@ struct shutdown_clean_binding {
     int64_t  cdb_size;
     uint32_t cdb_change_counter;
     uint32_t cdb_version_valid_for;
+
+    /* Block-file fingerprint (marker OPTIONAL keys block_files,
+     * block_files_sha3), see config/boot_block_files_fingerprint.h. Present
+     * iff both parsed; a marker from an older binary has none, which means
+     * the boot-time block-file scan always runs. */
+    bool     bf_valid;
+    uint32_t bf_count;
+    uint8_t  bf_sha3[32];
 };
 
 /* Facts captured at CLEAN SHUTDOWN, baked into the v3 marker so the next boot
