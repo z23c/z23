@@ -1639,6 +1639,15 @@ static int test_canary_does_not_flush_unrelated_filesystems(void)
         snprintf(script, sizeof(script), "#!/bin/sh\nprintf called >> '%s'\nexit 97\n", calls);
         write_file(directory, "sync", script);
         ASSERT(chmod(spy, 0755) == 0);
+        /* The canary needs timeout(1) before it probes the oracle. The
+         * restricted PATH below is /usr/bin:/bin, where Linux has it and
+         * macOS does not (coreutils lives under Homebrew): link the ambient
+         * one beside the spy so the canary still reaches the oracle probe. */
+        char link_timeout[PATH_MAX * 2 + 160];
+        snprintf(link_timeout, sizeof(link_timeout),
+            "[ -x /usr/bin/timeout ] || [ -x /bin/timeout ] || "
+            "ln -s \"$(command -v timeout)\" '%s/timeout'", directory);
+        ASSERT_EQ(system(link_timeout), 0);
         char cmd[PATH_MAX * 5];
         snprintf(cmd, sizeof(cmd),
             "cd '%s' && PATH='%s:/usr/bin:/bin' ZCL_CANARY_VERDICT_DIR=verdict "
