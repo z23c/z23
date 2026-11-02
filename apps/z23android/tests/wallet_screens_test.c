@@ -131,7 +131,8 @@ _Static_assert(sizeof(A1) == 79 && sizeof(A2) == 79 && sizeof(PUBLIC_ADDR) == 36
 
 struct fake {
     bool secure_ok, secure_on, block, async, always_ok, node_up, copy_ok;
-    int copy_calls;
+    int copy_calls, dismissed;
+    const char *progress;
     char copied[128];
     int secure_on_calls, secure_off_calls, changed, active, active_max, op_active[8];
     char ops[1024][16];
@@ -207,6 +208,14 @@ static bool fake_node_running(void *ctx) { (void)ctx; return fake.node_up; }
 static char cache_dir[PATH_MAX];  /* the files directory of the wallet under test; empty keeps no balance */
 static int64_t wall = 1700000000;
 static int64_t fake_wall(void *ctx) { (void)ctx; return wall; }
+static bool fake_progress(void *ctx, char *line, size_t cap)
+{
+    (void)ctx;
+    if (!fake.progress) return false;
+    snprintf(line, cap, "%s", fake.progress);
+    return true;
+}
+static void fake_dismiss(void *ctx) { (void)ctx; ++fake.dismissed; fake.progress = NULL; }
 static bool fake_copy_address(void *ctx, const char *address)
 {
     (void)ctx;
@@ -218,7 +227,7 @@ static bool fake_copy_address(void *ctx, const char *address)
 static void start(bool async)
 {
     struct wallet_env env = {NULL, fake_secure, fake_run, fake_changed, fake_now, async, fake_refusal, fake_node_running, fake_copy_address,
-                             cache_dir[0] ? cache_dir : NULL, fake_wall};
+                             cache_dir[0] ? cache_dir : NULL, fake_wall, fake_progress, fake_dismiss};
     wallet_screens_shutdown();
     memset(&fake, 0, sizeof(fake));
     pthread_mutex_init(&fake.lock, NULL);
@@ -498,6 +507,70 @@ static void test_refresh_and_stale(void)
     CHECK(has("Up to date at block 3000000") && !has("Last read more than"));
     wallet_screens_close();
     wait_for(settled);
+}
+
+/* ---- the payment in flight ---- */
+
+#define SENDING_LINE "Sending 1.5 ZCL to zs1abcde…uvwxyz: building the payment (about 2 min)"
+
+/* A line from the send flow sits right under the balance, follows the flow on every refresh, and a finished one can be dismissed. */
+static void test_send_line(void)
+{
+    start(false);
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    CHECK(find_text(snap(), "Sending") < 0 && find_text(snap(), "Sent") < 0 && find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_DISMISS_SEND) < 0);
+    fake.progress = SENDING_LINE;                       /* a payment starts while Funds is in front: the next tick draws it */
+    wallet_screens_tick();
+    struct wallet_screen *s = snap();
+    long amount = find(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE), line = find_text(s, "Sending 1.5 ZCL");
+    CHECK(amount >= 0 && line == amount + 1 && !strcmp(text_at(s, line), SENDING_LINE));
+    CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_DISMISS_SEND) < 0);          /* nothing to dismiss while it runs */
+    tap(WALLET_ACT_DISMISS_SEND, 0, WALLET_STAY);
+    CHECK(fake.dismissed == 0 && has("Sending 1.5 ZCL"));
+
+    fake.progress = "Sent 1.5 ZCL";                     /* a refresh on resume, without waiting for a tick */
+    wallet_screens_refresh_send();
+    s = snap();
+    long done = find_text(s, "Sent 1.5 ZCL"), dismiss = find(s, WALLET_ITEM_BUTTON, WALLET_ACT_DISMISS_SEND);
+    CHECK(done == amount + 1 && dismiss == done + 1 && !strcmp(text_at(s, dismiss), "Dismiss") && find_text(s, "Sending") < 0);
+    tap(WALLET_ACT_DISMISS_SEND, 0, WALLET_STAY);
+    CHECK(fake.dismissed == 1 && find_text(snap(), "Sent 1.5") < 0 && find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_DISMISS_SEND) < 0);
+    wallet_screens_tick();
+    CHECK(find_text(snap(), "Sent 1.5") < 0);          /* the flow forgot it, so it stays gone */
+
+    static const char *const ended[] = {"Already sent 2 ZCL", "Payment not sent: the node refused it. Your coins were not spent.",
+                                        "Payment status unknown: the node did not answer. It may have been sent."};
+    for (size_t i = 0; i < 3; ++i) {
+        fake.progress = ended[i];
+        wallet_screens_tick();
+        CHECK(find_text(snap(), ended[i]) >= 0 && find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_DISMISS_SEND) >= 0);
+        tap(WALLET_ACT_DISMISS_SEND, 0, WALLET_STAY);
+        CHECK(fake.dismissed == (int)i + 2 && find_text(snap(), ended[i]) < 0);
+    }
+    fake.progress = SENDING_LINE;
+    wallet_screens_close();
+    CHECK(!wallet_screens_residue("building the payment", 20));   /* leaving wipes it */
+}
+
+/* The line shows before the node has answered, with or without a last known balance, and when the node is silent. */
+static void test_send_line_before_answer(void)
+{
+    start(true);
+    set_block();
+    fake.progress = SENDING_LINE;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    long loading = find_text(snap(), "Loading"), line = find_text(snap(), "Sending 1.5 ZCL");
+    CHECK(loading >= 0 && line == loading + 1);
+    release_block();
+    wait_for(settled);
+    wallet_screens_close();
+
+    start(false);
+    fake.summary = NODE_UNAVAILABLE_ERROR;
+    fake.progress = "Sent 1.5 ZCL";
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    CHECK(has("Sent 1.5 ZCL") && has("Waiting for your node") && find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_DISMISS_SEND) >= 0);
+    wallet_screens_close();
 }
 
 /* ---- last known balance ---- */
@@ -1582,6 +1655,8 @@ int main(int argc, char **argv)
     test_funds_replies();
     test_fleet();
     test_refresh_and_stale();
+    test_send_line();
+    test_send_line_before_answer();
     test_cache_roundtrip();
     test_cache_other_wallet();
     test_cache_not_trusted();

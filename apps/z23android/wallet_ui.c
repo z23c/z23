@@ -5,6 +5,7 @@
 #include "fleet.h"
 #include "jni_util.h"
 #include "secure_window.h"
+#include "wallet_send_ui.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -167,6 +168,7 @@ void zapp_wallet_ui_clear(JNIEnv *env)
 void zapp_wallet_ui_render(JNIEnv *env)
 {
     if (!ui.container) return;
+    wallet_screens_refresh_send();
     unsigned version = wallet_screens_snapshot(&ui.screen);
     if (ui.drawn && version == ui.version) return;
     release_widgets(env);
@@ -255,6 +257,8 @@ static struct { void (*changed)(void); } bound;
 static bool bound_secure(void *activity, bool on) { return zapp_secure_window(activity, on); }
 static const char *bound_refusal(void *activity) { (void)activity; return zapp_secure_window_refusal(); }
 static bool bound_copy_address(void *activity, const char *address) { return zapp_clipboard_copy_sensitive(activity, address); }
+static bool bound_send_progress(void *ctx, char *line, size_t cap) { (void)ctx; return zapp_send_progress(line, cap); }
+static void bound_send_dismiss(void *ctx) { (void)ctx; zapp_send_progress_dismiss(); }
 static bool bound_run(void *ctx, const char *op, const char *arg, char *out, size_t cap)
 {
     (void)ctx;
@@ -280,7 +284,8 @@ static void bound_changed(void *ctx)
 
 bool zapp_wallet_attach(ANativeActivity *activity, void (*changed)(void))
 {
-    struct wallet_env env = {activity, bound_secure, bound_run, bound_changed, bound_now, true, bound_refusal, bound_node_running, bound_copy_address, activity ? activity->internalDataPath : NULL};
+    struct wallet_env env = {activity, bound_secure, bound_run, bound_changed, bound_now, true, bound_refusal, bound_node_running, bound_copy_address,
+                             activity ? activity->internalDataPath : NULL, NULL, bound_send_progress, bound_send_dismiss};
     bound.changed = changed;
     return activity && wallet_screens_init(&env);
 }

@@ -66,7 +66,7 @@ enum wallet_item_kind {
 enum wallet_action {
     WALLET_ACT_NONE, WALLET_ACT_RECEIVE, WALLET_ACT_SEND, WALLET_ACT_HISTORY, WALLET_ACT_NEW_ADDRESS,
     WALLET_ACT_SET_AMOUNT, WALLET_ACT_NEWER, WALLET_ACT_OLDER, WALLET_ACT_DETAIL, WALLET_ACT_BACK,
-    WALLET_ACT_START_NODE, WALLET_ACT_COPY_ADDRESS
+    WALLET_ACT_START_NODE, WALLET_ACT_COPY_ADDRESS, WALLET_ACT_DISMISS_SEND
 };
 enum wallet_outcome {
     WALLET_STAY,  /* the screen changed or nothing happened */
@@ -118,6 +118,12 @@ struct wallet_env {
     const char *files_dir;
     /* Seconds since the Unix epoch. Optional (NULL: the system clock). Dates the kept balance. */
     int64_t (*wall_s)(void *ctx);
+    /* The one line about the payment in flight or just finished ("Sending 1 ZCL to zs1abcde…uvwxyz: building the payment
+     * (about 2 min)", "Sent 1 ZCL", "Payment not sent: …", "Payment status unknown: …"), drawn under the balance. A line
+     * that does not begin "Sending " has ended and gets a Dismiss button. Optional (NULL: no line). Called on the UI thread. */
+    bool (*send_progress)(void *ctx, char *line, size_t cap);
+    /* Clears a finished line. Optional. Called on the UI thread. */
+    void (*send_dismiss)(void *ctx);
 };
 
 bool wallet_screens_init(const struct wallet_env *env);
@@ -146,6 +152,8 @@ bool wallet_screens_set_amount(const char *text);
 /* Call about every two seconds on the UI thread while the app is in front. On Funds it asks the node
  * again every WALLET_REFRESH_MS and marks a reading older than WALLET_STALE_MS as out of date. */
 void wallet_screens_tick(void);
+/* Reads the payment line again now, for a screen that was just shown again. Does nothing unless Funds is in front. */
+void wallet_screens_refresh_send(void);
 /* Taps that were dropped because another window was drawing over the app. The screen then says why nothing
  * happened, until a tap reaches it. Call on the UI thread; the count is of new drops. */
 void wallet_screens_dropped(unsigned taps);

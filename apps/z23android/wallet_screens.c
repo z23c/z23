@@ -76,6 +76,7 @@ struct data {
     bool detail_pending, detail_failed, memo_loaded, memo_hex, memo_over;
     char memo[MEMO_MAX];
     struct cache cache; /* the last balance the node gave, read from the files directory when Funds opened */
+    char send_line[WALLET_TEXT_MAX]; /* the payment line the send flow gave, read when Funds opened and on every refresh */
 };
 
 struct job {
@@ -192,6 +193,7 @@ static void title(struct wallet_screen *s, const char *text)
 
 struct cache_job { bool go; char path[CACHE_PATH_MAX], body[CACHE_BODY_MAX]; };
 
+static void send_lines(struct wallet_screen *s, const struct data *d);
 static int64_t wall_s(void) { return st.env.wall_s ? st.env.wall_s(st.env.ctx) : (int64_t)time(NULL); }
 static bool files_path(char *out, const char *name)
 {
@@ -318,8 +320,35 @@ static void cache_lines(struct wallet_screen *s, const struct data *d)
     else snprintf(label, sizeof(label), "Last known balance, %lld days ago", (long long)(m / 1440));
     line(s, label);
     (void)add(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE, d->cache.balance);
+    send_lines(s, d);
     if (d->cache.pending[0]) line(s, d->cache.pending);
     if (d->cache.public_line[0]) line(s, d->cache.public_line);
+}
+
+/* ---- the payment in flight ---- */
+#define SENDING_PREFIX "Sending "
+static bool send_finished(const char *line) { return strncmp(line, SENDING_PREFIX, strlen(SENDING_PREFIX)) != 0; }
+/* Under the lock, on the UI thread: asks the send flow for its line and redraws when it changed. */
+static void send_refresh(void)
+{
+    char line[WALLET_TEXT_MAX] = "";
+    if (!(st.env.send_progress && st.env.send_progress(st.env.ctx, line, sizeof(line)))) line[0] = '\0';
+    if (strcmp(line, st.d.send_line)) { copy(st.d.send_line, sizeof(st.d.send_line), line); touch(); }
+    memory_cleanse(line, sizeof(line));
+}
+/* The line under the balance; an ended payment also gets Dismiss, and one in flight does not. */
+static void send_lines(struct wallet_screen *s, const struct data *d)
+{
+    if (!d->send_line[0]) return;
+    line(s, d->send_line);
+    if (send_finished(d->send_line)) button(s, WALLET_ACT_DISMISS_SEND, "Dismiss");
+}
+static void dismiss_send(void)
+{
+    if (!st.d.send_line[0] || !send_finished(st.d.send_line)) return;
+    if (st.env.send_dismiss) st.env.send_dismiss(st.env.ctx);
+    memory_cleanse(st.d.send_line, sizeof(st.d.send_line));
+    touch();
 }
 
 /* A memo in items of their own kind, every hazardous character shown as its code point. What does not
@@ -348,6 +377,7 @@ static void funds_lines(struct wallet_screen *s, const struct data *d)
 {
     line(s, "Balance");
     (void)add(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE, d->view.balance);
+    send_lines(s, d);
     if (d->view.pending[0]) line(s, d->view.pending);
     if (d->view.unready_line[0]) line(s, d->view.unready_line);
     if (d->view.total_line[0]) line(s, d->view.total_line);
@@ -375,8 +405,8 @@ static void funds_items(struct wallet_screen *s)
     const struct data *d = &st.d;
     title(s, "Wallet");
     if (d->scan_note[0]) note(s, d->scan_note);
-    if (!d->funds_loaded) { if (d->cache.valid) cache_lines(s, d); else line(s, "Loading…"); }
-    else if (d->node_silent) { if (d->cache.valid) cache_lines(s, d); silent_node_items(s); }
+    if (!d->funds_loaded) { if (d->cache.valid) cache_lines(s, d); else { line(s, "Loading…"); send_lines(s, d); } }
+    else if (d->node_silent) { if (d->cache.valid) cache_lines(s, d); else send_lines(s, d); silent_node_items(s); }
     else funds_lines(s, d);
     if (d->fleet_loaded && !d->node_silent) line(s, d->fleet_fresh ? d->fleet : WALLET_FLEET_UNCHECKED);
     button(s, WALLET_ACT_RECEIVE, "Receive");
@@ -905,6 +935,7 @@ static size_t enter(enum wallet_page page, struct job *jobs)
     if (keep_amount) { st.d.has_amount = true; st.d.amount_zat = amount; }
     if (page == WALLET_PAGE_FUNDS) {
         cache_load();
+        send_refresh();
         st.d.requested_at = now();
         (void)submit(jobs, &count, K_SUMMARY, "summary", "");
         (void)submit(jobs, &count, K_FLEET, "fleet", "");
@@ -1076,6 +1107,7 @@ static size_t from_funds(enum wallet_action action, struct job *jobs, enum walle
     if (action == WALLET_ACT_HISTORY) return enter(WALLET_PAGE_HISTORY, jobs);
     if (action == WALLET_ACT_SEND) *outcome = WALLET_SEND;
     if (action == WALLET_ACT_START_NODE) *outcome = WALLET_START_NODE;
+    if (action == WALLET_ACT_DISMISS_SEND) dismiss_send();
     return 0;
 }
 /* The jobs a tap on the History page starts. */
@@ -1135,6 +1167,13 @@ void wallet_screens_scan_notice(const char *text)
     pthread_mutex_unlock(&st.lock);
 }
 
+void wallet_screens_refresh_send(void)
+{
+    pthread_mutex_lock(&st.lock);
+    if (st.ready && !st.blocked && st.page == WALLET_PAGE_FUNDS) send_refresh();
+    pthread_mutex_unlock(&st.lock);
+}
+
 void wallet_screens_dropped(unsigned taps)
 {
     pthread_mutex_lock(&st.lock);
@@ -1148,6 +1187,7 @@ void wallet_screens_tick(void)
     size_t count = 0;
     pthread_mutex_lock(&st.lock);
     if (st.ready && !st.blocked && st.page == WALLET_PAGE_FUNDS) {
+        send_refresh();
         uint64_t t = now();
         bool funds = st.d.funds_loaded && t - st.d.summary_at <= WALLET_STALE_MS;
         bool fleet = st.d.fleet_loaded && t - st.d.fleet_at <= WALLET_STALE_MS;
