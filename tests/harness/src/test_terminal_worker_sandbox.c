@@ -25,6 +25,16 @@
 
 #include <stdio.h>
 
+/* GCC names a ThreadSanitizer build with __SANITIZE_THREAD__; Clang reports it
+ * through __has_feature(thread_sanitizer). */
+#if defined(__SANITIZE_THREAD__)
+#define TW_UNDER_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define TW_UNDER_TSAN 1
+#endif
+#endif
+
 #if defined(__linux__)
 #include "platform/os_sandbox.h"
 
@@ -628,8 +638,23 @@ static int test_terminal_worker_sandbox_platform_arm(void)
                           c_tw_tgkill_killed, e_sigsys);
     failures += tw_attack("pidfd_send_signal -> SIGSYS",
                           c_tw_pidfd_send_killed, e_sigsys);
-    failures += tw_attack("kill: own child ok; pid 0, -1 and parent EPERM",
-                          c_tw_kill_guarded, e_zero);
+    /* Measured under TSan only: the sanitizer runtime cannot map its
+     * ThreadSignalContext inside the 256 MiB cage budget ("Failed to mmap",
+     * child exits 66). Skipped under TSan only; every other build runs it. */
+    static const bool tsan_kill_skip =
+#if defined(TW_UNDER_TSAN)
+        true;
+#else
+        false;
+#endif
+    if (tsan_kill_skip) {
+        printf("terminal_worker_sandbox: kill: own child ok; pid 0, -1 and "
+               "parent EPERM... SKIP under ThreadSanitizer (sanitizer runtime "
+               "exceeds the cage address-space budget)\n");
+    } else {
+        failures += tw_attack("kill: own child ok; pid 0, -1 and parent EPERM",
+                              c_tw_kill_guarded, e_zero);
+    }
 
     /* ── the granted shell works — and its own attacks fail ─────────── */
     if (!fbsh_available()) {
