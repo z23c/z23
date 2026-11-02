@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include "lintc.h"
 #include "gate_standalone_tools_link_priv.h"
 #include "gate_standalone_tools_link_x11_suite.h"
@@ -156,6 +157,61 @@ static int stl_st_nested(void)
     return bad;
 }
 
+/* Run the key with a fake `tool` first on PATH; returns the key ("" on failure). */
+static void stl_st_key_with_fake(const char *dir, const char *tool, const char *oldpath,
+                                 char *key, size_t cap)
+{
+    char bin[STL_PATH], f[STL_PATH], np[STL_PATH * 2];
+    key[0] = '\0';
+    if (ovf(snprintf(bin, sizeof bin, "%s/fake-%s", dir, tool), sizeof bin) ||
+        ovf(snprintf(f, sizeof f, "%s/%s", bin, tool), sizeof f) ||
+        ovf(snprintf(np, sizeof np, "%s:%s", bin, oldpath), sizeof np) ||
+        csr_write(f, "#!/bin/sh\necho fake-tool-version\n") != 0 || chmod(f, 0755) != 0)
+        return;
+    setenv("PATH", np, 1);
+    stl_x11_key_in(dir, key, cap);
+    setenv("PATH", oldpath, 1);
+}
+
+/* The X11 selftest stamp: the key follows make and bash, a nested fixture run
+ * never touches the shared stamp, a matching shared stamp is a hit. */
+static int stl_st_stamp(const char *dir)
+{
+    char k0[128], k1[128], k2[128], k3[128], sh[STL_PATH], local[STL_PATH], xdg[STL_PATH];
+    char oldpath[STL_PATH * 2] = "", oldxdg[STL_PATH] = "";
+    const char *p = getenv("PATH"), *x = getenv("XDG_CACHE_HOME");
+    int had_xdg = x != NULL, bad = 0;
+    if (!p || ovf(snprintf(oldpath, sizeof oldpath, "%s", p), sizeof oldpath) ||
+        (x && ovf(snprintf(oldxdg, sizeof oldxdg, "%s", x), sizeof oldxdg)) ||
+        ovf(snprintf(xdg, sizeof xdg, "%s/xdg", dir), sizeof xdg) ||
+        ovf(snprintf(local, sizeof local, "%s/absent.stamp", dir), sizeof local))
+        return stl_st_expect("stamp env", 1, 0);
+    stl_x11_key_in(dir, k0, sizeof k0);
+    stl_x11_key_in(dir, k3, sizeof k3);
+    stl_st_key_with_fake(dir, "make", oldpath, k1, sizeof k1);
+    stl_st_key_with_fake(dir, "bash", oldpath, k2, sizeof k2);
+    bad |= stl_st_expect("stamp key available", strlen(k0) == 64, 1);
+    bad |= stl_st_expect("stamp key stable", strcmp(k0, k3) == 0, 1);
+    bad |= stl_st_expect("stamp key follows make", strlen(k1) == 64 && strcmp(k0, k1) != 0, 1);
+    bad |= stl_st_expect("stamp key follows bash", strlen(k2) == 64 && strcmp(k0, k2) != 0, 1);
+    setenv("XDG_CACHE_HOME", xdg, 1);
+    bad |= stl_st_expect("stamp shared path", stl_shared_stamp_for(k0, 0, sh, sizeof sh), 0);
+    bad |= stl_st_expect("stamp nested has no shared path",
+                         stl_shared_stamp_for(k0, 1, sh, sizeof sh), -1);
+    bad |= stl_st_expect("stamp miss before write", stl_stamp_hit(k0, local, 0), 0);
+    if (stl_shared_stamp_for(k0, 0, sh, sizeof sh) == 0)
+        bad |= stl_st_expect("stamp write", csr_write(sh, k0), 0);
+    bad |= stl_st_expect("stamp shared hit", stl_stamp_hit(k0, local, 0), 1);
+    bad |= stl_st_expect("stamp changed key misses", stl_stamp_hit(k1, local, 0), 0);
+    bad |= stl_st_expect("stamp nested ignores shared", stl_stamp_hit(k0, local, 1), 0);
+    bad |= stl_st_expect("stamp read error is a miss", stl_stamp_file_has(dir, ""), 0);
+    if (had_xdg)
+        setenv("XDG_CACHE_HOME", oldxdg, 1);
+    else
+        unsetenv("XDG_CACHE_HOME");
+    return bad;
+}
+
 int check_standalone_tools_link_selftest(void)
 {
     char dir[STL_PATH];
@@ -167,6 +223,7 @@ int check_standalone_tools_link_selftest(void)
     bad |= stl_st_catalog(dir);
     bad |= stl_st_link_log(dir);
     bad |= stl_st_nested();
+    bad |= stl_st_stamp(dir);
     bad |= stl_st_expect("unknown argument is fatal",
                          check_standalone_tools_link_run(1, bogus), 2);
     rap_rm_rf(dir);

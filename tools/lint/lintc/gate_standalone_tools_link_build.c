@@ -124,36 +124,47 @@ static void stl_helper_selftest(struct stl_bs *bs, int build_only)
  * hashing failure. The lint binary contributes its digest only: sha256sum's
  * own output would add the binary's absolute path and give every worktree a
  * different key. */
-static void stl_x11_key(struct stl_bs *bs)
+void stl_x11_key_in(const char *dir, char *key, size_t cap)
 {
     char exe[STL_PATH], qexe[STL_PATH * 2], kin[STL_PATH], qkin[STL_PATH * 2];
     static char cmd[STL_TEXT];
     int code = 0;
-    bs->key[0] = '\0';
+    key[0] = '\0';
     if (lint_self_exe(exe, sizeof exe) != 0 || sh_single_quote(exe, qexe, sizeof qexe) != 0 ||
-        ovf(snprintf(kin, sizeof kin, "%s/key.in", bs->dir), sizeof kin) ||
+        ovf(snprintf(kin, sizeof kin, "%s/key.in", dir), sizeof kin) ||
         sh_single_quote(kin, qkin, sizeof qkin) != 0)
         return;
+    /* make and bash are run through PATH by the suite, so their versions are
+     * inputs too; any of these tools failing leaves the key empty (always run). */
     if (ovf(snprintf(cmd, sizeof cmd,
         "{ sha256sum %s && sha256sum %s | cut -c1-64 && find vendor/x11/include -type f | LC_ALL=C sort | xargs sha256sum"
-        " && cc --version && awk '/^NATIVE_UI_DRIVER_BIN = /{a=1} a{if(/^# Crash recovery/)exit;print}'"
+        " && cc --version && make --version && bash --version"
+        " && awk '/^NATIVE_UI_DRIVER_BIN = /{a=1} a{if(/^# Crash recovery/)exit;print}'"
         " Makefile; } >%s 2>/dev/null && sha256sum %s | cut -c1-64",
         k_x11_suite_files, qexe, qkin, qkin), sizeof cmd))
         return;
-    if (capture_cmd(cmd, bs->key, sizeof bs->key, &code) != 0 || code != 0 ||
-        strlen(bs->key) != 64)
-        bs->key[0] = '\0';
+    if (capture_cmd(cmd, key, cap, &code) != 0 || code != 0 || strlen(key) != 64)
+        key[0] = '\0';
 }
 
-/* True when the file at path holds exactly key (trailing newlines ignored). */
-static int stl_stamp_file_has(const char *path, const char *key)
+static void stl_x11_key(struct stl_bs *bs)
+{
+    stl_x11_key_in(bs->dir, bs->key, sizeof bs->key);
+}
+
+/* True when the file at path holds exactly key (trailing newlines ignored);
+ * a read error is a miss. */
+int stl_stamp_file_has(const char *path, const char *key)
 {
     char have[128] = "";
     FILE *f = fopen(path, "r");
     if (!f)
         return 0;
     size_t n = fread(have, 1, sizeof have - 1, f);
+    int err = ferror(f);
     fclose(f);
+    if (err)
+        return 0;
     have[n] = '\0';
     while (n && have[n - 1] == '\n')
         have[--n] = '\0';
@@ -167,30 +178,40 @@ static int stl_stamp_file_has(const char *path, const char *key)
  * in any tree on this host still proves the same thing. The shared stamp is
  * one file per key under the user cache dir; it is never consulted in a
  * nested fixture run, and its absence or any I/O failure is just a miss. */
-static int stl_shared_stamp_path(const struct stl_bs *bs, char *out, size_t cap)
+int stl_shared_stamp_for(const char *key, int nested, char *out, size_t cap)
 {
     const char *xdg = getenv("XDG_CACHE_HOME");
     const char *home = getenv("HOME");
-    if (g_nested || !bs->key[0])
+    if (nested || !key[0])
         return -1;
     if (xdg && xdg[0] == '/')
-        return ovf(snprintf(out, cap, "%s/z23/lint-stamps/standalone-x11.%s", xdg, bs->key), cap)
+        return ovf(snprintf(out, cap, "%s/z23/lint-stamps/standalone-x11.%s", xdg, key), cap)
                    ? -1 : 0;
     if (home && home[0] == '/')
         return ovf(snprintf(out, cap, "%s/.cache/z23/lint-stamps/standalone-x11.%s", home,
-                            bs->key), cap) ? -1 : 0;
+                            key), cap) ? -1 : 0;
     return -1;
+}
+
+static int stl_shared_stamp_path(const struct stl_bs *bs, char *out, size_t cap)
+{
+    return stl_shared_stamp_for(bs->key, g_nested, out, cap);
+}
+
+int stl_stamp_hit(const char *key, const char *local, int nested)
+{
+    char shared[STL_PATH];
+    if (!key[0])
+        return 0;
+    if (stl_stamp_file_has(local, key))
+        return 1;
+    return stl_shared_stamp_for(key, nested, shared, sizeof shared) == 0 &&
+           stl_stamp_file_has(shared, key);
 }
 
 static int stl_stamp_matches(const struct stl_bs *bs)
 {
-    char shared[STL_PATH];
-    if (!bs->key[0])
-        return 0;
-    if (stl_stamp_file_has(k_x11_stamp, bs->key))
-        return 1;
-    return stl_shared_stamp_path(bs, shared, sizeof shared) == 0 &&
-           stl_stamp_file_has(shared, bs->key);
+    return stl_stamp_hit(bs->key, k_x11_stamp, g_nested);
 }
 
 /* The suite exports its fixture root in k_stl_x11_nested so the gates it

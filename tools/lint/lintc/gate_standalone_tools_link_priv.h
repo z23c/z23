@@ -34,6 +34,12 @@ void stl_copy_to(FILE *out, const char *path);
 int stl_x11_linkable(void);
 int stl_x11_link_check(const char *dir);
 
+/* X11 selftest stamp pieces, exposed for the gate's own selftest. */
+void stl_x11_key_in(const char *dir, char *key, size_t cap);
+int stl_stamp_file_has(const char *path, const char *key);
+int stl_shared_stamp_for(const char *key, int nested, char *out, size_t cap);
+int stl_stamp_hit(const char *key, const char *local, int nested);
+
 /* 0 = clean or WARN, 1 = violations in FAIL mode, 2 = broken gate. */
 int stl_build_phase(char (*targets)[STL_TGT], int nt, int build_only,
                     const char *mode, int host_linux);
