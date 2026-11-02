@@ -819,6 +819,7 @@ int test_reducer_step_drain_harness(void)
     body_fetch_stage_shutdown();
     validate_headers_stage_shutdown();
     header_admit_stage_shutdown();
+    main_state_free(&ms);
     event_log_close(lg);
     progress_store_close();
     test_cleanup_tmpdir(blocksdir);
