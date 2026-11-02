@@ -290,13 +290,26 @@ static int rcr_limit_checks(const char *image);
 #endif
 
 /* Refusal and policy checks that hold on every host. */
-/* The host can arm the Linux sandbox. Without it (measured on macOS arm64:
- * no Landlock, no seccomp, and the translator refuses every grant with
- * "grant-pinning-unavailable") no profile is ever built, so the cases that
- * inspect a built profile skip and the refusals are asserted instead. */
-[[maybe_unused]] static bool rcr_host_sandbox(void)
+/* The host can arm the Linux sandbox (gates the behavioural runs). */
+static bool rcr_host_sandbox(void)
 {
     return os_sandbox_landlock_abi() >= 1 && os_sandbox_seccomp_supported();
+}
+
+/* The translator builds a profile (plain data) wherever grants can be
+ * pinned: Linux, through openat2, with or without Landlock and seccomp.
+ * Elsewhere the sandbox stub answers ENOTSUP and the translator refuses
+ * every grant with "grant-pinning-unavailable" (measured on macOS arm64),
+ * so the cases that inspect a built profile skip there and the refusal is
+ * asserted instead. Not the sandbox probe: a Linux host without Landlock
+ * still builds profiles and must keep every profile assertion. */
+static bool rcr_profile_host(void)
+{
+#if defined(__linux__)
+    return true;
+#else
+    return false;
+#endif
 }
 
 static int rcr_refusal_checks(const char *image, bool sandbox)
@@ -315,13 +328,13 @@ static int rcr_refusal_checks(const char *image, bool sandbox)
         (m.read_paths[0] = "/nonexistent-rcr-path", m.n_read = 1,
          !package_resident_manifest_profile(&m, image, &conf).ok));
     m.n_read = 0;
-    if (sandbox)
+    if (rcr_profile_host())
         RCR_CHECK("translator profile enables nnp, landlock, seccomp, core=0",
             package_resident_manifest_profile(&m, image, &conf).ok &&
             conf.profile.no_new_privs && conf.profile.landlock &&
             conf.profile.seccomp && conf.profile.rlimits.core_bytes == 0);
     else
-        RCR_CHECK("no Landlock/seccomp: the translator refuses the grants, never builds a profile",
+        RCR_CHECK("no grant pinning: the translator refuses the grants, never builds a profile",
             !package_resident_manifest_profile(&m, image, &conf).ok);
     struct os_sandbox_profile weak = conf.profile;
     weak.landlock = false;
@@ -450,14 +463,14 @@ static int rcr_limit_checks(const char *image)
     package_resident_manifest_init(&m);
     bool built = package_resident_manifest_profile(&m, image, &conf).ok;
     const struct os_sandbox_rlimits *l = &conf.profile.rlimits;
-    if (rcr_host_sandbox())
-    RCR_CHECK("default manifest yields finite rlimits incl. a uid-task-count thread budget (NPROC >= 256) for AS, CPU, NOFILE, FSIZE, CORE",
-        built && l->as_bytes != OS_SANDBOX_RLIMIT_KEEP &&
-        l->cpu_seconds != OS_SANDBOX_RLIMIT_KEEP && l->nproc != OS_SANDBOX_RLIMIT_KEEP && l->nproc >= 256u &&
-        l->nofile != OS_SANDBOX_RLIMIT_KEEP && l->fsize_bytes != OS_SANDBOX_RLIMIT_KEEP &&
-        l->core_bytes == 0 && l->as_bytes == PACKAGE_RESIDENT_DEFAULT_AS_BYTES);
+    if (rcr_profile_host())
+        RCR_CHECK("default manifest yields finite rlimits incl. a uid-task-count thread budget (NPROC >= 256) for AS, CPU, NOFILE, FSIZE, CORE",
+            built && l->as_bytes != OS_SANDBOX_RLIMIT_KEEP &&
+            l->cpu_seconds != OS_SANDBOX_RLIMIT_KEEP && l->nproc != OS_SANDBOX_RLIMIT_KEEP && l->nproc >= 256u &&
+            l->nofile != OS_SANDBOX_RLIMIT_KEEP && l->fsize_bytes != OS_SANDBOX_RLIMIT_KEEP &&
+            l->core_bytes == 0 && l->as_bytes == PACKAGE_RESIDENT_DEFAULT_AS_BYTES);
     else
-        printf("resident_confined_run: SKIP: finite default rlimits need a built profile (Landlock ABI >= 1 and seccomp)\n");
+        printf("resident_confined_run: SKIP: finite default rlimits need a built profile (grant pinning: Linux)\n");
     RCR_RELEASE(conf);
     m.rlimits.cpu_seconds = OS_SANDBOX_RLIMIT_KEEP;
     RCR_CHECK("an unbounded (KEEP) limit is refused without the explicit opt-out",
@@ -465,10 +478,10 @@ static int rcr_limit_checks(const char *image)
     m.allow_unbounded_limits = true;
     bool opted = package_resident_manifest_profile(&m, image, &conf).ok &&
         conf.profile.rlimits.cpu_seconds == OS_SANDBOX_RLIMIT_KEEP;
-    if (rcr_host_sandbox())
+    if (rcr_profile_host())
         RCR_CHECK("allow_unbounded_limits is the logged explicit opt-out", opted);
     else
-        printf("resident_confined_run: SKIP: the logged opt-out needs a built profile (Landlock ABI >= 1 and seccomp)\n");
+        printf("resident_confined_run: SKIP: the logged opt-out needs a built profile (grant pinning: Linux)\n");
     RCR_RELEASE(conf);
     package_resident_manifest_init(&m);
     m.allow_children = true;
@@ -492,10 +505,10 @@ static int rcr_policy_checks(const char *image)
         loader = loader || strncmp(p, "/lib", 4) == 0 || strncmp(p, "/usr/lib", 8) == 0 ||
                  strcmp(p, "/etc/ld.so.cache") == 0;
     }
-    if (rcr_host_sandbox())
+    if (rcr_profile_host())
         RCR_CHECK("no implicit loader directory is granted", !loader);
     else
-        printf("resident_confined_run: SKIP: the loader-grant check needs a built profile (Landlock ABI >= 1 and seccomp)\n");
+        printf("resident_confined_run: SKIP: the loader-grant check needs a built profile (grant pinning: Linux)\n");
     bool uring = false, clone_listed = false;
     for (size_t i = 0; i < conf.profile.n_denied; ++i) {
         uring = uring || conf.profile.denied_syscalls[i] == 425 || conf.profile.denied_syscalls[i] == 426 ||
@@ -503,15 +516,14 @@ static int rcr_policy_checks(const char *image)
         clone_listed = clone_listed || conf.profile.denied_syscalls[i] == 56;
     }
     /* The denied-syscall list is the seccomp policy the translator hands the
-     * Linux sandbox (x86-64 __NR_ numbers); a host without Landlock and
-     * seccomp (measured on macOS arm64: neither exists) builds no such list,
-     * so the case skips on the same condition as the behavioural siblings. */
-    if (rcr_host_sandbox())
+     * Linux sandbox (x86-64 __NR_ numbers); where no profile is built
+     * (no grant pinning, macOS) there is no such list. */
+    if (rcr_profile_host())
         RCR_CHECK("io_uring is denied, clone is thread-only and clone3 answers ENOSYS",
             uring && !clone_listed && RCR_V2_PROFILE(conf));
     else
         printf("resident_confined_run: SKIP: io_uring/clone/clone3 denial "
-               "needs Landlock ABI >= 1 and seccomp; this host has neither\n");
+               "needs a built profile (grant pinning: Linux)\n");
     RCR_RELEASE(conf);
     return failures;
 }
