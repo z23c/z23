@@ -1191,7 +1191,7 @@ static int topup_clean_resume(struct main_state *ms, struct node_db *ndb,
     if (now.map_count != got.map_count || now.map_fp != got.map_fp ||
         now.row_count != got.row_count)
         return lo;
-    return lo;
+    return got.clean_to + 1;
 }
 
 static void topup_clean_record(struct main_state *ms, struct node_db *ndb,

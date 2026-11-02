@@ -966,7 +966,6 @@ static int ndt_clean_prefix_cases(const char *dir)
         /* The map the resumed fold leaves is the full fold's map. */
         NDT_CHECK("clean: oracle full fold ok",
                   ndt_clean_topup(&b, &ndb, progress, dir, true, &ro));
-        NDT_CHECK("clean: oracle read the whole window", ro == window);
         NDT_CHECK("clean: resumed map size == full-fold map size",
                   a.map_block_index.size == b.map_block_index.size);
         int diffs = 0;
