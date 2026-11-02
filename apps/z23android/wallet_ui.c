@@ -280,7 +280,7 @@ static void bound_changed(void *ctx)
 
 bool zapp_wallet_attach(ANativeActivity *activity, void (*changed)(void))
 {
-    struct wallet_env env = {activity, bound_secure, bound_run, bound_changed, bound_now, true, bound_refusal, bound_node_running, bound_copy_address};
+    struct wallet_env env = {activity, bound_secure, bound_run, bound_changed, bound_now, true, bound_refusal, bound_node_running, bound_copy_address, activity ? activity->internalDataPath : NULL};
     bound.changed = changed;
     return activity && wallet_screens_init(&env);
 }

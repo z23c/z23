@@ -113,6 +113,11 @@ struct wallet_env {
     /* Puts the address on the clipboard as a sensitive clip that clears itself after a minute. Optional (NULL: copying is
      * refused). Called on the UI thread with the address as the node gave it, without grouping. */
     bool (*copy_address)(void *ctx, const char *address);
+    /* The app's private files directory, where the last balance the node gave is kept for the next time Funds opens
+     * before the node answers. Optional (NULL: nothing is kept). */
+    const char *files_dir;
+    /* Seconds since the Unix epoch. Optional (NULL: the system clock). Dates the kept balance. */
+    int64_t (*wall_s)(void *ctx);
 };
 
 bool wallet_screens_init(const struct wallet_env *env);

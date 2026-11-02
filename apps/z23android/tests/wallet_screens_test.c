@@ -2,10 +2,12 @@
 #define _GNU_SOURCE
 #include "residue.h"
 #include "wallet_screens.h"
+#include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -202,6 +204,9 @@ static bool fake_run(void *ctx, const char *op, const char *arg, char *out, size
 static void fake_changed(void *ctx) { (void)ctx; pthread_mutex_lock(&fake.lock); ++fake.changed; pthread_mutex_unlock(&fake.lock); }
 static uint64_t fake_now(void *ctx) { (void)ctx; return fake.now; }
 static bool fake_node_running(void *ctx) { (void)ctx; return fake.node_up; }
+static char cache_dir[PATH_MAX];  /* the files directory of the wallet under test; empty keeps no balance */
+static int64_t wall = 1700000000;
+static int64_t fake_wall(void *ctx) { (void)ctx; return wall; }
 static bool fake_copy_address(void *ctx, const char *address)
 {
     (void)ctx;
@@ -212,7 +217,8 @@ static bool fake_copy_address(void *ctx, const char *address)
 
 static void start(bool async)
 {
-    struct wallet_env env = {NULL, fake_secure, fake_run, fake_changed, fake_now, async, fake_refusal, fake_node_running, fake_copy_address};
+    struct wallet_env env = {NULL, fake_secure, fake_run, fake_changed, fake_now, async, fake_refusal, fake_node_running, fake_copy_address,
+                             cache_dir[0] ? cache_dir : NULL, fake_wall};
     wallet_screens_shutdown();
     memset(&fake, 0, sizeof(fake));
     pthread_mutex_init(&fake.lock, NULL);
@@ -492,6 +498,174 @@ static void test_refresh_and_stale(void)
     CHECK(has("Up to date at block 3000000") && !has("Last read more than"));
     wallet_screens_close();
     wait_for(settled);
+}
+
+/* ---- last known balance ---- */
+
+static void put_file(const char *name, const char *text)
+{
+    char path[PATH_MAX + 32];
+    snprintf(path, sizeof(path), "%s/%s", cache_dir, name);
+    FILE *f = fopen(path, "w");
+    CHECK(f && fputs(text, f) >= 0);
+    if (f) fclose(f);
+}
+static bool file_exists(const char *name)
+{
+    char path[PATH_MAX + 32];
+    struct stat info;
+    snprintf(path, sizeof(path), "%s/%s", cache_dir, name);
+    return lstat(path, &info) == 0;
+}
+static bool item_is(const char *text)
+{
+    const struct wallet_screen *s = snap();
+    for (size_t i = 0; i < s->count; ++i) if (!strcmp(s->items[i].text, text)) return true;
+    return false;
+}
+static void remove_dir(void)
+{
+    static const char *const names[] = {"wallet_key.blob", "wallet_balance_cache", "wallet_balance_cache.tmp", "elsewhere"};
+    char path[PATH_MAX + 32];
+    for (int attempt = 0; attempt < 400; ++attempt) {      /* a write the last reply started may still be finishing */
+        for (size_t i = 0; i < 4; ++i) { snprintf(path, sizeof(path), "%s/%s", cache_dir, names[i]); (void)unlink(path); }
+        if (rmdir(cache_dir) == 0) { cache_dir[0] = '\0'; return; }
+        usleep(5000);
+    }
+    CHECK(false);
+}
+static bool live_shown(void) { return find_text(snap(), "Up to date") >= 0; }
+static bool cache_present(void) { return file_exists("wallet_balance_cache"); }
+/* A wallet directory holding key file "one", whose first live summary leaves the balance file. */
+static void wallet_with_balance(void)
+{
+    snprintf(cache_dir, sizeof(cache_dir), "%s/z23-balance-XXXXXX", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+    CHECK(mkdtemp(cache_dir) != NULL);
+    put_file("wallet_key.blob", "key file one");
+    wall = 1700000000;
+    start(false);
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS) && has("1.23456789 ZCL"));
+    wallet_screens_close();
+}
+/* Opens Funds while the node has not answered and returns with the first screen. */
+static struct wallet_screen *open_waiting(void)
+{
+    start(true);
+    set_block();
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    return snap();
+}
+static void finish_waiting(void)
+{
+    release_block();
+    wait_for(live_shown);
+    wallet_screens_close();
+}
+
+static void test_cache_roundtrip(void)
+{
+    wallet_with_balance();
+    char path[PATH_MAX + 32], body[640] = "";
+    struct stat info;
+    snprintf(path, sizeof(path), "%s/wallet_balance_cache", cache_dir);
+    CHECK(stat(path, &info) == 0 && (info.st_mode & 0777) == 0600 && !file_exists("wallet_balance_cache.tmp"));
+    FILE *f = fopen(path, "r");
+    CHECK(f && fread(body, 1, sizeof(body) - 1, f) > 0);
+    if (f) fclose(f);
+    CHECK(!strncmp(body, "z23-balance-cache-v1\n", 21) && strstr(body, "\n1700000000\n1.23456789 ZCL\n") && !strstr(body, "zs1"));
+    wall += 300;                                                   /* five minutes later, before the node answers */
+    struct wallet_screen *s = open_waiting();
+    CHECK(find_text(s, "Loading") < 0 && !item_is("Balance"));
+    long label = find_text(s, "Last known balance, 5 min ago"), amount = find(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE);
+    CHECK(label >= 0 && amount == label + 1 && !strcmp(text_at(s, amount), "1.23456789 ZCL"));
+    CHECK(find_text(s, "0.5 ZCL pending") > amount && find_text(s, "0.1 ZCL public") > amount);
+    CHECK(find_text(s, "Up to date") < 0 && find(s, WALLET_ITEM_BUTTON, WALLET_ACT_SEND) >= 0);
+    wall += 600;                                                   /* the label follows the clock */
+    wallet_screens_tick();
+    CHECK(has("Last known balance, 15 min ago"));
+    release_block();                                               /* the node answers: live data replaces it */
+    wait_for(live_shown);
+    CHECK(!has("Last known") && item_is("Balance") && has("Up to date at block 3000000"));
+    wallet_screens_close();
+    remove_dir();
+}
+
+static void test_cache_other_wallet(void)
+{
+    wallet_with_balance();
+    put_file("wallet_key.blob", "key file two");                  /* the first wallet was set aside and another made */
+    struct wallet_screen *s = open_waiting();
+    CHECK(find_text(s, "Last known") < 0 && find_text(s, "1.23456789") < 0 && find_text(s, "Loading") >= 0);
+    CHECK(!file_exists("wallet_balance_cache"));                    /* the other wallet's balance is deleted, not kept */
+    finish_waiting();
+    wait_for(cache_present);                                        /* the live summary starts the new wallet's own */
+    remove_dir();
+
+    wallet_with_balance();
+    char path[PATH_MAX + 32];
+    snprintf(path, sizeof(path), "%s/wallet_key.blob", cache_dir);
+    CHECK(unlink(path) == 0);                                       /* no key file: no wallet to show a balance for */
+    s = open_waiting();
+    CHECK(find_text(s, "Last known") < 0 && !file_exists("wallet_balance_cache"));
+    finish_waiting();
+    remove_dir();
+}
+
+static void test_cache_not_trusted(void)
+{
+    static const char *const bad[] = {
+        "garbage\n", "",
+        "z23-balance-cache-v1\nffffffffffffffff\n1700000000\n9 ZCL\n\n\n",     /* another wallet's name */
+    };
+    for (size_t i = 0; i < 3; ++i) {
+        wallet_with_balance();
+        put_file("wallet_balance_cache", bad[i]);
+        struct wallet_screen *s = open_waiting();
+        CHECK(find_text(s, "Last known") < 0 && find_text(s, "Loading") >= 0 && !file_exists("wallet_balance_cache"));
+        finish_waiting();
+        remove_dir();
+    }
+    wallet_with_balance();                                          /* a link in the file's place is never followed */
+    char path[PATH_MAX + 32];
+    snprintf(path, sizeof(path), "%s/wallet_balance_cache", cache_dir);
+    char kept[PATH_MAX + 32];
+    snprintf(kept, sizeof(kept), "%s/elsewhere", cache_dir);
+    CHECK(rename(path, kept) == 0 && symlink(kept, path) == 0);
+    struct wallet_screen *s = open_waiting();
+    CHECK(find_text(s, "Last known") < 0);
+    finish_waiting();
+    (void)unlink(kept);
+    remove_dir();
+}
+
+/* Only a real summary is kept: an unreadable reply, a stopped node and a locked wallet leave nothing. */
+static void test_cache_only_real_summaries(void)
+{
+    static const char *const replies[] = {NODE_UNAVAILABLE_ERROR, "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\"}}"};
+    for (size_t i = 0; i < 2; ++i) {
+        snprintf(cache_dir, sizeof(cache_dir), "%s/z23-balance-XXXXXX", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+        CHECK(mkdtemp(cache_dir) != NULL);
+        put_file("wallet_key.blob", "key file one");
+        start(false);
+        fake.summary = replies[i];
+        CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+        CHECK(!file_exists("wallet_balance_cache"));
+        wallet_screens_close();
+        remove_dir();
+    }
+}
+
+/* A node that stops answering after it did answer shows the last balance with its age, beside the notice that it is waiting. */
+static void test_cache_silent_node(void)
+{
+    wallet_with_balance();
+    wall += 120;
+    start(false);
+    fake.summary = NODE_UNAVAILABLE_ERROR;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    CHECK(has("Last known balance, 2 min ago") && has("Waiting for your node") && item_is("1.23456789 ZCL"));
+    wallet_screens_close();
+    remove_dir();
 }
 
 /* ---- Receive ---- */
@@ -1408,6 +1582,11 @@ int main(int argc, char **argv)
     test_funds_replies();
     test_fleet();
     test_refresh_and_stale();
+    test_cache_roundtrip();
+    test_cache_other_wallet();
+    test_cache_not_trusted();
+    test_cache_only_real_summaries();
+    test_cache_silent_node();
     test_receive();
     test_receive_amount();
     test_receive_new_address();
