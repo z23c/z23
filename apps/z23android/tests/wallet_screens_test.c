@@ -128,7 +128,7 @@ _Static_assert(sizeof(A1) == 79 && sizeof(A2) == 79 && sizeof(PUBLIC_ADDR) == 36
 #define DETAIL(memo_member) "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_history.v1\",\"entry\":{\"txid\":\"" TX_A "\"," memo_member "}}}"
 
 struct fake {
-    bool secure_ok, secure_on, block, async, always_ok;
+    bool secure_ok, secure_on, block, async, always_ok, node_up;
     int secure_on_calls, secure_off_calls, changed, active, active_max, op_active[8];
     char ops[1024][16];
     char args[1024][WALLET_CURSOR_MAX];
@@ -199,10 +199,11 @@ static bool fake_run(void *ctx, const char *op, const char *arg, char *out, size
 }
 static void fake_changed(void *ctx) { (void)ctx; pthread_mutex_lock(&fake.lock); ++fake.changed; pthread_mutex_unlock(&fake.lock); }
 static uint64_t fake_now(void *ctx) { (void)ctx; return fake.now; }
+static bool fake_node_running(void *ctx) { (void)ctx; return fake.node_up; }
 
 static void start(bool async)
 {
-    struct wallet_env env = {NULL, fake_secure, fake_run, fake_changed, fake_now, async, fake_refusal};
+    struct wallet_env env = {NULL, fake_secure, fake_run, fake_changed, fake_now, async, fake_refusal, fake_node_running};
     wallet_screens_shutdown();
     memset(&fake, 0, sizeof(fake));
     pthread_mutex_init(&fake.lock, NULL);
@@ -210,6 +211,7 @@ static void start(bool async)
     fake.secure_ok = true;
     fake.async = async;
     fake.now = 1000000;
+    fake.node_up = true;
     fake.summary = GOOD_SUMMARY;
     fake.latest = "{\"ok\":true,\"data\":{\"address\":\"" A1 "\"}}";
     fake.receive = "{\"ok\":true,\"data\":{\"address\":\"" A2 "\"}}";
@@ -308,6 +310,17 @@ static void funds_node_silent(void)
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
     CHECK(has("The node is not answering. Start it to see your funds.") && find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_START_NODE) >= 0);
 }
+/* A node that gave no answer is "stopped" only when its process is known not to run; Start node is offered either way. */
+static void funds_node_stopped_or_not_answering(void)
+{
+    fake.summary = NODE_UNAVAILABLE_ERROR;
+    fake.node_up = false;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    CHECK(has("Node stopped. Start it to see your funds.") && !has("not answering") && find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_START_NODE) >= 0);
+    fake.node_up = true;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    CHECK(has("The node is not answering. Start it to see your funds.") && !has("Node stopped") && find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_START_NODE) >= 0);
+}
 static void funds_node_answers(void)
 {
     static const char *const answering[] = {                       /* a node that answers, even with an error, is running: Start would only say so */
@@ -338,6 +351,7 @@ static void test_funds_replies(void)
     start(false);
     funds_no_extra_lines();
     funds_node_silent();
+    funds_node_stopped_or_not_answering();
     funds_node_answers();
     int before = fake.op_count;               /* Send opens the Send screen and starts nothing */
     tap(WALLET_ACT_SEND, 0, WALLET_SEND);

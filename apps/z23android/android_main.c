@@ -15,6 +15,7 @@
 #include "pay_stash.h"
 #include "secure_window.h"
 #include "wallet_send_ui.h"
+#include "wallet_setup_ui.h"
 #include "wallet_ui.h"
 #include <android/input.h>
 #include <android/log.h>
@@ -551,7 +552,7 @@ static bool start_services(JNIEnv *env, ANativeActivity *activity, const char *n
     return release_surface(env, activity->clazz) && zapp_native_ui_package_preview(env, activity->clazz, preview) &&
            zapp_controller_start(activity->internalDataPath, native_dir, *preview, notify) &&
            zapp_native_ui_create(env, activity->clazz, action) && zapp_wallet_attach(activity, notify) &&
-           zapp_send_attach(activity, notify);
+           zapp_send_attach(activity, notify) && zapp_setup_attach(activity, notify);
 }
 JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, size_t state_size);
 JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, size_t state_size)

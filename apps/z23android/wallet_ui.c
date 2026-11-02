@@ -259,6 +259,11 @@ static bool bound_run(void *ctx, const char *op, const char *arg, char *out, siz
     (void)ctx;
     return zapp_controller_wallet_run(op, arg, out, cap);
 }
+static bool bound_node_running(void *ctx)
+{
+    (void)ctx;
+    return zapp_controller_node_running();
+}
 static uint64_t bound_now(void *ctx)
 {
     struct timespec at;
@@ -274,7 +279,7 @@ static void bound_changed(void *ctx)
 
 bool zapp_wallet_attach(ANativeActivity *activity, void (*changed)(void))
 {
-    struct wallet_env env = {activity, bound_secure, bound_run, bound_changed, bound_now, true, bound_refusal};
+    struct wallet_env env = {activity, bound_secure, bound_run, bound_changed, bound_now, true, bound_refusal, bound_node_running};
     bound.changed = changed;
     return activity && wallet_screens_init(&env);
 }

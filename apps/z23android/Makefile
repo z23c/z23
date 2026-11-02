@@ -330,10 +330,24 @@ test-setup:
 	  tests/setup_test.c setup_words.c setup_state.c setup_node.c wallet_setup.c device_key.c ../../platform/modules/sha3/src/sha3.c $(SPEECH_JSON) -o '$(BUILD_DIR)/setup-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/setup-test.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/setup-test' "$$(cd "$$scratch" && pwd)"
-	@if grep -nE '(^|[^a-z_])(printf|fprintf|puts|fputs|perror|syslog)\(|nodelog|__android_log' setup_words.c setup_state.c setup_node.c wallet_setup.c; then \
+	@if grep -nE '(^|[^a-z_])(printf|fprintf|puts|fputs|perror|syslog)\(|nodelog|__android_log' setup_words.c setup_state.c setup_node.c wallet_setup.c wallet_setup_ui.c; then \
 	  echo 'wallet setup must not log' >&2; exit 1; fi
-	@if grep -nE '(^|[^a-z_])(fopen|fwrite|fputs|open|write|creat|rename)\(' setup_words.c setup_node.c wallet_setup.c; then \
+	@if grep -nE '(^|[^a-z_])(fopen|fwrite|fputs|open|write|creat|rename)\(' setup_words.c setup_node.c wallet_setup.c wallet_setup_ui.c; then \
 	  echo 'the recovery words and the passphrase must not be written by the setup modules' >&2; exit 1; fi
+	@grep -q 'if (!v.protected)' wallet_setup_ui.c || { echo 'the setup screens must draw nothing while the window is unprotected (the model also withholds the words; see protection_tests)' >&2; exit 1; }
+	@grep -q 'env_progress, env_protect' wallet_setup_ui.c || { echo 'the setup screens must give the model the window protection' >&2; exit 1; }
+	@sed -n '/^static bool input_view/,/^}/p' wallet_setup_ui.c | grep -q 'setCursorVisible", false' || { echo 'the word fields must hide the cursor so no insertion handle offers Paste' >&2; exit 1; }
+	@! grep -q 'nothing can have been sent' wallet_setup_ui.c || { echo 'the setup screens must not claim a wallet is empty' >&2; exit 1; }
+	@sed -n '/^static void draw_failed_buttons/,/^}/p' wallet_setup_ui.c | grep -q 'WSU_ASIDE_STUCK) return;' || { echo 'a wallet that could not be put back must be offered no button' >&2; exit 1; }
+	@grep -q 'ZAPP_FIELD_PRIVATE' wallet_setup_ui.c || { echo 'the word fields must be checked against ZAPP_FIELD_PRIVATE' >&2; exit 1; }
+	@sed -n '/^static void draw_words/,/^}/p' wallet_setup_ui.c | grep -q 'WSU_SCREEN_LOCK_NOTICE' || { echo 'the words screen must carry the screen lock notice' >&2; exit 1; }
+	@grep -q 'v->may_start_over' wallet_setup_ui.c || { echo 'Start over must be offered only for a create' >&2; exit 1; }
+	@grep -q 'wsu_view_can_recheck(v)' wallet_setup_ui.c || { echo 'the interrupted screen must offer Check again by the model' >&2; exit 1; }
+	@grep -q 'wsu_words_intro(v, line' wallet_setup_ui.c || { echo 'the words screen must write its intro by the model, which omits an unrecorded start height' >&2; exit 1; }
+	@grep -q 'ZAPP_SETUP_READY ? SCREEN_WALLET : SCREEN_SETUP' shell.c || { echo 'the Wallet tile must open setup until setup is finished' >&2; exit 1; }
+	@grep -q 'next == SCREEN_SETUP) shell.gate.protect = true' shell.c || { echo 'the shell must drop obscured touches on the setup screens' >&2; exit 1; }
+	@grep -q 'setTextIsSelectable", false' wallet_setup_ui.c || { echo 'the recovery words must not be selectable' >&2; exit 1; }
+	@grep -q 'next = screen_for(next);' shell.c || { echo 'the shell must send the wallet and payment screens through setup until it is confirmed' >&2; exit 1; }
 	@grep -q 'memory_cleanse(buffer, sizeof(buffer))' operations.c || { echo 'the command reader must wipe its read buffer' >&2; exit 1; }
 	@grep -q 'zapp_setup_state(r->files) != ZAPP_SETUP_READY' operations.c || { echo 'the receive command must be refused until setup is confirmed' >&2; exit 1; }
 

@@ -107,6 +107,9 @@ struct wallet_env {
     /* In plain words, what the protection that was just refused could not do, as the end of "this phone would not
      * let the app ...". Optional (NULL). Called on the UI thread right after secure returned false. */
     const char *(*refusal)(void *ctx);
+    /* Whether the node process runs. Optional (NULL: unknown). A node that does not answer is shown as stopped when this says it
+     * is not running, and as not answering when it runs or this is unknown. Called on the UI thread. */
+    bool (*node_running)(void *ctx);
 };
 
 bool wallet_screens_init(const struct wallet_env *env);

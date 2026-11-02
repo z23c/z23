@@ -8,6 +8,8 @@
 #include "secure_window.h"
 #include "surface.h"
 #include "pay_stash.h"
+#include "setup_state.h"
+#include "wallet_setup_ui.h"
 #include "wallet_send_ui.h"
 #include "wallet_ui.h"
 #include <android/keycodes.h>
@@ -25,9 +27,9 @@
 #define BUTTON_COLOR 0xff2b2b2bu
 #define WHITE 0xffffffffu
 
-enum screen { SCREEN_HOME, SCREEN_ASSISTANT, SCREEN_APPS, SCREEN_SETTINGS, SCREEN_SCAN, SCREEN_WALLET, SCREEN_SEND, SCREEN_COUNT };
+enum screen { SCREEN_HOME, SCREEN_ASSISTANT, SCREEN_APPS, SCREEN_SETTINGS, SCREEN_SCAN, SCREEN_WALLET, SCREEN_SEND, SCREEN_SETUP, SCREEN_COUNT };
 enum command { CMD_HOME, CMD_APPS, CMD_SETTINGS, CMD_HOME_SETTINGS, CMD_LAYOUT, CMD_SCAN_CANCEL };
-enum target_kind { TARGET_NONE, TARGET_NAV, TARGET_ROW, TARGET_TILE, TARGET_WALLET, TARGET_SEND };
+enum target_kind { TARGET_NONE, TARGET_NAV, TARGET_ROW, TARGET_TILE, TARGET_WALLET, TARGET_SEND, TARGET_SETUP };
 
 struct nav { jobject view; enum command command; size_t arg; };
 struct target { enum target_kind kind; size_t index; char id[ZAPP_NAME_CAP]; size_t card; unsigned button; };
@@ -39,6 +41,7 @@ static struct {
     enum screen current, before_scan;
     bool send_from_wallet;
     bool preview, pair_seen, scan_dismissed, user_layout, rendered;
+    bool setup_offered;   /* the first launch without a wallet opened the setup screens once */
     unsigned scans_seen;
     struct zapp_layout *layout;
     char builtin[ZAPP_NAME_CAP], layout_notice[320], action_notice[160];
@@ -281,6 +284,15 @@ static bool build_send(JNIEnv *env, jobject root)
     if (content) (*env)->DeleteLocalRef(env, content);
     return ok;
 }
+static bool build_setup(JNIEnv *env, jobject root)
+{
+    jobject scroll = zj_widget(env, "android/widget/ScrollView", shell.activity), content = column(env, DARK, 16, false);
+    bool ok = scroll && content && add_notice(env, root, SCREEN_SETUP) && zj_margins(env, scroll, MATCH, 0, 1.0f, 0, 0, 0, 0) && zj_append(env, scroll, content) &&
+        zj_append(env, root, scroll) && zapp_setup_ui_create(env, shell.activity, content);
+    if (scroll) (*env)->DeleteLocalRef(env, scroll);
+    if (content) (*env)->DeleteLocalRef(env, content);
+    return ok;
+}
 static bool add_screen(JNIEnv *env, jobject stage, enum screen which, jobject root)
 {
     bool ok = root && zj_margins(env, root, MATCH, MATCH, 0.0f, 0, 0, 0, 0) && zj_visible(env, root, which == SCREEN_HOME) &&
@@ -290,12 +302,12 @@ static bool add_screen(JNIEnv *env, jobject stage, enum screen which, jobject ro
 }
 static bool build_pages(JNIEnv *env, jobject stage, jobject home, jobject apps, jobject settings)
 {
-    jobject scan = column(env, 0xff000000u, 0, false), wallet = column(env, DARK, 0, false), send = column(env, DARK, 0, false);
+    jobject scan = column(env, 0xff000000u, 0, false), wallet = column(env, DARK, 0, false), send = column(env, DARK, 0, false), setup = column(env, DARK, 0, false);
     return build_home(env, home) && build_apps(env, apps) && build_settings(env, settings) && build_scan(env, scan) &&
-           build_wallet(env, wallet) && build_send(env, send) && add_screen(env, stage, SCREEN_HOME, home) &&
+           build_wallet(env, wallet) && build_send(env, send) && build_setup(env, setup) && add_screen(env, stage, SCREEN_HOME, home) &&
            add_screen(env, stage, SCREEN_APPS, apps) && add_screen(env, stage, SCREEN_SETTINGS, settings) &&
            add_screen(env, stage, SCREEN_SCAN, scan) && add_screen(env, stage, SCREEN_WALLET, wallet) &&
-           add_screen(env, stage, SCREEN_SEND, send);
+           add_screen(env, stage, SCREEN_SEND, send) && add_screen(env, stage, SCREEN_SETUP, setup);
 }
 static bool build_stage(JNIEnv *env, jobject assistant)
 {
@@ -403,21 +415,44 @@ static void note_send_origin(enum screen next)
     enum screen origin = shell.current == SCREEN_SCAN ? shell.before_scan : shell.current;
     shell.send_from_wallet = zapp_home_send_opened_from_wallet(origin == SCREEN_SEND, origin == SCREEN_WALLET, shell.send_from_wallet);
 }
-static void go(JNIEnv *env, enum screen next)
+/* Setup is left only when no job runs and no recovery words are held: the words are shown once. */
+static bool leave_setup(JNIEnv *env)
 {
-    note_send_origin(next);
-    if (shell.current == SCREEN_SEND && next != SCREEN_SEND && !leave_send(env)) return;
-    if (shell.current == SCREEN_WALLET) leave_wallet(env);
-    if (next == SCREEN_WALLET || next == SCREEN_SEND) shell.gate.protect = true;
-    else zapp_touch_gate_release(&shell.gate);
-    shell.current = next;
-    shell.action_notice[0] = 0;
-    set_text(env, shell.outcome_view, "");
+    if (zapp_setup_ui_leave(env)) return true;
+    snprintf(shell.action_notice, sizeof(shell.action_notice), "Finish setup first. The recovery words are shown only once.");
+    show_notice(env);
+    return false;
+}
+/* The wallet and the payment screens open only once setup is confirmed; until then the way to them is the setup screens. */
+static enum screen screen_for(enum screen next)
+{
+    bool wallet = next == SCREEN_WALLET || next == SCREEN_SEND;
+    return wallet && !shell.preview && zapp_setup_state(shell.files) != ZAPP_SETUP_READY ? SCREEN_SETUP : next;
+}
+/* What a screen does as it comes into view. */
+static void enter_screen(JNIEnv *env, enum screen next)
+{
     if (next == SCREEN_APPS) { refresh_apps(env, true); fill_apps(env); }
     if (next == SCREEN_SETTINGS) settings_status(env);
     if (next == SCREEN_SCAN) zapp_shell_immersive(env);
     if (next == SCREEN_WALLET) enter_wallet(env);
+    if (next == SCREEN_SETUP) (void)zapp_setup_ui_open(env);
+}
+static void go(JNIEnv *env, enum screen next)
+{
+    next = screen_for(next);
+    note_send_origin(next);
+    if (shell.current == SCREEN_SETUP && next != SCREEN_SETUP && !leave_setup(env)) return;
+    if (shell.current == SCREEN_SEND && next != SCREEN_SEND && !leave_send(env)) return;
+    if (shell.current == SCREEN_WALLET) leave_wallet(env);
+    if (next == SCREEN_WALLET || next == SCREEN_SEND || next == SCREEN_SETUP) shell.gate.protect = true;
+    else zapp_touch_gate_release(&shell.gate);
+    shell.current = next;
+    shell.action_notice[0] = 0;
+    set_text(env, shell.outcome_view, "");
+    enter_screen(env, next);
     for (int i = 0; i < SCREEN_COUNT; ++i) (void)zj_visible(env, shell.roots[i], i == (int)next);
+    if (next == SCREEN_SETUP) zapp_setup_ui_render(env);
     if (next == SCREEN_HOME) show_home(env);
     show_notice(env);
 }
@@ -485,7 +520,7 @@ static void run_tile(JNIEnv *env, const struct target *target)
     char package[ZAPP_APP_PACKAGE_CAP] = "", activity[ZAPP_APP_ACTIVITY_CAP] = "", name[ZAPP_APP_LABEL_CAP] = "";
     if (!strcmp(target->id, "scan")) shell.send("scan", "");
     else if (!strcmp(target->id, "assistant")) go(env, SCREEN_ASSISTANT);
-    else if (!strcmp(target->id, "wallet")) go(env, SCREEN_WALLET);
+    else if (!strcmp(target->id, "wallet")) go(env, shell.preview || zapp_setup_state(shell.files) == ZAPP_SETUP_READY ? SCREEN_WALLET : SCREEN_SETUP);
     else if (!strcmp(target->id, "apps")) go(env, SCREEN_APPS);
     else if (!strcmp(target->id, "settings")) go(env, SCREEN_SETTINGS);
     else if (!strcmp(target->id, "launch") && target->card != ZAPP_NO_CARD && target->card > 0 &&
@@ -502,6 +537,7 @@ static bool find_target(JNIEnv *env, float x, float y, struct target *target)
         if (zj_hit(env, shell.navs[i].view, x, y)) { target->kind = TARGET_NAV; target->index = i; return true; }
     if (shell.current == SCREEN_WALLET && zapp_wallet_ui_hit(env, x, y, &target->index)) { target->kind = TARGET_WALLET; return true; }
     if (shell.current == SCREEN_SEND && zapp_send_ui_hit(env, x, y, &target->index, &target->button)) { target->kind = TARGET_SEND; return true; }
+    if (shell.current == SCREEN_SETUP && zapp_setup_ui_hit(env, x, y, &target->index)) { target->kind = TARGET_SETUP; return true; }
     for (size_t i = 0; shell.current == SCREEN_APPS && i < shell.row_count; ++i)
         if (zj_hit(env, shell.rows[i], x, y)) { target->kind = TARGET_ROW; target->index = i; return true; }
     if (shell.current == SCREEN_HOME && zapp_surface_hit(env, x, y, target->id, &target->card)) {
@@ -532,6 +568,13 @@ static void run_send(JNIEnv *env, size_t button)
     if (outcome == ZAPP_SEND_SCAN && leave_send(env)) shell.send("scan", "");
     else if (outcome == ZAPP_SEND_LEAVE) go(env, shell.send_from_wallet ? SCREEN_WALLET : SCREEN_HOME);
 }
+/* The setup screens: Continue leaves for the wallet once setup finished, and for Home otherwise. */
+static void run_setup(JNIEnv *env, size_t button)
+{
+    if (zapp_setup_ui_press(env, button) != ZAPP_SETUP_LEAVE) return;
+    go(env, SCREEN_HOME);
+    if (zapp_setup_state(shell.files) == ZAPP_SETUP_READY) go(env, SCREEN_WALLET);
+}
 static void tap(JNIEnv *env, float x, float y)
 {
     struct target now, before = shell.pressed;
@@ -540,6 +583,7 @@ static void tap(JNIEnv *env, float x, float y)
     if (now.kind == TARGET_NAV) run_nav(env, &shell.navs[now.index]);
     else if (now.kind == TARGET_WALLET) run_wallet(env, now.index);
     else if (now.kind == TARGET_SEND) run_send(env, now.index);
+    else if (now.kind == TARGET_SETUP) run_setup(env, now.index);
     else if (now.kind == TARGET_ROW) launch(env, shell.apps[now.index].entry.package, shell.apps[now.index].entry.activity, shell.apps[now.index].entry.label);
     else run_tile(env, &now);
 }
@@ -644,6 +688,8 @@ void zapp_shell_render(JNIEnv *env, const struct zapp_view *view)
     if (!shell.rendered) {
         shell.rendered = true; shell.scans_seen = view->scans_done; shell.scan_dismissed = view->scanning;
     }
+    /* The first launch without a wallet opens the setup screens once; the Wallet tile opens them after that. */
+    if (!shell.setup_offered && !shell.preview && zapp_setup_state(shell.files) == ZAPP_SETUP_NEEDED) { shell.setup_offered = true; go(env, SCREEN_SETUP); }
     bool finished = view->scans_done != shell.scans_seen, dismissed = shell.scan_dismissed;
     shell.scans_seen = view->scans_done;
     render_scan(env, view, finished, dismissed);
@@ -652,6 +698,7 @@ void zapp_shell_render(JNIEnv *env, const struct zapp_view *view)
     show_home(env);
     if (shell.current == SCREEN_WALLET) zapp_wallet_ui_render(env);
     if (shell.current == SCREEN_SEND) zapp_send_ui_render(env);
+    if (shell.current == SCREEN_SETUP) zapp_setup_ui_render(env);
 }
 void zapp_shell_pause(JNIEnv *env)
 {
@@ -663,12 +710,18 @@ void zapp_shell_pause(JNIEnv *env)
         go(env, SCREEN_HOME);
         return;
     }
+    if (shell.activity && shell.current == SCREEN_SETUP) {
+        /* Setup stays: a job may be waiting on the screen lock, and the words are held until confirmed. Only the drawn words go. */
+        zapp_setup_ui_pause(env);
+        return;
+    }
     if (!shell.activity || shell.current != SCREEN_WALLET) return;
     go(env, SCREEN_HOME);
 }
 void zapp_shell_dropped(JNIEnv *env)
 {
     if (shell.activity && shell.current == SCREEN_SEND) zapp_send_ui_dropped(env);
+    if (shell.activity && shell.current == SCREEN_SETUP) zapp_setup_ui_dropped(env);
     if (shell.activity && shell.current == SCREEN_WALLET) zapp_wallet_ui_dropped(env, shell.gate.obscured_gestures);
 }
 void zapp_shell_tick(JNIEnv *env)
@@ -678,6 +731,10 @@ void zapp_shell_tick(JNIEnv *env)
     zapp_send_ui_tick(env);
     if (shell.current == SCREEN_SEND) {
         zapp_send_ui_render(env);
+        return;
+    }
+    if (shell.current == SCREEN_SETUP) {
+        zapp_setup_ui_tick(env);
         return;
     }
     /* Off the wallet screens, the first tick after the app returned finds Home on screen: the protection a pause
@@ -691,7 +748,8 @@ void zapp_shell_resume(JNIEnv *env)
     zapp_shell_immersive(env);
     refresh_apps(env, false);
     load_layout();
-    if (shell.current == SCREEN_APPS || shell.current == SCREEN_SETTINGS || shell.current == SCREEN_WALLET) go(env, SCREEN_HOME);
+    if (shell.current == SCREEN_SETUP) zapp_setup_ui_render(env);
+    else if (shell.current == SCREEN_APPS || shell.current == SCREEN_SETTINGS || shell.current == SCREEN_WALLET) go(env, SCREEN_HOME);
     else show_home(env);
 }
 void zapp_shell_destroy(JNIEnv *env)
@@ -701,12 +759,13 @@ void zapp_shell_destroy(JNIEnv *env)
     wallet_screens_close();
     zapp_wallet_ui_destroy(env);
     zapp_send_ui_destroy(env);
+    zapp_setup_ui_destroy(env);
     zapp_pay_stash_clear();
     zapp_surface_destroy(env);
     for (size_t i = 0; i < shell.nav_count; ++i) (*env)->DeleteGlobalRef(env, shell.navs[i].view);
     for (size_t i = 0; i < shell.row_count; ++i) (*env)->DeleteGlobalRef(env, shell.rows[i]);
     for (int i = 0; i < SCREEN_COUNT; ++i) if (shell.roots[i]) (*env)->DeleteGlobalRef(env, shell.roots[i]);
-    jobject *views[] = {&shell.notice_views[SCREEN_HOME], &shell.notice_views[SCREEN_APPS], &shell.notice_views[SCREEN_SETTINGS], &shell.notice_views[SCREEN_SEND], &shell.outcome_view, &shell.status_view, &shell.scan_view, &shell.apps_list};
+    jobject *views[] = {&shell.notice_views[SCREEN_HOME], &shell.notice_views[SCREEN_APPS], &shell.notice_views[SCREEN_SETTINGS], &shell.notice_views[SCREEN_SEND], &shell.notice_views[SCREEN_SETUP], &shell.outcome_view, &shell.status_view, &shell.scan_view, &shell.apps_list};
     for (size_t i = 0; i < sizeof(views) / sizeof(views[0]); ++i) if (*views[i]) (*env)->DeleteGlobalRef(env, *views[i]);
     release_cards();
     zapp_launcher_release(env, shell.apps, ZAPP_LAUNCHER_MAX);
