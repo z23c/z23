@@ -68,8 +68,16 @@ static void *rcc_thread_main(void *arg)
 static int rcc_thread(void)
 {
     pthread_t thread;
+    pthread_attr_t attr;
     int value = 0;
-    int rc = pthread_create(&thread, NULL, rcc_thread_main, &value);
+    /* An explicit stack: with no attribute glibc takes RLIMIT_STACK as the
+     * thread stack size, and t-asan/t-tsan run with `ulimit -s 1048576`, so
+     * the default thread asks for 1 GiB, which the confined child's address
+     * space ceiling refuses (pthread_create returns EAGAIN, code 11). The
+     * case proves clone(CLONE_THREAD) is permitted, not the stack default. */
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 65536);
+    int rc = pthread_create(&thread, &attr, rcc_thread_main, &value);
     if (rc != 0) return rc;
     pthread_join(thread, NULL);
     return value == 42 ? 0 : 3;
