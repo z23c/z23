@@ -10,6 +10,7 @@
 #define WALLET_VIEW_MAX_ZAT 2100000000000000LL /* 21000000 ZCL: no amount above this is real */
 #define WALLET_VIEW_ADDRESS_MAX 256
 #define WALLET_VIEW_GROUP 4
+#define WALLET_VIEW_AMOUNT_MAX 18 /* "21000000.00000000", the longest amount read_zat admits, with its NUL */
 
 #define TEXT_BALANCE_UNKNOWN "Balance unknown"
 #define TEXT_PENDING_UNKNOWN "Pending amount unknown"
@@ -224,7 +225,7 @@ static void render_balance(const struct summary *s, struct wallet_view *out)
  * whole at that time, so only then is the whole amount said to arrive in it. */
 static void render_pending(const struct summary *s, struct wallet_view *out)
 {
-    char amount[32];
+    char amount[WALLET_VIEW_AMOUNT_MAX];
     out->pending[0] = '\0';
     if (s->hidden || s->pending == 0 || !zapp_zat_format((uint64_t)s->pending, amount, sizeof(amount))) return;
     const char *unit = s->pending_confirmations == 1 ? "" : "s";
