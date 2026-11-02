@@ -45,14 +45,6 @@ void wss_format_zat(uint64_t zat, char *out, size_t cap)
     if (n) snprintf(out, cap, "%llu.%s ZCL", (unsigned long long)whole, digits);
     else snprintf(out, cap, "%llu ZCL", (unsigned long long)whole);
 }
-/* Characters that move, hide or reorder text: controls, soft hyphen, zero width and bidi marks and
- * isolates, line and paragraph separators, byte order mark. They are written out, never acted on. */
-static bool invisible_cp(uint32_t cp)
-{
-    return cp < 0x20 || (cp >= 0x7f && cp <= 0x9f) || cp == 0xad || cp == 0x61c || cp == 0x180e ||
-           (cp >= 0x200b && cp <= 0x200f) || (cp >= 0x2028 && cp <= 0x202e) || (cp >= 0x2060 && cp <= 0x206f) ||
-           cp == 0xfeff || (cp >= 0xfff9 && cp <= 0xfffb);
-}
 /* The memo is shown as data in its own field. memo is valid UTF-8, so every lead byte has its tail. */
 static void fill_memo(const struct zapp_payment *pay, struct wss_view *v)
 {
@@ -70,7 +62,7 @@ static void fill_memo(const struct zapp_payment *pay, struct wss_view *v)
         size_t n = m[i] < 0x80 ? 1 : m[i] < 0xe0 ? 2 : m[i] < 0xf0 ? 3 : 4;
         uint32_t cp = n == 1 ? m[i] : m[i] & (0xffu >> (n + 1));
         for (size_t k = 1; k < n; ++k) cp = (cp << 6) | (m[i + k] & 0x3f);
-        if (invisible_cp(cp)) o += (size_t)snprintf(v->memo + o, sizeof(v->memo) - o, "<U+%04X>", (unsigned)cp);
+        if (zapp_pay_cp_hidden(cp)) o += (size_t)snprintf(v->memo + o, sizeof(v->memo) - o, "<U+%04X>", (unsigned)cp);
         else { memcpy(v->memo + o, m + i, n); o += n; v->memo[o] = 0; }
         i += n;
     }

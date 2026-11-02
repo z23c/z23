@@ -220,33 +220,36 @@ static enum decode_status base64url_decode(const uint8_t *in, size_t n, uint8_t 
     return DEC_OK;
 }
 
-/* Whether a bidirectional mark or control starts at s[i]: U+200E and U+200F (marks), U+061C
- * (Arabic letter mark), U+202A..U+202E (embeddings and overrides) or U+2066..U+2069 (isolates).
- * They reorder or change the direction of the text shown beside an address. */
-static bool bidi_control_at(const uint8_t *s, size_t n, size_t i)
+bool zapp_pay_cp_hidden(uint32_t cp)
 {
-    if (i + 1 < n && s[i] == 0xD8u && s[i + 1] == 0x9Cu)
-        return true;
-    if (i + 2 >= n || s[i] != 0xE2u)
-        return false;
-    if (s[i + 1] == 0x80u)
-        return (s[i + 2] >= 0xAAu && s[i + 2] <= 0xAEu) || s[i + 2] == 0x8Eu || s[i + 2] == 0x8Fu;
-    return s[i + 1] == 0x81u && s[i + 2] >= 0xA6u && s[i + 2] <= 0xA9u;
+    static const struct { uint32_t low, high; } spans[] = {
+        {0x00u, 0x1fu}, {0x7fu, 0x9fu}, {0xadu, 0xadu}, {0x61cu, 0x61cu}, {0x180eu, 0x180eu}, {0x200bu, 0x200fu},
+        {0x2028u, 0x202eu}, {0x2060u, 0x206fu}, {0xfdd0u, 0xfdefu}, {0xfeffu, 0xfeffu}, {0xfff9u, 0xfffbu}, {0xe0000u, 0xe007fu},
+    };
+    if ((cp & 0xfffeu) == 0xfffeu) return true;   /* U+FFFE and U+FFFF of every plane */
+    for (size_t i = 0; i < sizeof(spans) / sizeof(spans[0]); ++i)
+        if (cp >= spans[i].low && cp <= spans[i].high) return true;
+    return false;
 }
 
-/* Valid UTF-8 with no C0 control, no DEL, no C1 control (U+0080..U+009F) and no bidi control. */
+/* The code point that starts at s[i] in text already validated as UTF-8, and its length in bytes. */
+static uint32_t code_point_at(const uint8_t *s, size_t i, size_t *length)
+{
+    uint8_t lead = s[i];
+    *length = lead < 0x80u ? 1u : lead < 0xe0u ? 2u : lead < 0xf0u ? 3u : 4u;
+    uint32_t cp = *length == 1 ? lead : lead & (0xffu >> (*length + 1));
+    for (size_t k = 1; k < *length; ++k) cp = (cp << 6) | (s[i + k] & 0x3fu);
+    return cp;
+}
+
+/* Valid UTF-8 with no hidden code point (see zapp_pay_cp_hidden). */
 static bool text_is_clean(const uint8_t *s, size_t n)
 {
     if (!zutf8_validate_n((const char *)s, n))
         return false;
-    for (size_t i = 0; i < n; i++) {
-        if (s[i] < 0x20u || s[i] == 0x7Fu)
+    for (size_t i = 0, length = 0; i < n; i += length)
+        if (zapp_pay_cp_hidden(code_point_at(s, i, &length)))
             return false;
-        if (s[i] == 0xC2u && i + 1 < n && s[i + 1] >= 0x80u && s[i + 1] <= 0x9Fu)
-            return false;
-        if (bidi_control_at(s, n, i))
-            return false;
-    }
     return true;
 }
 

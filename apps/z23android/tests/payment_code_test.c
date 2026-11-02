@@ -117,20 +117,13 @@ static const struct accept_case ACCEPTED[] = {
     { .text = URI_PREFIX ZS_ADDR "?memo=aGVsbG8&message=%F0%9F%98%80", .net = MAIN,
       .address = ZS_ADDR, .kind = PRIVATE_KIND, .memo = "hello", .memo_len = 5,
       .label = "", .message = "\xf0\x9f\x98\x80" },
-    /* Code points either side of the bidi control ranges are valid text and stay accepted. */
-    { .text = URI_PREFIX ZS_ADDR "?label=%E2%80%A9", .net = MAIN, .address = ZS_ADDR,
-      .kind = PRIVATE_KIND, .label = "\xe2\x80\xa9", .message = "" },
+    /* Visible neighbours of the hidden ranges stay accepted: U+202F, U+2010, U+2000, U+2070 and U+061B. */
     { .text = URI_PREFIX ZS_ADDR "?label=%E2%80%AF", .net = MAIN, .address = ZS_ADDR,
       .kind = PRIVATE_KIND, .label = "\xe2\x80\xaf", .message = "" },
-    { .text = URI_PREFIX ZS_ADDR "?label=%E2%81%A5", .net = MAIN, .address = ZS_ADDR,
-      .kind = PRIVATE_KIND, .label = "\xe2\x81\xa5", .message = "" },
-    { .text = URI_PREFIX ZS_ADDR "?label=%E2%81%AA", .net = MAIN, .address = ZS_ADDR,
-      .kind = PRIVATE_KIND, .label = "\xe2\x81\xaa", .message = "" },
-    { .text = URI_PREFIX ZS_ADDR "?message=%E2%80%A8", .net = MAIN, .address = ZS_ADDR,
-      .kind = PRIVATE_KIND, .label = "", .message = "\xe2\x80\xa8" },
-    /* Neighbours of the new marks stay accepted: U+200D, U+2010 and U+061B. */
-    { .text = URI_PREFIX ZS_ADDR "?label=%E2%80%8D", .net = MAIN, .address = ZS_ADDR,
-      .kind = PRIVATE_KIND, .label = "\xe2\x80\x8d", .message = "" },
+    { .text = URI_PREFIX ZS_ADDR "?label=%E2%81%B0", .net = MAIN, .address = ZS_ADDR,
+      .kind = PRIVATE_KIND, .label = "\xe2\x81\xb0", .message = "" },
+    { .text = URI_PREFIX ZS_ADDR "?label=%E2%80%8A", .net = MAIN, .address = ZS_ADDR,
+      .kind = PRIVATE_KIND, .label = "\xe2\x80\x8a", .message = "" },
     { .text = URI_PREFIX ZS_ADDR "?label=%E2%80%90", .net = MAIN, .address = ZS_ADDR,
       .kind = PRIVATE_KIND, .label = "\xe2\x80\x90", .message = "" },
     { .text = URI_PREFIX ZS_ADDR "?message=%D8%9B", .net = MAIN, .address = ZS_ADDR,
@@ -271,6 +264,26 @@ static const struct refusal_case REFUSED[] = {
     REFUSE(URI_PREFIX ZS_ADDR "?message=%E2%80%AA", MAIN, ZAPP_PAY_REFUSE_MESSAGE_INVALID),
     REFUSE(URI_PREFIX ZS_ADDR "?message=%E2%81%A9", MAIN, ZAPP_PAY_REFUSE_MESSAGE_INVALID),
     REFUSE(URI_PREFIX ZS_ADDR "?message=\xe2\x81\xa6", MAIN, ZAPP_PAY_REFUSE_MESSAGE_INVALID),
+    /* Text from the payer's code is held to the memo's filter: nothing that hides, moves or reorders what a screen shows. */
+    REFUSE(URI_PREFIX ZS_ADDR "?label=Shop%E2%80%AE", MAIN, ZAPP_PAY_REFUSE_LABEL_INVALID),
+    REFUSE(URI_PREFIX ZS_ADDR "?message=Pay%E2%80%AEdna", MAIN, ZAPP_PAY_REFUSE_MESSAGE_INVALID),
+    REFUSE(URI_PREFIX ZS_ADDR "?label=Shop%E2%80%8B", MAIN, ZAPP_PAY_REFUSE_LABEL_INVALID),
+    REFUSE(URI_PREFIX ZS_ADDR "?label=Sh%C2%ADop", MAIN, ZAPP_PAY_REFUSE_LABEL_INVALID),
+    REFUSE(URI_PREFIX ZS_ADDR "?label=%E2%80%8D", MAIN, ZAPP_PAY_REFUSE_LABEL_INVALID),
+    REFUSE(URI_PREFIX ZS_ADDR "?label=%E2%80%A8", MAIN, ZAPP_PAY_REFUSE_LABEL_INVALID),
+    REFUSE(URI_PREFIX ZS_ADDR "?message=%E2%80%A9", MAIN, ZAPP_PAY_REFUSE_MESSAGE_INVALID),
+    REFUSE(URI_PREFIX ZS_ADDR "?label=%E2%81%A0", MAIN, ZAPP_PAY_REFUSE_LABEL_INVALID),
+    REFUSE(URI_PREFIX ZS_ADDR "?label=%E2%81%AA", MAIN, ZAPP_PAY_REFUSE_LABEL_INVALID),
+    REFUSE(URI_PREFIX ZS_ADDR "?label=%E1%A0%8E", MAIN, ZAPP_PAY_REFUSE_LABEL_INVALID),
+    REFUSE(URI_PREFIX ZS_ADDR "?label=%EF%BB%BF", MAIN, ZAPP_PAY_REFUSE_LABEL_INVALID),
+    REFUSE(URI_PREFIX ZS_ADDR "?message=%EF%BF%BA", MAIN, ZAPP_PAY_REFUSE_MESSAGE_INVALID),
+    REFUSE(URI_PREFIX ZS_ADDR "?label=%EF%BF%BE", MAIN, ZAPP_PAY_REFUSE_LABEL_INVALID),
+    REFUSE(URI_PREFIX ZS_ADDR "?label=%F3%A0%80%81", MAIN, ZAPP_PAY_REFUSE_LABEL_INVALID),
+    REFUSE(URI_PREFIX ZS_ADDR "?label=Shop%EF%B7%90", MAIN, ZAPP_PAY_REFUSE_LABEL_INVALID),
+    REFUSE(URI_PREFIX ZS_ADDR "?message=%EF%B7%AF", MAIN, ZAPP_PAY_REFUSE_MESSAGE_INVALID),
+    REFUSE(URI_PREFIX ZS_ADDR "?label=%F4%8F%BF%BF", MAIN, ZAPP_PAY_REFUSE_LABEL_INVALID),
+    REFUSE(URI_PREFIX ZS_ADDR "?message=%F0%9F%BF%BE", MAIN, ZAPP_PAY_REFUSE_MESSAGE_INVALID),
+    REFUSE(URI_PREFIX ZS_ADDR "?message=%F3%A0%81%BF", MAIN, ZAPP_PAY_REFUSE_MESSAGE_INVALID),
     /* a %-encoded parameter name is not decoded, so it is malformed, never req- or amount */
     REFUSE(URI_PREFIX ZS_ADDR "?%72eq-x=1", MAIN, ZAPP_PAY_REFUSE_MALFORMED),
     REFUSE(URI_PREFIX ZS_ADDR "?am%6Funt=1", MAIN, ZAPP_PAY_REFUSE_MALFORMED),
@@ -308,6 +321,16 @@ static enum zapp_pay_refusal parse_case(const char *text, enum zapp_pay_network 
     return zapp_payment_parse(text, strlen(text), net, p);
 }
 
+/* The table behind the filter: its boundaries, so a screen and the parser cannot drift apart. */
+static void hidden_code_points(void)
+{
+    static const uint32_t hidden[] = {0x00, 0x1f, 0x7f, 0x9f, 0xad, 0x61c, 0x180e, 0x200b, 0x200f, 0x2028, 0x202e, 0x2060, 0x206f,
+                                      0xfdd0, 0xfdef, 0xfeff, 0xfff9, 0xfffb, 0xfffe, 0xffff, 0x1fffe, 0x1ffff, 0x2fffe, 0xeffff, 0x10fffe, 0x10ffff, 0xe0000, 0xe007f};
+    static const uint32_t shown[] = {0x20, 0x7e, 0xa0, 0xa1, 0xae, 0x61b, 0x61d, 0x180d, 0x180f, 0x200a, 0x2010, 0x2027, 0x202f, 0x205f,
+                                     0x2070, 0xfdcf, 0xfdf0, 0xfefe, 0xff00, 0xfff8, 0xfffc, 0x1fffd, 0x20000, 0x1f600, 0xdfffd, 0xe0080, 0x10fffd};
+    for (size_t i = 0; i < sizeof(hidden) / sizeof(hidden[0]); i++) CHECK(zapp_pay_cp_hidden(hidden[i]));
+    for (size_t i = 0; i < sizeof(shown) / sizeof(shown[0]); i++) CHECK(!zapp_pay_cp_hidden(shown[i]));
+}
 static void expect_refusal(const char *text, enum zapp_pay_network net, enum zapp_pay_refusal want)
 {
     struct zapp_payment p;
@@ -657,6 +680,7 @@ static void run_zat_format_and_parse(void)
 
 int main(void)
 {
+    hidden_code_points();
     run_zat_format_and_parse();
     run_accepts();
     run_refusals();

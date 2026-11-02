@@ -124,17 +124,6 @@ static void drop_tree(struct json_value *root)
 
 /* ---- text from other people ---- */
 
-/* Characters that change how text reads without showing: controls, line and paragraph separators, bidi
- * and zero-width controls, the byte-order mark and tag characters. */
-static bool hazard(uint32_t c)
-{
-    static const struct { uint32_t low, high; } spans[] = {
-        {0x00u, 0x1fu}, {0x7fu, 0x9fu}, {0xadu, 0xadu}, {0x61cu, 0x61cu}, {0x180eu, 0x180eu}, {0x200bu, 0x200fu},
-        {0x2028u, 0x202eu}, {0x2060u, 0x206fu}, {0xfeffu, 0xfeffu}, {0xfff9u, 0xfffbu}, {0xfffeu, 0xffffu}, {0xe0000u, 0xe007fu},
-    };
-    for (size_t i = 0; i < sizeof(spans) / sizeof(spans[0]); ++i) if (c >= spans[i].low && c <= spans[i].high) return true;
-    return false;
-}
 /* The visible form of the character at in: itself, or its code point or byte in angle brackets. */
 static size_t visible_token(const char *in, size_t len, char tok[TOKEN_MAX])
 {
@@ -144,7 +133,7 @@ static size_t visible_token(const char *in, size_t len, char tok[TOKEN_MAX])
         snprintf(tok, TOKEN_MAX, "<x%02X>", (unsigned)(unsigned char)in[0]);
         return 1;
     }
-    if (hazard(cp)) snprintf(tok, TOKEN_MAX, "<U+%04X>", (unsigned)cp);
+    if (zapp_pay_cp_hidden(cp)) snprintf(tok, TOKEN_MAX, "<U+%04X>", (unsigned)cp);
     else { memcpy(tok, in, used); tok[used] = '\0'; }
     return used;
 }

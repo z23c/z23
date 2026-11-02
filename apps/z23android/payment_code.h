@@ -53,6 +53,12 @@ struct zapp_payment {
     char message[ZAPP_PAY_TEXT_MAX + 1]; /* decoded and NUL-terminated; "" when absent */
 };
 
+/* Whether a code point changes how text reads without showing: controls, soft hyphen, direction marks and isolates, zero width
+ * characters, line and paragraph separators, the byte order mark, the noncharacters U+FDD0..U+FDEF and U+nFFFE and U+nFFFF of
+ * every plane, and tag characters. The label and message of a payment code are refused when they hold one, and the screens write
+ * one out as <U+XXXX> instead of drawing it: one table. */
+bool zapp_pay_cp_hidden(uint32_t cp);
+
 /* Parses text[0..len) for network. On ZAPP_PAY_OK, out holds the payment. On any refusal out is
  * zeroed, so a refused code is never partly honoured. Parameters other than amount, memo, label and
  * message are ignored unless their name starts with req- (any case), which is refused. */
