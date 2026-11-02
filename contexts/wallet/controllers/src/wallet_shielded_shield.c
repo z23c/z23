@@ -89,7 +89,7 @@ static bool shield_resolve_to(struct wallet_rpc_context *ctx,
 {
     struct sapling_key_entry acct;
     if (!sapling_keystore_copy_account(&ctx->wallet->sapling_keys, &acct))
-        return false;
+        return false; // raw-return-ok:no account key; the caller refuses NO_PRIVATE_ADDRESS
     bool found = ctx->wallet_db &&
                  wallet_sqlite_diversifier_latest(ctx->wallet_db, &acct,
                                                   p->to_diversifier,
@@ -367,7 +367,7 @@ bool wallet_shield_build(struct wallet_rpc_context *ctx,
 {
     if (!shield_key_present(ctx, p, result) ||
         !wallet_shield_assemble(p, wtx, result))
-        return false;
+        return false; // raw-return-ok:callee-logged
     if (!shield_prove(ctx, p, wtx, result)) {
         transaction_free(&wtx->tx);
         return false;
@@ -386,7 +386,7 @@ static bool shield_send(struct wallet_rpc_context *ctx,
 {
     struct wallet_tx wtx;
     if (!wallet_shield_build(ctx, p, &wtx, result))
-        return false;
+        return false; // raw-return-ok:callee-logged
     return z_sendmany_admit_relay(ctx, &wtx, result);
 }
 
@@ -440,7 +440,7 @@ static bool shield_run(const struct json_value *params, bool help,
     bool keyed = kv && !json_is_null(kv);
     int32_t floor = WALLET_SPEND_NO_FLOOR;
     if (!wallet_spend_gate_for_send(ctx, true, &floor, result))
-        return false;
+        return false; // raw-return-ok:callee-logged
     if (keyed && !shield_lock_ok(result))
         return false;
     ENSURE_WALLET(result);
