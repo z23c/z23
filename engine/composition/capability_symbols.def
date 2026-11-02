@@ -450,6 +450,10 @@ ZCL_CAPABILITY_SYMBOL("fgetc", CAP_FS_READ, "")
 ZCL_CAPABILITY_SYMBOL("ungetc", CAP_FS_READ,
     "Pushes a byte back into an existing input stream; does not write external storage.")
 ZCL_CAPABILITY_SYMBOL("fgets", CAP_FS_READ, "")
+ZCL_CAPABILITY_SYMBOL("fmemopen", CAP_FS_READ,
+    "Opens a stream over a buffer the caller owns and names no path. "
+    "Classified with the stream readers; a write mode reaches only that "
+    "buffer.")
 ZCL_CAPABILITY_SYMBOL("fopen", CAP_FS_READ,
     "The mode string is invisible to nm, so this one symbol spans "
     "reading and writing. Classified read, and the write half is owned "
