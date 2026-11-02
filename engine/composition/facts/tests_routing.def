@@ -31,9 +31,9 @@ ZCL_FACT("tests.routing", "tfast_supports_only",
          "Makefile",
          "t-fast-locked ONLY='$(ONLY)'")
 ZCL_FACT("tests.routing", "stack_unlimited_required",
-         "ZCL_TEST_STACK_SETUP expands to ulimit -s unlimited and is run before the fast test binary to avoid SIGSEGV.",
+         "ZCL_TEST_STACK_SETUP raises the stack to unlimited (or to the hard limit when an outer recipe capped it) before the fast test binary runs, to avoid SIGSEGV.",
          "Makefile",
-         "ZCL_TEST_STACK_SETUP = ulimit -s unlimited")
+         "ZCL_TEST_STACK_SETUP = { ulimit -s unlimited 2>/dev/null || ulimit -s")
 ZCL_FACT("tests.routing", "tfast_locked_runs_only_flag",
          "t-fast-locked builds TEST_PARALLEL_FAST_CANDIDATE, applies ZCL_TEST_STACK_SETUP, then runs the binary with --only=$(ONLY).",
          "Makefile",
