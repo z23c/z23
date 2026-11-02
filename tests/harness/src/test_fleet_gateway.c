@@ -2462,9 +2462,30 @@ static bool gw_press_round(const char *bin, const char *node,
     return up;
 }
 
+/* Under AddressSanitizer the pressure case cannot run. It caps the gateway's
+ * address space at its idle VmSize plus a few hundred KB (RLIMIT_AS, 3028 KB
+ * in the sweep: idle 2780 + 248), and an ASan binary must reserve about 15 TB
+ * of shadow at startup. Measured in the ASan sweep (pfx-fl.log) and again
+ * alone: the gateway's stderr under the cap is "ERROR: Failed to mmap" and it
+ * never prints ready, so up=0 at the first level. The cap is the point of the
+ * case in every other build, which runs it unchanged. GCC defines
+ * __SANITIZE_ADDRESS__; Clang reports it through
+ * __has_feature(address_sanitizer). */
+#if defined(__SANITIZE_ADDRESS__)
+#define GW_UNDER_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define GW_UNDER_ASAN 1
+#endif
+#endif
+
 static int gw_t_bound_pressure(void)
 {
     int failures = 0;
+#if defined(GW_UNDER_ASAN)
+    printf("gateway: the node-input verdict does not move with memory pressure SKIP under AddressSanitizer (RLIMIT_AS cap refuses the shadow reservation)\n");
+    return failures;
+#endif
     char *reqs_m[3] = {NULL, NULL, NULL};
     char *ref[3] = {NULL, NULL, NULL};
     char *got[3] = {NULL, NULL, NULL};
