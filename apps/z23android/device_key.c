@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include "device_key.h"
 #include "base/cleanse.h"
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -222,10 +223,27 @@ enum zapp_devkey_status zapp_devkey_unwrap(const struct zapp_devkey_ops *ops, co
     return st;
 }
 
+/* Whether a file wrapped by the key remains beside path: a blob set aside as path.unused-<time> still needs the key. */
+static bool other_blob_remains(const char *path)
+{
+    char parent[PATH_MAX];
+    const char *slash = strrchr(path, '/');
+    if (!slash || (size_t)(slash - path) >= sizeof(parent)) return true;
+    memcpy(parent, path, (size_t)(slash - path));
+    parent[slash - path] = 0;
+    size_t base = strlen(slash + 1);
+    DIR *dir = opendir(parent[0] ? parent : "/");
+    if (!dir) return true;
+    bool found = false;
+    for (struct dirent *e = readdir(dir); e && !found; e = readdir(dir))
+        found = !strncmp(e->d_name, slash + 1, base) && (e->d_name[base] == 0 || e->d_name[base] == '.');
+    closedir(dir);
+    return found;
+}
 void zapp_devkey_discard(const struct zapp_devkey_ops *ops, const char *path)
 {
     (void)unlink(path);
-    ops->delete_key(ops->ctx);
+    if (!other_blob_remains(path)) ops->delete_key(ops->ctx);
 }
 
 enum zapp_devkey_answer zapp_devkey_answer_for_error(int biometric_error)

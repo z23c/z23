@@ -127,7 +127,7 @@ enum zapp_devkey_status zapp_devkey_wrap_new(const struct zapp_devkey_ops *ops, 
 enum zapp_devkey_status zapp_devkey_unwrap(const struct zapp_devkey_ops *ops, const char *path,
                                            enum zapp_devkey_purpose purpose,
                                            uint8_t secret[ZAPP_DEVKEY_SECRET]);
-/* Removes the blob and the key. */
+/* Removes the blob and, unless another blob beside it (path.unused-<time>, set aside) still needs it, the key. */
 void zapp_devkey_discard(const struct zapp_devkey_ops *ops, const char *path);
 const char *zapp_devkey_status_name(enum zapp_devkey_status status);
 const char *zapp_devkey_level_name(enum zapp_devkey_level level);

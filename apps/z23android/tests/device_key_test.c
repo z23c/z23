@@ -473,6 +473,13 @@ static void discard_removes_blob_and_key(const char *dir)
     assert(zapp_devkey_wrap_new(&ops, path, secret) == ZAPP_DEVKEY_OK);
     zapp_devkey_discard(&ops, path);
     assert(access(path, F_OK) != 0 && !f.has_key && f.deletes == 1);
+    /* A blob set aside beside it is still wrapped by the key: the key stays. */
+    char moved[PATH_MAX + 32]; snprintf(moved, sizeof(moved), "%s.unused-20261101T120000Z", path);
+    f = fake_new(); ops = ops_for(&f);
+    assert(zapp_devkey_wrap_new(&ops, path, secret) == ZAPP_DEVKEY_OK && rename(path, moved) == 0);
+    assert(zapp_devkey_wrap_new(&ops, path, secret) == ZAPP_DEVKEY_OK);
+    zapp_devkey_discard(&ops, path);
+    assert(access(path, F_OK) != 0 && access(moved, F_OK) == 0 && f.has_key && f.deletes == 0);
 }
 static void concurrent_blob_is_never_replaced(const char *dir)
 {
