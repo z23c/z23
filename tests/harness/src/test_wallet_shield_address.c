@@ -1157,6 +1157,21 @@ static int wsa_test_leaf_races(struct wsa_fix *fx, const char *from)
     return failures;
 }
 
+/* A replay reports the send-once record only: no field of the caller's
+ * commit input, whose count and total the node did not compare. */
+static bool wsa_reply_is_bare(const struct zcl_command_reply *r)
+{
+    static const char *const caller[] = {
+        "input_count", "total_zat", "amount_zat", "fee_zat", "from", "to",
+        "plan_token", "wallet_scope",
+    };
+    for (size_t i = 0; i < sizeof(caller) / sizeof(caller[0]); i++)
+        if (json_get(&r->data, caller[i]))
+            return false;
+    const char *key = json_get_str(json_get(&r->data, "idempotency_key"));
+    return key && strcmp(key, WSA_KEY) == 0;
+}
+
 /* A retry of a finished sweep: the first call admitted it and its coins are
  * spent, so a fresh plan has nothing to shield. The same commit input still
  * reaches the node, whose send-once layer replays the result. */
@@ -1190,16 +1205,7 @@ static int wsa_test_leaf_replay(void)
                   wsa_int(&first.data, "amount_zat") == 3000 - WSA_FEE);
     wsa_leaf(commit, &again);
     WSA_CHECK("a replay echoes nothing derived from the caller's input",
-              json_get(&again.data, "input_count") == NULL &&
-                  json_get(&again.data, "total_zat") == NULL &&
-                  json_get(&again.data, "amount_zat") == NULL &&
-                  json_get(&again.data, "fee_zat") == NULL &&
-                  json_get(&again.data, "from") == NULL &&
-                  json_get(&again.data, "to") == NULL &&
-                  json_get(&again.data, "plan_token") == NULL &&
-                  strcmp(json_get_str(json_get(&again.data,
-                                               "idempotency_key")),
-                         WSA_KEY) == 0);
+              wsa_reply_is_bare(&again));
     WSA_CHECK("retry after the coins are spent: replayed, same txid, not "
               "mutated, node reached again",
               again.exit_code == ZCL_COMMAND_EXIT_OK &&
