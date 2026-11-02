@@ -1271,6 +1271,42 @@ static void catchup_report_summary(const struct catchup_pass *ps)
                           ps->cb.last_committed_height);
 }
 
+/* Returns 1 when the pass is not suppressed and the db tip is behind the
+ * chain tip. Both tip outputs are written on every path. */
+static int catchup_tips_need_work(struct node_db *ndb,
+                                  const struct active_chain *chain,
+                                  int *db_tip, int *chain_tip)
+{
+    *db_tip = 0;
+    *chain_tip = 0;
+    if (catchup_pass_suppressed())
+        return 0;
+    *db_tip = node_db_sync_get_tip_height(ndb);
+    *chain_tip = active_chain_height(chain);
+    if (*db_tip >= *chain_tip)
+        return 0;
+    return 1;
+}
+
+/* Walk the pass from its start height through its chain tip, and end the
+ * walk on a stop or fail step. */
+static void catchup_walk_heights(struct catchup_pass *ps)
+{
+    for (int h = ps->start; h <= ps->chain_tip; h++) {
+        const struct block_index *pindex = NULL;
+        enum catchup_step st = catchup_walk_locate(ps, h, &pindex);
+        if (st == CATCHUP_STEP_GO)
+            st = catchup_walk_block(ps, pindex, h);
+        if (st == CATCHUP_STEP_GO)
+            st = catchup_walk_post(ps, pindex, h);
+        if (st >= CATCHUP_STEP_STOP) {
+            ps->interrupted = st == CATCHUP_STEP_STOP;
+            ps->failed = st == CATCHUP_STEP_FAIL;
+            break;
+        }
+    }
+}
+
 int node_db_catchup_service_run(struct node_db *ndb,
                                 const struct active_chain *chain,
                                 struct wallet *w,
@@ -1300,12 +1336,10 @@ int node_db_catchup_service_run(struct node_db *ndb,
     if (catchup_args_invalid(ndb, chain))
         LOG_ERR("sync", "catchup: invalid args (ndb=%p, chain=%p)", (void *)ndb, (void *)chain);
 
-    if (catchup_pass_suppressed())
+    int db_tip = 0;
+    int chain_tip = 0;
+    if (!catchup_tips_need_work(ndb, chain, &db_tip, &chain_tip))
         return 0;
-
-    int db_tip = node_db_sync_get_tip_height(ndb);
-    int chain_tip = active_chain_height(chain);
-    if (db_tip >= chain_tip) return 0;
     if (!datadir)
         LOG_ERR("sync", "catchup: datadir is NULL (db_tip=%d, chain_tip=%d)",
                 db_tip, chain_tip);
@@ -1314,19 +1348,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
     if (!catchup_open_pass(&ps))
         return -1; // raw-return-ok:logged-above
 
-    for (int h = ps.start; h <= ps.chain_tip; h++) {
-        const struct block_index *pindex = NULL;
-        enum catchup_step st = catchup_walk_locate(&ps, h, &pindex);
-        if (st == CATCHUP_STEP_GO)
-            st = catchup_walk_block(&ps, pindex, h);
-        if (st == CATCHUP_STEP_GO)
-            st = catchup_walk_post(&ps, pindex, h);
-        if (st >= CATCHUP_STEP_STOP) {
-            ps.interrupted = st == CATCHUP_STEP_STOP;
-            ps.failed = st == CATCHUP_STEP_FAIL;
-            break;
-        }
-    }
+    catchup_walk_heights(&ps);
 
     catchup_close_abort(&ps);
     catchup_final_tip(&ps);
