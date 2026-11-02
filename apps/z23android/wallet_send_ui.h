@@ -48,6 +48,15 @@ bool zapp_send_ui_take_reshow(void);
 void zapp_send_ui_pause(void);
 /* The owner leaves the screen. False while a payment is being built or the wallet is still open: the screen stays. */
 bool zapp_send_ui_leave(JNIEnv *env);
+/* True once per payment, when the commit starts while the Send screen is shown: the shell then goes to the wallet
+ * screen and the payment goes on in the background. The screen can be left (zapp_send_ui_leave succeeds) while it runs. */
+bool zapp_send_ui_take_background(void);
+/* The one line the wallet screen draws for a payment from the owner's confirmation on, for example
+ * "Sending 1.5 ZCL to zs1abcde…uvwxyz: building the payment (about 2 min)", then "…: waiting to leave the phone", then
+ * "Sent 1.5 ZCL", or "Payment not sent: <cause>. Your coins were not spent." Kept after the payment ended until the next
+ * payment begins or zapp_send_progress_dismiss. False when there is nothing to say. Call on the UI thread. */
+bool zapp_send_progress(char *line, size_t cap);
+void zapp_send_progress_dismiss(void);
 /* A touch was dropped because another window was drawing over the app. */
 void zapp_send_ui_dropped(JNIEnv *env);
 /* The button under a window point, or false. */

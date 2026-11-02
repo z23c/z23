@@ -6,6 +6,7 @@
 #include "device_key.h"
 #include "home.h"
 #include "jni_util.h"
+#include "node_service.h"
 #include "scan.h"
 #include "send_key.h"
 #include "secure_window.h"
@@ -13,6 +14,7 @@
 #include "wallet_send_keeper.h"
 #include "wallet_send_node.h"
 #include <pthread.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/random.h>
@@ -39,7 +41,7 @@ enum button { B_SEND, B_CANCEL, B_RETRY, B_DONE, B_SCAN, B_ENTER, B_USE_ADDRESS,
 static struct {
     ANativeActivity *activity;
     JavaVM *vm;
-    jobject app, key_app, container, address_input, amount_input, buttons[BUTTONS_MAX];
+    jobject app, key_app, notify_app, container, address_input, amount_input, buttons[BUTTONS_MAX];
     pthread_mutex_t key_lock;   /* guards key_app, which a worker reads while the activity is replaced */
     enum button button_id[BUTTONS_MAX];
     size_t button_count;
@@ -50,6 +52,9 @@ static struct {
     bool dropped;    /* a tap was dropped because another window covered the app */
     char notice[WSS_LINE];
     char hint[WSS_LINE];
+    char final_line[WSS_LINE];   /* the outcome of a payment that ended while the owner was away from this screen */
+    bool away;    /* the owner left the screen while the payment was in flight */
+    bool moved;   /* the shell was told once to go to the wallet for this payment */
     unsigned version, drawn_version;
     struct wss_view drawn;
     bool is_drawn;
@@ -138,6 +143,61 @@ static bool node_paused(void *ctx)
     return zapp_controller_node_paused();
 }
 
+/* Whether the node can prove a payment, re-checked off the UI thread because the check asks the node. The Send button
+ * appears only when it says ready; the result reaches the screen through the redraw. */
+#define GATE_RECHECK_MS 15000u
+static struct { pthread_mutex_t lock; bool known, ready, running; char why[WSS_LINE]; uint64_t at_ms; } gate = {.lock = PTHREAD_MUTEX_INITIALIZER};
+static void gate_job(void *arg)
+{
+    char why[WSS_LINE] = "";
+    bool ready = zapp_controller_prover_ready(why, sizeof(why));
+    (void)arg;
+    pthread_mutex_lock(&gate.lock);
+    gate.known = true;
+    gate.ready = ready;
+    gate.running = false;
+    gate.at_ms = host_now(NULL);
+    snprintf(gate.why, sizeof(gate.why), "%s", why);
+    pthread_mutex_unlock(&gate.lock);
+    host_redraw(NULL);
+}
+/* Starts a check when the review waits for an answer, or the last one is old. */
+static void gate_poll(void)
+{
+    pthread_mutex_lock(&gate.lock);
+    bool start = !gate.running && (!gate.known || !gate.ready || host_now(NULL) - gate.at_ms >= GATE_RECHECK_MS);
+    if (start) gate.running = true;
+    pthread_mutex_unlock(&gate.lock);
+    if (start && !host_spawn(NULL, gate_job, NULL)) {
+        pthread_mutex_lock(&gate.lock);
+        gate.running = false;
+        pthread_mutex_unlock(&gate.lock);
+    }
+}
+static void gate_apply(struct wss_view *v)
+{
+    pthread_mutex_lock(&gate.lock);
+    bool ready = gate.known && gate.ready;
+    wss_gate_prover(v, ready, gate.known ? gate.why : "Checking that sending is ready.");
+    pthread_mutex_unlock(&gate.lock);
+}
+/* A payment that reached the node ended: tell the owner, on a thread that may call Java. */
+static void notify_job(void *arg)
+{
+    jobject app = NULL;
+    if (!worker_env) return;
+    pthread_mutex_lock(&ui.key_lock);
+    if (ui.notify_app) app = (*worker_env)->NewLocalRef(worker_env, ui.notify_app);
+    pthread_mutex_unlock(&ui.key_lock);
+    if (!app) return;
+    (void)zapp_payment_notify(worker_env, app, (int)(intptr_t)arg);
+    (*worker_env)->DeleteLocalRef(worker_env, app);
+}
+static void host_outcome(void *ctx, int result)
+{
+    (void)host_spawn(ctx, notify_job, (void *)(intptr_t)result);
+}
+
 /* The ops of one flow live and die with its screen: a retired flow's worker keeps using them after the activity that
  * made them is gone, and a new screen never shares or resets them. */
 struct parts {
@@ -167,7 +227,7 @@ static struct wss *make_screen(void *ctx)
     if (!wsd_init(&parts->device, NULL, key_ops, ui.activity->internalDataPath)) { free(parts); return NULL; }
     wsd_ops(&parts->device, &deps.device);
     parts->id_ok = zapp_send_id_load(ui.activity->internalDataPath, &parts->id);
-    deps.host = (struct wss_host_ops){parts, host_random, host_now, host_spawn, host_redraw, host_derive, host_wall};
+    deps.host = (struct wss_host_ops){parts, host_random, host_now, host_spawn, host_redraw, host_derive, host_wall, host_outcome};
     zapp_secure_window_ops(&deps.secure, ui.activity);
     deps.release = parts_release;
     deps.release_ctx = parts;
@@ -356,7 +416,9 @@ void zapp_send_ui_render(JNIEnv *env)
     if (ui.flow && ui.keeper.screen) {
         wss_view(ui.keeper.screen, &v);
         v.elapsed_s = 0;
+        gate_apply(&v);
     }
+    ui.away = false;
     if (ui.is_drawn && ui.drawn_version == ui.version && !memcmp(&v, &ui.drawn, sizeof(v))) return;
     release_widgets(env);
     (void)text_view(env, "Send", 24.0f, WHITE);
@@ -395,6 +457,8 @@ static void open_payment(const struct zapp_payment *pay)
 {
     if (ui.keeper.screen && wss_begin(ui.keeper.screen, pay)) {
         ui.flow = true;
+        ui.moved = false;
+        ui.final_line[0] = 0;
         ui.notice[0] = ui.hint[0] = 0;
         ui.entering = false;
         ui.dropped = false;
@@ -420,6 +484,14 @@ void zapp_send_ui_open(JNIEnv *env, const struct zapp_payment *pay, const char *
 
 bool zapp_send_ui_leave(JNIEnv *env)
 {
+    if (ui.flow && ui.keeper.screen && wss_in_flight(ui.keeper.screen)) {
+        /* The commit keeps running in the app process; the owner sees its progress on the wallet screen. */
+        ui.away = true;
+        ui.entering = false;
+        ui.dropped = false;
+        zapp_send_ui_clear(env);
+        return true;
+    }
     if (ui.flow && ui.keeper.screen) {
         if (!wss_end(ui.keeper.screen)) return false;
         ui.flow = false;
@@ -435,12 +507,47 @@ void zapp_send_ui_pause(void)
 {
     if (ui.flow && ui.keeper.screen) wss_on_pause(ui.keeper.screen);
 }
+/* A payment that ended while the owner was elsewhere: its outcome is kept for the wallet screen and the flow is closed
+ * once the wallet is locked again. */
+static void finish_away(void)
+{
+    struct wss *s = ui.keeper.screen;
+    struct wss_view v;
+    if (!ui.away || !s || wss_in_flight(s)) return;
+    wss_view(s, &v);
+    if (!v.can_leave || wss_exposed(s)) return;
+    if (!wss_progress(s, ui.final_line, sizeof(ui.final_line))) ui.final_line[0] = 0;
+    wss_close(s);
+    ui.flow = false;
+    ui.away = false;
+}
 void zapp_send_ui_tick(JNIEnv *env)
 {
+    struct wss_view v;
     if (ui.flow && ui.keeper.screen) wss_on_tick(ui.keeper.screen);
+    if (ui.flow && ui.keeper.screen && !ui.away) {
+        wss_view(ui.keeper.screen, &v);
+        if (v.can_send) gate_poll();
+    }
+    finish_away();
     wsk_tick(&ui.keeper);
     (void)env;
 }
+bool zapp_send_ui_take_background(void)
+{
+    if (ui.moved || !ui.flow || !ui.keeper.screen || !wss_in_flight(ui.keeper.screen)) return false;
+    ui.moved = true;
+    return true;
+}
+bool zapp_send_progress(char *line, size_t cap)
+{
+    struct wss *s = ui.keeper.screen ? ui.keeper.screen : ui.keeper.retired;
+    if (s && wss_progress(s, line, cap)) return true;
+    if (!ui.final_line[0] || !line || !cap) return false;
+    snprintf(line, cap, "%s", ui.final_line);
+    return true;
+}
+void zapp_send_progress_dismiss(void) { ui.final_line[0] = 0; }
 bool zapp_send_ui_owes(void) { return ui.flow || wsk_owes(&ui.keeper); }
 void zapp_send_ui_dropped(JNIEnv *env)
 {
@@ -505,7 +612,7 @@ static void set_amount(JNIEnv *env)
 static void press_flow(JNIEnv *env, int id)
 {
     if (!ui.flow || !ui.keeper.screen) return;
-    if (id == B_SEND) wss_tap_send(ui.keeper.screen, ui.drawn.serial);
+    if (id == B_SEND) { if (ui.drawn.can_send) wss_tap_send(ui.keeper.screen, ui.drawn.serial); }
     else if (id == B_CANCEL) wss_tap_cancel(ui.keeper.screen);
     else if (id == B_RETRY) wss_tap_retry(ui.keeper.screen);
     else if (id == B_PAY_AGAIN) wss_tap_pay_again(ui.keeper.screen);
@@ -538,11 +645,17 @@ bool zapp_send_ui_create(JNIEnv *env, jobject activity, jobject container)
     ui.container = (*env)->NewGlobalRef(env, container);
     /* A flow kept from an earlier activity asks the keystore through the newest activity from here on. */
     jobject key_app = (*env)->NewGlobalRef(env, activity);
+    /* The notification of a payment that ends while no activity exists uses the application context. */
+    jobject context = zj_object_property(env, activity, "getApplicationContext", "()Landroid/content/Context;");
+    jobject notify_app = context ? (*env)->NewGlobalRef(env, context) : NULL;
     pthread_mutex_lock(&ui.key_lock);
-    jobject old = ui.key_app;
+    jobject old = ui.key_app, old_notify = ui.notify_app;
     ui.key_app = key_app;
+    if (notify_app) ui.notify_app = notify_app;
+    else old_notify = NULL;
     pthread_mutex_unlock(&ui.key_lock);
     if (old) (*env)->DeleteGlobalRef(env, old);
+    if (old_notify) (*env)->DeleteGlobalRef(env, old_notify);
     if (ui.app && ui.container && key_app && zj_int_property(env, ui.container, "setGravity", GRAVITY_CENTER_HORIZONTAL)) return true;
     zapp_send_ui_destroy(env);
     return false;

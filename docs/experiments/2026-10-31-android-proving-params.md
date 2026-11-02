@@ -59,7 +59,8 @@ finds the files with no restart. The probe is `zapp_proving_over_rpc`: one `getw
 loopback, `sapling.proving_status` mapped to `enum zapp_proving` (`none` unavailable; `pair_present`,
 `pair_armed`, `full_set` armed; anything else unknown). `zapp_controller_prover_ready` (controller.h)
 composes the job state, the probe and `zapp_prover_allowed`; the Send flow calls it just before it
-builds a payment. Not wired: that call in the Send files, which another lane owns. A node that booted
+builds a payment. The Send screen calls it from `wallet_send_ui.c` on a worker thread and shows no Send button
+until it says ready. A node that booted
 without the files keeps its `shielded_spend_unavailable` capability blocker until its next start,
 although it proves from the first send after the copy.
 
@@ -183,4 +184,5 @@ Nothing below has run on a phone.
   `AAsset_openFileDescriptor64` descriptor duplicated and read at an offset from another thread.
 - The probe against a real phone node, and whether `getwalletinfo` answers while the wallet is locked.
 - A node run that loads these files, for the reason in finding 2.
-- The thermal refusal and the send screen, which do not call `zapp_controller_prover_ready` yet.
+- The send gate, the background payment, its wallet-screen line and its notification on a phone; only the text and
+  state logic run on the host. The wallet screen does not draw `zapp_send_progress` yet.

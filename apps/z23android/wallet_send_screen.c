@@ -163,6 +163,68 @@ void wss_view(struct wss *s, struct wss_view *v)
     pthread_mutex_unlock(&s->lock);
 }
 
+/* ---- progress ---- */
+
+/* "zs1abcde…uvwxyz": the first eight and the last six characters. */
+static void short_address(const char *address, char *out, size_t cap)
+{
+    size_t n = strlen(address);
+    if (n <= 14) snprintf(out, cap, "%s", address);
+    else snprintf(out, cap, "%.8s…%s", address, address + n - 6);
+}
+static const char *refusal_cause(enum ws_fail fail)
+{
+    return fail == WS_FAIL_FEE_CHANGED ? "the wallet fee changed" : "the node refused it";
+}
+static bool failed_after_tap(enum ws_fail fail)
+{
+    return fail == WS_FAIL_COMMIT_REFUSED || fail == WS_FAIL_FEE_CHANGED || fail == WS_FAIL_COMMIT_UNKNOWN;
+}
+bool wss_progress(struct wss *s, char *line, size_t cap)
+{
+    char amount[WSS_AMOUNT], to[40];
+    pthread_mutex_lock(&s->lock);
+    const struct ws *ws = &s->ws;
+    enum ws_state state = ws->state;
+    enum ws_fail fail = ws->fail;
+    bool shown = s->begun && !s->closed;
+    wss_format_zat(ws->pay.amount_zat, amount, sizeof(amount));
+    short_address(ws->pay.address, to, sizeof(to));
+    pthread_mutex_unlock(&s->lock);
+    if (!shown || !line || !cap) return false;
+    if (state == WS_COMMIT) snprintf(line, cap, "Sending %s to %s: building the payment (about 2 min)", amount, to);
+    else if (state == WS_BROADCAST) snprintf(line, cap, "Sending %s to %s: waiting to leave the phone", amount, to);
+    else if (state == WS_DONE) snprintf(line, cap, "Sent %s", amount);
+    else if (state == WS_FAILED && fail == WS_FAIL_COMMIT_UNKNOWN)
+        snprintf(line, cap, "Payment status unknown: it may have been sent. Check History before paying again.");
+    else if (state == WS_FAILED && failed_after_tap(fail))
+        snprintf(line, cap, "Payment not sent: %s. Your coins were not spent.", refusal_cause(fail));
+    else return false;
+    return true;
+}
+bool wss_in_flight(struct wss *s)
+{
+    pthread_mutex_lock(&s->lock);
+    bool flying = s->ws.state == WS_COMMIT || s->ws.state == WS_BROADCAST;
+    pthread_mutex_unlock(&s->lock);
+    return flying;
+}
+void wss_gate_prover(struct wss_view *v, bool ready, const char *why)
+{
+    if (ready || !v->can_send) return;
+    v->can_send = false;
+    snprintf(v->status, sizeof(v->status), "%s", why && why[0] ? why : "Sending is not ready yet.");
+}
+/* The result of a payment that reached the node, at the step where it ends (once per attempt: the machine leaves COMMIT
+ * and BROADCAST only forward): sent, refused, or unknown. -1 at every other step. */
+static int outcome_of(struct wss *s, enum ws_state before)
+{
+    enum ws_state now = s->ws.state;
+    if ((before != WS_COMMIT && before != WS_BROADCAST) || (now != WS_DONE && now != WS_FAILED)) return -1;
+    if (now == WS_DONE) return ZAPP_PAYMENT_SENT;
+    return s->ws.fail == WS_FAIL_COMMIT_UNKNOWN ? ZAPP_PAYMENT_UNKNOWN : ZAPP_PAYMENT_NOT_SENT;
+}
+
 /* ---- the worker ---- */
 
 static void snapshot(struct wss *s, struct wss_send_req *req, bool with_token)
@@ -260,10 +322,12 @@ static void post(struct wss *s, struct ws_event *ev)
     ws_step(&s->ws, ev, &acts);
     if (ev->kind == WS_EV_TAP_SEND && before == WS_REVIEW && s->ws.state == WS_AUTH) freeze(s);
     if (flow_over(&s->ws)) memory_cleanse(&s->tapped, sizeof(s->tapped));
+    int result = outcome_of(s, before);
     enqueue(s, &acts);
     pthread_mutex_unlock(&s->lock);
     kick(s);
     if (s->d.host.redraw) s->d.host.redraw(s->d.host.ctx);
+    if (result >= 0 && s->d.host.outcome) s->d.host.outcome(s->d.host.ctx, result);
 }
 static void cleanse_secrets(struct wss *s)
 {

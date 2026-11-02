@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #ifndef ZAPP_WALLET_SEND_SCREEN_H
 #define ZAPP_WALLET_SEND_SCREEN_H
+#include "payment_notice.h"
 #include "secure_window.h"
 #include "wallet_send.h"
 
@@ -92,6 +93,9 @@ struct wss_host_ops {
     bool (*derive_key)(void *ctx, const struct zapp_payment *pay, char out[WS_KEY_HEX + 1]);
     /* Seconds since the Unix epoch, read when the node's committed answer arrives. Optional. */
     int64_t (*wall_s)(void *ctx);
+    /* Called once per payment, off the screen lock, when a payment that reached the node ends: result is an enum
+     * zapp_payment_result. Optional. It may run on any thread. */
+    void (*outcome)(void *ctx, int result);
 };
 struct wss_deps {
     enum zapp_pay_network network;
@@ -176,6 +180,18 @@ void wss_on_resume(struct wss *screen);
 void wss_on_tick(struct wss *screen);
 
 void wss_view(struct wss *screen, struct wss_view *out);
+/* The one-line progress of a payment from the owner's confirmation on:
+ *   "Sending X ZCL to <8>…<6>: building the payment (about 2 min)"   the commit runs
+ *   "Sending X ZCL to <8>…<6>: waiting to leave the phone"            the node holds it
+ *   "Sent X ZCL"                                                      it left the phone
+ *   "Payment not sent: <cause>. Your coins were not spent."           the node says nothing was sent
+ *   "Payment status unknown: ..."                                     no usable answer; it may have been sent
+ * False before the commit starts and after the owner closed the outcome. */
+bool wss_progress(struct wss *screen, char *line, size_t cap);
+/* True while the commit runs or the node holds the payment: the flow must keep running whatever screen is shown. */
+bool wss_in_flight(struct wss *screen);
+/* Applies the prover check to a view: while it is not ready the review offers no Send and says why. */
+void wss_gate_prover(struct wss_view *view, bool ready, const char *why);
 /* True when the passphrase and the unlock request hold no byte: proof that every path cleansed them. */
 bool wss_secrets_clear(struct wss *screen);
 /* Formats zatoshi as "1.5 ZCL" into out. */

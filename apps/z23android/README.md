@@ -66,8 +66,19 @@ proof, so a start before the copy ends needs no restart. The node checks its own
 copy was verified, the node reports through `zapp_proving_probe` that it can prove, and the
 thermal status is below 3 (severe). A copy took 2.0 to 3.4 seconds on the Linux host and has not been timed on a phone; it is not
 paused for heat. The probe is one `getwalletinfo` call (`zapp_proving_over_rpc`), and
-`zapp_controller_prover_ready` reports the copy state, the probe and the thermal refusal in one plain
-sentence; the Send screen does not call it yet.
+`zapp_controller_prover_ready` reports the copy state and the probe in one plain sentence. The Send
+screen calls it on a worker thread every tick while a review is open and every 15 seconds after a yes; the
+review shows no Send button, and that sentence, until it says ready.
+
+A payment goes on in the background. When the owner confirms with the screen lock and the commit starts, the shell
+returns to the wallet screen at once. The flow stays in the app process (the foreground node service keeps it
+alive) and `zapp_send_progress` gives the one line the wallet screen draws: "Sending X ZCL to <8>…<6>: building the
+payment (about 2 min)", then "…: waiting to leave the phone", then "Sent X ZCL", or "Payment not sent: <cause>.
+Your coins were not spent." when the node says nothing was sent, or "Payment status unknown: it may have been sent.
+Check History before paying again." when it gave no usable answer. When the payment leaves the phone or fails, one
+notification is posted on the "Payments" channel ("Payment sent", "Payment not sent" or "Payment status
+unknown"); it is VISIBILITY_PRIVATE and its public version on the lock screen reads only "Z23 payment update", with no
+amount or address anywhere. `zapp_send_progress_dismiss` clears a finished line.
 
 ## Install and open
 

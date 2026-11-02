@@ -53,6 +53,7 @@ struct fake {
     void (*job)(void *);
     void *job_arg;
     int redraws;
+    int outcomes, last_outcome;
     uint64_t rnd;
     /* the node's memory of keys that may have paid */
     char paid[PAID_MAX][WS_KEY_HEX + 1];
@@ -221,6 +222,12 @@ static bool h_derive(void *c, const struct zapp_payment *pay, char out[WS_KEY_HE
     return zapp_send_key_derive(&((struct fake *)c)->id, pay, out);
 }
 static int64_t h_wall(void *c) { return ((struct fake *)c)->wall; }
+static void h_outcome(void *c, int result)
+{
+    struct fake *f = c;
+    __atomic_store_n(&f->last_outcome, result, __ATOMIC_SEQ_CST);
+    __atomic_fetch_add(&f->outcomes, 1, __ATOMIC_SEQ_CST);
+}
 static bool s_flag(void *c, bool on) { struct fake *f = c; if (f->flag_ok) f->flag_on = on; return f->flag_ok; }
 static bool s_granted(void *c, bool on) { (void)c; (void)on; return true; }
 static bool w_set(void *c, bool on)
@@ -263,7 +270,7 @@ static struct wss *screen_of(struct fake *f)
         .network = ZAPP_PAY_MAINNET,
         .node = {f, n_validate, n_gate, n_plan, n_unlock, n_lock, n_commit, n_route},
         .device = {f, d_unwrap},
-        .host = {f, h_random, h_now, h_spawn, h_redraw, f->derive_on ? h_derive : NULL, h_wall},
+        .host = {f, h_random, h_now, h_spawn, h_redraw, f->derive_on ? h_derive : NULL, h_wall, h_outcome},
         .secure = {f, s_flag, s_filter, s_granted, s_granted, s_granted},
     };
     if (f->window) d.secure = win_ops(f->window);
@@ -1209,6 +1216,110 @@ static void the_key_follows_the_request(void)
     assert(strcmp(h.plan_key, k1) != 0);                /* another wallet, another key */
     wss_destroy(s);
 }
+#define TO "zs1qqqqq…qqqqqq"
+/* The commit runs on the real worker while the owner is elsewhere: the progress line says so, the worker is not
+ * cancelled, and the outcome is reported exactly once. */
+static void a_payment_in_flight_keeps_running_and_reports_once(void)
+{
+    struct zapp_payment a = pay_of(priv, "?amount=1");
+    struct fake *f = &threaded_fake;
+    char line[300];
+    fake_init(f);
+    f->threaded = f->hold = true;
+    f->main_thread = pthread_self();
+    struct wss *s = screen_of(f);
+    assert(wss_begin(s, &a));
+    wait_state(s, WS_REVIEW);
+    assert(!wss_progress(s, line, sizeof(line)) && !wss_in_flight(s));
+    wss_tap_send(s, view_of(s).serial);
+    pthread_mutex_lock(&f->mu);
+    while (!f->parked) pthread_cond_wait(&f->cv, &f->mu);
+    pthread_mutex_unlock(&f->mu);
+    assert(wss_in_flight(s) && wss_progress(s, line, sizeof(line)));
+    assert(!strcmp(line, "Sending 1 ZCL to " TO ": building the payment (about 2 min)"));
+    assert(!strstr(line, priv));   /* only the first eight and the last six characters */
+    wss_on_pause(s);               /* the owner left the screen and the app */
+    assert(wss_in_flight(s) && f->commits == 0 && f->outcomes == 0);
+    pthread_mutex_lock(&f->mu);
+    f->released = true;
+    pthread_cond_broadcast(&f->cv);
+    pthread_mutex_unlock(&f->mu);
+    wait_state(s, WS_DONE);
+    assert(f->commits == 1 && f->repeated_keys == 0);
+    assert(wss_progress(s, line, sizeof(line)) && !strcmp(line, "Sent 1 ZCL") && !wss_in_flight(s));
+    wss_on_tick(s); wss_on_tick(s);
+    pause_ms(20);
+    assert(f->outcomes == 1 && f->last_outcome == ZAPP_PAYMENT_SENT);
+    wss_close(s);
+    assert(!wss_progress(s, line, sizeof(line)));
+    wss_destroy(s);
+    pause_ms(20);
+}
+/* Each status reads in its own words, and each ending is reported once with the right result. */
+static void progress_and_notice_follow_each_status(void)
+{
+    struct zapp_payment p = pay_of(priv, "?amount=1");
+    struct fake f; char line[300];
+    fake_init(&f);
+    f.route = WS_ROUTE_WAITING;
+    struct wss *s = reviewed(&f, &p);
+    tap_and_run(s, &f);
+    assert(wss_in_flight(s) && wss_progress(s, line, sizeof(line)));
+    assert(!strcmp(line, "Sending 1 ZCL to " TO ": waiting to leave the phone") && f.outcomes == 0);
+    f.route = WS_ROUTE_SENT; f.now += 4000; wss_on_tick(s); drain(&f);
+    assert(wss_progress(s, line, sizeof(line)) && !strcmp(line, "Sent 1 ZCL"));
+    assert(f.outcomes == 1 && f.last_outcome == ZAPP_PAYMENT_SENT);
+    wss_destroy(s);
+    fake_init(&f);
+    f.commit_outcome = WSS_KEY_RELEASED;
+    s = reviewed(&f, &p);
+    tap_and_run(s, &f);
+    assert(wss_progress(s, line, sizeof(line)));
+    assert(!strcmp(line, "Payment not sent: the node refused it. Your coins were not spent."));
+    assert(f.outcomes == 1 && f.last_outcome == ZAPP_PAYMENT_NOT_SENT);
+    wss_destroy(s);
+    fake_init(&f);
+    s = reviewed(&f, &p);
+    f.fee = 20000;   /* the wallet fee moved after the review */
+    tap_and_run(s, &f);
+    assert(wss_progress(s, line, sizeof(line)));
+    assert(!strcmp(line, "Payment not sent: the wallet fee changed. Your coins were not spent."));
+    assert(f.outcomes == 1 && f.last_outcome == ZAPP_PAYMENT_NOT_SENT);
+    wss_destroy(s);
+    fake_init(&f);
+    f.commit_outcome = WSS_UNKNOWN;
+    s = reviewed(&f, &p);
+    tap_and_run(s, &f);
+    assert(wss_progress(s, line, sizeof(line)));
+    assert(strstr(line, "may have been sent") && strstr(line, "Check History") && !strstr(line, "not spent") && !strstr(line, "not sent"));
+    assert(f.outcomes == 1 && f.last_outcome == ZAPP_PAYMENT_UNKNOWN);
+    wss_destroy(s);
+    fake_init(&f);   /* a refusal before the tap sends no notification and has no progress line */
+    f.plan_ok = false;
+    s = reviewed(&f, &p);
+    assert(!wss_progress(s, line, sizeof(line)) && f.outcomes == 0);
+    wss_destroy(s);
+}
+/* Without a ready prover the review offers no Send and says why; once ready it is unchanged. */
+static void the_prover_gate_hides_send(void)
+{
+    struct fake f; fake_init(&f);
+    struct zapp_payment p = pay_of(priv, "?amount=1");
+    struct wss *s = reviewed(&f, &p);
+    struct wss_view v = view_of(s), held = v;
+    assert(v.can_send);
+    wss_gate_prover(&held, false, "Sending is not ready yet: the payment keys are still being installed. This takes under a minute, once.");
+    assert(!held.can_send && !strcmp(held.status, "Sending is not ready yet: the payment keys are still being installed. This takes under a minute, once."));
+    wss_gate_prover(&held, false, NULL);
+    held = v;
+    wss_gate_prover(&held, false, NULL);
+    assert(!held.can_send && !strcmp(held.status, "Sending is not ready yet."));
+    held = v;
+    wss_gate_prover(&held, true, "ignored");
+    assert(held.can_send && !strcmp(held.status, v.status));
+    wss_destroy(s);
+}
+
 int main(void)
 {
     memcpy(priv, "zs1", 3); memset(priv + 3, 'q', 75); priv[78] = 0;
@@ -1233,6 +1344,9 @@ int main(void)
     concurrent_scan_with_the_real_worker();
     leaving_during_authentication_does_not_cancel();
     leaving_during_the_commit_never_cancels();
+    a_payment_in_flight_keeps_running_and_reports_once();
+    progress_and_notice_follow_each_status();
+    the_prover_gate_hides_send();
     recreating_the_activity_during_a_commit_keeps_one_payment();
     a_flow_in_review_is_not_kept();
     an_already_paid_flow_is_kept_until_it_is_closed();

@@ -679,6 +679,11 @@ static void render_scan(JNIEnv *env, const struct zapp_view *view, bool finished
     if (shell.current == SCREEN_SCAN && !(finished && !dismissed && scan_goes_to_send(view))) go(env, shell.before_scan);
     if (finished && !dismissed) finish_scan(env, view);
 }
+/* Once the commit starts the owner returns to the wallet screen at once; the payment goes on in the background. */
+static void to_wallet_when_building(JNIEnv *env)
+{
+    if (shell.current == SCREEN_SEND && zapp_send_ui_take_background()) go(env, SCREEN_WALLET);
+}
 void zapp_shell_render(JNIEnv *env, const struct zapp_view *view)
 {
     if (!shell.activity || !view) return;
@@ -696,7 +701,7 @@ void zapp_shell_render(JNIEnv *env, const struct zapp_view *view)
     set_phone_card(view);
     show_home(env);
     if (shell.current == SCREEN_WALLET) zapp_wallet_ui_render(env);
-    if (shell.current == SCREEN_SEND) zapp_send_ui_render(env);
+    if (shell.current == SCREEN_SEND) { zapp_send_ui_render(env); to_wallet_when_building(env); }
     if (shell.current == SCREEN_SETUP) zapp_setup_ui_render(env);
 }
 void zapp_shell_pause(JNIEnv *env)
@@ -730,6 +735,7 @@ void zapp_shell_tick(JNIEnv *env)
     zapp_send_ui_tick(env);
     if (shell.current == SCREEN_SEND) {
         zapp_send_ui_render(env);
+        to_wallet_when_building(env);
         return;
     }
     if (shell.current == SCREEN_SETUP) {

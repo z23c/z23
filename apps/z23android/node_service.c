@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "node_service.h"
 #include "controller.h"
+#include "payment_notice.h"
 #include "node_watch.h"
 #include <android/log.h>
 #include <stdarg.h>
@@ -10,7 +11,7 @@
 
 #define TAG "z23"
 #define SERVICE_CLASS "org.z23.nativeapp.NodeService"
-enum { NOTIFICATION_ID = 1, IMPORTANCE_LOW = 2, VISIBILITY_SECRET = -1, FLAG_IMMUTABLE = 0x04000000,
+enum { NOTIFICATION_ID = 1, IMPORTANCE_LOW = 2, IMPORTANCE_DEFAULT = 3, VISIBILITY_PRIVATE = 0, VISIBILITY_PUBLIC = 1, VISIBILITY_SECRET = -1, FLAG_IMMUTABLE = 0x04000000,
        SERVICE_TYPE_SPECIAL_USE = 0x40000000, START_NOT_STICKY = 2 };
 
 /* True and cleared when a Java exception is pending. */
@@ -139,6 +140,65 @@ static bool enter_foreground(JNIEnv *env, jobject service)
     if (!n) n = minimal_notification(env, service);
     return n && call_void(env, service, "startForeground", "(ILandroid/app/Notification;I)V",
                           NOTIFICATION_ID, n, SERVICE_TYPE_SPECIAL_USE);
+}
+
+/* ---- payment notifications ---- */
+
+static void create_payments_channel(JNIEnv *env, jobject context, jobject manager)
+{
+    jobject channel = new_object(env, "android/app/NotificationChannel",
+        "(Ljava/lang/String;Ljava/lang/CharSequence;I)V", jstr(env, "payments"), jstr(env, "Payments"), IMPORTANCE_DEFAULT);
+    (void)context;
+    if (channel) (void)call_void(env, channel, "setLockscreenVisibility", "(I)V", VISIBILITY_PRIVATE);
+    if (channel) (void)call_void(env, manager, "createNotificationChannel", "(Landroid/app/NotificationChannel;)V", channel);
+}
+/* A notification on the payments channel. A null text leaves the body empty. */
+static jobject payment_builder(JNIEnv *env, jobject context, const char *title, const char *text, int visibility)
+{
+    jobject b = new_object(env, "android/app/Notification$Builder", "(Landroid/content/Context;Ljava/lang/String;)V",
+                           context, jstr(env, "payments"));
+    char sig[96];
+    if (!b) return NULL;
+    snprintf(sig, sizeof(sig), "(Ljava/lang/CharSequence;)%s", builder_class);
+    (void)call_object(env, b, "setContentTitle", sig, jstr(env, title));
+    if (text) (void)call_object(env, b, "setContentText", sig, jstr(env, text));
+    snprintf(sig, sizeof(sig), "(I)%s", builder_class);
+    (void)call_object(env, b, "setSmallIcon", sig, app_icon(env, context));
+    (void)call_object(env, b, "setVisibility", sig, visibility);
+    snprintf(sig, sizeof(sig), "(Z)%s", builder_class);
+    (void)call_object(env, b, "setAutoCancel", sig, 1);
+    return b;
+}
+static jobject payment_notification(JNIEnv *env, jobject context, const struct zapp_payment_notice *words)
+{
+    jobject pub_builder = payment_builder(env, context, ZAPP_PAYMENT_PUBLIC_TITLE, NULL, VISIBILITY_PUBLIC);
+    jobject pub = pub_builder ? call_object(env, pub_builder, "build", "()Landroid/app/Notification;") : NULL;
+    jobject b = payment_builder(env, context, words->title, words->text, VISIBILITY_PRIVATE);
+    jstring package = b ? call_object(env, context, "getPackageName", "()Ljava/lang/String;") : NULL;
+    jobject tap = package ? tap_action(env, context, package) : NULL;
+    char sig[96];
+    if (!b || !pub) return NULL;
+    snprintf(sig, sizeof(sig), "(Landroid/app/Notification;)%s", builder_class);
+    if (!call_object(env, b, "setPublicVersion", sig, pub)) return NULL;
+    if (tap) {
+        snprintf(sig, sizeof(sig), "(Landroid/app/PendingIntent;)%s", builder_class);
+        (void)call_object(env, b, "setContentIntent", sig, tap);
+    }
+    return call_object(env, b, "build", "()Landroid/app/Notification;");
+}
+bool zapp_payment_notify(JNIEnv *env, jobject context, int result)
+{
+    static atomic_int next_id = 100;
+    struct zapp_payment_notice words = zapp_payment_notice_of((enum zapp_payment_result)result);
+    bool posted = false;
+    if ((*env)->PushLocalFrame(env, 64) != JNI_OK) { (void)failed(env, "local frame"); return false; }
+    jobject manager = call_object(env, context, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;",
+                                  jstr(env, "notification"));
+    if (manager) create_payments_channel(env, context, manager);
+    jobject n = manager ? payment_notification(env, context, &words) : NULL;
+    if (n) posted = call_void(env, manager, "notify", "(ILandroid/app/Notification;)V", atomic_fetch_add(&next_id, 1), n);
+    (*env)->PopLocalFrame(env, NULL);
+    return posted;
 }
 
 /* generation counts service starts; a watch from an earlier start must not stop a newer one. */
