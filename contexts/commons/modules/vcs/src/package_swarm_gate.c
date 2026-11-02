@@ -9,11 +9,11 @@
 
 #include "package_swarm_priv.h"
 
+#include "platform/time_compat.h"
 #include "support/log_throttle.h"
 
 #include <stdint.h>
 #include <string.h>
-#include <time.h>
 
 #define SWARM_DROP_LOG_WINDOW_SECS 300
 
@@ -26,7 +26,7 @@ bool vcs_swarm_drop_due(enum vcs_swarm_drop why, uint64_t *suppressed)
     *suppressed = 0;
     if ((unsigned)why >= VCS_SWARM_DROP_COUNT)
         return true;
-    return log_throttle_should_emit(&g_drop_log[why], 1, (int64_t)time(NULL),
+    return log_throttle_should_emit(&g_drop_log[why], 1, (int64_t)platform_time_wall_time_t(),
                                     SWARM_DROP_LOG_WINDOW_SECS, suppressed);
 }
 
