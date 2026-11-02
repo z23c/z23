@@ -637,7 +637,7 @@ static void wb_force_enc_path_suffixes(
                WALLET_BACKUP_FILENAME_SUFFIX) == 0;
 }
 
-/* Decrypt the recorded encrypted backup and count its wallet_keys rows. */
+/* Count wallet_keys rows in the decrypted recorded backup, or -1. */
 static int64_t wb_force_enc_decrypt_rows(const char *backup_dir,
     const struct wallet_backup_status *status, bool has_encrypted_suffix)
 {
@@ -681,7 +681,7 @@ static bool wb_force_enc_run_preserved(bool started, bool ran,
            status->total_failures == after_start->total_failures;
 }
 
-/* Verify a restart restored the encrypted-backup authority exactly. */
+/* Verify a restart restored the recorded encrypted-backup fields. */
 static bool wb_force_enc_restart_preserved(bool restarted,
     const struct wallet_backup_status *encrypted_status,
     const struct wallet_backup_status *status,
@@ -1957,8 +1957,7 @@ static int t_authority_sync_backend(void)
 #else
     WB_RUN("wallet backup uses POSIX fsync authority barrier",
            barrier_ok &&
-           strcmp(platform_authority_sync_backend(),
-                                "fsync") == 0);
+           strcmp(platform_authority_sync_backend(), "fsync") == 0);
 #endif
     return failures;
 }
