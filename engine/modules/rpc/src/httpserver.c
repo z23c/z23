@@ -73,6 +73,9 @@
 #define RPC_HTTP_ACCEPT_POLL_MS 250
 
 static platform_socket_t g_listen_fd = PLATFORM_SOCKET_INVALID;
+/* The listener thread's own copy of g_listen_fd.  rpc_http_start writes it
+ * just before spawning the thread; rpc_http_stop never writes it. */
+static platform_socket_t g_listen_thread_fd = PLATFORM_SOCKET_INVALID;
 static pthread_t g_listen_thread;
 static bool g_listen_thread_started = false;
 /* g_running coordinates the listener + worker threads with rpc_http_stop().
@@ -111,6 +114,9 @@ void rpc_http_forbid_tls(bool forbid)
 /* ── TLS state ────────────────────────────────────────────────────── */
 static SSL_CTX *g_tls_ctx = NULL;
 static platform_socket_t g_tls_listen_fd = PLATFORM_SOCKET_INVALID;
+/* The TLS listener thread's own copy of g_tls_listen_fd; written just
+ * before its spawn, never by rpc_http_stop. */
+static platform_socket_t g_tls_listen_thread_fd = PLATFORM_SOCKET_INVALID;
 static pthread_t g_tls_listen_thread;
 static bool g_tls_listen_thread_started = false;
 static uint16_t g_tls_port = 0;
@@ -195,10 +201,11 @@ static bool rpc_listener_ready(platform_socket_t listener,
 static void *listen_thread_fn(void *arg)
 {
     (void)arg;
-    /* Captured before start returns and never rewritten.  Shutdown may close
-     * the underlying socket, but it does not race this thread on the global
-     * descriptor variable. */
-    const platform_socket_t listener = g_listen_fd;
+    /* g_listen_thread_fd was written by rpc_http_start before this thread
+     * was spawned, so the spawn orders that write before this read.
+     * rpc_http_stop closes the socket to wake accept() but writes only
+     * g_listen_fd, never this copy. */
+    const platform_socket_t listener = g_listen_thread_fd;
     while (g_running) {
         if (!rpc_listener_ready(listener, "plain"))
             continue;
@@ -237,7 +244,9 @@ static void *listen_thread_fn(void *arg)
 static void *tls_listen_thread_fn(void *arg)
 {
     (void)arg;
-    const platform_socket_t listener = g_tls_listen_fd;
+    /* g_tls_listen_thread_fd is written just before this thread is spawned;
+     * rpc_http_stop never writes it. */
+    const platform_socket_t listener = g_tls_listen_thread_fd;
     while (g_running) {
         if (!rpc_listener_ready(listener, "TLS"))
             continue;
@@ -516,6 +525,7 @@ static void rpc_tls_spawn_listener(void)
 {
     /* Start TLS listener thread if configured */
     if (g_tls_ctx && g_tls_listen_fd != PLATFORM_SOCKET_INVALID) {
+        g_tls_listen_thread_fd = g_tls_listen_fd;
         if (thread_registry_spawn("zcl_rpc_tls", tls_listen_thread_fn,
                                       NULL, &g_tls_listen_thread) == 0) {
             g_tls_listen_thread_started = true;
@@ -612,6 +622,7 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
     if (!rpc_http_spawn_workers())
         goto fail;
 
+    g_listen_thread_fd = g_listen_fd;
     if (thread_registry_spawn("zcl_rpc_listen", listen_thread_fn, NULL,
                                   &g_listen_thread) != 0) {
         perror("thread_registry_spawn");
