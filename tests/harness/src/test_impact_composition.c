@@ -86,7 +86,9 @@
 #include <signal.h>
 #include <sys/file.h>
 #include <sys/select.h>
+#if defined(__linux__)
 #include <sys/signalfd.h>
+#endif
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -4956,7 +4958,9 @@ static enum zcl_dev_proof_base_observation ic_base_observe(void *ctx)
  * handler-based wait relied on the kernel interrupting the syscall and the
  * runtime delivering the handler at once; TSan defers handler delivery until
  * the thread reaches an intercepted call, which stranded a cancelled worker
- * until its 10s deadline. */
+ * until its 10s deadline. signalfd is Linux-only (and TSan runs only there);
+ * other POSIX hosts use a self-pipe written by a SIGTERM handler. */
+#if defined(__linux__)
 static int ic_fake_worker_term_fd(int fd)
 {
     sigset_t term;
@@ -4966,6 +4970,39 @@ static int ic_fake_worker_term_fd(int fd)
     int term_fd = signalfd(-1, &term, SFD_CLOEXEC);
     return term_fd >= FD_SETSIZE ? -1 : term_fd;
 }
+
+static bool ic_fake_worker_term_read(int term_fd)
+{
+    struct signalfd_siginfo info;
+    return read(term_fd, &info, sizeof(info)) == (ssize_t)sizeof(info) &&
+           info.ssi_signo == SIGTERM;
+}
+#else
+static int g_ic_term_pipe[2] = {-1, -1};
+
+static void ic_fake_worker_on_term(int sig)
+{
+    (void)sig;
+    const char byte = 'T';
+    (void)!write(g_ic_term_pipe[1], &byte, 1);
+}
+
+static int ic_fake_worker_term_fd(int fd)
+{
+    struct sigaction action = {0};
+    action.sa_handler = ic_fake_worker_on_term;
+    if (fd >= FD_SETSIZE || pipe(g_ic_term_pipe) != 0 ||
+        sigemptyset(&action.sa_mask) != 0 ||
+        sigaction(SIGTERM, &action, NULL) != 0) return -1;
+    return g_ic_term_pipe[0] >= FD_SETSIZE ? -1 : g_ic_term_pipe[0];
+}
+
+static bool ic_fake_worker_term_read(int term_fd)
+{
+    char byte = 0;
+    return read(term_fd, &byte, 1) == 1 && byte == 'T';
+}
+#endif
 
 enum ic_fake_wake { IC_WAKE_NONE, IC_WAKE_TERM, IC_WAKE_RELEASE };
 
@@ -4985,13 +5022,8 @@ static enum ic_fake_wake ic_fake_worker_wait(int fd, int term_fd, int64_t end)
                         &timeout);
         if (rc < 0 && errno == EINTR) continue;
         if (rc <= 0) return IC_WAKE_NONE;
-        if (FD_ISSET(term_fd, &input)) {
-            struct signalfd_siginfo info;
-            bool termed = read(term_fd, &info, sizeof(info)) ==
-                              (ssize_t)sizeof(info) &&
-                          info.ssi_signo == SIGTERM;
-            return termed ? IC_WAKE_TERM : IC_WAKE_NONE;
-        }
+        if (FD_ISSET(term_fd, &input))
+            return ic_fake_worker_term_read(term_fd) ? IC_WAKE_TERM : IC_WAKE_NONE;
         char byte = 0;
         bool released = read(fd, &byte, 1) == 1 && byte == 'D';
         return released ? IC_WAKE_RELEASE : IC_WAKE_NONE;
