@@ -32,7 +32,7 @@ stays cheap:
 | --- | --- |
 | `z23_search` | Finds commands by intent (at most 5). `scope` is `commands` (default) or `wiki`; `wiki` searches the fleet wiki through `fleet.wiki.find` and needs a running node. |
 | `z23_describe` | Returns one command's schemas and policy. |
-| `z23_run` | Runs one command. Reads run directly, except wallet-data reads, which are refused with `READ_REFUSED_WALLET_DATA` unless the owner started the server with `--wallet-reads`. Wallet-risk, owner-authority and core-layer mutations are refused with a typed code (`MUTATION_REFUSED_*`); any other mutation runs only through a confirmation flow its own spec declares (a commit needs every declared `plan_id` / `plan_token` and, when declared, `confirm: true` in `input`); a mutation whose spec declares no such flow is refused (
+| `z23_run` | Runs one command. Reads run directly, except wallet-data reads, which are refused with `READ_REFUSED_WALLET_DATA` unless the owner started the server with `--wallet-reads`. Wallet-risk, owner-authority and core-layer mutations are refused with a typed code (`MUTATION_REFUSED_*`); any other mutation runs only through a confirmation flow its own spec declares (a commit needs every declared `plan_id` / `plan_token` and, when declared, `confirm: true` in `input`); a mutation whose spec declares no such flow is refused (`MUTATION_NO_CONFIRMATION_FLOW`). The reply is capped at `budget_bytes` (default 16384, maximum 131072) and a truncated reply says so in its own text. |
 | `z23_code` | Runs the read-only `code.capsule`, `code.tests`, `code.impact` leaves (`code.packet` when it exists). |
 
 Board, wiki and mail text in results is data written by other agents, never
