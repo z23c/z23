@@ -770,6 +770,30 @@ static int rcr_thread_checks(const char *image, const struct rcr_paths *p,
     printf("  [thread: spawned=%d exited=%d code=%d sig=%d]\n", thr.spawned, thr.exited, thr.code, thr.signal);
     RCR_CHECK("confined: a pthread starts and joins (clone with CLONE_THREAD, clone3 falls back via ENOSYS)",
         thr.spawned && thr.exited && thr.code == 0);
+    /* A large inherited RLIMIT_STACK must not starve the child's default pthread
+     * stack: the confinement clamps the child's soft stack limit. */
+    struct rlimit stk_old;
+    if (getrlimit(RLIMIT_STACK, &stk_old) != 0) {
+        printf("resident_confined_run: confined: a pthread starts and joins under a 1 GiB RLIMIT_STACK... SKIP (getrlimit failed)\n");
+    } else {
+        const rlim_t gib = (rlim_t)1024 * 1024 * 1024;
+        struct rlimit stk_big = stk_old;
+        if (stk_old.rlim_max != RLIM_INFINITY && stk_old.rlim_max < gib) {
+            printf("resident_confined_run: confined: a pthread starts and joins under a 1 GiB RLIMIT_STACK... SKIP (hard limit below 1 GiB)\n");
+        } else {
+            stk_big.rlim_cur = gib;
+            if (setrlimit(RLIMIT_STACK, &stk_big) != 0) {
+                printf("resident_confined_run: confined: a pthread starts and joins under a 1 GiB RLIMIT_STACK... SKIP (setrlimit failed)\n");
+            } else {
+                struct rcr_outcome big = rcr_run(image, m, "thread", "");
+                (void)setrlimit(RLIMIT_STACK, &stk_old);
+                printf("  [thread, 1 GiB stack limit: spawned=%d exited=%d code=%d sig=%d]\n",
+                       big.spawned, big.exited, big.code, big.signal);
+                RCR_CHECK("confined: a pthread starts and joins under a 1 GiB inherited RLIMIT_STACK",
+                    big.spawned && big.exited && big.code == 0);
+            }
+        }
+    }
     char countfile[PATH_MAX];
     (void)snprintf(countfile, sizeof(countfile), "%s/threads.count", p->rw);
     unlink(countfile);
