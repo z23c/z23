@@ -5462,7 +5462,10 @@ t-asan:
 	    $(ZCL_FROZEN_TOOLCHAIN_ARGS)
 
 .PHONY: t-asan-locked t-tsan-locked
-t-asan-locked: $(TEST_ASAN_CANDIDATE) dev-package-verifier-ensure
+# Like t-fast-locked: groups exec build/bin/z23-lint and the git hook (11-02
+# ASan sweep: secrets_hygiene exited 127 on a missing z23-lint).
+t-asan-locked: $(TEST_ASAN_CANDIDATE) dev-package-verifier-ensure \
+	$(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT) $(BIN_DIR)/z23-lint
 	+@ulimit -s 1048576 && $(foreach g,$(T_ASAN_GROUPS),( $(call ZCL_TEST_BUILD_NEEDS,$(TEST_ASAN_ACTIVE),--only=$(g)) ) &&) :
 	@sh -c 'set -e; ulimit -s 1048576; \
 	  export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1; \
@@ -5515,7 +5518,8 @@ t-tsan:
 	    BUILD_SOURCE_RECORD='$(BUILD_SOURCE_RECORD)' \
 	    $(ZCL_FROZEN_TOOLCHAIN_ARGS)
 
-t-tsan-locked: $(TEST_TSAN_CANDIDATE) dev-package-verifier-ensure
+t-tsan-locked: $(TEST_TSAN_CANDIDATE) dev-package-verifier-ensure \
+	$(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT) $(BIN_DIR)/z23-lint
 	+@ulimit -s 1048576 && ( $(call ZCL_TEST_BUILD_NEEDS,setarch -R $(TEST_TSAN_ACTIVE),--only=$(ONLY)) )
 	@sh -c 'ulimit -s 1048576 && \
 	  TSAN_OPTIONS="suppressions=$(TSAN_SUPP_FILE):print_stacktrace=1" \
