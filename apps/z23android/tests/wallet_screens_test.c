@@ -128,7 +128,9 @@ _Static_assert(sizeof(A1) == 79 && sizeof(A2) == 79 && sizeof(PUBLIC_ADDR) == 36
 #define DETAIL(memo_member) "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_history.v1\",\"entry\":{\"txid\":\"" TX_A "\"," memo_member "}}}"
 
 struct fake {
-    bool secure_ok, secure_on, block, async, always_ok, node_up;
+    bool secure_ok, secure_on, block, async, always_ok, node_up, copy_ok;
+    int copy_calls;
+    char copied[128];
     int secure_on_calls, secure_off_calls, changed, active, active_max, op_active[8];
     char ops[1024][16];
     char args[1024][WALLET_CURSOR_MAX];
@@ -200,10 +202,17 @@ static bool fake_run(void *ctx, const char *op, const char *arg, char *out, size
 static void fake_changed(void *ctx) { (void)ctx; pthread_mutex_lock(&fake.lock); ++fake.changed; pthread_mutex_unlock(&fake.lock); }
 static uint64_t fake_now(void *ctx) { (void)ctx; return fake.now; }
 static bool fake_node_running(void *ctx) { (void)ctx; return fake.node_up; }
+static bool fake_copy_address(void *ctx, const char *address)
+{
+    (void)ctx;
+    ++fake.copy_calls;
+    snprintf(fake.copied, sizeof(fake.copied), "%s", address);
+    return fake.copy_ok;
+}
 
 static void start(bool async)
 {
-    struct wallet_env env = {NULL, fake_secure, fake_run, fake_changed, fake_now, async, fake_refusal, fake_node_running};
+    struct wallet_env env = {NULL, fake_secure, fake_run, fake_changed, fake_now, async, fake_refusal, fake_node_running, fake_copy_address};
     wallet_screens_shutdown();
     memset(&fake, 0, sizeof(fake));
     pthread_mutex_init(&fake.lock, NULL);
@@ -212,6 +221,7 @@ static void start(bool async)
     fake.async = async;
     fake.now = 1000000;
     fake.node_up = true;
+    fake.copy_ok = true;
     fake.summary = GOOD_SUMMARY;
     fake.latest = "{\"ok\":true,\"data\":{\"address\":\"" A1 "\"}}";
     fake.receive = "{\"ok\":true,\"data\":{\"address\":\"" A2 "\"}}";
@@ -321,6 +331,7 @@ static void funds_node_stopped_or_starting(void)
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
     CHECK(has("Node stopped. Start it to see your funds.") && !has("Waiting for your node") && find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_START_NODE) >= 0);
     fake.node_up = true;
+    fake.copy_ok = true;
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
     CHECK(has("Waiting for your node. It is running") && !has("Node stopped") && !has("Start it") && !has("ZCL"));
     CHECK(find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_START_NODE) < 0 && find(snap(), WALLET_ITEM_AMOUNT, WALLET_ACT_NONE) < 0);
@@ -1038,6 +1049,45 @@ static void test_funds_lines(void)
     wallet_screens_close();
 }
 
+/* Copy address hands the bare address to the clipboard and says what happened, and only that. */
+static void test_receive_copy(void)
+{
+    start(false);
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    struct wallet_screen *s = snap();
+    long address = find(s, WALLET_ITEM_ADDRESS, WALLET_ACT_NONE), copy = find(s, WALLET_ITEM_BUTTON, WALLET_ACT_COPY_ADDRESS);
+    CHECK(address >= 0 && copy == address + 1 && !strcmp(text_at(s, copy), "Copy address"));
+    CHECK(!has("Address copied") && !has("Could not copy") && fake.copy_calls == 0);
+    tap(WALLET_ACT_COPY_ADDRESS, 0, WALLET_STAY);
+    CHECK(fake.copy_calls == 1 && !strcmp(fake.copied, A1));                      /* the bare address, not the groups of four */
+    s = snap();
+    CHECK(!strcmp(text_at(s, find_text(s, "Address copied")), "Address copied. It clears in 1 minute."));
+    CHECK(find_text(s, "Could not copy") < 0);
+    fake.copy_ok = false;
+    tap(WALLET_ACT_COPY_ADDRESS, 0, WALLET_STAY);
+    s = snap();
+    CHECK(fake.copy_calls == 2 && !strcmp(text_at(s, find_text(s, "Could not copy")), "Could not copy the address."));
+    CHECK(find_text(s, "Address copied") < 0);
+    tap(WALLET_ACT_NEW_ADDRESS, 0, WALLET_STAY);                                  /* a new address starts without the old word */
+    CHECK(!has("Could not copy") && !has("Address copied"));
+    wallet_screens_close();
+}
+
+/* No address on the screen: nothing is copied, whatever is tapped. */
+static void test_receive_copy_without_address(void)
+{
+    start(false);
+    fake.latest = "{\"ok\":true,\"data\":{\"address\":null}}";
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    CHECK(find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_COPY_ADDRESS) < 0);
+    tap(WALLET_ACT_COPY_ADDRESS, 0, WALLET_STAY);
+    CHECK(fake.copy_calls == 0 && !has("Address copied") && !has("Could not copy"));
+    wallet_screens_back();
+    tap(WALLET_ACT_COPY_ADDRESS, 0, WALLET_STAY);                                 /* off the Receive page it does nothing */
+    CHECK(fake.copy_calls == 0);
+    wallet_screens_close();
+}
+
 /* Receive puts the code, the address and New address on the first screen; the notes come after. */
 static void test_receive_order(void)
 {
@@ -1361,6 +1411,8 @@ int main(int argc, char **argv)
     test_receive();
     test_receive_amount();
     test_receive_new_address();
+    test_receive_copy();
+    test_receive_copy_without_address();
     test_receive_never_makes_keys();
     test_receive_replies();
     test_receive_without_new_address();

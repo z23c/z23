@@ -418,7 +418,7 @@ static void wallet_data_does_not_outlive_the_screens(void)
 {
     static struct wallet_screen screen;
     static struct zapp_view view;
-    struct wallet_env env = {NULL, marker_secure, marker_run, NULL, marker_now, false, NULL, NULL};
+    struct wallet_env env = {.secure = marker_secure, .run = marker_run, .now_ms = marker_now};
     struct zapp_app_entry app = {.label = "Maps", .package = "com.example.maps", .activity = "com.example.maps.Main"};
     static const char *const markers[] = {"1.23456789", "0.5 ZCL", "MEMO-MARKER", MARKER_TXID, MARKER_ADDRESS, "1700000000", "2023-11-14"};
     char card[2048];

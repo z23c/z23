@@ -53,6 +53,19 @@ bool zapp_secure_window_apply(const struct zapp_secure_ops *ops, bool on)
     return flagged && filtered && covered && hidden && guarded;
 }
 
+bool zapp_clip_copy(const struct zapp_clip_ops *ops, const char *text, int64_t *stamp)
+{
+    int64_t unused;
+    return ops && ops->put && text && text[0] && ops->put(ops->ctx, text, stamp ? stamp : &unused);
+}
+bool zapp_clip_expire(const struct zapp_clip_ops *ops, int64_t stamp)
+{
+    int64_t held;
+    if (!ops || !ops->current || !ops->clear) return false;
+    if (!ops->current(ops->ctx, &held)) return true;
+    return held != stamp || ops->clear(ops->ctx);
+}
+
 #ifdef __ANDROID__
 #include "jni_util.h"
 #include <assert.h>
@@ -161,4 +174,142 @@ bool zapp_secure_window_drops(const AInputEvent *event)
 static_assert((ZAPP_MOTION_OBSCURED & AMOTION_EVENT_FLAG_WINDOW_IS_OBSCURED) == AMOTION_EVENT_FLAG_WINDOW_IS_OBSCURED, "obscured flag");
 static_assert(ZAPP_MOTION_ACTION_MASK == AMOTION_EVENT_ACTION_MASK && ZAPP_MOTION_DOWN == AMOTION_EVENT_ACTION_DOWN &&
               ZAPP_MOTION_CANCEL == AMOTION_EVENT_ACTION_CANCEL, "motion actions");
+
+/* ---- sensitive clipboard ---- */
+
+#include <android/log.h>
+#include <errno.h>
+#include <pthread.h>
+#include <stdlib.h>
+#include <time.h>
+
+#define CLIP_SENSITIVE_EXTRA "android.content.extra.IS_SENSITIVE" /* ClipDescription.EXTRA_IS_SENSITIVE */
+#define CLIP_LABEL "Z23 address"
+#define CLIP_LOG(what) __android_log_print(ANDROID_LOG_WARN, "z23", "clipboard: %s", what)
+
+struct jni_clip { JNIEnv *env; jobject manager; };
+static bool jni_clip_clear(void *context);
+
+/* A ClipData of plain text. */
+static jobject plain_clip(JNIEnv *env, const char *text)
+{
+    jclass data = (*env)->FindClass(env, "android/content/ClipData");
+    jmethodID plain = data ? (*env)->GetStaticMethodID(env, data, "newPlainText",
+        "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Landroid/content/ClipData;") : NULL;
+    jstring label = zj_clean(env) && plain ? zj_string(env, CLIP_LABEL) : NULL, body = label ? zj_string(env, text) : NULL;
+    jobject clip = body ? (*env)->CallStaticObjectMethod(env, data, plain, label, body) : NULL;
+    return zj_clean(env) ? clip : NULL;
+}
+/* A PersistableBundle that holds the sensitive extra set to true. */
+static jobject sensitive_extras(JNIEnv *env)
+{
+    jclass bundle = (*env)->FindClass(env, "android/os/PersistableBundle");
+    jmethodID make = bundle ? (*env)->GetMethodID(env, bundle, "<init>", "()V") : NULL;
+    jmethodID put = make ? (*env)->GetMethodID(env, bundle, "putBoolean", "(Ljava/lang/String;Z)V") : NULL;
+    jobject extras = zj_clean(env) && put ? (*env)->NewObject(env, bundle, make) : NULL;
+    jstring key = extras ? zj_string(env, CLIP_SENSITIVE_EXTRA) : NULL;
+    if (key) (*env)->CallVoidMethod(env, extras, put, key, JNI_TRUE);
+    return key && zj_clean(env) ? extras : NULL;
+}
+/* A plain-text clip whose description carries the sensitive extra. */
+static jobject sensitive_clip(JNIEnv *env, const char *text)
+{
+    jobject clip = plain_clip(env, text);
+    jobject description = clip ? zj_object_property(env, clip, "getDescription", "()Landroid/content/ClipDescription;") : NULL;
+    jobject extras = description ? sensitive_extras(env) : NULL;
+    jmethodID set = extras ? zj_method(env, description, "setExtras", "(Landroid/os/PersistableBundle;)V") : NULL;
+    if (set) (*env)->CallVoidMethod(env, description, set, extras);
+    return set && zj_clean(env) ? clip : NULL;
+}
+static bool stamp_of(JNIEnv *env, jobject manager, int64_t *stamp)
+{
+    jobject description = zj_object_property(env, manager, "getPrimaryClipDescription", "()Landroid/content/ClipDescription;");
+    jmethodID get = description ? zj_method(env, description, "getTimestamp", "()J") : NULL;
+    jlong value = get ? (*env)->CallLongMethod(env, description, get) : 0;
+    if (get && zj_clean(env)) *stamp = (int64_t)value;
+    return get && description;
+}
+static bool jni_clip_put(void *context, const char *text, int64_t *stamp)
+{
+    struct jni_clip *clip = context;
+    JNIEnv *env = clip->env;
+    if ((*env)->PushLocalFrame(env, 16) != JNI_OK) { (void)zj_clean(env); return false; }
+    jobject data = sensitive_clip(env, text);
+    jmethodID set = data ? zj_method(env, clip->manager, "setPrimaryClip", "(Landroid/content/ClipData;)V") : NULL;
+    if (set) (*env)->CallVoidMethod(env, clip->manager, set, data);
+    bool placed = set && zj_clean(env), ok = placed && stamp_of(env, clip->manager, stamp);
+    if (placed && !ok) (void)jni_clip_clear(context);
+    (*env)->PopLocalFrame(env, NULL);
+    return ok;
+}
+static bool jni_clip_current(void *context, int64_t *stamp)
+{
+    struct jni_clip *clip = context;
+    JNIEnv *env = clip->env;
+    if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)zj_clean(env); return false; }
+    bool ok = stamp_of(env, clip->manager, stamp);
+    (*env)->PopLocalFrame(env, NULL);
+    return ok;
+}
+static bool jni_clip_clear(void *context)
+{
+    struct jni_clip *clip = context;
+    jmethodID clear = zj_method(clip->env, clip->manager, "clearPrimaryClip", "()V");
+    if (clear) (*clip->env)->CallVoidMethod(clip->env, clip->manager, clear);
+    return clear && zj_clean(clip->env);
+}
+static struct zapp_clip_ops clip_ops(struct jni_clip *clip)
+{
+    return (struct zapp_clip_ops){clip, jni_clip_put, jni_clip_current, jni_clip_clear};
+}
+
+struct clip_expiry { JavaVM *vm; jobject manager; int64_t stamp; };
+/* Waits out the delay on the clock that keeps counting while the phone sleeps, then clears the clip if it is still ours. */
+static void *clip_expiry_run(void *argument)
+{
+    struct clip_expiry *job = argument;
+    struct timespec left = {ZAPP_CLIP_CLEAR_SECONDS, 0};
+    JNIEnv *env = NULL;
+    while (clock_nanosleep(CLOCK_BOOTTIME, 0, &left, &left) == EINTR) {}
+    if ((*job->vm)->AttachCurrentThread(job->vm, &env, NULL) != JNI_OK) { CLIP_LOG("clearing the copied address failed: no JNI thread"); free(job); return NULL; }
+    struct jni_clip clip = {env, job->manager};
+    struct zapp_clip_ops ops = clip_ops(&clip);
+    if (!zapp_clip_expire(&ops, job->stamp)) CLIP_LOG("clearing the copied address failed");
+    (*env)->DeleteGlobalRef(env, job->manager);
+    (*job->vm)->DetachCurrentThread(job->vm);
+    free(job);
+    return NULL;
+}
+static bool schedule_expiry(ANativeActivity *activity, jobject manager, int64_t stamp)
+{
+    pthread_t thread;
+    struct clip_expiry *job = malloc(sizeof(*job));
+    if (!job) return false;
+    *job = (struct clip_expiry){activity->vm, (*activity->env)->NewGlobalRef(activity->env, manager), stamp};
+    bool ok = job->manager && pthread_create(&thread, NULL, clip_expiry_run, job) == 0;
+    if (ok) { (void)pthread_detach(thread); return true; }
+    if (job->manager) (*activity->env)->DeleteGlobalRef(activity->env, job->manager);
+    free(job);
+    return false;
+}
+bool zapp_clipboard_copy_sensitive(ANativeActivity *activity, const char *text)
+{
+    JNIEnv *env = activity->env;
+    int64_t stamp = 0;
+    bool ok = false;
+    if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)zj_clean(env); CLIP_LOG("copy failed: no local frame"); return false; }
+    jstring service = zj_string(env, "clipboard");
+    jmethodID get = service ? zj_method(env, activity->clazz, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;") : NULL;
+    jobject manager = get ? (*env)->CallObjectMethod(env, activity->clazz, get, service) : NULL;
+    struct jni_clip clip = {env, zj_clean(env) ? manager : NULL};
+    struct zapp_clip_ops ops = clip_ops(&clip);
+    if (!clip.manager) CLIP_LOG("copy failed: no clipboard service");
+    else if (!zapp_clip_copy(&ops, text, &stamp)) CLIP_LOG("copy failed: setPrimaryClip refused the address");
+    else if (!schedule_expiry(activity, clip.manager, stamp)) {
+        CLIP_LOG("copy undone: the clear could not be scheduled");
+        (void)zapp_clip_expire(&ops, stamp);
+    } else ok = true;
+    (*env)->PopLocalFrame(env, NULL);
+    return ok;
+}
 #endif

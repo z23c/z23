@@ -254,6 +254,7 @@ static struct { void (*changed)(void); } bound;
 
 static bool bound_secure(void *activity, bool on) { return zapp_secure_window(activity, on); }
 static const char *bound_refusal(void *activity) { (void)activity; return zapp_secure_window_refusal(); }
+static bool bound_copy_address(void *activity, const char *address) { return zapp_clipboard_copy_sensitive(activity, address); }
 static bool bound_run(void *ctx, const char *op, const char *arg, char *out, size_t cap)
 {
     (void)ctx;
@@ -279,7 +280,7 @@ static void bound_changed(void *ctx)
 
 bool zapp_wallet_attach(ANativeActivity *activity, void (*changed)(void))
 {
-    struct wallet_env env = {activity, bound_secure, bound_run, bound_changed, bound_now, true, bound_refusal, bound_node_running};
+    struct wallet_env env = {activity, bound_secure, bound_run, bound_changed, bound_now, true, bound_refusal, bound_node_running, bound_copy_address};
     bound.changed = changed;
     return activity && wallet_screens_init(&env);
 }

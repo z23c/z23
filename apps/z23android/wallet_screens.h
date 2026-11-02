@@ -66,7 +66,7 @@ enum wallet_item_kind {
 enum wallet_action {
     WALLET_ACT_NONE, WALLET_ACT_RECEIVE, WALLET_ACT_SEND, WALLET_ACT_HISTORY, WALLET_ACT_NEW_ADDRESS,
     WALLET_ACT_SET_AMOUNT, WALLET_ACT_NEWER, WALLET_ACT_OLDER, WALLET_ACT_DETAIL, WALLET_ACT_BACK,
-    WALLET_ACT_START_NODE
+    WALLET_ACT_START_NODE, WALLET_ACT_COPY_ADDRESS
 };
 enum wallet_outcome {
     WALLET_STAY,  /* the screen changed or nothing happened */
@@ -110,6 +110,9 @@ struct wallet_env {
     /* Whether the node process runs. Optional (NULL: unknown). A node that does not answer is shown as stopped when this says it
      * is not running, and as not answering when it runs or this is unknown. Called on the UI thread. */
     bool (*node_running)(void *ctx);
+    /* Puts the address on the clipboard as a sensitive clip that clears itself after a minute. Optional (NULL: copying is
+     * refused). Called on the UI thread with the address as the node gave it, without grouping. */
+    bool (*copy_address)(void *ctx, const char *address);
 };
 
 bool wallet_screens_init(const struct wallet_env *env);

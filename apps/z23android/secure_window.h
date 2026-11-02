@@ -59,6 +59,23 @@ unsigned zapp_secure_window_obscured_gestures(void);
 /* The window is gone or no longer protected: stop dropping. Called on every activity teardown. */
 void zapp_secure_window_release(void);
 
+/* A copied address is marked sensitive, so the system hides it in its clipboard preview, and is taken off the
+ * clipboard after this many seconds, if the clip is still the one the app put there. */
+#define ZAPP_CLIP_CLEAR_SECONDS 60
+struct zapp_clip_ops {
+    void *ctx;
+    /* Puts text on the clipboard as a sensitive clip and reports the stamp that identifies that clip. */
+    bool (*put)(void *ctx, const char *text, int64_t *stamp);
+    /* The stamp of the clip on the clipboard now; false when it holds none. */
+    bool (*current)(void *ctx, int64_t *stamp);
+    bool (*clear)(void *ctx);
+};
+/* False for empty text, a missing member or a clipboard that refused the clip. */
+bool zapp_clip_copy(const struct zapp_clip_ops *ops, const char *text, int64_t *stamp);
+/* Clears the clipboard only while its clip is the one with this stamp. True when the clipboard no longer holds
+ * that clip: it was cleared, or something else replaced it first. False when that could not be settled. */
+bool zapp_clip_expire(const struct zapp_clip_ops *ops, int64_t stamp);
+
 #ifdef __ANDROID__
 #include <android/input.h>
 #include <android/native_activity.h>
@@ -69,5 +86,9 @@ bool zapp_secure_window(ANativeActivity *activity, bool on);
 void zapp_secure_window_ops(struct zapp_secure_ops *ops, ANativeActivity *activity);
 /* True when the input event is a motion event the gate drops. Call on the UI thread. */
 bool zapp_secure_window_drops(const AInputEvent *event);
+/* Puts the text on the clipboard as a sensitive clip and clears it after ZAPP_CLIP_CLEAR_SECONDS while it is still
+ * that clip. Call on the UI thread. False, with a contextual line in the log, when the clipboard refused or the
+ * clearing could not be scheduled; the clipboard then does not keep the text. */
+bool zapp_clipboard_copy_sensitive(ANativeActivity *activity, const char *text);
 #endif
 #endif

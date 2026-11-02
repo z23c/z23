@@ -16,6 +16,8 @@
 #define TXID_MAX (WALLET_TXID_LEN + 1u)
 #define MEMO_MAX 1025u /* 512 bytes of text, or 512 bytes as hex, and the NUL */
 #define NOTE_MAX 192u
+#define WALLET_COPIED_NOTE "Address copied. It clears in 1 minute."
+#define WALLET_COPY_FAILED_NOTE "Could not copy the address."
 #define MAX_UNIX 253402300799LL
 #define MACHINES_MAX 64u
 #define CHUNK_MAX 280u
@@ -232,6 +234,7 @@ static void receive_items(struct wallet_screen *s)
     if (shown) {
         (void)add(s, WALLET_ITEM_QR, WALLET_ACT_NONE, d->code);
         (void)add(s, WALLET_ITEM_ADDRESS, WALLET_ACT_NONE, grouped);
+        button(s, WALLET_ACT_COPY_ADDRESS, "Copy address");
         if (d->has_amount && zapp_zat_format(d->amount_zat, grouped, sizeof(grouped))) {
             snprintf(text, sizeof(text), "Asking for %s ZCL", grouped);
             line(s, text);
@@ -894,6 +897,18 @@ static size_t new_address(struct job *jobs)
     return count;
 }
 
+/* Copy address: the clipboard gets the bare address, never the grouped text. The reply is a note on the screen. */
+static void copy_address(void)
+{
+    char address[ZAPP_PAY_ADDRESS_MAX];
+    if (!st.d.address[0]) return;
+    copy(address, sizeof(address), st.d.address);
+    bool ok = st.env.copy_address && st.env.copy_address(st.env.ctx, address);
+    memory_cleanse(address, sizeof(address));
+    copy(st.d.note, sizeof(st.d.note), ok ? WALLET_COPIED_NOTE : WALLET_COPY_FAILED_NOTE);
+    touch();
+}
+
 /* The jobs a tap on the Funds page starts, or WALLET_SEND for Send. */
 static size_t from_funds(enum wallet_action action, struct job *jobs, enum wallet_outcome *outcome)
 {
@@ -922,6 +937,7 @@ enum wallet_outcome wallet_screens_activate(enum wallet_action action, unsigned 
     if (st.ready && !st.blocked) {
         if (st.page == WALLET_PAGE_FUNDS) count = from_funds(action, jobs, &outcome);
         else if (st.page == WALLET_PAGE_RECEIVE && action == WALLET_ACT_NEW_ADDRESS) count = new_address(jobs);
+        else if (st.page == WALLET_PAGE_RECEIVE && action == WALLET_ACT_COPY_ADDRESS) copy_address();
         else if (st.page == WALLET_PAGE_HISTORY) count = from_history(action, arg, jobs);
     }
     pthread_mutex_unlock(&st.lock);

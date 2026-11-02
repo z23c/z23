@@ -155,6 +155,57 @@ static void a_missing_protection_is_a_refusal(void)
     zapp_secure_window_release();
 }
 
+/* A fake clipboard holding one clip: its text and the stamp the system gave it. */
+struct board { char text[64]; int64_t stamp, next_stamp; bool has, put_ok, clear_ok; int clears; };
+static bool b_put(void *c, const char *text, int64_t *stamp)
+{
+    struct board *b = c;
+    if (!b->put_ok) return false;
+    snprintf(b->text, sizeof(b->text), "%s", text);
+    *stamp = b->stamp = b->next_stamp++;
+    b->has = true;
+    return true;
+}
+static bool b_current(void *c, int64_t *stamp) { struct board *b = c; if (b->has) *stamp = b->stamp; return b->has; }
+static bool b_clear(void *c)
+{
+    struct board *b = c;
+    b->clears++;
+    if (b->clear_ok) { b->has = false; b->text[0] = '\0'; }
+    return b->clear_ok;
+}
+static void an_empty_copy_is_refused(void)
+{
+    struct board b = {.put_ok = true, .clear_ok = true, .next_stamp = 100};
+    struct zapp_clip_ops ops = {&b, b_put, b_current, b_clear};
+    int64_t stamp = 0;
+    assert(!zapp_clip_copy(&ops, "", &stamp) && !zapp_clip_copy(&ops, NULL, &stamp) && !b.has);
+    assert(!zapp_clip_copy(NULL, "zs1abc", &stamp));
+    b.put_ok = false;
+    assert(!zapp_clip_copy(&ops, "zs1abc", &stamp) && !b.has);
+}
+static void the_clipboard_clears_only_our_clip(void)
+{
+    struct board b = {.put_ok = true, .clear_ok = true, .next_stamp = 100};
+    struct zapp_clip_ops ops = {&b, b_put, b_current, b_clear};
+    int64_t stamp = 0, other = 0;
+    assert(zapp_clip_copy(&ops, "zs1abc", &stamp) && b.has && !strcmp(b.text, "zs1abc") && stamp == 100);
+    assert(zapp_clip_expire(&ops, stamp) && !b.has && b.clears == 1);        /* untouched for a minute: cleared */
+    assert(zapp_clip_copy(&ops, "zs1abc", &stamp));
+    assert(zapp_clip_copy(&ops, "something else", &other) && other != stamp);  /* replaced by another copy */
+    assert(zapp_clip_expire(&ops, stamp) && b.has && !strcmp(b.text, "something else") && b.clears == 1);
+    assert(zapp_clip_expire(&ops, other) && !b.has && b.clears == 2);
+    assert(zapp_clip_expire(&ops, other) && b.clears == 2);                  /* nothing left to clear */
+}
+static void a_refused_clear_is_reported(void)
+{
+    struct board b = {.put_ok = true, .clear_ok = false, .next_stamp = 100};
+    struct zapp_clip_ops ops = {&b, b_put, b_current, b_clear};
+    int64_t stamp = 0;
+    assert(zapp_clip_copy(&ops, "zs1abc", &stamp) && !zapp_clip_expire(&ops, stamp) && b.has);
+    assert(!zapp_clip_expire(NULL, stamp));
+}
+
 int main(void)
 {
     struct fake f = {.flag_ok = true, .filter_ok = true};
@@ -180,6 +231,9 @@ int main(void)
     unprotected_windows_pass_everything();
     every_protection_is_needed();
     a_missing_protection_is_a_refusal();
+    an_empty_copy_is_refused();
+    the_clipboard_clears_only_our_clip();
+    a_refused_clear_is_reported();
     puts("secure_window_test: ok");
     return 0;
 }
