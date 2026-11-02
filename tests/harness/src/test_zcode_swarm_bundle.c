@@ -493,6 +493,58 @@ static bool bundle_priority_evict(struct vcs_package_store *store, uint8_t root[
     return ok;
 }
 
+/* Live stall: the seeder's session already announced a full 64-root
+ * inventory, so a newly offered bundle is never announced to that peer
+ * ("announced":0). An ANNOUNCE-discovered fetch then waits forever, while a
+ * fetch bound to the named peer asks for the root directly and completes. */
+static int bundle_case_full_session_bound_fetch(void)
+{
+    int failures = 0;
+    struct bundle_pair p;
+    struct zcl_fleet_bundle_outcome offered, o;
+    uint8_t *orig = NULL;
+    if (!bundle_pair_open(&p, "bfs")) {
+        printf("  zcode_swarm: bundle full-session fixture... FAIL\n");
+        bundle_pair_close(&p);
+        return 1;
+    }
+    bool shelf = true;
+    for (size_t i = 0; i < VCS_SWARM_MAX_LOCAL_ANNOUNCES && shelf; i++) {
+        uint8_t bytes[] = { 0xc3, (uint8_t)i }, root[32];
+        shelf = vcs_bundle_put_to_no_evict(p.seed.store, bytes, sizeof bytes,
+                                           root) == VCS_BUNDLE_OK;
+    }
+    SW_CHECK("full session: 64 complete bundles seeded", shelf);
+    SW_CHECK("full session: the seeder announces its full inventory",
+             vcs_swarm_engine_announce_to(p.seed.engine,
+                                          BUNDLE_SEEDER_HANDLE) ==
+             VCS_SWARM_MAX_LOCAL_ANNOUNCES);
+    bundle_deliver(&p.seed, BUNDLE_SEEDER_HANDLE, &p.leech,
+                   BUNDLE_LEECH_HANDLE, 1);
+    SW_CHECK("full session: a new offer reaches nobody",
+             bundle_offer(&p, 3000, &offered, &orig) &&
+             offered.announced == 0);
+    char out_path[1200];
+    bundle_make_path(out_path, sizeof(out_path), &p.leech, "unbound.bundle");
+    struct zcl_fleet_bundle_fetch_args a;
+    bundle_args(&a, &offered, out_path);
+    SW_CHECK("full session: an ANNOUNCE-discovered fetch never completes",
+             bundle_fetch_loop(&p, &a, &o) == ZCL_FLEET_BUNDLE_PENDING &&
+             access(out_path, F_OK) != 0);
+    const uint64_t named[1] = { BUNDLE_LEECH_HANDLE };
+    bundle_make_path(out_path, sizeof(out_path), &p.leech, "bound.bundle");
+    bundle_args(&a, &offered, out_path);
+    a.providers = named;
+    a.provider_count = 1;
+    bool unused = false;
+    SW_CHECK("full session: a fetch bound to the named peer completes",
+             bundle_fetch_loop(&p, &a, &o) == ZCL_FLEET_BUNDLE_DONE &&
+             bundle_file_equals(out_path, orig, 3000, &unused));
+    free(orig);
+    bundle_pair_close(&p);
+    return failures;
+}
+
 static int bundle_case_priority_after_eviction(void)
 {
     int failures = 0;
@@ -711,6 +763,7 @@ int t_swarm_bundle_transfer(void)
     failures += bundle_case_peer_rules();
     failures += bundle_case_announce_priority();
     failures += bundle_case_priority_after_eviction();
+    failures += bundle_case_full_session_bound_fetch();
     failures += bundle_case_timeout_messages();
     failures += bundle_case_summary_fits();
     failures += bundle_case_timeout_facts();

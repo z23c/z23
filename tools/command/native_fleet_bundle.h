@@ -49,6 +49,12 @@ struct zcl_fleet_bundle_fetch_args {
     const char *out_path; /* absolute; must not exist */
     int64_t day;
     uint64_t now;
+    /* Swarm handles of the peer(s) the caller named (--peer). Non-empty:
+     * the download is bound to them, so it does not wait for an ANNOUNCE
+     * (a session whose 64-root announce inventory is full never announces
+     * a newer offer). Empty: ordinary discovery by ANNOUNCE. */
+    const uint64_t *providers;
+    size_t provider_count;
 };
 
 /* One non-blocking fetch step: start (idempotent) or continue the swarm
