@@ -932,25 +932,40 @@ static char g_jobs_reason[96] = "cpus";
  * its estimate stays charged this long. */
 #define RUNNER_ADMIT_RAMP_US INT64_C(3000000)
 
+/* Peak RSS seen so far: live (VmHWM, still rising) and finished (wait4). */
 [[maybe_unused]] static int64_t g_group_peak_bytes[sizeof(g_groups) / sizeof(g_groups[0])];
+[[maybe_unused]] static int64_t g_group_done_bytes[sizeof(g_groups) / sizeof(g_groups[0])];
+[[maybe_unused]] static int64_t g_pool_peak_bytes;
 [[maybe_unused]] static int64_t g_reaped_peak_bytes;
+/* A just-forked group may start ramping at once; no more than this many
+ * young ones at a time, so the first wave cannot outrun the measurements. */
+#define RUNNER_ADMIT_MAX_YOUNG 3
 
+/* What a group is expected to peak at: its finished peak from an earlier run
+ * in this process, else the larger of the static figure and 1.5x the heaviest
+ * group seen so far (a sibling of a 2 GiB simnet group is not 512 MiB). */
 [[maybe_unused]] static int64_t group_memory_estimate(size_t idx)
 {
-    int64_t learned = g_group_peak_bytes[idx];
-    return learned > RUNNER_WORKER_BYTES ? learned : RUNNER_WORKER_BYTES;
+    if (g_group_done_bytes[idx] > RUNNER_WORKER_BYTES)
+        return g_group_done_bytes[idx];
+    int64_t pool = g_pool_peak_bytes + g_pool_peak_bytes / 2;
+    return pool > RUNNER_WORKER_BYTES ? pool : RUNNER_WORKER_BYTES;
 }
 
 /* Pure: may a group estimated at estimate_bytes fork now? Admits when nothing
- * is running (never deadlock) or when headroom_bytes, less the estimates of
- * still-ramping children and the reserve, covers the estimate. A negative
- * headroom means no cgroup limit is known. */
-[[maybe_unused]] static bool runner_admit(int running, int64_t headroom_bytes,
-                         int64_t ramping_bytes, int64_t estimate_bytes)
+ * is running (never deadlock); else when the cgroup headroom, less the growth
+ * the running groups are still expected to make (pending_bytes) and the
+ * reserve, covers the estimate, and fewer than RUNNER_ADMIT_MAX_YOUNG groups
+ * are still ramping. A negative headroom means no cgroup limit is known. */
+[[maybe_unused]] static bool runner_admit(int running, int young,
+                                          int64_t headroom_bytes,
+                                          int64_t pending_bytes,
+                                          int64_t estimate_bytes)
 {
     if (running <= 0) return true;
+    if (young >= RUNNER_ADMIT_MAX_YOUNG) return false;
     if (headroom_bytes >= 0) {
-        headroom_bytes -= ramping_bytes;
+        headroom_bytes -= pending_bytes;
         if (headroom_bytes < 0) headroom_bytes = 0;
     }
     return platform_memory_admit(headroom_bytes, estimate_bytes,
@@ -963,25 +978,29 @@ static bool phase_memory_admits(const struct child_slot *slots, int jobs,
 #if defined(__linux__)
     if (RUNNER_WORKER_BYTES <= 0) return true;
     int running = 0;
-    int64_t ramping = 0;
+    int young = 0;
+    int64_t pending = 0;
     int64_t now = platform_time_monotonic_us();
     for (int i = 0; i < jobs; i++) {
         if (slots[i].pid == ZCL_CHILD_NONE) continue;
         running++;
-        if (now - slots[i].start_us < RUNNER_ADMIT_RAMP_US)
-            ramping += group_memory_estimate(slots[i].group_idx);
+        if (now - slots[i].start_us < RUNNER_ADMIT_RAMP_US) young++;
+        int64_t grow = group_memory_estimate(slots[i].group_idx) -
+                       g_group_peak_bytes[slots[i].group_idx];
+        if (grow > 0) pending += grow;
     }
     if (running == 0) return true;
     int64_t headroom = platform_cgroup_memory_headroom();
     int64_t estimate = group_memory_estimate(next_idx);
-    bool admit = runner_admit(running, headroom, ramping, estimate);
+    bool admit = runner_admit(running, young, headroom, pending, estimate);
     static size_t held_idx = (size_t)-1;
     if (!admit && held_idx != next_idx) {
         held_idx = next_idx;   /* once per held group, not once per poll */
-        printf("test_parallel: memory hold group=%s running=%d headroom=%lld "
-               "MiB ramping=%lld MiB estimate=%lld MiB\n",
-               g_groups[next_idx].name, running, (long long)(headroom >> 20),
-               (long long)(ramping >> 20), (long long)(estimate >> 20));
+        printf("test_parallel: memory hold group=%s running=%d young=%d "
+               "headroom=%lld MiB pending=%lld MiB estimate=%lld MiB\n",
+               g_groups[next_idx].name, running, young,
+               (long long)(headroom >> 20), (long long)(pending >> 20),
+               (long long)(estimate >> 20));
         fflush(stdout);
     }
     return admit;
@@ -1034,6 +1053,7 @@ static void phase_memory_sample(const struct child_slot *slots, int jobs)
         int64_t rss = proc_peak_rss_bytes(slots[i].pid);
         if (rss > g_group_peak_bytes[slots[i].group_idx])
             g_group_peak_bytes[slots[i].group_idx] = rss;
+        if (rss > g_pool_peak_bytes) g_pool_peak_bytes = rss;
     }
     int64_t headroom = platform_cgroup_memory_headroom();
     if (headroom < 0) return;
@@ -2003,6 +2023,10 @@ static void phase_record_reaped(const struct phase_run *pr, int slot, int status
                g_groups[idx].name, (long long)(g_reaped_peak_bytes >> 20));
     if (g_reaped_peak_bytes > g_group_peak_bytes[idx])
         g_group_peak_bytes[idx] = g_reaped_peak_bytes;
+    if (g_reaped_peak_bytes > g_group_done_bytes[idx])
+        g_group_done_bytes[idx] = g_reaped_peak_bytes;
+    if (g_reaped_peak_bytes > g_pool_peak_bytes)
+        g_pool_peak_bytes = g_reaped_peak_bytes;
     g_reaped_peak_bytes = 0;
     r->status = status;
     if (WIFSIGNALED(status)) {
