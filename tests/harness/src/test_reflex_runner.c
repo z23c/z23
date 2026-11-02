@@ -247,6 +247,14 @@ static int t_green_then_regression_keeps_accepted_root(void)
 #endif
 #endif
 
+#if defined(__SANITIZE_THREAD__)
+#define RR_UNDER_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define RR_UNDER_TSAN 1
+#endif
+#endif
+
 static int t_hang_and_crash_do_not_kill_runner(void)
 {
     int failures = 0;
@@ -279,6 +287,12 @@ static int t_hang_and_crash_do_not_kill_runner(void)
          * __has_feature(address_sanitizer). */
         ASSERT_EQ(segv.out.child_signal, 0);
         ASSERT_EQ(segv.out.child_exit_code, 1);
+#elif defined(RR_UNDER_TSAN)
+        /* ThreadSanitizer owns SIGSEGV too: it reports the fault and then
+         * traps, so the leaf dies of SIGILL (measured in the t-tsan run:
+         * signal=4 "observation frame missing"). The segfault is still red
+         * and the runner survives it. */
+        ASSERT_EQ(segv.out.child_signal, SIGILL);
 #else
         ASSERT_EQ(segv.out.child_signal, SIGSEGV);
 #endif

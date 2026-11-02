@@ -2276,6 +2276,21 @@ static void image_role_output(const char *output)
     }
 }
 
+/* The child hashes the 300 MB test image several times. The TSan build runs
+ * that hashing instrumented, which outlasts the 120 s bound sized for the
+ * plain build (measured: the child was killed, rc=137, with no output past
+ * its dispatch line). */
+#if defined(__SANITIZE_THREAD__)
+#define IMAGE_CHILD_TIMEOUT_MS 240000
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define IMAGE_CHILD_TIMEOUT_MS 240000
+#endif
+#endif
+#ifndef IMAGE_CHILD_TIMEOUT_MS
+#define IMAGE_CHILD_TIMEOUT_MS 120000
+#endif
+
 static bool image_role_run(const char *path, const char *role,
                             const char *expected)
 {
@@ -2300,10 +2315,15 @@ static bool image_role_run(const char *path, const char *role,
     const char *argv[] = { path, "--exact=test_action_root", "--jobs=1",
                            "--no-cache", "--verbose", NULL };
     char output[16384] = {0};
-    if (ok)
-        ok = zcl_spawn_capture(argv, output, sizeof(output), 120000) == 0 &&
+    int spawn_rc = -1;
+    if (ok) {
+        spawn_rc = zcl_spawn_capture(argv, output, sizeof(output),
+                                     IMAGE_CHILD_TIMEOUT_MS);
+        ok = spawn_rc == 0 &&
              strstr(output, "image controls completed") != NULL;
+    }
     image_role_output(output);
+    printf("    image child: spawn_rc=%d role=%s\n", spawn_rc, role);
     return image_environment_restore(names, prior) && ok;
 }
 

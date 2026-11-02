@@ -542,10 +542,10 @@ static void child_note(char stage[static 32], char error[static 160],
  * NOFILE, NPROC, FSIZE and CORE are unchanged, and every other build keeps
  * the 4 GiB cage. GCC defines __SANITIZE_ADDRESS__; Clang reports it
  * through __has_feature(address_sanitizer). */
-#if defined(__SANITIZE_ADDRESS__)
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
 #define RR_AS_BYTES OS_SANDBOX_RLIMIT_KEEP
 #elif defined(__has_feature)
-#if __has_feature(address_sanitizer)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
 #define RR_AS_BYTES OS_SANDBOX_RLIMIT_KEEP
 #endif
 #endif
