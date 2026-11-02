@@ -4131,6 +4131,10 @@ $(TEST_PARALLEL_FAST_CANDIDATE): | $(HOTSWAP_ROLLBACK_FIXTURE_SOS)
 # The ASan tree carries the real hot-swap loader too (ZCL_DEV_BUILD above),
 # so test_hotswap_rollback's real-image cases run under t-asan and need them.
 $(TEST_ASAN_CANDIDATE): | $(HOTSWAP_ROLLBACK_FIXTURE_SOS)
+# Same for the TSan tree: it links the real loader (HOTSWAP_TEST_LOADER_FLAGS),
+# so without this prerequisite t-tsan runs against absent or stale images
+# (stale ones are refused with "module consensus core seal does not match").
+$(TEST_TSAN_CANDIDATE): | $(HOTSWAP_ROLLBACK_FIXTURE_SOS)
 endif
 
 # ── Clean-zygote reflex runner proof images ───────────────────────────────
