@@ -855,6 +855,7 @@ ZCL_MODULE_CAPABILITY("core/modules/net/src/msg_beta6_bootstrap.c", CAP_FS_WRITE
 ZCL_MODULE_CAPABILITY("core/modules/net/src/msg_bounds_guard.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("core/modules/net/src/msg_compact.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("core/modules/net/src/msg_headers.c", CAP_FS_WRITE|CAP_FS_READ, "")
+ZCL_MODULE_CAPABILITY("core/modules/net/src/msg_headers_getheaders.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("core/modules/net/src/msg_tx.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("core/modules/net/src/msg_version.c", CAP_NETWORK, "builds and reads the peer-to-peer VERSION handshake message off the wire")
 ZCL_MODULE_CAPABILITY("core/modules/net/src/msgprocessor.c", CAP_FS_WRITE|CAP_RANDOM, "draws GetRand for the outbound ping nonce")
