@@ -7,6 +7,7 @@
 
 #include "coins/coins_view.h"
 #include "models/database.h"
+#include "platform/thread_compat.h"
 #include "storage/progress_store.h"
 
 #include <errno.h>
@@ -35,15 +36,7 @@ struct zcl_result csr_commit_tip_result(
 
 static bool csr_lock_bounded(struct chain_state_repository *csr)
 {
-    struct timespec dl;
-    if (clock_gettime(CLOCK_REALTIME, &dl) != 0) // platform-ok: timedlock needs an absolute CLOCK_REALTIME deadline
-        return false;  // raw-return-ok:no clock means no deadline: answer busy, never wait unbounded
-    dl.tv_nsec += CSR_SNAPSHOT_BOUNDED_WAIT_NS;
-    if (dl.tv_nsec >= 1000000000L) {
-        dl.tv_sec += 1;
-        dl.tv_nsec -= 1000000000L;
-    }
-    return pthread_mutex_timedlock(&csr->lock, &dl) == 0;
+    return platform_mutex_lock_bounded_ns(&csr->lock, CSR_SNAPSHOT_BOUNDED_WAIT_NS);
 }
 
 /* Try-enter the node.db connection mutex (serialized build: the shared

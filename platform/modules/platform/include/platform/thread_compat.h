@@ -11,6 +11,8 @@
 #define ZCL_PLATFORM_THREAD_COMPAT_H
 
 #include <pthread.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <time.h>
 
 #if defined(__ANDROID__)
@@ -223,6 +225,52 @@ static inline int platform_thread_join_until(pthread_t thread,
 #else
     (void)deadline;
     return pthread_join(thread, result);
+#endif
+}
+
+/* Bounded mutex acquire: true when *m was locked within wait_ns, false on
+ * timeout or any error (the caller never waits unbounded). Where
+ * pthread_mutex_timedlock exists it enforces an absolute CLOCK_REALTIME
+ * deadline. Darwin has no such call, so its arm retries pthread_mutex_trylock
+ * against a CLOCK_MONOTONIC deadline with a short sleep between tries. A
+ * non-positive wait_ns is a single try. */
+static inline bool platform_mutex_lock_bounded_ns(pthread_mutex_t *m,
+                                                  int64_t wait_ns)
+{
+    if (!m)
+        return false;
+    if (wait_ns < 0)
+        wait_ns = 0;
+#if defined(__APPLE__)
+    struct timespec start;
+    if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) // platform-ok: bounded trylock deadline is a kernel measured interval
+        return pthread_mutex_trylock(m) == 0;
+    for (;;) {
+        if (pthread_mutex_trylock(m) == 0)
+            return true;
+        struct timespec now;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) // platform-ok: bounded trylock deadline is a kernel measured interval
+            return false;
+        int64_t elapsed_ns =
+            ((int64_t)now.tv_sec - (int64_t)start.tv_sec) * INT64_C(1000000000) +
+            ((int64_t)now.tv_nsec - (int64_t)start.tv_nsec);
+        if (elapsed_ns >= wait_ns)
+            return false;
+        int64_t left_ns = wait_ns - elapsed_ns;
+        struct timespec delay = { .tv_sec = 0, .tv_nsec = 500000L };
+        if (left_ns < delay.tv_nsec)
+            delay.tv_nsec = (long)left_ns;
+        (void)nanosleep(&delay, NULL);
+    }
+#else
+    struct timespec dl;
+    if (clock_gettime(CLOCK_REALTIME, &dl) != 0) // platform-ok: timedlock needs an absolute CLOCK_REALTIME deadline
+        return pthread_mutex_trylock(m) == 0;
+    int64_t ns = (int64_t)dl.tv_nsec + wait_ns % INT64_C(1000000000);
+    dl.tv_sec += (time_t)(wait_ns / INT64_C(1000000000)) +
+                 (time_t)(ns / INT64_C(1000000000));
+    dl.tv_nsec = (long)(ns % INT64_C(1000000000));
+    return pthread_mutex_timedlock(m, &dl) == 0;
 #endif
 }
 

@@ -61,6 +61,7 @@
 #include "config/runtime.h"
 #include "models/database.h"
 #include "storage/progress_store.h"
+#include "platform/thread_compat.h"
 #include "util/thread_registry.h"
 
 #include <pthread.h>
@@ -921,6 +922,61 @@ static int case_bounded_snapshot_ndb_mutex(void)
     return failures;
 }
 
+/* platform_mutex_lock_bounded_ns: owned by this thread, a second thread's
+ * bounded acquire must answer false well inside CONTEST_BOUND_MS; free, it
+ * must answer true.  The mutex is non-recursive and owned by main, so the
+ * helper runs on its own thread. */
+struct bounded_lock_probe {
+    pthread_mutex_t *mu;
+    int64_t wait_ns;
+    bool got;
+    long ms;
+};
+
+static void *bounded_lock_thread(void *arg)
+{
+    struct bounded_lock_probe *p = (struct bounded_lock_probe *)arg;
+    struct timespec t0;
+    bool have_t0 = sdt_clock(CLOCK_MONOTONIC, &t0);
+    p->got = platform_mutex_lock_bounded_ns(p->mu, p->wait_ns);
+    p->ms = have_t0 ? cev_ms_since(&t0) : -1;
+    if (p->got)
+        pthread_mutex_unlock(p->mu);
+    return NULL;
+}
+
+static int case_platform_mutex_lock_bounded(void)
+{
+    int failures = 0;
+    pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    struct bounded_lock_probe p = { .mu = &mu, .wait_ns = 30000000L };
+    pthread_t th;
+
+    pthread_mutex_lock(&mu);
+    int rc = pthread_create(&th, NULL, bounded_lock_thread, &p);
+    SD_CHECK("bounded lock: probe thread starts", rc == 0);
+    if (rc == 0)
+        pthread_join(th, NULL);
+    SD_CHECK("bounded lock: held mutex answers false", rc == 0 && !p.got);
+    SD_CHECK("bounded lock: waited the bound, returned under the cap",
+             rc == 0 && p.ms >= 20 && p.ms < CONTEST_BOUND_MS);
+    pthread_mutex_unlock(&mu);
+
+    p.got = false;
+    rc = pthread_create(&th, NULL, bounded_lock_thread, &p);
+    if (rc == 0)
+        pthread_join(th, NULL);
+    SD_CHECK("bounded lock: free mutex answers true", rc == 0 && p.got);
+
+    bool zero = platform_mutex_lock_bounded_ns(&mu, 0);
+    SD_CHECK("bounded lock: zero wait on a free mutex locks", zero);
+    if (zero)
+        pthread_mutex_unlock(&mu);
+    SD_CHECK("bounded lock: NULL mutex answers false",
+             !platform_mutex_lock_bounded_ns(NULL, 1000000L));
+    return failures;
+}
+
 /* The real dumper against the node.db the production path uses
  * (app_runtime_node_db(), installed through the same db_service +
  * app_runtime_set_current fixture the dbquery tests use), with PS and CSR
@@ -1204,6 +1260,7 @@ int test_stage_dump_trylock(void)
     failures += case_chain_evidence_busy_ingest();
     failures += case_chain_evidence_ingest_contention();
     failures += case_bounded_snapshot_ndb_mutex();
+    failures += case_platform_mutex_lock_bounded();
     failures += case_dumper_ndb_mutex_busy();
     failures += case_health_collect_ndb_busy();
     int clock_failures = atomic_load(&g_sdt_clock_failures);
