@@ -3741,7 +3741,9 @@ TEST_TSAN_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) -O
 	$(TSAN_COMMON_SAN_FLAGS) \
 	-Wno-deprecated-declarations -Wno-format-truncation $(ZCL_WARN_MAYBE_UNINITIALIZED) $(ZCL_TEST_RETURN_TYPE_GATE)
 TEST_TSAN_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(ZCL_DEV_LINKER) $(TSAN_COMMON_SAN_FLAGS)
-TEST_TSAN_EPOCH_COMPILE_FLAGS := $(strip $(TEST_TSAN_CFLAGS) $(ZCL_EPOCH_DEPFILE_ID))
+TEST_TSAN_EPOCH_COMPILE_FLAGS := $(strip $(TEST_TSAN_CFLAGS) \
+	dev-loader=$(HOTSWAP_TEST_LOADER_REL):$(HOTSWAP_TEST_LOADER_FLAGS) \
+	$(ZCL_EPOCH_DEPFILE_ID))
 TEST_TSAN_EPOCH_LINK_FLAGS := $(strip $(TEST_TSAN_LDFLAGS) $(TOR_LIBS) $(LIBS) $(GTK_LIBS) $(WEBKIT_LIBS) cxx=$(CXX))
 ifneq ($(filter test-tsan,$(ZCL_EPOCH_PROFILES)),)
 TEST_TSAN_COMPILE_EPOCH := $(call zcl_compile_epoch,test-tsan-v2,TEST_TSAN_EPOCH_COMPILE_FLAGS,TEST_TSAN_EPOCH_LINK_FLAGS)
@@ -11601,6 +11603,9 @@ $(DEV_ASAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: $(BUILD_IDENTITY_
 # (see the TEST_TSAN_* block above). -MMD -MP records the project include
 # closure inside the exact epoch; compiler search roots bind the rest.
 TEST_TSAN_OBJECT_CFLAGS = $(TEST_TSAN_CFLAGS)
+# Module mode: carry the real hot-swap loader like the fast, release and ASan
+# trees; without it the component receiver stories refuse with stage=release.
+$(TEST_TSAN_OBJ_DIR)/$(HOTSWAP_TEST_LOADER_REL): TEST_TSAN_OBJECT_CFLAGS += $(HOTSWAP_TEST_LOADER_FLAGS)
 $(TEST_TSAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: TEST_TSAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
 $(TEST_TSAN_OBJ_DIR)/tests/harness/src/test_arena_view.o: TEST_TSAN_OBJECT_CFLAGS += \
   $(ARENA_VIEW_INCLUDES)
