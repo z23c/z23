@@ -49,7 +49,7 @@ struct data {
     uint64_t summary_at, fleet_at, requested_at;
     struct wallet_view view;
     char fleet[WALLET_TEXT_MAX];
-    bool address_pending, has_amount, no_receive, reused;
+    bool address_pending, has_amount, no_receive;
     uint64_t amount_zat;
     enum zapp_pay_network network;
     char address[ZAPP_PAY_ADDRESS_MAX], code[ZAPP_RECEIVE_CODE_MAX], note[NOTE_MAX], scan_note[NOTE_MAX];
@@ -241,8 +241,6 @@ static void receive_items(struct wallet_screen *s)
         }
     } else if (d->address_pending) line(s, "Loading the address…");
     if (!d->no_receive) button(s, WALLET_ACT_NEW_ADDRESS, "New address");
-    if (shown && d->reused && !d->no_receive) note(s, "This address may have been shown before. Tap New address for one that has not.");
-    else if (shown && d->reused) note(s, "This address may have been shown before.");
     if (d->note[0]) note(s, d->note);
     (void)add(s, WALLET_ITEM_INPUT, WALLET_ACT_NONE, "Amount in ZCL (optional)");
     button(s, WALLET_ACT_SET_AMOUNT, "Set amount");
@@ -501,13 +499,12 @@ static void rebuild_code(void)
     copy(d->note, sizeof(d->note), "A code could not be made for this address. Tap New address.");
 }
 
-static void show_address(const char *address, bool reused)
+static void show_address(const char *address)
 {
     st.d.note[0] = '\0';
     if (!private_network(address, &st.d.network)) copy(st.d.note, sizeof(st.d.note), "The wallet returned an address that is not private, so it is not shown. Tap New address.");
     else {
         copy(st.d.address, sizeof(st.d.address), address);
-        st.d.reused = reused;
         rebuild_code();
     }
 }
@@ -521,7 +518,7 @@ static void apply_address(bool ok, bool missing, bool latest, const char *json)
     json_init(&root);
     data = ok && json && json_read(&root, json, strlen(json)) ? data_of(&root) : NULL;
     address = text_of(data, "address");
-    if (address && address[0] && strlen(address) < sizeof(st.d.address)) show_address(address, latest);
+    if (address && address[0] && strlen(address) < sizeof(st.d.address)) show_address(address);
     else if (data && latest && typed(data, "address", JSON_NULL)) copy(st.d.note, sizeof(st.d.note), "This wallet has no receive address yet. Tap New address.");
     else if (latest && missing) copy(st.d.note, sizeof(st.d.note), "This node cannot report its latest address yet. Tap New address to make one.");
     else if (latest) copy(st.d.note, sizeof(st.d.note), "The latest address could not be read. Check that your node is running, or tap New address.");
@@ -891,7 +888,6 @@ static size_t new_address(struct job *jobs)
     memory_cleanse(st.d.address, sizeof(st.d.address));
     memory_cleanse(st.d.code, sizeof(st.d.code));
     st.d.note[0] = '\0';
-    st.d.reused = false;
     st.d.address_pending = true;
     touch();
     return count;

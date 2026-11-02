@@ -30,9 +30,9 @@
  *            refuses_send, machines_total, machines_connected, local_tip and machines[] of {name,
  *            connected, agreement (agrees | phone_behind | machine_behind | disagree | unknown)}. The
  *            line says that sending waits only when the node's own refuses_send is true.
- *   latest   {"address":"zs1..." | null} from the read-only node command `core wallet shielded latest`. It
- *            answers with an address that may have been shown before, and the screen says so. A node
- *            without the command is told apart from an error, and Receive offers New address.
+ *   latest   {"address":"zs1..." | null} from the read-only node command `core wallet shielded latest`. It names the
+ *            most recent address and not whether that address has received a payment, so the screen makes no claim
+ *            about reuse. A node without the command is told apart from an error, and Receive offers New address.
  *   receive  {"address":"zs1..."} from `core wallet shielded receive`. A node without the command gets one
  *            sentence saying this build cannot make a new address, and no New address button.
  *   history  zcl.wallet_history.v1: entries[] of {txid, status (confirmed | pending), time, direction

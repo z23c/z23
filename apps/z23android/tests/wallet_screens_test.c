@@ -508,7 +508,7 @@ static void test_receive(void)
     CHECK(qr >= 0 && !strcmp(text_at(s, qr), A1) && address >= 0);
     CHECK(!strncmp(text_at(s, address), "zs1 qqqq qqqq", 13) && find_text(s, "diversified") < 0);
     CHECK(find(s, WALLET_ITEM_INPUT, WALLET_ACT_NONE) >= 0 && find(s, WALLET_ITEM_BUTTON, WALLET_ACT_NEW_ADDRESS) >= 0);
-    CHECK(has("may have been shown before"));                               /* the latest address is not a fresh one */
+    CHECK(!has("may have been shown") && !has("shown before"));            /* the reply cannot say the address was used, so no note claims it */
 
     wallet_screens_close();
 }
@@ -540,7 +540,7 @@ static void test_receive_new_address(void)
     tap(WALLET_ACT_NEW_ADDRESS, 0, WALLET_STAY);                    /* only this makes an address, and the amount stays */
     s = snap();
     CHECK(count_ops("receive") == 1 && count_ops("latest") == 1);
-    CHECK(!has("may have been shown before"));                              /* an address made by the tap is fresh */
+    CHECK(!has("may have been shown") && !has("shown before"));
     CHECK(!strcmp(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), "zclassic:" A2 "?amount=0.00000001") && find_text(s, A1) < 0);
 
     CHECK(wallet_screens_back() && snap()->page == WALLET_PAGE_FUNDS);   /* leaving wipes the address from the screens */
@@ -1095,9 +1095,9 @@ static void test_receive_order(void)
     CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
     struct wallet_screen *s = snap();
     long qr = find(s, WALLET_ITEM_QR, WALLET_ACT_NONE), address = find(s, WALLET_ITEM_ADDRESS, WALLET_ACT_NONE);
-    long button = find(s, WALLET_ITEM_BUTTON, WALLET_ACT_NEW_ADDRESS), shown = find_text(s, "may have been shown before");
+    long button = find(s, WALLET_ITEM_BUTTON, WALLET_ACT_NEW_ADDRESS);
     long input = find(s, WALLET_ITEM_INPUT, WALLET_ACT_NONE);
-    CHECK(qr >= 0 && address > qr && button > address && shown > button && input > shown);
+    CHECK(qr >= 0 && address > qr && button > address && input > button && find_text(s, "shown before") < 0);
     wallet_screens_close();
 }
 
