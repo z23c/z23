@@ -291,6 +291,10 @@ static int cphw_ext_probe(const char *sig, char *sink, size_t cap,
     unsigned char buf[CPHW_IDXCAP];
     size_t n = cphw_idx_build(buf, sig);
     char path[64];
+    /* A freshly synced tree has no test-tmp/ until a test run makes it. */
+    int mrc = csr_mkdirs("test-tmp");
+    if (mrc != 0)
+        return mrc;
     memcpy(path, "test-tmp/cph_idxext_XXXXXX", 27);
     int fd = mkstemp(path);
     if (fd < 0)
