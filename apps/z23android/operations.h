@@ -26,6 +26,8 @@ struct zapp_runtime {
     enum zapp_pace pace;
     /* Forwards the node console log to logcat and tracks its boot stage. */
     struct zapp_nodelog log;
+    /* The largest app-console.log kept before it is rotated or truncated; 0 means ZAPP_CONSOLE_CAP. Tests set it small. */
+    off_t console_cap;
     /* The last direct node query failed and its reason is logged; cleared by the next success. */
     atomic_bool direct_reported;
     /* A wallet setup command is running: the node is not started until it ends. */

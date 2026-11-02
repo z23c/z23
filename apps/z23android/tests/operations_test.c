@@ -319,16 +319,44 @@ static void params_argument_cases(struct zapp_runtime *r, const char *directory)
     assert(rmdir(dir) == 0);
     start_expecting(r, "none");
 }
+/* The console log is 300 bytes and the cap for these cases is 256, so spawn must move it to .1 and start a new file. */
+static char oversize[300];
+static void console_before(struct zapp_runtime *r, const char *directory)
+{
+    char log[300], rotated[300];
+    r->console_cap = 256;
+    assert(snprintf(log, sizeof(log), "%s/app-console.log", directory) > 0);
+    assert(snprintf(rotated, sizeof(rotated), "%s/app-console.log.1", directory) > 0);
+    FILE *f = fopen(rotated, "w");
+    assert(f && fputs("older run\n", f) >= 0 && fclose(f) == 0);
+    memset(oversize, 'x', sizeof(oversize) - 1);
+    oversize[sizeof(oversize) - 1] = 0;
+    f = fopen(log, "w");
+    assert(f && fprintf(f, "%s\n", oversize) == (int)sizeof(oversize) && fclose(f) == 0);
+}
+static void console_after(const char *directory)
+{
+    char log[300], rotated[300];
+    struct stat st;
+    assert(snprintf(log, sizeof(log), "%s/app-console.log", directory) > 0);
+    assert(snprintf(rotated, sizeof(rotated), "%s/app-console.log.1", directory) > 0);
+    assert(stat(rotated, &st) == 0 && st.st_size == (off_t)sizeof(oversize));
+    assert(stat(log, &st) == 0 && st.st_size < 256);
+    assert(unlink(rotated) == 0);
+}
+
 static void node_cases(struct zapp_runtime *r, const char *self, const char *directory)
 {
     char out[128];
     assert(snprintf(r->directory, sizeof(r->directory), "%s", directory) > 0);
     assert(snprintf(r->state_root, sizeof(r->state_root), "%s/missing", directory) > 0);
     assert(setenv("ZAPP_TEST_STATE", r->state_root, 1) == 0);
+    console_before(r, directory);
     assert(zapp_node_start(r, out, sizeof(out)) && strstr(out, "could not save") && !zapp_node_wanted(r));
     int status;
     assert(waitpid(r->node, &status, 0) == r->node && WIFEXITED(status) && WEXITSTATUS(status) == 0);
     r->node = 0;
+    console_after(directory);
     assert(snprintf(r->state_root, sizeof(r->state_root), "%s", directory) > 0);
     assert(setenv("ZAPP_TEST_STATE", r->state_root, 1) == 0);
     assert(!zapp_node_wanted(r));

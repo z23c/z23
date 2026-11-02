@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 #ifdef __ANDROID__
@@ -222,16 +223,39 @@ static bool node_alive(pid_t pid)
     return kill(pid, 0) == 0;
 }
 
+/* Keeps the console log at or under the cap. Past it, the bytes not yet forwarded are forwarded first, then the file is
+ * truncated to 0 and the read offset goes back to 0. The node's descriptor is O_APPEND, so its next write lands at the new end
+ * of the file and the line it completes is forwarded as usual. A write made after the last byte forwarded and before the
+ * truncation is lost; that window is a few microseconds. */
+static void keep_within_cap(struct zapp_nodelog *l, int fd, struct splitter *s, char *buf, size_t bufsize)
+{
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= l->cap) return;
+    off_t pos = lseek(fd, 0, SEEK_CUR);
+    while (pos >= 0 && pos < st.st_size) {
+        size_t want = (size_t)(st.st_size - pos) < bufsize ? (size_t)(st.st_size - pos) : bufsize;
+        ssize_t got = read(fd, buf, want);
+        if (got <= 0) break;
+        split(l, s, buf, (size_t)got);
+        pos += got;
+    }
+    if (ftruncate(fd, 0) != 0) return;
+    l->offset = 0;
+    lseek(fd, 0, SEEK_SET);
+}
+
 static void *tail_main(void *arg)
 {
     struct zapp_nodelog *l = arg;
-    int fd = open(l->file, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    /* Read-write only so the reader can truncate through the same descriptor it reads. */
+    int fd = open(l->file, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return NULL;
     struct splitter s = {0};
     char buf[2048];
     bool last = false;
     if (lseek(fd, l->offset, SEEK_SET) < 0) { close(fd); return NULL; }
     for (;;) {
+        keep_within_cap(l, fd, &s, buf, sizeof(buf));
         ssize_t got = read(fd, buf, sizeof(buf));
         if (got > 0) { split(l, &s, buf, (size_t)got); continue; }
         if (last) break;
@@ -251,17 +275,28 @@ void zapp_nodelog_stop(struct zapp_nodelog *l)
     l->started = false;
 }
 
-bool zapp_nodelog_start(struct zapp_nodelog *l, const char *file, off_t offset, pid_t pid)
+bool zapp_nodelog_start(struct zapp_nodelog *l, const char *file, off_t offset, pid_t pid, off_t cap)
 {
     zapp_nodelog_stop(l);
     atomic_store(&l->stage, 0);
     atomic_store(&l->stop, false);
     l->window_count = 0;
     l->offset = offset;
+    l->cap = cap;
     l->pid = pid;
     if (snprintf(l->file, sizeof(l->file), "%s", file) >= (int)sizeof(l->file)) return false;
     l->started = pthread_create(&l->thread, NULL, tail_main, l) == 0;
     return l->started;
+}
+
+/* A rotated file keeps its name with ".1" appended; the path buffer holds the 1099 bytes the callers allow plus the suffix. */
+bool zapp_console_rotate(const char *file, off_t cap)
+{
+    struct stat st;
+    char rotated[1104];
+    if (lstat(file, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= cap) return true;
+    if (snprintf(rotated, sizeof(rotated), "%s.1", file) >= (int)sizeof(rotated)) return false;
+    return rename(file, rotated) == 0;
 }
 
 const char *zapp_nodelog_stage(struct zapp_nodelog *l)

@@ -299,6 +299,10 @@ static int spawn_node(struct zapp_runtime *r)
     char data[1100], log[1100];
     snprintf(data, sizeof(data), "-datadir=%s", r->directory);
     bool ok = path(log, sizeof(log), r->directory, "app-console.log");
+    off_t cap = r->console_cap > 0 ? r->console_cap : ZAPP_CONSOLE_CAP;
+    /* An oversize log moves to app-console.log.1 so the new file starts empty. A failed rename is not fatal: the reader
+     * still truncates the file once it passes the cap. */
+    if (ok) (void)zapp_console_rotate(log, cap);
     int fd = ok ? open(log, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
     off_t offset = fd >= 0 ? lseek(fd, 0, SEEK_END) : 0;
     int in = open("/dev/null", O_RDONLY | O_CLOEXEC);
@@ -317,7 +321,7 @@ static int spawn_node(struct zapp_runtime *r)
     int rc = fd >= 0 && in >= 0 ? spawn_redirect(r, argv, in, fd, &r->node) : EIO;
     if (fd >= 0) close(fd);
     if (in >= 0) close(in);
-    if (!rc) (void)zapp_nodelog_start(&r->log, log, offset < 0 ? 0 : offset, r->node);
+    if (!rc) (void)zapp_nodelog_start(&r->log, log, offset < 0 ? 0 : offset, r->node, cap);
     return rc;
 }
 bool zapp_node_start(struct zapp_runtime *r, char *out, size_t cap)

@@ -12,6 +12,9 @@
 #define ZAPP_NODELOG_TAG "z23node"
 #define ZAPP_NODELOG_LINE_MAX 300
 #define ZAPP_NODELOG_PER_SECOND 20
+/* The node console log is kept at or under this many bytes. Spawn moves a larger one to <name>.1, and the
+ * running reader truncates it to 0 once it grows past the cap. */
+#define ZAPP_CONSOLE_CAP ((off_t)16 * 1024 * 1024)
 
 /* level is 0 for information and 1 for a warning or error. */
 typedef void (*zapp_nodelog_sink)(void *arg, int level, const char *text);
@@ -27,6 +30,8 @@ struct zapp_nodelog {
     atomic_bool stop;
     char file[1100];
     off_t offset;
+    /* The size past which the running reader truncates the file; set by zapp_nodelog_start. */
+    off_t cap;
     pid_t pid;
 };
 
@@ -35,8 +40,12 @@ void zapp_nodelog_init(struct zapp_nodelog *l, zapp_nodelog_sink sink, void *arg
 /* Handles one console line: records a boot stage and forwards the line when it explains progress,
  * at most ZAPP_NODELOG_PER_SECOND lines in each second of now_ms. */
 void zapp_nodelog_line(struct zapp_nodelog *l, const char *line, int64_t now_ms);
-/* Tails file from offset on a thread until pid exits or zapp_nodelog_stop runs. */
-bool zapp_nodelog_start(struct zapp_nodelog *l, const char *file, off_t offset, pid_t pid);
+/* Tails file from offset on a thread until pid exits or zapp_nodelog_stop runs. Whenever the file is larger than cap, the
+ * reader forwards the unread bytes, truncates the file to 0 and continues from 0. */
+bool zapp_nodelog_start(struct zapp_nodelog *l, const char *file, off_t offset, pid_t pid, off_t cap);
+/* Renames file to file.1, replacing any older file.1, when file is a regular file larger than cap, so that the next
+ * open of file starts empty. Other files are left alone. False when the rename fails. */
+bool zapp_console_rotate(const char *file, off_t cap);
 void zapp_nodelog_stop(struct zapp_nodelog *l);
 /* What the node is doing after the latest boot stage it reported, as a short plain phrase. */
 const char *zapp_nodelog_stage(struct zapp_nodelog *l);

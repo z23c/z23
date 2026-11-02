@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -177,7 +178,7 @@ static void tail_cases(const char *dir)
     struct zapp_nodelog l;
     count = 0;
     zapp_nodelog_init(&l, sink, NULL);
-    assert(zapp_nodelog_start(&l, file, offset, getpid()));
+    assert(zapp_nodelog_start(&l, file, offset, getpid(), ZAPP_CONSOLE_CAP));
     for (int i = 0; i < 40 && forwarded() < 1; i++) { struct timespec p = {.tv_nsec = 100000000}; nanosleep(&p, NULL); }
     assert(fputs("ERROR [boot] db failed\n", f) >= 0 && fclose(f) == 0);
     for (int i = 0; i < 40 && forwarded() < 2; i++) { struct timespec p = {.tv_nsec = 100000000}; nanosleep(&p, NULL); }
@@ -185,6 +186,68 @@ static void tail_cases(const char *dir)
     assert(count == 2 && strstr(seen[0], "datadir_locked") && !strcmp(seen[1], "ERROR [boot]"));
     assert(!strcmp(zapp_nodelog_stage(&l), "preparing cryptography"));
     assert(unlink(file) == 0);
+}
+
+static long file_size(const char *file)
+{
+    struct stat st;
+    return stat(file, &st) == 0 ? (long)st.st_size : -1;
+}
+static void pause_briefly(void)
+{
+    struct timespec p = {.tv_nsec = 100000000};
+    nanosleep(&p, NULL);
+}
+
+/* With a 256-byte cap, the reader forwards the unread oversize line, truncates the file to 0 and forwards the line written
+ * after that. */
+static void cap_truncates_and_resumes(const char *dir)
+{
+    char file[512], pad[300];
+    assert(snprintf(file, sizeof(file), "%s/cap-console.log", dir) > 0);
+    memset(pad, 'x', sizeof(pad) - 1);
+    pad[sizeof(pad) - 1] = 0;
+    FILE *f = fopen(file, "w");
+    /* Written before the reader starts, so the line is unread tail when the reader first checks the cap. */
+    assert(f && fprintf(f, "2026-11-02T00:16:08Z WARN [net] src/a.c:1 before(): %s\n", pad) > 256 && fclose(f) == 0);
+    struct zapp_nodelog l;
+    count = 0;
+    zapp_nodelog_init(&l, sink, NULL);
+    assert(zapp_nodelog_start(&l, file, 0, getpid(), 256));
+    for (int i = 0; i < 40 && file_size(file) != 0; i++) pause_briefly();
+    assert(file_size(file) == 0);
+    /* Appended as the node appends: the file is opened in append mode, so the line lands at the new end. */
+    f = fopen(file, "a");
+    assert(f && fputs("2026-11-02T00:16:09Z WARN [net] src/b.c:2 after(): restarted\n", f) >= 0 && fclose(f) == 0);
+    for (int i = 0; i < 40 && forwarded() < 2; i++) pause_briefly();
+    zapp_nodelog_stop(&l);
+    assert(count == 2 && !strcmp(seen[0], "WARN [net] before()") && !strcmp(seen[1], "WARN [net] after()"));
+    assert(unlink(file) == 0);
+}
+
+/* A file under the cap is not touched. */
+static void under_cap_left_alone(const char *dir)
+{
+    char file[512];
+    assert(snprintf(file, sizeof(file), "%s/under-console.log", dir) > 0);
+    const char *small = "2026-11-02T00:16:10Z WARN [net] src/c.c:3 under(): small\n";
+    FILE *f = fopen(file, "w");
+    assert(f && fputs(small, f) >= 0 && fclose(f) == 0);
+    count = 0;
+    struct zapp_nodelog l;
+    zapp_nodelog_init(&l, sink, NULL);
+    assert(zapp_nodelog_start(&l, file, 0, getpid(), 256));
+    for (int i = 0; i < 40 && forwarded() < 1; i++) pause_briefly();
+    for (int i = 0; i < 3; i++) pause_briefly();
+    zapp_nodelog_stop(&l);
+    assert(count == 1 && !strcmp(seen[0], "WARN [net] under()") && file_size(file) == (long)strlen(small));
+    assert(unlink(file) == 0);
+}
+
+static void cap_cases(const char *dir)
+{
+    cap_truncates_and_resumes(dir);
+    under_cap_left_alone(dir);
 }
 
 int main(int argc, char **argv)
@@ -195,6 +258,7 @@ int main(int argc, char **argv)
     progress_words_do_not_leak();
     limit_cases();
     tail_cases(argv[1]);
+    cap_cases(argv[1]);
     puts("nodelog tests passed");
     return 0;
 }
