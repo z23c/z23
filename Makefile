@@ -247,6 +247,16 @@ ZCL_WARN_MAYBE_UNINITIALIZED = -Wno-maybe-uninitialized
 # is refused; take the hard limit instead of failing the nested run.
 ZCL_TEST_STACK_SETUP = { ulimit -s unlimited 2>/dev/null || ulimit -s "$$(ulimit -H -s)"; }
 endif
+# Sanitizer runs take a finite 1 GiB stack and, under TSan, no ASLR (see
+# t-tsan). macOS caps the hard stack limit near 64 MiB and has no setarch;
+# its TSan places shadow memory without disabling ASLR.
+ifeq ($(ZCL_HOST_OS),Darwin)
+ZCL_SANITIZER_STACK = ulimit -s "$$(ulimit -H -s)"
+ZCL_NO_ASLR =
+else
+ZCL_SANITIZER_STACK = ulimit -s 1048576
+ZCL_NO_ASLR = setarch -R
+endif
 # Generators execute on the build machine, independently of the artifact ABI.
 ZCL_BUILD_CC = $(CC)
 ifeq ($(ZCL_HOST_OS),Android)
@@ -4978,7 +4988,7 @@ zcode-package-asan: $(ZCODE_PACKAGE_BASE_ASAN_BIN) \
 		$(ZCODE_PACKAGE_SHA3_ASAN_BIN) $(ZCODE_PACKAGE_MLKEM_ASAN_BIN) $(ZCODE_PACKAGE_SLHDSA_ASAN_BIN) $(ZCODE_PACKAGE_CODEC_ASAN_BIN) \
 		$(BIN_DIR)/z23-package-verify
 	@$(CHECKOUT_LOCK_TOOL) foreground "$(CHECKOUT_LOCK)" -- \
-	  sh -c 'set -e; ulimit -s 1048576; \
+	  sh -c 'set -e; $(ZCL_SANITIZER_STACK); \
 	  export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1; \
 	  for t in $(ZCODE_PACKAGE_BASE_ASAN_BIN) $(ZCODE_PACKAGE_SHA3_ASAN_BIN) $(ZCODE_PACKAGE_MLKEM_ASAN_BIN) $(ZCODE_PACKAGE_SLHDSA_ASAN_BIN) $(ZCODE_PACKAGE_CODEC_ASAN_BIN); do \
 	    echo "zcode-package-asan: --- $$t ---"; "$$t"; \
@@ -5478,8 +5488,8 @@ t-asan:
 # ASan sweep: secrets_hygiene exited 127 on a missing z23-lint).
 t-asan-locked: $(TEST_ASAN_CANDIDATE) dev-package-verifier-ensure \
 	$(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT) $(BIN_DIR)/z23-lint
-	+@ulimit -s 1048576 && $(foreach g,$(T_ASAN_GROUPS),( $(call ZCL_TEST_BUILD_NEEDS,$(TEST_ASAN_ACTIVE),--only=$(g)) ) &&) :
-	@sh -c 'set -e; ulimit -s 1048576; \
+	+@$(ZCL_SANITIZER_STACK) && $(foreach g,$(T_ASAN_GROUPS),( $(call ZCL_TEST_BUILD_NEEDS,$(TEST_ASAN_ACTIVE),--only=$(g)) ) &&) :
+	@sh -c 'set -e; $(ZCL_SANITIZER_STACK); \
 	  export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1; \
 	  for g in $(T_ASAN_GROUPS); do \
 	    echo "t-asan: --- $$g ---"; \
@@ -5489,7 +5499,7 @@ t-asan-locked: $(TEST_ASAN_CANDIDATE) dev-package-verifier-ensure \
 asan-ci: $(TEST_ASAN_CANDIDATE) dev-package-verifier-ensure
 	@mkdir -p "$(BUILD_DIR)"
 	@$(CHECKOUT_LOCK_TOOL) foreground "$(CHECKOUT_LOCK)" -- \
-	  sh -c 'set -e; ulimit -s 1048576; \
+	  sh -c 'set -e; $(ZCL_SANITIZER_STACK); \
 	  export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1; \
 	  for g in $(ASAN_CI_GROUPS); do \
 	    echo "asan-ci: --- $$g ---"; \
@@ -5532,10 +5542,10 @@ t-tsan:
 
 t-tsan-locked: $(TEST_TSAN_CANDIDATE) dev-package-verifier-ensure \
 	$(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT) $(BIN_DIR)/z23-lint
-	+@ulimit -s 1048576 && ( $(call ZCL_TEST_BUILD_NEEDS,setarch -R $(TEST_TSAN_ACTIVE),--only=$(ONLY)) )
-	@sh -c 'ulimit -s 1048576 && \
+	+@$(ZCL_SANITIZER_STACK) && ( $(call ZCL_TEST_BUILD_NEEDS,$(ZCL_NO_ASLR) $(TEST_TSAN_ACTIVE),--only=$(ONLY)) )
+	@sh -c '$(ZCL_SANITIZER_STACK) && \
 	  TSAN_OPTIONS="suppressions=$(TSAN_SUPP_FILE):print_stacktrace=1" \
-	  exec setarch -R $(TEST_TSAN_ACTIVE) --only=$(ONLY)'
+	  exec $(ZCL_NO_ASLR) $(TEST_TSAN_ACTIVE) --only=$(ONLY)'
 
 # Opt-in sanitizer smoke: a small set of fast, thread-spawning groups under
 # test-tsan. Deliberately NOT wired into `make ci` — instrumented runs are
@@ -5552,11 +5562,11 @@ TSAN_CI_GROUPS ?= test_supervisor test_workpool test_mailbox test_parallel_range
 tsan-ci: $(TEST_TSAN_CANDIDATE) dev-package-verifier-ensure
 	@mkdir -p "$(BUILD_DIR)"
 	@$(CHECKOUT_LOCK_TOOL) foreground "$(CHECKOUT_LOCK)" -- \
-	  sh -c 'set -e; ulimit -s 1048576; \
+	  sh -c 'set -e; $(ZCL_SANITIZER_STACK); \
 	  export TSAN_OPTIONS="halt_on_error=1:print_stacktrace=1:suppressions=$(TSAN_SUPP_FILE)"; \
 	  for g in $(TSAN_CI_GROUPS); do \
 	    echo "tsan-ci: --- $$g ---"; \
-	    setarch -R $(TEST_TSAN_ACTIVE) --only=$$g; \
+	    $(ZCL_NO_ASLR) $(TEST_TSAN_ACTIVE) --only=$$g; \
 	  done; \
 	  echo "tsan-ci: OK ($(TSAN_CI_GROUPS))"'
 
