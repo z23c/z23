@@ -163,6 +163,7 @@ void wallet_free(struct wallet *w)
     w->num_sapling_notes = 0;
     w->sapling_notes_cap = 0;
     keystore_free(&w->keystore);
+    sapling_keystore_free(&w->sapling_keys);
     zcl_mutex_destroy(&w->cs);
 }
 

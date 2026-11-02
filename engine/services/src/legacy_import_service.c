@@ -43,6 +43,7 @@
 #include <time.h>
 #include <pthread.h>
 #include "services/scan_util.h"
+#include "support/cleanse.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "util/thread_registry.h"
@@ -505,6 +506,10 @@ static void legacy_import_release_sapling_contexts(
 {
     if (dctxs) {
         for (int f = 0; f < num_files; f++) {
+            /* A struct copy of the caller's Sapling keystore: seed and spending
+             * keys, never to reach the allocator unwiped. */
+            memory_cleanse(&dctxs[f].tw.sapling_keys,
+                           sizeof(dctxs[f].tw.sapling_keys));
             free(dctxs[f].results);
             free(dctxs[f].tw.sapling_notes);
         }
