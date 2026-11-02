@@ -1402,9 +1402,14 @@ int t_swarm_peer_offer(void)
     struct sw_pkg p;
     uint8_t key[33];
     sw_key(77, key);
-    if (!sw_node_open(&n, "offer", sw_score_contributor) ||
-        !sw_make_package(&p, 2, 91))
+    if (!sw_node_open(&n, "offer", sw_score_contributor))
         return 1;
+    if (!sw_make_package(&p, 2, 91)) {
+        sw_free_package(&p);
+        sw_node_close(&n);
+        test_rm_rf_recursive(n.datadir);
+        return 1;
+    }
     const uint64_t pid = 7701;
     const uint64_t evidence_expiry = 50;
 
@@ -1473,5 +1478,8 @@ int t_swarm_peer_offer(void)
     }
     SW_CHECK("fill bounded at capacity minus held root",
              filled == VCS_SWARM_MAX_PEER_ADS - 1);
+    sw_free_package(&p);
+    sw_node_close(&n);
+    test_rm_rf_recursive(n.datadir);
     return failures;
 }

@@ -1758,10 +1758,18 @@ static void zwn_link_free(struct zwn_link *l)
     if (!l || !l->node)
         return;
     if (l->sentinel) {
+        /* Segments queued behind the sentinel were never pumped to the
+         * peer; this link owns them, so release each one here. */
+        struct send_segment *seg = l->sentinel->next;
+        while (seg) {
+            struct send_segment *next = seg->next;
+            send_segment_free(seg);
+            seg = next;
+        }
+        l->sentinel->next = NULL;
         send_segment_free(l->sentinel);
         l->node->send_head = NULL;
         l->node->send_tail = NULL;
-        l->node->recv_msg_count = 0;
     }
     p2p_node_free(l->node);
     l->node = NULL;
@@ -5265,6 +5273,7 @@ static int zwn_t_late_joiner_announce_discovery(
         ASSERT(b.chunk_data_replies[0] > replies_before);
         ASSERT(zwn_store_matches(c.store, &pkg));
         ASSERT(c_b.node->misbehavior == 0);
+        zwn_free_package(&pkg);
         PASS();
     } _test_next:
     zwn_fixture_cleanup(&fixture);
@@ -7037,6 +7046,14 @@ static bool zwn_pull_fixture_create(struct zwn_pull_fixture *f,
     return ok;
 }
 
+/* Release the transport the pull fixture built; it owns the authority,
+ * manifest, recipe and source bytes. */
+static void zwn_pull_fixture_free(struct zwn_pull_fixture *f)
+{
+    if (f)
+        vcs_source_package_transport_free(&f->transport);
+}
+
 /* Put the package into the observer's datadir store, as the swarm would. */
 static bool zwn_pull_hold(const struct zwn_pull_fixture *f)
 {
@@ -7428,6 +7445,7 @@ static int zwn_t_work_pull_receipt_library(void)
                                                   root);
         vcs_package_store_close(store);
     }
+    zwn_pull_fixture_free(&f);
     memory_cleanse(secret, sizeof(secret));
     return failures;
 }
@@ -7653,6 +7671,7 @@ static int zwn_t_work_pull_leaf_held(void)
     node_rpc_client_set_test_hook(NULL);
     zcl_native_zcode_discovery_test_backend(NULL, NULL);
     zwn_pull_leaf_fixture = NULL;
+    zwn_pull_fixture_free(&f);
     return failures;
 }
 
@@ -7690,6 +7709,7 @@ static int zwn_t_work_pull_leaf_settle(void)
     node_rpc_client_set_test_hook(NULL);
     zcl_native_zcode_discovery_test_backend(NULL, NULL);
     zwn_pull_leaf_fixture = NULL;
+    zwn_pull_fixture_free(&f);
     return failures;
 }
 
@@ -7749,6 +7769,7 @@ static int zwn_t_work_pull_leaf_pending(void)
         PASS();
     } _test_next:;
     zwn_pull_leaf_backends_reset();
+    zwn_pull_fixture_free(&f);
     return failures;
 }
 
@@ -7785,6 +7806,7 @@ static int zwn_t_work_pull_leaf_pointer_rules(void)
         PASS();
     } _test_next:;
     zwn_pull_leaf_backends_reset();
+    zwn_pull_fixture_free(&f);
     return failures;
 }
 

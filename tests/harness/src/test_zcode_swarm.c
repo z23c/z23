@@ -285,11 +285,17 @@ bool sw_node_open(struct sw_node *n, const char *tag,
     n->store = vcs_package_store_open(
         n->datadir, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
     n->book = vcs_service_book_load(n->zcode_dir);
-    if (!n->store || !n->book)
+    if (!n->store || !n->book) {
+        sw_node_close(n);
         return false;
+    }
     n->engine = vcs_swarm_engine_create(n->store, n->book, n->zcode_dir,
                                         score_fn, NULL);
-    return n->engine != NULL;
+    if (!n->engine) {
+        sw_node_close(n);
+        return false;
+    }
+    return true;
 }
 
 void sw_node_close(struct sw_node *n)
