@@ -327,7 +327,7 @@ test-devkey:
 test-setup:
 	@mkdir -p '$(BUILD_DIR)'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread -I. -I../../platform/modules/sha3/include -I../../platform/modules/json/include -I../../platform/modules/base/include \
-	  tests/setup_test.c setup_words.c setup_state.c setup_node.c wallet_setup.c device_key.c ../../platform/modules/sha3/src/sha3.c $(SPEECH_JSON) -o '$(BUILD_DIR)/setup-test'
+	  tests/setup_test.c setup_words.c setup_state.c setup_node.c wallet_setup.c device_key.c ../../platform/modules/sha3/src/sha3.c $(SPEECH_JSON) -Wl,--wrap=free -o '$(BUILD_DIR)/setup-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/setup-test.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/setup-test' "$$(cd "$$scratch" && pwd)"
 	@if grep -nE '(^|[^a-z_])(printf|fprintf|puts|fputs|perror|syslog)\(|nodelog|__android_log' setup_words.c setup_state.c setup_node.c wallet_setup.c wallet_setup_ui.c; then \

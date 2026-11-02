@@ -7,6 +7,7 @@
 #include "wallet_setup.h"
 #include <assert.h>
 #include <errno.h>
+#include <malloc.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -215,6 +216,43 @@ static void error_reply(struct script *s, const char *code)
 #define CREATED_NO_BIRTHDAY "{\"ok\":true,\"data\":{\"phrase\":\"" PHRASE "\",\"birthday_recorded\":false}}"
 
 /* The node's log lines share the stream with its reply. */
+/* While a reply is read, every block that held the recovery phrase is overwritten before it is freed, and none is left behind. */
+void __real_free(void *p);
+void __wrap_free(void *p);
+static bool watching, freed_unwiped;
+void __wrap_free(void *p)
+{
+    static const char marker[] = "alpha bravo charlie";
+    if (watching && p && memmem(p, malloc_usable_size(p), marker, sizeof(marker) - 1)) freed_unwiped = true;
+    __real_free(p);
+}
+static void node_reply_wipe_tests(void)
+{
+    static const char *const streams[] = {
+        CREATED "\n" CREATED "\n",
+        CREATED "\n{\"ok\":true,\"data\":{\"phrase\":\"" PHRASE "\"}}\n",
+        "{\"ok\":true,\"data\":{\"phrase\":\"" PHRASE "\"}}\n" CREATED "\n[boot] done\n",
+        CREATED "\n[boot] done\n",
+        "[boot] start\n" CREATED "\n",
+    };
+    struct script s = {0};
+    struct sun node = node_of(&s);
+    struct sun_created c;
+    /* Each stream once first, so what the allocator keeps for itself is not counted. */
+    for (size_t i = 0; i < sizeof(streams) / sizeof(streams[0]); ++i) {
+        script_say(&s, true, streams[i]);
+        (void)sun_create(&node, PASS64, &c);
+    }
+    for (size_t i = 0; i < sizeof(streams) / sizeof(streams[0]); ++i) {
+        script_say(&s, true, streams[i]);
+        size_t before = mallinfo2().uordblks;
+        freed_unwiped = false;
+        watching = true;
+        (void)sun_create(&node, PASS64, &c);
+        watching = false;
+        assert(!freed_unwiped && mallinfo2().uordblks == before);
+    }
+}
 static void node_stream_tests(void)
 {
     struct script s = {0};
@@ -1411,6 +1449,7 @@ int main(int argc, char **argv)
     state_tests();
     node_tests();
     node_stream_tests();
+    node_reply_wipe_tests();
     node_restore_tests();
     node_hash_tests();
     create_tests();
