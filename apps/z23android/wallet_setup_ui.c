@@ -300,8 +300,8 @@ static const struct { enum wsu_failure failure; const char *text; } failure_text
     {WSU_REFUSED, "The node refused the request. Nothing was changed."},
     {WSU_UNKNOWN, "The node did not give a usable answer. A wallet may have been started; its words cannot be shown again."},
     {WSU_NOT_RECORDED, "The wallet exists but this app could not record that setup finished."},
-    {WSU_NO_TIP, "The node did not learn the current chain tip in time, so no wallet was made. Check the connection and try again."},
-    {WSU_NO_BIRTHDAY, "Your words were confirmed, but the wallet recorded no start height, so setup is not finished. Keep your written words. Check again tries once more."},
+    {WSU_NO_TIP, "The node has not yet read enough of the chain to give a new wallet a start height, so no wallet was made. Check the connection and try again."},
+    {WSU_NO_BIRTHDAY, "Your words were confirmed, but the wallet recorded no start height, so setup is not finished. Check again tries once more. Start over sets this wallet aside, only if the node shows it holds nothing, and begins a new one; nothing is deleted."},
     {WSU_NOT_RUN, "The wallet command could not start. Nothing was changed."},
     {WSU_NOT_CREATE, "Start over is only for a new wallet whose words were not confirmed. This wallet was restored from words."},
     {WSU_NOT_EMPTY, "The node reports funds or transactions in this wallet, so it is not set aside."},
@@ -373,9 +373,14 @@ static void draw_reading(JNIEnv *env, const struct wsu_view *v, bool known, int6
 static void draw_failed_buttons(JNIEnv *env, enum wsu_failure failure)
 {
     if (failure == WSU_ASIDE_STUCK) return;
-    if (failure == WSU_NOT_RECORDED) (void)button_view(env, B_SAVE_AGAIN, "Save again", GO_COLOR);
-    else if (failure == WSU_UNKNOWN || failure == WSU_NO_BIRTHDAY) (void)button_view(env, B_RECHECK, "Check again", BUTTON_COLOR);
-    else (void)button_view(env, B_BACK, "Try again", BUTTON_COLOR);
+    if (failure == WSU_NOT_RECORDED) {
+        (void)button_view(env, B_SAVE_AGAIN, "Save again", GO_COLOR);
+    } else if (failure == WSU_UNKNOWN || failure == WSU_NO_BIRTHDAY) {
+        (void)button_view(env, B_RECHECK, "Check again", BUTTON_COLOR);
+        if (failure == WSU_NO_BIRTHDAY) (void)button_view(env, B_START_OVER_ASK, "Start over", BUTTON_COLOR);
+    } else {
+        (void)button_view(env, B_BACK, "Try again", BUTTON_COLOR);
+    }
 }
 /* The screens after a restart: no wallet, the start over warning, the check, and a wallet whose words were not confirmed. */
 static void draw_interrupted(JNIEnv *env, const struct wsu_view *v)
@@ -527,10 +532,10 @@ void zapp_setup_ui_dropped(JNIEnv *env)
     ui.version++;
     zapp_setup_ui_render(env);
 }
-bool zapp_setup_ui_hit(JNIEnv *env, float x, float y, size_t *button)
+bool zapp_setup_ui_hit(JNIEnv *env, float x, float y, size_t *button, unsigned *id)
 {
     for (size_t i = 0; i < ui.button_count; ++i)
-        if (zj_hit(env, ui.buttons[i], x, y)) { *button = i; return true; }
+        if (zj_hit(env, ui.buttons[i], x, y)) { *button = i; *id = (unsigned)ui.button_id[i]; return true; }
     return false;
 }
 

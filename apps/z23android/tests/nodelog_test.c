@@ -133,6 +133,7 @@ static void progress_words_do_not_leak(void)
     /* Level and progress words match whole words only, and the Tor domain alone is not progress. */
     zapp_nodelog_line(&l, "ERRORS zs1qqqq", 3005);
     zapp_nodelog_line(&l, "x.c:1 WARNED about zs1qqqq", 3006);
+    zapp_nodelog_line(&l, "NOERROR zs1qqqq", 3006);
     zapp_nodelog_line(&l, "2026-11-02T00:16:08Z INFO [net] w.c:1 f(): handshakes zs1qqqq", 3007);
     zapp_nodelog_line(&l, "2026-11-02T00:16:08Z INFO [tor] circuit built", 3008);
     assert(count == 0);

@@ -54,7 +54,7 @@ void wsu_view_read(struct wsu *w, struct wsu_view *out)
     out->protected = w->protected;
     out->mismatches = w->mismatches;
     out->birthday_unknown = !w->birthday.known;
-    out->may_start_over = w->kind == ZAPP_KIND_CREATE && !w->confirmed;
+    out->may_start_over = w->kind == ZAPP_KIND_CREATE && (!w->confirmed || !w->birthday.known);
     out->birthday_dropped = w->step == WSU_READING && !w->birthday_honoured;
     if (w->failure == WSU_ASIDE_STUCK) memcpy(out->leftover, w->leftover, sizeof(out->leftover));
     if (w->step == WSU_WORDS && w->protected) { out->words = w->held; out->start_height = w->birthday.known ? w->birthday.height : 0; }
@@ -208,12 +208,13 @@ static bool begin_job(struct wsu *w, enum wsu_step from)
     return start;
 }
 
-/* The new wallet starts reading at the node's chain tip, so a node that has not learned one makes no wallet. */
+/* The new wallet starts reading at the node's chain tip, and the node records that start only above SUN_BIRTHDAY_MARGIN blocks,
+ * so a node that has not reached that height makes no wallet. */
 static bool wait_for_tip(struct wsu *w)
 {
     for (unsigned i = 0; i < TIP_POLLS; ++i) {
         int64_t headers, blocks;
-        if (sun_chain_tip(&w->node, &headers, &blocks) && headers > 0 && blocks > 0) return true;
+        if (sun_chain_tip(&w->node, &headers, &blocks) && headers > SUN_BIRTHDAY_MARGIN && blocks > SUN_BIRTHDAY_MARGIN) return true;
         w->env.pause_ms(w->env.ctx, TIP_POLL_MS);
     }
     return false;
@@ -263,7 +264,11 @@ void wsu_create_job(struct wsu *w)
     bool was_running = w->env.node_running(w->env.ctx);
     if (!tip_ready(w, was_running)) return;
     enum wsu_failure failure = new_passphrase(w, secret, hex);
-    if (failure != WSU_NO_FAILURE) { set_step(w, WSU_FAILED, failure); goto out; }
+    if (failure != WSU_NO_FAILURE) {
+        if (!was_running) (void)stop_node(w);
+        set_step(w, WSU_FAILED, failure);
+        goto out;
+    }
     enum sun_result result = create_run(w, hex, &created);
     if (result != SUN_OK) { end_failed(w, failure_of_node(result), was_running); goto out; }
     create_succeeded(w, &created);
@@ -488,18 +493,35 @@ void wsu_set_aside_job(struct wsu *w)
     set_step(w, failure == WSU_NO_FAILURE ? WSU_CHOICE : WSU_FAILED, failure);
 }
 
+/* Whether the owner proved the words of a create. A confirmation record that kept no start height does not count: that wallet has
+ * no start to write down, setup cannot finish, and Start over (which still requires an empty wallet) is its way forward. */
+static bool words_proved(struct wsu *w)
+{
+    if (zapp_setup_state(w->files) == ZAPP_SETUP_READY) return true;
+    if (zapp_setup_confirmed(w->files)) return zapp_setup_confirmed_start(w->files);
+    return w->confirmed;
+}
+
 bool wsu_ask_start_over(struct wsu *w)
 {
     enum zapp_setup_kind kind = zapp_setup_kind_read(w->files);
+    bool proved = words_proved(w);
     pthread_mutex_lock(&w->lock);
-    bool ok = w->step == WSU_BLOCKED && (w->failure == WSU_NO_FAILURE || w->failure == WSU_COULD_NOT_CHECK || w->failure == WSU_NODE_BUSY);
-    enum wsu_failure why = kind != ZAPP_KIND_CREATE ? WSU_NOT_CREATE :
-                           (w->confirmed || zapp_setup_confirmed(w->files) || zapp_setup_state(w->files) == ZAPP_SETUP_READY) ? WSU_ALREADY_CONFIRMED : WSU_NO_FAILURE;
+    bool blocked = w->step == WSU_BLOCKED && (w->failure == WSU_NO_FAILURE || w->failure == WSU_COULD_NOT_CHECK || w->failure == WSU_NODE_BUSY);
+    bool ok = blocked || (w->step == WSU_FAILED && w->failure == WSU_NO_BIRTHDAY);
+    enum wsu_failure why = kind != ZAPP_KIND_CREATE ? WSU_NOT_CREATE : proved ? WSU_ALREADY_CONFIRMED : WSU_NO_FAILURE;
     if (ok) { w->step = why == WSU_NO_FAILURE ? WSU_START_OVER : WSU_BLOCKED; w->failure = why; }
     pthread_mutex_unlock(&w->lock);
     return ok && why == WSU_NO_FAILURE;
 }
-void wsu_cancel_start_over(struct wsu *w) { move(w, WSU_START_OVER, WSU_BLOCKED); }
+/* Back to the screen the warning came from: a wallet that recorded no start height returns to saying so. */
+void wsu_cancel_start_over(struct wsu *w)
+{
+    bool no_start = zapp_setup_confirmed(w->files) && !zapp_setup_confirmed_start(w->files);
+    pthread_mutex_lock(&w->lock);
+    if (w->step == WSU_START_OVER) { w->step = no_start ? WSU_FAILED : WSU_BLOCKED; w->failure = no_start ? WSU_NO_BIRTHDAY : WSU_NO_FAILURE; }
+    pthread_mutex_unlock(&w->lock);
+}
 
 /* Whether the running node reports an empty wallet; starts the node when needed and waits for an answer. */
 static enum wsu_idle wallet_idle(struct wsu *w)
@@ -516,7 +538,7 @@ static enum wsu_idle wallet_idle(struct wsu *w)
 static enum wsu_failure start_over_refusal(struct wsu *w)
 {
     if (zapp_setup_kind_read(w->files) != ZAPP_KIND_CREATE) return WSU_NOT_CREATE;
-    if (zapp_setup_confirmed(w->files) || zapp_setup_state(w->files) == ZAPP_SETUP_READY) return WSU_ALREADY_CONFIRMED;
+    if (words_proved(w)) return WSU_ALREADY_CONFIRMED;
     enum wsu_idle idle = wallet_idle(w);
     if (idle == WSU_IDLE_FUNDS) return WSU_NOT_EMPTY;
     return idle == WSU_IDLE_UNKNOWN ? WSU_COULD_NOT_CHECK : WSU_NO_FAILURE;
@@ -525,14 +547,25 @@ static enum wsu_failure start_over_refusal(struct wsu *w)
 void wsu_start_over_job(struct wsu *w)
 {
     pthread_mutex_lock(&w->lock);
-    bool go = w->step == WSU_START_OVER && !w->confirmed;
+    bool go = w->step == WSU_START_OVER;
     if (go) { w->step = WSU_WORKING; w->failure = WSU_NO_FAILURE; }
     pthread_mutex_unlock(&w->lock);
     if (!go) return;
     enum wsu_failure refusal = start_over_refusal(w);
     if (refusal == WSU_NO_FAILURE && !stop_node(w)) refusal = WSU_NODE_BUSY;
-    if (refusal != WSU_NO_FAILURE) { set_step(w, WSU_BLOCKED, refusal); return; }
+    if (refusal != WSU_NO_FAILURE) {
+        /* A wallet that recorded no start height returns to saying so, as Cancel does: the blocked screen would describe unconfirmed words. */
+        bool no_start = zapp_setup_confirmed(w->files) && !zapp_setup_confirmed_start(w->files);
+        set_step(w, no_start ? WSU_FAILED : WSU_BLOCKED, no_start ? WSU_NO_BIRTHDAY : refusal);
+        return;
+    }
     enum wsu_failure failure = set_aside_all(w, w->env.wall_s(w->env.ctx));
+    if (failure == WSU_NO_FAILURE) {
+        pthread_mutex_lock(&w->lock);
+        w->confirmed = false;
+        memset(&w->birthday, 0, sizeof(w->birthday));
+        pthread_mutex_unlock(&w->lock);
+    }
     set_step(w, failure == WSU_NO_FAILURE ? WSU_CHOICE : WSU_FAILED, failure);
 }
 

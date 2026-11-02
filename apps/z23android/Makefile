@@ -339,6 +339,11 @@ test-setup:
 	@sed -n '/^static bool input_view/,/^}/p' wallet_setup_ui.c | grep -q 'setCursorVisible", false' || { echo 'the word fields must hide the cursor so no insertion handle offers Paste' >&2; exit 1; }
 	@! grep -q 'nothing can have been sent' wallet_setup_ui.c || { echo 'the setup screens must not claim a wallet is empty' >&2; exit 1; }
 	@sed -n '/^static void draw_failed_buttons/,/^}/p' wallet_setup_ui.c | grep -q 'WSU_ASIDE_STUCK) return;' || { echo 'a wallet that could not be put back must be offered no button' >&2; exit 1; }
+	@margin=$$(sed -n 's/^#define WALLET_BIRTHDAY_MARGIN \([0-9][0-9]*\).*/\1/p' ../../contexts/wallet/models/include/models/wallet_key.h); \
+	  grep -q "^#define SUN_BIRTHDAY_MARGIN $$margin\$$" setup_node.h || { echo 'SUN_BIRTHDAY_MARGIN must equal WALLET_BIRTHDAY_MARGIN' >&2; exit 1; }
+	@grep -q 'blocks > SUN_BIRTHDAY_MARGIN' wallet_setup.c || { echo 'create must wait for a tip above the birthday margin' >&2; exit 1; }
+	@sed -n '/^static void draw_failed_buttons/,/^}/p' wallet_setup_ui.c | grep -q 'WSU_NO_BIRTHDAY) (void)button_view(env, B_START_OVER_ASK' || { echo 'a wallet with no start height must be offered Start over' >&2; exit 1; }
+	@sed -n '/^static bool by_button/,/^}/p' shell.c | grep -q 'TARGET_SETUP' || { echo 'a setup tap must be matched by button identity at release' >&2; exit 1; }
 	@grep -q 'ZAPP_FIELD_PRIVATE' wallet_setup_ui.c || { echo 'the word fields must be checked against ZAPP_FIELD_PRIVATE' >&2; exit 1; }
 	@sed -n '/^static void draw_words/,/^}/p' wallet_setup_ui.c | grep -q 'WSU_SCREEN_LOCK_NOTICE' || { echo 'the words screen must carry the screen lock notice' >&2; exit 1; }
 	@grep -q 'v->may_start_over' wallet_setup_ui.c || { echo 'Start over must be offered only for a create' >&2; exit 1; }

@@ -214,6 +214,41 @@ static void error_reply(struct script *s, const char *code)
                 "\"birthday_height\":2999000,\"birthday_hash\":\"" HASH "\"}}"
 #define CREATED_NO_BIRTHDAY "{\"ok\":true,\"data\":{\"phrase\":\"" PHRASE "\",\"birthday_recorded\":false}}"
 
+/* The node's log lines share the stream with its reply. */
+static void node_stream_tests(void)
+{
+    struct script s = {0};
+    struct sun node = node_of(&s);
+    struct sun_created c;
+    /* The node's log lines share the stream: before the reply, after it, or shaped like an object, none of them hides it. */
+    static const char *const streams[] = {
+        CREATED "\n",
+        "[boot]   sqlite.migrate               35ms\n" CREATED "\n",
+        CREATED "\n[boot] shutdown complete\n",
+        "{\"level\":\"warn\",\"text\":\"slow disk\"}\n" CREATED "\n[boot] done\n",
+        "{not json\n" CREATED,
+    };
+    for (size_t i = 0; i < sizeof(streams) / sizeof(streams[0]); ++i) {
+        script_say(&s, true, streams[i]);
+        assert(sun_create(&node, PASS64, &c) == SUN_OK && c.words.count == 24 && c.birthday.known);
+    }
+    /* Two objects that read as replies are no reply: a stray refusal must not stand for the create, and a stray result must not
+     * show another phrase. The result is unknown, which keeps the key and the files. */
+    static const char *const doubled[] = {
+        "{\"ok\":false,\"error\":{\"code\":\"DATADIR_LOCKED\"}}\n" CREATED "\n",
+        "{\"ok\":true,\"data\":{\"phrase\":\"" PHRASE "\"}}\n" CREATED "\n",
+        CREATED "\n{\"ok\":false,\"error\":{\"code\":\"DATADIR_LOCKED\"}}\n",
+    };
+    for (size_t i = 0; i < sizeof(doubled) / sizeof(doubled[0]); ++i) {
+        script_say(&s, true, doubled[i]);
+        assert(sun_create(&node, PASS64, &c) == SUN_UNKNOWN && c.words.count == 0);
+    }
+    /* Text after the object on its own line is not part of a reply. */
+    script_say(&s, true, CREATED " trailing");
+    assert(sun_create(&node, PASS64, &c) == SUN_UNKNOWN && c.words.count == 0);
+    script_say(&s, true, "{\"ok\":true,\"data\":{\"phrase\":\"" PHRASE "\",\"birthday_recorded\":false}}");
+    assert(sun_create(&node, PASS64, &c) == SUN_OK && !c.birthday.known);
+}
 static void node_tests(void)
 {
     struct script s = {0};
@@ -224,8 +259,6 @@ static void node_tests(void)
     assert(c.birthday.height == 2999000 && !strcmp(c.birthday.hash, HASH));
     assert(!strcmp(s.op, "create") && strstr(s.input, "\"passphrase\":\"" PASS64 "\"") && strstr(s.input, "/data/files/z23"));
     assert(!strstr(s.input, "alpha"));
-    script_say(&s, true, "{\"ok\":true,\"data\":{\"phrase\":\"" PHRASE "\",\"birthday_recorded\":false}}");
-    assert(sun_create(&node, PASS64, &c) == SUN_OK && !c.birthday.known);
     static const struct { const char *code; enum sun_result result; } codes[] = {
         {"DATADIR_LOCKED", SUN_NODE_RUNNING}, {"WALLET_ALREADY_PRESENT", SUN_ALREADY_PRESENT},
         {"NODE_DB_UNREADABLE", SUN_STORAGE}, {"NOT_RUN", SUN_NOT_RUN}, {"PASSPHRASE_TOO_SHORT", SUN_REFUSED}, {"CREATE_FAILED", SUN_UNKNOWN},
@@ -516,6 +549,50 @@ static void create_tip_tests(void)
     assert(w.failure == WSU_NO_TIP && f.wraps == 0 && f.stops == 0 && f.running);
     wsu_destroy(&w);
 }
+/* Only a tip above the node's birthday margin gives the new wallet a start height. */
+static void create_tip_margin_tests(void)
+{
+    struct fake f;
+    struct wsu w;
+    static const struct { const char *chain; bool created; } tips[] = {
+        {"{\"result\":{\"headers\":40,\"blocks\":40}}", false},
+        {"{\"result\":{\"headers\":100,\"blocks\":100}}", false},
+        {"{\"result\":{\"headers\":3000000,\"blocks\":100}}", false},
+        {"{\"result\":{\"headers\":100,\"blocks\":3000000}}", false},
+        {"{\"result\":{\"headers\":101,\"blocks\":101}}", true},
+    };
+    for (size_t i = 0; i < sizeof(tips) / sizeof(tips[0]); ++i) {
+        fresh(&f, &w, true);
+        snprintf(f.script.chain, sizeof(f.script.chain), "%s", tips[i].chain);
+        script_say(&f.script, true, CREATED);
+        wsu_create_job(&w);
+        if (tips[i].created) assert(w.step == WSU_WORDS && f.script.calls == 1);
+        else assert(w.step == WSU_FAILED && w.failure == WSU_NO_TIP && f.wraps == 0 && f.script.calls == 0);
+        wsu_destroy(&w);
+    }
+}
+/* A stray refusal before the real reply leaves the result unknown: the key and the wrapped blob stay, since the node may have made the wallet. */
+static void create_stray_refusal_keeps_key_test(void)
+{
+    struct fake f;
+    struct wsu w;
+    fresh(&f, &w, true);
+    script_say(&f.script, true, "{\"ok\":false,\"error\":{\"code\":\"DATADIR_LOCKED\"}}\n" CREATED "\n");
+    wsu_create_job(&w);
+    assert(w.step == WSU_FAILED && w.failure == WSU_UNKNOWN && f.discards == 0 && f.key_deletes == 0 && exists_in(dir, "wallet_key.blob"));
+    wsu_destroy(&w);
+}
+/* A node started for the tip is stopped again when the owner then declines to authenticate. */
+static void create_declined_stops_node_test(void)
+{
+    struct fake f;
+    struct wsu w;
+    fresh(&f, &w, false);
+    f.wrap_status = ZAPP_DEVKEY_DECLINED;
+    wsu_create_job(&w);
+    assert(w.step == WSU_FAILED && w.failure == WSU_DECLINED && f.starts == 1 && f.stops == 1 && !f.running);
+    wsu_destroy(&w);
+}
 /* A wallet that recorded no start height shows its words, and setup stays unfinished. */
 static void create_no_start_tests(void)
 {
@@ -643,7 +720,10 @@ static void start_over_tests(void)
     wsu_cancel_start_over(&w);
     assert(w.step == WSU_BLOCKED);
     assert(wsu_ask_start_over(&w));
+    w.birthday.known = true;
+    w.birthday.height = 7;
     wsu_start_over_job(&w);
+    assert(!w.birthday.known && w.birthday.height == 0);
     char aside[760];
     snprintf(aside, sizeof(aside), "%s.unused-20261101T120000Z", node_dir);
     assert(w.step == WSU_CHOICE && !f.running && f.stops == 1 && f.discards == 0 && zapp_setup_state(dir) == ZAPP_SETUP_NEEDED);
@@ -691,7 +771,7 @@ static void start_over_confirmed_tests(void)
     w.step = WSU_START_OVER;
     w.confirmed = true;
     wsu_start_over_job(&w);
-    assert(w.step == WSU_START_OVER && f.stops == 0);
+    assert(w.step == WSU_BLOCKED && w.failure == WSU_ALREADY_CONFIRMED && f.stops == 0);
     files_untouched(node_dir);
     wsu_destroy(&w);
 }
@@ -877,7 +957,7 @@ static void resume_create_tests(void)
     init_with(&f, &w);
     wsu_resume_job(&w);
     assert(w.step == WSU_BLOCKED && w.failure == WSU_NO_FAILURE && zapp_setup_state(dir) == ZAPP_SETUP_INTERRUPTED && f.discards == 0);
-    assert(!wsu_recheck(&w) || w.step == WSU_CHECKING);
+    assert(wsu_recheck(&w) && w.step == WSU_CHECKING);
     wsu_destroy(&w);
 }
 
@@ -974,9 +1054,7 @@ static void key_kept_tests(void)
     struct wsu w;
     char node_dir[700];
     blocked_create(&f, &w, node_dir);
-    wsu_start_over_job(&w);
-    assert(wsu_ask_start_over(&w) || w.step == WSU_BLOCKED);
-    w.step = WSU_START_OVER;
+    assert(wsu_ask_start_over(&w) && w.step == WSU_START_OVER);
     wsu_start_over_job(&w);
     assert(w.step == WSU_CHOICE && holds(dir, "wallet_key.blob.unused-20261101T120000Z", "x") && f.key_deletes == 0);
     script_say(&f.script, false, "{\"ok\":false,\"error\":{\"code\":\"INVALID_PHRASE\"}}");
@@ -993,6 +1071,7 @@ static void key_kept_tests(void)
     wsu_destroy(&w);
 }
 
+static void confirmed_no_start_restart_tests(struct fake *fp);
 /* The confirmation is its own record, written when the words match and before the setup marker or the birthday: a confirmed
  * create is never offered Start over, not after a restart and not while the record cannot yet be written. */
 static void confirmed_record_tests(void)
@@ -1000,7 +1079,7 @@ static void confirmed_record_tests(void)
     struct fake f;
     struct wsu w;
     struct wsu_view v;
-    char node_dir[700], block[600];
+    char block[600];
     fresh(&f, &w, true);
     script_say(&f.script, true, CREATED_NO_BIRTHDAY);
     wsu_create_job(&w);
@@ -1023,9 +1102,19 @@ static void confirmed_record_tests(void)
     /* Written before the birthday check: the wallet has no start height, setup stays unfinished, and the record stands. */
     assert(w.step == WSU_FAILED && w.failure == WSU_NO_BIRTHDAY && zapp_setup_confirmed(dir) && zapp_setup_state(dir) == ZAPP_SETUP_INTERRUPTED);
     wsu_destroy(&w);
-
-    /* After a restart the confirmed create finishes its setup again: the record kept no start height, so it says so, and it cannot be
-     * started over. */
+    confirmed_no_start_restart_tests(&f);
+}
+/* After a restart the confirmed create finishes its setup again: the record kept no start height, so it says so. Start over is its way
+ * forward, and the empty-wallet check still applies. */
+static void confirmed_no_start_restart_tests(struct fake *fp)
+{
+    struct fake f = *fp;
+    struct wsu w;
+    struct wsu_view v;
+    char node_dir[700];
+    fake_of = &f;
+    f.script.node_flag = &f.running;
+    f.script.hook = fake_hook;
     snprintf(node_dir, sizeof(node_dir), "%s/node", dir);
     assert(mkdir(node_dir, 0700) == 0);
     put(node_dir, "node.db", "chain-and-wallet");
@@ -1036,13 +1125,25 @@ static void confirmed_record_tests(void)
     assert(wsu_init(&w, &env, &node, dir) && wsu_open(&w));
     wsu_resume_job(&w);
     assert(w.step == WSU_FAILED && w.failure == WSU_NO_BIRTHDAY && !w.birthday.known && w.confirmed);
-    assert(!wsu_ask_start_over(&w) && w.step == WSU_FAILED);
-    w.confirmed = false;   /* the record alone must refuse */
-    w.step = WSU_START_OVER;
-    w.failure = WSU_NO_FAILURE;
+    wsu_view_read(&w, &v);
+    assert(v.may_start_over);
+    /* That wallet is new and its record proves no words, so Start over is its way forward; the check that the wallet is empty still applies. */
+    assert(wsu_ask_start_over(&w) && w.step == WSU_START_OVER);
+    wsu_cancel_start_over(&w);
+    assert(w.step == WSU_FAILED && w.failure == WSU_NO_BIRTHDAY);
+    assert(wsu_ask_start_over(&w));
+    f.idle = WSU_IDLE_FUNDS;
     wsu_start_over_job(&w);
-    assert(w.step == WSU_BLOCKED && w.failure == WSU_ALREADY_CONFIRMED);
+    assert(w.step == WSU_FAILED && w.failure == WSU_NO_BIRTHDAY && f.running);
     files_untouched(node_dir);
+    assert(wsu_recheck(&w));
+    wsu_resume_job(&w);
+    assert(w.step == WSU_FAILED && w.failure == WSU_NO_BIRTHDAY);
+    f.idle = WSU_IDLE_EMPTY;
+    assert(wsu_ask_start_over(&w));
+    wsu_start_over_job(&w);
+    assert(w.step == WSU_CHOICE && !w.confirmed && !w.birthday.known && zapp_setup_state(dir) == ZAPP_SETUP_NEEDED && !zapp_setup_confirmed(dir));
+    assert(exists_in(dir, "wallet_setup_confirmed.unused-20261101T120000Z") && !exists_in(node_dir, "node.db"));
     wsu_destroy(&w);
 }
 /* The words matched, the confirmation record was written, the setup marker was not, and the app stopped. After the restart the
@@ -1309,11 +1410,15 @@ int main(int argc, char **argv)
     words_tests();
     state_tests();
     node_tests();
+    node_stream_tests();
     node_restore_tests();
     node_hash_tests();
     create_tests();
     create_failure_tests();
     create_tip_tests();
+    create_tip_margin_tests();
+    create_declined_stops_node_test();
+    create_stray_refusal_keeps_key_test();
     create_no_start_tests();
     restore_tests();
     restore_unknown_tests();

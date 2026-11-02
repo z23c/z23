@@ -12,8 +12,10 @@ void sun_init(struct sun *node, const struct sun_runner *runner, const char *dat
     snprintf(node->datadir, sizeof(node->datadir), "%s", datadir ? datadir : "");
 }
 
-/* The parsed reply of a command: {"ok":true,"data":{...}} or {"ok":false,"error":{"code":...}}. The node may print
- * warnings before the object. */
+/* The parsed reply of a command: {"ok":true,"data":{...}} or {"ok":false,"error":{"code":...}}. The node's log lines share the
+ * stream, so the reply is the one line that starts an object and reads as a whole object with an "ok" flag, alone or with
+ * everything after it. Two such lines, or none, are no reply: a stray object must neither stand in for the reply nor hide it,
+ * and a result that cannot be read leaves the wallet unknown, never absent. */
 struct reply {
     struct json_value root;
     bool parsed;
@@ -21,16 +23,38 @@ struct reply {
     const struct json_value *data;
     const char *code;
 };
+/* Reads the object that starts at line into root; false, with root empty, when it is not a whole object with an "ok" flag. */
+static bool reply_object(struct json_value *root, const char *line)
+{
+    size_t rest = strlen(line), own = strcspn(line, "\n");
+    if (!json_read(root, line, rest) && !json_read(root, line, own)) return false;
+    const struct json_value *ok = json_get(root, "ok");
+    if (ok && ok->type == JSON_BOOL) return true;
+    json_cleanse_strings(root);
+    json_free(root);
+    return false;
+}
 static void reply_read(struct reply *r, const char *text)
 {
     memset(r, 0, sizeof(*r));
-    const char *json = text[0] == '{' ? text : strstr(text, "\n{");
-    if (json && json[0] == '\n') ++json;
-    if (!json || !json_read(&r->root, json, strlen(json))) return;
-    const struct json_value *ok = json_get(&r->root, "ok");
-    if (!ok || ok->type != JSON_BOOL) return;
+    unsigned found = 0;
+    for (const char *line = text; line; line = strchr(line, '\n'), line = line ? line + 1 : NULL) {
+        struct json_value root;
+        if (line[0] != '{' || !reply_object(&root, line)) continue;
+        if (found++ == 0) {
+            r->root = root;
+        } else {
+            json_cleanse_strings(&root);
+            json_free(&root);
+        }
+    }
+    if (found != 1) {
+        if (found) { json_cleanse_strings(&r->root); json_free(&r->root); }
+        memset(r, 0, sizeof(*r));
+        return;
+    }
     r->parsed = true;
-    r->ok = json_get_bool(ok);
+    r->ok = json_get_bool(json_get(&r->root, "ok"));
     r->data = json_get(&r->root, "data");
     const struct json_value *code = json_get(json_get(&r->root, "error"), "code");
     r->code = code && code->type == JSON_STR ? json_get_str(code) : NULL;

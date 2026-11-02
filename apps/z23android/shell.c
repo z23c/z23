@@ -537,7 +537,7 @@ static bool find_target(JNIEnv *env, float x, float y, struct target *target)
         if (zj_hit(env, shell.navs[i].view, x, y)) { target->kind = TARGET_NAV; target->index = i; return true; }
     if (shell.current == SCREEN_WALLET && zapp_wallet_ui_hit(env, x, y, &target->index)) { target->kind = TARGET_WALLET; return true; }
     if (shell.current == SCREEN_SEND && zapp_send_ui_hit(env, x, y, &target->index, &target->button)) { target->kind = TARGET_SEND; return true; }
-    if (shell.current == SCREEN_SETUP && zapp_setup_ui_hit(env, x, y, &target->index)) { target->kind = TARGET_SETUP; return true; }
+    if (shell.current == SCREEN_SETUP && zapp_setup_ui_hit(env, x, y, &target->index, &target->button)) { target->kind = TARGET_SETUP; return true; }
     for (size_t i = 0; shell.current == SCREEN_APPS && i < shell.row_count; ++i)
         if (zj_hit(env, shell.rows[i], x, y)) { target->kind = TARGET_ROW; target->index = i; return true; }
     if (shell.current == SCREEN_HOME && zapp_surface_hit(env, x, y, target->id, &target->card)) {
@@ -546,10 +546,12 @@ static bool find_target(JNIEnv *env, float x, float y, struct target *target)
     }
     return false;
 }
+/* Send and setup screens redraw between a press and its release, so their buttons are matched by identity. */
+static bool by_button(const struct target *t) { return t->kind == TARGET_SEND || t->kind == TARGET_SETUP; }
 static bool same_target(const struct target *a, const struct target *b)
 {
     return a->kind == b->kind && !strcmp(a->id, b->id) &&
-           zapp_home_same_press(a->index, a->kind == TARGET_SEND, a->button, b->index, b->kind == TARGET_SEND, b->button);
+           zapp_home_same_press(a->index, by_button(a), a->button, b->index, by_button(b), b->button);
 }
 static void run_wallet(JNIEnv *env, size_t button)
 {

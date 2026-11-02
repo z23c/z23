@@ -20,6 +20,9 @@
 #define SUN_QUERY_TIMEOUT_MS 15000u
 #define SUN_HASH_HEX 64u
 #define SUN_PASSPHRASE_HEX 64u
+/* The node records a new wallet's start height only when its chain tip is higher than this many blocks
+ * (WALLET_BIRTHDAY_MARGIN in contexts/wallet/models/include/models/wallet_key.h; the Makefile checks they agree). */
+#define SUN_BIRTHDAY_MARGIN 100
 
 struct sun_runner {
     void *ctx;

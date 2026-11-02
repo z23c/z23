@@ -37,7 +37,9 @@ void zapp_setup_ui_pause(JNIEnv *env);
 /* The owner leaves the screen. False while a job runs or the words are held. */
 bool zapp_setup_ui_leave(JNIEnv *env);
 void zapp_setup_ui_dropped(JNIEnv *env);
-bool zapp_setup_ui_hit(JNIEnv *env, float x, float y, size_t *button);
+/* The button under the point: its position, and the identity of what it does, so a screen that redraws between the press and the
+ * release does not run the button that moved into the same position. */
+bool zapp_setup_ui_hit(JNIEnv *env, float x, float y, size_t *button, unsigned *id);
 enum zapp_setup_outcome zapp_setup_ui_press(JNIEnv *env, size_t button);
 
 #endif
