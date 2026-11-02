@@ -8,18 +8,11 @@
 #        local-reader (struct *_reader, *_cursor, *_rd definitions).
 # core/ rows are counted and frozen like the rest of core/.
 # Regenerate: z23-lint check-hardening-ratchet --write-baseline
-banned-str contexts/commons/modules/plugin/src/plugin_pack.c 2
 banned-str contexts/commons/modules/vcs/src/package_recipe.c 1
 banned-str contexts/commons/packages/zlru/tests/test_zlru.c 2
 banned-str contexts/commons/packages/ztemplate/tests/test_ztemplate.c 1
 banned-str contexts/commons/packages/ztoml/tests/test_ztoml.c 1
 banned-str contexts/commons/packages/zxml/src/zxml.c 1
-banned-str tools/bench_fresh_sync.c 1
-banned-str tools/command/native_dev_train_keep.c 1
-banned-str tools/corpus_census.c 1
-banned-str tools/corpus_census_args.c 1
-banned-str tools/dev/dev_proof.c 1
-banned-str tools/dev/wiki_runtime.c 1
 local-reader cognition/modules/codeindex/src/codeindex_merkle.c 1
 local-reader cognition/modules/codeindex/src/codeindex_merkle_decode.c 1
 local-reader cognition/modules/session/src/fleet_board_proto.c 2
