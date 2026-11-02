@@ -404,6 +404,9 @@ int test_sovereignty_guard(void)
             json_push_back(&params, &tid);
             json_push_back(&params, &addr);
             json_push_back(&params, &amt);
+            json_free(&tid);
+            json_free(&addr);
+            json_free(&amt);
         }
         SG_CHECK("borrowed: zslp_send RPC refused",
                  !rpc_table_execute(&tbl, "zslp_send", &params, &result));
@@ -538,6 +541,9 @@ int test_sovereignty_guard(void)
             json_push_back(&params, &tid);
             json_push_back(&params, &addr);
             json_push_back(&params, &amt);
+            json_free(&tid);
+            json_free(&addr);
+            json_free(&amt);
         }
         SG_CHECK("sovereign: zslp_send failure is NOT release_assisted",
                  sg_rpc_failed_without(&tbl, "zslp_send", &params, &result,

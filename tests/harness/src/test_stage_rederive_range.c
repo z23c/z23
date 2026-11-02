@@ -801,6 +801,7 @@ teardown:
     body_fetch_stage_shutdown();
     validate_headers_stage_shutdown();
     header_admit_stage_shutdown();
+    main_state_free(&ms);
     event_log_close(lg);
     projection_store_close();
     progress_store_close();

@@ -514,6 +514,7 @@ static int test_sapling_rebuild_folds_forward_from_saved_height(void)
     struct disk_block_pos pos;
     disk_block_pos_init(&pos);
     ok = ok && write_block_to_disk(&blk, &pos, dir, msg);
+    block_free(&blk);
 
     struct active_chain chain;
     active_chain_init(&chain);

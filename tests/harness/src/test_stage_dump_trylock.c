@@ -175,12 +175,14 @@ static int case_dumpers_busy_path(void)
     SD_CHECK("busy: utxo_apply dump returns true", d1);
     SD_CHECK("busy: utxo_apply emits progress_store_busy", is_busy_marker(&out));
 
+    json_free(&out);
     json_init(&out);
     bool d2 = script_validate_dump_state_json(&out, NULL);
     SD_CHECK("busy: script_validate dump returns true", d2);
     SD_CHECK("busy: script_validate emits progress_store_busy",
              is_busy_marker(&out));
 
+    json_free(&out);
     json_init(&out);
     bool d3 = proof_validate_dump_state_json(&out, NULL);
     SD_CHECK("busy: proof_validate dump returns true", d3);
@@ -192,10 +194,12 @@ static int case_dumpers_busy_path(void)
     atomic_store(&lk.release, 1);
     pthread_join(th, NULL);
 
+    json_free(&out);
     json_init(&out);
     bool d4 = utxo_apply_dump_state_json(&out, NULL);
     SD_CHECK("free: utxo_apply dump returns true", d4);
     SD_CHECK("free: utxo_apply no longer busy", !is_busy_marker(&out));
+    json_free(&out);
 
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -319,6 +323,7 @@ static int case_diag_dumps_busy_path(void)
     SD_CHECK("diag: refold_progress durable_store_status busy",
              json_status_is(&out, "durable_store_status", "progress_store_busy"));
 
+    json_free(&out);
     json_init(&out);
     bool v1 = validate_headers_stage_dump_state_json(&out, NULL);
     SD_CHECK("diag: validate_headers dump returns true", v1);
@@ -329,15 +334,18 @@ static int case_diag_dumps_busy_path(void)
     atomic_store(&lk.release, 1);
     pthread_join(th, NULL);
 
+    json_free(&out);
     json_init(&out);
     bool r2 = refold_progress_dump_state_json(&out, NULL);
     SD_CHECK("free: refold_progress durable_store_status available",
              r2 && json_status_is(&out, "durable_store_status", "available"));
 
+    json_free(&out);
     json_init(&out);
     bool v2 = validate_headers_stage_dump_state_json(&out, NULL);
     SD_CHECK("free: validate_headers failure_summary_status available",
              v2 && json_status_is(&out, "failure_summary_status", "available"));
+    json_free(&out);
 
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -447,6 +455,7 @@ static int case_sovereignty_dump_busy_path(void)
     /* Free path: real trust tier computed and published to the cache. A
      * fresh datadir has no coins_kv migration stamp, so trust_mode == bare
      * (G-SOV part 3's !proven_authority disjunct). */
+    json_free(&out);
     json_init(&out);
     bool d2 = sovereignty_dump_state_json(&out, NULL);
     SD_CHECK("sov free: dump returns true", d2);
@@ -468,6 +477,7 @@ static int case_sovereignty_dump_busy_path(void)
         SD_CHECK("sov: 2nd locker holds the progress lock",
                  atomic_load(&lk2.locked));
 
+        json_free(&out);
         json_init(&out);
         bool d3 = sovereignty_dump_state_json(&out, NULL);
         SD_CHECK("sov busy(2nd): dump returns true", d3);
@@ -480,6 +490,7 @@ static int case_sovereignty_dump_busy_path(void)
         atomic_store(&lk2.release, 1);
         pthread_join(th, NULL);
     }
+    json_free(&out);
 
     progress_store_close();
     test_cleanup_tmpdir(dir);
