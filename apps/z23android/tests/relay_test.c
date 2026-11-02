@@ -76,9 +76,11 @@ static unsigned read_replies(struct session *s, char *text, size_t cap)
     unsigned count = 0; char line[1024]; text[0] = 0;
     while (read_line(s->fd, line, sizeof(line))) {
         const char *payload = zapp_auth_open(&s->auth, "line", s->auth.seq, line);
-        assert(payload && strlen(text) + strlen(payload) + 2 < cap);
+        assert(payload);
+        size_t used = strlen(text);
+        int n = snprintf(text + used, cap - used, "%s\n", payload);
+        assert(n >= 0 && used + (size_t)n + 1 < cap);
         s->auth.seq++; count++;
-        strcat(text, payload); strcat(text, "\n");
     }
     close(s->fd);
     return count;
