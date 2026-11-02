@@ -505,13 +505,10 @@ static int pick_peer(const struct vcs_swarm_engine *engine,
     return best;
 }
 
-/* Issue new WANTs. Caller holds the lock. Rarest-first ACROSS downloads
- * (fewest advertisers first — the wire carries package-level ads only);
- * ascending chunks, least-in-flight peers within a download. */
-static void schedule_locked(struct vcs_swarm_engine *engine, int64_t day,
-                            uint64_t now)
+/* Active downloads (manifest or chunk phase) ordered by advertiser count
+ * ascending (stable insertion sort); returns how many. */
+static size_t sched_order(struct vcs_swarm_engine *engine, size_t *order)
 {
-    size_t order[VCS_SWARM_MAX_DOWNLOADS];
     uint32_t ad_counts[VCS_SWARM_MAX_DOWNLOADS];
     size_t active = 0;
     for (size_t i = 0; i < VCS_SWARM_MAX_DOWNLOADS; i++) {
@@ -535,109 +532,144 @@ static void schedule_locked(struct vcs_swarm_engine *engine, int64_t day,
         order[j] = k;
         ad_counts[j] = c;
     }
+    return active;
+}
+
+static bool sched_has_outstanding(const struct swarm_download *dl, uint32_t g)
+{
+    for (size_t r = 0; r < SWARM_DL_INFLIGHT_MAX; r++)
+        if (dl->reqs[r].used && dl->reqs[r].global_chunk == g)
+            return true;
+    return false;
+}
+
+static void sched_manifest(struct vcs_swarm_engine *engine,
+                           struct swarm_download *dl, uint64_t now)
+{
+    if (dl->manifest_attempts >= VCS_SWARM_MAX_CHUNK_ATTEMPTS) {
+        dl_fail(engine, dl, "manifest-attempts-exhausted");
+        return;
+    }
+    if (sched_has_outstanding(dl, SWARM_MANIFEST_CHUNK))
+        return;
+    /* Terminal check BEFORE scheduling: every advertiser has
+     * already served a bad manifest (manifest_failed_mask),
+     * so no assignment can ever succeed. Zero advertisers is
+     * NOT a failure — a fresh fetch honestly waits for the
+     * first ANNOUNCE. */
+    if (advertisers_of(engine, dl) > 0) {
+        bool eligible = false;
+        for (size_t i = 0; i < VCS_SWARM_MAX_PEERS; i++)
+            if (peer_offers_download(dl, &engine->peers[i]) &&
+                !(dl->manifest_failed_mask & (UINT64_C(1) << i)))
+                eligible = true;
+        if (!eligible) {
+            dl_fail(engine, dl, "no-serving-peer");
+            return;
+        }
+    }
+    int slot = pick_peer(engine, dl, SWARM_MANIFEST_CHUNK);
+    if (slot >= 0) {
+        issue_want(engine, dl, &engine->peers[slot], SWARM_MANIFEST_CHUNK,
+                   now);
+        dl->manifest_attempts++;
+    }
+}
+
+/* CHUNKS terminal checks. Attempts are consumed by invalid DATA
+ * AND by timeout retries (timeouts_locked); peer_failed masks
+ * exclude a chunk's bad advertisers permanently. A download is
+ * terminally stuck — and must SAY so — when every unfinished
+ * chunk exhausted its bounded attempts ("chunk-attempts-
+ * exhausted"), or when no unfinished chunk has any eligible
+ * advertiser left while at least one peer still advertises the
+ * root ("no-serving-peer": a peer that served bad data is a
+ * named failure; ZERO advertisers is not — a fetch honestly
+ * waits for the first ANNOUNCE, and an allowance-exhausted peer
+ * still counts as eligible because the weekly allowance is a
+ * rate limit, never a failure). A complete download never
+ * reaches this: the all-have sweep moves it to COMPLETE first. */
+static bool sched_chunks_failed(struct vcs_swarm_engine *engine,
+                                struct swarm_download *dl)
+{
+    uint32_t unfinished = 0, exhausted = 0, assignable = 0;
+    for (uint32_t g = 0; g < dl->total_chunks; g++) {
+        if (bitmap_get(dl->have, g))
+            continue;
+        unfinished++;
+        if (dl->chunk_attempts[g] >= VCS_SWARM_MAX_CHUNK_ATTEMPTS) {
+            exhausted++;
+            continue;
+        }
+        for (size_t i = 0; i < VCS_SWARM_MAX_PEERS; i++)
+            if (peer_offers_download(dl, &engine->peers[i]) &&
+                !(dl->peer_failed[g] & (UINT64_C(1) << i))) {
+                assignable++;
+                break;
+            }
+    }
+    if (unfinished > 0 && exhausted == unfinished) {
+        dl_fail(engine, dl, "chunk-attempts-exhausted");
+        return true;
+    }
+    if (unfinished > 0 && assignable == 0 && dl_inflight(dl) == 0 &&
+        advertisers_of(engine, dl) > 0) {
+        dl_fail(engine, dl, "no-serving-peer");
+        return true;
+    }
+    return false;
+}
+
+static void sched_issue_chunk(struct vcs_swarm_engine *engine,
+                              struct swarm_download *dl, uint32_t g,
+                              int64_t day, uint64_t now)
+{
+    for (;;) {
+        int slot = pick_peer(engine, dl, g);
+        if (slot < 0)
+            break;
+        if (allowance_denied(engine, &engine->peers[slot],
+                             chunk_len_of(dl, g), day))
+            continue;
+        if (issue_want(engine, dl, &engine->peers[slot], g, now))
+            dl->chunk_attempts[g]++;
+        break;
+    }
+}
+
+static void sched_chunks(struct vcs_swarm_engine *engine,
+                         struct swarm_download *dl, int64_t day,
+                         uint64_t now)
+{
+    if (sched_chunks_failed(engine, dl))
+        return;
+    for (uint32_t g = 0; g < dl->total_chunks; g++) {
+        if (dl_inflight(dl) >= SWARM_DL_INFLIGHT_MAX ||
+            global_inflight(engine) >= VCS_SWARM_GLOBAL_INFLIGHT_MAX)
+            break;
+        if (bitmap_get(dl->have, g) ||
+            dl->chunk_attempts[g] >= VCS_SWARM_MAX_CHUNK_ATTEMPTS ||
+            sched_has_outstanding(dl, g))
+            continue;
+        sched_issue_chunk(engine, dl, g, day, now);
+    }
+}
+
+/* Issue new WANTs. Caller holds the lock. Rarest-first ACROSS downloads
+ * (fewest advertisers first — the wire carries package-level ads only);
+ * ascending chunks, least-in-flight peers within a download. */
+static void schedule_locked(struct vcs_swarm_engine *engine, int64_t day,
+                            uint64_t now)
+{
+    size_t order[VCS_SWARM_MAX_DOWNLOADS];
+    size_t active = sched_order(engine, order);
 
     for (size_t oi = 0; oi < active; oi++) {
         struct swarm_download *dl = &engine->dls[order[oi]];
-        if (dl->state == VCS_SWARM_DL_WANT_MANIFEST) {
-            if (dl->manifest_attempts >= VCS_SWARM_MAX_CHUNK_ATTEMPTS) {
-                dl_fail(engine, dl, "manifest-attempts-exhausted");
-                continue;
-            }
-            bool outstanding = false;
-            for (size_t r = 0; r < SWARM_DL_INFLIGHT_MAX; r++)
-                if (dl->reqs[r].used &&
-                    dl->reqs[r].global_chunk == SWARM_MANIFEST_CHUNK)
-                    outstanding = true;
-            if (!outstanding) {
-                /* Terminal check BEFORE scheduling: every advertiser has
-                 * already served a bad manifest (manifest_failed_mask),
-                 * so no assignment can ever succeed. Zero advertisers is
-                 * NOT a failure — a fresh fetch honestly waits for the
-                 * first ANNOUNCE. */
-                if (advertisers_of(engine, dl) > 0) {
-                    bool eligible = false;
-                    for (size_t i = 0; i < VCS_SWARM_MAX_PEERS; i++)
-                        if (peer_offers_download(dl, &engine->peers[i]) &&
-                            !(dl->manifest_failed_mask &
-                              (UINT64_C(1) << i)))
-                            eligible = true;
-                    if (!eligible) {
-                        dl_fail(engine, dl, "no-serving-peer");
-                        continue;
-                    }
-                }
-                int slot = pick_peer(engine, dl, SWARM_MANIFEST_CHUNK);
-                if (slot >= 0) {
-                    issue_want(engine, dl, &engine->peers[slot],
-                               SWARM_MANIFEST_CHUNK, now);
-                    dl->manifest_attempts++;
-                }
-            }
-            continue;
-        }
-        /* CHUNKS terminal checks. Attempts are consumed by invalid DATA
-         * AND by timeout retries (timeouts_locked); peer_failed masks
-         * exclude a chunk's bad advertisers permanently. A download is
-         * terminally stuck — and must SAY so — when every unfinished
-         * chunk exhausted its bounded attempts ("chunk-attempts-
-         * exhausted"), or when no unfinished chunk has any eligible
-         * advertiser left while at least one peer still advertises the
-         * root ("no-serving-peer": a peer that served bad data is a
-         * named failure; ZERO advertisers is not — a fetch honestly
-         * waits for the first ANNOUNCE, and an allowance-exhausted peer
-         * still counts as eligible because the weekly allowance is a
-         * rate limit, never a failure). A complete download never
-         * reaches this: the all-have sweep moves it to COMPLETE first. */
-        uint32_t unfinished = 0, exhausted = 0, assignable = 0;
-        for (uint32_t g = 0; g < dl->total_chunks; g++) {
-            if (bitmap_get(dl->have, g))
-                continue;
-            unfinished++;
-            if (dl->chunk_attempts[g] >= VCS_SWARM_MAX_CHUNK_ATTEMPTS) {
-                exhausted++;
-                continue;
-            }
-            for (size_t i = 0; i < VCS_SWARM_MAX_PEERS; i++)
-                if (peer_offers_download(dl, &engine->peers[i]) &&
-                    !(dl->peer_failed[g] & (UINT64_C(1) << i))) {
-                    assignable++;
-                    break;
-                }
-        }
-        if (unfinished > 0 && exhausted == unfinished) {
-            dl_fail(engine, dl, "chunk-attempts-exhausted");
-            continue;
-        }
-        if (unfinished > 0 && assignable == 0 && dl_inflight(dl) == 0 &&
-            advertisers_of(engine, dl) > 0) {
-            dl_fail(engine, dl, "no-serving-peer");
-            continue;
-        }
-        for (uint32_t g = 0; g < dl->total_chunks; g++) {
-            if (dl_inflight(dl) >= SWARM_DL_INFLIGHT_MAX ||
-                global_inflight(engine) >= VCS_SWARM_GLOBAL_INFLIGHT_MAX)
-                break;
-            if (bitmap_get(dl->have, g) ||
-                dl->chunk_attempts[g] >= VCS_SWARM_MAX_CHUNK_ATTEMPTS)
-                continue;
-            bool outstanding = false;
-            for (size_t r = 0; r < SWARM_DL_INFLIGHT_MAX; r++)
-                if (dl->reqs[r].used && dl->reqs[r].global_chunk == g)
-                    outstanding = true;
-            if (outstanding)
-                continue;
-            for (;;) {
-                int slot = pick_peer(engine, dl, g);
-                if (slot < 0)
-                    break;
-                if (allowance_denied(engine, &engine->peers[slot],
-                                     chunk_len_of(dl, g), day))
-                    continue;
-                if (issue_want(engine, dl, &engine->peers[slot], g, now))
-                    dl->chunk_attempts[g]++;
-                break;
-            }
-        }
+        if (dl->state == VCS_SWARM_DL_WANT_MANIFEST)
+            sched_manifest(engine, dl, now);
+        else
+            sched_chunks(engine, dl, day, now);
     }
 }
 
