@@ -31,6 +31,8 @@ static int g_calls;
 static char g_last_path[32];
 static bool g_reenter;
 static char g_inner_msg[192];
+static tor_fetch_callback_fn g_pending_cb;
+static void *g_pending_ctx;
 
 static int fake_dispatch(const char *onion, const char *path, bool use_post,
                          const uint8_t *body, size_t body_len,
@@ -49,13 +51,34 @@ static int fake_dispatch(const char *onion, const char *path, bool use_post,
             free(r);
         snprintf(g_inner_msg, sizeof(g_inner_msg), "%s", inner.message);
     }
-    if (!g_silent)
-        cb(g_status, (const uint8_t *)g_body, g_body ? strlen(g_body) : 0, ctx);
+    if (g_silent) {
+        /* Silence: hold the completion back, as a real in-flight fetch does.
+         * The callback keeps its reference until settle_silent_fetch(). */
+        g_pending_cb = cb;
+        g_pending_ctx = ctx;
+        return 0;
+    }
+    cb(g_status, (const uint8_t *)g_body, g_body ? strlen(g_body) : 0, ctx);
     return 0;
+}
+
+/* Deliver a held-back completion after the waiter has timed out. The real
+ * dispatcher always calls back eventually (here: a dead fetch, status 0, no
+ * body), and that call drops the callback's reference on the fetch context. */
+static void settle_silent_fetch(void)
+{
+    if (!g_pending_cb)
+        return;
+    tor_fetch_callback_fn cb = g_pending_cb;
+    void *ctx = g_pending_ctx;
+    g_pending_cb = NULL;
+    g_pending_ctx = NULL;
+    cb(0, NULL, 0, ctx);
 }
 
 static void arm(int status, const char *body)
 {
+    settle_silent_fetch();
     g_status = status;
     g_body = body;
     g_dispatch_rc = 0;
@@ -162,6 +185,7 @@ static int test_transport_refusals(void)
         ASSERT(refused_with(HOST, 1, "TOR_UNAVAILABLE"));
         ASSERT_EQ(g_calls, 0);
     } TEST_END
+    settle_silent_fetch();
     onion_remote_status_clear_test_hooks();
     return failures;
 }

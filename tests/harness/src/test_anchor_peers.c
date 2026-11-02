@@ -200,7 +200,8 @@ static int anchor_collect_healthy_check(void)
 {
     printf("anchor_peers: collect_healthy_anchors filters... ");
     struct connman cm;
-    bool ok = anchor_connman_init(&cm);
+    bool inited = anchor_connman_init(&cm);
+    bool ok = inited;
 
     /* 2 genuinely-healthy outbound peers … */
     anchor_add_peer(&cm, 113, 10, PEER_HANDSHAKE_COMPLETE, false, false, false, NODE_NETWORK);
@@ -219,7 +220,9 @@ static int anchor_collect_healthy_check(void)
     for (size_t i = 0; ok && i < set.count; i++)
         ok = ok && (set.peers[i].services & NODE_NETWORK) != 0 &&
                    set.peers[i].port == 8033;
-    connman_free(&cm);
+    /* connman_init can fail before it initialises cm; free only what it built. */
+    if (inited)
+        connman_free(&cm);
     if (ok) printf("OK\n");
     else { printf("FAIL (collected=%zu, want 2)\n", set.count); return 1; }
     return 0;
@@ -276,7 +279,8 @@ static int anchor_gather_order_check(void)
 {
     printf("anchor_peers: gather returns anchors before addrman... ");
     struct connman cm;
-    bool ok = anchor_gather_prepare(&cm);
+    bool inited = anchor_gather_prepare(&cm);
+    bool ok = inited;
 
     struct connman_dial_candidate batch[8];
     size_t n = connman_gather_dial_candidates(&cm, batch, 8);
@@ -297,7 +301,9 @@ static int anchor_gather_order_check(void)
     for (size_t i = 0; ok && i < n2; i++)
         ok = ok && batch2[i].source != CONNMAN_TARGET_ANCHOR;
 
-    connman_free(&cm);
+    /* connman_init can fail before it initialises cm; free only what it built. */
+    if (inited)
+        connman_free(&cm);
     if (ok) printf("OK\n");
     else { printf("FAIL (n=%zu anchors=%zu order_ok=%d)\n", n, anchor_count, order_ok); return 1; }
     return 0;
