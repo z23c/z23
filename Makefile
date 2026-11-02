@@ -241,7 +241,10 @@ ZCL_LTO_FLAG = -flto=auto
 ZCL_PLATFORM_NODE_LIBS =
 ZCL_CXX_RUNTIME_LIB = -lstdc++
 ZCL_WARN_MAYBE_UNINITIALIZED = -Wno-maybe-uninitialized
-ZCL_TEST_STACK_SETUP = ulimit -s unlimited
+# Under an outer recipe that already capped the hard stack limit (t-tsan and
+# t-asan set 1 GiB, then a gate self-test runs make t-hotswap), `unlimited`
+# is refused; take the hard limit instead of failing the nested run.
+ZCL_TEST_STACK_SETUP = { ulimit -s unlimited 2>/dev/null || ulimit -s "$$(ulimit -H -s)"; }
 endif
 # Generators execute on the build machine, independently of the artifact ABI.
 ZCL_BUILD_CC = $(CC)
