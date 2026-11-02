@@ -208,15 +208,6 @@ static void on_tap(struct ws *ws, const struct ws_event *ev, struct ws_actions *
     enter(ws, WS_AUTH);
     ask(ws, out, WS_ACT_UNLOCK);
 }
-static void on_make_private(struct ws *ws, struct ws_actions *out)
-{
-    if (ws->state != WS_REVIEW || !ws->insufficient || ws->gate.public_zat == 0) return;
-    enter(ws, WS_CANCELLED);
-    ws->fail = WS_FAIL_NONE;
-    ws->tapped = false;
-    ws->ticket = ++ws->seq;
-    push(out, WS_ACT_OPEN_MAKE_PRIVATE, ws->ticket);
-}
 
 /* ---- authentication, unlock, commit ---- */
 
@@ -421,7 +412,6 @@ static void step_answers(struct ws *ws, const struct ws_event *ev, struct ws_act
     case WS_EV_GATE: on_gate(ws, ev, out); break;
     case WS_EV_PLAN: on_plan(ws, ev, out); break;
     case WS_EV_TAP_SEND: on_tap(ws, ev, out); break;
-    case WS_EV_MAKE_PRIVATE: on_make_private(ws, out); break;
     case WS_EV_UNLOCK: on_unlock(ws, ev, out); break;
     case WS_EV_COMMIT: on_commit(ws, ev, out); break;
     case WS_EV_ROUTE: on_route(ws, ev); break;

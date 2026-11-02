@@ -167,7 +167,7 @@ static struct wss *make_screen(void *ctx)
     if (!wsd_init(&parts->device, NULL, key_ops, ui.activity->internalDataPath)) { free(parts); return NULL; }
     wsd_ops(&parts->device, &deps.device);
     parts->id_ok = zapp_send_id_load(ui.activity->internalDataPath, &parts->id);
-    deps.host = (struct wss_host_ops){parts, host_random, host_now, host_spawn, host_redraw, NULL, host_derive, host_wall};
+    deps.host = (struct wss_host_ops){parts, host_random, host_now, host_spawn, host_redraw, host_derive, host_wall};
     zapp_secure_window_ops(&deps.secure, ui.activity);
     deps.release = parts_release;
     deps.release_ctx = parts;

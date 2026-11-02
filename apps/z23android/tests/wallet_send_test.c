@@ -388,15 +388,13 @@ static void insufficient_private_funds(void)
     struct ws_gate g = good_gate(); g.spendable_zat = 100000000; g.public_zat = 900000000;
     to_review_with(&w, &p, g);
     assert(w.ws.state == WS_REVIEW && w.ws.insufficient && !ws_can_send(&w.ws));
+    /* Public funds never pay for it, so the tap emits no action at all. */
     feed(&w, tap_ev(&w));
-    assert(w.ws.state == WS_REVIEW && count(&w, WS_ACT_UNLOCK) == 0);
-    feed(&w, E(WS_EV_MAKE_PRIVATE));
-    assert(emitted(&w, WS_ACT_OPEN_MAKE_PRIVATE) && w.ws.state == WS_CANCELLED && count(&w, WS_ACT_COMMIT) == 0);
-    /* without public funds there is nothing to offer */
+    assert(w.ws.state == WS_REVIEW && w.acts.count == 0 && count(&w, WS_ACT_UNLOCK) == 0);
     g.public_zat = 0;
     to_review_with(&w, &p, g);
-    feed(&w, E(WS_EV_MAKE_PRIVATE));
-    assert(w.ws.state == WS_REVIEW && !emitted(&w, WS_ACT_OPEN_MAKE_PRIVATE));
+    feed(&w, tap_ev(&w));
+    assert(w.ws.state == WS_REVIEW && w.acts.count == 0 && count(&w, WS_ACT_UNLOCK) == 0);
 }
 static void every_exit_locks(void)
 {

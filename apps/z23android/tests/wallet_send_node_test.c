@@ -520,7 +520,7 @@ static struct wss *screen_over(struct fake *f, struct wsn *n, struct host *h)
     memset(h, 0, sizeof(*h));
     h->f = f; h->now = 10000; h->key = WSS_KEY_OK;
     d.device = (struct wss_device_ops){h, d_unwrap};
-    d.host = (struct wss_host_ops){h, h_random, h_now, h_spawn, h_redraw, NULL, NULL, NULL};
+    d.host = (struct wss_host_ops){h, h_random, h_now, h_spawn, h_redraw, NULL, NULL};
     d.secure = (struct zapp_secure_ops){h, s_on, s_on, s_on, s_on, s_on};
     struct wss *s = wss_create(&d);
     assert(s);

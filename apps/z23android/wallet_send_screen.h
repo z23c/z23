@@ -88,7 +88,6 @@ struct wss_host_ops {
     /* Runs job(arg) once on a thread that is not the UI thread. */
     bool (*spawn)(void *ctx, void (*job)(void *arg), void *arg);
     void (*redraw)(void *ctx);
-    void (*open_make_private)(void *ctx);
     /* The key of a payment request (wallet_send.h, ws_env). Optional: without it every review gets a random key. */
     bool (*derive_key)(void *ctx, const struct zapp_payment *pay, char out[WS_KEY_HEX + 1]);
     /* Seconds since the Unix epoch, read when the node's committed answer arrives. Optional. */
@@ -118,7 +117,6 @@ struct wss_view {
     bool can_leave;                   /* Draw Done: the flow ended, or the node holds the payment and only History can say more. */
     bool can_cancel;
     bool can_pay_again;               /* Draw Pay again: the node holds an earlier payment of this request as committed. */
-    bool offer_make_private;
     uint32_t serial;                  /* Pass back with the Send tap. */
     char amount[WSS_AMOUNT];
     char address[WSS_ADDRESS];        /* In groups of four. */
@@ -165,7 +163,6 @@ bool wss_end(struct wss *screen);
 void wss_tap_send(struct wss *screen, uint32_t serial);
 void wss_tap_retry(struct wss *screen);
 void wss_tap_cancel(struct wss *screen);
-void wss_tap_make_private(struct wss *screen);
 /* Pay again, offered only on a payment the node reports as already paid. Starts a full review, and the owner's tap and
  * authentication, under a new random key. */
 void wss_tap_pay_again(struct wss *screen);

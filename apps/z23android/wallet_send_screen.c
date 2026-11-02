@@ -12,6 +12,8 @@
 
 #define QUEUE_MAX 16
 #define PUBLIC_WARNING "This payment is public. The amount and address are visible to everyone, forever."
+#define INSUFFICIENT_NOTE "Not enough private funds for this payment. Public funds are never used for it."
+#define INSUFFICIENT_PUBLIC_NOTE INSUFFICIENT_NOTE " Public funds cannot be spent from this phone. Move them to your private balance from your fleet node."
 #define FLEET_CHECKED "Checked by your fleet"
 #define ALREADY_PAID "Already paid. Your node has this payment, so nothing new was sent."
 #define SENT_TO_NODE "The node has your payment. History shows when it leaves the phone."
@@ -79,8 +81,7 @@ static void fill_review(const struct ws *ws, struct wss_view *v)
     snprintf(v->fleet, sizeof(v->fleet), "%s", ws->gate.fleet_checked ? FLEET_CHECKED : WALLET_FLEET_UNCHECKED);
     if (ws->pay.kind == ZAPP_PAY_PUBLIC) snprintf(v->warning, sizeof(v->warning), "%s", PUBLIC_WARNING);
     if (ws->insufficient) {
-        snprintf(v->note, sizeof(v->note), "Not enough private funds for this payment. Public funds are never used for it.");
-        v->offer_make_private = ws->gate.public_zat > 0;
+        snprintf(v->note, sizeof(v->note), "%s", ws->gate.public_zat > 0 ? INSUFFICIENT_PUBLIC_NOTE : INSUFFICIENT_NOTE);
         return;
     }
     wss_format_zat(ws->gate.spendable_zat - ws->plan.total_zat, v->remains, sizeof(v->remains));
@@ -375,9 +376,6 @@ static void run_action(struct wss *s, struct ws_action a)
         ev.kind = WS_EV_LOCK;
         ev.ok = s->d.node.lock(s->d.node.ctx);
         break;
-    case WS_ACT_OPEN_MAKE_PRIVATE:
-        if (s->d.host.open_make_private) s->d.host.open_make_private(s->d.host.ctx);
-        return;
     case WS_ACT_NONE: return;
     }
     post(s, &ev);
@@ -527,7 +525,6 @@ void wss_tap_send(struct wss *s, uint32_t serial)
 }
 void wss_tap_retry(struct wss *s) { send_kind(s, WS_EV_RETRY); }
 void wss_tap_cancel(struct wss *s) { send_kind(s, WS_EV_CANCEL); }
-void wss_tap_make_private(struct wss *s) { send_kind(s, WS_EV_MAKE_PRIVATE); }
 void wss_tap_pay_again(struct wss *s) { send_kind(s, WS_EV_PAY_AGAIN); }
 void wss_on_pause(struct wss *s) { send_kind(s, WS_EV_BACKGROUND); }
 void wss_on_resume(struct wss *s) { send_kind(s, WS_EV_RESUME); }

@@ -52,7 +52,7 @@ struct fake {
     uint64_t now;
     void (*job)(void *);
     void *job_arg;
-    int redraws, make_private;
+    int redraws;
     uint64_t rnd;
     /* the node's memory of keys that may have paid */
     char paid[PAID_MAX][WS_KEY_HEX + 1];
@@ -221,7 +221,6 @@ static bool h_derive(void *c, const struct zapp_payment *pay, char out[WS_KEY_HE
     return zapp_send_key_derive(&((struct fake *)c)->id, pay, out);
 }
 static int64_t h_wall(void *c) { return ((struct fake *)c)->wall; }
-static void h_private(void *c) { ((struct fake *)c)->make_private++; }
 static bool s_flag(void *c, bool on) { struct fake *f = c; if (f->flag_ok) f->flag_on = on; return f->flag_ok; }
 static bool s_granted(void *c, bool on) { (void)c; (void)on; return true; }
 static bool w_set(void *c, bool on)
@@ -264,7 +263,7 @@ static struct wss *screen_of(struct fake *f)
         .network = ZAPP_PAY_MAINNET,
         .node = {f, n_validate, n_gate, n_plan, n_unlock, n_lock, n_commit, n_route},
         .device = {f, d_unwrap},
-        .host = {f, h_random, h_now, h_spawn, h_redraw, h_private, f->derive_on ? h_derive : NULL, h_wall},
+        .host = {f, h_random, h_now, h_spawn, h_redraw, f->derive_on ? h_derive : NULL, h_wall},
         .secure = {f, s_flag, s_filter, s_granted, s_granted, s_granted},
     };
     if (f->window) d.secure = win_ops(f->window);
@@ -302,7 +301,7 @@ static void review_shows_the_plan(void)
     struct zapp_payment p = pay_of(priv, "?amount=1.5&memo=aGk");
     struct wss *s = reviewed(&f, &p);
     struct wss_view v = view_of(s);
-    assert(v.visible && v.review && v.state == WS_REVIEW && v.can_send && !v.offer_make_private);
+    assert(v.visible && v.review && v.state == WS_REVIEW && v.can_send && !strstr(v.note, "Public funds"));
     assert(!strcmp(v.amount, "1.5 ZCL") && !strcmp(v.fee, "0.0001 ZCL") && !strcmp(v.remains, "3.4999 ZCL"));
     assert(!strcmp(v.kind, "Private") && !strcmp(v.memo_label, "Memo") && !strcmp(v.memo, "hi") && !v.warning[0] && !v.note[0]);
     wss_destroy(s);
@@ -386,18 +385,24 @@ static void refusals_are_said_in_plain_words(void)
     assert(view_of(s).state == WS_FAILED && !strchr(f.calls, 'g') && !strstr(view_of(s).status, priv));
     wss_destroy(s);
 }
-static void insufficient_offers_make_private(void)
+static void insufficient_says_why_and_emits_nothing(void)
 {
     struct fake f; fake_init(&f);
     f.gate.spendable_zat = 100000000; f.gate.public_zat = 900000000;
     struct zapp_payment p = pay_of(priv, "?amount=4");
     struct wss *s = reviewed(&f, &p);
     struct wss_view v = view_of(s);
-    assert(v.review && !v.can_send && v.offer_make_private && strstr(v.note, "Not enough private funds") && !v.remains[0]);
+    assert(v.review && !v.can_send && strstr(v.note, "Not enough private funds") && !v.remains[0]);
+    assert(strstr(v.note, "Public funds cannot be spent from this phone. Move them to your private balance from your fleet node."));
+    size_t calls = strlen(f.calls);
     wss_tap_send(s, v.serial); drain(&f);
-    assert(view_of(s).state == WS_REVIEW && !strchr(f.calls, 'k') && !strchr(f.calls, 'c'));
-    wss_tap_make_private(s); drain(&f);
-    assert(f.make_private == 1 && f.commits == 0 && f.unlocks == 0);
+    assert(view_of(s).state == WS_REVIEW && strlen(f.calls) == calls && f.commits == 0 && f.unlocks == 0);
+    wss_destroy(s);
+    fake_init(&f);
+    f.gate.spendable_zat = 100000000; f.gate.public_zat = 0;
+    s = reviewed(&f, &p);
+    v = view_of(s);
+    assert(v.review && strstr(v.note, "Not enough private funds") && !strstr(v.note, "Public funds cannot be spent"));
     wss_destroy(s);
 }
 static void protection_is_required(void)
@@ -1214,7 +1219,7 @@ int main(void)
     tap_runs_the_whole_send();
     public_destination_is_flagged();
     refusals_are_said_in_plain_words();
-    insufficient_offers_make_private();
+    insufficient_says_why_and_emits_nothing();
     protection_is_required();
     leaving_cancels();
     secrets_never_survive();

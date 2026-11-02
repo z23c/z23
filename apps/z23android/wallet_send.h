@@ -99,7 +99,6 @@ enum ws_event_kind {
     WS_EV_GATE,          /* ticket, gate. */
     WS_EV_PLAN,          /* ticket, ok, plan. */
     WS_EV_TAP_SEND,      /* serial: the plan serial the screen was showing. */
-    WS_EV_MAKE_PRIVATE,  /* The owner chose Make private on the insufficient funds note. */
     WS_EV_UNLOCK,        /* ticket, ok (authenticated and unlocked), auth (why not). */
     WS_EV_COMMIT,        /* ticket, ok (committed or replayed), refused (the node said the key was released: nothing
                           * was sent), fee_changed (the node refused before building), plan.token echoed. Any
@@ -145,8 +144,7 @@ enum ws_action_kind {
     WS_ACT_UNLOCK,            /* Authenticate the owner for this one use, unwrap the passphrase and unlock for WS_UNLOCK_SECONDS. */
     WS_ACT_COMMIT,            /* Commit the reviewed plan with its idempotency key. */
     WS_ACT_POLL_ROUTE,
-    WS_ACT_LOCK,
-    WS_ACT_OPEN_MAKE_PRIVATE  /* Leave the flow for the Make private screen. */
+    WS_ACT_LOCK
 };
 struct ws_action { enum ws_action_kind kind; uint32_t ticket; };
 struct ws_actions { struct ws_action item[WS_ACTIONS_MAX]; size_t count; };
