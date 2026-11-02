@@ -24,9 +24,11 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #if !defined(_WIN32)
 #include <sys/file.h>
@@ -1939,8 +1941,10 @@ static int pst_case_lock_exclusion(void)
     return failures;
 }
 
-/* Child: hold the plugin lock for 2 ms and re-acquire it at once, for ms. */
-static enum plugin_status pst_loop_worker(const char *plugdir, int64_t ms)
+/* Child: hold the plugin lock for 2 ms and re-acquire it at once, for ms; each
+ * acquisition is counted in the shared counter so the waiter can measure how many
+ * holder cycles passed it. */
+static enum plugin_status pst_loop_worker(const char *plugdir, int64_t ms, _Atomic unsigned *cycles)
 {
     int64_t end = platform_time_monotonic_ms() + ms;
     while (platform_time_monotonic_ms() < end) {
@@ -1948,6 +1952,7 @@ static enum plugin_status pst_loop_worker(const char *plugdir, int64_t ms)
         enum plugin_status st = plugin_lock_acquire(plugdir, &lk);
         if (st != PLUGIN_OK)
             return st;
+        atomic_fetch_add(cycles, 1);
         platform_sleep_ms(2);
         plugin_lock_release(&lk);
     }
@@ -1958,29 +1963,40 @@ static int pst_case_lock_fairness(void)
 {
     int failures = 0;
     TEST_CASE("a waiter acquires the plugin lock while holders re-acquire in a tight loop") {
-        enum { LOOPERS = 1, WAITS = 20 };
+        /* The plugin lock queues waiters behind a FIFO gate, so at most the one
+         * holder cycle already in flight may pass a waiter; MAX_PASSED allows
+         * four, far below the hundreds a starved waiter sees. Counting cycles
+         * instead of wall time keeps the check independent of host load: a
+         * descheduled holder passes fewer cycles, never more. */
+        enum { LOOPERS = 1, WAITS = 20, MAX_PASSED = 4 };
         struct pst_fx fx;
         char plugdir[PATH_MAX];
         pid_t pids[LOOPERS];
+        _Atomic unsigned *cycles = mmap(NULL, sizeof(*cycles), PROT_READ | PROT_WRITE,
+                                        MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        ASSERT(cycles != MAP_FAILED);
+        atomic_init(cycles, 0);
         ASSERT(pst_fx_open(&fx, true) && pst_install(&fx, "hello", "version a", &(struct pst_opts){0}) == PLUGIN_OK);
         ASSERT(pst_plug_path(&fx, NULL, plugdir, sizeof(plugdir)));
         fflush(NULL);
         for (int i = 0; i < LOOPERS; i++) {
             pids[i] = fork();
             if (pids[i] == 0)
-                _exit((int)pst_loop_worker(plugdir, 3000));
+                _exit((int)pst_loop_worker(plugdir, 3000, cycles));
         }
         for (int i = 0; i < WAITS; i++) {
             struct plugin_lock lk;
-            int64_t t0 = platform_time_monotonic_ms();
+            unsigned before = atomic_load(cycles);
             ASSERT_EQ(plugin_lock_acquire(plugdir, &lk), PLUGIN_OK);
-            /* A holder cycles every ~2 ms; a fair waiter gets in within a few cycles. */
-            ASSERT(platform_time_monotonic_ms() - t0 < 500); /* real-clock: a flock waiter against a real child process; no fake-clock seam exists */
+            /* The holder is blocked while we hold the lock, so this read is exact. */
+            unsigned passed = atomic_load(cycles) - before;
             plugin_lock_release(&lk);
+            ASSERT(passed <= MAX_PASSED);
             platform_sleep_ms(1);
         }
         for (int i = 0; i < LOOPERS; i++)
             ASSERT_EQ(pst_reap(pids[i]), (int)PLUGIN_OK);
+        munmap(cycles, sizeof(*cycles));
         pst_fx_close(&fx);
     } TEST_END
     return failures;
