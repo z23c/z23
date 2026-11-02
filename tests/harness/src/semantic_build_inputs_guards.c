@@ -15,6 +15,16 @@
 #include <stdio.h>
 #include <string.h>
 
+/* The name make reads the fixture's root makefile by. make tries GNUmakefile,
+ * makefile, Makefile in order; a case-insensitive filesystem (macOS) opens the
+ * fixture's Makefile as "makefile", so make and the facts reader both name it
+ * so, and a rule remakes it only under that spelling. */
+#if defined(__APPLE__)
+#define SBI_ROOT_NAME "makefile"
+#else
+#define SBI_ROOT_NAME "Makefile"
+#endif
+
 /* A missing optional include no rule makes, read after a parse-time command. */
 #define SBI_P_TAIL "all: build/a.o\n" SBI_OBJ_RULE "-include build/gen.mk\n" SBI_GEN_RULE
 
@@ -456,7 +466,7 @@ static int sbit_t_restart(void)
                                       "-include cfg.mk\n%.mk: FORCE\n"
                                       SBI_CFG_RECIPE), k_sbi_cfg, false},
         {"restart_root", SBI_GUARD("", SBI_FLAG_COND, "X := " SBI_TOUCH "\n"
-                                   "Makefile: FORCE\n\t@test -f d/r || "
+                                   SBI_ROOT_NAME ": FORCE\n\t@test -f d/r || "
                                    "{ touch d/r && touch $@; }\nFORCE:\n"),
          NULL, false},
         {"restart_no_rule", SBI_GUARD("", SBI_FLAG_COND, "X := " SBI_TOUCH "\n"
@@ -581,7 +591,7 @@ static int sbit_t_computed_targets(void)
         ASSERT(p->premises == ZCL_DEVLOOP_PREMISE_COMPUTED_TARGETS_NOT_INCLUDES &&
                strcmp(p->include, "build/gen.mk") == 0 && p->nincludes == 1);
         ASSERT(strcmp(p->target, "$(subst Q,.,build/genQmk)") == 0 &&
-               strcmp(p->target_at, "Makefile:5") == 0 && p->ntargets == 1);
+               strcmp(p->target_at, SBI_ROOT_NAME ":5") == 0 && p->ntargets == 1);
     } TEST_END
     zcl_devloop_facts_report_free(&r.rep);
     return failures;
@@ -630,7 +640,7 @@ static int sbit_t_computed_lines(void)
         ASSERT(p->premises == ZCL_DEVLOOP_PREMISE_COMPUTED_TARGETS_NOT_INCLUDES &&
                strcmp(p->include, "build/gen.mk") == 0);
         ASSERT(strcmp(p->target, "$(R)") == 0 &&
-               strcmp(p->target_at, "Makefile:6") == 0 && p->ntargets == 2);
+               strcmp(p->target_at, SBI_ROOT_NAME ":6") == 0 && p->ntargets == 2);
     } TEST_END
     zcl_devloop_facts_report_free(&r.rep);
     return failures;
@@ -692,7 +702,7 @@ static int sbit_t_plan_record(void)
         ASSERT(p->premises == SBI_PLAN_PREMISE && p->nincludes == 1 && p->nskips == 0 &&
                strcmp(p->include, "build/gen.mk") == 0);
         ASSERT(strcmp(p->command, "tools/mkgen.sh") == 0 && p->ncommands == 1 &&
-               strcmp(p->command_at, "Makefile:1") == 0);
+               strcmp(p->command_at, SBI_ROOT_NAME ":1") == 0);
         ASSERT(sbi_consume("sbi_pp_u", "X := $(shell uname -m)\n" SBI_P_TAIL, changed,
                            1, &u) && u.rep.make_premise.premises == 0);
         ASSERT(sbi_consume_with("sbi_pp_x", "X := $(shell tools/mkgen.sh)\n" SBI_P_TAIL,
