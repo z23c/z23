@@ -3,6 +3,9 @@
 
 #include <string.h>
 
+_Static_assert(sizeof "SEND SHIELDED TRANSACTION" <= ZCL_BLUE_REVIEW_LINE_SIZE,
+    "every reset line literal fits a review line");
+
 static bool overlap(const void *left, size_t left_size,
     const void *right, size_t right_size) {
     if (!left || !right || !left_size || !right_size) return false;
@@ -25,9 +28,11 @@ void blue_shielded_review_app_reset(blue_shielded_review_app *app) {
     memset(app->reply, 0, sizeof app->reply);
     memset(app->lines, 0, sizeof app->lines);
     app->detail = app->page = 0;
-    strcpy(app->lines[0], "CONNECT Z23");
-    strcpy(app->lines[1], "SEND SHIELDED TRANSACTION");
-    strcpy(app->lines[2], "READ ONLY; NO SIGNING");
+    memcpy(app->lines[0], "CONNECT Z23", sizeof "CONNECT Z23");
+    memcpy(app->lines[1], "SEND SHIELDED TRANSACTION",
+        sizeof "SEND SHIELDED TRANSACTION");
+    memcpy(app->lines[2], "READ ONLY; NO SIGNING",
+        sizeof "READ ONLY; NO SIGNING");
 }
 
 static bool show_progress(blue_shielded_review_app *app) {

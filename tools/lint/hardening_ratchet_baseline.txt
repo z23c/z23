@@ -8,20 +8,6 @@
 #        local-reader (struct *_reader, *_cursor, *_rd definitions).
 # core/ rows are counted and frozen like the rest of core/.
 # Regenerate: z23-lint check-hardening-ratchet --write-baseline
-banned-str apps/skycombat/src/models/input_model.c 4
-banned-str apps/zcl-ledger/device-blue-review/src/blue_review_app.c 5
-banned-str apps/zcl-ledger/device-blue-shielded-review/src/blue_shielded_review_app.c 3
-banned-str apps/zcl-ledger/device-blue-wallet/src/blue_payment_screen.c 1
-banned-str apps/zcl-ledger/device-blue-wallet/src/wallet_payment_device.c 1
-banned-str apps/zcl-ledger/src/blue_payment_screen.c 1
-banned-str apps/zcl-ledger/src/blue_shielded_review_app.c 3
-banned-str apps/zcl-ledger/tests/test_blue_app_catalog.c 1
-banned-str apps/zcl-ledger/tests/test_blue_payment_screen.c 3
-banned-str apps/zcl-ledger/tests/test_blue_review_screen.c 4
-banned-str apps/zcl-ledger/tests/test_blue_review_simulator.c 2
-banned-str apps/zcl-ledger/tests/test_blue_wallet_device_ui.c 1
-banned-str apps/zcl-ledger/tests/test_blue_wallet_integrated_loop.c 2
-banned-str apps/zcl-ledger/tests/test_blue_wallet_startup.c 1
 banned-str contexts/commons/modules/plugin/src/plugin_pack.c 2
 banned-str contexts/commons/modules/vcs/src/package_recipe.c 1
 banned-str contexts/commons/packages/zlru/tests/test_zlru.c 2

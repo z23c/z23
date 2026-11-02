@@ -133,7 +133,9 @@ bool blue_payment_screen_format(const blue_payment_output *output,
     memcpy(screen->address_lines[0], screen->address, 12);
     memcpy(screen->address_lines[1], screen->address + 12, 12);
     memcpy(screen->address_lines[2], screen->address + 24, 11);
-    strcpy(screen->kind,
-        output->type == ZCL_TX_STREAM_P2PKH ? "P2PKH" : "P2SH");
+    if (output->type == ZCL_TX_STREAM_P2PKH)
+        memcpy(screen->kind, "P2PKH", sizeof "P2PKH");
+    else
+        memcpy(screen->kind, "P2SH", sizeof "P2SH");
     return true;
 }

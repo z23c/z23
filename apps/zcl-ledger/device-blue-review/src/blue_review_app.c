@@ -3,15 +3,18 @@
 
 #include <string.h>
 
+_Static_assert(sizeof "NO KEYS OR SIGNING" <= ZCL_BLUE_REVIEW_LINE_SIZE,
+    "every reset line literal fits a review line");
+
 void blue_review_app_reset(blue_review_app *app) {
     app->page = 0;
     app->detail = 0;
     memset(app->reply, 0, sizeof app->reply);
-    strcpy(app->lines[0], "CONNECT Z23");
-    strcpy(app->lines[1], "SEND A TRANSACTION");
-    strcpy(app->lines[2], "THEN TAP NEXT PAGE");
-    strcpy(app->lines[3], "READ ONLY");
-    strcpy(app->lines[4], "NO KEYS OR SIGNING");
+    memcpy(app->lines[0], "CONNECT Z23", sizeof "CONNECT Z23");
+    memcpy(app->lines[1], "SEND A TRANSACTION", sizeof "SEND A TRANSACTION");
+    memcpy(app->lines[2], "THEN TAP NEXT PAGE", sizeof "THEN TAP NEXT PAGE");
+    memcpy(app->lines[3], "READ ONLY", sizeof "READ ONLY");
+    memcpy(app->lines[4], "NO KEYS OR SIGNING", sizeof "NO KEYS OR SIGNING");
     app->lines[5][0] = 0;
 }
 

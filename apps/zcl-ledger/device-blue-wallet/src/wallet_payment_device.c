@@ -679,7 +679,7 @@ static void display_fee(void) {
         UX_DISPLAY(ended_ui, NULL);
         return;
     }
-    strcpy(input_path_text, paths);
+    memcpy(input_path_text, paths, strlen(paths) + 1);
     UX_DISPLAY(fee_ui, NULL);
 }
 
