@@ -184,6 +184,89 @@ network with borrowed shielded state.
 value right after an import: `release_assisted` /
 `proven_but_not_self_folded`.
 
+## 5. Phone spend rule (`-spend-after-checkpoint`)
+
+`sovereignty_guard_allow("wallet_spend")` refuses every spend while the tip is
+`release_assisted`, which is what a phone started from a snapshot is. The one
+exception is an explicit, default-off startup option, `-spend-after-checkpoint`,
+meant for the phone build. The Android app does not pass it yet; until it
+does, no shipped caller turns the rule on. It changes `z_sendmany` only (the
+registered RPC handler, and `core.wallet.shielded.send`, which calls it).
+`sendtoaddress`, `sendmany`, `zslp`, market, vault, multisig and the wallet view
+(send and shield forms) keep the strict guard and stay refused, as do in-process callers of `rpc_z_sendmany` and
+`z_sendmany_prepare`. Mining, bundle export and seeding are not touched, and
+the capability table in `services/sync_trust_policy.h` is unchanged.
+
+Nothing is read from a stored "approved" flag. At every send
+`wallet_spend_gate_check` (`contexts/wallet/controllers/src/wallet_spend_gate.c`)
+re-verifies, in order, and refuses with the first failing token:
+
+| Token | Check |
+|---|---|
+| `option_off` | the process was not started with the option |
+| `tip_not_validated` | no validated tip block (reducer tip), or its header Sapling root is unset |
+| `behind_tip` | the validated tip trails the best header by more than 2 blocks |
+| `checkpoint_missing` | no baked checkpoint at or below the tip, or the header chain does not reach it |
+| `tip_not_descended` | the tip's ancestor at a baked checkpoint height has another hash |
+| `checkpoint_mismatch` | the header `hashFinalSaplingRoot` at the baked frontier height differs from the baked frontier root |
+| `anchor_root_mismatch` | the header Sapling root at the tip is absent from the reducer's per-block Sapling anchor ledger; or, before proving, a selected note's witness root differs from the header root at its witness height |
+| `floor_unknown` | the Sapling anchor or nullifier activation cursor is absent, or the assisted-install seam, the reducer seed floor or the anchor ledger cannot be read, or the progress lock was not obtained within the bounded wait (5 s) |
+
+An assisted bundle install resets both cursors to 0 and records its seam height. A cold import declares the reducer seed floor, and `-import-complete-shielded` then sets both cursors to 0 with no seam. The floor includes the seam height when one is recorded and the seed floor when one is declared, so funds from before the seeded state stay out in every install mode (keystone seed, assisted bundle, cold import). An absent seam or seed floor is not an error; an unreadable one gives `floor_unknown`.
+
+With the option on, the strict guard alone never removes the floor. It counts a
+failed authority read as "not borrowed", so no floor is applied only when the
+durable self-folded marker reads true; otherwise the rule and floor apply.
+
+Every baked checkpoint (the keystone and each rung) at or below the tip must
+pass the two header checks. Header roots are proof-of-work committed.
+
+**Funds floor.** The floor is `max(compiled keystone height, Sapling anchor
+activation cursor, nullifier activation cursor, assisted-install seam height, reducer seed floor)`. A cursor of 0 does not prove the pre-seed history was replayed independently (a snapshot can carry a nullifier section), so the keystone height keeps older funds out. A shielded note or transparent coin received at or below the floor,
+or with an unknown height, is never selected, change included (change is a new
+output above the floor). A send that needs more than the post-floor funds
+refuses with `insufficient_post_checkpoint_funds` and the shortfall, and never
+spends partly; the reply says funds at or before the floor are not usable yet, not that they are absent. The shortfall goes to the caller only and is not logged.
+The native send command is keyed, so a refusal of this rule frees the key and
+answers with `SEND_REFUSED_KEY_RELEASED`: the refusal came before anything was
+built, so nothing was sent and the caller may retry (any other
+`WALLET_RPC_ERROR` may mean the send went out). Its log line carries a fixed
+text, never the reply text.
+
+**What the rule does not do.** It does not compare the snapshot's transparent
+coin set with the checkpoint, and that cannot be done after the node has folded
+forward: the set at the checkpoint height no longer exists to recompute. It
+does not prove the snapshot was honest. It spends only funds created in blocks
+this node validated after the floor, and binds the shielded state to
+proof-of-work-committed roots (the two header checks and the witness check), so
+a wrong snapshot makes a send refuse or fail on the device, not spend wrongly.
+The ledger check reads the reducer's anchor table, not the persisted
+`node_state["sapling_tree"]` copy, which is written only on rebuild, rescan and
+install and may lag the tip.
+
+Both cursor reads and the ledger read wait for the progress-store lock for at
+most 5 s instead of trying it once; status reads use a try-lock and report
+`unknown_progress_busy` while a walk holds the lock, and a send must not be
+refused for that. Only a read failure or the timeout gives `floor_unknown`.
+
+**One spent note below the floor blocks every shielded send.** The send path
+reconciles the wallet's shielded notes against the chain before selecting, and
+reconciling a spent note needs the body of the block that holds it. Blocks
+below the seeded state have no body on a phone, so a note at or below the floor
+that the chain shows as spent makes the send refuse with "Canonical shielded
+note state is unavailable". The rule does not change that reconciliation.
+
+**Nodes with a positive cursor.** On a node whose anchor or nullifier
+activation cursor is positive, the apply stage holds every block that contains
+a Sapling spend or JoinSplit (`shielded_history_incomplete`) and does not
+advance past it. The tip then stops, `behind_tip` follows, and sends are
+refused. The rule is therefore for nodes whose cursors are 0; it does not
+change that hold.
+
+`z23 dumpstate sovereignty` reports the rule in a separate
+`gated`-sibling object, `spend_after_checkpoint` (`enabled`, `last_send_check`),
+and does not change the meaning of the existing fields.
+
 ## Copy-prove harness
 
 `tools/scripts/import-copy-prove.sh` covers this path (its verdict does

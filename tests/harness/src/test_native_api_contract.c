@@ -1581,6 +1581,139 @@ static int test_space_separated_value_flag_is_refused_with_hint(void)
     return failures;
 }
 
+/* A refusal by the phone spend rule reaches the caller as a released key (the
+ * app shows "nothing was sent"), and its amount is not written to the log.
+ * Any other released reason is logged as before. */
+static const char *g_spend_rule_reply;
+
+static char *spend_rule_stub_rpc(const char *method, const char *params_json)
+{
+    if (method && strcmp(method, "z_sendmany") == 0 && g_spend_rule_reply)
+        return strdup(g_spend_rule_reply);
+    return wallet_stub_rpc(method, params_json);
+}
+
+static bool spend_rule_commit_input(const struct zcl_command_spec *spec,
+                                    struct json_value *commit)
+{
+    struct json_value in;
+    json_init(&in);
+    json_set_object(&in);
+    (void)json_push_kv_str(&in, "wallet_scope", "dev");
+    (void)json_push_kv_str(&in, "from", "zs1StubSource");
+    (void)json_push_kv_str(&in, "to", "zs1StubRecipient");
+    (void)json_push_kv_str(&in, "amount", "0.1");
+    (void)json_push_kv_str(&in, "idempotency_key", "spend-rule-1");
+    struct zcl_command_request req = {
+        .spec = spec, .input = &in, .view = "normal",
+    };
+    struct zcl_command_reply plan;
+    zcl_command_reply_init(&plan, spec->output_schema);
+    zcl_native_handle_wallet_shielded_send(&req, &plan);
+    const char *text = plan.exit_code == ZCL_COMMAND_EXIT_OK
+        ? json_get_str(json_get(&plan.data, "commit_input")) : NULL;
+    bool ok = text && json_read(commit, text, strlen(text));
+    zcl_command_reply_free(&plan);
+    json_free(&in);
+    return ok;
+}
+
+static bool spend_rule_send(const struct zcl_command_spec *spec,
+                            struct zcl_command_reply *reply, char *logtext,
+                            size_t cap)
+{
+    zcl_command_reply_init(reply, spec->output_schema);
+    struct json_value commit;
+    json_init(&commit);
+    if (!spend_rule_commit_input(spec, &commit)) {
+        json_free(&commit);
+        return false;
+    }
+    struct zcl_command_request req = {
+        .spec = spec, .input = &commit, .view = "normal",
+    };
+    FILE *cap_file = tmpfile();
+    int saved = dup(fileno(stderr));
+    bool ok = cap_file && saved >= 0 && fflush(stderr) == 0 &&
+              dup2(fileno(cap_file), fileno(stderr)) >= 0;
+    if (ok) {
+        zcl_native_handle_wallet_shielded_send(&req, reply);
+        ok = fflush(stderr) == 0 && fseek(cap_file, 0, SEEK_SET) == 0;
+        size_t n = ok ? fread(logtext, 1, cap - 1, cap_file) : 0;
+        logtext[n] = '\0';
+    }
+    ok &= security_restore_fd(saved, stderr);
+    if (cap_file)
+        fclose(cap_file);
+    json_free(&commit);
+    return ok;
+}
+
+static int test_wallet_spend_rule_refusal_code(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    TEST("core.wallet.shielded.send: a spend-rule refusal reaches the caller "
+         "with its reason and its amount is not logged") {
+        const struct zcl_command_spec *spec =
+            find_spec(reg, "core.wallet.shielded.send");
+        ASSERT(spec != NULL);
+        node_rpc_client_set_test_hook(spend_rule_stub_rpc);
+        struct zcl_command_reply reply;
+        char logtext[8192];
+
+        g_spend_rule_reply =
+            "{\"state\":\"released\",\"message\":\"Error: spend refused \xe2\x80\x94 "
+            "insufficient_post_checkpoint_funds (short by 7654321 zat; funds "
+            "received at or before the floor are not usable yet)\"}";
+        ASSERT(spend_rule_send(spec, &reply, logtext, sizeof(logtext)));
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_FAILED);
+        ASSERT_STR_EQ(reply.error.code, "SEND_REFUSED_KEY_RELEASED");
+        ASSERT(!reply.error.mutated);
+        ASSERT(strstr(reply.error.message, "nothing was sent") != NULL);
+        ASSERT(strstr(reply.error.message, "7654321") != NULL);
+        ASSERT(strstr(logtext, "refused by the spend rule") != NULL);
+        ASSERT(strstr(logtext, "7654321") == NULL);
+        ASSERT(strstr(logtext, "short by") == NULL);
+        zcl_command_reply_free(&reply);
+
+        g_spend_rule_reply =
+            "{\"state\":\"released\",\"message\":\"Error: spend refused \xe2\x80\x94 "
+            "spend-after-checkpoint check failed: behind_tip\"}";
+        ASSERT(spend_rule_send(spec, &reply, logtext, sizeof(logtext)));
+        ASSERT_STR_EQ(reply.error.code, "SEND_REFUSED_KEY_RELEASED");
+        ASSERT(strstr(reply.error.message, "behind_tip") != NULL);
+        zcl_command_reply_free(&reply);
+
+        /* The key could not be released: the node answers a plain RPC error
+         * that carries the refusal text. The caller keeps it; the log does
+         * not. */
+        g_spend_rule_reply =
+            "{\"error\":{\"code\":-4,\"message\":\"Error: spend refused \xe2\x80\x94 "
+            "insufficient_post_checkpoint_funds (short by 7654321 zat; funds "
+            "received at or before the floor are not usable yet)\"}}";
+        ASSERT(spend_rule_send(spec, &reply, logtext, sizeof(logtext)));
+        ASSERT_STR_EQ(reply.error.code, "WALLET_RPC_ERROR");
+        ASSERT(strstr(reply.error.message, "7654321") != NULL);
+        ASSERT(strstr(logtext, "refused by the spend rule") != NULL);
+        ASSERT(strstr(logtext, "7654321") == NULL);
+        ASSERT(strstr(logtext, "short by") == NULL);
+        zcl_command_reply_free(&reply);
+
+        g_spend_rule_reply =
+            "{\"state\":\"released\",\"message\":\"Insufficient shielded "
+            "funds\"}";
+        ASSERT(spend_rule_send(spec, &reply, logtext, sizeof(logtext)));
+        ASSERT_STR_EQ(reply.error.code, "SEND_REFUSED_KEY_RELEASED");
+        ASSERT(strstr(logtext, "Insufficient shielded funds") != NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    g_spend_rule_reply = NULL;
+    node_rpc_client_set_test_hook(NULL);
+    return failures;
+}
+
 static int test_wallet_security_refusal_flags(void)
 {
     int failures = 0;
@@ -4393,6 +4526,7 @@ int test_native_api_contract(void)
     failures += test_regtest_mine_native();
     failures += test_wallet_send_amount_admission();
     failures += test_wallet_mutating_native_e2e();
+    failures += test_wallet_spend_rule_refusal_code();
     failures += test_wallet_security_refusal_flags();
     failures += test_uniform_help();
     failures += test_guide_positional_paths();

@@ -2215,6 +2215,7 @@ static void run_full_suite_late_and_specs(int *failures)
     { extern int test_rom_journal_resume(void); *failures += test_rom_journal_resume(); }
     { extern int test_wallet_send_once(void); *failures += test_wallet_send_once(); }
     { extern int test_sync_trust_policy(void); *failures += test_sync_trust_policy(); }
+    { extern int test_wallet_spend_rule(void); *failures += test_wallet_spend_rule(); }
     { extern int test_code_capsule(void); *failures += test_code_capsule(); }
     { extern int test_code_packet(void); *failures += test_code_packet(); }
     { extern int test_code_impact(void); *failures += test_code_impact(); }

@@ -452,7 +452,13 @@ The spending paths also use two independent runtime gates:
   verification permits (`contexts/wallet/modules/wallet/include/wallet/wallet_lock.h`).
   Shielded sends additionally require the spending key to be resident (section 3).
 - **the sync-verified `WALLET_SPEND` capability** — spending is disabled until
-  the node's own state is self-verified.
+  the node's own state is self-verified. One exception, for a phone started
+  from a snapshot: the default-off `-spend-after-checkpoint` option lets
+  `z_sendmany` alone spend funds received after the snapshot point when the
+  compiled checkpoint is re-verified at send time; see
+  [shielded-history-importer.md §5](shielded-history-importer.md#5-phone-spend-rule--spend-after-checkpoint).
+  Mining, export and seeding stay refused, and the rule does not compare the
+  snapshot's transparent coin set with the checkpoint.
 
 ### 4.1 Fresh receive addresses (diversified)
 
