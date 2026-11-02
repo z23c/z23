@@ -216,41 +216,49 @@ static void error_reply(struct script *s, const char *code)
 #define CREATED_NO_BIRTHDAY "{\"ok\":true,\"data\":{\"phrase\":\"" PHRASE "\",\"birthday_recorded\":false}}"
 
 /* The node's log lines share the stream with its reply. */
-/* While a reply is read, every block that held the recovery phrase is overwritten before it is freed, and none is left behind. */
+/* While a reply is read, every block that held the whole recovery phrase is overwritten before it is freed, and none is left behind. */
 void __real_free(void *p);
 void __wrap_free(void *p);
 static bool watching, freed_unwiped;
 void __wrap_free(void *p)
 {
-    static const char marker[] = "alpha bravo charlie";
-    if (watching && p && memmem(p, malloc_usable_size(p), marker, sizeof(marker) - 1)) freed_unwiped = true;
+    if (watching && p && memmem(p, malloc_usable_size(p), PHRASE, sizeof(PHRASE) - 1)) freed_unwiped = true;
     __real_free(p);
 }
+#define TRUNCATED "{\"ok\":true,\"data\":{\"phrase\":\"" PHRASE
+static const struct { const char *stream; enum sun_result result; } wipe_streams[] = {
+    {CREATED "\n" CREATED "\n", SUN_UNKNOWN},
+    {CREATED "\n{\"ok\":true,\"data\":{\"phrase\":\"" PHRASE "\"}}\n", SUN_UNKNOWN},
+    {"{\"ok\":true,\"data\":{\"phrase\":\"" PHRASE "\"}}\n" CREATED "\n[boot] done\n", SUN_UNKNOWN},
+    {CREATED "\n[boot] done\n", SUN_OK},
+    {"[boot] start\n" CREATED "\n", SUN_OK},
+    /* A line that holds the whole phrase and ends before the object does. */
+    {TRUNCATED, SUN_UNKNOWN},
+    {TRUNCATED "\n", SUN_UNKNOWN},
+    {TRUNCATED "\n" CREATED "\n", SUN_OK},
+    {CREATED "\n" TRUNCATED, SUN_OK},
+    {TRUNCATED "\n" TRUNCATED "\n", SUN_UNKNOWN},
+};
+#define WIPE_STREAMS (sizeof(wipe_streams) / sizeof(wipe_streams[0]))
 static void node_reply_wipe_tests(void)
 {
-    static const char *const streams[] = {
-        CREATED "\n" CREATED "\n",
-        CREATED "\n{\"ok\":true,\"data\":{\"phrase\":\"" PHRASE "\"}}\n",
-        "{\"ok\":true,\"data\":{\"phrase\":\"" PHRASE "\"}}\n" CREATED "\n[boot] done\n",
-        CREATED "\n[boot] done\n",
-        "[boot] start\n" CREATED "\n",
-    };
     struct script s = {0};
     struct sun node = node_of(&s);
     struct sun_created c;
     /* Each stream once first, so what the allocator keeps for itself is not counted. */
-    for (size_t i = 0; i < sizeof(streams) / sizeof(streams[0]); ++i) {
-        script_say(&s, true, streams[i]);
+    for (size_t i = 0; i < WIPE_STREAMS; ++i) {
+        script_say(&s, true, wipe_streams[i].stream);
         (void)sun_create(&node, PASS64, &c);
     }
-    for (size_t i = 0; i < sizeof(streams) / sizeof(streams[0]); ++i) {
-        script_say(&s, true, streams[i]);
+    for (size_t i = 0; i < WIPE_STREAMS; ++i) {
+        script_say(&s, true, wipe_streams[i].stream);
         size_t before = mallinfo2().uordblks;
         freed_unwiped = false;
         watching = true;
-        (void)sun_create(&node, PASS64, &c);
+        enum sun_result result = sun_create(&node, PASS64, &c);
         watching = false;
         assert(!freed_unwiped && mallinfo2().uordblks == before);
+        assert(result == wipe_streams[i].result && (result == SUN_OK) == (c.words.count == 24));
     }
 }
 static void node_stream_tests(void)
