@@ -245,7 +245,9 @@ static int mv_check_facts(struct mv *m, int log)
 
 int sp_compare_move(const struct sp_mfile *f, size_t n, FILE *out)
 {
-    struct mv m = { f, n, calloc(n, sizeof(struct sp_file)), calloc(n, sizeof(struct sp_file)), out, 0, NULL };
+    struct sp_file *base = calloc(n, sizeof *base); // raw-alloc-ok:lint-runtime
+    struct sp_file *cur = calloc(n, sizeof *cur); // raw-alloc-ok:lint-runtime
+    struct mv m = { f, n, base, cur, out, 0, NULL };
     int bad = !m.b || !m.c, nsrc = 0;
     for (size_t i = 0; !bad && i < n; i++) {
         nsrc += f[i].base != NULL;
