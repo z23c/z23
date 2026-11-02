@@ -1858,6 +1858,12 @@ int test_fleet_ledger(void)
 
     TEST("fleet ledger: a peer's rows replicate, the same bytes again are a "
          "no-op, and a forged row refuses the batch whole") {
+        /* The earlier box a handle is still open: close it before the
+         * handle is reused, or its ledger is unreachable at teardown. */
+        if (ma_open) {
+            fl_box_close(&ma);
+            ma_open = false;
+        }
         ASSERT(fl_box_open(&ma, root, "a2", 0x21));
         ma_open = true;
         ASSERT(fl_box_open(&mb, root, "b2", 0x31));

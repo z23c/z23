@@ -1046,8 +1046,10 @@ static int case_owner_gate_refusal_writes_nothing(void)
                                                         false));
     CSIR_CHECK("gate marker: refusal leaves no .failed marker",
                access(failed, F_OK) != 0);
+    char *autodetected = boot_autodetect_consensus_bundle(canonical);
     CSIR_CHECK("gate marker: bundle is still autodetected",
-               boot_autodetect_consensus_bundle(canonical) != NULL);
+               autodetected != NULL);
+    free(autodetected);
     CSIR_CHECK("gate marker: clearing the state lets admission judge the bundle",
                csir_sql("DELETE FROM coins") &&
                !boot_maybe_auto_install_consensus_bundle(&ndb, NULL, canonical,

@@ -213,6 +213,7 @@ static int test_dpc_zero_rows(void)
                                                 sizeof(envelope), NULL, 0,
                                                 &binding, 0, why,
                                                 sizeof(why)));
+        free(blob);
     }
     TEST_END
     dpc_restore();

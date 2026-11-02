@@ -834,6 +834,7 @@ void fp_index_free(struct fp_index *ix)
     free(ix->files);
     free(ix->syms);
     free(ix->bucket);
+    free(ix->causes);
     free(ix);
 }
 

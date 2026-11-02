@@ -1435,10 +1435,12 @@ static int ar_test_has_many_wallet_tx_utxos(void)
     ok = ok && (utxos[0].vout == 0);
     ok = ok && (utxos[1].vout == 1);
     ok = ok && (utxos[2].vout == 2);
+    for (int i = 0; i < count; i++) db_wallet_utxo_free(&utxos[i]);
 
     count = db_wallet_tx_utxos(&ndb, txid2, utxos, 10);
     ok = ok && (count == 1);
     ok = ok && (utxos[0].value == 50000);
+    for (int i = 0; i < count; i++) db_wallet_utxo_free(&utxos[i]);
 
     node_db_close(&ndb);
     if (ok) printf("OK\n");
