@@ -93,6 +93,22 @@
 #endif
 #if defined(TP_ASAN)
 #include <sanitizer/lsan_interface.h>
+/* Z23 keeps the block index for the life of the process: block_map_free
+ * skips freeing it ("block_index lives for process lifetime") because
+ * lock-free readers still dereference pprev and phashBlock. A test that
+ * builds and drops a chainstate therefore leaves these allocations reachable
+ * only through that never-freed index. Each entry names an allocator whose
+ * objects hang off the block index. LeakSanitizer reads this default list
+ * only in the ASan test binary. */
+__attribute__((used))
+const char *__lsan_default_suppressions(void)
+{
+    return "leak:chainstate_insert_block_index\n"
+           "leak:add_to_block_index\n"
+           "leak:block_index_hdrext_get_or_alloc\n"
+           "leak:block_index_set_solution\n"
+           "leak:load_block_index_flat\n";
+}
 #endif
 #if defined(__linux__)
 #include <sys/vfs.h>
