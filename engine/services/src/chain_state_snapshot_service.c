@@ -2,6 +2,10 @@
  * Read-only projections split from chain_state_service.c so mutation policy
  * stays small and diagnostics reuse one repository-owned capture boundary. */
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE  /* pthread_timedjoin_np via platform/thread_compat.h */
+#endif
+
 #include "services/chain_state_service.h"
 #include "chain_state_internal.h"
 

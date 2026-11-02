@@ -44,6 +44,10 @@
  * call then reports "busy_stale_cache" carrying THAT observed value.
  */
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE  /* pthread_timedjoin_np via platform/thread_compat.h */
+#endif
+
 #include "test/test_core.h"
 
 #include "controllers/diagnostics_internal.h"
