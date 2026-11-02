@@ -1130,7 +1130,13 @@ static struct zcl_result set_one_rlimit(int resource, uint64_t v, const char *na
 struct zcl_result os_sandbox_set_rlimits(const struct os_sandbox_rlimits *lim)
 {
     if (!lim) return ZCL_ERR(OS_SANDBOX_ERR_INVALID_ARG, "lim==NULL");
-    ZCL_CHECK(set_one_rlimit(RLIMIT_AS,    lim->as_bytes,    "RLIMIT_AS"));
+    struct rlimit stk; /* glibc's pthread stack follows RLIMIT_STACK: clamp a big one (else EAGAIN under RLIMIT_AS) */
+    if (lim->as_bytes != OS_SANDBOX_RLIMIT_KEEP && getrlimit(RLIMIT_STACK, &stk) == 0 &&
+        stk.rlim_cur != RLIM_INFINITY && stk.rlim_cur > (rlim_t)8 << 20) {
+        stk.rlim_cur = (rlim_t)8 << 20;
+        (void)setrlimit(RLIMIT_STACK, &stk); /* lowering a soft limit cannot fail */
+    }
+    ZCL_CHECK(set_one_rlimit(RLIMIT_AS,   lim->as_bytes,    "RLIMIT_AS"));
     ZCL_CHECK(set_one_rlimit(RLIMIT_CPU,   lim->cpu_seconds, "RLIMIT_CPU"));
     ZCL_CHECK(set_one_rlimit(RLIMIT_NPROC, lim->nproc,       "RLIMIT_NPROC"));
     ZCL_CHECK(set_one_rlimit(RLIMIT_FSIZE, lim->fsize_bytes, "RLIMIT_FSIZE"));
