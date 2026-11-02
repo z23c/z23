@@ -20,6 +20,7 @@
 #include "lint/lintc/lintc.h"
 #include "lint/lintc/premise.h"
 #include "util/spawn.h"
+#include "platform/os_sandbox.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -469,6 +470,19 @@ static int lsel_ux_env_run(const struct lsel_ux *ux, char *env, size_t count,
     return lint_unit_exec_main(n, argv);
 }
 
+/* unit-exec runs a unit only inside a Landlock domain and exits UNCONFINED (4)
+ * where Landlock is unavailable (macOS has no equivalent), so a case that
+ * needs a confined run to succeed or be refused by the domain cannot run
+ * there. The probe is the capability itself, not the platform. */
+static bool lsel_confinement(const char *what)
+{
+    if (os_sandbox_landlock_abi() >= 1)
+        return true;
+    printf("lint_selection: SKIP %s: Landlock is unavailable here, so "
+           "unit-exec exits UNCONFINED\n", what);
+    return false;
+}
+
 static int test_lsel_ux_env_bounds(void)
 {
     int failures = 0;
@@ -487,12 +501,14 @@ static int test_lsel_ux_env_bounds(void)
         ASSERT_EQ(lsel_ux_env_run(&ux, env, 1, ": > \"$HOME/ran\""), 2);
         ASSERT(access(marker, F_OK) != 0);
         /* The largest fitting entry preserves every byte (4109 value bytes). */
-        env[8 + 4109] = '\0';
-        ASSERT_EQ(lsel_ux_env_run(&ux, env, 1,
-                  "case $X in *[!a]*) exit 1;; esac; test \"${#X}\" -eq 4109"), 0);
-        env[8 + 4095] = '\0';
-        ASSERT_EQ(lsel_ux_env_run(&ux, env, 1,
-                  "case $X in *[!a]*) exit 1;; esac; test \"${#X}\" -eq 4095"), 0);
+        if (lsel_confinement("the environment byte-preservation runs")) {
+            env[8 + 4109] = '\0';
+            ASSERT_EQ(lsel_ux_env_run(&ux, env, 1,
+                      "case $X in *[!a]*) exit 1;; esac; test \"${#X}\" -eq 4109"), 0);
+            env[8 + 4095] = '\0';
+            ASSERT_EQ(lsel_ux_env_run(&ux, env, 1,
+                      "case $X in *[!a]*) exit 1;; esac; test \"${#X}\" -eq 4095"), 0);
+        }
         ASSERT_EQ(lsel_ux_env_run(&ux, env, 33, ": > \"$HOME/ran\""), 2);
         ASSERT(access(marker, F_OK) != 0);
         test_rm_rf_recursive(ux.dir);
@@ -502,6 +518,8 @@ static int test_lsel_ux_env_bounds(void)
 
 static int test_lsel_ux_declared_and_undeclared(void)
 {
+    if (!lsel_confinement("a declared read and an undeclared read"))
+        return 0;
     int failures = 0;
     TEST_CASE("lint_selection: unit-exec reads its premise, an undeclared "
               "read is PREMISE_INCOMPLETE") {
@@ -518,6 +536,8 @@ static int test_lsel_ux_declared_and_undeclared(void)
 
 static int test_lsel_ux_read_dir(void)
 {
+    if (!lsel_confinement("the undeclared directory listing"))
+        return 0;
     int failures = 0;
     TEST_CASE("lint_selection: unit-exec refuses an undeclared directory "
               "listing") {
@@ -557,6 +577,8 @@ static bool lsel_home_file(char *out, size_t cap)
 
 static int test_lsel_ux_home(void)
 {
+    if (!lsel_confinement("the $HOME read refusal"))
+        return 0;
     int failures = 0;
     TEST_CASE("lint_selection: unit-exec refuses a $HOME read") {
         struct lsel_ux ux;
@@ -594,6 +616,8 @@ static int lsel_listener(int *port)
 
 static int test_lsel_ux_tcp(void)
 {
+    if (!lsel_confinement("the TCP connect refusal"))
+        return 0;
     int failures = 0;
     TEST_CASE("lint_selection: unit-exec refuses a TCP connect") {
         struct lsel_ux ux;
@@ -631,8 +655,10 @@ static int test_lsel_ux_forced_off(void)
         const char *touch[] = { "touch", marker, NULL };
         ASSERT_EQ(lsel_ux_run(&ux, true, touch), 4);
         ASSERT(access(marker, F_OK) != 0);
-        ASSERT_EQ(lsel_ux_run(&ux, false, touch), 0);
-        ASSERT(access(marker, F_OK) == 0);
+        if (lsel_confinement("the confined run that creates the marker")) {
+            ASSERT_EQ(lsel_ux_run(&ux, false, touch), 0);
+            ASSERT(access(marker, F_OK) == 0);
+        }
         /* The same unchanged candidate that inherits when confined. */
         ASSERT(lsel_fixture(&fx));
         ASSERT_EQ(lsel_eval(&fx, NULL, false, u, why, sizeof(why)), 0);
@@ -650,6 +676,8 @@ static int test_lsel_ux_forced_off(void)
  * and dropping one closure file from it fails the unit closed. */
 static int test_lsel_ux_compiler_premise(void)
 {
+    if (!lsel_confinement("the compiler premise run"))
+        return 0;
     int failures = 0;
     TEST_CASE("lint_selection: a computed premise compiles under unit-exec; "
               "a premise missing a header is PREMISE_INCOMPLETE") {
