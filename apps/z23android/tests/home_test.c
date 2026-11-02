@@ -51,18 +51,51 @@ static void node_button_states(void)
     assert(zapp_home_phone_card(&view, true, card, sizeof(card)) && strstr(card, "\"node_button\":\"\""));
 }
 
+static void plain_node_line_states(void)
+{
+    static struct zapp_view view;
+    char card[1024];
+    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && strstr(card, "\"node_line\":\"Node stopped\""));
+    view.node_process_running = true;
+    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) &&
+        strstr(card, "\"node_line\":\"Starting your node… usually about a minute\""));
+    view.node_running = true;
+    view.node_height = 1000;
+    view.node_headers = 1800;
+    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && strstr(card, "\"node_line\":\"Catching up: 800 blocks to go\""));
+    view.node_base_height = 900;
+    view.node_base_at = 40;
+    view.node_sample_height = 1000;
+    view.node_sample_at = 100;
+    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) &&
+        strstr(card, "\"node_line\":\"Catching up: 800 blocks to go, about 8 min left\""));
+    view.node_sample_at = 60;
+    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) &&
+        strstr(card, "\"node_line\":\"Catching up: 800 blocks to go\"") && !strstr(card, "min left"));
+    view.node_sample_at = 100;
+    view.node_base_height = 1000;
+    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && !strstr(card, "min left"));
+    view.node_height = 1999;
+    view.node_headers = 2000;
+    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && strstr(card, "\"node_line\":\"Up to date\""));
+    view.node_height = -1;
+    view.node_headers = -1;
+    snprintf(view.node_line, sizeof(view.node_line), "Node running");
+    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && strstr(card, "\"node_line\":\"Node running\""));
+}
 static void phone_card_golden(void)
 {
     static struct zapp_view view;
     char card[1024];
-    snprintf(view.node_line, sizeof(view.node_line), "Node catching up · 1,200 of 2,000");
-    snprintf(view.sync_status, sizeof(view.sync_status), "800 blocks to go.");
     view.node_process_running = true;
+    view.node_running = true;
     view.node_wanted = true;
+    view.node_height = 1200;
+    view.node_headers = 2000;
     fill_secrets(&view);
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)));
-    assert(!strcmp(card, "{\"schema\":\"zcl.phone_card.v1\",\"node_line\":\"Node catching up · 1,200 of 2,000\","
-        "\"sync\":\"800 blocks to go.\",\"pace\":\"normal\",\"node_button\":\"Stop node\"}"));
+    assert(!strcmp(card, "{\"schema\":\"zcl.phone_card.v1\",\"node_line\":\"Catching up: 800 blocks to go\","
+        "\"sync\":\"\",\"pace\":\"normal\",\"node_button\":\"Stop node\"}"));
     view.pace = ZAPP_PACE_GENTLE;
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)));
     assert(strstr(card, "\"node_line\":\"Syncing gently · phone is warm\"") && strstr(card, "\"pace\":\"gentle\""));
@@ -75,7 +108,7 @@ static void phone_card_omits_secrets(void)
     char card[1024];
     fill_secrets(&view);
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)));
-    assert(!strcmp(card, "{\"schema\":\"zcl.phone_card.v1\",\"node_line\":\"\",\"sync\":\"Sync status unknown\","
+    assert(!strcmp(card, "{\"schema\":\"zcl.phone_card.v1\",\"node_line\":\"Node stopped\",\"sync\":\"\","
         "\"pace\":\"normal\",\"node_button\":\"Start node\"}"));
     static const char *const secrets[] = {"FLEET-TOKEN", "RECEIPT", "PLAN-ID", "OPS-TEXT", "PAIR-OFFER", "PAIRCD",
         "TRANSCRIPT", "CONNECTION-PATH", "/data/", "fleet_token", "ops_plan", "pair_offer", "key"};
@@ -94,7 +127,7 @@ static void phone_card_never_shows_wallet(void)
     plant_wallet_marker(&view);
     assert(strstr(view.fleet_status, "WALLET-MARKER"));
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)));
-    assert(strstr(card, "\"sync\":\"Synced\"") && !strstr(card, "WALLET") && !strstr(card, "ZCL"));
+    assert(strstr(card, "\"sync\":\"\"") && !strstr(card, "WALLET") && !strstr(card, "ZCL"));
     assert(!strstr(card, "Balance") && !strstr(card, "Wallet") && !strstr(card, "balance"));
     assert(zapp_home_phone_card(&view, true, card, sizeof(card)) && !strstr(card, "WALLET"));
 }
@@ -373,6 +406,7 @@ int main(void)
     dark_by_default();
     phone_card_golden();
     node_button_states();
+    plain_node_line_states();
     phone_card_omits_secrets();
     phone_card_never_shows_wallet();
     wallet_tile_has_no_amount();

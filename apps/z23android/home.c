@@ -75,17 +75,44 @@ static const char *pace_name(enum zapp_pace pace)
 {
     return pace == ZAPP_PACE_GENTLE ? "gentle" : pace == ZAPP_PACE_PAUSE ? "pause" : "normal";
 }
+/* Minutes left at the rate of the two samples, rounded up. False unless they are ZAPP_RATE_SPAN_SECS apart,
+ * the height moved between them and the node is behind. */
+static bool minutes_left(const struct zapp_view *view, int64_t *minutes)
+{
+    const int64_t span = view->node_sample_at - view->node_base_at;
+    const int64_t moved = view->node_sample_height - view->node_base_height;
+    const int64_t remaining = view->node_headers - view->node_height;
+    if (view->node_base_at <= 0 || span < ZAPP_RATE_SPAN_SECS || moved <= 0 || remaining <= 0) return false;
+    *minutes = (remaining * span / moved + 59) / 60;
+    return true;
+}
+/* The one plain status line for the phone node: stopped, starting (the process runs but does not answer), catching up
+ * with the blocks left (and the minutes, only when a rate is known), or up to date. */
+static const char *plain_node_line(const struct zapp_view *view, char *out, size_t cap)
+{
+    char blocks[32], minutes_text[48] = "";
+    const int64_t behind = view->node_headers - view->node_height;
+    int64_t minutes = 0;
+    if (!view->node_process_running) snprintf(out, cap, "Node stopped");
+    else if (!view->node_running) snprintf(out, cap, "Starting your node… usually about a minute");
+    else if (view->node_height < 0 || view->node_headers < 0) snprintf(out, cap, "%s", view->node_line);
+    else if (behind > ZAPP_CHAIN_SKEW) {
+        if (minutes_left(view, &minutes)) snprintf(minutes_text, sizeof(minutes_text), ", about %lld min left", (long long)minutes);
+        snprintf(out, cap, "Catching up: %s blocks to go%s", zapp_grouped(behind, blocks), minutes_text);
+    } else snprintf(out, cap, "Up to date");
+    return out;
+}
 size_t zapp_home_phone_card(const struct zapp_view *view, bool preview, char *out, size_t cap)
 {
     struct json_value card;
-    char line[sizeof(view->node_line)];
+    char line[sizeof(view->node_line)], plain[sizeof(view->node_line)];
     bool running = view->node_running || view->node_process_running;
     json_init(&card); json_set_object(&card);
     json_push_kv_str(&card, "schema", "zcl.phone_card.v1");
     json_push_kv_str(&card, "node_line", preview ? "Preview · separate from your main node" :
-        zapp_paced_line(view->pace, running, view->node_line, line, sizeof(line)));
+        zapp_paced_line(view->pace, running, plain_node_line(view, plain, sizeof(plain)), line, sizeof(line)));
     json_push_kv_str(&card, "sync", preview ? "The preview app does not run a node." :
-        view->sync_status[0] ? view->sync_status : "Sync status unknown");
+        "");
     json_push_kv_str(&card, "pace", pace_name(view->pace));
     json_push_kv_str(&card, "node_button", preview ? "" : zapp_home_node_label(view));
     return finish(&card, out, cap);

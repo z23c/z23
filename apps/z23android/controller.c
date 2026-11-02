@@ -170,6 +170,25 @@ static void startup_default(void *ctx)
     pthread_mutex_unlock(&c->pace_lock);
 }
 #endif
+/* Keeps the newest height sample and, once it is ZAPP_RATE_SPAN_SECS old, the one it replaces as the older sample, for the
+ * Home rate. A node that does not answer or gives no height clears the samples. */
+static void record_height(struct zapp_view *view, const struct node_reading *n, int64_t now)
+{
+    if (!n->responding || n->height < 0) {
+        view->node_height = view->node_headers = -1;
+        view->node_sample_at = view->node_base_at = 0;
+        return;
+    }
+    view->node_height = n->height;
+    view->node_headers = n->target;
+    if (view->node_sample_at && now - view->node_sample_at < ZAPP_RATE_SPAN_SECS) return;
+    if (view->node_sample_at) {
+        view->node_base_height = view->node_sample_height;
+        view->node_base_at = view->node_sample_at;
+    }
+    view->node_sample_height = n->height;
+    view->node_sample_at = now;
+}
 static void observe_node(struct controller *c)
 {
     char *output = calloc(1, ZAPP_TEXT_CAP);
@@ -198,6 +217,7 @@ static void observe_node(struct controller *c)
     c->view.node_process_running = process_running;
     c->view.pace = pace;
     c->view.node_wanted = wanted;
+    record_height(&c->view, &n, now);
     copy_text(c->view.sync_status, sizeof(c->view.sync_status), status);
     copy_text(c->view.node_line, sizeof(c->view.node_line), line);
     c->seen_responding = n.responding; c->seen_height = n.height; c->seen_target = n.target; c->seen_peers = n.peers;
