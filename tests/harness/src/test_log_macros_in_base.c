@@ -100,21 +100,23 @@ static bool lmib_norm(const char *line, char *out, size_t cap)
     return n > 0 && (size_t)n < cap;
 }
 
+/* want is the exact normalised line the base body prints for the level
+ * token from zcl_log_emit_at (log_level.c): LEVEL, then [dom], then fn(). */
 struct lmib_pair {
     const char *what;
     void (*plain)(void);
     void (*in)(void);
-    const char *fn;
+    const char *want;
 };
 
 static const struct lmib_pair k_lmib_pairs[] = {
-    { "LOG_WARN", orig_warn, help_warn, "orig_warn():" },
-    { "LOG_INFO", orig_info, help_info, "orig_info():" },
-    { "LOG_ERROR", orig_error, help_error, "orig_error():" },
+    { "LOG_WARN", orig_warn, help_warn, "WARN [dom] orig_warn(): warn 7\n" },
+    { "LOG_INFO", orig_info, help_info, "INFO [dom] orig_info(): info 7\n" },
+    { "LOG_ERROR", orig_error, help_error, "ERROR [dom] orig_error(): error 7\n" },
 };
 
-/* The helper's line, normalised, equals the plain line from the original,
- * names the original, and does not name the helper. */
+/* Both the plain line from the original and the helper's _IN line normalise
+ * to the exact expected text, and the helper's line does not name the helper. */
 static bool lmib_pair_ok(const struct lmib_pair *p)
 {
     char a[1024], b[1024], na[1024], nb[1024];
@@ -122,8 +124,8 @@ static bool lmib_pair_ok(const struct lmib_pair *p)
         return false;
     if (!lmib_norm(a, na, sizeof na) || !lmib_norm(b, nb, sizeof nb))
         return false;
-    return strcmp(na, nb) == 0 && strstr(nb, p->fn) && !strstr(b, "help_") &&
-           strstr(nb, "[dom]");
+    return strcmp(na, p->want) == 0 && strcmp(nb, p->want) == 0 &&
+           !strstr(b, "help_");
 }
 
 /* Base ERROR lines carry no origin token, plain or _IN. */
