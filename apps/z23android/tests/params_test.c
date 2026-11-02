@@ -265,16 +265,18 @@ static void node_argument(void)
 {
     char arg[1200], dir[1300], expect[1400];
     reset(-1);
-    assert(!zapp_params_present(files) && !zapp_params_arg(files, arg, sizeof(arg)));
     path_of(dir, sizeof(dir), files, "params");
+    snprintf(expect, sizeof(expect), "-paramsdir=%s", dir);
+    /* Design pin: the node is given the directory before the copy exists, because it only notes the
+     * directory at boot and looks for the files at its first proof. */
+    assert(!zapp_params_present(files) && zapp_params_arg(files, arg, sizeof(arg)) && !strcmp(arg, expect));
     assert(mkdir(dir, 0700) == 0);
     write_sparse(dir, zapp_param_files[0].name, zapp_param_files[0].size);
-    assert(!zapp_params_present(files));            /* one of two */
+    assert(!zapp_params_present(files) && zapp_params_arg(files, arg, sizeof(arg)));   /* one of two */
     write_sparse(dir, zapp_param_files[1].name, zapp_param_files[1].size - 1);
     assert(!zapp_params_present(files));            /* wrong size */
     write_sparse(dir, zapp_param_files[1].name, zapp_param_files[1].size);
     assert(zapp_params_present(files) && zapp_params_arg(files, arg, sizeof(arg)));
-    snprintf(expect, sizeof(expect), "-paramsdir=%s", dir);
     assert(!strcmp(arg, expect));
     assert(!zapp_params_arg(files, arg, 8));      /* too small to hold it */
 }
@@ -326,6 +328,105 @@ static void prover_precondition(void)
     assert(!zapp_prover_allowed(0, true, NULL, why, sizeof(why)) && strstr(why, "not confirmed"));
     struct zapp_proving_probe none = {NULL, NULL};
     assert(!zapp_prover_allowed(0, true, &none, NULL, 0));
+}
+
+/* Launch and send readiness follow the job state of this process. */
+static int starts, stub_probe_calls;
+static bool start_result;
+static bool count_start(void *ctx, const char *dir) { (void)ctx; (void)dir; starts++; return start_result; }
+static enum zapp_proving stub_status(void *ctx) { stub_probe_calls++; return *(enum zapp_proving *)ctx; }
+#define NOT_READY "Sending is not ready yet: the payment keys are still being installed. This takes under a minute, once."
+
+static bool ready_text(enum zapp_proving node_says, const char *needle)
+{
+    char why[300] = "";
+    struct zapp_proving_probe node = {&node_says, stub_status};
+    stub_probe_calls = 0;
+    bool ok = zapp_send_prover_ready(0, &node, why, sizeof(why));
+    return needle ? !ok && strstr(why, needle) != NULL : ok && why[0] == 0;
+}
+
+static void idle_process_starts_once(void)
+{
+    starts = 0; start_result = true;
+    assert(zapp_params_launch(count_start, NULL, files) && starts == 1);
+    assert(!zapp_params_launch(NULL, NULL, files) && starts == 1);
+    assert(ready_text(ZAPP_PROVING_ARMED, "were not installed") && stub_probe_calls == 0);
+}
+
+static void copying_is_not_restarted(void)
+{
+    char why[300] = "";
+    struct zapp_proving_probe node = {NULL, NULL};
+    starts = 0; start_result = true;
+    assert(!zapp_params_launch(count_start, NULL, files) && starts == 0);
+    assert(!zapp_send_prover_ready(0, &node, why, sizeof(why)) && !strcmp(why, NOT_READY));
+    assert(ready_text(ZAPP_PROVING_ARMED, "still being installed") && stub_probe_calls == 0);
+}
+
+static void verified_is_not_restarted_and_asks_the_node(void)
+{
+    starts = 0; start_result = true;
+    assert(!zapp_params_launch(count_start, NULL, files) && starts == 0);
+    assert(ready_text(ZAPP_PROVING_ARMED, NULL) && stub_probe_calls == 1);
+    assert(ready_text(ZAPP_PROVING_UNAVAILABLE, "cannot prove"));
+    assert(ready_text(ZAPP_PROVING_UNKNOWN, "not confirmed"));
+}
+
+static void failed_says_why_and_may_start_again(void)
+{
+    starts = 0; start_result = true;
+    assert(ready_text(ZAPP_PROVING_ARMED, "could not be installed") && ready_text(ZAPP_PROVING_ARMED, "hash"));
+    assert(stub_probe_calls == 0);
+    assert(zapp_params_launch(count_start, NULL, files) && starts == 1);
+}
+
+static enum zapp_rpc_result rpc_answer;
+static const char *rpc_body, *rpc_method_seen, *rpc_dir_seen;
+static enum zapp_rpc_result stub_rpc(const char *datadir, const char *method, const char *params, int timeout_ms,
+                                     char *out, size_t cap, char *why, size_t why_cap)
+{
+    (void)params; (void)timeout_ms; (void)why_cap;
+    rpc_dir_seen = datadir; rpc_method_seen = method;
+    snprintf(out, cap, "%s", rpc_body);
+    snprintf(why, why_cap, "stub");
+    return rpc_answer;
+}
+
+static enum zapp_proving asked(enum zapp_rpc_result rc, const char *body)
+{
+    struct zapp_rpc_probe rpc = {"/data", stub_rpc};
+    rpc_answer = rc; rpc_body = body;
+    return zapp_proving_over_rpc(&rpc);
+}
+
+#define REPLY(word) "{\"result\":{\"balance\":\"0.0\",\"sapling\":{\"prover_ready\":true,\"proving_status\":\"" word "\"}},\"error\":null,\"id\":1}"
+static void probe_maps_node_replies(void)
+{
+    char why[200];
+    assert(asked(ZAPP_RPC_OK, REPLY("pair_present")) == ZAPP_PROVING_ARMED);
+    assert(!strcmp(rpc_method_seen, "getwalletinfo") && !strcmp(rpc_dir_seen, "/data"));
+    assert(asked(ZAPP_RPC_OK, REPLY("pair_armed")) == ZAPP_PROVING_ARMED);
+    assert(asked(ZAPP_RPC_OK, REPLY("full_set")) == ZAPP_PROVING_ARMED);
+    assert(asked(ZAPP_RPC_OK, REPLY("none")) == ZAPP_PROVING_UNAVAILABLE);
+    assert(asked(ZAPP_RPC_OK, REPLY("sideways")) == ZAPP_PROVING_UNKNOWN);
+    assert(asked(ZAPP_RPC_OK, "{\"result\":{\"balance\":\"0.0\"},\"error\":null,\"id\":1}") == ZAPP_PROVING_UNKNOWN);
+    assert(asked(ZAPP_RPC_OK, "{\"result\":null,\"error\":{\"code\":-18,\"message\":\"no wallet\"},\"id\":1}") == ZAPP_PROVING_UNKNOWN);
+    assert(asked(ZAPP_RPC_OK, "{\"result\":{\"sapling\":{\"proving_status\":\"pair_present\"}},\"error\":{\"code\":-1},\"id\":1}") == ZAPP_PROVING_UNKNOWN);
+    assert(asked(ZAPP_RPC_OK, "not json") == ZAPP_PROVING_UNKNOWN);
+    assert(asked(ZAPP_RPC_UNREACHABLE, REPLY("pair_present")) == ZAPP_PROVING_UNKNOWN);
+    assert(asked(ZAPP_RPC_FAILED, REPLY("pair_present")) == ZAPP_PROVING_UNKNOWN);
+    assert(zapp_proving_over_rpc(NULL) == ZAPP_PROVING_UNKNOWN && zapp_proving_from_reply(NULL) == ZAPP_PROVING_UNKNOWN);
+    struct zapp_rpc_probe rpc = {"/data", stub_rpc};
+    struct zapp_proving_probe node = {&rpc, zapp_proving_over_rpc};
+    rpc_answer = ZAPP_RPC_OK; rpc_body = REPLY("pair_present");
+    assert(zapp_prover_allowed(0, true, &node, why, sizeof(why)));
+    rpc_body = REPLY("none"); why[0] = 0;
+    assert(!zapp_prover_allowed(0, true, &node, why, sizeof(why)) && !strcmp(why, "The node cannot prove a payment yet."));
+    rpc_answer = ZAPP_RPC_UNREACHABLE; why[0] = 0;
+    assert(!zapp_prover_allowed(0, true, &node, why, sizeof(why)) && !strcmp(why, "The node has not confirmed that it can prove a payment."));
+    rpc_answer = ZAPP_RPC_OK; rpc_body = "{\"result\":{}}"; why[0] = 0;
+    assert(!zapp_prover_allowed(0, true, &node, why, sizeof(why)) && !strcmp(why, "The node has not confirmed that it can prove a payment."));
 }
 
 static void flip_installed_byte(int index)
@@ -468,6 +569,7 @@ static void job_reports_by_polling(void)
     assert(zapp_params_job_start_set(set, 2, fds, files));
     wait_for_job(why, sizeof(why), &state);
     assert(state == ZAPP_PARAMS_VERIFIED && why[0] == 0);
+    verified_is_not_restarted_and_asks_the_node();
     assert(same_bytes(0) && same_bytes(1) && closed(keep[0].fd) && closed(keep[1].fd));
     assert(atomic_load(&reads) > 0 && atomic_load(&reads_without_cloexec) == 0);
     job_released_everything();
@@ -479,6 +581,7 @@ static void job_reports_by_polling(void)
     assert(zapp_params_job_start_set(set, 2, fds, files));
     wait_for_job(why, sizeof(why), &state);
     assert(state == ZAPP_PARAMS_FAILED && strstr(why, "hash") && closed(keep[0].fd) && closed(keep[1].fd));
+    failed_says_why_and_may_start_again();
     nothing_left_behind();
     job_released_everything();
     unwatch();
@@ -515,6 +618,7 @@ static void second_start_is_refused_while_copying(void)
     for (int i = 0; i < 2000 && !atomic_load(&in_fsync); i++) pause_ms(2);
     assert(atomic_load(&in_fsync));                  /* the worker is inside its first flush */
     assert(zapp_params_job_state(why, sizeof(why)) == ZAPP_PARAMS_COPYING);
+    copying_is_not_restarted();
     open_fds(second);
     memcpy(keep2, second, sizeof(keep2));
     assert(!zapp_params_job_start_set(set, 2, second, files));
@@ -595,6 +699,8 @@ int main(int argc, char **argv)
     snprintf(root, sizeof(root), "%s", argv[1]);
     char why[200] = "unset";
     assert(zapp_params_job_state(why, sizeof(why)) == ZAPP_PARAMS_IDLE && why[0] == 0);
+    idle_process_starts_once();
+    probe_maps_node_replies();
     pinned_table_matches_the_published_sums();
     prover_precondition();
     install_succeeds();

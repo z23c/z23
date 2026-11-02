@@ -50,8 +50,8 @@ about 51.6 MB to the package.
 A preview build (`make preview-apk`) runs no node and leaves the files out, so it needs neither
 the files nor `check-params`. Pass `PREVIEW_PARAMS=1` to pack them into a wallet preview.
 
-State today: the code exists and is tested on a Linux host, but nothing in the app calls it yet and
-it has not run on a phone. `params_android.c` opens the packaged files on the caller's thread and
+State today: the app starts the copy at launch (`zapp_params_launch`, once per process unless the
+last attempt failed) and tests cover it on a Linux host; it has not run on a phone. `params_android.c` opens the packaged files on the caller's thread and
 `params_job.c` verifies and copies them on a worker thread to `files/params`: existing files are
 read and checked against their pinned SHA-256 first, a copy that differs (also at the same size) is
 replaced from the package, and each new file goes to `files/params.tmp`, is flushed, read back and
@@ -59,15 +59,15 @@ checked before the directory is renamed into place. After a failed copy no pinne
 under `files/params` (the directory stays only if it holds a file this code did not create). A start
 that is refused or whose thread cannot start changes nothing: the earlier outcome and files stand.
 The result is read by polling `zapp_params_job_state`; no callback runs and the worker
-touches no JNI. The node is started with `-paramsdir=<files>/params` when both files are present
-at their pinned size; the node checks its own pin when it loads them.
+touches no JNI. The node is always started with `-paramsdir=<files>/params`: it looks for the files at its first
+proof, so a start before the copy ends needs no restart. The node checks its own pin when it loads them.
 
 `zapp_prover_allowed` is the refusal before a send, not part of the copy. It passes only when the
 copy was verified, the node reports through `zapp_proving_probe` that it can prove, and the
 thermal status is below 3 (severe). A copy took 2.0 to 3.4 seconds on the Linux host and has not been timed on a phone; it is not
-paused for heat. The
-probe has no implementation yet. Two files alone do not arm proving in the node today (see the
-experiment record), so a send cannot be enabled until the node loads the Sapling pair on its own.
+paused for heat. The probe is one `getwalletinfo` call (`zapp_proving_over_rpc`), and
+`zapp_controller_prover_ready` reports the copy state, the probe and the thermal refusal in one plain
+sentence; the Send screen does not call it yet.
 
 ## Install and open
 

@@ -91,6 +91,28 @@ bool zapp_params_job_start_set(const struct zapp_param_file *set, size_t count, 
     return false;
 }
 
+bool zapp_params_launch(zapp_params_start_fn start, void *ctx, const char *files)
+{
+    enum zapp_params_state now = zapp_params_job_state(NULL, 0);
+    if (!start || now == ZAPP_PARAMS_COPYING || now == ZAPP_PARAMS_VERIFIED) return false;
+    return start(ctx, files);
+}
+
+bool zapp_send_prover_ready(int thermal_status, const struct zapp_proving_probe *node, char *why, size_t cap)
+{
+    char detail[sizeof(reason)];
+    enum zapp_params_state now = zapp_params_job_state(detail, sizeof(detail));
+    if (now == ZAPP_PARAMS_VERIFIED) return zapp_prover_allowed(thermal_status, true, node, why, cap);
+    if (!why || !cap) return false;
+    if (now == ZAPP_PARAMS_COPYING)
+        snprintf(why, cap, "Sending is not ready yet: the payment keys are still being installed. This takes under a minute, once.");
+    else if (now == ZAPP_PARAMS_FAILED)
+        snprintf(why, cap, "Sending is not ready: the payment keys could not be installed. %s", detail);
+    else
+        snprintf(why, cap, "Sending is not ready: the payment keys were not installed. Close and open Z23 to try again.");
+    return false;
+}
+
 bool zapp_params_job_start(const struct zapp_params_fd *fds, const char *files)
 {
     return zapp_params_job_start_set(zapp_param_files, ZAPP_PARAMS_COUNT, fds, files);

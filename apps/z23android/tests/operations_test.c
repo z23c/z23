@@ -307,9 +307,10 @@ static void roster_case(struct zapp_runtime *r)
     int fd = open(file, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     assert(fd >= 0 && write(fd, text, strlen(text)) == (ssize_t)strlen(text) && close(fd) == 0);
     assert(setenv("ZAPP_TEST_ADDNODE", peer, 1) == 0);
-    char out[128];
+    char out[128], expect[1200];
     int status;
-    assert(setenv("ZAPP_TEST_PARAMS_ARG", "none", 1) == 0);
+    assert(snprintf(expect, sizeof(expect), "-paramsdir=%s/params", r->files) > 0);
+    assert(setenv("ZAPP_TEST_PARAMS_ARG", expect, 1) == 0);
     assert(zapp_node_start(r, out, sizeof(out)));
     assert(waitpid(r->node, &status, 0) == r->node && WIFEXITED(status) && WEXITSTATUS(status) == 0);
     r->node = 0;
@@ -324,25 +325,28 @@ static void start_expecting(struct zapp_runtime *r, const char *argument)
     assert(waitpid(r->node, &status, 0) == r->node && WIFEXITED(status) && WEXITSTATUS(status) == 0);
     r->node = 0;
 }
-/* The node gets -paramsdir only once both files of the pinned size are in files/params. */
+/* The node always gets -paramsdir=files/params: it looks for the files at its first proof, so a node
+ * started before the copy finishes still finds them. */
 static void params_argument_cases(struct zapp_runtime *r, const char *directory)
 {
     char dir[400], file[500], expect[450];
     assert(snprintf(r->files, sizeof(r->files), "%s", directory) > 0);
-    assert(snprintf(dir, sizeof(dir), "%s/params", directory) > 0 && mkdir(dir, 0700) == 0);
-    start_expecting(r, "none");                                   /* no files */
-    sized_file(dir, 0, zapp_param_files[0].size);
-    start_expecting(r, "none");                                   /* one of two */
-    sized_file(dir, 1, zapp_param_files[1].size - 1);
-    start_expecting(r, "none");                                   /* wrong size */
-    sized_file(dir, 1, zapp_param_files[1].size);
+    assert(snprintf(dir, sizeof(dir), "%s/params", directory) > 0);
     assert(snprintf(expect, sizeof(expect), "-paramsdir=%s", dir) > 0);
+    start_expecting(r, expect);                                   /* no directory yet */
+    assert(mkdir(dir, 0700) == 0);
+    start_expecting(r, expect);                                   /* no files */
+    sized_file(dir, 0, zapp_param_files[0].size);
+    start_expecting(r, expect);                                   /* one of two */
+    sized_file(dir, 1, zapp_param_files[1].size - 1);
+    start_expecting(r, expect);                                   /* wrong size */
+    sized_file(dir, 1, zapp_param_files[1].size);
     start_expecting(r, expect);                                   /* complete */
     for (int i = 0; i < ZAPP_PARAMS_COUNT; i++) {
         assert(snprintf(file, sizeof(file), "%s/%s", dir, zapp_param_files[i].name) > 0 && unlink(file) == 0);
     }
     assert(rmdir(dir) == 0);
-    start_expecting(r, "none");
+    start_expecting(r, expect);
 }
 /* The console log is 300 bytes and the cap for these cases is 256, so spawn must move it to .1 and start a new file. */
 static char oversize[300];

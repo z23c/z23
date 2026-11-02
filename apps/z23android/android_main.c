@@ -13,6 +13,7 @@
 #include "native_ui.h"
 #include "node_service.h"
 #include "pairing.h"
+#include "params_android.h"
 #include "pay_stash.h"
 #include "secure_window.h"
 #include "wallet_send_ui.h"
@@ -562,6 +563,9 @@ static void forward_pairing(JNIEnv *env, jobject activity)
     (void)zapp_controller_action("pair_offer", offer, "");
     memory_cleanse(offer, sizeof(offer));
 }
+/* Copies the packaged proving parameters to <files>/params on a worker thread. Once per process unless the
+ * last attempt failed; a running or verified copy is left alone (zapp_params_launch). */
+static bool prepare_params(void *assets, const char *files) { return zapp_params_prepare_async(assets, files); }
 /* Prepares the surface and starts the controller and the native screens, in the order the app needs them. */
 static bool start_services(JNIEnv *env, ANativeActivity *activity, const char *native_dir, bool *preview)
 {
@@ -594,6 +598,7 @@ JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, 
     if (!start_tick()) goto fail;
     pthread_mutex_lock(&lock); active = (*env)->NewGlobalRef(env, activity->clazz); pthread_mutex_unlock(&lock);
     if (!clean(env) || !active || !start_services(env, activity, native_dir, &preview)) goto fail;
+    (void)zapp_params_launch(prepare_params, activity->assetManager, activity->internalDataPath);
     request_full_brightness(env, activity->clazz);
     zapp_camera_set_frame_notify(notify);
     forward_pairing(env, activity->clazz);

@@ -28,6 +28,10 @@ bool zapp_controller_node_control(bool start);
 bool zapp_controller_node_pause_for_setup(void);
 /* The node's boot stage as a short plain phrase, copied into out. */
 void zapp_controller_node_stage(char *out, size_t cap);
+/* Whether a shielded send may be built now (see zapp_send_prover_ready): the proving parameters are
+ * installed and the running node reports it can prove. False, with a plain reason in why, when not. Asks
+ * the node, so call it on the thread that is about to build the payment, not the controller worker. */
+bool zapp_controller_prover_ready(char *why, size_t cap);
 /* True while the phone's thermal state has paused the node. */
 bool zapp_controller_node_paused(void);
 #endif

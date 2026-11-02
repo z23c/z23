@@ -272,6 +272,8 @@ test-host:
 	$(HOST_CC) $(HOST_WARNINGS) tests/surface_test.c -o '$(BUILD_DIR)/surface-test'
 	'$(BUILD_DIR)/surface-test'
 	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../contexts/commons/packages/zsha256/include tests/params_test.c params.c params_install.c params_job.c \
+	  -I../../platform/modules/json/include -I../../platform/modules/base/include ../../platform/modules/json/src/json.c \
+	  ../../platform/modules/base/src/safe_alloc.c ../../platform/modules/base/src/cleanse.c \
 	  ../../contexts/commons/packages/zsha256/src/zsha256.c -Wl,--wrap=fsync -Wl,--wrap=write -Wl,--wrap=pread -Wl,--wrap=close -Wl,--wrap=calloc -Wl,--wrap=free -Wl,--wrap=pthread_create -pthread -o '$(BUILD_DIR)/params-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/params-test.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/params-test' "$$scratch"

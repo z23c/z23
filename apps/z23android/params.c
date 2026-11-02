@@ -1,6 +1,8 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #define _POSIX_C_SOURCE 200809L
 #include "params.h"
+#include "json/json.h"
+#include <string.h>
 #include <stdio.h>
 #include <sys/stat.h>
 
@@ -12,7 +14,7 @@ const struct zapp_param_file zapp_param_files[ZAPP_PARAMS_COUNT] = {
 
 bool zapp_params_path(const char *files, char *out, size_t cap)
 {
-    int n = files ? snprintf(out, cap, "%s/" ZAPP_PARAMS_DIR, files) : -1;
+    int n = files && *files ? snprintf(out, cap, "%s/" ZAPP_PARAMS_DIR, files) : -1;
     return n > 0 && (size_t)n < cap;
 }
 
@@ -39,9 +41,33 @@ bool zapp_params_present(const char *files)
 bool zapp_params_arg(const char *files, char *out, size_t cap)
 {
     char dir[1100];
-    if (!zapp_params_present(files) || !zapp_params_path(files, dir, sizeof(dir))) return false;
+    if (!zapp_params_path(files, dir, sizeof(dir))) return false;
     int n = snprintf(out, cap, "-paramsdir=%s", dir);
     return n > 0 && (size_t)n < cap;
+}
+
+enum zapp_proving zapp_proving_from_reply(const char *reply)
+{
+    struct json_value v = {0};
+    enum zapp_proving out = ZAPP_PROVING_UNKNOWN;
+    if (!reply || !json_read(&v, reply, strlen(reply))) return out;
+    const struct json_value *error = json_get(&v, "error");
+    const char *word = error && !json_is_null(error) ? ""
+                       : json_get_str(json_get(json_get(json_get(&v, "result"), "sapling"), "proving_status"));
+    if (!strcmp(word, "none")) out = ZAPP_PROVING_UNAVAILABLE;
+    else if (!strcmp(word, "pair_present") || !strcmp(word, "pair_armed") || !strcmp(word, "full_set")) out = ZAPP_PROVING_ARMED;
+    json_free(&v);
+    return out;
+}
+
+enum zapp_proving zapp_proving_over_rpc(void *ctx)
+{
+    const struct zapp_rpc_probe *probe = ctx;
+    char reply[8192], why[160];
+    if (!probe || !probe->datadir || !probe->call) return ZAPP_PROVING_UNKNOWN;
+    reply[0] = 0;
+    return probe->call(probe->datadir, "getwalletinfo", "[]", 5000, reply, sizeof(reply), why, sizeof(why)) == ZAPP_RPC_OK
+               ? zapp_proving_from_reply(reply) : ZAPP_PROVING_UNKNOWN;
 }
 
 bool zapp_prover_allowed(int thermal_status, bool params_verified, const struct zapp_proving_probe *node,

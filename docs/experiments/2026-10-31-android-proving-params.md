@@ -43,15 +43,25 @@ can prove and the phone is not hot.
 - `zapp_prover_allowed(thermal, params_verified, probe, ...)` passes only when the copy of this
   process was verified, `probe->status` returns `ZAPP_PROVING_ARMED`, and the thermal status is
   below 3. It is a refusal before a send; a copy is not paused for heat.
-- `operations.c`: `spawn_node` appends `-paramsdir=<files>/params` when both files are present at
-  their pinned size; the node applies its own SHA-512 pin on load.
+- `operations.c`: `spawn_node` appends `-paramsdir=<files>/params` always (`zapp_params_arg`); the node
+  applies its own SHA-512 pin on load.
 - `make preview-apk` leaves the parameters out unless `PREVIEW_PARAMS=1`; `make apk` packs them
   (`PACK_PARAMS=1`, the default).
 
-Not wired: nothing calls `zapp_params_prepare_async` or `zapp_prover_allowed` yet, and the proving
-probe has no implementation. The node-side status call is being added by another change (the node
-loads the Sapling pair lazily at the first proof and reports a status); the probe becomes one RPC
-to the running node mapped onto `enum zapp_proving`. No restart flow is built.
+Wired: `ANativeActivity_onCreate` calls `zapp_params_launch` with `zapp_params_prepare_async`, so a
+launch starts the copy unless this process already has one running or verified. The node is given
+`-paramsdir=<files>/params` even before the files exist: boot only notes the directory
+(`engine/composition/src/boot_params_gate.c:107`, `params_init.c:889`), a missing directory is the
+capability-only embedded-keys outcome the phone has today (`boot_params_gate.c:148-169`), and
+`sapling_proving_status` and the first proof stat the two files when asked
+(`params_init.c:1004-1006`, `:1230-1233`, `:1264`), so a node that starts before the copy ends
+finds the files with no restart. The probe is `zapp_proving_over_rpc`: one `getwalletinfo` call over
+loopback, `sapling.proving_status` mapped to `enum zapp_proving` (`none` unavailable; `pair_present`,
+`pair_armed`, `full_set` armed; anything else unknown). `zapp_controller_prover_ready` (controller.h)
+composes the job state, the probe and `zapp_prover_allowed`; the Send flow calls it just before it
+builds a payment. Not wired: that call in the Send files, which another lane owns. A node that booted
+without the files keeps its `shielded_spend_unavailable` capability blocker until its next start,
+although it proves from the first send after the copy.
 
 ## Findings about the node (core/ is out of bounds for this lane)
 
@@ -144,9 +154,9 @@ and the files when the thread cannot start (a wrapped `pthread_create`); a forei
 directory and refused when the buffer is too small; the pinned table equal to `params.sha256` and
 to the documented sizes; and `zapp_prover_allowed` over every thermal status -1 to 6 with a stub
 node probe returning armed, unavailable and unknown, an unverified copy never asking the node.
-`tests/operations_test.c` starts a stand-in node through `spawn_node` and requires exactly five
-arguments without parameters, with one file, or with a wrong-size file, and the sixth
-`-paramsdir=<files>/params` only with both files at the pinned size.
+`tests/operations_test.c` starts a stand-in node through `spawn_node` and requires `-paramsdir=<files>/params`
+whether the directory is absent, empty, partial, wrong-sized or complete, and none when the app has no files
+directory.
 
 Mutants of the sources (one edit each, host build of `params_test` or `operations_test`); every one
 turns the test red:
@@ -162,7 +172,7 @@ turns the test red:
 - `params_job.c`: descriptors closed only when no record was allocated; the running guard removed;
   a second close of each descriptor; the worker's record not freed; a refused start's record not
   freed; a failed thread start marking FAILED; the duplicate made without close-on-exec;
-- `operations.c`: the `argv[5]` assignment removed; `-paramsdir` added when the files are absent.
+- `operations.c`: the `argv[5]` assignment removed; `-paramsdir` dropped when the files are absent.
 
 ## Not measured
 
@@ -171,6 +181,6 @@ Nothing below has run on a phone.
 - Phone copy and verify time, peak memory and thermal state. `params_android.c` compiles in the NDK
   build but has not executed; neither has `params_job.c` on bionic, nor the use of one
   `AAsset_openFileDescriptor64` descriptor duplicated and read at an offset from another thread.
-- The proving probe: there is no implementation, and the node's status call is not in this tree.
+- The probe against a real phone node, and whether `getwalletinfo` answers while the wallet is locked.
 - A node run that loads these files, for the reason in finding 2.
-- The thermal refusal and the send screen, which nothing calls yet.
+- The thermal refusal and the send screen, which do not call `zapp_controller_prover_ready` yet.

@@ -6,6 +6,8 @@
 #include "private.h"
 #include "pairing.h"
 #include "operations.h"
+#include "params_job.h"
+#include "rpc.h"
 #include "pay_stash.h"
 #include "camera.h"
 #include "audio.h"
@@ -1051,6 +1053,20 @@ void zapp_controller_node_stage(char *out, size_t cap)
     struct controller *c = current;
     pthread_mutex_unlock(&startup_lock);
     snprintf(out, cap, "%s", c ? zapp_node_stage(&c->runtime) : "");
+}
+bool zapp_controller_prover_ready(char *why, size_t cap)
+{
+    pthread_mutex_lock(&startup_lock);
+    struct controller *c = current;
+    pthread_mutex_unlock(&startup_lock);
+    if (!c) {
+        if (why && cap) snprintf(why, cap, "The app is not ready.");
+        return false;
+    }
+    /* No thermal status is passed: the send screen already holds a payment while the node is paused for heat. */
+    struct zapp_rpc_probe rpc = {c->runtime.directory, zapp_rpc_call};
+    struct zapp_proving_probe node = {&rpc, zapp_proving_over_rpc};
+    return zapp_send_prover_ready(-1, &node, why, cap);
 }
 bool zapp_controller_node_paused(void)
 {

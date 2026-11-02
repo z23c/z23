@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "rpc.h"
 
 /* The Sapling proving parameters a shielded send needs. They ship inside the package as uncompressed
  * assets and are copied once to <files>/params, where the node finds them through -paramsdir. */
@@ -26,8 +27,10 @@ bool zapp_params_path(const char *files, char *out, size_t cap);
  * a send: only a completed zapp_params_install or a true zapp_params_verify does. */
 bool zapp_params_present(const char *files);
 
-/* "-paramsdir=<files>/params" when the files are present; false and out untouched otherwise. The
- * node checks its own SHA-512 pin of each file when it loads them. */
+/* "-paramsdir=<files>/params", whether or not the files are there yet. The node only notes the
+ * directory at boot and looks for the Sapling pair at its first proof, where it checks its own SHA-512
+ * pin of each file, so a node that starts while the copy is still running finds the files without a
+ * restart. False and out untouched only when the path does not fit. */
 bool zapp_params_arg(const char *files, char *out, size_t cap);
 
 /* Reads every file under <files>/params and compares its length and SHA-256 with the pin. Reads
@@ -48,6 +51,20 @@ struct zapp_proving_probe {
     void *ctx;
     enum zapp_proving (*status)(void *ctx);
 };
+
+/* The probe the app uses: one getwalletinfo call to the node serving datadir. call is zapp_rpc_call in
+ * the app and a stub in tests. The ctx of zapp_proving_over_rpc is a struct zapp_rpc_probe. */
+typedef enum zapp_rpc_result (*zapp_rpc_fn)(const char *datadir, const char *method, const char *params,
+                                            int timeout_ms, char *out, size_t cap, char *why, size_t why_cap);
+struct zapp_rpc_probe {
+    const char *datadir;
+    zapp_rpc_fn call;
+};
+enum zapp_proving zapp_proving_over_rpc(void *ctx);
+
+/* Maps a getwalletinfo reply: sapling.proving_status "none" is UNAVAILABLE; "pair_present", "pair_armed"
+ * and "full_set" are ARMED; an error, a missing field or a word this app does not know is UNKNOWN. */
+enum zapp_proving zapp_proving_from_reply(const char *reply);
 
 /* Whether a shielded send may start. Refused, with a plain reason in why, unless the copy was
  * verified (params_verified: the install or verify of this process returned success), the node
