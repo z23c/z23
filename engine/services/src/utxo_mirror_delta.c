@@ -425,6 +425,75 @@ static bool mirror_finish_range(struct node_db *ndb, sqlite3 *rdb,
     return ok;
 }
 
+enum mirror_rollback_why {
+    MIRROR_ROLLBACK_CHECKPOINT_GAP,
+    MIRROR_ROLLBACK_AFTER_ERROR,
+    MIRROR_ROLLBACK_COMMITMENT,
+    MIRROR_ROLLBACK_CURSOR,
+    MIRROR_ROLLBACK_COMMIT,
+};
+
+/* Roll node.db back. Log the selected failure when the rollback itself fails. */
+static void mirror_rollback_warn(struct node_db *ndb, enum mirror_rollback_why why)
+{
+    if (node_db_rollback(ndb))
+        return;
+    switch (why) {
+    case MIRROR_ROLLBACK_CHECKPOINT_GAP:
+        LOG_WARN_IN("utxo_mirror_delta_apply", "utxo_mirror",
+                    "delta: node.db ROLLBACK failed after checkpoint gap");
+        break;
+    case MIRROR_ROLLBACK_AFTER_ERROR:
+        LOG_WARN_IN("utxo_mirror_delta_apply", "utxo_mirror",
+                    "delta: node.db ROLLBACK failed after error");
+        break;
+    case MIRROR_ROLLBACK_COMMITMENT:
+        LOG_WARN_IN("utxo_mirror_delta_apply", "utxo_mirror",
+                    "delta: node.db ROLLBACK failed after commitment error");
+        break;
+    case MIRROR_ROLLBACK_CURSOR:
+        LOG_WARN_IN("utxo_mirror_delta_apply", "utxo_mirror",
+                    "delta: node.db ROLLBACK failed after cursor error");
+        break;
+    case MIRROR_ROLLBACK_COMMIT:
+        LOG_WARN_IN("utxo_mirror_delta_apply", "utxo_mirror",
+                    "delta: node.db ROLLBACK failed after commit fail");
+        break;
+    }
+}
+
+/* Upsert live coins in [cursor, upper). False when the query or an upsert fails. */
+static bool mirror_apply_live_coins(struct node_db *ndb, sqlite3 *rdb,
+                                    struct addr_set *touched,
+                                    struct utxo_commitment *uc,
+                                    bool track_commitment, int32_t ch,
+                                    int32_t cursor, int32_t upper,
+                                    int64_t *rows_changed)
+{
+    *rows_changed = 0;
+    sqlite3_stmt *sel = NULL;
+    bool ok = mirror_coins_query_open(rdb, cursor, upper, &sel);
+    while (ok) {
+        enum mirror_coin_step step =
+            mirror_coin_step_apply(ndb, touched, sel, uc, track_commitment,
+                                   ch, rows_changed);
+        if (step == MIRROR_COIN_STEP_DONE) break;
+        if (step == MIRROR_COIN_STEP_SKIP_BAD_TXID) {
+            LOG_WARN_IN("utxo_mirror_delta_apply", "utxo_mirror",
+                        "delta: malformed coin txid — skipping");
+            continue;
+        }
+        if (step == MIRROR_COIN_STEP_SKIP_BIG_SCRIPT) {
+            LOG_WARN_IN("utxo_mirror_delta_apply", "utxo_mirror",
+                        "delta: oversize coin script — skipping");
+            continue;
+        }
+        ok = step == MIRROR_COIN_STEP_OK;
+    }
+    sqlite3_finalize(sel);
+    return ok;
+}
+
 /* ── The delta pass ──────────────────────────────────────────────────── */
 
 int utxo_mirror_delta_apply(struct node_db *ndb,
@@ -487,9 +556,7 @@ int utxo_mirror_delta_apply(struct node_db *ndb,
         mirror_commitment_tracked(ndb, &uc, cursor, upper, &ch);
     if (!track_commitment) {
         sqlite3_close(rdb);
-        if (!node_db_rollback(ndb))
-            LOG_WARN("utxo_mirror",
-                     "delta: node.db ROLLBACK failed after checkpoint gap");
+        mirror_rollback_warn(ndb, MIRROR_ROLLBACK_CHECKPOINT_GAP);
         LOG_RETURN(UTXO_MIRROR_DELTA_FALLBACK, "utxo_mirror",
                    "delta: commitment checkpoint does not cover cursor=%d "
                    "upper=%d — quarantine", cursor, upper);
@@ -498,34 +565,16 @@ int utxo_mirror_delta_apply(struct node_db *ndb,
     struct addr_set touched;
     memset(&touched, 0, sizeof(touched));
     int64_t rows_changed = 0;
-    bool ok = true;
 
     /* 1. UPSERT adds: live coins created in the range. */
-    sqlite3_stmt *sel = NULL;
-    ok = mirror_coins_query_open(rdb, cursor, upper, &sel);
-    while (ok) {
-        enum mirror_coin_step step =
-            mirror_coin_step_apply(ndb, &touched, sel, &uc, track_commitment,
-                                   ch, &rows_changed);
-        if (step == MIRROR_COIN_STEP_DONE) break;
-        if (step == MIRROR_COIN_STEP_SKIP_BAD_TXID) {
-            LOG_WARN("utxo_mirror", "delta: malformed coin txid — skipping");
-            continue;
-        }
-        if (step == MIRROR_COIN_STEP_SKIP_BIG_SCRIPT) {
-            LOG_WARN("utxo_mirror", "delta: oversize coin script — skipping");
-            continue;
-        }
-        ok = step == MIRROR_COIN_STEP_OK;
-    }
-    sqlite3_finalize(sel);
+    bool ok = mirror_apply_live_coins(ndb, rdb, &touched, &uc, track_commitment,
+                                      ch, cursor, upper, &rows_changed);
 
     ok = mirror_finish_range(ndb, rdb, &touched, &rows_changed, &uc,
                              track_commitment, ch, cursor, upper, ok);
 
     if (!ok) {
-        if (!node_db_rollback(ndb))
-            LOG_WARN("utxo_mirror", "delta: node.db ROLLBACK failed after error");
+        mirror_rollback_warn(ndb, MIRROR_ROLLBACK_AFTER_ERROR);
         LOG_RETURN(UTXO_MIRROR_DELTA_ERROR, "utxo_mirror",
                    "delta: aborted [%d,%d) after %lld ops",
                    cursor, upper, (long long)rows_changed);
@@ -534,9 +583,7 @@ int utxo_mirror_delta_apply(struct node_db *ndb,
     /* Commitment and next-height cursor are mandatory members of this mirror
      * transaction. Any failure rolls every derived row and cache back. */
     if (!utxo_commitment_save_checkpoint_at_height(ndb->db, &uc, upper)) {
-        if (!node_db_rollback(ndb))
-            LOG_WARN("utxo_mirror",
-                     "delta: node.db ROLLBACK failed after commitment error");
+        mirror_rollback_warn(ndb, MIRROR_ROLLBACK_COMMITMENT);
         LOG_RETURN(UTXO_MIRROR_DELTA_ERROR, "utxo_mirror",
                    "delta: commitment checkpoint save failed at frontier=%d",
                    upper);
@@ -545,16 +592,13 @@ int utxo_mirror_delta_apply(struct node_db *ndb,
     int64_t next_cursor = upper;
     if (!node_db_state_set(ndb, cursor_key, &next_cursor,
                            sizeof(next_cursor))) {
-        if (!node_db_rollback(ndb))
-            LOG_WARN("utxo_mirror",
-                     "delta: node.db ROLLBACK failed after cursor error");
+        mirror_rollback_warn(ndb, MIRROR_ROLLBACK_CURSOR);
         LOG_RETURN(UTXO_MIRROR_DELTA_ERROR, "utxo_mirror",
                    "delta: cursor persist failed at frontier=%d", upper);
     }
 
     if (!node_db_commit(ndb)) {
-        if (!node_db_rollback(ndb))
-            LOG_WARN("utxo_mirror", "delta: node.db ROLLBACK failed after commit fail");
+        mirror_rollback_warn(ndb, MIRROR_ROLLBACK_COMMIT);
         LOG_RETURN(UTXO_MIRROR_DELTA_ERROR, "utxo_mirror", "delta: node.db COMMIT failed");
     }
 
