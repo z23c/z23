@@ -2164,6 +2164,8 @@ int test_node_health_service(void)
     failures += health_test_unproven_archive_refuses_at_tip();
     failures += health_test_proven_archive_permits_at_tip();
     failures += health_test_completeness_predicate_fail_closed();
+    /* Reap the one-shot evidence-maintenance thread node_health_collect spawns. */
+    chain_evidence_maintain_quiesce();
 
     sync_set_state(SYNC_IDLE, "done");
     return failures;
