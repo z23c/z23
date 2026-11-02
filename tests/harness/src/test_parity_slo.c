@@ -288,6 +288,13 @@ static int test_ring_buffer_cap(void)
 /* The comparison tick must not touch node.db: lms_record_parity_sample hands
  * the row to the db worker (fire and forget) and the retention prune runs once
  * per N saved samples, not per sample. */
+static bool ps_barrier_write(struct node_db *ndb, void *ctx)
+{
+    (void)ndb;
+    (void)ctx;
+    return true;
+}
+
 static int test_off_tick_write_and_prune_cadence(void)
 {
     int failures = 0;
@@ -318,12 +325,11 @@ static int test_off_tick_write_and_prune_cadence(void)
         app_runtime_set_current(&rt);
         for (int i = 0; i < 25; i++)
             lms_record_parity_sample(100 + i, true, true);
-        for (int i = 0; i < 2000; i++) {
-            lms_parity_sample_get_stats(&st);
-            if (st.saved + st.dropped >= 25)
-                break;
-            nanosleep(&(struct timespec){.tv_nsec = 5000000}, NULL);
-        }
+        /* The worker drains its queue in order, so a synchronous write queued
+         * after the samples returns only once every sample has run: a
+         * barrier, not a clock. */
+        PS_CHECK("barrier write ran after the samples",
+                 db_service_run_write(&svc, ps_barrier_write, NULL));
         lms_parity_sample_get_stats(&st);
         PS_CHECK("every sample accounted for (saved or counted drop)",
                  st.saved + st.dropped == 25 && st.enqueued == st.saved);
