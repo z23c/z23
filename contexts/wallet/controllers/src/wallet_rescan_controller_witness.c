@@ -437,6 +437,135 @@ static void witness_rescan_log_done(int start_height, int end_height,
              ok ? "ok" : "failed");
 }
 
+/* First failing rescan precondition message, NULL when the context is usable. */
+static const char *rescan_context_unavailable_error(
+    const struct wallet_rpc_context *ctx)
+{
+    if (!ctx->main_state)
+        return "Main state not available";
+    if (!wallet_ctx_db_ready(ctx))
+        return "Node database not available";
+    if (!ctx->datadir)
+        return "Data directory not configured";
+    return NULL;
+}
+
+/* Sapling activation height for the selected network, or
+ * NETWORK_UPGRADE_NO_ACTIVATION when the chain params are unavailable. */
+static int rescan_sapling_activation_height(void)
+{
+    const struct chain_params *chain = chain_params_get();
+    return chain
+        ? chain->consensus.vUpgrades[UPGRADE_SAPLING].nActivationHeight
+        : NETWORK_UPGRADE_NO_ACTIVATION;
+}
+
+/* Block writers and stage readers use the network-specific directory
+ * (<base>/regtest on regtest, ==base on mainnet). The wallet context owns
+ * the base directory for backups and databases, so resolve the body root
+ * explicitly instead of accidentally decoding a same-offset base file. */
+static void rescan_resolve_block_datadir(const struct wallet_rpc_context *ctx,
+                                         char *block_datadir,
+                                         size_t block_datadir_size)
+{
+    GetDataDir(true, block_datadir, block_datadir_size);
+    if (!block_datadir[0])
+        (void)snprintf(block_datadir, block_datadir_size, "%s", ctx->datadir);
+}
+
+/* Replay blocks [sapling_start, safe_tip] into the tree and per-note
+ * witnesses: skip blocks whose header root is zero or unchanged, decode each
+ * tree-changing block's durable body and append its commitments, printing
+ * the checkpoint root comparison on cadence. */
+static void rescan_replay_blocks(const struct wallet_rpc_context *ctx,
+                                 const char *block_datadir,
+                                 int sapling_start, int safe_tip,
+                                 struct incremental_merkle_tree *tree,
+                                 struct incremental_witness *witnesses,
+                                 bool *witness_active,
+                                 const struct db_sapling_note *notes,
+                                 int n_notes, int64_t t_start,
+                                 int *blocks_scanned_out,
+                                 size_t *total_commitments_out,
+                                 int *witnesses_built_out)
+{
+    *blocks_scanned_out = 0;
+    *total_commitments_out = 0;
+    *witnesses_built_out = 0;
+    int blocks_scanned = 0;
+    size_t total_commitments = 0;
+    int witnesses_built = 0;
+
+    /* Keep the descriptor alive with its view.  Windows file mappings do not
+     * inherit POSIX's close-after-mmap lifetime semantics. */
+    struct wallet_rescan_block_mapping block_mapping;
+    wallet_rescan_block_mapping_init(&block_mapping);
+
+    for (int h = sapling_start; h <= safe_tip; h++) {
+        const struct block_index *pindex =
+            active_chain_at(&ctx->main_state->chain_active, h);
+        if (!pindex) continue;
+        if (!rescan_block_body_mapped(pindex, &block_mapping, block_datadir))
+            continue;
+
+        /* A repeated header root proves this block did not change the Sapling
+         * tree, so the body is irrelevant to witness replay. This skips the
+         * overwhelming majority of blocks without trusting a heuristic wire
+         * scanner. A zero root is an unavailable pre-commitment projection;
+         * it cannot authorize a save and likewise supplies no changed-tree
+         * evidence to replay. */
+        struct uint256 before_root;
+        incremental_tree_root(tree, &before_root);
+        if (uint256_is_zero_local(&pindex->hashFinalSaplingRoot) ||
+            uint256_eq(&before_root, &pindex->hashFinalSaplingRoot)) {
+            blocks_scanned++;
+            continue;
+        }
+
+        /* The header proves the tree changed. Decode this exact durable body
+         * with the consensus block parser and append every output; unlike the
+         * former fixed 4096-entry fast-scan buffer, this cannot silently drop
+         * commitments from a valid high-output block. The final header-root
+         * comparison below remains the authority before persistence. */
+        size_t data_pos = (size_t)pindex->nDataPos;
+        size_t block_data_len = block_mapping.view.size - data_pos;
+        struct byte_stream body_stream;
+        stream_init_from_data(&body_stream,
+                              block_mapping.view.data + data_pos,
+                              block_data_len);
+        struct block block;
+        block_init(&block);
+        if (!block_deserialize(&block, &body_stream)) {
+            block_free(&block);
+            LOG_WARN_IN("rpc_rescanwitnesses", "rescanwitnesses",
+                        "durable block body decode failed at height=%d", h);
+            blocks_scanned++;
+            continue;
+        }
+        total_commitments += rescan_append_block_commitments(
+            &block, tree, witnesses, witness_active, notes, n_notes,
+            &witnesses_built);
+        block_free(&block);
+        blocks_scanned++;
+
+        /* Checkpoint: compare our tree root vs block header.
+         * Every 100K blocks normally, every 1000 heights in last 10K. */
+        bool do_ckpt = (blocks_scanned % 100000 == 0) ||
+                       (h > safe_tip - 10000 && h % 1000 == 0);
+        if (do_ckpt) {
+            rescan_print_checkpoint(tree, pindex, blocks_scanned, h,
+                                    total_commitments, witnesses_built, n_notes,
+                                    t_start);
+        }
+    }
+
+    wallet_rescan_block_mapping_close(&block_mapping);
+
+    *blocks_scanned_out = blocks_scanned;
+    *total_commitments_out = total_commitments;
+    *witnesses_built_out = witnesses_built;
+}
+
 bool rpc_rescanwitnesses(const struct json_value *params, bool help,
 	                                  struct json_value *result)
 {
@@ -449,16 +578,9 @@ bool rpc_rescanwitnesses(const struct json_value *params, bool help,
         "from the Sapling activation height to tip.");
 
     ENSURE_WALLET(result);
-    if (!ctx->main_state) {
-        json_set_str(result, "Main state not available");
-        return false;
-    }
-    if (!wallet_ctx_db_ready(ctx)) {
-        json_set_str(result, "Node database not available");
-        return false;
-    }
-    if (!ctx->datadir) {
-        json_set_str(result, "Data directory not configured");
+    const char *context_error = rescan_context_unavailable_error(ctx);
+    if (context_error) {
+        json_set_str(result, context_error);
         return false;
     }
 
@@ -486,10 +608,7 @@ bool rpc_rescanwitnesses(const struct json_value *params, bool help,
     extern _Atomic bool g_sapling_rescan_active;
     atomic_store(&g_sapling_rescan_active, true);
 
-    const struct chain_params *chain = chain_params_get();
-    int sapling_start = chain
-        ? chain->consensus.vUpgrades[UPGRADE_SAPLING].nActivationHeight
-        : NETWORK_UPGRADE_NO_ACTIVATION;
+    int sapling_start = rescan_sapling_activation_height();
     if (sapling_start < 0) {
         free(notes);
         json_set_str(result,
@@ -527,20 +646,8 @@ bool rpc_rescanwitnesses(const struct json_value *params, bool help,
     }
     int witnesses_built = 0;
 
-    /* Block writers and stage readers use the network-specific directory
-     * (<base>/regtest on regtest, ==base on mainnet). The wallet context owns
-     * the base directory for backups and databases, so resolve the body root
-     * explicitly instead of accidentally decoding a same-offset base file. */
     char block_datadir[4096];
-    GetDataDir(true, block_datadir, sizeof(block_datadir));
-    if (!block_datadir[0])
-        (void)snprintf(block_datadir, sizeof(block_datadir), "%s",
-                       ctx->datadir);
-
-    /* Keep the descriptor alive with its view.  Windows file mappings do not
-     * inherit POSIX's close-after-mmap lifetime semantics. */
-    struct wallet_rescan_block_mapping block_mapping;
-    wallet_rescan_block_mapping_init(&block_mapping);
+    rescan_resolve_block_datadir(ctx, block_datadir, sizeof(block_datadir));
 
     int64_t t0_ms = platform_time_monotonic_ms();
     int64_t t_start = (int64_t)platform_time_wall_time_t();
@@ -568,65 +675,9 @@ bool rpc_rescanwitnesses(const struct json_value *params, bool help,
     struct uint256 endpoint_hash = *save_block->phashBlock;
     struct uint256 endpoint_root = save_block->hashFinalSaplingRoot;
 
-    for (int h = sapling_start; h <= safe_tip; h++) {
-        const struct block_index *pindex =
-            active_chain_at(&ctx->main_state->chain_active, h);
-        if (!pindex) continue;
-        if (!rescan_block_body_mapped(pindex, &block_mapping, block_datadir))
-            continue;
-
-        /* A repeated header root proves this block did not change the Sapling
-         * tree, so the body is irrelevant to witness replay. This skips the
-         * overwhelming majority of blocks without trusting a heuristic wire
-         * scanner. A zero root is an unavailable pre-commitment projection;
-         * it cannot authorize a save and likewise supplies no changed-tree
-         * evidence to replay. */
-        struct uint256 before_root;
-        incremental_tree_root(&tree, &before_root);
-        if (uint256_is_zero_local(&pindex->hashFinalSaplingRoot) ||
-            uint256_eq(&before_root, &pindex->hashFinalSaplingRoot)) {
-            blocks_scanned++;
-            continue;
-        }
-
-        /* The header proves the tree changed. Decode this exact durable body
-         * with the consensus block parser and append every output; unlike the
-         * former fixed 4096-entry fast-scan buffer, this cannot silently drop
-         * commitments from a valid high-output block. The final header-root
-         * comparison below remains the authority before persistence. */
-        size_t data_pos = (size_t)pindex->nDataPos;
-        size_t block_data_len = block_mapping.view.size - data_pos;
-        struct byte_stream body_stream;
-        stream_init_from_data(&body_stream,
-                              block_mapping.view.data + data_pos,
-                              block_data_len);
-        struct block block;
-        block_init(&block);
-        if (!block_deserialize(&block, &body_stream)) {
-            block_free(&block);
-            LOG_WARN("rescanwitnesses",
-                     "durable block body decode failed at height=%d", h);
-            blocks_scanned++;
-            continue;
-        }
-        total_commitments += rescan_append_block_commitments(
-            &block, &tree, witnesses, witness_active, notes, n_notes,
-            &witnesses_built);
-        block_free(&block);
-        blocks_scanned++;
-
-        /* Checkpoint: compare our tree root vs block header.
-         * Every 100K blocks normally, every 1000 heights in last 10K. */
-        bool do_ckpt = (blocks_scanned % 100000 == 0) ||
-                       (h > safe_tip - 10000 && h % 1000 == 0);
-        if (do_ckpt) {
-            rescan_print_checkpoint(&tree, pindex, blocks_scanned, h,
-                                    total_commitments, witnesses_built, n_notes,
-                                    t_start);
-        }
-    }
-
-    wallet_rescan_block_mapping_close(&block_mapping);
+    rescan_replay_blocks(ctx, block_datadir, sapling_start, safe_tip, &tree,
+                         witnesses, witness_active, notes, n_notes, t_start,
+                         &blocks_scanned, &total_commitments, &witnesses_built);
 
     /* Binary search for divergence point: check tree root at last checkpoint
      * that passed (3036968) vs block header. We know tree matches there.
