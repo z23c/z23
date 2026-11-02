@@ -58,17 +58,21 @@ static void uppercase_hex(void)
 }
 static void descriptors(void)
 {
-    snprintf(text, sizeof(text), "z23:pair:{\"port\":8770,\"token\":\"%s\"}", HEX64);
+    snprintf(text, sizeof(text), "z23:pair:{\"v\":2,\"port\":8770,\"token\":\"%s\"}", HEX64);
     assert(scan(text) == ZAPP_SCAN_PAIR && !strcmp(value, text + 9));
-    snprintf(text, sizeof(text), "z23:pair:{\"port\":0,\"token\":\"%s\"}", HEX64);
+    snprintf(text, sizeof(text), "z23:pair:{\"v\":2,\"port\":0,\"token\":\"%s\"}", HEX64);
     assert(unreadable(text));
-    snprintf(text, sizeof(text), "z23:pair:{\"port\":8770,\"token\":\"%s\"}", HEX64_UPPER);
+    snprintf(text, sizeof(text), "z23:pair:{\"v\":2,\"port\":8770,\"token\":\"%s\"}", HEX64_UPPER);
     assert(unreadable(text));
-    snprintf(text, sizeof(text), "z23:pair:{\"port\":8770,\"token\":\"%.63s\"}", HEX64);
+    snprintf(text, sizeof(text), "z23:pair:{\"v\":2,\"port\":8770,\"token\":\"%.63s\"}", HEX64);
     assert(unreadable(text));
-    snprintf(text, sizeof(text), "z23:pair:{\"port\":8770,\n\"token\":\"%s\"}", HEX64);
+    snprintf(text, sizeof(text), "z23:pair:{\"v\":2,\"port\":8770,\n\"token\":\"%s\"}", HEX64);
     assert(unreadable(text));
-    snprintf(text, sizeof(text), "z23:pair:{\"port\":8770,\"token\":\"%s\",\"extra\":1}", HEX64);
+    snprintf(text, sizeof(text), "z23:pair:{\"port\":8770,\"token\":\"%s\"}", HEX64);
+    assert(unreadable(text));
+    snprintf(text, sizeof(text), "z23:pair:{\"v\":1,\"port\":8770,\"token\":\"%s\"}", HEX64);
+    assert(unreadable(text));
+    snprintf(text, sizeof(text), "z23:pair:{\"v\":2,\"port\":8770,\"token\":\"%s\",\"extra\":1}", HEX64);
     assert(unreadable(text));
 }
 static void fleet_invitations(void)
@@ -96,10 +100,10 @@ static void loosely_written_secrets(void)
     snprintf(text, sizeof(text), "%.100s %s", token, token + 100); assert(unreadable(text));
     snprintf(text, sizeof(text), "%.100s\n%s", token, token + 100); assert(unreadable(text));
     snprintf(text, sizeof(text), "%.100s\x01%s", token, token + 100); assert(unreadable(text));
-    snprintf(text, sizeof(text), "Z23:PAIR:{\"port\":8770,\"token\":\"%s\"}", HEX64); assert(unreadable(text));
-    snprintf(text, sizeof(text), " z23:pair:{\"port\":8770,\"token\":\"%s\"}", HEX64); assert(unreadable(text));
-    snprintf(text, sizeof(text), "{\"port\":8770,\"token\":\"%s\"}", HEX64); assert(unreadable(text));
-    snprintf(text, sizeof(text), "{\"port\":8770, \"TOKEN\" : \"%s\"}", HEX64); assert(unreadable(text));
+    snprintf(text, sizeof(text), "Z23:PAIR:{\"v\":2,\"port\":8770,\"token\":\"%s\"}", HEX64); assert(unreadable(text));
+    snprintf(text, sizeof(text), " z23:pair:{\"v\":2,\"port\":8770,\"token\":\"%s\"}", HEX64); assert(unreadable(text));
+    snprintf(text, sizeof(text), "{\"v\":2,\"port\":8770,\"token\":\"%s\"}", HEX64); assert(unreadable(text));
+    snprintf(text, sizeof(text), "{\"v\":2,\"port\":8770, \"TOKEN\" : \"%s\"}", HEX64); assert(unreadable(text));
     assert(unreadable("z23 fleet join short") && unreadable("z23\nfleet join short") && unreadable("Z23: PAIR:{}"));
     snprintf(text, sizeof(text), "see https://example.com/%.60s", token); assert(scan(text) == ZAPP_SCAN_TEXT);
 }

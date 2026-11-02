@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-static const char pairing[] = "{\"port\":12345,\"token\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}";
+static const char pairing[] = "{\"v\":2,\"port\":12345,\"token\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}";
 static const int16_t capture[] = {INT16_MIN, -1, 0, 1, INT16_MAX};
 static const char *mock_reply, *mock_op, *mock_scope, *mock_history;
 static bool mock_success;
@@ -108,14 +108,19 @@ static void invalid_pairing(const char *directory, const struct pair_paths *p)
 {
     char error[256];
     const char *invalid[] = {
-        "{}", "[]", "{\"port\":12345,\"token\":\"short\"}",
-        "{\"port\":65536,\"token\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}",
-        "{\"port\":12345,\"token\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg\"}",
-        "{\"port\":12345,\"token\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"extra\":true}",
-        "{\"port\":12345,\"token\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\\u0000\"}"
+        "{}", "[]", "{\"v\":2,\"port\":12345,\"token\":\"short\"}",
+        "{\"v\":1,\"port\":12345,\"token\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}",
+        "{\"v\":\"2\",\"port\":12345,\"token\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}",
+        "{\"v\":2,\"port\":65536,\"token\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}",
+        "{\"v\":2,\"port\":12345,\"token\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg\"}",
+        "{\"v\":2,\"port\":12345,\"token\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"extra\":true}",
+        "{\"v\":2,\"port\":12345,\"token\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\\u0000\"}"
     };
     for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i)
         assert(!zapp_speech_client_pair(directory, invalid[i], error, sizeof(error)));
+    /* An older host: told to update, nothing stored. */
+    assert(!zapp_speech_client_pair(directory, "{\"port\":12345,\"token\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}", error, sizeof(error)));
+    assert(strstr(error, "older bridge protocol"));
     assert(!symlink(directory, p->linked));
     assert(!zapp_speech_client_pair(p->linked, pairing, error, sizeof(error)));
     assert(!unlink(p->linked));

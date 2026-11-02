@@ -3,6 +3,7 @@
 #include "host.h"
 #include "http.h"
 #include "pairing.h"
+#include "relay.h"
 #include "base/cleanse.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -219,9 +220,10 @@ bool zapp_host_offer_pairing(const char *adb, const char *serial, const char *ap
     char path[1024], command[512];
     char *shell[] = {(char *)adb, "-s", (char *)serial, "shell", NULL};
     unsigned char *descriptor = NULL; size_t size = 0;
-    bool ok = path_join(path, sizeof(path), dir, "codex-bridge.json") &&
-        zapp_host_read_file(path, 256, &descriptor, &size) && !strchr((char *)descriptor, '\'') &&
-        zapp_host_route(adb, serial, port);
+    /* Each offer starts a new pairing: the secret the phone held before stops working. */
+    bool ok = path_join(path, sizeof(path), dir, "codex-bridge.json") && zapp_host_route(adb, serial, port) &&
+        zapp_relay_rotate() && zapp_host_read_file(path, 256, &descriptor, &size) &&
+        !strchr((char *)descriptor, '\'');
     if (ok) {
         descriptor[strcspn((char *)descriptor, "\n")] = 0;
         int n = snprintf(command, sizeof(command), "am start -n %s/android.app.NativeActivity "

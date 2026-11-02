@@ -212,11 +212,13 @@ static void *pairing_loop(void *opaque)
 {
     const struct options *o = opaque;
     bool offered = false;
+    int next = 0, wait = 10; /* Ticks of 200 ms; a failed offer doubles the wait up to 30 s, because each offer replaces the secret. */
     for (int tick = 0; !zapp_relay_stopping(); tick++) {
-        if (!offered && tick % 10 == 0 &&
-            (offered = zapp_host_offer_pairing(o->adb, o->serial, o->app, o->port, o->dir, o->qr_window)))
-            fputs("Pairing offered to the phone. Confirm it on the phone screen.\n", stderr);
-        else if (offered && tick % 100 == 0) (void)zapp_host_route(o->adb, o->serial, o->port);
+        if (!offered && tick >= next) {
+            offered = zapp_host_offer_pairing(o->adb, o->serial, o->app, o->port, o->dir, o->qr_window);
+            if (offered) fputs("Pairing offered to the phone. Confirm it on the phone screen.\n", stderr);
+            else { next = tick + wait; wait = wait < 75 ? wait * 2 : 150; }
+        } else if (offered && tick % 100 == 0) (void)zapp_host_route(o->adb, o->serial, o->port);
         usleep(200000);
     }
     return NULL;

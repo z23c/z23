@@ -40,7 +40,7 @@ bridge:
 	@mkdir -p '$(BUILD_DIR)'
 	$(HOST_CC) $(HOST_WARNINGS) -I../../platform/modules/json/include \
 	  -I../../platform/modules/base/include -I../../contexts/commons/packages/zutf8/include \
-	  bridge/main.c bridge/relay.c ../../contexts/commons/packages/zutf8/src/zutf8.c \
+	  -I. -I../../platform/modules/sha3/include -pthread bridge/main.c bridge/relay.c bridge_auth.c ../../platform/modules/sha3/src/sha3.c ../../contexts/commons/packages/zutf8/src/zutf8.c \
 	  ../../platform/modules/json/src/json.c ../../platform/modules/base/src/cleanse.c \
 	  ../../platform/modules/base/src/safe_alloc.c -o '$(BUILD_DIR)/z23-bridge'
 
@@ -56,7 +56,7 @@ test-bridge: bridge
 	grep -Fx '{"ok":false,"error":"Could not safely configure local Codex."}' '$(BUILD_DIR)/bridge-refused.json'
 	$(HOST_CC) $(HOST_WARNINGS) -I. -Ibridge -I../../platform/modules/json/include \
 	  -I../../platform/modules/base/include -I../../contexts/commons/packages/zutf8/include \
-	  tests/relay_test.c bridge/relay.c ../../contexts/commons/packages/zutf8/src/zutf8.c \
+	  -I../../platform/modules/sha3/include -pthread tests/relay_test.c bridge/relay.c bridge_auth.c ../../platform/modules/sha3/src/sha3.c ../../contexts/commons/packages/zutf8/src/zutf8.c \
 	  ../../platform/modules/json/src/json.c ../../platform/modules/base/src/cleanse.c \
 	  ../../platform/modules/base/src/safe_alloc.c -o '$(BUILD_DIR)/relay-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/relay-test.XXXXXX'); \
@@ -64,7 +64,7 @@ test-bridge: bridge
 
 SPEECH_JSON := ../../platform/modules/json/src/json.c ../../platform/modules/base/src/cleanse.c ../../platform/modules/base/src/safe_alloc.c
 SPEECH_INCLUDES := -I. -Ibridge -I../../platform/modules/json/include -I../../platform/modules/base/include -I../../contexts/commons/packages/zutf8/include -I../../platform/modules/encoding/include -I../../platform/modules/sha3/include
-HOST_SOURCES := bridge/assistant.c bridge/http.c bridge/fleet_probe.c private.c bridge/host_ops.c bridge/host.c bridge/relay.c hosts.c pairing.c voice.c \
+HOST_SOURCES := bridge_auth.c bridge/assistant.c bridge/http.c bridge/fleet_probe.c private.c bridge/host_ops.c bridge/host.c bridge/relay.c hosts.c pairing.c voice.c \
   ../../platform/modules/sha3/src/sha3.c \
   ../../platform/modules/encoding/src/utilstrencodings.c ../../contexts/commons/packages/zutf8/src/zutf8.c
 .PHONY: speech-bridge speech-probe test-voice test-host preview-apk
@@ -75,7 +75,7 @@ speech-bridge:
 
 speech-probe:
 	@mkdir -p '$(BUILD_DIR)'
-	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/speech_roundtrip.c speech_client.c bridge_client.c voice.c \
+	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/speech_roundtrip.c speech_client.c bridge_client.c bridge_auth.c ../../platform/modules/sha3/src/sha3.c voice.c \
 	  $(SPEECH_JSON) -o '$(BUILD_DIR)/speech-roundtrip'
 
 DEXDUMP ?= $(TOOLS)/dexdump
@@ -132,7 +132,7 @@ test: prepare-quirc test-bridge test-voice test-host test-devkey test-dexgen tes
 	  ../../platform/modules/base/src/safe_alloc.c -o '$(BUILD_DIR)/conversation-test'
 	'$(BUILD_DIR)/conversation-test'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread -I. -I../../platform/modules/json/include \
-	  -I../../platform/modules/base/include tests/bridge_client_test.c bridge_client.c \
+	  -I../../platform/modules/base/include -I../../platform/modules/sha3/include tests/bridge_client_test.c bridge_client.c bridge_auth.c ../../platform/modules/sha3/src/sha3.c \
 	  ../../platform/modules/json/src/json.c ../../platform/modules/base/src/cleanse.c \
 	  ../../platform/modules/base/src/safe_alloc.c -o '$(BUILD_DIR)/bridge-client-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/bridge-test.XXXXXX'); \
@@ -159,7 +159,7 @@ test-qr-window: prepare-quirc
 # Host fuzz of the QR path (quirc, then scan.c and payment_code.c) under ASan and UBSan, no NDK.
 QR_FUZZ_ITERATIONS ?= 2000
 QR_FUZZ_SAN ?= -fsanitize=address,undefined -fno-sanitize-recover=all
-QR_FUZZ_SOURCES := scan.c payment_code.c fleet.c speech_client.c bridge_client.c voice.c \
+QR_FUZZ_SOURCES := scan.c payment_code.c fleet.c speech_client.c bridge_client.c bridge_auth.c ../../platform/modules/sha3/src/sha3.c voice.c \
   ../../contexts/commons/packages/zutf8/src/zutf8.c ../../vendor/qrcodegen/qrcodegen.c
 .PHONY: test-qr-fuzz
 test-qr-fuzz: prepare-quirc
@@ -171,7 +171,7 @@ test-qr-fuzz: prepare-quirc
 
 test-scan:
 	@mkdir -p '$(BUILD_DIR)'
-	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) -I../../vendor/qrcodegen tests/scan_test.c scan.c payment_code.c fleet.c speech_client.c bridge_client.c voice.c ../../contexts/commons/packages/zutf8/src/zutf8.c ../../vendor/qrcodegen/qrcodegen.c $(SPEECH_JSON) -o '$(BUILD_DIR)/scan-test'
+	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) -I../../vendor/qrcodegen tests/scan_test.c scan.c payment_code.c fleet.c speech_client.c bridge_client.c bridge_auth.c ../../platform/modules/sha3/src/sha3.c voice.c ../../contexts/commons/packages/zutf8/src/zutf8.c ../../vendor/qrcodegen/qrcodegen.c $(SPEECH_JSON) -o '$(BUILD_DIR)/scan-test'
 	'$(BUILD_DIR)/scan-test'
 .PHONY: test-payment test-wallet
 test-payment:
@@ -298,7 +298,7 @@ test-host:
 	'$(BUILD_DIR)/thermal-start-test'
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/layout_test.c layout.c $(SPEECH_JSON) -o '$(BUILD_DIR)/layout-test'
 	'$(BUILD_DIR)/layout-test'
-	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) -pthread -I../../vendor/qrcodegen tests/home_test.c home.c layout.c hosts.c pairing.c scan.c payment_code.c wallet_screens.c wallet_view.c fleet.c speech_client.c bridge_client.c voice.c ../../contexts/commons/packages/zutf8/src/zutf8.c ../../vendor/qrcodegen/qrcodegen.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/home-test'
+	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) -pthread -I../../vendor/qrcodegen tests/home_test.c home.c layout.c hosts.c pairing.c scan.c payment_code.c wallet_screens.c wallet_view.c fleet.c speech_client.c bridge_client.c bridge_auth.c voice.c ../../contexts/commons/packages/zutf8/src/zutf8.c ../../vendor/qrcodegen/qrcodegen.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/home-test'
 	'$(BUILD_DIR)/home-test'
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/clip_store_test.c clip_store.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/clip-store-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/clip-store-test.XXXXXX'); \
@@ -347,7 +347,7 @@ test-wallet-send:
 	  secure_window.c wallet_view.c $(WALLET_SEND_SOURCES) $(SPEECH_JSON) -o '$(BUILD_DIR)/wallet-send-device-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/wallet-send-device.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/wallet-send-device-test' "$$(cd "$$scratch" && pwd)"
-	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) -I../../vendor/qrcodegen tests/pay_stash_test.c pay_stash.c scan.c payment_code.c fleet.c speech_client.c bridge_client.c voice.c \
+	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) -I../../vendor/qrcodegen tests/pay_stash_test.c pay_stash.c scan.c payment_code.c fleet.c speech_client.c bridge_client.c bridge_auth.c ../../platform/modules/sha3/src/sha3.c voice.c \
 	  ../../contexts/commons/packages/zutf8/src/zutf8.c ../../vendor/qrcodegen/qrcodegen.c $(SPEECH_JSON) -o '$(BUILD_DIR)/pay-stash-test'
 	'$(BUILD_DIR)/pay-stash-test'
 	@if grep -nE '(^|[^a-z_])(printf|fprintf|puts|fputs|perror|syslog)\(|nodelog|__android_log' wallet_send.c wallet_send_screen.c wallet_send_node.c wallet_send_device.c wallet_send_keeper.c wallet_send_ui.c pay_stash.c send_key.c; then \

@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #define _GNU_SOURCE
 #include "speech_client.h"
+#include "bridge_auth.h"
 #include "bridge_client.h"
 #include "voice.h"
 #include "json/json.h"
@@ -28,13 +29,18 @@ static bool write_all(int fd, const char *data, size_t size)
     }
     return true;
 }
+static bool pairing_version(const struct json_value *root)
+{
+    const struct json_value *version = json_get(root, "v");
+    return root->type == JSON_OBJ && root->num_children == 3 && version && version->type == JSON_INT &&
+        json_get_int(version) == ZAPP_AUTH_VERSION;
+}
 static bool pairing_descriptor(const char *json, size_t len, struct json_value *root)
 {
     if (!len || len >= 256 || strstr(json, "\\u") || !json_read(root, json, len)) return false;
     const char *token = json_get_str(json_get(root, "token"));
     const struct json_value *port = json_get(root, "port");
-    return root->type == JSON_OBJ && root->num_children == 2 && token &&
-        strlen(token) == 64 && strspn(token, "0123456789abcdef") == 64 &&
+    return pairing_version(root) && token && strlen(token) == 64 && strspn(token, "0123456789abcdef") == 64 &&
         port && port->type == JSON_INT && json_get_int(port) > 0 && json_get_int(port) <= 65535;
 }
 bool zapp_speech_client_descriptor_valid(const char *json, size_t len)
@@ -75,6 +81,9 @@ bool zapp_speech_client_pair(const char *files, const char *json, char *error, s
     struct json_value root = {0};
     bool ok = pairing_descriptor(json, len, &root);
     int dir = ok ? private_directory(files) : -1;
+    if (!ok && root.type == JSON_OBJ && root.num_children == 2 &&
+        json_get(&root, "port") && json_get(&root, "token"))
+        snprintf(error, cap, "This host uses an older bridge protocol. Update it and pair the phone again.");
     ok = dir >= 0 && store_pairing(dir, json, len);
     if (dir >= 0) close(dir);
     json_cleanse_strings(&root); json_free(&root);

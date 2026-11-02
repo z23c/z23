@@ -372,12 +372,38 @@ against `zclassicd`, and `z23 core sync blockers` on one configured host, either
 when a question names it and asks why or about its blockers or problems, or
 when the chat model asks for that host's report.
 
-On first start the host prints a six-character pairing code and opens the app
-with a pairing offer. Accept on the phone only if it shows the same code. The
-host keeps its port and token in `--dir`, so later restarts reconnect without
-another pairing. The token reaches `adb` on standard input, not in laptop process arguments;
-on the phone it is briefly visible to shell and root in the arguments of the
-`am` command. The app stores it privately as `speech-bridge.json`.
+On start the host prints a six-character pairing code and opens the app
+with a pairing offer. Accept on the phone only if it shows the same code. Each
+offer starts a new pairing with a fresh secret; the secret of the earlier pairing
+stops working on the host at once and on the phone when the new one is stored.
+The host keeps its port and the current secret in `--dir/pairing-secret`; without `--adb` a
+restart reconnects, and with `--adb` every start makes a new offer. A `host-token` left by the
+earlier protocol travelled in the clear: the host removes it at start and never uses it. To
+pair by hand with a new secret, stop the host, delete `--dir/pairing-secret` and start it.
+The secret reaches `adb` on standard input, not in laptop
+process arguments; on the phone it is briefly visible to shell and root in the
+arguments of the `am` command. The app stores it privately as `speech-bridge.json`.
+
+### Bridge authentication
+
+The phone reaches the host on loopback port 8770, where another app on the phone
+can also listen. The pairing secret is never sent. Protocol 2 (`bridge_auth.c`)
+authenticates both sides with HMAC-SHA3-256 keyed by the secret:
+
+1. The host sends a fresh random nonce NS.
+2. The phone answers with its own fresh nonce NC and nothing else.
+3. The host proves the secret with a tag over NS and NC. The phone checks it
+   first; a server that fails receives no request and no secret.
+4. The phone sends the request with a tag over NS, NC and the request digest.
+5. Every host line (events and the final reply) carries a tag over NS, NC, the
+   request digest and its index, and the phone parses nothing it has not
+   verified. A reply cannot be replayed to another connection or request.
+
+The descriptor is `{"v":2,"port":N,"token":"<64 hex>"}`. A phone with an older
+pairing, or an older host, is refused with a message telling the owner to pair
+again; there is no fallback to the earlier scheme. The channel is not encrypted:
+a program that can reach the real host and relays between it and the phone can read the
+traffic, but it cannot alter, replay or forge it.
 
 ### Use
 

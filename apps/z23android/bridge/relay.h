@@ -15,9 +15,14 @@ bool zapp_relay_emit(int client_fd, const char *line);
 int zapp_relay_run_sized(const char *directory, bool (*answer)(int client_fd,
     const char *prompt, char *out, size_t cap, const char **error),
     size_t prompt_limit, size_t answer_limit);
-/* Fixed loopback port and a token persisted in DIRECTORY/host-token, so a
- * paired phone survives host restarts. Port 0 selects an ephemeral port. */
+/* Fixed loopback port and a pairing secret persisted in DIRECTORY/pairing-secret, so a
+ * restart without a new pairing offer reconnects. The speech bridge with --adb offers pairing at
+ * every start, and each offer replaces the secret. Port 0 selects an ephemeral port. */
 int zapp_relay_run_persistent(const char *directory, uint16_t port, bool (*answer)(int client_fd,
     const char *prompt, char *out, size_t cap, const char **error),
     size_t prompt_limit, size_t answer_limit);
+
+/* Replaces the pairing secret of the running relay with a fresh one and publishes the new
+ * descriptor, so the next pairing is the only one that works. False when no relay is running. */
+bool zapp_relay_rotate(void);
 #endif
