@@ -991,9 +991,33 @@ static bool phase_memory_admits(const struct child_slot *slots, int jobs,
 #endif
 }
 
-/* Diagnostic trail: one line when the cgroup headroom moved by 256 MiB or
- * more since the last line, polled at most once a second. A runner killed by
- * the memory ceiling leaves no other record of how it got there. */
+#if defined(__linux__)
+/* Peak resident bytes of a live process (VmHWM), 0 when unreadable. */
+static int64_t proc_peak_rss_bytes(pid_t pid)
+{
+    char path[64];
+    char line[128];
+    snprintf(path, sizeof path, "/proc/%d/status", (int)pid);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    int64_t kib = 0;
+    while (fgets(line, sizeof line, f)) {
+        if (strncmp(line, "VmHWM:", 6) != 0) continue;
+        for (const char *p = line + 6; *p; p++)
+            if (*p >= '0' && *p <= '9') kib = kib * 10 + (*p - '0');
+            else if (kib > 0) break;
+        break;
+    }
+    fclose(f);
+    return kib * 1024;
+}
+#endif
+
+/* Poll the live workers about 4 times a second: raise each group's learned
+ * peak from its VmHWM while it runs (a group that dies at the ceiling never
+ * reaches the wait4 figure), and leave one trail line when the cgroup
+ * headroom moved 256 MiB or more since the last line. A runner killed by the
+ * memory ceiling leaves no other record of how it got there. */
 static void phase_memory_sample(const struct child_slot *slots, int jobs)
 {
 #if defined(__linux__)
@@ -1001,8 +1025,16 @@ static void phase_memory_sample(const struct child_slot *slots, int jobs)
     static int64_t last_us;
     static int64_t last_headroom = -1;
     int64_t now = platform_time_monotonic_us();
-    if (now - last_us < 1000000) return;
+    if (now - last_us < 250000) return;
     last_us = now;
+    int running = 0;
+    for (int i = 0; i < jobs; i++) {
+        if (slots[i].pid == ZCL_CHILD_NONE) continue;
+        running++;
+        int64_t rss = proc_peak_rss_bytes(slots[i].pid);
+        if (rss > g_group_peak_bytes[slots[i].group_idx])
+            g_group_peak_bytes[slots[i].group_idx] = rss;
+    }
     int64_t headroom = platform_cgroup_memory_headroom();
     if (headroom < 0) return;
     int64_t delta = headroom - last_headroom;
@@ -1010,11 +1042,16 @@ static void phase_memory_sample(const struct child_slot *slots, int jobs)
         -delta < (INT64_C(256) << 20))
         return;
     last_headroom = headroom;
-    int running = 0;
-    for (int i = 0; i < jobs; i++)
-        if (slots[i].pid != ZCL_CHILD_NONE) running++;
-    printf("test_parallel: memory headroom=%lld MiB running=%d\n",
+    printf("test_parallel: memory headroom=%lld MiB running=%d heavy:",
            (long long)(headroom >> 20), running);
+    for (int i = 0; i < jobs; i++) {
+        if (slots[i].pid == ZCL_CHILD_NONE) continue;
+        int64_t peak = g_group_peak_bytes[slots[i].group_idx];
+        if (peak >= (INT64_C(256) << 20))
+            printf(" %s=%lld", g_groups[slots[i].group_idx].name,
+                   (long long)(peak >> 20));
+    }
+    printf("\n");
     fflush(stdout);
 #else
     (void)slots; (void)jobs;
