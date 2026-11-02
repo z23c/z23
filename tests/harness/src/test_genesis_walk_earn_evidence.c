@@ -446,6 +446,37 @@ static int test_mark_at_tip_moved_is_retryable_not_frozen(void)
     return failures;
 }
 
+/* A genesis-fold node at tip is still CEC_EMPTY: only promote_tip leaves that
+ * state, and the reducer's live advance (record_finalized_tip) never does.
+ * An ordinary not-yet-following publish attempt must refuse softly and must
+ * not latch the controller CONTRADICTION_FROZEN. */
+static int test_genesis_mark_from_empty_state_refuses_unfrozen(void)
+{
+    int failures = 0;
+    struct gw_fixture f;
+    if (!gw_init(&f))
+        return gw_check("fixture", false);
+    failures += gw_check("fixture state set empty",
+                         node_db_state_set(&f.ndb, "cec.sync_state", "empty",
+                                           strlen("empty") + 1));
+    chain_evidence_controller_init(&f.authority, &f.ndb, csr_instance());
+    struct chain_evidence_controller_view v;
+    gw_view(&f, &v);
+    failures += gw_check("controller is in the empty state", v.state == CEC_EMPTY);
+    gw_walk_verified(&f, GW_TIP, 0);
+    struct zcl_result r = bg_validation_authority_publish(&f.svc, false, true);
+    failures += gw_check("publish refuses", !r.ok);
+    failures += gw_check("refusal names the not-yet-following state",
+                         strstr(r.message, "not yet tip-following") != NULL);
+    chain_evidence_controller_init(&f.authority, &f.ndb, csr_instance());
+    gw_view(&f, &v);
+    failures += gw_check("controller is not frozen",
+                         v.state != CEC_CONTRADICTION_FROZEN);
+    failures += gw_check("controller stays empty", v.state == CEC_EMPTY);
+    gw_free(&f);
+    return failures;
+}
+
 /* Two real threads over the one shared handle. B is the live advance: it
  * opens its transaction and parks (hook) before writing the new tip. A is
  * the genesis walk's earn for the OLD tip. The evidence write lock must
@@ -609,6 +640,7 @@ int test_genesis_walk_earn_evidence(void)
     failures += test_earn_refuses_when_tip_moves_before_write();
     failures += test_mark_at_tip_moved_is_retryable_not_frozen();
     failures += test_two_thread_earn_waits_for_live_advance();
+    failures += test_genesis_mark_from_empty_state_refuses_unfrozen();
     failures += test_mark_refuses_same_height_rival_after_scan();
     if (failures == 0)
         printf("  all genesis_walk_earn_evidence tests passed\n");

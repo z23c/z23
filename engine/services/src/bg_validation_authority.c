@@ -209,6 +209,23 @@ static bool bgv_auth_genesis_tip_prepare(
     return true;
 }
 
+/* The genesis mark latches the controller FROZEN when it is asked from a
+ * state it does not accept. Not being tip-following yet is an ordinary wait,
+ * not a contradiction, so refuse here and leave the freeze in the controller
+ * as the last-line latch for a real one. FULLY_VALIDATED returned earlier. */
+static bool bgv_auth_genesis_state_ready(
+    const struct chain_evidence_controller_view *view, bool external_seeded,
+    char reason[192])
+{
+    if (external_seeded || view->state == CEC_TIP_FOLLOWING ||
+        view->state == CEC_BACKGROUND_VALIDATING)
+        return true;
+    snprintf(reason, 192,
+             "CEC state %s not yet tip-following; genesis authority waits",
+             chain_evidence_controller_state_name(view->state));
+    return false;
+}
+
 /* A live-advance write for a newer tip can replace the earned record
  * between the earn and the snapshot that follows. Earning is tip-by-hash
  * and idempotent, so retry once from a fresh snapshot; if the record is
@@ -230,7 +247,7 @@ static bool bgv_auth_prepare_and_check(
                                           external_seeded, reason))
             return false;
         if (bgv_auth_evidence_ready(view, external_seeded, reason))
-            return true;
+            return bgv_auth_genesis_state_ready(view, external_seeded, reason);
     }
     return false;
 }
