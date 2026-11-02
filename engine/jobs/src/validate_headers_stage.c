@@ -600,6 +600,70 @@ static job_result_t vh_recheck_write_exit(enum vh_recheck_write wr, int rc,
     return JOB_IDLE;
 }
 
+/* Run the collected recheck jobs. Return the begin, write, or commit
+ * failure result, or settle the floor after the commit succeeds. */
+static job_result_t vh_recheck_run_and_settle(sqlite3 *db, struct vh_job *jobs,
+                                              int n, int64_t last_seen,
+                                              int64_t first_unresolved,
+                                              int64_t start)
+{
+    vh_pool_run_batch(&g_pool, jobs, sizeof(jobs[0]), n);
+    char *err = NULL;
+    progress_store_tx_lock();
+    /* This path runs both standalone (validate_headers_stage_step_once with no
+     * outer txn) and inside the bounded drain (STAGE_DRAIN_IMPL → stage_run_once
+     * → here), where stage_batch_begin has already opened a BEGIN IMMEDIATE on
+     * this same connection. A bare BEGIN here would nest a transaction inside
+     * that batch ("cannot start a transaction within a transaction") and the
+     * recheck/repair would never run — the failed-row self-heal silently
+     * disabled. Mirror stage_run_once's contract: open a SAVEPOINT when a batch
+     * is active (its writes stay enrolled in the batch, committed once by
+     * stage_batch_end), a fresh BEGIN IMMEDIATE only when standalone. */
+    const bool vh_batched = stage_batch_active();
+    const char *vh_open   = vh_recheck_open_sql(vh_batched);
+    const char *vh_commit = vh_recheck_commit_sql(vh_batched);
+    if (sqlite3_exec(db, vh_open, NULL, NULL, &err) != SQLITE_OK) {
+        int frc = sqlite3_extended_errcode(db);
+        /* De-storm: keyed on frc, mirrors recheck_prepare_throttle above. */
+        static struct log_throttle recheck_begin_throttle = LOG_THROTTLE_INIT;
+        uint64_t reps = 0;
+        if (log_throttle_should_emit(&recheck_begin_throttle, (uint64_t)frc,
+                                     platform_time_wall_unix(), 60, &reps))
+            LOG_WARN_IN("recheck_failed_rows", "validate_headers",
+                     "[validate_headers] failed-row recheck BEGIN failed: %s "
+                     "repeats=%llu", err ? err : "(no message)",
+                     (unsigned long long)reps);
+        sqlite3_free(err);
+        progress_store_tx_unlock();
+        return vh_db_fault(frc, (int)start, "recheck begin/savepoint");
+    }
+    int wfault_rc = 0;
+    int wfault_height = 0;
+    enum vh_recheck_write wr = vh_recheck_write_rows(db, jobs, n, vh_batched,
+                                                     &wfault_rc,
+                                                     &wfault_height);
+    if (wr != VH_RW_OK)
+        return vh_recheck_write_exit(wr, wfault_rc, wfault_height);
+    if (sqlite3_exec(db, vh_commit, NULL, NULL, &err) != SQLITE_OK) {
+        int frc = sqlite3_extended_errcode(db);
+        /* De-storm: keyed on frc, mirrors recheck_begin_throttle above. */
+        static struct log_throttle recheck_commit_throttle = LOG_THROTTLE_INIT;
+        uint64_t reps = 0;
+        if (log_throttle_should_emit(&recheck_commit_throttle, (uint64_t)frc,
+                                     platform_time_wall_unix(), 60, &reps))
+            LOG_WARN_IN("recheck_failed_rows", "validate_headers",
+                     "[validate_headers] failed-row recheck COMMIT failed: %s "
+                     "repeats=%llu", err ? err : "(no message)",
+                     (unsigned long long)reps);
+        sqlite3_free(err);
+        vh_recheck_rollback(db, vh_batched);
+        progress_store_tx_unlock();
+        return vh_db_fault(frc, (int)last_seen, "recheck commit");
+    }
+    progress_store_tx_unlock();
+    return vh_recheck_settle_floor(jobs, n, last_seen, first_unresolved, start);
+}
+
 static job_result_t recheck_failed_rows(struct main_state *ms,
                                           sqlite3 *db,
                                           uint64_t validated_cursor)
@@ -679,61 +743,8 @@ static job_result_t recheck_failed_rows(struct main_state *ms,
         return JOB_IDLE;
     }
 
-    vh_pool_run_batch(&g_pool, jobs, sizeof(jobs[0]), n);
-    char *err = NULL;
-    progress_store_tx_lock();
-    /* This path runs both standalone (validate_headers_stage_step_once with no
-     * outer txn) and inside the bounded drain (STAGE_DRAIN_IMPL → stage_run_once
-     * → here), where stage_batch_begin has already opened a BEGIN IMMEDIATE on
-     * this same connection. A bare BEGIN here would nest a transaction inside
-     * that batch ("cannot start a transaction within a transaction") and the
-     * recheck/repair would never run — the failed-row self-heal silently
-     * disabled. Mirror stage_run_once's contract: open a SAVEPOINT when a batch
-     * is active (its writes stay enrolled in the batch, committed once by
-     * stage_batch_end), a fresh BEGIN IMMEDIATE only when standalone. */
-    const bool vh_batched = stage_batch_active();
-    const char *vh_open   = vh_recheck_open_sql(vh_batched);
-    const char *vh_commit = vh_recheck_commit_sql(vh_batched);
-    if (sqlite3_exec(db, vh_open, NULL, NULL, &err) != SQLITE_OK) {
-        int frc = sqlite3_extended_errcode(db);
-        /* De-storm: keyed on frc, mirrors recheck_prepare_throttle above. */
-        static struct log_throttle recheck_begin_throttle = LOG_THROTTLE_INIT;
-        uint64_t reps = 0;
-        if (log_throttle_should_emit(&recheck_begin_throttle, (uint64_t)frc,
-                                     platform_time_wall_unix(), 60, &reps))
-            LOG_WARN("validate_headers",
-                     "[validate_headers] failed-row recheck BEGIN failed: %s "
-                     "repeats=%llu", err ? err : "(no message)",
-                     (unsigned long long)reps);
-        sqlite3_free(err);
-        progress_store_tx_unlock();
-        return vh_db_fault(frc, (int)start, "recheck begin/savepoint");
-    }
-    int wfault_rc = 0;
-    int wfault_height = 0;
-    enum vh_recheck_write wr = vh_recheck_write_rows(db, jobs, n, vh_batched,
-                                                     &wfault_rc,
-                                                     &wfault_height);
-    if (wr != VH_RW_OK)
-        return vh_recheck_write_exit(wr, wfault_rc, wfault_height);
-    if (sqlite3_exec(db, vh_commit, NULL, NULL, &err) != SQLITE_OK) {
-        int frc = sqlite3_extended_errcode(db);
-        /* De-storm: keyed on frc, mirrors recheck_begin_throttle above. */
-        static struct log_throttle recheck_commit_throttle = LOG_THROTTLE_INIT;
-        uint64_t reps = 0;
-        if (log_throttle_should_emit(&recheck_commit_throttle, (uint64_t)frc,
-                                     platform_time_wall_unix(), 60, &reps))
-            LOG_WARN("validate_headers",
-                     "[validate_headers] failed-row recheck COMMIT failed: %s "
-                     "repeats=%llu", err ? err : "(no message)",
-                     (unsigned long long)reps);
-        sqlite3_free(err);
-        vh_recheck_rollback(db, vh_batched);
-        progress_store_tx_unlock();
-        return vh_db_fault(frc, (int)last_seen, "recheck commit");
-    }
-    progress_store_tx_unlock();
-    return vh_recheck_settle_floor(jobs, n, last_seen, first_unresolved, start);
+    return vh_recheck_run_and_settle(db, jobs, n, last_seen, first_unresolved,
+                                     start);
 }
 
 static bool mark_valid_header(struct block_index *bi)
