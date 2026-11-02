@@ -73,6 +73,7 @@ struct vcs_package_store {
     uint64_t hot_loads;       /* manifests parsed again after release */
     uint64_t hot_trim_passes; /* catalog passes that released manifests */
     bool catalog_incomplete; /* committed manifest could not be replayed */
+    uint32_t open_ms_lock;      /* last open: store lock wait */
     uint32_t open_ms_sweep;     /* last open: temp sweep */
     uint32_t open_ms_manifests; /* last open: manifest load */
     uint32_t open_ms_cas;       /* last open: CAS listing and GC */
@@ -165,6 +166,11 @@ enum vcs_package_store_result store_chunk_hash_checked(
  * GC unreferenced CAS objects, and commit CAS-complete staged packages.
  * Fills store->{pkgs,cas,gc_orphans_total}; false on hard I/O failure. */
 bool store_open_recover(struct vcs_package_store *store);
+/* Open-time phase timing: the lock wait is recorded, and one INFO line names
+ * the phases when the whole open took VCS_PACKAGE_STORE_SLOW_OPEN_MS or more. */
+#define VCS_PACKAGE_STORE_SLOW_OPEN_MS 500
+bool store_open_lock_timed(struct vcs_package_store *store);
+void store_open_log_slow(const struct vcs_package_store *store);
 /* Rebuild release acceptance from every present immutable envelope. The
  * caller owns the returned unpublished projection, or receives NULL on any
  * incomplete/corrupt history or resource failure. *quarantined

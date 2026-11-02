@@ -1113,6 +1113,27 @@ static bool store_existing_layout_safe(const struct vcs_package_store *store)
     return true;
 }
 
+bool store_open_lock_timed(struct vcs_package_store *store)
+{
+    int64_t t0 = clock_now_monotonic_ns();
+    bool ok = store_process_lock(store);
+    store->open_ms_lock = (uint32_t)((clock_now_monotonic_ns() - t0) / 1000000);
+    return ok;
+}
+
+void store_open_log_slow(const struct vcs_package_store *store)
+{
+    uint64_t total = (uint64_t)store->open_ms_lock + store->open_ms_sweep +
+                     store->open_ms_manifests + store->open_ms_cas;
+    if (total >= VCS_PACKAGE_STORE_SLOW_OPEN_MS)
+        LOG_INFO(STORE_LOG,
+                 "slow package store open: %llu ms (lock wait %u ms, temp "
+                 "sweep %u ms, manifest load %u ms, CAS listing %u ms)",
+                 (unsigned long long)total, store->open_ms_lock,
+                 store->open_ms_sweep, store->open_ms_manifests,
+                 store->open_ms_cas);
+}
+
 bool store_open_recover(struct vcs_package_store *store)
 {
     if (!store_existing_layout_safe(store))

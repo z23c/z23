@@ -15,7 +15,6 @@
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
 #include "json/json.h"
-#include "platform/clock.h"
 #include "platform/positioned_file.h"
 #include "platform/file_metadata.h"
 #include "platform/rng.h"
@@ -40,9 +39,6 @@
 #include <unistd.h>
 
 #define STORE_LOG "vcs.store"
-
-/* An open at or above this many milliseconds logs its phase split. */
-#define VCS_PACKAGE_STORE_SLOW_OPEN_MS 500
 
 bool store_process_lock(struct vcs_package_store *store)
 {
@@ -491,7 +487,7 @@ static bool store_room_available(struct vcs_package_store *store,
 /* ── open / close ─────────────────────────────────────────────────── */
 static bool store_open_lock_ready(struct vcs_package_store *store)
 {
-    return store->process_lock_fd >= 0 && store_process_lock(store);
+    return store->process_lock_fd >= 0 && store_open_lock_timed(store);
 }
 
 static int store_open_lock_file(const char *lock_path)
@@ -560,11 +556,8 @@ struct vcs_package_store *vcs_package_store_open(const char *datadir,
         free(store);
         LOG_NULL(STORE_LOG, "process lock path too long");
     }
-    int64_t open_t0 = clock_now_monotonic_ns();
     store->process_lock_fd = store_open_lock_file(lock_path);
-    bool lock_ok = store_open_lock_ready(store);
-    int64_t open_t1 = clock_now_monotonic_ns();
-    if (!lock_ok) {
+    if (!store_open_lock_ready(store)) {
         if (store->process_lock_fd >= 0)
             close(store->process_lock_fd);
         free(store);
@@ -598,17 +591,7 @@ struct vcs_package_store *vcs_package_store_open(const char *datadir,
         LOG_NULL(STORE_LOG, "recovery under %s", root_copy);
     }
     store_process_unlock(store);
-    /* One bounded line per slow open: which phase held the boot. */
-    int64_t open_total_ms = (clock_now_monotonic_ns() - open_t0) / 1000000;
-    if (open_total_ms >= VCS_PACKAGE_STORE_SLOW_OPEN_MS)
-        LOG_INFO(STORE_LOG,
-                 "slow package store open: total %lld ms (lock wait %lld "
-                 "ms, temp sweep %u ms, manifest load %u ms, CAS listing "
-                 "%u ms)",
-                 (long long)open_total_ms,
-                 (long long)((open_t1 - open_t0) / 1000000),
-                 store->open_ms_sweep, store->open_ms_manifests,
-                 store->open_ms_cas);
+    store_open_log_slow(store);
     LOG_INFO(STORE_LOG,
              "package store open at %s (quota %llu bytes, %zu packages, "
              "%zu CAS chunks, %llu orphans GC'd)",
