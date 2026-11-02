@@ -496,10 +496,14 @@ static bool preflight_write_all(int out, const uint8_t *buffer, size_t len) {
     return true;
 }
 
-/* Stream the source file to an open descriptor, fsync it, and record the
- * copy and fsync timing submarks; returns false on any I/O failure. */
+/* Stream the source file to an open descriptor and record the copy timing
+ * submark; returns false on any I/O failure. The copy is a private, short-lived
+ * snapshot that this process reads back through the page cache and then
+ * deletes, so it is deliberately NOT fsynced: forcing 1.7 GB of dirty pages to
+ * disk cost 697 s of a 877 s warm restart under writeback pressure, for a file
+ * whose durability nothing depends on. */
 static bool copy_exact_stream_body(const struct preflight_source_file *source, int out,
-                                   const char *copy_mark, const char *fsync_mark) {
+                                   const char *copy_mark) {
     uint8_t buffer[64u * 1024u];
     off_t offset = 0;
     bool ok = true;
@@ -522,23 +526,17 @@ static bool copy_exact_stream_body(const struct preflight_source_file *source, i
         offset += got;
     }
     (void)boot_submark(copy_mark, phase);
-    if (ok) {
-        phase = boot_clock_ms();
-        if (fsync(out) != 0)
-            ok = false;
-        (void)boot_submark(fsync_mark, phase);
-    }
     return ok;
 }
 
 static bool copy_exact_file(const struct preflight_source_file *source, const char *destination,
-                            const char *copy_mark, const char *fsync_mark) {
+                            const char *copy_mark) {
     if (!source->exists)
         return true;
     int out = open(destination, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, S_IRUSR | S_IWUSR);
     if (out < 0)
         return false;
-    bool ok = copy_exact_stream_body(source, out, copy_mark, fsync_mark);
+    bool ok = copy_exact_stream_body(source, out, copy_mark);
     if (close(out) != 0)
         ok = false;
     return ok;
@@ -606,8 +604,8 @@ static bool copy_family_stable(int dirfd, const char *temp_dir, const char *kbas
     int64_t phase = boot_clock_ms();
     /* Distinct names preserve both files in the flight recorder, whose
      * repeated stage names replace the previous observation. */
-    bool copied = copy_exact_file(&files[0], main_copy, "mint_preflight.main_copy", "mint_preflight.main_fsync") &&
-                  copy_exact_file(&files[1], wal_copy, "mint_preflight.wal_copy", "mint_preflight.wal_fsync");
+    bool copied = copy_exact_file(&files[0], main_copy, "mint_preflight.main_copy") &&
+                  copy_exact_file(&files[1], wal_copy, "mint_preflight.wal_copy");
     phase = boot_submark("mint_preflight.copy", phase);
     if (!copied) return false;
     bool stable = true;

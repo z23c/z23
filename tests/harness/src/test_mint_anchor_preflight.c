@@ -379,6 +379,10 @@ static bool map_copy_marks(const char *text, bool verdict)
         strstr(text, "mint_preflight.copy_stability ") &&
         strstr(text, "mint_preflight.copy_inspect ") &&
         strstr(text, "mint_preflight.cleanup_check ") &&
+        /* the private throwaway copy must never be fsynced: that flush cost
+         * 697 s of an 877 s warm restart on r1 */
+        !strstr(text, "mint_preflight.main_fsync") &&
+        !strstr(text, "mint_preflight.wal_fsync") &&
         !strstr(text, "mint_preflight.live_inspect ") && final == verdict;
 }
 
