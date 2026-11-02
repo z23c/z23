@@ -1143,7 +1143,7 @@ static bool topup_clean_measure(struct main_state *ms, struct node_db *ndb,
     struct block_index **all = NULL;
     size_t n = 0;
     if (!block_map_snapshot_indices(&ms->map_block_index, &all, &n))
-        return false;
+        return false; // raw-return-ok:caller treats a failed fingerprint as "no clean prefix" and folds the whole window
     uint32_t count = 0;
     uint64_t fp = 0;
     for (size_t i = 0; i < n; i++) {
