@@ -14,11 +14,11 @@ Plugin path is one of three things: **now** (possible with the current host), **
 
 | app | path | today | plugin path | blocker | evidence |
 | --- | --- | --- | --- | --- | --- |
-| skycombat | `apps/skycombat/` | separate C23 program, no `app.def` | needs API 2 for the game window; headless simulation could use interface 2 | no `ui.panel` descriptor | `apps/AGENTS.md:5`; `apps/skycombat/src/models/aircraft_manager.c:770`; PLUGINS.md 316-318 |
+| skycombat | `apps/skycombat/` | separate C23 program, no `app.def` | needs API 2 for the game window; headless simulation could use interface 2 | no `ui.panel` descriptor | `apps/AGENTS.md:5`; PLUGINS.md 316-318 |
 | zcl-ledger | `apps/zcl-ledger/` | separate host over Linux `hidraw` | **in-tree behind a facade**: signing and custody stay out of plugins; the host remains a separate binary | custody rule; no wallet broker (API 6); no device descriptor | `apps/zcl-ledger/README.md:5`; `apps/AGENTS.md:11`; `engine/modules/framework/include/zclassic23/app.h:127` |
 | z23kernel | `apps/z23kernel/` | separate freestanding RV64 image that links no node code | not a plugin candidate: it is a boot image, so it stays separate | needs a non-Linux execution host (API 9) | `apps/z23kernel/README.md:5`; PLUGINS.md 61-63 |
-| wallet | `contexts/wallet/` | linked into z23 (`PRODUCT_CONTEXTS`); custody-bearing | **in-tree behind a facade** through `wallet_request` | wallet broker (API 6); `make custody-check` | `Makefile:773-775`; `engine/modules/framework/include/zclassic23/app.h:127` |
-| explorer | `contexts/explorer/` | linked into z23; controllers, models, views | needs API 3 (chain read) and API 5 (routes) | chain-read coverage beyond tip and header; route descriptor | `Makefile:773-775`; `app.h:105`; PLUGINS.md 316-318 |
+| wallet | `contexts/wallet/` | linked into z23 (`PRODUCT_CONTEXTS`); custody-bearing | **in-tree behind a facade** through `wallet_request` | wallet broker (API 6); `make custody-check` | `Makefile:849`; `engine/modules/framework/include/zclassic23/app.h:127` |
+| explorer | `contexts/explorer/` | linked into z23; controllers, models, views | needs API 3 (chain read) and API 5 (routes) | chain-read coverage beyond tip and header; route descriptor | `Makefile:849`; `app.h:105`; PLUGINS.md 316-318 |
 | naming | `contexts/naming/` | linked into z23; ZDIR publishes on chain through OP_RETURN | ZDIR publication **in-tree behind a facade**; the ZNAM overlay needs API 4 and API 6 | consensus-bearing publication; no state or event descriptor | `contexts/naming/controllers/include/controllers/zdir_controller.h:3,20`; `contexts/naming/modules/znam/include/znam/znam.h:53-56` |
 | market | `contexts/market/` | linked into z23; consensus branch id and genesis hash in use | consensus-bearing offer and settlement **in-tree behind a facade**; catalogue UI needs API 4 and API 6 | consensus parity; wallet broker | `contexts/market/controllers/include/controllers/yardsale_controller.h:103`; `contexts/market/controllers/src/file_market_offer_controller.c:235` |
 | messaging | `contexts/messaging/` | linked into z23; board, wiki and messaging controllers (8 tracked files) | needs API 5 (routes and topics) | no topic descriptor; `p2p_publish` is in-tree only | `engine/modules/framework/include/zclassic23/app.h:124`; PLUGINS.md 316-318 |
@@ -41,7 +41,7 @@ The order is the order of work: each later item depends on the earlier ones. Shi
 6. **Wallet request broker.** The host table has `wallet_request` (`app.h:127`) and apps declare `WALLET_REQUESTS`. No plugin path exists, and custody review gates any change here.
 7. **Enforcing service binder.** The service catalog is shadow-only: `ZCL_SERVICE_ENFORCEMENT_SHADOW` grants no runtime authority, and promotion "needs a real binder first" (`docs/commons/EXTENSION_POINTS.md` lines 74-80).
 8. **Uninstall and stop.** The command list has install, switch and rollback, but no uninstall (PLUGINS.md lines 185-195). A resident plugin stops only when its run ends or on `SIGHUP` restart (PLUGINS.md lines 261-264). An uninstall plan is a proposed task (`docs/work/C23_TASK_CATALOG.md:597`).
-9. **Non-Linux execution.** `plugin run` and `plugin call` are Linux-only and refuse other hosts with `PLUGIN_RUN_PLATFORM` (PLUGINS.md lines 61-63, 265, 370). The z23kernel image and any guest runtime need a host that is not Linux.
+9. **Non-Linux execution.** `plugin run` and `plugin call` are Linux-only and refuse other hosts with `PLUGIN_RUN_PLATFORM` (PLUGINS.md lines 61-63, 265, 409). The z23kernel image and any guest runtime need a host that is not Linux.
 
 ## 4. Distribution
 
