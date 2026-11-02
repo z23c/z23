@@ -19,7 +19,6 @@
 # allowed band with no paperwork. Generated/tabular code is skipped entirely
 # via ALLOWLIST in tools/file_size_policy.c, not listed here.
 engine/composition/src/boot.c 3732
-engine/composition/src/boot_refold_staged.c 1810
 cognition/modules/codeindex/src/codeindex_merkle.c 1681
 engine/modules/hotswap/src/hotswap_activate.c 2314
 core/modules/net/src/connman.c 3010

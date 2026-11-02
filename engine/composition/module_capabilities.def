@@ -643,6 +643,7 @@ ZCL_MODULE_CAPABILITY("engine/composition/src/boot_promote_shielded_history.c", 
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_ratify_mint_anchor.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_refold_body_rebind.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_refold_staged.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/composition/src/boot_refold_staged_snapshot.c", CAP_FS_WRITE, "named steps of the -load-snapshot-at-own-height loader split from boot_refold_staged.c: write the node and progress databases")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_refuse.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_runtime_sync_services.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_sd_watchdog.c", CAP_FS_READ|CAP_CLOCK, "")
