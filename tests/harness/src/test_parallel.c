@@ -82,7 +82,16 @@
 #endif
 #include <time.h>
 #include <unistd.h>
+/* gcc defines __SANITIZE_ADDRESS__; clang reports ASan only through
+ * __has_feature(address_sanitizer). */
 #if defined(__SANITIZE_ADDRESS__)
+#define TP_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define TP_ASAN 1
+#endif
+#endif
+#if defined(TP_ASAN)
 #include <sanitizer/lsan_interface.h>
 #endif
 #if defined(__linux__)
@@ -1000,7 +1009,7 @@ static bool child_fixture_root_select(size_t idx)
  * reaches its own exit-time check. ZCL_TEST_LEAK_CHECK=report prints
  * LEAKS for a group that leaks; =fail also makes that group red. Any other
  * value (or unset) leaves the child exactly as it was. */
-#if defined(__SANITIZE_ADDRESS__)
+#if defined(TP_ASAN)
 static int child_leak_check(int failures, const char *group)
 {
     const char *mode = getenv("ZCL_TEST_LEAK_CHECK");
