@@ -69,15 +69,117 @@ struct zcl_result bii_write_embedded(
                          uint8_t out_payload_sha3[32]),
     void *ctx)
 {
+    bii_verified_body_forget();
     return ssio_write_embedded(datadir, &bii_embedded_spec, emit_payload, ctx);
+}
+
+/* ── Verified-body memo ─────────────────────────────────────────────
+ * The flat loader proves block_index.bin with one full-file hash
+ * (bii_verify_embedded). The integrity gate runs in the same process a few
+ * seconds later and would hash the same bytes again. The memo records what
+ * the loader proved -- header digest, payload size and the file's
+ * identity (device, inode, size, mtime to the nanosecond) -- and the gate
+ * accepts it only while all of those are unchanged. Any difference, an
+ * unreadable header, or a path that is not a plain regular file takes the
+ * full hash. Boot-thread only. */
+static struct {
+    bool valid;
+    char datadir[1024];
+    uint8_t sha3[32];
+    uint64_t body_size;
+    struct platform_file_metadata file;
+} g_verified;
+static uint64_t g_full_hashes;
+
+static bool bii_same_file(const struct platform_file_metadata *a,
+                          const struct platform_file_metadata *b)
+{
+    return a->size == b->size &&
+           a->modified_seconds == b->modified_seconds &&
+           a->modified_nanoseconds == b->modified_nanoseconds &&
+           a->device == b->device && a->inode == b->inode;
+}
+
+void bii_verified_body_forget(void)
+{
+    memset(&g_verified, 0, sizeof(g_verified));
+}
+
+uint64_t bii_full_hash_count(void)
+{
+    return g_full_hashes;
+}
+
+static enum ssio_read_verdict bii_hash_embedded(
+    const char *datadir, struct ssio_sidecar_header *out,
+    uint64_t *out_payload_off)
+{
+    g_full_hashes++;
+    return ssio_verify_embedded(datadir, &bii_embedded_spec, out,
+                                out_payload_off);
+}
+
+static void bii_remember_verified(const char *datadir,
+                                  const struct ssio_sidecar_header *hdr,
+                                  const struct platform_file_metadata *file)
+{
+    bii_verified_body_forget();
+    if (snprintf(g_verified.datadir, sizeof(g_verified.datadir), "%s",
+                 datadir) >= (int)sizeof(g_verified.datadir)) {
+        bii_verified_body_forget();
+        return;
+    }
+    memcpy(g_verified.sha3, hdr->body_sha3, 32);
+    g_verified.body_size = hdr->body_size;
+    g_verified.file = *file;
+    g_verified.valid = true;
+}
+
+/* True when the file now on disk is the one the loader hashed. */
+static bool bii_memo_covers(const char *datadir, const char *body_path,
+                            const struct platform_file_metadata *now)
+{
+    if (!g_verified.valid || strcmp(g_verified.datadir, datadir) != 0 ||
+        !bii_same_file(&g_verified.file, now) ||
+        now->size != BII_EMBEDDED_HEADER_BYTES + g_verified.body_size)
+        return false;
+    struct ssio_sidecar_header hdr;
+    FILE *f = fopen(body_path, "rb");
+    if (!f)
+        return false;
+    bool read_ok = fread(&hdr, 1, sizeof(hdr), f) == sizeof(hdr);
+    fclose(f);
+    return read_ok && memcmp(hdr.magic, bii_embedded_spec.magic, 4) == 0 &&
+           hdr.version == bii_embedded_spec.version &&
+           hdr.body_size == g_verified.body_size &&
+           memcmp(hdr.body_sha3, g_verified.sha3, 32) == 0;
 }
 
 int bii_verify_embedded(const char *datadir,
                         struct ssio_sidecar_header *out,
                         uint64_t *out_payload_off)
 {
-    return (int)ssio_verify_embedded(datadir, &bii_embedded_spec, out,
-                                     out_payload_off);
+    char body_path[1024];
+    struct platform_file_metadata before, after;
+    struct ssio_sidecar_header hdr;
+    snprintf(body_path, sizeof(body_path), "%s/%s", datadir,
+             bii_embedded_spec.body_name);
+    bool have_before = platform_file_metadata_read(body_path, &before) ==
+                       PLATFORM_FILE_METADATA_OK;
+    bii_verified_body_forget();
+    enum ssio_read_verdict v = bii_hash_embedded(datadir, &hdr,
+                                                 out_payload_off);
+    if (v == SSIO_READ_OK) {
+        if (out)
+            *out = hdr;
+        /* Remember only when the file is provably the same one before and
+         * after the hash: a write during the hash must not be memoised. */
+        if (have_before &&
+            platform_file_metadata_read(body_path, &after) ==
+                PLATFORM_FILE_METADATA_OK && bii_same_file(&before, &after))
+            bii_remember_verified(datadir, &hdr, &after);
+    }
+    return (int)v;
 }
 
 static enum bii_verdict bii_read_sidecar(const char *datadir,
@@ -320,7 +422,9 @@ enum bii_verdict bii_verify(const char *datadir,
     {
         struct ssio_sidecar_header ehdr;
         enum ssio_read_verdict ev =
-            ssio_verify_embedded(datadir, &bii_embedded_spec, &ehdr, NULL);
+            bii_memo_covers(datadir, body_path, &body_metadata)
+                ? SSIO_READ_OK
+                : bii_hash_embedded(datadir, &ehdr, NULL);
         if (ev == SSIO_READ_OK) {
             /* Body integrity proven by the embedded header; only the
              * SQLite tip cross-check remains. */

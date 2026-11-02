@@ -199,6 +199,16 @@ int bii_verify_embedded(const char *datadir,
                         struct ssio_sidecar_header *out,
                         uint64_t *out_payload_off);
 
+/* The embedded verification above memoises what it proved: header digest,
+ * payload size and the file identity (device, inode, size, mtime in
+ * nanoseconds). bii_verify() accepts that memo for the same process and
+ * datadir while the file is unchanged, instead of hashing it again. Any
+ * difference takes the full hash. */
+void bii_verified_body_forget(void);
+
+/* Number of full-file embedded hashes this process has run. */
+uint64_t bii_full_hash_count(void);
+
 /* ── Quarantine ───────────────────────────────────────────────
  * Renames both block_index.bin and block_index.bin.sha3 to
  * `<name>.corrupt.<unix_ts>`. Does NOT delete — operators need

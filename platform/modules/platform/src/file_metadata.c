@@ -52,6 +52,11 @@ enum platform_file_metadata_result platform_file_metadata_read(
     const uint64_t unix_epoch_ticks = UINT64_C(116444736000000000);
     out->modified_seconds = ticks >= unix_epoch_ticks
         ? (int64_t)((ticks - unix_epoch_ticks) / UINT64_C(10000000)) : 0;
+    out->modified_nanoseconds = ticks >= unix_epoch_ticks
+        ? (uint32_t)(((ticks - unix_epoch_ticks) % UINT64_C(10000000)) * 100)
+        : 0;
+    out->device = (uint64_t)info.dwVolumeSerialNumber;
+    out->inode = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow;
     return PLATFORM_FILE_METADATA_OK;
 }
 
@@ -114,6 +119,13 @@ enum platform_file_metadata_result platform_file_metadata_read(
     out->size = (uint64_t)st.st_size;
     out->links = (uint64_t)st.st_nlink;
     out->modified_seconds = (int64_t)st.st_mtime;
+#if defined(__APPLE__)
+    out->modified_nanoseconds = (uint32_t)st.st_mtimespec.tv_nsec;
+#else
+    out->modified_nanoseconds = (uint32_t)st.st_mtim.tv_nsec;
+#endif
+    out->device = (uint64_t)st.st_dev;
+    out->inode = (uint64_t)st.st_ino;
     return PLATFORM_FILE_METADATA_OK;
 }
 

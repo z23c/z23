@@ -17,6 +17,12 @@ struct platform_file_metadata {
     uint64_t size;
     uint64_t links;
     int64_t modified_seconds;
+    /* Sub-second part of the modification time and the file identity
+     * (device/volume and inode/file index), for callers that must notice a
+     * file replaced or rewritten since an earlier observation. */
+    uint32_t modified_nanoseconds;
+    uint64_t device;
+    uint64_t inode;
 };
 
 /* Open the named object without following a final symlink/reparse point and

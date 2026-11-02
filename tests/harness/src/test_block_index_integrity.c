@@ -19,12 +19,14 @@
 #include "chain/pow.h"
 #include "models/database.h"
 #include "event/event.h"
+#include "sha3/sha3.h"
 
 #include <fcntl.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 /* ── Event counter for EV_BLOCK_INDEX_CORRUPT ──────────────── */
@@ -923,6 +925,107 @@ static int t_bcs_repair_heights_wrapper(void)
     return failures;
 }
 
+/* ── Verified-body memo: one full hash per process and unchanged file ── */
+
+static bool bii_memo_emit(FILE *f, void *ctx, uint64_t *size, uint8_t sha3[32])
+{
+    (void)ctx;
+    uint8_t payload[4096];
+    for (size_t i = 0; i < sizeof(payload); i++)
+        payload[i] = (uint8_t)(i * 31u + 7u);
+    struct sha3_256_ctx h;
+    sha3_256_init(&h);
+    sha3_256_write(&h, payload, sizeof(payload));
+    sha3_256_finalize(&h, sha3);
+    *size = sizeof(payload);
+    return fwrite(payload, 1, sizeof(payload), f) == sizeof(payload);
+}
+
+static bool bii_memo_set_mtime(const char *dir, long seconds)
+{
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/block_index.bin", dir);
+    struct timespec ts[2] = {{.tv_sec = seconds}, {.tv_sec = seconds}};
+    return utimensat(AT_FDCWD, path, ts, 0) == 0;
+}
+
+static bool bii_memo_flip_payload_byte(const char *dir)
+{
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/block_index.bin", dir);
+    FILE *f = fopen(path, "r+b");
+    if (!f) return false;
+    uint8_t b = 0;
+    bool ok = fseek(f, 100, SEEK_SET) == 0 && fread(&b, 1, 1, f) == 1;
+    b ^= 0x5a;
+    ok = ok && fseek(f, 100, SEEK_SET) == 0 && fwrite(&b, 1, 1, f) == 1;
+    fclose(f);
+    return ok;
+}
+
+static int t_verified_memo(void)
+{
+    int failures = 0;
+    char dir[256];
+    bii_make_tmpdir(dir, sizeof(dir));
+    char err[256];
+    bii_verified_body_forget();
+
+    BII_RUN("memo: embedded body written",
+            bii_write_embedded(dir, bii_memo_emit, NULL).ok);
+    uint64_t base = bii_full_hash_count();
+    BII_RUN("memo: loader-side verification hashes once and passes",
+            bii_verify_embedded(dir, NULL, NULL) == 0 &&
+            bii_full_hash_count() == base + 1);
+    BII_RUN("memo: gate on the unchanged file accepts it without a hash",
+            bii_verify(dir, NULL, NULL, err, sizeof(err)) == BII_OK &&
+            bii_full_hash_count() == base + 1);
+    BII_RUN("memo: gate in another datadir path does not use the memo",
+            bii_verify("/nonexistent-bii-memo", NULL, NULL, err,
+                       sizeof(err)) != BII_OK &&
+            bii_full_hash_count() == base + 1);
+
+    bii_verified_body_forget();
+    BII_RUN("memo: forgotten memo means the gate hashes",
+            bii_verify(dir, NULL, NULL, err, sizeof(err)) == BII_OK &&
+            bii_full_hash_count() == base + 2);
+
+    bii_verified_body_forget();
+    (void)bii_verify_embedded(dir, NULL, NULL);
+    uint64_t c = bii_full_hash_count();
+    BII_RUN("memo: touched mtime with identical bytes takes the full hash",
+            bii_memo_set_mtime(dir, 1000000000L) &&
+            bii_verify(dir, NULL, NULL, err, sizeof(err)) == BII_OK &&
+            bii_full_hash_count() == c + 1);
+
+    bii_verified_body_forget();
+    (void)bii_verify_embedded(dir, NULL, NULL);
+    c = bii_full_hash_count();
+    BII_RUN("memo: changed payload byte and mtime is detected by the hash",
+            bii_memo_flip_payload_byte(dir) &&
+            bii_memo_set_mtime(dir, 1000000123L) &&
+            bii_verify(dir, NULL, NULL, err, sizeof(err)) != BII_OK &&
+            bii_full_hash_count() == c + 1);
+
+    BII_RUN("memo: rewritten body (new inode, new size) takes the full hash",
+            bii_write_embedded(dir, bii_memo_emit, NULL).ok &&
+            bii_verify_embedded(dir, NULL, NULL) == 0);
+    c = bii_full_hash_count();
+    {
+        char path[1024];
+        snprintf(path, sizeof(path), "%s/block_index.bin", dir);
+        FILE *f = fopen(path, "ab");
+        bool grew = f && fwrite("x", 1, 1, f) == 1;
+        if (f) fclose(f);
+        BII_RUN("memo: appended byte (size changed) takes the full hash and fails",
+                grew && bii_verify(dir, NULL, NULL, err, sizeof(err)) != BII_OK &&
+                bii_full_hash_count() == c + 1);
+    }
+    bii_verified_body_forget();
+    bii_tear_down(dir);
+    return failures;
+}
+
 int test_block_index_integrity(void)
 {
     printf("\n=== block_index_integrity tests ===\n");
@@ -940,6 +1043,7 @@ int test_block_index_integrity(void)
     failures += t_verdict_names();
     failures += t_recovery_status();
     failures += t_dump_state_json();
+    failures += t_verified_memo();
     failures += t_height_repair();
     failures += t_height_repair_empty();
     failures += t_height_repair_cycle();
