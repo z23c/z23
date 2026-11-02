@@ -37,16 +37,21 @@
 #include "chain/chainparams.h"
 #include "chain/subsidy.h"
 #include "consensus/validation.h"
+#include "controllers/mining_controller.h"
 #include "core/arith_uint256.h"
 #include "core/uint256.h"
 #include "domain/consensus/coinbase.h"
+#include "domain/consensus/upgrades.h"
 #include "keys/key_io.h"
 #include "keys/pubkey.h"
 #include "mining/miner.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
+#include "sapling/incremental_merkle_tree.h"
 #include "script/script.h"
 #include "script/standard.h"
+#include "storage/anchor_kv.h"
+#include "storage/progress_store.h"
 #include "validation/check_block.h"
 
 #include <stdio.h>
@@ -287,6 +292,49 @@ static int gta_check_mainnet_address_rejected(bool main_encoded,
     return failures;
 }
 
+/* A header commits to the Sapling frontier root after its block, and a block
+ * with no shielded outputs carries the previous root. The regtest miner used
+ * to stamp the root only on blocks that held shielded outputs, so every other
+ * block was mined with a zero root and the wallet refused to spend against
+ * such a tip ("the chain has no Sapling root at the tip"). Stamp a
+ * commitment-free block against a persisted one-note frontier. */
+static int gta_check_sapling_root_stamp(const struct chain_params *cp)
+{
+    int failures = 0;
+    char dir[512];
+    bool ready = test_mkdtemp(dir, sizeof(dir), "gta_root") &&
+                 progress_store_open(dir) && progress_store_db() &&
+                 anchor_kv_ensure_schema(progress_store_db());
+    struct incremental_merkle_tree tree;
+    struct uint256 cm, expect, zero;
+    sapling_tree_init(&tree);
+    memset(&cm, 0x5a, sizeof(cm));
+    incremental_tree_append(&tree, &cm);
+    incremental_tree_root(&tree, &expect);
+    uint256_set_null(&zero);
+    ready = ready && anchor_kv_add_tree(progress_store_db(),
+                                        ANCHOR_POOL_SAPLING, &tree, 5);
+
+    struct chain_params shielded = *cp;
+    shielded.consensus.vUpgrades[UPGRADE_SAPLING].nActivationHeight = 0;
+    struct block blk;
+    block_init(&blk);
+    if (ready) mining_stamp_sapling_final_root(&blk, 6, &shielded);
+    printf("generatetoaddress: a commitment-free block carries the frontier root... ");
+    if (ready && uint256_eq(&blk.header.hashFinalSaplingRoot, &expect) &&
+        !uint256_eq(&blk.header.hashFinalSaplingRoot, &zero)) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+
+    struct block before;
+    block_init(&before);
+    if (ready) mining_stamp_sapling_final_root(&before, 6, cp);
+    printf("generatetoaddress: no root is stamped while Sapling is inactive... ");
+    if (ready && uint256_eq(&before.header.hashFinalSaplingRoot, &zero)) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+
+    if (ready) progress_store_close();
+    if (dir[0]) test_rm_rf(dir);
+    return failures;
+}
+
 int test_generatetoaddress(void);
 int test_generatetoaddress(void)
 {
@@ -340,6 +388,8 @@ int test_generatetoaddress(void)
 
     /* ── (4) the bug, pinned: `generate`'s empty script owns nothing ── */
     failures += gta_check_empty_script_coinbase(cp);
+
+    failures += gta_check_sapling_root_stamp(cp);
 
     /* ── (5) cross-network safety ────────────────────────────────── */
     failures += gta_check_mainnet_address_rejected(main_encoded, mainnet_addr);

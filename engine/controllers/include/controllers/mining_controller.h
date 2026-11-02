@@ -16,4 +16,12 @@ void rpc_mining_set_state(struct main_state *ms, struct tx_mempool *mp,
 
 void register_mining_rpc_commands(struct rpc_table *t);
 
+struct block;
+struct chain_params;
+
+/* Stamp the Sapling frontier root a mined block must commit to (the previous
+ * root when it holds no shielded outputs). No-op while Sapling is inactive. */
+void mining_stamp_sapling_final_root(struct block *block, int height,
+                                     const struct chain_params *cp);
+
 #endif
