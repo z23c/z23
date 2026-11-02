@@ -10385,6 +10385,45 @@ static bool dp_hs_closure_changed(const char *owner)
            dp_hf_drive(&seen) && dp_hs_story_green("closure-restored", owner);
 }
 
+/* Under AddressSanitizer the HOT_FORK story cases cannot run. The reflex
+ * runner cages each story child with RLIMIT_AS = 4 GiB (child_rlimits in
+ * tools/dev/devloop_reflex_runner_main.c), set after the fork. An ASan
+ * process already maps terabytes of shadow, so every later mmap in the cage
+ * (dlopen of the candidate, malloc) fails and the child exits 1: the story
+ * stage reports "HOT_FORK child exited with code 1" while the same cases pass
+ * in the plain build. Measured on the ASan test binary: VmSize=21476868232 KB
+ * (about 20 TB, printed by the skip line). The
+ * product cage is a fail-closed refusal and stays as it is; only the ASan
+ * build skips these three cases. GCC defines __SANITIZE_ADDRESS__; Clang
+ * reports it through __has_feature(address_sanitizer). */
+#if defined(__SANITIZE_ADDRESS__)
+#define DP_UNDER_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define DP_UNDER_ASAN 1
+#endif
+#endif
+
+static bool dp_hotfork_skip_asan(const char *name)
+{
+#if defined(DP_UNDER_ASAN)
+    unsigned long vm_kb = 0;
+    char line[128];
+    FILE *st = fopen("/proc/self/status", "r");
+    while (st && fgets(line, sizeof(line), st))
+        if (sscanf(line, "VmSize: %lu kB", &vm_kb) == 1)
+            break;
+    if (st)
+        (void)fclose(st);
+    printf("dev platform: %s SKIP under AddressSanitizer (VmSize=%lu KB "
+           "exceeds the runner's 4 GiB RLIMIT_AS story cage)\n", name, vm_kb);
+    return true;
+#else
+    (void)name;
+    return false;
+#endif
+}
+
 [[maybe_unused]] static bool dp_hs_edit_matrix(const char *owner)
 {
     bool ok = dp_hs_story_green("baseline", owner);
@@ -10397,6 +10436,8 @@ static bool dp_hs_closure_changed(const char *owner)
 static int test_hotfork_shape_refusals(void)
 {
     int failures = 0;
+    if (dp_hotfork_skip_asan("test_hotfork_shape_refusals"))
+        return 0;
     TEST("dev platform: HOT_FORK admits proven ELF edits or refuses unsupported Darwin shapes with restart") {
         static char owner[16384], story[16384];
         char cwd[PATH_MAX];
@@ -10619,6 +10660,8 @@ static int test_hotfork_shape_image_cache(void)
 static int test_hotfork_story_file_green_and_red(void)
 {
     int failures = 0;
+    if (dp_hotfork_skip_asan("test_hotfork_story_file_green_and_red"))
+        return 0;
     TEST("dev platform: HOT_FORK story runs only for admitted shapes; Darwin refuses unsupported shapes") {
         static char owner[16384], story[16384];
 #if defined(__linux__)
@@ -10914,6 +10957,8 @@ static bool dp_hc_cycle(const char *model)
 static int test_hotfork_resident_model_closure(void)
 {
     int failures = 0;
+    if (dp_hotfork_skip_asan("test_hotfork_resident_model_closure"))
+        return 0;
     TEST("dev platform: HOT_FORK refuses changed or unsupported resident call closure") {
 #if defined(__linux__)
         static char model[32768];
