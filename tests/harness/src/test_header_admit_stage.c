@@ -1328,6 +1328,117 @@ static int ha_failed_best_child_case(void)
     return failures;
 }
 
+static struct ha_branch_env *g_ha_tip_env;
+
+static int64_t ha_tip_height(void) { return g_ha_tip_env->b1.nHeight; }
+static bool ha_tip_hash(uint8_t hash[32])
+{
+    memcpy(hash, g_ha_tip_env->b1_hash.data, 32);
+    return true;
+}
+static bool ha_tip_on(void) { return true; }
+
+/* Serves b1 as the published tip while b1 is off the best-header chain (best
+ * is blocks[5], so the fork point of b1 is blocks[2]), with `child` as the
+ * window child of b1. */
+static bool ha_abandoned_tip_arm(struct ha_branch_env *e,
+                                 struct block_index *child)
+{
+    e->ms.pindex_best_header = &e->sc.blocks[5];
+    test_block_map_insert(&e->ms.map_block_index, &e->b1_hash, &e->b1);
+    g_ha_tip_env = e;
+    struct active_chain_authority auth = { ha_tip_height, ha_tip_hash,
+                                           ha_tip_on };
+    active_chain_register_authority(&auth);
+    active_chain_register_block_map(&e->ms.map_block_index);
+    return active_chain_move_window_tip(&e->ms.chain_active, &e->b1) &&
+           active_chain_move_window_tip(&e->ms.chain_active, child) &&
+           active_chain_tip(&e->ms.chain_active) == &e->b1 &&
+           active_chain_at(&e->ms.chain_active, 4) == child;
+}
+
+static void ha_abandoned_tip_disarm(void)
+{
+    struct active_chain_authority none = {0};
+    active_chain_register_authority(&none);
+    active_chain_register_block_map(NULL);
+    g_ha_tip_env = NULL;
+}
+
+/* The published tip b1 is off the best-header chain and the window holds its
+ * child b2. The window child keeps the audit on the tip: the stale h4 row names
+ * a sibling of b2, so it is rewound from h4 and not from the fork point, where
+ * the h3 row would match and nothing would be rewound. */
+static int ha_abandoned_tip_child_case(void)
+{
+    int failures = 0;
+    char dir[256];
+    struct ha_branch_env e;
+    ha_branch_env_open(&e, "abandoned_child", dir, sizeof(dir), 2);
+    HA_CHECK("abandoned_child: init", header_admit_stage_init(&e.ms));
+    HA_CHECK("abandoned_child: admit active prefix",
+             header_admit_stage_drain(100) == 3);
+    sqlite3 *db = progress_store_db();
+    HA_CHECK("abandoned_child: b1 is the tip with b2 as window child",
+             ha_abandoned_tip_arm(&e, &e.b2));
+    struct uint256 stale_h4 = e.b2_hash;
+    stale_h4.data[5] ^= 0x44;
+    HA_CHECK("abandoned_child: canonical h3 is b1, stale h4 above it",
+             put_header_row(db, 3, &e.b1_hash, &e.sc.hashes[2]) &&
+             put_header_row(db, 4, &stale_h4, &e.b1_hash));
+    int target = -1;
+    const char *reason = NULL;
+    HA_CHECK("abandoned_child: forward audit runs",
+             header_admit_forward_rewind_target(db, &e.sc.blocks[5],
+                                                &e.ms.chain_active, 6,
+                                                &target, &reason));
+    HA_CHECK("abandoned_child: the tip audit rewinds the stale h4 row",
+             target == 4 && strcmp(reason, "hash_mismatch") == 0);
+    ha_abandoned_tip_disarm();
+    ha_branch_env_close(&e, dir);
+    return failures;
+}
+
+/* The window child's parent is a second block_index entry for b1 (same hash,
+ * other pointer). Blocks compare by hash, so the tip audit still runs and the
+ * stale h4 row is rewound; a pointer compare would hand the audit to the fork
+ * point and leave the row in place. */
+static int ha_abandoned_tip_dup_child_case(void)
+{
+    int failures = 0;
+    char dir[256];
+    struct ha_branch_env e;
+    ha_branch_env_open(&e, "abandoned_dup", dir, sizeof(dir), 2);
+    HA_CHECK("abandoned_dup: init", header_admit_stage_init(&e.ms));
+    HA_CHECK("abandoned_dup: admit active prefix",
+             header_admit_stage_drain(100) == 3);
+    sqlite3 *db = progress_store_db();
+    struct block_index b1_dup = e.b1;
+    struct block_index child;
+    block_index_init(&child);
+    child.phashBlock = &e.b2_hash;
+    child.nHeight = 4;
+    child.pprev = &b1_dup;
+    HA_CHECK("abandoned_dup: b1 is the tip with a duplicate-b1 window child",
+             ha_abandoned_tip_arm(&e, &child));
+    struct uint256 stale_h4 = e.b2_hash;
+    stale_h4.data[5] ^= 0x44;
+    HA_CHECK("abandoned_dup: canonical h3 is b1, stale h4 above it",
+             put_header_row(db, 3, &e.b1_hash, &e.sc.hashes[2]) &&
+             put_header_row(db, 4, &stale_h4, &e.b1_hash));
+    int target = -1;
+    const char *reason = NULL;
+    HA_CHECK("abandoned_dup: forward audit runs",
+             header_admit_forward_rewind_target(db, &e.sc.blocks[5],
+                                                &e.ms.chain_active, 6,
+                                                &target, &reason));
+    HA_CHECK("abandoned_dup: the tip audit rewinds the stale h4 row",
+             target == 4 && strcmp(reason, "hash_mismatch") == 0);
+    ha_abandoned_tip_disarm();
+    ha_branch_env_close(&e, dir);
+    return failures;
+}
+
 /* The h+2 fallback must link through the prior admitted row. With canonical h3
  * logged and a stale h4 row (right parent, wrong hash) the stage holds at h5:
  * it neither rewinds nor admits h5 through the stale row. */
@@ -1629,6 +1740,8 @@ int test_header_admit_stage(void)
     failures += ha_sibling_row_case();
     failures += ha_window_slot_owned_case();
     failures += ha_failed_best_child_case();
+    failures += ha_abandoned_tip_child_case();
+    failures += ha_abandoned_tip_dup_child_case();
     failures += ha_stale_prior_row_hold_case();
     failures += ha_forward_fork_floor_case(HA_FLOOR_ANCHOR, "floor_anchor");
     failures += ha_forward_fork_floor_case(HA_FLOOR_COINS, "floor_coins");

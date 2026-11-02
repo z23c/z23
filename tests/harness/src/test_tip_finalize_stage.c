@@ -2920,6 +2920,8 @@ static int case_reorg_stale_fork_duplicate(void)
     TF_CHECK("stale_dup: row 4 becomes Y",
              header_admit_stage_has_record(4, &hy) &&
              !header_admit_stage_has_record(4, &hx));
+    TF_CHECK("stale_dup: body_fetch is clamped to the rewound height",
+             stale_auth_cursor(db, "body_fetch") == 4);
 
     header_admit_stage_shutdown();
     tf_teardown(dir, &ms, &sc);

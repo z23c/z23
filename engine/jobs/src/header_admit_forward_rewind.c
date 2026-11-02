@@ -315,7 +315,9 @@ static bool audit_row_above(sqlite3 *db, struct block_index *best_header,
 
 /* The fork point owns the audit when the window holds no child of the served
  * tip: a row above a tip that nothing extends would otherwise be rewound on
- * every pass. A failed tip never has a window child. */
+ * every pass. A failed tip has no window child: invalidation moves the window
+ * to the failed block's parent first (process_block_disconnect_to_parent in
+ * core/modules/validation/src/process_block_invalidate.c). */
 static bool fork_owns_audit(struct active_chain *chain,
                             struct block_index *tip,
                             struct block_index *fork)
