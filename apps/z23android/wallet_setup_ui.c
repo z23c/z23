@@ -134,6 +134,11 @@ static void env_control(void *ctx, bool start)
     (void)ctx;
     (void)(start ? zapp_controller_node_control(true) : zapp_controller_node_pause_for_setup());
 }
+static void env_stage(void *ctx, char *out, size_t cap)
+{
+    (void)ctx;
+    zapp_controller_node_stage(out, cap);
+}
 static void env_pause(void *ctx, unsigned ms)
 {
     struct timespec step = {.tv_sec = ms / 1000u, .tv_nsec = (long)(ms % 1000u) * 1000000L};
@@ -288,35 +293,6 @@ static void release_widgets(JNIEnv *env)
 
 /* ---- drawing ---- */
 
-static const struct { enum wsu_failure failure; const char *text; } failure_texts[] = {
-    {WSU_DECLINED, "Nothing was changed: the screen lock was not confirmed."},
-    {WSU_NO_SCREEN_LOCK, "Set a screen lock (PIN, pattern or password) in the phone's settings first. The wallet is protected by it."},
-    {WSU_KEY, "This phone could not make a hardware-protected key for the wallet, so no wallet was made."},
-    {WSU_NODE_BUSY, "The node did not stop in time. Nothing was changed. Try again in a minute."},
-    {WSU_PRESENT, "This phone already holds a wallet. Nothing was changed."},
-    {WSU_BAD_PHRASE, "Those words are not a valid recovery phrase. Check each word and its order."},
-    {WSU_BAD_WORDS, "Type all of your recovery words: 12, 15, 18, 21 or 24 words separated by spaces."},
-    {WSU_STORAGE, "The node's chain database could not be read. Nothing was changed."},
-    {WSU_REFUSED, "The node refused the request. Nothing was changed."},
-    {WSU_UNKNOWN, "The node did not give a usable answer. A wallet may have been started; its words cannot be shown again."},
-    {WSU_NOT_RECORDED, "The wallet exists but this app could not record that setup finished."},
-    {WSU_NO_TIP, "The node has not yet read enough of the chain to give a new wallet a start height, so no wallet was made. Check the connection and try again."},
-    {WSU_NO_BIRTHDAY, "Your words were confirmed, but the wallet recorded no start height, so setup is not finished. Check again tries once more. Start over sets this wallet aside, only if the node shows it holds nothing, and begins a new one; nothing is deleted."},
-    {WSU_NOT_RUN, "The wallet command could not start. Nothing was changed."},
-    {WSU_NOT_CREATE, "Start over is only for a new wallet whose words were not confirmed. This wallet was restored from words."},
-    {WSU_NOT_EMPTY, "The node reports funds or transactions in this wallet, so it is not set aside."},
-    {WSU_ALREADY_CONFIRMED, "The words of this wallet were confirmed, so it is not set aside."},
-    {WSU_COULD_NOT_CHECK, "The node did not say whether this wallet holds transactions, so nothing was changed."},
-    {WSU_ASIDE, "Could not set the wallet aside; nothing changed."},
-    {WSU_ASIDE_STUCK, "The wallet could not be set aside and some items could not be put back. Do not create a new wallet. These stay moved aside and need their original names back:"},
-    {WSU_UNPROTECTED, "This phone would not protect the screen from capture, so no wallet was made."},
-};
-static const char *failure_text(enum wsu_failure failure)
-{
-    for (size_t i = 0; i < sizeof(failure_texts) / sizeof(failure_texts[0]); ++i)
-        if (failure_texts[i].failure == failure) return failure_texts[i].text;
-    return "";
-}
 static void draw_words(JNIEnv *env, const struct wsu_view *v)
 {
     const struct zapp_words *words = &v->words;
@@ -353,7 +329,7 @@ static void draw_form(JNIEnv *env, const struct wsu_view *v)
     (void)input_view(env, "Recovery words", ZAPP_FIELD_INPUT_WORDS | ZAPP_FIELD_FLAG_MULTI_LINE, &ui.words_input);
     (void)text_view(env, "If you know the block height where this wallet began, type it: the wallet then reads the chain from there. Without it the wallet reads the whole chain, which takes longer.", 14.0f, SOFT);
     (void)input_view(env, "Block height (optional)", ZAPP_FIELD_NUMBER, &ui.height_input);
-    if (v->failure) (void)text_view(env, failure_text(v->failure), 15.0f, AMBER);
+    if (v->failure) (void)text_view(env, wsu_failure_text(v->failure), 15.0f, AMBER);
     (void)button_view(env, B_RESTORE, "Restore", GO_COLOR);
     (void)button_view(env, B_RESTORE_UNKNOWN, "I do not know the height", BUTTON_COLOR);
     (void)button_view(env, B_BACK, "Back", BUTTON_COLOR);
@@ -401,14 +377,21 @@ static void draw_interrupted(JNIEnv *env, const struct wsu_view *v)
     case WSU_CHECKING:
         (void)text_view(env, "Checking this phone's wallet", 24.0f, WHITE);
         (void)text_view(env, "Setup was interrupted. The app is reading what it left behind.", 15.0f, SOFT);
+        if (v->phase != WSU_PHASE_NONE) {
+            char line[320];
+            wsu_working_line(v, line, sizeof(line));
+            (void)text_view(env, line, 15.0f, SOFT);
+            wsu_elapsed_text(v, line, sizeof(line));
+            (void)text_view(env, line, 15.0f, SOFT);
+        }
         break;
     default:
         (void)text_view(env, "Setup was interrupted", 24.0f, WHITE);
-        (void)text_view(env, v->failure == WSU_UNKNOWN ? "The node did not answer, so the app does not know whether a wallet exists." : "A wallet was started on this phone and its recovery words were not confirmed. The node has no command that shows them again. Receive stays closed until setup is confirmed.", 15.0f, AMBER);
+        (void)text_view(env, v->failure == WSU_UNKNOWN ? "Your node did not answer, so the app cannot tell whether a wallet exists." : "A wallet was started on this phone and its recovery words were not confirmed. The node has no command that shows them again. Receive stays closed until setup is confirmed.", 15.0f, AMBER);
         if (wsu_view_can_recheck(v)) (void)button_view(env, B_RECHECK, "Check again", BUTTON_COLOR);
         if (v->may_start_over && (v->failure == WSU_NO_FAILURE || v->failure == WSU_COULD_NOT_CHECK || v->failure == WSU_NODE_BUSY))
             (void)button_view(env, B_START_OVER_ASK, "Start over", BUTTON_COLOR);
-        if (v->failure != WSU_NO_FAILURE && v->failure != WSU_UNKNOWN) (void)text_view(env, failure_text(v->failure), 15.0f, AMBER);
+        if (v->failure != WSU_NO_FAILURE && v->failure != WSU_UNKNOWN) (void)text_view(env, wsu_failure_text(v->failure), 15.0f, AMBER);
         break;
     }
 }
@@ -423,8 +406,13 @@ static void draw_model(JNIEnv *env, const struct wsu_view *v, bool known, int64_
         (void)button_view(env, B_RESTORE_FORM, "Restore from words", BUTTON_COLOR);
         break;
     case WSU_WORKING:
+        char line[320], elapsed[64];
+        wsu_working_line(v, line, sizeof(line));
         (void)text_view(env, "Working", 24.0f, WHITE);
-        (void)text_view(env, "A new wallet waits for the node to learn the current chain tip, which can take a few minutes. The phone may ask for your screen lock. Keep this screen open.", 15.0f, SOFT);
+        (void)text_view(env, line, 17.0f, WHITE);
+        wsu_elapsed_text(v, elapsed, sizeof(elapsed));
+        (void)text_view(env, elapsed, 15.0f, SOFT);
+        (void)text_view(env, "Keep this screen open until this finishes.", 15.0f, SOFT);
         break;
     case WSU_WORDS: draw_words(env, v); break;
     case WSU_CONFIRM: draw_confirm(env, v); break;
@@ -436,9 +424,9 @@ static void draw_model(JNIEnv *env, const struct wsu_view *v, bool known, int64_
         break;
     case WSU_FAILED:
         (void)text_view(env, "Setup stopped", 24.0f, WHITE);
-        (void)text_view(env, failure_text(v->failure), 15.0f, AMBER);
+        (void)text_view(env, wsu_failure_text(v->failure), 15.0f, AMBER);
         if (v->failure == WSU_ASIDE_STUCK) (void)text_view(env, v->leftover, 14.0f, SOFT);
-        if (v->failure == WSU_NO_BIRTHDAY && v->refusal != WSU_NO_FAILURE) (void)text_view(env, failure_text(v->refusal), 15.0f, AMBER);
+        if (v->failure == WSU_NO_BIRTHDAY && v->refusal != WSU_NO_FAILURE) (void)text_view(env, wsu_failure_text(v->refusal), 15.0f, AMBER);
         draw_failed_buttons(env, v->failure);
         break;
     default: draw_interrupted(env, v); break;
@@ -491,7 +479,7 @@ bool zapp_setup_ui_open(JNIEnv *env)
     if (!ui.model_ready) {
         struct sun node;
         char datadir[600];
-        struct wsu_env host = {NULL, env_wrap_new, env_discard, env_running, env_control, env_pause, host_random, env_progress, env_protect, env_idle, env_wall};
+        struct wsu_env host = {NULL, env_wrap_new, env_discard, env_running, env_control, env_pause, host_random, env_progress, env_protect, env_idle, env_wall, env_stage};
         snprintf(datadir, sizeof(datadir), "%s/node", ui.activity->internalDataPath);
         sun_init(&node, &(struct sun_runner){NULL, setup_runner}, datadir);
         ui.model_ready = wsu_init(&ui.model, &host, &node, ui.activity->internalDataPath);
@@ -514,6 +502,15 @@ bool zapp_setup_ui_leave(JNIEnv *env)
     zapp_setup_ui_clear(env);
     if (ui.model_ready) wsu_close(&ui.model);
     return true;
+}
+/* What Back says when it cannot leave setup: one sentence in plain words. */
+void zapp_setup_ui_leave_notice(char *out, size_t cap)
+{
+    struct wsu_view v;
+    memset(&v, 0, sizeof(v));
+    if (ui.model_ready) wsu_view_read(&ui.model, &v);
+    wsu_leave_notice(&v, out, cap);
+    memory_cleanse(&v, sizeof(v));
 }
 void zapp_setup_ui_tick(JNIEnv *env)
 {

@@ -406,11 +406,11 @@ static void note_send_origin(enum screen next)
     enum screen origin = shell.current == SCREEN_SCAN ? shell.before_scan : shell.current;
     shell.send_from_wallet = zapp_home_send_opened_from_wallet(origin == SCREEN_SEND, origin == SCREEN_WALLET, shell.send_from_wallet);
 }
-/* Setup is left only when no job runs and no recovery words are held: the words are shown once. */
+/* Setup is left only when no job runs and no recovery words are held: the words are shown once. A job that runs says so. */
 static bool leave_setup(JNIEnv *env)
 {
     if (zapp_setup_ui_leave(env)) return true;
-    snprintf(shell.action_notice, sizeof(shell.action_notice), "Finish setup first. The recovery words are shown only once.");
+    zapp_setup_ui_leave_notice(shell.action_notice, sizeof(shell.action_notice));
     show_notice(env);
     return false;
 }

@@ -36,6 +36,8 @@ void zapp_setup_ui_tick(JNIEnv *env);
 void zapp_setup_ui_pause(JNIEnv *env);
 /* The owner leaves the screen. False while a job runs or the words are held. */
 bool zapp_setup_ui_leave(JNIEnv *env);
+/* The notice for a refused leave: the words are shown once while they are held; otherwise setup goes on and can be left. */
+void zapp_setup_ui_leave_notice(char *out, size_t cap);
 void zapp_setup_ui_dropped(JNIEnv *env);
 /* The button under the point: its position, and the identity of what it does, so a screen that redraws between the press and the
  * release does not run the button that moved into the same position. */

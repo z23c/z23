@@ -54,6 +54,8 @@ struct wsu_env {
     enum wsu_idle (*wallet_idle)(void *ctx);
     /* Seconds since the epoch, for the names of files set aside. */
     int64_t (*wall_s)(void *ctx);
+    /* The node's boot stage as a short plain phrase, or empty. */
+    void (*node_stage)(void *ctx, char *out, size_t cap);
 };
 
 enum wsu_step {
@@ -69,6 +71,16 @@ enum wsu_step {
     WSU_NO_WALLET,      /* The datadir holds no wallet. The wrapped key is kept until the owner taps. */
     WSU_START_OVER,     /* The warning before an unconfirmed create is set aside. */
     WSU_CHECKING        /* After a restart: reading the datadir to learn what the interrupted setup left. */
+};
+/* What a working screen is doing; each has one plain line (wsu_working_line). */
+enum wsu_phase {
+    WSU_PHASE_NONE,
+    WSU_PHASE_TIP,       /* waiting for the node to reach the chain tip */
+    WSU_PHASE_KEY,       /* securing the key; the phone may ask for the screen lock */
+    WSU_PHASE_PAUSE,     /* waiting for the node to exit so the wallet files are written safely */
+    WSU_PHASE_WRITE,     /* the node writes the wallet */
+    WSU_PHASE_RESTART,   /* starting the node again */
+    WSU_PHASE_CHECK      /* reading the wallet files or asking the node about the wallet */
 };
 enum wsu_failure {
     WSU_NO_FAILURE,
@@ -114,6 +126,10 @@ struct wsu {
     bool protected;      /* every window protection is in force */
     enum zapp_setup_kind kind;   /* what the interrupted setup was, read when the datadir is checked */
     char leftover[WSU_LEFTOVER_MAX];   /* with ASIDE_STUCK: the paths that stay moved aside, one per line */
+    enum wsu_phase phase;     /* the sub-step of the running job */
+    int64_t phase_since_s;
+    int64_t tip_blocks;       /* the last block the node reported while waiting, or 0 */
+    char stage[48];           /* the node's boot stage while it reports no chain tip */
     bool paused_node;         /* setup asked the node to exit and has not started it again */
 };
 bool wsu_init(struct wsu *w, const struct wsu_env *env, const struct sun *node, const char *files);
@@ -138,6 +154,10 @@ struct wsu_view {
     enum wsu_failure refusal;   /* with NO_BIRTHDAY: why the last Start over was refused, or none */
     bool may_start_over;   /* the setup is a create whose words were not confirmed */
     char leftover[WSU_LEFTOVER_MAX];
+    enum wsu_phase phase;   /* with WORKING or CHECKING */
+    int64_t elapsed_s;      /* seconds since the job began */
+    int64_t tip_blocks;
+    char stage[48];
 };
 void wsu_view_read(struct wsu *w, struct wsu_view *out);
 /* Whether the interrupted-setup screen offers Check again: the node did not answer, or was busy, or could not say whether the wallet is empty. */
@@ -145,6 +165,15 @@ bool wsu_view_can_recheck(const struct wsu_view *v);
 /* The sentence above the recovery words. With a recorded start height it names the height; when the wallet recorded none it says so
  * and names no height. */
 void wsu_words_intro(const struct wsu_view *v, char *out, size_t cap);
+/* The line a working screen shows: the sub-step in plain words, with the block the node has reached while waiting for the chain tip
+ * or its boot stage while it has none. With no sub-step set, before the first and after the words are confirmed, it is "Saving…". */
+void wsu_working_line(const struct wsu_view *v, char *out, size_t cap);
+/* "2 min 05 s since setup began": the seconds of the job so far, so a long wait shows it is alive. */
+void wsu_elapsed_text(const struct wsu_view *v, char *out, size_t cap);
+/* One plain sentence and the action for a failed job; empty for none. */
+const char *wsu_failure_text(enum wsu_failure failure);
+/* What Back says when setup cannot be left now: the words are shown once while they are held, and a running job goes on without the owner. */
+void wsu_leave_notice(const struct wsu_view *v, char *out, size_t cap);
 
 /* Navigation on the UI thread. */
 void wsu_open_restore(struct wsu *w);   /* CHOICE to RESTORE_FORM */

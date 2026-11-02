@@ -29,6 +29,7 @@ bool wsu_init(struct wsu *w, const struct wsu_env *env, const struct sun *node, 
     case ZAPP_SETUP_INTERRUPTED: w->step = WSU_CHECKING; break;
     default: w->step = WSU_DONE; break;
     }
+    w->phase_since_s = w->env.wall_s ? w->env.wall_s(w->env.ctx) : 0;
     return true;
 }
 
@@ -48,6 +49,14 @@ static void set_step(struct wsu *w, enum wsu_step step, enum wsu_failure failure
     pthread_mutex_unlock(&w->lock);
 }
 
+/* A job begins, with the lock held: nothing of an earlier step may show, and the clock of seconds since setup began restarts. */
+static void work_begins_locked(struct wsu *w)
+{
+    w->phase = WSU_PHASE_NONE;
+    w->tip_blocks = 0;
+    w->stage[0] = 0;
+    w->phase_since_s = w->env.wall_s ? w->env.wall_s(w->env.ctx) : 0;
+}
 void wsu_view_read(struct wsu *w, struct wsu_view *out)
 {
     memset(out, 0, sizeof(*out));
@@ -60,6 +69,13 @@ void wsu_view_read(struct wsu *w, struct wsu_view *out)
     out->birthday_unknown = !w->birthday.known;
     out->may_start_over = w->kind == ZAPP_KIND_CREATE && (!w->confirmed || !w->birthday.known);
     out->birthday_dropped = w->step == WSU_READING && !w->birthday_honoured;
+    if (w->step == WSU_WORKING || w->step == WSU_CHECKING) {
+        int64_t gone = w->env.wall_s && w->phase_since_s ? w->env.wall_s(w->env.ctx) - w->phase_since_s : 0;
+        out->phase = w->phase;
+        out->elapsed_s = gone > 0 ? gone : 0;
+        out->tip_blocks = w->tip_blocks;
+        memcpy(out->stage, w->stage, sizeof(out->stage));
+    }
     if (w->failure == WSU_ASIDE_STUCK) memcpy(out->leftover, w->leftover, sizeof(out->leftover));
     if (w->step == WSU_WORDS && w->protected) { out->words = w->held; out->start_height = w->birthday.known ? w->birthday.height : 0; }
     if (w->step == WSU_CONFIRM) memcpy(out->asked, w->asked, sizeof(out->asked));
@@ -109,7 +125,7 @@ bool wsu_retry_marker(struct wsu *w)
 {
     pthread_mutex_lock(&w->lock);
     bool ok = w->step == WSU_FAILED && w->failure == WSU_NOT_RECORDED && w->confirmed;
-    if (ok) { w->step = WSU_WORKING; w->failure = WSU_NO_FAILURE; }
+    if (ok) { w->step = WSU_WORKING; w->failure = WSU_NO_FAILURE; work_begins_locked(w); }
     pthread_mutex_unlock(&w->lock);
     return ok;
 }
@@ -126,11 +142,75 @@ void wsu_words_intro(const struct wsu_view *v, char *out, size_t cap)
     else
         snprintf(out, cap, "Write down these words and start height %lld, on paper, in this order. %s", (long long)v->start_height, tail);
 }
+/* ---- the words of the screens that are not a view ---- */
+
+static const struct { enum wsu_failure failure; const char *text; } failure_texts[] = {
+    {WSU_DECLINED, "The screen lock was not confirmed, so nothing was changed. Try again."},
+    {WSU_NO_SCREEN_LOCK, "This phone has no screen lock, and the wallet is protected by it. Set one in the phone's settings, then try again."},
+    {WSU_KEY, "This phone could not make a protected key, so no wallet was made. Try again."},
+    {WSU_NODE_BUSY, "Your node is still stopping. Try again in a minute."},
+    {WSU_PRESENT, "This phone already has a wallet. Nothing was changed."},
+    {WSU_BAD_PHRASE, "Those words are not a valid recovery phrase. Check each word and its order."},
+    {WSU_BAD_WORDS, "Type all of your recovery words, 12, 15, 18, 21 or 24, separated by spaces."},
+    {WSU_STORAGE, "Your node's saved data could not be read. Nothing was changed."},
+    {WSU_REFUSED, "Your node refused the request. Nothing was changed. Try again."},
+    {WSU_UNKNOWN, "Your node gave no clear answer, so a wallet may have been started. Its words cannot be shown again. Tap Check again."},
+    {WSU_NOT_RECORDED, "The wallet exists, but the app could not record that setup finished. Tap Save again."},
+    {WSU_NO_TIP, "Your node has not caught up enough to start a wallet, so none was made. Check your connection and try again."},
+    {WSU_NO_BIRTHDAY, "Your words were confirmed, but the wallet has no start block, so setup is not finished. Tap Check again, or Start over to set it aside; nothing is deleted."},
+    {WSU_NOT_RUN, "The wallet could not start, so nothing was changed. Try again."},
+    {WSU_NOT_CREATE, "Start over is only for a new wallet. This one was restored from words."},
+    {WSU_NOT_EMPTY, "Your node reports funds or transactions in this wallet, so it was not set aside."},
+    {WSU_ALREADY_CONFIRMED, "The words of this wallet were confirmed, so it was not set aside."},
+    {WSU_COULD_NOT_CHECK, "Your node did not say whether this wallet is empty, so nothing was changed. Try again."},
+    {WSU_ASIDE, "The wallet could not be set aside, so nothing was changed."},
+    {WSU_ASIDE_STUCK, "Some items could not be put back. Do not create a new wallet. They need their original names back:"},
+    {WSU_UNPROTECTED, "This phone would not protect the screen from capture, so no wallet was made."},
+};
+const char *wsu_failure_text(enum wsu_failure failure)
+{
+    for (size_t i = 0; i < sizeof(failure_texts) / sizeof(failure_texts[0]); ++i)
+        if (failure_texts[i].failure == failure) return failure_texts[i].text;
+    return "";
+}
+void wsu_leave_notice(const struct wsu_view *v, char *out, size_t cap)
+{
+    bool words = v->step == WSU_WORDS || v->step == WSU_CONFIRM;
+    snprintf(out, cap, "%s", words ? "Finish setup first. The recovery words are shown only once." : "Setting up. You can leave the app and come back.");
+}
+/* The block the node has reached, or what it is doing while it has none. */
+static void tip_line(const struct wsu_view *v, char *out, size_t cap)
+{
+    if (v->tip_blocks > 0)
+        snprintf(out, cap, "Waiting for your node to reach the latest block (block %lld)…", (long long)v->tip_blocks);
+    else if (v->stage[0])
+        snprintf(out, cap, "Waiting for your node to start: %s…", v->stage);
+    else
+        snprintf(out, cap, "Waiting for your node to start…");
+}
+void wsu_working_line(const struct wsu_view *v, char *out, size_t cap)
+{
+    static const char *const fixed[] = {
+        [WSU_PHASE_NONE] = "Saving…",
+        [WSU_PHASE_KEY] = "Confirm with your screen lock",
+        [WSU_PHASE_PAUSE] = "Pausing your node to write the new wallet… (about 30 s)",
+        [WSU_PHASE_WRITE] = "Writing your wallet…",
+        [WSU_PHASE_RESTART] = "Starting your node again…",
+        [WSU_PHASE_CHECK] = "Checking your wallet…"
+    };
+    if (v->phase == WSU_PHASE_TIP) tip_line(v, out, cap);
+    else snprintf(out, cap, "%s", v->phase <= WSU_PHASE_CHECK ? fixed[v->phase] : fixed[WSU_PHASE_NONE]);
+}
+void wsu_elapsed_text(const struct wsu_view *v, char *out, size_t cap)
+{
+    if (v->elapsed_s < 60) snprintf(out, cap, "%lld s since setup began", (long long)v->elapsed_s);
+    else snprintf(out, cap, "%lld min %02lld s since setup began", (long long)(v->elapsed_s / 60), (long long)(v->elapsed_s % 60));
+}
 bool wsu_recheck(struct wsu *w)
 {
     pthread_mutex_lock(&w->lock);
     bool ok = w->step == WSU_BLOCKED || (w->step == WSU_FAILED && (w->failure == WSU_UNKNOWN || w->failure == WSU_NO_BIRTHDAY || w->failure == WSU_ASIDE));
-    if (ok) { w->step = WSU_CHECKING; w->failure = WSU_NO_FAILURE; }
+    if (ok) { w->step = WSU_CHECKING; w->failure = WSU_NO_FAILURE; work_begins_locked(w); }
     pthread_mutex_unlock(&w->lock);
     return ok;
 }
@@ -177,6 +257,13 @@ static enum wsu_failure new_passphrase(struct wsu *w, uint8_t secret[ZAPP_DEVKEY
     hex_of(secret, ZAPP_DEVKEY_SECRET, hex);
     return WSU_NO_FAILURE;
 }
+/* Names what the running job does now, so the screen can say it. */
+static void phase(struct wsu *w, enum wsu_phase next)
+{
+    pthread_mutex_lock(&w->lock);
+    w->phase = next;
+    pthread_mutex_unlock(&w->lock);
+}
 /* True when no node process holds the files; waits up to STOP_WAIT_MS for one that is exiting. */
 static bool wait_exit(struct wsu *w)
 {
@@ -190,6 +277,7 @@ static bool wait_exit(struct wsu *w)
 static bool stop_node(struct wsu *w)
 {
     if (!w->env.node_running(w->env.ctx)) return true;
+    phase(w, WSU_PHASE_PAUSE);
     w->paused_node = true;
     w->env.node_control(w->env.ctx, false);
     return wait_exit(w);
@@ -199,6 +287,7 @@ static bool stop_node(struct wsu *w)
 static bool start_node(struct wsu *w)
 {
     if (w->env.node_running(w->env.ctx) && !w->paused_node) return true;
+    phase(w, WSU_PHASE_RESTART);
     if (!wait_exit(w)) return false;
     w->env.node_control(w->env.ctx, true);
     w->paused_node = false;
@@ -223,18 +312,30 @@ static bool begin_job(struct wsu *w, enum wsu_step from)
     pthread_mutex_lock(&w->lock);
     bool start = w->step == from;
     if (start && !w->protected) { w->step = WSU_FAILED; w->failure = WSU_UNPROTECTED; start = false; }
-    else if (start) { w->step = WSU_WORKING; w->failure = WSU_NO_FAILURE; }
+    else if (start) { w->step = WSU_WORKING; w->failure = WSU_NO_FAILURE; work_begins_locked(w); }
     pthread_mutex_unlock(&w->lock);
     return start;
 }
 
+/* Keeps what the screen shows while it waits: the node's height, or its boot stage while it gives none. */
+static void note_tip(struct wsu *w, bool answered, int64_t blocks)
+{
+    char stage[sizeof(w->stage)] = "";
+    if (!answered && w->env.node_stage) w->env.node_stage(w->env.ctx, stage, sizeof(stage));
+    pthread_mutex_lock(&w->lock);
+    w->tip_blocks = answered ? blocks : 0;
+    memcpy(w->stage, stage, sizeof(stage));
+    pthread_mutex_unlock(&w->lock);
+}
 /* The new wallet starts reading at the node's chain tip, and the node records that start only above SUN_BIRTHDAY_MARGIN blocks,
  * so a node that has not reached that height makes no wallet. */
 static bool wait_for_tip(struct wsu *w)
 {
     for (unsigned i = 0; i < TIP_POLLS; ++i) {
-        int64_t headers, blocks;
-        if (sun_chain_tip(&w->node, &headers, &blocks) && headers > SUN_BIRTHDAY_MARGIN && blocks > SUN_BIRTHDAY_MARGIN) return true;
+        int64_t headers = 0, blocks = 0;
+        bool answered = sun_chain_tip(&w->node, &headers, &blocks);
+        note_tip(w, answered, blocks);
+        if (answered && headers > SUN_BIRTHDAY_MARGIN && blocks > SUN_BIRTHDAY_MARGIN) return true;
         w->env.pause_ms(w->env.ctx, TIP_POLL_MS);
     }
     return false;
@@ -260,6 +361,7 @@ static void create_succeeded(struct wsu *w, struct sun_created *created)
 /* Starts the node if needed and waits for a chain tip. False, with the step set, when there is none: no wallet is made. */
 static bool tip_ready(struct wsu *w, bool was_running)
 {
+    phase(w, WSU_PHASE_TIP);
     if (!was_running) (void)start_node(w);
     if (wait_for_tip(w)) return true;
     if (!was_running) (void)stop_node(w);
@@ -271,6 +373,7 @@ static enum sun_result create_run(struct wsu *w, const char *hex, struct sun_cre
 {
     if (!zapp_setup_kind_write(w->files, ZAPP_KIND_CREATE)) return SUN_REFUSED;
     if (!stop_node(w)) return SUN_NODE_RUNNING;
+    phase(w, WSU_PHASE_WRITE);
     return sun_create(&w->node, hex, created);
 }
 
@@ -283,6 +386,7 @@ void wsu_create_job(struct wsu *w)
     if (!begin_job(w, WSU_CHOICE)) return;
     bool was_running = w->env.node_running(w->env.ctx);
     if (!tip_ready(w, was_running)) return;
+    phase(w, WSU_PHASE_KEY);
     enum wsu_failure failure = new_passphrase(w, secret, hex);
     if (failure != WSU_NO_FAILURE) {
         if (!was_running) (void)stop_node(w);
@@ -308,6 +412,7 @@ bool wsu_confirm(struct wsu *w, const char *const *answers, size_t n)
         w->confirmed = true;
         w->step = WSU_WORKING;
         w->failure = WSU_NO_FAILURE;
+        work_begins_locked(w);
     } else if (w->step == WSU_CONFIRM) {
         ++w->mismatches;
     }
@@ -371,6 +476,7 @@ static enum sun_result restore_run(struct wsu *w, const struct zapp_words *words
 {
     if (!zapp_setup_kind_write(w->files, ZAPP_KIND_RESTORE)) return SUN_REFUSED;
     if (!stop_node(w)) return SUN_NODE_RUNNING;
+    phase(w, WSU_PHASE_WRITE);
     return sun_restore(&w->node, words, hex, birthday, restored);
 }
 
@@ -383,6 +489,7 @@ void wsu_restore_job(struct wsu *w, const char *text, int64_t birthday_height)
     memset(&words, 0, sizeof(words));
     if (!begin_job(w, WSU_RESTORE_FORM)) return;
     if (!zapp_words_parse(text, &words)) { set_step(w, WSU_RESTORE_FORM, WSU_BAD_WORDS); goto out; }
+    phase(w, WSU_PHASE_KEY);
     enum wsu_failure failure = new_passphrase(w, secret, hex);
     if (failure != WSU_NO_FAILURE) { set_step(w, WSU_RESTORE_FORM, failure); goto out; }
     bool was_running = w->env.node_running(w->env.ctx);
@@ -433,6 +540,7 @@ void wsu_resume_job(struct wsu *w)
         set_step(w, WSU_BLOCKED, WSU_NODE_BUSY);
         return;
     }
+    phase(w, WSU_PHASE_CHECK);
     enum sun_probe probe = sun_wallet_probe(&w->node);
     if (was_running && !(probe == SUN_PROBE_PRESENT && kind == ZAPP_KIND_RESTORE)) (void)start_node(w);
     switch (probe) {
@@ -510,7 +618,7 @@ void wsu_set_aside_job(struct wsu *w)
 {
     pthread_mutex_lock(&w->lock);
     bool go = w->step == WSU_NO_WALLET;
-    if (go) w->step = WSU_WORKING;
+    if (go) { w->step = WSU_WORKING; work_begins_locked(w); }
     pthread_mutex_unlock(&w->lock);
     if (!go) return;
     enum wsu_failure failure = set_aside_key(w, w->env.wall_s(w->env.ctx));
@@ -550,6 +658,7 @@ void wsu_cancel_start_over(struct wsu *w)
 /* Whether the running node reports an empty wallet; starts the node when needed and waits for an answer. */
 static enum wsu_idle wallet_idle(struct wsu *w)
 {
+    phase(w, WSU_PHASE_CHECK);
     (void)start_node(w);
     for (unsigned i = 0; i < IDLE_POLLS; ++i) {
         enum wsu_idle idle = w->env.wallet_idle(w->env.ctx);
@@ -582,7 +691,7 @@ void wsu_start_over_job(struct wsu *w)
 {
     pthread_mutex_lock(&w->lock);
     bool go = w->step == WSU_START_OVER;
-    if (go) { w->step = WSU_WORKING; w->failure = WSU_NO_FAILURE; }
+    if (go) { w->step = WSU_WORKING; w->failure = WSU_NO_FAILURE; work_begins_locked(w); }
     pthread_mutex_unlock(&w->lock);
     if (!go) return;
     enum wsu_failure refusal = start_over_refusal(w);

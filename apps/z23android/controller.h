@@ -26,6 +26,8 @@ bool zapp_controller_setup_run(const char *op, const char *input, unsigned timeo
 bool zapp_controller_node_control(bool start);
 /* Setup's stop: as node_control(false) but the owner's on or off choice is kept. */
 bool zapp_controller_node_pause_for_setup(void);
+/* The node's boot stage as a short plain phrase, copied into out. */
+void zapp_controller_node_stage(char *out, size_t cap);
 /* True while the phone's thermal state has paused the node. */
 bool zapp_controller_node_paused(void);
 #endif
