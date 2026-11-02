@@ -73,7 +73,7 @@ static void ref_car25519(ref_gf o)
         o[i] += (1LL << 16);
         int64_t c = o[i] >> 16;
         o[(i + 1) * (i < 15)] += c - 1 + 37 * (c - 1) * (i == 15);
-        o[i] -= c << 16;
+        o[i] -= c * 65536; /* c may be negative: << 16 is UB */
     }
 }
 
@@ -295,7 +295,7 @@ static void ref_modL(uint8_t r[32], int64_t x[64])
         for (j = i - 32; j < i - 12; j++) {
             x[j] += carry - 16 * x[i] * (int64_t)REF_L[j - (i - 32)];
             carry = (x[j] + 128) >> 8;
-            x[j] -= carry << 8;
+            x[j] -= carry * 256; /* carry may be negative: << 8 is UB */
         }
         x[j] += carry;
         x[i] = 0;
