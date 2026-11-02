@@ -57,7 +57,6 @@ core/modules/validation/src/process_block_invalidate.c:process_block_invalidate:
 core/modules/validation/src/process_block_invalidate.c:process_block_reconsider:17
 core/modules/validation/src/process_block_revalidate.c:process_block_revalidate:51
 engine/composition/src/boot_refold_staged.c:boot_load_snapshot_at_own_height_reset:28
-engine/composition/src/boot_refold_staged.c:boot_load_snapshot_resume_seed_from_authority:33
 engine/composition/src/boot_refold_staged.c:boot_snapshot_drop_bodiless_have_data_above_seed:28
 engine/composition/src/boot_snapshot_import.c:boot_import_snapshot_db:18
 engine/controllers/src/sync_controller_sapling_tree.c:sapling_tree_rebuild:31
