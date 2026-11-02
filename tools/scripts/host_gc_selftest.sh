@@ -381,7 +381,7 @@ assert_not_contains "$out" "reclaimed" \
 ZCC_STUB_SLOW="$WORK/zcc-stub-slow"
 cat > "$ZCC_STUB_SLOW" <<'STUBEOF'
 #!/usr/bin/env bash
-sleep 5
+exec sleep 5
 echo "zcc: 42 MB held, 0 MB ceiling, 0 MB freed"
 STUBEOF
 chmod +x "$ZCC_STUB_SLOW"
