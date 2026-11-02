@@ -569,6 +569,34 @@ static bool nbf_default_reader_unusable(
     return !cfg->read_block && (!cfg->ndb || !cfg->ndb->open || !cfg->datadir);
 }
 
+static struct zcl_result nbf_read_status_result(enum nbf_read_status rs,
+                                                int64_t h)
+{
+    if (rs == NBF_READ_FAILED) {
+        /* De-stormed: a stuck resume marker re-hits this same height on
+         * every backfill tick until the reader fault clears. */
+        static struct log_throttle thr = LOG_THROTTLE_INIT;
+        if (log_throttle_should_emit(&thr, (uint64_t)h,
+                                     platform_time_wall_unix(), 300, NULL))
+            LOG_WARN_IN("nullifier_backfill_service_run", NBF_SUBSYS,
+                        "run: block reader failed at h=%lld", (long long)h);
+        return ZCL_ERR(-47, "block reader failed at height %lld",
+                       (long long)h);
+    }
+    if (rs == NBF_READ_MISSING) {
+        static struct log_throttle thr = LOG_THROTTLE_INIT;
+        if (log_throttle_should_emit(&thr, (uint64_t)h,
+                                     platform_time_wall_unix(), 300, NULL))
+            LOG_WARN_IN("nullifier_backfill_service_run", NBF_SUBSYS,
+                        "run: missing validated block body at h=%lld",
+                        (long long)h);
+        return ZCL_ERR(-48, "missing validated block body at height %lld; "
+                            "nullifier gap marker left in place",
+                       (long long)h);
+    }
+    return ZCL_OK;
+}
+
 struct zcl_result nullifier_backfill_service_run(
     const struct nullifier_backfill_config *cfg,
     struct nullifier_backfill_report *report)
@@ -656,29 +684,10 @@ struct zcl_result nullifier_backfill_service_run(
         struct zcl_result one;
         enum nbf_read_status rs =
             nbf_read_height(reader, &blk, h, cfg->datadir, reader_user);
+        struct zcl_result rs_rc = nbf_read_status_result(rs, h);
 
-        if (rs == NBF_READ_FAILED) {
-            /* De-stormed: a stuck resume marker re-hits this same height on
-             * every backfill tick until the reader fault clears. */
-            static struct log_throttle thr = LOG_THROTTLE_INIT;
-            if (log_throttle_should_emit(&thr, (uint64_t)h,
-                                         platform_time_wall_unix(), 300, NULL))
-                LOG_WARN(NBF_SUBSYS, "run: block reader failed at h=%lld",
-                         (long long)h);
-            return ZCL_ERR(-47, "block reader failed at height %lld",
-                           (long long)h);
-        }
-        if (rs == NBF_READ_MISSING) {
-            static struct log_throttle thr = LOG_THROTTLE_INIT;
-            if (log_throttle_should_emit(&thr, (uint64_t)h,
-                                         platform_time_wall_unix(), 300, NULL))
-                LOG_WARN(NBF_SUBSYS,
-                         "run: missing validated block body at h=%lld",
-                         (long long)h);
-            return ZCL_ERR(-48, "missing validated block body at height %lld; "
-                                "nullifier gap marker left in place",
-                           (long long)h);
-        }
+        if (!rs_rc.ok)
+            return rs_rc;
 
         one = nbf_verify_and_backfill(db, &binding, &blk, h);
         block_free(&blk);
