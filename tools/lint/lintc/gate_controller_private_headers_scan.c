@@ -95,7 +95,9 @@
 #include <sys/stat.h>
 #include "lintc.h"
 
-enum { CPHS_MAXF = 8192, CPHS_FPOOL = 1 << 20, CPHS_MAXE = 8192,
+/* CPHS_MAXF bounds every tracked .c and .h path, not a subset: the tree
+ * passed 8192 on 2026-11-02 (8340), so the cap has headroom to 65536. */
+enum { CPHS_MAXF = 1 << 16, CPHS_FPOOL = 1 << 23, CPHS_MAXE = 8192,
        CPHS_EPOOL = 1 << 20, CPHS_LINE = 8192 };
 
 static char g_cphs_fpool[CPHS_FPOOL];   /* the collected file set */
@@ -135,15 +137,20 @@ static int cphs_file_add(const char *path)
 /* ── collect_files ─────────────────────────────────────────────────────── */
 
 /* The "."-mode collector: one index entry per *.c or *.h path, in index
- * order — exactly the order ls-files prints. */
+ * order — exactly the order ls-files prints. ctx is the collector's rc: an
+ * overflow is recorded there so the caller fails closed instead of scanning
+ * a truncated set (which reported live baseline rows as stale). */
 static int cphs_index_add(const char *path, int stage, void *ctx)
 {
     (void)stage;
-    (void)ctx;
     size_t n = strlen(path);
     if (n >= 2 && path[n - 2] == '.'
-        && (path[n - 1] == 'c' || path[n - 1] == 'h'))
-        return cphs_file_add(path);
+        && (path[n - 1] == 'c' || path[n - 1] == 'h')) {
+        int rc = cphs_file_add(path);
+        if (rc != 0)
+            *(int *)ctx = rc;
+        return rc;
+    }
     return 0;
 }
 
@@ -232,7 +239,10 @@ int cphs_collect(const char *root)
     g_cphs_fused = 0;
     if (strcmp(root, ".") == 0) {
         g_cphs_badext[0] = '\0';
-        (void)lint_git_index_foreach(cphs_index_add, NULL, g_cphs_badext);
+        int add_rc = 0;
+        (void)lint_git_index_foreach(cphs_index_add, &add_rc, g_cphs_badext);
+        if (add_rc != 0)
+            return add_rc;
         return g_cphs_badext[0] ? cphs_badext_report() : 0;
     }
     struct stat st;
