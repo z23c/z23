@@ -860,3 +860,38 @@ later lane flips it HARD.
   old ROOT: a63df6dc83dc8eafc1c8a04acb83d83f8139fb674630c85ac4e0bed1faa37df5
   by: appended by the lane author after make core-seal; not the unseal ritual
   (the new ROOT is the one in core/MANIFEST.sha3 at the commit that carries this entry)
+
+- 2026-11-02T01:24:31Z — REASON: reseal after rebasing the private wallet broadcast lane onto origin/main 0683540c9a, which carries further sealed-core changes (process_block_tip_is_best_work export and complexity splits in block_successor, connect_block and msg_blocks). The lane's own core/modules/net changes (tor_integration.c, tor_integration.h, tor_config_log.c) replay onto main, with the DisableNetwork line added to main's buffered torrc writer; core/MANIFEST.sha3 and the two hotswap seal headers were taken from main during the rebase and recomputed with make core-seal.
+  old ROOT: d75f27fb8939bb9af238382d4a64d175692fa2fb6a67431a850129ebf25d51b3
+  by: appended by the lane author after make core-seal; not the unseal ritual
+  (the new ROOT is the one in core/MANIFEST.sha3 at the commit that carries this entry)
+
+- 2026-11-02T07:24:49Z — REASON: reseal after rebasing the private wallet broadcast lane onto origin/main 50e19f1e7c, which carries further sealed-core changes (sapling_structural and bn254 complexity splits). The lane's own core/modules/net changes (tor_integration.c, tor_integration.h, tor_config_log.c) replay unchanged; core/MANIFEST.sha3 and the two hotswap seal headers were taken from main during the rebase and recomputed with make core-seal.
+  old ROOT: 7d0194ae6bc82e0756d0e9f5cad1f8bb4f5dd4d0565aa52f500301196a536969
+  by: appended by the lane author after make core-seal; not the unseal ritual
+  (the new ROOT is the one in core/MANIFEST.sha3 at the commit that carries this entry)
+
+- 2026-11-02T08:25:13Z — REASON: reseal after rebasing the private wallet broadcast lane onto origin/main d3d533e1cd, which carries sealed-core changes from other lanes (validation chainstate and process_block_revalidate among them, recorded by their own entries). The lane's own core/modules/net changes (tor_integration.c, tor_integration.h, tor_config_log.c) replay unchanged; core/MANIFEST.sha3 and the two hotswap seal headers were taken from main during the rebase and recomputed with make core-seal.
+  old ROOT: 629f667a565d680a4513f350e975ec8308b99f39809f6bcccd1192a57da04506
+  by: appended by the lane author after make core-seal; not the unseal ritual
+  (the new ROOT is the one in core/MANIFEST.sha3 at the commit that carries this entry)
+
+- 2026-11-02T12:28:52Z — REASON: reseal after rebasing the private wallet broadcast lane onto origin/main 4b1f009f68, which carries sealed-core changes from other lanes, recorded by their own entries. The lane's own core/modules/net changes (tor_integration.c, tor_integration.h, tor_config_log.c) replay unchanged; core/MANIFEST.sha3 and the two hotswap seal headers were taken from main during the rebase and recomputed with make core-seal.
+  old ROOT: da0f33673610ce97aedb5d84ac83d04f36e70b8dc51415837dd807c7d9f530b1
+  by: appended by the lane author after make core-seal; not the unseal ritual
+  (the new ROOT is the one in core/MANIFEST.sha3 at the commit that carries this entry)
+
+- 2026-11-02T14:02:12Z — REASON: reseal after rebasing the private wallet broadcast lane onto origin/main 59ee3c11c8, which carries sealed-core changes from other lanes, recorded by their own entries. The lane's own core/modules/net changes (tor_integration.c, tor_integration.h, tor_config_log.c) replay unchanged; core/MANIFEST.sha3 and the two hotswap seal headers were taken from main during the rebase and recomputed with make core-seal.
+  old ROOT: 62e3093c4c1176a9ff92053afe78e16ccce5945e023c9633550796a41815a19e
+  by: appended by the lane author after make core-seal; not the unseal ritual
+  (the new ROOT is the one in core/MANIFEST.sha3 at the commit that carries this entry)
+
+- 2026-11-02T15:56:33Z — REASON: reseal after rebasing the private wallet broadcast lane onto origin/main 9f4ed8d410, which carries sealed-core changes from other lanes, recorded by their own entries. The lane's own core/modules/net changes (tor_integration.c, tor_integration.h, tor_config_log.c) replay unchanged; core/MANIFEST.sha3 and the two hotswap seal headers were taken from main during the rebase and recomputed with make core-seal.
+  old ROOT: 356f85e4efa95e0ed525d4a8156a090b59a1c7a00ad2a5d7765ce935a49e82bd
+  by: appended by the lane author after make core-seal; not the unseal ritual
+  (the new ROOT is the one in core/MANIFEST.sha3 at the commit that carries this entry)
+
+- 2026-11-02T17:19:55Z — REASON: reseal after rebasing the private wallet broadcast lane onto origin/main b81422231d, which carries sealed-core changes from other lanes, recorded by their own entries. The lane's own core/modules/net changes (tor_integration.c, tor_integration.h, tor_config_log.c) replay unchanged; core/MANIFEST.sha3 and the two hotswap seal headers were taken from main during the rebase and recomputed with make core-seal.
+  old ROOT: 608c4a1e4fcdad4c1afa3fe0be8d8c326b830dbe1631ce01a11204727821a9f6
+  by: appended by the lane author after make core-seal; not the unseal ritual
+  (the new ROOT is the one in core/MANIFEST.sha3 at the commit that carries this entry)
