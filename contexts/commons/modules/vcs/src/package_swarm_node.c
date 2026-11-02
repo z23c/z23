@@ -1525,8 +1525,6 @@ struct vcs_swarm_frame_result vcs_swarm_engine_handle_frame(
         return res;
     }
     pthread_mutex_lock(&engine->lock);
-    if (now > engine->clock)
-        engine->clock = now;
     int slot = peer_slot(engine, peer);
     if (slot < 0) {
         pthread_mutex_unlock(&engine->lock);
@@ -1808,8 +1806,6 @@ void vcs_swarm_engine_tick(struct vcs_swarm_engine *engine, int64_t day,
         return;
     vcs_swarm_refresh_moved_store(engine, now);
     pthread_mutex_lock(&engine->lock);
-    if (now > engine->clock)
-        engine->clock = now;
     if (engine->ticked && engine->last_tick == now) {
         pthread_mutex_unlock(&engine->lock);
         return;

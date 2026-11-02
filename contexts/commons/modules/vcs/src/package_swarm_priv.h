@@ -85,10 +85,13 @@ struct swarm_peer {
      * call it on every membership sync without flooding the peer). */
     uint8_t announced[VCS_SWARM_MAX_LOCAL_ANNOUNCES][32];
     size_t announced_count;
-    /* Sender-side accounting of the receiver's hourly unique-root budget:
-     * roots sent since ann_win_start (engine clock; 0 = not yet known). */
-    uint64_t ann_win_start;
-    uint32_t ann_win_sent;
+    /* Sliding window over the receiver's hourly unique-root budget: monotonic
+     * seconds of the last 64 new-root sends (ring; 512 bytes per peer, so
+     * 32 KiB for VCS_SWARM_MAX_PEERS). A send needs the 64th-previous one
+     * to be older than the window plus margin. */
+    uint64_t ann_ring[VCS_SWARM_MAX_LOCAL_ANNOUNCES];
+    size_t ann_ring_pos;
+    size_t ann_ring_count;
     uint32_t inflight;
     uint64_t burst_start;
     uint32_t burst_count;
@@ -143,7 +146,6 @@ struct vcs_swarm_engine {
     struct swarm_outbound outq[VCS_SWARM_OUTBOUND_MAX];
     size_t outq_pos;
     size_t outq_count;
-    uint64_t clock; /* newest wall time seen by tick/handle_frame; 0 = none */
     uint64_t last_tick;
     bool ticked;
     /* Touched only by the tick: the disk generation whose catalog refresh was

@@ -9,6 +9,7 @@
 
 #include "package_swarm_priv.h"
 
+#include "platform/clock.h"
 #include "platform/time_compat.h"
 #include "support/log_throttle.h"
 
@@ -87,30 +88,43 @@ bool vcs_swarm_public_serveable(struct vcs_swarm_engine *engine,
  * hourly budget (VCS_SWARM_ANNOUNCE_WINDOW_TICKS) and treats the next one as
  * ANNOUNCE_FLOOD; a root it already holds is a free keep-alive and its
  * advertisement lasts the whole session. There is no withdraw frame, so the
- * sender keeps to the same budget and rotates its remembered inventory:
- *   - never more than VCS_SWARM_MAX_LOCAL_ANNOUNCES sends per window; the
- *     window is the receiver's plus a margin for its later start;
- *   - when the remembered inventory is full, a newer root takes the slot of
- *     an entry that is no longer on the current shelf, but only once the
- *     window has rolled and budget is back. The evicted root stays
- *     advertised on the receiver until the session ends; a new session
- *     starts from the current shelf, pins and newest first. */
-#define SWARM_ANNOUNCE_WINDOW_MARGIN 60u
+ * sender keeps to the same budget and rotates its remembered inventory.
+ *
+ * The receiver re-anchors its window at whatever frame arrives first after
+ * expiry, so a fixed sender window can be out of phase with it. The sender
+ * therefore uses a SLIDING window: a ring of the last 64 new-root send
+ * times, and a send is allowed only when the 64th-previous one is at least
+ * WINDOW + MARGIN old. Any interval shorter than the window then holds at
+ * most 64 sends, wherever the receiver anchors its own.
+ *
+ * Time is the platform MONOTONIC clock (seconds), never wall time: a forward
+ * wall-clock step must not release a burst.
+ *
+ * MARGIN is 300 s. Sends are stamped when queued; the receiver sees send i
+ * after a transit-plus-queue delay d_i, and two sends 64 apart reach it
+ * (3600 + MARGIN + d_{i+64} - d_i) apart. Five minutes covers a slow Tor
+ * circuit or a drained-late outbound queue; the cost is 64 roots per 3900 s
+ * instead of per 3600 s.
+ *
+ * When the remembered inventory is full, a newer root takes the slot of an
+ * entry that is no longer on the current shelf. The evicted root stays
+ * advertised on the receiver until the session ends; a new session starts
+ * from the current shelf, pins and newest first. */
+#define SWARM_ANNOUNCE_WINDOW_MARGIN 300u
 
-static bool announce_budget_open(struct vcs_swarm_engine *engine,
-                                 struct swarm_peer *peer)
+static uint64_t announce_now(void)
 {
-    uint64_t clock = engine->clock;
-    if (clock != 0 && peer->ann_win_start == 0) {
-        peer->ann_win_start = clock; /* adopt: only ever shortens nothing */
-    } else if (clock != 0 &&
-               clock >= peer->ann_win_start +
-                            VCS_SWARM_ANNOUNCE_WINDOW_TICKS +
-                            SWARM_ANNOUNCE_WINDOW_MARGIN) {
-        peer->ann_win_start = clock;
-        peer->ann_win_sent = 0;
-    }
-    return peer->ann_win_sent < VCS_SWARM_MAX_LOCAL_ANNOUNCES;
+    int64_t ns = clock_now_monotonic_ns();
+    return ns > 0 ? (uint64_t)ns / 1000000000u : 0;
+}
+
+static bool announce_budget_open(const struct swarm_peer *peer)
+{
+    if (peer->ann_ring_count < VCS_SWARM_MAX_LOCAL_ANNOUNCES)
+        return true;
+    uint64_t oldest = peer->ann_ring[peer->ann_ring_pos];
+    return announce_now() >= oldest + VCS_SWARM_ANNOUNCE_WINDOW_TICKS +
+                                 SWARM_ANNOUNCE_WINDOW_MARGIN;
 }
 
 int vcs_swarm_announce_plan(struct vcs_swarm_engine *engine,
@@ -118,10 +132,11 @@ int vcs_swarm_announce_plan(struct vcs_swarm_engine *engine,
                             const struct vcs_package_store_summary *shelf,
                             size_t shelf_n)
 {
-    if (!announce_budget_open(engine, peer)) {
+    (void)engine;
+    if (!announce_budget_open(peer)) {
         SWARM_DROP(VCS_SWARM_DROP_ANNOUNCE_FULL,
                    "announce deferred: this peer's hourly unique-root budget "
-                   "is spent; it resumes when the window rolls");
+                   "is spent; the oldest send leaves the window later");
         return -1;
     }
     if (peer->announced_count < VCS_SWARM_MAX_LOCAL_ANNOUNCES)
@@ -145,5 +160,8 @@ void vcs_swarm_announce_commit(struct swarm_peer *peer, int slot,
     memcpy(peer->announced[slot], root, 32);
     if ((size_t)slot == peer->announced_count)
         peer->announced_count++;
-    peer->ann_win_sent++;
+    peer->ann_ring[peer->ann_ring_pos] = announce_now();
+    peer->ann_ring_pos = (peer->ann_ring_pos + 1) % VCS_SWARM_MAX_LOCAL_ANNOUNCES;
+    if (peer->ann_ring_count < VCS_SWARM_MAX_LOCAL_ANNOUNCES)
+        peer->ann_ring_count++;
 }

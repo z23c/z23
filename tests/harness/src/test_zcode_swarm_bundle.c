@@ -14,6 +14,7 @@
 #include "command/native_command.h"
 #include "command/native_fleet_bundle.h"
 #include "config/command_catalog.h"
+#include "platform/clock.h"
 #include "kernel/command_registry.h"
 #include "json/json.h"
 #include "vcs/blob_store.h"
@@ -639,9 +640,31 @@ static int bundle_case_complete_on_full_session(void)
     bundle_pair_close(&p);
     return failures;
 }
+/* Controllable monotonic clock for the sender's sliding announce window. */
+static int64_t g_bundle_mono_us;
+static int64_t bundle_mono_us(void *user)
+{
+    (void)user;
+    return g_bundle_mono_us;
+}
+static int64_t bundle_wall_unix(void *user)
+{
+    (void)user;
+    return 1700000000;
+}
+static struct platform_clock_source g_bundle_clock = {
+    bundle_mono_us, bundle_wall_unix, NULL
+};
+static void bundle_mono_set(uint64_t secs)
+{
+    g_bundle_mono_us = (int64_t)(secs * 1000000u) + 1000000;
+}
 
-/* A newer root reaches a peer whose session is full, once the receiver's
- * hourly window has rolled, and the receiver never sees an over-cap root. */
+enum { BUNDLE_WINDOW = 3600 + 300 }; /* receiver window + sender margin */
+
+/* A newer root reaches a peer whose session is full only once the sliding
+ * window has room, a forward WALL-clock step releases nothing early, and the
+ * receiver never sees an over-cap root. */
 static int bundle_case_rotation_on_full_session(void)
 {
     int failures = 0;
@@ -651,12 +674,13 @@ static int bundle_case_rotation_on_full_session(void)
         bundle_pair_close(&p);
         return 1;
     }
-    enum { T0 = 1000000, WINDOW = 3600 };
+    enum { T0 = 1000000 };
     size_t penalised = 0;
     uint8_t pin[32], got[32];
+    bundle_mono_set(0);
+    platform_clock_set_source(&g_bundle_clock);
     SW_CHECK("rotation: 64 roots announced in the first window",
              bundle_put_shelf(&p.seed, 0xe5, VCS_SWARM_MAX_LOCAL_ANNOUNCES) &&
-             (vcs_swarm_engine_tick(p.seed.engine, SW_DAY, T0), true) &&
              vcs_swarm_engine_announce_to(p.seed.engine,
                                           BUNDLE_SEEDER_HANDLE) ==
                  VCS_SWARM_MAX_LOCAL_ANNOUNCES &&
@@ -673,22 +697,79 @@ static int bundle_case_rotation_on_full_session(void)
     SW_CHECK("rotation: inside the window nothing over the cap is sent",
              vcs_swarm_engine_announce_to(p.seed.engine,
                                           BUNDLE_SEEDER_HANDLE) == 0);
-    vcs_swarm_engine_tick(p.seed.engine, SW_DAY, T0 + WINDOW + 10);
-    SW_CHECK("rotation: before the margin has passed nothing is sent",
+    vcs_swarm_engine_tick(p.seed.engine, SW_DAY, (uint64_t)T0 + 36000u);
+    SW_CHECK("rotation: a forward wall-clock step releases nothing",
              vcs_swarm_engine_announce_to(p.seed.engine,
                                           BUNDLE_SEEDER_HANDLE) == 0);
-    vcs_swarm_engine_tick(p.seed.engine, SW_DAY, T0 + WINDOW + 120);
+    bundle_mono_set(BUNDLE_WINDOW - 1);
+    SW_CHECK("rotation: one second before the window nothing is sent",
+             vcs_swarm_engine_announce_to(p.seed.engine,
+                                          BUNDLE_SEEDER_HANDLE) == 0);
+    bundle_mono_set(BUNDLE_WINDOW);
     size_t frames = 0;
     memset(got, 0, sizeof got);
-    SW_CHECK("rotation: after the window the newer root is announced",
+    SW_CHECK("rotation: once the window has room the newer root is announced",
              vcs_swarm_engine_announce_to(p.seed.engine,
                                           BUNDLE_SEEDER_HANDLE) >= 1 &&
              (frames = bundle_drain_scored(&p.seed, BUNDLE_SEEDER_HANDLE,
                                            &p.leech, BUNDLE_LEECH_HANDLE,
-                                           T0 + WINDOW + 120, &penalised,
+                                           T0 + BUNDLE_WINDOW, &penalised,
                                            got)) >= 1 &&
              memcmp(got, pin, 32) == 0 && frames <= 64);
     SW_CHECK("rotation: the receiver scores no offence", penalised == 0);
+    platform_clock_clear_source();
+    bundle_pair_close(&p);
+    return failures;
+}
+
+/* The receiver re-anchors its window at the first frame after expiry. One
+ * root at S, then 63 just past the receiver's expiry (its window 2 starts
+ * there holding 63): a fixed sender window would roll at S+3660 and send 64
+ * more, 127 in the receiver's window. The sliding window sends none. */
+static int bundle_case_back_loaded_window(void)
+{
+    int failures = 0;
+    struct bundle_pair p;
+    if (!bundle_pair_open(&p, "bbl2")) {
+        printf("  zcode_swarm: bundle back-loaded fixture... FAIL\n");
+        bundle_pair_close(&p);
+        return 1;
+    }
+    enum { R0 = 2000000 };
+    size_t penalised = 0, frames = 0;
+    bundle_mono_set(0);
+    platform_clock_set_source(&g_bundle_clock);
+    SW_CHECK("back-loaded: one root at the start of the window",
+             bundle_put_shelf(&p.seed, 0xa1, 1) &&
+             vcs_swarm_engine_announce_to(p.seed.engine,
+                                          BUNDLE_SEEDER_HANDLE) == 1 &&
+             bundle_drain_scored(&p.seed, BUNDLE_SEEDER_HANDLE, &p.leech,
+                                 BUNDLE_LEECH_HANDLE, R0, &penalised, NULL) ==
+                 1);
+    bundle_mono_set(3650);
+    SW_CHECK("back-loaded: 63 more just before the sender's old window ends",
+             bundle_put_shelf(&p.seed, 0xa2, 63) &&
+             vcs_swarm_engine_announce_to(p.seed.engine,
+                                          BUNDLE_SEEDER_HANDLE) == 63 &&
+             bundle_drain_scored(&p.seed, BUNDLE_SEEDER_HANDLE, &p.leech,
+                                 BUNDLE_LEECH_HANDLE, R0 + 3650, &penalised,
+                                 NULL) == 63);
+    bundle_mono_set(3665);
+    SW_CHECK("back-loaded: the roll of a fixed window releases nothing",
+             bundle_put_shelf(&p.seed, 0xa3, 64) &&
+             vcs_swarm_engine_announce_to(p.seed.engine,
+                                          BUNDLE_SEEDER_HANDLE) == 0);
+    bundle_mono_set(BUNDLE_WINDOW);
+    SW_CHECK("back-loaded: only the one slot that left the window opens",
+             vcs_swarm_engine_announce_to(p.seed.engine,
+                                          BUNDLE_SEEDER_HANDLE) == 1 &&
+             (frames = bundle_drain_scored(&p.seed, BUNDLE_SEEDER_HANDLE,
+                                           &p.leech, BUNDLE_LEECH_HANDLE,
+                                           R0 + BUNDLE_WINDOW, &penalised,
+                                           NULL)) == 1);
+    SW_CHECK("back-loaded: the receiver scores no ANNOUNCE_FLOOD",
+             penalised == 0);
+    platform_clock_clear_source();
     bundle_pair_close(&p);
     return failures;
 }
@@ -914,6 +995,7 @@ int t_swarm_bundle_transfer(void)
     failures += bundle_case_full_session_bound_fetch();
     failures += bundle_case_complete_on_full_session();
     failures += bundle_case_rotation_on_full_session();
+    failures += bundle_case_back_loaded_window();
     failures += bundle_case_timeout_messages();
     failures += bundle_case_summary_fits();
     failures += bundle_case_timeout_facts();
