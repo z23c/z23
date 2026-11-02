@@ -76,7 +76,6 @@ tests/harness/src/test_engine.c:case_cli_observation:33
 tests/harness/src/test_engine.c:case_engine_unit_grok_projection_e2e:36
 tests/harness/src/test_engine.c:case_engine_unit_state_e2e:29
 tests/harness/src/test_engine.c:case_receipt_chain:74
-tests/harness/src/test_parallel.c:main:121
 tests/harness/src/test_wallet_backup.c:t_force_now_encrypted:27
 tests/harness/src/test_wallet_destruction_drill.c:act1_transparent:73
 tests/harness/src/test_wallet_destruction_drill.c:act2_bodyless_restore_must_fail_loud:29

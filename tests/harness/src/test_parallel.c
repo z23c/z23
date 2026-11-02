@@ -3096,23 +3096,112 @@ static void print_failed_groups_report(const struct group_result *results,
     }
 }
 
-int main(int argc, char **argv)
-{
-    if (!selection_inspection_valid(argc, argv)) return 2;
-    /* Narrow sealed-image process fixture dispatch, before runner init. */
-    extern void supervised_fixture_exit_if_requested(int argc, char **argv);
-    supervised_fixture_exit_if_requested(argc, argv);
-    struct timespec process_start;
-    platform_time_monotonic_timespec(&process_start);
+/* A stage of main that decides the run is over returns its exit code; a stage
+ * that lets the run go on returns RUN_CONTINUE. */
+enum { RUN_CONTINUE = -1 };
 
+/* Everything main parses off the command line. */
+struct run_opts {
+    int jobs;
+    int timeout_secs;
+    bool verbose;
+    bool list_only;
+    bool selection_only;
+    bool list_build_needs;
+    const char *only; /* --only=SUBSTR or --exact=FULL_ID[,FULL...] */
+    bool only_exact;
+    /* Content-addressed test cache. Default OFF so the canonical push gate
+     * stays COLD (a cached SKIP never gates a push). --cache / ZCL_TEST_CACHE=1
+     * opt in for the inner dev loop; --no-cache forces off; --cold-audit runs
+     * everything fresh and asserts every cache HIT matches its fresh verdict. */
+    bool cli_cache;      /* --cache */
+    bool cli_no_cache;   /* --no-cache */
+    bool cli_cold_audit; /* --cold-audit */
+    bool cli_probe_only; /* --cache-probe-only */
+    bool cli_collect_observations;
+    bool cli_emit_observations;
+    struct capsule_state cap_state;
+    bool activate_proof_contracts;
+    bool cache_snapshot;
+    const char *changed_sources[32];
+    size_t changed_source_count;
+};
+
+/* The state the stages of main hand to one another. */
+struct run_ctx {
+    struct run_opts o;
+    struct timespec process_start;
+    struct timespec t_start;
+    enum cache_mode cache_mode;
+    struct group_result *results;
+    size_t pre_skipped;
+    struct testcache *tc;
+    struct testcache_probe *probes;
+    size_t cached_count;
+    size_t cacheable_count;
+    struct child_slot *slots;
+    double startup_wall;
+    pid_t parent_pid;
+    size_t reaped;
+    double wall;
+    int failed_groups;
+    int skip_groups;
+    int unobserved_groups;
+    int load_flaky_groups;
+    struct suite_verdict verdict;
+};
+
+#if defined(_WIN32)
+/* Fork-role dispatch: tests with a cross-process leg (SQLite owner lease,
+ * kill -9 recovery, ...) re-exec this binary through
+ * test_spawn_self_with_role(), which sets ZCL_TEST_FORK_GROUP/_ROLE. Run
+ * the group DIRECTLY in this process — a second scheduler layer would put
+ * a proxy between the parent and the worker and break the hard-kill
+ * tests. The group entry branches on the role and runs only the child
+ * body. Same chain/ecc/event setup as child_run. */
+static bool main_fork_role(int *rc)
+{
+    const char *role = getenv("ZCL_TEST_FORK_ROLE");
+    const char *gname = getenv("ZCL_TEST_FORK_GROUP");
+    if (!(role && role[0])) return false;
+    *rc = 2;
+    if (!gname || !gname[0]) {
+        fprintf(stderr, "test_parallel: ZCL_TEST_FORK_ROLE without "
+                        "ZCL_TEST_FORK_GROUP\n");
+        return true;
+    }
+    for (size_t i = 0; i < g_num_groups; i++) {
+        if (strcmp(g_groups[i].name, gname) != 0) continue;
+        chain_params_select(CHAIN_MAIN);
+        ecc_start();
+        ecc_verify_init();
+        event_log_init();
+        int failures = g_groups[i].fn();
+        ecc_verify_destroy();
+        ecc_stop();
+        *rc = failures ? 1 : 0;
+        return true;
+    }
+    fprintf(stderr, "test_parallel: ZCL_TEST_FORK_GROUP names no "
+                    "registered group: %s\n", gname);
+    return true;
+}
+#endif
+
+/* Dispatch that must happen before any suite setup. True means main returns
+ * *rc now. */
+static bool main_early_modes(int argc, char **argv, int *rc)
+{
     /* The confined-agent boundary re-execs THIS binary as the untrusted child
      * (session/agent_broker.h). It is dispatched before any test setup for the
      * same reason main.c dispatches it before node boot: the child arrives
      * already sandboxed, under a seccomp allow-list that would kill it for
      * most of what suite setup does. Never reached by an ordinary run. */
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--metaverse-agent-confined") == 0)
-            return agent_confined_mode_main(argc, argv);
+        if (strcmp(argv[i], "--metaverse-agent-confined") == 0) {
+            *rc = agent_confined_mode_main(argc, argv);
+            return true;
+        }
     }
     /* The clean-zygote reflex runner re-execs THIS binary when a test drives
      * the resident runner client. Exact argv shape, dispatched before any
@@ -3124,195 +3213,205 @@ int main(int argc, char **argv)
      * group. Dispatch before any suite setup: child_run does its own
      * stdout/stderr redirection (same body the forked POSIX child runs), so
      * nothing may print before it. */
-    if (child_dispatch(argc, argv)) return 2;
-
-    /* Fork-role dispatch: tests with a cross-process leg (SQLite owner lease,
-     * kill -9 recovery, ...) re-exec this binary through
-     * test_spawn_self_with_role(), which sets ZCL_TEST_FORK_GROUP/_ROLE. Run
-     * the group DIRECTLY in this process — a second scheduler layer would put
-     * a proxy between the parent and the worker and break the hard-kill
-     * tests. The group entry branches on the role and runs only the child
-     * body. Same chain/ecc/event setup as child_run. */
-    {
-        const char *role = getenv("ZCL_TEST_FORK_ROLE");
-        const char *gname = getenv("ZCL_TEST_FORK_GROUP");
-        if (role && role[0]) {
-            if (!gname || !gname[0]) {
-                fprintf(stderr, "test_parallel: ZCL_TEST_FORK_ROLE without "
-                                "ZCL_TEST_FORK_GROUP\n");
-                return 2;
-            }
-            for (size_t i = 0; i < g_num_groups; i++) {
-                if (strcmp(g_groups[i].name, gname) != 0) continue;
-                chain_params_select(CHAIN_MAIN);
-                ecc_start();
-                ecc_verify_init();
-                event_log_init();
-                int failures = g_groups[i].fn();
-                ecc_verify_destroy();
-                ecc_stop();
-                return failures ? 1 : 0;
-            }
-            fprintf(stderr, "test_parallel: ZCL_TEST_FORK_GROUP names no "
-                            "registered group: %s\n", gname);
-            return 2;
-        }
+    if (child_dispatch(argc, argv)) {
+        *rc = 2;
+        return true;
     }
+    if (main_fork_role(rc)) return true;
 #endif
     if (argc == 2 && strcmp(argv[1], "--source-id") == 0) {
         printf("%s\n", zcl_build_source_id_sha256());
-        return 0;
+        *rc = 0;
+        return true;
     }
     if (argc == 2 && strcmp(argv[1], "--source-record") == 0) {
         printf("%s 1 %s\n", zcl_build_source_id_sha256(),
                zcl_build_source_mutation_sha256());
-        return 0;
+        *rc = 0;
+        return true;
     }
+    return false;
+}
 
-    /* Before any group forks. Not inside the confined-agent arm above: that
-     * child is deliberately sandboxed and must not widen its own limits. */
-    raise_stack_limit();
-#if defined(__linux__)
-    tmpfs_setup();
-#endif
+/* --jobs=N, -jN, --timeout=SECS. */
+static bool cli_parse_numeric(const char *a, struct run_opts *o)
+{
+    if (strncmp(a, "--jobs=", 7) == 0) {
+        o->jobs = atoi(a + 7);
+        if (o->jobs < 1) o->jobs = 1;
+    } else if (strncmp(a, "-j", 2) == 0 && a[2]) {
+        o->jobs = atoi(a + 2);
+        if (o->jobs < 1) o->jobs = 1;
+    } else if (strncmp(a, "--timeout=", 10) == 0) {
+        o->timeout_secs = atoi(a + 10);
+        if (o->timeout_secs < 1) o->timeout_secs = 1;
+    } else {
+        return false;
+    }
+    return true;
+}
 
-    int jobs = get_nproc();
+/* The flags that only set a mode. */
+static bool cli_parse_mode(const char *a, struct run_opts *o)
+{
+    if (strcmp(a, "--verbose") == 0 ||
+        strcmp(a, "-v") == 0) {
+        o->verbose = true;
+    } else if (strcmp(a, "--state-isolation-probe") == 0) {
+        g_state_isolation_probe = true;
+    } else if (retry_probe_parse(a)) {
+        /* Internal fixture flags are validated together after parsing. */
+    } else if (strcmp(a, "--list") == 0) {
+        o->list_only = true;
+    } else if (strcmp(a, "--selection-only") == 0) {
+        o->selection_only = true;
+    } else if (strcmp(a, "--list-build-needs") == 0) {
+        o->list_build_needs = true;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+/* --only= / --exact=: 0 not this flag, 1 taken, -1 refused. */
+static int cli_parse_selector(const char *a, struct run_opts *o)
+{
+    bool exact = strncmp(a, "--exact=", 8) == 0;
+    if (strncmp(a, "--only=", 7) != 0 && !exact) return 0;
+    if (o->only) {
+        fprintf(stderr,
+                "test_parallel: pass only one of --only/--exact\n");
+        return -1;
+    }
+    o->only = a + (exact ? 8 : 7);
+    o->only_exact = exact;
+    return 1;
+}
+
+/* --changed-source=: 0 not this flag, 1 taken, -1 refused. */
+static int cli_parse_changed_source(const char *a, struct run_opts *o)
+{
+    if (strncmp(a, "--changed-source=", 17) != 0) return 0;
+    const char *path = a + 17;
+    if (!path[0] || path[0] == '/' || strstr(path, "..") ||
+        strlen(path) >= 256 || o->changed_source_count >= 32) {
+        fprintf(stderr,
+                "test_parallel: invalid --changed-source path\n");
+        return -1;
+    }
+    o->changed_sources[o->changed_source_count++] = path;
+    return 1;
+}
+
+/* The cache, observation, capsule and proof-contract flags. */
+static bool cli_parse_cache_flag(const char *a, struct run_opts *o)
+{
+    if (strcmp(a, "--cache") == 0) {
+        o->cli_cache = true;
+    } else if (strcmp(a, "--cache-snapshot") == 0) {
+        o->cache_snapshot = true;
+    } else if (strcmp(a, "--no-cache") == 0) {
+        o->cli_no_cache = true;
+    } else if (strcmp(a, "--cold-audit") == 0) {
+        o->cli_cold_audit = true;
+    } else if (strcmp(a, "--cache-probe-only") == 0) {
+        o->cli_probe_only = true;
+    } else if (strcmp(a, "--emit-observations") == 0) {
+        o->cli_emit_observations = true;
+    } else if (strcmp(a, "--collect-observations") == 0) {
+        o->cli_collect_observations = true;
+    } else if (cli_opt_capsule(a, &o->cap_state.cli)) {
+        /* --write-capsule/--use-capsule/--capsule-*: honored only with
+         * --cache; otherwise silently ignored like the cache env. */
+    } else if (strcmp(a, "--activate-proof-contracts") == 0) {
+        o->activate_proof_contracts = true;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+/* One argument: 0 unknown, 1 taken, -1 refused. */
+static int cli_parse_arg(const char *a, struct run_opts *o)
+{
+    if (cli_parse_numeric(a, o) || cli_parse_mode(a, o)) return 1;
+    int r = cli_parse_selector(a, o);
+    if (r != 0) return r;
+    r = cli_parse_changed_source(a, o);
+    if (r != 0) return r;
+    return cli_parse_cache_flag(a, o) ? 1 : 0;
+}
+
+static void cli_usage(const char *argv0)
+{
+    fprintf(stderr,
+            "Usage: %s [--jobs=N] [--timeout=SECS] [--verbose] "
+            "[--list|--list-build-needs|--selection-only|--source-id|--source-record] "
+            "[--only=SUBSTR|--exact=FULL_ID[,FULL...]] "
+            "[--cache|--no-cache] "
+            "[--cache-snapshot --changed-source=PATH] "
+            "[--cold-audit] [--emit-observations|--collect-observations] "
+            "[--activate-proof-contracts] "
+            "[--cache-probe-only] "
+            "[--write-capsule=PATH|--use-capsule=PATH "
+            "--capsule-source-id=ID --capsule-mutation-id=ID "
+            "--capsule-source-cas=HEX --capsule-graph-root=HEX]\n",
+            argv0);
+}
+
+static int cli_parse(int argc, char **argv, struct run_opts *o)
+{
+    o->jobs = get_nproc();
     /* Per-group bound on SILENCE, not on runtime — see group_watchdog_expired
      * for the full rationale and the derivation. A group may run for as long
      * as it likes provided it keeps emitting; 300 s of a group producing
      * literally nothing is a hang. (--timeout= keeps its name for callers,
      * but it has never been a runtime budget since this changed.) */
-    int timeout_secs = 300;
-    bool verbose = false;
-    bool list_only = false;
-    bool selection_only = false;
-    bool list_build_needs = false;
-    const char *only = NULL; /* --only=SUBSTR or --exact=FULL_ID[,FULL...] */
-    bool only_exact = false;
-    /* Content-addressed test cache. Default OFF so the canonical push gate
-     * stays COLD (a cached SKIP never gates a push). --cache / ZCL_TEST_CACHE=1
-     * opt in for the inner dev loop; --no-cache forces off; --cold-audit runs
-     * everything fresh and asserts every cache HIT matches its fresh verdict. */
-    bool cli_cache = false;      /* --cache */
-    bool cli_no_cache = false;   /* --no-cache */
-    bool cli_cold_audit = false; /* --cold-audit */
-    bool cli_probe_only = false; /* --cache-probe-only */
-    bool cli_collect_observations = false;
-    bool cli_emit_observations = false;
-    struct capsule_state cap_state;
-    bool activate_proof_contracts = false;
-    memset(&cap_state, 0, sizeof(cap_state));
-    bool cache_snapshot = false;
-    const char *changed_sources[32];
-    size_t changed_source_count = 0;
-
+    o->timeout_secs = 300;
     for (int i = 1; i < argc; i++) {
-        if (strncmp(argv[i], "--jobs=", 7) == 0) {
-            jobs = atoi(argv[i] + 7);
-            if (jobs < 1) jobs = 1;
-        } else if (strncmp(argv[i], "-j", 2) == 0 && argv[i][2]) {
-            jobs = atoi(argv[i] + 2);
-            if (jobs < 1) jobs = 1;
-        } else if (strncmp(argv[i], "--timeout=", 10) == 0) {
-            timeout_secs = atoi(argv[i] + 10);
-            if (timeout_secs < 1) timeout_secs = 1;
-        } else if (strcmp(argv[i], "--verbose") == 0 ||
-                   strcmp(argv[i], "-v") == 0) {
-            verbose = true;
-        } else if (strcmp(argv[i], "--state-isolation-probe") == 0) {
-            g_state_isolation_probe = true;
-        } else if (retry_probe_parse(argv[i])) {
-            /* Internal fixture flags are validated together after parsing. */
-        } else if (strcmp(argv[i], "--list") == 0) {
-            list_only = true;
-        } else if (strcmp(argv[i], "--selection-only") == 0) {
-            selection_only = true;
-        } else if (strcmp(argv[i], "--list-build-needs") == 0) {
-            list_build_needs = true;
-        } else if (strncmp(argv[i], "--only=", 7) == 0) {
-            if (only) {
-                fprintf(stderr,
-                        "test_parallel: pass only one of --only/--exact\n");
-                return 2;
-            }
-            only = argv[i] + 7;
-        } else if (strncmp(argv[i], "--exact=", 8) == 0) {
-            if (only) {
-                fprintf(stderr,
-                        "test_parallel: pass only one of --only/--exact\n");
-                return 2;
-            }
-            only = argv[i] + 8;
-            only_exact = true;
-        } else if (strcmp(argv[i], "--cache") == 0) {
-            cli_cache = true;
-        } else if (strcmp(argv[i], "--cache-snapshot") == 0) {
-            cache_snapshot = true;
-        } else if (strncmp(argv[i], "--changed-source=", 17) == 0) {
-            const char *path = argv[i] + 17;
-            if (!path[0] || path[0] == '/' || strstr(path, "..") ||
-                strlen(path) >= 256 || changed_source_count >= 32) {
-                fprintf(stderr,
-                        "test_parallel: invalid --changed-source path\n");
-                return 2;
-            }
-            changed_sources[changed_source_count++] = path;
-        } else if (strcmp(argv[i], "--no-cache") == 0) {
-            cli_no_cache = true;
-        } else if (strcmp(argv[i], "--cold-audit") == 0) {
-            cli_cold_audit = true;
-        } else if (strcmp(argv[i], "--cache-probe-only") == 0) {
-            cli_probe_only = true;
-        } else if (strcmp(argv[i], "--emit-observations") == 0) {
-            cli_emit_observations = true;
-        } else if (strcmp(argv[i], "--collect-observations") == 0) {
-            cli_collect_observations = true;
-        } else if (cli_opt_capsule(argv[i], &cap_state.cli)) {
-            /* --write-capsule/--use-capsule/--capsule-*: honored only with
-             * --cache; otherwise silently ignored like the cache env. */
-        } else if (strcmp(argv[i], "--activate-proof-contracts") == 0) {
-            activate_proof_contracts = true;
-        } else {
-            fprintf(stderr,
-                    "Usage: %s [--jobs=N] [--timeout=SECS] [--verbose] "
-                    "[--list|--list-build-needs|--selection-only|--source-id|--source-record] "
-                    "[--only=SUBSTR|--exact=FULL_ID[,FULL...]] "
-                    "[--cache|--no-cache] "
-                    "[--cache-snapshot --changed-source=PATH] "
-                    "[--cold-audit] [--emit-observations|--collect-observations] "
-                    "[--activate-proof-contracts] "
-                    "[--cache-probe-only] "
-                    "[--write-capsule=PATH|--use-capsule=PATH "
-                    "--capsule-source-id=ID --capsule-mutation-id=ID "
-                    "--capsule-source-cas=HEX --capsule-graph-root=HEX]\n",
-                    argv[0]);
+        int r = cli_parse_arg(argv[i], o);
+        if (r < 0) return 2;
+        if (r == 0) {
+            cli_usage(argv[0]);
             return 2;
         }
     }
+    return RUN_CONTINUE;
+}
+
+static int cli_validate(int argc, char **argv, struct run_opts *o)
+{
     if (!retry_probe_admit(argc, argv)) return 2;
-    if (list_build_needs) return build_needs_list(only, only_exact);
-    if (!cache_snapshot_selection_valid(cache_snapshot, changed_source_count,
-                                        cli_cache)) {
+    if (o->list_build_needs) return build_needs_list(o->only, o->only_exact);
+    if (!cache_snapshot_selection_valid(o->cache_snapshot,
+                                        o->changed_source_count,
+                                        o->cli_cache)) {
         fprintf(stderr, "test_parallel: cache snapshot requires --cache and "
                         "one or more --changed-source paths\n");
         return 2;
     }
-    if (activate_proof_contracts &&
-        (!only_exact || !zcl_test_group_proof_contracts_valid())) {
+    if (o->activate_proof_contracts &&
+        (!o->only_exact || !zcl_test_group_proof_contracts_valid())) {
         fprintf(stderr,
                 "test_parallel: --activate-proof-contracts requires an "
                 "exact selector and a valid proof-contract catalog\n");
         return 2;
     }
-    if (!observation_options_valid(cli_collect_observations, cli_emit_observations,
-                                   cli_cold_audit, only_exact))
+    if (!observation_options_valid(o->cli_collect_observations,
+                                   o->cli_emit_observations,
+                                   o->cli_cold_audit, o->only_exact))
         return 2;
-    cli_emit_observations |= cli_collect_observations;
-    /* Diagnostic surface: ZCL_TEST_CACHE_DUMP=<group> prints the group's forward
-     * input closure, its content key, and its cacheability, then exits — the
-     * operator/proof lens onto what the cache would key on. */
+    o->cli_emit_observations |= o->cli_collect_observations;
+    return RUN_CONTINUE;
+}
+
+/* Diagnostic surface: ZCL_TEST_CACHE_DUMP=<group> prints the group's forward
+ * input closure, its content key, and its cacheability, then exits — the
+ * operator/proof lens onto what the cache would key on. */
+static int cache_dump_stage(const struct run_opts *o)
+{
     const char *dump_group = getenv("ZCL_TEST_CACHE_DUMP");
-    if (!selection_only && dump_group && dump_group[0]) {
+    if (!o->selection_only && dump_group && dump_group[0]) {
         struct testcache *tc = testcache_open(NULL);
         if (!tc) {
             fprintf(stderr, "test_parallel: cache open failed for dump\n");
@@ -3322,57 +3421,66 @@ int main(int argc, char **argv)
         testcache_close(tc);
         return 0;
     }
+    return RUN_CONTINUE;
+}
 
+static int run_cache_mode(struct run_ctx *c)
+{
+    struct run_opts *o = &c->o;
     /* Resolve the cache mode. Precedence: --cold-audit > --no-cache >
      * (--cache | ZCL_TEST_CACHE!=0) > OFF. OFF reproduces the historical
      * behavior byte-for-byte (none of the cache code below runs). */
-    enum cache_mode cache_mode = runner_cache_mode(cli_cold_audit,
-                                                    cli_no_cache, cli_cache);
+    c->cache_mode = runner_cache_mode(o->cli_cold_audit,
+                                      o->cli_no_cache, o->cli_cache);
     /* A probe-only run reports what the cache WOULD reuse; with the cache
      * off or auditing there is nothing reusable to report. (Placed before
      * any allocation, so refusal here frees nothing.) */
-    if (probe_only_refused(cli_probe_only, cache_mode == CACHE_ON)) {
+    if (probe_only_refused(o->cli_probe_only, c->cache_mode == CACHE_ON)) {
         fprintf(stderr, "test_parallel: --cache-probe-only requires --cache "
                         "(--no-cache and --cold-audit probe nothing reusable)\n");
         return 2;
     }
 
-    if (!list_only && !selection_only) {
+    if (!o->list_only && !o->selection_only) {
         if (!hotswap_module_mode_begin())
             return 2;
         /* A verdict produced against a hot-swapped module must never be
          * reusable as a cached PASS for the linked binary, and must never be
          * served from one. */
         if (g_hotswap_module_active)
-            cache_mode = CACHE_OFF;
+            c->cache_mode = CACHE_OFF;
     }
 
-    if (cli_emit_observations && cache_mode != CACHE_COLD_AUDIT) {
+    if (o->cli_emit_observations && c->cache_mode != CACHE_COLD_AUDIT) {
         fprintf(stderr, "test_parallel: observation emission requires "
                         "an unchanged linked test image and cold audit\n");
         return 2;
     }
+    return RUN_CONTINUE;
+}
 
-    if (list_only) {
+static int run_select(struct run_ctx *c)
+{
+    struct run_opts *o = &c->o;
+    if (o->list_only) {
         for (size_t i = 0; i < g_num_groups; i++)
             printf("%s\n", g_groups[i].name);
         return 0;
     }
 
-    if (!exact_selection_valid(only_exact, only)) return 2;
+    if (!exact_selection_valid(o->only_exact, o->only)) return 2;
 
     setbuf(stdout, NULL);
     printf("test_parallel: %zu groups, %d workers, %ds per-group timeout\n",
-           g_num_groups, jobs, timeout_secs);
+           g_num_groups, o->jobs, o->timeout_secs);
 
-    struct group_result *results =
-        calloc(g_num_groups, sizeof(*results));
-    if (!results) {
+    c->results = calloc(g_num_groups, sizeof(*c->results));
+    if (!c->results) {
         fprintf(stderr, "test_parallel: calloc failed\n");
         return 1;
     }
     for (size_t i = 0; i < g_num_groups; i++) {
-        results[i].status = -1;
+        c->results[i].status = -1;
     }
 
     /* --only=SUBSTR / --exact=FULL_ID[,FULL...]: pre-mark non-matching groups so
@@ -3380,17 +3488,17 @@ int main(int argc, char **argv)
      * group in ~seconds instead of waiting on the slowest group. Proof
      * automation uses --exact: a stale short id must not accidentally select
      * a differently named group and report green. */
-    size_t pre_skipped = selector_premark(results, only, only_exact);
-    if (only && pre_skipped == g_num_groups) {
+    c->pre_skipped = selector_premark(c->results, o->only, o->only_exact);
+    if (o->only && c->pre_skipped == g_num_groups) {
         fprintf(stderr, "test_parallel: --%s=%s matched no groups\n",
-                only_exact ? "exact" : "only", only);
-        free(results);
+                o->only_exact ? "exact" : "only", o->only);
+        free(c->results);
         return 2;
     }
-    pre_skipped += fold_umbrellas_into_shards(results, only_exact);
-    if (selection_only) {
-        print_selected_groups(results);
-        free(results);
+    c->pre_skipped += fold_umbrellas_into_shards(c->results, o->only_exact);
+    if (o->selection_only) {
+        print_selected_groups(c->results);
+        free(c->results);
         return 0;
     }
     ensure_tmp_dir();
@@ -3401,199 +3509,274 @@ int main(int argc, char **argv)
      * clear for the matching group). Folded into pre_skipped so they are not
      * dispatched and are excluded from the pass/fail denominator. */
     /* An explicit selector opts into its selected params-heavy group. */
-    size_t params_gated = gate_params_groups(results, only);
-    pre_skipped += params_gated;
+    size_t params_gated = gate_params_groups(c->results, o->only);
+    c->pre_skipped += params_gated;
 
-    external_cache_prepare(results, pre_skipped, &cache_mode);
+    external_cache_prepare(c->results, c->pre_skipped, &c->cache_mode);
+    return RUN_CONTINUE;
+}
 
-    /* ── Content-addressed cache: probe every group's forward input closure,
-     * and in CACHE_ON mark the provable HITS as CACHED so they are never
-     * forked. Fail-safe: any open failure downgrades to CACHE_OFF (run all). */
-    struct testcache *tc = NULL;
-    struct testcache_probe *probes = NULL;
-    size_t cached_count = 0;
-    size_t cacheable_count = 0;
-    size_t reason_hist[TESTCACHE_R__COUNT] = {0};
-    if (cache_mode != CACHE_OFF) {
-        probes = calloc(g_num_groups, sizeof(*probes));
-        if (!probes) {
-            if (cli_emit_observations) {
-                fprintf(stderr, "OBSERVATION REFUSE reason=observation_probe_unavailable\n");
-                free(results);
-                return 1;
-            }
-            fprintf(stderr, "test_parallel: probe calloc failed — "
-                            "running every group uncached\n");
-            testcache_close(tc);
-            tc = NULL;
-            cache_mode = CACHE_OFF;
-        }
+/* ── Content-addressed cache: probe every group's forward input closure,
+ * and in CACHE_ON mark the provable HITS as CACHED so they are never
+ * forked. Fail-safe: any open failure downgrades to CACHE_OFF (run all). */
+static int cache_probes_alloc(struct run_ctx *c)
+{
+    c->probes = calloc(g_num_groups, sizeof(*c->probes));
+    if (c->probes) return RUN_CONTINUE;
+    if (c->o.cli_emit_observations) {
+        fprintf(stderr, "OBSERVATION REFUSE reason=observation_probe_unavailable\n");
+        free(c->results);
+        return 1;
     }
-    if (cache_mode != CACHE_OFF) {
-        /* Probe acquisition: a validated capsule (no open at all), else
-         * the one open plus the batch probe over the shared memo.
-         * Fail-safe as before — any acquisition failure downgrades to
-         * CACHE_OFF and runs everything, and the marking/PLAN below is
-         * the else arm so a downgraded run prints no plan from zeroed
-         * probes. */
-        if (acquire_probes(&tc, results, probes, activate_proof_contracts,
-                           cache_snapshot, changed_sources,
-                           changed_source_count,
-                           &cap_state) != ACQUIRE_OK) {
-            testcache_close(tc);
-            tc = NULL;
-            if (cli_emit_observations) {
-                fprintf(stderr, "OBSERVATION REFUSE reason=observation_probe_unavailable\n");
-                free(probes);
-                free(results);
-                return 1;
-            }
-            fprintf(stderr, "test_parallel: cache probe failed (open or "
-                            "alloc) — running every group uncached\n");
-            cache_mode = CACHE_OFF;
-        } else {
-        /* CACHE_ON: a provable stored PASS at the current key means the group
-         * cannot have changed — mark it CACHED (status 0 excludes it from
-         * dispatch; cached=1 records why). COLD_AUDIT never marks anything so
-         * every group runs fresh and is verified after. */
-        if (cache_mode == CACHE_ON) {
-            for (size_t i = 0; i < g_num_groups; i++)
-                group_cache_hit_marked(results, i, probes, &cached_count);
-        }
+    fprintf(stderr, "test_parallel: probe calloc failed — "
+                    "running every group uncached\n");
+    testcache_close(c->tc);
+    c->tc = NULL;
+    c->cache_mode = CACHE_OFF;
+    return RUN_CONTINUE;
+}
 
-        /* ── The PLAN, printed BEFORE dispatch ──────────────────────────────
-         * Announcing "cached 742 / ran 1" only in the retrospective summary
-         * means an operator watching a run cannot tell, while it is happening,
-         * that almost nothing is being executed. Say it up front. */
-        for (size_t i = 0; i < g_num_groups; i++) {
-            if (results[i].skipped) continue;
-            if (probes[i].cacheable) cacheable_count++;
-        }
-        for (size_t i = 0; i < g_num_groups; i++) {
-            if (results[i].skipped) continue;
-            if (probes[i].code < TESTCACHE_R__COUNT)
-                reason_hist[probes[i].code]++;
-        }
-        printf("test_parallel: cache PLAN — %zu cacheable, %zu cache HIT "
-               "(will NOT run), %zu will run%s\n",
-               cacheable_count, cached_count,
-               g_num_groups - pre_skipped - cached_count,
-               cache_mode == CACHE_COLD_AUDIT ? " [cold-audit: runs all]" : "");
-        /* The uncacheable-reason histogram. probe.reason was already filled for
-         * every group and thrown away; printing it is how a whole-run
-         * degradation (an absent include graph making EVERY group uncacheable,
-         * say) becomes visible instead of looking like a normal cold run. */
-        printf("test_parallel: cacheability by reason:\n");
-        for (int r = 0; r < TESTCACHE_R__COUNT; r++) {
-            if (reason_hist[r] == 0) continue;
-            printf("  %-32s %zu\n",
-                   testcache_reason_label((enum testcache_reason)r),
-                   reason_hist[r]);
-        }
-        /* Capsule-consumed runs revalidated against a live handle, so the
-         * live dep-graph count is authoritative and the capsule's
-         * mint-time count is zeroed at accept; the warnings below read
-         * the same in both modes. */
-        size_t plan_depfiles =
-            testcache_depfile_count(tc) + cap_state.depfiles;
-        if (plan_depfiles == 0)
-            printf("test_parallel: !! NO DEPFILES under build/ — the include "
-                   "graph is ABSENT, so every group is UNCACHEABLE and the "
-                   "whole run is cold. Build first to restore caching. !!\n");
-        else if (reason_hist[TESTCACHE_R_GRAPH_STALE] > 0)
-            printf("test_parallel: !! %zu group(s) have inputs NEWER than the "
-                   "include graph (%zu depfiles) — the graph cannot describe "
-                   "them, so they are UNCACHEABLE. Rebuild to refresh. !!\n",
-                   reason_hist[TESTCACHE_R_GRAPH_STALE], plan_depfiles);
-        }
+/* CACHE_ON: a provable stored PASS at the current key means the group
+ * cannot have changed — mark it CACHED (status 0 excludes it from
+ * dispatch; cached=1 records why). COLD_AUDIT never marks anything so
+ * every group runs fresh and is verified after. */
+static void cache_hits_mark(struct run_ctx *c)
+{
+    if (c->cache_mode != CACHE_ON) return;
+    for (size_t i = 0; i < g_num_groups; i++)
+        group_cache_hit_marked(c->results, i, c->probes, &c->cached_count);
+}
+
+static void cache_plan_tally(struct run_ctx *c, size_t *reason_hist)
+{
+    for (size_t i = 0; i < g_num_groups; i++) {
+        if (c->results[i].skipped) continue;
+        if (c->probes[i].cacheable) c->cacheable_count++;
+    }
+    for (size_t i = 0; i < g_num_groups; i++) {
+        if (c->results[i].skipped) continue;
+        if (c->probes[i].code < TESTCACHE_R__COUNT)
+            reason_hist[c->probes[i].code]++;
+    }
+}
+
+static void cache_plan_print(const struct run_ctx *c, const size_t *reason_hist)
+{
+    printf("test_parallel: cache PLAN — %zu cacheable, %zu cache HIT "
+           "(will NOT run), %zu will run%s\n",
+           c->cacheable_count, c->cached_count,
+           g_num_groups - c->pre_skipped - c->cached_count,
+           c->cache_mode == CACHE_COLD_AUDIT ? " [cold-audit: runs all]" : "");
+    /* The uncacheable-reason histogram. probe.reason was already filled for
+     * every group and thrown away; printing it is how a whole-run
+     * degradation (an absent include graph making EVERY group uncacheable,
+     * say) becomes visible instead of looking like a normal cold run. */
+    printf("test_parallel: cacheability by reason:\n");
+    for (int r = 0; r < TESTCACHE_R__COUNT; r++) {
+        if (reason_hist[r] == 0) continue;
+        printf("  %-32s %zu\n",
+               testcache_reason_label((enum testcache_reason)r),
+               reason_hist[r]);
+    }
+}
+
+static void cache_plan_warn(const struct run_ctx *c, const size_t *reason_hist)
+{
+    /* Capsule-consumed runs revalidated against a live handle, so the
+     * live dep-graph count is authoritative and the capsule's
+     * mint-time count is zeroed at accept; the warnings below read
+     * the same in both modes. */
+    size_t plan_depfiles =
+        testcache_depfile_count(c->tc) + c->o.cap_state.depfiles;
+    if (plan_depfiles == 0)
+        printf("test_parallel: !! NO DEPFILES under build/ — the include "
+               "graph is ABSENT, so every group is UNCACHEABLE and the "
+               "whole run is cold. Build first to restore caching. !!\n");
+    else if (reason_hist[TESTCACHE_R_GRAPH_STALE] > 0)
+        printf("test_parallel: !! %zu group(s) have inputs NEWER than the "
+               "include graph (%zu depfiles) — the graph cannot describe "
+               "them, so they are UNCACHEABLE. Rebuild to refresh. !!\n",
+               reason_hist[TESTCACHE_R_GRAPH_STALE], plan_depfiles);
+}
+
+/* ── The PLAN, printed BEFORE dispatch ──────────────────────────────
+ * Announcing "cached 742 / ran 1" only in the retrospective summary
+ * means an operator watching a run cannot tell, while it is happening,
+ * that almost nothing is being executed. Say it up front. */
+static void cache_plan(struct run_ctx *c)
+{
+    size_t reason_hist[TESTCACHE_R__COUNT] = {0};
+    cache_plan_tally(c, reason_hist);
+    cache_plan_print(c, reason_hist);
+    cache_plan_warn(c, reason_hist);
+}
+
+/* Probe acquisition: a validated capsule (no open at all), else
+ * the one open plus the batch probe over the shared memo.
+ * Fail-safe as before — any acquisition failure downgrades to
+ * CACHE_OFF and runs everything, and the marking/PLAN below is
+ * the else arm so a downgraded run prints no plan from zeroed
+ * probes. */
+static int cache_probes_acquire(struct run_ctx *c)
+{
+    struct run_opts *o = &c->o;
+    if (acquire_probes(&c->tc, c->results, c->probes,
+                       o->activate_proof_contracts, o->cache_snapshot,
+                       o->changed_sources, o->changed_source_count,
+                       &o->cap_state) == ACQUIRE_OK) {
+        cache_hits_mark(c);
+        cache_plan(c);
+        return RUN_CONTINUE;
+    }
+    testcache_close(c->tc);
+    c->tc = NULL;
+    if (o->cli_emit_observations) {
+        fprintf(stderr, "OBSERVATION REFUSE reason=observation_probe_unavailable\n");
+        free(c->probes);
+        free(c->results);
+        return 1;
+    }
+    fprintf(stderr, "test_parallel: cache probe failed (open or "
+                    "alloc) — running every group uncached\n");
+    c->cache_mode = CACHE_OFF;
+    return RUN_CONTINUE;
+}
+
+static int run_cache_probe(struct run_ctx *c)
+{
+    int rc;
+    if (c->cache_mode != CACHE_OFF) {
+        rc = cache_probes_alloc(c);
+        if (rc != RUN_CONTINUE) return rc;
+    }
+    if (c->cache_mode != CACHE_OFF) {
+        rc = cache_probes_acquire(c);
+        if (rc != RUN_CONTINUE) return rc;
     }
     /* Probe-only: the batch verdicts above ARE the deliverable (the routed
      * set's preflight). Report them and exit before any fork: nothing here
      * runs, stores, or dispatches. After an allocation downgrade there is no
      * verified graph, so the report carries no SUMMARY and the caller's
      * self-check refuses it. */
-    if (cli_probe_only) {
-        print_probe_only(results, probes, tc);
-        testcache_close(tc);
-        free(probes);
-        free(results);
+    if (c->o.cli_probe_only) {
+        print_probe_only(c->results, c->probes, c->tc);
+        testcache_close(c->tc);
+        free(c->probes);
+        free(c->results);
         return 0;
     }
+    return RUN_CONTINUE;
+}
 
-    struct child_slot *slots =
-        calloc((size_t)jobs, sizeof(*slots));
-    if (!slots) {
-        fprintf(stderr, "test_parallel: slot calloc failed\n");
-        testcache_close(tc);
-        free(probes);
-        free(results);
-        return 1;
-    }
+static int run_prepare(int argc, char **argv, struct run_ctx *c)
+{
+    int rc = cli_parse(argc, argv, &c->o);
+    if (rc != RUN_CONTINUE) return rc;
+    rc = cli_validate(argc, argv, &c->o);
+    if (rc != RUN_CONTINUE) return rc;
+    rc = cache_dump_stage(&c->o);
+    if (rc != RUN_CONTINUE) return rc;
+    rc = run_cache_mode(c);
+    if (rc != RUN_CONTINUE) return rc;
+    rc = run_select(c);
+    if (rc != RUN_CONTINUE) return rc;
+    return run_cache_probe(c);
+}
 
-    struct timespec t_start;
-    platform_time_monotonic_timespec(&t_start);
-    double startup_wall =
-        (double)(t_start.tv_sec - process_start.tv_sec) +
-        (double)(t_start.tv_nsec - process_start.tv_nsec) / 1e9;
-
-    pid_t parent_pid = getpid();
-    /* pre_skipped (‑‑only / params) plus cache HITS are already accounted done. */
-    size_t reaped = pre_skipped + cached_count;
+static size_t run_exclusive_groups(struct run_ctx *c)
+{
     size_t exclusive_ran = 0;
-
     for (size_t i = 0; i < g_num_groups; i++) {
-        if (results[i].skipped || results[i].cached)
+        if (c->results[i].skipped || c->results[i].cached)
             continue;
         if (!group_requires_exclusive_run(g_groups[i].name))
             continue;
-        if (verbose)
+        if (c->o.verbose)
             printf("[exclusive] [%zu/%zu] %s\n",
                    i + 1, g_num_groups, g_groups[i].name);
-        run_group_exclusive(i, parent_pid, results, timeout_secs, verbose,
-                            activate_proof_contracts);
-        reaped++;
+        run_group_exclusive(i, c->parent_pid, c->results, c->o.timeout_secs,
+                            c->o.verbose, c->o.activate_proof_contracts);
+        c->reaped++;
         exclusive_ran++;
     }
+    return exclusive_ran;
+}
+
+/* A shard invokes its own compiler/lint subprocesses, so eight shards per
+ * checkout oversubscribe a 16-core host as soon as a second worktree runs
+ * the same gate. Keep two normal developer streams inside the fixed
+ * per-group timeout without serializing either checkout. */
+static bool run_phases_ok(struct run_ctx *c)
+{
+    const struct run_opts *o = &c->o;
+    int quiet_jobs = o->jobs < 4 ? o->jobs : 4;
+    bool phases_ok = run_parallel_phase(
+        POOL_PHASE_QUIET_LINT, c->slots, quiet_jobs, c->parent_pid,
+        c->results, o->timeout_secs, o->verbose,
+        o->activate_proof_contracts, &c->reaped);
+    if (phases_ok)
+        phases_ok = run_parallel_phase(
+            POOL_PHASE_GENERAL, c->slots, o->jobs, c->parent_pid, c->results,
+            o->timeout_secs, o->verbose, o->activate_proof_contracts,
+            &c->reaped);
+    return phases_ok && c->reaped == g_num_groups;
+}
+
+static int run_phases_abort(struct run_ctx *c)
+{
+    for (int i = 0; i < c->o.jobs; i++) {
+        if (c->slots[i].pid == ZCL_CHILD_NONE) continue;
+        child_kill(c->slots[i].pid);
+        int st = 0;
+        (void)child_wait(c->slots[i].pid, &st);
+        child_close(c->slots[i].pid);
+    }
+    fprintf(stderr, "test_parallel: bounded phase scheduler failed\n");
+    testcache_close(c->tc);
+    free(c->probes);
+    free(c->slots);
+    free(c->results);
+    return 1;
+}
+
+static int run_execute(struct run_ctx *c)
+{
+    c->slots = calloc((size_t)c->o.jobs, sizeof(*c->slots));
+    if (!c->slots) {
+        fprintf(stderr, "test_parallel: slot calloc failed\n");
+        testcache_close(c->tc);
+        free(c->probes);
+        free(c->results);
+        return 1;
+    }
+
+    platform_time_monotonic_timespec(&c->t_start);
+    c->startup_wall =
+        (double)(c->t_start.tv_sec - c->process_start.tv_sec) +
+        (double)(c->t_start.tv_nsec - c->process_start.tv_nsec) / 1e9;
+
+    c->parent_pid = getpid();
+    /* pre_skipped (‑‑only / params) plus cache HITS are already accounted done. */
+    c->reaped = c->pre_skipped + c->cached_count;
+    size_t exclusive_ran = run_exclusive_groups(c);
     /* stdout is unbuffered, so this line reaches a proof's log whole the
      * moment the last run-alone group has been reaped. */
     printf("%s groups=%zu\n", ZCL_TEST_EXCLUSIVE_PASS_DONE, exclusive_ran);
     dispatch_order_prepare();
 
-    /* A shard invokes its own compiler/lint subprocesses, so eight shards per
-     * checkout oversubscribe a 16-core host as soon as a second worktree runs
-     * the same gate. Keep two normal developer streams inside the fixed
-     * per-group timeout without serializing either checkout. */
-    int quiet_jobs = jobs < 4 ? jobs : 4;
-    bool phases_ok = run_parallel_phase(
-        POOL_PHASE_QUIET_LINT, slots, quiet_jobs, parent_pid, results,
-        timeout_secs, verbose, activate_proof_contracts, &reaped);
-    if (phases_ok)
-        phases_ok = run_parallel_phase(
-            POOL_PHASE_GENERAL, slots, jobs, parent_pid, results,
-            timeout_secs, verbose, activate_proof_contracts, &reaped);
-    if (!phases_ok || reaped != g_num_groups) {
-        for (int i = 0; i < jobs; i++) {
-            if (slots[i].pid == ZCL_CHILD_NONE) continue;
-            child_kill(slots[i].pid);
-            int st = 0;
-            (void)child_wait(slots[i].pid, &st);
-            child_close(slots[i].pid);
-        }
-        fprintf(stderr, "test_parallel: bounded phase scheduler failed\n");
-        testcache_close(tc);
-        free(probes);
-        free(slots);
-        free(results);
-        return 1;
-    }
+    if (!run_phases_ok(c)) return run_phases_abort(c);
 
     /* Every group that FAILed or was WEDGED under the shared pool gets one
      * clean shot alone before it counts — see rerun_load_flaky_groups. This
      * runs before the pass/fail accounting below so a load-flaky group's
      * alone verdict is what gets counted, cached, and reported. */
-    rerun_load_flaky_groups(results, parent_pid, timeout_secs, verbose,
-                            activate_proof_contracts);
+    rerun_load_flaky_groups(c->results, c->parent_pid, c->o.timeout_secs,
+                            c->o.verbose, c->o.activate_proof_contracts);
+    return RUN_CONTINUE;
+}
 
+static void report_tally(struct run_ctx *c)
+{
     /* All children reaped. Full-suite green output is intentionally compact:
      * replaying hundreds of passing group logs produced ~46k lines / ~1M LLM
      * tokens with no diagnostic value. Focused runs retain their one group's
@@ -3601,71 +3784,82 @@ int main(int argc, char **argv)
      * remains the explicit full transcript. */
     struct timespec t_end;
     platform_time_monotonic_timespec(&t_end);
-    double wall =
-        (double)(t_end.tv_sec - t_start.tv_sec) +
-        (double)(t_end.tv_nsec - t_start.tv_nsec) / 1e9;
+    c->wall =
+        (double)(t_end.tv_sec - c->t_start.tv_sec) +
+        (double)(t_end.tv_nsec - c->t_start.tv_nsec) / 1e9;
 
     struct group_tally tally = {0};
     for (size_t i = 0; i < g_num_groups; i++) {
-        if (results[i].skipped) continue;
-        tally_group(&results[i], g_groups[i].name, verbose || only != NULL,
-                    &tally);
+        if (c->results[i].skipped) continue;
+        tally_group(&c->results[i], g_groups[i].name,
+                    c->o.verbose || c->o.only != NULL, &tally);
     }
-    int failed_groups = tally.failed;
-    int skip_groups = tally.skip;
-    int unobserved_groups = tally.unobserved;
-    int load_flaky_groups = count_load_flaky_groups(results);
+    c->failed_groups = tally.failed;
+    c->skip_groups = tally.skip;
+    c->unobserved_groups = tally.unobserved;
+    c->load_flaky_groups = count_load_flaky_groups(c->results);
+}
 
-    /* ── The verdict ────────────────────────────────────────────────────────
-     * The old headline printed "ALL TESTS PASSED — 0/743 groups failed" whether
-     * 743 groups ran or 1 ran and 742 were returned from cache: `pre_skipped`
-     * counted only --only filtering and the params gate, never cache hits. The
-     * push gate greps for exactly that string, so a run that executed nothing
-     * reported GATE OK.
-     *
-     * Two fixes, both required:
-     *   - a machine-greppable SUITE VERDICT line emitted BEFORE any verdict
-     *     word, leading with groups_ran (what actually executed); and
-     *   - the bare token "ALL TESTS PASSED" ONLY for a cold run. A cached run
-     *     says "ALL TESTS PASSED (CACHED)", which a `grep -q "ALL TESTS
-     *     PASSED"` still matches — so gate-and-report.sh is taught to reject
-     *     the cached form explicitly rather than relying on the token alone.
-     *
-     * `mode` is derived from what the run actually SERVED from cache, not from
-     * whether the cache was enabled. Keying it on the flag produced its own
-     * misreport — `ZCL_TEST_CACHE=1 ... --only=<group>` printed
-     * "mode=cached ... groups_cached=0" and the (CACHED) headline for a run in
-     * which every selected group executed. A run with zero hits ran everything
-     * and is a cold run; a run with one hit is not, and says so. */
-    bool served_from_cache = (cached_count > 0);
-    struct suite_verdict verdict = {
+/* ── The verdict ────────────────────────────────────────────────────────
+ * The old headline printed "ALL TESTS PASSED — 0/743 groups failed" whether
+ * 743 groups ran or 1 ran and 742 were returned from cache: `pre_skipped`
+ * counted only --only filtering and the params gate, never cache hits. The
+ * push gate greps for exactly that string, so a run that executed nothing
+ * reported GATE OK.
+ *
+ * Two fixes, both required:
+ *   - a machine-greppable SUITE VERDICT line emitted BEFORE any verdict
+ *     word, leading with groups_ran (what actually executed); and
+ *   - the bare token "ALL TESTS PASSED" ONLY for a cold run. A cached run
+ *     says "ALL TESTS PASSED (CACHED)", which a `grep -q "ALL TESTS
+ *     PASSED"` still matches — so gate-and-report.sh is taught to reject
+ *     the cached form explicitly rather than relying on the token alone.
+ *
+ * `mode` is derived from what the run actually SERVED from cache, not from
+ * whether the cache was enabled. Keying it on the flag produced its own
+ * misreport — `ZCL_TEST_CACHE=1 ... --only=<group>` printed
+ * "mode=cached ... groups_cached=0" and the (CACHED) headline for a run in
+ * which every selected group executed. A run with zero hits ran everything
+ * and is a cold run; a run with one hit is not, and says so. */
+static void report_verdict_build(struct run_ctx *c)
+{
+    bool served_from_cache = (c->cached_count > 0);
+    c->verdict = (struct suite_verdict){
         .mode          = served_from_cache ? "cached" : "cold",
         .groups_total  = g_num_groups,
-        .groups_ran    = g_num_groups - pre_skipped - cached_count,
-        .groups_cached = cached_count,
-        .groups_gated  = pre_skipped,
-        .groups_cacheable = cacheable_count,
-        .groups_failed = failed_groups,
-        .self_skips    = skip_groups,
-        .env_unobserved = unobserved_groups,
-        .load_flaky    = load_flaky_groups,
+        .groups_ran    = g_num_groups - c->pre_skipped - c->cached_count,
+        .groups_cached = c->cached_count,
+        .groups_gated  = c->pre_skipped,
+        .groups_cacheable = c->cacheable_count,
+        .groups_failed = c->failed_groups,
+        .self_skips    = c->skip_groups,
+        .env_unobserved = c->unobserved_groups,
+        .load_flaky    = c->load_flaky_groups,
     };
-    testcache_toolkey_digest12(verdict.toolkey);
+    testcache_toolkey_digest12(c->verdict.toolkey);
+}
 
-    write_test_timing_json(results, probes, activate_proof_contracts,
-                           startup_wall, wall, jobs, g_num_groups,
-                           failed_groups,
-                           pre_skipped, &verdict);
-    write_test_verdict_file(results, &verdict);
+static void report_write_files(struct run_ctx *c)
+{
+    write_test_timing_json(c->results, c->probes,
+                           c->o.activate_proof_contracts,
+                           c->startup_wall, c->wall, c->o.jobs, g_num_groups,
+                           c->failed_groups,
+                           c->pre_skipped, &c->verdict);
+    write_test_verdict_file(c->results, &c->verdict);
 
     /* A compact receipt near the end of stdout lets the resident dev service
      * bind its identity/graph phases to the test runner's own startup/body
      * measurement without parsing human timing prose. */
     printf("{\"schema\":\"zcl.test_phase_receipt.v1\","
            "\"startup_ms\":%lld,\"test_body_ms\":%lld}\n",
-           (long long)(startup_wall * 1000.0),
-           (long long)(wall * 1000.0));
+           (long long)(c->startup_wall * 1000.0),
+           (long long)(c->wall * 1000.0));
+}
 
+static void report_verdict_lines(const struct run_ctx *c)
+{
+    const struct suite_verdict *v = &c->verdict;
     /* A hot-swapped run is stamped on the machine-greppable verdict line and
      * on the headline. It ran the module's bodies, not the linked binary's:
      * nothing downstream may read it as an ordinary run. */
@@ -3682,52 +3876,95 @@ int main(int argc, char **argv)
     printf("\nSUITE VERDICT mode=%s groups_total=%zu groups_ran=%zu "
            "groups_cached=%zu groups_gated=%zu groups_failed=%d self_skips=%d "
            "env_unobserved=%d load_flaky=%d toolkey=%s%s\n",
-           verdict.mode, verdict.groups_total, verdict.groups_ran,
-           verdict.groups_cached, verdict.groups_gated, verdict.groups_failed,
-           verdict.self_skips, verdict.env_unobserved, verdict.load_flaky,
-           verdict.toolkey, hotswap_verdict);
+           v->mode, v->groups_total, v->groups_ran,
+           v->groups_cached, v->groups_gated, v->groups_failed,
+           v->self_skips, v->env_unobserved, v->load_flaky,
+           v->toolkey, hotswap_verdict);
 
     printf("%s%s — %d/%zu groups failed, %d skipped (%.1fs wall, %d workers)%s\n",
-           failed_groups != 0 ? "SOME TESTS FAILED"
-                              : (served_from_cache
-                                     ? "ALL TESTS PASSED (CACHED)"
-                                     : "ALL TESTS PASSED"),
+           c->failed_groups != 0 ? "SOME TESTS FAILED"
+                                 : (c->cached_count > 0
+                                        ? "ALL TESTS PASSED (CACHED)"
+                                        : "ALL TESTS PASSED"),
            hotswap_headline,
-           failed_groups, g_num_groups - pre_skipped, skip_groups, wall, jobs,
-           only ? (only_exact ? " [--exact filtered]"
-                              : " [--only filtered]")
-                : "");
-    print_suite_notes(results, skip_groups, unobserved_groups,
-                      load_flaky_groups);
-    if (failed_groups > 0)
-        print_failed_groups_report(results, timeout_secs);
+           c->failed_groups, g_num_groups - c->pre_skipped, c->skip_groups,
+           c->wall, c->o.jobs,
+           c->o.only ? (c->o.only_exact ? " [--exact filtered]"
+                                        : " [--only filtered]")
+                     : "");
+    print_suite_notes(c->results, c->skip_groups, c->unobserved_groups,
+                      c->load_flaky_groups);
+    if (c->failed_groups > 0)
+        print_failed_groups_report(c->results, c->o.timeout_secs);
+}
 
-    /* ── Cache accounting: store fresh cacheable PASSes, report cached/ran,
-     * and (cold-audit) assert every stored PASS at a group's CURRENT key would
-     * have matched its fresh verdict. A cold-audit divergence is a closure/cache
-     * soundness bug and fails the run loudly (over and above the failing group
-     * already counting toward failed_groups). */
+/* ── Cache accounting: store fresh cacheable PASSes, report cached/ran,
+ * and (cold-audit) assert every stored PASS at a group's CURRENT key would
+ * have matched its fresh verdict. A cold-audit divergence is a closure/cache
+ * soundness bug and fails the run loudly (over and above the failing group
+ * already counting toward failed_groups). */
+static int report_cache_accounting(struct run_ctx *c, int *observation_refused)
+{
     int audit_diverged = 0;
-    int observation_refused = 0;
-    if (cache_mode != CACHE_OFF) {
-        struct cache_accounting acc = { .mode = cache_mode };
-        account_cache_run(results, probes, &tc, &acc);
+    *observation_refused = 0;
+    if (c->cache_mode != CACHE_OFF) {
+        struct cache_accounting acc = { .mode = c->cache_mode };
+        account_cache_run(c->results, c->probes, &c->tc, &acc);
         print_cache_summary(&acc);
-        if (cli_emit_observations)
-            acc.observation_refused = emit_group_observations(results, probes,
-                                        observation_store_root(tc),
-                                        cli_collect_observations);
+        if (c->o.cli_emit_observations)
+            acc.observation_refused = emit_group_observations(c->results,
+                                        c->probes,
+                                        observation_store_root(c->tc),
+                                        c->o.cli_collect_observations);
         audit_diverged = acc.audit_diverged;
-        observation_refused = acc.observation_refused;
-        testcache_close(tc);
-        free(probes);
+        *observation_refused = acc.observation_refused;
+        testcache_close(c->tc);
+        free(c->probes);
     }
+    return audit_diverged;
+}
 
-    free(slots);
-    free(results);
-    int exit_code = retry_probe_exit(failed_groups, audit_diverged, observation_refused);
+static int run_report(struct run_ctx *c)
+{
+    report_tally(c);
+    report_verdict_build(c);
+    report_write_files(c);
+    report_verdict_lines(c);
+    int observation_refused = 0;
+    int audit_diverged = report_cache_accounting(c, &observation_refused);
+    free(c->slots);
+    free(c->results);
+    return retry_probe_exit(c->failed_groups, audit_diverged,
+                            observation_refused);
+}
+
+int main(int argc, char **argv)
+{
+    if (!selection_inspection_valid(argc, argv)) return 2;
+    /* Narrow sealed-image process fixture dispatch, before runner init. */
+    extern void supervised_fixture_exit_if_requested(int argc, char **argv);
+    supervised_fixture_exit_if_requested(argc, argv);
+    struct run_ctx c;
+    memset(&c, 0, sizeof(c));
+    platform_time_monotonic_timespec(&c.process_start);
+
+    int rc = 0;
+    if (main_early_modes(argc, argv, &rc)) return rc;
+
+    /* Before any group forks. Not inside the confined-agent arm above: that
+     * child is deliberately sandboxed and must not widen its own limits. */
+    raise_stack_limit();
 #if defined(__linux__)
-    tmpfs_finish(exit_code, load_flaky_groups);
+    tmpfs_setup();
+#endif
+
+    rc = run_prepare(argc, argv, &c);
+    if (rc != RUN_CONTINUE) return rc;
+    rc = run_execute(&c);
+    if (rc != RUN_CONTINUE) return rc;
+    int exit_code = run_report(&c);
+#if defined(__linux__)
+    tmpfs_finish(exit_code, c.load_flaky_groups);
 #endif
     return exit_code;
 }
