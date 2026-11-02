@@ -28,18 +28,18 @@
 #define WORDS_PANEL 0xff1c2430u
 _Static_assert(ZAPP_FIELD_PRIVATE(ZAPP_FIELD_INPUT_WORDS | ZAPP_FIELD_FLAG_MULTI_LINE, ZAPP_FIELD_IME_NO_LEARNING), "the word fields must be private");
 #define GRAVITY_CENTER_HORIZONTAL 1
-#define BUTTONS_MAX 4
+#define BUTTONS_MAX 16
 #define TYPED_MAX 640
 #define SUMMARY_MAX 8192
 
-enum button { B_CREATE, B_RESTORE_FORM, B_RESTORE, B_RESTORE_UNKNOWN, B_SEEN, B_CONFIRM, B_AGAIN, B_BACK, B_CONTINUE, B_RECHECK, B_SAVE_AGAIN, B_NEW_WALLET, B_START_OVER_ASK, B_START_OVER_GO, B_START_OVER_CANCEL };
+enum button { B_CREATE, B_RESTORE_FORM, B_RESTORE, B_RESTORE_UNKNOWN, B_SEEN, B_CONFIRM, B_AGAIN, B_BACK, B_CONTINUE, B_RECHECK, B_SAVE_AGAIN, B_NEW_WALLET, B_START_OVER_ASK, B_START_OVER_GO, B_START_OVER_CANCEL, B_PICK };   /* B_PICK + 4 * position + slot: one of the words offered */
 enum job_kind { JOB_CREATE, JOB_RESTORE, JOB_PROGRESS, JOB_FINISH, JOB_RESUME, JOB_ASIDE, JOB_START_OVER };
 struct job { enum job_kind kind; char text[TYPED_MAX]; int64_t height; };
 
 static struct {
     ANativeActivity *activity;
     JavaVM *vm;
-    jobject app, key_app, container, words_input, height_input, answers[ZAPP_WORDS_ASKED], buttons[BUTTONS_MAX];
+    jobject app, key_app, container, words_input, height_input, buttons[BUTTONS_MAX];
     pthread_mutex_t key_lock;   /* guards key_app, which a worker reads while the activity is replaced */
     enum button button_id[BUTTONS_MAX];
     size_t button_count;
@@ -282,10 +282,6 @@ static void release_widgets(JNIEnv *env)
     (void)zj_clean(env);
     for (size_t i = 0; i < ui.button_count; ++i) (*env)->DeleteGlobalRef(env, ui.buttons[i]);
     ui.button_count = 0;
-    for (size_t i = 0; i < ZAPP_WORDS_ASKED; ++i) {
-        if (ui.answers[i]) (*env)->DeleteGlobalRef(env, ui.answers[i]);
-        ui.answers[i] = NULL;
-    }
     if (ui.words_input) (*env)->DeleteGlobalRef(env, ui.words_input);
     if (ui.height_input) (*env)->DeleteGlobalRef(env, ui.height_input);
     ui.words_input = ui.height_input = NULL;
@@ -311,15 +307,22 @@ static void draw_words(JNIEnv *env, const struct wsu_view *v)
 }
 static void draw_confirm(JNIEnv *env, const struct wsu_view *v)
 {
-    char hint[32];
+    char hint[48];
+    bool all = true;
     (void)text_view(env, "Check your words", 24.0f, WHITE);
-    (void)text_view(env, "Type the words you wrote down at these positions.", 15.0f, SOFT);
+    (void)text_view(env, "Tap the word you wrote down at each position.", 15.0f, SOFT);
     for (size_t i = 0; i < ZAPP_WORDS_ASKED; ++i) {
         snprintf(hint, sizeof(hint), "Word %zu", v->asked[i] + 1);
-        (void)input_view(env, hint, ZAPP_FIELD_INPUT_WORDS, &ui.answers[i]);
+        (void)text_view(env, hint, 17.0f, WHITE);
+        for (size_t s = 0; s < ZAPP_WORD_CHOICES; ++s)
+            (void)button_view(env, (enum button)(B_PICK + ZAPP_WORD_CHOICES * i + s), v->choice[i][s], strcmp(v->choice[i][s], v->picked[i]) ? BUTTON_COLOR : GO_COLOR);
+        all = all && v->picked[i][0];
     }
-    if (v->mismatches) (void)text_view(env, "Those words do not match. Check your paper.", 15.0f, AMBER);
-    (void)button_view(env, B_CONFIRM, "Confirm", GO_COLOR);
+    if (v->wrong_position) {
+        snprintf(hint, sizeof(hint), "That is not word %zu. Check your paper.", v->wrong_position);
+        (void)text_view(env, hint, 15.0f, AMBER);
+    }
+    if (all) (void)button_view(env, B_CONFIRM, "Confirm", GO_COLOR);
     (void)button_view(env, B_AGAIN, "Show the words again", BUTTON_COLOR);
 }
 static void draw_form(JNIEnv *env, const struct wsu_view *v)
@@ -569,18 +572,6 @@ static void start_restore(JNIEnv *env, bool with_height)
     (void)spawn_job(JOB_RESTORE, typed, height);
     memory_cleanse(typed, sizeof(typed));
 }
-static bool check_answers(JNIEnv *env)
-{
-    char typed[ZAPP_WORDS_ASKED][ZAPP_WORD_LETTERS + 2];
-    const char *answers[ZAPP_WORDS_ASKED];
-    for (size_t i = 0; i < ZAPP_WORDS_ASKED; ++i) {
-        if (!read_input(env, ui.answers[i], typed[i], sizeof(typed[i]))) typed[i][0] = 0;
-        answers[i] = typed[i];
-    }
-    bool right = wsu_confirm(&ui.model, answers, ZAPP_WORDS_ASKED);
-    memory_cleanse(typed, sizeof(typed));
-    return right;
-}
 
 /* The buttons of the interrupted-setup screens. */
 static void press_interrupted(enum button id)
@@ -598,13 +589,14 @@ static void press_interrupted(enum button id)
 /* The buttons that start a job or move the model. */
 static void press_model(JNIEnv *env, enum button id)
 {
+    if (id >= B_PICK) { (void)wsu_pick(&ui.model, (size_t)(id - B_PICK) / ZAPP_WORD_CHOICES, (size_t)(id - B_PICK) % ZAPP_WORD_CHOICES); return; }
     switch (id) {
     case B_CREATE: (void)spawn_job(JOB_CREATE, NULL, 0); break;
     case B_RESTORE_FORM: wsu_open_restore(&ui.model); break;
     case B_RESTORE: start_restore(env, true); break;
     case B_RESTORE_UNKNOWN: start_restore(env, false); break;
     case B_SEEN: wsu_words_seen(&ui.model); break;
-    case B_CONFIRM: if (check_answers(env)) (void)spawn_job(JOB_FINISH, NULL, 0); break;
+    case B_CONFIRM: if (wsu_confirm_picked(&ui.model)) (void)spawn_job(JOB_FINISH, NULL, 0); break;
     case B_AGAIN: wsu_show_again(&ui.model); break;
     case B_BACK: wsu_back(&ui.model); break;
     case B_SAVE_AGAIN: if (wsu_retry_marker(&ui.model)) (void)spawn_job(JOB_FINISH, NULL, 0); break;

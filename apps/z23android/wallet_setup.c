@@ -33,9 +33,29 @@ bool wsu_init(struct wsu *w, const struct wsu_env *env, const struct sun *node, 
     return true;
 }
 
+/* The words offered at asked position index: the right word and decoys, with the lock held. */
+static bool offer_locked(struct wsu *w, size_t index)
+{
+    return zapp_words_choices(w->held.word[w->asked[index]], w->env.random, w->env.ctx, w->choice[index]);
+}
+static bool offer_all_locked(struct wsu *w)
+{
+    bool ok = true;
+    memset(w->picked, 0, sizeof(w->picked));
+    w->wrong = 0;
+    for (size_t i = 0; ok && i < ZAPP_WORDS_ASKED; ++i) ok = offer_locked(w, i);
+    return ok;
+}
+static void forget_choices_locked(struct wsu *w)
+{
+    memory_cleanse(w->choice, sizeof(w->choice));
+    memory_cleanse(w->picked, sizeof(w->picked));
+    w->wrong = 0;
+}
 void wsu_destroy(struct wsu *w)
 {
     zapp_words_cleanse(&w->held);
+    forget_choices_locked(w);
     pthread_mutex_destroy(&w->lock);
     memset(w, 0, sizeof(*w));
 }
@@ -78,7 +98,12 @@ void wsu_view_read(struct wsu *w, struct wsu_view *out)
     }
     if (w->failure == WSU_ASIDE_STUCK) memcpy(out->leftover, w->leftover, sizeof(out->leftover));
     if (w->step == WSU_WORDS && w->protected) { out->words = w->held; out->start_height = w->birthday.known ? w->birthday.height : 0; }
-    if (w->step == WSU_CONFIRM) memcpy(out->asked, w->asked, sizeof(out->asked));
+    if (w->step == WSU_CONFIRM) {
+        memcpy(out->asked, w->asked, sizeof(out->asked));
+        memcpy(out->choice, w->choice, sizeof(out->choice));
+        memcpy(out->picked, w->picked, sizeof(out->picked));
+        out->wrong_position = w->wrong ? w->asked[w->wrong - 1] + 1 : 0;
+    }
     pthread_mutex_unlock(&w->lock);
 }
 
@@ -106,7 +131,13 @@ void wsu_close(struct wsu *w)
 }
 void wsu_open_restore(struct wsu *w) { move(w, WSU_CHOICE, WSU_RESTORE_FORM); }
 void wsu_words_seen(struct wsu *w) { move(w, WSU_WORDS, WSU_CONFIRM); }
-void wsu_show_again(struct wsu *w) { move(w, WSU_CONFIRM, WSU_WORDS); }
+void wsu_show_again(struct wsu *w)
+{
+    move(w, WSU_CONFIRM, WSU_WORDS);
+    pthread_mutex_lock(&w->lock);
+    if (w->step == WSU_WORDS) { memset(w->picked, 0, sizeof(w->picked)); w->wrong = 0; }
+    pthread_mutex_unlock(&w->lock);
+}
 /* After these failures a wallet may exist, so the choice is not offered again. */
 static bool wallet_may_exist(enum wsu_failure failure)
 {
@@ -347,7 +378,8 @@ static void create_succeeded(struct wsu *w, struct sun_created *created)
     w->held = created->words;
     w->birthday = created->birthday;
     w->mismatches = 0;
-    if (!zapp_words_pick(w->held.count, w->env.random, w->env.ctx, ZAPP_WORDS_ASKED, w->asked)) {
+    if (!zapp_words_pick(w->held.count, w->env.random, w->env.ctx, ZAPP_WORDS_ASKED, w->asked) || !offer_all_locked(w)) {
+        forget_choices_locked(w);
         zapp_words_cleanse(&w->held);
         w->step = WSU_FAILED;
         w->failure = WSU_UNKNOWN;
@@ -408,6 +440,7 @@ bool wsu_confirm(struct wsu *w, const char *const *answers, size_t n)
     pthread_mutex_lock(&w->lock);
     bool right = w->step == WSU_CONFIRM && n == ZAPP_WORDS_ASKED && zapp_words_match(&w->held, w->asked, answers, n);
     if (right) {
+        forget_choices_locked(w);
         zapp_words_cleanse(&w->held);
         w->confirmed = true;
         w->step = WSU_WORKING;
@@ -417,6 +450,40 @@ bool wsu_confirm(struct wsu *w, const char *const *answers, size_t n)
         ++w->mismatches;
     }
     pthread_mutex_unlock(&w->lock);
+    return right;
+}
+
+bool wsu_pick(struct wsu *w, size_t index, size_t slot)
+{
+    pthread_mutex_lock(&w->lock);
+    bool live = w->step == WSU_CONFIRM && index < ZAPP_WORDS_ASKED && slot < ZAPP_WORD_CHOICES;
+    bool right = live && !strcmp(w->choice[index][slot], w->held.word[w->asked[index]]);
+    if (right) {
+        memcpy(w->picked[index], w->choice[index][slot], sizeof(w->picked[index]));
+        w->wrong = 0;
+    } else if (live) {
+        ++w->mismatches;
+        w->wrong = (unsigned)index + 1;
+        memset(w->picked[index], 0, sizeof(w->picked[index]));
+        (void)offer_locked(w, index);
+    }
+    pthread_mutex_unlock(&w->lock);
+    return right;
+}
+bool wsu_confirm_picked(struct wsu *w)
+{
+    char typed[ZAPP_WORDS_ASKED][ZAPP_WORD_LETTERS + 1];
+    const char *answers[ZAPP_WORDS_ASKED];
+    pthread_mutex_lock(&w->lock);
+    memcpy(typed, w->picked, sizeof(typed));
+    pthread_mutex_unlock(&w->lock);
+    bool all = true;
+    for (size_t i = 0; i < ZAPP_WORDS_ASKED; ++i) {
+        answers[i] = typed[i];
+        all = all && typed[i][0];
+    }
+    bool right = all && wsu_confirm(w, answers, ZAPP_WORDS_ASKED);
+    memory_cleanse(typed, sizeof(typed));
     return right;
 }
 

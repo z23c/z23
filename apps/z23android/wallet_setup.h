@@ -117,6 +117,9 @@ struct wsu {
     enum wsu_failure failure;
     struct zapp_words held;
     size_t asked[ZAPP_WORDS_ASKED];
+    char choice[ZAPP_WORDS_ASKED][ZAPP_WORD_CHOICES][ZAPP_WORD_LETTERS + 1];   /* the words offered for each asked position */
+    char picked[ZAPP_WORDS_ASKED][ZAPP_WORD_LETTERS + 1];   /* the right words picked so far, empty for none */
+    unsigned wrong;      /* 1 + the index of the asked position of the last wrong pick, or 0 */
     unsigned mismatches;
     struct sun_birthday birthday;
     bool birthday_honoured;
@@ -146,6 +149,9 @@ struct wsu_view {
     enum wsu_failure failure;
     struct zapp_words words;
     size_t asked[ZAPP_WORDS_ASKED];
+    char choice[ZAPP_WORDS_ASKED][ZAPP_WORD_CHOICES][ZAPP_WORD_LETTERS + 1];   /* with CONFIRM: the words to pick from */
+    char picked[ZAPP_WORDS_ASKED][ZAPP_WORD_LETTERS + 1];
+    size_t wrong_position;   /* with CONFIRM: the word number of the last wrong pick, or 0 */
     unsigned mismatches;
     int64_t start_height;   /* with the words: the block the new wallet starts reading at */
     bool protected;
@@ -189,6 +195,11 @@ void wsu_restore_job(struct wsu *w, const char *text, int64_t birthday_height);
 /* answers are the typed words for the asked positions. True when they match: the words are wiped and the step is
  * WORKING until wsu_finish_job writes the setup marker. Otherwise the step stays CONFIRM. */
 bool wsu_confirm(struct wsu *w, const char *const *answers, size_t n);
+/* A tap on one of the words offered for asked position index. True when it is the right word, which is then kept as the answer.
+ * A wrong word is counted, clears the answer and offers new decoys for that position. Only while the step is CONFIRM. */
+bool wsu_pick(struct wsu *w, size_t index, size_t slot);
+/* wsu_confirm with the words picked; false while a position has none. */
+bool wsu_confirm_picked(struct wsu *w);
 /* After a matching wsu_confirm, on the worker: records that setup finished, or, when the new wallet recorded no start
  * height, leaves setup unfinished. */
 void wsu_finish_job(struct wsu *w);

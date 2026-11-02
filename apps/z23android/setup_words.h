@@ -27,6 +27,15 @@ bool zapp_words_join(const struct zapp_words *words, char *out, size_t cap);
 bool zapp_words_pick(size_t count, bool (*random)(void *ctx, uint8_t *out, size_t len), void *ctx, size_t n, size_t *positions);
 /* Whether every answer is the word at its position, ignoring case and the white space around it. */
 bool zapp_words_match(const struct zapp_words *words, const size_t *positions, const char *const *answers, size_t n);
+
+#define ZAPP_WORDLIST_SIZE 2048u
+#define ZAPP_WORD_CHOICES 4u
+/* The BIP39 English wordlist, sorted. */
+extern const char *const zapp_wordlist[ZAPP_WORDLIST_SIZE];
+/* The words to pick from for one asked word: right and ZAPP_WORD_CHOICES - 1 decoys drawn from the wordlist, all different, with
+ * right in a slot drawn from random. False, with out empty, when random fails or right is not 1 to 8 letters. */
+bool zapp_words_choices(const char *right, bool (*random)(void *ctx, uint8_t *out, size_t len), void *ctx,
+                        char out[ZAPP_WORD_CHOICES][ZAPP_WORD_LETTERS + 1]);
 void zapp_words_cleanse(struct zapp_words *words);
 
 #endif

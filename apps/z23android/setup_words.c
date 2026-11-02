@@ -97,3 +97,33 @@ void zapp_words_cleanse(struct zapp_words *words)
 {
     memory_cleanse(words, sizeof(*words));
 }
+/* Fills the next empty slot of out with a word of the wordlist that differs from right and from every word already in out. */
+static bool decoy(bool (*random)(void *, uint8_t *, size_t), void *ctx, char out[ZAPP_WORD_CHOICES][ZAPP_WORD_LETTERS + 1], const char *right)
+{
+    for (unsigned tries = 0; tries < 64; ++tries) {
+        uint8_t bytes[2];
+        if (!random(ctx, bytes, sizeof(bytes))) return false;
+        const char *word = zapp_wordlist[(bytes[0] << 8 | bytes[1]) % ZAPP_WORDLIST_SIZE];
+        bool fresh = strcmp(word, right) != 0;
+        for (size_t i = 0; fresh && i < ZAPP_WORD_CHOICES; ++i) fresh = strcmp(word, out[i]) != 0;
+        if (!fresh) continue;
+        for (size_t i = 0; i < ZAPP_WORD_CHOICES; ++i) {
+            if (out[i][0]) continue;
+            memcpy(out[i], word, strlen(word) + 1);
+            return true;
+        }
+    }
+    return false;
+}
+bool zapp_words_choices(const char *right, bool (*random)(void *ctx, uint8_t *out, size_t len), void *ctx,
+                        char out[ZAPP_WORD_CHOICES][ZAPP_WORD_LETTERS + 1])
+{
+    size_t slot, length = right ? strlen(right) : 0;
+    memset(out, 0, ZAPP_WORD_CHOICES * (ZAPP_WORD_LETTERS + 1));
+    if (!random || length < 1 || length > ZAPP_WORD_LETTERS) return false;
+    bool ok = one_position(ZAPP_WORD_CHOICES, random, ctx, &slot);
+    if (ok) memcpy(out[slot], right, length + 1);
+    for (size_t i = 1; ok && i < ZAPP_WORD_CHOICES; ++i) ok = decoy(random, ctx, out, right);
+    if (!ok) memset(out, 0, ZAPP_WORD_CHOICES * (ZAPP_WORD_LETTERS + 1));
+    return ok;
+}

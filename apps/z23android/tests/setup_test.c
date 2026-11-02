@@ -1766,6 +1766,102 @@ static void saving_after_confirm_tests(void)
     wsu_destroy(&w);
 }
 
+/* ---- the word check by tapping ---- */
+
+static bool on_list(const char *word)
+{
+    for (size_t i = 0; i < ZAPP_WORDLIST_SIZE; ++i) if (!strcmp(zapp_wordlist[i], word)) return true;
+    return false;
+}
+/* Four different words, the right one once, the three decoys from the wordlist, and the right word's slot drawn at random. */
+static void choices_tests(void)
+{
+    unsigned slots[ZAPP_WORD_CHOICES] = {0};
+    char out[ZAPP_WORD_CHOICES][ZAPP_WORD_LETTERS + 1];
+    for (unsigned seed = 1; seed <= 400; ++seed) {
+        unsigned state = seed * 7919u;
+        assert(zapp_words_choices("alpha", counter_random, &state, out));
+        unsigned right = 0;
+        size_t slot = 0;
+        for (size_t i = 0; i < ZAPP_WORD_CHOICES; ++i) {
+            assert(out[i][0]);
+            if (!strcmp(out[i], "alpha")) { ++right; slot = i; } else assert(on_list(out[i]));
+            for (size_t j = i + 1; j < ZAPP_WORD_CHOICES; ++j) assert(strcmp(out[i], out[j]));
+        }
+        assert(right == 1);
+        ++slots[slot];
+    }
+    for (size_t i = 0; i < ZAPP_WORD_CHOICES; ++i) assert(slots[i] > 40);
+    /* A word of the list asked for is never offered twice. */
+    for (unsigned seed = 1; seed <= 400; ++seed) {
+        unsigned state = seed * 104729u;
+        unsigned right = 0;
+        assert(zapp_words_choices("zoo", counter_random, &state, out));
+        for (size_t i = 0; i < ZAPP_WORD_CHOICES; ++i) right += !strcmp(out[i], "zoo");
+        assert(right == 1);
+    }
+    unsigned state = 3;
+    assert(!zapp_words_choices("alpha", failing_random, NULL, out) && !out[0][0] && !out[3][0]);
+    assert(!zapp_words_choices("", counter_random, &state, out) && !zapp_words_choices("ninewords", counter_random, &state, out));
+    assert(!zapp_words_choices(NULL, counter_random, &state, out));
+}
+
+/* Every right word tapped, then Confirm: the setup goes on and nothing of the check stays in the model. */
+static void pick_all_right(struct wsu *w, const struct zapp_words *all)
+{
+    struct wsu_view v;
+    wsu_view_read(w, &v);
+    for (size_t i = 0; i < ZAPP_WORDS_ASKED; ++i) {
+        size_t s = 0;
+        while (strcmp(v.choice[i][s], all->word[v.asked[i]])) ++s;
+        assert(wsu_pick(w, i, s));
+        wsu_view_read(w, &v);
+        assert(!strcmp(v.picked[i], all->word[v.asked[i]]) && v.wrong_position == 0);
+    }
+    assert(wsu_confirm_picked(w) && w->step == WSU_WORKING);
+    wsu_view_read(w, &v);
+    assert(!v.choice[0][0][0] && !v.picked[0][0] && !wsu_pick(w, 0, 0));
+}
+
+/* The model offers choices for each asked position, counts a wrong pick, offers new decoys for that position and keeps right picks. */
+static void pick_tests(void)
+{
+    struct fake f;
+    struct wsu w;
+    struct wsu_view v;
+    fresh(&f, &w, true);
+    script_say(&f.script, true, CREATED);
+    wsu_create_job(&w);
+    assert(w.step == WSU_WORDS);
+    wsu_words_seen(&w);
+    wsu_view_read(&w, &v);
+    struct zapp_words all;
+    assert(zapp_words_parse(PHRASE, &all));
+    for (size_t i = 0; i < ZAPP_WORDS_ASKED; ++i) {
+        unsigned right = 0;
+        for (size_t s = 0; s < ZAPP_WORD_CHOICES; ++s) right += !strcmp(v.choice[i][s], all.word[v.asked[i]]);
+        assert(right == 1 && !v.picked[i][0]);
+    }
+    assert(!wsu_confirm_picked(&w) && w.mismatches == 0 && w.step == WSU_CONFIRM);
+    /* A wrong tap on the first position: counted, named, answer empty, new decoys with the right word still among them. */
+    size_t wrong_slot = 0;
+    while (!strcmp(v.choice[0][wrong_slot], all.word[v.asked[0]])) ++wrong_slot;
+    char before[ZAPP_WORD_CHOICES][ZAPP_WORD_LETTERS + 1];
+    memcpy(before, v.choice[0], sizeof(before));
+    assert(!wsu_pick(&w, 0, wrong_slot));
+    wsu_view_read(&w, &v);
+    assert(v.mismatches == 1 && v.wrong_position == v.asked[0] + 1 && !v.picked[0][0] && memcmp(before, v.choice[0], sizeof(before)));
+    unsigned right = 0;
+    for (size_t s = 0; s < ZAPP_WORD_CHOICES; ++s) right += !strcmp(v.choice[0][s], all.word[v.asked[0]]);
+    assert(right == 1 && w.step == WSU_CONFIRM);
+    /* Out of range taps do nothing. */
+    assert(!wsu_pick(&w, ZAPP_WORDS_ASKED, 0) && !wsu_pick(&w, 0, ZAPP_WORD_CHOICES));
+    wsu_view_read(&w, &v);
+    assert(v.mismatches == 1);
+    pick_all_right(&w, &all);
+    wsu_destroy(&w);
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2);
@@ -1817,6 +1913,8 @@ int main(int argc, char **argv)
     failure_text_tests();
     tip_progress_tests();
     saving_after_confirm_tests();
+    choices_tests();
+    pick_tests();
     slow_exit_tests();
     slow_exit_restore_tests();
     stuck_exit_late_tests();
