@@ -423,29 +423,13 @@ static void import_publish_rows(int *out_rows, int total_rows)
         *out_rows = total_rows;
 }
 
-struct zcl_result node_db_import_service_run(struct node_db *ndb,
-                                             struct coins_view_db *cvdb,
-                                             int *out_rows)
+/* Enter SQLite turbo mode and wipe utxos when the table is not empty.
+ * ZCL_OK means the pipeline may start. */
+static struct zcl_result import_prepare_reimport(struct node_db *ndb,
+                                                 struct sync_db_turbo_scope *turbo_mode)
 {
-    struct import_job job;
-    struct sync_db_turbo_scope turbo_mode = {0};
-    bool restore_ok = true;
-
-    if (import_args_invalid(ndb, cvdb))
-        return ZCL_ERR(-10, "import_utxos: invalid args (ndb=%p, cvdb=%p)",
-                       (void *)ndb, (void *)cvdb);
-    sync_job_import_begin();
-
-    int num_decoders = utxo_import_num_decoders();
-    printf("UTXO import: parallel pipeline (%d decoders, %d chunks, %u cores)...\n",
-           num_decoders, IMPORT_NUM_CHUNKS, platform_logical_cpu_count());
-    fflush(stdout);
-
-    struct timespec ts_start;
-    platform_time_monotonic_timespec(&ts_start);
-
     /* ── SQLite turbo mode — delegate to node_db layer ────────────── */
-    if (!sync_db_turbo_scope_begin(&turbo_mode, ndb, true)) {
+    if (!sync_db_turbo_scope_begin(turbo_mode, ndb, true)) {
         fprintf(stderr, "UTXO import: failed to enter turbo mode\n");
         sync_job_import_finish(0);
         return ZCL_ERR(-1, "import: failed to enter SQLite turbo mode");
@@ -473,8 +457,8 @@ struct zcl_result node_db_import_service_run(struct node_db *ndb,
     if (existing > 0) {
         enum policy_decision pd = import_wipe_policy_decision(existing);
         if (pd != POLICY_ALLOW) {
-            LOG_INFO("sync", "UTXO import: recovery_policy refused wipe (code=%s, rows=%lld)", policy_decision_name(pd), (long long)existing);
-            import_abort_before_pipeline(&turbo_mode, "policy refusal");
+            LOG_INFO_IN("node_db_import_service_run", "sync", "UTXO import: recovery_policy refused wipe (code=%s, rows=%lld)", policy_decision_name(pd), (long long)existing);
+            import_abort_before_pipeline(turbo_mode, "policy refusal");
             return ZCL_ERR(-2, "import: recovery_policy refused utxo wipe "
                            "(existing_rows=%lld)", (long long)existing);
         }
@@ -482,43 +466,46 @@ struct zcl_result node_db_import_service_run(struct node_db *ndb,
         {
             DB_TXN_SCOPE(txn, ndb, "sync_controller.import_utxos_reimport");
             if (!txn) {
-                LOG_WARN("sync", "UTXO import: failed to open db_txn for wipe");
-                import_abort_before_pipeline(&turbo_mode, "db_txn failure");
+                LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO import: failed to open db_txn for wipe");
+                import_abort_before_pipeline(turbo_mode, "db_txn failure");
                 return ZCL_ERR(-3, "import: failed to open db_txn for "
                                "utxo wipe");
             }
             if (!node_db_wipe_utxos(ndb)) {
-                LOG_WARN("sync", "UTXO import: failed to wipe utxos table");
+                LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO import: failed to wipe utxos table");
                 /* leave scope → auto-rollback */
-                import_abort_before_pipeline(&turbo_mode, "wipe failure");
+                import_abort_before_pipeline(turbo_mode, "wipe failure");
                 return ZCL_ERR(-4, "import: failed to wipe utxos table");
             }
             if (!db_txn_commit(txn)) {
-                LOG_WARN("sync", "UTXO import: commit of wipe failed");
-                import_abort_before_pipeline(&turbo_mode, "commit failure");
+                LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO import: commit of wipe failed");
+                import_abort_before_pipeline(turbo_mode, "commit failure");
                 return ZCL_ERR(-5, "import: commit of utxo wipe failed");
             }
         }
     }
+    return ZCL_OK;
+}
 
-    /* ── Initialize pipeline context ───────────────────────────────── */
-    struct import_context *ctx = import_context_create(ndb, cvdb);
-    if (!ctx) {
-        import_abort_before_pipeline(&turbo_mode, "alloc failure");
-        return ZCL_ERR(-6, "import: failed to allocate import context");
-    }
-    import_job_init(&job, ctx, num_decoders);
+/* Free a context whose worker threads failed to start. */
+static struct zcl_result import_fail_worker_pipeline(struct import_context *ctx,
+                                                     struct sync_db_turbo_scope *turbo_mode)
+{
+    LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO import: FATAL — worker pipeline failed to start");
+    import_context_release_chunks(ctx);
+    if (!sync_db_turbo_scope_end(turbo_mode))
+        LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO import: failed to restore normal mode after worker startup failure");
+    free(ctx);
+    sync_job_import_finish(0);
+    return ZCL_ERR(-7, "import: worker pipeline failed to start");
+}
 
-    /* ── Start decoder + writer threads ────────────────────────────── */
-    if (!import_job_start(&job)) {
-        LOG_WARN("sync", "UTXO import: FATAL — worker pipeline failed to start");
-        import_context_release_chunks(ctx);
-        if (!sync_db_turbo_scope_end(&turbo_mode))
-            LOG_WARN("sync", "UTXO import: failed to restore normal mode after worker startup failure");
-        free(ctx);
-        sync_job_import_finish(0);
-        return ZCL_ERR(-7, "import: worker pipeline failed to start");
-    }
+/* Fill the chunk ring from the LevelDB coins range; *total_entries_out is the txid count. */
+static void import_scan_leveldb(struct import_context *ctx,
+                                struct coins_view_db *cvdb,
+                                int *total_entries_out)
+{
+    *total_entries_out = 0;
 
     /* ── Reader (main thread): iterate LevelDB, fill chunks ────────── */
     /* Take a LevelDB snapshot so the iterator sees a consistent,
@@ -556,7 +543,7 @@ struct zcl_result node_db_import_service_run(struct node_db *ndb,
             enum import_next nx = import_reader_next(
                 ctx, &it, chunk, &checked_len, &len_ok, &total_entries);
             if (nx == IMPORT_NEXT_NOMEM) {
-                LOG_WARN("sync",
+                LOG_WARN_IN("node_db_import_service_run", "sync",
                          "malloc failed for chunk entry value (%u bytes), "
                          "skipping entry", checked_len);
                 skipped_entries++;
@@ -565,7 +552,7 @@ struct zcl_result node_db_import_service_run(struct node_db *ndb,
             if (nx == IMPORT_NEXT_STOP)
                 goto reader_done;
             if (nx == IMPORT_NEXT_BAD_LEN) {
-                LOG_WARN("sync",
+                LOG_WARN_IN("node_db_import_service_run", "sync",
                          "UTXO import: rejecting LevelDB CCoins value after "
                          "%d txids: %s", total_entries, len_ok.message);
                 atomic_store(&ctx->iter_error, true);
@@ -588,7 +575,7 @@ reader_done:
      * imported prefix: the post-join gate below converts this to a hard
      * ZCL_ERR return instead of a silently-short "complete" set. */
     if (!db_iter_check_error(&it)) {
-        LOG_WARN("sync", "UTXO import: LevelDB iterator error mid-scan after "
+        LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO import: LevelDB iterator error mid-scan after "
                  "%d txids — set is TRUNCATED, rejecting import",
                  total_entries);
         atomic_store(&ctx->iter_error, true);
@@ -601,6 +588,131 @@ reader_done:
     printf("UTXO import: read %d txids from LevelDB (%d skipped)\n",
            total_entries, skipped_entries);
     fflush(stdout);
+    *total_entries_out = total_entries;
+}
+
+/* Reject a truncated or aborted import. ZCL_OK means the rows can be kept. */
+static struct zcl_result import_reject_halted_scan(struct import_context *ctx,
+                                                   struct sync_db_turbo_scope *turbo_mode,
+                                                   int total_entries,
+                                                   int total_rows)
+{
+    /* HARD-HALT on a torn/short read: if the reader hit a LevelDB iterator
+     * error mid-scan, the iterated range is truncated and the imported rows
+     * are NOT a complete UTXO set. Reject the import outright — never let a
+     * silently-short prefix be accepted as authoritative. This gate precedes
+     * the generic should_stop gate so the failure is named precisely (the
+     * reader also requested stop, so should_stop would otherwise fire with a
+     * misleading "aborted on shutdown" message). */
+    if (atomic_load(&ctx->iter_error)) {
+        /* LOG_WARN (not LOG_FAIL) — LOG_FAIL would `return false`, but this
+         * function returns struct zcl_result and must clean up first. The
+         * named ZCL_ERR below carries the failure context to the caller. */
+        LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO import: REJECTED — LevelDB iterator error left a "
+                 "TRUNCATED set (%d txids, %d rows read before the error); "
+                 "refusing to accept a partial UTXO set", total_entries,
+                 total_rows);
+        if (!sync_db_turbo_scope_end(turbo_mode))
+            LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO import: failed to restore normal mode after iterator-error reject");
+        import_job_teardown(ctx, total_rows);
+        return ZCL_ERR(-10, "import: REJECTED — LevelDB iterator error left a "
+                       "truncated UTXO set (%d txids read before error)",
+                       total_entries);
+    }
+
+    if (import_ctx_should_stop(ctx)) {
+        LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO import: aborted%s", g_shutdown_requested ? " on shutdown" : "");
+        if (!sync_db_turbo_scope_end(turbo_mode))
+            LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO import: failed to restore normal mode after abort");
+        import_job_teardown(ctx, total_rows);
+        return ZCL_ERR(-8, "import: aborted%s",
+                       g_shutdown_requested ? " on shutdown" : "");
+    }
+    return ZCL_OK;
+}
+
+/* End turbo mode and, when that succeeds, report index timing. */
+static struct zcl_result import_finish_index_build(struct import_context *ctx,
+                                                   struct sync_db_turbo_scope *turbo_mode,
+                                                   const struct timespec *ts_start,
+                                                   double pipe_ms,
+                                                   int total_rows,
+                                                   int total_entries)
+{
+    bool restore_ok = true;
+
+    /* ── Rebuild all indexes for power-node queries ────────────────── */
+    printf("UTXO import: building indexes for fast queries...\n");
+    fflush(stdout);
+
+    struct timespec ts_idx;
+    platform_time_monotonic_timespec(&ts_idx);
+
+    /* Rebuild indexes and restore safe pragmas */
+    if (!sync_db_turbo_scope_end(turbo_mode)) {
+        restore_ok = false;
+        LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO import: failed to restore normal mode");
+    }
+    if (!restore_ok) {
+        import_job_teardown(ctx, total_rows);
+        return ZCL_ERR(-9, "import: failed to restore normal db mode "
+                       "after index build");
+    }
+
+    struct timespec ts_idx_done;
+    platform_time_monotonic_timespec(&ts_idx_done);
+    double idx_ms = import_elapsed_ms(&ts_idx, &ts_idx_done);
+    printf("UTXO import: indexes built in %.0fms\n", idx_ms);
+
+    double total_ms = import_elapsed_ms(ts_start, &ts_idx_done);
+    printf("UTXO import complete: %d outputs from %d txids in %.1fs "
+           "(pipeline %.0fms + index %.0fms)\n",
+           total_rows, total_entries, total_ms / 1000.0,
+           pipe_ms, idx_ms);
+    fflush(stdout);
+
+    import_job_teardown(ctx, total_rows);
+    return ZCL_OK;
+}
+
+struct zcl_result node_db_import_service_run(struct node_db *ndb,
+                                             struct coins_view_db *cvdb,
+                                             int *out_rows)
+{
+    struct import_job job;
+    struct sync_db_turbo_scope turbo_mode = {0};
+
+    if (import_args_invalid(ndb, cvdb))
+        return ZCL_ERR(-10, "import_utxos: invalid args (ndb=%p, cvdb=%p)",
+                       (void *)ndb, (void *)cvdb);
+    sync_job_import_begin();
+
+    int num_decoders = utxo_import_num_decoders();
+    printf("UTXO import: parallel pipeline (%d decoders, %d chunks, %u cores)...\n",
+           num_decoders, IMPORT_NUM_CHUNKS, platform_logical_cpu_count());
+    fflush(stdout);
+
+    struct timespec ts_start;
+    platform_time_monotonic_timespec(&ts_start);
+
+    struct zcl_result prepared = import_prepare_reimport(ndb, &turbo_mode);
+    if (!prepared.ok)
+        return prepared;
+
+    /* ── Initialize pipeline context ───────────────────────────────── */
+    struct import_context *ctx = import_context_create(ndb, cvdb);
+    if (!ctx) {
+        import_abort_before_pipeline(&turbo_mode, "alloc failure");
+        return ZCL_ERR(-6, "import: failed to allocate import context");
+    }
+    import_job_init(&job, ctx, num_decoders);
+
+    /* ── Start decoder + writer threads ────────────────────────────── */
+    if (!import_job_start(&job))
+        return import_fail_worker_pipeline(ctx, &turbo_mode);
+
+    int total_entries = 0;
+    import_scan_leveldb(ctx, cvdb, &total_entries);
 
     /* ── Wait for decoders ────────────────────────────────────────── */
     import_job_join_decoders(&job);
@@ -630,71 +742,17 @@ reader_done:
     printf("UTXO import: %d rows written in %.0fms\n", total_rows, pipe_ms);
     fflush(stdout);
 
-    /* HARD-HALT on a torn/short read: if the reader hit a LevelDB iterator
-     * error mid-scan, the iterated range is truncated and the imported rows
-     * are NOT a complete UTXO set. Reject the import outright — never let a
-     * silently-short prefix be accepted as authoritative. This gate precedes
-     * the generic should_stop gate so the failure is named precisely (the
-     * reader also requested stop, so should_stop would otherwise fire with a
-     * misleading "aborted on shutdown" message). */
-    if (atomic_load(&ctx->iter_error)) {
-        /* LOG_WARN (not LOG_FAIL) — LOG_FAIL would `return false`, but this
-         * function returns struct zcl_result and must clean up first. The
-         * named ZCL_ERR below carries the failure context to the caller. */
-        LOG_WARN("sync", "UTXO import: REJECTED — LevelDB iterator error left a "
-                 "TRUNCATED set (%d txids, %d rows read before the error); "
-                 "refusing to accept a partial UTXO set", total_entries,
-                 total_rows);
-        if (!sync_db_turbo_scope_end(&turbo_mode))
-            LOG_WARN("sync", "UTXO import: failed to restore normal mode after iterator-error reject");
-        restore_ok = false;
-        import_job_teardown(ctx, total_rows);
-        return ZCL_ERR(-10, "import: REJECTED — LevelDB iterator error left a "
-                       "truncated UTXO set (%d txids read before error)",
-                       total_entries);
-    }
+    struct zcl_result halted = import_reject_halted_scan(ctx, &turbo_mode,
+                                                        total_entries,
+                                                        total_rows);
+    if (!halted.ok)
+        return halted;
 
-    if (import_ctx_should_stop(ctx)) {
-        LOG_WARN("sync", "UTXO import: aborted%s", g_shutdown_requested ? " on shutdown" : "");
-        if (!sync_db_turbo_scope_end(&turbo_mode))
-            LOG_WARN("sync", "UTXO import: failed to restore normal mode after abort");
-        restore_ok = false;
-        import_job_teardown(ctx, total_rows);
-        return ZCL_ERR(-8, "import: aborted%s",
-                       g_shutdown_requested ? " on shutdown" : "");
-    }
-
-    /* ── Rebuild all indexes for power-node queries ────────────────── */
-    printf("UTXO import: building indexes for fast queries...\n");
-    fflush(stdout);
-
-    struct timespec ts_idx;
-    platform_time_monotonic_timespec(&ts_idx);
-
-    /* Rebuild indexes and restore safe pragmas */
-    if (!sync_db_turbo_scope_end(&turbo_mode)) {
-        restore_ok = false;
-        LOG_WARN("sync", "UTXO import: failed to restore normal mode");
-    }
-    if (!restore_ok) {
-        import_job_teardown(ctx, total_rows);
-        return ZCL_ERR(-9, "import: failed to restore normal db mode "
-                       "after index build");
-    }
-
-    struct timespec ts_idx_done;
-    platform_time_monotonic_timespec(&ts_idx_done);
-    double idx_ms = import_elapsed_ms(&ts_idx, &ts_idx_done);
-    printf("UTXO import: indexes built in %.0fms\n", idx_ms);
-
-    double total_ms = import_elapsed_ms(&ts_start, &ts_idx_done);
-    printf("UTXO import complete: %d outputs from %d txids in %.1fs "
-           "(pipeline %.0fms + index %.0fms)\n",
-           total_rows, total_entries, total_ms / 1000.0,
-           pipe_ms, idx_ms);
-    fflush(stdout);
-
-    import_job_teardown(ctx, total_rows);
+    struct zcl_result done = import_finish_index_build(ctx, &turbo_mode,
+                                                      &ts_start, pipe_ms,
+                                                      total_rows, total_entries);
+    if (!done.ok)
+        return done;
     import_publish_rows(out_rows, total_rows);
-    return ZCL_OK;
+    return done;
 }
