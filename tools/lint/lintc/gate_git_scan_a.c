@@ -264,6 +264,63 @@ static int simd_pcmp(const void *a, const void *b)
 static int simd_open(const char *path, int rc)
 { return rc < 0 ? die("z23-lint: cannot open %s\n", path) : rc; }
 
+static int simd_check_delegate(const char *name, const char *file, int *v)
+{
+    struct stat st;
+    if (stat(file, &st) != 0 || !S_ISREG(st.st_mode)) {
+        if (fprintf(stderr, "%s: delegate '%s' names a file that no longer exists\n",
+                    file, name) < 0)
+            return die("z23-lint: write failed\n", "");
+        (*v)++;
+        return 0;
+    }
+    int ok = 0;
+    int rc = simd_open(file, simd_local_file(file, &ok));
+    if (rc) return rc;
+    if (!ok) {
+        if (fprintf(stderr, "%s: defines delegate '%s' but performs no OS-state check\n",
+                    file, name) < 0
+            || fputs("    -> every caller that relies on it is now unguarded\n", stderr) < 0)
+            return die("z23-lint: write failed\n", "");
+        (*v)++;
+    }
+    return 0;
+}
+
+static int simd_check_file(const char *path, int *v)
+{
+    int ok = 0, del = 0;
+    int rc = simd_open(path, simd_local_file(path, &ok));
+    if (rc) return rc;
+    if (ok) return 0;
+    for (size_t d = 0; d + 1 < sizeof k_simd_del / sizeof k_simd_del[0]; d += 2) {
+        int fnd = 0;
+        rc = simd_open(path, file_has(path, k_simd_del[d], 0, &fnd));
+        if (rc) return rc;
+        if (fnd) { del = 1; break; }
+    }
+    if (del) return 0;
+    if (fprintf(stderr, "%s: dispatches into target(\"avx...\") code with no OS-state check\n",
+                path) < 0
+        || fputs("    -> #include \"crypto/simd_dispatch.h\" and gate the dispatch on\n",
+                 stderr) < 0
+        || fputs("       simd_host_has_avx2() / simd_host_has_avx512f()\n", stderr) < 0)
+        return die("z23-lint: write failed\n", "");
+    (*v)++;
+    return 0;
+}
+
+static int simd_report(int n, int v, const char *mode)
+{
+    if (printf("[check_simd_os_support] scanned %d AVX dispatch file(s), %d violation(s) "
+               "(mode: %s)\n", n, v, mode) < 0
+        || puts("[check_simd_os_support] CPUID says what the CPU decodes; XCR0 says what") < 0
+        || puts("[check_simd_os_support] the OS will save. Dispatching on the first alone") < 0
+        || puts("[check_simd_os_support] is a SIGILL on a host booted with the state off.") < 0)
+        return die("z23-lint: write failed\n", "");
+    return clock_grade(v, mode);
+}
+
 int check_simd_os_support_run(int argc, char **argv)
 {
     (void)argc; (void)argv;
@@ -276,55 +333,15 @@ int check_simd_os_support_run(int argc, char **argv)
                                   "expected at least core/modules/crypto/src/blake2b_avx2.c "
                                   "to carry target(\"avx...\")");
     for (size_t i = 0; rc == 0 && i + 1 < sizeof k_simd_del / sizeof k_simd_del[0]; i += 2) {
-        const char *name = k_simd_del[i], *file = k_simd_del[i + 1];
-        struct stat st;
-        if (stat(file, &st) != 0 || !S_ISREG(st.st_mode)) {
-            if (fprintf(stderr, "%s: delegate '%s' names a file that no longer exists\n",
-                        file, name) < 0)
-                return die("z23-lint: write failed\n", "");
-            v++;
-            continue;
-        }
-        int ok = 0;
-        rc = simd_open(file, simd_local_file(file, &ok));
+        rc = simd_check_delegate(k_simd_del[i], k_simd_del[i + 1], &v);
         if (rc) return rc;
-        if (!ok) {
-            if (fprintf(stderr, "%s: defines delegate '%s' but performs no OS-state check\n",
-                        file, name) < 0
-                || fputs("    -> every caller that relies on it is now unguarded\n", stderr) < 0)
-                return die("z23-lint: write failed\n", "");
-            v++;
-        }
     }
     for (int i = 0; rc == 0 && i < a.n; i++) {
-        int ok = 0, del = 0;
-        rc = simd_open(a.f[i], simd_local_file(a.f[i], &ok));
+        rc = simd_check_file(a.f[i], &v);
         if (rc) return rc;
-        if (ok) continue;
-        for (size_t d = 0; d + 1 < sizeof k_simd_del / sizeof k_simd_del[0]; d += 2) {
-            int fnd = 0;
-            rc = simd_open(a.f[i], file_has(a.f[i], k_simd_del[d], 0, &fnd));
-            if (rc) return rc;
-            if (fnd) { del = 1; break; }
-        }
-        if (del) continue;
-        if (fprintf(stderr, "%s: dispatches into target(\"avx...\") code with no OS-state check\n",
-                    a.f[i]) < 0
-            || fputs("    -> #include \"crypto/simd_dispatch.h\" and gate the dispatch on\n",
-                     stderr) < 0
-            || fputs("       simd_host_has_avx2() / simd_host_has_avx512f()\n", stderr) < 0)
-            return die("z23-lint: write failed\n", "");
-        v++;
     }
     if (rc) return rc;
-    const char *mode = clock_mode();
-    if (printf("[check_simd_os_support] scanned %d AVX dispatch file(s), %d violation(s) "
-               "(mode: %s)\n", a.n, v, mode) < 0
-        || puts("[check_simd_os_support] CPUID says what the CPU decodes; XCR0 says what") < 0
-        || puts("[check_simd_os_support] the OS will save. Dispatching on the first alone") < 0
-        || puts("[check_simd_os_support] is a SIGILL on a host booted with the state off.") < 0)
-        return die("z23-lint: write failed\n", "");
-    return clock_grade(v, mode);
+    return simd_report(a.n, v, clock_mode());
 }
 
 static int simd_build_fixtures(char *a, size_t asz, char *b, size_t bsz, char *c,
@@ -896,6 +913,38 @@ static int edr_lit_skip(const char *s, const char *e)
     return 0;
 }
 
+static int edr_lit_has_md(const char *start, const char *end)
+{
+    int has_md = 0;
+    for (const char *q = start; q < end; q++)
+        if (q + 2 < end && q[0] == '.' && q[1] == 'm' && q[2] == 'd') has_md = 1;
+    return has_md;
+}
+
+static int edr_lit_tokens(const char *file, int lineno, char *start, char *end, FILE *out,
+                          int *violations)
+{
+    char *q = start;
+    while (q < end) {
+        while (q < end && !edr_word((unsigned char)*q)) q++;
+        if (q >= end) break;
+        char *tok = q;
+        while (q < end && edr_word((unsigned char)*q)) q++;
+        char saved = *q;
+        *q = '\0';
+        if (edr_tok_end_md(tok) && !edr_resolves(tok)) {
+            (*violations)++;
+            if (out && fprintf(out, "  %s:%d names a document that does not exist: %s\n",
+                               file, lineno, tok) < 0) {
+                *q = saved;
+                return die("z23-lint: write failed\n", "");
+            }
+        }
+        *q = saved;
+    }
+    return 0;
+}
+
 static int edr_line(const char *file, int lineno, char *line, FILE *out, int *violations)
 {
     if (!strstr(line, ".md")) return 0;
@@ -907,28 +956,9 @@ static int edr_line(const char *file, int lineno, char *line, FILE *out, int *vi
         while (*end && *end != '"') end++;
         if (!*end) break;
         p = end;
-        int has_md = 0;
-        for (char *q = start; q < end; q++)
-            if (q + 2 < end && q[0] == '.' && q[1] == 'm' && q[2] == 'd') has_md = 1;
-        if (!has_md || edr_lit_skip(start, end)) continue;
-        char *q = start;
-        while (q < end) {
-            while (q < end && !edr_word((unsigned char)*q)) q++;
-            if (q >= end) break;
-            char *tok = q;
-            while (q < end && edr_word((unsigned char)*q)) q++;
-            char saved = *q;
-            *q = '\0';
-            if (edr_tok_end_md(tok) && !edr_resolves(tok)) {
-                (*violations)++;
-                if (out && fprintf(out, "  %s:%d names a document that does not exist: %s\n",
-                                   file, lineno, tok) < 0) {
-                    *q = saved;
-                    return die("z23-lint: write failed\n", "");
-                }
-            }
-            *q = saved;
-        }
+        if (!edr_lit_has_md(start, end) || edr_lit_skip(start, end)) continue;
+        int rc = edr_lit_tokens(file, lineno, start, end, out, violations);
+        if (rc) return rc;
     }
     return 0;
 }
@@ -1440,10 +1470,59 @@ static int eqp_msg(void)
         stderr) < 0 ? die("z23-lint: write failed\n", "") : 0;
 }
 
+static int eqp_doc_check(const char *fresh, const char *qfresh, char *dump, int *status)
+{
+    char qdoc[8192], cmd[16384];
+    int code = 0, rc = 0;
+    struct stat st;
+    if (stat(k_eqp_doc, &st) != 0 || !S_ISREG(st.st_mode)) {
+        fputs("check_equihash_params: FAIL — docs/node/EQUIHASH_PARAMS.md is missing;"
+              " run: make equihash-facts\n", stderr);
+        *status = 1;
+    } else if (sh_single_quote(k_eqp_doc, qdoc, sizeof qdoc)
+               || ovf(snprintf(cmd, sizeof cmd, "diff -u %s %s", qdoc, qfresh),
+                      sizeof cmd)) {
+        unlink(fresh); return 2;
+    } else if ((rc = capture_cmd(cmd, dump, EQP_DIFF, &code)) != 0) {
+        unlink(fresh); return rc;
+    } else if (code == 1) {
+        fputs("check_equihash_params: FAIL — docs/node/EQUIHASH_PARAMS.md no "
+              "longer matches the consensus tables:\n", stderr);
+        if (eqp_head40(dump)) { unlink(fresh); return 2; }
+        fputs("  regenerate it: make equihash-facts\n", stderr);
+        *status = 1;
+    } else if (code != 0) {
+        unlink(fresh); return die("z23-lint: command failed (%s)\n", cmd);
+    }
+    return 0;
+}
+
+static int eqp_scan_tracked(int *status)
+{
+    regex_t lit, claim, qual;
+    int rc = eqp_comp(&lit, &claim, &qual);
+    if (rc) return rc;
+    struct eqp_acc a = { .lit = &lit, .claim = &claim, .qual = &qual };
+    rc = each_zpath(k_ls_all, eqp_on_track, &a);
+    if (rc == 0) rc = a.rc;
+    if (rc == 0 && a.hits) { rc = eqp_msg(); *status = 1; }
+    drop3(&lit, &claim, &qual);
+    return rc;
+}
+
+static int eqp_finish(int status)
+{
+    if (status == 0
+        && fputs("check_equihash_params: OK — docs/node/EQUIHASH_PARAMS.md matches "
+                 "consensus, no flat 200,9 claim\n", stdout) < 0)
+        return die("z23-lint: write failed\n", "");
+    return status;
+}
+
 int check_equihash_params_run(int argc, char **argv)
 {
     (void)argc; (void)argv;
-    char root[4096], fresh[4096], qtool[8192], qfresh[8192], qdoc[8192], cmd[16384];
+    char root[4096], fresh[4096], qtool[8192], qfresh[8192], cmd[16384];
     static char dump[EQP_DIFF];
     int code = 0, status = 0, rc = 0;
     if (cic_repo_root(root, sizeof root)) return 2;
@@ -1462,39 +1541,10 @@ int check_equihash_params_run(int argc, char **argv)
     }
     rc = capture_cmd(cmd, dump, sizeof dump, &code);
     if (rc || code != 0) { unlink(fresh); return rc ? rc : 1; }
-    struct stat st;
-    if (stat(k_eqp_doc, &st) != 0 || !S_ISREG(st.st_mode)) {
-        fputs("check_equihash_params: FAIL — docs/node/EQUIHASH_PARAMS.md is missing;"
-              " run: make equihash-facts\n", stderr);
-        status = 1;
-    } else if (sh_single_quote(k_eqp_doc, qdoc, sizeof qdoc)
-               || ovf(snprintf(cmd, sizeof cmd, "diff -u %s %s", qdoc, qfresh),
-                      sizeof cmd)) {
-        unlink(fresh); return 2;
-    } else if ((rc = capture_cmd(cmd, dump, sizeof dump, &code)) != 0) {
-        unlink(fresh); return rc;
-    } else if (code == 1) {
-        fputs("check_equihash_params: FAIL — docs/node/EQUIHASH_PARAMS.md no "
-              "longer matches the consensus tables:\n", stderr);
-        if (eqp_head40(dump)) { unlink(fresh); return 2; }
-        fputs("  regenerate it: make equihash-facts\n", stderr);
-        status = 1;
-    } else if (code != 0) {
-        unlink(fresh); return die("z23-lint: command failed (%s)\n", cmd);
-    }
+    rc = eqp_doc_check(fresh, qfresh, dump, &status);
+    if (rc) return rc;
     unlink(fresh);
-    regex_t lit, claim, qual;
-    rc = eqp_comp(&lit, &claim, &qual);
+    rc = eqp_scan_tracked(&status);
     if (rc) return rc;
-    struct eqp_acc a = { .lit = &lit, .claim = &claim, .qual = &qual };
-    rc = each_zpath(k_ls_all, eqp_on_track, &a);
-    if (rc == 0) rc = a.rc;
-    if (rc == 0 && a.hits) { rc = eqp_msg(); status = 1; }
-    drop3(&lit, &claim, &qual);
-    if (rc) return rc;
-    if (status == 0
-        && fputs("check_equihash_params: OK — docs/node/EQUIHASH_PARAMS.md matches "
-                 "consensus, no flat 200,9 claim\n", stdout) < 0)
-        return die("z23-lint: write failed\n", "");
-    return status;
+    return eqp_finish(status);
 }
