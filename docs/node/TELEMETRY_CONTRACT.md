@@ -50,25 +50,20 @@ ok < unknown < degraded < unhealthy
 
 The `ops state` handler has an annotation branch for a true JSON boolean
 `explain` and a returned `state` for a covered subsystem. That branch calls
-`telemetry_ontology_annotate()` (`tools/command/native_command.c:604-611`),
+`telemetry_ontology_annotate()` (`tools/command/native_command.c:865-869`),
 which uses the same evaluator
 (`platform/modules/util/src/telemetry_ontology.c:598-604`).
-Current input validation prevents that branch from being reached: `explain`
-falls through to the non-empty string rule
-(`engine/modules/kernel/src/command_registry_input_types.c:411-420,539`);
-it is absent from the boolean key lists
-(`engine/modules/kernel/src/command_registry_input_types.c:67-77`;
-`engine/modules/kernel/src/command_registry_devagent_input.c:185-194,352-364`).
-The CLI converts `explain=true` to a JSON boolean before validation, which
-rejects it as `INVALID_INPUT`
-(`tools/command/native_command.c:2446-2448,4205-4216,4286-4291`).
-A valid string does not satisfy `json_get_bool()`
-(`platform/modules/json/src/json.c`), so the covered-subsystem handler
-reports `meaning_available` instead of annotating
-(`tools/command/native_command.c:613-619`).
+Input validation accepts a JSON boolean `explain`: it is in the boolean key
+list (`engine/modules/kernel/src/command_registry_input_types.c:92-106`), and
+the CLI converts `explain=true` to a JSON boolean
+(`tools/command/native_command.c:2852-2858`). A string `explain` is rejected at
+validation. When `explain` is not true, the covered-subsystem handler reports
+`meaning_available` instead of annotating
+(`tools/command/native_command.c:871-872`); `json_get_bool()`
+(`platform/modules/json/src/json.c`) is false for anything but a JSON `true`.
 `ops debug meaning` routes questions and reads the static ontology through
 `telemetry_ontology_json`; it does not evaluate a supplied field value
-(`tools/command/native_command.c:1092-1097,1132-1155`).
+(`tools/command/native_command.c:1430-1462`).
 
 `unknown` outranks `ok` deliberately: a reply full of unreadable leaves must
 never claim health. It sits below `degraded` because "could not judge" must not
@@ -117,7 +112,7 @@ restart from a stall.
 
 | Gate | Holds |
 |---|---|
-| `check-telemetry-ontology` | the row-content check rejects an empty `means`; for the eight judged rules it also rejects an empty `next`, including when both `implies` and `next` are empty. Empty `implies` with non-empty `next` passes this check; it does not validate the unit or rule column (`tools/lint/lintc/gate_telemetry_ontology.c`; current rules: `platform/modules/util/include/util/telemetry_ontology.h:59-69`). Table-driven domains receive structural checks (`tools/lint/lintc/gate_telemetry_ontology.c`); scanned fill-provider files fail on calls matching `json_push_kv_(int\|str\|bool\|dbl\|uint)` (`tools/lint/lintc/gate_telemetry_ontology.c`). |
+| `check-telemetry-ontology` | the row-content check rejects an empty `means`; for the eight judged rules it also rejects an empty `next`, including when both `implies` and `next` are empty. Empty `implies` with non-empty `next` passes this check; it does not validate the unit or rule column (`tools/lint/lintc/gate_telemetry_ontology_onto.c:453-464`; current rules: `platform/modules/util/include/util/telemetry_ontology.h:59-69`). Table-driven domains receive structural checks (`tools/lint/lintc/gate_telemetry_ontology_scan.c`, section 4); scanned fill-provider files fail on calls matching `json_push_kv_(int\|str\|bool\|dbl\|uint)` (`tools/lint/lintc/gate_telemetry_ontology_scan.c:34`). |
 | `check-dumper-never-blocks` | no blocking lock or unbounded scan in a dumper **or** a collector |
 | `check-command-contract` | every leaf states its source and freshness |
 | `check-command-availability-truthful` | a leaf that cannot answer is `PLANNED`, not silently empty |
