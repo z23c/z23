@@ -217,10 +217,15 @@ static int zeb_build(struct zeb_args *a, const char *root, const char *bin)
     if (rc == 0)
         rc = zeb_add_path(a, "-I", root, "/platform/modules/base/include");
     if (rc == 0)
+        rc = zeb_add_path(a, "-I", root, "/platform/modules/codec/include");
+    if (rc == 0)
         rc = zeb_add_path(a, "", root, "/tools/zcc_epoch_batch.c");
     if (rc == 0)
         rc = zeb_add_path(a, "", root,
                           "/platform/modules/base/src/safe_alloc.c");
+    if (rc == 0)
+        rc = zeb_add_path(a, "", root,
+                          "/platform/modules/codec/src/cursor.c");
     if (rc == 0)
         rc = zeb_push_all(a, tail);
     if (rc == 0)
