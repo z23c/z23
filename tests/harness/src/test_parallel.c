@@ -972,8 +972,19 @@ static bool phase_memory_admits(const struct child_slot *slots, int jobs,
             ramping += group_memory_estimate(slots[i].group_idx);
     }
     if (running == 0) return true;
-    return runner_admit(running, platform_cgroup_memory_headroom(), ramping,
-                        group_memory_estimate(next_idx));
+    int64_t headroom = platform_cgroup_memory_headroom();
+    int64_t estimate = group_memory_estimate(next_idx);
+    bool admit = runner_admit(running, headroom, ramping, estimate);
+    static size_t held_idx = (size_t)-1;
+    if (!admit && held_idx != next_idx) {
+        held_idx = next_idx;   /* once per held group, not once per poll */
+        printf("test_parallel: memory hold group=%s running=%d headroom=%lld "
+               "MiB ramping=%lld MiB estimate=%lld MiB\n",
+               g_groups[next_idx].name, running, (long long)(headroom >> 20),
+               (long long)(ramping >> 20), (long long)(estimate >> 20));
+        fflush(stdout);
+    }
+    return admit;
 #else
     (void)slots; (void)jobs; (void)next_idx;
     return true;
@@ -1920,6 +1931,9 @@ static void phase_record_reaped(const struct phase_run *pr, int slot, int status
     size_t idx = pr->slots[slot].group_idx;
     struct group_result *r = &pr->results[idx];
     child_close(pr->slots[slot].pid);
+    if (g_reaped_peak_bytes >= (INT64_C(256) << 20))
+        printf("test_parallel: peak RSS group=%s %lld MiB\n",
+               g_groups[idx].name, (long long)(g_reaped_peak_bytes >> 20));
     if (g_reaped_peak_bytes > g_group_peak_bytes[idx])
         g_group_peak_bytes[idx] = g_reaped_peak_bytes;
     g_reaped_peak_bytes = 0;

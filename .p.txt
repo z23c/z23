@@ -1,0 +1,3 @@
+    if (g_reaped_peak_bytes >= (INT64_C(1) << 30))
+        printf("test_parallel: peak RSS group=%s %lld MiB\n",
+               g_groups[idx].name, (long long)(g_reaped_peak_bytes >> 20));
