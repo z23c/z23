@@ -30,10 +30,14 @@
 #include "models/parity_sample.h"
 #include "models/database.h"
 #include "util/blocker.h"
+#include "config/db_service.h"
+#include "config/runtime.h"
+#include "../../../engine/services/src/legacy_mirror_sync_internal.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #define PS_CHECK(name, expr) do { \
@@ -281,6 +285,66 @@ static int test_ring_buffer_cap(void)
     return failures;
 }
 
+/* The comparison tick must not touch node.db: lms_record_parity_sample hands
+ * the row to the db worker (fire and forget) and the retention prune runs once
+ * per N saved samples, not per sample. */
+static int test_off_tick_write_and_prune_cadence(void)
+{
+    int failures = 0;
+    printf("parity_sample: off-tick write, prune once per N...\n");
+
+    char dir[256], path[320];
+    struct db_service svc;
+    struct app_runtime_context rt = {.db_service = &svc};
+    struct node_db ndb;
+    test_make_tmpdir(dir, sizeof(dir), "paritysample", "offtick");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    memset(&ndb, 0, sizeof(ndb));
+    db_service_init(&svc);
+
+    /* No runtime db service wired: silent no-op, nothing counted. */
+    app_runtime_set_current(NULL);
+    lms_parity_sample_test_reset(10, 5);
+    lms_record_parity_sample(1, true, true);
+    struct lms_parity_sample_stats st;
+    lms_parity_sample_get_stats(&st);
+    PS_CHECK("no db service: nothing enqueued or dropped",
+             st.enqueued == 0 && st.dropped == 0);
+
+    bool up = node_db_open(&ndb, path) && db_service_attach(&svc, &ndb) &&
+              db_service_start_test_worker(&svc);
+    PS_CHECK("db service up", up);
+    if (up) {
+        app_runtime_set_current(&rt);
+        for (int i = 0; i < 25; i++)
+            lms_record_parity_sample(100 + i, true, true);
+        for (int i = 0; i < 2000; i++) {
+            lms_parity_sample_get_stats(&st);
+            if (st.saved + st.dropped >= 25)
+                break;
+            nanosleep(&(struct timespec){.tv_nsec = 5000000}, NULL);
+        }
+        lms_parity_sample_get_stats(&st);
+        PS_CHECK("every sample accounted for (saved or counted drop)",
+                 st.saved + st.dropped == 25 && st.enqueued == st.saved);
+        PS_CHECK("write ran on the db worker, not the calling thread",
+                 st.saved > 0 &&
+                 !lms_parity_sample_last_write_on_thread(pthread_self()));
+        PS_CHECK("prune ran once per 10 saved samples, not per sample",
+                 st.pruned == st.saved / 10 && st.pruned < st.saved);
+        if (st.dropped == 0) {
+            /* 25 saved, prune after #10 and #20 (keep 5): 5 + 5 rows remain. */
+            PS_CHECK("retention bound applied at the prune points",
+                     db_parity_sample_count(&ndb) == 10);
+        }
+        app_runtime_set_current(NULL);
+        db_service_stop(&svc);
+    }
+    lms_parity_sample_test_reset(0, 0);
+    printf("parity_sample off-tick: %d failures\n", failures);
+    return failures;
+}
+
 int test_parity_slo(void)
 {
     printf("\n=== parity_slo tests ===\n");
@@ -288,6 +352,7 @@ int test_parity_slo(void)
     failures += test_detector();
     failures += test_remedy_witness_registration();
     failures += test_ring_buffer_cap();
+    failures += test_off_tick_write_and_prune_cadence();
     printf("parity_slo: %d total failures\n", failures);
     return failures;
 }

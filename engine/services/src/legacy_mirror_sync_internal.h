@@ -119,4 +119,19 @@ struct zcl_result lms_request_catchup_result_internal(const char *reason);
  * `known`/`agree` mirror that call's own known/agree flags. */
 void lms_record_parity_sample(int height, bool known, bool agree);
 
+/* Counters for the off-tick parity write: samples handed to the db worker,
+ * dropped (queue full / alloc failure), saved by the worker, and prune runs.
+ * Prune runs once per PARITY_SAMPLE_PRUNE_EVERY saved samples. */
+struct lms_parity_sample_stats {
+    uint64_t enqueued;
+    uint64_t dropped;
+    uint64_t saved;
+    uint64_t pruned;
+};
+void lms_parity_sample_get_stats(struct lms_parity_sample_stats *out);
+/* Test hooks: whether the last write ran on thread t; reset counters and set
+ * the prune cadence / retention bound (<=0 restores the defaults). */
+bool lms_parity_sample_last_write_on_thread(pthread_t t);
+void lms_parity_sample_test_reset(int prune_every, int retain);
+
 #endif /* ZCL_LEGACY_MIRROR_SYNC_INTERNAL_H */
