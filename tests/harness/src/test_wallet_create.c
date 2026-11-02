@@ -60,6 +60,7 @@
 #include "wallet/wallet_sqlite.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -230,9 +231,10 @@ static size_t wcr_count(const char *hay, size_t hay_len, const char *needle,
     return n;
 }
 
-/* Occurrences of `needle` in every regular file under `dir`. Files and
- * directories that cannot be read are counted in `*unreadable`, apart from the
- * matches. */
+/* Occurrences of `needle` in every regular file under `dir`. Directories and
+ * files that cannot be read, entries that are not regular files or
+ * directories, and a failed directory read are counted in `*unreadable`,
+ * apart from the matches. */
 static size_t wcr_scan_tree(const char *dir, const char *needle, size_t nlen,
                             size_t *unreadable)
 {
@@ -243,7 +245,11 @@ static size_t wcr_scan_tree(const char *dir, const char *needle, size_t nlen,
         return 0;
     }
     struct dirent *e;
-    while ((e = readdir(d)) != NULL) {
+    for (;;) {
+        errno = 0;
+        e = readdir(d);
+        if (!e)
+            break;
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
             continue;
         char path[1400];
@@ -257,8 +263,10 @@ static size_t wcr_scan_tree(const char *dir, const char *needle, size_t nlen,
             total += wcr_scan_tree(path, needle, nlen, unreadable);
             continue;
         }
-        if (!S_ISREG(st.st_mode))
+        if (!S_ISREG(st.st_mode)) {
+            (*unreadable)++;
             continue;
+        }
         FILE *f = fopen(path, "rb");
         char *buf = f ? malloc((size_t)st.st_size + 1) : NULL;
         if (buf && fread(buf, 1, (size_t)st.st_size, f) == (size_t)st.st_size)
@@ -268,6 +276,8 @@ static size_t wcr_scan_tree(const char *dir, const char *needle, size_t nlen,
         free(buf);
         if (f) fclose(f);
     }
+    if (errno != 0)
+        (*unreadable)++;
     closedir(d);
     return total;
 }
@@ -280,6 +290,14 @@ static size_t wcr_count_in_tree(const char *dir, const char *needle,
     size_t unreadable = 0;
     size_t matches = wcr_scan_tree(dir, needle, nlen, &unreadable);
     return matches + (unreadable ? 1 : 0);
+}
+
+/* True when the scan read every file and found `seed` in at least one. */
+static bool wcr_scan_proves_seed(const char *dir, const uint8_t seed[32])
+{
+    size_t unreadable = 0;
+    size_t matches = wcr_scan_tree(dir, (const char *)seed, 32, &unreadable);
+    return unreadable == 0 && matches > 0;
 }
 
 /* Occurrences of the spending key scalars the phrase's seed derives, in every
@@ -1673,6 +1691,47 @@ static int t_unreadable_file_fails_scan(void)
     return failures;
 }
 
+/* The seed scan proves nothing when it could not read everything: an
+ * unreadable file or a non-regular entry beside a datadir without the seed, or
+ * beside one with it, withholds the proof. */
+static int t_seed_proof_needs_a_full_read(void)
+{
+    int failures = 0;
+    uint8_t seed[32];
+    memset(seed, 0x6b, sizeof(seed));
+    char dir[1024], path[1100], fifo[1100], other[1100];
+    wcr_fixture(dir, sizeof(dir), "seedproof");
+    snprintf(path, sizeof(path), "%s/hidden.bin", dir);
+    snprintf(fifo, sizeof(fifo), "%s/pipe", dir);
+    snprintf(other, sizeof(other), "%s/seed.bin", dir);
+    FILE *f = fopen(path, "wb");
+    bool wrote = f && fwrite("abcdefgh", 1, 8, f) == 8;
+    if (f)
+        fclose(f);
+    WCR_CHECK("setup: a datadir without the seed does not prove it",
+              wrote && !wcr_scan_proves_seed(dir, seed));
+    f = fopen(other, "wb");
+    bool seeded = f && fwrite(seed, 1, sizeof(seed), f) == sizeof(seed);
+    if (f)
+        fclose(f);
+    WCR_CHECK("setup: a fully readable datadir with the seed proves it",
+              seeded && wcr_scan_proves_seed(dir, seed));
+    bool piped = mkfifo(fifo, 0600) == 0;
+    WCR_CHECK("a non-regular entry withholds the seed proof",
+              piped && !wcr_scan_proves_seed(dir, seed));
+    (void)unlink(fifo);
+    if (geteuid() == 0) {
+        printf("wallet_create: an unreadable file withholds the seed proof... "
+               "not exercised: root reads any file\n");
+        return failures;
+    }
+    bool locked = wrote && chmod(path, 0) == 0;
+    WCR_CHECK("an unreadable file withholds the seed proof",
+              locked && !wcr_scan_proves_seed(dir, seed));
+    (void)chmod(path, 0600);
+    return failures;
+}
+
 /* wallet_free wipes the Sapling seed and spending keys the wallet holds. The
  * keystore lives inside the caller's struct, so its bytes are read before the
  * struct itself is released. */
@@ -1882,12 +1941,9 @@ static int t_scan_positive_control(void)
     bool ran = wcr_restore_cli(dir, "", true, &run);
     WCR_CHECK("setup: a plaintext restore commits",
               ran && run.rc == 0 && wcr_data_bool(&run, "committed"));
-    size_t seed_unreadable = 0;
-    size_t seed_matches =
-        wcr_scan_tree(dir, (const char *)seed, 32, &seed_unreadable);
     WCR_CHECK("the seed scan reads every file and finds the seed in a "
               "plaintext wallet",
-              seed_unreadable == 0 && seed_matches > 0);
+              wcr_scan_proves_seed(dir, seed));
     size_t key_matches = 0;
     bool key_scanned = wcr_spending_key_scan(dir, seed, &key_matches);
     WCR_CHECK("the spending-key scan derives the key and reads every file",
@@ -1916,6 +1972,7 @@ int test_wallet_create(void)
     failures += t_locked_wallet();
     failures += t_restore_inputs();
     failures += t_unreadable_file_fails_scan();
+    failures += t_seed_proof_needs_a_full_read();
     failures += t_wallet_free_wipes_sapling_keys();
     failures += t_live_wallet_refused();
     failures += t_create_failure_codes();

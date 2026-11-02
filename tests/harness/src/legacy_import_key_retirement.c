@@ -155,13 +155,20 @@ static bool save_fixture_run(struct save_fixture *x)
 
 static int save_path_case(void)
 {
-    struct save_fixture x;
-    save_fixture_open(&x);
-    bool saved = save_fixture_run(&x);
-    if (!saved) {
-        free(x.d[0].results);
-        free(x.d[0].tw.sapling_notes);
+    /* The context holds a whole wallet, far above a portable stack. */
+    struct save_fixture *x = calloc(1, sizeof(*x));
+    if (!x) {
+        printf("legacy_import_key_retirement: setup: the save fixture "
+               "allocates... FAIL\n");
+        return 1;
     }
+    save_fixture_open(x);
+    bool saved = save_fixture_run(x);
+    if (!saved) {
+        free(x->d[0].results);
+        free(x->d[0].tw.sapling_notes);
+    }
+    free(x);
     bool result_zero = saved && span_ok(0);
     bool notes_zero = saved && span_ok(1);
     printf("legacy_import_key_retirement: the save path commits a file's "
