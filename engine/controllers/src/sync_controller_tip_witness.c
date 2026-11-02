@@ -279,8 +279,10 @@ bool node_db_sync_advance_tip_witnesses_with(
     if (!ndb || !ndb->open || !blk || !pindex || !pindex->pprev || !rd)
         LOG_FAIL("sync", "tip witnesses: invalid args");
     int h = pindex->nHeight;
-    if (db_sapling_note_count_unspent(ndb) <= 0)
+    if (db_sapling_note_count_unspent(ndb) <= 0) {
+        atomic_store(&g_tip_witness_needs_rescan, 0);
         return true; // raw-return-ok:no wallet notes, nothing to maintain
+    }
     int64_t t0 = GetTimeMicros();
     struct incremental_merkle_tree tree;
     enum tip_witness_prep prep =

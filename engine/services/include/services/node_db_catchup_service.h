@@ -81,7 +81,8 @@ struct wallet;
  * With the option on:
  *  - node.db has no block, transaction, explorer or integrity-receipt rows
  *    for the skipped heights; the receipt chain restarts at the first walked
- *    height. /api/node/status reports history_index.from_seed and
+ *    height. /api/node/status reports history_index.from_seed (the effective
+ *    value, false when the prefix is walked) and
  *    history_index.seed_height so a client knows where the history begins.
  *  - the projection hole scan stays off, because the skipped heights are an
  *    expected prefix, not a defect.
@@ -89,9 +90,14 @@ struct wallet;
  *    below the seed is never skipped: its notes below the seed are found only
  *    by this walk, so the option is ignored for that wallet and the pass
  *    walks from the cursor, logging why.
+ *  - a wallet with no keys when the pass starts, which later imports an old
+ *    key, is not covered: rescan after the import.
  * With the option off nothing changes. */
 void node_db_catchup_set_from_seed(bool enabled);
 bool node_db_catchup_from_seed(void);
+/* The option as applied: false once a pass walks the prefix because the wallet
+ * needs it. Equals the option until a pass decides. */
+bool node_db_catchup_from_seed_effective(void);
 /* Sapling anchor activation cursor of the reducer store (the seed height), or
  * -1 when the store is absent or was adopted from genesis. */
 int node_db_catchup_seed_height(void);

@@ -598,7 +598,7 @@ static void api_node_status_push_history_index(struct json_value *body)
     struct json_value hi;
     json_init(&hi);
     json_set_object(&hi);
-    json_push_kv_bool(&hi, "from_seed", node_db_catchup_from_seed());
+    json_push_kv_bool(&hi, "from_seed", node_db_catchup_from_seed_effective());
     json_push_kv_int(&hi, "seed_height", node_db_catchup_seed_height());
     json_push_kv(body, "history_index", &hi);
     json_free(&hi);

@@ -13,15 +13,22 @@
 #include <stdatomic.h>
 
 static _Atomic bool g_from_seed;
+static _Atomic bool g_from_seed_effective;
 
 void node_db_catchup_set_from_seed(bool enabled)
 {
     atomic_store(&g_from_seed, enabled);
+    atomic_store(&g_from_seed_effective, enabled);
 }
 
 bool node_db_catchup_from_seed(void)
 {
     return atomic_load(&g_from_seed);
+}
+
+bool node_db_catchup_from_seed_effective(void)
+{
+    return atomic_load(&g_from_seed_effective);
 }
 
 int node_db_catchup_seed_height(void)
@@ -55,11 +62,13 @@ bool node_db_catchup_prefix_needed(int seed_height, int wallet_keys,
 int node_db_catchup_start_height(int next, bool wallet_needs_prefix)
 {
     bool on = node_db_catchup_from_seed() && !wallet_needs_prefix;
+    atomic_store(&g_from_seed_effective, on);
     return node_db_catchup_first_height(
         next, on ? node_db_catchup_seed_height() : -1, on);
 }
 
 bool node_db_catchup_seed_prefix_expected(void)
 {
-    return node_db_catchup_from_seed() && node_db_catchup_seed_height() >= 0;
+    return node_db_catchup_from_seed_effective() &&
+           node_db_catchup_seed_height() >= 0;
 }

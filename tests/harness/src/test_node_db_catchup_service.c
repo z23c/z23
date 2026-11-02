@@ -2123,6 +2123,21 @@ static int ndc_seed_post(struct ndc_sap_fix *f, struct node_db *ndb, int rc,
     return failures;
 }
 
+/* What the pass decided about the option: when it walked a wallet prefix, the
+ * prefix is not expected absent and the option is not effective. */
+static int ndc_seed_effective(bool option, int64_t activation,
+                              const struct wallet *w, bool walked_low)
+{
+    int failures = 0;
+    bool wallet_walked = w && walked_low;
+    NDC_CHECK("seed walk: a walked wallet prefix is no longer expected absent",
+              node_db_catchup_seed_prefix_expected() ==
+                  (option && activation > 0 && !wallet_walked));
+    NDC_CHECK("seed walk: the effective option is off when the prefix is walked",
+              !w || node_db_catchup_from_seed_effective() == !walked_low);
+    return failures;
+}
+
 static int ndc_seed_case(struct ndc_sap_fix *f, const char *name, bool option,
                          int64_t activation, int cursor, int want_rc,
                          bool want_low_rows,
@@ -2144,6 +2159,8 @@ static int ndc_seed_case(struct ndc_sap_fix *f, const char *name, bool option,
     failures += ndc_seed_pre(store, option, activation);
     int rc = seeded ? node_db_catchup_service_run(&ndb, &f->ac, w, f->dir)
                     : -99;
+    if (seeded)
+        failures += ndc_seed_effective(option, activation, w, want_low_rows);
     node_db_catchup_set_from_seed(false);
     printf("seed walk %s: rc=%d\n", name, rc);
     NDC_CHECK("seed walk: the pass ran", seeded);
@@ -2485,6 +2502,12 @@ static int nt_check_note_below_history(void)
     NDC_CHECK("the newer note reaches 7", up && nt_current(&r, NT_NOTE, NT_A7));
     NDC_CHECK("the old note is reported as needing a rescan",
               up && node_db_sync_tip_witness_needs_rescan() == 1);
+    NDC_CHECK("the last note spent clears the rescan count",
+              up && sqlite3_exec(ndb.db, "UPDATE wallet_sapling_notes SET "
+                                   "spent_txid=x'01'", NULL, NULL, NULL) ==
+                         SQLITE_OK &&
+              nt_tip(&r, NT_A7) &&
+              node_db_sync_tip_witness_needs_rescan() == 0);
     nt_close(&r, dir);
     return failures;
 }

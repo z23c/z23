@@ -959,14 +959,18 @@ static int api_status_history_ok(uint8_t *resp, size_t cap)
 {
     int failures = 0;
     struct api_status_sapling f;
-    printf("api: history index reports the option and the seed height... ");
+    printf("api: history index reports the effective option and the seed "
+           "height... ");
     api_status_sapling_open(&f, true);
     node_db_catchup_set_from_seed(false);
     bool off = f.up && api_status_history_check(resp, cap, false, 1);
     node_db_catchup_set_from_seed(true);
     bool on = f.up && api_status_history_check(resp, cap, true, 1);
     node_db_catchup_set_from_seed(false);
-    if (off && on)
+    node_db_catchup_set_from_seed(true);
+    (void)node_db_catchup_start_height(0, true);
+    bool walked = f.up && api_status_history_check(resp, cap, false, 1);
+    if (off && on && walked)
         printf("OK\n");
     else { printf("FAIL\n"); failures++; }
     api_status_sapling_close(&f);
