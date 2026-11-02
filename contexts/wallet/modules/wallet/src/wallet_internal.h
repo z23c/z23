@@ -13,4 +13,7 @@ void wallet_key_pool_consume_transaction_outputs_locked(
 bool wallet_add_sapling_note(struct wallet *w,
                                 const struct sapling_received_note *note);
 
+void wallet_release_note_buffer(struct sapling_received_note *buf,
+                                size_t cap);
+
 #endif /* ZCL_WALLET_INTERNAL_H */
