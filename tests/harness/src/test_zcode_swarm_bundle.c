@@ -977,9 +977,12 @@ static int bundle_case_timeout_facts(void)
     return failures;
 }
 
+static int bundle_case_inbound_tor_peers(void);
+
 int t_swarm_bundle_transfer(void)
 {
     int failures = 0;
+    failures += bundle_case_inbound_tor_peers();
     failures += bundle_case_roundtrip("1 B", "b1", 1u);
     failures += bundle_case_roundtrip("1 MiB + 1 B", "b2",
                                       (size_t)VCS_PACKAGE_CHUNK_BYTES + 1u);
@@ -999,5 +1002,152 @@ int t_swarm_bundle_transfer(void)
     failures += bundle_case_timeout_messages();
     failures += bundle_case_summary_fits();
     failures += bundle_case_timeout_facts();
+    return failures;
+}
+
+/* ── inbound Tor peers: one session key per connection ─────────────── */
+
+#include "config/boot_zcode_swarm_membership.h"
+#include "net/net.h"
+#include "net/netaddr.h"
+#include "net/noise_transport.h"
+#include "vcs/package_service.h"
+
+static struct p2p_node *tor_peer_new(int64_t id, uint16_t port)
+{
+    struct p2p_node *n = calloc(1, sizeof(*n));
+    if (!n)
+        return NULL;
+    n->id = id;
+    n->inbound = true;
+    static const unsigned char lo[4] = { 127, 0, 0, 1 };
+    net_addr_set_ipv4(&n->addr.svc.addr, lo);
+    n->addr.svc.port = port;
+    (void)snprintf(n->addr_name, sizeof(n->addr_name), "127.0.0.1:%u",
+                   (unsigned)port);
+    return n;
+}
+
+static bool tor_peer_noise(struct p2p_node *n, uint8_t seed)
+{
+    uint8_t priv[32];
+    memset(priv, seed, sizeof(priv));
+    static const unsigned char magic[4] = { 1, 2, 3, 4 };
+    n->transport = noise_transport_begin(false, priv, magic, NULL, NULL);
+    if (!n->transport)
+        return false;
+    n->transport->state = NOISE_ESTABLISHED;
+    n->transport->have_peer_static = true;
+    n->transport->have_transcript_hash = true;
+    memset(n->transport->peer_static, seed, 32);
+    return true;
+}
+
+/* One unrequested DATA frame: an offence, never credit. Returns true when
+ * the engine asks for the peer to be dropped. */
+static bool tor_peer_misbehave(struct sw_node *n, uint64_t peer,
+                               const struct sw_pkg *p, uint32_t i)
+{
+    size_t len = 0;
+    const uint8_t *bytes = sw_chunk_bytes(p, 0, &len);
+    struct vcs_package_swarm_message data;
+    memset(&data, 0, sizeof(data));
+    data.type = VCS_PACKAGE_SWARM_DATA;
+    data.body.data.object.request_id = 70000 + i;
+    memcpy(data.body.data.object.package_root, p->root, 32);
+    data.body.data.object.object_kind = VCS_PACKAGE_SWARM_OBJECT_CHUNK;
+    memcpy(data.body.data.object.expected_hash,
+           p->manifest.files[0].chunk_hashes, 32);
+    data.body.data.bytes = bytes;
+    data.body.data.bytes_len = (uint32_t)len;
+    uint8_t frame[8 + 96 + SW_MAX_FILE];
+    size_t frame_len = 0;
+    vcs_package_swarm_serialize(&data, frame, sizeof(frame), &frame_len);
+    return vcs_swarm_engine_handle_frame(n->engine, peer, frame, frame_len,
+                                         SW_DAY, 1).disconnect_peer;
+}
+
+static uint32_t tor_peer_offences(struct sw_node *n, const uint8_t key[33])
+{
+    struct vcs_service_key_totals t;
+    return vcs_service_key_totals(n->book, key, SW_DAY, &t)
+        ? t.offence_total : 0;
+}
+
+static int bundle_case_inbound_tor_peers(void)
+{
+    int failures = 0;
+    struct sw_node n;
+    struct sw_pkg p;
+    if (!sw_node_open(&n, "torinbound", sw_score_contributor) ||
+        !sw_make_package(&p, 1, 3))
+        return 1;
+    struct p2p_node *a = tor_peer_new(11, 40001);
+    struct p2p_node *b = tor_peer_new(12, 40002);
+    struct p2p_node *a2 = tor_peer_new(13, 40003); /* a, reconnected */
+    struct p2p_node *c = tor_peer_new(14, 40004);
+    struct p2p_node *c2 = tor_peer_new(15, 40005); /* other static key */
+    SW_CHECK("tor inbound: fixtures built",
+             a && b && a2 && c && c2 && tor_peer_noise(a, 0x21) &&
+             tor_peer_noise(a2, 0x21) && tor_peer_noise(c, 0x21) == true &&
+             tor_peer_noise(c2, 0x22));
+    uint8_t ka[33], kb[33], ka2[33], kc2[33];
+    SW_CHECK("tor inbound: every peer has a key",
+             boot_zcode_swarm_peer_key(a, ka) &&
+             boot_zcode_swarm_peer_key(b, kb) &&
+             boot_zcode_swarm_peer_key(a2, ka2) &&
+             boot_zcode_swarm_peer_key(c2, kc2));
+    SW_CHECK("tor inbound: loopback peers do not share one key",
+             memcmp(ka, kb, 33) != 0 && memcmp(kb, kc2, 33) != 0 &&
+             memcmp(ka, kc2, 33) != 0);
+    SW_CHECK("tor inbound: an authenticated identity survives a reconnect",
+             memcmp(ka, ka2, 33) == 0);
+    uint8_t kb_again[33];
+    SW_CHECK("tor inbound: an unauthenticated key is stable for the session",
+             boot_zcode_swarm_peer_key(b, kb_again) &&
+             memcmp(kb, kb_again, 33) == 0);
+    /* The unauthenticated b is keyed by connection id: id 12 is the same
+     * connection, id 99 is another. */
+    struct p2p_node *b_other = tor_peer_new(99, 40002);
+    uint8_t kb_other[33];
+    SW_CHECK("tor inbound: another connection id is another key",
+             b_other && boot_zcode_swarm_peer_key(b_other, kb_other) &&
+             memcmp(kb, kb_other, 33) != 0);
+
+    const uint64_t ha = boot_zcode_swarm_peer_id(a);
+    const uint64_t hb = boot_zcode_swarm_peer_id(b);
+    SW_CHECK("tor inbound: both peers join the engine",
+             vcs_swarm_engine_peer_add(n.engine, ha, ka) &&
+             vcs_swarm_engine_peer_add(n.engine, hb, kb));
+    bool banned = false;
+    for (uint32_t i = 0; i < VCS_POLICY_OFFENCE_DISCONNECT_THRESHOLD + 2 &&
+                         !banned; i++)
+        banned = tor_peer_misbehave(&n, ha, &p, i);
+    SW_CHECK("tor inbound: the flooding peer reaches the drop threshold",
+             banned && tor_peer_offences(&n, ka) >=
+                 VCS_POLICY_OFFENCE_DISCONNECT_THRESHOLD);
+    SW_CHECK("tor inbound: the other peer carries no offence",
+             tor_peer_offences(&n, kb) == 0);
+    SW_CHECK("tor inbound: the other peer is still served",
+             !tor_peer_misbehave(&n, hb, &p, 5000) &&
+             tor_peer_offences(&n, kb) == 1);
+    SW_CHECK("tor inbound: a reconnect with the same identity stays banned",
+             vcs_swarm_engine_peer_add(n.engine,
+                                       boot_zcode_swarm_peer_id(a2), ka2) &&
+             tor_peer_offences(&n, ka2) >=
+                 VCS_POLICY_OFFENCE_DISCONNECT_THRESHOLD &&
+             tor_peer_misbehave(&n, boot_zcode_swarm_peer_id(a2), &p, 6000));
+    SW_CHECK("tor inbound: a different identity starts clean",
+             tor_peer_offences(&n, kc2) == 0);
+
+    for (struct p2p_node **x = (struct p2p_node *[]){ a, b, a2, c, c2,
+                                                       b_other, NULL };
+         *x; x++) {
+        noise_transport_free((*x)->transport);
+        free(*x);
+    }
+    sw_free_package(&p);
+    sw_node_close(&n);
+    test_rm_rf_recursive(n.datadir);
     return failures;
 }
