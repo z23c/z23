@@ -2,6 +2,7 @@
  *
  * Tests for wallet_keystore — passphrase-based AES-256-GCM at rest. */
 
+#include "util/thread_registry.h"
 #include "test/test_core.h"
 #include "wallet/wallet_keystore.h"
 #include "wallet/wallet_lock.h"
@@ -796,6 +797,8 @@ int test_wallet_keystore(void)
     failures += test_wallet_lock_arm_failure_relocks();
     failures += test_wallet_lock_boot_credential();
     failures += test_keystore_secure_erase();
+    /* Reap the registry-owned wallet auto-lock timers the cases armed. */
+    (void)thread_registry_join_all(5);
 
     return failures;
 }

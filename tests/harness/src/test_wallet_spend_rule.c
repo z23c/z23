@@ -10,6 +10,7 @@
  * history cursor) and the real strict guard. No private key, address, memo or
  * amount of a real wallet is involved. */
 
+#include "services/chain_evidence_authority_service.h"
 #include "test/test_core.h"
 
 #include "chain/chain.h"
@@ -1604,5 +1605,7 @@ int test_wallet_spend_rule(void)
     failures += wsr_test_compiled_table();
     failures += wsr_test_rpc_selection();
     failures += wsr_test_send_e2e();
+    /* Reap the one-shot evidence-maintenance thread the shielded RPC reads spawn. */
+    chain_evidence_maintain_quiesce();
     return failures;
 }

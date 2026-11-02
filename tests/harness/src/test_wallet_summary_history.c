@@ -6,6 +6,7 @@
  * back through the same fact readers the node RPCs use. No wallet, key, node
  * or network is involved. */
 
+#include "services/chain_evidence_authority_service.h"
 #include "test/test_core.h"
 
 #include "controllers/sovereignty_controller.h"
@@ -924,6 +925,8 @@ int test_wallet_summary_history(void)
     failures += test_latest_address(&ndb);
     node_db_close(&ndb);
     failures += wallet_summary_handlers_run();
+    /* Reap the one-shot evidence-maintenance thread walletsummary reads spawn. */
+    chain_evidence_maintain_quiesce();
     (void)test_rm_rf_recursive(dir);
     return failures;
 }
