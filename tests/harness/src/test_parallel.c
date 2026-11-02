@@ -82,6 +82,9 @@
 #endif
 #include <time.h>
 #include <unistd.h>
+#if defined(__SANITIZE_ADDRESS__)
+#include <sanitizer/lsan_interface.h>
+#endif
 #if defined(__linux__)
 #include <sys/vfs.h>
 #include <linux/magic.h>
@@ -993,6 +996,30 @@ static bool child_fixture_root_select(size_t idx)
 }
 #endif
 
+/* Children end with _exit, which skips atexit, so LeakSanitizer never
+ * reaches its own exit-time check. ZCL_TEST_LEAK_CHECK=report prints
+ * LEAKS for a group that leaks; =fail also makes that group red. Any other
+ * value (or unset) leaves the child exactly as it was. */
+#if defined(__SANITIZE_ADDRESS__)
+static int child_leak_check(int failures, const char *group)
+{
+    const char *mode = getenv("ZCL_TEST_LEAK_CHECK");
+    int fail = mode && strcmp(mode, "fail") == 0;
+    if (!fail && !(mode && strcmp(mode, "report") == 0))
+        return failures;
+    if (__lsan_do_recoverable_leak_check() == 0)
+        return failures;
+    fprintf(stderr, "test_parallel: leak-check: LEAKS group=%s\n", group);
+    return fail && failures == 0 ? 1 : failures;
+}
+#else
+static int child_leak_check(int failures, const char *group)
+{
+    (void)group;
+    return failures;
+}
+#endif
+
 static void child_run(size_t idx, const char *out_path, const char *state_path,
                       bool activate_proof_contracts)
 {
@@ -1070,6 +1097,7 @@ static void child_run(size_t idx, const char *out_path, const char *state_path,
 
     ecc_verify_destroy();
     ecc_stop();
+    failures = child_leak_check(failures, g_groups[idx].name);
 
     fflush(stdout);
     fflush(stderr);

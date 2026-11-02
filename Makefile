@@ -5453,6 +5453,9 @@ ASAN_CI_GROUPS ?= test_bloom test_json test_parse_num test_zcl_result test_super
 	test_bn254_accel test_fr_mont_parity test_fr_accel test_mont_adx_honest \
 	test_semantic_manifest test_rolling_anchor_service
 T_ASAN_GROUPS = $(if $(strip $(ONLY)),$(ONLY),$(ASAN_CI_GROUPS))
+# Children _exit, so LSan's exit-time check never runs; LEAK_CHECK=report|fail
+# makes each child run an explicit check (child_leak_check, test_parallel.c).
+LEAK_CHECK ?=
 
 # With ONLY=, run the requested substring exactly as before.  With no selector,
 # run the params-free smoke set plus the positive/negative ADX differential
@@ -5479,7 +5482,7 @@ t-asan-locked: $(TEST_ASAN_CANDIDATE) dev-package-verifier-ensure \
 	  export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1; \
 	  for g in $(T_ASAN_GROUPS); do \
 	    echo "t-asan: --- $$g ---"; \
-	    $(TEST_ASAN_ACTIVE) --only=$$g; \
+	    $(if $(LEAK_CHECK),ZCL_TEST_LEAK_CHECK=$(LEAK_CHECK) )$(TEST_ASAN_ACTIVE) --only=$$g; \
 	  done'
 
 asan-ci: $(TEST_ASAN_CANDIDATE) dev-package-verifier-ensure
