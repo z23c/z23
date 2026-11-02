@@ -37,4 +37,10 @@ bool sd_bootstrapstatus_beta6_params_scenario(void);
 bool sd_getnetworkinfo_reachability_scenario(void);
 bool sd_getpeerinfo_transport_scenario(void);
 
+/* test_syncdiag_network_bans.c — the operator ban surface: listbanned,
+ * setban add/remove, and clearbanned, each checked against banlist.dat. */
+bool sd_bans_listbanned_remove_scenario(void);
+bool sd_bans_setban_add_scenario(void);
+bool sd_bans_clearbanned_scenario(void);
+
 #endif

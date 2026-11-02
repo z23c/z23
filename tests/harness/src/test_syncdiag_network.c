@@ -66,6 +66,15 @@ int syncdiag_cases_network(void)
     sd_report("getpeerinfo: reports plaintext, handshaking and hybrid "
               "Noise transport per peer (RED)... ",
               sd_getpeerinfo_transport_scenario(), &failures);
+    sd_report("listbanned: lists a core ban with its reason; setban remove "
+              "lifts it from the table and banlist.dat... ",
+              sd_bans_listbanned_remove_scenario(), &failures);
+    sd_report("setban add: bans a numeric address through core and persists; "
+              "bad address, command, bantime and arity are RPC errors... ",
+              sd_bans_setban_add_scenario(), &failures);
+    sd_report("clearbanned: empties the table and banlist.dat; listbanned "
+              "skips expired bans... ",
+              sd_bans_clearbanned_scenario(), &failures);
 
     return failures;
 }

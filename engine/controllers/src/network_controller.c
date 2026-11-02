@@ -12,6 +12,7 @@
 #include "controllers/node_binary_identity_json.h"
 #include "util/log_macros.h"
 #include "controllers/strong_params.h"
+#include "core/utiltime.h"
 #include "event/event.h"
 #include "jobs/reducer_frontier.h"
 #include "json/json.h"
@@ -965,6 +966,144 @@ static bool rpc_ping_rpc(const struct json_value *params, bool help,
     return true;
 }
 
+/* ── Operator ban table: listbanned, setban, clearbanned ─────────────
+ * Authority is addnode's: the RPC table grants no more and no less. Every
+ * mutation goes through core's own ban functions, which write
+ * <datadir>/banlist.dat at once whenever the manager has a datadir
+ * (core/modules/net/src/net.c: ban_addr_ex, unban_addr, clear_banned). */
+
+static struct net_manager *network_ban_manager(void)
+{
+    struct connman *cm = rpc_net_get_connman();
+    return cm ? &cm->manager : NULL;
+}
+
+/* A ban is keyed by IP. Onion and DNS names are refused, never resolved. */
+static bool network_ban_parse_ip(const struct net_manager *nm,
+                                 const char *text, struct net_addr *out,
+                                 struct json_value *result)
+{
+    if (net_name_is_onion(text)) {
+        json_set_str(result, "setban requires a numeric IP address "
+                             "(onion peers are not banned by address)");
+        LOG_WARN("net", "setban: refused onion address (not banned by address)");
+        return false;
+    }
+    struct net_service svc;
+    if (!lookup_numeric(text, &svc, nm->default_port)) {
+        LOG_WARN("net", "setban: refused a non-numeric address (DNS not resolved)");
+        json_set_str(result, "setban requires a numeric IP address "
+                             "(DNS names are not resolved)");
+        return false;
+    }
+    *out = svc.addr;
+    return true;
+}
+
+static void network_ban_push_entry(struct json_value *result,
+                                   const struct ban_entry *ban)
+{
+    char address[NET_ADDR_STR_MAX + 1];
+    net_addr_to_string(&ban->addr, address, sizeof(address));
+    struct json_value entry = {0};
+    json_set_object(&entry);
+    json_push_kv_str(&entry, "address", address);
+    json_push_kv_int(&entry, "banned_until", ban->ban_until);
+    json_push_kv_str(&entry, "ban_reason", ban->reason);
+    json_push_back(result, &entry);
+    json_free(&entry);
+}
+
+static bool rpc_listbanned(const struct json_value *params, bool help,
+                           struct json_value *result)
+{
+    (void)params;
+    RPC_HELP(help, result,
+        "listbanned\n"
+        "Returns the IP addresses currently banned, with expiry and reason.");
+
+    json_set_array(result);
+    struct net_manager *nm = network_ban_manager();
+    if (!nm) return true;
+
+    int64_t now = GetTime();
+    zcl_mutex_lock(&nm->cs_banned);
+    for (size_t i = 0; i < nm->num_banned; i++) {
+        /* An expired row stays until the next lazy prune; it is not a live
+         * ban (is_banned() ignores it too), so it is not reported. */
+        if (now >= nm->banned[i].ban_until)
+            continue;
+        network_ban_push_entry(result, &nm->banned[i]);
+    }
+    zcl_mutex_unlock(&nm->cs_banned);
+    return true;
+}
+
+static bool rpc_setban(const struct json_value *params, bool help,
+                       struct json_value *result)
+{
+    RPC_HELP(help, result,
+        "setban \"ip\" \"add|remove\" ( bantime )\n"
+        "Adds an IP address to the ban list, or lifts its ban. bantime is "
+        "seconds from now (default 24h) and applies to add only.");
+
+    struct rpc_params p;
+    rpc_params_init(&p, params);
+    rpc_params_expect(&p, 2, 3);
+    const char *ip = rpc_require_str(&p, 0, "ip");
+    const char *cmd = rpc_require_str(&p, 1, "command");
+    int64_t bantime = rpc_permit_int(&p, 2, "bantime", 0);
+    if (rpc_params_invalid(&p)) { rpc_params_error(&p, result); return false; }
+
+    struct net_manager *nm = network_ban_manager();
+    if (!nm) {
+        json_set_str(result, "P2P not initialized");
+        return false;
+    }
+    if (strcmp(cmd, "add") != 0 && strcmp(cmd, "remove") != 0) {
+        json_set_str(result, "setban command must be add or remove");
+        return false;
+    }
+    if (bantime < 0) {
+        json_set_str(result, "setban bantime must not be negative");
+        return false;
+    }
+    struct net_addr addr;
+    if (!network_ban_parse_ip(nm, ip, &addr, result)) {
+        LOG_WARN("net", "setban: refused a non-IP target");
+        return false;
+    }
+
+    if (strcmp(cmd, "remove") == 0) {
+        if (!unban_addr(nm, &addr)) {
+            json_set_str(result, "setban entry not found");
+            return false;
+        }
+    } else {
+        ban_addr(nm, &addr, bantime, false);
+    }
+    json_set_null(result);
+    return true;
+}
+
+static bool rpc_clearbanned(const struct json_value *params, bool help,
+                            struct json_value *result)
+{
+    (void)params;
+    RPC_HELP(help, result,
+        "clearbanned\n"
+        "Clears every IP address from the ban list.");
+
+    struct net_manager *nm = network_ban_manager();
+    if (!nm) {
+        json_set_str(result, "P2P not initialized");
+        return false;
+    }
+    clear_banned(nm);
+    json_set_null(result);
+    return true;
+}
+
 void register_net_rpc_commands(struct rpc_table *t)
 {
     struct rpc_command cmds[] = {
@@ -978,6 +1117,9 @@ void register_net_rpc_commands(struct rpc_table *t)
         { "network", "peerincidents",     rpc_peerincidents,     true },
         { "network", "ping",              rpc_ping_rpc,          true },
         { "network", "addnode",           network_addnode_rpc,   true },
+        { "network", "listbanned",        rpc_listbanned,        true },
+        { "network", "setban",            rpc_setban,            true },
+        { "network", "clearbanned",       rpc_clearbanned,       true },
     };
 
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
