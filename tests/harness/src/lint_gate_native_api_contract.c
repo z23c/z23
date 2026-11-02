@@ -355,7 +355,7 @@ int t_native_agent_api_contract(void)
         ASSERT(strstr(main_buf, "if (!snapshot->observed)") != NULL);
         ASSERT(strstr(main_buf, "zcl_spawn_capture(argv, snapshot->exec_start") != NULL);
         ASSERT(strstr(main_buf, "cli_p2p_port") != NULL);
-        ASSERT(strstr(main_buf, "cli_service_exec_arg(&service, \"port\"") != NULL);
+        ASSERT(strstr(main_buf, "cli_apply_service_port(service, \"port\"") != NULL);
         ASSERT(strstr(main_buf,
                       "datadir, cli_port, cli_p2p_port") != NULL);
         ASSERT(strstr(main_buf, "cli_cookie_exists") != NULL);
