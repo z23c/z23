@@ -19,10 +19,39 @@
  * in-memory blocker registry (engine/controllers/src/status_frontdoor.c,
  * guarded by the check_dumper_never_blocks lint). Other dumpstate keys are
  * not proven lock-free and stay on the general workers. */
+/* Argument-free chain/peer reads whose handlers never touch node.db or a
+ * lock held across disk IO:
+ *   getblockcount       reducer_frontier_provable_tip_cached(), a lock-free
+ *                       atomic (blockchain_controller_blocks.c)
+ *   getbestblockhash    the same atomic, the in-memory active chain, and a
+ *                       node.db fallback that only try-enters the connection
+ *                       mutex for 50 ms and then answers "unresolved"
+ *   getconnectioncount  one short cs_nodes critical section (the P2P hot
+ *                       lock, never held across IO)
+ * They ride the reserved lane so a stalled disk that parks every general
+ * worker in a node.db-dependent call (the 2026-11-02 r1 wedge) cannot also
+ * starve them behind the accept queue. getnetworkinfo is not listed: it
+ * walks peer lifecycle state that is not proven lock-free. */
+static bool fastlane_argless_read(const char *method)
+{
+    static const char *const reads[] = {
+        "getblockcount", "getbestblockhash", "getconnectioncount",
+    };
+    for (size_t i = 0; i < sizeof(reads) / sizeof(reads[0]); i++) {
+        if (strcmp(method, reads[i]) == 0)
+            return true;
+    }
+    return false;
+}
+
 bool rpc_http_fastlane_allows(const char *method,
                               const struct json_value *params)
 {
-    if (method == NULL || params == NULL || strcmp(method, "dumpstate") != 0)
+    if (method == NULL || params == NULL)
+        return false;
+    if (fastlane_argless_read(method))
+        return params->type == JSON_ARR && json_size(params) == 0;
+    if (strcmp(method, "dumpstate") != 0)
         return false;
     if (params->type != JSON_ARR || json_size(params) != 1)
         return false;
