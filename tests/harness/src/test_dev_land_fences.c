@@ -756,6 +756,26 @@ _test_next:;
     return failures;
 }
 
+/* dl_attest_image (tools/command/native_dev_land.c) refuses to hash a self
+ * image over 512 MiB. A sanitizer test binary built with -g can pass that
+ * (the ASan runner binary does), and then attest_only is correctly
+ * ATTESTATION_UNKNOWN even though the image identity is the running one.
+ * The case keeps asserting that refusal for such a binary instead of
+ * expecting a capture the product is built to deny. */
+static bool dlx_self_image_over_attest_cap(void)
+{
+#if defined(__linux__)
+    struct stat st;
+    if (stat("/proc/self/exe", &st) != 0)
+        return false;
+    printf("land attest-only: self image is %ju bytes (cap 536870912)\n", (uintmax_t)st.st_size);
+    return
+           (uintmax_t)st.st_size > (uintmax_t)512u * 1024u * 1024u;
+#else
+    return false;
+#endif
+}
+
 int dlx_attest_only_cases(void)
 {
     int failures = 0;
@@ -776,7 +796,8 @@ int dlx_attest_only_cases(void)
             ASSERT(setenv("ZCL_LAND_PROOF_STUB", (i & 2) ? "PRIVATE-FIXTURE-VALUE-NOT-OUTPUT" : "", 1) == 0);
             dlx_begin(&c, "attest_only");
             ASSERT(dlx_run(&c));
-            if (os_proc_self_exe_identity() == OS_PROC_IMAGE_IDENTITY_RUNNING_IMAGE) {
+            if (os_proc_self_exe_identity() == OS_PROC_IMAGE_IDENTITY_RUNNING_IMAGE &&
+                !dlx_self_image_over_attest_cap()) {
                 ASSERT(dlx_ok(&c));
                 ASSERT_STR_EQ(dlx_str(&c, "service_origin"), "UNKNOWN");
                 ASSERT_EQ(json_get(&c.reply.data, "allow_unsigned_is_one")->val.b, !!(i & 1));
