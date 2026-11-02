@@ -19,6 +19,7 @@ struct sp_ent {
     size_t off;
     int miss;
     int used; /* dedup: a matched copy in a removed function already excused one miss */
+    char *alt; /* LOG only: the key this call has when read as a returning macro, or NULL */
 };
 
 struct sp_list {

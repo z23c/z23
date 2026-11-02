@@ -79,6 +79,33 @@ static int sp_diff(struct sp_list *a, struct sp_list *b)
     return bad;
 }
 
+/* Returning LOG calls moved into a helper. A base LOG_ERR/LOG_FAIL/LOG_NULL/
+ * LOG_RETURN call in F is preserved by LOG_ERROR_IN("F", ...) in a static
+ * helper that F calls, when the very next statement is the matching
+ * "return -1;", "return false;", "return NULL;" or "return V;" (V the
+ * LOG_RETURN value, byte-identical). The analyzer stores that reading as the
+ * entry's alt key; here each cur entry left unmatched is paired with one base
+ * entry left unmatched under its alt key. The line printed is the same but
+ * for __LINE__ in both headers (base and util): the returning macro and
+ * LOG_ERROR_IN share one body there.
+ * LIMIT: this gate sees text only. It cannot prove that F propagates the
+ * helper's failure (an `if (!h()) return ...;` of the right polarity); the
+ * reviewer and the behaviour tests must. */
+static void sp_pair_alts(struct sp_list *a, struct sp_list *b)
+{
+    for (size_t j = 0; j < b->n; j++) {
+        struct sp_ent *y = &b->v[j];
+        if (!y->miss || !y->alt)
+            continue;
+        for (size_t i = 0; i < a->n; i++) {
+            if (a->v[i].miss && strcmp(a->v[i].key, y->alt) == 0) {
+                a->v[i].miss = y->miss = 0;
+                break;
+            }
+        }
+    }
+}
+
 static int sp_marker(const char *l)
 {
     return l && (strstr(l, "Copyright") || strstr(l, "SPDX") || strstr(l, "Licensed under"));
@@ -198,6 +225,7 @@ int sp_compare(const char *path, const char *base, size_t base_len,
     int bad = sp_analyze(&b, base, base_len) || sp_analyze(&n, cur, cur_len) ||
               sp_diff(&b.inc, &n.inc) || sp_diff(&b.lg, &n.lg) || sp_diff(&b.cm, &n.cm);
     if (!bad) {
+        sp_pair_alts(&b.lg, &n.lg);
         sp_check_header(&c);
         sp_check_includes(&c, &b, &n);
         sp_check_logs(&c, &b, &n);

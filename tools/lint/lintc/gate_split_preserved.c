@@ -55,7 +55,7 @@ static void sp_add(struct sp_list *l, char *key, char *func, unsigned line, size
         l->v = nv;
         l->cap = nc;
     }
-    l->v[l->n++] = (struct sp_ent){ key, func, line, off, 0, 0 };
+    l->v[l->n++] = (struct sp_ent){ key, func, line, off, 0, 0, NULL };
 }
 
 /* s[a..b) with every whitespace run outside a literal collapsed to one space
@@ -536,10 +536,91 @@ static int sp_in_accept(const struct sp_file *f, size_t off, const char *fn)
     return g && t && g->stat && sp_calls(f, t->body, t->to, g->name);
 }
 
+/* Returning form. LOG_ERROR_IN("F", args) immediately followed by
+ * "return V;" prints what the returning macro prints inside F and then
+ * returns V: LOG_ERR(args) for -1, LOG_FAIL(args) for false, LOG_NULL(args)
+ * for NULL, else LOG_RETURN(V, args) with V as written. Every returning macro
+ * and LOG_ERROR_IN share one body in their header (same rank, same
+ * "[%s] %s:%d %s(): " layout, same origin token or none), so the line differs
+ * only in __LINE__. Builds that text from rew, the LOG_ERROR(args) rewrite. */
+static char *sp_ret_build(const char *rew, const char *v)
+{
+    const char *name = strcmp(v, "-1") == 0 ? "LOG_ERR" : strcmp(v, "false") == 0 ? "LOG_FAIL"
+                     : strcmp(v, "NULL") == 0 ? "LOG_NULL" : "LOG_RETURN";
+    int val = strcmp(name, "LOG_RETURN") == 0;
+    const char *q = rew + strlen("LOG_ERROR");
+    while (*q && *q != '(')
+        q++;
+    for (q += *q == '('; *q == ' '; q++)
+        ;
+    size_t pre = (size_t)(q - (rew + strlen("LOG_ERROR")));
+    char *out = malloc(strlen(name) + pre + (val ? strlen(v) + 2 : 0) + strlen(q) + 1); // raw-alloc-ok:lint-runtime
+    if (!out)
+        return NULL;
+    strcpy(out, name);
+    memcpy(out + strlen(name), rew + strlen("LOG_ERROR"), pre);
+    out[strlen(name) + pre] = '\0';
+    if (val)
+        strcat(strcat(out, v), ", ");
+    return strcat(out, q);
+}
+
+/* Whether the call at code[i..) starts a statement: the last token before it
+ * is ';', '{' or '}'. A call under a braceless if or else does not. */
+static int sp_stmt_start(const struct sp_file *f, size_t i)
+{
+    while (i > 0 && isspace((unsigned char)f->code[i - 1]))
+        i--;
+    return i > 0 && strchr(";{}", f->code[i - 1]) != NULL;
+}
+
+/* Index of the first non-space byte at or after k. */
+static size_t sp_skip_ws(const struct sp_file *f, size_t k)
+{
+    while (k < f->n && isspace((unsigned char)f->code[k]))
+        k++;
+    return k;
+}
+
+/* The normalized value V of the statement "return V;" that is the very next
+ * statement after the call code[i..end) (which must itself start a
+ * statement), or NULL. A bare "return;" gives NULL. */
+static char *sp_ret_after(const struct sp_file *f, size_t i, size_t end)
+{
+    const char *c = f->code;
+    size_t k = sp_skip_ws(f, end), v, e;
+    if (!sp_stmt_start(f, i) || k >= f->n || c[k] != ';')
+        return NULL;
+    k = sp_skip_ws(f, k + 1);
+    if (k >= f->n || f->lit[k] || strncmp(c + k, "return", 6) != 0 || sp_isid(c[k + 6]))
+        return NULL;
+    v = sp_skip_ws(f, k + 6);
+    for (e = v; e < f->n && (f->lit[e] || c[e] != ';'); e++)
+        ;
+    while (e > v && isspace((unsigned char)c[e - 1]))
+        e--;
+    return e < f->n && e > v ? sp_norm(c, f->lit, v, e) : NULL;
+}
+
+/* The key of the returning-macro reading of an accepted LOG_ERROR_IN call
+ * (rew is its LOG_ERROR(args) rewrite), or NULL when it has none. */
+static char *sp_alt_key(const struct sp_file *f, const char *call, const char *rew,
+                        const char *fn, size_t i, size_t end)
+{
+    char *ret = strncmp(call, "LOG_ERROR_IN", 12) == 0 ? sp_ret_after(f, i, end) : NULL;
+    char *alt = ret ? sp_ret_build(rew, ret) : NULL;
+    char *key = alt ? malloc(strlen(fn) + strlen(alt) + 2) : NULL; // raw-alloc-ok:lint-runtime
+    if (key)
+        sprintf(key, "%s\t%s", fn, alt);
+    free(ret);
+    free(alt);
+    return key;
+}
+
 static void sp_add_log(struct sp_file *f, size_t i, size_t end, unsigned line)
 {
     char *call = sp_norm(f->code, f->lit, i, end);
-    char *rew = NULL, *infn = NULL;
+    char *rew = NULL, *infn = NULL, *akey = NULL;
     const char *fn = sp_func_at(f, i);
     int rc = call ? sp_in_rewrite(call, &rew, &infn) : 0;
     if (rc < 0) {
@@ -548,6 +629,7 @@ static void sp_add_log(struct sp_file *f, size_t i, size_t end, unsigned line)
         return;
     }
     if (rc > 0 && sp_in_accept(f, i, infn)) {
+        akey = sp_alt_key(f, call, rew, infn, i, end);
         free(call);
         call = rew;
         fn = infn;
@@ -557,11 +639,16 @@ static void sp_add_log(struct sp_file *f, size_t i, size_t end, unsigned line)
     size_t cl = call ? strlen(call) : 0;
     char *func = sp_dup(fn, strlen(fn));
     char *key = call && func ? malloc(strlen(fn) + cl + 2) : NULL; // raw-alloc-ok:lint-runtime
+    size_t had = f->lg.n;
     if (key)
         sprintf(key, "%s\t%s", fn, call);
     free(call);
     free(infn);
     sp_add(&f->lg, key, func, line, i);
+    if (f->lg.n > had)
+        f->lg.v[had].alt = akey;
+    else
+        free(akey);
 }
 
 static void sp_logs(struct sp_file *f)
@@ -659,6 +746,7 @@ static void sp_list_free(struct sp_list *l)
     for (size_t i = 0; i < l->n; i++) {
         free(l->v[i].key);
         free(l->v[i].func);
+        free(l->v[i].alt);
     }
     free(l->v);
 }
