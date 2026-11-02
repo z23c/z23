@@ -15355,6 +15355,7 @@ $(LINTC_PREMISE_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o) build/lintc-obj/m
 # struct change there must rebuild all three (a stale object reads spans at
 # the old stride).
 build/lintc-obj/gate_split_preserved.o build/lintc-obj/gate_split_preserved_check.o \
+build/lintc-obj/gate_split_preserved_move.o \
 build/lintc-obj/gate_split_preserved_selftest.o: tools/lint/lintc/gate_split_preserved_priv.h
 
 build/lintc-obj/node/%.o: %.c

@@ -8,7 +8,9 @@
  * it: the licence lines, the include set, the LOG_* calls per function and
  * every comment line. split mode demands all four equal; dedup mode allows
  * added includes of existing headers and whole functions removed with their
- * LOG calls and comments. Facts come from gate_split_preserved.c. Paths are
+ * LOG calls and comments. --mode=move (gate_split_preserved_move.c) takes the
+ * whole set of files of a move into a new sibling file. Facts come from
+ * gate_split_preserved.c. Paths are
  * repo-relative. Exit 0 clean, 1 findings, 2 usage or I/O error. Selftest:
  * gate_split_preserved_selftest.c.
  */
@@ -58,7 +60,7 @@ static struct sp_ent **sp_sorted(const struct sp_list *l)
 
 /* Multiset difference: sets miss on every entry of a with no partner in b and
  * on every entry of b with no partner in a. Returns 1 when memory ran out. */
-static int sp_diff(struct sp_list *a, struct sp_list *b)
+int sp_diff(struct sp_list *a, struct sp_list *b)
 {
     struct sp_ent **x = sp_sorted(a), **y = sp_sorted(b);
     size_t i = 0, j = 0;
@@ -91,7 +93,7 @@ static int sp_diff(struct sp_list *a, struct sp_list *b)
  * LIMIT: this gate sees text only. It cannot prove that F propagates the
  * helper's failure (an `if (!h()) return ...;` of the right polarity); the
  * reviewer and the behaviour tests must. */
-static void sp_pair_alts(struct sp_list *a, struct sp_list *b)
+void sp_pair_alts(struct sp_list *a, struct sp_list *b)
 {
     for (size_t j = 0; j < b->n; j++) {
         struct sp_ent *y = &b->v[j];
@@ -120,7 +122,17 @@ static void sp_check_header(struct sp_ctx *c)
     }
 }
 
-/* An added dedup include: #include "x/y.h" or <x/y.h> of an existing header. */
+int sp_hdr_same(const struct sp_file *a, const struct sp_file *b)
+{
+    for (int k = 0; k < 5; k++) {
+        const char *x = a->hdr[k], *y = b->hdr[k];
+        if ((sp_marker(x) || sp_marker(y)) && strcmp(x ? x : "", y ? y : "") != 0)
+            return 0;
+    }
+    return 1;
+}
+
+/* An added dedup include:#include "x/y.h" or <x/y.h> of an existing header. */
 static int sp_include_ok(const char *line, sp_exists_fn exists)
 {
     char path[512];
@@ -241,6 +253,7 @@ int sp_compare(const char *path, const char *base, size_t base_len,
 struct sp_opts {
     const char *base;
     int dedup;
+    int move;
     int first; /* index of the first PATH in argv */
 };
 
@@ -253,6 +266,8 @@ static int sp_parse(int argc, char **argv, struct sp_opts *o)
             o->base = a + 7;
         else if (strcmp(a, "--mode=dedup") == 0)
             o->dedup = 1;
+        else if (strcmp(a, "--mode=move") == 0)
+            o->move = 1;
         else if (strcmp(a, "--mode=split") != 0)
             return die("check_split_preserved: unknown option: %s\n", a);
     }
@@ -355,18 +370,49 @@ static int sp_one(const char *rev, const char *path, int dedup)
     return rc;
 }
 
+/* --mode=move: PATH... is every file the commit touches; a path absent at REV
+ * is a new file. Returns 2 when a path is readable in neither place. */
+static int sp_run_move(const char *rev, int argc, char **argv)
+{
+    struct sp_mfile *f = calloc((size_t)argc, sizeof *f); // raw-alloc-ok:lint-runtime
+    int rc = f ? 0 : 2;
+    for (int i = 0; !rc && i < argc; i++) {
+        char *base = sp_git_show(rev, argv[i], &f[i].base_len);
+        char *cur = sp_read_file(argv[i], &f[i].cur_len);
+        f[i].path = argv[i];
+        f[i].base = base;
+        f[i].cur = cur;
+        if (!cur) {
+            fprintf(stderr, "check_split_preserved: cannot read %s\n", argv[i]);
+            rc = 2;
+        }
+    }
+    if (!rc)
+        rc = sp_compare_move(f, (size_t)argc, stdout);
+    if (rc == 0)
+        printf("check_split_preserved: move of %d file(s) preserved\n", argc);
+    for (int i = 0; f && i < argc; i++) {
+        free((char *)f[i].base);
+        free((char *)f[i].cur);
+    }
+    free(f);
+    return rc;
+}
+
 int check_split_preserved_run(int argc, char **argv)
 {
     struct sp_opts o = { 0 };
     char root[4096];
     int rc = 0, sig;
     if (sp_parse(argc, argv, &o)) {
-        fputs("usage: z23-lint check-split-preserved [--base=REV] [--mode=split|dedup] PATH...\n", stderr);
+        fputs("usage: z23-lint check-split-preserved [--base=REV] [--mode=split|dedup|move] PATH...\n", stderr);
         return 2;
     }
     if (cic_repo_root(root, sizeof root) || chdir(root) != 0 || lsc_install() != 0)
         return die("z23-lint: cannot enter the repository\n", "");
-    for (int i = o.first; i < argc && !lsc_pending(); i++) {
+    if (o.move)
+        rc = sp_run_move(o.base, argc - o.first, argv + o.first);
+    for (int i = o.first; !o.move && i < argc && !lsc_pending(); i++) {
         int one = sp_one(o.base, argv[i], o.dedup);
         rc = one > rc ? one : rc;
     }

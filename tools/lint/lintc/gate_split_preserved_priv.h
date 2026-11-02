@@ -64,4 +64,29 @@ int sp_compare(const char *path, const char *base, size_t base_len,
                const char *cur, size_t cur_len, int dedup,
                sp_exists_fn exists, FILE *out);
 
+/* Multiset difference of two fact lists: sets miss on unpaired entries of
+ * either. Returns 1 when memory ran out. */
+int sp_diff(struct sp_list *a, struct sp_list *b);
+
+/* Pairs unmatched base LOG entries with unmatched current ones read through
+ * their alt key (a returning LOG moved into a LOG_ERROR_IN helper). */
+void sp_pair_alts(struct sp_list *a, struct sp_list *b);
+
+/* Whether the licence lines (first five lines) of a and b agree. */
+int sp_hdr_same(const struct sp_file *a, const struct sp_file *b);
+
+/* One file of a move: base is NULL for a file absent at the base. */
+struct sp_mfile {
+    const char *path;
+    const char *base;
+    size_t base_len;
+    const char *cur;
+    size_t cur_len;
+};
+
+/* --mode=move: compares the set of files one commit touches, writing one
+ * "FAIL path:LINE: ..." line per finding. Returns 0 clean, 1 findings, 2
+ * memory ran out or no file exists at the base. */
+int sp_compare_move(const struct sp_mfile *f, size_t n, FILE *out);
+
 #endif

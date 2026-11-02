@@ -5,7 +5,7 @@
  * reworded and moved comments, a LOG call moved into a helper, added
  * includes, a returning LOG moved as LOG_ERROR_IN plus its return, a removed
  * duplicate function, comment-like text in strings and a
- * changed licence line. No files are created and git is not spawned.
+ * changed licence line, and --mode=move over sets of files. No files are created and git is not spawned.
  */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -213,9 +213,86 @@ static int sps_run_case(const struct sps_case *c)
     return ok;
 }
 
+/* --mode=move: files [0] is the source (present at the base), the rest new
+ * (base NULL). The base source holds f (comment + LOG) and g (comment). */
+#define SPM_BASE SPS_LIC "#include <stdio.h>\n#include <string.h>\n" SPS_F1 SPS_G1
+#define SPM_SRC SPS_LIC "#include <stdio.h>\n#include \"s_internal.h\"\n" SPS_F1
+#define SPM_NEW SPS_LIC "#include <string.h>\n#include \"s_internal.h\"\n" SPS_G1
+#define SPM_HDR SPS_LIC "int g(void);\n"
+
+struct spm_case {
+    const char *what;
+    const char *path[4];
+    const char *base[4];
+    const char *cur[4];
+    size_t n;
+    int want_rc;
+    const char *want;
+};
+
+static const struct spm_case k_spm_cases[] = {
+    { "a clean move into a new file and an internal header",
+      { "d/s.c", "d/n.c", "d/s_internal.h" }, { SPM_BASE, NULL, NULL }, { SPM_SRC, SPM_NEW, SPM_HDR },
+      3, 0, NULL },
+    { "a move that drops a comment",
+      { "d/s.c", "d/n.c", "d/s_internal.h" }, { SPM_BASE, NULL, NULL },
+      { SPM_SRC, SPS_LIC "#include <string.h>\n#include \"s_internal.h\"\nint g(void)\n{\n    return 1;\n}\n", SPM_HDR },
+      3, 1, "base comment line lost or reworded: // other note" },
+    { "a LOG call moved into a different function",
+      { "d/s.c", "d/n.c", "d/s_internal.h" }, { SPM_BASE, NULL, NULL },
+      { SPM_SRC, SPS_LIC "#include <string.h>\n#include \"s_internal.h\"\nint g(void)\n{\n    // other note\n"
+        "    LOG_FAIL(\"f broke\");\n    return 1;\n}\n", SPM_HDR },
+      3, 1, "LOG call not in the base, or not in the same function, in g" },
+    { "a new file missing the licence",
+      { "d/s.c", "d/n.c", "d/s_internal.h" }, { SPM_BASE, NULL, NULL },
+      { SPM_SRC, "#include <string.h>\n#include \"s_internal.h\"\n" SPS_G1, SPM_HDR },
+      3, 1, "n.c:1: licence lines match no source file" },
+    { "a new file with an unrelated new include",
+      { "d/s.c", "d/n.c", "d/s_internal.h" }, { SPM_BASE, NULL, NULL },
+      { SPM_SRC, SPS_LIC "#include <string.h>\n#include <math.h>\n#include \"s_internal.h\"\n" SPS_G1, SPM_HDR },
+      3, 1, "n.c:3: include is neither a source include" },
+    { "a new file including a second new header",
+      { "d/s.c", "d/n.c", "d/s_internal.h", "d/other.h" }, { SPM_BASE, NULL, NULL, NULL },
+      { SPM_SRC, SPS_LIC "#include <string.h>\n#include \"s_internal.h\"\n#include \"other.h\"\n" SPS_G1,
+        SPM_HDR, SPM_HDR },
+      4, 1, "n.c:4: include is neither a source include" },
+    { "a source include dropped and present in no new file",
+      { "d/s.c", "d/n.c", "d/s_internal.h" }, { SPM_BASE, NULL, NULL },
+      { SPM_SRC, SPS_LIC "#include \"s_internal.h\"\n" SPS_G1, SPM_HDR },
+      3, 1, "s.c:3: base include removed and not in any new file" },
+    { "a new file in another directory",
+      { "d/s.c", "e/n.c", "d/s_internal.h" }, { SPM_BASE, NULL, NULL },
+      { SPM_SRC, SPM_NEW, SPM_HDR }, 3, 1, "n.c:1: new file is not in the directory of a source" },
+};
+
+static int spm_run_case(const struct spm_case *c)
+{
+    struct sp_mfile f[4];
+    char *buf = NULL;
+    size_t blen = 0;
+    FILE *out = open_memstream(&buf, &blen);
+    int rc = 2, ok;
+    for (size_t i = 0; i < c->n; i++)
+        f[i] = (struct sp_mfile){ c->path[i], c->base[i], c->base[i] ? strlen(c->base[i]) : 0,
+                                  c->cur[i], strlen(c->cur[i]) };
+    if (out)
+        rc = sp_compare_move(f, c->n, out);
+    if (out)
+        fclose(out);
+    ok = rc == c->want_rc && (!c->want || (buf && strstr(buf, c->want)));
+    if (!ok)
+        fprintf(stderr, "check_split_preserved: SELFTEST FAILED (move) — %s\n  rc %d (want %d), output:\n%s\n",
+                c->what, rc, c->want_rc, buf ? buf : "");
+    free(buf);
+    return ok;
+}
+
 static size_t sps_count_fails(void)
 {
     size_t fails = 0;
+    for (size_t i = 0; i < sizeof k_spm_cases / sizeof k_spm_cases[0]; i++)
+        if (!spm_run_case(&k_spm_cases[i]))
+            fails++;
     for (size_t i = 0; i < sizeof k_sps_cases / sizeof k_sps_cases[0]; i++)
         if (!sps_run_case(&k_sps_cases[i]))
             fails++;
