@@ -13,28 +13,80 @@
 #include "vcs/package_swarm_node.h"
 #include "vcs/zcode_work_node.h"
 
+#include "core/random.h"
+#include "net/netaddr.h"
+#include "net/noise_transport.h"
+
+#include <pthread.h>
 #include <stdatomic.h>
 #include <string.h>
 
 #define ZCODE_SWARM_KEY_DOMAIN "zcl.zcode_swarm_peer.v1"
+#define ZCODE_SWARM_KEY_DOMAIN_NOISE "zcl.zcode_swarm_peer.noise.v1"
+#define ZCODE_SWARM_KEY_DOMAIN_CONN "zcl.zcode_swarm_peer.conn.v1"
 
 uint64_t boot_zcode_swarm_peer_id(const struct p2p_node *node)
 {
     return (uint64_t)node->id + 1u;
 }
 
-bool boot_zcode_swarm_peer_key(const struct p2p_node *node, uint8_t out[33])
+static unsigned char s_session_salt[16];
+static pthread_once_t s_session_salt_once = PTHREAD_ONCE_INIT;
+
+static void boot_zcode_swarm_salt_init(void)
 {
-    char host[ZCL_PEER_HOST_KEY_MAX];
-    if (!zcl_peer_host_key(node, host, sizeof(host)))
-        return false;
+    GetRandBytes(s_session_salt, sizeof(s_session_salt));
+}
+
+static void boot_zcode_swarm_key_hash(const char *domain,
+                                      const unsigned char *a, size_t a_len,
+                                      const unsigned char *b, size_t b_len,
+                                      uint8_t out[33])
+{
     out[0] = 0x02;
     struct sha3_256_ctx h;
     sha3_256_init(&h);
-    sha3_256_write(&h, (const unsigned char *)ZCODE_SWARM_KEY_DOMAIN,
-                   sizeof(ZCODE_SWARM_KEY_DOMAIN) - 1);
-    sha3_256_write(&h, (const unsigned char *)host, strlen(host));
+    sha3_256_write(&h, (const unsigned char *)domain, strlen(domain));
+    sha3_256_write(&h, a, a_len);
+    if (b_len)
+        sha3_256_write(&h, b, b_len);
     sha3_256_finalize(&h, out + 1);
+}
+
+/* A loopback inbound peer is not identified by its address: every Tor
+ * hidden-service stream reaches the listener from 127.0.0.1, so a host key
+ * would pool all of them into one offence/budget book entry. Such a peer is
+ * keyed by its Noise static key when the handshake authenticated one (the
+ * same key on a reconnect, so offences recorded in the service book stay
+ * against it), and otherwise by a per-connection id mixed with a random
+ * per-process salt (distinct per connection, never colliding with a book
+ * entry a previous run wrote for the same small node id). */
+bool boot_zcode_swarm_peer_key(const struct p2p_node *node, uint8_t out[33])
+{
+    if (node && node->inbound &&
+        net_addr_is_operator_local(&node->addr.svc.addr)) {
+        struct noise_transport_snapshot snap;
+        if (node->transport &&
+            noise_transport_snapshot(node->transport, &snap)) {
+            boot_zcode_swarm_key_hash(ZCODE_SWARM_KEY_DOMAIN_NOISE,
+                                      snap.remote_static, 32, NULL, 0, out);
+            return true;
+        }
+        (void)pthread_once(&s_session_salt_once, boot_zcode_swarm_salt_init);
+        unsigned char id[8];
+        uint64_t conn = (uint64_t)node->id;
+        for (size_t i = 0; i < sizeof(id); i++)
+            id[i] = (unsigned char)(conn >> (8 * i));
+        boot_zcode_swarm_key_hash(ZCODE_SWARM_KEY_DOMAIN_CONN, id, sizeof(id),
+                                  s_session_salt, sizeof(s_session_salt), out);
+        return true;
+    }
+    char host[ZCL_PEER_HOST_KEY_MAX];
+    if (!zcl_peer_host_key(node, host, sizeof(host)))
+        return false;
+    boot_zcode_swarm_key_hash(ZCODE_SWARM_KEY_DOMAIN,
+                              (const unsigned char *)host, strlen(host),
+                              NULL, 0, out);
     return true;
 }
 
