@@ -51,6 +51,16 @@
 
 #define FBSH_BIN "build/bin/fbsh"
 
+/* GCC names a ThreadSanitizer build with __SANITIZE_THREAD__; Clang reports it
+ * through __has_feature(thread_sanitizer). */
+#if defined(__SANITIZE_THREAD__)
+#define TW_UNDER_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define TW_UNDER_TSAN 1
+#endif
+#endif
+
 #if defined(__linux__)
 #include <dirent.h>
 #include <errno.h>
@@ -1614,6 +1624,26 @@ static int test_mesh_terminal_worker_platform_arm(void)
                 (st.st_mode & S_IXUSR) != 0;
 
     failures += live_config_refusals();
+
+    /* Every live spawn enters a user+PID namespace in its forked child before
+     * exec (os_sandbox_pidns_enter). ThreadSanitizer's runtime keeps a helper
+     * thread in that child, so the kernel refuses unshare(CLONE_NEWUSER) with
+     * EINVAL (a multithreaded caller) and each live spawn fails with
+     * TERMINAL_PIDNS_UNAVAILABLE. Measured under TSan: the forked child reports
+     * Threads: 2 and unshare returns 22. Skipped under TSan only; every other
+     * build runs the live cases unchanged. */
+    static const bool tsan_live_skip =
+#if defined(TW_UNDER_TSAN)
+        true;
+#else
+        false;
+#endif
+    if (tsan_live_skip) {
+        printf("mesh_terminal_worker: live cases SKIP under ThreadSanitizer "
+               "(sanitizer helper thread refuses the user namespace)\n");
+        printf("mesh_terminal_worker: %d failures\n", failures);
+        return failures;
+    }
 
     if (!fbsh) {
         printf("mesh_terminal_worker: " FBSH_BIN
