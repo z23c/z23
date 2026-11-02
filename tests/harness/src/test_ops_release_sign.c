@@ -185,7 +185,7 @@ static bool ort_commit(const char *repo, const char *msg, char sha[41])
                        "commit.gpgsign=false", "commit", "-q", "--allow-empty",
                        "-m", msg, NULL};
     const char *rev[] = {"rev-parse", "HEAD", NULL};
-    return ort_git(repo, c, NULL, 0) && ort_git(repo, rev, sha, 64);
+    return ort_git(repo, c, NULL, 0) && ort_git(repo, rev, sha, 41);
 }
 
 static bool ort_git_fixture(struct ort_fx *fx)
