@@ -133,7 +133,7 @@ Two layouts are built in, `default` (black) and `classic` (light, with the
 list of other apps). **Settings** switches between them and remembers the
 choice in the app's private files. To use your own layout, put it at
 `Android/data/<package>/files/layouts/home.json` (shared storage, for example
-with `adb push`); the app re-reads it when it resumes. An invalid file shows a
+with `adb push`); the app re-reads it when it resumes. The folder is created owner-only and only a regular file of at most 64 KiB is read; a link is not followed. An invalid file shows a
 notice with the reason and the built-in layout. Delete the file to return to a
 built-in layout.
 
@@ -383,6 +383,7 @@ pair by hand with a new secret, stop the host, delete `--dir/pairing-secret` and
 The secret reaches `adb` on standard input, not in laptop
 process arguments; on the phone it is briefly visible to shell and root in the
 arguments of the `am` command. The app stores it privately as `speech-bridge.json`.
+The app reads the offer only when the adb shell, root or the app itself launched it (`Activity.getLaunchedFromUid`); an offer sent by another app, or from a launch whose uid cannot be read, is dropped, and scanning the laptop QR code still pairs.
 
 ### Bridge authentication
 

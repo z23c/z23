@@ -367,6 +367,14 @@ int main(void)
     assert(!strcmp(zapp_sync_line(true, true, 3300133, 3301537, 4, NULL, line, sizeof(line)), "1,404 blocks to go."));
     assert(!strcmp(zapp_sync_line(true, true, 3301536, 3301537, 4, NULL, line, sizeof(line)),
                    "Your node has every block its peers report."));
+    /* Only this app, the adb shell and root may launch the app with a pairing offer. */
+    assert(zapp_pair_caller_allowed(10234, 10234));
+    assert(zapp_pair_caller_allowed(2000, 10234));
+    assert(zapp_pair_caller_allowed(0, 10234));
+    assert(!zapp_pair_caller_allowed(10235, 10234));
+    assert(!zapp_pair_caller_allowed(1000, 10234));
+    assert(!zapp_pair_caller_allowed(-1, 10234));
+    assert(!zapp_pair_caller_allowed(-1, -1));
     puts("hosts tests passed");
     return 0;
 }

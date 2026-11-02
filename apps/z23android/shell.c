@@ -108,22 +108,13 @@ static void adopt_builtin(const char *notice)
     snprintf(shell.layout_notice, sizeof(shell.layout_notice), "%s", notice);
     replace_layout(document ? zapp_layout_parse(document, strlen(document), reason, sizeof(reason)) : NULL, false);
 }
-static char *read_file(const char *path, size_t *length)
-{
-    FILE *file = fopen(path, "rb");
-    char *data = file ? malloc(ZAPP_LAYOUT_MAX_BYTES + 2) : NULL;
-    if (data) *length = fread(data, 1, ZAPP_LAYOUT_MAX_BYTES + 1, file);
-    if (file) fclose(file);
-    return data;
-}
 static void adopt_user(const char *path)
 {
     size_t length = 0;
     char reason[160], notice[sizeof(shell.layout_notice)];
-    char *data = read_file(path, &length);
+    char *data = zapp_layout_read(path, &length, reason, sizeof(reason));
     struct zapp_layout *layout = data ? zapp_layout_parse(data, length, reason, sizeof(reason)) : NULL;
-    if (!data) snprintf(reason, sizeof(reason), "cannot read the file");
-    else if (layout && !zapp_layout_screen(layout, "home")) {
+    if (layout && !zapp_layout_screen(layout, "home")) {
         zapp_layout_free(layout); layout = NULL;
         snprintf(reason, sizeof(reason), "it has no home screen");
     }
@@ -139,7 +130,7 @@ static void load_layout(void)
     char path[PATH_CAP];
     struct stat info;
     snprintf(path, sizeof(path), "%s/layouts/home.json", shell.external);
-    bool present = shell.external[0] && stat(path, &info) == 0 && S_ISREG(info.st_mode);
+    bool present = shell.external[0] && lstat(path, &info) == 0 && S_ISREG(info.st_mode);
     if (!present) {
         if (shell.user_layout || !shell.layout || shell.layout_notice[0]) adopt_builtin("");
         memset(&shell.user_stamp, 0, sizeof(shell.user_stamp));
@@ -784,7 +775,7 @@ bool zapp_shell_create(JNIEnv *env, jobject activity, jobject assistant, zapp_na
     shell.send = send; shell.preview = preview;
     if (!shell.activity || !directory(env, activity, "getFilesDir", "()Ljava/io/File;", shell.files, sizeof(shell.files))) goto fail;
     (void)directory(env, activity, "getExternalFilesDir", "(Ljava/lang/String;)Ljava/io/File;", shell.external, sizeof(shell.external));
-    if (shell.external[0]) { snprintf(layouts, sizeof(layouts), "%s/layouts", shell.external); (void)mkdir(layouts, 0770); }
+    if (shell.external[0]) { snprintf(layouts, sizeof(layouts), "%s/layouts", shell.external); (void)mkdir(layouts, 0700); }
     load_choice();
     if (!build_stage(env, assistant)) goto fail;
     load_layout();

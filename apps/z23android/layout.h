@@ -49,6 +49,11 @@ struct zapp_layout {
  * 64 KiB, an unknown primitive, a color that is not "#rrggbb", more than 8 levels or 256 nodes. Unknown
  * fields are ignored. The result is released with zapp_layout_free. */
 struct zapp_layout *zapp_layout_parse(const char *json, size_t len, char *reason, size_t reason_cap);
+
+/* Reads a layout document from path into a new buffer of *length bytes. Only a regular file of at most
+ * ZAPP_LAYOUT_MAX_BYTES is read, and a symbolic link or a device is never opened. Returns NULL with the reason when
+ * the file is refused; the caller frees the buffer. */
+char *zapp_layout_read(const char *path, size_t *length, char *reason, size_t reason_cap);
 void zapp_layout_free(struct zapp_layout *layout);
 /* The root node of the named screen, or NULL. */
 const struct zapp_node *zapp_layout_screen(const struct zapp_layout *layout, const char *name);

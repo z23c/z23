@@ -1,9 +1,12 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+#define _POSIX_C_SOURCE 200809L
 #include "layout.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #define HEAD "{\"schema\":\"zcl.layout_recipe.v1\",\"id\":\"t\","
 static char reason[160];
@@ -230,8 +233,46 @@ static void card_fields(void)
     assert(zapp_card_is(&card, "clip") && !zapp_card_is(&card, "phone") && !zapp_card_is(NULL, "clip"));
     json_free(&card);
 }
-int main(void)
+/* home.json comes from shared storage: only a regular file within the size limit is read, never through a link. */
+static void write_file(const char *path, const char *text)
 {
+    FILE *file = fopen(path, "wb");
+    assert(file);
+    assert(fwrite(text, 1, strlen(text), file) == strlen(text));
+    assert(fclose(file) == 0);
+}
+static void read_checks(const char *scratch)
+{
+    char path[512], link[512], big[ZAPP_LAYOUT_MAX_BYTES + 8];
+    size_t length = 0;
+    char *data;
+    snprintf(path, sizeof(path), "%s/home.json", scratch);
+    write_file(path, "{\"a\":1}");
+    data = zapp_layout_read(path, &length, reason, sizeof(reason));
+    assert(data && length == 7 && !memcmp(data, "{\"a\":1}", 7));
+    free(data);
+    snprintf(link, sizeof(link), "%s/link.json", scratch);
+    assert(symlink(path, link) == 0);
+    assert(!zapp_layout_read(link, &length, reason, sizeof(reason)) && reason[0]);
+    assert(!zapp_layout_read(scratch, &length, reason, sizeof(reason)) && reason[0]);
+    snprintf(link, sizeof(link), "%s/fifo", scratch);
+    assert(mkfifo(link, 0600) == 0);
+    assert(!zapp_layout_read(link, &length, reason, sizeof(reason)) && reason[0]);
+    memset(big, ' ', sizeof(big) - 1);
+    big[sizeof(big) - 1] = 0;
+    write_file(path, big);
+    assert(!zapp_layout_read(path, &length, reason, sizeof(reason)) && strstr(reason, "larger"));
+    assert(!zapp_layout_read("/nonexistent/home.json", &length, reason, sizeof(reason)) && reason[0]);
+    assert(unlink(path) == 0);
+    snprintf(link, sizeof(link), "%s/link.json", scratch);
+    assert(unlink(link) == 0);
+    snprintf(link, sizeof(link), "%s/fifo", scratch);
+    assert(unlink(link) == 0);
+}
+int main(int argc, char **argv)
+{
+    assert(argc == 2);
+    read_checks(argv[1]);
     valid_layout();
     unknown_fields_are_ignored();
     unknown_primitive_is_refused();

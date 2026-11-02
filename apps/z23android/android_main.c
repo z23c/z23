@@ -12,6 +12,7 @@
 #endif
 #include "native_ui.h"
 #include "node_service.h"
+#include "pairing.h"
 #include "pay_stash.h"
 #include "secure_window.h"
 #include "wallet_send_ui.h"
@@ -369,8 +370,18 @@ static bool copy_utf(JNIEnv *env, jstring value, char *out, size_t cap)
     if (chars) (*env)->ReleaseStringUTFChars(env, value, chars);
     return ok;
 }
-/* Reads and removes the pairing descriptor a USB-connected laptop host offered
- * through the launch intent. The owner still accepts it on screen. */
+/* True when the uid that launched the activity may offer a pairing. A launch whose uid cannot be read is refused. */
+static bool pairing_caller_allowed(JNIEnv *env, jobject activity)
+{
+    jclass cls = (*env)->GetObjectClass(env, activity);
+    jmethodID get = cls ? (*env)->GetMethodID(env, cls, "getLaunchedFromUid", "()I") : NULL;
+    jint uid = clean(env) && get ? (*env)->CallIntMethod(env, activity, get) : -1;
+    return clean(env) && zapp_pair_caller_allowed(uid, (int)getuid());
+}
+/* Reads and removes the pairing descriptor a USB-connected laptop host offered through the launch
+ * intent. The extra is removed whoever sent it, and kept only when the adb shell, root or this app
+ * launched the activity; another app cannot raise a pairing prompt. QR scanning pairs without it.
+ * The owner still accepts the offer on screen. */
 static bool intent_pairing(JNIEnv *env, jobject activity, char *out, size_t cap)
 {
     bool ok = false;
@@ -383,6 +394,7 @@ static bool intent_pairing(JNIEnv *env, jobject activity, char *out, size_t cap)
     jstring value = clean(env) && extra && remove && key ? (*env)->CallObjectMethod(env, intent, extra, key) : NULL;
     ok = copy_utf(env, value, out, cap);
     if (value) (*env)->CallVoidMethod(env, intent, remove, key);
+    if (ok && !pairing_caller_allowed(env, activity)) { memory_cleanse(out, cap); ok = false; }
     (void)clean(env); (*env)->PopLocalFrame(env, NULL); return ok;
 }
 /* Reads the org.z23.clips launch extra and removes it from the in-process intent, so a later resume or

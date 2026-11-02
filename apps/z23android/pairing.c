@@ -14,3 +14,10 @@ bool zapp_pair_code(const char *descriptor, char code[7])
     code[6] = 0;
     return true;
 }
+
+bool zapp_pair_caller_allowed(int caller_uid, int own_uid)
+{
+    enum { UID_ROOT = 0, UID_SHELL = 2000 };
+    if (caller_uid < 0) return false;
+    return caller_uid == UID_ROOT || caller_uid == UID_SHELL || (own_uid >= 0 && caller_uid == own_uid);
+}

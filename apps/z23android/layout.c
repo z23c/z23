@@ -1,10 +1,15 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+#define _POSIX_C_SOURCE 200809L
 #include "layout.h"
+#include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 static const struct { const char *name; enum zapp_node_kind kind; bool container; } kinds[] = {
     {"pager_vertical", ZAPP_NODE_PAGER_VERTICAL, true}, {"list", ZAPP_NODE_LIST, true},
@@ -224,4 +229,25 @@ bool zapp_card_is(const struct json_value *card, const char *kind)
     char expected[ZAPP_NAME_CAP];
     snprintf(expected, sizeof(expected), "zcl.%s_card.v1", kind);
     return !strcmp(schema, expected);
+}
+
+char *zapp_layout_read(const char *path, size_t *length, char *reason, size_t reason_cap)
+{
+    struct stat info;
+    char *data = NULL;
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) { snprintf(reason, reason_cap, "cannot open the file (%s)", strerror(errno)); return NULL; }
+    if (fstat(fd, &info) != 0 || !S_ISREG(info.st_mode)) snprintf(reason, reason_cap, "it is not a regular file");
+    else if (info.st_size < 0 || (uintmax_t)info.st_size > ZAPP_LAYOUT_MAX_BYTES)
+        snprintf(reason, reason_cap, "it is larger than %u bytes", ZAPP_LAYOUT_MAX_BYTES);
+    else if (!(data = malloc((size_t)info.st_size + 1))) snprintf(reason, reason_cap, "out of memory");
+    else {
+        size_t got = 0;
+        ssize_t n;
+        while (got < (size_t)info.st_size && (n = read(fd, data + got, (size_t)info.st_size - got)) > 0) got += (size_t)n;
+        if (got != (size_t)info.st_size) { snprintf(reason, reason_cap, "cannot read the file"); free(data); data = NULL; }
+        else { data[got] = 0; *length = got; }
+    }
+    close(fd);
+    return data;
 }

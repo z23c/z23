@@ -126,6 +126,24 @@ static void node_notification_is_secret(void)
     free(src);
 }
 
+/* A pairing offer is read only when the launching uid is this app, the adb shell or root; the layouts folder is
+ * created owner-only and home.json is read without following links. */
+static void inputs_are_gated(void)
+{
+    char *src = slurp("android_main.c");
+    require(src, "\"getLaunchedFromUid\"", "caller uid of the launch");
+    require(src, "zapp_pair_caller_allowed(", "uid policy");
+    free(src);
+    src = slurp("shell.c");
+    assert(!strstr(src, "0770"));
+    require(src, "mkdir(layouts, 0700)", "owner-only layouts folder");
+    require(src, "zapp_layout_read(", "checked read of home.json");
+    free(src);
+    src = slurp("layout.c");
+    require(src, "O_NOFOLLOW", "no symbolic link for home.json");
+    free(src);
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && chdir(argv[1])) { perror(argv[1]); return 1; }
@@ -133,6 +151,7 @@ int main(int argc, char **argv)
     manifest_exports_only_the_launcher();
     text_entry_is_private();
     node_notification_is_secret();
+    inputs_are_gated();
     puts("surface_test: ok");
     return 0;
 }
