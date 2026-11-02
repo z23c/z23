@@ -755,6 +755,107 @@ static bool cold_import_seed_declare_floor(sqlite3 *db, int32_t H)
     return ok;
 }
 
+/* Gates (2b) forward-only and (2c) live-import provenance for the cold-import
+ * seed; logs and returns false on either refusal. */
+static bool cold_import_seed_chain_provenance_ok(struct main_state *ms,
+                                                 struct node_db *ndb,
+                                                 int32_t H)
+{
+    /* (2b) FORWARD-ONLY: never seed below where the active chain already is.
+     *     The seed publishes a finalized frontier at H; if the live tip is
+     *     already at or beyond H there is nothing to advance and lowering the
+     *     finalized authority is never correct. A torn datadir that genuinely
+     *     reached past H is left untouched. */
+    int cur_h = active_chain_height(&ms->chain_active);
+    if (cur_h > H) {
+        LOG_WARN_IN("block_index_loader_seed_stages_from_cold_import",
+                 "block_index",
+                 "cold-import seed: active tip h=%d already >= import H=%d; "
+                 "skip (forward-only)", cur_h, H);
+        return false;
+    }
+
+    /* (2c) LIVE IMPORT PROVENANCE: leveldb_utxo_migrated must STILL be set.
+     *     The producer writes the durable anchor inside the same accepted gate
+     *     that sets this flag; utxo_recovery_prepare_reimport clears the flag
+     *     (and the anchor) when a reimport starts. An interrupted reimport that
+     *     left a STALE height/hash key but cleared the flag is rejected here —
+     *     the durable key alone is not a coin-presence proof. */
+    if (!cold_import_seed_live_migrated(ndb)) {
+        LOG_WARN_IN("block_index_loader_seed_stages_from_cold_import",
+                 "block_index",
+                 "cold-import seed: leveldb_utxo_migrated not set; skip — "
+                 "import not live (H=%d)", H);
+        return false;
+    }
+    return true;
+}
+
+/* Commits the cold-import seed: steps (4)-(6) — coins_applied cursor, band
+ * note, tip_finalize anchor, seed floor, and the post-seed H* self-check. */
+static int cold_import_seed_commit(sqlite3 *progress_db,
+                                   struct block_index *anchor,
+                                   const uint8_t anchor_hash[32],
+                                   int32_t H)
+{
+    /* (4) Set the SECOND authority FIRST: coins_applied_height = H+1 (the
+     *     utxo_apply NEXT-height cursor convention — applied through H means
+     *     coins_applied_height == H+1). reducer_anchor_candidate_ok normalizes
+     *     tip_finalize's served-tip cursor H to the same H+1 frame, so the
+     *     anchor at H is accepted. Raise-only. */
+    if (!cold_import_set_applied_if_behind(progress_db, H + 1))
+        return -1;  // raw-return-ok:cold_import_set_applied_if_behind logs on failure
+
+    /* Record-only: a seed anchor NOT pprev-contiguous to a trust root is
+     * the band-hole class — note it loudly so the header
+     * planner backfills the band; the seed itself proceeds untouched.
+     * Covers re-boots that re-seed without re-running the LDB branch.
+     * Ancestry-derived: on the proven two-step cold-import recipe the
+     * imported header chain is contiguous and this abstains. */
+    utxo_recovery_note_band_unrooted_tip(anchor, "cold_import_seed");
+
+    /* (5) Seed the tip_finalize anchor (cursor -> H, served-tip convention)
+     *     + all 7 upstream cursors -> H+1 (next-height convention).
+     *     trusted_seed=true is the SHA3-verified fast-sync trust model the
+     *     import already established at H — same as snapshot_apply.c. */
+    if (!tip_finalize_stage_seed_anchor(H, anchor_hash, true)) {
+        LOG_WARN_IN("block_index_loader_seed_stages_from_cold_import",
+                 "block_index",
+                 "cold-import seed: tip_finalize_stage_seed_anchor failed H=%d "
+                 "— leaving durable anchor for next-boot retry", H);
+        return -1;  // raw-return-ok:logged on the lines above
+    }
+
+    /* (5b) Declare the external-seed floor ONCE: this cold-import seed is a
+     *     genuine external-seed path, so bg-validation's fresh walk starts
+     *     above H (the seeded extent has no undo data to script-verify
+     *     against). Absent-guarded — a re-seed keeps the first declaration.
+     *     Advisory: never fail the heal over the marker. */
+    if (!cold_import_seed_declare_floor(progress_db, H))
+        LOG_WARN_IN("block_index_loader_seed_stages_from_cold_import",
+                 "block_index",
+                 "cold-import seed: seed-floor declare failed H=%d "
+                 "(bg-validation will walk from genesis — slow, correct)", H);
+
+    /* (6) Self-check: the seed must have moved H* up to H. If not, the heal
+     *     silently did nothing — keep the durable anchor so the next boot
+     *     retries rather than booting half-seeded. */
+    int32_t hstar = 0, served = 0;
+    if (!cold_import_seed_hstar_reached(progress_db, H, &hstar, &served)) {
+        LOG_WARN_IN("block_index_loader_seed_stages_from_cold_import",
+                 "block_index",
+                 "cold-import seed: post-seed H*=%d != H=%d (heal incomplete) "
+                 "— durable anchor retained for retry", hstar, H);
+        return -1;  // raw-return-ok:logged on the lines above
+    }
+
+    printf("[boot] cold-import staged-sync seed: H*=%d coins_applied=%d "
+           "tip_finalize cursor -> %d, 7 upstream cursors -> %d "
+           "(was wedged at the import floor)\n",
+           hstar, H + 1, H, H + 1);
+    return 1;
+}
+
 int block_index_loader_seed_stages_from_cold_import(struct main_state *ms,
                                                     struct node_db *ndb,
                                                     struct sqlite3 *progress_db)
@@ -801,31 +902,9 @@ int block_index_loader_seed_stages_from_cold_import(struct main_state *ms,
                                                   checkpoint))
         return 0;  // raw-return-ok:torn-import refusal — fail-loud in the gate, stamps nothing
 
-    /* (2b) FORWARD-ONLY: never seed below where the active chain already is.
-     *     The seed publishes a finalized frontier at H; if the live tip is
-     *     already at or beyond H there is nothing to advance and lowering the
-     *     finalized authority is never correct. A torn datadir that genuinely
-     *     reached past H is left untouched. */
-    int cur_h = active_chain_height(&ms->chain_active);
-    if (cur_h > H) {
-        LOG_WARN("block_index",
-                 "cold-import seed: active tip h=%d already >= import H=%d; "
-                 "skip (forward-only)", cur_h, H);
+    /* (2b)/(2c) forward-only + live-import provenance gates. */
+    if (!cold_import_seed_chain_provenance_ok(ms, ndb, H))
         return 0;
-    }
-
-    /* (2c) LIVE IMPORT PROVENANCE: leveldb_utxo_migrated must STILL be set.
-     *     The producer writes the durable anchor inside the same accepted gate
-     *     that sets this flag; utxo_recovery_prepare_reimport clears the flag
-     *     (and the anchor) when a reimport starts. An interrupted reimport that
-     *     left a STALE height/hash key but cleared the flag is rejected here —
-     *     the durable key alone is not a coin-presence proof. */
-    if (!cold_import_seed_live_migrated(ndb)) {
-        LOG_WARN("block_index",
-                 "cold-import seed: leveldb_utxo_migrated not set; skip — "
-                 "import not live (H=%d)", H);
-        return 0;
-    }
 
     /* (2d) COIN-PRESENCE CROSS-CHECK: the torn-datadir guard. H*==H (step 6)
      *     cannot detect a coin tear: H* derives from progress-store
@@ -902,56 +981,6 @@ int block_index_loader_seed_stages_from_cold_import(struct main_state *ms,
         return 0;
     }
 
-    /* (4) Set the SECOND authority FIRST: coins_applied_height = H+1 (the
-     *     utxo_apply NEXT-height cursor convention — applied through H means
-     *     coins_applied_height == H+1). reducer_anchor_candidate_ok normalizes
-     *     tip_finalize's served-tip cursor H to the same H+1 frame, so the
-     *     anchor at H is accepted. Raise-only. */
-    if (!cold_import_set_applied_if_behind(progress_db, H + 1))
-        return -1;  // raw-return-ok:cold_import_set_applied_if_behind logs on failure
-
-    /* Record-only: a seed anchor NOT pprev-contiguous to a trust root is
-     * the band-hole class — note it loudly so the header
-     * planner backfills the band; the seed itself proceeds untouched.
-     * Covers re-boots that re-seed without re-running the LDB branch.
-     * Ancestry-derived: on the proven two-step cold-import recipe the
-     * imported header chain is contiguous and this abstains. */
-    utxo_recovery_note_band_unrooted_tip(anchor, "cold_import_seed");
-
-    /* (5) Seed the tip_finalize anchor (cursor -> H, served-tip convention)
-     *     + all 7 upstream cursors -> H+1 (next-height convention).
-     *     trusted_seed=true is the SHA3-verified fast-sync trust model the
-     *     import already established at H — same as snapshot_apply.c. */
-    if (!tip_finalize_stage_seed_anchor(H, anchor_hash, true)) {
-        LOG_WARN("block_index",
-                 "cold-import seed: tip_finalize_stage_seed_anchor failed H=%d "
-                 "— leaving durable anchor for next-boot retry", H);
-        return -1;  // raw-return-ok:logged on the lines above
-    }
-
-    /* (5b) Declare the external-seed floor ONCE: this cold-import seed is a
-     *     genuine external-seed path, so bg-validation's fresh walk starts
-     *     above H (the seeded extent has no undo data to script-verify
-     *     against). Absent-guarded — a re-seed keeps the first declaration.
-     *     Advisory: never fail the heal over the marker. */
-    if (!cold_import_seed_declare_floor(progress_db, H))
-        LOG_WARN("block_index",
-                 "cold-import seed: seed-floor declare failed H=%d "
-                 "(bg-validation will walk from genesis — slow, correct)", H);
-
-    /* (6) Self-check: the seed must have moved H* up to H. If not, the heal
-     *     silently did nothing — keep the durable anchor so the next boot
-     *     retries rather than booting half-seeded. */
-    if (!cold_import_seed_hstar_reached(progress_db, H, &hstar, &served)) {
-        LOG_WARN("block_index",
-                 "cold-import seed: post-seed H*=%d != H=%d (heal incomplete) "
-                 "— durable anchor retained for retry", hstar, H);
-        return -1;  // raw-return-ok:logged on the lines above
-    }
-
-    printf("[boot] cold-import staged-sync seed: H*=%d coins_applied=%d "
-           "tip_finalize cursor -> %d, 7 upstream cursors -> %d "
-           "(was wedged at the import floor)\n",
-           hstar, H + 1, H, H + 1);
-    return 1;
+    /* (4)-(6) commit the seed, then verify it moved H* up to H. */
+    return cold_import_seed_commit(progress_db, anchor, anchor_hash, H);
 }

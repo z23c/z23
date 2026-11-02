@@ -58,7 +58,6 @@ engine/jobs/src/utxo_apply_delta_repair.c:utxo_apply_repair_value_overflow_hole:
 engine/modules/storage/src/block_index_db.c:disk_block_index_deserialize:32
 engine/modules/storage/src/block_index_db.c:disk_block_index_serialize:29
 engine/modules/storage/src/coins_ram_boot_reconcile.c:coins_ram_reconcile_boot:31
-engine/services/src/block_index_loader_rebuild.c:block_index_loader_seed_stages_from_cold_import:18
 engine/services/src/node_db_import_service.c:node_db_import_service_run:29
 engine/services/src/property_grant_commit.c:commit_attempt:24
 engine/services/src/shielded_history_import_service.c:shielded_history_import_from_chainstate:22
