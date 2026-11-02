@@ -805,9 +805,42 @@ _test_next:;
 /* (e1) Kill after claim with submitted:false restarts to exactly-once:
  * the orphan is adopted, the submitted flag flips once, the executor
  * runs once, and the outcome completes. */
+/* Under AddressSanitizer the cases that run the fixture executor cannot run.
+ * The drive forks the executor and confines it with RLIMIT_DATA = mem_mb (1024
+ * MB here, zcl_devagent_worker_confine). The child is a fork of the ASan test
+ * process, whose private writable shadow already exceeds that (VmData is
+ * terabytes, see the skip line of test_devagent_worker's ceiling case), so its
+ * first malloc dies with the sanitizer's "ERROR: Failed to mmap" and the task
+ * never runs (measured: test_devagent_worker_guards.c:840, 1164, 1259, 1260 in
+ * the ASan run, task.txt never written). Raising mem_mb would change the cap
+ * the cases exist to exercise, so only the ASan build skips them. GCC defines
+ * __SANITIZE_ADDRESS__; Clang reports it through
+ * __has_feature(address_sanitizer). */
+#if defined(__SANITIZE_ADDRESS__)
+#define GTX_UNDER_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define GTX_UNDER_ASAN 1
+#endif
+#endif
+
+static bool gtx_skip_asan(const char *name)
+{
+#if defined(GTX_UNDER_ASAN)
+    printf("worker guards: %s SKIP under AddressSanitizer (RLIMIT_DATA cage "
+           "refuses the sanitizer's mappings)\n", name);
+    return true;
+#else
+    (void)name;
+    return false;
+#endif
+}
+
 static int gtx_case_e1(void)
 {
     int failures = 0;
+    if (gtx_skip_asan("gtx_case_e1"))
+        return 0;
 
     TEST("(e) submitted:false restarts to exactly-once")
     {
@@ -1136,6 +1169,8 @@ static int gtx_brief_cleanup(int mode, const char *local, const char *localdir,
 static int gtx_case_brief(int mode)
 {
     int failures = 0;
+    if (gtx_skip_asan("gtx_case_brief"))
+        return 0;
     bool isolated = false;
     char local[PATH_MAX] = "", localdir[PATH_MAX] = "";
     char outside[PATH_MAX] = "";
@@ -1228,6 +1263,8 @@ _test_next:;
 static int gtx_case_brief_resolution(int mode)
 {
     int failures = 0;
+    if (gtx_skip_asan("gtx_case_brief_resolution"))
+        return 0;
     bool isolated = false;
     char link[PATH_MAX] = "";
     TEST("brief resolution follows contained links and distinguishes absence")
