@@ -140,12 +140,13 @@ int check_hidden_return_under_lock_selftest(void)
     int rc = lct_scratch_dir(root, sizeof root, "hidden-return-under-lock");
     if (rc)
         return rc;
-    int bad = 0;
-    for (size_t i = 0; i < sizeof k_hrls_cases / sizeof k_hrls_cases[0]; i++)
-        bad |= hrls_run_case(root, &k_hrls_cases[i]) != 0;
-    bad |= hrls_missing_case(root) != 0;
+    const size_t ncases = sizeof k_hrls_cases / sizeof k_hrls_cases[0];
+    size_t failed = hrls_missing_case(root) != 0;
+    for (size_t i = 0; i < ncases; i++)
+        failed += hrls_run_case(root, &k_hrls_cases[i]) != 0;
     rap_rm_rf(root);
-    if (bad)
-        fputs("FAIL: check_hidden_return_under_lock selftest\n", stderr);
-    return st_ok(bad, "check-hidden-return-under-lock selftest: OK\n");
+    if (failed)
+        fprintf(stderr, "FAIL: check_hidden_return_under_lock selftest: %zu of %zu cases\n",
+                failed, ncases + 1);
+    return st_ok(failed != 0, "check-hidden-return-under-lock selftest: OK\n");
 }
