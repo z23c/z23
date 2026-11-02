@@ -176,7 +176,9 @@ int t_boot_shutdown_persistence_order_contract(void)
         char *consumer_join = strstr(
             buf, "thread_registry_join_all_except(\n"
                  "        2, db_threads, db_thread_count)");
-        char *thread_join = strstr(buf, "thread_registry_join_all(2)");
+        char *thread_join = strstr(
+            buf, "thread_registry_join_all_except(\n"
+                 "        2, parked_threads, parked_count)");
         char *marker = strstr(
             buf, "boot_shutdown_marker_write_clean(svc->datadir)");
         char *fast = strstr(buf, "shutdown_persist_fast_restart_state(svc);");
@@ -320,7 +322,8 @@ int t_boot_shutdown_connman_holders_stop_first(void)
         char *sup = strstr(drain, "supervisor_stop();");
         char *join_except =
             strstr(drain, "thread_registry_join_all_except(");
-        char *join_all = strstr(persist, "thread_registry_join_all(");
+        char *join_all =
+            strstr(persist, "thread_registry_join_all_except(");
         char *freed = strstr(release, "connman_free(svc->connman);");
         char *guard = strstr(release, "if (!diagnostics_drained)");
         ASSERT(in_range(sup, drain, d_end));

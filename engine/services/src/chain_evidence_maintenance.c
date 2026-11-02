@@ -142,6 +142,18 @@ bool chain_evidence_maintain_stop(int wait_ms)
     return idle;
 }
 
+bool chain_evidence_maintain_parked_tid(pthread_t *tid)
+{
+    if (!tid)
+        return false;
+    pthread_mutex_lock(&g_mu);
+    bool parked = g_inflight && g_have_tid;
+    if (parked)
+        *tid = g_tid;
+    pthread_mutex_unlock(&g_mu);
+    return parked;
+}
+
 void chain_evidence_maintain_resume(void)
 {
     pthread_mutex_lock(&g_mu);

@@ -16,6 +16,7 @@
 #include "services/chain_state_service.h"
 #include "util/result.h"
 
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -295,6 +296,10 @@ enum cec_maint_result chain_evidence_maintain_bounded(
     struct node_db *ndb, struct chain_state_repository *csr, int wait_ms);
 void chain_evidence_maintain_quiesce(void);
 bool chain_evidence_maintain_stop(int wait_ms);
+/* The parked run's thread id, for a shutdown join that must not wait on it:
+ * true (and *tid set) only while a run is still in flight, i.e. after a
+ * stop that returned false. false when the helper is idle or never ran. */
+bool chain_evidence_maintain_parked_tid(pthread_t *tid);
 void chain_evidence_maintain_resume(void);
 
 /* Guard A (coins-durability): the genuine applied coins frontier is the height

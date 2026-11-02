@@ -61,6 +61,7 @@
 #include "config/runtime.h"
 #include "models/database.h"
 #include "storage/progress_store.h"
+#include "util/thread_registry.h"
 
 #include <pthread.h>
 #include <sqlite3.h>
@@ -1021,10 +1022,43 @@ static bool hc_persisted_tip(struct node_db *ndb)
     return node_db_state_get_int(ndb, "cec.active_tip_height", &h) && h == 7;
 }
 
+/* The shutdown join steps over the registry, with the DB provider tids and
+ * the parked maintenance run excluded as boot_services_shutdown.c does. A
+ * join that waited on the parked run would not return until node.db frees. */
+struct hc_join_arg {
+    struct ndb_contest *n;
+    pthread_t ex[3];
+    size_t count;
+};
+
+static void *hc_join_thread(void *arg)
+{
+    struct hc_join_arg *a = (struct hc_join_arg *)arg;
+    (void)thread_registry_join_all_except(0, a->ex, a->count);
+    thread_registry_join_all_owned_except(a->ex, a->count);
+    contest_set(&a->n->c, &a->n->c.d_done);
+    return NULL;
+}
+
+static void hc_join_arg_init(struct hc_join_arg *a, struct ndb_contest *n,
+                             const struct db_service *dbsvc)
+{
+    memset(a, 0, sizeof(*a));
+    a->n = n;
+    if (dbsvc->worker_started)
+        a->ex[a->count++] = dbsvc->worker_thread;
+    if (dbsvc->ckpt_started)
+        a->ex[a->count++] = dbsvc->ckpt_thread;
+    pthread_t parked;
+    if (chain_evidence_maintain_parked_tid(&parked))
+        a->ex[a->count++] = parked;
+}
+
 /* Phase 3: shutdown with a run parked behind node.db. stop reports it (not
  * drained) inside its bound, so shutdown keeps node.db open; it drains once
  * node.db frees; a stopped helper starts no new run; resume re-arms it. */
-static int hc_shutdown_phase(struct node_db *ndb, struct ndb_contest *n)
+static int hc_shutdown_phase(struct node_db *ndb, struct ndb_contest *n,
+                             const struct db_service *dbsvc)
 {
     int failures = 0;
     pthread_t th;
@@ -1045,8 +1079,23 @@ static int hc_shutdown_phase(struct node_db *ndb, struct ndb_contest *n)
                "parked\n", have_t0 ? cev_ms_since(&t0) : -1L);
         SD_CHECK("hcbusy: shutdown stop reports the parked run (not drained)",
                  !drained);
+        /* The join steps after the bounded stop must not wait on the parked
+         * run: they return inside the bound while node.db is still owned. */
+        static struct hc_join_arg ja;
+        hc_join_arg_init(&ja, n, dbsvc);
+        pthread_t tj;
+        int rj = pthread_create(&tj, NULL, hc_join_thread, &ja);
+        SD_CHECK("hcbusy: shutdown join thread starts", rj == 0);
+        bool joined = rj == 0 && contest_wait(&n->c, &n->c.d_done, 10);
+        SD_CHECK("hcbusy: shutdown joins return without waiting on the "
+                 "parked run", joined);
+        pthread_t still;
+        SD_CHECK("hcbusy: the run is still parked after the joins",
+                 chain_evidence_maintain_parked_tid(&still));
         contest_set(&n->c, &n->c.release_h);
         pthread_join(th, NULL);
+        if (rj == 0)
+            pthread_join(tj, NULL);
         SD_CHECK("hcbusy: stop drains once node.db frees",
                  chain_evidence_maintain_stop(10000));
         /* node.db is free now, so a run that started would finish DONE
@@ -1135,7 +1184,7 @@ static int case_health_collect_ndb_busy(void)
     SD_CHECK("hcbusy: next tick writes nothing again (exactly-once persist)",
              sqlite3_total_changes(fx.ndb.db) == before);
 
-    failures += hc_shutdown_phase(&fx.ndb, &n);
+    failures += hc_shutdown_phase(&fx.ndb, &n, &fx.dbsvc);
 
     chain_evidence_pending_tip_test_reset();
     app_runtime_set_current(NULL);

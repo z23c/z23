@@ -51,6 +51,16 @@
 #include <stdatomic.h>
 #include <unistd.h>
 
+/* Append the parked chain-evidence maintenance run's tid (if one is still in
+ * flight) to an exclusion list the caller sized for it. */
+static size_t shutdown_exclude_parked_maint(pthread_t *excluded, size_t count)
+{
+    pthread_t parked;
+    if (chain_evidence_maintain_parked_tid(&parked))
+        excluded[count++] = parked;
+    return count;
+}
+
 static void shutdown_stop_frontend_services(struct boot_svc_ctx *svc)
 {
     printf("[shutdown] stopping frontend services\n");
@@ -322,7 +332,7 @@ static bool shutdown_stop_runtime_and_drain_workers(struct boot_svc_ctx *svc)
      * those exact pthread identities (not names), drain every consumer with
      * dependencies live, then let shutdown_persist_runtime_state() stop the DB
      * provider and run a final all-thread ownership audit. */
-    pthread_t db_threads[2];
+    pthread_t db_threads[3];
     size_t db_thread_count = 0;
     if (svc->db_service) {
         if (svc->db_service->worker_started)
@@ -330,6 +340,13 @@ static bool shutdown_stop_runtime_and_drain_workers(struct boot_svc_ctx *svc)
         if (svc->db_service->ckpt_started)
             db_threads[db_thread_count++] = svc->db_service->ckpt_thread;
     }
+    /* A maintenance run that did not drain is parked behind node.db or CSR
+     * and is registry-registered: joining it here would wait on the stalled
+     * disk and defeat the bounded stop above. Exclude it exactly like the DB
+     * tids; node.db stays retained for it. */
+    if (!maint_drained)
+        db_thread_count = shutdown_exclude_parked_maint(
+            db_threads, db_thread_count);
     int stragglers = thread_registry_join_all_except(
         2, db_threads, db_thread_count);
     if (stragglers > 0) {
@@ -475,13 +492,20 @@ static bool shutdown_persist_runtime_state(struct boot_svc_ctx *svc,
     /* db_service_stop() has now signalled and joined the only intentionally
      * excluded provider threads. No registered thread may survive the final
      * durability barrier or observe the resource-release phase. */
-    int stragglers = thread_registry_join_all(2);
+    /* A maintenance run still parked behind node.db (shutdown retained node.db
+     * for it) is excluded from the join, or this stage would wait on the
+     * stalled disk; the audit below still reports it live. */
+    pthread_t parked_threads[1];
+    size_t parked_count =
+        shutdown_exclude_parked_maint(parked_threads, 0);
+    int stragglers = thread_registry_join_all_except(
+        2, parked_threads, parked_count);
     if (stragglers > 0) {
         fprintf(stderr,
                 "[shutdown] %d final worker(s) exceeded their join budget; "
                 "retaining ownership before durability\n",
                 stragglers);
-        thread_registry_join_all_owned();
+        thread_registry_join_all_owned_except(parked_threads, parked_count);
     }
     int live_threads = thread_registry_live_count();
     int unreaped_threads = thread_registry_unreaped_count();
