@@ -54,26 +54,22 @@ static bool cli_take_port_flag(const char *arg, struct cli_target_args *t)
     return false;
 }
 
-static int cli_take_lane_flag(const char *arg, struct cli_target_args *t)
+/* -operator-lane=NAME and -profile=NAME; 1 on a name neither knows. */
+static int cli_take_named_flag(const char *arg, struct cli_target_args *t)
 {
-    if (strncmp(arg, "-operator-lane=", 15) != 0)
-        return CLI_FLAG_NOT_MINE;
-    if (!app_operator_lane_parse(arg + 15, &t->operator_lane)) {
+    if (strncmp(arg, "-operator-lane=", 15) == 0) {
+        if (app_operator_lane_parse(arg + 15, &t->operator_lane))
+            return CLI_ARGS_OK;
         fprintf(stderr, "Unknown operator lane: %s\n", arg + 15);
         return 1;
     }
-    return CLI_ARGS_OK;
-}
-
-static int cli_take_profile_flag(const char *arg, struct cli_target_args *t)
-{
-    if (strncmp(arg, "-profile=", 9) != 0)
-        return CLI_FLAG_NOT_MINE;
-    if (!app_runtime_profile_parse(arg + 9, &t->runtime_profile)) {
+    if (strncmp(arg, "-profile=", 9) == 0) {
+        if (app_runtime_profile_parse(arg + 9, &t->runtime_profile))
+            return CLI_ARGS_OK;
         fprintf(stderr, "Unknown runtime profile: %s\n", arg + 9);
         return 1;
     }
-    return CLI_ARGS_OK;
+    return CLI_FLAG_NOT_MINE;
 }
 
 static bool cli_take_network_flag(const char *arg, struct cli_target_args *t)
@@ -96,10 +92,7 @@ static int cli_take_flag(const char *arg, struct cli_target_args *t)
         return rc;
     if (cli_take_port_flag(arg, t))
         return CLI_ARGS_OK;
-    rc = cli_take_lane_flag(arg, t);
-    if (rc != CLI_FLAG_NOT_MINE)
-        return rc;
-    rc = cli_take_profile_flag(arg, t);
+    rc = cli_take_named_flag(arg, t);
     if (rc != CLI_FLAG_NOT_MINE)
         return rc;
     return cli_take_network_flag(arg, t) ? CLI_ARGS_OK : CLI_FLAG_NOT_MINE;
