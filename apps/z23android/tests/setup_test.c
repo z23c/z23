@@ -1144,6 +1144,34 @@ static void confirmed_record_tests(void)
 }
 /* After a restart the confirmed create finishes its setup again: the record kept no start height, so it says so. Start over is its way
  * forward, and the empty-wallet check still applies. */
+/* Start over refused for a reason: back on the no-start-height screen, which names the reason; checking again clears it. */
+static void start_over_refused_with(struct fake *f, struct wsu *w, enum wsu_idle idle, bool node_stops, enum wsu_failure reason)
+{
+    struct wsu_view v;
+    f->idle = idle;
+    f->stops_when_asked = node_stops;
+    assert(wsu_ask_start_over(w));
+    wsu_start_over_job(w);
+    wsu_view_read(w, &v);
+    assert(v.step == WSU_FAILED && v.failure == WSU_NO_BIRTHDAY && v.refusal == reason && f->running);
+    f->stops_when_asked = true;
+    assert(wsu_recheck(w));
+    wsu_resume_job(w);
+    wsu_view_read(w, &v);
+    assert(v.step == WSU_FAILED && v.failure == WSU_NO_BIRTHDAY && v.refusal == WSU_NO_FAILURE);
+}
+/* Cancel on the warning that follows a refusal also clears it. */
+static void start_over_refusal_cleared_by_cancel(struct fake *f, struct wsu *w)
+{
+    struct wsu_view v;
+    f->idle = WSU_IDLE_FUNDS;
+    assert(wsu_ask_start_over(w));
+    wsu_start_over_job(w);
+    assert(wsu_ask_start_over(w));
+    wsu_cancel_start_over(w);
+    wsu_view_read(w, &v);
+    assert(v.step == WSU_FAILED && v.failure == WSU_NO_BIRTHDAY && v.refusal == WSU_NO_FAILURE);
+}
 static void confirmed_no_start_restart_tests(struct fake *fp)
 {
     struct fake f = *fp;
@@ -1169,14 +1197,12 @@ static void confirmed_no_start_restart_tests(struct fake *fp)
     assert(wsu_ask_start_over(&w) && w.step == WSU_START_OVER);
     wsu_cancel_start_over(&w);
     assert(w.step == WSU_FAILED && w.failure == WSU_NO_BIRTHDAY);
-    assert(wsu_ask_start_over(&w));
-    f.idle = WSU_IDLE_FUNDS;
-    wsu_start_over_job(&w);
-    assert(w.step == WSU_FAILED && w.failure == WSU_NO_BIRTHDAY && f.running);
+    start_over_refusal_cleared_by_cancel(&f, &w);
+    start_over_refused_with(&f, &w, WSU_IDLE_FUNDS, true, WSU_NOT_EMPTY);
     files_untouched(node_dir);
-    assert(wsu_recheck(&w));
-    wsu_resume_job(&w);
-    assert(w.step == WSU_FAILED && w.failure == WSU_NO_BIRTHDAY);
+    start_over_refused_with(&f, &w, WSU_IDLE_UNKNOWN, true, WSU_COULD_NOT_CHECK);
+    start_over_refused_with(&f, &w, WSU_IDLE_EMPTY, false, WSU_NODE_BUSY);
+    files_untouched(node_dir);
     f.idle = WSU_IDLE_EMPTY;
     assert(wsu_ask_start_over(&w));
     wsu_start_over_job(&w);

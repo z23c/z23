@@ -42,6 +42,7 @@ static void set_step(struct wsu *w, enum wsu_step step, enum wsu_failure failure
     pthread_mutex_lock(&w->lock);
     w->step = step;
     w->failure = failure;
+    w->refusal = WSU_NO_FAILURE;
     pthread_mutex_unlock(&w->lock);
 }
 
@@ -51,6 +52,7 @@ void wsu_view_read(struct wsu *w, struct wsu_view *out)
     pthread_mutex_lock(&w->lock);
     out->step = w->step;
     out->failure = w->failure;
+    out->refusal = w->refusal;
     out->protected = w->protected;
     out->mismatches = w->mismatches;
     out->birthday_unknown = !w->birthday.known;
@@ -519,7 +521,7 @@ void wsu_cancel_start_over(struct wsu *w)
 {
     bool no_start = zapp_setup_confirmed(w->files) && !zapp_setup_confirmed_start(w->files);
     pthread_mutex_lock(&w->lock);
-    if (w->step == WSU_START_OVER) { w->step = no_start ? WSU_FAILED : WSU_BLOCKED; w->failure = no_start ? WSU_NO_BIRTHDAY : WSU_NO_FAILURE; }
+    if (w->step == WSU_START_OVER) { w->step = no_start ? WSU_FAILED : WSU_BLOCKED; w->failure = no_start ? WSU_NO_BIRTHDAY : WSU_NO_FAILURE; w->refusal = WSU_NO_FAILURE; }
     pthread_mutex_unlock(&w->lock);
 }
 
@@ -557,6 +559,9 @@ void wsu_start_over_job(struct wsu *w)
         /* A wallet that recorded no start height returns to saying so, as Cancel does: the blocked screen would describe unconfirmed words. */
         bool no_start = zapp_setup_confirmed(w->files) && !zapp_setup_confirmed_start(w->files);
         set_step(w, no_start ? WSU_FAILED : WSU_BLOCKED, no_start ? WSU_NO_BIRTHDAY : refusal);
+        pthread_mutex_lock(&w->lock);
+        if (no_start) w->refusal = refusal;   /* the screen names it; its own text does not */
+        pthread_mutex_unlock(&w->lock);
         return;
     }
     enum wsu_failure failure = set_aside_all(w, w->env.wall_s(w->env.ctx));

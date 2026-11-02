@@ -344,6 +344,7 @@ test-setup:
 	@grep -q 'blocks > SUN_BIRTHDAY_MARGIN' wallet_setup.c || { echo 'create must wait for a tip above the birthday margin' >&2; exit 1; }
 	@sed -n '/^static void draw_failed_buttons/,/^}/p' wallet_setup_ui.c | grep -q 'WSU_NO_BIRTHDAY) (void)button_view(env, B_START_OVER_ASK' || { echo 'a wallet with no start height must be offered Start over' >&2; exit 1; }
 	@sed -n '/^static bool by_button/,/^}/p' shell.c | grep -q 'TARGET_SETUP' || { echo 'a setup tap must be matched by button identity at release' >&2; exit 1; }
+	@grep -q 'v->refusal != WSU_NO_FAILURE' wallet_setup_ui.c || { echo 'a refused Start over must say why on the screen it returns to' >&2; exit 1; }
 	@grep -q 'ZAPP_FIELD_PRIVATE' wallet_setup_ui.c || { echo 'the word fields must be checked against ZAPP_FIELD_PRIVATE' >&2; exit 1; }
 	@sed -n '/^static void draw_words/,/^}/p' wallet_setup_ui.c | grep -q 'WSU_SCREEN_LOCK_NOTICE' || { echo 'the words screen must carry the screen lock notice' >&2; exit 1; }
 	@grep -q 'v->may_start_over' wallet_setup_ui.c || { echo 'Start over must be offered only for a create' >&2; exit 1; }

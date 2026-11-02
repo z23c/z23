@@ -107,6 +107,7 @@ struct wsu {
     unsigned mismatches;
     struct sun_birthday birthday;
     bool birthday_honoured;
+    enum wsu_failure refusal;   /* with NO_BIRTHDAY: why the last Start over was refused, or none */
     bool confirmed;      /* the owner proved the words (create) or typed them (restore) */
     bool restored;       /* the setup was a restore */
     bool protected;      /* every window protection is in force */
@@ -132,6 +133,7 @@ struct wsu_view {
     bool protected;
     bool birthday_unknown;
     bool birthday_dropped;
+    enum wsu_failure refusal;   /* with NO_BIRTHDAY: why the last Start over was refused, or none */
     bool may_start_over;   /* the setup is a create whose words were not confirmed */
     char leftover[WSU_LEFTOVER_MAX];
 };

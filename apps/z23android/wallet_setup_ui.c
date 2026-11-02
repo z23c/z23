@@ -438,6 +438,7 @@ static void draw_model(JNIEnv *env, const struct wsu_view *v, bool known, int64_
         (void)text_view(env, "Setup stopped", 24.0f, WHITE);
         (void)text_view(env, failure_text(v->failure), 15.0f, AMBER);
         if (v->failure == WSU_ASIDE_STUCK) (void)text_view(env, v->leftover, 14.0f, SOFT);
+        if (v->failure == WSU_NO_BIRTHDAY && v->refusal != WSU_NO_FAILURE) (void)text_view(env, failure_text(v->refusal), 15.0f, AMBER);
         draw_failed_buttons(env, v->failure);
         break;
     default: draw_interrupted(env, v); break;
