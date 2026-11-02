@@ -3275,6 +3275,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         check-log-macro-return-type \
         check-wallet-raw-prepare-log check-wallet-log-privacy check-blob-read-bounds \
         check-outparam-init-before-return \
+        check-hidden-return-under-lock \
         check-before-save-hooks check-pthread-create check-model-validation \
         check-model-sql-literals \
         check-persona-resolves check-specialists check-fleet-airship-rules check-fleet-facts check-fleet-observations check-fleet-vitals check-prompt-templates check-rule-vocabulary check-cookbook \
@@ -6696,6 +6697,7 @@ LINT_FAST_GATES := \
     check-before-save-hooks \
     check-pthread-create \
     check-log-macro-return-type \
+    check-hidden-return-under-lock \
     check-wallet-raw-prepare-log \
     check-wallet-log-privacy \
     check-zcc-cache \
@@ -15711,6 +15713,11 @@ check-outparam-init-before-return: $(LINTC_TOOL)
 	@./build/bin/z23-lint check-outparam-init-before-return --selftest
 	@./build/bin/z23-lint check-outparam-init-before-return
 
+check-hidden-return-under-lock: $(LINTC_TOOL)
+	@echo "══ LINT: no hidden-return macro while a directly taken lock is held ══"
+	@./build/bin/z23-lint check-hidden-return-under-lock --selftest
+	@./build/bin/z23-lint check-hidden-return-under-lock
+
 check-codeindex-coverage: $(Z23_DEV_BIN) $(LINTC_TOOL)
 	@echo "══ LINT: every tracked maintained source node is indexed ══"
 	@./build/bin/z23-lint check-codeindex-coverage --selftest
@@ -15920,6 +15927,7 @@ LINT_GATES := \
     check-dev-proof-native-fast-path \
     check-tu-random-seed \
     check-outparam-init-before-return \
+    check-hidden-return-under-lock \
     check-equihash-params \
     check-determinism-ratchet \
     check-before-save-hooks \

@@ -1475,6 +1475,7 @@ add/remove a gate.
 - `check-dev-proof-native-fast-path`
 - `check-tu-random-seed`
 - `check-outparam-init-before-return`
+- `check-hidden-return-under-lock`
 - `check-equihash-params`
 - `check-determinism-ratchet`
 - `check-sqlite-cursor-lifetime`
