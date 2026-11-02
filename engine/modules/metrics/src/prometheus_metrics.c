@@ -101,9 +101,12 @@ static bool                 g_observer_installed[4];
 static metrics_rpc_http_gauges_fn g_rpc_http_source = NULL;
 static void                      *g_rpc_http_source_ctx = NULL;
 
-/* Sync state gauge (set atomically alongside node gauges) */
+/* Sync state gauge (set atomically alongside node gauges). The name is a
+ * copy, written and read under g_lock: the metrics tick passes a name that
+ * lives in its own stack frame (11-02 ASan: stack-use-after-return when the
+ * renderer read a stored pointer to it). */
 static _Atomic int          g_node_sync_state;
-static const char          *g_node_sync_state_name = "unknown";
+static char                 g_node_sync_state_name[32] = "unknown";
 
 /* ── Hysteresis gauges ───────────────────────────────
  *
@@ -574,7 +577,10 @@ static void consensus_reject_observer(enum event_type type, uint32_t peer_id,
 void metrics_prometheus_set_sync_state(int state, const char *name)
 {
     atomic_store(&g_node_sync_state, state);
-    g_node_sync_state_name = name ? name : "unknown";
+    pthread_mutex_lock(&g_lock);
+    (void)snprintf(g_node_sync_state_name, sizeof(g_node_sync_state_name),
+                   "%s", name ? name : "unknown");
+    pthread_mutex_unlock(&g_lock);
 
     /* sync_state_stuck hysteresis: uses the same-tick uptime gauge (set
      * by metrics_prometheus_set_node_gauges, which engine/modules/metrics's tick always
@@ -754,7 +760,7 @@ size_t metrics_prometheus_render_prometheus(char *buf, size_t cap)
     int64_t uc = atomic_load(&g_node_utxo_count);
     int64_t up = atomic_load(&g_node_uptime_seconds);
     int ss = atomic_load(&g_node_sync_state);
-    const char *ssn = g_node_sync_state_name;
+    const char *ssn = g_node_sync_state_name; /* g_lock held since entry */
 
     pos = append(buf, cap, pos,
         "# HELP zcl_block_height Current best chain height\n"
@@ -798,7 +804,7 @@ size_t metrics_prometheus_render_prometheus(char *buf, size_t cap)
         "# HELP zcl_sync_state Sync state (0=idle, 5=at_tip)\n"
         "# TYPE zcl_sync_state gauge\n"
         "zcl_sync_state{name=\"%s\"} %d\n",
-        ssn ? ssn : "unknown", ss);
+        ssn, ss);
 
     pos = append(buf, cap, pos,
         "# HELP zcl_uptime_seconds Node uptime in seconds\n"
