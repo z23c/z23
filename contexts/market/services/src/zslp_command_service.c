@@ -188,7 +188,7 @@ static bool zslp_command_prevouts_in_range(struct wallet *wallet,
             wallet, &wtx->tx.vin[i].prevout.hash);
 
         if (prev && wtx->tx.vin[i].prevout.n >= prev->tx.num_vout) {
-            LOG_FAIL("zslp_cmd", "prepare: input %zu names output %u of a transaction with %zu outputs",
+            LOG_ERROR("zslp_cmd", "prepare: input %zu names output %u of a transaction with %zu outputs",
                      i, (unsigned int)wtx->tx.vin[i].prevout.n,
                      prev->tx.num_vout);
             in_range = false;
