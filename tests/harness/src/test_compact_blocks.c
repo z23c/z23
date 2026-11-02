@@ -17,6 +17,20 @@
 #include <string.h>
 #include <stdio.h>
 
+/* The fixture node lives on the stack, so p2p_node_free() never runs for it;
+ * drain its send queue here so each queued segment is released through
+ * send_segment_free(), which also returns its bytes to the send budget. */
+static void compact_oom_drain_sends(struct p2p_node *node)
+{
+    while (node->send_head) {
+        struct send_segment *seg = node->send_head;
+        node->send_head = seg->next;
+        send_segment_free(seg);
+    }
+    node->send_tail = NULL;
+    node->send_size = 0;
+}
+
 /* Drive process_cmpctblock() with a partially-reconstructing compact block
  * while the per-peer pending-block stash allocation is faulted out. Pre-fix
  * the handler built a getblocktxn request from node->compact_missing_indices
@@ -150,6 +164,7 @@ static int test_process_cmpctblock_oom_pending_stash(void)
     node.compact_num_missing = 0;
     node.compact_request_time = 0;
     memset(&node.compact_pending_hash, 0, sizeof(node.compact_pending_hash));
+    compact_oom_drain_sends(&node);
     stream_free(&s);
     compact_block_msg_free(&cb);
     block_free(&blk);

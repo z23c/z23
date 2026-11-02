@@ -4397,7 +4397,7 @@ static int test_net_net_peer_misbehaving_accumulates_score(void)
         memset(&node, 0, sizeof(node));
         snprintf(node.addr_name, sizeof(node.addr_name), "test_peer");
         struct net_manager nm;
-        memset(&nm, 0, sizeof(nm));
+        net_manager_init(&nm);
 
         /* Below threshold — not disconnected */
         peer_misbehaving(&nm, &node, 50, "test1");
@@ -4405,6 +4405,7 @@ static int test_net_net_peer_misbehaving_accumulates_score(void)
         /* At threshold — banned and disconnected */
         peer_misbehaving(&nm, &node, 50, "test2");
         ok = ok && (node.misbehavior == 100 && node.disconnect);
+        net_manager_free(&nm);
         if (ok) printf("OK\n");
         else { printf("FAIL (score=%d, disc=%d)\n", node.misbehavior, node.disconnect); failures++; }
     }
@@ -4415,12 +4416,13 @@ static int test_net_net_peer_misbehaving_accumulates_score(void)
         memset(&node, 0, sizeof(node));
         snprintf(node.addr_name, sizeof(node.addr_name), "test_spam");
         struct net_manager nm;
-        memset(&nm, 0, sizeof(nm));
+        net_manager_init(&nm);
 
         /* 10 bad blocks at 10 points each = 100 = banned */
         for (int i = 0; i < 10; i++)
             peer_misbehaving(&nm, &node, 10, "bad block");
         bool ok = (node.misbehavior == 100 && node.disconnect);
+        net_manager_free(&nm);
         if (ok) printf("OK\n");
         else { printf("FAIL (score=%d)\n", node.misbehavior); failures++; }
     }

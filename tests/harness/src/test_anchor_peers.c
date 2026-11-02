@@ -219,6 +219,7 @@ static int anchor_collect_healthy_check(void)
     for (size_t i = 0; ok && i < set.count; i++)
         ok = ok && (set.peers[i].services & NODE_NETWORK) != 0 &&
                    set.peers[i].port == 8033;
+    connman_free(&cm);
     if (ok) printf("OK\n");
     else { printf("FAIL (collected=%zu, want 2)\n", set.count); return 1; }
     return 0;
@@ -296,6 +297,7 @@ static int anchor_gather_order_check(void)
     for (size_t i = 0; ok && i < n2; i++)
         ok = ok && batch2[i].source != CONNMAN_TARGET_ANCHOR;
 
+    connman_free(&cm);
     if (ok) printf("OK\n");
     else { printf("FAIL (n=%zu anchors=%zu order_ok=%d)\n", n, anchor_count, order_ok); return 1; }
     return 0;
