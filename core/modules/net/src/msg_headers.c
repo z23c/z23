@@ -1490,8 +1490,43 @@ static bool headers_skip_to_best_header(struct msg_processor *mp,
                mp->main_state->pindex_best_header->nHeight;
 }
 
-bool process_headers(struct msg_processor *mp, struct p2p_node *node,
-                     struct byte_stream *s)
+struct headers_batch_acc {
+    struct uint256 last_hash;
+    struct block_index *pindex_last;
+    struct sync_header_processing_plan header_plan;
+    size_t accepted;
+    size_t newly_added;  /* headers that were NOT already in block index */
+    bool any_bad_prevblk;  /* any header rejected as unconnectable */
+    size_t seq_count;
+    int pre_tip_height;
+    struct block_index *sequence_prev;
+    unsigned char peer_group[NET_ADDR_GROUP_MAX];
+    size_t peer_group_len;
+    struct uint256 seq_hashes[512];
+    int32_t seq_heights[512];
+};
+
+/* Initialize the batch accumulator from the active tip and peer group. */
+static void headers_batch_acc_prepare(struct headers_batch_acc *acc,
+                                     struct msg_processor *mp,
+                                     struct p2p_node *node)
+{
+    /* Address-group key of the peer offering these headers — the unit of
+     * distinct-source counting for the eclipse-resistant switch corroboration
+     * policy (net/header_corroboration.h). Onion and clearnet peers carry
+     * distinct keys; a whole /16 (clearnet) or one onion group counts once. */
+    memset(acc, 0, sizeof(*acc));
+    uint256_set_null(&acc->last_hash);
+    acc->pre_tip_height = active_chain_height(&mp->main_state->chain_active);
+    acc->sequence_prev = active_chain_tip(&mp->main_state->chain_active);
+    acc->peer_group_len = net_addr_get_group(&node->addr.svc.addr,
+                                             acc->peer_group,
+                                             sizeof(acc->peer_group));
+}
+
+/* Drop the batch when snapshot sync is active, otherwise return false. */
+static bool headers_drop_for_snapshot(struct msg_processor *mp,
+                                     struct p2p_node *node)
 {
     /* Defer header processing during any snapshot sync state — header parsing
      * and block index updates consume CPU and starve P2P reads.
@@ -1504,19 +1539,35 @@ bool process_headers(struct msg_processor *mp, struct p2p_node *node,
         uint64_t n =
             atomic_fetch_add(&g_headers_recv_suppressed_snapshot, 1) + 1;
         if (getheaders_suppress_rising_edge(&g_headers_recv_snapshot_streak))
-            LOG_WARN("headers",
+            LOG_WARN_IN("process_headers", "headers",
                      "process_headers: inbound headers from %s DROPPED — "
                      "active snapshot sync (suppressed_recv_snapshot=%llu)",
                      node->addr_name, (unsigned long long)n);
         return true;
     }
-    atomic_store(&g_headers_recv_snapshot_streak, false);
+    return false;
+}
 
-    uint64_t count;
-    if (!stream_read_compact_size(s, &count))
-        LOG_FAIL("net", "failed to read headers count from %s",
-                 node->addr_name);
+/* Read the compact headers count. A short read fails the batch. */
+static bool headers_read_batch_count(struct byte_stream *s,
+                                    struct p2p_node *node,
+                                    uint64_t *count)
+{
+    *count = 0;
+    if (!stream_read_compact_size(s, count)) {
+        LOG_ERROR_IN("process_headers", "net",
+                     "failed to read headers count from %s",
+                     node->addr_name);
+        return false;
+    }
+    return true;
+}
 
+/* Disconnect a peer that sent more headers than the batch cap allows. */
+static bool headers_reject_header_flood(struct msg_processor *mp,
+                                        struct p2p_node *node,
+                                        uint64_t count)
+{
     if (msg_count_exceeds("net", "headers", count, 2000, node->addr_name)) {
         event_emitf(EV_PEER_MISBEHAVE, (uint32_t)node->id,
                     "headers count %llu exceeds 2000 from %s",
@@ -1527,162 +1578,621 @@ bool process_headers(struct msg_processor *mp, struct p2p_node *node,
             node, P2P_DISCONNECT_RESOURCE_LIMIT,
             P2P_DISCONNECT_SOURCE_RESOURCE_GOVERNOR,
             node->endpoint_generation);
+        return true;
+    }
+    return false;
+}
+
+/* Count an accepted header and offer it to repair and corroboration. */
+static void headers_account_accepted(struct headers_batch_acc *acc,
+                                    struct msg_processor *mp,
+                                    struct block_index *pindex,
+                                    const struct block_header *hdr,
+                                    const struct uint256 *hdr_hash,
+                                    bool was_known)
+{
+    acc->accepted++;
+    if (!was_known)
+        acc->newly_added++;
+    /* A serve miss may have requested this exact bounded header-only
+     * span. Known headers take a cheap path in accept_block_header,
+     * so independently full-verify before caching their solutions. */
+    (void)getheaders_cache_repair_candidate(mp, pindex, hdr);
+    /* Record that THIS peer's address group served this header, so a
+     * later best-header SWITCH to this branch can be corroborated
+     * against a second distinct group before we adopt it. Records the
+     * header hash regardless of whether it was new — a second peer
+     * re-serving a known header is exactly the corroboration signal. */
+    if (acc->peer_group_len > 0)
+        header_corroboration_note(hdr_hash, acc->peer_group,
+                                  acc->peer_group_len);
+}
+
+/* Relink onto the batch anchor when the map agrees; true means refused. */
+static bool headers_relink_batch_order(struct msg_processor *mp,
+                                      struct headers_batch_acc *acc,
+                                      const struct block_header *hdr,
+                                      struct block_index *pindex)
+{
+    /* Batch-order relink heal: the wire's prev hash names this
+     * batch's previous header, but our index disagrees with
+     * that ordering. accept_block_header has ALREADY repaired
+     * this entry against the map-derived parent, so a residual
+     * disagreement can only mean the batch anchor went stale
+     * against the map (concurrent re-keying, an orphaned twin,
+     * a freed entry). Trust the map, not the batch position:
+     * re-link only when the claimed parent resolves to exactly
+     * that anchor and the child carries no failure mask —
+     * anything else would rewrite an established index ladder
+     * (parent, height, skip list, chain work) from one
+     * unauthenticated signal. A refused header does NOT advance
+     * the cursor: the next one compares against the last
+     * map-agreed anchor instead. */
+    if (pindex && acc->sequence_prev && acc->sequence_prev->phashBlock &&
+        uint256_eq(&hdr->hashPrevBlock, acc->sequence_prev->phashBlock)) {
+        struct block_index *mapped_prev = block_map_find(
+            &mp->main_state->map_block_index, &hdr->hashPrevBlock);
+        if (mapped_prev && mapped_prev == acc->sequence_prev &&
+            !(pindex->nStatus & BLOCK_FAILED_MASK)) {
+            if (pindex->pprev != acc->sequence_prev ||
+                pindex->nHeight != acc->sequence_prev->nHeight + 1) {
+                pindex->pprev = acc->sequence_prev;
+                pindex->nHeight = acc->sequence_prev->nHeight + 1;
+                block_index_build_skip(pindex);
+                struct arith_uint256 proof = GetBlockProof(pindex);
+                arith_uint256_add(&pindex->nChainWork,
+                                  &acc->sequence_prev->nChainWork, &proof);
+            }
+            acc->sequence_prev = pindex;
+            return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+/* Record the accepted header as the batch tail and a sequence candidate. */
+static void headers_store_accepted_tail(struct headers_batch_acc *acc,
+                                       struct block_index *pindex)
+{
+    acc->pindex_last = pindex;
+    if (pindex && pindex->phashBlock)
+        acc->last_hash = *pindex->phashBlock;
+    acc->seq_count = headers_note_sequence_candidate(
+        pindex, acc->pre_tip_height, acc->seq_hashes, acc->seq_heights,
+        acc->seq_count);
+}
+
+/* Record a bad-prevblk rejection and trace the header. */
+static void headers_note_rejection(struct p2p_node *node,
+                                  struct block_header *hdr,
+                                  uint64_t i,
+                                  const struct validation_state *state,
+                                  bool *any_bad_prevblk)
+{
+    /* Track the unconnectable-rejection signal: a batch rejected
+     * with bad-prevblk usually means the peer is AHEAD of us (we
+     * missed the intermediate header), not that it is garbage —
+     * the all-rejected recovery probe below keys on this. */
+    if (strcmp(state->reject_reason, "bad-prevblk") == 0)
+        *any_bad_prevblk = true;
+    headers_trace_rejected_header(node, hdr, i, state);
+}
+
+/* Deserialize and accept one header. A short read fails the batch. */
+static bool headers_take_one_header(struct msg_processor *mp,
+                                   struct p2p_node *node,
+                                   struct byte_stream *s,
+                                   uint64_t i,
+                                   struct headers_batch_acc *acc)
+{
+    struct block_header hdr;
+    block_header_init(&hdr);
+    if (!block_header_deserialize(&hdr, s)) {
+        event_emitf(EV_HEADERS_REJECTED, (uint32_t)node->id,
+                    "malformed header[%llu] from %s",
+                    (unsigned long long)i, node->addr_name);
+        peer_scoring_record(mp->net_mgr, node, PEER_OFFENCE_FLOOD,
+                            "malformed header");
+        LOG_ERROR_IN("process_headers", "net", "malformed header[%llu] from %s",
+                     (unsigned long long)i, node->addr_name);
         return false;
     }
 
-    struct uint256 last_hash;
-    uint256_set_null(&last_hash);
-    struct block_index *pindex_last = NULL;
-    struct sync_header_processing_plan header_plan = {0};
-    size_t accepted = 0;
-    size_t newly_added = 0;  /* headers that were NOT already in block index */
-    bool any_bad_prevblk = false;  /* any header rejected as unconnectable */
-    struct uint256 seq_hashes[512];
-    int32_t seq_heights[512];
-    size_t seq_count = 0;
-    int pre_tip_height = active_chain_height(&mp->main_state->chain_active);
-    struct block_index *sequence_prev =
-        active_chain_tip(&mp->main_state->chain_active);
+    uint64_t dummy;
+    if (!stream_read_compact_size(s, &dummy)) {
+        peer_scoring_record(mp->net_mgr, node, PEER_OFFENCE_FLOOD,
+                            "truncated header tx count");
+        LOG_ERROR_IN("process_headers", "net",
+                     "truncated header tx count at header[%llu] from %s",
+                     (unsigned long long)i, node->addr_name);
+        return false;
+    }
 
-    /* Address-group key of the peer offering these headers — the unit of
-     * distinct-source counting for the eclipse-resistant switch corroboration
-     * policy (net/header_corroboration.h). Onion and clearnet peers carry
-     * distinct keys; a whole /16 (clearnet) or one onion group counts once. */
-    unsigned char peer_group[NET_ADDR_GROUP_MAX];
-    size_t peer_group_len = net_addr_get_group(&node->addr.svc.addr,
-                                               peer_group, sizeof(peer_group));
+    /* Check if header already in index BEFORE accept_block_header */
+    struct uint256 hdr_hash;
+    block_header_get_hash(&hdr, &hdr_hash);
+    bool was_known = (block_map_find(&mp->main_state->map_block_index,
+                                      &hdr_hash) != NULL);
+
+    /* Checkpoint-header-solution cure: offer every received header (with its
+     * on-wire Equihash solution) to the checkpoint fetch. Cheap (one relaxed
+     * atomic) when no fetch is armed; on a hash-pin match it captures the
+     * bytes for the app-layer condition to frozen-verify + persist. The
+     * header is captured even when `was_known` (the imported checkpoint
+     * header IS already in the index — only its solution is missing). */
+    checkpoint_header_fetch_offer(&hdr, &hdr_hash);
+
+    struct validation_state state;
+    validation_state_init(&state);
+    struct block_index *pindex = NULL;
+    if (accept_block_header(&hdr, &state, mp->main_state,
+                            mp->params, &pindex)) {
+        headers_account_accepted(acc, mp, pindex, &hdr, &hdr_hash, was_known);
+        if (headers_relink_batch_order(mp, acc, &hdr, pindex)) {
+            /* Non-returning ERROR emit: a refused relink must not
+             * abort the batch (LOG_FAIL would return false out of
+             * process_headers mid-loop) — later headers in this
+             * same batch still carry independent information. */
+            LOG_ERROR_IN("process_headers", "net",
+                         "headers[%llu]: batch-order relink "
+                         "refused (anchor not map-resolved or child "
+                         "failed) for h=%d",
+                         (unsigned long long)i, pindex->nHeight);
+        }
+        headers_store_accepted_tail(acc, pindex);
+    } else {
+        headers_note_rejection(node, &hdr, i, &state, &acc->any_bad_prevblk);
+    }
+
+    /* Detective A2 — score the peer for an objectively-forged header page.
+     * accept_block_header admits header-first and defers the PoW/Equihash
+     * verdict to the validate_headers stage, so it returns true even for a
+     * bad-solution / high-hash header; check_block_header still computes the
+     * DoS grade into `state`. A dos>0 here is an objective PoW/Equihash
+     * failure (invalid-solution=100, high-hash=50) — penalize INVALID_HEADER
+     * so a peer forging the header range (e.g. while a stale-header repair
+     * is fetching the canonical bytes) is scored and eventually
+     * disconnected, and the forged page never fools the repair. Gated on
+     * dos>0 so orphans / failed-parent / obsolete-version (dos 0) — all
+     * normal during sync — are never penalized. Trusted/localhost peers are
+     * exempted inside peer_misbehaving. Mirrors msg_blocks.c grading. */
+    headers_penalize_forged_header(mp, node, &state);
+    return true;
+}
+
+/* Prefer this batch's connected sequence as the block-request queue. */
+static void headers_overlay_sequence_queue(struct headers_batch_acc *acc,
+                                          struct uint256 *hashes,
+                                          int32_t *heights)
+{
+    if (acc->seq_count > 0 && hashes && heights) {
+        memcpy(hashes, acc->seq_hashes, acc->seq_count * sizeof(struct uint256));
+        memcpy(heights, acc->seq_heights, acc->seq_count * sizeof(int32_t));
+        acc->header_plan.should_queue_needed_blocks = true;
+        acc->header_plan.queue_count = acc->seq_count;
+        acc->header_plan.should_activate_chain = false;
+        acc->header_plan.download.needed_blocks.count = acc->seq_count;
+        acc->header_plan.download.needed_blocks.chains_from_tip = true;
+    }
+}
+
+/* Skip the inline block-file scan once the chain is past height 1000000. */
+static void headers_suppress_live_block_scan(int our_height,
+                                             struct sync_header_processing_plan *plan)
+{
+    if (our_height > 1000000 && plan->should_scan_block_files) {
+        printf("headers: skip inline block-file scan at live height h=%d\n",
+               our_height);
+        plan->should_scan_block_files = false;
+    }
+}
+
+/* Emit the all-headers-rejected stall warning when the plan asks for it. */
+static void headers_warn_all_rejected(struct p2p_node *node, uint64_t count,
+                                     const struct sync_header_processing_plan *plan)
+{
+    if (plan->batch.should_warn_all_rejected) {
+        /* All headers rejected — this stalls sync. Log prominently. */
+        event_emitf(EV_HEADERS_REJECTED, (uint32_t)node->id,
+                    "all %llu headers rejected", (unsigned long long)count);
+        printf("WARNING: Peer %s: all %llu headers rejected — sync stalled!\n",
+               node->addr_name, (unsigned long long)count);
+    }
+}
+
+/* Build the header-processing plan and its block-request arrays. */
+static void headers_plan_block_requests(struct msg_processor *mp,
+                                       struct p2p_node *node,
+                                       struct headers_batch_acc *acc,
+                                       uint64_t count,
+                                       struct uint256 **hashes_out,
+                                       int32_t **heights_out,
+                                       int *our_height_out)
+{
+    *hashes_out = NULL;
+    *heights_out = NULL;
+    *our_height_out = 0;
+
+    struct block_index *tip = active_chain_tip(&mp->main_state->chain_active);
+    int our_height = tip ? tip->nHeight : 0;
+    *our_height_out = our_height;
+    struct block_index *bi = block_map_find(
+        &mp->main_state->map_block_index, &acc->last_hash);
+    size_t max_collect = 512;
+    struct uint256 *hashes = zcl_malloc(max_collect * sizeof(struct uint256), "blk_req_hashes");
+    int32_t *heights = zcl_malloc(max_collect * sizeof(int32_t), "blk_req_heights");
+
+    if (!hashes || !heights) {
+        LOG_WARN_IN("process_headers", "sync", "malloc failed for block request arrays "
+                 "(%zu entries)", max_collect);
+        free(hashes); free(heights);
+        hashes = NULL; heights = NULL;
+    }
+    *hashes_out = hashes;
+    *heights_out = heights;
+
+    syncsvc_plan_header_processing(&acc->header_plan, acc->accepted, count,
+                                   acc->pindex_last, sync_get_state(),
+                                   bi, tip, our_height,
+                                   hashes, heights, max_collect);
+    headers_overlay_sequence_queue(acc, hashes, heights);
+    headers_suppress_live_block_scan(our_height, &acc->header_plan);
+    headers_warn_all_rejected(node, count, &acc->header_plan);
+
+    /* All-rejected recovery probe (the missed-intermediate-header stall):
+     * a direct tip announcement (BIP 130) whose prev we do not have is
+     * all-rejected with bad-prevblk, and should_request_more_headers
+     * requires accepted>0, so without this probe no getheaders follow-up
+     * is ever scheduled and — once the frontier-parity gate disables the
+     * stale-peer disconnect — the node forgets the announced height and
+     * sits below the network tip forever. Re-probe with getheaders from
+     * our best header; the exponential locator lets the peer serve the
+     * missing intermediate headers. Keyed on the bad-prevblk signal and
+     * rate-limited per peer so a garbage peer cannot make us ping-pong. */
+    headers_probe_after_reject(mp, node, &acc->header_plan, acc->any_bad_prevblk);
+}
+
+/* Emit header-batch receipt and warn when the header tip is stalled. */
+static void headers_emit_received_batch(struct msg_processor *mp,
+                                       struct p2p_node *node,
+                                       struct block_index *pindex_last,
+                                       size_t accepted,
+                                       uint64_t count,
+                                       const struct sync_header_processing_plan *plan)
+{
+    if (plan->batch.should_emit_received) {
+        event_emitf(EV_HEADERS_RECEIVED, (uint32_t)node->id,
+                    "accepted=%zu total=%llu tip=%d",
+                    accepted, (unsigned long long)count,
+                    pindex_last ? pindex_last->nHeight : -1);
+
+        if (syncsvc_should_log_accepted_headers(node, pindex_last)) {
+            int chain_h = active_chain_height(&mp->main_state->chain_active);
+            printf("Peer %s: accepted %zu/%llu headers "
+                   "(header tip=%d, chain tip=%d, peer=%d)\n",
+                   node->addr_name, accepted, (unsigned long long)count,
+                   pindex_last ? pindex_last->nHeight : -1,
+                   chain_h, node->starting_height);
+            /* Stall detection: if we accepted headers but the tip
+             * didn't advance past chain height, something is wrong
+             * with the block index heights. Log loudly. */
+            if (headers_is_stalled_tip(pindex_last, accepted, chain_h,
+                                       node)) {
+                LOG_WARN_IN("process_headers", "sync",
+                    "STALL DETECTED: accepted %zu headers but "
+                    "header tip=%d < chain tip=%d (peer at %d). "
+                    "Block index heights may be corrupted.",
+                    accepted, pindex_last->nHeight, chain_h,
+                    node->starting_height);
+            }
+        }
+    }
+}
+
+/* Submit the header tip, or hold an uncorroborated deep switch. */
+static void headers_commit_corroborated_tip(struct msg_processor *mp,
+                                           struct p2p_node *node,
+                                           struct block_index *pindex_last,
+                                           const unsigned char *peer_group,
+                                           size_t peer_group_len)
+{
+    /* The CSR owns both ranking and publication. Always submit the batch
+     * candidate; a valid non-winning header is an idempotent no-op.
+     *
+     * Eclipse resistance (net/header_corroboration.h): before submitting a
+     * candidate that would SWITCH us onto a different branch (a reorg of
+     * the header tree deeper than MIN_SWITCH_DEPTH, above the compiled
+     * checkpoint), require a second distinct address group to have served
+     * that branch. An un-corroborated deep switch is HELD — we simply do
+     * not submit it (the peer is NOT banned, the candidate stays in the
+     * header tree, and plain extension of the current chain is unaffected).
+     * The chain_reorg_uncorroborated condition surfaces the transient
+     * blocker; the hold auto-clears when a second group corroborates or the
+     * branch is abandoned. */
+    if (pindex_last) {
+        int ckpt_last =
+            checkpoints_last_height(&mp->params->checkpointData);
+        enum header_corroboration_gate g =
+            header_corroboration_gate_switch(
+                mp->main_state->pindex_best_header, pindex_last,
+                ckpt_last, peer_group, peer_group_len, node->addr_name);
+        if (g == HEADER_CORROBORATION_HOLD) {
+            event_emitf(EV_HEADERS_REJECTED, (uint32_t)node->id,
+                        "held un-corroborated header switch to h=%d from %s",
+                        pindex_last->nHeight, node->addr_name);
+        } else if (!msg_processor_commit_header_tip(mp, pindex_last)) {
+            LOG_WARN_IN("process_headers", "sync",
+                        "best-header promotion rejected h=%d",
+                        pindex_last->nHeight);
+        }
+    }
+}
+
+/* Record this peer's header-tip hash as a chain-identity vote. */
+static void headers_record_peer_vote(struct msg_processor *mp,
+                                    struct p2p_node *node,
+                                    struct block_index *pindex_last)
+{
+    /* An accepted header is chain-identity evidence regardless of whether
+     * its sender advertises our optional fast-sync service bit. Standard
+     * ZClassic peers speak headers too; excluding them made the off-host
+     * agreement ledger see heights from the whole network but hashes from
+     * only zclassic23 peers. The two-distinct-host judge remains the
+     * authority that decides whether those per-peer votes corroborate. */
+    if (pindex_last && pindex_last->phashBlock) {
+        char peer_hash_hex[65];
+        uint256_get_hex(pindex_last->phashBlock, peer_hash_hex);
+        msg_processor_record_peer_header_vote(mp, (uint32_t)node->id,
+                                              pindex_last->nHeight,
+                                              peer_hash_hex);
+    }
+}
+
+/* Clear the snapshot anchor when the header chain walks back to it. */
+static void headers_release_snapshot_anchor(struct msg_processor *mp,
+                                           struct block_index *pindex_last)
+{
+    /* Clear snapshot anchor once headers extend past the configured
+     * immutable/finality window. The anchor blocks reducer activation.
+     * Once the header chain has enough depth for the snapshot policy that
+     * accepted it, clear it so blocks can be connected. Set chain tip to
+     * the anchor so the reducer starts from the right UTXO state. */
+    struct block_index *anc = msg_processor_snapshot_anchor(mp);
+    if (syncsvc_should_release_snapshot_anchor(anc, pindex_last)) {
+        /* Verify the header chain reaches the anchor via pprev */
+        struct block_index *walk = pindex_last;
+        while (walk && walk->nHeight > anc->nHeight)
+            walk = walk->pprev;
+        if (walk == anc) {
+            printf("Anchor cleared: headers extend %d blocks past "
+                   "anchor h=%d — enabling block connection\n",
+                   pindex_last->nHeight - anc->nHeight,
+                   anc->nHeight);
+            /* Re-anchor active_chain at the snapshot anchor through
+             * the boot-owned chain-state boundary so
+             * block_map/coins_tip/header agree. In production this
+             * is typically a no-op move (active_chain is already at
+             * `anc`), but routing it through the single authority
+             * gives the transition a structured event and guards
+             * against drift since snapshot activation ran. */
+            bool anchor_recommitted = false;
+            if (anc->phashBlock) {
+                int from_height = mp->main_state ?
+                    active_chain_height(&mp->main_state->chain_active) : -1;
+                anchor_recommitted =
+                    msg_processor_recommit_snapshot_anchor(
+                        mp, anc, from_height);
+                if (!anchor_recommitted) {
+                    LOG_WARN_IN("process_headers", "sync",
+                        "anchor re-commit rejected h=%d",
+                        anc->nHeight);
+                }
+            } else {
+                LOG_WARN_IN("process_headers", "sync",
+                    "refusing to clear snapshot anchor "
+                    "without block hash h=%d", anc->nHeight);
+            }
+            if (anchor_recommitted) {
+                msg_processor_set_snapshot_anchor(mp, NULL);
+                msg_processor_clear_activation_anchor(
+                    mp, "headers_past_anchor");
+            }
+        }
+    }
+}
+
+/* Scan block files when planned, then advance the download phase. */
+static void headers_scan_and_advance(struct msg_processor *mp,
+                                    struct p2p_node *node,
+                                    struct sync_header_processing_plan *plan,
+                                    struct uint256 *hashes,
+                                    int32_t *heights,
+                                    int our_height)
+{
+    /* One-shot block file scan: if block files exist on disk (from
+     * file_service) but weren't scanned at boot (empty index at boot),
+     * scan them now that we have headers. This marks downloaded blocks
+     * as BLOCK_HAVE_DATA so we don't re-download them from P2P. */
+    if (plan->should_scan_block_files)
+        headers_scan_block_files(mp);
+    /* Header processing owns the HEADERS_DOWNLOAD -> BLOCKS_DOWNLOAD
+     * phase edge even when there is no body to enqueue.  The empty-batch
+     * case is the positive reply to an equal-height warm-start probe; the
+     * all-data case activates from disk.  Keeping this inside the queue
+     * branch stranded both cases in HEADERS_DOWNLOAD forever. */
+    headers_advance_download_phase(node, plan, hashes, heights, our_height);
+}
+
+/* Queue active-tip successors when the header plan queued nothing. */
+static void headers_queue_tip_fallback(struct msg_processor *mp,
+                                      struct p2p_node *node,
+                                      struct uint256 *hashes,
+                                      int32_t *heights,
+                                      size_t max_collect,
+                                      struct block_index *pindex_last,
+                                      int our_height,
+                                      size_t queue_count)
+{
+    if (headers_fallback_eligible(hashes, heights, pindex_last,
+                                  our_height, queue_count)) {
+        bool has_data_successor = false;
+        size_t fallback_count = collect_active_tip_successors(
+            mp->main_state, hashes, heights, max_collect,
+            &has_data_successor);
+        if (fallback_count > 0) {
+            struct download_manager *dm = get_download_mgr();
+            size_t queued = dl_queue_blocks(dm, hashes, heights,
+                                            fallback_count);
+            if (queued > 0) {
+                sync_set_state(SYNC_BLOCKS_DOWNLOAD,
+                               "tip successor fallback");
+                event_emitf(EV_BLOCK_REQUESTED, (uint32_t)node->id,
+                            "fallback_queued=%zu total_needed=%zu",
+                            queued, fallback_count);
+                LOG_INFO_IN("process_headers", "headers",
+                    "fallback queued %zu active-tip "
+                    "successor blocks after empty header plan "
+                    "(tip=%d header=%d)",
+                    queued, our_height, pindex_last->nHeight);
+            }
+        } else if (has_data_successor) {
+            msg_processor_request_activation(
+                mp, MSG_ACTIVATE_HEADERS_ALL_DATA);
+        }
+    }
+}
+
+/* Report whether this below-tip batch continues a header band. */
+static bool headers_batch_is_band_fill(struct msg_processor *mp,
+                                      struct block_index *pindex_last)
+{
+    /* Band fill: a below-tip batch that extends the trust-rooted
+     * frontier toward an installed-above-frontier island is progress
+     * — it must suppress BOTH the restart-from-tip and the
+     * best-header skip below, or the band hole never closes. The
+     * low-batch gate keeps the ancestry walk off the IBD hot path. */
+    if (pindex_last &&
+        pindex_last->nHeight <
+            active_chain_height(&mp->main_state->chain_active))
+        return syncsvc_header_band_continue(&mp->main_state->chain_active,
+                                           pindex_last);
+    return false;
+}
+
+/* Warn when a full header batch barely advances the frontier. */
+static void headers_note_slow_advance(struct p2p_node *node,
+                                     struct block_index *pindex_last,
+                                     size_t accepted, bool band_fill)
+{
+    /* Track header advancement rate.  If a full batch of headers
+     * didn't carry the frontier forward by at least 100, something
+     * may be wrong (e.g., heights still scrambled, bouncing
+     * locators).  Two things keep this coarse: the comparison is
+     * against the previous batch from ANY peer, and band-fill
+     * batches land below the frontier by design, so they are
+     * excluded rather than reported as a regression. */
+    if (pindex_last && accepted >= 100 && !band_fill) {
+        int prev_end = atomic_load(&g_last_batch_end_height);
+        int cur_end = pindex_last->nHeight;
+        if (prev_end > 0 && cur_end > 0 &&
+            cur_end - prev_end < 100) {
+            LOG_WARN_IN("process_headers", "headers",
+                "SLOW ADVANCE: peer %s sent %zu headers but the "
+                "batch ended at h=%d, %d from the previous batch "
+                "end h=%d",
+                node->addr_name, accepted, cur_end,
+                cur_end - prev_end, prev_end);
+        }
+        atomic_store(&g_last_batch_end_height, cur_end);
+    }
+}
+
+/* Continue getheaders from the tip, the best header, or this batch. */
+static void headers_follow_header_batch(struct msg_processor *mp,
+                                       struct p2p_node *node,
+                                       struct block_index *pindex_last,
+                                       size_t accepted,
+                                       size_t newly_added,
+                                       bool band_fill)
+{
+    if (syncsvc_should_restart_headers_from_tip(
+            accepted, pindex_last, active_chain_height(
+                &mp->main_state->chain_active), node->starting_height,
+            band_fill)) {
+        LOG_WARN_IN("process_headers", "headers",
+                "low batch from %s ended at h=%d below "
+                "chain tip h=%d; restarting getheaders from tip",
+                node->addr_name,
+                pindex_last ? pindex_last->nHeight : -1,
+                active_chain_height(&mp->main_state->chain_active));
+        {
+            struct block_index *restart_tip = active_chain_tip(
+                &mp->main_state->chain_active);
+            if (restart_tip && restart_tip->phashBlock)
+                push_getheaders_from(mp, node, restart_tip);
+            else
+                push_getheaders(mp, node);
+        }
+    } else if (headers_skip_to_best_header(mp, node, pindex_last,
+                                           newly_added, band_fill)) {
+        /* The whole batch was already known and our best header sits
+         * far above it (boot restored a deep header chain, or a
+         * periodic re-anchor pulled the conversation back to the
+         * active tip). Continuing from pindex_last would crawl the
+         * known span 160 headers per round trip — with millions of
+         * known headers that is a multi-day stall that also burns a
+         * core re-accepting known headers. Skip the conversation
+         * straight to best_header; the exponential locator still
+         * lets the peer pick an earlier fork point if our best
+         * header is stale. Gated on repaired heights — with
+         * scrambled heights this skip would loop forever.
+         * Also gated on the peer's advertised starting_height being
+         * ABOVE our best header: an honest peer whose tip is below
+         * best_header answers a best_header-anchored getheaders with
+         * the same all-known span every time (their fork point never
+         * moves), so the skip would ping-pong the identical request
+         * with that peer forever. Such peers take the pindex_last
+         * continuation below, which terminates at their tip. */
+        push_getheaders_from(mp, node, mp->main_state->pindex_best_header);
+    } else {
+        /* Advance from pindex_last — the actual last header the peer
+         * sent.  Using pindex_best_header caused infinite loops after
+         * snapshot/LDB import when heights were scrambled. */
+        push_getheaders_from(mp, node, pindex_last);
+    }
+}
+
+bool process_headers(struct msg_processor *mp, struct p2p_node *node,
+                     struct byte_stream *s)
+{
+    if (headers_drop_for_snapshot(mp, node))
+        return true;
+    atomic_store(&g_headers_recv_snapshot_streak, false);
+
+    uint64_t count = 0;
+    bool got_count = headers_read_batch_count(s, node, &count);
+    if (!got_count)
+        return false;
+
+    if (headers_reject_header_flood(mp, node, count))
+        return false;
+
+    struct headers_batch_acc acc;
+    headers_batch_acc_prepare(&acc, mp, node);
 
     for (uint64_t i = 0; i < count; i++) {
-        struct block_header hdr;
-        block_header_init(&hdr);
-        if (!block_header_deserialize(&hdr, s)) {
-            event_emitf(EV_HEADERS_REJECTED, (uint32_t)node->id,
-                        "malformed header[%llu] from %s",
-                        (unsigned long long)i, node->addr_name);
-            peer_scoring_record(mp->net_mgr, node, PEER_OFFENCE_FLOOD,
-                                "malformed header");
-            LOG_FAIL("net", "malformed header[%llu] from %s",
-                     (unsigned long long)i, node->addr_name);
-        }
-
-        uint64_t dummy;
-        if (!stream_read_compact_size(s, &dummy)) {
-            peer_scoring_record(mp->net_mgr, node, PEER_OFFENCE_FLOOD,
-                                "truncated header tx count");
-            LOG_FAIL("net", "truncated header tx count at header[%llu] from %s",
-                     (unsigned long long)i, node->addr_name);
-        }
-
-        /* Check if header already in index BEFORE accept_block_header */
-        struct uint256 hdr_hash;
-        block_header_get_hash(&hdr, &hdr_hash);
-        bool was_known = (block_map_find(&mp->main_state->map_block_index,
-                                          &hdr_hash) != NULL);
-
-        /* Checkpoint-header-solution cure: offer every received header (with its
-         * on-wire Equihash solution) to the checkpoint fetch. Cheap (one relaxed
-         * atomic) when no fetch is armed; on a hash-pin match it captures the
-         * bytes for the app-layer condition to frozen-verify + persist. The
-         * header is captured even when `was_known` (the imported checkpoint
-         * header IS already in the index — only its solution is missing). */
-        checkpoint_header_fetch_offer(&hdr, &hdr_hash);
-
-        struct validation_state state;
-        validation_state_init(&state);
-        struct block_index *pindex = NULL;
-        if (accept_block_header(&hdr, &state, mp->main_state,
-                                mp->params, &pindex)) {
-            accepted++;
-            if (!was_known)
-                newly_added++;
-            /* A serve miss may have requested this exact bounded header-only
-             * span. Known headers take a cheap path in accept_block_header,
-             * so independently full-verify before caching their solutions. */
-            (void)getheaders_cache_repair_candidate(mp, pindex, &hdr);
-            /* Record that THIS peer's address group served this header, so a
-             * later best-header SWITCH to this branch can be corroborated
-             * against a second distinct group before we adopt it. Records the
-             * header hash regardless of whether it was new — a second peer
-             * re-serving a known header is exactly the corroboration signal. */
-            if (peer_group_len > 0)
-                header_corroboration_note(&hdr_hash, peer_group, peer_group_len);
-            if (pindex && sequence_prev && sequence_prev->phashBlock &&
-                uint256_eq(&hdr.hashPrevBlock, sequence_prev->phashBlock)) {
-                /* Batch-order relink heal: the wire's prev hash names this
-                 * batch's previous header, but our index disagrees with
-                 * that ordering. accept_block_header has ALREADY repaired
-                 * this entry against the map-derived parent, so a residual
-                 * disagreement can only mean the batch anchor went stale
-                 * against the map (concurrent re-keying, an orphaned twin,
-                 * a freed entry). Trust the map, not the batch position:
-                 * re-link only when the claimed parent resolves to exactly
-                 * that anchor and the child carries no failure mask —
-                 * anything else would rewrite an established index ladder
-                 * (parent, height, skip list, chain work) from one
-                 * unauthenticated signal. A refused header does NOT advance
-                 * the cursor: the next one compares against the last
-                 * map-agreed anchor instead. */
-                struct block_index *mapped_prev = block_map_find(
-                    &mp->main_state->map_block_index, &hdr.hashPrevBlock);
-                if (mapped_prev && mapped_prev == sequence_prev &&
-                    !(pindex->nStatus & BLOCK_FAILED_MASK)) {
-                    if (pindex->pprev != sequence_prev ||
-                        pindex->nHeight != sequence_prev->nHeight + 1) {
-                        pindex->pprev = sequence_prev;
-                        pindex->nHeight = sequence_prev->nHeight + 1;
-                        block_index_build_skip(pindex);
-                        struct arith_uint256 proof = GetBlockProof(pindex);
-                        arith_uint256_add(&pindex->nChainWork,
-                                          &sequence_prev->nChainWork, &proof);
-                    }
-                    sequence_prev = pindex;
-                } else {
-                    /* Non-returning ERROR emit: a refused relink must not
-                     * abort the batch (LOG_FAIL would return false out of
-                     * process_headers mid-loop) — later headers in this
-                     * same batch still carry independent information. */
-                    LOG_ERROR("net", "headers[%llu]: batch-order relink "
-                              "refused (anchor not map-resolved or child "
-                              "failed) for h=%d",
-                              (unsigned long long)i, pindex->nHeight);
-                }
-            }
-            pindex_last = pindex;
-            if (pindex && pindex->phashBlock)
-                last_hash = *pindex->phashBlock;
-            seq_count = headers_note_sequence_candidate(
-                pindex, pre_tip_height, seq_hashes, seq_heights, seq_count);
-        } else {
-            /* Track the unconnectable-rejection signal: a batch rejected
-             * with bad-prevblk usually means the peer is AHEAD of us (we
-             * missed the intermediate header), not that it is garbage —
-             * the all-rejected recovery probe below keys on this. */
-            if (strcmp(state.reject_reason, "bad-prevblk") == 0)
-                any_bad_prevblk = true;
-            headers_trace_rejected_header(node, &hdr, i, &state);
-        }
-
-        /* Detective A2 — score the peer for an objectively-forged header page.
-         * accept_block_header admits header-first and defers the PoW/Equihash
-         * verdict to the validate_headers stage, so it returns true even for a
-         * bad-solution / high-hash header; check_block_header still computes the
-         * DoS grade into `state`. A dos>0 here is an objective PoW/Equihash
-         * failure (invalid-solution=100, high-hash=50) — penalize INVALID_HEADER
-         * so a peer forging the header range (e.g. while a stale-header repair
-         * is fetching the canonical bytes) is scored and eventually
-         * disconnected, and the forged page never fools the repair. Gated on
-         * dos>0 so orphans / failed-parent / obsolete-version (dos 0) — all
-         * normal during sync — are never penalized. Trusted/localhost peers are
-         * exempted inside peer_misbehaving. Mirrors msg_blocks.c grading. */
-        headers_penalize_forged_header(mp, node, &state);
+        bool took = headers_take_one_header(mp, node, s, i, &acc);
+        if (!took)
+            return false;
     }
 
     /* Update diagnostic counters */
     atomic_fetch_add(&g_headers_batches_received, 1);
-    atomic_fetch_add(&g_headers_total_accepted, accepted);
-    atomic_fetch_add(&g_headers_total_rejected, count - accepted);
-    atomic_fetch_add(&g_headers_newly_added, newly_added);
-    atomic_fetch_add(&g_headers_already_known, accepted - newly_added);
+    atomic_fetch_add(&g_headers_total_accepted, acc.accepted);
+    atomic_fetch_add(&g_headers_total_rejected, count - acc.accepted);
+    atomic_fetch_add(&g_headers_newly_added, acc.newly_added);
+    atomic_fetch_add(&g_headers_already_known, acc.accepted - acc.newly_added);
 
     /* Per-peer usefulness credit (P1). MUST pass newly_added, NEVER
      * accepted: `accepted` also counts headers we already had in the
@@ -1691,243 +2201,39 @@ bool process_headers(struct msg_processor *mp, struct p2p_node *node,
      * last_useful_headers_time (defeating the stale-peer disconnect)
      * and inflate total_headers_delivered (deflecting worst-peer
      * eviction onto honest peers). Only new-to-index headers count. */
-    syncsvc_note_headers_received(node, newly_added);
+    syncsvc_note_headers_received(node, acc.newly_added);
 
     /* Arm/disarm the recovery-probe pending flag: an all-rejected
      * bad-prevblk batch arms it (so the periodic per-peer tick re-probes
      * even after the announcement burst ends); any batch that accepts a
      * header disarms it — the conversation is connected again. */
-    syncsvc_note_header_batch_outcome(node, accepted, any_bad_prevblk);
+    syncsvc_note_header_batch_outcome(node, acc.accepted, acc.any_bad_prevblk);
 
-    {
-        struct block_index *tip = active_chain_tip(&mp->main_state->chain_active);
-        int our_height = tip ? tip->nHeight : 0;
-        struct block_index *bi = block_map_find(
-            &mp->main_state->map_block_index, &last_hash);
-        size_t max_collect = 512;
-        struct uint256 *hashes = zcl_malloc(max_collect * sizeof(struct uint256), "blk_req_hashes");
-        int32_t *heights = zcl_malloc(max_collect * sizeof(int32_t), "blk_req_heights");
+    struct uint256 *hashes = NULL;
+    int32_t *heights = NULL;
+    int our_height = 0;
+    headers_plan_block_requests(mp, node, &acc, count,
+                               &hashes, &heights, &our_height);
 
-        if (!hashes || !heights) {
-            LOG_WARN("sync", "malloc failed for block request arrays "
-                     "(%zu entries)", max_collect);
-            free(hashes); free(heights);
-            hashes = NULL; heights = NULL;
-        }
-
-        syncsvc_plan_header_processing(&header_plan, accepted, count,
-                                       pindex_last, sync_get_state(),
-                                       bi, tip, our_height,
-                                       hashes, heights, max_collect);
-        if (seq_count > 0 && hashes && heights) {
-            memcpy(hashes, seq_hashes, seq_count * sizeof(struct uint256));
-            memcpy(heights, seq_heights, seq_count * sizeof(int32_t));
-            header_plan.should_queue_needed_blocks = true;
-            header_plan.queue_count = seq_count;
-            header_plan.should_activate_chain = false;
-            header_plan.download.needed_blocks.count = seq_count;
-            header_plan.download.needed_blocks.chains_from_tip = true;
-        }
-        if (our_height > 1000000 && header_plan.should_scan_block_files) {
-            printf("headers: skip inline block-file scan at live height h=%d\n",
-                   our_height);
-            header_plan.should_scan_block_files = false;
-        }
-
-        if (header_plan.batch.should_warn_all_rejected) {
-            /* All headers rejected — this stalls sync. Log prominently. */
-            event_emitf(EV_HEADERS_REJECTED, (uint32_t)node->id,
-                        "all %llu headers rejected", (unsigned long long)count);
-            printf("WARNING: Peer %s: all %llu headers rejected — sync stalled!\n",
-                   node->addr_name, (unsigned long long)count);
-        }
-
-        /* All-rejected recovery probe (the missed-intermediate-header stall):
-         * a direct tip announcement (BIP 130) whose prev we do not have is
-         * all-rejected with bad-prevblk, and should_request_more_headers
-         * requires accepted>0, so without this probe no getheaders follow-up
-         * is ever scheduled and — once the frontier-parity gate disables the
-         * stale-peer disconnect — the node forgets the announced height and
-         * sits below the network tip forever. Re-probe with getheaders from
-         * our best header; the exponential locator lets the peer serve the
-         * missing intermediate headers. Keyed on the bad-prevblk signal and
-         * rate-limited per peer so a garbage peer cannot make us ping-pong. */
-        headers_probe_after_reject(mp, node, &header_plan, any_bad_prevblk);
-
-        if (header_plan.batch.should_emit_received) {
-            event_emitf(EV_HEADERS_RECEIVED, (uint32_t)node->id,
-                        "accepted=%zu total=%llu tip=%d",
-                        accepted, (unsigned long long)count,
-                        pindex_last ? pindex_last->nHeight : -1);
-
-            if (syncsvc_should_log_accepted_headers(node, pindex_last)) {
-                int chain_h = active_chain_height(&mp->main_state->chain_active);
-                printf("Peer %s: accepted %zu/%llu headers "
-                       "(header tip=%d, chain tip=%d, peer=%d)\n",
-                       node->addr_name, accepted, (unsigned long long)count,
-                       pindex_last ? pindex_last->nHeight : -1,
-                       chain_h, node->starting_height);
-                /* Stall detection: if we accepted headers but the tip
-                 * didn't advance past chain height, something is wrong
-                 * with the block index heights. Log loudly. */
-                if (headers_is_stalled_tip(pindex_last, accepted, chain_h,
-                                           node)) {
-                    LOG_WARN("sync",
-                        "STALL DETECTED: accepted %zu headers but "
-                        "header tip=%d < chain tip=%d (peer at %d). "
-                        "Block index heights may be corrupted.",
-                        accepted, pindex_last->nHeight, chain_h,
-                        node->starting_height);
-                }
-            }
-        }
-
-        /* The CSR owns both ranking and publication. Always submit the batch
-         * candidate; a valid non-winning header is an idempotent no-op.
-         *
-         * Eclipse resistance (net/header_corroboration.h): before submitting a
-         * candidate that would SWITCH us onto a different branch (a reorg of
-         * the header tree deeper than MIN_SWITCH_DEPTH, above the compiled
-         * checkpoint), require a second distinct address group to have served
-         * that branch. An un-corroborated deep switch is HELD — we simply do
-         * not submit it (the peer is NOT banned, the candidate stays in the
-         * header tree, and plain extension of the current chain is unaffected).
-         * The chain_reorg_uncorroborated condition surfaces the transient
-         * blocker; the hold auto-clears when a second group corroborates or the
-         * branch is abandoned. */
-        if (pindex_last) {
-            int ckpt_last =
-                checkpoints_last_height(&mp->params->checkpointData);
-            enum header_corroboration_gate g =
-                header_corroboration_gate_switch(
-                    mp->main_state->pindex_best_header, pindex_last,
-                    ckpt_last, peer_group, peer_group_len, node->addr_name);
-            if (g == HEADER_CORROBORATION_HOLD) {
-                event_emitf(EV_HEADERS_REJECTED, (uint32_t)node->id,
-                            "held un-corroborated header switch to h=%d from %s",
-                            pindex_last->nHeight, node->addr_name);
-            } else if (!msg_processor_commit_header_tip(mp, pindex_last)) {
-                LOG_WARN("sync",
-                         "best-header promotion rejected h=%d",
-                         pindex_last->nHeight);
-            }
-        }
-
-        /* An accepted header is chain-identity evidence regardless of whether
-         * its sender advertises our optional fast-sync service bit. Standard
-         * ZClassic peers speak headers too; excluding them made the off-host
-         * agreement ledger see heights from the whole network but hashes from
-         * only zclassic23 peers. The two-distinct-host judge remains the
-         * authority that decides whether those per-peer votes corroborate. */
-        if (pindex_last && pindex_last->phashBlock) {
-            char peer_hash_hex[65];
-            uint256_get_hex(pindex_last->phashBlock, peer_hash_hex);
-            msg_processor_record_peer_header_vote(mp, (uint32_t)node->id,
-                                                  pindex_last->nHeight,
-                                                  peer_hash_hex);
-        }
-
-        /* Clear snapshot anchor once headers extend past the configured
-         * immutable/finality window. The anchor blocks reducer activation.
-         * Once the header chain has enough depth for the snapshot policy that
-         * accepted it, clear it so blocks can be connected. Set chain tip to
-         * the anchor so the reducer starts from the right UTXO state. */
-        {
-            struct block_index *anc = msg_processor_snapshot_anchor(mp);
-            if (syncsvc_should_release_snapshot_anchor(anc, pindex_last)) {
-                /* Verify the header chain reaches the anchor via pprev */
-                struct block_index *walk = pindex_last;
-                while (walk && walk->nHeight > anc->nHeight)
-                    walk = walk->pprev;
-                if (walk == anc) {
-                    printf("Anchor cleared: headers extend %d blocks past "
-                           "anchor h=%d — enabling block connection\n",
-                           pindex_last->nHeight - anc->nHeight,
-                           anc->nHeight);
-                    /* Re-anchor active_chain at the snapshot anchor through
-                     * the boot-owned chain-state boundary so
-                     * block_map/coins_tip/header agree. In production this
-                     * is typically a no-op move (active_chain is already at
-                     * `anc`), but routing it through the single authority
-                     * gives the transition a structured event and guards
-                     * against drift since snapshot activation ran. */
-                    bool anchor_recommitted = false;
-                    if (anc->phashBlock) {
-                        int from_height = mp->main_state ?
-                            active_chain_height(&mp->main_state->chain_active) : -1;
-                        anchor_recommitted =
-                            msg_processor_recommit_snapshot_anchor(
-                                mp, anc, from_height);
-                        if (!anchor_recommitted) {
-                            LOG_WARN("sync",
-                                "anchor re-commit rejected h=%d",
-                                anc->nHeight);
-                        }
-                    } else {
-                        LOG_WARN("sync",
-                            "refusing to clear snapshot anchor "
-                            "without block hash h=%d", anc->nHeight);
-                    }
-                    if (anchor_recommitted) {
-                        msg_processor_set_snapshot_anchor(mp, NULL);
-                        msg_processor_clear_activation_anchor(
-                            mp, "headers_past_anchor");
-                    }
-                }
-            }
-        }
-
-        /* One-shot block file scan: if block files exist on disk (from
-         * file_service) but weren't scanned at boot (empty index at boot),
-         * scan them now that we have headers. This marks downloaded blocks
-         * as BLOCK_HAVE_DATA so we don't re-download them from P2P. */
-        if (header_plan.should_scan_block_files)
-            headers_scan_block_files(mp);
-        /* Header processing owns the HEADERS_DOWNLOAD -> BLOCKS_DOWNLOAD
-         * phase edge even when there is no body to enqueue.  The empty-batch
-         * case is the positive reply to an equal-height warm-start probe; the
-         * all-data case activates from disk.  Keeping this inside the queue
-         * branch stranded both cases in HEADERS_DOWNLOAD forever. */
-        headers_advance_download_phase(node, &header_plan, hashes, heights,
-                                       our_height);
-
-        if (headers_fallback_eligible(hashes, heights, pindex_last,
-                                      our_height, header_plan.queue_count)) {
-            bool has_data_successor = false;
-            size_t fallback_count = collect_active_tip_successors(
-                mp->main_state, hashes, heights, max_collect,
-                &has_data_successor);
-            if (fallback_count > 0) {
-                struct download_manager *dm = get_download_mgr();
-                size_t queued = dl_queue_blocks(dm, hashes, heights,
-                                                fallback_count);
-                if (queued > 0) {
-                    sync_set_state(SYNC_BLOCKS_DOWNLOAD,
-                                   "tip successor fallback");
-                    event_emitf(EV_BLOCK_REQUESTED, (uint32_t)node->id,
-                                "fallback_queued=%zu total_needed=%zu",
-                                queued, fallback_count);
-                    LOG_INFO("headers",
-                        "fallback queued %zu active-tip "
-                        "successor blocks after empty header plan "
-                        "(tip=%d header=%d)",
-                        queued, our_height, pindex_last->nHeight);
-                }
-            } else if (has_data_successor) {
-                msg_processor_request_activation(
-                    mp, MSG_ACTIVATE_HEADERS_ALL_DATA);
-            }
-        }
-
-        /* Chain activation: if all blocks already have data (e.g. after
-         * LDB import with symlinked blk files), needed_blocks.count is 0
-         * but should_activate_chain is true.  This MUST run outside the
-         * should_queue_needed_blocks guard — that gate requires count>0,
-         * which is the opposite of the activation condition. */
-        headers_request_header_activation(mp, &header_plan);
-        free(hashes);
-        free(heights);
-    }
+    headers_emit_received_batch(mp, node, acc.pindex_last, acc.accepted,
+                               count, &acc.header_plan);
+    headers_commit_corroborated_tip(mp, node, acc.pindex_last,
+                                   acc.peer_group, acc.peer_group_len);
+    headers_record_peer_vote(mp, node, acc.pindex_last);
+    headers_release_snapshot_anchor(mp, acc.pindex_last);
+    headers_scan_and_advance(mp, node, &acc.header_plan, hashes, heights,
+                            our_height);
+    headers_queue_tip_fallback(mp, node, hashes, heights, 512,
+                              acc.pindex_last, our_height,
+                              acc.header_plan.queue_count);
+    /* Chain activation: if all blocks already have data (e.g. after
+     * LDB import with symlinked blk files), needed_blocks.count is 0
+     * but should_activate_chain is true.  This MUST run outside the
+     * should_queue_needed_blocks guard — that gate requires count>0,
+     * which is the opposite of the activation condition. */
+    headers_request_header_activation(mp, &acc.header_plan);
+    free(hashes);
+    free(heights);
 
     /* Request more headers if we accepted any.
      *
@@ -1938,93 +2244,19 @@ bool process_headers(struct msg_processor *mp, struct p2p_node *node,
      *
      * If some headers were new, use pindex_last — the peer will continue
      * from right after it. */
-    if (header_plan.batch.should_request_more_headers) {
-        /* Band fill: a below-tip batch that extends the trust-rooted
-         * frontier toward an installed-above-frontier island is progress
-         * — it must suppress BOTH the restart-from-tip and the
-         * best-header skip below, or the band hole never closes. The
-         * low-batch gate keeps the ancestry walk off the IBD hot path. */
-        bool band_fill = (pindex_last &&
-            pindex_last->nHeight <
-                active_chain_height(&mp->main_state->chain_active))
-            ? syncsvc_header_band_continue(&mp->main_state->chain_active,
-                                           pindex_last)
-            : false;
-
-        /* Track header advancement rate.  If a full batch of headers
-         * didn't carry the frontier forward by at least 100, something
-         * may be wrong (e.g., heights still scrambled, bouncing
-         * locators).  Two things keep this coarse: the comparison is
-         * against the previous batch from ANY peer, and band-fill
-         * batches land below the frontier by design, so they are
-         * excluded rather than reported as a regression. */
-        if (pindex_last && accepted >= 100 && !band_fill) {
-            int prev_end = atomic_load(&g_last_batch_end_height);
-            int cur_end = pindex_last->nHeight;
-            if (prev_end > 0 && cur_end > 0 &&
-                cur_end - prev_end < 100) {
-                LOG_WARN("headers",
-                    "SLOW ADVANCE: peer %s sent %zu headers but the "
-                    "batch ended at h=%d, %d from the previous batch "
-                    "end h=%d",
-                    node->addr_name, accepted, cur_end,
-                    cur_end - prev_end, prev_end);
-            }
-            atomic_store(&g_last_batch_end_height, cur_end);
-        }
-
-        if (syncsvc_should_restart_headers_from_tip(
-                accepted, pindex_last, active_chain_height(
-                    &mp->main_state->chain_active), node->starting_height,
-                band_fill)) {
-            LOG_WARN("headers",
-                    "low batch from %s ended at h=%d below "
-                    "chain tip h=%d; restarting getheaders from tip",
-                    node->addr_name,
-                    pindex_last ? pindex_last->nHeight : -1,
-                    active_chain_height(&mp->main_state->chain_active));
-            {
-                struct block_index *restart_tip = active_chain_tip(
-                    &mp->main_state->chain_active);
-                if (restart_tip && restart_tip->phashBlock)
-                    push_getheaders_from(mp, node, restart_tip);
-                else
-                    push_getheaders(mp, node);
-            }
-        } else if (headers_skip_to_best_header(mp, node, pindex_last,
-                                               newly_added, band_fill)) {
-            /* The whole batch was already known and our best header sits
-             * far above it (boot restored a deep header chain, or a
-             * periodic re-anchor pulled the conversation back to the
-             * active tip). Continuing from pindex_last would crawl the
-             * known span 160 headers per round trip — with millions of
-             * known headers that is a multi-day stall that also burns a
-             * core re-accepting known headers. Skip the conversation
-             * straight to best_header; the exponential locator still
-             * lets the peer pick an earlier fork point if our best
-             * header is stale. Gated on repaired heights — with
-             * scrambled heights this skip would loop forever.
-             * Also gated on the peer's advertised starting_height being
-             * ABOVE our best header: an honest peer whose tip is below
-             * best_header answers a best_header-anchored getheaders with
-             * the same all-known span every time (their fork point never
-             * moves), so the skip would ping-pong the identical request
-             * with that peer forever. Such peers take the pindex_last
-             * continuation below, which terminates at their tip. */
-            push_getheaders_from(mp, node, mp->main_state->pindex_best_header);
-        } else {
-            /* Advance from pindex_last — the actual last header the peer
-             * sent.  Using pindex_best_header caused infinite loops after
-             * snapshot/LDB import when heights were scrambled. */
-            push_getheaders_from(mp, node, pindex_last);
-        }
+    if (acc.header_plan.batch.should_request_more_headers) {
+        bool band_fill = headers_batch_is_band_fill(mp, acc.pindex_last);
+        headers_note_slow_advance(node, acc.pindex_last, acc.accepted,
+                                 band_fill);
+        headers_follow_header_batch(mp, node, acc.pindex_last, acc.accepted,
+                                   acc.newly_added, band_fill);
     }
 
     /* Band closure probe — deliberately OUTSIDE should_request_more_headers
      * (the final band batch can be shorter than 160). No-op without the
      * band blocker. */
-    if (accepted > 0)
-        syncsvc_header_band_after_batch(mp->main_state, pindex_last);
+    if (acc.accepted > 0)
+        syncsvc_header_band_after_batch(mp->main_state, acc.pindex_last);
 
     return true;
 }

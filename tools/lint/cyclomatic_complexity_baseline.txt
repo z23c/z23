@@ -21,7 +21,6 @@ core/modules/crypto/src/sha3_256_x4.c:sha3_256_x4_neon:17
 core/modules/crypto_registry/src/crypto_registry.c:crypto_registry_register:16
 core/modules/net/src/download.c:dl_assign_to_peer:90
 core/modules/net/src/download.c:dl_queue_blocks_class:39
-core/modules/net/src/msg_headers.c:process_headers:70
 core/modules/net/src/msgprocessor_snapshot.c:mp_handle_zcl23_sync:174
 core/modules/net/src/msgprocessor_snapshot.c:mp_snapshot_maybe_offer:17
 core/modules/net/src/msgprocessor_snapshot.c:mp_snapshot_send_tick:33

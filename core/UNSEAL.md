@@ -809,3 +809,7 @@ later lane flips it HARD.
 - 2026-11-02T11:35:47Z — REASON: refactor(process_block_invalidate): split 3 function(s) under the complexity cap (grok); behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
   old ROOT: 013f3a865186500a83f3dd066c95f729146d1f7f043e3c7b7fcb8d6695ad78a2
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-02T12:44:59Z — REASON: refactor(msg_headers): split 1 function(s) under the complexity cap (grok); behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
+  old ROOT: 62e3093c4c1176a9ff92053afe78e16ccce5945e023c9633550796a41815a19e
+  by: owner unseal ritual (make core-unseal)
