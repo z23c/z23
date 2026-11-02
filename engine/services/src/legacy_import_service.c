@@ -891,6 +891,93 @@ static int legacy_import_execute(const char *legacy_datadir,
 
 /* Status arms stay in legacy_import_service_run so each LOG_* call keeps
  * that function's name. The passes return a code; this switch only logs. */
+/* The arms now log through the helpers below. */
+/* Pass 1 and pass 2 failure codes. Each LOG_* names legacy_import_service_run
+ * through its _IN form. A thread-start failure joins the threads that started. */
+static void legacy_import_log_pass12_failure(int code, int num_files,
+                                             struct legacy_import_thread_batch *batch)
+{
+    switch (code) {
+    case LEGACY_IMPORT_OOM_FLAGS:
+        LOG_WARN_IN("legacy_import_service_run", "legacy_import",
+                    "legacy_import: OOM allocating %d file-match flags", num_files);
+        break;
+    case LEGACY_IMPORT_ABORT_P1:
+        LOG_INFO_IN("legacy_import_service_run", "legacy_import",
+                    "legacy import aborted: shutdown requested (pass 1)");
+        break;
+    case LEGACY_IMPORT_THREAD_P1:
+        LOG_WARN_IN("legacy_import_service_run", "legacy_import",
+                    "legacy_import: failed to start pass-1 scan thread");
+        legacy_import_join_started(batch->threads, batch->started);
+        break;
+    case LEGACY_IMPORT_ABORT_P2:
+        LOG_INFO_IN("legacy_import_service_run", "legacy_import",
+                    "legacy import aborted: shutdown requested (pass 2)");
+        break;
+    case LEGACY_IMPORT_UNSTABLE:
+        LOG_WARN_IN("legacy_import_service_run", "legacy_import",
+                    "legacy block file changed during immutable pass 2");
+        break;
+    default:
+        break;
+    }
+}
+
+/* Pass 3 SAVE_OPEN failure: logs the save error, then rolls back the open
+ * sapling transaction and logs again if the rollback itself fails. */
+static void legacy_import_log_save_open(struct node_db *ndb, bool sapling_tx_open)
+{
+    LOG_WARN_IN("legacy_import_service_run", "legacy_import",
+                "legacy_import: pass 3 sapling note save failed");
+    if (sapling_tx_open &&
+        !legacy_import_rollback_checked(ndb,
+            "pass 3 rollback")) {
+        LOG_WARN_IN("legacy_import_service_run", "legacy_import",
+                    "legacy_import: pass 3 rollback failed after DB error");
+    }
+}
+
+/* Pass 3 failure codes (filter and decrypt). SAVE_OPEN is logged by the caller. */
+static void legacy_import_log_pass3_failure(int code,
+                                            struct legacy_import_thread_batch *batch)
+{
+    switch (code) {
+    case LEGACY_IMPORT_FCTX_OOM:
+        LOG_WARN_IN("legacy_import_service_run", "legacy_import",
+                    "legacy_import: failed to allocate sapling filter contexts");
+        break;
+    case LEGACY_IMPORT_ABORT_P3A:
+        LOG_INFO_IN("legacy_import_service_run", "legacy_import",
+                    "legacy import aborted: shutdown requested (pass 3a)");
+        break;
+    case LEGACY_IMPORT_THREAD_P3A:
+        LOG_WARN_IN("legacy_import_service_run", "legacy_import",
+                    "legacy_import: failed to start sapling filter thread");
+        legacy_import_join_started(batch->threads, batch->started);
+        break;
+    case LEGACY_IMPORT_DCTX_OOM:
+        LOG_WARN_IN("legacy_import_service_run", "legacy_import",
+                    "legacy_import: failed to allocate sapling decrypt contexts");
+        break;
+    case LEGACY_IMPORT_RESULTS_OOM:
+        LOG_WARN_IN("legacy_import_service_run", "legacy_import",
+                    "legacy_import: failed to allocate sapling decrypt results");
+        break;
+    case LEGACY_IMPORT_ABORT_P3B:
+        LOG_INFO_IN("legacy_import_service_run", "legacy_import",
+                    "legacy import aborted: shutdown requested (pass 3b)");
+        break;
+    case LEGACY_IMPORT_THREAD_P3B:
+        LOG_WARN_IN("legacy_import_service_run", "legacy_import",
+                    "legacy_import: failed to start sapling decrypt thread");
+        legacy_import_join_started(batch->threads, batch->started);
+        break;
+    default:
+        break;
+    }
+}
+
 int legacy_import_service_run(const char *legacy_datadir,
                               struct node_db *ndb,
                               struct wallet *w,
@@ -910,95 +997,15 @@ int legacy_import_service_run(const char *legacy_datadir,
     int num_files = st.num_files;
     bool sapling_tx_open = st.sapling_tx_open;
 
-    switch (code) {
-    case LEGACY_IMPORT_OK:
-        goto legacy_import_run_ok;
-    case LEGACY_IMPORT_OOM_FLAGS:
-        goto legacy_import_run_oom_flags;
-    case LEGACY_IMPORT_ABORT_P1:
-        goto legacy_import_run_abort_p1;
-    case LEGACY_IMPORT_THREAD_P1:
-        goto legacy_import_run_thread_p1;
-    case LEGACY_IMPORT_ABORT_P2:
-        goto legacy_import_run_abort_p2;
-    case LEGACY_IMPORT_UNSTABLE:
-        goto legacy_import_run_unstable;
-    case LEGACY_IMPORT_FCTX_OOM:
-        goto legacy_import_run_fctx_oom;
-    case LEGACY_IMPORT_ABORT_P3A:
-        goto legacy_import_run_abort_p3a;
-    case LEGACY_IMPORT_THREAD_P3A:
-        goto legacy_import_run_thread_p3a;
-    case LEGACY_IMPORT_DCTX_OOM:
-        goto legacy_import_run_dctx_oom;
-    case LEGACY_IMPORT_RESULTS_OOM:
-        goto legacy_import_run_results_oom;
-    case LEGACY_IMPORT_ABORT_P3B:
-        goto legacy_import_run_abort_p3b;
-    case LEGACY_IMPORT_THREAD_P3B:
-        goto legacy_import_run_thread_p3b;
-    case LEGACY_IMPORT_SAVE_OPEN:
-        goto legacy_import_run_save_open;
-    default:
-        goto cleanup;
+    if (code == LEGACY_IMPORT_OK) {
+        ret = st.wl.count;
+    } else {
+        legacy_import_log_pass12_failure(code, num_files, &batch);
+        legacy_import_log_pass3_failure(code, &batch);
+        if (code == LEGACY_IMPORT_SAVE_OPEN)
+            legacy_import_log_save_open(ndb, sapling_tx_open);
     }
 
-legacy_import_run_oom_flags:
-    LOG_WARN("legacy_import", "legacy_import: OOM allocating %d file-match flags", num_files);
-    goto cleanup;
-legacy_import_run_abort_p1:
-    LOG_INFO("legacy_import",
-             "legacy import aborted: shutdown requested (pass 1)");
-    goto cleanup;
-legacy_import_run_thread_p1:
-    LOG_WARN("legacy_import", "legacy_import: failed to start pass-1 scan thread");
-    legacy_import_join_started(batch.threads, batch.started);
-    goto cleanup;
-legacy_import_run_abort_p2:
-    LOG_INFO("legacy_import",
-             "legacy import aborted: shutdown requested (pass 2)");
-    goto cleanup;
-legacy_import_run_unstable:
-    LOG_WARN("legacy_import",
-             "legacy block file changed during immutable pass 2");
-    goto cleanup;
-legacy_import_run_fctx_oom:
-    LOG_WARN("legacy_import", "legacy_import: failed to allocate sapling filter contexts");
-    goto cleanup;
-legacy_import_run_abort_p3a:
-    LOG_INFO("legacy_import",
-             "legacy import aborted: shutdown requested (pass 3a)");
-    goto cleanup;
-legacy_import_run_thread_p3a:
-    LOG_WARN("legacy_import", "legacy_import: failed to start sapling filter thread");
-    legacy_import_join_started(batch.threads, batch.started);
-    goto cleanup;
-legacy_import_run_dctx_oom:
-    LOG_WARN("legacy_import", "legacy_import: failed to allocate sapling decrypt contexts");
-    goto cleanup;
-legacy_import_run_results_oom:
-    LOG_WARN("legacy_import", "legacy_import: failed to allocate sapling decrypt results");
-    goto cleanup;
-legacy_import_run_abort_p3b:
-    LOG_INFO("legacy_import",
-             "legacy import aborted: shutdown requested (pass 3b)");
-    goto cleanup;
-legacy_import_run_thread_p3b:
-    LOG_WARN("legacy_import", "legacy_import: failed to start sapling decrypt thread");
-    legacy_import_join_started(batch.threads, batch.started);
-    goto cleanup;
-legacy_import_run_save_open:
-    LOG_WARN("legacy_import", "legacy_import: pass 3 sapling note save failed");
-    if (sapling_tx_open &&
-        !legacy_import_rollback_checked(ndb,
-            "pass 3 rollback")) {
-        LOG_WARN("legacy_import", "legacy_import: pass 3 rollback failed after DB error");
-    }
-    goto cleanup;
-legacy_import_run_ok:
-    ret = st.wl.count;
-
-cleanup:
     /* Cleanup. */
     legacy_import_release_sapling_contexts(st.dctxs, st.fctxs, st.num_files);
     scan_aht_free(&st.aht);
