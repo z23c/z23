@@ -65,6 +65,7 @@
 #include "validation/main_state.h"
 
 #include <errno.h>
+#include <stdatomic.h>
 #include <sqlite3.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -356,6 +357,8 @@ static void stamp_upstream_log(sqlite3 *db, uint64_t *rng,
 
 /* ── adversarial injected readers/validators for downstream stages ────── */
 
+static atomic_flag g_vh_rng_lock = ATOMIC_FLAG_INIT;
+
 static bool adv_vh_validator(const struct block_index *bi, const char *datadir,
                              char *out_reason, size_t out_reason_size,
                              void *user)
@@ -364,8 +367,16 @@ static bool adv_vh_validator(const struct block_index *bi, const char *datadir,
     uint64_t *rng = user;
     /* Randomly pass / fail-with-reason / fail-empty-reason. A failing
      * validator MUST write a reason per its contract; we sometimes leave
-     * it empty to confirm the stage still produces a typed outcome. */
-    int pick = rng ? sm_range(rng, 0, 2) : 0;
+     * it empty to confirm the stage still produces a typed outcome. The
+     * validate_headers pool runs this on several workers sharing one
+     * splitmix state, so the draw is serialized. */
+    int pick = 0;
+    if (rng) {
+        while (atomic_flag_test_and_set_explicit(&g_vh_rng_lock,
+                                                 memory_order_acquire)) { }
+        pick = sm_range(rng, 0, 2);
+        atomic_flag_clear_explicit(&g_vh_rng_lock, memory_order_release);
+    }
     if (pick == 0) {
         if (out_reason && out_reason_size) out_reason[0] = 0;
         return true;
