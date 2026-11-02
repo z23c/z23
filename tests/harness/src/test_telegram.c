@@ -2,6 +2,9 @@
  * Purpose: ops.telegram leaves against a scripted transport and a loopback
  * Bot API: chunking, secret refusal, offset persistence, allowlist, 409,
  * credential modes, configure, and a canary token that must never surface. */
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
 #include "test/test_core.h"
 #include "command/native_command.h"
 #include "command/native_telegram.h"
