@@ -557,6 +557,7 @@ static int bipd_path_cold(void)
                loaded && bipd_golden("cold", &ms.map_block_index,
                                      BIPD_GOLDEN_COLD));
     block_map_free(&ms.map_block_index);
+    active_chain_free(&ms.chain_active);
     if (ndb.db)
         sqlite3_close(ndb.db);
     return failures;

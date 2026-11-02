@@ -317,6 +317,7 @@ static int test_execute_anchor_creation(void) {
         ASSERT(arith_uint256_compare(&anchor->nChainWork, &zero) == 0);
 
         block_map_free(&ms.map_block_index);
+        free(anchor);
         active_chain_free(&ms.chain_active);
         PASS();
     } _test_next:;
@@ -347,6 +348,7 @@ static int test_execute_records_anchor_without_consensus_tip(void) {
         ASSERT((result->nStatus & BLOCK_HAVE_DATA) == 0);
 
         block_map_free(&ms.map_block_index);
+        free(result);
         active_chain_free(&ms.chain_active);
         PASS();
     } _test_next:;
@@ -385,6 +387,7 @@ static int test_execute_found_in_index(void) {
         ASSERT(tip == existing);
 
         block_map_free(&ms.map_block_index);
+        free(existing);
         active_chain_free(&ms.chain_active);
         PASS();
     } _test_next:;
@@ -587,6 +590,7 @@ static int test_integrity_anchor_restore_is_benign(void) {
         ASSERT(r.ok == false);
 
         block_map_free(&ms.map_block_index);
+        free(anchor);
         active_chain_free(&ms.chain_active);
         PASS();
     } _test_next:;
@@ -1568,6 +1572,7 @@ static int test_backfill_nbits_skips_synthetic_anchor(void) {
         ASSERT(anchor->nBits == 0);
 
         block_map_free(&ms.map_block_index);
+        free(anchor);
         active_chain_free(&ms.chain_active);
 
         char rm_cmd[512];

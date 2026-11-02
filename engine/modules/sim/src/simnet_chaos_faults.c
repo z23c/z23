@@ -247,6 +247,7 @@ cleanup:
     tip_finalize_stage_shutdown();
     progress_store_close();
     block_map_free(&ms.map_block_index);
+    active_chain_free(&ms.chain_active);
     test_cleanup_tmpdir(dir);
     chain_params_select(CHAIN_MAIN);
     return true;

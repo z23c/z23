@@ -103,6 +103,7 @@ static int bhc_case_matches_scan_and_caches(void)
               bhc_scan(&ms, 1, pred_any));
     BHC_CHECK("empty height yields NULL",
               block_height_find(&ms, 9, pred_any, NULL) == NULL);
+    main_state_free(&ms);
     return failures;
 }
 
@@ -136,6 +137,7 @@ static int bhc_case_rebuilds_on_change(void)
     (void)block_height_find(&ms, 1, pred_failed, NULL);
     BHC_CHECK("a changed best header rebuilds the census",
               block_height_census_test_scans() == scans + 1);
+    main_state_free(&ms);
     return failures;
 }
 
@@ -161,6 +163,7 @@ static int bhc_case_overflow_falls_back_to_scan(void)
     (void)block_height_find(&ms, 1, pred_failed, NULL);
     BHC_CHECK("overflow marker is cached: no census rescan per call",
               block_height_census_test_scans() == scans);
+    main_state_free(&ms);
     return failures;
 }
 
@@ -188,6 +191,7 @@ static int bhc_case_moved_block_not_returned(void)
               block_height_find(&ms, 1, pred_failed, NULL) == NULL &&
               bhc_scan(&ms, 1, pred_failed) == NULL &&
               block_height_census_test_scans() == scans);
+    main_state_free(&ms);
     return failures;
 }
 
@@ -217,6 +221,7 @@ static int bhc_case_expiry_rescans(void)
               block_height_find(&ms, 5, pred_failed, NULL) == y &&
               block_height_census_test_scans() == scans + 1);
     block_height_census_test_reset();
+    main_state_free(&ms);
     return failures;
 }
 

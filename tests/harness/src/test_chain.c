@@ -294,6 +294,8 @@ static int test_chain_block_map_insert_find(void)
             failures++;
         }
         block_map_free(&bm);
+        free(bi1);
+        free(bi2);
     }
 
     return failures;

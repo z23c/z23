@@ -1188,6 +1188,7 @@ static int ml_check_healthy_fold(const struct chain_params *cp)
     body_fetch_stage_shutdown();
     validate_headers_stage_shutdown();
     header_admit_stage_shutdown();
+    main_state_free(&ms);
     progress_store_close();
     test_cleanup_tmpdir(blocksdir);
     test_cleanup_tmpdir(netdir);
@@ -1327,6 +1328,7 @@ int test_mint_fold_livelock(void)
         body_fetch_stage_shutdown();
         validate_headers_stage_shutdown();
         header_admit_stage_shutdown();
+        main_state_free(&ms);
         progress_store_close();
         test_cleanup_tmpdir(netdir);
         test_cleanup_tmpdir(dir);

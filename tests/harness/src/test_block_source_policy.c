@@ -1296,6 +1296,7 @@ static int test_bsp_dump_populates_local_import_recovery(void)
         block_source_policy_reset_for_test();
         zcl_mutex_destroy(&dm.cs);
         zcl_mutex_destroy(&cm.manager.cs_nodes);
+        active_chain_free(&ms.chain_active);
         zcl_mutex_destroy(&ms.cs_main);
     } TEST_END
     return failures;
@@ -1502,6 +1503,7 @@ static int test_bsp_dump_populates_live_mirror_source(void)
         block_source_policy_reset_for_test();
         mirror_consensus_reset_for_test();
         legacy_mirror_sync_reset_for_test();
+        active_chain_free(&ms.chain_active);
     } TEST_END
     return failures;
 }

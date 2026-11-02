@@ -224,6 +224,7 @@ static int test_nss_scenario_c_warm_reboot_no_raise(void)
 
     no_state_source_test_reset();
     unsetenv("ZCL_NO_BUNDLE_FETCH");
+    main_state_free(&ms);
     test_cleanup_tmpdir(dir);
     return failures;
 }
