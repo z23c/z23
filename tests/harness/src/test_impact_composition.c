@@ -5076,6 +5076,9 @@ static int test_ic_proof_base_probe_cancels_superseded_worker(void)
         (void)ic_waited_ms(false, &silent_probe, &silent_rc, &silent_flag);
         (void)ic_waited_ms(false, NULL, &plain_rc, &plain_flag);
         ASSERT_EQ(moved_rc, 1);
+        if (!(moved_flag && moved.calls == 2 && moved_ms < 5000))
+            fprintf(stderr, "superseded probe: flag=%d calls=%d moved_ms=%lld\n",
+                    (int)moved_flag, (int)moved.calls, (long long)moved_ms);
         ASSERT(moved_flag && moved.calls == 2 && moved_ms < 5000);
         ASSERT_EQ(silent_rc, 1);
         ASSERT(!silent_flag && silent.calls >= 3 && silent.released);

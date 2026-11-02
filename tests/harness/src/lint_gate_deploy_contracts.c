@@ -13,6 +13,16 @@
 
 #include "test/test_core.h"
 
+/* GCC names a ThreadSanitizer build with __SANITIZE_THREAD__; Clang reports it
+ * through __has_feature(thread_sanitizer). */
+#if defined(__SANITIZE_THREAD__)
+#define LGD_UNDER_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define LGD_UNDER_TSAN 1
+#endif
+#endif
+
 /* The lint-gate self-test family fork+execs POSIX bash gate scripts; native
  * Windows has no fork/exec/waitpid, so on _WIN32 every check compiles out and
  * the registered group entry points (test_make_lint_gates.c) report a loud
@@ -1146,6 +1156,17 @@ int t_agent_fast_ci_contract(void)
          * ahead of its upstream still yields the committed file list. */
         ASSERT(run_gate_script_arg("tools/agent_fast_ci.sh", NULL,
                                    "changed-set-selftest") == 0);
+#if defined(LGD_UNDER_TSAN)
+        /* The build-epoch self-test's t-hotswap phase runs make t-hotswap,
+         * whose recipe sets `ulimit -s unlimited` (ZCL_TEST_STACK_SETUP). The
+         * t-tsan recipe has already lowered the hard stack limit to 1 GiB, so
+         * that nested ulimit fails with "Operation not permitted" and the phase
+         * fails (TSan sweep, pfx-ma.log). Skipped under TSan only, with that
+         * reason; every other build runs the self-test unchanged. */
+        printf("  build-epoch-selftest SKIP under ThreadSanitizer (the nested "
+               "t-hotswap recipe cannot raise the 1 GiB hard stack limit: "
+               "ulimit -s unlimited: Operation not permitted)\n");
+#else
         int epoch_selftest_rc = run_gate_script(
             "tools/dev/build-epoch-selftest.sh", NULL);
         if (epoch_selftest_rc != 0) {
@@ -1161,6 +1182,7 @@ int t_agent_fast_ci_contract(void)
             free(epoch_output);
         }
         ASSERT(epoch_selftest_rc == 0);
+#endif
         PASS();
     } _test_next:;
     free(buf);

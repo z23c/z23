@@ -273,6 +273,16 @@ static int portable_cases(void)
 
 #define FBSH_BIN "build/bin/fbsh"
 
+/* GCC names a ThreadSanitizer build with __SANITIZE_THREAD__; Clang reports it
+ * through __has_feature(thread_sanitizer). */
+#if defined(__SANITIZE_THREAD__)
+#define MH_UNDER_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define MH_UNDER_TSAN 1
+#endif
+#endif
+
 int test_mesh_terminal_hub_bounds(const char *fbsh, const char *dir);
 
 static char g_dir[160];
@@ -1710,6 +1720,17 @@ int test_mesh_terminal_hub(void)
     failures += key_cases();
     failures += exec_wire_cases();
     if (g_fbsh[0]) {
+#if defined(MH_UNDER_TSAN)
+        /* Every live case spawns its shell through mesh_terminal_worker_spawn,
+         * which enters a user+PID namespace. ThreadSanitizer's helper thread
+         * makes unshare(CLONE_NEWUSER) fail with EINVAL, so each spawn reports
+         * TERMINAL_PIDNS_UNAVAILABLE (measured in the TSan sweep, pfx-me.log:
+         * "admitted with the right key" and the status cases fail). The same
+         * refusal skips the live block in test_mesh_terminal_worker. Skipped
+         * under TSan only; the wire, key and portable cases above still run. */
+        printf("  mesh terminal hub: live shell cases SKIP under ThreadSanitizer "
+               "(the sanitizer helper thread refuses the user namespace)\n");
+#else
         failures += status_cases();
         failures += echo_and_resize_cases();
         failures += refusal_cases();
@@ -1722,6 +1743,7 @@ int test_mesh_terminal_hub(void)
         failures += latency_case();
         failures += bound_cases();
         failures += test_mesh_terminal_hub_bounds(g_fbsh, g_dir);
+#endif
     }
     printf("mesh terminal hub: %d failures\n", failures);
     return failures;

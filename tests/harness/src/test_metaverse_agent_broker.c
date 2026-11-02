@@ -1660,6 +1660,19 @@ static int mb_identity_options(void)
 #endif
 #endif
 
+/* ThreadSanitizer reserves its own shadow range at startup, so the same
+ * RLIMIT_AS cap kills each hostile child before it runs: the child prints
+ * "CHECK failed: sanitizer_allocator_primary64.h:131 ... address_range.Init"
+ * (TotalSpaceSize 0x720000000000 under the cap, measured in the TSan sweep,
+ * pfx-me.log). Skipped under TSan only, with the same printed reason. */
+#if defined(__SANITIZE_THREAD__)
+#define MB_UNDER_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define MB_UNDER_TSAN 1
+#endif
+#endif
+
 int test_metaverse_agent_broker(void)
 {
     printf("\n=== metaverse confined-agent broker (adversarial) ===\n");
@@ -1688,6 +1701,10 @@ int test_metaverse_agent_broker(void)
 #if defined(MB_UNDER_ASAN)
     bool have_self = false;
     printf("agent_broker: confinement assertions SKIP under AddressSanitizer "
+           "(the RLIMIT_AS cage refuses its shadow reservation)\n");
+#elif defined(MB_UNDER_TSAN)
+    bool have_self = false;
+    printf("agent_broker: confinement assertions SKIP under ThreadSanitizer "
            "(the RLIMIT_AS cage refuses its shadow reservation)\n");
 #else
     bool have_self = os_proc_exe_path(self_exe, sizeof(self_exe));

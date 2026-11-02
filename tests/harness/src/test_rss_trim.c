@@ -16,6 +16,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+/* GCC names a ThreadSanitizer build with __SANITIZE_THREAD__; Clang reports it
+ * through __has_feature(thread_sanitizer). */
+#if defined(__SANITIZE_THREAD__)
+#define RT_UNDER_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define RT_UNDER_TSAN 1
+#endif
+#endif
+
 #define RT_CHECK(name, expr) do { \
     printf("rss_trim: %s... ", (name)); \
     if ((expr)) printf("OK\n"); \
@@ -109,8 +119,17 @@ static int rt_measure_cases(void)
            (long long)freed, (long long)trimmed);
     RT_CHECK("statm reads resident", base > 0 && full > base);
     RT_CHECK("freed chunks stay resident until the trim", freed > full / 2);
+#if defined(RT_UNDER_TSAN)
+    /* TSan's allocator keeps the freed chunks mapped and the platform trim
+     * returns nothing: the TSan sweep (pfx-rs.log) measured after_free=829084
+     * and after_trim=829104 KiB. Skipped under TSan only, with that reason. */
+    printf("rss_trim: trim returns >= 150 MiB to the OS SKIP under ThreadSanitizer "
+           "(the trim released no resident memory: after_free=%lld after_trim=%lld KiB)\n",
+           (long long)freed, (long long)trimmed);
+#else
     RT_CHECK("trim returns >= 150 MiB to the OS",
              freed - trimmed >= 150 * 1024);
+#endif
 #endif
     return failures;
 }

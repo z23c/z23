@@ -2479,11 +2479,25 @@ static bool gw_press_round(const char *bin, const char *node,
 #endif
 #endif
 
+/* ThreadSanitizer maps a shadow range of its own, so the same RLIMIT_AS cap
+ * (3028 KB in the TSan sweep, idle VmSize 2780 + 248, pfx-fl.log) refuses the
+ * gateway at startup and up=0 at the first level. Skipped under TSan only. */
+#if defined(__SANITIZE_THREAD__)
+#define GW_UNDER_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define GW_UNDER_TSAN 1
+#endif
+#endif
+
 static int gw_t_bound_pressure(void)
 {
     int failures = 0;
 #if defined(GW_UNDER_ASAN)
     printf("gateway: the node-input verdict does not move with memory pressure SKIP under AddressSanitizer (RLIMIT_AS cap refuses the shadow reservation)\n");
+    return failures;
+#elif defined(GW_UNDER_TSAN)
+    printf("gateway: the node-input verdict does not move with memory pressure SKIP under ThreadSanitizer (RLIMIT_AS cap of 3028 KB refuses the TSan shadow reservation; up=0 at the first level)\n");
     return failures;
 #endif
     char *reqs_m[3] = {NULL, NULL, NULL};
