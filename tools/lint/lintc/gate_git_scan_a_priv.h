@@ -15,6 +15,9 @@
 
 int nak_filesystem_selftest(void);
 
+/* suffix test, also used by check-error-doc-refs in gate_git_scan_c.c. */
+int c23_ends(const char *path, const char *suf);
+
 /* check-equihash-params: path filter, regex setup, file load, line scan. */
 int eqp_keep_path(const char *path);
 int eqp_comp(regex_t *lit, regex_t *claim, regex_t *qual);
