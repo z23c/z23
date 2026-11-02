@@ -149,7 +149,9 @@ extern void build_fabric_attach_test_before_donor_scan(void (*hook)(void *),
 extern void build_fabric_attach_test_after_scan(void (*hook)(void *),
                                                 void *context);
 extern void build_fabric_attach_test_now(int64_t now);
-static void att_set_now_after_scan(void *context)
+/* The hooks and checks marked [[maybe_unused]] below are called only by the
+ * Linux-only runtime-closure cases; other platforms compile them unused. */
+[[maybe_unused]] static void att_set_now_after_scan(void *context)
 { build_fabric_attach_test_now(*(const int64_t *)context); }
 extern void db_build_attach_test_before_settle(void (*hook)(void *),
                                               void *context);
@@ -174,7 +176,7 @@ static void *att_same_handle_revoke_thread(void *context)
     return NULL;
 }
 
-static void att_same_handle_revoke_at_settle(void *context)
+[[maybe_unused]] static void att_same_handle_revoke_at_settle(void *context)
 {
     struct att_same_handle_revoke *race = context;
     pthread_t thread;
@@ -190,7 +192,7 @@ struct att_remove_before_scan {
     bool removed;
 };
 
-static void att_remove_donor_input_before_scan(void *context)
+[[maybe_unused]] static void att_remove_donor_input_before_scan(void *context)
 {
     struct att_remove_before_scan *race = context;
     race->removed = remove(race->path) == 0;
@@ -203,7 +205,7 @@ struct att_revoke_after_scan {
     bool saved;
 };
 
-static void att_revoke_donor_after_scan(void *context)
+[[maybe_unused]] static void att_revoke_donor_after_scan(void *context)
 {
     struct att_revoke_after_scan *race = context;
     race->called = true;
@@ -405,7 +407,7 @@ static bool att_read_artifact_bytes(const char *workspace,
                                out_len) == 0;
 }
 
-static bool att_artifact_binds_action(const char *workspace,
+[[maybe_unused]] static bool att_artifact_binds_action(const char *workspace,
                                       const char *manifest_root_hex,
                                       const char *action_hex)
 {
@@ -422,7 +424,7 @@ static bool att_artifact_binds_action(const char *workspace,
     return ok;
 }
 
-static bool att_observation_bytes_root(const char *workspace,
+[[maybe_unused]] static bool att_observation_bytes_root(const char *workspace,
                                         const char *root_hex,
                                         uint8_t out[32])
 {
@@ -450,7 +452,7 @@ static int att_deny_table_reads(void *ctx, int operation,
 }
 
 /* Create a divergent signed physical result while the first is quarantined. */
-static bool att_diverge_quarantined_output(struct node_db *ndb,
+[[maybe_unused]] static bool att_diverge_quarantined_output(struct node_db *ndb,
                                          const char *workspace,
                                          struct db_build_action *action,
                                          struct db_build_receipt *receipt,
