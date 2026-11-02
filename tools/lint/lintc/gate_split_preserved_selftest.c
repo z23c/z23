@@ -260,6 +260,8 @@ static const struct spm_case k_spm_cases[] = {
       { "d/s.c", "d/n.c", "d/s_internal.h" }, { SPM_BASE, NULL, NULL },
       { SPM_SRC, SPS_LIC "#include \"s_internal.h\"\n" SPS_G1, SPM_HDR },
       3, 1, "s.c:3: base include removed and not in any new file" },
+    { "no file exists at the base (zero sources) is an error, rc 2",
+      { "d/n.c", "d/s_internal.h" }, { NULL, NULL }, { SPM_NEW, SPM_HDR }, 2, 2, NULL },
     { "a new file in another directory",
       { "d/s.c", "e/n.c", "d/s_internal.h" }, { SPM_BASE, NULL, NULL },
       { SPM_SRC, SPM_NEW, SPM_HDR }, 3, 1, "n.c:1: new file is not in the directory of a source" },

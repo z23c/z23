@@ -370,6 +370,21 @@ static int sp_one(const char *rev, const char *path, int dedup)
     return rc;
 }
 
+/* Whether PATH exists in the tree of REV: 1 yes, 0 no, -1 when git failed
+ * (a bad REV or any other error is not "absent"). */
+static int sp_git_present(const char *rev, const char *path)
+{
+    char *argv[] = { (char *)"git", (char *)"ls-tree", (char *)"--name-only", (char *)rev,
+                     (char *)"--", (char *)path, NULL };
+    struct lcp_spec s = { argv, NULL, NULL, LCP_OUT, 2000, NULL };
+    struct lcp_buf out = { 0 };
+    int code = 1, res = -1;
+    if (lcp_run(&s, &out, &code) == 0 && code == 0 && !out.lost)
+        res = out.len > 0;
+    lcp_buf_free(&out);
+    return res;
+}
+
 /* --mode=move: PATH... is every file the commit touches; a path absent at REV
  * is a new file. Returns 2 when a path is readable in neither place. */
 static int sp_run_move(const char *rev, int argc, char **argv)
@@ -377,12 +392,16 @@ static int sp_run_move(const char *rev, int argc, char **argv)
     struct sp_mfile *f = calloc((size_t)argc, sizeof *f); // raw-alloc-ok:lint-runtime
     int rc = f ? 0 : 2;
     for (int i = 0; !rc && i < argc; i++) {
-        char *base = sp_git_show(rev, argv[i], &f[i].base_len);
+        int present = sp_git_present(rev, argv[i]);
+        char *base = present > 0 ? sp_git_show(rev, argv[i], &f[i].base_len) : NULL;
         char *cur = sp_read_file(argv[i], &f[i].cur_len);
         f[i].path = argv[i];
         f[i].base = base;
         f[i].cur = cur;
-        if (!cur) {
+        if (present < 0 || (present > 0 && !base)) {
+            fprintf(stderr, "check_split_preserved: cannot read %s at %s\n", argv[i], rev);
+            rc = 2;
+        } else if (!cur) {
             fprintf(stderr, "check_split_preserved: cannot read %s\n", argv[i]);
             rc = 2;
         }

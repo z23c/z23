@@ -13,8 +13,11 @@
  * file has it; a new file may include only what a source included at the
  * base, plus one new header of the move (the *_internal.h in the same
  * directory) and the standard type headers that header's declarations need.
- * Dropping `static` is not checked: nothing else about a moved function may
- * change, and the comment and LOG checks plus review cover that. Facts come
+ * LIMIT: move mode does NOT compare function bodies. It compares comments,
+ * LOG calls, includes, licence lines and directory only; a moved function
+ * whose code changed but whose comments and LOG calls did not passes here.
+ * check-core-seal and review cover the bodies. Dropping `static` is not
+ * checked either. Facts come
  * from gate_split_preserved.c; split and dedup modes are
  * gate_split_preserved_check.c. Selftest: gate_split_preserved_selftest.c.
  */
@@ -61,21 +64,17 @@ static int mv_is_new(const struct mv *m, size_t i)
 static int mv_append(struct sp_list *dst, const struct sp_list *src, size_t **own, size_t who)
 {
     for (size_t i = 0; i < src->n; i++) {
-        struct sp_ent *v = NULL;
-        size_t *o = NULL;
         if (dst->n == dst->cap) {
             size_t cap = dst->cap ? dst->cap * 2 : 256;
-            v = realloc(dst->v, cap * sizeof *v); // raw-alloc-ok:lint-runtime
-            if (!v)
-                return 1;
-            dst->v = v;
-            dst->cap = cap;
-            if (own) {
-                o = realloc(*own, cap * sizeof *o); // raw-alloc-ok:lint-runtime
-                if (!o)
-                    return 1;
+            struct sp_ent *v = realloc(dst->v, cap * sizeof *v); // raw-alloc-ok:lint-runtime
+            size_t *o = own ? realloc(*own, cap * sizeof *o) : NULL; // raw-alloc-ok:lint-runtime
+            if (v)
+                dst->v = v;
+            if (o)
                 *own = o;
-            }
+            if (!v || (own && !o))
+                return 1;
+            dst->cap = cap;
         }
         if (own)
             (*own)[dst->n] = who;

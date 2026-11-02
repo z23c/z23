@@ -162,6 +162,18 @@ use `_IN` outside such a split. `check-split-preserved` counts
 file and calls the static helper that holds the call; any other name is
 compared as written and fails the gate.
 
+`check-split-preserved --mode=move [--base=REV] PATH...` accepts a move of
+whole functions from a pinned file into a new sibling file (kept under a
+shrink-only size pin). PATH... is every file the commit touches: files that
+exist at REV are sources, the rest are new and must sit in a source's
+directory. It checks that every base comment line survives in the union of the
+files, that every LOG call stays in a function of the same name with identical
+text, that a new file carries a source's licence lines, and that includes only
+move to new files (a new file adds at most one new `*_internal.h` plus standard
+type headers). It does NOT compare function bodies: `check-core-seal` and
+review must cover the moved code itself. A path that git cannot read at REV
+(other than being absent there) is an error (exit 2), not a new file.
+
 ### Release a stepped sqlite cursor BEFORE the log-and-return macros
 
 **Problem:** the `LOG_*` / `GUARD*` macros above RETURN from the caller, so a
