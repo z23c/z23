@@ -325,17 +325,24 @@ static bool db_service_submit_job(struct db_service *svc,
     if (db_service_is_worker_thread(svc))
         return db_service_perform_job(svc, job);
 
+    /* A queued async job belongs to the worker, which may run and free it
+     * as soon as queue_mutex is released: read `async` before queueing and
+     * the verdict before unlocking, never `job` afterwards (11-02 ASan:
+     * heap-use-after-free here; a stale false would make
+     * db_service_enqueue_write free the job and its ctx a second time). */
+    const bool async = job->async;
     zcl_mutex_lock(&svc->queue_mutex);
     bool queued = db_service_admit_job_locked(svc, job);
 
-    while (queued && !job->async && !job->done)
+    while (queued && !async && !job->done)
         zcl_cond_wait(&job->done_cond, &svc->queue_mutex);
 
     if (queued && svc->queue_count < DB_SERVICE_QUEUE_CAP)
         zcl_cond_broadcast(&svc->queue_cond);
 
+    const bool ok = async ? queued : (queued && job->success);
     zcl_mutex_unlock(&svc->queue_mutex);
-    return job->async ? queued : (queued && job->success);
+    return ok;
 }
 
 static bool db_service_submit_simple_job(struct db_service *svc,
