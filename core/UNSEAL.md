@@ -821,3 +821,7 @@ later lane flips it HARD.
 - 2026-11-02T12:47:00Z — REASON: refactor(download): split 2 function(s) under the complexity cap (grok); behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
   old ROOT: d24d38f96c68138ac6a2cb2f4fd9fad234e20b4dd242830363f49aa6b555de69
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-02T12:47:20Z — REASON: refactor(download): move assignment-window helpers to download_assign_windows.c; behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
+  old ROOT: 3556c9082fe02d91fc69c29b9ff9fd2668fb997997283ff56727dc19ec50a90f
+  by: owner unseal ritual (make core-unseal)
