@@ -605,6 +605,94 @@ void boot_refold_from_anchor_reset(struct node_db *ndb)
  * GATED: only called when ctx->load_snapshot_at_own_height is non-NULL (an
  * operator-supplied path); a normal boot never reaches it. */
 
+/* Resolve the block the resume repair seeds at: the active chain slot, else
+ * the ancestor on the best header chain. May return NULL or a block at the
+ * wrong height; the caller checks. */
+static struct block_index *boot_resume_resolve_anchor(struct main_state *ms,
+                                                      int32_t authority_h)
+{
+    struct block_index *anchor =
+        active_chain_at(&ms->chain_active, authority_h);
+    if ((!anchor || anchor->nHeight != authority_h) &&
+        ms->pindex_best_header &&
+        ms->pindex_best_header->nHeight >= authority_h) {
+        anchor = block_index_get_ancestor(ms->pindex_best_header,
+                                          authority_h);
+    }
+    return anchor;
+}
+
+/* Stamp every stage cursor to the authority height in ONE progress.kv
+ * transaction under the progress-store tx lock; true when committed. */
+static bool boot_resume_stamp_cursors(sqlite3 *rpdb, int32_t authority_h)
+{
+    char *cerr = NULL;
+    bool cursor_ok = true;
+    progress_store_tx_lock();
+    if (sqlite3_exec(rpdb, "BEGIN IMMEDIATE", NULL, NULL, &cerr)
+        != SQLITE_OK) {
+        LOG_WARN_IN("boot_load_snapshot_resume_seed_from_authority", "boot",
+                 "[boot] -load-snapshot-at-own-height: resume repair cursor "
+                 "BEGIN failed h=%d: %s",
+                 authority_h, cerr ? cerr : "(no msg)");
+        cursor_ok = false;
+    }
+    if (cursor_ok) {
+        static const char *const k_upstream_stages[] = {
+            "header_admit", "validate_headers", "body_fetch", "body_persist",
+            "script_validate", "proof_validate", "utxo_apply",
+        };
+        int next_h = authority_h + 1;
+        for (size_t i = 0;
+             cursor_ok &&
+             i < sizeof(k_upstream_stages) / sizeof(k_upstream_stages[0]);
+             i++) {
+            if (!stage_repair_force_stage_cursor(rpdb, k_upstream_stages[i],
+                                                 next_h)) {
+                LOG_WARN_IN("boot_load_snapshot_resume_seed_from_authority", "boot",
+                         "[boot] -load-snapshot-at-own-height: resume repair "
+                         "cursor stamp failed stage=%s h=%d",
+                         k_upstream_stages[i], next_h);
+                cursor_ok = false;
+            }
+        }
+    }
+    if (cursor_ok &&
+        !stage_repair_force_stage_cursor(rpdb, "tip_finalize",
+                                         authority_h)) {
+        LOG_WARN_IN("boot_load_snapshot_resume_seed_from_authority", "boot",
+                 "[boot] -load-snapshot-at-own-height: resume repair cursor "
+                 "stamp failed stage=tip_finalize h=%d", authority_h);
+        cursor_ok = false;
+    }
+    if (cursor_ok &&
+        sqlite3_exec(rpdb, "COMMIT", NULL, NULL, &cerr) != SQLITE_OK) {
+        LOG_WARN_IN("boot_load_snapshot_resume_seed_from_authority", "boot",
+                 "[boot] -load-snapshot-at-own-height: resume repair cursor "
+                 "COMMIT failed h=%d: %s",
+                 authority_h, cerr ? cerr : "(no msg)");
+        cursor_ok = false;
+    }
+    if (!cursor_ok)
+        sqlite3_exec(rpdb, "ROLLBACK", NULL, NULL, NULL);
+    if (cerr)
+        sqlite3_free(cerr);
+    progress_store_tx_unlock();
+    return cursor_ok;
+}
+
+/* One WARN line for a resume repair that did not bring H* up to the
+ * authority height. */
+static void boot_resume_warn_incomplete(bool after_ok, int32_t after,
+                                        int32_t authority_h, int32_t hstar,
+                                        int32_t seed_h)
+{
+    LOG_WARN_IN("boot_load_snapshot_resume_seed_from_authority", "boot",
+                 "[boot] -load-snapshot-at-own-height: resume repair incomplete "
+                 "H*=%d want=%d before=%d seed_h=%d",
+                 after_ok ? after : -1, authority_h, hstar, seed_h);
+}
+
 /* FIX 3 seam (see boot.h). PURE: no side effects. */
 static bool boot_load_snapshot_resume_seed_from_authority(
     const struct uss_header *hdr,
@@ -643,14 +731,7 @@ static bool boot_load_snapshot_resume_seed_from_authority(
         return false;
     }
 
-    struct block_index *anchor =
-        active_chain_at(&ms->chain_active, authority_h);
-    if ((!anchor || anchor->nHeight != authority_h) &&
-        ms->pindex_best_header &&
-        ms->pindex_best_header->nHeight >= authority_h) {
-        anchor = block_index_get_ancestor(ms->pindex_best_header,
-                                          authority_h);
-    }
+    struct block_index *anchor = boot_resume_resolve_anchor(ms, authority_h);
     if (!anchor || anchor->nHeight != authority_h || !anchor->phashBlock) {
         LOG_WARN("boot",
                  "[boot] -load-snapshot-at-own-height: resume repair skipped "
@@ -669,59 +750,7 @@ static bool boot_load_snapshot_resume_seed_from_authority(
         return false;
     }
 
-    char *cerr = NULL;
-    bool cursor_ok = true;
-    progress_store_tx_lock();
-    if (sqlite3_exec(rpdb, "BEGIN IMMEDIATE", NULL, NULL, &cerr)
-        != SQLITE_OK) {
-        LOG_WARN("boot",
-                 "[boot] -load-snapshot-at-own-height: resume repair cursor "
-                 "BEGIN failed h=%d: %s",
-                 authority_h, cerr ? cerr : "(no msg)");
-        cursor_ok = false;
-    }
-    if (cursor_ok) {
-        static const char *const k_upstream_stages[] = {
-            "header_admit", "validate_headers", "body_fetch", "body_persist",
-            "script_validate", "proof_validate", "utxo_apply",
-        };
-        int next_h = authority_h + 1;
-        for (size_t i = 0;
-             cursor_ok &&
-             i < sizeof(k_upstream_stages) / sizeof(k_upstream_stages[0]);
-             i++) {
-            if (!stage_repair_force_stage_cursor(rpdb, k_upstream_stages[i],
-                                                 next_h)) {
-                LOG_WARN("boot",
-                         "[boot] -load-snapshot-at-own-height: resume repair "
-                         "cursor stamp failed stage=%s h=%d",
-                         k_upstream_stages[i], next_h);
-                cursor_ok = false;
-            }
-        }
-    }
-    if (cursor_ok &&
-        !stage_repair_force_stage_cursor(rpdb, "tip_finalize",
-                                         authority_h)) {
-        LOG_WARN("boot",
-                 "[boot] -load-snapshot-at-own-height: resume repair cursor "
-                 "stamp failed stage=tip_finalize h=%d", authority_h);
-        cursor_ok = false;
-    }
-    if (cursor_ok &&
-        sqlite3_exec(rpdb, "COMMIT", NULL, NULL, &cerr) != SQLITE_OK) {
-        LOG_WARN("boot",
-                 "[boot] -load-snapshot-at-own-height: resume repair cursor "
-                 "COMMIT failed h=%d: %s",
-                 authority_h, cerr ? cerr : "(no msg)");
-        cursor_ok = false;
-    }
-    if (!cursor_ok)
-        sqlite3_exec(rpdb, "ROLLBACK", NULL, NULL, NULL);
-    if (cerr)
-        sqlite3_free(cerr);
-    progress_store_tx_unlock();
-    if (!cursor_ok)
+    if (!boot_resume_stamp_cursors(rpdb, authority_h))
         return false;
 
     int32_t after = 0;
@@ -731,10 +760,8 @@ static bool boot_load_snapshot_resume_seed_from_authority(
         reducer_frontier_compute_hstar(rpdb, &after, &after_served);
     progress_store_tx_unlock();
     if (!after_ok || after < authority_h) {
-        LOG_WARN("boot",
-                 "[boot] -load-snapshot-at-own-height: resume repair incomplete "
-                 "H*=%d want=%d before=%d seed_h=%d",
-                 after_ok ? after : -1, authority_h, hstar, seed_h);
+        boot_resume_warn_incomplete(after_ok, after, authority_h, hstar,
+                                    seed_h);
         return false;
     }
 
@@ -1051,11 +1078,9 @@ static bool boot_snapshot_arm_cursors(sqlite3 *rpdb, struct main_state *ms, int3
     return boot_progress_tx_finish(rpdb, ok, &err);
 }
 
-void boot_load_snapshot_at_own_height_reset(struct node_db *ndb,
-                                            const char *path,
-                                            const char *datadir,
-                                            struct main_state *ms,
-                                            bool trust_existing_block_files)
+/* Refuse an empty path, a missing chain context and a shieldless seed before
+ * any file or database is touched. */
+static void boot_snapshot_preflight(const char *path, struct main_state *ms)
 {
     if (!path || !path[0]) {
         fprintf(stderr, "FATAL: -load-snapshot-at-own-height: empty path\n");
@@ -1068,7 +1093,13 @@ void boot_load_snapshot_at_own_height_reset(struct node_db *ndb,
     /* D1: refuse a shieldless v1 seed past Sapling activation up front; it
      * otherwise wedges on shielded backfill. v2/v3 seeds pass. */
     boot_seed_refuse_shieldless_or_die(path);
+}
 
+/* Open the snapshot and verify it. Fatal on any failure; returns the open
+ * handle. */
+static struct uss_handle *boot_snapshot_open_verified(
+    const char *path, struct uss_header *hdr_out, uint8_t artifact_sha256[32])
+{
     /* (i) Open + verify the snapshot body digest against its header (NOT the
      * compiled checkpoint). expected_sha3=NULL skips the checkpoint binding;
      * verify_full_sha3=true still recomputes the whole body and compares it to
@@ -1085,7 +1116,6 @@ void boot_load_snapshot_at_own_height_reset(struct node_db *ndb,
                     path, err);
         _exit(EXIT_FAILURE);
     }
-    uint8_t artifact_sha256[32] = {0};
     if (!uss_artifact_sha256(h, artifact_sha256)) {
         uss_close(h);
         fprintf(stderr, "FATAL: snapshot exact artifact hash failed\n");
@@ -1098,6 +1128,425 @@ void boot_load_snapshot_at_own_height_reset(struct node_db *ndb,
                     "load_snapshot snapshot_height_out_of_range");
         _exit(EXIT_FAILURE);
     }
+    *hdr_out = hdr;
+    return h;
+}
+
+/* Bind the snapshot to this node's validated header at seed_h. Returns true
+ * when the seed must be DEFERRED (headers not synced to seed_h; *hdr_tip_out
+ * is set); every other failure is fatal and does not return. */
+static bool boot_snapshot_anchor_bind(struct uss_handle *h,
+                                      struct main_state *ms,
+                                      const struct uss_header *hdr,
+                                      int32_t seed_h, int32_t *hdr_tip_out)
+{
+    /* Require the snapshot to name this node's validated header at its height.
+     * Body SHA3 proves file integrity, not state derivation or contents.
+     * Require the snapshot's hdr.anchor_block_hash to byte-equal the in-memory
+     * active-chain block hash at seed_h (both internal little-endian; the
+     * snapshot writer fed cp->block_hash, same representation as
+     * block_index.hashBlock). The prior block-index load (`--importblockindex`
+     * is a documented prerequisite) populates ms->chain_active up to the tip, so
+     * the slot at seed_h is present on the supported recovery path. FATAL on a
+     * mismatch — never stamp a coin against a forged anchor. */
+    const struct block_index *bi = active_chain_at(&ms->chain_active, seed_h);
+    if (!bi && ms->pindex_best_header &&
+        ms->pindex_best_header->nHeight >= seed_h) {
+        /* seed_h is above the coins-best active-chain WINDOW but within
+         * this node's PoW-proven header chain. The block_index map + the
+         * on-disk bodies span to the header tip (pindex_best_header); only
+         * the VISIBLE active window was pinned to coins-best by the boot
+         * restore (utxo_recovery_restore_chain_tip -> csr_commit_tip).
+         * Widen the window forward to the header tip with the SAME
+         * primitive the reducer uses for its lookahead: it fills chain[]
+         * by walking pprev and NEVER publishes finalized authority, so the
+         * consensus anchor-hash cross-check below reads the real
+         * PoW-proven block_index at seed_h. A pprev gap leaves the slot
+         * NULL and the FATAL below still fires (never bind against a
+         * missing/forged anchor). The loader's header docstring assumed
+         * `--importblockindex` supplies this slot; it does NOT (header
+         * import sets only pindex_best_header, never c->chain[]), so the
+         * window is extended here. */
+        active_chain_extend_window(&ms->chain_active, ms->pindex_best_header);
+        bi = active_chain_at(&ms->chain_active, seed_h);
+    }
+    if (!bi) {
+        int32_t hdr_tip =
+            ms->pindex_best_header ? ms->pindex_best_header->nHeight : -1;
+        /* Distinguish two NULL-slot causes:
+         *
+         *  (a) Headers simply not synced to seed_h yet (hdr_tip < seed_h) —
+         *      e.g. a FRESH datadir. We cannot check its chain location NOW;
+         *      that never authenticates contents. Degrade to a WARN
+         *      and RETURN cleanly so the node falls back to normal P2P IBD
+         *      and downloads headers/blocks the usual way. (Auto-seeding the
+         *      snapshot once headers later reach seed_h is a follow-up — the
+         *      seed is simply skipped this run.)
+         *
+         *  (b) Headers ARE at/above seed_h but the slot is still NULL after
+         *      active_chain_extend_window (a real pprev/data gap below the
+         *      header tip) — genuine corruption. KEEP the fail-closed FATAL:
+         *      never stamp a coin against a missing/forged anchor. */
+        *hdr_tip_out = hdr_tip;
+        if (hdr_tip < seed_h)
+            return true;
+        fprintf(stderr,
+                "FATAL: -load-snapshot-at-own-height: the in-memory active "
+                "chain has NO block at the snapshot height h=%d — cannot "
+                "check its declared chain location (header tip h=%d). This "
+                "does not authenticate state contents. REFUSING to seed.\n",
+                seed_h, hdr_tip);
+        event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
+                    "load_snapshot_at_own_height no_index_block seed_h=%d",
+                    seed_h);
+        uss_close(h);
+        _exit(EXIT_FAILURE);
+    }
+    if (!boot_snapshot_anchor_hash_matches(bi->hashBlock.data,
+                                           hdr->anchor_block_hash)) {
+        fprintf(stderr,
+                "FATAL: -load-snapshot-at-own-height: snapshot anchor hash "
+                "DOES NOT MATCH this node's PoW-proven header at h=%d — the "
+                "snapshot is for a DIFFERENT (or forged) chain. REFUSING to "
+                "seed coins_kv.\n",
+                seed_h);
+        event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
+                    "load_snapshot_at_own_height anchor_hash_mismatch "
+                    "seed_h=%d", seed_h);
+        uss_close(h);
+        _exit(EXIT_FAILURE);
+    }
+    fprintf(stderr,
+            "[boot] -load-snapshot-at-own-height: anchor hash MATCHES the "
+            "validated local header at h=%d — chain location verified; "
+            "snapshot state contents remain assisted/unproven\n", seed_h);
+    return false;
+}
+
+/* The exact receipt + coins authority already cover this snapshot: repair the
+ * stage cursors from the authority and finish without reseeding. Fatal when
+ * the repair fails. Closes h. */
+static void boot_snapshot_resume_finish(
+    struct uss_handle *h, const char *path, const struct uss_header *hdr,
+    const uint8_t artifact_sha256[32], struct main_state *ms, int32_t applied,
+    int32_t seed_h, bool prior_frontier_verified)
+{
+    bool repaired = boot_load_snapshot_resume_seed_from_authority(
+        hdr, progress_store_db(), ms, applied);
+    if (!repaired) {
+        fprintf(stderr, "FATAL: persisted coins authority h=%d failed "
+                "snapshot resume repair; REFUSING recovery\n", applied - 1);
+        event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
+                    "load_snapshot resume_repair_failed applied=%d seed_h=%d",
+                    applied, seed_h);
+        uss_close(h);
+        _exit(EXIT_FAILURE);
+    }
+    LOG_INFO_IN("boot_load_snapshot_at_own_height_reset", "boot", "[boot] exact assisted receipt + coins authority "
+             "resume at h=%d from seed h=%d (stage repair ok)",
+             applied - 1, seed_h);
+    event_emitf(EV_RECOVERY_ACTION, 0,
+                "load_snapshot resume_skip applied=%d seed_h=%d",
+                applied, seed_h);
+    boot_snapshot_install_record_proof(path, hdr, artifact_sha256,
+                                       prior_frontier_verified);
+    uss_close(h);
+}
+
+/* After reopening the snapshot (after the coins reset, or after the authority
+ * store was rebuilt) refuse unless it is byte-for-byte the artifact that was
+ * verified. Fatal on a change. */
+static void boot_snapshot_reopen_check(
+    struct uss_handle *h, const struct uss_header *hdr,
+    const struct uss_header *hdr2, const uint8_t artifact_sha256[32],
+    const char *err2, bool after_apply_retry)
+{
+    uint8_t applied_artifact_sha256[32] = {0};
+    if (!h || !uss_artifact_sha256(h, applied_artifact_sha256) ||
+        memcmp(applied_artifact_sha256, artifact_sha256, 32) != 0 ||
+        !boot_snapshot_install_headers_equal(hdr, hdr2)) {
+        fprintf(stderr,
+                "FATAL: -load-snapshot-at-own-height: snapshot changed %s "
+                "(%s) — refusing to seed\n",
+                after_apply_retry ? "while recovering authority store"
+                                  : "after verification",
+                h ? "header mismatch" : err2);
+        event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
+                    "load_snapshot_at_own_height snapshot_changed_%s",
+                    after_apply_retry ? "after_apply_retry" : "after_verify");
+        if (h)
+            uss_close(h);
+        _exit(EXIT_FAILURE);
+    }
+}
+
+/* Fatal: the snapshot records did not load as the header promised. */
+static void boot_snapshot_load_failed_die(
+    const struct boot_snapshot_apply_result *ar, uint64_t want)
+{
+    fprintf(stderr, "FATAL: -load-snapshot-at-own-height: load FAILED "
+            "(inserted=%llu emitted=%lld want count=%llu) "
+            "— REFUSING to seed\n",
+            (unsigned long long)ar->inserted, (long long)ar->emitted,
+            (unsigned long long)want);
+    event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
+                "load_snapshot_at_own_height load_mismatch inserted=%llu "
+                "want=%llu", (unsigned long long)ar->inserted,
+                (unsigned long long)want);
+    _exit(EXIT_FAILURE);
+}
+
+/* Drop the borrowed have-data above the seed and retract the active tip. */
+static void boot_snapshot_repair_bodiless_above_seed(
+    struct main_state *ms, const char *datadir, int32_t seed_h,
+    bool trust_existing_block_files)
+{
+    /* Blocks-less bundle repair: the shipped block_index.bin claims HAVE_DATA at
+     * the SOURCE's blk file coordinates for blocks above the seed, but a
+     * blocks-less judge bundle has no bodies there. Drop the borrowed have-data
+     * for any above-seed block whose blk file is absent so P2P re-fetches +
+     * re-indexes the body cleanly (else the window never extends past seed_h+1
+     * and tip_finalize wedges on lookahead_tip_missing). No-op when the bodies
+     * are really present (live / legacy-import datadirs). */
+    size_t bodiless = boot_snapshot_drop_bodiless_have_data_above_seed(
+        ms, datadir, seed_h, trust_existing_block_files);
+    /* On a blocks-less bundle, retract the active-chain tip to the seed. The
+     * boot's earlier CSR restore promoted the active tip to the top of the
+     * now-cleared borrowed span (e.g. 3,159,325), and the P2P download window
+     * follows active_chain_height(); without this the node floods the TOP of
+     * the gap and never fetches the connectable bottom (seed_h+1) the staged
+     * fold needs next. active_chain_move_window_tip re-pins chain[] to the
+     * seed block (walking pprev); it publishes NO finalized authority — the
+     * staged pipeline re-publishes the served tip as it folds forward. */
+    if (bodiless > 0) {
+        struct block_index *seed_bi =
+            active_chain_at(&ms->chain_active, seed_h);
+        if (seed_bi &&
+            active_chain_move_window_tip(&ms->chain_active, seed_bi)) {
+            fprintf(stderr,
+                    "[boot] -load-snapshot-at-own-height: blocks-less bundle "
+                    "— retracted active-chain tip to seed h=%d so P2P fills "
+                    "the gap bottom-up\n", seed_h);
+        } else {
+            LOG_WARN_IN("boot_load_snapshot_at_own_height_reset", "boot",
+                     "[boot] -load-snapshot-at-own-height: blocks-less "
+                     "active-tip retract to seed h=%d failed (seed slot %s) "
+                     "— download may still target the gap top",
+                     seed_h, seed_bi ? "present" : "NULL");
+        }
+    }
+}
+
+/* Outcome of the pre-rebuild applied-height publication. */
+enum boot_applied_step {
+    BOOT_APPLIED_OK = 0,
+    BOOT_APPLIED_BEGIN_FAILED,
+    BOOT_APPLIED_SET_FAILED,
+    BOOT_APPLIED_COMMIT_FAILED,
+};
+
+static const char *const k_applied_step_reason[] = {
+    NULL,
+    "applied_height_begin_failed",
+    "applied_height_set_failed",
+    "applied_height_commit_failed",
+};
+
+/* Publish the durable applied frontier (seed_h + 1) in its own committed
+ * transaction. On a BEGIN or COMMIT error *aherr holds the sqlite message,
+ * unless the authority retry is still unused (then it is already freed). */
+static enum boot_applied_step boot_snapshot_publish_applied_height(
+    sqlite3 *rpdb, int32_t seed_h, bool retry_used, char **aherr)
+{
+    if (sqlite3_exec(rpdb, "BEGIN IMMEDIATE", NULL, NULL, aherr)
+        != SQLITE_OK) {
+        if (!retry_used) {
+            sqlite3_free(*aherr);
+            *aherr = NULL;
+        }
+        return BOOT_APPLIED_BEGIN_FAILED;
+    }
+    if (!utxo_apply_frontier_set_in_tx(rpdb, seed_h + 1)) {
+        sqlite3_exec(rpdb, "ROLLBACK", NULL, NULL, NULL);
+        return BOOT_APPLIED_SET_FAILED;
+    }
+    if (sqlite3_exec(rpdb, "COMMIT", NULL, NULL, aherr) != SQLITE_OK) {
+        sqlite3_exec(rpdb, "ROLLBACK", NULL, NULL, NULL);
+        if (!retry_used) {
+            sqlite3_free(*aherr);
+            *aherr = NULL;
+        }
+        return BOOT_APPLIED_COMMIT_FAILED;
+    }
+    return BOOT_APPLIED_OK;
+}
+
+/* Fatal: the applied-height publication failed and no retry is left. */
+static void boot_snapshot_applied_height_die(enum boot_applied_step step,
+                                             int32_t seed_h, char *aherr)
+{
+    if (step == BOOT_APPLIED_SET_FAILED) {
+        fprintf(stderr, "FATAL: -load-snapshot-at-own-height: failed to set "
+                "pre-rebuild applied-height=%d — refusing to run the Sapling "
+                "rebuild with an uncapped endpoint\n", seed_h + 1);
+        event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
+                    "load_snapshot_at_own_height applied_height_set_failed "
+                    "h=%d", seed_h + 1);
+        _exit(EXIT_FAILURE);
+    }
+    bool begin = step == BOOT_APPLIED_BEGIN_FAILED;
+    fprintf(stderr, "FATAL: -load-snapshot-at-own-height: pre-rebuild "
+            "applied-height %s failed: %s\n", begin ? "BEGIN" : "COMMIT",
+            aherr ? aherr : "(no msg)");
+    if (aherr) sqlite3_free(aherr);
+    event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
+                "load_snapshot_at_own_height applied_height_%s_failed",
+                begin ? "begin" : "commit");
+    _exit(EXIT_FAILURE);
+}
+
+/* Install the embedded Sapling frontier when it verifies; returns true when
+ * it was installed. */
+static bool boot_snapshot_install_embedded_frontier(
+    struct node_db *ndb, struct main_state *ms, int32_t seed_h,
+    uint8_t *embedded_frontier, uint32_t embedded_frontier_len)
+{
+    /* FAST PATH (v2 snapshot, no blocks/ needed): if the snapshot carried a
+     * Sapling frontier, deserialize it, COMPUTE its root, and VERIFY it equals
+     * the PoW-proven hashFinalSaplingRoot at seed_h (the SAME endpoint check the
+     * block-replay rebuild does at its final height). On a match, persist the
+     * frontier + rebuild_height = seed_h and SKIP sapling_tree_rebuild — so a
+     * fresh node with NO blocks/ directory installs a verified Sapling tree.
+     * On ANY mismatch / parse failure / missing seed-slot root, fall through to
+     * the existing rebuild (never regress v1 / blocks-present behavior). */
+    bool sapling_installed_from_frontier = false;
+    if (ms && embedded_frontier && embedded_frontier_len > 0) {
+        const struct block_index *seed_bi =
+            active_chain_at(&ms->chain_active, seed_h);
+        static const uint8_t zeros32[32] = {0};
+        bool seed_root_known = seed_bi &&
+            memcmp(seed_bi->hashFinalSaplingRoot.data, zeros32, 32) != 0;
+
+        struct incremental_merkle_tree ftree;
+        sapling_tree_init(&ftree);
+        struct byte_stream fs;
+        stream_init_from_data(&fs, embedded_frontier, embedded_frontier_len);
+        bool parsed = incremental_tree_deserialize(&ftree, &fs);
+
+        if (parsed && seed_root_known) {
+            struct uint256 froot;
+            incremental_tree_root(&ftree, &froot);
+            if (memcmp(froot.data, seed_bi->hashFinalSaplingRoot.data, 32) == 0) {
+                struct byte_stream ts;
+                stream_init(&ts, 4096);
+                bool serialized = incremental_tree_serialize(&ftree, &ts);
+                if (serialized &&
+                    sapling_tree_persist_pair(ndb, ts.data, ts.size,
+                                              (int64_t)seed_h)) {
+                    sapling_installed_from_frontier = true;
+                    fprintf(stderr,
+                            "[boot] -load-snapshot-at-own-height: installed the "
+                            "EMBEDDED Sapling frontier at h=%d (root verified vs "
+                            "hashFinalSaplingRoot) — SKIPPED the block-replay "
+                            "rebuild (no blocks/ required)\n", seed_h);
+                } else {
+                    LOG_WARN_IN("boot_load_snapshot_at_own_height_reset", "boot", "[boot] -load-snapshot-at-own-height: "
+                             "failed to persist the embedded frontier — falling "
+                             "back to the block-replay rebuild");
+                }
+                stream_free(&ts);
+            } else {
+                LOG_WARN_IN("boot_load_snapshot_at_own_height_reset", "boot", "[boot] -load-snapshot-at-own-height: embedded "
+                         "frontier root MISMATCH vs hashFinalSaplingRoot at "
+                         "h=%d — falling back to the block-replay rebuild",
+                         seed_h);
+            }
+        } else {
+            LOG_WARN_IN("boot_load_snapshot_at_own_height_reset", "boot", "[boot] -load-snapshot-at-own-height: embedded "
+                     "frontier %s (parsed=%d seed_root_known=%d) — falling back "
+                     "to the block-replay rebuild",
+                     parsed ? "unverifiable" : "unparseable",
+                     parsed, seed_root_known);
+        }
+        /* Clear the half-set blob if we did NOT fully install, so the rebuild
+         * below starts from a clean node_state. */
+        if (!sapling_installed_from_frontier) {
+            (void)node_db_state_set(ndb, "sapling_tree", NULL, 0);
+            (void)node_db_state_set(ndb, "sapling_tree_rebuild_height", NULL, 0);
+        }
+    }
+    return sapling_installed_from_frontier;
+}
+
+/* Drive the dedicated, consensus-validating rebuilder
+ * (sync_controller_sapling_tree.c sapling_tree_rebuild). Fatal on failure. */
+static void boot_snapshot_rebuild_sapling_tree(struct node_db *ndb,
+                                               struct main_state *ms)
+{
+    char datadir[1024] = {0};
+    GetDataDir(true, datadir, sizeof(datadir));
+    int appended = sapling_tree_rebuild(ndb, &ms->chain_active, datadir);
+    if (appended < 0) {
+        fprintf(stderr,
+                "FATAL: -load-snapshot-at-own-height: "
+                "sapling_tree_rebuild failed (returned %d) — refusing "
+                "to claim coherent wallet/MMR state\n", appended);
+        event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
+                    "load_snapshot_at_own_height sapling_tree_rebuild_failed "
+                    "rc=%d", appended);
+        _exit(EXIT_FAILURE);
+    } else {
+        fprintf(stderr,
+                "[boot] -load-snapshot-at-own-height: Sapling commitment "
+                "tree REBUILT + re-persisted (%d commitments) coherent with "
+                "the chain tip\n", appended);
+    }
+}
+
+/* Fatal: the 8 stage cursors could not be forced to the seed height. */
+static void boot_snapshot_cursor_arm_die(int32_t seed_h)
+{
+    fprintf(stderr,
+            "FATAL: -load-snapshot-at-own-height: failed to force the 8 stage "
+            "cursors to h=%d — refusing to start a half-armed fold\n", seed_h);
+    event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
+                "load_snapshot_at_own_height seed_h=%d cursor arm failed",
+                seed_h);
+    _exit(EXIT_FAILURE);
+}
+
+/* Seed the tip anchor and clear the install journal. Fatal if either fails. */
+static void boot_snapshot_seal_install(sqlite3 *rpdb,
+                                       const struct uss_header *hdr,
+                                       const uint8_t artifact_sha256[32],
+                                       int32_t seed_h, bool frontier_installed)
+{
+    /* Seed every durable reducer anchor; retain the journal until success. */
+    if (!tip_finalize_stage_seed_anchor(seed_h, hdr->anchor_block_hash, true)) {
+        fprintf(stderr, "FATAL: snapshot tip anchor failed h=%d; journal retained\n", seed_h);
+        event_emitf(EV_BOOT_VALIDATION_FAILED, 0, "load_snapshot tip_finalize_seed_failed h=%d", seed_h);
+        _exit(EXIT_FAILURE);
+    }
+    if (!boot_snapshot_install_marker_complete(
+            rpdb, artifact_sha256, frontier_installed)) {
+        fprintf(stderr, "FATAL: snapshot journal clear failed after tip seed h=%d\n", seed_h);
+        event_emitf(EV_BOOT_VALIDATION_FAILED, 0, "load_snapshot install_marker_final_clear_failed h=%d", seed_h);
+        _exit(EXIT_FAILURE);
+    }
+}
+
+void boot_load_snapshot_at_own_height_reset(struct node_db *ndb,
+                                            const char *path,
+                                            const char *datadir,
+                                            struct main_state *ms,
+                                            bool trust_existing_block_files)
+{
+    boot_snapshot_preflight(path, ms);
+
+    uint8_t artifact_sha256[32] = {0};
+    struct uss_header hdr;
+    struct uss_handle *h = boot_snapshot_open_verified(path, &hdr,
+                                                       artifact_sha256);
     const int32_t seed_h = (int32_t)hdr.height;
 
     /* If this is a v2 snapshot it carries a Sapling commitment-tree frontier
@@ -1117,99 +1566,23 @@ void boot_load_snapshot_at_own_height_reset(struct node_db *ndb,
     uint32_t embedded_sprout_len = 0;
     uint64_t embedded_nullifier_count = 0;
 
-    /* Require the snapshot to name this node's validated header at its height.
-     * Body SHA3 proves file integrity, not state derivation or contents.
-     * Require the snapshot's hdr.anchor_block_hash to byte-equal the in-memory
-     * active-chain block hash at seed_h (both internal little-endian; the
-     * snapshot writer fed cp->block_hash, same representation as
-     * block_index.hashBlock). The prior block-index load (`--importblockindex`
-     * is a documented prerequisite) populates ms->chain_active up to the tip, so
-     * the slot at seed_h is present on the supported recovery path. FATAL on a
-     * mismatch — never stamp a coin against a forged anchor. */
     if (ms) {
-        const struct block_index *bi = active_chain_at(&ms->chain_active, seed_h);
-        if (!bi && ms->pindex_best_header &&
-            ms->pindex_best_header->nHeight >= seed_h) {
-            /* seed_h is above the coins-best active-chain WINDOW but within
-             * this node's PoW-proven header chain. The block_index map + the
-             * on-disk bodies span to the header tip (pindex_best_header); only
-             * the VISIBLE active window was pinned to coins-best by the boot
-             * restore (utxo_recovery_restore_chain_tip -> csr_commit_tip).
-             * Widen the window forward to the header tip with the SAME
-             * primitive the reducer uses for its lookahead: it fills chain[]
-             * by walking pprev and NEVER publishes finalized authority, so the
-             * consensus anchor-hash cross-check below reads the real
-             * PoW-proven block_index at seed_h. A pprev gap leaves the slot
-             * NULL and the FATAL below still fires (never bind against a
-             * missing/forged anchor). The loader's header docstring assumed
-             * `--importblockindex` supplies this slot; it does NOT (header
-             * import sets only pindex_best_header, never c->chain[]), so the
-             * window is extended here. */
-            active_chain_extend_window(&ms->chain_active, ms->pindex_best_header);
-            bi = active_chain_at(&ms->chain_active, seed_h);
-        }
-        if (!bi) {
-            int32_t hdr_tip =
-                ms->pindex_best_header ? ms->pindex_best_header->nHeight : -1;
-            /* Distinguish two NULL-slot causes:
-             *
-             *  (a) Headers simply not synced to seed_h yet (hdr_tip < seed_h) —
-             *      e.g. a FRESH datadir. We cannot check its chain location NOW;
-             *      that never authenticates contents. Degrade to a WARN
-             *      and RETURN cleanly so the node falls back to normal P2P IBD
-             *      and downloads headers/blocks the usual way. (Auto-seeding the
-             *      snapshot once headers later reach seed_h is a follow-up — the
-             *      seed is simply skipped this run.)
-             *
-             *  (b) Headers ARE at/above seed_h but the slot is still NULL after
-             *      active_chain_extend_window (a real pprev/data gap below the
-             *      header tip) — genuine corruption. KEEP the fail-closed FATAL:
-             *      never stamp a coin against a missing/forged anchor. */
-            if (hdr_tip < seed_h) {
-                LOG_WARN("boot",
-                         "[boot] -load-snapshot-at-own-height: header tip h=%d "
-                         "< snapshot height h=%d — headers not synced yet; "
-                         "SKIPPING the snapshot seed and falling back to normal "
-                         "P2P IBD (re-run once headers reach the snapshot "
-                         "height).",
-                         hdr_tip, seed_h);
-                event_emitf(EV_RECOVERY_ACTION, 0,
-                            "load_snapshot_at_own_height deferred "
-                            "header_tip=%d seed_h=%d",
-                            hdr_tip, seed_h);
-                uss_close(h);
-                return;  /* normal boot continues; coins_kv left as-is for IBD */
-            }
-            fprintf(stderr,
-                    "FATAL: -load-snapshot-at-own-height: the in-memory active "
-                    "chain has NO block at the snapshot height h=%d — cannot "
-                    "check its declared chain location (header tip h=%d). This "
-                    "does not authenticate state contents. REFUSING to seed.\n",
-                    seed_h, hdr_tip);
-            event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-                        "load_snapshot_at_own_height no_index_block seed_h=%d",
-                        seed_h);
+        int32_t hdr_tip = -1;
+        if (boot_snapshot_anchor_bind(h, ms, &hdr, seed_h, &hdr_tip)) {
+            LOG_WARN("boot",
+                     "[boot] -load-snapshot-at-own-height: header tip h=%d "
+                     "< snapshot height h=%d — headers not synced yet; "
+                     "SKIPPING the snapshot seed and falling back to normal "
+                     "P2P IBD (re-run once headers reach the snapshot "
+                     "height).",
+                     hdr_tip, seed_h);
+            event_emitf(EV_RECOVERY_ACTION, 0,
+                        "load_snapshot_at_own_height deferred "
+                        "header_tip=%d seed_h=%d",
+                        hdr_tip, seed_h);
             uss_close(h);
-            _exit(EXIT_FAILURE);
+            return;  /* normal boot continues; coins_kv left as-is for IBD */
         }
-        if (!boot_snapshot_anchor_hash_matches(bi->hashBlock.data,
-                                               hdr.anchor_block_hash)) {
-            fprintf(stderr,
-                    "FATAL: -load-snapshot-at-own-height: snapshot anchor hash "
-                    "DOES NOT MATCH this node's PoW-proven header at h=%d — the "
-                    "snapshot is for a DIFFERENT (or forged) chain. REFUSING to "
-                    "seed coins_kv.\n",
-                    seed_h);
-            event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-                        "load_snapshot_at_own_height anchor_hash_mismatch "
-                        "seed_h=%d", seed_h);
-            uss_close(h);
-            _exit(EXIT_FAILURE);
-        }
-        fprintf(stderr,
-                "[boot] -load-snapshot-at-own-height: anchor hash MATCHES the "
-                "validated local header at h=%d — chain location verified; "
-                "snapshot state contents remain assisted/unproven\n", seed_h);
     } else {
         LOG_WARN("boot", "[boot] ZCL_TESTING fixture has no anchor binding");
     }
@@ -1225,26 +1598,8 @@ void boot_load_snapshot_at_own_height_reset(struct node_db *ndb,
                  "(binding=%s): RESUME-FAST disabled; rerunning",
                  marker_matches ? "matches" : "unknown_or_mismatch");
     if (resume) {
-        bool repaired = boot_load_snapshot_resume_seed_from_authority(
-            &hdr, progress_store_db(), ms, applied);
-        if (!repaired) {
-            fprintf(stderr, "FATAL: persisted coins authority h=%d failed "
-                    "snapshot resume repair; REFUSING recovery\n", applied - 1);
-            event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-                        "load_snapshot resume_repair_failed applied=%d seed_h=%d",
-                        applied, seed_h);
-            uss_close(h);
-            _exit(EXIT_FAILURE);
-        }
-        LOG_INFO("boot", "[boot] exact assisted receipt + coins authority "
-                 "resume at h=%d from seed h=%d (stage repair ok)",
-                 applied - 1, seed_h);
-        event_emitf(EV_RECOVERY_ACTION, 0,
-                    "load_snapshot resume_skip applied=%d seed_h=%d",
-                    applied, seed_h);
-        boot_snapshot_install_record_proof(path, &hdr, artifact_sha256,
-                                           prior_frontier_verified);
-        uss_close(h);
+        boot_snapshot_resume_finish(h, path, &hdr, artifact_sha256, ms,
+                                    applied, seed_h, prior_frontier_verified);
         return;
     }
 
@@ -1306,22 +1661,9 @@ retry_authority_store:
 
     char err2[256] = {0};
     struct uss_header hdr2;
-    uint8_t applied_artifact_sha256[32] = {0};
     h = uss_open(path, /*verify_full_sha3=*/true,
                  /*expected_sha3=*/NULL, &hdr2, err2, sizeof(err2));
-    if (!h || !uss_artifact_sha256(h, applied_artifact_sha256) ||
-        memcmp(applied_artifact_sha256, artifact_sha256, 32) != 0 ||
-        !boot_snapshot_install_headers_equal(&hdr, &hdr2)) {
-        fprintf(stderr,
-                "FATAL: -load-snapshot-at-own-height: snapshot changed after "
-                "verification (%s) — refusing to seed\n",
-                h ? "header mismatch" : err2);
-        event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-                    "load_snapshot_at_own_height snapshot_changed_after_verify");
-        if (h)
-            uss_close(h);
-        _exit(EXIT_FAILURE);
-    }
+    boot_snapshot_reopen_check(h, &hdr, &hdr2, artifact_sha256, err2, false);
 
     struct boot_snapshot_apply_result ar = {0};
     bool load_ok = boot_snapshot_apply_to_coins_kv(rpdb, h, hdr.count, &ar);
@@ -1333,19 +1675,7 @@ retry_authority_store:
             goto retry_authority_store;
         h = uss_open(path, /*verify_full_sha3=*/true,
                      /*expected_sha3=*/NULL, &hdr2, err2, sizeof(err2));
-        if (!h || !uss_artifact_sha256(h, applied_artifact_sha256) ||
-            memcmp(applied_artifact_sha256, artifact_sha256, 32) != 0 ||
-            !boot_snapshot_install_headers_equal(&hdr, &hdr2)) {
-            fprintf(stderr,
-                    "FATAL: -load-snapshot-at-own-height: snapshot changed "
-                    "while recovering authority store (%s) — refusing to seed\n",
-                    h ? "header mismatch" : err2);
-            event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-                        "load_snapshot_at_own_height snapshot_changed_after_apply_retry");
-            if (h)
-                uss_close(h);
-            _exit(EXIT_FAILURE);
-        }
+        boot_snapshot_reopen_check(h, &hdr, &hdr2, artifact_sha256, err2, true);
     }
 
     /* Capture heap copies of the embedded shielded state (v2 = Sapling frontier;
@@ -1363,58 +1693,16 @@ retry_authority_store:
         if (boot_snapshot_authority_retry(&authority_retry_used, datadir,
                                           &rpdb, "snapshot_load_failed"))
             goto retry_authority_store;
-        fprintf(stderr, "FATAL: -load-snapshot-at-own-height: load FAILED "
-                "(inserted=%llu emitted=%lld want count=%llu) "
-                "— REFUSING to seed\n",
-                (unsigned long long)ar.inserted, (long long)ar.emitted,
-                (unsigned long long)hdr.count);
-        event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-                    "load_snapshot_at_own_height load_mismatch inserted=%llu "
-                    "want=%llu", (unsigned long long)ar.inserted,
-                    (unsigned long long)hdr.count);
-        _exit(EXIT_FAILURE);
+        boot_snapshot_load_failed_die(&ar, hdr.count);
     }
     fprintf(stderr,
             "[boot] -load-snapshot-at-own-height: digest-verified assisted snapshot %s "
             "(body SHA3 OK, height=%d, count=%llu) — seeded coins_kv\n",
             path, seed_h, (unsigned long long)hdr.count);
 
-    /* Blocks-less bundle repair: the shipped block_index.bin claims HAVE_DATA at
-     * the SOURCE's blk file coordinates for blocks above the seed, but a
-     * blocks-less judge bundle has no bodies there. Drop the borrowed have-data
-     * for any above-seed block whose blk file is absent so P2P re-fetches +
-     * re-indexes the body cleanly (else the window never extends past seed_h+1
-     * and tip_finalize wedges on lookahead_tip_missing). No-op when the bodies
-     * are really present (live / legacy-import datadirs). */
-    if (ms) {
-        size_t bodiless = boot_snapshot_drop_bodiless_have_data_above_seed(
+    if (ms)
+        boot_snapshot_repair_bodiless_above_seed(
             ms, datadir, seed_h, trust_existing_block_files);
-        /* On a blocks-less bundle, retract the active-chain tip to the seed. The
-         * boot's earlier CSR restore promoted the active tip to the top of the
-         * now-cleared borrowed span (e.g. 3,159,325), and the P2P download window
-         * follows active_chain_height(); without this the node floods the TOP of
-         * the gap and never fetches the connectable bottom (seed_h+1) the staged
-         * fold needs next. active_chain_move_window_tip re-pins chain[] to the
-         * seed block (walking pprev); it publishes NO finalized authority — the
-         * staged pipeline re-publishes the served tip as it folds forward. */
-        if (bodiless > 0) {
-            struct block_index *seed_bi =
-                active_chain_at(&ms->chain_active, seed_h);
-            if (seed_bi &&
-                active_chain_move_window_tip(&ms->chain_active, seed_bi)) {
-                fprintf(stderr,
-                        "[boot] -load-snapshot-at-own-height: blocks-less bundle "
-                        "— retracted active-chain tip to seed h=%d so P2P fills "
-                        "the gap bottom-up\n", seed_h);
-            } else {
-                LOG_WARN("boot",
-                         "[boot] -load-snapshot-at-own-height: blocks-less "
-                         "active-tip retract to seed h=%d failed (seed slot %s) "
-                         "— download may still target the gap top",
-                         seed_h, seed_bi ? "present" : "NULL");
-            }
-        }
-    }
 
     /* Publish the durable applied frontier BEFORE the Sapling
      * rebuild runs, in its own committed transaction (the snapshot-load tx
@@ -1425,52 +1713,14 @@ retry_authority_store:
      * Phase-2 write at ~line 1014 sets the same value and is now idempotent. */
     {
         char *aherr = NULL;
-        if (sqlite3_exec(rpdb, "BEGIN IMMEDIATE", NULL, NULL, &aherr)
-            != SQLITE_OK) {
-            if (!authority_retry_used) {
-                sqlite3_free(aherr);
-                aherr = NULL;
-            }
+        enum boot_applied_step step = boot_snapshot_publish_applied_height(
+            rpdb, seed_h, authority_retry_used, &aherr);
+        if (step != BOOT_APPLIED_OK) {
             if (boot_snapshot_authority_retry(&authority_retry_used, datadir,
-                                              &rpdb, "applied_height_begin_failed"))
+                                              &rpdb,
+                                              k_applied_step_reason[step]))
                 goto retry_authority_store;
-            fprintf(stderr, "FATAL: -load-snapshot-at-own-height: pre-rebuild "
-                    "applied-height BEGIN failed: %s\n",
-                    aherr ? aherr : "(no msg)");
-            if (aherr) sqlite3_free(aherr);
-            event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-                        "load_snapshot_at_own_height applied_height_begin_failed");
-            _exit(EXIT_FAILURE);
-        }
-        if (!utxo_apply_frontier_set_in_tx(rpdb, seed_h + 1)) {
-            sqlite3_exec(rpdb, "ROLLBACK", NULL, NULL, NULL);
-            if (boot_snapshot_authority_retry(&authority_retry_used, datadir,
-                                              &rpdb, "applied_height_set_failed"))
-                goto retry_authority_store;
-            fprintf(stderr, "FATAL: -load-snapshot-at-own-height: failed to set "
-                    "pre-rebuild applied-height=%d — refusing to run the Sapling "
-                    "rebuild with an uncapped endpoint\n", seed_h + 1);
-            event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-                        "load_snapshot_at_own_height applied_height_set_failed "
-                        "h=%d", seed_h + 1);
-            _exit(EXIT_FAILURE);
-        }
-        if (sqlite3_exec(rpdb, "COMMIT", NULL, NULL, &aherr) != SQLITE_OK) {
-            sqlite3_exec(rpdb, "ROLLBACK", NULL, NULL, NULL);
-            if (!authority_retry_used) {
-                sqlite3_free(aherr);
-                aherr = NULL;
-            }
-            if (boot_snapshot_authority_retry(&authority_retry_used, datadir,
-                                              &rpdb, "applied_height_commit_failed"))
-                goto retry_authority_store;
-            fprintf(stderr, "FATAL: -load-snapshot-at-own-height: pre-rebuild "
-                    "applied-height COMMIT failed: %s\n",
-                    aherr ? aherr : "(no msg)");
-            if (aherr) sqlite3_free(aherr);
-            event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-                        "load_snapshot_at_own_height applied_height_commit_failed");
-            _exit(EXIT_FAILURE);
+            boot_snapshot_applied_height_die(step, seed_h, aherr);
         }
         if (aherr) sqlite3_free(aherr);
         LOG_INFO("boot", "[boot] -load-snapshot-at-own-height: pre-rebuild "
@@ -1511,90 +1761,11 @@ retry_authority_store:
     (void)node_db_state_set(ndb, "sapling_tree_rescan_height", NULL, 0);
     (void)node_db_state_set(ndb, "sapling_tree_rebuild_height", NULL, 0);
 
-    /* FAST PATH (v2 snapshot, no blocks/ needed): if the snapshot carried a
-     * Sapling frontier, deserialize it, COMPUTE its root, and VERIFY it equals
-     * the PoW-proven hashFinalSaplingRoot at seed_h (the SAME endpoint check the
-     * block-replay rebuild does at its final height). On a match, persist the
-     * frontier + rebuild_height = seed_h and SKIP sapling_tree_rebuild — so a
-     * fresh node with NO blocks/ directory installs a verified Sapling tree.
-     * On ANY mismatch / parse failure / missing seed-slot root, fall through to
-     * the existing rebuild (never regress v1 / blocks-present behavior). */
-    bool sapling_installed_from_frontier = false;
-    if (ms && embedded_frontier && embedded_frontier_len > 0) {
-        const struct block_index *seed_bi =
-            active_chain_at(&ms->chain_active, seed_h);
-        static const uint8_t zeros32[32] = {0};
-        bool seed_root_known = seed_bi &&
-            memcmp(seed_bi->hashFinalSaplingRoot.data, zeros32, 32) != 0;
-
-        struct incremental_merkle_tree ftree;
-        sapling_tree_init(&ftree);
-        struct byte_stream fs;
-        stream_init_from_data(&fs, embedded_frontier, embedded_frontier_len);
-        bool parsed = incremental_tree_deserialize(&ftree, &fs);
-
-        if (parsed && seed_root_known) {
-            struct uint256 froot;
-            incremental_tree_root(&ftree, &froot);
-            if (memcmp(froot.data, seed_bi->hashFinalSaplingRoot.data, 32) == 0) {
-                struct byte_stream ts;
-                stream_init(&ts, 4096);
-                bool serialized = incremental_tree_serialize(&ftree, &ts);
-                if (serialized &&
-                    sapling_tree_persist_pair(ndb, ts.data, ts.size,
-                                              (int64_t)seed_h)) {
-                    sapling_installed_from_frontier = true;
-                    fprintf(stderr,
-                            "[boot] -load-snapshot-at-own-height: installed the "
-                            "EMBEDDED Sapling frontier at h=%d (root verified vs "
-                            "hashFinalSaplingRoot) — SKIPPED the block-replay "
-                            "rebuild (no blocks/ required)\n", seed_h);
-                } else {
-                    LOG_WARN("boot", "[boot] -load-snapshot-at-own-height: "
-                             "failed to persist the embedded frontier — falling "
-                             "back to the block-replay rebuild");
-                }
-                stream_free(&ts);
-            } else {
-                LOG_WARN("boot", "[boot] -load-snapshot-at-own-height: embedded "
-                         "frontier root MISMATCH vs hashFinalSaplingRoot at "
-                         "h=%d — falling back to the block-replay rebuild",
-                         seed_h);
-            }
-        } else {
-            LOG_WARN("boot", "[boot] -load-snapshot-at-own-height: embedded "
-                     "frontier %s (parsed=%d seed_root_known=%d) — falling back "
-                     "to the block-replay rebuild",
-                     parsed ? "unverifiable" : "unparseable",
-                     parsed, seed_root_known);
-        }
-        /* Clear the half-set blob if we did NOT fully install, so the rebuild
-         * below starts from a clean node_state. */
-        if (!sapling_installed_from_frontier) {
-            (void)node_db_state_set(ndb, "sapling_tree", NULL, 0);
-            (void)node_db_state_set(ndb, "sapling_tree_rebuild_height", NULL, 0);
-        }
-    }
+    bool sapling_installed_from_frontier = boot_snapshot_install_embedded_frontier(
+        ndb, ms, seed_h, embedded_frontier, embedded_frontier_len);
 
     if (ms && !sapling_installed_from_frontier) {
-        char datadir[1024] = {0};
-        GetDataDir(true, datadir, sizeof(datadir));
-        int appended = sapling_tree_rebuild(ndb, &ms->chain_active, datadir);
-        if (appended < 0) {
-            fprintf(stderr,
-                    "FATAL: -load-snapshot-at-own-height: "
-                    "sapling_tree_rebuild failed (returned %d) — refusing "
-                    "to claim coherent wallet/MMR state\n", appended);
-            event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-                        "load_snapshot_at_own_height sapling_tree_rebuild_failed "
-                        "rc=%d", appended);
-            _exit(EXIT_FAILURE);
-        } else {
-            fprintf(stderr,
-                    "[boot] -load-snapshot-at-own-height: Sapling commitment "
-                    "tree REBUILT + re-persisted (%d commitments) coherent with "
-                    "the chain tip\n", appended);
-        }
+        boot_snapshot_rebuild_sapling_tree(ndb, ms);
     } else if (!ms) {
         LOG_WARN("boot", "[boot] -load-snapshot-at-own-height: no main_state — "
                  "cleared sapling_tree to NULL; the catchup service rebuilds it "
@@ -1609,27 +1780,11 @@ retry_authority_store:
         if (boot_snapshot_authority_retry(&authority_retry_used, datadir,
                                           &rpdb, "stage_cursor_arm_failed"))
             goto retry_authority_store;
-        fprintf(stderr,
-                "FATAL: -load-snapshot-at-own-height: failed to force the 8 stage "
-                "cursors to h=%d — refusing to start a half-armed fold\n", seed_h);
-        event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-                    "load_snapshot_at_own_height seed_h=%d cursor arm failed",
-                    seed_h);
-        _exit(EXIT_FAILURE);
+        boot_snapshot_cursor_arm_die(seed_h);
     }
 
-    /* Seed every durable reducer anchor; retain the journal until success. */
-    if (!tip_finalize_stage_seed_anchor(seed_h, hdr.anchor_block_hash, true)) {
-        fprintf(stderr, "FATAL: snapshot tip anchor failed h=%d; journal retained\n", seed_h);
-        event_emitf(EV_BOOT_VALIDATION_FAILED, 0, "load_snapshot tip_finalize_seed_failed h=%d", seed_h);
-        _exit(EXIT_FAILURE);
-    }
-    if (!boot_snapshot_install_marker_complete(
-            rpdb, artifact_sha256, sapling_installed_from_frontier)) {
-        fprintf(stderr, "FATAL: snapshot journal clear failed after tip seed h=%d\n", seed_h);
-        event_emitf(EV_BOOT_VALIDATION_FAILED, 0, "load_snapshot install_marker_final_clear_failed h=%d", seed_h);
-        _exit(EXIT_FAILURE);
-    }
+    boot_snapshot_seal_install(rpdb, &hdr, artifact_sha256, seed_h,
+                               sapling_installed_from_frontier);
 
     free(embedded_frontier);
     embedded_frontier = NULL;
