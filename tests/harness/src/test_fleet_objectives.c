@@ -620,6 +620,71 @@ static int fox_case_git(void)
         ASSERT_EQ(v.value, 3); /* HEAD fallback sees commit 9 too */
         PASS();
     }
+    TEST("objectives: the lint and baseline inputs are read from origin/main, "
+         "and the working tree answers only when origin/main does not resolve") {
+        char tree[1024], lint[1100], lintc[1200], path[1400];
+        (void)snprintf(tree, sizeof(tree), "%s/tree", root);
+        ASSERT(fox_mkdir(tree));
+        ASSERT_EQ(fox_git(tree, "init", "-q", NULL, NULL), 0);
+        (void)snprintf(lint, sizeof(lint), "%s/tools/lint", tree);
+        (void)snprintf(lintc, sizeof(lintc), "%s/tools/lint/lintc", tree);
+        (void)snprintf(path, sizeof(path), "%s/tools", tree);
+        ASSERT(fox_mkdir(path));
+        ASSERT(fox_mkdir(lint));
+        ASSERT(fox_mkdir(lintc));
+        /* origin/main holds three pins, four banned-str calls, and one family
+         * over the 1500-line ceiling (big.c) beside a small one. */
+        (void)snprintf(path, sizeof(path), "%s/cyclomatic_complexity_baseline.txt", lint);
+        ASSERT(fox_write(path, "a/one.c:f1:16\na/two.c:f2:20\na/three.c:f3:17\n"));
+        (void)snprintf(path, sizeof(path), "%s/hardening_ratchet_baseline.txt", lint);
+        ASSERT(fox_write(path, "banned-str a/one.c 4\n"));
+        (void)snprintf(path, sizeof(path), "%s/big.c", lintc);
+        ASSERT(fox_write_n_lines(path, 1501));
+        (void)snprintf(path, sizeof(path), "%s/small.c", lintc);
+        ASSERT(fox_write_n_lines(path, 10));
+        ASSERT_EQ(fox_git(tree, "add", "-A", NULL, NULL), 0);
+        ASSERT_EQ(fox_git(tree, "commit", "-q", "-m", "origin"), 0);
+        ASSERT_EQ(fox_git(tree, "update-ref", "refs/remotes/origin/main", "HEAD", NULL), 0);
+        /* The working tree differs and is never committed: seven pins, nine
+         * banned-str calls, and a second family over the ceiling (small.c). */
+        (void)snprintf(path, sizeof(path), "%s/cyclomatic_complexity_baseline.txt", lint);
+        ASSERT(fox_write(path, "a/one.c:f1:16\na/two.c:f2:20\na/three.c:f3:17\n"
+                               "a/four.c:f4:31\na/five.c:f5:18\na/six.c:f6:15\n"
+                               "a/seven.c:main:74\n"));
+        (void)snprintf(path, sizeof(path), "%s/hardening_ratchet_baseline.txt", lint);
+        ASSERT(fox_write(path, "banned-str a/one.c 9\n"));
+        (void)snprintf(path, sizeof(path), "%s/small.c", lintc);
+        ASSERT(fox_write_n_lines(path, 1501));
+        o.repo = tree;
+        v = zcl_objectives_measure(&o, "functions_over_complexity_cap");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, 3); /* origin/main's pins, not the working tree's seven */
+        ASSERT_STR_EQ(v.note, ZCL_OBJECTIVES_NOTE_ORIGIN);
+        v = zcl_objectives_measure(&o, "baseline_hardening_banned_str");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, 4); /* origin/main's count, not the working tree's nine */
+        ASSERT_STR_EQ(v.note, ZCL_OBJECTIVES_NOTE_ORIGIN);
+        v = zcl_objectives_measure(&o, "lint_families_over_ceiling");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, 1); /* big.c only; the working tree's small.c is not on origin/main */
+        ASSERT_STR_EQ(v.note, ZCL_OBJECTIVES_NOTE_ORIGIN);
+        /* With no origin/main the working tree answers, labelled as such. */
+        ASSERT_EQ(fox_git(tree, "update-ref", "-d", "refs/remotes/origin/main", NULL), 0);
+        v = zcl_objectives_measure(&o, "functions_over_complexity_cap");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, 7);
+        ASSERT_STR_EQ(v.note, ZCL_OBJECTIVES_NOTE_WORKTREE);
+        v = zcl_objectives_measure(&o, "baseline_hardening_banned_str");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, 9);
+        ASSERT_STR_EQ(v.note, ZCL_OBJECTIVES_NOTE_WORKTREE);
+        v = zcl_objectives_measure(&o, "lint_families_over_ceiling");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, 2);
+        ASSERT_STR_EQ(v.note, ZCL_OBJECTIVES_NOTE_WORKTREE);
+        o.repo = repo;
+        PASS();
+    }
     TEST("objectives: the git readers are unmeasured outside a repository "
          "and when the window holds no commit") {
         char plain[1024];

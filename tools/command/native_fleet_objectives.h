@@ -11,6 +11,17 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
+
+/* The note a checkout input's value carries: where its bytes came from. Every
+ * baseline and lint count reads origin/main; the working tree answers only
+ * when origin/main does not resolve, and the note says so. */
+#define ZCL_OBJECTIVES_NOTE_ORIGIN "origin/main"
+#define ZCL_OBJECTIVES_NOTE_WORKTREE "working tree (origin/main unavailable)"
+
+/* Counts the rows of one stream: -1 when it cannot be read, -2 when a row is
+ * one the gate would refuse, else the count. */
+typedef int64_t (*zcl_objectives_stream_count)(FILE *fp);
 
 #define ZCL_OBJECTIVES_SCHEMA "zcl.fleet_objectives.v1"
 #define ZCL_OBJECTIVES_REASON_MAX 256u
@@ -83,6 +94,15 @@ struct zcl_objectives_options {
  * on a catalog/producer drift, never on ordinary input. */
 struct zcl_objective_value zcl_objectives_measure(
     const struct zcl_objectives_options *options, const char *id);
+
+/* Counts repo-relative `rel` as origin/main has it (its blob, through the
+ * no-shell spawn seam), via `count`. A file that origin/main does not hold is
+ * unmeasured, never a fallback; only an unresolvable origin/main reads the
+ * working tree, with the note naming that fallback. `what` is the noun phrase
+ * a reason names, e.g. "pin row in baseline <path>". */
+struct zcl_objective_value zcl_objectives_count_checkout(
+    const char *repo, const char *rel, zcl_objectives_stream_count count,
+    const char *what);
 
 /* The product producers (native_fleet_objectives_node.c): the running node's
  * own answers, unmeasured with a reason when it cannot give them. */

@@ -119,6 +119,16 @@ static bool fob_git_repo(const char *dir)
                    NULL, NULL);
 }
 
+/* Commits everything in dir and points origin/main at it. The hardening
+ * baseline is read from origin/main, so every change to it is published. */
+static bool fob_publish(const char *dir)
+{
+    return fob_git(dir, "add", "-A", NULL, NULL, NULL) &&
+           fob_git(dir, "commit", "--allow-empty", "-qm", "publish", NULL) &&
+           fob_git(dir, "update-ref", "refs/remotes/origin/main", "HEAD",
+                   NULL, NULL);
+}
+
 /* A node at 2200 MB (a product row over its 1024 target), one oversized lint
  * file, and three cyclomatic pin rows in three small repo files. Everything
  * else is unmeasured. */
@@ -697,7 +707,8 @@ static bool fob_hard_fixture(const struct fob_paths *p)
                      "banned-str apps/q/tests/t.c 5\n"
                      "banned-str apps/zz.c 2\n"
                      "banned-str apps/aa.c 1\n"
-                     "local-reader apps/aa.c 7\n");
+                     "local-reader apps/aa.c 7\n") &&
+           fob_publish(p->repo);
 }
 
 static bool fob_hard_card_ok(const struct fob_call *c)
@@ -765,10 +776,12 @@ static int fob_case_baseline_row(struct fob_paths *p)
         ASSERT(v.measured);
         ASSERT_EQ(v.value, 11);
         ASSERT(fob_write(file, "banned-str apps/a.c 2\nbanned-str apps/b.c x\n"));
+        ASSERT(fob_publish(p->repo));
         v = zcl_objectives_measure(&o, FOB_HARD_ID);
         ASSERT(!v.measured);
         ASSERT(strstr(v.reason, "malformed") != NULL);
         ASSERT_EQ(remove(file), 0);
+        ASSERT(fob_publish(p->repo));
         v = zcl_objectives_measure(&o, FOB_HARD_ID);
         ASSERT(!v.measured);
         PASS();
@@ -785,6 +798,11 @@ int test_fleet_objectives_brief(void)
     struct fob_paths paths;
     test_make_tmpdir(root, sizeof(root), "fleet_objectives_brief", "root");
     (void)setenv("ZCL_LAND_OBJECTIVES_DATADIR", FOB_NOWHERE "/datadir", 1);
+    /* The fixture is a working-tree tree by design. Its root sits inside the
+     * checkout's test-tmp, so without this ceiling git would find the checkout's
+     * origin/main, which never holds the fixture, and every baseline would read
+     * unmeasured. */
+    (void)setenv("GIT_CEILING_DIRECTORIES", root, 1);
     failures += fob_case_rows();
     failures += fob_case_runner_paths();
     if (!fob_fixture(root, &paths)) {

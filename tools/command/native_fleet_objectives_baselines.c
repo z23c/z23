@@ -3,7 +3,8 @@
  *          turns into one-row work cards (baseline_hardening_banned_str).
  *
  * WHAT IT MEASURES. The sum of the COUNT column over the `banned-str` rows of
- * tools/lint/hardening_ratchet_baseline.txt, read under options->repo. The
+ * tools/lint/hardening_ratchet_baseline.txt as origin/main holds it (the
+ * working tree under options->repo only when origin/main does not resolve). The
  * gate (check-hardening-ratchet) only lets those counts shrink, so the sum is
  * the number of banned string calls still owed a bounded form. A row the gate
  * would refuse is unmeasured with the reason, never a guessed zero. */
@@ -38,15 +39,12 @@ static int64_t base_banned_count(const char *line)
     return (n >= 0 && n <= BASE_COUNT_MAX) ? n : -2;
 }
 
-/* The count sum of the file, -1 when it cannot be read, -2 when a banned-str
+/* The count sum of the stream, -1 when it cannot be read, -2 when a banned-str
  * row is malformed (or longer than the line buffer). */
-static int64_t base_banned_sum(const char *path)
+static int64_t base_banned_sum(FILE *fp)
 {
     char line[BASE_LINE_MAX];
     int64_t sum = 0;
-    FILE *fp = fopen(path, "r");
-    if (!fp)
-        return -1;
     while (sum >= 0 && fgets(line, sizeof(line), fp)) {
         bool whole = strchr(line, '\n') != NULL || feof(fp);
         int64_t n = whole ? base_banned_count(line)
@@ -62,29 +60,15 @@ static int64_t base_banned_sum(const char *path)
     }
     if (ferror(fp))
         sum = -1;
-    (void)fclose(fp);
     return sum;
 }
 
+/* The hardening ratchet's banned-str sum, read from origin/main; the working
+ * tree answers only when origin/main does not resolve (see read.c). */
 struct zcl_objective_value zcl_objectives_baseline_hardening_banned_str(
     const struct zcl_objectives_options *options)
 {
-    struct zcl_objective_value v = {0};
-    char path[1024];
-    int64_t sum;
-    if (snprintf(path, sizeof(path), "%s/" BASE_HARDENING_PATH,
-                 options && options->repo ? options->repo : ".") >=
-        (int)sizeof(path)) {
-        (void)snprintf(v.reason, sizeof(v.reason), "repo path too long");
-        return v;
-    }
-    sum = base_banned_sum(path);
-    if (sum < 0) {
-        (void)snprintf(v.reason, sizeof(v.reason), "%s hardening baseline %.200s",
-                       sum == -2 ? "malformed row in" : "no", path);
-        return v;
-    }
-    v.measured = true;
-    v.value = sum;
-    return v;
+    return zcl_objectives_count_checkout(
+        options && options->repo ? options->repo : ".", BASE_HARDENING_PATH,
+        base_banned_sum, "row in hardening baseline " BASE_HARDENING_PATH);
 }

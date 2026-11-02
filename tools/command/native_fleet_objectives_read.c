@@ -1137,6 +1137,139 @@ static struct zcl_objective_value obj_land_failure_repeats(
     return v;
 }
 
+/* ── origin/main checkout inputs ──────────────────────────────────────── */
+
+#define OBJ_ORIGIN_MAIN "refs/remotes/origin/main"
+#define OBJ_BLOB_MAX (1024u * 1024u)
+#define OBJ_LIST_MAX 16384u
+#define OBJ_SPAWN_MS 5000
+#define OBJ_LINTC_REL "tools/lint/lintc"
+#define OBJ_CYCLO_REL "tools/lint/cyclomatic_complexity_baseline.txt"
+
+static const char *obj_repo_or_dot(const struct zcl_objectives_options *options)
+{
+    return options && options->repo ? options->repo : ".";
+}
+
+/* True when origin/main resolves in repo. Never fetches, and never falls back
+ * to HEAD: a repo without origin/main reads its working tree instead. */
+static bool obj_origin_resolves(const char *repo)
+{
+    const char *argv[] = {"git", "-C", repo, "rev-parse", "--verify",
+                          "--quiet", OBJ_ORIGIN_MAIN, NULL};
+    char out[64];
+    return zcl_spawn_capture(argv, out, sizeof(out), OBJ_SPAWN_MS) == 0;
+}
+
+/* The stored bytes of repo-relative `rel` at origin/main, in a fresh buffer of
+ * *len bytes. NULL when git cannot give the whole blob within OBJ_BLOB_MAX
+ * bytes. `cat-file blob` runs no textconv or filters. */
+static char *obj_origin_blob(const char *repo, const char *rel, size_t *len)
+{
+    char spec[1024];
+    const char *argv[] = {"git", "-C", repo, "cat-file", "blob", spec, NULL};
+    struct zcl_spawn_binary_observation seen;
+    char *buf;
+    if (snprintf(spec, sizeof(spec), OBJ_ORIGIN_MAIN ":%s", rel) >=
+        (int)sizeof(spec))
+        return NULL;
+    buf = zcl_malloc(OBJ_BLOB_MAX, "fleet_objectives_blob");
+    if (!buf)
+        return NULL;
+    (void)zcl_spawn_capture_binary(argv, buf, OBJ_BLOB_MAX, OBJ_SPAWN_MS,
+                                   &seen);
+    if (!seen.eof || seen.overflow || !seen.exit_observed ||
+        seen.exit_code != 0) {
+        free(buf);
+        return NULL;
+    }
+    *len = seen.output_len;
+    return buf;
+}
+
+/* A read stream over an origin/main blob. fmemopen rejects an empty buffer,
+ * and an empty blob reads as one blank line, which no baseline row counts. */
+static FILE *obj_blob_stream(char *blob, size_t len)
+{
+    if (len == 0) {
+        blob[0] = '\n';
+        len = 1;
+    }
+    return fmemopen(blob, len, "r");
+}
+
+/* Counts an open stream, then closes it and frees its blob (NULL for a file).
+ * `what` is the noun phrase the reason names, e.g. "pin row in baseline X". */
+static struct zcl_objective_value obj_count_done(
+    FILE *fp, char *blob, zcl_objectives_stream_count count, const char *what,
+    struct zcl_objective_value v)
+{
+    int64_t n = count(fp);
+    (void)fclose(fp);
+    free(blob);
+    if (n == -2)
+        obj_set_reason(&v, "malformed %s", what);
+    else if (n < 0)
+        obj_set_reason(&v, "cannot read %s", what);
+    else {
+        v.measured = true;
+        v.value = n;
+    }
+    return v;
+}
+
+/* Counts an explicit path on disk; the caller's own override, not origin/main. */
+static struct zcl_objective_value obj_count_path(
+    const char *path, zcl_objectives_stream_count count)
+{
+    struct zcl_objective_value v = {0};
+    char what[1200];
+    FILE *fp = fopen(path, "r");
+    if (!fp) {
+        obj_set_reason(&v, "no baseline file at %s", path);
+        return v;
+    }
+    (void)snprintf(what, sizeof(what), "pin row in baseline %s", path);
+    return obj_count_done(fp, NULL, count, what, v);
+}
+
+struct zcl_objective_value zcl_objectives_count_checkout(
+    const char *repo, const char *rel, zcl_objectives_stream_count count,
+    const char *what)
+{
+    struct zcl_objective_value v = {0};
+    char path[1024];
+    size_t len = 0;
+    char *blob;
+    FILE *fp;
+    if (obj_origin_resolves(repo)) {
+        blob = obj_origin_blob(repo, rel, &len);
+        if (!blob) {
+            obj_set_reason(&v, "cannot read %s on origin/main", rel);
+            return v;
+        }
+        fp = obj_blob_stream(blob, len);
+        if (!fp) {
+            free(blob);
+            obj_set_reason(&v, "cannot read %s on origin/main", rel);
+            return v;
+        }
+        (void)snprintf(v.note, sizeof(v.note), "%s", ZCL_OBJECTIVES_NOTE_ORIGIN);
+        return obj_count_done(fp, blob, count, what, v);
+    }
+    if (snprintf(path, sizeof(path), "%s/%s", repo, rel) >= (int)sizeof(path)) {
+        obj_set_reason(&v, "%s", "repo path too long");
+        return v;
+    }
+    (void)snprintf(v.note, sizeof(v.note), "%s", ZCL_OBJECTIVES_NOTE_WORKTREE);
+    fp = fopen(path, "r");
+    if (!fp) {
+        obj_set_reason(&v, "no file at %s", path);
+        return v;
+    }
+    return obj_count_done(fp, NULL, count, what, v);
+}
+
 /* ── git log ──────────────────────────────────────────────────────────── */
 
 /* The repo's origin/main, never fetched; HEAD only when it is absent. */
@@ -1289,18 +1422,28 @@ static int64_t obj_file_line_count(const char *path)
     return lines;
 }
 
-static struct zcl_objective_value obj_lint_families_over_ceiling(
-    const struct zcl_objectives_options *options)
+/* Lines in buf[0..len): every newline, and a final unterminated line. */
+static int64_t obj_buf_line_count(const char *buf, size_t len)
 {
-    struct zcl_objective_value v = {0};
-    const char *dir = options && options->lintc_dir ? options->lintc_dir
-                                                     : "tools/lint/lintc";
+    int64_t lines = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (buf[i] == '\n')
+            lines++;
+    }
+    if (len && buf[len - 1] != '\n')
+        lines++;
+    return lines;
+}
+
+/* Counts the oversized .c families in a directory on disk. */
+static void obj_lint_over_disk(const char *dir, struct zcl_objective_value *v)
+{
     DIR *d = opendir(dir);
     struct dirent *e;
     int64_t over = 0;
     if (!d) {
-        obj_set_reason(&v, "cannot open %s", dir);
-        return v;
+        obj_set_reason(v, "cannot open %s", dir);
+        return;
     }
     while ((e = readdir(d))) {
         char path[1024];
@@ -1311,16 +1454,104 @@ static struct zcl_objective_value obj_lint_families_over_ceiling(
             continue;
         lines = obj_file_line_count(path);
         if (lines < 0) {
-            obj_set_reason(&v, "cannot read lint family %s", path);
+            obj_set_reason(v, "cannot read lint family %s", path);
             (void)closedir(d);
-            return v;
+            return;
         }
         if (lines > OBJ_LINT_CEILING_LINES)
             over++;
     }
     (void)closedir(d);
-    v.measured = true;
-    v.value = over;
+    v->measured = true;
+    v->value = over;
+}
+
+/* Counts one origin/main family by its blob. False when git cannot give it. */
+static bool obj_lint_origin_file(const char *repo, const char *name,
+                                 int64_t *over)
+{
+    size_t len = 0;
+    char *blob = obj_origin_blob(repo, name, &len);
+    if (!blob)
+        return false;
+    if (obj_buf_line_count(blob, len) > OBJ_LINT_CEILING_LINES)
+        (*over)++;
+    free(blob);
+    return true;
+}
+
+/* Walks the newline-separated names of the .c families and counts each one's
+ * oversized blob. False when a family cannot be read at origin/main. */
+static bool obj_lint_origin_walk(const char *repo, char *names, int64_t *over,
+                                 int64_t *families)
+{
+    char *line = names;
+    while (*line) {
+        char *nl = strchr(line, '\n');
+        if (nl)
+            *nl = '\0';
+        if (obj_ends_with(line, ".c")) {
+            (*families)++;
+            if (!obj_lint_origin_file(repo, line, over))
+                return false;
+        }
+        if (!nl)
+            break;
+        line = nl + 1;
+    }
+    return true;
+}
+
+/* Counts the oversized .c families of tools/lint/lintc at origin/main. */
+static void obj_lint_over_origin(const char *repo, struct zcl_objective_value *v)
+{
+    const char *argv[] = {"git", "-C", repo, "ls-tree", "--name-only",
+                          OBJ_ORIGIN_MAIN, OBJ_LINTC_REL "/", NULL};
+    char *names = zcl_malloc(OBJ_LIST_MAX, "fleet_objectives_lintc");
+    int64_t over = 0, families = 0;
+    if (!names ||
+        zcl_spawn_capture(argv, names, OBJ_LIST_MAX, OBJ_SPAWN_MS) != 0 ||
+        strlen(names) >= OBJ_LIST_MAX - 1u) {
+        free(names);
+        obj_set_reason(v, "cannot list %s on origin/main", OBJ_LINTC_REL);
+        return;
+    }
+    if (!obj_lint_origin_walk(repo, names, &over, &families)) {
+        obj_set_reason(v, "%s", "cannot read a lint family on origin/main");
+    } else if (families == 0) {
+        obj_set_reason(v, "no lint family at origin/main %s", OBJ_LINTC_REL);
+    } else {
+        v->measured = true;
+        v->value = over;
+    }
+    free(names);
+}
+
+/* The oversized .c families. An explicit lintc_dir is read on disk; otherwise
+ * origin/main is read by blob, and the working tree only when origin/main
+ * does not resolve. */
+static struct zcl_objective_value obj_lint_families_over_ceiling(
+    const struct zcl_objectives_options *options)
+{
+    struct zcl_objective_value v = {0};
+    const char *repo = obj_repo_or_dot(options);
+    char dir[1024];
+    if (options && options->lintc_dir) {
+        obj_lint_over_disk(options->lintc_dir, &v);
+        return v;
+    }
+    if (obj_origin_resolves(repo)) {
+        obj_lint_over_origin(repo, &v);
+        (void)snprintf(v.note, sizeof(v.note), "%s", ZCL_OBJECTIVES_NOTE_ORIGIN);
+        return v;
+    }
+    if (snprintf(dir, sizeof(dir), "%s/%s", repo, OBJ_LINTC_REL) >=
+        (int)sizeof(dir)) {
+        obj_set_reason(&v, "%s", "repo path too long");
+        return v;
+    }
+    obj_lint_over_disk(dir, &v);
+    (void)snprintf(v.note, sizeof(v.note), "%s", ZCL_OBJECTIVES_NOTE_WORKTREE);
     return v;
 }
 
@@ -1370,15 +1601,12 @@ static int obj_baseline_row_kind(FILE *fp, const char *line)
     return kind < 0 ? -1 : 0;
 }
 
-/* The pin rows of a baseline file, or -1 when it cannot be read and -2 when
+/* The pin rows of a baseline stream, or -1 when it cannot be read and -2 when
  * a line is one the gate would refuse. */
-static int64_t obj_baseline_pins(const char *path)
+static int64_t obj_baseline_pins(FILE *fp)
 {
-    FILE *fp = fopen(path, "r");
     char line[OBJ_BASELINE_LINE_MAX];
     int64_t pins = 0;
-    if (!fp)
-        return -1;
     while (fgets(line, sizeof(line), fp)) {
         int kind = obj_baseline_row_kind(fp, line);
         if (kind == 0) {
@@ -1390,29 +1618,20 @@ static int64_t obj_baseline_pins(const char *path)
     }
     if (ferror(fp))
         pins = -1;
-    (void)fclose(fp);
     return pins;
 }
 
+/* Pin rows of the cyclomatic baseline. An explicit baseline input is read on
+ * disk; otherwise origin/main's copy is, and the working tree only when
+ * origin/main does not resolve. */
 static struct zcl_objective_value obj_functions_over_complexity_cap(
     const struct zcl_objectives_options *options)
 {
-    struct zcl_objective_value v = {0};
-    const char *path = options && options->baseline
-                          ? options->baseline
-                          : "tools/lint/cyclomatic_complexity_baseline.txt";
-    int64_t pins = obj_baseline_pins(path);
-    if (pins == -2) {
-        obj_set_reason(&v, "malformed pin row in baseline %s", path);
-        return v;
-    }
-    if (pins < 0) {
-        obj_set_reason(&v, "no baseline file at %s", path);
-        return v;
-    }
-    v.measured = true;
-    v.value = pins;
-    return v;
+    if (options && options->baseline)
+        return obj_count_path(options->baseline, obj_baseline_pins);
+    return zcl_objectives_count_checkout(obj_repo_or_dot(options), OBJ_CYCLO_REL,
+                                         obj_baseline_pins,
+                                         "pin row in baseline " OBJ_CYCLO_REL);
 }
 
 /* ── fresh_node_sync_eta_s: the C3 cold-sync stopwatch ledger ─────────── */
