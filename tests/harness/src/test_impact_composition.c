@@ -4983,8 +4983,10 @@ static int g_ic_term_pipe[2] = {-1, -1};
 static void ic_fake_worker_on_term(int sig)
 {
     (void)sig;
+    const int saved_errno = errno; /* the interrupted select reads errno */
     const char byte = 'T';
     (void)!write(g_ic_term_pipe[1], &byte, 1);
+    errno = saved_errno;
 }
 
 static int ic_fake_worker_term_fd(int fd)
