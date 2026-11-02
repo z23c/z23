@@ -96,8 +96,18 @@ static enum chain_evidence_earn_outcome earn_check_and_write_locked(
             authority, "cec.block_index_evidence_state", &rec).ok &&
         chain_evidence_store_persist(authority, "cec.active_tip_evidence",
                                      &rec).ok;
-    if (!ok || (txn && !db_txn_commit(txn)))
+    /* The earned transition: both flags are now on the record for the exact
+     * tip, so a genesis-fold node still in EMPTY / HEADERS_WORK_VALIDATED
+     * (only promote_tip leaves those, and the live follow never calls it)
+     * becomes TIP_FOLLOWING in this same transaction. Other states, the
+     * snapshot one included, are untouched. */
+    enum chain_evidence_controller_state previous_state = authority->state;
+    ok = ok && chain_evidence_controller_advance_earned_tip_state(
+                   authority, &previous_state);
+    if (!ok || (txn && !db_txn_commit(txn))) {
+        authority->state = previous_state;
         return CEC_EARN_STORE_BUSY;
+    }
     return CEC_EARN_OK;
 }
 

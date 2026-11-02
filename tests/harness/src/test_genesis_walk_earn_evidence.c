@@ -446,33 +446,143 @@ static int test_mark_at_tip_moved_is_retryable_not_frozen(void)
     return failures;
 }
 
-/* A genesis-fold node at tip is still CEC_EMPTY: only promote_tip leaves that
- * state, and the reducer's live advance (record_finalized_tip) never does.
- * An ordinary not-yet-following publish attempt must refuse softly and must
- * not latch the controller CONTRADICTION_FROZEN. */
-static int test_genesis_mark_from_empty_state_refuses_unfrozen(void)
+/* Put the persisted controller state to `name` and reload it, as a restart. */
+static bool gw_set_state(struct gw_fixture *f, const char *name)
+{
+    bool ok = node_db_state_set(&f->ndb, "cec.sync_state", name,
+                                strlen(name) + 1);
+    chain_evidence_controller_test_reset_startup_reconcile();
+    chain_evidence_controller_init(&f->authority, &f->ndb, csr_instance());
+    return ok;
+}
+
+static enum chain_evidence_controller_state gw_state(struct gw_fixture *f)
+{
+    struct chain_evidence_controller_view v;
+    gw_view(f, &v);
+    return v.state;
+}
+
+static struct zcl_result gw_earn_tip(struct gw_fixture *f, bool best,
+                                     bool bytes)
+{
+    return chain_evidence_controller_earn_active_tip_evidence(
+        &f->authority, &f->hashes[GW_TIP], f->blocks[GW_TIP].nHeight, best,
+        bytes);
+}
+
+/* (a) A genesis-fold node at tip is still CEC_EMPTY or HEADERS_WORK_VALIDATED
+ * (only promote_tip leaves them and the live follow never calls it). Earning
+ * both flags for the exact tip by hash advances it to TIP_FOLLOWING, and the
+ * genesis mark then succeeds. */
+static int test_earn_advances_empty_to_tip_following(void)
+{
+    int failures = 0;
+    static const char *const names[] = {"empty", "headers_work_validated"};
+    static const enum chain_evidence_controller_state want[] = {
+        CEC_EMPTY, CEC_HEADERS_WORK_VALIDATED};
+    for (int i = 0; i < 2; i++) {
+        struct gw_fixture f;
+        if (!gw_init(&f))
+            return failures + gw_check("fixture", false);
+        failures += gw_check("fixture state set", gw_set_state(&f, names[i]));
+        failures += gw_check("controller starts in the pre-follow state",
+                             gw_state(&f) == want[i]);
+        gw_walk_verified(&f, GW_TIP, 0);
+        struct zcl_result r = bg_validation_authority_publish(&f.svc, false,
+                                                              true);
+        failures += gw_check("publish succeeds from the earned transition",
+                             r.ok);
+        failures += gw_check("node is fully validated, review-free",
+                             gw_posture_review_free(&f));
+        gw_free(&f);
+    }
+    struct gw_fixture f;
+    if (!gw_init(&f))
+        return failures + gw_check("fixture", false);
+    failures += gw_check("fixture state set", gw_set_state(&f, "empty"));
+    failures += gw_check("earn on the exact tip with both flags",
+                         gw_earn_tip(&f, true, true).ok);
+    failures += gw_check("earn leaves the controller tip_following",
+                         gw_state(&f) == CEC_TIP_FOLLOWING);
+    /* (d) the state is the persisted one: a re-init keeps it. */
+    char persisted[32] = {0};
+    size_t len = 0;
+    failures += gw_check("cec.sync_state persisted tip_following",
+             node_db_state_get(&f.ndb, "cec.sync_state", persisted,
+                               sizeof(persisted) - 1, &len) &&
+             strcmp(persisted, "tip_following") == 0);
+    chain_evidence_controller_test_reset_startup_reconcile();
+    chain_evidence_controller_init(&f.authority, &f.ndb, csr_instance());
+    failures += gw_check("state persists across re-init",
+                         gw_state(&f) == CEC_TIP_FOLLOWING);
+    failures += gw_check("not frozen", gw_state(&f) != CEC_CONTRADICTION_FROZEN);
+    gw_walk_verified(&f, GW_TIP, 0);
+    failures += gw_check("genesis mark then succeeds",
+             bg_validation_authority_publish(&f.svc, false, true).ok);
+    gw_free(&f);
+    return failures;
+}
+
+/* (b) A missing flag, or flags earned for a different hash, keep EMPTY with
+ * a soft (non-freezing) refusal. */
+static int test_earn_missing_flag_or_other_hash_keeps_empty(void)
 {
     int failures = 0;
     struct gw_fixture f;
     if (!gw_init(&f))
         return gw_check("fixture", false);
-    failures += gw_check("fixture state set empty",
-                         node_db_state_set(&f.ndb, "cec.sync_state", "empty",
-                                           strlen("empty") + 1));
+    failures += gw_check("fixture state set", gw_set_state(&f, "empty"));
+    struct zcl_result no_best = gw_earn_tip(&f, false, true);
+    failures += gw_check("missing best-work flag refuses",
+                         !no_best.ok && no_best.code == CEC_EARN_FINAL);
+    struct zcl_result no_bytes = gw_earn_tip(&f, true, false);
+    failures += gw_check("missing body-bytes flag refuses",
+                         !no_bytes.ok && no_bytes.code == CEC_EARN_FINAL);
+    struct zcl_result other = chain_evidence_controller_earn_active_tip_evidence(
+        &f.authority, &f.hashes[4], f.blocks[4].nHeight, true, true);
+    failures += gw_check("flags for a different tip hash refuse as tip-moved",
+                         !other.ok && other.code == CEC_EARN_TIP_MOVED);
+    failures += gw_check("state is still empty after every refusal",
+                         gw_state(&f) == CEC_EMPTY);
+    failures += gw_check("no flag was attached", gw_flags_unearned(&f));
+    /* The publisher with no hash-verified walk tip refuses softly too. */
+    struct zcl_result r = bg_validation_authority_publish(&f.svc, false, true);
+    failures += gw_check("publish refuses without a verified tip", !r.ok);
+    chain_evidence_controller_test_reset_startup_reconcile();
     chain_evidence_controller_init(&f.authority, &f.ndb, csr_instance());
-    struct chain_evidence_controller_view v;
-    gw_view(&f, &v);
-    failures += gw_check("controller is in the empty state", v.state == CEC_EMPTY);
+    failures += gw_check("controller stays empty, not frozen",
+                         gw_state(&f) == CEC_EMPTY);
+    gw_free(&f);
+    return failures;
+}
+
+/* (c) The assisted/snapshot state is not advanced by the earn path, and the
+ * genesis mark still refuses softly (the former not-yet-following case). */
+static int test_earn_does_not_advance_snapshot_state(void)
+{
+    int failures = 0;
+    struct gw_fixture f;
+    if (!gw_init(&f))
+        return gw_check("fixture", false);
+    failures += gw_check("fixture state set",
+                         gw_set_state(&f, "snapshot_utxo_hash_verified"));
+    failures += gw_check("controller is in the snapshot state",
+                         gw_state(&f) == CEC_SNAPSHOT_UTXO_HASH_VERIFIED);
+    failures += gw_check("earn itself succeeds", gw_earn_tip(&f, true, true).ok);
+    failures += gw_check("snapshot state is unchanged by the earn",
+                         gw_state(&f) == CEC_SNAPSHOT_UTXO_HASH_VERIFIED);
     gw_walk_verified(&f, GW_TIP, 0);
     struct zcl_result r = bg_validation_authority_publish(&f.svc, false, true);
     failures += gw_check("publish refuses", !r.ok);
     failures += gw_check("refusal names the not-yet-following state",
                          strstr(r.message, "not yet tip-following") != NULL);
+    chain_evidence_controller_test_reset_startup_reconcile();
     chain_evidence_controller_init(&f.authority, &f.ndb, csr_instance());
-    gw_view(&f, &v);
     failures += gw_check("controller is not frozen",
-                         v.state != CEC_CONTRADICTION_FROZEN);
-    failures += gw_check("controller stays empty", v.state == CEC_EMPTY);
+                         gw_state(&f) != CEC_CONTRADICTION_FROZEN);
+    failures += gw_check("controller stays in the snapshot state",
+                         gw_state(&f) == CEC_SNAPSHOT_UTXO_HASH_VERIFIED);
     gw_free(&f);
     return failures;
 }
@@ -640,7 +750,9 @@ int test_genesis_walk_earn_evidence(void)
     failures += test_earn_refuses_when_tip_moves_before_write();
     failures += test_mark_at_tip_moved_is_retryable_not_frozen();
     failures += test_two_thread_earn_waits_for_live_advance();
-    failures += test_genesis_mark_from_empty_state_refuses_unfrozen();
+    failures += test_earn_advances_empty_to_tip_following();
+    failures += test_earn_missing_flag_or_other_hash_keeps_empty();
+    failures += test_earn_does_not_advance_snapshot_state();
     failures += test_mark_refuses_same_height_rival_after_scan();
     if (failures == 0)
         printf("  all genesis_walk_earn_evidence tests passed\n");

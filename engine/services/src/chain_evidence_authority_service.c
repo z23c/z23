@@ -610,6 +610,39 @@ static enum chain_evidence_controller_state cec_tip_next_state(
     return old_state;
 }
 
+/* The EARNED transition (genesis walk): called by the earn writer inside its
+ * own node.db transaction, under the evidence write lock, after the tip hash
+ * and both flags were checked. Advances ONLY EMPTY and HEADERS_WORK_VALIDATED,
+ * via cec_tip_next_state exactly as promote_tip does, and persists the same
+ * cec.sync_state key. SNAPSHOT_UTXO_HASH_VERIFIED (which cec_tip_next_state
+ * also advances) and every other state are left untouched, so the assisted
+ * path is unchanged. promote_tip does not write cec.header_chain_evidence
+ * (only snapshot import does), so there is nothing else to persist. The
+ * caller restores *previous_state if its transaction then fails to commit. */
+bool chain_evidence_controller_advance_earned_tip_state(
+    struct chain_evidence_controller *authority,
+    enum chain_evidence_controller_state *previous_state)
+{
+    if (!authority || !authority->ndb || !previous_state) {
+        LOG_WARN("cec", "earned tip state: bad args");
+        return false;
+    }
+    (void)chain_evidence_controller_load_state_readonly(authority);
+    *previous_state = authority->state;
+    if (authority->state != CEC_EMPTY &&
+        authority->state != CEC_HEADERS_WORK_VALIDATED)
+        return true;
+    enum chain_evidence_controller_state next =
+        cec_tip_next_state(authority->state);
+    const char *name = chain_evidence_controller_state_name(next);
+    if (!persist_blob(authority, "cec.sync_state", name, strlen(name) + 1)) {
+        LOG_WARN("cec", "earned tip state: persist failed state=%s", name);
+        return false;
+    }
+    authority->state = next;
+    return true;
+}
+
 static bool cec_outer_txn_open(struct chain_evidence_controller *authority)
 {
     struct node_db_status status = {0};

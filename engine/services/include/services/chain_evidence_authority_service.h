@@ -256,6 +256,17 @@ struct zcl_result chain_evidence_controller_earn_active_tip_evidence(
     const struct uint256 *tip_hash, int tip_height,
     bool nakamoto_selected_best_work, bool block_bytes_hash_checked);
 
+/* Earned-tip state transition, for the earn writer only (inside its open
+ * node.db transaction, under the evidence write lock): EMPTY or
+ * HEADERS_WORK_VALIDATED -> TIP_FOLLOWING via the same next-state rule and
+ * cec.sync_state key as promote_tip. Every other state, SNAPSHOT_UTXO_HASH_
+ * VERIFIED included, is left unchanged (returns true). *previous_state gets
+ * the persisted state before the call so the caller can restore
+ * authority->state if its commit fails. Returns false on persist failure. */
+bool chain_evidence_controller_advance_earned_tip_state(
+    struct chain_evidence_controller *authority,
+    enum chain_evidence_controller_state *previous_state);
+
 /* Reducer-side half of the live evidence follow: stamp the just-published
  * tip into a pending slot guarded by ONE leaf mutex (nothing else is ever
  * acquired while it is held), safe under any lock the drive holds. */
