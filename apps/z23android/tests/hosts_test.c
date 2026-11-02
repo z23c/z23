@@ -369,7 +369,7 @@ int main(void)
     assert(!strcmp(zapp_paced_line(ZAPP_PACE_GENTLE, true, sync_text, line, sizeof(line)),
                    "Syncing gently · phone is warm"));
     assert(!strcmp(zapp_paced_line(ZAPP_PACE_PAUSE, true, sync_text, line, sizeof(line)),
-                   "Sync paused · phone is cooling down"));
+                   "Paused while the phone cools down. It picks up again by itself."));
     assert(!strcmp(zapp_paced_line(ZAPP_PACE_PAUSE, false, "Node stopped", line, sizeof(line)), "Node stopped"));
     assert(!strcmp(zapp_paced_line(ZAPP_PACE_GENTLE, true, sync_text, line, 8), "Syncing"));
     /* A synced or stopping node keeps its true line; only a node that is starting or catching up shows the pace. */

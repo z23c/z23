@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #define _GNU_SOURCE
 #include "home.h"
+#include "hosts.h"
 #include "residue.h"
 #include "json/json.h"
 #include "layout.h"
@@ -134,7 +135,7 @@ static void phone_card_golden(void)
         "\"sync\":\"\",\"pace\":\"normal\",\"node_button\":\"Stop node\"}"));
     view.pace = ZAPP_PACE_GENTLE;
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)));
-    assert(strstr(card, "\"node_line\":\"Syncing gently · phone is warm\"") && strstr(card, "\"pace\":\"gentle\""));
+    assert(strstr(card, "\"node_line\":\"Catching up slowly to keep the phone cool: 800 blocks to go\"") && strstr(card, "\"pace\":\"gentle\""));
     view.pace = ZAPP_PACE_PAUSE;
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && strstr(card, "\"pace\":\"pause\""));
 }
@@ -454,6 +455,40 @@ static void fallback_labels(void)
     assert(!strcmp(label, "App"));
 }
 
+static void paced_home_lines(void)
+{
+    static struct zapp_view view;
+    char card[1024];
+    view.node_process_running = true;
+    view.node_wanted = true;
+    view.node_running = true;
+    view.node_height = 1000;
+    view.node_reference = 2000;
+    view.node_base_height = 900;
+    view.node_base_at = 40;
+    view.node_sample_height = 1000;
+    view.node_sample_at = 100;
+    view.chain_state = ZAPP_CHAIN_BEHIND;
+    /* The rate is known here, so a normal pace would give the minutes: the pace cases below show none. */
+    view.pace = ZAPP_PACE_NORMAL;
+    assert(node_line_is(&view, "Catching up: 1,000 blocks to go, about 10 min left"));
+    /* Paused while behind: the pause line, never the blocks left and never up to date. */
+    view.pace = ZAPP_PACE_PAUSE;
+    assert(node_line_is(&view, ZAPP_PAUSED_LINE));
+    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && !strstr(card, "Up to date") && !strstr(card, "Catching up"));
+    /* Paused while current: still the pause line, never up to date. */
+    view.node_reference = 1000;
+    view.chain_state = ZAPP_CHAIN_CURRENT;
+    assert(node_line_is(&view, ZAPP_PAUSED_LINE));
+    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && !strstr(card, "Up to date"));
+    /* Gentle while behind: the slow catch-up line, with no estimate. */
+    view.pace = ZAPP_PACE_GENTLE;
+    view.node_reference = 2000;
+    view.chain_state = ZAPP_CHAIN_BEHIND;
+    assert(node_line_is(&view, "Catching up slowly to keep the phone cool: 1,000 blocks to go"));
+    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && !strstr(card, "min left") && !strstr(card, "Catching up:"));
+}
+
 int main(void)
 {
     fallback_labels();
@@ -462,6 +497,7 @@ int main(void)
     node_button_states();
     plain_node_line_states();
     plain_node_line_verdicts();
+    paced_home_lines();
     phone_card_omits_secrets();
     phone_card_never_shows_wallet();
     wallet_tile_has_no_amount();

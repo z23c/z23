@@ -45,6 +45,8 @@ const char *zapp_node_line(bool responding, bool process_running, bool stopping,
 /* The pace the node reports in a status reply (data.pace), normal when the reply lacks it, the word is
  * unknown or the reply is NULL or unreadable. A node that does not apply the pace file reports none. */
 enum zapp_pace zapp_status_pace(const char *status);
+/* The line the node shows while the phone cools: it picks up again by itself. */
+#define ZAPP_PAUSED_LINE "Paused while the phone cools down. It picks up again by itself."
 /* The main-screen node line for the pace in effect: while the phone is warm the node says so instead
  * of its sync progress. node_line is used for a normal pace or when the node process is not running.
  * Returns out. */

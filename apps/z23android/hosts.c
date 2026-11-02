@@ -130,7 +130,7 @@ const char *zapp_paced_line(enum zapp_pace pace, bool process_running, const cha
     const bool settled = node_line && (!strncmp(node_line, "Node stopping", 13) || !strncmp(node_line, "Node in sync", 12));
     if (settled) process_running = false;
     if (process_running && pace == ZAPP_PACE_GENTLE) text = "Syncing gently · phone is warm";
-    else if (process_running && pace == ZAPP_PACE_PAUSE) text = "Sync paused · phone is cooling down";
+    else if (process_running && pace == ZAPP_PACE_PAUSE) text = ZAPP_PAUSED_LINE;
     snprintf(out, cap, "%s", text ? text : "");
     return out;
 }

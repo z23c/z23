@@ -87,23 +87,33 @@ static bool minutes_left(const struct zapp_view *view, int64_t *minutes)
     *minutes = (remaining * span / moved + 59) / 60;
     return true;
 }
-/* The one plain status line for the phone node: stopped, stopping, starting (no height seen since the process started),
- * running without a reply yet, catching up with the blocks left (and the minutes, only when a rate is known), can't confirm
- * it is up to date (with the reason), or up to date. Up to date shows only for the CURRENT verdict. */
-static const char *plain_node_line(const struct zapp_view *view, char *out, size_t cap)
+/* A node behind its reference: at a gentle pace it catches up slowly to keep the phone cool, so no minutes are given;
+ * otherwise the blocks left, with the minutes only when a rate is known. */
+static void behind_line(const struct zapp_view *view, char *out, size_t cap)
 {
     char blocks[32], minutes_text[48] = "";
     const int64_t behind = view->node_reference - view->node_height;
     int64_t minutes = 0;
+    if (view->pace == ZAPP_PACE_GENTLE) {
+        snprintf(out, cap, "Catching up slowly to keep the phone cool: %s blocks to go", zapp_grouped(behind, blocks));
+        return;
+    }
+    if (minutes_left(view, &minutes)) snprintf(minutes_text, sizeof(minutes_text), ", about %lld min left", (long long)minutes);
+    snprintf(out, cap, "Catching up: %s blocks to go%s", zapp_grouped(behind, blocks), minutes_text);
+}
+/* The one plain status line for the phone node: stopped, stopping, paused while the phone cools (before any catching-up
+ * or up-to-date text), starting (no height seen since the process started), running without a reply yet, catching up,
+ * can't confirm it is up to date (with the reason), or up to date. Up to date shows only for the CURRENT verdict. */
+static const char *plain_node_line(const struct zapp_view *view, char *out, size_t cap)
+{
     if (!view->node_process_running) snprintf(out, cap, "Node stopped");
     else if (!view->node_wanted) snprintf(out, cap, "Stopping…");
+    else if (view->pace == ZAPP_PACE_PAUSE) snprintf(out, cap, "%s", ZAPP_PAUSED_LINE);
     else if (!view->node_running) snprintf(out, cap, "%s", view->node_seen_height ?
         "Your node is running but has not replied yet" : "Starting your node… usually about a minute");
     else if (view->node_height < 0 || view->node_reference < 0) snprintf(out, cap, "%s", view->node_line);
-    else if (view->chain_state == ZAPP_CHAIN_BEHIND) {
-        if (minutes_left(view, &minutes)) snprintf(minutes_text, sizeof(minutes_text), ", about %lld min left", (long long)minutes);
-        snprintf(out, cap, "Catching up: %s blocks to go%s", zapp_grouped(behind, blocks), minutes_text);
-    } else if (view->chain_state == ZAPP_CHAIN_UNCONFIRMED) snprintf(out, cap, "Can't confirm it's up to date: %s", view->chain_doubt);
+    else if (view->chain_state == ZAPP_CHAIN_BEHIND) behind_line(view, out, cap);
+    else if (view->chain_state == ZAPP_CHAIN_UNCONFIRMED) snprintf(out, cap, "Can't confirm it's up to date: %s", view->chain_doubt);
     else if (view->chain_state == ZAPP_CHAIN_WAITING) snprintf(out, cap, "%s", view->chain_doubt);
     else if (view->chain_state == ZAPP_CHAIN_CURRENT) snprintf(out, cap, "Up to date");
     else snprintf(out, cap, "%s", view->node_line);
@@ -112,12 +122,11 @@ static const char *plain_node_line(const struct zapp_view *view, char *out, size
 size_t zapp_home_phone_card(const struct zapp_view *view, bool preview, char *out, size_t cap)
 {
     struct json_value card;
-    char line[sizeof(view->node_line)], plain[sizeof(view->node_line)];
-    bool running = view->node_running || view->node_process_running;
+    char line[sizeof(view->node_line)];
     json_init(&card); json_set_object(&card);
     json_push_kv_str(&card, "schema", "zcl.phone_card.v1");
     json_push_kv_str(&card, "node_line", preview ? "Preview · separate from your main node" :
-        zapp_paced_line(view->node_wanted || !view->node_process_running ? view->pace : ZAPP_PACE_NORMAL, running, plain_node_line(view, plain, sizeof(plain)), line, sizeof(line)));
+        plain_node_line(view, line, sizeof(line)));
     json_push_kv_str(&card, "sync", preview ? "The preview app does not run a node." :
         "");
     json_push_kv_str(&card, "pace", pace_name(view->pace));
