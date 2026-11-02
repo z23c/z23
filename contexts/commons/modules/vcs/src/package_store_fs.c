@@ -44,6 +44,19 @@ static bool store_sweep_child_path(const char *dir, const char *name,
     return n > 0 && (size_t)n < child_size;
 }
 
+/* False for a directory the temp sweep must not enter: <root>/service is the
+ * package-service event log. It grows without bound, never holds a store
+ * temp (its own writer uses a different temp suffix), and walking it made
+ * every open of a long-lived host cost time proportional to its history. */
+static bool store_sweep_owned(const struct vcs_package_store *store,
+                              const char *child)
+{
+    char service[STORE_PATH_MAX];
+    int n = snprintf(service, sizeof(service), "%s/service", store->root);
+    return n <= 0 || (size_t)n >= sizeof(service) ||
+           strcmp(child, service) != 0;
+}
+
 #if defined(_WIN32)
 void store_set_errno(DWORD error)
 {
@@ -469,14 +482,21 @@ bool store_atomic_write(const char *path, const uint8_t *data,
 enum store_sweep_kind { STORE_SWEEP_SKIP, STORE_SWEEP_DIR, STORE_SWEEP_TEMP };
 
 /* Classify one readdir entry: recurse into a directory, or flag a regular
- * file whose name carries the temp suffix. child receives the full path. */
+ * file whose name carries the temp suffix. child receives the full path.
+ * A plain regular file whose name is not temp-shaped needs no lstat: the
+ * directory entry already says so, and a store holds one file per object. */
 static enum store_sweep_kind store_sweep_classify_posix(const char *dir,
-                                                        const char *name,
+                                                        const struct dirent *ent,
                                                         char *child,
                                                         size_t child_size)
 {
+    const char *name = ent->d_name;
     if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
         return STORE_SWEEP_SKIP;
+#ifdef DT_REG
+    if (ent->d_type == DT_REG && strstr(name, STORE_TEMP_SUFFIX ".") == NULL)
+        return STORE_SWEEP_SKIP;
+#endif
     if (!store_sweep_child_path(dir, name, child, child_size))
         return STORE_SWEEP_SKIP;
     struct stat st;
@@ -517,7 +537,8 @@ void store_sweep_temps(struct vcs_package_store *store,
     for (size_t i = 0; i < dirs.count; i++) {
         char child[STORE_PATH_MAX];
         if (store_sweep_child_path(dir, dirs.entries[i].name, child,
-                                   sizeof(child)))
+                                   sizeof(child)) &&
+            store_sweep_owned(store, child))
             store_sweep_temps(store, child);
     }
     platform_directory_list_free(&dirs);
@@ -538,8 +559,10 @@ void store_sweep_temps(struct vcs_package_store *store,
     while ((ent = readdir(d)) != NULL) {
         char child[STORE_PATH_MAX];
         enum store_sweep_kind kind = store_sweep_classify_posix(
-            dir, ent->d_name, child, sizeof(child));
+            dir, ent, child, sizeof(child));
         if (kind == STORE_SWEEP_DIR) {
+            if (!store_sweep_owned(store, child))
+                continue;
             store_sweep_temps(store, child);
         } else if (kind == STORE_SWEEP_TEMP &&
                    !store_temp_owned_live_posix(ent->d_name) &&

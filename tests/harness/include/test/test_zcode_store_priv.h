@@ -85,6 +85,10 @@ int t_store_pins(void);
 int t_store_possession_scheduler(void);
 int t_store_releases(void);
 
+/* test_zcode_store_open_scale.c — recovery sweep cost on a long-lived
+ * host, and a corrupt object still refused after reopen. */
+int t_store_open_scale(void);
+
 /* test_zcode_store_quarantine.c — damaged persisted release records. */
 int t_store_release_quarantine(void);
 

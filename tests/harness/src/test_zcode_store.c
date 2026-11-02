@@ -1176,6 +1176,7 @@ int test_zcode_store(void)
     failures += t_store_chunk_flow();
     failures += t_store_dedup();
     failures += t_store_recovery();
+    failures += t_store_open_scale();
     failures += t_store_interrupted_empty_layout();
     failures += t_store_nonempty_staging_after_commit();
     failures += t_store_stale_noop_pin();
