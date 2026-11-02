@@ -159,9 +159,15 @@ struct wallet_recovery_report {
  *       or another recovery writing it)  -66 target node.db unreadable
  *   -62 datadir already holds a wallet       or damaged — NOT touched
  *   -63 cannot open the target db        -67 at-rest policy refuses
+ *   -68 passphrase shorter than the minimum
+ *   -70 this process already serves a wallet (a commit refuses; a plan answers)
  */
 struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
                                       struct wallet_recovery_report *out);
+
+/* ZCL_OK, or -70 when boot has marked this process as serving a wallet. A
+ * commit-mode create or restore calls it before it reads or writes anything. */
+struct zcl_result wallet_recovery_refuse_live_process(void);
 
 #ifdef ZCL_TESTING
 struct zcl_result wallet_recovery_test_ensure_datadir(

@@ -567,16 +567,29 @@ static void wrc_settle_birthday(const struct wallet_recovery_request *req,
     wrc_report_history(req, out, seeded, honoured);
 }
 
+/* Create and restore unlock and then force-lock the process-wide wallet lock
+ * to write their datadir, which would lock or re-key a wallet this process
+ * serves. -70 when boot has marked one. */
+struct zcl_result wallet_recovery_refuse_live_process(void)
+{
+    if (!wallet_lock_has_live_wallet())
+        return ZCL_OK;
+    return ZCL_ERR(-70,
+        "this process already serves a wallet. Creating or restoring one "
+        "unlocks and then locks the whole process, which would lock or "
+        "re-key that wallet: run it in its own process. Nothing was "
+        "written");
+}
+
 /* The request's own shape, refused before anything is read or written. */
 static struct zcl_result wrc_check_request(
     const struct wallet_recovery_request *req)
 {
-    if (!req->dry_run && wallet_lock_has_live_wallet())
-        return ZCL_ERR(-69,
-            "this process already serves a wallet. Creating or restoring one "
-            "unlocks and then locks the whole process, which would lock or "
-            "re-key that wallet: run it in its own process. Nothing was "
-            "written");
+    if (!req->dry_run) {
+        struct zcl_result live = wallet_recovery_refuse_live_process();
+        if (!live.ok)
+            return live;
+    }
     if (!req->datadir || !req->datadir[0])
         return ZCL_ERR(-63, "datadir path is empty");
     if (!req->phrase || !req->phrase[0])

@@ -39,6 +39,7 @@
 #include "config/boot_wallet_phrase.h"
 #include "command/native_command.h"
 #include "config/command_catalog.h"
+#include "controllers/wallet_native_handlers.h"
 #include "controllers/wallet_scan.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -1671,10 +1672,13 @@ static int t_wallet_free_wipes_sapling_keys(void)
     if (made) {
         wallet_init(w);
         made = sapling_keystore_set_seed(&w->sapling_keys, seed) &&
-               sapling_keystore_new_address(&w->sapling_keys, div, pk_d);
+               sapling_keystore_new_address(&w->sapling_keys, div, pk_d) &&
+               wallet_init_hd(w, seed, sizeof(seed));
     }
-    WCR_CHECK("setup: a wallet holds a Sapling seed and a spending key",
-              made && !wcr_all_zero(w->sapling_keys.seed, 32) &&
+    WCR_CHECK("setup: a wallet holds a Sapling seed, a spending key and a BIP32 master key",
+              made && w->has_master_key &&
+              !wcr_all_zero(&w->master_key, sizeof(w->master_key)) &&
+              !wcr_all_zero(w->sapling_keys.seed, 32) &&
               !wcr_all_zero(&w->sapling_keys.keys[0].xsk.expsk,
                             sizeof(w->sapling_keys.keys[0].xsk.expsk)));
     if (made)
@@ -1684,6 +1688,9 @@ static int t_wallet_free_wipes_sapling_keys(void)
     WCR_CHECK("wallet_free leaves no master key in the struct",
               made && wcr_all_zero(&w->sapling_keys.master_xsk,
                                    sizeof(w->sapling_keys.master_xsk)));
+    WCR_CHECK("wallet_free leaves no BIP32 master key in the struct",
+              made && wcr_all_zero(&w->master_key, sizeof(w->master_key)));
+    WCR_CHECK("and no longer claims one", made && !w->has_master_key);
     WCR_CHECK("wallet_free leaves no spending key in the struct",
               made && wcr_all_zero(&w->sapling_keys.keys[0].xsk,
                                    sizeof(w->sapling_keys.keys[0].xsk)));
@@ -1732,6 +1739,59 @@ static int t_live_wallet_refused(void)
     return failures;
 }
 
+/* The reply code a service code maps to. -69 stays the phrase-draw and
+ * report failure the create service documents; the live-process refusal has a
+ * code of its own and is checked before the request is read. */
+static int t_create_failure_codes(void)
+{
+    int failures = 0;
+    enum zcl_command_exit ex = ZCL_COMMAND_EXIT_BLOCKED;
+    const char *code = wrp_create_failure_code(-69, &ex);
+    WCR_CHECK("a phrase-draw failure (-69) still reports CREATE_FAILED",
+              !strcmp(code, "CREATE_FAILED") && ex == ZCL_COMMAND_EXIT_FAILED);
+    struct wallet_create_request req = {.datadir = "/nonexistent-create-test",
+                                        .passphrase = WCR_PASS};
+    struct zcl_result null_report = wallet_create_run(&req, NULL);
+    code = wrp_create_failure_code(null_report.code, &ex);
+    WCR_CHECK("the service's own -69 (no report) maps to CREATE_FAILED",
+              null_report.code == -69 && !strcmp(code, "CREATE_FAILED"));
+    code = wrp_create_failure_code(-70, &ex);
+    WCR_CHECK("the live-process refusal (-70) reports WALLET_LIVE_IN_PROCESS",
+              !strcmp(code, "WALLET_LIVE_IN_PROCESS") &&
+              ex == ZCL_COMMAND_EXIT_BLOCKED);
+    wallet_lock_reset_for_test();
+    wallet_lock_note_live_wallet();
+    struct wallet_create_request empty = {.datadir = "", .passphrase = ""};
+    struct wallet_create_report rep;
+    struct zcl_result r = wallet_create_run(&empty, &rep);
+    WCR_CHECK("create checks the live process before it reads the request",
+              r.code == -70);
+    wallet_lock_reset_for_test();
+    return failures;
+}
+
+/* The key scans can find what they look for: a plaintext datadir holds the raw
+ * seed, and the spending-key search finds it when it is stored. */
+static int t_scan_positive_control(void)
+{
+    int failures = 0;
+    char dir[1024];
+    struct wcr_run run;
+    uint8_t seed[32];
+    wcr_phrase_seed(WCR_RESTORE_PHRASE, seed);
+    WCR_CHECK("setup: a seeded datadir",
+              wcr_seeded_chain(dir, sizeof(dir), "rs_plain", false));
+    bool ran = wcr_restore_cli(dir, "", true, &run);
+    WCR_CHECK("setup: a plaintext restore commits",
+              ran && run.rc == 0 && wcr_data_bool(&run, "committed"));
+    WCR_CHECK("the seed scan finds the seed in a plaintext wallet",
+              wcr_count_in_tree(dir, (const char *)seed, 32) > 0);
+    WCR_CHECK("the spending-key scan finds the key in a plaintext wallet",
+              wcr_spending_key_in_tree(dir, seed) > 0);
+    memory_cleanse(seed, sizeof(seed));
+    return failures;
+}
+
 int test_wallet_create(void);
 int test_wallet_create(void)
 {
@@ -1752,6 +1812,8 @@ int test_wallet_create(void)
     failures += t_unreadable_file_fails_scan();
     failures += t_wallet_free_wipes_sapling_keys();
     failures += t_live_wallet_refused();
+    failures += t_create_failure_codes();
+    failures += t_scan_positive_control();
     if (failures == 0)
         printf("wallet_create: OK (all wallet creation gates pass)\n");
     else

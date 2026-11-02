@@ -64,6 +64,11 @@ void wnh_fail(struct zcl_command_reply *reply,
               enum zcl_command_exit exit_code, const char *code,
               const char *message, const char *evidence);
 
+/* The reply code and exit class a create failure maps to: the service codes
+ * name refusals (-61 / -62 / -66 / -68 / -70), every other code is
+ * CREATE_FAILED. Published for the test that pins the table. */
+const char *wrp_create_failure_code(int code, enum zcl_command_exit *ex);
+
 /* Call a node RPC, publishing a typed BLOCKED failure into `reply` and
  * returning false when the node does not answer. `out` is only
  * initialised on true. */

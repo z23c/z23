@@ -34,6 +34,9 @@ struct zcl_result wallet_create_run(const struct wallet_create_request *req,
     if (!out)
         return ZCL_ERR(-69, "report is NULL");
     memset(out, 0, sizeof(*out));
+    struct zcl_result live = wallet_recovery_refuse_live_process();
+    if (!live.ok)
+        return live;
     if (!req || !req->datadir || !req->datadir[0])
         return ZCL_ERR(-63, "datadir path is empty");
     if (!req->passphrase || strlen(req->passphrase) <

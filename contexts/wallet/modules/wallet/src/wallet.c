@@ -158,11 +158,16 @@ void wallet_free(struct wallet *w)
         }
     }
     w->num_wallet_tx = 0;
+    if (w->sapling_notes)
+        memory_cleanse(w->sapling_notes,
+                       w->sapling_notes_cap * sizeof(*w->sapling_notes));
     free(w->sapling_notes);
     w->sapling_notes = NULL;
     w->num_sapling_notes = 0;
     w->sapling_notes_cap = 0;
     keystore_free(&w->keystore);
+    memory_cleanse(&w->master_key, sizeof(w->master_key));
+    w->has_master_key = false;
     sapling_keystore_free(&w->sapling_keys);
     zcl_mutex_destroy(&w->cs);
 }
