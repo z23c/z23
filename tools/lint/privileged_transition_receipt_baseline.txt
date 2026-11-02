@@ -157,6 +157,7 @@ core.wallet.transaction.raw.create    exempt: composes unsigned transaction byte
 core.wallet.transaction.raw.sign      exempt: produces signatures with resident wallet keys but imports nothing, persists nothing and installs no artifact
 core.wallet.transaction.raw.broadcast exempt: submits bytes through the shared mempool acceptance and relay gates; installs no privileged artifact
 core.wallet.recovery.restore    exempt: derives a wallet's own keys from an operator-supplied phrase and writes them into an EMPTY datadir through the node's own schema path; refuses while a node holds the datadir and refuses outright if a wallet is already there; installs no artifact and changes no running binary
+core.wallet.recovery.new       exempt: draws a new phrase from the system random source and returns it once; writes no file, opens no database, takes no lock and installs no artifact
 core.wallet.create              exempt: draws a new phrase and writes a new wallet encrypted under a stdin passphrase into an EMPTY datadir through the node schema path; refuses while a node holds the datadir and refuses outright if any seed, key or note is there; installs no artifact and changes no existing wallet
 core.identity.anchor       exempt: reserves and broadcasts an identity-bound wallet transaction through durable vault-intent gates; installs no privileged artifact
 core.identity.rotate       exempt: reserves and broadcasts an identity-bound wallet transaction through durable vault-intent gates; installs no privileged artifact

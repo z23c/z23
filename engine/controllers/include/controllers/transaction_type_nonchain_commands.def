@@ -31,6 +31,8 @@ TX_NONCHAIN_COMMAND("core.wallet.restore", "wallet_recovery",
     "Restores local wallet state from a backup; it does not broadcast during restore.")
 TX_NONCHAIN_COMMAND("core.wallet.recovery.restore", "wallet_recovery",
     "Runs the typed local wallet recovery path; it does not broadcast during restore.")
+TX_NONCHAIN_COMMAND("core.wallet.recovery.new", "wallet_key_management",
+    "Draws a new phrase in memory and shows it once; it creates no chain transaction.")
 TX_NONCHAIN_COMMAND("core.wallet.create", "wallet_key_management",
     "Creates a new local wallet and shows its phrase once; it creates no chain transaction.")
 TX_NONCHAIN_COMMAND("core.wallet.rescan-witnesses", "wallet_scan",

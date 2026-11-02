@@ -1484,11 +1484,9 @@ ZCL_COMMAND_READY_COMMAND(
      * ZCL_COMMAND_SPEC_BUDGET; over it, the document does not render at all
      * and this warning becomes invisible. check-describe-budget holds the
      * line. Trim here — never raise the budget. */
-    "Plan/commit rebuild of a whole wallet from the recovery phrase alone "
-    "into an EMPTY datadir — the disaster case where the machine and the "
-    "backup file are both gone. These words work in Z23 only, not in "
-    "Electrum, a hardware wallet or other software; a phrase from "
-    "elsewhere opens a different EMPTY wallet here with no error. datadir "
+    "Plan/commit rebuild of a wallet from its recovery phrase alone into an "
+    "EMPTY datadir. These words work in Z23 only; a phrase from other "
+    "software opens a different EMPTY wallet here with no error. datadir "
     "is REQUIRED and has NO default, so the keys are never aimed at the "
     "running node's datadir. "
     "The plan half shows the first transparent and shielded addresses the "
@@ -1510,12 +1508,15 @@ ZCL_COMMAND_READY_COMMAND(
     "passphrase (standard input via --input=- only, 12+ bytes), "
     "shielded_only (no transparent keys) and birthday {height,hash} from a "
     "create reply, used only if this datadir holds that block; else the "
-    "wallet is marked unread from 0. history_below_seed_hidden says a "
+    "wallet is marked unread from 0. birthday_at_local_tip true (not with "
+    "birthday) stores this datadir's tip as the birthday, for a phrase made "
+    "just now; NO_LOCAL_CHAIN if it holds 100 blocks or fewer. history_below_seed_hidden says a "
     "seeded node cannot show older funds. Keys come back, history does "
     "not: next_steps names the rescans.", ZCL_COMMAND_LIST_BUDGET,
     "wallet,recovery,phrase,seed,mnemonic,restore",
     "zcl.wallet_recovery_restore.input.v1", "zcl.wallet_recovery_restore.v1",
-    "phrase,datadir,confirm,passphrase,shielded_only,birthday", "",
+    "phrase,datadir,confirm,passphrase,shielded_only,birthday,"
+    "birthday_at_local_tip", "",
     "z23 core wallet recovery restore "
     "--input='{\"datadir\":\"/tmp/recovered\"}'",
     ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
@@ -1525,6 +1526,29 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
     zcl_native_handle_wallet_recovery_restore)
+ZCL_COMMAND_READY_COMMAND(
+    "core.wallet.recovery.new", "core.wallet.recovery", "",
+    "Make a new 24-word recovery phrase and show it once",
+    /* KEEP THIS UNDER BUDGET (see core.wallet.recovery.restore above). */
+    "Draws a new 24-word BIP39 phrase from the system random source, the "
+    "same generator core.wallet.create uses. It needs no datadir and no "
+    "running node, opens no database, writes no file and takes no lock. The "
+    "phrase is in this reply ONCE and is not stored, logged or journaled: "
+    "no command prints it again, so write it down now. The reply is "
+    "{phrase, words}; the seed is never included. It makes no wallet: "
+    "pass the words to core.wallet.recovery.restore to build one. Owner "
+    "only, local only, never available to agents or MCP.",
+    0, "wallet,recovery,phrase,seed,mnemonic,new,generate",
+    "zcl.wallet_recovery_new.input.v1", "zcl.wallet_recovery_new.v1",
+    "", "",
+    "z23 core wallet recovery new",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_wallet_recovery_new)
 ZCL_COMMAND_READY_COMMAND(
     "core.wallet.create", "core.wallet", "",
     "Create a new private wallet and show its 24 words once",

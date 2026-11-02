@@ -429,6 +429,16 @@ static void wrp_push_birthday_input(struct json_value *obj,
     json_free(&b);
 }
 
+/* Whichever birthday source the caller gave, for the commit input. */
+static void wrp_push_birthday_inputs(struct json_value *obj,
+                                     const struct wallet_recovery_request *req)
+{
+    if (req->has_birthday)
+        wrp_push_birthday_input(obj, req);
+    if (req->birthday_at_local_tip)
+        (void)json_push_kv_bool(obj, "birthday_at_local_tip", true);
+}
+
 /* The reply code for a refused recovery. The names are separate because they
  * are separate operator moves: "your database is damaged and I did not touch
  * it" differs from "decide how these keys are stored first". None is a generic
@@ -447,6 +457,8 @@ static const char *wrp_failure_code(int code, enum zcl_command_exit *ex)
         { -67, "WALLET_AT_REST_UNDECIDED", ZCL_COMMAND_EXIT_BLOCKED },
         { -68, "PASSPHRASE_TOO_SHORT", ZCL_COMMAND_EXIT_INVALID },
         { -70, "WALLET_LIVE_IN_PROCESS", ZCL_COMMAND_EXIT_BLOCKED },
+        { -71, "BIRTHDAY_CONFLICT", ZCL_COMMAND_EXIT_INVALID },
+        { -72, "NO_LOCAL_CHAIN", ZCL_COMMAND_EXIT_BLOCKED },
     };
     for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
         if (map[i].code == code) {
@@ -489,6 +501,8 @@ static void wrp_restore_body(
         .dry_run = !confirm,
         .shielded_only = json_get_bool_or(request->input, "shielded_only",
                                           false),
+        .birthday_at_local_tip = json_get_bool_or(request->input,
+                                                  "birthday_at_local_tip", false),
     };
     if (!wrp_restore_passphrase(request->input, &req.passphrase, reply) ||
         !wrp_parse_birthday(request->input, &req, reply))
@@ -549,8 +563,7 @@ static void wrp_restore_body(
         (void)json_push_kv_bool(&commit_value, "confirm", true);
         if (req.shielded_only)
             (void)json_push_kv_bool(&commit_value, "shielded_only", true);
-        if (req.has_birthday)
-            wrp_push_birthday_input(&commit_value, &req);
+        wrp_push_birthday_inputs(&commit_value, &req);
         char commit[7000];
         if (json_write(&commit_value, commit, sizeof(commit)) == 0)
             snprintf(commit, sizeof(commit), "{\"error\":\"input too long\"}");
@@ -773,6 +786,36 @@ void zcl_native_handle_wallet_create(
                  "core.wallet.create");
         reply->error.mutated = true;
     }
+}
+
+/* ── core.wallet.recovery.new ──────────────────────────────────────────
+ *
+ * A fresh recovery phrase and nothing else: no datadir, no database, no lock,
+ * no running node. It draws through wallet_create_phrase, the generator
+ * core.wallet.create uses, so entropy source, size, wordlist and checksum are
+ * the same. The phrase is in this reply ONCE and is stored, logged and
+ * journaled nowhere; the seed and entropy it derives from are never in it.
+ * The caller restores it later with core.wallet.recovery.restore. */
+void zcl_native_handle_wallet_recovery_new(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    (void)request;
+    wrp_disable_core_dumps();
+    char phrase[MNEMONIC_MAX_PHRASE_SIZE];
+    struct zcl_result r = wallet_create_phrase(phrase, sizeof(phrase));
+    if (!r.ok) {
+        memory_cleanse(phrase, sizeof(phrase));
+        wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "PHRASE_GENERATION_FAILED",
+                 "the system random source could not produce a recovery "
+                 "phrase. Nothing was made", "core.wallet.recovery.new");
+        return;
+    }
+    int64_t words = 1;
+    for (const char *p = phrase; *p; p++)
+        words += *p == ' ';
+    (void)json_push_kv_str(&reply->data, "phrase", phrase);
+    (void)json_push_kv_int(&reply->data, "words", words);
+    memory_cleanse(phrase, sizeof(phrase));
 }
 
 /* ── Hot-swappable leaves ──────────────────────────────────────────────────

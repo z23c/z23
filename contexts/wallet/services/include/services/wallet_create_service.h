@@ -52,6 +52,12 @@ struct wallet_create_report {
 struct zcl_result wallet_create_run(const struct wallet_create_request *req,
                                     struct wallet_create_report *out);
 
+/* Draw a new 24-word recovery phrase into `out` (at least
+ * MNEMONIC_MAX_PHRASE_SIZE bytes) from the system random source. Touches no
+ * file or database and takes no lock; the one generator create uses. Returns
+ * ZCL_OK, or -69 with `out` emptied. The caller cleanses `out`. */
+struct zcl_result wallet_create_phrase(char *out, size_t cap);
+
 /* Overwrite the phrase buffer. */
 void wallet_create_report_cleanse(struct wallet_create_report *rep);
 

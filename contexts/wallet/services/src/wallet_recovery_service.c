@@ -442,18 +442,40 @@ static void wrc_mark_unread(const struct wallet_recovery_request *req,
  * chain, or one no longer than the margin, records nothing: the wallet has no
  * birthday and its first catch-up starts at genesis, or, when boot defers a
  * long range, marks it unread so the wallet reads incomplete. */
+static bool wrc_floor_cb(int height, const struct db_block *row, void *ctx)
+{
+    (void)height;
+    *(struct db_block *)ctx = *row;
+    return false;
+}
+
+/* The ordered range probe reads through a plain handle, so this serves the
+ * read-only inspection handle as well as the write handle. */
+static bool wrc_local_tip(struct node_db *ndb, int *tip,
+                          struct db_block *floor_block)
+{
+    if (!ndb || !ndb->open)
+        return false;
+    *tip = db_block_max_height(ndb);
+    if (*tip <= WALLET_BIRTHDAY_MARGIN)
+        return false;
+    int at = *tip - WALLET_BIRTHDAY_MARGIN;
+    memset(floor_block, 0, sizeof(*floor_block));
+    (void)db_block_scan_height_range_probe(ndb, at, at, wrc_floor_cb,
+                                           floor_block);
+    return floor_block->height == at;
+}
+
 static void wrc_record_birthday(const struct wallet_recovery_request *req,
                                 struct node_db *ndb,
                                 struct wallet_recovery_report *out)
 {
     struct db_block floor_block;
+    int tip = 0;
     if (!req->record_birthday)
         return;
-    int tip = db_block_max_height(ndb);
     out->birthday_recorded =
-        tip > WALLET_BIRTHDAY_MARGIN &&
-        db_block_find_by_height(ndb, tip - WALLET_BIRTHDAY_MARGIN,
-                                &floor_block) &&
+        wrc_local_tip(ndb, &tip, &floor_block) &&
         db_wallet_birthday_set(ndb, tip, floor_block.hash);
     out->birthday_height = out->birthday_recorded ? tip : 0;
     if (out->birthday_recorded)
@@ -601,10 +623,64 @@ static struct zcl_result wrc_check_request(
             "from its first write, so it is refused rather than written with "
             "a weak one. Nothing was written",
             WALLET_CREATE_MIN_PASSPHRASE);
+    if (req->birthday_at_local_tip && req->has_birthday)
+        return ZCL_ERR(-71,
+            "a birthday was named and birthday_at_local_tip was also set. "
+            "They are two sources for one value, so neither is used. Send "
+            "one. Nothing was written");
     return ZCL_OK;
 }
 
 /* ── recover ─────────────────────────────────────────────────────── */
+
+/* A phrase made seconds ago cannot have received anything below this
+ * datadir's own tip, so the tip is stored the way a create stores it. */
+static const struct wallet_recovery_request *
+wrc_with_tip_birthday(const struct wallet_recovery_request *req,
+                      struct wallet_recovery_request *scratch)
+{
+    if (!req->birthday_at_local_tip)
+        return req;
+    *scratch = *req;
+    scratch->record_birthday = true;
+    return scratch;
+}
+
+/* What the inspected target allows, before any write handle exists: -62 when
+ * it already holds a wallet, -72 when birthday_at_local_tip cannot be honoured
+ * (on a plan as on a commit; the flag never falls back to scanning from
+ * genesis). */
+static struct zcl_result wrc_target_gate(const struct wallet_recovery_request *req,
+                                         struct node_db *ndb,
+                                         const struct wallet_recovery_report *out)
+{
+    struct db_block tip_floor;
+    int tip_height = 0;
+    if (wrc_wallet_present(out)) {
+        LOG_WARN(WRC_TAG, "refusing recovery: %s already holds a wallet "
+                 "(%lld keys, seed_state=%d)", out->target_db,
+                 (long long)out->keys_before, (int)out->seed_state_before);
+        return ZCL_ERR(-62,
+            "%s already holds a wallet (%lld keys). Recovering here would "
+            "leave a wallet whose keys came from two different seeds and no "
+            "way to tell them apart. Recover into an empty datadir instead, "
+            "then move what you need",
+            out->datadir, (long long)out->keys_before);
+    }
+    if (req->birthday_at_local_tip &&
+        !wrc_local_tip(ndb, &tip_height, &tip_floor)) {
+        LOG_WARN(WRC_TAG, "refusing recovery: %s holds no chain above the "
+                 "birthday margin", out->target_db);
+        return ZCL_ERR(-72,
+            "birthday_at_local_tip needs a datadir that already holds more "
+            "than %d connected blocks, and %s does not. Recording no birthday "
+            "would make the wallet scan from genesis, so nothing was "
+            "written. Let the node sync first, or send no birthday_at_local_tip",
+            WALLET_BIRTHDAY_MARGIN, out->datadir);
+    }
+    return ZCL_OK;
+}
+
 
 struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
                                       struct wallet_recovery_report *out)
@@ -619,6 +695,8 @@ struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
     struct zcl_result shape = wrc_check_request(req);
     if (!shape.ok)
         return shape;
+    struct wallet_recovery_request tip_req;
+    req = wrc_with_tip_birthday(req, &tip_req);
 
     out->word_count = wrc_word_count(req->phrase);
     /* Refuse on shape, and describe the shape — never the words. */
@@ -795,19 +873,12 @@ struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
     bool seeded = wrc_assess_history(req, &ndb, out);
 
     /* Never write a second seed over a wallet that already has keys. */
-    if (wrc_wallet_present(out)) {
+    struct zcl_result gate = wrc_target_gate(req, &ndb, out);
+    if (!gate.ok) {
         if (have_ws) wallet_sqlite_close(&ws);
         if (ro_open) zcl_native_node_db_close_readonly(&ro_db, &ndb);
         wallet_restore_datadir_release(&wlock);
-        LOG_WARN(WRC_TAG, "refusing recovery: %s already holds a wallet "
-                 "(%lld keys, seed_state=%d)", out->target_db,
-                 (long long)out->keys_before, (int)out->seed_state_before);
-        return ZCL_ERR(-62,
-            "%s already holds a wallet (%lld keys). Recovering here would "
-            "leave a wallet whose keys came from two different seeds and no "
-            "way to tell them apart. Recover into an empty datadir instead, "
-            "then move what you need",
-            out->datadir, (long long)out->keys_before);
+        return gate;
     }
 
     /* Proven readable AND wallet-free. Only NOW may a write handle exist:

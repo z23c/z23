@@ -64,6 +64,11 @@ struct wallet_recovery_request {
     bool        has_birthday;
     int64_t     birthday_height;
     uint8_t     birthday_hash[32];
+    /* A phrase made just now: record the datadir's own chain tip as the
+     * birthday at write time, as a create does. Refused with -72 when the
+     * datadir holds no chain above WALLET_BIRTHDAY_MARGIN, and with -71 when
+     * has_birthday is also set. */
+    bool        birthday_at_local_tip;
 };
 
 struct wallet_recovery_report {
@@ -161,6 +166,8 @@ struct wallet_recovery_report {
  *   -63 cannot open the target db        -67 at-rest policy refuses
  *   -68 passphrase shorter than the minimum
  *   -70 this process already serves a wallet (a commit refuses; a plan answers)
+ *   -71 birthday and birthday_at_local_tip were both given
+ *   -72 birthday_at_local_tip, and the datadir holds no chain above the margin
  */
 struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
                                       struct wallet_recovery_report *out);

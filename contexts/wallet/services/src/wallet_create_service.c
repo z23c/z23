@@ -22,6 +22,18 @@ static bool wcs_legacy_wallet_present(const char *datadir)
     return n <= 0 || (size_t)n >= sizeof(legacy) || lstat(legacy, &st) == 0;
 }
 
+struct zcl_result wallet_create_phrase(char *out, size_t cap)
+{
+    if (!out || cap < MNEMONIC_MAX_PHRASE_SIZE)
+        return ZCL_ERR(-69, "phrase buffer is too small");
+    out[0] = '\0';
+    if (!mnemonic_generate(MNEMONIC_24_WORDS, out, cap)) {
+        memory_cleanse(out, cap);
+        return ZCL_ERR(-69, "could not draw a recovery phrase");
+    }
+    return ZCL_OK;
+}
+
 void wallet_create_report_cleanse(struct wallet_create_report *rep)
 {
     if (rep)
@@ -54,11 +66,9 @@ struct zcl_result wallet_create_run(const struct wallet_create_request *req,
             req->datadir);
 
     char phrase[MNEMONIC_MAX_PHRASE_SIZE];
-    if (!mnemonic_generate(MNEMONIC_24_WORDS, phrase, sizeof(phrase))) {
-        memory_cleanse(phrase, sizeof(phrase));
+    if (!wallet_create_phrase(phrase, sizeof(phrase)).ok)
         return ZCL_ERR(-69, "could not draw a recovery phrase. Nothing was "
                             "written");
-    }
 
     struct wallet_recovery_request rr = {
         .phrase = phrase,

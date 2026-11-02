@@ -1365,13 +1365,14 @@ static bool wcr_process_serves_wallet;
 /* `z23 core wallet recovery restore` on the production path. `extra` is the
  * rest of the input object (leading comma included), `via_stdin` selects
  * --input=- over --input=<json>. */
-static bool wcr_restore_cli(const char *dir, const char *extra,
-                            bool via_stdin, struct wcr_run *run)
+static bool wcr_restore_phrase_cli(const char *dir, const char *phrase,
+                                    const char *extra, bool via_stdin,
+                                    struct wcr_run *run)
 {
     char text[2048], arg[2100];
     snprintf(text, sizeof(text),
              "{\"datadir\":\"%s\",\"phrase\":\"%s\",\"confirm\":true%s}", dir,
-             WCR_RESTORE_PHRASE, extra);
+             phrase, extra);
     wallet_lock_reset_for_test();
     if (wcr_process_serves_wallet)
         wallet_lock_note_live_wallet();
@@ -1390,6 +1391,13 @@ static bool wcr_restore_cli(const char *dir, const char *extra,
     if (run->rc != 0)
         printf("    restore reply: %.500s\n", run->wire);
     return ok;
+}
+
+static bool wcr_restore_cli(const char *dir, const char *extra,
+                            bool via_stdin, struct wcr_run *run)
+{
+    return wcr_restore_phrase_cli(dir, WCR_RESTORE_PHRASE, extra, via_stdin,
+                                  run);
 }
 
 static bool wcr_wallet_rows_exist(const char *dir)
@@ -1927,6 +1935,145 @@ static int t_create_failure_codes(void)
     return failures;
 }
 
+/* `core wallet recovery new` draws a phrase and touches nothing else. */
+static bool wcr_recovery_new(struct wcr_run *run)
+{
+    const char *args[] = {"wallet", "recovery", "new", "--format=json"};
+    memset(run, 0, sizeof(*run));
+    return wcr_cli_args(args, 4, "", run);
+}
+
+static int t_recovery_new(void)
+{
+    int failures = 0;
+    struct wcr_run a, b;
+    char p1[MNEMONIC_MAX_PHRASE_SIZE] = "", p2[MNEMONIC_MAX_PHRASE_SIZE] = "";
+    bool ran = wcr_recovery_new(&a) && wcr_recovery_new(&b);
+    WCR_CHECK("the new leaf answers ok with a phrase and no datadir",
+              ran && a.rc == 0 && wcr_field(&a, "phrase", p1, sizeof(p1)) &&
+              b.rc == 0 && wcr_field(&b, "phrase", p2, sizeof(p2)));
+    WCR_CHECK("the phrase is 24 valid BIP39 words and the reply counts them",
+              mnemonic_validate(p1) && wcr_data_int(&a, "words") == 24 &&
+              strlen(p1) > 24 * 3);
+    WCR_CHECK("two calls give different phrases", strcmp(p1, p2) != 0);
+    WCR_CHECK("the reply carries no seed or entropy field",
+              strstr(a.wire, "seed") == NULL &&
+              strstr(a.wire, "entropy") == NULL);
+    WCR_CHECK("the phrase is in the reply once and never on standard error",
+              wcr_count(a.wire, strlen(a.wire), p1, strlen(p1)) == 1 &&
+              strstr(a.err, p1) == NULL);
+
+    char dir[1024];
+    wcr_fixture(dir, sizeof(dir), "new_restore");
+    WCR_CHECK("setup: a seeded datadir",
+              wcr_block(dir, 0x09, 900, 3) && wcr_block(dir, 0x0a, 1000, 3));
+    struct wcr_run r;
+    bool restored = wcr_restore_phrase_cli(dir, p1, "", true, &r);
+    WCR_CHECK("restore accepts the phrase the new leaf drew",
+              restored && r.rc == 0 && wcr_data_bool(&r, "committed") &&
+              wcr_data_bool(&r, "recovered"));
+    memory_cleanse(p1, sizeof(p1));
+    memory_cleanse(p2, sizeof(p2));
+    return failures;
+}
+
+/* A datadir holding blocks only at the given heights (status connected). */
+static bool wcr_chain_at(char *dir, size_t cap, const char *tag,
+                         const int *heights, size_t n)
+{
+    wcr_fixture(dir, cap, tag);
+    for (size_t i = 0; i < n; i++)
+        if (!wcr_block(dir, (uint8_t)(0x10 + i), heights[i], 3))
+            return false;
+    return true;
+}
+
+static int restore_tip_recorded(void)
+{
+    int failures = 0;
+    char dir[1024];
+    struct wcr_run run;
+    struct node_db ndb;
+    int64_t b = 0;
+    uint8_t hash[32];
+    WCR_CHECK("setup: a seeded datadir",
+              wcr_seeded_chain(dir, sizeof(dir), "tip_ok", false));
+    bool ran = wcr_restore_cli(dir, ",\"birthday_at_local_tip\":true", true,
+                               &run);
+    bool open = ran && run.rc == 0 && wcr_open(&ndb, dir);
+    WCR_CHECK("the datadir's tip is stored with the floor block's hash",
+              open && db_wallet_birthday_get(&ndb, &b, hash) && b == 1000 &&
+              hash[0] == 0x09 && hash[31] == 0x09);
+    if (open)
+        node_db_close(&ndb);
+    WCR_CHECK("the wallet carries no unread marker",
+              ran && !wcr_unread_from_zero(dir));
+    WCR_CHECK("the reply reports a recorded birthday and nothing hidden",
+              wcr_data_bool(&run, "birthday_recorded") &&
+              !wcr_data_bool(&run, "birthday_rejected") &&
+              !wcr_data_bool(&run, "history_below_seed_hidden"));
+    return failures;
+}
+
+static int restore_tip_edge(void)
+{
+    int failures = 0;
+    char dir[1024];
+    struct wcr_run run;
+    struct node_db ndb;
+    int64_t b = 0;
+    uint8_t hash[32];
+    /* One block past the margin is the shortest usable chain. */
+    const int edge[] = {1, 101};
+    WCR_CHECK("setup: a chain of exactly margin + 1",
+              wcr_chain_at(dir, sizeof(dir), "tip_edge", edge, 2));
+    bool ran = wcr_restore_cli(dir, ",\"birthday_at_local_tip\":true", true, &run);
+    bool open = ran && run.rc == 0 && wcr_open(&ndb, dir);
+    WCR_CHECK("a tip one above the margin is accepted and stored",
+              open && db_wallet_birthday_get(&ndb, &b, hash) && b == 101 &&
+              hash[0] == 0x10);
+    if (open)
+        node_db_close(&ndb);
+    return failures;
+}
+
+static int restore_tip_refused(void)
+{
+    int failures = 0;
+    char dir[1024];
+    struct wcr_run run;
+    const int low[] = {1, 100};
+    WCR_CHECK("setup: a chain exactly at the margin",
+              wcr_chain_at(dir, sizeof(dir), "tip_low", low, 2));
+    bool ran = wcr_restore_cli(dir, ",\"birthday_at_local_tip\":true", true,
+                               &run);
+    WCR_CHECK("a tip at the margin is refused as NO_LOCAL_CHAIN",
+              ran && run.rc != 0 && wcr_error_is(&run, "NO_LOCAL_CHAIN"));
+    WCR_CHECK("and nothing was written: no wallet rows, no birthday",
+              !wcr_wallet_rows_exist(dir));
+    wcr_fixture(dir, sizeof(dir), "tip_none");
+    ran = wcr_restore_cli(dir, ",\"birthday_at_local_tip\":true", true, &run);
+    WCR_CHECK("an empty datadir is refused the same way and gets no node.db",
+              ran && wcr_error_is(&run, "NO_LOCAL_CHAIN") &&
+              !wcr_exists(dir, "node.db"));
+    WCR_CHECK("setup: a seeded datadir for the conflict",
+              wcr_seeded_chain(dir, sizeof(dir), "tip_conflict", false));
+    ran = wcr_restore_cli(dir, ",\"birthday_at_local_tip\":true,"
+                          "\"birthday\":{\"height\":1000,\"hash\":\""
+                          WCR_HASH_09 "\"}", true, &run);
+    WCR_CHECK("an explicit birthday plus the flag is refused",
+              ran && run.rc != 0 && wcr_error_is(&run, "BIRTHDAY_CONFLICT"));
+    WCR_CHECK("and nothing was written",
+              !wcr_wallet_rows_exist(dir));
+    return failures;
+}
+
+static int t_restore_at_local_tip(void)
+{
+    return restore_tip_recorded() + restore_tip_edge() + restore_tip_refused();
+}
+
+
 /* The key scans can find what they look for: a plaintext datadir holds the raw
  * seed, and the spending-key search finds it when it is stored. */
 static int t_scan_positive_control(void)
@@ -1976,6 +2123,8 @@ int test_wallet_create(void)
     failures += t_wallet_free_wipes_sapling_keys();
     failures += t_live_wallet_refused();
     failures += t_create_failure_codes();
+    failures += t_recovery_new();
+    failures += t_restore_at_local_tip();
     failures += t_scan_positive_control();
     if (failures == 0)
         printf("wallet_create: OK (all wallet creation gates pass)\n");

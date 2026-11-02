@@ -100,6 +100,7 @@ static bool cr_bool_key(const char *key)
         "runner_ok_only",    "dedupe",            "route_only",
         "route-only",        "explain",
         "shielded_only",
+        "birthday_at_local_tip",
     };
     return cr_key_in(key, keys, sizeof(keys) / sizeof(keys[0])) ||
            command_registry_devagent_input_extra_bool_key(key);
