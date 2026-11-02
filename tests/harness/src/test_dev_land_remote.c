@@ -1107,7 +1107,8 @@ static bool dlt_rv_direct(const struct dlt_rig *r, const char *base, int shape,
     sha[strcspn(sha, "\n")] = '\0';
     g_rvf.calls = 0;
     dlt_begin(&c, "dev.land.reverify_offer");
-    ok = ok && !zcl_dlr_verify_run(wt, sha, 5, "dev.land.reverify_offer",
+    ok = ok && !zcl_dlr_verify_run(wt, sha, 5, ZCL_DLR_CHECK_VERIFY,
+                                   "dev.land.reverify_offer",
                                    &c.reply) &&
          dlt_refused(&c, code) && g_rvf.calls == 0;
     dlt_end(&c);
