@@ -6250,9 +6250,11 @@ hotswap:
 # is load-bearing on Linux: without it a dlopen'd handler's internal calls
 # interpose back onto the resident (old) code and the swap silently does
 # nothing.  macOS uses -bundle for dlopen-able Mach-O images and omits the
-# GNU/Linux linker hardening flags.
+# GNU/Linux linker hardening flags. -fixup_chains is load-bearing there: a
+# bundle linked with -undefined dynamic_lookup otherwise carries legacy dyld
+# bind opcodes, which the hot-swap Mach-O admission refuses.
 ifeq ($(ZCL_HOST_OS),Darwin)
-HOTSWAP_MODULE_LDFLAGS = -bundle -Wl,-undefined,dynamic_lookup -Wl,-dead_strip
+HOTSWAP_MODULE_LDFLAGS = -bundle -Wl,-undefined,dynamic_lookup -Wl,-dead_strip -Wl,-fixup_chains
 HOTSWAP_MODULE_CODESIGN = codesign --sign - --force
 else
 HOTSWAP_MODULE_LDFLAGS = -shared -nostartfiles -Wl,--build-id=none -Wl,-z,relro -Wl,-z,now \

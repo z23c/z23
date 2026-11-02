@@ -390,7 +390,7 @@ static bool hs_plan_module_ldflags_safe(const char *flags)
 {
 #if defined(__APPLE__)
     return strcmp(flags, "-bundle -Wl,-undefined,dynamic_lookup "
-                         "-Wl,-dead_strip") == 0;
+                         "-Wl,-dead_strip -Wl,-fixup_chains") == 0;
 #else
     return strstr(flags, "-Wl,-Bsymbolic") != NULL &&
            strstr(flags, "-nostartfiles") != NULL;

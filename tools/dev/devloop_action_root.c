@@ -943,7 +943,7 @@ static const char *const k_ar_joined[] = {
 static const char *const k_ar_wl[] = {
     "--build-id=none", "-z", "relro", "now", "noexecstack", "-Bsymbolic",
     "--version-script=@out/version-script", "-undefined", "dynamic_lookup",
-    "-dead_strip",
+    "-dead_strip", "-fixup_chains",
 };
 
 static bool ar_in(const char *const *set, size_t n, const char *w, size_t len)

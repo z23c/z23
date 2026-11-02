@@ -3590,7 +3590,7 @@ static const char *const g_dp_hotswap_cache_files[][2] = {
 
 #if defined(__APPLE__)
 #define DP_HOTSWAP_TEST_LINK_FLAGS \
-    "-bundle -Wl,-undefined,dynamic_lookup -Wl,-dead_strip"
+    "-bundle -Wl,-undefined,dynamic_lookup -Wl,-dead_strip -Wl,-fixup_chains"
 #else
 #define DP_HOTSWAP_TEST_LINK_FLAGS \
     "-shared -nostartfiles -Wl,-Bsymbolic"
