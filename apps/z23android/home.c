@@ -10,7 +10,8 @@
     "{\"type\":\"action\",\"id\":\"wallet\"}"
 #define HOME_PHONE_TEXT \
     "{\"type\":\"text\",\"field\":\"node_line\",\"style\":\"title\",\"max_lines\":2}," \
-    "{\"type\":\"text\",\"field\":\"sync\",\"style\":\"caption\",\"max_lines\":2}"
+    "{\"type\":\"text\",\"field\":\"sync\",\"style\":\"caption\",\"max_lines\":2}," \
+    "{\"type\":\"action\",\"id\":\"node_toggle\",\"field\":\"node_button\"}"
 #define HOME_Z23_APPS(columns) \
     "{\"type\":\"grid\",\"columns\":" columns ",\"card\":\"z23_app\",\"children\":[" \
     "{\"type\":\"action\",\"id\":\"launch\",\"field\":\"label\"}]}"
@@ -54,6 +55,16 @@ const char *zapp_home_action_label(const char *id)
         if (!strcmp(labels[i].id, id)) return labels[i].label;
     return NULL;
 }
+const char *zapp_home_node_label(const struct zapp_view *view)
+{
+    if (!view->node_process_running) return "Start node";
+    return view->node_wanted ? "Stop node" : "Stopping…";
+}
+const char *zapp_home_node_action(const struct zapp_view *view)
+{
+    if (!view->node_process_running) return "node_start";
+    return view->node_wanted ? "node_stop" : "";
+}
 static size_t finish(struct json_value *card, char *out, size_t cap)
 {
     size_t length = json_write(card, out, cap);
@@ -76,6 +87,7 @@ size_t zapp_home_phone_card(const struct zapp_view *view, bool preview, char *ou
     json_push_kv_str(&card, "sync", preview ? "The preview app does not run a node." :
         view->sync_status[0] ? view->sync_status : "Sync status unknown");
     json_push_kv_str(&card, "pace", pace_name(view->pace));
+    json_push_kv_str(&card, "node_button", preview ? "" : zapp_home_node_label(view));
     return finish(&card, out, cap);
 }
 bool zapp_home_is_z23_app(const char *package)
