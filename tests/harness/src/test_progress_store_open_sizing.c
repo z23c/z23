@@ -10,7 +10,11 @@
 
 #include "storage/progress_store.h"
 
+#include <pthread.h>
 #include <sqlite3.h>
+#include <stdatomic.h>
+#include <time.h>
+#include <unistd.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -56,6 +60,8 @@ static bool po_garble_page(const char *path)
     return ok;
 }
 
+static int test_progress_store_lock_order(void);
+
 int test_progress_store_open_sizing(void)
 {
     printf("\n=== progress_store open sizing tests ===\n");
@@ -90,6 +96,73 @@ int test_progress_store_open_sizing(void)
              !progress_store_quick_check_for_test(db));
     sqlite3_close(db);
 
+    test_cleanup_tmpdir(dir);
+    return failures + test_progress_store_lock_order();
+}
+
+/* Lock order: tx_lock may be held when g_lock is taken, never the reverse.
+ * Thread A holds tx_lock and asks progress_store_directory_matches_fd (g_lock)
+ * while thread B runs a fresh open, whose finish checks need tx_lock.  If the
+ * open held g_lock across those checks, A and B would deadlock. */
+static void lo_sleep_ms(long ms)
+{
+    struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L };
+    nanosleep(&ts, NULL);
+}
+
+static _Atomic int lo_a_locked, lo_a_done, lo_b_started;
+static const char *lo_dir;
+static _Atomic int lo_open_ok;
+
+static void *lo_thread_a(void *arg)
+{
+    (void)arg;
+    progress_store_tx_lock();
+    atomic_store(&lo_a_locked, 1);
+    while (!atomic_load(&lo_b_started))
+        lo_sleep_ms(1);
+    lo_sleep_ms(500); /* let B reach the finish checks and block on tx_lock */
+    int dummy = 0;
+    (void)progress_store_directory_matches_fd((sqlite3 *)&dummy, 0);
+    atomic_store(&lo_a_done, 1);
+    progress_store_tx_unlock();
+    return NULL;
+}
+
+static void *lo_thread_b(void *arg)
+{
+    (void)arg;
+    atomic_store(&lo_b_started, 1);
+    atomic_store(&lo_open_ok, progress_store_open(lo_dir) ? 1 : 0);
+    return NULL;
+}
+
+static int test_progress_store_lock_order(void)
+{
+    printf("\n=== progress_store lock order tests ===\n");
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "ps_lock_order", "gate");
+    lo_dir = dir;
+    pthread_t a, b;
+    pthread_create(&a, NULL, lo_thread_a, NULL);
+    while (!atomic_load(&lo_a_locked))
+        lo_sleep_ms(1);
+    pthread_create(&b, NULL, lo_thread_b, NULL);
+    for (int i = 0; i < 3000 && !atomic_load(&lo_a_done); i++)
+        lo_sleep_ms(1);
+    if (!atomic_load(&lo_a_done)) {
+        printf("  ps_lock_order: matches_fd under tx_lock during open... "
+               "FAIL (deadlock: open holds g_lock while taking tx_lock)\n");
+        fflush(stdout);
+        _exit(1);
+    }
+    PO_CHECK("matches_fd under tx_lock does not wait on a fresh open", true);
+    pthread_join(a, NULL);
+    pthread_join(b, NULL);
+    PO_CHECK("concurrent fresh open succeeds", atomic_load(&lo_open_ok) == 1);
+    PO_CHECK("store closes", progress_store_close_checked() ==
+             PROGRESS_STORE_CLOSE_OK);
     test_cleanup_tmpdir(dir);
     return failures;
 }

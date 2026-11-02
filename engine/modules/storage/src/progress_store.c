@@ -56,6 +56,9 @@
 #define PROGRESS_STORE_FILENAME  CONSENSUS_DB_FILENAME
 /* PROGRESS_STORE_PATH_MAX comes from storage/progress_store.h. */
 
+/* Lock order: progress_store_tx_lock() may be held when g_lock is taken;
+ * never take tx_lock while holding g_lock (open and close both honour this).
+ * g_lifecycle_lock is outermost and serialises open against close. */
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_lifecycle_lock = PTHREAD_MUTEX_INITIALIZER;
 static sqlite3 *g_closing_db = NULL;
@@ -405,7 +408,6 @@ static bool progress_store_open_finish_checks(sqlite3 *db, const char *path, uin
         (void)sqlite_vfs_dir_unregister(opened_vfs_name);
 #endif
         progress_directory_close(opened_dir_handle);
-        pthread_mutex_unlock(&g_lock);
         return false;
     }
 
@@ -418,7 +420,6 @@ static bool progress_store_open_finish_checks(sqlite3 *db, const char *path, uin
         (void)sqlite_vfs_dir_unregister(opened_vfs_name);
 #endif
         progress_directory_close(opened_dir_handle);
-        pthread_mutex_unlock(&g_lock);
         return false;
     }
 
@@ -446,7 +447,6 @@ static bool progress_store_open_finish_checks(sqlite3 *db, const char *path, uin
                         "reason=schema_marker_future marker_version=%u "
                         "binary_version=%u path=%s", marker_v,
                         (unsigned)CONSENSUS_DB_SCHEMA_VERSION, path);
-            pthread_mutex_unlock(&g_lock);
             return false;
         }
     }
@@ -607,8 +607,14 @@ static bool progress_store_open_impl(const char *datadir)
 #else
     const char *check_vfs = NULL;
 #endif
+    /* The finish checks ensure stage tables, which takes tx_lock. db is still
+     * private (g_db is published below) and g_lifecycle_lock excludes any
+     * other open or close, so drop g_lock for them: tx_lock must never be
+     * taken under g_lock. */
+    pthread_mutex_unlock(&g_lock);
     if (!progress_store_open_finish_checks(db, path, opened_dir_handle, check_vfs))
         return false;
+    pthread_mutex_lock(&g_lock);
 
     snprintf(g_path, sizeof(g_path), "%s", path);
     snprintf(g_display_path, sizeof(g_display_path), "%s", display_path);
@@ -823,14 +829,14 @@ bool progress_store_checkpoint(void)
 enum progress_store_close_result progress_store_close_checked(void)
 {
     pthread_mutex_lock(&g_lifecycle_lock);
-    pthread_mutex_lock(&g_lock);
     progress_store_tx_lock();
+    pthread_mutex_lock(&g_lock);
     sqlite3 *db = g_closing_db;
     if (!db && !g_close_pending)
         db = atomic_exchange_explicit(&g_db, NULL, memory_order_acq_rel);
     if (!db && !g_close_pending) {
-        progress_store_tx_unlock();
         pthread_mutex_unlock(&g_lock);
+        progress_store_tx_unlock();
         pthread_mutex_unlock(&g_lifecycle_lock);
         return PROGRESS_STORE_CLOSE_OK;
     }
@@ -867,8 +873,8 @@ enum progress_store_close_result progress_store_close_checked(void)
         result = PROGRESS_STORE_CLOSE_CHECKPOINT_ERROR;
     g_checkpoint_failed = false;
 done:
-    progress_store_tx_unlock();
     pthread_mutex_unlock(&g_lock);
+    progress_store_tx_unlock();
     pthread_mutex_unlock(&g_lifecycle_lock);
     return result;
 }
