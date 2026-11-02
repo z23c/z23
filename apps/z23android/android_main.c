@@ -376,7 +376,11 @@ static bool pairing_caller_allowed(JNIEnv *env, jobject activity)
     jclass cls = (*env)->GetObjectClass(env, activity);
     jmethodID get = cls ? (*env)->GetMethodID(env, cls, "getLaunchedFromUid", "()I") : NULL;
     jint uid = clean(env) && get ? (*env)->CallIntMethod(env, activity, get) : -1;
-    return clean(env) && zapp_pair_caller_allowed(uid, (int)getuid());
+    if (!clean(env)) uid = -1;
+    if (uid < 0) __android_log_print(ANDROID_LOG_WARN, "z23", "pairing offer ignored: the launching uid is unavailable");
+    else if (!zapp_pair_caller_allowed(uid, (int)getuid())) __android_log_print(ANDROID_LOG_WARN, "z23", "pairing offer ignored: launched by uid %d", (int)uid);
+    else return true;
+    return false;
 }
 /* Reads and removes the pairing descriptor a USB-connected laptop host offered through the launch
  * intent. The extra is removed whoever sent it, and kept only when the adb shell, root or this app

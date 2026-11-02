@@ -133,7 +133,7 @@ Two layouts are built in, `default` (black) and `classic` (light, with the
 list of other apps). **Settings** switches between them and remembers the
 choice in the app's private files. To use your own layout, put it at
 `Android/data/<package>/files/layouts/home.json` (shared storage, for example
-with `adb push`); the app re-reads it when it resumes. The folder is created owner-only and only a regular file of at most 64 KiB is read; a link is not followed. An invalid file shows a
+with `adb push`); the app re-reads it when it resumes. The folder lives in the app-specific external storage, which other apps cannot read; shared storage ignores file modes, so the protection is that location, `O_NOFOLLOW`, regular files only and a 64 KiB cap, not a mode. A link is not followed. An invalid file shows a
 notice with the reason and the built-in layout. Delete the file to return to a
 built-in layout.
 
@@ -383,7 +383,7 @@ pair by hand with a new secret, stop the host, delete `--dir/pairing-secret` and
 The secret reaches `adb` on standard input, not in laptop
 process arguments; on the phone it is briefly visible to shell and root in the
 arguments of the `am` command. The app stores it privately as `speech-bridge.json`.
-The app reads the offer only when the adb shell, root or the app itself launched it (`Activity.getLaunchedFromUid`); an offer sent by another app, or from a launch whose uid cannot be read, is dropped, and scanning the laptop QR code still pairs.
+The app reads the offer only when the adb shell, root or the app itself launched it (`Activity.getLaunchedFromUid`); an offer sent by another app, or from a launch whose uid cannot be read, is dropped with one log line (tag `z23`, no offer content), and scanning the laptop QR code still pairs.
 
 ### Bridge authentication
 
@@ -673,7 +673,7 @@ A phone with no wallet opens the setup screens on first launch, and the Wallet t
 
 ## Wallet screens
 
-Wallet files are never backed up or transferred (cloud backup and device transfer exclude every storage domain, including device-protected storage), and suggestions and personalised learning are off in every text field. The node notification is secret on the lock screen.
+Wallet files are never backed up or transferred (cloud backup and device transfer exclude every storage domain, including device-protected storage), and suggestions and personalised learning are off in every text field. The node notification is secret on the lock screen: each notification sets `VISIBILITY_SECRET`, which also covers an existing install whose notification channel keeps its older lock screen setting (Android does not change a channel after it is created).
 
 The Wallet tile on Home opens **Funds**: the spendable amount, the amount still pending (one note arrives whole in the confirmations it needs; of several, the line says when the next arrives), a **Public** line only when public funds exist, a line for mined coins that are still maturing, amounts written without trailing zeros ("25 ZCL"), one line of synchronization state, one line of fleet state ("Not checked by your fleet" unless the fleet status is exactly the documented reply; "sending waits until they agree" appears only when the node reports `refuses_send`, a machine one or more blocks behind on this chain counts as agreeing, and a machine that last reported another chain at a lower height is reported with the words "sending is not held back"), and rows for **Receive**, **Send** and **History**. **Send** opens the camera scan screen and nothing else. While Funds is in front it asks the node again every 10 seconds; a reading older than 30 seconds, or a node that stops answering, replaces "Up to date at block N" with a notice that the amounts may be out of date, a reply that is not the documented summary shows "Balance unknown", and a node that does not answer at all (`NODE_UNAVAILABLE`, or a command that timed out) shows one line, "The node is not answering. Start it to see your funds.", with a **Start node** button and no amounts, while a running node that answers with an error of its own, such as a missing command or an unreadable wallet database, still shows "Balance unknown"; an unread amount is never shown as zero. The synchronization line reads the summary's `current` and `blocks_behind`, so a node that is not current never reads "Up to date".
 

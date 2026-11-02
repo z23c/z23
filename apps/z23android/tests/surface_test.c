@@ -133,6 +133,20 @@ static void inputs_are_gated(void)
     char *src = slurp("android_main.c");
     require(src, "\"getLaunchedFromUid\"", "caller uid of the launch");
     require(src, "zapp_pair_caller_allowed(", "uid policy");
+    const char *body = strstr(src, "static bool intent_pairing(");
+    const char *end = body ? strstr(body, "\n}\n") : NULL;
+    assert(body && end);
+    size_t gated = 0;
+    for (const char *p = body; p < end;) {
+        const char *eol = strchr(p, '\n');
+        char line[512];
+        size_t len = (size_t)(eol - p);
+        if (len >= sizeof(line)) len = sizeof(line) - 1;
+        memcpy(line, p, len); line[len] = 0;
+        if (strstr(line, "!pairing_caller_allowed(env, activity)") && strstr(line, "memory_cleanse")) gated++;
+        p = eol + 1;
+    }
+    if (gated != 1) { fprintf(stderr, "intent_pairing does not drop the offer of a refused caller\n"); abort(); }
     free(src);
     src = slurp("shell.c");
     assert(!strstr(src, "0770"));

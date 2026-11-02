@@ -60,6 +60,7 @@ static void create_channel(JNIEnv *env, jobject service)
                                   jstr(env, "notification"));
     jobject channel = manager ? new_object(env, "android/app/NotificationChannel",
         "(Ljava/lang/String;Ljava/lang/CharSequence;I)V", jstr(env, "node"), jstr(env, "Node"), IMPORTANCE_LOW) : NULL;
+    /* An existing install keeps its channel as first created; the per-notification setVisibility covers it. */
     if (channel) (void)call_void(env, channel, "setLockscreenVisibility", "(I)V", VISIBILITY_SECRET);
     if (channel) (void)call_void(env, manager, "createNotificationChannel", "(Landroid/app/NotificationChannel;)V", channel);
 }
