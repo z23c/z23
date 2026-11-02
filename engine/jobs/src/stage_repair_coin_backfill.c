@@ -162,6 +162,109 @@ static bool cb_insert_bookkeeping(sqlite3 *db, int hole_height,
                hole_hash->data);
 }
 
+/* True when the loaded scan record is present and CLEAN. */
+static bool cb_insert_scan_is_clean(bool rec_found,
+                                    const struct coin_backfill_scan_record *rec,
+                                    char fail[64])
+{
+    fail[0] = '\0';
+    if (!rec_found || !rec->clean) {
+        snprintf(fail, 64, "scan_record_not_clean");
+        return false;
+    }
+    return true;
+}
+
+/* BEGIN IMMEDIATE for the insert. Returns 0, or -1 after the failure log. */
+static int cb_insert_begin(sqlite3 *db, int hole_height)
+{
+    char *err = NULL;
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK) {
+        LOG_WARN_IN("coin_backfill_insert_tx", "coin_backfill",
+                 "[coin_backfill] insert BEGIN failed h=%d: %s",
+                 hole_height, err ? err : "(no message)");
+        if (err) sqlite3_free(err);
+        return -1;  // raw-return-ok:begin-failure-logged-above
+    }
+    return 0;
+}
+
+/* Steps 2-4 for the whole set. Returns 1 inserted, 0 already present, -1 infra. */
+static int cb_insert_outpoints(sqlite3 *db, int hole_height,
+                               const char *hole_hex, int32_t rounds,
+                               const struct coin_backfill_outpoint *set,
+                               int n, char fail[64])
+{
+    /* steps 2-4: absence check, insert, outpoint-keyed one-shot marker */
+    fail[0] = '\0';
+    int rc = 1;
+    for (int k = 0; k < n; k++) {
+        char okey[160];
+        enum cb_insert_step st = cb_insert_one(db, hole_height, hole_hex,
+                                               rounds, &set[k], okey);
+        if (st == CB_STEP_OK)
+            continue;
+        switch (st) {
+        case CB_STEP_PRESENT:
+            snprintf(fail, 64, "coin_already_present idx=%d", k);
+            rc = 0;
+            break;
+        case CB_STEP_ADD_FAILED:
+            LOG_WARN_IN("coin_backfill_insert_tx", "coin_backfill",
+                     "[coin_backfill] coins_kv_add failed idx=%d h=%d",
+                     k, hole_height);
+            rc = -1;
+            break;
+        case CB_STEP_VALUE_OVERFLOW:
+            LOG_WARN_IN("coin_backfill_insert_tx", "coin_backfill",
+                     "[coin_backfill] marker value overflow h=%d",
+                     hole_height);
+            rc = -1;
+            break;
+        case CB_STEP_MARKER_FAILED:
+            LOG_WARN_IN("coin_backfill_insert_tx", "coin_backfill",
+                     "[coin_backfill] marker write failed key=%s", okey);
+            rc = -1;
+            break;
+        default:
+            rc = -1;
+            break;
+        }
+        break;
+    }
+    return rc;
+}
+
+/* Steps 5-7 and COMMIT. Returns 1 after writing *out_round, else -1. */
+static int cb_insert_commit(sqlite3 *db, int hole_height,
+                            const struct uint256 *hole_hash,
+                            int32_t rounds, int32_t *out_round)
+{
+    /* steps 5-7: round counter, scan record delete. STEP 3: the
+     * stale-script replay no longer uses a write-once marker (termination is
+     * the body-vs-row delta), so there is no replay marker to clear here —
+     * once this backfill inserts the missing coin, the next reconcile's
+     * dry-run resolves the prevout and the rewind re-derives ok=1. */
+    *out_round = 0;
+    char *err = NULL;
+    int rc = 1;
+    if (!cb_insert_bookkeeping(db, hole_height, hole_hash, rounds)) {
+        LOG_WARN_IN("coin_backfill_insert_tx", "coin_backfill",
+                 "[coin_backfill] round/scan bookkeeping failed h=%d",
+                 hole_height);
+        rc = -1;
+    } else if (sqlite3_exec(db, "COMMIT", NULL, NULL, &err) != SQLITE_OK) {
+        LOG_WARN_IN("coin_backfill_insert_tx", "coin_backfill",
+                 "[coin_backfill] insert COMMIT failed h=%d: %s",
+                 hole_height, err ? err : "(no message)");
+        if (err) sqlite3_free(err);
+        rc = -1;
+    } else {
+        *out_round = rounds + 1;
+    }
+    return rc;
+}
+
 /* The single write transaction (§2 steps 1-8) under the caller's
  * progress_store_tx_lock. Step 1 re-binds the CLEAN scan proof to the
  * insert-time active chain. Returns 1 committed, 0 recheck-failed
@@ -188,19 +291,12 @@ static int coin_backfill_insert_tx(sqlite3 *db,
         LOG_RETURN(-1, "coin_backfill",
                    "[coin_backfill] insert scan record read failed h=%d",
                    hole_height);
-    if (!rec_found || !rec.clean) {
-        snprintf(fail, 64, "scan_record_not_clean");
+    if (!cb_insert_scan_is_clean(rec_found, &rec, fail))
         return 0;
-    }
 
-    char *err = NULL;
-    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK) {
-        LOG_WARN("coin_backfill",
-                 "[coin_backfill] insert BEGIN failed h=%d: %s",
-                 hole_height, err ? err : "(no message)");
-        if (err) sqlite3_free(err);
-        return -1;  // raw-return-ok:begin-failure-logged-above
-    }
+    int brc = cb_insert_begin(db, hole_height);
+    if (brc != 0)
+        return brc;
 
     int rc = 0;
     do {
@@ -216,65 +312,21 @@ static int coin_backfill_insert_tx(sqlite3 *db,
         char hole_hex[65];
         uint256_get_hex(hole_hash, hole_hex);
 
-        /* steps 2-4: absence check, insert, outpoint-keyed one-shot marker */
-        bool step_failed = false;
-        for (int k = 0; k < n && !step_failed; k++) {
-            char okey[160];
-            enum cb_insert_step st = cb_insert_one(db, hole_height, hole_hex,
-                                                   rounds, &set[k], okey);
-            if (st == CB_STEP_OK)
-                continue;
-            step_failed = true;
-            switch (st) {
-            case CB_STEP_PRESENT:
-                snprintf(fail, 64, "coin_already_present idx=%d", k);
-                break;
-            case CB_STEP_ADD_FAILED:
-                LOG_WARN("coin_backfill",
-                         "[coin_backfill] coins_kv_add failed idx=%d h=%d",
-                         k, hole_height);
-                rc = -1;
-                break;
-            case CB_STEP_VALUE_OVERFLOW:
-                LOG_WARN("coin_backfill",
-                         "[coin_backfill] marker value overflow h=%d",
-                         hole_height);
-                rc = -1;
-                break;
-            case CB_STEP_MARKER_FAILED:
-                LOG_WARN("coin_backfill",
-                         "[coin_backfill] marker write failed key=%s", okey);
-                rc = -1;
-                break;
-            default:
-                rc = -1;
-                break;
-            }
+        int src = cb_insert_outpoints(db, hole_height, hole_hex, rounds,
+                                      set, n, fail);
+        if (src < 0) {
+            rc = -1;
+            break;
         }
-        if (step_failed || fail[0])
+        if (src == 0)
             break;
 
-        /* steps 5-7: round counter, scan record delete. STEP 3: the
-         * stale-script replay no longer uses a write-once marker (termination is
-         * the body-vs-row delta), so there is no replay marker to clear here —
-         * once this backfill inserts the missing coin, the next reconcile's
-         * dry-run resolves the prevout and the rewind re-derives ok=1. */
-        if (!cb_insert_bookkeeping(db, hole_height, hole_hash, rounds)) {
-            LOG_WARN("coin_backfill",
-                     "[coin_backfill] round/scan bookkeeping failed h=%d",
-                     hole_height);
+        int crc = cb_insert_commit(db, hole_height, hole_hash, rounds,
+                                   out_round);
+        if (crc < 0) {
             rc = -1;
             break;
         }
-        if (sqlite3_exec(db, "COMMIT", NULL, NULL, &err) != SQLITE_OK) {
-            LOG_WARN("coin_backfill",
-                     "[coin_backfill] insert COMMIT failed h=%d: %s",
-                     hole_height, err ? err : "(no message)");
-            if (err) sqlite3_free(err);
-            rc = -1;
-            break;
-        }
-        *out_round = rounds + 1;
         return 1;
     } while (0);
 
@@ -542,6 +594,228 @@ static int cb_creator_gate(sqlite3 *db, const struct coin_backfill_io *io,
     return 1;
 }
 
+/* True when the snapshot hole is not this repair's target. */
+static bool cb_hole_not_admitted(int hole_h, int script_cursor,
+                                 const char *hole_status)
+{
+    /* G2: repairs the lowest prevout_unresolved hole. internal_error/decode
+     * holes (transient / re-attempted) are owned by the separate stale-script
+     * replay path, so scanning for prevout_unresolved here means a lower
+     * internal_error can no longer mask a higher genuine coin tear. */
+    /* Admit hole_h == script_cursor (the STEP-2A frozen-cursor case): when
+     * script_validate HOLDS on a prevout_unresolved it does NOT advance, so the
+     * held hole sits AT the cursor, not below it. The repair must be able to act
+     * on the held outpoint while the cursor is frozen there; a strict `>=` would
+     * forever skip the very hole the HOLD is waiting on. hole_h > script_cursor
+     * (above the live frontier — not yet a settled verdict) is still skipped. */
+    if (hole_h < 0 || script_cursor <= 0 || hole_h > script_cursor)
+        return true;
+    if (strcmp(hole_status, "prevout_unresolved") != 0)
+        return true;
+    return false;
+}
+
+/* Forget legacy refusal markers, logging each delete. */
+static void cb_forget_legacy_markers(sqlite3 *db, int hole_h,
+                                     const struct uint256 *hole_hash,
+                                     bool legacy_spent, bool legacy_txindex)
+{
+    if (legacy_spent) {
+        if (!repair_marker_forget(db, REPAIR_MARKER_KIND_COIN_BACKFILL_REFUSED,
+                                  hole_h, hole_hash->data))
+            LOG_WARN_IN("backfill_run", "coin_backfill",
+                     "[coin_backfill] legacy spent marker delete failed h=%d "
+                     "(continuing with v2 re-proof)", hole_h);
+        else
+            LOG_WARN_IN("backfill_run", "coin_backfill",
+                     "[coin_backfill] ignored legacy spent marker h=%d; "
+                     "re-proving with terminal-bound scan", hole_h);
+    }
+    if (legacy_txindex) {
+        if (!repair_marker_forget(db, REPAIR_MARKER_KIND_COIN_BACKFILL_REFUSED,
+                                  hole_h, hole_hash->data))
+            LOG_WARN_IN("backfill_run", "coin_backfill",
+                     "[coin_backfill] legacy txindex_miss marker delete "
+                     "failed h=%d (continuing with v2 re-proof)", hole_h);
+        else
+            LOG_WARN_IN("backfill_run", "coin_backfill",
+                     "[coin_backfill] ignored legacy txindex_miss marker h=%d; "
+                     "re-proving against active-chain block data", hole_h);
+    }
+}
+
+/* Owner, horizon, creator and detect gates. True when the run is decided. */
+static bool cb_gates_through_detect(sqlite3 *db,
+                                    const struct coin_backfill_io *io,
+                                    struct coin_backfill_result *r,
+                                    int hole_h, const struct uint256 *hole_hash,
+                                    int32_t frontier, int utxo_cursor,
+                                    struct coin_backfill_outpoint *set, int n,
+                                    bool apply, int *creator_floor,
+                                    bool *infra_fail)
+{
+    *creator_floor = -1;
+    *infra_fail = false;
+    /* G6 owner gate — the refusal already carries owner_ack_missing and the
+     * page's escape text names the ack env var; no extra per-tick WARN */
+    if (!coin_backfill_owner_ack())
+        return refuse(r, COIN_BACKFILL_OWNER_REFUSED, hole_hash,
+                      "owner_ack_missing");
+
+    /* G7 + G8 — the delta-horizon walk (up to 262144 lock-held steps) runs
+     * only once the owner gate has passed. The horizon remains observability
+     * for old-hole geometry, not a refusal boundary: a creator inside the
+     * recent delta window is still safe to re-derive if the active-chain
+     * creator proof and terminal-bound no-spend scan both pass. */
+    int horizon = -1;
+    if (!cb_horizon_locked(db, utxo_cursor, &horizon)) {
+        *infra_fail = true;
+        return true;
+    }
+    if (horizon < 0)
+        return refuse(r, COIN_BACKFILL_REFUSED_UNPROVABLE, hole_hash,
+                      "delta_horizon_walk_capped");
+    r->delta_horizon = horizon;
+    bool refused_ok = true;
+    if (cb_creator_gate(db, io, r, hole_h, hole_hash, frontier, horizon, set,
+                        n, creator_floor, &refused_ok))
+        return refused_ok;
+    r->creator_floor = *creator_floor;
+
+    if (!apply) {
+        /* detect: enumeration + guards only — no scan, no writes */
+        cb_detect_report(db, r, hole_h, hole_hash, *creator_floor);
+        return true;
+    }
+    return false;
+}
+
+/* G9 verdict. True when the caller should return; false on CLEAN. */
+static bool cb_scan_settled(sqlite3 *db, struct main_state *ms,
+                            const struct coin_backfill_io *io,
+                            struct coin_backfill_result *r, int hole_h,
+                            const struct uint256 *hole_hash,
+                            struct coin_backfill_outpoint *set, int n,
+                            int creator_floor, int32_t frontier)
+{
+    /* G9: chunked resumable chain-bound no-spend scan (scan TU) */
+    int next = -1, spent_h = -1;
+    uint8_t spender[32] = {0};
+    enum coin_backfill_scan_verdict v = coin_backfill_scan_step(
+        db, ms, io, hole_h, hole_hash, set, (size_t)n, creator_floor,
+        frontier - 1, frontier, COIN_BACKFILL_SCAN_CHUNK_BLOCKS,
+        COIN_BACKFILL_SCAN_CHUNK_WALL_MS, &next, &spent_h, spender);
+    r->scan_next_height = next;
+    switch (v) {
+    case COIN_SCAN_IN_PROGRESS:
+        r->status = COIN_BACKFILL_SCANNING;
+        LOG_INFO_IN("backfill_run", "coin_backfill",
+                 "[coin_backfill] scan progress h=%d next_height=%d top=%d "
+                 "set=%d", hole_h, next, frontier - 1, n);
+        return true;
+    case COIN_SCAN_CHAIN_REBOUND:
+        coin_backfill_stats_note_rebind();
+        r->status = COIN_BACKFILL_SCANNING;
+        snprintf(r->refuse_reason, sizeof(r->refuse_reason), "chain_rebound");
+        LOG_WARN_IN("backfill_run", "coin_backfill",
+                 "[coin_backfill] scan chain_rebound h=%d: lineage prev-link "
+                 "broke (reorg); restarted from floor=%d", hole_h,
+                 creator_floor);
+        return true;
+    case COIN_SCAN_GAP:
+        /* RETRYABLE, NOT terminal: scan_gap fires when a deep block body is
+         * simply UNREADABLE (not yet fetched) — it resumes to CLEAN once the
+         * body appears (stage_repair_coin_backfill_scan.c:454-468, proven by
+         * cb_case_scan_gap). Persisting a durable marker here would latch a
+         * transient missing-body into a permanent refusal and BLOCK the resume
+         * (the refused_marker check above would then REFUSED_SPENT it). Do NOT
+         * persist. (The design's class list mislabeled this; the live scan
+         * semantics + the resume test are authoritative.) */
+        return refuse(r, COIN_BACKFILL_REFUSED_UNPROVABLE, hole_hash,
+                      "scan_gap h=%d", next);
+    case COIN_SCAN_WINDOW_OVER_BUDGET:
+        /* TG-F1: the terminal window [frontier..H] must complete in ONE
+         * chunk (mid-window checkpoints clamp back to the frontier); a
+         * window larger than the budget would pin SCANNING forever. This is
+         * a budget artifact, NOT a coin-unprovability verdict — RETRYABLE,
+         * so do NOT persist the durable terminal marker. */
+        return refuse(r, COIN_BACKFILL_REFUSED_UNPROVABLE, hole_hash,
+                      "terminal_window_exceeds_budget w=%d cap=%d",
+                      hole_h - frontier + 1, COIN_BACKFILL_SCAN_CHUNK_BLOCKS);
+    case COIN_SCAN_SPENT_FOUND: {
+        char shex[65];
+        coin_backfill_txid_hex(spender, shex);
+        /* refusal marker: a PROVEN spend means the failing block double-
+         * spends or local history is torn — never rescan, never guess */
+        if (!repair_marker_note(db, REPAIR_MARKER_KIND_COIN_BACKFILL_REFUSED,
+                                hole_h, hole_hash->data,
+                                COIN_BACKFILL_SPENT_MARKER_V2,
+                                strlen(COIN_BACKFILL_SPENT_MARKER_V2)))
+            LOG_WARN_IN("backfill_run", "coin_backfill",
+                     "[coin_backfill] refusal marker write failed h=%d "
+                     "(refusing anyway)", hole_h);
+        return refuse(r, COIN_BACKFILL_REFUSED_SPENT, hole_hash,
+                      "spent h=%d tx=%.16s", spent_h, shex);
+    }
+    case COIN_SCAN_CLEAN:
+        break;
+    }
+    return false;
+}
+
+/* G10 insert and the repaired-coin logs. False only on infra failure. */
+static bool cb_apply_clean_insert(sqlite3 *db,
+                                  const struct coin_backfill_io *io,
+                                  struct coin_backfill_result *r, int hole_h,
+                                  const struct uint256 *hole_hash,
+                                  struct coin_backfill_outpoint *set, int n)
+{
+    /* G10: the single write transaction */
+    char fail[64];
+    int32_t round = 0;
+    progress_store_tx_lock();
+    int irc = coin_backfill_insert_tx(db, io, hole_h, hole_hash, set, n,
+                                      &round, fail);
+    progress_store_tx_unlock();
+    if (irc < 0) {
+        LOG_ERROR_IN("backfill_run", "coin_backfill",
+                 "[coin_backfill] insert tx infrastructure failure h=%d",
+                 hole_h);
+        return false;
+    }
+    if (irc == 0) {
+        /* recheck failed: rolled back, retry next tick (guards + scan
+         * record re-validate; a moved frontier restarts the scan) */
+        r->status = COIN_BACKFILL_SCANNING;
+        snprintf(r->refuse_reason, sizeof(r->refuse_reason),
+                 "insert_recheck:%s", fail);
+        LOG_WARN_IN("backfill_run", "coin_backfill",
+                 "[coin_backfill] insert rolled back h=%d (%s); retrying "
+                 "next tick", hole_h, fail);
+        return true;
+    }
+
+    r->status = COIN_BACKFILL_REPAIRED;
+    r->inserted_count = n;
+    coin_backfill_stats_note_repaired(n);
+    for (int k = 0; k < n; k++) {
+        char hex[65];
+        coin_backfill_txid_hex(set[k].txid, hex);
+        LOG_WARN_IN("backfill_run", "coin_backfill",
+                 "[coin_backfill] inserted outpoint %s:%u value=%lld "
+                 "creator=%d coinbase=%d (hole h=%d round=%d)",
+                 hex, set[k].vout, (long long)set[k].value,
+                 set[k].creator_height, (int)set[k].is_coinbase, hole_h,
+                 (int)round);
+    }
+    LOG_WARN_IN("backfill_run", "coin_backfill",
+             "[coin_backfill] backfilled %d coin(s) for hole h=%d round=%d; "
+             "the next reconcile dry-run can now resolve the prevout and "
+             "re-derive ok=1",
+             n, hole_h, (int)round);
+    return true;
+}
+
 /* Core flow: guards G1-G8 re-run on EVERY call (normative contract), the
  * scan (G9) and insert (G10) only when apply=true. Returns false only on
  * infrastructure error. */
@@ -565,19 +839,7 @@ static bool backfill_run(sqlite3 *db, struct main_state *ms,
                  "[coin_backfill] cursor/hole snapshot read failed");
 
     r->hole_height = hole_h;
-    /* G2: repairs the lowest prevout_unresolved hole. internal_error/decode
-     * holes (transient / re-attempted) are owned by the separate stale-script
-     * replay path, so scanning for prevout_unresolved here means a lower
-     * internal_error can no longer mask a higher genuine coin tear. */
-    /* Admit hole_h == script_cursor (the STEP-2A frozen-cursor case): when
-     * script_validate HOLDS on a prevout_unresolved it does NOT advance, so the
-     * held hole sits AT the cursor, not below it. The repair must be able to act
-     * on the held outpoint while the cursor is frozen there; a strict `>=` would
-     * forever skip the very hole the HOLD is waiting on. hole_h > script_cursor
-     * (above the live frontier — not yet a settled verdict) is still skipped. */
-    if (hole_h < 0 || script_cursor <= 0 || hole_h > script_cursor)
-        return true;
-    if (strcmp(hole_status, "prevout_unresolved") != 0)
+    if (cb_hole_not_admitted(hole_h, script_cursor, hole_status))
         return true;
 
     struct block blk;
@@ -597,171 +859,29 @@ static bool backfill_run(sqlite3 *db, struct main_state *ms,
                  "[coin_backfill] enumeration/marker read failed h=%d",
                  hole_h);
     int n = g5.n;
-    if (g5.legacy_spent_marker) {
-        if (!repair_marker_forget(db, REPAIR_MARKER_KIND_COIN_BACKFILL_REFUSED,
-                                  hole_h, hole_hash.data))
-            LOG_WARN("coin_backfill",
-                     "[coin_backfill] legacy spent marker delete failed h=%d "
-                     "(continuing with v2 re-proof)", hole_h);
-        else
-            LOG_WARN("coin_backfill",
-                     "[coin_backfill] ignored legacy spent marker h=%d; "
-                     "re-proving with terminal-bound scan", hole_h);
-    }
-    if (g5.legacy_txindex_miss_marker) {
-        if (!repair_marker_forget(db, REPAIR_MARKER_KIND_COIN_BACKFILL_REFUSED,
-                                  hole_h, hole_hash.data))
-            LOG_WARN("coin_backfill",
-                     "[coin_backfill] legacy txindex_miss marker delete "
-                     "failed h=%d (continuing with v2 re-proof)", hole_h);
-        else
-            LOG_WARN("coin_backfill",
-                     "[coin_backfill] ignored legacy txindex_miss marker h=%d; "
-                     "re-proving against active-chain block data", hole_h);
-    }
+    cb_forget_legacy_markers(db, hole_h, &hole_hash, g5.legacy_spent_marker,
+                             g5.legacy_txindex_miss_marker);
 
     r->unresolved_count = n;
     if (cb_g5_decided(db, io, r, hole_h, &hole_hash, &g5))
         return true; /* refuse() always returns true; n == 0 is also true */
 
-    /* G6 owner gate — the refusal already carries owner_ack_missing and the
-     * page's escape text names the ack env var; no extra per-tick WARN */
-    if (!coin_backfill_owner_ack())
-        return refuse(r, COIN_BACKFILL_OWNER_REFUSED, &hole_hash,
-                      "owner_ack_missing");
-
-    /* G7 + G8 — the delta-horizon walk (up to 262144 lock-held steps) runs
-     * only once the owner gate has passed. The horizon remains observability
-     * for old-hole geometry, not a refusal boundary: a creator inside the
-     * recent delta window is still safe to re-derive if the active-chain
-     * creator proof and terminal-bound no-spend scan both pass. */
-    int horizon = -1;
-    ok = cb_horizon_locked(db, utxo_cursor, &horizon);
-    if (!ok)
-        LOG_FAIL("coin_backfill",
-                 "[coin_backfill] delta horizon walk failed h=%d", hole_h);
-    if (horizon < 0)
-        return refuse(r, COIN_BACKFILL_REFUSED_UNPROVABLE, &hole_hash,
-                      "delta_horizon_walk_capped");
-    r->delta_horizon = horizon;
+    bool infra_fail = false;
     int creator_floor = -1;
-    bool refused_ok = true;
-    if (cb_creator_gate(db, io, r, hole_h, &hole_hash, frontier, horizon, set,
-                        n, &creator_floor, &refused_ok))
-        return refused_ok;
-    r->creator_floor = creator_floor;
-
-    if (!apply) {
-        /* detect: enumeration + guards only — no scan, no writes */
-        cb_detect_report(db, r, hole_h, &hole_hash, creator_floor);
+    if (cb_gates_through_detect(db, io, r, hole_h, &hole_hash, frontier,
+                                utxo_cursor, set, n, apply, &creator_floor,
+                                &infra_fail)) {
+        if (infra_fail)
+            LOG_FAIL("coin_backfill",
+                     "[coin_backfill] delta horizon walk failed h=%d", hole_h);
         return true;
     }
 
-    /* G9: chunked resumable chain-bound no-spend scan (scan TU) */
-    int next = -1, spent_h = -1;
-    uint8_t spender[32] = {0};
-    enum coin_backfill_scan_verdict v = coin_backfill_scan_step(
-        db, ms, io, hole_h, &hole_hash, set, (size_t)n, creator_floor,
-        frontier - 1, frontier, COIN_BACKFILL_SCAN_CHUNK_BLOCKS,
-        COIN_BACKFILL_SCAN_CHUNK_WALL_MS, &next, &spent_h, spender);
-    r->scan_next_height = next;
-    switch (v) {
-    case COIN_SCAN_IN_PROGRESS:
-        r->status = COIN_BACKFILL_SCANNING;
-        LOG_INFO("coin_backfill",
-                 "[coin_backfill] scan progress h=%d next_height=%d top=%d "
-                 "set=%d", hole_h, next, frontier - 1, n);
+    if (cb_scan_settled(db, ms, io, r, hole_h, &hole_hash, set, n,
+                        creator_floor, frontier))
         return true;
-    case COIN_SCAN_CHAIN_REBOUND:
-        coin_backfill_stats_note_rebind();
-        r->status = COIN_BACKFILL_SCANNING;
-        snprintf(r->refuse_reason, sizeof(r->refuse_reason), "chain_rebound");
-        LOG_WARN("coin_backfill",
-                 "[coin_backfill] scan chain_rebound h=%d: lineage prev-link "
-                 "broke (reorg); restarted from floor=%d", hole_h,
-                 creator_floor);
-        return true;
-    case COIN_SCAN_GAP:
-        /* RETRYABLE, NOT terminal: scan_gap fires when a deep block body is
-         * simply UNREADABLE (not yet fetched) — it resumes to CLEAN once the
-         * body appears (stage_repair_coin_backfill_scan.c:454-468, proven by
-         * cb_case_scan_gap). Persisting a durable marker here would latch a
-         * transient missing-body into a permanent refusal and BLOCK the resume
-         * (the refused_marker check above would then REFUSED_SPENT it). Do NOT
-         * persist. (The design's class list mislabeled this; the live scan
-         * semantics + the resume test are authoritative.) */
-        return refuse(r, COIN_BACKFILL_REFUSED_UNPROVABLE, &hole_hash,
-                      "scan_gap h=%d", next);
-    case COIN_SCAN_WINDOW_OVER_BUDGET:
-        /* TG-F1: the terminal window [frontier..H] must complete in ONE
-         * chunk (mid-window checkpoints clamp back to the frontier); a
-         * window larger than the budget would pin SCANNING forever. This is
-         * a budget artifact, NOT a coin-unprovability verdict — RETRYABLE,
-         * so do NOT persist the durable terminal marker. */
-        return refuse(r, COIN_BACKFILL_REFUSED_UNPROVABLE, &hole_hash,
-                      "terminal_window_exceeds_budget w=%d cap=%d",
-                      hole_h - frontier + 1, COIN_BACKFILL_SCAN_CHUNK_BLOCKS);
-    case COIN_SCAN_SPENT_FOUND: {
-        char shex[65];
-        coin_backfill_txid_hex(spender, shex);
-        /* refusal marker: a PROVEN spend means the failing block double-
-         * spends or local history is torn — never rescan, never guess */
-        if (!repair_marker_note(db, REPAIR_MARKER_KIND_COIN_BACKFILL_REFUSED,
-                                hole_h, hole_hash.data,
-                                COIN_BACKFILL_SPENT_MARKER_V2,
-                                strlen(COIN_BACKFILL_SPENT_MARKER_V2)))
-            LOG_WARN("coin_backfill",
-                     "[coin_backfill] refusal marker write failed h=%d "
-                     "(refusing anyway)", hole_h);
-        return refuse(r, COIN_BACKFILL_REFUSED_SPENT, &hole_hash,
-                      "spent h=%d tx=%.16s", spent_h, shex);
-    }
-    case COIN_SCAN_CLEAN:
-        break;
-    }
 
-    /* G10: the single write transaction */
-    char fail[64];
-    int32_t round = 0;
-    progress_store_tx_lock();
-    int irc = coin_backfill_insert_tx(db, io, hole_h, &hole_hash, set, n,
-                                      &round, fail);
-    progress_store_tx_unlock();
-    if (irc < 0)
-        LOG_FAIL("coin_backfill",
-                 "[coin_backfill] insert tx infrastructure failure h=%d",
-                 hole_h);
-    if (irc == 0) {
-        /* recheck failed: rolled back, retry next tick (guards + scan
-         * record re-validate; a moved frontier restarts the scan) */
-        r->status = COIN_BACKFILL_SCANNING;
-        snprintf(r->refuse_reason, sizeof(r->refuse_reason),
-                 "insert_recheck:%s", fail);
-        LOG_WARN("coin_backfill",
-                 "[coin_backfill] insert rolled back h=%d (%s); retrying "
-                 "next tick", hole_h, fail);
-        return true;
-    }
-
-    r->status = COIN_BACKFILL_REPAIRED;
-    r->inserted_count = n;
-    coin_backfill_stats_note_repaired(n);
-    for (int k = 0; k < n; k++) {
-        char hex[65];
-        coin_backfill_txid_hex(set[k].txid, hex);
-        LOG_WARN("coin_backfill",
-                 "[coin_backfill] inserted outpoint %s:%u value=%lld "
-                 "creator=%d coinbase=%d (hole h=%d round=%d)",
-                 hex, set[k].vout, (long long)set[k].value,
-                 set[k].creator_height, (int)set[k].is_coinbase, hole_h,
-                 (int)round);
-    }
-    LOG_WARN("coin_backfill",
-             "[coin_backfill] backfilled %d coin(s) for hole h=%d round=%d; "
-             "the next reconcile dry-run can now resolve the prevout and "
-             "re-derive ok=1",
-             n, hole_h, (int)round);
-    return true;
+    return cb_apply_clean_insert(db, io, r, hole_h, &hole_hash, set, n);
 }
 
 bool stage_repair_coin_backfill_try(struct sqlite3 *db, struct main_state *ms,
