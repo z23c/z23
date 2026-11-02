@@ -36,9 +36,6 @@ core/modules/sapling/src/groth16_prover.c:g1_msm:18
 core/modules/sapling/src/groth16_prover.c:g2_msm:18
 core/modules/sapling/src/groth16_prover.c:groth16_pk_read:20
 core/modules/sapling/src/groth16_prover.c:groth16_prove:63
-core/modules/validation/src/process_block_invalidate.c:process_block_clear_invalid:17
-core/modules/validation/src/process_block_invalidate.c:process_block_invalidate:26
-core/modules/validation/src/process_block_invalidate.c:process_block_reconsider:17
 engine/composition/src/boot_refold_staged.c:boot_load_snapshot_at_own_height_reset:28
 engine/composition/src/boot_refold_staged.c:boot_snapshot_drop_bodiless_have_data_above_seed:28
 engine/controllers/src/sync_controller_sapling_tree.c:sapling_tree_rebuild:31
