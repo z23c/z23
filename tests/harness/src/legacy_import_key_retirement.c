@@ -93,66 +93,84 @@ static int release_path_case(void)
 
 /* The save path hands a file's results and note copies to free() after the
  * rows are written; both are zero by then. */
-static int save_path_case(void)
+struct save_fixture {
+    struct legacy_import_decrypt_file_ctx d[1];
+    struct legacy_import_filter_file_ctx fc[1];
+    struct node_db ndb;
+    bool ready;
+};
+
+static void save_fixture_fill(struct save_fixture *x)
 {
-    struct legacy_import_decrypt_file_ctx d[1] = {{0}};
-    struct legacy_import_filter_file_ctx fc[1] = {{0}};
-    d[0].result_cap = 2;
-    d[0].result_count = 1;
-    d[0].results = calloc(2, sizeof(struct db_sapling_note));
-    d[0].tw.sapling_notes_cap = 2;
-    d[0].tw.sapling_notes = calloc(2, sizeof(struct sapling_received_note));
+    struct db_sapling_note *row = &x->d[0].results[0];
+    row->txid[0] = 1;
+    row->value = 7;
+    memset(row->rcm, 0xa5, sizeof(row->rcm));
+    memset(row->ivk, 0x11, sizeof(row->ivk));
+    memset(row->diversifier, 0x22, sizeof(row->diversifier));
+    memset(row->pk_d, 0x33, sizeof(row->pk_d));
+    memset(row->cm, 0x44, sizeof(row->cm));
+    memset(row->nullifier, 0x55, sizeof(row->nullifier));
+    memset(x->d[0].tw.sapling_notes, 0xa5,
+           2 * sizeof(struct sapling_received_note));
+}
+
+static void save_fixture_open(struct save_fixture *x)
+{
+    memset(x, 0, sizeof(*x));
+    x->d[0].result_cap = 2;
+    x->d[0].result_count = 1;
+    x->d[0].results = calloc(2, sizeof(struct db_sapling_note));
+    x->d[0].tw.sapling_notes_cap = 2;
+    x->d[0].tw.sapling_notes =
+        calloc(2, sizeof(struct sapling_received_note));
     char dir[1024], path[1100];
     test_make_tmpdir(dir, sizeof(dir), "legacy_import_retire", "save");
     snprintf(path, sizeof(path), "%s/node.db", dir);
-    struct node_db ndb;
-    memset(&ndb, 0, sizeof(ndb));
-    bool ready = d[0].results && d[0].tw.sapling_notes &&
-                 node_db_open(&ndb, path);
-    if (ready) {
-        d[0].results[0].txid[0] = 1;
-        d[0].results[0].value = 7;
-        memset(d[0].results[0].rcm, 0xa5, sizeof(d[0].results[0].rcm));
-        memset(d[0].results[0].ivk, 0x11, sizeof(d[0].results[0].ivk));
-        memset(d[0].results[0].diversifier, 0x22,
-               sizeof(d[0].results[0].diversifier));
-        memset(d[0].results[0].pk_d, 0x33, sizeof(d[0].results[0].pk_d));
-        memset(d[0].results[0].cm, 0x44, sizeof(d[0].results[0].cm));
-        memset(d[0].results[0].nullifier, 0x55,
-               sizeof(d[0].results[0].nullifier));
-        memset(d[0].tw.sapling_notes, 0xa5,
-               2 * sizeof(struct sapling_received_note));
-    }
+    x->ready = x->d[0].results && x->d[0].tw.sapling_notes &&
+               node_db_open(&x->ndb, path);
+    if (!x->ready)
+        return;
+    save_fixture_fill(x);
     memset(retirement_spans, 0, sizeof(retirement_spans));
-    if (ready) {
-        retirement_spans[0] = (struct retirement_span){
-            .ptr = d[0].results,
-            .bytes = 2 * sizeof(struct db_sapling_note)};
-        retirement_spans[1] = (struct retirement_span){
-            .ptr = d[0].tw.sapling_notes,
-            .bytes = 2 * sizeof(struct sapling_received_note)};
-    }
+    retirement_spans[0] = (struct retirement_span){
+        .ptr = x->d[0].results,
+        .bytes = 2 * sizeof(struct db_sapling_note)};
+    retirement_spans[1] = (struct retirement_span){
+        .ptr = x->d[0].tw.sapling_notes,
+        .bytes = 2 * sizeof(struct sapling_received_note)};
+}
+
+static bool save_fixture_run(struct save_fixture *x)
+{
     int seen = 0, found = 0;
     bool open_tx = false;
-    int rc = ready ? legacy_import_save_sapling_notes(&ndb, d, fc, 1, &seen,
-                                                      &found, &open_tx)
-                   : -1;
-    bool saved = ready && rc == LEGACY_IMPORT_OK && !open_tx;
-    if (ready)
-        node_db_close(&ndb);
+    if (!x->ready)
+        return false;
+    int rc = legacy_import_save_sapling_notes(&x->ndb, x->d, x->fc, 1, &seen,
+                                              &found, &open_tx);
+    node_db_close(&x->ndb);
+    return rc == LEGACY_IMPORT_OK && !open_tx;
+}
+
+static int save_path_case(void)
+{
+    struct save_fixture x;
+    save_fixture_open(&x);
+    bool saved = save_fixture_run(&x);
     if (!saved) {
-        free(d[0].results);
-        free(d[0].tw.sapling_notes);
+        free(x.d[0].results);
+        free(x.d[0].tw.sapling_notes);
     }
+    bool result_zero = saved && span_ok(0);
+    bool notes_zero = saved && span_ok(1);
     printf("legacy_import_key_retirement: the save path commits a file's "
            "rows... %s\n", saved ? "OK" : "FAIL");
     printf("legacy_import_key_retirement: the saved result buffer is zero "
-           "when freed... %s\n",
-           saved && span_ok(0) ? "OK" : "FAIL");
+           "when freed... %s\n", result_zero ? "OK" : "FAIL");
     printf("legacy_import_key_retirement: the saved note buffer is zero when "
-           "freed... %s\n", saved && span_ok(1) ? "OK" : "FAIL");
-    return (saved ? 0 : 1) + (saved && span_ok(0) ? 0 : 1) +
-           (saved && span_ok(1) ? 0 : 1);
+           "freed... %s\n", notes_zero ? "OK" : "FAIL");
+    return (saved ? 0 : 1) + (result_zero ? 0 : 1) + (notes_zero ? 0 : 1);
 }
 
 int legacy_import_key_retirement_cases(void);
