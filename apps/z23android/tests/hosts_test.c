@@ -262,8 +262,22 @@ static void private_line_tests(void)
     assert(!strcmp(zapp_sync_line(true, true, 3304001, 3304001, 2, &tor, long_line, sizeof(long_line)),
                    "Your node has every block its peers report."));
 }
+static void chain_doubt_reasons(void)
+{
+    char reason[48];
+    const struct zapp_chain_evidence moving = {.fleet_height = -1, .quiet_secs = 10, .onion_only = true};
+    const struct zapp_chain_evidence silent = {.fleet_height = -1, .quiet_secs = 1000, .onion_only = true};
+    assert(zapp_chain_doubt(1000, 1000, 0, &moving, reason, sizeof(reason)) && !strcmp(reason, "no peers yet"));
+    assert(zapp_chain_doubt(1000, 1000, 1, &moving, reason, sizeof(reason)) && !strcmp(reason, "no peers yet"));
+    assert(zapp_chain_doubt(1000, 0, 5, &moving, reason, sizeof(reason)) && !strcmp(reason, "no peers yet"));
+    assert(zapp_chain_doubt(1000, 1000, 5, &silent, reason, sizeof(reason)) && !strcmp(reason, "no new block for 16 min"));
+    assert(!zapp_chain_doubt(1000, 1000, 5, &moving, reason, sizeof(reason)) && !reason[0]);
+    assert(!zapp_chain_doubt(-1, 1000, 5, &silent, reason, sizeof(reason)) && !reason[0]);
+}
+
 int main(void)
 {
+    chain_doubt_reasons();
     static const char snapshot[] = "{\"hosts\":["
         "{\"host\":\"r1\",\"reachable\":true,\"probe_ms\":1080,\"node\":\"blocked\",\"synced\":\"yes\","
         "\"blocker\":\"review_required_bootstrap_trust\",\"height\":3301130,\"reference_height\":3301130,"

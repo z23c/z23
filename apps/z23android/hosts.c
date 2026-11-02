@@ -156,6 +156,21 @@ const char *zapp_sync_line(bool responding, bool process_running, int64_t height
     else snprintf(out, cap, "Your node has every block its peers report.");
     return out;
 }
+/* Why a node that answers cannot yet confirm its chain is current, for the Home line. "no new block for N min" when the
+ * tip has been still too long; "no peers yet" when peers report no height or too few answer. False when the chain is
+ * confirmed, the node is behind, or it gives no height. The same rule as zapp_node_line and zapp_sync_line. */
+bool zapp_chain_doubt(int64_t height, int64_t target, int64_t peers, const struct zapp_chain_evidence *evidence,
+                      char *reason, size_t cap)
+{
+    if (cap) reason[0] = 0;
+    if (height < 0 || !cap) return false;
+    const struct chain_verdict v = chain_verdict(height, target, peers, evidence);
+    if (v.state == CHAIN_WAITING) snprintf(reason, cap, "no peers yet");
+    else if (v.state != CHAIN_UNCONFIRMED) return false;
+    else if (!strncmp(v.reason, "no new block", 12)) snprintf(reason, cap, "%s", v.reason);
+    else snprintf(reason, cap, "no peers yet");
+    return true;
+}
 /* Whether the snapshot was observed recently enough, by the clock of the host that probed it. */
 static bool snapshot_current(const struct json_value *root, int64_t now_unix)
 {

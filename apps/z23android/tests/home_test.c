@@ -46,8 +46,9 @@ static void node_button_states(void)
     view.node_wanted = true;
     assert(!strcmp(zapp_home_node_label(&view), "Stop node") && !strcmp(zapp_home_node_action(&view), "node_stop"));
     view.node_wanted = false;
-    assert(!strcmp(zapp_home_node_label(&view), "Stopping…") && !strcmp(zapp_home_node_action(&view), ""));
-    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && strstr(card, "\"node_button\":\"Stopping…\""));
+    assert(!strcmp(zapp_home_node_label(&view), "") && !strcmp(zapp_home_node_action(&view), ""));
+    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && strstr(card, "\"node_button\":\"\"") &&
+        strstr(card, "\"node_line\":\"Stopping…\""));
     assert(zapp_home_phone_card(&view, true, card, sizeof(card)) && strstr(card, "\"node_button\":\"\""));
 }
 
@@ -57,6 +58,7 @@ static void plain_node_line_states(void)
     char card[1024];
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && strstr(card, "\"node_line\":\"Node stopped\""));
     view.node_process_running = true;
+    view.node_wanted = true;
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)) &&
         strstr(card, "\"node_line\":\"Starting your node… usually about a minute\""));
     view.node_running = true;
@@ -77,11 +79,21 @@ static void plain_node_line_states(void)
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && !strstr(card, "min left"));
     view.node_height = 1999;
     view.node_headers = 2000;
+    view.chain_doubt[0] = 0;
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && strstr(card, "\"node_line\":\"Up to date\""));
+    snprintf(view.chain_doubt, sizeof(view.chain_doubt), "no peers yet");
+    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) &&
+        strstr(card, "\"node_line\":\"Can't confirm it's up to date: no peers yet\"") && !strstr(card, "Up to date\""));
+    snprintf(view.chain_doubt, sizeof(view.chain_doubt), "no new block for 17 min");
+    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) &&
+        strstr(card, "\"node_line\":\"Can't confirm it's up to date: no new block for 17 min\""));
+    view.chain_doubt[0] = 0;
     view.node_height = -1;
     view.node_headers = -1;
     snprintf(view.node_line, sizeof(view.node_line), "Node running");
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && strstr(card, "\"node_line\":\"Node running\""));
+    view.node_wanted = false;
+    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && strstr(card, "\"node_line\":\"Stopping…\""));
 }
 static void phone_card_golden(void)
 {

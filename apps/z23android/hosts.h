@@ -51,6 +51,11 @@ const char *zapp_paced_line(enum zapp_pace pace, bool process_running, const cha
                             char *out, size_t cap);
 const char *zapp_sync_line(bool responding, bool process_running, int64_t height, int64_t target, int64_t peers,
                            const struct zapp_chain_evidence *evidence, char *out, size_t cap);
+/* Why a node that answers cannot yet confirm its chain is current: "no peers yet" or "no new block for N min", written to
+ * reason (cap bytes, at least 1). Returns false, with reason empty, when the chain is confirmed, the node is behind or it
+ * gives no height. Same rule as zapp_node_line and zapp_sync_line. */
+bool zapp_chain_doubt(int64_t height, int64_t target, int64_t peers, const struct zapp_chain_evidence *evidence,
+                      char *reason, size_t cap);
 /* Hosts not in sync in a zapp_hosts_format report, read from its headline; 0 for an empty or
  * unreadable report. */
 int zapp_fleet_attention(const char *report);

@@ -92,7 +92,7 @@ is the owner's decision in Android's own Home settings; the app never changes
 that role. The app hides the system bars (a swipe from the edge shows them
 briefly) and the keyboard still works in text fields.
 
-The Home screen shows the phone card (one plain status line: Node stopped, Starting your node…, Catching up with the blocks to go and, when a rate is known, the minutes left, or Up to date; and a Start node, Stop node or Stopping… button), a Z23 apps section, and tiles for Scan, Assistant and Wallet. The Wallet tile shows no amount: Home does not read the balance, and the balance appears only on the wallet screens, which the Wallet tile opens. A fixed bar with **Apps** and
+The Home screen shows the phone card (one plain status line: Node stopped, Stopping…, Starting your node…, Catching up with the blocks to go and, when a rate is known, the minutes left, Can't confirm it's up to date with the reason, or Up to date; and a Start node or Stop node button, hidden while the node stops), a Z23 apps section, and tiles for Scan, Assistant and Wallet. The Wallet tile shows no amount: Home does not read the balance, and the balance appears only on the wallet screens, which the Wallet tile opens. A fixed bar with **Apps** and
 **Settings** sits under the layout on every layout. The Z23
 apps section is built from the launcher list: every installed launchable
 package whose name starts with `org.z23.`, except the base app

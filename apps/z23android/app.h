@@ -51,6 +51,7 @@ struct zapp_view {
     int64_t node_sample_at;     /* Monotonic seconds of the newer sample, 0 for none. */
     int64_t node_base_height;   /* Height at node_base_at, the older sample. */
     int64_t node_base_at;       /* Monotonic seconds of the older sample, 0 for none. */
+    char chain_doubt[48]; /* Why a node that answers cannot yet confirm it is current (zapp_chain_doubt), or empty. */
     enum zapp_pace pace; /* Pace the node reports in its status, normal when it reports none. */
     char suggestion[96]; /* One question for the current state, or empty. */
     char pending_question[ZAPP_PENDING_CAP]; /* Question being answered, shown until its answer or cancel. */

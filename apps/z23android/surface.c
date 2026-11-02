@@ -75,7 +75,7 @@ static void apply_text(JNIEnv *env, struct bind *bind, const char *text)
     bind->applied = true;
     snprintf(bind->last, sizeof(bind->last), "%s", text);
     (void)zj_text(env, bind->view, text);
-    if (bind->node->kind != ZAPP_NODE_ACTION) (void)zj_visible(env, bind->view, text[0] != 0);
+    (void)zj_visible(env, bind->view, text[0] != 0);
 }
 static void release_binds(JNIEnv *env)
 {
@@ -264,12 +264,7 @@ static jobject make_node(struct build *b, const struct zapp_node *node, size_t c
 {
     JNIEnv *env = b->env;
     bool container = node->kind <= ZAPP_NODE_STACK;
-    char label[TEXT_CAP];
     if (container && !has_cards(b, node)) return NULL;
-    if (node->kind == ZAPP_NODE_ACTION) {
-        leaf_text(b, node, card, label);
-        if (!label[0]) return NULL;
-    }
     if ((*env)->PushLocalFrame(env, 16) != JNI_OK) { (void)zj_clean(env); b->failed = true; return NULL; }
     ++b->views;
     jobject view = container ? make_container(b, node, card, where, scrolls) : make_leaf(b, node, card, where);

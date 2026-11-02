@@ -217,6 +217,7 @@ static void observe_node(struct controller *c)
     c->view.node_process_running = process_running;
     c->view.pace = pace;
     c->view.node_wanted = wanted;
+    (void)zapp_chain_doubt(n.height, n.target, n.peers, &evidence, c->view.chain_doubt, sizeof(c->view.chain_doubt));
     record_height(&c->view, &n, now);
     copy_text(c->view.sync_status, sizeof(c->view.sync_status), status);
     copy_text(c->view.node_line, sizeof(c->view.node_line), line);

@@ -58,7 +58,7 @@ const char *zapp_home_action_label(const char *id)
 const char *zapp_home_node_label(const struct zapp_view *view)
 {
     if (!view->node_process_running) return "Start node";
-    return view->node_wanted ? "Stop node" : "Stopping…";
+    return view->node_wanted ? "Stop node" : "";
 }
 const char *zapp_home_node_action(const struct zapp_view *view)
 {
@@ -86,20 +86,23 @@ static bool minutes_left(const struct zapp_view *view, int64_t *minutes)
     *minutes = (remaining * span / moved + 59) / 60;
     return true;
 }
-/* The one plain status line for the phone node: stopped, starting (the process runs but does not answer), catching up
- * with the blocks left (and the minutes, only when a rate is known), or up to date. */
+/* The one plain status line for the phone node: stopped, stopping, starting (the process runs but does not answer),
+ * catching up with the blocks left (and the minutes, only when a rate is known), can't confirm it is up to date (with the
+ * reason the node reports), or up to date. */
 static const char *plain_node_line(const struct zapp_view *view, char *out, size_t cap)
 {
     char blocks[32], minutes_text[48] = "";
     const int64_t behind = view->node_headers - view->node_height;
     int64_t minutes = 0;
     if (!view->node_process_running) snprintf(out, cap, "Node stopped");
+    else if (!view->node_wanted) snprintf(out, cap, "Stopping…");
     else if (!view->node_running) snprintf(out, cap, "Starting your node… usually about a minute");
     else if (view->node_height < 0 || view->node_headers < 0) snprintf(out, cap, "%s", view->node_line);
     else if (behind > ZAPP_CHAIN_SKEW) {
         if (minutes_left(view, &minutes)) snprintf(minutes_text, sizeof(minutes_text), ", about %lld min left", (long long)minutes);
         snprintf(out, cap, "Catching up: %s blocks to go%s", zapp_grouped(behind, blocks), minutes_text);
-    } else snprintf(out, cap, "Up to date");
+    } else if (view->chain_doubt[0]) snprintf(out, cap, "Can't confirm it's up to date: %s", view->chain_doubt);
+    else snprintf(out, cap, "Up to date");
     return out;
 }
 size_t zapp_home_phone_card(const struct zapp_view *view, bool preview, char *out, size_t cap)
@@ -110,7 +113,7 @@ size_t zapp_home_phone_card(const struct zapp_view *view, bool preview, char *ou
     json_init(&card); json_set_object(&card);
     json_push_kv_str(&card, "schema", "zcl.phone_card.v1");
     json_push_kv_str(&card, "node_line", preview ? "Preview · separate from your main node" :
-        zapp_paced_line(view->pace, running, plain_node_line(view, plain, sizeof(plain)), line, sizeof(line)));
+        zapp_paced_line(view->node_wanted || !view->node_process_running ? view->pace : ZAPP_PACE_NORMAL, running, plain_node_line(view, plain, sizeof(plain)), line, sizeof(line)));
     json_push_kv_str(&card, "sync", preview ? "The preview app does not run a node." :
         "");
     json_push_kv_str(&card, "pace", pace_name(view->pace));
