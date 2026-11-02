@@ -343,6 +343,7 @@ past — you will meet it whether or not you read this file, which is the point.
 | 12 | Evidence from a failed gate is deleted before anyone can read it — a 25-minute `make ship` failure left nothing but "full suite did not pass" | **fixed** | `tools/ship.sh` keeps the suite log at `${GATE_CACHE_DIR}/last-failed-suite.log`, names it in the die message, and removes it only on success. A suite that died before printing any verdict now says so instead of leaving an empty block. When you add a gate, keep its log on the FAILURE path — that is the path where somebody needs it. |
 | 13 | The first `file.c:123`-shaped string in a `node.log` is usually NOT the fault — it can be ambient instrumentation far above the real failure (measured: 173 lines before it) | **fixed** | Every `LOG_FAIL`/`LOG_ERR`/`LOG_NULL`/`LOG_RETURN`/`LOG_ERROR`/`GUARD*` call reached through `platform/modules/util/include/util/log_macros.h` (the macro include path most of the tree uses) appends a trailing `origin=<basename>:<line>` token. `grep -a -m1 'origin=' node.log` finds the first real fault in one read. The stamp lives in that header, not in `base/log_macros.h`, because base is a pinned package inside the core seal closure. Code including `base/log_macros.h` directly keeps the base format, which still carries `file:line func()` mid-line. |
 | 14 | `devbuild --wait` run outside the checkout (for example from `$HOME`) is classified `exclusive`, not `z23`. The project comes from the git common directory of the current directory; outside a repository it is empty and falls through to `exclusive`. An exclusive job takes `heavy.lock` exclusively, so it waits behind every shared z23 job | **prose**: measured on a managed host, `devbuild --plan` prints `project=exclusive … memory_max=48G` from `$HOME` and `project=z23 … memory_max=24G` from the worktree. Run it inside the worktree; its admission line on stderr, `devbuild: z23 class normal lane N`, may follow a `devbuild: note:` line | Maintainer hosts in `docs/dev/DEVELOPING.md` |
+| 15 | The release binary `build/bin/z23` does not compile `tools/dev/dev_proof.c`; only `z23-dev` (`-DZCL_DEV_BUILD`) and the test harness (`ZCL_TESTING`) link it. A `dev_proof` call from `tools/command/*.c` outside those guards fails at the `z23` link with `undefined reference` while every test passes | **prose**: guard the call with `#if defined(ZCL_DEV_BUILD) \|\| defined(ZCL_TESTING)` and an `#else` that refuses or stubs. `dl_pool_sweep_and_log` uses the same shape with an `#ifdef ZCL_DEV_BUILD` guard and `#else` | `DEV_ONLY_SRCS` in `Makefile:1041-1109`; `tools/command/native_dev_land.c:179-182` and `:594-616`; `tools/command/native_dev_land_precheck.c:409-447` |
 
 ### Why trap 10 is still prose
 
@@ -388,6 +389,32 @@ out.
   `git checkout -- <paths>`, run the control, then `git apply <file>.patch`.
   To reuse a stash, apply it by its exact commit hash; never `pop` a stash
   another agent may have created.
+
+- **An interrupted mutant run can leave the mutant in a dirty tree.** The
+  acceptance script writes each candidate over the source file with `mv -f`
+  (`drive_candidate`, `tools/dev/reflex-hotfork-source-bundle-acceptance.sh:38-42`)
+  and restores it from a saved backup in an `EXIT INT TERM` trap (`:26-30`). A
+  `SIGKILL` or a host reset skips the trap. Before committing a tree a previous
+  run touched, diff each mutated file against its saved original and read the
+  whole `git diff` for the tree.
+
+- **`dev land submit` moves the lane HEAD before its gates run.** The qualify
+  step calls `dlq_rebase`, which rebases the lane worktree onto `origin/main`
+  (`tools/command/native_dev_land_qualify.c:281-292`, called at `:886`). The HEAD
+  changes even when qualify refuses. Range-diff the old and new heads, for
+  example `git range-diff OLD_BASE..OLD_HEAD NEW_BASE..NEW_HEAD`, then resubmit
+  at the new head with `build/bin/z23-dev dev land submit --worktree=$PWD`. The
+  old head is in `git reflog`.
+
+- **A rebase that resolves a conflict can drop an added hunk silently.**
+  Measured 2026-11-02: a lane rebased onto a rewritten
+  `core/modules/net/src/tor_config_log.c` kept a function's declaration and
+  callers but lost its definition, which surfaced only as an `undefined
+  reference` at test link time. The same rebase placed a `core/UNSEAL.md` entry
+  between another entry and its `by:` line. List every added line the new
+  series lost with
+  `git range-diff OLD_BASE..OLD_HEAD NEW_BASE..NEW_HEAD | grep '^    -+'` and
+  account for each one before review.
 
 - **A wedged Android node with a stripped binary can be diagnosed from `/proc`
   without root or a debugger.** The steps:
