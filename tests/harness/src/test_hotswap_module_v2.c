@@ -60,7 +60,12 @@ static void t_macho_magic_image(unsigned char image[88],
     uint32_t arch[5] = {UINT32_C(0x0100000c), 0, row->offset, row->size, 0};
     uint32_t thin[8] = {UINT32_C(0xfeedfacf), UINT32_C(0x0100000c), 0, 8,
                         1, 24, 0, 0};
-    uint32_t symbols[6] = {2, 24, 88, 0, 88, 0};
+    /* LC_SYMTAB offsets are relative to the selected slice (the probe hands
+     * the slice to the thin parser), not to the fat file: the slice is
+     * image[32..88), so an empty table sits at slice offset 56. The old
+     * file-relative 88 was out of bounds, measured on macOS arm64 where the
+     * full probe actually runs ("symbol table out of bounds"). */
+    uint32_t symbols[6] = {2, 24, 56, 0, 56, 0};
     memset(image, 0, 88);
     if (swap) {
         fat[0] = zcl_bswap32(fat[0]);

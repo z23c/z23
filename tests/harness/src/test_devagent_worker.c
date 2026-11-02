@@ -1281,7 +1281,7 @@ static bool wtx_cancelled_only_on_request(void)
 #if !defined(_WIN32)
 /* Applies the caps to a forked child and reports, through its exit code,
  * which of the three expectations it broke. */
-static void wtx_rlimit_child(const struct wkr_caps *caps)
+[[maybe_unused]] static void wtx_rlimit_child(const struct wkr_caps *caps)
 {
     struct rlimit before, data, as, cpu;
     int bad = 0;
@@ -1368,6 +1368,33 @@ static int wtx_rlimit_case(void)
                (long long)o.mem_mb);
     }
     return failures;
+#elif defined(__APPLE__)
+    /* Measured on macOS arm64: setrlimit(RLIMIT_DATA) with any finite value
+     * fails with EINVAL (soft alone or soft+hard), getrlimit keeps reporting
+     * RLIM_INFINITY and a 1 GiB malloc still succeeds, so the heap ceiling
+     * cannot be applied. The worker must say so with a typed reason (and
+     * refuse the launch) rather than run uncapped; the Linux case below
+     * keeps asserting the real ceiling. */
+    TEST("confine: macOS cannot hold RLIMIT_DATA, so the worker refuses with a typed reason")
+    {
+        const char *why = zcl_devagent_worker_memory_ceiling_refusal();
+        ASSERT(why != NULL);
+        ASSERT(strncmp(why, "memory-ceiling-unavailable", 26) == 0);
+        pid_t pid = fork();
+        ASSERT(pid >= 0);
+        if (pid == 0) {
+            struct rlimit rl = {.rlim_cur = (rlim_t)512 << 20,
+                                .rlim_max = (rlim_t)512 << 20};
+            _exit(setrlimit(RLIMIT_DATA, &rl) != 0 && errno == EINVAL ? 0 : 1);
+        }
+        int status = 0;
+        ASSERT(waitpid(pid, &status, 0) == pid);
+        ASSERT(WIFEXITED(status));
+        ASSERT_EQ(WEXITSTATUS(status), 0);
+        PASS();
+    }
+_test_next:;
+    return failures;
 #else
     TEST("confine: the memory ceiling is RLIMIT_DATA and never RLIMIT_AS")
     {
@@ -1375,6 +1402,7 @@ static int wtx_rlimit_case(void)
         struct wkr_caps caps;
         pid_t pid;
         int status = 0;
+        ASSERT(zcl_devagent_worker_memory_ceiling_refusal() == NULL);
         wtx_opts(&o, "wtx", "s-rlimit");
         ASSERT(zcl_devagent_worker_caps(&o, &caps));
         pid = fork();
@@ -2048,6 +2076,50 @@ static bool wtx_receipt_retry(void)
 }
 #endif
 
+#if !defined(_WIN32)
+/* On a host that cannot hold the heap ceiling (macOS: setrlimit(RLIMIT_DATA)
+ * is refused with EINVAL) the worker refuses every launch with a typed reason
+ * instead of running the executor uncapped. The drive-through lifecycle
+ * cases below need a launched executor, so such a host asserts the refusal
+ * here (job taken, executor never run, outcome "no-receipt" rc=127, never a
+ * pass) and skips them. Linux runs all of them. */
+static int wtx_refusal_case(void)
+{
+    int failures = 0;
+    TEST("launch refusal: no heap ceiling means no executor run, typed, never a pass")
+    {
+        struct wkr_drive_opts o;
+        char verdict[64] = "";
+        long long rc = -1;
+        wtx_isolate("refused");
+        wtx_queue_post("wtx-refused");
+        (void)remove(g_fx_count);
+        g_fx_mode = 0;
+        wtx_opts(&o, "wtx", "s-refused");
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 1);
+        ASSERT_EQ(wtx_count_read(), 0);
+        ASSERT(wtx_queue_verb("reap", NULL, NULL));
+        ASSERT(wtx_outcome("wtx-refused", verdict, sizeof(verdict), &rc));
+        ASSERT_STR_EQ(verdict, "no-receipt");
+        ASSERT_EQ(rc, 127);
+        ASSERT(!zcl_devagent_closed_pass(verdict, rc));
+        wtx_restore();
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+#endif /* !defined(_WIN32) */
+
+
+static void wtx_report(int failures)
+{
+    if (failures == 0)
+        printf("test_devagent_worker: all passed\n");
+    else
+        printf("test_devagent_worker: %d FAILED\n", failures);
+}
+
 int test_devagent_worker(void);
 int test_devagent_worker(void)
 {
@@ -2056,6 +2128,14 @@ int test_devagent_worker(void)
 #if !defined(_WIN32)
     failures += wtx_status_cases();
     failures += wtx_cleanup_cases();
+
+    if (zcl_devagent_worker_memory_ceiling_refusal() != NULL) {
+        failures += wtx_refusal_case();
+        failures += wtx_confine_cases();
+        printf("test_devagent_worker: SKIP: the drive-through lifecycle cases "
+               "need a host that can hold the RLIMIT_DATA heap ceiling\n");
+        goto _test_next;
+    }
 
     failures += wtx_usage_cases();
 
@@ -2822,10 +2902,7 @@ int test_devagent_worker(void)
 
 _test_next:;
     wtx_restore();
-    if (failures == 0)
-        printf("test_devagent_worker: all passed\n");
-    else
-        printf("test_devagent_worker: %d FAILED\n", failures);
+    wtx_report(failures);
     return failures;
 }
 

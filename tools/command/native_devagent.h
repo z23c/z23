@@ -271,6 +271,16 @@ bool zcl_devagent_worker_caps(const struct wkr_drive_opts *opts,
  * ignores this. */
 void zcl_devagent_worker_confine(const struct wkr_caps *caps);
 
+/* The typed reason this host cannot hold the heap ceiling above, or NULL
+ * when it can. macOS refuses every finite RLIMIT_DATA with EINVAL
+ * (measured on macOS arm64: setrlimit(RLIMIT_DATA, 512 MiB) fails for the
+ * soft limit alone and for soft+hard; getrlimit keeps reporting
+ * RLIM_INFINITY, and a 1 GiB malloc still succeeds), so a drive there
+ * would run with no memory ceiling at all. The POSIX spawn refuses the
+ * launch with this reason (status -1, "launch-failed") instead of
+ * running uncapped. Linux and the other POSIX hosts return NULL. */
+const char *zcl_devagent_worker_memory_ceiling_refusal(void);
+
 /* What the parent observed. status: 1 ran, 0 wall timeout (killed), -1
  * launch/wait failure. signaled: the child died by signal (POSIX), by an
  * exception or fast-fail exit, or by the job CPU cap (Windows). */

@@ -205,6 +205,15 @@ void zcl_devagent_worker_confine(const struct wkr_caps *caps)
 #endif
 }
 
+const char *zcl_devagent_worker_memory_ceiling_refusal(void)
+{
+#if defined(__APPLE__)
+    return "memory-ceiling-unavailable: setrlimit(RLIMIT_DATA) is refused (EINVAL) on this host";
+#else
+    return NULL;
+#endif
+}
+
 /* ── outcome: the one receipt-facing mapping ───────────────────────────── */
 
 void zcl_devagent_worker_outcome(const struct wkr_spawn_out *out,

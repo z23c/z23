@@ -608,15 +608,26 @@ static int https_public_install_routed_refusal_cases(void)
     PC_CHECK("routed fixture: root mkdir", mkdir(root, 0700) == 0);
     PC_CHECK("routed fixture: control-byte file",
              make_url_file(root, ctrl_url));
+    PC_CHECK("refusal: control byte in a routed URL with an existing file",
+             !https_server_public_install_filepath_for_testing(
+                 root, ctrl_url, out, sizeof(out)));
+    /* The boundary cases need a file whose full path is root + URL. macOS
+     * caps a path at PATH_MAX = 1024 (Linux: 4096), measured: no file with
+     * a 2047-byte routed URL can exist there, so the 2047/2048 boundary is
+     * unreachable and is skipped on that condition, never faked. */
+    if (strlen(root) + sizeof(cap_ok) > (size_t)PATH_MAX) {
+        printf("path_check: SKIP: routed 2047/2048-byte URL cases need "
+               "PATH_MAX > root + 2048 (PATH_MAX is %d on this host)\n",
+               (int)PATH_MAX);
+        test_rm_rf(dir);
+        return failures;
+    }
     PC_CHECK("routed fixture: 2047-byte file", make_url_file(root, cap_ok));
     PC_CHECK("routed fixture: 2048-byte file", make_url_file(root, cap_over));
     snprintf(cap_path, sizeof(cap_path), "%s%s", root, cap_ok);
     PC_CHECK("routed fixture: 2047-byte realpath",
              realpath(cap_path, cap_real) != NULL);
 
-    PC_CHECK("refusal: control byte in a routed URL with an existing file",
-             !https_server_public_install_filepath_for_testing(
-                 root, ctrl_url, out, sizeof(out)));
     PC_CHECK("refusal: routed URL of 2048 bytes is over the 2047 cap",
              !https_server_public_install_filepath_for_testing(
                  root, cap_over, out, sizeof(out)));
@@ -625,7 +636,10 @@ static int https_public_install_routed_refusal_cases(void)
                  root, cap_ok, out, sizeof(out)) &&
              strcmp(out, cap_real) == 0);
 
-    test_cleanup_tmpdir(dir);
+    /* The fixture is a deep tree (release/ and the 200-byte segments): the
+     * flat cleanup unlinks one level and leaves it behind, and the in-C
+     * recursive walker refuses names this long, so use rm -rf. */
+    test_rm_rf(dir);
     return failures;
 }
 

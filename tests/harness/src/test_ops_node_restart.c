@@ -535,10 +535,40 @@ static int test_onr_old_plan_format(void)
     return failures;
 }
 
+/* The restart drives a systemd --user unit, which only exists on Linux. Every
+ * other host answers one typed UNSUPPORTED refusal (macOS reports "macOS
+ * (launchd)", measured: all 18 plan/confirm cases failed there because they
+ * expect systemd answers) and must never reach systemctl. Linux runs the full
+ * plan/confirm suite below, unchanged. */
+[[maybe_unused]] static int test_onr_unsupported_host(void)
+{
+    struct onr_cmd c;
+    int failures = 0;
+    if (!onr_init("unsupported"))
+        return onr_check(false, "fixture");
+    oc_run(&c, "{}");
+    failures += onr_check(oc_code(&c, "UNSUPPORTED") && onr_restarts() == 0 &&
+                          access(onr.calls, F_OK) != 0,
+                          "a host without systemd refuses with UNSUPPORTED and never reaches systemctl");
+    oc_free(&c);
+    onr_confirm(&c, "0123456789abcdef0123456789abcdef", "");
+    failures += onr_check(oc_code(&c, "UNSUPPORTED") && onr_restarts() == 0,
+                          "UNSUPPORTED also answers a confirm");
+    oc_free(&c);
+    onr_done();
+    return failures;
+}
+
 int test_ops_node_restart(void)
 {
     int failures = 0;
     printf("\n=== ops node restart tests ===\n");
+#if !defined(__linux__)
+    failures += test_onr_unsupported_host();
+    printf("ops_node_restart: SKIP: the plan/confirm suite needs systemd --user (Linux)\n");
+    printf("=== OPS_NODE_RESTART: %d failure(s) ===\n", failures);
+    return failures;
+#endif
     failures += test_onr_plan_and_confirm();
     failures += test_onr_refusals();
     failures += test_onr_expired();

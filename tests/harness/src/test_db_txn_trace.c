@@ -48,6 +48,7 @@ static struct {
     sqlite3_stmt *stmt;
     int request, response, status[3], sleeps;
     bool seen[3], stop_probe, scan_done, start_finalizer, finalizer_probed;
+    bool gate_dumper;
     int finalizer_try, finalize_rc;
 } dtt;
 
@@ -141,6 +142,14 @@ static int dtt_sleep(const struct timespec *requested, struct timespec *remainin
     (void)requested;
     (void)remaining;
     pthread_mutex_lock(&dtt_control);
+    /* Hold the dumper until registration has released the connection
+     * mutex: register starts the dumper while still inside the mutex, and
+     * the hooked sleep returns at once, so an early scan finds the mutex
+     * owned by the registering thread (unavailable=connection_busy) and
+     * never reaches the statement hooks. Measured on macOS arm64, where the
+     * dumper thread wins that race. */
+    while (dtt.gate_dumper)
+        pthread_cond_wait(&dtt_changed, &dtt_control);
     if (++dtt.sleeps > ZCL_DB_TXN_TRACE_DUMP_SECS) {
         atomic_store(&g_dumper_stop, true);
         dtt.scan_done = true;
@@ -228,7 +237,14 @@ static int dtt_fullmutex_inspection(void)
         pthread_create(&finalizer, NULL, dtt_finalizer, NULL) == 0;
     dtt_check("fixture workers start", probe_started && finalizer_started, &failures);
     if (finalizer_started) {
+        pthread_mutex_lock(&dtt_control);
+        dtt.gate_dumper = true;
+        pthread_mutex_unlock(&dtt_control);
         dtt_register(dtt.db, "lifetime");
+        pthread_mutex_lock(&dtt_control);
+        dtt.gate_dumper = false;
+        pthread_cond_broadcast(&dtt_changed);
+        pthread_mutex_unlock(&dtt_control);
         dtt_check("actual dumper terminates", dtt_join_dumper() == 0, &failures);
         pthread_mutex_lock(&dtt_control);
         dtt.scan_done = true;

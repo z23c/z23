@@ -99,6 +99,7 @@
 #include "platform/state_root.h"
 #include "platform/time_compat.h"
 #include "platform/windows_path.h"
+#include "util/log_macros.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -796,6 +797,12 @@ static struct wkr_spawn_out wkr_spawn(const struct wkr_drive_opts *opts,
     out.status = -1;
     if (!opts || !job || !exec)
         return out;
+    const char *refusal = zcl_devagent_worker_memory_ceiling_refusal();
+    if (refusal) {
+        /* Typed refusal: never run an executor with no heap ceiling. */
+        LOG_ERROR("devagent_worker", "launch refused: %s", refusal);
+        return out;
+    }
     t0_s = platform_time_wall_unix();
     pid = fork();
     if (pid < 0)
