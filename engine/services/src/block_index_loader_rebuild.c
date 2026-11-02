@@ -792,11 +792,13 @@ static bool cold_import_seed_chain_provenance_ok(struct main_state *ms,
 }
 
 /* Commits the cold-import seed: steps (4)-(6) — coins_applied cursor, band
- * note, tip_finalize anchor, seed floor, and the post-seed H* self-check. */
+ * note, tip_finalize anchor, seed floor, and the post-seed H* self-check.
+ * hstar is the step-(3) H* the caller read; it is logged if the post-seed
+ * read fails. */
 static int cold_import_seed_commit(sqlite3 *progress_db,
                                    struct block_index *anchor,
                                    const uint8_t anchor_hash[32],
-                                   int32_t H)
+                                   int32_t H, int32_t hstar)
 {
     /* (4) Set the SECOND authority FIRST: coins_applied_height = H+1 (the
      *     utxo_apply NEXT-height cursor convention — applied through H means
@@ -840,7 +842,7 @@ static int cold_import_seed_commit(sqlite3 *progress_db,
     /* (6) Self-check: the seed must have moved H* up to H. If not, the heal
      *     silently did nothing — keep the durable anchor so the next boot
      *     retries rather than booting half-seeded. */
-    int32_t hstar = 0, served = 0;
+    int32_t served = 0;
     if (!cold_import_seed_hstar_reached(progress_db, H, &hstar, &served)) {
         LOG_WARN_IN("block_index_loader_seed_stages_from_cold_import",
                  "block_index",
@@ -982,5 +984,5 @@ int block_index_loader_seed_stages_from_cold_import(struct main_state *ms,
     }
 
     /* (4)-(6) commit the seed, then verify it moved H* up to H. */
-    return cold_import_seed_commit(progress_db, anchor, anchor_hash, H);
+    return cold_import_seed_commit(progress_db, anchor, anchor_hash, H, hstar);
 }
