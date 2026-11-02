@@ -509,8 +509,13 @@ static void wrp_restore_body(
     wrp_push_report(reply, &rep);
     wrp_push_scan(reply, &rep);
     wrp_push_history(reply, &rep);
+    /* Once, from the service: a commit's result, or a plan's forecast under
+     * the same decision the commit uses. */
     (void)json_push_kv_bool(&reply->data, "encrypted_at_rest",
-                            req.passphrase != NULL || !confirm);
+                            rep.encrypted_at_rest);
+    if (!confirm && rep.commit_refused_at_rest)
+        (void)json_push_kv_str(&reply->data, "commit_would_refuse",
+                               "WALLET_AT_REST_UNDECIDED");
     /* Said on every plan and every commit, because the failure it prevents
      * is silent: a phrase from other wallet software validates here, opens
      * a different empty wallet, and reports success. */
@@ -571,8 +576,6 @@ static void wrp_restore_body(
 
     (void)json_push_kv_str(&reply->data, "stage", "committed");
     (void)json_push_kv_bool(&reply->data, "committed", true);
-    (void)json_push_kv_bool(&reply->data, "encrypted_at_rest",
-                            rep.encrypted_at_rest);
     (void)json_push_kv_bool(&reply->data, "recovered", rep.seed_installed);
     reply->error.mutated = true;
 }

@@ -102,7 +102,10 @@ struct wallet_recovery_report {
     bool     chain_history_consulted; /* a chain was available to scan */
     bool     transparent_scan_truncated;
     bool     birthday_recorded;
-    bool     encrypted_at_rest;     /* a committed run wrapped the keys */
+    bool     encrypted_at_rest;     /* a committed run wrapped the keys; on a
+                                     * dry run, what a commit would do */
+    bool     commit_refused_at_rest; /* dry run only: a commit would refuse
+                                      * (WALLET_AT_REST_UNDECIDED) */
     int64_t  birthday_height;       /* valid when birthday_recorded */
     uint8_t  birthday_hash[32];     /* floor block hash, when birthday_recorded */
     bool     birthday_rejected;     /* a birthday was supplied and not honoured */

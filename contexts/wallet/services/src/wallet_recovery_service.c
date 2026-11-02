@@ -103,13 +103,18 @@ struct zcl_result wallet_recovery_test_ensure_datadir(
  * So the same env-driven policy decides here. The lane/mint context boot
  * folds in does NOT apply: this is a one-shot offline CLI invocation, not a
  * declared unattended lane, and there is nobody to wedge. */
-static struct zcl_result wrc_at_rest_gate(const char *passphrase)
+static enum wallet_at_rest_policy wrc_at_rest_decision(const char *passphrase)
 {
     /* A passphrase handed in by the caller (wallet creation reads it from
      * standard input) decides the question: the keys are encrypted. */
     if (passphrase && passphrase[0])
-        return ZCL_OK;
-    switch (wallet_at_rest_creation_policy()) {
+        return WALLET_AT_REST_ENCRYPTED;
+    return wallet_at_rest_creation_policy();
+}
+
+static struct zcl_result wrc_at_rest_gate(const char *passphrase)
+{
+    switch (wrc_at_rest_decision(passphrase)) {
     case WALLET_AT_REST_ENCRYPTED:
         /* wallet_sqlite_flush_r wraps every key and the seed in a WKS1
          * envelope under this passphrase. Nothing further to do. */
@@ -636,7 +641,13 @@ struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
 
     /* The at-rest decision, before a directory is created — a refusal that
      * arrives after the datadir exists has already changed the disk. */
-    if (!req->dry_run) {
+    if (req->dry_run) {
+        /* A plan writes nothing, so it does not refuse; it says what the
+         * commit would do under these inputs and this policy. */
+        enum wallet_at_rest_policy d = wrc_at_rest_decision(req->passphrase);
+        out->encrypted_at_rest = d == WALLET_AT_REST_ENCRYPTED;
+        out->commit_refused_at_rest = d == WALLET_AT_REST_REFUSE;
+    } else {
         struct zcl_result pr = wrc_at_rest_gate(req->passphrase);
         if (!pr.ok) {
             LOG_WARN(WRC_TAG, "refusing recovery: %s", pr.message);

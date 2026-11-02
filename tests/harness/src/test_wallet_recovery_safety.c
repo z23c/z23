@@ -788,6 +788,73 @@ static int t_at_rest_policy_is_obeyed(void)
     return failures;
 }
 
+/* ── the reply carries encrypted_at_rest exactly once, truthfully ───── */
+
+static int wrs_count_substr(const char *hay, const char *needle)
+{
+    int n = 0;
+    for (const char *p = strstr(hay, needle); p; p = strstr(p + 1, needle))
+        n++;
+    return n;
+}
+
+/* Run the restore leaf on a fixture and return the reply data as text. */
+static bool wrs_leaf_reply_text(const char *dir, bool confirm, char *out,
+                                size_t n, bool *refused)
+{
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    (void)json_push_kv_str(&input, "phrase", WRS_PHRASE_A);
+    (void)json_push_kv_str(&input, "datadir", dir);
+    (void)json_push_kv_bool(&input, "confirm", confirm);
+    struct zcl_command_request request = { .input = &input };
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.wallet_recovery_restore.v1");
+    zcl_native_handle_wallet_recovery_restore(&request, &reply);
+    *refused = reply.exit_code != 0;
+    bool ok = json_write(&reply.data, out, n) != 0;
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return ok;
+}
+
+static int t_reply_reports_encrypted_at_rest_once(void)
+{
+    int failures = 0;
+    char dir[512], text[16384];
+    bool refused = false;
+
+    printf("  encrypted_at_rest appears once and tells the truth\n");
+
+    /* (a) commit, policy variable only: the service encrypts. */
+    wrs_mkfixture(dir, sizeof(dir), "reply_commit");
+    wrs_set_at_rest("correct horse battery staple", NULL);
+    wallet_lock_reset_for_test();
+    bool got = wrs_leaf_reply_text(dir, true, text, sizeof(text), &refused);
+    WRS_CHECK("commit reply was produced and not refused", got && !refused);
+    WRS_CHECK("commit reply names encrypted_at_rest exactly once",
+              wrs_count_substr(text, "\"encrypted_at_rest\"") == 1);
+    WRS_CHECK("and it is true for the encrypted wallet",
+              strstr(text, "\"encrypted_at_rest\":true") != NULL);
+    wallet_lock_reset_for_test();
+
+    /* (b) plan, no passphrase and no policy: a commit would refuse. */
+    wrs_mkfixture(dir, sizeof(dir), "reply_plan");
+    wrs_set_at_rest(NULL, NULL);
+    got = wrs_leaf_reply_text(dir, false, text, sizeof(text), &refused);
+    WRS_CHECK("plan reply was produced", got && !refused);
+    WRS_CHECK("plan reply names encrypted_at_rest exactly once",
+              wrs_count_substr(text, "\"encrypted_at_rest\"") == 1);
+    WRS_CHECK("and it is false: a commit would not encrypt",
+              strstr(text, "\"encrypted_at_rest\":false") != NULL);
+    WRS_CHECK("and the plan says the commit would refuse",
+              strstr(text, "WALLET_AT_REST_UNDECIDED") != NULL);
+
+    wrs_set_at_rest(NULL, NULL);
+    return failures;
+}
+
 int test_wallet_recovery_safety(void);
 int test_wallet_recovery_safety(void)
 {
@@ -845,6 +912,7 @@ int test_wallet_recovery_safety(void)
     failures += t_restore_leaf_rejects_a_truncated_datadir();
     failures += t_two_concurrent_restores_leave_one_wallet();
     failures += t_at_rest_policy_is_obeyed();
+    failures += t_reply_reports_encrypted_at_rest_once();
 
     wallet_lock_reset_for_test();
     unsetenv("ZCL_WALLET_KDF_ITERS");
