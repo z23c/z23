@@ -936,6 +936,8 @@ int test_block_scan(void)
     failures += test_scan_block_descriptor_cloexec();
     { extern int legacy_import_key_retirement_cases(void);
       failures += legacy_import_key_retirement_cases(); }
+    { extern int legacy_import_growth_retirement_cases(void);
+      failures += legacy_import_growth_retirement_cases(); }
     failures += test_scan_storage_concurrency();
     failures += test_cmp_height();
     failures += test_chain_gap_walk();

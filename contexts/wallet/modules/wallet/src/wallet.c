@@ -149,6 +149,30 @@ void wallet_rebuild_spent_set(struct wallet *w)
     LOG_INFO("wallet", "Wallet spent set rebuilt: %zu spent outpoints", w->num_spent);
 }
 
+#ifdef ZCL_TESTING
+static wallet_note_buffer_observer g_note_buffer_observer;
+
+void wallet_set_note_buffer_observer_for_test(wallet_note_buffer_observer fn)
+{
+    g_note_buffer_observer = fn;
+}
+#endif
+
+/* Cleanse and release a Sapling note buffer: it holds memos, note randomness
+ * and viewing keys. */
+static void wallet_release_note_buffer(struct sapling_received_note *buf,
+                                       size_t cap)
+{
+    if (!buf)
+        return;
+    memory_cleanse(buf, cap * sizeof(*buf));
+#ifdef ZCL_TESTING
+    if (g_note_buffer_observer)
+        g_note_buffer_observer(buf, cap * sizeof(*buf));
+#endif
+    free(buf);
+}
+
 void wallet_free(struct wallet *w)
 {
     for (size_t i = 0; i < MAX_WALLET_TX; i++) {
@@ -158,10 +182,7 @@ void wallet_free(struct wallet *w)
         }
     }
     w->num_wallet_tx = 0;
-    if (w->sapling_notes)
-        memory_cleanse(w->sapling_notes,
-                       w->sapling_notes_cap * sizeof(*w->sapling_notes));
-    free(w->sapling_notes);
+    wallet_release_note_buffer(w->sapling_notes, w->sapling_notes_cap);
     w->sapling_notes = NULL;
     w->num_sapling_notes = 0;
     w->sapling_notes_cap = 0;
@@ -1406,12 +1427,18 @@ bool wallet_add_sapling_note(struct wallet *w,
 
     if (w->num_sapling_notes >= w->sapling_notes_cap) {
         size_t new_cap = w->sapling_notes_cap == 0 ? 64 : w->sapling_notes_cap * 2;
-        struct sapling_received_note *new_buf = zcl_realloc(
-            w->sapling_notes, new_cap * sizeof(*new_buf), "sapling_notes");
+        /* Allocate, copy, cleanse the old buffer, free it: realloc would
+         * leave the old copy of every memo unwiped in the allocator. */
+        struct sapling_received_note *new_buf =
+            zcl_malloc(new_cap * sizeof(*new_buf), "sapling_notes");
         if (!new_buf) {
             zcl_mutex_unlock(&w->cs);
             return false;
         }
+        if (w->sapling_notes)
+            memcpy(new_buf, w->sapling_notes,
+                   w->num_sapling_notes * sizeof(*new_buf));
+        wallet_release_note_buffer(w->sapling_notes, w->sapling_notes_cap);
         w->sapling_notes = new_buf;
         w->sapling_notes_cap = new_cap;
     }

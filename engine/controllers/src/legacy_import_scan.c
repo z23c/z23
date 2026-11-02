@@ -6,11 +6,13 @@
 
 #include "core/serialize.h"
 #include "platform/read_mapping.h"
+#include "support/cleanse.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -509,18 +511,22 @@ static void store_notes_matching_txid(struct legacy_import_decrypt_file_ctx *c,
             continue;
         if (c->result_count >= c->result_cap) {
             c->result_cap *= 2;
-            struct db_sapling_note *tmp = zcl_realloc(
-                c->results,
+            /* Allocate, copy, cleanse the old buffer, free it: realloc
+             * would leave the old copy of every memo unwiped. */
+            struct db_sapling_note *tmp = zcl_malloc(
                 (size_t)c->result_cap * sizeof(struct db_sapling_note),
                 "sapling decrypt results grow");
             if (!tmp) {
-                /* OOM: keep the old buffer (zcl_realloc does
-                 * not free on failure) and skip appending this
+                /* OOM: keep the old buffer and skip appending this
                  * note rather than NULL-deref. Partial results
                  * are tolerated by the caller. */
                 c->result_cap /= 2;
                 continue;
             }
+            memcpy(tmp, c->results,
+                   (size_t)c->result_count * sizeof(*tmp));
+            memory_cleanse(c->results, (size_t)c->result_count * sizeof(*tmp));
+            free(c->results);
             c->results = tmp;
         }
         struct db_sapling_note *dn = &c->results[c->result_count++];

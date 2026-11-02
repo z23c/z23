@@ -31,10 +31,9 @@ void sapling_keystore_free(struct sapling_keystore *sks)
 {
     memory_cleanse(sks->seed, 32);
     memory_cleanse(&sks->master_xsk, sizeof(sks->master_xsk));
-    for (size_t i = 0; i < sks->num_keys; i++) {
-        if (sks->keys[i].used)
-            memory_cleanse(&sks->keys[i].xsk, sizeof(struct zip32_xsk));
-    }
+    /* The whole array: a key's full viewing key and ivk are as private as
+     * its spending key, and an entry past num_keys may still hold either. */
+    memory_cleanse(sks->keys, sizeof(sks->keys));
     zcl_mutex_destroy(&sks->cs);
 }
 

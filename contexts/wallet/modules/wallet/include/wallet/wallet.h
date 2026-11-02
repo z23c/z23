@@ -198,6 +198,14 @@ struct coins_view_cache;
 void wallet_verify_utxos(struct wallet *w, struct coins_view_cache *coins_tip);
 void wallet_free(struct wallet *w);
 
+#ifdef ZCL_TESTING
+/* Test-only: called with a Sapling note buffer after it is cleansed and just
+ * before it is freed (wallet_free and buffer growth), so a test can read the
+ * bytes while they are still valid. NULL removes it. */
+typedef void (*wallet_note_buffer_observer)(const void *buf, size_t bytes);
+void wallet_set_note_buffer_observer_for_test(wallet_note_buffer_observer fn);
+#endif
+
 bool wallet_generate_new_key(struct wallet *w, struct pubkey *pk_out);
 /* Add a freshly generated legacy key under w->cs. Refuses once the wallet
  * is locked, so a lock that lands after the caller's own check cannot leave

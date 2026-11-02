@@ -230,16 +230,18 @@ static size_t wcr_count(const char *hay, size_t hay_len, const char *needle,
     return n;
 }
 
-/* Occurrences of `needle` in every regular file under `dir`. A file or
- * directory that cannot be read counts as one occurrence: a scan that skipped
- * it would call it clean, and every caller asserts a count of zero. */
-static size_t wcr_count_in_tree(const char *dir, const char *needle,
-                                size_t nlen)
+/* Occurrences of `needle` in every regular file under `dir`. Files and
+ * directories that cannot be read are counted in `*unreadable`, apart from the
+ * matches. */
+static size_t wcr_scan_tree(const char *dir, const char *needle, size_t nlen,
+                            size_t *unreadable)
 {
     size_t total = 0;
     DIR *d = opendir(dir);
-    if (!d)
-        return 1;
+    if (!d) {
+        (*unreadable)++;
+        return 0;
+    }
     struct dirent *e;
     while ((e = readdir(d)) != NULL) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
@@ -248,11 +250,11 @@ static size_t wcr_count_in_tree(const char *dir, const char *needle,
         snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
         struct stat st;
         if (lstat(path, &st) != 0) {
-            total++;
+            (*unreadable)++;
             continue;
         }
         if (S_ISDIR(st.st_mode)) {
-            total += wcr_count_in_tree(path, needle, nlen);
+            total += wcr_scan_tree(path, needle, nlen, unreadable);
             continue;
         }
         if (!S_ISREG(st.st_mode))
@@ -262,7 +264,7 @@ static size_t wcr_count_in_tree(const char *dir, const char *needle,
         if (buf && fread(buf, 1, (size_t)st.st_size, f) == (size_t)st.st_size)
             total += wcr_count(buf, (size_t)st.st_size, needle, nlen);
         else
-            total++;
+            (*unreadable)++;
         free(buf);
         if (f) fclose(f);
     }
@@ -270,22 +272,43 @@ static size_t wcr_count_in_tree(const char *dir, const char *needle,
     return total;
 }
 
+/* Matches plus one when anything was unreadable: a scan that skipped a file
+ * would call it clean, and every caller asserting absence expects zero. */
+static size_t wcr_count_in_tree(const char *dir, const char *needle,
+                                size_t nlen)
+{
+    size_t unreadable = 0;
+    size_t matches = wcr_scan_tree(dir, needle, nlen, &unreadable);
+    return matches + (unreadable ? 1 : 0);
+}
+
 /* Occurrences of the spending key scalars the phrase's seed derives, in every
  * file under `dir`. An unreadable file counts, as above. */
-static size_t wcr_spending_key_in_tree(const char *dir, const uint8_t seed[32])
+static bool wcr_spending_key_scan(const char *dir, const uint8_t seed[32],
+                                  size_t *matches)
 {
     struct sapling_keystore sks;
     uint8_t div[ZC_DIVERSIFIER_SIZE], pk_d[32];
     sapling_keystore_init(&sks);
-    size_t found = 1;
-    if (sapling_keystore_set_seed(&sks, seed) &&
-        sapling_keystore_new_address(&sks, div, pk_d)) {
+    size_t unreadable = 0;
+    *matches = 0;
+    bool derived = sapling_keystore_set_seed(&sks, seed) &&
+                   sapling_keystore_new_address(&sks, div, pk_d);
+    if (derived) {
         const struct zip32_expsk *k = &sks.keys[0].xsk.expsk;
-        found = wcr_count_in_tree(dir, (const char *)k->ask, 32) +
-                wcr_count_in_tree(dir, (const char *)k->nsk, 32);
+        *matches = wcr_scan_tree(dir, (const char *)k->ask, 32, &unreadable) +
+                   wcr_scan_tree(dir, (const char *)k->nsk, 32, &unreadable);
     }
     sapling_keystore_free(&sks);
-    return found;
+    return derived && unreadable == 0;
+}
+
+/* For checks that assert absence: a failed derivation or an unreadable file
+ * counts as a hit, so the check cannot pass without having searched. */
+static size_t wcr_spending_key_in_tree(const char *dir, const uint8_t seed[32])
+{
+    size_t matches;
+    return wcr_spending_key_scan(dir, seed, &matches) ? matches : matches + 1;
 }
 
 static uint64_t wcr_file_hash(const char *path)
@@ -1662,6 +1685,25 @@ static bool wcr_all_zero(const void *p, size_t n)
     return true;
 }
 
+bool wallet_add_sapling_note(struct wallet *w,
+                             const struct sapling_received_note *note);
+
+/* What the note-buffer observer saw: one entry per release, in order. */
+static struct {
+    unsigned calls;
+    size_t bytes[4];
+    bool zero[4];
+} wcr_released;
+
+static void wcr_note_buffer_released(const void *buf, size_t bytes)
+{
+    unsigned i = wcr_released.calls++;
+    if (i >= 4)
+        return;
+    wcr_released.bytes[i] = bytes;
+    wcr_released.zero[i] = wcr_all_zero(buf, bytes);
+}
+
 static int t_wallet_free_wipes_sapling_keys(void)
 {
     int failures = 0;
@@ -1675,14 +1717,44 @@ static int t_wallet_free_wipes_sapling_keys(void)
                sapling_keystore_new_address(&w->sapling_keys, div, pk_d) &&
                wallet_init_hd(w, seed, sizeof(seed));
     }
+    /* 65 notes with a memo, randomness and ivk: the append that crosses 64
+     * grows the buffer, then wallet_free releases the grown one. */
+    memset(&wcr_released, 0, sizeof(wcr_released));
+    wallet_set_note_buffer_observer_for_test(wcr_note_buffer_released);
+    bool noted = made;
+    for (uint32_t i = 0; noted && i < 65; i++) {
+        struct sapling_received_note n;
+        memset(&n, 0x5a, sizeof(n));
+        memset(&n.txid, 0, sizeof(n.txid));
+        n.txid.data[0] = (uint8_t)(i + 1);
+        n.output_index = i;
+        noted = wallet_add_sapling_note(w, &n);
+    }
     WCR_CHECK("setup: a wallet holds a Sapling seed, a spending key and a BIP32 master key",
               made && w->has_master_key &&
               !wcr_all_zero(&w->master_key, sizeof(w->master_key)) &&
               !wcr_all_zero(w->sapling_keys.seed, 32) &&
               !wcr_all_zero(&w->sapling_keys.keys[0].xsk.expsk,
                             sizeof(w->sapling_keys.keys[0].xsk.expsk)));
+    WCR_CHECK("setup: the wallet holds 65 notes and a full viewing key",
+              noted && w->num_sapling_notes == 65 &&
+              !wcr_all_zero(&w->sapling_keys.keys[0].xfvk,
+                            sizeof(w->sapling_keys.keys[0].xfvk)) &&
+              !wcr_all_zero(w->sapling_keys.keys[0].ivk, 32));
+    WCR_CHECK("growing the note buffer cleanses the old one before freeing it",
+              wcr_released.calls == 1 && wcr_released.zero[0] &&
+              wcr_released.bytes[0] == 64 * sizeof(struct sapling_received_note));
     if (made)
         wallet_free(w);
+    wallet_set_note_buffer_observer_for_test(NULL);
+    WCR_CHECK("wallet_free cleanses the note buffer before freeing it",
+              wcr_released.calls == 2 && wcr_released.zero[1] &&
+              wcr_released.bytes[1] == 128 * sizeof(struct sapling_received_note));
+    WCR_CHECK("wallet_free leaves no full viewing key in the struct",
+              made && wcr_all_zero(&w->sapling_keys.keys[0].xfvk,
+                                   sizeof(w->sapling_keys.keys[0].xfvk)));
+    WCR_CHECK("wallet_free leaves no ivk in the struct",
+              made && wcr_all_zero(w->sapling_keys.keys[0].ivk, 32));
     WCR_CHECK("wallet_free leaves no Sapling seed in the struct",
               made && wcr_all_zero(w->sapling_keys.seed, 32));
     WCR_CHECK("wallet_free leaves no master key in the struct",
@@ -1786,8 +1858,12 @@ static int t_scan_positive_control(void)
               ran && run.rc == 0 && wcr_data_bool(&run, "committed"));
     WCR_CHECK("the seed scan finds the seed in a plaintext wallet",
               wcr_count_in_tree(dir, (const char *)seed, 32) > 0);
+    size_t key_matches = 0;
+    bool key_scanned = wcr_spending_key_scan(dir, seed, &key_matches);
+    WCR_CHECK("the spending-key scan derives the key and reads every file",
+              key_scanned);
     WCR_CHECK("the spending-key scan finds the key in a plaintext wallet",
-              wcr_spending_key_in_tree(dir, seed) > 0);
+              key_scanned && key_matches > 0);
     memory_cleanse(seed, sizeof(seed));
     return failures;
 }

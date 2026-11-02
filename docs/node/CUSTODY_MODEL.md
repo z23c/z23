@@ -210,9 +210,11 @@ marks it once the node's wallet is open) refuses both with
 `WALLET_LIVE_IN_PROCESS` (service code -70) before anything is read or
 written (create checks first of all), so they cannot lock or re-key that wallet; a plan locks nothing and is
 still answered. Each runs in its own CLI process. `wallet_free` wipes the
-transparent keys, the BIP32 master key and chain code, the Sapling seed and
-spending keys and the received notes of the wallet it releases, so a dry run,
-a failed key rebuild or a status query leaves none in freed memory.
+transparent keys, the BIP32 master key and chain code, the Sapling seed, spending
+and full viewing keys and the received notes of the wallet it releases, and a
+grown note buffer wipes its old copy, so a dry run, a failed key rebuild or a
+status query leaves none in freed memory. The legacy import wipes its decrypt
+workers' key copies, note buffers and result buffers the same way.
 
 `tests/harness/src/test_wallet_create.c` holds the proof.
 

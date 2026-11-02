@@ -499,6 +499,23 @@ static void legacy_import_announce_complete(const struct timespec *ts_start,
     fflush(stdout);
 }
 
+/* The decrypt worker's note plaintexts (value, note randomness, memo, ivk) in
+ * its wallet copy and its result buffer, wiped before they are freed. */
+static void legacy_import_free_decrypt_buffers(
+    struct legacy_import_decrypt_file_ctx *c)
+{
+    if (c->results)
+        memory_cleanse(c->results,
+                       (size_t)c->result_cap * sizeof(*c->results));
+    free(c->results);
+    c->results = NULL;
+    if (c->tw.sapling_notes)
+        memory_cleanse(c->tw.sapling_notes,
+                       c->tw.sapling_notes_cap * sizeof(*c->tw.sapling_notes));
+    free(c->tw.sapling_notes);
+    c->tw.sapling_notes = NULL;
+}
+
 static void legacy_import_release_sapling_contexts(
     struct legacy_import_decrypt_file_ctx *dctxs,
     struct legacy_import_filter_file_ctx *fctxs,
@@ -510,8 +527,7 @@ static void legacy_import_release_sapling_contexts(
              * keys, never to reach the allocator unwiped. */
             memory_cleanse(&dctxs[f].tw.sapling_keys,
                            sizeof(dctxs[f].tw.sapling_keys));
-            free(dctxs[f].results);
-            free(dctxs[f].tw.sapling_notes);
+            legacy_import_free_decrypt_buffers(&dctxs[f]);
         }
         free(dctxs);
     }
@@ -761,12 +777,9 @@ static int legacy_import_save_sapling_notes(
             if (!saved)
                 return LEGACY_IMPORT_SAVE_OPEN;
         }
-        free(dctxs[f].results);
-        dctxs[f].results = NULL;
+        legacy_import_free_decrypt_buffers(&dctxs[f]);
         free(fctxs[f].hits);
         fctxs[f].hits = NULL;
-        free(dctxs[f].tw.sapling_notes);
-        dctxs[f].tw.sapling_notes = NULL;
     }
     bool committed = legacy_import_commit_checked(ndb, "pass 3 commit");
     if (!committed)
