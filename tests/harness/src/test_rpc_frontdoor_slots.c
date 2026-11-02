@@ -812,6 +812,17 @@ static bool rfs_lane_dumpstate(const struct json_value *params, bool help,
     return json_push_kv_bool(result, "lane_ok", true);
 }
 
+#define RFS_LANE_TIP_HEIGHT 4242
+
+/* Stands in for the real in-memory getblockcount (a lock-free atomic). */
+static bool rfs_lane_getblockcount(const struct json_value *params, bool help,
+                                   struct json_value *result)
+{
+    (void)params; (void)help;
+    json_set_int(result, RFS_LANE_TIP_HEIGHT);
+    return true;
+}
+
 static int rfs_lane_connect(uint16_t port, const char *method,
                             const char *params)
 {
@@ -898,6 +909,15 @@ static bool rfs_lane_exercise(uint16_t port)
                                      RFS_LANE_REPLY_MS), "status reply");
     RFS_LANE_STEP(!rfs_lane_reply_has(other, "lane_ok", RFS_LANE_QUIET_MS),
                   "non-allowlisted stays queued");
+    /* The 2026-11-02 wedge: every general worker parked behind a stalled
+     * node.db, and a plain chain-height read starved in the accept queue.
+     * It must be answered promptly while all blockers are still held. */
+    int height = ok ? rfs_lane_connect(port, "getblockcount", "[]") : -1;
+    RFS_LANE_STEP(height >= 0, "connect getblockcount");
+    RFS_LANE_STEP(rfs_lane_reply_has(height, "\"result\":4242",
+                                     RFS_LANE_REPLY_MS),
+                  "getblockcount answered while workers blocked");
+    if (height >= 0) close(height);
     rfs_lane_open_gate();
     RFS_LANE_STEP(rfs_lane_reply_has(other, "lane_ok", RFS_LANE_REPLY_MS),
                   "queued call served after release");
@@ -920,8 +940,10 @@ static bool rfs_case_fast_lane_serves_status(void)
     rpc_table_init(&tbl);
     struct rpc_command blk = { "test", "block", rfs_lane_block, true };
     struct rpc_command dmp = { "test", "dumpstate", rfs_lane_dumpstate, true };
+    struct rpc_command cnt = { "test", "getblockcount",
+                               rfs_lane_getblockcount, true };
     bool ok = port != 0 && rpc_table_append(&tbl, &blk) &&
-              rpc_table_append(&tbl, &dmp) &&
+              rpc_table_append(&tbl, &dmp) && rpc_table_append(&tbl, &cnt) &&
               rpc_http_start(&tbl, port, "u", "p", rpcdir);
     if (ok) {
         set_rpc_warmup_finished();
@@ -943,7 +965,13 @@ static bool rfs_case_fast_lane_allowlist(void)
         !rpc_http_test_fastlane_allows("dumpstate", "[]") &&
         !rpc_http_test_fastlane_allows("dumpstate", "[\"status_frontdoor\",1]") &&
         !rpc_http_test_fastlane_allows("dumpstate", "{\"k\":\"status_frontdoor\"}") &&
-        !rpc_http_test_fastlane_allows("getinfo", "[\"status_frontdoor\"]");
+        !rpc_http_test_fastlane_allows("getinfo", "[\"status_frontdoor\"]") &&
+        rpc_http_test_fastlane_allows("getblockcount", "[]") &&
+        rpc_http_test_fastlane_allows("getbestblockhash", "[]") &&
+        rpc_http_test_fastlane_allows("getconnectioncount", "[]") &&
+        !rpc_http_test_fastlane_allows("getblockcount", "[1]") &&
+        !rpc_http_test_fastlane_allows("getnetworkinfo", "[]") &&
+        !rpc_http_test_fastlane_allows("getblock", "[]");
     printf(ok ? "OK\n" : "FAIL\n");
     return ok;
 }
