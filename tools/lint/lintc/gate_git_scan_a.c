@@ -112,6 +112,33 @@ static int sr_report(char stray[][SR_NAME], int n)
     return 1;
 }
 
+/* Scan "." once, collecting non-allowlisted root entries into stray; the
+ * scandir list is freed either way. */
+static int sr_scan_root_entries(const struct sr_set *al, char stray[][SR_NAME],
+                                int *ns, int *scanned)
+{
+    *ns = 0;
+    *scanned = 0;
+    struct dirent **names = NULL;
+    int nd = scandir(".", &names, NULL, alphasort);
+    if (nd < 0) return die("z23-lint: cannot scan %s\n", ".");
+    int rc = 0;
+    for (int i = 0; i < nd; i++) {
+        const char *name = names[i]->d_name;
+        if (rc == 0 && strcmp(name, ".") && strcmp(name, "..")) {
+            (*scanned)++;
+            if (!sr_ok_name(name, al)) {
+                if (*ns >= SR_STRAY || strlen(name) >= SR_NAME)
+                    rc = die("z23-lint: stray-root overflow\n", "");
+                else memcpy(stray[(*ns)++], name, strlen(name) + 1);
+            }
+        }
+        free(names[i]);
+    }
+    free(names);
+    return rc;
+}
+
 int check_no_stray_root_files_run(int argc, char **argv)
 {
     (void)argc; (void)argv;
@@ -124,24 +151,9 @@ int check_no_stray_root_files_run(int argc, char **argv)
     if (rc) return rc;
     const char *extra = getenv("ZCL_ROOT_STRAY_EXTRA_FOR_TEST");
     if (extra && extra[0]) sr_del(&a.allowed, extra);
-    struct dirent **names = NULL;
-    int nd = scandir(".", &names, NULL, alphasort);
-    if (nd < 0) return die("z23-lint: cannot scan %s\n", ".");
     char stray[SR_STRAY][SR_NAME];
     int ns = 0, scanned = 0;
-    for (int i = 0; i < nd; i++) {
-        const char *name = names[i]->d_name;
-        if (rc == 0 && strcmp(name, ".") && strcmp(name, "..")) {
-            scanned++;
-            if (!sr_ok_name(name, &a.allowed)) {
-                if (ns >= SR_STRAY || strlen(name) >= SR_NAME)
-                    rc = die("z23-lint: stray-root overflow\n", "");
-                else memcpy(stray[ns++], name, strlen(name) + 1);
-            }
-        }
-        free(names[i]);
-    }
-    free(names);
+    rc = sr_scan_root_entries(&a.allowed, stray, &ns, &scanned);
     if (rc == 0)
         rc = gate_require_scanned(scanned, 20, "check-no-stray-root-files",
                                   "the repo root listed fewer than 20 entries — wrong cwd?");
@@ -568,6 +580,25 @@ static int nak_open_error(const char *path)
 {
     return errno == ENOENT ? 0 : die("z23-lint: cannot open API-key input: %s\n", path);
 }
+/* Count one credential hit and append "path:lineno:line" to the hits file;
+ * hits past the 20th are counted but not written. */
+static int nak_report_hit(const char *path, int lineno, const char *line,
+                          ssize_t n, struct nak_acc *a)
+{
+    a->nhits++;
+    if (a->nhits > 20) return 0;
+    if (fprintf(a->hits, "%s:%d:", path, lineno) < 0)
+        return die("z23-lint: write failed\n", "");
+    for (ssize_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)line[i];
+        if (c == '\0') continue;
+        if (fputc(c, a->hits) == EOF)
+            return die("z23-lint: write failed\n", "");
+    }
+    if (fputc('\n', a->hits) == EOF)
+        return die("z23-lint: write failed\n", "");
+    return 0;
+}
 static int nak_scan_file(const char *path, struct nak_acc *a)
 {
     FILE *f = fopen(path, "r");
@@ -583,25 +614,8 @@ static int nak_scan_file(const char *path, struct nak_acc *a)
         for (ssize_t i = 0; i < n; i++)
             if (line[i] == '\0') line[i] = ' ';
         if (n <= 0 || !nak_match(a->re, line, (size_t)n)) continue;
-        a->nhits++;
-        if (a->nhits > 20) continue;
-        if (fprintf(a->hits, "%s:%d:", path, lineno) < 0) {
-            rc = die("z23-lint: write failed\n", "");
-            break;
-        }
-        for (ssize_t i = 0; i < n; i++) {
-            unsigned char c = (unsigned char)line[i];
-            if (c == '\0') continue;
-            if (fputc(c, a->hits) == EOF) {
-                rc = die("z23-lint: write failed\n", "");
-                break;
-            }
-        }
+        rc = nak_report_hit(path, lineno, line, n, a);
         if (rc) break;
-        if (fputc('\n', a->hits) == EOF) {
-            rc = die("z23-lint: write failed\n", "");
-            break;
-        }
     }
     return fin(f, line, path, rc);
 }
@@ -946,6 +960,48 @@ static int ffs_file_has_marker(const char *path, const regex_t *re, int *hit)
     return fin(f, line, path, 0);
 }
 
+/* Unless the file carries the suffix-ok marker, record a violation when the
+ * stem b ends in a shape foreign to own. */
+static int ffs_check_shape(const char *path, const char *b, const char *own,
+                           const regex_t *re, char v[][FFS_VLEN], int *nv)
+{
+    int marked = 0;
+    int rc = ffs_file_has_marker(path, re, &marked);
+    if (rc || marked) return rc;
+    const char *shape = ffs_foreign_shape(b, own);
+    if (!shape) return 0;
+    if (*nv >= FFS_VMAX) return die("z23-lint: derived buffer overflow\n", "");
+    if (ovf(snprintf(v[*nv], FFS_VLEN,
+            "%s ends in foreign-shape suffix _%s "
+            "(this folder's shape: %s)",
+            path, shape, own), FFS_VLEN))
+        return 2;
+    (*nv)++;
+    return 0;
+}
+
+/* Stat one src-dir entry; a regular .c file's stem goes to ffs_check_shape. */
+static int ffs_scan_entry(const char *src, const char *name, const char *own,
+                          const regex_t *re, char v[][FFS_VLEN], int *nv)
+{
+    char path[4096];
+    struct stat st;
+    size_t nl = strlen(name);
+    int k = snprintf(path, sizeof path, "%s/%s", src, name);
+    if (k < 0 || (size_t)k >= sizeof path)
+        return die("z23-lint: path too long: %s\n", src);
+    if (lstat(path, &st) != 0)
+        return die("z23-lint: cannot stat %s\n", path);
+    if (!S_ISREG(st.st_mode) || nl < 2 || name[nl - 2] != '.' || name[nl - 1] != 'c')
+        return 0;
+    char b[256];
+    if (nl - 2 >= sizeof b)
+        return die("z23-lint: derived buffer overflow\n", "");
+    memcpy(b, name, nl - 2);
+    b[nl - 2] = '\0';
+    return ffs_check_shape(path, b, own, re, v, nv);
+}
+
 static int ffs_scan_room(const char *d, const char *own, const regex_t *re,
                          char v[][FFS_VLEN], int *nv)
 {
@@ -960,55 +1016,17 @@ static int ffs_scan_room(const char *d, const char *own, const regex_t *re,
     int rc = 0;
     for (int i = 0; i < n; i++) {
         const char *name = names[i]->d_name;
-        if (rc == 0 && strcmp(name, ".") != 0 && strcmp(name, "..") != 0) {
-            char path[4096];
-            struct stat st;
-            size_t nl = strlen(name);
-            int k = snprintf(path, sizeof path, "%s/%s", src, name);
-            if (k < 0 || (size_t)k >= sizeof path)
-                rc = die("z23-lint: path too long: %s\n", src);
-            else if (lstat(path, &st) != 0)
-                rc = die("z23-lint: cannot stat %s\n", path);
-            else if (S_ISREG(st.st_mode) && nl >= 2
-                     && name[nl - 2] == '.' && name[nl - 1] == 'c') {
-                char b[256];
-                if (nl - 2 >= sizeof b)
-                    rc = die("z23-lint: derived buffer overflow\n", "");
-                else {
-                    memcpy(b, name, nl - 2);
-                    b[nl - 2] = '\0';
-                    int marked = 0;
-                    rc = ffs_file_has_marker(path, re, &marked);
-                    if (rc == 0 && !marked) {
-                        const char *shape = ffs_foreign_shape(b, own);
-                        if (shape) {
-                            if (*nv >= FFS_VMAX)
-                                rc = die("z23-lint: derived buffer overflow\n", "");
-                            else if (ovf(snprintf(v[*nv], FFS_VLEN,
-                                    "%s ends in foreign-shape suffix _%s "
-                                    "(this folder's shape: %s)",
-                                    path, shape, own), FFS_VLEN))
-                                rc = 2;
-                            else
-                                (*nv)++;
-                        }
-                    }
-                }
-            }
-        }
+        if (rc == 0 && strcmp(name, ".") != 0 && strcmp(name, "..") != 0)
+            rc = ffs_scan_entry(src, name, own, re, v, nv);
         free(names[i]);
     }
     free(names);
     return rc;
 }
 
-int check_framework_filename_suffix_run(int argc, char **argv)
+/* Every Makefile APP_DIRS shape needs an OWN[] suffix entry. */
+static int ffs_check_shapes_mapped(void)
 {
-    (void)argc;
-    (void)argv;
-    int rc = rs_init();
-    if (rc)
-        return rc;
     for (int i = 0; i < g_n_shapes; i++) {
         if (ffs_own_suffix(g_shapes[i]))
             continue;
@@ -1019,6 +1037,12 @@ int check_framework_filename_suffix_run(int argc, char **argv)
         fprintf(stderr, "  whole app/%s/ tree from this gate.\n", g_shapes[i]);
         return 2;
     }
+    return 0;
+}
+
+/* Every OWN[] folder must be declared in the Makefile's APP_DIRS. */
+static int ffs_check_own_declared(void)
+{
     for (size_t i = 0; i < sizeof k_ffs_own / sizeof k_ffs_own[0]; i++) {
         if (ffs_in_shapes(k_ffs_own[i].folder, g_shapes, g_n_shapes))
             continue;
@@ -1027,22 +1051,27 @@ int check_framework_filename_suffix_run(int argc, char **argv)
         fprintf(stderr, "  but the Makefile's APP_DIRS does not declare it.\n");
         return 2;
     }
-    regex_t re;
-    rc = ffs_marker_comp(&re);
-    if (rc)
-        return rc;
-    static char viol[FFS_VMAX][FFS_VLEN];
-    int nv = 0;
+    return 0;
+}
+
+/* Scan every OWN[] room's src dir, accumulating violations in v. */
+static int ffs_scan_all_rooms(regex_t *re, char v[][FFS_VLEN], int *nv)
+{
+    *nv = 0;
     char rooms[RS_MAX][RS_PATH];
+    int rc = 0;
     for (size_t i = 0; rc == 0 && i < sizeof k_ffs_own / sizeof k_ffs_own[0]; i++) {
         int nr = 0;
         rc = repo_shape_room_dirs(k_ffs_own[i].folder, rooms, RS_MAX, &nr);
         for (int r = 0; rc == 0 && r < nr; r++)
-            rc = ffs_scan_room(rooms[r], k_ffs_own[i].suffix, &re, viol, &nv);
+            rc = ffs_scan_room(rooms[r], k_ffs_own[i].suffix, re, v, nv);
     }
-    regfree(&re);
-    if (rc)
-        return rc;
+    return rc;
+}
+
+/* Print the clean verdict, or every violation plus the fix options. */
+static int ffs_report_violations(char v[][FFS_VLEN], int nv)
+{
     if (nv == 0)
         return puts("check_framework_filename_suffix: clean — no shape file carries a "
                     "foreign-shape filename suffix") < 0
@@ -1051,7 +1080,7 @@ int check_framework_filename_suffix_run(int argc, char **argv)
                "violation(s)\n\n", nv) < 0)
         return die("z23-lint: write failed\n", "");
     for (int i = 0; i < nv; i++)
-        if (printf("  %s\n", viol[i]) < 0)
+        if (printf("  %s\n", v[i]) < 0)
             return die("z23-lint: write failed\n", "");
     if (fputs("\nFix options:\n"
               "  1. Rename the file to its own shape's suffix or a bare entity name.\n"
@@ -1061,6 +1090,32 @@ int check_framework_filename_suffix_run(int argc, char **argv)
               stdout) < 0)
         return die("z23-lint: write failed\n", "");
     return 1;
+}
+
+int check_framework_filename_suffix_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    int rc = rs_init();
+    if (rc)
+        return rc;
+    rc = ffs_check_shapes_mapped();
+    if (rc)
+        return rc;
+    rc = ffs_check_own_declared();
+    if (rc)
+        return rc;
+    regex_t re;
+    rc = ffs_marker_comp(&re);
+    if (rc)
+        return rc;
+    static char viol[FFS_VMAX][FFS_VLEN];
+    int nv = 0;
+    rc = ffs_scan_all_rooms(&re, viol, &nv);
+    regfree(&re);
+    if (rc)
+        return rc;
+    return ffs_report_violations(viol, nv);
 }
 
 static int ffs_test_foreign_shapes(void)

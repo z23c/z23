@@ -71,7 +71,3 @@ tools/acme/tls_client.c:tls_client_response_parse_bounded:27
 tools/acme/tls_client.c:tls_client_url_parse:17
 tools/engine_unit.c:append_unit_receipt:25
 tools/engine_unit.c:compose_prompt:21
-tools/lint/lintc/gate_git_scan_a.c:check_framework_filename_suffix_run:18
-tools/lint/lintc/gate_git_scan_a.c:check_no_stray_root_files_run:18
-tools/lint/lintc/gate_git_scan_a.c:ffs_scan_room:22
-tools/lint/lintc/gate_git_scan_a.c:nak_scan_file:17
