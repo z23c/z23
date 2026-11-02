@@ -16,6 +16,12 @@
  *   z->z  plan, commit, mine; recipient and change notes, exact fee, memo,
  *         block inclusion read without the wallet, tip hash validated
  *   z->t  plan, commit, mine; block inclusion and exact balance arithmetic
+ *   sweep 110 blocks mined to a fresh transparent address; core.wallet.
+ *         shielded.shield plans the node's ten mature coins, commits one
+ *         transaction (ten inputs, no transparent output, one Sapling
+ *         output, value_balance) and replays on the same key before and
+ *         after a block; a coin maturing after the plan gives
+ *         PLAN_TOKEN_MISMATCH and sends nothing; a locked wallet refuses
  *
  * Each proving send prints its elapsed milliseconds; no time limit is
  * asserted.
@@ -85,6 +91,7 @@
 enum e2e_cmd_id {
     E2E_TIP, E2E_CHAININFO, E2E_BALANCE, E2E_ADDR_NEW, E2E_Z_ADDR, E2E_MINE,
     E2E_SEND, E2E_NOTES, E2E_BLOCK_GET, E2E_TX_GET, E2E_SUMMARY,
+    E2E_SHIELD, E2E_UNSPENT, E2E_RAWTX, E2E_LOCK,
     E2E_CMD_COUNT
 };
 static const struct { const char *w[5]; } e2e_cmds[E2E_CMD_COUNT] = {
@@ -99,6 +106,10 @@ static const struct { const char *w[5]; } e2e_cmds[E2E_CMD_COUNT] = {
     [E2E_BLOCK_GET] = { { "core", "chain", "block", "get" } },
     [E2E_TX_GET] = { { "core", "wallet", "transaction", "get" } },
     [E2E_SUMMARY] = { { "core", "wallet", "summary" } },
+    [E2E_SHIELD] = { { "core", "wallet", "shielded", "shield" } },
+    [E2E_UNSPENT] = { { "listunspent" } },
+    [E2E_RAWTX] = { { "getrawtransaction" } },
+    [E2E_LOCK] = { { "core", "wallet", "security", "lock" } },
 };
 
 struct e2e {
@@ -891,6 +902,379 @@ static int e2e_step_z_to_t(struct e2e *e, const struct e2e_send *prev,
     return failures;
 }
 
+/* ── the public-address sweep: core.wallet.shielded.shield ────────── */
+
+#define E2E_SWEEP_BLOCKS 110
+#define E2E_COINBASE_CONFS 101 /* a coinbase output spends at tip - height >= 100 */
+#define E2E_SWEEP_FEE_ZAT E2E_FEE_ZAT
+#define E2E_SAPLING_SPEND_BYTES 384
+#define E2E_SAPLING_OUTPUT_BYTES 948
+
+/* Mature coins of one transparent address as the node lists them. */
+struct e2e_coins {
+    int count;
+    int64_t total;
+};
+
+/* The node's own listunspent at the coinbase depth: a bare JSON array, so it
+ * is read from the first '['. */
+static bool e2e_coins_of(const struct e2e *e, const char *addr,
+                         struct e2e_coins *c)
+{
+    static char raw[E2E_RAW];
+    char minconf[16];
+    snprintf(minconf, sizeof(minconf), "%d", E2E_COINBASE_CONFS);
+    const char *args[] = { minconf, NULL };
+    c->count = 0;
+    c->total = 0;
+    int rc = e2e_exec(e, E2E_UNSPENT, args, raw, sizeof(raw));
+    const char *start = strchr(raw, '[');
+    struct json_value l;
+    json_init(&l);
+    if (rc != 0 || !start || !json_read(&l, start, strlen(start)) ||
+        l.type != JSON_ARR) {
+        printf("\n  listunspent failed (exit %d): %.300s\n", rc, raw);
+        json_free(&l);
+        return false;
+    }
+    for (size_t i = 0; i < l.num_children; i++) {
+        const struct json_value *u = &l.children[i];
+        const struct json_value *a = json_get(u, "amount");
+        if (strcmp(e2e_str(u, "address"), addr) != 0) continue;
+        c->count++;
+        c->total += (int64_t)((a && a->type == JSON_REAL ? a->val.d : 0) *
+                                  1e8 + 0.5);
+    }
+    json_free(&l);
+    return true;
+}
+
+/* The wire form of a transaction, read back from the node. */
+struct e2e_rawtx {
+    size_t vin, vout, spends, outputs;
+    int64_t value_balance;
+};
+
+static bool e2e_cs(const uint8_t *b, size_t len, size_t *pos, uint64_t *v)
+{
+    if (*pos >= len) return false;
+    uint8_t first = b[(*pos)++];
+    size_t extra = first < 253 ? 0 : first == 253 ? 2 : first == 254 ? 4 : 8;
+    if (extra == 0) { *v = first; return true; }
+    if (*pos + extra > len) return false;
+    *v = 0;
+    for (size_t i = 0; i < extra; i++) *v |= (uint64_t)b[*pos + i] << (8 * i);
+    *pos += extra;
+    return true;
+}
+
+static bool e2e_skip_scripts(const uint8_t *b, size_t len, size_t *pos,
+                             uint64_t count, size_t fixed)
+{
+    for (uint64_t i = 0; i < count; i++) {
+        uint64_t sl;
+        if (*pos + fixed > len) return false;
+        *pos += fixed;
+        if (!e2e_cs(b, len, pos, &sl) || sl > len - *pos) return false;
+        *pos += (size_t)sl;
+        if (fixed == 36) { /* an input: the sequence follows the script */
+            if (*pos + 4 > len) return false;
+            *pos += 4;
+        }
+    }
+    return true;
+}
+
+/* Sapling v4 layout: header, group id, inputs, outputs, lock time, expiry,
+ * value balance, spend descriptions, output descriptions. */
+static bool e2e_decode(const char *hex, struct e2e_rawtx *t)
+{
+    static uint8_t b[64 * 1024];
+    size_t n = strlen(hex) / 2, pos = 8;
+    uint64_t v;
+    if (n == 0 || n > sizeof(b)) return false;
+    for (size_t i = 0; i < n; i++) {
+        unsigned x;
+        if (sscanf(hex + 2 * i, "%2x", &x) != 1) return false;
+        b[i] = (uint8_t)x;
+    }
+    memset(t, 0, sizeof(*t));
+    if (!e2e_cs(b, n, &pos, &v) || !e2e_skip_scripts(b, n, &pos, v, 36))
+        return false;
+    t->vin = (size_t)v;
+    if (!e2e_cs(b, n, &pos, &v) || !e2e_skip_scripts(b, n, &pos, v, 8))
+        return false;
+    t->vout = (size_t)v;
+    pos += 8; /* lock time, expiry height */
+    if (pos + 8 > n) return false;
+    for (int i = 7; i >= 0; i--)
+        t->value_balance = (int64_t)(((uint64_t)t->value_balance << 8) |
+                                     b[pos + (size_t)i]);
+    pos += 8;
+    if (!e2e_cs(b, n, &pos, &v)) return false;
+    t->spends = (size_t)v;
+    if (v > (n - pos) / E2E_SAPLING_SPEND_BYTES) return false;
+    pos += (size_t)v * E2E_SAPLING_SPEND_BYTES;
+    if (!e2e_cs(b, n, &pos, &v)) return false;
+    t->outputs = (size_t)v;
+    return v <= (n - pos) / E2E_SAPLING_OUTPUT_BYTES;
+}
+
+static bool e2e_rawtx_of(const struct e2e *e, const char *txid,
+                         struct e2e_rawtx *t)
+{
+    const char *args[] = { txid, "1", NULL };
+    struct json_value r;
+    bool ok = e2e_json(e, E2E_RAWTX, args, &r) &&
+              e2e_decode(e2e_str(&r, "hex"), t);
+    json_free(&r);
+    return ok;
+}
+
+struct e2e_sweep {
+    char addr[128], to[256], commit[2200], txid[80];
+    struct e2e_coins coins;
+    int64_t total, fee, amount;
+    int64_t notes_before;
+};
+
+static void e2e_sweep_input(const struct e2e_sweep *w, const char *key,
+                            char *input, size_t cap)
+{
+    snprintf(input, cap,
+             "--input={\"wallet_scope\":\"dev\",\"from\":\"%s\","
+             "\"idempotency_key\":\"%s\"}", w->addr, key);
+}
+
+/* Plan the sweep. On success w->commit is the plan's own commit input and the
+ * quoted figures are in w. */
+static bool e2e_sweep_plan(const struct e2e *e, struct e2e_sweep *w,
+                           const char *key, int64_t *count_out)
+{
+    char input[512];
+    e2e_sweep_input(w, key, input, sizeof(input));
+    const char *args[] = { input, NULL };
+    struct json_value r;
+    bool ok = e2e_json(e, E2E_SHIELD, args, &r) &&
+              strcmp(e2e_str(&r, "data.stage"), "plan") == 0;
+    const char *ci = e2e_str(&r, "data.commit_input");
+    ok = ok && ci[0] && strlen(ci) + 9 < sizeof(w->commit);
+    if (ok) {
+        snprintf(w->commit, sizeof(w->commit), "--input=%s", ci);
+        snprintf(w->to, sizeof(w->to), "%s", e2e_str(&r, "data.to"));
+        w->total = json_get_int(e2e_at(&r, "data.total_zat"));
+        w->fee = json_get_int(e2e_at(&r, "data.fee_zat"));
+        w->amount = json_get_int(e2e_at(&r, "data.amount_zat"));
+        *count_out = json_get_int(e2e_at(&r, "data.input_count"));
+        ok = json_get_int(e2e_at(&r, "data.coinbase_input_count")) ==
+                 *count_out &&
+             json_get_int(e2e_at(&r, "data.remaining_inputs")) == 0;
+    }
+    json_free(&r);
+    return ok;
+}
+
+/* Commit with the stored commit input. True when the node accepted it;
+ * *replayed and txid are its answer. */
+static bool e2e_sweep_commit(const struct e2e *e, const struct e2e_sweep *w,
+                             bool *replayed, char *txid, size_t cap)
+{
+    const char *args[] = { w->commit, NULL };
+    struct json_value r;
+    bool ok = e2e_json(e, E2E_SHIELD, args, &r) &&
+              strcmp(e2e_str(&r, "data.stage"), "committed") == 0 &&
+              strlen(e2e_str(&r, "data.txid")) == 64;
+    if (ok) {
+        *replayed = json_get_bool(e2e_at(&r, "data.replayed"));
+        snprintf(txid, cap, "%s", e2e_str(&r, "data.txid"));
+    }
+    json_free(&r);
+    return ok;
+}
+
+/* The commit is refused; *code is the node's answer. */
+static bool e2e_sweep_refused(const struct e2e *e, const struct e2e_sweep *w,
+                              char *code, char *msg, size_t cap)
+{
+    const char *args[] = { w->commit, NULL };
+    struct json_value r;
+    bool accepted = false;
+    bool parsed = e2e_call(e, E2E_SHIELD, args, &r, &accepted);
+    if (parsed && !accepted) {
+        snprintf(code, 64, "%s", e2e_str(&r, "error.code"));
+        snprintf(msg, cap, "%s", e2e_str(&r, "error.message"));
+    }
+    json_free(&r);
+    return parsed && !accepted;
+}
+
+/* Every note the wallet holds at `addr`, in zats. */
+static int64_t e2e_notes_value(const struct e2e *e, const char *addr)
+{
+    int64_t sum = 0;
+    struct json_value r;
+    if (e2e_json(e, E2E_NOTES, NULL, &r)) {
+        const struct json_value *l = e2e_at(&r, "data.notes");
+        for (size_t i = 0; l && i < l->num_children; i++)
+            if (strcmp(e2e_str(&l->children[i], "address"), addr) == 0)
+                sum += e2e_zats(e2e_str(&l->children[i], "amount"));
+    }
+    json_free(&r);
+    return sum;
+}
+
+static int e2e_step_sweep_plan(struct e2e *e, struct e2e_sweep *w)
+{
+    int failures = 0;
+    TEST("wallet_e2e_regtest: sweep plan quotes the node's own mature coins") {
+        ASSERT(e2e_new_address(e, E2E_ADDR_NEW, w->addr, sizeof(w->addr)));
+        for (int i = 0; i < E2E_SWEEP_BLOCKS; i++) {
+            ASSERT(e2e_mine_chunk(e, 1, w->addr));
+            if ((i + 1) % 20 == 0) printf("\n  mined %d/%d sweep blocks",
+                                          i + 1, E2E_SWEEP_BLOCKS);
+        }
+        ASSERT(e2e_tip_validated(e));
+        ASSERT(e2e_coins_of(e, w->addr, &w->coins));
+        int64_t count = 0;
+        ASSERT(e2e_sweep_plan(e, w, "e2e-shield-1", &count));
+        printf("\n  [evidence] node lists %d mature coins, %lld zat; plan "
+               "quotes %lld inputs, total %lld, fee %lld, to %s ",
+               w->coins.count, (long long)w->coins.total, (long long)count,
+               (long long)w->total, (long long)w->fee, w->to);
+        ASSERT_EQ(w->coins.count, E2E_SWEEP_BLOCKS - 100);
+        ASSERT_EQ(count, w->coins.count);
+        ASSERT_EQ(w->total, w->coins.total);
+        ASSERT_EQ(w->fee, E2E_SWEEP_FEE_ZAT);
+        ASSERT_EQ(w->amount, w->coins.total - w->fee);
+        ASSERT(strcmp(w->to, e->za) == 0 || strcmp(w->to, e->zb) == 0);
+        w->notes_before = e2e_notes_value(e, w->to);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int e2e_step_sweep_commit(struct e2e *e, struct e2e_sweep *w)
+{
+    int failures = 0;
+    TEST("wallet_e2e_regtest: sweep commit: one shielded output, no transparent output") {
+        bool replayed = true;
+        ASSERT(e2e_sweep_commit(e, w, &replayed, w->txid, sizeof(w->txid)));
+        ASSERT(!replayed);
+        /* The same commit input before any block is mined: the coins are
+         * already spent, and the key replays the first result. */
+        char again[80] = "";
+        ASSERT(e2e_sweep_commit(e, w, &replayed, again, sizeof(again)));
+        ASSERT(replayed);
+        ASSERT_STR_EQ(again, w->txid);
+        ASSERT(e2e_mine(e, 1));
+        ASSERT(e2e_block_has_tx(e, e->tip, w->txid));
+        struct e2e_rawtx t;
+        ASSERT(e2e_rawtx_of(e, w->txid, &t));
+        printf("\n  [evidence] sweep tx: %zu inputs, %zu transparent outputs, "
+               "%zu spends, %zu shielded outputs, value_balance %lld ",
+               t.vin, t.vout, t.spends, t.outputs, (long long)t.value_balance);
+        ASSERT_EQ((int64_t)t.vin, w->coins.count);
+        ASSERT_EQ((int64_t)t.vout, 0);
+        ASSERT_EQ((int64_t)t.spends, 0);
+        ASSERT_EQ((int64_t)t.outputs, 1);
+        ASSERT_EQ(t.value_balance, -(w->coins.total - w->fee));
+        struct e2e_note n = e2e_notes(e, w->to, w->txid);
+        ASSERT_EQ(n.count, 1);
+        ASSERT_EQ(n.zat, w->coins.total - E2E_SWEEP_FEE_ZAT);
+        ASSERT_EQ(n.confs, 1);
+        ASSERT_EQ(e2e_notes_value(e, w->to), w->notes_before + n.zat);
+        ASSERT(e2e_tip_validated(e));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int e2e_step_sweep_replay(struct e2e *e, struct e2e_sweep *w)
+{
+    int failures = 0;
+    TEST("wallet_e2e_regtest: sweep retried after a block and a new mature coin replays") {
+        struct e2e_coins now;
+        ASSERT(e2e_coins_of(e, w->addr, &now));
+        printf("\n  [evidence] %d mature coin(s) now at the swept address ",
+               now.count);
+        ASSERT(now.count >= 1);
+        bool replayed = false;
+        char again[80] = "";
+        ASSERT(e2e_sweep_commit(e, w, &replayed, again, sizeof(again)));
+        ASSERT(replayed);
+        ASSERT_STR_EQ(again, w->txid);
+        ASSERT_EQ(e2e_notes(e, w->to, w->txid).count, 1);
+        ASSERT_EQ(e2e_notes_value(e, w->to),
+                  w->notes_before + w->coins.total - E2E_SWEEP_FEE_ZAT);
+        struct e2e_coins after;
+        ASSERT(e2e_coins_of(e, w->addr, &after));
+        ASSERT_EQ(after.count, now.count);
+        ASSERT_EQ(after.total, now.total);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int e2e_step_sweep_drift(struct e2e *e, struct e2e_sweep *w)
+{
+    int failures = 0;
+    TEST("wallet_e2e_regtest: a coin that matures after the plan: PLAN_TOKEN_MISMATCH, nothing sent") {
+        struct e2e_coins before, after;
+        int64_t count = 0;
+        ASSERT(e2e_coins_of(e, w->addr, &before));
+        ASSERT(e2e_sweep_plan(e, w, "e2e-shield-2", &count));
+        ASSERT_EQ(count, before.count);
+        ASSERT(e2e_mine(e, 1));
+        int64_t notes = e2e_notes_value(e, w->to);
+        char code[64] = "", msg[512] = "";
+        ASSERT(e2e_sweep_refused(e, w, code, msg, sizeof(msg)));
+        printf("\n  [evidence] drift refused (%s): %s ", code, msg);
+        ASSERT_STR_EQ(code, "PLAN_TOKEN_MISMATCH");
+        ASSERT(e2e_coins_of(e, w->addr, &after));
+        ASSERT_EQ(after.count, before.count + 1);
+        ASSERT_EQ(e2e_notes_value(e, w->to), notes);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int e2e_step_sweep_lock(struct e2e *e, struct e2e_sweep *w)
+{
+    int failures = 0;
+    TEST("wallet_e2e_regtest: a sweep committed with the wallet locked is refused") {
+        struct e2e_coins before, after;
+        int64_t count = 0;
+        struct json_value r;
+        ASSERT(e2e_coins_of(e, w->addr, &before));
+        ASSERT(e2e_sweep_plan(e, w, "e2e-shield-3", &count));
+        ASSERT(e2e_json(e, E2E_LOCK, NULL, &r));
+        json_free(&r);
+        int64_t notes = e2e_notes_value(e, w->to);
+        char code[64] = "", msg[512] = "";
+        ASSERT(e2e_sweep_refused(e, w, code, msg, sizeof(msg)));
+        printf("\n  [evidence] locked commit refused (%s): %s ", code, msg);
+        ASSERT(strstr(msg, "locked") != NULL);
+        ASSERT(e2e_mine(e, 1));
+        ASSERT(e2e_coins_of(e, w->addr, &after));
+        ASSERT(after.count >= before.count);
+        ASSERT_EQ(e2e_notes_value(e, w->to), notes);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int e2e_step_sweep(struct e2e *e)
+{
+    struct e2e_sweep w;
+    memset(&w, 0, sizeof(w));
+    int failures = e2e_step_sweep_plan(e, &w);
+    if (!failures) failures += e2e_step_sweep_commit(e, &w);
+    if (!failures) failures += e2e_step_sweep_replay(e, &w);
+    if (!failures) failures += e2e_step_sweep_drift(e, &w);
+    if (!failures) failures += e2e_step_sweep_lock(e, &w);
+    return failures;
+}
+
 static bool e2e_setup(struct e2e *e)
 {
     memset(e, 0, sizeof(*e));
@@ -940,6 +1324,7 @@ static int e2e_run_steps(struct e2e *e)
     if (!failures) failures += e2e_step_t_to_z(e, &tz);
     if (!failures) failures += e2e_step_z_to_z(e, &tz, &zz);
     if (!failures) failures += e2e_step_z_to_t(e, &zz, &zt);
+    if (!failures) failures += e2e_step_sweep(e);
     return failures;
 }
 

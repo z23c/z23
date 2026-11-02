@@ -7,6 +7,7 @@
 #define ZCL_CONTROLLERS_WALLET_NATIVE_HANDLERS_H
 
 #include "controllers/native_handler_body.h"
+#include "core/amount.h"
 #include "kernel/command_registry.h"
 
 #ifdef __cplusplus
@@ -92,6 +93,35 @@ bool wnh_commit_input(const struct json_value *input, char *out,
 void wnh_emit_plan(struct zcl_command_reply *reply, const char *path,
                    const char *action, const char *token,
                    const char *commit_input);
+
+/* Validated inputs of one shielded send or sweep call: read and checked once,
+ * then carried by both the plan and the commit stage. */
+struct wnh_shielded_send_in {
+    const char *wallet_scope;
+    const char *from;
+    const char *to;
+    const char *idem;
+    const char *memo;
+    const char *memo_hex;
+    const char *plan_token;
+    CAmount amount_zats;
+    CAmount fee_zats;      /* quoted at plan; carried by the commit input */
+    bool has_fee;
+    char amount[32];
+};
+
+/* Exact decimal text for a zatoshi amount (8 places, the RPC wire form). */
+bool wnh_zat_text(CAmount zats, char out[32]);
+/* The idempotency key is required and shape-checked. */
+bool wnh_shielded_key_ok(struct zcl_command_reply *reply, const char *idem);
+/* The fee the plan quoted, when the caller supplies it (the commit does). */
+bool wnh_shielded_fee_input(struct zcl_command_reply *reply,
+                            const struct zcl_command_request *request,
+                            struct wnh_shielded_send_in *in);
+/* Refuse a send whose node-side record says it must not run again. True when
+ * the body is a committed send to render. */
+bool wnh_shielded_send_state_ok(struct zcl_command_reply *reply,
+                                const struct json_value *body);
 
 #ifdef __cplusplus
 }

@@ -749,7 +749,11 @@ static int wsa_test_build(void)
 
 /* ── Leg: the native leaf ─────────────────────────────────────────────── */
 
-enum wsa_hook_mode { WSA_HOOK_REAL, WSA_HOOK_STUB_SEND, WSA_HOOK_DRIFT };
+enum wsa_hook_mode { WSA_HOOK_REAL, WSA_HOOK_STUB_SEND, WSA_HOOK_DRIFT,
+                       WSA_HOOK_ADMIT };
+static bool g_admitted;
+#define WSA_TXID \
+    "abababababababababababababababababababababababababababababababab"
 
 static struct wsa_fix *g_fix;
 static int g_hook_mode;
@@ -781,9 +785,24 @@ static char *wsa_hook(const char *method, const char *params_json)
                        params_json);
         if (g_hook_mode == WSA_HOOK_STUB_SEND) {
             json_free(&params);
-            return strdup("{\"state\":\"committed\",\"txid\":\""
-                          "abababababababababababababababababababababababababababababababab"
+            return strdup("{\"state\":\"committed\",\"txid\":\"" WSA_TXID
                           "\",\"replayed\":false}");
+        }
+        if (g_hook_mode == WSA_HOOK_ADMIT) {
+            /* The node's send-once layer: the first call admits the sweep and
+             * its coins become spent; a repeat of the key replays. */
+            bool replay = g_admitted;
+            g_admitted = true;
+            for (unsigned id = 1; !replay && id <= 2; id++) {
+                uint8_t t[32] = { (uint8_t)id, 0 };
+                t[31] = 0xC7;
+                (void)db_wallet_utxo_delete(&g_fix->ndb, t, 0);
+            }
+            json_free(&params);
+            return strdup(replay ? "{\"state\":\"committed\",\"txid\":\"" WSA_TXID
+                                   "\",\"replayed\":true}"
+                                 : "{\"state\":\"committed\",\"txid\":\"" WSA_TXID
+                                   "\",\"replayed\":false}");
         }
         if (g_hook_mode == WSA_HOOK_DRIFT)
             (void)wsa_coin(g_fix, 900, 12345, 20, false, NULL);
@@ -862,9 +881,11 @@ static int wsa_test_leaf_plan(struct wsa_fix *fx, const char *from)
                   wsa_int(d, "amount_zat") == 3000 - WSA_FEE &&
                   wsa_int(d, "remaining_inputs") == 0 &&
                   wsa_int(d, "maturing_zat") == 7000);
-    WSA_CHECK("plan: the commit input names no destination and no amount",
-              !strstr(commit, "\"to\"") && !strstr(commit, "amount") &&
-                  strstr(commit, "plan_token"));
+    WSA_CHECK("plan: the commit input quotes the node's destination, count "
+              "and total, and no amount",
+              strstr(commit, fx->to) && strstr(commit, "\"input_count\":2") &&
+                  strstr(commit, "\"total_zat\":3000") &&
+                  !strstr(commit, "amount") && strstr(commit, "plan_token"));
     zcl_command_reply_free(&plan);
     return failures;
 }
@@ -875,14 +896,11 @@ static int wsa_test_leaf_commit(struct wsa_fix *fx, const char *from)
     struct zcl_command_reply plan, out;
     char commit[1024], with_to[1400];
 
-    /* A caller-supplied destination is ignored: the node's address is what the
-     * RPC receives. */
+    /* The RPC receives the destination the plan quoted. */
     g_hook_mode = WSA_HOOK_STUB_SEND;
     g_keyed_calls = 0;
     wsa_plan(from, &plan, commit, sizeof(commit));
-    (void)snprintf(with_to, sizeof(with_to), "%.*s,\"to\":\"zs1callerchosen\"}",
-                   (int)strlen(commit) - 1, commit);
-    wsa_leaf(with_to, &out);
+    wsa_leaf(commit, &out);
     WSA_CHECK("commit with a stub node: committed, mutated",
               out.exit_code == ZCL_COMMAND_EXIT_OK &&
                   json_get_bool(json_get(&out.data, "committed")) &&
@@ -895,17 +913,34 @@ static int wsa_test_leaf_commit(struct wsa_fix *fx, const char *from)
     WSA_CHECK("the reply echoes the destination the node chose",
               strcmp(json_get_str(json_get(&out.data, "to")), fx->to) == 0);
     zcl_command_reply_free(&out);
+
+    /* A destination swapped into the commit input no longer fits its token. */
+    const char *at = strstr(commit, fx->to);
+    WSA_CHECK("commit input quotes the destination", at != NULL);
+    if (at) {
+        (void)snprintf(with_to, sizeof(with_to), "%.*szs1callerchosen%s",
+                       (int)(at - commit), commit, at + strlen(fx->to));
+        g_keyed_calls = 0;
+        wsa_leaf(with_to, &out);
+        WSA_CHECK("a swapped destination: PLAN_TOKEN_MISMATCH, no keyed call",
+                  wsa_replied_code(&out, WALLET_SHIELD_CHANGED) &&
+                      g_keyed_calls == 0);
+        zcl_command_reply_free(&out);
+    }
     zcl_command_reply_free(&plan);
 
-    /* The token binds the coin set: a coin that arrives after the plan. */
+    /* The node compares the quoted coin set with its own: a coin that
+     * arrives after the plan. */
     g_hook_mode = WSA_HOOK_REAL;
     wsa_plan(from, &plan, commit, sizeof(commit));
     WSA_CHECK("extra coin saved", wsa_coin(fx, 50, 777, 21, false, NULL));
     g_keyed_calls = 0;
     wsa_leaf(commit, &out);
-    WSA_CHECK("a coin arriving after the plan: PLAN_TOKEN_MISMATCH, no "
-              "keyed call", wsa_replied_code(&out, WALLET_SHIELD_CHANGED) &&
-                                g_keyed_calls == 0);
+    WSA_CHECK("a coin arriving after the plan: the node refuses "
+              "PLAN_TOKEN_MISMATCH and frees the key",
+              wsa_replied_code(&out, WALLET_SHIELD_CHANGED) &&
+                  g_keyed_calls == 1 &&
+                  db_wallet_send_once_count(&fx->ndb) == 0);
     zcl_command_reply_free(&out);
     zcl_command_reply_free(&plan);
 
@@ -961,14 +996,75 @@ static int wsa_test_leaf_races(struct wsa_fix *fx, const char *from)
 
     /* A plan token from another sweep. */
     (void)snprintf(commit, sizeof(commit),
-                   "{\"wallet_scope\":\"dev\",\"from\":\"%s\",\"fee_zat\":%d,"
+                   "{\"wallet_scope\":\"dev\",\"from\":\"%s\",\"to\":\"%s\","
+                   "\"input_count\":1,\"total_zat\":1000,\"fee_zat\":%d,"
                    "\"idempotency_key\":\"%s\",\"confirm\":true,"
-                   "\"plan_token\":\"0000000000000000\"}", from, WSA_FEE,
-                   WSA_KEY);
+                   "\"plan_token\":\"0000000000000000\"}", from, fx->to,
+                   WSA_FEE, WSA_KEY);
+    g_keyed_calls = 0;
     wsa_leaf(commit, &out);
-    WSA_CHECK("a forged plan token: PLAN_TOKEN_MISMATCH",
-              wsa_replied_code(&out, WALLET_SHIELD_CHANGED));
+    WSA_CHECK("a forged plan token: PLAN_TOKEN_MISMATCH, no keyed call",
+              wsa_replied_code(&out, WALLET_SHIELD_CHANGED) &&
+                  g_keyed_calls == 0);
     zcl_command_reply_free(&out);
+    return failures;
+}
+
+/* A retry of a finished sweep: the first call admitted it and its coins are
+ * spent, so a fresh plan has nothing to shield. The same commit input still
+ * reaches the node, whose send-once layer replays the result. */
+static int wsa_test_leaf_replay(void)
+{
+    int failures = 0;
+    struct wsa_fix fx;
+    char from[128], commit[1024], later[1024];
+    struct zcl_command_reply plan, first, again, fresh;
+    WSA_CHECK("replay fixture opens", wsa_open(&fx, "replay", true));
+    wsa_addr(&fx.kid, from, sizeof(from));
+    WSA_CHECK("replay coins saved",
+              wsa_coin(&fx, 1, 1000, 5, false, NULL) &&
+                  wsa_coin(&fx, 2, 2000, 6, false, NULL));
+    g_fix = &fx;
+    g_hook_mode = WSA_HOOK_ADMIT;
+    node_rpc_client_set_test_hook(wsa_hook);
+    g_admitted = false;
+    g_keyed_calls = 0;
+    wsa_plan(from, &plan, commit, sizeof(commit));
+    wsa_leaf(commit, &first);
+    WSA_CHECK("first commit: committed, not replayed",
+              first.exit_code == ZCL_COMMAND_EXIT_OK &&
+                  strcmp(json_get_str(json_get(&first.data, "txid")),
+                         WSA_TXID) == 0 &&
+                  !json_get_bool(json_get(&first.data, "replayed")) &&
+                  first.error.mutated);
+    wsa_leaf(commit, &again);
+    WSA_CHECK("retry after the coins are spent: replayed, same txid, not "
+              "mutated, node reached again",
+              again.exit_code == ZCL_COMMAND_EXIT_OK &&
+                  strcmp(json_get_str(json_get(&again.data, "txid")),
+                         WSA_TXID) == 0 &&
+                  json_get_bool(json_get(&again.data, "replayed")) &&
+                  !again.error.mutated && g_keyed_calls == 2);
+    zcl_command_reply_free(&again);
+    wsa_plan(from, &fresh, later, sizeof(later));
+    WSA_CHECK("a fresh plan finds nothing left to shield",
+              wsa_replied_code(&fresh, WALLET_SHIELD_NOTHING));
+    zcl_command_reply_free(&fresh);
+
+    WSA_CHECK("a coin arrives between the two calls",
+              wsa_coin(&fx, 60, 555, 7, false, NULL));
+    wsa_leaf(commit, &again);
+    WSA_CHECK("retry after a new coin arrived: replayed, same txid",
+              again.exit_code == ZCL_COMMAND_EXIT_OK &&
+                  strcmp(json_get_str(json_get(&again.data, "txid")),
+                         WSA_TXID) == 0 &&
+                  json_get_bool(json_get(&again.data, "replayed")) &&
+                  g_keyed_calls == 3);
+    zcl_command_reply_free(&again);
+    zcl_command_reply_free(&first);
+    zcl_command_reply_free(&plan);
+    g_fix = NULL;
+    wsa_close(&fx);
     return failures;
 }
 
@@ -994,6 +1090,7 @@ static int wsa_test_leaf(void)
     failures += wsa_test_leaf_races(&fx, from);
     g_fix = NULL;
     wsa_close(&fx);
+    failures += wsa_test_leaf_replay();
     return failures;
 }
 

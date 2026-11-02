@@ -1370,10 +1370,11 @@ ZCL_COMMAND_READY_COMMAND(
     "when the node cannot prove. idempotency_key is required and recorded "
     "durably before anything is built: a repeat returns the earlier txid "
     "(replayed=true), SEND_IN_PROGRESS or SEND_OUTCOME_UNKNOWN and never sends "
-    "again.", 0,
+    "again. The commit input is the plan's own commit_input; its to, input_count "
+    "and total_zat are checked against the plan_token and by the node.", 0,
     "shielded,shield,sweep,private,t2z",
     "zcl.core_shielded_shield.input.v1", "zcl.shielded_shield.v1",
-    "wallet_scope,from,fee_zat,idempotency_key,plan_token,confirm", "",
+    "wallet_scope,from,to,input_count,total_zat,fee_zat,idempotency_key,plan_token,confirm", "",
     "z23 core wallet shielded shield --input='{\"wallet_scope\":\"dev\",\"idempotency_key\":\"shield-2026-0001\"}'",
     ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
     ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,

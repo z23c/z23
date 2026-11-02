@@ -552,11 +552,15 @@ change is zero by construction.
   `remaining_inputs`, `maturing_zat` and a `plan_token` that binds wallet scope,
   `from`, `to`, input count, total, fee and idempotency key. The plan works
   while the wallet is locked; it spends nothing.
-- **Commit.** The commit reads the sweep again and refuses
-  `PLAN_TOKEN_MISMATCH` before any send when any bound value moved, then passes
-  the count and total to the node, which checks them a second time when it
-  builds, so a coin that arrives between the check and the build cannot change
-  what is sent. The same send-once record, fee check (`FEE_CHANGED`), sovereignty
+- **Commit.** The commit input quotes the plan's destination, input count and
+  total. The leaf checks them against the plan token and passes them to the
+  node, which alone compares them with the coins it holds and refuses
+  `PLAN_TOKEN_MISMATCH` before any send when one moved, so a coin that arrives
+  between the plan and the build cannot change what is sent. The send-once
+  layer answers a repeated key before that comparison: a retry of a finished
+  sweep returns the same txid with `replayed: true` although its coins are
+  already spent, and a coin that arrived since does not turn it into a
+  refusal. The same send-once record, fee check (`FEE_CHANGED`), sovereignty
   guard and wallet lock guard as section 4.1 apply; a locked wallet refuses and
   frees the key. `NOTHING_TO_SHIELD` (mature total not above the fee) and
   `PROVING_UNAVAILABLE` also free the key.
