@@ -812,6 +812,7 @@ static int epoch_creation_accounting_test(void)
         ASSERT_EQ(vcs_zcode_epoch_creation_root(&parsed, root_b),
                   VCS_ZCODE_EPOCH_CREATION_OK);
         ASSERT(memcmp(root_a, root_b, 32) == 0);
+        vcs_zcode_epoch_creation_free(&parsed);
         wire[0] ^= 1;
         ASSERT_EQ(vcs_zcode_epoch_creation_parse(wire, wire_len, &parsed),
                   VCS_ZCODE_EPOCH_CREATION_MAGIC);

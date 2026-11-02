@@ -840,6 +840,7 @@ static int ps_closure_work_and_task(struct ps_node *n, struct ps_pkg *work)
     PS_CHECK("a posted task moves between peers on its own terms",
              ps_is_shape(n->store, task.root,
                          VCS_PACKAGE_PUBLIC_TASK_CONTEXT));
+    ps_pkg_free(&task);
     return failures;
 }
 

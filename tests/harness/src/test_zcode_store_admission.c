@@ -377,6 +377,7 @@ int t_store_chunk_flow(void)
     ZS_CHECK("chunks: CAS object stored under its hash",
              zs_path_exists(path));
 
+    zs_free_package(&p);
     vcs_package_store_close(s);
     test_rm_rf_recursive(dd);
     return failures;
