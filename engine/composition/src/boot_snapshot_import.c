@@ -865,6 +865,49 @@ static bool snapshot_import_settle_txn(struct node_db *ndb, bool ok,
     return committed;
 }
 
+/* Emits the checkpoint-rejection warning on behalf of boot_import_snapshot_db. */
+static void snapshot_import_log_checkpoint_reject(bool rejected, int64_t snap_height,
+    uint64_t cnt, const struct sha3_utxo_checkpoint *cp)
+{
+    if (!rejected)
+        return;
+    LOG_WARN_IN("boot_import_snapshot_db", "boot_snapshot_import",
+                "checkpoint SHA3 MISMATCH at h=%lld (count=%llu "
+                "want=%llu) — snapshot REJECTED, not installed as "
+                "ground truth",
+                (long long)snap_height, (unsigned long long)cnt,
+                (unsigned long long)cp->utxo_count);
+}
+
+/* Emits the failed-COMMIT warning on behalf of boot_import_snapshot_db. */
+static void snapshot_import_log_commit_rollback(bool commit_failed, struct node_db *ndb)
+{
+    /* A failed COMMIT (SQLITE_FULL / IO error) leaves the bulk-copy txn
+     * uncommitted — we must NOT then stamp coins_best_block at the
+     * snapshot tip (that is the snapshot-path coin-tear class). Capture
+     * the rc, roll back, and propagate failure so the caller falls back
+     * to normal sync instead of trusting a half-installed set. */
+    if (!commit_failed)
+        return;
+    LOG_WARN_IN("boot_import_snapshot_db", "boot_snapshot_import",
+                "COMMIT failed (%s) — rolling back snapshot install",
+                sqlite3_errmsg(ndb->db));
+}
+
+/* Completes the committed import and publishes the caller's outputs
+ * only when the completion succeeded. */
+static void snapshot_import_complete_and_publish(struct node_db *ndb,
+    int64_t *out_utxo_count, int64_t snap_utxos, int64_t *out_snap_height,
+    int64_t snap_height, uint8_t out_best_hash[32], const uint8_t best_hash[32],
+    bool *imported)
+{
+    *imported = snapshot_import_complete(ndb);
+    if (*imported)
+        snapshot_import_publish_outputs(out_utxo_count, snap_utxos,
+                                        out_snap_height, snap_height,
+                                        out_best_hash, best_hash);
+}
+
 bool boot_import_snapshot_db(struct node_db *ndb,
                               const char *snapshot_path,
                               int64_t *out_utxo_count,
@@ -987,30 +1030,10 @@ bool boot_import_snapshot_db(struct node_db *ndb,
     const struct sha3_utxo_checkpoint *cp = NULL;
     uint64_t cnt = 0;
     bool rejected = snapshot_import_checkpoint_rejects(ndb, &cp, snap_height, ok, &cnt);
-    {
-        if (rejected) {
-            LOG_WARN("boot_snapshot_import",
-                     "checkpoint SHA3 MISMATCH at h=%lld (count=%llu "
-                     "want=%llu) — snapshot REJECTED, not installed as "
-                     "ground truth",
-                     (long long)snap_height, (unsigned long long)cnt,
-                     (unsigned long long)cp->utxo_count);
-        }
-    }
+    snapshot_import_log_checkpoint_reject(rejected, snap_height, cnt, cp);
     ok = snapshot_import_mirror_unless_rejected(ndb, &pending, snap_utxos, ok, rejected);
     bool commit_failed = snapshot_import_commit_failed(ndb, ok);
-    {
-        /* A failed COMMIT (SQLITE_FULL / IO error) leaves the bulk-copy txn
-         * uncommitted — we must NOT then stamp coins_best_block at the
-         * snapshot tip (that is the snapshot-path coin-tear class). Capture
-         * the rc, roll back, and propagate failure so the caller falls back
-         * to normal sync instead of trusting a half-installed set. */
-        if (commit_failed) {
-            LOG_WARN("boot_snapshot_import",
-                     "COMMIT failed (%s) — rolling back snapshot install",
-                     sqlite3_errmsg(ndb->db));
-        }
-    }
+    snapshot_import_log_commit_rollback(commit_failed, ndb);
     ok = snapshot_import_settle_txn(ndb, ok, commit_failed);
 
     if (!ok) {
@@ -1019,10 +1042,9 @@ bool boot_import_snapshot_db(struct node_db *ndb,
         return false;
     }
 
-    if (!snapshot_import_complete(ndb))
-        return false;
-
-    snapshot_import_publish_outputs(out_utxo_count, snap_utxos, out_snap_height,
-                                    snap_height, out_best_hash, best_hash);
-    return true;
+    bool imported = false;
+    snapshot_import_complete_and_publish(ndb, out_utxo_count, snap_utxos,
+                                         out_snap_height, snap_height,
+                                         out_best_hash, best_hash, &imported);
+    return imported;
 }
