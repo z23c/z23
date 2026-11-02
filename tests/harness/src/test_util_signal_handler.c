@@ -352,6 +352,11 @@ static int test_darwin_unreadable_frame(void)
 }
 #endif
 
+/* Room for a whole crash dump: 64 symbolized frames under ThreadSanitizer
+ * measured 9452-9824 bytes (11-02), past the old 8192-byte read, which cut the
+ * "[fatal-signal] end" marker off. Callers assert the cap was not reached. */
+#define SIG_DUMP_CAP 65536
+
 /* Slurp up to cap-1 bytes of a file into buf (NUL-terminated). Returns bytes
  * read, or -1 if the file could not be opened. */
 static long slurp_file(const char *path, char *buf, size_t cap)
@@ -428,9 +433,10 @@ static int test_reraise_and_durable_mirror(void)
         ASSERT_EQ(WTERMSIG(status), SIGABRT);
 
         /* (a) stderr branch: exact marker for sig=6 + a real backtrace. */
-        char buf[8192];
+        static char buf[SIG_DUMP_CAP];
         long n = slurp_file(stderr_path, buf, sizeof(buf));
         ASSERT(n > 0);
+        ASSERT((size_t)n < sizeof(buf) - 1); /* the whole dump was read */
         ASSERT(strstr(buf, "[fatal-signal] sig=6") != NULL);
         ASSERT(strstr(buf, "[fatal-signal] end") != NULL);
         ASSERT(count_hex_frames(buf) >= 3);
@@ -438,9 +444,10 @@ static int test_reraise_and_durable_mirror(void)
         /* (b) durable mirror branch: the fsync'd crash log carries the SAME
          * marker (proves the g_crash_fd >= 0 mirror at signal_handler.c:132
          * actually ran and survived the hard death). */
-        char dbuf[8192];
+        static char dbuf[SIG_DUMP_CAP];
         long dn2 = slurp_file(durable_path, dbuf, sizeof(dbuf));
         ASSERT(dn2 > 0);
+        ASSERT((size_t)dn2 < sizeof(dbuf) - 1);
         ASSERT(strstr(dbuf, "[fatal-signal] sig=6") != NULL);
         ASSERT(count_hex_frames(dbuf) >= 3);
 
