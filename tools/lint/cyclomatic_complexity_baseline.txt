@@ -31,12 +31,6 @@ core/modules/sapling/src/groth16_prover.c:g1_msm:18
 core/modules/sapling/src/groth16_prover.c:g2_msm:18
 core/modules/sapling/src/groth16_prover.c:groth16_pk_read:20
 core/modules/sapling/src/groth16_prover.c:groth16_prove:63
-engine/entry/main_cli_modes.c:bench_crypto_vs_rust:44
-engine/entry/main_cli_modes.c:cli_rpc_call_internal_ex:29
-engine/entry/main_cli_modes.c:import_complete_shielded_mode:39
-engine/entry/main_cli_modes.c:importblockindex_cli_mode:20
-engine/entry/main_cli_modes.c:importchainstate_mode:19
-engine/entry/main_cli_modes.c:mintutxocommitment_mode:26
 tests/harness/src/test_engine.c:case_cli_argv:71
 tests/harness/src/test_engine.c:case_cli_observation:33
 tests/harness/src/test_engine.c:case_engine_unit_grok_projection_e2e:36

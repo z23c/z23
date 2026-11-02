@@ -977,6 +977,290 @@ static void bench_vsr_measure(struct bench_row *rows, size_t *nrows,
     if (ok) bench_vsr_record(rows, nrows, key, human, ns);
 }
 
+/* Append one equihash-200-9 row when the hermetic solution teeth pass. */
+static int bench_vsr_equihash(struct bench_row *row, double budget_ns,
+                              int samples)
+{
+    memset(row, 0, sizeof(*row));
+    /* ── Equihash (200,9) verify — hermetic ────────────────────────── */
+    struct block_header h;
+    verify_bench_fill_eh_header(&h);
+    bool pos = check_equihash_solution(&h, NULL);
+    struct block_header bad = h;
+    bad.nSolution[600] ^= 0x01;
+    bool neg = check_equihash_solution(&bad, NULL);
+    if (!pos || neg) {
+        fprintf(stderr, "[bench-crypto-vs-rust] REFUSING equihash: "
+                "hollow (valid=%d flipped=%d)\n", pos, neg);
+        return 0;
+    }
+    size_t n = 0;
+    bench_vsr_measure(row, &n, bench_verify_equihash, &h,
+                      "equihash-200-9", "equihash-200-9 verify",
+                      budget_ns, samples);
+    return (int)n;
+}
+
+/* Append one bls12-381 Fp-multiply row when square-consistency teeth pass. */
+static int bench_vsr_fp_mul(struct bench_row *row, double budget_ns,
+                            int samples)
+{
+    memset(row, 0, sizeof(*row));
+    /* ── BLS12-381 Fp multiply — hermetic ──────────────────────────── */
+    struct bench_fpmul_arg fa;
+    /* Both fixtures must be < the BLS12-381 field modulus q (top byte
+     * 0x1a); 0x11 and 0x07 repeated are safely canonical. */
+    uint8_t ba[48], bb[48];
+    memset(ba, 0x11, sizeof(ba));
+    memset(bb, 0x07, sizeof(bb));
+    bool va = fp_from_bytes(&fa.a, ba);
+    bool vb = fp_from_bytes(&fa.b, bb);
+    /* TEETH (Montgomery-form agnostic): the multiply must agree with the
+     * independent squaring routine (fp_mul(a,a) == fp_sq(a)) and produce a
+     * non-zero, non-trivial result. A no-op multiply (returns an operand)
+     * or a constant-output multiply fails square-consistency. */
+    struct fp sq, mm, ab;
+    fp_sq(&sq, &fa.a);
+    fp_mul(&mm, &fa.a, &fa.a);
+    fp_mul(&ab, &fa.a, &fa.b);
+    bool sq_consistent = va && vb && fp_eq(&sq, &mm);
+    bool nondegen = sq_consistent && !fp_is_zero(&ab) &&
+                    !fp_eq(&ab, &fa.a) && !fp_eq(&ab, &fa.b);
+    if (!sq_consistent || !nondegen) {
+        fprintf(stderr, "[bench-crypto-vs-rust] REFUSING bls-fp-mul: "
+                "teeth failed (sq_consistent=%d nondegen=%d)\n",
+                sq_consistent, nondegen);
+        return 0;
+    }
+    size_t n = 0;
+    bench_vsr_measure(row, &n, bench_fpmul, &fa,
+                      "bls12-381-fp-mul", "bls12-381 Fp multiply",
+                      budget_ns, samples);
+    return (int)n;
+}
+
+/* Append one BLS12-381 Ate pairing row when the generator teeth pass. */
+static int bench_vsr_pairing(struct bench_row *row, double budget_ns,
+                             int samples)
+{
+    memset(row, 0, sizeof(*row));
+    /* ── BLS12-381 optimal-Ate pairing (miller loop + final exp) ───── */
+    static const uint8_t G1_GEN[48] = {
+        0x97,0xf1,0xd3,0xa7,0x31,0x97,0xd7,0x94,0x26,0x95,0x63,0x8c,
+        0x4f,0xa9,0xac,0x0f,0xc3,0x68,0x8c,0x4f,0x97,0x74,0xb9,0x05,
+        0xa1,0x4e,0x3a,0x3f,0x17,0x1b,0xac,0x58,0x6c,0x55,0xe8,0x3f,
+        0xf9,0x7a,0x1a,0xef,0xfb,0x3a,0xf0,0x0a,0xdb,0x22,0xc6,0xbb };
+    static const uint8_t G2_GEN[96] = {
+        0x93,0xe0,0x2b,0x60,0x52,0x71,0x9f,0x60,0x7d,0xac,0xd3,0xa0,
+        0x88,0x27,0x4f,0x65,0x59,0x6b,0xd0,0xd0,0x99,0x20,0xb6,0x1a,
+        0xb5,0xda,0x61,0xbb,0xdc,0x7f,0x50,0x49,0x33,0x4c,0xf1,0x12,
+        0x13,0x94,0x5d,0x57,0xe5,0xac,0x7d,0x05,0x5d,0x04,0x2b,0x7e,
+        0x02,0x4a,0xa2,0xb2,0xf0,0x8f,0x0a,0x91,0x26,0x08,0x05,0x27,
+        0x2d,0xc5,0x10,0x51,0xc6,0xe4,0x7a,0xd4,0xfa,0x40,0x3b,0x02,
+        0xb4,0x51,0x0b,0x64,0x7a,0xe3,0xd1,0x77,0x0b,0xac,0x03,0x26,
+        0xa8,0x05,0xbb,0xef,0xd4,0x80,0x56,0xc8,0xc1,0x21,0xbd,0xb8 };
+    struct bench_pairing_arg pa;
+    bool g1_ok = g1_from_compressed(&pa.g1, G1_GEN);
+    bool g2_ok = g2_from_compressed(&pa.g2, G2_GEN);
+    /* TEETH: e(G1,G2) must be a non-degenerate GT element (!=1, !=0). */
+    bool teeth = false;
+    if (g1_ok && g2_ok) {
+        struct fp12 r, one12;
+        bls12_381_pairing(&r, &pa.g1, &pa.g2);
+        fp12_one(&one12);
+        teeth = !fp12_is_zero(&r) && !(fp12_sub(&one12, &one12, &r),
+                                       fp12_is_zero(&one12));
+    }
+    if (!teeth) {
+        fprintf(stderr, "[bench-crypto-vs-rust] REFUSING bls-pairing: "
+                "teeth failed (g1=%d g2=%d)\n", g1_ok, g2_ok);
+        return 0;
+    }
+    size_t n = 0;
+    bench_vsr_measure(row, &n, bench_pairing, &pa,
+                      "bls12-381-pairing", "bls12-381 Ate pairing",
+                      budget_ns, samples);
+    return (int)n;
+}
+
+/* Append one secp256k1 ECDSA-verify row when the round-trip teeth pass. */
+static int bench_vsr_ecdsa(struct bench_row *row, double budget_ns,
+                           int samples)
+{
+    memset(row, 0, sizeof(*row));
+    /* ── secp256k1 ECDSA verify — locally signed round-trip ────────── */
+    ecc_start();
+    ecc_verify_init();
+    struct bench_ecdsa_arg ea;
+    struct privkey k;
+    privkey_make_new(&k, true);
+    for (int i = 0; i < 32; ++i) ea.hash.data[i] = (uint8_t)(i * 7 + 1);
+    ea.siglen = sizeof(ea.sig);
+    bool signed_ok = privkey_get_pubkey(&k, &ea.pk) &&
+                     privkey_sign(&k, &ea.hash, ea.sig, &ea.siglen);
+    /* TEETH: valid sig -> true, corrupted hash -> false. */
+    bool pos = signed_ok &&
+               pubkey_verify(&ea.pk, &ea.hash, ea.sig, ea.siglen);
+    struct uint256 badh = ea.hash;
+    badh.data[0] ^= 0x01;
+    bool neg = signed_ok &&
+               pubkey_verify(&ea.pk, &badh, ea.sig, ea.siglen);
+    int produced = 0;
+    if (!pos || neg) {
+        fprintf(stderr, "[bench-crypto-vs-rust] REFUSING secp256k1: "
+                "teeth failed (valid=%d corrupted=%d)\n", pos, neg);
+    } else {
+        size_t n = 0;
+        bench_vsr_measure(row, &n, bench_verify_ecdsa, &ea,
+                          "secp256k1-ecdsa-verify", "secp256k1 ECDSA verify",
+                          budget_ns, samples);
+        produced = (int)n;
+    }
+    ecc_verify_destroy();
+    ecc_stop();
+    return produced;
+}
+
+/* Append one ed25519-verify row when the RFC 8032 teeth pass. */
+static int bench_vsr_ed25519(struct bench_row *row, double budget_ns,
+                             int samples)
+{
+    memset(row, 0, sizeof(*row));
+    /* ── ed25519 verify (JoinSplit) — RFC 8032 Test 2 vector ───────── */
+    struct bench_ed_arg ed;
+    static const uint8_t ED_PK[32] = {
+        0x3d,0x40,0x17,0xc3,0xe8,0x43,0x89,0x5a,0x92,0xb7,0x0a,0xa7,
+        0x4d,0x1b,0x7e,0xbc,0x9c,0x98,0x2c,0xcf,0x2e,0xc4,0x96,0x8c,
+        0xc0,0xcd,0x55,0xf1,0x2a,0xf4,0x66,0x0c };
+    static const uint8_t ED_SIG[64] = {
+        0x92,0xa0,0x09,0xa9,0xf0,0xd4,0xca,0xb8,0x72,0x0e,0x82,0x0b,
+        0x5f,0x64,0x25,0x40,0xa2,0xb2,0x7b,0x54,0x16,0x50,0x3f,0x8f,
+        0xb3,0x76,0x22,0x23,0xeb,0xdb,0x69,0xda,0x08,0x5a,0xc1,0xe4,
+        0x3e,0x15,0x99,0x6e,0x45,0x8f,0x36,0x13,0xd0,0xf1,0x1d,0x8c,
+        0x38,0x7b,0x2e,0xae,0xb4,0x30,0x2a,0xee,0xb0,0x0d,0x29,0x16,
+        0x12,0xbb,0x0c,0x00 };
+    static const uint8_t ED_MSG[1] = { 0x72 };
+    memcpy(ed.pk, ED_PK, 32);
+    memcpy(ed.sig, ED_SIG, 64);
+    ed.msg = ED_MSG;
+    ed.msglen = 1;
+    bool pos = ed25519_verify(ed.sig, ed.msg, ed.msglen, ed.pk);
+    uint8_t bad_sig[64];
+    memcpy(bad_sig, ED_SIG, 64);
+    bad_sig[10] ^= 0x01;
+    bool neg = ed25519_verify(bad_sig, ed.msg, ed.msglen, ed.pk);
+    if (!pos || neg) {
+        fprintf(stderr, "[bench-crypto-vs-rust] REFUSING ed25519: "
+                "teeth failed (valid=%d corrupted=%d)\n", pos, neg);
+        return 0;
+    }
+    size_t n = 0;
+    bench_vsr_measure(row, &n, bench_verify_ed25519, &ed,
+                      "ed25519-verify", "ed25519 verify",
+                      budget_ns, samples);
+    return (int)n;
+}
+
+/* Append sha256, sha3-256, and blake2b rows whose avalanche teeth pass. */
+static int bench_vsr_hashes(struct bench_row *row, double budget_ns,
+                            int samples)
+{
+    memset(row, 0, sizeof(*row) * 3);
+    /* ── Hash primitives — 1 KiB message, avalanche teeth ──────────── */
+    static uint8_t msg1k[1024];
+    for (size_t i = 0; i < sizeof(msg1k); ++i) msg1k[i] = (uint8_t)(i * 131 + 7);
+
+    struct { const char *key; const char *human; bool (*fn)(void *); } H[] = {
+        { "sha256",   "SHA256 (1 KiB)",    bench_hash_sha256   },
+        { "sha3-256", "SHA3-256 (1 KiB)",  bench_hash_sha3_256 },
+        { "blake2b",  "BLAKE2b-512 (1 KiB)", bench_hash_blake2b },
+    };
+    int produced = 0;
+    for (size_t hi = 0; hi < sizeof(H) / sizeof(H[0]); ++hi) {
+        struct bench_hash_arg ha = { .buf = msg1k, .len = sizeof(msg1k) };
+        /* TEETH: avalanche — digest depends on all input and is not a
+         * copy of the input (defeats no-op / constant-output hashes). */
+        H[hi].fn(&ha);
+        uint8_t d0[64];
+        memcpy(d0, ha.out, 64);
+        uint8_t flipped[1024];
+        memcpy(flipped, msg1k, sizeof(flipped));
+        flipped[500] ^= 0x01;
+        struct bench_hash_arg hb = { .buf = flipped, .len = sizeof(flipped) };
+        H[hi].fn(&hb);
+        bool avalanche = memcmp(d0, hb.out, 32) != 0;
+        bool not_copy = memcmp(d0, msg1k, 32) != 0;
+        if (!avalanche || !not_copy) {
+            fprintf(stderr, "[bench-crypto-vs-rust] REFUSING %s: teeth "
+                    "failed (avalanche=%d not_copy=%d)\n",
+                    H[hi].key, avalanche, not_copy);
+            continue;
+        }
+        struct bench_hash_arg ht = { .buf = msg1k, .len = sizeof(msg1k) };
+        size_t n = 0;
+        bench_vsr_measure(row + produced, &n, H[hi].fn, &ht, H[hi].key,
+                          H[hi].human, budget_ns, samples);
+        produced += (int)n;
+    }
+    return produced;
+}
+
+/* Append one groth16 output-verify row, or skip when params or teeth fail. */
+static int bench_vsr_groth16(struct bench_row *row, double budget_ns,
+                             int samples)
+{
+    memset(row, 0, sizeof(*row));
+    /* ── Groth16 / BLS12-381 output-proof verify — needs params ────── */
+    const char *home = getenv("HOME");
+    char params_dir[512];
+    snprintf(params_dir, sizeof(params_dir), "%s/.zcash-params",
+             (home && *home) ? home : ".");
+    if (!sapling_init_params(params_dir)) {
+        printf("  groth16-bls12-381-output verify: %s unusable -> SKIPPED "
+               "(absent, or present and REFUSED)\n", params_dir);
+        return 0;
+    }
+    struct bench_groth16_arg ga;
+    bool built = bench_cv_groth16_build(&ga);
+    if (!built) {
+        fprintf(stderr, "[bench-crypto-vs-rust] no groth16 row: the "
+                "verify benchmark needs a freshly proved "
+                "output description and this build has no "
+                "native Sapling proving backend or it is not "
+                "ready (backend=%s status=%s).\n",
+                zclassic_sapling_prover_backend(),
+                zclassic_sapling_prover_status());
+        return 0;
+    }
+    bool pos, neg;
+    bench_groth16_teeth(&ga, &pos, &neg);
+    if (!pos || neg) {
+        fprintf(stderr, "[bench-crypto-vs-rust] REFUSING groth16: "
+                "hollow (valid=%d flipped=%d)\n", pos, neg);
+        return 0;
+    }
+    size_t n = 0;
+    bench_vsr_measure(row, &n, bench_verify_groth16, &ga,
+                      "groth16-bls12-381-output",
+                      "groth16 output verify", budget_ns,
+                      samples);
+    return (int)n;
+}
+
+/* Append the produced rows, or report that the run produced none. */
+static int bench_vsr_commit(const char *path, const struct bench_row *rows,
+                            size_t nrows)
+{
+    if (nrows == 0) {
+        fprintf(stderr,
+            "[bench-crypto-vs-rust] no rows produced (nothing appended)\n");
+        return 1;
+    }
+    printf("\n  appended %zu row(s) to %s\n", nrows, path);
+    if (g_bench_verify_sink == 0xdeadbeefULL) fputc(' ', stderr);
+    return bench_history_append(path, rows, nrows) ? 0 : 1;
+}
+
 static int bench_crypto_vs_rust(void)
 {
     const char *path = bench_history_path();
@@ -1010,239 +1294,14 @@ static int bench_crypto_vs_rust(void)
 
     struct bench_row rows[16];
     size_t nrows = 0;
-
-    /* ── Equihash (200,9) verify — hermetic ────────────────────────── */
-    {
-        struct block_header h;
-        verify_bench_fill_eh_header(&h);
-        bool pos = check_equihash_solution(&h, NULL);
-        struct block_header bad = h;
-        bad.nSolution[600] ^= 0x01;
-        bool neg = check_equihash_solution(&bad, NULL);
-        if (!pos || neg) {
-            fprintf(stderr, "[bench-crypto-vs-rust] REFUSING equihash: "
-                    "hollow (valid=%d flipped=%d)\n", pos, neg);
-        } else {
-            bench_vsr_measure(rows, &nrows, bench_verify_equihash, &h,
-                              "equihash-200-9", "equihash-200-9 verify",
-                              budget_ns, samples);
-        }
-    }
-
-    /* ── BLS12-381 Fp multiply — hermetic ──────────────────────────── */
-    {
-        struct bench_fpmul_arg fa;
-        /* Both fixtures must be < the BLS12-381 field modulus q (top byte
-         * 0x1a); 0x11 and 0x07 repeated are safely canonical. */
-        uint8_t ba[48], bb[48];
-        memset(ba, 0x11, sizeof(ba));
-        memset(bb, 0x07, sizeof(bb));
-        bool va = fp_from_bytes(&fa.a, ba);
-        bool vb = fp_from_bytes(&fa.b, bb);
-        /* TEETH (Montgomery-form agnostic): the multiply must agree with the
-         * independent squaring routine (fp_mul(a,a) == fp_sq(a)) and produce a
-         * non-zero, non-trivial result. A no-op multiply (returns an operand)
-         * or a constant-output multiply fails square-consistency. */
-        struct fp sq, mm, ab;
-        fp_sq(&sq, &fa.a);
-        fp_mul(&mm, &fa.a, &fa.a);
-        fp_mul(&ab, &fa.a, &fa.b);
-        bool sq_consistent = va && vb && fp_eq(&sq, &mm);
-        bool nondegen = sq_consistent && !fp_is_zero(&ab) &&
-                        !fp_eq(&ab, &fa.a) && !fp_eq(&ab, &fa.b);
-        if (!sq_consistent || !nondegen) {
-            fprintf(stderr, "[bench-crypto-vs-rust] REFUSING bls-fp-mul: "
-                    "teeth failed (sq_consistent=%d nondegen=%d)\n",
-                    sq_consistent, nondegen);
-        } else {
-            bench_vsr_measure(rows, &nrows, bench_fpmul, &fa,
-                              "bls12-381-fp-mul", "bls12-381 Fp multiply",
-                              budget_ns, samples);
-        }
-    }
-
-    /* ── BLS12-381 optimal-Ate pairing (miller loop + final exp) ───── */
-    {
-        static const uint8_t G1_GEN[48] = {
-            0x97,0xf1,0xd3,0xa7,0x31,0x97,0xd7,0x94,0x26,0x95,0x63,0x8c,
-            0x4f,0xa9,0xac,0x0f,0xc3,0x68,0x8c,0x4f,0x97,0x74,0xb9,0x05,
-            0xa1,0x4e,0x3a,0x3f,0x17,0x1b,0xac,0x58,0x6c,0x55,0xe8,0x3f,
-            0xf9,0x7a,0x1a,0xef,0xfb,0x3a,0xf0,0x0a,0xdb,0x22,0xc6,0xbb };
-        static const uint8_t G2_GEN[96] = {
-            0x93,0xe0,0x2b,0x60,0x52,0x71,0x9f,0x60,0x7d,0xac,0xd3,0xa0,
-            0x88,0x27,0x4f,0x65,0x59,0x6b,0xd0,0xd0,0x99,0x20,0xb6,0x1a,
-            0xb5,0xda,0x61,0xbb,0xdc,0x7f,0x50,0x49,0x33,0x4c,0xf1,0x12,
-            0x13,0x94,0x5d,0x57,0xe5,0xac,0x7d,0x05,0x5d,0x04,0x2b,0x7e,
-            0x02,0x4a,0xa2,0xb2,0xf0,0x8f,0x0a,0x91,0x26,0x08,0x05,0x27,
-            0x2d,0xc5,0x10,0x51,0xc6,0xe4,0x7a,0xd4,0xfa,0x40,0x3b,0x02,
-            0xb4,0x51,0x0b,0x64,0x7a,0xe3,0xd1,0x77,0x0b,0xac,0x03,0x26,
-            0xa8,0x05,0xbb,0xef,0xd4,0x80,0x56,0xc8,0xc1,0x21,0xbd,0xb8 };
-        struct bench_pairing_arg pa;
-        bool g1_ok = g1_from_compressed(&pa.g1, G1_GEN);
-        bool g2_ok = g2_from_compressed(&pa.g2, G2_GEN);
-        /* TEETH: e(G1,G2) must be a non-degenerate GT element (!=1, !=0). */
-        bool teeth = false;
-        if (g1_ok && g2_ok) {
-            struct fp12 r, one12;
-            bls12_381_pairing(&r, &pa.g1, &pa.g2);
-            fp12_one(&one12);
-            teeth = !fp12_is_zero(&r) && !(fp12_sub(&one12, &one12, &r),
-                                           fp12_is_zero(&one12));
-        }
-        if (!teeth) {
-            fprintf(stderr, "[bench-crypto-vs-rust] REFUSING bls-pairing: "
-                    "teeth failed (g1=%d g2=%d)\n", g1_ok, g2_ok);
-        } else {
-            bench_vsr_measure(rows, &nrows, bench_pairing, &pa,
-                              "bls12-381-pairing", "bls12-381 Ate pairing",
-                              budget_ns, samples);
-        }
-    }
-
-    /* ── secp256k1 ECDSA verify — locally signed round-trip ────────── */
-    {
-        ecc_start();
-        ecc_verify_init();
-        struct bench_ecdsa_arg ea;
-        struct privkey k;
-        privkey_make_new(&k, true);
-        for (int i = 0; i < 32; ++i) ea.hash.data[i] = (uint8_t)(i * 7 + 1);
-        ea.siglen = sizeof(ea.sig);
-        bool signed_ok = privkey_get_pubkey(&k, &ea.pk) &&
-                         privkey_sign(&k, &ea.hash, ea.sig, &ea.siglen);
-        /* TEETH: valid sig -> true, corrupted hash -> false. */
-        bool pos = signed_ok &&
-                   pubkey_verify(&ea.pk, &ea.hash, ea.sig, ea.siglen);
-        struct uint256 badh = ea.hash;
-        badh.data[0] ^= 0x01;
-        bool neg = signed_ok &&
-                   pubkey_verify(&ea.pk, &badh, ea.sig, ea.siglen);
-        if (!pos || neg) {
-            fprintf(stderr, "[bench-crypto-vs-rust] REFUSING secp256k1: "
-                    "teeth failed (valid=%d corrupted=%d)\n", pos, neg);
-        } else {
-            bench_vsr_measure(rows, &nrows, bench_verify_ecdsa, &ea,
-                              "secp256k1-ecdsa-verify", "secp256k1 ECDSA verify",
-                              budget_ns, samples);
-        }
-        ecc_verify_destroy();
-        ecc_stop();
-    }
-
-    /* ── ed25519 verify (JoinSplit) — RFC 8032 Test 2 vector ───────── */
-    {
-        struct bench_ed_arg ed;
-        static const uint8_t ED_PK[32] = {
-            0x3d,0x40,0x17,0xc3,0xe8,0x43,0x89,0x5a,0x92,0xb7,0x0a,0xa7,
-            0x4d,0x1b,0x7e,0xbc,0x9c,0x98,0x2c,0xcf,0x2e,0xc4,0x96,0x8c,
-            0xc0,0xcd,0x55,0xf1,0x2a,0xf4,0x66,0x0c };
-        static const uint8_t ED_SIG[64] = {
-            0x92,0xa0,0x09,0xa9,0xf0,0xd4,0xca,0xb8,0x72,0x0e,0x82,0x0b,
-            0x5f,0x64,0x25,0x40,0xa2,0xb2,0x7b,0x54,0x16,0x50,0x3f,0x8f,
-            0xb3,0x76,0x22,0x23,0xeb,0xdb,0x69,0xda,0x08,0x5a,0xc1,0xe4,
-            0x3e,0x15,0x99,0x6e,0x45,0x8f,0x36,0x13,0xd0,0xf1,0x1d,0x8c,
-            0x38,0x7b,0x2e,0xae,0xb4,0x30,0x2a,0xee,0xb0,0x0d,0x29,0x16,
-            0x12,0xbb,0x0c,0x00 };
-        static const uint8_t ED_MSG[1] = { 0x72 };
-        memcpy(ed.pk, ED_PK, 32);
-        memcpy(ed.sig, ED_SIG, 64);
-        ed.msg = ED_MSG;
-        ed.msglen = 1;
-        bool pos = ed25519_verify(ed.sig, ed.msg, ed.msglen, ed.pk);
-        uint8_t bad_sig[64];
-        memcpy(bad_sig, ED_SIG, 64);
-        bad_sig[10] ^= 0x01;
-        bool neg = ed25519_verify(bad_sig, ed.msg, ed.msglen, ed.pk);
-        if (!pos || neg) {
-            fprintf(stderr, "[bench-crypto-vs-rust] REFUSING ed25519: "
-                    "teeth failed (valid=%d corrupted=%d)\n", pos, neg);
-        } else {
-            bench_vsr_measure(rows, &nrows, bench_verify_ed25519, &ed,
-                              "ed25519-verify", "ed25519 verify",
-                              budget_ns, samples);
-        }
-    }
-
-    /* ── Hash primitives — 1 KiB message, avalanche teeth ──────────── */
-    {
-        static uint8_t msg1k[1024];
-        for (size_t i = 0; i < sizeof(msg1k); ++i) msg1k[i] = (uint8_t)(i * 131 + 7);
-
-        struct { const char *key; const char *human; bool (*fn)(void *); } H[] = {
-            { "sha256",   "SHA256 (1 KiB)",    bench_hash_sha256   },
-            { "sha3-256", "SHA3-256 (1 KiB)",  bench_hash_sha3_256 },
-            { "blake2b",  "BLAKE2b-512 (1 KiB)", bench_hash_blake2b },
-        };
-        for (size_t hi = 0; hi < sizeof(H) / sizeof(H[0]); ++hi) {
-            struct bench_hash_arg ha = { .buf = msg1k, .len = sizeof(msg1k) };
-            /* TEETH: avalanche — digest depends on all input and is not a
-             * copy of the input (defeats no-op / constant-output hashes). */
-            H[hi].fn(&ha);
-            uint8_t d0[64];
-            memcpy(d0, ha.out, 64);
-            uint8_t flipped[1024];
-            memcpy(flipped, msg1k, sizeof(flipped));
-            flipped[500] ^= 0x01;
-            struct bench_hash_arg hb = { .buf = flipped, .len = sizeof(flipped) };
-            H[hi].fn(&hb);
-            bool avalanche = memcmp(d0, hb.out, 32) != 0;
-            bool not_copy = memcmp(d0, msg1k, 32) != 0;
-            if (!avalanche || !not_copy) {
-                fprintf(stderr, "[bench-crypto-vs-rust] REFUSING %s: teeth "
-                        "failed (avalanche=%d not_copy=%d)\n",
-                        H[hi].key, avalanche, not_copy);
-                continue;
-            }
-            struct bench_hash_arg ht = { .buf = msg1k, .len = sizeof(msg1k) };
-            bench_vsr_measure(rows, &nrows, H[hi].fn, &ht, H[hi].key,
-                              H[hi].human, budget_ns, samples);
-        }
-    }
-
-    /* ── Groth16 / BLS12-381 output-proof verify — needs params ────── */
-    {
-        const char *home = getenv("HOME");
-        char params_dir[512];
-        snprintf(params_dir, sizeof(params_dir), "%s/.zcash-params",
-                 (home && *home) ? home : ".");
-        if (!sapling_init_params(params_dir)) {
-            printf("  groth16-bls12-381-output verify: %s unusable -> SKIPPED "
-                   "(absent, or present and REFUSED)\n", params_dir);
-        } else {
-            struct bench_groth16_arg ga;
-            bool built = bench_cv_groth16_build(&ga);
-            if (!built) {
-                fprintf(stderr, "[bench-crypto-vs-rust] no groth16 row: the "
-                        "verify benchmark needs a freshly proved "
-                        "output description and this build has no "
-                        "native Sapling proving backend or it is not "
-                        "ready (backend=%s status=%s).\n",
-                        zclassic_sapling_prover_backend(),
-                        zclassic_sapling_prover_status());
-            } else {
-                bool pos, neg;
-                bench_groth16_teeth(&ga, &pos, &neg);
-                if (!pos || neg) {
-                    fprintf(stderr, "[bench-crypto-vs-rust] REFUSING groth16: "
-                            "hollow (valid=%d flipped=%d)\n", pos, neg);
-                } else {
-                    bench_vsr_measure(rows, &nrows, bench_verify_groth16, &ga,
-                                      "groth16-bls12-381-output",
-                                      "groth16 output verify", budget_ns,
-                                      samples);
-                }
-            }
-        }
-    }
-
-    if (nrows == 0) {
-        fprintf(stderr,
-            "[bench-crypto-vs-rust] no rows produced (nothing appended)\n");
-        return 1;
-    }
-    printf("\n  appended %zu row(s) to %s\n", nrows, path);
-    if (g_bench_verify_sink == 0xdeadbeefULL) fputc(' ', stderr);
-    return bench_history_append(path, rows, nrows) ? 0 : 1;
+    nrows += (size_t)bench_vsr_equihash(&rows[nrows], budget_ns, samples);
+    nrows += (size_t)bench_vsr_fp_mul(&rows[nrows], budget_ns, samples);
+    nrows += (size_t)bench_vsr_pairing(&rows[nrows], budget_ns, samples);
+    nrows += (size_t)bench_vsr_ecdsa(&rows[nrows], budget_ns, samples);
+    nrows += (size_t)bench_vsr_ed25519(&rows[nrows], budget_ns, samples);
+    nrows += (size_t)bench_vsr_hashes(&rows[nrows], budget_ns, samples);
+    nrows += (size_t)bench_vsr_groth16(&rows[nrows], budget_ns, samples);
+    return bench_vsr_commit(path, rows, nrows);
 }
 
 int bench_mode_main(int argc, char **argv)
@@ -1766,17 +1825,10 @@ static int cli_rpc_timeout_sec(void)
     return CLI_RPC_TIMEOUT_SEC;
 }
 
-static char *cli_rpc_call_internal_ex(const char *body, size_t body_len,
-                                      bool quiet,
-                                      enum cli_rpc_outcome *outcome)
+/* Connect to 127.0.0.1:cli_port. On failure set *outcome, report, and close. */
+static int cli_rpc_connect_localhost(platform_socket_t sock, bool quiet,
+                                    enum cli_rpc_outcome *outcome)
 {
-    if (outcome) *outcome = CLI_RPC_OK;
-
-    platform_socket_t sock = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
-    if (sock == PLATFORM_SOCKET_INVALID) {
-        if (outcome) *outcome = CLI_RPC_OTHER_ERROR;
-        return NULL;
-    }
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -1812,8 +1864,105 @@ static char *cli_rpc_call_internal_ex(const char *body, size_t body_len,
                            connect_errno, socket_error, sizeof(socket_error)));
         }
         platform_socket_close(sock);
+        return -1;
+    }
+    return 0;
+}
+
+/* Read the HTTP response and close sock. *timed_out and *len are set
+ * before every return; NULL means the buffer was not allocated. */
+static char *cli_rpc_recv_response(platform_socket_t sock,
+                                  enum cli_rpc_outcome *outcome,
+                                  bool *timed_out, size_t *len)
+{
+    *timed_out = false;
+    *len = 0;
+    size_t cap = 65536;
+    char *buf = malloc(cap);
+    if (!buf) {
+        if (outcome) *outcome = CLI_RPC_OTHER_ERROR;
+        platform_socket_close(sock);
         return NULL;
     }
+    for (;;) {
+        if (*len + 4096 > cap) {
+            size_t next_cap = cap * 2;
+            char *next = realloc(buf, next_cap);
+            if (!next) {
+                free(buf);
+                platform_socket_close(sock);
+                if (outcome) *outcome = CLI_RPC_OTHER_ERROR;
+                return NULL;
+            }
+            buf = next;
+            cap = next_cap;
+        }
+        ssize_t n = recv(sock, buf + *len, cap - *len - 1, 0);
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                *timed_out = true;
+            break;
+        }
+        if (n == 0) break;
+        *len += (size_t)n;
+    }
+    platform_socket_close(sock);
+    return buf;
+}
+
+/* Free buf and report CLI_RPC_TIMEOUT when the read timed out with no bytes. */
+static int cli_rpc_response_timeout(char *buf, bool timed_out, size_t len,
+                                   bool quiet, int timeout_sec,
+                                   enum cli_rpc_outcome *outcome)
+{
+    if (!(timed_out && len == 0))
+        return 0;
+    free(buf);
+    if (outcome) *outcome = CLI_RPC_TIMEOUT;
+    if (!quiet)
+        fprintf(stderr,
+               "error=RESPONSE_TIMEOUT detail=127.0.0.1:%d accepted "
+               "the connection but did not answer within %ds try=node "
+               "is busy — retry, or inspect `ops state "
+               "--subsystem=supervisor` for a stalled child\n",
+               cli_port, timeout_sec);
+    return 1;
+}
+
+/* Classify auth rejection off the status line BEFORE stripping it —
+ * httpserver.c always sends "HTTP/1.1 <code> <reason>\r\n...". A
+ * wrong/stale cookie (the other datadir's, if auto-discovery guessed
+ * wrong, or a stale explicit -datadir=) reads back as 401 here. */
+static void cli_rpc_note_auth_rejection(char *buf,
+                                       enum cli_rpc_outcome *outcome)
+{
+    if (!outcome)
+        return;
+    char *sp = strchr(buf, ' ');
+    if (sp && strncmp(sp + 1, "401", 3) == 0)
+        *outcome = CLI_RPC_AUTH_REJECTED;
+}
+
+/* Drop the HTTP header block, leaving the body at the start of buf. */
+static void cli_rpc_strip_http_headers(char *buf)
+{
+    char *start = strstr(buf, "\r\n\r\n");
+    if (start) { start += 4; memmove(buf, start, strlen(start) + 1); }
+}
+
+static char *cli_rpc_call_internal_ex(const char *body, size_t body_len,
+                                      bool quiet,
+                                      enum cli_rpc_outcome *outcome)
+{
+    if (outcome) *outcome = CLI_RPC_OK;
+
+    platform_socket_t sock = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
+    if (sock == PLATFORM_SOCKET_INVALID) {
+        if (outcome) *outcome = CLI_RPC_OTHER_ERROR;
+        return NULL;
+    }
+    if (cli_rpc_connect_localhost(sock, quiet, outcome) != 0)
+        return NULL;
 
     /* Past this point the peer accepted the TCP connection, so a hang now
      * means "accepted but not answering" (busy/wedged), not "not running"
@@ -1836,64 +1985,18 @@ static char *cli_rpc_call_internal_ex(const char *body, size_t body_len,
     send(sock, hdr, (size_t)hlen, 0);
     send(sock, body, body_len, 0);
 
-    size_t cap = 65536, len = 0;
-    char *buf = malloc(cap);
-    if (!buf) {
-        if (outcome) *outcome = CLI_RPC_OTHER_ERROR;
-        platform_socket_close(sock);
-        return NULL;
-    }
     bool timed_out = false;
-    for (;;) {
-        if (len + 4096 > cap) {
-            size_t next_cap = cap * 2;
-            char *next = realloc(buf, next_cap);
-            if (!next) {
-                free(buf);
-                platform_socket_close(sock);
-                if (outcome) *outcome = CLI_RPC_OTHER_ERROR;
-                return NULL;
-            }
-            buf = next;
-            cap = next_cap;
-        }
-        ssize_t n = recv(sock, buf + len, cap - len - 1, 0);
-        if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
-                timed_out = true;
-            break;
-        }
-        if (n == 0) break;
-        len += (size_t)n;
-    }
-    platform_socket_close(sock);
-
-    if (timed_out && len == 0) {
-        free(buf);
-        if (outcome) *outcome = CLI_RPC_TIMEOUT;
-        if (!quiet)
-            fprintf(stderr,
-                   "error=RESPONSE_TIMEOUT detail=127.0.0.1:%d accepted "
-                   "the connection but did not answer within %ds try=node "
-                   "is busy — retry, or inspect `ops state "
-                   "--subsystem=supervisor` for a stalled child\n",
-                   cli_port, timeout_sec);
+    size_t len = 0;
+    char *buf = cli_rpc_recv_response(sock, outcome, &timed_out, &len);
+    if (!buf)
         return NULL;
-    }
+    if (cli_rpc_response_timeout(buf, timed_out, len, quiet, timeout_sec,
+                                outcome))
+        return NULL;
     buf[len] = 0;
 
-    /* Classify auth rejection off the status line BEFORE stripping it —
-     * httpserver.c always sends "HTTP/1.1 <code> <reason>\r\n...". A
-     * wrong/stale cookie (the other datadir's, if auto-discovery guessed
-     * wrong, or a stale explicit -datadir=) reads back as 401 here. */
-    if (outcome) {
-        char *sp = strchr(buf, ' ');
-        if (sp && strncmp(sp + 1, "401", 3) == 0)
-            *outcome = CLI_RPC_AUTH_REJECTED;
-    }
-
-    char *start = strstr(buf, "\r\n\r\n");
-    if (start) { start += 4; memmove(buf, start, strlen(start) + 1); }
+    cli_rpc_note_auth_rejection(buf, outcome);
+    cli_rpc_strip_http_headers(buf);
     return buf;
 }
 
@@ -3080,43 +3183,40 @@ static bool import_shielded_is_live_datadir(const char *target)
            (strlen(mint) == tl && strncmp(target, mint, tl) == 0);
 }
 
-int import_complete_shielded_mode(int argc, char **argv)
+/* Write $HOME/.zclassic-c23 into target ('.' when HOME is unset). Returns 2 when it does not fit. */
+static int import_shielded_default_target(char *target, size_t target_cap)
 {
-    /* UX: glibc block-buffers stdout when it isn't a tty (the common case
-     * for a redirected/logged import run), so every printf() below would
-     * sit in the buffer until process exit. For a run that goes CPU-bound
-     * inside shielded_history_import_from_chainstate() for many minutes,
-     * that means the operator watches a blank terminal with no way to
-     * tell "running" from "stuck" — a silent stall, which the node's
-     * prime invariant forbids. Force line buffering up front so every
-     * banner below (Source/Target/Chainstate snapshot/Tip bind/
-     * IMPORT COMPLETE|REFUSED) lands on the terminal/log the instant it's
-     * printed. */
-    setvbuf(stdout, NULL, _IOLBF, 0);
-
+    target[0] = '\0';
     const char *home = getenv("HOME");
-    const char *src = NULL;
-    char target[512];
-    int tn = snprintf(target, sizeof(target), "%s/.zclassic-c23",
+    int tn = snprintf(target, target_cap, "%s/.zclassic-c23",
                        home ? home : ".");
-    if (tn < 0 || (size_t)tn >= sizeof(target)) {
+    if (tn < 0 || (size_t)tn >= target_cap) {
         fprintf(stderr,
                 "-import-complete-shielded: $HOME is too long for the "
                 "%zu-byte target datadir buffer — refusing (no silent "
                 "truncation); pass -datadir=<short path> explicitly\n",
-                sizeof(target));
+                target_cap);
         return 2;
     }
+    return 0;
+}
 
+/* Record -import-complete-shielded= and an optional -datadir= override. Returns 2 on a datadir overflow or a missing source. */
+static int import_shielded_parse_invocation(int argc, char **argv,
+                                           const char **src_out,
+                                           char *target, size_t target_cap)
+{
+    *src_out = NULL;
+    const char *src = NULL;
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], "-import-complete-shielded=", 26) == 0) {
             src = argv[i] + 26;
         } else if (strncmp(argv[i], "-datadir=", 9) == 0) {
-            int n = snprintf(target, sizeof(target), "%s", argv[i] + 9);
-            if (n < 0 || (size_t)n >= sizeof(target)) {
+            int n = snprintf(target, target_cap, "%s", argv[i] + 9);
+            if (n < 0 || (size_t)n >= target_cap) {
                 fprintf(stderr,
                         "-datadir=<...> exceeds the %zu-byte path buffer — "
-                        "refusing (no silent truncation)\n", sizeof(target));
+                        "refusing (no silent truncation)\n", target_cap);
                 return 2;
             }
         }
@@ -3127,25 +3227,16 @@ int import_complete_shielded_mode(int argc, char **argv)
                 "-import-complete-shielded=<zclassicd-datadir>\n", argv[0]);
         return 2;
     }
+    *src_out = src;
+    return 0;
+}
 
-    printf("=== ZClassic Complete Shielded-History Import ===\n");
-    printf("Source chainstate: %s/chainstate\n", src);
-    printf("Target datadir:    %s\n", target);
-
-    /* Containment: NEVER write shielded history into a live datadir. The cure
-     * is copy-proven on a COPY first (see §6); the operator points -datadir at
-     * the copy, then cuts over by re-running against canonical after a green
-     * copy-prove. This mode itself refuses the two known live paths. */
-    if (import_shielded_is_live_datadir(target)) {
-        fprintf(stderr,
-                "REFUSING: %s is a live datadir. Copy-prove on a COPY first "
-                "(cp -a the datadir + chainstate, run this against the copy, "
-                "gate on H* climb + tip-hash parity vs zclassicd), then cut "
-                "over. See docs/node/shielded-history-importer.md §6.\n",
-                target);
-        return 1;
-    }
-
+/* Copy the source chainstate to a LOCK-free snapshot under target. Returns 1 on failure. */
+static int import_shielded_snapshot_chainstate(const char *src,
+                                              const char *target,
+                                              char *snap_path, size_t snap_cap)
+{
+    snap_path[0] = '\0';
     /* Point-in-time snapshot of the source chainstate (never read the live
      * LevelDB directly). MUST be the full WAL-inclusive stable copy — NOT
      * ldb_snapshot_make, which copies only the compacted .ldb SSTs + metadata
@@ -3153,7 +3244,7 @@ int import_complete_shielded_mode(int argc, char **argv)
      * best-anchor pointers lag every recent record. Uses the same
      * signature-proven point-in-time helper as the legacy UTXO import and the
      * tier1b frontier borrow. */
-    char cs_src[700], snap_path[900];
+    char cs_src[700];
     int csn = snprintf(cs_src, sizeof(cs_src), "%s/chainstate", src);
     if (csn < 0 || (size_t)csn >= sizeof(cs_src)) {
         fprintf(stderr,
@@ -3167,12 +3258,12 @@ int import_complete_shielded_mode(int argc, char **argv)
         fprintf(stderr, "missing chainstate at %s\n", cs_src);
         return 1;
     }
-    int spn = snprintf(snap_path, sizeof(snap_path),
+    int spn = snprintf(snap_path, snap_cap,
                        "%s/shielded_import_cs_snap", target);
-    if (spn < 0 || (size_t)spn >= sizeof(snap_path)) {
+    if (spn < 0 || (size_t)spn >= snap_cap) {
         fprintf(stderr,
                 "-datadir=<...> exceeds the %zu-byte snapshot path buffer — "
-                "refusing (no silent truncation)\n", sizeof(snap_path));
+                "refusing (no silent truncation)\n", snap_cap);
         return 1;
     }
     {
@@ -3190,7 +3281,15 @@ int import_complete_shielded_mode(int argc, char **argv)
         unlink(tmp_lock);
     }
     printf("Chainstate snapshot: %s\n", snap_path);
+    return 0;
+}
 
+/* Open progress.kv and write the fold-resume height. Returns 1 on failure; the store stays open only on success. */
+static int import_shielded_read_resume_anchor(const char *target,
+                                             const char *snap_path,
+                                             int64_t *tip_height)
+{
+    *tip_height = 0;
     /* Select the bind anchor from the TARGET's progress.kv. The anchor is the
      * durable seed floor when one is declared (a node that folded PAST its
      * seed already carries roots above the floor in its own anchor table),
@@ -3236,8 +3335,20 @@ int import_complete_shielded_mode(int argc, char **argv)
                 "first boot). Nothing committed.\n");
         return 1;
     }
-    int64_t tip_height =
+    *tip_height =
         floor_found ? (int64_t)seed_floor : (int64_t)coins_best;
+    return 0;
+}
+
+/* Read the fold-resume header's Sapling root and print the tip bind. Returns 1 when the root is all-zero. */
+static int import_shielded_read_tip_root(const char *target,
+                                        const char *snap_path,
+                                        int64_t tip_height,
+                                        struct uint256 *tip_block_hash,
+                                        struct uint256 *tip_sapling_root)
+{
+    uint256_set_null(tip_block_hash);
+    uint256_set_null(tip_sapling_root);
     /* The chain-committed hashFinalSaplingRoot at the resume anchor comes
      * from the target's own HEADER INDEX flat file (block_index.bin):
      * accept_block_header copies the wire hashFinalSaplingRoot into every
@@ -3255,18 +3366,15 @@ int import_complete_shielded_mode(int argc, char **argv)
      * never a misbind. The flat is freshened by the node's graceful
      * shutdown save, so this read REQUIRES the clean stop the canary /
      * operator flow performs before invoking the verb. */
-    struct uint256 tip_block_hash, tip_sapling_root;
-    uint256_set_null(&tip_block_hash);
-    uint256_set_null(&tip_sapling_root);
     {
         struct zcl_result fr = block_index_flat_header_at(
-            target, (int32_t)tip_height, tip_block_hash.data,
-            tip_sapling_root.data);
+            target, (int32_t)tip_height, tip_block_hash->data,
+            tip_sapling_root->data);
         if (!fr.ok) {
             fprintf(stderr, "tip bind root read: %s\n", fr.message);
         }
     }
-    if (uint256_is_null(&tip_sapling_root)) {
+    if (uint256_is_null(tip_sapling_root)) {
         progress_store_close();
         (void)zcl_tree_remove(snap_path);
         fprintf(stderr,
@@ -3282,10 +3390,16 @@ int import_complete_shielded_mode(int argc, char **argv)
         return 1;
     }
     char root_hex[65];
-    uint256_get_hex(&tip_sapling_root, root_hex);
+    uint256_get_hex(tip_sapling_root, root_hex);
     printf("Tip bind: height=%lld hashFinalSaplingRoot=%s "
            "(target fold-resume anchor)\n", (long long)tip_height, root_hex);
+    return 0;
+}
 
+/* Run the bind-height probe. Returns 1 when the probe fails, after closing progress.kv and removing the snapshot. */
+static int import_shielded_bind_height_guard(const char *snap_path,
+                                            int64_t tip_height)
+{
     /* Bind-height guard, surfaced on the TERMINAL (the service re-enforces the
      * same predicate internally before its transaction): refuse to manufacture
      * a height-mismatched datadir. tip_height above IS the target's fold-
@@ -3318,12 +3432,12 @@ int import_complete_shielded_mode(int argc, char **argv)
         }
         return 1;
     }
+    return 0;
+}
 
-    struct shielded_import_report rep = {0};
-    bool ok = shielded_history_import_from_chainstate(
-        progress_store_db(), snap_path, tip_height, &tip_block_hash,
-        &tip_sapling_root, &rep);
-
+/* Best-effort register of the cured coins tip as a cold-import trust anchor. */
+static void import_shielded_persist_cured_tip(const char *target)
+{
     /* On success, register the cured coins tip as a cold-import TRUST anchor so
      * the next normal boot's Invariant A gate installs it into the active chain
      * (instead of refusing the detached island and stalling getheaders at
@@ -3331,24 +3445,26 @@ int import_complete_shielded_mode(int argc, char **argv)
      * logs but never undoes the committed import. progress_store stays open so
      * the coins-best derivation + the durable count token read the canonical
      * store. */
-    if (ok) {
-        char ndb_path[600];
-        int nn = snprintf(ndb_path, sizeof(ndb_path), "%s/node.db", target);
-        struct node_db ndb2;
-        if (nn > 0 && (size_t)nn < sizeof(ndb_path) &&
-            node_db_open(&ndb2, ndb_path)) {
-            (void)shielded_history_import_register_cured_tip_trust_anchor(
-                progress_store_db(), &ndb2);
-            node_db_close(&ndb2);
-        } else {
-            fprintf(stderr,
-                    "WARNING: import committed but could not reopen %s to "
-                    "persist the cured-tip trust anchor; the coins tip may need "
-                    "one extra boot to install into the active chain.\n",
-                    ndb_path);
-        }
+    char ndb_path[600];
+    int nn = snprintf(ndb_path, sizeof(ndb_path), "%s/node.db", target);
+    struct node_db ndb2;
+    if (nn > 0 && (size_t)nn < sizeof(ndb_path) &&
+        node_db_open(&ndb2, ndb_path)) {
+        (void)shielded_history_import_register_cured_tip_trust_anchor(
+            progress_store_db(), &ndb2);
+        node_db_close(&ndb2);
+    } else {
+        fprintf(stderr,
+                "WARNING: import committed but could not reopen %s to "
+                "persist the cured-tip trust anchor; the coins tip may need "
+                "one extra boot to install into the active chain.\n",
+                ndb_path);
     }
+}
 
+/* Re-arm proof_validate over NULL-block_hash rows and report a rewind, refusal, or error. */
+static void import_shielded_rearm_proof_validate(void)
+{
     /* Re-arm proof_validate over any NULL-block_hash suffix so the post-cure
      * fold is not wedged at utxo_apply's label_splice guard (which refuses a
      * hashless proof verdict). The rewind FLOOR is utxo_apply's own cursor
@@ -3356,30 +3472,96 @@ int import_complete_shielded_mode(int argc, char **argv)
      * block-rollback cap (default 100) is REFUSED; raise ZCL_MAX_BLOCK_ROLLBACK
      * past the reported depth after a copy proof. progress_store is still open
      * here. */
-    if (ok) {
-        struct proof_validate_rearm_report rr;
-        memset(&rr, 0, sizeof(rr));
-        enum proof_validate_rearm_outcome ro =
-            proof_validate_null_hash_rearm(progress_store_db(), NULL, &rr);
-        if (ro == PV_REARM_REARMED) {
-            printf("proof_validate re-arm: rewound cursor %llu->%llu, deleted "
-                   "%lld NULL-block_hash rows; the next boot re-derives them.\n",
-                   (unsigned long long)rr.pv_cursor_before,
-                   (unsigned long long)rr.rewound_to, (long long)rr.deleted_rows);
-        } else if (ro == PV_REARM_REFUSED) {
-            fprintf(stderr,
-                    "WARNING: proof_validate re-arm REFUSED — rewinding to h=%d "
-                    "(%lld NULL-block_hash rows) exceeds the recovery "
-                    "block-rollback cap. Raise ZCL_MAX_BLOCK_ROLLBACK past it "
-                    "and re-run, else the post-cure fold wedges at utxo_apply.\n",
-                    rr.lowest_null_height, (long long)rr.null_row_count);
-        } else if (ro == PV_REARM_ERROR) {
-            fprintf(stderr, "WARNING: proof_validate re-arm ERROR — see "
-                            "node.log [proof_validate]; the fold may wedge.\n");
-        }
-        /* PV_REARM_NOT_NEEDED: the fold above utxo_apply is already
-         * hash-complete — nothing to do. */
+    struct proof_validate_rearm_report rr;
+    memset(&rr, 0, sizeof(rr));
+    enum proof_validate_rearm_outcome ro =
+        proof_validate_null_hash_rearm(progress_store_db(), NULL, &rr);
+    if (ro == PV_REARM_REARMED) {
+        printf("proof_validate re-arm: rewound cursor %llu->%llu, deleted "
+               "%lld NULL-block_hash rows; the next boot re-derives them.\n",
+               (unsigned long long)rr.pv_cursor_before,
+               (unsigned long long)rr.rewound_to, (long long)rr.deleted_rows);
+    } else if (ro == PV_REARM_REFUSED) {
+        fprintf(stderr,
+                "WARNING: proof_validate re-arm REFUSED — rewinding to h=%d "
+                "(%lld NULL-block_hash rows) exceeds the recovery "
+                "block-rollback cap. Raise ZCL_MAX_BLOCK_ROLLBACK past it "
+                "and re-run, else the post-cure fold wedges at utxo_apply.\n",
+                rr.lowest_null_height, (long long)rr.null_row_count);
+    } else if (ro == PV_REARM_ERROR) {
+        fprintf(stderr, "WARNING: proof_validate re-arm ERROR — see "
+                        "node.log [proof_validate]; the fold may wedge.\n");
     }
+    /* PV_REARM_NOT_NEEDED: the fold above utxo_apply is already
+     * hash-complete — nothing to do. */
+}
+
+int import_complete_shielded_mode(int argc, char **argv)
+{
+    /* UX: glibc block-buffers stdout when it isn't a tty (the common case
+     * for a redirected/logged import run), so every printf() below would
+     * sit in the buffer until process exit. For a run that goes CPU-bound
+     * inside shielded_history_import_from_chainstate() for many minutes,
+     * that means the operator watches a blank terminal with no way to
+     * tell "running" from "stuck" — a silent stall, which the node's
+     * prime invariant forbids. Force line buffering up front so every
+     * banner below (Source/Target/Chainstate snapshot/Tip bind/
+     * IMPORT COMPLETE|REFUSED) lands on the terminal/log the instant it's
+     * printed. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
+    const char *src = NULL;
+    char target[512];
+    if (import_shielded_default_target(target, sizeof(target)) != 0)
+        return 2;
+    if (import_shielded_parse_invocation(argc, argv, &src, target,
+                                        sizeof(target)) != 0)
+        return 2;
+
+    printf("=== ZClassic Complete Shielded-History Import ===\n");
+    printf("Source chainstate: %s/chainstate\n", src);
+    printf("Target datadir:    %s\n", target);
+
+    /* Containment: NEVER write shielded history into a live datadir. The cure
+     * is copy-proven on a COPY first (see §6); the operator points -datadir at
+     * the copy, then cuts over by re-running against canonical after a green
+     * copy-prove. This mode itself refuses the two known live paths. */
+    if (import_shielded_is_live_datadir(target)) {
+        fprintf(stderr,
+                "REFUSING: %s is a live datadir. Copy-prove on a COPY first "
+                "(cp -a the datadir + chainstate, run this against the copy, "
+                "gate on H* climb + tip-hash parity vs zclassicd), then cut "
+                "over. See docs/node/shielded-history-importer.md §6.\n",
+                target);
+        return 1;
+    }
+
+    char snap_path[900];
+    if (import_shielded_snapshot_chainstate(src, target, snap_path,
+                                           sizeof(snap_path)) != 0)
+        return 1;
+
+    int64_t tip_height = 0;
+    if (import_shielded_read_resume_anchor(target, snap_path, &tip_height) != 0)
+        return 1;
+
+    struct uint256 tip_block_hash, tip_sapling_root;
+    if (import_shielded_read_tip_root(target, snap_path, tip_height,
+                                     &tip_block_hash, &tip_sapling_root) != 0)
+        return 1;
+
+    if (import_shielded_bind_height_guard(snap_path, tip_height) != 0)
+        return 1;
+
+    struct shielded_import_report rep = {0};
+    bool ok = shielded_history_import_from_chainstate(
+        progress_store_db(), snap_path, tip_height, &tip_block_hash,
+        &tip_sapling_root, &rep);
+
+    if (ok)
+        import_shielded_persist_cured_tip(target);
+    if (ok)
+        import_shielded_rearm_proof_validate();
 
     progress_store_close();
     (void)zcl_tree_remove(snap_path);
@@ -3423,6 +3605,109 @@ int import_complete_shielded_mode(int argc, char **argv)
  * datadir REFUSES loudly here (named error, non-zero exit) rather than
  * proceeding as a normal boot or failing deep inside the importer with a
  * generic message. */
+/* Select main, regtest, or testnet from argv so chain_params_get() is valid. */
+static void importblockindex_select_chain(int argc, char **argv)
+{
+    /* The importer's per-row hash-bind + PoW-target verify reads
+     * chain_params_get(), which asserts unless a network was selected —
+     * the normal boot path does this in boot_step_select_chain_and_datadir,
+     * but this CLI mode never reaches boot. Mirror boot's selection,
+     * honoring the same network flags anywhere in argv. */
+    enum chain_network net = CHAIN_MAIN;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-regtest") == 0 ||
+            strcmp(argv[i], "-regtest=1") == 0)
+            net = CHAIN_REGTEST;
+        else if (strcmp(argv[i], "-testnet") == 0 ||
+                 strcmp(argv[i], "-testnet=1") == 0)
+            net = CHAIN_TESTNET;
+    }
+    chain_params_select(net);
+}
+
+/* Copy a LOCKed blocks/index aside. Returns 1 when the copy fails. */
+static int importblockindex_stage_locked_index(const char *snap_dir,
+                                              const char *db_path,
+                                              char *import_parent,
+                                              size_t import_parent_cap,
+                                              char *tmp_cleanup,
+                                              size_t tmp_cleanup_cap)
+{
+    /* If the source LevelDB is LOCKed (e.g. a running zclassicd owns
+     * it), copy blocks/index to a temp dir and remove the copied LOCK —
+     * NEVER touch another process's LOCK. Mirrors utxo_recovery_import_ldb.
+     * Then import from the temp parent. */
+    snprintf(import_parent, import_parent_cap, "%s", snap_dir);
+    tmp_cleanup[0] = '\0';
+    char src_lock[1100];
+    snprintf(src_lock, sizeof(src_lock), "%s/blocks/index/LOCK", snap_dir);
+    struct stat lst;
+    if (stat(src_lock, &lst) == 0) {
+        /* Derive a temp parent next to the target db. */
+        char ddir[700];
+        snprintf(ddir, sizeof(ddir), "%s", db_path);
+        char *slash = strrchr(ddir, '/');
+        if (slash) *slash = '\0'; else snprintf(ddir, sizeof(ddir), ".");
+        char tmp_parent[900];
+        snprintf(tmp_parent, sizeof(tmp_parent), "%s/bidx_import_tmp", ddir);
+        printf("Copying block index (source LOCK present)...\n");
+        fflush(stdout);
+        /* `rm -rf tmp_parent && mkdir -p tmp_parent/blocks &&
+         *  cp -a snap_dir/blocks/index tmp_parent/blocks/index` — the
+         * fd-based walker, no shell. PRESERVE_TIMES matches cp -a. */
+        char src_index[1100], dst_blocks[1100], dst_index[1200];
+        snprintf(src_index, sizeof(src_index), "%s/blocks/index", snap_dir);
+        snprintf(dst_blocks, sizeof(dst_blocks), "%s/blocks", tmp_parent);
+        snprintf(dst_index, sizeof(dst_index), "%s/blocks/index", tmp_parent);
+        struct zcl_result rrm = zcl_tree_remove(tmp_parent);
+        struct zcl_result rmk = rrm.ok ? zcl_mkdir_p(dst_blocks, 0755)
+                                       : rrm;
+        struct zcl_result rcp = rmk.ok
+            ? zcl_tree_copy(src_index, dst_index,
+                            ZCL_COPY_PRESERVE_TIMES, NULL, NULL)
+            : rmk;
+        if (!rcp.ok) {
+            fprintf(stderr, "Failed to copy block index: %s\n",
+                    rcp.message);
+            return 1;
+        }
+        char tmp_lock[1100];
+        snprintf(tmp_lock, sizeof(tmp_lock), "%s/blocks/index/LOCK", tmp_parent);
+        unlink(tmp_lock);
+        snprintf(import_parent, import_parent_cap, "%s", tmp_parent);
+        snprintf(tmp_cleanup, tmp_cleanup_cap, "%s", tmp_parent);
+    }
+    return 0;
+}
+
+/* Remove the temp copy and report the bulk import result. */
+static int importblockindex_report_import(const char *snap_dir,
+                                         const char *db_path,
+                                         const char *tmp_cleanup,
+                                         int64_t t0, int64_t t1,
+                                         bool ok, int count)
+{
+    if (tmp_cleanup[0]) {
+        /* `rm -rf tmp_cleanup` via the fd-based walker (no shell). */
+        struct zcl_result rmc = zcl_tree_remove(tmp_cleanup);
+        if (!rmc.ok)
+            fprintf(stderr, "warning: failed to clean temp %s: %s\n",
+                    tmp_cleanup, rmc.message);
+    }
+    if (!ok) {
+        LOG_WARN_IN("importblockindex_cli_mode", "importblockindex",
+                 "bulk import FAILED source=%s target=%s elapsed=%llds",
+                 snap_dir, db_path, (long long)(t1 - t0));
+        fprintf(stderr, "Block-index import failed\n");
+        return 1;
+    }
+    LOG_INFO_IN("importblockindex_cli_mode", "importblockindex",
+             "bulk import complete: headers=%d elapsed=%llds target=%s",
+             count, (long long)(t1 - t0), db_path);
+    printf("\nImported %d headers in %llds\n", count, (long long)(t1 - t0));
+    return 0;
+}
+
 int importblockindex_cli_mode(int argc, char **argv, int ibi_idx)
 {
     if (ibi_idx + 1 >= argc) {
@@ -3478,23 +3763,7 @@ int importblockindex_cli_mode(int argc, char **argv, int ibi_idx)
         snprintf(db_path, sizeof(db_path), "%s/.zclassic-c23/node.db",
                  home ? home : ".");
 
-    /* The importer's per-row hash-bind + PoW-target verify reads
-     * chain_params_get(), which asserts unless a network was selected —
-     * the normal boot path does this in boot_step_select_chain_and_datadir,
-     * but this CLI mode never reaches boot. Mirror boot's selection,
-     * honoring the same network flags anywhere in argv. */
-    {
-        enum chain_network net = CHAIN_MAIN;
-        for (int i = 1; i < argc; i++) {
-            if (strcmp(argv[i], "-regtest") == 0 ||
-                strcmp(argv[i], "-regtest=1") == 0)
-                net = CHAIN_REGTEST;
-            else if (strcmp(argv[i], "-testnet") == 0 ||
-                     strcmp(argv[i], "-testnet=1") == 0)
-                net = CHAIN_TESTNET;
-        }
-        chain_params_select(net);
-    }
+    importblockindex_select_chain(argc, argv);
 
     printf("=== ZClassic Block-Index (header) Import ===\n");
     printf("Source: %s/blocks/index (LevelDB CDiskBlockIndex)\n", snap_dir);
@@ -3504,77 +3773,19 @@ int importblockindex_cli_mode(int argc, char **argv, int ibi_idx)
              "CLI dispatch: argv_pos=%d source=%s target=%s mode=bulk",
              ibi_idx, snap_dir, db_path);
 
-    /* If the source LevelDB is LOCKed (e.g. a running zclassicd owns
-     * it), copy blocks/index to a temp dir and remove the copied LOCK —
-     * NEVER touch another process's LOCK. Mirrors utxo_recovery_import_ldb.
-     * Then import from the temp parent. */
     char import_parent[1024];
-    char tmp_cleanup[1100] = "";
-    snprintf(import_parent, sizeof(import_parent), "%s", snap_dir);
-    {
-        char src_lock[1100];
-        snprintf(src_lock, sizeof(src_lock), "%s/blocks/index/LOCK", snap_dir);
-        struct stat lst;
-        if (stat(src_lock, &lst) == 0) {
-            /* Derive a temp parent next to the target db. */
-            char ddir[700];
-            snprintf(ddir, sizeof(ddir), "%s", db_path);
-            char *slash = strrchr(ddir, '/');
-            if (slash) *slash = '\0'; else snprintf(ddir, sizeof(ddir), ".");
-            char tmp_parent[900];
-            snprintf(tmp_parent, sizeof(tmp_parent), "%s/bidx_import_tmp", ddir);
-            printf("Copying block index (source LOCK present)...\n");
-            fflush(stdout);
-            /* `rm -rf tmp_parent && mkdir -p tmp_parent/blocks &&
-             *  cp -a snap_dir/blocks/index tmp_parent/blocks/index` — the
-             * fd-based walker, no shell. PRESERVE_TIMES matches cp -a. */
-            char src_index[1100], dst_blocks[1100], dst_index[1200];
-            snprintf(src_index, sizeof(src_index), "%s/blocks/index", snap_dir);
-            snprintf(dst_blocks, sizeof(dst_blocks), "%s/blocks", tmp_parent);
-            snprintf(dst_index, sizeof(dst_index), "%s/blocks/index", tmp_parent);
-            struct zcl_result rrm = zcl_tree_remove(tmp_parent);
-            struct zcl_result rmk = rrm.ok ? zcl_mkdir_p(dst_blocks, 0755)
-                                           : rrm;
-            struct zcl_result rcp = rmk.ok
-                ? zcl_tree_copy(src_index, dst_index,
-                                ZCL_COPY_PRESERVE_TIMES, NULL, NULL)
-                : rmk;
-            if (!rcp.ok) {
-                fprintf(stderr, "Failed to copy block index: %s\n",
-                        rcp.message);
-                return 1;
-            }
-            char tmp_lock[1100];
-            snprintf(tmp_lock, sizeof(tmp_lock), "%s/blocks/index/LOCK", tmp_parent);
-            unlink(tmp_lock);
-            snprintf(import_parent, sizeof(import_parent), "%s", tmp_parent);
-            snprintf(tmp_cleanup, sizeof(tmp_cleanup), "%s", tmp_parent);
-        }
-    }
+    char tmp_cleanup[1100];
+    if (importblockindex_stage_locked_index(snap_dir, db_path,
+                                            import_parent, sizeof(import_parent),
+                                            tmp_cleanup, sizeof(tmp_cleanup)) != 0)
+        return 1;
 
     int64_t t0 = (int64_t)time(NULL);
     int count = 0;
     bool ok = snapshot_import_block_index(import_parent, db_path, true, &count);
     int64_t t1 = (int64_t)time(NULL);
-    if (tmp_cleanup[0]) {
-        /* `rm -rf tmp_cleanup` via the fd-based walker (no shell). */
-        struct zcl_result rmc = zcl_tree_remove(tmp_cleanup);
-        if (!rmc.ok)
-            fprintf(stderr, "warning: failed to clean temp %s: %s\n",
-                    tmp_cleanup, rmc.message);
-    }
-    if (!ok) {
-        LOG_WARN("importblockindex",
-                 "bulk import FAILED source=%s target=%s elapsed=%llds",
-                 snap_dir, db_path, (long long)(t1 - t0));
-        fprintf(stderr, "Block-index import failed\n");
-        return 1;
-    }
-    LOG_INFO("importblockindex",
-             "bulk import complete: headers=%d elapsed=%llds target=%s",
-             count, (long long)(t1 - t0), db_path);
-    printf("\nImported %d headers in %llds\n", count, (long long)(t1 - t0));
-    return 0;
+    return importblockindex_report_import(snap_dir, db_path, tmp_cleanup,
+                                          t0, t1, ok, count);
 }
 
 /* ── former inline main() sub-modes ─────────────────────────────── */
@@ -3603,6 +3814,127 @@ int wallet_backup_decrypt_mode(int argc, char **argv)
         return 1;
     }
     printf("Decrypted %s -> %s\n", argv[2], argv[3]);
+    return 0;
+}
+
+/* Rebuild wallet_utxos, then addresses. On failure roll back, close, return 1. */
+static int importchainstate_rebuild_tables(struct node_db *ndb)
+{
+    /* Rebuild wallet_utxos from ground truth */
+    printf("Rebuilding wallet_utxos...\n");
+    sqlite3_exec(ndb->db, "BEGIN", NULL, NULL, NULL);
+    if (ar_exec_write_sql(ndb->db, "DELETE FROM wallet_utxos") != SQLITE_OK ||
+        ar_exec_write_sql(ndb->db,
+        "INSERT INTO wallet_utxos "
+        "(txid, vout, value, address_hash, script, height, is_coinbase) "
+        "SELECT u.txid, u.vout, u.value, u.address_hash, u.script, "
+        "u.height, u.is_coinbase "
+        "FROM utxos u INNER JOIN wallet_keys wk "
+        "ON u.address_hash = wk.pubkey_hash") != SQLITE_OK) {
+        fprintf(stderr, "wallet_utxos rebuild failed: %s\n",
+                sqlite3_errmsg(ndb->db));
+        sqlite3_exec(ndb->db, "ROLLBACK", NULL, NULL, NULL);
+        node_db_close(ndb);
+        return 1;
+    }
+    sqlite3_exec(ndb->db, "COMMIT", NULL, NULL, NULL);
+
+    /* Rebuild addresses */
+    printf("Rebuilding addresses...\n");
+    sqlite3_exec(ndb->db, "BEGIN", NULL, NULL, NULL);
+    if (ar_exec_write_sql(ndb->db, "DELETE FROM addresses") != SQLITE_OK ||
+        ar_exec_write_sql(ndb->db,
+        "INSERT OR REPLACE INTO addresses "
+        "(address_hash, script_type, balance, utxo_count, "
+        "first_seen_height, last_seen_height) "
+        "SELECT address_hash, MAX(script_type), SUM(value), count(*), "
+        "MIN(height), MAX(height) "
+        "FROM utxos WHERE address_hash IS NOT NULL "
+        "GROUP BY address_hash") != SQLITE_OK) {
+        fprintf(stderr, "addresses rebuild failed: %s\n",
+                sqlite3_errmsg(ndb->db));
+        sqlite3_exec(ndb->db, "ROLLBACK", NULL, NULL, NULL);
+        node_db_close(ndb);
+        return 1;
+    }
+    sqlite3_exec(ndb->db, "COMMIT", NULL, NULL, NULL);
+    return 0;
+}
+
+/* Print UTXO, wallet, and address counts for the imported database. */
+static void importchainstate_print_results(struct node_db *ndb,
+                                          int64_t t0, int64_t t1)
+{
+    /* Verify results */
+    sqlite3_stmt *s = NULL;
+    int64_t utxo_count = 0, utxo_sum = 0;
+    sqlite3_prepare_v2(ndb->db,
+        "SELECT count(*), COALESCE(SUM(value),0) FROM utxos",
+        -1, &s, NULL);
+    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+        utxo_count = sqlite3_column_int64(s, 0);
+        utxo_sum = sqlite3_column_int64(s, 1);
+    }
+    sqlite3_finalize(s);
+
+    int64_t wallet_bal = 0, wallet_cnt = 0;
+    s = NULL;
+    sqlite3_prepare_v2(ndb->db,
+        "SELECT count(*), COALESCE(SUM(value),0) FROM wallet_utxos "
+        "WHERE spent_txid IS NULL", -1, &s, NULL);
+    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+        wallet_cnt = sqlite3_column_int64(s, 0);
+        wallet_bal = sqlite3_column_int64(s, 1);
+    }
+    sqlite3_finalize(s);
+
+    int64_t addr_count = 0;
+    s = NULL;
+    sqlite3_prepare_v2(ndb->db,
+        "SELECT count(*) FROM addresses WHERE balance > 0",
+        -1, &s, NULL);
+    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW)
+        addr_count = sqlite3_column_int64(s, 0);
+    sqlite3_finalize(s);
+
+    printf("\n=== Results ===\n");
+    printf("UTXOs:     %lld (%.8f ZCL)\n",
+           (long long)utxo_count, (double)utxo_sum / 1e8);
+    printf("Wallet:    %lld UTXOs (%.8f ZCL)\n",
+           (long long)wallet_cnt, (double)wallet_bal / 1e8);
+    printf("Addresses: %lld with balance\n", (long long)addr_count);
+    printf("Time:      %llds\n", (long long)(t1 - t0));
+}
+
+/* Check the imported set against the SHA3 checkpoint. Closes ndb on mismatch. */
+static int importchainstate_verify_sha3(struct node_db *ndb)
+{
+    /* ── SHA3 UTXO integrity verification ── */
+    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+    if (cp && cp->height > 0) {
+        printf("\nVerifying UTXO set against SHA3 checkpoint "
+               "(h=%d, %llu expected UTXOs)...\n",
+               cp->height, (unsigned long long)cp->utxo_count);
+        uint8_t sha3[32];
+        uint64_t sha3_count = 0;
+        utxo_commitment_sha3_compute(ndb->db, sha3, &sha3_count);
+        if (memcmp(sha3, cp->sha3_hash, 32) == 0 &&
+            sha3_count == cp->utxo_count) {
+            printf("SHA3 UTXO verification PASSED (%llu UTXOs match)\n",
+                   (unsigned long long)sha3_count);
+        } else {
+            fprintf(stderr,
+                "SHA3 UTXO MISMATCH — imported UTXO set is corrupt!\n"
+                "  Expected: %llu UTXOs, got %llu\n",
+                (unsigned long long)cp->utxo_count,
+                (unsigned long long)sha3_count);
+            if (sha3_count != cp->utxo_count)
+                fprintf(stderr, "  Count delta: %lld\n",
+                        (long long)sha3_count - (long long)cp->utxo_count);
+            node_db_close(ndb);
+            return 1;
+        }
+    }
     return 0;
 }
 
@@ -3658,141 +3990,118 @@ int importchainstate_mode(int argc, char **argv)
     }
     printf("\nImported %d UTXOs in %llds\n", count, (long long)(t1 - t0));
 
-    /* Rebuild wallet_utxos from ground truth */
-    printf("Rebuilding wallet_utxos...\n");
-    sqlite3_exec(ndb.db, "BEGIN", NULL, NULL, NULL);
-    if (ar_exec_write_sql(ndb.db, "DELETE FROM wallet_utxos") != SQLITE_OK ||
-        ar_exec_write_sql(ndb.db,
-        "INSERT INTO wallet_utxos "
-        "(txid, vout, value, address_hash, script, height, is_coinbase) "
-        "SELECT u.txid, u.vout, u.value, u.address_hash, u.script, "
-        "u.height, u.is_coinbase "
-        "FROM utxos u INNER JOIN wallet_keys wk "
-        "ON u.address_hash = wk.pubkey_hash") != SQLITE_OK) {
-        fprintf(stderr, "wallet_utxos rebuild failed: %s\n",
-                sqlite3_errmsg(ndb.db));
-        sqlite3_exec(ndb.db, "ROLLBACK", NULL, NULL, NULL);
-        node_db_close(&ndb);
+    if (importchainstate_rebuild_tables(&ndb) != 0)
         return 1;
-    }
-    sqlite3_exec(ndb.db, "COMMIT", NULL, NULL, NULL);
-
-    /* Rebuild addresses */
-    printf("Rebuilding addresses...\n");
-    sqlite3_exec(ndb.db, "BEGIN", NULL, NULL, NULL);
-    if (ar_exec_write_sql(ndb.db, "DELETE FROM addresses") != SQLITE_OK ||
-        ar_exec_write_sql(ndb.db,
-        "INSERT OR REPLACE INTO addresses "
-        "(address_hash, script_type, balance, utxo_count, "
-        "first_seen_height, last_seen_height) "
-        "SELECT address_hash, MAX(script_type), SUM(value), count(*), "
-        "MIN(height), MAX(height) "
-        "FROM utxos WHERE address_hash IS NOT NULL "
-        "GROUP BY address_hash") != SQLITE_OK) {
-        fprintf(stderr, "addresses rebuild failed: %s\n",
-                sqlite3_errmsg(ndb.db));
-        sqlite3_exec(ndb.db, "ROLLBACK", NULL, NULL, NULL);
-        node_db_close(&ndb);
+    importchainstate_print_results(&ndb, t0, t1);
+    if (importchainstate_verify_sha3(&ndb) != 0)
         return 1;
-    }
-    sqlite3_exec(ndb.db, "COMMIT", NULL, NULL, NULL);
-
-    /* Verify results */
-    sqlite3_stmt *s = NULL;
-    int64_t utxo_count = 0, utxo_sum = 0;
-    sqlite3_prepare_v2(ndb.db,
-        "SELECT count(*), COALESCE(SUM(value),0) FROM utxos",
-        -1, &s, NULL);
-    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-        utxo_count = sqlite3_column_int64(s, 0);
-        utxo_sum = sqlite3_column_int64(s, 1);
-    }
-    sqlite3_finalize(s);
-
-    int64_t wallet_bal = 0, wallet_cnt = 0;
-    s = NULL;
-    sqlite3_prepare_v2(ndb.db,
-        "SELECT count(*), COALESCE(SUM(value),0) FROM wallet_utxos "
-        "WHERE spent_txid IS NULL", -1, &s, NULL);
-    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-        wallet_cnt = sqlite3_column_int64(s, 0);
-        wallet_bal = sqlite3_column_int64(s, 1);
-    }
-    sqlite3_finalize(s);
-
-    int64_t addr_count = 0;
-    s = NULL;
-    sqlite3_prepare_v2(ndb.db,
-        "SELECT count(*) FROM addresses WHERE balance > 0",
-        -1, &s, NULL);
-    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW)
-        addr_count = sqlite3_column_int64(s, 0);
-    sqlite3_finalize(s);
-
-    printf("\n=== Results ===\n");
-    printf("UTXOs:     %lld (%.8f ZCL)\n",
-           (long long)utxo_count, (double)utxo_sum / 1e8);
-    printf("Wallet:    %lld UTXOs (%.8f ZCL)\n",
-           (long long)wallet_cnt, (double)wallet_bal / 1e8);
-    printf("Addresses: %lld with balance\n", (long long)addr_count);
-    printf("Time:      %llds\n", (long long)(t1 - t0));
-
-    /* ── SHA3 UTXO integrity verification ── */
-    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
-    if (cp && cp->height > 0) {
-        printf("\nVerifying UTXO set against SHA3 checkpoint "
-               "(h=%d, %llu expected UTXOs)...\n",
-               cp->height, (unsigned long long)cp->utxo_count);
-        uint8_t sha3[32];
-        uint64_t sha3_count = 0;
-        utxo_commitment_sha3_compute(ndb.db, sha3, &sha3_count);
-        if (memcmp(sha3, cp->sha3_hash, 32) == 0 &&
-            sha3_count == cp->utxo_count) {
-            printf("SHA3 UTXO verification PASSED (%llu UTXOs match)\n",
-                   (unsigned long long)sha3_count);
-        } else {
-            fprintf(stderr,
-                "SHA3 UTXO MISMATCH — imported UTXO set is corrupt!\n"
-                "  Expected: %llu UTXOs, got %llu\n",
-                (unsigned long long)cp->utxo_count,
-                (unsigned long long)sha3_count);
-            if (sha3_count != cp->utxo_count)
-                fprintf(stderr, "  Count delta: %lld\n",
-                        (long long)sha3_count - (long long)cp->utxo_count);
-            node_db_close(&ndb);
-            return 1;
-        }
-    }
 
     node_db_close(&ndb);
     return 0;
 }
 
-int mintutxocommitment_mode(int argc, char **argv)
+struct mintutxo_projection {
+    int32_t height;
+    uint8_t block_hash[32];
+    int64_t total_supply;
+    uint8_t sha3[32];
+    uint64_t count;
+};
+
+/* Read --height and the optional node.db path. Returns 1 when height is absent. */
+static int mintutxo_parse_args(int argc, char **argv, char *db_path,
+                              size_t db_path_cap, int32_t *want_height)
 {
     const char *home = getenv("HOME");
-    char db_path[512];
     db_path[0] = '\0';
+    *want_height = -1;
     /* Fail-closed: the operator MUST declare the intended checkpoint
      * height, and the ceremony refuses unless the utxos projection sits
      * EXACTLY there. The original mint had no such assert and committed
      * an off-by-one projection (see checkpoints.c re-bake note). */
-    int32_t want_height = -1;
     for (int i = 2; i < argc; i++) {
         if (strncmp(argv[i], "--height=", 9) == 0)
-            want_height = atoi(argv[i] + 9);
+            *want_height = atoi(argv[i] + 9);
         else if (argv[i][0] != '-' && db_path[0] == '\0')
-            snprintf(db_path, sizeof(db_path), "%s", argv[i]);
+            snprintf(db_path, db_path_cap, "%s", argv[i]);
     }
     if (db_path[0] == '\0')
-        snprintf(db_path, sizeof(db_path), "%s/.zclassic-c23/node.db",
+        snprintf(db_path, db_path_cap, "%s/.zclassic-c23/node.db",
                  home ? home : ".");
-    if (want_height < 0) {
+    if (*want_height < 0) {
         fprintf(stderr, "Refusing to mint: pass --height=N (the intended "
                 "checkpoint height) so the ceremony can assert the utxos "
                 "projection sits exactly there.\n");
         return 1;
     }
+    return 0;
+}
+
+/* Read height, block hash, supply, and the SHA3 commitment, then close ndb. */
+static void mintutxo_load_projection(struct node_db *ndb,
+                                    struct mintutxo_projection *proj)
+{
+    memset(proj, 0, sizeof(*proj));
+    /* Height = the UTXO set's height (coins best block height). */
+    sqlite3_stmt *hs = NULL;
+    sqlite3_prepare_v2(ndb->db, "SELECT MAX(height) FROM utxos", -1, &hs, NULL);
+    if (hs && AR_STEP_ROW_READONLY(hs) == SQLITE_ROW)
+        proj->height = sqlite3_column_int(hs, 0);
+    if (hs) sqlite3_finalize(hs);
+
+    /* Block hash at that height (prefer a data-bearing canonical row). */
+    sqlite3_stmt *bs = NULL;
+    sqlite3_prepare_v2(ndb->db,
+        "SELECT hash FROM blocks WHERE height = ? "
+        "ORDER BY (status & 8) DESC LIMIT 1", -1, &bs, NULL);
+    if (bs) {
+        sqlite3_bind_int(bs, 1, proj->height);
+        if (AR_STEP_ROW_READONLY(bs) == SQLITE_ROW &&
+            sqlite3_column_bytes(bs, 0) == 32)
+            memcpy(proj->block_hash, sqlite3_column_blob(bs, 0), 32);
+        sqlite3_finalize(bs);
+    }
+
+    /* Total transparent supply (zatoshi). */
+    sqlite3_stmt *ts = NULL;
+    sqlite3_prepare_v2(ndb->db,
+        "SELECT COALESCE(SUM(value),0) FROM utxos", -1, &ts, NULL);
+    if (ts && AR_STEP_ROW_READONLY(ts) == SQLITE_ROW)
+        proj->total_supply = sqlite3_column_int64(ts, 0);
+    if (ts) sqlite3_finalize(ts);
+
+    /* SHA3 over the canonical UTXO set. */
+    utxo_commitment_sha3_compute(ndb->db, proj->sha3, &proj->count);
+    node_db_close(ndb);
+}
+
+/* Write the display hex of the reversed block hash and the SHA3 digest. */
+static void mintutxo_format_display_hex(const uint8_t block_hash[32],
+                                        const uint8_t sha3[32],
+                                        char bh_hex[65], char s3_hex[65])
+{
+    bh_hex[0] = '\0';
+    s3_hex[0] = '\0';
+    for (int i = 0; i < 32; i++) {
+        snprintf(bh_hex + i * 2, 3, "%02x", block_hash[31 - i]); /* display = reversed */
+        snprintf(s3_hex + i * 2, 3, "%02x", sha3[i]);
+    }
+}
+
+/* Print 32 bytes as a C initializer, eight values per line. */
+static void mintutxo_print_c_bytes(const uint8_t bytes[32])
+{
+    for (int i = 0; i < 32; i++)
+        printf("0x%02x,%s", bytes[i], (i % 8 == 7) ? "\n        " : " ");
+}
+
+int mintutxocommitment_mode(int argc, char **argv)
+{
+    char db_path[512];
+    int32_t want_height = -1;
+    if (mintutxo_parse_args(argc, argv, db_path, sizeof(db_path),
+                            &want_height) != 0)
+        return 1;
 
     struct node_db ndb;
     if (!node_db_open(&ndb, db_path)) {
@@ -3800,82 +4109,44 @@ int mintutxocommitment_mode(int argc, char **argv)
         return 1;
     }
 
-    /* Height = the UTXO set's height (coins best block height). */
-    int32_t height = 0;
-    sqlite3_stmt *hs = NULL;
-    sqlite3_prepare_v2(ndb.db, "SELECT MAX(height) FROM utxos", -1, &hs, NULL);
-    if (hs && AR_STEP_ROW_READONLY(hs) == SQLITE_ROW)
-        height = sqlite3_column_int(hs, 0);
-    if (hs) sqlite3_finalize(hs);
+    struct mintutxo_projection proj;
+    mintutxo_load_projection(&ndb, &proj);
 
-    /* Block hash at that height (prefer a data-bearing canonical row). */
-    uint8_t block_hash[32] = {0};
-    sqlite3_stmt *bs = NULL;
-    sqlite3_prepare_v2(ndb.db,
-        "SELECT hash FROM blocks WHERE height = ? "
-        "ORDER BY (status & 8) DESC LIMIT 1", -1, &bs, NULL);
-    if (bs) {
-        sqlite3_bind_int(bs, 1, height);
-        if (AR_STEP_ROW_READONLY(bs) == SQLITE_ROW &&
-            sqlite3_column_bytes(bs, 0) == 32)
-            memcpy(block_hash, sqlite3_column_blob(bs, 0), 32);
-        sqlite3_finalize(bs);
-    }
-
-    /* Total transparent supply (zatoshi). */
-    int64_t total_supply = 0;
-    sqlite3_stmt *ts = NULL;
-    sqlite3_prepare_v2(ndb.db,
-        "SELECT COALESCE(SUM(value),0) FROM utxos", -1, &ts, NULL);
-    if (ts && AR_STEP_ROW_READONLY(ts) == SQLITE_ROW)
-        total_supply = sqlite3_column_int64(ts, 0);
-    if (ts) sqlite3_finalize(ts);
-
-    /* SHA3 over the canonical UTXO set. */
-    uint8_t sha3[32];
-    uint64_t count = 0;
-    utxo_commitment_sha3_compute(ndb.db, sha3, &count);
-    node_db_close(&ndb);
-
-    if (height <= 0 || count == 0) {
+    if (proj.height <= 0 || proj.count == 0) {
         fprintf(stderr, "Refusing to mint: empty/incomplete UTXO set "
                 "(height=%d count=%llu). Sync to tip from a trusted "
-                "source first.\n", height, (unsigned long long)count);
+                "source first.\n", proj.height, (unsigned long long)proj.count);
         return 1;
     }
 
-    if (height != want_height) {
+    if (proj.height != want_height) {
         fprintf(stderr, "Refusing to mint: utxos projection height %d != "
                 "intended checkpoint height %d — the projection is not at "
                 "the checkpoint height (this is the off-by-one class the "
                 "original corrupt mint hit). Settle the projection to "
-                "exactly h=%d first.\n", height, want_height, want_height);
+                "exactly h=%d first.\n", proj.height, want_height, want_height);
         return 1;
     }
 
     char bh_hex[65], s3_hex[65];
-    for (int i = 0; i < 32; i++) {
-        snprintf(bh_hex + i * 2, 3, "%02x", block_hash[31 - i]); /* display = reversed */
-        snprintf(s3_hex + i * 2, 3, "%02x", sha3[i]);
-    }
+    mintutxo_format_display_hex(proj.block_hash, proj.sha3, bh_hex, s3_hex);
     printf("=== ZClassic SHA3 UTXO Commitment (MINT ceremony) ===\n");
     printf("height=%d count=%llu supply=%lld zatoshi\n",
-           height, (unsigned long long)count, (long long)total_supply);
+           proj.height, (unsigned long long)proj.count,
+           (long long)proj.total_supply);
     printf("block_hash=%s\nsha3=%s\n\n", bh_hex, s3_hex);
     printf("/* Paste into core/modules/chain/src/checkpoints.c as the latest\n"
            " * g_sha3_checkpoint, then commit (signed release). */\n");
     printf("static const struct sha3_utxo_checkpoint g_sha3_checkpoint = {\n");
-    printf("    .height = %d,\n", height);
+    printf("    .height = %d,\n", proj.height);
     printf("    .block_hash = { /* %s */\n        ", bh_hex);
-    for (int i = 0; i < 32; i++)
-        printf("0x%02x,%s", block_hash[i], (i % 8 == 7) ? "\n        " : " ");
+    mintutxo_print_c_bytes(proj.block_hash);
     printf("\n    },\n");
     printf("    .sha3_hash = { /* %s */\n        ", s3_hex);
-    for (int i = 0; i < 32; i++)
-        printf("0x%02x,%s", sha3[i], (i % 8 == 7) ? "\n        " : " ");
+    mintutxo_print_c_bytes(proj.sha3);
     printf("\n    },\n");
-    printf("    .utxo_count = %llu,\n", (unsigned long long)count);
-    printf("    .total_supply = %lldLL,\n", (long long)total_supply);
+    printf("    .utxo_count = %llu,\n", (unsigned long long)proj.count);
+    printf("    .total_supply = %lldLL,\n", (long long)proj.total_supply);
     printf("};\n");
     return 0;
 }
