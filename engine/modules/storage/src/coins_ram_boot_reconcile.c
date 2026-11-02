@@ -70,6 +70,107 @@ static bool coins_ram_boot_read_apply_cursor(struct sqlite3 *db,
     return true;
 }
 
+/* Turn the watermark read into a status: 1 continue, 0 nothing to rewind,
+ * -1 malformed. */
+static int coins_ram_boot_take_flush_watermark(bool wfound, size_t wlen,
+                                               const uint8_t *wm,
+                                               bool replay_marker,
+                                               int32_t *watermark)
+{
+    *watermark = -1;
+    if (!wfound) {
+        if (!replay_marker)
+            return 0;
+        return 1;
+    }
+    if (wlen != 8) {
+        LOG_WARN_IN("coins_ram_reconcile_boot", "coins_ram", "reconcile_boot: watermark malformed (len=%zu)",
+                 wlen);
+        return -1;
+    }
+    *watermark = (int32_t)zcl_read_u64_le(wm);
+    return 1;
+}
+
+/* Report whether the cursor needs a rewind or an equal-cursor purge.
+ * Sets *rewind_cursor on every path. */
+static bool coins_ram_boot_cursor_needs_work(int64_t cursor,
+                                             int64_t want_cursor,
+                                             bool replay_marker,
+                                             bool *rewind_cursor)
+{
+    *rewind_cursor = false;
+    if (cursor < 0 || cursor < want_cursor)
+        return false;
+    *rewind_cursor = cursor > want_cursor;
+    bool purge_equal_tail = replay_marker && cursor == want_cursor;
+    if (!*rewind_cursor && !purge_equal_tail)
+        return false;
+    return true;
+}
+
+/* Rewind utxo_apply to want_cursor and write the frontier inside the open
+ * transaction. Returns 0 on success, -1 when prepare, step, or the writer fails. */
+static int coins_ram_boot_rewind_cursor_and_frontier(
+    struct sqlite3 *db, coins_ram_frontier_writer_fn writer,
+    int64_t want_cursor)
+{
+    sqlite3_stmt *u2 = NULL;
+    int prep = sqlite3_prepare_v2(db,
+            "UPDATE stage_cursor SET cursor=?1, updated_at=strftime('%s','now') "
+            "WHERE name='utxo_apply'", -1, &u2, NULL);
+    if (prep != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(u2, 1, want_cursor);
+    int step = sqlite3_step(u2);  // raw-sql-ok:progress-kv-kernel-store
+    sqlite3_finalize(u2);
+    if (step != SQLITE_DONE)
+        return -1;
+    return writer(db, (int32_t)want_cursor) ? 0 : -1;
+}
+
+/* Hold the progress-store lock across the replay repair transaction.
+ * Returns false when begin, rewind, purge, or commit fails. */
+static bool coins_ram_boot_commit_replay_repair(
+    struct sqlite3 *db, coins_ram_frontier_writer_fn writer,
+    bool rewind_cursor, int64_t want_cursor)
+{
+    progress_store_tx_lock();
+    char *err = NULL;
+    bool ok = true;
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK) ok = false;
+    if (ok && rewind_cursor &&
+        coins_ram_boot_rewind_cursor_and_frontier(db, writer, want_cursor) != 0)
+        ok = false;
+    if (ok && !coins_ram_purge_replay_tail(db, want_cursor))
+        ok = false;
+    if (ok && sqlite3_exec(db, "COMMIT", NULL, NULL, &err) != SQLITE_OK) ok = false;
+    if (!ok) sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    if (err) sqlite3_free(err);
+    progress_store_tx_unlock();
+    return ok;
+}
+
+/* Log the crash-replay cursor rewind, or the equal-cursor tail purge. */
+static void coins_ram_boot_log_replay_outcome(bool rewind_cursor,
+                                              int64_t cursor,
+                                              int64_t want_cursor,
+                                              int32_t watermark)
+{
+    if (rewind_cursor) {
+        LOG_INFO_IN("coins_ram_reconcile_boot", "coins_ram",
+                 "[coins_ram] crash-replay: rewound utxo_apply cursor %lld -> "
+                 "%lld (durable flush watermark=%d); the fold re-applies the "
+                 "tail",
+                 (long long)cursor, (long long)want_cursor, watermark);
+    } else {
+        LOG_INFO_IN("coins_ram_reconcile_boot", "coins_ram",
+                 "[coins_ram] crash-replay: purged stale replay tail at "
+                 "utxo_apply cursor %lld (durable flush watermark=%d)",
+                 (long long)want_cursor, watermark);
+    }
+}
+
 bool coins_ram_reconcile_boot(
     struct sqlite3 *db, coins_ram_frontier_writer_fn writer)
 {
@@ -89,16 +190,12 @@ bool coins_ram_reconcile_boot(
     bool replay_marker = false;
     if (!coins_ram_boot_replay_marker_present(db, &replay_marker))
         LOG_FAIL("coins_ram", "reconcile_boot: replay marker read failed");
-    if (!wfound) {
-        if (!replay_marker)
-            return true;
-    } else if (wlen != 8) {
-        LOG_WARN("coins_ram", "reconcile_boot: watermark malformed (len=%zu)",
-                 wlen);
+    int wm_rc = coins_ram_boot_take_flush_watermark(wfound, wlen, wm,
+                                                    replay_marker, &watermark);
+    if (wm_rc < 0)
         return false;
-    } else {
-        watermark = (int32_t)zcl_read_u64_le(wm);
-    }
+    if (wm_rc == 0)
+        return true;
 
     /* Read the persisted utxo_apply cursor. */
     int64_t cursor = -1;
@@ -109,12 +206,9 @@ bool coins_ram_reconcile_boot(
      * than the cursor claims. Do not purge durable log evidence in that
      * inconsistent-but-conservative shape; another reconcile owns cursor lift. */
     int64_t want_cursor = (int64_t)watermark + 1;
-    if (cursor < 0 || cursor < want_cursor)
-        return true;
-
-    bool rewind_cursor = cursor > want_cursor;
-    bool purge_equal_tail = replay_marker && cursor == want_cursor;
-    if (!rewind_cursor && !purge_equal_tail)
+    bool rewind_cursor = false;
+    if (!coins_ram_boot_cursor_needs_work(cursor, want_cursor, replay_marker,
+                                          &rewind_cursor))
         return true;
 
     /* Crash between flushes: the cursor advanced past the last durable flush,
@@ -127,45 +221,11 @@ bool coins_ram_reconcile_boot(
      * replayed block collide with its own stale output. Keeping log/finalize
      * rows also leaves tip_finalize ahead of the coin frontier and can trap
      * mint/refold in an unwind/replay loop. */
-    progress_store_tx_lock();
-    char *err = NULL;
-    bool ok = true;
-    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK) ok = false;
-    if (ok && rewind_cursor) {
-        sqlite3_stmt *u2 = NULL;
-        if (sqlite3_prepare_v2(db,
-            "UPDATE stage_cursor SET cursor=?1, updated_at=strftime('%s','now') "
-            "WHERE name='utxo_apply'", -1, &u2, NULL) != SQLITE_OK) {
-            ok = false;
-        } else {
-            sqlite3_bind_int64(u2, 1, want_cursor);
-            if (sqlite3_step(u2) != SQLITE_DONE) ok = false;  // raw-sql-ok:progress-kv-kernel-store
-            sqlite3_finalize(u2);
-        }
-    }
-    if (ok && rewind_cursor &&
-        !writer(db, (int32_t)want_cursor))
-        ok = false;
-    if (ok && !coins_ram_purge_replay_tail(db, want_cursor))
-        ok = false;
-    if (ok && sqlite3_exec(db, "COMMIT", NULL, NULL, &err) != SQLITE_OK) ok = false;
-    if (!ok) sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-    if (err) sqlite3_free(err);
-    progress_store_tx_unlock();
-    if (!ok)
+    if (!coins_ram_boot_commit_replay_repair(db, writer, rewind_cursor,
+                                             want_cursor))
         LOG_FAIL("coins_ram", "reconcile_boot: rewind commit failed");
 
-    if (rewind_cursor) {
-        LOG_INFO("coins_ram",
-                 "[coins_ram] crash-replay: rewound utxo_apply cursor %lld -> "
-                 "%lld (durable flush watermark=%d); the fold re-applies the "
-                 "tail",
-                 (long long)cursor, (long long)want_cursor, watermark);
-    } else {
-        LOG_INFO("coins_ram",
-                 "[coins_ram] crash-replay: purged stale replay tail at "
-                 "utxo_apply cursor %lld (durable flush watermark=%d)",
-                 (long long)want_cursor, watermark);
-    }
+    coins_ram_boot_log_replay_outcome(rewind_cursor, cursor, want_cursor,
+                                      watermark);
     return true;
 }
