@@ -704,6 +704,9 @@ chmod +x "$HOT_MAKE" "$HOT_HARNESS"
 # VENDOR_MISSING_INPUTS for this one invocation skips that bootstrap, the same
 # way the view-header bootstrap is emptied, so the fixture never builds or
 # rewrites vendor/lib or vendor/include (see vendor_inputs_unchanged).
+# ZCL_TEST_STACK_SETUP is emptied too: the recipe's `ulimit -s unlimited`
+# cannot raise the stack hard limit that t-asan/t-tsan fix at 1 GiB
+# (ulimit -s 1048576), and the inert harness below needs no stack.
 run_hot_fixture()
 {
     BUILD_SOURCE_RECORD="$AMBIENT_RECORD" \
@@ -711,7 +714,7 @@ run_hot_fixture()
     Z23_HOT_HARNESS_ARGS="$HOT_HARNESS_ARGS" \
     make --no-print-directory \
         MAKE="$HOT_MAKE" BUILD_SOURCE_RECORD="$HOT_RECORD" \
-        ZCL_EPOCH_PROFILES= ZCL_DEPFILE_PROFILES= \
+        ZCL_EPOCH_PROFILES= ZCL_DEPFILE_PROFILES= ZCL_TEST_STACK_SETUP=: \
         VIEW_GEN_HEADERS_EARLY= VIEW_GEN_HEADERS= VENDOR_MISSING_INPUTS= \
         TEST_FAST_COMPILE_EPOCH="$EPOCH_MAIN" \
         TEST_PARALLEL_FAST_CANDIDATE="$HOT_HARNESS" \
