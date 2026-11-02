@@ -14,8 +14,13 @@
 #include "net/https_server.h"
 #include "platform/socket_compat.h"
 #include "rpc/httpserver.h"
+#include "config/boot_internal.h"
+#include "config/boot_mesh_pairing.h"
+#include "kernel/service_kernel.h"
+#include "services/https_deferred_start.h"
 
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -202,6 +207,155 @@ static int case_rpc_tls(const char *dir)
     return failures;
 }
 
+/* The boot frontend start path. boot_register_frontend_services() installs
+ * the hooks the node runs, and zcl_service_kernel_start_all() runs them with
+ * the -bind address carried in app_context. The context is zeroed apart from
+ * the listener fields: the miner, Tor and package-store hooks return without
+ * opening anything, and the chain state is empty, so the HTTPS start is not
+ * deferred unless a case raises the proof-validation height. */
+extern _Atomic int g_deferred_proof_validation_below_height;
+
+static struct boot_svc_ctx bf_svc;
+static struct app_context bf_ctx;
+static struct main_state bf_state;
+static struct rpc_table bf_tbl;
+static int bf_starter_calls;
+static char bf_starter_bind[64];
+
+static bool bf_record_starter(const char *cert, const char *key,
+                              const char *host, int https_port, int http_port,
+                              const char *bind)
+{
+    (void)cert;
+    (void)key;
+    (void)host;
+    (void)https_port;
+    (void)http_port;
+    bf_starter_calls++;
+    snprintf(bf_starter_bind, sizeof(bf_starter_bind), "%s", bind);
+    return true;
+}
+
+static bool bf_start(const char *dir, const char *bind, int fs_port,
+                     int rpc_port, int https_port)
+{
+    memset(&bf_svc, 0, sizeof(bf_svc));
+    memset(&bf_ctx, 0, sizeof(bf_ctx));
+    memset(&bf_state, 0, sizeof(bf_state));
+    rpc_table_init(&bf_tbl);
+    bf_ctx.datadir = dir;
+    bf_ctx.p2p_bind_address = bind;
+    bf_ctx.fs_port = fs_port;
+    bf_ctx.rpc_port = rpc_port;
+    bf_ctx.https_port = https_port;
+    bf_ctx.no_tor = true;
+    bf_svc.app_ctx = &bf_ctx;
+    bf_svc.state = &bf_state;
+    bf_svc.rpc_table = &bf_tbl;
+    bf_svc.datadir = dir;
+    zcl_service_kernel_init(&bf_svc.frontend_kernel);
+    return boot_register_frontend_services(&bf_svc) &&
+           zcl_service_kernel_start_all(&bf_svc.frontend_kernel);
+}
+
+static void bf_stop(void)
+{
+    zcl_service_kernel_stop_all(&bf_svc.frontend_kernel);
+    boot_mesh_pairing_shutdown();
+}
+
+static void bf_set_tls_port(uint16_t port)
+{
+    char text[16];
+    snprintf(text, sizeof(text), "%u", (unsigned)port);
+    setenv("ZCL_RPC_TLS_PORT", text, 1);
+}
+
+static bool bf_wait_fs(void)
+{
+    for (int i = 0; i < 200 && !fs_server_is_running(); i++)
+        nanosleep(&(struct timespec){ .tv_nsec = 25000000 }, NULL);
+    return fs_server_is_running();
+}
+
+static bool bf_fs_is(const char *want)
+{
+    char text[NAME_SIZE];
+    uint16_t port = 0;
+    bool ok = fs_server_listener_name(text, sizeof(text), &port);
+    return name_is(ok && port != 0, text, want);
+}
+
+static bool bf_rpc_tls_is(uint16_t tls_port, const char *want)
+{
+    char text[NAME_SIZE];
+    uint16_t port = 0;
+    bool ok = rpc_http_tls_listener_name(text, sizeof(text), &port);
+    return name_is(ok && port == tls_port, text, want);
+}
+
+static int case_boot_frontend_bind(const char *dir)
+{
+    int failures = 0;
+
+    TEST_CASE("listener_bind: the boot frontend start path binds every listener to -bind")
+    {
+        uint16_t tls_port = free_port();
+        uint16_t fs_port = free_port();
+        uint16_t rpc_port = free_port();
+        uint16_t https_port = free_port();
+        ASSERT(tls_port != 0 && fs_port != 0 && rpc_port != 0 && https_port > 363);
+        bf_set_tls_port(tls_port);
+        int saved = atomic_load(&g_deferred_proof_validation_below_height);
+        atomic_store(&g_deferred_proof_validation_below_height, -1);
+        bool started = bf_start(dir, "127.0.0.1", fs_port, rpc_port, https_port);
+        bool fs_ok = started && bf_wait_fs() && bf_fs_is("::ffff:127.0.0.1");
+        bool https_ok = started && https_names(false, "127.0.0.1");
+        bool redirect_ok = started && https_names(true, "127.0.0.1");
+        bool rpc_ok = started && bf_rpc_tls_is(tls_port, "127.0.0.1");
+        bf_stop();
+        atomic_store(&g_deferred_proof_validation_below_height, saved);
+        ASSERT(started);
+        ASSERT(fs_ok);
+        ASSERT(https_ok);
+        ASSERT(redirect_ok);
+        ASSERT(rpc_ok);
+    }
+    TEST_END
+    return failures;
+}
+
+static int case_boot_frontend_deferred(const char *dir)
+{
+    int failures = 0;
+
+    TEST_CASE("listener_bind: a queued HTTPS start keeps the -bind address")
+    {
+        uint16_t tls_port = free_port();
+        uint16_t fs_port = free_port();
+        uint16_t rpc_port = free_port();
+        uint16_t https_port = free_port();
+        ASSERT(tls_port != 0 && fs_port != 0 && rpc_port != 0 && https_port > 363);
+        bf_set_tls_port(tls_port);
+        int saved = atomic_load(&g_deferred_proof_validation_below_height);
+        atomic_store(&g_deferred_proof_validation_below_height, 20000);
+        https_deferred_start_set_starter_for_testing(bf_record_starter);
+        bf_starter_calls = 0;
+        bf_starter_bind[0] = '\0';
+        bool started = bf_start(dir, "127.0.0.1", fs_port, rpc_port, https_port);
+        https_deferred_start_check();
+        bool queued = started && bf_starter_calls == 1 &&
+                      name_is(true, bf_starter_bind, "127.0.0.1");
+        bf_stop();
+        https_deferred_start_set_starter_for_testing(NULL);
+        atomic_store(&g_deferred_proof_validation_below_height, saved);
+        ASSERT(started);
+        ASSERT(queued);
+    }
+    TEST_END
+    return failures;
+}
+
 int test_listener_bind(void)
 {
     int failures = 0;
@@ -227,6 +381,8 @@ int test_listener_bind(void)
     failures += case_fs_bound(dir);
     failures += case_fs_unparsable(dir);
     failures += case_rpc_tls(dir);
+    failures += case_boot_frontend_bind(dir);
+    failures += case_boot_frontend_deferred(dir);
 
     (void)rpc_http_set_tls_bind(NULL);
     unsetenv("ZCL_RPC_TLS_CERT");
