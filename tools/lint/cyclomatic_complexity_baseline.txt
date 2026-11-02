@@ -69,7 +69,6 @@ engine/jobs/src/stage_repair_coin_backfill.c:backfill_run:28
 engine/jobs/src/stage_repair_coin_backfill.c:coin_backfill_insert_tx:23
 engine/jobs/src/utxo_apply_delta_reorg.c:utxo_apply_reorg_unwind_if_needed:20
 engine/jobs/src/utxo_apply_delta_repair.c:utxo_apply_repair_value_overflow_hole:23
-engine/models/src/database_migrate_features_v67_up.c:node_db_migrate_features_v67_up:51
 engine/modules/storage/src/block_index_db.c:disk_block_index_deserialize:32
 engine/modules/storage/src/block_index_db.c:disk_block_index_serialize:29
 engine/modules/storage/src/coins_ram_boot_reconcile.c:coins_ram_reconcile_boot:31

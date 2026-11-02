@@ -626,116 +626,547 @@ static int db_migrate_finish_87(struct node_db *ndb, int *current_ver,
     return *applied;
 }
 
+/* v67: signed seller claims bound to a want, direct artifact SHA3,
+ * content.v2 CAS root, and optional node-verifiable receipts. This
+ * is evidence only: no award, escrow, ZCL movement, or ZC23 issuance.
+ * review_state and withdrawn_unix are local-only projection state. */
+static int db_migrate_step_67(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver >= 67) return 0;
+    if (!node_db_exec(ndb,
+            "CREATE TABLE IF NOT EXISTS shop_fulfills("
+            "fulfill_id BLOB PRIMARY KEY CHECK(length(fulfill_id)=32),"
+            "want_id BLOB NOT NULL CHECK(length(want_id)=32),"
+            "wire BLOB NOT NULL CHECK(length(wire)=322),"
+            "seller_pubkey BLOB NOT NULL CHECK(length(seller_pubkey)=32),"
+            "nonce INTEGER NOT NULL CHECK(nonce>0),"
+            "artifact_root BLOB NOT NULL CHECK(length(artifact_root)=32),"
+            "content_root BLOB NOT NULL CHECK(length(content_root)=32),"
+            "build_receipt_id BLOB NOT NULL "
+            "CHECK(length(build_receipt_id)=32),"
+            "fuzz_receipt_id BLOB NOT NULL "
+            "CHECK(length(fuzz_receipt_id)=32),"
+            "bench_receipt_id BLOB NOT NULL "
+            "CHECK(length(bench_receipt_id)=32),"
+            "issued_unix INTEGER NOT NULL CHECK(issued_unix>0),"
+            "expires_unix INTEGER NOT NULL CHECK(expires_unix>issued_unix),"
+            "review_state TEXT NOT NULL DEFAULT 'unreviewed' "
+            "CHECK(review_state IN "
+            "('unreviewed','reviewed_ok','sensitive')),"
+            "withdrawn_unix INTEGER NOT NULL DEFAULT 0 "
+            "CHECK(withdrawn_unix>=0),"
+            "posted_unix INTEGER NOT NULL CHECK(posted_unix>0))")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v67: shop_fulfills table failed");
+        return -1;
+    }
+    if (!node_db_exec(ndb,
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "idx_shop_fulfills_seller_nonce "
+            "ON shop_fulfills(seller_pubkey,nonce)")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v67: seller nonce index failed");
+        return -1;
+    }
+    if (!node_db_exec(ndb,
+            "CREATE INDEX IF NOT EXISTS idx_shop_fulfills_want "
+            "ON shop_fulfills(want_id,posted_unix DESC)")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v67: want index failed");
+        return -1;
+    }
+    if (!node_db_exec(ndb,
+            "CREATE INDEX IF NOT EXISTS idx_shop_fulfills_open "
+            "ON shop_fulfills(want_id,expires_unix,withdrawn_unix)")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v67: open index failed");
+        return -1;
+    }
+    if (!node_db_exec(ndb,
+            "INSERT OR IGNORE INTO schema_migrations(version) "
+            "VALUES('067')")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v67: migration stamp failed");
+        return -1;
+    }
+    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 67, *floor_ver);
+    *current_ver = 67;
+    (*applied)++;
+    return 0;
+}
+
+/* v68: append-only requester-local async proof events. Existing
+ * build_actions remain the exact work identity; signed work_receipts
+ * remain evidence authority. This table is a rebuildable, root-bound
+ * lifecycle projection and grants neither acceptance nor publication. */
+static int db_migrate_step_68(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver >= 68) return 0;
+    if (!node_db_exec(ndb,
+            "CREATE TABLE IF NOT EXISTS build_proof_events("
+            "event_root TEXT NOT NULL UNIQUE CHECK(length(event_root)=64),"
+            "prior_event_root TEXT NOT NULL DEFAULT '' "
+            "CHECK(length(prior_event_root) IN (0,64)),"
+            "action_id TEXT NOT NULL REFERENCES build_actions(action_id) "
+            "ON DELETE CASCADE CHECK(length(action_id)=64),"
+            "task_root_sha3 TEXT NOT NULL CHECK(length(task_root_sha3)=64),"
+            "candidate_root_sha3 TEXT NOT NULL "
+            "CHECK(length(candidate_root_sha3)=64),"
+            "proof_policy_root_sha3 TEXT NOT NULL "
+            "CHECK(length(proof_policy_root_sha3)=64),"
+            "context_root_sha3 TEXT NOT NULL DEFAULT '' "
+            "CHECK(length(context_root_sha3) IN (0,64)),"
+            "receipt_root_sha3 TEXT NOT NULL DEFAULT '' "
+            "CHECK(length(receipt_root_sha3) IN (0,64)),"
+            "workspace TEXT NOT NULL CHECK(length(workspace) BETWEEN 1 AND 4095),"
+            "state TEXT NOT NULL CHECK(state IN ('REQUESTED',"
+            "'PEER_DISCOVERED','CONTEXT_READY','RUNNING','REMOTE_GREEN','REMOTE_RED',"
+            "'RECEIPT_VERIFIED','REPRODUCED','SUPERSEDED',"
+            "'READY_FOR_ACCEPTANCE')),"
+            "peer_id INTEGER NOT NULL CHECK(peer_id>=0),"
+            "request_id BLOB NOT NULL CHECK(length(request_id)=8),"
+            "deadline_at INTEGER NOT NULL CHECK(deadline_at>=0),"
+            "elapsed_us INTEGER NOT NULL CHECK(elapsed_us>=0),"
+            "created_at INTEGER NOT NULL CHECK(created_at>0))")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v68: build_proof_events table failed");
+        return -1;
+    }
+    if (!node_db_exec(ndb,
+            "CREATE INDEX IF NOT EXISTS idx_build_proof_events_action "
+            "ON build_proof_events(action_id,created_at,event_root)")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v68: action event index failed");
+        return -1;
+    }
+    if (!node_db_exec(ndb,
+            "CREATE INDEX IF NOT EXISTS idx_build_proof_events_task "
+            "ON build_proof_events(task_root_sha3,created_at)")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v68: task event index failed");
+        return -1;
+    }
+    if (!node_db_exec(ndb,
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "idx_build_proof_events_one_successor "
+            "ON build_proof_events(prior_event_root) "
+            "WHERE prior_event_root<>''")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v68: event chain index failed");
+        return -1;
+    }
+    if (!node_db_exec(ndb,
+            "INSERT OR IGNORE INTO schema_migrations(version) "
+            "VALUES('068')")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v68: migration stamp failed");
+        return -1;
+    }
+    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 68, *floor_ver);
+    *current_ver = 68;
+    (*applied)++;
+    return 0;
+}
+
+/* v70: a worker result is quarantined together with the canonical
+ * physical execution observation it names. The receipt remains in
+ * the existing ledger and the bytes remain in the existing CAS;
+ * this column adds no scheduler or cache authority. Empty preserves
+ * historical v2 receipts, which cannot satisfy secure admission. */
+static int db_migrate_step_70(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver >= 70) return 0;
+    if (!node_db_exec(ndb,
+            "ALTER TABLE build_receipts ADD COLUMN "
+            "observation_sha3 TEXT NOT NULL DEFAULT '' "
+            "CHECK(length(observation_sha3) IN (0,64))")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v70: observation root failed");
+        return -1;
+    }
+    if (!node_db_exec(ndb,
+            "CREATE INDEX IF NOT EXISTS "
+            "idx_build_receipts_action_observation "
+            "ON build_receipts(action_id,observation_sha3,created_at)")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v70: observation index failed");
+        return -1;
+    }
+    if (!node_db_exec(ndb,
+            "INSERT OR IGNORE INTO schema_migrations(version) "
+            "VALUES('070')")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v70: migration stamp failed");
+        return -1;
+    }
+    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 70, *floor_ver);
+    *current_ver = 70;
+    (*applied)++;
+    return 0;
+}
+
+/* v71: the last verified encrypted wallet backup survives a process
+ * restart as a byte-bound receipt. This is custody readiness evidence,
+ * not a substitute for the external backup itself: startup reopens and
+ * hashes the named regular file before restoring authority. */
+static int db_migrate_step_71(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver >= 71) return 0;
+    if (!node_db_exec(ndb,
+            "CREATE TABLE IF NOT EXISTS wallet_backup_receipts("
+            "singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1),"
+            "completed_unix INTEGER NOT NULL CHECK(completed_unix>0),"
+            "key_count INTEGER NOT NULL CHECK(key_count>=0),"
+            "tables_verified INTEGER NOT NULL CHECK(tables_verified>0),"
+            "size_bytes INTEGER NOT NULL CHECK(size_bytes>0),"
+            "file_sha3 BLOB NOT NULL CHECK(length(file_sha3)=32),"
+            "backup_path TEXT NOT NULL CHECK(length(backup_path) BETWEEN 1 AND 511))")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v71: wallet backup receipt table failed");
+        return -1;
+    }
+    if (!node_db_exec(ndb,
+            "INSERT OR IGNORE INTO schema_migrations(version) "
+            "VALUES('071')")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v71: migration stamp failed");
+        return -1;
+    }
+    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 71, *floor_ver);
+    *current_ver = 71;
+    (*applied)++;
+    return 0;
+}
+
+/* v72: unused transparent change keys are durable state. Private key
+ * rows alone cannot distinguish an unused keypool entry from an
+ * already-issued receive/change key after restart. */
+static int db_migrate_step_72(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver >= 72) return 0;
+    if (!node_db_exec(ndb,
+            "CREATE TABLE IF NOT EXISTS wallet_keypool("
+            "pubkey_hash BLOB PRIMARY KEY CHECK(length(pubkey_hash)=20),"
+            "generation INTEGER NOT NULL UNIQUE CHECK(generation>=0),"
+            "FOREIGN KEY(pubkey_hash) REFERENCES wallet_keys(pubkey_hash) "
+            "ON DELETE CASCADE)")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v72: wallet keypool table failed");
+        return -1;
+    }
+    if (!node_db_exec(ndb,
+            "INSERT OR IGNORE INTO schema_migrations(version) "
+            "VALUES('072')")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v72: migration stamp failed");
+        return -1;
+    }
+    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 72, *floor_ver);
+    *current_ver = 72;
+    (*applied)++;
+    return 0;
+}
+
+/* v73: bind a bounded agent grant to the canonical durable intent and
+ * remember its exact once-only debit across crashes/retries. The full
+ * bearer id never leaves node.db after the local CLI presents it. */
+static int db_migrate_step_73(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver >= 73) return 0;
+    if (!node_db_exec(ndb,
+            "ALTER TABLE vault_intents ADD COLUMN agent_session_id "
+            "TEXT NOT NULL DEFAULT '' CHECK(length(agent_session_id) "
+            "IN (0,32))")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v73: intent agent binding failed");
+        return -1;
+    }
+    if (!node_db_exec(ndb,
+            "ALTER TABLE vault_intents ADD COLUMN agent_debited_zat "
+            "INTEGER NOT NULL DEFAULT 0 CHECK(agent_debited_zat>=0)")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v73: intent debit marker failed");
+        return -1;
+    }
+    if (!node_db_exec(ndb,
+            "INSERT OR IGNORE INTO schema_migrations(version) "
+            "VALUES('073')")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v73: migration stamp failed");
+        return -1;
+    }
+    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 73, *floor_ver);
+    *current_ver = 73;
+    (*applied)++;
+    return 0;
+}
+
+/* v74: an owner-minted dev grant may narrow the generic custody
+ * policy to an explicit wallet floor. Existing grants retain the
+ * historical 0.25-ZCL floor; only a newly confirmed grant can name a
+ * different floor, and every grant remains wallet-identity bound. */
+static int db_migrate_step_74(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver >= 74) return 0;
+    if (!node_db_exec(ndb,
+            "ALTER TABLE agent_sessions ADD COLUMN reserve_floor_zat "
+            "INTEGER NOT NULL DEFAULT 25000000 "
+            "CHECK(reserve_floor_zat>=0 AND "
+            "reserve_floor_zat<=2100000000000000)")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v74: session reserve floor failed");
+        return -1;
+    }
+    if (!node_db_exec(ndb,
+            "INSERT OR IGNORE INTO schema_migrations(version) "
+            "VALUES('074')")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v74: migration stamp failed");
+        return -1;
+    }
+    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 74, *floor_ver);
+    *current_ver = 74;
+    (*applied)++;
+    return 0;
+}
+
+/* v76: private local machine-pairing authority. The record binds one
+ * network, active ZID master, persistent Noise static key, narrow
+ * capability mask, expiry, and sticky revocation generation. It holds
+ * public identity only and is never published to the DHT or Commons. */
+static int db_migrate_step_76(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver >= 76) return 0;
+    if (!node_db_exec(ndb,
+            "CREATE TABLE IF NOT EXISTS mesh_pairings("
+            "pairing_id TEXT PRIMARY KEY CHECK(length(pairing_id)=64),"
+            "network_genesis BLOB NOT NULL CHECK(length(network_genesis)=32),"
+            "peer_master_pubkey BLOB NOT NULL "
+            "CHECK(length(peer_master_pubkey)=32),"
+            "peer_noise_pubkey BLOB NOT NULL "
+            "CHECK(length(peer_noise_pubkey)=32),"
+            "capability_mask INTEGER NOT NULL CHECK(capability_mask>0),"
+            "delegation_sequence INTEGER NOT NULL "
+            "CHECK(delegation_sequence>0),"
+            "paired_at INTEGER NOT NULL CHECK(paired_at>0),"
+            "expires_at INTEGER NOT NULL CHECK(expires_at>paired_at),"
+            "revoked_at INTEGER NOT NULL DEFAULT 0 CHECK(revoked_at>=0),"
+            "revocation_generation INTEGER NOT NULL DEFAULT 0 "
+            "CHECK(revocation_generation>=0),"
+            "UNIQUE(network_genesis,peer_master_pubkey,peer_noise_pubkey))")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v76: mesh_pairings table failed");
+        return -1;
+    }
+    if (!node_db_exec(ndb,
+            "CREATE INDEX IF NOT EXISTS idx_mesh_pairings_active "
+            "ON mesh_pairings(revoked_at,expires_at)")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v76: mesh_pairings index failed");
+        return -1;
+    }
+    if (!node_db_exec(ndb,
+            "INSERT OR IGNORE INTO schema_migrations(version) "
+            "VALUES('076')")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v76: migration stamp failed");
+        return -1;
+    }
+    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 76, *floor_ver);
+    *current_ver = 76;
+    (*applied)++;
+    return 0;
+}
+
+/* v77: latest exact signed status evidence for each private local
+ * pairing. This is an observational projection, never authority. */
+static int db_migrate_step_77(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver >= 77) return 0;
+    if (!node_db_exec(ndb,
+            "CREATE TABLE IF NOT EXISTS mesh_machine_observations("
+            "pairing_id TEXT PRIMARY KEY REFERENCES mesh_pairings(pairing_id) "
+            "ON DELETE CASCADE CHECK(length(pairing_id)=64),"
+            "receipt_wire BLOB NOT NULL "
+            "CHECK(length(receipt_wire) BETWEEN 400 AND 4496),"
+            "receipt_root BLOB NOT NULL CHECK(length(receipt_root)=32),"
+            "status INTEGER NOT NULL CHECK(status BETWEEN 0 AND 9),"
+            "observed_unix INTEGER NOT NULL CHECK(observed_unix>0),"
+            "expires_unix INTEGER NOT NULL CHECK(expires_unix>observed_unix),"
+            "received_unix INTEGER NOT NULL CHECK(received_unix>0))")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v77: mesh machine observations failed");
+        return -1;
+    }
+    if (!node_db_exec(ndb,
+            "INSERT OR IGNORE INTO schema_migrations(version) "
+            "VALUES('077')")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v77: migration stamp failed");
+        return -1;
+    }
+    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 77, *floor_ver);
+    *current_ver = 77;
+    (*applied)++;
+    return 0;
+}
+
+/* v78: exact, insert-only private-object receive grants. Pairing is
+ * the subject authority; one-use consumption and sticky revocation
+ * remain durable across retries and process restarts. */
+static int db_migrate_step_78(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver >= 78) return 0;
+    if (!node_db_exec(ndb,
+            "CREATE TABLE IF NOT EXISTS mesh_capability_grants("
+            "grant_id TEXT PRIMARY KEY CHECK(length(grant_id)=64),"
+            "pairing_id TEXT NOT NULL REFERENCES mesh_pairings(pairing_id) "
+            "ON DELETE CASCADE CHECK(length(pairing_id)=64),"
+            "operation INTEGER NOT NULL CHECK(operation=1),"
+            "plaintext_root BLOB NOT NULL CHECK(length(plaintext_root)=32),"
+            "ciphertext_root BLOB NOT NULL CHECK(length(ciphertext_root)=32),"
+            "object_size_bytes INTEGER NOT NULL CHECK(object_size_bytes BETWEEN 1 AND 1073741824),"
+            "ciphertext_size_bytes INTEGER NOT NULL CHECK(ciphertext_size_bytes>=object_size_bytes AND ciphertext_size_bytes<=2147483648),"
+            "storage_limit_bytes INTEGER NOT NULL CHECK(storage_limit_bytes>=ciphertext_size_bytes AND storage_limit_bytes<=2147483648),"
+            "transfer_limit_bytes INTEGER NOT NULL CHECK(transfer_limit_bytes>=ciphertext_size_bytes AND transfer_limit_bytes<=2147483648),"
+            "chunk_limit INTEGER NOT NULL CHECK(chunk_limit BETWEEN 1 AND 4096),"
+            "max_chunk_bytes INTEGER NOT NULL CHECK(max_chunk_bytes BETWEEN 1 AND 4194304),"
+            "wall_limit_seconds INTEGER NOT NULL CHECK(wall_limit_seconds BETWEEN 1 AND 86400),"
+            "nonce BLOB NOT NULL CHECK(length(nonce)=32),"
+            "deny_mask INTEGER NOT NULL CHECK(deny_mask=63),"
+            "issued_at INTEGER NOT NULL CHECK(issued_at>0),"
+            "not_before INTEGER NOT NULL CHECK(not_before>=issued_at),"
+            "expires_at INTEGER NOT NULL CHECK(expires_at>not_before AND expires_at-issued_at<=2592000),"
+            "consumed_at INTEGER NOT NULL DEFAULT 0 CHECK(consumed_at=0 OR (consumed_at>=not_before AND consumed_at<expires_at)),"
+            "revoked_at INTEGER NOT NULL DEFAULT 0 CHECK(revoked_at=0 OR revoked_at>=issued_at),"
+            "revocation_generation INTEGER NOT NULL DEFAULT 0 CHECK((revoked_at=0 AND revocation_generation=0) OR (revoked_at>0 AND revocation_generation>0)),"
+            "CHECK(chunk_limit*max_chunk_bytes>=ciphertext_size_bytes))")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v78: mesh capability grants failed");
+        return -1;
+    }
+    if (!node_db_exec(ndb,
+            "CREATE INDEX IF NOT EXISTS "
+            "idx_mesh_capability_grants_pairing_state ON "
+            "mesh_capability_grants(pairing_id,revoked_at,consumed_at,expires_at)")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v78: mesh capability grant index failed");
+        return -1;
+    }
+    if (!node_db_exec(ndb,
+            "INSERT OR IGNORE INTO schema_migrations(version) "
+            "VALUES('078')")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v78: migration stamp failed");
+        return -1;
+    }
+    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 78, *floor_ver);
+    *current_ver = 78;
+    (*applied)++;
+    return 0;
+}
+
+/* v80: the fleet AI message board and wiki — one append-only, signed,
+ * gossiped ledger every full node carries. `seq` is this node's local
+ * arrival order and `chain_hash` chains the ids in that order, so the
+ * local ledger is tamper-evident; neither is gossiped and neither
+ * orders the board for anybody else. Posts are application overlay
+ * and are never consulted by consensus. Every column the wire signs
+ * is bounded here too, so a row that could not have been a valid post
+ * cannot be inserted even by a local bug. */
+static int db_migrate_step_80(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver >= 80) return 0;
+    if (!node_db_exec(ndb,
+            "CREATE TABLE IF NOT EXISTS fleet_board_posts("
+            "id BLOB PRIMARY KEY CHECK(length(id)=32),"
+            "seq INTEGER NOT NULL,"
+            "kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 7),"
+            "created_at INTEGER NOT NULL CHECK(created_at>0),"
+            "ttl INTEGER NOT NULL CHECK(ttl BETWEEN 1 AND 2592000),"
+            "expires_at INTEGER NOT NULL CHECK(expires_at>created_at),"
+            "ref BLOB NOT NULL CHECK(length(ref)=32),"
+            "host_pubkey BLOB NOT NULL CHECK(length(host_pubkey)=32),"
+            "agent TEXT NOT NULL CHECK(length(agent)<=64),"
+            "slug TEXT NOT NULL CHECK(length(slug)<=64),"
+            "title TEXT NOT NULL CHECK(length(title)<=128),"
+            "supersedes BLOB NOT NULL CHECK(length(supersedes)=32),"
+            "receipt TEXT NOT NULL CHECK(length(receipt)<=256),"
+            "text TEXT NOT NULL CHECK(length(text) BETWEEN 1 AND 16384),"
+            "body_bytes INTEGER NOT NULL CHECK(body_bytes BETWEEN 1 AND 17408),"
+            "signature BLOB NOT NULL CHECK(length(signature)=64),"
+            "chain_prev BLOB NOT NULL CHECK(length(chain_prev)=32),"
+            "chain_hash BLOB NOT NULL CHECK(length(chain_hash)=32),"
+            "received_at INTEGER NOT NULL CHECK(received_at>=0))")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v80: fleet board table failed");
+        return -1;
+    }
+    if (!node_db_exec(ndb,
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_fleet_board_seq "
+            "ON fleet_board_posts(seq)")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v80: fleet board seq index failed");
+        return -1;
+    }
+    /* The three reads the board actually makes: newest-first listing,
+     * "has anything answered this post" for --open, and the wiki's
+     * latest-revision-per-slug resolution. */
+    if (!node_db_exec(ndb,
+            "CREATE INDEX IF NOT EXISTS idx_fleet_board_created "
+            "ON fleet_board_posts(created_at DESC,id)")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v80: fleet board created index failed");
+        return -1;
+    }
+    if (!node_db_exec(ndb,
+            "CREATE INDEX IF NOT EXISTS idx_fleet_board_ref "
+            "ON fleet_board_posts(ref,kind)")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v80: fleet board ref index failed");
+        return -1;
+    }
+    if (!node_db_exec(ndb,
+            "CREATE INDEX IF NOT EXISTS idx_fleet_board_slug "
+            "ON fleet_board_posts(slug,created_at DESC,id)")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v80: fleet board slug index failed");
+        return -1;
+    }
+    if (!node_db_exec(ndb,
+            "INSERT OR IGNORE INTO schema_migrations(version) "
+            "VALUES('080')")) {
+        LOG_ERROR_IN("node_db_migrate_features_v67_up", "db",
+                     "migrate v80: migration stamp failed");
+        return -1;
+    }
+    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 80, *floor_ver);
+    *current_ver = 80;
+    (*applied)++;
+    return 0;
+}
+
 int node_db_migrate_features_v67_up(struct node_db *ndb, int *version,
                                     int *floor)
 {
     int applied = 0;
     int current_ver = *version;
     int floor_ver = *floor;
-    if (current_ver < 67) {
-        /* v67: signed seller claims bound to a want, direct artifact SHA3,
-         * content.v2 CAS root, and optional node-verifiable receipts. This
-         * is evidence only: no award, escrow, ZCL movement, or ZC23 issuance.
-         * review_state and withdrawn_unix are local-only projection state. */
-        if (!node_db_exec(ndb,
-                "CREATE TABLE IF NOT EXISTS shop_fulfills("
-                "fulfill_id BLOB PRIMARY KEY CHECK(length(fulfill_id)=32),"
-                "want_id BLOB NOT NULL CHECK(length(want_id)=32),"
-                "wire BLOB NOT NULL CHECK(length(wire)=322),"
-                "seller_pubkey BLOB NOT NULL CHECK(length(seller_pubkey)=32),"
-                "nonce INTEGER NOT NULL CHECK(nonce>0),"
-                "artifact_root BLOB NOT NULL CHECK(length(artifact_root)=32),"
-                "content_root BLOB NOT NULL CHECK(length(content_root)=32),"
-                "build_receipt_id BLOB NOT NULL "
-                "CHECK(length(build_receipt_id)=32),"
-                "fuzz_receipt_id BLOB NOT NULL "
-                "CHECK(length(fuzz_receipt_id)=32),"
-                "bench_receipt_id BLOB NOT NULL "
-                "CHECK(length(bench_receipt_id)=32),"
-                "issued_unix INTEGER NOT NULL CHECK(issued_unix>0),"
-                "expires_unix INTEGER NOT NULL CHECK(expires_unix>issued_unix),"
-                "review_state TEXT NOT NULL DEFAULT 'unreviewed' "
-                "CHECK(review_state IN "
-                "('unreviewed','reviewed_ok','sensitive')),"
-                "withdrawn_unix INTEGER NOT NULL DEFAULT 0 "
-                "CHECK(withdrawn_unix>=0),"
-                "posted_unix INTEGER NOT NULL CHECK(posted_unix>0))"))
-            LOG_ERR("db", "migrate v67: shop_fulfills table failed");
-        if (!node_db_exec(ndb,
-                "CREATE UNIQUE INDEX IF NOT EXISTS "
-                "idx_shop_fulfills_seller_nonce "
-                "ON shop_fulfills(seller_pubkey,nonce)"))
-            LOG_ERR("db", "migrate v67: seller nonce index failed");
-        if (!node_db_exec(ndb,
-                "CREATE INDEX IF NOT EXISTS idx_shop_fulfills_want "
-                "ON shop_fulfills(want_id,posted_unix DESC)"))
-            LOG_ERR("db", "migrate v67: want index failed");
-        if (!node_db_exec(ndb,
-                "CREATE INDEX IF NOT EXISTS idx_shop_fulfills_open "
-                "ON shop_fulfills(want_id,expires_unix,withdrawn_unix)"))
-            LOG_ERR("db", "migrate v67: open index failed");
-        if (!node_db_exec(ndb,
-                "INSERT OR IGNORE INTO schema_migrations(version) "
-                "VALUES('067')"))
-            LOG_ERR("db", "migrate v67: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 67, floor_ver);
-        current_ver = 67;
-        applied++;
-    }
-    if (current_ver < 68) {
-        /* v68: append-only requester-local async proof events. Existing
-         * build_actions remain the exact work identity; signed work_receipts
-         * remain evidence authority. This table is a rebuildable, root-bound
-         * lifecycle projection and grants neither acceptance nor publication. */
-        if (!node_db_exec(ndb,
-                "CREATE TABLE IF NOT EXISTS build_proof_events("
-                "event_root TEXT NOT NULL UNIQUE CHECK(length(event_root)=64),"
-                "prior_event_root TEXT NOT NULL DEFAULT '' "
-                "CHECK(length(prior_event_root) IN (0,64)),"
-                "action_id TEXT NOT NULL REFERENCES build_actions(action_id) "
-                "ON DELETE CASCADE CHECK(length(action_id)=64),"
-                "task_root_sha3 TEXT NOT NULL CHECK(length(task_root_sha3)=64),"
-                "candidate_root_sha3 TEXT NOT NULL "
-                "CHECK(length(candidate_root_sha3)=64),"
-                "proof_policy_root_sha3 TEXT NOT NULL "
-                "CHECK(length(proof_policy_root_sha3)=64),"
-                "context_root_sha3 TEXT NOT NULL DEFAULT '' "
-                "CHECK(length(context_root_sha3) IN (0,64)),"
-                "receipt_root_sha3 TEXT NOT NULL DEFAULT '' "
-                "CHECK(length(receipt_root_sha3) IN (0,64)),"
-                "workspace TEXT NOT NULL CHECK(length(workspace) BETWEEN 1 AND 4095),"
-                "state TEXT NOT NULL CHECK(state IN ('REQUESTED',"
-                "'PEER_DISCOVERED','CONTEXT_READY','RUNNING','REMOTE_GREEN','REMOTE_RED',"
-                "'RECEIPT_VERIFIED','REPRODUCED','SUPERSEDED',"
-                "'READY_FOR_ACCEPTANCE')),"
-                "peer_id INTEGER NOT NULL CHECK(peer_id>=0),"
-                "request_id BLOB NOT NULL CHECK(length(request_id)=8),"
-                "deadline_at INTEGER NOT NULL CHECK(deadline_at>=0),"
-                "elapsed_us INTEGER NOT NULL CHECK(elapsed_us>=0),"
-                "created_at INTEGER NOT NULL CHECK(created_at>0))"))
-            LOG_ERR("db", "migrate v68: build_proof_events table failed");
-        if (!node_db_exec(ndb,
-                "CREATE INDEX IF NOT EXISTS idx_build_proof_events_action "
-                "ON build_proof_events(action_id,created_at,event_root)"))
-            LOG_ERR("db", "migrate v68: action event index failed");
-        if (!node_db_exec(ndb,
-                "CREATE INDEX IF NOT EXISTS idx_build_proof_events_task "
-                "ON build_proof_events(task_root_sha3,created_at)"))
-            LOG_ERR("db", "migrate v68: task event index failed");
-        if (!node_db_exec(ndb,
-                "CREATE UNIQUE INDEX IF NOT EXISTS "
-                "idx_build_proof_events_one_successor "
-                "ON build_proof_events(prior_event_root) "
-                "WHERE prior_event_root<>''"))
-            LOG_ERR("db", "migrate v68: event chain index failed");
-        if (!node_db_exec(ndb,
-                "INSERT OR IGNORE INTO schema_migrations(version) "
-                "VALUES('068')"))
-            LOG_ERR("db", "migrate v68: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 68, floor_ver);
-        current_ver = 68;
-        applied++;
-    }
+    if (db_migrate_step_67(ndb, &current_ver, &floor_ver, &applied) < 0)
+        return -1;
+    if (db_migrate_step_68(ndb, &current_ver, &floor_ver, &applied) < 0)
+        return -1;
     {
         int r = db_migrate_step_69(ndb, &current_ver, &floor_ver, &applied);
         if (r < 0) {
@@ -744,112 +1175,16 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version,
             return r;
         }
     }
-    if (current_ver < 70) {
-        /* v70: a worker result is quarantined together with the canonical
-         * physical execution observation it names. The receipt remains in
-         * the existing ledger and the bytes remain in the existing CAS;
-         * this column adds no scheduler or cache authority. Empty preserves
-         * historical v2 receipts, which cannot satisfy secure admission. */
-        if (!node_db_exec(ndb,
-                "ALTER TABLE build_receipts ADD COLUMN "
-                "observation_sha3 TEXT NOT NULL DEFAULT '' "
-                "CHECK(length(observation_sha3) IN (0,64))"))
-            LOG_ERR("db", "migrate v70: observation root failed");
-        if (!node_db_exec(ndb,
-                "CREATE INDEX IF NOT EXISTS "
-                "idx_build_receipts_action_observation "
-                "ON build_receipts(action_id,observation_sha3,created_at)"))
-            LOG_ERR("db", "migrate v70: observation index failed");
-        if (!node_db_exec(ndb,
-                "INSERT OR IGNORE INTO schema_migrations(version) "
-                "VALUES('070')"))
-            LOG_ERR("db", "migrate v70: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 70, floor_ver);
-        current_ver = 70;
-        applied++;
-    }
-    if (current_ver < 71) {
-        /* v71: the last verified encrypted wallet backup survives a process
-         * restart as a byte-bound receipt. This is custody readiness evidence,
-         * not a substitute for the external backup itself: startup reopens and
-         * hashes the named regular file before restoring authority. */
-        if (!node_db_exec(ndb,
-                "CREATE TABLE IF NOT EXISTS wallet_backup_receipts("
-                "singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1),"
-                "completed_unix INTEGER NOT NULL CHECK(completed_unix>0),"
-                "key_count INTEGER NOT NULL CHECK(key_count>=0),"
-                "tables_verified INTEGER NOT NULL CHECK(tables_verified>0),"
-                "size_bytes INTEGER NOT NULL CHECK(size_bytes>0),"
-                "file_sha3 BLOB NOT NULL CHECK(length(file_sha3)=32),"
-                "backup_path TEXT NOT NULL CHECK(length(backup_path) BETWEEN 1 AND 511))"))
-            LOG_ERR("db", "migrate v71: wallet backup receipt table failed");
-        if (!node_db_exec(ndb,
-                "INSERT OR IGNORE INTO schema_migrations(version) "
-                "VALUES('071')"))
-            LOG_ERR("db", "migrate v71: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 71, floor_ver);
-        current_ver = 71;
-        applied++;
-    }
-    if (current_ver < 72) {
-        /* v72: unused transparent change keys are durable state. Private key
-         * rows alone cannot distinguish an unused keypool entry from an
-         * already-issued receive/change key after restart. */
-        if (!node_db_exec(ndb,
-                "CREATE TABLE IF NOT EXISTS wallet_keypool("
-                "pubkey_hash BLOB PRIMARY KEY CHECK(length(pubkey_hash)=20),"
-                "generation INTEGER NOT NULL UNIQUE CHECK(generation>=0),"
-                "FOREIGN KEY(pubkey_hash) REFERENCES wallet_keys(pubkey_hash) "
-                "ON DELETE CASCADE)"))
-            LOG_ERR("db", "migrate v72: wallet keypool table failed");
-        if (!node_db_exec(ndb,
-                "INSERT OR IGNORE INTO schema_migrations(version) "
-                "VALUES('072')"))
-            LOG_ERR("db", "migrate v72: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 72, floor_ver);
-        current_ver = 72;
-        applied++;
-    }
-    if (current_ver < 73) {
-        /* v73: bind a bounded agent grant to the canonical durable intent and
-         * remember its exact once-only debit across crashes/retries. The full
-         * bearer id never leaves node.db after the local CLI presents it. */
-        if (!node_db_exec(ndb,
-                "ALTER TABLE vault_intents ADD COLUMN agent_session_id "
-                "TEXT NOT NULL DEFAULT '' CHECK(length(agent_session_id) "
-                "IN (0,32))"))
-            LOG_ERR("db", "migrate v73: intent agent binding failed");
-        if (!node_db_exec(ndb,
-                "ALTER TABLE vault_intents ADD COLUMN agent_debited_zat "
-                "INTEGER NOT NULL DEFAULT 0 CHECK(agent_debited_zat>=0)"))
-            LOG_ERR("db", "migrate v73: intent debit marker failed");
-        if (!node_db_exec(ndb,
-                "INSERT OR IGNORE INTO schema_migrations(version) "
-                "VALUES('073')"))
-            LOG_ERR("db", "migrate v73: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 73, floor_ver);
-        current_ver = 73;
-        applied++;
-    }
-    if (current_ver < 74) {
-        /* v74: an owner-minted dev grant may narrow the generic custody
-         * policy to an explicit wallet floor. Existing grants retain the
-         * historical 0.25-ZCL floor; only a newly confirmed grant can name a
-         * different floor, and every grant remains wallet-identity bound. */
-        if (!node_db_exec(ndb,
-                "ALTER TABLE agent_sessions ADD COLUMN reserve_floor_zat "
-                "INTEGER NOT NULL DEFAULT 25000000 "
-                "CHECK(reserve_floor_zat>=0 AND "
-                "reserve_floor_zat<=2100000000000000)"))
-            LOG_ERR("db", "migrate v74: session reserve floor failed");
-        if (!node_db_exec(ndb,
-                "INSERT OR IGNORE INTO schema_migrations(version) "
-                "VALUES('074')"))
-            LOG_ERR("db", "migrate v74: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 74, floor_ver);
-        current_ver = 74;
-        applied++;
-    }
+    if (db_migrate_step_70(ndb, &current_ver, &floor_ver, &applied) < 0)
+        return -1;
+    if (db_migrate_step_71(ndb, &current_ver, &floor_ver, &applied) < 0)
+        return -1;
+    if (db_migrate_step_72(ndb, &current_ver, &floor_ver, &applied) < 0)
+        return -1;
+    if (db_migrate_step_73(ndb, &current_ver, &floor_ver, &applied) < 0)
+        return -1;
+    if (db_migrate_step_74(ndb, &current_ver, &floor_ver, &applied) < 0)
+        return -1;
     {
         int r = db_migrate_step_75(ndb, &current_ver, &floor_ver, &applied);
         if (r < 0) {
@@ -858,106 +1193,12 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version,
             return r;
         }
     }
-    if (current_ver < 76) {
-        /* v76: private local machine-pairing authority. The record binds one
-         * network, active ZID master, persistent Noise static key, narrow
-         * capability mask, expiry, and sticky revocation generation. It holds
-         * public identity only and is never published to the DHT or Commons. */
-        if (!node_db_exec(ndb,
-                "CREATE TABLE IF NOT EXISTS mesh_pairings("
-                "pairing_id TEXT PRIMARY KEY CHECK(length(pairing_id)=64),"
-                "network_genesis BLOB NOT NULL CHECK(length(network_genesis)=32),"
-                "peer_master_pubkey BLOB NOT NULL "
-                "CHECK(length(peer_master_pubkey)=32),"
-                "peer_noise_pubkey BLOB NOT NULL "
-                "CHECK(length(peer_noise_pubkey)=32),"
-                "capability_mask INTEGER NOT NULL CHECK(capability_mask>0),"
-                "delegation_sequence INTEGER NOT NULL "
-                "CHECK(delegation_sequence>0),"
-                "paired_at INTEGER NOT NULL CHECK(paired_at>0),"
-                "expires_at INTEGER NOT NULL CHECK(expires_at>paired_at),"
-                "revoked_at INTEGER NOT NULL DEFAULT 0 CHECK(revoked_at>=0),"
-                "revocation_generation INTEGER NOT NULL DEFAULT 0 "
-                "CHECK(revocation_generation>=0),"
-                "UNIQUE(network_genesis,peer_master_pubkey,peer_noise_pubkey))"))
-            LOG_ERR("db", "migrate v76: mesh_pairings table failed");
-        if (!node_db_exec(ndb,
-                "CREATE INDEX IF NOT EXISTS idx_mesh_pairings_active "
-                "ON mesh_pairings(revoked_at,expires_at)"))
-            LOG_ERR("db", "migrate v76: mesh_pairings index failed");
-        if (!node_db_exec(ndb,
-                "INSERT OR IGNORE INTO schema_migrations(version) "
-                "VALUES('076')"))
-            LOG_ERR("db", "migrate v76: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 76, floor_ver);
-        current_ver = 76;
-        applied++;
-    }
-    if (current_ver < 77) {
-        /* v77: latest exact signed status evidence for each private local
-         * pairing. This is an observational projection, never authority. */
-        if (!node_db_exec(ndb,
-                "CREATE TABLE IF NOT EXISTS mesh_machine_observations("
-                "pairing_id TEXT PRIMARY KEY REFERENCES mesh_pairings(pairing_id) "
-                "ON DELETE CASCADE CHECK(length(pairing_id)=64),"
-                "receipt_wire BLOB NOT NULL "
-                "CHECK(length(receipt_wire) BETWEEN 400 AND 4496),"
-                "receipt_root BLOB NOT NULL CHECK(length(receipt_root)=32),"
-                "status INTEGER NOT NULL CHECK(status BETWEEN 0 AND 9),"
-                "observed_unix INTEGER NOT NULL CHECK(observed_unix>0),"
-                "expires_unix INTEGER NOT NULL CHECK(expires_unix>observed_unix),"
-                "received_unix INTEGER NOT NULL CHECK(received_unix>0))"))
-            LOG_ERR("db", "migrate v77: mesh machine observations failed");
-        if (!node_db_exec(ndb,
-                "INSERT OR IGNORE INTO schema_migrations(version) "
-                "VALUES('077')"))
-            LOG_ERR("db", "migrate v77: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 77, floor_ver);
-        current_ver = 77;
-        applied++;
-    }
-    if (current_ver < 78) {
-        /* v78: exact, insert-only private-object receive grants. Pairing is
-         * the subject authority; one-use consumption and sticky revocation
-         * remain durable across retries and process restarts. */
-        if (!node_db_exec(ndb,
-                "CREATE TABLE IF NOT EXISTS mesh_capability_grants("
-                "grant_id TEXT PRIMARY KEY CHECK(length(grant_id)=64),"
-                "pairing_id TEXT NOT NULL REFERENCES mesh_pairings(pairing_id) "
-                "ON DELETE CASCADE CHECK(length(pairing_id)=64),"
-                "operation INTEGER NOT NULL CHECK(operation=1),"
-                "plaintext_root BLOB NOT NULL CHECK(length(plaintext_root)=32),"
-                "ciphertext_root BLOB NOT NULL CHECK(length(ciphertext_root)=32),"
-                "object_size_bytes INTEGER NOT NULL CHECK(object_size_bytes BETWEEN 1 AND 1073741824),"
-                "ciphertext_size_bytes INTEGER NOT NULL CHECK(ciphertext_size_bytes>=object_size_bytes AND ciphertext_size_bytes<=2147483648),"
-                "storage_limit_bytes INTEGER NOT NULL CHECK(storage_limit_bytes>=ciphertext_size_bytes AND storage_limit_bytes<=2147483648),"
-                "transfer_limit_bytes INTEGER NOT NULL CHECK(transfer_limit_bytes>=ciphertext_size_bytes AND transfer_limit_bytes<=2147483648),"
-                "chunk_limit INTEGER NOT NULL CHECK(chunk_limit BETWEEN 1 AND 4096),"
-                "max_chunk_bytes INTEGER NOT NULL CHECK(max_chunk_bytes BETWEEN 1 AND 4194304),"
-                "wall_limit_seconds INTEGER NOT NULL CHECK(wall_limit_seconds BETWEEN 1 AND 86400),"
-                "nonce BLOB NOT NULL CHECK(length(nonce)=32),"
-                "deny_mask INTEGER NOT NULL CHECK(deny_mask=63),"
-                "issued_at INTEGER NOT NULL CHECK(issued_at>0),"
-                "not_before INTEGER NOT NULL CHECK(not_before>=issued_at),"
-                "expires_at INTEGER NOT NULL CHECK(expires_at>not_before AND expires_at-issued_at<=2592000),"
-                "consumed_at INTEGER NOT NULL DEFAULT 0 CHECK(consumed_at=0 OR (consumed_at>=not_before AND consumed_at<expires_at)),"
-                "revoked_at INTEGER NOT NULL DEFAULT 0 CHECK(revoked_at=0 OR revoked_at>=issued_at),"
-                "revocation_generation INTEGER NOT NULL DEFAULT 0 CHECK((revoked_at=0 AND revocation_generation=0) OR (revoked_at>0 AND revocation_generation>0)),"
-                "CHECK(chunk_limit*max_chunk_bytes>=ciphertext_size_bytes))"))
-            LOG_ERR("db", "migrate v78: mesh capability grants failed");
-        if (!node_db_exec(ndb,
-                "CREATE INDEX IF NOT EXISTS "
-                "idx_mesh_capability_grants_pairing_state ON "
-                "mesh_capability_grants(pairing_id,revoked_at,consumed_at,expires_at)"))
-            LOG_ERR("db", "migrate v78: mesh capability grant index failed");
-        if (!node_db_exec(ndb,
-                "INSERT OR IGNORE INTO schema_migrations(version) "
-                "VALUES('078')"))
-            LOG_ERR("db", "migrate v78: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 78, floor_ver);
-        current_ver = 78;
-        applied++;
-    }
+    if (db_migrate_step_76(ndb, &current_ver, &floor_ver, &applied) < 0)
+        return -1;
+    if (db_migrate_step_77(ndb, &current_ver, &floor_ver, &applied) < 0)
+        return -1;
+    if (db_migrate_step_78(ndb, &current_ver, &floor_ver, &applied) < 0)
+        return -1;
     {
         int r = db_migrate_step_79(ndb, &current_ver, &floor_ver, &applied);
         if (r < 0) {
@@ -966,64 +1207,8 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version,
             return r;
         }
     }
-    if (current_ver < 80) {
-        /* v80: the fleet AI message board and wiki — one append-only, signed,
-         * gossiped ledger every full node carries. `seq` is this node's local
-         * arrival order and `chain_hash` chains the ids in that order, so the
-         * local ledger is tamper-evident; neither is gossiped and neither
-         * orders the board for anybody else. Posts are application overlay
-         * and are never consulted by consensus. Every column the wire signs
-         * is bounded here too, so a row that could not have been a valid post
-         * cannot be inserted even by a local bug. */
-        if (!node_db_exec(ndb,
-                "CREATE TABLE IF NOT EXISTS fleet_board_posts("
-                "id BLOB PRIMARY KEY CHECK(length(id)=32),"
-                "seq INTEGER NOT NULL,"
-                "kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 7),"
-                "created_at INTEGER NOT NULL CHECK(created_at>0),"
-                "ttl INTEGER NOT NULL CHECK(ttl BETWEEN 1 AND 2592000),"
-                "expires_at INTEGER NOT NULL CHECK(expires_at>created_at),"
-                "ref BLOB NOT NULL CHECK(length(ref)=32),"
-                "host_pubkey BLOB NOT NULL CHECK(length(host_pubkey)=32),"
-                "agent TEXT NOT NULL CHECK(length(agent)<=64),"
-                "slug TEXT NOT NULL CHECK(length(slug)<=64),"
-                "title TEXT NOT NULL CHECK(length(title)<=128),"
-                "supersedes BLOB NOT NULL CHECK(length(supersedes)=32),"
-                "receipt TEXT NOT NULL CHECK(length(receipt)<=256),"
-                "text TEXT NOT NULL CHECK(length(text) BETWEEN 1 AND 16384),"
-                "body_bytes INTEGER NOT NULL CHECK(body_bytes BETWEEN 1 AND 17408),"
-                "signature BLOB NOT NULL CHECK(length(signature)=64),"
-                "chain_prev BLOB NOT NULL CHECK(length(chain_prev)=32),"
-                "chain_hash BLOB NOT NULL CHECK(length(chain_hash)=32),"
-                "received_at INTEGER NOT NULL CHECK(received_at>=0))"))
-            LOG_ERR("db", "migrate v80: fleet board table failed");
-        if (!node_db_exec(ndb,
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_fleet_board_seq "
-                "ON fleet_board_posts(seq)"))
-            LOG_ERR("db", "migrate v80: fleet board seq index failed");
-        /* The three reads the board actually makes: newest-first listing,
-         * "has anything answered this post" for --open, and the wiki's
-         * latest-revision-per-slug resolution. */
-        if (!node_db_exec(ndb,
-                "CREATE INDEX IF NOT EXISTS idx_fleet_board_created "
-                "ON fleet_board_posts(created_at DESC,id)"))
-            LOG_ERR("db", "migrate v80: fleet board created index failed");
-        if (!node_db_exec(ndb,
-                "CREATE INDEX IF NOT EXISTS idx_fleet_board_ref "
-                "ON fleet_board_posts(ref,kind)"))
-            LOG_ERR("db", "migrate v80: fleet board ref index failed");
-        if (!node_db_exec(ndb,
-                "CREATE INDEX IF NOT EXISTS idx_fleet_board_slug "
-                "ON fleet_board_posts(slug,created_at DESC,id)"))
-            LOG_ERR("db", "migrate v80: fleet board slug index failed");
-        if (!node_db_exec(ndb,
-                "INSERT OR IGNORE INTO schema_migrations(version) "
-                "VALUES('080')"))
-            LOG_ERR("db", "migrate v80: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 80, floor_ver);
-        current_ver = 80;
-        applied++;
-    }
+    if (db_migrate_step_80(ndb, &current_ver, &floor_ver, &applied) < 0)
+        return -1;
     (void)db_migrate_step_81(ndb, &current_ver, &floor_ver, &applied);
     (void)db_migrate_step_82(ndb, &current_ver, &applied, floor_ver);
     (void)db_migrate_step_83(ndb, &current_ver, &floor_ver, &applied);
