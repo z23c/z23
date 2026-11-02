@@ -712,9 +712,33 @@ static void vi_sc_child(const char *src, const char *out, const char *profile)
     _exit(bad);
 }
 
+/* Under AddressSanitizer this case cannot run. Its forked child installs the
+ * seccomp filter and then runs code (the refusal probes, the compile driver),
+ * and the filter denies sigaltstack. The ASan runtime calls
+ * sigaltstack(nullptr, ...) when the child unwinds or exits
+ * (__asan::PlatformUnpoisonStacks), gets -1, and aborts with
+ * "CHECK failed: asan_posix.cpp:45 ((0)) == ((sigaltstack(nullptr,
+ * &signal_stack)))" (measured in the ASan sweep, pfx-v.log, twice). The
+ * filter is the subject of the case and is not widened; only the ASan build
+ * skips it, every other build runs it unchanged. GCC defines
+ * __SANITIZE_ADDRESS__; Clang reports it through
+ * __has_feature(address_sanitizer). */
+#if defined(__SANITIZE_ADDRESS__)
+#define VI_UNDER_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define VI_UNDER_ASAN 1
+#endif
+#endif
+
 static int test_vi_seccomp_kernel(struct vi_world *w)
 {
     int failures = 0;
+#if defined(VI_UNDER_ASAN)
+    (void)w;
+    printf("verifier images: kernel enforces the filter and result.c compiles under it SKIP under AddressSanitizer (the filter denies sigaltstack, which the ASan runtime needs)\n");
+    return failures;
+#endif
     TEST("verifier images: kernel enforces the filter and result.c compiles under it") {
         char src[PATH_MAX], out[PATH_MAX];
         struct zcl_fri_image img;
