@@ -86,6 +86,7 @@
 #include <signal.h>
 #include <sys/file.h>
 #include <sys/select.h>
+#include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -4949,57 +4950,64 @@ static enum zcl_dev_proof_base_observation ic_base_observe(void *ctx)
     return script->otherwise;
 }
 
-static volatile sig_atomic_t ic_fake_worker_termed;
-
-static void ic_fake_worker_term(int signal_number)
-{
-    (void)signal_number;
-    ic_fake_worker_termed = 1;
-}
-
-/* The flag is checked with SIGTERM blocked. pselect atomically installs the
- * wait mask, so a pending SIGTERM interrupts the wait instead of being lost. */
-static bool ic_fake_worker_wait_setup(int fd, sigset_t *wait_mask)
+/* SIGTERM is blocked and read through a signalfd rather than caught by a
+ * handler: the cancel is then an ordinary readable descriptor in the same
+ * select as the release channel, so it is observed as soon as it is sent. A
+ * handler-based wait relied on the kernel interrupting the syscall and the
+ * runtime delivering the handler at once; TSan defers handler delivery until
+ * the thread reaches an intercepted call, which stranded a cancelled worker
+ * until its 10s deadline. */
+static int ic_fake_worker_term_fd(int fd)
 {
     sigset_t term;
-    return fd < FD_SETSIZE && sigemptyset(&term) == 0 &&
-           sigaddset(&term, SIGTERM) == 0 &&
-           sigprocmask(SIG_BLOCK, &term, wait_mask) == 0 &&
-           sigdelset(wait_mask, SIGTERM) == 0;
+    if (fd >= FD_SETSIZE || sigemptyset(&term) != 0 ||
+        sigaddset(&term, SIGTERM) != 0 ||
+        sigprocmask(SIG_BLOCK, &term, NULL) != 0) return -1;
+    int term_fd = signalfd(-1, &term, SFD_CLOEXEC);
+    return term_fd >= FD_SETSIZE ? -1 : term_fd;
+}
+
+enum ic_fake_wake { IC_WAKE_NONE, IC_WAKE_TERM, IC_WAKE_RELEASE };
+
+/* Wait for the first of SIGTERM or the release byte, up to the deadline. */
+static enum ic_fake_wake ic_fake_worker_wait(int fd, int term_fd, int64_t end)
+{
+    for (;;) {
+        int64_t remaining = end - platform_time_monotonic_us();
+        if (remaining <= 0) return IC_WAKE_NONE;
+        fd_set input;
+        FD_ZERO(&input);
+        FD_SET(fd, &input);
+        FD_SET(term_fd, &input);
+        struct timeval timeout = {.tv_sec = (time_t)(remaining / 1000000),
+                                  .tv_usec = (suseconds_t)(remaining % 1000000)};
+        int rc = select((fd > term_fd ? fd : term_fd) + 1, &input, NULL, NULL,
+                        &timeout);
+        if (rc < 0 && errno == EINTR) continue;
+        if (rc <= 0) return IC_WAKE_NONE;
+        if (FD_ISSET(term_fd, &input)) {
+            struct signalfd_siginfo info;
+            bool termed = read(term_fd, &info, sizeof(info)) ==
+                              (ssize_t)sizeof(info) &&
+                          info.ssi_signo == SIGTERM;
+            return termed ? IC_WAKE_TERM : IC_WAKE_NONE;
+        }
+        char byte = 0;
+        bool released = read(fd, &byte, 1) == 1 && byte == 'D';
+        return released ? IC_WAKE_RELEASE : IC_WAKE_NONE;
+    }
 }
 
 /* Completion is causal: ready precedes observation; a release or SIGTERM
  * must match the expected outcome. The 10s deadline is failure, not success. */
 [[noreturn]] static void ic_fake_worker(bool cancelled, int fd)
 {
-    sigset_t wait_mask;
-    if (!ic_fake_worker_wait_setup(fd, &wait_mask)) _exit(2);
-    struct sigaction action = {0};
-    action.sa_handler = ic_fake_worker_term;
-    sigemptyset(&action.sa_mask);
-    if (sigaction(SIGTERM, &action, NULL) != 0 ||
-        send(fd, "R", 1, MSG_NOSIGNAL) != 1) _exit(2);
-    bool released = false;
-    int64_t end = platform_time_monotonic_us() + 10000000;
-    while (!ic_fake_worker_termed && !released) {
-        int64_t remaining = end - platform_time_monotonic_us();
-        if (remaining <= 0) break;
-        fd_set input;
-        FD_ZERO(&input);
-        FD_SET(fd, &input);
-        struct timespec timeout = {.tv_sec = (time_t)(remaining / 1000000),
-                                   .tv_nsec = (long)(remaining % 1000000) * 1000};
-        int rc = pselect(fd + 1, &input, NULL, NULL, &timeout, &wait_mask);
-        if (rc > 0) {
-            char byte = 0;
-            released = read(fd, &byte, 1) == 1 && byte == 'D';
-            break;
-        }
-        if (rc < 0 && errno != EINTR) break;
-    }
-    bool expected = cancelled ? ic_fake_worker_termed != 0
-                              : released && !ic_fake_worker_termed;
-    if (close(fd) != 0) expected = false;
+    int term_fd = ic_fake_worker_term_fd(fd);
+    if (term_fd < 0 || send(fd, "R", 1, MSG_NOSIGNAL) != 1) _exit(2);
+    enum ic_fake_wake wake =
+        ic_fake_worker_wait(fd, term_fd, platform_time_monotonic_us() + 10000000);
+    bool expected = wake == (cancelled ? IC_WAKE_TERM : IC_WAKE_RELEASE);
+    if (close(term_fd) != 0 || close(fd) != 0) expected = false;
     _exit(expected ? 0 : 2);
 }
 
