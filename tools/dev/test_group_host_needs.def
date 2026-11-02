@@ -160,6 +160,11 @@ ZCL_TEST_GROUP_BUILD_NEED("test_plugin_package",
 ZCL_TEST_GROUP_BUILD_NEED("test_acme_worker", "build/bin/z23-acme", "z23-acme")
 #endif
 
+/* The floor-gate cases fork+exec build/bin/z23-lint check-peer-floor-single-source.
+ * a tree that has not built it (seen under t-tsan) exits 127 in case L13. */
+ZCL_TEST_GROUP_BUILD_NEED("test_anchor_peers", "build/bin/z23-lint",
+                          "build/bin/z23-lint")
+
 /* The generator is exercised through its built binary on fixture trees. */
 #if !defined(_WIN32)
 ZCL_TEST_GROUP_BUILD_NEED("test_toolgen", "build/bin/z23-toolgen",
