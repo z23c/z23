@@ -162,6 +162,10 @@ static void wprt_close(struct wprt_fx *f)
         progress_store_close();
     if (f->wsql_open)
         wallet_sqlite_close(&f->wsql);
+    /* The wallet RPC context keeps the node DB pointer after this frame's
+     * fixture is gone; the next case's registration would read it. */
+    if (f->db_open && wallet_rpc_node_db() == &f->ndb)
+        rpc_wallet_set_node_db(NULL);
     if (f->db_open)
         node_db_close(&f->ndb);
     if (f->params_saved)
