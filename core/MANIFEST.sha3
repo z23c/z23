@@ -38,7 +38,7 @@
 #       pair — the sealed core's identity, mirrored into
 #       hotswap/core_seal_root.h. FROZEN: SECTION/TREE are additive and
 #       do not enter this preimage.
-6bd5ca664c3baea9c450f48bdb1d99823796e9e564f17adc4936da2faf697ae4  core/UNSEAL.md
+1f9d8708109e75dae4e9bb5d30ae3583cb1f7d05608dfa1b6496e00a68846a7b  core/UNSEAL.md
 0154dee8b452e80f28e6d9c915483ab19cf93ee834518edc355885204dad4119  core/chainparams/include/chain/chainparams.h
 76417939b54d9b0d0b2309c66b90fd20a510de3492bb6f97a11f4198292aa01f  core/chainparams/include/chain/chainparamsbase.h
 1b38019875d5bb928f13ca3ac4f2d93f346c4a12699fbb41265f23cc3d7ee8c2  core/chainparams/include/chain/checkpoints.h
@@ -93,7 +93,7 @@ d8d7ca882d71d6dcdbe4e841abf17cd67a4de7ab24fe54b3c6a2415a88bc46e6  core/math/incl
 5c81aa7f75f179c12fce04e2a901eddc62e135a70345dd566d2601df68ae5c03  core/math/include/core/serialize.h
 dbcceb6a316650121ad34be25daf67738e4b450ce4f5f966d5c7a41e1b86f7b8  core/math/include/core/uint256.h
 7f26969142ff0783301beab227f5532d1d1a9b4e8ee92b148b34e6426cb7e3ba  core/math/src/arith_uint256.c
-1fa62b96f3c71cd62e4266d9d089a3678a6421f2da1fb1c94c1aa5340efa2ac6  core/math/src/core_io.c
+8b13ea2de1160838c721fc11bb84767a24272bfde1d6c6acfe896799dade213f  core/math/src/core_io.c
 905543f8cec7c0b562b2afca73acda0382e16de5e1308c8916072cd91308854f  core/math/src/hash.c
 d1635287b82d834fc387fd7017b99047cdaf92a50a249ba77b80578143152c4f  core/math/src/serialize.c
 17f585526796fedad91d98c306942de59f1ad56fd344b02401eafd0ecfd50db4  core/math/src/uint256.c
@@ -605,7 +605,7 @@ e84a4566fb4a01985ccbec9a4d3136a278422e1efe4f00cb8d0cf01480531064  core/params/in
 5ed0e4562789e7ea0bd9ff1238a27172669074b3d26201195aafffe1f863558e  core/params/module.cfg
 4d62b9a9b8824925e2f7efebca536ff924a96c7464067472cb07b9dd57e356dc  core/params/src/params.c
 9907071da9b95e13d236ac70fe8fa95612c7873ff9a88102d988c83ba8492b89  core/params/src/upgrades.c
-SECTION  567  4  d6abad6d3e95883802ab132857d055dc573c5eaf85feaf8e5c9ee4e7153b2907  core
+SECTION  567  4  3bca4fe2f70317c1cf3d9d8e1a38aff78f3558401c317e1805c4624ed485bab8  core
 SECTION  12  16  8f1a4eb8e2634b666158a5f9613906f708e252178a13d6e27e374d72425c4ba5  core/chainparams
 SECTION  6  24  63dff36c30ea1f9c45ed358d05006795f91e44b502d1d1b1196fc4a2cca2570b  core/chainparams/include
 SECTION  6  30  c247859f7b026dc314874fe7f2bfda58f885c05c44ff2fd601ebc3ce25ebeb48  core/chainparams/include/chain
@@ -615,10 +615,10 @@ SECTION  17  22  9559692f7fa69fb22ef84266cbf87183f16208aa1a9e6ed3ee9178545d0cc29
 SECTION  17  29  6072e26bba85c0a24adbd98da9749c7e6b8ac10872726a2c7272df8cc7322fc0  core/consensus/include/domain
 SECTION  17  39  b8a8cb81bbcb38ef4e106701e3df63fb1a4385e27c904f592d8d686dc310879f  core/consensus/include/domain/consensus
 SECTION  19  18  45de2ab11984e5aa10f845991bca39900f54f574c80520be4211d7ce5c462922  core/consensus/src
-SECTION  10  9  4a12df854665934805645f7b11b9ce279b93b7568fe58dde37f68d84913813da  core/math
+SECTION  10  9  7e8a3e564cb71d49980d5141902adfbbb0e4d8bf3c708c4eaaaf9309b892bb0b  core/math
 SECTION  5  17  3d74828940990b6914192791641041d1ad63de1b84d7693d2533f1c9b29a7edd  core/math/include
 SECTION  5  22  13bc29100524578193cb79036f24fe9e1d8538c0f45dcc4dd87956a25f4f2b38  core/math/include/core
-SECTION  5  13  bed7851826222b99834c6ee74bb3e7ce6155798a5ef78c798fe2f836bbf30862  core/math/src
+SECTION  5  13  ac7b8e6c7a8205cf34be219651c4641c62423b00b31a24edfc509c91adf2492a  core/math/src
 SECTION  501  12  00c1f5d0bd4e8ab40e1f07c429d3f37b95e8894883832790ac15c839f6728d19  core/modules
 SECTION  6  18  ac31397c188f3b23c7c5fe7eab8d30978ae4009a7098e938da44255a9e7fb2a1  core/modules/bloom
 SECTION  3  26  25f9f764136ebc796a9aaed6dc708deba3347052954808e4efacd66eed7255c6  core/modules/bloom/include
@@ -685,5 +685,5 @@ SECTION  7  11  9b023bcd18300a51052f45e69609bb741b2832e3ce6e6a02fd21a12ea94647c0
 SECTION  4  19  e07dc0f2326862830b48105e02648f8d76dfeee9a859b7c56679c461e2cca7f1  core/params/include
 SECTION  4  29  5680a2f2d804163e77f94854ee18838480d785b74b297265f2f8a77db9d02242  core/params/include/consensus
 SECTION  2  15  8fdd673c41b8758e48c6fb225c15d7bbdf79f6816066a1d0c793d4bee2c5f6b1  core/params/src
-TREE  df58ab6315bdfb1e9b75618a3aeb1b679c80173cb9d3390566ff138309f5fec4
-ROOT  da0f33673610ce97aedb5d84ac83d04f36e70b8dc51415837dd807c7d9f530b1
+TREE  55a64892f23d07d6df9bae94737aae0913a4c2551f457d5a1de633d4e9c44f5d
+ROOT  84f532e346250370f583cf7a2529976505a2772106af47d39c53ffbd372f4f0a

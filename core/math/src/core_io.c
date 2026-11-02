@@ -80,6 +80,68 @@ static bool str_is_digits(const char *s)
     return true;
 }
 
+enum script_tok_status {
+    SCRIPT_TOK_FAIL = 0,
+    SCRIPT_TOK_OK = 1,
+    SCRIPT_TOK_STOP = -1,
+    SCRIPT_TOK_SKIP = 2
+};
+
+/* Copy a 0x hex token into out: SKIP if not hex, STOP if over MAX_SCRIPT_SIZE, OK when copied. */
+static int parse_script_hex_token(struct script *out, const char *token)
+{
+    if (strncmp(token, "0x", 2) == 0 && token[2] && IsHex(token + 2)) {
+        size_t hex_len = strlen(token + 2);
+        size_t byte_len = hex_len / 2;
+        if (byte_len > MAX_SCRIPT_SIZE || out->size + byte_len > MAX_SCRIPT_SIZE)
+            return SCRIPT_TOK_STOP;
+        unsigned char raw[MAX_SCRIPT_SIZE];
+        ParseHex(token + 2, raw, byte_len);
+        memcpy(out->data + out->size, raw, byte_len);
+        out->size += byte_len;
+        return SCRIPT_TOK_OK;
+    }
+    return SCRIPT_TOK_SKIP;
+}
+
+/* Parse a numeric or 0x token: OK, FAIL, STOP, or SKIP when it is neither. */
+static int parse_script_num_or_hex(struct script *out, const char *token)
+{
+    bool is_neg = token[0] == '-';
+    const char *num_start = is_neg ? token + 1 : token;
+
+    if (str_is_digits(num_start) && *num_start) {
+        int64_t n = strtoll(token, NULL, 10);
+        if (script_push_num(out, n))
+            return SCRIPT_TOK_OK;
+        return SCRIPT_TOK_FAIL;
+    }
+
+    return parse_script_hex_token(out, token);
+}
+
+/* Push a single-quoted token: SKIP if not quoted, else OK or FAIL as script_push_data reports. */
+static int parse_script_quoted_token(struct script *out, const char *token)
+{
+    if (token[0] == '\'' && token[strlen(token)-1] == '\'' &&
+        strlen(token) >= 2) {
+        size_t len = strlen(token) - 2;
+        if (script_push_data(out, (const unsigned char *)(token + 1), len))
+            return SCRIPT_TOK_OK;
+        return SCRIPT_TOK_FAIL;
+    }
+    return SCRIPT_TOK_SKIP;
+}
+
+/* Push a named opcode: OK when the push succeeds, FAIL when the name is unknown or the push does not fit. */
+static int parse_script_opcode_token(struct script *out, const char *token)
+{
+    enum opcodetype op;
+    if (find_opcode(token, &op))
+        return script_push_op(out, op) ? SCRIPT_TOK_OK : SCRIPT_TOK_FAIL;
+    return SCRIPT_TOK_FAIL;
+}
+
 bool parse_script(const char *asm_str, struct script *out)
 {
     script_init(out);
@@ -97,33 +159,16 @@ bool parse_script(const char *asm_str, struct script *out)
             token = strtok_r(NULL, " \t\n", &saveptr);
             continue;
         }
-
-        bool is_neg = token[0] == '-';
-        const char *num_start = is_neg ? token + 1 : token;
-
-        if (str_is_digits(num_start) && *num_start) {
-            int64_t n = strtoll(token, NULL, 10);
-            ok = script_push_num(out, n);
-        } else if (strncmp(token, "0x", 2) == 0 && token[2] && IsHex(token + 2)) {
-            size_t hex_len = strlen(token + 2);
-            size_t byte_len = hex_len / 2;
-            if (byte_len > MAX_SCRIPT_SIZE || out->size + byte_len > MAX_SCRIPT_SIZE) { ok = false; break; }
-            unsigned char raw[MAX_SCRIPT_SIZE];
-            ParseHex(token + 2, raw, byte_len);
-            memcpy(out->data + out->size, raw, byte_len);
-            out->size += byte_len;
-        } else if (token[0] == '\'' && token[strlen(token)-1] == '\'' &&
-                   strlen(token) >= 2) {
-            size_t len = strlen(token) - 2;
-            ok = script_push_data(out, (const unsigned char *)(token + 1), len);
-        } else {
-            enum opcodetype op;
-            if (find_opcode(token, &op)) {
-                ok = script_push_op(out, op);
-            } else {
-                ok = false;
-            }
+        int st = parse_script_num_or_hex(out, token);
+        if (st == SCRIPT_TOK_STOP) {
+            ok = false;
+            break;
         }
+        if (st == SCRIPT_TOK_SKIP)
+            st = parse_script_quoted_token(out, token);
+        if (st == SCRIPT_TOK_SKIP)
+            st = parse_script_opcode_token(out, token);
+        ok = st == SCRIPT_TOK_OK;
         token = strtok_r(NULL, " \t\n", &saveptr);
     }
     free(buf);
@@ -143,6 +188,68 @@ static const char *sighash_type_name(unsigned char type)
     }
 }
 
+/* Write text at pos through snprintf clamped to out_size, and return pos plus that result. */
+static size_t script_asm_append(char *out, size_t out_size, size_t pos,
+                                const char *text)
+{
+    size_t n = (size_t)snprintf(out + (pos < out_size ? pos : out_size - 1),
+                                pos < out_size ? out_size - pos : 1,
+                                "%s", text);
+    return pos + n;
+}
+
+/* Format data as a decimal script number, or as hex when it is not one. */
+static size_t script_asm_push_small(char *out, size_t out_size, size_t pos,
+                                    const unsigned char *data, size_t datalen)
+{
+    struct script_num sn;
+    if (script_num_from_bytes(&sn, data, datalen,
+                              false, 4)) {
+        int n = script_num_get_int(&sn);
+        char num[32];
+        snprintf(num, sizeof(num), "%d", n);
+        return script_asm_append(out, out_size, pos, num);
+    }
+    char hex[MAX_SCRIPT_ELEMENT_SIZE * 2 + 1];
+    HexStr(data, datalen, false, hex, sizeof(hex));
+    return script_asm_append(out, out_size, pos, hex);
+}
+
+/* Write data in hex. When the sighash checks yield a name, write the leading bytes and that name. */
+static size_t script_asm_push_long(char *out, size_t out_size, size_t pos,
+                                   const struct script *s,
+                                   const unsigned char *data, size_t datalen,
+                                   bool attempt_sighash_decode)
+{
+    char hex[MAX_SCRIPT_ELEMENT_SIZE * 2 + 1];
+    HexStr(data, datalen, false, hex, sizeof(hex));
+
+    if (attempt_sighash_decode && !script_is_unspendable(s)) {
+        if (check_transaction_signature_encoding(
+                data, datalen, SCRIPT_VERIFY_STRICTENC, NULL)) {
+            unsigned char ht = data[datalen - 1];
+            const char *tn = sighash_type_name(ht);
+            if (tn) {
+                char hex2[MAX_SCRIPT_ELEMENT_SIZE * 2 + 1];
+                HexStr(data, datalen - 1, false, hex2, sizeof(hex2));
+                char rendered[MAX_SCRIPT_ELEMENT_SIZE * 2 + 64];
+                snprintf(rendered, sizeof(rendered), "%s[%s]", hex2, tn);
+                return script_asm_append(out, out_size, pos, rendered);
+            }
+        }
+    }
+    return script_asm_append(out, out_size, pos, hex);
+}
+
+/* Write the terminating NUL when out_size allows it. */
+static void script_asm_terminate(char *out, size_t out_size, size_t pos)
+{
+    if (pos < out_size)
+        out[pos] = '\0';
+    else if (out_size > 0)
+        out[out_size - 1] = '\0';
+}
+
 size_t script_to_asm_str(const struct script *s, bool attempt_sighash_decode,
                          char *out, size_t out_size)
 {
@@ -159,69 +266,22 @@ size_t script_to_asm_str(const struct script *s, bool attempt_sighash_decode,
 
         datalen = 0;
         if (!script_get_op(s, &pc, &opcode, data, &datalen)) {
-            size_t n = snprintf(out + (pos < out_size ? pos : out_size - 1),
-                                pos < out_size ? out_size - pos : 1,
-                                "[error]");
-            pos += n;
+            pos = script_asm_append(out, out_size, pos, "[error]");
             break;
         }
 
         if (opcode >= 0 && opcode <= OP_PUSHDATA4) {
-            if (datalen <= 4) {
-                struct script_num sn;
-                if (script_num_from_bytes(&sn, data, datalen,
-                                          false, 4)) {
-                    int n = script_num_get_int(&sn);
-                    size_t w = (size_t)snprintf(
-                        out + (pos < out_size ? pos : out_size - 1),
-                        pos < out_size ? out_size - pos : 1, "%d", n);
-                    pos += w;
-                } else {
-                    char hex[MAX_SCRIPT_ELEMENT_SIZE * 2 + 1];
-                    HexStr(data, datalen, false, hex, sizeof(hex));
-                    size_t w = (size_t)snprintf(
-                        out + (pos < out_size ? pos : out_size - 1),
-                        pos < out_size ? out_size - pos : 1, "%s", hex);
-                    pos += w;
-                }
-            } else {
-                char hex[MAX_SCRIPT_ELEMENT_SIZE * 2 + 1];
-                HexStr(data, datalen, false, hex, sizeof(hex));
-
-                if (attempt_sighash_decode && !script_is_unspendable(s)) {
-                    if (check_transaction_signature_encoding(
-                            data, datalen, SCRIPT_VERIFY_STRICTENC, NULL)) {
-                        unsigned char ht = data[datalen - 1];
-                        const char *tn = sighash_type_name(ht);
-                        if (tn) {
-                            char hex2[MAX_SCRIPT_ELEMENT_SIZE * 2 + 1];
-                            HexStr(data, datalen - 1, false, hex2, sizeof(hex2));
-                            size_t w = (size_t)snprintf(
-                                out + (pos < out_size ? pos : out_size - 1),
-                                pos < out_size ? out_size - pos : 1,
-                                "%s[%s]", hex2, tn);
-                            pos += w;
-                            continue;
-                        }
-                    }
-                }
-                size_t w = (size_t)snprintf(
-                    out + (pos < out_size ? pos : out_size - 1),
-                    pos < out_size ? out_size - pos : 1, "%s", hex);
-                pos += w;
-            }
+            if (datalen <= 4)
+                pos = script_asm_push_small(out, out_size, pos, data, datalen);
+            else
+                pos = script_asm_push_long(out, out_size, pos, s, data,
+                                           datalen, attempt_sighash_decode);
         } else {
             const char *name = script_get_op_name(opcode);
-            size_t w = (size_t)snprintf(
-                out + (pos < out_size ? pos : out_size - 1),
-                pos < out_size ? out_size - pos : 1, "%s", name);
-            pos += w;
+            pos = script_asm_append(out, out_size, pos, name);
         }
     }
-    if (pos < out_size)
-        out[pos] = '\0';
-    else if (out_size > 0)
-        out[out_size - 1] = '\0';
+    script_asm_terminate(out, out_size, pos);
     return pos;
 }
 

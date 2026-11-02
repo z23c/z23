@@ -36,7 +36,7 @@
 
 /* Root node digest over the whole sealed set (dirpath ""). */
 #define ZCL_CORE_SEAL_TREE \
-    "df58ab6315bdfb1e9b75618a3aeb1b679c80173cb9d3390566ff138309f5fec4"
+    "55a64892f23d07d6df9bae94737aae0913a4c2551f457d5a1de633d4e9c44f5d"
 
 /* SECTION lines in core/MANIFEST.sha3 at generation time. */
 #define ZCL_CORE_SEAL_SECTION_COUNT 80u
@@ -45,7 +45,7 @@
  * hotswap/hotswap_module.h defines it as an initializer element. */
 #define ZCL_CORE_SEAL_SECTION_ROWS \
     ZCL_HOTSWAP_SECTION_ROW("core", \
-        "d6abad6d3e95883802ab132857d055dc573c5eaf85feaf8e5c9ee4e7153b2907") \
+        "3bca4fe2f70317c1cf3d9d8e1a38aff78f3558401c317e1805c4624ed485bab8") \
     ZCL_HOTSWAP_SECTION_ROW("core/chainparams", \
         "8f1a4eb8e2634b666158a5f9613906f708e252178a13d6e27e374d72425c4ba5") \
     ZCL_HOTSWAP_SECTION_ROW("core/chainparams/include", \
@@ -65,13 +65,13 @@
     ZCL_HOTSWAP_SECTION_ROW("core/consensus/src", \
         "45de2ab11984e5aa10f845991bca39900f54f574c80520be4211d7ce5c462922") \
     ZCL_HOTSWAP_SECTION_ROW("core/math", \
-        "4a12df854665934805645f7b11b9ce279b93b7568fe58dde37f68d84913813da") \
+        "7e8a3e564cb71d49980d5141902adfbbb0e4d8bf3c708c4eaaaf9309b892bb0b") \
     ZCL_HOTSWAP_SECTION_ROW("core/math/include", \
         "3d74828940990b6914192791641041d1ad63de1b84d7693d2533f1c9b29a7edd") \
     ZCL_HOTSWAP_SECTION_ROW("core/math/include/core", \
         "13bc29100524578193cb79036f24fe9e1d8538c0f45dcc4dd87956a25f4f2b38") \
     ZCL_HOTSWAP_SECTION_ROW("core/math/src", \
-        "bed7851826222b99834c6ee74bb3e7ce6155798a5ef78c798fe2f836bbf30862") \
+        "ac7b8e6c7a8205cf34be219651c4641c62423b00b31a24edfc509c91adf2492a") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules", \
         "00c1f5d0bd4e8ab40e1f07c429d3f37b95e8894883832790ac15c839f6728d19") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/bloom", \
