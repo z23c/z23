@@ -723,6 +723,174 @@ static struct zcl_result exec_invalid_ctx_err(
         ctx ? (void *)ctx->activation_ctl : NULL);
 }
 
+/* BOOT_RECOVER_REIMPORT / BOOT_RECOVER_WIPE_WAIT: the coins DB is empty
+ * while the chain tip is set. Wipe the coins to genesis so the re-sync
+ * rebuilds them, unless the stale-metadata repair already fixed the tip.
+ * The log calls stay here so the gate attributes them to the caller. */
+static struct recovery_exec_result exec_reimport_or_wipe(
+    struct utxo_recovery_ctx *ctx,
+    const struct boot_validation_result *vr,
+    struct recovery_exec_result res)
+{
+    printf("WARNING: Chain tip at h=%d but coins DB %s!\n",
+           vr->chain_height,
+           exec_coins_empty_label(vr->action));
+
+    /* SAFETY: check actual UTXO count before wiping */
+    if (recover_stale_metadata(ctx)) {
+        /* Refused the wipe: the coin stores are populated, only the
+         * cursor was stale. A recovery ACTION was taken (the tip was
+         * corrected) but NO bulk reload follows, so bulk_reload_pending
+         * stays false — see struct recovery_exec_result. */
+        res.recovered = true;
+        return res;
+    }
+
+    if (!ctx->params) {
+        res.status = ZCL_ERR(-31,
+            "utxo_recovery_execute: %s requires chain params",
+            exec_wipe_action_name(vr->action));
+        LOG_WARN_IN("utxo_recovery_execute", "utxo_recovery", "%s", res.status.message);
+        return res;
+    }
+
+    if (!reset_to_genesis(ctx)) {
+        res.status = ZCL_ERR(-32,
+            "utxo_recovery_execute: reset_to_genesis failed for "
+            "action=%s chain_height=%d coins_height=%d",
+            exec_wipe_action_name(vr->action),
+            vr->chain_height, vr->coins_height);
+        LOG_WARN_IN("utxo_recovery_execute", "utxo_recovery", "%s", res.status.message);
+        return res;
+    }
+    /* Wiped to genesis: the entire projection set is re-populated by the
+     * re-sync that follows, so the caller may legitimately drop the
+     * secondary indexes now and rebuild them once at the end. */
+    res.recovered = true;
+    res.bulk_reload_pending = true;
+    return res;
+}
+
+/* BOOT_RECOVER_RESET_CHAIN: raise the active chain to the disk-backed coins
+ * tip. A genesis-phase RESET_CHAIN is a RESTORE, never a rollback. */
+static struct recovery_exec_result exec_reset_chain(
+    struct utxo_recovery_ctx *ctx,
+    const struct boot_validation_result *vr,
+    struct recovery_exec_result res)
+{
+    struct block_index *coins_block = block_map_find(
+        &ctx->state->map_block_index, &vr->coins_hash);
+    if (!coins_block) {
+        res.status = ZCL_ERR(-35,
+            "utxo_recovery_execute: coins tip h=%d is missing from "
+            "block index", vr->coins_height);
+        LOG_WARN_IN("utxo_recovery_execute", "utxo_recovery", "%s", res.status.message);
+        return res;
+    }
+
+    /* A genesis-phase RESET_CHAIN is a RESTORE (raise the chain to
+     * the coins), never a rollback: when the CSR already holds a
+     * HIGHER restored tip (the derived coins-best installed moments
+     * earlier), committing the stale legacy view's lower height
+     * bulldozes it — a deterministic every-boot pull-down (csr_commit
+     * from a higher restored tip down to the stale legacy floor).
+     * Refuse the downward commit loudly and let the higher tip stand;
+     * the legacy projection reconciles forward. */
+    struct chain_state_view csv;
+    exec_csr_snapshot(&csv);
+    if (csv.tip_height > coins_block->nHeight) {
+        LOG_WARN_IN("utxo_recovery_execute", "utxo_recovery",
+                 "chain_coins_mismatch_reset REFUSED: csr already "
+                 "holds h=%d above the legacy coins view h=%d — a "
+                 "genesis-phase reset is raise-only; keeping the "
+                 "restored tip",
+                 csv.tip_height, coins_block->nHeight);
+        event_emitf(EV_RECOVERY_ACTION, 0,
+                    "action=mismatch_reset_refused csr_h=%d "
+                    "legacy_h=%d", csv.tip_height,
+                    coins_block->nHeight);
+        res.recovered = true;
+        return res;
+    }
+
+    if (chain_restore_block_is_consensus_backed_on_disk(
+            coins_block, ctx->datadir)) {
+        printf("Chain tip/coins mismatch: chain=%d coins=%d\n"
+               "  Resetting chain to disk-backed coins tip — "
+               "will replay %d blocks.\n",
+               vr->chain_height, vr->coins_height,
+               vr->chain_height - vr->coins_height);
+        if (!utxo_recovery_commit_tip(
+                ctx, &coins_block,
+                "chain_coins_mismatch_reset", true, false).ok) {
+            res.status = ZCL_ERR(-33,
+                "utxo_recovery_execute: failed to reset chain "
+                "to coins tip h=%d", vr->coins_height);
+            LOG_WARN_IN("utxo_recovery_execute", "utxo_recovery", "%s", res.status.message);
+            return res;
+        }
+    } else {
+        LOG_WARN_IN("utxo_recovery_execute", "chain", "Chain tip/coins mismatch: coins tip h=%d is not " "disk-backed; refusing active-tip reset", vr->coins_height);
+        res.status = ZCL_ERR(-34,
+            "utxo_recovery_execute: coins tip h=%d is not "
+            "disk-backed", vr->coins_height);
+        LOG_WARN_IN("utxo_recovery_execute", "utxo_recovery", "%s", res.status.message);
+        return res;
+    }
+    res.recovered = true;
+    return res;
+}
+
+/* BOOT_RECOVER_RESET_COINS_TO_CHAIN_TIP: move the coins cursor to the
+ * active chain tip. */
+static struct recovery_exec_result exec_reset_coins_to_chain_tip(
+    struct utxo_recovery_ctx *ctx,
+    struct recovery_exec_result res)
+{
+    struct block_index *chain_tip =
+        active_chain_tip(&ctx->state->chain_active);
+    if (!chain_tip) {
+        res.status = ZCL_ERR(-37,
+            "utxo_recovery_execute: cannot reset coins cursor because "
+            "active chain tip is missing");
+        LOG_WARN_IN("utxo_recovery_execute", "utxo_recovery", "%s", res.status.message);
+        return res;
+    }
+    if (!utxo_recovery_commit_tip(
+            ctx, &chain_tip, "coins_cursor_to_chain_tip",
+            true, false).ok) {
+        res.status = ZCL_ERR(-36,
+            "utxo_recovery_execute: failed to reset coins cursor "
+            "to active chain tip h=%d", chain_tip->nHeight);
+        LOG_WARN_IN("utxo_recovery_execute", "utxo_recovery", "%s", res.status.message);
+        return res;
+    }
+    res.recovered = true;
+    return res;
+}
+
+/* BOOT_RECOVER_RESET_COINS_TO_GENESIS: move the coins cursor to genesis. */
+static struct recovery_exec_result exec_reset_coins_to_genesis(
+    struct utxo_recovery_ctx *ctx,
+    struct recovery_exec_result res)
+{
+    if (!ctx->params) {
+        res.status = ZCL_ERR(-38,
+            "utxo_recovery_execute: reset coins to genesis requires "
+            "chain params");
+        LOG_WARN_IN("utxo_recovery_execute", "utxo_recovery", "%s", res.status.message);
+    } else if (utxo_recovery_commit_genesis(ctx,
+                                            "coins_cursor_to_genesis").ok) {
+        res.recovered = true;
+    } else {
+        res.status = ZCL_ERR(-39,
+            "utxo_recovery_execute: failed to reset coins cursor "
+            "to genesis");
+        LOG_WARN_IN("utxo_recovery_execute", "utxo_recovery", "%s", res.status.message);
+    }
+    return res;
+}
+
 struct recovery_exec_result utxo_recovery_execute(
     struct utxo_recovery_ctx *ctx,
     struct boot_validation_result *vr)
@@ -750,144 +918,16 @@ struct recovery_exec_result utxo_recovery_execute(
     switch (vr->action) {
     case BOOT_RECOVER_REIMPORT:
     case BOOT_RECOVER_WIPE_WAIT:
-        printf("WARNING: Chain tip at h=%d but coins DB %s!\n",
-               vr->chain_height,
-               exec_coins_empty_label(vr->action));
-
-        /* SAFETY: check actual UTXO count before wiping */
-        if (recover_stale_metadata(ctx)) {
-            /* Refused the wipe: the coin stores are populated, only the
-             * cursor was stale. A recovery ACTION was taken (the tip was
-             * corrected) but NO bulk reload follows, so bulk_reload_pending
-             * stays false — see struct recovery_exec_result. */
-            res.recovered = true;
-            break;
-        }
-
-        if (!ctx->params) {
-            res.status = ZCL_ERR(-31,
-                "utxo_recovery_execute: %s requires chain params",
-                exec_wipe_action_name(vr->action));
-            LOG_WARN("utxo_recovery", "%s", res.status.message);
-            break;
-        }
-
-        if (!reset_to_genesis(ctx)) {
-            res.status = ZCL_ERR(-32,
-                "utxo_recovery_execute: reset_to_genesis failed for "
-                "action=%s chain_height=%d coins_height=%d",
-                exec_wipe_action_name(vr->action),
-                vr->chain_height, vr->coins_height);
-            LOG_WARN("utxo_recovery", "%s", res.status.message);
-            break;
-        }
-        /* Wiped to genesis: the entire projection set is re-populated by the
-         * re-sync that follows, so the caller may legitimately drop the
-         * secondary indexes now and rebuild them once at the end. */
-        res.recovered = true;
-        res.bulk_reload_pending = true;
+        res = exec_reimport_or_wipe(ctx, vr, res);
         break;
-
-    case BOOT_RECOVER_RESET_CHAIN: {
-        struct block_index *coins_block = block_map_find(
-            &ctx->state->map_block_index, &vr->coins_hash);
-        if (!coins_block) {
-            res.status = ZCL_ERR(-35,
-                "utxo_recovery_execute: coins tip h=%d is missing from "
-                "block index", vr->coins_height);
-            LOG_WARN("utxo_recovery", "%s", res.status.message);
-            break;
-        }
-
-        /* A genesis-phase RESET_CHAIN is a RESTORE (raise the chain to
-         * the coins), never a rollback: when the CSR already holds a
-         * HIGHER restored tip (the derived coins-best installed moments
-         * earlier), committing the stale legacy view's lower height
-         * bulldozes it — a deterministic every-boot pull-down (csr_commit
-         * from a higher restored tip down to the stale legacy floor).
-         * Refuse the downward commit loudly and let the higher tip stand;
-         * the legacy projection reconciles forward. */
-        struct chain_state_view csv;
-        exec_csr_snapshot(&csv);
-        if (csv.tip_height > coins_block->nHeight) {
-            LOG_WARN("utxo_recovery",
-                     "chain_coins_mismatch_reset REFUSED: csr already "
-                     "holds h=%d above the legacy coins view h=%d — a "
-                     "genesis-phase reset is raise-only; keeping the "
-                     "restored tip",
-                     csv.tip_height, coins_block->nHeight);
-            event_emitf(EV_RECOVERY_ACTION, 0,
-                        "action=mismatch_reset_refused csr_h=%d "
-                        "legacy_h=%d", csv.tip_height,
-                        coins_block->nHeight);
-            res.recovered = true;
-            break;
-        }
-
-        if (chain_restore_block_is_consensus_backed_on_disk(
-                coins_block, ctx->datadir)) {
-            printf("Chain tip/coins mismatch: chain=%d coins=%d\n"
-                   "  Resetting chain to disk-backed coins tip — "
-                   "will replay %d blocks.\n",
-                   vr->chain_height, vr->coins_height,
-                   vr->chain_height - vr->coins_height);
-            if (!utxo_recovery_commit_tip(
-                    ctx, &coins_block,
-                    "chain_coins_mismatch_reset", true, false).ok) {
-                res.status = ZCL_ERR(-33,
-                    "utxo_recovery_execute: failed to reset chain "
-                    "to coins tip h=%d", vr->coins_height);
-                LOG_WARN("utxo_recovery", "%s", res.status.message);
-                break;
-            }
-        } else {
-            LOG_WARN("chain", "Chain tip/coins mismatch: coins tip h=%d is not " "disk-backed; refusing active-tip reset", vr->coins_height);
-            res.status = ZCL_ERR(-34,
-                "utxo_recovery_execute: coins tip h=%d is not "
-                "disk-backed", vr->coins_height);
-            LOG_WARN("utxo_recovery", "%s", res.status.message);
-            break;
-        }
-        res.recovered = true;
+    case BOOT_RECOVER_RESET_CHAIN:
+        res = exec_reset_chain(ctx, vr, res);
         break;
-    }
-    case BOOT_RECOVER_RESET_COINS_TO_CHAIN_TIP: {
-        struct block_index *chain_tip =
-            active_chain_tip(&ctx->state->chain_active);
-        if (chain_tip) {
-            if (!utxo_recovery_commit_tip(
-                    ctx, &chain_tip, "coins_cursor_to_chain_tip",
-                    true, false).ok) {
-                res.status = ZCL_ERR(-36,
-                    "utxo_recovery_execute: failed to reset coins cursor "
-                    "to active chain tip h=%d", chain_tip->nHeight);
-                LOG_WARN("utxo_recovery", "%s", res.status.message);
-                break;
-            }
-            res.recovered = true;
-        } else {
-            res.status = ZCL_ERR(-37,
-                "utxo_recovery_execute: cannot reset coins cursor because "
-                "active chain tip is missing");
-            LOG_WARN("utxo_recovery", "%s", res.status.message);
-        }
+    case BOOT_RECOVER_RESET_COINS_TO_CHAIN_TIP:
+        res = exec_reset_coins_to_chain_tip(ctx, res);
         break;
-    }
     case BOOT_RECOVER_RESET_COINS_TO_GENESIS:
-        if (!ctx->params) {
-            res.status = ZCL_ERR(-38,
-                "utxo_recovery_execute: reset coins to genesis requires "
-                "chain params");
-            LOG_WARN("utxo_recovery", "%s", res.status.message);
-        } else if (utxo_recovery_commit_genesis(ctx,
-                                                "coins_cursor_to_genesis").ok) {
-            res.recovered = true;
-        } else {
-            res.status = ZCL_ERR(-39,
-                "utxo_recovery_execute: failed to reset coins cursor "
-                "to genesis");
-            LOG_WARN("utxo_recovery", "%s", res.status.message);
-        }
+        res = exec_reset_coins_to_genesis(ctx, res);
         break;
     case BOOT_OK_COMMIT_DERIVED_BEST:
     case BOOT_OK:

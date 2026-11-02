@@ -66,7 +66,6 @@ engine/services/src/block_index_loader_rebuild.c:block_index_loader_seed_stages_
 engine/services/src/node_db_import_service.c:node_db_import_service_run:29
 engine/services/src/property_grant_commit.c:commit_attempt:24
 engine/services/src/shielded_history_import_service.c:shielded_history_import_from_chainstate:22
-engine/services/src/utxo_recovery_service.c:utxo_recovery_execute:21
 tests/harness/src/test_engine.c:case_cli_argv:71
 tests/harness/src/test_engine.c:case_cli_observation:33
 tests/harness/src/test_engine.c:case_engine_unit_grok_projection_e2e:36
