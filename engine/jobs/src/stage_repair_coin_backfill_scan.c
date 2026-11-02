@@ -694,6 +694,73 @@ static enum coin_scan_action coin_scan_walk_blocks(struct coin_scan_walk *r)
     }
 }
 
+/* Actions that do not end the walk: each one yields the next action, and the
+ * step loop keeps stepping until a terminal action. */
+static bool coin_scan_is_advance_action(enum coin_scan_action act)
+{
+    return act == COIN_SCAN_ACT_LOG_STALE || act == COIN_SCAN_ACT_LOG_SEEDED ||
+           act == COIN_SCAN_ACT_LOG_SPEND_FOUND ||
+           act == COIN_SCAN_ACT_LOG_DELETE_FAIL;
+}
+
+static enum coin_scan_action coin_scan_advance_action(struct coin_scan_walk *r,
+                                                      enum coin_scan_action act)
+{
+    switch (act) {
+    case COIN_SCAN_ACT_LOG_STALE: {
+        int digest_ok = r->digest_ok;
+        struct coin_backfill_scan_record rec = r->rec;
+        int hole_height = r->hole_height;
+        int frontier_at_start = r->frontier_at_start;
+        int floor_height = r->floor_height;
+        LOG_WARN_IN("coin_backfill_scan_step", "stage_repair",
+                    "[coin_backfill] scan record stale hole=%d "
+                    "(digest_ok=%d frontier=%d/%d next=%d): restart from "
+                    "floor=%d",
+                    hole_height, digest_ok, rec.frontier_at_start,
+                    frontier_at_start, rec.next_height, floor_height);
+        return coin_scan_seed_fresh(r);
+    }
+    case COIN_SCAN_ACT_LOG_SEEDED: {
+        int hole_height = r->hole_height;
+        int floor_height = r->floor_height;
+        int top_height = r->top_height;
+        size_t n = r->n;
+        char seed_hex[65];
+        uint256_get_hex(&r->lineage, seed_hex);
+        LOG_INFO_IN("coin_backfill_scan_step", "stage_repair",
+                    "[coin_backfill] scan seeded hole=%d floor=%d top=%d "
+                    "lineage=%.8s n=%zu",
+                    hole_height, floor_height, top_height, seed_hex, n);
+        coin_scan_arm_walk(r);
+        return coin_scan_begin_walk(r);
+    }
+    case COIN_SCAN_ACT_LOG_SPEND_FOUND: {
+        int h = r->h;
+        int hole_height = r->hole_height;
+        char sp_hex[65];
+        struct uint256 sp;
+        memcpy(sp.data, r->pending_spender, 32);
+        uint256_get_hex(&sp, sp_hex);
+        LOG_WARN_IN("coin_backfill_scan_step", "stage_repair",
+                    "[coin_backfill] scan SPEND FOUND hole=%d h=%d "
+                    "spender=%s — deferring refusal until terminal linkage",
+                    hole_height, h, sp_hex);
+        coin_scan_advance_linked_block(r);
+        return coin_scan_walk_blocks(r);
+    }
+    case COIN_SCAN_ACT_LOG_DELETE_FAIL: {
+        int hole_height = r->hole_height;
+        LOG_WARN_IN("coin_backfill_scan_step", "stage_repair",
+                    "[coin_backfill] scan record delete failed h=%d",
+                    hole_height);
+        return coin_scan_publish_spend(r);
+    }
+    default:
+        return act;
+    }
+}
+
 enum coin_backfill_scan_verdict coin_backfill_scan_step(
     struct sqlite3 *db, struct main_state *ms, const struct coin_backfill_io *io,
     int hole_height, const struct uint256 *hole_hash,
@@ -725,6 +792,10 @@ enum coin_backfill_scan_verdict coin_backfill_scan_step(
 
     enum coin_scan_action act = coin_scan_open(&run);
     while (act != COIN_SCAN_ACT_DONE) {
+        if (coin_scan_is_advance_action(act)) {
+            act = coin_scan_advance_action(&run, act);
+            continue;
+        }
         switch (act) {
         case COIN_SCAN_ACT_LOG_NULL:
             LOG_RETURN(COIN_SCAN_GAP, "stage_repair",
@@ -748,29 +819,6 @@ enum coin_backfill_scan_verdict coin_backfill_scan_step(
         case COIN_SCAN_ACT_LOG_TABLES:
             LOG_RETURN(COIN_SCAN_GAP, "stage_repair",
                        "[coin_backfill] scan: table ensure failed");
-        case COIN_SCAN_ACT_LOG_STALE: {
-            int digest_ok = run.digest_ok;
-            struct coin_backfill_scan_record rec = run.rec;
-            LOG_WARN("stage_repair",
-                     "[coin_backfill] scan record stale hole=%d "
-                     "(digest_ok=%d frontier=%d/%d next=%d): restart from "
-                     "floor=%d",
-                     hole_height, digest_ok, rec.frontier_at_start,
-                     frontier_at_start, rec.next_height, floor_height);
-            act = coin_scan_seed_fresh(&run);
-            break;
-        }
-        case COIN_SCAN_ACT_LOG_SEEDED: {
-            char seed_hex[65];
-            uint256_get_hex(&run.lineage, seed_hex);
-            LOG_INFO("stage_repair",
-                     "[coin_backfill] scan seeded hole=%d floor=%d top=%d "
-                     "lineage=%.8s n=%zu",
-                     hole_height, floor_height, top_height, seed_hex, n);
-            coin_scan_arm_walk(&run);
-            act = coin_scan_begin_walk(&run);
-            break;
-        }
         case COIN_SCAN_ACT_LOG_CKPT_NOTOP: {
             int h = run.h;
             LOG_RETURN(COIN_SCAN_GAP, "stage_repair",
@@ -800,30 +848,10 @@ enum coin_backfill_scan_verdict coin_backfill_scan_step(
             *out_next_height = h;
             return COIN_SCAN_GAP;
         }
-        case COIN_SCAN_ACT_LOG_SPEND_FOUND: {
-            int h = run.h;
-            char sp_hex[65];
-            struct uint256 sp;
-            memcpy(sp.data, run.pending_spender, 32);
-            uint256_get_hex(&sp, sp_hex);
-            LOG_WARN("stage_repair",
-                     "[coin_backfill] scan SPEND FOUND hole=%d h=%d "
-                     "spender=%s — deferring refusal until terminal linkage",
-                     hole_height, h, sp_hex);
-            coin_scan_advance_linked_block(&run);
-            act = coin_scan_walk_blocks(&run);
-            break;
-        }
         case COIN_SCAN_ACT_LOG_NO_TOP:
             LOG_RETURN(COIN_SCAN_GAP, "stage_repair",
                        "[coin_backfill] scan finished without top hash hole=%d "
                        "(programming error)", hole_height);
-        case COIN_SCAN_ACT_LOG_DELETE_FAIL:
-            LOG_WARN("stage_repair",
-                     "[coin_backfill] scan record delete failed h=%d",
-                     hole_height);
-            act = coin_scan_publish_spend(&run);
-            break;
         case COIN_SCAN_ACT_LOG_SPENT: {
             int32_t pending_spent_height = run.pending_spent_height;
             char sp_hex[65];

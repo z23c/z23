@@ -73,7 +73,6 @@ engine/entry/main_cli_modes.c:importchainstate_mode:19
 engine/entry/main_cli_modes.c:mintutxocommitment_mode:26
 engine/jobs/src/stage_repair_coin_backfill.c:backfill_run:28
 engine/jobs/src/stage_repair_coin_backfill.c:coin_backfill_insert_tx:23
-engine/jobs/src/stage_repair_coin_backfill_scan.c:coin_backfill_scan_step:17
 engine/jobs/src/utxo_apply_delta_reorg.c:utxo_apply_reorg_unwind_if_needed:20
 engine/jobs/src/utxo_apply_delta_repair.c:utxo_apply_repair_value_overflow_hole:23
 engine/jobs/src/validate_headers_stage.c:recheck_failed_rows:16
