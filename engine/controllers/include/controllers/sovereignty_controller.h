@@ -13,6 +13,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 struct json_value;
 
@@ -92,5 +93,39 @@ bool sovereignty_guard_allow(const char *action, char *reason,
  * it: no stamp write, no log line. `reason` is filled as for the guard. */
 bool sovereignty_guard_peek(const char *action, char *reason,
                             size_t reason_cap);
+
+/* Phone-only spend rule (-spend-after-checkpoint). Off by default; meant
+ * for the phone build, and no shipped caller passes it yet. The flag itself grants nothing: the wallet
+ * send paths that honour it (contexts/wallet wallet_spend_gate_check) re-verify
+ * the compiled checkpoint at every send. Mining, export and seeding never
+ * consult it. *_note_verdict / *_last_verdict carry the most recent send-time
+ * verdict token (no private data) to the diagnostics report. */
+void sovereignty_spend_after_checkpoint_set(bool enabled);
+bool sovereignty_spend_after_checkpoint_enabled(void);
+void sovereignty_spend_rule_note_verdict(const char *reason);
+void sovereignty_spend_rule_last_verdict(char *out, size_t cap);
+
+/* Reducer per-block Sapling anchor ledger: 1 when `root` is a recorded anchor,
+ * 0 when it is absent (or the history below it is incomplete), -1 when the ledger cannot be read or the
+ * progress lock is not obtained within the bounded wait. Reads the live
+ * ledger, never the persisted node_state tree. */
+int sovereignty_sapling_ledger_has_root(const uint8_t root[32]);
+
+/* Highest of the Sapling anchor and nullifier activation cursors, the
+ * assisted-install seam height and the reducer seed floor (the last two when
+ * recorded): no history below it is known to be independently complete. False
+ * when either cursor is absent, or any of the four reads fails, or the
+ * progress lock is not obtained within the bounded wait (default SOV_PROGRESS_WAIT_MS_DEFAULT ms). */
+bool sovereignty_history_cursor(int64_t *cursor_out);
+
+/* True only when the coins set carries the durable self-folded marker, read
+ * under the bounded progress lock. False when the marker is absent, the read
+ * fails, or the lock is not obtained: callers then treat the tip as unproven. */
+bool sovereignty_self_folded_marker(void);
+
+#define SOV_PROGRESS_WAIT_MS_DEFAULT 5000
+
+/* Bound, in milliseconds, of the progress-lock wait of the two readers above. */
+void sovereignty_progress_wait_ms_set(int ms);
 
 #endif

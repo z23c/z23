@@ -132,7 +132,7 @@ ZCL_MODULE_CAPABILITY("engine/controllers/src/snapshot_controller.c", CAP_FS_REA
 ZCL_MODULE_CAPABILITY("engine/controllers/src/snapshot_controller_import.c", CAP_FS_READ|CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("engine/controllers/src/snapshot_controller_txindex.c", CAP_FS_READ|CAP_CLOCK|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/controllers/src/snapshot_import_chain_select.c", CAP_FS_READ, "")
-ZCL_MODULE_CAPABILITY("engine/controllers/src/sovereignty_controller.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/controllers/src/sovereignty_controller.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("engine/controllers/src/status_native_handlers.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/controllers/src/status_native_helpers.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/controllers/src/store_controller.c", CAP_FS_READ, "")

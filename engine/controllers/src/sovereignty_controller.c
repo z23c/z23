@@ -26,18 +26,23 @@
 
 #include "controllers/sovereignty_controller.h"
 
+#include "config/consensus_state_snapshot_install.h"
+
 #include "jobs/reducer_frontier.h"
 #include "json/json.h"
 #include "platform/time_compat.h"
 #include "base/utc_tm.h"
 #include "services/shielded_history_import_service.h"
 #include "services/sync_trust_policy.h"
+#include "storage/anchor_kv.h"
 #include "storage/coins_kv.h"
+#include "storage/nullifier_kv.h"
 #include "storage/progress_store.h"
 #include "util/log_macros.h"
 
 #include <pthread.h>
 #include <sqlite3.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -318,6 +323,145 @@ bool sovereignty_guard_allow(const char *action, char *reason,
     return allowed;
 }
 
+/* Phone-only spend rule state. The option is off unless the process was
+ * started with -spend-after-checkpoint. The verdict token is the last
+ * send-time answer of wallet_spend_gate_check; it carries no private data. */
+static _Atomic bool g_spend_after_checkpoint;
+static pthread_mutex_t g_spend_rule_lock = PTHREAD_MUTEX_INITIALIZER;
+static char g_spend_rule_verdict[48];
+
+void sovereignty_spend_after_checkpoint_set(bool enabled)
+{
+    atomic_store(&g_spend_after_checkpoint, enabled);
+    if (enabled)
+        LOG_INFO("sovereignty",
+                 "spend-after-checkpoint enabled: sends re-verify the compiled "
+                 "checkpoint and spend only funds received after the snapshot");
+}
+
+bool sovereignty_spend_after_checkpoint_enabled(void)
+{
+    return atomic_load(&g_spend_after_checkpoint);
+}
+
+void sovereignty_spend_rule_note_verdict(const char *reason)
+{
+    pthread_mutex_lock(&g_spend_rule_lock);
+    snprintf(g_spend_rule_verdict, sizeof(g_spend_rule_verdict), "%s",
+             reason ? reason : "");
+    pthread_mutex_unlock(&g_spend_rule_lock);
+}
+
+void sovereignty_spend_rule_last_verdict(char *out, size_t cap)
+{
+    if (!out || !cap)
+        return;
+    pthread_mutex_lock(&g_spend_rule_lock);
+    snprintf(out, cap, "%s", g_spend_rule_verdict);
+    pthread_mutex_unlock(&g_spend_rule_lock);
+}
+
+/* Bounded wait for the progress-store lock: the node status path uses a
+ * try-lock and reports "unknown_progress_busy" while a walk holds the lock,
+ * so the spend gate must wait instead of failing on a busy read. */
+static _Atomic int g_progress_wait_ms = SOV_PROGRESS_WAIT_MS_DEFAULT;
+
+void sovereignty_progress_wait_ms_set(int ms)
+{
+    atomic_store(&g_progress_wait_ms, ms < 0 ? 0 : ms);
+}
+
+static bool sov_progress_lock_bounded(void)
+{
+    const int budget = atomic_load(&g_progress_wait_ms);
+    const struct timespec nap = { 0, 2 * 1000 * 1000 };
+    for (int waited = 0;; waited += 2) {
+        if (progress_store_tx_trylock())
+            return true;
+        if (waited >= budget) {
+            LOG_WARN("sovereignty", "progress lock not obtained in %d ms",
+                     budget);
+            return false; // raw-return-ok:logged above
+        }
+        nanosleep(&nap, NULL);
+    }
+}
+
+int sovereignty_sapling_ledger_has_root(const uint8_t root[32])
+{
+    sqlite3 *pdb = progress_store_db();
+    struct uint256 r;
+    if (!pdb || !root) {
+        LOG_WARN("sovereignty", "anchor ledger lookup without a store or root");
+        return -1; // raw-return-ok:logged above
+    }
+    memcpy(r.data, root, 32);
+    if (!sov_progress_lock_bounded())
+        return -1; // raw-return-ok:sov_progress_lock_bounded logged the timeout
+    int res = anchor_kv_get(pdb, ANCHOR_POOL_SAPLING, &r, NULL, NULL);
+    progress_store_tx_unlock();
+    if (res == ANCHOR_KV_ERROR) {
+        LOG_WARN("sovereignty", "anchor ledger lookup failed");
+        return -1; // raw-return-ok:logged above
+    }
+    return res == ANCHOR_KV_FOUND ? 1 : 0;
+}
+
+/* Highest height below which history is not independently complete: the larger
+ * of the two activation cursors, the assisted-install seam and the reducer seed
+ * floor. Caller holds the progress lock. False when a read fails or a cursor
+ * is absent. */
+static bool sov_history_top(sqlite3 *pdb, int64_t *top_out)
+{
+    int64_t anchor = -1, nullifier = -1;
+    bool anchor_found = false, nullifier_found = false;
+    int32_t seam = 0, seed = 0;
+    bool seam_found = false, seed_found = false;
+    uint8_t seam_commitments[3][32];
+    bool ok = anchor_kv_activation_cursor(pdb, ANCHOR_POOL_SAPLING, &anchor,
+                                          &anchor_found) &&
+              nullifier_kv_activation_cursor(pdb, &nullifier,
+                                             &nullifier_found) &&
+              consensus_state_install_read_assisted_seam(
+                  pdb, &seam, seam_commitments[0], seam_commitments[1],
+                  seam_commitments[2], &seam_found) &&
+              reducer_seed_floor_height_read(pdb, &seed, &seed_found);
+    if (!ok || !anchor_found || !nullifier_found || anchor < 0 ||
+        nullifier < 0)
+        return false; // raw-return-ok:cursor, seam or seed floor unreadable is floor_unknown
+    int64_t top = anchor > nullifier ? anchor : nullifier;
+    if (seam_found && seam > top)
+        top = seam;
+    if (seed_found && seed > top)
+        top = seed;
+    *top_out = top;
+    return true;
+}
+
+bool sovereignty_history_cursor(int64_t *cursor_out)
+{
+    sqlite3 *pdb = progress_store_db();
+    if (!pdb || !cursor_out)
+        return false;
+    if (!sov_progress_lock_bounded())
+        return false; // raw-return-ok:sov_progress_lock_bounded logged the timeout
+    bool ok = sov_history_top(pdb, cursor_out);
+    progress_store_tx_unlock();
+    return ok;
+}
+
+bool sovereignty_self_folded_marker(void)
+{
+    sqlite3 *pdb = progress_store_db();
+    if (!pdb)
+        return false; // raw-return-ok:no store means no marker
+    if (!sov_progress_lock_bounded())
+        return false; // raw-return-ok:sov_progress_lock_bounded logged the timeout
+    bool marked = coins_kv_contains_refold_marker(pdb);
+    progress_store_tx_unlock();
+    return marked;
+}
+
 /* One capability the v2 dumper reports, with its stable JSON key. */
 struct sov_cap_entry {
     const char *key;
@@ -542,6 +686,22 @@ static void sov_emit_gated(struct json_value *out, bool progress_open,
                      "and snapshot/bundle export require self_folded");
     json_push_kv(out, "gated", &gated);
     json_free(&gated);
+
+    /* The phone rule is reported apart from the fields above: they keep their
+     * meaning (the strict guard), and this object only says whether the
+     * option is on and what the last send-time check answered. */
+    char verdict[48];
+    sovereignty_spend_rule_last_verdict(verdict, sizeof(verdict));
+    struct json_value rule = {0};
+    json_set_object(&rule);
+    json_push_kv_bool(&rule, "enabled",
+                      sovereignty_spend_after_checkpoint_enabled());
+    json_push_kv_str(&rule, "last_send_check",
+                     verdict[0] ? verdict : "none");
+    json_push_kv_str(&rule, "scope",
+                     "z_sendmany only; mint, export and seed stay refused");
+    json_push_kv(out, "spend_after_checkpoint", &rule);
+    json_free(&rule);
 }
 
 bool sovereignty_dump_state_json(struct json_value *out, const char *key)

@@ -17,6 +17,7 @@
 #include "config/boot_error.h"
 #include "config/boot_fleet_roster.h"
 #include "controllers/agent_controller.h"  /* agent_print_native_usage (print_usage) */
+#include "controllers/sovereignty_controller.h"
 #include "hotswap/hotswap_module.h"
 #include "kernel/command_registry.h"
 #include "net/netaddr.h"
@@ -199,6 +200,9 @@ void print_usage_all(const char *prog)
     printf("                      upgrade you want a rollback copy of). Refuses to\n");
     printf("                      start the migration if free space is short.\n");
     printf("  -backfill-nullifiers  One-shot owner-gated C-3 nullifier history backfill\n");
+    printf("  -spend-after-checkpoint  Phone only (default OFF): z_sendmany may spend\n");
+    printf("                      funds received after the snapshot point when the\n");
+    printf("                      compiled checkpoint is re-verified at send time.\n");
     printf("  -enforce-sapling-root  Reject ANY hashFinalSaplingRoot mismatch\n");
     printf("                      (default OFF: only all-zeros is rejected).\n");
     printf("                      DO NOT use on the live node until a full-history\n");
@@ -1048,6 +1052,13 @@ static int args_arm_hotswap_wallet(const char *arg,
          * unconditionally. Without this flag every hot-swap is verify-only.
          * See hotswap_activation_authorized() (engine/modules/hotswap). */
         hotswap_set_activate_flag(true);
+    }
+    else if (strcmp(arg, "-spend-after-checkpoint") == 0) {
+        /* Phone-only, default OFF. Lets z_sendmany spend funds received after
+         * the snapshot point when the compiled checkpoint is re-verified at
+         * send time (contexts/wallet wallet_spend_gate_check). Mining, export
+         * and seeding are unaffected. Meant for the phone build; no shipped caller passes it yet. */
+        sovereignty_spend_after_checkpoint_set(true);
     }
     else if (strcmp(arg, "-nolegacyimport") == 0) ctx->no_legacy_auto_import = true;
     else if (strcmp(arg, "-nolegacyutxoimport") == 0) ctx->no_legacy_utxo_import = true;
