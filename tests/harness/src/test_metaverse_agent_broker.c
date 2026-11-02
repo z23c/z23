@@ -1641,6 +1641,25 @@ static int mb_identity_options(void)
     return failures;
 }
 
+/* Under AddressSanitizer the confined-child half cannot run. The child is
+ * this same binary re-exec'd under an RLIMIT_AS rlimit set by
+ * os_sandbox_set_rlimits, and ASan must reserve about 15 TB of shadow at
+ * startup. Measured in the ASan sweep (pfx-me.log): each child dies with
+ * "AddressSanitizer failed to allocate 0xdfff0001000 bytes ...
+ * ReserveShadowMemoryRange failed ... Perhaps you're using ulimit -v"
+ * (exit by signal, report=0 bytes), 21 assertions in all. The production
+ * cage is a fail-closed refusal and stays; only the ASan build skips these
+ * assertions, every other build runs them unchanged. GCC defines
+ * __SANITIZE_ADDRESS__; Clang reports it through
+ * __has_feature(address_sanitizer). */
+#if defined(__SANITIZE_ADDRESS__)
+#define MB_UNDER_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define MB_UNDER_ASAN 1
+#endif
+#endif
+
 int test_metaverse_agent_broker(void)
 {
     printf("\n=== metaverse confined-agent broker (adversarial) ===\n");
@@ -1666,7 +1685,13 @@ int test_metaverse_agent_broker(void)
 
 #if !defined(_WIN32)
     char self_exe[512] = { 0 };
+#if defined(MB_UNDER_ASAN)
+    bool have_self = false;
+    printf("agent_broker: confinement assertions SKIP under AddressSanitizer "
+           "(the RLIMIT_AS cage refuses its shadow reservation)\n");
+#else
     bool have_self = os_proc_exe_path(self_exe, sizeof(self_exe));
+#endif
 
     if (abi >= 1 && seccomp && have_self && self_exe[0]) {
         struct mb_child_run run;
