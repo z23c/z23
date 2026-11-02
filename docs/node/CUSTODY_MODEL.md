@@ -566,8 +566,14 @@ change is zero by construction.
   layer answers a repeated key before that comparison: a retry of a finished
   sweep returns the same txid with `replayed: true` although its coins are
   already spent, and a coin that arrived since does not turn it into a
-  refusal. The same send-once record, fee check (`FEE_CHANGED`), sovereignty
-  guard and wallet lock guard as section 4.1 apply; a locked wallet refuses and
+  refusal. A replayed reply carries only what the send-once record holds:
+  `stage`, `committed`, `replayed: true`, the `txid` and the
+  `idempotency_key`. It echoes no `from`, `to`, `input_count`, `total_zat`,
+  `fee_zat`, `amount_zat` or `plan_token`, because the node never compared
+  those caller-supplied values on a replay and a forged set would otherwise
+  be shown as the amount of a sweep that sent nothing. The same send-once
+  record, fee check (`FEE_CHANGED`), sovereignty guard and wallet lock guard
+  as section 4.1 apply; a locked wallet refuses and
   frees the key. `NOTHING_TO_SHIELD` (mature total not above the fee) and
   `PROVING_UNAVAILABLE` also free the key.
 - **Visibility.** The transparent inputs, their total and the fee are public;

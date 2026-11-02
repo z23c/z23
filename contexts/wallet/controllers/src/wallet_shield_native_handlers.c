@@ -36,7 +36,12 @@
  * alone compares them with the coins it holds and refuses PLAN_TOKEN_MISMATCH
  * when they moved, after the send-once layer has answered a repeated key. A
  * retry of a finished sweep therefore replays its result, though its coins are
- * already spent. A destination that is not the node's own is refused there. */
+ * already spent. A destination that is not the node's own is refused there.
+ *
+ * A fresh commit echoes the sweep the node just verified against its coins. A
+ * replay echoes nothing derived from the caller's input: the node never
+ * compared the quoted count and total with anything, so only the txid, the
+ * replayed flag and the idempotency key (the lookup key) are reported. */
 
 /* The sweep as the node quotes it. */
 struct wnh_shield_plan {
@@ -264,6 +269,11 @@ static void wnh_shield_committed(struct zcl_command_reply *reply,
     (void)json_push_kv_bool(&reply->data, "committed", true);
     (void)json_push_kv_bool(&reply->data, "replayed", replayed);
     (void)json_push_kv_str(&reply->data, "txid", txid);
+    if (replayed) {
+        (void)json_push_kv_str(&reply->data, "idempotency_key", in->idem);
+        reply->error.mutated = false;
+        return;
+    }
     (void)json_push_kv_str(&reply->data, "wallet_scope", in->wallet_scope);
     (void)json_push_kv_str(&reply->data, "from", pl->from);
     (void)json_push_kv_str(&reply->data, "to", pl->to);
@@ -273,7 +283,7 @@ static void wnh_shield_committed(struct zcl_command_reply *reply,
     (void)json_push_kv_int(&reply->data, "amount_zat", pl->total - in->fee_zats);
     (void)json_push_kv_str(&reply->data, "idempotency_key", in->idem);
     (void)json_push_kv_str(&reply->data, "plan_token", in->plan_token);
-    reply->error.mutated = !replayed;
+    reply->error.mutated = true;
 }
 
 /* The sweep the plan quoted, read back from its commit input. */

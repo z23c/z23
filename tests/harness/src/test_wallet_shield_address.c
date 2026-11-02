@@ -17,6 +17,7 @@
 #include "chain/chainparams.h"
 #include "command/native_command.h"
 #include "config/command_catalog.h"
+#include "consensus/upgrades.h"
 #include "controllers/rpc_client.h"
 #include "controllers/wallet_helpers.h"
 #include "controllers/wallet_shield_address.h"
@@ -35,12 +36,18 @@
 #include "sapling/params_init.h"
 #include "sapling/sapling.h"
 #include "sapling/sapling_prover.h"
+#include "script/interpreter.h"
 #include "script/script.h"
+#include "script/script_error.h"
+#include "script/script_flags.h"
 #include "script/standard.h"
 #include "storage/coins_kv.h"
 #include "storage/progress_store.h"
 #include "util/safe_alloc.h"
+#include "controllers/sync_controller.h"
 #include "validation/main_state.h"
+#include "validation/sighash.h"
+#include "validation/tx_verifier.h"
 #include "wallet/keystore.h"
 #include "wallet/sapling_keys.h"
 #include "wallet/wallet.h"
@@ -699,7 +706,135 @@ static int wsa_test_coinbase_protect(void)
     return failures;
 }
 
+/* ── Leg: coins reserved by a pending wallet transaction ──────────────── */
+
+/* A wallet-originated transaction that spends the largest coin is projected
+ * into node.db through the production path (unconfirmed, height 0). The coin
+ * is then reserved: a new plan neither selects nor totals it. */
+static int wsa_test_pending(void)
+{
+    int failures = 0;
+    struct wsa_fix fx;
+    char from[128];
+    WSA_CHECK("pending fixture opens", wsa_open(&fx, "pending", true));
+    wsa_addr(&fx.kid, from, sizeof(from));
+    WSA_CHECK("three coins saved",
+              wsa_coin(&fx, 1, 5000, 5, false, NULL) &&
+                  wsa_coin(&fx, 2, 3000, 6, false, NULL) &&
+                  wsa_coin(&fx, 3, 1000, 7, false, NULL));
+    struct wallet_rpc_context *ctx = wallet_rpc_context_current();
+    struct wallet_shield_plan *p = zcl_calloc(1, sizeof(*p), "wsa_plan");
+    struct json_value res;
+    json_init(&res);
+    p->floor = -1;
+    WSA_CHECK("before the pending spend the plan takes all three",
+              wallet_shield_load(ctx, from, p, &res) ==
+                      WALLET_SHIELD_LOAD_OK &&
+                  p->count == 3 && p->total == 9000);
+
+    /* The pending transaction spends only the largest coin (index 0). */
+    struct wallet_tx wtx;
+    size_t all = p->count;
+    int64_t all_total = p->total;
+    p->count = 1;
+    p->total = p->coins[0].value;
+    WSA_CHECK("pending transaction assembles",
+              wallet_shield_assemble(p, &wtx, &res) && wtx.tx.num_vin == 1);
+    transaction_compute_hash(&wtx.tx);
+    uint8_t pending_txid[32], spent_outpoint[32];
+    memcpy(pending_txid, wtx.tx.hash.data, 32);
+    memcpy(spent_outpoint, p->coins[0].txid, 32);
+    p->count = all;
+    p->total = all_total;
+    WSA_CHECK("projected as an unconfirmed wallet transaction",
+              node_db_sync_wallet_tx(&fx.ndb, &wtx.tx, fx.w, 0));
+    transaction_free(&wtx.tx);
+    wallet_shield_plan_free(p);
+
+    struct db_wallet_utxo held;
+    WSA_CHECK("the spent coin is reserved by the pending transaction",
+              db_wallet_utxo_find(&fx.ndb, spent_outpoint, 0, &held) &&
+                  held.is_spent &&
+                  memcmp(held.spent_txid, pending_txid, 32) == 0);
+    free(held.script);
+
+    memset(p, 0, sizeof(*p));
+    p->floor = -1;
+    json_free(&res);
+    json_init(&res);
+    WSA_CHECK("the sweep plan skips the reserved coin",
+              wallet_shield_load(ctx, from, p, &res) ==
+                      WALLET_SHIELD_LOAD_OK &&
+                  p->count == 2 && p->total == 4000);
+    bool taken = false;
+    for (size_t i = 0; i < p->count; i++)
+        taken = taken || memcmp(p->coins[i].txid, spent_outpoint, 32) == 0;
+    WSA_CHECK("no selected coin is the reserved outpoint", !taken);
+    wallet_shield_plan_free(p);
+    free(p);
+    json_free(&res);
+    wsa_close(&fx);
+    return failures;
+}
+
 /* ── Leg: the real build ──────────────────────────────────────────────── */
+
+/* The built transaction through the production verifiers: every transparent
+ * input script over its own coin, then the Sapling output and the binding
+ * signature over the real sighash. */
+static bool wsa_verify_inputs(const struct wsa_fix *fx,
+                              const struct wallet_shield_plan *p,
+                              const struct wallet_tx *wtx, uint32_t branch)
+{
+    struct precomputed_tx_data txdata;
+    precompute_tx_data(&wtx->tx, &txdata);
+    if (wtx->tx.num_vin != p->count)
+        return false;
+    for (size_t i = 0; i < p->count; i++) {
+        struct script spk;
+        script_for_p2pkh(&spk, &fx->kid);
+        if (memcmp(wtx->tx.vin[i].prevout.hash.data, p->coins[i].txid, 32) != 0)
+            return false;
+        struct tx_sig_checker cc;
+        tx_sig_checker_init(&cc, &wtx->tx, (unsigned)i, p->coins[i].value,
+                            branch, &txdata);
+        struct sig_checker checker = tx_make_sig_checker(&cc);
+        ScriptError err = SCRIPT_ERR_OK;
+        if (!verify_script(&wtx->tx.vin[i].script_sig, &spk,
+                           SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_STRICTENC,
+                           &checker, branch, &err))
+            return false;
+    }
+    return true;
+}
+
+static bool wsa_verify_binding(const struct wallet_tx *wtx, uint32_t branch)
+{
+    struct precomputed_tx_data txdata;
+    struct sighash_type ht;
+    struct script empty;
+    struct uint256 sighash;
+    ht.raw = SIGHASH_ALL;
+    empty.size = 0;
+    precompute_tx_data(&wtx->tx, &txdata);
+    if (!signature_hash(&empty, &wtx->tx, NOT_AN_INPUT, ht, 0, branch, &txdata,
+                        &sighash))
+        return false;
+    void *vc = zclassic_sapling_verification_ctx_init();
+    if (!vc)
+        return false;
+    bool ok = true;
+    for (size_t i = 0; ok && i < wtx->tx.num_shielded_output; i++) {
+        const struct output_description *o = &wtx->tx.v_shielded_output[i];
+        ok = zclassic_sapling_check_output(vc, o->cv.data, o->cm.data,
+                                           o->ephemeral_key.data, o->zkproof);
+    }
+    ok = ok && zclassic_sapling_final_check(vc, wtx->tx.value_balance,
+                                            wtx->tx.binding_sig,
+                                            sighash.data);
+    zclassic_sapling_verification_ctx_free(vc);
+    return ok;
+}
 
 static int wsa_test_build(void)
 {
@@ -733,6 +868,16 @@ static int wsa_test_build(void)
                   wtx.tx.value_balance == -(3000000 - WSA_FEE));
         WSA_CHECK("the built sweep passes the coinbase_protect check",
                   wsa_delta_ok(&wtx.tx, &set, &protect) && !protect);
+        uint32_t branch = consensus_current_epoch_branch_id(
+            p->tip + 1, &chain_params_get()->consensus);
+        WSA_CHECK("every transparent input script verifies against its coin",
+                  wsa_verify_inputs(&fx, p, &wtx, branch));
+        WSA_CHECK("the Sapling output proof and the binding signature verify",
+                  wsa_verify_binding(&wtx, branch));
+        wtx.tx.binding_sig[0] ^= 0x01;
+        WSA_CHECK("a flipped binding signature byte is rejected",
+                  !wsa_verify_binding(&wtx, branch));
+        wtx.tx.binding_sig[0] ^= 0x01;
         transaction_free(&wtx.tx);
         wallet_shield_plan_free(p);
         free(p);
@@ -740,6 +885,8 @@ static int wsa_test_build(void)
         wsa_close(&fx);
         return failures;
     }
+    printf("  wallet_shield_address: binding signature and input script "
+           "verification... UNOBSERVED (the sweep was not built)\n");
     wallet_shield_plan_free(p);
     free(p);
     json_free(&res);
@@ -1037,7 +1184,22 @@ static int wsa_test_leaf_replay(void)
                          WSA_TXID) == 0 &&
                   !json_get_bool(json_get(&first.data, "replayed")) &&
                   first.error.mutated);
+    WSA_CHECK("the first commit echoes the verified sweep",
+              wsa_int(&first.data, "input_count") == 2 &&
+                  wsa_int(&first.data, "total_zat") == 3000 &&
+                  wsa_int(&first.data, "amount_zat") == 3000 - WSA_FEE);
     wsa_leaf(commit, &again);
+    WSA_CHECK("a replay echoes nothing derived from the caller's input",
+              json_get(&again.data, "input_count") == NULL &&
+                  json_get(&again.data, "total_zat") == NULL &&
+                  json_get(&again.data, "amount_zat") == NULL &&
+                  json_get(&again.data, "fee_zat") == NULL &&
+                  json_get(&again.data, "from") == NULL &&
+                  json_get(&again.data, "to") == NULL &&
+                  json_get(&again.data, "plan_token") == NULL &&
+                  strcmp(json_get_str(json_get(&again.data,
+                                               "idempotency_key")),
+                         WSA_KEY) == 0);
     WSA_CHECK("retry after the coins are spent: replayed, same txid, not "
               "mutated, node reached again",
               again.exit_code == ZCL_COMMAND_EXIT_OK &&
@@ -1114,9 +1276,14 @@ int test_wallet_shield_address(void)
     bool prover = wsa_load_prover();
     WSA_CHECK("sapling proving parameters load (a missing set is a failure, "
               "not a skip)", prover);
-    if (!prover)
+    if (!prover) {
+        printf("  wallet_shield_address: binding signature and input script "
+               "verification... UNOBSERVED (proving parameters did not "
+               "load)\n");
         return failures;
+    }
     failures += wsa_test_selection();
+    failures += wsa_test_pending();
     failures += wsa_test_cap();
     failures += wsa_test_sovereignty();
     failures += wsa_test_lock();
