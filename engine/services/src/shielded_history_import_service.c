@@ -528,6 +528,267 @@ static void shi_free_exec_err(char *err)
         sqlite3_free(err);
 }
 
+/* Refuse invalid arguments, an all-zero expected Sapling root, or a schema
+ * ensure failure before any cursor or transaction work. */
+static bool shi_import_inputs_accepted(
+    sqlite3 *progress_db, const char *chainstate_src_path,
+    int64_t expected_tip_height, const struct uint256 *expected_tip_block_hash,
+    const struct uint256 *expected_tip_sapling_root)
+{
+    if (!shi_import_args_ok(progress_db, chainstate_src_path,
+                            expected_tip_height, expected_tip_block_hash,
+                            expected_tip_sapling_root)) {
+        LOG_ERROR_IN("shielded_history_import_from_chainstate", SHI_SUBSYS,
+                     "invalid args");
+        return false;
+    }
+
+    /* Fork-safety, defense-in-depth: an all-zero expected root means the caller
+     * failed to obtain the header-committed hashFinalSaplingRoot (e.g. reading a
+     * blocks.sapling_root projection column that a header import left null). The
+     * tip is far past Sapling activation, so its frontier root can never be
+     * zero. Binding the imported frontier against zeros — then flipping the
+     * activation cursors — would convert the SAFE wedge into an ACCEPT of an
+     * unverified frontier. Refuse before touching the transaction. */
+    if (uint256_is_null(expected_tip_sapling_root)) {
+        LOG_ERROR_IN("shielded_history_import_from_chainstate", SHI_SUBSYS,
+                 "expected tip Sapling root is all-zero — caller did not "
+                 "obtain the header-committed hashFinalSaplingRoot; refusing to "
+                 "bind the tip frontier against zeros (wedge left intact)");
+        return false;
+    }
+
+    if (!shi_schema_ensure(progress_db)) {
+        LOG_ERROR_IN("shielded_history_import_from_chainstate", SHI_SUBSYS,
+                     "schema ensure failed");
+        return false;
+    }
+    return true;
+}
+
+/* Open the chainstate and refuse unless its best block and Sapling tip anchor
+ * match the expected tip. Ends progress on refusal. */
+static bool shi_bind_chainstate_tip(
+    const char *chainstate_src_path, int64_t expected_tip_height,
+    const struct uint256 *expected_tip_block_hash,
+    const struct uint256 *expected_tip_sapling_root,
+    void **opened, struct uint256 *best_block)
+{
+    memset(best_block, 0, sizeof(*best_block));
+    *opened = NULL;
+
+    /* Open the (already point-in-time / fixture) chainstate copy. */
+    if (!shi_source_open(chainstate_src_path, opened)) {
+        shi_progress_end();
+        LOG_ERROR_IN("shielded_history_import_from_chainstate", SHI_SUBSYS,
+                     "chainstate_legacy_open(%s) failed",
+                 chainstate_src_path);
+        return false;
+    }
+    void *h = *opened;
+
+    uint256_set_null(best_block);
+    if (!chainstate_legacy_get_best_block(h, best_block)) {
+        shi_abort_source(h);
+        LOG_ERROR_IN("shielded_history_import_from_chainstate", SHI_SUBSYS,
+                 "source best-block bind FAILED: chainstate has no readable "
+                 "best-block pointer; refusing before import");
+        return false;
+    }
+    if (!uint256_eq(best_block, expected_tip_block_hash)) {
+        char source_hex[65], target_hex[65];
+        uint256_get_hex(best_block, source_hex);
+        uint256_get_hex(expected_tip_block_hash, target_hex);
+        shi_abort_source(h);
+        LOG_ERROR_IN("shielded_history_import_from_chainstate", SHI_SUBSYS,
+                 "source best-block bind FAILED: source=%s target=%s at "
+                 "resume_h=%lld — importing an additive nullifier set from "
+                 "above/below the target makes forward spends look already "
+                 "spent; refusing before transaction",
+                 source_hex, target_hex, (long long)expected_tip_height);
+        return false;
+    }
+
+    /* The chain-committed tip bind (§3), keyed on OUR expected root — never
+     * the source's own 'z' best-anchor pointer. The pointer only reflects
+     * what the source last flushed and races the WAL frontier on a live
+     * daemon (a fresh flush between the target's UTXO seed and this import
+     * moves it past the fold-resume anchor), so a pointer-derived bind can
+     * key the frontier at a height the fold cannot use. The bind that is
+     * actually load-bearing is: the anchor RECORD for the expected root
+     * (the PoW-committed hashFinalSaplingRoot at the target's fold-resume
+     * anchor, supplied by the caller) exists, and its tree Pedersen-hashes
+     * to that root. A torn/forged frontier fails closed here, before the
+     * import transaction opens. */
+    struct incremental_merkle_tree tip_tree;
+    enum chainstate_anchor_result tip_ar = chainstate_legacy_get_sapling_anchor(
+        h, expected_tip_sapling_root, &tip_tree);
+    if (tip_ar != CHAINSTATE_ANCHOR_FOUND) {
+        shi_abort_source(h);
+        LOG_ERROR_IN("shielded_history_import_from_chainstate", SHI_SUBSYS,
+                 "tip bind FAILED: chainstate has no Sapling anchor record "
+                 "for the fold-resume root at h=%lld (result=%d) — the "
+                 "source does not cover the target's resume point (stale "
+                 "snapshot or reorg); refusing",
+                 (long long)expected_tip_height, (int)tip_ar);
+        return false;
+    }
+    struct uint256 tip_recomputed;
+    incremental_tree_root(&tip_tree, &tip_recomputed);
+    if (!uint256_eq(&tip_recomputed, expected_tip_sapling_root)) {
+        shi_abort_source(h);
+        LOG_ERROR_IN("shielded_history_import_from_chainstate", SHI_SUBSYS,
+                 "tip bind FAILED: anchor tree for the fold-resume root at "
+                 "h=%lld does not hash to the header-committed "
+                 "hashFinalSaplingRoot — torn/forged frontier, refusing",
+                 (long long)expected_tip_height);
+        return false;
+    }
+    return true;
+}
+
+/* Import both pools in one immediate transaction and commit, or stop on failure. */
+static bool shi_commit_imported_history(
+    sqlite3 *progress_db, void *h, int64_t expected_tip_height,
+    const struct uint256 *best_block, const struct uint256 *best_sapling,
+    bool sprout_best_present, const struct uint256 *best_sprout,
+    int64_t anchor_boundary, int64_t nullifier_boundary,
+    struct shielded_import_report *report)
+{
+    report->sapling_anchors = 0;
+    report->sprout_anchors = 0;
+    report->sapling_nullifiers = 0;
+    report->sprout_nullifiers = 0;
+    report->committed = false;
+
+    /* ── the ONE atomic transaction ── */
+    progress_store_tx_lock();
+    char *err = NULL;
+    if (sqlite3_exec(progress_db, "BEGIN IMMEDIATE", NULL, NULL, &err)
+            != SQLITE_OK) {
+        LOG_WARN_IN("shielded_history_import_from_chainstate", SHI_SUBSYS,
+                    "BEGIN IMMEDIATE failed: %s",
+                 err ? err : sqlite3_errmsg(progress_db));
+        shi_free_exec_err(err);
+        progress_store_tx_unlock();
+        chainstate_legacy_close(h);
+        shi_progress_end();
+        return false;
+    }
+    shi_free_exec_err(err);
+    err = NULL;
+
+    int64_t nf_sentinel = anchor_boundary - 1; /* highest historical height */
+
+    /* ── anchors (Sapling then Sprout) ── */
+    shi_progress_phase(SHI_PHASE_SCAN_ANCHORS);
+
+    int64_t sap_count = 0;
+    bool sap_saw_best = false;
+    int64_t n = shi_run_anchor_pass(progress_db, h, ANCHOR_POOL_SAPLING, true,
+                                    best_sapling, expected_tip_height,
+                                    &sap_count, &sap_saw_best);
+    if (shi_anchor_pass_incomplete(n, true, sap_saw_best)) {
+        shi_rollback(progress_db);
+        chainstate_legacy_close(h);
+        LOG_ERROR_IN("shielded_history_import_from_chainstate", SHI_SUBSYS,
+                 "Sapling anchor import incomplete n=%lld saw_tip=%d — "
+                 "rolled back", (long long)n, sap_saw_best);
+        return false;
+    }
+    report->sapling_anchors = sap_count;
+
+    /* Sprout anchors (best may be absent — a drained/empty pool). */
+    int64_t spr_count = 0;
+    bool spr_saw_best = false;
+    n = shi_run_anchor_pass(progress_db, h, ANCHOR_POOL_SPROUT,
+                            sprout_best_present, best_sprout,
+                            expected_tip_height, &spr_count, &spr_saw_best);
+    if (shi_anchor_pass_incomplete(n, sprout_best_present, spr_saw_best)) {
+        shi_rollback(progress_db);
+        chainstate_legacy_close(h);
+        LOG_ERROR_IN("shielded_history_import_from_chainstate", SHI_SUBSYS,
+                 "Sprout anchor import incomplete n=%lld best=%d saw_best=%d — "
+                 "rolled back", (long long)n, sprout_best_present,
+                 spr_saw_best);
+        return false;
+    }
+    report->sprout_anchors = spr_count;
+
+    /* ── nullifiers (Sapling then Sprout) ── */
+    shi_progress_phase(SHI_PHASE_SCAN_NULLIFIERS);
+
+    int64_t snf_count = 0;
+    n = shi_run_nullifier_pass(progress_db, h, NULLIFIER_POOL_SAPLING,
+                               nf_sentinel, &snf_count);
+    if (n < 0) {
+        shi_rollback(progress_db);
+        chainstate_legacy_close(h);
+        LOG_ERROR_IN("shielded_history_import_from_chainstate", SHI_SUBSYS,
+                     "Sapling nullifier import failed n=%lld — "
+                             "rolled back", (long long)n);
+        return false;
+    }
+    report->sapling_nullifiers = snf_count;
+
+    int64_t pnf_count = 0;
+    n = shi_run_nullifier_pass(progress_db, h, NULLIFIER_POOL_SPROUT,
+                               nf_sentinel, &pnf_count);
+    if (n < 0) {
+        shi_rollback(progress_db);
+        chainstate_legacy_close(h);
+        LOG_ERROR_IN("shielded_history_import_from_chainstate", SHI_SUBSYS,
+                     "Sprout nullifier import failed n=%lld — "
+                             "rolled back", (long long)n);
+        return false;
+    }
+    report->sprout_nullifiers = pnf_count;
+
+    /* We are done reading the chainstate; close it before the flip so a torn
+     * source cannot silently reopen. */
+    chainstate_legacy_close(h);
+    h = NULL;
+
+    /* Flip BOTH activation cursors to zero — only now, after the COMPLETE set
+     * is staged in this transaction and the tip was bound. */
+    shi_progress_phase(SHI_PHASE_BIND);
+    if (!shi_publish_cursors(progress_db, anchor_boundary,
+                             nullifier_boundary)) {
+        shi_rollback(progress_db);
+        LOG_ERROR_IN("shielded_history_import_from_chainstate", SHI_SUBSYS,
+                     "cursor publish failed — rolled back");
+        return false;
+    }
+
+    if (!shi_write_provenance(progress_db, best_block, report)) {
+        shi_rollback(progress_db);
+        LOG_ERROR_IN("shielded_history_import_from_chainstate", SHI_SUBSYS,
+                     "provenance failed — rolled back");
+        return false;
+    }
+
+    shi_progress_phase(SHI_PHASE_COMMIT);
+    if (sqlite3_exec(progress_db, "COMMIT", NULL, NULL, &err) != SQLITE_OK) {
+        LOG_WARN_IN("shielded_history_import_from_chainstate", SHI_SUBSYS,
+                    "COMMIT failed: %s",
+                 err ? err : sqlite3_errmsg(progress_db));
+        shi_free_exec_err(err);
+        shi_rollback(progress_db);
+        return false;
+    }
+    shi_free_exec_err(err);
+    progress_store_tx_unlock();
+    shi_progress_end();
+
+    report->committed = true;
+
+    /* Both cursors are now durably zero: refresh the two permanent blockers so
+     * the reducer resumes folding from the wedge height + 1. */
+    utxo_apply_anchor_gap_blocker_refresh(progress_db);
+    utxo_apply_nullifier_gap_blocker_refresh(progress_db);
+    return true;
+}
+
 bool shielded_history_import_from_chainstate(
     sqlite3 *progress_db, const char *chainstate_src_path,
     int64_t expected_tip_height, const struct uint256 *expected_tip_block_hash,
@@ -537,26 +798,11 @@ bool shielded_history_import_from_chainstate(
     struct shielded_import_report report = {0};
     shi_publish_report(out, &report);
 
-    if (!shi_import_args_ok(progress_db, chainstate_src_path,
-                            expected_tip_height, expected_tip_block_hash,
-                            expected_tip_sapling_root))
-        LOG_FAIL(SHI_SUBSYS, "invalid args");
-
-    /* Fork-safety, defense-in-depth: an all-zero expected root means the caller
-     * failed to obtain the header-committed hashFinalSaplingRoot (e.g. reading a
-     * blocks.sapling_root projection column that a header import left null). The
-     * tip is far past Sapling activation, so its frontier root can never be
-     * zero. Binding the imported frontier against zeros — then flipping the
-     * activation cursors — would convert the SAFE wedge into an ACCEPT of an
-     * unverified frontier. Refuse before touching the transaction. */
-    if (uint256_is_null(expected_tip_sapling_root))
-        LOG_FAIL(SHI_SUBSYS,
-                 "expected tip Sapling root is all-zero — caller did not "
-                 "obtain the header-committed hashFinalSaplingRoot; refusing to "
-                 "bind the tip frontier against zeros (wedge left intact)");
-
-    if (!shi_schema_ensure(progress_db))
-        LOG_FAIL(SHI_SUBSYS, "schema ensure failed");
+    bool inputs_ok = shi_import_inputs_accepted(
+        progress_db, chainstate_src_path, expected_tip_height,
+        expected_tip_block_hash, expected_tip_sapling_root);
+    if (!inputs_ok)
+        return false;
 
     int64_t anchor_boundary = 0, nullifier_boundary = 0;
     int br = shi_read_boundaries(progress_db, &anchor_boundary,
@@ -587,68 +833,14 @@ bool shielded_history_import_from_chainstate(
      * shi_rollback() does it for the transactional paths. */
     shi_progress_begin();
 
-    /* Open the (already point-in-time / fixture) chainstate copy. */
     void *h = NULL;
-    if (!shi_source_open(chainstate_src_path, &h)) {
-        shi_progress_end();
-        LOG_FAIL(SHI_SUBSYS, "chainstate_legacy_open(%s) failed",
-                 chainstate_src_path);
-    }
+    struct uint256 best_block = {0};
+    bool source_ok = shi_bind_chainstate_tip(
+        chainstate_src_path, expected_tip_height, expected_tip_block_hash,
+        expected_tip_sapling_root, &h, &best_block);
+    if (!source_ok)
+        return false;
 
-    struct uint256 best_block;
-    uint256_set_null(&best_block);
-    if (!chainstate_legacy_get_best_block(h, &best_block)) {
-        shi_abort_source(h);
-        LOG_FAIL(SHI_SUBSYS,
-                 "source best-block bind FAILED: chainstate has no readable "
-                 "best-block pointer; refusing before import");
-    }
-    if (!uint256_eq(&best_block, expected_tip_block_hash)) {
-        char source_hex[65], target_hex[65];
-        uint256_get_hex(&best_block, source_hex);
-        uint256_get_hex(expected_tip_block_hash, target_hex);
-        shi_abort_source(h);
-        LOG_FAIL(SHI_SUBSYS,
-                 "source best-block bind FAILED: source=%s target=%s at "
-                 "resume_h=%lld — importing an additive nullifier set from "
-                 "above/below the target makes forward spends look already "
-                 "spent; refusing before transaction",
-                 source_hex, target_hex, (long long)expected_tip_height);
-    }
-
-    /* The chain-committed tip bind (§3), keyed on OUR expected root — never
-     * the source's own 'z' best-anchor pointer. The pointer only reflects
-     * what the source last flushed and races the WAL frontier on a live
-     * daemon (a fresh flush between the target's UTXO seed and this import
-     * moves it past the fold-resume anchor), so a pointer-derived bind can
-     * key the frontier at a height the fold cannot use. The bind that is
-     * actually load-bearing is: the anchor RECORD for the expected root
-     * (the PoW-committed hashFinalSaplingRoot at the target's fold-resume
-     * anchor, supplied by the caller) exists, and its tree Pedersen-hashes
-     * to that root. A torn/forged frontier fails closed here, before the
-     * import transaction opens. */
-    struct incremental_merkle_tree tip_tree;
-    enum chainstate_anchor_result tip_ar = chainstate_legacy_get_sapling_anchor(
-        h, expected_tip_sapling_root, &tip_tree);
-    if (tip_ar != CHAINSTATE_ANCHOR_FOUND) {
-        shi_abort_source(h);
-        LOG_FAIL(SHI_SUBSYS,
-                 "tip bind FAILED: chainstate has no Sapling anchor record "
-                 "for the fold-resume root at h=%lld (result=%d) — the "
-                 "source does not cover the target's resume point (stale "
-                 "snapshot or reorg); refusing",
-                 (long long)expected_tip_height, (int)tip_ar);
-    }
-    struct uint256 tip_recomputed;
-    incremental_tree_root(&tip_tree, &tip_recomputed);
-    if (!uint256_eq(&tip_recomputed, expected_tip_sapling_root)) {
-        shi_abort_source(h);
-        LOG_FAIL(SHI_SUBSYS,
-                 "tip bind FAILED: anchor tree for the fold-resume root at "
-                 "h=%lld does not hash to the header-committed "
-                 "hashFinalSaplingRoot — torn/forged frontier, refusing",
-                 (long long)expected_tip_height);
-    }
     /* The bulk pass keys the row matching best_root at tip_height and
      * Pedersen-verifies it a second time; feeding it the expected root keeps
      * the saw_best completeness assert on exactly the frontier we bound. */
@@ -659,119 +851,12 @@ bool shielded_history_import_from_chainstate(
     bool sprout_best_present =
         chainstate_legacy_get_best_sprout_anchor(h, &best_sprout);
 
-    /* ── the ONE atomic transaction ── */
-    progress_store_tx_lock();
-    char *err = NULL;
-    if (sqlite3_exec(progress_db, "BEGIN IMMEDIATE", NULL, NULL, &err)
-            != SQLITE_OK) {
-        LOG_WARN(SHI_SUBSYS, "BEGIN IMMEDIATE failed: %s",
-                 err ? err : sqlite3_errmsg(progress_db));
-        shi_free_exec_err(err);
-        progress_store_tx_unlock();
-        chainstate_legacy_close(h);
-        shi_progress_end();
+    bool committed = shi_commit_imported_history(
+        progress_db, h, expected_tip_height, &best_block, &best_sapling,
+        sprout_best_present, &best_sprout, anchor_boundary,
+        nullifier_boundary, &report);
+    if (!committed)
         return false;
-    }
-    shi_free_exec_err(err);
-    err = NULL;
-
-    int64_t nf_sentinel = anchor_boundary - 1; /* highest historical height */
-
-    /* ── anchors (Sapling then Sprout) ── */
-    shi_progress_phase(SHI_PHASE_SCAN_ANCHORS);
-
-    int64_t sap_count = 0;
-    bool sap_saw_best = false;
-    int64_t n = shi_run_anchor_pass(progress_db, h, ANCHOR_POOL_SAPLING, true,
-                                    &best_sapling, expected_tip_height,
-                                    &sap_count, &sap_saw_best);
-    if (shi_anchor_pass_incomplete(n, true, sap_saw_best)) {
-        shi_rollback(progress_db);
-        chainstate_legacy_close(h);
-        LOG_FAIL(SHI_SUBSYS,
-                 "Sapling anchor import incomplete n=%lld saw_tip=%d — "
-                 "rolled back", (long long)n, sap_saw_best);
-    }
-    report.sapling_anchors = sap_count;
-
-    /* Sprout anchors (best may be absent — a drained/empty pool). */
-    int64_t spr_count = 0;
-    bool spr_saw_best = false;
-    n = shi_run_anchor_pass(progress_db, h, ANCHOR_POOL_SPROUT,
-                            sprout_best_present, &best_sprout,
-                            expected_tip_height, &spr_count, &spr_saw_best);
-    if (shi_anchor_pass_incomplete(n, sprout_best_present, spr_saw_best)) {
-        shi_rollback(progress_db);
-        chainstate_legacy_close(h);
-        LOG_FAIL(SHI_SUBSYS,
-                 "Sprout anchor import incomplete n=%lld best=%d saw_best=%d — "
-                 "rolled back", (long long)n, sprout_best_present,
-                 spr_saw_best);
-    }
-    report.sprout_anchors = spr_count;
-
-    /* ── nullifiers (Sapling then Sprout) ── */
-    shi_progress_phase(SHI_PHASE_SCAN_NULLIFIERS);
-
-    int64_t snf_count = 0;
-    n = shi_run_nullifier_pass(progress_db, h, NULLIFIER_POOL_SAPLING,
-                               nf_sentinel, &snf_count);
-    if (n < 0) {
-        shi_rollback(progress_db);
-        chainstate_legacy_close(h);
-        LOG_FAIL(SHI_SUBSYS, "Sapling nullifier import failed n=%lld — "
-                             "rolled back", (long long)n);
-    }
-    report.sapling_nullifiers = snf_count;
-
-    int64_t pnf_count = 0;
-    n = shi_run_nullifier_pass(progress_db, h, NULLIFIER_POOL_SPROUT,
-                               nf_sentinel, &pnf_count);
-    if (n < 0) {
-        shi_rollback(progress_db);
-        chainstate_legacy_close(h);
-        LOG_FAIL(SHI_SUBSYS, "Sprout nullifier import failed n=%lld — "
-                             "rolled back", (long long)n);
-    }
-    report.sprout_nullifiers = pnf_count;
-
-    /* We are done reading the chainstate; close it before the flip so a torn
-     * source cannot silently reopen. */
-    chainstate_legacy_close(h);
-    h = NULL;
-
-    /* Flip BOTH activation cursors to zero — only now, after the COMPLETE set
-     * is staged in this transaction and the tip was bound. */
-    shi_progress_phase(SHI_PHASE_BIND);
-    if (!shi_publish_cursors(progress_db, anchor_boundary,
-                             nullifier_boundary)) {
-        shi_rollback(progress_db);
-        LOG_FAIL(SHI_SUBSYS, "cursor publish failed — rolled back");
-    }
-
-    if (!shi_write_provenance(progress_db, &best_block, &report)) {
-        shi_rollback(progress_db);
-        LOG_FAIL(SHI_SUBSYS, "provenance failed — rolled back");
-    }
-
-    shi_progress_phase(SHI_PHASE_COMMIT);
-    if (sqlite3_exec(progress_db, "COMMIT", NULL, NULL, &err) != SQLITE_OK) {
-        LOG_WARN(SHI_SUBSYS, "COMMIT failed: %s",
-                 err ? err : sqlite3_errmsg(progress_db));
-        shi_free_exec_err(err);
-        shi_rollback(progress_db);
-        return false;
-    }
-    shi_free_exec_err(err);
-    progress_store_tx_unlock();
-    shi_progress_end();
-
-    report.committed = true;
-
-    /* Both cursors are now durably zero: refresh the two permanent blockers so
-     * the reducer resumes folding from the wedge height + 1. */
-    utxo_apply_anchor_gap_blocker_refresh(progress_db);
-    utxo_apply_nullifier_gap_blocker_refresh(progress_db);
 
     LOG_INFO(SHI_SUBSYS,
              "IMPORT COMPLETE: sapling_anchors=%lld sprout_anchors=%lld "
