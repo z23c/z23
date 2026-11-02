@@ -8,7 +8,7 @@
  * a steady node never gives either back. This policy runs from an existing
  * periodic tick and does two things, both non-consensus:
  *   1. once per catch-up -> steady transition, release the projection cache;
- *   2. while steady, trim freed heap at most once per interval (10 minutes).
+ *   2. while steady, trim freed heap at most once per interval (150 s).
  *
  * The policy is a pure function of (clock, ibd flag, latches); the effects
  * (cache release, heap trim, resident read, clock, ibd) are injected so the
@@ -29,7 +29,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define RSS_TRIM_INTERVAL_US (600LL * 1000000LL)
+/* 150 s = one block interval. Measured on r1 (2026-11-02): at 10 minutes the
+ * heap regrows ~130 MiB between trims (1.60 GiB after, 1.75 GiB before), so the
+ * steady node sat ~65 MiB above its floor on average. */
+#define RSS_TRIM_INTERVAL_US (150LL * 1000000LL)
 
 /* Outcome of an injected cache release. RETRY (e.g. connection busy) leaves
  * the once-per-transition latch open so the next tick tries again. */

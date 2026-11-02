@@ -56,6 +56,9 @@ static int rt_policy_cases(void)
     int failures = 0;
     struct rss_trim_policy p;
     struct rss_trim_ops ops = { t_now, t_sync, t_cache, t_heap, t_res, NULL };
+    RT_CHECK("steady heap trim interval is pinned at 150 s (<= 5 minutes)",
+             RSS_TRIM_INTERVAL_US == 150LL * 1000000LL &&
+             RSS_TRIM_INTERVAL_US <= 5 * MIN_US);
     rss_trim_policy_init(&p, RSS_TRIM_INTERVAL_US);
     g_now = 100 * MIN_US; g_sync = true;
     g_cache_calls = g_heap_calls = 0; g_cache_result = RSS_TRIM_RELEASE_DONE;
@@ -68,12 +71,12 @@ static int rt_policy_cases(void)
     rss_trim_tick(&p, &ops);
     RT_CHECK("transition: cache released once and heap trimmed once",
              g_cache_calls == 1 && g_heap_calls == 1);
-    for (int i = 0; i < 9; i++) { g_now += MIN_US; rss_trim_tick(&p, &ops); }
-    RT_CHECK("cadence: no second trim inside 10 minutes",
+    for (int i = 0; i < 2; i++) { g_now += MIN_US; rss_trim_tick(&p, &ops); }
+    RT_CHECK("cadence: no second trim inside 150 s",
              g_heap_calls == 1 && g_cache_calls == 1);
     g_now += MIN_US;
     rss_trim_tick(&p, &ops);
-    RT_CHECK("cadence: second trim at 10 minutes, cache not repeated",
+    RT_CHECK("cadence: second trim at 150 s, cache not repeated",
              g_heap_calls == 2 && g_cache_calls == 1);
 
     g_sync = true; rss_trim_tick(&p, &ops);
