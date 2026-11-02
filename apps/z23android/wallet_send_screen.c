@@ -28,6 +28,7 @@ struct wss {
     bool dying;
     bool protected_window;
     bool begun;
+    bool replayed; /* the node answered this payment's commit from its record of an earlier one */
     bool closed;   /* the owner left the flow's outcome and no later payment has begun */
     uint8_t secret[32];
     char unlock_json[WSS_UNLOCK_JSON];
@@ -188,6 +189,7 @@ bool wss_progress(struct wss *s, char *line, size_t cap)
     enum ws_state state = ws->state;
     enum ws_fail fail = ws->fail;
     bool shown = s->begun && !s->closed;
+    bool replayed = s->replayed;
     wss_format_zat(ws->pay.amount_zat, amount, sizeof(amount));
     short_address(ws->pay.address, to, sizeof(to));
     pthread_mutex_unlock(&s->lock);
@@ -195,6 +197,7 @@ bool wss_progress(struct wss *s, char *line, size_t cap)
     if (state == WS_COMMIT) snprintf(line, cap, "Sending %s to %s: building the payment (about 2 min)", amount, to);
     else if (state == WS_BROADCAST) snprintf(line, cap, "Sending %s to %s: waiting to leave the phone", amount, to);
     else if (state == WS_DONE) snprintf(line, cap, "Sent %s", amount);
+    else if (state == WS_PAID && replayed) snprintf(line, cap, "Already sent %s", amount);
     else if (state == WS_FAILED && fail == WS_FAIL_COMMIT_UNKNOWN)
         snprintf(line, cap, "Payment status unknown: it may have been sent. Check History before paying again.");
     else if (state == WS_FAILED && failed_after_tap(fail))
@@ -220,8 +223,9 @@ void wss_gate_prover(struct wss_view *v, bool ready, const char *why)
 static int outcome_of(struct wss *s, enum ws_state before)
 {
     enum ws_state now = s->ws.state;
-    if ((before != WS_COMMIT && before != WS_BROADCAST) || (now != WS_DONE && now != WS_FAILED)) return -1;
-    if (now == WS_DONE) return ZAPP_PAYMENT_SENT;
+    if ((before != WS_COMMIT && before != WS_BROADCAST) || (now != WS_DONE && now != WS_FAILED && now != WS_PAID)) return -1;
+    s->replayed = now == WS_PAID;   /* the node already held this payment as sent */
+    if (now == WS_DONE || now == WS_PAID) return ZAPP_PAYMENT_SENT;
     return s->ws.fail == WS_FAIL_COMMIT_UNKNOWN ? ZAPP_PAYMENT_UNKNOWN : ZAPP_PAYMENT_NOT_SENT;
 }
 
@@ -553,6 +557,7 @@ bool wss_begin(struct wss *s, const struct zapp_payment *pay)
     s->protected_window = s->begun = true;
     s->unprotected = false;
     s->closed = false;
+    s->replayed = false;
     ws_open(&s->ws, &env, pay, s->d.host.now_ms ? s->d.host.now_ms(s->d.host.ctx) : 0, &acts);
     enqueue(s, &acts);
     pthread_mutex_unlock(&s->lock);
@@ -586,6 +591,12 @@ void wss_tap_send(struct wss *s, uint32_t serial)
 {
     struct ws_event ev = {.kind = WS_EV_TAP_SEND, .serial = serial};
     post(s, &ev);
+}
+bool wss_tap_send_ready(struct wss *s, uint32_t serial, bool ready)
+{
+    if (!ready) return false;
+    wss_tap_send(s, serial);
+    return true;
 }
 void wss_tap_retry(struct wss *s) { send_kind(s, WS_EV_RETRY); }
 void wss_tap_cancel(struct wss *s) { send_kind(s, WS_EV_CANCEL); }

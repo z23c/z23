@@ -1300,6 +1300,50 @@ static void progress_and_notice_follow_each_status(void)
     assert(!wss_progress(s, line, sizeof(line)) && f.outcomes == 0);
     wss_destroy(s);
 }
+/* The node answers the commit from its record of the same key: the flow ends as already sent, with one notice, and the
+ * progress line does not vanish. */
+static void a_replayed_commit_reads_as_already_sent(void)
+{
+    struct zapp_payment p = pay_of(priv, "?amount=1");
+    struct fake f; char line[300];
+    struct wss_send_req r = {0};
+    fake_init(&f);
+    struct wss *s = reviewed(&f, &p);
+    /* the node holds this key as committed from an earlier send the phone does not know about */
+    snprintf(r.address, sizeof(r.address), "%s", p.address);
+    r.amount_zat = p.amount_zat;
+    memcpy(r.key, f.plan_key, sizeof(r.key));
+    node_token(&r, f.fee, f.paid_token[0]);
+    memcpy(f.paid[0], f.plan_key, sizeof(f.plan_key));
+    f.paid_outcome[0] = WSS_COMMITTED;
+    f.paid_n = 1;
+    tap_and_run(s, &f);
+    assert(f.repeated_keys == 1 && view_of(s).state == WS_PAID);
+    assert(wss_progress(s, line, sizeof(line)) && !strcmp(line, "Already sent 1 ZCL"));
+    assert(f.outcomes == 1 && f.last_outcome == ZAPP_PAYMENT_SENT);
+    wss_on_tick(s); drain(&f);
+    assert(f.outcomes == 1);
+    wss_destroy(s);
+    fake_init(&f);   /* a payment already paid when it is opened is not a progress line */
+    s = reviewed(&f, &p);
+    assert(!wss_progress(s, line, sizeof(line)));
+    wss_destroy(s);
+}
+/* A Send press while the prover is not ready starts nothing. */
+static void a_send_press_without_a_ready_prover_starts_nothing(void)
+{
+    struct zapp_payment p = pay_of(priv, "?amount=1");
+    struct fake f; fake_init(&f);
+    struct wss *s = reviewed(&f, &p);
+    uint32_t serial = view_of(s).serial;
+    assert(!wss_tap_send_ready(s, serial, false));
+    drain(&f);
+    assert(view_of(s).state == WS_REVIEW && f.prompts == 0 && f.commits == 0);
+    assert(wss_tap_send_ready(s, serial, true));
+    drain(&f);
+    assert(f.commits == 1);
+    wss_destroy(s);
+}
 /* Without a ready prover the review offers no Send and says why; once ready it is unchanged. */
 static void the_prover_gate_hides_send(void)
 {
@@ -1347,6 +1391,8 @@ int main(void)
     a_payment_in_flight_keeps_running_and_reports_once();
     progress_and_notice_follow_each_status();
     the_prover_gate_hides_send();
+    a_replayed_commit_reads_as_already_sent();
+    a_send_press_without_a_ready_prover_starts_nothing();
     recreating_the_activity_during_a_commit_keeps_one_payment();
     a_flow_in_review_is_not_kept();
     an_already_paid_flow_is_kept_until_it_is_closed();

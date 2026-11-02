@@ -146,14 +146,14 @@ static bool node_paused(void *ctx)
 /* Whether the node can prove a payment, re-checked off the UI thread because the check asks the node. The Send button
  * appears only when it says ready; the result reaches the screen through the redraw. */
 #define GATE_RECHECK_MS 15000u
-static struct { pthread_mutex_t lock; bool known, ready, running; char why[WSS_LINE]; uint64_t at_ms; } gate = {.lock = PTHREAD_MUTEX_INITIALIZER};
+static struct { pthread_mutex_t lock; bool known, ready, running; unsigned gen; char why[WSS_LINE]; uint64_t at_ms; } gate = {.lock = PTHREAD_MUTEX_INITIALIZER};
 static void gate_job(void *arg)
 {
     char why[WSS_LINE] = "";
     bool ready = zapp_controller_prover_ready(why, sizeof(why));
-    (void)arg;
     pthread_mutex_lock(&gate.lock);
-    gate.known = true;
+    /* An answer asked for before the payment changed is not this payment's answer. */
+    gate.known = gate.gen == (unsigned)(uintptr_t)arg;
     gate.ready = ready;
     gate.running = false;
     gate.at_ms = host_now(NULL);
@@ -166,13 +166,29 @@ static void gate_poll(void)
 {
     pthread_mutex_lock(&gate.lock);
     bool start = !gate.running && (!gate.known || !gate.ready || host_now(NULL) - gate.at_ms >= GATE_RECHECK_MS);
+    unsigned gen = gate.gen;
     if (start) gate.running = true;
     pthread_mutex_unlock(&gate.lock);
-    if (start && !host_spawn(NULL, gate_job, NULL)) {
+    if (start && !host_spawn(NULL, gate_job, (void *)(uintptr_t)gen)) {
         pthread_mutex_lock(&gate.lock);
         gate.running = false;
         pthread_mutex_unlock(&gate.lock);
     }
+}
+/* Every payment starts unknown and asks afresh. */
+static void gate_reset(void)
+{
+    pthread_mutex_lock(&gate.lock);
+    gate.known = gate.ready = false;
+    gate.gen++;
+    pthread_mutex_unlock(&gate.lock);
+}
+static bool gate_ready(void)
+{
+    pthread_mutex_lock(&gate.lock);
+    bool ready = gate.known && gate.ready;
+    pthread_mutex_unlock(&gate.lock);
+    return ready;
 }
 static void gate_apply(struct wss_view *v)
 {
@@ -458,6 +474,7 @@ static void open_payment(const struct zapp_payment *pay)
     if (ui.keeper.screen && wss_begin(ui.keeper.screen, pay)) {
         ui.flow = true;
         ui.moved = false;
+        gate_reset();
         ui.final_line[0] = 0;
         ui.notice[0] = ui.hint[0] = 0;
         ui.entering = false;
@@ -612,7 +629,7 @@ static void set_amount(JNIEnv *env)
 static void press_flow(JNIEnv *env, int id)
 {
     if (!ui.flow || !ui.keeper.screen) return;
-    if (id == B_SEND) { if (ui.drawn.can_send) wss_tap_send(ui.keeper.screen, ui.drawn.serial); }
+    if (id == B_SEND) (void)wss_tap_send_ready(ui.keeper.screen, ui.drawn.serial, gate_ready());
     else if (id == B_CANCEL) wss_tap_cancel(ui.keeper.screen);
     else if (id == B_RETRY) wss_tap_retry(ui.keeper.screen);
     else if (id == B_PAY_AGAIN) wss_tap_pay_again(ui.keeper.screen);

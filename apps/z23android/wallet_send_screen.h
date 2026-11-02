@@ -165,6 +165,9 @@ bool wss_begin(struct wss *screen, const struct zapp_payment *pay);
 bool wss_end(struct wss *screen);
 
 void wss_tap_send(struct wss *screen, uint32_t serial);
+/* The Send tap, refused (nothing posted, false) while the prover is not ready: the button is hidden then, and a press
+ * that still arrives starts nothing. */
+bool wss_tap_send_ready(struct wss *screen, uint32_t serial, bool ready);
 void wss_tap_retry(struct wss *screen);
 void wss_tap_cancel(struct wss *screen);
 /* Pay again, offered only on a payment the node reports as already paid. Starts a full review, and the owner's tap and
@@ -184,6 +187,7 @@ void wss_view(struct wss *screen, struct wss_view *out);
  *   "Sending X ZCL to <8>…<6>: building the payment (about 2 min)"   the commit runs
  *   "Sending X ZCL to <8>…<6>: waiting to leave the phone"            the node holds it
  *   "Sent X ZCL"                                                      it left the phone
+ *   "Already sent X ZCL"                                               the node answered from its record of it
  *   "Payment not sent: <cause>. Your coins were not spent."           the node says nothing was sent
  *   "Payment status unknown: ..."                                     no usable answer; it may have been sent
  * False before the commit starts and after the owner closed the outcome. */
