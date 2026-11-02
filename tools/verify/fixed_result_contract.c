@@ -5,6 +5,7 @@
 
 #include "base/hex.h"
 #include "base/serialize_le.h"
+#include "codec/cursor.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -117,24 +118,17 @@ void zcl_fr_put_u64(struct zcl_fr_writer *w, const char *label,
 
 /* ── Decoder ──────────────────────────────────────────────────────────── */
 
-struct fr_cursor {
-    const uint8_t *p;
-    size_t n;
-    size_t at;
-};
-
-static const char *fr_frame(struct fr_cursor *c, size_t max,
+static const char *fr_frame(struct zcl_codec_reader *c, size_t max,
                             const uint8_t **out, size_t *len)
 {
-    size_t left = c->n - c->at;
+    size_t left = zcl_codec_reader_remaining(c);
     if (left == 0) return ZCL_FR_WHY_FIELD_MISSING;
     if (left < 8u) return ZCL_FR_WHY_TRUNCATED;
-    uint64_t n = zcl_read_u64_le(c->p + c->at);
+    uint64_t n = zcl_read_u64_le(zcl_codec_take(c, 8u));
     if (n > max) return ZCL_FR_WHY_OVERSIZE;
     if (n > left - 8u) return ZCL_FR_WHY_TRUNCATED;
-    *out = c->p + c->at + 8u;
+    *out = zcl_codec_take(c, (size_t)n);
     *len = (size_t)n;
-    c->at += 8u + (size_t)n;
     return NULL;
 }
 
@@ -167,12 +161,12 @@ static bool fr_text_framed(const uint8_t *p, size_t n)
     return n >= 3u && memcmp(p, "z23", 3u) == 0;
 }
 
-static const char *fr_domain(struct fr_cursor *c, const char *domain)
+static const char *fr_domain(struct zcl_codec_reader *c, const char *domain)
 {
     const uint8_t *d = NULL;
     size_t n = 0;
     const char *why = fr_frame(c, ZCL_FR_DOMAIN_MAX, &d, &n);
-    if (fr_is(why, ZCL_FR_WHY_OVERSIZE) && fr_text_framed(c->p, c->n))
+    if (fr_is(why, ZCL_FR_WHY_OVERSIZE) && fr_text_framed(c->buffer, c->length))
         return ZCL_FR_WHY_DOMAIN_MALFORMED;
     if (why) return fr_is(why, ZCL_FR_WHY_FIELD_MISSING) ? ZCL_FR_WHY_TRUNCATED
                                                     : why;
@@ -214,7 +208,8 @@ static const char *fr_value_check(const struct zcl_fr_spec *s,
     return ok ? NULL : ZCL_FR_WHY_FIELD_MALFORMED;
 }
 
-static const char *fr_field(struct fr_cursor *c, const struct zcl_fr_spec *s,
+static const char *fr_field(struct zcl_codec_reader *c,
+                            const struct zcl_fr_spec *s,
                             struct zcl_fr_value *out)
 {
     const uint8_t *label = NULL;
@@ -242,13 +237,15 @@ const char *zcl_fr_decode_prefix(const uint8_t *bytes, size_t len,
     *used = 0;
     memset(out, 0, count * sizeof(*out));
     if (bytes && fr_v1_header(bytes, len)) return ZCL_FR_WHY_V1_RETIRED;
-    struct fr_cursor c = {bytes, len, 0u};
+    struct zcl_codec_reader c;
+    zcl_codec_reader_init(&c, bytes, len);
     const char *why = fr_domain(&c, domain);
     if (why) return why;
     size_t fields_used = 0;
-    why = zcl_fr_decode_fields(bytes + c.at, len - c.at, spec, count, out,
+    why = zcl_fr_decode_fields(bytes + c.position, len - c.position, spec,
+                               count, out,
                                &fields_used);
-    if (!why) *used = c.at + fields_used;
+    if (!why) *used = c.position + fields_used;
     return why;
 }
 
@@ -259,7 +256,8 @@ const char *zcl_fr_decode_fields(const uint8_t *bytes, size_t len,
     if ((!bytes && len) || !spec || !out || !used)
         return ZCL_FR_WHY_ARGUMENTS;
     *used = 0;
-    struct fr_cursor c = {bytes, len, 0u};
+    struct zcl_codec_reader c;
+    zcl_codec_reader_init(&c, bytes, len);
     const char *why = NULL;
     for (size_t i = 0; !why && i < count; i++)
         why = fr_field(&c, &spec[i], &out[i]);
@@ -267,7 +265,7 @@ const char *zcl_fr_decode_fields(const uint8_t *bytes, size_t len,
         memset(out, 0, count * sizeof(*out));
         return why;
     }
-    *used = c.at;
+    *used = c.position;
     return NULL;
 }
 

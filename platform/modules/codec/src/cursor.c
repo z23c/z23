@@ -110,6 +110,14 @@ bool zcl_codec_read_bytes(struct zcl_codec_reader *reader, void *out,
     return true;
 }
 
+const uint8_t *zcl_codec_take(struct zcl_codec_reader *reader, size_t n)
+{
+    if (!reader_need(reader, n)) return NULL;
+    const uint8_t *here = reader->buffer + reader->position;
+    reader->position += n;
+    return here;
+}
+
 bool zcl_codec_write_bytes(struct zcl_codec_writer *writer, const void *bytes,
                            size_t length)
 {

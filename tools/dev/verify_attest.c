@@ -10,6 +10,7 @@
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"
+#include "codec/cursor.h"
 #include "crypto/ed25519.h"
 #include "sha3/sha3.h"
 #include "verify/fixed_result_contract.h"
@@ -225,53 +226,35 @@ bool zcl_verify_attest_seal(const struct zcl_verify_attest_record *record,
 
 /* The retired v1 layout, parsed only so a well-formed v1 record is refused
  * by name instead of as noise. */
-struct va_cursor {
-    const uint8_t *bytes;
-    size_t len;
-    size_t at;
-    bool ok;
-};
-
-static const uint8_t *va_take(struct va_cursor *c, size_t n)
-{
-    if (!c->ok || c->len - c->at < n) {
-        c->ok = false;
-        return NULL;
-    }
-    const uint8_t *here = c->bytes + c->at;
-    c->at += n;
-    return here;
-}
-
-static void va_take_text(struct va_cursor *c,
+static void va_take_text(struct zcl_codec_reader *c,
                          struct zcl_verify_attest_text *out, size_t min,
                          size_t max)
 {
-    const uint8_t *len_bytes = va_take(c, 4u);
+    const uint8_t *len_bytes = zcl_codec_take(c, 4u);
     if (!len_bytes)
         return;
     size_t n = zcl_read_u32_le(len_bytes);
     if (n < min || n > max) {
-        c->ok = false;
+        c->error = ZCL_CODEC_INVALID;
         return;
     }
-    const uint8_t *text = va_take(c, n);
+    const uint8_t *text = zcl_codec_take(c, n);
     if (!text || (n && memchr(text, 0, n))) {
-        c->ok = false;
+        c->error = ZCL_CODEC_INVALID;
         return;
     }
     out->bytes = (const char *)text;
     out->len = n;
 }
 
-static void va_take_hash(struct va_cursor *c, uint8_t out[VA_HASH])
+static void va_take_hash(struct zcl_codec_reader *c, uint8_t out[VA_HASH])
 {
-    const uint8_t *hash = va_take(c, VA_HASH);
+    const uint8_t *hash = zcl_codec_take(c, VA_HASH);
     if (hash)
         memcpy(out, hash, VA_HASH);
 }
 
-static void va_take_v1_fields(struct va_cursor *c,
+static void va_take_v1_fields(struct zcl_codec_reader *c,
                               struct zcl_verify_attest_record *r)
 {
     va_take_text(c, &r->toolchain_id, 1u, ZCL_VERIFY_ATTEST_TOOLCHAIN_MAX);
@@ -282,7 +265,7 @@ static void va_take_v1_fields(struct va_cursor *c,
     va_take_hash(c, r->obj_sha3);
     va_take_hash(c, r->dep_sha3);
     va_take_hash(c, r->stderr_sha3);
-    const uint8_t *exit_bytes = va_take(c, 4u);
+    const uint8_t *exit_bytes = zcl_codec_take(c, 4u);
     if (exit_bytes)
         r->exit_code = zcl_read_i32_le(exit_bytes);
 }
@@ -297,11 +280,13 @@ static bool va_is_v1(const uint8_t *bytes, size_t len)
 static const char *va_parse_v1(const uint8_t *bytes, size_t len,
                                struct zcl_verify_attest_signed *out)
 {
-    struct va_cursor c = {bytes, len, 2u + VA_V1_SCHEMA_LEN, true};
+    struct zcl_codec_reader c;
+    zcl_codec_reader_init(&c, bytes, len);
+    (void)zcl_codec_take(&c, 2u + VA_V1_SCHEMA_LEN);
     va_take_v1_fields(&c, &out->record);
-    out->body_len = c.at;
-    const uint8_t *trailer = va_take(&c, VA_V1_TRAILER);
-    if (!c.ok || c.at != len)
+    out->body_len = c.position;
+    const uint8_t *trailer = zcl_codec_take(&c, VA_V1_TRAILER);
+    if (c.error != ZCL_CODEC_OK || c.position != len)
         return ZCL_VERIFY_ATTEST_WHY_MALFORMED;
     memcpy(out->signer_pubkey, trailer, VA_PUB);
     memcpy(out->signature, trailer + VA_PUB, VA_SIG);

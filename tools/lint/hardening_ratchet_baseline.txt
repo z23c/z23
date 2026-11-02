@@ -48,8 +48,5 @@ local-reader tools/command/native_dev_index_identity.h 1
 local-reader tools/command/native_dev_land.c 1
 local-reader tools/command/native_dev_machine_boot_owner.c 1
 local-reader tools/command/native_fleet_triggers_eval.c 1
-local-reader tools/dev/verify_attest.c 1
 local-reader tools/fleet_gateway.c 1
-local-reader tools/verify/fixed_result_contract.c 1
-local-reader tools/zcc_epoch_batch.c 1
 local-reader tools/zcode_app_server_benchmark.c 1

@@ -7,6 +7,7 @@
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"
+#include "codec/cursor.h"
 
 #include <stdbool.h>
 #include <stdlib.h>
@@ -14,10 +15,8 @@
 
 static const uint8_t batch_magic[] = "zcc.epoch.batch";
 
-struct batch_reader {
-    const uint8_t *wire;
-    size_t size;
-    size_t offset;
+struct batch_decode {
+    struct zcl_codec_reader codec;
     struct zcc_epoch_batch_error *error;
     bool field_limit;
 };
@@ -29,28 +28,27 @@ struct batch_writer {
 };
 
 static enum zcc_epoch_batch_result batch_fail(
-    struct batch_reader *reader, enum zcc_epoch_batch_result code,
+    struct batch_decode *reader, enum zcc_epoch_batch_result code,
     uint32_t job_index)
 {
     if (reader->error) {
         reader->error->code = code;
-        reader->error->offset = reader->offset;
+        reader->error->offset = reader->codec.position;
         reader->error->job_index = job_index;
     }
     return code;
 }
 
-static bool batch_read_u32(struct batch_reader *reader, uint32_t *value)
+static bool batch_read_u32(struct batch_decode *reader, uint32_t *value)
 {
-    if (reader->size - reader->offset < 4u)
+    const uint8_t *p = zcl_codec_take(&reader->codec, 4u);
+    if (!p)
         return false;
-    const uint8_t *p = reader->wire + reader->offset;
     *value = zcl_read_u32_le(p);
-    reader->offset += 4u;
     return true;
 }
 
-static bool batch_read_field(struct batch_reader *reader,
+static bool batch_read_field(struct batch_decode *reader,
                              struct zcc_epoch_batch_bytes *field)
 {
     uint32_t length = 0;
@@ -60,12 +58,13 @@ static bool batch_read_field(struct batch_reader *reader,
         reader->field_limit = true;
         return false;
     }
-    if ((size_t)length > reader->size - reader->offset)
+    const uint8_t *data = zcl_codec_take(&reader->codec, length);
+    if (!data)
         return false;
-    field->data = reader->wire + reader->offset;
+    field->data = data;
     field->length = length;
-    reader->offset += length;
     return true;
+}
 }
 
 static bool batch_field_equal(const struct zcc_epoch_batch_bytes *left,
@@ -78,7 +77,7 @@ static bool batch_field_equal(const struct zcc_epoch_batch_bytes *left,
 }
 
 static enum zcc_epoch_batch_result batch_field_failure(
-    struct batch_reader *reader, uint32_t job_index)
+    struct batch_decode *reader, uint32_t job_index)
 {
     return batch_fail(reader, reader->field_limit ? ZCC_EPOCH_BATCH_LIMIT :
                       ZCC_EPOCH_BATCH_TRUNCATED, job_index);
@@ -227,7 +226,7 @@ static bool batch_args_reserve(struct zcc_epoch_batch_manifest *manifest,
 }
 
 static enum zcc_epoch_batch_result batch_read_magic(
-    struct batch_reader *reader)
+    struct batch_decode *reader)
 {
     struct zcc_epoch_batch_bytes magic = {0};
     uint32_t version = 0;
@@ -260,7 +259,7 @@ static bool batch_bindings_invalid(
 }
 
 static enum zcc_epoch_batch_result batch_read_bindings(
-    struct batch_reader *reader, struct zcc_epoch_batch_manifest *manifest)
+    struct batch_decode *reader, struct zcc_epoch_batch_manifest *manifest)
 {
     enum zcc_epoch_batch_result result = batch_read_magic(reader);
     if (result != ZCC_EPOCH_BATCH_OK)
@@ -281,7 +280,7 @@ static enum zcc_epoch_batch_result batch_read_bindings(
 }
 
 static enum zcc_epoch_batch_result batch_read_arg(
-    struct batch_reader *reader, struct zcc_epoch_batch_bytes *arg,
+    struct batch_decode *reader, struct zcc_epoch_batch_bytes *arg,
     bool command, uint32_t job_index)
 {
     if (!batch_read_field(reader, arg))
@@ -292,7 +291,7 @@ static enum zcc_epoch_batch_result batch_read_arg(
 }
 
 static enum zcc_epoch_batch_result batch_read_common_args(
-    struct batch_reader *reader, struct zcc_epoch_batch_manifest *manifest)
+    struct batch_decode *reader, struct zcc_epoch_batch_manifest *manifest)
 {
     if (!batch_read_u32(reader, &manifest->common_argc))
         return batch_fail(reader, ZCC_EPOCH_BATCH_TRUNCATED, UINT32_MAX);
@@ -328,7 +327,7 @@ static bool batch_job_paths_ok(const struct zcc_epoch_batch_manifest *manifest,
 }
 
 static enum zcc_epoch_batch_result batch_read_job_argv(
-    struct batch_reader *reader, struct zcc_epoch_batch_manifest *manifest,
+    struct batch_decode *reader, struct zcc_epoch_batch_manifest *manifest,
     uint32_t job_index, uint32_t count)
 {
     for (uint32_t i = 0; i < count; ++i) {
@@ -342,7 +341,7 @@ static enum zcc_epoch_batch_result batch_read_job_argv(
 }
 
 static enum zcc_epoch_batch_result batch_read_job(
-    struct batch_reader *reader, struct zcc_epoch_batch_manifest *manifest,
+    struct batch_decode *reader, struct zcc_epoch_batch_manifest *manifest,
     uint32_t job_index, uint32_t *argv_capacity)
 {
     struct zcc_epoch_batch_job *job = &manifest->jobs[job_index];
@@ -385,7 +384,7 @@ static int batch_destination_compare(const void *left, const void *right)
 }
 
 static enum zcc_epoch_batch_result batch_destinations_unique(
-    struct batch_reader *reader, const struct zcc_epoch_batch_manifest *manifest)
+    struct batch_decode *reader, const struct zcc_epoch_batch_manifest *manifest)
 {
     size_t count = (size_t)manifest->job_count * 2u;
     if (count == 0)
@@ -547,7 +546,7 @@ static enum zcc_epoch_batch_result batch_manifest_validate(
         return batch_manifest_fail(error, ZCC_EPOCH_BATCH_ARGUMENT,
                                    UINT32_MAX);
 
-    struct batch_reader report = {.error = error};
+    struct batch_decode report = {.error = error};
     return batch_destinations_unique(&report, manifest);
 }
 
@@ -640,7 +639,7 @@ static bool batch_write_field(struct batch_writer *writer,
 }
 
 static enum zcc_epoch_batch_result batch_read_jobs(
-    struct batch_reader *reader, struct zcc_epoch_batch_manifest *out)
+    struct batch_decode *reader, struct zcc_epoch_batch_manifest *out)
 {
     if (!batch_read_u32(reader, &out->job_count))
         return batch_fail(reader, ZCC_EPOCH_BATCH_TRUNCATED, UINT32_MAX);
@@ -661,7 +660,7 @@ static enum zcc_epoch_batch_result batch_read_jobs(
 }
 
 static enum zcc_epoch_batch_result batch_read_body(
-    struct batch_reader *reader, struct zcc_epoch_batch_manifest *out)
+    struct batch_decode *reader, struct zcc_epoch_batch_manifest *out)
 {
     enum zcc_epoch_batch_result result = batch_read_bindings(reader, out);
     if (result != ZCC_EPOCH_BATCH_OK)
@@ -672,7 +671,7 @@ static enum zcc_epoch_batch_result batch_read_body(
     result = batch_read_jobs(reader, out);
     if (result != ZCC_EPOCH_BATCH_OK)
         return result;
-    if (reader->offset != reader->size)
+    if (zcl_codec_reader_remaining(&reader->codec) != 0)
         return batch_fail(reader, ZCC_EPOCH_BATCH_TRAILING_BYTES, UINT32_MAX);
     return batch_destinations_unique(reader, out);
 }
@@ -696,8 +695,8 @@ enum zcc_epoch_batch_result zcc_epoch_batch_manifest_decode(
                                    UINT32_MAX);
     if (wire_size > ZCC_EPOCH_BATCH_MAX_WIRE)
         return batch_manifest_fail(error, ZCC_EPOCH_BATCH_LIMIT, UINT32_MAX);
-    struct batch_reader reader = {
-        .wire = wire, .size = wire_size, .error = error};
+    struct batch_decode reader = {.error = error};
+    zcl_codec_reader_init(&reader.codec, wire, wire_size);
     enum zcc_epoch_batch_result result = batch_read_body(&reader, out);
     if (result != ZCC_EPOCH_BATCH_OK)
         zcc_epoch_batch_manifest_free(out);

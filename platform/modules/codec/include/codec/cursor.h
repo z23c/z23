@@ -45,6 +45,13 @@ bool zcl_codec_read_bytes(struct zcl_codec_reader *reader, void *out,
 bool zcl_codec_write_bytes(struct zcl_codec_writer *writer, const void *bytes,
                            size_t length);
 
+/* Zero-copy bounded take: returns a pointer to the next n input bytes and
+ * advances, or NULL with the reader marked failed (ZCL_CODEC_BOUNDS) when
+ * fewer than n remain. A failed reader stays failed. n == 0 on a healthy
+ * reader returns the current position. The pointer lives as long as the
+ * input buffer. */
+const uint8_t *zcl_codec_take(struct zcl_codec_reader *reader, size_t n);
+
 bool zcl_codec_read_u8(struct zcl_codec_reader *reader, uint8_t *out);
 bool zcl_codec_read_u16le(struct zcl_codec_reader *reader, uint16_t *out);
 bool zcl_codec_read_u32le(struct zcl_codec_reader *reader, uint32_t *out);

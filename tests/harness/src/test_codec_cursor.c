@@ -307,9 +307,40 @@ static int codec_test_invalid_string_guidance(void)
     return failures;
 }
 
+static int codec_test_take(void)
+{
+    int failures = 0;
+    TEST("codec cursor: zero-copy take is bounded and sticky") {
+        const uint8_t input[4] = {1, 2, 3, 4};
+        struct zcl_codec_reader r;
+        zcl_codec_reader_init(&r, input, sizeof(input));
+        const uint8_t *p = zcl_codec_take(&r, 4);
+        ASSERT(p == input && r.position == 4 && r.error == ZCL_CODEC_OK);
+        ASSERT(zcl_codec_take(&r, 0) == input + 4);
+        ASSERT(r.error == ZCL_CODEC_OK && r.position == 4);
+        ASSERT(zcl_codec_take(&r, 1) == NULL);
+        ASSERT(r.error == ZCL_CODEC_BOUNDS && r.position == 4);
+
+        zcl_codec_reader_init(&r, input, sizeof(input));
+        ASSERT(zcl_codec_take(&r, 5) == NULL);
+        ASSERT(r.error == ZCL_CODEC_BOUNDS && r.position == 0);
+        ASSERT(zcl_codec_take(&r, 0) == NULL);
+        ASSERT(zcl_codec_take(&r, 1) == NULL);
+        ASSERT(r.error == ZCL_CODEC_BOUNDS && r.position == 0);
+
+        zcl_codec_reader_init(&r, input, sizeof(input));
+        ASSERT(zcl_codec_take(&r, 3) == input);
+        ASSERT(zcl_codec_take(&r, 2) == NULL && r.position == 3);
+        ASSERT(zcl_codec_take(&r, SIZE_MAX) == NULL);
+        ASSERT(zcl_codec_take(NULL, 1) == NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_codec_cursor(void)
 {
-    return codec_test_kat() + codec_test_failures() + codec_test_properties() +
+    return codec_test_take() + codec_test_kat() + codec_test_failures() + codec_test_properties() +
            codec_test_string_bounds() + codec_test_string_controls() +
            codec_test_invalid_buffer_guidance() +
            codec_test_invalid_output_guidance() + codec_test_invalid_string_guidance();
