@@ -312,303 +312,386 @@ static void dr_clear_rpc_ctx(void)
  *         assert the exact balance, and SPEND.
  * ───────────────────────────────────────────────────────────────── */
 
-static int act1_transparent(void)
+#define A1_FAUCET_AMOUNT ((int64_t)(COIN_VALUE + 10000))
+#define A1_FUND_VALUE    ((int64_t)COIN_VALUE)
+#define A1_SEND_FEE      ((int64_t)WALLET_DEFAULT_FEE_ZAT)
+#define A1_PASSPHRASE    "destruction-drill-act1"
+
+/* Every value act 1 carries from one phase to the next. */
+struct act1_ctx {
+    char livedir[256], backupdir[256], newdir[256];
+    struct node_db live_ndb;
+    struct wallet *live_w;
+    struct wallet_sqlite live_ws;
+    struct rpc_table live_tbl;
+    char addrA[128];
+    struct tx_destination destA;
+    bool decoded;
+    struct script scriptA;
+    struct privkey keyA_expected;
+    bool have_expected;
+    struct simnet s;
+    struct dr_key faucet;
+    struct uint256 cb_txid;
+    int cb_height;
+    int fund_height;
+    struct uint256 txid_A;
+    struct transaction fund_for_mint;
+    bool built;
+    struct db_wallet_utxo wu;
+    char recorded_balance[32];
+    char plainpath[512];
+    int64_t key_count;
+    bool backed_up;
+    char encpath[576];
+    bool encrypted;
+    struct wallet_restore_report rep;
+    struct wallet_restore_request req;
+    struct zcl_result rr;
+    int64_t restored_keys, restored_utxos;
+    char blocksdir[384];
+    struct transaction fund_for_disk;
+    bool rebuilt_tx;
+    struct disk_block_pos pos;
+    bool wrote;
+    struct block_index bi;
+    char newdb[576];
+    struct node_db new_ndb;
+    struct wallet *new_w;
+    struct wallet_sqlite new_ws;
+    struct main_state new_ms;
+    struct block_index **chain_arr;
+    struct tx_mempool new_mempool;
+    struct coins_view null_view;
+    struct coins_view_cache new_coins;
+    struct rpc_table new_tbl;
+    struct dr_key recipient;
+    char addrR[128];
+    char sendtxid[80];
+    struct transaction sendtx;
+    bool have_sendtx;
+    bool mined;
+};
+
+/* ── the machine, before it is destroyed ────────────────────── */
+static int act1_live_open(struct act1_ctx *c)
 {
     int failures = 0;
-    printf("\n-- ACT 1: transparent destroy-and-recover, ending in a SPEND --\n");
+    dr_mk_datadir(c->livedir, sizeof(c->livedir), "act1live");
+    dr_mkdir(c->backupdir, sizeof(c->backupdir), "act1bk");
 
-    const int64_t FAUCET_AMOUNT = COIN_VALUE + 10000;
-    const int64_t FUND_VALUE    = COIN_VALUE;
-    const int64_t SEND_FEE      = WALLET_DEFAULT_FEE_ZAT;
-    const char   *PASSPHRASE    = "destruction-drill-act1";
-
-    char livedir[256], backupdir[256], newdir[256];
-    dr_mk_datadir(livedir, sizeof(livedir), "act1live");
-    dr_mkdir(backupdir, sizeof(backupdir), "act1bk");
-
-    /* ── the machine, before it is destroyed ────────────────────── */
     char livedb[320];
-    snprintf(livedb, sizeof(livedb), "%s/node.db", livedir);
-    struct node_db live_ndb;
-    memset(&live_ndb, 0, sizeof(live_ndb));
-    DR_CHECK("live: node_db_open", node_db_open(&live_ndb, livedb));
+    snprintf(livedb, sizeof(livedb), "%s/node.db", c->livedir);
+    memset(&c->live_ndb, 0, sizeof(c->live_ndb));
+    DR_CHECK("live: node_db_open", node_db_open(&c->live_ndb, livedb));
 
-    struct wallet *live_w = zcl_calloc(1, sizeof(*live_w), "dr_act1_live_wallet");
-    DR_CHECK("live: alloc wallet (heap)", live_w != NULL);
-    if (live_w) wallet_init(live_w);
-    struct wallet_sqlite live_ws;
-    DR_CHECK("live: wallet_sqlite_open", wallet_sqlite_open(&live_ws, live_ndb.db));
+    c->live_w = zcl_calloc(1, sizeof(*c->live_w), "dr_act1_live_wallet");
+    DR_CHECK("live: alloc wallet (heap)", c->live_w != NULL);
+    if (c->live_w) wallet_init(c->live_w);
+    DR_CHECK("live: wallet_sqlite_open",
+             wallet_sqlite_open(&c->live_ws, c->live_ndb.db));
 
-    rpc_wallet_set_state(live_w, NULL, livedir, &live_ws, NULL, NULL);
-    rpc_wallet_set_node_db(&live_ndb);
+    rpc_wallet_set_state(c->live_w, NULL, c->livedir, &c->live_ws, NULL, NULL);
+    rpc_wallet_set_node_db(&c->live_ndb);
     rpc_wallet_set_coins_tip(NULL);
 
-    struct rpc_table live_tbl;
-    rpc_table_init(&live_tbl);
-    register_wallet_rpc_commands(&live_tbl);
+    rpc_table_init(&c->live_tbl);
+    register_wallet_rpc_commands(&c->live_tbl);
+    return failures;
+}
 
-    char addrA[128] = "";
+static int act1_live_addr(struct act1_ctx *c)
+{
+    int failures = 0;
+    memset(c->addrA, 0, sizeof(c->addrA));
     {
         struct json_value params, result;
         dr_params_none(&params);
         json_init(&result);
-        bool ok = rpc_table_execute(&live_tbl, "getnewaddress", &params, &result)
+        bool ok = rpc_table_execute(&c->live_tbl, "getnewaddress", &params, &result)
                   && result.type == JSON_STR;
-        if (ok) snprintf(addrA, sizeof(addrA), "%s", json_get_str(&result));
+        if (ok) snprintf(c->addrA, sizeof(c->addrA), "%s", json_get_str(&result));
         json_free(&params);
         json_free(&result);
         DR_CHECK("live: getnewaddress produced the address to be funded",
-                 ok && addrA[0]);
+                 ok && c->addrA[0]);
     }
 
-    struct tx_destination destA;
-    memset(&destA, 0, sizeof(destA));
-    bool decoded = addrA[0] && wallet_decode_address(addrA, &destA) &&
-                   destA.type == DEST_KEY_ID;
-    DR_CHECK("live: address decodes to a P2PKH destination", decoded);
+    memset(&c->destA, 0, sizeof(c->destA));
+    c->decoded = c->addrA[0] && wallet_decode_address(c->addrA, &c->destA) &&
+                 c->destA.type == DEST_KEY_ID;
+    DR_CHECK("live: address decodes to a P2PKH destination", c->decoded);
 
-    struct script scriptA;
-    script_init(&scriptA);
-    if (decoded)
-        script_for_destination(&scriptA, &destA);
+    script_init(&c->scriptA);
+    if (c->decoded)
+        script_for_destination(&c->scriptA, &c->destA);
 
     /* Keep a copy of the private key ONLY so the drill can later prove the
      * restored key is byte-identical. The restored wallet never receives it
      * from here — it comes back out of the backup file. */
-    struct privkey keyA_expected;
-    privkey_init(&keyA_expected);
-    bool have_expected = decoded && live_w &&
-        wallet_dump_key(live_w, &destA.id.key, &keyA_expected);
+    privkey_init(&c->keyA_expected);
+    c->have_expected = c->decoded && c->live_w &&
+        wallet_dump_key(c->live_w, &c->destA.id.key, &c->keyA_expected);
     DR_CHECK("live: the funded address has a spending key in the wallet",
-             have_expected && keyA_expected.fValid);
+             c->have_expected && c->keyA_expected.fValid);
+    return failures;
+}
 
+static int act1_fund(struct act1_ctx *c)
+{
+    int failures = 0;
     /* REAL connect_block-validated funding on the deterministic simnet. */
-    struct simnet s;
-    DR_CHECK("simnet_init", simnet_init(&s));
+    DR_CHECK("simnet_init", simnet_init(&c->s));
 
-    struct dr_key faucet;
-    dr_make_key(&faucet);
-    struct uint256 cb_txid;
-    int cb_height = simnet_tip_height(&s) + 1;
+    dr_make_key(&c->faucet);
+    c->cb_height = simnet_tip_height(&c->s) + 1;
     DR_CHECK("simnet: mint faucet coinbase",
-             simnet_mint_coinbase_to(&s, &faucet.spk, FAUCET_AMOUNT, &cb_txid));
+             simnet_mint_coinbase_to(&c->s, &c->faucet.spk, A1_FAUCET_AMOUNT,
+                                     &c->cb_txid));
     DR_CHECK("simnet: mature faucet coinbase",
-             simnet_mint_to_height(&s, cb_height + COINBASE_MATURITY));
+             simnet_mint_to_height(&c->s, c->cb_height + COINBASE_MATURITY));
 
-    int fund_height = simnet_tip_height(&s) + 1;
-    struct uint256 txid_A;
-    uint256_set_null(&txid_A);
-    struct transaction fund_for_mint;
-    bool built = decoded &&
-        dr_build_fund_tx(&fund_for_mint, &cb_txid, 0, &scriptA, FUND_VALUE);
-    if (built) txid_A = fund_for_mint.hash;
-    DR_CHECK("simnet: build the funding transfer", built);
+    c->fund_height = simnet_tip_height(&c->s) + 1;
+    uint256_set_null(&c->txid_A);
+    c->built = c->decoded &&
+        dr_build_fund_tx(&c->fund_for_mint, &c->cb_txid, 0, &c->scriptA,
+                         A1_FUND_VALUE);
+    if (c->built) c->txid_A = c->fund_for_mint.hash;
+    DR_CHECK("simnet: build the funding transfer", c->built);
     DR_CHECK("simnet: mint it through REAL connect_block validation",
-             built && simnet_mint_txs(&s, &fund_for_mint, 1));
+             c->built && simnet_mint_txs(&c->s, &c->fund_for_mint, 1));
 
     /* The wallet's own record of the funded coin — wallet_utxos is one of
      * the eight tables a backup captures, so this is the row whose survival
      * the whole drill turns on. */
-    struct db_wallet_utxo wu;
-    memset(&wu, 0, sizeof(wu));
-    memcpy(wu.txid, txid_A.data, 32);
-    wu.vout = 0;
-    memcpy(wu.address_hash, destA.id.key.id.data, 20);
-    wu.value = FUND_VALUE;
-    wu.height = fund_height;
-    wu.is_coinbase = false;
-    wu.script = scriptA.data;
-    wu.script_len = scriptA.size;
+    memset(&c->wu, 0, sizeof(c->wu));
+    memcpy(c->wu.txid, c->txid_A.data, 32);
+    c->wu.vout = 0;
+    memcpy(c->wu.address_hash, c->destA.id.key.id.data, 20);
+    c->wu.value = A1_FUND_VALUE;
+    c->wu.height = c->fund_height;
+    c->wu.is_coinbase = false;
+    c->wu.script = c->scriptA.data;
+    c->wu.script_len = c->scriptA.size;
     DR_CHECK("live: record the funded coin in wallet_utxos",
-             decoded && db_wallet_utxo_save(&live_ndb, &wu));
+             c->decoded && db_wallet_utxo_save(&c->live_ndb, &c->wu));
+    return failures;
+}
 
+static int act1_balance(struct act1_ctx *c)
+{
+    int failures = 0;
     /* THE NUMBER the drill must reproduce, read through the shipped RPC. */
-    char recorded_balance[32] = "";
+    memset(c->recorded_balance, 0, sizeof(c->recorded_balance));
     {
         struct json_value params, result;
         dr_params_none(&params);
         json_init(&result);
-        bool ok = rpc_table_execute(&live_tbl, "getbalance", &params, &result)
+        bool ok = rpc_table_execute(&c->live_tbl, "getbalance", &params, &result)
                   && result.type == JSON_STR;
-        if (ok) snprintf(recorded_balance, sizeof(recorded_balance), "%s",
+        if (ok) snprintf(c->recorded_balance, sizeof(c->recorded_balance), "%s",
                          json_get_str(&result));
         json_free(&params);
         json_free(&result);
         char expect[32];
-        format_amount(FUND_VALUE, expect, sizeof(expect));
+        format_amount(A1_FUND_VALUE, expect, sizeof(expect));
         DR_CHECK("live: getbalance reports the funded amount",
-                 ok && strcmp(recorded_balance, expect) == 0);
+                 ok && strcmp(c->recorded_balance, expect) == 0);
     }
+    return failures;
+}
 
+static int act1_backup_destroy(struct act1_ctx *c)
+{
+    int failures = 0;
     /* ── back it up, then encrypt it (the shipped WBE1 path) ────── */
-    char plainpath[512] = "";
-    int64_t key_count = -1;
-    bool backed_up = wallet_backup_run_once(backupdir, &live_ndb, plainpath,
-                                            sizeof(plainpath), &key_count,
-                                            NULL, 0).ok;
+    memset(c->plainpath, 0, sizeof(c->plainpath));
+    c->key_count = -1;
+    c->backed_up = wallet_backup_run_once(c->backupdir, &c->live_ndb, c->plainpath,
+                                          sizeof(c->plainpath), &c->key_count,
+                                          NULL, 0).ok;
     DR_CHECK("backup: wallet_backup_run_once produced a file with keys",
-             backed_up && plainpath[0] && key_count >= 1);
+             c->backed_up && c->plainpath[0] && c->key_count >= 1);
 
-    char encpath[576] = "";
-    snprintf(encpath, sizeof(encpath), "%s.enc", plainpath);
-    bool encrypted = backed_up &&
-        wallet_backup_encrypt_file(plainpath, encpath, PASSPHRASE).ok;
+    memset(c->encpath, 0, sizeof(c->encpath));
+    snprintf(c->encpath, sizeof(c->encpath), "%s.enc", c->plainpath);
+    c->encrypted = c->backed_up &&
+        wallet_backup_encrypt_file(c->plainpath, c->encpath, A1_PASSPHRASE).ok;
     DR_CHECK("backup: encrypt it (ChaCha20-Poly1305, the shipped path)",
-             encrypted);
+             c->encrypted);
     /* Remove the plaintext copy: from here the ONLY surviving wallet
      * artifact in the universe is the encrypted file. */
-    if (encrypted) (void)unlink(plainpath);
+    if (c->encrypted) (void)unlink(c->plainpath);
 
     /* ── DESTROY THE MACHINE ─────────────────────────────────────── */
     dr_clear_rpc_ctx();
-    wallet_sqlite_close(&live_ws);
-    if (live_w) { wallet_free(live_w); free(live_w); live_w = NULL; }
-    node_db_close(&live_ndb);
+    wallet_sqlite_close(&c->live_ws);
+    if (c->live_w) { wallet_free(c->live_w); free(c->live_w); c->live_w = NULL; }
+    node_db_close(&c->live_ndb);
 
-    dr_destroy_tree(livedir, 2);
+    dr_destroy_tree(c->livedir, 2);
     DR_CHECK("DESTROY: the datadir is gone — no node.db, no wal, no blocks/",
-             dr_is_destroyed(livedir));
+             dr_is_destroyed(c->livedir));
     {
         struct stat st;
         DR_CHECK("DESTROY: the encrypted backup is the only thing left",
-                 stat(encpath, &st) == 0 && S_ISREG(st.st_mode));
+                 stat(c->encpath, &st) == 0 && S_ISREG(st.st_mode));
     }
+    return failures;
+}
 
+static int act1_restore(struct act1_ctx *c)
+{
+    int failures = 0;
     /* ── RESTORE onto a fresh datadir, from the backup alone ────── */
-    test_fmt_tmpdir(newdir, sizeof(newdir), "drill", "act1new");
+    test_fmt_tmpdir(c->newdir, sizeof(c->newdir), "drill", "act1new");
     /* Deliberately NOT created: a rebuilt machine has no datadir, and the
      * restore service is supposed to make one. */
-    struct wallet_restore_report rep;
-    struct wallet_restore_request req = {
-        .backup_path = encpath,
-        .datadir     = newdir,
-        .password    = PASSPHRASE,
+    c->req = (struct wallet_restore_request){
+        .backup_path = c->encpath,
+        .datadir     = c->newdir,
+        .password    = A1_PASSPHRASE,
         .dry_run     = false,
     };
-    struct zcl_result rr = wallet_restore_run(&req, &rep);
+    c->rr = wallet_restore_run(&c->req, &c->rep);
     DR_CHECK("restore: wallet_restore_run succeeds on a datadir that did not exist",
-             rr.ok);
-    DR_CHECK("restore: it created node.db", rr.ok && rep.target_created);
+             c->rr.ok);
+    DR_CHECK("restore: it created node.db", c->rr.ok && c->rep.target_created);
     DR_CHECK("restore: it read the encrypted backup",
-             rr.ok && rep.source_was_encrypted);
+             c->rr.ok && c->rep.source_was_encrypted);
     DR_CHECK("restore: it merged rows back in",
-             rr.ok && rep.total_inserted >= 2);   /* >=1 key + the utxo */
+             c->rr.ok && c->rep.total_inserted >= 2);   /* >=1 key + the utxo */
     DR_CHECK("restore: nothing collided on a virgin datadir",
-             rr.ok && rep.total_collided == 0);
+             c->rr.ok && c->rep.total_collided == 0);
     DR_CHECK("restore: the target's schema rejected nothing",
-             rr.ok && rep.total_rejected == 0);
+             c->rr.ok && c->rep.total_rejected == 0);
 
     /* Per-table: the two rows that ARE the funds must both be back. */
-    int64_t restored_keys = -1, restored_utxos = -1;
-    for (size_t i = 0; i < rep.n_tables; i++) {
-        if (strcmp(rep.tables[i].table, "wallet_keys") == 0)
-            restored_keys = rep.tables[i].rows_after;
-        else if (strcmp(rep.tables[i].table, "wallet_utxos") == 0)
-            restored_utxos = rep.tables[i].rows_after;
+    c->restored_keys = -1;
+    c->restored_utxos = -1;
+    for (size_t i = 0; i < c->rep.n_tables; i++) {
+        if (strcmp(c->rep.tables[i].table, "wallet_keys") == 0)
+            c->restored_keys = c->rep.tables[i].rows_after;
+        else if (strcmp(c->rep.tables[i].table, "wallet_utxos") == 0)
+            c->restored_utxos = c->rep.tables[i].rows_after;
     }
-    DR_CHECK("restore: wallet_keys came back", restored_keys >= 1);
-    DR_CHECK("restore: wallet_utxos came back", restored_utxos == 1);
+    DR_CHECK("restore: wallet_keys came back", c->restored_keys >= 1);
+    DR_CHECK("restore: wallet_utxos came back", c->restored_utxos == 1);
+    return failures;
+}
 
+static int act1_resync(struct act1_ctx *c)
+{
+    int failures = 0;
     /* ── the rebuilt machine ─────────────────────────────────────── */
-    char blocksdir[384];
-    snprintf(blocksdir, sizeof(blocksdir), "%s/blocks", newdir);
-    mkdir(blocksdir, 0755); /* raw-alloc-ok:test-fixture */
+    snprintf(c->blocksdir, sizeof(c->blocksdir), "%s/blocks", c->newdir);
+    mkdir(c->blocksdir, 0755); /* raw-alloc-ok:test-fixture */
 
     /* Re-supply the block body. On a real rebuilt machine this arrives from
      * the P2P network; it is chain data, not wallet data, and it is NOT in
      * the backup. Byte-identical construction ⇒ the same txid. */
-    struct transaction fund_for_disk;
-    bool rebuilt_tx = built &&
-        dr_build_fund_tx(&fund_for_disk, &cb_txid, 0, &scriptA, FUND_VALUE);
+    c->rebuilt_tx = c->built &&
+        dr_build_fund_tx(&c->fund_for_disk, &c->cb_txid, 0, &c->scriptA,
+                         A1_FUND_VALUE);
     DR_CHECK("resync: the re-downloaded block carries the same txid",
-             rebuilt_tx &&
-             memcmp(fund_for_disk.hash.data, txid_A.data, 32) == 0);
-    struct disk_block_pos pos;
-    bool wrote = rebuilt_tx && dr_write_block(newdir, &fund_for_disk, &pos);
-    DR_CHECK("resync: block body written into the rebuilt datadir", wrote);
+             c->rebuilt_tx &&
+             memcmp(c->fund_for_disk.hash.data, c->txid_A.data, 32) == 0);
+    c->wrote = c->rebuilt_tx &&
+        dr_write_block(c->newdir, &c->fund_for_disk, &c->pos);
+    DR_CHECK("resync: block body written into the rebuilt datadir", c->wrote);
 
-    struct block_index bi;
-    block_index_init(&bi);
-    bi.nHeight   = fund_height;
-    bi.nFile     = pos.nFile;
-    bi.nDataPos  = pos.nPos;
-    bi.nStatus   = BLOCK_HAVE_DATA;
-    bi.phashBlock = NULL;
+    block_index_init(&c->bi);
+    c->bi.nHeight   = c->fund_height;
+    c->bi.nFile     = c->pos.nFile;
+    c->bi.nDataPos  = c->pos.nPos;
+    c->bi.nStatus   = BLOCK_HAVE_DATA;
+    c->bi.phashBlock = NULL;
+    return failures;
+}
 
-    char newdb[576];
-    snprintf(newdb, sizeof(newdb), "%s/node.db", newdir);
-    struct node_db new_ndb;
-    memset(&new_ndb, 0, sizeof(new_ndb));
+static int act1_rebuilt_open(struct act1_ctx *c)
+{
+    int failures = 0;
+    snprintf(c->newdb, sizeof(c->newdb), "%s/node.db", c->newdir);
+    memset(&c->new_ndb, 0, sizeof(c->new_ndb));
     DR_CHECK("rebuilt: node_db_open on the restored database",
-             node_db_open(&new_ndb, newdb));
+             node_db_open(&c->new_ndb, c->newdb));
 
-    struct wallet *new_w = zcl_calloc(1, sizeof(*new_w), "dr_act1_new_wallet");
-    DR_CHECK("rebuilt: alloc wallet (heap)", new_w != NULL);
-    if (new_w) wallet_init(new_w);
-    struct wallet_sqlite new_ws;
-    DR_CHECK("rebuilt: wallet_sqlite_open", wallet_sqlite_open(&new_ws, new_ndb.db));
+    c->new_w = zcl_calloc(1, sizeof(*c->new_w), "dr_act1_new_wallet");
+    DR_CHECK("rebuilt: alloc wallet (heap)", c->new_w != NULL);
+    if (c->new_w) wallet_init(c->new_w);
+    DR_CHECK("rebuilt: wallet_sqlite_open",
+             wallet_sqlite_open(&c->new_ws, c->new_ndb.db));
 
     /* The keystore is loaded FROM THE RESTORED DATABASE — no import, no WIF,
      * nothing carried over in memory. */
     DR_CHECK("rebuilt: wallet_sqlite_read_keys loads the restored keys",
-             new_w && wallet_sqlite_read_keys(&new_ws, new_w));
+             c->new_w && wallet_sqlite_read_keys(&c->new_ws, c->new_w));
     {
         struct privkey got;
         privkey_init(&got);
-        bool got_it = decoded && new_w && wallet_dump_key(new_w, &destA.id.key, &got);
+        bool got_it = c->decoded && c->new_w &&
+                      wallet_dump_key(c->new_w, &c->destA.id.key, &got);
         DR_CHECK("rebuilt: the restored private key is byte-identical",
-                 got_it && have_expected && got.fValid &&
-                 memcmp(got.vch, keyA_expected.vch, 32) == 0);
+                 got_it && c->have_expected && got.fValid &&
+                 memcmp(got.vch, c->keyA_expected.vch, 32) == 0);
         memory_cleanse(got.vch, 32);
     }
+    return failures;
+}
 
-    struct main_state new_ms;
-    main_state_init(&new_ms);
-    struct block_index **chain_arr =
-        calloc((size_t)(fund_height + 1), sizeof(*chain_arr)); /* raw-alloc-ok:test-fixture */
-    DR_CHECK("rebuilt: alloc synthetic active_chain", chain_arr != NULL);
-    if (chain_arr) {
-        chain_arr[fund_height] = &bi;
-        free(new_ms.chain_active.chain);
-        new_ms.chain_active.chain    = chain_arr;
-        new_ms.chain_active.height   = fund_height;
-        new_ms.chain_active.capacity = fund_height + 1;
+static int act1_chainstate(struct act1_ctx *c)
+{
+    int failures = 0;
+    main_state_init(&c->new_ms);
+    c->chain_arr =
+        calloc((size_t)(c->fund_height + 1), sizeof(*c->chain_arr)); /* raw-alloc-ok:test-fixture */
+    DR_CHECK("rebuilt: alloc synthetic active_chain", c->chain_arr != NULL);
+    if (c->chain_arr) {
+        c->chain_arr[c->fund_height] = &c->bi;
+        free(c->new_ms.chain_active.chain);
+        c->new_ms.chain_active.chain    = c->chain_arr;
+        c->new_ms.chain_active.height   = c->fund_height;
+        c->new_ms.chain_active.capacity = c->fund_height + 1;
     }
 
-    struct tx_mempool new_mempool;
-    tx_mempool_init(&new_mempool, 0);
-    struct coins_view null_view;
-    memset(&null_view, 0, sizeof(null_view));
-    struct coins_view_cache new_coins;
-    coins_view_cache_init(&new_coins, &null_view);
+    tx_mempool_init(&c->new_mempool, 0);
+    memset(&c->null_view, 0, sizeof(c->null_view));
+    coins_view_cache_init(&c->new_coins, &c->null_view);
 
-    struct coins_cache_entry *eA = coins_view_cache_modify_new(&new_coins, &txid_A);
+    struct coins_cache_entry *eA =
+        coins_view_cache_modify_new(&c->new_coins, &c->txid_A);
     DR_CHECK("rebuilt: stamp the coin into the coins view (chain state)",
              eA != NULL);
     if (eA) {
         coins_alloc(&eA->coins, 1);
-        eA->coins.vout[0].value = FUND_VALUE;
-        eA->coins.vout[0].script_pub_key = scriptA;
-        eA->coins.height = fund_height;
+        eA->coins.vout[0].value = A1_FUND_VALUE;
+        eA->coins.vout[0].script_pub_key = c->scriptA;
+        eA->coins.height = c->fund_height;
         eA->coins.version = 1;
         eA->coins.is_coinbase = false;
     }
 
-    rpc_wallet_set_state(new_w, &new_ms, newdir, &new_ws, &new_mempool, NULL);
-    rpc_wallet_set_node_db(&new_ndb);
-    rpc_wallet_set_coins_tip(&new_coins);
+    rpc_wallet_set_state(c->new_w, &c->new_ms, c->newdir, &c->new_ws,
+                         &c->new_mempool, NULL);
+    rpc_wallet_set_node_db(&c->new_ndb);
+    rpc_wallet_set_coins_tip(&c->new_coins);
 
-    struct rpc_table new_tbl;
-    rpc_table_init(&new_tbl);
-    register_wallet_rpc_commands(&new_tbl);
+    rpc_table_init(&c->new_tbl);
+    register_wallet_rpc_commands(&c->new_tbl);
+    return failures;
+}
 
+static int act1_rescan(struct act1_ctx *c)
+{
+    int failures = 0;
     /* ── RESCAN — through the real rescanblockchain RPC ──────────── */
     {
         struct json_value params, result;
         json_init(&params);
         json_set_array(&params);
         json_init(&result);
-        bool ok = rpc_table_execute(&new_tbl, "rescanblockchain", &params,
+        bool ok = rpc_table_execute(&c->new_tbl, "rescanblockchain", &params,
                                     &result);
         const struct json_value *cov  = ok ? json_get(&result, "coverage_ok") : NULL;
         const struct json_value *fnd  = ok ? json_get(&result, "outputs_found") : NULL;
@@ -629,76 +712,85 @@ static int act1_transparent(void)
         struct json_value params, result;
         dr_params_none(&params);
         json_init(&result);
-        bool ok = rpc_table_execute(&new_tbl, "getbalance", &params, &result)
+        bool ok = rpc_table_execute(&c->new_tbl, "getbalance", &params, &result)
                   && result.type == JSON_STR;
-        bool exact = ok && recorded_balance[0] &&
-                     strcmp(json_get_str(&result), recorded_balance) == 0;
+        bool exact = ok && c->recorded_balance[0] &&
+                     strcmp(json_get_str(&result), c->recorded_balance) == 0;
         DR_CHECK("RECOVERED: getbalance is EXACTLY the pre-destruction balance",
                  exact);
         json_free(&params);
         json_free(&result);
     }
+    return failures;
+}
 
+static int act1_spend(struct act1_ctx *c)
+{
+    int failures = 0;
     /* ── SPEND IT ────────────────────────────────────────────────── */
-    struct dr_key recipient;
-    dr_make_key(&recipient);
-    char addrR[128] = "";
+    dr_make_key(&c->recipient);
+    memset(c->addrR, 0, sizeof(c->addrR));
     {
         struct tx_destination destR;
         destR.type = DEST_KEY_ID;
-        destR.id.key = recipient.kid;
-        wallet_encode_destination(&destR, addrR, sizeof(addrR));
+        destR.id.key = c->recipient.kid;
+        wallet_encode_destination(&destR, c->addrR, sizeof(c->addrR));
     }
 
-    char sendtxid[80] = "";
+    memset(c->sendtxid, 0, sizeof(c->sendtxid));
     {
-        int64_t send_amount = FUND_VALUE - SEND_FEE;  /* exact, no change */
+        int64_t send_amount = A1_FUND_VALUE - A1_SEND_FEE;  /* exact, no change */
         char amtstr[32];
         format_amount(send_amount, amtstr, sizeof(amtstr));
         struct json_value params, result;
-        dr_params_2str(&params, addrR, amtstr);
+        dr_params_2str(&params, c->addrR, amtstr);
         json_init(&result);
-        bool ok = addrR[0] &&
-            rpc_table_execute(&new_tbl, "sendtoaddress", &params, &result) &&
+        bool ok = c->addrR[0] &&
+            rpc_table_execute(&c->new_tbl, "sendtoaddress", &params, &result) &&
             result.type == JSON_STR;
-        if (ok) snprintf(sendtxid, sizeof(sendtxid), "%s", json_get_str(&result));
+        if (ok) snprintf(c->sendtxid, sizeof(c->sendtxid), "%s", json_get_str(&result));
         if (!ok && result.type == JSON_STR)
             fprintf(stderr, "  sendtoaddress error: %s\n", json_get_str(&result)); /* obs-ok:test-diagnostic */
         json_free(&params);
         json_free(&result);
         DR_CHECK("SPEND: sendtoaddress signs with the RESTORED key and broadcasts",
-                 ok && sendtxid[0]);
+                 ok && c->sendtxid[0]);
     }
 
-    struct transaction sendtx;
-    transaction_init(&sendtx);
-    bool have_sendtx = false;
-    if (sendtxid[0]) {
+    transaction_init(&c->sendtx);
+    c->have_sendtx = false;
+    if (c->sendtxid[0]) {
         struct uint256 send_hash;
-        uint256_set_hex(&send_hash, sendtxid);
-        have_sendtx = tx_mempool_lookup(&new_mempool, &send_hash, &sendtx);
+        uint256_set_hex(&send_hash, c->sendtxid);
+        c->have_sendtx = tx_mempool_lookup(&c->new_mempool, &send_hash, &c->sendtx);
         DR_CHECK("SPEND: the signed tx was admitted to a real mempool",
-                 have_sendtx);
+                 c->have_sendtx);
     }
 
-    bool mined = false;
-    if (have_sendtx) {
+    c->mined = false;
+    if (c->have_sendtx) {
         struct coins_cache_entry *espend =
-            coins_view_cache_modify(&new_coins, &txid_A);
+            coins_view_cache_modify(&c->new_coins, &c->txid_A);
         if (espend)
             coins_spend(&espend->coins, 0);
         struct coins_cache_entry *enew =
-            coins_view_cache_modify_new(&new_coins, &sendtx.hash);
-        mined = espend && enew &&
-                coins_from_transaction(&enew->coins, &sendtx, fund_height + 1);
+            coins_view_cache_modify_new(&c->new_coins, &c->sendtx.hash);
+        c->mined = espend && enew &&
+                   coins_from_transaction(&enew->coins, &c->sendtx,
+                                          c->fund_height + 1);
     }
-    DR_CHECK("SPEND: confirm it (apply to the coins view)", mined);
+    DR_CHECK("SPEND: confirm it (apply to the coins view)", c->mined);
+    return failures;
+}
 
-    if (mined) {
+static int act1_spent_check(struct act1_ctx *c)
+{
+    int failures = 0;
+    if (c->mined) {
         struct coins spent_check;
         coins_init(&spent_check);
         bool still =
-            coins_view_cache_get_coins(&new_coins, &txid_A, &spent_check) &&
+            coins_view_cache_get_coins(&c->new_coins, &c->txid_A, &spent_check) &&
             coins_is_available(&spent_check, 0);
         coins_free(&spent_check);
         DR_CHECK("SPEND: the recovered coin is now spent", !still);
@@ -706,36 +798,61 @@ static int act1_transparent(void)
         struct coins recv;
         coins_init(&recv);
         bool recv_ok =
-            coins_view_cache_get_coins(&new_coins, &sendtx.hash, &recv) &&
+            coins_view_cache_get_coins(&c->new_coins, &c->sendtx.hash, &recv) &&
             coins_is_available(&recv, 0) &&
-            recv.vout[0].value == FUND_VALUE - SEND_FEE &&
-            recv.vout[0].script_pub_key.size == recipient.spk.size &&
-            memcmp(recv.vout[0].script_pub_key.data, recipient.spk.data,
-                   recipient.spk.size) == 0;
+            recv.vout[0].value == A1_FUND_VALUE - A1_SEND_FEE &&
+            recv.vout[0].script_pub_key.size == c->recipient.spk.size &&
+            memcmp(recv.vout[0].script_pub_key.data, c->recipient.spk.data,
+                   c->recipient.spk.size) == 0;
         coins_free(&recv);
         DR_CHECK("SPEND: the recipient received the recovered funds — the money MOVED",
                  recv_ok);
     }
-    if (have_sendtx)
-        transaction_free(&sendtx);
+    if (c->have_sendtx)
+        transaction_free(&c->sendtx);
+    return failures;
+}
 
+static void act1_teardown(struct act1_ctx *c)
+{
     /* ── teardown ────────────────────────────────────────────────── */
     dr_clear_rpc_ctx();
-    if (have_expected)
-        memory_cleanse(keyA_expected.vch, 32);
-    memory_cleanse(faucet.priv.vch, 32);
-    memory_cleanse(recipient.priv.vch, 32);
-    coins_view_cache_free(&new_coins);
-    tx_mempool_free(&new_mempool);
-    free(new_ms.chain_active.chain);
-    new_ms.chain_active.chain = NULL;
-    wallet_sqlite_close(&new_ws);
-    if (new_w) { wallet_free(new_w); free(new_w); new_w = NULL; }
-    node_db_close(&new_ndb);
-    simnet_free(&s);
+    if (c->have_expected)
+        memory_cleanse(c->keyA_expected.vch, 32);
+    memory_cleanse(c->faucet.priv.vch, 32);
+    memory_cleanse(c->recipient.priv.vch, 32);
+    coins_view_cache_free(&c->new_coins);
+    tx_mempool_free(&c->new_mempool);
+    free(c->new_ms.chain_active.chain);
+    c->new_ms.chain_active.chain = NULL;
+    wallet_sqlite_close(&c->new_ws);
+    if (c->new_w) { wallet_free(c->new_w); free(c->new_w); c->new_w = NULL; }
+    node_db_close(&c->new_ndb);
+    simnet_free(&c->s);
 
-    dr_destroy_tree(newdir, 2);
-    dr_destroy_tree(backupdir, 2);
+    dr_destroy_tree(c->newdir, 2);
+    dr_destroy_tree(c->backupdir, 2);
+}
+
+static int act1_transparent(void)
+{
+    int failures = 0;
+    printf("\n-- ACT 1: transparent destroy-and-recover, ending in a SPEND --\n");
+
+    struct act1_ctx c;
+    failures += act1_live_open(&c);
+    failures += act1_live_addr(&c);
+    failures += act1_fund(&c);
+    failures += act1_balance(&c);
+    failures += act1_backup_destroy(&c);
+    failures += act1_restore(&c);
+    failures += act1_resync(&c);
+    failures += act1_rebuilt_open(&c);
+    failures += act1_chainstate(&c);
+    failures += act1_rescan(&c);
+    failures += act1_spend(&c);
+    failures += act1_spent_check(&c);
+    act1_teardown(&c);
     return failures;
 }
 
@@ -1034,82 +1151,124 @@ static bool dr_decrypt_note(const struct output_description *od,
     return ok;
 }
 
-static int act3_shielded(void)
+#define A3_FUND_VALUE     100000000   /* 1 ZCL */
+#define A3_FEE            10000
+#define A3_SHIELDED_VALUE ((int64_t)A3_FUND_VALUE - A3_FEE)
+#define A3_SAPLING_H      100
+#define A3_PASSPHRASE     "destruction-drill-act3"
+#define A3_TZ_HEIGHT      (A3_SAPLING_H + COINBASE_MATURITY + 1)
+#define A3_ZT_HEIGHT      (A3_TZ_HEIGHT + 1)
+
+/* Every value act 3 carries from one phase to the next. */
+struct act3_ctx {
+    char livedir[256], backupdir[256], newdir[256];
+    uint8_t seed32[32];
+    struct dr_zid id;
+    struct node_db live_ndb;
+    struct wallet_sqlite live_ws;
+    struct wallet *live_w;
+    char zaddr[128];
+    struct simnet s;
+    struct script fund_script;
+    struct uint256 cb_txid;
+    uint8_t note_rcm[32];
+    uint8_t note_cm[32];
+    struct uint256 note_cm_u256;
+    bool have_note;
+    char plainpath[512];
+    bool backed_up;
+    char encpath[576];
+    bool encrypted;
+    struct wallet_restore_report rep;
+    struct wallet_restore_request req;
+    struct zcl_result rr;
+    struct node_db new_ndb;
+    struct wallet_sqlite new_ws;
+    struct wallet *new_w;
+    uint8_t restored_seed[32];
+    const struct sapling_key_entry *restored_key;
+    uint8_t got_rcm[32], got_cm[32];
+    int64_t got_value;
+    bool note_back;
+    struct incremental_merkle_tree tree;
+    struct incremental_witness wit;
+    struct uint256 anchor;
+    bool witness_ok;
+};
+
+/* The wallet that holds the shielded key, before the machine is destroyed. */
+static int act3_live_setup(struct act3_ctx *c)
 {
     int failures = 0;
-    printf("\n-- ACT 3: SHIELDED destroy-and-recover, ending in a shielded SPEND --\n");
-
-    const int64_t FUND_VALUE     = 100000000;   /* 1 ZCL */
-    const int64_t FEE            = 10000;
-    const int64_t SHIELDED_VALUE = FUND_VALUE - FEE;
-    const int     SAPLING_H      = 100;
-    const char   *PASSPHRASE     = "destruction-drill-act3";
-
-    char livedir[256], backupdir[256], newdir[256];
-    dr_mkdir(livedir, sizeof(livedir), "act3live");
-    dr_mkdir(backupdir, sizeof(backupdir), "act3bk");
+    dr_mkdir(c->livedir, sizeof(c->livedir), "act3live");
+    dr_mkdir(c->backupdir, sizeof(c->backupdir), "act3bk");
 
     /* A wallet with a real Sapling spending key, derived from a seed we
      * install so the restored copy can be compared byte-for-byte. */
-    uint8_t seed32[32];
-    memset(seed32, 0x5e, sizeof(seed32));
-    seed32[0] = 0xD1;
-    struct dr_zid id;
-    DR_CHECK("act3: derive the Sapling spending key", dr_zid_from_seed(&id, seed32));
+    memset(c->seed32, 0x5e, sizeof(c->seed32));
+    c->seed32[0] = 0xD1;
+    DR_CHECK("act3: derive the Sapling spending key",
+             dr_zid_from_seed(&c->id, c->seed32));
 
     char livedb[320];
-    snprintf(livedb, sizeof(livedb), "%s/node.db", livedir);
-    struct node_db live_ndb;
-    memset(&live_ndb, 0, sizeof(live_ndb));
-    DR_CHECK("act3: node_db_open", node_db_open(&live_ndb, livedb));
-    struct wallet_sqlite live_ws;
-    DR_CHECK("act3: wallet_sqlite_open", wallet_sqlite_open(&live_ws, live_ndb.db));
+    snprintf(livedb, sizeof(livedb), "%s/node.db", c->livedir);
+    memset(&c->live_ndb, 0, sizeof(c->live_ndb));
+    DR_CHECK("act3: node_db_open", node_db_open(&c->live_ndb, livedb));
+    DR_CHECK("act3: wallet_sqlite_open",
+             wallet_sqlite_open(&c->live_ws, c->live_ndb.db));
 
-    struct wallet *live_w = zcl_calloc(1, sizeof(*live_w), "dr_act3_live_wallet");
-    DR_CHECK("act3: alloc wallet (heap)", live_w != NULL);
-    if (live_w) wallet_init(live_w);
+    c->live_w = zcl_calloc(1, sizeof(*c->live_w), "dr_act3_live_wallet");
+    DR_CHECK("act3: alloc wallet (heap)", c->live_w != NULL);
+    if (c->live_w) wallet_init(c->live_w);
     DR_CHECK("act3: install the seed",
-             live_w && sapling_keystore_set_seed(&live_w->sapling_keys, seed32));
+             c->live_w &&
+             sapling_keystore_set_seed(&c->live_w->sapling_keys, c->seed32));
     DR_CHECK("act3: import the spending key",
-             live_w && sapling_keystore_import_xsk(&live_w->sapling_keys, &id.xsk));
+             c->live_w &&
+             sapling_keystore_import_xsk(&c->live_w->sapling_keys, &c->id.xsk));
     DR_CHECK("act3: persist the seed",
-             wallet_sqlite_write_sapling_seed(&live_ws, seed32));
+             wallet_sqlite_write_sapling_seed(&c->live_ws, c->seed32));
     DR_CHECK("act3: persist the Sapling key",
-             live_w && live_w->sapling_keys.num_keys >= 1 &&
-             wallet_sqlite_write_sapling_key(&live_ws,
-                 live_w->sapling_keys.keys[0].child_index,
-                 &live_w->sapling_keys.keys[0]));
+             c->live_w && c->live_w->sapling_keys.num_keys >= 1 &&
+             wallet_sqlite_write_sapling_key(&c->live_ws,
+                 c->live_w->sapling_keys.keys[0].child_index,
+                 &c->live_w->sapling_keys.keys[0]));
 
-    char zaddr[128] = "";
+    memset(c->zaddr, 0, sizeof(c->zaddr));
     DR_CHECK("act3: encode the z-address",
-             sapling_encode_payment_address(id.d, id.pk_d, "zs", zaddr,
-                                            sizeof(zaddr)));
+             sapling_encode_payment_address(c->id.d, c->id.pk_d, "zs", c->zaddr,
+                                            sizeof(c->zaddr)));
+    return failures;
+}
 
+static int act3_sim_setup(struct act3_ctx *c)
+{
+    int failures = 0;
     /* ── a REAL shielded note the REAL verifier accepts ──────────── */
-    struct simnet s;
-    DR_CHECK("act3: simnet_init", simnet_init(&s));
-    simnet_activate_sapling_at(&s, SAPLING_H);
-    DR_CHECK("act3: enable the in-sim Sapling tree", simnet_enable_sapling_tree(&s));
-    simnet_enable_contextual_check(&s, false);
-    const struct consensus_params *cp = &s.params.consensus;
+    DR_CHECK("act3: simnet_init", simnet_init(&c->s));
+    simnet_activate_sapling_at(&c->s, A3_SAPLING_H);
+    DR_CHECK("act3: enable the in-sim Sapling tree",
+             simnet_enable_sapling_tree(&c->s));
+    simnet_enable_contextual_check(&c->s, false);
 
-    struct script fund_script;
-    script_init(&fund_script);
-    { uint8_t pk[3] = { 0x76, 0xa9, 0x14 }; script_set(&fund_script, pk, sizeof(pk)); }
-    struct uint256 cb_txid;
+    script_init(&c->fund_script);
+    { uint8_t pk[3] = { 0x76, 0xa9, 0x14 }; script_set(&c->fund_script, pk, sizeof(pk)); }
     DR_CHECK("act3: mint funding coinbase",
-             simnet_mint_coinbase_to(&s, &fund_script, FUND_VALUE, &cb_txid));
+             simnet_mint_coinbase_to(&c->s, &c->fund_script, A3_FUND_VALUE,
+                                     &c->cb_txid));
     DR_CHECK("act3: mature it",
-             simnet_mint_to_height(&s, SAPLING_H + COINBASE_MATURITY));
+             simnet_mint_to_height(&c->s, A3_SAPLING_H + COINBASE_MATURITY));
+    return failures;
+}
 
-    const int tz_height = SAPLING_H + COINBASE_MATURITY + 1;
-    const int zt_height = tz_height + 1;
-
-    uint8_t note_rcm[32];  memset(note_rcm, 0, 32);
-    uint8_t note_cm[32];   memset(note_cm, 0, 32);
-    struct uint256 note_cm_u256;
-    uint256_set_null(&note_cm_u256);
-    bool have_note = false;
+static int act3_mint_note(struct act3_ctx *c)
+{
+    int failures = 0;
+    const struct consensus_params *cp = &c->s.params.consensus;
+    memset(c->note_rcm, 0, 32);
+    memset(c->note_cm, 0, 32);
+    uint256_set_null(&c->note_cm_u256);
+    c->have_note = false;
     {
         void *pctx = zclassic_sapling_proving_ctx_init();
         DR_CHECK("act3: acquire the production proving ctx", pctx != NULL);
@@ -1120,11 +1279,11 @@ static int act3_shielded(void)
         tz.version          = SAPLING_TX_VERSION;
         tz.version_group_id = SAPLING_VERSION_GROUP_ID;
         DR_CHECK("act3: alloc transparent input", transaction_alloc(&tz, 1, 0));
-        tz.vin[0].prevout.hash = cb_txid;
+        tz.vin[0].prevout.hash = c->cb_txid;
         tz.vin[0].prevout.n    = 0;
         tz.vin[0].sequence     = 0xFFFFFFFFu;
         { uint8_t ss[2] = { 0x00, 0x00 }; script_set(&tz.vin[0].script_sig, ss, sizeof(ss)); }
-        tz.value_balance = -SHIELDED_VALUE;
+        tz.value_balance = -A3_SHIELDED_VALUE;
 
         tz.v_shielded_output = zcl_calloc(1, sizeof(struct output_description),
                                           "dr_tz_out");
@@ -1138,7 +1297,7 @@ static int act3_shielded(void)
 
         bool ok = pctx && tz.v_shielded_output &&
             sapling_build_output_with_ctx(
-                pctx, id.ovk, id.d, id.pk_d, (uint64_t)SHIELDED_VALUE, memo,
+                pctx, c->id.ovk, c->id.d, c->id.pk_d, (uint64_t)A3_SHIELDED_VALUE, memo,
                 tz.v_shielded_output[0].cv.data,
                 tz.v_shielded_output[0].cm.data,
                 tz.v_shielded_output[0].ephemeral_key.data,
@@ -1148,28 +1307,28 @@ static int act3_shielded(void)
         DR_CHECK("act3: build the t->z output (production prover)", ok);
 
         struct uint256 sighash;
-        DR_CHECK("act3: sighash", ok && dr_sighash(&tz, cp, tz_height, &sighash));
+        DR_CHECK("act3: sighash", ok && dr_sighash(&tz, cp, A3_TZ_HEIGHT, &sighash));
         DR_CHECK("act3: binding sig",
                  ok && zclassic_sapling_binding_sig(pctx, tz.value_balance,
                                                     sighash.data, tz.binding_sig));
         transaction_compute_hash(&tz);
         DR_CHECK("act3: the REAL consensus verifier ACCEPTS the funding tx",
-                 ok && dr_verify(&tz, cp, tz_height));
+                 ok && dr_verify(&tz, cp, A3_TZ_HEIGHT));
 
         uint64_t dv = 0;
-        bool dec = ok && dr_decrypt_note(&tz.v_shielded_output[0], id.ivk,
-                                         &dv, note_rcm);
+        bool dec = ok && dr_decrypt_note(&tz.v_shielded_output[0], c->id.ivk,
+                                         &dv, c->note_rcm);
         DR_CHECK("act3: the note decrypts to the wallet's ivk",
-                 dec && dv == (uint64_t)SHIELDED_VALUE);
+                 dec && dv == (uint64_t)A3_SHIELDED_VALUE);
         if (ok) {
-            memcpy(note_cm, tz.v_shielded_output[0].cm.data, 32);
-            memcpy(note_cm_u256.data, note_cm, 32);
+            memcpy(c->note_cm, tz.v_shielded_output[0].cm.data, 32);
+            memcpy(c->note_cm_u256.data, c->note_cm, 32);
         }
 
         DR_CHECK("act3: mint it (tree append + connect_block)",
-                 ok && simnet_mint_txs(&s, &tz, 1));
-        have_note = dec && simnet_sapling_tree_size(&s) == 1;
-        DR_CHECK("act3: the note is at tree position 0", have_note);
+                 ok && simnet_mint_txs(&c->s, &tz, 1));
+        c->have_note = dec && simnet_sapling_tree_size(&c->s) == 1;
+        DR_CHECK("act3: the note is at tree position 0", c->have_note);
 
         free(tz.v_shielded_output);
         tz.v_shielded_output = NULL;
@@ -1177,275 +1336,336 @@ static int act3_shielded(void)
         transaction_free(&tz);
         zclassic_sapling_proving_ctx_free(pctx);
     }
+    return failures;
+}
 
+static int act3_persist_backup(struct act3_ctx *c)
+{
+    int failures = 0;
     /* Persist the note — with its REAL rcm and cm, the material a spend
      * needs and the material the backup must carry. */
     struct db_sapling_note note;
     memset(&note, 0, sizeof(note));
     memset(note.txid, 0xD1, 32);
     note.output_index = 0;
-    note.value = SHIELDED_VALUE;
-    memcpy(note.rcm, note_rcm, 32);
+    note.value = A3_SHIELDED_VALUE;
+    memcpy(note.rcm, c->note_rcm, 32);
     memset(note.memo, 0xF6, sizeof(note.memo));
     note.memo_len = 512;
-    memcpy(note.ivk, id.ivk, 32);
-    memcpy(note.diversifier, id.d, 11);
-    memcpy(note.pk_d, id.pk_d, 32);
-    memcpy(note.cm, note_cm, 32);
+    memcpy(note.ivk, c->id.ivk, 32);
+    memcpy(note.diversifier, c->id.d, 11);
+    memcpy(note.pk_d, c->id.pk_d, 32);
+    memcpy(note.cm, c->note_cm, 32);
     memset(note.nullifier, 0xA5, 32);   /* replaced by the real one on spend */
-    note.block_height = tz_height;
+    note.block_height = A3_TZ_HEIGHT;
     note.is_spent = false;
-    snprintf(note.address, sizeof(note.address), "%s", zaddr);
+    snprintf(note.address, sizeof(note.address), "%s", c->zaddr);
     snprintf(note.source, sizeof(note.source), "%s", DB_SAPLING_NOTE_SOURCE_LOCAL);
-    DR_CHECK("act3: persist the received note", have_note &&
-             db_sapling_note_save(&live_ndb, &note));
+    DR_CHECK("act3: persist the received note", c->have_note &&
+             db_sapling_note_save(&c->live_ndb, &note));
 
     /* ── back up, then DESTROY ───────────────────────────────────── */
-    char plainpath[512] = "";
-    bool backed_up = wallet_backup_run_once(backupdir, &live_ndb, plainpath,
-                                            sizeof(plainpath), NULL, NULL, 0).ok;
-    DR_CHECK("act3: backup taken", backed_up && plainpath[0]);
-    char encpath[576] = "";
-    snprintf(encpath, sizeof(encpath), "%s.enc", plainpath);
-    bool encrypted = backed_up &&
-        wallet_backup_encrypt_file(plainpath, encpath, PASSPHRASE).ok;
-    DR_CHECK("act3: encrypt it", encrypted);
-    if (encrypted) (void)unlink(plainpath);
+    memset(c->plainpath, 0, sizeof(c->plainpath));
+    c->backed_up = wallet_backup_run_once(c->backupdir, &c->live_ndb, c->plainpath,
+                                          sizeof(c->plainpath), NULL, NULL, 0).ok;
+    DR_CHECK("act3: backup taken", c->backed_up && c->plainpath[0]);
+    memset(c->encpath, 0, sizeof(c->encpath));
+    snprintf(c->encpath, sizeof(c->encpath), "%s.enc", c->plainpath);
+    c->encrypted = c->backed_up &&
+        wallet_backup_encrypt_file(c->plainpath, c->encpath, A3_PASSPHRASE).ok;
+    DR_CHECK("act3: encrypt it", c->encrypted);
+    if (c->encrypted) (void)unlink(c->plainpath);
 
-    wallet_sqlite_close(&live_ws);
-    if (live_w) { wallet_free(live_w); free(live_w); live_w = NULL; }
-    node_db_close(&live_ndb);
-    dr_destroy_tree(livedir, 2);
+    wallet_sqlite_close(&c->live_ws);
+    if (c->live_w) { wallet_free(c->live_w); free(c->live_w); c->live_w = NULL; }
+    node_db_close(&c->live_ndb);
+    dr_destroy_tree(c->livedir, 2);
     DR_CHECK("act3: DESTROY the datadir — the shielded key and note are gone",
-             dr_is_destroyed(livedir));
+             dr_is_destroyed(c->livedir));
+    return failures;
+}
 
+static int act3_restore(struct act3_ctx *c)
+{
+    int failures = 0;
     /* ── RESTORE ─────────────────────────────────────────────────── */
-    test_fmt_tmpdir(newdir, sizeof(newdir), "drill", "act3new");
-    struct wallet_restore_report rep;
-    struct wallet_restore_request req = {
-        .backup_path = encpath,
-        .datadir     = newdir,
-        .password    = PASSPHRASE,
+    test_fmt_tmpdir(c->newdir, sizeof(c->newdir), "drill", "act3new");
+    c->req = (struct wallet_restore_request){
+        .backup_path = c->encpath,
+        .datadir     = c->newdir,
+        .password    = A3_PASSPHRASE,
         .dry_run     = false,
     };
-    struct zcl_result rr = wallet_restore_run(&req, &rep);
-    DR_CHECK("act3: wallet_restore_run succeeds", rr.ok);
+    c->rr = wallet_restore_run(&c->req, &c->rep);
+    DR_CHECK("act3: wallet_restore_run succeeds", c->rr.ok);
 
     int64_t r_sap_keys = -1, r_seed = -1, r_notes = -1;
-    for (size_t i = 0; i < rep.n_tables; i++) {
-        if (strcmp(rep.tables[i].table, "wallet_sapling_keys") == 0)
-            r_sap_keys = rep.tables[i].rows_after;
-        else if (strcmp(rep.tables[i].table, "wallet_seed") == 0)
-            r_seed = rep.tables[i].rows_after;
-        else if (strcmp(rep.tables[i].table, "wallet_sapling_notes") == 0)
-            r_notes = rep.tables[i].rows_after;
+    for (size_t i = 0; i < c->rep.n_tables; i++) {
+        if (strcmp(c->rep.tables[i].table, "wallet_sapling_keys") == 0)
+            r_sap_keys = c->rep.tables[i].rows_after;
+        else if (strcmp(c->rep.tables[i].table, "wallet_seed") == 0)
+            r_seed = c->rep.tables[i].rows_after;
+        else if (strcmp(c->rep.tables[i].table, "wallet_sapling_notes") == 0)
+            r_notes = c->rep.tables[i].rows_after;
     }
     DR_CHECK("act3: wallet_sapling_keys came back", r_sap_keys >= 1);
     DR_CHECK("act3: wallet_seed came back", r_seed >= 1);
     DR_CHECK("act3: wallet_sapling_notes came back", r_notes == 1);
+    return failures;
+}
 
+static int act3_reload(struct act3_ctx *c)
+{
+    int failures = 0;
     char newdb[576];
-    snprintf(newdb, sizeof(newdb), "%s/node.db", newdir);
-    struct node_db new_ndb;
-    memset(&new_ndb, 0, sizeof(new_ndb));
-    DR_CHECK("act3: open the restored database", node_db_open(&new_ndb, newdb));
-    struct wallet_sqlite new_ws;
-    DR_CHECK("act3: wallet_sqlite_open", wallet_sqlite_open(&new_ws, new_ndb.db));
+    snprintf(newdb, sizeof(newdb), "%s/node.db", c->newdir);
+    memset(&c->new_ndb, 0, sizeof(c->new_ndb));
+    DR_CHECK("act3: open the restored database", node_db_open(&c->new_ndb, newdb));
+    DR_CHECK("act3: wallet_sqlite_open",
+             wallet_sqlite_open(&c->new_ws, c->new_ndb.db));
 
-    struct wallet *new_w = zcl_calloc(1, sizeof(*new_w), "dr_act3_new_wallet");
-    DR_CHECK("act3: alloc wallet (heap)", new_w != NULL);
-    if (new_w) wallet_init(new_w);
-    uint8_t restored_seed[32];
-    memset(restored_seed, 0, sizeof(restored_seed));
+    c->new_w = zcl_calloc(1, sizeof(*c->new_w), "dr_act3_new_wallet");
+    DR_CHECK("act3: alloc wallet (heap)", c->new_w != NULL);
+    if (c->new_w) wallet_init(c->new_w);
+    memset(c->restored_seed, 0, sizeof(c->restored_seed));
     DR_CHECK("act3: the seed loads out of the restored database",
-             wallet_sqlite_read_sapling_seed(&new_ws, restored_seed) &&
-             memcmp(restored_seed, seed32, 32) == 0);
+             wallet_sqlite_read_sapling_seed(&c->new_ws, c->restored_seed) &&
+             memcmp(c->restored_seed, c->seed32, 32) == 0);
     DR_CHECK("act3: the Sapling keys load out of the restored database",
-             new_w && wallet_sqlite_read_sapling_keys(&new_ws, new_w) &&
-             new_w->sapling_keys.num_keys >= 1);
+             c->new_w && wallet_sqlite_read_sapling_keys(&c->new_ws, c->new_w) &&
+             c->new_w->sapling_keys.num_keys >= 1);
 
-    const struct sapling_key_entry *restored_key = new_w ?
-        sapling_keystore_find_by_ivk(&new_w->sapling_keys, id.ivk) : NULL;
-    DR_CHECK("act3: the restored keystore holds the note's ivk", restored_key != NULL);
+    c->restored_key = c->new_w ?
+        sapling_keystore_find_by_ivk(&c->new_w->sapling_keys, c->id.ivk) : NULL;
+    DR_CHECK("act3: the restored keystore holds the note's ivk",
+             c->restored_key != NULL);
     DR_CHECK("act3: the restored SPENDING key is byte-identical",
-             restored_key &&
-             memcmp(restored_key->xsk.expsk.ask, id.ask, 32) == 0 &&
-             memcmp(restored_key->xsk.expsk.nsk, id.nsk, 32) == 0);
+             c->restored_key &&
+             memcmp(c->restored_key->xsk.expsk.ask, c->id.ask, 32) == 0 &&
+             memcmp(c->restored_key->xsk.expsk.nsk, c->id.nsk, 32) == 0);
+    return failures;
+}
 
+static int act3_note_back(struct act3_ctx *c)
+{
+    int failures = 0;
     /* ── the restored note, read back out of the restored database ── */
-    uint8_t got_rcm[32], got_cm[32];
-    int64_t got_value = -1;
-    bool note_back = false;
+    c->got_value = -1;
+    c->note_back = false;
     {
         sqlite3_stmt *st = NULL;
         const char *sql = "SELECT value, rcm, cm FROM wallet_sapling_notes "
                           "WHERE spent_txid IS NULL LIMIT 1";
-        if (sqlite3_prepare_v2(new_ndb.db, sql, -1, &st, NULL) == SQLITE_OK &&
+        if (sqlite3_prepare_v2(c->new_ndb.db, sql, -1, &st, NULL) == SQLITE_OK &&
             sqlite3_step(st) == SQLITE_ROW) {
-            got_value = sqlite3_column_int64(st, 0);
+            c->got_value = sqlite3_column_int64(st, 0);
             const void *rcm_b = sqlite3_column_blob(st, 1);
             const void *cm_b  = sqlite3_column_blob(st, 2);
             if (rcm_b && cm_b && sqlite3_column_bytes(st, 1) == 32 &&
                 sqlite3_column_bytes(st, 2) == 32) {
-                memcpy(got_rcm, rcm_b, 32);
-                memcpy(got_cm, cm_b, 32);
-                note_back = true;
+                memcpy(c->got_rcm, rcm_b, 32);
+                memcpy(c->got_cm, cm_b, 32);
+                c->note_back = true;
             }
         }
         if (st) sqlite3_finalize(st);
     }
     DR_CHECK("act3: the note's value survived exactly",
-             note_back && got_value == SHIELDED_VALUE);
+             c->note_back && c->got_value == A3_SHIELDED_VALUE);
     DR_CHECK("act3: the note's rcm survived byte-for-byte",
-             note_back && memcmp(got_rcm, note_rcm, 32) == 0);
+             c->note_back && memcmp(c->got_rcm, c->note_rcm, 32) == 0);
     DR_CHECK("act3: the note's commitment survived byte-for-byte",
-             note_back && memcmp(got_cm, note_cm, 32) == 0);
+             c->note_back && memcmp(c->got_cm, c->note_cm, 32) == 0);
+    return failures;
+}
 
+static int act3_witness(struct act3_ctx *c)
+{
+    int failures = 0;
     /* ── REBUILD THE WITNESS ──────────────────────────────────────
      * A restored note has rows but no witness, and a note without a witness
      * cannot be spent — that is what `core wallet rescan-witnesses` is for.
      * Here the tree is rebuilt from the re-synced chain's note commitments
      * (chain data, never from the backup) and the witness re-derived. */
-    struct incremental_merkle_tree tree;
-    sapling_tree_init(&tree);
-    struct incremental_witness wit;
-    memset(&wit, 0, sizeof(wit));
-    struct uint256 anchor;
-    uint256_set_null(&anchor);
-    bool witness_ok = false;
-    if (note_back) {
+    sapling_tree_init(&c->tree);
+    memset(&c->wit, 0, sizeof(c->wit));
+    uint256_set_null(&c->anchor);
+    c->witness_ok = false;
+    if (c->note_back) {
         struct uint256 leaf;
         uint256_set_null(&leaf);
-        memcpy(leaf.data, got_cm, 32);
-        incremental_tree_append(&tree, &leaf);
-        incremental_witness_init(&wit, &tree);
-        incremental_tree_root(&tree, &anchor);
+        memcpy(leaf.data, c->got_cm, 32);
+        incremental_tree_append(&c->tree, &leaf);
+        incremental_witness_init(&c->wit, &c->tree);
+        incremental_tree_root(&c->tree, &c->anchor);
         struct uint256 wroot;
-        incremental_witness_root(&wit, &wroot);
-        witness_ok = memcmp(wroot.data, anchor.data, 32) == 0;
+        incremental_witness_root(&c->wit, &wroot);
+        c->witness_ok = memcmp(wroot.data, c->anchor.data, 32) == 0;
     }
     DR_CHECK("act3: the rebuilt witness hashes up to the rebuilt anchor",
-             witness_ok);
+             c->witness_ok);
     {
         struct uint256 chain_anchor;
         uint256_set_null(&chain_anchor);
-        bool same = simnet_sapling_tree_root(&s, &chain_anchor) &&
-                    memcmp(chain_anchor.data, anchor.data, 32) == 0;
+        bool same = simnet_sapling_tree_root(&c->s, &chain_anchor) &&
+                    memcmp(chain_anchor.data, c->anchor.data, 32) == 0;
         DR_CHECK("act3: the rebuilt anchor equals the chain's own tree root",
                  same);
     }
+    return failures;
+}
 
+/* Negative control: a one-byte tamper must be rejected, so the
+ * ACCEPT above is a verdict and not a rubber stamp. */
+static int act3_tamper_check(const struct transaction *zt,
+                             const struct consensus_params *cp)
+{
+    int failures = 0;
+    struct transaction bad;
+    transaction_init(&bad);
+    bool copied = transaction_copy(&bad, zt);
+    if (copied && bad.num_shielded_spend == 1) {
+        bad.v_shielded_spend[0].zkproof[0] ^= 0x01;
+        transaction_compute_hash(&bad);
+    }
+    DR_CHECK("act3: a tampered spend proof is REJECTED",
+             copied && !dr_verify(&bad, cp, A3_ZT_HEIGHT));
+    transaction_free(&bad);
+    return failures;
+}
+
+static int act3_spend_tx(struct act3_ctx *c)
+{
+    int failures = 0;
+    const struct consensus_params *cp = &c->s.params.consensus;
+    void *pctx = zclassic_sapling_proving_ctx_init();
+    DR_CHECK("act3: acquire the proving ctx for the spend", pctx != NULL);
+
+    struct transaction zt;
+    transaction_init(&zt);
+    zt.overwintered     = true;
+    zt.version          = SAPLING_TX_VERSION;
+    zt.version_group_id = SAPLING_VERSION_GROUP_ID;
+    /* The pool loses the full note value. The transparent output is lower
+     * by FEE; fees do not reduce Sapling valueBalance itself. */
+    zt.value_balance    = A3_SHIELDED_VALUE;
+
+    struct dr_key sink;
+    dr_make_key(&sink);
+    bool alloced = transaction_alloc(&zt, 0, 1);
+    DR_CHECK("act3: alloc the transparent output", alloced);
+    if (alloced) {
+        zt.vout[0].value = A3_SHIELDED_VALUE - A3_FEE;
+        zt.vout[0].script_pub_key = sink.spk;
+    }
+
+    zt.v_shielded_spend = zcl_calloc(1, sizeof(struct spend_description),
+                                     "dr_zt_spend");
+    DR_CHECK("act3: alloc the shielded spend", zt.v_shielded_spend != NULL);
+
+    uint8_t path[1 + 32 * 33];
+    size_t path_len = 0;
+    bool pathok = incremental_witness_merkle_path(&c->wit, path, &path_len);
+    DR_CHECK("act3: extract the Merkle path from the rebuilt witness", pathok);
+
+    /* EVERY secret below came out of the restored database: the spend
+     * authority (ask/nsk from the restored keystore), the address the
+     * note pays to, and the note randomness (rcm read back out of
+     * wallet_sapling_notes). Nothing survives from the destroyed
+     * machine's memory. */
+    uint8_t ar[32];
+    bool spend_built = pctx && zt.v_shielded_spend && pathok && alloced &&
+        sapling_build_spend_with_ctx(
+            pctx, c->restored_key->xsk.expsk.ask, c->restored_key->xsk.expsk.nsk,
+            c->restored_key->diversifier, c->restored_key->pk_d, c->got_rcm,
+            (uint64_t)c->got_value, /*position*/0, c->anchor.data,
+            path, path_len,
+            zt.v_shielded_spend[0].cv.data,
+            zt.v_shielded_spend[0].nullifier.data,
+            zt.v_shielded_spend[0].rk.data,
+            zt.v_shielded_spend[0].zkproof, ar);
+    DR_CHECK("act3: build the spend proof from the RESTORED key + rcm",
+             spend_built);
+    if (spend_built) {
+        zt.num_shielded_spend = 1;
+        memcpy(zt.v_shielded_spend[0].anchor.data, c->anchor.data, 32);
+    }
+
+    struct uint256 sighash;
+    DR_CHECK("act3: sighash",
+             spend_built && dr_sighash(&zt, cp, A3_ZT_HEIGHT, &sighash));
+    if (spend_built) {
+        uint8_t rsk[32];
+        dr_rsk(c->restored_key->xsk.expsk.ask, ar, rsk);
+        DR_CHECK("act3: spend_auth_sig from the restored spending key",
+                 redjubjub_sign(rsk, sighash.data, 32,
+                                zt.v_shielded_spend[0].spend_auth_sig, 5));
+        memory_cleanse(rsk, sizeof(rsk));
+    }
+    DR_CHECK("act3: binding sig",
+             spend_built && zclassic_sapling_binding_sig(
+                 pctx, zt.value_balance, sighash.data, zt.binding_sig));
+    transaction_compute_hash(&zt);
+
+    DR_CHECK("act3: THE REAL CONSENSUS VERIFIER ACCEPTS THE RESTORED "
+             "WALLET'S SHIELDED SPEND — the shielded money MOVED",
+             spend_built && dr_verify(&zt, cp, A3_ZT_HEIGHT));
+
+    if (spend_built)
+        failures += act3_tamper_check(&zt, cp);
+
+    memory_cleanse(sink.priv.vch, 32);
+    free(zt.v_shielded_spend);
+    zt.v_shielded_spend = NULL;
+    zt.num_shielded_spend = 0;
+    transaction_free(&zt);
+    zclassic_sapling_proving_ctx_free(pctx);
+    return failures;
+}
+
+static int act3_spend(struct act3_ctx *c)
+{
+    int failures = 0;
     /* ── SPEND IT: a real z->t spend from restored material ──────── */
-    if (witness_ok && restored_key) {
-        void *pctx = zclassic_sapling_proving_ctx_init();
-        DR_CHECK("act3: acquire the proving ctx for the spend", pctx != NULL);
-
-        struct transaction zt;
-        transaction_init(&zt);
-        zt.overwintered     = true;
-        zt.version          = SAPLING_TX_VERSION;
-        zt.version_group_id = SAPLING_VERSION_GROUP_ID;
-        /* The pool loses the full note value. The transparent output is lower
-         * by FEE; fees do not reduce Sapling valueBalance itself. */
-        zt.value_balance    = SHIELDED_VALUE;
-
-        struct dr_key sink;
-        dr_make_key(&sink);
-        bool alloced = transaction_alloc(&zt, 0, 1);
-        DR_CHECK("act3: alloc the transparent output", alloced);
-        if (alloced) {
-            zt.vout[0].value = SHIELDED_VALUE - FEE;
-            zt.vout[0].script_pub_key = sink.spk;
-        }
-
-        zt.v_shielded_spend = zcl_calloc(1, sizeof(struct spend_description),
-                                         "dr_zt_spend");
-        DR_CHECK("act3: alloc the shielded spend", zt.v_shielded_spend != NULL);
-
-        uint8_t path[1 + 32 * 33];
-        size_t path_len = 0;
-        bool pathok = incremental_witness_merkle_path(&wit, path, &path_len);
-        DR_CHECK("act3: extract the Merkle path from the rebuilt witness", pathok);
-
-        /* EVERY secret below came out of the restored database: the spend
-         * authority (ask/nsk from the restored keystore), the address the
-         * note pays to, and the note randomness (rcm read back out of
-         * wallet_sapling_notes). Nothing survives from the destroyed
-         * machine's memory. */
-        uint8_t ar[32];
-        bool spend_built = pctx && zt.v_shielded_spend && pathok && alloced &&
-            sapling_build_spend_with_ctx(
-                pctx, restored_key->xsk.expsk.ask, restored_key->xsk.expsk.nsk,
-                restored_key->diversifier, restored_key->pk_d, got_rcm,
-                (uint64_t)got_value, /*position*/0, anchor.data,
-                path, path_len,
-                zt.v_shielded_spend[0].cv.data,
-                zt.v_shielded_spend[0].nullifier.data,
-                zt.v_shielded_spend[0].rk.data,
-                zt.v_shielded_spend[0].zkproof, ar);
-        DR_CHECK("act3: build the spend proof from the RESTORED key + rcm",
-                 spend_built);
-        if (spend_built) {
-            zt.num_shielded_spend = 1;
-            memcpy(zt.v_shielded_spend[0].anchor.data, anchor.data, 32);
-        }
-
-        struct uint256 sighash;
-        DR_CHECK("act3: sighash",
-                 spend_built && dr_sighash(&zt, cp, zt_height, &sighash));
-        if (spend_built) {
-            uint8_t rsk[32];
-            dr_rsk(restored_key->xsk.expsk.ask, ar, rsk);
-            DR_CHECK("act3: spend_auth_sig from the restored spending key",
-                     redjubjub_sign(rsk, sighash.data, 32,
-                                    zt.v_shielded_spend[0].spend_auth_sig, 5));
-            memory_cleanse(rsk, sizeof(rsk));
-        }
-        DR_CHECK("act3: binding sig",
-                 spend_built && zclassic_sapling_binding_sig(
-                     pctx, zt.value_balance, sighash.data, zt.binding_sig));
-        transaction_compute_hash(&zt);
-
-        DR_CHECK("act3: THE REAL CONSENSUS VERIFIER ACCEPTS THE RESTORED "
-                 "WALLET'S SHIELDED SPEND — the shielded money MOVED",
-                 spend_built && dr_verify(&zt, cp, zt_height));
-
-        /* Negative control: a one-byte tamper must be rejected, so the
-         * ACCEPT above is a verdict and not a rubber stamp. */
-        if (spend_built) {
-            struct transaction bad;
-            transaction_init(&bad);
-            bool copied = transaction_copy(&bad, &zt);
-            if (copied && bad.num_shielded_spend == 1) {
-                bad.v_shielded_spend[0].zkproof[0] ^= 0x01;
-                transaction_compute_hash(&bad);
-            }
-            DR_CHECK("act3: a tampered spend proof is REJECTED",
-                     copied && !dr_verify(&bad, cp, zt_height));
-            transaction_free(&bad);
-        }
-
-        memory_cleanse(sink.priv.vch, 32);
-        free(zt.v_shielded_spend);
-        zt.v_shielded_spend = NULL;
-        zt.num_shielded_spend = 0;
-        transaction_free(&zt);
-        zclassic_sapling_proving_ctx_free(pctx);
+    if (c->witness_ok && c->restored_key) {
+        failures += act3_spend_tx(c);
     } else {
         DR_CHECK("act3: shielded spend prerequisites (witness + restored key)",
                  false);
     }
+    return failures;
+}
 
-    memory_cleanse(seed32, sizeof(seed32));
-    memory_cleanse(restored_seed, sizeof(restored_seed));
-    memory_cleanse(&id, sizeof(id));
-    wallet_sqlite_close(&new_ws);
-    if (new_w) { wallet_free(new_w); free(new_w); new_w = NULL; }
-    node_db_close(&new_ndb);
-    simnet_free(&s);
+static void act3_teardown(struct act3_ctx *c)
+{
+    memory_cleanse(c->seed32, sizeof(c->seed32));
+    memory_cleanse(c->restored_seed, sizeof(c->restored_seed));
+    memory_cleanse(&c->id, sizeof(c->id));
+    wallet_sqlite_close(&c->new_ws);
+    if (c->new_w) { wallet_free(c->new_w); free(c->new_w); c->new_w = NULL; }
+    node_db_close(&c->new_ndb);
+    simnet_free(&c->s);
 
-    dr_destroy_tree(newdir, 2);
-    dr_destroy_tree(backupdir, 2);
+    dr_destroy_tree(c->newdir, 2);
+    dr_destroy_tree(c->backupdir, 2);
+}
+
+static int act3_shielded(void)
+{
+    int failures = 0;
+    printf("\n-- ACT 3: SHIELDED destroy-and-recover, ending in a shielded SPEND --\n");
+
+    struct act3_ctx c;
+    failures += act3_live_setup(&c);
+    failures += act3_sim_setup(&c);
+    failures += act3_mint_note(&c);
+    failures += act3_persist_backup(&c);
+    failures += act3_restore(&c);
+    failures += act3_reload(&c);
+    failures += act3_note_back(&c);
+    failures += act3_witness(&c);
+    failures += act3_spend(&c);
+    act3_teardown(&c);
     return failures;
 }
 
