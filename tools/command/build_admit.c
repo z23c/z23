@@ -118,7 +118,9 @@ bool ba_list_names(const char *dir, char (**names)[BA_NAME_MAX], size_t *count)
         }
     }
     closedir(d);
-    qsort(*names, *count, BA_NAME_MAX, ba_name_cmp);
+    /* An empty queue leaves *names NULL; qsort's base must never be NULL. */
+    if (*count > 1)
+        qsort(*names, *count, BA_NAME_MAX, ba_name_cmp);
     return true;
 }
 
