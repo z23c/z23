@@ -369,6 +369,11 @@ static int cphw_phase4(void)
     return rc;
 }
 
+/* The collect step over a scripted index reader (gate_controller_private_
+ * headers_scan.c): the file cap is exact, one past it is refused, and a
+ * reader failure after accepted entries leaves no partial set. */
+int cphs_collect_selftest(void);
+
 int check_controller_private_headers_selftest(void)
 {
     char root[4096];
@@ -388,11 +393,14 @@ int check_controller_private_headers_selftest(void)
     if (rc == 0)
         rc = cphw_phase4();
     if (rc == 0)
+        rc = cphs_collect_selftest();
+    if (rc == 0)
         fputs("[check_controller_private_headers] SELFTEST PASS (owner/"
               "private/test allowed; quoted/angle config, view, and "
               "public-header edges rejected; stale baseline and "
               "missing/empty roots fail closed; a mandatory index "
               "extension is refused and named while an optional one "
-              "changes nothing)\n", stdout);
+              "changes nothing); a partial or over-cap file set fails "
+              "closed\n", stdout);
     return rc;
 }

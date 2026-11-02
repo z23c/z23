@@ -233,18 +233,53 @@ static int cphs_badext_report(void)
     return 2;
 }
 
+/* The injectable index walker: lint_git_index_foreach in the gate, a scripted
+ * reader in the selftest (cphs_collect_selftest). */
+typedef int (*cphs_index_walk_fn)(int (*)(const char *, int, void *), void *,
+                                  char *);
+
+static void cphs_reset_set(void)
+{
+    g_cphs_nfiles = 0;
+    g_cphs_fused = 0;
+}
+
+/* The walk's own rc. A reader failure after some entries were accepted (a
+ * truncated or malformed index) leaves a PARTIAL set: empty it and refuse
+ * with one named line, so the gate never grades the prefix. A mandatory
+ * extension keeps its named refusal. */
+static int cphs_index_refuse(int walk_rc)
+{
+    cphs_reset_set();
+    if (g_cphs_badext[0])
+        return cphs_badext_report();
+    fprintf(stderr, "[check_controller_private_headers] git index reader "
+            "failed (rc %d) after collecting entries; discarding the partial "
+            "file set\n", walk_rc);
+    return walk_rc;
+}
+
+/* The "." collect over an injected walker. The scan-set overflow refusal
+ * (add_rc) is returned first, unchanged; the walk's own rc is checked next. */
+static int cphs_collect_index(cphs_index_walk_fn walk)
+{
+    cphs_reset_set();
+    g_cphs_badext[0] = '\0';
+    int add_rc = 0;
+    int walk_rc = walk(cphs_index_add, &add_rc, g_cphs_badext);
+    if (add_rc != 0)
+        return add_rc;
+    if (walk_rc != 0)
+        return cphs_index_refuse(walk_rc);
+    return g_cphs_badext[0] ? cphs_badext_report() : 0;
+}
+
 int cphs_collect(const char *root)
 {
     g_cphs_nfiles = 0;
     g_cphs_fused = 0;
-    if (strcmp(root, ".") == 0) {
-        g_cphs_badext[0] = '\0';
-        int add_rc = 0;
-        (void)lint_git_index_foreach(cphs_index_add, &add_rc, g_cphs_badext);
-        if (add_rc != 0)
-            return add_rc;
-        return g_cphs_badext[0] ? cphs_badext_report() : 0;
-    }
+    if (strcmp(root, ".") == 0)
+        return cphs_collect_index(lint_git_index_foreach);
     struct stat st;
     if (lstat(root, &st) != 0 || !S_ISDIR(st.st_mode))
         return 0;
@@ -258,6 +293,53 @@ int cphs_collect(const char *root)
 int cphs_nfiles(void)
 {
     return g_cphs_nfiles;
+}
+
+/* -- --selftest: the collect step over a scripted index reader ----------
+ * A fixture cannot reach a real git index that is truncated mid-walk, so the
+ * probe injects a reader that emits N entries through the same callback
+ * lgi_entries uses, then returns a scripted rc. Three cases: one entry past
+ * the cap is refused; exactly the cap collects fully; a reader failure after
+ * accepted entries leaves no partial set. */
+static long g_cphs_probe_n;   /* entries the scripted reader emits */
+static int g_cphs_probe_rc;   /* the rc it returns after them */
+
+static int cphs_probe_walk(int (*fn)(const char *, int, void *), void *ctx,
+                           char *badext)
+{
+    if (badext)
+        badext[0] = '\0';
+    for (long i = 0; i < g_cphs_probe_n; i++) {
+        int rc = fn("probe.c", 0, ctx);
+        if (rc != 0)
+            return rc;
+    }
+    return g_cphs_probe_rc;
+}
+
+static int cphs_probe_run(long n, int rc)
+{
+    g_cphs_probe_n = n;
+    g_cphs_probe_rc = rc;
+    return cphs_collect_index(cphs_probe_walk);
+}
+
+static int cphs_probe_fail(const char *label)
+{
+    fprintf(stderr, "check_controller_private_headers: SELFTEST FAILED - %s\n",
+            label);
+    return 2;
+}
+
+int cphs_collect_selftest(void)
+{
+    if (cphs_probe_run(CPHS_MAXF + 1, 0) == 0)
+        return cphs_probe_fail("one entry past the file cap was collected");
+    if (cphs_probe_run(CPHS_MAXF, 0) != 0 || cphs_nfiles() != CPHS_MAXF)
+        return cphs_probe_fail("exactly the file cap did not collect fully");
+    if (cphs_probe_run(3, 2) == 0 || cphs_nfiles() != 0 || g_cphs_fused != 0)
+        return cphs_probe_fail("reader failure left a partial file set");
+    return 0;
 }
 
 /* display_path: see the file header for the trailing-slash case. */
