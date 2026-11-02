@@ -802,18 +802,500 @@ static void catchup_print_summary(bool interrupted, int indexed,
     fflush(stdout);
 }
 
+/* The LOG_*_IN calls below name node_db_catchup_service_run so a line moved
+ * into a helper prints the same "fn():" text it printed in the run body. */
+
+/* Every local of one catchup pass, so the phase helpers below can share it. */
+struct catchup_pass {
+    struct node_db *ndb;
+    const struct active_chain *chain;
+    struct wallet *w;
+    const char *datadir;
+    bool interrupted;
+    struct catchup_batch cb;
+    bool failed;
+    int last_indexed_height;
+    const struct block_index *last_indexed_tip;
+    struct sync_db_turbo_scope turbo_mode;
+    bool restore_ok;
+    int start;
+    int chain_tip;
+    int total;
+    int32_t proven_applied;
+    bool proven_authority;
+    int indexed;
+    int wallet_hits;
+    int batch_size;
+    int64_t t_start;
+    int cached_file;
+    struct node_db_catchup_block_mapping cached_mapping;
+    struct catchup_sapling_tree sapling_tree;
+    struct catchup_holes holes;
+    uint8_t prev_receipt[32];
+};
+
+static void catchup_pass_init(struct catchup_pass *ps, struct node_db *ndb,
+                              const struct active_chain *chain,
+                              struct wallet *w, const char *datadir,
+                              int db_tip, int chain_tip)
+{
+    ps->ndb = ndb;
+    ps->chain = chain;
+    ps->w = w;
+    ps->datadir = datadir;
+    /* Keep pre-existing fast path behavior when there is no catchup work. */
+    ps->last_indexed_height = db_tip;
+    ps->cb.last_committed_height = db_tip;
+
+    ps->start = catchup_start_height(db_tip);
+    ps->chain_tip = chain_tip;
+    ps->total = chain_tip - ps->start + 1;
+    catchup_active_begin(ps->start, chain_tip);
+
+    ps->proven_applied = -1;
+    ps->proven_authority = catchup_read_proven(&ps->proven_applied);
+
+    int wallet_keys = catchup_count_wallet_keys(w);
+    printf("SQLite catchup: %d blocks (%d..%d), lean index + wallet scan"
+           " (%d keys)\n", ps->total, ps->start, chain_tip, wallet_keys);
+    fflush(stdout);
+
+    /* Turbo mode: disable fsync, drop indexes, enlarge cache. */
+    ps->cb.bulk_mode = (ps->total > 50000);
+}
+
+/* Leave turbo mode and close the pass after a failed transaction open. */
+static void catchup_unwind_open(struct catchup_pass *ps, const char *restore_msg)
+{
+    if (!sync_db_turbo_scope_end(&ps->turbo_mode))
+        fprintf(stderr, "%s\n", restore_msg);
+    catchup_abort_pass(&ps->restore_ok);
+}
+
+static bool catchup_open_pass(struct catchup_pass *ps)
+{
+    if (!sync_db_turbo_scope_begin(&ps->turbo_mode, ps->ndb, ps->cb.bulk_mode)) {
+        fprintf(stderr, "catchup: failed to enter turbo mode\n");
+        node_db_catchup_lock_guard_note_outcome(true);
+        catchup_active_finish();
+        return false; // raw-return-ok:logged-above
+    }
+
+    /* Verify connection works before starting. BEGIN IMMEDIATE (all three
+     * transaction opens in this run): the writer reservation is taken at
+     * BEGIN, where the 10 s busy handler CAN wait out a contender — a
+     * deferred BEGIN would only discover the contention at the first
+     * write, as SQLITE_BUSY_SNAPSHOT, which no busy-handler wait can cure. */
+    if (!node_db_begin_immediate(ps->ndb)) {
+        LOG_WARN_IN("node_db_catchup_service_run", "catchup", "catchup: BEGIN failed — aborting");
+        catchup_unwind_open(ps, "catchup: failed to restore normal mode after BEGIN failure");
+        return false; // raw-return-ok:logged-above
+    }
+    ps->cb.tx_open = true;
+    if (!node_db_commit(ps->ndb)) {
+        LOG_WARN_IN("node_db_catchup_service_run", "catchup", "catchup: initial COMMIT failed — aborting");
+        node_db_rollback(ps->ndb);
+        catchup_unwind_open(ps, "catchup: failed to restore normal mode after initial COMMIT failure");
+        return false; // raw-return-ok:logged-above
+    }
+    ps->cb.tx_open = false;
+
+    /* Commit-cadence cap (node_db_catchup_lock_guard.c): the old
+     * 100000-block batch held the single WAL write lock across mmap disk
+     * reads for minutes — past every other writer's budget (wallet ~80 s,
+     * coins 30 s, this handle's own 10 s busy timeout) — producing
+     * "database is locked" bursts. Commit every batch_size blocks (2000)
+     * OR every NODE_DB_CATCHUP_COMMIT_BATCH_MAX_SECS, whichever first.
+     * Catchup is an idempotent projection re-run, so finer granularity
+     * changes only lock-hold time, never the final state. */
+    ps->batch_size = node_db_catchup_lock_guard_batch_size();
+    ps->cb.t_start = node_db_catchup_lock_guard_now_ms();
+    ps->t_start = (int64_t)platform_time_wall_time_t();
+
+    /* Read-only mapping cache.  The cache owns the source descriptor for the
+     * complete mapping lifetime, as required on Windows and POSIX. */
+    node_db_catchup_block_mapping_init(&ps->cached_mapping);
+
+    /* Initialize Sapling commitment tree for catchup */
+    catchup_sapling_tree_load(ps->ndb, ps->chain, &ps->sapling_tree);
+
+    if (!node_db_begin_immediate(ps->ndb)) {
+        LOG_WARN_IN("node_db_catchup_service_run", "catchup", "catchup: failed to open main transaction");
+        catchup_unwind_open(ps, "catchup: failed to restore normal mode after tx open failure");
+        return false; // raw-return-ok:logged-above
+    }
+    ps->cb.tx_open = true;
+    catchup_sapling_tree_persist_dirty(ps->ndb, &ps->sapling_tree);
+
+    /* Integrity-receipt chain carry. Seed from the receipt at start-1
+     * (zeros at a genesis start). Updated after each indexed block and
+     * threaded into sync_block_lean so the per-height SHA3 receipt chains
+     * across the whole ascending walk without a per-block SELECT. */
+    catchup_seed_receipt(ps->ndb, ps->start, ps->prev_receipt);
+    return true;
+}
+
+/* How one height of the walk ended. NEXT and GO carry on; a hole is NEXT. */
+enum catchup_step {
+    CATCHUP_STEP_NEXT,
+    CATCHUP_STEP_GO,
+    CATCHUP_STEP_STOP,
+    CATCHUP_STEP_FAIL,
+};
+
+/* Shutdown check, batch cycling, then locate and map the block's file. */
+static enum catchup_step catchup_walk_locate(struct catchup_pass *ps, int h,
+                                             const struct block_index **out)
+{
+    if (g_shutdown_requested)
+        return CATCHUP_STEP_STOP;
+#ifdef ZCL_TESTING
+    node_db_catchup_lock_guard_test_height_delay();
+#endif
+    if (!catchup_cycle_batch(ps->ndb, h, ps->indexed, ps->last_indexed_tip,
+                             ps->last_indexed_height, &ps->cb))
+        return CATCHUP_STEP_FAIL;
+    catchup_pump_watchdog(h);
+    const struct block_index *pindex = active_chain_at(ps->chain, h);
+    if (!pindex) {
+        if (catchup_hole_missing_index(&ps->holes, h))
+            LOG_INFO_IN("node_db_catchup_service_run", "catchup", "catchup: missing active-chain index at "
+                        "height %d — recording lean hole", h);
+        return CATCHUP_STEP_NEXT;
+    }
+    if (!(pindex->nStatus & BLOCK_HAVE_DATA)) {
+        if (catchup_hole_missing_data(&ps->holes, h))
+            LOG_INFO_IN("node_db_catchup_service_run", "catchup", "catchup: block data missing at height "
+                        "%d — recording lean hole", h);
+        return CATCHUP_STEP_NEXT;
+    }
+    if (pindex->nFile == ps->holes.skip_file) {
+        catchup_hole_note(&ps->holes, h);
+        return CATCHUP_STEP_NEXT;
+    }
+
+    /* Map a new file if needed. */
+    struct zcl_result mapped = catchup_map_if_needed(
+        &ps->cached_mapping, &ps->cached_file, ps->datadir, pindex->nFile);
+    if (!mapped.ok) {
+        if (catchup_hole_map_failed(&ps->holes, h, pindex->nFile,
+                                    mapped.code))
+            LOG_WARN_IN("node_db_catchup_service_run", "catchup",
+                        "catchup: mapping failed for blk%05d.dat "
+                        "(errno=%d) — skipping its blocks",
+                        pindex->nFile, mapped.code);
+        return CATCHUP_STEP_NEXT;
+    }
+
+    if ((uint64_t)pindex->nDataPos >= ps->cached_mapping.mapping.size) {
+        if (catchup_hole_suspicious(&ps->holes, h))
+            LOG_INFO_IN("node_db_catchup_service_run", "catchup", "catchup: malformed block data offset at "
+                        "height %d — recording lean hole", h);
+        return CATCHUP_STEP_NEXT;
+    }
+    *out = pindex;
+    return CATCHUP_STEP_GO;
+}
+
+/* Decode and hash-bind the frame, then lean index, wallet scan and tree step. */
+static enum catchup_step catchup_walk_block(struct catchup_pass *ps,
+                                            const struct block_index *pindex,
+                                            int h)
+{
+    struct node_db *ndb = ps->ndb;
+    struct block blk;
+    block_init(&blk);
+
+    size_t remaining = ps->cached_mapping.mapping.size -
+                       (size_t)pindex->nDataPos;
+    struct byte_stream s;
+    stream_init_from_data(&s, ps->cached_mapping.mapping.data +
+                              (size_t)pindex->nDataPos,
+                          remaining);
+    if (!block_deserialize(&blk, &s)) {
+        block_free(&blk);
+        if (catchup_hole_suspicious(&ps->holes, h))
+            LOG_INFO_IN("node_db_catchup_service_run", "catchup", "catchup: undecodable block frame at "
+                        "height %d — recording lean hole", h);
+        return CATCHUP_STEP_NEXT;
+    }
+
+    /* Garbage at a wrong offset can still PARSE as a block; the lean
+     * index must never hold a row whose hash disagrees with the
+     * block index (the live h=6131 frame parsed, then poisoned
+     * db_block_save with nonsense). Hash-bind every frame to its
+     * index entry; a mismatch is a lean hole like any other
+     * unreadable frame. */
+    enum catchup_frame_check frame = catchup_frame_check(&blk, pindex);
+    if (frame == CATCHUP_FRAME_HASH_MISMATCH) {
+        block_free(&blk);
+        if (catchup_hole_suspicious(&ps->holes, h))
+            LOG_INFO_IN("node_db_catchup_service_run", "catchup", "catchup: frame hash mismatch at "
+                        "height %d — recording lean hole", h);
+        return CATCHUP_STEP_NEXT;
+    }
+    if (frame == CATCHUP_FRAME_NO_INDEX_HASH) {
+        /* A torn index (e.g. cp -a of a running node) can carry an
+         * active-chain slot with BLOCK_HAVE_DATA yet no phashBlock. Its
+         * frame cannot be hash-bound to an identity and every downstream
+         * write keys off pindex->phashBlock->data; record it as a
+         * suspicious lean hole (never advanced over quietly) instead of
+         * dereferencing NULL in sync_block_lean. */
+        block_free(&blk);
+        if (catchup_hole_suspicious(&ps->holes, h))
+            LOG_INFO_IN("node_db_catchup_service_run", "catchup", "catchup: block index missing its hash "
+                        "at height %d — recording lean hole", h);
+        return CATCHUP_STEP_NEXT;
+    }
+
+    /* Lean index: block header + txid index + explorer projections */
+    uint8_t this_receipt[32];
+    if (!sync_block_lean(ps->ndb, &blk, pindex, ps->prev_receipt, this_receipt)) {
+        LOG_WARN_IN("node_db_catchup_service_run", "catchup", "catchup: lean index failed at height %d (sqlite=%s)", h, sqlite3_errmsg(ndb->db));
+        block_free(&blk);
+        return CATCHUP_STEP_FAIL;
+    }
+    memcpy(ps->prev_receipt, this_receipt, 32);
+
+    /* Wallet scan */
+    size_t i = 0;
+    size_t si = 0;
+    enum catchup_wallet_scan scan = catchup_scan_wallet_block(
+        ps->ndb, &blk, ps->w, h, &ps->wallet_hits, &i, &si);
+    if (scan == CATCHUP_WALLET_TX_FAILED)
+        LOG_WARN_IN("node_db_catchup_service_run", "catchup", "catchup: wallet tx sync failed at height %d " "(tx=%d)", h, (int)i);
+    if (scan == CATCHUP_WALLET_DECRYPT_FAILED)
+        LOG_WARN_IN("node_db_catchup_service_run", "catchup", "catchup: sapling decrypt failed at height %d " "(tx=%d)", h, (int)i);
+    if (scan == CATCHUP_WALLET_SPEND_FAILED)
+        LOG_WARN_IN("node_db_catchup_service_run", "catchup", "catchup: sapling spend update failed at height %d " "(tx=%d, spend=%zu)", h, (int)i, si);
+    if (scan != CATCHUP_WALLET_OK) {
+        block_free(&blk);
+        return CATCHUP_STEP_FAIL;
+    }
+
+    /* Advance Sapling tree + wallet witnesses */
+    if (!catchup_tree_step(ps->ndb, ps->chain, &blk, &ps->sapling_tree, h, ps->w)) {
+        LOG_WARN_IN("node_db_catchup_service_run", "catchup", "catchup: witness/tree advance failed at height %d", h);
+        block_free(&blk);
+        return CATCHUP_STEP_FAIL;
+    }
+
+    block_free(&blk);
+    ps->indexed++;
+    ps->last_indexed_height = h;
+    ps->last_indexed_tip = pindex;
+    sync_job_catchup_progress(h);
+    return CATCHUP_STEP_GO;
+}
+
+/* After an indexed block: test injection, then commit the batch if due. */
+static enum catchup_step catchup_walk_post(struct catchup_pass *ps,
+                                           const struct block_index *pindex,
+                                           int h)
+{
+#ifdef ZCL_TESTING
+    /* Armed by node_db_catchup_lock_guard_test_force_snapshot_failures:
+     * fail this block exactly as a SQLITE_BUSY_SNAPSHOT write failure
+     * would, so the rollback + bounded whole-walk restart plumbing is
+     * exercised deterministically. */
+    if (node_db_catchup_lock_guard_test_consume_snapshot_failure()) {
+        LOG_WARN_IN("node_db_catchup_service_run", "catchup",
+                    "catchup: TEST-INJECTED SQLITE_BUSY_SNAPSHOT write "
+                    "failure at height %d", h);
+        ps->cb.busy_snapshot = true;
+        return CATCHUP_STEP_FAIL;
+    }
+#endif
+
+    if (!catchup_batch_due(ps->indexed, ps->batch_size, &ps->cb))
+        return CATCHUP_STEP_NEXT;
+    if (!catchup_set_batch_tip(ps->ndb, pindex, h, &ps->cb.busy_snapshot))
+        return CATCHUP_STEP_FAIL;
+    if (!node_db_commit(ps->ndb)) {
+        LOG_WARN_IN("node_db_catchup_service_run", "catchup", "catchup: batch COMMIT failed at height %d", h);
+        catchup_note_busy_snapshot(ps->ndb, &ps->cb.busy_snapshot);
+        node_db_rollback(ps->ndb);
+        ps->cb.tx_open = false;
+        return CATCHUP_STEP_FAIL;
+    }
+    node_db_catchup_lock_guard_note_batch_commit();
+    ps->cb.tx_open = false;
+    ps->cb.last_committed_height = h;
+    catchup_batch_committed(ps->ndb, ps->cb.bulk_mode, &ps->sapling_tree,
+                            pindex, h, ps->indexed, ps->total,
+                            ps->wallet_hits, ps->t_start);
+    ps->cb.indexed_at_start = ps->indexed;
+    node_db_catchup_lock_guard_yield_to_writers(catchup_db_service(ps->ndb),
+                                                !ps->cb.bulk_mode);
+    /* The batch just committed is durable no matter what happens
+     * next, so a busy reopen is worth waiting out rather than
+     * aborting the pass (which stops catchup, withholds the boot
+     * watchdog ping, and gets the node killed). */
+    if (!catchup_reopen_batch_txn(ps->ndb, h, &ps->cb.busy_snapshot)) {
+        LOG_WARN_IN("node_db_catchup_service_run", "catchup", "catchup: failed to reopen transaction after batch commit");
+        return CATCHUP_STEP_FAIL;
+    }
+    ps->cb.t_start = node_db_catchup_lock_guard_now_ms();
+    ps->cb.tx_open = true;
+    return CATCHUP_STEP_NEXT;
+}
+
+/* After the walk: unmap, snapshot the busy state, roll back a failure. */
+static void catchup_close_abort(struct catchup_pass *ps)
+{
+    node_db_catchup_block_mapping_close(&ps->cached_mapping);
+
+    catchup_capture_busy_snapshot(ps->ndb, ps->failed, &ps->cb);
+
+    if (ps->failed) {
+        if (ps->cb.tx_open && !node_db_rollback(ps->ndb))
+            LOG_WARN_IN("node_db_catchup_service_run", "catchup", "catchup: rollback failed after failure");
+        ps->cb.tx_open = false;
+    }
+}
+
+/* Final commit, part one: the tip row (or the sparse proven-prefix cursor). */
+static void catchup_final_tip(struct catchup_pass *ps)
+{
+    /* Final commit */
+    if (!ps->cb.tx_open || ps->failed)
+        return;
+    if (catchup_tip_hashed(ps->last_indexed_tip)) {
+        if (!node_db_sync_set_tip(ps->ndb,
+                                  ps->last_indexed_tip->phashBlock->data,
+                                  ps->last_indexed_height)) {
+            LOG_WARN_IN("node_db_catchup_service_run", "catchup", "catchup: failed to set tip before final commit");
+            ps->failed = true;
+        }
+        return;
+    }
+    int start = ps->start;
+    int chain_tip = ps->chain_tip;
+    int first_missing_index_h = ps->holes.first_missing_index_h;
+    int sparse_target = catchup_advance_sparse_tip(
+        ps->ndb, ps->chain, &ps->holes, ps->indexed, ps->total, ps->start,
+        ps->chain_tip, ps->proven_authority, ps->proven_applied);
+    if (sparse_target < 0) {
+        LOG_WARN_IN("node_db_catchup_service_run", "catchup", "catchup: final commit missing tip hash");
+        ps->failed = true;
+        return;
+    }
+    ps->last_indexed_height = sparse_target;
+    ps->cb.last_committed_height = sparse_target;
+    LOG_INFO_IN("node_db_catchup_service_run", "catchup",
+                "catchup: sparse proven prefix %d..%d has no block "
+                "bodies; advanced SQLite projection cursor to h=%d "
+                "without writing block rows (first missing active "
+                "slot=%d)",
+                start, chain_tip, sparse_target,
+                first_missing_index_h);
+    event_emitf(EV_RECOVERY_ACTION, 0,
+                "action=sparse_projection_tip_advance "
+                "start=%d height=%d holes=%d first_missing_index=%d",
+                ps->start, sparse_target, ps->holes.lean,
+                first_missing_index_h);
+}
+
+/* Final commit, part two: the COMMIT itself and its failure handling. */
+static void catchup_final_commit(struct catchup_pass *ps)
+{
+    if (!ps->cb.tx_open || ps->failed)
+        return;
+    if (node_db_commit(ps->ndb)) {
+        catchup_final_commit_done(&ps->cb, ps->last_indexed_height,
+                                  ps->last_indexed_tip, &ps->sapling_tree);
+        return;
+    }
+    LOG_WARN_IN("node_db_catchup_service_run", "catchup", "catchup: final COMMIT failed");
+    catchup_note_busy_snapshot(ps->ndb, &ps->cb.busy_snapshot);
+    if (!node_db_rollback(ps->ndb))
+        LOG_WARN_IN("node_db_catchup_service_run", "catchup", "catchup: final ROLLBACK failed");
+    ps->cb.tx_open = false;
+    ps->failed = true;
+    ps->last_indexed_height = ps->cb.last_committed_height;
+}
+
+/* Roll back what a failure left open, then restore pragmas and indexes. */
+static void catchup_close_restore(struct catchup_pass *ps)
+{
+    if (ps->failed) {
+        if (ps->cb.tx_open && !node_db_rollback(ps->ndb))
+            LOG_WARN_IN("node_db_catchup_service_run", "catchup", "catchup: final rollback path failed");
+        ps->interrupted = false;
+    }
+
+    /* Restore safe pragmas and rebuild indexes */
+    if (!sync_db_turbo_scope_end(&ps->turbo_mode)) {
+        LOG_WARN_IN("node_db_catchup_service_run", "catchup", "catchup: failed to restore normal mode");
+        ps->restore_ok = false;
+    }
+}
+
+static void catchup_log_holes(const struct catchup_holes *hl)
+{
+    if (hl->lean <= 0)
+        return;
+    int lean_holes = hl->lean;
+    int first_hole_h = hl->first_h;
+    int missing_file_holes = hl->missing_file;
+    int first_missing_file_h = hl->first_missing_file_h;
+    int first_missing_file_num = hl->first_missing_file_num;
+    int suspicious_lean_holes = hl->suspicious;
+    if (hl->suspicious > 0) {
+        LOG_WARN_IN("node_db_catchup_service_run", "catchup",
+                    "catchup: %d lean-index hole(s) recorded (first h=%d, "
+                    "missing_file_holes=%d first_file=blk%05d.dat@h=%d, "
+                    "suspicious=%d) — unreadable/garbage frames skipped, "
+                    "not aborted; those heights stay unindexed until their "
+                    "bodies are refetched",
+                    lean_holes, first_hole_h, missing_file_holes,
+                    first_missing_file_num, first_missing_file_h,
+                    suspicious_lean_holes);
+    } else {
+        LOG_INFO_IN("node_db_catchup_service_run", "catchup",
+                    "catchup: %d lean-index hole(s) recorded (first h=%d, "
+                    "missing_file_holes=%d first_file=blk%05d.dat@h=%d) — "
+                    "expected sparse/snapshot block bodies skipped",
+                    lean_holes, first_hole_h, missing_file_holes,
+                    first_missing_file_num, first_missing_file_h);
+    }
+    event_emitf(EV_RECOVERY_ACTION, 0,
+                "action=lean_catchup_holes count=%d first_h=%d",
+                lean_holes, first_hole_h);
+}
+
+static void catchup_report_summary(const struct catchup_pass *ps)
+{
+    int64_t elapsed = (int64_t)platform_time_wall_time_t() - ps->t_start;
+    catchup_print_summary(ps->interrupted, ps->indexed, elapsed,
+                          ps->cb.last_committed_height);
+}
+
 int node_db_catchup_service_run(struct node_db *ndb,
                                 const struct active_chain *chain,
                                 struct wallet *w,
                                 const char *datadir)
 {
-    bool interrupted = false;
-    struct catchup_batch cb = {.last_committed_height = -1};
-    bool failed = false;
-    int last_indexed_height = 0;
-    const struct block_index *last_indexed_tip = NULL;
-    struct sync_db_turbo_scope turbo_mode = {0};
-    bool restore_ok = true;
+    /* Unreadable blocks are LOUD HOLES, not abort triggers: on a
+     * cold-import datadir the imported index carries the source node's
+     * nFile/nDataPos layout, so low-height entries can claim
+     * BLOCK_HAVE_DATA yet deserialize as garbage from OUR files. The old
+     * abort-on-first-bad-frame turned one such frame into an infinite
+     * restart loop that never reached the readable rows the tip needs
+     * (garbage reads at low height, catchup aborting forever, tip pinned).
+     * Consumers already handle missing lean rows (height_not_found). */
+    struct catchup_pass ps = {
+        .cb = {.last_committed_height = -1},
+        .restore_ok = true,
+        .cached_file = -1,
+        .holes = {
+            .first_h = -1,
+            .first_missing_index_h = -1,
+            .first_missing_file_h = -1,
+            .first_missing_file_num = -1,
+            .skip_file = -1,
+        },
+    };
 
     if (catchup_args_invalid(ndb, chain))
         LOG_ERR("sync", "catchup: invalid args (ndb=%p, chain=%p)", (void *)ndb, (void *)chain);
@@ -828,378 +1310,28 @@ int node_db_catchup_service_run(struct node_db *ndb,
         LOG_ERR("sync", "catchup: datadir is NULL (db_tip=%d, chain_tip=%d)",
                 db_tip, chain_tip);
 
-    /* Keep pre-existing fast path behavior when there is no catchup work. */
-    last_indexed_height = db_tip;
-    cb.last_committed_height = db_tip;
-
-    int start = catchup_start_height(db_tip);
-    int total = chain_tip - start + 1;
-    catchup_active_begin(start, chain_tip);
-
-    int32_t proven_applied = -1;
-    bool proven_authority = catchup_read_proven(&proven_applied);
-
-    int wallet_keys = catchup_count_wallet_keys(w);
-    printf("SQLite catchup: %d blocks (%d..%d), lean index + wallet scan"
-           " (%d keys)\n", total, start, chain_tip, wallet_keys);
-    fflush(stdout);
-
-    /* Turbo mode: disable fsync, drop indexes, enlarge cache. */
-    bool bulk_mode = (total > 50000);
-    cb.bulk_mode = bulk_mode;
-    if (!sync_db_turbo_scope_begin(&turbo_mode, ndb, bulk_mode)) {
-        fprintf(stderr, "catchup: failed to enter turbo mode\n");
-        node_db_catchup_lock_guard_note_outcome(true);
-        catchup_active_finish();
+    catchup_pass_init(&ps, ndb, chain, w, datadir, db_tip, chain_tip);
+    if (!catchup_open_pass(&ps))
         return -1; // raw-return-ok:logged-above
-    }
 
-    /* Verify connection works before starting. BEGIN IMMEDIATE (all three
-     * transaction opens in this run): the writer reservation is taken at
-     * BEGIN, where the 10 s busy handler CAN wait out a contender — a
-     * deferred BEGIN would only discover the contention at the first
-     * write, as SQLITE_BUSY_SNAPSHOT, which no busy-handler wait can cure. */
-    if (!node_db_begin_immediate(ndb)) {
-        LOG_WARN("catchup", "catchup: BEGIN failed — aborting");
-        if (!sync_db_turbo_scope_end(&turbo_mode))
-            fprintf(stderr, "catchup: failed to restore normal mode after BEGIN failure\n");
-        catchup_abort_pass(&restore_ok);
-        return -1; // raw-return-ok:logged-above
-    }
-    cb.tx_open = true;
-    if (!node_db_commit(ndb)) {
-        LOG_WARN("catchup", "catchup: initial COMMIT failed — aborting");
-        node_db_rollback(ndb);
-        if (!sync_db_turbo_scope_end(&turbo_mode))
-            fprintf(stderr, "catchup: failed to restore normal mode after initial COMMIT failure\n");
-        catchup_abort_pass(&restore_ok);
-        return -1; // raw-return-ok:logged-above
-    }
-    cb.tx_open = false;
-
-    int indexed = 0;
-    int wallet_hits = 0;
-    /* Commit-cadence cap (node_db_catchup_lock_guard.c): the old
-     * 100000-block batch held the single WAL write lock across mmap disk
-     * reads for minutes — past every other writer's budget (wallet ~80 s,
-     * coins 30 s, this handle's own 10 s busy timeout) — producing
-     * "database is locked" bursts. Commit every batch_size blocks (2000)
-     * OR every NODE_DB_CATCHUP_COMMIT_BATCH_MAX_SECS, whichever first.
-     * Catchup is an idempotent projection re-run, so finer granularity
-     * changes only lock-hold time, never the final state. */
-    int batch_size = node_db_catchup_lock_guard_batch_size();
-    cb.t_start = node_db_catchup_lock_guard_now_ms();
-    int64_t t_start = (int64_t)platform_time_wall_time_t();
-
-    /* Read-only mapping cache.  The cache owns the source descriptor for the
-     * complete mapping lifetime, as required on Windows and POSIX. */
-    int cached_file = -1;
-    struct node_db_catchup_block_mapping cached_mapping;
-    node_db_catchup_block_mapping_init(&cached_mapping);
-
-    /* Initialize Sapling commitment tree for catchup */
-    struct catchup_sapling_tree sapling_tree;
-    catchup_sapling_tree_load(ndb, chain, &sapling_tree);
-
-    if (!node_db_begin_immediate(ndb)) {
-        LOG_WARN("catchup", "catchup: failed to open main transaction");
-        if (!sync_db_turbo_scope_end(&turbo_mode))
-            fprintf(stderr, "catchup: failed to restore normal mode after tx open failure\n");
-        catchup_abort_pass(&restore_ok);
-        return -1; // raw-return-ok:logged-above
-    }
-    cb.tx_open = true;
-    catchup_sapling_tree_persist_dirty(ndb, &sapling_tree);
-
-    /* Unreadable blocks are LOUD HOLES, not abort triggers: on a
-     * cold-import datadir the imported index carries the source node's
-     * nFile/nDataPos layout, so low-height entries can claim
-     * BLOCK_HAVE_DATA yet deserialize as garbage from OUR files. The old
-     * abort-on-first-bad-frame turned one such frame into an infinite
-     * restart loop that never reached the readable rows the tip needs
-     * (garbage reads at low height, catchup aborting forever, tip pinned).
-     * Consumers already handle missing lean rows (height_not_found). */
-    struct catchup_holes holes = {
-        .first_h = -1,
-        .first_missing_index_h = -1,
-        .first_missing_file_h = -1,
-        .first_missing_file_num = -1,
-        .skip_file = -1,
-    };
-
-    /* Integrity-receipt chain carry. Seed from the receipt at start-1
-     * (zeros at a genesis start). Updated after each indexed block and
-     * threaded into sync_block_lean so the per-height SHA3 receipt chains
-     * across the whole ascending walk without a per-block SELECT. */
-    uint8_t prev_receipt[32] = {0};
-    catchup_seed_receipt(ndb, start, prev_receipt);
-
-    for (int h = start; h <= chain_tip; h++) {
-        if (g_shutdown_requested) {
-            interrupted = true;
+    for (int h = ps.start; h <= ps.chain_tip; h++) {
+        const struct block_index *pindex = NULL;
+        enum catchup_step st = catchup_walk_locate(&ps, h, &pindex);
+        if (st == CATCHUP_STEP_GO)
+            st = catchup_walk_block(&ps, pindex, h);
+        if (st == CATCHUP_STEP_GO)
+            st = catchup_walk_post(&ps, pindex, h);
+        if (st >= CATCHUP_STEP_STOP) {
+            ps.interrupted = st == CATCHUP_STEP_STOP;
+            ps.failed = st == CATCHUP_STEP_FAIL;
             break;
         }
-#ifdef ZCL_TESTING
-        node_db_catchup_lock_guard_test_height_delay();
-#endif
-        if (!catchup_cycle_batch(ndb, h, indexed, last_indexed_tip,
-                                 last_indexed_height, &cb)) {
-            failed = true;
-            break;
-        }
-        catchup_pump_watchdog(h);
-        const struct block_index *pindex = active_chain_at(chain, h);
-        if (!pindex) {
-            if (catchup_hole_missing_index(&holes, h))
-                LOG_INFO("catchup", "catchup: missing active-chain index at "
-                         "height %d — recording lean hole", h);
-            continue;
-        }
-        if (!(pindex->nStatus & BLOCK_HAVE_DATA)) {
-            if (catchup_hole_missing_data(&holes, h))
-                LOG_INFO("catchup", "catchup: block data missing at height "
-                         "%d — recording lean hole", h);
-            continue;
-        }
-        if (pindex->nFile == holes.skip_file) {
-            catchup_hole_note(&holes, h);
-            continue;
-        }
-
-        /* Map a new file if needed. */
-        struct zcl_result mapped = catchup_map_if_needed(
-            &cached_mapping, &cached_file, datadir, pindex->nFile);
-        if (!mapped.ok) {
-            if (catchup_hole_map_failed(&holes, h, pindex->nFile,
-                                        mapped.code))
-                LOG_WARN("catchup",
-                         "catchup: mapping failed for blk%05d.dat "
-                         "(errno=%d) — skipping its blocks",
-                         pindex->nFile, mapped.code);
-            continue;
-        }
-
-        if ((uint64_t)pindex->nDataPos >= cached_mapping.mapping.size) {
-            if (catchup_hole_suspicious(&holes, h))
-                LOG_INFO("catchup", "catchup: malformed block data offset at "
-                         "height %d — recording lean hole", h);
-            continue;
-        }
-
-        struct block blk;
-        block_init(&blk);
-
-        size_t remaining = cached_mapping.mapping.size -
-                           (size_t)pindex->nDataPos;
-        struct byte_stream s;
-        stream_init_from_data(&s, cached_mapping.mapping.data +
-                                  (size_t)pindex->nDataPos,
-                              remaining);
-        if (!block_deserialize(&blk, &s)) {
-            block_free(&blk);
-            if (catchup_hole_suspicious(&holes, h))
-                LOG_INFO("catchup", "catchup: undecodable block frame at "
-                         "height %d — recording lean hole", h);
-            continue;
-        }
-
-        /* Garbage at a wrong offset can still PARSE as a block; the lean
-         * index must never hold a row whose hash disagrees with the
-         * block index (the live h=6131 frame parsed, then poisoned
-         * db_block_save with nonsense). Hash-bind every frame to its
-         * index entry; a mismatch is a lean hole like any other
-         * unreadable frame. */
-        enum catchup_frame_check frame = catchup_frame_check(&blk, pindex);
-        if (frame == CATCHUP_FRAME_HASH_MISMATCH) {
-            block_free(&blk);
-            if (catchup_hole_suspicious(&holes, h))
-                LOG_INFO("catchup", "catchup: frame hash mismatch at "
-                         "height %d — recording lean hole", h);
-            continue;
-        }
-        if (frame == CATCHUP_FRAME_NO_INDEX_HASH) {
-            /* A torn index (e.g. cp -a of a running node) can carry an
-             * active-chain slot with BLOCK_HAVE_DATA yet no phashBlock. Its
-             * frame cannot be hash-bound to an identity and every downstream
-             * write keys off pindex->phashBlock->data; record it as a
-             * suspicious lean hole (never advanced over quietly) instead of
-             * dereferencing NULL in sync_block_lean. */
-            block_free(&blk);
-            if (catchup_hole_suspicious(&holes, h))
-                LOG_INFO("catchup", "catchup: block index missing its hash "
-                         "at height %d — recording lean hole", h);
-            continue;
-        }
-
-        /* Lean index: block header + txid index + explorer projections */
-        uint8_t this_receipt[32];
-        if (!sync_block_lean(ndb, &blk, pindex, prev_receipt, this_receipt)) {
-            LOG_WARN("catchup", "catchup: lean index failed at height %d (sqlite=%s)", h, sqlite3_errmsg(ndb->db));
-            block_free(&blk);
-            failed = true;
-            break;
-        }
-        memcpy(prev_receipt, this_receipt, 32);
-
-        /* Wallet scan */
-        size_t i = 0;
-        size_t si = 0;
-        enum catchup_wallet_scan scan = catchup_scan_wallet_block(
-            ndb, &blk, w, h, &wallet_hits, &i, &si);
-        if (scan == CATCHUP_WALLET_TX_FAILED)
-            LOG_WARN("catchup", "catchup: wallet tx sync failed at height %d " "(tx=%d)", h, (int)i);
-        if (scan == CATCHUP_WALLET_DECRYPT_FAILED)
-            LOG_WARN("catchup", "catchup: sapling decrypt failed at height %d " "(tx=%d)", h, (int)i);
-        if (scan == CATCHUP_WALLET_SPEND_FAILED)
-            LOG_WARN("catchup", "catchup: sapling spend update failed at height %d " "(tx=%d, spend=%zu)", h, (int)i, si);
-        if (scan != CATCHUP_WALLET_OK) {
-            block_free(&blk);
-            failed = true;
-            break;
-        }
-
-        /* Advance Sapling tree + wallet witnesses */
-        if (!catchup_tree_step(ndb, chain, &blk, &sapling_tree, h, w)) {
-            LOG_WARN("catchup", "catchup: witness/tree advance failed at height %d", h);
-            block_free(&blk);
-            failed = true;
-            break;
-        }
-
-        block_free(&blk);
-        indexed++;
-        last_indexed_height = h;
-        last_indexed_tip = pindex;
-        sync_job_catchup_progress(h);
-
-#ifdef ZCL_TESTING
-        /* Armed by node_db_catchup_lock_guard_test_force_snapshot_failures:
-         * fail this block exactly as a SQLITE_BUSY_SNAPSHOT write failure
-         * would, so the rollback + bounded whole-walk restart plumbing is
-         * exercised deterministically. */
-        if (node_db_catchup_lock_guard_test_consume_snapshot_failure()) {
-            LOG_WARN("catchup",
-                     "catchup: TEST-INJECTED SQLITE_BUSY_SNAPSHOT write "
-                     "failure at height %d", h);
-            failed = true;
-            cb.busy_snapshot = true;
-            break;
-        }
-#endif
-
-        if (catchup_batch_due(indexed, batch_size, &cb)) {
-            if (!catchup_set_batch_tip(ndb, pindex, h, &cb.busy_snapshot)) {
-                failed = true;
-                break;
-            }
-            if (!node_db_commit(ndb)) {
-                LOG_WARN("catchup", "catchup: batch COMMIT failed at height %d", h);
-                catchup_note_busy_snapshot(ndb, &cb.busy_snapshot);
-                node_db_rollback(ndb);
-                cb.tx_open = false;
-                failed = true;
-                break;
-            }
-            node_db_catchup_lock_guard_note_batch_commit();
-            cb.tx_open = false;
-            cb.last_committed_height = h;
-            catchup_batch_committed(ndb, bulk_mode, &sapling_tree, pindex, h,
-                                    indexed, total, wallet_hits, t_start);
-            cb.indexed_at_start = indexed;
-            node_db_catchup_lock_guard_yield_to_writers(catchup_db_service(ndb),
-                                                        !bulk_mode);
-            /* The batch just committed is durable no matter what happens
-             * next, so a busy reopen is worth waiting out rather than
-             * aborting the pass (which stops catchup, withholds the boot
-             * watchdog ping, and gets the node killed). */
-            if (!catchup_reopen_batch_txn(ndb, h, &cb.busy_snapshot)) {
-                LOG_WARN("catchup", "catchup: failed to reopen transaction after batch commit");
-                failed = true;
-                break;
-            }
-            cb.t_start = node_db_catchup_lock_guard_now_ms();
-            cb.tx_open = true;
-        }
     }
 
-    node_db_catchup_block_mapping_close(&cached_mapping);
-
-    int lean_holes = holes.lean;
-    int first_hole_h = holes.first_h;
-    int first_missing_index_h = holes.first_missing_index_h;
-    int missing_file_holes = holes.missing_file;
-    int first_missing_file_h = holes.first_missing_file_h;
-    int first_missing_file_num = holes.first_missing_file_num;
-    int suspicious_lean_holes = holes.suspicious;
-
-    catchup_capture_busy_snapshot(ndb, failed, &cb);
-
-    if (failed) {
-        if (cb.tx_open && !node_db_rollback(ndb))
-            LOG_WARN("catchup", "catchup: rollback failed after failure");
-        cb.tx_open = false;
-    }
-
-    /* Final commit */
-    if (cb.tx_open && !failed) {
-        if (catchup_tip_hashed(last_indexed_tip)) {
-            if (!node_db_sync_set_tip(ndb,
-                                      last_indexed_tip->phashBlock->data,
-                                      last_indexed_height)) {
-                LOG_WARN("catchup", "catchup: failed to set tip before final commit");
-                failed = true;
-            }
-        } else {
-            int sparse_target = catchup_advance_sparse_tip(
-                ndb, chain, &holes, indexed, total, start, chain_tip,
-                proven_authority, proven_applied);
-            if (sparse_target >= 0) {
-                last_indexed_height = sparse_target;
-                cb.last_committed_height = sparse_target;
-                LOG_INFO("catchup",
-                         "catchup: sparse proven prefix %d..%d has no block "
-                         "bodies; advanced SQLite projection cursor to h=%d "
-                         "without writing block rows (first missing active "
-                         "slot=%d)",
-                         start, chain_tip, sparse_target,
-                         first_missing_index_h);
-                event_emitf(EV_RECOVERY_ACTION, 0,
-                            "action=sparse_projection_tip_advance "
-                            "start=%d height=%d holes=%d first_missing_index=%d",
-                            start, sparse_target, lean_holes,
-                            first_missing_index_h);
-            } else {
-                LOG_WARN("catchup", "catchup: final commit missing tip hash");
-                failed = true;
-            }
-        }
-        if (!failed) {
-            if (!node_db_commit(ndb)) {
-                LOG_WARN("catchup", "catchup: final COMMIT failed");
-                catchup_note_busy_snapshot(ndb, &cb.busy_snapshot);
-                if (!node_db_rollback(ndb))
-                    LOG_WARN("catchup", "catchup: final ROLLBACK failed");
-                cb.tx_open = false;
-                failed = true;
-                last_indexed_height = cb.last_committed_height;
-            } else {
-                catchup_final_commit_done(&cb, last_indexed_height,
-                                          last_indexed_tip, &sapling_tree);
-            }
-        }
-    }
-
-    if (failed) {
-        if (cb.tx_open && !node_db_rollback(ndb))
-            LOG_WARN("catchup", "catchup: final rollback path failed");
-        interrupted = false;
-    }
-
-    /* Restore safe pragmas and rebuild indexes */
-    if (!sync_db_turbo_scope_end(&turbo_mode)) {
-        LOG_WARN("catchup", "catchup: failed to restore normal mode");
-        restore_ok = false;
-    }
+    catchup_close_abort(&ps);
+    catchup_final_tip(&ps);
+    catchup_final_commit(&ps);
+    catchup_close_restore(&ps);
 
     /* BUSY_SNAPSHOT restart seatbelt (node_db_catchup_lock_guard.c): the
      * rollback above unwound the poisoned transaction; the only cure for
@@ -1210,12 +1342,16 @@ int node_db_catchup_service_run(struct node_db *ndb,
      * state), so a bounded recursion is exact. With BEGIN IMMEDIATE this
      * pass's own writes can no longer produce the class; this covers any
      * residual/regressed deferred writer. */
-    if (node_db_catchup_lock_guard_restart_needed(failed, cb.busy_snapshot)) {
+    if (node_db_catchup_lock_guard_restart_needed(ps.failed, ps.cb.busy_snapshot)) {
         catchup_active_finish();
         int r = node_db_catchup_service_run(ndb, chain, w, datadir);
         node_db_catchup_lock_guard_restart_done();
         return r;
     }
+
+    bool failed = ps.failed;
+    bool restore_ok = ps.restore_ok;
+    int indexed = ps.indexed;
 
     /* One logical pass = one outcome (the restart path above returns
      * before this, so a restarted attempt never double-counts). Account
@@ -1237,32 +1373,8 @@ int node_db_catchup_service_run(struct node_db *ndb,
                 failed, restore_ok, indexed);
     }
 
-    int64_t elapsed = (int64_t)platform_time_wall_time_t() - t_start;
-    catchup_print_summary(interrupted, indexed, elapsed,
-                          cb.last_committed_height);
-    if (lean_holes > 0) {
-        if (suspicious_lean_holes > 0) {
-            LOG_WARN("catchup",
-                     "catchup: %d lean-index hole(s) recorded (first h=%d, "
-                     "missing_file_holes=%d first_file=blk%05d.dat@h=%d, "
-                     "suspicious=%d) — unreadable/garbage frames skipped, "
-                     "not aborted; those heights stay unindexed until their "
-                     "bodies are refetched",
-                     lean_holes, first_hole_h, missing_file_holes,
-                     first_missing_file_num, first_missing_file_h,
-                     suspicious_lean_holes);
-        } else {
-            LOG_INFO("catchup",
-                     "catchup: %d lean-index hole(s) recorded (first h=%d, "
-                     "missing_file_holes=%d first_file=blk%05d.dat@h=%d) — "
-                     "expected sparse/snapshot block bodies skipped",
-                     lean_holes, first_hole_h, missing_file_holes,
-                     first_missing_file_num, first_missing_file_h);
-        }
-        event_emitf(EV_RECOVERY_ACTION, 0,
-                    "action=lean_catchup_holes count=%d first_h=%d",
-                    lean_holes, first_hole_h);
-    }
+    catchup_report_summary(&ps);
+    catchup_log_holes(&ps.holes);
 
     /* Checkpoint WAL after bulk catchup to reclaim disk space */
     if (indexed > 10000)
