@@ -63,6 +63,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #if !defined(_WIN32)
+#include <sys/resource.h>
 #include <sys/wait.h>
 #endif
 #include <time.h>
@@ -74,8 +75,30 @@ static int test_block_status_event_restart_proof_platform_arm(void);
 #define RP_N_BLOCKS     48
 #define RP_SOLUTION_LEN 96
 #define RP_N_CYCLES     8
-#define RP_BUDGET_SEC   60
+/* Performance budget: CPU milliseconds (this process plus reaped children)
+ * for the SIGKILL cycles and the terminal drain. CPU time does not grow when
+ * the host is loaded. Measured on r1 at load 59-99 over 23 runs: 96-124 ms
+ * CPU while wall time ranged 8-46 s. 300 ms is 2.4x the measured maximum and
+ * still fails a run that spends 600 ms more CPU (measured 725 ms).
+ * RP_HANG_SEC is a post-hoc wall deadline checked after the cycles return; it
+ * reports a run that took too long and cannot interrupt one that never ends. */
+#define RP_CPU_BUDGET_MS 300
+#define RP_HANG_SEC     600
 #define RP_CURSOR_NAME  "rp_status_event_restart"
+
+/* CPU milliseconds consumed by this process and its reaped children. */
+static long rp_cpu_ms(void)
+{
+    long total = 0;
+    for (int who = 0; who < 2; who++) {
+        struct rusage ru;
+        if (getrusage(who ? RUSAGE_CHILDREN : RUSAGE_SELF, &ru) != 0)
+            continue;
+        total += (long)ru.ru_utime.tv_sec * 1000 + ru.ru_utime.tv_usec / 1000;
+        total += (long)ru.ru_stime.tv_sec * 1000 + ru.ru_stime.tv_usec / 1000;
+    }
+    return total;
+}
 
 static void rp_event_log_close(event_log_t *log)
 {
@@ -574,6 +597,7 @@ static int test_block_status_event_restart_proof_platform_arm(void)
     unsigned int rng = (unsigned int)(platform_time_wall_time_t() ^
                                       (uint64_t)getpid() ^ 0x53544154ull);
     time_t t0 = platform_time_wall_time_t();
+    long cpu0_ms = rp_cpu_ms();
 
     bool all_done = false;
     int cycles_run = 0;
@@ -594,17 +618,24 @@ static int test_block_status_event_restart_proof_platform_arm(void)
     RP_CHECK("fixture fully folded (kill cycles + terminal drain)", all_done);
 
     int elapsed = (int)(platform_time_wall_time_t() - t0);
-    if (elapsed > RP_BUDGET_SEC) {
-        printf("FAIL (%d cycles took %ds, exceeds %ds budget)\n",
-               cycles_run, elapsed, RP_BUDGET_SEC);
+    long cpu_ms = rp_cpu_ms() - cpu0_ms;
+    if (cpu_ms > RP_CPU_BUDGET_MS) {
+        printf("FAIL (%d cycles used %ldms CPU, exceeds %dms budget)\n",
+               cycles_run, cpu_ms, RP_CPU_BUDGET_MS);
+        failures++;
+    }
+    if (elapsed > RP_HANG_SEC) {
+        printf("FAIL (%d cycles took %ds wall, exceeds %ds hang guard)\n",
+               cycles_run, elapsed, RP_HANG_SEC);
         failures++;
     }
 
     if (!failures)
         printf("test_block_status_event_restart_proof: OK (%d cycle(s) in "
-               "%ds; every completed height survived a real SIGKILL with "
+               "%ds wall, %ldms CPU; every completed height survived a real "
+               "SIGKILL with "
                "identical status + header state; fold always resumed)\n",
-               cycles_run, elapsed);
+               cycles_run, elapsed, cpu_ms);
     else
         printf("test_block_status_event_restart_proof: %d FAILURE(S)\n",
                failures);
