@@ -343,18 +343,29 @@ bool zapp_node_start(struct zapp_runtime *r, char *out, size_t cap)
     return rc == 0;
 }
 
-bool zapp_node_stop(struct zapp_runtime *r, char *out, size_t cap)
+static bool request_stop(struct zapp_runtime *r, char *out, size_t cap, bool owner_choice)
 {
     pthread_mutex_lock(&r->mutex);
     pid_t node = running_locked(r) ? r->node : earlier_node(r);
     int rc = node > 0 ? kill(node, SIGINT) : 0;
     r->stop_sent = node > 0 && rc == 0;
-    bool kept = remember_on(r, false);
+    bool kept = !owner_choice || remember_on(r, false);
     snprintf(out, cap, "%s%s", node <= 0 ? "The local node is stopped." :
              rc == 0 ? "Node stopping. It saves its data first." : "Could not request shutdown.",
              kept ? "" : " The app could not save this choice and may start the node when reopened.");
     pthread_mutex_unlock(&r->mutex);
     return rc == 0;
+}
+
+/* The owner's Stop button: also forgets that the node should run when the app opens. */
+bool zapp_node_stop(struct zapp_runtime *r, char *out, size_t cap)
+{
+    return request_stop(r, out, cap, true);
+}
+/* Wallet setup pauses the node for its files; the owner's on or off choice stays as it was. */
+bool zapp_node_stop_for_setup(struct zapp_runtime *r, char *out, size_t cap)
+{
+    return request_stop(r, out, cap, false);
 }
 
 const char *zapp_node_stage(struct zapp_runtime *r)

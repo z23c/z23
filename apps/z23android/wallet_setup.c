@@ -6,8 +6,10 @@
 #include <string.h>
 
 #define ASIDE_PATH_MAX 512
-#define STOP_POLLS 100u
-#define STOP_POLL_MS 100u
+/* A phone node saves its database before it exits: 50 s measured on a Pixel, the fast-restart save alone 35 s. Three times that
+ * bounds the wait for a node to exit, before create or restore and again before the node is started. */
+#define STOP_WAIT_MS 180000u
+#define STOP_POLL_MS 250u
 #define TIP_POLLS 120u
 #define TIP_POLL_MS 5000u
 #define IDLE_POLLS 24u
@@ -175,16 +177,32 @@ static enum wsu_failure new_passphrase(struct wsu *w, uint8_t secret[ZAPP_DEVKEY
     hex_of(secret, ZAPP_DEVKEY_SECRET, hex);
     return WSU_NO_FAILURE;
 }
-/* Stops the node when it runs and waits for it to exit; true when no node holds the files. */
+/* True when no node process holds the files; waits up to STOP_WAIT_MS for one that is exiting. */
+static bool wait_exit(struct wsu *w)
+{
+    for (unsigned waited = 0;; waited += STOP_POLL_MS) {
+        if (!w->env.node_running(w->env.ctx)) return true;
+        if (waited >= STOP_WAIT_MS) return false;
+        w->env.pause_ms(w->env.ctx, STOP_POLL_MS);
+    }
+}
+/* Asks a running node to exit and waits for the process to be gone; true when no node holds the files. */
 static bool stop_node(struct wsu *w)
 {
     if (!w->env.node_running(w->env.ctx)) return true;
+    w->paused_node = true;
     w->env.node_control(w->env.ctx, false);
-    for (unsigned i = 0; i < STOP_POLLS; ++i) {
-        if (!w->env.node_running(w->env.ctx)) return true;
-        w->env.pause_ms(w->env.ctx, STOP_POLL_MS);
-    }
-    return false;
+    return wait_exit(w);
+}
+/* Makes the node run: after a pause of setup's, the old process must be gone first, or the start is refused. False when it never
+ * exits within the bound; the node is then not started a second time. */
+static bool start_node(struct wsu *w)
+{
+    if (w->env.node_running(w->env.ctx) && !w->paused_node) return true;
+    if (!wait_exit(w)) return false;
+    w->env.node_control(w->env.ctx, true);
+    w->paused_node = false;
+    return true;
 }
 /* A job that ended without a wallet: the key is discarded when nothing was written, and the node runs again if it did. */
 static void end_failed(struct wsu *w, enum wsu_failure failure, bool node_was_running)
@@ -193,7 +211,7 @@ static void end_failed(struct wsu *w, enum wsu_failure failure, bool node_was_ru
         w->env.discard_key(w->env.ctx);
         zapp_setup_kind_forget(w->files);
     }
-    if (node_was_running) w->env.node_control(w->env.ctx, true);
+    if (node_was_running) (void)start_node(w);
     set_step(w, WSU_FAILED, failure);
 }
 
@@ -242,7 +260,7 @@ static void create_succeeded(struct wsu *w, struct sun_created *created)
 /* Starts the node if needed and waits for a chain tip. False, with the step set, when there is none: no wallet is made. */
 static bool tip_ready(struct wsu *w, bool was_running)
 {
-    if (!was_running) w->env.node_control(w->env.ctx, true);
+    if (!was_running) (void)start_node(w);
     if (wait_for_tip(w)) return true;
     if (!was_running) (void)stop_node(w);
     set_step(w, WSU_FAILED, WSU_NO_TIP);
@@ -274,7 +292,7 @@ void wsu_create_job(struct wsu *w)
     enum sun_result result = create_run(w, hex, &created);
     if (result != SUN_OK) { end_failed(w, failure_of_node(result), was_running); goto out; }
     create_succeeded(w, &created);
-    w->env.node_control(w->env.ctx, true);
+    (void)start_node(w);
 out:
     memory_cleanse(secret, sizeof(secret));
     memory_cleanse(hex, sizeof(hex));
@@ -344,7 +362,7 @@ static void restore_succeeded(struct wsu *w, const struct sun_restored *restored
     w->step = WSU_WORKING;
     w->failure = WSU_NO_FAILURE;
     pthread_mutex_unlock(&w->lock);
-    w->env.node_control(w->env.ctx, true);
+    (void)start_node(w);
     wsu_finish_job(w);
 }
 
@@ -410,9 +428,13 @@ void wsu_resume_job(struct wsu *w)
     if (!go) return;
     /* The status command refuses a datadir a running node holds, so the node is stopped for the read and started again after. */
     bool was_running = w->env.node_running(w->env.ctx);
-    if (!stop_node(w)) { set_step(w, WSU_BLOCKED, WSU_NODE_BUSY); return; }
+    if (!stop_node(w)) {
+        if (was_running) (void)start_node(w);
+        set_step(w, WSU_BLOCKED, WSU_NODE_BUSY);
+        return;
+    }
     enum sun_probe probe = sun_wallet_probe(&w->node);
-    if (was_running && !(probe == SUN_PROBE_PRESENT && kind == ZAPP_KIND_RESTORE)) w->env.node_control(w->env.ctx, true);
+    if (was_running && !(probe == SUN_PROBE_PRESENT && kind == ZAPP_KIND_RESTORE)) (void)start_node(w);
     switch (probe) {
     case SUN_PROBE_NONE:
         set_step(w, WSU_NO_WALLET, WSU_NO_FAILURE);
@@ -528,7 +550,7 @@ void wsu_cancel_start_over(struct wsu *w)
 /* Whether the running node reports an empty wallet; starts the node when needed and waits for an answer. */
 static enum wsu_idle wallet_idle(struct wsu *w)
 {
-    if (!w->env.node_running(w->env.ctx)) w->env.node_control(w->env.ctx, true);
+    (void)start_node(w);
     for (unsigned i = 0; i < IDLE_POLLS; ++i) {
         enum wsu_idle idle = w->env.wallet_idle(w->env.ctx);
         if (idle != WSU_IDLE_UNKNOWN) return idle;
@@ -546,6 +568,16 @@ static enum wsu_failure start_over_refusal(struct wsu *w)
     return idle == WSU_IDLE_UNKNOWN ? WSU_COULD_NOT_CHECK : WSU_NO_FAILURE;
 }
 
+/* A wallet that recorded no start height returns to saying so, as Cancel does: the blocked screen would describe unconfirmed words. */
+static void start_over_refused(struct wsu *w, enum wsu_failure refusal)
+{
+    bool no_start = zapp_setup_confirmed(w->files) && !zapp_setup_confirmed_start(w->files);
+    set_step(w, no_start ? WSU_FAILED : WSU_BLOCKED, no_start ? WSU_NO_BIRTHDAY : refusal);
+    pthread_mutex_lock(&w->lock);
+    if (no_start) w->refusal = refusal;   /* the screen names it; its own text does not */
+    pthread_mutex_unlock(&w->lock);
+}
+
 void wsu_start_over_job(struct wsu *w)
 {
     pthread_mutex_lock(&w->lock);
@@ -556,12 +588,8 @@ void wsu_start_over_job(struct wsu *w)
     enum wsu_failure refusal = start_over_refusal(w);
     if (refusal == WSU_NO_FAILURE && !stop_node(w)) refusal = WSU_NODE_BUSY;
     if (refusal != WSU_NO_FAILURE) {
-        /* A wallet that recorded no start height returns to saying so, as Cancel does: the blocked screen would describe unconfirmed words. */
-        bool no_start = zapp_setup_confirmed(w->files) && !zapp_setup_confirmed_start(w->files);
-        set_step(w, no_start ? WSU_FAILED : WSU_BLOCKED, no_start ? WSU_NO_BIRTHDAY : refusal);
-        pthread_mutex_lock(&w->lock);
-        if (no_start) w->refusal = refusal;   /* the screen names it; its own text does not */
-        pthread_mutex_unlock(&w->lock);
+        if (w->paused_node) (void)start_node(w);
+        start_over_refused(w, refusal);
         return;
     }
     enum wsu_failure failure = set_aside_all(w, w->env.wall_s(w->env.ctx));
@@ -571,6 +599,7 @@ void wsu_start_over_job(struct wsu *w)
         memset(&w->birthday, 0, sizeof(w->birthday));
         pthread_mutex_unlock(&w->lock);
     }
+    if (w->paused_node) (void)start_node(w);
     set_step(w, failure == WSU_NO_FAILURE ? WSU_CHOICE : WSU_FAILED, failure);
 }
 

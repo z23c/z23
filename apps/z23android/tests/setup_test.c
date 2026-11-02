@@ -412,8 +412,14 @@ struct fake {
     enum wsu_idle idle;
     unsigned random_state;
     int64_t scanned, tip;
+    /* A node that needs exit_after_ms of simulated time to exit once asked; pause_ms advances the clock, nothing sleeps. */
+    unsigned exit_after_ms;
+    int64_t now_ms, stop_at_ms;
+    bool exiting, watch;
+    int starts_refused, step_at_start;
 };
 static struct fake *fake_of;
+static struct wsu *model_of;
 static bool fake_hook(struct script *s, const char *op)
 {
     struct fake *f = fake_of;
@@ -441,14 +447,31 @@ static void f_discard(void *ctx)
     ++f->discards;
     zapp_devkey_discard(&ops, path);
 }
-static bool f_running(void *ctx) { return ((struct fake *)ctx)->running; }
+/* The process is gone once the simulated time since the stop request reaches exit_after_ms. */
+static bool f_running(void *ctx)
+{
+    struct fake *f = ctx;
+    if (f->exiting && f->now_ms - f->stop_at_ms >= (int64_t)f->exit_after_ms) { f->running = false; f->exiting = false; }
+    return f->running;
+}
 static void f_control(void *ctx, bool start)
 {
     struct fake *f = ctx;
-    if (start) { ++f->starts; f->running = true; }
-    else { ++f->stops; if (f->stops_when_asked) f->running = false; }
+    struct wsu_view v;
+    if (start && f_running(f)) { ++f->starts_refused; return; }   /* the app refuses a start while the old process exists */
+    if (start) {
+        ++f->starts;
+        f->running = true;
+        if (f->watch) { wsu_view_read(model_of, &v); f->step_at_start = v.step; zapp_words_cleanse(&v.words); }
+        return;
+    }
+    ++f->stops;
+    if (!f->stops_when_asked) return;
+    f->exiting = f->exit_after_ms > 0;
+    f->stop_at_ms = f->now_ms;
+    f->running = f->exiting;
 }
-static void f_pause(void *ctx, unsigned ms) { ++((struct fake *)ctx)->pauses; (void)ms; }
+static void f_pause(void *ctx, unsigned ms) { struct fake *f = ctx; ++f->pauses; f->now_ms += ms; }
 static bool f_random(void *ctx, uint8_t *out, size_t len) { return counter_random(&((struct fake *)ctx)->random_state, out, len); }
 static bool f_protect(void *ctx, bool on)
 {
@@ -481,6 +504,7 @@ static void fresh(struct fake *f, struct wsu *w, bool running)
     snprintf(f->script.chain, sizeof(f->script.chain), "%s", CHAIN);
     struct sun node = node_of(&f->script);
     struct wsu_env env = {f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_wall};
+    model_of = w;
     assert(wsu_init(w, &env, &node, dir));
     assert(wsu_open(w));
 }
@@ -772,7 +796,9 @@ static void start_over_tests(void)
     assert(!w.birthday.known && w.birthday.height == 0);
     char aside[760];
     snprintf(aside, sizeof(aside), "%s.unused-20261101T120000Z", node_dir);
-    assert(w.step == WSU_CHOICE && !f.running && f.stops == 1 && f.discards == 0 && zapp_setup_state(dir) == ZAPP_SETUP_NEEDED);
+    assert(w.step == WSU_CHOICE && f.stops == 1 && f.discards == 0 && zapp_setup_state(dir) == ZAPP_SETUP_NEEDED);
+    /* The node runs again on the empty datadir. */
+    assert(f.running && f.starts == 1);
     /* The whole datadir moved in one rename; an empty one stands in its place. */
     assert(holds(aside, "node.db", "chain-and-wallet") && holds(aside, "node.db-wal", "wal") && holds(aside, "node.db-shm", "shm") && holds(aside, "other.dat", "keep"));
     assert(exists_in(dir, "node") && !exists_in(node_dir, "node.db") && !exists_in(node_dir, "other.dat"));
@@ -1475,6 +1501,124 @@ static void recheck_and_intro_tests(void)
     wsu_words_intro(&v, line, sizeof(line));
     assert(!strstr(line, "start height") && !strstr(line, " 0") && strstr(line, "did not record where it starts"));
 }
+/* ---- the node needs minutes to exit ---- */
+
+#define STOP_BOUND_MS 180000u
+/* A node that takes 60 s to exit once asked: create waits for the process, writes the wallet and shows the words before the node starts. */
+static void slow_exit_tests(void)
+{
+    struct fake f;
+    struct wsu w;
+    struct wsu_view v;
+    fresh(&f, &w, true);
+    f.exit_after_ms = 60000;
+    f.watch = true;
+    script_say(&f.script, true, CREATED);
+    wsu_create_job(&w);
+    wsu_view_read(&w, &v);
+    assert(v.step == WSU_WORDS && v.words.count == 24 && v.failure == WSU_NO_FAILURE);
+    assert(f.now_ms >= 60000 && f.stops == 1 && f.starts == 1 && f.starts_refused == 0 && f.running);
+    assert(f.create_while_running == 0 && f.script.calls == 1);
+    /* The words were on screen before the node started. */
+    assert(f.step_at_start == WSU_WORDS);
+    zapp_words_cleanse(&v.words);
+    wsu_destroy(&w);
+
+    /* The same wait before a restore. */
+    fresh(&f, &w, true);
+    f.exit_after_ms = 60000;
+    wsu_open_restore(&w);
+    script_say(&f.script, true, "{\"ok\":true,\"data\":{\"recovered\":true,\"birthday_recorded\":false,\"birthday_rejected\":false}}");
+    wsu_restore_job(&w, PHRASE, 0);
+    assert(w.step != WSU_FAILED && f.now_ms >= 60000 && f.starts == 1 && f.starts_refused == 0 && f.running);
+    wsu_destroy(&w);
+}
+
+/* A node that outlasts the bound fails the create with NODE_BUSY. It is not started a second time; it is started once it is gone. */
+static void stuck_exit_tests(void)
+{
+    struct fake f;
+    struct wsu w;
+    /* Gone after 250 s: the stop wait gives up at 180 s, and the restart waits for the process and then starts. */
+    fresh(&f, &w, true);
+    f.exit_after_ms = 250000;
+    script_say(&f.script, true, CREATED);
+    wsu_create_job(&w);
+    assert(w.step == WSU_FAILED && w.failure == WSU_NODE_BUSY && f.script.calls == 0 && f.discards == 1);
+    assert(f.now_ms >= 250000 && f.starts == 1 && f.starts_refused == 0 && f.running);
+    wsu_destroy(&w);
+
+    /* Alive through both waits: no start is issued while the old process exists. */
+    fresh(&f, &w, true);
+    f.exit_after_ms = 4 * STOP_BOUND_MS;
+    script_say(&f.script, true, CREATED);
+    wsu_create_job(&w);
+    assert(w.step == WSU_FAILED && w.failure == WSU_NODE_BUSY && f.script.calls == 0);
+    assert(f.now_ms >= 2 * STOP_BOUND_MS && f.now_ms < 3 * STOP_BOUND_MS && f.starts == 0 && f.starts_refused == 0);
+    /* Once the process is gone, the next try starts the node and creates the wallet. */
+    f.now_ms += 4 * STOP_BOUND_MS;
+    assert(!f_running(&f));
+    f.exit_after_ms = 0;
+    wsu_back(&w);
+    assert(w.step == WSU_CHOICE);
+    wsu_create_job(&w);
+    assert(w.step == WSU_WORDS && f.starts == 2 && f.starts_refused == 0 && f.running);
+    wsu_destroy(&w);
+
+    /* The check after an interrupted setup, the node still exiting at the end of the wait: the node still starts once it is gone. */
+    fresh(&f, &w, true);
+    touch("wallet_key.blob");
+    w.step = WSU_CHECKING;
+    f.exit_after_ms = 250000;
+    wsu_resume_job(&w);
+    assert(w.step == WSU_BLOCKED && w.failure == WSU_NODE_BUSY && f.starts == 1 && f.starts_refused == 0 && f.running);
+    wsu_destroy(&w);
+}
+
+/* Every way a create or restore fails ends with the node running again when it ran at the start. */
+static void failed_jobs_restart_node_tests(void)
+{
+    static const char *const codes[] = {"DATADIR_LOCKED", "WALLET_ALREADY_PRESENT", "NODE_DB_UNREADABLE", "NOT_RUN", "PASSPHRASE_TOO_SHORT", "CREATE_FAILED", "INVALID_PHRASE"};
+    struct fake f;
+    struct wsu w;
+    for (size_t i = 0; i < sizeof(codes) / sizeof(codes[0]); ++i) {
+        fresh(&f, &w, true);
+        f.exit_after_ms = 30000;
+        error_reply(&f.script, codes[i]);
+        wsu_create_job(&w);
+        assert(w.step == WSU_FAILED && f.stops == 1 && f.starts == 1 && f.starts_refused == 0 && f.running);
+        wsu_destroy(&w);
+        fresh(&f, &w, true);
+        f.exit_after_ms = 30000;
+        wsu_open_restore(&w);
+        error_reply(&f.script, codes[i]);
+        wsu_restore_job(&w, PHRASE, 0);
+        assert(w.step == WSU_FAILED && f.stops == 1 && f.starts == 1 && f.starts_refused == 0 && f.running);
+        wsu_destroy(&w);
+    }
+    /* No answer at all. */
+    fresh(&f, &w, true);
+    script_say(&f.script, false, "The node did not answer.");
+    wsu_create_job(&w);
+    assert(w.step == WSU_FAILED && w.failure == WSU_UNKNOWN && f.starts == 1 && f.running);
+    wsu_destroy(&w);
+    /* The kind record cannot be written: the node was never asked to stop and keeps running. */
+    fresh(&f, &w, true);
+    char block[600];
+    snprintf(block, sizeof(block), "%s/wallet_setup_kind", dir);
+    assert(mkdir(block, 0700) == 0);
+    wsu_create_job(&w);
+    assert(w.step == WSU_FAILED && f.stops == 0 && f.running);
+    assert(rmdir(block) == 0);
+    wsu_destroy(&w);
+    /* The owner declines the screen lock after the node had to be started for the chain tip: it is stopped again, as before. */
+    fresh(&f, &w, false);
+    f.wrap_status = ZAPP_DEVKEY_DECLINED;
+    wsu_create_job(&w);
+    assert(w.failure == WSU_DECLINED && f.starts == 1 && f.stops == 1 && !f.running);
+    wsu_destroy(&w);
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2);
@@ -1521,6 +1665,9 @@ int main(int argc, char **argv)
     confirmation_is_tied_to_the_key_file_tests();
     recheck_and_intro_tests();
     screen_lock_notice_test();
+    slow_exit_tests();
+    stuck_exit_tests();
+    failed_jobs_restart_node_tests();
     forget("wallet_setup_kind");
     forget("wallet_key.blob");
     forget("wallet_setup_done");

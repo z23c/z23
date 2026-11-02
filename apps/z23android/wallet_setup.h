@@ -41,6 +41,7 @@ struct wsu_env {
     enum zapp_devkey_status (*wrap_new)(void *ctx, uint8_t secret[ZAPP_DEVKEY_SECRET]);
     void (*discard_key)(void *ctx);
     bool (*node_running)(void *ctx);
+    /* start=false pauses the node for setup and must keep the owner's on or off choice; only the owner's Stop button changes it. */
     void (*node_control)(void *ctx, bool start);
     void (*pause_ms)(void *ctx, unsigned ms);
     bool (*random)(void *ctx, uint8_t *out, size_t len);
@@ -113,6 +114,7 @@ struct wsu {
     bool protected;      /* every window protection is in force */
     enum zapp_setup_kind kind;   /* what the interrupted setup was, read when the datadir is checked */
     char leftover[WSU_LEFTOVER_MAX];   /* with ASIDE_STUCK: the paths that stay moved aside, one per line */
+    bool paused_node;         /* setup asked the node to exit and has not started it again */
 };
 bool wsu_init(struct wsu *w, const struct wsu_env *env, const struct sun *node, const char *files);
 void wsu_destroy(struct wsu *w);

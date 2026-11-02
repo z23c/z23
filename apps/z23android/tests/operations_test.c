@@ -213,12 +213,37 @@ static void saving_cases(struct zapp_runtime *r, const char *self, const char *d
     assert(waitpid(other, &status, 0) == other && WIFEXITED(status) && WEXITSTATUS(status) == 0);
     assert(!zapp_node_stopping(r));
 }
+static void mark_wanted(const struct zapp_runtime *r)
+{
+    char marker[1100];
+    assert(snprintf(marker, sizeof(marker), "%s/node-on", r->state_root) > 0);
+    int fd = open(marker, O_WRONLY | O_CREAT | O_CLOEXEC, 0600);
+    assert(fd >= 0 && close(fd) == 0 && zapp_node_wanted(r));
+}
+/* Wallet setup's stop asks the node to exit and leaves the owner's choice; the owner's Stop button removes it. */
+static void setup_stop_cases(struct zapp_runtime *r, const char *self, const char *data, const char *pidfile)
+{
+    char out[128];
+    int status;
+    pid_t other = spawn_orphan(self, data, "orphan", pidfile);
+    await_running(r);
+    mark_wanted(r);
+    assert(zapp_node_stop_for_setup(r, out, sizeof(out)) && !strcmp(out, "Node stopping. It saves its data first."));
+    assert(waitpid(other, &status, 0) == other && WIFSIGNALED(status) && WTERMSIG(status) == SIGINT);
+    assert(!zapp_node_running(r) && zapp_node_wanted(r));
+    assert(zapp_node_stop_for_setup(r, out, sizeof(out)) && !strcmp(out, "The local node is stopped.") && zapp_node_wanted(r));
+    other = spawn_orphan(self, data, "orphan", pidfile);
+    await_running(r);
+    assert(zapp_node_stop(r, out, sizeof(out)) && !zapp_node_wanted(r));
+    assert(waitpid(other, &status, 0) == other && WIFSIGNALED(status) && WTERMSIG(status) == SIGINT);
+}
 /* A node left by an earlier app process is found through its pid file and its first argument. */
 static void earlier_cases(struct zapp_runtime *r, const char *self, const char *directory)
 {
     char data[300], pidfile[300], out[128];
     assert(snprintf(data, sizeof(data), "-datadir=%s", directory) > 0);
     assert(snprintf(pidfile, sizeof(pidfile), "%s/zclassic23.pid", directory) > 0);
+    setup_stop_cases(r, self, data, pidfile);
     pid_t other = spawn_orphan(self, data, "orphan", pidfile);
     await_running(r);
     assert(!zapp_node_start(r, out, sizeof(out)) && !strcmp(out, "The local node is already running."));

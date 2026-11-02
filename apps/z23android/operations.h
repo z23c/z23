@@ -41,6 +41,9 @@ bool zapp_node_running(struct zapp_runtime *r);
 bool zapp_node_stopping(struct zapp_runtime *r);
 bool zapp_node_start(struct zapp_runtime *r, char *out, size_t cap);
 bool zapp_node_stop(struct zapp_runtime *r, char *out, size_t cap);
+/* Asks the node to exit exactly as zapp_node_stop does but leaves the marker that starts it when the app opens, so a stop made by
+ * wallet setup never changes the owner's choice. */
+bool zapp_node_stop_for_setup(struct zapp_runtime *r, char *out, size_t cap);
 /* What the node is doing after its latest boot stage, as a short plain phrase such as "opening the
  * database"; "starting the node" before it reports one. */
 const char *zapp_node_stage(struct zapp_runtime *r);

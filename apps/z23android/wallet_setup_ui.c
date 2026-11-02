@@ -132,7 +132,7 @@ static bool env_running(void *ctx) { (void)ctx; return zapp_controller_node_runn
 static void env_control(void *ctx, bool start)
 {
     (void)ctx;
-    (void)zapp_controller_node_control(start);
+    (void)(start ? zapp_controller_node_control(true) : zapp_controller_node_pause_for_setup());
 }
 static void env_pause(void *ctx, unsigned ms)
 {

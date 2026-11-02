@@ -1037,6 +1037,14 @@ bool zapp_controller_node_control(bool start)
     if (!c) return false;
     return start ? zapp_node_start(&c->runtime, text, sizeof(text)) : zapp_node_stop(&c->runtime, text, sizeof(text));
 }
+bool zapp_controller_node_pause_for_setup(void)
+{
+    char text[256];
+    pthread_mutex_lock(&startup_lock);
+    struct controller *c = current;
+    pthread_mutex_unlock(&startup_lock);
+    return c && zapp_node_stop_for_setup(&c->runtime, text, sizeof(text));
+}
 bool zapp_controller_node_paused(void)
 {
     pthread_mutex_lock(&startup_lock);
