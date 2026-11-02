@@ -419,6 +419,7 @@ ZCL_MODULE_CAPABILITY("engine/services/src/hodl_history_service.c", CAP_FS_WRITE
 ZCL_MODULE_CAPABILITY("engine/services/src/ibd_throttle.c", CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/invariant_sentinel.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/legacy_import_service.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/services/src/legacy_mirror_sync_parity_trend.c", CAP_FS_WRITE, "best-effort parity-sample trend rows saved and pruned on the db worker")
 ZCL_MODULE_CAPABILITY("engine/services/src/legacy_mirror_sync_state.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/mempool_limits.c", CAP_FS_WRITE|CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/mesh_observation_collect.c", CAP_CLOCK, "")
