@@ -496,8 +496,9 @@ static bool fetch_dumpstate_state(const char *sub, struct json_value *dst)
             json_copy(dst, st);
             ok = true;
         }
-        json_free(&body);
     }
+    /* A refused body (an RPC error envelope) is parsed too; release it. */
+    json_free(&body);
     free(raw);
     return ok;
 }
@@ -540,11 +541,11 @@ static void explain_build_release(bool have_frontier,
                                   struct json_value *blocker_state,
                                   bool have_conditions,
                                   struct json_value *conditions,
-                                  bool have_health, struct json_value *health,
-                                  bool have_sync, struct json_value *sync,
-                                  bool have_chain, struct json_value *chain,
-                                  bool have_count, struct json_value *count_j,
-                                  bool have_peers, struct json_value *peers,
+                                  struct json_value *health,
+                                  struct json_value *sync,
+                                  struct json_value *chain,
+                                  struct json_value *count_j,
+                                  struct json_value *peers,
                                   char *health_raw, char *sync_raw,
                                   char *chain_raw, char *count_raw,
                                   char *peers_raw)
@@ -552,11 +553,13 @@ static void explain_build_release(bool have_frontier,
     if (have_frontier) json_free(frontier);
     if (have_blocker) json_free(blocker_state);
     if (have_conditions) json_free(conditions);
-    if (have_health) json_free(health);
-    if (have_sync) json_free(sync);
-    if (have_chain) json_free(chain);
-    if (have_count) json_free(count_j);
-    if (have_peers) json_free(peers);
+    /* status_parse_rpc_json fills its value even when it refuses the body
+     * (an RPC error envelope, a wrong type), so these are always released. */
+    json_free(health);
+    json_free(sync);
+    json_free(chain);
+    json_free(count_j);
+    json_free(peers);
     free(health_raw); free(sync_raw); free(chain_raw);
     free(count_raw); free(peers_raw);
 }
@@ -617,8 +620,7 @@ bool explain_build(const char *topic, struct json_value *out)
 
     explain_build_release(have_frontier, &frontier, have_blocker,
                           &blocker_state, have_conditions, &conditions,
-                          have_health, &health, have_sync, &sync, have_chain,
-                          &chain, have_count, &count_j, have_peers, &peers,
+                          &health, &sync, &chain, &count_j, &peers,
                           health_raw, sync_raw, chain_raw, count_raw,
                           peers_raw);
 

@@ -158,14 +158,8 @@ bool status_json_is_rpc_error(const struct json_value *value)
 bool status_parse_rpc_json(struct json_value *out, const char *raw,
                                   enum json_type expected_type)
 {
-    if (status_parse_json(out, raw) && out->type == expected_type &&
-        !status_json_is_rpc_error(out))
-        return true;
-    /* A refused body is not handed to the caller: release the parsed tree
-     * here so callers that drop the value on refusal do not leak it. */
-    json_free(out);
-    json_init(out);
-    return false;
+    return status_parse_json(out, raw) && out->type == expected_type &&
+           !status_json_is_rpc_error(out);
 }
 
 bool status_read_height(const struct json_value *obj,
