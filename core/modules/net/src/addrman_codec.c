@@ -548,31 +548,61 @@ static int addrman_walk_bucket_table(struct addr_man *am, struct byte_stream *s,
     return 0;
 }
 
-bool addrman_deserialize(struct addr_man *am, struct byte_stream *s)
+/* Read the header into am->nKey and the out-counts. False on a short read,
+ * a rejected version or key size, or an out-of-range count. */
+static bool addrman_read_deser_header(struct addr_man *am, struct byte_stream *s,
+                                      uint8_t *nVersion_out, int32_t *nNew_out,
+                                      int32_t *nTried_out, int32_t *nUBuckets_out,
+                                      int *table_buckets_out)
 {
-    addrman_clear(am);
+    *nVersion_out = 0;
+    *nNew_out = 0;
+    *nTried_out = 0;
+    *nUBuckets_out = 0;
+    *table_buckets_out = 0;
 
     uint8_t nVersion;
-    if (!stream_read_u8(s, &nVersion)) LOG_FAIL("addrman", "deserialize: failed to read version");
+    if (!stream_read_u8(s, &nVersion)) {
+        LOG_ERROR_IN("addrman_deserialize", "addrman", "deserialize: failed to read version");
+        return false;
+    }
     if (nVersion > ADDRMAN_SER_VERSION_CURRENT) {
         /* A file from a newer build. We cannot know where its records end,
          * so guessing would mis-parse every byte after the header. Refuse
          * cleanly; the caller starts with an empty table. */
-        LOG_FAIL("addrman", "deserialize: unsupported version=%u (max %u)",
+        LOG_ERROR_IN("addrman_deserialize", "addrman", "deserialize: unsupported version=%u (max %u)",
                  (unsigned)nVersion, (unsigned)ADDRMAN_SER_VERSION_CURRENT);
         return false;
     }
     uint8_t nKeySize;
-    if (!stream_read_u8(s, &nKeySize)) LOG_FAIL("addrman", "deserialize: failed to read key size");
-    if (nKeySize != 32) LOG_FAIL("addrman", "deserialize: invalid key size=%u expected 32", nKeySize);
-    if (!stream_read_bytes(s, am->nKey.data, 32)) LOG_FAIL("addrman", "deserialize: failed to read nKey");
+    if (!stream_read_u8(s, &nKeySize)) {
+        LOG_ERROR_IN("addrman_deserialize", "addrman", "deserialize: failed to read key size");
+        return false;
+    }
+    if (nKeySize != 32) {
+        LOG_ERROR_IN("addrman_deserialize", "addrman", "deserialize: invalid key size=%u expected 32", nKeySize);
+        return false;
+    }
+    if (!stream_read_bytes(s, am->nKey.data, 32)) {
+        LOG_ERROR_IN("addrman_deserialize", "addrman", "deserialize: failed to read nKey");
+        return false;
+    }
 
     int32_t nNew, nTried;
-    if (!stream_read_i32_le(s, &nNew)) LOG_FAIL("addrman", "deserialize: failed to read new count");
-    if (!stream_read_i32_le(s, &nTried)) LOG_FAIL("addrman", "deserialize: failed to read tried count");
+    if (!stream_read_i32_le(s, &nNew)) {
+        LOG_ERROR_IN("addrman_deserialize", "addrman", "deserialize: failed to read new count");
+        return false;
+    }
+    if (!stream_read_i32_le(s, &nTried)) {
+        LOG_ERROR_IN("addrman_deserialize", "addrman", "deserialize: failed to read tried count");
+        return false;
+    }
 
     int32_t nUBuckets;
-    if (!stream_read_i32_le(s, &nUBuckets)) LOG_FAIL("addrman", "deserialize: failed to read bucket count");
+    if (!stream_read_i32_le(s, &nUBuckets)) {
+        LOG_ERROR_IN("addrman_deserialize", "addrman", "deserialize: failed to read bucket count");
+        return false;
+    }
     nUBuckets = addrman_ubuckets_for_version(nVersion, nUBuckets);
 
     /* Reject out-of-range counts BEFORE the (size_t) cast: a negative nNew/
@@ -581,11 +611,11 @@ bool addrman_deserialize(struct addr_man *am, struct byte_stream *s)
      * into the overflow, so this must return false. A valid peers.dat never has
      * negative or over-cap counts, so this rejects only corrupt input. */
     if (!addrman_new_count_ok(nNew)) {
-        LOG_FAIL("addrman", "deserialize: nNew=%d out of range", nNew);
+        LOG_ERROR_IN("addrman_deserialize", "addrman", "deserialize: nNew=%d out of range", nNew);
         return false;
     }
     if (!addrman_tried_count_ok(nTried)) {
-        LOG_FAIL("addrman", "deserialize: nTried=%d out of range", nTried);
+        LOG_ERROR_IN("addrman_deserialize", "addrman", "deserialize: nTried=%d out of range", nTried);
         return false;
     }
     /* nUBuckets is NOT a reason to refuse the file. The bucket table is a
@@ -597,10 +627,26 @@ bool addrman_deserialize(struct addr_man *am, struct byte_stream *s)
      * outcome this store exists to prevent — over something we can recompute.
      * Clamp the walk instead; nothing is read after the table, so stopping
      * early costs nothing. */
-    int table_buckets = addrman_clamp_table_buckets(nUBuckets);
+    *nVersion_out = nVersion;
+    *nNew_out = nNew;
+    *nTried_out = nTried;
+    *nUBuckets_out = nUBuckets;
+    *table_buckets_out = addrman_clamp_table_buckets(nUBuckets);
+    return true;
+}
 
+/* Load the rows, apply the bucket hint, and rebuild the index. False when
+ * the entry array or a row cannot be read. */
+static bool addrman_load_deser_body(struct addr_man *am, struct byte_stream *s,
+                                    uint8_t nVersion, int32_t nNew,
+                                    int32_t nTried, int32_t nUBuckets,
+                                    int table_buckets)
+{
     size_t need = (size_t)(nNew + nTried);
-    if (!addrman_reserve_entries(am, need)) LOG_FAIL("addrman", "deserialize: realloc failed for entries need=%zu", need);
+    if (!addrman_reserve_entries(am, need)) {
+        LOG_ERROR_IN("addrman_deserialize", "addrman", "deserialize: realloc failed for entries need=%zu", need);
+        return false;
+    }
 
     const int64_t now = GetAdjustedTime();
 
@@ -611,7 +657,10 @@ bool addrman_deserialize(struct addr_man *am, struct byte_stream *s)
      * like this keeps entries[0..id_count) hole-free, which the bucket
      * tables, the random order and the address index all rely on. */
     int *remap = NULL;
-    if (!addrman_alloc_remap(nNew, &remap)) LOG_FAIL("addrman", "deserialize: alloc failed for remap");
+    if (!addrman_alloc_remap(nNew, &remap)) {
+        LOG_ERROR_IN("addrman_deserialize", "addrman", "deserialize: alloc failed for remap");
+        return false;
+    }
 
     int placed = 0;
     int nDropped = 0;
@@ -619,7 +668,7 @@ bool addrman_deserialize(struct addr_man *am, struct byte_stream *s)
     if (!addrman_load_new_rows(am, s, nVersion, now, nNew, remap, &placed,
                                &nDropped, &n)) {
         free(remap);
-        LOG_FAIL("addrman", "deserialize: failed to read new entry n=%d", n);
+        LOG_ERROR_IN("addrman_deserialize", "addrman", "deserialize: failed to read new entry n=%d", n);
         return false;
     }
     am->id_count = placed;
@@ -629,7 +678,7 @@ bool addrman_deserialize(struct addr_man *am, struct byte_stream *s)
     if (!addrman_load_tried_rows(am, s, nVersion, now, nTried, &nLost,
                                  &nDropped, &n)) {
         free(remap);
-        LOG_FAIL("addrman", "deserialize: failed to read tried entry n=%d", n);
+        LOG_ERROR_IN("addrman_deserialize", "addrman", "deserialize: failed to read tried entry n=%d", n);
         return false;
     }
     am->tried_count = nTried - nLost;
@@ -641,12 +690,12 @@ bool addrman_deserialize(struct addr_man *am, struct byte_stream *s)
     int bucket = 0;
     int bstat = addrman_walk_bucket_table(am, s, remap, nNew, walk_limit, &bucket);
     if (bstat == 1) {
-        LOG_WARN("addrman",
+        LOG_WARN_IN("addrman_deserialize", "addrman",
                  "load: bucket table unreadable at bucket=%d — "
                  "re-bucketing the remaining addresses ourselves", bucket);
     }
     if (bstat == 2) {
-        LOG_WARN("addrman",
+        LOG_WARN_IN("addrman_deserialize", "addrman",
                  "load: bucket table truncated at bucket=%d — "
                  "re-bucketing the remaining addresses ourselves",
                  bucket);
@@ -663,11 +712,11 @@ bool addrman_deserialize(struct addr_man *am, struct byte_stream *s)
      * the position ourselves is also the safer reading of an untrusted hint. */
     int rebucketed = addrman_rebucket_unplaced(am, placed);
     if (rebucketed > 0)
-        LOG_INFO("addrman", "load: re-bucketed %d address(es) from their own "
+        LOG_INFO_IN("addrman_deserialize", "addrman", "load: re-bucketed %d address(es) from their own "
                             "addresses", rebucketed);
 
     if (nDropped > 0)
-        LOG_WARN("addrman",
+        LOG_WARN_IN("addrman_deserialize", "addrman",
                  "load: dropped %d unusable address record(s) (kept %d)",
                  nDropped, am->id_count);
 
@@ -677,4 +726,22 @@ bool addrman_deserialize(struct addr_man *am, struct byte_stream *s)
     addrman_rebuild_loaded_index(am);
 
     return true;
+}
+
+bool addrman_deserialize(struct addr_man *am, struct byte_stream *s)
+{
+    addrman_clear(am);
+
+    uint8_t nVersion = 0;
+    int32_t nNew = 0;
+    int32_t nTried = 0;
+    int32_t nUBuckets = 0;
+    int table_buckets = 0;
+    bool header_ok = addrman_read_deser_header(am, s, &nVersion, &nNew,
+                                               &nTried, &nUBuckets,
+                                               &table_buckets);
+    if (!header_ok)
+        return false;
+    return addrman_load_deser_body(am, s, nVersion, nNew, nTried, nUBuckets,
+                                   table_buckets);
 }
