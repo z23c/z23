@@ -4,8 +4,8 @@
  * check-windows-cross-syntax gate, ported from tools/lint/tu_result_cache.sh
  * (deleted). Each entry is <cache>/<gate>/<salt>/<src>.<sha>: line 1 is
  * "<rc> <haslog>", the byte-exact compiler log follows. The salt folds the
- * gate identity, both gate source files, the compiler version line, the
- * flag list and the include-set digest of the whole tree, so a hit replays
+ * gate identity, both gate source files, the compiler version line, the sha256 of
+ * the compiler binary itself (realpath), the flag list and the include-set digest of the whole tree, so a hit replays
  * exactly what a fresh compile would have written. Fail-safe, not
  * fail-open: every failure mode disables the cache with a reason; none can
  * turn a red gate green.
@@ -18,6 +18,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <ftw.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -103,6 +104,32 @@ static int cc_version_line(const char *cc, const char *scratch, char *out,
         while (n && (out[n - 1] == '\n' || out[n - 1] == '\r')) out[--n] = '\0';
     }
     return ok && out[0] ? 0 : -1;
+}
+
+/* Resolves cc (a path, or a bare name searched on PATH) to its realpath and
+ * writes the sha256 of the binary's bytes. -1 when it cannot be found or
+ * read, so a compiler the cache cannot identify turns the cache off. */
+static int cc_hash_real(const char *real, char out[WCS_SHA])
+{
+    return wcs_sha_file(real, out) == 0 && strcmp(out, "absent") != 0 ? 0 : -1;
+}
+
+static int cc_binary_sha(const char *cc, char out[WCS_SHA])
+{
+    char cand[WCS_PATH], real[PATH_MAX];
+    if (strchr(cc, '/'))
+        return realpath(cc, real) ? cc_hash_real(real, out) : -1;
+    const char *path = getenv("PATH");
+    for (const char *p = path ? path : ""; *p;) {
+        size_t n = strcspn(p, ":");
+        if (n > 0 && n < sizeof cand &&
+            !ovf(snprintf(cand, sizeof cand, "%.*s/%s", (int)n, p, cc),
+                 sizeof cand) &&
+            access(cand, X_OK) == 0 && realpath(cand, real))
+            return cc_hash_real(real, out);
+        p += n + (p[n] == ':');
+    }
+    return -1;
 }
 
 struct gen_ent { char name[256]; long mtime; };
@@ -209,13 +236,17 @@ int wcs_cache_setup(const char *gate, const char *script_path,
                     const char *cachedir)
 {
     char ccid[WCS_LINE], dg[WCS_SHA], libsha[WCS_SHA], gsha[WCS_SHA];
-    char fsha[WCS_SHA], salt[WCS_SHA], input[WCS_LINE * 2];
+    char fsha[WCS_SHA], salt[WCS_SHA], input[WCS_LINE * 2], ccbin[WCS_SHA];
     char gate_root[WCS_PATH], dir[WCS_PATH];
     c_on = 0;
     c_dir[0] = c_stats[0] = '\0';
     if (cache_env_off(cachedir)) return 0;
     if (cc_version_line(cc, scratch, ccid, sizeof ccid) != 0) {
         c_off_fmt("'%s' printed no version line", cc);
+        return 0;
+    }
+    if (cc_binary_sha(cc, ccbin) != 0) {
+        c_off_fmt("could not hash the compiler binary '%s'", cc);
         return 0;
     }
     if (wcs_include_digest(root, dg) != 0) {
@@ -226,8 +257,9 @@ int wcs_cache_setup(const char *gate, const char *script_path,
     wcs_sha_file(script_path, gsha);
     wcs_sha_file(flags_nul, fsha);
     if (ovf(snprintf(input, sizeof input,
-                     "tu-result-cache/v2\n%s\n%s\n%s\n%s\n%s\n%s\n",
-                     gate, libsha, gsha, ccid, fsha, dg), sizeof input)) {
+                     "tu-result-cache/v3\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n",
+                     gate, libsha, gsha, ccid, ccbin, fsha, dg),
+            sizeof input)) {
         c_off("salt derivation produced no digest");
         return 0;
     }

@@ -25,9 +25,9 @@ enum { SH_P = 1024, SH_UNITS = 6 };
 
 /* snprintf behind a call so an over-long path truncates visibly (the later
  * stat or open fails closed) instead of tripping format-truncation. */
-static int shp(char *dst, size_t cap, const char *fmt, ...)
+static int shp_(char *dst, size_t cap, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
-static int shp(char *dst, size_t cap, const char *fmt, ...)
+static int shp_(char *dst, size_t cap, const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
@@ -35,6 +35,13 @@ static int shp(char *dst, size_t cap, const char *fmt, ...)
     va_end(ap);
     return n < 0 || (size_t)n >= cap;
 }
+
+/* A truncated path ends the proof with the setup-error code 2 instead of
+ * running against a half path. Only used as a statement in int functions. */
+#define shp(...)                                                           \
+    do {                                                                   \
+        if (shp_(__VA_ARGS__)) return 2;                                   \
+    } while (0)
 
 static int sh_fail(const char *msg)
 {
@@ -53,10 +60,10 @@ static int sh_tree(const char *tree, const char *list)
     FILE *l = fopen(list, "w");
     if (!l) return 2;
     for (int i = 0; i < SH_UNITS; i++) {
-        shp(p, sizeof p, "%s/src/s%d.c", tree, i);
-        shp(text, sizeof text, "#include \"shared.h\"\nint s_%d(void);\n",
-                 i);
-        if (csr_write(p, text) != 0) { fclose(l); return 2; }
+        if (shp_(p, sizeof p, "%s/src/s%d.c", tree, i) ||
+            shp_(text, sizeof text, "#include \"shared.h\"\nint s_%d(void);\n",
+                 i) ||
+            csr_write(p, text) != 0) { fclose(l); return 2; }
         fprintf(l, "src/s%d.c\n", i);
     }
     fclose(l);
@@ -65,13 +72,13 @@ static int sh_tree(const char *tree, const char *list)
 
 /* Sweeps the tree whose root is the cwd, through the default store. */
 static int sh_sweep(const char *work, const char *list, const char *stub,
-                    const char *flags, int *h, int *m, int *s)
+                    const char *cc, const char *flags, int *h, int *m, int *s)
 {
     char miss[SH_P], out[SH_P], log[SH_P], rc[SH_P];
     shp(miss, sizeof miss, "%s/miss.txt", work);
     shp(out, sizeof out, "%s/out", work);
     if (csr_mkdirs(out) != 0) return 2;
-    wcs_cache_setup("tu-cache-shared-selftest", stub, stub, flags, work, ".",
+    wcs_cache_setup("tu-cache-shared-selftest", stub, cc, flags, work, ".",
                     NULL);
     if (!wcs_cache_on())
         return sh_fail("the default store refused to enable");
@@ -82,13 +89,15 @@ static int sh_sweep(const char *work, const char *list, const char *stub,
     while (fgets(src, sizeof src, mf)) {
         src[strcspn(src, "\n")] = '\0';
         if (!src[0]) continue;
-        shp(log, sizeof log, "%s/%s.log", out, src);
-        shp(rc, sizeof rc, "%s/%s.rc", out, src);
-        char *const cargv[] = { (char *)stub, (char *)"-c", src, NULL };
+        char *const cargv[] = { (char *)cc, (char *)"-c", src, NULL };
         char dir[SH_P];
-        shp(dir, sizeof dir, "%s/src", out);
-        csr_mkdirs(dir);
-        wcs_cache_compile(log, rc, stub, cargv, src);
+        if (shp_(log, sizeof log, "%s/%s.log", out, src) ||
+            shp_(rc, sizeof rc, "%s/%s.rc", out, src) ||
+            shp_(dir, sizeof dir, "%s/src", out) || csr_mkdirs(dir) != 0) {
+            fclose(mf);
+            return 2;
+        }
+        wcs_cache_compile(log, rc, cc, cargv, src);
     }
     fclose(mf);
     wcs_cache_counts(h, m, s);
@@ -122,17 +131,43 @@ static int sh_paths(const char *base, struct sh_env *e)
 
 /* Sweep tree i from inside it; cwd is restored by the caller. */
 static int sh_run(const struct sh_env *e, int i, const char *stub,
-                  const char *flags, int *h, int *m, int *s)
+                  const char *cc, const char *flags, int *h, int *m, int *s)
 {
     if (chdir(e->tree[i]) != 0) return 2;
-    return sh_sweep(e->work[i], e->list[i], stub, flags, h, m, s);
+    return sh_sweep(e->work[i], e->list[i], stub, cc, flags, h, m, s);
+}
+
+/* A compiler whose --version line is unchanged but whose bytes differ (the
+ * stub plus a trailing comment) must miss every TU: the version line alone
+ * does not identify a compiler. */
+static int sh_cc_identity(struct sh_env *e, const char *stub,
+                          const char *flags)
+{
+    static char body[4096];
+    char alt[SH_P];
+    int h, m, s, rc;
+    FILE *f = fopen(stub, "rb");
+    if (!f) return 2;
+    size_t n = fread(body, 1, sizeof body - 32, f);
+    int bad = ferror(f) || !feof(f);
+    fclose(f);
+    if (bad) return 2;
+    memcpy(body + n, "\n# other compiler bytes\n", 25);
+    shp(alt, sizeof alt, "%s/stub_cc_alt.sh", e->work[1]);
+    if (csr_write(alt, body) != 0 || chmod(alt, 0755) != 0) return 2;
+    if ((rc = sh_run(e, 1, stub, stub, flags, &h, &m, &s)) != 0) return rc;
+    if ((rc = sh_expect("the unchanged compiler (control)", h, m, s, SH_UNITS,
+                        0, 0)) != 0) return rc;
+    if ((rc = sh_run(e, 1, stub, alt, flags, &h, &m, &s)) != 0) return rc;
+    return sh_expect("a compiler with the same version line but other bytes",
+                     h, m, s, 0, SH_UNITS, SH_UNITS);
 }
 
 static int sh_cases(struct sh_env *e, const char *stub, const char *flags)
 {
     int h, m, s, rc;
     char p[SH_P];
-    if ((rc = sh_run(e, 0, stub, flags, &h, &m, &s)) != 0) return rc;
+    if ((rc = sh_run(e, 0, stub, stub, flags, &h, &m, &s)) != 0) return rc;
     if ((rc = sh_expect("a cold run in the first tree", h, m, s, 0,
                         SH_UNITS, SH_UNITS)) != 0) return rc;
     struct stat st;
@@ -142,14 +177,15 @@ static int sh_cases(struct sh_env *e, const char *stub, const char *flags)
     shp(p, sizeof p, "%s/.cache", e->tree[0]);
     if (stat(p, &st) == 0)
         return sh_fail("the default store was created inside the worktree");
-    if ((rc = sh_run(e, 1, stub, flags, &h, &m, &s)) != 0) return rc;
+    if ((rc = sh_run(e, 1, stub, stub, flags, &h, &m, &s)) != 0) return rc;
     if ((rc = sh_expect("an identical tree at another path", h, m, s,
                         SH_UNITS, 0, 0)) != 0) return rc;
     shp(p, sizeof p, "%s/src/shared.h", e->tree[1]);
     if (csr_write(p, "#define SHARED_ST 2\n") != 0) return 2;
-    if ((rc = sh_run(e, 1, stub, flags, &h, &m, &s)) != 0) return rc;
-    return sh_expect("a changed header in the second tree", h, m, s, 0,
-                     SH_UNITS, SH_UNITS);
+    if ((rc = sh_run(e, 1, stub, stub, flags, &h, &m, &s)) != 0) return rc;
+    if ((rc = sh_expect("a changed header in the second tree", h, m, s, 0,
+                        SH_UNITS, SH_UNITS)) != 0) return rc;
+    return sh_cc_identity(e, stub, flags);
 }
 
 int wcs_selftest_shared_store(const char *base, const char *stub,
