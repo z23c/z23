@@ -247,7 +247,8 @@ struct cx_pick {
     const struct cx_row *rows;
     struct cx_unit unit;
     const char *file;
-    int band; /* 0 sorts first; only the pin_band order sets it */
+    int band;      /* 0 sorts first; only the pin_band order sets it */
+    bool banded;   /* pin_band order: the function count only picks the band */
 };
 
 static int cx_pick_cmp(const void *x, const void *y)
@@ -255,7 +256,7 @@ static int cx_pick_cmp(const void *x, const void *y)
     const struct cx_pick *a = x, *b = y;
     if (a->band != b->band)
         return a->band < b->band ? -1 : 1;
-    if (a->unit.n != b->unit.n)
+    if (!a->banded && a->unit.n != b->unit.n)
         return a->unit.n < b->unit.n ? -1 : 1;
     if (a->unit.max != b->unit.max)
         return a->unit.max < b->unit.max ? -1 : 1;
@@ -296,6 +297,7 @@ static size_t cx_select(const struct cx_row *rows, size_t n, const char *root,
         picks[kept].file = rows[i].file;
         picks[kept].unit = (struct cx_unit){ i, j - i,
                                              cx_max_score(rows, i, j), lines };
+        picks[kept].banded = a->pin_band;
         picks[kept].band = a->pin_band && (j - i < 3 || j - i > 6);
         kept++;
     }

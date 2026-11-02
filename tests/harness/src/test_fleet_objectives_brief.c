@@ -649,6 +649,33 @@ _test_next:;
     return failures;
 }
 
+/* Two in-band files: p.c has 3 pins and the higher max M (30), q.c has 6 pins
+ * and the lower one (16). The brief's order is band, max M, path: q.c wins,
+ * where dev.cx.next's fewest-functions order would take p.c. */
+static int fob_case_order(const char *root, const struct fob_paths *p)
+{
+    int failures = 0;
+    struct fob_paths q = *p;
+    (void)snprintf(q.repo, sizeof(q.repo), "%s/order", root);
+    (void)snprintf(q.baseline, sizeof(q.baseline), "%s/order.txt", root);
+    q.exclude[0] = '\0';
+    TEST("brief: inside the 3-6 pin band the lowest max M wins over fewer "
+         "pins") {
+        ASSERT(mkdir(q.repo, 0700) == 0);
+        ASSERT(fob_repo_file(&q, "apps/p.c", 10));
+        ASSERT(fob_repo_file(&q, "apps/q.c", 10));
+        ASSERT(fob_write(q.baseline,
+                         "apps/p.c:f:30\napps/p.c:g:16\napps/p.c:h:16\n"
+                         "apps/q.c:f:16\napps/q.c:g:16\napps/q.c:h:16\n"
+                         "apps/q.c:i:16\napps/q.c:j:16\napps/q.c:k:16\n"));
+        ASSERT(fob_git_repo(q.repo));
+        ASSERT(fob_narrow_picks(&q, "", "apps/q.c"));
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 #define FOB_HARD_ID "baseline_hardening_banned_str"
 #define FOB_HARD_PATH "tools/lint/hardening_ratchet_baseline.txt"
 
@@ -770,6 +797,7 @@ int test_fleet_objectives_brief(void)
         failures += fob_case_protected(&paths);
         failures += fob_case_narrow(root, &paths);
         failures += fob_case_live(root, &paths);
+        failures += fob_case_order(root, &paths);
         failures += fob_case_baseline_row(&paths);
     }
     (void)unsetenv("ZCL_LAND_OBJECTIVES_DATADIR");

@@ -19,8 +19,10 @@ struct zcl_cx_pick_in {
     /* The caller's own filter (NULL = none): false skips the file. */
     bool (*allow)(const char *file, void *ctx);
     void *allow_ctx;
-    /* false: fewest functions first. true: files of 3 to 6 functions first,
-     * each group then by lowest max score and path. */
+    /* false (dev cx next): fewest functions first, then lowest max score,
+     * then path. true (the brief): files of 3 to 6 functions first, then,
+     * inside and outside that band alike, lowest max score, then path; the
+     * function count itself does not rank. */
     bool pin_band;
 };
 
