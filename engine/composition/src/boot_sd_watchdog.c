@@ -466,18 +466,19 @@ static void boot_sd_watchdog_describe_pillars(char *out, size_t cap)
                            ? now_us - ll.message_last_progress_us : -1;
     int64_t dial_age = ll.dial_last_progress_us > 0
                            ? now_us - ll.dial_last_progress_us : -1;
-    char drive[160];
+    char drive[160], hold[96];
     boot_sd_watchdog_live_drive_fields(drive, sizeof(drive));
+    boot_sd_watchdog_format_hold_fields(hold, sizeof(hold));
     snprintf(out, cap,
              "sweep=%d tick_running=%d tick_hb_age_us=%lld "
              "connman_started=%d msg_age_us=%lld dial_age_us=%lld "
-             "dial_wait_until_us=%lld bound_us=%lld work_probe=%d %s",
+             "dial_wait_until_us=%lld bound_us=%lld work_probe=%d %s %s",
              (int)boot_sd_watchdog_supervisor_alive(),
              (int)supervisor_tick_runner_running(),
              (long long)supervisor_tick_runner_last_hb_age_us(),
              (int)ll.started, (long long)msg_age, (long long)dial_age,
              (long long)ll.dial_bounded_wait_until_us,
-             (long long)bound_us, (int)thread_work_probe_supported(), drive);
+             (long long)bound_us, (int)thread_work_probe_supported(), drive, hold);
 }
 
 /* boot_progress freshness, shared by the collect tick (STATUS label) and
@@ -565,6 +566,106 @@ bool boot_sd_watchdog_test_connman_alive(bool msg_marker_fresh,
 }
 #endif
 
+/* ── Disk-stall hold ─────────────────────────────────────────────────────
+ * Called by the pet thread only when the runtime gate says "dead". The hold
+ * is tied to the STALL, not to the process: it applies only when every
+ * stalled pillar thread (the tick runner, or a connman loop whose heartbeat
+ * is dead) is itself st=D on a disk-IO wchan, or is futex-waiting on a known
+ * lock (cs_main, activation mutex, progress tx lock) whose holder is st=D on
+ * a disk-IO wchan. The same D thread must explain two consecutive checks, the
+ * network (socket thread, sweep) must be live, and the hold ends after
+ * BOOT_SD_DISK_HOLD_GRACE_US from the first dead period of the episode.
+ * Everything else withholds exactly as before.
+ *
+ * The work probe is NOT re-sampled here: its since-last-period state belongs
+ * to boot_sd_watchdog_runtime_alive. */
+struct wd_stall_state {
+    int64_t start_us;   /* 0 = no episode */
+    long    prev_d_tid; /* D thread that explained the previous check */
+};
+
+static bool boot_sd_watchdog_marker_fresh(int64_t last_us, int64_t now_us,
+                                          int64_t bound_us)
+{
+    return last_us > 0 && now_us - last_us >= 0 && now_us - last_us < bound_us;
+}
+
+static size_t boot_sd_watchdog_stalled_pillars(long *tids, size_t cap,
+                                               bool *started_out)
+{
+    int64_t bound_us = boot_sd_watchdog_freshness_bound_us();
+    int64_t now_us   = platform_time_monotonic_us();
+    struct connman_loop_liveness ll;
+    connman_observe_loop_liveness(
+        g_sd_watchdog_ctx ? g_sd_watchdog_ctx->connman : NULL, &ll);
+    *started_out = ll.started;
+    bool tick_stalled = supervisor_tick_runner_running() &&
+        supervisor_tick_runner_last_hb_age_us() >= bound_us;
+    bool msg_stalled = ll.started && !boot_sd_watchdog_marker_fresh(
+        ll.message_last_progress_us, now_us, bound_us);
+    bool dial_stalled = ll.started &&
+        !boot_sd_watchdog_marker_fresh(ll.dial_last_progress_us, now_us,
+                                       bound_us) &&
+        ll.dial_bounded_wait_until_us <= now_us;
+    long cand[3] = { supervisor_tick_runner_tid(), ll.message_tid,
+                     ll.dial_tid };
+    bool stalled[3] = { tick_stalled, msg_stalled, dial_stalled };
+    size_t n = 0;
+    for (size_t i = 0; i < 3 && n < cap; i++)
+        if (stalled[i])
+            tids[n++] = cand[i];
+    return n;
+}
+
+/* Pet-thread only. The LOG_WARN below takes the logger lock on the pet
+ * thread; it is rate-limited to one line per BOOT_SD_DISK_HOLD_LOG_US. */
+static bool boot_sd_watchdog_disk_hold(struct wd_stall_state *st)
+{
+    int64_t now_us = platform_time_monotonic_us();
+    if (st->start_us == 0)
+        st->start_us = now_us;
+    if (g_sd_watchdog_ctx && g_sd_watchdog_ctx->state)
+        boot_sd_watchdog_register_cs_main(&g_sd_watchdog_ctx->state->cs_main);
+    long tids[3];
+    bool started = false;
+    size_t n = boot_sd_watchdog_stalled_pillars(tids, 3, &started);
+    char ev[768];
+    long d_tid = 0;
+    enum boot_sd_disk_hold_verdict v = boot_sd_watchdog_disk_hold_scan(
+        started, boot_sd_watchdog_supervisor_alive(), now_us - st->start_us,
+        tids, n, &d_tid, ev, sizeof(ev));
+    v = boot_sd_watchdog_hold_confirm(v, d_tid, &st->prev_d_tid);
+    boot_sd_watchdog_disk_hold_note(v);
+    static int64_t s_last_log_us;
+    if (v == BOOT_SD_HOLD &&
+        (s_last_log_us == 0 ||
+         now_us - s_last_log_us >= BOOT_SD_DISK_HOLD_LOG_US)) {
+        s_last_log_us = now_us;
+        LOG_WARN("boot",
+                 "[sd_watchdog] disk-stall hold: keeping the ping while the "
+                 "stalled work waits on disk IO (d_tid=%ld): held_s=%lld "
+                 "grace_s=%lld holds=%lu %s",
+                 d_tid, (long long)((now_us - st->start_us) / 1000000),
+                 (long long)(BOOT_SD_DISK_HOLD_GRACE_US / 1000000),
+                 boot_sd_watchdog_disk_hold_count(), ev);
+    }
+    return v == BOOT_SD_HOLD;
+}
+
+/* The runtime gate, widened by the disk-stall hold. A live gate ends the
+ * stall episode (grace clock and D-thread memory reset); a dead one asks
+ * the hold. */
+static bool boot_sd_watchdog_gate_with_hold(bool runtime_gate_alive,
+                                            struct wd_stall_state *st)
+{
+    if (runtime_gate_alive) {
+        st->start_us = 0;
+        st->prev_d_tid = 0;
+        return true;
+    }
+    return boot_sd_watchdog_disk_hold(st);
+}
+
 /* PET half. Sleeps in 1 s slices so boot_sd_watchdog_stop's pthread_join
  * never waits a full period. */
 static void *boot_sd_watchdog_pet_main(void *arg)
@@ -575,6 +676,7 @@ static void *boot_sd_watchdog_pet_main(void *arg)
     int64_t period_us = bound_us / 4;
     if (period_us < 5000000)  period_us = 5000000;  /* never DoS systemd */
     if (period_us > 60000000) period_us = 60000000;
+    struct wd_stall_state stall = {0};
     while (!atomic_load(&g_pet_stop) &&
            !thread_registry_shutdown_requested()) {
         bool recent = boot_sd_watchdog_recent_progress();
@@ -583,7 +685,9 @@ static void *boot_sd_watchdog_pet_main(void *arg)
             boot_sd_watchdog_supervisor_alive(),
             recent);
         boot_sd_watchdog_maybe_notify_ready();
-        bool pet = boot_sd_watchdog_pet_decide(runtime_gate_alive);
+        bool pet = boot_sd_watchdog_pet_decide(
+            boot_sd_watchdog_gate_with_hold(runtime_gate_alive,
+                                            &stall));
         /* Log on the edge only. Withholding the ping asks systemd to SIGABRT
          * this process WatchdogSec later; the log names which leg refused.
          * Edge-triggered, so a long refusal logs once, not once per period. */
@@ -592,7 +696,7 @@ static void *boot_sd_watchdog_pet_main(void *arg)
             /* `runtime=0` names the conjunction, not the term. Print every
              * pillar's raw observation so the journal shows which leg refused
              * and by how much. */
-            char pillars[512];
+            char pillars[640];
             boot_sd_watchdog_describe_pillars(pillars, sizeof(pillars));
             if (pet) {
                 LOG_INFO("boot",

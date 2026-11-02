@@ -647,6 +647,77 @@ unsigned boot_sd_watchdog_task_priority(const char *stat,
 size_t boot_sd_watchdog_order_snapshot(const unsigned char *prio, size_t n,
                                        size_t cap, size_t *order);
 
+/* Disk-stall hold. When the ping would be withheld but every stalled thread
+ * is readable and at least one is blocked in the kernel on disk IO (st=D with
+ * an IO wchan), and network liveness is fresh, the pet thread keeps pinging
+ * for at most BOOT_SD_DISK_HOLD_GRACE_US per stall episode. */
+#define BOOT_SD_DISK_HOLD_GRACE_US (30LL * 60 * 1000000)
+#define BOOT_SD_DISK_HOLD_LOG_US   (60LL * 1000000)
+
+enum boot_sd_disk_hold_verdict {
+    BOOT_SD_HOLD = 0,            /* keep pinging */
+    BOOT_SD_HOLD_NO_PROC,        /* /proc task state unreadable */
+    BOOT_SD_HOLD_NO_STALL,       /* no stalled pillar thread identified */
+    BOOT_SD_HOLD_NO_IO_WAIT,     /* a stalled pillar is not waiting on disk IO
+                                  * (itself or via a known lock's D+IO holder) */
+    BOOT_SD_HOLD_NETWORK_STALE,  /* connman/socket thread/sweep not live */
+    BOOT_SD_HOLD_GRACE_ELAPSED,  /* hold budget spent: withhold */
+    BOOT_SD_HOLD_UNCONFIRMED,    /* same D thread not yet seen on 2 checks */
+};
+/* One stalled pillar thread's /proc text (NULL stat/wchan = unreadable). */
+struct boot_sd_pillar_obs {
+    long        tid;
+    const char *stat;
+    const char *wchan;
+    const char *syscall;
+};
+/* A known lock and its recorded holder's /proc text (holder_tid 0 = free or
+ * unknown; NULL holder_stat/wchan = unreadable). */
+struct boot_sd_known_lock {
+    const void *addr;
+    long        holder_tid;
+    const char *holder_stat;
+    const char *holder_wchan;
+};
+/* Pure accumulator. Threads feed socket liveness; stalled pillars feed the
+ * explanation. Fixture tests drive it directly. */
+struct boot_sd_hold_acc {
+    size_t seen, unreadable, pillars, explained;
+    bool   socket_alive;
+    long   d_tid;
+};
+bool boot_sd_watchdog_task_in_disk_wait(const char *stat, const char *wchan);
+bool boot_sd_watchdog_task_is_live_socket_thread(const char *stat,
+                                                 const char *wchan);
+bool boot_sd_watchdog_pillar_explained(const struct boot_sd_pillar_obs *p,
+                                       const struct boot_sd_known_lock *locks,
+                                       size_t nlocks, long *d_tid);
+void boot_sd_watchdog_hold_acc_add(struct boot_sd_hold_acc *a,
+                                   const char *stat, const char *wchan);
+void boot_sd_watchdog_hold_acc_add_pillar(
+    struct boot_sd_hold_acc *a, const struct boot_sd_pillar_obs *p,
+    const struct boot_sd_known_lock *locks, size_t nlocks);
+enum boot_sd_disk_hold_verdict
+boot_sd_watchdog_hold_acc_verdict(const struct boot_sd_hold_acc *a,
+                                  bool connman_started, bool sweep_alive,
+                                  int64_t held_us, int64_t grace_us);
+/* HOLD only when the same D+IO thread explained the previous check too. */
+enum boot_sd_disk_hold_verdict
+boot_sd_watchdog_hold_confirm(enum boot_sd_disk_hold_verdict v, long d_tid,
+                              long *prev_d_tid);
+/* Live scan; pillar_tids are the stalled pillar threads. */
+enum boot_sd_disk_hold_verdict
+boot_sd_watchdog_disk_hold_scan(bool connman_started, bool sweep_alive,
+                                int64_t held_us, const long *pillar_tids,
+                                size_t npillars, long *d_tid, char *evidence,
+                                size_t cap);
+/* Tell the evidence code where cs_main lives (a known lock). */
+void boot_sd_watchdog_register_cs_main(const void *cs_main);
+const char *boot_sd_watchdog_disk_hold_name(enum boot_sd_disk_hold_verdict v);
+void boot_sd_watchdog_disk_hold_note(enum boot_sd_disk_hold_verdict v);
+unsigned long boot_sd_watchdog_disk_hold_count(void);
+void boot_sd_watchdog_format_hold_fields(char *out, size_t cap);
+
 #ifdef ZCL_TESTING
 /* Pillar 7's own refusal: a root supervisor sweep that has stopped advancing
  * withholds the systemd keepalive, so systemd restarts the process. A sweep

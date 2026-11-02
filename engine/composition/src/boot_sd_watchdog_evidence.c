@@ -19,6 +19,7 @@
 #include "storage/progress_store.h"
 #include "services/chain_activation_service.h"
 #include "validation/process_block.h"
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #if defined(__linux__)
@@ -233,19 +234,28 @@ static void snapshot_one_task(long tid, bool priority)
         snapshot_task_stack(tid);
 }
 
+static _Atomic(const void *) s_cs_main_addr;
+
+void boot_sd_watchdog_register_cs_main(const void *cs_main)
+{
+    atomic_store(&s_cs_main_addr, cs_main);
+}
+
+#define EVIDENCE_NLOCKS 3
 static void known_locks(const void **locks)
 {
     struct chain_activation_controller *ctl = process_block_activation_controller();
     locks[0] = ctl ? (const void *)&ctl->mutex : NULL;
     locks[1] = progress_store_tx_lock_addr();
+    locks[2] = atomic_load(&s_cs_main_addr);
 }
 
 static void log_lock_addresses(const void *const *locks)
 {
     LOG_WARN("boot",
              "[sd_watchdog] lock addresses (match a futex a0): "
-             "activation_mutex=%p progress_store_tx_lock=%p",
-             locks[0], locks[1]);
+             "activation_mutex=%p progress_store_tx_lock=%p cs_main=%p",
+             locks[0], locks[1], locks[2]);
 }
 
 static void log_tx_lock_holder(void)
@@ -271,7 +281,8 @@ static void classify_tasks(const long *tids, size_t n, const void *const *locks,
         bool has_sc = os_proc_self_task_read(tids[i], "syscall", sc,
                                              sizeof(sc));
         prio[i] = (unsigned char)boot_sd_watchdog_task_priority(
-            ok ? stat : NULL, has_sc ? sc : NULL, locks, 2);
+            ok ? stat : NULL, has_sc ? sc : NULL, locks,
+            EVIDENCE_NLOCKS);
     }
 }
 
@@ -288,7 +299,7 @@ static atomic_flag s_scan_busy = ATOMIC_FLAG_INIT;
 
 static void log_thread_snapshot_scan(void)
 {
-    const void *locks[2];
+    const void *locks[EVIDENCE_NLOCKS];
     size_t total = 0;
     known_locks(locks);
     log_lock_addresses(locks);
@@ -320,4 +331,356 @@ void boot_sd_watchdog_log_thread_snapshot(void)
     }
     log_thread_snapshot_scan();
     atomic_flag_clear(&s_scan_busy);
+}
+
+/* ── Disk-stall hold: pure classifier + status counters ──────────────────
+ *
+ * 11-02 incident: every pillar thread (tick runner, connman msg and open)
+ * sat in a futex wait, queued behind ONE thread that was st=D in pread64
+ * (wchan folio_wait_bit_common) while the socket thread kept polling. The
+ * futex waiters are not the evidence; the D+IO thread is. So the scan covers
+ * every thread of the process (the same view the withhold snapshot prints).
+ *
+ * A thread parked in the kernel on disk IO is waiting on the device, not
+ * wedged, and restarting makes it worse (the restart is itself heavy IO).
+ * HOLD requires positive evidence on every leg; a missing /proc read, a
+ * futex-only process (deadlock), a dead socket thread, a stale sweep or a
+ * spent grace all say WITHHOLD, the pre-existing behavior. */
+
+static bool wchan_is_disk_io(const char *w)
+{
+    static const char *const prefixes[] = {
+        "folio_wait", "wait_on_page", "rq_qos", "wbt_", "io_schedule",
+        "bit_wait_io", "submit_bio", "blk", "balance_dirty",
+    };
+    if (!w || !w[0])
+        return false;
+    for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++)
+        if (strncmp(w, prefixes[i], strlen(prefixes[i])) == 0)
+            return true;
+    return false;
+}
+
+bool boot_sd_watchdog_task_in_disk_wait(const char *stat, const char *wchan)
+{
+    char comm[32], wc[64] = "";
+    char state = '?';
+    if (!stat || !wchan || !task_parse_stat(stat, comm, sizeof(comm), &state))
+        return false;
+    if (state != 'D')
+        return false;
+    snprintf(wc, sizeof(wc), "%s", wchan);
+    trim_eol(wc);
+    return wchan_is_disk_io(wc);
+}
+
+/* The connman socket thread (comm is cut to 15 chars) is alive when it is
+ * running or sleeping in a non-futex wait: do_poll/ep_poll/hrtimer are the
+ * healthy idle states; D or a futex wait means it too is stuck. */
+bool boot_sd_watchdog_task_is_live_socket_thread(const char *stat,
+                                                 const char *wchan)
+{
+    char comm[32], wc[64] = "";
+    char state = '?';
+    if (!stat || !wchan || !task_parse_stat(stat, comm, sizeof(comm), &state))
+        return false;
+    if (strncmp(comm, "zcl_connman_soc", 15) != 0)
+        return false;
+    if (state != 'R' && state != 'S')
+        return false;
+    snprintf(wc, sizeof(wc), "%s", wchan);
+    trim_eol(wc);
+    return strncmp(wc, "futex", 5) != 0;
+}
+
+void boot_sd_watchdog_hold_acc_add(struct boot_sd_hold_acc *a,
+                                   const char *stat, const char *wchan)
+{
+    if (!a)
+        return;
+    a->seen++;
+    if (!stat || !wchan) {
+        a->unreadable++;
+        return;
+    }
+    if (boot_sd_watchdog_task_is_live_socket_thread(stat, wchan))
+        a->socket_alive = true;
+}
+
+/* A stalled pillar thread is EXPLAINED by disk IO when it is itself st=D on
+ * an IO wchan, or when it is in a futex wait (syscall 202, a0 = the futex
+ * word) on the address of a KNOWN lock whose recorded holder is itself st=D
+ * on an IO wchan. Anything else (unknown lock, free lock, unreadable holder)
+ * is unexplained, and an unexplained stall keeps the status-quo kill. On
+ * success *d_tid is the D+IO thread the stall waits on. */
+/* The futex word address (syscall a0) of a futex-wait syscall text, or 0. */
+static unsigned long long futex_wait_addr(const char *syscall_text)
+{
+    char nr[24] = "", a0[32] = "";
+    if (!syscall_text || sscanf(syscall_text, "%23s %31s", nr, a0) != 2 ||
+        !syscall_nr_is_futex(nr))
+        return 0;
+    char *end = NULL;
+    unsigned long long v = strtoull(a0, &end, 0);
+    return (end == a0 || *end != '\0') ? 0 : v;
+}
+
+/* True when `addr` is a known lock whose recorded holder waits on disk IO. */
+static bool lock_holder_waits_on_disk(const struct boot_sd_known_lock *locks,
+                                      size_t nlocks, unsigned long long addr,
+                                      long *d_tid)
+{
+    for (size_t i = 0; i < nlocks; i++) {
+        if (!locks[i].addr || (unsigned long long)(uintptr_t)locks[i].addr != addr)
+            continue;
+        if (locks[i].holder_tid <= 0 ||
+            !boot_sd_watchdog_task_in_disk_wait(locks[i].holder_stat,
+                                                locks[i].holder_wchan))
+            return false;
+        if (d_tid)
+            *d_tid = locks[i].holder_tid;
+        return true;
+    }
+    return false;
+}
+
+bool boot_sd_watchdog_pillar_explained(const struct boot_sd_pillar_obs *p,
+                                       const struct boot_sd_known_lock *locks,
+                                       size_t nlocks, long *d_tid)
+{
+    if (!p || !p->stat || !p->wchan)
+        return false;
+    if (boot_sd_watchdog_task_in_disk_wait(p->stat, p->wchan)) {
+        if (d_tid)
+            *d_tid = p->tid;
+        return true;
+    }
+    unsigned long long addr = futex_wait_addr(p->syscall);
+    if (addr == 0 || !locks)
+        return false;
+    return lock_holder_waits_on_disk(locks, nlocks, addr, d_tid);
+}
+
+void boot_sd_watchdog_hold_acc_add_pillar(
+    struct boot_sd_hold_acc *a, const struct boot_sd_pillar_obs *p,
+    const struct boot_sd_known_lock *locks, size_t nlocks)
+{
+    if (!a)
+        return;
+    a->pillars++;
+    long d = 0;
+    if (boot_sd_watchdog_pillar_explained(p, locks, nlocks, &d)) {
+        a->explained++;
+        if (a->d_tid == 0)
+            a->d_tid = d;
+    }
+}
+
+enum boot_sd_disk_hold_verdict
+boot_sd_watchdog_hold_acc_verdict(const struct boot_sd_hold_acc *a,
+                                  bool connman_started, bool sweep_alive,
+                                  int64_t held_us, int64_t grace_us)
+{
+    if (!a || a->seen == 0 || a->unreadable >= a->seen)
+        return BOOT_SD_HOLD_NO_PROC;
+    if (a->pillars == 0)
+        return BOOT_SD_HOLD_NO_STALL;
+    if (a->explained < a->pillars)
+        return BOOT_SD_HOLD_NO_IO_WAIT;
+    if (!connman_started || !sweep_alive || !a->socket_alive)
+        return BOOT_SD_HOLD_NETWORK_STALE;
+    if (held_us < 0 || held_us >= grace_us)
+        return BOOT_SD_HOLD_GRACE_ELAPSED;
+    return BOOT_SD_HOLD;
+}
+
+/* Two consecutive checks must be explained by the SAME D+IO thread. */
+enum boot_sd_disk_hold_verdict
+boot_sd_watchdog_hold_confirm(enum boot_sd_disk_hold_verdict v, long d_tid,
+                              long *prev_d_tid)
+{
+    if (v != BOOT_SD_HOLD) {
+        *prev_d_tid = 0;
+        return v;
+    }
+    if (d_tid <= 0 || *prev_d_tid != d_tid) {
+        *prev_d_tid = d_tid;
+        return BOOT_SD_HOLD_UNCONFIRMED;
+    }
+    return BOOT_SD_HOLD;
+}
+
+const char *boot_sd_watchdog_disk_hold_name(enum boot_sd_disk_hold_verdict v)
+{
+    /* Indexed by the enum; keep in step with boot_internal.h. */
+    static const char *const names[] = {
+        [BOOT_SD_HOLD] = "hold",
+        [BOOT_SD_HOLD_NO_PROC] = "proc-unreadable",
+        [BOOT_SD_HOLD_NO_STALL] = "no-stalled-pillar",
+        [BOOT_SD_HOLD_NO_IO_WAIT] = "stall-not-on-disk-io",
+        [BOOT_SD_HOLD_NETWORK_STALE] = "network-stale",
+        [BOOT_SD_HOLD_GRACE_ELAPSED] = "grace-elapsed",
+        [BOOT_SD_HOLD_UNCONFIRMED] = "d-thread-unconfirmed",
+    };
+    return (unsigned)v < sizeof(names) / sizeof(names[0]) ? names[v] : "?";
+}
+
+static _Atomic unsigned long s_disk_hold_count;
+static _Atomic int s_disk_hold_last = -1;
+
+void boot_sd_watchdog_disk_hold_note(enum boot_sd_disk_hold_verdict v)
+{
+    if (v == BOOT_SD_HOLD)
+        atomic_fetch_add(&s_disk_hold_count, 1);
+    atomic_store(&s_disk_hold_last, (int)v);
+}
+
+unsigned long boot_sd_watchdog_disk_hold_count(void)
+{
+    return atomic_load(&s_disk_hold_count);
+}
+
+void boot_sd_watchdog_format_hold_fields(char *out, size_t cap)
+{
+    if (!out || cap == 0)
+        return;
+    int last = atomic_load(&s_disk_hold_last);
+    snprintf(out, cap, "disk_hold_count=%lu disk_hold_last=%s",
+             atomic_load(&s_disk_hold_count),
+             last < 0 ? "none"
+                      : boot_sd_watchdog_disk_hold_name(
+                            (enum boot_sd_disk_hold_verdict)last));
+}
+
+/* Owner tid of a glibc mutex (the lock word's owner field, set while held,
+ * 0 when free). Racy by nature: read once, and the holder's own /proc state
+ * is then read independently. Other libcs report 0 = unknown = no hold. */
+static long mutex_owner_tid(const void *m)
+{
+#if defined(__GLIBC__)
+    return m ? (long)((const pthread_mutex_t *)m)->__data.__owner : 0;
+#else
+    (void)m;
+    return 0;
+#endif
+}
+
+struct hold_lock_scratch {
+    char stat[EVIDENCE_NLOCKS][EVIDENCE_FILE_MAX];
+    char wchan[EVIDENCE_NLOCKS][64];
+};
+
+/* Fill the known-lock table: address, recorded holder, holder's /proc text. */
+static void fill_known_locks(struct boot_sd_known_lock *kl,
+                             struct hold_lock_scratch *sc)
+{
+    const void *addrs[EVIDENCE_NLOCKS];
+    known_locks(addrs);
+    for (size_t i = 0; i < EVIDENCE_NLOCKS; i++) {
+        long holder = 0;
+        if (i == 1) {
+            if (!progress_store_tx_holder(&holder, NULL))
+                holder = 0;
+        } else {
+            holder = mutex_owner_tid(addrs[i]);
+        }
+        kl[i] = (struct boot_sd_known_lock){ .addr = addrs[i],
+                                             .holder_tid = holder };
+        sc->stat[i][0] = sc->wchan[i][0] = '\0';
+        if (holder > 0 &&
+            os_proc_self_task_read(holder, "stat", sc->stat[i],
+                                   sizeof(sc->stat[i])) &&
+            os_proc_self_task_read(holder, "wchan", sc->wchan[i],
+                                   sizeof(sc->wchan[i]))) {
+            kl[i].holder_stat  = sc->stat[i];
+            kl[i].holder_wchan = sc->wchan[i];
+        }
+    }
+}
+
+/* Append " <label>[task line]" to `evidence` while it fits. */
+static void evidence_append(char *evidence, size_t cap, const char *label,
+                            long tid, const char *stat, const char *wchan,
+                            const char *sc)
+{
+    char line[192];
+    size_t used = evidence ? strlen(evidence) : 0;
+    if (!evidence || cap == 0 || used + 16 >= cap ||
+        !boot_sd_watchdog_format_task_line(line, sizeof(line), tid, stat,
+                                           wchan, sc))
+        return;
+    snprintf(evidence + used, cap - used, "%s%s[%s]", used ? " " : "", label,
+             line);
+}
+
+/* Read one stalled pillar's /proc text and feed the accumulator. */
+static void scan_one_pillar(struct boot_sd_hold_acc *acc, long tid,
+                            const struct boot_sd_known_lock *kl, char *evidence,
+                            size_t cap)
+{
+    char stat[EVIDENCE_FILE_MAX], wchan[64], sc[EVIDENCE_FILE_MAX];
+    stat[0] = wchan[0] = sc[0] = '\0';
+    bool ok = tid > 0 &&
+              os_proc_self_task_read(tid, "stat", stat, sizeof(stat)) &&
+              os_proc_self_task_read(tid, "wchan", wchan, sizeof(wchan));
+    (void)os_proc_self_task_read(tid, "syscall", sc, sizeof(sc));
+    struct boot_sd_pillar_obs p = { .tid = tid, .stat = ok ? stat : NULL,
+                                    .wchan = ok ? wchan : NULL, .syscall = sc };
+    boot_sd_watchdog_hold_acc_add_pillar(acc, &p, kl, EVIDENCE_NLOCKS);
+    if (ok)
+        evidence_append(evidence, cap, "pillar", tid, stat, wchan, sc);
+}
+
+/* Walk every thread once for the connman socket thread's liveness. A thread
+ * that exited between listing and reading is skipped: only an unreadable
+ * procfs as a whole is "missing /proc". */
+static void scan_all_threads(struct boot_sd_hold_acc *acc)
+{
+    size_t total = 0;
+    size_t n = os_proc_self_task_ids(s_scan.tids, EVIDENCE_SCAN_THREADS,
+                                     &total);
+    for (size_t i = 0; i < n; i++) {
+        char stat[EVIDENCE_FILE_MAX], wchan[64];
+        stat[0] = wchan[0] = '\0';
+        if (os_proc_self_task_read(s_scan.tids[i], "stat", stat,
+                                   sizeof(stat)) &&
+            os_proc_self_task_read(s_scan.tids[i], "wchan", wchan,
+                                   sizeof(wchan)))
+            boot_sd_watchdog_hold_acc_add(acc, stat, wchan);
+    }
+}
+
+/* Live scan. `pillar_tids` are the stalled pillar threads (the tick runner
+ * and/or the connman loops whose heartbeat is dead). Reuses the snapshot's
+ * static tid array and busy flag (one scan at a time; no malloc on a stalled
+ * process). */
+enum boot_sd_disk_hold_verdict
+boot_sd_watchdog_disk_hold_scan(bool connman_started, bool sweep_alive,
+                                int64_t held_us, const long *pillar_tids,
+                                size_t npillars, long *d_tid, char *evidence,
+                                size_t cap)
+{
+    if (evidence && cap)
+        evidence[0] = '\0';
+    if (d_tid)
+        *d_tid = 0;
+    if (atomic_flag_test_and_set(&s_scan_busy))
+        return BOOT_SD_HOLD_NO_PROC;
+    struct boot_sd_hold_acc acc = {0};
+    struct boot_sd_known_lock kl[EVIDENCE_NLOCKS];
+    struct hold_lock_scratch scratch;
+    fill_known_locks(kl, &scratch);
+    for (size_t i = 0; i < npillars; i++)
+        scan_one_pillar(&acc, pillar_tids[i], kl, evidence, cap);
+    for (size_t i = 0; i < EVIDENCE_NLOCKS; i++)
+        if (kl[i].holder_stat)
+            evidence_append(evidence, cap, "holder", kl[i].holder_tid,
+                            kl[i].holder_stat, kl[i].holder_wchan, "");
+    scan_all_threads(&acc);
+    atomic_flag_clear(&s_scan_busy);
+    if (d_tid)
+        *d_tid = acc.d_tid;
+    return boot_sd_watchdog_hold_acc_verdict(&acc, connman_started,
+                                             sweep_alive, held_us,
+                                             BOOT_SD_DISK_HOLD_GRACE_US);
 }

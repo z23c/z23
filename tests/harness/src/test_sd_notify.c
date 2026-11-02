@@ -1209,8 +1209,212 @@ static int test_sd_watchdog_holder_and_order(void)
     return failures;
 }
 
+/* Disk-stall hold classifier. Fixtures follow the 11-02 incident shape: the
+ * pillar threads futex-wait on a lock whose holder is st=D in
+ * folio_wait_bit_common while the connman socket thread keeps polling. */
+#define HOLD_G BOOT_SD_DISK_HOLD_GRACE_US
+#if defined(SYS_futex)
+#define HOLD_FUTEX_NR ((long)SYS_futex)
+#else
+#define HOLD_FUTEX_NR 202L
+#endif
+static const char *const k_d_stat   = "796187 (z23) D 1 2 3 0\n";
+static const char *const k_s_stat   = "763 (zcl_supervisor_) S 1 2 3 0\n";
+static const char *const k_sock     = "764 (zcl_connman_soc) S 1 2 3 0\n";
+static const char *const k_sock_d   = "764 (zcl_connman_soc) D 1 2 3 0\n";
+#define CSMAIN_ADDR 0xc0de00ULL
+
+struct hold_fx {
+    char sys_cs[64];            /* pillar syscall text */
+    struct boot_sd_pillar_obs pillar;
+    struct boot_sd_known_lock locks[3];
+};
+
+static void hold_fx_init(struct hold_fx *f, unsigned long long futex_a0)
+{
+    memset(f, 0, sizeof(*f));
+    snprintf(f->sys_cs, sizeof(f->sys_cs), "%ld 0x%llx 0x80 0x0",
+             HOLD_FUTEX_NR, futex_a0);
+    f->pillar = (struct boot_sd_pillar_obs){ .tid = 100, .stat = k_s_stat,
+        .wchan = "futex_wait_queue\n", .syscall = f->sys_cs };
+    f->locks[2] = (struct boot_sd_known_lock){
+        .addr = (const void *)(uintptr_t)CSMAIN_ADDR, .holder_tid = 796187,
+        .holder_stat = k_d_stat, .holder_wchan = "folio_wait_bit_common\n" };
+}
+
+static enum boot_sd_disk_hold_verdict
+hold_run(const struct hold_fx *f, size_t npillars, const char *sock_stat,
+         const char *sock_wchan, bool started, bool sweep, int64_t held,
+         long *d_tid)
+{
+    struct boot_sd_hold_acc a = {0};
+    boot_sd_watchdog_hold_acc_add(&a, sock_stat, sock_wchan);
+    for (size_t i = 0; i < npillars; i++)
+        boot_sd_watchdog_hold_acc_add_pillar(&a, &f->pillar, f->locks, 3);
+    if (d_tid)
+        *d_tid = a.d_tid;
+    return boot_sd_watchdog_hold_acc_verdict(&a, started, sweep, held, HOLD_G);
+}
+
+static int test_sd_watchdog_disk_hold(void)
+{
+    int failures = 0;
+    SDN_CHECK("io-wait: D + folio_wait_bit_common",
+              boot_sd_watchdog_task_in_disk_wait(k_d_stat,
+                                                 "folio_wait_bit_common\n"));
+    SDN_CHECK("io-wait: D + rq_qos_wait / blk / io_schedule",
+              boot_sd_watchdog_task_in_disk_wait(k_d_stat, "rq_qos_wait") &&
+              boot_sd_watchdog_task_in_disk_wait(k_d_stat, "blk_mq_get_tag") &&
+              boot_sd_watchdog_task_in_disk_wait(k_d_stat, "io_schedule"));
+    SDN_CHECK("io-wait: S + io wchan is not D",
+              !boot_sd_watchdog_task_in_disk_wait(k_s_stat,
+                                                  "folio_wait_bit_common"));
+    SDN_CHECK("io-wait: D + futex / empty / 0 wchan is not IO",
+              !boot_sd_watchdog_task_in_disk_wait(k_d_stat,
+                                                  "futex_wait_queue") &&
+              !boot_sd_watchdog_task_in_disk_wait(k_d_stat, "") &&
+              !boot_sd_watchdog_task_in_disk_wait(k_d_stat, "0"));
+    SDN_CHECK("io-wait: garbage stat is not IO",
+              !boot_sd_watchdog_task_in_disk_wait("garbage", "rq_qos_wait"));
+    SDN_CHECK("socket: polling thread is live",
+              boot_sd_watchdog_task_is_live_socket_thread(k_sock, "do_poll"));
+    SDN_CHECK("socket: futex-waiting, D, or other-named thread is not",
+              !boot_sd_watchdog_task_is_live_socket_thread(
+                  k_sock, "futex_wait_queue") &&
+              !boot_sd_watchdog_task_is_live_socket_thread(k_sock_d,
+                                                           "do_poll") &&
+              !boot_sd_watchdog_task_is_live_socket_thread(k_s_stat,
+                                                           "do_poll"));
+
+    struct hold_fx f;
+    long d = 0;
+    hold_fx_init(&f, CSMAIN_ADDR);
+    SDN_CHECK("HOLD: pillar futex on cs_main whose holder is D+IO",
+              hold_run(&f, 2, k_sock, "do_poll", true, true, 0, &d) ==
+              BOOT_SD_HOLD && d == 796187);
+    SDN_CHECK("HOLD: one microsecond inside the grace",
+              hold_run(&f, 1, k_sock, "do_poll", true, true, HOLD_G - 1,
+                       NULL) == BOOT_SD_HOLD);
+    SDN_CHECK("WITHHOLD: grace elapsed",
+              hold_run(&f, 1, k_sock, "do_poll", true, true, HOLD_G, NULL) ==
+              BOOT_SD_HOLD_GRACE_ELAPSED);
+    SDN_CHECK("WITHHOLD: connman not started / sweep stale",
+              hold_run(&f, 1, k_sock, "do_poll", false, true, 0, NULL) ==
+              BOOT_SD_HOLD_NETWORK_STALE &&
+              hold_run(&f, 1, k_sock, "do_poll", true, false, 0, NULL) ==
+              BOOT_SD_HOLD_NETWORK_STALE);
+    SDN_CHECK("WITHHOLD: socket thread itself stuck",
+              hold_run(&f, 1, k_sock, "futex_wait_queue", true, true, 0,
+                       NULL) == BOOT_SD_HOLD_NETWORK_STALE);
+
+    /* The reviewer's case: a deadlock plus an UNRELATED D+IO thread. The
+     * pillar futex-waits on cs_main but cs_main's holder is a futex-waiting
+     * thread; a separate crawler thread sits in D+IO elsewhere. */
+    hold_fx_init(&f, CSMAIN_ADDR);
+    f.locks[2].holder_stat  = k_s_stat;
+    f.locks[2].holder_wchan = "futex_wait_queue\n";
+    SDN_CHECK("WITHHOLD: deadlock + unrelated D+IO thread elsewhere",
+              hold_run(&f, 1, k_sock, "do_poll", true, true, 0, NULL) ==
+              BOOT_SD_HOLD_NO_IO_WAIT);
+    hold_fx_init(&f, CSMAIN_ADDR);
+    f.locks[2].holder_tid = 0; /* free lock */
+    SDN_CHECK("WITHHOLD: known lock with no holder",
+              hold_run(&f, 1, k_sock, "do_poll", true, true, 0, NULL) ==
+              BOOT_SD_HOLD_NO_IO_WAIT);
+    hold_fx_init(&f, 0xdead00ULL);
+    SDN_CHECK("WITHHOLD: pillar futex on an unknown address",
+              hold_run(&f, 1, k_sock, "do_poll", true, true, 0, NULL) ==
+              BOOT_SD_HOLD_NO_IO_WAIT);
+    hold_fx_init(&f, CSMAIN_ADDR);
+    f.locks[2].holder_stat = NULL; /* holder /proc unreadable */
+    SDN_CHECK("WITHHOLD: lock holder /proc unreadable",
+              hold_run(&f, 1, k_sock, "do_poll", true, true, 0, NULL) ==
+              BOOT_SD_HOLD_NO_IO_WAIT);
+    hold_fx_init(&f, CSMAIN_ADDR);
+    f.pillar.stat = NULL;
+    SDN_CHECK("WITHHOLD: pillar /proc unreadable",
+              hold_run(&f, 1, k_sock, "do_poll", true, true, 0, NULL) ==
+              BOOT_SD_HOLD_NO_IO_WAIT);
+    hold_fx_init(&f, CSMAIN_ADDR);
+    SDN_CHECK("WITHHOLD: no stalled pillar identified",
+              hold_run(&f, 0, k_sock, "do_poll", true, true, 0, NULL) ==
+              BOOT_SD_HOLD_NO_STALL);
+    SDN_CHECK("WITHHOLD: no threads readable at all",
+              hold_run(&f, 1, NULL, NULL, true, true, 0, NULL) ==
+              BOOT_SD_HOLD_NO_PROC);
+
+    /* The pillar itself in D+IO needs no lock. */
+    hold_fx_init(&f, 0);
+    f.pillar.stat  = k_d_stat;
+    f.pillar.wchan = "rq_qos_wait\n";
+    f.pillar.tid   = 100;
+    SDN_CHECK("HOLD: the stalled pillar is itself D+IO",
+              hold_run(&f, 1, k_sock, "do_poll", true, true, 0, &d) ==
+              BOOT_SD_HOLD && d == 100);
+    /* All stalled pillars must be explained. */
+    {
+        struct boot_sd_hold_acc a = {0};
+        struct hold_fx g;
+        hold_fx_init(&g, CSMAIN_ADDR);
+        boot_sd_watchdog_hold_acc_add(&a, k_sock, "do_poll");
+        boot_sd_watchdog_hold_acc_add_pillar(&a, &g.pillar, g.locks, 3);
+        hold_fx_init(&g, 0xdead00ULL);
+        boot_sd_watchdog_hold_acc_add_pillar(&a, &g.pillar, g.locks, 3);
+        SDN_CHECK("WITHHOLD: one of two stalled pillars unexplained",
+                  boot_sd_watchdog_hold_acc_verdict(&a, true, true, 0,
+                                                    HOLD_G) ==
+                  BOOT_SD_HOLD_NO_IO_WAIT);
+    }
+
+    /* Persistence: the same D thread on two consecutive checks. */
+    long prev = 0;
+    SDN_CHECK("WITHHOLD: D thread seen only once",
+              boot_sd_watchdog_hold_confirm(BOOT_SD_HOLD, 796187, &prev) ==
+              BOOT_SD_HOLD_UNCONFIRMED && prev == 796187);
+    SDN_CHECK("HOLD: same D thread on the second consecutive check",
+              boot_sd_watchdog_hold_confirm(BOOT_SD_HOLD, 796187, &prev) ==
+              BOOT_SD_HOLD);
+    SDN_CHECK("WITHHOLD: a different D thread restarts the count",
+              boot_sd_watchdog_hold_confirm(BOOT_SD_HOLD, 555, &prev) ==
+              BOOT_SD_HOLD_UNCONFIRMED && prev == 555);
+    SDN_CHECK("a non-hold verdict clears the memory",
+              boot_sd_watchdog_hold_confirm(BOOT_SD_HOLD_NO_IO_WAIT, 0,
+                                            &prev) ==
+              BOOT_SD_HOLD_NO_IO_WAIT && prev == 0);
+    SDN_CHECK("WITHHOLD: confirm then a gap then the same thread again",
+              boot_sd_watchdog_hold_confirm(BOOT_SD_HOLD, 796187, &prev) ==
+              BOOT_SD_HOLD_UNCONFIRMED);
+    SDN_CHECK("grace is 30 minutes",
+              BOOT_SD_DISK_HOLD_GRACE_US == 30LL * 60 * 1000000);
+
+    /* Live scan on this process: no stalled pillars named -> never held. */
+    char ev[300];
+    long dt = 0;
+    SDN_CHECK("live scan: no stalled pillar is not held",
+              boot_sd_watchdog_disk_hold_scan(true, true, 0, NULL, 0, &dt, ev,
+                                              sizeof(ev)) != BOOT_SD_HOLD);
+    long self = os_proc_self_tid();
+    SDN_CHECK("live scan: a running pillar is not held",
+              boot_sd_watchdog_disk_hold_scan(true, true, 0, &self, 1, &dt,
+                                              ev, sizeof(ev)) !=
+              BOOT_SD_HOLD);
+
+    unsigned long before = boot_sd_watchdog_disk_hold_count();
+    boot_sd_watchdog_disk_hold_note(BOOT_SD_HOLD);
+    boot_sd_watchdog_disk_hold_note(BOOT_SD_HOLD_NO_IO_WAIT);
+    char out[128];
+    boot_sd_watchdog_format_hold_fields(out, sizeof(out));
+    SDN_CHECK("status: hold count advances only on HOLD",
+              boot_sd_watchdog_disk_hold_count() == before + 1);
+    SDN_CHECK("status: count and last reason named",
+              strstr(out, "disk_hold_last=stall-not-on-disk-io") &&
+              strstr(out, "disk_hold_count="));
+    return failures;
+}
+
 int test_sd_notify(void)
 {
     return test_sd_notify_platform_arm() + test_sd_watchdog_evidence() +
-           test_sd_watchdog_holder_and_order();
+           test_sd_watchdog_holder_and_order() +
+           test_sd_watchdog_disk_hold();
 }
