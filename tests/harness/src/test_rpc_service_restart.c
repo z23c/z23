@@ -442,9 +442,63 @@ static int rsr_check_repeated_cycles(struct zcl_service_kernel *kernel)
     return failures;
 }
 
-int test_rpc_service_restart(void)
+/* The rpc_http_start phase timer, over an injected clock: a phase under 500 ms
+ * stays silent, a phase of 500 ms or more is named, the phase times sum to
+ * the whole start, and the total line appears only at 500 ms or more. */
+static int rsr_check_start_phase_timer(void)
 {
     int failures = 0;
+    size_t slow = 99;
+    int64_t sum = -1;
+    char breakdown[320];
+
+    const char *const quiet_names[] = {"a", "b", "c"};
+    const int64_t quiet_ends[] = {1100, 1200, 1300};
+    bool total = rpc_http_test_start_timing(quiet_names, quiet_ends, 3, 1000,
+                                            &slow, &sum, breakdown,
+                                            sizeof(breakdown));
+    printf("rpc_service_restart: fast phases stay silent... ");
+    if (slow == 0 && !total && sum == 300 &&
+        strcmp(breakdown, "a=100 b=100 c=100") == 0) {
+        printf("OK\n");
+    } else {
+        printf("FAIL\n");
+        failures++;
+    }
+
+    /* 499 ms is under the threshold, 500 ms is on it. */
+    const char *const edge_names[] = {"a", "b", "c"};
+    const int64_t edge_ends[] = {1100, 1599, 2099};
+    total = rpc_http_test_start_timing(edge_names, edge_ends, 3, 1000, &slow,
+                                       &sum, breakdown, sizeof(breakdown));
+    printf("rpc_service_restart: a 500 ms phase is named, 499 ms is not... ");
+    if (slow == 1 && total && sum == 1099 &&
+        strcmp(breakdown, "a=100 b=499 c=500") == 0) {
+        printf("OK\n");
+    } else {
+        printf("FAIL\n");
+        failures++;
+    }
+
+    /* Many phases each under the threshold still log the total, and the
+     * phases account for all of it. */
+    const char *const many_names[] = {"a", "b", "c", "d", "e", "f"};
+    const int64_t many_ends[] = {1100, 1200, 1300, 1400, 1500, 1600};
+    total = rpc_http_test_start_timing(many_names, many_ends, 6, 1000, &slow,
+                                       &sum, breakdown, sizeof(breakdown));
+    printf("rpc_service_restart: small phases add up to a logged total... ");
+    if (slow == 0 && total && sum == 600) {
+        printf("OK\n");
+    } else {
+        printf("FAIL\n");
+        failures++;
+    }
+    return failures;
+}
+
+int test_rpc_service_restart(void)
+{
+    int failures = rsr_check_start_phase_timer();
 
     char datadir[256];
     if (rsr_prepare_datadir(datadir, sizeof(datadir)) != 0)

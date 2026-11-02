@@ -564,13 +564,88 @@ bool rpc_http_tls_listener_name(char *text, size_t text_size, uint16_t *port)
  * step stalled. */
 #define RPC_HTTP_START_SLOW_PHASE_MS 500
 
-static void rpc_http_start_phase(const char *phase, int64_t *mark_ms)
+/* Phase marks chain from the start instant, so the phase times sum to the
+ * whole start by construction. Every phase is appended to the breakdown;
+ * the total (with that breakdown) is logged when it reaches the threshold. */
+struct rpc_http_start_timer {
+    int64_t start_ms;
+    int64_t mark_ms;
+    int64_t sum_ms;
+    char breakdown[320];
+    size_t len;
+};
+
+static void rpc_http_start_timer_init(struct rpc_http_start_timer *t, int64_t now_ms)
 {
-    int64_t now = platform_time_monotonic_ms();
-    if (now - *mark_ms >= RPC_HTTP_START_SLOW_PHASE_MS)
+    t->start_ms = now_ms;
+    t->mark_ms = now_ms;
+    t->breakdown[0] = '\0';
+    t->len = 0;
+    t->sum_ms = 0;
+}
+
+/* Close the phase that ran since the previous mark. Returns true when it
+ * was slow enough to be logged. */
+static bool rpc_http_start_phase_at(struct rpc_http_start_timer *t,
+                                    const char *phase, int64_t now_ms)
+{
+    int64_t took = now_ms - t->mark_ms;
+    t->sum_ms += took;
+    bool slow = took >= RPC_HTTP_START_SLOW_PHASE_MS;
+    if (slow)
         LOG_WARN("rpc", "rpc_http_start: slow phase %s took %lld ms", phase,
-                 (long long)(now - *mark_ms));
-    *mark_ms = now;
+                 (long long)took);
+    if (t->len < sizeof(t->breakdown)) {
+        int n = snprintf(t->breakdown + t->len, sizeof(t->breakdown) - t->len,
+                         "%s%s=%lld", t->len ? " " : "", phase, (long long)took);
+        if (n > 0)
+            t->len = (size_t)n >= sizeof(t->breakdown) - t->len
+                         ? sizeof(t->breakdown)
+                         : t->len + (size_t)n;
+    }
+    t->mark_ms = now_ms;
+    return slow;
+}
+
+/* Log the whole start with its phase breakdown when it took the threshold
+ * or more. Returns true when logged. */
+static bool rpc_http_start_finish_at(const struct rpc_http_start_timer *t,
+                                     int64_t now_ms)
+{
+    int64_t total = now_ms - t->start_ms;
+    if (total < RPC_HTTP_START_SLOW_PHASE_MS)
+        return false;
+    LOG_WARN("rpc", "rpc_http_start: total %lld ms (phases ms: %s)",
+             (long long)total, t->breakdown);
+    return true;
+}
+
+static void rpc_http_start_phase(struct rpc_http_start_timer *t, const char *phase)
+{
+    (void)rpc_http_start_phase_at(t, phase, platform_time_monotonic_ms());
+}
+
+bool rpc_http_test_start_timing(const char *const *phases, const int64_t *ends_ms,
+                                size_t count, int64_t start_ms,
+                                size_t *slow_phases, int64_t *sum_ms,
+                                char *breakdown, size_t breakdown_size)
+{
+    struct rpc_http_start_timer t;
+    rpc_http_start_timer_init(&t, start_ms);
+    size_t slow = 0;
+    int64_t last = start_ms;
+    for (size_t i = 0; i < count; i++) {
+        if (rpc_http_start_phase_at(&t, phases[i], ends_ms[i]))
+            slow++;
+        last = ends_ms[i];
+    }
+    if (slow_phases)
+        *slow_phases = slow;
+    if (sum_ms)
+        *sum_ms = t.sum_ms;
+    if (breakdown && breakdown_size > 0)
+        snprintf(breakdown, breakdown_size, "%s", t.breakdown);
+    return rpc_http_start_finish_at(&t, last);
 }
 
 bool rpc_http_start(const struct rpc_table *table, uint16_t port,
@@ -579,7 +654,8 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
 {
     if (rpc_http_already_started())
         return false;
-    int64_t phase_mark_ms = platform_time_monotonic_ms();
+    struct rpc_http_start_timer phase_timer;
+    rpc_http_start_timer_init(&phase_timer, platform_time_monotonic_ms());
 
     int queue_wait_ms = RPC_HTTP_QUEUE_WAIT_MS_DEFAULT;
     {
@@ -593,22 +669,22 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
         .timeout = NULL,
         .metrics_http_enable = false,
     };
-    rpc_http_start_phase("queue_start", &phase_mark_ms);
+    rpc_http_start_phase(&phase_timer, "queue_start");
     rpc_http_auth_configure(rpc_user, rpc_password, datadir, port);
-    rpc_http_start_phase("auth_configure", &phase_mark_ms);
+    rpc_http_start_phase(&phase_timer, "auth_configure");
     if (!rpc_loopback_listener_open(port))
         goto fail;
-    rpc_http_start_phase("listener_open", &phase_mark_ms);
+    rpc_http_start_phase(&phase_timer, "listener_open");
 
     rpc_http_configure_middleware();
-    rpc_http_start_phase("middleware", &phase_mark_ms);
+    rpc_http_start_phase(&phase_timer, "middleware");
 
     rpc_http_init_rpc_timeout();
     if (!rpc_timeout_start_watchdog(&g_rpc_timeout)) {
         fprintf(stderr, "RPC server: rpc_timeout watchdog start failed\n");  // obs-ok:helper-context-logged
     }
     g_request_context.timeout = &g_rpc_timeout;
-    rpc_http_start_phase("timeout_watchdog", &phase_mark_ms);
+    rpc_http_start_phase(&phase_timer, "timeout_watchdog");
 
     /* Optional GET /metrics Prometheus endpoint. Accept "1", "true",
      * "yes", "on" as truthy; anything else leaves it off. */
@@ -618,6 +694,7 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
         g_request_context.metrics_http_enable = true;
         printf("RPC server: GET /metrics Prometheus endpoint enabled\n");
     }
+    rpc_http_start_phase(&phase_timer, "metrics_setup");
 
     /* Optional TLS listener for non-loopback RPC. Set ZCL_RPC_TLS_CERT
      * and ZCL_RPC_TLS_KEY to PEM file paths. TLS listener binds to
@@ -654,7 +731,7 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
         }
     }
 
-    rpc_http_start_phase("tls_setup", &phase_mark_ms);
+    rpc_http_start_phase(&phase_timer, "tls_setup");
     g_running = true;
     printf("RPC server listening on 127.0.0.1:%u\n", port);
     if (g_tls_ctx)
@@ -663,7 +740,7 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
 
     if (!rpc_http_spawn_workers())
         goto fail;
-    rpc_http_start_phase("spawn_workers", &phase_mark_ms);
+    rpc_http_start_phase(&phase_timer, "spawn_workers");
 
     g_listen_thread_fd = g_listen_fd;
     if (thread_registry_spawn("zcl_rpc_listen", listen_thread_fn, NULL,
@@ -673,11 +750,13 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
     }
     g_listen_thread_started = true;
     thread_liveness_register(&g_rpc_listen_liveness, "zcl_rpc_listen", 0, 0);
+    rpc_http_start_phase(&phase_timer, "listen_thread_spawn");
 
     rpc_tls_spawn_listener();
 
     rpc_http_auth_start_rotation();
-    rpc_http_start_phase("listener_threads", &phase_mark_ms);
+    rpc_http_start_phase(&phase_timer, "tls_listener_and_rotation");
+    (void)rpc_http_start_finish_at(&phase_timer, platform_time_monotonic_ms());
     return true;
 
 fail:

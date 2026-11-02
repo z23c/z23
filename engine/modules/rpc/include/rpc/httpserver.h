@@ -112,4 +112,15 @@ bool rpc_http_test_fastlane_allows(const char *method, const char *params_json);
  * classifiable (complete, single Content-Length, allowlisted body). */
 bool rpc_http_test_fastlane_peek_matches(const char *raw);
 
+/* test surface: run the rpc_http_start phase timer over an injected clock.
+ * phases[i] ends at ends_ms[i]; the first phase starts at start_ms. Phases of
+ * 500 ms or more are logged as slow (count in *slow_phases); *sum_ms is the
+ * sum of the phase times and breakdown receives "name=ms ..." for every
+ * phase. Returns true when the whole start (last end - start_ms) reached
+ * 500 ms and the total line was logged. */
+bool rpc_http_test_start_timing(const char *const *phases, const int64_t *ends_ms,
+                                size_t count, int64_t start_ms,
+                                size_t *slow_phases, int64_t *sum_ms,
+                                char *breakdown, size_t breakdown_size);
+
 #endif
