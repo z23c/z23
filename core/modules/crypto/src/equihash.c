@@ -374,6 +374,19 @@ static void eh_row_xor_merge(struct eh_row *out,
     }
 }
 
+/* Frees one collision round on a reject: every input row, the input array,
+ * the `merged` output rows already built this round, and the output array.
+ * A reject at pair i has built Xc[0 .. i/2-1]; freeing only X leaked them on
+ * every invalid solution. */
+static void eh_round_free(struct eh_row *X, size_t count,
+                          struct eh_row *Xc, size_t merged)
+{
+    for (size_t j = 0; j < count; j++) free(X[j].data);
+    for (size_t j = 0; j < merged; j++) free(Xc[j].data);
+    free(X);
+    free(Xc);
+}
+
 bool equihash_is_valid_solution(const struct equihash_params *p,
                                 const struct blake2b_ctx *base_state,
                                 const unsigned char *soln, size_t soln_len)
@@ -502,22 +515,19 @@ bool equihash_is_valid_solution(const struct equihash_params *p,
         for (size_t i = 0; i < count; i += 2) {
             if (!eh_row_has_collision(&X[i], &X[i + 1],
                                       p->collision_byte_length)) {
-                for (size_t j = 0; j < count; j++) free(X[j].data);
-                free(X); free(Xc);
+                eh_round_free(X, count, Xc, i / 2);
                 LOG_FAIL("equihash",
                          "is_valid_solution: expected collision at i=%zu (PoW reject)", i);
             }
             if (eh_row_indices_before(&X[i + 1], &X[i],
                                        hash_len, len_indices)) {
-                for (size_t j = 0; j < count; j++) free(X[j].data);
-                free(X); free(Xc);
+                eh_round_free(X, count, Xc, i / 2);
                 LOG_FAIL("equihash",
                          "is_valid_solution: indices out of order at i=%zu (PoW reject)", i);
             }
             if (!eh_row_distinct_indices(&X[i], &X[i + 1],
                                           hash_len, len_indices)) {
-                for (size_t j = 0; j < count; j++) free(X[j].data);
-                free(X); free(Xc);
+                eh_round_free(X, count, Xc, i / 2);
                 LOG_FAIL("equihash",
                          "is_valid_solution: non-distinct indices at i=%zu (PoW reject)", i);
             }
@@ -525,9 +535,7 @@ bool equihash_is_valid_solution(const struct equihash_params *p,
                               hash_len, len_indices,
                               p->collision_byte_length, width);
             if (!Xc[i / 2].data) {
-                for (size_t j = 0; j < count; j++) free(X[j].data);
-                for (size_t j = 0; j < i / 2; j++) free(Xc[j].data);
-                free(X); free(Xc);
+                eh_round_free(X, count, Xc, i / 2);
                 LOG_FAIL("equihash",
                          "is_valid_solution: eh_row_xor_merge alloc failed at i=%zu",
                          i);

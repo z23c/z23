@@ -895,3 +895,7 @@ later lane flips it HARD.
   old ROOT: 608c4a1e4fcdad4c1afa3fe0be8d8c326b830dbe1631ce01a11204727821a9f6
   by: appended by the lane author after make core-seal; not the unseal ritual
   (the new ROOT is the one in core/MANIFEST.sha3 at the commit that carries this entry)
+
+- 2026-11-02T19:05:59Z — REASON: equihash: free this round's merged rows on a PoW reject; behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
+  old ROOT: e23bc5b69bf867c14bd27b4a7091f11d8838ad83251adf6f41ceff2e775bef54
+  by: owner unseal ritual (make core-unseal)
