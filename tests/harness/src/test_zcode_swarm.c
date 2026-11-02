@@ -280,6 +280,11 @@ void sw_make_tmpdir(char *buf, size_t n, const char *tag)
 bool sw_node_open(struct sw_node *n, const char *tag,
                          vcs_swarm_score_fn score_fn)
 {
+    /* Callers pass an uninitialised node; sw_node_close on a failure path
+     * below must see NULL for whatever was not opened yet. */
+    n->engine = NULL;
+    n->book = NULL;
+    n->store = NULL;
     sw_make_tmpdir(n->datadir, sizeof(n->datadir), tag);
     snprintf(n->zcode_dir, sizeof(n->zcode_dir), "%s/zcode", n->datadir);
     n->store = vcs_package_store_open(
