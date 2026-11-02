@@ -316,12 +316,15 @@ static void mock_server_stop(struct mock_server *m)
      * on Linux as well as Windows.  A close from another thread alone can
      * leave accept() holding its own reference to the socket until another
      * connection arrives. */
-    if (m->listen_fd != PLATFORM_SOCKET_INVALID) {
-        (void)platform_socket_shutdown_both(m->listen_fd);
-        platform_socket_close(m->listen_fd);
-        m->listen_fd = PLATFORM_SOCKET_INVALID;
+    /* The accept loop reads m->listen_fd, so do not write the field until the
+     * thread is joined; close a local copy to interrupt accept(). */
+    platform_socket_t fd = m->listen_fd;
+    if (fd != PLATFORM_SOCKET_INVALID) {
+        (void)platform_socket_shutdown_both(fd);
+        platform_socket_close(fd);
     }
     pthread_join(m->thread, NULL);
+    m->listen_fd = PLATFORM_SOCKET_INVALID;
 }
 
 /* ── Fixture: a tiny main_state with one block at height 7 ─────── */
