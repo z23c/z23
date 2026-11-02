@@ -37,9 +37,9 @@ const char *zapp_home_layout_name(size_t index);
 const char *zapp_home_layout(const char *name);
 /* The label of a home action id (scan, assistant, apps, settings), or NULL. */
 const char *zapp_home_action_label(const char *id);
-/* The Home node button for a snapshot: its label, and the user-intent action it sends ("" while a stop is in progress). */
+/* The action a Home node button sends, from the label drawn on it: "" for no action, such as while a stop is in progress. */
 const char *zapp_home_node_label(const struct zapp_view *view);
-const char *zapp_home_node_action(const struct zapp_view *view);
+const char *zapp_home_node_action_for_label(const char *label);
 /* Whether a laptop pairing offer must open its review now. seen records that the owner was taken to
  * it: it is set only when this returns true, and cleared when there is no offer, so an offer that
  * arrives while the scan screen is up is not lost. */

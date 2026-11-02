@@ -56,15 +56,14 @@ const char *zapp_grouped(int64_t value, char out[32])
  * skew of the highest height it has heard of (a peer's or the fleet's) and has evidence the chain is
  * live: enough peers, or a fleet height that agrees. Without that evidence, a quiet tip is unconfirmed,
  * never "in sync". Both the node line and the sync sentence read this, so they cannot disagree. */
-enum chain_state { CHAIN_WAITING, CHAIN_BEHIND, CHAIN_UNCONFIRMED, CHAIN_CURRENT };
-struct chain_verdict { enum chain_state state; int64_t reference; char reason[48]; bool onion_wait; };
+struct chain_verdict { enum zapp_chain state; int64_t reference; char reason[48]; bool onion_wait; };
 static int64_t abs_gap(int64_t a, int64_t b) { return a > b ? a - b : b - a; }
 /* Why a node within the skew still cannot confirm its chain is current, or false when it can. */
 static bool unconfirmed_reason(bool fleet_agrees, int64_t peers, int64_t quiet, char *reason, size_t cap)
 {
     if (fleet_agrees) return false;
     if (peers < ZAPP_CHAIN_MIN_PEERS)
-        snprintf(reason, cap, peers == 1 ? "only 1 peer" : peers == 0 ? "no peers" : "no peer count");
+        snprintf(reason, cap, peers == 1 ? "only 1 peer" : peers == 0 ? "no peers" : "peer count unknown");
     else if (quiet > ZAPP_CHAIN_QUIET_SECS)
         snprintf(reason, cap, "no new block for %lld min", (long long)(quiet / 60));
     else return false;
@@ -78,9 +77,9 @@ static struct chain_verdict chain_verdict(int64_t height, int64_t target, int64_
     const bool fleet_agrees = fleet >= 0 && abs_gap(fleet, height) <= ZAPP_CHAIN_SKEW;
     /* Private mode dials only onion peers, so too few peers there means too few onion peers. */
     v.onion_wait = ev && ev->onion_only && !fleet_agrees && peers < ZAPP_CHAIN_MIN_PEERS;
-    if (v.reference <= 0) { v.state = CHAIN_WAITING; return v; }
-    if (v.reference - height > ZAPP_CHAIN_SKEW) { v.state = CHAIN_BEHIND; return v; }
-    v.state = unconfirmed_reason(fleet_agrees, peers, quiet, v.reason, sizeof(v.reason)) ? CHAIN_UNCONFIRMED : CHAIN_CURRENT;
+    if (v.reference <= 0) { v.state = ZAPP_CHAIN_WAITING; return v; }
+    if (v.reference - height > ZAPP_CHAIN_SKEW) { v.state = ZAPP_CHAIN_BEHIND; return v; }
+    v.state = unconfirmed_reason(fleet_agrees, peers, quiet, v.reason, sizeof(v.reason)) ? ZAPP_CHAIN_UNCONFIRMED : ZAPP_CHAIN_CURRENT;
     return v;
 }
 /* "1 of 2" for a reported count, "count unknown" when the node reported none. */
@@ -103,10 +102,10 @@ const char *zapp_node_line(bool responding, bool process_running, bool stopping,
     else if (height < 0) snprintf(out, cap, "Node running%s%s", count, onion);
     else if (v.onion_wait)
         snprintf(out, cap, "Private · waiting for onion peers (%s)%s", onion_count(peers, ratio, sizeof(ratio)), onion);
-    else if (v.state == CHAIN_WAITING) snprintf(out, cap, "Node waiting for peers · %s%s", zapp_grouped(height, at), onion);
-    else if (v.state == CHAIN_BEHIND)
+    else if (v.state == ZAPP_CHAIN_WAITING) snprintf(out, cap, "Node waiting for peers · %s%s", zapp_grouped(height, at), onion);
+    else if (v.state == ZAPP_CHAIN_BEHIND)
         snprintf(out, cap, "Behind · %s of %s%s", zapp_grouped(height, at), zapp_grouped(v.reference, top), onion);
-    else if (v.state == CHAIN_UNCONFIRMED)
+    else if (v.state == ZAPP_CHAIN_UNCONFIRMED)
         snprintf(out, cap, "Height %s · %s, cannot confirm it is current%s", zapp_grouped(height, at), v.reason, onion);
     else snprintf(out, cap, "Node in sync · %s%s%s", zapp_grouped(height, at), count, onion);
     return out;
@@ -148,28 +147,24 @@ const char *zapp_sync_line(bool responding, bool process_running, int64_t height
         snprintf(out, cap, "Private mode dials only onion peers. The node has not reported its peer count.");
     else if (v.onion_wait)
         snprintf(out, cap, "Private mode dials only onion peers. This node has %s.", onion_count(peers, ratio, sizeof(ratio)));
-    else if (v.state == CHAIN_WAITING) snprintf(out, cap, "Waiting for a peer that reports the current chain.");
-    else if (v.state == CHAIN_BEHIND) snprintf(out, cap, "%s %s to go.", zapp_grouped(v.reference - height, gap),
+    else if (v.state == ZAPP_CHAIN_WAITING) snprintf(out, cap, "Waiting for a peer that reports the current chain.");
+    else if (v.state == ZAPP_CHAIN_BEHIND) snprintf(out, cap, "%s %s to go.", zapp_grouped(v.reference - height, gap),
                                             v.reference - height == 1 ? "block" : "blocks");
-    else if (v.state == CHAIN_UNCONFIRMED)
+    else if (v.state == ZAPP_CHAIN_UNCONFIRMED)
         snprintf(out, cap, "Your node has every block it can see, but with %s it cannot confirm it is current.", v.reason);
     else snprintf(out, cap, "Your node has every block its peers report.");
     return out;
 }
-/* Why a node that answers cannot yet confirm its chain is current, for the Home line. "no new block for N min" when the
- * tip has been still too long; "no peers yet" when peers report no height or too few answer. False when the chain is
- * confirmed, the node is behind, or it gives no height. The same rule as zapp_node_line and zapp_sync_line. */
-bool zapp_chain_doubt(int64_t height, int64_t target, int64_t peers, const struct zapp_chain_evidence *evidence,
-                      char *reason, size_t cap)
+struct zapp_chain_status zapp_chain_check(int64_t height, int64_t target, int64_t peers, const struct zapp_chain_evidence *evidence)
 {
-    if (cap) reason[0] = 0;
-    if (height < 0 || !cap) return false;
+    struct zapp_chain_status status = {.state = ZAPP_CHAIN_NONE, .reference = -1};
+    if (height < 0) return status;
     const struct chain_verdict v = chain_verdict(height, target, peers, evidence);
-    if (v.state == CHAIN_WAITING) snprintf(reason, cap, "no peers yet");
-    else if (v.state != CHAIN_UNCONFIRMED) return false;
-    else if (!strncmp(v.reason, "no new block", 12)) snprintf(reason, cap, "%s", v.reason);
-    else snprintf(reason, cap, "no peers yet");
-    return true;
+    status.state = v.state;
+    status.reference = v.reference > 0 ? v.reference : -1;
+    if (v.state == ZAPP_CHAIN_UNCONFIRMED) snprintf(status.reason, sizeof(status.reason), "%s", v.reason);
+    else if (v.state == ZAPP_CHAIN_WAITING) snprintf(status.reason, sizeof(status.reason), "No peer has reported a block height yet");
+    return status;
 }
 /* Whether the snapshot was observed recently enough, by the clock of the host that probed it. */
 static bool snapshot_current(const struct json_value *root, int64_t now_unix)

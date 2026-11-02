@@ -41,59 +41,82 @@ static void node_button_states(void)
 {
     static struct zapp_view view;
     char card[1024];
-    assert(!strcmp(zapp_home_node_label(&view), "Start node") && !strcmp(zapp_home_node_action(&view), "node_start"));
+    assert(!strcmp(zapp_home_node_action_for_label("Start node"), "node_start"));
+    assert(!strcmp(zapp_home_node_action_for_label("Stop node"), "node_stop"));
+    assert(!strcmp(zapp_home_node_action_for_label(""), "") && !strcmp(zapp_home_node_action_for_label("Stopping…"), ""));
+    assert(!strcmp(zapp_home_node_label(&view), "Start node"));
     view.node_process_running = true;
     view.node_wanted = true;
-    assert(!strcmp(zapp_home_node_label(&view), "Stop node") && !strcmp(zapp_home_node_action(&view), "node_stop"));
+    assert(!strcmp(zapp_home_node_label(&view), "Stop node"));
     view.node_wanted = false;
-    assert(!strcmp(zapp_home_node_label(&view), "") && !strcmp(zapp_home_node_action(&view), ""));
+    assert(!strcmp(zapp_home_node_label(&view), ""));
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && strstr(card, "\"node_button\":\"\"") &&
         strstr(card, "\"node_line\":\"Stopping…\""));
     assert(zapp_home_phone_card(&view, true, card, sizeof(card)) && strstr(card, "\"node_button\":\"\""));
 }
-
+/* Whether the card's node line is exactly text, from the view as it stands. */
+static bool node_line_is(const struct zapp_view *view, const char *text)
+{
+    char card[1024], needle[256];
+    snprintf(needle, sizeof(needle), "\"node_line\":\"%s\"", text);
+    return zapp_home_phone_card(view, false, card, sizeof(card)) && strstr(card, needle);
+}
 static void plain_node_line_states(void)
 {
     static struct zapp_view view;
-    char card[1024];
-    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && strstr(card, "\"node_line\":\"Node stopped\""));
+    assert(node_line_is(&view, "Node stopped"));
     view.node_process_running = true;
     view.node_wanted = true;
-    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) &&
-        strstr(card, "\"node_line\":\"Starting your node… usually about a minute\""));
+    assert(node_line_is(&view, "Starting your node… usually about a minute"));
+    view.node_seen_height = true;
+    assert(node_line_is(&view, "Your node is running but has not replied yet"));
+    view.node_seen_height = false;
     view.node_running = true;
     view.node_height = 1000;
-    view.node_headers = 1800;
-    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && strstr(card, "\"node_line\":\"Catching up: 800 blocks to go\""));
+    view.node_reference = 1800;
+    view.chain_state = ZAPP_CHAIN_BEHIND;
+    assert(node_line_is(&view, "Catching up: 800 blocks to go"));
     view.node_base_height = 900;
     view.node_base_at = 40;
     view.node_sample_height = 1000;
     view.node_sample_at = 100;
-    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) &&
-        strstr(card, "\"node_line\":\"Catching up: 800 blocks to go, about 8 min left\""));
+    assert(node_line_is(&view, "Catching up: 800 blocks to go, about 8 min left"));
     view.node_sample_at = 60;
-    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) &&
-        strstr(card, "\"node_line\":\"Catching up: 800 blocks to go\"") && !strstr(card, "min left"));
+    assert(node_line_is(&view, "Catching up: 800 blocks to go"));
     view.node_sample_at = 100;
     view.node_base_height = 1000;
-    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && !strstr(card, "min left"));
-    view.node_height = 1999;
-    view.node_headers = 2000;
-    view.chain_doubt[0] = 0;
-    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && strstr(card, "\"node_line\":\"Up to date\""));
-    snprintf(view.chain_doubt, sizeof(view.chain_doubt), "no peers yet");
-    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) &&
-        strstr(card, "\"node_line\":\"Can't confirm it's up to date: no peers yet\"") && !strstr(card, "Up to date\""));
+    assert(node_line_is(&view, "Catching up: 800 blocks to go"));
+}
+static void plain_node_line_verdicts(void)
+{
+    static struct zapp_view view;
+    view.node_process_running = true;
+    view.node_wanted = true;
+    view.node_running = true;
+    view.node_height = 1000;
+    /* A fleet height ahead of the node's own target: the verdict judges the node behind it, never up to date. */
+    view.node_reference = 2000;
+    view.chain_state = ZAPP_CHAIN_BEHIND;
+    assert(node_line_is(&view, "Catching up: 1,000 blocks to go"));
+    view.node_reference = 1000;
+    view.chain_state = ZAPP_CHAIN_CURRENT;
+    assert(node_line_is(&view, "Up to date"));
+    view.chain_state = ZAPP_CHAIN_UNCONFIRMED;
+    snprintf(view.chain_doubt, sizeof(view.chain_doubt), "only 1 peer");
+    assert(node_line_is(&view, "Can't confirm it's up to date: only 1 peer"));
     snprintf(view.chain_doubt, sizeof(view.chain_doubt), "no new block for 17 min");
-    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) &&
-        strstr(card, "\"node_line\":\"Can't confirm it's up to date: no new block for 17 min\""));
+    assert(node_line_is(&view, "Can't confirm it's up to date: no new block for 17 min"));
+    view.chain_state = ZAPP_CHAIN_WAITING;
+    snprintf(view.chain_doubt, sizeof(view.chain_doubt), "No peer has reported a block height yet");
+    assert(node_line_is(&view, "No peer has reported a block height yet"));
     view.chain_doubt[0] = 0;
     view.node_height = -1;
-    view.node_headers = -1;
+    view.node_reference = -1;
+    view.chain_state = ZAPP_CHAIN_NONE;
     snprintf(view.node_line, sizeof(view.node_line), "Node running");
-    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && strstr(card, "\"node_line\":\"Node running\""));
+    assert(node_line_is(&view, "Node running"));
     view.node_wanted = false;
-    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && strstr(card, "\"node_line\":\"Stopping…\""));
+    assert(node_line_is(&view, "Stopping…"));
 }
 static void phone_card_golden(void)
 {
@@ -103,7 +126,8 @@ static void phone_card_golden(void)
     view.node_running = true;
     view.node_wanted = true;
     view.node_height = 1200;
-    view.node_headers = 2000;
+    view.node_reference = 2000;
+    view.chain_state = ZAPP_CHAIN_BEHIND;
     fill_secrets(&view);
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)));
     assert(!strcmp(card, "{\"schema\":\"zcl.phone_card.v1\",\"node_line\":\"Catching up: 800 blocks to go\","
@@ -419,6 +443,7 @@ int main(void)
     phone_card_golden();
     node_button_states();
     plain_node_line_states();
+    plain_node_line_verdicts();
     phone_card_omits_secrets();
     phone_card_never_shows_wallet();
     wallet_tile_has_no_amount();

@@ -264,7 +264,12 @@ static jobject make_node(struct build *b, const struct zapp_node *node, size_t c
 {
     JNIEnv *env = b->env;
     bool container = node->kind <= ZAPP_NODE_STACK;
+    char label[TEXT_CAP];
     if (container && !has_cards(b, node)) return NULL;
+    if (node->kind == ZAPP_NODE_ACTION && where == IN_CELL) {
+        leaf_text(b, node, card, label);
+        if (!label[0]) return NULL; /* An empty grid cell is not drawn, so it takes no grid slot. */
+    }
     if ((*env)->PushLocalFrame(env, 16) != JNI_OK) { (void)zj_clean(env); b->failed = true; return NULL; }
     ++b->views;
     jobject view = container ? make_container(b, node, card, where, scrolls) : make_leaf(b, node, card, where);

@@ -172,15 +172,15 @@ static void startup_default(void *ctx)
 #endif
 /* Keeps the newest height sample and, once it is ZAPP_RATE_SPAN_SECS old, the one it replaces as the older sample, for the
  * Home rate. A node that does not answer or gives no height clears the samples. */
-static void record_height(struct zapp_view *view, const struct node_reading *n, int64_t now)
+static void record_height(struct zapp_view *view, const struct node_reading *n, int64_t now, bool running)
 {
+    view->node_seen_height = running && (view->node_seen_height || n->height >= 0);
     if (!n->responding || n->height < 0) {
-        view->node_height = view->node_headers = -1;
+        view->node_height = -1;
         view->node_sample_at = view->node_base_at = 0;
         return;
     }
     view->node_height = n->height;
-    view->node_headers = n->target;
     if (view->node_sample_at && now - view->node_sample_at < ZAPP_RATE_SPAN_SECS) return;
     if (view->node_sample_at) {
         view->node_base_height = view->node_sample_height;
@@ -217,8 +217,11 @@ static void observe_node(struct controller *c)
     c->view.node_process_running = process_running;
     c->view.pace = pace;
     c->view.node_wanted = wanted;
-    (void)zapp_chain_doubt(n.height, n.target, n.peers, &evidence, c->view.chain_doubt, sizeof(c->view.chain_doubt));
-    record_height(&c->view, &n, now);
+    struct zapp_chain_status chain = zapp_chain_check(n.height, n.target, n.peers, &evidence);
+    c->view.chain_state = chain.state;
+    c->view.node_reference = chain.reference;
+    snprintf(c->view.chain_doubt, sizeof(c->view.chain_doubt), "%s", chain.reason);
+    record_height(&c->view, &n, now, process_running);
     copy_text(c->view.sync_status, sizeof(c->view.sync_status), status);
     copy_text(c->view.node_line, sizeof(c->view.node_line), line);
     c->seen_responding = n.responding; c->seen_height = n.height; c->seen_target = n.target; c->seen_peers = n.peers;

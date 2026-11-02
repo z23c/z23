@@ -18,6 +18,8 @@ enum zapp_voice_state { ZAPP_VOICE_READY, ZAPP_VOICE_RECORDING, ZAPP_VOICE_TRANS
 
 /* Two height samples this far apart give the Home rate; the newer one is at least this many seconds after the older. */
 enum { ZAPP_RATE_SPAN_SECS = 30 };
+/* The shell's verdict on the chain a node reports (zapp_chain_check). */
+enum zapp_chain { ZAPP_CHAIN_NONE, ZAPP_CHAIN_WAITING, ZAPP_CHAIN_BEHIND, ZAPP_CHAIN_UNCONFIRMED, ZAPP_CHAIN_CURRENT };
 struct zapp_view {
     char notice[ZAPP_NOTICE_CAP];
     char result[ZAPP_NOTICE_CAP];
@@ -46,12 +48,14 @@ struct zapp_view {
     char pair_code[8];
     char node_line[96]; /* One-line phone node summary for the main screen. */
     int64_t node_height;        /* Height the node reports, -1 when it does not answer or reports none. */
-    int64_t node_headers;       /* Highest height its peers report, -1 when unknown. */
     int64_t node_sample_height; /* Height at node_sample_at, the newer sample. */
     int64_t node_sample_at;     /* Monotonic seconds of the newer sample, 0 for none. */
     int64_t node_base_height;   /* Height at node_base_at, the older sample. */
     int64_t node_base_at;       /* Monotonic seconds of the older sample, 0 for none. */
-    char chain_doubt[48]; /* Why a node that answers cannot yet confirm it is current (zapp_chain_doubt), or empty. */
+    enum zapp_chain chain_state;  /* The verdict on the node's chain (zapp_chain_check). */
+    int64_t node_reference;       /* Height the verdict judges the node against, -1 when none. */
+    char chain_doubt[48];         /* Reason for a WAITING or UNCONFIRMED verdict, else empty. */
+    bool node_seen_height;        /* A height was seen since the node process started. */
     enum zapp_pace pace; /* Pace the node reports in its status, normal when it reports none. */
     char suggestion[96]; /* One question for the current state, or empty. */
     char pending_question[ZAPP_PENDING_CAP]; /* Question being answered, shown until its answer or cancel. */

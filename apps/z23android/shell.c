@@ -1,7 +1,6 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "shell.h"
 #include "camera.h"
-#include "controller.h"
 #include "home.h"
 #include "jni_util.h"
 #include "launcher.h"
@@ -516,9 +515,9 @@ static void run_tile(JNIEnv *env, const struct target *target)
     else if (!strcmp(target->id, "apps")) go(env, SCREEN_APPS);
     else if (!strcmp(target->id, "settings")) go(env, SCREEN_SETTINGS);
     else if (!strcmp(target->id, "node_toggle")) {
-        static struct zapp_view view;
-        zapp_controller_snapshot(&view);
-        const char *action = zapp_home_node_action(&view);
+        char label[32] = "";
+        (void)zapp_card_field(&shell.phone, "node_button", label, sizeof(label));
+        const char *action = zapp_home_node_action_for_label(label);
         if (action[0]) shell.send(action, "");
     }
     else if (!strcmp(target->id, "launch") && target->card != ZAPP_NO_CARD && target->card > 0 &&

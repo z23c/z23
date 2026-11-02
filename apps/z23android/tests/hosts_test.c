@@ -170,7 +170,7 @@ static void chain_evidence_tests(void)
     assert(!strcmp(zapp_node_line(true, true, false, true, 3304001, 3304001, 0, NULL, line, sizeof(line)),
                    "Height 3,304,001 · no peers, cannot confirm it is current · onion ready"));
     assert(!strcmp(zapp_node_line(true, true, false, true, 3304001, 3304001, -1, NULL, line, sizeof(line)),
-                   "Height 3,304,001 · no peer count, cannot confirm it is current · onion ready"));
+                   "Height 3,304,001 · peer count unknown, cannot confirm it is current · onion ready"));
     assert(!strcmp(zapp_node_line(true, true, false, true, 3304001, 3304001, 2, NULL, line, sizeof(line)),
                    "Node in sync · 3,304,001 · 2 peers · onion ready"));
     {
@@ -262,22 +262,33 @@ static void private_line_tests(void)
     assert(!strcmp(zapp_sync_line(true, true, 3304001, 3304001, 2, &tor, long_line, sizeof(long_line)),
                    "Your node has every block its peers report."));
 }
-static void chain_doubt_reasons(void)
+static void chain_state_reasons(void)
 {
-    char reason[48];
+    struct zapp_chain_status s;
     const struct zapp_chain_evidence moving = {.fleet_height = -1, .quiet_secs = 10, .onion_only = true};
     const struct zapp_chain_evidence silent = {.fleet_height = -1, .quiet_secs = 1000, .onion_only = true};
-    assert(zapp_chain_doubt(1000, 1000, 0, &moving, reason, sizeof(reason)) && !strcmp(reason, "no peers yet"));
-    assert(zapp_chain_doubt(1000, 1000, 1, &moving, reason, sizeof(reason)) && !strcmp(reason, "no peers yet"));
-    assert(zapp_chain_doubt(1000, 0, 5, &moving, reason, sizeof(reason)) && !strcmp(reason, "no peers yet"));
-    assert(zapp_chain_doubt(1000, 1000, 5, &silent, reason, sizeof(reason)) && !strcmp(reason, "no new block for 16 min"));
-    assert(!zapp_chain_doubt(1000, 1000, 5, &moving, reason, sizeof(reason)) && !reason[0]);
-    assert(!zapp_chain_doubt(-1, 1000, 5, &silent, reason, sizeof(reason)) && !reason[0]);
+    const struct zapp_chain_evidence fleet_ahead = {.fleet_height = 2000, .quiet_secs = 10, .onion_only = true};
+    s = zapp_chain_check(1000, 1000, 1, &moving);
+    assert(s.state == ZAPP_CHAIN_UNCONFIRMED && !strcmp(s.reason, "only 1 peer") && s.reference == 1000);
+    s = zapp_chain_check(1000, 1000, 0, &moving);
+    assert(s.state == ZAPP_CHAIN_UNCONFIRMED && !strcmp(s.reason, "no peers"));
+    s = zapp_chain_check(1000, 1000, -1, &moving);
+    assert(s.state == ZAPP_CHAIN_UNCONFIRMED && !strcmp(s.reason, "peer count unknown"));
+    s = zapp_chain_check(1000, 1000, 5, &silent);
+    assert(s.state == ZAPP_CHAIN_UNCONFIRMED && !strcmp(s.reason, "no new block for 16 min"));
+    s = zapp_chain_check(1000, 1000, 5, &moving);
+    assert(s.state == ZAPP_CHAIN_CURRENT && !s.reason[0] && s.reference == 1000);
+    s = zapp_chain_check(1000, 0, 5, &moving);
+    assert(s.state == ZAPP_CHAIN_WAITING && !strcmp(s.reason, "No peer has reported a block height yet") && s.reference == -1);
+    s = zapp_chain_check(1000, 1000, 5, &fleet_ahead);
+    assert(s.state == ZAPP_CHAIN_BEHIND && s.reference == 2000);
+    s = zapp_chain_check(-1, 1000, 5, &moving);
+    assert(s.state == ZAPP_CHAIN_NONE && s.reference == -1 && !s.reason[0]);
 }
 
 int main(void)
 {
-    chain_doubt_reasons();
+    chain_state_reasons();
     static const char snapshot[] = "{\"hosts\":["
         "{\"host\":\"r1\",\"reachable\":true,\"probe_ms\":1080,\"node\":\"blocked\",\"synced\":\"yes\","
         "\"blocker\":\"review_required_bootstrap_trust\",\"height\":3301130,\"reference_height\":3301130,"

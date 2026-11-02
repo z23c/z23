@@ -60,10 +60,11 @@ const char *zapp_home_node_label(const struct zapp_view *view)
     if (!view->node_process_running) return "Start node";
     return view->node_wanted ? "Stop node" : "";
 }
-const char *zapp_home_node_action(const struct zapp_view *view)
+const char *zapp_home_node_action_for_label(const char *label)
 {
-    if (!view->node_process_running) return "node_start";
-    return view->node_wanted ? "node_stop" : "";
+    if (!label) return "";
+    if (!strcmp(label, "Start node")) return "node_start";
+    return !strcmp(label, "Stop node") ? "node_stop" : "";
 }
 static size_t finish(struct json_value *card, char *out, size_t cap)
 {
@@ -81,28 +82,31 @@ static bool minutes_left(const struct zapp_view *view, int64_t *minutes)
 {
     const int64_t span = view->node_sample_at - view->node_base_at;
     const int64_t moved = view->node_sample_height - view->node_base_height;
-    const int64_t remaining = view->node_headers - view->node_height;
+    const int64_t remaining = view->node_reference - view->node_height;
     if (view->node_base_at <= 0 || span < ZAPP_RATE_SPAN_SECS || moved <= 0 || remaining <= 0) return false;
     *minutes = (remaining * span / moved + 59) / 60;
     return true;
 }
-/* The one plain status line for the phone node: stopped, stopping, starting (the process runs but does not answer),
- * catching up with the blocks left (and the minutes, only when a rate is known), can't confirm it is up to date (with the
- * reason the node reports), or up to date. */
+/* The one plain status line for the phone node: stopped, stopping, starting (no height seen since the process started),
+ * running without a reply yet, catching up with the blocks left (and the minutes, only when a rate is known), can't confirm
+ * it is up to date (with the reason), or up to date. Up to date shows only for the CURRENT verdict. */
 static const char *plain_node_line(const struct zapp_view *view, char *out, size_t cap)
 {
     char blocks[32], minutes_text[48] = "";
-    const int64_t behind = view->node_headers - view->node_height;
+    const int64_t behind = view->node_reference - view->node_height;
     int64_t minutes = 0;
     if (!view->node_process_running) snprintf(out, cap, "Node stopped");
     else if (!view->node_wanted) snprintf(out, cap, "Stopping…");
-    else if (!view->node_running) snprintf(out, cap, "Starting your node… usually about a minute");
-    else if (view->node_height < 0 || view->node_headers < 0) snprintf(out, cap, "%s", view->node_line);
-    else if (behind > ZAPP_CHAIN_SKEW) {
+    else if (!view->node_running) snprintf(out, cap, "%s", view->node_seen_height ?
+        "Your node is running but has not replied yet" : "Starting your node… usually about a minute");
+    else if (view->node_height < 0 || view->node_reference < 0) snprintf(out, cap, "%s", view->node_line);
+    else if (view->chain_state == ZAPP_CHAIN_BEHIND) {
         if (minutes_left(view, &minutes)) snprintf(minutes_text, sizeof(minutes_text), ", about %lld min left", (long long)minutes);
         snprintf(out, cap, "Catching up: %s blocks to go%s", zapp_grouped(behind, blocks), minutes_text);
-    } else if (view->chain_doubt[0]) snprintf(out, cap, "Can't confirm it's up to date: %s", view->chain_doubt);
-    else snprintf(out, cap, "Up to date");
+    } else if (view->chain_state == ZAPP_CHAIN_UNCONFIRMED) snprintf(out, cap, "Can't confirm it's up to date: %s", view->chain_doubt);
+    else if (view->chain_state == ZAPP_CHAIN_WAITING) snprintf(out, cap, "%s", view->chain_doubt);
+    else if (view->chain_state == ZAPP_CHAIN_CURRENT) snprintf(out, cap, "Up to date");
+    else snprintf(out, cap, "%s", view->node_line);
     return out;
 }
 size_t zapp_home_phone_card(const struct zapp_view *view, bool preview, char *out, size_t cap)
