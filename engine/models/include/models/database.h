@@ -276,8 +276,17 @@ bool node_db_detached_writer_waiting(void);
 void node_db_detached_writer_test_reset(void);
 void node_db_detached_writer_test_force_waiting(bool on);
 #endif
+/* False for an absent key and for a failed read alike. */
 bool node_db_state_get(struct node_db *ndb, const char *key,
                        void *value, size_t max_len, size_t *out_len);
+/* Read a node_state value, telling an absent key from a failed read. Returns
+ * false on a NULL or closed handle, a NULL key or present, or a SQLite prepare
+ * or step error, which sqlite3_errmsg(ndb->db) then describes. Returns true
+ * otherwise, with *present set when the key holds a non-empty value; that
+ * value is copied, truncated to max_len, into value with its length in
+ * *out_len. *present and *out_len are cleared on every path. */
+bool node_db_state_read(struct node_db *ndb, const char *key, void *value,
+                        size_t max_len, size_t *out_len, bool *present);
 bool node_db_state_set_int(struct node_db *ndb, const char *key, int64_t val);
 bool node_db_state_get_int(struct node_db *ndb, const char *key, int64_t *val);
 /* Delete a node_state key. Returns true when the key is gone afterwards

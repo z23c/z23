@@ -368,8 +368,15 @@ bool node_db_sync_peer_score(struct node_db *ndb,
                               uint32_t bandwidth_score, bool is_zcl23);
 
 /* Load persisted state on startup:
- * Returns the chain tip height stored in SQLite, or -1. */
+ * Returns the chain tip height stored in SQLite, or -1. A failed read also
+ * returns -1, so this suits gauges and status lines only. */
 int node_db_sync_get_tip_height(struct node_db *ndb);
+/* The projection tip for callers that start work from it. Returns true with
+ * *height_out set to the stored height, or to -1 when the key is absent (no
+ * tip: walk from genesis). Returns false, with *height_out -1 and one warning
+ * naming the key and the SQLite error, when the read fails or the stored value
+ * is malformed; the tip is then unknown and nothing may start from it. */
+bool node_db_sync_get_tip_height_checked(struct node_db *ndb, int *height_out);
 bool node_db_sync_get_tip_hash(struct node_db *ndb, uint8_t hash_out[32]);
 
 /* Store the SQLite sync projection cursor. This is not publishable

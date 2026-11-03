@@ -461,6 +461,17 @@ static bool projection_backfill_catchup_ready(struct node_db *ndb,
            !node_db_sync_catchup_job_is_started(&svc->catchup_job);
 }
 
+/* True when this tick may act on the projection, with its tip read into
+ * *projection_tip. An unreadable tip skips the tick: every rewind, hole
+ * repair and catch-up start keys on it. */
+static bool projection_backfill_tip_ready(struct node_db *ndb,
+                                          struct boot_svc_ctx *svc,
+                                          int chain_tip, int *projection_tip)
+{
+    return projection_backfill_catchup_ready(ndb, svc, chain_tip) &&
+           node_db_sync_get_tip_height_checked(ndb, projection_tip);
+}
+
 static bool projection_backfill_rewind_to_block(struct node_db *ndb,
                                                 struct boot_svc_ctx *svc,
                                                 int projection_tip,
@@ -641,8 +652,8 @@ static void *projection_backfill_service_thread(void *arg)
         if (projection_backfill_defer_for_fold(svc, refolding, tail_folding))
             continue;
 
-        if (projection_backfill_catchup_ready(ndb, svc, chain_tip)) {
-            projection_tip = node_db_sync_get_tip_height(ndb);
+        if (projection_backfill_tip_ready(ndb, svc, chain_tip,
+                                          &projection_tip)) {
             projection_block_tip = db_block_max_height(ndb);
             bool sparse_prefix =
                 boot_projection_sparse_prefix_is_expected(projection_tip,

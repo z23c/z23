@@ -225,10 +225,32 @@ bool node_db_state_set_detached(struct node_db *ndb, const char *key,
     return rc == SQLITE_DONE;
 }
 
-bool node_db_state_get(struct node_db *ndb, const char *key,
-                       void *value, size_t max_len, size_t *out_len)
+/* Copy the stepped row's value, truncated to max_len, into value. An empty or
+ * NULL value counts as absent. */
+static bool state_read_copy_row(sqlite3_stmt *s, void *value, size_t max_len,
+                                size_t *out_len)
 {
-    if (!ndb->open) return false;
+    const void *blob = sqlite3_column_blob(s, 0);
+    int blob_len = sqlite3_column_bytes(s, 0);
+    if (!blob || blob_len <= 0)
+        return false;  // raw-return-ok:empty-value-is-absent
+    size_t copy = (size_t)blob_len < max_len ? (size_t)blob_len : max_len;
+    if (value && copy > 0)
+        memcpy(value, blob, copy);
+    if (out_len)
+        *out_len = copy;
+    return true;
+}
+
+bool node_db_state_read(struct node_db *ndb, const char *key, void *value,
+                        size_t max_len, size_t *out_len, bool *present)
+{
+    if (present)
+        *present = false;
+    if (out_len)
+        *out_len = 0;
+    if (!ndb || !ndb->open || !key || !present)
+        return false;  // raw-return-ok:caller-logs-unreadable-state
 
     /* Prepare a fresh statement per call rather than reusing the
      * cached ndb->stmt_state_get. SQLite statements are not
@@ -243,33 +265,28 @@ bool node_db_state_get(struct node_db *ndb, const char *key,
      * background task, not per block). The cached stmt_state_get
      * field is intentionally unused. */
     sqlite3_stmt *s = NULL;
-    if (sqlite3_prepare_v2(ndb->db,
-            "SELECT value FROM node_state WHERE key=?",
-            -1, &s, NULL) != SQLITE_OK || !s) {
+    int rc = sqlite3_prepare_v2(ndb->db,
+            "SELECT value FROM node_state WHERE key=?", -1, &s, NULL);
+    if (rc != SQLITE_OK || !s) {
         node_db_note_activity(ndb, "state_get",
-                              s ? SQLITE_OK : SQLITE_ERROR);
-        return false;
+                              rc == SQLITE_OK ? SQLITE_ERROR : rc);
+        return false;  // raw-return-ok:caller-logs-unreadable-state
     }
     sqlite3_bind_text(s, 1, key, -1, SQLITE_STATIC);
-    int rc = sqlite3_step(s);  // raw-sql-ok:kv-state-primitive
-    if (rc != SQLITE_ROW) {
-        sqlite3_finalize(s);
-        node_db_note_activity(ndb, "state_get", rc);
-        return false;
-    }
-    int blob_len = sqlite3_column_bytes(s, 0);
-    if (blob_len <= 0) {
-        sqlite3_finalize(s);
-        node_db_note_activity(ndb, "state_get", SQLITE_DONE);
-        return false;
-    }
-    size_t copy = (size_t)blob_len < max_len
-                  ? (size_t)blob_len : max_len;
-    memcpy(value, sqlite3_column_blob(s, 0), copy);
-    if (out_len) *out_len = copy;
+    rc = sqlite3_step(s);  // raw-sql-ok:kv-state-primitive
+    if (rc == SQLITE_ROW)
+        *present = state_read_copy_row(s, value, max_len, out_len);
     sqlite3_finalize(s);
     node_db_note_activity(ndb, "state_get", rc);
-    return true;
+    return rc == SQLITE_ROW || rc == SQLITE_DONE;
+}
+
+bool node_db_state_get(struct node_db *ndb, const char *key,
+                       void *value, size_t max_len, size_t *out_len)
+{
+    bool present = false;
+    return node_db_state_read(ndb, key, value, max_len, out_len, &present) &&
+           present;
 }
 
 bool node_db_state_set_int(struct node_db *ndb,

@@ -793,6 +793,35 @@ int node_db_sync_get_tip_height(struct node_db *ndb)
     return (int)h;
 }
 
+bool node_db_sync_get_tip_height_checked(struct node_db *ndb, int *height_out)
+{
+    int64_t h = -1;
+    size_t len = 0;
+    bool present = false;
+
+    if (height_out)
+        *height_out = -1;
+    if (!ndb || !height_out)
+        LOG_FAIL("sync", "get_tip_height_checked: invalid args (ndb=%p, "
+                 "height_out=%p)", (void *)ndb, (void *)height_out);
+    if (!node_db_state_read(ndb, SYNC_PROJECTION_TIP_HEIGHT_KEY, &h,
+                            sizeof(h), &len, &present)) {
+        LOG_WARN("sync", "projection tip read failed (key=%s): %s; the tip "
+                 "is unknown, not absent, so nothing starts from it",
+                 SYNC_PROJECTION_TIP_HEIGHT_KEY,
+                 ndb->open ? sqlite3_errmsg(ndb->db) : "handle closed");
+        return false;
+    }
+    if (present && len != sizeof(h)) {
+        LOG_WARN("sync", "projection tip malformed (key=%s): %zu bytes, "
+                 "expected %zu; the tip is unknown, not absent",
+                 SYNC_PROJECTION_TIP_HEIGHT_KEY, len, sizeof(h));
+        return false;
+    }
+    *height_out = present ? (int)h : -1;
+    return true;
+}
+
 bool node_db_sync_get_tip_hash(struct node_db *ndb, uint8_t hash_out[32])
 {
     size_t len = 0;

@@ -1539,6 +1539,170 @@ static int ndc_check_timed_commit_survives_abort(struct ndc_fix_ctx *fx)
     return failures;
 }
 
+/* ── An unreadable projection tip is not an absent one ──────────────────
+ * A failed read of sync_projection_tip_height used to come back as the "no
+ * tip" sentinel, so a synced node walked its whole chain from genesis in bulk
+ * mode and dropped every secondary index. A one-shot SQLite authorizer
+ * refuses the next node_state read, failing the tip read with a real
+ * SQLITE_AUTH, and counts DROP INDEX statements, which only turbo mode
+ * prepares. */
+struct ndc_tip_auth {
+    int deny_reads;
+    int denied;
+    int index_drops;
+};
+
+static int ndc_tip_authorizer(void *arg, int action, const char *table,
+                              const char *column, const char *db_name,
+                              const char *trigger)
+{
+    struct ndc_tip_auth *auth = arg;
+    (void)column;
+    (void)db_name;
+    (void)trigger;
+    if (action == SQLITE_DROP_INDEX)
+        auth->index_drops++;
+    if (action != SQLITE_READ || auth->deny_reads <= 0 || !table ||
+        strcmp(table, "node_state") != 0)
+        return SQLITE_OK;
+    auth->deny_reads--;
+    auth->denied++;
+    return SQLITE_DENY;
+}
+
+/* The explorer indexes the 2026-11-03 phone boot had to rebuild. */
+static int ndc_explorer_index_count(struct node_db *ndb)
+{
+    static const char sql[] =
+        "SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN "
+        "('idx_txo_addr','idx_txo_height','idx_txo_hodl_scan',"
+        "'idx_txi_prev','idx_txi_prev_height','idx_txi_height')";
+    sqlite3_stmt *stmt = NULL;
+    int n = -1;
+    if (sqlite3_prepare_v2(ndb->db, sql, -1, &stmt, NULL) == SQLITE_OK &&
+        sqlite3_step(stmt) == SQLITE_ROW)
+        n = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return n;
+}
+
+static int ndc_count_substr(const char *text, const char *needle)
+{
+    int n = 0;
+    size_t len = strlen(needle);
+    for (const char *p = strstr(text, needle); p; p = strstr(p + len, needle))
+        n++;
+    return n;
+}
+
+/* One catchup pass under the authorizer, its stderr captured into log. */
+static int ndc_tip_auth_run(struct node_db *ndb, struct ndc_fix_ctx *fx,
+                            struct ndc_tip_auth *auth, char *log,
+                            size_t log_len)
+{
+    g_cap_ndb = ndb;
+    g_cap_chain = &fx->ac;
+    g_cap_datadir = fx->dirF;
+    g_cap_result = -99;
+    bool installed =
+        sqlite3_set_authorizer(ndb->db, ndc_tip_authorizer, auth) == SQLITE_OK;
+    bool captured = installed &&
+        ndc_capture_stderr(ndc_run_catchup_capture, log, log_len);
+    sqlite3_set_authorizer(ndb->db, NULL, NULL);
+    return captured ? g_cap_result : -99;
+}
+
+/* A failed tip read runs no pass: no walk from genesis, no turbo mode, every
+ * index kept, one warning naming the key and the SQLite error. The next pass
+ * reads the real tip and walks only the block it is behind. */
+static int ndc_check_unreadable_tip_skips_pass(struct node_db *ndb,
+                                               struct ndc_fix_ctx *fx)
+{
+    int failures = 0;
+    struct ndc_tip_auth auth = {.deny_reads = 1};
+    char log[16384];
+    int res = ndc_tip_auth_run(ndb, fx, &auth, log, sizeof(log));
+    int tip = node_db_sync_get_tip_height(ndb);
+    printf("unreadable tip: result=%d tip=%d denied=%d index_drops=%d\n",
+           res, tip, auth.denied, auth.index_drops);
+    NDC_CHECK("the tip read is refused exactly once", auth.denied == 1);
+    NDC_CHECK("an unreadable tip starts no pass from genesis",
+              res == 0 && tip == NDC_FIX_N - 1);
+    NDC_CHECK("an unreadable tip never enters turbo mode",
+              auth.index_drops == 0);
+    NDC_CHECK("an unreadable tip keeps every explorer index",
+              ndc_explorer_index_count(ndb) == 6);
+    NDC_CHECK("an unreadable tip logs one warning with key and error",
+              ndc_count_substr(log, "projection tip read failed") == 1 &&
+              strstr(log, "key=sync_projection_tip_height") != NULL &&
+              strstr(log, "prohibited") != NULL);
+
+    struct ndc_tip_auth retry = {0};
+    res = ndc_tip_auth_run(ndb, fx, &retry, log, sizeof(log));
+    NDC_CHECK("the next pass resumes from the real tip",
+              res == 1 && node_db_sync_get_tip_height(ndb) == NDC_FIX_N &&
+              retry.index_drops == 0);
+    return failures;
+}
+
+/* An absent key still means "no tip" (the -reindex-explorer reset): the pass
+ * walks from genesis, over the bulk threshold in turbo mode, and normal mode
+ * rebuilds the indexes after it. */
+static int ndc_check_absent_tip_walks_from_genesis(struct node_db *ndb,
+                                                   struct ndc_fix_ctx *fx)
+{
+    int failures = 0;
+    struct ndc_tip_auth auth = {0};
+    char log[16384];
+    int64_t stored = 0;
+    bool absent =
+        node_db_state_delete(ndb, "sync_projection_tip_height") &&
+        !node_db_state_get_int(ndb, "sync_projection_tip_height", &stored);
+    int res = absent ? ndc_tip_auth_run(ndb, fx, &auth, log, sizeof(log))
+                     : -99;
+    int tip = node_db_sync_get_tip_height(ndb);
+    printf("absent tip: result=%d tip=%d index_drops=%d\n", res, tip,
+           auth.index_drops);
+    NDC_CHECK("an absent tip key walks the chain from genesis",
+              absent && res == NDC_FIX_N && tip == NDC_FIX_N);
+    NDC_CHECK("the genesis walk is a bulk pass in turbo mode",
+              auth.index_drops > 0);
+    NDC_CHECK("normal mode rebuilds the explorer indexes after it",
+              ndc_explorer_index_count(ndb) == 6);
+    return failures;
+}
+
+static int ndc_check_tip_read_failure(struct ndc_fix_ctx *fx)
+{
+    int failures = 0;
+    struct node_db ndb;
+    char dir[256], path[512];
+
+    test_make_tmpdir(dir, sizeof(dir), "node_db_catchup", "tipread");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    bool up = fx->built && node_db_open(&ndb, path);
+    node_db_catchup_lock_guard_test_reset();
+    int res = up ? node_db_catchup_service_run(&ndb, &fx->ac, NULL, fx->dirF)
+                 : -1;
+    /* One block behind the chain, as a synced node is between blocks. */
+    bool behind = up && res == NDC_FIX_N &&
+        node_db_sync_set_tip(&ndb, fx->hashes[NDC_FIX_N - 1].data,
+                             NDC_FIX_N - 1);
+    NDC_CHECK("tip-read fixture is one block behind with its indexes",
+              behind && ndc_explorer_index_count(&ndb) == 6);
+    /* A walk from genesis covers NDC_FIX_N + 1 heights and is a bulk pass;
+     * the one-block pass is not. */
+    node_db_catchup_lock_guard_test_set_bulk_threshold(2);
+    if (behind) {
+        failures += ndc_check_unreadable_tip_skips_pass(&ndb, fx);
+        failures += ndc_check_absent_tip_walks_from_genesis(&ndb, fx);
+    }
+    node_db_catchup_lock_guard_test_reset();
+    if (up) node_db_close(&ndb);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 static void ndc_release_five_block_fixture(struct ndc_fix_ctx *fx)
 {
     node_db_catchup_lock_guard_test_reset();
@@ -2692,6 +2856,7 @@ int test_node_db_catchup_service(void)
     failures += ndc_check_waiting_writer_cycles_batch(&fx);
     failures += ndc_check_yield_sleep_not_hold_time(&fx);
     failures += ndc_check_timed_commit_survives_abort(&fx);
+    failures += ndc_check_tip_read_failure(&fx);
     failures += ndc_check_durable_reopen(&fx);
     failures += ndc_check_maintenance_defers_while_active(&fx);
     failures += ndc_check_abort_storm_parks_worker();
