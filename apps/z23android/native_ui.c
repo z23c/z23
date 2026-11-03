@@ -471,8 +471,9 @@ static void render_node(JNIEnv *env, const struct zapp_view *view)
     const char *send_label = reply_state == ZAPP_REPLY_WAITING ? "Stop reply" :
         reply_state == ZAPP_REPLY_CANCELLING ? "Stopping…" : "Send";
     if (buttons[3]) (void)zj_text(env, buttons[3], send_label);
-    char status[1100];
-    snprintf(status, sizeof(status), "%s%s", view->sync_status[0] ? view->sync_status : "Sync status unknown",
+    char paced[sizeof(view->sync_status)], status[1100];
+    zapp_paced_sync_line(view->pace, view->node_process_running, view->node_wanted, view->sync_status, paced, sizeof(paced));
+    snprintf(status, sizeof(status), "%s%s", paced[0] ? paced : "Sync status unknown",
              view->busy ? "\nWorking…" : "");
     (void)zj_text(env, sync_view, voice_preview ? "The preview app does not run a node." : status);
     (void)zj_text(env, connection_view, view->connection[0] ? view->connection : "Connect a laptop to use chat.");

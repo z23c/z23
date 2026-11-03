@@ -503,6 +503,63 @@ static void caption_has_three_lines(void)
     assert(strstr(zapp_home_layout("default"), "\"style\":\"caption\",\"max_lines\":3}") && strstr(zapp_home_layout("classic"), "\"style\":\"caption\",\"max_lines\":3}"));
 }
 
+/* The Assistant sync sentence and the Home node line come from one observation, built as the controller builds them.
+ * Over every combination of the inputs below they agree on paused and on up to date, and the Assistant never says up
+ * to date while Home says behind. The one allowed difference is wording: where Home says "Catching up" with fewer than
+ * two onion peers, the Assistant names the onion peers instead. */
+static void assistant_and_home_agree(void)
+{
+    static const int64_t heights[] = {-1, 1000, 1500}, targets[] = {-1, 1000, 2000}, peers[] = {-1, 1, 2},
+        fleets[] = {-1, 1000, 2000}, quiets[] = {-1, 60, 1000};
+    static const enum zapp_pace paces[] = {ZAPP_PACE_NORMAL, ZAPP_PACE_GENTLE, ZAPP_PACE_PAUSE};
+    static const char up_to_date[] = "Your node has every block its peers report.";
+    static struct zapp_view view;
+    bool seen_paused = false, seen_current = false, seen_behind = false;
+    for (int responding = 0; responding < 2; responding++)
+    for (int process = responding; process < 2; process++)
+    for (int wanted = 0; wanted < 2; wanted++)
+    for (int onion = 0; onion < 2; onion++)
+    for (size_t h = 0; h < 3; h++) for (size_t t = 0; t < 3; t++) for (size_t n = 0; n < 3; n++)
+    for (size_t f = 0; f < 3; f++) for (size_t q = 0; q < 3; q++) for (size_t p = 0; p < 3; p++) {
+        /* The controller reports no height for a node that does not answer, and a running node the owner does not
+         * want is stopping. */
+        const bool stopping = process && !wanted;
+        const int64_t height = responding ? heights[h] : -1;
+        const enum zapp_pace pace = responding ? paces[p] : ZAPP_PACE_NORMAL;
+        const struct zapp_chain_evidence ev = {.onion_only = onion == 1, .fleet_height = fleets[f], .quiet_secs = quiets[q]};
+        const struct zapp_chain_status chain = zapp_chain_check(height, targets[t], peers[n], &ev);
+        char node[96], sync[1024], paced[1024], home[160];
+        zapp_node_line(responding, process, stopping, false, height, targets[t], peers[n], &ev, node, sizeof(node));
+        zapp_sync_line(responding, process, height, targets[t], peers[n], &ev, sync, sizeof(sync));
+        if (stopping) snprintf(sync, sizeof(sync), "The node is saving its data before it exits.");
+        view.node_process_running = process == 1;
+        view.node_wanted = wanted == 1;
+        view.node_running = responding == 1;
+        view.node_seen_height = false;
+        view.pace = pace;
+        view.node_height = height;
+        view.node_reference = chain.reference;
+        view.chain_state = chain.state;
+        snprintf(view.chain_doubt, sizeof(view.chain_doubt), "%s", chain.reason);
+        snprintf(view.node_line, sizeof(view.node_line), "%s", node);
+        zapp_home_node_line(&view, home, sizeof(home));
+        zapp_paced_sync_line(pace, process == 1, wanted == 1, sync, paced, sizeof(paced));
+        const bool home_paused = !strcmp(home, ZAPP_PAUSED_LINE), home_current = !strcmp(home, "Up to date");
+        const bool home_behind = !strncmp(home, "Catching up", 11);
+        const bool sync_paused = !strcmp(paced, ZAPP_PAUSED_LINE), sync_current = !strcmp(paced, up_to_date);
+        const bool sync_behind = strstr(paced, " to go.") != NULL;
+        assert(home_paused == sync_paused);
+        assert(home_current == sync_current);
+        assert(!home_behind || !sync_current);
+        assert(!sync_behind || home_behind);
+        assert(!home_behind || sync_behind || strstr(paced, "dials only onion peers") != NULL);
+        seen_paused |= home_paused;
+        seen_current |= home_current;
+        seen_behind |= home_behind;
+    }
+    assert(seen_paused && seen_current && seen_behind);
+}
+
 int main(void)
 {
     fallback_labels();
@@ -511,6 +568,7 @@ int main(void)
     node_button_states();
     plain_node_line_states();
     plain_node_line_verdicts();
+    assistant_and_home_agree();
     paced_home_lines();
     phone_card_omits_secrets();
     phone_card_never_shows_wallet();

@@ -134,6 +134,14 @@ const char *zapp_paced_line(enum zapp_pace pace, bool process_running, const cha
     snprintf(out, cap, "%s", text ? text : "");
     return out;
 }
+const char *zapp_paced_sync_line(enum zapp_pace pace, bool process_running, bool wanted, const char *sync_line,
+                                 char *out, size_t cap)
+{
+    const bool paused = process_running && wanted && pace == ZAPP_PACE_PAUSE;
+    const char *text = paused ? ZAPP_PAUSED_LINE : sync_line;
+    snprintf(out, cap, "%s", text ? text : "");
+    return out;
+}
 const char *zapp_sync_line(bool responding, bool process_running, int64_t height, int64_t target, int64_t peers,
                            const struct zapp_chain_evidence *evidence, char *out, size_t cap)
 {
