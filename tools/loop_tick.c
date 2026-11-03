@@ -1696,8 +1696,10 @@ static int wait_gates(struct tick *t, struct gate *g, size_t n)
     for (long waited = 0;; waited += poll_ms) {
         size_t done = 0;
         for (size_t i = 0; i < n; i++) {
-            if (gate_poll(t, &g[i]) == LT_WAIT_DIED)
+            if (gate_poll(t, &g[i]) == LT_WAIT_DIED) {
+                say(t, "dead gate after %ld ms of the gate wait", waited);
                 return LT_WAIT_DIED;
+            }
             done += g[i].done ? 1 : 0;
         }
         if (done == n)

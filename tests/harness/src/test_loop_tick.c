@@ -694,6 +694,21 @@ static int case_gate_failure_hold(void)
     return failures;
 }
 
+/* How far into its gate wait the tick held a dead gate, by the tick's own poll
+ * count rather than the wall clock, so a loaded host's slow sleeps cannot
+ * flake it. -1 when the tick logged no dead-gate line. */
+static long lt_dead_gate_ms(const struct lt_env *e)
+{
+    static char text[1 << 16];
+    static const char mark[] = "dead gate after ";
+    char p[900];
+    (void)snprintf(p, sizeof(p), "%s/state/tick.log", e->d);
+    if (!lt_slurp(p, text, sizeof(text)))
+        return -1;
+    const char *m = strstr(text, mark);
+    return m ? strtol(m + sizeof(mark) - 1, NULL, 10) : -1;
+}
+
 /* A gate that exits 0 having written nothing is a dead gate: one rerun, then a
  * typed HOLD in seconds, not a wait out of --gate-wait-s. */
 static int case_gate_dies_twice(void)
@@ -706,10 +721,11 @@ static int case_gate_dies_twice(void)
     if (!ready)
         return failures + 1;
     (void)lt_tick(&e, NULL, NULL, NULL, 0);
-    /* The env caps --gate-wait-s at 10: waiting it out would hold with the
-     * timeout reason, so gate_died_no_rc alone proves the early hold. */
-    LT_CHECK("a gate dying twice holds as gate_died_no_rc, not the gate wait",
+    LT_CHECK("a gate dying twice holds as gate_died_no_rc",
              lt_file_has(&e, "state/loop-t1.HOLD", "gate_died_no_rc"));
+    const long dead_ms = lt_dead_gate_ms(&e);
+    LT_CHECK("the hold comes in seconds, not the 10 s gate wait",
+             dead_ms >= 0 && dead_ms < 9000);
     LT_CHECK("it logs the one rerun",
              lt_file_has(&e, "state/tick.log", "gate died without rc; rerun 1/1"));
     LT_CHECK("agent-verify was started exactly twice", lt_file_has(&e, "av.n", "2"));
