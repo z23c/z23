@@ -534,6 +534,25 @@ static void an_edit_voids_the_old_tap(void)
     assert(f.commits == 1 && strcmp(f.plan_key, "") != 0 && view_of(s).state == WS_DONE);
     wss_destroy(s);
 }
+/* The amount on the review is the amount the owner confirms. Changing it voids the plan and the tap of the amount
+ * shown before, and the confirmation that follows binds to the new amount. */
+static void a_review_amount_change_rebinds_the_confirmation(void)
+{
+    struct zapp_payment p = pay_of(priv, "?amount=1");
+    struct fake f; fake_init(&f);
+    struct wss *s = reviewed(&f, &p);
+    uint32_t old = view_of(s).serial;
+    int plans = f.plans;
+    wss_edit_amount(s, 250000000); drain(&f);
+    struct wss_view v = view_of(s);
+    assert(v.state == WS_REVIEW && v.serial != old && !strcmp(v.amount, "2.5 ZCL"));
+    assert(f.plans == plans + 1);   /* the new amount is planned before it can be confirmed */
+    wss_tap_send(s, old); drain(&f);
+    assert(view_of(s).state == WS_REVIEW && f.commits == 0 && f.unlocks == 0);
+    tap_and_run(s, &f);
+    assert(f.commits == 1 && f.commit_amount == 250000000 && view_of(s).state == WS_DONE);
+    wss_destroy(s);
+}
 static void progress_shows_the_wait(void)
 {
     struct zapp_payment p = pay_of(priv, "?amount=1");
@@ -1408,6 +1427,7 @@ int main(void)
     secrets_never_survive();
     unknown_commit_is_never_retried();
     refused_commit_retries_with_a_new_prompt();
+    a_review_amount_change_rebinds_the_confirmation();
     an_edit_voids_the_old_tap();
     progress_shows_the_wait();
     review_says_whether_the_fleet_checked();

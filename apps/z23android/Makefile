@@ -419,6 +419,7 @@ test-wallet-send:
 	@test "$$(grep -c zapp_pay_stash_clear shell.c)" -ge 3 && grep -q zapp_pay_stash_clear android_main.c || { echo 'the payment stash must be cleared on Back while decoding, when a dismissed scan finishes, and on destroy' >&2; exit 1; }
 	@grep -q zapp_send_key_derive wallet_send_ui.c || { echo 'the send screen must derive the payment key from the request' >&2; exit 1; }
 	@grep -q "v->can_pay_again) (void)button_view(env, B_PAY_AGAIN" wallet_send_ui.c || { echo 'the send screen must draw Pay again when the view offers it' >&2; exit 1; }
+	@sed -n '/^static void draw_flow/,/^}/p' wallet_send_ui.c | grep -q 'if (v->state == WS_PARSED || v->state == WS_REVIEW) {' || { echo 'the send screen must offer Change amount on the review' >&2; exit 1; }
 	@grep -q "make_screen, wait_for_lock, bind_screen}" wallet_send_ui.c || { echo 'the send screen must bind an adopted flow to the new window' >&2; exit 1; }
 	@grep -q 'wallet_view_trim_address(text);' wallet_send_ui.c || { echo 'the address field must be trimmed before it is parsed' >&2; exit 1; }
 	@grep -q zapp_send_ui_take_reshow shell.c || { echo 'the shell must show a payment kept from the replaced activity' >&2; exit 1; }

@@ -427,9 +427,9 @@ static void draw_flow(JNIEnv *env, const struct wss_view *v)
     if (v->state == WS_PAID) draw_paid(env, v);
     line_if(env, ui.hint, 14.0f, AMBER);
     if (ui.dropped) (void)text_view(env, "Another app is drawing over this screen, so your tap was ignored.", 14.0f, AMBER);
-    if (v->state == WS_PARSED) {
+    if (v->state == WS_PARSED || v->state == WS_REVIEW) {
         (void)input_view(env, "Amount in ZCL", INPUT_TYPE_DECIMAL, &ui.amount_input);
-        (void)button_view(env, B_SET_AMOUNT, "Set amount", BUTTON_COLOR, false);
+        (void)button_view(env, B_SET_AMOUNT, v->state == WS_REVIEW ? "Change amount" : "Set amount", BUTTON_COLOR, false);
     }
     if (v->can_send) (void)button_view(env, B_SEND, "Send", SEND_COLOR, true);
     if (v->can_retry) (void)button_view(env, B_RETRY, "Try again", BUTTON_COLOR, false);
