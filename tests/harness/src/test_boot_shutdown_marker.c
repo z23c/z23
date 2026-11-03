@@ -8,6 +8,7 @@
 #include "chain/chain.h"
 #include "event/event.h"
 #include "util/thread_registry.h"
+#include "sha3/sha3.h"
 
 #include <errno.h>
 #include <stdatomic.h>
@@ -500,6 +501,38 @@ static int bsm_check_block_file_fingerprint(void)
     return failures;
 }
 
+/* The digest is fixed by the little-endian encoding of slot, size, mtime
+ * seconds and nanoseconds per file; changing it invalidates every recorded
+ * marker. */
+static int bsm_check_block_file_fingerprint_encoding(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "boot_shutdown_marker", "bfe");
+    char blocks[300];
+    snprintf(blocks, sizeof(blocks), "%s/blocks", dir);
+    bool setup = mkdir(blocks, 0700) == 0 &&
+                 bsm_bf_make_file(blocks, "blk00000.dat", "aaaa") &&
+                 bsm_bf_set_mtime(blocks, "blk00000.dat", 0x0102030405L);
+    /* slot 0, size 4, seconds 0x0102030405, nanoseconds 0. */
+    static const unsigned char expect_in[32] = {
+        0, 0, 0, 0, 0, 0, 0, 0,
+        4, 0, 0, 0, 0, 0, 0, 0,
+        0x05, 0x04, 0x03, 0x02, 0x01, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0};
+    struct sha3_256_ctx h;
+    uint8_t expect[32];
+    sha3_256_init(&h);
+    sha3_256_write(&h, expect_in, sizeof(expect_in));
+    sha3_256_finalize(&h, expect);
+    struct boot_block_files_fingerprint fp;
+    BSM_CHECK("fingerprint: digest is the little-endian slot, size and mtime",
+              setup && boot_block_files_fingerprint_read(dir, &fp) &&
+              fp.count == 1 && memcmp(fp.sha3, expect, 32) == 0);
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
 static int bsm_check_block_file_marker_roundtrip(void)
 {
     int failures = 0;
@@ -777,6 +810,7 @@ int test_boot_shutdown_marker(void)
     failures += bsm_check_evaluate_verdicts();
     failures += bsm_check_block_file_marker_roundtrip();
     failures += bsm_check_block_file_fingerprint();
+    failures += bsm_check_block_file_fingerprint_encoding();
     failures += bsm_check_block_file_shutdown_wiring();
     failures += bsm_check_container_tip_relation();
     failures += bsm_check_capture_decision();

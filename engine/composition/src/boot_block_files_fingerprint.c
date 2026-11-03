@@ -3,6 +3,7 @@
 #include "config/boot_block_files_fingerprint.h"
 
 #include "config/boot_shutdown_marker.h"
+#include "base/serialize_le.h"
 #include "platform/file_metadata.h"
 #include "sha3/sha3.h"
 
@@ -14,8 +15,7 @@ enum { BOOT_BLOCK_FILE_SLOTS = 256 };
 static void bbf_put_u64(struct sha3_256_ctx *h, uint64_t v)
 {
     unsigned char b[8];
-    for (int i = 0; i < 8; i++)
-        b[i] = (unsigned char)(v >> (8 * i));
+    zcl_write_u64_le(b, v);
     sha3_256_write(h, b, sizeof(b));
 }
 
