@@ -12,9 +12,11 @@
 #define STOP_WAIT_MS 180000u
 #define STOP_POLL_MS 250u
 /* A node that runs may still be starting: a question it cannot answer yet is asked again IDLE_POLL_MS later, IDLE_POLLS times in
- * all. The two minutes are over twice the 50 s a Pixel node took on 2026-11-03 to answer after a start. */
+ * all. The check after a restart also asks no question IDLE_WAIT_S or more after its first, because one question can take as long
+ * as the command line is given; the two minutes are over twice the 50 s a Pixel node took on 2026-11-03 to answer after a start. */
 #define IDLE_POLLS 24u
 #define IDLE_POLL_MS 5000u
+#define IDLE_WAIT_S (IDLE_POLLS * IDLE_POLL_MS / 1000u)
 #define CONFIRM_TRIES 5u
 #define CONFIRM_RETRY_MS 1000u
 
@@ -753,14 +755,18 @@ static void confirmed_create_resumes(struct wsu *w)
 }
 
 /* The running node holds the wallet open and answers from it, so nothing is stopped. It is asked until it answers, while it may
- * still be starting; false when no node runs, or it stops, or it gives no answer within IDLE_POLLS questions. */
+ * still be starting; false when no node runs, or it stops, or it gives no answer to the questions asked in the IDLE_WAIT_S after
+ * the first by the wall clock, which the screen's clock also reads. IDLE_POLLS also bounds the questions when the clock is set
+ * back. */
 static bool running_probe(struct wsu *w, enum sun_probe *probe)
 {
     if (!w->env.node_running(w->env.ctx)) return false;
     phase(w, WSU_PHASE_CHECK);
+    int64_t first_s = w->env.wall_s(w->env.ctx);
     for (unsigned asked = 1;; ++asked) {
         if (w->env.wallet_held(w->env.ctx, probe)) return true;
-        if (asked >= IDLE_POLLS) return false;
+        int64_t next_s = w->env.wall_s(w->env.ctx) - first_s + IDLE_POLL_MS / 1000u;
+        if (asked >= IDLE_POLLS || next_s >= (int64_t)IDLE_WAIT_S) return false;
         w->env.pause_ms(w->env.ctx, IDLE_POLL_MS);
         if (!w->env.node_running(w->env.ctx)) return false;
     }

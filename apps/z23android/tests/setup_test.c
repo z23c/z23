@@ -444,10 +444,11 @@ struct fake {
     bool waiting_at_sample, waiting_at_write, ready_at_sample;
     const char *note_at_sample;
     /* The running node's answer about its open wallet: given from question held_after + 1 on when held_answers is set; the node
-     * exits on its own at question held_exit_at when that is not 0. */
+     * exits on its own at question held_exit_at when that is not 0. Each question takes held_takes_ms of simulated time. */
     bool held_answers;
     enum sun_probe held;
     int held_calls, held_while_stopped, held_after, held_exit_at;
+    int64_t held_takes_ms;
 };
 static struct fake *fake_of;
 static struct wsu *model_of;
@@ -559,6 +560,7 @@ static bool f_held(void *ctx, enum sun_probe *out)
 {
     struct fake *f = ctx;
     ++f->held_calls;
+    f->now_ms += f->held_takes_ms;
     if (!f_running(f)) { ++f->held_while_stopped; return false; }
     if (f->held_exit_at && f->held_calls == f->held_exit_at) f->running = false;
     if (!f->running || !f->held_answers || f->held_calls <= f->held_after) return false;
@@ -1449,9 +1451,11 @@ static void probe_meaning_tests(void)
     wsu_destroy(&w);
 }
 
-/* The model's bound on asking a running node: ASK_TIMES questions, ASK_GAP_MS apart (IDLE_POLLS and IDLE_POLL_MS). */
+/* The model's bound on asking a running node: ASK_TIMES questions, ASK_GAP_MS apart (IDLE_POLLS and IDLE_POLL_MS), none started two
+ * minutes or more after the first. ASK_TAKES_MS is the most the command line gives one question. */
 #define ASK_TIMES 24
 #define ASK_GAP_MS 5000
+#define ASK_TAKES_MS 15000
 #define SUMMARY_HELD(seed, keys) \
     "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"shielded_keys\":0,\"seed_present\":" seed ",\"keys_present\":" keys "}}"
 /* The summary's answer keeps the rule of the status probe: a seed or a key is a wallet, both false is none, a null is not known,
@@ -1547,8 +1551,25 @@ static void running_check_tests(void)
     stops += booting_check_test();
     printf("  wallet check, node running and answering: %d node stops in %zu opens\n", stops, sizeof(cases) / sizeof(cases[0]) + 1);
 }
-/* A running node that gives no answer within the bound is read as before: stopped once, read, started once. One that exits on its
- * own while it is asked is read without a stop or a start. */
+/* Each question takes the 15 s the command line is given and none is answered. Questions start at 0, 20, 40, 60, 80 and 100 s; the
+ * one due at two minutes is not asked, so the datadir is read 1:55 in, not after 24 questions and 7:55. */
+static void slow_check_test(void)
+{
+    struct fake f;
+    struct wsu w;
+    interrupted_with(&f, &w, ZAPP_KIND_RESTORE, SUN_PROBE_NONE, ASK_TIMES);
+    snprintf(f.script.status, sizeof(f.script.status), EMPTY_REPLY);
+    f.clock_follows = true;
+    f.held_takes_ms = ASK_TAKES_MS;
+    wsu_resume_job(&w);
+    assert(w.step == WSU_NO_WALLET && f.held_calls == 6 && f.held_while_stopped == 0 && f.now_ms == 6 * ASK_TAKES_MS + 5 * ASK_GAP_MS);
+    assert(f.stops == 1 && f.starts == 1 && f.starts_refused == 0 && f.running && f.script.status_calls == 1);
+    printf("  wallet check, node running with 15 s silent answers: %d questions, datadir read %lld s in\n", f.held_calls,
+           (long long)(f.now_ms / 1000));
+    wsu_destroy(&w);
+}
+/* A running node that gives no answer within the bound is read as before: stopped once, read, started once; with a clock that does
+ * not move, the count alone ends the questions. One that exits on its own while it is asked is read without a stop or a start. */
 static void silent_check_tests(void)
 {
     struct fake f;
@@ -1567,6 +1588,7 @@ static void silent_check_tests(void)
     assert(w.step == WSU_BLOCKED && w.failure == WSU_NO_FAILURE && f.held_calls == 2 && f.held_while_stopped == 0);
     assert(f.stops == 0 && f.starts == 0 && !f.running && f.script.status_calls == 1);
     wsu_destroy(&w);
+    slow_check_test();
 }
 /* With no node running, the datadir is read at once: the node is not asked, stopped or started. */
 static void stopped_check_tests(void)
