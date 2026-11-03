@@ -1145,7 +1145,10 @@ static bool rpc_listbanned(const struct json_value *params, bool help,
 
     json_set_array(result);
     struct net_manager *nm = network_ban_manager();
-    if (!nm) return true;
+    if (!nm) {
+        LOG_WARN("net", "listbanned: P2P not initialized, reporting an empty list");
+        return true;
+    }
 
     /* Copy the rows under cs_banned, then release it before any JSON is built:
      * allocation and JSON work never run while peers wait on the ban lock. */
@@ -1241,6 +1244,7 @@ static bool rpc_clearbanned(const struct json_value *params, bool help,
 
     struct net_manager *nm = network_ban_manager();
     if (!nm) {
+        LOG_WARN("net", "clearbanned: refused, P2P not initialized");
         json_set_str(result, "P2P not initialized");
         return false;
     }
