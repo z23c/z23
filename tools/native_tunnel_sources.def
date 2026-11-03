@@ -35,6 +35,7 @@ ZCL_TUNNEL_SOURCE("engine/modules/event/src/error_ring.c","src/engine/modules/ev
 ZCL_TUNNEL_SOURCE("platform/modules/json/src/json.c","src/platform/modules/json/src/json.c")
 ZCL_TUNNEL_SOURCE("contexts/commons/packages/zutf8/src/zutf8.c","src/contexts/commons/packages/zutf8/src/zutf8.c")
 ZCL_TUNNEL_SOURCE("platform/modules/util/src/supervisor.c","src/platform/modules/util/src/supervisor.c")
+ZCL_TUNNEL_SOURCE("platform/modules/util/src/supervisor_introspection.c","src/platform/modules/util/src/supervisor_introspection.c")
 ZCL_TUNNEL_SOURCE("platform/modules/util/src/blocker.c","src/platform/modules/util/src/blocker.c")
 ZCL_TUNNEL_SOURCE("platform/modules/util/src/thread_work_probe.c","src/platform/modules/util/src/thread_work_probe.c")
 ZCL_TUNNEL_SOURCE("platform/modules/platform/src/os_proc.c","src/platform/modules/platform/src/os_proc.c")
