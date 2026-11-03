@@ -25,9 +25,11 @@
  *
  * Patch identity is `git cherry HEAD-of-lane` in the stack, which compares
  * the same stable patch ids `git patch-id --stable` prints (git 2.43) and
- * needs no stdin. Not ported: the duplicate_candidates floor, which the
- * bridge answers by running dup-audit.sh; its log names no file, so it ends
- * as no_paths here. git runs by argv only, with origin/main as the base.
+ * needs no stdin; a stack commit that is the lane's own commit (same sha,
+ * which cherry cannot list) maps by `git rev-list`. Not ported: the
+ * duplicate_candidates floor, which the bridge answers by running
+ * dup-audit.sh; its log names no file, so it ends as no_paths here. git runs
+ * by argv only, with origin/main as the base.
  *
  * Inputs: --stack (the stack worktree), --log (the failure log), --stage
  * (lint, fast or agent-verify), --ledger (the directory holding
@@ -245,36 +247,55 @@ static bool cd_load_lanes(struct cd_ctx *x)
     return true;
 }
 
-/* `git cherry LANEHEAD HEAD origin/main` prints "- SHA" for each stack commit
- * whose patch the lane already holds. */
-static void cd_mark_lane(struct cd_ctx *x, size_t li, char *out)
+/* The stack commit `sha` belongs to lane `li`; a second lane claiming it
+ * leaves it ambiguous. */
+static void cd_mark(struct cd_ctx *x, size_t li, const char *sha)
+{
+    size_t i;
+    for (i = 0; i < x->nc; i++) {
+        if (strncmp(x->c[i].sha, sha, 40) != 0)
+            continue;
+        if (x->c[i].lane == CD_UNMAPPED)
+            x->c[i].lane = (int)li;
+        else if (x->c[i].lane != (int)li)
+            x->c[i].lane = CD_AMBIGUOUS;
+    }
+}
+
+/* Each output line is "SHA" or, from git cherry, "- SHA" (a stack commit
+ * whose patch the lane holds) or "+ SHA" (one it does not: skipped). */
+static void cd_mark_lane(struct cd_ctx *x, size_t li, char *out, bool cherry)
 {
     char *line = out, *nl;
-    size_t i;
     while (*line) {
         nl = strchr(line, '\n');
         if (nl)
             *nl = '\0';
-        if (line[0] == '-' && line[1] == ' ')
-            for (i = 0; i < x->nc; i++)
-                if (strncmp(x->c[i].sha, line + 2, 40) == 0)
-                    x->c[i].lane = x->c[i].lane == CD_UNMAPPED
-                                       ? (int)li
-                                       : CD_AMBIGUOUS;
+        if (!cherry)
+            cd_mark(x, li, line);
+        else if (line[0] == '-' && line[1] == ' ')
+            cd_mark(x, li, line + 2);
         if (!nl)
             break;
         line = nl + 1;
     }
 }
 
+/* By patch identity (`git cherry LANEHEAD HEAD origin/main`), and by sha for
+ * a stack commit that IS the lane's commit (a fast-forwarded pick, which
+ * cherry cannot list: it is reachable from both sides). */
 static void cd_map_lanes(struct cd_ctx *x)
 {
     size_t li;
     for (li = 0; li < x->nl; li++) {
         const char *cherry[] = {"cherry", x->lane[li].head, "HEAD",
                                 "origin/main", NULL};
+        const char *own[] = {"rev-list", x->lane[li].head, "^origin/main",
+                             NULL};
         if (db_git(x->stack, cherry, x->buf, CD_BUF) == 0)
-            cd_mark_lane(x, li, x->buf);
+            cd_mark_lane(x, li, x->buf, true);
+        if (db_git(x->stack, own, x->buf, CD_BUF) == 0)
+            cd_mark_lane(x, li, x->buf, false);
     }
 }
 

@@ -34,6 +34,20 @@ static bool dbc_pick(const char *stack, const char *lane, const char *rev,
     return dbf_rev(stack, "HEAD", out);
 }
 
+/* The stack takes the lane's commit as it is (a fast-forward): same sha, so
+ * `git cherry` cannot list it and only the sha mapping finds its lane. */
+static bool dbc_ff(const char *stack, const char *lane, const char *rev,
+                   char out[41])
+{
+    const char *fetch[] = {"fetch", "-q", lane, "HEAD", NULL};
+    char lsha[41];
+    const char *merge[] = {"merge", "-q", "--ff-only", lsha, NULL};
+    if (!dbf_rev(lane, rev, lsha) || !dbf_git(stack, fetch) ||
+        !dbf_git(stack, merge))
+        return false;
+    return dbf_rev(stack, "HEAD", out);
+}
+
 /* One lane of up to two commits; its path and head. */
 static bool dbc_lane(const struct dbc *d, const char *name, const char *f1,
                      const char *f2, char path[900], char head[41])
@@ -79,7 +93,7 @@ static bool dbc_stack_make(struct dbc *d, const struct dbc_lanes *l)
     (void)snprintf(d->stack, sizeof(d->stack), "%s/z23-stacks9", par);
     if (!dbf_git(par, clone))
         return false;
-    return dbc_pick(d->stack, l->a, "HEAD~1", d->sha[A1]) &&
+    return dbc_ff(d->stack, l->a, "HEAD~1", d->sha[A1]) &&
            dbc_pick(d->stack, l->b, "HEAD", d->sha[B1]) &&
            dbc_pick(d->stack, l->c, "HEAD~1", d->sha[C1]) &&
            dbc_pick(d->stack, l->a, "HEAD", d->sha[A2]) &&
