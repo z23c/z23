@@ -530,8 +530,10 @@ static bool os_proc_pid_exe_path_linux(uint64_t pid, char *buf, size_t n)
     int written = snprintf(link, sizeof(link), "/proc/%llu/exe",
                            (unsigned long long)pid);
     if (written <= 0 || (size_t)written >= sizeof(link)) return false;
+    /* readlink neither terminates nor reports truncation: a target that
+     * fills n - 1 bytes may have been cut short, so it is a refusal. */
     ssize_t length = readlink(link, buf, n - 1);
-    if (length <= 0 || (size_t)length >= n) return false;
+    if (length <= 0 || (size_t)length >= n - 1) return false;
     buf[length] = '\0';
     return true;
 }

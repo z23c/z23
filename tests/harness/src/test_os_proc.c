@@ -549,6 +549,29 @@ static int os_proc_exe_path_fit_checks(void)
     return failures;
 }
 
+/* pid exe_path refuses a buffer that holds the path but not its terminator:
+ * readlink would fill n - 1 bytes and may have cut the path short. */
+static int os_proc_pid_exe_path_fit_checks(void)
+{
+    int failures = 0;
+#if defined(__linux__)
+    uint64_t self = (uint64_t)getpid();
+    char full[4096];
+    bool ok = os_proc_pid_exe_path(self, full, sizeof(full));
+    OSPROC_CHECK("pid exe_path resolves the running image", ok);
+    if (ok) {
+        size_t len = strlen(full);
+        char exact[4096];
+        OSPROC_CHECK("pid exe_path refuses a buffer that fills n - 1 bytes",
+                     !os_proc_pid_exe_path(self, exact, len + 1));
+        OSPROC_CHECK("pid exe_path accepts the exact fit",
+                     os_proc_pid_exe_path(self, exact, len + 2) &&
+                     strcmp(exact, full) == 0);
+    }
+#endif
+    return failures;
+}
+
 /* open_self_exe hands back real bytes of the running image. */
 static int os_proc_open_self_exe_read_checks(void)
 {
@@ -1026,6 +1049,7 @@ int test_os_proc(void)
     failures += os_proc_pid_start_token_checks();
     failures += os_proc_exe_path_checks();
     failures += os_proc_exe_path_fit_checks();
+    failures += os_proc_pid_exe_path_fit_checks();
     failures += os_proc_open_self_exe_read_checks();
     failures += os_proc_self_exe_identity_rung_checks();
     failures += os_proc_cgroup_dir_checks();
