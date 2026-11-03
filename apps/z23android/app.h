@@ -36,6 +36,7 @@ struct zapp_view {
     bool node_running;
     bool node_process_running;
     bool node_wanted;
+    bool node_stopping; /* A stop was sent to the node process that is still running. */
     bool scanning;
     unsigned scans_done;           /* Scan actions that have finished, with or without a code. */
     enum zapp_scan_kind scan_kind; /* Kind of the last code scanned by the scan action. */

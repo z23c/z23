@@ -274,6 +274,7 @@ static void observe_node(struct controller *c)
     c->view.node_process_running = process_running;
     c->view.pace = pace;
     c->view.node_wanted = wanted;
+    c->view.node_stopping = stopping;
     struct zapp_chain_status chain = zapp_chain_check(n.height, n.target, n.peers, &evidence);
     c->view.chain_state = chain.state;
     c->view.node_reference = chain.reference;
@@ -904,6 +905,7 @@ static void *worker(void *opaque)
             pthread_mutex_lock(&c->lock);
             c->view.node_process_running = process_running;
             c->view.node_wanted = wanted;
+            c->view.node_stopping = stopping;
             if (!c->view.node_running) {
                 zapp_sync_line(false, process_running, -1, -1, -1, NULL, c->view.sync_status, sizeof(c->view.sync_status));
                 zapp_node_line(false, process_running, stopping, false, -1, -1, -1, NULL, c->view.node_line, sizeof(c->view.node_line));

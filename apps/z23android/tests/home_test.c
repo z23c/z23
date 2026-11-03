@@ -49,7 +49,13 @@ static void node_button_states(void)
     view.node_process_running = true;
     view.node_wanted = true;
     assert(!strcmp(zapp_home_node_label(&view), "Stop node"));
+    /* The start marker could not be saved: the node still runs and no stop was sent, so Stop stays. */
     view.node_wanted = false;
+    assert(!strcmp(zapp_home_node_label(&view), "Stop node"));
+    assert(!strcmp(zapp_home_node_action_for_label(zapp_home_node_label(&view)), "node_stop"));
+    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && strstr(card, "\"node_button\":\"Stop node\"") &&
+        !strstr(card, "Stopping"));
+    view.node_stopping = true;
     assert(!strcmp(zapp_home_node_label(&view), ""));
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && strstr(card, "\"node_button\":\"\"") &&
         strstr(card, "\"node_line\":\"Stopping…\""));
@@ -118,7 +124,7 @@ static void plain_node_line_verdicts(void)
     assert(node_line_is(&view, "Connected, checking the chain"));
     view.node_height = 1000;
     assert(node_line_is(&view, "Looking for other computers to connect to"));
-    view.node_wanted = false;
+    view.node_stopping = true;
     assert(node_line_is(&view, "Stopping…"));
 }
 static void phone_card_golden(void)
