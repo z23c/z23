@@ -425,6 +425,19 @@ static void *cookie_stall_rotate_fn(void *arg)
     return NULL;
 }
 
+/* After the stall is released the rotation must complete: new secret on disk
+ * and accepted, old secret still inside the grace window. */
+static bool cookie_stall_check_rotated(uint16_t port, const char *tmpdir,
+                                       const char *pass_v1)
+{
+    char pass_v2[128] = {0};
+    bool ok = read_cookie_password(tmpdir, pass_v2, sizeof(pass_v2));
+    ok = ok && strcmp(pass_v1, pass_v2) != 0;
+    ok = ok && rpc_with_auth(port, "__cookie__", pass_v2) == 200;
+    ok = ok && rpc_with_auth(port, "__cookie__", pass_v1) == 200;
+    return ok;
+}
+
 static bool cookie_rotation_check_auth_not_blocked_by_write(
     const struct rpc_table *table, const char *tmpdir, int *status_out)
 {
@@ -456,11 +469,7 @@ static bool cookie_rotation_check_auth_not_blocked_by_write(
     if (started) pthread_join(rot, NULL);
     rpc_http_cookie_write_test_hook(NULL);
 
-    char pass_v2[128] = {0};
-    ok = ok && read_cookie_password(tmpdir, pass_v2, sizeof(pass_v2));
-    ok = ok && strcmp(pass_v1, pass_v2) != 0;
-    ok = ok && rpc_with_auth(port, "__cookie__", pass_v2) == 200;
-    ok = ok && rpc_with_auth(port, "__cookie__", pass_v1) == 200;
+    ok = ok && cookie_stall_check_rotated(port, tmpdir, pass_v1);
 
     rpc_http_stop();
     *status_out = status;
