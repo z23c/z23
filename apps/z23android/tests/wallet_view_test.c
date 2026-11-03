@@ -165,24 +165,29 @@ static void test_sync_lines(void)
     replace_once(json, sizeof(json), VALID_REPLY, "\"blocks_behind\":0,\"current\":true",
                  "\"blocks_behind\":5,\"current\":false");
     assert(wallet_view_from_summary(json, &v) && v.known);
-    assert(!strcmp(v.sync, "Catching up, 5 blocks behind: amounts may change"));
+    assert(!strcmp(v.sync, "Updating your wallet. Amounts may change."));
 
     replace_once(json, sizeof(json), VALID_REPLY, "\"blocks_behind\":0,\"current\":true",
                  "\"blocks_behind\":0,\"current\":false");
     assert(wallet_view_from_summary(json, &v) && v.known);
     assert(!strcmp(v.sync, "Catching up: amounts may change"));
 
-    /* One block behind is singular, even with current true: never shown as up to date. */
+    /* One block behind, even with current true, reads as updating: never as up to date. */
     replace_once(json, sizeof(json), VALID_REPLY, "\"blocks_behind\":0,\"current\":true",
                  "\"blocks_behind\":1,\"current\":true");
     assert(wallet_view_from_summary(json, &v) && v.known);
-    assert(!strcmp(v.sync, "Catching up, 1 block behind: amounts may change"));
+    assert(!strcmp(v.sync, "Updating your wallet. Amounts may change."));
 
     /* current true with a larger gap is inconsistent, and must not read as confirmed. */
     replace_once(json, sizeof(json), VALID_REPLY, "\"blocks_behind\":0,\"current\":true",
                  "\"blocks_behind\":2,\"current\":true");
     assert(wallet_view_from_summary(json, &v) && v.known);
-    assert(!strcmp(v.sync, "Catching up, 2 blocks behind: amounts may change"));
+    assert(!strcmp(v.sync, "Updating your wallet. Amounts may change."));
+    /* The node is current, but the wallet has not scanned every block it knows: not up to date. */
+    replace_once(json, sizeof(json), VALID_REPLY, "\"scanned_through_height\":3000000",
+                 "\"scanned_through_height\":2999000");
+    assert(wallet_view_from_summary(json, &v) && v.known && v.current);
+    assert(!strcmp(v.sync, "Still scanning your wallet history. Amounts may change."));
     printf("  sync line: up to date, catching up, one block, several blocks behind\n");
 }
 
@@ -419,9 +424,9 @@ static void test_hidden_private_amounts(void)
     assert(!strcmp(v.balance, "Your private balance is hidden because the wallet is locked") && !strstr(v.balance, "ZCL"));
     assert(!v.pending[0] && !v.unready_line[0] && !v.total_line[0] && !v.current && v.scanning);
     assert(!strcmp(v.sync, "The wallet is locked, so private amounts are not shown"));
-    /* Blocks behind keep their own wording while locked: the public amounts may still change. */
+    /* Blocks behind keep the updating wording while locked: the public amounts may still change. */
     replace_once(json, sizeof(json), hidden, "\"blocks_behind\":0,", "\"blocks_behind\":500,");
-    assert(wallet_view_from_summary(json, &v) && !strcmp(v.sync, "Catching up, 500 blocks behind: amounts may change"));
+    assert(wallet_view_from_summary(json, &v) && !strcmp(v.sync, "Updating your wallet. Amounts may change."));
     assert(!strncmp(v.public_line, "0.1 ZCL public", 14));
     assert(!strncmp(v.public_line, "0.1 ZCL public", 14));
     replace_once(json, sizeof(json), VALID_REPLY, schema, "\"schema\":\"zcl.wallet_summary.v1\",\"shielded_state\":\"bogus\",");

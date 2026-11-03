@@ -20,6 +20,8 @@
 #define TEXT_HIDDEN "Your private balance is hidden because the wallet is locked"
 #define TEXT_SYNC_UNKNOWN "Sync state unknown"
 #define TEXT_SYNC_LOCKED "The wallet is locked, so private amounts are not shown"
+#define TEXT_SYNC_UPDATING "Updating your wallet. Amounts may change."
+#define TEXT_SYNC_SCANNING "Still scanning your wallet history. Amounts may change."
 #define TEXT_SEND_UNAVAILABLE "Sending is unavailable until the wallet state loads."
 #define TEXT_SEND_RELEASE "Sending is paused until your phone has checked the latest blocks on its own."
 #define TEXT_SEND_STORE "Sending is paused because the wallet cannot save its progress right now."
@@ -270,19 +272,19 @@ static void render_public(const struct summary *s, struct wallet_view *out)
     snprintf(out->public_line, sizeof(out->public_line), "%s ZCL public: visible to everyone, not part of the spendable amount", amount);
 }
 
-/* Up to date only at zero blocks behind. A gap of one or more blocks says so, whatever current
- * says, so a stale balance is never shown as confirmed. */
+/* Up to date only when the node is current and the wallet has scanned every block it knows. A gap of one or more
+ * blocks, in the node or in the wallet's own scan, says so whatever current says, so a stale balance is never shown
+ * as confirmed. out->scanning is set before this runs. */
 static void render_sync(const struct summary *s, struct wallet_view *out)
 {
-    if (s->blocks_behind > 1)
-        snprintf(out->sync, sizeof(out->sync), "Catching up, %lld blocks behind: amounts may change",
-                 (long long)s->blocks_behind);
-    else if (s->blocks_behind == 1)
-        put(out->sync, sizeof(out->sync), "Catching up, 1 block behind: amounts may change");
-    else if (s->current)
+    if (s->blocks_behind > 0)
+        put(out->sync, sizeof(out->sync), TEXT_SYNC_UPDATING);
+    else if (out->current && !out->scanning)
         snprintf(out->sync, sizeof(out->sync), "Up to date at block %lld", (long long)s->tip);
     else if (s->hidden)
         put(out->sync, sizeof(out->sync), TEXT_SYNC_LOCKED);
+    else if (out->scanning)
+        put(out->sync, sizeof(out->sync), TEXT_SYNC_SCANNING);
     else
         put(out->sync, sizeof(out->sync), "Catching up: amounts may change");
 }

@@ -29,7 +29,8 @@ struct wallet_view {
     char public_line[WALLET_VIEW_LINE];
     /* "0.2 ZCL maturing, not yet spendable", or "" when no mined coins are maturing. */
     char immature_line[WALLET_VIEW_LINE];
-    /* "Up to date at block N", or "Catching up, N blocks behind: amounts may change". */
+    /* "Up to date at block N", "Still scanning your wallet history. Amounts may change.", or
+     * "Updating your wallet. Amounts may change.". */
     char sync[WALLET_VIEW_LINE];
     /* "" when sending is allowed, otherwise one plain sentence. */
     char send[WALLET_VIEW_LINE];
