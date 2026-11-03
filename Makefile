@@ -356,6 +356,20 @@ ZCL_HOTSWAP_LOOP_GOALS := hotswap-try hotswap-apply hotswap c3-mutex-probe c3-sp
 	$(ZCL_GUI_APP_GOALS)
 ZCL_HOTSWAP_LOOP_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_HOTSWAP_LOOP_GOALS),$(MAKECMDGOALS))),,1),)
 
+# These exact goals only regenerate source headers and their stamps. They do
+# not consume node archives, source identity, compile epochs or object graphs.
+# Mixed and default invocations retain authoritative source identity and
+# artifact gates; existing standalone-helper exemptions still apply.
+ZCL_GENERATED_HEADER_GOALS := contexts/wallet/views/include/views/wallet_templates_gen.h \
+	contexts/explorer/views/include/views/site_css.h \
+	contexts/commons/views/include/views/install_script_gen.h \
+	tools/dev/native_tunnel_export_binding.h \
+	build/identity/gen-stamps/wallet_templates.stamp \
+	build/identity/gen-stamps/site_css.stamp \
+	build/identity/gen-stamps/install_script.stamp \
+	build/identity/gen-stamps/native_tunnel_export_binding.stamp
+ZCL_GENERATED_HEADER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_GENERATED_HEADER_GOALS),$(MAKECMDGOALS))),,1),)
+
 # These exact goals build standalone C23 checker tools. They consume no node
 # objects, vendor archives, generated view headers, or compile epoch. Mixed
 # goals keep the full parse; the inventory lint still runs its complete census.
@@ -369,7 +383,7 @@ ZCL_INVENTORY_LINT_ONLY := $(if $(filter check-capability-inventory-generated do
 # ZCL_HOTSWAP_LOOP_GOALS above (that set fakes a zero identity). This wider
 # set only gates the depfile-graph import skip.
 ZCL_HOTSWAP_DEPFILE_LEAN_GOALS := $(ZCL_HOTSWAP_LOOP_GOALS) check-capability-inventory-generated docs-proof-tools hotswap-module-so \
-	t-hotswap hotswap-test-so
+	t-hotswap hotswap-test-so $(ZCL_GENERATED_HEADER_GOALS)
 ZCL_HOTSWAP_DEPFILE_LEAN_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_HOTSWAP_DEPFILE_LEAN_GOALS),$(MAKECMDGOALS))),,1),)
 
 # worktree-prime supplies generated vendor/lib/*.a and vendor/include by copy
@@ -461,7 +475,7 @@ ZCL_WINDOWS_LAUNCHER_GOALS := windows-headless-run windows-headless-run-selftest
 ZCL_BUILD_QUERY_GOALS := print-node-c23-srcs help doctor doctor-env doctor-build timings agent-dev-status print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags
 # Receipt hooks use in-tree C23 and system libraries, never node archives.
 ZCL_GIT_HOOK_GOALS := git-hook git-hook-selftest install-hooks
-ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GIT_HOOK_GOALS) check-capability-inventory-generated docs-proof-tools game game-check game-platform-probe,$(MAKECMDGOALS))),,1),)
+ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GIT_HOOK_GOALS) $(ZCL_GENERATED_HEADER_GOALS) check-capability-inventory-generated docs-proof-tools game game-check game-platform-probe,$(MAKECMDGOALS))),,1),)
 ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ifneq ($(ZCL_PORTABLE_FRONTDOOR_ONLY),1)
@@ -491,7 +505,9 @@ ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifeq ($(strip $(MAKE_RESTARTS)),)
 ifeq ($(ZCL_HOTSWAP_LOOP_ONLY),)
 ifeq ($(ZCL_INVENTORY_LINT_ONLY),)
+ifeq ($(ZCL_GENERATED_HEADER_ONLY),)
 -include $(VIEW_BOOTSTRAP_MK)
+endif
 endif
 endif
 endif
@@ -544,7 +560,7 @@ endif
 # derives a new token, so cross-invocation supersession detection (a real
 # source edit between two separate builds) is untouched; see the session
 # cache in tools/dev/source-identity.sh.
-BUILD_EPOCH_CLEAN_ONLY := $(if $(ZCL_STANDALONE_CLEAN)$(ZCL_HOTSWAP_LOOP_ONLY)$(ZCL_INVENTORY_LINT_ONLY),1,)
+BUILD_EPOCH_CLEAN_ONLY := $(if $(ZCL_STANDALONE_CLEAN)$(ZCL_HOTSWAP_LOOP_ONLY)$(ZCL_INVENTORY_LINT_ONLY)$(ZCL_GENERATED_HEADER_ONLY),1,)
 BUILD_INVOCATION_PID := $(if $(BUILD_EPOCH_CLEAN_ONLY),0,$(strip $(shell printf '%s' $$PPID)))
 BUILD_INVOCATION_START := $(if $(BUILD_EPOCH_CLEAN_ONLY),0,$(strip $(shell tools/dev/process-start-token.sh '$(BUILD_INVOCATION_PID)' 2>/dev/null)))
 BUILD_INVOCATION_ID := $(if $(BUILD_EPOCH_CLEAN_ONLY),clean,$(strip $(shell printf '%s\0%s' '$(BUILD_INVOCATION_PID)' '$(BUILD_INVOCATION_START)' | sha256sum | awk '{print $$1}')))
@@ -651,6 +667,9 @@ BUILD_SOURCE_RECORD := $(ZCL_ZERO_SHA256) 1 $(ZCL_ZERO_SHA256)
 else ifeq ($(ZCL_INVENTORY_LINT_ONLY),1)
 # These standalone tools have no source-record or node epoch input; the
 # inventory lint recipe still scans and compares the complete public census.
+BUILD_SOURCE_RECORD := $(ZCL_ZERO_SHA256) 1 $(ZCL_ZERO_SHA256)
+else ifeq ($(ZCL_GENERATED_HEADER_ONLY),1)
+# Header-only recipes never stamp or publish a node artifact.
 BUILD_SOURCE_RECORD := $(ZCL_ZERO_SHA256) 1 $(ZCL_ZERO_SHA256)
 else
 BUILD_SOURCE_RECORD := $(shell ZCL_SOURCE_IDENTITY_SESSION='$(ZCL_SOURCE_IDENTITY_SESSION)' tools/dev/source-identity.sh capture-record 2>/dev/null || echo unknown 0 unknown)
@@ -4043,6 +4062,21 @@ gen-stamps-selftest:
 	    else [ "$$a" = "$$b" ] || fail "$$what: file $$i changed but should not have"; fi; i=$$((i+1)); done; \
 	    [ "$$(tr '\n' ' ' < "$$d/gen.log" | sed 's/ $$//')" = "$$glog" ] || fail "$$what: generator runs were '$$(tr '\n' ' ' < "$$d/gen.log")', expected '$$glog'"; }; \
 	rmk; for f in $$stamps $$hdrs; do [ -e "$$w/$$f" ] || fail "real build did not produce $$f"; done; \
+	cp "$$w/tools/dev/source-identity.sh" "$$w/tools/dev/source-identity-real.sh"; \
+	printf '%s\n' '#!/bin/sh' "[ \"\$$1\" != capture-record ] || echo capture >> '$$d/captures'" \
+	  'exec "$$(dirname "$$0")/source-identity-real.sh" "$$@"' > "$$w/tools/dev/source-identity.sh"; \
+	chmod +x "$$w/tools/dev/source-identity.sh"; \
+	: > "$$d/captures"; \
+	(cd "$$w" && env -u MAKEFLAGS -u MAKELEVEL $(MAKE) --no-print-directory -qp $$hdrs >/dev/null 2>&1) || [ $$? = 1 ] || fail "header query failed"; \
+	[ ! -s "$$d/captures" ] || fail "header-only parse captured source identity"; \
+	(cd "$$w" && env -u MAKEFLAGS -u MAKELEVEL $(MAKE) --no-print-directory -qp $$stamps >/dev/null 2>&1) || [ $$? = 1 ] || fail "stamp query failed"; \
+	[ ! -s "$$d/captures" ] || fail "stamp-only parse captured source identity"; \
+	for goals in "$$hdrs help" "help $$hdrs" "$$hdrs z23" "z23 $$hdrs" ""; do \
+	  : > "$$d/captures"; \
+	  (cd "$$w" && env -u MAKEFLAGS -u MAKELEVEL $(MAKE) --no-print-directory -qp $$goals >/dev/null 2>&1) || [ $$? = 1 ] || fail "mixed/default query failed"; \
+	  [ -s "$$d/captures" ] || fail "mixed/default parse skipped source identity"; \
+	done; \
+	mv "$$w/tools/dev/source-identity-real.sh" "$$w/tools/dev/source-identity.sh"; \
 	for h in $$hdrs; do touch -d '2001-01-01' "$$w/$$h"; done; \
 	before="$$(snap)"; lmk; lmk; after="$$(snap)"; \
 	expect "settled tree" 00000000 ""; \
