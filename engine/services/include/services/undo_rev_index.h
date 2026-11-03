@@ -33,6 +33,7 @@
 enum undo_rev_status {
     UNDO_REV_FOUND = 0,   /* verified record deserialized into *out */
     UNDO_REV_NOT_FOUND,   /* rev files read, no record binds this parent */
+    UNDO_REV_AMBIGUOUS,   /* two records pass checksum and shape */
     UNDO_REV_NO_FILE,     /* no rev file could be opened */
     UNDO_REV_ERROR,       /* bad arguments or allocation failure */
 };
@@ -65,6 +66,8 @@ bool undo_rev_locator_init(struct undo_rev_locator *loc, const char *datadir,
                            const unsigned char magic[UNDO_REV_MAGIC_SIZE]);
 void undo_rev_locator_free(struct undo_rev_locator *loc);
 
+typedef bool (*undo_rev_accept_fn)(const struct block_undo *undo, void *ctx);
+
 /* Find and parse the undo record bound to `parent` (the hash of the block's
  * PARENT). hint_file < 0 means unknown; a known file is tried first. On
  * UNDO_REV_FOUND *out owns its allocations (block_undo_free); on any other
@@ -72,12 +75,14 @@ void undo_rev_locator_free(struct undo_rev_locator *loc);
 enum undo_rev_status undo_rev_locator_read(struct undo_rev_locator *loc,
                                            const struct uint256 *parent,
                                            int hint_file,
+                                           undo_rev_accept_fn accept, void *accept_ctx,
                                            struct block_undo *out);
 
 /* Process-wide locator behind its own lock, for the validation walk and the
  * sampler. Re-initialised when datadir or magic change. */
 enum undo_rev_status undo_rev_shared_read(
     const char *datadir, const unsigned char magic[UNDO_REV_MAGIC_SIZE],
-    const struct uint256 *parent, int hint_file, struct block_undo *out);
+    const struct uint256 *parent, int hint_file, undo_rev_accept_fn accept,
+    void *accept_ctx, struct block_undo *out);
 
 #endif /* ZCL_UNDO_REV_INDEX_H */

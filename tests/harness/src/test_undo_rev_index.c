@@ -35,18 +35,20 @@ static struct uint256 make_hash(unsigned char seed)
 }
 
 /* One-input undo whose prevout value is `value`. */
-static bool make_payload(int64_t value, struct byte_stream *s)
+static bool make_payload(int64_t value, size_t nprev, struct byte_stream *s)
 {
     struct block_undo u;
     block_undo_init(&u);
-    if (!block_undo_alloc(&u, 1) || !tx_undo_alloc(&u.vtxundo[0], 1)) {
+    if (!block_undo_alloc(&u, 1) || !tx_undo_alloc(&u.vtxundo[0], nprev)) {
         block_undo_free(&u);
         return false;
     }
-    struct tx_in_undo *in = &u.vtxundo[0].vprevout[0];
-    in->txout.value = value;
-    in->txout.script_pub_key.size = 3;
-    memcpy(in->txout.script_pub_key.data, "\x51\x52\x53", 3);
+    for (size_t i = 0; i < nprev; i++) {
+        struct tx_in_undo *in = &u.vtxundo[0].vprevout[i];
+        in->txout.value = value;
+        in->txout.script_pub_key.size = 3;
+        memcpy(in->txout.script_pub_key.data, "\x51\x52\x53", 3);
+    }
     u.old_sprout_tree_root = make_hash(0x5a);
     stream_init(s, 0);
     bool ok = block_undo_serialize(&u, s);
@@ -57,10 +59,10 @@ static bool make_payload(int64_t value, struct byte_stream *s)
 /* Append [magic][size][payload][checksum] to f; the checksum binds
  * `bind_parent`. Flaws are applied to the written bytes. */
 static bool append_record(FILE *f, const struct uint256 *bind_parent,
-                          int64_t value, enum rev_flaw flaw)
+                          int64_t value, size_t nprev, enum rev_flaw flaw)
 {
     struct byte_stream s;
-    if (!make_payload(value, &s))
+    if (!make_payload(value, nprev, &s))
         return false;
     size_t n = s.size;
     unsigned char *hb = zcl_malloc(32 + n, "test undo hash buf");
@@ -120,13 +122,13 @@ static enum undo_rev_status read_one(const struct uint256 *bind,
     if (!make_datadir(dir, sizeof(dir)))
         return st;
     FILE *f = open_rev(dir, 0);
-    bool wrote = f && append_record(f, bind, 4242, flaw);
+    bool wrote = f && append_record(f, bind, 4242, 1, flaw);
     if (f)
         fclose(f);
     struct undo_rev_locator loc;
     struct block_undo u;
     if (wrote && undo_rev_locator_init(&loc, dir, TEST_MAGIC)) {
-        st = undo_rev_locator_read(&loc, want, 0, &u);
+        st = undo_rev_locator_read(&loc, want, 0, NULL, NULL, &u);
         if (st == UNDO_REV_FOUND) {
             *value = u.vtxundo[0].vprevout[0].txout.value;
             block_undo_free(&u);
@@ -170,7 +172,7 @@ static int test_missing_file(void)
     struct uint256 pa = make_hash(0x11);
     bool init = undo_rev_locator_init(&loc, dir, TEST_MAGIC);
     enum undo_rev_status st = init
-        ? undo_rev_locator_read(&loc, &pa, -1, &u) : UNDO_REV_ERROR;
+        ? undo_rev_locator_read(&loc, &pa, -1, NULL, NULL, &u) : UNDO_REV_ERROR;
     if (init)
         undo_rev_locator_free(&loc);
     remove_datadir(dir);
@@ -182,7 +184,7 @@ static int64_t found_value(struct undo_rev_locator *loc,
                            const struct uint256 *p, int hint)
 {
     struct block_undo u;
-    if (undo_rev_locator_read(loc, p, hint, &u) != UNDO_REV_FOUND)
+    if (undo_rev_locator_read(loc, p, hint, NULL, NULL, &u) != UNDO_REV_FOUND)
         return -1;
     int64_t v = u.vtxundo[0].vprevout[0].txout.value;
     block_undo_free(&u);
@@ -195,9 +197,9 @@ static bool write_two_files(const char *dir, const struct uint256 *p1,
 {
     FILE *f0 = open_rev(dir, 0);
     FILE *f1 = open_rev(dir, 1);
-    bool wrote = f0 && f1 && append_record(f0, p1, 1, FLAW_NONE) &&
-                 append_record(f0, p2, 2, FLAW_NONE) &&
-                 append_record(f1, p3, 3, FLAW_NONE);
+    bool wrote = f0 && f1 && append_record(f0, p1, 1, 1, FLAW_NONE) &&
+                 append_record(f0, p2, 2, 1, FLAW_NONE) &&
+                 append_record(f1, p3, 3, 1, FLAW_NONE);
     if (f0)
         fclose(f0);
     if (f1)
@@ -230,6 +232,84 @@ static int test_hint_and_cursor(void)
     return check(ok, "wrong hint and sequential cursor find records");
 }
 
+/* Shape check standing in for the verifier's: this "block" has one tx with
+ * two inputs. */
+static bool two_input_shape(const struct block_undo *u, void *ctx)
+{
+    (void)ctx;
+    return u->num_txundo == 1 && u->vtxundo[0].num_prevout == 2;
+}
+
+/* Two records bind parent p: a one-input sibling and a two-input one, in the
+ * given order (value 11 for the sibling, 22 for the right one). */
+static enum undo_rev_status read_siblings(size_t first_nprev, size_t second_nprev,
+                                          int64_t *value)
+{
+    char dir[512];
+    enum undo_rev_status st = UNDO_REV_ERROR;
+    if (!make_datadir(dir, sizeof(dir)))
+        return st;
+    struct uint256 p = make_hash(0x33);
+    FILE *f = open_rev(dir, 0);
+    bool wrote = f && append_record(f, &p, first_nprev == 1 ? 11 : 22,
+                                    first_nprev, FLAW_NONE) &&
+                 append_record(f, &p, second_nprev == 1 ? 11 : 22,
+                               second_nprev, FLAW_NONE);
+    if (f)
+        fclose(f);
+    struct undo_rev_locator loc;
+    struct block_undo u;
+    if (wrote && undo_rev_locator_init(&loc, dir, TEST_MAGIC)) {
+        st = undo_rev_locator_read(&loc, &p, 0, two_input_shape, NULL, &u);
+        if (st == UNDO_REV_FOUND) {
+            *value = u.vtxundo[0].vprevout[0].txout.value;
+            block_undo_free(&u);
+        }
+        undo_rev_locator_free(&loc);
+    }
+    remove_datadir(dir);
+    return st;
+}
+
+static int test_fork_siblings(void)
+{
+    int failures = 0;
+    int64_t v = 0;
+    failures += check(read_siblings(1, 2, &v) == UNDO_REV_FOUND && v == 22,
+                      "wrong-shape sibling first: the right-shape record wins");
+    v = 0;
+    failures += check(read_siblings(2, 1, &v) == UNDO_REV_FOUND && v == 22,
+                      "wrong-shape sibling second: the right-shape record wins");
+    failures += check(read_siblings(2, 2, &v) == UNDO_REV_AMBIGUOUS,
+                      "two same-parent same-shape records: ambiguous, none used");
+    return failures;
+}
+
+/* Three lookups for absent blocks must not switch the scan off. */
+static int test_misses_do_not_disable(void)
+{
+    char dir[512];
+    if (!make_datadir(dir, sizeof(dir)))
+        return check(false, "misses: temp datadir");
+    struct uint256 p = make_hash(0x44);
+    FILE *f = open_rev(dir, 0);
+    bool wrote = f && append_record(f, &p, 9, 1, FLAW_NONE);
+    if (f)
+        fclose(f);
+    struct undo_rev_locator loc;
+    bool ok = wrote && undo_rev_locator_init(&loc, dir, TEST_MAGIC);
+    if (ok) {
+        for (unsigned char i = 1; i <= 3; i++) {
+            struct uint256 absent = make_hash((unsigned char)(0xa0 + i));
+            ok = ok && found_value(&loc, &absent, -1) == -1;
+        }
+        ok = ok && found_value(&loc, &p, -1) == 9;
+        undo_rev_locator_free(&loc);
+    }
+    remove_datadir(dir);
+    return check(ok, "present block is found after three absent-block misses");
+}
+
 int test_undo_rev_index(void)
 {
     printf("\n=== undo rev index ===\n");
@@ -237,5 +317,7 @@ int test_undo_rev_index(void)
     failures += test_good_and_rejected();
     failures += test_missing_file();
     failures += test_hint_and_cursor();
+    failures += test_fork_siblings();
+    failures += test_misses_do_not_disable();
     return failures;
 }

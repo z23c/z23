@@ -186,7 +186,7 @@ static bool read_rev_scan_undo(struct block_undo *undo,
         return false; // raw-return-ok:missing-undo-is-counted-as-script-skip
     enum undo_rev_status st = undo_rev_shared_read(
         datadir, params->pchMessageStart, pindex->pprev->phashBlock,
-        block_index_file_load(pindex), undo);
+        block_index_file_load(pindex), NULL, NULL, undo);
     if (st != UNDO_REV_FOUND)
         return false; // raw-return-ok:missing-undo-is-counted-as-script-skip
     atomic_fetch_add(&g_undo_from_rev_scan_blocks, 1);

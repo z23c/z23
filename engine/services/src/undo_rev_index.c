@@ -327,11 +327,13 @@ void undo_rev_locator_free(struct undo_rev_locator *loc)
 enum undo_rev_status undo_rev_locator_read(struct undo_rev_locator *loc,
                                            const struct uint256 *parent,
                                            int hint_file,
+                                           undo_rev_accept_fn accept, void *accept_ctx,
                                            struct block_undo *out)
 {
     if (!loc || !parent || !out)
         LOG_RETURN(UNDO_REV_ERROR, "undo_rev",
                    "locator read received invalid arguments");
+    (void)accept; (void)accept_ctx;
     block_undo_init(out);
     zcl_mutex_lock(&loc->lock);
     enum undo_rev_status st = try_window(loc, parent, out);
@@ -361,7 +363,8 @@ static bool shared_matches(const char *datadir,
 
 enum undo_rev_status undo_rev_shared_read(
     const char *datadir, const unsigned char magic[UNDO_REV_MAGIC_SIZE],
-    const struct uint256 *parent, int hint_file, struct block_undo *out)
+    const struct uint256 *parent, int hint_file, undo_rev_accept_fn accept,
+    void *accept_ctx, struct block_undo *out)
 {
     if (!datadir || !magic || !zcl_once_call(&g_shared_once, shared_lock_init))
         LOG_RETURN(UNDO_REV_ERROR, "undo_rev",
@@ -373,7 +376,8 @@ enum undo_rev_status undo_rev_shared_read(
         g_shared_ready = undo_rev_locator_init(&g_shared, datadir, magic);
     }
     enum undo_rev_status st = g_shared_ready
-        ? undo_rev_locator_read(&g_shared, parent, hint_file, out)
+        ? undo_rev_locator_read(&g_shared, parent, hint_file, accept,
+                                accept_ctx, out)
         : UNDO_REV_ERROR;
     zcl_mutex_unlock(&g_shared_lock);
     return st;
