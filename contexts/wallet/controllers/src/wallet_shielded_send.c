@@ -1073,7 +1073,7 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
     const char *from_addr = NULL;
     const struct json_value *recipients = NULL;
     if (!z_sendmany_check_args(params, result, &from_addr, &recipients)) {
-        return false; // raw-return-ok:callee-logs
+        return false; // raw-return-ok:callee-logs-except-ENSURE_WALLET-reply-silent-as-before
     }
 
     /* Is the from address transparent or Sapling? Decided against the active
