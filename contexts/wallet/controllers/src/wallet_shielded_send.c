@@ -569,7 +569,6 @@ static bool z_sendmany_collect_recipients(const struct json_value *recipients,
     o->total_amount = 0;
     for (size_t i = 0; i < num_recip; i++) {
         if (!z_sendmany_add_recipient(json_at(recipients, i), i, o, result, f)) {
-            LOG_WARN("wallet_shielded", "z_sendmany: recipient could not be added to the outputs");
             return false;
         }
     }
@@ -821,7 +820,6 @@ static bool z_sendmany_sign_shielded(struct wallet_rpc_context *ctx,
                                      struct z_sendmany_fail *f)
 {
     if (!z_sendmany_alloc_z_outs(wtx, o->num_z_out, result)) {
-        LOG_WARN("wallet_shielded", "z_sendmany: shielded output allocation failed");
         return false;
     }
 
@@ -834,13 +832,11 @@ static bool z_sendmany_sign_shielded(struct wallet_rpc_context *ctx,
      * wallet_shielded_internal.h. */
     void *proving_ctx = NULL;
     if (!z_sendmany_prover_init(wtx, sel, result, &proving_ctx)) {
-        LOG_WARN("wallet_shielded", "z_sendmany: prover initialisation failed");
         return false;
     }
 
     size_t i = 0;
     if (!z_sendmany_prove_outs(proving_ctx, wtx, ovk, o, &i, result)) {
-        LOG_WARN("wallet_shielded", "z_sendmany: shielded output proving failed");
         return false;
     }
 
@@ -849,7 +845,6 @@ static bool z_sendmany_sign_shielded(struct wallet_rpc_context *ctx,
 
     /* Sign transparent inputs */
     if (!z_sendmany_sign_tz(ctx, cp, wtx, sel, height, proving_ctx, &i, result)) {
-        LOG_WARN("wallet_shielded", "z_sendmany: transparent signing failed");
         return false;
     }
     return z_sendmany_bind_shielded(cp, wtx, height, proving_ctx, result, f);
@@ -994,7 +989,6 @@ static bool z_sendmany_spend_transparent(struct wallet_rpc_context *ctx,
     /* ── Transparent spend path (t→t, t→z) ─────────────────────── */
 
     if (!z_sendmany_check_proving(o->num_z_out, result)) {
-        LOG_WARN("wallet_shielded", "z_sendmany: proving check failed");
         return false;
     }
 
@@ -1044,14 +1038,12 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
      * only this spend entry is gated. */
     int32_t spend_floor = WALLET_SPEND_NO_FLOOR;
     if (!z_sendmany_gate_spend(ctx, checkpoint_rule, &spend_floor, result)) {
-        LOG_WARN("wallet_shielded", "z_sendmany: spend gate refused the send");
         return false;
     }
 
     const char *from_addr = NULL;
     const struct json_value *recipients = NULL;
     if (!z_sendmany_check_args(params, result, &from_addr, &recipients)) {
-        LOG_WARN("wallet_shielded", "z_sendmany: argument check failed");
         return false;
     }
 
