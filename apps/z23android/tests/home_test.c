@@ -503,14 +503,14 @@ static void caption_has_three_lines(void)
     assert(strstr(zapp_home_layout("default"), "\"style\":\"caption\",\"max_lines\":3}") && strstr(zapp_home_layout("classic"), "\"style\":\"caption\",\"max_lines\":3}"));
 }
 
-/* One input of the agreement grid: a node that is stopped, running without a reply, or answering, with its wanted and
- * onion settings, its pace and the chain readings. */
+/* One input of the agreement grid: a node that is stopped, running without a reply, or answering, with its wanted,
+ * stopping and onion settings, its pace and the chain readings. */
 struct agreement_sample {
-    bool responding, process, wanted, onion;
+    bool responding, process, wanted, stopping, onion;
     enum zapp_pace pace;
     int64_t height, target, peers, fleet, quiet;
 };
-enum { AGREEMENT_SAMPLES = 3 * 2 * 2 * 3 * 3 * 3 * 3 * 3 * 3 };
+enum { AGREEMENT_SAMPLES = 3 * 2 * 2 * 2 * 3 * 3 * 3 * 3 * 3 * 3 };
 
 /* Sample i of the grid: every combination of the inputs, in mixed radix. */
 static struct agreement_sample agreement_sample_at(unsigned i)
@@ -525,6 +525,8 @@ static struct agreement_sample agreement_sample_at(unsigned i)
     s.process = state >= 1;
     s.responding = state == 2;
     s.wanted = k % 2 == 1;
+    k /= 2;
+    s.stopping = s.process && k % 2 == 1;
     k /= 2;
     s.onion = k % 2 == 1;
     k /= 2;
@@ -547,9 +549,9 @@ static struct agreement_sample agreement_sample_at(unsigned i)
 static void check_agreement(const struct agreement_sample *s, struct zapp_view *view, bool seen[3])
 {
     static const char up_to_date[] = "Your node has every block its peers report.";
-    /* The controller reports no height for a node that does not answer, and a running node the owner does not want
-     * is stopping. */
-    const bool stopping = s->process && !s->wanted;
+    /* The controller reports no height for a node that does not answer, and shows the saving line while a stop sent
+     * to a running process is in progress. */
+    const bool stopping = s->stopping;
     const int64_t height = s->responding ? s->height : -1;
     const enum zapp_pace pace = s->responding ? s->pace : ZAPP_PACE_NORMAL;
     const struct zapp_chain_evidence ev = {.onion_only = s->onion, .fleet_height = s->fleet, .quiet_secs = s->quiet};
@@ -560,6 +562,7 @@ static void check_agreement(const struct agreement_sample *s, struct zapp_view *
     if (stopping) snprintf(sync, sizeof(sync), "The node is saving its data before it exits.");
     view->node_process_running = s->process;
     view->node_wanted = s->wanted;
+    view->node_stopping = stopping;
     view->node_running = s->responding;
     view->node_seen_height = false;
     view->pace = pace;
@@ -569,7 +572,7 @@ static void check_agreement(const struct agreement_sample *s, struct zapp_view *
     snprintf(view->chain_doubt, sizeof(view->chain_doubt), "%s", chain.reason);
     snprintf(view->node_line, sizeof(view->node_line), "%s", node);
     zapp_home_node_line(view, home, sizeof(home));
-    zapp_paced_sync_line(pace, s->process, s->wanted, sync, paced, sizeof(paced));
+    zapp_paced_sync_line(pace, s->process, stopping, sync, paced, sizeof(paced));
     const bool home_paused = !strcmp(home, ZAPP_PAUSED_LINE), home_current = !strcmp(home, "Up to date");
     const bool home_behind = !strncmp(home, "Catching up", 11);
     const bool sync_paused = !strcmp(paced, ZAPP_PAUSED_LINE), sync_current = !strcmp(paced, up_to_date);

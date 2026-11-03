@@ -78,8 +78,8 @@ enum zapp_pace zapp_getnodepace_pace(const char *reply);
 const char *zapp_paced_line(enum zapp_pace pace, bool process_running, const char *node_line,
                             char *out, size_t cap);
 /* The Assistant's sync sentence under the same pace rule as the Home node line: a warm phone shows the pause line
- * for a node that is running and wanted. Returns out. */
-const char *zapp_paced_sync_line(enum zapp_pace pace, bool process_running, bool wanted, const char *sync_line,
+ * for a node that is running and not stopping. Returns out. */
+const char *zapp_paced_sync_line(enum zapp_pace pace, bool process_running, bool stopping, const char *sync_line,
                                  char *out, size_t cap);
 const char *zapp_sync_line(bool responding, bool process_running, int64_t height, int64_t target, int64_t peers,
                            const struct zapp_chain_evidence *evidence, char *out, size_t cap);
