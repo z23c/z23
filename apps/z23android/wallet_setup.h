@@ -117,6 +117,7 @@ enum wsu_failure {
 };
 
 #define WSU_LEFTOVER_MAX 1100
+#define WSU_FORM_MAX 640
 struct wsu {
     struct wsu_env env;
     struct sun node;
@@ -147,6 +148,7 @@ struct wsu {
     enum wsu_write write;
     enum wsu_failure write_failure;
     bool words_first;           /* the setup is a create whose words were shown before the wallet was written */
+    char form[WSU_FORM_MAX];    /* the restore words as typed; the form shows them again after a refusal (wsu_set_form) */
 };
 bool wsu_init(struct wsu *w, const struct wsu_env *env, const struct sun *node, const char *files);
 void wsu_destroy(struct wsu *w);
@@ -179,6 +181,7 @@ struct wsu_view {
     enum wsu_write write;    /* with WORDS or CONFIRM: whether the wallet behind the words is written */
     enum wsu_failure write_failure;
     bool start_pending;      /* with WORDS: a words-first create, before and after the write; the wallet start is the node's own, so no height is shown */
+    char form[WSU_FORM_MAX];   /* with RESTORE_FORM and WORKING: the restore words as typed */
 };
 void wsu_view_read(struct wsu *w, struct wsu_view *out);
 /* Whether the interrupted-setup screen offers Check again: the node did not answer, or was busy, or could not say whether the wallet is empty. */
@@ -221,6 +224,11 @@ bool wsu_retry_write(struct wsu *w);
 bool wsu_give_up_write(struct wsu *w);
 /* text is the typed words; birthday_height is 0 when the owner does not know it. */
 void wsu_restore_job(struct wsu *w, const char *text, int64_t birthday_height);
+/* Keeps the restore words as typed, so the form shows them again after a refusal. They are wiped when the form is left, when
+ * setup finishes and when the app leaves the foreground. */
+void wsu_set_form(struct wsu *w, const char *text);
+/* Wipes the restore words held for the form. */
+void wsu_forget_form(struct wsu *w);
 /* answers are the typed words for the asked positions. True when they match: the words are wiped and the step is
  * WORKING until wsu_finish_job writes the setup marker. Otherwise the step stays CONFIRM. */
 bool wsu_confirm(struct wsu *w, const char *const *answers, size_t n);

@@ -56,6 +56,7 @@ void wsu_destroy(struct wsu *w)
     zapp_words_cleanse(&w->phrase);
     memory_cleanse(w->write_pass, sizeof(w->write_pass));
     forget_choices_locked(w);
+    memory_cleanse(w->form, sizeof(w->form));
     pthread_mutex_destroy(&w->lock);
     memset(w, 0, sizeof(*w));
 }
@@ -95,11 +96,18 @@ static void view_words_locked(struct wsu *w, struct wsu_view *out)
     memcpy(out->picked, w->picked, sizeof(out->picked));
     out->wrong_position = w->wrong ? w->asked[w->wrong - 1] + 1 : 0;
 }
+/* The restore words stay for the form while it is shown and while its job runs; the view wipes them at every other step. */
+static bool form_kept(enum wsu_step step)
+{
+    return step == WSU_RESTORE_FORM || step == WSU_WORKING;
+}
 void wsu_view_read(struct wsu *w, struct wsu_view *out)
 {
     memset(out, 0, sizeof(*out));
     pthread_mutex_lock(&w->lock);
     out->step = w->step;
+    if (form_kept(w->step)) memcpy(out->form, w->form, sizeof(out->form));
+    else memory_cleanse(w->form, sizeof(w->form));
     out->failure = w->failure;
     out->refusal = w->refusal;
     out->bad_word = w->bad_word;
@@ -338,15 +346,16 @@ static bool start_node(struct wsu *w)
     w->paused_node = false;
     return true;
 }
-/* A job that ended without a wallet: the key is discarded when nothing was written, and the node runs again if it did. */
-static void end_failed(struct wsu *w, enum wsu_failure failure, bool node_was_running)
+/* A job that ended without a wallet: the key is discarded when nothing was written, and the node runs again if it did. The job then
+ * moves to step. */
+static void end_failed(struct wsu *w, enum wsu_failure failure, bool node_was_running, enum wsu_step step)
 {
     if (failure != WSU_UNKNOWN) {
         w->env.discard_key(w->env.ctx);
         zapp_setup_kind_forget(w->files);
     }
     if (node_was_running) (void)start_node(w);
-    set_step(w, WSU_FAILED, failure);
+    set_step(w, step, failure);
 }
 
 /* ---- create ---- */
@@ -416,7 +425,7 @@ void wsu_create_job(struct wsu *w)
     if (failure != WSU_NO_FAILURE) { set_step(w, WSU_FAILED, failure); goto out; }
     failure = phrase_failure(w, &phrase);
     if (failure == WSU_NO_FAILURE && !words_shown(w, &phrase, hex)) failure = WSU_NOT_RUN;
-    if (failure != WSU_NO_FAILURE) end_failed(w, failure, false);
+    if (failure != WSU_NO_FAILURE) end_failed(w, failure, false, WSU_FAILED);
 out:
     memory_cleanse(secret, sizeof(secret));
     memory_cleanse(hex, sizeof(hex));
@@ -575,6 +584,20 @@ void wsu_finish_job(struct wsu *w)
 
 /* ---- restore ---- */
 
+void wsu_set_form(struct wsu *w, const char *text)
+{
+    pthread_mutex_lock(&w->lock);
+    memory_cleanse(w->form, sizeof(w->form));
+    if (text) snprintf(w->form, sizeof(w->form), "%s", text);
+    pthread_mutex_unlock(&w->lock);
+}
+void wsu_forget_form(struct wsu *w)
+{
+    pthread_mutex_lock(&w->lock);
+    memory_cleanse(w->form, sizeof(w->form));
+    pthread_mutex_unlock(&w->lock);
+}
+
 static struct sun_birthday birthday_at(struct wsu *w, int64_t height)
 {
     struct sun_birthday birthday = {0};
@@ -590,6 +613,7 @@ static void restore_succeeded(struct wsu *w, const struct sun_restored *restored
 {
     pthread_mutex_lock(&w->lock);
     w->birthday_honoured = honoured || (restored && restored->birthday_recorded && !restored->birthday_rejected);
+    memory_cleanse(w->form, sizeof(w->form));
     w->confirmed = true;
     w->restored = true;
     w->step = WSU_WORKING;
@@ -637,7 +661,12 @@ void wsu_restore_job(struct wsu *w, const char *text, int64_t birthday_height)
     w->birthday = birthday;
     pthread_mutex_unlock(&w->lock);
     enum sun_result result = restore_run(w, &words, hex, &birthday, &restored);
-    if (result != SUN_OK) { end_failed(w, failure_of_node(result), was_running); goto out; }
+    if (result != SUN_OK) {
+        /* A refusal wrote nothing, so the owner stays on the form with the words kept. An unknown answer goes to the check. */
+        failure = failure_of_node(result);
+        end_failed(w, failure, was_running, failure == WSU_UNKNOWN ? WSU_FAILED : WSU_RESTORE_FORM);
+        goto out;
+    }
     restore_succeeded(w, &restored, false);
 out:
     memory_cleanse(secret, sizeof(secret));

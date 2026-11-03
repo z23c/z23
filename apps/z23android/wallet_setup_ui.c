@@ -47,7 +47,6 @@ static struct {
     struct wsu model;
     bool model_ready;
     char blob[512];
-    char form_words[TYPED_MAX];   /* the words of the last restore try, shown again by the form; cleansed when setup leaves the form */
     bool dropped;
     atomic_bool progress_busy, resume_busy;
     pthread_mutex_t progress_lock;
@@ -336,7 +335,7 @@ static void draw_form(JNIEnv *env, const struct wsu_view *v)
     (void)text_view(env, "Restore from words", 24.0f, WHITE);
     (void)text_view(env, "Type your recovery words, separated by spaces.", 15.0f, SOFT);
     (void)input_view(env, "Recovery words", ZAPP_FIELD_INPUT_WORDS | ZAPP_FIELD_FLAG_MULTI_LINE, &ui.words_input);
-    if (ui.words_input && ui.form_words[0]) (void)zj_text(env, ui.words_input, ui.form_words);
+    if (ui.words_input && v->form[0]) (void)zj_text(env, ui.words_input, v->form);
     (void)text_view(env, "If you know the block height where this wallet began, type it: the wallet then reads the chain from there. Without it the wallet reads the whole chain, which takes longer.", 14.0f, SOFT);
     (void)input_view(env, "Block height (optional)", ZAPP_FIELD_NUMBER, &ui.height_input);
     if (v->failure == WSU_BAD_WORD) {
@@ -454,7 +453,6 @@ void zapp_setup_ui_render(JNIEnv *env)
     int64_t scanned, tip;
     if (!ui.container || !ui.model_ready) return;
     wsu_view_read(&ui.model, &v);
-    if (v.step != WSU_RESTORE_FORM && v.step != WSU_WORKING) memory_cleanse(ui.form_words, sizeof(ui.form_words));
     pthread_mutex_lock(&ui.progress_lock);
     known = ui.progress_known; scanned = ui.scanned; tip = ui.tip;
     pthread_mutex_unlock(&ui.progress_lock);
@@ -480,7 +478,7 @@ void zapp_setup_ui_render(JNIEnv *env)
 void zapp_setup_ui_clear(JNIEnv *env)
 {
     release_widgets(env);
-    memory_cleanse(ui.form_words, sizeof(ui.form_words));
+    if (ui.model_ready) wsu_forget_form(&ui.model);
     (void)zj_bool_property(env, ui.container, "setKeepScreenOn", false);
     memory_cleanse(&ui.drawn, sizeof(ui.drawn));
     ui.is_drawn = false;
@@ -582,7 +580,7 @@ static void start_restore(JNIEnv *env, bool with_height)
     char typed[TYPED_MAX];
     int64_t height = with_height ? typed_height(env) : 0;
     if (!read_input(env, ui.words_input, typed, sizeof(typed))) typed[0] = 0;
-    memcpy(ui.form_words, typed, sizeof(typed));
+    wsu_set_form(&ui.model, typed);
     (void)spawn_job(JOB_RESTORE, typed, height);
     memory_cleanse(typed, sizeof(typed));
 }

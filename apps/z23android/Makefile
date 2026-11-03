@@ -357,8 +357,8 @@ test-setup:
 	@grep -q 'v->refusal != WSU_NO_FAILURE' wallet_setup_ui.c || { echo 'a refused Start over must say why on the screen it returns to' >&2; exit 1; }
 	@grep -q 'ZAPP_FIELD_PRIVATE' wallet_setup_ui.c || { echo 'the word fields must be checked against ZAPP_FIELD_PRIVATE' >&2; exit 1; }
 	@sed -n '/^static void draw_words/,/^}/p' wallet_setup_ui.c | grep -q 'WSU_SCREEN_LOCK_NOTICE' || { echo 'the words screen must carry the screen lock notice' >&2; exit 1; }
-	@grep -q 'zj_text(env, ui.words_input, ui.form_words)' wallet_setup_ui.c || { echo 'the restore form must show the words kept from its last try' >&2; exit 1; }
-	@sed -n '/^void zapp_setup_ui_clear/,/^}/p' wallet_setup_ui.c | grep -q 'memory_cleanse(ui.form_words' || { echo 'leaving or hiding setup must cleanse the kept restore words' >&2; exit 1; }
+	@grep -q 'zj_text(env, ui.words_input, v->form)' wallet_setup_ui.c || { echo 'the restore form must show the words kept from its last try' >&2; exit 1; }
+	@sed -n '/^void zapp_setup_ui_clear/,/^}/p' wallet_setup_ui.c | grep -q 'wsu_forget_form(&ui.model)' || { echo 'leaving or hiding setup must cleanse the kept restore words' >&2; exit 1; }
 	@grep -q 'v->may_start_over' wallet_setup_ui.c || { echo 'Start over must be offered only for a create' >&2; exit 1; }
 	@grep -q 'wsu_view_can_recheck(v)' wallet_setup_ui.c || { echo 'the interrupted screen must offer Check again by the model' >&2; exit 1; }
 	@grep -q 'wsu_words_intro(v, line' wallet_setup_ui.c || { echo 'the words screen must write its intro by the model, which omits an unrecorded start height' >&2; exit 1; }

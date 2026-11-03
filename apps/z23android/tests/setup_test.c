@@ -887,7 +887,7 @@ static void restore_unknown_tests(void)
     wsu_open_restore(&w);
     error_reply(&f.script, "INVALID_PHRASE");
     wsu_restore_job(&w, VALID_PHRASE, 0);
-    assert(w.step == WSU_FAILED && w.failure == WSU_BAD_PHRASE && f.discards == 1 && f.running);
+    assert(w.step == WSU_RESTORE_FORM && w.failure == WSU_BAD_PHRASE && f.discards == 1 && f.running);
     assert(zapp_setup_state(dir) == ZAPP_SETUP_NEEDED);
     wsu_back(&w);
     assert(w.step == WSU_CHOICE);
@@ -907,6 +907,84 @@ static void restore_busy_tests(void)
     assert(w.failure == WSU_NODE_BUSY && f.script.calls == 0 && f.restore_while_running == 0);
     wsu_destroy(&w);
 
+}
+/* A refused restore keeps the typed words on the form and shows the reason. The node runs again, and an unknown answer goes to the
+ * check instead, with no words kept. */
+struct refusal {
+    const char *code;
+    enum wsu_failure failure;
+    enum wsu_step step;
+};
+static const struct refusal refusals[] = {
+    {"INVALID_PHRASE", WSU_BAD_PHRASE, WSU_RESTORE_FORM},
+    {"BIRTHDAY_CONFLICT", WSU_REFUSED, WSU_RESTORE_FORM},
+    {"NODE_DB_UNREADABLE", WSU_STORAGE, WSU_RESTORE_FORM},
+    {"DATADIR_LOCKED", WSU_NODE_BUSY, WSU_RESTORE_FORM},
+    {"NOT_RUN", WSU_NOT_RUN, WSU_RESTORE_FORM},
+    {"WALLET_ALREADY_PRESENT", WSU_PRESENT, WSU_RESTORE_FORM},
+    {"CREATE_FAILED", WSU_UNKNOWN, WSU_FAILED},
+};
+static void refusal_check(const struct refusal *c)
+{
+    struct fake f;
+    struct wsu w;
+    struct wsu_view v;
+    fresh(&f, &w, true);
+    f.exit_after_ms = 30000;
+    wsu_open_restore(&w);
+    wsu_set_form(&w, VALID_PHRASE);
+    error_reply(&f.script, c->code);
+    wsu_restore_job(&w, VALID_PHRASE, 0);
+    wsu_view_read(&w, &v);
+    assert(v.step == c->step && v.failure == c->failure && f.stops == 1 && f.starts == 1 && f.starts_refused == 0 && f.running);
+    if (c->step == WSU_RESTORE_FORM) {
+        assert(f.discards == 1 && zapp_setup_state(dir) == ZAPP_SETUP_NEEDED && !strcmp(v.form, VALID_PHRASE));
+        wsu_back(&w);
+        wsu_view_read(&w, &v);
+        assert(v.step == WSU_CHOICE && v.form[0] == 0);
+    } else {
+        assert(v.form[0] == 0);
+    }
+    wsu_destroy(&w);
+}
+/* A node that was stopped stays stopped: nothing is started, the words are kept, and leaving the form wipes them. */
+static void refusal_stopped_check(void)
+{
+    struct fake f;
+    struct wsu w;
+    struct wsu_view v;
+    fresh(&f, &w, false);
+    wsu_open_restore(&w);
+    wsu_set_form(&w, VALID_PHRASE);
+    error_reply(&f.script, "INVALID_PHRASE");
+    wsu_restore_job(&w, VALID_PHRASE, 0);
+    wsu_view_read(&w, &v);
+    assert(v.step == WSU_RESTORE_FORM && v.failure == WSU_BAD_PHRASE && f.starts == 0 && !f.running && !strcmp(v.form, VALID_PHRASE));
+    wsu_forget_form(&w);
+    wsu_view_read(&w, &v);
+    assert(v.step == WSU_RESTORE_FORM && v.form[0] == 0);
+    wsu_destroy(&w);
+}
+/* A restore that succeeds wipes the words once they are in the node. */
+static void restore_success_wipes_test(void)
+{
+    struct fake f;
+    struct wsu w;
+    struct wsu_view v;
+    fresh(&f, &w, true);
+    wsu_open_restore(&w);
+    wsu_set_form(&w, VALID_PHRASE);
+    script_say(&f.script, true, "{\"ok\":true,\"data\":{\"recovered\":true}}");
+    wsu_restore_job(&w, VALID_PHRASE, 0);
+    wsu_view_read(&w, &v);
+    assert(v.step == WSU_READING && v.form[0] == 0);
+    wsu_destroy(&w);
+}
+static void restore_refusal_form_tests(void)
+{
+    for (size_t i = 0; i < sizeof(refusals) / sizeof(refusals[0]); ++i) refusal_check(&refusals[i]);
+    refusal_stopped_check();
+    restore_success_wipes_test();
 }
 /* Sets up an unconfirmed create over a real datadir under the test directory, reaches the blocked state and returns. */
 static void blocked_create(struct fake *f, struct wsu *w, char node_dir[700])
@@ -1770,7 +1848,7 @@ static void failed_jobs_restart_node_tests(void)
         wsu_open_restore(&w);
         error_reply(&f.script, codes[i]);
         wsu_restore_job(&w, VALID_PHRASE, 0);
-        assert(w.step == WSU_FAILED && f.stops == 1 && f.starts == 1 && f.starts_refused == 0 && f.running);
+        assert(w.step == (strcmp(codes[i], "CREATE_FAILED") ? WSU_RESTORE_FORM : WSU_FAILED) && f.stops == 1 && f.starts == 1 && f.starts_refused == 0 && f.running);
         wsu_destroy(&w);
     }
 }
@@ -2144,6 +2222,7 @@ int main(int argc, char **argv)
     restore_tests();
     restore_check_tests();
     restore_unknown_tests();
+    restore_refusal_form_tests();
     restore_busy_tests();
     restore_blocked_tests();
     resume_create_tests();
