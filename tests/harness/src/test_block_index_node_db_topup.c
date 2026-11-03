@@ -389,10 +389,11 @@ static bool ndt_range_fill_map(struct main_state *ms)
     return ok;
 }
 
-/* Run one top-up with stdout captured; copy the counter line into `line`. */
-static bool ndt_range_run(struct main_state *ms, struct node_db *ndb,
-                          sqlite3 *progress, const char *dir, bool oracle,
-                          char *line, size_t line_cap, int64_t *ms_out)
+/* Run one top-up with stdout captured; copy the counter line into `line`.
+ * Clock-free: callers that assert on the counters use this directly. */
+static bool ndt_range_capture(struct main_state *ms, struct node_db *ndb,
+                              sqlite3 *progress, const char *dir, bool oracle,
+                              char *line, size_t line_cap)
 {
     char path[320];
     snprintf(path, sizeof(path), "%s/stdout_capture.txt", dir);
@@ -404,9 +405,7 @@ static bool ndt_range_run(struct main_state *ms, struct node_db *ndb,
     dup2(fd, 1);
     close(fd);
     g_node_db_topup_perheight_oracle = oracle;
-    int64_t t0 = ndt_now_ms();
     bool ok = block_index_node_db_topup_with(ms, ndb, progress, dir);
-    *ms_out = ndt_now_ms() - t0;
     g_node_db_topup_perheight_oracle = false;
     fflush(stdout);
     dup2(saved, 1);
@@ -419,6 +418,17 @@ static bool ndt_range_run(struct main_state *ms, struct node_db *ndb,
             line[0] = '\0';
         fclose(fp);
     }
+    return ok;
+}
+
+/* Timed variant of ndt_range_capture: the timing is reported, never asserted. */
+static bool ndt_range_run(struct main_state *ms, struct node_db *ndb,
+                          sqlite3 *progress, const char *dir, bool oracle,
+                          char *line, size_t line_cap, int64_t *ms_out)
+{
+    int64_t t0 = ndt_now_ms();
+    bool ok = ndt_range_capture(ms, ndb, progress, dir, oracle, line, line_cap);
+    *ms_out = ndt_now_ms() - t0;
     return ok;
 }
 
@@ -917,9 +927,8 @@ static bool ndt_clean_topup(struct main_state *ms, struct node_db *ndb,
                             size_t *rows_seen)
 {
     char line[1024];
-    int64_t t = 0;
-    bool ok = ndt_range_run(ms, ndb, progress, dir, oracle, line,
-                            sizeof(line), &t);
+    bool ok = ndt_range_capture(ms, ndb, progress, dir, oracle, line,
+                                sizeof(line));
     *rows_seen = g_node_db_topup_last_rows_seen;
     return ok;
 }
