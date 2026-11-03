@@ -1069,11 +1069,12 @@ static int mb_listen_round(const char *sock, int lfd,
     return failures;
 }
 
-static int mb_socket_identity(void)
+static int mb_socket_identity(const char *root)
 {
     int failures = 0;
-    char dir[320];
-    mb_subdir(dir, sizeof(dir), "listener");
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s/listener", root);
+    (void)mkdir(dir, 0700);
 
     /* AF_UNIX caps a bound path at sizeof(sun_path) (108) and
      * agent_broker_listen() refuses a longer one outright — correctly. The
@@ -1081,13 +1082,18 @@ static int mb_socket_identity(void)
      * own short-named directory instead of nesting under the group root;
      * otherwise a deep checkout path alone defeats the identity round. */
     char sockdir[PATH_MAX], sock[PATH_MAX];
-    test_fmt_tmpdir(sockdir, sizeof(sockdir), "mvs", "l");
-    (void)mkdir(sockdir, 0700);
+    if (!test_mksockdir(sockdir, sizeof(sockdir), "mvs",
+                        sizeof("a.sock") - 1)) {
+        printf("agent_broker: no short directory for the socket — skipping "
+               "the socket identity round\n");
+        return 1;
+    }
     snprintf(sock, sizeof(sock), "%s/a.sock", sockdir);
     int lfd = agent_broker_listen(sock);
     if (lfd < 0) {
         printf("agent_broker: cannot listen on %s — skipping the socket "
                "identity round\n", sock);
+        (void)rmdir(sockdir);
         return 1;
     }
 
@@ -1170,7 +1176,7 @@ static int mb_socket_identity_deep_root(void)
     }
     (void)setenv("ZCL_TEST_TMPROOT", pad, 1);
 
-    int round = mb_socket_identity();
+    int round = mb_socket_identity(deep);
     MB_CHECK("the socket round listens and attributes the peer on a deep root",
              round == 0);
     failures += round != 0;
@@ -1469,8 +1475,9 @@ static int mb_sender_cred(void)
     return 0;
 }
 
-static int mb_socket_identity(void)
+static int mb_socket_identity(const char *root)
 {
+    (void)root;
     printf("agent_broker: SKIP (Windows): end-to-end peer-identity case "
            "needs AF_UNIX + SO_PEERCRED\n");
     return 0;
@@ -1728,7 +1735,7 @@ int test_metaverse_agent_broker(void)
     failures += mb_status_path_bounds();
     failures += mb_peercred();
     failures += mb_sender_cred();
-    failures += mb_socket_identity();
+    failures += mb_socket_identity(g_dir);
 #if !defined(_WIN32)
     failures += mb_socket_identity_deep_root();
 #endif

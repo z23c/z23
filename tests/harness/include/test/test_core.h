@@ -22,6 +22,9 @@
 #include <limits.h>
 #include <sys/time.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
+#include <sys/un.h>
+#endif
 #include <sqlite3.h>
 #include <dirent.h>
 #include <unistd.h>
@@ -305,6 +308,43 @@ static inline int test_mkstemp(char *buf, size_t n, const char *prefix)
     }
     if (!test_ensure_tmproot()) return -1;
     return mkstemp(buf);
+}
+
+/* AF_UNIX caps a bound path below sizeof(sun_path); agent_broker_listen()
+ * refuses a longer one outright. Windows uses the same 108-byte limit. */
+#if defined(_WIN32)
+#define TEST_SUN_PATH_BYTES 108
+#else
+#define TEST_SUN_PATH_BYTES sizeof(((struct sockaddr_un *)0)->sun_path)
+#endif
+
+/* Format "<root>/<prefix>_XXXXXX" into buf only when that directory, plus
+ * "/<leaf>" of leaf_len bytes, still fits the socket path limit. */
+static inline bool test_sockdir_format(char *buf, size_t n, const char *root,
+                                       const char *prefix, size_t leaf_len)
+{
+    int w = snprintf(buf, n, "%s/%s_XXXXXX", root, prefix);
+    return w > 0 && (size_t)w < n &&
+           (size_t)w + 1 + leaf_len < TEST_SUN_PATH_BYTES;
+}
+
+/* Make a fresh 0700 directory for a socket whose leaf is leaf_len bytes.
+ * It goes under the normal test tmp root when "<dir>/<leaf>" fits, else under
+ * /dev/shm (the harness's own short tmpfs scratch; the lint gate forbids a
+ * bare /tmp fixture literal). Returns buf on success, NULL when no root fits
+ * or mkdtemp fails. A too-long path is never truncated, and an invalid
+ * ZCL_TEST_TMPROOT is never replaced by the short root. */
+static inline char *test_mksockdir(char *buf, size_t n, const char *prefix,
+                                   size_t leaf_len)
+{
+    char root[PATH_MAX];
+    if (test_fmt_tmproot(root, sizeof(root)) < 0) return NULL;
+    if (test_sockdir_format(buf, n, root, prefix, leaf_len)) {
+        if (!test_ensure_tmproot()) return NULL;
+        return mkdtemp(buf);
+    }
+    if (!test_sockdir_format(buf, n, "/dev/shm", prefix, leaf_len)) return NULL;
+    return mkdtemp(buf);
 }
 
 /* Shared helper functions */
