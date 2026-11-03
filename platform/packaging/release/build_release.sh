@@ -421,7 +421,9 @@ package_from_bin() {
 
     strip_tool="$(platform_strip "$platform")"
     command -v "$strip_tool" >/dev/null 2>&1 || die "$strip_tool not found"
-    [ -x "$FLOOR_GATE" ] || die "missing $FLOOR_GATE"
+    # The symbol-floor gate is a host tool the release targets do not build.
+    [ -x "$FLOOR_GATE" ] || make -C "$REPO_ROOT" build/bin/z23-lint >&2 \
+        || die "missing $FLOOR_GATE and make build/bin/z23-lint failed"
     [ -x "$NODE_AUDIT" ] || die "missing $NODE_AUDIT"
 
     mkdir -p "$out_dir"
