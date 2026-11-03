@@ -518,24 +518,48 @@ static void boot_shutdown_marker_reset_cached_bindings(void)
     atomic_store(&g_quick_check_probe_consumed, false);
 }
 
-static void boot_shutdown_marker_cache_locked(
-    struct platform_private_file *marker)
+static bool boot_shutdown_marker_read_locked(
+    struct platform_private_file *marker, struct shutdown_clean_binding *out)
 {
     uint64_t marker_size = 0;
     char buf[2048];
     if (!platform_private_file_size(marker, &marker_size) || marker_size == 0 ||
         marker_size >= sizeof(buf) ||
         !platform_private_file_read_at(marker, buf, (size_t)marker_size, 0))
-        return;
-    size_t rd = (size_t)marker_size;
+        return false;
+    return boot_shutdown_marker_parse(buf, (size_t)marker_size, out);
+}
+
+static void boot_shutdown_marker_cache_locked(
+    struct platform_private_file *marker)
+{
     struct shutdown_clean_binding parsed;
-    if (!boot_shutdown_marker_parse(buf, rd, &parsed))
+    if (!boot_shutdown_marker_read_locked(marker, &parsed))
         return;
     g_cached_binding = parsed;
     if (parsed.fr_valid)
         g_cached_fr = parsed;
     if (parsed.cdb_valid)
         g_cached_cdb = parsed;
+}
+
+bool boot_shutdown_marker_peek_verified_clean(const char *datadir,
+                                              const char *node_db_path)
+{
+    char marker_path[1024];
+    struct node_db_file_identity cur;
+    if (!boot_shutdown_marker_path(marker_path, sizeof(marker_path), datadir,
+                                   ZCL_SHUTDOWN_MARKER_NAME) ||
+        !node_db_file_identity_read(node_db_path, &cur))
+        return false;
+    struct platform_private_file marker;
+    struct shutdown_clean_binding b;
+    platform_private_file_init(&marker);
+    if (!platform_private_file_open_locked(marker_path, &marker))
+        return false;
+    bool parsed = boot_shutdown_marker_read_locked(&marker, &b);
+    platform_private_file_close(&marker);
+    return parsed && boot_shutdown_marker_can_skip(&b, &cur);
 }
 
 static void boot_shutdown_marker_report_state(

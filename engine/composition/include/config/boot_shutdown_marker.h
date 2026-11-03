@@ -178,6 +178,15 @@ void boot_shutdown_marker_set_schema_version(int schema_version);
  * so a second call cannot reuse a stale decision. */
 bool boot_shutdown_marker_quick_check_probe(const char *node_db_path);
 
+/* The verified-clean half of that decision for an offline writer that holds
+ * the datadir's exclusive lock (no node can start or stop meanwhile): true
+ * only when `datadir`'s marker carries a v2 binding that matches the current
+ * identity of `node_db_path`. Reads the marker without retiring it and leaves
+ * this process's boot cache untouched, so the next boot decides exactly as it
+ * would have. Call it before any sqlite handle opens `node_db_path`. */
+bool boot_shutdown_marker_peek_verified_clean(const char *datadir,
+                                              const char *node_db_path);
+
 /* progress_store_open's quick_check-skip probe (matches
  * progress_store_quick_check_skip_probe_fn). Same contract as the node.db probe:
  * true only when the previous clean shutdown bound THIS consensus.db file

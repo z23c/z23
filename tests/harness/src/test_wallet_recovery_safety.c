@@ -45,6 +45,21 @@
  *      ENCRYPTED (not merely present), and node.db is not group- or
  *      world-readable.
  *
+ *   4. IT READ AN EXISTING node.db IN FULL TWICE, AND ONE READ DECIDED
+ *      NOTHING. A commit into a synced datadir ran PRAGMA quick_check on
+ *      the read-only handle and again inside node_db_open(): two whole-file
+ *      reads, about 7 minutes each for a 7.4 GB node.db on a phone. The
+ *      read-only one looked only at sqlite3_exec's return code, which stays
+ *      SQLITE_OK when quick_check reports a damaged index as a result row;
+ *      such a node.db passed it, the boot open's own check then renamed
+ *      node.db, -wal and -shm aside to *.corrupt-<ts>, and the wallet was
+ *      written into a fresh empty database.
+ *      ASSERTED (counting every quick_check SQLite starts): zero when the
+ *      node's last clean shutdown bound this exact node.db, and the marker
+ *      is left for the next boot; exactly one without a matching binding;
+ *      a damaged node.db is refused and never renamed aside, with or
+ *      without a binding.
+ *
  * Every case runs against a fixture datadir under ./test-tmp. Nothing here
  * reads, writes or dials a live node.
  */
@@ -55,6 +70,7 @@
 
 #include "chain/chainparams.h"
 #include "command/native_command.h"   /* the restore leaf's handler */
+#include "config/boot_shutdown_marker.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "models/database.h"
@@ -855,6 +871,281 @@ static int t_reply_reports_encrypted_at_rest_once(void)
     return failures;
 }
 
+/* ── case 4: an existing node.db is read in full at most once ──────── */
+
+/* Every connection opened while the hook is armed traces its statements
+ * here (sqlite3_auto_extension runs on each open), so the count covers the
+ * read-only inspection and the write open alike. */
+static int g_wrs_full_checks;
+
+static int wrs_trace_stmt(unsigned type, void *ctx, void *stmt, void *sql)
+{
+    (void)type;
+    (void)ctx;
+    (void)stmt;
+    if (sql && strncmp((const char *)sql, "PRAGMA quick_check", 18) == 0)
+        g_wrs_full_checks++;
+    return 0;
+}
+
+static int wrs_trace_open(sqlite3 *db, char **err,
+                          const sqlite3_api_routines *api)
+{
+    (void)err;
+    (void)api;
+    return sqlite3_trace_v2(db, SQLITE_TRACE_STMT, wrs_trace_stmt, NULL);
+}
+
+/* One recovery of phrase A into `dir`; returns the quick_checks it ran. */
+static int wrs_counted_run(const char *dir, bool dry_run,
+                           struct wallet_recovery_report *rep,
+                           struct zcl_result *r)
+{
+    struct wallet_recovery_request req = {
+        .phrase = WRS_PHRASE_A, .datadir = dir, .dry_run = dry_run,
+    };
+    void (*hook)(void) = (void (*)(void))wrs_trace_open;
+    g_wrs_full_checks = 0;
+    if (sqlite3_auto_extension(hook) != SQLITE_OK)
+        return -1;
+    *r = wallet_recovery_run(&req, rep);
+    sqlite3_cancel_auto_extension(hook);
+    printf("    %s %s: ok=%d code=%d full_checks=%d\n",
+           dry_run ? "plan" : "commit", dir, (int)r->ok, r->code,
+           g_wrs_full_checks);
+    return g_wrs_full_checks;
+}
+
+/* A datadir holding a node.db the node created and closed cleanly. */
+struct wrs_node_db {
+    char dir[256];
+    char db_path[1200];
+    long page_size;
+    int roots[8];
+    int nroots;
+};
+
+/* Root pages of the schema object `name` (a table with its indexes, or one
+ * index alone), and the page size. */
+static bool wrs_object_roots(sqlite3 *db, const char *name,
+                             struct wrs_node_db *fx)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT rootpage FROM sqlite_master "
+                           "WHERE (name=?1 OR tbl_name=?1) AND rootpage>1",
+                           -1, &s, NULL) != SQLITE_OK)
+        return false;
+    sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
+    while (fx->nroots < 8 && sqlite3_step(s) == SQLITE_ROW)
+        fx->roots[fx->nroots++] = sqlite3_column_int(s, 0);
+    sqlite3_finalize(s);
+    if (sqlite3_prepare_v2(db, "PRAGMA page_size", -1, &s, NULL) != SQLITE_OK)
+        return false;
+    if (sqlite3_step(s) == SQLITE_ROW)
+        fx->page_size = (long)sqlite3_column_int64(s, 0);
+    sqlite3_finalize(s);
+    return fx->nroots > 0 && fx->page_size > 0;
+}
+
+/* Create the node.db (no -wal is left once it closes), note the root pages
+ * of `object` when one is named, and with `bound` write the clean-shutdown
+ * marker the node writes last. */
+static bool wrs_mk_node_db(struct wrs_node_db *fx, const char *tag,
+                           const char *object, bool bound)
+{
+    memset(fx, 0, sizeof(*fx));
+    wrs_mkfixture(fx->dir, sizeof(fx->dir), tag);
+    snprintf(fx->db_path, sizeof(fx->db_path), "%s/node.db", fx->dir);
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    if (!node_db_open(&ndb, fx->db_path))
+        return false;
+    bool roots = !object || wrs_object_roots(ndb.db, object, fx);
+    node_db_close(&ndb);
+    return roots && (!bound || boot_shutdown_marker_write_clean(fx->dir));
+}
+
+/* Overwrite the noted root pages in place with bytes no b-tree page starts
+ * with. Size and header stay put, so a shutdown binding still matches. */
+static bool wrs_damage_roots(const struct wrs_node_db *fx)
+{
+    static unsigned char junk[65536];
+    if (fx->page_size <= 0 || fx->page_size > (long)sizeof(junk))
+        return false;
+    memset(junk, 0xA5, sizeof(junk));
+    FILE *f = fopen(fx->db_path, "r+b");
+    bool ok = f != NULL;
+    for (int i = 0; ok && i < fx->nroots; i++)
+        ok = fseek(f, (long)(fx->roots[i] - 1) * fx->page_size,
+                   SEEK_SET) == 0 &&
+             fwrite(junk, 1, (size_t)fx->page_size, f) ==
+                 (size_t)fx->page_size;
+    if (f && fclose(f) != 0)
+        ok = false;
+    return ok;
+}
+
+/* One committed write that moves node.db's header identity. */
+static bool wrs_touch_node_db(const char *db_path)
+{
+    sqlite3 *db = NULL;
+    bool ok = sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READWRITE,
+                              NULL) == SQLITE_OK &&
+              sqlite3_exec(db, "CREATE TABLE wrs_touch(x)", NULL, NULL,
+                           NULL) == SQLITE_OK;
+    sqlite3_close(db);
+    return ok;
+}
+
+/* The next boot's decision for this datadir: deferred, never verified. */
+static bool wrs_next_boot_defers(const struct wrs_node_db *fx)
+{
+    boot_shutdown_marker_reset_for_test();
+    (void)boot_shutdown_marker_detect_unclean(fx->dir);
+    bool skip = boot_shutdown_marker_quick_check_probe(fx->db_path);
+    bool deferred = skip && boot_shutdown_marker_quick_check_was_deferred() &&
+                    !boot_shutdown_marker_quick_check_was_skipped();
+    boot_shutdown_marker_reset_for_test();
+    return deferred;
+}
+
+static int t_verified_clean_binding_skips_every_full_check(void)
+{
+    int failures = 0;
+    struct wrs_node_db fx;
+    struct wallet_recovery_report rep;
+    struct zcl_result r;
+    bool made = wrs_mk_node_db(&fx, "clean_binding", NULL, true);
+    WRS_CHECK("fixture: a cleanly shut down node.db and its binding", made);
+    char marker[1300];
+    snprintf(marker, sizeof(marker), "%s/.shutdown_clean", fx.dir);
+    int64_t size_before = -1, size_after = -1;
+    uint64_t hash_before = wrs_file_hash(marker, &size_before);
+
+    int plan = made ? wrs_counted_run(fx.dir, true, &rep, &r) : -1;
+    WRS_CHECK("a plan holds no lock, so it still checks once", plan == 1);
+    int checks = made ? wrs_counted_run(fx.dir, false, &rep, &r) : -1;
+    WRS_CHECK("the commit succeeds", checks >= 0 && r.ok &&
+              rep.seed_installed);
+    WRS_CHECK("and reads node.db in full ZERO times", checks == 0);
+    uint64_t hash_after = wrs_file_hash(marker, &size_after);
+    WRS_CHECK("the marker is left byte-for-byte for the next boot",
+              hash_before != 0 && hash_after == hash_before &&
+              size_after == size_before);
+    /* The wallet's write moved node.db's identity, so the next boot runs
+     * its existing fail-closed background check instead of a skip. */
+    WRS_CHECK("the next boot defers its check to the background",
+              made && wrs_next_boot_defers(&fx));
+    test_rm_rf(fx.dir);
+    return failures;
+}
+
+static int t_unbound_node_db_is_checked_exactly_once(void)
+{
+    int failures = 0;
+    struct wrs_node_db fx;
+    struct wallet_recovery_report rep;
+    struct zcl_result r;
+
+    bool made = wrs_mk_node_db(&fx, "no_binding", NULL, false);
+    int checks = made ? wrs_counted_run(fx.dir, false, &rep, &r) : -1;
+    WRS_CHECK("no binding: the commit succeeds", checks >= 0 && r.ok);
+    WRS_CHECK("no binding: node.db is read in full exactly once",
+              checks == 1);
+    test_rm_rf(fx.dir);
+
+    /* A binding for an earlier identity of the file is no binding. */
+    made = wrs_mk_node_db(&fx, "stale_binding", NULL, true) &&
+           wrs_touch_node_db(fx.db_path);
+    checks = made ? wrs_counted_run(fx.dir, false, &rep, &r) : -1;
+    WRS_CHECK("stale binding: the commit succeeds", checks >= 0 && r.ok);
+    WRS_CHECK("stale binding: node.db is read in full exactly once",
+              checks == 1);
+    test_rm_rf(fx.dir);
+
+    /* An empty datadir: the boot open creates node.db, as before. */
+    wrs_mkfixture(fx.dir, sizeof(fx.dir), "empty_target");
+    checks = wrs_counted_run(fx.dir, false, &rep, &r);
+    WRS_CHECK("empty datadir: created and checked once by the boot open",
+              r.ok && rep.target_created && checks == 1);
+    test_rm_rf(fx.dir);
+    return failures;
+}
+
+/* Refused, unchanged, nothing renamed: the damaged-target promise. */
+static void wrs_check_untouched(const struct wrs_node_db *fx,
+                                uint64_t hash_before, int64_t size_before,
+                                const struct wallet_recovery_report *rep,
+                                int *failures_io)
+{
+    int failures = 0;
+    int64_t size_after = -1;
+    uint64_t hash_after = wrs_file_hash(fx->db_path, &size_after);
+    wrs_list_dir("after", fx->dir);
+    WRS_CHECK("damaged: no key was installed", !rep->seed_installed);
+    WRS_CHECK("damaged: node.db is still there, byte-for-byte",
+              hash_after != 0 && hash_after == hash_before &&
+              size_after == size_before);
+    WRS_CHECK("damaged: nothing was quarantined to node.db.corrupt-*",
+              wrs_count_entries(fx->dir, "node.db.corrupt-") == 0);
+    *failures_io += failures;
+}
+
+/* No binding, `object`'s pages damaged: refused once, as damaged. */
+static int wrs_unbound_damage_is_refused(const char *tag, const char *object)
+{
+    int failures = 0;
+    struct wrs_node_db fx;
+    struct wallet_recovery_report rep;
+    struct zcl_result r;
+    bool made = wrs_mk_node_db(&fx, tag, object, false) &&
+                wrs_damage_roots(&fx);
+    printf("    damaged object: %s\n", object);
+    WRS_CHECK("fixture: a node.db with damaged pages, no binding", made);
+    int64_t size_before = -1;
+    uint64_t hash_before = wrs_file_hash(fx.db_path, &size_before);
+    int checks = made ? wrs_counted_run(fx.dir, false, &rep, &r) : -1;
+    WRS_CHECK("damaged, no binding: REFUSED as damaged (-66)",
+              checks >= 0 && !r.ok && r.code == -66);
+    WRS_CHECK("damaged, no binding: checked exactly once", checks == 1);
+    wrs_check_untouched(&fx, hash_before, size_before, &rep, &failures);
+    test_rm_rf(fx.dir);
+    return failures;
+}
+
+static int t_damaged_sqlite_node_db_is_refused_not_reset(void)
+{
+    int failures = 0;
+    struct wrs_node_db fx;
+    struct wallet_recovery_report rep;
+    struct zcl_result r;
+
+    /* Opens fine, fails its integrity check. A damaged table also fails
+     * the row scan quick_check runs after its b-tree walk, so the statement
+     * itself errors; a damaged index is reported only as a result row, so
+     * the read-only check must read quick_check's answer, not only
+     * sqlite3_exec's return code. */
+    failures += wrs_unbound_damage_is_refused("damaged_table",
+                                              "view_integrity");
+    failures += wrs_unbound_damage_is_refused("damaged_index",
+                                              "idx_js_height");
+
+    /* A binding the file still matches, over the node_state pages every
+     * write open reads first: no check runs, and the write open must fail
+     * rather than rename the file aside and start an empty one. */
+    bool made = wrs_mk_node_db(&fx, "damaged_bound", "node_state", true) &&
+                wrs_damage_roots(&fx);
+    WRS_CHECK("fixture: a bound node.db with damaged pages", made);
+    int64_t size_before = -1;
+    uint64_t hash_before = wrs_file_hash(fx.db_path, &size_before);
+    int checks = made ? wrs_counted_run(fx.dir, false, &rep, &r) : -1;
+    WRS_CHECK("damaged, bound: the run does not succeed",
+              checks >= 0 && !r.ok);
+    wrs_check_untouched(&fx, hash_before, size_before, &rep, &failures);
+    test_rm_rf(fx.dir);
+    return failures;
+}
+
 int test_wallet_recovery_safety(void);
 int test_wallet_recovery_safety(void)
 {
@@ -913,6 +1204,12 @@ int test_wallet_recovery_safety(void)
     failures += t_two_concurrent_restores_leave_one_wallet();
     failures += t_at_rest_policy_is_obeyed();
     failures += t_reply_reports_encrypted_at_rest_once();
+
+    wrs_set_at_rest(NULL, "1");
+    failures += t_verified_clean_binding_skips_every_full_check();
+    failures += t_unbound_node_db_is_checked_exactly_once();
+    failures += t_damaged_sqlite_node_db_is_refused_not_reset();
+    wrs_set_at_rest(NULL, NULL);
 
     wallet_lock_reset_for_test();
     unsetenv("ZCL_WALLET_KDF_ITERS");

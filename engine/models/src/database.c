@@ -520,7 +520,7 @@ void node_db_set_quick_check_skip_probe(node_db_quick_check_skip_probe_fn fn)
     g_quick_check_skip_probe = fn;
 }
 
-static bool db_quick_check_ok(sqlite3 *db, const char *path)
+bool node_db_quick_check_ok(sqlite3 *db, const char *path)
 {
     sqlite3_stmt *stmt = NULL;
     bool ok = false;
@@ -827,7 +827,7 @@ static bool db_boot_quick_check_clean(struct node_db *ndb, const char *path)
     if (skip_quick_check)
         return true;
     int64_t t_qc = db_now_ms();
-    bool qc_ok = db_quick_check_ok(ndb->db, path);
+    bool qc_ok = node_db_quick_check_ok(ndb->db, path);
     printf("[boot]   %-28s %lldms\n", "sqlite.quick_check",
            (long long)(db_now_ms() - t_qc));
     return qc_ok;

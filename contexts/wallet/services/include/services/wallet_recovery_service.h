@@ -148,6 +148,12 @@ struct wallet_recovery_report {
  * and installs an empty one. A write handle is opened only after the target
  * is proven readable AND wallet-free.
  *
+ * An existing node.db is read in full at most once per run: the read-only
+ * PRAGMA quick_check, which a committed run skips when the node's last clean
+ * shutdown bound this exact file (boot_shutdown_marker_peek_verified_clean).
+ * The write handle on an existing target is a runtime open, which neither
+ * repeats the check nor renames anything aside.
+ *
  * A committed run also obeys the SAME at-rest policy boot obeys
  * (wallet_at_rest_creation_policy): no plaintext keys on disk without
  * ZCL_WALLET_PASSPHRASE or an explicit ZCL_ALLOW_PLAINTEXT_WALLET opt-in,

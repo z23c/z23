@@ -7,6 +7,7 @@
 
 #include "chain/chainparams.h"
 #include "command/native_command.h"            /* the ONE read-only db open */
+#include "config/boot_shutdown_marker.h"       /* verified-clean binding */
 #include "keys/key.h"                          /* ecc_start_once */
 #include "models/database.h"
 #include "models/block.h"                       /* active tip for the birthday */
@@ -808,6 +809,12 @@ static struct zcl_result wrc_open_existing_target_ro(
     const struct wallet_recovery_request *req,
     struct wallet_recovery_report *out, struct wrc_run *st)
 {
+    /* A commit holds the writer's lock, so no node can start, write or shut
+     * down under it: the node's own last clean shutdown, bound to this exact
+     * file identity, already proves it intact. Read before any handle opens
+     * the file. A plan holds no lock, so it always runs the check. */
+    bool verified_clean = !req->dry_run &&
+        boot_shutdown_marker_peek_verified_clean(req->datadir, out->target_db);
     char ro_path[1200];
     enum zcl_node_db_ro_status ro = zcl_native_node_db_open_readonly(
         req->datadir, &st->ro_db, &st->ndb, ro_path, sizeof(ro_path));
@@ -825,13 +832,13 @@ static struct zcl_result wrc_open_existing_target_ro(
     st->have_db = true;
     st->ro_open = true;
 
-    /* The deeper read the write open would have done anyway. Running it
-     * HERE, on the read-only handle, is what turns "damaged database"
-     * into a refusal instead of a quarantine: if this fails, the write
-     * open would have renamed the file aside. Only paid when a node.db
-     * already exists, which on the disaster path it usually does not. */
-    if (sqlite3_exec(st->ro_db, "PRAGMA quick_check", NULL, NULL, NULL)
-        != SQLITE_OK) {
+    /* The deeper read the boot open would do. Running it HERE, on the
+     * read-only handle, is what turns "damaged database" into a refusal
+     * instead of a quarantine; the write open below neither repeats it nor
+     * renames anything aside. Only paid when a node.db already exists
+     * without a verified-clean binding. */
+    if (!verified_clean &&
+        !node_db_quick_check_ok(st->ro_db, out->target_db)) {
         zcl_native_node_db_close_readonly(&st->ro_db, &st->ndb);
         wallet_restore_datadir_release(&st->wlock);
         LOG_WARN(WRC_TAG, "refusing recovery: quick_check failed on %s",
@@ -882,7 +889,15 @@ static struct zcl_result wrc_swap_to_write_handle(
         st->ro_open = false;
         st->have_db = false;
     }
-    if (!node_db_open(&st->ndb, out->target_db)) {
+    /* An existing target was proven intact by the read-only inspection, so
+     * it gets the runtime open: no second full read of the file and no boot
+     * repair that could rename it aside. Only a target this run creates
+     * gets the boot open. */
+    bool opened = out->target_created
+        ? node_db_open(&st->ndb, out->target_db)
+        : node_db_open_runtime(&st->ndb, out->target_db,
+                               "wallet_recovery.restore");
+    if (!opened) {
         wallet_restore_datadir_release(&st->wlock);
         return ZCL_ERR(-63, "cannot open target database %s",
                        out->target_db);

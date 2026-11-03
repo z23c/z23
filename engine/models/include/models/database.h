@@ -126,13 +126,16 @@ struct node_db {
 bool node_db_open(struct node_db *ndb, const char *path);
 
 /* Open the node database for an IN-PROCESS RUNTIME REOPEN (a background worker
- * or request handler after boot already opened + verified the file once).
+ * or request handler after boot already opened + verified the file once), or
+ * for an offline writer that verified the existing file read-only first.
  *
  * Skips the boot-only ceremony — the ~280 ms PRAGMA quick_check, the
  * snapshot-staging crash-recovery DELETEs, and the schema-version banner — none
  * of which are meaningful on a reopen and all of which, emitted every cycle,
  * make a periodic reopen indistinguishable from a boot loop in a filtered log
  * (the exact "silent halt looks like a restart" trap this project forbids).
+ * It never quarantines: a schema build that finds the store malformed fails
+ * the open and leaves every file where it was.
  *
  * `reason` is MANDATORY and must be a short, non-empty label naming the opener
  * (e.g. "store.payment_scan"); it is logged once per open so no DB open is ever
@@ -191,6 +194,13 @@ void node_db_test_fail_next_checked_close(void);
  * keep app/models decoupled. */
 typedef bool (*node_db_quick_check_skip_probe_fn)(const char *path);
 void node_db_set_quick_check_skip_probe(node_db_quick_check_skip_probe_fn fn);
+
+/* The boot open's integrity check on any handle, read-only ones included:
+ * PRAGMA quick_check(1), published as a long op on `path`. True only when
+ * SQLite answers the single row "ok". A damaged index is reported as a row
+ * that names the fault under a success return code, so the code alone does
+ * not prove the store intact. */
+bool node_db_quick_check_ok(sqlite3 *db, const char *path);
 
 /* ── Long-running maintenance-op visibility ─────────────────────────────
  *
