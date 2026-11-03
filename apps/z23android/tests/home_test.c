@@ -503,61 +503,100 @@ static void caption_has_three_lines(void)
     assert(strstr(zapp_home_layout("default"), "\"style\":\"caption\",\"max_lines\":3}") && strstr(zapp_home_layout("classic"), "\"style\":\"caption\",\"max_lines\":3}"));
 }
 
-/* The Assistant sync sentence and the Home node line come from one observation, built as the controller builds them.
- * Over every combination of the inputs below they agree on paused and on up to date, and the Assistant never says up
- * to date while Home says behind. The one allowed difference is wording: where Home says "Catching up" with fewer than
- * two onion peers, the Assistant names the onion peers instead. */
-static void assistant_and_home_agree(void)
+/* One input of the agreement grid: a node that is stopped, running without a reply, or answering, with its wanted and
+ * onion settings, its pace and the chain readings. */
+struct agreement_sample {
+    bool responding, process, wanted, onion;
+    enum zapp_pace pace;
+    int64_t height, target, peers, fleet, quiet;
+};
+enum { AGREEMENT_SAMPLES = 3 * 2 * 2 * 3 * 3 * 3 * 3 * 3 * 3 };
+
+/* Sample i of the grid: every combination of the inputs, in mixed radix. */
+static struct agreement_sample agreement_sample_at(unsigned i)
 {
     static const int64_t heights[] = {-1, 1000, 1500}, targets[] = {-1, 1000, 2000}, peers[] = {-1, 1, 2},
         fleets[] = {-1, 1000, 2000}, quiets[] = {-1, 60, 1000};
     static const enum zapp_pace paces[] = {ZAPP_PACE_NORMAL, ZAPP_PACE_GENTLE, ZAPP_PACE_PAUSE};
+    struct agreement_sample s;
+    unsigned k = i;
+    const unsigned state = k % 3;
+    k /= 3;
+    s.process = state >= 1;
+    s.responding = state == 2;
+    s.wanted = k % 2 == 1;
+    k /= 2;
+    s.onion = k % 2 == 1;
+    k /= 2;
+    s.pace = paces[k % 3];
+    k /= 3;
+    s.height = heights[k % 3];
+    k /= 3;
+    s.target = targets[k % 3];
+    k /= 3;
+    s.peers = peers[k % 3];
+    k /= 3;
+    s.fleet = fleets[k % 3];
+    k /= 3;
+    s.quiet = quiets[k % 3];
+    return s;
+}
+
+/* Builds the Home node line and the Assistant sentence for one sample, as the controller does, and checks that they
+ * agree on paused, up to date and behind. seen records which of the three Home states. */
+static void check_agreement(const struct agreement_sample *s, struct zapp_view *view, bool seen[3])
+{
     static const char up_to_date[] = "Your node has every block its peers report.";
+    /* The controller reports no height for a node that does not answer, and a running node the owner does not want
+     * is stopping. */
+    const bool stopping = s->process && !s->wanted;
+    const int64_t height = s->responding ? s->height : -1;
+    const enum zapp_pace pace = s->responding ? s->pace : ZAPP_PACE_NORMAL;
+    const struct zapp_chain_evidence ev = {.onion_only = s->onion, .fleet_height = s->fleet, .quiet_secs = s->quiet};
+    const struct zapp_chain_status chain = zapp_chain_check(height, s->target, s->peers, &ev);
+    char node[96], sync[1024], paced[1024], home[160];
+    zapp_node_line(s->responding, s->process, stopping, false, height, s->target, s->peers, &ev, node, sizeof(node));
+    zapp_sync_line(s->responding, s->process, height, s->target, s->peers, &ev, sync, sizeof(sync));
+    if (stopping) snprintf(sync, sizeof(sync), "The node is saving its data before it exits.");
+    view->node_process_running = s->process;
+    view->node_wanted = s->wanted;
+    view->node_running = s->responding;
+    view->node_seen_height = false;
+    view->pace = pace;
+    view->node_height = height;
+    view->node_reference = chain.reference;
+    view->chain_state = chain.state;
+    snprintf(view->chain_doubt, sizeof(view->chain_doubt), "%s", chain.reason);
+    snprintf(view->node_line, sizeof(view->node_line), "%s", node);
+    zapp_home_node_line(view, home, sizeof(home));
+    zapp_paced_sync_line(pace, s->process, s->wanted, sync, paced, sizeof(paced));
+    const bool home_paused = !strcmp(home, ZAPP_PAUSED_LINE), home_current = !strcmp(home, "Up to date");
+    const bool home_behind = !strncmp(home, "Catching up", 11);
+    const bool sync_paused = !strcmp(paced, ZAPP_PAUSED_LINE), sync_current = !strcmp(paced, up_to_date);
+    const bool sync_behind = strstr(paced, " to go.") != NULL;
+    assert(home_paused == sync_paused);
+    assert(home_current == sync_current);
+    assert(!home_behind || !sync_current);
+    assert(!sync_behind || home_behind);
+    assert(!home_behind || sync_behind || strstr(paced, "dials only onion peers") != NULL);
+    seen[0] |= home_paused;
+    seen[1] |= home_current;
+    seen[2] |= home_behind;
+}
+
+/* The Assistant sync sentence and the Home node line come from one observation, built as the controller builds them.
+ * Over every combination of the inputs they agree on paused and on up to date, and the Assistant never says up to date
+ * while Home says behind. The one allowed difference is wording: where Home says "Catching up" with fewer than two onion
+ * peers, the Assistant names the onion peers instead. */
+static void assistant_and_home_agree(void)
+{
     static struct zapp_view view;
-    bool seen_paused = false, seen_current = false, seen_behind = false;
-    for (int responding = 0; responding < 2; responding++)
-    for (int process = responding; process < 2; process++)
-    for (int wanted = 0; wanted < 2; wanted++)
-    for (int onion = 0; onion < 2; onion++)
-    for (size_t h = 0; h < 3; h++) for (size_t t = 0; t < 3; t++) for (size_t n = 0; n < 3; n++)
-    for (size_t f = 0; f < 3; f++) for (size_t q = 0; q < 3; q++) for (size_t p = 0; p < 3; p++) {
-        /* The controller reports no height for a node that does not answer, and a running node the owner does not
-         * want is stopping. */
-        const bool stopping = process && !wanted;
-        const int64_t height = responding ? heights[h] : -1;
-        const enum zapp_pace pace = responding ? paces[p] : ZAPP_PACE_NORMAL;
-        const struct zapp_chain_evidence ev = {.onion_only = onion == 1, .fleet_height = fleets[f], .quiet_secs = quiets[q]};
-        const struct zapp_chain_status chain = zapp_chain_check(height, targets[t], peers[n], &ev);
-        char node[96], sync[1024], paced[1024], home[160];
-        zapp_node_line(responding, process, stopping, false, height, targets[t], peers[n], &ev, node, sizeof(node));
-        zapp_sync_line(responding, process, height, targets[t], peers[n], &ev, sync, sizeof(sync));
-        if (stopping) snprintf(sync, sizeof(sync), "The node is saving its data before it exits.");
-        view.node_process_running = process == 1;
-        view.node_wanted = wanted == 1;
-        view.node_running = responding == 1;
-        view.node_seen_height = false;
-        view.pace = pace;
-        view.node_height = height;
-        view.node_reference = chain.reference;
-        view.chain_state = chain.state;
-        snprintf(view.chain_doubt, sizeof(view.chain_doubt), "%s", chain.reason);
-        snprintf(view.node_line, sizeof(view.node_line), "%s", node);
-        zapp_home_node_line(&view, home, sizeof(home));
-        zapp_paced_sync_line(pace, process == 1, wanted == 1, sync, paced, sizeof(paced));
-        const bool home_paused = !strcmp(home, ZAPP_PAUSED_LINE), home_current = !strcmp(home, "Up to date");
-        const bool home_behind = !strncmp(home, "Catching up", 11);
-        const bool sync_paused = !strcmp(paced, ZAPP_PAUSED_LINE), sync_current = !strcmp(paced, up_to_date);
-        const bool sync_behind = strstr(paced, " to go.") != NULL;
-        assert(home_paused == sync_paused);
-        assert(home_current == sync_current);
-        assert(!home_behind || !sync_current);
-        assert(!sync_behind || home_behind);
-        assert(!home_behind || sync_behind || strstr(paced, "dials only onion peers") != NULL);
-        seen_paused |= home_paused;
-        seen_current |= home_current;
-        seen_behind |= home_behind;
+    bool seen[3] = {false, false, false};
+    for (unsigned i = 0; i < AGREEMENT_SAMPLES; i++) {
+        const struct agreement_sample s = agreement_sample_at(i);
+        check_agreement(&s, &view, seen);
     }
-    assert(seen_paused && seen_current && seen_behind);
+    assert(seen[0] && seen[1] && seen[2]);
 }
 
 int main(void)
