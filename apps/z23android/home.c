@@ -10,7 +10,7 @@
     "{\"type\":\"action\",\"id\":\"wallet\"}"
 #define HOME_PHONE_TEXT \
     "{\"type\":\"text\",\"field\":\"node_line\",\"style\":\"title\",\"max_lines\":2}," \
-    "{\"type\":\"text\",\"field\":\"sync\",\"style\":\"caption\",\"max_lines\":2}," \
+    "{\"type\":\"text\",\"field\":\"sync\",\"style\":\"caption\",\"max_lines\":3}," \
     "{\"type\":\"action\",\"id\":\"node_toggle\",\"field\":\"node_button\"}"
 #define HOME_Z23_APPS(columns) \
     "{\"type\":\"grid\",\"columns\":" columns ",\"card\":\"z23_app\",\"children\":[" \

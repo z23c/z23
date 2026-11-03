@@ -180,6 +180,21 @@ static void clips_is_unreachable(void)
     free(m);
 }
 
+/* Clipped text ends with an ellipsis: make_text sets TruncateAt.END on every text view that has a line limit. */
+static void text_is_ellipsized(void)
+{
+    char *src = slurp("surface.c");
+    require(src, "\"android/text/TextUtils$TruncateAt\"", "TruncateAt class");
+    require(src, "\"END\", \"Landroid/text/TextUtils$TruncateAt;\"", "TruncateAt.END");
+    require(src, "\"setEllipsize\"", "end ellipsis");
+    const char *body = strstr(src, "static jobject make_text(");
+    const char *end = body ? strstr(body, "\n}\n") : NULL;
+    assert(body && end);
+    const char *call = strstr(body, "ellipsize_end(b->env, view)");
+    assert(call && call < end);
+    free(src);
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && chdir(argv[1])) { perror(argv[1]); return 1; }
@@ -189,6 +204,7 @@ int main(int argc, char **argv)
     node_notification_is_secret();
     inputs_are_gated();
     clips_is_unreachable();
+    text_is_ellipsized();
     puts("surface_test: ok");
     return 0;
 }

@@ -491,6 +491,12 @@ static void paced_home_lines(void)
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && !strstr(card, "min left") && !strstr(card, "Catching up:"));
 }
 
+/* Both built-in layouts give the sync caption three lines, so the detail fits beside a long title. */
+static void caption_has_three_lines(void)
+{
+    assert(strstr(zapp_home_layout("default"), "\"style\":\"caption\",\"max_lines\":3}") && strstr(zapp_home_layout("classic"), "\"style\":\"caption\",\"max_lines\":3}"));
+}
+
 int main(void)
 {
     fallback_labels();
@@ -512,6 +518,7 @@ int main(void)
     scanned_text_routes();
     worst_case_card_fits();
     built_in_layouts();
+    caption_has_three_lines();
     offer_jump();
     puts("home tests passed");
     return 0;

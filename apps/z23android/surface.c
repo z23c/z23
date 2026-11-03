@@ -111,6 +111,19 @@ static jobject make_view(struct build *b, const char *type)
 {
     return zj_widget(b->env, type, state.activity);
 }
+/* Ends a line that does not fit with an ellipsis, so clipped Home text shows that it continues. */
+static bool ellipsize_end(JNIEnv *env, jobject view)
+{
+    jclass mode = (*env)->FindClass(env, "android/text/TextUtils$TruncateAt");
+    jfieldID end = zj_clean(env) && mode ? (*env)->GetStaticFieldID(env, mode, "END", "Landroid/text/TextUtils$TruncateAt;") : NULL;
+    jobject value = zj_clean(env) && end ? (*env)->GetStaticObjectField(env, mode, end) : NULL;
+    jmethodID set = zj_clean(env) && value ? zj_method(env, view, "setEllipsize", "(Landroid/text/TextUtils$TruncateAt;)V") : NULL;
+    if (set) (*env)->CallVoidMethod(env, view, set, value);
+    bool ok = set && zj_clean(env);
+    if (value) (*env)->DeleteLocalRef(env, value);
+    if (mode) (*env)->DeleteLocalRef(env, mode);
+    return ok;
+}
 static jobject make_text(struct build *b, const struct zapp_node *node)
 {
     const struct zapp_theme *theme = &b->layout->theme;
@@ -118,7 +131,7 @@ static jobject make_text(struct build *b, const struct zapp_node *node)
     jobject view = make_view(b, "android/widget/TextView");
     jint color = counter ? (jint)theme->accent : (jint)(node->style == ZAPP_STYLE_CAPTION ? theme->muted : theme->text);
     bool ok = view && zj_typography(b->env, view, counter ? 16.0f : text_size(node), color) && zj_padding(b->env, view, 0, 4) &&
-        (node->max_lines <= 0 || zj_int_property(b->env, view, "setMaxLines", node->max_lines));
+        (node->max_lines <= 0 || (zj_int_property(b->env, view, "setMaxLines", node->max_lines) && ellipsize_end(b->env, view)));
     return ok ? view : NULL;
 }
 static jobject make_avatar(struct build *b)
