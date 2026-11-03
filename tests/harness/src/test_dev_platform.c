@@ -12775,13 +12775,13 @@ static int test_dev_platform_platform_arm(void)
         owned += counts[i];
         nonempty &= counts[i] > 0;
     }
-    if (DP_CASE_COUNT != 75u + (unsigned)(
+    if (DP_CASE_COUNT != 77u + (unsigned)(
 #if defined(__APPLE__)
             1
 #else
             0
 #endif
-            ) + 1u || owned != DP_CASE_COUNT || !unique || !nonempty) {
+            ) || owned != DP_CASE_COUNT || !unique || !nonempty) {
         fprintf(stderr, "dev_platform: case partition invalid\n");
         failures++;
     }
