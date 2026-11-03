@@ -934,6 +934,19 @@ static int json_write_boundary_case(void)
     return ok ? 0 : 1;
 }
 
+/* json_write(v, NULL, 0) is the sizing probe. Nested containers must not form
+ * a pointer offset from the NULL buffer (UBSan: "applying non-zero offset to
+ * null pointer"); the measured length must still equal the canonical text. */
+static bool json_write_null_probe_case(void)
+{
+    static const char raw[] = "{\"a\":[1,{\"b\":\"c\"}],\"d\":2}";
+    struct json_value v;
+    if (!json_read(&v, raw, sizeof(raw) - 1)) return false;
+    size_t n = json_write(&v, NULL, 0);
+    json_free(&v);
+    return n == sizeof(raw) - 1;
+}
+
 /* Pins json_escape_str's writer output through json_write: it escapes only
  * the quote, backslash and C-named controls, uses lowercase \u00XX for the
  * other controls below 0x20, and copies every other byte (0x7f, multi-byte
@@ -1068,6 +1081,7 @@ int test_json(void)
     failures += json_parse_large_array_case();
     failures += json_write_read_roundtrip_case();
     failures += json_write_boundary_case();
+    failures += json_write_null_probe_case() ? 0 : 1;
     failures += json_escape_output_cases();
     failures += json_scalar_boundary_case();
     failures += json_nesting_limit_and_copy_cases();
