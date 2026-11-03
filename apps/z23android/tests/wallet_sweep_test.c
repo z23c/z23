@@ -196,6 +196,48 @@ static void key_of(const char *request, char key[WS_KEY_HEX + 1])
 
 /* ---- the flow ---- */
 
+/* The review before the tap: the move in plain words, nothing authenticated or committed yet. */
+static void check_review(const struct wss_view *v, const struct fake *f, const struct host *h)
+{
+    assert(v->sweep && v->review && v->can_send && !v->can_retry && !v->can_pay_again && !v->address[0] && !v->memo[0] && !v->warning[0]);
+    assert(!strcmp(v->move, MOVE) && !strcmp(v->arrives, "0.0999 ZCL arrives in your private balance.") && !v->move_note[0]);
+    assert(!strcmp(f->calls, "sfP") && f->commits == 0 && h->unwraps == 0 && f->unlocks == 0);
+    assert(!strcmp(v->fleet, "Not checked by your fleet") && !wss_send_busy(v->state));
+}
+
+/* The plan request names no destination, no amount and no secret: only the scope and the idempotency key. */
+static void check_plan_request(const struct json_value *a, const struct fake *f)
+{
+    static const char *const absent[] = {"to", "from", "amount", "amount_zat", "memo", "memo_hex", "fee_zat", "plan_token", "confirm"};
+    for (size_t i = 0; i < sizeof(absent) / sizeof(absent[0]); ++i) assert(!json_get(a, absent[i]));
+    assert(!strcmp(json_get_str(field(a, "wallet_scope", JSON_STR)), "prod") && field(a, "idempotency_key", JSON_STR));
+    assert(!strstr(f->plan_input, TO) && !strstr(f->plan_input, FROM) && !strstr(f->plan_input, SECRET_HEX));
+}
+
+/* After the tap: one authentication, one commit, the lock asked for, and the secret only in the unlock request. */
+static void check_done(struct wss *s, const struct fake *f, const struct host *h)
+{
+    struct wss_view v = view_of(s);
+    assert(v.state == WS_DONE && !strcmp(v.status, DONE) && v.can_leave && !v.can_retry && !wss_send_busy(v.state));
+    assert(!strcmp(f->calls, "sfPuCl") && h->unwraps == 1 && f->commits == 1 && f->locks == 1);
+    assert(strstr(f->unlock_input, SECRET_HEX));   /* the unlock request is where the secret goes, and nowhere else */
+    assert(!wss_exposed(s) && wss_secrets_clear(s));
+    char line[WSS_LINE];
+    assert(wss_progress(s, line, sizeof(line)) && !strcmp(line, DONE));
+}
+
+/* The commit carries what the node quoted under the plan's idempotency key, and no amount, memo or secret. */
+static void check_commit_request(const struct json_value *c, const struct json_value *a, const char *commit_input)
+{
+    assert(!strcmp(json_get_str(field(c, "from", JSON_STR)), FROM) && !strcmp(json_get_str(field(c, "to", JSON_STR)), TO));
+    assert(json_get_int(field(c, "input_count", JSON_INT)) == 2 && json_get_int(field(c, "total_zat", JSON_INT)) == 10000000);
+    assert(json_get_int(field(c, "fee_zat", JSON_INT)) == 10000 && json_get_bool(field(c, "confirm", JSON_BOOL)));
+    assert(!strcmp(json_get_str(field(c, "plan_token", JSON_STR)), TOKEN) && !strcmp(json_get_str(field(c, "wallet_scope", JSON_STR)), "prod"));
+    assert(!strcmp(json_get_str(field(c, "idempotency_key", JSON_STR)), json_get_str(field(a, "idempotency_key", JSON_STR))));
+    assert(!json_get(c, "amount") && !json_get(c, "amount_zat") && !json_get(c, "memo") && !json_get(c, "memo_hex"));
+    assert(!strstr(commit_input, SECRET_HEX));
+}
+
 /* Plan, review, authentication, commit, done. The plan names no destination and no amount, nothing is authenticated or
  * committed before the tap, the commit carries what the node quoted, and no secret reaches a request or stays in a buffer. */
 static void plan_review_auth_commit_done(void)
@@ -204,37 +246,19 @@ static void plan_review_auth_commit_done(void)
     fake_init(&f);
     struct wss *s = at_review(&f, &w, &h);
     struct wss_view v = view_of(s);
-    assert(v.sweep && v.review && v.can_send && !v.can_retry && !v.can_pay_again && !v.address[0] && !v.memo[0] && !v.warning[0]);
-    assert(!strcmp(v.move, MOVE) && !strcmp(v.arrives, "0.0999 ZCL arrives in your private balance.") && !v.move_note[0]);
-    assert(!strcmp(f.calls, "sfP") && f.commits == 0 && h.unwraps == 0 && f.unlocks == 0);
-    assert(!strcmp(v.fleet, "Not checked by your fleet") && !wss_send_busy(v.state));
+    check_review(&v, &f, &h);
 
     struct json_value a = {0}, c = {0};
     assert(json_read(&a, f.plan_input, strlen(f.plan_input)));
-    static const char *const absent[] = {"to", "from", "amount", "amount_zat", "memo", "memo_hex", "fee_zat", "plan_token", "confirm"};
-    for (size_t i = 0; i < sizeof(absent) / sizeof(absent[0]); ++i) assert(!json_get(&a, absent[i]));
-    assert(!strcmp(json_get_str(field(&a, "wallet_scope", JSON_STR)), "prod") && field(&a, "idempotency_key", JSON_STR));
-    assert(!strstr(f.plan_input, TO) && !strstr(f.plan_input, FROM) && !strstr(f.plan_input, SECRET_HEX));
+    check_plan_request(&a, &f);
 
     wss_tap_send(s, v.serial);
     assert(view_of(s).state == WS_AUTH && wss_send_busy(WS_AUTH));
     drain(&h);
-    v = view_of(s);
-    assert(v.state == WS_DONE && !strcmp(v.status, DONE) && v.can_leave && !v.can_retry && !wss_send_busy(v.state));
-    assert(!strcmp(f.calls, "sfPuCl") && h.unwraps == 1 && f.commits == 1 && f.locks == 1);
-    assert(strstr(f.unlock_input, SECRET_HEX));   /* the unlock request is where the secret goes, and nowhere else */
-    assert(!wss_exposed(s) && wss_secrets_clear(s));
+    check_done(s, &f, &h);
 
     assert(json_read(&c, f.commit_input[0], strlen(f.commit_input[0])));
-    assert(!strcmp(json_get_str(field(&c, "from", JSON_STR)), FROM) && !strcmp(json_get_str(field(&c, "to", JSON_STR)), TO));
-    assert(json_get_int(field(&c, "input_count", JSON_INT)) == 2 && json_get_int(field(&c, "total_zat", JSON_INT)) == 10000000);
-    assert(json_get_int(field(&c, "fee_zat", JSON_INT)) == 10000 && json_get_bool(field(&c, "confirm", JSON_BOOL)));
-    assert(!strcmp(json_get_str(field(&c, "plan_token", JSON_STR)), TOKEN) && !strcmp(json_get_str(field(&c, "wallet_scope", JSON_STR)), "prod"));
-    assert(!strcmp(json_get_str(field(&c, "idempotency_key", JSON_STR)), json_get_str(field(&a, "idempotency_key", JSON_STR))));
-    assert(!json_get(&c, "amount") && !json_get(&c, "amount_zat") && !json_get(&c, "memo") && !json_get(&c, "memo_hex"));
-    assert(!strstr(f.commit_input[0], SECRET_HEX));
-    char line[WSS_LINE];
-    assert(wss_progress(s, line, sizeof(line)) && !strcmp(line, DONE));
+    check_commit_request(&c, &a, f.commit_input[0]);
     json_free(&a); json_free(&c);
     finish_screen(s);
     printf("  plan, review, authentication, commit, done\n");
