@@ -893,7 +893,13 @@ journalctl --user -u z23-node --since "5 min ago" --no-pager
 ## Boot on a slow disk: integrity is checked, but never on the boot thread
 
 A node that was killed (or restarted) before it closed its stores cleanly has
-no clean-close receipt for them, so their SQLite integrity check is owed. Both
+no clean-close receipt for them, so their SQLite integrity check is owed. A
+clean stop can also leave `progress.kv` without one: the stop's close hashes
+every byte of the file for the receipt only while the measured rate says the
+whole digest fits 2 s, and otherwise publishes none and logs
+`[projection_store] clean-close receipt skipped: hashed … of … bytes in … ms;
+the whole file does not fit the 2000 ms close budget, so the next boot runs
+the integrity check`. Both
 owed checks — `node.db` and the `progress.kv` projection — are handed to one
 paced background scan that starts **after** the node reaches READY and binds
 RPC and P2P, instead of running on the boot thread. On rotational storage

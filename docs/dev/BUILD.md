@@ -795,12 +795,20 @@ mislabel an x86-64 executable as architecture-neutral.
 Warm production boots also avoid rescanning the entire rebuildable
 `progress.kv` projection store. A successful projection WAL checkpoint and
 close writes a single-use `progress.kv.clean` receipt bound to the exact inode,
-size, timestamps, and SQLite header counters. An unchanged WAL-free reopen
-consumes that receipt and skips the O(file-size) `quick_check`. A crash,
-non-empty WAL, malformed receipt, replaced file, or any in-place write takes
-the full timed integrity scan and existing quarantine/rederive path. Never copy
-the receipt independently of its database; a mismatch is intentionally treated
-as a dirty boot.
+size, timestamps, SQLite header counters, and a SHA3-256 digest of every byte
+of the file. An unchanged WAL-free reopen consumes that receipt and skips the
+O(file-size) `quick_check`. The close during a node stop bounds that digest:
+once 32 MiB are hashed it projects the whole digest from the measured rate,
+and when the projection exceeds 2 s it stops hashing, publishes no receipt,
+and logs `[projection_store] clean-close receipt skipped: hashed … of … bytes
+in … ms`. A 4 GB store whose first 32 MiB hash slower than 2 GB/s therefore
+stops cleanly without a receipt. That close, a crash, non-empty WAL, malformed
+receipt, replaced file, or any in-place write leaves the integrity check owed:
+a node boot runs it as the paced background scan after READY
+([RUNBOOK](../RUNBOOK.md#boot-on-a-slow-disk-integrity-is-checked-but-never-on-the-boot-thread)),
+a plain open runs it before returning, and a finding takes the existing
+quarantine/rederive path. Never copy the receipt independently of its
+database; a mismatch is intentionally treated as a dirty boot.
 
 ### Verify
 
