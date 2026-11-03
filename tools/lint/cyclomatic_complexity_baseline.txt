@@ -5,5 +5,3 @@
 # Only-gets-simpler ratchet: a pin may only fall. A grown function, a pin whose function
 # no longer exists, or a pin whose function is now within the cap fails the gate.
 # A shrunk function still over the cap passes; --tighten-baseline lowers its pin.
-tests/harness/src/test_zcode_package_dev.c:zpd_test_twelve_task_benchmark:30
-tests/harness/src/test_zcode_package_dev.c:zpd_test_work_start:56
