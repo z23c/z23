@@ -3612,6 +3612,16 @@ static int sapling_params_verdict(bool present, bool ok)
     return 1;
 }
 
+/* Free what groth16_vk_read left in a VK the test owns. Combs and lines are
+ * released too, in case a test built them. */
+static void test_groth16_vk_release(struct groth16_vk *vk)
+{
+    groth16_vk_free_combs(vk);
+    free(vk->ic);
+    vk->ic = NULL;
+    vk->ic_len = 0;
+}
+
 static int test_sapling_groth16_vk_read_sapling_spend(void)
 {
     int failures = 0;
@@ -3623,6 +3633,7 @@ static int test_sapling_groth16_vk_read_sapling_spend(void)
         char fpath[512];
         snprintf(fpath, sizeof(fpath), "%s/.zcash-params/sapling-spend.params", path ? path : ".");
         const struct groth16_vk *prev = sapling_test_published_spend_vk();
+        struct groth16_vk vk = {0};
         FILE *f = fopen(fpath, "rb");
         const bool f_present = f != NULL;
         bool ok = false;
@@ -3634,7 +3645,6 @@ static int test_sapling_groth16_vk_read_sapling_spend(void)
             size_t read_sz = sz < 200000 ? (size_t)sz : 200000;
             uint8_t *buf = zcl_malloc(read_sz, "vk_file_buf");
             if (buf && fread(buf, 1, read_sz, f) == read_sz) {
-                struct groth16_vk vk = {0};
                 ok = groth16_vk_read(&vk, buf, read_sz);
                 if (ok) {
                     /* Spend VK should have 8 IC elements (7 public inputs + 1) */
@@ -3642,13 +3652,16 @@ static int test_sapling_groth16_vk_read_sapling_spend(void)
                     if (ok) {
                         sapling_set_spend_vk(&vk);
                     }
-                    /* Don't free — VK is now in use */
                 }
             }
             free(buf);
             fclose(f);
         }
         failures += sapling_params_verdict(f_present, ok);
+        /* Put back the global this block replaced, then free the VK it read:
+         * the global borrowed &vk, which dies with this block. */
+        sapling_set_spend_vk((struct groth16_vk *)prev);
+        test_groth16_vk_release(&vk);
         if (sapling_test_published_spend_vk() != prev) {
             printf("FAIL (spend VK global not restored after block)\n");
             failures++;
@@ -3668,6 +3681,7 @@ static int test_sapling_groth16_vk_read_sapling_output(void)
         char fpath[512];
         snprintf(fpath, sizeof(fpath), "%s/.zcash-params/sapling-output.params", path ? path : ".");
         const struct groth16_vk *prev = sapling_test_published_output_vk();
+        struct groth16_vk vk = {0};
         FILE *f = fopen(fpath, "rb");
         bool ok = false;
         const bool f_present = f != NULL;
@@ -3678,7 +3692,6 @@ static int test_sapling_groth16_vk_read_sapling_output(void)
             size_t read_sz = sz < 200000 ? (size_t)sz : 200000;
             uint8_t *buf = zcl_malloc(read_sz, "vk_file_buf");
             if (buf && fread(buf, 1, read_sz, f) == read_sz) {
-                struct groth16_vk vk = {0};
                 ok = groth16_vk_read(&vk, buf, read_sz);
                 if (ok) {
                     /* Output VK should have 6 IC elements (5 public inputs + 1) */
@@ -3692,6 +3705,8 @@ static int test_sapling_groth16_vk_read_sapling_output(void)
             fclose(f);
         }
         failures += sapling_params_verdict(f_present, ok);
+        sapling_set_output_vk((struct groth16_vk *)prev);
+        test_groth16_vk_release(&vk);
         if (sapling_test_published_output_vk() != prev) {
             printf("FAIL (output VK global not restored after block)\n");
             failures++;
@@ -3784,6 +3799,7 @@ static int test_sapling_groth16_vk_read_sprout_groth16(void)
         char fpath[512];
         snprintf(fpath, sizeof(fpath), "%s/.zcash-params/sprout-groth16.params", path ? path : ".");
         const struct groth16_vk *prev = sprout_test_published_vk();
+        struct groth16_vk vk = {0};
         FILE *f = fopen(fpath, "rb");
         const bool f_present = f != NULL;
         bool ok = false;
@@ -3794,7 +3810,6 @@ static int test_sapling_groth16_vk_read_sprout_groth16(void)
             size_t read_sz = sz < 200000 ? (size_t)sz : 200000;
             uint8_t *buf = zcl_malloc(read_sz, "vk_file_buf");
             if (buf && fread(buf, 1, read_sz, f) == read_sz) {
-                struct groth16_vk vk = {0};
                 ok = groth16_vk_read(&vk, buf, read_sz);
                 if (ok) {
                     /* Sprout Groth16 VK: 272 bytes input -> ceil(2176/253) = 9 scalars -> ic_len = 10 */
@@ -3808,6 +3823,8 @@ static int test_sapling_groth16_vk_read_sprout_groth16(void)
             fclose(f);
         }
         failures += sapling_params_verdict(f_present, ok);
+        sprout_set_vk((struct groth16_vk *)prev);
+        test_groth16_vk_release(&vk);
         if (sprout_test_published_vk() != prev) {
             printf("FAIL (sprout VK global not restored after block)\n");
             failures++;
