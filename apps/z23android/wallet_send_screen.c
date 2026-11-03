@@ -8,7 +8,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #define QUEUE_MAX 16
 #define PUBLIC_WARNING "This payment is public. The amount and address are visible to everyone, forever."
@@ -88,13 +87,13 @@ static void fill_review(const struct ws *ws, struct wss_view *v)
     }
     wss_format_zat(ws->gate.spendable_zat - ws->plan.total_zat, v->remains, sizeof(v->remains));
 }
-/* "HH:MM UTC" of a time in seconds since the epoch; empty when there is none. */
-static void format_utc(int64_t seconds, char *out, size_t cap)
+/* The phone's local label of a time in seconds since the epoch, such as "Today 14:05"; empty when there is none or
+ * the phone has no clock. */
+static void format_confirmed(const struct wss *s, int64_t seconds, char *out, size_t cap)
 {
-    struct tm utc;
-    time_t at = (time_t)seconds;
     out[0] = 0;
-    if (seconds > 0 && gmtime_r(&at, &utc)) (void)strftime(out, cap, "%H:%M UTC", &utc);
+    if (seconds > 0 && s->d.host.wall_s)
+        wallet_time_label(s->d.host.wall_s(s->d.host.ctx), seconds, wallet_utc_offset(seconds), out, cap);
 }
 /* The two states a payment waits in: for the wallet to catch up, and, in review, for the wallet to lock. */
 static void fill_hold_status(const struct ws *ws, struct wss_view *v)
@@ -156,7 +155,7 @@ void wss_view(struct wss *s, struct wss_view *v)
     v->can_pay_again = ws_can_pay_again(ws);
     if (ws->state == WS_PAID) {
         snprintf(v->txid, sizeof(v->txid), "%s", ws->txid);
-        format_utc(ws->sent.answered_s, v->confirmed, sizeof(v->confirmed));
+        format_confirmed(s, ws->sent.answered_s, v->confirmed, sizeof(v->confirmed));
     }
     v->can_cancel = ws->state != WS_COMMIT && ws->state != WS_BROADCAST && !ws_terminal(ws);
     v->can_leave = flow_over(ws);

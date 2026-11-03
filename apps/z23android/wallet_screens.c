@@ -499,14 +499,17 @@ void wallet_time_label(int64_t now, int64_t when, int64_t offset, char *out, siz
     else if (year == this_year) snprintf(out, cap, "%lld %s %s", (long long)dom, months[month - 1], clock);
     else snprintf(out, cap, "%lld %s %lld %s", (long long)dom, months[month - 1], (long long)year, clock);
 }
+int64_t wallet_utc_offset(int64_t when)
+{
+    struct tm local;
+    time_t at = (time_t)when;
+    return localtime_r(&at, &local) ? tm_seconds(&local) - when : 0;
+}
 /* The time of an entry in the phone's time zone, or "Date unknown". The entry keeps its time in UTC. */
 static void date_label(const struct entry *e, char *out, size_t cap)
 {
-    struct tm local;
-    time_t at = (time_t)e->time;
     if (!e->time_known) { copy(out, cap, "Date unknown"); return; }
-    int64_t offset = localtime_r(&at, &local) ? tm_seconds(&local) - e->time : 0;
-    wallet_time_label(wall_s(), e->time, offset, out, cap);
+    wallet_time_label(wall_s(), e->time, wallet_utc_offset(e->time), out, cap);
 }
 static void row_text(const struct entry *e, char *out, size_t cap)
 {

@@ -132,7 +132,7 @@ struct wss_view {
     char warning[WSS_LINE];           /* The public destination warning. */
     char note[WSS_LINE];              /* Insufficient private funds. */
     char txid[WS_TXID_MAX];           /* The earlier payment's transaction, in WS_PAID. */
-    char confirmed[WSS_CONFIRMED];    /* When the node gave the committed answer, as "HH:MM UTC"; empty when the phone has no clock. */
+    char confirmed[WSS_CONFIRMED];    /* When the node gave the committed answer, as "Today 14:05", in the phone's time zone; empty when the phone has no clock. */
     char fleet[WSS_LINE];             /* "Checked by your fleet" or "Not checked by your fleet". */
     char status[WSS_LINE];
 };

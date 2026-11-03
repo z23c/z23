@@ -1101,7 +1101,7 @@ static void rescans_show_already_paid(struct wss *s, struct fake *f, const struc
         rescan(s, f, p);
         struct wss_view v = view_of(s);
         assert(v.state == WS_PAID && v.can_pay_again && v.can_leave && !v.busy && !v.can_send && !v.can_retry && !v.can_cancel);
-        assert(!strcmp(v.txid, TXID) && !strcmp(v.confirmed, "14:32 UTC") && strstr(v.status, "Already paid"));
+        assert(!strcmp(v.txid, TXID) && !strcmp(v.confirmed, "Today 09:32") && strstr(v.status, "Already paid"));
         assert(f->plans == 1 && f->commits == 1 && f->prompts == 1 && f->unlocks == 1 && f->repeated_keys == 0);
     }
 }
@@ -1186,7 +1186,7 @@ static void a_fresh_process_asks_the_node_and_the_node_decides(void)
     assert(!strcmp(g.plan_key, first) && view_of(s).state == WS_REVIEW);   /* the same request, the same key */
     tap_and_run(s, &g);
     struct wss_view v = view_of(s);
-    assert(v.state == WS_PAID && v.can_pay_again && !strcmp(v.txid, TXID) && !strcmp(v.confirmed, "15:12 UTC"));   /* the node answered just now */
+    assert(v.state == WS_PAID && v.can_pay_again && !strcmp(v.txid, TXID) && !strcmp(v.confirmed, "Today 10:12"));   /* the node answered just now */
     assert(g.repeated_keys == 1 && g.commits == 1 && g.locks == 1 && !strchr(g.calls, 'r') && wss_end(s));
     wss_destroy(s);
     /* an unknown answer is just as lasting */
@@ -1411,6 +1411,8 @@ static void busy_states_are_the_send_states(void)
 
 int main(void)
 {
+    setenv("TZ", "EST5", 1);   /* UTC-5 with no daylight saving: the screen labels times in the phone's zone */
+    tzset();
     memcpy(priv, "zs1", 3); memset(priv + 3, 'q', 75); priv[78] = 0;
     memcpy(priv2, "zs1", 3); memset(priv2 + 3, 'p', 75); priv2[78] = 0;
     memcpy(pub, "t1", 2); memset(pub + 2, '2', 33); pub[35] = 0;

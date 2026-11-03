@@ -416,7 +416,7 @@ static void draw_paid(JNIEnv *env, const struct wss_view *v)
         (void)text_view(env, text, 14.0f, SOFT);
     }
     if (v->confirmed[0]) {
-        snprintf(text, sizeof(text), "Your node confirmed this payment at %s", v->confirmed);
+        snprintf(text, sizeof(text), "Your node confirmed this payment: %s", v->confirmed);
         (void)text_view(env, text, 14.0f, SOFT);
     }
 }
