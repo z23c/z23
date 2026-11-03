@@ -1517,7 +1517,7 @@ ZCL_COMMAND_DEV_COMMAND(
  * bridges keep acting. One file per leaf: native_dev_batch_ledger.c,
  * native_dev_batch_restack.c and native_dev_batch_slim.c. */
 ZCL_COMMAND_BRANCH("dev.batch", "dev",
-                   "Requeue, restack and slim the lab's batch stacks",
+                   "Lab batch ledger",
                    ZCL_COMMAND_LAYER_DEV)
 
 ZCL_COMMAND_DEV_COMMAND(
