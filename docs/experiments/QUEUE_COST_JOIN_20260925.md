@@ -994,6 +994,9 @@ and `28d7798bfe0e487e9e23e8810c23a549f26d6c5b6cedcad470371c6a9fde2a12`.
 No retained build receipt independently binds this binary to that checkout;
 the executable verdict is bound to the binary SHA-256, not a fresh main build.
 
+The run used the command below. The fixture script has since been removed,
+so this records that run and is not a current procedure.
+
 ```sh
 cd "$Z23_QUAL_BRANCH"
 # tools/dev/fixtures/receiver/receive-revoke-replay.sh removed 2026-11-03; last present at a6a1e0d6a8, recover with: git show a6a1e0d6a8:tools/dev/fixtures/receiver/receive-revoke-replay.sh

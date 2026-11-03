@@ -38,7 +38,9 @@ new full output SHA-256 is
 `ea171c386c51baa3afdfb917e7962db768eb1ce9eae8063cc9d23c2bc9a8fa5f`.
 The original source root in F1 remains its historical run identity.
 
-Run the two bounded tracked controls with:
+The two bounded tracked controls ran with the commands below. Both scripts
+have since been removed; this is a record of that run, not a current
+procedure. Recover a script with the `git show` line above it.
 
 ```sh
 # tools/dev/fixtures/factory_qualification/toolchain_drift.sh removed 2026-10-19; last present at d15f5f62e, recover with: git show d15f5f62e:tools/dev/fixtures/factory_qualification/toolchain_drift.sh
