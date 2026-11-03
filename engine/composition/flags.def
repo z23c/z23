@@ -361,7 +361,7 @@ Z23_FLAG("ZCL_CLANG_PORTABILITY_COVERAGE_ALLOWANCE", "env_build", "0", "-",
 Z23_FLAG("ZCL_CLANG_PORTABILITY_MAKEFILE", "env_build", "Makefile", "-",
           "undocumented; first use tools/lint/lintc/gate_clang_portability_run.c:auto")
 Z23_FLAG("ZCL_CLI", "env_build", "build/bin/zclassic-cli", "-",
-          "undocumented; first use tools/scripts/agent_msg_roundtrip.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_golden_freshness.c:auto")
 Z23_FLAG("ZCL_CLI_RPC_TIMEOUT_SEC", "env_runtime", "-", "-",
           "undocumented; first use engine/entry/main_cli_modes.c:auto")
 Z23_FLAG("ZCL_CLI_TEST_NO_SERVICE_LOOKUP", "env_runtime", "-", "-",
@@ -652,8 +652,6 @@ Z23_FLAG("ZCL_DEV_BENCH_WARMUP", "env_build", "1", "-",
           "undocumented; first use tools/dev/dev-loop-bench.sh:auto")
 Z23_FLAG("ZCL_DEV_BIN", "env_build", "-", "-",
           "undocumented; first use tools/dev/hotswap-resident-bench.sh:auto")
-Z23_FLAG("ZCL_DEVBOX_PEERS_DIR", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/devbox_init.sh:auto")
 Z23_FLAG("ZCL_DEV_BUILD_ARTIFACT", "env_build", "-", "-",
           "undocumented; first use tools/dev/deploy-dev-lane.sh:auto")
 Z23_FLAG("ZCL_DEV_BUILD_COMMIT_OVERRIDE", "env_build", "-", "-",
@@ -1755,20 +1753,6 @@ Z23_FLAG("ZCL_PARITY_STATE_CMD", "env_build", "-", "-",
           "undocumented; first use tools/scripts/tip_agreement_probe.sh:auto")
 Z23_FLAG("ZCL_PARITY_WINDOW_SECS", "env_build", "900", "-",
           "undocumented; first use tools/scripts/tip_agreement_probe.sh:auto")
-Z23_FLAG("ZCL_PAS_BINARY", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/produce_anchor_snapshot.sh:auto")
-Z23_FLAG("ZCL_PAS_MINT_FLAGS", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/produce_anchor_snapshot.sh:auto")
-Z23_FLAG("ZCL_PAS_OPERATOR_LANE", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/produce_anchor_snapshot.sh:auto")
-Z23_FLAG("ZCL_PAS_SOURCE_DATADIR", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/produce_anchor_snapshot.sh:auto")
-Z23_FLAG("ZCL_PAS_VERDICT_LOG", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/produce_anchor_snapshot.sh:auto")
-Z23_FLAG("ZCL_PAS_VERIFY_DATADIR", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/produce_anchor_snapshot.sh:auto")
-Z23_FLAG("ZCL_PAS_WORK_DATADIR", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/produce_anchor_snapshot.sh:auto")
 Z23_FLAG("ZCL_PEER", "env_build", "127.0.0.1:39070", "-",
           "first use tools/scripts/c3_stopwatch_run_and_record.sh:auto; documented at docs/quality/MVP.md:25: | 3 | **Cold-start sync to tip in <10 min** | Fresh datadir → z23 core sync status repo...")
 Z23_FLAG("ZCL_PEER_BAN_HOURS", "env_test", "-", "-",
@@ -1833,10 +1817,6 @@ Z23_FLAG("ZCL_PROCESS_GROUP_EXEC", "env_build", "-", "-",
           "undocumented; first use tools/dev/node_lifecycle.sh:auto")
 Z23_FLAG("ZCL_PROCESS_START_TOKEN", "env_build", "-", "-",
           "undocumented; first use tools/dev/node_lifecycle.sh:auto")
-Z23_FLAG("ZCL_PRODUCER_DD", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/byte_exact_utxo_check.sh:auto")
-Z23_FLAG("ZCL_PRODUCER_RPCPORT", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/byte_exact_utxo_check.sh:auto")
 Z23_FLAG("ZCL_PRODUCT_CONTEXTS", "env_build", "-", "-",
           "undocumented; first use tools/lint/repo_shape.sh:auto")
 Z23_FLAG("ZCL_PROFILE", "env_build", "-", "-",
@@ -2075,14 +2055,6 @@ Z23_FLAG("ZCL_ROM_FETCH_ORPHAN_HORIZON_SEC", "env_runtime", "21600", "-",
           "How many seconds an abandoned ROM download's .part + .journal pair must sit untouched before the boot sweep may reclaim it; first use engine/composition/src/rom_fetch_orphan_sweep.c:auto")
 Z23_FLAG("ZCL_ROOT_STRAY_EXTRA_FOR_TEST", "env_runtime", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_git_scan_a.c:auto")
-Z23_FLAG("ZCL_ROUNDTRIP_DATADIR", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/agent_msg_roundtrip.sh:auto")
-Z23_FLAG("ZCL_ROUNDTRIP_LOG", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/agent_msg_roundtrip.sh:auto")
-Z23_FLAG("ZCL_ROUNDTRIP_RPCPORT", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/agent_msg_roundtrip.sh:auto")
-Z23_FLAG("ZCL_ROUNDTRIP_TIMEOUT", "env_build", "300", "-",
-          "undocumented; first use tools/scripts/agent_msg_roundtrip.sh:auto")
 Z23_FLAG("ZCL_RPC_BIN", "env_build", "build/bin/zcl-rpc", "-",
           "first use platform/deploy/z23-cutover.sh:auto; documented at docs/quality/mvp-live-gate.md:37: ZCL_RPC_BIN — c23 client (default build/bin/zcl-rpc)")
 Z23_FLAG("ZCL_RPCCONNECT", "env_build", "-", "-",
@@ -2668,8 +2640,6 @@ Z23_FLAG("ZCL_WRS_DIR", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_wallet_recovery_safety.c:auto")
 Z23_FLAG("ZCL_WRS_GO", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_wallet_recovery_safety.c:auto")
-Z23_FLAG("ZCL_XMR_KEEP", "env_build", "0", "-",
-          "undocumented; first use tools/dev/cross-machine-reproduce.sh:auto")
 Z23_FLAG("ZCL_Z23_BIN", "env_runtime", "-", "-",
           "undocumented; first use tools/command/native_devagent_queue.c:auto")
 Z23_FLAG("ZCL_ZD_RPC_CMD", "env_build", "-", "-",

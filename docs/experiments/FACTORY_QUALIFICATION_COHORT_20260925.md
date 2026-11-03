@@ -43,6 +43,7 @@ Run the two bounded tracked controls with:
 ```sh
 # tools/dev/fixtures/factory_qualification/toolchain_drift.sh removed 2026-10-19; last present at d15f5f62e, recover with: git show d15f5f62e:tools/dev/fixtures/factory_qualification/toolchain_drift.sh
 tools/dev/fixtures/factory_qualification/toolchain_drift.sh /usr/bin/gcc test-tmp
+# tools/dev/fixtures/receiver/receive-revoke-replay.sh removed 2026-11-03; last present at a6a1e0d6a8, recover with: git show a6a1e0d6a8:tools/dev/fixtures/receiver/receive-revoke-replay.sh
 tools/dev/fixtures/receiver/receive-revoke-replay.sh build/bin/z23-dev test-tmp
 ```
 

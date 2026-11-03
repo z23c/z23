@@ -343,7 +343,7 @@ then binds it to that receipt before atomic publication. It removes the extra
 quick build formerly used only to emit the plan. The plan now explicitly names
 profile `standard`; all four required builds and tests remain.
 
-Measured with `tools/dev/c23-ingest-bench.sh` through `devbuild --wait` on Linux,
+Measured with the `c23-ingest-bench` script (deleted 2026-11-03, last present at a6a1e0d6a8) through `devbuild --wait` on Linux,
 three cold/warm pairs per implementation. Each run has fresh isolated stores;
 each pair has a fresh object cache, shared only with its warm run. Executables
 are copied and hashed before measurement and checked afterward. The same

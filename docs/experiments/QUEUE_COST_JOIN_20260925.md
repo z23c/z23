@@ -978,7 +978,7 @@ occurred, so duplicate proof executions avoided remains zero.
 
 ## Receiver restart, revocation and queue-ACK identity
 
-The tracked Linux executable fixture `tools/dev/fixtures/receiver/receive-revoke-replay.sh`
+The tracked Linux executable fixture `receive-revoke-replay.sh` (deleted 2026-11-03, last present at a6a1e0d6a8)
 (SHA-256 `2d3afbe0a89d0001b858cb10b68702cf0357c9314e0cfd0f5ef8672e20ffa06d`)
 uses only the native `fleet steer`, `dev agent receive`, `dev agent queue`,
 and `dev agent mail` leaves against a new private state root and signed,
@@ -996,6 +996,7 @@ the executable verdict is bound to the binary SHA-256, not a fresh main build.
 
 ```sh
 cd "$Z23_QUAL_BRANCH"
+# tools/dev/fixtures/receiver/receive-revoke-replay.sh removed 2026-11-03; last present at a6a1e0d6a8, recover with: git show a6a1e0d6a8:tools/dev/fixtures/receiver/receive-revoke-replay.sh
 tools/dev/fixtures/receiver/receive-revoke-replay.sh \
     "$Z23_PREFLIGHT_DEV_BIN" "$Z23_QUAL_SCRATCH"
 ```

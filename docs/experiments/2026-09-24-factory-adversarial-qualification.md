@@ -603,7 +603,7 @@ factory returned. That smoke does not replace the 20-revision load evidence.
 
 ## Real-package throughput sweep
 
-`tools/dev/factory-throughput-qualification.sh` copied the existing
+The `factory-throughput-qualification` script (deleted 2026-11-03, last present at a6a1e0d6a8) copied the existing
 `z23/textstat` C23 package into isolated candidate roots. Eight cumulative
 revisions added counts for digits, tabs, ASCII letters, high bytes, carriage
 returns, spaces, NUL bytes, and newlines. Every revision retained the
