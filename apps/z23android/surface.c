@@ -13,6 +13,9 @@
 #define FIXED_DP 320.0f /* Height of a video or image in a parent that scrolls. */
 #define GRAVITY_CENTER 17
 #define GRAVITY_START_CENTER 8388627
+#define VIEW_VISIBLE 0
+#define VIEW_INVISIBLE 4
+#define VIEW_GONE 8
 
 /* Where a view sits: in a vertical or horizontal LinearLayout, a FrameLayout or a grid row. */
 enum placement { IN_COLUMN, IN_ROW, IN_STACK, IN_CELL };
@@ -75,7 +78,8 @@ static void apply_text(JNIEnv *env, struct bind *bind, const char *text)
     bind->applied = true;
     snprintf(bind->last, sizeof(bind->last), "%s", text);
     (void)zj_text(env, bind->view, text);
-    (void)zj_visible(env, bind->view, text[0] != 0);
+    /* An empty text is not drawn, unless its node names its lines: then it keeps its place, so nothing below it moves. */
+    (void)zj_int_property(env, bind->view, "setVisibility", text[0] ? VIEW_VISIBLE : bind->node->lines > 0 ? VIEW_INVISIBLE : VIEW_GONE);
 }
 static void release_binds(JNIEnv *env)
 {
@@ -124,6 +128,12 @@ static bool ellipsize_end(JNIEnv *env, jobject view)
     if (mode) (*env)->DeleteLocalRef(env, mode);
     return ok;
 }
+/* A node that names its lines is exactly that many lines tall (zapp_layout_text_lines); one that names a limit is cut there. */
+static bool line_limits(JNIEnv *env, jobject view, const struct zapp_node *node)
+{
+    if (node->lines > 0) return zj_int_property(env, view, "setLines", node->lines) && ellipsize_end(env, view);
+    return node->max_lines <= 0 || (zj_int_property(env, view, "setMaxLines", node->max_lines) && ellipsize_end(env, view));
+}
 static jobject make_text(struct build *b, const struct zapp_node *node)
 {
     const struct zapp_theme *theme = &b->layout->theme;
@@ -131,7 +141,7 @@ static jobject make_text(struct build *b, const struct zapp_node *node)
     jobject view = make_view(b, "android/widget/TextView");
     jint color = counter ? (jint)theme->accent : (jint)(node->style == ZAPP_STYLE_CAPTION ? theme->muted : theme->text);
     bool ok = view && zj_typography(b->env, view, counter ? 16.0f : text_size(node), color) && zj_padding(b->env, view, 0, 4) &&
-        (node->max_lines <= 0 || (zj_int_property(b->env, view, "setMaxLines", node->max_lines) && ellipsize_end(b->env, view)));
+        line_limits(b->env, view, node);
     return ok ? view : NULL;
 }
 static jobject make_avatar(struct build *b)
@@ -147,10 +157,10 @@ static jobject make_image(struct build *b)
     jobject view = make_view(b, "android/widget/ImageView");
     return view && zj_pill(b->env, view, tile_color(b), 12.0f) ? view : NULL;
 }
-static jobject make_action(struct build *b, bool cell)
+static jobject make_action(struct build *b, const struct zapp_node *node, bool cell)
 {
     jobject view = make_view(b, "android/widget/Button");
-    return view && style_tile(b, view, cell) ? view : NULL;
+    return view && style_tile(b, view, cell) && (node->lines <= 0 || line_limits(b->env, view, node)) ? view : NULL;
 }
 static bool fills(const struct zapp_node *node)
 {
@@ -258,7 +268,7 @@ static jobject make_leaf(struct build *b, const struct zapp_node *node, size_t c
     case ZAPP_NODE_AVATAR: view = make_avatar(b); break;
     case ZAPP_NODE_IMAGE: view = make_image(b); break;
     case ZAPP_NODE_VIDEO: view = make_view(b, "android/view/SurfaceView"); break;
-    case ZAPP_NODE_ACTION: view = make_action(b, where == IN_CELL); break;
+    case ZAPP_NODE_ACTION: view = make_action(b, node, where == IN_CELL); break;
     default: break;
     }
     bool bound = node->kind == ZAPP_NODE_TEXT || node->kind == ZAPP_NODE_COUNTER || node->kind == ZAPP_NODE_AVATAR ||

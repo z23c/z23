@@ -516,6 +516,44 @@ static void onion_tests(void)
     assert(rmdir(dir) == 0 && rmdir(directory) == 0);
     pthread_mutex_destroy(&r.mutex);
 }
+/* Serving is read from the node's boot status: only a zcl.boot_status.v1 document whose serving is true counts. A missing,
+ * malformed, oversized or linked file, another schema and a string "true" do not. */
+static void write_status(const char *file, const char *text)
+{
+    FILE *f = fopen(file, "w");
+    assert(f && fputs(text, f) >= 0 && fclose(f) == 0);
+}
+static void serving_tests(void)
+{
+    char directory[] = "/tmp/zapp-serving-test-XXXXXX", file[420], other[420], *big;
+    assert(mkdtemp(directory));
+    struct zapp_runtime r = {0};
+    assert(snprintf(r.directory, sizeof(r.directory), "%s", directory) > 0);
+    snprintf(file, sizeof(file), "%s/boot_status.json", directory);
+    snprintf(other, sizeof(other), "%s/elsewhere.json", directory);
+    assert(!zapp_node_serving(&r) && !zapp_node_serving(NULL));
+    write_status(file, "{\"schema\":\"zcl.boot_status.v1\",\"phase\":\"network\",\"rpc_bound\":false,\"serving\":false}");
+    assert(!zapp_node_serving(&r));
+    write_status(file, "{\"schema\":\"zcl.boot_status.v1\",\"phase\":\"serving\",\"stage\":\"ready\",\"rpc_bound\":true,\"serving\":true}");
+    assert(zapp_node_serving(&r));
+    write_status(file, "{\"schema\":\"zcl.boot_status.v2\",\"serving\":true}");
+    assert(!zapp_node_serving(&r));
+    write_status(file, "{\"schema\":\"zcl.boot_status.v1\",\"serving\":\"true\"}");
+    assert(!zapp_node_serving(&r));
+    write_status(file, "{\"schema\":\"zcl.boot_status.v1\",\"serving\":tr");
+    assert(!zapp_node_serving(&r));
+    big = calloc(1, ZAPP_BOOT_STATUS_MAX + 64);
+    assert(big);
+    snprintf(big, ZAPP_BOOT_STATUS_MAX + 64, "{\"schema\":\"zcl.boot_status.v1\",\"serving\":true,\"activity\":\"%*s\"}",
+             ZAPP_BOOT_STATUS_MAX, "");
+    write_status(file, big);
+    free(big);
+    assert(!zapp_node_serving(&r));
+    write_status(other, "{\"schema\":\"zcl.boot_status.v1\",\"serving\":true}");
+    assert(unlink(file) == 0 && symlink(other, file) == 0);
+    assert(!zapp_node_serving(&r));   /* a link is not followed */
+    assert(unlink(file) == 0 && unlink(other) == 0 && rmdir(directory) == 0);
+}
 
 static void fixture_dir(char *out, size_t cap, const char *base, const char *leaf)
 {
@@ -559,6 +597,7 @@ int main(int argc, char **argv)
     pace_tests();
     onion_tests();
     linked_files_tests();
+    serving_tests();
     struct zapp_runtime r = {0};
     assert(pthread_mutex_init(&r.mutex, NULL) == 0);
     assert(snprintf(r.executable, sizeof(r.executable), "%s", argv[0]) > 0);

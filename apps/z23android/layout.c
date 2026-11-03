@@ -121,6 +121,7 @@ static bool parse_node(struct parser *p, const struct json_value *obj, struct za
     node->kind = kinds[index].kind;
     node->style = parse_style(obj);
     node->max_lines = clamped(obj, "max_lines", 0, 20, 0);
+    node->lines = clamped(obj, "lines", 0, 20, 0);
     node->columns = clamped(obj, "columns", 1, 6, 2);
     if (!copy_name(p, obj, "card", node->card) || !copy_name(p, obj, "id", node->id)) return false;
     if (!copy_name(p, obj, "field", node->field)) return false;
@@ -250,4 +251,10 @@ char *zapp_layout_read(const char *path, size_t *length, char *reason, size_t re
     }
     close(fd);
     return data;
+}
+int zapp_layout_text_lines(const struct zapp_node *node, int wrapped)
+{
+    if (node->lines > 0) return node->lines;
+    if (wrapped <= 0) return 0;
+    return node->max_lines > 0 && wrapped > node->max_lines ? node->max_lines : wrapped;
 }

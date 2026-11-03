@@ -26,6 +26,7 @@
 #define DARK 0xff111111u
 #define BUTTON_COLOR 0xff2b2b2bu
 #define WHITE 0xffffffffu
+#define GRAVITY_CENTER_HORIZONTAL 1
 
 enum screen { SCREEN_HOME, SCREEN_ASSISTANT, SCREEN_APPS, SCREEN_SETTINGS, SCREEN_SCAN, SCREEN_WALLET, SCREEN_SEND, SCREEN_SETUP, SCREEN_COUNT };
 enum command { CMD_HOME, CMD_APPS, CMD_SETTINGS, CMD_HOME_SETTINGS, CMD_LAYOUT, CMD_SCAN_CANCEL, CMD_CAMERA_SETTINGS, CMD_CAMERA_PASTE };
@@ -263,14 +264,19 @@ static bool build_settings(JNIEnv *env, jobject root)
     if (content) (*env)->DeleteLocalRef(env, content);
     return ok;
 }
-/* The camera preview with Cancel. */
+/* The camera preview, the line that says what to point it at, and Cancel. */
 static bool build_scan_camera(JNIEnv *env, jobject root)
 {
     jobject camera = column(env, 0xff000000u, 0, false);
     jobject image = zj_widget(env, "android/widget/ImageView", shell.activity);
-    bool ok = camera && image && zj_margins(env, image, MATCH, 0, 1.0f, 0, 0, 0, 0) && zj_append(env, camera, image) &&
-        zj_keep(env, &shell.scan_view, image) && button(env, camera, "Cancel", CMD_SCAN_CANCEL, 0, 0) &&
+    jobject hint = zj_widget(env, "android/widget/TextView", shell.activity);
+    bool ok = camera && image && hint && zj_margins(env, image, MATCH, 0, 1.0f, 0, 0, 0, 0) && zj_append(env, camera, image) &&
+        zj_keep(env, &shell.scan_view, image) && zj_typography(env, hint, 17.0f, (jint)WHITE) && zj_padding(env, hint, 16, 10) &&
+        zj_int_property(env, hint, "setGravity", GRAVITY_CENTER_HORIZONTAL) &&
+        zj_text(env, hint, zapp_camera_screen(ZAPP_CAMERA_GRANTED).hint) && zj_margins(env, hint, MATCH, WRAP, 0.0f, 0, 0, 0, 0) &&
+        zj_append(env, camera, hint) && button(env, camera, "Cancel", CMD_SCAN_CANCEL, 0, 0) &&
         zj_margins(env, camera, MATCH, 0, 1.0f, 0, 0, 0, 0) && zj_append(env, root, camera) && zj_keep(env, &shell.scan_camera, camera);
+    if (hint) (*env)->DeleteLocalRef(env, hint);
     if (image) (*env)->DeleteLocalRef(env, image);
     if (camera) (*env)->DeleteLocalRef(env, camera);
     return ok;
@@ -298,10 +304,13 @@ static void show_scan_screen(JNIEnv *env, enum zapp_camera_access access)
     (void)zj_visible(env, shell.scan_camera, preview);
     (void)zj_visible(env, shell.scan_panel, !preview);
 }
+/* The wallet pages scroll above a fixed bar that holds their Back. */
 static bool build_wallet(JNIEnv *env, jobject root)
 {
-    jobject content = scroll_column(env, root, 16);
-    bool ok = content && zapp_wallet_ui_create(env, shell.activity, content);
+    jobject content = scroll_column(env, root, 16), footer = content ? column(env, DARK, 0, false) : NULL;
+    bool ok = footer && zj_padding4(env, footer, 16, 0, 16, 8) && zj_append(env, root, footer) &&
+        zapp_wallet_ui_create(env, shell.activity, content, footer);
+    if (footer) (*env)->DeleteLocalRef(env, footer);
     if (content) (*env)->DeleteLocalRef(env, content);
     return ok;
 }
@@ -651,10 +660,20 @@ static bool same_target(const struct target *a, const struct target *b)
 static void run_wallet(JNIEnv *env, size_t button)
 {
     enum wallet_outcome outcome = zapp_wallet_ui_press(env, button);
+    uint64_t spendable = 0;
+    if (outcome == WALLET_SEND && wallet_screens_spendable(&spendable)) zapp_send_ui_known_balance(spendable);
     if (outcome == WALLET_SEND) open_send(env, NULL, "", false);
     else if (outcome == WALLET_MAKE_PRIVATE) open_send(env, NULL, "", true);
     else if (outcome == WALLET_START_NODE) shell.send("node_start", "");
     else if (outcome == WALLET_LEAVE) go(env, SCREEN_HOME);
+}
+/* Receive on the wallet screen, for a Send page that had nothing to send. Back on Receive returns to Funds. */
+static void open_receive(JNIEnv *env)
+{
+    go(env, SCREEN_WALLET);
+    if (shell.current != SCREEN_WALLET) return;
+    (void)wallet_screens_activate(WALLET_ACT_RECEIVE, 0);
+    zapp_wallet_ui_render(env);
 }
 /* The Send screen: Scan code leaves it first, so a scan never starts while a lock is owed. */
 static void run_send(JNIEnv *env, size_t button)
@@ -662,6 +681,7 @@ static void run_send(JNIEnv *env, size_t button)
     enum zapp_send_outcome outcome = zapp_send_ui_press(env, button);
     if (outcome == ZAPP_SEND_SCAN && leave_send(env)) begin_scan(env);
     else if (outcome == ZAPP_SEND_LEAVE) go(env, shell.send_from_wallet ? SCREEN_WALLET : SCREEN_HOME);
+    else if (outcome == ZAPP_SEND_RECEIVE) open_receive(env);
 }
 /* The setup screens: Continue leaves for the wallet once setup finished, and for Home otherwise. */
 static void run_setup(JNIEnv *env, size_t button)
@@ -846,6 +866,12 @@ void zapp_shell_tick(JNIEnv *env)
      * kept can go. */
     if (shell.current == SCREEN_WALLET) zapp_wallet_ui_tick(env);
     else wallet_screens_settle();
+}
+void zapp_shell_focus(JNIEnv *env)
+{
+    if (!shell.activity) return;
+    zapp_shell_immersive(env);
+    if (shell.current == SCREEN_SEND) zapp_send_ui_focus(env);
 }
 void zapp_shell_resume(JNIEnv *env)
 {

@@ -180,6 +180,22 @@ static bool read_gate(void *ctx, struct ws_gate *out)
     return true;
 }
 
+/* core wallet summary alone, for the amount the Send pages show. A summary that hides the private amounts is unknown. */
+static bool read_balance(void *ctx, struct wss_balance *out)
+{
+    struct wsn *n = ctx;
+    char text[WSN_REPLY_MAX];
+    struct wallet_view view;
+    memset(out, 0, sizeof(*out));
+    text[0] = 0;
+    bool ran = n->runner.run(n->runner.ctx, "summary", NULL, WSN_STEP_TIMEOUT_MS, text, sizeof(text));
+    out->known = ran && wallet_view_from_summary(text, &view) && view.spendable_known;
+    out->spendable_zat = out->known ? view.spendable_zat : 0;
+    memory_cleanse(text, sizeof(text));
+    memory_cleanse(&view, sizeof(view));
+    return ran;
+}
+
 /* ---- address ---- */
 
 static bool address_chars(const char *address)
@@ -463,5 +479,5 @@ static bool route(void *ctx, enum ws_route *out)
 
 void wsn_ops(struct wsn *node, struct wss_node_ops *ops)
 {
-    *ops = (struct wss_node_ops){node, validate_address, read_gate, plan, unlock, lock, commit, route};
+    *ops = (struct wss_node_ops){node, validate_address, read_gate, plan, unlock, lock, commit, route, read_balance};
 }

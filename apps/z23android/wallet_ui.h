@@ -15,8 +15,9 @@
 bool zapp_wallet_attach(ANativeActivity *activity, void (*changed)(void));
 void zapp_wallet_detach(void);
 
-/* container is a vertical LinearLayout inside the wallet screen's ScrollView. */
-bool zapp_wallet_ui_create(JNIEnv *env, jobject activity, jobject container);
+/* container is a vertical LinearLayout inside the wallet screen's ScrollView; footer is the vertical LinearLayout under it
+ * that holds the pinned Back (wallet_item_pinned). */
+bool zapp_wallet_ui_create(JNIEnv *env, jobject activity, jobject container, jobject footer);
 void zapp_wallet_ui_destroy(JNIEnv *env);
 /* Redraws when the screen changed since the last draw. */
 void zapp_wallet_ui_render(JNIEnv *env);

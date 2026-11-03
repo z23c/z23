@@ -269,6 +269,25 @@ static void read_checks(const char *scratch)
     snprintf(link, sizeof(link), "%s/fifo", scratch);
     assert(unlink(link) == 0);
 }
+/* A node that names its lines is that tall whatever its text, an empty text included; one that does not follows its text up
+ * to max_lines and takes no space when empty. Lines are clamped to 0..20. */
+static void text_lines(void)
+{
+    struct zapp_layout *layout = parse(HEAD "\"screens\":{\"s\":{\"container\":\"column\",\"children\":["
+        "{\"type\":\"text\",\"field\":\"a\",\"lines\":2},{\"type\":\"text\",\"field\":\"b\",\"max_lines\":3},"
+        "{\"type\":\"text\",\"field\":\"c\"},{\"type\":\"action\",\"id\":\"d\",\"lines\":99},"
+        "{\"type\":\"text\",\"field\":\"e\",\"lines\":-4,\"max_lines\":1}]}}}");
+    assert(layout);
+    const struct zapp_node *s = zapp_layout_screen(layout, "s");
+    assert(s && s->child_count == 5);
+    const struct zapp_node *fixed = &s->children[0], *capped = &s->children[1], *free_text = &s->children[2];
+    assert(fixed->lines == 2 && capped->lines == 0 && s->children[3].lines == 20 && s->children[4].lines == 0);
+    for (int wrapped = 0; wrapped <= 5; ++wrapped) assert(zapp_layout_text_lines(fixed, wrapped) == 2);
+    assert(zapp_layout_text_lines(capped, 0) == 0 && zapp_layout_text_lines(capped, 1) == 1 && zapp_layout_text_lines(capped, 5) == 3);
+    assert(zapp_layout_text_lines(free_text, 0) == 0 && zapp_layout_text_lines(free_text, 7) == 7);
+    assert(zapp_layout_text_lines(&s->children[3], 0) == 20 && zapp_layout_text_lines(&s->children[4], 4) == 1);
+    zapp_layout_free(layout);
+}
 int main(int argc, char **argv)
 {
     assert(argc == 2);
@@ -283,6 +302,7 @@ int main(int argc, char **argv)
     size_limit();
     malformed_documents();
     card_fields();
+    text_lines();
     puts("layout tests passed");
     return 0;
 }

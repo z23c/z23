@@ -124,8 +124,65 @@ static void plain_node_line_verdicts(void)
     assert(node_line_is(&view, "Connected, checking the chain"));
     view.node_height = 1000;
     assert(node_line_is(&view, "Looking for other computers to connect to"));
+    /* Once the boot status says the node serves, the line says so at its height while no other computer has given one. */
+    view.node_serving = true;
+    assert(node_line_is(&view, "Serving at block 1,000, waiting for other computers"));
+    view.node_reference = 1000;
+    view.chain_state = ZAPP_CHAIN_CURRENT;
+    assert(node_line_is(&view, "Up to date"));
+    view.node_reference = -1;
+    view.node_height = -1;
+    assert(node_line_is(&view, "Connected, checking the chain"));
+    view.node_height = 1000;
     view.node_stopping = true;
     assert(node_line_is(&view, "Stopping…"));
+}
+/* The lines each node of the phone card takes for one card: the status line wrapped to status_lines, the other texts on one
+ * line, and an empty text on none. */
+static void card_lines(const struct zapp_node *phone, const char *json, int status_lines, int *lines)
+{
+    struct json_value card = {0};
+    char text[160];
+    assert(json_read(&card, json, strlen(json)));
+    for (size_t i = 0; i < phone->child_count; ++i) {
+        const struct zapp_node *node = &phone->children[i];
+        bool shown = zapp_card_field(&card, node->field, text, sizeof(text)) && text[0];
+        lines[i] = zapp_layout_text_lines(node, !shown ? 0 : !strcmp(node->field, "node_line") ? status_lines : 1);
+    }
+    json_free(&card);
+}
+/* Every node of the phone card takes the same lines for a status of one line or two, and while the node stops, when the
+ * button has no label, as while it runs: the tiles under the card never move. */
+static void phone_card_keeps_its_height(void)
+{
+    static struct zapp_view running, stopping;
+    char card[1024];
+    running.node_process_running = running.node_wanted = running.node_running = true;
+    running.node_height = 1000;
+    running.node_reference = 1000;
+    running.chain_state = ZAPP_CHAIN_CURRENT;
+    stopping = running;
+    stopping.node_stopping = true;
+    for (size_t i = 0; i < zapp_home_layout_count(); ++i) {
+        const char *document = zapp_home_layout(zapp_home_layout_name(i));
+        char reason[160];
+        struct zapp_layout *layout = zapp_layout_parse(document, strlen(document), reason, sizeof(reason));
+        assert(layout);
+        const struct zapp_node *home = zapp_layout_screen(layout, "home"), *phone = NULL;
+        for (size_t c = 0; home && c < home->child_count; ++c)
+            if (!strcmp(home->children[c].card, "phone")) phone = &home->children[c];
+        assert(phone && phone->child_count == 3);
+        int want[3], got[3];
+        assert(zapp_home_phone_card(&running, false, card, sizeof(card)));
+        card_lines(phone, card, 1, want);
+        assert(want[0] == 2 && want[2] == 1);   /* the status line holds two lines and the button one */
+        card_lines(phone, card, 2, got);
+        assert(!memcmp(want, got, phone->child_count * sizeof(int)));
+        assert(zapp_home_phone_card(&stopping, false, card, sizeof(card)) && strstr(card, "\"node_button\":\"\""));
+        card_lines(phone, card, 1, got);
+        assert(!memcmp(want, got, phone->child_count * sizeof(int)));
+        zapp_layout_free(layout);
+    }
 }
 static void phone_card_golden(void)
 {
@@ -625,6 +682,7 @@ int main(void)
     worst_case_card_fits();
     built_in_layouts();
     caption_has_three_lines();
+    phone_card_keeps_its_height();
     offer_jump();
     puts("home tests passed");
     return 0;

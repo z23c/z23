@@ -55,6 +55,13 @@ struct wss_commit_info {
     char txid[WS_TXID_MAX];
 };
 
+/* What one payment can use now, as `core wallet summary` reports it. known is false until the node reported the private
+ * amounts: a locked wallet that hides them has no known balance, never a zero one. */
+struct wss_balance {
+    bool known;
+    uint64_t spendable_zat;
+};
+
 /* Typed node calls. Each returns false when the node could not be asked. */
 struct wss_node_ops {
     void *ctx;
@@ -67,6 +74,7 @@ struct wss_node_ops {
     enum wss_commit_outcome (*commit)(void *ctx, const struct wss_send_req *req, char token_echo[WS_TOKEN_MAX],
                                       struct wss_commit_info *info);
     bool (*route)(void *ctx, enum ws_route *out);                            /* core wallet broadcast status */
+    bool (*read_balance)(void *ctx, struct wss_balance *out);                /* core wallet summary. Optional. */
 };
 /* The device key. unwrap is the only way to the 32 byte wallet secret and it authenticates the owner for
  * this one use: it blocks on the worker while the system shows its prompt and returns the secret or a
@@ -111,6 +119,9 @@ struct wss_deps {
     void *release_ctx;
 };
 
+/* The field whose keyboard opens when its page opens. */
+enum wss_focus { WSS_FOCUS_NONE, WSS_FOCUS_ADDRESS, WSS_FOCUS_AMOUNT };
+
 /* Everything the renderer draws. Fields not in use are empty strings. */
 struct wss_view {
     bool visible;                     /* False: show only status; the screen could not be protected. */
@@ -142,7 +153,29 @@ struct wss_view {
     char confirmed[WSS_CONFIRMED];    /* When the node gave the committed answer, as "Today 14:05", in the phone's time zone; empty when the phone has no clock. */
     char fleet[WSS_LINE];             /* "Checked by your fleet" or "Not checked by your fleet". */
     char status[WSS_LINE];
+    enum wss_focus focus;             /* WSS_FOCUS_AMOUNT on the amount page of a payment named without an amount. */
+    char available[WSS_LINE];         /* The amount page: "Available: 4.9999 ZCL", once the balance is known. */
+    bool can_max;                     /* Draw Max: the amount becomes the spendable balance less the fee a plan quotes. */
 };
+
+/* The Send page before a payment is named. With the balance known to be 0 it says so and offers Receive, and asks for no
+ * address; otherwise it asks for the address with its keyboard open, and offers Paste address when the clipboard holds an
+ * address or a payment code that the parser of scanned codes accepts. */
+#define WSS_ZERO_BALANCE "You have 0 ZCL to send. Receive some first."
+struct wss_start {
+    bool zero;
+    bool paste;
+    enum wss_focus focus;
+    char line[WSS_LINE];
+};
+void wss_start_page(const struct wss_balance *balance, bool clip_holds_address, struct wss_start *out);
+/* Whether clip, trimmed of the spaces and control bytes at its ends, is an address or a payment code of network. */
+bool wss_paste_offered(const char *clip, enum zapp_pay_network network);
+/* The most one payment can send: the spendable amount less the fee, 0 when the fee takes it all. */
+uint64_t wss_max_amount(uint64_t spendable_zat, uint64_t fee_zat);
+/* The keyboard opens once each time a page with a field comes up, not on every redraw of that page: true when focus names
+ * a field and the page drawn before asked for another or none. *asked keeps the field of the page last drawn. */
+bool wss_keyboard_due(enum wss_focus focus, enum wss_focus *asked);
 
 struct wss;
 struct wss *wss_create(const struct wss_deps *deps);
@@ -183,6 +216,21 @@ void wss_tap_cancel(struct wss *screen);
  * authentication, under a new random key. */
 void wss_tap_pay_again(struct wss *screen);
 void wss_edit_amount(struct wss *screen, uint64_t amount_zat);
+/* Max. On a review it sets the amount to the reviewed spendable balance less the fee of that review's plan. On the amount
+ * page it first asks the node for a plan of the whole spendable balance, which binds nothing and sends nothing, and sets
+ * the amount to that balance less the fee the plan quotes. The new amount gets its own review, plan and tap. */
+void wss_tap_max(struct wss *screen);
+/* Asks the node for the spendable balance on the worker; the redraw follows the answer. A flow named without an amount
+ * asks by itself. */
+void wss_read_balance(struct wss *screen);
+/* Reads the balance again while the amount page is shown and its reading is older than half of WSS_BALANCE_FRESH_MS, so
+ * Available and Max stay on the page. Call on the ticks. */
+void wss_keep_balance(struct wss *screen);
+/* A reading the wallet screen took from the node moments ago, used until the node answers again. */
+void wss_note_balance(struct wss *screen, uint64_t spendable_zat);
+/* The latest reading, known only while it is at most WSS_BALANCE_FRESH_MS old. */
+#define WSS_BALANCE_FRESH_MS 30000u
+void wss_balance(struct wss *screen, struct wss_balance *out);
 void wss_edit_address(struct wss *screen, const char *address);
 void wss_edit_memo(struct wss *screen, const char *memo, size_t len);
 void wss_on_pause(struct wss *screen);

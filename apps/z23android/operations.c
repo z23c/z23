@@ -824,6 +824,22 @@ bool zapp_onion_ready(const struct zapp_runtime *r)
     if (n > 0 && text[n - 1] == '\n') --n;
     return n > 0 && onion_hostname_valid(text, (size_t)n);
 }
+bool zapp_node_serving(const struct zapp_runtime *r)
+{
+    char file[1200], text[ZAPP_BOOT_STATUS_MAX + 1];
+    struct json_value doc = {0};
+    if (!r || snprintf(file, sizeof(file), "%s/boot_status.json", r->directory) >= (int)sizeof(file)) return false;
+    int fd = open(file, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return false;
+    ssize_t n = read(fd, text, sizeof(text));
+    close(fd);
+    if (n <= 0 || n > ZAPP_BOOT_STATUS_MAX || !json_read(&doc, text, (size_t)n)) return false;
+    const struct json_value *schema = json_get(&doc, "schema"), *serving = json_get(&doc, "serving");
+    bool ok = schema && schema->type == JSON_STR && !strcmp(schema->val.s, "zcl.boot_status.v1") && serving &&
+              serving->type == JSON_BOOL && json_get_bool(serving);
+    json_free(&doc);
+    return ok;
+}
 enum zapp_onion zapp_onion_wait(struct zapp_runtime *r, unsigned seconds, void (*waiting)(void *), void *arg)
 {
     if (!zapp_node_running(r)) return ZAPP_ONION_NODE_STOPPED;

@@ -24,16 +24,18 @@ static void states(void)
     }
 }
 
-/* The scan screen for each state: the camera with Cancel, or the settings words and the two buttons. */
+/* The scan screen for each state: the camera with the line that says what to point it at and Cancel, or the settings
+ * words and the two buttons. */
 static void screens(void)
 {
     const enum zapp_camera_access camera[] = {ZAPP_CAMERA_GRANTED, ZAPP_CAMERA_ASK, ZAPP_CAMERA_ASK_AGAIN};
     for (size_t i = 0; i < sizeof(camera) / sizeof(camera[0]); ++i) {
         struct zapp_camera_screen s = zapp_camera_screen(camera[i]);
         assert(s.preview && !s.text && !s.open && !s.paste);
+        assert(s.hint && !strcmp(s.hint, "Point at a payment code"));
     }
     struct zapp_camera_screen s = zapp_camera_screen(ZAPP_CAMERA_SETTINGS);
-    assert(!s.preview);
+    assert(!s.preview && !s.hint);
     assert(!strcmp(s.text, "Camera access is off. Open Settings to allow it, or paste an address."));
     assert(!strcmp(s.open, "Open settings"));
     assert(!strcmp(s.paste, "Paste instead"));

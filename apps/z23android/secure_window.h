@@ -2,6 +2,7 @@
 #ifndef ZAPP_SECURE_WINDOW_H
 #define ZAPP_SECURE_WINDOW_H
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* Screen protection for wallet screens: FLAG_SECURE blocks screenshots, screen recording and the
@@ -125,5 +126,11 @@ bool zapp_clipboard_copy_sensitive(ANativeActivity *activity, const char *text);
 /* Runs zapp_clip_recover on the system clipboard. Call on the UI thread when the window gains focus, the first moment
  * the clipboard can be read. */
 void zapp_clipboard_recover(ANativeActivity *activity);
+/* What the clipboard holds, from the clip's description alone: reading it shows no system notice. stamp is set only for
+ * ZAPP_CLIP_HELD and changes with every new clip. Call on the UI thread. */
+enum zapp_clip_state zapp_clipboard_stamp(ANativeActivity *activity, int64_t *stamp);
+/* The text of the clip's first item, never what a URI names. False, with out wiped, when there is no text, it does not fit
+ * in cap or the app has no focus. The system may tell the owner that the app read the clipboard. Call on the UI thread. */
+bool zapp_clipboard_text(ANativeActivity *activity, char *out, size_t cap);
 #endif
 #endif

@@ -31,7 +31,7 @@
 #define BOTTOM_SPACE_DP 24
 
 static struct {
-    jobject activity, container, input, buttons[WALLET_ITEMS_MAX];
+    jobject activity, container, footer, input, buttons[WALLET_ITEMS_MAX];
     size_t button_item[WALLET_ITEMS_MAX], button_count;
     struct wallet_screen screen;
     unsigned version;
@@ -123,13 +123,15 @@ static bool bottom_space(JNIEnv *env)
     if (view) (*env)->DeleteLocalRef(env, view);
     return ok;
 }
+/* Back sits in the fixed bar under the page, so it stays on the screen however long the page is. */
 static bool button_view(JNIEnv *env, size_t item, const char *text, bool row)
 {
     jobject view = zj_widget(env, "android/widget/Button", ui.activity);
+    jobject parent = wallet_item_pinned(&ui.screen.items[item]) ? ui.footer : ui.container;
     bool ok = view && ui.button_count < WALLET_ITEMS_MAX && zj_typography(env, view, 16.0f, (jint)WHITE) &&
         zj_bool_property(env, view, "setAllCaps", false) && zj_pill(env, view, (jint)BUTTON_COLOR, 24.0f) &&
         zj_flatten(env, view) && zj_text(env, view, text) && zj_margins(env, view, MATCH, WRAP, 0.0f, 4, 4, 4, 4) &&
-        zj_append(env, ui.container, view) && zj_keep(env, &ui.buttons[ui.button_count], view);
+        zj_append(env, parent, view) && zj_keep(env, &ui.buttons[ui.button_count], view);
     if (ok && row) row_style(env, view, text);
     if (ok) ui.button_item[ui.button_count++] = item;
     if (view) (*env)->DeleteLocalRef(env, view);
@@ -153,11 +155,16 @@ static bool draw_item(JNIEnv *env, size_t index)
     return false;
 }
 
+static void remove_children(JNIEnv *env, jobject group)
+{
+    jmethodID clear = group ? zj_method(env, group, "removeAllViews", "()V") : NULL;
+    if (clear) (*env)->CallVoidMethod(env, group, clear);
+    (void)zj_clean(env);
+}
 static void release_widgets(JNIEnv *env)
 {
-    jmethodID clear = ui.container ? zj_method(env, ui.container, "removeAllViews", "()V") : NULL;
-    if (clear) (*env)->CallVoidMethod(env, ui.container, clear);
-    (void)zj_clean(env);
+    remove_children(env, ui.container);
+    remove_children(env, ui.footer);
     for (size_t i = 0; i < ui.button_count; ++i) (*env)->DeleteGlobalRef(env, ui.buttons[i]);
     ui.button_count = 0;
     if (ui.input) (*env)->DeleteGlobalRef(env, ui.input);
@@ -246,13 +253,14 @@ enum wallet_outcome zapp_wallet_ui_press(JNIEnv *env, size_t button)
 
 /* ---- lifecycle ---- */
 
-bool zapp_wallet_ui_create(JNIEnv *env, jobject activity, jobject container)
+bool zapp_wallet_ui_create(JNIEnv *env, jobject activity, jobject container, jobject footer)
 {
     if (ui.container) return false;
     ui.activity = (*env)->NewGlobalRef(env, activity);
     ui.container = (*env)->NewGlobalRef(env, container);
+    ui.footer = (*env)->NewGlobalRef(env, footer);
     /* A fixed-width child, the receive code, sits in the middle; text and buttons fill the width. */
-    if (ui.activity && ui.container && zj_int_property(env, ui.container, "setGravity", GRAVITY_CENTER_HORIZONTAL)) return true;
+    if (ui.activity && ui.container && ui.footer && zj_int_property(env, ui.container, "setGravity", GRAVITY_CENTER_HORIZONTAL)) return true;
     zapp_wallet_ui_destroy(env);
     return false;
 }
@@ -260,6 +268,7 @@ bool zapp_wallet_ui_create(JNIEnv *env, jobject activity, jobject container)
 void zapp_wallet_ui_destroy(JNIEnv *env)
 {
     zapp_wallet_ui_clear(env);
+    if (ui.footer) (*env)->DeleteGlobalRef(env, ui.footer);
     if (ui.container) (*env)->DeleteGlobalRef(env, ui.container);
     if (ui.activity) (*env)->DeleteGlobalRef(env, ui.activity);
     memset(&ui, 0, sizeof(ui));

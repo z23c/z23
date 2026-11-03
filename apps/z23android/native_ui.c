@@ -551,7 +551,7 @@ void zapp_native_ui_pause(JNIEnv *env) { zapp_shell_pause(env); }
 void zapp_native_ui_resume(JNIEnv *env) { zapp_shell_resume(env); }
 void zapp_native_ui_tick(JNIEnv *env) { zapp_shell_tick(env); }
 void zapp_native_ui_dropped(JNIEnv *env) { zapp_shell_dropped(env); }
-void zapp_native_ui_focus(JNIEnv *env) { zapp_shell_immersive(env); }
+void zapp_native_ui_focus(JNIEnv *env) { zapp_shell_focus(env); }
 void zapp_native_ui_open_details(JNIEnv *env)
 {
     if (details_open || !details_view || !zj_visible(env, details_view, true)) return;

@@ -249,6 +249,7 @@ static_assert(ZAPP_MOTION_ACTION_MASK == AMOTION_EVENT_ACTION_MASK && ZAPP_MOTIO
 #include <errno.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 #define CLIP_SENSITIVE_EXTRA "android.content.extra.IS_SENSITIVE" /* ClipDescription.EXTRA_IS_SENSITIVE */
@@ -433,5 +434,34 @@ void zapp_clipboard_recover(ANativeActivity *activity)
     struct zapp_clip_ops ops = clip_ops(&clip);
     if (clip.manager) (void)zapp_clip_recover(&ops, path, realtime_ms());
     (*env)->PopLocalFrame(env, NULL);
+}
+enum zapp_clip_state zapp_clipboard_stamp(ANativeActivity *activity, int64_t *stamp)
+{
+    JNIEnv *env = activity->env;
+    if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)zj_clean(env); return ZAPP_CLIP_UNREADABLE; }
+    jobject manager = clipboard_manager(activity);
+    enum zapp_clip_state state = manager ? stamp_of(env, manager, stamp) : ZAPP_CLIP_UNREADABLE;
+    (*env)->PopLocalFrame(env, NULL);
+    return state;
+}
+bool zapp_clipboard_text(ANativeActivity *activity, char *out, size_t cap)
+{
+    JNIEnv *env = activity->env;
+    if (!out || !cap) return false;
+    out[0] = 0;
+    if ((*env)->PushLocalFrame(env, 12) != JNI_OK) { (void)zj_clean(env); return false; }
+    jobject manager = clipboard_manager(activity);
+    jobject clip = manager ? zj_object_property(env, manager, "getPrimaryClip", "()Landroid/content/ClipData;") : NULL;
+    jmethodID count = clip ? zj_method(env, clip, "getItemCount", "()I") : NULL;
+    jint items = count ? (*env)->CallIntMethod(env, clip, count) : 0;
+    jmethodID item_at = items > 0 && zj_clean(env) ? zj_method(env, clip, "getItemAt", "(I)Landroid/content/ClipData$Item;") : NULL;
+    jobject item = item_at ? (*env)->CallObjectMethod(env, clip, item_at, 0) : NULL;
+    jobject chars = item && zj_clean(env) ? zj_object_property(env, item, "getText", "()Ljava/lang/CharSequence;") : NULL;
+    jobject string = chars ? zj_object_property(env, chars, "toString", "()Ljava/lang/String;") : NULL;
+    bool ok = string && zj_copy_utf(env, (jstring)string, out, cap);
+    (void)zj_clean(env);
+    (*env)->PopLocalFrame(env, NULL);
+    if (!ok) memset(out, 0, cap);
+    return ok;
 }
 #endif

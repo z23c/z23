@@ -17,7 +17,7 @@ bool zapp_camera_wait_goes_on(unsigned tick, bool paused, bool dialog)
 
 struct zapp_camera_screen zapp_camera_screen(enum zapp_camera_access access)
 {
-    if (access != ZAPP_CAMERA_SETTINGS) return (struct zapp_camera_screen){ .preview = true };
+    if (access != ZAPP_CAMERA_SETTINGS) return (struct zapp_camera_screen){ .preview = true, .hint = "Point at a payment code" };
     return (struct zapp_camera_screen){
         .text = "Camera access is off. Open Settings to allow it, or paste an address.",
         .open = "Open settings",

@@ -260,6 +260,7 @@ static void observe_node(struct controller *c)
     bool process_running = zapp_node_running(&c->runtime), stopping = zapp_node_stopping(&c->runtime);
     bool wanted = zapp_node_wanted(&c->runtime);
     bool onion = n.responding && zapp_onion_ready(&c->runtime);
+    bool serving = n.responding && zapp_node_serving(&c->runtime);
     char status[1024], line[96];
     /* Evidence outside the node: how long its tip has been still, and the fleet's height while that report is current. */
     const int64_t now = monotonic_secs();
@@ -279,6 +280,7 @@ static void observe_node(struct controller *c)
     c->view.pace = pace;
     c->view.node_wanted = wanted;
     c->view.node_stopping = stopping;
+    c->view.node_serving = serving;
     struct zapp_chain_status chain = zapp_chain_check(n.height, n.target, n.peers, &evidence);
     c->view.chain_state = chain.state;
     c->view.node_reference = chain.reference;

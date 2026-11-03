@@ -6,6 +6,7 @@
 #include <jni.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /* The Send screen: it draws the send flow of wallet_send_screen.c as Android Views and carries taps back to it. It
  * also wires that flow to the app: the node commands through the controller, the device key on a worker thread that is
@@ -17,8 +18,9 @@
 
 enum zapp_send_outcome {
     ZAPP_SEND_STAY,  /* the screen changed or nothing happened */
-    ZAPP_SEND_SCAN,  /* open the camera scan screen */
-    ZAPP_SEND_LEAVE  /* the flow is over: go Home */
+    ZAPP_SEND_SCAN,    /* open the camera scan screen */
+    ZAPP_SEND_LEAVE,   /* the flow is over: go Home */
+    ZAPP_SEND_RECEIVE  /* nothing to send: open Receive on the wallet screen */
 };
 
 /* Binds the Send flow to the activity. Call once the controller is running. changed wakes the UI thread when the flow
@@ -31,8 +33,15 @@ void zapp_send_detach(JNIEnv *env);
 /* container is a vertical LinearLayout inside the Send screen's ScrollView. */
 bool zapp_send_ui_create(JNIEnv *env, jobject activity, jobject container);
 void zapp_send_ui_destroy(JNIEnv *env);
-/* Opens the screen on a payment, or, with none, on a notice with Scan code and Enter address. */
+/* Opens the screen on a payment, or, with none, on the start page of wss_start_page under the notice: Scan code, the
+ * address field with its keyboard open and Paste address when the clipboard holds an address, or, with a balance known to
+ * be 0, the line that says so and Receive. */
 void zapp_send_ui_open(JNIEnv *env, const struct zapp_payment *pay, const char *notice);
+/* The spendable balance the wallet screen read moments ago. Call before zapp_send_ui_open, so the start page shows a zero
+ * balance at once. */
+void zapp_send_ui_known_balance(uint64_t spendable_zat);
+/* The window regained focus: the start page looks at the clipboard again, for an address copied in another app. */
+void zapp_send_ui_focus(JNIEnv *env);
 /* Opens the screen on the move of public funds into the private balance (Make private on Funds). The node names the amount,
  * so nothing is passed; the review, the screen lock and the commit are the payment's. */
 void zapp_send_ui_open_sweep(JNIEnv *env);

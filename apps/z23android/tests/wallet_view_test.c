@@ -450,6 +450,7 @@ static void test_hidden_private_amounts(void)
         "\"send_blocked_reason\":\"progress_store_unavailable\"}}";
     assert(wallet_view_from_summary(hidden, &v) && v.known);
     assert(!strcmp(v.balance, "Your private balance is hidden because the wallet is locked") && !strstr(v.balance, "ZCL"));
+    assert(!v.spendable_known && v.spendable_zat == 0);   /* Send treats a hidden balance as unknown, never as 0 */
     assert(!v.pending[0] && !v.unready_line[0] && !v.total_line[0] && !v.current && v.scanning);
     assert(!strcmp(v.sync, "The wallet is locked, so private amounts are not shown"));
     /* Blocks behind keep the updating wording while locked: the public amounts may still change. */
@@ -463,6 +464,7 @@ static void test_hidden_private_amounts(void)
     assert(!wallet_view_from_summary(json, &v));
     replace_once(json, sizeof(json), VALID_REPLY, schema, "\"schema\":\"zcl.wallet_summary.v1\",\"shielded_state\":\"ok\",");
     assert(wallet_view_from_summary(json, &v) && v.known && !strcmp(v.balance, "1.23456789 ZCL"));
+    assert(v.spendable_known && v.spendable_zat == 123456789u);
     printf("  hidden private amounts\n");
 }
 

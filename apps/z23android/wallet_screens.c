@@ -1421,6 +1421,17 @@ bool wallet_screens_active(void)
     return active;
 }
 
+bool wallet_screens_spendable(uint64_t *zat)
+{
+    pthread_mutex_lock(&st.lock);
+    const struct data *d = &st.d;
+    bool known = st.ready && !st.blocked && st.page == WALLET_PAGE_FUNDS && d->funds_loaded && !d->node_silent &&
+                 now() - d->summary_at <= WALLET_STALE_MS && d->view.known && d->view.spendable_known;
+    if (known) *zat = d->view.spendable_zat;
+    pthread_mutex_unlock(&st.lock);
+    return known;
+}
+
 bool wallet_screens_residue(const void *bytes, size_t len)
 {
     const unsigned char *all = (const unsigned char *)&st, *want = bytes;

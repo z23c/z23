@@ -92,6 +92,10 @@ bool zapp_wallet_setup_run(struct zapp_runtime *r, const char *op, const char *i
 bool zapp_fleet_join_run(struct zapp_runtime *r, const char *token, char *out, size_t cap);
 /* True when the node has published its onion address: a valid Tor v3 hostname file. */
 bool zapp_onion_ready(const struct zapp_runtime *r);
+/* True when boot_status.json in the node's datadir is a zcl.boot_status.v1 document of at most ZAPP_BOOT_STATUS_MAX bytes
+ * whose serving is true: the node finished starting and serves. The file is opened without following a link. */
+#define ZAPP_BOOT_STATUS_MAX 4096
+bool zapp_node_serving(const struct zapp_runtime *r);
 enum zapp_onion { ZAPP_ONION_READY, ZAPP_ONION_NODE_STOPPED, ZAPP_ONION_TIMEOUT };
 /* Re-checks once a second for up to the given seconds. waiting runs once, when the address is not
  * yet there. Returns early if the node exits. */

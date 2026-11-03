@@ -1239,6 +1239,61 @@ static void test_receive(void)
     wallet_screens_close();
 }
 
+/* Every wallet page has one Back, and it is the item the screen pins under the scrolling content, so it stays on screen
+ * however long the page is: Funds (as "Home"), Receive, History and a detail. */
+static size_t pinned(const struct wallet_screen *s)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < s->count; ++i) n += wallet_item_pinned(&s->items[i]);
+    return n;
+}
+static void test_every_page_pins_one_back(void)
+{
+    struct wallet_screen *s;
+    start(false);
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    s = snap();
+    CHECK(pinned(s) == 1 && !strcmp(text_at(s, find(s, WALLET_ITEM_BUTTON, WALLET_ACT_BACK)), "Home"));
+    tap(WALLET_ACT_RECEIVE, 0, WALLET_STAY);
+    s = snap();
+    CHECK(s->page == WALLET_PAGE_RECEIVE && pinned(s) == 1 && !strcmp(text_at(s, find(s, WALLET_ITEM_BUTTON, WALLET_ACT_BACK)), "Back"));
+    CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_NEW_ADDRESS) >= 0 && !wallet_item_pinned(&s->items[find(s, WALLET_ITEM_BUTTON, WALLET_ACT_NEW_ADDRESS)]));
+    CHECK(wallet_screens_back() && snap()->page == WALLET_PAGE_FUNDS);
+    tap(WALLET_ACT_HISTORY, 0, WALLET_STAY);
+    s = snap();
+    CHECK(s->page == WALLET_PAGE_HISTORY && pinned(s) == 1);
+    fake.detail = DETAIL("\"memo\":\"thanks\"");
+    tap(WALLET_ACT_DETAIL, 0, WALLET_STAY);
+    s = snap();
+    CHECK(s->page == WALLET_PAGE_DETAIL && pinned(s) == 1);
+    wallet_screens_close();
+}
+
+/* What Send starts from: the spendable amount Funds shows, only while Funds is in front with a reading of the private
+ * amounts no older than WALLET_STALE_MS. A hidden balance is unknown, never 0. */
+static void test_spendable_for_send(void)
+{
+    uint64_t zat = 7;
+    start(false);
+    CHECK(!wallet_screens_spendable(&zat) && zat == 7);
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    CHECK(wallet_screens_spendable(&zat) && zat == 123456789u);
+    fake.now += WALLET_STALE_MS + 1;
+    zat = 7;
+    CHECK(!wallet_screens_spendable(&zat) && zat == 7);
+    wallet_screens_close();
+    start(false);
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    tap(WALLET_ACT_RECEIVE, 0, WALLET_STAY);
+    CHECK(!wallet_screens_spendable(&zat) && zat == 7);
+    wallet_screens_close();
+    start(false);
+    fake.summary = LOCKED_SUMMARY;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS) && has("hidden"));
+    CHECK(!wallet_screens_spendable(&zat) && zat == 7);
+    wallet_screens_close();
+}
+
 static void test_receive_amount(void)
 {
     start(false);
@@ -2212,6 +2267,8 @@ int main(int argc, char **argv)
     test_reveal_across_pages();
     test_reveal_amount_not_kept();
     test_receive();
+    test_every_page_pins_one_back();
+    test_spendable_for_send();
     test_receive_amount();
     test_receive_new_address();
     test_receive_copy();

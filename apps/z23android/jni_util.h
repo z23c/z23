@@ -34,6 +34,9 @@ bool zj_place(JNIEnv *env, jobject view, int width, int height, float weight, in
 bool zj_hit(JNIEnv *env, jobject view, float x, float y);
 /* Copies a Java string as UTF-8; false when it does not fit in cap. */
 bool zj_copy_utf(JNIEnv *env, jstring value, char *out, size_t cap);
+/* show: gives a text field focus and asks for its soft keyboard. Otherwise hides the keyboard from the window of the view.
+ * True when the system took the request. Call on the UI thread with the view attached. */
+bool zj_keyboard(JNIEnv *env, jobject activity, jobject view, bool show);
 /* Shows a BMP or other image encoding in an ImageView; a NULL image clears it. */
 bool zj_bitmap(JNIEnv *env, jobject view, const unsigned char *bmp, size_t len);
 #endif

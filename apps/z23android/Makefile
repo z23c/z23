@@ -179,6 +179,7 @@ test-camera-access:
 	$(HOST_CC) $(HOST_WARNINGS) -I. tests/camera_access_test.c camera_access.c -o '$(BUILD_DIR)/camera-access-test'
 	'$(BUILD_DIR)/camera-access-test'
 	@grep -q 'zapp_camera_wait_goes_on(i, atomic_load(&camera_paused)' android_main.c || { echo 'the camera wait must end on the dialog result or when no dialog appears' >&2; exit 1; }
+	@grep -q 'zapp_camera_screen(ZAPP_CAMERA_GRANTED).hint' shell.c || { echo 'the scan screen must say what to point the camera at' >&2; exit 1; }
 
 .PHONY: test-payment test-wallet
 test-payment:
@@ -215,6 +216,7 @@ test-wallet:
 	  echo 'wallet text must not be selectable or copied; the one exception is Copy address on Receive, which copies the bare receive address only, through secure_window.c' >&2; exit 1; fi
 	@if grep -n zapp_clipboard_copy_sensitive wallet_screens.c wallet_view.c wallet_ui.c wallet_send_*.c | grep -v 'wallet_ui.c:[0-9]*:static bool bound_copy_address'; then \
 	  echo 'zapp_clipboard_copy_sensitive may be called only from bound_copy_address in wallet_ui.c' >&2; exit 1; fi
+	@grep -q 'zapp_wallet_ui_create(env, shell.activity, content, footer)' shell.c && grep -q 'wallet_item_pinned(&ui.screen.items\[item\]) ? ui.footer : ui.container' wallet_ui.c || { echo 'the wallet Back must be pinned under the scrolling content' >&2; exit 1; }
 
 check-node:
 	@test -x '$(NODE_BIN)' || { echo 'Build the Android node first' >&2; exit 1; }
@@ -280,6 +282,7 @@ test-host:
 	@mkdir -p '$(BUILD_DIR)'
 	$(HOST_CC) $(HOST_WARNINGS) tests/surface_test.c -o '$(BUILD_DIR)/surface-test'
 	'$(BUILD_DIR)/surface-test'
+	@grep -q 'bind->node->lines > 0 ? VIEW_INVISIBLE : VIEW_GONE' surface.c || { echo 'an empty text whose layout node names its lines must keep its place' >&2; exit 1; }
 	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../contexts/commons/packages/zsha256/include tests/params_test.c params.c params_install.c params_job.c \
 	  -I../../platform/modules/json/include -I../../platform/modules/base/include ../../platform/modules/json/src/json.c \
 	  ../../platform/modules/base/src/safe_alloc.c ../../platform/modules/base/src/cleanse.c \
@@ -433,3 +436,7 @@ test-wallet-send:
 	@grep -q "make_screen, wait_for_lock, bind_screen}" wallet_send_ui.c || { echo 'the send screen must bind an adopted flow to the new window' >&2; exit 1; }
 	@grep -q 'wallet_view_trim_address(text);' wallet_send_ui.c || { echo 'the address field must be trimmed before it is parsed' >&2; exit 1; }
 	@grep -q zapp_send_ui_take_reshow shell.c || { echo 'the shell must show a payment kept from the replaced activity' >&2; exit 1; }
+	@grep -q 'if (start->paste) (void)button_view(env, B_PASTE, "Paste address"' wallet_send_ui.c || { echo 'Paste address must be drawn only while the clipboard holds an address' >&2; exit 1; }
+	@! grep -q 'Enter address' wallet_send_ui.c || { echo 'the Send page must show the address field without a tap on Enter address' >&2; exit 1; }
+	@grep -q 'ask_keyboard(env, flow ? v.focus : start.focus);' wallet_send_ui.c || { echo 'a Send page with a field must ask for its keyboard when it opens' >&2; exit 1; }
+	@grep -q 'wallet_screens_spendable(&spendable)) zapp_send_ui_known_balance(spendable);' shell.c || { echo 'Send opened from Funds must start from the balance Funds shows' >&2; exit 1; }

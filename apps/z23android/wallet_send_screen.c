@@ -18,6 +18,8 @@
 #define SENT_TO_NODE "Sending privately. Waiting for an onion peer to carry it. You can leave this screen."
 #define SWEEP_DONE "Done. It shows in your private balance after the next block."
 #define SWEEP_REPLAYED "Done. This move was already made. It shows in your private balance after the next block."
+#define MAX_FAILED "The node did not quote the fee, so Max set no amount. Enter an amount."
+#define MAX_NONE "The fee is more than you have to send."
 
 struct wss {
     pthread_mutex_t lock;
@@ -35,6 +37,13 @@ struct wss {
     struct wss_unlock_buf unlock;
     bool unprotected;   /* the window protections are not in force: the payment is not shown */
     struct wss_send_req tapped;   /* The plan the owner tapped Send on; the commit is bound to it. */
+    struct wss_balance balance;   /* the latest spendable reading */
+    uint64_t balance_ms;          /* when it was taken */
+    bool balance_wanted;          /* a reading is asked for and not yet started */
+    bool balance_reading;         /* the worker is taking a reading */
+    bool quoting, quote_wanted;   /* Max on the amount page waits for the node to quote the fee */
+    uint32_t quote_serial;        /* the amount page the quote was asked on */
+    char max_note[WSS_LINE];      /* why Max set no amount */
 };
 
 /* ---- formatting ---- */
@@ -176,6 +185,60 @@ static bool is_busy(enum ws_state state)
 /* The flow has nothing left to ask of the owner: it ended, or the node holds the payment and only History can say more. */
 static bool flow_over(const struct ws *ws) { return ws_terminal(ws) || ws->state == WS_BROADCAST; }
 static bool shows_review(enum ws_state state) { return state == WS_REVIEW || state == WS_AUTH || state == WS_COMMIT; }
+
+/* ---- balance and Max ---- */
+
+static uint64_t now_of(const struct wss *s) { return s->d.host.now_ms ? s->d.host.now_ms(s->d.host.ctx) : 0; }
+/* Under the lock: whether the latest reading may still be shown. */
+static bool balance_fresh(const struct wss *s)
+{
+    uint64_t now = now_of(s);
+    return s->balance.known && (now < s->balance_ms || now - s->balance_ms <= WSS_BALANCE_FRESH_MS);
+}
+uint64_t wss_max_amount(uint64_t spendable_zat, uint64_t fee_zat) { return spendable_zat > fee_zat ? spendable_zat - fee_zat : 0; }
+/* Under the lock: the amount Max gives on a review, from the balance and the fee of that review; 0 when it gives none. */
+static uint64_t review_max(const struct ws *ws)
+{
+    if (ws->state != WS_REVIEW || ws->sweep || !ws->plan.token[0] || !ws->gate.known) return 0;
+    uint64_t target = wss_max_amount(ws->gate.spendable_zat, ws->plan.fee_zat);
+    return target != ws->pay.amount_zat ? target : 0;
+}
+/* The amount page: the address named, the balance and Max, or the quote Max waits for. */
+static void fill_amount_page(const struct wss *s, struct wss_view *v)
+{
+    char amount[WSS_AMOUNT];
+    v->focus = WSS_FOCUS_AMOUNT;
+    if (!wallet_view_group_address(s->ws.pay.address, v->address, sizeof(v->address))) v->address[0] = 0;
+    if (balance_fresh(s)) {
+        wss_format_zat(s->balance.spendable_zat, amount, sizeof(amount));
+        snprintf(v->available, sizeof(v->available), "Available: %s", amount);
+    }
+    v->can_max = balance_fresh(s) && s->balance.spendable_zat > 0 && !s->quoting;
+    snprintf(v->note, sizeof(v->note), "%s", s->max_note);
+    if (!s->quoting) return;
+    v->busy = true;
+    snprintf(v->status, sizeof(v->status), "Working out the most you can send.");
+}
+void wss_start_page(const struct wss_balance *balance, bool clip_holds_address, struct wss_start *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->zero = balance && balance->known && balance->spendable_zat == 0;
+    if (out->zero) { snprintf(out->line, sizeof(out->line), "%s", WSS_ZERO_BALANCE); return; }
+    out->paste = clip_holds_address;
+    out->focus = WSS_FOCUS_ADDRESS;
+}
+bool wss_paste_offered(const char *clip, enum zapp_pay_network network)
+{
+    char text[ZAPP_PAY_INPUT_MAX + 1];
+    struct zapp_payment pay;
+    if (!clip || !memchr(clip, 0, sizeof(text))) return false;
+    snprintf(text, sizeof(text), "%s", clip);
+    wallet_view_trim_address(text);
+    bool ok = text[0] && zapp_payment_parse(text, strlen(text), network, &pay) == ZAPP_PAY_OK;
+    memory_cleanse(text, sizeof(text));
+    memory_cleanse(&pay, sizeof(pay));
+    return ok;
+}
 void wss_view(struct wss *s, struct wss_view *v)
 {
     memset(v, 0, sizeof(*v));
@@ -204,6 +267,8 @@ void wss_view(struct wss *s, struct wss_view *v)
     v->can_leave = flow_over(ws);
     if (shows_review(ws->state) && ws->plan.token[0]) fill_review(ws, v);
     fill_status(ws, v);
+    if (ws->state == WS_PARSED && !ws->sweep) fill_amount_page(s, v);
+    v->can_max |= review_max(ws) > 0 && !ws->lock_wanted;
     pthread_mutex_unlock(&s->lock);
 }
 
@@ -366,12 +431,16 @@ static void kick(struct wss *s)
     struct ws_actions acts;
     struct ws_event ev = {.kind = WS_EV_ABORT};
     pthread_mutex_lock(&s->lock);
-    bool start = s->queued && !s->worker;
+    bool start = (s->queued || s->balance_wanted || s->quote_wanted) && !s->worker;
     if (start) s->worker = true;
     pthread_mutex_unlock(&s->lock);
     if (!start || s->d.host.spawn(s->d.host.ctx, run_job, s)) return;
     pthread_mutex_lock(&s->lock);
     s->worker = false;
+    /* A reading or a quote that cannot start is dropped; only queued actions of the flow end it. */
+    if (s->quote_wanted) snprintf(s->max_note, sizeof(s->max_note), "%s", MAX_FAILED);
+    s->balance_wanted = s->quote_wanted = s->quoting = false;
+    if (!s->queued) { pthread_mutex_unlock(&s->lock); return; }
     ev.now_ms = s->d.host.now_ms ? s->d.host.now_ms(s->d.host.ctx) : 0;
     enum ws_state before = s->ws.state;
     ws_step(&s->ws, &ev, &acts);
@@ -563,27 +632,95 @@ static void destroy_now(struct wss *s)
     cleanse_secrets(s);
     memory_cleanse(&s->tapped, sizeof(s->tapped));
     memory_cleanse(&s->ws, sizeof(s->ws));
+    memory_cleanse(&s->balance, sizeof(s->balance));
     pthread_mutex_destroy(&s->lock);
     free(s);
     if (release) release(release_ctx);
+}
+static void do_balance(struct wss *s)
+{
+    struct wss_balance b = {0};
+    if (!s->d.node.read_balance || !s->d.node.read_balance(s->d.node.ctx, &b)) b.known = false;
+    pthread_mutex_lock(&s->lock);
+    /* An unanswered or hidden reading leaves the last one, which goes out of date by itself. */
+    if (b.known) { s->balance = b; s->balance_ms = now_of(s); }
+    s->balance_reading = false;
+    pthread_mutex_unlock(&s->lock);
+    if (s->d.host.redraw) s->d.host.redraw(s->d.host.ctx);
+}
+static bool random_key(struct wss *s, char out[WS_KEY_HEX + 1])
+{
+    static const char hex[] = "0123456789abcdef";
+    uint8_t raw[WS_KEY_HEX / 2];
+    if (!s->d.host.random || !s->d.host.random(s->d.host.ctx, raw, sizeof(raw))) return false;
+    for (size_t i = 0; i < sizeof(raw); ++i) { out[2 * i] = hex[raw[i] >> 4]; out[2 * i + 1] = hex[raw[i] & 15]; }
+    out[WS_KEY_HEX] = 0;
+    memory_cleanse(raw, sizeof(raw));
+    return true;
+}
+/* Under the lock: whether the amount page that asked for the quote is still on screen. */
+static bool quote_live(const struct wss *s)
+{
+    return s->quoting && s->ws.state == WS_PARSED && s->ws.serial == s->quote_serial;
+}
+/* The fee a plan of the whole balance quotes. The plan binds nothing and is never committed: its key is a throwaway. */
+static void do_quote(struct wss *s)
+{
+    struct wss_send_req req;
+    struct ws_plan plan = {0};
+    snapshot(s, &req, false);
+    pthread_mutex_lock(&s->lock);
+    bool live = quote_live(s) && balance_fresh(s);
+    uint64_t spendable = s->balance.spendable_zat;
+    pthread_mutex_unlock(&s->lock);
+    req.amount_zat = spendable;
+    bool ok = live && random_key(s, req.key) && s->d.node.plan(s->d.node.ctx, &req, &plan) && plan.amount_zat == spendable &&
+              plan.total_zat == plan.amount_zat + plan.fee_zat;
+    uint64_t target = ok ? wss_max_amount(spendable, plan.fee_zat) : 0;
+    memory_cleanse(&req, sizeof(req));
+    memory_cleanse(&plan, sizeof(plan));
+    pthread_mutex_lock(&s->lock);
+    bool still = quote_live(s);
+    s->quoting = false;
+    if (still && !target) snprintf(s->max_note, sizeof(s->max_note), "%s", ok ? MAX_NONE : MAX_FAILED);
+    pthread_mutex_unlock(&s->lock);
+    if (still && target) wss_edit_amount(s, target);
+    else if (s->d.host.redraw) s->d.host.redraw(s->d.host.ctx);
+}
+/* Under the lock: takes the next piece of work of the worker. Queued actions of the flow come first; a reading and a quote
+ * follow them. */
+enum work { WORK_NONE, WORK_ACTION, WORK_BALANCE, WORK_QUOTE };
+static enum work next_work(struct wss *s, struct ws_action *a)
+{
+    if (s->queued) {
+        *a = s->queue[0];
+        memmove(s->queue, s->queue + 1, (s->queued - 1) * sizeof(s->queue[0]));
+        s->queued--;
+        return WORK_ACTION;
+    }
+    if (s->dying) return WORK_NONE;
+    if (s->balance_wanted) { s->balance_wanted = false; s->balance_reading = true; return WORK_BALANCE; }
+    if (s->quote_wanted) { s->quote_wanted = false; return WORK_QUOTE; }
+    return WORK_NONE;
 }
 static void run_job(void *arg)
 {
     struct wss *s = arg;
     for (;;) {
+        struct ws_action a = {0};
         pthread_mutex_lock(&s->lock);
-        if (!s->queued) {
+        enum work work = next_work(s, &a);
+        if (work == WORK_NONE) {
             bool dead = s->dying;
             s->worker = false;
             pthread_mutex_unlock(&s->lock);
             if (dead) destroy_now(s);
             return;
         }
-        struct ws_action a = s->queue[0];
-        memmove(s->queue, s->queue + 1, (s->queued - 1) * sizeof(s->queue[0]));
-        s->queued--;
         pthread_mutex_unlock(&s->lock);
-        run_action(s, a);
+        if (work == WORK_BALANCE) do_balance(s);
+        else if (work == WORK_QUOTE) do_quote(s);
+        else run_action(s, a);
     }
 }
 
@@ -671,6 +808,10 @@ static bool begin_flow(struct wss *s, const struct zapp_payment *pay)
     uint64_t now = s->d.host.now_ms ? s->d.host.now_ms(s->d.host.ctx) : 0;
     if (pay) ws_open(&s->ws, &env, pay, now, &acts);
     else ws_open_sweep(&s->ws, &env, now, &acts);
+    s->quoting = s->quote_wanted = false;
+    s->max_note[0] = 0;
+    /* The amount page shows what can be sent, so a payment named without an amount reads the balance at once. */
+    if (s->ws.state == WS_PARSED && s->d.node.read_balance) s->balance_wanted = true;
     enqueue(s, &acts);
     pthread_mutex_unlock(&s->lock);
     kick(s);
@@ -722,6 +863,61 @@ void wss_edit_amount(struct wss *s, uint64_t amount_zat)
 {
     struct ws_event ev = {.kind = WS_EV_SET_AMOUNT, .amount_zat = amount_zat};
     post(s, &ev);
+}
+void wss_tap_max(struct wss *s)
+{
+    pthread_mutex_lock(&s->lock);
+    const struct ws *ws = &s->ws;
+    uint64_t target = ws->lock_wanted ? 0 : review_max(ws);
+    bool quote = ws->state == WS_PARSED && !ws->sweep && balance_fresh(s) && s->balance.spendable_zat > 0 && !s->quoting;
+    if (quote) {
+        s->quoting = s->quote_wanted = true;
+        s->quote_serial = ws->serial;
+        s->max_note[0] = 0;
+    }
+    pthread_mutex_unlock(&s->lock);
+    if (target) { wss_edit_amount(s, target); return; }
+    if (!quote) return;
+    kick(s);
+    if (s->d.host.redraw) s->d.host.redraw(s->d.host.ctx);
+}
+void wss_read_balance(struct wss *s)
+{
+    if (!s->d.node.read_balance) return;
+    pthread_mutex_lock(&s->lock);
+    s->balance_wanted = true;
+    pthread_mutex_unlock(&s->lock);
+    kick(s);
+}
+void wss_keep_balance(struct wss *s)
+{
+    if (!s->d.node.read_balance) return;
+    pthread_mutex_lock(&s->lock);
+    uint64_t now = now_of(s);
+    bool old = !s->balance.known || now < s->balance_ms || now - s->balance_ms >= WSS_BALANCE_FRESH_MS / 2;
+    bool ask = s->begun && s->ws.state == WS_PARSED && !s->ws.sweep && old && !s->balance_wanted && !s->balance_reading;
+    if (ask) s->balance_wanted = true;
+    pthread_mutex_unlock(&s->lock);
+    if (ask) kick(s);
+}
+bool wss_keyboard_due(enum wss_focus focus, enum wss_focus *asked)
+{
+    bool due = focus != WSS_FOCUS_NONE && focus != *asked;
+    *asked = focus;
+    return due;
+}
+void wss_note_balance(struct wss *s, uint64_t spendable_zat)
+{
+    pthread_mutex_lock(&s->lock);
+    s->balance = (struct wss_balance){.known = true, .spendable_zat = spendable_zat};
+    s->balance_ms = now_of(s);
+    pthread_mutex_unlock(&s->lock);
+}
+void wss_balance(struct wss *s, struct wss_balance *out)
+{
+    pthread_mutex_lock(&s->lock);
+    *out = balance_fresh(s) ? s->balance : (struct wss_balance){0};
+    pthread_mutex_unlock(&s->lock);
 }
 void wss_edit_address(struct wss *s, const char *address)
 {

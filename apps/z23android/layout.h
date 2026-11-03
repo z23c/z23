@@ -29,6 +29,7 @@ struct zapp_node {
     char field[ZAPP_NAME_CAP]; /* Dotted path into the current card, or empty. */
     char id[ZAPP_NAME_CAP];    /* Action id of an action node. */
     int max_lines;             /* 0 for no limit. */
+    int lines;                 /* Exact height in lines of text, kept while the text is empty; 0 to follow the text. */
     int columns;               /* Grid columns. */
     struct zapp_node *children;
     size_t child_count;
@@ -60,6 +61,10 @@ const struct zapp_node *zapp_layout_screen(const struct zapp_layout *layout, con
 /* Copies the scalar at a dotted path of a card ("counts.comments") as text, cut on a character
  * boundary to fit cap. A missing or non-scalar field gives an empty string and false. */
 bool zapp_card_field(const struct json_value *card, const char *path, char *out, size_t cap);
+/* The lines of text a text or action node takes on screen for a text that wraps to `wrapped` lines, 0 for an empty text:
+ * exactly `lines` when the node names them, so a status that wraps differently never moves what follows it and an empty
+ * text keeps its place; otherwise the wrapped lines cut at `max_lines`, and none for an empty text, which is not drawn. */
+int zapp_layout_text_lines(const struct zapp_node *node, int wrapped);
 /* True when the card's schema is zcl.<kind>_card.v1. */
 bool zapp_card_is(const struct json_value *card, const char *kind);
 #endif

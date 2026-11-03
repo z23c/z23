@@ -41,7 +41,9 @@
 #define BUTTONS_MAX 8
 #define TEXT_CAP (ZAPP_PAY_INPUT_MAX + 1)
 
-enum button { B_SEND, B_CANCEL, B_RETRY, B_DONE, B_SCAN, B_ENTER, B_USE_ADDRESS, B_SET_AMOUNT, B_PAY_AGAIN };
+#define PASTE_GONE "The clipboard no longer holds an address."
+
+enum button { B_SEND, B_CANCEL, B_RETRY, B_DONE, B_SCAN, B_PASTE, B_USE_ADDRESS, B_SET_AMOUNT, B_PAY_AGAIN, B_MAX, B_RECEIVE };
 
 static struct {
     ANativeActivity *activity;
@@ -53,8 +55,10 @@ static struct {
     struct wsk keeper;
     void (*changed)(void);
     bool flow;       /* a payment is open on the screen and has not been left */
-    bool entering;   /* the address field is shown */
     bool dropped;    /* a tap was dropped because another window covered the app */
+    bool clip_read, clip_address;   /* the clip with clip_stamp was read, and it holds an address or a payment code */
+    int64_t clip_stamp;
+    enum wss_focus asked;           /* the field whose keyboard the page on screen asked for */
     char notice[WSS_LINE];
     char hint[WSS_LINE];
     char final_line[WSS_LINE];   /* the outcome of a payment that ended while the owner was away from this screen */
@@ -62,7 +66,8 @@ static struct {
     bool moved;   /* the shell was told once to go to the wallet for this payment */
     unsigned version, drawn_version;
     struct wss_view drawn;
-    bool is_drawn;
+    struct wss_start drawn_start;
+    bool is_drawn, drawn_flow;
 } ui;
 
 /* ---- the host: clock, random bytes and a JVM-attached worker ---- */
@@ -472,18 +477,31 @@ static void draw_paid(JNIEnv *env, const struct wss_view *v)
         (void)text_view(env, text, 14.0f, SOFT);
     }
 }
-/* The amount can be changed on the review of a payment; a sweep takes what the node names. */
+/* The amount can be changed on the review of a payment; a sweep takes what the node names. Max fills in the most one payment
+ * can send. */
 static void draw_amount_edit(JNIEnv *env, const struct wss_view *v)
 {
     if (v->sweep) return;
     (void)input_view(env, "Amount in ZCL", INPUT_TYPE_DECIMAL, &ui.amount_input);
+    if (v->can_max) (void)button_view(env, B_MAX, "Max", BUTTON_COLOR, false);
     (void)button_view(env, B_SET_AMOUNT, v->state == WS_REVIEW ? "Change amount" : "Set amount", BUTTON_COLOR, false);
+}
+/* The amount page of a payment named without an amount: where it goes and what can be sent. */
+static void draw_amount_page(JNIEnv *env, const struct wss_view *v)
+{
+    if (v->address[0]) {
+        (void)text_view(env, "To", 14.0f, SOFT);
+        (void)text_view(env, v->address, 18.0f, WHITE);
+    }
+    line_if(env, v->available, 16.0f, WHITE);
+    line_if(env, v->note, 14.0f, AMBER);
 }
 /* Another code can follow a finished payment, not a sweep and not a payment the node still holds. */
 static bool offers_scan(const struct wss_view *v) { return v->can_leave && v->state != WS_BROADCAST && !v->sweep; }
 static void draw_flow(JNIEnv *env, const struct wss_view *v)
 {
     if (v->review) draw_review(env, v);
+    else if (v->state == WS_PARSED && !v->sweep) draw_amount_page(env, v);
     line_if(env, v->status, 16.0f, v->check_history ? AMBER : SOFT);
     if (v->state == WS_PAID) draw_paid(env, v);
     line_if(env, ui.hint, 14.0f, AMBER);
@@ -498,43 +516,112 @@ static void draw_flow(JNIEnv *env, const struct wss_view *v)
     if (offers_scan(v)) (void)button_view(env, B_SCAN, "Scan another code", BUTTON_COLOR, false);
     if (v->can_leave) (void)button_view(env, B_DONE, "Done", BUTTON_COLOR, false);
 }
-/* No payment is open: a notice, and the two ways to name one. */
-static void draw_blank(JNIEnv *env)
+/* No payment is open. With nothing to send: the line that says so, Receive and Back. Otherwise the ways to name a payment:
+ * Scan code, the address field, Paste address while the clipboard holds an address, and Back. */
+static void draw_blank(JNIEnv *env, const struct wss_start *start)
 {
     line_if(env, ui.notice, 16.0f, SOFT);
-    (void)button_view(env, B_SCAN, zapp_home_send_scan_label(ui.notice), BUTTON_COLOR, false);
-    (void)button_view(env, B_ENTER, "Enter address", BUTTON_COLOR, false);
-    if (ui.entering) {
+    if (start->zero) {
+        (void)text_view(env, start->line, 18.0f, WHITE);
+        (void)button_view(env, B_RECEIVE, "Receive", BUTTON_COLOR, false);
+    } else {
+        (void)button_view(env, B_SCAN, zapp_home_send_scan_label(ui.notice), BUTTON_COLOR, false);
         (void)input_view(env, "Address or payment code", INPUT_TYPE_ADDRESS, &ui.address_input);
+        if (start->paste) (void)button_view(env, B_PASTE, "Paste address", BUTTON_COLOR, false);
         (void)button_view(env, B_USE_ADDRESS, "Use this address", BUTTON_COLOR, false);
     }
     (void)button_view(env, B_DONE, "Back", BUTTON_COLOR, false);
 }
+/* The Send page with no payment open, from the flow's latest balance reading and the clipboard. */
+static void start_of(struct wss_start *start)
+{
+    struct wss_balance balance = {0};
+    if (ui.keeper.screen) wss_balance(ui.keeper.screen, &balance);
+    wss_start_page(&balance, ui.clip_address, start);
+}
+
+/* What the owner typed into the field of the page on screen, carried across a redraw of that same page with the focus. */
+struct typed { char text[TEXT_CAP]; bool kept, focused; };
+static jobject page_field(bool flow) { return flow ? ui.amount_input : ui.address_input; }
+static bool same_page(bool flow, const struct wss_view *v)
+{
+    if (!ui.is_drawn || ui.drawn_flow != flow) return false;
+    return !flow || (ui.drawn.state == v->state && ui.drawn.serial == v->serial);
+}
+static bool read_input(JNIEnv *env, jobject input, char *out, size_t cap);
+static bool field_focused(JNIEnv *env, jobject field)
+{
+    jmethodID focused = zj_method(env, field, "isFocused", "()Z");
+    bool yes = focused && (*env)->CallBooleanMethod(env, field, focused);
+    return zj_clean(env) && yes;
+}
+static void keep_typed(JNIEnv *env, bool flow, const struct wss_view *v, struct typed *t)
+{
+    jobject field = page_field(ui.drawn_flow);
+    memset(t, 0, sizeof(*t));
+    if (!field || !same_page(flow, v)) return;
+    t->kept = read_input(env, field, t->text, sizeof(t->text)) && t->text[0];
+    t->focused = field_focused(env, field);
+}
+static void restore_typed(JNIEnv *env, bool flow, struct typed *t)
+{
+    jobject field = page_field(flow);
+    if (field && t->kept && zj_text(env, field, t->text)) {
+        jobject text = zj_object_property(env, field, "getText", "()Landroid/text/Editable;");
+        jmethodID length = text ? zj_method(env, text, "length", "()I") : NULL;
+        jint end = length ? (*env)->CallIntMethod(env, text, length) : 0;
+        if (zj_clean(env) && length) (void)zj_int_property(env, field, "setSelection", end);
+        if (text) (*env)->DeleteLocalRef(env, text);
+    }
+    if (field && t->focused) (void)zj_keyboard(env, ui.app, field, true);
+    memory_cleanse(t, sizeof(*t));
+}
+/* A page that opens with a field asks for its keyboard once; a page without one puts away the keyboard the page before
+ * asked for. */
+static void ask_keyboard(JNIEnv *env, enum wss_focus focus)
+{
+    enum wss_focus before = ui.asked;
+    jobject field = focus == WSS_FOCUS_ADDRESS ? ui.address_input : focus == WSS_FOCUS_AMOUNT ? ui.amount_input : NULL;
+    if (wss_keyboard_due(focus, &ui.asked) && field) (void)zj_keyboard(env, ui.app, field, true);
+    else if (focus == WSS_FOCUS_NONE && before != WSS_FOCUS_NONE) (void)zj_keyboard(env, ui.app, ui.container, false);
+}
 
 void zapp_send_ui_render(JNIEnv *env)
 {
+    static struct typed typed;
     struct wss_view v;
+    struct wss_start start;
     if (!ui.container) return;
     memset(&v, 0, sizeof(v));
-    if (ui.flow && ui.keeper.screen) {
+    memset(&start, 0, sizeof(start));
+    bool flow = ui.flow && ui.keeper.screen;
+    if (flow) {
         wss_view(ui.keeper.screen, &v);
         v.elapsed_s = 0;
         gate_apply(&v);
-    }
+    } else start_of(&start);
     ui.away = false;
-    if (ui.is_drawn && ui.drawn_version == ui.version && !memcmp(&v, &ui.drawn, sizeof(v))) return;
+    if (ui.is_drawn && ui.drawn_version == ui.version && ui.drawn_flow == flow && !memcmp(&v, &ui.drawn, sizeof(v)) &&
+        !memcmp(&start, &ui.drawn_start, sizeof(start))) return;
+    keep_typed(env, flow, &v, &typed);
     release_widgets(env);
     (void)text_view(env, v.sweep ? "Make private" : "Send", 24.0f, WHITE);
-    if (ui.flow && ui.keeper.screen) draw_flow(env, &v);
-    else draw_blank(env);
+    if (flow) draw_flow(env, &v);
+    else draw_blank(env, &start);
+    restore_typed(env, flow, &typed);
+    ask_keyboard(env, flow ? v.focus : start.focus);
     /* The phone must not sleep while a payment is built: it takes about two minutes. */
     (void)zj_bool_property(env, ui.container, "setKeepScreenOn", v.busy);
     ui.drawn = v;
+    ui.drawn_start = start;
+    ui.drawn_flow = flow;
     ui.drawn_version = ui.version;
     ui.is_drawn = true;
 }
 void zapp_send_ui_clear(JNIEnv *env)
 {
+    if (ui.container) (void)zj_keyboard(env, ui.app, ui.container, false);
+    ui.asked = WSS_FOCUS_NONE;
     release_widgets(env);
     (void)zj_bool_property(env, ui.container, "setKeepScreenOn", false);
     memory_cleanse(&ui.drawn, sizeof(ui.drawn));
@@ -563,7 +650,6 @@ static void flow_started(void)
     gate_reset();
     ui.final_line[0] = 0;
     ui.notice[0] = ui.hint[0] = 0;
-    ui.entering = false;
     ui.dropped = false;
     ui.version++;
 }
@@ -584,20 +670,50 @@ static void open_payment(const struct zapp_payment *pay)
 }
 void zapp_send_ui_open_sweep(JNIEnv *env)
 {
-    ui.entering = false;
     ui.hint[0] = 0;
     say(ui.notice, "");
     if (ui.keeper.screen && wss_begin_sweep(ui.keeper.screen)) flow_started();
     else flow_refused();
     zapp_send_ui_render(env);
 }
+/* Whether the clipboard holds an address or a payment code. A clip is read once: the same clip keeps its answer, so the
+ * system notice that the app read the clipboard comes once for each new clip. The text read is wiped here. */
+static void check_clip(void)
+{
+    int64_t stamp = 0;
+    enum zapp_clip_state state = ui.activity ? zapp_clipboard_stamp(ui.activity, &stamp) : ZAPP_CLIP_UNREADABLE;
+    if (state == ZAPP_CLIP_EMPTY) ui.clip_read = ui.clip_address = false;
+    if (state != ZAPP_CLIP_HELD || (ui.clip_read && stamp == ui.clip_stamp)) return;
+    char *text = calloc(1, TEXT_CAP);
+    if (!text) return;
+    ui.clip_read = zapp_clipboard_text(ui.activity, text, TEXT_CAP);
+    ui.clip_stamp = stamp;
+    ui.clip_address = ui.clip_read && wss_paste_offered(text, ZAPP_SCAN_NETWORK);
+    memory_cleanse(text, TEXT_CAP);
+    free(text);
+}
 void zapp_send_ui_open(JNIEnv *env, const struct zapp_payment *pay, const char *notice)
 {
-    ui.entering = false;
     ui.hint[0] = 0;
     say(ui.notice, notice ? notice : "");
     if (pay) open_payment(pay);
     else ui.flow = flow_live();
+    if (!ui.flow) {
+        /* The start page asks for the address with its keyboard each time it opens, and reads the balance. */
+        ui.asked = WSS_FOCUS_NONE;
+        check_clip();
+        if (ui.keeper.screen) wss_read_balance(ui.keeper.screen);
+    }
+    zapp_send_ui_render(env);
+}
+void zapp_send_ui_known_balance(uint64_t spendable_zat)
+{
+    if (ui.keeper.screen) wss_note_balance(ui.keeper.screen, spendable_zat);
+}
+void zapp_send_ui_focus(JNIEnv *env)
+{
+    if (ui.flow || !ui.container) return;
+    check_clip();
     zapp_send_ui_render(env);
 }
 
@@ -606,7 +722,6 @@ bool zapp_send_ui_leave(JNIEnv *env)
     if (ui.flow && ui.keeper.screen && wss_in_flight(ui.keeper.screen)) {
         /* The commit keeps running in the app process; the owner sees its progress on the wallet screen. */
         ui.away = true;
-        ui.entering = false;
         ui.dropped = false;
         zapp_send_ui_clear(env);
         return true;
@@ -615,7 +730,6 @@ bool zapp_send_ui_leave(JNIEnv *env)
         if (!wss_end(ui.keeper.screen)) return false;
         ui.flow = false;
     }
-    ui.entering = false;
     ui.notice[0] = ui.hint[0] = 0;
     ui.dropped = false;
     ui.version++;
@@ -647,6 +761,7 @@ void zapp_send_ui_tick(JNIEnv *env)
     if (ui.flow && ui.keeper.screen && !ui.away) {
         wss_view(ui.keeper.screen, &v);
         if (v.can_send) gate_poll();
+        wss_keep_balance(ui.keeper.screen);
     }
     finish_away();
     wsk_tick(&ui.keeper);
@@ -702,25 +817,39 @@ static bool read_input(JNIEnv *env, jobject input, char *out, size_t cap)
     (*env)->PopLocalFrame(env, NULL);
     return ok;
 }
-/* The same parser as a scanned code: an address typed or pasted is a payment with no amount, a payment code is read whole. */
-static void use_address(JNIEnv *env)
+/* The same parser as a scanned code: an address typed or pasted is a payment with no amount, a payment code is read whole.
+ * text holds TEXT_CAP bytes and is wiped. False, with the reason on screen, when it names no payment. */
+static bool open_text(char *text)
 {
-    char *text = calloc(1, TEXT_CAP);
     struct zapp_payment pay;
-    if (!text) return;
-    if (!read_input(env, ui.address_input, text, TEXT_CAP)) text[0] = 0;
     wallet_view_trim_address(text);
     enum zapp_pay_refusal why = zapp_scan_payment(text, &pay);
     memory_cleanse(text, TEXT_CAP);
-    free(text);
-    if (why != ZAPP_PAY_OK) {
-        say(ui.notice, zapp_scan_refusal_text(why));
-        return;
-    }
-    ui.entering = false;
-    say(ui.notice, "");
-    open_payment(&pay);
+    if (why == ZAPP_PAY_OK) {
+        say(ui.notice, "");
+        open_payment(&pay);
+    } else say(ui.notice, zapp_scan_refusal_text(why));
     memory_cleanse(&pay, sizeof(pay));
+    return why == ZAPP_PAY_OK;
+}
+static void use_address(JNIEnv *env)
+{
+    char *text = calloc(1, TEXT_CAP);
+    if (!text) return;
+    if (!read_input(env, ui.address_input, text, TEXT_CAP)) text[0] = 0;
+    (void)open_text(text);
+    free(text);
+}
+/* Paste address reads the clipboard again at the tap, so what opens is what the clipboard holds now. */
+static void paste_address(void)
+{
+    char *text = calloc(1, TEXT_CAP);
+    if (!text) return;
+    bool read = ui.activity && zapp_clipboard_text(ui.activity, text, TEXT_CAP) && text[0];
+    if (!read) say(ui.notice, PASTE_GONE);
+    if (!read || !open_text(text)) ui.clip_address = false;
+    memory_cleanse(text, TEXT_CAP);
+    free(text);
 }
 static void set_amount(JNIEnv *env)
 {
@@ -744,6 +873,11 @@ static void press_flow(JNIEnv *env, int id)
     else if (id == B_RETRY) wss_tap_retry(ui.keeper.screen);
     else if (id == B_PAY_AGAIN) wss_tap_pay_again(ui.keeper.screen);
     else if (id == B_SET_AMOUNT) set_amount(env);
+    else if (id == B_MAX) {
+        ui.hint[0] = 0;
+        ui.version++;
+        wss_tap_max(ui.keeper.screen);
+    }
 }
 enum zapp_send_outcome zapp_send_ui_press(JNIEnv *env, size_t button)
 {
@@ -756,7 +890,8 @@ enum zapp_send_outcome zapp_send_ui_press(JNIEnv *env, size_t button)
         outcome = ZAPP_SEND_LEAVE;
     }
     else if (id == B_SCAN) outcome = ZAPP_SEND_SCAN;
-    else if (id == B_ENTER) { ui.entering = true; ui.version++; }
+    else if (id == B_RECEIVE) outcome = ZAPP_SEND_RECEIVE;
+    else if (id == B_PASTE) paste_address();
     else if (id == B_USE_ADDRESS) use_address(env);
     else press_flow(env, id);
     if (outcome == ZAPP_SEND_STAY) zapp_send_ui_render(env);

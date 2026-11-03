@@ -236,17 +236,23 @@ static void clips_is_unreachable(void)
     free(m);
 }
 
-/* Clipped text ends with an ellipsis: make_text sets TruncateAt.END on every text view that has a line limit. */
+/* Clipped text ends with an ellipsis: every line limit surface.c sets, fixed or maximum, comes with TruncateAt.END,
+ * and make_text applies the node's limit. */
 static void text_is_ellipsized(void)
 {
     char *src = slurp("surface.c");
     require(src, "\"android/text/TextUtils$TruncateAt\"", "TruncateAt class");
     require(src, "\"END\", \"Landroid/text/TextUtils$TruncateAt;\"", "TruncateAt.END");
     require(src, "\"setEllipsize\"", "end ellipsis");
+    static const char *const limits[] = {"\"setLines\"", "\"setMaxLines\""};
+    for (size_t i = 0; i < 2; i++) {
+        size_t set = lines_with(src, limits[i], NULL, NULL);
+        if (!set || lines_with(src, limits[i], "ellipsize_end(", NULL) != set) { fprintf(stderr, "%s without an ellipsis\n", limits[i]); abort(); }
+    }
     const char *body = strstr(src, "static jobject make_text(");
     const char *end = body ? strstr(body, "\n}\n") : NULL;
     assert(body && end);
-    const char *call = strstr(body, "ellipsize_end(b->env, view)");
+    const char *call = strstr(body, "line_limits(b->env, view, node)");
     assert(call && call < end);
     free(src);
 }

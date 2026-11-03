@@ -213,3 +213,42 @@ bool zj_bitmap(JNIEnv *env, jobject view, const unsigned char *bmp, size_t len)
     if (ok) { (*env)->CallVoidMethod(env, view, set, bitmap); ok = zj_clean(env); }
     (void)zj_clean(env); (*env)->PopLocalFrame(env, NULL); return ok;
 }
+/* The input method service, valid in the caller's local frame. */
+static jobject input_methods(JNIEnv *env, jobject activity)
+{
+    jstring name = zj_string(env, "input_method");
+    jmethodID get = name ? zj_method(env, activity, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;") : NULL;
+    jobject service = get ? (*env)->CallObjectMethod(env, activity, get, name) : NULL;
+    return zj_clean(env) ? service : NULL;
+}
+/* The keyboard asked for through the insets of the field's window, for a service that refused the field. */
+static bool show_by_insets(JNIEnv *env, jobject view)
+{
+    jobject controller = zj_object_property(env, view, "getWindowInsetsController", "()Landroid/view/WindowInsetsController;");
+    jclass type = controller ? (*env)->FindClass(env, "android/view/WindowInsets$Type") : NULL;
+    jmethodID ime = type && zj_clean(env) ? (*env)->GetStaticMethodID(env, type, "ime", "()I") : NULL;
+    jint mask = ime && zj_clean(env) ? (*env)->CallStaticIntMethod(env, type, ime) : 0;
+    jmethodID show = mask && zj_clean(env) ? zj_method(env, controller, "show", "(I)V") : NULL;
+    if (show) (*env)->CallVoidMethod(env, controller, show, mask);
+    return show && zj_clean(env);
+}
+bool zj_keyboard(JNIEnv *env, jobject activity, jobject view, bool show)
+{
+    if (!activity || !view || (*env)->PushLocalFrame(env, 12) != JNI_OK) { (void)zj_clean(env); return false; }
+    jobject service = input_methods(env, activity);
+    bool ok = false;
+    if (service && show) {
+        jmethodID focus = zj_method(env, view, "requestFocus", "()Z");
+        jmethodID open = focus ? zj_method(env, service, "showSoftInput", "(Landroid/view/View;I)Z") : NULL;
+        bool focused = open && (*env)->CallBooleanMethod(env, view, focus) && zj_clean(env);
+        ok = focused && (*env)->CallBooleanMethod(env, service, open, view, 0) && zj_clean(env);
+        if (focused && !ok) ok = show_by_insets(env, view);
+    } else if (service) {
+        jobject token = zj_object_property(env, view, "getWindowToken", "()Landroid/os/IBinder;");
+        jmethodID hide = token ? zj_method(env, service, "hideSoftInputFromWindow", "(Landroid/os/IBinder;I)Z") : NULL;
+        ok = hide && (*env)->CallBooleanMethod(env, service, hide, token, 0) && zj_clean(env);
+    }
+    (void)zj_clean(env);
+    (*env)->PopLocalFrame(env, NULL);
+    return ok;
+}

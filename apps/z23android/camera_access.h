@@ -20,12 +20,12 @@ enum zapp_camera_access zapp_camera_access_state(bool granted, bool rationale, b
  * paused since the request, which the dialog causes. dialog: the dialog has not reported its result yet. */
 bool zapp_camera_wait_goes_on(unsigned tick, bool paused, bool dialog);
 
-/* What the scan screen shows for an access state. With preview, the camera and Cancel are shown and the other
- * fields are NULL. Otherwise text is shown with two buttons: open leads to the system settings page and paste
- * returns to Send. */
+/* What the scan screen shows for an access state. With preview, the camera is shown with one line, hint, that says what to
+ * point it at, and Cancel; the other fields are NULL. Otherwise text is shown with two buttons: open leads to the system
+ * settings page and paste returns to Send, and hint is NULL. */
 struct zapp_camera_screen {
     bool preview;
-    const char *text, *open, *paste;
+    const char *hint, *text, *open, *paste;
 };
 struct zapp_camera_screen zapp_camera_screen(enum zapp_camera_access access);
 #endif

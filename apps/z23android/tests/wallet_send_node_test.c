@@ -804,6 +804,32 @@ static void node_message_text_never_reaches_the_screen(void)
 }
 
 /* A declined or failed authentication commits nothing and the passphrase never exists on the node side. */
+/* The balance the Send pages show is the summary's spendable amount, read with the summary alone. A summary that hides the
+ * private amounts, a summary of another shape and a node that does not answer give no balance, never 0. */
+static void the_send_balance_is_the_summary_spendable(void)
+{
+    static const char hidden[] =
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"shielded_state\":\"keys_unavailable\","
+        "\"spendable_zat\":null,\"spendable\":null,\"pending_zat\":null,\"pending\":null,\"pending_notes\":null,"
+        "\"pending_min_confirmations_needed\":null,\"unready_zat\":null,\"unready\":null,\"unready_notes\":null,"
+        "\"public_zat\":10000000,\"public\":\"0.10000000\",\"immature_zat\":0,\"immature\":\"0.00000000\","
+        "\"tip_height\":3000000,\"header_height\":3000000,\"scanned_through_height\":null,\"blocks_behind\":0,"
+        "\"current\":false,\"locked\":true,\"encrypted\":true,\"shielded_keys\":0,\"send_allowed\":false,"
+        "\"send_blocked_reason\":\"progress_store_unavailable\"}}";
+    struct fake f; struct wsn n; struct wss_node_ops ops; struct wss_balance b;
+    fake_init(&f);
+    adapter(&f, &n, &ops);
+    assert(ops.read_balance(ops.ctx, &b) && b.known && b.spendable_zat == 500000000u && !strcmp(f.calls, "s"));
+    summary_json(f.summary.text, sizeof(f.summary.text), true, "", true, 0, 0);
+    assert(ops.read_balance(ops.ctx, &b) && b.known && b.spendable_zat == 0);
+    say(&f.summary, true, hidden);
+    assert(ops.read_balance(ops.ctx, &b) && !b.known && b.spendable_zat == 0);
+    say(&f.summary, true, "{\"ok\":true,\"data\":{\"schema\":\"zcl.other.v1\"}}");
+    assert(ops.read_balance(ops.ctx, &b) && !b.known);
+    say(&f.summary, false, "");
+    assert(!ops.read_balance(ops.ctx, &b) && !b.known);
+    assert(!strcmp(f.calls, "sssss"));
+}
 static void a_declined_prompt_commits_nothing(void)
 {
     struct fake f; struct wsn n; struct host h;
@@ -842,6 +868,7 @@ int main(void)
     a_killed_commit_is_unknown_and_never_repeated();
     node_message_text_never_reaches_the_screen();
     a_declined_prompt_commits_nothing();
+    the_send_balance_is_the_summary_spendable();
     puts("wallet_send_node_test: ok");
     return 0;
 }

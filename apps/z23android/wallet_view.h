@@ -33,6 +33,9 @@ struct wallet_view {
     char public_line[WALLET_VIEW_LINE];
     /* The public balance in zatoshi, 0 when unknown. */
     uint64_t public_zat;
+    /* What one payment can use (spendable), in zatoshi. spendable_known is false while a locked wallet hides it. */
+    bool spendable_known;
+    uint64_t spendable_zat;
     /* Make private is offered: the public balance is above the fee and sending is allowed. */
     bool can_make_private;
     /* "0.2 ZCL maturing, not yet spendable", or "" when no mined coins are maturing. */

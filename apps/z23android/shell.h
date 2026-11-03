@@ -24,6 +24,8 @@ void zapp_shell_dropped(JNIEnv *env);
 /* On resume: hides the system bars again, re-reads the app list and the layout file. */
 void zapp_shell_resume(JNIEnv *env);
 void zapp_shell_immersive(JNIEnv *env);
+/* The window gained focus: hides the system bars again, and the Send start page looks at the clipboard again. */
+void zapp_shell_focus(JNIEnv *env);
 /* A camera frame for the scan screen; NULL clears it. */
 void zapp_shell_preview(JNIEnv *env, const unsigned char *bmp, size_t len);
 /* A message under the home screen's top edge until the next screen change. */

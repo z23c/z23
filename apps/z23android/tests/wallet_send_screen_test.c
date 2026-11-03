@@ -26,6 +26,8 @@ struct fake {
     /* script */
     struct ws_gate gate;
     uint64_t fee;
+    struct wss_balance balance;   /* what the summary reports as spendable */
+    int balance_reads;
     bool address_valid, plan_ok, unlock_ok, lock_ok;
     enum wss_commit_outcome commit_outcome;
     enum ws_route route;
@@ -161,6 +163,7 @@ static enum wss_commit_outcome n_commit(void *c, const struct wss_send_req *r, c
     return f->commit_outcome;
 }
 static bool n_route(void *c, enum ws_route *out) { struct fake *f = c; note(f, 'r', NULL); *out = f->route; return true; }
+static bool n_balance(void *c, struct wss_balance *out) { struct fake *f = c; note(f, 'b', NULL); f->balance_reads++; *out = f->balance; return true; }
 /* The device key with a timeout of 0: every unwrap is one prompt, and the secret leaves only with an answer. */
 static enum wss_key_status d_unwrap(void *c, uint8_t secret[32])
 {
@@ -251,6 +254,7 @@ static void fake_init(struct fake *f)
     memset(f, 0, sizeof(*f));
     f->gate = (struct ws_gate){.known = true, .send_allowed = true, .spendable_zat = 500000000u, .public_zat = 100000000u};
     f->fee = 10000; f->address_valid = f->plan_ok = f->unlock_ok = f->lock_ok = true;
+    f->balance = (struct wss_balance){.known = true, .spendable_zat = 500000000u};
     f->commit_outcome = WSS_COMMITTED; f->route = WS_ROUTE_SENT; f->key = WSS_KEY_OK;
     f->flag_ok = f->filter_ok = true; f->now = 5000; f->rnd = 42;
     pthread_mutex_init(&f->mu, NULL);
@@ -268,7 +272,7 @@ static struct wss *screen_of(struct fake *f)
 {
     struct wss_deps d = {
         .network = ZAPP_PAY_MAINNET,
-        .node = {f, n_validate, n_gate, n_plan, n_unlock, n_lock, n_commit, n_route},
+        .node = {f, n_validate, n_gate, n_plan, n_unlock, n_lock, n_commit, n_route, n_balance},
         .device = {f, d_unwrap},
         .host = {f, h_random, h_now, h_spawn, h_redraw, f->derive_on ? h_derive : NULL, h_wall, h_outcome},
         .secure = {f, s_flag, s_filter, s_granted, s_granted, s_granted},
@@ -1032,6 +1036,172 @@ static void ticks_cannot_starve_a_lock(void)
     assert(view_of(s).state == WS_DONE && wss_end(s) && wss_destroy(s));
 }
 /* No worker thread: the UI thread runs nothing. The flow fails before any commit and the lock is still owed. */
+/* ---- the start page, the amount page and Max ---- */
+
+/* With the balance known to be 0 the start page says so and asks for no address; otherwise it asks for the address with its
+ * keyboard, and offers Paste only for a clipboard that holds an address. A reading from Funds shows at once; a reading from
+ * the node shows when it answers; a hidden or old reading is unknown, never 0. */
+static void the_start_page_follows_the_balance(void)
+{
+    struct wss_start st;
+    struct wss_balance zero = {.known = true}, some = {.known = true, .spendable_zat = 1}, unknown = {0}, b;
+    wss_start_page(&zero, true, &st);
+    assert(st.zero && !st.paste && st.focus == WSS_FOCUS_NONE && !strcmp(st.line, "You have 0 ZCL to send. Receive some first."));
+    wss_start_page(&some, true, &st);
+    assert(!st.zero && st.paste && st.focus == WSS_FOCUS_ADDRESS && !st.line[0]);
+    wss_start_page(&unknown, false, &st);
+    assert(!st.zero && !st.paste && st.focus == WSS_FOCUS_ADDRESS);
+    wss_start_page(NULL, true, &st);
+    assert(!st.zero && st.paste && st.focus == WSS_FOCUS_ADDRESS);
+
+    struct fake f; fake_init(&f);
+    struct wss *s = screen_of(&f);
+    wss_balance(s, &b);
+    assert(!b.known);
+    wss_note_balance(s, 0);
+    wss_balance(s, &b);
+    wss_start_page(&b, true, &st);
+    assert(st.zero && f.balance_reads == 0);
+    f.now += WSS_BALANCE_FRESH_MS + 1;
+    wss_balance(s, &b);
+    assert(!b.known);
+    f.balance.spendable_zat = 0;
+    wss_read_balance(s);
+    assert(f.balance_reads == 0);   /* the UI thread never waits: the reading runs on the worker */
+    drain(&f);
+    wss_balance(s, &b);
+    assert(f.balance_reads == 1 && b.known && b.spendable_zat == 0);
+    f.now += WSS_BALANCE_FRESH_MS + 1;
+    f.balance = (struct wss_balance){0};   /* a locked wallet hides its private balance */
+    wss_read_balance(s); drain(&f);
+    wss_balance(s, &b);
+    wss_start_page(&b, false, &st);
+    assert(f.balance_reads == 2 && !b.known && !st.zero && st.focus == WSS_FOCUS_ADDRESS);
+    wss_destroy(s);
+}
+/* Paste address is offered for what the parser of scanned codes accepts on this network, trimmed at its ends like a typed
+ * address, and for nothing else. */
+static void paste_is_offered_only_for_an_address(void)
+{
+    char text[256];
+    assert(wss_paste_offered(priv, ZAPP_PAY_MAINNET) && wss_paste_offered(pub, ZAPP_PAY_MAINNET));
+    snprintf(text, sizeof(text), "zclassic:%s?amount=1.5", priv);
+    assert(wss_paste_offered(text, ZAPP_PAY_MAINNET));
+    snprintf(text, sizeof(text), "  %s\n", priv);
+    assert(wss_paste_offered(text, ZAPP_PAY_MAINNET));
+    assert(!wss_paste_offered(NULL, ZAPP_PAY_MAINNET) && !wss_paste_offered("", ZAPP_PAY_MAINNET));
+    assert(!wss_paste_offered("   \n", ZAPP_PAY_MAINNET) && !wss_paste_offered("Meet at 5", ZAPP_PAY_MAINNET));
+    assert(!wss_paste_offered("https://example.com/pay", ZAPP_PAY_MAINNET));
+    snprintf(text, sizeof(text), "%.40s", priv);
+    assert(!wss_paste_offered(text, ZAPP_PAY_MAINNET));        /* a cut address */
+    snprintf(text, sizeof(text), "tm%.33s", pub + 2);
+    assert(!wss_paste_offered(text, ZAPP_PAY_MAINNET) && wss_paste_offered(text, ZAPP_PAY_TESTNET));
+    char *big = calloc(1, ZAPP_PAY_INPUT_MAX + 8);
+    assert(big);
+    memcpy(big, priv, strlen(priv));
+    memset(big + strlen(priv), ' ', ZAPP_PAY_INPUT_MAX + 4 - strlen(priv));
+    assert(!wss_paste_offered(big, ZAPP_PAY_MAINNET));        /* more than a payment code can hold */
+    free(big);
+}
+/* The amount page of an address named without an amount: the address, what can be sent, Max, and the amount field with its
+ * keyboard. The balance is read when the page opens and again before the reading goes out of date. */
+static void the_amount_page_shows_what_can_be_sent(void)
+{
+    struct fake f; fake_init(&f);
+    struct zapp_payment p = pay_of(priv, "");
+    struct wss *s = reviewed(&f, &p);
+    struct wss_view v = view_of(s);
+    assert(v.state == WS_PARSED && v.focus == WSS_FOCUS_AMOUNT && !strcmp(v.status, "Enter an amount to send."));
+    assert(!strcmp(v.available, "Available: 5 ZCL") && v.can_max && f.balance_reads == 1 && !strncmp(v.address, "zs1 qqqq", 8));
+    wss_keep_balance(s);
+    assert(!f.job && f.balance_reads == 1);   /* a fresh reading is not asked for again */
+    f.now += WSS_BALANCE_FRESH_MS / 2;
+    wss_keep_balance(s); drain(&f);
+    assert(f.balance_reads == 2 && view_of(s).can_max);
+    f.now += WSS_BALANCE_FRESH_MS + 1;
+    f.balance = (struct wss_balance){0};
+    v = view_of(s);
+    assert(!v.available[0] && !v.can_max);    /* an out-of-date reading shows nothing rather than a stale amount */
+    wss_tap_max(s);
+    assert(!f.job && view_of(s).state == WS_PARSED);
+    wss_edit_amount(s, 100000000u); drain(&f);
+    v = view_of(s);
+    assert(v.state == WS_REVIEW && v.focus == WSS_FOCUS_NONE && !v.available[0]);
+    wss_destroy(s);
+}
+/* Max on the amount page asks the node for a plan of the whole spendable balance, which is never committed, and sets the
+ * amount to that balance less the fee the plan quotes. The new amount gets its own plan and review. */
+static void max_is_the_balance_less_the_planned_fee(void)
+{
+    struct fake f; fake_init(&f);
+    f.fee = 12345;
+    struct zapp_payment p = pay_of(priv, "");
+    struct wss *s = reviewed(&f, &p);
+    int plans = f.plans;
+    wss_tap_max(s);
+    struct wss_view v = view_of(s);
+    assert(v.busy && !v.can_max && !strcmp(v.status, "Working out the most you can send.") && f.plans == plans);
+    drain(&f);
+    v = view_of(s);
+    assert(v.state == WS_REVIEW && !strcmp(v.amount, "4.99987655 ZCL") && !strcmp(v.fee, "0.00012345 ZCL"));
+    assert(!strcmp(v.remains, "0 ZCL") && !v.note[0] && !v.can_max);
+    assert(f.plans == plans + 2 && f.commits == 0 && f.unlocks == 0 && !strchr(f.calls, 'k'));
+    tap_and_run(s, &f);
+    assert(f.commits == 1 && f.commit_amount == 500000000u - 12345u && f.commit_fee == 12345u);
+    wss_destroy(s);
+
+    /* On a review, Max uses the reviewed balance and that review's fee. */
+    fake_init(&f);
+    p = pay_of(priv, "?amount=1");
+    s = reviewed(&f, &p);
+    assert(view_of(s).can_max);
+    plans = f.plans;
+    wss_tap_max(s); drain(&f);
+    v = view_of(s);
+    assert(v.state == WS_REVIEW && !strcmp(v.amount, "4.9999 ZCL") && !v.can_max && f.plans == plans + 1);
+    wss_destroy(s);
+}
+/* Max sets no amount when the fee takes the whole balance or the node gives no plan, and says why on the amount page. */
+static void max_says_why_it_set_no_amount(void)
+{
+    struct fake f; fake_init(&f);
+    f.balance.spendable_zat = 10000;
+    struct zapp_payment p = pay_of(priv, "");
+    struct wss *s = reviewed(&f, &p);
+    wss_tap_max(s); drain(&f);
+    struct wss_view v = view_of(s);
+    assert(v.state == WS_PARSED && !strcmp(v.note, "The fee is more than you have to send.") && v.can_max && !v.busy);
+    wss_destroy(s);
+
+    fake_init(&f);
+    f.plan_ok = false;
+    s = reviewed(&f, &p);
+    wss_tap_max(s); drain(&f);
+    v = view_of(s);
+    assert(v.state == WS_PARSED && !strcmp(v.note, "The node did not quote the fee, so Max set no amount. Enter an amount."));
+    assert(f.commits == 0);
+    wss_destroy(s);
+
+    fake_init(&f);
+    s = reviewed(&f, &p);
+    f.spawn_fail = true;
+    wss_tap_max(s);
+    v = view_of(s);
+    assert(v.state == WS_PARSED && !v.busy && strstr(v.note, "did not quote the fee"));   /* the flow itself goes on */
+    wss_destroy(s);
+}
+/* The keyboard opens once each time a page with a field comes up: the start page and the amount page ask, their redraws
+ * and the review do not. */
+static void the_keyboard_opens_once_per_page(void)
+{
+    enum wss_focus asked = WSS_FOCUS_NONE;
+    assert(wss_keyboard_due(WSS_FOCUS_ADDRESS, &asked));
+    assert(!wss_keyboard_due(WSS_FOCUS_ADDRESS, &asked));
+    assert(wss_keyboard_due(WSS_FOCUS_AMOUNT, &asked));
+    assert(!wss_keyboard_due(WSS_FOCUS_AMOUNT, &asked));
+    assert(!wss_keyboard_due(WSS_FOCUS_NONE, &asked) && asked == WSS_FOCUS_NONE);
+    assert(wss_keyboard_due(WSS_FOCUS_AMOUNT, &asked));
+}
 static void a_missing_worker_fails_the_flow(void)
 {
     struct zapp_payment p = pay_of(priv, "?amount=1");
@@ -1461,6 +1631,12 @@ int main(void)
     pay_again_is_offered_only_on_a_committed_payment();
     a_fresh_process_asks_the_node_and_the_node_decides();
     the_key_follows_the_request();
+    the_start_page_follows_the_balance();
+    paste_is_offered_only_for_an_address();
+    the_amount_page_shows_what_can_be_sent();
+    max_is_the_balance_less_the_planned_fee();
+    max_says_why_it_set_no_amount();
+    the_keyboard_opens_once_per_page();
     puts("wallet_send_screen_test: ok");
     return 0;
 }
