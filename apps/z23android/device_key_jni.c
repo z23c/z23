@@ -11,6 +11,8 @@
 #define ALIAS "z23.wallet.device-key.v2"
 #define OLD_ALIAS "z23.wallet.device-key.v1"
 #define AAD "z23.wallet.device-key.v2"
+/* The key that seals the last balance Funds shows: no authentication, usable only while the phone is unlocked. */
+#define BALANCE_ALIAS "z23.wallet.balance-key.v1"
 #define PROMPT_CLASS "org.z23.nativeapp.KeyPrompt"
 #define PROMPT_TIMEOUT_MS 120000u
 /* Per-operation authentication: no validity window. Keystore binds each operation to one fresh
@@ -232,19 +234,20 @@ static status_t jni_create_key(void *context, bool strongbox)
     return st;
 }
 
-/* The keystore entry, or NULL with *status set: NOT_FOUND when absent. */
-static jobject stored_key(JNIEnv *env, status_t *status)
+/* The keystore entry under name, or NULL with *status set: NOT_FOUND when absent. */
+static jobject keystore_entry(JNIEnv *env, const char *name, status_t *status)
 {
     jclass store = (*env)->FindClass(env, "java/security/KeyStore");
     jstring type = zj_clean(env) ? (*env)->NewStringUTF(env, "AndroidKeyStore") : NULL;
     jobject keystore = type ? call_static(env, store, "getInstance", "(Ljava/lang/String;)Ljava/security/KeyStore;", type) : NULL;
     bool loaded = keystore && call_void(env, keystore, "load", "(Ljava/security/KeyStore$LoadStoreParameter;)V", NULL);
-    jstring alias = loaded ? (*env)->NewStringUTF(env, ALIAS) : NULL;
+    jstring alias = loaded ? (*env)->NewStringUTF(env, name) : NULL;
     jobject key = alias ? call_object(env, keystore, "getKey", "(Ljava/lang/String;[C)Ljava/security/Key;", alias, NULL) : NULL;
     if (key) return key;
     *status = (*env)->ExceptionCheck(env) ? failed(env) : (alias ? ZAPP_DEVKEY_NOT_FOUND : ZAPP_DEVKEY_ERROR);
     return NULL;
 }
+static jobject stored_key(JNIEnv *env, status_t *status) { return keystore_entry(env, ALIAS, status); }
 static bool info_int(JNIEnv *env, jobject info, const char *name, jint *value)
 {
     jmethodID get = zj_method(env, info, name, "()I");
@@ -309,13 +312,18 @@ static jobject cipher_for(JNIEnv *env, int mode, jobject key, jobject parameters
         call_void(env, cipher, "init", "(ILjava/security/Key;)V", mode, key));
     return ready ? cipher : NULL;
 }
-/* Binds the blob to this wallet purpose, then runs the cipher over input. Returns the output. */
-static jbyteArray cipher_run(JNIEnv *env, jobject cipher, jbyteArray input)
+/* Binds the output to aad, then runs the cipher over input. Returns the output. */
+static jbyteArray cipher_bound(JNIEnv *env, jobject cipher, const uint8_t *data, size_t len, jbyteArray input)
 {
-    jbyteArray aad = bytes_new(env, (const uint8_t *)AAD, strlen(AAD));
+    jbyteArray aad = bytes_new(env, data, len);
     bool bound = aad && call_void(env, cipher, "updateAAD", "([B)V", aad);
     bytes_wipe(env, aad);
     return bound ? call_object(env, cipher, "doFinal", "([B)[B", input) : NULL;
+}
+/* Binds the blob to this wallet purpose, then runs the cipher over input. Returns the output. */
+static jbyteArray cipher_run(JNIEnv *env, jobject cipher, jbyteArray input)
+{
+    return cipher_bound(env, cipher, (const uint8_t *)AAD, strlen(AAD), input);
 }
 /* Copies the sealed bytes and the nonce out of Java, wiping both Java arrays. */
 static bool seal_copy(JNIEnv *env, jobject cipher, jbyteArray output, uint8_t iv[ZAPP_DEVKEY_IV], uint8_t sealed[ZAPP_DEVKEY_SEALED])
@@ -538,6 +546,71 @@ static void jni_delete_key(void *context)
         if (alias) (void)call_void(env, keystore, "deleteEntry", "(Ljava/lang/String;)V", alias);
     }
     frame_end(env);
+}
+
+/* ---- the balance key ---- */
+
+/* No authentication, so Funds shows the kept balance without a prompt; Keystore refuses the key while the phone is locked. */
+static jobject balance_spec(JNIEnv *env)
+{
+    jstring alias = (*env)->NewStringUTF(env, BALANCE_ALIAS);
+    jobject modes = string_array1(env, "GCM"), paddings = string_array1(env, "NoPadding");
+    jobject builder = alias && modes && paddings ?
+        new_object(env, "android/security/keystore/KeyGenParameterSpec$Builder", "(Ljava/lang/String;I)V", alias, PURPOSES) : NULL;
+    bool ok = builder && builder_step(env, builder, "setBlockModes", BUILDER_SIG("[Ljava/lang/String;"), modes) &&
+        builder_step(env, builder, "setEncryptionPaddings", BUILDER_SIG("[Ljava/lang/String;"), paddings) &&
+        builder_step(env, builder, "setKeySize", BUILDER_SIG("I"), 256) &&
+        builder_step(env, builder, "setUserAuthenticationRequired", BUILDER_SIG("Z"), JNI_FALSE) &&
+        builder_step(env, builder, "setUnlockedDeviceRequired", BUILDER_SIG("Z"), JNI_TRUE);
+    jobject spec = ok ? call_object(env, builder, "build", "()Landroid/security/keystore/KeyGenParameterSpec;") : NULL;
+    return zj_clean(env) ? spec : NULL;
+}
+/* The balance key. With make, a key that is missing or unreadable is replaced by a new one: a balance sealed under the old one
+ * then fails to open and is deleted, which costs only the wait for the node. */
+static jobject balance_key(JNIEnv *env, bool make)
+{
+    status_t status = ZAPP_DEVKEY_ERROR;
+    jobject key = keystore_entry(env, BALANCE_ALIAS, &status);
+    if (key || !make) return key;
+    jclass generator = (*env)->FindClass(env, "javax/crypto/KeyGenerator");
+    jstring algorithm = zj_clean(env) ? (*env)->NewStringUTF(env, "AES") : NULL;
+    jstring provider = algorithm ? (*env)->NewStringUTF(env, "AndroidKeyStore") : NULL;
+    jobject maker = provider ? call_static(env, generator, "getInstance",
+        "(Ljava/lang/String;Ljava/lang/String;)Ljavax/crypto/KeyGenerator;", algorithm, provider) : NULL;
+    jobject spec = zj_clean(env) && maker ? balance_spec(env) : NULL;
+    key = spec && call_void(env, maker, "init", "(Ljava/security/spec/AlgorithmParameterSpec;)V", spec) ?
+        call_object(env, maker, "generateKey", "()Ljavax/crypto/SecretKey;") : NULL;
+    return zj_clean(env) ? key : NULL;
+}
+bool zapp_balance_seal(JNIEnv *env, const uint8_t *aad, size_t aad_len, const uint8_t *plain, size_t len,
+                       uint8_t iv[ZAPP_BALANCE_IV], uint8_t *out)
+{
+    if (!frame_begin(env)) return false;
+    jobject key = balance_key(env, true);
+    jobject cipher = key ? cipher_for(env, 1, key, NULL) : NULL;
+    jbyteArray input = cipher ? bytes_new(env, plain, len) : NULL;
+    jbyteArray output = input ? cipher_bound(env, cipher, aad, aad_len, input) : NULL;
+    bytes_wipe(env, input);
+    jbyteArray nonce = output ? (jbyteArray)call_object(env, cipher, "getIV", "()[B") : NULL;
+    if (!zj_clean(env)) nonce = NULL;
+    bool ok = output && bytes_take(env, output, out, len + ZAPP_BALANCE_TAG) && nonce && bytes_take(env, nonce, iv, ZAPP_BALANCE_IV);
+    if (!ok) { memory_cleanse(out, len + ZAPP_BALANCE_TAG); memory_cleanse(iv, ZAPP_BALANCE_IV); }
+    frame_end(env);
+    return ok;
+}
+bool zapp_balance_unseal(JNIEnv *env, const uint8_t *aad, size_t aad_len, const uint8_t iv[ZAPP_BALANCE_IV],
+                         const uint8_t *sealed, size_t len, uint8_t *plain)
+{
+    if (len < ZAPP_BALANCE_TAG || !frame_begin(env)) return false;
+    jobject key = balance_key(env, false);
+    jbyteArray nonce = key ? bytes_new(env, iv, ZAPP_BALANCE_IV) : NULL;
+    jobject params = nonce ? new_object(env, "javax/crypto/spec/GCMParameterSpec", "(I[B)V", (jint)(ZAPP_BALANCE_TAG * 8u), nonce) : NULL;
+    jobject cipher = params ? cipher_for(env, 2, key, params) : NULL;
+    jbyteArray input = cipher ? bytes_new(env, sealed, len) : NULL;
+    jbyteArray output = input ? cipher_bound(env, cipher, aad, aad_len, input) : NULL;
+    bool ok = output && bytes_take(env, output, plain, len - ZAPP_BALANCE_TAG);
+    frame_end(env);
+    return ok;
 }
 #ifdef ZAPP_DEVKEY_PROBE
 /* Copies at most cap - 1 bytes of value, cutting a long message for printing only. */

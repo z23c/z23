@@ -584,6 +584,7 @@ static void fresh(struct fake *f, struct wsu *w, bool running)
     assert(wsu_open(w));
 }
 
+static void init_with(struct fake *f, struct wsu *w);
 /* The create as the app runs it: the words first, then the wallet written behind them. */
 static void create_all(struct wsu *w)
 {
@@ -624,11 +625,15 @@ static void create_tests(void)
     wsu_words_seen(&w);
     assert(wsu_confirm(&w, right, 3));
     /* The marker is written by the finishing job, not by the tap that confirmed. */
-    assert(w.step == WSU_WORKING && w.held.count == 0 && zapp_setup_state(dir) == ZAPP_SETUP_INTERRUPTED);
+    assert(w.step == WSU_WORKING && w.held.count == 0 && zapp_setup_state(dir) == ZAPP_SETUP_INTERRUPTED && !wsu_created(&w));
     wsu_finish_job(&w);
     assert(w.step == WSU_DONE && zapp_setup_state(dir) == ZAPP_SETUP_READY && !wsu_busy(&w));
+    assert(wsu_created(&w));     /* the wallet starts at the tip and has shown no address: the app may show it as 0 ZCL */
     wsu_finish_job(&w);
     assert(w.step == WSU_DONE);
+    wsu_destroy(&w);
+    init_with(&f, &w);           /* a setup finished before the app started is not a new wallet */
+    assert(w.step == WSU_DONE && !wsu_created(&w));
     wsu_destroy(&w);
 
 }
@@ -898,13 +903,13 @@ static void restore_tests(void)
     wsu_restore_job(&w, VALID_PHRASE, 2999000);
     wsu_view_read(&w, &v);
     assert(v.step == WSU_READING && !v.birthday_dropped && f.restore_while_running == 0 && f.stops == 1 && f.starts == 1);
-    assert(zapp_setup_state(dir) == ZAPP_SETUP_READY && f.wraps == 1);
+    assert(zapp_setup_state(dir) == ZAPP_SETUP_READY && f.wraps == 1 && !wsu_created(&w));
     assert(strstr(f.script.input, "\"passphrase\":\"abab") && strstr(f.script.input, "\"confirm\":true"));
     f.scanned = 100; f.tip = 3000000;
     int64_t a, b;
     assert(wsu_reading(&w, &a, &b) && a == 100 && b == 3000000);
     wsu_finish_reading(&w);
-    assert(w.step == WSU_DONE);
+    assert(w.step == WSU_DONE && !wsu_created(&w));   /* a restore's balance is unknown until the node has read the chain */
     wsu_destroy(&w);
 
 }

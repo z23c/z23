@@ -181,19 +181,35 @@ static void title(struct wallet_screen *s, const char *text)
 
 /* ---- last known balance ----
  * Funds shows the last balance the node gave while the node has not answered yet. It is kept in one small file in the
- * app's private files directory (0600, never through a link, replaced whole), written only from a summary the node
- * gave, and read back only for the wallet it was written for: the file names the wallet's key file by a hash of its
- * bytes, so a wallet set aside or replaced never shows another wallet's balance. A file that does not read back
- * exactly is deleted. */
-#define CACHE_FILE "wallet_balance_cache"
+ * app's private files directory (0600, never through a link, replaced whole), sealed with the environment's key, so no
+ * amount reaches the disk as plain text. It is written from a summary the node gave whose amounts the wallet shows without
+ * the owner's screen lock, or as the zero of a wallet that setup has just made, and read back only for the wallet it was
+ * written for: the sealed body names the wallet's key file by a hash of its bytes and the seal is bound to that name, so a
+ * wallet set aside or replaced never shows another wallet's balance. A file that does not open and read back exactly is
+ * deleted, and so is the plain text file of earlier builds. */
+#define CACHE_FILE "wallet_balance_sealed"
+#define CACHE_PLAIN_FILE "wallet_balance_cache"
 #define CACHE_TAG "z23-balance-cache-v1"
 #define CACHE_BODY_MAX 640u
 #define CACHE_PATH_MAX 512u
 #define CACHE_REFRESH_S 60 /* an unchanged balance is written again after this long, so its age stays honest */
 #define CACHE_FUTURE_S 120 /* a file dated further ahead than this was not written by this clock, and is deleted */
 #define KEY_FILE_MAX 65536u
+#define WALLET_ID_LEN 16u
+/* The file is SEALED_TAG, the nonce, then the body sealed with its tag. The seal is bound to SEALED_TAG and the wallet. */
+#define SEALED_TAG "z23-balance-sealed-v1\n"
+#define SEALED_TAG_LEN (sizeof(SEALED_TAG) - 1u)
+#define SEALED_HEAD (SEALED_TAG_LEN + WALLET_SEAL_IV)
+#define SEALED_MAX (SEALED_HEAD + CACHE_BODY_MAX - 1u + WALLET_SEAL_TAG)
+#define CACHE_AAD_LEN (SEALED_TAG_LEN + WALLET_ID_LEN)
 
-struct cache_job { bool go, drop; char path[CACHE_PATH_MAX], body[CACHE_BODY_MAX]; };
+struct cache_job {
+    bool go, drop;
+    char path[CACHE_PATH_MAX], wallet[WALLET_ID_LEN + 1], body[CACHE_BODY_MAX];
+    struct wallet_env env; /* the seal, as it was under the lock */
+};
+/* One writer of the file at a time, so two never share its temporary. */
+static pthread_mutex_t cache_write = PTHREAD_MUTEX_INITIALIZER;
 
 static void send_lines(struct wallet_screen *s, const struct data *d);
 static int64_t wall_s(void) { return st.env.wall_s ? st.env.wall_s(st.env.ctx) : (int64_t)time(NULL); }
@@ -202,7 +218,7 @@ static bool files_path(char *out, const char *name)
     return st.env.files_dir && st.env.files_dir[0] && snprintf(out, CACHE_PATH_MAX, "%s/%s", st.env.files_dir, name) < (int)CACHE_PATH_MAX;
 }
 /* 16 hex digits of the FNV-1a hash of the wallet's key file. It tells wallets apart; it is not a secret and not a check against an attacker. */
-static bool wallet_identity(char out[17])
+static bool wallet_identity(char out[WALLET_ID_LEN + 1])
 {
     char path[CACHE_PATH_MAX];
     unsigned char bytes[256];
@@ -218,8 +234,15 @@ static bool wallet_identity(char out[17])
     }
     (void)close(fd);
     if (n != 0 || total == 0 || total > KEY_FILE_MAX) return false;
-    snprintf(out, 17, "%016llx", (unsigned long long)hash);
+    snprintf(out, WALLET_ID_LEN + 1, "%016llx", (unsigned long long)hash);
     return true;
+}
+/* What the seal is bound to: the format and the wallet. */
+static size_t cache_aad(const char *wallet, uint8_t out[CACHE_AAD_LEN])
+{
+    memcpy(out, SEALED_TAG, SEALED_TAG_LEN);
+    memcpy(out + SEALED_TAG_LEN, wallet, WALLET_ID_LEN);
+    return CACHE_AAD_LEN;
 }
 static bool ends_in_zcl(const char *amount)
 {
@@ -232,7 +255,7 @@ static bool plain_line(const char *text)
     for (size_t i = 0; i < n; ++i) if ((unsigned char)text[i] < 0x20 || (unsigned char)text[i] >= 0x7f) return false;
     return n < WALLET_VIEW_LINE;
 }
-/* The file is: tag, wallet, time, balance, pending, public, each ended by a newline, and nothing after. */
+/* The body is: tag, wallet, time, balance, pending, public, each ended by a newline, and nothing after. */
 static bool cache_parse(char *body, const char *wallet, int64_t now_s, struct cache *out)
 {
     char *line[6], *end = NULL;
@@ -254,65 +277,107 @@ static bool cache_parse(char *body, const char *wallet, int64_t now_s, struct ca
     snprintf(out->public_line, sizeof(out->public_line), "%s", line[5]);
     return true;
 }
+/* Reads the sealed file and opens it for this wallet into body, as text. False for another format, version, length or wallet,
+ * for any changed byte, and when there is no key to open it with. */
+static bool cache_unseal(int fd, const char *wallet, char body[CACHE_BODY_MAX])
+{
+    uint8_t sealed[SEALED_MAX + 1], aad[CACHE_AAD_LEN];
+    ssize_t n = read(fd, sealed, sizeof(sealed));
+    size_t len = n > (ssize_t)(SEALED_HEAD + WALLET_SEAL_TAG) && n <= (ssize_t)SEALED_MAX ? (size_t)n - SEALED_HEAD : 0;
+    size_t aad_len = cache_aad(wallet, aad);
+    bool ok = len && !memcmp(sealed, SEALED_TAG, SEALED_TAG_LEN) && st.env.unseal &&
+              st.env.unseal(st.env.ctx, aad, aad_len, sealed + SEALED_TAG_LEN, sealed + SEALED_HEAD, len, (uint8_t *)body);
+    size_t plain = ok ? len - WALLET_SEAL_TAG : 0;
+    if (ok) body[plain] = '\0';
+    return ok && strlen(body) == plain;
+}
 static void cache_load(void)
 {
-    char path[CACHE_PATH_MAX], wallet[17], body[CACHE_BODY_MAX];
+    char path[CACHE_PATH_MAX], wallet[WALLET_ID_LEN + 1], body[CACHE_BODY_MAX];
     memset(&st.d.cache, 0, sizeof(st.d.cache));
+    if (files_path(path, CACHE_PLAIN_FILE)) (void)unlink(path);
     if (!files_path(path, CACHE_FILE)) return;
     int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) return;
-    ssize_t n = read(fd, body, sizeof(body) - 1);
+    bool ok = wallet_identity(wallet) && cache_unseal(fd, wallet, body) && cache_parse(body, wallet, wall_s(), &st.d.cache);
     (void)close(fd);
-    if (n > 0) body[n] = '\0';
-    bool ok = n > 0 && wallet_identity(wallet) && cache_parse(body, wallet, wall_s(), &st.d.cache);
     if (!ok) { memset(&st.d.cache, 0, sizeof(st.d.cache)); (void)unlink(path); }
     memory_cleanse(body, sizeof(body));
 }
+/* Under the lock: the write of these lines, dated at, for the wallet whose key file is there now. False when none can be kept. */
+static bool cache_body(struct cache_job *job, int64_t at, const char *balance, const char *pending, const char *public_line)
+{
+    if (!st.env.seal || !files_path(job->path, CACHE_FILE) || !wallet_identity(job->wallet)) return false;
+    int n = snprintf(job->body, sizeof(job->body), "%s\n%s\n%lld\n%s\n%s\n%s\n", CACHE_TAG, job->wallet, (long long)at, balance, pending, public_line);
+    if (n < 0 || n >= (int)sizeof(job->body)) return false;
+    job->env = st.env;
+    job->go = true;
+    return true;
+}
 /* Under the lock, after a summary reply: what to write, if the reply is a real balance that is new or old enough to date again.
- * An encrypted wallet shows its private amounts only while it is unlocked, so none is kept: the reply instead removes a file
- * that an earlier build wrote from an unlocked read. */
+ * Only what the wallet shows without the owner's screen lock is kept: an encrypted wallet that is unlocked may be showing amounts
+ * its lock hides, so that read changes nothing. A reply that hides the private amounts removes the file, so no kept amount is
+ * shown for a wallet that hides it now. */
 static void cache_prepare(struct cache_job *job)
 {
     const struct wallet_view *v = &st.d.view;
     struct cache *c = &st.d.cache;
-    char wallet[17];
     int64_t at = wall_s();
-    if (v->known && v->encrypted) {
+    if (v->known && !ends_in_zcl(v->balance)) {
         memset(c, 0, sizeof(*c));
         job->drop = files_path(job->path, CACHE_FILE);
         return;
     }
     bool same = c->valid && !strcmp(c->balance, v->balance) && !strcmp(c->pending, v->pending) && !strcmp(c->public_line, v->public_line);
-    if (!v->known || !ends_in_zcl(v->balance) || (same && at >= c->at && at - c->at < CACHE_REFRESH_S)) return;
-    if (!files_path(job->path, CACHE_FILE) || !wallet_identity(wallet)) return;
-    if (snprintf(job->body, sizeof(job->body), "%s\n%s\n%lld\n%s\n%s\n%s\n", CACHE_TAG, wallet, (long long)at, v->balance, v->pending, v->public_line) >= (int)sizeof(job->body)) return;
-    job->go = true;
+    if (!v->known || (v->encrypted && !v->locked) || (same && at >= c->at && at - c->at < CACHE_REFRESH_S)) return;
+    if (!cache_body(job, at, v->balance, v->pending, v->public_line)) return;
     c->valid = true;
     c->at = at;
     snprintf(c->balance, sizeof(c->balance), "%s", v->balance);
     snprintf(c->pending, sizeof(c->pending), "%s", v->pending);
     snprintf(c->public_line, sizeof(c->public_line), "%s", v->public_line);
 }
-/* Outside the lock: temporary file, flushed, then renamed over the old one. A failure leaves the old file and no temporary. */
+/* Temporary file (new, 0600, never through a link), flushed, then renamed over path. A failure leaves the old file and no temporary. */
+static void replace_file(const char *tmp, const char *path, const uint8_t *bytes, size_t len)
+{
+    (void)unlink(tmp);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    size_t put = 0;
+    bool ok = fd >= 0;
+    while (ok && put < len) {
+        ssize_t w = write(fd, bytes + put, len - put);
+        if (w > 0) put += (size_t)w;
+        else if (w == 0 || errno != EINTR) ok = false;
+    }
+    ok = ok && fsync(fd) == 0;
+    if (fd >= 0 && close(fd) != 0) ok = false;
+    if (!ok || rename(tmp, path) != 0) (void)unlink(tmp);
+}
+/* Outside the lock: seals the body and replaces the file with it, or removes the file. A seal that fails writes nothing. */
 static void cache_commit(struct cache_job *job)
 {
     char tmp[CACHE_PATH_MAX + 8];
-    if (job->drop) (void)unlink(job->path);
-    if (job->go && snprintf(tmp, sizeof(tmp), "%s.tmp", job->path) < (int)sizeof(tmp)) {
-        (void)unlink(tmp);
-        int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
-        size_t len = strlen(job->body), put = 0;
-        bool ok = fd >= 0;
-        while (ok && put < len) {
-            ssize_t w = write(fd, job->body + put, len - put);
-            if (w > 0) put += (size_t)w;
-            else if (w == 0 || errno != EINTR) ok = false;
-        }
-        ok = ok && fsync(fd) == 0;
-        if (fd >= 0 && close(fd) != 0) ok = false;
-        if (!ok || rename(tmp, job->path) != 0) (void)unlink(tmp);
+    uint8_t sealed[SEALED_MAX], aad[CACHE_AAD_LEN];
+    if (job->go || job->drop) {
+        size_t len = strlen(job->body), aad_len = cache_aad(job->wallet, aad);
+        pthread_mutex_lock(&cache_write);
+        if (job->drop) (void)unlink(job->path);
+        memcpy(sealed, SEALED_TAG, SEALED_TAG_LEN);
+        if (job->go && snprintf(tmp, sizeof(tmp), "%s.tmp", job->path) < (int)sizeof(tmp) &&
+            job->env.seal(job->env.ctx, aad, aad_len, (const uint8_t *)job->body, len, sealed + SEALED_TAG_LEN, sealed + SEALED_HEAD))
+            replace_file(tmp, job->path, sealed, SEALED_HEAD + len + WALLET_SEAL_TAG);
+        pthread_mutex_unlock(&cache_write);
+        memory_cleanse(sealed, sizeof(sealed));
     }
     memory_cleanse(job, sizeof(*job));
+}
+void wallet_screens_new_wallet(void)
+{
+    struct cache_job keep = {0};
+    pthread_mutex_lock(&st.lock);
+    if (st.ready) (void)cache_body(&keep, wall_s(), "0 ZCL", "", "");
+    pthread_mutex_unlock(&st.lock);
+    cache_commit(&keep);
 }
 /* Whole minutes since the kept balance was given; a clock that went back reads as 0. */
 static int64_t cache_minutes(const struct cache *c)
@@ -320,16 +385,21 @@ static int64_t cache_minutes(const struct cache *c)
     int64_t seconds = wall_s() - c->at;
     return seconds > 0 ? seconds / 60 : 0;
 }
+/* The kept balance, never as the live one: its own heading, and under the amount how old it is and whether the app is asking the
+ * node now (a reply is awaited, or the node runs and is asked again at every refresh). */
 static void cache_lines(struct wallet_screen *s, const struct data *d)
 {
-    char label[96];
+    char age[96];
     int64_t m = cache_minutes(&d->cache);
-    if (m < 1) snprintf(label, sizeof(label), "Last known balance, less than a minute ago");
-    else if (m < 120) snprintf(label, sizeof(label), "Last known balance, %lld min ago", (long long)m);
-    else if (m < 2880) snprintf(label, sizeof(label), "Last known balance, %lld h ago", (long long)(m / 60));
-    else snprintf(label, sizeof(label), "Last known balance, %lld days ago", (long long)(m / 1440));
-    line(s, label);
+    bool asking = !d->funds_loaded || (st.env.node_running && st.env.node_running(st.env.ctx));
+    const char *more = asking ? ", updating" : "";
+    if (m < 1) snprintf(age, sizeof(age), "As of less than a minute ago%s", more);
+    else if (m < 120) snprintf(age, sizeof(age), "As of %lld min ago%s", (long long)m, more);
+    else if (m < 2880) snprintf(age, sizeof(age), "As of %lld h ago%s", (long long)(m / 60), more);
+    else snprintf(age, sizeof(age), "As of %lld days ago%s", (long long)(m / 1440), more);
+    line(s, "Last known balance");
     (void)add(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE, d->cache.balance);
+    line(s, age);
     send_lines(s, d);
     if (d->cache.pending[0]) line(s, d->cache.pending);
     if (d->cache.public_line[0]) line(s, d->cache.public_line);

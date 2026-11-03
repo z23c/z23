@@ -329,6 +329,12 @@ test-devkey:
 	@grep -q 'android:name="android.permission.USE_BIOMETRIC"' AndroidManifest.xml || { echo "AndroidManifest.xml lacks USE_BIOMETRIC: BiometricPrompt.authenticate would throw SecurityException and every wallet key use would fail" >&2; exit 1; }
 	@grep -q 'android:allowAudioPlaybackCapture="false"' AndroidManifest.xml || { echo "AndroidManifest.xml must set android:allowAudioPlaybackCapture=false: otherwise another app can record what the Assistant says aloud" >&2; exit 1; }
 	@if $(MAKE) --no-print-directory check-probe DEVKEY_PROBE=ON 2>/dev/null; then echo "production manifest accepted DEVKEY_PROBE=ON" >&2; exit 1; fi
+	@sed -n '/^static jobject key_spec/,/^}/p' device_key_jni.c | grep -q 'setUserAuthenticationParameters", BUILDER_SIG("II"), AUTH_EVERY_USE, AUTH_TYPES' || { echo "the wallet key must ask for the screen lock at every use" >&2; exit 1; }
+	@spec="$$(sed -n '/^static jobject balance_spec/,/^}/p' device_key_jni.c)"; \
+	  printf '%s\n' "$$spec" | grep -q 'setUserAuthenticationRequired", BUILDER_SIG("Z"), JNI_FALSE' && \
+	  printf '%s\n' "$$spec" | grep -q 'setUnlockedDeviceRequired", BUILDER_SIG("Z"), JNI_TRUE' && \
+	  printf '%s\n' "$$spec" | grep -q 'NewStringUTF(env, BALANCE_ALIAS)' || { echo "the balance key must ask for no screen lock and be refused while the phone is locked" >&2; exit 1; }
+	@grep -q '^#define BALANCE_ALIAS "z23.wallet.balance-key.v1"$$' device_key_jni.c && grep -q '^#define ALIAS "z23.wallet.device-key.v2"$$' device_key_jni.c || { echo "the balance key must keep an alias apart from the wallet key" >&2; exit 1; }
 	$(HOST_CC) $(HOST_WARNINGS) -I. tests/secure_window_test.c secure_window.c -o '$(BUILD_DIR)/secure-window-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/secure-window-test.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/secure-window-test' "$$scratch"

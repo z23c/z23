@@ -52,6 +52,9 @@
 #define WALLET_REFRESH_MS 10000u
 /* A reading older than this is no longer shown as current. */
 #define WALLET_STALE_MS 30000u
+/* The nonce and the tag of the AES-256-GCM seal that keeps the last balance (wallet_env.seal). */
+#define WALLET_SEAL_IV 12u
+#define WALLET_SEAL_TAG 16u
 
 enum wallet_page { WALLET_PAGE_NONE, WALLET_PAGE_FUNDS, WALLET_PAGE_RECEIVE, WALLET_PAGE_HISTORY, WALLET_PAGE_DETAIL };
 
@@ -122,7 +125,7 @@ struct wallet_env {
     /* Puts the address on the clipboard as a sensitive clip that clears itself after a minute. Optional (NULL: copying is
      * refused). Called on the UI thread with the address as the node gave it, without grouping. */
     bool (*copy_address)(void *ctx, const char *address);
-    /* The app's private files directory, where the last balance the node gave is kept for the next time Funds opens
+    /* The app's private files directory, where the last balance the node gave is kept, sealed, for the next time Funds opens
      * before the node answers. Optional (NULL: nothing is kept). */
     const char *files_dir;
     /* Seconds since the Unix epoch. Optional (NULL: the system clock). Dates the kept balance. */
@@ -141,11 +144,24 @@ struct wallet_env {
     bool (*reveal_start)(void *ctx);
     enum wallet_reveal (*reveal_state)(void *ctx);
     void (*reveal_end)(void *ctx);
+    /* The key that keeps the last balance in files_dir: AES-256-GCM in AndroidKeyStore under a key of its own, apart from the
+     * wallet key, that asks for no screen lock and that Keystore refuses while the phone is locked. seal encrypts len bytes
+     * of plain, bound to aad, into a fresh iv and len + WALLET_SEAL_TAG bytes of out; unseal checks len bytes of sealed
+     * against iv and aad and decrypts them into len - WALLET_SEAL_TAG bytes of plain. Each is false on any failure, and
+     * unseal for any changed byte. Optional (NULL: no balance is kept). Called on the UI thread and on worker threads. */
+    bool (*seal)(void *ctx, const uint8_t *aad, size_t aad_len, const uint8_t *plain, size_t len,
+                 uint8_t iv[WALLET_SEAL_IV], uint8_t *out);
+    bool (*unseal)(void *ctx, const uint8_t *aad, size_t aad_len, const uint8_t iv[WALLET_SEAL_IV],
+                   const uint8_t *sealed, size_t len, uint8_t *plain);
 };
 
 bool wallet_screens_init(const struct wallet_env *env);
 /* Leaves any wallet screen and wipes everything. */
 void wallet_screens_shutdown(void);
+/* Setup has just finished a create, whose wallet starts at the node's chain tip and has shown no address yet, so it holds
+ * 0 ZCL. Keeps that as the last balance, so Funds shows 0 ZCL at once while the node restarts, until the node answers. Not
+ * for a restore, whose balance is unknown until the node has read the chain. Blocks for the seal; call from a worker. */
+void wallet_screens_new_wallet(void);
 
 /* Enters a page (Funds from Home) and starts its commands. False, with only a plain notice to show, when
  * the screen protection is not in force. */

@@ -322,6 +322,13 @@ bool wsu_busy(struct wsu *w)
     pthread_mutex_unlock(&w->lock);
     return busy;
 }
+bool wsu_created(struct wsu *w)
+{
+    pthread_mutex_lock(&w->lock);
+    bool created = w->step == WSU_DONE && w->confirmed && !w->restored;
+    pthread_mutex_unlock(&w->lock);
+    return created;
+}
 
 /* ---- the shared parts of both jobs ---- */
 

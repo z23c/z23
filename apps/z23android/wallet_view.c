@@ -322,6 +322,7 @@ static void render_known(const struct summary *s, struct wallet_view *out)
     out->scanning = s->blocks_behind > 0 || s->scanned < s->header;
     out->current = s->current;
     out->encrypted = s->encrypted;
+    out->locked = s->locked;
     out->can_reveal = s->encrypted && s->locked && s->hidden;
     render_sync(s, out);
     render_send(s, out);

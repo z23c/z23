@@ -47,8 +47,10 @@ struct wallet_view {
     bool scanning;
     /* The node reports that it is at the tip of the chain. A list read from a node that is not current is not complete. */
     bool current;
-    /* The wallet is encrypted. Its private amounts are then known only while it is unlocked. */
+    /* The wallet is encrypted. Its private amounts are then known while it is locked only when it holds a viewing key. */
     bool encrypted;
+    /* The wallet is locked: whatever this reply shows is shown without the owner's screen lock. */
+    bool locked;
     /* The wallet is encrypted, locked, and the node hid its private amounts: unlocking would show them. */
     bool can_reveal;
 };

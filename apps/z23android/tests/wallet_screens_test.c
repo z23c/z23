@@ -36,14 +36,15 @@ _Static_assert(sizeof(A1) == 79 && sizeof(A2) == 79 && sizeof(PUBLIC_ADDR) == 36
 #define TX_D TXID("d")
 #define CURSOR_1 "3000000:" TXID("e")
 
-#define SUMMARY_SEND_E(enc, spendable_zat, spendable, pending_zat, pending, public_zat, public, allowed, why)           \
+#define SUMMARY_SEND_EL(enc, locked, spendable_zat, spendable, pending_zat, pending, public_zat, public, allowed, why)  \
     "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"spendable_zat\":" spendable_zat ","  \
     "\"spendable\":\"" spendable "\",\"pending_zat\":" pending_zat ",\"pending\":\"" pending "\","      \
     "\"pending_notes\":2,\"pending_min_confirmations_needed\":7,\"sending_zat\":0,\"sending\":\"0.00000000\"," \
     "\"public_zat\":" public_zat ",\"public\":\"" public "\",\"immature_zat\":0,"                       \
     "\"immature\":\"0.00000000\",\"tip_height\":3000000,\"header_height\":3000000,"                     \
-    "\"scanned_through_height\":3000000,\"blocks_behind\":0,\"current\":true,\"locked\":false,"         \
+    "\"scanned_through_height\":3000000,\"blocks_behind\":0,\"current\":true,\"locked\":" locked ","    \
     "\"encrypted\":" enc ",\"shielded_keys\":1,\"send_allowed\":" allowed ",\"send_blocked_reason\":\"" why "\"}}"
+#define SUMMARY_SEND_E(enc, ...) SUMMARY_SEND_EL(enc, "false", __VA_ARGS__)
 #define SUMMARY_SEND(...) SUMMARY_SEND_E("true", __VA_ARGS__)
 #define SUMMARY(spendable_zat, spendable, pending_zat, pending, public_zat, public) \
     SUMMARY_SEND(spendable_zat, spendable, pending_zat, pending, public_zat, public, "true", "")
@@ -99,6 +100,10 @@ _Static_assert(sizeof(A1) == 79 && sizeof(A2) == 79 && sizeof(PUBLIC_ADDR) == 36
 /* The same wallet without encryption: it never locks, so its amounts are always shown. */
 #define GOOD_SUMMARY_PLAIN \
     SUMMARY_SEND_E("false", "123456789", "1.23456789", "50000000", "0.50000000", "10000000", "0.10000000", "true", "")
+/* The same wallet encrypted and locked with its viewing key loaded, as the app's wallets are: its amounts show without the
+ * screen lock, so they are kept. */
+#define GOOD_SUMMARY_LOCKED \
+    SUMMARY_SEND_EL("true", "true", "123456789", "1.23456789", "50000000", "0.50000000", "10000000", "0.10000000", "true", "")
 /* A locked wallet whose node hides the private amounts. */
 #define LOCKED_SUMMARY SUMMARY_STATE_L("keys_unavailable", "true", PRIVATE_HIDDEN, "10000000", "0.10000000")
 #define UNKNOWN_COMMAND_ERROR "{\"ok\":false,\"error\":{\"code\":\"UNKNOWN_COMMAND\"}}"
@@ -245,15 +250,56 @@ static bool fake_copy_address(void *ctx, const char *address)
     snprintf(fake.copied, sizeof(fake.copied), "%s", address);
     return fake.copy_ok;
 }
+/* The balance key in memory: XOR with a stream drawn from the nonce, and a tag over the bound data, the nonce and the sealed bytes,
+ * so a changed byte or other bound data does not open. refuse stands for a key that is gone or a phone that is locked. */
+static struct { bool refuse; int seals, unseals; uint8_t counter; } keystore;
+static bool with_seal = true;
+static uint64_t mix(uint64_t hash, const uint8_t *bytes, size_t len)
+{
+    for (size_t i = 0; i < len; ++i) { hash ^= bytes[i]; hash *= 1099511628211ull; }
+    return hash;
+}
+static void fake_tag(const uint8_t *aad, size_t aad_len, const uint8_t iv[WALLET_SEAL_IV], const uint8_t *sealed, size_t len,
+                     uint8_t tag[WALLET_SEAL_TAG])
+{
+    uint64_t hash = mix(mix(mix(1469598103934665603ull, aad, aad_len), iv, WALLET_SEAL_IV), sealed, len);
+    for (unsigned i = 0; i < WALLET_SEAL_TAG; ++i) { hash = hash * 6364136223846793005ull + 1442695040888963407ull; tag[i] = (uint8_t)(hash >> 56); }
+}
+static uint8_t stream(const uint8_t iv[WALLET_SEAL_IV], size_t i) { return (uint8_t)(0x5a ^ iv[i % WALLET_SEAL_IV] ^ (i * 31u)); }
+static bool fake_seal(void *ctx, const uint8_t *aad, size_t aad_len, const uint8_t *plain, size_t len, uint8_t iv[WALLET_SEAL_IV],
+                      uint8_t *out)
+{
+    (void)ctx;
+    ++keystore.seals;
+    if (keystore.refuse) return false;
+    ++keystore.counter;
+    for (unsigned i = 0; i < WALLET_SEAL_IV; ++i) iv[i] = (uint8_t)(keystore.counter * 13u + i);
+    for (size_t i = 0; i < len; ++i) out[i] = plain[i] ^ stream(iv, i);
+    fake_tag(aad, aad_len, iv, out, len, out + len);
+    return true;
+}
+static bool fake_unseal(void *ctx, const uint8_t *aad, size_t aad_len, const uint8_t iv[WALLET_SEAL_IV], const uint8_t *sealed,
+                        size_t len, uint8_t *plain)
+{
+    uint8_t tag[WALLET_SEAL_TAG];
+    (void)ctx;
+    ++keystore.unseals;
+    if (keystore.refuse || len < WALLET_SEAL_TAG) return false;
+    fake_tag(aad, aad_len, iv, sealed, len - WALLET_SEAL_TAG, tag);
+    if (memcmp(tag, sealed + len - WALLET_SEAL_TAG, WALLET_SEAL_TAG)) return false;
+    for (size_t i = 0; i + WALLET_SEAL_TAG < len; ++i) plain[i] = sealed[i] ^ stream(iv, i);
+    return true;
+}
 
 static void start(bool async)
 {
     struct wallet_env env = {NULL, fake_secure, fake_run, fake_changed, fake_now, async, fake_refusal, fake_node_running, fake_copy_address,
                              cache_dir[0] ? cache_dir : NULL, fake_wall, fake_progress, fake_dismiss,
                              with_reveal ? fake_reveal_start : NULL, with_reveal ? fake_reveal_state : NULL,
-                             with_reveal ? fake_reveal_end : NULL};
+                             with_reveal ? fake_reveal_end : NULL, with_seal ? fake_seal : NULL, with_seal ? fake_unseal : NULL};
     wallet_screens_shutdown();
     memset(&fake, 0, sizeof(fake));
+    memset(&keystore, 0, sizeof(keystore));
     pthread_mutex_init(&fake.lock, NULL);
     pthread_cond_init(&fake.cond, NULL);
     fake.secure_ok = true;
@@ -261,7 +307,7 @@ static void start(bool async)
     fake.now = 1000000;
     fake.node_up = true;
     fake.copy_ok = true;
-    fake.summary = cache_dir[0] ? GOOD_SUMMARY_PLAIN : GOOD_SUMMARY;   /* a balance is kept only for a wallet that never locks */
+    fake.summary = cache_dir[0] ? GOOD_SUMMARY_LOCKED : GOOD_SUMMARY;   /* a balance is kept from what shows without the screen lock */
     fake.reveal_after_start = WALLET_REVEAL_ASKING;
     fake.latest = "{\"ok\":true,\"data\":{\"address\":\"" A1 "\"}}";
     fake.receive = "{\"ok\":true,\"data\":{\"address\":\"" A2 "\"}}";
@@ -600,13 +646,35 @@ static void test_send_line_before_answer(void)
 
 /* ---- last known balance ---- */
 
-static void put_file(const char *name, const char *text)
+#define CACHE "wallet_balance_sealed"
+#define PLAIN_CACHE "wallet_balance_cache"
+#define SEALED_TAG "z23-balance-sealed-v1\n"
+#define SEALED_TAG_LEN (sizeof(SEALED_TAG) - 1u)
+#define SEALED_HEAD (SEALED_TAG_LEN + WALLET_SEAL_IV)
+
+static void put_bytes(const char *name, const void *bytes, size_t len)
 {
     char path[PATH_MAX + 32];
     snprintf(path, sizeof(path), "%s/%s", cache_dir, name);
-    FILE *f = fopen(path, "w");
-    CHECK(f && fputs(text, f) >= 0);
+    FILE *f = fopen(path, "wb");
+    CHECK(f && fwrite(bytes, 1, len, f) == len);
     if (f) fclose(f);
+}
+static void put_file(const char *name, const char *text) { put_bytes(name, text, strlen(text)); }
+static size_t get_bytes(const char *name, uint8_t *out, size_t cap)
+{
+    char path[PATH_MAX + 32];
+    snprintf(path, sizeof(path), "%s/%s", cache_dir, name);
+    FILE *f = fopen(path, "rb");
+    size_t n = f ? fread(out, 1, cap, f) : 0;
+    if (f) fclose(f);
+    return n;
+}
+static bool bytes_hold(const uint8_t *bytes, size_t n, const char *text)
+{
+    size_t len = strlen(text);
+    for (size_t i = 0; i + len <= n; ++i) if (!memcmp(bytes + i, text, len)) return true;
+    return false;
 }
 static bool file_exists(const char *name)
 {
@@ -623,17 +691,18 @@ static bool item_is(const char *text)
 }
 static void remove_dir(void)
 {
-    static const char *const names[] = {"wallet_key.blob", "wallet_balance_cache", "wallet_balance_cache.tmp", "elsewhere"};
+    static const char *const names[] = {"wallet_key.blob", CACHE, CACHE ".tmp", PLAIN_CACHE, "elsewhere"};
     char path[PATH_MAX + 32];
     for (int attempt = 0; attempt < 400; ++attempt) {      /* a write the last reply started may still be finishing */
-        for (size_t i = 0; i < 4; ++i) { snprintf(path, sizeof(path), "%s/%s", cache_dir, names[i]); (void)unlink(path); }
+        for (size_t i = 0; i < 5; ++i) { snprintf(path, sizeof(path), "%s/%s", cache_dir, names[i]); (void)unlink(path); }
         if (rmdir(cache_dir) == 0) { cache_dir[0] = '\0'; return; }
         usleep(5000);
     }
     CHECK(false);
 }
 static bool live_shown(void) { return find_text(snap(), "Up to date") >= 0; }
-static bool cache_present(void) { return file_exists("wallet_balance_cache"); }
+static bool node_waited(void) { return find_text(snap(), "Waiting for your node") >= 0; }
+static bool cache_present(void) { return file_exists(CACHE); }
 /* A fresh files directory under TMPDIR, which the Makefile points at the build directory so no test writes to /tmp. */
 static void make_dir(void)
 {
@@ -642,7 +711,8 @@ static void make_dir(void)
     snprintf(cache_dir, sizeof(cache_dir), "%s/z23-balance-XXXXXX", base && base[0] ? base : ".");
     CHECK(mkdtemp(cache_dir) != NULL);
 }
-/* A wallet directory holding key file "one", whose first live summary leaves the balance file. */
+/* A wallet directory holding key file "one", whose first live summary, of an encrypted wallet that is locked and shows its
+ * amounts, leaves the sealed balance file. */
 static void wallet_with_balance(void)
 {
     make_dir();
@@ -666,32 +736,52 @@ static void finish_waiting(void)
     wait_for(live_shown);
     wallet_screens_close();
 }
+/* The kept balance as Funds draws it: its heading, the amount and under it the age line. */
+static bool cached_shown(const struct wallet_screen *s, const char *amount, const char *age)
+{
+    long at = find(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE);
+    return at >= 1 && (size_t)at + 1 < s->count && !strcmp(text_at(s, at), amount) &&
+           !strcmp(text_at(s, at - 1), "Last known balance") && !strcmp(text_at(s, at + 1), age);
+}
 
 static void test_cache_roundtrip(void)
 {
     wallet_with_balance();
-    char path[PATH_MAX + 32], body[640] = "";
+    uint8_t bytes[1024];
+    char path[PATH_MAX + 32];
     struct stat info;
-    snprintf(path, sizeof(path), "%s/wallet_balance_cache", cache_dir);
-    CHECK(stat(path, &info) == 0 && (info.st_mode & 0777) == 0600 && !file_exists("wallet_balance_cache.tmp"));
-    FILE *f = fopen(path, "r");
-    CHECK(f && fread(body, 1, sizeof(body) - 1, f) > 0);
-    if (f) fclose(f);
-    CHECK(!strncmp(body, "z23-balance-cache-v1\n", 21) && strstr(body, "\n1700000000\n1.23456789 ZCL\n") && !strstr(body, "zs1"));
+    snprintf(path, sizeof(path), "%s/" CACHE, cache_dir);
+    CHECK(stat(path, &info) == 0 && (info.st_mode & 0777) == 0600 && !file_exists(CACHE ".tmp") && !file_exists(PLAIN_CACHE));
+    size_t n = get_bytes(CACHE, bytes, sizeof(bytes));
+    size_t body = strlen("z23-balance-cache-v1\n") + 17 + strlen("1700000000\n1.23456789 ZCL\n") +
+                  strlen("0.5 ZCL pending in 2 payments. The next arrives in 7 confirmations.\n") +
+                  strlen("0.1 ZCL public: visible to everyone, not part of the spendable amount\n");
+    CHECK(n == SEALED_HEAD + body + WALLET_SEAL_TAG && !memcmp(bytes, SEALED_TAG, SEALED_TAG_LEN) && keystore.seals == 1);
+    CHECK(!bytes_hold(bytes, n, "ZCL") && !bytes_hold(bytes, n, "1.23456789") && !bytes_hold(bytes, n, "1700000000"));
     wall += 300;                                                   /* five minutes later, before the node answers */
     struct wallet_screen *s = open_waiting();
-    CHECK(find_text(s, "Loading") < 0 && !item_is("Balance"));
-    long label = find_text(s, "Last known balance, 5 min ago"), amount = find(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE);
-    CHECK(label >= 0 && amount == label + 1 && !strcmp(text_at(s, amount), "1.23456789 ZCL"));
+    CHECK(find_text(s, "Loading") < 0 && !item_is("Balance") && keystore.unseals == 1);
+    CHECK(cached_shown(s, "1.23456789 ZCL", "As of 5 min ago, updating"));
+    long amount = find(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE);
     CHECK(find_text(s, "0.5 ZCL pending") > amount && find_text(s, "0.1 ZCL public") > amount);
     CHECK(find_text(s, "Up to date") < 0 && find(s, WALLET_ITEM_BUTTON, WALLET_ACT_SEND) >= 0);
-    wall += 600;                                                   /* the label follows the clock */
+    wall += 600;                                                   /* the age line follows the clock */
     wallet_screens_tick();
-    CHECK(has("Last known balance, 15 min ago"));
+    CHECK(cached_shown(snap(), "1.23456789 ZCL", "As of 15 min ago, updating"));
     release_block();                                               /* the node answers: live data replaces it */
     wait_for(live_shown);
-    CHECK(!has("Last known") && item_is("Balance") && has("Up to date at block 3000000"));
+    CHECK(!has("Last known") && !has("As of") && item_is("Balance") && has("Up to date at block 3000000"));
     wallet_screens_close();
+    remove_dir();
+
+    make_dir();                                                    /* a wallet without encryption is kept the same way */
+    put_file("wallet_key.blob", "key file one");
+    start(false);
+    fake.summary = GOOD_SUMMARY_PLAIN;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS) && has("1.23456789 ZCL"));
+    wallet_screens_close();
+    n = get_bytes(CACHE, bytes, sizeof(bytes));
+    CHECK(n > SEALED_HEAD && !memcmp(bytes, SEALED_TAG, SEALED_TAG_LEN) && !bytes_hold(bytes, n, "ZCL"));
     remove_dir();
 }
 
@@ -701,7 +791,7 @@ static void test_cache_other_wallet(void)
     put_file("wallet_key.blob", "key file two");                  /* the first wallet was set aside and another made */
     struct wallet_screen *s = open_waiting();
     CHECK(find_text(s, "Last known") < 0 && find_text(s, "1.23456789") < 0 && find_text(s, "Loading") >= 0);
-    CHECK(!file_exists("wallet_balance_cache"));                    /* the other wallet's balance is deleted, not kept */
+    CHECK(!file_exists(CACHE));                                     /* the other wallet's balance is deleted, not kept */
     finish_waiting();
     wait_for(cache_present);                                        /* the live summary starts the new wallet's own */
     remove_dir();
@@ -711,53 +801,98 @@ static void test_cache_other_wallet(void)
     snprintf(path, sizeof(path), "%s/wallet_key.blob", cache_dir);
     CHECK(unlink(path) == 0);                                       /* no key file: no wallet to show a balance for */
     s = open_waiting();
-    CHECK(find_text(s, "Last known") < 0 && !file_exists("wallet_balance_cache"));
+    CHECK(find_text(s, "Last known") < 0 && !file_exists(CACHE));
     finish_waiting();
     remove_dir();
 }
 
+/* 16 hex digits of the FNV-1a hash of a key file, as the screens name a wallet. */
+static void identity_of(const char *key_file, char out[17])
+{
+    uint64_t hash = 1469598103934665603ull;
+    for (const char *p = key_file; *p; ++p) { hash ^= (unsigned char)*p; hash *= 1099511628211ull; }
+    snprintf(out, 17, "%016llx", (unsigned long long)hash);
+}
+/* A file sealed for the wallet of key file "one" whose body is text, as a writer that is not the screens could leave it. */
+static void put_sealed(const char *text)
+{
+    uint8_t aad[64], out[1024];
+    char wallet[17];
+    identity_of("key file one", wallet);
+    memcpy(aad, SEALED_TAG, SEALED_TAG_LEN);
+    memcpy(aad + SEALED_TAG_LEN, wallet, 16);
+    memcpy(out, SEALED_TAG, SEALED_TAG_LEN);
+    size_t len = strlen(text);
+    CHECK(fake_seal(NULL, aad, SEALED_TAG_LEN + 16, (const uint8_t *)text, len, out + SEALED_TAG_LEN, out + SEALED_HEAD));
+    put_bytes(CACHE, out, SEALED_HEAD + len + WALLET_SEAL_TAG);
+}
+
+/* Every file that is not the sealed balance of this wallet, exactly, is deleted and shows nothing. */
 static void test_cache_not_trusted(void)
 {
-    static const char *const bad[] = {
-        "garbage\n", "",
-        "z23-balance-cache-v1\nffffffffffffffff\n1700000000\n9 ZCL\n\n\n",     /* another wallet's name */
-    };
-    for (size_t i = 0; i < 3; ++i) {
+    static const char *const bad[] = {"garbage\n", "", SEALED_TAG, "z23-balance-sealed-v2\n" "0123456789ab" "z23-balance-cache-v1\n"};
+    for (size_t i = 0; i < 8; ++i) {
         wallet_with_balance();
-        put_file("wallet_balance_cache", bad[i]);
+        uint8_t bytes[1024];
+        size_t n = get_bytes(CACHE, bytes, sizeof(bytes));
+        if (i < 4) put_file(CACHE, bad[i]);
+        else if (i == 4) { bytes[SEALED_HEAD + 3] ^= 1; put_bytes(CACHE, bytes, n); }        /* a changed byte */
+        else if (i == 5) { bytes[SEALED_TAG_LEN - 2] = '9'; put_bytes(CACHE, bytes, n); }    /* a version this build does not know */
+        else if (i == 6) put_bytes(CACHE, bytes, n - 1);                                     /* cut short */
+        else put_sealed("z23-balance-cache-v1\nffffffffffffffff\n1700000000\n42 ZCL\n\n\n");   /* names another wallet inside */
         struct wallet_screen *s = open_waiting();
-        CHECK(find_text(s, "Last known") < 0 && find_text(s, "Loading") >= 0 && !file_exists("wallet_balance_cache"));
+        CHECK(find_text(s, "Last known") < 0 && find_text(s, "ZCL") < 0 && find_text(s, "Loading") >= 0 && !file_exists(CACHE));
         finish_waiting();
         remove_dir();
     }
+    wallet_with_balance();                                          /* the key is gone or the phone is locked: nothing opens */
+    start(true);
+    keystore.refuse = true;
+    set_block();
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS) && find_text(snap(), "Last known") < 0 && !file_exists(CACHE));
+    finish_waiting();
+    CHECK(!file_exists(CACHE) && !file_exists(CACHE ".tmp"));       /* a seal that fails writes nothing */
+    remove_dir();
+
+    wallet_with_balance();                                          /* the plain text file of an earlier build is removed */
+    put_file(PLAIN_CACHE, "z23-balance-cache-v1\nffffffffffffffff\n1700000000\n42 ZCL\n\n\n");
+    struct wallet_screen *s = open_waiting();
+    CHECK(!file_exists(PLAIN_CACHE) && find_text(s, "42 ZCL") < 0 && cached_shown(s, "1.23456789 ZCL", "As of less than a minute ago, updating"));
+    finish_waiting();
+    remove_dir();
+
     wallet_with_balance();                                          /* a link in the file's place is never followed */
     char path[PATH_MAX + 32];
-    snprintf(path, sizeof(path), "%s/wallet_balance_cache", cache_dir);
+    snprintf(path, sizeof(path), "%s/" CACHE, cache_dir);
     char kept[PATH_MAX + 32];
     snprintf(kept, sizeof(kept), "%s/elsewhere", cache_dir);
     CHECK(rename(path, kept) == 0 && symlink(kept, path) == 0);
-    struct wallet_screen *s = open_waiting();
+    s = open_waiting();
     CHECK(find_text(s, "Last known") < 0);
     finish_waiting();
     (void)unlink(kept);
     remove_dir();
 }
 
-/* Only a real summary is kept: an unreadable reply, a stopped node and a locked wallet leave nothing. */
+/* Only a real summary is kept: an unreadable reply, a stopped node, a locked wallet that hides its amounts, a wallet unlocked for
+ * the owner, and an environment without the key leave nothing. */
 static void test_cache_only_real_summaries(void)
 {
     static const char *const replies[] = {NODE_UNAVAILABLE_ERROR, "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\"}}",
-                                          SUMMARY_STATE("keys_unavailable", PRIVATE_HIDDEN, "10000000", "0.10000000")};
-    for (size_t i = 0; i < 3; ++i) {
+                                          SUMMARY_STATE("keys_unavailable", PRIVATE_HIDDEN, "10000000", "0.10000000"),
+                                          LOCKED_SUMMARY, GOOD_SUMMARY, GOOD_SUMMARY_LOCKED};
+    for (size_t i = 0; i < 6; ++i) {
         make_dir();
         put_file("wallet_key.blob", "key file one");
+        with_seal = i < 5;
         start(false);
         fake.summary = replies[i];
         CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
-        CHECK(!file_exists("wallet_balance_cache"));
+        CHECK(!file_exists(CACHE) && keystore.seals == 0);
         wallet_screens_close();
         remove_dir();
     }
+    with_seal = true;
 }
 
 /* A balance file dated ahead of this clock was not written by it: nothing is shown and the file is deleted. A small lead is clock slack. */
@@ -769,10 +904,10 @@ static void test_cache_from_the_future(void)
     start(false);
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS) && has("1.23456789 ZCL"));
     wallet_screens_close();
-    CHECK(file_exists("wallet_balance_cache"));
+    CHECK(file_exists(CACHE));
     wall = 1700000000;
     struct wallet_screen *s = open_waiting();
-    CHECK(find_text(s, "Last known") < 0 && find_text(s, "Loading") >= 0 && !file_exists("wallet_balance_cache"));
+    CHECK(find_text(s, "Last known") < 0 && find_text(s, "Loading") >= 0 && !file_exists(CACHE));
     finish_waiting();
     remove_dir();
 
@@ -784,12 +919,13 @@ static void test_cache_from_the_future(void)
     wallet_screens_close();
     wall = 1700000000;
     s = open_waiting();
-    CHECK(find_text(s, "Last known balance, less than a minute ago") >= 0);
+    CHECK(cached_shown(s, "1.23456789 ZCL", "As of less than a minute ago, updating"));
     finish_waiting();
     remove_dir();
 }
 
-/* A node that stops answering after it did answer shows the last balance with its age, beside the notice that it is waiting. */
+/* A node that stops answering after it did answer shows the last balance with its age, beside the notice that it is waiting. Once
+ * its process has stopped, the age line no longer says it is updating. */
 static void test_cache_silent_node(void)
 {
     wallet_with_balance();
@@ -797,8 +933,64 @@ static void test_cache_silent_node(void)
     start(false);
     fake.summary = NODE_UNAVAILABLE_ERROR;
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
-    CHECK(has("Last known balance, 2 min ago") && has("Waiting for your node") && item_is("1.23456789 ZCL"));
+    CHECK(cached_shown(snap(), "1.23456789 ZCL", "As of 2 min ago, updating") && has("Waiting for your node"));
     wallet_screens_close();
+    start(false);
+    fake.summary = NODE_UNAVAILABLE_ERROR;
+    fake.node_up = false;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    CHECK(cached_shown(snap(), "1.23456789 ZCL", "As of 2 min ago") && has("Node stopped. Start it to see your funds."));
+    wallet_screens_close();
+    remove_dir();
+}
+
+/* Setup has just made a wallet: Funds shows 0 ZCL at once while the node restarts, never as the live balance, until the node
+ * answers. Without the call, as after a restore, Funds waits for the node. */
+static void test_new_wallet_zero(void)
+{
+    make_dir();
+    put_file("wallet_key.blob", "key file one");
+    wall = 1700000000;
+    struct wallet_screen *s = open_waiting();                       /* no call: nothing is known before the node answers */
+    CHECK(find_text(s, "Loading") >= 0 && find(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE) < 0);
+    finish_waiting();
+    remove_dir();
+
+    make_dir();
+    put_file("wallet_key.blob", "key file one");
+    start(true);
+    wallet_screens_new_wallet();
+    uint8_t bytes[1024];
+    size_t n = get_bytes(CACHE, bytes, sizeof(bytes));
+    CHECK(n > SEALED_HEAD && !memcmp(bytes, SEALED_TAG, SEALED_TAG_LEN) && !bytes_hold(bytes, n, "ZCL") && keystore.seals == 1);
+    wall += 70;                                                     /* the owner opens Funds while the node restarts */
+    set_block();
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    s = snap();
+    CHECK(cached_shown(s, "0 ZCL", "As of 1 min ago, updating") && find_text(s, "Loading") < 0 && !item_is("Balance"));
+    CHECK(find_text(s, "Up to date") < 0 && find_text(s, "Updating your wallet") < 0);
+    fake.summary = NODE_UNAVAILABLE_ERROR;                          /* the node is still starting */
+    release_block();
+    wait_for(node_waited);
+    CHECK(cached_shown(snap(), "0 ZCL", "As of 1 min ago, updating"));
+    fake.summary = GOOD_SUMMARY_LOCKED;                             /* it answers: the live summary replaces the kept zero */
+    fake.now += WALLET_REFRESH_MS;
+    wallet_screens_tick();
+    wait_for(live_shown);
+    CHECK(!has("Last known") && !has("As of") && item_is("Balance") && item_is("1.23456789 ZCL"));
+    wallet_screens_close();
+    remove_dir();
+
+    make_dir();                                                     /* no key file, or no seal: nothing is kept */
+    start(false);
+    wallet_screens_new_wallet();
+    CHECK(!file_exists(CACHE));
+    put_file("wallet_key.blob", "key file one");
+    with_seal = false;
+    start(false);
+    wallet_screens_new_wallet();
+    CHECK(!file_exists(CACHE));
+    with_seal = true;
     remove_dir();
 }
 
@@ -991,23 +1183,23 @@ static void test_reveal_across_pages(void)
     wallet_screens_close();
 }
 
-/* A private amount read from an unlocked wallet never reaches the balance file, and a file an earlier build kept from
- * such a read is removed. A wallet that never locks keeps its balance as before. */
+/* A private amount read from a wallet unlocked for the owner never reaches the balance file, and a reply that hides the private
+ * amounts removes a kept one, so no kept amount is shown for a wallet that hides it now. */
 static void test_reveal_amount_not_kept(void)
 {
-    wallet_with_balance();                                            /* a wallet that never locks keeps its balance */
-    CHECK(file_exists("wallet_balance_cache"));
-    start(false);                                                     /* the same files, now an encrypted wallet that is locked */
+    wallet_with_balance();                                            /* kept from a locked read that showed the amounts */
+    CHECK(file_exists(CACHE));
+    start(false);                                                     /* the same wallet, now locked with its amounts hidden */
     fake.summary = LOCKED_SUMMARY;
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
-    CHECK(!file_exists("wallet_balance_cache"));                      /* a file an earlier build kept is removed */
+    CHECK(!file_exists(CACHE));                                       /* the kept balance is removed */
     tap(WALLET_ACT_SHOW_PRIVATE, 0, WALLET_STAY);
     fake.summary = GOOD_SUMMARY;                                      /* encrypted, unlocked, 1.23456789 ZCL */
     fake.reveal = WALLET_REVEAL_OPEN;
     wallet_screens_refresh_send();
     CHECK(has("1.23456789 ZCL"));
     wallet_screens_close();
-    CHECK(!file_exists("wallet_balance_cache") && !file_exists("wallet_balance_cache.tmp"));
+    CHECK(!file_exists(CACHE) && !file_exists(CACHE ".tmp") && keystore.seals == 0);
     remove_dir();
 }
 
@@ -1992,6 +2184,7 @@ int main(int argc, char **argv)
     test_cache_from_the_future();
     test_cache_only_real_summaries();
     test_cache_silent_node();
+    test_new_wallet_zero();
     test_make_private_offer();
     test_make_private_hidden();
     test_reveal_offer();

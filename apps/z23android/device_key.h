@@ -176,6 +176,18 @@ void zapp_devkey_jni_ops(struct zapp_devkey_ops *ops, struct zapp_devkey_jni *st
 /* Ends a pending prompt with DECLINED and dismisses it; call from the activity's onDestroy. The
  * waiting thread returns at once and nothing stays referenced. */
 void zapp_devkey_jni_abandon(JNIEnv *env);
+/* The balance key: a second AES-256-GCM key in AndroidKeyStore, under an alias of its own, that seals the last balance
+ * Funds shows (wallet_screens.h, wallet_env.seal) and nothing else. It needs no authentication, so Funds can show that
+ * balance before the node answers, and it is made with setUnlockedDeviceRequired, so Keystore refuses it while the phone
+ * is locked. It never touches the wallet key above. seal makes the key on its first use and draws a fresh nonce into iv;
+ * unseal never makes one. Both bind aad, take len bytes and return false on any failure, and unseal on any changed byte.
+ * Call on a thread attached to the JVM. */
+#define ZAPP_BALANCE_IV ZAPP_DEVKEY_IV
+#define ZAPP_BALANCE_TAG 16u
+bool zapp_balance_seal(JNIEnv *env, const uint8_t *aad, size_t aad_len, const uint8_t *plain, size_t len,
+                       uint8_t iv[ZAPP_BALANCE_IV], uint8_t *out);
+bool zapp_balance_unseal(JNIEnv *env, const uint8_t *aad, size_t aad_len, const uint8_t iv[ZAPP_BALANCE_IV],
+                         const uint8_t *sealed, size_t len, uint8_t *plain);
 #ifdef ZAPP_DEVKEY_PROBE
 /* Outcome of an operation attempted without the authentication Keystore requires. */
 struct zapp_devkey_misuse {

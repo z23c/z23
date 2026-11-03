@@ -2,6 +2,7 @@
 #include "wallet_ui.h"
 #include "base/cleanse.h"
 #include "controller.h"
+#include "device_key.h"
 #include "fleet.h"
 #include "jni_util.h"
 #include "secure_window.h"
@@ -266,7 +267,7 @@ void zapp_wallet_ui_destroy(JNIEnv *env)
 
 /* ---- binding to the app ---- */
 
-static struct { void (*changed)(void); } bound;
+static struct { void (*changed)(void); JavaVM *vm; } bound;
 
 static bool bound_secure(void *activity, bool on) { return zapp_secure_window(activity, on); }
 static const char *bound_refusal(void *activity) { (void)activity; return zapp_secure_window_refusal(); }
@@ -298,13 +299,48 @@ static void bound_changed(void *ctx)
     (void)ctx;
     if (bound.changed) bound.changed();
 }
+/* The balance key runs on the UI thread, which the JVM knows, and on command workers, attached for the one call. */
+static JNIEnv *key_thread(bool *attached)
+{
+    JNIEnv *env = NULL;
+    *attached = false;
+    jint known = bound.vm ? (*bound.vm)->GetEnv(bound.vm, (void **)&env, JNI_VERSION_1_6) : JNI_ERR;
+    if (known == JNI_EDETACHED) *attached = (*bound.vm)->AttachCurrentThread(bound.vm, &env, NULL) == JNI_OK;
+    return known == JNI_OK || *attached ? env : NULL;
+}
+static void key_thread_done(bool attached)
+{
+    if (attached) (void)(*bound.vm)->DetachCurrentThread(bound.vm);
+}
+_Static_assert(WALLET_SEAL_IV == ZAPP_BALANCE_IV && WALLET_SEAL_TAG == ZAPP_BALANCE_TAG, "the screens seal with the balance key");
+static bool bound_seal(void *ctx, const uint8_t *aad, size_t aad_len, const uint8_t *plain, size_t len,
+                       uint8_t iv[WALLET_SEAL_IV], uint8_t *out)
+{
+    bool attached;
+    JNIEnv *env = key_thread(&attached);
+    (void)ctx;
+    bool ok = env && zapp_balance_seal(env, aad, aad_len, plain, len, iv, out);
+    key_thread_done(attached);
+    return ok;
+}
+static bool bound_unseal(void *ctx, const uint8_t *aad, size_t aad_len, const uint8_t iv[WALLET_SEAL_IV],
+                         const uint8_t *sealed, size_t len, uint8_t *plain)
+{
+    bool attached;
+    JNIEnv *env = key_thread(&attached);
+    (void)ctx;
+    bool ok = env && zapp_balance_unseal(env, aad, aad_len, iv, sealed, len, plain);
+    key_thread_done(attached);
+    return ok;
+}
 
 bool zapp_wallet_attach(ANativeActivity *activity, void (*changed)(void))
 {
     struct wallet_env env = {activity, bound_secure, bound_run, bound_changed, bound_now, true, bound_refusal, bound_node_running, bound_copy_address,
                              activity ? activity->internalDataPath : NULL, NULL, bound_send_progress, bound_send_dismiss,
-                             bound_reveal_start, bound_reveal_state, bound_reveal_end};
+                             bound_reveal_start, bound_reveal_state, bound_reveal_end, bound_seal, bound_unseal};
     bound.changed = changed;
+    bound.vm = activity ? activity->vm : NULL;
     return activity && wallet_screens_init(&env);
 }
 void zapp_wallet_detach(void) { wallet_screens_shutdown(); }

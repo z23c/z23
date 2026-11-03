@@ -8,6 +8,7 @@
 #include "json/json.h"
 #include "secure_window.h"
 #include "setup_field.h"
+#include "wallet_screens.h"
 #include "wallet_setup.h"
 #include <pthread.h>
 #include <stdatomic.h>
@@ -221,7 +222,7 @@ static void run_job(struct job *job)
     if (job->kind == JOB_CREATE) { wsu_create_job(&ui.model); woken(); wsu_write_job(&ui.model); }
     else if (job->kind == JOB_WRITE) wsu_write_job(&ui.model);
     else if (job->kind == JOB_RESTORE) wsu_restore_job(&ui.model, job->text, job->height);
-    else if (job->kind == JOB_FINISH) wsu_finish_job(&ui.model);
+    else if (job->kind == JOB_FINISH) { wsu_finish_job(&ui.model); if (wsu_created(&ui.model)) wallet_screens_new_wallet(); }
     else if (job->kind == JOB_ASIDE) wsu_set_aside_job(&ui.model);
     else if (job->kind == JOB_START_OVER) wsu_start_over_job(&ui.model);
     else if (job->kind == JOB_RESUME) { wsu_resume_job(&ui.model); atomic_store(&ui.resume_busy, false); }

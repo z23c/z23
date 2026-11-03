@@ -479,16 +479,16 @@ static void test_can_reveal(void)
         "\"send_blocked_reason\":\"progress_store_unavailable\"}}";
     char json[2048];
     struct wallet_view v;
-    assert(wallet_view_from_summary(hidden, &v) && v.encrypted && v.can_reveal);
+    assert(wallet_view_from_summary(hidden, &v) && v.encrypted && v.locked && v.can_reveal);
     replace_once(json, sizeof(json), hidden, "\"locked\":true", "\"locked\":false");
-    assert(wallet_view_from_summary(json, &v) && v.encrypted && !v.can_reveal);
+    assert(wallet_view_from_summary(json, &v) && v.encrypted && !v.locked && !v.can_reveal);
     replace_once(json, sizeof(json), hidden, "\"encrypted\":true", "\"encrypted\":false");
     assert(wallet_view_from_summary(json, &v) && !v.encrypted && !v.can_reveal);
     /* A locked wallet whose node did not hide the amounts has nothing to reveal. */
     replace_once(json, sizeof(json), VALID_REPLY, "\"locked\":false", "\"locked\":true");
-    assert(wallet_view_from_summary(json, &v) && v.encrypted && !v.can_reveal && !strcmp(v.balance, "1.23456789 ZCL"));
-    assert(wallet_view_from_summary(VALID_REPLY, &v) && v.encrypted && !v.can_reveal);
-    assert(!wallet_view_from_summary("{}", &v) && !v.encrypted && !v.can_reveal);
+    assert(wallet_view_from_summary(json, &v) && v.encrypted && v.locked && !v.can_reveal && !strcmp(v.balance, "1.23456789 ZCL"));
+    assert(wallet_view_from_summary(VALID_REPLY, &v) && v.encrypted && !v.locked && !v.can_reveal);
+    assert(!wallet_view_from_summary("{}", &v) && !v.encrypted && !v.locked && !v.can_reveal);
     printf("  show private balance offered only on an encrypted, locked, hidden wallet\n");
 }
 
