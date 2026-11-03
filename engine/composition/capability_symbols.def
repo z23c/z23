@@ -1291,6 +1291,8 @@ ZCL_CAPABILITY_SYMBOL("strcmp", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("strcpy", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("strcspn", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("strdup", CAP_HARMLESS, "")
+ZCL_CAPABILITY_SYMBOL("strndup", CAP_HARMLESS, "Copies caller-owned text into a new allocation.")
+ZCL_CAPABILITY_SYMBOL("strcoll", CAP_HARMLESS, "Compares caller-owned text under the process collation locale.")
 ZCL_CAPABILITY_SYMBOL("strerror", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("strftime", CAP_HARMLESS,
     "Formats a time value the caller supplied. Reading the clock is "
