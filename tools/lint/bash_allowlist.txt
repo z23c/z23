@@ -167,7 +167,6 @@ tools/new_shape.sh
 tools/release.sh
 tools/repro_on_copy.sh
 tools/scripts/agent_msg_roundtrip.sh
-tools/scripts/anchor-snapshot-copy-prove.sh
 tools/scripts/background_quality_lane.sh
 tools/scripts/binary_size.sh
 tools/scripts/build_bench.sh
@@ -224,7 +223,6 @@ tools/scripts/doctor.sh
 tools/scripts/first_build_timing.sh
 tools/scripts/fleet_source_status.sh
 tools/scripts/fleet_sync.sh
-tools/scripts/fold_profile.sh
 tools/scripts/fresh-boot-proof.sh
 tools/scripts/fresh-boot-weld-prove-selftest.sh
 tools/scripts/fresh-boot-weld-prove.sh
@@ -241,7 +239,6 @@ tools/scripts/install_git_hooks.sh
 tools/scripts/install_git_hooks_selftest.sh
 tools/scripts/install_host_gc.sh
 tools/scripts/install_z23.sh
-tools/scripts/instant-on-copy-prove.sh
 tools/scripts/intervention_ledger.sh
 tools/scripts/isolated_mainnet_env.sh
 tools/scripts/isolated_node_env.sh
