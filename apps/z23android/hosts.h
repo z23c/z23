@@ -42,9 +42,8 @@ const char *zapp_node_line(bool responding, bool process_running, bool stopping,
                            const struct zapp_chain_evidence *evidence, char *out, size_t cap);
 /* The sentence under More that adds what the node line does not say: how many blocks are left,
  * or that none are. Arguments as for zapp_node_line. Returns out. */
-/* The pace the node reports in a status reply (data.pace), normal when the reply lacks it, the word is
- * unknown or the reply is NULL or unreadable. A node that does not apply the pace file reports none. */
-enum zapp_pace zapp_status_pace(const char *status);
+/* The pace in a getnodepace reply, {"result":{"pace":...}}. An error reply or anything else is NORMAL. */
+enum zapp_pace zapp_getnodepace_pace(const char *reply);
 /* The line the node shows while the phone cools: it picks up again by itself. */
 #define ZAPP_PAUSED_LINE "Paused while the phone cools down. It picks up again by itself."
 /* The main-screen node line for the pace in effect: while the phone is warm the node says so instead

@@ -357,14 +357,19 @@ int main(void)
     chain_evidence_tests();
     private_line_tests();
     const char *sync_text = "Behind · 3,301,133 of 3,301,537";
-    const char *gentle_reply = "{\"ok\":true,\"data\":{\"provable_tip\":5,\"pace\":\"gentle\"}}";
+    const char *gentle_reply = "{\"result\":{\"pace\":\"gentle\"},\"error\":null,\"id\":1}";
     const char *old_reply = "{\"ok\":true,\"data\":{\"provable_tip\":5}}";
-    assert(!strcmp(zapp_paced_line(zapp_status_pace(gentle_reply), true, sync_text, line, sizeof(line)),
+    assert(!strcmp(zapp_paced_line(zapp_getnodepace_pace(gentle_reply), true, sync_text, line, sizeof(line)),
                    "Syncing gently · phone is warm"));
-    assert(!strcmp(zapp_paced_line(zapp_status_pace(old_reply), true, sync_text, line, sizeof(line)), sync_text));
-    assert(zapp_status_pace("{\"data\":{\"pace\":\"pause\"}}") == ZAPP_PACE_PAUSE);
-    assert(zapp_status_pace("{\"data\":{\"pace\":\"unknown\"}}") == ZAPP_PACE_NORMAL);
-    assert(zapp_status_pace("not json") == ZAPP_PACE_NORMAL && zapp_status_pace(NULL) == ZAPP_PACE_NORMAL);
+    assert(!strcmp(zapp_paced_line(zapp_getnodepace_pace(old_reply), true, sync_text, line, sizeof(line)), sync_text));
+    const char *pause_reply = "{\"result\":{\"pace\":\"pause\"},\"error\":null,\"id\":1}";
+    assert(zapp_getnodepace_pace(pause_reply) == ZAPP_PACE_PAUSE);
+    assert(zapp_getnodepace_pace("{\"result\":{\"pace\":\"gentle\"},\"error\":null,\"id\":1}") == ZAPP_PACE_GENTLE);
+    assert(zapp_getnodepace_pace("{\"result\":{\"pace\":\"normal\"},\"error\":null,\"id\":1}") == ZAPP_PACE_NORMAL);
+    assert(zapp_getnodepace_pace("{\"result\":{\"pace\":\"unknown\"},\"error\":null,\"id\":1}") == ZAPP_PACE_NORMAL);
+    assert(zapp_getnodepace_pace("{\"result\":null,\"error\":{\"code\":-28,\"message\":\"loading\"},\"id\":1}") == ZAPP_PACE_NORMAL);
+    assert(zapp_getnodepace_pace("{\"data\":{\"pace\":\"pause\"}}") == ZAPP_PACE_NORMAL);
+    assert(zapp_getnodepace_pace("not json") == ZAPP_PACE_NORMAL && zapp_getnodepace_pace(NULL) == ZAPP_PACE_NORMAL);
     assert(!strcmp(zapp_paced_line(ZAPP_PACE_NORMAL, true, sync_text, line, sizeof(line)), sync_text));
     assert(!strcmp(zapp_paced_line(ZAPP_PACE_GENTLE, true, sync_text, line, sizeof(line)),
                    "Syncing gently · phone is warm"));

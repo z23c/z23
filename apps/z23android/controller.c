@@ -189,12 +189,25 @@ static void record_height(struct zapp_view *view, const struct node_reading *n, 
     view->node_sample_height = n->height;
     view->node_sample_at = now;
 }
+/* The pace the node reports through getnodepace. Read only when the node answered status; a node that does not
+ * answer within this time keeps the NORMAL fallback. */
+#define PACE_TIMEOUT_MS 1000
+static enum zapp_pace read_node_pace(struct controller *c)
+{
+    char *reply = calloc(1, ZAPP_TEXT_CAP), why[96];
+    enum zapp_pace pace = ZAPP_PACE_NORMAL;
+    if (reply && zapp_rpc_call(c->runtime.directory, "getnodepace", "[]", PACE_TIMEOUT_MS,
+                               reply, ZAPP_TEXT_CAP, why, sizeof(why)) == ZAPP_RPC_OK)
+        pace = zapp_getnodepace_pace(reply);
+    free(reply);
+    return pace;
+}
 static void observe_node(struct controller *c)
 {
     char *output = calloc(1, ZAPP_TEXT_CAP);
     bool ran = output && zapp_operation_run(&c->runtime, "status", output, ZAPP_TEXT_CAP);
     struct node_reading n = read_status(ran ? output : NULL);
-    enum zapp_pace pace = zapp_status_pace(ran ? output : NULL);
+    enum zapp_pace pace = n.responding ? read_node_pace(c) : ZAPP_PACE_NORMAL;
     free(output);
     bool process_running = zapp_node_running(&c->runtime), stopping = zapp_node_stopping(&c->runtime);
     bool wanted = zapp_node_wanted(&c->runtime);

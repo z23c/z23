@@ -110,12 +110,12 @@ const char *zapp_node_line(bool responding, bool process_running, bool stopping,
     else snprintf(out, cap, "Node in sync · %s%s%s", zapp_grouped(height, at), count, onion);
     return out;
 }
-enum zapp_pace zapp_status_pace(const char *status)
+enum zapp_pace zapp_getnodepace_pace(const char *reply)
 {
     struct json_value root = {0};
     enum zapp_pace pace = ZAPP_PACE_NORMAL;
-    if (!status || !json_read(&root, status, strlen(status))) return pace;
-    const char *word = json_get_str(json_get(json_get(&root, "data"), "pace"));
+    if (!reply || !json_read(&root, reply, strlen(reply))) return pace;
+    const char *word = json_get_str(json_get(json_get(&root, "result"), "pace"));
     if (word && !strcmp(word, "gentle")) pace = ZAPP_PACE_GENTLE;
     else if (word && !strcmp(word, "pause")) pace = ZAPP_PACE_PAUSE;
     json_free(&root);
