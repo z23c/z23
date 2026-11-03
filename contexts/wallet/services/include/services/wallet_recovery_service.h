@@ -71,6 +71,15 @@ struct wallet_recovery_request {
     bool        birthday_at_local_tip;
 };
 
+/* Why a rebuild did not ask this datadir's chain which addresses were used.
+ * Meaningful only when chain_history_consulted is false. */
+enum wallet_recovery_history_skip {
+    WALLET_RECOVERY_HISTORY_NO_CHAIN = 0, /* no address history here to ask */
+    WALLET_RECOVERY_HISTORY_NEW_PHRASE,   /* record_birthday: a phrase made
+                                           * just now, none below the tip */
+    WALLET_RECOVERY_HISTORY_SHIELDED_ONLY /* no transparent key to look up */
+};
+
 struct wallet_recovery_report {
     char    datadir[1024];
     char    target_db[1024];
@@ -105,6 +114,7 @@ struct wallet_recovery_report {
     uint32_t change_keys_used;
     uint32_t shielded_children;     /* ZIP32 children 0..n-1 */
     bool     chain_history_consulted; /* the scan asked this datadir's chain */
+    enum wallet_recovery_history_skip history_skip; /* why it did not */
     bool     transparent_scan_truncated;
     bool     birthday_recorded;
     bool     encrypted_at_rest;     /* a committed run wrapped the keys; on a
@@ -141,8 +151,9 @@ struct wallet_recovery_report {
  * through the wallet's single writer. A phrase made just now
  * (record_birthday, which birthday_at_local_tip implies) has no history to
  * find and a shielded-only rebuild has no transparent key to look up, so
- * neither reads the chain: the transparent side is the standard floor and
- * chain_history_consulted is false. It does NOT mint a fixed keypool:
+ * neither reads the chain: the transparent side is the standard floor,
+ * chain_history_consulted is false and history_skip names which of the two
+ * it was, on a plan as on a commit. It does NOT mint a fixed keypool:
  * a created wallet hands out index 100 first, so a fixed 100 keys rebuilt
  * every address the user never saw and none of the one they published.
  *

@@ -2380,6 +2380,7 @@ static int restore_tip_reads_no_history(void)
     bool ran = wcr_restore_counted(dir, &at_tip, &rep, &asks);
     WCR_CHECK("an at-tip restore asks the chain nothing and says so",
               ran && asks == 0 && !rep.chain_history_consulted &&
+              rep.history_skip == WALLET_RECOVERY_HISTORY_NEW_PHRASE &&
               rep.receiving_keys_used == 0 && rep.birthday_recorded);
     wcr_fixture(bare, sizeof(bare), "tip_floor");
     bool floored = wcr_restore_counted(bare, &plain, &bare_rep, &bare_asks);
@@ -2410,6 +2411,7 @@ static int restore_tip_shielded_reads_nothing(void)
     bool ran = wcr_restore_counted(dir, &app, &rep, &asks);
     WCR_CHECK("the app's shielded at-tip create runs no history statement",
               ran && asks == 0 && !rep.chain_history_consulted &&
+              rep.history_skip == WALLET_RECOVERY_HISTORY_SHIELDED_ONLY &&
               rep.receiving_keys == 0 && rep.birthday_recorded);
     return failures;
 }
@@ -2444,7 +2446,58 @@ static int restore_other_birthdays_read_history(void)
     return failures;
 }
 
- static int t_restore_at_local_tip(void)
+/* Words from each address_coverage line, one per reason the chain was not
+ * read. */
+#define WCR_SAYS_NO_CHAIN "has no chain to check against"
+#define WCR_SAYS_NEW_PHRASE "marks this phrase as made just now"
+#define WCR_SAYS_SHIELDED "shielded_only derives no transparent address"
+
+/* The reply reports the chain unread with the coverage line that contains
+ * `says`, and claims no missing chain unless that is the line expected. */
+static bool wcr_unread_because(const struct wcr_run *run, const char *says)
+{
+    char cov[1024];
+    bool unread = run->rc == 0 &&
+                  strstr(run->wire, "\"chain_history_consulted\":false") &&
+                  wcr_field(run, "address_coverage", cov, sizeof(cov)) &&
+                  strstr(cov, says) != NULL;
+    return unread && (strcmp(says, WCR_SAYS_NO_CHAIN) == 0 ||
+                      strstr(cov, WCR_SAYS_NO_CHAIN) == NULL);
+}
+
+/* The reply says why the chain was not read. On a datadir that holds history,
+ * an at-tip plan and its commit name the phrase as new and the app's
+ * shielded at-tip create names the missing transparent side; only a datadir
+ * with no chain says it has none. */
+static int restore_tip_reply_names_reason(void)
+{
+    int failures = 0;
+    char dir[1024];
+    struct wcr_run plan, run;
+    const char *tip = ",\"birthday_at_local_tip\":true";
+    WCR_CHECK("setup: a chain with history for the at-tip reply",
+              wcr_history_chain(dir, sizeof(dir), "tip_reply"));
+    bool planned = wcr_restore_plan(dir, tip, &plan);
+    WCR_CHECK("an at-tip plan says the phrase is new, not that there is no "
+              "chain",
+              planned && wcr_unread_because(&plan, WCR_SAYS_NEW_PHRASE));
+    bool ran = wcr_restore_cli(dir, tip, true, &run);
+    WCR_CHECK("and so does its commit",
+              ran && wcr_unread_because(&run, WCR_SAYS_NEW_PHRASE));
+    WCR_CHECK("setup: a chain with history for the app's create reply",
+              wcr_history_chain(dir, sizeof(dir), "tip_reply_z"));
+    ran = wcr_restore_cli(dir, ",\"shielded_only\":true,"
+                               "\"birthday_at_local_tip\":true", true, &run);
+    WCR_CHECK("the app's create says it had no transparent address to look up",
+              ran && wcr_unread_because(&run, WCR_SAYS_SHIELDED));
+    wcr_fixture(dir, sizeof(dir), "reply_nochain");
+    ran = wcr_restore_cli(dir, "", true, &run);
+    WCR_CHECK("a restore into a datadir with no chain still says it has none",
+              ran && wcr_unread_because(&run, WCR_SAYS_NO_CHAIN));
+    return failures;
+}
+
+static int t_restore_at_local_tip(void)
 {
     return restore_tip_recorded() + restore_tip_edge() +
            restore_tip_refused() + restore_tip_plan_then_commit() +
@@ -2452,7 +2505,8 @@ static int restore_other_birthdays_read_history(void)
            restore_refusal_keeps_phrase_out() + recovery_new_makes_no_state() +
            restore_tip_reads_no_history() +
            restore_tip_shielded_reads_nothing() +
-           restore_other_birthdays_read_history();
+           restore_other_birthdays_read_history() +
+           restore_tip_reply_names_reason();
 }
 
 /* The key scans can find what they look for: a plaintext datadir holds the raw

@@ -929,11 +929,17 @@ static struct zcl_result wrc_swap_to_write_handle(
  * one has the tables and no rows, and every address probe against it
  * answers false for a reason that has nothing to do with the address. Ask
  * only when there is something to ask, so "no history found" is never
- * printed for "nothing to look in". */
+ * printed for "nothing to look in". out->history_skip records which reason
+ * held, so the reply states it rather than "no chain" for every one. */
 static struct node_db *wrc_history_oracle(
-    const struct wallet_recovery_request *req, struct wrc_run *st)
+    const struct wallet_recovery_request *req, struct wrc_run *st,
+    struct wallet_recovery_report *out)
 {
-    if (req->shielded_only || req->record_birthday || !st->have_db)
+    out->history_skip =
+        req->shielded_only     ? WALLET_RECOVERY_HISTORY_SHIELDED_ONLY
+        : req->record_birthday ? WALLET_RECOVERY_HISTORY_NEW_PHRASE
+                               : WALLET_RECOVERY_HISTORY_NO_CHAIN;
+    if (out->history_skip != WALLET_RECOVERY_HISTORY_NO_CHAIN || !st->have_db)
         return NULL;
     return db_address_index_populated(&st->ndb) ? &st->ndb : NULL;
 }
@@ -949,8 +955,8 @@ static struct zcl_result wrc_rebuild_and_flush(
         return ZCL_ERR(-64, "could not root the wallet on the recovery phrase");
     /* Same scan on both paths, against the same chain, so the plan's
      * numbers are the commit's numbers. */
-    rc = wrc_rebuild_keys(w, wrc_history_oracle(req, st), req->shielded_only,
-                          out);
+    rc = wrc_rebuild_keys(w, wrc_history_oracle(req, st, out),
+                          req->shielded_only, out);
     if (!rc.ok)
         return rc;
 

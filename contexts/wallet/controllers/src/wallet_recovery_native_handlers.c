@@ -133,6 +133,32 @@ static const char *wrp_seed_state_name(enum wallet_seed_state s)
     return "unknown";
 }
 
+/* What a rebuild that did not ask the chain covers, for the reason it did
+ * not ask. */
+static const char *wrp_coverage_text(enum wallet_recovery_history_skip why)
+{
+    switch (why) {
+    case WALLET_RECOVERY_HISTORY_NEW_PHRASE:
+        return "birthday_at_local_tip marks this phrase as made just now, so "
+               "it has no history below this datadir's tip to find: the "
+               "rebuild derived the standard lookahead without reading the "
+               "chain. Restore a phrase that has been used without "
+               "birthday_at_local_tip, so the scan follows its history";
+    case WALLET_RECOVERY_HISTORY_SHIELDED_ONLY:
+        return "shielded_only derives no transparent address, so there was "
+               "no address history to look up and the chain was not read. "
+               "The shielded addresses are the standard lookahead";
+    case WALLET_RECOVERY_HISTORY_NO_CHAIN:
+        break;
+    }
+    return "this datadir has no chain to check against, so the rebuild "
+           "derived the standard lookahead rather than following your "
+           "history. That covers every address a wallet hands out before "
+           "it has been used a lot. If you gave out more addresses than "
+           "that, recover into a datadir that has already synced and the "
+           "scan will follow them";
+}
+
 /* How far the rebuild reached. Printed on both the plan and the commit, so
  * "recovered" is never a bare true with no scope attached. */
 static void wrp_push_scan(struct zcl_command_reply *reply,
@@ -152,12 +178,7 @@ static void wrp_push_scan(struct zcl_command_reply *reply,
                                (int64_t)rep->change_keys_used);
     else
         (void)json_push_kv_str(&reply->data, "address_coverage",
-            "this datadir has no chain to check against, so the rebuild "
-            "derived the standard lookahead rather than following your "
-            "history. That covers every address a wallet hands out before "
-            "it has been used a lot. If you gave out more addresses than "
-            "that, recover into a datadir that has already synced and the "
-            "scan will follow them");
+                               wrp_coverage_text(rep->history_skip));
     if (rep->transparent_scan_truncated)
         (void)json_push_kv_str(&reply->data, "coverage_warning",
             "the address scan stopped at its safety ceiling with your "
