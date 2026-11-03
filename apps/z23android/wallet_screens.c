@@ -590,6 +590,17 @@ static void detail_items(struct wallet_screen *s)
     button(s, WALLET_ACT_BACK, "Back");
 }
 
+/* Whether two copies of a screen hold the same items, so that a redraw with nothing new keeps the widgets it has. */
+bool wallet_screen_same(const struct wallet_screen *a, const struct wallet_screen *b)
+{
+    if (a->page != b->page || a->count != b->count) return false;
+    for (size_t i = 0; i < a->count; ++i) {
+        const struct wallet_item *x = &a->items[i], *y = &b->items[i];
+        if (x->kind != y->kind || x->action != y->action || x->arg != y->arg || strcmp(x->text, y->text)) return false;
+    }
+    return true;
+}
+
 unsigned wallet_screens_snapshot(struct wallet_screen *out)
 {
     unsigned version;

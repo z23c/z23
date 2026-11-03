@@ -165,28 +165,6 @@ void zapp_wallet_ui_clear(JNIEnv *env)
     ui.drawn = false;
 }
 
-void zapp_wallet_ui_render(JNIEnv *env)
-{
-    if (!ui.container) return;
-    wallet_screens_refresh_send();
-    unsigned version = wallet_screens_snapshot(&ui.screen);
-    if (ui.drawn && version == ui.version) return;
-    release_widgets(env);
-    for (size_t i = 0; i < ui.screen.count; ++i) (void)draw_item(env, i);
-    if (ui.screen.count) (void)bottom_space(env);
-    ui.version = version;
-    ui.drawn = true;
-}
-
-/* ---- input ---- */
-
-bool zapp_wallet_ui_hit(JNIEnv *env, float x, float y, size_t *button)
-{
-    for (size_t i = 0; i < ui.button_count; ++i)
-        if (zj_hit(env, ui.buttons[i], x, y)) { *button = i; return true; }
-    return false;
-}
-
 /* The amount field's text, or false when it cannot be read or does not fit. */
 static bool read_input(JNIEnv *env, char *out, size_t cap)
 {
@@ -198,6 +176,37 @@ static bool read_input(JNIEnv *env, char *out, size_t cap)
     ok = string && zj_copy_utf(env, (jstring)string, out, cap);
     (*env)->PopLocalFrame(env, NULL);
     return ok;
+}
+
+void zapp_wallet_ui_render(JNIEnv *env)
+{
+    static struct wallet_screen next;
+    char typed[AMOUNT_TEXT_CAP];
+    if (!ui.container) return;
+    wallet_screens_refresh_send();
+    unsigned version = wallet_screens_snapshot(&next);
+    if (ui.drawn && version == ui.version) { memory_cleanse(&next, sizeof(next)); return; }
+    ui.version = version;
+    if (ui.drawn && wallet_screen_same(&ui.screen, &next)) { memory_cleanse(&next, sizeof(next)); return; }
+    /* When the items change, the amount field is drawn again; what the owner typed in it is put back. */
+    bool kept = ui.input && read_input(env, typed, sizeof(typed)) && typed[0] != '\0';
+    release_widgets(env);
+    ui.screen = next;
+    memory_cleanse(&next, sizeof(next));
+    for (size_t i = 0; i < ui.screen.count; ++i) (void)draw_item(env, i);
+    if (ui.screen.count) (void)bottom_space(env);
+    if (kept && ui.input) (void)zj_text(env, ui.input, typed);
+    memory_cleanse(typed, sizeof(typed));
+    ui.drawn = true;
+}
+
+/* ---- input ---- */
+
+bool zapp_wallet_ui_hit(JNIEnv *env, float x, float y, size_t *button)
+{
+    for (size_t i = 0; i < ui.button_count; ++i)
+        if (zj_hit(env, ui.buttons[i], x, y)) { *button = i; return true; }
+    return false;
 }
 
 void zapp_wallet_ui_dropped(JNIEnv *env, unsigned shell_drops)

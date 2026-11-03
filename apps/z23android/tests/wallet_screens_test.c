@@ -1716,6 +1716,29 @@ static void test_time_labels(void)
     label(now, at_utc(2026, 11, 2, 11, 30), 14 * 3600, "Today 01:30");      /* the phone is fourteen hours ahead */
     label(now, at_utc(2026, 11, 2, 9, 0), 5 * 3600 + 1800, "Today 14:30");  /* a half-hour zone */
 }
+static void test_receive_redraw(void)
+{
+    struct wallet_screen before, after;
+    start(false);
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    unsigned v0 = wallet_screens_snapshot(&before);
+    CHECK(wallet_screens_set_amount("  "));                          /* nothing new on the screen: the version changes, the items do not */
+    unsigned v1 = wallet_screens_snapshot(&after);
+    CHECK(v1 != v0 && wallet_screen_same(&before, &after));
+    CHECK(wallet_screens_set_amount("1.5"));
+    (void)wallet_screens_snapshot(&before);
+    CHECK(!wallet_screen_same(&before, &after));
+    CHECK(wallet_screens_set_amount("2.5"));                           /* the same count of items, another code */
+    (void)wallet_screens_snapshot(&after);
+    CHECK(after.count == before.count && !wallet_screen_same(&before, &after));
+    CHECK(!wallet_screens_set_amount("2.5x"));                         /* refused: a note appears, the code stays */
+    (void)wallet_screens_snapshot(&before);
+    CHECK(find_text(&before, "Enter an amount") >= 0 && !wallet_screen_same(&before, &after));
+    long qr = find(&before, WALLET_ITEM_QR, WALLET_ACT_NONE);
+    CHECK(qr >= 0 && !strcmp(text_at(&before, qr), "zclassic:" A1 "?amount=2.5"));
+    wallet_screens_close();
+}
+
 int main(int argc, char **argv)
 {
     setenv("TZ", "UTC", 1);
@@ -1769,6 +1792,7 @@ int main(int argc, char **argv)
     test_single_flight();
     test_async();
     test_time_labels();
+    test_receive_redraw();
     puts("wallet_screens_test: ok");
     return 0;
 }
