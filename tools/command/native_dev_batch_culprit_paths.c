@@ -9,6 +9,7 @@
 
 #include "base/safe_alloc.h"
 
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -66,7 +67,7 @@ bool cp_set_add(struct cp_set *s, const char *str, size_t len)
 
 static int cp_cmp(const void *a, const void *b)
 {
-    return strcmp(*(char *const *)a, *(char *const *)b);
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
 void cp_set_sort(struct cp_set *s)
@@ -180,8 +181,7 @@ static bool cp_failure_line(struct cp_sel *s, const char *l, size_t n)
 
 static bool cp_word(char c)
 {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-           (c >= '0' && c <= '9') || c == '_';
+    return isalnum((unsigned char)c) || c == '_';
 }
 
 static bool cp_class(char c)
@@ -206,7 +206,8 @@ static bool cp_ext_at(const char *l, size_t n, size_t first, size_t e)
     return false;
 }
 
-/* grep -o -E '[A-Za-z0-9_][A-Za-z0-9_./-]*\.(c|h|def|txt|sh|md)\b' */
+/* The bridge's grep -o -E: one word character, then word characters, dots,
+ * slashes and dashes, then a dot and one of the six extensions. */
 static bool cp_extract(const char *l, size_t n, struct cp_set *out)
 {
     size_t i = 0, j, e;

@@ -144,6 +144,15 @@ static bool dbc_refused(struct dbc *d, const char *text, const char *code)
     return ok;
 }
 
+static bool dbc_ratchet_names(void)
+{
+    return cp_is_ratchet("tools/lint/x_floor_a.txt") &&
+           cp_is_ratchet("tools/lint/sub/b_baseline.txt") &&
+           !cp_is_ratchet("tools/lint/budget.sh") &&
+           !cp_is_ratchet("tools/lint/budget_Z.txt") &&
+           !cp_is_ratchet("src/a_budget.txt");
+}
+
 static bool dbc_paths_case(void)
 {
     static char text[] =
@@ -161,11 +170,7 @@ static bool dbc_paths_case(void)
          cp_set_has(&s, "src/pre.c") && !cp_set_has(&s, "src/zz.c") &&
          !cp_set_has(&s, "tools/lint/a_budget.txt");
     cp_set_free(&s);
-    return ok && cp_is_ratchet("tools/lint/x_floor_a.txt") &&
-           cp_is_ratchet("tools/lint/sub/b_baseline.txt") &&
-           !cp_is_ratchet("tools/lint/budget.sh") &&
-           !cp_is_ratchet("tools/lint/budget_Z.txt") &&
-           !cp_is_ratchet("src/a_budget.txt");
+    return ok && dbc_ratchet_names();
 }
 
 int test_dev_batch_culprit(void);

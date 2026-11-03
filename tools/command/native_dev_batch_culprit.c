@@ -472,33 +472,47 @@ static bool cd_stack_id(struct cd_ctx *x)
            (int)sizeof(x->sid);
 }
 
+static bool cd_stage_ok(const char *stage)
+{
+    return strcmp(stage, "lint") == 0 || strcmp(stage, "fast") == 0 ||
+           strcmp(stage, "agent-verify") == 0 ||
+           strcmp(stage, "agent_verify") == 0;
+}
+
+/* The stack path (trailing slashes dropped) and the two files it reads. */
+static bool cd_args_ok(const char *stack, const char *log, const char *ledger,
+                       struct cd_ctx *x, char *tsv, size_t tsv_cap)
+{
+    size_t n = strlen(stack);
+    while (n > 1 && stack[n - 1] == '/')
+        n--;
+    if (!n || n >= sizeof(x->stack) || !log[0] || !ledger[0] ||
+        access(log, R_OK) != 0 || !db_join(tsv, tsv_cap, ledger, "stacked.tsv"))
+        return false;
+    memcpy(x->stack, stack, n);
+    return true;
+}
+
 static bool cd_inputs(const struct json_value *in, struct cd_ctx *x,
                       struct zcl_command_reply *reply)
 {
     const char *stage = db_opt_str(in, "stage");
     const char *log = db_opt_str(in, "log");
-    const char *ledger = db_opt_str(in, "ledger");
-    const char *stack = db_opt_str(in, "stack");
-    char path[DB_PATH + 32];
-    size_t n = strlen(stack);
-    if (strcmp(stage, "lint") != 0 && strcmp(stage, "fast") != 0 &&
-        strcmp(stage, "agent-verify") != 0 && strcmp(stage, "agent_verify") != 0) {
+    char tsv[DB_PATH + 32];
+    if (!cd_stage_ok(stage)) {
         db_refuse(reply, "BAD_INPUT", "input",
                   "--stage is lint, fast or agent-verify");
         return false;
     }
     x->agent_verify = stage[0] == 'a';
-    while (n > 1 && stack[n - 1] == '/')
-        n--;
-    if (!n || n >= sizeof(x->stack) || !log[0] || !ledger[0] ||
-        access(log, R_OK) != 0 || !db_join(path, sizeof(path), ledger, "stacked.tsv")) {
+    if (!cd_args_ok(db_opt_str(in, "stack"), log, db_opt_str(in, "ledger"), x,
+                    tsv, sizeof(tsv))) {
         db_refuse(reply, "BAD_INPUT", "input",
                   "--stack, --log (readable) and --ledger are required");
         return false;
     }
-    memcpy(x->stack, stack, n);
     if (!cd_stack_id(x) || !db_text_load(log, &x->log) ||
-        !db_text_load(path, &x->ledger)) {
+        !db_text_load(tsv, &x->ledger)) {
         db_refuse(reply, "BAD_INPUT", "input",
                   "the stack must be a z23-stacksN worktree and the log and "
                   "ledger readable");
