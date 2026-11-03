@@ -2022,6 +2022,7 @@ static void check_sqlite_34_sqlite_wallet_utxo_balance_spend(int *failures)
     int n = db_wallet_utxo_list_unspent(&ndb, unspent, 10);
     ok = ok && (n == 1);
     ok = ok && (unspent[0].value == 50000000);
+    db_wallet_utxo_free(&unspent[0]);
 
     node_db_close(&ndb);
     if (ok) printf("OK\n");
