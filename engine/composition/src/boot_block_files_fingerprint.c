@@ -1,4 +1,8 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Reads the fingerprint of the block files under <datadir>/blocks that the
+ * clean-shutdown marker records, so a verified fast restart can tell that no
+ * block file changed while the node was down. */
 
 #include "config/boot_block_files_fingerprint.h"
 
