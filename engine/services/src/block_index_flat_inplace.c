@@ -24,6 +24,34 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* What the last in-place save changed, kept for the shutdown bind. */
+static struct {
+    bool valid;
+    struct block_index_flat_identity base, saved;
+    uint8_t (*hashes)[32];
+    size_t nhashes;
+} g_delta;
+
+void block_index_flat_delta_forget(void)
+{
+    free(g_delta.hashes);
+    memset(&g_delta, 0, sizeof(g_delta));
+}
+
+bool block_index_flat_delta_for(const struct block_index_flat_identity *saved,
+                                struct block_index_flat_delta *out)
+{
+    if (!saved || !out || !g_delta.valid ||
+        memcmp(g_delta.saved.payload_sha3, saved->payload_sha3, 32) != 0 ||
+        g_delta.saved.payload_size != saved->payload_size ||
+        g_delta.saved.row_count != saved->row_count)
+        return false;
+    out->base = g_delta.base;
+    out->hashes = (const uint8_t (*)[32])g_delta.hashes;
+    out->nhashes = g_delta.nhashes;
+    return true;
+}
+
 #ifndef _WIN32
 #include "platform/file_sync.h"
 #include <fcntl.h>
@@ -66,34 +94,6 @@ struct bfi {
     size_t nhashes, cap_hashes;
     bool hashes_lost;        /* an allocation failed: no delta */
 };
-
-/* What the last in-place save changed, kept for the shutdown bind. */
-static struct {
-    bool valid;
-    struct block_index_flat_identity base, saved;
-    uint8_t (*hashes)[32];
-    size_t nhashes;
-} g_delta;
-
-void block_index_flat_delta_forget(void)
-{
-    free(g_delta.hashes);
-    memset(&g_delta, 0, sizeof(g_delta));
-}
-
-bool block_index_flat_delta_for(const struct block_index_flat_identity *saved,
-                                struct block_index_flat_delta *out)
-{
-    if (!saved || !out || !g_delta.valid ||
-        memcmp(g_delta.saved.payload_sha3, saved->payload_sha3, 32) != 0 ||
-        g_delta.saved.payload_size != saved->payload_size ||
-        g_delta.saved.row_count != saved->row_count)
-        return false;
-    out->base = g_delta.base;
-    out->hashes = (const uint8_t (*)[32])g_delta.hashes;
-    out->nhashes = g_delta.nhashes;
-    return true;
-}
 
 static void bfi_note_hash(struct bfi *b, const uint8_t *hash)
 {
@@ -527,17 +527,6 @@ enum bif_inplace block_index_flat_save_inplace(
 }
 
 #else /* _WIN32 */
-
-void block_index_flat_delta_forget(void)
-{
-}
-
-bool block_index_flat_delta_for(const struct block_index_flat_identity *saved,
-                                struct block_index_flat_delta *out)
-{
-    (void)saved; (void)out;
-    return false;
-}
 
 enum bif_inplace block_index_flat_save_inplace(
     const char *datadir, struct main_state *ms, struct block_index **sorted,
