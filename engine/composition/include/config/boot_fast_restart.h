@@ -50,6 +50,30 @@ bool boot_fast_restart_tip_matches_container(
     const struct block_index *container_tip,
     const struct block_index *durable_tip);
 
+/* What shutdown observed, passed to the decision so it is testable without a
+ * live progress store. */
+struct boot_fr_capture_inputs {
+    const struct block_index *container_tip; /* raw active-chain slot        */
+    bool    durable_found;      /* durable tip resolved from the cursor        */
+    int     durable_height;
+    uint8_t durable_hash[32];
+    const struct block_index *durable_block; /* index entry of that hash   */
+    bool    coins_derived;      /* coins-best derive call succeeded            */
+    bool    coins_found;        /* ... and found a frontier                    */
+    int32_t coins_height;
+    uint8_t coins_hash[32];
+    int64_t block_index_count;
+};
+
+struct fast_restart_shutdown_facts;
+
+/* NULL and `fr` filled when a binding may be recorded; else the refusal
+ * reason. Off the exact tip it also requires the coins frontier AT the durable
+ * tip (height and hash). */
+const char *boot_fast_restart_decide_facts(
+    const struct boot_fr_capture_inputs *in,
+    struct fast_restart_shutdown_facts *fr);
+
 /* Cheaply-derived current-boot facts, gathered AFTER the block index + coins
  * frontier have loaded, to verify against the shutdown marker's fast-restart
  * binding. Each field is an O(1)/O(log n) read — never a full recompute. */

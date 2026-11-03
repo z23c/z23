@@ -616,6 +616,139 @@ static int bsm_check_container_tip_relation(void)
     return failures;
 }
 
+/* ── Shutdown binding decision (container tip, durable tip, coins-best) ── */
+
+enum { BSM_DEC_N = 300 };
+static struct block_index g_dec_chain[BSM_DEC_N];
+static struct uint256 g_dec_hash[BSM_DEC_N];
+
+/* Inputs with the durable tip at `d`; `coins` NULL means the derive found no
+ * frontier. */
+static struct boot_fr_capture_inputs bsm_dec_inputs(
+    int container, int d, const struct block_index *coins,
+    const uint8_t *coins_hash)
+{
+    struct boot_fr_capture_inputs in;
+    memset(&in, 0, sizeof(in));
+    in.container_tip = &g_dec_chain[container];
+    in.durable_found = true;
+    in.durable_height = d;
+    memcpy(in.durable_hash, g_dec_hash[d].data, 32);
+    in.durable_block = &g_dec_chain[d];
+    in.block_index_count = 1234;
+    if (coins) {
+        in.coins_derived = true;
+        in.coins_found = true;
+        in.coins_height = coins->nHeight;
+        memcpy(in.coins_hash, coins_hash, 32);
+    }
+    return in;
+}
+
+static const char *bsm_dec(const struct boot_fr_capture_inputs *in,
+                           struct fast_restart_shutdown_facts *fr)
+{
+    memset(fr, 0, sizeof(*fr));
+    return boot_fast_restart_decide_facts(in, fr);
+}
+
+/* strcmp against the refusal reason; a recorded binding compares as
+ * "recorded" so a wrong verdict fails the check instead of crashing it. */
+static int bsm_cmp(const struct boot_fr_capture_inputs *in,
+                   struct fast_restart_shutdown_facts *fr, const char *want)
+{
+    const char *why = bsm_dec(in, fr);
+    return strcmp(why ? why : "recorded", want);
+}
+
+static int bsm_check_capture_decision(void)
+{
+    int failures = 0;
+    memset(g_dec_chain, 0, sizeof(g_dec_chain));
+    memset(g_dec_hash, 0, sizeof(g_dec_hash));
+    for (int i = 0; i < BSM_DEC_N; i++) {
+        g_dec_hash[i].data[0] = (uint8_t)(i & 0xff);
+        g_dec_hash[i].data[1] = (uint8_t)(i >> 8);
+        g_dec_hash[i].data[2] = 0x5a;
+        g_dec_chain[i].nHeight = i;
+        g_dec_chain[i].phashBlock = &g_dec_hash[i];
+        g_dec_chain[i].pprev = i ? &g_dec_chain[i - 1] : NULL;
+    }
+    struct fast_restart_shutdown_facts fr;
+    const uint8_t *dh = g_dec_hash[200].data;
+    struct boot_fr_capture_inputs in;
+
+    in = bsm_dec_inputs(200, 200, NULL, NULL);
+    BSM_CHECK("capture: exact tips record even without a coins frontier",
+              bsm_dec(&in, &fr) == NULL && fr.valid &&
+              fr.tip_height == 200 && fr.coins_best_height == 200 &&
+              memcmp(fr.tip_hash, dh, 32) == 0 &&
+              fr.block_index_count == 1234);
+
+    in = bsm_dec_inputs(203, 200, &g_dec_chain[203], g_dec_hash[203].data);
+    BSM_CHECK("capture: container ahead, coins-best above durable refuses",
+              bsm_cmp(&in, &fr, "coins_best_not_durable_tip") == 0 &&
+              !fr.valid);
+    in = bsm_dec_inputs(203, 200, NULL, NULL);
+    BSM_CHECK("capture: container ahead, no coins frontier refuses",
+              bsm_cmp(&in, &fr, "coins_best_not_durable_tip") == 0);
+    in = bsm_dec_inputs(203, 200, &g_dec_chain[199], g_dec_hash[199].data);
+    BSM_CHECK("capture: container ahead, coins-best below durable refuses",
+              bsm_cmp(&in, &fr, "coins_best_not_durable_tip") == 0);
+    in = bsm_dec_inputs(203, 200, &g_dec_chain[200], g_dec_hash[201].data);
+    BSM_CHECK("capture: coins-best at the durable height with another hash "
+              "refuses",
+              bsm_cmp(&in, &fr, "coins_best_not_durable_tip") == 0);
+    in = bsm_dec_inputs(203, 200, &g_dec_chain[201], g_dec_hash[200].data);
+    BSM_CHECK("capture: coins-best with the durable hash at another height "
+              "refuses",
+              bsm_cmp(&in, &fr, "coins_best_not_durable_tip") == 0);
+
+    in = bsm_dec_inputs(203, 200, &g_dec_chain[200], dh);
+    BSM_CHECK("capture: container ahead, coins-best at durable binds the "
+              "durable tip",
+              bsm_dec(&in, &fr) == NULL && fr.valid && fr.tip_height == 200 &&
+              fr.coins_best_height == 200 &&
+              memcmp(fr.tip_hash, dh, 32) == 0);
+    in = bsm_dec_inputs(198, 200, &g_dec_chain[200], dh);
+    BSM_CHECK("capture: container behind, coins-best at durable binds the "
+              "durable tip",
+              bsm_dec(&in, &fr) == NULL && fr.tip_height == 200);
+
+    in = bsm_dec_inputs(200 - BOOT_FR_CONTAINER_GAP_MAX, 200,
+                        &g_dec_chain[200], dh);
+    BSM_CHECK("capture: a gap of 64 records",
+              bsm_dec(&in, &fr) == NULL);
+    in = bsm_dec_inputs(200 - BOOT_FR_CONTAINER_GAP_MAX - 1, 200,
+                        &g_dec_chain[200], dh);
+    BSM_CHECK("capture: a gap of 65 refuses",
+              bsm_cmp(&in, &fr, "container_tip_lags_durable_tip") ==
+              0);
+
+    in = bsm_dec_inputs(63, 64, &g_dec_chain[64], g_dec_hash[64].data);
+    BSM_CHECK("capture: lower tip at height 63 refuses",
+              bsm_cmp(&in, &fr, "container_tip_lags_durable_tip") ==
+              0);
+    in = bsm_dec_inputs(64, 65, &g_dec_chain[65], g_dec_hash[65].data);
+    BSM_CHECK("capture: lower tip at height 64 records",
+              bsm_dec(&in, &fr) == NULL);
+
+    in = bsm_dec_inputs(200, 200, NULL, NULL);
+    in.durable_block = NULL;
+    BSM_CHECK("capture: durable block absent from the index refuses",
+              bsm_cmp(&in, &fr, "container_tip_lags_durable_tip") ==
+              0);
+    in = bsm_dec_inputs(200, 200, NULL, NULL);
+    in.durable_found = false;
+    BSM_CHECK("capture: no durable tip refuses",
+              bsm_cmp(&in, &fr, "no_durable_tip") == 0);
+    in = bsm_dec_inputs(200, 200, NULL, NULL);
+    in.container_tip = NULL;
+    BSM_CHECK("capture: no container tip refuses",
+              bsm_cmp(&in, &fr, "no_container_tip") == 0);
+    return failures;
+}
+
 int test_boot_shutdown_marker(void)
 {
     int failures = 0;
@@ -646,6 +779,7 @@ int test_boot_shutdown_marker(void)
     failures += bsm_check_block_file_fingerprint();
     failures += bsm_check_block_file_shutdown_wiring();
     failures += bsm_check_container_tip_relation();
+    failures += bsm_check_capture_decision();
 
     return failures;
 }

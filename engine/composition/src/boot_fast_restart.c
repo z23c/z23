@@ -171,62 +171,87 @@ bool boot_fast_restart_tip_matches_container(
     return p == lo;
 }
 
-/* Fill `fr` from the live state. Returns NULL when a binding was filled, else
- * the reason none may be recorded. The binding names the DURABLE tip (what
- * progress.kv and coins hold); the container tip only has to be the same
- * block or sit within BOOT_FR_CONTAINER_GAP_MAX blocks of it on one pprev
- * chain, which is what a block applied in the last seconds before shutdown
- * looks like. Every other disagreement refuses. */
-static const char *boot_fast_restart_fill_facts(
-    struct main_state *ms, struct fast_restart_shutdown_facts *fr)
+/* The refusal reason when the container tip and the durable tip cannot both
+ * name one chain position, else NULL. */
+static const char *boot_fr_tip_refusal(const struct boot_fr_capture_inputs *in)
 {
-    /* Raw container tip (active_chain_cached_tip): the tip authority may
-     * already be stopped at teardown. */
-    struct block_index *ctip = active_chain_cached_tip(&ms->chain_active);
-    int dh = -1;
-    uint8_t dhash[32];
+    const struct block_index *ctip = in->container_tip;
     if (!ctip || !ctip->phashBlock || ctip->nHeight < 0)
         return "no_container_tip";
-    if (!tip_finalize_stage_resolve_durable_tip(progress_store_db(), &dh,
-                                                dhash) || dh <= 0)
+    if (!in->durable_found || in->durable_height <= 0)
         return "no_durable_tip";
-    struct uint256 dkey;
-    memcpy(dkey.data, dhash, 32);
-    const struct block_index *dtip = block_map_find(&ms->map_block_index,
-                                                    &dkey);
-    if (!dtip || dtip->nHeight != dh ||
-        !boot_fast_restart_tip_matches_container(ctip, dtip)) {
-        printf("[shutdown] container tip h=%d, durable tip h=%d (%s)\n",
-               ctip->nHeight, dh,
-               dtip ? "durable block in index" : "durable block absent");
+    const struct block_index *dtip = in->durable_block;
+    if (!dtip || dtip->nHeight != in->durable_height ||
+        !boot_fast_restart_tip_matches_container(ctip, dtip))
         return "container_tip_lags_durable_tip";
-    }
-    bool exact = ctip == dtip;
-    int32_t cb_h = -1;
-    uint8_t cb_hash[32];
-    bool cb_found = false;
-    bool cb_ok = reducer_frontier_derive_coins_best_now(&cb_h, cb_hash,
-                                                        &cb_found);
-    bool cb_durable = cb_ok && cb_found && cb_h == dh &&
-                      memcmp(cb_hash, dhash, 32) == 0;
+    return NULL;
+}
+
+/* Decide whether shutdown may record a fast-restart binding and fill `fr`.
+ * Returns NULL when a binding was filled, else the reason none may be
+ * recorded. The binding names the DURABLE tip (what progress.kv and the coins
+ * frontier hold); the container tip only has to be that block or lie within
+ * BOOT_FR_CONTAINER_GAP_MAX blocks of it on one pprev chain. Every other
+ * disagreement refuses. */
+const char *boot_fast_restart_decide_facts(
+    const struct boot_fr_capture_inputs *in,
+    struct fast_restart_shutdown_facts *fr)
+{
+    const char *why = boot_fr_tip_refusal(in);
+    if (why)
+        return why;
+    bool exact = in->container_tip == in->durable_block;
+    bool cb_present = in->coins_derived && in->coins_found;
+    bool cb_durable = cb_present && in->coins_height == in->durable_height &&
+                      memcmp(in->coins_hash, in->durable_hash, 32) == 0;
     /* Off the exact tip, only a coins frontier AT the durable tip proves
      * that the block above it never reached the stores. */
     if (!exact && !cb_durable)
         return "coins_best_not_durable_tip";
     fr->valid = true;
-    fr->tip_height = dh;
-    memcpy(fr->tip_hash, dhash, 32);
+    fr->tip_height = in->durable_height;
+    memcpy(fr->tip_hash, in->durable_hash, 32);
     /* Prefer the durable coins-best frontier; on a healthy at-tip node it
      * equals the tip, so fall back to the tip when the derive is unavailable
      * at teardown (a boot-side mismatch just declines). */
-    fr->coins_best_height = cb_ok && cb_found ? cb_h : dh;
-    memcpy(fr->coins_best_hash, cb_ok && cb_found ? cb_hash : dhash, 32);
-    fr->block_index_count = (int64_t)ms->map_block_index.size;
-    if (!exact)
+    fr->coins_best_height = cb_present ? in->coins_height : in->durable_height;
+    memcpy(fr->coins_best_hash, cb_present ? in->coins_hash : in->durable_hash,
+           32);
+    fr->block_index_count = in->block_index_count;
+    return NULL;
+}
+
+/* Gather the live inputs for boot_fast_restart_decide_facts. Raw container
+ * tip (active_chain_cached_tip): the tip authority may already be stopped at
+ * teardown. */
+static const char *boot_fast_restart_fill_facts(
+    struct main_state *ms, struct fast_restart_shutdown_facts *fr)
+{
+    struct boot_fr_capture_inputs in;
+    memset(&in, 0, sizeof(in));
+    in.container_tip = active_chain_cached_tip(&ms->chain_active);
+    in.durable_found = tip_finalize_stage_resolve_durable_tip(
+        progress_store_db(), &in.durable_height, in.durable_hash);
+    if (in.durable_found) {
+        struct uint256 dkey;
+        memcpy(dkey.data, in.durable_hash, 32);
+        in.durable_block = block_map_find(&ms->map_block_index, &dkey);
+    }
+    in.coins_derived = reducer_frontier_derive_coins_best_now(
+        &in.coins_height, in.coins_hash, &in.coins_found);
+    in.block_index_count = (int64_t)ms->map_block_index.size;
+    const char *why = boot_fast_restart_decide_facts(&in, fr);
+    if (why && in.container_tip && in.durable_found)
+        printf("[shutdown] container tip h=%d, durable tip h=%d (%s)\n",
+               in.container_tip->nHeight, in.durable_height,
+               in.durable_block ? "durable block in index"
+                                : "durable block absent");
+    else if (!why && in.container_tip != in.durable_block)
         printf("[shutdown] container tip h=%d is within %d blocks of durable "
                "tip h=%d on one chain; binding the durable tip\n",
-               ctip->nHeight, BOOT_FR_CONTAINER_GAP_MAX, dh);
-    return NULL;
+               in.container_tip->nHeight, BOOT_FR_CONTAINER_GAP_MAX,
+               in.durable_height);
+    return why;
 }
 
 void boot_fast_restart_capture_shutdown_facts(struct main_state *ms)
