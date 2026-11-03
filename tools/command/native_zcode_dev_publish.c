@@ -540,10 +540,14 @@ void zcl_native_handle_zcode_publish_plan(
             "plan", "zcode.publish.plan", reply))
         return;
     struct zpub_accepted_bundle bundle;
-    if (!zpub_normalize(request, reply, &bundle) ||
-        !zpub_find_lane_readonly(request, reply, &bundle) ||
-        !zpub_prepare_accepted_objects(request, reply, &bundle))
+    if (!zpub_normalize(request, reply, &bundle))
         return;
+    if (!zpub_find_lane_readonly(request, reply, &bundle) ||
+        !zpub_prepare_accepted_objects(request, reply, &bundle)) {
+        /* Idempotent: releases the mapping set normalize loaded. */
+        zpub_bundle_free(&bundle);
+        return;
+    }
     struct zpub_job_binding job_binding;
     if (!zpub_job_preflight(request, reply, &bundle, &job_binding)) {
         zpub_bundle_free(&bundle);
@@ -777,10 +781,13 @@ static void zpub_commit_local(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     struct zpub_accepted_bundle bundle;
-    if (!zpub_normalize(request, reply, &bundle) ||
-        !zpub_find_lane_commit(request, reply, &bundle) ||
-        !zpub_prepare_accepted_objects(request, reply, &bundle))
+    if (!zpub_normalize(request, reply, &bundle))
         return;
+    if (!zpub_find_lane_commit(request, reply, &bundle) ||
+        !zpub_prepare_accepted_objects(request, reply, &bundle)) {
+        zpub_bundle_free(&bundle);
+        return;
+    }
     struct zpub_job_binding job_binding;
     if (!zpub_job_preflight(request, reply, &bundle, &job_binding)) {
         zpub_bundle_free(&bundle);
