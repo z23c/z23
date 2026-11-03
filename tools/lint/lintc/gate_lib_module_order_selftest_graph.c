@@ -18,18 +18,13 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include "base/serialize_le.h"
 #include "lintc.h"
 #include "gate_lib_module_order_graph.h"
 #include "gate_lib_module_order_priv.h"
 
 enum { LMSG_PATH = 1024, LMSG_IMG = 4096, LMSG_REPORT = 8192, LMSG_SYMS = 8,
        LMSG_SHNUM = 5 };
-
-static void lmsg_put(unsigned char *b, size_t off, uint64_t v, unsigned n)
-{
-    for (unsigned i = 0; i < n; i++)
-        b[off + i] = (unsigned char)(v >> (8 * i));
-}
 
 /* Appends s to the string table at *used; returns its offset. */
 static uint32_t lmsg_str(unsigned char *tab, size_t *used, const char *s)
@@ -43,27 +38,27 @@ static uint32_t lmsg_str(unsigned char *tab, size_t *used, const char *s)
 
 static void lmsg_shdr(unsigned char *b, size_t at, const uint64_t f[8])
 {
-    lmsg_put(b, at, f[0], 4);
-    lmsg_put(b, at + 4, f[1], 4);
-    lmsg_put(b, at + 8, f[2], 8);
-    lmsg_put(b, at + 24, f[3], 8);
-    lmsg_put(b, at + 32, f[4], 8);
-    lmsg_put(b, at + 40, f[5], 4);
-    lmsg_put(b, at + 44, f[6], 4);
-    lmsg_put(b, at + 56, f[7], 8);
+    zcl_write_u32_le(b + at, (uint32_t)f[0]);
+    zcl_write_u32_le(b + at + 4, (uint32_t)f[1]);
+    zcl_write_u64_le(b + at + 8, f[2]);
+    zcl_write_u64_le(b + at + 24, f[3]);
+    zcl_write_u64_le(b + at + 32, f[4]);
+    zcl_write_u32_le(b + at + 40, (uint32_t)f[5]);
+    zcl_write_u32_le(b + at + 44, (uint32_t)f[6]);
+    zcl_write_u64_le(b + at + 56, f[7]);
 }
 
 static void lmsg_ehdr(unsigned char *b, size_t shoff)
 {
     memcpy(b, "\177ELF\2\1\1", 7);
-    lmsg_put(b, 16, 1, 2);       /* ET_REL */
-    lmsg_put(b, 18, 62, 2);      /* EM_X86_64 */
-    lmsg_put(b, 20, 1, 4);
-    lmsg_put(b, 40, shoff, 8);
-    lmsg_put(b, 52, 64, 2);
-    lmsg_put(b, 58, 64, 2);
-    lmsg_put(b, 60, LMSG_SHNUM, 2);
-    lmsg_put(b, 62, LMSG_SHNUM - 1, 2);
+    zcl_write_u16_le(b + 16, (uint16_t)(1));       /* ET_REL */
+    zcl_write_u16_le(b + 18, (uint16_t)(62));      /* EM_X86_64 */
+    zcl_write_u32_le(b + 20, 1);
+    zcl_write_u64_le(b + 40, shoff);
+    zcl_write_u16_le(b + 52, (uint16_t)(64));
+    zcl_write_u16_le(b + 58, (uint16_t)(64));
+    zcl_write_u16_le(b + 60, (uint16_t)(LMSG_SHNUM));
+    zcl_write_u16_le(b + 62, (uint16_t)(LMSG_SHNUM - 1));
 }
 
 /* Builds the object image: .text (empty), .symtab, .strtab, .shstrtab.
@@ -88,9 +83,9 @@ static size_t lmsg_image(unsigned char *b, const char *def,
     memcpy(b + shso, shs, sizeof shs);
     for (int i = 1; i < nsym; i++) {
         size_t at = sym + 24 * (size_t)i;
-        lmsg_put(b, at, name[i], 4);
+        zcl_write_u32_le(b + at, name[i]);
         b[at + 4] = i == 1 ? 0x12 : 0x10; /* GLOBAL FUNC / GLOBAL NOTYPE */
-        lmsg_put(b, at + 6, i == 1 ? 1 : 0, 2);
+        zcl_write_u16_le(b + at + 6, (uint16_t)(i == 1 ? 1 : 0));
     }
     lmsg_ehdr(b, shdr);
     const uint64_t t[8] = { 1, 1, 6, 64, 0, 0, 0, 0 };
@@ -215,34 +210,38 @@ static int lmsg_expect(const char *what, int mode, const char *root,
     return 0;
 }
 
+/* Writes root/lib/<mod>/src/<mod>.c, the source that keeps mod's object. */
+static int lmsg_source(const char *root, const char *mod)
+{
+    char dir[LMSG_PATH], path[LMSG_PATH], text[128];
+    if (ovf(snprintf(dir, sizeof dir, "%s/lib/%s/src", root, mod), sizeof dir) ||
+        ovf(snprintf(path, sizeof path, "%s/%s.c", dir, mod), sizeof path) ||
+        ovf(snprintf(text, sizeof text, "int def_%s;\n", mod), sizeof text))
+        return 2;
+    int rc = csr_mkdirs(dir);
+    return rc ? rc : csr_write(path, text);
+}
+
 /* Two epochs (the newer one wins) plus an object whose source is gone. */
 static int lmsg_tree(const char *root)
 {
-    char old[LMSG_PATH], cur[LMSG_PATH], src[LMSG_PATH];
+    char old[LMSG_PATH], cur[LMSG_PATH];
     if (ovf(snprintf(old, sizeof old, "%s/build/obj/epochs/old", root),
             sizeof old) ||
         ovf(snprintf(cur, sizeof cur, "%s/build/obj/epochs/new", root),
-            sizeof cur) ||
-        ovf(snprintf(src, sizeof src, "%s/lib/alpha/src", root), sizeof src))
+            sizeof cur))
         return 2;
-    int rc = csr_mkdirs(old) || csr_mkdirs(cur) || csr_mkdirs(src);
+    int rc = csr_mkdirs(old) || csr_mkdirs(cur);
     rc = rc ? rc : lmos_write_graph(old, "zeta>alpha");
     rc = rc ? rc : lmos_write_graph(cur, "alpha>beta;beta>alpha;gone>alpha");
+    rc = rc ? rc : lmsg_source(root, "alpha");
+    rc = rc ? rc : lmsg_source(root, "beta");
     if (rc)
         return rc;
     struct timeval tv[2] = { { 1000, 0 }, { 1000, 0 } };
     if (utimes(old, tv) != 0)
         return die("z23-lint: cannot set mtime on %s\n", old);
-    char path[LMSG_PATH];
-    if (ovf(snprintf(path, sizeof path, "%s/alpha.c", src), sizeof path))
-        return 2;
-    rc = csr_write(path, "int def_alpha;\n");
-    if (rc || ovf(snprintf(src, sizeof src, "%s/lib/beta/src", root), sizeof src))
-        return rc ? rc : 2;
-    if (csr_mkdirs(src) || ovf(snprintf(path, sizeof path, "%s/beta.c", src),
-                              sizeof path))
-        return 2;
-    return csr_write(path, "int def_beta;\n");
+    return 0;
 }
 
 int lmos_graph_selftest(const char *root)

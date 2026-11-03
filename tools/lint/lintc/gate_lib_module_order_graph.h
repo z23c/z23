@@ -52,4 +52,7 @@ struct lmg_objs {
 int lmg_collect(const struct lmg_req *req, struct lmg_objs *o, FILE *diag);
 void lmg_objs_free(struct lmg_objs *o);
 
+/* qsort order for an array of C strings. */
+int lmg_cmp_strp(const void *a, const void *b);
+
 #endif

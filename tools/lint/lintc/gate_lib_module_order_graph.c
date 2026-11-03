@@ -23,6 +23,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include "base/safe_alloc.h"
 #include "gate_lib_module_order_graph.h"
 #include "gate_lib_module_order_priv.h"
 
@@ -68,7 +69,7 @@ static uint32_t lmg_hash(const char *s, size_t len)
 static int lmg_pool_rehash(struct lmg_pool *p)
 {
     size_t nt = p->tcap ? p->tcap * 2 : 1024;
-    int *t = calloc(nt, sizeof *t);
+    int *t = zcl_calloc(nt, sizeof *t, "lmg_tab");
     if (!t)
         return -1;
     for (size_t i = 0; i < p->n; i++) {
@@ -90,7 +91,7 @@ static int lmg_pool_grow(struct lmg_pool *p, size_t len)
         size_t nc = p->cap ? p->cap * 2 : 65536;
         while (nc < p->used + len + 1)
             nc *= 2;
-        char *a = realloc(p->arena, nc);
+        char *a = zcl_realloc(p->arena, nc, "lmg_arena");
         if (!a)
             return -1;
         p->arena = a;
@@ -98,13 +99,13 @@ static int lmg_pool_grow(struct lmg_pool *p, size_t len)
     }
     if (p->n == p->ncap) {
         size_t nc = p->ncap ? p->ncap * 2 : 1024;
-        size_t *o = realloc(p->off, nc * sizeof *o);
+        size_t *o = zcl_realloc(p->off, nc * sizeof *o, "lmg_off");
         if (o)
             p->off = o;
-        int *a = o ? realloc(p->aux, nc * sizeof *a) : NULL;
+        int *a = o ? zcl_realloc(p->aux, nc * sizeof *a, "lmg_aux") : NULL;
         if (a)
             p->aux = a;
-        unsigned char *f = a ? realloc(p->flag, nc) : NULL;
+        unsigned char *f = a ? zcl_realloc(p->flag, nc, "lmg_flag") : NULL;
         if (f)
             p->flag = f;
         if (!f)
@@ -231,7 +232,7 @@ static int lmg_ref_push(struct lmg_graph *g, int mod, int sym, int src)
 {
     if (g->nref == g->cref) {
         size_t nc = g->cref ? g->cref * 2 : 4096;
-        struct lmg_edge *r = realloc(g->ref, nc * sizeof *r);
+        struct lmg_edge *r = zcl_realloc(g->ref, nc * sizeof *r, "lmg_ref");
         if (!r)
             return -1;
         g->ref = r;
@@ -351,24 +352,27 @@ static size_t lmg_resolve(struct lmg_graph *g)
     return u;
 }
 
-static int lmg_cmp_line(const void *a, const void *b)
-{
-    return strcmp(*(char *const *)a, *(char *const *)b);
-}
-
 static char *lmg_fmt(const char *fmt, const char *a, const char *b,
                      const char *c, const char *d)
 {
     int n = snprintf(NULL, 0, fmt, a, b, c, d);
-    char *s = n < 0 ? NULL : malloc((size_t)n + 1);
+    char *s = n < 0 ? NULL : zcl_malloc((size_t)n + 1, "lmg_line");
     if (s)
         snprintf(s, (size_t)n + 1, fmt, a, b, c, d);
     return s;
 }
 
+/* Frees the first n lines of v and v itself (v may be NULL). */
+static void lmg_lines_free(char **v, size_t n)
+{
+    while (v && n > 0)
+        free(v[--n]);
+    free(v);
+}
+
 static char **lmg_edge_lines(const struct lmg_graph *g, size_t *n)
 {
-    char **v = malloc((g->nref + 1) * sizeof *v);
+    char **v = zcl_malloc((g->nref + 1) * sizeof *v, "lmg_lines");
     *n = 0;
     for (size_t i = 0; v && i < g->nref; i++) {
         const struct lmg_edge *e = &g->ref[i];
@@ -376,9 +380,8 @@ static char **lmg_edge_lines(const struct lmg_graph *g, size_t *n)
                         lmg_str(&g->mods, e->to), lmg_str(&g->syms, e->sym),
                         lmg_str(&g->srcs, e->src));
         if (!v[*n]) {
-            for (size_t k = 0; k < *n; k++)
-                free(v[k]);
-            free(v);
+            lmg_lines_free(v, *n);
+            *n = 0;
             return NULL;
         }
         (*n)++;
@@ -386,16 +389,11 @@ static char **lmg_edge_lines(const struct lmg_graph *g, size_t *n)
     return v;
 }
 
-static int lmg_cmp_cstr(const void *a, const void *b)
-{
-    return strcmp(*(const char *const *)a, *(const char *const *)b);
-}
-
 /* One summary line for the edges [lo, hi) sharing (from, to): the distinct
  * symbols, sorted. */
 static char *lmg_group_line(const struct lmg_graph *g, size_t lo, size_t hi)
 {
-    const char **sy = malloc((hi - lo) * sizeof *sy);
+    const char **sy = zcl_malloc((hi - lo) * sizeof *sy, "lmg_syms");
     if (!sy)
         return NULL;
     size_t ns = 0, len = 0;
@@ -404,11 +402,11 @@ static char *lmg_group_line(const struct lmg_graph *g, size_t lo, size_t hi)
             sy[ns] = lmg_str(&g->syms, g->ref[i].sym);
             len += strlen(sy[ns++]) + 1;
         }
-    qsort(sy, ns, sizeof *sy, lmg_cmp_cstr);
+    qsort(sy, ns, sizeof *sy, lmg_cmp_strp);
     const char *from = lmg_str(&g->mods, g->ref[lo].from);
     const char *to = lmg_str(&g->mods, g->ref[lo].to);
     size_t cap = strlen(from) + strlen(to) + len + 64;
-    char *line = malloc(cap);
+    char *line = zcl_malloc(cap, "lmg_group");
     if (line) {
         int off = snprintf(line, cap, "%s -> %s\t%zu\t", from, to, ns);
         for (size_t i = 0; i < ns; i++)
@@ -421,7 +419,7 @@ static char *lmg_group_line(const struct lmg_graph *g, size_t lo, size_t hi)
 
 static char **lmg_summary_lines(const struct lmg_graph *g, size_t *n)
 {
-    char **v = malloc((g->nref + 1) * sizeof *v);
+    char **v = zcl_malloc((g->nref + 1) * sizeof *v, "lmg_lines");
     size_t lo = 0;
     *n = 0;
     while (v && lo < g->nref) {
@@ -431,9 +429,8 @@ static char **lmg_summary_lines(const struct lmg_graph *g, size_t *n)
             hi++;
         v[*n] = lmg_group_line(g, lo, hi);
         if (!v[*n]) {
-            while (*n > 0)
-                free(v[--*n]);
-            free(v);
+            lmg_lines_free(v, *n);
+            *n = 0;
             return NULL;
         }
         (*n)++;
@@ -442,16 +439,9 @@ static char **lmg_summary_lines(const struct lmg_graph *g, size_t *n)
     return v;
 }
 
-static void lmg_lines_free(char **v, size_t n)
-{
-    for (size_t i = 0; v && i < n; i++)
-        free(v[i]);
-    free(v);
-}
-
 static int lmg_emit_lines(char **v, size_t n, int fas, FILE *out)
 {
-    qsort(v, n, sizeof *v, lmg_cmp_line);
+    qsort(v, n, sizeof *v, lmg_cmp_strp);
     int rc = 0;
     if (fas)
         rc = lmg_fas((const char *const *)v, n, out);
@@ -484,12 +474,12 @@ static int lmg_modules(const struct lmg_graph *g, const struct lmg_objs *o,
                     o->dir_rel);
         return LMG_UNREADABLE;
     }
-    char **v = malloc(g->mods.n * sizeof *v);
+    char **v = zcl_malloc(g->mods.n * sizeof *v, "lmg_mods");
     if (!v)
         return LMG_ERROR;
     for (size_t i = 0; i < g->mods.n; i++)
         v[i] = (char *)lmg_str(&g->mods, (int)i);
-    qsort(v, g->mods.n, sizeof *v, lmg_cmp_line);
+    qsort(v, g->mods.n, sizeof *v, lmg_cmp_strp);
     for (size_t i = 0; i < g->mods.n; i++)
         fprintf(out, "%s\n", v[i]);
     free(v);

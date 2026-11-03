@@ -16,6 +16,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include "base/safe_alloc.h"
 #include "gate_lib_module_order_graph.h"
 
 /* Production tree first, then the release/fast/asan test trees and the dev
@@ -31,7 +32,7 @@ struct lmg_list { char **p; size_t n, cap; };
 static char *lmg_fmt2(const char *a, const char *b)
 {
     size_t la = strlen(a), lb = strlen(b);
-    char *s = malloc(la + lb + 2);
+    char *s = zcl_malloc(la + lb + 2, "lmg_path");
     if (!s)
         return NULL;
     memcpy(s, a, la);
@@ -52,7 +53,7 @@ static int lmg_push(struct lmg_list *l, char *s)
 {
     if (l->n == l->cap) {
         size_t nc = l->cap ? l->cap * 2 : 256;
-        char **np = realloc(l->p, nc * sizeof *np);
+        char **np = zcl_realloc(l->p, nc * sizeof *np, "lmg_objs");
         if (!np) {
             free(s);
             return -1;
@@ -210,9 +211,11 @@ static int lmg_select(const struct lmg_req *req, struct lmg_objs *o, FILE *diag)
     return LMG_NONE;
 }
 
-static int lmg_cmp_path(const void *a, const void *b)
+/* qsort order for an array of C strings. */
+int lmg_cmp_strp(const void *a, const void *b)
 {
-    return strcmp(*(char *const *)a, *(char *const *)b);
+    int r = strcmp(*(char *const *)a, *(char *const *)b);
+    return (r > 0) - (r < 0);
 }
 
 /* A root-selected object keeps its place only while its source file exists:
@@ -222,7 +225,7 @@ static int lmg_source_exists(const char *root, const char *dirj, const char *obj
     size_t dl = strlen(dirj);
     const char *rel = obj + dl + 1;
     size_t rl = strlen(rel);
-    char *src = malloc(rl + 1);
+    char *src = zcl_malloc(rl + 1, "lmg_src");
     if (!src)
         return 0;
     memcpy(src, rel, rl - 1);
@@ -282,7 +285,7 @@ int lmg_collect(const struct lmg_req *req, struct lmg_objs *o, FILE *diag)
                     "  Run 'make build-only -j$(nproc)' first.\n", o->dir_rel);
         return LMG_NONE;
     }
-    qsort(o->path, o->n, sizeof *o->path, lmg_cmp_path);
+    qsort(o->path, o->n, sizeof *o->path, lmg_cmp_strp);
     return 0;
 }
 
