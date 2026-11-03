@@ -369,7 +369,7 @@ test-setup:
 	@grep -q 'setTextIsSelectable", false' wallet_setup_ui.c || { echo 'the recovery words must not be selectable' >&2; exit 1; }
 	@grep -q 'next = screen_for(next);' shell.c || { echo 'the shell must send the wallet and payment screens through setup until it is confirmed' >&2; exit 1; }
 	@test "$$(grep -c 'go(env, SCREEN_SEND)' shell.c)" = 2 && grep -q 'take_reshow()) go(env, SCREEN_SEND);' shell.c || { echo 'Send must be entered through open_send, except to show a kept flow' >&2; exit 1; }
-	@grep -q 'case CMD_CAMERA_PASTE: open_send(env, NULL, "");' shell.c || { echo 'Paste instead must open the Send flow' >&2; exit 1; }
+	@grep -q 'case CMD_CAMERA_PASTE: open_send(env, NULL, "", false);' shell.c || { echo 'Paste instead must open the Send flow' >&2; exit 1; }
 	@grep -q 'memory_cleanse(buffer, sizeof(buffer))' operations.c || { echo 'the command reader must wipe its read buffer' >&2; exit 1; }
 	@grep -q 'zapp_setup_state(r->files) != ZAPP_SETUP_READY' operations.c || { echo 'the receive command must be refused until setup is confirmed' >&2; exit 1; }
 
@@ -395,6 +395,9 @@ test-wallet-send:
 	$(HOST_CC) $(HOST_WARNINGS) -pthread $(WALLET_SEND_INCLUDES) tests/wallet_send_node_test.c wallet_send_node.c wallet_send_screen.c wallet_screens.c \
 	  secure_window.c wallet_view.c $(WALLET_SEND_SOURCES) $(SPEECH_JSON) -o '$(BUILD_DIR)/wallet-send-node-test'
 	'$(BUILD_DIR)/wallet-send-node-test'
+	$(HOST_CC) $(HOST_WARNINGS) -pthread $(WALLET_SEND_INCLUDES) tests/wallet_sweep_test.c wallet_sweep.c wallet_send_node.c wallet_send_screen.c wallet_screens.c \
+	  secure_window.c wallet_view.c $(WALLET_SEND_SOURCES) $(SPEECH_JSON) -o '$(BUILD_DIR)/wallet-sweep-test'
+	'$(BUILD_DIR)/wallet-sweep-test'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread $(WALLET_SEND_INCLUDES) tests/wallet_send_device_test.c wallet_send_device.c device_key.c wallet_send_screen.c wallet_screens.c \
 	  secure_window.c wallet_view.c $(WALLET_SEND_SOURCES) $(SPEECH_JSON) -o '$(BUILD_DIR)/wallet-send-device-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/wallet-send-device.XXXXXX'); \
@@ -407,7 +410,7 @@ test-wallet-send:
 	'$(BUILD_DIR)/pay-stash-test'
 	$(HOST_CC) $(HOST_WARNINGS) -I. tests/payment_notice_test.c payment_notice.c -o '$(BUILD_DIR)/payment-notice-test'
 	'$(BUILD_DIR)/payment-notice-test'
-	@if grep -nE '(^|[^a-z_])(printf|fprintf|puts|fputs|perror|syslog)\(|nodelog|__android_log' wallet_send.c wallet_send_screen.c wallet_send_node.c wallet_send_device.c wallet_send_keeper.c wallet_send_ui.c wallet_reveal.c pay_stash.c send_key.c; then \
+	@if grep -nE '(^|[^a-z_])(printf|fprintf|puts|fputs|perror|syslog)\(|nodelog|__android_log' wallet_send.c wallet_send_screen.c wallet_send_node.c wallet_sweep.c wallet_send_device.c wallet_send_keeper.c wallet_send_ui.c wallet_reveal.c pay_stash.c send_key.c; then \
 	  echo 'wallet_send must not log' >&2; exit 1; fi
 	@if grep -n 'zapp_pay_stash_take' $(WALLET_FREE); then \
 	  echo 'only the shell may take the payment out of the stash' >&2; exit 1; fi

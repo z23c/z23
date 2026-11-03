@@ -71,6 +71,12 @@ static void send_commands_run(struct zapp_runtime *r)
     assert(zapp_wallet_send_run(r, "plan", "{\"to\":\"X\"}", 60000, got, sizeof(got)));
     assert(strstr(got, "\"argv\":\"core wallet shielded send -datadir=") && strstr(got, "--input=-"));
     assert(strstr(got, "\"stdin\":\"{\"to\":\"X\"}\""));
+    /* The move of public funds into the private balance: its plan and its commit go to the shield command, input on stdin. */
+    assert(zapp_wallet_send_run(r, "shieldplan", "{\"wallet_scope\":\"prod\"}", 60000, got, sizeof(got)));
+    assert(strstr(got, "\"argv\":\"core wallet shielded shield -datadir=") && strstr(got, "--input=-"));
+    assert(strstr(got, "\"stdin\":\"{\"wallet_scope\":\"prod\"}\"") && !strstr(got, "shielded send"));
+    assert(zapp_wallet_send_run(r, "shieldcommit", "{\"confirm\":true}", 60000, got, sizeof(got)));
+    assert(strstr(got, "core wallet shielded shield -datadir=") && strstr(got, "\"stdin\":\"{\"confirm\":true}\""));
     assert(zapp_wallet_send_run(r, "unlock", "{}", 60000, got, sizeof(got)) && strstr(got, "core wallet security unlock"));
     assert(zapp_wallet_send_run(r, "lock", NULL, 60000, got, sizeof(got)) && strstr(got, "core wallet security lock"));
     assert(!strstr(got, "--input"));
@@ -85,6 +91,9 @@ static void send_refusals_run(struct zapp_runtime *r)
     assert(!zapp_wallet_send_run(r, "lock", "{}", 60000, got, sizeof(got)) && !strstr(got, "argv"));
     assert(!zapp_wallet_send_run(r, "plan", NULL, 60000, got, sizeof(got)) && !strstr(got, "argv"));
     assert(!zapp_wallet_send_run(r, "commit", "{}", 0, got, sizeof(got)) && !strstr(got, "argv"));
+    assert(!zapp_wallet_send_run(r, "shieldplan", NULL, 60000, got, sizeof(got)) && !strstr(got, "argv"));
+    assert(!zapp_wallet_send_run(r, "shieldcommit", "{}", 0, got, sizeof(got)) && !strstr(got, "argv"));
+    assert(!zapp_wallet_send_run(r, "shieldcommit", "{}", ZAPP_WALLET_SEND_TIMEOUT_MAX_MS + 1, got, sizeof(got)) && !strstr(got, "argv"));
     assert(!zapp_wallet_send_run(r, "commit", "{}", ZAPP_WALLET_SEND_TIMEOUT_MAX_MS + 1, got, sizeof(got)) && !strstr(got, "argv"));
     assert(!zapp_wallet_send_run(r, "summary", "{}", 60000, got, sizeof(got)));
     static const char *const other[] = {"export", "create", "restore", "send", "address", "history", "", "Plan"};
@@ -100,6 +109,8 @@ static void send_timeouts_run(struct zapp_runtime *r)
     char got[512];
     assert(!zapp_wallet_send_run(r, "plan", "SLEEP", 300, got, sizeof(got)) && strstr(got, "timed out"));
     assert(zapp_wallet_send_run(r, "commit", "SLEEP", 1, got, sizeof(got)) && strstr(got, "\"stdin\":\"SLEEP\""));
+    assert(zapp_wallet_send_run(r, "shieldcommit", "SLEEP", 1, got, sizeof(got)) && strstr(got, "\"stdin\":\"SLEEP\""));
+    assert(!zapp_wallet_send_run(r, "shieldplan", "SLEEP", 300, got, sizeof(got)) && strstr(got, "timed out"));
     assert(ZAPP_WALLET_COMMIT_MIN_MS >= 300000u);
 }
 

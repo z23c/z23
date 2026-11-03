@@ -16,6 +16,8 @@
 #define FLEET_CHECKED "Checked by your fleet"
 #define ALREADY_PAID "Already paid. Your node has this payment, so nothing new was sent."
 #define SENT_TO_NODE "The node has your payment. History shows when it leaves the phone."
+#define SWEEP_DONE "Done. It shows in your private balance after the next block."
+#define SWEEP_REPLAYED "Done. This move was already made. It shows in your private balance after the next block."
 
 struct wss {
     pthread_mutex_t lock;
@@ -69,8 +71,29 @@ static void fill_memo(const struct zapp_payment *pay, struct wss_view *v)
         i += n;
     }
 }
+/* The review of a sweep, in plain words. The total leaves the public address; the private balance gains it less the fee. */
+static void fill_sweep_review(const struct ws *ws, struct wss_view *v)
+{
+    char total[WSS_AMOUNT], arrives[WSS_AMOUNT], maturing[WSS_AMOUNT];
+    v->review = true;
+    wss_format_zat(ws->plan.total_zat, total, sizeof(total));
+    wss_format_zat(ws->plan.fee_zat, v->fee, sizeof(v->fee));
+    wss_format_zat(ws->plan.amount_zat, arrives, sizeof(arrives));
+    snprintf(v->amount, sizeof(v->amount), "%s", total);
+    snprintf(v->move, sizeof(v->move), "Move %s from your public address into your private balance. Fee %s.", total, v->fee);
+    snprintf(v->arrives, sizeof(v->arrives), "%s arrives in your private balance.", arrives);
+    if (ws->plan.remaining_inputs)
+        snprintf(v->move_note, sizeof(v->move_note), "Some coins on this address are left for a later move. Tap Make private again after this one.");
+    if (ws->plan.maturing_zat) {
+        wss_format_zat(ws->plan.maturing_zat, maturing, sizeof(maturing));
+        size_t used = strlen(v->move_note);
+        snprintf(v->move_note + used, sizeof(v->move_note) - used, "%sMined coins of %s are still maturing and are not moved.", used ? " " : "", maturing);
+    }
+    snprintf(v->fleet, sizeof(v->fleet), "%s", ws->gate.fleet_checked ? FLEET_CHECKED : WALLET_FLEET_UNCHECKED);
+}
 static void fill_review(const struct ws *ws, struct wss_view *v)
 {
+    if (ws->sweep) { fill_sweep_review(ws, v); return; }
     v->review = true;
     wss_format_zat(ws->pay.amount_zat, v->amount, sizeof(v->amount));
     wss_format_zat(ws->plan.fee_zat, v->fee, sizeof(v->fee));
@@ -104,7 +127,23 @@ static void fill_hold_status(const struct ws *ws, struct wss_view *v)
     else if (ws->lock_wanted)
         snprintf(v->status, sizeof(v->status), "Locking the wallet. Sending is possible again in a moment.");
 }
-static void fill_status(const struct ws *ws, struct wss_view *v)
+/* The words of a sweep where they differ from a payment's. False for the states that read the same. */
+static bool sweep_status(const struct ws *ws, struct wss_view *v)
+{
+    const char *text;
+    switch (ws->state) {
+    case WS_PLAN: text = "Looking at your public coins."; break;
+    case WS_AUTH: text = "Confirm with your screen lock to make your public funds private."; break;
+    case WS_COMMIT: text = "Moving your funds. This can take about two minutes on this phone."; break;
+    case WS_DONE: text = SWEEP_DONE; break;
+    case WS_PAID: text = SWEEP_REPLAYED; break;
+    case WS_CANCELLED: text = "Cancelled. Nothing was moved."; break;
+    default: return false;
+    }
+    snprintf(v->status, sizeof(v->status), "%s", text);
+    return true;
+}
+static void payment_status(const struct ws *ws, struct wss_view *v)
 {
     switch (ws->state) {
     case WS_PARSED: snprintf(v->status, sizeof(v->status), "Enter an amount to send."); break;
@@ -124,6 +163,10 @@ static void fill_status(const struct ws *ws, struct wss_view *v)
     case WS_PAID: snprintf(v->status, sizeof(v->status), "%s", ALREADY_PAID); break;
     case WS_IDLE: break;
     }
+}
+static void fill_status(const struct ws *ws, struct wss_view *v)
+{
+    if (!ws->sweep || !sweep_status(ws, v)) payment_status(ws, v);
 }
 static bool is_busy(enum ws_state state)
 {
@@ -152,6 +195,7 @@ void wss_view(struct wss *s, struct wss_view *v)
     v->can_retry = ws->state == WS_FAILED && ws->retry_ok;
     v->check_history = ws->state == WS_FAILED && ws->fail == WS_FAIL_COMMIT_UNKNOWN;
     v->can_pay_again = ws_can_pay_again(ws);
+    v->sweep = ws->sweep;
     if (ws->state == WS_PAID) {
         snprintf(v->txid, sizeof(v->txid), "%s", ws->txid);
         format_confirmed(s, ws->sent.answered_s, v->confirmed, sizeof(v->confirmed));
@@ -186,6 +230,19 @@ static bool progress_shown(struct wss *s, enum ws_state state)
     if (state == WS_COMMIT || state == WS_BROADCAST) s->progress_seen = false;
     return s->begun && !s->closed && !s->progress_seen;
 }
+/* The line of a sweep from the owner's confirmation on. A sweep is done or refused; it never waits to leave the phone. */
+static bool sweep_line(enum ws_state state, enum ws_fail fail, const char *amount, char *line, size_t cap)
+{
+    if (state == WS_COMMIT) snprintf(line, cap, "Sending %s to your private balance: building the transaction (about 2 min)", amount);
+    else if (state == WS_DONE) snprintf(line, cap, "%s", SWEEP_DONE);
+    else if (state == WS_PAID) snprintf(line, cap, "%s", SWEEP_REPLAYED);
+    else if (state == WS_FAILED && fail == WS_FAIL_COMMIT_UNKNOWN)
+        snprintf(line, cap, "Move status unknown: it may have been made. Check History before trying again.");
+    else if (state == WS_FAILED && failed_after_tap(fail))
+        snprintf(line, cap, "Not moved: %s. Your coins were not spent.", refusal_cause(fail));
+    else return false;
+    return true;
+}
 bool wss_progress(struct wss *s, char *line, size_t cap)
 {
     char amount[WSS_AMOUNT], to[40];
@@ -195,10 +252,12 @@ bool wss_progress(struct wss *s, char *line, size_t cap)
     enum ws_fail fail = ws->fail;
     bool shown = progress_shown(s, state);
     bool replayed = s->replayed;
-    wss_format_zat(ws->pay.amount_zat, amount, sizeof(amount));
+    bool sweep = ws->sweep;
+    wss_format_zat(sweep ? ws->plan.total_zat : ws->pay.amount_zat, amount, sizeof(amount));
     short_address(ws->pay.address, to, sizeof(to));
     pthread_mutex_unlock(&s->lock);
     if (!shown || !line || !cap) return false;
+    if (sweep) return sweep_line(state, fail, amount, line, cap);
     if (state == WS_COMMIT) snprintf(line, cap, "Sending %s to %s: building the payment (about 2 min)", amount, to);
     else if (state == WS_BROADCAST) snprintf(line, cap, "Sending %s to %s: waiting to leave the phone", amount, to);
     else if (state == WS_DONE) snprintf(line, cap, "Sent %s", amount);
@@ -240,6 +299,7 @@ static int outcome_of(struct wss *s, enum ws_state before)
     enum ws_state now = s->ws.state;
     if ((before != WS_COMMIT && before != WS_BROADCAST) || (now != WS_DONE && now != WS_FAILED && now != WS_PAID)) return -1;
     s->replayed = now == WS_PAID;   /* the node already held this payment as sent */
+    if (s->ws.sweep) return -1;     /* the Funds line tells the owner; a sweep sends no payment notice */
     if (now == WS_DONE || now == WS_PAID) return ZAPP_PAYMENT_SENT;
     return s->ws.fail == WS_FAIL_COMMIT_UNKNOWN ? ZAPP_PAYMENT_UNKNOWN : ZAPP_PAYMENT_NOT_SENT;
 }
@@ -250,10 +310,13 @@ static void snapshot(struct wss *s, struct wss_send_req *req, bool with_token)
 {
     memset(req, 0, sizeof(*req));
     pthread_mutex_lock(&s->lock);
-    memcpy(req->address, s->ws.pay.address, sizeof(req->address));
-    req->amount_zat = s->ws.pay.amount_zat;
-    memcpy(req->memo, s->ws.pay.memo, sizeof(req->memo));
-    req->memo_len = s->ws.pay.memo_len;
+    req->sweep = s->ws.sweep;
+    if (!req->sweep) {
+        memcpy(req->address, s->ws.pay.address, sizeof(req->address));
+        req->amount_zat = s->ws.pay.amount_zat;
+        memcpy(req->memo, s->ws.pay.memo, sizeof(req->memo));
+        req->memo_len = s->ws.pay.memo_len;
+    }
     memcpy(req->key, s->ws.key, sizeof(req->key));
     if (with_token) memcpy(req->plan_token, s->ws.plan.token, sizeof(req->plan_token));
     pthread_mutex_unlock(&s->lock);
@@ -324,11 +387,14 @@ static void freeze(struct wss *s)
 {
     struct wss_send_req *r = &s->tapped;
     memset(r, 0, sizeof(*r));
-    memcpy(r->address, s->ws.pay.address, sizeof(r->address));
-    r->amount_zat = s->ws.pay.amount_zat;
+    r->sweep = s->ws.sweep;
+    if (!r->sweep) {
+        memcpy(r->address, s->ws.pay.address, sizeof(r->address));
+        r->amount_zat = s->ws.pay.amount_zat;
+        memcpy(r->memo, s->ws.pay.memo, sizeof(r->memo));
+        r->memo_len = s->ws.pay.memo_len;
+    }
     r->fee_zat = s->ws.plan.fee_zat;   /* the fee the owner saw; the node refuses a commit without it */
-    memcpy(r->memo, s->ws.pay.memo, sizeof(r->memo));
-    r->memo_len = s->ws.pay.memo_len;
     memcpy(r->key, s->ws.key, sizeof(r->key));
     memcpy(r->plan_token, s->ws.plan.token, sizeof(r->plan_token));
 }
@@ -432,6 +498,7 @@ static void do_commit(struct wss *s, uint32_t ticket)
     ev.ok = out == WSS_COMMITTED;
     if (ev.ok && s->d.host.wall_s) ev.wall_s = s->d.host.wall_s(s->d.host.ctx);
     ev.replayed = ev.ok && info.replayed;
+    ev.why = info.why;
     if (ev.ok) snprintf(ev.txid, sizeof(ev.txid), "%s", info.txid);
     ev.refused = out == WSS_KEY_RELEASED;
     ev.fee_changed = out == WSS_FEE_CHANGED;
@@ -582,7 +649,8 @@ bool wss_exposed(struct wss *s)
     pthread_mutex_unlock(&s->lock);
     return exposed;
 }
-bool wss_begin(struct wss *s, const struct zapp_payment *pay)
+/* pay NULL begins a sweep. */
+static bool begin_flow(struct wss *s, const struct zapp_payment *pay)
 {
     struct ws_actions acts;
     struct ws_env env = {s->d.network, s->d.host.ctx, s->d.host.random, s->d.host.derive_key};
@@ -600,13 +668,17 @@ bool wss_begin(struct wss *s, const struct zapp_payment *pay)
     s->closed = false;
     s->replayed = false;
     s->progress_seen = false;
-    ws_open(&s->ws, &env, pay, s->d.host.now_ms ? s->d.host.now_ms(s->d.host.ctx) : 0, &acts);
+    uint64_t now = s->d.host.now_ms ? s->d.host.now_ms(s->d.host.ctx) : 0;
+    if (pay) ws_open(&s->ws, &env, pay, now, &acts);
+    else ws_open_sweep(&s->ws, &env, now, &acts);
     enqueue(s, &acts);
     pthread_mutex_unlock(&s->lock);
     kick(s);
     if (s->d.host.redraw) s->d.host.redraw(s->d.host.ctx);
     return true;
 }
+bool wss_begin(struct wss *s, const struct zapp_payment *pay) { return begin_flow(s, pay); }
+bool wss_begin_sweep(struct wss *s) { return begin_flow(s, NULL); }
 /* Leaving the screen cancels a flow that has not reached the wallet. A flow in authentication is not cancelled: the
  * system credential screen backgrounds the app, and the result of the prompt completes the payment. Only the Cancel
  * button ends it. A running commit is never cancelled either; the wallet is locked when the node answers. */

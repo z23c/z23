@@ -425,6 +425,7 @@ static void funds_lines(struct wallet_screen *s, const struct data *d)
     if (d->view.unready_line[0]) line(s, d->view.unready_line);
     if (d->view.total_line[0]) line(s, d->view.total_line);
     if (d->view.public_line[0]) line(s, d->view.public_line);
+    if (d->view.can_make_private) button(s, WALLET_ACT_MAKE_PRIVATE, "Make private");
     if (d->view.immature_line[0]) line(s, d->view.immature_line);
     if (d->funds_fresh) line(s, d->view.sync);
     else note(s, "Last read more than 30 seconds ago, so these amounts and the sync state may be out of date. Check that your node is running.");
@@ -1221,6 +1222,8 @@ static size_t from_funds(enum wallet_action action, struct job *jobs, enum walle
     if (action == WALLET_ACT_RECEIVE) return enter(WALLET_PAGE_RECEIVE, jobs);
     if (action == WALLET_ACT_HISTORY) return enter(WALLET_PAGE_HISTORY, jobs);
     if (action == WALLET_ACT_SEND) *outcome = WALLET_SEND;
+    if (action == WALLET_ACT_MAKE_PRIVATE && st.d.funds_loaded && !st.d.node_silent && st.d.view.can_make_private)
+        *outcome = WALLET_MAKE_PRIVATE;
     if (action == WALLET_ACT_START_NODE) *outcome = WALLET_START_NODE;
     if (action == WALLET_ACT_DISMISS_SEND) dismiss_send();
     if (action == WALLET_ACT_SHOW_PRIVATE) return show_private(jobs);

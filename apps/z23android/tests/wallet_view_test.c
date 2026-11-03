@@ -69,6 +69,34 @@ static void test_valid_reply(void)
     printf("  valid reply renders every line\n");
 }
 
+/* Make private is offered for a public balance above the fee, and only while sending is allowed. */
+static void test_can_make_private(void)
+{
+    char json[2048], blocked[2048];
+    struct wallet_view v;
+    assert(wallet_view_from_summary(VALID_REPLY, &v) && v.public_zat == 10000000u && v.can_make_private);
+    static const struct { const char *zat, *text; bool want; } amounts[] = {
+        {"0", "0.00000000", false},
+        {"10000", "0.00010000", false},         /* exactly the fee: nothing would be left */
+        {"10001", "0.00010001", true},          /* one zatoshi above it */
+        {"2100000000000000", "21000000.00000000", true},
+    };
+    for (size_t i = 0; i < sizeof(amounts) / sizeof(amounts[0]); ++i) {
+        char from[96], to[96];
+        snprintf(to, sizeof(to), "\"public_zat\":%s,\"public\":\"%s\"", amounts[i].zat, amounts[i].text);
+        snprintf(from, sizeof(from), "%s", "\"public_zat\":10000000,\"public\":\"0.10000000\"");
+        replace_once(json, sizeof(json), VALID_REPLY, from, to);
+        assert(wallet_view_from_summary(json, &v) && v.known && v.public_zat == strtoull(amounts[i].zat, NULL, 10));
+        assert(v.can_make_private == amounts[i].want);
+    }
+    /* The send gate of the wallet decides, with the reason shown as on Send. */
+    replace_once(blocked, sizeof(blocked), VALID_REPLY, "\"send_allowed\":true,\"send_blocked_reason\":\"\"",
+                 "\"send_allowed\":false,\"send_blocked_reason\":\"progress_store_unavailable\"");
+    assert(wallet_view_from_summary(blocked, &v) && v.known && !v.send_allowed && v.public_zat == 10000000u && !v.can_make_private);
+    assert(!wallet_view_from_summary("garbage", &v) && !v.can_make_private && v.public_zat == 0);
+    printf("  make private follows the public amount and the send gate\n");
+}
+
 static void test_empty_lines_and_singular(void)
 {
     char json[2048], json2[2048];
@@ -487,6 +515,7 @@ int main(void)
 {
     printf("wallet view model:\n");
     test_valid_reply();
+    test_can_make_private();
     test_empty_lines_and_singular();
     test_amount_format();
     test_immature_and_scan();

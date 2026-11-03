@@ -33,6 +33,9 @@ bool zapp_send_ui_create(JNIEnv *env, jobject activity, jobject container);
 void zapp_send_ui_destroy(JNIEnv *env);
 /* Opens the screen on a payment, or, with none, on a notice with Scan code and Enter address. */
 void zapp_send_ui_open(JNIEnv *env, const struct zapp_payment *pay, const char *notice);
+/* Opens the screen on the move of public funds into the private balance (Make private on Funds). The node names the amount,
+ * so nothing is passed; the review, the screen lock and the commit are the payment's. */
+void zapp_send_ui_open_sweep(JNIEnv *env);
 /* Redraws when what is shown changed since the last draw. */
 void zapp_send_ui_render(JNIEnv *env);
 /* Removes every widget and wipes the copy of the screen. */

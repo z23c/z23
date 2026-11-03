@@ -802,6 +802,54 @@ static void test_cache_silent_node(void)
     remove_dir();
 }
 
+/* ---- Make private ---- */
+
+static long make_private_button(void) { return find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_MAKE_PRIVATE); }
+
+/* Funds draws Make private under the public line when the public balance is above the fee and sending is allowed, and a tap
+ * hands the shell the move; it never runs a command itself. */
+static void test_make_private_offer(void)
+{
+    start(false);
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    long at = make_private_button(), pub = find_text(snap(), "0.1 ZCL public");
+    CHECK(at >= 0 && pub >= 0 && at == pub + 1 && !strcmp(text_at(snap(), at), "Make private"));
+    int ops = fake.op_count;
+    tap(WALLET_ACT_MAKE_PRIVATE, 0, WALLET_MAKE_PRIVATE);
+    CHECK(fake.op_count == ops && fake.reveal_started == 0);       /* the node is asked when the owner reviews, not by this tap */
+    wallet_screens_close();
+
+    /* A locked wallet that hides its private balance still shows its public one, and the move asks for the screen lock itself. */
+    start(false);
+    fake.summary = LOCKED_SUMMARY;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS) && make_private_button() >= 0 && has("Show private balance"));
+    wallet_screens_close();
+}
+/* The button is not drawn, and a tap that still arrives moves nothing, without a public amount above the fee, while sending
+ * is paused, and while the node is silent. */
+static void test_make_private_hidden(void)
+{
+    static const char *const none[] = {
+        SUMMARY("123456789", "1.23456789", "0", "0.00000000", "0", "0.00000000"),                  /* no public amount */
+        SUMMARY("123456789", "1.23456789", "0", "0.00000000", "10000", "0.00010000"),              /* exactly the fee */
+        SUMMARY_SEND("123456789", "1.23456789", "0", "0.00000000", "10000000", "0.10000000", "false", "progress_store_unavailable"),
+        NODE_UNAVAILABLE_ERROR, "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\"}}",
+    };
+    for (size_t i = 0; i < sizeof(none) / sizeof(none[0]); ++i) {
+        start(false);
+        fake.summary = none[i];
+        CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+        CHECK(make_private_button() < 0);
+        tap(WALLET_ACT_MAKE_PRIVATE, 0, WALLET_STAY);
+        wallet_screens_close();
+    }
+    start(false);
+    fake.summary = SUMMARY("123456789", "1.23456789", "0", "0.00000000", "10001", "0.00010001");   /* one zatoshi above the fee */
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS) && make_private_button() >= 0);
+    wallet_screens_close();
+    tap(WALLET_ACT_MAKE_PRIVATE, 0, WALLET_STAY);                    /* no screen is open */
+}
+
 /* ---- Show private balance ---- */
 
 static long reveal_button(void) { return find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_SHOW_PRIVATE); }
@@ -1944,6 +1992,8 @@ int main(int argc, char **argv)
     test_cache_from_the_future();
     test_cache_only_real_summaries();
     test_cache_silent_node();
+    test_make_private_offer();
+    test_make_private_hidden();
     test_reveal_offer();
     test_reveal_window();
     test_reveal_cancelled();

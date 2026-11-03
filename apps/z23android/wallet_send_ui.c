@@ -14,6 +14,7 @@
 #include "wallet_send_keeper.h"
 #include "wallet_reveal.h"
 #include "wallet_send_node.h"
+#include "wallet_sweep.h"
 #include "wallet_view.h"
 #include <pthread.h>
 #include <stdatomic.h>
@@ -220,7 +221,7 @@ static void host_outcome(void *ctx, int result)
 /* The ops of one flow live and die with its screen: a retired flow's worker keeps using them after the activity that
  * made them is gone, and a new screen never shares or resets them. */
 struct parts {
-    struct wsn node;
+    struct wsw node;
     struct wsd device;
     struct zapp_send_id id;   /* the wallet id the payment keys derive from */
     bool id_ok;
@@ -265,8 +266,8 @@ static struct wss *make_screen(void *ctx)
     struct parts *parts = calloc(1, sizeof(*parts));
     (void)ctx;
     if (!parts || !ui.activity) { free(parts); return NULL; }
-    wsn_init(&parts->node, &(struct wsn_runner){NULL, node_run, node_paused}, ZAPP_SCAN_NETWORK);
-    wsn_ops(&parts->node, &deps.node);
+    wsw_init(&parts->node, &(struct wsn_runner){NULL, node_run, node_paused}, ZAPP_SCAN_NETWORK);
+    wsw_ops(&parts->node, &deps.node);
     if (!wsd_init(&parts->device, NULL, key_ops, ui.activity->internalDataPath)) { free(parts); return NULL; }
     wsd_ops(&parts->device, &deps.device);
     parts->id_ok = zapp_send_id_load(ui.activity->internalDataPath, &parts->id);
@@ -422,9 +423,19 @@ static void line_if(JNIEnv *env, const char *text, float sp, uint32_t color)
 {
     if (text[0]) (void)text_view(env, text, sp, color);
 }
+/* The review of a sweep: what leaves the public address, what the private balance gains, and what stays behind. */
+static void draw_sweep_review(JNIEnv *env, const struct wss_view *v)
+{
+    (void)text_view(env, v->amount, 40.0f, WHITE);
+    (void)text_view(env, v->move, 18.0f, WHITE);
+    (void)text_view(env, v->arrives, 16.0f, SOFT);
+    line_if(env, v->move_note, 14.0f, AMBER);
+    line_if(env, v->fleet, 14.0f, SOFT);
+}
 static void draw_review(JNIEnv *env, const struct wss_view *v)
 {
     char text[WSS_LINE + 32];
+    if (v->sweep) { draw_sweep_review(env, v); return; }
     (void)text_view(env, v->amount, 40.0f, WHITE);
     snprintf(text, sizeof(text), "%s payment", v->kind);
     (void)text_view(env, text, 16.0f, SOFT);
@@ -457,6 +468,15 @@ static void draw_paid(JNIEnv *env, const struct wss_view *v)
         (void)text_view(env, text, 14.0f, SOFT);
     }
 }
+/* The amount can be changed on the review of a payment; a sweep takes what the node names. */
+static void draw_amount_edit(JNIEnv *env, const struct wss_view *v)
+{
+    if (v->sweep) return;
+    (void)input_view(env, "Amount in ZCL", INPUT_TYPE_DECIMAL, &ui.amount_input);
+    (void)button_view(env, B_SET_AMOUNT, v->state == WS_REVIEW ? "Change amount" : "Set amount", BUTTON_COLOR, false);
+}
+/* Another code can follow a finished payment, not a sweep and not a payment the node still holds. */
+static bool offers_scan(const struct wss_view *v) { return v->can_leave && v->state != WS_BROADCAST && !v->sweep; }
 static void draw_flow(JNIEnv *env, const struct wss_view *v)
 {
     if (v->review) draw_review(env, v);
@@ -465,14 +485,13 @@ static void draw_flow(JNIEnv *env, const struct wss_view *v)
     line_if(env, ui.hint, 14.0f, AMBER);
     if (ui.dropped) (void)text_view(env, "Another app is drawing over this screen, so your tap was ignored.", 14.0f, AMBER);
     if (v->state == WS_PARSED || v->state == WS_REVIEW) {
-        (void)input_view(env, "Amount in ZCL", INPUT_TYPE_DECIMAL, &ui.amount_input);
-        (void)button_view(env, B_SET_AMOUNT, v->state == WS_REVIEW ? "Change amount" : "Set amount", BUTTON_COLOR, false);
+        draw_amount_edit(env, v);
     }
-    if (v->can_send) (void)button_view(env, B_SEND, "Send", SEND_COLOR, true);
+    if (v->can_send) (void)button_view(env, B_SEND, v->sweep ? "Make private" : "Send", SEND_COLOR, true);
     if (v->can_retry) (void)button_view(env, B_RETRY, "Try again", BUTTON_COLOR, false);
     if (v->can_pay_again) (void)button_view(env, B_PAY_AGAIN, "Pay again", BUTTON_COLOR, false);
     if (v->can_cancel) (void)button_view(env, B_CANCEL, "Cancel", BUTTON_COLOR, false);
-    if (v->can_leave && v->state != WS_BROADCAST) (void)button_view(env, B_SCAN, "Scan another code", BUTTON_COLOR, false);
+    if (offers_scan(v)) (void)button_view(env, B_SCAN, "Scan another code", BUTTON_COLOR, false);
     if (v->can_leave) (void)button_view(env, B_DONE, "Done", BUTTON_COLOR, false);
 }
 /* No payment is open: a notice, and the two ways to name one. */
@@ -501,7 +520,7 @@ void zapp_send_ui_render(JNIEnv *env)
     ui.away = false;
     if (ui.is_drawn && ui.drawn_version == ui.version && !memcmp(&v, &ui.drawn, sizeof(v))) return;
     release_widgets(env);
-    (void)text_view(env, "Send", 24.0f, WHITE);
+    (void)text_view(env, v.sweep ? "Make private" : "Send", 24.0f, WHITE);
     if (ui.flow && ui.keeper.screen) draw_flow(env, &v);
     else draw_blank(env);
     /* The phone must not sleep while a payment is built: it takes about two minutes. */
@@ -533,25 +552,40 @@ static bool flow_live(void)
     wss_view(ui.keeper.screen, &v);
     return v.visible;
 }
-static void open_payment(const struct zapp_payment *pay)
+static void flow_started(void)
 {
-    if (ui.keeper.screen && wss_begin(ui.keeper.screen, pay)) {
-        ui.flow = true;
-        ui.moved = false;
-        gate_reset();
-        ui.final_line[0] = 0;
-        ui.notice[0] = ui.hint[0] = 0;
-        ui.entering = false;
-        ui.dropped = false;
-        ui.version++;
-        return;
-    }
+    ui.flow = true;
+    ui.moved = false;
+    gate_reset();
+    ui.final_line[0] = 0;
+    ui.notice[0] = ui.hint[0] = 0;
+    ui.entering = false;
+    ui.dropped = false;
+    ui.version++;
+}
+/* A flow that could not begin: the window could not be protected, or the earlier flow has not ended. */
+static void flow_refused(void)
+{
     const char *refused = zapp_secure_window_refusal();
     char text[WSS_LINE];
     if (refused) snprintf(text, sizeof(text), "This phone would not let the app %s, so the payment is not shown.", refused);
     else snprintf(text, sizeof(text), "Another payment is still finishing. Try again in a moment.");
     ui.flow = flow_live();
     say(ui.notice, text);
+}
+static void open_payment(const struct zapp_payment *pay)
+{
+    if (ui.keeper.screen && wss_begin(ui.keeper.screen, pay)) flow_started();
+    else flow_refused();
+}
+void zapp_send_ui_open_sweep(JNIEnv *env)
+{
+    ui.entering = false;
+    ui.hint[0] = 0;
+    say(ui.notice, "");
+    if (ui.keeper.screen && wss_begin_sweep(ui.keeper.screen)) flow_started();
+    else flow_refused();
+    zapp_send_ui_render(env);
 }
 void zapp_send_ui_open(JNIEnv *env, const struct zapp_payment *pay, const char *notice)
 {

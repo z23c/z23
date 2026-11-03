@@ -3,6 +3,7 @@
 #define ZAPP_WALLET_VIEW_H
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /* Display strings for the Android funds screens, built from the JSON reply of
  * `z23 core wallet summary` (schema zcl.wallet_summary.v1). Pure: no I/O, no
@@ -11,6 +12,9 @@
  * screen never shows a zero balance that was not read. */
 
 #define WALLET_VIEW_LINE 128
+/* The wallet's default fee, 0.0001 ZCL. Public funds at or below it cannot be moved into the private balance; the plan of a
+ * move reports the real fee. */
+#define WALLET_VIEW_FEE_FLOOR_ZAT 10000u
 
 struct wallet_view {
     bool known;
@@ -27,6 +31,10 @@ struct wallet_view {
     char total_line[WALLET_VIEW_LINE];
     /* "0.1 ZCL public", or "" when there is no public balance. */
     char public_line[WALLET_VIEW_LINE];
+    /* The public balance in zatoshi, 0 when unknown. */
+    uint64_t public_zat;
+    /* Make private is offered: the public balance is above the fee and sending is allowed. */
+    bool can_make_private;
     /* "0.2 ZCL maturing, not yet spendable", or "" when no mined coins are maturing. */
     char immature_line[WALLET_VIEW_LINE];
     /* "Up to date at block N", "Still scanning your wallet history. Amounts may change.", or

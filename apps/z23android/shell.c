@@ -475,11 +475,14 @@ static void go(JNIEnv *env, enum screen next)
     if (next == SCREEN_HOME) show_home(env);
     show_notice(env);
 }
-/* Opens the Send screen with its flow. When setup is not finished, go shows the setup screens and nothing opens. */
-static void open_send(JNIEnv *env, const struct zapp_payment *pay, const char *notice)
+/* Opens the Send screen with its flow: a payment, a notice, or, with sweep, the move of public funds into the private
+ * balance. When setup is not finished, go shows the setup screens and nothing opens. */
+static void open_send(JNIEnv *env, const struct zapp_payment *pay, const char *notice, bool sweep)
 {
     go(env, SCREEN_SEND);
-    if (shell.current == SCREEN_SEND) zapp_send_ui_open(env, pay, notice);
+    if (shell.current != SCREEN_SEND) return;
+    if (sweep) zapp_send_ui_open_sweep(env);
+    else zapp_send_ui_open(env, pay, notice);
 }
 static void show_home(JNIEnv *env)
 {
@@ -559,7 +562,7 @@ static void run_nav(JNIEnv *env, const struct nav *nav)
     case CMD_LAYOUT: choose_layout(env, nav->arg); break;
     case CMD_SCAN_CANCEL: back(env); break;
     case CMD_CAMERA_SETTINGS: open_camera_settings(env); break;
-    case CMD_CAMERA_PASTE: open_send(env, NULL, ""); break;
+    case CMD_CAMERA_PASTE: open_send(env, NULL, "", false); break;
     }
 }
 static void launch(JNIEnv *env, const char *package, const char *activity, const char *name)
@@ -615,7 +618,8 @@ static bool same_target(const struct target *a, const struct target *b)
 static void run_wallet(JNIEnv *env, size_t button)
 {
     enum wallet_outcome outcome = zapp_wallet_ui_press(env, button);
-    if (outcome == WALLET_SEND) open_send(env, NULL, "");
+    if (outcome == WALLET_SEND) open_send(env, NULL, "", false);
+    else if (outcome == WALLET_MAKE_PRIVATE) open_send(env, NULL, "", true);
     else if (outcome == WALLET_START_NODE) shell.send("node_start", "");
     else if (outcome == WALLET_LEAVE) go(env, SCREEN_HOME);
 }
@@ -706,7 +710,7 @@ static void finish_scan(JNIEnv *env, const struct zapp_view *view)
         struct zapp_payment pay;
         bool have = zapp_pay_stash_take(&pay);
         const char *why = zapp_home_send_notice(view->scan_kind, view->scan_text, view->result);
-        open_send(env, have ? &pay : NULL, have ? "" : why);
+        open_send(env, have ? &pay : NULL, have ? "" : why, false);
         memory_cleanse(&pay, sizeof(pay));
         return;
     }

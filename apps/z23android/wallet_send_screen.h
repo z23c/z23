@@ -23,8 +23,10 @@
 #define WSS_UNLOCK_JSON 128
 #define WSS_MEMO 4200   /* A memo of ZAPP_PAY_MEMO_MAX bytes with every character written out in full. */
 
-/* What the node is asked to plan or commit. */
+/* What the node is asked to plan or commit. A sweep (sweep true) moves public funds into the private balance: it carries
+ * no address, no amount and no memo, only the idempotency key and, for a commit, the plan the node quoted. */
 struct wss_send_req {
+    bool sweep;
     char address[ZAPP_PAY_ADDRESS_MAX];
     uint64_t amount_zat;
     uint8_t memo[ZAPP_PAY_MEMO_MAX];
@@ -49,6 +51,7 @@ enum wss_commit_outcome wss_commit_outcome_of(bool answered, bool committed, con
  * (replayed true: nothing new was built), and the transaction id it reported. Empty strings when it reported none. */
 struct wss_commit_info {
     bool replayed;
+    enum ws_why why;   /* A refused sweep commit: the reason, when it is one the app knows. */
     char txid[WS_TXID_MAX];
 };
 
@@ -121,6 +124,7 @@ struct wss_view {
     bool can_leave;                   /* Draw Done: the flow ended, or the node holds the payment and only History can say more. */
     bool can_cancel;
     bool can_pay_again;               /* Draw Pay again: the node holds an earlier payment of this request as committed. */
+    bool sweep;                       /* The flow moves public funds into the private balance: draw move and arrives, not a payment. */
     uint32_t serial;                  /* Pass back with the Send tap. */
     char amount[WSS_AMOUNT];
     char address[WSS_ADDRESS];        /* In groups of four. */
@@ -131,6 +135,9 @@ struct wss_view {
     char memo[WSS_MEMO];              /* Data only: control and bidi characters are written as <U+XXXX>. */
     char warning[WSS_LINE];           /* The public destination warning. */
     char note[WSS_LINE];              /* Insufficient private funds. */
+    char move[WSS_LINE];              /* A sweep: "Move 0.1 ZCL from your public address into your private balance. Fee 0.0001 ZCL." */
+    char arrives[WSS_LINE];           /* A sweep: what the private balance gains. */
+    char move_note[WSS_LINE];         /* A sweep: coins left for a later move, and coins still maturing. */
     char txid[WS_TXID_MAX];           /* The earlier payment's transaction, in WS_PAID. */
     char confirmed[WSS_CONFIRMED];    /* When the node gave the committed answer, as "Today 14:05", in the phone's time zone; empty when the phone has no clock. */
     char fleet[WSS_LINE];             /* "Checked by your fleet" or "Not checked by your fleet". */
@@ -159,6 +166,8 @@ bool wss_rebind(struct wss *screen, const struct zapp_secure_ops *secure);
  * the flow in progress untouched, when a send is still in progress or when either protection is not in
  * force. A new code is accepted only once the earlier flow has ended. */
 bool wss_begin(struct wss *screen, const struct zapp_payment *pay);
+/* The same for a sweep: Make private on Funds. It is refused for the same reasons, and it names no payment. */
+bool wss_begin_sweep(struct wss *screen);
 /* Leaves the screen: cancels the flow where it can and removes the window protection. False while the
  * send is past the point of cancelling, and while the wallet is exposed or a lock is owed: keep calling
  * wss_on_tick until it returns true. */

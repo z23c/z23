@@ -317,6 +317,8 @@ static void render_known(const struct summary *s, struct wallet_view *out)
     render_unready(s, out);
     render_public(s, out);
     render_immature(s, out);
+    out->public_zat = (uint64_t)s->public_zat;
+    out->can_make_private = s->send_allowed && out->public_zat > WALLET_VIEW_FEE_FLOOR_ZAT;
     out->scanning = s->blocks_behind > 0 || s->scanned < s->header;
     out->current = s->current;
     out->encrypted = s->encrypted;

@@ -67,7 +67,8 @@ enum wallet_action {
     WALLET_ACT_NONE, WALLET_ACT_RECEIVE, WALLET_ACT_SEND, WALLET_ACT_HISTORY, WALLET_ACT_NEW_ADDRESS,
     WALLET_ACT_SET_AMOUNT, WALLET_ACT_NEWER, WALLET_ACT_OLDER, WALLET_ACT_DETAIL, WALLET_ACT_BACK,
     WALLET_ACT_START_NODE, WALLET_ACT_COPY_ADDRESS, WALLET_ACT_DISMISS_SEND,
-    WALLET_ACT_SHOW_PRIVATE /* ask the screen lock and show the private balance of a locked wallet for a short while */
+    WALLET_ACT_SHOW_PRIVATE, /* ask the screen lock and show the private balance of a locked wallet for a short while */
+    WALLET_ACT_MAKE_PRIVATE  /* open the review that moves public funds into the private balance */
 };
 /* Where the private balance request stands, as the environment reports it. WALLET_REVEAL_OPEN: the wallet is unlocked for
  * the owner and not yet locked again. The reasons after it say why the last request left the wallet locked. */
@@ -79,7 +80,8 @@ enum wallet_outcome {
     WALLET_STAY,  /* the screen changed or nothing happened */
     WALLET_SEND,  /* open the Send screen; the camera starts only from its Scan code button */
     WALLET_LEAVE, /* leave the wallet for Home */
-    WALLET_START_NODE /* ask the controller to start the node, and nothing else */
+    WALLET_START_NODE, /* ask the controller to start the node, and nothing else */
+    WALLET_MAKE_PRIVATE /* open the Send screen on the move of public funds into the private balance */
 };
 
 struct wallet_item {

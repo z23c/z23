@@ -47,6 +47,7 @@ static void clear_review(struct ws *ws)
     ws->tapped = false;
     ws->insufficient = false;
     ws->fail = WS_FAIL_NONE;
+    ws->why = WS_WHY_NONE;
     ws->retry_ok = false;
 }
 static void derive_request_key(struct ws *ws)
@@ -84,13 +85,16 @@ static void begin_validation(struct ws *ws, struct ws_actions *out)
 {
     clear_review(ws);
     ws->serial++;
+    /* A sweep has no address to check and no request to recognise: it goes straight to the wallet gate. */
+    if (ws->sweep) { enter(ws, WS_GATE); ask(ws, out, WS_ACT_READ_GATE); return; }
     derive_request_key(ws);
     if (request_was_sent(ws)) { show_sent(ws, out); return; }
     enter(ws, WS_VALIDATING);
     ask(ws, out, WS_ACT_VALIDATE_ADDRESS);
 }
-void ws_open(struct ws *ws, const struct ws_env *env, const struct zapp_payment *pay, uint64_t now_ms,
-             struct ws_actions *out)
+/* Drops the previous flow and keeps what outlives it: tickets, the last sent request and an owed lock. */
+static void reopen(struct ws *ws, const struct ws_env *env, const struct zapp_payment *pay, uint64_t now_ms,
+                   struct ws_actions *out)
 {
     uint32_t seq = ws->seq, serial = ws->serial, lock_ticket = ws->lock_ticket;
     struct ws_sent sent = ws->sent;
@@ -111,7 +115,19 @@ void ws_open(struct ws *ws, const struct ws_env *env, const struct zapp_payment 
     ws->lock_attempts = attempts;
     ws->lock_ms = lock_ms;
     ws->now_ms = now_ms;
+}
+void ws_open(struct ws *ws, const struct ws_env *env, const struct zapp_payment *pay, uint64_t now_ms,
+             struct ws_actions *out)
+{
+    reopen(ws, env, pay, now_ms, out);
     if (!pay->has_amount) { enter(ws, WS_PARSED); return; }
+    begin_validation(ws, out);
+}
+void ws_open_sweep(struct ws *ws, const struct ws_env *env, uint64_t now_ms, struct ws_actions *out)
+{
+    static const struct zapp_payment none;
+    reopen(ws, env, &none, now_ms, out);
+    ws->sweep = true;
     begin_validation(ws, out);
 }
 
@@ -119,7 +135,7 @@ static bool new_key(struct ws *ws)
 {
     static const char hex[] = "0123456789abcdef";
     uint8_t raw[WS_KEY_HEX / 2];
-    if (ws->env.derive_key && !ws->fresh_key) {
+    if (ws->env.derive_key && !ws->fresh_key && !ws->sweep) {
         if (!ws->request_key[0]) return false;
         memcpy(ws->key, ws->request_key, sizeof(ws->key));
         return true;
@@ -178,19 +194,27 @@ static void on_gate(struct ws *ws, const struct ws_event *ev, struct ws_actions 
 
 /* ---- plan and review ---- */
 
+/* A payment is quoted for the amount asked. A sweep asks for none: the node names it, and it must be above zero. */
 static bool plan_matches(const struct ws *ws, const struct ws_plan *p)
 {
-    return p->token[0] && memchr(p->token, 0, sizeof(p->token)) && p->amount_zat == ws->pay.amount_zat &&
+    bool amount = ws->sweep ? p->amount_zat > 0 : p->amount_zat == ws->pay.amount_zat;
+    return p->token[0] && memchr(p->token, 0, sizeof(p->token)) && amount &&
            p->total_zat == p->amount_zat + p->fee_zat && p->total_zat >= p->amount_zat;
 }
 static void on_plan(struct ws *ws, const struct ws_event *ev, struct ws_actions *out)
 {
     if (ws->state != WS_PLAN || ev->ticket != ws->ticket) return;
-    if (!ev->ok || !plan_matches(ws, &ev->plan)) { finish(ws, out, WS_FAILED, WS_FAIL_PLAN, true); return; }
+    if (!ev->ok || !plan_matches(ws, &ev->plan)) {
+        ws->why = ev->ok ? WS_WHY_NONE : ev->plan.why;
+        finish(ws, out, WS_FAILED, WS_FAIL_PLAN, true);
+        return;
+    }
     ws->plan = ev->plan;
+    if (ws->sweep) ws->pay.amount_zat = ws->plan.amount_zat;
     ws->serial++;
     ws->tapped = false;
-    ws->insufficient = ws->plan.total_zat > ws->gate.spendable_zat;
+    /* A sweep spends public coins; the private funds do not have to cover it. */
+    ws->insufficient = !ws->sweep && ws->plan.total_zat > ws->gate.spendable_zat;
     ws->gate_ms = ws->now_ms;
     ws->ticket = ++ws->seq;
     enter(ws, WS_REVIEW);
@@ -236,12 +260,14 @@ static void on_commit(struct ws *ws, const struct ws_event *ev, struct ws_action
     if (ev->ok && strncmp(ev->plan.token, ws->plan.token, sizeof(ws->plan.token)) == 0) {
         char txid[WS_TXID_MAX];
         snprintf(txid, sizeof(txid), "%s", ev->txid);
-        remember(ws, WS_SENT_COMMITTED, txid, ev->wall_s);
+        if (!ws->sweep) remember(ws, WS_SENT_COMMITTED, txid, ev->wall_s);
         if (ev->replayed) {
             snprintf(ws->txid, sizeof(ws->txid), "%s", txid);
             finish(ws, out, WS_PAID, WS_FAIL_NONE, false);
             return;
         }
+        /* A committed sweep has no route to wait for: it is done, and the wallet is locked. */
+        if (ws->sweep) { finish(ws, out, WS_DONE, WS_FAIL_NONE, false); return; }
         ask_lock(ws, out);
         enter(ws, WS_BROADCAST);
         ask(ws, out, WS_ACT_POLL_ROUTE);
@@ -250,10 +276,11 @@ static void on_commit(struct ws *ws, const struct ws_event *ev, struct ws_action
     /* Only the node saying it released the key, or refused the stale fee before building, proves that nothing
      * was sent. Any other answer leaves the payment possibly sent, so the flow ends for good: no retry, no
      * second commit for this review. A changed fee needs a new plan, so it returns to a new review. */
+    ws->why = ev->why;
     if (!ev->ok && ev->fee_changed) finish(ws, out, WS_FAILED, WS_FAIL_FEE_CHANGED, true);
     else if (!ev->ok && ev->refused) finish(ws, out, WS_FAILED, WS_FAIL_COMMIT_REFUSED, true);
     else {
-        remember(ws, WS_SENT_UNKNOWN, NULL, 0);
+        if (!ws->sweep) remember(ws, WS_SENT_UNKNOWN, NULL, 0);
         finish(ws, out, WS_FAILED, WS_FAIL_COMMIT_UNKNOWN, false);
     }
 }
@@ -274,6 +301,7 @@ static void on_lock(struct ws *ws, const struct ws_event *ev, struct ws_actions 
 
 static bool editable(const struct ws *ws)
 {
+    if (ws->sweep) return false;
     switch (ws->state) {
     case WS_PARSED: case WS_VALIDATING: case WS_GATE: case WS_WAITING: case WS_PLAN: case WS_REVIEW: return true;
     default: return false;
@@ -331,11 +359,11 @@ static void on_retry(struct ws *ws, struct ws_actions *out)
         enter(ws, WS_REVIEW);
         return;
     }
-    if (ws->pay.has_amount) begin_validation(ws, out);
+    if (ws->sweep || ws->pay.has_amount) begin_validation(ws, out);
 }
 bool ws_can_pay_again(const struct ws *ws)
 {
-    return ws->state == WS_PAID && ws->sent.kind == WS_SENT_COMMITTED;
+    return !ws->sweep && ws->state == WS_PAID && ws->sent.kind == WS_SENT_COMMITTED;
 }
 /* The owner chose to pay a request the node already holds a second time: full review and authentication again, under a
  * new random key. */
@@ -461,8 +489,48 @@ static const char *fail_text_more(enum ws_fail fail)
     default: return "";
     }
 }
+/* The sentence of a refused sweep: the node's reason when the app knows it, otherwise a plain refusal. */
+static const char *why_text(enum ws_why why)
+{
+    switch (why) {
+    case WS_WHY_NOTHING: return "There is not enough public money to move after the fee. Nothing was moved.";
+    case WS_WHY_NO_ADDRESS: return "Your wallet has no private address yet. Open Receive to make one, then try again. Nothing was moved.";
+    case WS_WHY_NO_PROVER: return "This phone cannot build private transactions yet. Wait for the node to finish starting, then try again. Nothing was moved.";
+    case WS_WHY_CHANGED: return "Your public coins changed while you were reviewing. Nothing was moved. Try again to see the new amount.";
+    case WS_WHY_NONE: break;
+    }
+    return "The node refused this move. Nothing was moved. Try again.";
+}
+static const char *sweep_fail_more(const struct ws *ws)
+{
+    switch (ws->fail) {
+    case WS_FAIL_BLOCKED: return ws->blocked[0] ? ws->blocked : "Moving funds is not available right now. Nothing was moved.";
+    case WS_FAIL_THERMAL: return "This phone is too warm, so the node is paused. Try again when it has cooled down. Nothing was moved.";
+    case WS_FAIL_FEE_CHANGED:
+        return ws->why == WS_WHY_CHANGED ? why_text(ws->why) : "The network fee changed. Nothing was moved. Try again to see the new fee.";
+    case WS_FAIL_NO_RANDOM: return "A key for this move could not be made. Nothing was moved. Try again.";
+    case WS_FAIL_WORKER: return "The phone could not start the task for this move. Nothing was moved. Try again.";
+    case WS_FAIL_NO_SCREEN_LOCK: return "Set a screen lock on this phone to move funds. Nothing was moved.";
+    default: return "The node refused this move. Nothing was moved. Try again.";
+    }
+}
+static const char *sweep_fail_text(const struct ws *ws)
+{
+    switch (ws->fail) {
+    case WS_FAIL_NONE: return "";
+    case WS_FAIL_STATE_UNKNOWN: return "The wallet state could not be read. Nothing was moved. Try again.";
+    case WS_FAIL_PLAN: case WS_FAIL_COMMIT_REFUSED: return why_text(ws->why);
+    case WS_FAIL_AUTH_DECLINED: return "Device authentication was not completed. Nothing was moved. Try again when you are ready.";
+    case WS_FAIL_KEY_GONE: return "The wallet key on this phone is gone. Restore the wallet from its recovery phrase.";
+    case WS_FAIL_UNLOCK: return "The wallet could not be unlocked. Nothing was moved. Try again.";
+    case WS_FAIL_WINDOW: return "The unlock time ended and the wallet is locked again. Nothing was moved. Try again.";
+    case WS_FAIL_COMMIT_UNKNOWN: return "It is not known whether this move was made. It will not be repeated from here. Check History.";
+    default: return sweep_fail_more(ws);
+    }
+}
 const char *ws_fail_text(const struct ws *ws)
 {
+    if (ws->sweep) return sweep_fail_text(ws);
     switch (ws->fail) {
     case WS_FAIL_NONE: return "";
     case WS_FAIL_ADDRESS: return "The node does not accept this address. Nothing was sent.";

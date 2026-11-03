@@ -70,7 +70,8 @@ bool zapp_wallet_run(struct zapp_runtime *r, const char *op, const char *arg, ch
 #define ZAPP_WALLET_SEND_TIMEOUT_MAX_MS 600000u
 /* Runs one step of a send and leaves its reply in out. op is "summary", "fleet" or "latest" (the read commands of
  * zapp_wallet_run, no input), "validateaddress" (input is the JSON-RPC parameter array, sent to the node over its local
- * RPC port), "lock" (no input), or "unlock", "plan" or "commit" (input is the request). The request of those three goes
+ * RPC port), "lock" (no input), or "unlock", "plan", "commit", "shieldplan" or "shieldcommit" (input is the request; the
+ * last two are the plan and the commit of the move of public funds into the private balance). The request of those five goes
  * to the node on standard input, never on the command line, and is read as is: the caller cleanses it. A command is
  * killed after timeout_ms, and a commit never sooner than ZAPP_WALLET_COMMIT_MIN_MS. False when the step fails, is
  * killed, or does not exist; out then holds the node reply, which may still be a typed error, or a plain sentence. */

@@ -639,6 +639,8 @@ static const struct send_command send_commands[] = {
     {"lock", {"core", "wallet", "security", "lock"}, false},
     {"plan", {"core", "wallet", "shielded", "send"}, true},
     {"commit", {"core", "wallet", "shielded", "send"}, true},
+    {"shieldplan", {"core", "wallet", "shielded", "shield"}, true},
+    {"shieldcommit", {"core", "wallet", "shielded", "shield"}, true},
 };
 static const struct send_command *send_command_of(const char *op)
 {
@@ -654,7 +656,8 @@ static bool send_args_valid(const struct send_command *c, const char *input, uns
 /* A commit builds a proof, about 100 seconds on a phone: no caller may cut it shorter than the floor. */
 static unsigned send_timeout(const char *op, unsigned timeout_ms)
 {
-    return !strcmp(op, "commit") && timeout_ms < ZAPP_WALLET_COMMIT_MIN_MS ? ZAPP_WALLET_COMMIT_MIN_MS : timeout_ms;
+    bool commit = !strcmp(op, "commit") || !strcmp(op, "shieldcommit");
+    return commit && timeout_ms < ZAPP_WALLET_COMMIT_MIN_MS ? ZAPP_WALLET_COMMIT_MIN_MS : timeout_ms;
 }
 bool zapp_wallet_send_run(struct zapp_runtime *r, const char *op, const char *input, unsigned timeout_ms, char *out, size_t cap)
 {

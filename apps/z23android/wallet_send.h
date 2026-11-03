@@ -21,7 +21,12 @@
  * produces a lock action, and no tap is accepted while a lock is owed.
  *
  * The machine stores the payment (an address, an amount and a memo) while the flow lives and writes
- * none of it anywhere: no log, no card, no notification. */
+ * none of it anywhere: no log, no card, no notification.
+ *
+ * The same machine runs a sweep, the move of public funds into the wallet's own private balance (ws_open_sweep). A
+ * sweep names no address and no amount: the node picks the public address and the private destination, quotes the
+ * total, and the plan it quotes is reviewed, authenticated and committed by exactly the steps above. It has no
+ * address check, no edits and no route wait, and its idempotency key is always random, one per review. */
 
 #define WS_KEY_HEX 32
 #define WS_TOKEN_MAX 40
@@ -83,11 +88,17 @@ struct ws_gate {
     uint64_t public_zat;      /* Public funds, never drawn on by a private send. */
 };
 
+/* Why the node refused a sweep, when it gave a reason the app knows; WS_WHY_NONE for every other refusal. */
+enum ws_why { WS_WHY_NONE, WS_WHY_NOTHING, WS_WHY_NO_ADDRESS, WS_WHY_NO_PROVER, WS_WHY_CHANGED };
+
 /* The plan the node quotes: the answer of `core wallet shielded send` without confirm. */
 struct ws_plan {
     uint64_t amount_zat;
     uint64_t fee_zat;
     uint64_t total_zat;
+    uint64_t remaining_inputs;   /* A sweep: mature coins of the address that a later sweep takes. */
+    uint64_t maturing_zat;       /* A sweep: mined coins of the address that are not mature yet. */
+    enum ws_why why;             /* A plan the node refused: the reason, when it is one the app knows. */
     char token[WS_TOKEN_MAX];
 };
 
@@ -123,6 +134,7 @@ struct ws_event {
     bool ok;
     bool refused;       /* The node released the key: nothing was sent. */
     bool fee_changed;   /* The node refused the stale fee before building: nothing was sent. */
+    enum ws_why why;    /* A refused sweep commit: the reason, when it is one the app knows. */
     bool replayed;      /* ok: the node answered from its record of an earlier commit under this key. */
     enum ws_auth_result auth;
     enum ws_route route;
@@ -182,6 +194,8 @@ struct ws {
     struct ws_sent sent;      /* Survives ws_open. */
     char txid[WS_TXID_MAX];   /* The transaction of an earlier payment, while in WS_PAID. */
     char blocked[WS_REASON_MAX];
+    bool sweep;               /* The flow moves public funds into the private balance and sends no payment. */
+    enum ws_why why;          /* Why the node refused the plan or the commit of a sweep. */
     uint32_t ticket;
     uint32_t serial;          /* Counts reviews; a new plan is a new serial. */
     bool tapped;              /* The owner tapped Send on this serial. */
@@ -203,6 +217,8 @@ struct ws {
  * no amount waits in WS_PARSED for WS_EV_SET_AMOUNT. */
 void ws_open(struct ws *ws, const struct ws_env *env, const struct zapp_payment *pay, uint64_t now_ms,
              struct ws_actions *out);
+/* Starts the sweep flow: the previous flow, if any, is dropped, and the wallet is read for the send gate at once. */
+void ws_open_sweep(struct ws *ws, const struct ws_env *env, uint64_t now_ms, struct ws_actions *out);
 /* Feeds one event and returns the actions to carry out. */
 void ws_step(struct ws *ws, const struct ws_event *ev, struct ws_actions *out);
 
