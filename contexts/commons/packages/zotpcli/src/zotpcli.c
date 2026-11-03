@@ -752,6 +752,65 @@ static int hex_dig(char c)
     return -1;
 }
 
+/* Resolve the \uXXXX escape whose backslash is text[i]; the caller has
+ * already checked that text[i + 1] is 'u'. Sets *cp to the code point
+ * and *adv to the bytes consumed (12 for a surrogate pair, else 6).
+ * Returns ZOTPCLI_ERR_FORMAT on bad hex, an escape past end, a high
+ * surrogate without a following low-surrogate escape, or a lone low
+ * surrogate. */
+static zotpcli_err json_unicode_escape_at(const char *text, size_t i,
+                                          size_t end, uint32_t *cp,
+                                          size_t *adv)
+{
+    if (i + 5 >= end) return ZOTPCLI_ERR_FORMAT;
+    uint32_t v = 0;
+    for (size_t k = 2; k <= 5; k++) {
+        int d = hex_dig(text[i + k]);
+        if (d < 0) return ZOTPCLI_ERR_FORMAT;
+        v = (v << 4) | (uint32_t)d;
+    }
+    *adv = 6;
+    if (v >= 0xd800 && v <= 0xdbff) { /* high surrogate */
+        if (i + 11 >= end || text[i + 6] != '\\' ||
+            text[i + 7] != 'u')
+            return ZOTPCLI_ERR_FORMAT;
+        uint32_t lo = 0;
+        for (size_t k = 8; k <= 11; k++) {
+            int d = hex_dig(text[i + k]);
+            if (d < 0) return ZOTPCLI_ERR_FORMAT;
+            lo = (lo << 4) | (uint32_t)d;
+        }
+        if (lo < 0xdc00 || lo > 0xdfff) return ZOTPCLI_ERR_FORMAT;
+        *cp = 0x10000u + ((v - 0xd800u) << 10) + (lo - 0xdc00u);
+        *adv = 12;
+    } else if (v >= 0xdc00 && v <= 0xdfff) {
+        return ZOTPCLI_ERR_FORMAT; /* lone low surrogate */
+    } else {
+        *cp = v;
+    }
+    return ZOTPCLI_OK;
+}
+
+/* Map the single-character escape `e` (the byte after a backslash, other
+ * than 'u') to its code point in *cp. Returns ZOTPCLI_ERR_FORMAT for any
+ * byte that is not an RFC 8259 simple escape. */
+static zotpcli_err json_simple_escape(char e, uint32_t *cp)
+{
+    switch (e) {
+    case '"': *cp = '"'; break;
+    case '\\': *cp = '\\'; break;
+    case '/': *cp = '/'; break;
+    case 'b': *cp = 0x08; break;
+    case 'f': *cp = 0x0c; break;
+    case 'n': *cp = 0x0a; break;
+    case 'r': *cp = 0x0d; break;
+    case 't': *cp = 0x09; break;
+    default:
+        return ZOTPCLI_ERR_FORMAT;
+    }
+    return ZOTPCLI_OK;
+}
+
 /* Decode a KEY/STR payload into buf[0..cap), NUL-terminated. Raw bytes
  * (already validated UTF-8 by the parser) are copied VERBATIM; only
  * the RFC 8259 escapes are resolved, \uXXXX (incl. surrogate pairs)
@@ -779,46 +838,12 @@ static zotpcli_err json_str_decode(const char *text,
         char e = text[i + 1];
         uint32_t cp = 0;
         size_t adv = 2;
-        switch (e) {
-        case '"': cp = '"'; break;
-        case '\\': cp = '\\'; break;
-        case '/': cp = '/'; break;
-        case 'b': cp = 0x08; break;
-        case 'f': cp = 0x0c; break;
-        case 'n': cp = 0x0a; break;
-        case 'r': cp = 0x0d; break;
-        case 't': cp = 0x09; break;
-        case 'u': {
-            if (i + 5 >= end) return ZOTPCLI_ERR_FORMAT;
-            uint32_t v = 0;
-            for (size_t k = 2; k <= 5; k++) {
-                int d = hex_dig(text[i + k]);
-                if (d < 0) return ZOTPCLI_ERR_FORMAT;
-                v = (v << 4) | (uint32_t)d;
-            }
-            adv = 6;
-            if (v >= 0xd800 && v <= 0xdbff) { /* high surrogate */
-                if (i + 11 >= end || text[i + 6] != '\\' ||
-                    text[i + 7] != 'u')
-                    return ZOTPCLI_ERR_FORMAT;
-                uint32_t lo = 0;
-                for (size_t k = 8; k <= 11; k++) {
-                    int d = hex_dig(text[i + k]);
-                    if (d < 0) return ZOTPCLI_ERR_FORMAT;
-                    lo = (lo << 4) | (uint32_t)d;
-                }
-                if (lo < 0xdc00 || lo > 0xdfff) return ZOTPCLI_ERR_FORMAT;
-                cp = 0x10000u + ((v - 0xd800u) << 10) + (lo - 0xdc00u);
-                adv = 12;
-            } else if (v >= 0xdc00 && v <= 0xdfff) {
-                return ZOTPCLI_ERR_FORMAT; /* lone low surrogate */
-            } else {
-                cp = v;
-            }
-            break;
-        }
-        default:
-            return ZOTPCLI_ERR_FORMAT;
+        if (e == 'u') {
+            zotpcli_err ue = json_unicode_escape_at(text, i, end, &cp, &adv);
+            if (ue != ZOTPCLI_OK) return ue;
+        } else {
+            zotpcli_err se = json_simple_escape(e, &cp);
+            if (se != ZOTPCLI_OK) return se;
         }
         char enc[4];
         size_t en = zutf8_encode(cp, enc);
