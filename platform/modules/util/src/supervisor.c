@@ -270,18 +270,6 @@ static _Atomic uint64_t g_runner_wake_seq = 0;
  * in diagnostics.  g_lock also makes concurrent JSON reads race-free. */
 static char g_runner_active_name[SUPERVISOR_NAME_MAX];
 
-const char *supervisor_stall_reason_name(enum supervisor_stall_reason r)
-{
-    switch (r) {
-    case SUPERVISOR_STALL_NONE:             return "none";
-    case SUPERVISOR_STALL_TIME_DEADLINE:    return "time_deadline";
-    case SUPERVISOR_STALL_NO_PROGRESS:      return "no_progress";
-    case SUPERVISOR_STALL_CHILD_REPORTED:   return "child_reported";
-    case SUPERVISOR_STALL_REPEATED_RESTART: return "repeated_restart";
-    }
-    return "(invalid)";
-}
-
 /* The policy an operator should be TOLD, which is not always the one a child
  * declared. Three children (chain.coord_escalation, net.outbound_floor, and
  * the staged-sync stages) arm detection by storing progress_max_quiet_us
@@ -299,26 +287,6 @@ supervisor_effective_progress_policy(const struct liveness_contract *c)
     if (atomic_load(&c->progress_max_quiet_us) > 0)
         return SUPERVISOR_PROGRESS_ARMED;
     return SUPERVISOR_PROGRESS_UNDECLARED;
-}
-
-const char *supervisor_progress_policy_name(enum supervisor_progress_policy p)
-{
-    switch (p) {
-    case SUPERVISOR_PROGRESS_UNDECLARED: return "undeclared";
-    case SUPERVISOR_PROGRESS_ARMED:      return "armed";
-    case SUPERVISOR_PROGRESS_EXEMPT:     return "exempt";
-    }
-    return "(invalid)";
-}
-
-const char *supervisor_restart_policy_name(enum supervisor_restart_policy p)
-{
-    switch (p) {
-    case SUPERVISOR_RESTART_TEMPORARY: return "temporary";
-    case SUPERVISOR_RESTART_TRANSIENT: return "transient";
-    case SUPERVISOR_RESTART_PERMANENT: return "permanent";
-    }
-    return "(invalid)";
 }
 
 /* ── Init / registry ───────────────────────────────────────────────── */
@@ -920,6 +888,14 @@ static void *supervisor_stall_runner_main(void *arg)
     return NULL;
 }
 
+/* Effective tick window: period_us (sub-second override) wins when set, else
+ * period_secs. 0 means the supervisor does not drive this child's ticks. */
+static int64_t tick_window_us(struct liveness_contract *c)
+{
+    int64_t period_u = atomic_load(&c->period_us);
+    return period_u > 0 ? period_u : atomic_load(&c->period_secs) * 1000000;
+}
+
 /* Execute every child whose tick_pending flag is set. Runs on the tick-runner
  * thread in production and inline only in the threadless test seam. Snapshots
  * pointers under the registry lock, then invokes callbacks outside it. */
@@ -940,7 +916,12 @@ static void run_due_ticks(void)
         struct liveness_contract *c = snap[i];
         if (!c) continue;
         if (atomic_load(&c->completed)) continue;
+        if (!atomic_load(&c->tick_pending) || atomic_load(&c->tick_running))
+            continue;   /* not due, or its callback is already in flight */
 
+        /* Published before tick_running: see deadline_lapsed. */
+        atomic_store(&c->dispatch_base_us,
+                     platform_time_monotonic_us() - tick_window_us(c));
         bool expected_running = false;
         if (!atomic_compare_exchange_strong(&c->tick_running,
                                              &expected_running, true))
@@ -1002,19 +983,50 @@ static void supervisor_monitor_runner(int64_t now)
     }
 }
 
-static void sweep_contract(struct liveness_contract *c, int64_t now)
+/* The tick-runner's own deadline (us) while it owns dispatch and its heartbeat
+ * is inside that deadline; 0 when the runner is disabled or has lapsed. */
+static int64_t runner_queue_bound_us(int64_t now)
+{
+    int64_t bound = atomic_load(&g_runner_contract.deadline_secs) * 1000000;
+    if (!atomic_load(&g_runner_enabled) || bound <= 0 ||
+        now - atomic_load(&g_runner_contract.last_tick_us) >= bound)
+        return 0;
+    return bound;
+}
+
+/* Whether `c` has gone deadline_s without a tick. One runner dispatches every
+ * child with a tick window, so waiting behind another child's callback is not
+ * this child's stall: queued for a live runner it may wait its period plus the
+ * runner's own deadline, and while its callback runs the deadline counts from
+ * the dispatch's nominal previous tick (dispatch_base_us). Self-ticking
+ * children and a child queued behind a lapsed runner count from last_tick_us,
+ * read after the flags so a callback finishing between the reads shows its
+ * fresh tick. */
+static bool deadline_lapsed(struct liveness_contract *c, int64_t now,
+                            int64_t deadline_s, int64_t queue_bound_us)
+{
+    if (deadline_s <= 0) return false;
+    int64_t window = tick_window_us(c), limit = deadline_s * 1000000;
+    int64_t base = INT64_MIN;
+    if (window > 0) {
+        bool pending = atomic_load(&c->tick_pending);
+        bool running = atomic_load(&c->tick_running);
+        if (pending && !running && queue_bound_us > 0 &&
+            window + queue_bound_us > limit)
+            limit = window + queue_bound_us;
+        if (running) base = atomic_load(&c->dispatch_base_us);
+    }
+    int64_t last = atomic_load(&c->last_tick_us);
+    return now - (base > last ? base : last) >= limit;
+}
+
+static void sweep_contract(struct liveness_contract *c, int64_t now,
+                           int64_t queue_bound_us)
 {
     int64_t last_tick = atomic_load(&c->last_tick_us);
-    int64_t period_s  = atomic_load(&c->period_secs);
-    int64_t period_u  = atomic_load(&c->period_us);
     int64_t deadl_s   = atomic_load(&c->deadline_secs);
     int64_t quiet_us  = atomic_load(&c->progress_max_quiet_us);
-
-    /* Effective tick window: period_us (sub-second override) wins when set,
-     * else period_secs. Default period_us=0 ⇒ byte-identical to before for
-     * every child that does not opt into the sub-second cadence. */
-    int64_t period_window_us = period_u > 0 ? period_u
-                                            : period_s * 1000000;
+    int64_t period_window_us = tick_window_us(c);
 
     /* Periodic on_tick driving. When the configured period has elapsed we
      * only MARK the child due (an atomic flag); the tick-runner thread
@@ -1038,9 +1050,7 @@ static void sweep_contract(struct liveness_contract *c, int64_t now)
     int sr = atomic_load(&c->stall_reason);
     if (sr != SUPERVISOR_STALL_NONE) return;
 
-    /* Reload last_tick_us in case the tick-runner just bumped it. */
-    int64_t lt = atomic_load(&c->last_tick_us);
-    if (deadl_s > 0 && (now - lt) >= deadl_s * 1000000) {
+    if (deadline_lapsed(c, now, deadl_s, queue_bound_us)) {
         int expected = SUPERVISOR_STALL_NONE;
         if (atomic_compare_exchange_strong(&c->stall_reason,
                 &expected, SUPERVISOR_STALL_TIME_DEADLINE)) {
@@ -1083,6 +1093,7 @@ static void sweep_once(void)
     memcpy(snap, g_contracts, (size_t)n * sizeof(snap[0]));
     pthread_mutex_unlock(&g_lock);
 
+    int64_t queue_bound_us = runner_queue_bound_us(now);
     for (int i = 0; i < n; i++) {
         /* Shutdown gate: once process shutdown is requested, dispatch no
          * further callbacks. A staged-sync on_tick drains validation work
@@ -1094,7 +1105,7 @@ static void sweep_once(void)
         if (!c) continue;
         if (atomic_load(&c->completed)) continue;
 
-        sweep_contract(c, now);
+        sweep_contract(c, now, queue_bound_us);
     }
 
     /* Drain / monitor the tick-runner. Production startup requires it. Inline
@@ -1435,6 +1446,11 @@ void supervisor_sweep_once_for_testing(void)
     sweep_once();
 }
 
+void supervisor_run_due_ticks_for_testing(void)
+{
+    run_due_ticks();
+}
+
 void supervisor_tick_runner_setup_for_testing(int64_t deadline_secs)
 {
     liveness_contract_init(&g_runner_contract, "supervisor.tick_runner");
@@ -1456,22 +1472,6 @@ void supervisor_tick_runner_monitor_for_testing(void)
     supervisor_monitor_runner(platform_time_monotonic_us());
 }
 #endif
-
-int64_t supervisor_tick_runner_last_hb_age_us(void)
-{
-    return platform_time_monotonic_us() -
-           atomic_load(&g_runner_contract.last_tick_us);
-}
-
-uint32_t supervisor_tick_runner_stall_fires(void)
-{
-    return atomic_load(&g_runner_contract.stall_fires);
-}
-
-bool supervisor_tick_runner_running(void)
-{
-    return atomic_load(&g_runner_running);
-}
 
 long supervisor_tick_runner_tid(void)
 {

@@ -12,6 +12,38 @@
 
 /* ── Introspection ─────────────────────────────────────────────────── */
 
+const char *supervisor_stall_reason_name(enum supervisor_stall_reason r)
+{
+    switch (r) {
+    case SUPERVISOR_STALL_NONE:             return "none";
+    case SUPERVISOR_STALL_TIME_DEADLINE:    return "time_deadline";
+    case SUPERVISOR_STALL_NO_PROGRESS:      return "no_progress";
+    case SUPERVISOR_STALL_CHILD_REPORTED:   return "child_reported";
+    case SUPERVISOR_STALL_REPEATED_RESTART: return "repeated_restart";
+    }
+    return "(invalid)";
+}
+
+const char *supervisor_progress_policy_name(enum supervisor_progress_policy p)
+{
+    switch (p) {
+    case SUPERVISOR_PROGRESS_UNDECLARED: return "undeclared";
+    case SUPERVISOR_PROGRESS_ARMED:      return "armed";
+    case SUPERVISOR_PROGRESS_EXEMPT:     return "exempt";
+    }
+    return "(invalid)";
+}
+
+const char *supervisor_restart_policy_name(enum supervisor_restart_policy p)
+{
+    switch (p) {
+    case SUPERVISOR_RESTART_TEMPORARY: return "temporary";
+    case SUPERVISOR_RESTART_TRANSIENT: return "transient";
+    case SUPERVISOR_RESTART_PERMANENT: return "permanent";
+    }
+    return "(invalid)";
+}
+
 int supervisor_child_count_total(void)
 {
     pthread_mutex_lock(&g_lock);
@@ -28,6 +60,22 @@ uint64_t supervisor_sweep_heartbeat(void)
 int64_t supervisor_sweep_last_us(void)
 {
     return atomic_load(&g_sweep_last_us);
+}
+
+int64_t supervisor_tick_runner_last_hb_age_us(void)
+{
+    return platform_time_monotonic_us() -
+           atomic_load(&g_runner_contract.last_tick_us);
+}
+
+uint32_t supervisor_tick_runner_stall_fires(void)
+{
+    return atomic_load(&g_runner_contract.stall_fires);
+}
+
+bool supervisor_tick_runner_running(void)
+{
+    return atomic_load(&g_runner_running);
 }
 
 int supervisor_snapshot_all(struct supervisor_snapshot *out, int max)

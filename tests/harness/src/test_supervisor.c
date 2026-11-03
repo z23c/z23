@@ -8,6 +8,9 @@
  *   - child-side: tick monotonicity, progress edge-rearm, stall report
  *   - supervisor loop: period drives on_tick, deadline fires on_stall,
  *     progress-frozen fires on_stall, edge-once not every tick
+ *   - dispatch delay: a child queued behind another callback is not charged
+ *     while the tick runner is live; silent, wedged, lapsed-runner and
+ *     never-dispatched children still fire
  *   - lifecycle: start/stop idempotency, second start returns true
  *   - introspection: snapshot_all + dump_state_json shape
  *
@@ -21,6 +24,7 @@
 #include "util/supervisor.h"
 #include "util/blocker.h"
 #include "json/json.h"
+#include "platform/clock.h"
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -1626,6 +1630,173 @@ static int check_wedged_tick_runner_blocker(void)
     return failures;
 }
 
+/* ── dispatch delay is the runner's, not the queued child's ─────────────
+ * Replays a phone bundle (2026-11-03): another child's on_tick held the one
+ * shared tick runner for about 10 s, and build.requester (period 2 s,
+ * deadline 10 s) reported time_deadline at last_tick_age 10.078 s although it
+ * ticked every time the runner reached it. Virtual time drives the sweep at a
+ * jittered 100/178 ms cadence, and the runner seams set dispatch time and
+ * runner heartbeat exactly. */
+static _Atomic int64_t g_dispatch_now_us;
+
+static int64_t dispatch_clock_mono_ns(void *self)
+{
+    (void)self;
+    return atomic_load(&g_dispatch_now_us) * 1000;
+}
+
+static int64_t dispatch_clock_wall_ms(void *self)
+{
+    (void)self;
+    return INT64_C(1700000000000) + atomic_load(&g_dispatch_now_us) / 1000;
+}
+
+static const clock_iface_t g_dispatch_clock = {
+    dispatch_clock_mono_ns, dispatch_clock_wall_ms, NULL,
+};
+
+/* The callback runs for run_us of virtual time, then the root sweep observes
+ * it mid-flight, as it does while a real callback holds the runner. */
+struct dispatch_probe {
+    int64_t run_us;
+    uint32_t fires_inside;
+};
+
+static void dispatch_sweep_inside_tick(struct liveness_contract *self)
+{
+    struct dispatch_probe *probe = self->ctx;
+    atomic_fetch_add(&g_dispatch_now_us, probe->run_us);
+    supervisor_sweep_once_for_testing();
+    probe->fires_inside = atomic_load(&self->stall_fires);
+}
+
+/* Sweep at the jittered cadence until `until_us`; return the virtual time at
+ * which `watch` next fired, or 0. `runner_moving` heartbeats the runner before
+ * every sweep, as a runner passing between many other callbacks does. */
+static int64_t dispatch_sweep_until(int64_t until_us,
+                                    struct liveness_contract *watch,
+                                    bool runner_moving)
+{
+    uint32_t fires0 = atomic_load(&watch->stall_fires);
+    int64_t fired_at = 0;
+    for (int i = 0; atomic_load(&g_dispatch_now_us) < until_us; i++) {
+        atomic_fetch_add(&g_dispatch_now_us, i % 2 ? 178000 : 100000);
+        if (runner_moving)
+            supervisor_tick_runner_backdate_hb_for_testing(0);
+        supervisor_sweep_once_for_testing();
+        if (fired_at == 0 && atomic_load(&watch->stall_fires) != fires0)
+            fired_at = atomic_load(&g_dispatch_now_us);
+    }
+    return fired_at;
+}
+
+static supervisor_child_id dispatch_fixture(struct liveness_contract *on_time,
+                                            struct dispatch_probe *probe,
+                                            struct liveness_contract *silent)
+{
+    supervisor_reset_for_testing();
+    blocker_reset_for_testing();
+    atomic_store(&g_dispatch_now_us, INT64_C(1000000000));
+    clock_set_default(&g_dispatch_clock);
+    supervisor_tick_runner_setup_for_testing(30);
+    *probe = (struct dispatch_probe){0};
+    liveness_contract_init(on_time, "dispatch.on_time");
+    on_time->ctx = probe;
+    on_time->on_tick = dispatch_sweep_inside_tick;
+    atomic_store(&on_time->period_secs, 2);
+    atomic_store(&on_time->deadline_secs, 10);
+    liveness_contract_init(silent, "dispatch.silent");
+    atomic_store(&silent->deadline_secs, 10);
+    (void)supervisor_register(silent);
+    return supervisor_register(on_time);
+}
+
+static void dispatch_fixture_end(void)
+{
+    clock_reset_default();
+    supervisor_reset_for_testing();
+    blocker_reset_for_testing();
+}
+
+static int check_dispatch_delay_not_charged(void)
+{
+    int failures = 0;
+    static struct liveness_contract on_time, silent;
+    static struct dispatch_probe probe;
+    supervisor_child_id id = dispatch_fixture(&on_time, &probe, &silent);
+    SUP_CHECK("dispatch fixture registers", id >= 0);
+    int64_t t0 = atomic_load(&g_dispatch_now_us);
+    /* Last ticked 0.678 s before the runner entered the other callback, so
+     * the hold carries its age across 10 s, as in the bundle. */
+    atomic_store(&on_time.last_tick_us, t0 - 678000);
+    int64_t silent_at = dispatch_sweep_until(t0 + 10500000, &silent, false);
+    SUP_CHECK("child queued behind another callback reports no stall",
+              atomic_load(&on_time.stall_fires) == 0u &&
+              atomic_load(&on_time.tick_pending));
+    SUP_CHECK("silent child fires within its deadline plus one sweep",
+              silent_at >= t0 + 10000000 && silent_at <= t0 + 10178000);
+    /* The runner returns and dispatches the child 10.5 s late; the sweep
+     * sees its callback in flight. */
+    supervisor_tick_runner_backdate_hb_for_testing(0);
+    supervisor_run_due_ticks_for_testing();
+    SUP_CHECK("late-dispatched callback is not charged for the queue",
+              atomic_load(&on_time.ticks_run) == 1u &&
+              probe.fires_inside == 0u &&
+              atomic_load(&on_time.stall_fires) == 0u);
+    dispatch_fixture_end();
+    return failures;
+}
+
+static int check_dispatch_stalls_still_fire(void)
+{
+    int failures = 0;
+    static struct liveness_contract on_time, silent;
+    static struct dispatch_probe probe;
+    supervisor_child_id id = dispatch_fixture(&on_time, &probe, &silent);
+    SUP_CHECK("dispatch fixture registers (stalls)", id >= 0);
+    int64_t t0 = atomic_load(&g_dispatch_now_us);
+    /* Dispatched on schedule, its own callback runs deadline - period. */
+    atomic_store(&g_dispatch_now_us, t0 + 2000000);
+    supervisor_sweep_once_for_testing();
+    probe.run_us = 8000000;
+    supervisor_run_due_ticks_for_testing();
+    SUP_CHECK("own callback past deadline minus period fires",
+              probe.fires_inside == 1u &&
+              atomic_load(&on_time.stall_reason) ==
+                  SUPERVISOR_STALL_TIME_DEADLINE);
+    /* Rearmed and due again, but the runner never returns: once the runner
+     * lapses its own 30 s deadline the queued child is judged again. */
+    supervisor_tick(id);
+    int64_t held_from = atomic_load(&g_dispatch_now_us);
+    int64_t fired_at =
+        dispatch_sweep_until(held_from + 40000000, &on_time, false);
+    SUP_CHECK("child queued behind a lapsed runner fires within one sweep",
+              fired_at >= held_from + 30000000 &&
+              fired_at <= held_from + 30178000 &&
+              supervisor_tick_runner_stall_fires() == 1u);
+    dispatch_fixture_end();
+    return failures;
+}
+
+/* A runner that keeps heartbeating between other callbacks but never reaches
+ * this child: the queue wait is bounded by period plus the runner's own
+ * deadline, so the child still fires. */
+static int check_dispatch_queue_bounded(void)
+{
+    int failures = 0;
+    static struct liveness_contract on_time, silent;
+    static struct dispatch_probe probe;
+    supervisor_child_id id = dispatch_fixture(&on_time, &probe, &silent);
+    SUP_CHECK("dispatch fixture registers (bounded)", id >= 0);
+    int64_t t0 = atomic_load(&g_dispatch_now_us);
+    int64_t fired_at = dispatch_sweep_until(t0 + 40000000, &on_time, true);
+    SUP_CHECK("never-dispatched child fires at period plus runner deadline",
+              fired_at >= t0 + 32000000 && fired_at <= t0 + 32178000 &&
+              supervisor_tick_runner_stall_fires() == 0u);
+    dispatch_fixture_end();
+    return failures;
+}
+
 int test_supervisor(void)
 {
     printf("\n=== supervisor tests ===\n");
@@ -1648,6 +1819,9 @@ int test_supervisor(void)
     failures += check_periodic_tick_dispatch();
     failures += check_event_wake_tick();
     failures += check_deadline_stall_once();
+    failures += check_dispatch_delay_not_charged();
+    failures += check_dispatch_stalls_still_fire();
+    failures += check_dispatch_queue_bounded();
     failures += check_progress_frozen_stall();
     failures += check_completed_child_stall();
     failures += check_start_stop_lifecycle();

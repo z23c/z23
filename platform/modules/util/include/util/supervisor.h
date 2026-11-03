@@ -212,7 +212,12 @@ struct liveness_contract {
      * refold_cadence_active); every other child leaves it 0, so their tick
      * cadence is byte-identical. */
     _Atomic int64_t period_us;
-    _Atomic int64_t deadline_secs;     /* >0 ⇒ stall if last_tick lapses */
+    /* >0 ⇒ stall if ticks lapse. A child the supervisor drives is not charged
+     * for waiting behind other children's callbacks: queued for a live tick
+     * runner it may wait its period plus the runner's own deadline, and once
+     * dispatched it is measured from dispatch_base_us, so deadline_secs minus
+     * period is the budget of its own callback. */
+    _Atomic int64_t deadline_secs;
     _Atomic int64_t progress_max_quiet_us;
                                        /* >0 ⇒ stall if marker frozen */
     /* enum supervisor_progress_policy. Zero-inits to UNDECLARED. Written by
@@ -278,6 +283,12 @@ struct liveness_contract {
      * on_tick + stamps last_tick/ticks_run. Supervisor+runner owned. */
     _Atomic bool     tick_pending;
     _Atomic bool     tick_running;
+    /* Nominal previous tick of the callback the runner last dispatched: the
+     * dispatch time minus the tick window, published before tick_running. A
+     * running callback's time deadline counts from here when that is later
+     * than last_tick_us, so a dispatch delayed behind another child's
+     * callback is not charged to this child. Runner-owned. */
+    _Atomic int64_t  dispatch_base_us;
 
     /* vtable (set at init; never mutated after register) */
     void  *ctx;
@@ -520,6 +531,11 @@ void supervisor_sweep_once_for_testing(void);
 void supervisor_tick_runner_setup_for_testing(int64_t deadline_secs);
 void supervisor_tick_runner_backdate_hb_for_testing(int64_t age_us);
 void supervisor_tick_runner_monitor_for_testing(void);
+
+/* Run one tick-runner pass on the calling thread: dispatch every due child
+ * exactly as the runner thread does. With the runner contract armed by the
+ * setup seam above, a test controls dispatch time and runner heartbeat. */
+void supervisor_run_due_ticks_for_testing(void);
 #endif
 
 /* ── `z23 dumpstate supervisor` ────────────────────────────── */
