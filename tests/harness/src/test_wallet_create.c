@@ -43,6 +43,8 @@
 #include "controllers/wallet_scan.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
+#include "keys/key.h"
+#include "keys/pubkey.h"
 #include "models/database.h"
 #include "models/wallet_key.h"
 #include "services/wallet_create_service.h"
@@ -53,6 +55,7 @@
 #include "sapling/note_encryption.h"
 #include "sapling/sapling.h"
 #include "primitives/transaction.h"
+#include "wallet/bip44.h"
 #include "wallet/mnemonic.h"
 #include "wallet/sapling_keys.h"
 #include "wallet/wallet.h"
@@ -2232,12 +2235,224 @@ static int recovery_new_makes_no_state(void)
     return failures;
 }
 
+/* ── a phrase made just now reads no address history ───────────────── */
+
+/* The receiving index the history fixture marks used: past the floor's last
+ * gap, so a scan that asks the chain derives more keys than one that does
+ * not. */
+#define WCR_USED_INDEX 110u
+
+/* Statements asking whether an address has history on this chain (the gap
+ * scan's two probes and the populated-index check), counted on every
+ * connection the process opens while the trace is armed. */
+static int wcr_history_asks;
+
+static int wcr_history_trace(unsigned type, void *ctx, void *stmt, void *sql)
+{
+    (void)ctx;
+    (void)stmt;
+    const char *text = sql;
+    if (type == SQLITE_TRACE_STMT && text &&
+        (strstr(text, "FROM utxos WHERE address_hash") ||
+         strstr(text, "FROM tx_outputs WHERE address_hash")))
+        wcr_history_asks++;
+    return 0;
+}
+
+static int wcr_history_trace_arm(sqlite3 *db, char **err,
+                                 const struct sqlite3_api_routines *api)
+{
+    (void)err;
+    (void)api;
+    return sqlite3_trace_v2(db, SQLITE_TRACE_STMT, wcr_history_trace, NULL);
+}
+
+/* Restore the test phrase into `dir` with the request flags in `shape`,
+ * plaintext, counting the history statements it runs into *asks. */
+static bool wcr_restore_counted(const char *dir,
+                                const struct wallet_recovery_request *shape,
+                                struct wallet_recovery_report *rep, int *asks)
+{
+    struct wallet_recovery_request rq = *shape;
+    rq.phrase = WCR_RESTORE_PHRASE;
+    rq.datadir = dir;
+    wallet_lock_reset_for_test();
+    setenv("ZCL_ALLOW_PLAINTEXT_WALLET", "1", 1);
+    wcr_history_asks = 0;
+    void (*arm)(void) = (void (*)(void))wcr_history_trace_arm;
+    bool armed = sqlite3_auto_extension(arm) == SQLITE_OK;
+    struct zcl_result r = wallet_recovery_run(&rq, rep);
+    if (armed)
+        (void)sqlite3_cancel_auto_extension(arm);
+    unsetenv("ZCL_ALLOW_PLAINTEXT_WALLET");
+    *asks = wcr_history_asks;
+    if (!r.ok)
+        printf("    restore refused: %s\n", r.message);
+    return armed && r.ok;
+}
+
+/* The hash160 of receiving key `index` of `phrase`, as hex: the key the gap
+ * scan derives at that index and asks the chain about. */
+static bool wcr_receiving_hash(const char *phrase, uint32_t index,
+                               char hex[41])
+{
+    struct wallet *w = calloc(1, sizeof(*w));
+    struct pubkey pk;
+    if (!w)
+        return false;
+    wallet_lock_reset_for_test();
+    wallet_init(w);
+    w->sapling_keys.follows_wallet_lock = false;
+    bool ok = ecc_start_once() && wallet_init_from_recovery_phrase(w, phrase);
+    for (uint32_t i = 0; ok && i <= index; i++)
+        ok = wallet_mint_next_hd_key(w, BIP44_EXTERNAL, &pk);
+    if (ok) {
+        struct key_id id = pubkey_get_id(&pk);
+        for (int i = 0; i < 20; i++)
+            snprintf(hex + 2 * i, 3, "%02x", id.id.data[i]);
+    }
+    wallet_free(w);
+    free(w);
+    return ok;
+}
+
+/* A seeded chain whose address index holds receiving key WCR_USED_INDEX. */
+static bool wcr_history_chain(char *dir, size_t cap, const char *tag)
+{
+    char hex[41], sql[512];
+    if (!wcr_receiving_hash(WCR_RESTORE_PHRASE, WCR_USED_INDEX, hex) ||
+        !wcr_seeded_chain(dir, cap, tag, false))
+        return false;
+    snprintf(sql, sizeof(sql),
+             "INSERT INTO tx_outputs(txid,vout,value,script_type,address_hash,"
+             "block_height) VALUES(zeroblob(32),0,1000,1,X'%s',950)", hex);
+    return wcr_sql(dir, sql);
+}
+
+struct wcr_digest {
+    uint64_t hash;
+    int64_t rows;
+};
+
+static int wcr_digest_row(void *ctx, int ncol, char **val, char **name)
+{
+    struct wcr_digest *d = ctx;
+    (void)name;
+    for (const char *p = ncol > 0 && val[0] ? val[0] : ""; *p; p++) {
+        d->hash ^= (unsigned char)*p;
+        d->hash *= 1099511628211ULL;
+    }
+    d->rows++;
+    return 0;
+}
+
+/* The transparent public keys of `dir`'s wallet, in pubkey_hash order. */
+static bool wcr_key_digest(const char *dir, struct wcr_digest *d)
+{
+    struct node_db ndb;
+    d->hash = 1469598103934665603ULL;
+    d->rows = 0;
+    bool ok = wcr_open(&ndb, dir) &&
+              sqlite3_exec(ndb.db, "SELECT hex(pubkey) FROM wallet_keys "
+                           "ORDER BY pubkey_hash", wcr_digest_row, d,
+                           NULL) == SQLITE_OK;
+    if (ndb.open)
+        node_db_close(&ndb);
+    return ok;
+}
+
+/* An at-tip restore of a transparent wallet asks the chain nothing, even
+ * where history for its phrase exists, and its keys are exactly the floor
+ * keys a restore with no chain derives. */
+static int restore_tip_reads_no_history(void)
+{
+    int failures = 0;
+    char dir[1024], bare[1024];
+    struct wallet_recovery_report rep, bare_rep;
+    struct wcr_digest keys, floor_keys;
+    int asks = -1, bare_asks = -1;
+    const struct wallet_recovery_request at_tip = {
+        .birthday_at_local_tip = true,
+    };
+    const struct wallet_recovery_request plain = { .dry_run = false };
+    WCR_CHECK("setup: a chain whose address index holds a used key",
+              wcr_history_chain(dir, sizeof(dir), "tip_nohist"));
+    bool ran = wcr_restore_counted(dir, &at_tip, &rep, &asks);
+    WCR_CHECK("an at-tip restore asks the chain nothing and says so",
+              ran && asks == 0 && !rep.chain_history_consulted &&
+              rep.receiving_keys_used == 0 && rep.birthday_recorded);
+    wcr_fixture(bare, sizeof(bare), "tip_floor");
+    bool floored = wcr_restore_counted(bare, &plain, &bare_rep, &bare_asks);
+    WCR_CHECK("its keys are the floor keys a restore with no chain derives",
+              ran && floored && wcr_key_digest(dir, &keys) &&
+              wcr_key_digest(bare, &floor_keys) &&
+              keys.rows == 2 * WALLET_RECOVERY_MIN_LOOKAHEAD &&
+              keys.rows == floor_keys.rows && keys.hash == floor_keys.hash &&
+              rep.receiving_keys == bare_rep.receiving_keys &&
+              rep.change_keys == bare_rep.change_keys);
+    return failures;
+}
+
+/* The app's create (shielded only, birthday at the tip) runs no history
+ * statement at all, not even the populated-index check. */
+static int restore_tip_shielded_reads_nothing(void)
+{
+    int failures = 0;
+    char dir[1024];
+    struct wallet_recovery_report rep;
+    int asks = -1;
+    const struct wallet_recovery_request app = {
+        .shielded_only = true,
+        .birthday_at_local_tip = true,
+    };
+    WCR_CHECK("setup: a chain with history for the app's create",
+              wcr_history_chain(dir, sizeof(dir), "tip_nohist_z"));
+    bool ran = wcr_restore_counted(dir, &app, &rep, &asks);
+    WCR_CHECK("the app's shielded at-tip create runs no history statement",
+              ran && asks == 0 && !rep.chain_history_consulted &&
+              rep.receiving_keys == 0 && rep.birthday_recorded);
+    return failures;
+}
+
+/* Every other restore still asks the chain and rebuilds past the floor to
+ * the used key: one with no birthday and one with a verified birthday. */
+static int restore_other_birthdays_read_history(void)
+{
+    int failures = 0;
+    char dir[1024];
+    struct wallet_recovery_report rep;
+    int asks = -1;
+    struct wallet_recovery_request named = {
+        .has_birthday = true,
+        .birthday_height = 1000,
+    };
+    memset(named.birthday_hash, 0x09, sizeof(named.birthday_hash));
+    const struct wallet_recovery_request plain = { .dry_run = false };
+    const uint32_t reach = WCR_USED_INDEX + 1 + WALLET_GAP_LIMIT;
+    WCR_CHECK("setup: a chain with history for a restore without a birthday",
+              wcr_history_chain(dir, sizeof(dir), "hist_plain"));
+    bool ran = wcr_restore_counted(dir, &plain, &rep, &asks);
+    WCR_CHECK("a restore without a birthday asks the chain and finds the key",
+              ran && asks > 0 && rep.chain_history_consulted &&
+              rep.receiving_keys_used == 1 && rep.receiving_keys == reach);
+    WCR_CHECK("setup: a chain with history for a named birthday",
+              wcr_history_chain(dir, sizeof(dir), "hist_named"));
+    ran = wcr_restore_counted(dir, &named, &rep, &asks);
+    WCR_CHECK("a restore with a verified birthday asks the chain as well",
+              ran && asks > 0 && rep.chain_history_consulted &&
+              rep.birthday_recorded && rep.receiving_keys == reach);
+    return failures;
+}
+
  static int t_restore_at_local_tip(void)
 {
     return restore_tip_recorded() + restore_tip_edge() +
            restore_tip_refused() + restore_tip_plan_then_commit() +
            restore_tip_plan_refused() + restore_default_no_birthday() +
-           restore_refusal_keeps_phrase_out() + recovery_new_makes_no_state();
+           restore_refusal_keeps_phrase_out() + recovery_new_makes_no_state() +
+           restore_tip_reads_no_history() +
+           restore_tip_shielded_reads_nothing() +
+           restore_other_birthdays_read_history();
 }
 
 /* The key scans can find what they look for: a plaintext datadir holds the raw

@@ -104,7 +104,7 @@ struct wallet_recovery_report {
     uint32_t receiving_keys_used;   /* of those, seen on the local chain */
     uint32_t change_keys_used;
     uint32_t shielded_children;     /* ZIP32 children 0..n-1 */
-    bool     chain_history_consulted; /* a chain was available to scan */
+    bool     chain_history_consulted; /* the scan asked this datadir's chain */
     bool     transparent_scan_truncated;
     bool     birthday_recorded;
     bool     encrypted_at_rest;     /* a committed run wrapped the keys; on a
@@ -138,7 +138,11 @@ struct wallet_recovery_report {
  * A committed run rebuilds the keys with the BIP44 gap-limit scan —
  * wallet_derive_gap_limited(), using this datadir's own chain as the "has
  * this address been used" oracle where one exists — and flushes them
- * through the wallet's single writer. It does NOT mint a fixed keypool:
+ * through the wallet's single writer. A phrase made just now
+ * (record_birthday, which birthday_at_local_tip implies) has no history to
+ * find and a shielded-only rebuild has no transparent key to look up, so
+ * neither reads the chain: the transparent side is the standard floor and
+ * chain_history_consulted is false. It does NOT mint a fixed keypool:
  * a created wallet hands out index 100 first, so a fixed 100 keys rebuilt
  * every address the user never saw and none of the one they published.
  *

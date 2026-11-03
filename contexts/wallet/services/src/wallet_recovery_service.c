@@ -920,6 +920,24 @@ static struct zcl_result wrc_swap_to_write_handle(
     return ZCL_OK;
 }
 
+/* The chain the gap scan asks, or NULL to derive the floor without reading
+ * it. A shielded-only rebuild derives no transparent key, so nothing would
+ * use the answer. A phrase made just now (drawn by a create, or restored
+ * with birthday_at_local_tip) has no history to find, so its keys are the
+ * floor; asking would read the chain once per derived address for an answer
+ * already known. An open node.db is not by itself a chain: a freshly created
+ * one has the tables and no rows, and every address probe against it
+ * answers false for a reason that has nothing to do with the address. Ask
+ * only when there is something to ask, so "no history found" is never
+ * printed for "nothing to look in". */
+static struct node_db *wrc_history_oracle(
+    const struct wallet_recovery_request *req, struct wrc_run *st)
+{
+    if (req->shielded_only || req->record_birthday || !st->have_db)
+        return NULL;
+    return db_address_index_populated(&st->ndb) ? &st->ndb : NULL;
+}
+
 /* Root the wallet on the phrase, rebuild its keys and, on a commit, flush. */
 static struct zcl_result wrc_rebuild_and_flush(
     const struct wallet_recovery_request *req, struct wrc_run *st,
@@ -930,15 +948,9 @@ static struct zcl_result wrc_rebuild_and_flush(
     if (!wallet_init_from_recovery_phrase(w, req->phrase))
         return ZCL_ERR(-64, "could not root the wallet on the recovery phrase");
     /* Same scan on both paths, against the same chain, so the plan's
-     * numbers are the commit's numbers. An open node.db is not by itself a
-     * chain: a freshly created one has the tables and no rows, and every
-     * address probe against it answers false for a reason that has nothing
-     * to do with the address. Pass the oracle only when there is something
-     * to ask, so "no history found" is never printed for "nothing to look
-     * in". */
-    struct node_db *chain =
-        (st->have_db && db_address_index_populated(&st->ndb)) ? &st->ndb : NULL;
-    rc = wrc_rebuild_keys(w, chain, req->shielded_only, out);
+     * numbers are the commit's numbers. */
+    rc = wrc_rebuild_keys(w, wrc_history_oracle(req, st), req->shielded_only,
+                          out);
     if (!rc.ok)
         return rc;
 
