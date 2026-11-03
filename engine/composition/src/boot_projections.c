@@ -34,6 +34,7 @@
 #include "config/boot_background_workers.h"
 #include "platform/time_compat.h"
 #include "rpc/server.h"
+#include "util/shutdown_stagewatch.h"
 #include "util/thread_registry.h"
 #include "boot_timing_marks_internal.h"
 #include <limits.h>
@@ -657,8 +658,13 @@ void boot_stop_projection_storage(void)
     }
     t = shutdown_submark("stop.event_log_close", t);
     /* Close the Wave A2 projection handle to progress.kv (no-op if unopened).
-     * progress_store's own close still owns the WAL checkpoint of the file. */
+     * progress_store's own close still owns the WAL checkpoint of the file.
+     * Its clean-close receipt hashes every byte of progress.kv; the stage
+     * clock bounds that digest so a multi-GB store on slow storage stops
+     * early instead of running into the stage deadline. */
+    projection_store_set_receipt_clock(shutdown_stagewatch_now_us);
     projection_store_close();
+    projection_store_set_receipt_clock(NULL);
     t = shutdown_submark("stop.projection_store_close", t);
     pthread_mutex_lock(&g_warm_mu);
     g_warm_state = WARM_IDLE;

@@ -3,12 +3,15 @@
  * Projection clean-close receipt v3: the content digest is taken over fixed
  * chunks on a pool of threads, and its value must not depend on the pool size.
  * A small chunk size (test seam) lets a ~100 KiB progress.kv span many chunks.
+ * The shutdown stage bounds the close-time digest by the stagewatch clock.
  */
 
 #include "test/test_core.h"
 
+#include "config/boot_internal.h"
 #include "platform/positioned_file.h"
 #include "storage/projection_store.h"
+#include "util/shutdown_stagewatch.h"
 
 #include <sqlite3.h>
 #include <stdbool.h>
@@ -229,6 +232,80 @@ static int pr_test_clean_roundtrip(const char *dir)
     return failures;
 }
 
+/* ---- Close budget: the shutdown stage bounds the digest ----------------
+ * The stage hands the close the stagewatch clock. With a clock whose every
+ * reading is one second later, the first sampled chunk projects a whole
+ * digest far over the 2 s budget, so the close stops after that chunk and
+ * publishes no receipt; with a frozen clock the same close hashes every
+ * byte and publishes one. Neither waits on real time. */
+static int64_t g_pr_now_us;
+
+static int64_t pr_clock_step(void)
+{
+    g_pr_now_us += 1000000;
+    return g_pr_now_us;
+}
+
+static int64_t pr_clock_frozen(void)
+{
+    return g_pr_now_us;
+}
+
+/* Seed, reopen (consuming the seed's receipt), then close through the
+ * shutdown stage with `clock` as the stagewatch clock. */
+static bool pr_stage_close(const char *dir, shutdown_stagewatch_clock_fn clock,
+                           uint64_t *size, uint64_t *hashed, bool *over)
+{
+    bool seeded = pr_seed(dir) && projection_store_open(dir);
+    shutdown_stagewatch_set_clock_for_test(clock);
+    boot_stop_projection_storage();
+    shutdown_stagewatch_set_clock_for_test(NULL);
+    return seeded && projection_store_receipt_last_for_test(size, hashed, over);
+}
+
+static int pr_test_stage_budget(const char *dir, const char *fpath,
+                                const char *receipt)
+{
+    int failures = 0;
+    uint64_t size = 0, hashed = 0;
+    bool over = false, owes = false;
+    struct stat st;
+    projection_store_receipt_chunk_bytes_for_test(PR_CHUNK);
+    projection_store_receipt_sample_bytes_for_test(PR_CHUNK);
+    projection_store_receipt_workers_for_test(1);
+
+    bool closed = pr_stage_close(dir, pr_clock_step, &size, &hashed, &over);
+    PR_CHECK("slow digest: the stage stops after the sampled chunk",
+             closed && over && hashed == PR_CHUNK &&
+             stat(fpath, &st) == 0 && size == (uint64_t)st.st_size &&
+             size >= 8u * PR_CHUNK);
+    PR_CHECK("slow digest: no receipt is published",
+             access(receipt, F_OK) != 0);
+    PR_CHECK("slow digest: the next open owes the integrity scan",
+             pr_reopen_owes_scan(dir, &owes) && owes);
+
+    closed = pr_stage_close(dir, pr_clock_frozen, &size, &hashed, &over);
+    PR_CHECK("digest within budget: the stage hashes every byte",
+             closed && !over && hashed == size && size > 0);
+    PR_CHECK("digest within budget: the receipt is published",
+             access(receipt, F_OK) == 0);
+    PR_CHECK("digest within budget: the next open skips the scan",
+             pr_reopen_owes_scan(dir, &owes) && !owes);
+
+    shutdown_stagewatch_set_clock_for_test(pr_clock_step);
+    bool seeded = pr_seed(dir);
+    shutdown_stagewatch_set_clock_for_test(NULL);
+    PR_CHECK("outside the stage the close hashes in full",
+             seeded && access(receipt, F_OK) == 0 &&
+             projection_store_receipt_last_for_test(&size, &hashed, &over) &&
+             !over && hashed == size);
+
+    projection_store_receipt_workers_for_test(0);
+    projection_store_receipt_sample_bytes_for_test(0);
+    projection_store_receipt_chunk_bytes_for_test(0);
+    return failures;
+}
+
 int test_projection_receipt(void)
 {
     int failures = 0;
@@ -245,6 +322,7 @@ int test_projection_receipt(void)
     projection_store_receipt_chunk_bytes_for_test(0);
     failures += pr_test_old_version_rejected(dir, fpath, receipt);
     failures += pr_test_clean_roundtrip(dir);
+    failures += pr_test_stage_budget(dir, fpath, receipt);
     test_cleanup_tmpdir(dir);
     return failures;
 }

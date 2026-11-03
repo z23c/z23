@@ -136,6 +136,10 @@ int shutdown_stagewatch_write_terminal_receipt_fd(int fd,
 typedef int64_t (*shutdown_stagewatch_clock_fn)(void);
 void shutdown_stagewatch_set_clock_for_test(shutdown_stagewatch_clock_fn fn);
 
+/* The clock stages are timed with, for work a stage bounds by its own
+ * budget (the projection store's clean-close receipt digest). */
+int64_t shutdown_stagewatch_now_us(void);
+
 /* Reset all module state (tests). */
 void shutdown_stagewatch_reset_for_test(void);
 

@@ -137,6 +137,15 @@ int projection_store_apply_memory_profile(bool steady, int64_t *mmap_bytes_out,
  * separate file, handle, and WAL lifecycle. */
 void projection_store_close(void);
 
+/* Monotonic microseconds. Installing a clock bounds the clean-close
+ * receipt's full-content digest: once 32 MiB are hashed, the close projects
+ * the whole digest from the measured rate and, when it would exceed 2 s,
+ * stops, publishes no receipt and logs the numbers; the next boot then runs
+ * the integrity check it would run after any receiptless close. NULL (the
+ * default) hashes the whole file. Shutdown installs the stagewatch clock. */
+typedef int64_t (*projection_store_clock_fn)(void);
+void projection_store_set_receipt_clock(projection_store_clock_fn now_us);
+
 #ifdef ZCL_TESTING
 /* Force the next close's TRUNCATE checkpoint to report SQLITE_BUSY, so the
  * reader-blocked path (PASSIVE drain, then the close and the receipt
@@ -149,6 +158,11 @@ void projection_store_force_checkpoint_busy_for_test(void);
 void projection_store_receipt_chunk_bytes_for_test(uint64_t bytes);
 void projection_store_receipt_workers_for_test(int workers);
 bool projection_store_receipt_digest_for_test(const char *path, char out[65]);
+/* Bytes hashed before the budget is judged (0 restores 32 MiB), and what the
+ * last close-time digest did; false when no close has digested a file. */
+void projection_store_receipt_sample_bytes_for_test(uint64_t bytes);
+bool projection_store_receipt_last_for_test(uint64_t *size, uint64_t *hashed,
+                                            bool *over_budget);
 #endif
 #endif
 

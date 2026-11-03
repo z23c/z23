@@ -266,6 +266,11 @@ void shutdown_stagewatch_set_clock_for_test(shutdown_stagewatch_clock_fn fn)
     g_clock = fn ? fn : real_clock_us;
 }
 
+int64_t shutdown_stagewatch_now_us(void)
+{
+    return g_clock();
+}
+
 void shutdown_stagewatch_reset_for_test(void)
 {
     stagewatch_cancel();
