@@ -2506,10 +2506,9 @@ _test_next:
     return false;
 }
 
-static bool zpd_benchmark_case_tail(struct zpd_benchmark_run *bs, struct zpd_benchmark_case_state *cs, size_t i, int *failures_out)
+static bool zpd_benchmark_case_tail(struct zpd_benchmark_case_state *cs, int *failures_out)
 {
     int failures = 0;
-    (void)i;
     {
             char *attempt = strrchr(cs->candidate, '/');
             ASSERT(attempt != NULL); *attempt = '\0';
@@ -2609,7 +2608,7 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
                 if (!zpd_benchmark_case_accept(&bs, &cs, i, &failures)) goto _test_next;
                 if (!zpd_benchmark_case_focus(&bs, &cs, i, &failures)) goto _test_next;
             }
-            if (!zpd_benchmark_case_tail(&bs, &cs, i, &failures)) goto _test_next;
+            if (!zpd_benchmark_case_tail(&cs, &failures)) goto _test_next;
         }
         if (!zpd_benchmark_finish(&bs, &failures)) goto _test_next;
     } _test_next:;
