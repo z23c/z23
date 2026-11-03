@@ -641,11 +641,252 @@ static enum sapling_persist_status sapling_rebuild_persist_final_checked(
     return ps;
 }
 
+/* True when a required argument is missing; the caller logs and refuses. */
+static bool sapling_rebuild_args_missing(const struct node_db *ndb,
+                                         const struct active_chain *chain,
+                                         const char *datadir)
+{
+    return !ndb || !chain || !datadir;
+}
+
+/* Cap the endpoint to coins-applied. True when it was capped, after logging. */
+static bool sapling_rebuild_resolve_endpoint(int header_tip, int *chain_tip)
+{
+    int32_t coins_best = -1;
+    bool capped = sapling_rebuild_cap_endpoint(&coins_best, chain_tip);
+    if (capped)
+        LOG_INFO("sapling_tree_rebuild",
+                 "sapling_tree_rebuild: capping endpoint to coins-applied "
+                 "height %d (header tip %d)", coins_best, header_tip);
+    return capped;
+}
+
+/* Resume candidate (0): anchor_kv's sapling_anchors frontier. A hit sets the
+ * tree, start height, commitment total and ckpt_h, then logs. */
+static void sapling_rebuild_resume_anchor(
+        const struct active_chain *chain, int chain_tip, int sapling_height,
+        struct incremental_merkle_tree *tree, int *start_height,
+        int *total_commitments, int64_t *ckpt_h)
+{
+    struct incremental_merkle_tree akv_tree;
+    int64_t akv_h = -1;
+    if (sapling_rebuild_anchor_seed(chain, chain_tip, sapling_height,
+                                    &akv_tree, &akv_h)) {
+        *tree = akv_tree;
+        *start_height = (int)akv_h + 1;
+        *total_commitments = (int)incremental_tree_size(tree);
+        *ckpt_h = akv_h;
+        LOG_INFO("sapling_tree_rebuild",
+                 "sapling_tree_rebuild: resuming from the anchor_kv "
+                 "Sapling frontier h=%lld (%d commitments) — the "
+                 "canonical fold ledger, header-root-bound at that height",
+                 (long long)akv_h, *total_commitments);
+    }
+}
+
+/* Resume candidate (1): the flat-file checkpoint, with its resume log lines. */
+static void sapling_rebuild_resume_flat_logged(
+        const struct active_chain *chain, const char *datadir, int chain_tip,
+        int sapling_height, struct incremental_merkle_tree *tree,
+        int *start_height, int *total_commitments, int64_t *ckpt_h)
+{
+    int64_t flat_h = 0;
+    enum sapling_ckpt_verdict v = SAPLING_CKPT_OK;
+    enum sapling_resume_result rr = sapling_rebuild_resume_flat(
+        chain, datadir, chain_tip, sapling_height, tree, start_height,
+        total_commitments, ckpt_h, &flat_h, &v);
+    if (rr == SAPLING_RESUME_DONE) {
+        LOG_INFO("sapling_tree_rebuild", "sapling_tree_rebuild: resuming " "from flat-file checkpoint h=%lld " "(%d commitments,)", (long long)flat_h, *total_commitments);
+        fflush(stderr);
+    } else if (rr == SAPLING_RESUME_REFUSED) {
+        LOG_WARN("sapling_tree_rebuild",
+                 "sapling_tree_rebuild: refusing flat-file "
+                 "checkpoint h=%lld (%s)",
+                 (long long)flat_h, sapling_ckpt_verdict_str(v));
+    }
+}
+
+/* Resume candidate (2): node_state["sapling_tree"], with its resume log lines. */
+static void sapling_rebuild_resume_node_state_logged(
+        struct node_db *ndb, const struct active_chain *chain, int chain_tip,
+        int sapling_height, struct incremental_merkle_tree *tree,
+        int *start_height, int *total_commitments, int64_t *ckpt_h)
+{
+    enum sapling_resume_result rr = sapling_rebuild_resume_node_state(
+        ndb, chain, chain_tip, sapling_height, tree, start_height,
+        total_commitments, ckpt_h);
+    if (rr == SAPLING_RESUME_DONE) {
+        LOG_INFO("sapling_tree_rebuild", "sapling_tree_rebuild: resuming " "from checkpoint h=%d (%d commitments)", (int)*ckpt_h, *total_commitments);
+        fflush(stderr);
+    } else if (rr == SAPLING_RESUME_MISMATCH) {
+        LOG_WARN("sapling_tree_rebuild",
+                 "sapling_tree_rebuild: checkpoint h=%d "
+                 "root mismatch; replaying from activation",
+                 (int)*ckpt_h);
+    } else if (rr == SAPLING_RESUME_UNVERIFIED) {
+        LOG_WARN("sapling_tree_rebuild",
+                 "sapling_tree_rebuild: refusing unverified "
+                 "node_state checkpoint h=%d (missing "
+                 "hashFinalSaplingRoot)",
+                 (int)*ckpt_h);
+    }
+}
+
+/* Try to resume from a persisted frontier to avoid a full replay
+ * on crash recovery. Three candidates, most
+ * authoritative first:
+ *   (0) anchor_kv's sapling_anchors frontier — the CANONICAL ledger
+ *       fold_sapling writes and root-verifies per block (see
+ *       sapling_rebuild_anchor_seed in
+ *       sync_controller_sapling_tree_resume.c).
+ *   (1) Flat-file checkpoint at <datadir>/sapling_tree_ckpt.dat
+ *       flushed every 10K blocks, SHA3-verified.
+ *   (2) node_state["sapling_tree"] - flushed every 100K blocks,
+ *       SQLite-backed, legacy path.
+ * Each hit short-circuits the ones below it; every miss falls through.
+ * All three bind fail-closed to the header chain before being trusted. */
+static void sapling_rebuild_resume_candidates(
+        struct node_db *ndb, const struct active_chain *chain,
+        const char *datadir, int chain_tip, int sapling_height,
+        struct incremental_merkle_tree *tree, int *start_height,
+        int *total_commitments)
+{
+    int64_t ckpt_h = 0;
+    sapling_rebuild_resume_anchor(chain, chain_tip, sapling_height, tree,
+                                  start_height, total_commitments, &ckpt_h);
+    if (ckpt_h == 0)
+        sapling_rebuild_resume_flat_logged(chain, datadir, chain_tip,
+                                           sapling_height, tree, start_height,
+                                           total_commitments, &ckpt_h);
+    if (ckpt_h == 0)
+        sapling_rebuild_resume_node_state_logged(ndb, chain, chain_tip,
+                                                 sapling_height, tree,
+                                                 start_height,
+                                                 total_commitments, &ckpt_h);
+}
+
+/* True at each per-100k checkpoint height above activation. */
+static bool sapling_rebuild_is_checkpoint_height(int h, int sapling_height)
+{
+    return ((h - sapling_height) % 100000 == 0 && h > sapling_height);
+}
+
+/* Fold one block, run its root checks and free it. True when a check set
+ * fail_reason, so the caller must fail closed. */
+static bool sapling_rebuild_fold_checked(
+        struct incremental_merkle_tree *tree, const struct block_index *bi,
+        struct block *blk, bool is_checkpoint, int h, int *total_commitments,
+        int *mismatches, const char **fail_reason, int *fail_height)
+{
+    int appended_this_block =
+        sapling_rebuild_fold_block(tree, blk, total_commitments);
+    sapling_rebuild_check_block_roots(tree, bi, blk, is_checkpoint,
+                                      appended_this_block, h, mismatches,
+                                      fail_reason, fail_height);
+    block_free(blk);
+    return *fail_reason != NULL;
+}
+
+/* Checkpoint persist and its log for one height. True when it fails closed
+ * (fail_reason and fail_height are set); a DEFERRED persist is not a failure. */
+static bool sapling_rebuild_replay_checkpoint(
+        bool is_checkpoint, struct node_db *ndb,
+        const struct incremental_merkle_tree *tree, int h, int chain_tip,
+        int total_commitments, int mismatches, const char **fail_reason,
+        int *fail_height)
+{
+    if (!is_checkpoint)
+        return false;
+    LOG_WARN("sapling_tree_rebuild", "  sapling_tree_rebuild: h=%d/%d " "commitments=%d mismatches=%d", h, chain_tip, total_commitments, mismatches);
+    fflush(stderr);
+
+    enum sapling_persist_status ps = SAPLING_PERSIST_OK;
+    *fail_reason = sapling_rebuild_persist_checkpoint(ndb, tree, h, &ps);
+    if (*fail_reason) {
+        *fail_height = h;
+        return true;
+    }
+    /* DEFERRED: a foreign tx transiently owned the connection. Skip
+     * persisting THIS checkpoint — the tree stays in memory and the
+     * next checkpoint (or the final persist) records it. Not a
+     * failure; the fold keeps making progress. */
+    if (ps == SAPLING_PERSIST_DEFERRED)
+        LOG_INFO("sapling_tree_rebuild",
+                "checkpoint persist deferred at h=%d (busy)", h);
+    return false;
+}
+
+/* Verify the rebuilt root against the resolved endpoint. False when it does
+ * not match, after naming the endpoint failure in fail_reason and fail_height. */
+static bool sapling_rebuild_verify_endpoint(
+        const struct active_chain *chain, int chain_tip,
+        const struct incremental_merkle_tree *tree, int start_height,
+        int total_commitments, int mismatches, int64_t t_replay_start,
+        const char **fail_reason, int *fail_height)
+{
+    /* Verify against the resolved endpoint (the coins-applied frontier, or the
+     * header tip when no coins frontier exists), not active_chain_tip(): a
+     * block above the applied frontier may lack hashFinalSaplingRoot and
+     * FATAL on `tip_missing_sapling_root`. */
+    const struct block_index *tip = active_chain_at(chain, chain_tip);
+    struct uint256 final_root;
+    incremental_tree_root(tree, &final_root);
+    bool tip_root_known = false;
+    bool match = sapling_rebuild_tip_matches(tip, &final_root, &tip_root_known);
+
+    char root_hex[65];
+    uint256_get_hex(&final_root, root_hex);
+    int64_t replay_ms = GetTimeMillis() - t_replay_start;
+    int replayed_blocks = sapling_rebuild_replayed_blocks(start_height,
+                                                          chain_tip);
+    LOG_INFO("sapling_tree_rebuild", "sapling_tree_rebuild: replayed %d blocks in %lld ms", replayed_blocks, (long long)replay_ms);
+    LOG_WARN("sapling_tree_rebuild", "sapling_tree_rebuild: DONE commitments=%d " "mismatches=%d root=%s match=%s", total_commitments, mismatches, root_hex, match ? "YES" : "NO");
+    fflush(stderr);
+
+    if (!match) {
+        sapling_rebuild_tip_failure(tip, tip_root_known, fail_reason,
+                                    fail_height);
+        return false;
+    }
+    return true;
+}
+
+/* Fill the fail-path tally from the skip counters, and log it when any block
+ * was skipped. */
+static void sapling_rebuild_tally_fail_skips(
+        const struct sapling_rebuild_skips *skips,
+        struct sapling_rebuild_skip_tally *fail_skips)
+{
+    sapling_rebuild_fill_skip_tally(fail_skips, skips);
+    const int skipped_no_index = skips->counts[SAPLING_SKIP_NO_INDEX];
+    const int skipped_no_data = skips->counts[SAPLING_SKIP_NO_DATA];
+    const int skipped_no_mmap = skips->counts[SAPLING_SKIP_NO_MMAP];
+    const int skipped_datapos_oob = skips->counts[SAPLING_SKIP_DATAPOS_OOB];
+    const int skipped_deserialize = skips->counts[SAPLING_SKIP_DESERIALIZE];
+    const int first_skip_height = skips->first_height;
+    const int last_skip_height = skips->last_height;
+    if (fail_skips->total > 0)
+        LOG_WARN("sapling_tree_rebuild",
+                "sapling_tree_rebuild: at fail — %d block(s) were skipped "
+                "(no_index=%d no_data=%d no_mmap=%d datapos_oob=%d "
+                "deserialize=%d span=[%d..%d]); a dropped shielded-output "
+                "block below the mismatch height is the leading cause",
+                fail_skips->total, skipped_no_index, skipped_no_data,
+                skipped_no_mmap, skipped_datapos_oob, skipped_deserialize,
+                first_skip_height, last_skip_height);
+}
+
+/* The fail reason for the fail-closed log; "unknown" when none was recorded. */
+static const char *sapling_rebuild_reason_or_unknown(const char *fail_reason)
+{
+    return fail_reason ? fail_reason : "unknown";
+}
+
 int sapling_tree_rebuild(struct node_db *ndb,
                          const struct active_chain *chain,
                          const char *datadir)
 {
-    if (!ndb || !chain || !datadir)
+    if (sapling_rebuild_args_missing(ndb, chain, datadir))
         LOG_ERR("sync", "sapling_tree_rebuild: invalid args (ndb=%p, chain=%p, datadir=%p)",
                 (void *)ndb, (void *)chain, (void *)datadir);
 
@@ -666,16 +907,8 @@ int sapling_tree_rebuild(struct node_db *ndb,
      * its data position is valid — so a per-block skip (below) is a real local
      * defect worth failing-closed AT that height, not a legitimate header-only
      * tail. Stays false for the legacy/header-tip endpoint. */
-    bool endpoint_is_coins_applied = false;
-    {
-        int32_t coins_best = -1;
-        if (sapling_rebuild_cap_endpoint(&coins_best, &chain_tip)) {
-            LOG_INFO("sapling_tree_rebuild",
-                     "sapling_tree_rebuild: capping endpoint to coins-applied "
-                     "height %d (header tip %d)", coins_best, header_tip);
-            endpoint_is_coins_applied = true;
-        }
-    }
+    bool endpoint_is_coins_applied =
+        sapling_rebuild_resolve_endpoint(header_tip, &chain_tip);
 
     if (chain_tip < sapling_height) return 0;
 
@@ -698,74 +931,9 @@ int sapling_tree_rebuild(struct node_db *ndb,
         .last_height = -1,
     };
 
-    /* Try to resume from a persisted frontier to avoid a full replay
-     * on crash recovery. Three candidates, most
-     * authoritative first:
-     *   (0) anchor_kv's sapling_anchors frontier — the CANONICAL ledger
-     *       fold_sapling writes and root-verifies per block (see
-     *       sapling_rebuild_anchor_seed in
-     *       sync_controller_sapling_tree_resume.c).
-     *   (1) Flat-file checkpoint at <datadir>/sapling_tree_ckpt.dat
-     *       flushed every 10K blocks, SHA3-verified.
-     *   (2) node_state["sapling_tree"] - flushed every 100K blocks,
-     *       SQLite-backed, legacy path.
-     * Each hit short-circuits the ones below it; every miss falls through.
-     * All three bind fail-closed to the header chain before being trusted. */
-    int64_t ckpt_h = 0;
-    {
-        struct incremental_merkle_tree akv_tree;
-        int64_t akv_h = -1;
-        if (sapling_rebuild_anchor_seed(chain, chain_tip, sapling_height,
-                                        &akv_tree, &akv_h)) {
-            tree = akv_tree;
-            start_height = (int)akv_h + 1;
-            total_commitments = (int)incremental_tree_size(&tree);
-            ckpt_h = akv_h;
-            LOG_INFO("sapling_tree_rebuild",
-                     "sapling_tree_rebuild: resuming from the anchor_kv "
-                     "Sapling frontier h=%lld (%d commitments) — the "
-                     "canonical fold ledger, header-root-bound at that height",
-                     (long long)akv_h, total_commitments);
-        }
-    }
-
-    if (ckpt_h == 0) {
-        int64_t flat_h = 0;
-        enum sapling_ckpt_verdict v = SAPLING_CKPT_OK;
-        enum sapling_resume_result rr = sapling_rebuild_resume_flat(
-            chain, datadir, chain_tip, sapling_height, &tree, &start_height,
-            &total_commitments, &ckpt_h, &flat_h, &v);
-        if (rr == SAPLING_RESUME_DONE) {
-            LOG_INFO("sapling_tree_rebuild", "sapling_tree_rebuild: resuming " "from flat-file checkpoint h=%lld " "(%d commitments,)", (long long)flat_h, total_commitments);
-            fflush(stderr);
-        } else if (rr == SAPLING_RESUME_REFUSED) {
-            LOG_WARN("sapling_tree_rebuild",
-                     "sapling_tree_rebuild: refusing flat-file "
-                     "checkpoint h=%lld (%s)",
-                     (long long)flat_h, sapling_ckpt_verdict_str(v));
-        }
-    }
-
-    if (ckpt_h == 0) {
-        enum sapling_resume_result rr = sapling_rebuild_resume_node_state(
-            ndb, chain, chain_tip, sapling_height, &tree, &start_height,
-            &total_commitments, &ckpt_h);
-        if (rr == SAPLING_RESUME_DONE) {
-            LOG_INFO("sapling_tree_rebuild", "sapling_tree_rebuild: resuming " "from checkpoint h=%d (%d commitments)", (int)ckpt_h, total_commitments);
-            fflush(stderr);
-        } else if (rr == SAPLING_RESUME_MISMATCH) {
-            LOG_WARN("sapling_tree_rebuild",
-                     "sapling_tree_rebuild: checkpoint h=%d "
-                     "root mismatch; replaying from activation",
-                     (int)ckpt_h);
-        } else if (rr == SAPLING_RESUME_UNVERIFIED) {
-            LOG_WARN("sapling_tree_rebuild",
-                     "sapling_tree_rebuild: refusing unverified "
-                     "node_state checkpoint h=%d (missing "
-                     "hashFinalSaplingRoot)",
-                     (int)ckpt_h);
-        }
-    }
+    sapling_rebuild_resume_candidates(ndb, chain, datadir, chain_tip,
+                                      sapling_height, &tree, &start_height,
+                                      &total_commitments);
 
     int64_t t_replay_start = GetTimeMillis();
     int cached_file = -1;
@@ -808,40 +976,17 @@ int sapling_tree_rebuild(struct node_db *ndb,
         if (loc == SAPLING_LOCATE_SKIP)
             continue;
 
-        int appended_this_block =
-            sapling_rebuild_fold_block(&tree, &blk, &total_commitments);
-
-        bool is_checkpoint = ((h - sapling_height) % 100000 == 0 &&
-                              h > sapling_height);
-
-        sapling_rebuild_check_block_roots(&tree, bi, &blk, is_checkpoint,
-                                          appended_this_block, h, &mismatches,
-                                          &fail_reason, &fail_height);
-
-        block_free(&blk);
-
-        if (fail_reason)
+        bool is_checkpoint = sapling_rebuild_is_checkpoint_height(h,
+                                                                  sapling_height);
+        if (sapling_rebuild_fold_checked(&tree, bi, &blk, is_checkpoint, h,
+                                         &total_commitments, &mismatches,
+                                         &fail_reason, &fail_height))
             goto fail;
-
-        if (is_checkpoint) {
-            LOG_WARN("sapling_tree_rebuild", "  sapling_tree_rebuild: h=%d/%d " "commitments=%d mismatches=%d", h, chain_tip, total_commitments, mismatches);
-            fflush(stderr);
-
-            enum sapling_persist_status ps = SAPLING_PERSIST_OK;
-            fail_reason = sapling_rebuild_persist_checkpoint(ndb, &tree, h,
-                                                             &ps);
-            if (fail_reason) {
-                fail_height = h;
-                goto fail;
-            }
-            /* DEFERRED: a foreign tx transiently owned the connection. Skip
-             * persisting THIS checkpoint — the tree stays in memory and the
-             * next checkpoint (or the final persist) records it. Not a
-             * failure; the fold keeps making progress. */
-            if (ps == SAPLING_PERSIST_DEFERRED)
-                LOG_INFO("sapling_tree_rebuild",
-                        "checkpoint persist deferred at h=%d (busy)", h);
-        }
+        if (sapling_rebuild_replay_checkpoint(is_checkpoint, ndb, &tree, h,
+                                              chain_tip, total_commitments,
+                                              mismatches, &fail_reason,
+                                              &fail_height))
+            goto fail;
     }
 
     sync_block_file_mapping_close(&cached_mapping);
@@ -854,30 +999,11 @@ int sapling_tree_rebuild(struct node_db *ndb,
                                      skips.first_height, skips.last_height,
                                      endpoint_is_coins_applied);
 
-    /* Verify against the resolved endpoint (the coins-applied frontier, or the
-     * header tip when no coins frontier exists), not active_chain_tip(): a
-     * block above the applied frontier may lack hashFinalSaplingRoot and
-     * FATAL on `tip_missing_sapling_root`. */
-    const struct block_index *tip = active_chain_at(chain, chain_tip);
-    struct uint256 final_root;
-    incremental_tree_root(&tree, &final_root);
-    bool tip_root_known = false;
-    bool match = sapling_rebuild_tip_matches(tip, &final_root, &tip_root_known);
-
-    char root_hex[65];
-    uint256_get_hex(&final_root, root_hex);
-    int64_t replay_ms = GetTimeMillis() - t_replay_start;
-    int replayed_blocks = sapling_rebuild_replayed_blocks(start_height,
-                                                          chain_tip);
-    LOG_INFO("sapling_tree_rebuild", "sapling_tree_rebuild: replayed %d blocks in %lld ms", replayed_blocks, (long long)replay_ms);
-    LOG_WARN("sapling_tree_rebuild", "sapling_tree_rebuild: DONE commitments=%d " "mismatches=%d root=%s match=%s", total_commitments, mismatches, root_hex, match ? "YES" : "NO");
-    fflush(stderr);
-
-    if (!match) {
-        sapling_rebuild_tip_failure(tip, tip_root_known, &fail_reason,
-                                    &fail_height);
+    if (!sapling_rebuild_verify_endpoint(chain, chain_tip, &tree, start_height,
+                                         total_commitments, mismatches,
+                                         t_replay_start, &fail_reason,
+                                         &fail_height))
         goto fail;
-    }
 
     {
         enum sapling_persist_status ps = sapling_rebuild_persist_final_checked(
@@ -935,32 +1061,14 @@ fail:
      * check — so a non-zero tally always means "bodies missing BELOW the
      * mismatch". */
     struct sapling_rebuild_skip_tally fail_skips = {0};
-    {
-        sapling_rebuild_fill_skip_tally(&fail_skips, &skips);
-        const int skipped_no_index = skips.counts[SAPLING_SKIP_NO_INDEX];
-        const int skipped_no_data = skips.counts[SAPLING_SKIP_NO_DATA];
-        const int skipped_no_mmap = skips.counts[SAPLING_SKIP_NO_MMAP];
-        const int skipped_datapos_oob = skips.counts[SAPLING_SKIP_DATAPOS_OOB];
-        const int skipped_deserialize = skips.counts[SAPLING_SKIP_DESERIALIZE];
-        const int first_skip_height = skips.first_height;
-        const int last_skip_height = skips.last_height;
-        if (fail_skips.total > 0)
-            LOG_WARN("sapling_tree_rebuild",
-                    "sapling_tree_rebuild: at fail — %d block(s) were skipped "
-                    "(no_index=%d no_data=%d no_mmap=%d datapos_oob=%d "
-                    "deserialize=%d span=[%d..%d]); a dropped shielded-output "
-                    "block below the mismatch height is the leading cause",
-                    fail_skips.total, skipped_no_index, skipped_no_data,
-                    skipped_no_mmap, skipped_datapos_oob, skipped_deserialize,
-                    first_skip_height, last_skip_height);
-    }
+    sapling_rebuild_tally_fail_skips(&skips, &fail_skips);
     sapling_tree_rebuild_raise_fail_blocker(fail_reason, fail_height,
                                             total_commitments, mismatches,
                                             &fail_skips);
     LOG_ERR("sapling_tree_rebuild",
             "sapling_tree_rebuild: fail-closed reason=%s height=%d "
             "commitments=%d mismatches=%d",
-            fail_reason ? fail_reason : "unknown", fail_height,
+            sapling_rebuild_reason_or_unknown(fail_reason), fail_height,
             total_commitments, mismatches);
 }
 
