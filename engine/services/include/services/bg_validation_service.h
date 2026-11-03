@@ -208,6 +208,11 @@ void bg_validation_reset_undo_skip_stats(void);
  * Monotonic for the process; lock-free. */
 uint64_t bg_validation_undo_from_delta_blocks(void);
 
+/* Verifier invocations whose spent outputs came from a checksum-verified scan
+ * of the zclassicd rev files (the block's undo position was cleared by a
+ * seed). Monotonic for the process; lock-free. */
+uint64_t bg_validation_undo_from_rev_scan_blocks(void);
+
 /* Record the outcome of ONE sampled re-verify of an already-verified height.
  * On success bumps reverify_passes and returns true (keep sampling). On failure
  * bumps reverify_fails, flips state to BG_VALIDATION_FAILED, raises the PERMANENT

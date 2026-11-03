@@ -39,6 +39,7 @@
 #include "script/script_flags.h"
 #include "platform/positioned_file.h"
 #include "jobs/utxo_apply_delta_undo.h"
+#include "services/undo_rev_index.h"
 #include "storage/progress_store.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
@@ -161,17 +162,53 @@ static bool read_delta_undo(struct block_undo *undo, const struct block *block,
     return true;
 }
 
-/* A copied-in rev record wins; otherwise the fold's own delta row. */
+/* ── Undo located by scanning the zclassicd rev files ───────────
+ *
+ * A bundle-seeded node clears BLOCK_HAVE_UNDO below the seed although the
+ * zclassicd rev files are still in <datadir>/blocks. The locator finds the
+ * block's record by its PARENT-hash checksum and accepts it only when that
+ * checksum matches and the undo deserializer consumes the whole payload, so
+ * an unverified offset is never trusted. Read-only; see undo_rev_index.h. */
+static _Atomic uint64_t g_undo_from_rev_scan_blocks = 0;
+
+uint64_t bg_validation_undo_from_rev_scan_blocks(void)
+{
+    return atomic_load(&g_undo_from_rev_scan_blocks);
+}
+
+static bool read_rev_scan_undo(struct block_undo *undo,
+                               const struct block_index *pindex,
+                               const char *datadir,
+                               const struct chain_params *params)
+{
+    block_undo_init(undo);
+    if (!pindex->pprev || !pindex->pprev->phashBlock)
+        return false; // raw-return-ok:missing-undo-is-counted-as-script-skip
+    enum undo_rev_status st = undo_rev_shared_read(
+        datadir, params->pchMessageStart, pindex->pprev->phashBlock,
+        block_index_file_load(pindex), undo);
+    if (st != UNDO_REV_FOUND)
+        return false; // raw-return-ok:missing-undo-is-counted-as-script-skip
+    atomic_fetch_add(&g_undo_from_rev_scan_blocks, 1);
+    return true;
+}
+
+/* A copied-in rev record wins; then the fold's own delta row; then a verified
+ * scan of the rev files for a block whose undo position was cleared. */
 static bool read_undo_rev_or_delta(struct block_undo *undo,
                                    const struct block *block,
                                    const struct block_index *pindex,
-                                   const char *datadir)
+                                   const char *datadir,
+                                   const struct chain_params *params)
 {
     if (read_block_undo(undo, pindex, datadir))
         return true;
     /* A torn rev parse may leave partial allocations behind. */
     block_undo_free(undo);
-    return read_delta_undo(undo, block, pindex);
+    if (read_delta_undo(undo, block, pindex))
+        return true;
+    block_undo_free(undo);
+    return read_rev_scan_undo(undo, pindex, datadir, params);
 }
 
 /* ── Undo-missing script-skip suppression ─────────────────────
@@ -465,7 +502,7 @@ bool bg_validation_validate_block_proofs(const struct block *block,
 
     if (block->num_vtx > 1)
         have_undo = read_undo_rev_or_delta(&blockundo, block, pindex,
-                                           datadir);
+                                           datadir, params);
 
     size_t alloc_size = script_batch_alloc_size(block, max_script_batch);
 
