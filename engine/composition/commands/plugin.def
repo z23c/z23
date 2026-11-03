@@ -215,15 +215,17 @@ ZCL_COMMAND_READY_COMMAND(
     "limits); declared capabilities grant nothing beyond that. An interface 1 "
     "plugin is refused with PLUGIN_INTERFACE, as plugin.run refuses an "
     "interface 2 plugin. Linux only; other hosts refuse with "
-    "PLUGIN_RUN_PLATFORM.",
+    "PLUGIN_RUN_PLATFORM. It changes no plugin generation and keeps nothing "
+    "after the run, so it is a read for the MCP adapter; install, switch and "
+    "rollback stay owner-only.",
     ZCL_COMMAND_RESULT_BUDGET,
     "plugin,call,one-shot,interface,stdin,stdout,confined,landlock,seccomp",
     "zcl.plugin_call.input.v1", "zcl.plugin_call.v1",
     "name,stdin,args,timeout_ms", "name",
     "z23 plugin call upper --stdin=abc",
-    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
-    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
-    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_READ,
+    ZCL_COMMAND_RISK_READ, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
     ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
     ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_PROCESS_EXEC, ZCL_COMMAND_TRAIT_NONE,
