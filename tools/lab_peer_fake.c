@@ -70,6 +70,8 @@ static void fp_base(const char *dir, int argc, char **argv, char *out, size_t ca
     char key[FP_DIR];
     (void)snprintf(key, sizeof(key), "%s.%s.%s", argc > 1 ? argv[1] : "",
                    argc > 2 ? argv[2] : "", argc > 3 ? argv[3] : "");
+    if (argc > 1 && (strcmp(argv[1], "offer") == 0 || strcmp(argv[1], "collect") == 0))
+        (void)snprintf(key, sizeof(key), "peer.%s", argv[1]); /* the shadow's child */
     if (strcmp(key, "fleet.board.post") == 0 && argc > 4)
         (void)snprintf(key + strlen(key), sizeof(key) - strlen(key), ".%s", argv[4]);
     for (int i = 1; i < argc; i++)

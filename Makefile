@@ -13687,7 +13687,7 @@ endif
 # on a Windows host.
 ifeq ($(ZCL_HOST_WINDOWS),)
 LAB_PEER_BIN = $(BIN_DIR)/z23-lab-peer
-LAB_PEER_SRCS = tools/lab_peer.c platform/modules/json/src/json.c platform/modules/util/src/spawn.c platform/modules/base/src/cleanse.c platform/modules/base/src/log_level.c platform/modules/base/src/result.c platform/modules/base/src/safe_alloc.c platform/modules/platform/src/clock.c platform/modules/platform/src/os_proc.c
+LAB_PEER_SRCS = tools/lab_peer.c tools/lab_peer_shadow.c platform/modules/json/src/json.c platform/modules/util/src/spawn.c platform/modules/base/src/cleanse.c platform/modules/base/src/log_level.c platform/modules/base/src/result.c platform/modules/base/src/safe_alloc.c platform/modules/platform/src/clock.c platform/modules/platform/src/os_proc.c
 LAB_PEER_INCLUDES = -Iplatform/modules/base/include -Iplatform/modules/json/include -Iplatform/modules/platform/include -Iplatform/modules/util/include
 .PHONY: lab-peer
 # tools/lab_peer_fake.c is the fake z23 / z23-dev the test group runs the tool
@@ -13697,7 +13697,7 @@ lab-peer: $(LAB_PEER_BIN) $(LAB_PEER_FAKE_BIN)
 # check-capability-closure grades the objects of the dev epoch, and these two
 # standalone programs link into neither z23-dev nor the package verifier:
 # build their objects there so their capability rows are graded, not missing.
-CAPABILITY_STANDALONE_OBJS += $(DEV_OBJ_DIR)/tools/lab_peer.o $(DEV_OBJ_DIR)/tools/lab_peer_fake.o
+CAPABILITY_STANDALONE_OBJS += $(DEV_OBJ_DIR)/tools/lab_peer.o $(DEV_OBJ_DIR)/tools/lab_peer_shadow.o $(DEV_OBJ_DIR)/tools/lab_peer_fake.o
 # Every path that runs the gate (the make target, parallel lint, lint-preflight)
 # builds them first.
 check-capability-closure lint lint-preflight: $(CAPABILITY_STANDALONE_OBJS)

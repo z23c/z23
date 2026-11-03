@@ -1104,6 +1104,8 @@ int test_lab_peer(void)
                LPT_FAKE);
         return 1;
     }
+    /* first: the offer/verify cases put a stub git first on PATH for good */
+    { extern int test_lab_peer_shadow(void); failures += test_lab_peer_shadow(); }
     failures += case_usage();
     failures += case_offer_posts_and_records();
     failures += case_offer_too_long();

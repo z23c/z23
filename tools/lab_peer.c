@@ -33,6 +33,7 @@
  *       -> STATE/receipts/<post>-<host12>.json -> dev land qualify_offer ->
  *       STATE/qualified.tsv. SHADOW MODE: it never submits to or changes the
  *       land queue; the only dev land leaf it runs is qualify_offer.
+ *   shadow  --state=DIR [--dry-run] ...   see tools/lab_peer_shadow.c
  *
  * One JSON document per run on stdout (zcl.lab_peer.v1): exit 0 when the run
  * completed (items may have failed), 1 when it stopped on a typed code (ok
@@ -58,6 +59,7 @@
 #define _DEFAULT_SOURCE
 #endif
 #include "json/json.h"
+#include "lab_peer_shadow.h"
 #include "platform/clock.h"
 #include "util/spawn.h"
 
@@ -1508,6 +1510,8 @@ static int lp_cmd_collect(struct lp_ctx *c)
 int main(int argc, char **argv)
 {
     static struct lp_ctx c;
+    if (argc >= 2 && strcmp(argv[1], "shadow") == 0)
+        return lab_peer_shadow_main(argc, argv);
     if (argc < 2 || !lp_parse_args(&c, argc, argv))
         return lp_usage();
     c.now = clock_now_wall_ms() / 1000;
