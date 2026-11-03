@@ -67,7 +67,9 @@ bool cp_set_add(struct cp_set *s, const char *str, size_t len)
 
 static int cp_cmp(const void *a, const void *b)
 {
-    return strcmp(*(const char *const *)a, *(const char *const *)b);
+    const char *const *left = a;
+    const char *const *right = b;
+    return strcmp(*left, *right);
 }
 
 void cp_set_sort(struct cp_set *s)
