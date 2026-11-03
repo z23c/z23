@@ -1501,6 +1501,26 @@ static void interrupted_with(struct fake *f, struct wsu *w, enum zapp_setup_kind
     f->held_after = held_after;
     init_with(f, w);
 }
+/* The running node was asked once, without a pause, and was never stopped, started or read around. */
+static bool asked_once_untouched(const struct fake *f)
+{
+    return f->stops == 0 && f->starts == 0 && f->starts_refused == 0 && f->running && f->script.status_calls == 0 &&
+           f->held_calls == 1 && f->held_while_stopped == 0 && f->pauses == 0 && f->now_ms == 0;
+}
+/* A node still starting answers at the fourth question, 15 s on; the screen names the check meanwhile and nothing stops. */
+static int booting_check_test(void)
+{
+    struct fake f;
+    struct wsu w;
+    interrupted_with(&f, &w, ZAPP_KIND_RESTORE, SUN_PROBE_NONE, 3);
+    f.clock_follows = true;
+    f.sample_ms = 2 * ASK_GAP_MS;
+    wsu_resume_job(&w);
+    assert(w.step == WSU_NO_WALLET && f.held_calls == 4 && f.now_ms == 3 * ASK_GAP_MS && f.stops == 0 && f.starts == 0);
+    assert(f.script.status_calls == 0 && f.step_at_sample == WSU_CHECKING && !strcmp(f.line_at_sample, "Checking your wallet - 0:10"));
+    wsu_destroy(&w);
+    return f.stops;
+}
 /* With the node running, the check asks the node and never stops or starts it: the node's answer alone decides each step. */
 static void running_check_tests(void)
 {
@@ -1520,20 +1540,11 @@ static void running_check_tests(void)
         if (cases[i].confirmed) assert(zapp_setup_mark_confirmed(dir, true));
         wsu_resume_job(&w);
         assert(w.step == cases[i].step && w.failure == cases[i].failure && f.discards == 0 && exists_in(dir, "wallet_key.blob"));
-        assert(f.stops == 0 && f.starts == 0 && f.starts_refused == 0 && f.running && f.script.status_calls == 0);
-        assert(f.held_calls == 1 && f.held_while_stopped == 0 && f.pauses == 0 && f.now_ms == 0);
+        assert(asked_once_untouched(&f));
         stops += f.stops;
         wsu_destroy(&w);
     }
-    /* A node still starting answers at the fourth question, 15 s on; the screen names the check meanwhile and nothing stops. */
-    interrupted_with(&f, &w, ZAPP_KIND_RESTORE, SUN_PROBE_NONE, 3);
-    f.clock_follows = true;
-    f.sample_ms = 2 * ASK_GAP_MS;
-    wsu_resume_job(&w);
-    assert(w.step == WSU_NO_WALLET && f.held_calls == 4 && f.now_ms == 3 * ASK_GAP_MS && f.stops == 0 && f.starts == 0);
-    assert(f.script.status_calls == 0 && f.step_at_sample == WSU_CHECKING && !strcmp(f.line_at_sample, "Checking your wallet - 0:10"));
-    stops += f.stops;
-    wsu_destroy(&w);
+    stops += booting_check_test();
     printf("  wallet check, node running and answering: %d node stops in %zu opens\n", stops, sizeof(cases) / sizeof(cases[0]) + 1);
 }
 /* A running node that gives no answer within the bound is read as before: stopped once, read, started once. One that exits on its
