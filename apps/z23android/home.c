@@ -102,8 +102,9 @@ static void behind_line(const struct zapp_view *view, char *out, size_t cap)
     snprintf(out, cap, "Catching up: %s blocks to go%s", zapp_grouped(behind, blocks), minutes_text);
 }
 /* The one plain status line for the phone node: stopped, stopping, paused while the phone cools (before any catching-up
- * or up-to-date text), starting (no height seen since the process started), running without a reply yet, catching up,
- * can't confirm it is up to date (with the reason), or up to date. Up to date shows only for the CURRENT verdict. */
+ * or up-to-date text), starting (no height seen since the process started), running without a reply yet, connected with
+ * no height yet, looking for other computers, catching up, can't confirm it is up to date (with the reason), or up to
+ * date. Up to date shows only for the CURRENT verdict. */
 static const char *plain_node_line(const struct zapp_view *view, char *out, size_t cap)
 {
     if (!view->node_process_running) snprintf(out, cap, "Node stopped");
@@ -111,12 +112,13 @@ static const char *plain_node_line(const struct zapp_view *view, char *out, size
     else if (view->pace == ZAPP_PACE_PAUSE) snprintf(out, cap, "%s", ZAPP_PAUSED_LINE);
     else if (!view->node_running) snprintf(out, cap, "%s", view->node_seen_height ?
         "Your node is running but has not replied yet" : "Starting your node… usually about a minute");
-    else if (view->node_height < 0 || view->node_reference < 0) snprintf(out, cap, "%s", view->node_line);
+    else if (view->node_height < 0) snprintf(out, cap, "Connected, checking the chain");
+    else if (view->node_reference < 0) snprintf(out, cap, "Looking for other computers to connect to");
     else if (view->chain_state == ZAPP_CHAIN_BEHIND) behind_line(view, out, cap);
     else if (view->chain_state == ZAPP_CHAIN_UNCONFIRMED) snprintf(out, cap, "Can't confirm it's up to date: %s", view->chain_doubt);
     else if (view->chain_state == ZAPP_CHAIN_WAITING) snprintf(out, cap, "%s", view->chain_doubt);
     else if (view->chain_state == ZAPP_CHAIN_CURRENT) snprintf(out, cap, "Up to date");
-    else snprintf(out, cap, "%s", view->node_line);
+    else snprintf(out, cap, "Connected, checking the chain");
     return out;
 }
 /* The plain node line the Home card shows, copied into out; the foreground notification shows the same line. */

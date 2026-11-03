@@ -115,7 +115,9 @@ static void plain_node_line_verdicts(void)
     view.node_reference = -1;
     view.chain_state = ZAPP_CHAIN_NONE;
     snprintf(view.node_line, sizeof(view.node_line), "Node running");
-    assert(node_line_is(&view, "Node running"));
+    assert(node_line_is(&view, "Connected, checking the chain"));
+    view.node_height = 1000;
+    assert(node_line_is(&view, "Looking for other computers to connect to"));
     view.node_wanted = false;
     assert(node_line_is(&view, "Stopping…"));
 }
