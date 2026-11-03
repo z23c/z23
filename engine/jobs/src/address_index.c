@@ -10,6 +10,7 @@
 #include "crypto/sha3.h"
 #include "encoding/utilstrencodings.h"
 #include "json/json.h"
+#include "platform/time_compat.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
 #include "script/standard.h"
@@ -31,6 +32,13 @@ static void ai_put_u64le(uint8_t b[8], uint64_t v)
 {
     for (int i = 0; i < 8; i++)
         b[i] = (uint8_t)(v >> (8 * i));
+}
+static uint64_t ai_get_u64le(const uint8_t b[8])
+{
+    uint64_t v = 0;
+    for (int i = 0; i < 8; i++)
+        v |= (uint64_t)b[i] << (8 * i);
+    return v;
 }
 
 /* Cached -addressindex decision (file-scope so a test can reset it). -1 =
@@ -265,32 +273,29 @@ bool address_index_put_block(sqlite3 *db, const struct block *blk, int height,
     return true;
 }
 
-bool address_index_get_cursor(sqlite3 *db, int64_t *cursor_out)
+/* One address_index_state value of exactly `n` bytes. A missing table, key or
+ * size is a clean *found=false; false only on a real SQLite error. */
+static bool ai_state_get(sqlite3 *db, const char *key, void *out, int n,
+                         bool *found)
 {
-    if (cursor_out) *cursor_out = -1;
-    if (!db || !cursor_out)
-        LOG_FAIL("address_index", "get_cursor: NULL db/out");
+    *found = false;
     sqlite3_stmt *st = NULL;
     if (sqlite3_prepare_v2(db,
-        "SELECT v FROM address_index_state WHERE k='cursor'",
+        "SELECT v FROM address_index_state WHERE k=?",
         -1, &st, NULL) != SQLITE_OK) {
-        /* table may not exist yet — clean cursor=-1, not an error. */
-        return true;
+        return true;                /* table may not exist yet */
     }
+    sqlite3_bind_text(st, 1, key, -1, SQLITE_STATIC);
     int rc = sqlite3_step(st);  // raw-sql-ok:progress-kv-kernel-store
     if (rc == SQLITE_ROW) {
         const void *b = sqlite3_column_blob(st, 0);
-        int n = sqlite3_column_bytes(st, 0);
-        if (b && n == 8) {
-            int64_t v = 0;
-            const uint8_t *p = b;
-            for (int i = 0; i < 8; i++)
-                v |= (int64_t)p[i] << (8 * i);
-            *cursor_out = v;
+        if (b && sqlite3_column_bytes(st, 0) == n) {
+            memcpy(out, b, (size_t)n);
+            *found = true;
         }
     } else if (rc != SQLITE_DONE) {
-        LOG_WARN("address_index", "[address_index] get_cursor step rc=%d: %s",
-                 rc, sqlite3_errmsg(db));
+        LOG_WARN("address_index", "[address_index] get %s step rc=%d: %s",
+                 key, rc, sqlite3_errmsg(db));
         sqlite3_finalize(st);
         return false;
     }
@@ -298,44 +303,59 @@ bool address_index_get_cursor(sqlite3 *db, int64_t *cursor_out)
     return true;
 }
 
+static bool ai_state_put(sqlite3 *db, const char *key, const void *v, int n)
+{
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db,
+        "INSERT OR REPLACE INTO address_index_state(k,v) VALUES(?,?)",
+        -1, &st, NULL) != SQLITE_OK) {
+        LOG_WARN("address_index", "[address_index] set %s prepare: %s",
+                 key, sqlite3_errmsg(db));
+        return false;
+    }
+    sqlite3_bind_text(st, 1, key, -1, SQLITE_STATIC);
+    sqlite3_bind_blob(st, 2, v, n, SQLITE_STATIC);
+    bool ok = sqlite3_step(st) == SQLITE_DONE;  // raw-sql-ok:progress-kv-kernel-store
+    if (!ok)
+        LOG_WARN("address_index", "[address_index] set %s rc: %s",
+                 key, sqlite3_errmsg(db));
+    sqlite3_finalize(st);
+    return ok;
+}
+
+static bool ai_state_get_i64(sqlite3 *db, const char *key, int64_t *v,
+                             bool *found)
+{
+    uint8_t b[8];
+    bool ok = ai_state_get(db, key, b, 8, found);
+    if (ok && *found)
+        *v = (int64_t)ai_get_u64le(b);
+    return ok;
+}
+
+static bool ai_state_put_i64(sqlite3 *db, const char *key, int64_t v)
+{
+    uint8_t b[8];
+    ai_put_u64le(b, (uint64_t)v);
+    return ai_state_put(db, key, b, 8);
+}
+
+bool address_index_get_cursor(sqlite3 *db, int64_t *cursor_out)
+{
+    if (cursor_out) *cursor_out = -1;
+    if (!db || !cursor_out)
+        LOG_FAIL("address_index", "get_cursor: NULL db/out");
+    bool found = false;
+    return ai_state_get_i64(db, "cursor", cursor_out, &found);
+}
+
 bool address_index_set_cursor(sqlite3 *db, int64_t cursor,
                               const uint8_t digest[32])
 {
     if (!db || !digest)
         LOG_FAIL("address_index", "set_cursor: NULL db/digest");
-    sqlite3_stmt *st = NULL;
-    if (sqlite3_prepare_v2(db,
-        "INSERT OR REPLACE INTO address_index_state(k,v) VALUES(?,?)",
-        -1, &st, NULL) != SQLITE_OK) {
-        LOG_WARN("address_index", "[address_index] set_cursor prepare: %s",
-                 sqlite3_errmsg(db));
-        return false;
-    }
-    uint8_t cb[8];
-    ai_put_u64le(cb, (uint64_t)cursor);
-    bool ok = true;
-    /* cursor row */
-    sqlite3_reset(st);
-    sqlite3_bind_text(st, 1, "cursor", -1, SQLITE_STATIC);
-    sqlite3_bind_blob(st, 2, cb, 8, SQLITE_STATIC);
-    if (sqlite3_step(st) != SQLITE_DONE) {  // raw-sql-ok:progress-kv-kernel-store
-        LOG_WARN("address_index", "[address_index] set cursor rc: %s",
-                 sqlite3_errmsg(db));
-        ok = false;
-    }
-    /* digest row */
-    if (ok) {
-        sqlite3_reset(st);
-        sqlite3_bind_text(st, 1, "digest", -1, SQLITE_STATIC);
-        sqlite3_bind_blob(st, 2, digest, 32, SQLITE_STATIC);
-        if (sqlite3_step(st) != SQLITE_DONE) {  // raw-sql-ok:progress-kv-kernel-store
-            LOG_WARN("address_index", "[address_index] set digest rc: %s",
-                     sqlite3_errmsg(db));
-            ok = false;
-        }
-    }
-    sqlite3_finalize(st);
-    return ok;
+    return ai_state_put_i64(db, "cursor", cursor) &&
+           ai_state_put(db, "digest", digest, 32);
 }
 
 bool address_index_get_digest(sqlite3 *db, uint8_t digest[32], bool *found)
@@ -344,26 +364,94 @@ bool address_index_get_digest(sqlite3 *db, uint8_t digest[32], bool *found)
     if (digest) memset(digest, 0, 32);
     if (!db || !digest || !found)
         LOG_FAIL("address_index", "get_digest: NULL arg");
+    return ai_state_get(db, "digest", digest, 32, found);
+}
+
+bool address_index_get_rows(sqlite3 *db, int64_t *rows_out, bool *found)
+{
+    if (found) *found = false;
+    if (rows_out) *rows_out = -1;
+    if (!db || !rows_out || !found)
+        LOG_FAIL("address_index", "get_rows: NULL arg");
+    return ai_state_get_i64(db, "rows", rows_out, found);
+}
+
+bool address_index_set_rows(sqlite3 *db, int64_t rows)
+{
+    if (!db || rows < 0)
+        LOG_FAIL("address_index", "set_rows: NULL db or negative count");
+    return ai_state_put_i64(db, "rows", rows);
+}
+
+void address_index_census_begin(struct address_index_census *c, int64_t floor)
+{
+    memset(c, 0, sizeof(*c));
+    c->floor = floor;
+}
+
+/* Binds the scan position. An empty blob sorts before every 32-byte key. */
+static void ai_census_bind(sqlite3_stmt *st,
+                           const struct address_index_census *c, int max_rows)
+{
+    if (c->started) {
+        sqlite3_bind_blob(st, 1, c->scripthash, 32, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(st, 2, c->txid, 32, SQLITE_TRANSIENT);
+    } else {
+        sqlite3_bind_zeroblob(st, 1, 0);
+        sqlite3_bind_zeroblob(st, 2, 0);
+    }
+    sqlite3_bind_int64(st, 3, (sqlite3_int64)c->vout);
+    sqlite3_bind_int(st, 4, max_rows);
+}
+
+/* Counts the current row and advances the scan position past it. False when
+ * a key column is not the 32 bytes every fold writes. */
+static bool ai_census_take(sqlite3_stmt *st, struct address_index_census *c)
+{
+    const void *sh = sqlite3_column_blob(st, 0);
+    int sh_n = sqlite3_column_bytes(st, 0);
+    const void *txid = sqlite3_column_blob(st, 1);
+    int txid_n = sqlite3_column_bytes(st, 1);
+    if (!sh || sh_n != 32 || !txid || txid_n != 32)
+        return false;
+    memcpy(c->scripthash, sh, 32);
+    memcpy(c->txid, txid, 32);
+    c->vout = sqlite3_column_int64(st, 2);
+    c->started = true;
+    if (sqlite3_column_int64(st, 3) <= c->floor)
+        c->counted++;
+    return true;
+}
+
+bool address_index_census_step(sqlite3 *db, struct address_index_census *c,
+                               int max_rows, int64_t deadline_us)
+{
+    if (!db || !c || max_rows <= 0)
+        LOG_FAIL("address_index", "census_step: bad args");
     sqlite3_stmt *st = NULL;
     if (sqlite3_prepare_v2(db,
-        "SELECT v FROM address_index_state WHERE k='digest'",
-        -1, &st, NULL) != SQLITE_OK) {
-        return true; /* no table yet */
-    }
-    int rc = sqlite3_step(st);  // raw-sql-ok:progress-kv-kernel-store
-    if (rc == SQLITE_ROW) {
-        const void *b = sqlite3_column_blob(st, 0);
-        int n = sqlite3_column_bytes(st, 0);
-        if (b && n == 32) {
-            memcpy(digest, b, 32);
-            *found = true;
+        "SELECT scripthash, txid, vout, height FROM address_index "
+        "WHERE (scripthash, txid, vout) > (?, ?, ?) "
+        "ORDER BY scripthash, txid, vout LIMIT ?",
+        -1, &st, NULL) != SQLITE_OK)
+        LOG_FAIL("address_index", "census prepare: %s", sqlite3_errmsg(db));
+    ai_census_bind(st, c, max_rows);
+    int scanned = 0;
+    int rc;
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {  // raw-sql-ok:progress-kv-kernel-store
+        if (!ai_census_take(st, c)) {
+            rc = SQLITE_MISMATCH;
+            break;
         }
-    } else if (rc != SQLITE_DONE) {
-        LOG_WARN("address_index", "[address_index] get_digest step rc=%d", rc);
-        sqlite3_finalize(st);
-        return false;
+        if (++scanned < max_rows &&
+            platform_time_monotonic_us() >= deadline_us)
+            break;                      /* budget spent: resume next step */
     }
     sqlite3_finalize(st);
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE)
+        LOG_FAIL("address_index", "census step rc=%d: %s", rc,
+                 sqlite3_errmsg(db));
+    c->done = rc == SQLITE_DONE && scanned < max_rows;
     return true;
 }
 

@@ -79,7 +79,39 @@ bool address_index_set_cursor(sqlite3 *db, int64_t cursor,
  * projection has never been folded. Returns false on a real SQLite error. */
 bool address_index_get_digest(sqlite3 *db, uint8_t digest[32], bool *found);
 
-/* Total appearance rows. -1 on error. */
+/* Exact appearance-row count, persisted in address_index_state beside the
+ * cursor. The fold writes it in the same transaction as the cursor, and a
+ * drop removes it with the state table. *found=false when it is absent: a
+ * store folded before the count was persisted, or a freshly reset one.
+ * Returns false on a real SQLite error. */
+bool address_index_get_rows(sqlite3 *db, int64_t *rows_out, bool *found);
+bool address_index_set_rows(sqlite3 *db, int64_t rows);
+
+/* Resumable, bounded count for a store without a persisted row count. A fold
+ * only inserts rows at heights above the cursor, so the rows at or below
+ * `floor` (the cursor when the census began) are fixed in number while the
+ * fold keeps running; the caller counts the rows it folds above `floor`. */
+struct address_index_census {
+    int64_t floor;
+    int64_t counted;            /* rows at height <= floor scanned so far */
+    uint8_t scripthash[32];     /* scan position: the last primary key */
+    uint8_t txid[32];
+    int64_t vout;
+    bool    started;            /* false: the scan starts before every row */
+    bool    done;               /* every row has been scanned */
+};
+
+void address_index_census_begin(struct address_index_census *c, int64_t floor);
+
+/* Scan at most `max_rows` rows past the saved position in primary-key order,
+ * stopping after the row at which platform_time_monotonic_us() reaches
+ * `deadline_us`. Returns false on a real SQLite error. Caller holds the tx
+ * lock. */
+bool address_index_census_step(sqlite3 *db, struct address_index_census *c,
+                               int max_rows, int64_t deadline_us);
+
+/* Total appearance rows by a full table scan, -1 on error. An offline oracle:
+ * the supervised fold reads the persisted count instead. */
 int64_t address_index_row_count(sqlite3 *db);
 
 /* Appearances for one scripthash with height >= from_height, ascending, capped

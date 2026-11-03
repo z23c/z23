@@ -6,10 +6,12 @@
 #include "test/test_core.h"
 #include "encoding/utilstrencodings.h"
 
+#include "config/runtime.h"
 #include "core/uint256.h"
 #include "crypto/sha3.h"
 #include "jobs/address_index.h"
 #include "jobs/reducer_frontier.h"
+#include "jobs/tip_finalize_stage.h"
 #include "json/json.h"
 #include "platform/time_compat.h"
 #include "primitives/block.h"
@@ -18,11 +20,13 @@
 #include "script/script.h"
 #include "services/address_index_service.h"
 #include "services/index_fold_guard.h"
+#include "storage/disk_block_io.h"
 #include "storage/progress_store.h"
 #include "storage/projection_store.h"
 #include "util/blocker.h"
 #include "util/safe_alloc.h"
 #include "util/util.h"
+#include "validation/main_state.h"
 
 #include <pthread.h>
 #include <sqlite3.h>
@@ -598,6 +602,239 @@ static int ai_check_backfill_safety(sqlite3 *db, const char *dir)
     return failures;
 }
 
+/* ── service tick: the "rows" gauge without a full-table count ───────────
+ * The tick runs on the shared supervisor runner, so it reads the persisted
+ * row count. A store folded before that count existed is counted once in
+ * bounded steps while folding continues. */
+enum { AI_GENESIS_OUTS = 3 };
+
+/* What one tick ran on the projection handle: count() aggregates authorized
+ * at prepare, and full-table-scan steps and sorts at statement end. */
+struct ai_sql_census {
+    int     count_calls;
+    int64_t fullscan_steps;
+    int64_t sorts;
+};
+
+static int ai_sql_census_auth(void *ctx, int action, const char *a,
+                              const char *b, const char *c, const char *d)
+{
+    (void)a; (void)c; (void)d;
+    struct ai_sql_census *s = ctx;
+    if (action == SQLITE_FUNCTION && b && sqlite3_stricmp(b, "count") == 0)
+        s->count_calls++;
+    return SQLITE_OK;
+}
+
+static int ai_sql_census_trace(unsigned type, void *ctx, void *p, void *x)
+{
+    (void)x;
+    struct ai_sql_census *s = ctx;
+    if (type == SQLITE_TRACE_PROFILE) {
+        sqlite3_stmt *st = p;
+        s->fullscan_steps +=
+            sqlite3_stmt_status(st, SQLITE_STMTSTATUS_FULLSCAN_STEP, 0);
+        s->sorts += sqlite3_stmt_status(st, SQLITE_STMTSTATUS_SORT, 0);
+    }
+    return 0;
+}
+
+static int ai_tick_census(sqlite3 *db, struct ai_sql_census *s)
+{
+    memset(s, 0, sizeof(*s));
+    sqlite3_set_authorizer(db, ai_sql_census_auth, s);
+    sqlite3_trace_v2(db, SQLITE_TRACE_PROFILE, ai_sql_census_trace, s);
+    int folded = address_index_service_tick_once();
+    sqlite3_trace_v2(db, 0, NULL, NULL);
+    sqlite3_set_authorizer(db, NULL, NULL);
+    return folded;
+}
+
+static bool ai_tick_census_clean(const struct ai_sql_census *s)
+{
+    return s->count_calls == 0 && s->fullscan_steps == 0 && s->sorts == 0;
+}
+
+static int64_t ai_dump_int(const char *key)
+{
+    struct json_value out;
+    json_init(&out);
+    int64_t v = address_index_dump_state_json(&out, NULL)
+        ? json_get_int(json_get(&out, key)) : INT64_MIN;
+    json_free(&out);
+    return v;
+}
+
+static bool ai_persisted_rows_are(sqlite3 *db, int64_t want)
+{
+    int64_t rows = -1;
+    bool found = false;
+    return address_index_get_rows(db, &rows, &found) && found && rows == want;
+}
+
+/* The gauge, the persisted count and a full-scan oracle all agree. */
+static bool ai_rows_exact(sqlite3 *db, int64_t want)
+{
+    return ai_dump_int("rows") == want && ai_persisted_rows_are(db, want) &&
+           address_index_row_count(db) == want;
+}
+
+/* Rows a fold before the persisted count left behind. Height -1 keeps them
+ * at or below the absent (-1) cursor, so a genesis fold can run while the
+ * census still counts them. Their keys sort below every sha3 scripthash, so
+ * the census also scans the genesis rows folded meanwhile and must leave
+ * them to the fold's own tally. */
+static bool ai_insert_legacy_rows(sqlite3 *db, int64_t n)
+{
+    char sql[512];
+    snprintf(sql, sizeof(sql),
+             "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c "
+             "WHERE x<%lld) INSERT INTO address_index"
+             "(scripthash, txid, vout, height, value, script_type) "
+             "SELECT unhex(printf('%%064x', x)), unhex(printf('%%064x', x)), "
+             "0, -1, 1, 0 FROM c",
+             (long long)n);
+    return address_index_drop(db) && address_index_ensure_schema(db) &&
+           sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK &&
+           address_index_row_count(db) == n;
+}
+
+/* A readable genesis body with AI_GENESIS_OUTS outputs under `datadir`,
+ * indexed at height 0. No phashBlock: the read skips the hash comparison. */
+static bool ai_write_genesis(const char *datadir, struct block_index *bi)
+{
+    static const unsigned char s0[1] = { 0x51 }, s1[1] = { 0x52 },
+                               s2[1] = { 0x53 };
+    const unsigned char *scripts[AI_GENESIS_OUTS] = { s0, s1, s2 };
+    size_t lens[AI_GENESIS_OUTS] = { 1, 1, 1 };
+    int64_t values[AI_GENESIS_OUTS] = { 10, 20, 30 };
+    struct block b;
+    block_init(&b);
+    b.header.nVersion = 4;
+    b.header.nBits = 0x2000ffff;
+    b.num_vtx = 1;
+    b.vtx = zcl_calloc(1, sizeof(struct transaction), "ai_genesis_vtx");
+    transaction_init(&b.vtx[0]);
+    ai_set_spend(&b.vtx[0], NULL, 0);
+    ai_set_vouts(&b.vtx[0], AI_GENESIS_OUTS, values, scripts, lens);
+    struct disk_block_pos pos = {0};
+    unsigned char magic[4] = { 0x24, 0xe9, 0x27, 0x64 };
+    bool ok = write_block_to_disk(&b, &pos, datadir, magic);
+    block_free(&b);
+    block_index_init(bi);
+    bi->nHeight = 0;
+    bi->nStatus |= BLOCK_HAVE_DATA;
+    block_index_disk_pos_store(bi, pos.nFile, pos.nPos);
+    return ok;
+}
+
+struct ai_tick_fixture {
+    struct main_state ms;
+    struct app_runtime_context runtime;
+    struct block_index genesis;
+};
+
+/* The runtime one tick needs: datadir, main state with a readable genesis,
+ * no disk floor, and H* = 0 (no tip_finalize stage in this process). */
+static bool ai_tick_fixture_open(struct ai_tick_fixture *f, const char *dir)
+{
+    char netdir[1024];
+    memset(f, 0, sizeof(*f));
+    main_state_init(&f->ms);
+    f->runtime.main_state = &f->ms;
+    if (!SetDataDir(dir))
+        return false;
+    GetDataDir(true, netdir, sizeof(netdir));
+    index_fold_set_min_free_for_test(0);
+    app_runtime_set_current(&f->runtime);
+    return netdir[0] && ai_write_genesis(netdir, &f->genesis) &&
+           active_chain_install_tip_slot(&f->ms.chain_active, &f->genesis) &&
+           tip_finalize_stage_cursor() == 0;
+}
+
+static void ai_tick_fixture_close(struct ai_tick_fixture *f)
+{
+    app_runtime_set_current(NULL);
+    index_fold_set_min_free_for_test(-1);
+    (void)SetDataDir(NULL);
+    main_state_free(&f->ms);
+}
+
+/* A store without a persisted count: the first tick runs no count() and no
+ * full scan; the census spans ticks and lands exact, a concurrent fold
+ * included. */
+static int ai_check_legacy_census(sqlite3 *db)
+{
+    int failures = 0;
+    const int64_t legacy = 2 * (int64_t)ADDRESS_INDEX_CENSUS_ROWS + 123;
+    const int64_t want = legacy + AI_GENESIS_OUTS;
+    AI_CHECK("census: legacy store without a persisted count",
+             ai_insert_legacy_rows(db, legacy) &&
+             !ai_persisted_rows_are(db, legacy));
+    struct ai_sql_census s;
+    int folded = ai_tick_census(db, &s);
+    AI_CHECK("first tick runs no count() and no full scan or sort",
+             ai_tick_census_clean(&s));
+    AI_CHECK("first tick folds genesis while the census runs", folded == 1);
+    AI_CHECK("gauge reads unknown (-1) until the census completes",
+             ai_dump_int("rows") == -1);
+    /* A census tick scans at least one row and at most the row cap. */
+    const int64_t min_ticks = (want + ADDRESS_INDEX_CENSUS_ROWS - 1) /
+                              ADDRESS_INDEX_CENSUS_ROWS;
+    int64_t ticks = 1;
+    bool clean = true;
+    while (ai_dump_int("rows") < 0 && ticks <= want + 1) {
+        (void)ai_tick_census(db, &s);
+        clean = clean && ai_tick_census_clean(&s);
+        ticks++;
+    }
+    AI_CHECK("census ticks run no count() and no full scan or sort", clean);
+    AI_CHECK("census spans at least ceil(rows / row cap) ticks",
+             ticks >= min_ticks);
+    AI_CHECK("gauge exact after the census and a concurrent fold",
+             ai_rows_exact(db, want));
+    folded = ai_tick_census(db, &s);
+    AI_CHECK("caught-up tick reads the persisted count",
+             folded == 0 && ai_tick_census_clean(&s) &&
+             ai_rows_exact(db, want));
+    return failures;
+}
+
+/* A deep-rewind reset zeroes the gauge; the refold keeps it exact. */
+static int ai_check_reset_refold(sqlite3 *db)
+{
+    int failures = 0;
+    uint8_t digest[32] = {0};
+    int64_t resets = ai_dump_int("resets");
+    AI_CHECK("cursor past H* forces a deep-rewind reset",
+             address_index_set_cursor(db, 1, digest));
+    struct ai_sql_census s;
+    (void)ai_tick_census(db, &s);
+    AI_CHECK("reset tick resets once", ai_dump_int("resets") == resets + 1);
+    AI_CHECK("gauge 0 after the reset",
+             ai_dump_int("rows") == 0 && address_index_row_count(db) == 0);
+    int folded = ai_tick_census(db, &s);
+    AI_CHECK("refold after the reset runs no count() and no full scan",
+             folded == 1 && ai_tick_census_clean(&s));
+    AI_CHECK("gauge exact after the refold",
+             ai_rows_exact(db, AI_GENESIS_OUTS));
+    return failures;
+}
+
+static int ai_check_row_gauge(sqlite3 *db, const char *dir)
+{
+    int failures = 0;
+    struct ai_tick_fixture f;
+    bool up = ai_tick_fixture_open(&f, dir);
+    AI_CHECK("tick fixture: datadir, genesis body, runtime, H* 0", up);
+    if (up) {
+        failures += ai_check_legacy_census(db);
+        failures += ai_check_reset_refold(db);
+    }
+    ai_tick_fixture_close(&f);
+    return failures;
+}
+
 int test_address_index(void);
 int test_address_index(void)
 {
@@ -710,6 +947,8 @@ int test_address_index(void)
     failures += ai_check_fold_throughput(db);
 
     failures += ai_check_backfill_safety(db, dir);
+
+    failures += ai_check_row_gauge(db, dir);
 
     /* cleanup */
     for (size_t i = 0; i < blk100.num_vtx; i++)

@@ -37,7 +37,10 @@ int address_index_service_tick_once(void);
 
 /* dumpstate `address_index` (CLAUDE.md "Adding state introspection").
  * key == NULL/empty  -> projection status (enabled, cursor, H*, gap, rows,
- *                        digest, counters, coverage blocker).
+ *                        digest, counters, coverage blocker). `rows` is the
+ *                        exact persisted count, or -1 before the first tick
+ *                        and while a store folded before the count was
+ *                        persisted is counted once in bounded steps.
  * key == "<64-hex scripthash>[:<from_height>]" -> up to a bounded page of
  *                        appearances + confirmed balance for that script. */
 bool address_index_dump_state_json(struct json_value *out, const char *key);
@@ -46,5 +49,6 @@ bool address_index_dump_state_json(struct json_value *out, const char *key);
 #define ADDRESS_INDEX_BATCH_BLOCKS   128
 #define ADDRESS_INDEX_BATCH_US       15000   /* 15 ms wall budget per tick */
 #define ADDRESS_INDEX_TICK_SECONDS   2
+#define ADDRESS_INDEX_CENSUS_ROWS    8192    /* census rows per tick */
 
 #endif /* ZCL_SERVICES_ADDRESS_INDEX_SERVICE_H */

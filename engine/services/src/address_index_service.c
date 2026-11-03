@@ -45,7 +45,7 @@ static _Atomic bool    g_ai_registered      = false;
 static _Atomic bool    g_ai_schema_ready    = false;
 static _Atomic int64_t g_ai_cursor          = -1;
 static _Atomic int64_t g_ai_hstar           = -1;
-static _Atomic int64_t g_ai_rows            = 0;
+static _Atomic int64_t g_ai_rows            = -1;  /* -1 until known */
 static _Atomic int64_t g_ai_blocks_folded   = 0;   /* lifetime */
 static _Atomic int64_t g_ai_ticks           = 0;
 static _Atomic int64_t g_ai_last_batch_blocks = 0;
@@ -60,11 +60,49 @@ static char g_ai_digest_hex[65];
 static struct liveness_contract g_ai_contract;
 static _Atomic supervisor_child_id g_ai_id = SUPERVISOR_INVALID_ID;
 
-static void ai_mark_schema_ready(sqlite3 *db)
+/* Census of a store folded before the row count was persisted. Touched only
+ * under the projection tx lock, by the one fold caller. */
+static struct {
+    bool    active;
+    int64_t folded;             /* rows folded above the floor since begin */
+    struct address_index_census scan;
+} g_ai_census;
+
+/* One census step, bounded like a fold batch (ADDRESS_INDEX_CENSUS_ROWS rows
+ * AND the ADDRESS_INDEX_BATCH_US wall budget). Folding continues meanwhile;
+ * *rows becomes the exact count, now persisted, once the scan completes. */
+static void ai_census_advance(sqlite3 *db, int64_t cursor, int64_t *rows)
 {
-    int64_t rc0 = address_index_row_count(db);
-    atomic_store(&g_ai_rows, rc0 >= 0 ? rc0 : 0);
-    atomic_store(&g_ai_schema_ready, true);
+    if (!g_ai_census.active) {
+        address_index_census_begin(&g_ai_census.scan, cursor);
+        g_ai_census.folded = 0;
+        g_ai_census.active = true;
+    }
+    int64_t deadline = platform_time_monotonic_us() + ADDRESS_INDEX_BATCH_US;
+    bool done = address_index_census_step(db, &g_ai_census.scan,
+                                          ADDRESS_INDEX_CENSUS_ROWS,
+                                          deadline) &&
+                g_ai_census.scan.done;
+    int64_t total = g_ai_census.scan.counted + g_ai_census.folded;
+    if (done && address_index_set_rows(db, total)) {
+        g_ai_census.active = false;
+        *rows = total;
+    }
+}
+
+/* The "rows" gauge reads the persisted count: O(1) on every tick, boot
+ * included. A store without one is counted once by the census; *rows stays
+ * -1 until that completes. False only on a real SQLite error: the tick then
+ * skips its fold, so the persisted count never misses a batch. */
+static bool ai_rows_refresh(sqlite3 *db, int64_t cursor, int64_t *rows)
+{
+    bool found = false;
+    bool ok = address_index_get_rows(db, rows, &found);
+    if (ok && found)
+        g_ai_census.active = false;
+    else if (ok)
+        ai_census_advance(db, cursor, rows);
+    return ok;
 }
 
 /* Deep-rewind safety net: H* only advances under normal operation, so
@@ -79,6 +117,7 @@ static bool ai_reset_after_deep_rewind(sqlite3 *db, int64_t hstar,
             atomic_fetch_add(&g_ai_resets, 1);
             atomic_store(&g_ai_cursor, -1);
             atomic_store(&g_ai_rows, 0);
+            g_ai_census.active = false;
             pthread_mutex_lock(&g_ai_digest_lock);
             g_ai_digest_hex[0] = '\0';
             pthread_mutex_unlock(&g_ai_digest_lock);
@@ -127,11 +166,14 @@ static void ai_fold_pending_blocks(struct main_state *ms, const char *datadir,
     }
 }
 
+/* `rows` is the persisted count before this batch, -1 while it is unknown. */
 static bool ai_try_commit_fold(sqlite3 *db, int folded, int64_t last_good,
-                               uint8_t digest[32])
+                               uint8_t digest[32], int64_t rows,
+                               int total_added)
 {
     bool commit = false;
     if (folded > 0 && address_index_set_cursor(db, last_good, digest) &&
+        (rows < 0 || address_index_set_rows(db, rows + total_added)) &&
         sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK) {
         commit = true;
     }
@@ -152,11 +194,15 @@ static void ai_publish_batch_stats(bool commit, int folded, bool blocked,
 }
 
 static void ai_publish_fold_result(int64_t last_good, int folded,
-                                   int total_added, uint8_t digest[32])
+                                   int64_t rows, int total_added,
+                                   uint8_t digest[32])
 {
     atomic_store(&g_ai_cursor, last_good);
     atomic_fetch_add(&g_ai_blocks_folded, folded);
-    atomic_fetch_add(&g_ai_rows, total_added);
+    if (rows >= 0)
+        atomic_store(&g_ai_rows, rows + total_added);
+    else
+        g_ai_census.folded += total_added;
     char hex[65];
     HexStr(digest, 32, false, hex, sizeof(hex));
     pthread_mutex_lock(&g_ai_digest_lock);
@@ -170,7 +216,7 @@ static int ai_do_batch(struct main_state *ms, const char *datadir, sqlite3 *db)
     if (!atomic_load(&g_ai_schema_ready)) {
         if (!address_index_ensure_schema(db))
             return 0;
-        ai_mark_schema_ready(db);
+        atomic_store(&g_ai_schema_ready, true);
     }
 
     int64_t cursor = -1;
@@ -180,6 +226,11 @@ static int ai_do_batch(struct main_state *ms, const char *datadir, sqlite3 *db)
     atomic_store(&g_ai_cursor, cursor);
 
     if (ai_reset_after_deep_rewind(db, hstar, cursor))
+        return 0;
+    int64_t rows = -1;
+    bool rows_ok = ai_rows_refresh(db, cursor, &rows);
+    atomic_store(&g_ai_rows, rows);
+    if (!rows_ok)
         return 0;
     if (cursor >= hstar) {                 /* caught up to the finalized tip */
         atomic_store(&g_ai_blocked, false);
@@ -217,12 +268,13 @@ static int ai_do_batch(struct main_state *ms, const char *datadir, sqlite3 *db)
                            &folded, &total_added, &blocked, &blocked_h,
                            &last_good);
 
-    bool commit = ai_try_commit_fold(db, folded, last_good, digest);
+    bool commit = ai_try_commit_fold(db, folded, last_good, digest, rows,
+                                     total_added);
 
     int64_t elapsed = platform_time_monotonic_us() - start_us;
     ai_publish_batch_stats(commit, folded, blocked, blocked_h, elapsed);
     if (commit)
-        ai_publish_fold_result(last_good, folded, total_added, digest);
+        ai_publish_fold_result(last_good, folded, rows, total_added, digest);
     return commit ? folded : 0;
 }
 
