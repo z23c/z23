@@ -534,6 +534,23 @@ static int fgl_case_inventory_lines(const char *root)
     return failures;
 }
 
+static int fgl_case_allowlist_read_error(const char *root)
+{
+    int failures = 0;
+    struct zcl_goals_options o;
+    fgl_options(&o);
+    o.bash_allowlist = root;
+    TEST("D8: an allowlist stream read error is unmeasured") {
+        /* A directory may open as a stream but cannot provide inventory bytes. */
+        struct zcl_goal_result r = zcl_goals_measure(&o, "D8");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "no shell script allowlist"));
+        ASSERT(fgl_has(r.evidence, root));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int fgl_case_claims(const char *root)
 {
     int failures = 0;
@@ -1681,6 +1698,7 @@ int test_fleet_goals(void)
     failures += fgl_case_claims(root);
     failures += fgl_case_claim_expiry_numeric(root);
     failures += fgl_case_claim_expiry_positive(root);
+    failures += fgl_case_allowlist_read_error(root);
     failures += fgl_case_claims_read_error(root);
     failures += fgl_case_receipt_c3(root);
     failures += fgl_case_receipt_c6(root);

@@ -1344,8 +1344,9 @@ static int64_t gr_count_entries(const char *path)
         n += ch != '#' && ch != '\r' && ch != '\0';
         first = false;
     }
-    (void)fclose(fp);
-    return n;
+    bool read_ok = !ferror(fp);
+    int close_rc = fclose(fp);
+    return read_ok && close_rc == 0 ? n : -1;
 }
 
 static struct zcl_goal_result gr_d8(const struct zcl_goals_options *o)
