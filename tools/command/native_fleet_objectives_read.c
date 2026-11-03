@@ -1573,8 +1573,11 @@ static struct zcl_objective_value obj_lint_families_over_ceiling(
 
 /* ── cyclomatic complexity baseline ──────────────────────────────────── */
 
+/* Mirrors LB_KEY in tools/lint/lintc/lintc.h without a lint implementation dependency. */
+#define OBJ_BASELINE_KEY_MAX 320u
+
 /* Whether one baseline line is a pin row, judged the way the lint gate's
- * loader (lb_parse_line in tools/lint/lintc/lib.c) judges it: blank lines
+ * loader (lb_parse_line in tools/lint/lintc/lib_ledger.c) judges it: blank lines
  * and lines whose first non-blank byte is '#' are not rows; every other
  * line must be path:function:M with M in 1..100000. -1 is not a row, 1 is
  * a pin, 0 is a line the gate would refuse as malformed. */
@@ -1589,7 +1592,7 @@ static int obj_baseline_line(const char *line)
     if (*p == '#' || *p == '\n' || *p == '\0')
         return -1;
     colon = strrchr(p, ':');
-    if (!colon || colon == p)
+    if (!colon || colon == p || (size_t)(colon - p) >= OBJ_BASELINE_KEY_MAX)
         return 0;
     m = strtol(colon + 1, &end, 10);
     if (end == colon + 1)

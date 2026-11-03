@@ -368,6 +368,39 @@ _test_next:;
     return failures;
 }
 
+/* ── baseline keys held to the lint loader's bound ───────────────────── */
+
+/* The lint loader refuses a key of LB_KEY (320) bytes or more. A pin row
+ * with such a key must refuse the whole count; one byte under still counts. */
+static int rpr_case_baseline_key(const char *root)
+{
+    int failures = 0;
+    char path[1024], key[340], body[1024];
+    struct zcl_objectives_options o = {0};
+    (void)snprintf(path, sizeof(path), "%s/baseline_key.txt", root);
+    o.baseline = path;
+    o.now = RPR_NOW;
+    TEST("objectives: a baseline pin with a key the lint loader refuses is not counted") {
+        struct zcl_objective_value v;
+        memset(key, 'k', 330);
+        key[330] = '\0';
+        (void)snprintf(body, sizeof(body), "%s:7\n", key);
+        ASSERT(rpr_write(path, body));
+        v = zcl_objectives_measure(&o, "functions_over_complexity_cap");
+        ASSERT(!v.measured);
+        memset(key, 'k', 300);
+        key[300] = '\0';
+        (void)snprintf(body, sizeof(body), "%s:7\n", key);
+        ASSERT(rpr_write(path, body));
+        v = zcl_objectives_measure(&o, "functions_over_complexity_cap");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, (int64_t)1);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int fox_repair_cases(void);
 int fox_repair_cases(void)
 {
@@ -381,6 +414,7 @@ int fox_repair_cases(void)
     failures += rpr_case_lane_labels(root);
     failures += rpr_case_outcome_fallback(root);
     failures += rpr_case_module_wall(root);
+    failures += rpr_case_baseline_key(root);
     (void)test_rm_rf_recursive(root);
     return failures;
 }
