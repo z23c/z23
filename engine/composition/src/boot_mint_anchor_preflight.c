@@ -409,6 +409,10 @@ bool boot_mint_anchor_normal_boot_preflight(const char *datadir) {
     (void)projection_present;
     return ok;
 }
+void boot_mint_anchor_preflight_stage_hook_for_test(void (*hook)(const char *stage, void *ctx), void *ctx) {
+    (void)hook;
+    (void)ctx;
+}
 bool boot_mint_anchor_preflight_dump_state_json(struct json_value *out, const char *key) {
     (void)out;
     (void)key;
@@ -422,6 +426,7 @@ bool boot_mint_anchor_preflight_dump_state_json(struct json_value *out, const ch
 #include <limits.h>
 #include <sqlite3.h>
 #include <stdbool.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -438,13 +443,59 @@ struct preflight_source_file {
     struct stat identity;
 };
 
-static bool identity_equal(const struct stat *a, const struct stat *b) {
-    return a->st_dev == b->st_dev && a->st_ino == b->st_ino && a->st_nlink == b->st_nlink && a->st_size == b->st_size &&
-           a->st_mode == b->st_mode && a->st_mtim.tv_sec == b->st_mtim.tv_sec && a->st_mtim.tv_nsec == b->st_mtim.tv_nsec &&
-           a->st_ctim.tv_sec == b->st_ctim.tv_sec && a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
+/* Record why the preflight is about to refuse, once: the first reason wins so
+ * the root cause is never overwritten by a later knock-on failure, and every
+ * failure is logged once here with its context. */
+static void preflight_reason_set(char *reason, size_t cap, const char *fmt, ...)
+    __attribute__((format(printf, 3, 4)));
+static void preflight_reason_set(char *reason, size_t cap, const char *fmt, ...) {
+    char text[384];
+    va_list args;
+    va_start(args, fmt);
+    (void)vsnprintf(text, sizeof(text), fmt, args);
+    va_end(args);
+    LOG_WARN(PREFLIGHT_SUBSYS, "preflight failed: %s", text);
+    if (reason && cap && reason[0] == '\0')
+        (void)snprintf(reason, cap, "%s", text);
 }
 
-static bool source_open(int dirfd, struct preflight_source_file *file) {
+/* The directory the private snapshot copy lands in; same rule as
+ * platform_temp_directory_create (absolute TMPDIR, else /tmp). */
+static const char *preflight_temp_base(void) {
+    const char *base = getenv("TMPDIR");
+    return (base && base[0] == '/') ? base : "/tmp";
+}
+
+static void (*g_preflight_stage_hook)(const char *stage, void *ctx);
+static void *g_preflight_stage_hook_ctx;
+
+void boot_mint_anchor_preflight_stage_hook_for_test(void (*hook)(const char *stage, void *ctx), void *ctx) {
+    g_preflight_stage_hook = hook;
+    g_preflight_stage_hook_ctx = ctx;
+}
+
+static void preflight_stage_hook(const char *stage) {
+    if (g_preflight_stage_hook)
+        g_preflight_stage_hook(stage, g_preflight_stage_hook_ctx);
+}
+
+/* Name the first stat field that differs, or NULL when identical. */
+static const char *identity_diff_field(const struct stat *a, const struct stat *b) {
+    if (a->st_dev != b->st_dev) return "dev";
+    if (a->st_ino != b->st_ino) return "ino";
+    if (a->st_nlink != b->st_nlink) return "nlink";
+    if (a->st_size != b->st_size) return "size";
+    if (a->st_mode != b->st_mode) return "mode";
+    if (a->st_mtim.tv_sec != b->st_mtim.tv_sec || a->st_mtim.tv_nsec != b->st_mtim.tv_nsec) return "mtime";
+    if (a->st_ctim.tv_sec != b->st_ctim.tv_sec || a->st_ctim.tv_nsec != b->st_ctim.tv_nsec) return "ctime";
+    return NULL;
+}
+
+static bool identity_equal(const struct stat *a, const struct stat *b) {
+    return identity_diff_field(a, b) == NULL;
+}
+
+static bool source_open(int dirfd, struct preflight_source_file *file, char *reason, size_t reason_size) {
     file->fd = -1;
     file->exists = false;
     struct stat named;
@@ -452,17 +503,22 @@ static bool source_open(int dirfd, struct preflight_source_file *file) {
     if (fstatat(dirfd, file->name, &named, AT_SYMLINK_NOFOLLOW) != 0) {
         if (errno == ENOENT)
             return true;
-        LOG_WARN(PREFLIGHT_SUBSYS, "preflight stat failed file=%s: %s", file->name, strerror(errno));
+        preflight_reason_set(reason, reason_size, "source_open_failed file=%s op=stat errno=%d", file->name, errno);
         return false;
     }
     if (!S_ISREG(named.st_mode)) {
-        LOG_WARN(PREFLIGHT_SUBSYS, "preflight refuses non-regular file=%s", file->name);
+        preflight_reason_set(reason, reason_size, "source_open_failed file=%s op=not_regular_file", file->name);
         return false;
     }
     file->fd = openat(dirfd, file->name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    int open_errno = errno;
     struct stat opened;
     if (file->fd < 0 || fstat(file->fd, &opened) != 0 || !identity_equal(&named, &opened)) {
-        LOG_WARN(PREFLIGHT_SUBSYS, "preflight source identity raced file=%s", file->name);
+        if (file->fd < 0)
+            preflight_reason_set(reason, reason_size, "source_open_failed file=%s op=open errno=%d", file->name,
+                                 open_errno);
+        else
+            preflight_reason_set(reason, reason_size, "source_open_failed file=%s op=identity_raced", file->name);
         if (file->fd >= 0)
             close(file->fd);
         file->fd = -1;
@@ -473,14 +529,45 @@ static bool source_open(int dirfd, struct preflight_source_file *file) {
     return true;
 }
 
-static bool source_unchanged(int dirfd, const struct preflight_source_file *file) {
+static bool source_unchanged(int dirfd, const struct preflight_source_file *file, const char *when, char *reason,
+                             size_t reason_size) {
     struct stat named;
     errno = 0;
-    if (!file->exists)
-        return fstatat(dirfd, file->name, &named, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT;
+    if (!file->exists) {
+        if (fstatat(dirfd, file->name, &named, AT_SYMLINK_NOFOLLOW) == 0) {
+            preflight_reason_set(reason, reason_size, "source_changed stage=%s field=appeared file=%s", when, file->name);
+            return false;
+        }
+        if (errno != ENOENT) {
+            preflight_reason_set(reason, reason_size, "source_changed stage=%s field=stat_failed file=%s errno=%d", when,
+                                 file->name, errno);
+            return false;
+        }
+        return true;
+    }
     struct stat opened;
-    return file->fd >= 0 && fstat(file->fd, &opened) == 0 && fstatat(dirfd, file->name, &named, AT_SYMLINK_NOFOLLOW) == 0 &&
-           identity_equal(&file->identity, &opened) && identity_equal(&file->identity, &named);
+    if (file->fd < 0 || fstat(file->fd, &opened) != 0) {
+        preflight_reason_set(reason, reason_size, "source_changed stage=%s field=fstat_failed file=%s errno=%d", when,
+                             file->name, errno);
+        return false;
+    }
+    const char *field = identity_diff_field(&file->identity, &opened);
+    if (field) {
+        preflight_reason_set(reason, reason_size, "source_changed stage=%s field=%s file=%s", when, field, file->name);
+        return false;
+    }
+    if (fstatat(dirfd, file->name, &named, AT_SYMLINK_NOFOLLOW) != 0) {
+        preflight_reason_set(reason, reason_size, "source_changed stage=%s field=%s file=%s errno=%d", when,
+                             errno == ENOENT ? "removed" : "stat_failed", file->name, errno);
+        return false;
+    }
+    field = identity_diff_field(&file->identity, &named);
+    if (field) {
+        preflight_reason_set(reason, reason_size, "source_changed stage=%s field=%s via=name file=%s", when, field,
+                             file->name);
+        return false;
+    }
+    return true;
 }
 
 static bool preflight_write_all(int out, const uint8_t *buffer, size_t len) {
@@ -489,21 +576,24 @@ static bool preflight_write_all(int out, const uint8_t *buffer, size_t len) {
         ssize_t n = write(out, buffer + written, len - written);
         if (n < 0 && errno == EINTR)
             continue;
-        if (n <= 0)
+        if (n <= 0) {
+            if (n == 0)
+                errno = EIO;
             return false;
+        }
         written += (size_t)n;
     }
     return true;
 }
 
 /* Stream the source file to an open descriptor and record the copy timing
- * submark; returns false on any I/O failure. The copy is a private, short-lived
+ * submark; returns false on any I/O failure and names it in reason. The copy is a private, short-lived
  * snapshot that this process reads back through the page cache and then
  * deletes, so it is deliberately NOT fsynced: forcing 1.7 GB of dirty pages to
  * disk cost 697 s of a 877 s warm restart under writeback pressure, for a file
  * whose durability nothing depends on. */
 static bool copy_exact_stream_body(const struct preflight_source_file *source, int out,
-                                   const char *copy_mark) {
+                                   const char *copy_mark, char *reason, size_t reason_size) {
     uint8_t buffer[64u * 1024u];
     off_t offset = 0;
     bool ok = true;
@@ -517,12 +607,17 @@ static bool copy_exact_stream_body(const struct preflight_source_file *source, i
         if (got < 0 && errno == EINTR)
             continue;
         if (got <= 0) {
+            preflight_reason_set(reason, reason_size, "copy_failed file=%s op=read errno=%d offset=%lld%s", source->name,
+                                 got < 0 ? errno : 0, (long long)offset, got == 0 ? " short=1" : "");
             ok = false;
             break;
         }
         ok = preflight_write_all(out, buffer, (size_t)got);
-        if (!ok)
+        if (!ok) {
+            preflight_reason_set(reason, reason_size, "copy_failed file=%s op=write errno=%d offset=%lld dir=%s",
+                                 source->name, errno, (long long)offset, preflight_temp_base());
             break;
+        }
         offset += got;
     }
     (void)boot_submark(copy_mark, phase);
@@ -530,41 +625,79 @@ static bool copy_exact_stream_body(const struct preflight_source_file *source, i
 }
 
 static bool copy_exact_file(const struct preflight_source_file *source, const char *destination,
-                            const char *copy_mark) {
+                            const char *copy_mark, char *reason, size_t reason_size) {
     if (!source->exists)
         return true;
     int out = open(destination, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, S_IRUSR | S_IWUSR);
-    if (out < 0)
+    if (out < 0) {
+        preflight_reason_set(reason, reason_size, "copy_failed file=%s op=open errno=%d dir=%s", source->name, errno,
+                             preflight_temp_base());
         return false;
-    bool ok = copy_exact_stream_body(source, out, copy_mark);
-    if (close(out) != 0)
+    }
+    bool ok = copy_exact_stream_body(source, out, copy_mark, reason, reason_size);
+    if (close(out) != 0) {
+        preflight_reason_set(reason, reason_size, "copy_failed file=%s op=close errno=%d dir=%s", source->name, errno,
+                             preflight_temp_base());
         ok = false;
+    }
     return ok;
 }
 
-static bool remove_temp_family(const char *dir, const char *main_path) {
+static bool remove_temp_family(const char *dir, const char *main_path, char *reason, size_t reason_size) {
     static const char *const suffixes[] = {"", "-wal", "-shm", "-journal"};
     bool ok = true;
     char path[2304];
     for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
         int n = snprintf(path, sizeof(path), "%s%s", main_path, suffixes[i]);
-        if (n <= 0 || (size_t)n >= sizeof(path) || (unlink(path) != 0 && errno != ENOENT))
+        if (n <= 0 || (size_t)n >= sizeof(path)) {
+            preflight_reason_set(reason, reason_size, "cleanup_failed op=path_too_long suffix=%s dir=%s", suffixes[i], dir);
             ok = false;
+        } else if (unlink(path) != 0 && errno != ENOENT) {
+            preflight_reason_set(reason, reason_size, "cleanup_failed op=unlink suffix=%s errno=%d dir=%s", suffixes[i],
+                                 errno, dir);
+            ok = false;
+        }
     }
-    if (rmdir(dir) != 0)
+    if (rmdir(dir) != 0) {
+        preflight_reason_set(reason, reason_size, "cleanup_failed op=rmdir errno=%d dir=%s", errno, dir);
         ok = false;
+    }
+    return ok;
+}
+
+/* Open an inspected database and run the gate; every failure that is not the
+ * gate's own refusal is named in reason. */
+static bool inspect_open_and_gate(const char *target, int flags, const char *what, char *reason, size_t reason_size) {
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open_v2(target, &db, flags, NULL);
+    bool ok = rc == SQLITE_OK;
+    if (!ok)
+        preflight_reason_set(reason, reason_size, "inspect_read_failed what=%s_open rc=%d sqlite=%s", what, rc,
+                             db ? sqlite3_errmsg(db) : sqlite3_errstr(rc));
+    if (ok) {
+        rc = sqlite3_exec(db, "PRAGMA query_only=ON", NULL, NULL, NULL);
+        ok = rc == SQLITE_OK;
+        if (!ok)
+            preflight_reason_set(reason, reason_size, "inspect_read_failed what=%s_query_only rc=%d sqlite=%s", what, rc,
+                                 sqlite3_errmsg(db));
+    }
+    if (ok) {
+        ok = mint_anchor_normal_boot_allowed(db, reason, reason_size);
+        if (!ok && reason && reason_size && reason[0] == '\0')
+            preflight_reason_set(reason, reason_size, "inspect_read_failed what=%s_gate", what);
+    }
+    if (db) {
+        rc = sqlite3_close(db);
+        if (rc != SQLITE_OK) {
+            preflight_reason_set(reason, reason_size, "inspect_read_failed what=%s_close rc=%d", what, rc);
+            ok = false;
+        }
+    }
     return ok;
 }
 
 static bool inspect_snapshot(const char *path, char *reason, size_t reason_size) {
-    sqlite3 *db = NULL;
-    int rc = sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, NULL);
-    bool ok = rc == SQLITE_OK && sqlite3_exec(db, "PRAGMA query_only=ON", NULL, NULL, NULL) == SQLITE_OK;
-    if (ok)
-        ok = mint_anchor_normal_boot_allowed(db, reason, reason_size);
-    if (db && sqlite3_close(db) != SQLITE_OK)
-        ok = false;
-    return ok;
+    return inspect_open_and_gate(path, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, "snapshot", reason, reason_size);
 }
 
 static void preflight_kernel_basename(const char *datadir, char *out, size_t cap) {
@@ -578,14 +711,20 @@ static void preflight_kernel_basename(const char *datadir, char *out, size_t cap
     (void)snprintf(out, cap, "%s", CONSENSUS_DB_LEGACY_KERNEL_FILENAME);
 }
 
-static bool datadir_is_not_tmp(int dirfd) {
-    const char *base = getenv("TMPDIR");
-    if (!base || base[0] != '/') base = "/tmp";
+static bool datadir_is_not_tmp(int dirfd, char *reason, size_t reason_size) {
+    const char *base = preflight_temp_base();
     struct stat datadir_identity;
     struct stat tmp_identity;
-    if (fstat(dirfd, &datadir_identity) != 0 || stat(base, &tmp_identity) != 0 ||
-        (datadir_identity.st_dev == tmp_identity.st_dev && datadir_identity.st_ino == tmp_identity.st_ino)) {
-        LOG_WARN(PREFLIGHT_SUBSYS, "preflight disposable root cannot be the node datadir");
+    if (fstat(dirfd, &datadir_identity) != 0) {
+        preflight_reason_set(reason, reason_size, "temp_root_unusable op=fstat_datadir errno=%d", errno);
+        return false;
+    }
+    if (stat(base, &tmp_identity) != 0) {
+        preflight_reason_set(reason, reason_size, "temp_root_unusable op=stat errno=%d dir=%s", errno, base);
+        return false;
+    }
+    if (datadir_identity.st_dev == tmp_identity.st_dev && datadir_identity.st_ino == tmp_identity.st_ino) {
+        preflight_reason_set(reason, reason_size, "temp_root_unusable op=is_datadir dir=%s", base);
         return false;
     }
     return true;
@@ -595,22 +734,25 @@ static bool datadir_is_not_tmp(int dirfd) {
  * the copy, and delete it. Used whenever the WAL holds frames, because only a
  * WAL-aware open can see committed state that has not been checkpointed. */
 static bool copy_family_stable(int dirfd, const char *temp_dir, const char *kbase, struct preflight_source_file files[3],
-                               char main_copy[2304]) {
+                               char main_copy[2304], char *reason, size_t reason_size) {
     char wal_copy[2304];
     int n1 = snprintf(main_copy, 2304, "%s/%s", temp_dir, kbase);
     int n2 = snprintf(wal_copy, sizeof(wal_copy), "%s/%s-wal", temp_dir, kbase);
-    if (n1 <= 0 || n1 >= 2304 || n2 <= 0 || (size_t)n2 >= sizeof(wal_copy))
+    if (n1 <= 0 || n1 >= 2304 || n2 <= 0 || (size_t)n2 >= sizeof(wal_copy)) {
+        preflight_reason_set(reason, reason_size, "copy_failed file=%s op=path_too_long dir=%s", kbase, temp_dir);
         return false;
+    }
     int64_t phase = boot_clock_ms();
     /* Distinct names preserve both files in the flight recorder, whose
      * repeated stage names replace the previous observation. */
-    bool copied = copy_exact_file(&files[0], main_copy, "mint_preflight.main_copy") &&
-                  copy_exact_file(&files[1], wal_copy, "mint_preflight.wal_copy");
+    bool copied = copy_exact_file(&files[0], main_copy, "mint_preflight.main_copy", reason, reason_size) &&
+                  copy_exact_file(&files[1], wal_copy, "mint_preflight.wal_copy", reason, reason_size);
     phase = boot_submark("mint_preflight.copy", phase);
     if (!copied) return false;
+    preflight_stage_hook("copied");
     bool stable = true;
     for (size_t i = 0; stable && i < 3; i++)
-        stable = source_unchanged(dirfd, &files[i]);
+        stable = source_unchanged(dirfd, &files[i], "copy", reason, reason_size);
     (void)boot_submark("mint_preflight.copy_stability", phase);
     return stable;
 }
@@ -619,10 +761,13 @@ static bool inspect_via_copy(int dirfd, const char *kbase, struct preflight_sour
     char temp_dir[PLATFORM_TEMP_PATH_MAX] = {0};
     char main_copy[2304] = {0};
     int64_t phase = boot_clock_ms();
+    errno = 0;
     bool ok = platform_temp_directory_create("zcl-preflight-", temp_dir, sizeof(temp_dir));
+    if (!ok)
+        preflight_reason_set(reason, reason_size, "temp_create_failed errno=%d dir=%s", errno, preflight_temp_base());
     phase = boot_submark("mint_preflight.temp_create", phase);
     if (ok)
-        ok = copy_family_stable(dirfd, temp_dir, kbase, files, main_copy);
+        ok = copy_family_stable(dirfd, temp_dir, kbase, files, main_copy, reason, reason_size);
     if (ok) {
         phase = boot_clock_ms();
         ok = inspect_snapshot(main_copy, reason, reason_size);
@@ -631,11 +776,11 @@ static bool inspect_via_copy(int dirfd, const char *kbase, struct preflight_sour
     if (ok) {
         phase = boot_clock_ms();
         for (size_t i = 0; ok && i < 3; i++)
-            ok = source_unchanged(dirfd, &files[i]);
+            ok = source_unchanged(dirfd, &files[i], "final", reason, reason_size);
         (void)boot_submark("mint_preflight.final_stability", phase);
     }
     phase = boot_clock_ms();
-    bool cleanup_ok = temp_dir[0] && access(temp_dir, F_OK) == 0 ? remove_temp_family(temp_dir, main_copy) : true;
+    bool cleanup_ok = temp_dir[0] && access(temp_dir, F_OK) == 0 ? remove_temp_family(temp_dir, main_copy, reason, reason_size) : true;
     (void)boot_submark("mint_preflight.cleanup_check", phase);
     return ok && cleanup_ok;
 }
@@ -677,21 +822,17 @@ static bool live_uri_build(const char *datadir, const char *kbase, char *out, si
 
 static bool inspect_live_immutable(const char *datadir, const char *kbase, char *reason, size_t reason_size) {
     char uri[PATH_MAX * 3 + 256];
-    if (!live_uri_build(datadir, kbase, uri, sizeof(uri)))
+    if (!live_uri_build(datadir, kbase, uri, sizeof(uri))) {
+        preflight_reason_set(reason, reason_size, "inspect_read_failed what=live_uri_build file=%s", kbase);
         return false;
-    sqlite3 *db = NULL;
-    int rc = sqlite3_open_v2(uri, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_NOMUTEX, NULL);
-    bool ok = rc == SQLITE_OK && sqlite3_exec(db, "PRAGMA query_only=ON", NULL, NULL, NULL) == SQLITE_OK;
-    if (ok)
-        ok = mint_anchor_normal_boot_allowed(db, reason, reason_size);
-    if (db && sqlite3_close(db) != SQLITE_OK)
-        ok = false;
-    return ok;
+    }
+    return inspect_open_and_gate(uri, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_NOMUTEX, "live", reason,
+                                 reason_size);
 }
 
 static bool inspect_family(const char *datadir, int dirfd, const char *kbase, struct preflight_source_file files[3], char *reason,
                            size_t reason_size) {
-    if (!datadir_is_not_tmp(dirfd))
+    if (!datadir_is_not_tmp(dirfd, reason, reason_size))
         return false;
     if (!live_inspect_eligible(&files[1]))
         return inspect_via_copy(dirfd, kbase, files, reason, reason_size);
@@ -700,30 +841,32 @@ static bool inspect_family(const char *datadir, int dirfd, const char *kbase, st
     phase = boot_submark("mint_preflight.live_inspect", phase);
     if (ok) {
         for (size_t i = 0; ok && i < 3; i++)
-            ok = source_unchanged(dirfd, &files[i]);
+            ok = source_unchanged(dirfd, &files[i], "live", reason, reason_size);
         (void)boot_submark("mint_preflight.live_stability", phase);
     }
     return ok;
 }
 
-static bool preflight_open_sources(int dirfd, struct preflight_source_file files[3]) {
+static bool preflight_open_sources(int dirfd, struct preflight_source_file files[3], char *reason, size_t reason_size) {
     bool ok = true;
     for (size_t i = 0; ok && i < 3; i++)
-        ok = source_open(dirfd, &files[i]);
+        ok = source_open(dirfd, &files[i], reason, reason_size);
     return ok;
 }
 
-static bool preflight_close_sources(struct preflight_source_file files[3]) {
+static bool preflight_close_sources(struct preflight_source_file files[3], char *reason, size_t reason_size) {
     bool ok = true;
     for (size_t i = 0; i < 3; i++)
-        if (files[i].fd >= 0 && close(files[i].fd) != 0)
+        if (files[i].fd >= 0 && close(files[i].fd) != 0) {
+            preflight_reason_set(reason, reason_size, "source_close_failed file=%s errno=%d", files[i].name, errno);
             ok = false;
+        }
     return ok;
 }
 
 static bool preflight_missing_main_result(int dirfd, struct preflight_source_file files[3], const char *kbase) {
     bool empty_family = !files[1].exists && !files[2].exists;
-    (void)preflight_close_sources(files);
+    (void)preflight_close_sources(files, NULL, 0);
     (void)close(dirfd);
     if (empty_family)
         return true;
@@ -738,16 +881,25 @@ static bool preflight_missing_main_result(int dirfd, struct preflight_source_fil
 static void preflight_report_refusal(const char *reason) {
     fprintf(stderr, "FATAL: normal node boot refused before datadir mutation: %s\n",
             reason[0] ? reason : "producer evidence snapshot could not be proven stable");
+    /* The reason starts with the failing stage token (temp_create_failed,
+     * copy_failed, source_changed, inspect_read_failed, cleanup_failed, ...). */
     event_emitf(EV_BOOT_VALIDATION_FAILED, 0, "producer_evidence_preflight_refused reason=%s",
                 reason[0] ? reason : "stable_snapshot_inspection_failed");
 }
 
 bool boot_mint_anchor_normal_boot_preflight(const char *datadir) {
-    if (!datadir || !datadir[0])
-        LOG_FAIL(PREFLIGHT_SUBSYS, "normal boot preflight: missing datadir");
+    char reason[512] = {0};
+    if (!datadir || !datadir[0]) {
+        preflight_reason_set(reason, sizeof(reason), "datadir_open_failed op=missing_path");
+        preflight_report_refusal(reason);
+        return false;
+    }
     int dirfd = open(datadir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    if (dirfd < 0)
-        LOG_FAIL(PREFLIGHT_SUBSYS, "normal boot preflight cannot open datadir");
+    if (dirfd < 0) {
+        preflight_reason_set(reason, sizeof(reason), "datadir_open_failed errno=%d datadir=%s", errno, datadir);
+        preflight_report_refusal(reason);
+        return false;
+    }
 
     char kbase[64];
     char kmain[80], kwal[80], kshm[80];
@@ -760,16 +912,17 @@ bool boot_mint_anchor_normal_boot_preflight(const char *datadir) {
         {.name = kwal, .fd = -1},
         {.name = kshm, .fd = -1},
     };
-    bool ok = preflight_open_sources(dirfd, files);
+    bool ok = preflight_open_sources(dirfd, files, reason, sizeof(reason));
     if (ok && !files[0].exists)
         return preflight_missing_main_result(dirfd, files, kbase);
-    char reason[512] = {0};
     if (ok)
         ok = inspect_family(datadir, dirfd, kbase, files, reason, sizeof(reason));
-    if (!preflight_close_sources(files))
+    if (!preflight_close_sources(files, reason, sizeof(reason)))
         ok = false;
-    if (close(dirfd) != 0)
+    if (close(dirfd) != 0) {
+        preflight_reason_set(reason, sizeof(reason), "datadir_close_failed errno=%d", errno);
         ok = false;
+    }
     if (!ok)
         preflight_report_refusal(reason);
     return ok;

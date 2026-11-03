@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #define MAP_CHECK(name, expr) do { \
@@ -494,6 +495,83 @@ static int map_alternate_temp_root(const char *dir, sqlite3 *db)
     return failures;
 }
 
+/* Run the preflight with stderr captured so the refusal text can be asserted. */
+static bool map_capture_refusal(const char *dir, bool *verdict, char *text, size_t cap)
+{
+    FILE *capture = tmpfile();
+    if (!capture) return false;
+    int saved = dup(STDERR_FILENO);
+    if (saved < 0) { fclose(capture); return false; }
+    fflush(stderr);
+    if (dup2(fileno(capture), STDERR_FILENO) < 0) {
+        close(saved); fclose(capture); return false;
+    }
+    *verdict = boot_mint_anchor_normal_boot_preflight(dir);
+    fflush(stderr);
+    bool restored = dup2(saved, STDERR_FILENO) >= 0;
+    close(saved);
+    rewind(capture);
+    size_t n = fread(text, 1, cap - 1, capture);
+    text[n] = 0;
+    bool read_ok = !ferror(capture);
+    if (fclose(capture) != 0) read_ok = false;
+    return restored && read_ok;
+}
+
+static bool map_refused_with(const char *dir, const char *needle)
+{
+    char text[8192];
+    bool verdict = true;
+    char want[200];
+    snprintf(want, sizeof(want), "refused before datadir mutation: %s", needle);
+    return map_capture_refusal(dir, &verdict, text, sizeof text) && !verdict && strstr(text, want) != NULL &&
+           !strstr(text, "could not be proven stable");
+}
+
+static void map_touch_wal_hook(const char *stage, void *ctx)
+{
+    const char *dir = ctx;
+    char path[600];
+    snprintf(path, sizeof(path), "%s/consensus.db-wal", dir);
+    struct timespec times[2] = {{.tv_sec = 1000000000, .tv_nsec = 0}, {.tv_sec = 1000000000, .tv_nsec = 0}};
+    if (strcmp(stage, "copied") == 0)
+        (void)utimensat(AT_FDCWD, path, times, 0);
+}
+
+/* The silent refusal on r5: every false path of the copy path must name its
+ * stage instead of the generic "could not be proven stable" text. */
+static int map_failure_reasons(const char *dir)
+{
+    int failures = 0;
+    const char *old = getenv("TMPDIR");
+    char *saved = old ? strdup(old) : NULL;
+    char not_a_dir[600], missing[600];
+    snprintf(not_a_dir, sizeof(not_a_dir), "%s/not-a-directory", dir);
+    snprintf(missing, sizeof(missing), "%s/no-such-root", dir);
+    FILE *f = fopen(not_a_dir, "w");
+    MAP_CHECK("reasons: regular file prepared as an unusable temporary root", f && fclose(f) == 0);
+
+    MAP_CHECK("reasons: unusable temporary root selected", setenv("TMPDIR", not_a_dir, 1) == 0);
+    /* /…/not-a-directory is a file: stat succeeds, mkdir under it is ENOTDIR */
+    MAP_CHECK("reasons: temp directory creation failure names stage and errno",
+              map_refused_with(dir, "temp_create_failed errno=20 dir="));
+
+    MAP_CHECK("reasons: missing temporary root selected", setenv("TMPDIR", missing, 1) == 0);
+    MAP_CHECK("reasons: missing temporary root names its stage",
+              map_refused_with(dir, "temp_root_unusable op=stat errno=2 dir="));
+
+    MAP_CHECK("reasons: restore temporary environment",
+              saved ? setenv("TMPDIR", saved, 1) == 0 : unsetenv("TMPDIR") == 0);
+    free(saved);
+    (void)unlink(not_a_dir);
+
+    boot_mint_anchor_preflight_stage_hook_for_test(map_touch_wal_hook, (void *)dir);
+    MAP_CHECK("reasons: source changed during the copy names field and file",
+              map_refused_with(dir, "source_changed stage=copy field=mtime file=consensus.db-wal"));
+    boot_mint_anchor_preflight_stage_hook_for_test(NULL, NULL);
+    return failures;
+}
+
 static int test_normal_preflight_marker_only_in_wal(void)
 {
     int failures = 0;
@@ -513,6 +591,7 @@ static int test_normal_preflight_marker_only_in_wal(void)
     MAP_CHECK("wal-only: marker seen in the WAL is refused, nothing changes",
               map_marked_preflight(dir, true, &verdict) && !verdict);
     failures += map_alternate_temp_root(dir, db);
+    failures += map_failure_reasons(dir);
     if (db)
         sqlite3_close(db);
     map_cleanup_dir(dir);

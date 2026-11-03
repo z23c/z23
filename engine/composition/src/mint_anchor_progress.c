@@ -186,8 +186,14 @@ static int normal_boot_validation_tables_state(sqlite3 *db, char *reason,
         bool incompatible = false;
         bool allow_anchor = strcmp(tables[i], "utxo_apply_log") == 0;
         if (!table_has_non_full_success(db, tables[i], allow_anchor,
-                                        &incompatible))
+                                        &incompatible)) {
+            if (reason && reason_size)
+                snprintf(reason, reason_size,
+                         "inspect_read_failed what=validation_table_scan "
+                         "table=%s sqlite=%s",
+                         tables[i], sqlite3_errmsg(db));
             return -1;
+        }
         if (!incompatible)
             continue;
         if (reason && reason_size)
@@ -199,24 +205,40 @@ static int normal_boot_validation_tables_state(sqlite3 *db, char *reason,
     return 1;
 }
 
+/* Names a failed gate read in the refusal reason so the boot refusal says
+ * which read failed instead of printing a generic text. */
+static void reason_read_failed(char *reason, size_t reason_size,
+                               const char *what, sqlite3 *db)
+{
+    if (reason && reason_size)
+        snprintf(reason, reason_size, "inspect_read_failed what=%s sqlite=%s",
+                 what, db ? sqlite3_errmsg(db) : "no_database");
+}
+
 bool mint_anchor_normal_boot_allowed(sqlite3 *db, char *reason,
                                      size_t reason_size)
 {
     if (reason && reason_size)
         reason[0] = '\0';
-    if (!db)
+    if (!db) {
+        reason_read_failed(reason, reason_size, "null_database", NULL);
         LOG_FAIL("mint_anchor", "normal boot gate: NULL db");
+    }
     int marker = normal_boot_progress_marker_state(db, reason, reason_size);
-    if (marker < 0)
+    if (marker < 0) {
+        reason_read_failed(reason, reason_size, "in_progress_marker", db);
         LOG_FAIL("mint_anchor", "normal boot progress marker read failed");
+    }
     if (marker == 0)
         return false;
     uint8_t lane = 0;
     size_t n = 0;
     bool found = false;
     if (!progress_meta_get_blob_exact(db, MINT_ANCHOR_PRODUCER_LANE_KEY,
-                                      &lane, sizeof(lane), &n, &found))
+                                      &lane, sizeof(lane), &n, &found)) {
+        reason_read_failed(reason, reason_size, "producer_lane", db);
         LOG_FAIL("mint_anchor", "normal boot lane read failed");
+    }
     if (found) {
         reason_producer_lane_bound(reason, reason_size, lane, n);
         return false;
