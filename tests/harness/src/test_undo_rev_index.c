@@ -89,8 +89,7 @@ static bool append_record(FILE *f, const struct uint256 *bind_parent,
 
 static bool make_datadir(char *dir, size_t len)
 {
-    snprintf(dir, len, "build/scratch/undo_rev_XXXXXX");
-    if (!mkdtemp(dir))
+    if (!test_mkdtemp(dir, len, "undo_rev"))
         return false;
     char blocks[600];
     snprintf(blocks, sizeof(blocks), "%s/blocks", dir);
