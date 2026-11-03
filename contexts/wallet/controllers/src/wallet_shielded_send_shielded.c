@@ -444,29 +444,29 @@ static int z_sendmany_shielded_load_notes(
     return num_notes;
 }
 
-/* Body of the shielded spend. `from_z_key` is the caller's private copy of the
- * keystore entry, never a pointer into the keystore. */
-static bool z_sendmany_shielded_with_key(
-    struct wallet_rpc_context *ctx,
-    const struct chain_params *cp,
-    const struct sapling_key_entry *from_z_key,
-    int64_t total_amount,
-    const struct tx_destination *t_dests, const int64_t *t_amounts,
-    size_t num_t_out,
-    const uint8_t (*z_diversifiers)[11], const uint8_t (*z_pk_ds)[32],
-    const int64_t *z_amounts, const uint8_t (*z_memos)[512],
-    const bool *z_has_memo, size_t num_z_out, int min_conf,
-    struct wallet_tx *prepared, struct json_value *result,
-    int32_t spend_floor)
+/* Check the wallet database, load and select the spendable notes covering the
+ * target plus fee, and refuse when proving is unavailable. */
+static bool z_sendmany_shielded_select_inputs(
+    struct wallet_rpc_context *ctx, const struct chain_params *cp,
+    const struct sapling_key_entry *from_z_key, int64_t total_amount,
+    int min_conf, int32_t spend_floor,
+    struct db_sapling_note selected_notes[256], size_t *num_sel_notes,
+    int64_t *notes_total, int64_t *fee, struct json_value *result)
 {
+        *num_sel_notes = 0;
+        *notes_total = 0;
+        *fee = 0;
+
         if (!wallet_ctx_db_ready(ctx)) {
             json_set_str(result,
                          "Shielded wallet database is unavailable; send aborted");
-            LOG_FAIL("wallet_shielded",
-                     "z_sendmany: shielded spend requires an open node.db");
+            LOG_ERROR_IN("z_sendmany_shielded_with_key",
+                         "wallet_shielded",
+                         "z_sendmany: shielded spend requires an open node.db");
+            return false;
         }
 
-        int64_t fee = ctx->wallet->default_fee;
+        *fee = ctx->wallet->default_fee;
 
         struct db_sapling_note notes[256];
         int num_notes = z_sendmany_shielded_load_notes(
@@ -475,15 +475,12 @@ static bool z_sendmany_shielded_with_key(
             return false;
 
         /* Coin selection: pick notes until we have enough */
-        struct db_sapling_note selected_notes[256];
-        size_t num_sel_notes = 0;
-        int64_t notes_total = 0;
-        z_sendmany_shielded_select_notes(notes, num_notes, total_amount + fee,
-                                         selected_notes, &num_sel_notes,
-                                         &notes_total);
-        if (notes_total < total_amount + fee)
+        z_sendmany_shielded_select_notes(notes, num_notes, total_amount + *fee,
+                                         selected_notes, num_sel_notes,
+                                         notes_total);
+        if (*notes_total < total_amount + *fee)
             return wallet_spend_gate_short_funds(
-                result, spend_floor, total_amount + fee, notes_total,
+                result, spend_floor, total_amount + *fee, *notes_total,
                 "shielded", "Insufficient shielded funds");
 
         /* Wallet proving is a capability, not an assumption. The backend is
@@ -499,11 +496,207 @@ static bool z_sendmany_shielded_with_key(
                      zclassic_sapling_prover_backend(),
                      zclassic_sapling_prover_status());
             json_set_str(result, err);
-            LOG_FAIL("wallet_shielded",
-                     "z_sendmany: refusing shielded spend: backend=%s status=%s",
+            LOG_ERROR_IN("z_sendmany_shielded_with_key",
+                         "wallet_shielded",
+                         "z_sendmany: refusing shielded spend: backend=%s status=%s",
+                         zclassic_sapling_prover_backend(),
+                         zclassic_sapling_prover_status());
+            return false;
+        }
+        return true;
+}
+
+/* Initialise the transaction, fill its transparent outputs, and set up the
+ * proving context and spend-description array. */
+static bool z_sendmany_shielded_prepare_tx_and_prover(
+    struct wallet_tx *wtx, struct incremental_witness *witnesses,
+    const struct tx_destination *t_dests, const int64_t *t_amounts,
+    size_t num_t_out, size_t num_z_out, size_t num_sel_notes, int height,
+    void **proving_ctx, struct json_value *result)
+{
+        *proving_ctx = NULL;
+        memset(wtx, 0, sizeof(*wtx));
+        transaction_init(&wtx->tx);
+
+        wtx->tx.overwintered = true;
+        wtx->tx.version = SAPLING_TX_VERSION;
+        wtx->tx.version_group_id = SAPLING_VERSION_GROUP_ID;
+        wtx->tx.expiry_height = (uint32_t)(height + 20);
+
+        /* Allocate transparent outputs if any */
+        size_t total_t_out_shielded = num_t_out;
+        if (total_t_out_shielded > 0 || num_z_out > 0) {
+            if (!transaction_alloc(&wtx->tx, 0, total_t_out_shielded)) {
+                free(witnesses);
+                json_set_str(result, "Transaction allocation failed");
+                LOG_ERROR_IN("z_sendmany_shielded_with_key",
+                             "wallet_shielded",
+                             "z_sendmany: transaction_alloc failed for %zu t-outputs (shielded path)",
+                             total_t_out_shielded);
+                return false;
+            }
+        }
+
+        /* Fill transparent outputs (for z→t) */
+        for (size_t i = 0; i < num_t_out; i++) {
+            struct script dest_script;
+            script_for_destination(&dest_script, &t_dests[i]);
+            wtx->tx.vout[i].value = t_amounts[i];
+            wtx->tx.vout[i].script_pub_key = dest_script;
+        }
+
+        /* Init proving context */
+        *proving_ctx = zclassic_sapling_proving_ctx_init();
+        if (!*proving_ctx) {
+            free(witnesses);
+            transaction_free(&wtx->tx);
+            char err[320];
+            snprintf(err, sizeof(err),
+                     "Failed to init proving context (backend=%s, status=%s)",
                      zclassic_sapling_prover_backend(),
                      zclassic_sapling_prover_status());
+            json_set_str(result, err);
+            LOG_ERROR_IN("z_sendmany_shielded_with_key",
+                         "wallet_shielded",
+                         "z_sendmany: sapling_proving_ctx_init failed (shielded spend path)");
+            return false;
         }
+
+        /* Build spend descriptions */
+        wtx->tx.v_shielded_spend = zcl_calloc(num_sel_notes, sizeof(struct spend_description), "shielded_spends");
+        if (!wtx->tx.v_shielded_spend) {
+            /* num_shielded_spend left 0 so transaction_free won't walk a NULL
+             * array. proving_ctx was init'd above; free it too. */
+            zclassic_sapling_proving_ctx_free(*proving_ctx);
+            free(witnesses);
+            transaction_free(&wtx->tx);
+            json_set_str(result, "Out of memory (shielded spends)");
+            LOG_ERROR_IN("z_sendmany_shielded_with_key",
+                         "wallet_shielded",
+                         "z_sendmany: calloc v_shielded_spend failed for %zu notes",
+                         num_sel_notes);
+            return false;
+        }
+        wtx->tx.num_shielded_spend = num_sel_notes;
+        return true;
+}
+
+/* Commit the signed transaction, persist it, reserve the spent notes and
+ * relay it; sets the txid on result on success. */
+static bool z_sendmany_shielded_commit_and_relay(
+    struct wallet_rpc_context *ctx, struct wallet_tx *wtx,
+    struct json_value *result)
+{
+        /* The old shielded-spend branch bypassed every mempool check with
+         * tx_mempool_add_unchecked(), ignored its return, and marked notes
+         * spent even when admission failed. Use the same consensus gate and
+         * rollback contract as every transparent wallet send. */
+        struct zcl_result commit = wallet_commit_from_context(ctx, wtx);
+        if (!commit.ok) {
+            transaction_free(&wtx->tx);
+            json_set_str(result, commit.message);
+            LOG_ERROR_IN("z_sendmany_shielded_with_key",
+                         "wallet_shielded",
+                         "z_sendmany: shielded commit rejected (code=%d): %s",
+                         commit.code, commit.message);
+            return false;
+        }
+
+        /* Persist the wallet transaction through node.db's single-writer lane
+         * before network relay. A failed durability step unwinds wallet and
+         * mempool state. */
+        struct zcl_result persisted =
+            wallet_persist_commit_before_relay(ctx, wtx);
+        if (!persisted.ok) {
+            transaction_free(&wtx->tx);
+            json_set_str(result, persisted.message);
+            LOG_ERROR_IN("z_sendmany_shielded_with_key",
+                         "wallet_shielded",
+                         "z_sendmany: pre-relay durability failed (code=%d): %s",
+                         persisted.code, persisted.message);
+            return false;
+        }
+
+        /* Reserve the selected notes before broadcast — by their
+         * stored nullifier, keyed to the new txid — both in SQLite (so the next
+         * db_sapling_note_list_unspent_for_ivk selection excludes them) and in
+         * the in-memory wallet. Without this, a second z_sendmany issued before
+         * this tx confirms re-selects the SAME notes and produces a conflicting
+         * transaction (double-spend of the user's own notes), so neither send
+         * confirms and the funds appear stuck. This mirrors the transparent
+         * path, which marks UTXOs spent at broadcast (wallet_commit_transaction
+         * + node_db_sync_wallet_tx). */
+        if (!node_db_sync_wallet_sapling_spends(ctx->node_db, &wtx->tx)) {
+            struct zcl_result compensated =
+                wallet_rollback_persisted_commit(ctx, wtx);
+            transaction_free(&wtx->tx);
+            if (!compensated.ok) {
+                json_set_str(result, compensated.message);
+                LOG_ERROR_IN("z_sendmany_shielded_with_key",
+                             "wallet_shielded",
+                             "z_sendmany: note reservation and durable compensation "
+                             "failed (code=%d): %s",
+                             compensated.code, compensated.message);
+                return false;
+            }
+            json_set_str(result, "Cannot reserve shielded notes; send aborted");
+            LOG_ERROR_IN("z_sendmany_shielded_with_key",
+                         "wallet_shielded",
+                         "z_sendmany: atomic wallet-note reservation failed");
+            return false;
+        }
+        if (ctx->wallet)
+            wallet_mark_sapling_nullifiers_spent(ctx->wallet, &wtx->tx);
+
+        /* node.db's wallet projection is rebuildable; report a write failure,
+         * but the authoritative private wallet transaction + note reservation
+         * are already durable before relay. */
+        if (!node_db_sync_wallet_tx(ctx->node_db, &wtx->tx, ctx->wallet, 0))
+            LOG_WARN_IN("z_sendmany_shielded_with_key",
+                        "wallet_shielded",
+                        "z_sendmany: wallet projection write failed after durable reservation");
+
+        if (!wallet_send_relay(ctx, wtx)) {
+            json_set_str(result, wallet_send_relay_failure_text());
+            transaction_free(&wtx->tx);
+            LOG_ERROR_IN("z_sendmany_shielded_with_key",
+                         "wallet_shielded",
+                         "z_sendmany: private broadcast not queued");
+            return false;
+        }
+
+        char txid_hex[65];
+        uint256_get_hex(&wtx->tx.hash, txid_hex);
+        json_set_str(result, txid_hex);
+
+        transaction_free(&wtx->tx);
+        return true;
+}
+
+/* Body of the shielded spend. `from_z_key` is the caller's private copy of the
+ * keystore entry, never a pointer into the keystore. */
+static bool z_sendmany_shielded_with_key(
+    struct wallet_rpc_context *ctx,
+    const struct chain_params *cp,
+    const struct sapling_key_entry *from_z_key,
+    int64_t total_amount,
+    const struct tx_destination *t_dests, const int64_t *t_amounts,
+    size_t num_t_out,
+    const uint8_t (*z_diversifiers)[11], const uint8_t (*z_pk_ds)[32],
+    const int64_t *z_amounts, const uint8_t (*z_memos)[512],
+    const bool *z_has_memo, size_t num_z_out, int min_conf,
+    struct wallet_tx *prepared, struct json_value *result,
+    int32_t spend_floor)
+{
+        struct db_sapling_note selected_notes[256];
+        size_t num_sel_notes = 0;
+        int64_t notes_total = 0;
+        int64_t fee = 0;
+
+        if (!z_sendmany_shielded_select_inputs(
+                ctx, cp, from_z_key, total_amount, min_conf, spend_floor,
+                selected_notes, &num_sel_notes, &notes_total, &fee, result))
+            return false;
 
         /* Witnesses are maintained incrementally by connect_block and bulk_blocks.
          * The gate loads them at the authoritative tip and checks the anchor
@@ -526,59 +719,13 @@ static bool z_sendmany_shielded_with_key(
 
         /* Build transaction */
         struct wallet_tx wtx;
-        memset(&wtx, 0, sizeof(wtx));
-        transaction_init(&wtx.tx);
-
         int height = ctx->wallet->best_block_height;
-        wtx.tx.overwintered = true;
-        wtx.tx.version = SAPLING_TX_VERSION;
-        wtx.tx.version_group_id = SAPLING_VERSION_GROUP_ID;
-        wtx.tx.expiry_height = (uint32_t)(height + 20);
 
-        /* Allocate transparent outputs if any */
-        size_t total_t_out_shielded = num_t_out;
-        if (total_t_out_shielded > 0 || num_z_out > 0) {
-            if (!transaction_alloc(&wtx.tx, 0, total_t_out_shielded)) {
-                free(witnesses);
-                json_set_str(result, "Transaction allocation failed");
-                LOG_FAIL("wallet_shielded", "z_sendmany: transaction_alloc failed for %zu t-outputs (shielded path)", total_t_out_shielded);
-            }
-        }
-
-        /* Fill transparent outputs (for z→t) */
-        for (size_t i = 0; i < num_t_out; i++) {
-            struct script dest_script;
-            script_for_destination(&dest_script, &t_dests[i]);
-            wtx.tx.vout[i].value = t_amounts[i];
-            wtx.tx.vout[i].script_pub_key = dest_script;
-        }
-
-        /* Init proving context */
-        void *proving_ctx = zclassic_sapling_proving_ctx_init();
-        if (!proving_ctx) {
-            free(witnesses);
-            transaction_free(&wtx.tx);
-            char err[320];
-            snprintf(err, sizeof(err),
-                     "Failed to init proving context (backend=%s, status=%s)",
-                     zclassic_sapling_prover_backend(),
-                     zclassic_sapling_prover_status());
-            json_set_str(result, err);
-            LOG_FAIL("wallet_shielded", "z_sendmany: sapling_proving_ctx_init failed (shielded spend path)");
-        }
-
-        /* Build spend descriptions */
-        wtx.tx.v_shielded_spend = zcl_calloc(num_sel_notes, sizeof(struct spend_description), "shielded_spends");
-        if (!wtx.tx.v_shielded_spend) {
-            /* num_shielded_spend left 0 so transaction_free won't walk a NULL
-             * array. proving_ctx was init'd above; free it too. */
-            zclassic_sapling_proving_ctx_free(proving_ctx);
-            free(witnesses);
-            transaction_free(&wtx.tx);
-            json_set_str(result, "Out of memory (shielded spends)");
-            LOG_FAIL("wallet_shielded", "z_sendmany: calloc v_shielded_spend failed for %zu notes", num_sel_notes);
-        }
-        wtx.tx.num_shielded_spend = num_sel_notes;
+        void *proving_ctx = NULL;
+        if (!z_sendmany_shielded_prepare_tx_and_prover(
+                &wtx, witnesses, t_dests, t_amounts, num_t_out, num_z_out,
+                num_sel_notes, height, &proving_ctx, result))
+            return false;
 
         uint8_t spend_ars[256][32]; /* ar values for spend_auth_sig */
 
@@ -637,78 +784,7 @@ shielded_cleanup:
             return true;
         }
 
-        /* The old shielded-spend branch bypassed every mempool check with
-         * tx_mempool_add_unchecked(), ignored its return, and marked notes
-         * spent even when admission failed. Use the same consensus gate and
-         * rollback contract as every transparent wallet send. */
-        struct zcl_result commit = wallet_commit_from_context(ctx, &wtx);
-        if (!commit.ok) {
-            transaction_free(&wtx.tx);
-            json_set_str(result, commit.message);
-            LOG_FAIL("wallet_shielded",
-                     "z_sendmany: shielded commit rejected (code=%d): %s",
-                     commit.code, commit.message);
-        }
-
-        /* Persist the wallet transaction through node.db's single-writer lane
-         * before network relay. A failed durability step unwinds wallet and
-         * mempool state. */
-        struct zcl_result persisted =
-            wallet_persist_commit_before_relay(ctx, &wtx);
-        if (!persisted.ok) {
-            transaction_free(&wtx.tx);
-            json_set_str(result, persisted.message);
-            LOG_FAIL("wallet_shielded",
-                     "z_sendmany: pre-relay durability failed (code=%d): %s",
-                     persisted.code, persisted.message);
-        }
-
-        /* Reserve the selected notes before broadcast — by their
-         * stored nullifier, keyed to the new txid — both in SQLite (so the next
-         * db_sapling_note_list_unspent_for_ivk selection excludes them) and in
-         * the in-memory wallet. Without this, a second z_sendmany issued before
-         * this tx confirms re-selects the SAME notes and produces a conflicting
-         * transaction (double-spend of the user's own notes), so neither send
-         * confirms and the funds appear stuck. This mirrors the transparent
-         * path, which marks UTXOs spent at broadcast (wallet_commit_transaction
-         * + node_db_sync_wallet_tx). */
-        if (!node_db_sync_wallet_sapling_spends(ctx->node_db, &wtx.tx)) {
-            struct zcl_result compensated =
-                wallet_rollback_persisted_commit(ctx, &wtx);
-            transaction_free(&wtx.tx);
-            if (!compensated.ok) {
-                json_set_str(result, compensated.message);
-                LOG_FAIL("wallet_shielded",
-                         "z_sendmany: note reservation and durable compensation "
-                         "failed (code=%d): %s",
-                         compensated.code, compensated.message);
-            }
-            json_set_str(result, "Cannot reserve shielded notes; send aborted");
-            LOG_FAIL("wallet_shielded",
-                     "z_sendmany: atomic wallet-note reservation failed");
-        }
-        if (ctx->wallet)
-            wallet_mark_sapling_nullifiers_spent(ctx->wallet, &wtx.tx);
-
-        /* node.db's wallet projection is rebuildable; report a write failure,
-         * but the authoritative private wallet transaction + note reservation
-         * are already durable before relay. */
-        if (!node_db_sync_wallet_tx(ctx->node_db, &wtx.tx, ctx->wallet, 0))
-            LOG_WARN("wallet_shielded",
-                     "z_sendmany: wallet projection write failed after durable reservation");
-
-        if (!wallet_send_relay(ctx, &wtx)) {
-            json_set_str(result, wallet_send_relay_failure_text());
-            transaction_free(&wtx.tx);
-            LOG_FAIL("wallet_shielded", "z_sendmany: private broadcast not queued");
-        }
-
-        char txid_hex[65];
-        uint256_get_hex(&wtx.tx.hash, txid_hex);
-        json_set_str(result, txid_hex);
-
-        transaction_free(&wtx.tx);
-        return true;
+        return z_sendmany_shielded_commit_and_relay(ctx, &wtx, result);
 }
 
 /* Shielded-spend path (from-address is a zaddr): spend selected notes,
