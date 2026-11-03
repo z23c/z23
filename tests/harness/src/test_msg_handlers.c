@@ -1925,6 +1925,307 @@ static int test_msg_build_identity_prefix_branches(void)
     return failures;
 }
 
+/* ── mp_block_payload_submit_all (msgprocessor_snapshot_payload.c) ──
+ *
+ * The function and struct block_piece_payload_ref live in the private src/
+ * header msgprocessor_snapshot_internal.h, which this file does not include.
+ * Declared here the way test_block_swarm_loopback.c declares its private
+ * helpers; the two-field struct is mirrored and must stay in step. */
+
+struct block_piece_payload_ref {
+    const unsigned char *data;
+    size_t len;
+};
+
+bool mp_block_payload_submit_all(struct msg_processor *mp,
+                                 struct p2p_node *node,
+                                 const struct block_piece_payload_ref *refs,
+                                 uint32_t count);
+
+struct pay_probe {
+    int submit_calls;
+    int drain_calls;
+    int scope_begins;
+    int scope_ends;
+    int drain_ret;
+    int ok_on;           /* 1-based submit call that returns true */
+    bool ok_always;
+    bool snapshot;
+    const char *reason;  /* reject reason for every other submit call */
+};
+
+static const unsigned char pay_junk[1] = {0x00};
+
+static bool pay_probe_submit(struct block *b, struct validation_state *out,
+                             void *ctx)
+{
+    (void)b;
+    struct pay_probe *p = ctx;
+    p->submit_calls++;
+    if (p->ok_always || p->submit_calls == p->ok_on)
+        return true;
+    validation_state_invalid(out, false, REJECT_INVALID, p->reason, NULL);
+    return false;
+}
+
+static int pay_probe_drain(void *ctx)
+{
+    struct pay_probe *p = ctx;
+    p->drain_calls++;
+    return p->drain_ret;
+}
+
+static void pay_probe_begin(void *ctx)
+{
+    ((struct pay_probe *)ctx)->scope_begins++;
+}
+
+static void pay_probe_end(void *ctx)
+{
+    ((struct pay_probe *)ctx)->scope_ends++;
+}
+
+static bool pay_probe_snapshot_active(void *ctx)
+{
+    return ((struct pay_probe *)ctx)->snapshot;
+}
+
+static void pay_wire(struct msg_processor *mp, struct pay_probe *p, bool scope)
+{
+    memset(mp, 0, sizeof(*mp));
+    mp->block_submit = pay_probe_submit;
+    mp->block_submit_ctx = p;
+    mp->catchup_drain = pay_probe_drain;
+    mp->catchup_drain_ctx = p;
+    mp->snapshot_active = pay_probe_snapshot_active;
+    mp->snapshot_active_ctx = p;
+    if (scope) {
+        mp->catchup_batch_begin = pay_probe_begin;
+        mp->catchup_batch_end = pay_probe_end;
+        mp->catchup_batch_scope_ctx = p;
+    }
+}
+
+/* Serializes a minimal block into out; returns its length, 0 on failure. */
+static size_t pay_block_bytes(uint8_t nonce, unsigned char *out, size_t cap,
+                              struct uint256 *hash_out)
+{
+    struct block blk;
+    block_init(&blk);
+    blk.header.nVersion = 4;
+    blk.header.nTime = 1700000002u;
+    blk.header.nBits = 0x1f00ffffu;
+    blk.header.nNonce.data[0] = nonce;
+    block_get_hash(&blk, hash_out);
+    struct byte_stream s;
+    stream_init(&s, 256);
+    size_t n = 0;
+    if (block_serialize(&blk, &s) && s.size <= cap) {
+        memcpy(out, s.data, s.size);
+        n = s.size;
+    }
+    stream_free(&s);
+    block_free(&blk);
+    return n;
+}
+
+static void pay_node(struct p2p_node *node)
+{
+    memset(node, 0, sizeof(*node));
+    node->id = 91;
+    snprintf(node->addr_name, sizeof(node->addr_name), "test-peer");
+}
+static int test_pay_refusal_branches(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: submit_all refuses NULL inputs and balances scope on early exits") {
+        struct pay_probe p = {0};
+        struct msg_processor mp;
+        pay_wire(&mp, &p, true);
+        struct p2p_node node;
+        pay_node(&node);
+        struct block_piece_payload_ref ref = {pay_junk, 1};
+        ASSERT(mp_block_payload_submit_all(NULL, NULL, NULL, 0));
+        ASSERT(mp_block_payload_submit_all(&mp, &node, NULL, 3));
+        ASSERT(!mp_block_payload_submit_all(NULL, &node, &ref, 1));
+        ASSERT(!mp_block_payload_submit_all(&mp, NULL, &ref, 1));
+        ASSERT_EQ(p.scope_begins, 0);
+        ASSERT_EQ(p.submit_calls, 0);
+
+        /* Zero count: scope opened and closed, nothing submitted. */
+        ASSERT(mp_block_payload_submit_all(&mp, &node, &ref, 0));
+        ASSERT_EQ(p.scope_begins, 1);
+        ASSERT_EQ(p.scope_ends, 1);
+
+        /* Malformed first piece refuses before any submit. */
+        ASSERT(!mp_block_payload_submit_all(&mp, &node, &ref, 1));
+        ASSERT_EQ(p.scope_begins, 2);
+        ASSERT_EQ(p.scope_ends, 2);
+        ASSERT_EQ(p.submit_calls, 0);
+
+        /* Without scope hooks the same refusal still happens. */
+        struct pay_probe q = {0};
+        pay_wire(&mp, &q, false);
+        ASSERT(!mp_block_payload_submit_all(&mp, &node, &ref, 1));
+        ASSERT_EQ(q.scope_begins, 0);
+
+        /* Unwired block_submit refuses a valid piece with the scope balanced. */
+        unsigned char vb[512];
+        struct uint256 vh;
+        size_t nv = pay_block_bytes(1, vb, sizeof(vb), &vh);
+        ASSERT(nv > 0);
+        struct block_piece_payload_ref valid = {vb, nv};
+        struct pay_probe r = {0};
+        pay_wire(&mp, &r, true);
+        mp.block_submit = NULL;
+        ASSERT(!mp_block_payload_submit_all(&mp, &node, &valid, 1));
+        ASSERT_EQ(r.scope_begins, 1);
+        ASSERT_EQ(r.scope_ends, 1);
+        ASSERT_EQ(r.submit_calls, 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_pay_accept_and_skip_branches(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: submit_all accepts pieces and skips snapshot or have-data pieces") {
+        struct p2p_node node;
+        pay_node(&node);
+        unsigned char a[512], b[512];
+        struct uint256 ha, hb;
+        size_t na = pay_block_bytes(1, a, sizeof(a), &ha);
+        size_t nb = pay_block_bytes(2, b, sizeof(b), &hb);
+        ASSERT(na > 0 && nb > 0);
+
+        /* Two accepted pieces: one submit each, one scope, no drain. */
+        struct pay_probe p = {0};
+        p.ok_always = true;
+        struct msg_processor mp;
+        pay_wire(&mp, &p, true);
+        struct block_piece_payload_ref refs[2] = {{a, na}, {b, nb}};
+        ASSERT(mp_block_payload_submit_all(&mp, &node, refs, 2));
+        ASSERT_EQ(p.submit_calls, 2);
+        ASSERT_EQ(p.drain_calls, 0);
+        ASSERT_EQ(p.scope_begins, 1);
+        ASSERT_EQ(p.scope_ends, 1);
+
+        /* A malformed later piece refuses after the earlier submit. */
+        struct pay_probe m = {0};
+        m.ok_always = true;
+        pay_wire(&mp, &m, true);
+        struct block_piece_payload_ref bad[2] = {{a, na}, {pay_junk, 1}};
+        ASSERT(!mp_block_payload_submit_all(&mp, &node, bad, 2));
+        ASSERT_EQ(m.submit_calls, 1);
+        ASSERT_EQ(m.scope_begins, 1);
+        ASSERT_EQ(m.scope_ends, 1);
+
+        /* Snapshot active: no submit at all. */
+        struct pay_probe s = {0};
+        s.snapshot = true;
+        pay_wire(&mp, &s, true);
+        struct block_piece_payload_ref ref = {a, na};
+        ASSERT(mp_block_payload_submit_all(&mp, &node, &ref, 1));
+        ASSERT_EQ(s.submit_calls, 0);
+        ASSERT_EQ(s.scope_begins, 1);
+        ASSERT_EQ(s.scope_ends, 1);
+
+        /* BLOCK_HAVE_DATA skips; a piece without it is submitted. */
+        struct pay_probe d = {0};
+        d.ok_always = true;
+        pay_wire(&mp, &d, true);
+        struct main_state ms;
+        main_state_init(&ms);
+        struct block_index bi;
+        memset(&bi, 0, sizeof(bi));
+        bi.hashBlock = ha;
+        bi.nStatus = BLOCK_HAVE_DATA;
+        ASSERT(block_map_insert(&ms.map_block_index, &ha, &bi));
+        mp.main_state = &ms;
+        ASSERT(mp_block_payload_submit_all(&mp, &node, &ref, 1));
+        ASSERT_EQ(d.submit_calls, 0);
+        bi.nStatus = 0;
+        ASSERT(mp_block_payload_submit_all(&mp, &node, &ref, 1));
+        ASSERT_EQ(d.submit_calls, 1);
+        main_state_free(&ms);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_pay_reject_retry_branches(void)
+{
+    static const char *const retry_reasons[] = {
+        "header-admit-inbox-full", "p2p-block-header-missing",
+        "p2p-block-intake-full"};
+    static const char *const accept_reasons[] = {
+        "p2p-block-queued-for-reducer", "p2p-block-already-queued",
+        "p2p-block-staged-for-reducer"};
+    int failures = 0;
+    TEST("msg_handlers: submit_all reject, retry and queued-reason branches") {
+        struct p2p_node node;
+        pay_node(&node);
+        unsigned char a[512];
+        struct uint256 h;
+        size_t na = pay_block_bytes(6, a, sizeof(a), &h);
+        ASSERT(na > 0);
+        struct block_piece_payload_ref ref = {a, na};
+
+        /* Non-retryable reject: one submit, no drain. */
+        struct pay_probe n = {0};
+        n.reason = "block-not-finalized-by-reducer";
+        struct msg_processor mp;
+        pay_wire(&mp, &n, true);
+        ASSERT(!mp_block_payload_submit_all(&mp, &node, &ref, 1));
+        ASSERT_EQ(n.submit_calls, 1);
+        ASSERT_EQ(n.drain_calls, 0);
+
+        /* Retry reasons with a draining catch-up: three attempts, three drains. */
+        struct pay_probe t = {0};
+        t.drain_ret = 1;
+        pay_wire(&mp, &t, true);
+        for (size_t i = 0; i < sizeof(retry_reasons) / sizeof(retry_reasons[0]); i++) {
+            t.submit_calls = 0;
+            t.drain_calls = 0;
+            t.reason = retry_reasons[i];
+            ASSERT(!mp_block_payload_submit_all(&mp, &node, &ref, 1));
+            ASSERT_EQ(t.submit_calls, 3);
+            ASSERT_EQ(t.drain_calls, 3);
+        }
+        /* No drain progress: stop after the first attempt. */
+        t.submit_calls = 0;
+        t.drain_calls = 0;
+        t.drain_ret = 0;
+        t.reason = retry_reasons[0];
+        ASSERT(!mp_block_payload_submit_all(&mp, &node, &ref, 1));
+        ASSERT_EQ(t.submit_calls, 1);
+        ASSERT_EQ(t.drain_calls, 1);
+
+        /* Accepted on a later retry attempt. */
+        struct pay_probe l = {0};
+        l.ok_on = 2;
+        l.drain_ret = 1;
+        l.reason = "p2p-block-header-missing";
+        pay_wire(&mp, &l, true);
+        ASSERT(mp_block_payload_submit_all(&mp, &node, &ref, 1));
+        ASSERT_EQ(l.submit_calls, 2);
+        ASSERT_EQ(l.drain_calls, 1);
+
+        /* Queued, already-queued and staged reasons count as accepted. */
+        for (size_t i = 0; i < sizeof(accept_reasons) / sizeof(accept_reasons[0]); i++) {
+            struct pay_probe q = {0};
+            q.reason = accept_reasons[i];
+            pay_wire(&mp, &q, true);
+            ASSERT(mp_block_payload_submit_all(&mp, &node, &ref, 1));
+            ASSERT_EQ(q.submit_calls, 1);
+            ASSERT_EQ(q.drain_calls, 0);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── Entry point ───────────────────────────────────────────────── */
 
 int test_msg_handlers(void);
@@ -1960,6 +2261,9 @@ int test_msg_handlers(void)
     failures += test_msg_process_messages_yields_after_bounded_batch();
     failures += test_swarm_utxo_sha3_verify_passed_is_quiet();
     failures += test_swarm_utxo_sha3_verify_mismatch_is_not_silent();
+    failures += test_pay_refusal_branches();
+    failures += test_pay_accept_and_skip_branches();
+    failures += test_pay_reject_retry_branches();
     failures += test_zfilelist_empty_and_dropped_offers();
     failures += test_zfilelist_ttl_clamp_relay_gate_and_update();
     failures += test_zfilelist_count_clamp_and_truncated_batch();
