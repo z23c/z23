@@ -46,14 +46,14 @@ static enum zapp_restart_action wait_step(struct zapp_restart *r, const struct z
     return ZAPP_RESTART_RUN;
 }
 
-/* The node is gone. One that was expected to run exited on its own: it is restarted when the owner still wants it and
- * the device is not too hot, and not after the last try. */
+/* The node is gone. One that was expected to run exited on its own: it is restarted when the owner still wants it,
+ * and not after the last try. A heat pause does not cancel the restart: wait_step holds it until the pause ends. */
 static enum zapp_restart_action gone_seen(struct zapp_restart *r, const struct zapp_restart_seen *s)
 {
     r->up_since = 0;
     if (r->phase == ZAPP_RESTART_WAIT) return wait_step(r, s);
     if (r->phase != ZAPP_RESTART_UP) return ZAPP_RESTART_NONE;
-    if (!s->wanted || s->held) {
+    if (!s->wanted) {
         r->phase = ZAPP_RESTART_IDLE;
         return ZAPP_RESTART_NONE;
     }

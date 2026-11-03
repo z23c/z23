@@ -117,20 +117,46 @@ static void a_node_the_owner_no_longer_wants_is_not_restarted(void)
     assert(zapp_restart_notice(&r) == NULL);
 }
 
-/* The heat pause never restarts the node: an exit while paused leaves it stopped, and a restart that is due waits. */
-static void the_heat_pause_holds_every_restart(void)
+/* A heat pause defers a restart that is due: an exit while paused is restarted once the pause ends, and the tries
+ * count as usual. */
+static void a_heat_pause_defers_the_restart(void)
 {
     struct zapp_restart r = {0};
     zapp_restart_started(&r);
     assert(obs(&r, up(100)) == ZAPP_RESTART_NONE);
     assert(obs(&r, see(false, true, true, true, 110)) == ZAPP_RESTART_NONE);
-    assert(r.phase == ZAPP_RESTART_IDLE);
-    assert(obs(&r, down(500)) == ZAPP_RESTART_NONE);
+    assert(r.phase == ZAPP_RESTART_WAIT && r.tries == 1 && r.due == 140);
+    assert(obs(&r, see(false, true, true, true, 500)) == ZAPP_RESTART_NONE);
+    assert(obs(&r, see(false, true, false, true, 501)) == ZAPP_RESTART_RUN);
+    assert(zapp_restart_notice(&r) == NULL);
+    assert(obs(&r, see(true, true, false, true, 502)) == ZAPP_RESTART_NONE);
+    assert(obs(&r, see(false, true, true, true, 520)) == ZAPP_RESTART_NONE);
+    assert(r.phase == ZAPP_RESTART_WAIT && r.tries == 2 && r.due == 580);
+    assert(obs(&r, see(false, true, false, true, 600)) == ZAPP_RESTART_RUN);
+    assert(obs(&r, see(true, true, false, true, 601)) == ZAPP_RESTART_NONE);
+    assert(obs(&r, see(false, true, true, true, 610)) == ZAPP_RESTART_NONE);
+    assert(r.phase == ZAPP_RESTART_WAIT && r.tries == 3 && r.due == 730);
+    assert(obs(&r, see(false, true, false, true, 800)) == ZAPP_RESTART_RUN);
+    assert(obs(&r, see(false, true, true, true, 820)) == ZAPP_RESTART_NONE);
+    assert(r.phase == ZAPP_RESTART_GAVE_UP);
+}
+
+/* The owner's Stop cancels a restart that a pause holds, and a node the owner stops during the pause is not restarted. */
+static void a_stop_during_a_pause_cancels_the_restart(void)
+{
+    struct zapp_restart r = {0};
     zapp_restart_started(&r);
-    assert(obs(&r, up(600)) == ZAPP_RESTART_NONE);
-    assert(obs(&r, down(610)) == ZAPP_RESTART_NONE);
-    assert(obs(&r, see(false, true, true, true, 640)) == ZAPP_RESTART_NONE);
-    assert(obs(&r, see(false, true, false, true, 650)) == ZAPP_RESTART_RUN);
+    assert(obs(&r, up(100)) == ZAPP_RESTART_NONE);
+    assert(obs(&r, see(false, true, true, true, 110)) == ZAPP_RESTART_NONE);
+    zapp_restart_stopped(&r);
+    assert(obs(&r, see(false, true, false, true, 200)) == ZAPP_RESTART_NONE);
+    assert(r.phase == ZAPP_RESTART_IDLE);
+    zapp_restart_started(&r);
+    assert(obs(&r, up(300)) == ZAPP_RESTART_NONE);
+    assert(obs(&r, see(false, true, true, true, 310)) == ZAPP_RESTART_NONE);
+    assert(obs(&r, see(false, false, true, true, 320)) == ZAPP_RESTART_NONE);
+    assert(obs(&r, see(false, true, false, true, 400)) == ZAPP_RESTART_NONE);
+    assert(r.phase == ZAPP_RESTART_IDLE);
 }
 
 /* A restart waits while the app is hidden and runs once it is shown. */
@@ -182,7 +208,8 @@ int main(void)
     a_restart_that_dies_at_once_uses_the_next_delay();
     a_stop_cancels_the_restart();
     a_node_the_owner_no_longer_wants_is_not_restarted();
-    the_heat_pause_holds_every_restart();
+    a_heat_pause_defers_the_restart();
+    a_stop_during_a_pause_cancels_the_restart();
     a_hidden_app_waits_for_the_restart();
     a_node_already_running_is_taken_over();
     a_node_stop_is_refused_while_a_payment_is_sent();
