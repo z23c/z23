@@ -289,6 +289,48 @@ _test_next:;
     return failures;
 }
 
+/* ── outcome ranking dropped on a failed read ─────────────────────────── */
+
+/* Attempt A is recorded by a valid outcome row, so it outranks B by its
+ * recorded time. Once the ledger cannot be read to its end, no row may rank
+ * anything: the newest by mtime, B, must win. */
+static int rpr_case_outcome_fallback(const char *root)
+{
+    int failures = 0;
+    char dir[1024], outcomes[1024], text[5600];
+    const char *row =
+        "{\"local\":\"tipA\",\"base\":\"baseA\",\"started\":1792663000,"
+        "\"state\":\"landed\"}\n";
+    size_t n;
+    struct zcl_objectives_options o = {0};
+    (void)snprintf(dir, sizeof(dir), "%s/outcome_rank", root);
+    (void)snprintf(outcomes, sizeof(outcomes), "%s/outcome_rank.jsonl", root);
+    o.attempts_dir = dir;
+    o.outcomes = outcomes;
+    o.now = RPR_NOW;
+    TEST("objectives: a partially read outcome ledger does not rank attempts") {
+        struct zcl_objective_value v;
+        ASSERT(rpr_mkdir(dir));
+        ASSERT(rpr_attempt(dir, "tipA-baseA.r1", 1000000, "100.0", 1000000000L));
+        ASSERT(rpr_attempt(dir, "tipB-baseB.r2", 2000000, "200.0", 2000000000L));
+        ASSERT(rpr_write(outcomes, row));
+        v = zcl_objectives_measure(&o, "proof_test_wall_s");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, (int64_t)100);
+        n = (size_t)snprintf(text, sizeof(text), "%s", row);
+        memset(text + n, 'x', 5000);
+        text[n + 5000] = '\n';
+        text[n + 5001] = '\0';
+        ASSERT(rpr_write(outcomes, text));
+        v = zcl_objectives_measure(&o, "proof_test_wall_s");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, (int64_t)200);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int fox_repair_cases(void);
 int fox_repair_cases(void)
 {
@@ -300,6 +342,7 @@ int fox_repair_cases(void)
     failures += rpr_case_train_identity(root);
     failures += rpr_case_attempt_growth(root);
     failures += rpr_case_lane_labels(root);
+    failures += rpr_case_outcome_fallback(root);
     (void)test_rm_rf_recursive(root);
     return failures;
 }

@@ -630,16 +630,20 @@ static void obj_attempts_record(struct obj_attempts *set, const char *outcomes)
     char line[OBJ_LINE_MAX];
     FILE *fp = outcomes ? fopen(outcomes, "r") : NULL;
     size_t len;
+    int status;
     if (!fp)
         return;
-    while (obj_ledger_line(fp, line, sizeof line, &len) == 1) {
+    while ((status = obj_ledger_line(fp, line, sizeof line, &len)) == 1) {
         struct json_value row;
         json_init(&row);
         if (json_read(&row, line, len) && row.type == JSON_OBJ)
             obj_attempts_note_row(set, &row);
         json_free(&row);
     }
-    (void)fclose(fp);
+    bool closed = fclose(fp) == 0;
+    if (!closed || status < 0)
+        for (size_t i = 0; i < set->n; i++)
+            set->items[i].recorded = 0;
 }
 
 /* True when a ranks after b. phases.txt carries no wall-clock stamp (its rows
