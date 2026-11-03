@@ -51,6 +51,8 @@ static char state_dir[256];
 static atomic_bool camera_dialog;
 /* The dialog closed without the permission. */
 static atomic_bool camera_denied;
+/* The activity paused while the camera permission dialog was up. Android pauses the activity for its dialog. */
+static atomic_bool camera_paused;
 /* The foreground service that keeps the node's process above hidden-app priority is running. */
 static bool node_service_on;
 /* Notifications were requested once; the service works without them. */
@@ -275,7 +277,7 @@ static int signal_ready(int fd, int events, void *context)
     bool request = permission_ticket && permission_ticket == zapp_camera_ticket();
     permission_ticket = 0;
     pthread_mutex_unlock(&lock);
-    if (activity && request) { atomic_store(&camera_dialog, true); request_permission(env, activity, "android.permission.CAMERA"); }
+    if (activity && request) request_permission(env, activity, "android.permission.CAMERA");
     if (activity) { refresh(env); (*env)->DeleteLocalRef(env, activity); }
     return 1;
 }
@@ -314,22 +316,21 @@ static void queue_created(ANativeActivity *activity, AInputQueue *queue)
 static void queue_destroyed(ANativeActivity *activity, AInputQueue *queue)
 { (void)activity; AInputQueue_detachLooper(queue); }
 /* Waits for the system dialog that was asked for. It returns when the dialog has closed (resume_activity clears
- * camera_dialog), when the denial is reported, or when the wait runs out. The caller then reads the access state. */
+ * camera_dialog), when the denial is reported, when no pause shows the dialog within the first second, or when the
+ * wait runs out after 30 s. The caller then reads the access state. */
 static void permission_wait(uint64_t ticket)
 {
     pthread_mutex_lock(&lock);
     bool queued = active && ticket == zapp_camera_ticket() && signal_pipe[1] >= 0;
     if (queued) { char byte = 1; permission_ticket = ticket; queued = write(signal_pipe[1], &byte, 1) == 1; if (!queued) permission_ticket = 0; }
+    if (queued) atomic_store(&camera_dialog, true);
     pthread_mutex_unlock(&lock);
     struct timespec pause = { .tv_sec = 0, .tv_nsec = 200000000 };
-    bool shown = false;
-    for (int i = 0; queued && i < 150; ++i) {
+    for (unsigned i = 1; queued && i <= 150; ++i) {
         nanosleep(&pause, NULL);
         pthread_mutex_lock(&lock); bool alive = active && ticket == zapp_camera_ticket(); pthread_mutex_unlock(&lock);
         if (!alive || atomic_load(&camera_denied)) break;
-        bool dialog = atomic_load(&camera_dialog);
-        shown = shown || dialog;
-        if (shown && !dialog) break;
+        if (!zapp_camera_wait_goes_on(i, atomic_load(&camera_paused), atomic_load(&camera_dialog))) break;
     }
 }
 
@@ -354,6 +355,7 @@ enum zapp_camera_access zapp_camera_permission(uint64_t ticket)
     if (!permission_attach(current_vm, &env, &attached)) return access;
     atomic_store(&camera_denied, false);
     atomic_store(&camera_dialog, false);
+    atomic_store(&camera_paused, false);
     pthread_mutex_lock(&lock);
     jobject activity = active && ticket == zapp_camera_ticket() ? (*env)->NewLocalRef(env, active) : NULL;
     pthread_mutex_unlock(&lock);
@@ -608,6 +610,7 @@ static void pause_activity(ANativeActivity *activity)
     zapp_clip_screen_pause(activity->env);
     zapp_controller_visible(false);
     if (!atomic_load(&camera_dialog)) zapp_camera_stop();
+    else atomic_store(&camera_paused, true);
 }
 static void focus_changed(ANativeActivity *activity, int focused)
 {

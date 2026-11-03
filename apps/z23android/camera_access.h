@@ -16,6 +16,10 @@ enum zapp_camera_access {
  * so asked_before tells the two apart. */
 enum zapp_camera_access zapp_camera_access_state(bool granted, bool rationale, bool asked_before);
 
+/* One check of the wait for the system dialog, taken every 200 ms; tick counts from 1. paused: the activity has
+ * paused since the request, which the dialog causes. dialog: the dialog has not reported its result yet. */
+bool zapp_camera_wait_goes_on(unsigned tick, bool paused, bool dialog);
+
 /* What the scan screen shows for an access state. With preview, the camera and Cancel are shown and the other
  * fields are NULL. Otherwise text is shown with two buttons: open leads to the system settings page and paste
  * returns to Send. */

@@ -178,6 +178,7 @@ test-camera-access:
 	@mkdir -p '$(BUILD_DIR)'
 	$(HOST_CC) $(HOST_WARNINGS) -I. tests/camera_access_test.c camera_access.c -o '$(BUILD_DIR)/camera-access-test'
 	'$(BUILD_DIR)/camera-access-test'
+	@grep -q 'zapp_camera_wait_goes_on(i, atomic_load(&camera_paused)' android_main.c || { echo 'the camera wait must end on the dialog result or when no dialog appears' >&2; exit 1; }
 
 .PHONY: test-payment test-wallet
 test-payment:

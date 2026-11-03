@@ -39,9 +39,24 @@ static void screens(void)
     assert(!strcmp(s.paste, "Paste instead"));
 }
 
+/* The wait for the system dialog: it goes on while the dialog is up, ends once the dialog has reported, and ends
+ * after the first second when the activity never paused for a dialog. */
+static void waits(void)
+{
+    assert(!zapp_camera_wait_goes_on(1, false, false));
+    assert(!zapp_camera_wait_goes_on(7, true, false));
+    assert(zapp_camera_wait_goes_on(1, false, true));
+    assert(zapp_camera_wait_goes_on(4, false, true));
+    assert(!zapp_camera_wait_goes_on(5, false, true));
+    assert(!zapp_camera_wait_goes_on(6, false, true));
+    assert(zapp_camera_wait_goes_on(5, true, true));
+    assert(zapp_camera_wait_goes_on(1000, true, true));
+}
+
 int main(void)
 {
     states();
     screens();
+    waits();
     return 0;
 }
