@@ -66,24 +66,46 @@ before and after values.
    `node_warm_restart_s` as the biggest gap; read the live card, not this
    file. The boot timers split it: the landed bundle downloaded again, the
    coins read view, the prologue. Fix the largest step, read the next boot
-   beacon, repeat. Resident memory (`node_rss_mb`) comes next.
-2. **Whole-suite proofs pass the first time.** A group that fails only under
-   load gets a root-cause fix (a private path, a CPU budget instead of a wall
-   clock), never a rerun or a weaker assertion. Next: the two-row train case
-   in `dev_land` that failed once under load.
-3. **Plugins end to end.** Attest, fetch and run plugins, with host calls;
-   then the bundled apps ship as plugins ([`PLUGIN_APPS.md`](../commons/PLUGIN_APPS.md)).
-4. **Functions under the complexity cap.** The baseline file
-   `tools/lint/cyclomatic_complexity_baseline.txt` lists every function over
-   the cap of 15. Split product-room functions first,
-   behaviour-preserving, and lower each pin.
-5. **The strict test suite is green.** `make test` builds every binary its
+   beacon, repeat. Resident memory (`node_rss_mb`) comes next. A boot that
+   refuses to start names its stage and cause; an untyped refusal is a bug.
+2. **Two labs agree on every change.** A second lab rechecks each change
+   the first lab gated, over the swarm ([`LAB.md`](../dev/LAB.md#peer-verification-over-the-swarm)).
+   It must receive the final gated commit, not an earlier draft, and use the
+   same check modes. Measure the agreement rate from the shadow comparison;
+   when it holds near every change, a second-lab receipt becomes required
+   before landing. The lab's queue, retry and offer steps move from scripts
+   outside the tree into `z23-dev` and `z23-lab-peer` commands, each run in
+   shadow beside the old step until their decisions match.
+3. **Hot-swap plugins for agents.** The plugin store already keeps signed
+   generations, swaps `current` atomically, reloads a supervised plugin on
+   SIGHUP and rolls back after three crashes ([`PLUGINS.md`](../dev/PLUGINS.md)).
+   Next: one command takes an agent's plugin source to a running, switched
+   generation (today it is keygen, publisher, pack, install and switch), then
+   agents call plugins through the MCP adapter. In-process module hot swap
+   ([`HOTSWAP.md`](../dev/HOTSWAP.md)) stays development-only and never loads
+   fetched code.
+4. **A wiki with public and fleet-private pages.** `fleet wiki` writes only
+   public pages today, although the board already has a fleet scope served
+   only to paired, roster-admitted peers. Give the wiki leaves a scope:
+   public pages are shared with every fleet; fleet pages reach only peers
+   holding the `observer` or `worker` role. A cooperating fleet reads your
+   fleet pages after pairing and an `observer` grant. Host and operations
+   lessons go to fleet pages; Z23 lessons stay public ([`WIKI.md`](../agent/WIKI.md)).
+5. **Less shell, more C23.** Port the scripts the land path runs on every
+   change first (lint, verify, land proof), then the large `tools/dev` and
+   `tools/scripts` acceptance scripts. Each port proves the same output and
+   exit status as the script it replaces, deletes that script, and lowers
+   `tools/lint/bash_line_budget.txt` in the same commit. Bootstrap scripts
+   that run before `z23` exists stay shell. The cyclomatic cap stays 15 and
+   its baseline stays empty.
+6. **Proofs pass the first time.** A group that fails only under load gets a
+   root-cause fix (a private path, a CPU budget instead of a wall clock),
+   never a rerun or a weaker assertion. `make test` builds every binary its
    groups need, and every group passes under the `-Werror -O3` test profile.
-6. **A new feature touches only its own files.** Handler prototypes, remote
+   A gate that dies without a verdict is detected at once, not waited out.
+7. **A new feature touches only its own files.** Handler prototypes, remote
    command classes and test groups now come from `.def` tables; a new test
    group is its file plus one catalog line. The lint gate table is next.
-7. **Less shell.** Shell lint gates move into the C23 `lintc` driver; the
-   shell line budget only goes down.
 
 ## Invariants and authority
 
