@@ -852,6 +852,47 @@ static int compose_gate_note(const struct unit_opts *o, char *out, size_t room)
         "evidence about the tree and not about you.\n", o->group);
 }
 
+/* Adds one section of `emitted` bytes at the end of the composed prompt, so
+ * *n tracks its length. False when that section is refused by the cap. */
+static bool compose_prompt_advance(size_t cap, int *n, int emitted)
+{
+    if (emitted < 0 || (size_t)emitted >= cap - (size_t)*n)
+        return false;
+    *n += emitted;
+    return true;
+}
+
+/* The two sections that lead the prompt, in order: the carried state, then
+ * the kind's constraints. False when either does not fit the cap. */
+static bool compose_prompt_leading(const struct unit_opts *o,
+                                   const char *carried_preamble,
+                                   char *p, size_t cap, int *n)
+{
+    /* Carried state leads everything else, including the kind's own
+     * constraints: it is what THIS run already knows about itself, from an
+     * earlier turn or an earlier attempt, and reading it after the task
+     * would frame it as background instead of as the model's own memory. */
+    if (carried_preamble && carried_preamble[0]) {
+        const int pn = snprintf(p, cap, "%s", carried_preamble);
+        if (!compose_prompt_advance(cap, n, pn))
+            return false;
+    }
+    /* The kind's own constraints lead the rest, because they are the frame
+     * the task is read in. A unit that must not edit anything should learn
+     * that before it reads a job description full of file names. */
+    if (o->kind && o->kind[0]) {
+        char heading[128];
+        (void)snprintf(heading, sizeof(heading),
+                       "# This is a %s unit", o->kind);
+        const int kn = append_body(p + *n, cap - (size_t)*n, heading,
+                                   engine_prompt_template_body(o->kind,
+                                                               "rules"));
+        if (!compose_prompt_advance(cap, n, kn))
+            return false;
+    }
+    return true;
+}
+
 static char *compose_prompt(const struct unit_opts *o,
                             const struct engine_vendor *v, const char *task,
                             const char *brief, const char *carried_preamble,
@@ -862,33 +903,9 @@ static char *compose_prompt(const struct unit_opts *o,
     if (!p)
         LOG_NULL("engine_unit", "cannot allocate the prompt buffer");
     int n = 0;
-    /* Carried state leads everything else, including the kind's own
-     * constraints: it is what THIS run already knows about itself, from an
-     * earlier turn or an earlier attempt, and reading it after the task
-     * would frame it as background instead of as the model's own memory. */
-    if (carried_preamble && carried_preamble[0]) {
-        const int pn = snprintf(p, cap, "%s", carried_preamble);
-        if (pn < 0 || (size_t)pn >= cap) {
-            free(p);
-            LOG_NULL("engine_unit", "the composed prompt does not fit its cap");
-        }
-        n = pn;
-    }
-    /* The kind's own constraints lead the rest, because they are the frame
-     * the task is read in. A unit that must not edit anything should learn
-     * that before it reads a job description full of file names. */
-    if (o->kind && o->kind[0]) {
-        char heading[128];
-        (void)snprintf(heading, sizeof(heading),
-                       "# This is a %s unit", o->kind);
-        const int kn = append_body(p + n, cap - (size_t)n, heading,
-                                   engine_prompt_template_body(o->kind,
-                                                               "rules"));
-        if (kn < 0 || (size_t)kn >= cap - (size_t)n) {
-            free(p);
-            LOG_NULL("engine_unit", "the composed prompt does not fit its cap");
-        }
-        n += kn;
+    if (!compose_prompt_leading(o, carried_preamble, p, cap, &n)) {
+        free(p);
+        LOG_NULL("engine_unit", "the composed prompt does not fit its cap");
     }
     /* Each section is emitted, then its template body, so a body always
      * lands under the section it belongs to. Composing the whole prompt in
@@ -896,12 +913,11 @@ static char *compose_prompt(const struct unit_opts *o,
 #define EMIT(expr)                                                            \
     do {                                                                      \
         const int emitted_ = (expr);                                          \
-        if (emitted_ < 0 || (size_t)emitted_ >= cap - (size_t)n) {            \
+        if (!compose_prompt_advance(cap, &n, emitted_)) {                     \
             free(p);                                                          \
             LOG_NULL("engine_unit",                                           \
                      "the composed prompt does not fit its cap");             \
         }                                                                     \
-        n += emitted_;                                                        \
     } while (0)
 
     EMIT(snprintf(p + n, cap - (size_t)n, "# Your unit of work\n\n%s\n\n",
@@ -910,11 +926,10 @@ static char *compose_prompt(const struct unit_opts *o,
                      engine_prompt_template_body(o->kind, "task")));
 
     const int head = compose_territory_head(o, brief, p + n, cap - (size_t)n);
-    if (head < 0 || (size_t)head >= cap - (size_t)n) {
+    if (!compose_prompt_advance(cap, &n, head)) {
         free(p);
         LOG_NULL("engine_unit", "the composed prompt does not fit its cap");
     }
-    n += head;
 
     /* The authored half. The brief above is measured and regenerates itself;
      * this does not, and is the only thing in the prompt that somebody wrote
@@ -931,11 +946,10 @@ static char *compose_prompt(const struct unit_opts *o,
             "would catch a violation. Treat it as a constraint on the change.\n"
             "\n%s\n\n",
             o->territory, stance);
-        if (sn < 0 || (size_t)sn >= cap - (size_t)n) {
+        if (!compose_prompt_advance(cap, &n, sn)) {
             free(p);
             LOG_NULL("engine_unit", "the composed prompt does not fit its cap");
         }
-        n += sn;
     }
 
     EMIT(snprintf(p + n, cap - (size_t)n, "# %s\n\n", delivery_text(v)));
@@ -952,16 +966,15 @@ static char *compose_prompt(const struct unit_opts *o,
 #undef EMIT
 
     int m = compose_gate_note(o, p + n, cap - (size_t)n);
-    if (m < 0 || (size_t)(n + m) >= cap) {
+    if (!compose_prompt_advance(cap, &n, m)) {
         free(p);
         LOG_NULL("engine_unit", "the composed prompt does not fit its cap");
     }
-    n += m;
     if (repair_note && repair_note[0]) {
         m = snprintf(p + n, cap - (size_t)n,
             "\n# A previous turn was not usable\n\n%s\n"
             "Send the whole reply again, corrected.\n", repair_note);
-        if (m < 0 || (size_t)(n + m) >= cap) {
+        if (!compose_prompt_advance(cap, &n, m)) {
             free(p);
             LOG_NULL("engine_unit", "the composed prompt does not fit its cap");
         }
@@ -2486,6 +2499,61 @@ static void write_receipt(const struct unit_opts *o,
     receipt_emit(o, text);
 }
 
+/* The outcome block of one unit's receipt: what the gate ran, its verdict,
+ * and the retries it took to get there. */
+static struct engine_receipt_outcome
+unit_receipt_outcome(const struct engine_gate_reading *g,
+                     enum engine_verdict verdict, int attempts,
+                     size_t files_changed, bool files_changed_known)
+{
+    return (struct engine_receipt_outcome) {
+        .applied = files_changed_known && files_changed > 0,
+        .groups_ran = g->groups_ran,
+        .groups_failed = g->groups_failed,
+        .gate_pass = engine_verdict_is_pass(verdict),
+        .retries = attempts > 0 ? attempts - 1 : 0,
+        .lines_changed = files_changed_known
+                             ? (int64_t)files_changed
+                             : ENGINE_RECEIPT_UNREPORTED,
+        .lint_rc = ENGINE_RECEIPT_UNREPORTED,
+    };
+}
+
+/* Copies the token counts the vendor reported. A count it did not report is
+ * recorded as ENGINE_RECEIPT_UNREPORTED, never synthesized. */
+static void unit_receipt_fill_tokens(struct engine_receipt *r,
+                                     const struct engine_usage *usage)
+{
+    r->prompt_tokens = usage->prompt_tokens_known ? usage->prompt_tokens
+                                                  : ENGINE_RECEIPT_UNREPORTED;
+    r->completion_tokens = usage->completion_tokens_known
+        ? usage->completion_tokens : ENGINE_RECEIPT_UNREPORTED;
+    r->cache_read_input_tokens = usage->cache_read_input_tokens_known
+        ? usage->cache_read_input_tokens : ENGINE_RECEIPT_UNREPORTED;
+    r->cache_creation_input_tokens = usage->cache_creation_input_tokens_known
+        ? usage->cache_creation_input_tokens : ENGINE_RECEIPT_UNREPORTED;
+    r->reasoning_tokens = usage->reasoning_tokens_known
+        ? usage->reasoning_tokens : ENGINE_RECEIPT_UNREPORTED;
+    r->total_tokens = usage->total_tokens_known ? usage->total_tokens
+                                                : ENGINE_RECEIPT_UNREPORTED;
+}
+
+/* The turn count and the bounded invocation list. A resumed session may
+ * report its counters cumulatively, so its totals are marked ambiguous. */
+static void unit_receipt_fill_invocations(
+    struct engine_receipt *r, const struct unit_opts *o,
+    const struct engine_cli_observation *observation,
+    const struct invocation_log *invocations)
+{
+    r->turns = observation && observation->known
+        ? observation->turns : ENGINE_RECEIPT_UNREPORTED;
+    r->invocations = invocations ? invocations->items : NULL;
+    r->invocations_count = invocations ? invocations->count : 0;
+    r->invocation_totals_ambiguous =
+        o->resume_session_id != NULL ||
+        (invocations && invocations->totals_ambiguous);
+}
+
 /* The sequence, not the one-run snapshot above. One JSON line appended to
  * <state-dir>/engine_receipts.chainlog; see engine/engine_receipt.h. */
 static bool append_unit_receipt(const struct unit_opts *o,
@@ -2534,25 +2602,6 @@ static bool append_unit_receipt(const struct unit_opts *o,
         .rules_count = 0,
         .task_sha3 = task_sha3,
         .group = o->group,
-        .prompt_tokens = usage->prompt_tokens_known ? usage->prompt_tokens
-                                             : ENGINE_RECEIPT_UNREPORTED,
-        .completion_tokens = usage->completion_tokens_known ? usage->completion_tokens
-                                                 : ENGINE_RECEIPT_UNREPORTED,
-        .cache_read_input_tokens = usage->cache_read_input_tokens_known
-            ? usage->cache_read_input_tokens : ENGINE_RECEIPT_UNREPORTED,
-        .cache_creation_input_tokens = usage->cache_creation_input_tokens_known
-            ? usage->cache_creation_input_tokens : ENGINE_RECEIPT_UNREPORTED,
-        .reasoning_tokens = usage->reasoning_tokens_known
-            ? usage->reasoning_tokens : ENGINE_RECEIPT_UNREPORTED,
-        .total_tokens = usage->total_tokens_known ? usage->total_tokens
-                                                  : ENGINE_RECEIPT_UNREPORTED,
-        .turns = observation && observation->known
-            ? observation->turns : ENGINE_RECEIPT_UNREPORTED,
-        .invocations = invocations ? invocations->items : NULL,
-        .invocations_count = invocations ? invocations->count : 0,
-        .invocation_totals_ambiguous =
-            o->resume_session_id != NULL ||
-            (invocations && invocations->totals_ambiguous),
         .cumulative_proof_ms = cumulative_proof_ms,
         .unit_elapsed_ms = unit_elapsed_ms,
         .dispatch_ms = dispatch_latency_ms,
@@ -2560,18 +2609,11 @@ static bool append_unit_receipt(const struct unit_opts *o,
         .wall_ms = dispatch_latency_ms + proof_latency_ms,
         .http_status = http_status,
         .worktree_head = NULL,
-        .outcome = {
-            .applied = files_changed_known && files_changed > 0,
-            .groups_ran = g->groups_ran,
-            .groups_failed = g->groups_failed,
-            .gate_pass = engine_verdict_is_pass(verdict),
-            .retries = attempts > 0 ? attempts - 1 : 0,
-            .lines_changed = files_changed_known
-                                 ? (int64_t)files_changed
-                                 : ENGINE_RECEIPT_UNREPORTED,
-            .lint_rc = ENGINE_RECEIPT_UNREPORTED,
-        },
+        .outcome = unit_receipt_outcome(g, verdict, attempts, files_changed,
+                                        files_changed_known),
     };
+    unit_receipt_fill_tokens(&r, usage);
+    unit_receipt_fill_invocations(&r, o, observation, invocations);
     return engine_receipt_append(path, &r, NULL);
 }
 
