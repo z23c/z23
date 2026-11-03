@@ -401,6 +401,29 @@ _test_next:;
     return failures;
 }
 
+/* A commit stamped after the captured clock is outside today's window. */
+static int rpr_case_git_future(const char *root)
+{
+    int failures = 0;
+    char repo[1024];
+    struct zcl_objectives_options o = {0};
+    (void)snprintf(repo, sizeof(repo), "%s/future", root);
+    o.now = RPR_NOW;
+    o.repo = repo;
+    TEST("objectives: a commit stamped after the captured clock is not counted today") {
+        struct zcl_objective_value v;
+        ASSERT(rpr_repo_init(repo));
+        ASSERT(rpr_commit(repo, RPR_NOW - 3600, 1));
+        ASSERT(rpr_commit(repo, RPR_NOW + 3600, 2));
+        v = zcl_objectives_measure(&o, "commits_landed_today");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, (int64_t)1);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int fox_repair_cases(void);
 int fox_repair_cases(void)
 {
@@ -415,6 +438,7 @@ int fox_repair_cases(void)
     failures += rpr_case_outcome_fallback(root);
     failures += rpr_case_module_wall(root);
     failures += rpr_case_baseline_key(root);
+    failures += rpr_case_git_future(root);
     (void)test_rm_rf_recursive(root);
     return failures;
 }

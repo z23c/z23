@@ -1301,12 +1301,12 @@ static const char *obj_git_main_ref(const char *repo)
 #define OBJ_GIT_OUT_MAX 65536u
 #define OBJ_GIT_PATHS_MAX 8u
 
-/* Commits reachable from the main ref with a committer time at or after
- * `since`, limited to `paths` when any. One %ct per commit keeps the output
- * small; the count is a bounded read, and a full buffer is a failure rather
- * than a short count. The date filter must not prune recent ancestors behind
- * an old-dated commit (Git 2.37 and later). */
-static bool obj_git_count_since(const char *repo, int64_t since,
+/* Commits reachable from the main ref with a committer time in the inclusive
+ * `since` through `until` window, limited to `paths` when any. One %ct keeps
+ * the output small; the count is a bounded read, and a full buffer is a
+ * failure rather than a short count. The date filter must not prune recent
+ * ancestors behind an old-dated commit (Git 2.37 and later). */
+static bool obj_git_count_since(const char *repo, int64_t since, int64_t until,
                                 const char *const *paths, size_t npaths,
                                 int64_t *count)
 {
@@ -1340,7 +1340,7 @@ static bool obj_git_count_since(const char *repo, int64_t since,
     for (const char *p = out; ok && *p;) {
         char *end;
         long long ct = strtoll(p, &end, 10);
-        if (end != p && ct >= since)
+        if (end != p && ct >= since && ct <= until)
             seen++;
         p = strchr(end, '\n');
         p = p ? p + 1 : end + strlen(end);
@@ -1351,12 +1351,12 @@ static bool obj_git_count_since(const char *repo, int64_t since,
 }
 
 static struct zcl_objective_value obj_git_window(
-    const struct zcl_objectives_options *options, int64_t since,
+    const struct zcl_objectives_options *options, int64_t since, int64_t until,
     const char *const *paths, size_t npaths, int64_t *count)
 {
     struct zcl_objective_value v = {0};
     const char *repo = options && options->repo ? options->repo : ".";
-    if (!obj_git_count_since(repo, since, paths, npaths, count))
+    if (!obj_git_count_since(repo, since, until, paths, npaths, count))
         obj_set_reason(&v, "git log failed in %s", repo);
     else
         v.measured = true;
@@ -1366,9 +1366,10 @@ static struct zcl_objective_value obj_git_window(
 static struct zcl_objective_value obj_commits_landed_today(
     const struct zcl_objectives_options *options)
 {
+    int64_t now = obj_now(options);
     int64_t count = 0;
     struct zcl_objective_value v = obj_git_window(
-        options, obj_utc_midnight(obj_now(options)), NULL, 0, &count);
+        options, obj_utc_midnight(now), now, NULL, 0, &count);
     v.value = count;
     return v;
 }
@@ -1386,12 +1387,13 @@ static const char *const k_generated_paths[] = {
 static struct zcl_objective_value obj_product_commit_share_7d(
     const struct zcl_objectives_options *options)
 {
-    int64_t since = obj_now(options) - (int64_t)OBJ_HISTORY_DAYS_PRODUCT * OBJ_DAY_S;
+    int64_t now = obj_now(options);
+    int64_t since = now - (int64_t)OBJ_HISTORY_DAYS_PRODUCT * OBJ_DAY_S;
     int64_t total = 0, product = 0;
-    struct zcl_objective_value v = obj_git_window(options, since, NULL, 0, &total);
+    struct zcl_objective_value v = obj_git_window(options, since, now, NULL, 0, &total);
     if (!v.measured)
         return v;
-    v = obj_git_window(options, since, k_product_paths,
+    v = obj_git_window(options, since, now, k_product_paths,
                        sizeof(k_product_paths) / sizeof(k_product_paths[0]),
                        &product);
     if (!v.measured)
@@ -1407,9 +1409,10 @@ static struct zcl_objective_value obj_product_commit_share_7d(
 static struct zcl_objective_value obj_generated_churn_10d(
     const struct zcl_objectives_options *options)
 {
+    int64_t now = obj_now(options);
     int64_t count = 0;
     struct zcl_objective_value v = obj_git_window(
-        options, obj_now(options) - (int64_t)OBJ_HISTORY_DAYS_CHURN * OBJ_DAY_S,
+        options, now - (int64_t)OBJ_HISTORY_DAYS_CHURN * OBJ_DAY_S, now,
         k_generated_paths,
         sizeof(k_generated_paths) / sizeof(k_generated_paths[0]), &count);
     v.value = count;
