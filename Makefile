@@ -9201,6 +9201,8 @@ $(P2_INVARIANT_CHECK_BIN): tools/p2_invariant_check.c vendor/include/sqlite3.h v
 # shell-side diagnostic primitive (the native `sql` command covers node.db).
 # Standalone on every host, not an argv0 link to z23: lint and the gates that
 # name build/bin/sqlq must not build the full release z23 (tools/sqlq_standalone.c).
+# The test_sqlq group is the exception: its host-needs row builds z23 itself
+# (tools/dev/test_group_host_needs.def), so the argv0 case has its prerequisite.
 SQLQ_BIN = $(BIN_DIR)/sqlq$(ZCL_HOST_EXEEXT)
 .PHONY: sqlq
 sqlq: $(SQLQ_BIN)

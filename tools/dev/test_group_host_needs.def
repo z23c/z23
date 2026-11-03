@@ -379,6 +379,9 @@ ZCL_TEST_GROUP_BUILD_NEED("test_export_snapshot", "build/bin/export_snapshot",
  * The proof's prefork step builds sqlq only when this group
  * is selected; a local run builds it via the same row. */
 ZCL_TEST_GROUP_BUILD_NEED("test_sqlq", "build/bin/sqlq", "sqlq")
+/* The argv0 case symlinks build/bin/z23 as sqlq and runs `z23 sqlq`; the
+ * group builds z23 itself. The sqlq make gate and lint stay standalone. */
+ZCL_TEST_GROUP_BUILD_NEED("test_sqlq", "build/bin/z23", "z23")
 /* tests/harness/src/test_p2_invariant_check.c execs
  * build/bin/p2_invariant_check and self-skips where it is absent. The
  * proof's prefork step builds p2_invariant_check only when this group is
