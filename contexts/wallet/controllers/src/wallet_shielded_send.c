@@ -297,21 +297,24 @@ static bool z_sendmany_shielded_from(struct wallet_rpc_context *ctx,
         memory_cleanse(&account, sizeof(account));
         if (!key) {
             json_set_str(result, "The wallet has no shielded account");
-            LOG_FAIL("wallet_shielded", "z_sendmany: no account key");
+            LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: no account key");
+            return false;
         }
     } else {
         uint8_t diversifier[11], pk_d[32];
         if (!sapling_decode_payment_address(from_addr, diversifier, pk_d)) {
             json_set_str(result, "Invalid shielded from address");
-            LOG_FAIL("wallet_shielded",
+            LOG_ERROR_IN("z_sendmany_run", "wallet_shielded",
                      "z_sendmany: cannot decode shielded from address");
+            return false;
         }
         key = sapling_keystore_find_by_owned_address(
             &ctx->wallet->sapling_keys, diversifier, pk_d);
         if (!key) {
             json_set_str(result, "Shielded from address not in wallet");
-            LOG_FAIL("wallet_shielded",
+            LOG_ERROR_IN("z_sendmany_run", "wallet_shielded",
                      "z_sendmany: shielded from addr not found in keystore");
+            return false;
         }
     }
     *key_out = key;
@@ -347,9 +350,10 @@ bool z_sendmany_admit_relay(struct wallet_rpc_context *ctx,
     if (!commit.ok) {
         json_set_str(result, commit.message);
         transaction_free(&wtx->tx);
-        LOG_FAIL("wallet_shielded", "z_sendmany: wallet commit failed "
+        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: wallet commit failed "
                                     "(code=%d): %s", commit.code,
                                     commit.message);
+        return false;
     }
 
     struct zcl_result persisted =
@@ -357,9 +361,10 @@ bool z_sendmany_admit_relay(struct wallet_rpc_context *ctx,
     if (!persisted.ok) {
         json_set_str(result, persisted.message);
         transaction_free(&wtx->tx);
-        LOG_FAIL("wallet_shielded",
+        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded",
                  "z_sendmany: pre-relay durability failed (code=%d): %s",
                  persisted.code, persisted.message);
+        return false;
     }
 
     if (wallet_ctx_db_ready(ctx))
@@ -368,7 +373,8 @@ bool z_sendmany_admit_relay(struct wallet_rpc_context *ctx,
     if (!wallet_send_relay(ctx, wtx)) {
         json_set_str(result, wallet_send_relay_failure_text());
         transaction_free(&wtx->tx);
-        LOG_FAIL("wallet_shielded", "z_sendmany: private broadcast not queued");
+        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: private broadcast not queued");
+        return false;
     }
 
     char txid[65];
@@ -429,7 +435,8 @@ static bool z_sendmany_check_args(const struct json_value *params,
 {
     if (json_size(params) < 2) {
         json_set_str(result, "Expected at least 2 parameter(s)");
-        LOG_FAIL("wallet_shielded", "z_sendmany: expected 2+ params, got %zu", json_size(params));
+        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: expected 2+ params, got %zu", json_size(params));
+        return false;
     }
 
     ENSURE_WALLET(result);
@@ -438,7 +445,8 @@ static bool z_sendmany_check_args(const struct json_value *params,
     const struct json_value *recip = json_at(params, 1);
     if (!addr || !recip || recip->type != JSON_ARR || json_size(recip) == 0) {
         json_set_str(result, "Invalid parameters");
-        LOG_FAIL("wallet_shielded", "z_sendmany: invalid from_addr or recipients array");
+        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: invalid from_addr or recipients array");
+        return false;
     }
     *from_addr = addr;
     *recipients = recip;
@@ -466,8 +474,9 @@ static bool z_sendmany_gate_spend(struct wallet_rpc_context *ctx,
         if (!lk.ok) {
             json_set_str(result, "Error: wallet is locked — run "
                                  "walletunlock before spending");
-            LOG_FAIL("wallet_shielded", "z_sendmany: refused — wallet locked "
+            LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: refused — wallet locked "
                      "(code=%d)", lk.code);
+            return false;
         }
     }
     return true;
@@ -494,11 +503,13 @@ static bool z_sendmany_add_sapling(const struct json_value *r, const char *addr,
                                         &hlen, &got);
     if (memo_st == Z_SENDMANY_MEMO_BAD_LEN) {
         json_set_str(result, "Invalid memo_hex (even-length hex, <=1024 chars)");
-        LOG_FAIL("wallet_shielded", "z_sendmany: bad memo_hex len=%zu", hlen);
+        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: bad memo_hex len=%zu", hlen);
+        return false;
     }
     if (memo_st == Z_SENDMANY_MEMO_BAD_HEX) {
         json_set_str(result, "Invalid memo_hex (non-hex characters)");
-        LOG_FAIL("wallet_shielded", "z_sendmany: memo_hex parse got=%zu want=%zu", got, hlen / 2);
+        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: memo_hex parse got=%zu want=%zu", got, hlen / 2);
+        return false;
     }
     o->num_z_out++;
     return true;
@@ -531,7 +542,8 @@ static bool z_sendmany_add_recipient(const struct json_value *r, size_t i,
 {
     if (!r || r->type != JSON_OBJ) {
         json_set_str(result, "Invalid recipient");
-        LOG_FAIL("wallet_shielded", "z_sendmany: recipient %zu is not a JSON object", i);
+        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: recipient %zu is not a JSON object", i);
+        return false;
     }
     const char *addr = json_get_str(json_get(r, "address"));
     int64_t amount = parse_amount(json_get(r, "amount"));
@@ -560,7 +572,8 @@ static bool z_sendmany_collect_recipients(const struct json_value *recipients,
     size_t num_recip = json_size(recipients);
     if (num_recip > 50) {
         json_set_str(result, "Too many recipients");
-        LOG_FAIL("wallet_shielded", "z_sendmany: too many recipients (%zu > 50)", num_recip);
+        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: too many recipients (%zu > 50)", num_recip);
+        return false;
     }
 
     /* Separate into transparent and shielded outputs */
@@ -611,10 +624,11 @@ static bool z_sendmany_check_proving(size_t num_z_out,
                  zclassic_sapling_prover_backend(),
                  zclassic_sapling_prover_status());
         json_set_str(result, err);
-        LOG_FAIL("wallet_shielded",
+        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded",
                  "z_sendmany: refusing t->z shielding: backend=%s status=%s",
                  zclassic_sapling_prover_backend(),
                  zclassic_sapling_prover_status());
+        return false;
     }
     return true;
 }
@@ -633,7 +647,8 @@ static bool z_sendmany_select(struct wallet_rpc_context *ctx,
         memcpy(from_addr_hash, from_dest->id.script.hash.data, 20);
     else {
         json_set_str(result, "Unsupported from address type");
-        LOG_FAIL("wallet_shielded", "z_sendmany: unsupported from_dest type %d", from_dest->type);
+        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: unsupported from_dest type %d", from_dest->type);
+        return false;
     }
 
     z_sendmany_select_coins(ctx, target, tip, floor, from_addr_hash,
@@ -657,8 +672,9 @@ static bool z_sendmany_begin_tx(struct wallet_tx *wtx, int height,
 
     if (!transaction_alloc(&wtx->tx, num_selected, total_t_out)) {
         json_set_str(result, "Transaction allocation failed");
-        LOG_FAIL("wallet_shielded", "z_sendmany: transaction_alloc failed for %zu inputs, %zu outputs",
+        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: transaction_alloc failed for %zu inputs, %zu outputs",
                  num_selected, total_t_out);
+        return false;
     }
     return true;
 }
@@ -671,7 +687,8 @@ static bool z_sendmany_alloc_z_outs(struct wallet_tx *wtx, size_t num_z_out,
     if (!wtx->tx.v_shielded_output) {
         transaction_free(&wtx->tx);
         json_set_str(result, "Allocation failed");
-        LOG_FAIL("wallet_shielded", "z_sendmany: calloc shielded_output failed for %zu outputs", num_z_out);
+        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: calloc shielded_output failed for %zu outputs", num_z_out);
+        return false;
     }
     wtx->tx.num_shielded_output = num_z_out;
     return true;
@@ -697,10 +714,11 @@ static bool z_sendmany_prover_init(struct wallet_tx *wtx,
                  zclassic_sapling_prover_backend(),
                  zclassic_sapling_prover_status());
         json_set_str(result, err);
-        LOG_FAIL("wallet_shielded",
+        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded",
                  "z_sendmany: sapling_proving_ctx_init failed (transparent spend path): backend=%s status=%s",
                  zclassic_sapling_prover_backend(),
                  zclassic_sapling_prover_status());
+        return false;
     }
     return true;
 }
@@ -716,7 +734,8 @@ static bool z_sendmany_prove_outs(void *proving_ctx, struct wallet_tx *wtx,
         zclassic_sapling_proving_ctx_free(proving_ctx);
         transaction_free(&wtx->tx);
         json_set_str(result, "Failed to build Sapling output");
-        LOG_FAIL("wallet_shielded", "z_sendmany: sapling_build_output failed for output %zu", *i);
+        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: sapling_build_output failed for output %zu", *i);
+        return false;
     }
     return true;
 }
@@ -738,7 +757,8 @@ static bool z_sendmany_sign_tz(struct wallet_rpc_context *ctx,
         json_set_str(result, "Cannot determine input destination");
         for (size_t j = 0; j < sel->num_selected; j++)
             db_wallet_utxo_free(&sel->db_selected[j]);
-        LOG_FAIL("wallet_shielded", "z_sendmany: script_extract_destination failed for input %zu (t->z path)", *i);
+        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: script_extract_destination failed for input %zu (t->z path)", *i);
+        return false;
     }
     if (sign_st == Z_SENDMANY_SIGN_NO_KEY) {
         zclassic_sapling_proving_ctx_free(proving_ctx);
@@ -746,7 +766,8 @@ static bool z_sendmany_sign_tz(struct wallet_rpc_context *ctx,
         json_set_str(result, "Private key not available");
         for (size_t j = 0; j < sel->num_selected; j++)
             db_wallet_utxo_free(&sel->db_selected[j]);
-        LOG_FAIL("wallet_shielded", "z_sendmany: private key not found for input %zu (t->z path)", *i);
+        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: private key not found for input %zu (t->z path)", *i);
+        return false;
     }
     if (sign_st == Z_SENDMANY_SIGN_SIGHASH) {
         zclassic_sapling_proving_ctx_free(proving_ctx);
@@ -754,7 +775,8 @@ static bool z_sendmany_sign_tz(struct wallet_rpc_context *ctx,
         json_set_str(result, "Sighash computation failed");
         for (size_t j = 0; j < sel->num_selected; j++)
             db_wallet_utxo_free(&sel->db_selected[j]);
-        LOG_FAIL("wallet_shielded", "z_sendmany: signature_hash failed for input %zu (t->z path)", *i);
+        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: signature_hash failed for input %zu (t->z path)", *i);
+        return false;
     }
     if (sign_st == Z_SENDMANY_SIGN_SIGN) {
         zclassic_sapling_proving_ctx_free(proving_ctx);
@@ -762,7 +784,8 @@ static bool z_sendmany_sign_tz(struct wallet_rpc_context *ctx,
         json_set_str(result, "Signing failed");
         for (size_t j = 0; j < sel->num_selected; j++)
             db_wallet_utxo_free(&sel->db_selected[j]);
-        LOG_FAIL("wallet_shielded", "z_sendmany: privkey_sign failed for input %zu (t->z path)", *i);
+        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: privkey_sign failed for input %zu (t->z path)", *i);
+        return false;
     }
     return true;
 }
@@ -791,7 +814,8 @@ static bool z_sendmany_bind_shielded(const struct chain_params *cp,
         zclassic_sapling_proving_ctx_free(proving_ctx);
         transaction_free(&wtx->tx);
         json_set_str(result, "Binding sighash computation failed");
-        LOG_FAIL("wallet_shielded", "z_sendmany: binding signature_hash failed (t->z path)");
+        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: binding signature_hash failed (t->z path)");
+        return false;
     }
 
     if (!zclassic_sapling_binding_sig(proving_ctx,
@@ -868,28 +892,32 @@ static bool z_sendmany_sign_transparent(struct wallet_rpc_context *ctx,
         json_set_str(result, "Cannot determine input destination");
         for (size_t j = 0; j < sel->num_selected; j++)
             db_wallet_utxo_free(&sel->db_selected[j]);
-        LOG_FAIL("wallet_shielded", "z_sendmany: script_extract_destination failed for input %zu (t->t path)", i);
+        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: script_extract_destination failed for input %zu (t->t path)", i);
+        return false;
     }
     if (sign_st == Z_SENDMANY_SIGN_NO_KEY) {
         transaction_free(&wtx->tx);
         json_set_str(result, "Private key not available");
         for (size_t j = 0; j < sel->num_selected; j++)
             db_wallet_utxo_free(&sel->db_selected[j]);
-        LOG_FAIL("wallet_shielded", "z_sendmany: private key not found for input %zu (t->t path)", i);
+        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: private key not found for input %zu (t->t path)", i);
+        return false;
     }
     if (sign_st == Z_SENDMANY_SIGN_SIGHASH) {
         transaction_free(&wtx->tx);
         json_set_str(result, "Sighash computation failed");
         for (size_t j = 0; j < sel->num_selected; j++)
             db_wallet_utxo_free(&sel->db_selected[j]);
-        LOG_FAIL("wallet_shielded", "z_sendmany: signature_hash failed for input %zu (t->t path)", i);
+        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: signature_hash failed for input %zu (t->t path)", i);
+        return false;
     }
     if (sign_st == Z_SENDMANY_SIGN_SIGN) {
         transaction_free(&wtx->tx);
         json_set_str(result, "Signing failed");
         for (size_t j = 0; j < sel->num_selected; j++)
             db_wallet_utxo_free(&sel->db_selected[j]);
-        LOG_FAIL("wallet_shielded", "z_sendmany: privkey_sign failed for input %zu (t->t path)", i);
+        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: privkey_sign failed for input %zu (t->t path)", i);
+        return false;
     }
     return true;
 }
@@ -918,8 +946,9 @@ static bool z_sendmany_finish_tx(struct wallet_rpc_context *ctx,
         if (!fr.ok) {
             transaction_free(&wtx->tx);
             json_set_str(result, "Cannot persist change key before broadcast — send aborted");
-            LOG_FAIL("wallet", "z_sendmany: pre-broadcast key flush failed "
+            LOG_ERROR_IN("z_sendmany_run", "wallet", "z_sendmany: pre-broadcast key flush failed "
                                 "(code=%d): %s", fr.code, fr.message);
+            return false;
         }
     }
 
@@ -1069,18 +1098,22 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
         memset(&from_dest, 0, sizeof(from_dest));
     } else if (!wallet_decode_address(from_addr, &from_dest)) {
         json_set_str(result, "Invalid from address");
-        LOG_FAIL("wallet_shielded", "z_sendmany: decode_destination failed for from=%s", from_addr);
+        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: decode_destination failed for from=%s", from_addr);
+        return false;
     }
 
     struct z_sendmany_outs outs;
     struct z_sendmany_fail f = { .why = Z_SENDMANY_WHY_NONE };
     if (!z_sendmany_collect_recipients(recipients, &outs, result, &f)) {
         if (f.why == Z_SENDMANY_WHY_BAD_AMOUNT)
-            LOG_FAIL("wallet_shielded", "z_sendmany: recipient %zu has invalid addr or amount=%lld", f.index, (long long)f.amount);
+            LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: recipient %zu has invalid addr or amount=%lld", f.index, (long long)f.amount);
+            return false;
         if (f.why == Z_SENDMANY_WHY_BAD_SAPLING)
-            LOG_FAIL("wallet_shielded", "z_sendmany: cannot decode sapling recipient addr=%s", f.addr);
+            LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: cannot decode sapling recipient addr=%s", f.addr);
+            return false;
         if (f.why == Z_SENDMANY_WHY_BAD_TRANSPARENT)
-            LOG_FAIL("wallet_shielded", "z_sendmany: cannot decode transparent recipient addr=%s", f.addr);
+            LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: cannot decode transparent recipient addr=%s", f.addr);
+            return false;
         return false;
     }
 
@@ -1092,7 +1125,8 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
     if (!z_sendmany_spend_transparent(ctx, cp, &from_dest, &outs, prepared,
                                       result, spend_floor, &f)) {
         if (f.why == Z_SENDMANY_WHY_BINDING)
-            LOG_FAIL("wallet_shielded", "z_sendmany: binding_sig failed, value_balance=%lld", (long long)f.value_balance);
+            LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: binding_sig failed, value_balance=%lld", (long long)f.value_balance);
+            return false;
         return false;
     }
     return true;
@@ -1131,7 +1165,8 @@ bool z_sendmany_prepare(const struct json_value *params,
                         struct json_value *result)
 {
     if (!prepared || !result)
-        LOG_FAIL("wallet_shielded", "z_sendmany_prepare: NULL output");
+        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany_prepare: NULL output");
+        return false;
     memset(prepared, 0, sizeof(*prepared));
     return z_sendmany_run(params, false, prepared, result, false);
 }
