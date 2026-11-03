@@ -120,6 +120,37 @@ _test_next:;
     return failures;
 }
 
+/* ── train identities kept whole ─────────────────────────────────────── */
+
+/* Two trains share a 300-byte note prefix. Under a 256-byte identity they
+ * merge, and the newest train's latency starts at the other train's row. */
+static int rpr_case_train_identity(const char *root)
+{
+    int failures = 0;
+    char path[1024], prefix[304], text[1400];
+    struct zcl_objectives_options o = {0};
+    (void)snprintf(path, sizeof(path), "%s/train_identity.jsonl", root);
+    memset(prefix, 'p', 300);
+    prefix[300] = '\0';
+    o.now = RPR_NOW;
+    o.outcomes = path;
+    TEST("objectives: train identities longer than 255 bytes do not merge") {
+        struct zcl_objective_value v;
+        (void)snprintf(text, sizeof(text),
+            "{\"state\":\"failed\",\"ts\":\"2026-10-22T08:00:00Z\","
+            "\"note\":\"%sA\"}\n"
+            "{\"state\":\"landed\",\"ts\":\"2026-10-22T09:00:00Z\","
+            "\"landed_at\":1792663200,\"note\":\"%sB\"}\n", prefix, prefix);
+        ASSERT(rpr_write(path, text));
+        v = zcl_objectives_measure(&o, "landing_latency_s");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, (int64_t)3600);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int fox_repair_cases(void);
 int fox_repair_cases(void)
 {
@@ -128,6 +159,7 @@ int fox_repair_cases(void)
     test_make_tmpdir(root, sizeof(root), "fleet_objectives", "repair");
     failures += rpr_case_window_future(root);
     failures += rpr_case_git_skew(root);
+    failures += rpr_case_train_identity(root);
     (void)test_rm_rf_recursive(root);
     return failures;
 }

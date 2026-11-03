@@ -148,7 +148,8 @@ static bool obj_default_attempts_dir(char *out, size_t cap)
  * back to `worktree`. landing_latency_s and landing_attempts_per_train are
  * both properties of the newest train that finished landing, not of its
  * final row alone. */
-#define OBJ_NOTE_MAX 256u
+/* A decoded identity cannot exceed the complete ledger record holding it. */
+#define OBJ_NOTE_MAX OBJ_LINE_MAX
 
 static void obj_row_group_key(const struct json_value *row, char *out,
                               size_t cap)
