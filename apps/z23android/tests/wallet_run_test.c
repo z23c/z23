@@ -177,15 +177,17 @@ static void limited_plan(const char *root, struct call *c, char *log, size_t cap
     assert(saved >= 0 && fd >= 0 && dup2(fd, STDERR_FILENO) == STDERR_FILENO);
     pthread_t thread;
     assert(pthread_create(&thread, NULL, call_main, c) == 0);
-    assert(ended_within(c, 10) && pthread_join(thread, NULL) == 0);
+    bool ended = ended_within(c, 10);
     fflush(stderr);
+    /* Standard error is back before the check, so a call with no bound fails with its assertion in view. */
     assert(dup2(saved, STDERR_FILENO) == STDERR_FILENO && close(saved) == 0);
+    assert(ended && pthread_join(thread, NULL) == 0);
     ssize_t n = pread(fd, log, cap - 1, 0);
     assert(n >= 0 && close(fd) == 0 && unlink(path) == 0);
     log[n] = 0;
 }
 /* A child stuck between fork and exec, and one that runs and never answers, are each stopped at the limit: the call fails, the
- * child is killed and reaped, and the log names the command, the pid and whether it had reached exec. */
+ * child is killed and reaped, and the log names the command and the pid. */
 static void stopped_children_run(struct zapp_runtime *r, const char *root)
 {
     char log[1024], want[160];
@@ -194,14 +196,14 @@ static void stopped_children_run(struct zapp_runtime *r, const char *root)
     limited_plan(root, &stuck, log, sizeof(log));
     pid_t child = atomic_load(&spawned);
     assert(!stuck.ok && strstr(stuck.out, "The command timed out.") && reaped(child));
-    snprintf(want, sizeof(want), "core wallet shielded: no answer within 300 ms, stopped pid %d; it was still between fork and exec", (int)child);
+    snprintf(want, sizeof(want), "z23: core wallet shielded: no answer within 300 ms, stopped pid %d\n", (int)child);
     assert(strstr(log, want));
     atomic_store(&silent_next, true);
     limited_plan(root, &silent, log, sizeof(log));
     child = atomic_load(&spawned);
     assert(!silent.ok && strstr(silent.out, "The command timed out.") && reaped(child));
-    snprintf(want, sizeof(want), "no answer within 300 ms, stopped pid %d\n", (int)child);
-    assert(strstr(log, want) && !strstr(log, "between fork and exec"));
+    snprintf(want, sizeof(want), "z23: core wallet shielded: no answer within 300 ms, stopped pid %d\n", (int)child);
+    assert(strstr(log, want));
     char got[512];
     assert(zapp_wallet_send_run(r, "plan", "{}", 60000, got, sizeof(got)) && strstr(got, "core wallet shielded send"));
 }

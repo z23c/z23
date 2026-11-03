@@ -704,9 +704,8 @@ static void create_failure_decline_tests(void)
     assert(w.failure == WSU_NO_SCREEN_LOCK);
     wsu_destroy(&w);
 }
-/* A phone that keeps keys only in software: no wallet and no node call, one plain reason and no Try again, from Create and from
- * Restore, whose typed words are wiped. The other device key refusals keep Try again. */
-static void no_hardware_key_tests(void)
+/* A phone that keeps keys only in software, from Create: no wallet and no node call, one plain reason and no Try again. */
+static void no_hardware_create_test(void)
 {
     struct fake f;
     struct wsu w;
@@ -720,6 +719,13 @@ static void no_hardware_key_tests(void)
     const char *text = wsu_failure_text(v.failure);
     assert(strstr(text, "cannot protect a wallet key in hardware") && strstr(text, "will not make a wallet here") && !strstr(text, "Try again"));
     wsu_destroy(&w);
+}
+/* The same refusal from Restore leaves the form, whose typed words are wiped, for the failure page with no Try again. */
+static void no_hardware_restore_test(void)
+{
+    struct fake f;
+    struct wsu w;
+    struct wsu_view v;
     fresh(&f, &w, true);
     f.wrap_status = ZAPP_DEVKEY_NOT_HARDWARE;
     wsu_open_restore(&w);
@@ -728,6 +734,12 @@ static void no_hardware_key_tests(void)
     wsu_view_read(&w, &v);
     assert(v.step == WSU_FAILED && v.failure == WSU_NO_HARDWARE_KEY && !v.form[0] && f.script.calls == 0 && f.stops == 0);
     wsu_destroy(&w);
+}
+/* The other device key refusals keep Try again. */
+static void other_key_refusals_retry_test(void)
+{
+    struct fake f;
+    struct wsu w;
     fresh(&f, &w, true);
     f.wrap_status = ZAPP_DEVKEY_NOT_PER_USE;
     create_all(&w);
@@ -2620,7 +2632,9 @@ int main(int argc, char **argv)
     create_tests();
     created_tests();
     create_failure_decline_tests();
-    no_hardware_key_tests();
+    no_hardware_create_test();
+    no_hardware_restore_test();
+    other_key_refusals_retry_test();
     create_failure_refused_tests();
     create_failure_unknown_tests();
     create_failure_present_after_refusal_tests();

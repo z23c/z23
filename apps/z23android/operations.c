@@ -430,33 +430,17 @@ static void pump_input(struct pump *p)
     }
 }
 
-static ssize_t read_head(const char *file, char *out, size_t cap)
-{
-    int fd = open(file, O_RDONLY | O_CLOEXEC);
-    ssize_t n = fd >= 0 ? read(fd, out, cap) : -1;
-    if (fd >= 0) close(fd);
-    return n;
-}
-/* Whether a child still has the app's own command line: it was forked and has not reached exec, which gives it the command's. */
-static bool before_exec(pid_t pid)
-{
-    char file[32], self[512], child[512];
-    snprintf(file, sizeof(file), "/proc/%d/cmdline", (int)pid);
-    ssize_t a = read_head("/proc/self/cmdline", self, sizeof(self)), b = read_head(file, child, sizeof(child));
-    return a > 0 && a == b && !memcmp(self, child, (size_t)a);
-}
 /* Logs a command stopped at its limit by its first three words, which are fixed command words, never an argument the owner
  * gave. */
-static void command_note(const struct pump *p, bool forked_only)
+static void command_note(const struct pump *p)
 {
     char words[64] = "";
     for (size_t i = 0, at = 0; i < 3 && p->args[i] && at < sizeof(words); ++i)
         at += (size_t)snprintf(words + at, sizeof(words) - at, "%s%s", i ? " " : "", p->args[i]);
-    const char *how = forked_only ? "; it was still between fork and exec" : "";
 #ifdef __ANDROID__
-    __android_log_print(ANDROID_LOG_ERROR, "z23", "%s: no answer within %u ms, stopped pid %d%s", words, p->timeout_ms, (int)p->pid, how);
+    __android_log_print(ANDROID_LOG_ERROR, "z23", "%s: no answer within %u ms, stopped pid %d", words, p->timeout_ms, (int)p->pid);
 #else
-    fprintf(stderr, "z23: %s: no answer within %u ms, stopped pid %d%s\n", words, p->timeout_ms, (int)p->pid, how);
+    fprintf(stderr, "z23: %s: no answer within %u ms, stopped pid %d\n", words, p->timeout_ms, (int)p->pid);
 #endif
 }
 /* Stops a command that did not answer in time: the child itself first, because one stuck between fork and exec has not made
@@ -464,11 +448,10 @@ static void command_note(const struct pump *p, bool forked_only)
  * can name another process, and SIGKILL ends it even with every other signal blocked. */
 static void pump_stop(struct pump *p, int *status)
 {
-    bool forked_only = before_exec(p->pid);
     (void)kill(p->pid, SIGKILL);
     (void)kill(-p->pid, SIGKILL);
     while (waitpid(p->pid, status, 0) < 0 && errno == EINTR) {}
-    command_note(p, forked_only);
+    command_note(p);
 }
 static void pump_finish(struct pump *p, char *out, size_t cap, bool ended, int *status)
 {
