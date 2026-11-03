@@ -1804,7 +1804,9 @@ run_mapped_focused_tests() {
         log "focused test scope=mapped_groups count=0 reason=no-mapped-group-in-changed-set"
         return
     fi
-    exact_groups="$(tools/dev/test-group-list.sh --resolve-proof $TEST_GROUPS)" ||
+    make_fast build/bin/test-group-list >/dev/null ||
+        fail "cannot build the test-group list tool"
+    exact_groups="$(build/bin/test-group-list --resolve-proof $TEST_GROUPS)" ||
         fail "focused proof plan contains a non-exact registered group: $TEST_GROUPS"
     count="$(printf '%s\n' "$exact_groups" | sed '/^$/d' | wc -l | tr -d ' ')"
     exact_csv="$(printf '%s\n' "$exact_groups" | sed '/^$/d' | paste -sd, -)"

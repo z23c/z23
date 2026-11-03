@@ -61,7 +61,7 @@ echo "commits_ahead_of_main=$(git rev-list --count main..HEAD 2>/dev/null || ech
 # ── registered test groups ─────────────────────────────────────────────────
 # From the X-macro registry, not from a run: a baseline must be derivable
 # without building anything.
-if reg="$("$SCRIPT_DIR/test-group-list.sh" --count 2>/dev/null)"; then
+if reg="$("$REPO/build/bin/test-group-list" --count 2>/dev/null)"; then
     echo "registered_test_groups=$reg"
 else
     echo "registered_test_groups=UNKNOWN"

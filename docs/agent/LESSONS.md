@@ -161,7 +161,7 @@ Rebasing a train that took `--ours` for
 increment. `check-doc-counts` then fails with
 `<key> MISMATCH — code=N doc-says=N-1`. Run `make fix-doc-counts`, never
 hand-edit the block and never change the code. The block no longer declares
-`test_groups` (every new group bumped it); `tools/dev/test-group-list.sh
+`test_groups` (every new group bumped it); `build/bin/test-group-list
 --count` prints it. The land queue does not resolve this conflict for you: it
 refuses the row naming `make fix-doc-counts`.
 

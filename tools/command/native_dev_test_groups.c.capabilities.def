@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for the dev.test-groups leaf. */
+ZCL_MODULE_CAPABILITY("tools/command/native_dev_test_groups.c", CAP_FS_READ, "reads the test-group catalog, the proof-family and umbrella declarations, the runner source and the run artifact under the checkout; the impact-rules check runs git ls-files through the spawn seam with no shell")

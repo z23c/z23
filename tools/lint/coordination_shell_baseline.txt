@@ -114,8 +114,6 @@ tools/dev/sovereign-source-identity.sh
 tools/dev/sovereign_source_network_acceptance.sh
 tools/dev/sovereign_source_network_hook.sh
 tools/dev/store_onion_acceptance.sh
-tools/dev/test-group-list.sh
-tools/dev/test-registry-report.sh
 tools/dev/transaction-lab.sh
 tools/dev/transaction-micro-lab-wallets.sh
 tools/dev/transaction-micro-lab.sh

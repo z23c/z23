@@ -32,6 +32,9 @@
 #endif
 #include <unistd.h>
 
+/* The list tool the Makefile builds beside the test binaries. */
+#define TGS_LIST "build/bin/test-group-list"
+
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
@@ -39,7 +42,7 @@
 #if defined(_WIN32)
 /* The UCRT _pclose() returns the child's raw exit code, not a wait(2)
  * status word; map the two macros onto that honestly. popen() routes
- * through cmd.exe, which cannot run the POSIX test-group-list.sh driver,
+ * through cmd.exe, which cannot run the POSIX test-group-list driver,
  * so commands are re-dispatched through the MSYS2 sh on the lane's PATH.
  * The command strings in this file carry no double quotes. */
 #define WIFEXITED(s) ((s) >= 0)
@@ -597,7 +600,7 @@ static int test_exact_set_diagnostics(void)
     TEST("exact set: unknown token explains separator and closest names") {
         char out[4096];
         int rc = capture_command(
-            "tools/dev/test-group-list.sh --resolve-exact-set zvec 2>&1",
+            "" TGS_LIST " --resolve-exact-set zvec 2>&1",
             out, sizeof(out));
         ASSERT_EQ(rc, 1);
         ASSERT(strstr(out, "unknown exact group 'zvec'") != NULL);
@@ -605,7 +608,7 @@ static int test_exact_set_diagnostics(void)
         ASSERT(strstr(out, "closest registered names:") != NULL);
         ASSERT(exact_suggestions_valid(out));
         rc = capture_command(
-            "tools/dev/test-group-list.sh --resolve-exact-set test_dev_landd 2>&1",
+            "" TGS_LIST " --resolve-exact-set test_dev_landd 2>&1",
             out, sizeof(out));
         ASSERT_EQ(rc, 1);
         ASSERT(strstr(out, "closest registered names:\n  test_dev_land\n") != NULL);
@@ -621,19 +624,19 @@ static int test_exact_set_mixed(void)
     TEST("exact set: every unknown token is named without admitting prefix") {
         char out[4096];
         int rc = capture_command(
-            "tools/dev/test-group-list.sh --resolve-exact-set api,zvec,api_missing 2>&1",
+            "" TGS_LIST " --resolve-exact-set api,zvec,api_missing 2>&1",
             out, sizeof(out));
         ASSERT_EQ(rc, 1);
         ASSERT(strstr(out, "unknown exact group 'zvec'") != NULL);
         ASSERT(strstr(out, "unknown exact group 'api_missing'") != NULL);
         ASSERT(strstr(out, "unknown exact group 'api'") == NULL);
         rc = capture_command(
-            "tools/dev/test-group-list.sh --resolve-exact-set api,zvec,api_missing 2>/dev/null",
+            "" TGS_LIST " --resolve-exact-set api,zvec,api_missing 2>/dev/null",
             out, sizeof(out));
         ASSERT_EQ(rc, 1);
         ASSERT(out[0] == '\0');
         rc = capture_command(
-            "tools/dev/test-group-list.sh --resolve-exact-set api,zvec,,api_missing 2>&1",
+            "" TGS_LIST " --resolve-exact-set api,zvec,,api_missing 2>&1",
             out, sizeof(out));
         ASSERT_EQ(rc, 1);
         ASSERT(strstr(out, "empty exact group token") != NULL);
@@ -650,13 +653,13 @@ static int test_exact_set_empty(void)
     TEST("exact set: empty selection explains accepted syntax") {
         char out[4096];
         int rc = capture_command(
-            "tools/dev/test-group-list.sh --resolve-exact-set '' 2>&1",
+            "" TGS_LIST " --resolve-exact-set '' 2>&1",
             out, sizeof(out));
         ASSERT_EQ(rc, 2);
         ASSERT(strstr(out, "empty") != NULL);
         ASSERT(strstr(out, "comma-separated") != NULL);
         rc = capture_command(
-            "tools/dev/test-group-list.sh --resolve-exact-set api,,impact_composition 2>&1",
+            "" TGS_LIST " --resolve-exact-set api,,impact_composition 2>&1",
             out, sizeof(out));
         ASSERT_EQ(rc, 1);
         ASSERT(strstr(out, "empty exact group token") != NULL);
@@ -671,7 +674,7 @@ static int test_exact_set_valid(void)
     TEST("exact set: comma sets remain ordered and deduplicated") {
         char out[4096];
         int rc = capture_command(
-            "tools/dev/test-group-list.sh --resolve-exact-set api,impact_composition,api 2>&1",
+            "" TGS_LIST " --resolve-exact-set api,impact_composition,api 2>&1",
             out, sizeof(out));
         ASSERT_EQ(rc, 0);
         ASSERT(strcmp(out, "test_api,test_impact_composition\n") == 0);
@@ -686,7 +689,7 @@ static int test_exact_set_space_separator(void)
     TEST("exact set: spaces remain invalid and comma multi-set is explained") {
         char out[4096];
         int rc = capture_command(
-            "tools/dev/test-group-list.sh --resolve-exact-set 'dev_land impact_composition' 2>&1",
+            "" TGS_LIST " --resolve-exact-set 'dev_land impact_composition' 2>&1",
             out, sizeof(out));
         ASSERT_EQ(rc, 1);
         ASSERT(strstr(out, "unknown exact group 'dev_land impact_composition'") != NULL);
@@ -709,19 +712,19 @@ static int test_registry_exact_resolution(void)
         ASSERT(strlen(bounded) == sizeof(bounded) - 1);
 
         rc = capture_command(
-            "tools/dev/test-group-list.sh --resolve-exact api 2>&1", out,
+            "" TGS_LIST " --resolve-exact api 2>&1", out,
             sizeof(out));
         ASSERT(rc == 0);
         ASSERT(strcmp(out, "test_api\n") == 0);
 
         rc = capture_command(
-            "tools/dev/test-group-list.sh --resolve-exact test_api 2>&1", out,
+            "" TGS_LIST " --resolve-exact test_api 2>&1", out,
             sizeof(out));
         ASSERT(rc == 0);
         ASSERT(strcmp(out, "test_api\n") == 0);
 
         rc = capture_command(
-            "tools/dev/test-group-list.sh --resolve-exact api_missing 2>&1",
+            "" TGS_LIST " --resolve-exact api_missing 2>&1",
             out, sizeof(out));
         ASSERT(rc == 1);
         ASSERT(out[0] == '\0');
@@ -730,12 +733,12 @@ static int test_registry_exact_resolution(void)
          * of a registered name (test_api) is not itself registered, so a
          * lookup that degraded into substring or prefix matching fails here. */
         rc = capture_command(
-            "tools/dev/test-group-list.sh --resolve-exact test_ap 2>&1", out,
+            "" TGS_LIST " --resolve-exact test_ap 2>&1", out,
             sizeof(out));
         ASSERT(rc == 1);
         ASSERT(out[0] == '\0');
         rc = capture_command(
-            "tools/dev/test-group-list.sh --resolve-exact est_api 2>&1", out,
+            "" TGS_LIST " --resolve-exact est_api 2>&1", out,
             sizeof(out));
         ASSERT(rc == 1);
         ASSERT(out[0] == '\0');
@@ -743,7 +746,7 @@ static int test_registry_exact_resolution(void)
         /* Two plan tokens that select the same group print it once, in
          * first-selected order. */
         rc = capture_command(
-            "tools/dev/test-group-list.sh --resolve-proof test_api api 2>&1",
+            "" TGS_LIST " --resolve-proof test_api api 2>&1",
             out, sizeof(out));
         ASSERT(rc == 0);
         ASSERT(strncmp(out, "test_api\n", strlen("test_api\n")) == 0);
@@ -751,7 +754,7 @@ static int test_registry_exact_resolution(void)
         ASSERT(strstr(out, "test_native_api_contract\n") != NULL);
 
         rc = capture_command(
-            "tools/dev/test-group-list.sh --check-impact-rules 2>&1", out,
+            "" TGS_LIST " --check-impact-rules 2>&1", out,
             sizeof(out));
         ASSERT(rc == 0);
         ASSERT(out[0] == '\0');
@@ -771,7 +774,7 @@ static int test_registry_exact_resolution(void)
         char fixture_command[512];
         int command_n = snprintf(
             fixture_command, sizeof(fixture_command),
-            "tools/dev/test-group-list.sh --check-impact-rules %s 2>&1",
+            "" TGS_LIST " --check-impact-rules %s 2>&1",
             fixture_path);
         ASSERT(command_n > 0 && (size_t)command_n < sizeof(fixture_command));
         rc = capture_command(fixture_command, out, sizeof(out));
@@ -783,7 +786,7 @@ static int test_registry_exact_resolution(void)
                NULL);
 
         rc = capture_command(
-            "tools/dev/test-group-list.sh --resolve-proof make_lint_gates "
+            "" TGS_LIST " --resolve-proof make_lint_gates "
             "api 2>&1", out, sizeof(out));
         ASSERT(rc == 0);
         ASSERT(strstr(out, "test_make_lint_gates\n") != NULL);
@@ -794,7 +797,7 @@ static int test_registry_exact_resolution(void)
         ASSERT(strstr(out, "test_native_api_contract\n") != NULL);
 
         rc = capture_command(
-            "tools/dev/test-group-list.sh --resolve-proof test_api 2>&1",
+            "" TGS_LIST " --resolve-proof test_api 2>&1",
             out, sizeof(out));
         ASSERT(rc == 0);
         ASSERT(strcmp(out, "test_api\n") == 0);
@@ -802,7 +805,7 @@ static int test_registry_exact_resolution(void)
         /* A legacy prefixless ID may itself begin with "test_". It is exact
          * only when that literal full ID exists in the registry. */
         rc = capture_command(
-            "tools/dev/test-group-list.sh --resolve-proof "
+            "" TGS_LIST " --resolve-proof "
             "test_group_selector 2>&1", out, sizeof(out));
         ASSERT(rc == 0);
         ASSERT(strcmp(out, "test_test_group_selector\n") == 0);
@@ -810,7 +813,7 @@ static int test_registry_exact_resolution(void)
         /* Coverage migration is lossless: a legacy family selector becomes
          * exact full IDs, but only after its exact primary is admitted. */
         rc = capture_command(
-            "tools/dev/test-group-list.sh --resolve-proof stage_repair 2>&1",
+            "" TGS_LIST " --resolve-proof stage_repair 2>&1",
             out, sizeof(out));
         ASSERT(rc == 0);
         ASSERT(strstr(out, "test_stage_repair\n") != NULL);
@@ -819,7 +822,7 @@ static int test_registry_exact_resolution(void)
         ASSERT(strstr(out, "test_stage_repair_tipfin_backfill\n") != NULL);
 
         rc = capture_command(
-            "tools/dev/test-group-list.sh --resolve-proof oracle_policy "
+            "" TGS_LIST " --resolve-proof oracle_policy "
             "2>&1", out, sizeof(out));
         ASSERT(rc == 0);
         ASSERT(strstr(out, "test_oracle_policy\n") != NULL);
@@ -3407,7 +3410,7 @@ static bool tgs_proof_resolver_selection(const char *arguments,
     if (truncated || want == SIZE_MAX || want == 0)
         return false;
     int n = snprintf(command, sizeof(command),
-        "tools/dev/test-group-list.sh --resolve-proof %s 2>/dev/null",
+        "" TGS_LIST " --resolve-proof %s 2>/dev/null",
         arguments);
     if (n < 0 || (size_t)n >= sizeof(command) ||
         capture_command(command, resolved, sizeof(resolved)) != 0)
@@ -3447,14 +3450,14 @@ static int test_proof_resolver_umbrellas(void)
             "test_dev_land_shard_03 test_dev_land_shard_04", complete, 5));
         char out[4096];
         ASSERT_EQ(capture_command(
-            "tools/dev/test-group-list.sh --resolve-proof test_api dev_land "
+            "" TGS_LIST " --resolve-proof test_api dev_land "
             "test_api 2>/dev/null", out, sizeof(out)), 0);
         ASSERT_STR_EQ(out, "test_api\ntest_dev_land_shard_01\n"
             "test_dev_land_shard_02\ntest_dev_land_shard_03\n"
             "test_dev_land_shard_04\ntest_dev_land_window\n"
             "test_dev_land_remote\n");
         ASSERT_EQ(capture_command(
-            "tools/dev/test-group-list.sh --resolve-proof dev_land "
+            "" TGS_LIST " --resolve-proof dev_land "
             "test_dev_land_missing 2>/dev/null", out, sizeof(out)), 1);
         ASSERT_STR_EQ(out, "");
         PASS();
@@ -3489,7 +3492,7 @@ static int test_proof_resolver_umbrella_sources(void)
             "ZCL_TEST_UMBRELLAS_SRC='%s'", registry, families, umbrellas);
         ASSERT(n > 0 && (size_t)n < sizeof(env));
         n = snprintf(command, sizeof(command),
-            "%s tools/dev/test-group-list.sh --resolve-proof dev_land "
+            "%s " TGS_LIST " --resolve-proof dev_land "
             "2>/dev/null", env);
         ASSERT(n > 0 && (size_t)n < sizeof(command));
         ASSERT_EQ(capture_command(command, out, sizeof(out)), 0);
@@ -3512,7 +3515,7 @@ static int test_proof_resolver_umbrella_sources(void)
             ASSERT(n > 0 && (size_t)n < sizeof(declaration));
             ASSERT(tgs_write_file(umbrellas, declaration));
             n = snprintf(partial, sizeof(partial),
-                "%s tools/dev/test-group-list.sh --resolve-proof "
+                "%s " TGS_LIST " --resolve-proof "
                 "test_dev_land test_dev_land_shard_01 2>/dev/null", env);
             ASSERT(n > 0 && (size_t)n < sizeof(partial));
             ASSERT_EQ(capture_command(partial, out, sizeof(out)), 0);
@@ -3565,13 +3568,13 @@ static int test_proof_resolver_umbrella_sources(void)
         ASSERT_EQ(capture_command(command, out, sizeof(out)), 1);
         ASSERT_STR_EQ(out, "");
         n = snprintf(command, sizeof(command),
-            "%s tools/dev/test-group-list.sh --resolve-exact-set dev_land "
+            "%s " TGS_LIST " --resolve-exact-set dev_land "
             "2>/dev/null", env);
         ASSERT(n > 0 && (size_t)n < sizeof(command));
         ASSERT_EQ(capture_command(command, out, sizeof(out)), 0);
         ASSERT_STR_EQ(out, "test_dev_land\n");
         n = snprintf(command, sizeof(command),
-            "%s tools/dev/test-group-list.sh --resolve-exact dev_land "
+            "%s " TGS_LIST " --resolve-exact dev_land "
             "2>/dev/null", env);
         ASSERT(n > 0 && (size_t)n < sizeof(command));
         ASSERT_EQ(capture_command(command, out, sizeof(out)), 0);

@@ -288,7 +288,7 @@ page changing with it.
 <!--   app_shape_folders    = directories directly under app/                        -->
 <!-- Fix a mismatch with `make fix-doc-counts`, never by hand.                      -->
 <!-- The test-group count is not declared here (every new group bumped it); it is  -->
-<!-- printed by `tools/dev/test-group-list.sh --count`, and `make t-list` lists them. -->
+<!-- printed by `build/bin/test-group-list --count`, and `make t-list` lists them.  -->
 
 port_interfaces: 13
 persistence_adapters: 14

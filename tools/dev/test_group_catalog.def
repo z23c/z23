@@ -1200,6 +1200,7 @@ ZCL_TEST_GROUP(dev_proof_coverage)
  * See tools/dev/dev_proof_observation_index.c. */
 ZCL_TEST_GROUP(dev_proof_observation_index)
 ZCL_TEST_GROUP(test_group_selector)
+ZCL_TEST_GROUP(test_group_list)
 ZCL_TEST_GROUP(metaverse_catalog)
 ZCL_TEST_GROUP(node_character)
 /* A node's character with a birthday, in the fixed 128-byte form it travels

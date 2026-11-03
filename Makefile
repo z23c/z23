@@ -823,6 +823,10 @@ FILE_SIZE_POLICY_BIN = $(BIN_DIR)/file_size_policy
 # audit runs on the build machine even under a cross VENDOR_TARGET, so it is
 # compiled with HOST_CC rather than the target CC.
 DEP_AUDIT_BIN = $(BIN_DIR)/dep_audit
+# Test-group list and registry report (tools/dev/test_group_list*.c). Declared
+# here because Make runs it at parse time (ONLY= validation, t-list) and the
+# test binaries take it as an order-only prerequisite. Host tool.
+TEST_GROUP_LIST_BIN = $(BIN_DIR)/test-group-list$(ZCL_HOST_EXEEXT)
 TOOLGEN_BIN =$(BIN_DIR)/z23-toolgen$(ZCL_HOST_EXEEXT)
 # Tor archive provenance verifier — binds the four bundled Tor archives to the
 # vendor/tor commit, compiler identity, and configure flags that produced
@@ -1076,6 +1080,7 @@ DEV_STANDALONE_SRCS = tools/dev/hotswap_verify_so.c \
 	tools/dev/fleet_observe_main.c \
 	tools/dev/wiki_runtime_main.c \
 	tools/dev/test_group_weights_main.c \
+	tools/dev/test_group_list_main.c \
 	tools/dev/sem_replay.c tools/dev/sem_replay_util.c \
 	tools/dev/sem_replay_build.c tools/dev/sem_replay_change.c \
 	tools/dev/sem_replay_plan.c tools/dev/sem_replay_step.c \
@@ -4173,7 +4178,7 @@ $(TEST_PARALLEL_BIN): $(TEST_PARALLEL_REL_CANDIDATE) FORCE
 	  "$(TEST_REL_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_REL_PROFILE)" \
 	  "$(TEST_REL_EPOCH_COMPILE_FLAGS)" "$(TEST_REL_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
 
-$(TEST_PARALLEL_REL_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_REL_OBJS) $(TEST_PARALLEL_REL_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/z23-acme$(ZCL_HOST_EXEEXT)
+$(TEST_PARALLEL_REL_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_REL_OBJS) $(TEST_PARALLEL_REL_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(TEST_GROUP_LIST_BIN) $(BIN_DIR)/z23-acme$(ZCL_HOST_EXEEXT)
 	@mkdir -p $(dir $@)
 	@set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
@@ -4195,7 +4200,7 @@ $(TEST_PARALLEL_FAST_BIN): $(TEST_PARALLEL_FAST_CANDIDATE) FORCE
 	  "$(TEST_FAST_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_FAST_PROFILE)" \
 	  "$(TEST_FAST_EPOCH_COMPILE_FLAGS)" "$(TEST_FAST_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
 
-$(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_FAST_OBJS) $(TEST_PARALLEL_FAST_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/z23-acme$(ZCL_HOST_EXEEXT)
+$(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_FAST_OBJS) $(TEST_PARALLEL_FAST_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(TEST_GROUP_LIST_BIN) $(BIN_DIR)/z23-acme$(ZCL_HOST_EXEEXT)
 	@mkdir -p $(dir $@)
 	@set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
@@ -4436,7 +4441,7 @@ endif
 # fast runner's tool prerequisites, so a group that execs one of these tools
 # fails under t-asan/t-tsan only for its own reasons (11-02 ASan sweep:
 # binary_ab_fallback's launcher cases exec build/bin/zcl-nodectl, never built).
-$(TEST_SANITIZER_CANDIDATES): | $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/z23-acme$(ZCL_HOST_EXEEXT)
+$(TEST_SANITIZER_CANDIDATES): | $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(TEST_GROUP_LIST_BIN) $(BIN_DIR)/z23-acme$(ZCL_HOST_EXEEXT)
 
 # Expanding the complete object list inside a recipe makes the recipe itself
 # one oversized `/bin/sh -c` argument on Linux.  GNU Make writes the exact,
@@ -4711,7 +4716,7 @@ prove-cold-join: $(TEST_PARALLEL_REL_CANDIDATE)
 #
 # The validation therefore runs at Makefile PARSE time — before make considers
 # a single prerequisite — and resolves ONLY= against the registered group list
-# using the runner's own substring rule (tools/dev/test-group-list.sh, which
+# using the runner's own substring rule (build/bin/test-group-list, which
 # reads the X-macro registry directly and needs no build).
 #
 # That resolution is also what makes the recipes' unquoted `--only=$(ONLY)`
@@ -4720,10 +4725,15 @@ prove-cold-join: $(TEST_PARALLEL_REL_CANDIDATE)
 # every registered name is [A-Za-z_0-9] only. So by the time a recipe runs,
 # ONLY cannot contain a redirection, a quote, a space, or any other shell
 # metacharacter. `<substring>` never reaches sh at all.
-T_LIST_TOOL := tools/dev/test-group-list.sh
+T_LIST_TOOL := $(TEST_GROUP_LIST_BIN)
 ONLY_REQUIRED_GOALS := t t-fast t-tsan t-hotswap
 ONLY_SELECTOR_GOALS := $(ONLY_REQUIRED_GOALS) t-asan
 ONLY_ACTIVE_GOALS := $(filter $(ONLY_SELECTOR_GOALS),$(MAKECMDGOALS))
+# The list tool is a small host binary, so a parse-time use builds it first
+# (its own rule, below) in a child make that shares no flags with this one.
+ifneq ($(strip $(ONLY_ACTIVE_GOALS) $(filter t-fast-exact,$(MAKECMDGOALS))),)
+  T_LIST_READY := $(shell env -u MAKEFLAGS -u MFLAGS $(MAKE) --no-print-directory -s $(T_LIST_TOOL) 1>&2)
+endif
 ifneq ($(ONLY_ACTIVE_GOALS),)
   ONLY_GOAL := $(firstword $(ONLY_ACTIVE_GOALS))
   ifeq ($(strip $(ONLY)),)
@@ -4809,7 +4819,7 @@ endif
 # documented way to enumerate groups; the old `git grep -hoE 'X\(...\)'`
 # incantation drops the test_/spec_ prefixes and mislabels 28 spec groups.
 .PHONY: t-list
-t-list:
+t-list: $(TEST_GROUP_LIST_BIN)
 	@$(T_LIST_TOOL)
 
 # One memorable custody regression command for contributors. Keep the list
@@ -4905,15 +4915,15 @@ transaction-micro-lab-check:
 # Reads the runner's own .cache/test-timing/last-run.json as the evidence for
 # EXECUTED; override with ZCL_TEST_TIMING_JSON=<path> to reconcile against a
 # run recorded in another checkout. Exits non-zero on an UNACCOUNTED-FOR group.
-test-registry-report:
-	@tools/dev/test-registry-report.sh
+test-registry-report: $(TEST_GROUP_LIST_BIN)
+	@$(TEST_GROUP_LIST_BIN) --report
 
 # The lane pin, as key=value. Deterministic, no timestamp — two runs on the
 # same tree are byte-identical, which is the whole point.
 #   make agent-baseline BASELINE_FILES="core/MANIFEST.sha3 Makefile"
 # The lint gate count is passed from $(words $(LINT_GATES)) — the umbrella's
 # own definition — rather than re-counted from a doc that can go stale.
-agent-baseline:
+agent-baseline: $(TEST_GROUP_LIST_BIN)
 	@ZCL_BASELINE_LINT_GATES='$(words $(LINT_GATES))' \
 	 BASELINE_FILES='$(BASELINE_FILES)' tools/dev/agent-baseline.sh
 
@@ -5178,6 +5188,26 @@ $(TEST_GROUP_WEIGHTS_BIN): tools/dev/test_group_weights.c \
 	    -Iplatform/modules/json/include -Iplatform/modules/base/include \
 	    -Iplatform/modules/platform/include \
 	    -o $@ $^ -lpthread
+# test-group-list: the registered test-group names and their resolvers, the C
+# form of the former tools/dev/test-group-list.sh and test-registry-report.sh.
+# A host tool compiled straight from source, so Make can run it at parse time
+# before anything else is built; the same body is `z23-dev dev test-groups`.
+TEST_GROUP_LIST_SRCS = tools/dev/test_group_list_main.c \
+    tools/dev/test_group_list.c tools/dev/test_group_list_umbrella.c \
+    tools/dev/test_group_list_rules.c tools/dev/test_group_list_report.c \
+    platform/modules/util/src/spawn.c platform/modules/base/src/cleanse.c \
+    platform/modules/base/src/log_level.c platform/modules/base/src/result.c \
+    platform/modules/base/src/safe_alloc.c platform/modules/platform/src/clock.c \
+    platform/modules/platform/src/os_proc.c
+.PHONY: test-group-list
+test-group-list: $(TEST_GROUP_LIST_BIN)
+$(TEST_GROUP_LIST_BIN): $(TEST_GROUP_LIST_SRCS) tools/dev/test_group_list.h \
+		tools/dev/test_group_list_int.h
+	@mkdir -p $(dir $@)
+	$(or $(HOST_CC),cc) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Itools/dev \
+	    $(DEP_AUDIT_INCLUDES) \
+	    -o $@ $(TEST_GROUP_LIST_SRCS) -lpthread
 test-group-weights-regen: $(TEST_GROUP_WEIGHTS_BIN)
 	$(TEST_GROUP_WEIGHTS_BIN) --timing=$(TEST_GROUP_WEIGHTS_TIMING) \
 	    --out=tools/dev/test_group_weights.tsv
