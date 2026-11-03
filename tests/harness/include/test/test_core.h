@@ -796,6 +796,7 @@ int test_zendp_records(void);
 int test_identity_command(void);
 int test_proof_chain(void);
 int test_htlc(void);
+int test_core_nullptr(void);
 int test_swap_settlement(void);
 int test_file_market(void);
 int test_file_market_moderation(void);

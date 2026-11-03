@@ -185,6 +185,7 @@ bool htlc_extract_secret(const uint8_t *script_sig, size_t sig_len,
                          uint8_t secret_out[32])
 {
     const uint8_t *p = script_sig;
+    if (script_sig == NULL || sig_len == 0) return false;
     const uint8_t *end = script_sig + sig_len;
     int push_index = 0;
 

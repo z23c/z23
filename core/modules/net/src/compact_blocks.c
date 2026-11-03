@@ -40,12 +40,12 @@ uint64_t siphash_2_4(const uint8_t key[16],
     uint64_t v2 = 0x6c7967656e657261ULL ^ k0;
     uint64_t v3 = 0x7465646279746573ULL ^ k1;
 
-    const uint8_t *end = data + len - (len % 8);
+    const size_t full = len - (len % 8);
     size_t left = len & 7;
 
-    for (const uint8_t *p = data; p < end; p += 8) {
+    for (size_t i = 0; i < full; i += 8) {
         uint64_t m;
-        memcpy(&m, p, 8);
+        memcpy(&m, data + i, 8);
         v3 ^= m;
         SIPROUND;
         SIPROUND;
@@ -54,13 +54,13 @@ uint64_t siphash_2_4(const uint8_t key[16],
 
     uint64_t b = (uint64_t)len << 56;
     switch (left) {
-    case 7: b |= (uint64_t)end[6] << 48; /* fallthrough */
-    case 6: b |= (uint64_t)end[5] << 40; /* fallthrough */
-    case 5: b |= (uint64_t)end[4] << 32; /* fallthrough */
-    case 4: b |= (uint64_t)end[3] << 24; /* fallthrough */
-    case 3: b |= (uint64_t)end[2] << 16; /* fallthrough */
-    case 2: b |= (uint64_t)end[1] << 8;  /* fallthrough */
-    case 1: b |= (uint64_t)end[0]; break;
+    case 7: b |= (uint64_t)data[full + 6] << 48; /* fallthrough */
+    case 6: b |= (uint64_t)data[full + 5] << 40; /* fallthrough */
+    case 5: b |= (uint64_t)data[full + 4] << 32; /* fallthrough */
+    case 4: b |= (uint64_t)data[full + 3] << 24; /* fallthrough */
+    case 3: b |= (uint64_t)data[full + 2] << 16; /* fallthrough */
+    case 2: b |= (uint64_t)data[full + 1] << 8;  /* fallthrough */
+    case 1: b |= (uint64_t)data[full + 0]; break;
     case 0: break;
     }
 

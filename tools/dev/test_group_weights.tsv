@@ -278,3 +278,4 @@ test_plugin_dist	5
 test_plugin_fetch_job	8
 test_lab	18
 test_legacy_seed	7
+test_core_nullptr	2

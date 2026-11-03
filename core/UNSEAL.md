@@ -915,3 +915,7 @@ later lane flips it HARD.
 - 2026-11-03T08:29:20Z — REASON: behaviour-preserving complexity splits of 22 core functions (8 reviewed lanes: crypto_registry, transaction, script_interp, msgprocessor_snapshot, circuit_spend, crypto pkg, rom_fetch, groth16_prover); owner-authorized 2026-10-19 hardening program
   old ROOT: af865887b569d4501530707471b29c636349ac80b113d6dd152c36c9136d99f4
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-03T09:08:55Z — REASON: add core batch: no NULL-base pointer arithmetic in sha256/sha512/htlc/siphash and close the status db handle on open failure (Mac UBSan; reviewed lane core-batch-1103 f859bfd44a); owner-authorized 2026-10-19 hardening program
+  old ROOT: 60f05baecb7a8fb3ad8545bac9c2cb68802674e4f8560416a5f7efb02c11aede
+  by: owner unseal ritual (make core-unseal)

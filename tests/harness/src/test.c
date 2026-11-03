@@ -1253,6 +1253,7 @@ static void run_full_suite_foundation(int *failures)
     *failures += test_proof_chain();
     { extern int test_znam_site(void); *failures += test_znam_site(); }
     *failures += test_htlc();
+    *failures += test_core_nullptr();
     *failures += test_swap_settlement();
     *failures += test_file_market();
     *failures += test_file_market_moderation();

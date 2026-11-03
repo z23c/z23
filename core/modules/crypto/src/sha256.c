@@ -723,6 +723,7 @@ void sha256_init(struct sha256_ctx *ctx)
 
 void sha256_write(struct sha256_ctx *ctx, const unsigned char *data, size_t len)
 {
+    if (len == 0) return; /* no NULL + 0 pointer arithmetic; a zero-length write changes nothing */
     const unsigned char *end = data + len;
     size_t bufsize = ctx->bytes % 64;
     if (bufsize && bufsize + len >= 64) {

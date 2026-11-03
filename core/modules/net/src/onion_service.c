@@ -1100,7 +1100,8 @@ static void status_db_stats(const char *datadir, int64_t *last_block_time,
     char db_path[1024];
     zcl_node_db_path(db_path, sizeof(db_path), datadir);
     sqlite3 *db = NULL;
-    if (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK) {
+    int rc = sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READONLY, NULL);
+    if (rc == SQLITE_OK) {
         sqlite3_busy_timeout(db, 5000);
         status_query_int64(db,
                 "SELECT time FROM blocks ORDER BY height DESC LIMIT 1",
@@ -1108,8 +1109,9 @@ static void status_db_stats(const char *datadir, int64_t *last_block_time,
         status_query_int64(db,
                 "SELECT count(*) FROM transactions",
                 tx_count);
-        sqlite3_close(db);
     }
+    if (db != NULL)
+        sqlite3_close(db);
 }
 
 static bool status_is_syncing(int height, long uptime, int64_t last_block_age)
