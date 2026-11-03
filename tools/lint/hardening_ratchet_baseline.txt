@@ -12,7 +12,6 @@ banned-str contexts/commons/modules/vcs/src/package_recipe.c 1
 banned-str contexts/commons/packages/zlru/tests/test_zlru.c 2
 banned-str contexts/commons/packages/ztemplate/tests/test_ztemplate.c 1
 banned-str contexts/commons/packages/ztoml/tests/test_ztoml.c 1
-banned-str contexts/commons/packages/zxml/src/zxml.c 1
 local-reader cognition/modules/codeindex/src/codeindex_merkle.c 1
 local-reader cognition/modules/codeindex/src/codeindex_merkle_decode.c 1
 local-reader cognition/modules/session/src/fleet_board_proto.c 2
