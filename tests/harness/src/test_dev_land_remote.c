@@ -1379,7 +1379,7 @@ static int dlt_rv_verify_cases(const struct dlt_rig *r, const char *tmp,
         dlt_rv_mode(&c, r, b2, o2, rc2, "gate", 0);
         ASSERT(dlt_rv_refused(&c, r, tmp, "REVERIFY_PREPARE_FAILED", rc2, 2));
         ASSERT(strstr(c.reply.error.evidence, "step=dev-bin exit=4") != NULL);
-        ASSERT(strstr(g_rvf.log, "lint") == NULL);
+        ASSERT(strstr(g_rvf.log, " lint ") == NULL); /* the argv word, not a path */
         dlt_end(&c);
         PASS();
     }
