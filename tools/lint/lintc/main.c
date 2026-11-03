@@ -11,6 +11,7 @@
 #include <string.h>
 #include "lintc.h"
 #include "premise.h"
+#include "gate_lib_module_order_graph.h"
 
 #define LINT_GATE(name, base, cmd) { name, base##_run, base##_selftest },
 static const struct lint_gate k_gates[] = {
@@ -24,8 +25,8 @@ const struct lint_gate *lint_gate_table(size_t *n)
     return k_gates;
 }
 
-/* Premise-selection subcommands; they are tools, not gates, so --list and
- * the gate table never name them. */
+/* Subcommands (premise selection, module-linkgraph); they are tools, not
+ * gates, so --list and the gate table never name them. */
 static const struct {
     const char *name;
     int (*main)(int argc, char **argv);
@@ -34,6 +35,7 @@ static const struct {
     { "unit-exec", lint_unit_exec_main },
     { "premise", lint_premise_main },
     { "precheck", lint_precheck_main },
+    { "module-linkgraph", lmg_main },
 };
 
 /* The premise-selection tool named by argv[1], or NULL. */

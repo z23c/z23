@@ -3,7 +3,7 @@
  * purpose: gate check-lib-module-order — lib/ module link order (RATCHET).
  * Ported from tools/scripts/check_lib_module_order.sh (deleted). Proves the
  * declared link order in engine/composition/lib_module_order.def against the
- * MEASURED symbol graph (tools/dev/module-linkgraph.sh over compiled
+ * MEASURED symbol graph (gate_lib_module_order_graph.c over compiled
  * objects). Three failures: (a) the .def module set disagreeing with the
  * lib/ tree on disk, (b) a graph module the .def does not rank, (c) a back
  * edge (rank(to) >= rank(from)) not grandfathered in
@@ -25,20 +25,19 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include "lintc.h"
+#include "gate_lib_module_order_graph.h"
 #include "gate_lib_module_order_priv.h"
 
 static const char k_lmo_gate[] = "check_lib_module_order";
 static const char k_lmo_def_rel[] = "engine/composition/lib_module_order.def";
 static const char k_lmo_base_rel[] =
     "tools/scripts/lib_module_order_baseline.txt";
-static const char k_lmo_tool_rel[] = "tools/dev/module-linkgraph.sh";
 static const char k_lmo_obj_rel[] = "build/obj";
 
 enum { LMO_MAX_MODS = 128, LMO_NAME = 64, LMO_PATH = 1024,
        LMO_MAX_BASE = 128, LMO_KEY = 256,
        LMO_MAX_UNDEC = 256, LMO_MAX_VIOL = 512, LMO_ROW = 256,
-       LMO_MAX_DIRS = 128, LMO_LINE = 1024,
-       LMO_GRAPH_CAP = 1048576 };
+       LMO_MAX_DIRS = 128, LMO_LINE = 1024 };
 
 struct lmo_mods { char name[LMO_MAX_MODS][LMO_NAME]; int n; };
 struct lmo_base {
@@ -51,7 +50,7 @@ struct lmo_undec { char name[LMO_MAX_UNDEC][LMO_NAME]; int n; };
 struct lmo_viol { char row[LMO_MAX_VIOL][LMO_ROW]; int n; };
 
 struct lmo_paths {
-    char def[LMO_PATH], base[LMO_PATH], tool[LMO_PATH];
+    char def[LMO_PATH], base[LMO_PATH];
 };
 
 struct lmo_grade {
@@ -584,60 +583,54 @@ static void lmo_report_viol(struct lmo_grade *g, FILE *out)
     fprintf(out, "  3. Re-rank in %s — legitimate ONLY when the new position "
             "is\n", k_lmo_def_rel);
     fprintf(out, "     genuinely correct for the whole graph. Re-run\n");
-    fprintf(out, "     'tools/dev/module-linkgraph.sh --summary' and confirm "
+    fprintf(out, "     'z23-lint module-linkgraph --summary' and confirm "
             "the total\n");
     fprintf(out, "     back-edge count did not grow before doing this.\n");
     fprintf(out, "\n");
     fprintf(out, "  Inspect the exact reference sites:\n");
-    fprintf(out, "    tools/dev/module-linkgraph.sh --edges | grep -P "
+    fprintf(out, "    z23-lint module-linkgraph --edges | grep -P "
             "'^lib/<from>\\tlib/<to>\\t'\n");
 }
 
 /* ── graph run and verdict ────────────────────────────────────────────── */
 
-static int lmo_graph_argv(const struct lmo_paths *p, char *argv[5],
-                          char *measured, size_t mcap)
+static int lmo_graph_req(const char *root, struct lmg_req *rq, char *measured,
+                         size_t mcap)
 {
     const char *od = getenv("ZCL_LINKGRAPH_OBJ_DIR");
+    *rq = (struct lmg_req){ LMG_SUMMARY, root, NULL, NULL };
     if (od && *od) {
-        argv[0] = (char *)p->tool;
-        argv[1] = (char *)"--summary";
-        argv[2] = (char *)"--obj-dir";
-        argv[3] = (char *)od;
-        argv[4] = NULL;
-        if (ovf(snprintf(measured, mcap, "%s (ZCL_LINKGRAPH_OBJ_DIR)", od),
-                mcap))
-            return 2;
-        return 0;
+        rq->obj_dir = od;
+        return ovf(snprintf(measured, mcap, "%s (ZCL_LINKGRAPH_OBJ_DIR)", od),
+                   mcap) ? 2 : 0;
     }
-    argv[0] = (char *)p->tool;
-    argv[1] = (char *)"--summary";
-    argv[2] = (char *)"--obj-root";
-    argv[3] = (char *)k_lmo_obj_rel;
-    argv[4] = NULL;
-    if (ovf(snprintf(measured, mcap, "%s", k_lmo_obj_rel), mcap))
-        return 2;
-    return 0;
+    rq->obj_root = k_lmo_obj_rel;
+    return ovf(snprintf(measured, mcap, "%s", k_lmo_obj_rel), mcap) ? 2 : 0;
 }
 
-/* Handles a non-zero graph exit. *rc becomes the gate verdict; 0 back means
- * "graph measured, continue grading". */
-static int lmo_graph_dispatch(int grc, const char *measured,
-                              char *const argv[], int *rc, FILE *out)
+/* Handles a graph result other than success. *rc becomes the gate verdict;
+ * 0 back means "graph measured, continue grading". diag is what the
+ * measurement said about itself (shown only for a fail-closed result). */
+static int lmo_graph_dispatch(int grc, const char *measured, const char *diag,
+                              int *rc, FILE *out)
 {
-    size_t sinkn = 0;
-    if (grc == 3) {
+    if (grc == LMG_OK)
+        return 1;
+    if (grc == LMG_UNREADABLE) {
         fprintf(out, "%s: FAIL — the link graph could not be measured.\n",
                 k_lmo_gate);
         fflush(out);
-        /* Diagnostic re-run (stdout discarded, stderr visible); like the
-         * shell's `|| true`, its own status cannot change the verdict. */
-        (void)lmo_capture(argv, NULL, 0, &sinkn, 0);
+        fputs(diag, stderr);
         *rc = 1;
         return 0;
     }
-    if (grc == 0)
-        return 1;
+    if (grc != LMG_NONE) {
+        fputs(diag, stderr);
+        fprintf(stderr, "%s: link-graph measurement failed (%d)\n",
+                k_lmo_gate, grc);
+        *rc = 2;
+        return 0;
+    }
     if (getenv("ZCL_LINT_REQUIRE_LINKGRAPH") &&
         strcmp(getenv("ZCL_LINT_REQUIRE_LINKGRAPH"), "1") == 0) {
         fprintf(out, "%s: FAIL — no compiled objects under %s; cannot "
@@ -657,31 +650,49 @@ static int lmo_graph_dispatch(int grc, const char *measured,
     return 0;
 }
 
-static int lmo_measure_grade(const struct lmo_paths *p, struct lmo_grade *g,
-                             FILE *out)
+/* Measures the summary graph into *graph / *gn and its diagnostics into
+ * *diag (both open_memstream buffers the caller frees). Returns the LMG_
+ * result, or -1 when a buffer cannot be opened. */
+static int lmo_measure(const struct lmg_req *rq, char **graph, size_t *gn,
+                       char **diag)
 {
-    static char graph[LMO_GRAPH_CAP];
+    size_t dn = 0;
+    FILE *gf = open_memstream(graph, gn);
+    FILE *df = open_memstream(diag, &dn);
+    int grc = -1;
+    if (gf && df)
+        grc = lmg_run(rq, gf, df);
+    if (gf)
+        fclose(gf);
+    if (df)
+        fclose(df);
+    return grc;
+}
+
+static int lmo_measure_grade(const char *root, struct lmo_grade *g, FILE *out)
+{
     static char measured[LMO_PATH];
-    char *argv[5];
-    if (lmo_graph_argv(p, argv, measured, sizeof measured))
+    struct lmg_req rq;
+    if (lmo_graph_req(root, &rq, measured, sizeof measured))
         return 2;
+    char *graph = NULL, *diag = NULL;
     size_t gn = 0;
-    int grc = lmo_capture(argv, graph, sizeof graph, &gn, 1);
-    if (grc < 0)
-        return 2;
-    int rc = 0;
-    if (!lmo_graph_dispatch(grc, measured, argv, &rc, out))
-        return rc;
-    graph[gn] = '\0';
-    int bad = lmo_for_each_edge(graph, gn, g);
-    if (bad)
-        return bad;
-    if (!g->fail)
-        return lmo_report_ok(g, out);
-    fprintf(out, "\n");
-    lmo_report_undeclared(g, out);
-    lmo_report_viol(g, out);
-    return 1;
+    int grc = lmo_measure(&rq, &graph, &gn, &diag);
+    int rc = 2;
+    if (grc >= 0 && lmo_graph_dispatch(grc, measured, diag ? diag : "", &rc, out)) {
+        rc = lmo_for_each_edge(graph, gn, g);
+        if (rc == 0 && g->fail) {
+            fprintf(out, "\n");
+            lmo_report_undeclared(g, out);
+            lmo_report_viol(g, out);
+            rc = 1;
+        } else if (rc == 0) {
+            rc = lmo_report_ok(g, out);
+        }
+    }
+    free(graph);
+    free(diag);
+    return rc;
 }
 
 /* ── entry ────────────────────────────────────────────────────────────── */
@@ -694,9 +705,6 @@ static int lmo_paths_init(struct lmo_paths *p, const char *root)
     if (ovf(snprintf(p->base, sizeof p->base, "%s/%s", root, k_lmo_base_rel),
             sizeof p->base))
         return 2;
-    if (ovf(snprintf(p->tool, sizeof p->tool, "%s/%s", root, k_lmo_tool_rel),
-            sizeof p->tool))
-        return 2;
     return 0;
 }
 
@@ -706,10 +714,6 @@ static int lmo_precheck(const struct lmo_paths *p, struct lmo_base *b,
 {
     if (access(p->def, F_OK) != 0) {
         fprintf(out, "%s: FAIL — missing %s\n", k_lmo_gate, k_lmo_def_rel);
-        return 1;
-    }
-    if (access(p->tool, X_OK) != 0) {
-        fprintf(out, "%s: FAIL — missing %s\n", k_lmo_gate, k_lmo_tool_rel);
         return 1;
     }
     int rc = lmo_load_baseline(p->base, b);
@@ -723,7 +727,7 @@ static int lmo_precheck(const struct lmo_paths *p, struct lmo_base *b,
                 k_lmo_obj_rel);
         fprintf(out, "  Re-seed the baseline from %s (make build-only, then\n",
                 k_lmo_obj_rel);
-        fprintf(out, "  tools/dev/module-linkgraph.sh --summary --obj-root "
+        fprintf(out, "  z23-lint module-linkgraph --summary --obj-root "
                 "%s).\n", k_lmo_obj_rel);
         return 1;
     }
@@ -784,7 +788,7 @@ int lmo_check_root(const char *root, FILE *out)
     memset(&g, 0, sizeof g);
     g.mods = &mods;
     g.base = &base;
-    return lmo_measure_grade(&p, &g, out);
+    return lmo_measure_grade(root, &g, out);
 }
 
 int check_lib_module_order_run(int argc, char **argv)

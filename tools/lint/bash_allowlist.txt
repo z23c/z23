@@ -92,7 +92,6 @@ tools/dev/market_acceptance.sh
 tools/dev/market_moderation_acceptance.sh
 tools/dev/market_onion_acceptance.sh
 tools/dev/metaverse_tour.sh
-tools/dev/module-linkgraph.sh
 tools/dev/native-dev-failure-selftest.sh
 tools/dev/native-dev-loop-wait-selftest.sh
 tools/dev/native_agent_ui_alpha_acceptance.sh

@@ -1445,7 +1445,7 @@ Z23_FLAG("ZCL_LEGACY_ORACLE_MODE", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_LEVELDB_NO_VERIFY_CHECKSUMS", "env_runtime", "-", "-",
           "undocumented; first use engine/modules/storage/src/dbwrapper.c:auto")
 Z23_FLAG("ZCL_LINKGRAPH_OBJ_DIR", "env_build", "-", "-",
-          "undocumented; first use tools/dev/module-linkgraph.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_lib_module_order.c:auto")
 Z23_FLAG("ZCL_LINT_BIN_DIR", "env_build", "build/bin", "-",
           "undocumented; first use tools/lint/lintc/gate_cookbook.c:auto")
 Z23_FLAG("ZCL_LINT_BUDGET_SEC", "env_build", "75", "-",

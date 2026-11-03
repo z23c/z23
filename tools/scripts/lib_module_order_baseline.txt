@@ -16,7 +16,7 @@
 # the header line above disagrees with it.
 #
 # WHY THERE ARE ANY: re-measured 2026-08-29 over the compiled objects of the
-# production tree (make build-only; tools/dev/module-linkgraph.sh --summary
+# production tree (make build-only; build/bin/z23-lint module-linkgraph --summary
 # --obj-root build/obj), lib/ has 248 module-to-module edges across the 46 lib
 # modules that have any edge at all, with two non-trivial strongly-connected
 # components: {metrics sync validation net rpc storage} and
@@ -31,7 +31,7 @@
 # THESE FOUR ARE THE PROVEN MINIMUM, not a heuristic's leftovers. Re-check it
 # in one command:
 #
-#   tools/dev/module-linkgraph.sh --fas --obj-root build/obj
+#   build/bin/z23-lint module-linkgraph --fas --obj-root build/obj
 #
 # It solves each component exactly and reports the floor as 3 + 1 = 4, which
 # the order in engine/composition/lib_module_order.def hits exactly. Minimum feedback arc
@@ -49,7 +49,7 @@
 # tightened the moment a cycle is broken.
 #
 # What each line owes (symbol counts re-measured 2026-07-26 from build/obj;
-# tools/dev/module-linkgraph.sh --summary):
+# build/bin/z23-lint module-linkgraph --summary):
 #   core/modules/net -> engine/modules/rpc            1 sym   legacy_chain_rpc_get_chainwork
 #   engine/modules/storage -> core/modules/net        2 syms  net_addr_to_string, net_addr_is_routable
 #   core/modules/sync -> engine/modules/storage       5 syms  progress_meta_get, progress_meta_set_in_tx,
@@ -66,7 +66,7 @@
 # for deletion.
 #
 # Reference sites for any one edge:
-#   tools/dev/module-linkgraph.sh --edges | grep -P '^lib/net\tlib/rpc\t'
+#   build/bin/z23-lint module-linkgraph --edges | grep -P '^lib/net\tlib/rpc\t'
 
 core/modules/net -> engine/modules/rpc
 engine/modules/storage -> core/modules/net

@@ -14164,7 +14164,7 @@ check-lib-layering: $(LINTC_TOOL)
 # lib/ module link order. engine/composition/lib_module_order.def declares every lib module
 # in link order (rank = line position) and a module may reference only strictly
 # lower ranks. Unlike check-lib-layering above, which greps #include lines, this
-# gate asks the linker: tools/dev/module-linkgraph.sh joins nm's defined and
+# gate asks the linker: `z23-lint module-linkgraph` joins nm's defined and
 # undefined symbols over the compiled objects, so it also sees a module reached
 # through a bare `extern` with no include at all.
 #

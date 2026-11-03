@@ -1,14 +1,15 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: --selftest for check-lib-module-order
- * (gate_lib_module_order.c). The shell script had no self-test mode, so
- * this proves one passing and several failing shapes against a fixture
- * tree under the lint scratch area: a cold tree reports NOT MEASURED
- * (exit 0); a forward edge passes; an unbaselined back edge fails; a
- * baselined back edge passes; an undeclared graph module fails; a .def
- * that disagrees with the tree fails; a baseline keyed to another tree
- * fails. The graph tool is a stub script driven through the
- * ZCL_LINKGRAPH_OBJ_DIR seam.
+ * (gate_lib_module_order.c). Proves one passing and several failing shapes
+ * against a fixture tree under the lint scratch area: a cold tree reports
+ * NOT MEASURED (exit 0); a forward edge passes; an unbaselined back edge
+ * fails; a baselined back edge passes; an undeclared graph module fails; a
+ * .def that disagrees with the tree fails; a baseline keyed to another tree
+ * fails; objects with no cross-module edge fail closed. The objects are
+ * real tiny ELF files read by the real nm (gate_lib_module_order_selftest_
+ * graph.c), reached through the ZCL_LINKGRAPH_OBJ_DIR seam; the same file
+ * checks the object-tree rules and the --edges/--modules/--fas reports.
  */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -24,51 +25,38 @@
 
 enum { LMOS_PATH = 1024, LMOS_TEXT = 2048 };
 
-static const char k_lmos_stub[] =
-    "#!/bin/sh\n"
-    "[ \"$1\" = \"--summary\" ] || exit 3\n"
-    "d=\"$3\"\n"
-    "[ -f \"$d/edges.txt\" ] || exit 1\n"
-    "cat \"$d/edges.txt\"\n"
-    "exit 0\n";
 
 struct lmos_case {
     const char *name;
     const char *extra_def; /* extra LIB_MODULE line, "" for none */
     const char *baseline;  /* baseline text; "# ..." headers honored */
-    const char *edges;     /* edges.txt text; NULL means cold tree */
+    const char *edges;     /* graph spec ("a>b;c"); NULL means cold tree */
     int want;
     const char *want_text; /* substring the report must hold, or NULL */
 };
 
 static const struct lmos_case k_lmos_cases[] = {
     { "cold tree is NOT MEASURED (exit 0)", "", "", NULL, 0, NULL },
-    { "forward edge passes", "", "",
-      "lib/beta -> lib/alpha\t3\tsym\n", 0, NULL },
-    { "unbaselined back edge fails", "", "",
-      "lib/alpha -> lib/beta\t3\tsym\n", 1, NULL },
+    { "forward edge passes", "", "", "beta>alpha", 0, NULL },
+    { "unbaselined back edge fails", "", "", "alpha>beta", 1, NULL },
     { "baselined back edge passes", "",
       "# measured-from-tree: build/obj\nlib/alpha -> lib/beta\n",
-      "lib/alpha -> lib/beta\t3\tsym\n", 0, NULL },
-    { "undeclared graph module fails", "", "",
-      "lib/gamma -> lib/alpha\t1\ts\n", 1, NULL },
+      "alpha>beta", 0, NULL },
+    { "undeclared graph module fails", "", "", "gamma>alpha", 1, NULL },
     { "def disagreeing with the tree fails", "LIB_MODULE(\"delta\")\n", "",
       NULL, 1, NULL },
     { "baseline keyed to another tree fails", "",
       "# measured-from-tree: build/test-rel-obj\n", NULL, 1, NULL },
     { "stale baseline entry: ratchet can tighten", "",
-      "lib/alpha -> lib/beta\n", "lib/beta -> lib/alpha\t3\tsym\n", 0,
-      "ratchet can tighten" },
+      "lib/alpha -> lib/beta\n", "beta>alpha", 0, "ratchet can tighten" },
     { "indented baseline key never matches (still a violation)", "",
-      "  lib/alpha -> lib/beta\n", "lib/alpha -> lib/beta\t3\tsym\n", 1,
-      "NEW rank violation" },
+      "  lib/alpha -> lib/beta\n", "alpha>beta", 1, "NEW rank violation" },
     { "whitespace-only baseline line counts as a key", "", "   \n",
-      "lib/beta -> lib/alpha\t3\tsym\n", 0, "1 baselined" },
+      "beta>alpha", 0, "1 baselined" },
     { "unterminated final baseline line is not a key", "",
-      "lib/alpha -> lib/beta", "lib/alpha -> lib/beta\t3\tsym\n", 1,
-      "NEW rank violation" },
-    { "malformed lib edge line fails closed", "", "",
-      "lib/alpha\t3\tsym\n", 2, NULL },
+      "lib/alpha -> lib/beta", "alpha>beta", 1, "NEW rank violation" },
+    { "objects without one cross-module edge fail closed", "", "",
+      "alpha;beta", 1, NULL },
 };
 
 /* Writes the fixture .def (alpha, beta, plus any extra declaration). */
@@ -98,19 +86,6 @@ static int lmos_write_baseline(const char *root, const char *body)
     return csr_write(path, body);
 }
 
-static int lmos_write_stub(const char *root)
-{
-    char path[LMOS_PATH];
-    if (ovf(snprintf(path, sizeof path, "%s/tools/dev/module-linkgraph.sh",
-             root), sizeof path))
-        return 2;
-    int rc = csr_write(path, k_lmos_stub);
-    if (rc)
-        return rc;
-    if (chmod(path, 0755) != 0)
-        return die("z23-lint: cannot chmod %s\n", path);
-    return 0;
-}
 
 /* Lays down the static fixture: Makefile, module dirs, def, stub tool. */
 /* Points the shared repo-shape reader at the fixture so the declared-set
@@ -157,27 +132,22 @@ static int lmos_fixture(const char *root)
     rc = lmos_write_baseline(root, "");
     if (rc)
         return rc;
-    rc = lmos_write_stub(root);
     return rc ? rc : lmos_point_repo_shape(root);
 }
 
-/* Arms or disarms the object tree and the env seam for one case. */
+/* Re-lays the object tree for one case (empty = cold) and points the seam
+ * at it. */
 static int lmos_arm(const char *root, const struct lmos_case *c)
 {
-    char edges[LMOS_PATH];
-    if (ovf(snprintf(edges, sizeof edges, "%s/build/obj/edges.txt", root),
-             sizeof edges))
-        return 2;
-    if (c->edges) {
-        int rc = csr_write(edges, c->edges);
-        if (rc)
-            return rc;
-    } else {
-        (void)unlink(edges);
-    }
     char dir[LMOS_PATH];
     if (ovf(snprintf(dir, sizeof dir, "%s/build/obj", root), sizeof dir))
         return 2;
+    rap_rm_rf(dir);
+    int rc = csr_mkdirs(dir);
+    if (rc == 0 && c->edges)
+        rc = lmos_write_graph(dir, c->edges);
+    if (rc)
+        return rc;
     return setenv("ZCL_LINKGRAPH_OBJ_DIR", dir, 1) != 0 ? 2 : 0;
 }
 
@@ -257,6 +227,13 @@ int check_lib_module_order_selftest(void)
     else
         bad = 1;
     (void)unsetenv("ZCL_LINKGRAPH_OBJ_DIR");
+    if (rc == 0) {
+        char sub[LMOS_PATH];
+        if (ovf(snprintf(sub, sizeof sub, "%s/graphfix", root), sizeof sub))
+            bad = 1;
+        else
+            bad |= lmos_graph_selftest(sub) != 0;
+    }
     rap_rm_rf(root);
     if (bad)
         fputs("FAIL: check_lib_module_order selftest\n", stderr);

@@ -18,14 +18,14 @@
  * check-lib-module-order (tools/lint/lintc/gate_lib_module_order.c) and test_codeindex.c case 6 compare
  * this file's set against it. Rank has no such witness, so the gate also
  * enforces the rank rule against the MEASURED link graph
- * (tools/dev/module-linkgraph.sh).
+ * (tools/lint/lintc/gate_lib_module_order_graph.c).
  *
  * A module missing from this file is not a lint warning, it is a module
  * missing from the build.
  *
  * The order is re-derivable with two commands:
  *   make build-only -j"$(nproc)"          # the ONLY tree the gate measures
- *   tools/dev/module-linkgraph.sh --fas --obj-root build/obj
+ *   build/bin/z23-lint module-linkgraph --fas --obj-root build/obj
  * The lib->lib graph has two non-trivial strongly-connected components:
  * {metrics sync validation net rpc storage} and {util health}. The sequence
  * below leaves 4 back edges, the optimal floor: --fas solves each component
