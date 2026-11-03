@@ -242,6 +242,43 @@ static bool prepare_statements(struct node_db *ndb)
          "sapling_value,sprout_value)"
          " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
 
+    /* Projection replay write (db_block_save_canonical): same row as above,
+     * but a lean replay must never turn a populated column into a lean zero.
+     * Imported rows carry real sapling/sprout roots and an undo position the
+     * body-only catchup path cannot rebuild; keep the stored value when the
+     * incoming one is NULL/zero. Values derived from the body, and every
+     * header field, still overwrite. */
+    PREP(stmt_block_upsert_keep,
+         "INSERT OR REPLACE INTO blocks"
+         "(hash,height,prev_hash,version,merkle_root,"
+         "time,bits,nonce,solution,chain_work,status,"
+         "file_num,data_pos,undo_pos,num_tx,"
+         "sapling_root,sprout_root,"
+         "sapling_value,sprout_value)"
+         " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+         " ON CONFLICT(hash) DO UPDATE SET"
+         " height=excluded.height,prev_hash=excluded.prev_hash,"
+         "version=excluded.version,merkle_root=excluded.merkle_root,"
+         "time=excluded.time,bits=excluded.bits,nonce=excluded.nonce,"
+         "solution=excluded.solution,chain_work=excluded.chain_work,"
+         "status=excluded.status,file_num=excluded.file_num,"
+         "data_pos=excluded.data_pos,num_tx=excluded.num_tx,"
+         "undo_pos=CASE WHEN COALESCE(excluded.undo_pos,0)=0"
+         " AND COALESCE(blocks.undo_pos,0)<>0"
+         " THEN blocks.undo_pos ELSE excluded.undo_pos END,"
+         "sapling_root=CASE WHEN (excluded.sapling_root IS NULL"
+         " OR excluded.sapling_root=zeroblob(32))"
+         " AND blocks.sapling_root IS NOT NULL"
+         " AND blocks.sapling_root<>zeroblob(32)"
+         " THEN blocks.sapling_root ELSE excluded.sapling_root END,"
+         "sprout_root=CASE WHEN (excluded.sprout_root IS NULL"
+         " OR excluded.sprout_root=zeroblob(32))"
+         " AND blocks.sprout_root IS NOT NULL"
+         " AND blocks.sprout_root<>zeroblob(32)"
+         " THEN blocks.sprout_root ELSE excluded.sprout_root END,"
+         "sapling_value=excluded.sapling_value,"
+         "sprout_value=excluded.sprout_value");
+
     PREP(stmt_block_by_hash,
          "SELECT height,prev_hash,version,merkle_root,"
          "time,bits,nonce,solution,chain_work,status,"
@@ -609,6 +646,7 @@ static void finalize_statements(struct node_db *ndb)
     sqlite3_finalize(ndb->stmt_utxo_delete);
     sqlite3_finalize(ndb->stmt_utxo_find);
     sqlite3_finalize(ndb->stmt_block_insert);
+    sqlite3_finalize(ndb->stmt_block_upsert_keep);
     sqlite3_finalize(ndb->stmt_block_by_hash);
     sqlite3_finalize(ndb->stmt_block_by_height);
     sqlite3_finalize(ndb->stmt_tx_insert);

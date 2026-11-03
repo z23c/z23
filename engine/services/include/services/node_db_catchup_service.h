@@ -200,4 +200,13 @@ int node_db_catchup_service_run(struct node_db *ndb,
                                 struct wallet *w,
                                 const char *datadir);
 
+/* Reorg heal for the node.db projection. If a connected `blocks` row at or
+ * below the projection cursor names a block that is no longer the active
+ * chain's block at that height, rewind the cursor to just below the lowest
+ * such row so the ascending catchup re-indexes the winners (the existing
+ * db_block_save_canonical demotes each same-height loser). Returns true when
+ * the cursor was rewound. Cheap when nothing is stale: one row read. */
+bool node_db_catchup_service_rewind_stale_fork(struct node_db *ndb,
+                                               const struct active_chain *chain);
+
 #endif /* ZCL_SERVICES_NODE_DB_CATCHUP_SERVICE_H */

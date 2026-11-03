@@ -88,4 +88,10 @@ void catchup_sapling_tree_note_skipped(struct catchup_sapling_tree *ct, int h);
 void catchup_sapling_tree_persist_dirty(struct node_db *ndb,
                                         struct catchup_sapling_tree *ct);
 
+/* Reorg rewind with the cursor already read (node_db_catchup_fork_rewind.c); the
+ * public wrapper is node_db_catchup_service_rewind_stale_fork. */
+bool node_db_catchup_fork_rewind_at(struct node_db *ndb,
+                                  const struct active_chain *chain,
+                                  int cursor);
+
 #endif /* ZCL_NODE_DB_CATCHUP_INTERNAL_H */

@@ -468,8 +468,15 @@ static bool projection_backfill_tip_ready(struct node_db *ndb,
                                           struct boot_svc_ctx *svc,
                                           int chain_tip, int *projection_tip)
 {
-    return projection_backfill_catchup_ready(ndb, svc, chain_tip) &&
-           node_db_sync_get_tip_height_checked(ndb, projection_tip);
+    if (!projection_backfill_catchup_ready(ndb, svc, chain_tip))
+        return false;
+    /* Reorg heal: a stale connected row (loser of a reorg) rewinds the cursor
+     * so the winner is re-indexed even when the cursor already sits at the new
+     * tip height. The catchup child is not running here, so it cannot race. */
+    if (svc->state)
+        (void)node_db_catchup_service_rewind_stale_fork(
+            ndb, &svc->state->chain_active);
+    return node_db_sync_get_tip_height_checked(ndb, projection_tip);
 }
 
 static bool projection_backfill_rewind_to_block(struct node_db *ndb,

@@ -3,10 +3,13 @@
 
 #include "config/boot_projection_hole_scan.h"
 
+#include "controllers/sync_controller.h"
+#include "chain/chain.h"
 #include "models/block.h"
 #include "models/database.h"
 #include "storage/coins_kv.h"
 #include "storage/progress_store.h"
+#include "validation/chainstate.h"
 #include "util/log_macros.h"
 
 #include <limits.h>
@@ -98,4 +101,60 @@ bool boot_projection_hole_scan_if_due(
     if (ok && *missing_height_out >= 0)
         state->next_scan_unix = 0;
     return ok;
+}
+
+/* Highest height the projection cursor may claim at boot: the active tip,
+ * lowered to the highest connected row (one indexed MAX, O(1) because this
+ * runs synchronously in boot) when rows end below the tip, so catchup refills
+ * a range node.db lost (restored backup, crash). Stays at the tip when there
+ * are no connected rows (body-less snapshot / imported history is sparse by
+ * design) and when the height right above the top row has no stored body:
+ * catchup could only record a lean hole there, and rewinding would replay to
+ * the tip on every boot. Interior holes stay the background scan's job. */
+static int finalize_target_height(struct node_db *ndb,
+                                  const struct active_chain *chain,
+                                  int chain_tip)
+{
+    int top = db_block_max_height(ndb);
+    if (top < 0 || top >= chain_tip)
+        return chain_tip;
+    const struct block_index *next = active_chain_at(chain, top + 1);
+    if (!next || !(next->nStatus & BLOCK_HAVE_DATA))
+        return chain_tip;
+    const struct block_index *slot = active_chain_at(chain, top);
+    return (slot && slot->phashBlock) ? top : chain_tip;
+}
+
+bool boot_projection_finalize_cursor(struct node_db *ndb,
+                                     const struct active_chain *chain,
+                                     int *cursor_out)
+{
+    if (cursor_out)
+        *cursor_out = -1;
+    if (!ndb || !ndb->open || !chain)
+        return false;
+    int chain_tip = active_chain_height(chain);
+    if (chain_tip < 0)
+        return false;
+    int target = finalize_target_height(ndb, chain, chain_tip);
+    const struct block_index *slot = active_chain_at(chain, target);
+    if (!slot || !slot->phashBlock) {
+        LOG_ERROR("projection_backfill",
+                  "finalize cursor refused: no active slot at %d", target);
+        return false;
+    }
+    int previous = node_db_sync_get_tip_height(ndb);
+    if (previous > target)
+        LOG_WARN("projection_backfill",
+                 "cursor %d is above the highest projected row (chain tip "
+                 "%d); rewinding to %d so catchup fills %d..%d",
+                 previous, chain_tip, target, target + 1, chain_tip);
+    if (!node_db_sync_set_tip(ndb, slot->phashBlock->data, target)) {
+        LOG_ERROR("projection_backfill",
+                  "finalize cursor: set_tip failed at %d", target);
+        return false;
+    }
+    if (cursor_out)
+        *cursor_out = target;
+    return true;
 }

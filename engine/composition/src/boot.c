@@ -13,6 +13,7 @@
 #include "config/boot_cursor_state.h"
 #include "config/boot_datadir_lock.h"
 #include "config/boot_internal.h"
+#include "config/boot_projection_hole_scan.h"
 #include "config/boot_legacy_blocks.h"
 #include "config/boot_memory_guard.h"
 #include "config/boot_postmortem.h"
@@ -458,8 +459,8 @@ static void boot_step_finalize_chain_state(void)
     struct block_index *tip = active_chain_tip(&g_state.chain_active);
     if (tip && tip->phashBlock) {
         if (g_node_db.open &&
-            !node_db_sync_set_tip(&g_node_db, tip->phashBlock->data,
-                                  tip->nHeight))
+            !boot_projection_finalize_cursor(&g_node_db,
+                                            &g_state.chain_active, NULL))
             fprintf(stderr, "boot: failed to persist final chain tip\n");
         char hex[65];
         uint256_get_hex(tip->phashBlock, hex);

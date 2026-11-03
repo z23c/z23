@@ -38,6 +38,7 @@ struct node_db {
     sqlite3_stmt *stmt_utxo_delete;
     sqlite3_stmt *stmt_utxo_find;
     sqlite3_stmt *stmt_block_insert;
+    sqlite3_stmt *stmt_block_upsert_keep;
     sqlite3_stmt *stmt_block_by_hash;
     sqlite3_stmt *stmt_block_by_height;
     sqlite3_stmt *stmt_tx_insert;

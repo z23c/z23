@@ -242,15 +242,22 @@ bool db_block_validate(const struct db_block *b, struct ar_errors *errors)
 
 /* ── Save ──────────────────────────────────────────────────────── */
 
-bool db_block_save(struct node_db *ndb, const struct db_block *b)
+/* keep=false: full replace (INSERT OR REPLACE). keep=true: projection replay
+ * upsert that never overwrites a populated root/undo column with a lean
+ * zero (see stmt_block_upsert_keep in database.c). */
+static bool db_block_save_with(struct node_db *ndb, const struct db_block *b,
+                               bool keep)
 {
-    if (!ndb || !ndb->open || !ndb->stmt_block_insert) return false;
+    if (!ndb || !ndb->open || !ndb->stmt_block_insert ||
+        !ndb->stmt_block_upsert_keep)
+        return false;
 
     block_init_hooks();
     struct ar_callbacks *cbs = db_block_callbacks();
     AR_BEGIN_SAVE(cbs, "block", b, db_block_validate);
 
-    sqlite3_stmt *s = ndb->stmt_block_insert;
+    sqlite3_stmt *s = keep ? ndb->stmt_block_upsert_keep
+                           : ndb->stmt_block_insert;
     bool locked_stmt = node_db_lock_connection_and_state(ndb);
 
     int rc = SQLITE_OK;
@@ -291,6 +298,11 @@ bool db_block_save(struct node_db *ndb, const struct db_block *b)
     AR_FINISH_SAVE(cbs, b, ok);
 }
 
+bool db_block_save(struct node_db *ndb, const struct db_block *b)
+{
+    return db_block_save_with(ndb, b, false);
+}
+
 bool db_block_save_canonical(struct node_db *ndb, const struct db_block *b)
 {
     if (!ndb || !ndb->open || !b)
@@ -301,7 +313,7 @@ bool db_block_save_canonical(struct node_db *ndb, const struct db_block *b)
     if (!db_block_has_canonical_conflict(ndb, b, &has_conflict))
         LOG_FAIL("db_block_save_canonical", "db_block_save_canonical: conflict check failed height=%d last_op=%s last_rc=%d", b->height, ndb->last_op, ndb->last_sqlite_rc);
     if (!has_conflict)
-        return db_block_save(ndb, b);
+        return db_block_save_with(ndb, b, true);
 
     sqlite3_stmt *s = NULL;
     bool locked_stmt = node_db_lock_connection_and_state(ndb);
@@ -345,7 +357,7 @@ bool db_block_save_canonical(struct node_db *ndb, const struct db_block *b)
     }
 
     db_block_reset_cached_readers(ndb);
-    return db_block_save(ndb, b);
+    return db_block_save_with(ndb, b, true);
 }
 
 bool db_block_prepare_file_position_scan(sqlite3 *db,

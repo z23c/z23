@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 struct node_db;
+struct active_chain;
 
 struct boot_projection_hole_scan {
     int last_stall_scanned_cursor;
@@ -15,6 +16,13 @@ struct boot_projection_hole_scan {
 
 void boot_projection_hole_scan_init(
     struct boot_projection_hole_scan *state);
+
+/* Boot-time cursor policy: set the projection cursor to min(active tip, top
+ * connected row) so catchup refills any range node.db lost (see the .c).
+ * *cursor_out (optional) is the height written. */
+bool boot_projection_finalize_cursor(struct node_db *ndb,
+                                     const struct active_chain *chain,
+                                     int *cursor_out);
 
 bool boot_projection_sparse_prefix_is_expected(int projection_tip,
                                                int chain_tip);
