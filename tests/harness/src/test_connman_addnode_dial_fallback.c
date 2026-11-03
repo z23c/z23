@@ -13,6 +13,7 @@
 #include "test/test_core.h"
 #include "coins/undo.h"
 #include "net/connman.h"
+#include "net/version.h"
 #include "net/tor_integration.h"
 #include "net/onion_v3_address.h"
 #include "storage/census_read.h"
@@ -1977,5 +1978,452 @@ int check_connman_addnode_starving_redials_proven_peer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+/* ── connman_gather_known_zcl23_candidate branch pins (characterization) ──
+ * The ZCL23 step is reached through connman_gather_dial_candidates, its public
+ * caller. Each case forces an even preference round so this step runs first.
+ * Refusal rows use max 8, so an empty anchor/addrman step cannot hide a ZCL23
+ * refusal behind a general pick. Success rows use max 1. Peers are public
+ * routable addresses: RFC 5737 space is not routable, so addrman would refuse
+ * it and the row would test the wrong gate. */
+
+static void zcl23_pin_init(struct connman *cm,
+                           struct test_known_zcl23_ctx *known, bool *ok)
+{
+    chain_params_select(CHAIN_MAIN);
+    const struct chain_params *params = chain_params_get();
+    struct node_signals sigs;
+    memset(&sigs, 0, sizeof(sigs));
+    memset(known, 0, sizeof(*known));
+    *ok = connman_init(cm, params, &sigs);
+    connman_set_known_zcl23_peer_source(cm, test_known_zcl23_peers, known);
+}
+
+static size_t zcl23_pin_gather(struct connman *cm,
+                               struct connman_dial_candidate *out, size_t max)
+{
+    atomic_store(&cm->zcl23_preference_round, 0);
+    return connman_gather_dial_candidates(cm, out, max);
+}
+
+static bool zcl23_pin_counts(struct connman *cm, uint64_t seen,
+                             uint64_t policy, uint64_t backoff,
+                             uint64_t dials)
+{
+    return atomic_load(&cm->zcl23_candidates_seen) == seen &&
+           atomic_load(&cm->zcl23_policy_skips) == policy &&
+           atomic_load(&cm->zcl23_backoff_skips) == backoff &&
+           atomic_load(&cm->zcl23_dials_scheduled) == dials;
+}
+
+/* Recorded addrman attempts for the public IPv4 endpoint, or -1 when addrman
+ * holds no entry for it. */
+static int zcl23_pin_attempts(struct connman *cm, uint8_t a, uint8_t b,
+                              uint8_t c, uint8_t d)
+{
+    struct net_address addr;
+    struct addr_info info;
+    memset(&info, 0, sizeof(info));
+    test_set_ipv4(&addr, a, b, c, d, 8033);
+    if (!addrman_find_info(&cm->manager.addrman, &addr.svc, &info))
+        return -1;
+    return info.attempts;
+}
+
+static void zcl23_pin_add(struct connman *cm, uint8_t a, uint8_t b,
+                          uint8_t c, uint8_t d, int64_t nTime)
+{
+    struct net_address addr;
+    struct net_addr source;
+    test_set_ipv4(&addr, a, b, c, d, 8033);
+    addr.nTime = (uint32_t)nTime;
+    net_addr_init(&source);
+    (void)addrman_add(&cm->manager.addrman, &addr, &source, 0);
+}
+
+static struct p2p_node *zcl23_pin_inbound_ephemeral(struct connman *cm,
+                                                    uint64_t services)
+{
+    struct net_address adv;
+    struct p2p_node *node = add_test_peer(
+        cm, 140, 174, 189, 3, PEER_HANDSHAKE_COMPLETE, true, false);
+    if (!node)
+        return NULL;
+    test_set_ipv4(&adv, 140, 174, 189, 3, 8033);
+    node->addr.svc.port = 49152;
+    node->services = services;
+    node->advertised_service = adv.svc;
+    node->advertised_service_valid = true;
+    return node;
+}
+
+static int zcl23_pin_negative_peers(void *ctx,
+                                    struct connman_known_peer *out,
+                                    size_t max)
+{
+    (void)ctx;
+    (void)out;
+    (void)max;
+    return -1;
+}
+
+static int zcl23_pin_report(const char *name, bool ok)
+{
+    printf("connman_zcl23 pins: %s... %s\n", name, ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
+static int zcl23_pin_no_source(void)
+{
+    struct connman cm;
+    struct test_known_zcl23_ctx known;
+    struct connman_dial_candidate out[8];
+    bool ok = true;
+    zcl23_pin_init(&cm, &known, &ok);
+    connman_set_known_zcl23_peer_source(&cm, NULL, NULL);
+    size_t n = ok ? zcl23_pin_gather(&cm, out, 8) : 1;
+    ok = ok && n == 0 && zcl23_pin_counts(&cm, 0, 0, 0, 0);
+    connman_free(&cm);
+    return zcl23_pin_report("no peer source returns nothing, counts nothing",
+                            ok);
+}
+
+static int zcl23_pin_empty_source(void)
+{
+    struct connman cm;
+    struct test_known_zcl23_ctx known;
+    struct connman_dial_candidate out[8];
+    bool ok = true;
+    zcl23_pin_init(&cm, &known, &ok);
+    size_t n = ok ? zcl23_pin_gather(&cm, out, 8) : 1;
+    ok = ok && n == 0 && zcl23_pin_counts(&cm, 0, 0, 0, 0);
+    connman_free(&cm);
+    return zcl23_pin_report("source reporting zero peers is a no-op", ok);
+}
+
+static int zcl23_pin_negative_source(void)
+{
+    struct connman cm;
+    struct test_known_zcl23_ctx known;
+    struct connman_dial_candidate out[8];
+    bool ok = true;
+    zcl23_pin_init(&cm, &known, &ok);
+    connman_set_known_zcl23_peer_source(&cm, zcl23_pin_negative_peers, NULL);
+    size_t n = ok ? zcl23_pin_gather(&cm, out, 8) : 1;
+    ok = ok && n == 0 && zcl23_pin_counts(&cm, 0, 0, 0, 0);
+    connman_free(&cm);
+    return zcl23_pin_report("source reporting a negative count is a no-op",
+                            ok);
+}
+
+static int zcl23_pin_unreachable_port(void)
+{
+    struct connman cm;
+    struct test_known_zcl23_ctx known;
+    struct connman_dial_candidate out[8];
+    bool ok = true;
+    zcl23_pin_init(&cm, &known, &ok);
+    test_known_add_ipv4(&known, 60, 1, 1, 1, 9999);
+    test_known_add_ipv4(&known, 60, 1, 1, 2, 9999);
+    test_known_add_ipv4(&known, 60, 1, 1, 3, 9999);
+    size_t n = ok ? zcl23_pin_gather(&cm, out, 8) : 1;
+    ok = ok && n == 0 && zcl23_pin_counts(&cm, 3, 3, 0, 0) &&
+         zcl23_pin_attempts(&cm, 60, 1, 1, 1) == -1;
+    connman_free(&cm);
+    return zcl23_pin_report("unreachable port skipped as policy, not added",
+                            ok);
+}
+
+static int zcl23_pin_loopback_not_routable(void)
+{
+    struct connman cm;
+    struct test_known_zcl23_ctx known;
+    struct connman_dial_candidate out[8];
+    bool ok = true;
+    zcl23_pin_init(&cm, &known, &ok);
+    test_known_add_ipv4(&known, 127, 0, 0, 1, 8033);
+    size_t n = ok ? zcl23_pin_gather(&cm, out, 8) : 1;
+    ok = ok && n == 0 && zcl23_pin_counts(&cm, 1, 1, 0, 0);
+    connman_free(&cm);
+    return zcl23_pin_report("non-routable endpoint refused by addrman", ok);
+}
+
+static int zcl23_pin_local_host(void)
+{
+    struct connman cm;
+    struct test_known_zcl23_ctx known;
+    struct connman_dial_candidate out[8];
+    struct net_address self;
+    bool ok = true;
+    zcl23_pin_init(&cm, &known, &ok);
+    test_set_ipv4(&self, 140, 174, 189, 3, 8033);
+    ok = ok && add_local(&cm.manager, &self.svc, 1);
+    test_known_add_ipv4(&known, 140, 174, 189, 3, 8033);
+    size_t n = ok ? zcl23_pin_gather(&cm, out, 8) : 1;
+    ok = ok && n == 0 && zcl23_pin_counts(&cm, 1, 1, 0, 0);
+    connman_free(&cm);
+    return zcl23_pin_report("own local host endpoint is not dialed", ok);
+}
+
+static int zcl23_pin_inbound_zcl23_suppresses(void)
+{
+    struct connman cm;
+    struct test_known_zcl23_ctx known;
+    struct connman_dial_candidate out[8];
+    bool ok = true;
+    zcl23_pin_init(&cm, &known, &ok);
+    test_known_add_ipv4(&known, 140, 174, 189, 3, 8033);
+    ok = ok && zcl23_pin_inbound_ephemeral(&cm, NODE_NETWORK | NODE_ZCL23);
+    size_t n = ok ? zcl23_pin_gather(&cm, out, 8) : 1;
+    ok = ok && n == 0 && zcl23_pin_counts(&cm, 1, 1, 0, 0);
+    connman_free(&cm);
+    return zcl23_pin_report("handshaked ZCL23 inbound owns its endpoint", ok);
+}
+
+static int zcl23_pin_inbound_plain_not_suppressed(void)
+{
+    struct connman cm;
+    struct test_known_zcl23_ctx known;
+    struct connman_dial_candidate out[8];
+    bool ok = true;
+    zcl23_pin_init(&cm, &known, &ok);
+    test_known_add_ipv4(&known, 140, 174, 189, 3, 8033);
+    ok = ok && zcl23_pin_inbound_ephemeral(&cm, NODE_NETWORK);
+    size_t n = ok ? zcl23_pin_gather(&cm, out, 1) : 0;
+    ok = ok && n == 1 && out[0].addr.svc.port == 8033 &&
+         out[0].source == CONNMAN_TARGET_ZCL23_DB &&
+         zcl23_pin_counts(&cm, 1, 0, 0, 1);
+    connman_free(&cm);
+    return zcl23_pin_report("non-ZCL23 inbound does not suppress the dial", ok);
+}
+
+static int zcl23_pin_outbound_connected(void)
+{
+    struct connman cm;
+    struct test_known_zcl23_ctx known;
+    struct connman_dial_candidate out[8];
+    bool ok = true;
+    zcl23_pin_init(&cm, &known, &ok);
+    test_known_add_ipv4(&known, 140, 174, 189, 3, 8033);
+    ok = ok && add_test_peer(&cm, 140, 174, 189, 3, PEER_HANDSHAKE_COMPLETE,
+                             false, false);
+    size_t n = ok ? zcl23_pin_gather(&cm, out, 8) : 1;
+    ok = ok && n == 0 && zcl23_pin_counts(&cm, 1, 1, 0, 0);
+    connman_free(&cm);
+    return zcl23_pin_report("endpoint already connected outbound is skipped",
+                            ok);
+}
+
+static int zcl23_pin_batch_has_candidate(void)
+{
+    struct connman cm;
+    struct test_known_zcl23_ctx known;
+    struct connman_dial_candidate out[8];
+    bool ok = true;
+    zcl23_pin_init(&cm, &known, &ok);
+    dialer_pin_hint(&cm, &ok, 140, 174, 10, 7, 8033);
+    test_known_add_ipv4(&known, 140, 174, 10, 7, 8033);
+    size_t n = ok ? zcl23_pin_gather(&cm, out, 8) : 1;
+    ok = ok && n == 1 && out[0].source == CONNMAN_TARGET_DHT_HINT &&
+         out[0].addr.svc.port == 8033 && zcl23_pin_counts(&cm, 1, 1, 0, 0);
+    connman_free(&cm);
+    return zcl23_pin_report("endpoint already in batch is not repeated", ok);
+}
+
+static int zcl23_pin_batch_group_saturated(void)
+{
+    struct connman cm;
+    struct test_known_zcl23_ctx known;
+    struct connman_dial_candidate out[8];
+    bool ok = true;
+    zcl23_pin_init(&cm, &known, &ok);
+    dialer_pin_hint(&cm, &ok, 140, 174, 10, 5, 8033);
+    dialer_pin_hint(&cm, &ok, 140, 174, 10, 6, 18033);
+    test_known_add_ipv4(&known, 140, 174, 10, 7, 8033);
+    size_t n = ok ? zcl23_pin_gather(&cm, out, 8) : 1;
+    ok = ok && n == 2 && dialer_pin_all_source(out, n,
+                                               CONNMAN_TARGET_DHT_HINT) &&
+         zcl23_pin_counts(&cm, 1, 1, 0, 0);
+    connman_free(&cm);
+    return zcl23_pin_report("full /16 in batch refuses a ZCL23 endpoint", ok);
+}
+
+static int zcl23_pin_batch_group_room(void)
+{
+    struct connman cm;
+    struct test_known_zcl23_ctx known;
+    struct connman_dial_candidate out[8];
+    bool ok = true;
+    zcl23_pin_init(&cm, &known, &ok);
+    dialer_pin_hint(&cm, &ok, 140, 174, 10, 5, 8033);
+    test_known_add_ipv4(&known, 140, 174, 10, 7, 8033);
+    size_t n = ok ? zcl23_pin_gather(&cm, out, 8) : 1;
+    ok = ok && n == 2 && out[0].source == CONNMAN_TARGET_DHT_HINT &&
+         out[1].source == CONNMAN_TARGET_ZCL23_DB &&
+         out[1].addr.svc.addr.ip[15] == 7 && zcl23_pin_counts(&cm, 1, 0, 0, 1);
+    connman_free(&cm);
+    return zcl23_pin_report("one /16 batch member leaves room for ZCL23", ok);
+}
+
+static int zcl23_pin_backoff_active(void)
+{
+    struct connman cm;
+    struct test_known_zcl23_ctx known;
+    struct connman_dial_candidate out[8];
+    bool ok = true;
+    int64_t now = (int64_t)platform_time_wall_time_t();
+    zcl23_pin_init(&cm, &known, &ok);
+    zcl23_pin_add(&cm, 150, 1, 1, 1, now);
+    ok = ok && test_addrman_set_fail(&cm, 150, 1, now);
+    test_known_add_ipv4(&known, 150, 1, 1, 1, 8033);
+    size_t n = ok ? zcl23_pin_gather(&cm, out, 8) : 1;
+    ok = ok && n == 0 && zcl23_pin_counts(&cm, 1, 0, 1, 0) &&
+         zcl23_pin_attempts(&cm, 150, 1, 1, 1) == 1;
+    connman_free(&cm);
+    return zcl23_pin_report("endpoint inside its cooldown counts as backoff",
+                            ok);
+}
+
+static int zcl23_pin_backoff_elapsed(void)
+{
+    struct connman cm;
+    struct test_known_zcl23_ctx known;
+    struct connman_dial_candidate out[8];
+    struct addr_info info;
+    bool ok = true;
+    int64_t now = (int64_t)platform_time_wall_time_t();
+    zcl23_pin_init(&cm, &known, &ok);
+    zcl23_pin_add(&cm, 151, 1, 1, 1, now);
+    ok = ok && test_addrman_set_fail(&cm, 151, 1, now - 61);
+    test_known_add_ipv4(&known, 151, 1, 1, 1, 8033);
+    size_t n = ok ? zcl23_pin_gather(&cm, out, 1) : 0;
+    memset(&info, 0, sizeof(info));
+    struct net_address want;
+    test_set_ipv4(&want, 151, 1, 1, 1, 8033);
+    ok = ok && n == 1 && out[0].source == CONNMAN_TARGET_ZCL23_DB &&
+         zcl23_pin_counts(&cm, 1, 0, 0, 1) &&
+         addrman_find_info(&cm.manager.addrman, &want.svc, &info) &&
+         info.attempts == 2 && info.last_try >= now;
+    connman_free(&cm);
+    return zcl23_pin_report("elapsed cooldown dials and is charged once", ok);
+}
+
+static int zcl23_pin_external_refused(void)
+{
+    struct connman cm;
+    struct test_known_zcl23_ctx known;
+    struct connman_dial_candidate out[8];
+    bool ok = true;
+    zcl23_pin_init(&cm, &known, &ok);
+    msg_version_set_external_ip("160.1.1.1", 8033);
+    test_known_add_ipv4(&known, 160, 1, 1, 1, 8033);
+    size_t n = ok ? zcl23_pin_gather(&cm, out, 8) : 1;
+    ok = ok && n == 0 && zcl23_pin_counts(&cm, 1, 1, 0, 0);
+    msg_version_clear_external_ip_for_test();
+    connman_free(&cm);
+    return zcl23_pin_report("our own advertised external endpoint refused", ok);
+}
+
+static int zcl23_pin_external_other_port(void)
+{
+    struct connman cm;
+    struct test_known_zcl23_ctx known;
+    struct connman_dial_candidate out[8];
+    bool ok = true;
+    zcl23_pin_init(&cm, &known, &ok);
+    msg_version_set_external_ip("160.1.1.1", 9999);
+    test_known_add_ipv4(&known, 160, 1, 1, 1, 8033);
+    size_t n = ok ? zcl23_pin_gather(&cm, out, 1) : 0;
+    ok = ok && n == 1 && out[0].source == CONNMAN_TARGET_ZCL23_DB &&
+         zcl23_pin_counts(&cm, 1, 0, 0, 1);
+    msg_version_clear_external_ip_for_test();
+    connman_free(&cm);
+    return zcl23_pin_report("external IP on another port does not refuse", ok);
+}
+
+static int zcl23_pin_success_fields(void)
+{
+    struct connman cm;
+    struct test_known_zcl23_ctx known;
+    struct connman_dial_candidate out[8];
+    struct net_address want;
+    bool ok = true;
+    int64_t now = (int64_t)platform_time_wall_time_t();
+    zcl23_pin_init(&cm, &known, &ok);
+    test_set_ipv4(&want, 205, 209, 104, 118, 8033);
+    test_known_add_ipv4(&known, 205, 209, 104, 118, 8033);
+    size_t n = ok ? zcl23_pin_gather(&cm, out, 1) : 0;
+    ok = ok && n == 1 && net_service_eq(&out[0].addr.svc, &want.svc) &&
+         (int64_t)out[0].addr.nTime >= now &&
+         out[0].source == CONNMAN_TARGET_ZCL23_DB &&
+         out[0].addnode_index == SIZE_MAX && !out[0].is_feeler &&
+         zcl23_pin_counts(&cm, 1, 0, 0, 1) &&
+         zcl23_pin_attempts(&cm, 205, 209, 104, 118) == 1;
+    connman_free(&cm);
+    return zcl23_pin_report("success fills the candidate and charges addrman",
+                            ok);
+}
+
+static int zcl23_pin_two_eligible(void)
+{
+    struct connman cm;
+    struct test_known_zcl23_ctx known;
+    struct connman_dial_candidate out[8];
+    bool ok = true;
+    zcl23_pin_init(&cm, &known, &ok);
+    test_known_add_ipv4(&known, 60, 1, 1, 1, 8033);
+    test_known_add_ipv4(&known, 61, 1, 1, 1, 8033);
+    size_t n = ok ? zcl23_pin_gather(&cm, out, 1) : 0;
+    int a = zcl23_pin_attempts(&cm, 60, 1, 1, 1);
+    int b = zcl23_pin_attempts(&cm, 61, 1, 1, 1);
+    ok = ok && n == 1 && zcl23_pin_counts(&cm, 2, 0, 0, 1) &&
+         ((a == 1 && b == -1) || (a == -1 && b == 1));
+    connman_free(&cm);
+    return zcl23_pin_report("first eligible peer wins, the other is untouched",
+                            ok);
+}
+
+static int zcl23_pin_skip_then_eligible(void)
+{
+    struct connman cm;
+    struct test_known_zcl23_ctx known;
+    struct connman_dial_candidate out[8];
+    bool ok = true;
+    zcl23_pin_init(&cm, &known, &ok);
+    test_known_add_ipv4(&known, 60, 1, 1, 1, 9999);
+    test_known_add_ipv4(&known, 61, 1, 1, 1, 8033);
+    size_t n = ok ? zcl23_pin_gather(&cm, out, 1) : 0;
+    ok = ok && n == 1 && out[0].addr.svc.addr.ip[12] == 61 &&
+         out[0].source == CONNMAN_TARGET_ZCL23_DB &&
+         atomic_load(&cm.zcl23_policy_skips) <= 1 &&
+         atomic_load(&cm.zcl23_dials_scheduled) == 1;
+    connman_free(&cm);
+    return zcl23_pin_report("unreachable peer skipped, eligible one dialed", ok);
+}
+
+int check_connman_zcl23_gather_pins(void)
+{
+    int failures = 0;
+    failures += zcl23_pin_no_source();
+    failures += zcl23_pin_empty_source();
+    failures += zcl23_pin_negative_source();
+    failures += zcl23_pin_unreachable_port();
+    failures += zcl23_pin_loopback_not_routable();
+    failures += zcl23_pin_local_host();
+    failures += zcl23_pin_inbound_zcl23_suppresses();
+    failures += zcl23_pin_inbound_plain_not_suppressed();
+    failures += zcl23_pin_outbound_connected();
+    failures += zcl23_pin_batch_has_candidate();
+    failures += zcl23_pin_batch_group_saturated();
+    failures += zcl23_pin_batch_group_room();
+    failures += zcl23_pin_backoff_active();
+    failures += zcl23_pin_backoff_elapsed();
+    failures += zcl23_pin_external_refused();
+    failures += zcl23_pin_external_other_port();
+    failures += zcl23_pin_success_fields();
+    failures += zcl23_pin_two_eligible();
+    failures += zcl23_pin_skip_then_eligible();
     return failures;
 }

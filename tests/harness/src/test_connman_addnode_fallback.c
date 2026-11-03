@@ -102,6 +102,7 @@ int test_connman_addnode_fallback(void)
     failures += check_connman_addnode_dial_batch_refused_loopback();
     failures += check_connman_addnode_dial_batch_accepted_loopback();
     failures += check_connman_addnode_dial_batch_onion_tor_absent();
+    failures += check_connman_zcl23_gather_pins();
     failures += check_connman_onion_slot();
     failures += check_connman_addnode_prehandshake_protocol_backoff();
     failures += check_connman_addnode_protocol_backoff_gt_tcp();

@@ -53,6 +53,7 @@ int check_connman_dialer_gather_pins(void);
 int check_connman_addnode_dial_batch_refused_loopback(void);
 int check_connman_addnode_dial_batch_accepted_loopback(void);
 int check_connman_addnode_dial_batch_onion_tor_absent(void);
+int check_connman_zcl23_gather_pins(void);
 
 /* test_connman_onion_slot.c — onion relay hints to addrman, the once-per-boot
  * onion walk, the dialer's reserved onion slot, and no onion gossip. */
