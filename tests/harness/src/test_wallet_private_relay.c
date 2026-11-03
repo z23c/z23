@@ -60,11 +60,12 @@
 #include "storage/progress_store.h"
 
 #include <sqlite3.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
-static int64_t wprt_now;
-static int64_t wprt_clock(void) { return wprt_now; }
+static _Atomic int64_t wprt_now;
+static int64_t wprt_clock(void) { return atomic_load(&wprt_now); }
 
 /* Deterministic RNG: byte = fill, or the real CSPRNG when fill < 0. */
 static int wprt_fill = -1;
@@ -139,7 +140,7 @@ static bool wprt_open(struct wprt_fx *f, enum wpr_mode mode)
     r->now_ms = wprt_clock;
     r->random_bytes = wprt_rng;
     wprt_cur = f;
-    wprt_now = 1000000;
+    atomic_store(&wprt_now, 1000000);
     wprt_fill = -1;
     struct wpr_env env = {
         .wallet = f->wallet, .connman = &f->cm, .coins_tip = &f->coins,
@@ -370,7 +371,7 @@ static void wprt_revive_peers(void)
 
 static void wprt_tick(int64_t advance_ms, int tip, struct wpr_tick_result *out)
 {
-    wprt_now += advance_ms;
+    atomic_fetch_add(&wprt_now, advance_ms);
     wpr_tick(wpr_global(), tip, out);
     wprt_revive_peers();
 }
@@ -1385,7 +1386,7 @@ static void wprt_public_restart_steps(struct wprt_fx *f,
                                       const struct outpoint *spent, bool ok,
                                       int *failures)
 {
-    wprt_now += 60 * 1000;
+    atomic_fetch_add(&wprt_now, 60 * 1000);
     platform_sleep_ms(2500);
     wprt_report("a public-mode restart resumes the held send and sends "
                 "nothing, though an onion peer is connected",
@@ -1546,7 +1547,7 @@ static int wprt_case_expiry_unverified(void)
                 ok && wprt_status_next_has(&f, &id,
                                            "Do not send the payment again"),
                 &failures);
-    wprt_now += (WPR_RETRY_S + 1) * 1000;
+    atomic_fetch_add(&wprt_now, (WPR_RETRY_S + 1) * 1000);
     wprt_tick_at_height(&f, e + WPR_EXPIRY_MARGIN_BLOCKS + 500);
     wprt_report("a later tick, far past the margin, still keeps the record",
                 ok && wprt_record_kept(&f, &id, &spent), &failures);
@@ -1576,7 +1577,7 @@ static int wprt_case_expiry_disk_full(void)
     wprt_report("a failed row delete does not mark the send expired",
                 ok && wprt_state(&id, &found) != WPR_EXPIRED && found,
                 &failures);
-    wprt_now += (WPR_RETRY_S + 1) * 1000;
+    atomic_fetch_add(&wprt_now, (WPR_RETRY_S + 1) * 1000);
     wprt_tick_at_height(&f, e + WPR_EXPIRY_MARGIN_BLOCKS + 2);
     wprt_report("a second tick with the database still refusing does not "
                 "either, and the status says it is retried",
@@ -1584,7 +1585,7 @@ static int wprt_case_expiry_disk_full(void)
                     wprt_status_next_has(&f, &id, "retried"),
                 &failures);
     f.ndb.open = true;
-    wprt_now += (WPR_RETRY_S + 1) * 1000;
+    atomic_fetch_add(&wprt_now, (WPR_RETRY_S + 1) * 1000);
     wprt_tick_at_height(&f, e + WPR_EXPIRY_MARGIN_BLOCKS + 3);
     struct db_wallet_tx row;
     memset(&row, 0, sizeof(row));
