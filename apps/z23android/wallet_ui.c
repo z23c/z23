@@ -5,6 +5,7 @@
 #include "fleet.h"
 #include "jni_util.h"
 #include "secure_window.h"
+#include "setup_field.h"
 #include "wallet_reveal.h"
 #include "wallet_send_ui.h"
 #include <stdlib.h>
@@ -77,7 +78,10 @@ static bool input_view(JNIEnv *env, const char *hint)
         zj_int_property(env, view, "setImeOptions", IME_NO_LEARNING) && zj_int_property(env, view, "setHintTextColor", (jint)0xff808080u) &&
         zj_char_sequence(env, view, "setHint", hint) && zj_margins(env, view, MATCH, WRAP, 0.0f, 0, 8, 0, 0) &&
         zj_append(env, ui.container, view) && zj_keep(env, &ui.input, view);
-    if (view) (*env)->DeleteLocalRef(env, view);
+    if (view) {
+        (void)zj_int_property(env, view, "setImportantForAutofill", ZAPP_FIELD_AUTOFILL_NO);
+        (*env)->DeleteLocalRef(env, view);
+    }
     return ok;
 }
 /* Sets the first line of a row's text, the amount, larger. A failure leaves the text plain. */

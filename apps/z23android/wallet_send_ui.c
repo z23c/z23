@@ -10,6 +10,7 @@
 #include "scan.h"
 #include "send_key.h"
 #include "secure_window.h"
+#include "setup_field.h"
 #include "wallet_send_device.h"
 #include "wallet_send_keeper.h"
 #include "wallet_reveal.h"
@@ -388,7 +389,10 @@ static bool input_view(JNIEnv *env, const char *hint, int type, jobject *keep)
               zj_int_property(env, view, "setImeOptions", IME_NO_LEARNING) && zj_int_property(env, view, "setHintTextColor", (jint)0xff808080u) &&
               zj_char_sequence(env, view, "setHint", hint) && zj_margins(env, view, MATCH, WRAP, 0.0f, 0, 8, 0, 0) &&
               zj_append(env, ui.container, view) && zj_keep(env, keep, view);
-    if (view) (*env)->DeleteLocalRef(env, view);
+    if (view) {
+        (void)zj_int_property(env, view, "setImportantForAutofill", ZAPP_FIELD_AUTOFILL_NO);
+        (*env)->DeleteLocalRef(env, view);
+    }
     return ok;
 }
 /* Send is the one button that moves money: the platform drops its touches while another window covers it, in addition to

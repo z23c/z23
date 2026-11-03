@@ -5,6 +5,7 @@
 #include "fleet.h"
 #include "hosts.h"
 #include "jni_util.h"
+#include "setup_field.h"
 #include "shell.h"
 #include <stdio.h>
 #include <stdint.h>
@@ -234,12 +235,15 @@ static bool orient_layout(JNIEnv *env, jobject layout)
     return zj_clean(env);
 }
 /* Typed text, and a pasted pairing invitation, stay out of keyboard suggestions and personalised learning:
- * TYPE_CLASS_TEXT, TYPE_TEXT_FLAG_MULTI_LINE and TYPE_TEXT_FLAG_NO_SUGGESTIONS; IME_FLAG_NO_PERSONALIZED_LEARNING. */
+ * TYPE_CLASS_TEXT, TYPE_TEXT_FLAG_MULTI_LINE and TYPE_TEXT_FLAG_NO_SUGGESTIONS; IME_FLAG_NO_PERSONALIZED_LEARNING. Autofill is
+ * off; long-click stays on so paste works. */
 static bool style_prompt(JNIEnv *env, jobject field)
 {
-    return zj_typography(env, field, 16.0f, (jint)0xffffffff) &&
+    bool ok = zj_typography(env, field, 16.0f, (jint)0xffffffff) &&
            zj_int_property(env, field, "setInputType", 0xA0001) && zj_int_property(env, field, "setImeOptions", 0x1000000) &&
            zj_int_property(env, field, "setMinLines", 1) && zj_int_property(env, field, "setMaxLines", 4);
+    (void)zj_int_property(env, field, "setImportantForAutofill", ZAPP_FIELD_AUTOFILL_NO);
+    return ok;
 }
 static bool prepare_layouts(JNIEnv *env, jobject layout, jobject details, jobject prompt, jobject invite, jobject receipt)
 {

@@ -447,6 +447,27 @@ static enum screen screen_for(enum screen next)
     bool wallet = next == SCREEN_WALLET || next == SCREEN_SEND;
     return wallet && !shell.preview && zapp_setup_state(shell.files) != ZAPP_SETUP_READY ? SCREEN_SETUP : next;
 }
+/* The Assistant takes pasted fleet invitations and laptop pairing descriptors and shows the conversation, so it gets the
+ * window protections of the wallet screens. They read only the environment and the activity object. */
+static bool protect_window(JNIEnv *env, bool on)
+{
+    ANativeActivity window = {.env = env, .clazz = shell.activity};
+    return zapp_secure_window(&window, on);
+}
+static bool wallet_screen(enum screen s) { return s == SCREEN_WALLET || s == SCREEN_SEND || s == SCREEN_SETUP; }
+/* What the owner is told when the window could not be protected; read before any later call resets the reason. */
+static void assistant_refused(char *out, size_t cap)
+{
+    const char *refused = zapp_secure_window_refusal();
+    snprintf(out, cap, "This phone would not let the app %s, so the assistant is not shown.", refused ? refused : "protect the screen");
+}
+/* The touch gate and the Assistant's window protection for the screen about to be shown. */
+static void set_protection(JNIEnv *env, enum screen next)
+{
+    if (wallet_screen(next) || next == SCREEN_ASSISTANT) shell.gate.protect = true;
+    else zapp_touch_gate_release(&shell.gate);
+    if (shell.current == SCREEN_ASSISTANT && next != SCREEN_ASSISTANT && !wallet_screen(next)) (void)protect_window(env, false);
+}
 /* What a screen does as it comes into view. */
 static void enter_screen(JNIEnv *env, enum screen next)
 {
@@ -463,11 +484,15 @@ static void go(JNIEnv *env, enum screen next)
     if (shell.current == SCREEN_SETUP && next != SCREEN_SETUP && !leave_setup(env)) return;
     if (shell.current == SCREEN_SEND && next != SCREEN_SEND && !leave_send(env)) return;
     if (shell.current == SCREEN_WALLET) leave_wallet(env);
-    if (next == SCREEN_WALLET || next == SCREEN_SEND || next == SCREEN_SETUP) shell.gate.protect = true;
-    else zapp_touch_gate_release(&shell.gate);
+    char why[sizeof(shell.action_notice)] = "";
+    if (next == SCREEN_ASSISTANT && !protect_window(env, true)) {
+        assistant_refused(why, sizeof(why));
+        next = SCREEN_HOME;
+    }
+    set_protection(env, next);
     if (next != SCREEN_SCAN) shell.camera_waiting = false;
     shell.current = next;
-    shell.action_notice[0] = 0;
+    snprintf(shell.action_notice, sizeof(shell.action_notice), "%s", why);
     set_text(env, shell.outcome_view, "");
     enter_screen(env, next);
     for (int i = 0; i < SCREEN_COUNT; ++i) (void)zj_visible(env, shell.roots[i], i == (int)next);
@@ -819,6 +844,7 @@ void zapp_shell_resume(JNIEnv *env)
     if (shell.current == SCREEN_SETUP) zapp_setup_ui_render(env);
     else if (shell.current == SCREEN_SCAN) resume_scan(env);
     else if (shell.current == SCREEN_APPS || shell.current == SCREEN_SETTINGS || shell.current == SCREEN_WALLET) go(env, SCREEN_HOME);
+    else if (shell.current == SCREEN_ASSISTANT && !protect_window(env, true)) go(env, SCREEN_HOME);
     else show_home(env);
 }
 void zapp_shell_destroy(JNIEnv *env)

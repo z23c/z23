@@ -100,12 +100,14 @@ static void text_entry_is_private(void)
         size_t created = count(src, "android/widget/EditText");
         if (created) {
             size_t ime = lines_with(src, "setImeOptions", "0x1000000", NULL) + lines_with(src, "setImeOptions", "IME_NO_LEARNING", NULL);
+            size_t autofill = lines_with(src, "setImportantForAutofill", "ZAPP_FIELD_AUTOFILL_NO", NULL);
             size_t type = lines_with(src, "setInputType", NULL, NULL);
             size_t helper_calls = count(src, "style_prompt(env, ");
-            if (helper_calls) { ime = ime - 1 + helper_calls; type = type - 1 + helper_calls; }
+            if (helper_calls) { ime = ime - 1 + helper_calls; type = type - 1 + helper_calls; autofill = autofill - 1 + helper_calls; }
             fields += created;
             if (ime < created) { fprintf(stderr, "%s: %zu EditText fields, %zu with IME_FLAG_NO_PERSONALIZED_LEARNING\n", e->d_name, created, ime); abort(); }
             if (type < created) { fprintf(stderr, "%s: %zu EditText fields, %zu with an input type\n", e->d_name, created, type); abort(); }
+            if (autofill < created) { fprintf(stderr, "%s: %zu EditText fields, %zu with autofill off\n", e->d_name, created, autofill); abort(); }
             if (lines_with(src, "(void)", "setImeOptions", NULL) || lines_with(src, "(void)", "setInputType", NULL)) {
                 fprintf(stderr, "%s: the result of an IME flag call is discarded\n", e->d_name); abort();
             }
@@ -116,6 +118,58 @@ static void text_entry_is_private(void)
     /* Five fields: native_ui.c creates two and each of the three wallet screens creates one. The sixth field was in
      * clip_screen.c, which was removed with the Clips screen. */
     assert(fields == 5);
+}
+
+/* Paste must keep working in the fields that take payment and invitation text, so none turns long-click off. */
+static void paste_stays_available(void)
+{
+    static const char *const fields[][2] = {{"native_ui.c", "static bool style_prompt("}, {"wallet_send_ui.c", "static bool input_view("},
+                                            {"wallet_ui.c", "static bool input_view("}};
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i) {
+        char *src = slurp(fields[i][0]);
+        const char *at = strstr(src, fields[i][1]);
+        const char *end = at ? strstr(at, "\n}\n") : NULL;
+        assert(at && end);
+        char *body = strndup(at, (size_t)(end - at));
+        assert(body);
+        if (strstr(body, "setLongClickable")) { fprintf(stderr, "%s turns long-click off on a field\n", fields[i][0]); abort(); }
+        free(body);
+        free(src);
+    }
+}
+
+/* The screens that take or show secrets get the window protections and the obscured-touch drop: the wallet screens, and the
+ * Assistant, which takes pasted invitations and pairing descriptors. */
+static void secret_screens_are_protected(void)
+{
+    char *src = slurp("shell.c");
+    const char *list = strstr(src, "static bool wallet_screen(");
+    const char *list_end = list ? strchr(list, '\n') : NULL;
+    assert(list && list_end);
+    char *line = strndup(list, (size_t)(list_end - list));
+    assert(line);
+    require(line, "SCREEN_WALLET", "the wallet screen is protected");
+    require(line, "SCREEN_SEND", "the send screen is protected");
+    require(line, "SCREEN_SETUP", "the setup screens are protected");
+    free(line);
+    const char *go = strstr(src, "static void go(JNIEnv *env, enum screen next)\n{");
+    const char *end = go ? strstr(go, "\n}\n") : NULL;
+    assert(go && end);
+    char *body = strndup(go, (size_t)(end - go));
+    assert(body);
+    require(body, "next == SCREEN_ASSISTANT && !protect_window(env, true)", "the Assistant is not shown unprotected");
+    require(body, "set_protection(env, next);", "every screen change sets the protection");
+    free(body);
+    const char *set = strstr(src, "static void set_protection(JNIEnv *env, enum screen next)\n{");
+    const char *set_end = set ? strstr(set, "\n}\n") : NULL;
+    assert(set && set_end);
+    body = strndup(set, (size_t)(set_end - set));
+    assert(body);
+    require(body, "wallet_screen(next) || next == SCREEN_ASSISTANT) shell.gate.protect = true", "obscured touches are dropped on the Assistant");
+    require(body, "protect_window(env, false)", "leaving the Assistant lifts the protection");
+    require(src, "shell.current == SCREEN_ASSISTANT && !protect_window(env, true)", "the Assistant is protected again on resume");
+    free(body);
+    free(src);
 }
 
 /* The node notification and its channel are secret on the lock screen. */
@@ -203,6 +257,8 @@ int main(int argc, char **argv)
     manifest_blocks_extraction();
     manifest_exports_only_the_launcher();
     text_entry_is_private();
+    paste_stays_available();
+    secret_screens_are_protected();
     node_notification_is_secret();
     inputs_are_gated();
     clips_is_unreachable();
