@@ -582,7 +582,7 @@ static bool z_sendmany_collect_recipients(const struct json_value *recipients,
     o->total_amount = 0;
     for (size_t i = 0; i < num_recip; i++) {
         if (!z_sendmany_add_recipient(json_at(recipients, i), i, o, result, f)) {
-            return false;
+            return false; // raw-return-ok:fail-record-logged-by-z_sendmany_run
         }
     }
     return true;
@@ -844,7 +844,7 @@ static bool z_sendmany_sign_shielded(struct wallet_rpc_context *ctx,
                                      struct z_sendmany_fail *f)
 {
     if (!z_sendmany_alloc_z_outs(wtx, o->num_z_out, result)) {
-        return false;
+        return false; // raw-return-ok:callee-logs
     }
 
     /* Get OVK from sapling keystore */
@@ -856,12 +856,12 @@ static bool z_sendmany_sign_shielded(struct wallet_rpc_context *ctx,
      * wallet_shielded_internal.h. */
     void *proving_ctx = NULL;
     if (!z_sendmany_prover_init(wtx, sel, result, &proving_ctx)) {
-        return false;
+        return false; // raw-return-ok:callee-logs
     }
 
     size_t i = 0;
     if (!z_sendmany_prove_outs(proving_ctx, wtx, ovk, o, &i, result)) {
-        return false;
+        return false; // raw-return-ok:callee-logs
     }
 
     /* Fill transparent inputs from SQLite model (needed for sighash) */
@@ -869,7 +869,7 @@ static bool z_sendmany_sign_shielded(struct wallet_rpc_context *ctx,
 
     /* Sign transparent inputs */
     if (!z_sendmany_sign_tz(ctx, cp, wtx, sel, height, proving_ctx, &i, result)) {
-        return false;
+        return false; // raw-return-ok:callee-logs
     }
     return z_sendmany_bind_shielded(cp, wtx, height, proving_ctx, result, f);
 }
@@ -1018,7 +1018,7 @@ static bool z_sendmany_spend_transparent(struct wallet_rpc_context *ctx,
     /* ── Transparent spend path (t→t, t→z) ─────────────────────── */
 
     if (!z_sendmany_check_proving(o->num_z_out, result)) {
-        return false;
+        return false; // raw-return-ok:callee-logs
     }
 
     /* Select coins from SQLite model layer, restricted to the from-address.
@@ -1067,13 +1067,13 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
      * only this spend entry is gated. */
     int32_t spend_floor = WALLET_SPEND_NO_FLOOR;
     if (!z_sendmany_gate_spend(ctx, checkpoint_rule, &spend_floor, result)) {
-        return false;
+        return false; // raw-return-ok:callee-logs
     }
 
     const char *from_addr = NULL;
     const struct json_value *recipients = NULL;
     if (!z_sendmany_check_args(params, result, &from_addr, &recipients)) {
-        return false;
+        return false; // raw-return-ok:callee-logs
     }
 
     /* Is the from address transparent or Sapling? Decided against the active
