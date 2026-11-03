@@ -113,6 +113,7 @@ ZCL_MODULE_CAPABILITY("engine/controllers/src/mining_controller.c", CAP_FS_WRITE
 ZCL_MODULE_CAPABILITY("engine/controllers/src/misc_controller.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/explorer/controllers/src/name_site_controller.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/controllers/src/net_native_handlers.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/controllers/src/network_controller.c", CAP_FS_WRITE, "setban, remove and clearbanned persist banlist.dat through core's ban functions")
 ZCL_MODULE_CAPABILITY("engine/controllers/src/network_snapshot_loader_contract.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/controllers/src/nodelog_controller.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/controllers/src/ops_native_handlers.c", CAP_FS_WRITE, "")
