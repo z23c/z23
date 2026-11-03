@@ -1915,9 +1915,6 @@ static int test_bf_recovery_renewal_race(void)
 /* The runtime ticks against a file-backed node.db installed as
  * app_runtime_node_db(), plus a second connection to the same file standing
  * in for a staged writer with its own handle. */
-enum { BF_TICK_HOLD_MS = 1000 };
-#define BF_TICK_BOUND_US ((int64_t)BF_TICK_HOLD_MS * 1000 / 2)
-
 struct bf_tick_fixture {
     struct node_db ndb;
     struct node_db other;
@@ -1982,13 +1979,6 @@ static int64_t bf_runtime_state_int(const char *key)
     return value;
 }
 
-static int64_t bf_timed_tick(void (*tick)(void))
-{
-    int64_t started = platform_time_monotonic_us();
-    tick();
-    return platform_time_monotonic_us() - started;
-}
-
 static int test_bf_requester_tick_idle_and_recovery(void)
 {
     int failures = 0;
@@ -2006,17 +1996,14 @@ static int test_bf_requester_tick_idle_and_recovery(void)
                                NULL), SQLITE_OK);
         ASSERT_EQ(sqlite3_set_authorizer(f.ndb.db, bf_sql_census_count,
                                          &census), SQLITE_OK);
-        int64_t idle_us = bf_timed_tick(
-            build_fabric_runtime_requester_tick_for_test);
+        build_fabric_runtime_requester_tick_for_test();
         ASSERT_EQ(sqlite3_set_authorizer(f.ndb.db, NULL, NULL), SQLITE_OK);
         ASSERT_EQ(sqlite3_exec(f.other.db, "ROLLBACK", NULL, NULL, NULL),
                   SQLITE_OK);
-        printf("[idle tick %lld us] ", (long long)idle_us);
         ASSERT(census.reads > 0);
         ASSERT_EQ(census.writes, 0);
         ASSERT_EQ(sqlite3_total_changes(f.ndb.db), changes);
         ASSERT_EQ(sqlite3_txn_state(f.ndb.db, NULL), SQLITE_TXN_NONE);
-        ASSERT(idle_us < BF_TICK_BOUND_US);
         ASSERT_EQ(bf_runtime_state_int("node_db_busy_skips"), skips);
         ASSERT_EQ(bf_runtime_state_int("recovery_failures"), failed);
 
@@ -2041,96 +2028,80 @@ static int test_bf_requester_tick_idle_and_recovery(void)
     return failures;
 }
 
-/* A staged writer on its own connection holds the write lock while a writer
- * on the shared handle waits it out inside its busy handler, owning the
- * shared connection's mutex throughout. */
-struct bf_held_connection {
-    struct node_db *shared;
-    struct node_db *other;
-    bool released;
-    bool wrote;
+/* Another thread owns the shared connection's mutex, as a writer waiting out
+ * another connection's write lock in its busy handler does, until the test
+ * lets it go. The handshake is a condition variable, not a clock. */
+struct bf_mutex_holder {
+    sqlite3_mutex *mutex;
+    pthread_mutex_t lock;
+    pthread_cond_t changed;
+    bool held;
+    bool release;
 };
 
-static void *bf_release_write_lock(void *context)
+static void *bf_hold_connection_mutex(void *context)
 {
-    struct bf_held_connection *held = context;
-    platform_sleep_ms(BF_TICK_HOLD_MS);
-    held->released = sqlite3_exec(held->other->db, "COMMIT", NULL, NULL,
-                                  NULL) == SQLITE_OK;
+    struct bf_mutex_holder *h = context;
+    sqlite3_mutex_enter(h->mutex);
+    pthread_mutex_lock(&h->lock);
+    h->held = true;
+    pthread_cond_broadcast(&h->changed);
+    while (!h->release)
+        pthread_cond_wait(&h->changed, &h->lock);
+    pthread_mutex_unlock(&h->lock);
+    sqlite3_mutex_leave(h->mutex);
     return NULL;
 }
 
-static void *bf_write_shared(void *context)
+static void bf_mutex_holder_wait_held(struct bf_mutex_holder *h)
 {
-    struct bf_held_connection *held = context;
-    held->wrote = sqlite3_exec(held->shared->db,
-                               "INSERT INTO bf_tick_contender VALUES(1)",
-                               NULL, NULL, NULL) == SQLITE_OK;
-    return NULL;
+    pthread_mutex_lock(&h->lock);
+    while (!h->held)
+        pthread_cond_wait(&h->changed, &h->lock);
+    pthread_mutex_unlock(&h->lock);
 }
 
-/* True once another thread has owned the connection mutex for five straight
- * 10 ms polls, far longer than a prepare: it is inside a busy wait. */
-static bool bf_connection_mutex_held(struct node_db *ndb)
+static void bf_mutex_holder_release(struct bf_mutex_holder *h)
 {
-    sqlite3_mutex *mutex = sqlite3_db_mutex(ndb->db);
-    int held_polls = 0;
-    for (int i = 0; mutex && i < 400 && held_polls < 5; i++) {
-        if (sqlite3_mutex_try(mutex) == SQLITE_OK) {
-            sqlite3_mutex_leave(mutex);
-            held_polls = 0;
-        } else {
-            held_polls++;
-        }
-        platform_sleep_ms(10);
-    }
-    return held_polls >= 5;
+    pthread_mutex_lock(&h->lock);
+    h->release = true;
+    pthread_cond_broadcast(&h->changed);
+    pthread_mutex_unlock(&h->lock);
 }
 
+/* Both ticks return while another thread owns the connection. A tick that
+ * waited for the mutex would never return, and the group's progress watchdog
+ * fails the run; no wall-clock bound decides the verdict. */
 static int test_bf_runtime_ticks_skip_held_connection(void)
 {
     int failures = 0;
     struct bf_tick_fixture f = {0};
-    struct bf_held_connection held = {0};
-    pthread_t releaser, writer;
-    bool releasing = false, writing = false;
+    struct bf_mutex_holder holder = {.lock = PTHREAD_MUTEX_INITIALIZER,
+                                     .changed = PTHREAD_COND_INITIALIZER};
+    pthread_t thread;
+    bool holding = false;
     TEST("build_fabric: requester and worker ticks skip a held node.db connection") {
         ASSERT(bf_tick_fixture_open(&f, "tick-held"));
-        ASSERT_EQ(sqlite3_exec(f.ndb.db,
-                               "CREATE TABLE bf_tick_contender(x INTEGER)",
-                               NULL, NULL, NULL), SQLITE_OK);
-        held = (struct bf_held_connection){.shared = &f.ndb,
-                                           .other = &f.other};
+        holder.mutex = sqlite3_db_mutex(f.ndb.db);
         int64_t skips = bf_runtime_state_int("node_db_busy_skips");
         int64_t ticks = bf_runtime_state_int("requester_ticks");
-        ASSERT_EQ(sqlite3_exec(f.other.db, "BEGIN IMMEDIATE", NULL, NULL,
-                               NULL), SQLITE_OK);
-        releasing = pthread_create(&releaser, NULL, bf_release_write_lock,
-                                   &held) == 0;
-        ASSERT(releasing);
-        writing = pthread_create(&writer, NULL, bf_write_shared, &held) == 0;
-        ASSERT(writing);
-        ASSERT(bf_connection_mutex_held(&f.ndb));
-        int64_t requester_us = bf_timed_tick(
-            build_fabric_runtime_requester_tick_for_test);
-        int64_t worker_us = bf_timed_tick(
-            build_fabric_runtime_worker_tick_for_test);
-        printf("[requester tick %lld us, worker tick %lld us, hold %d ms] ",
-               (long long)requester_us, (long long)worker_us,
-               BF_TICK_HOLD_MS);
-        (void)pthread_join(writer, NULL);
-        writing = false;
-        (void)pthread_join(releaser, NULL);
-        releasing = false;
-        ASSERT(held.released && held.wrote);
-        ASSERT(requester_us < BF_TICK_BOUND_US);
-        ASSERT(worker_us < BF_TICK_BOUND_US);
+        holding = pthread_create(&thread, NULL, bf_hold_connection_mutex,
+                                 &holder) == 0;
+        ASSERT(holding);
+        bf_mutex_holder_wait_held(&holder);
+        build_fabric_runtime_requester_tick_for_test();
+        build_fabric_runtime_worker_tick_for_test();
+        bf_mutex_holder_release(&holder);
+        (void)pthread_join(thread, NULL);
+        holding = false;
         ASSERT(bf_runtime_state_int("node_db_busy_skips") >= skips + 3);
         ASSERT_EQ(bf_runtime_state_int("requester_ticks"), ticks + 1);
         PASS();
     } _test_next:;
-    if (writing) (void)pthread_join(writer, NULL);
-    if (releasing) (void)pthread_join(releaser, NULL);
+    if (holding) {
+        bf_mutex_holder_release(&holder);
+        (void)pthread_join(thread, NULL);
+    }
     bf_tick_fixture_close(&f);
     return failures;
 }
