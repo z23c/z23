@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "setup_words.h"
 #include "base/cleanse.h"
+#include "zsha256/zsha256.h"
 #include <string.h>
 
 static bool space(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
@@ -37,6 +38,42 @@ bool zapp_words_parse(const char *text, struct zapp_words *out)
     memory_cleanse(word, sizeof(word));
     if (bad || !count_valid(out->count)) { zapp_words_cleanse(out); return false; }
     return true;
+}
+/* The index of word in the BIP39 list, or -1. The list is sorted. */
+static long index_of(const char *word)
+{
+    size_t lo = 0, hi = ZAPP_WORDLIST_SIZE;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        int order = strcmp(word, zapp_wordlist[mid]);
+        if (order == 0) return (long)mid;
+        if (order < 0) hi = mid;
+        else lo = mid + 1;
+    }
+    return -1;
+}
+enum zapp_words_problem zapp_words_check(const struct zapp_words *words, size_t *position)
+{
+    uint8_t bits[ZAPP_WORDS_MAX * 11 / 8 + 1] = {0};
+    uint8_t digest[ZSHA256_DIGEST_LEN];
+    if (!count_valid(words->count)) return ZAPP_WORDS_CHECKSUM;
+    for (size_t i = 0; i < words->count; ++i) {
+        long index = index_of(words->word[i]);
+        if (index < 0) {
+            *position = i;
+            memory_cleanse(bits, sizeof(bits));
+            return ZAPP_WORDS_OFF_LIST;
+        }
+        for (size_t b = 0; b < 11; ++b)
+            if ((index >> (10 - b)) & 1) bits[(i * 11 + b) / 8] |= (uint8_t)(0x80u >> ((i * 11 + b) % 8));
+    }
+    /* Each word holds 11 bits: ENT bits of entropy followed by ENT / 32 bits of the SHA-256 of the entropy. */
+    size_t total = words->count * 11, entropy = total * 32 / 33, checksum = total - entropy;
+    zsha256(bits, entropy / 8, digest);
+    bool ok = (bits[entropy / 8] >> (8 - checksum)) == (digest[0] >> (8 - checksum));
+    memory_cleanse(bits, sizeof(bits));
+    memory_cleanse(digest, sizeof(digest));
+    return ok ? ZAPP_WORDS_OK : ZAPP_WORDS_CHECKSUM;
 }
 bool zapp_words_join(const struct zapp_words *words, char *out, size_t cap)
 {

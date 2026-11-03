@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #define PHRASE "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray"
+#define VALID_PHRASE "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
 #define HASH "00000000000000000000000000000000000000000000000000000000000abcde"
 #define CHAIN "{\"result\":{\"headers\":3000000,\"blocks\":2999990},\"error\":null}"
 #define PASS64 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -854,7 +855,7 @@ static void restore_tests(void)
     assert(w.step == WSU_RESTORE_FORM && w.failure == WSU_BAD_WORDS && f.wraps == 0);
     f.script.hook = fake_hook;
     script_say(&f.script, true, "{\"ok\":true,\"data\":{\"recovered\":true,\"birthday_recorded\":true,\"birthday_rejected\":false}}");
-    wsu_restore_job(&w, PHRASE, 2999000);
+    wsu_restore_job(&w, VALID_PHRASE, 2999000);
     wsu_view_read(&w, &v);
     assert(v.step == WSU_READING && !v.birthday_dropped && f.restore_while_running == 0 && f.stops == 1 && f.starts == 1);
     assert(zapp_setup_state(dir) == ZAPP_SETUP_READY && f.wraps == 1);
@@ -876,7 +877,7 @@ static void restore_unknown_tests(void)
     fresh(&f, &w, true);
     wsu_open_restore(&w);
     script_say(&f.script, true, "{\"ok\":true,\"data\":{\"recovered\":true,\"birthday_recorded\":false}}");
-    wsu_restore_job(&w, PHRASE, 0);
+    wsu_restore_job(&w, VALID_PHRASE, 0);
     wsu_view_read(&w, &v);
     assert(v.step == WSU_READING && v.birthday_unknown && v.birthday_dropped && !strstr(f.script.input, "birthday\""));
     wsu_destroy(&w);
@@ -885,7 +886,7 @@ static void restore_unknown_tests(void)
     fresh(&f, &w, true);
     wsu_open_restore(&w);
     error_reply(&f.script, "INVALID_PHRASE");
-    wsu_restore_job(&w, PHRASE, 0);
+    wsu_restore_job(&w, VALID_PHRASE, 0);
     assert(w.step == WSU_FAILED && w.failure == WSU_BAD_PHRASE && f.discards == 1 && f.running);
     assert(zapp_setup_state(dir) == ZAPP_SETUP_NEEDED);
     wsu_back(&w);
@@ -902,7 +903,7 @@ static void restore_busy_tests(void)
     f.stops_when_asked = false;
     wsu_open_restore(&w);
     script_say(&f.script, true, "{\"ok\":true,\"data\":{\"recovered\":true}}");
-    wsu_restore_job(&w, PHRASE, 0);
+    wsu_restore_job(&w, VALID_PHRASE, 0);
     assert(w.failure == WSU_NODE_BUSY && f.script.calls == 0 && f.restore_while_running == 0);
     wsu_destroy(&w);
 
@@ -1548,7 +1549,7 @@ static void marker_retry_tests(void)
     wsu_open_restore(&w);
     script_say(&f.script, true, "{\"ok\":true,\"data\":{\"recovered\":true,\"birthday_recorded\":false}}");
     assert(mkdir(block, 0700) == 0);
-    wsu_restore_job(&w, PHRASE, 0);
+    wsu_restore_job(&w, VALID_PHRASE, 0);
     assert(w.step == WSU_FAILED && w.failure == WSU_NOT_RECORDED && zapp_setup_state(dir) == ZAPP_SETUP_INTERRUPTED && f.starts == 1);
     assert(rmdir(block) == 0);
     assert(wsu_retry_marker(&w));
@@ -1569,7 +1570,7 @@ static void kind_and_not_run_tests(void)
     fresh(&f, &w, true);
     wsu_open_restore(&w);
     script_say(&f.script, true, "{\"ok\":true,\"data\":{\"recovered\":true}}");
-    wsu_restore_job(&w, PHRASE, 0);
+    wsu_restore_job(&w, VALID_PHRASE, 0);
     assert(f.kind_at_restore == ZAPP_KIND_RESTORE);
     wsu_destroy(&w);
     fresh(&f, &w, true);
@@ -1607,7 +1608,7 @@ static void protection_tests(void)
     wsu_close(&w);
     f.protect_ok = false;
     assert(!wsu_open(&w));
-    wsu_restore_job(&w, PHRASE, 0);
+    wsu_restore_job(&w, VALID_PHRASE, 0);
     assert(w.failure == WSU_UNPROTECTED && f.wraps == 0);
     wsu_destroy(&w);
 }
@@ -1696,7 +1697,7 @@ static void slow_exit_restore_tests(void)
     f.exit_after_ms = 60000;
     wsu_open_restore(&w);
     script_say(&f.script, true, "{\"ok\":true,\"data\":{\"recovered\":true,\"birthday_recorded\":false,\"birthday_rejected\":false}}");
-    wsu_restore_job(&w, PHRASE, 0);
+    wsu_restore_job(&w, VALID_PHRASE, 0);
     assert(w.step != WSU_FAILED && f.now_ms >= 60000 && f.starts == 1 && f.starts_refused == 0 && f.running);
     wsu_destroy(&w);
 }
@@ -1768,7 +1769,7 @@ static void failed_jobs_restart_node_tests(void)
         f.exit_after_ms = 30000;
         wsu_open_restore(&w);
         error_reply(&f.script, codes[i]);
-        wsu_restore_job(&w, PHRASE, 0);
+        wsu_restore_job(&w, VALID_PHRASE, 0);
         assert(w.step == WSU_FAILED && f.stops == 1 && f.starts == 1 && f.starts_refused == 0 && f.running);
         wsu_destroy(&w);
     }
@@ -2065,6 +2066,42 @@ static void phase_order_tests(void)
     wsu_destroy(&w);
 }
 
+/* The local check: a word off the list is named by position, a checksum that fails is refused, both before any node is asked. */
+static void check_tests(void)
+{
+    struct zapp_words w;
+    size_t at = 99;
+    assert(zapp_words_parse(VALID_PHRASE, &w) && zapp_words_check(&w, &at) == ZAPP_WORDS_OK);
+    assert(zapp_words_parse("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon", &w));
+    assert(zapp_words_check(&w, &at) == ZAPP_WORDS_CHECKSUM && at == 99);
+    assert(zapp_words_parse("abandon abandon abandon zzzz abandon abandon abandon abandon abandon abandon abandon about", &w));
+    assert(zapp_words_check(&w, &at) == ZAPP_WORDS_OFF_LIST && at == 3);
+    assert(zapp_words_parse("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art", &w) && zapp_words_check(&w, &at) == ZAPP_WORDS_OK);
+    assert(zapp_words_parse("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon", &w));
+    assert(zapp_words_check(&w, &at) == ZAPP_WORDS_CHECKSUM);
+}
+
+/* A restore with a word off the list or a bad checksum stays on the form, and the node and the screen lock are never asked. */
+static void restore_check_tests(void)
+{
+    struct fake f;
+    struct wsu w;
+    struct wsu_view v;
+    char line[120];
+    fresh(&f, &w, true);
+    wsu_open_restore(&w);
+    wsu_restore_job(&w, "abandon abandon abandon zzzz abandon abandon abandon abandon abandon abandon abandon about", 0);
+    wsu_view_read(&w, &v);
+    assert(v.step == WSU_RESTORE_FORM && v.failure == WSU_BAD_WORD && v.bad_word == 3 && f.wraps == 0 && f.stops == 0);
+    wsu_bad_word_text(v.bad_word, line, sizeof(line));
+    assert(!strcmp(line, "Word 4 is not in the recovery word list. Check its spelling.") && !strstr(line, "zzzz"));
+    wsu_restore_job(&w, "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon", 0);
+    wsu_view_read(&w, &v);
+    assert(v.step == WSU_RESTORE_FORM && v.failure == WSU_BAD_PHRASE && f.wraps == 0 && f.stops == 0);
+    assert(!f.script.input[0]);
+    wsu_destroy(&w);
+}
+
 /* The interrupted-setup screen says a wallet was started only when the probe found one. */
 static void interrupted_note_tests(void)
 {
@@ -2081,6 +2118,7 @@ int main(int argc, char **argv)
     assert(argc == 2);
     dir = argv[1];
     words_tests();
+    check_tests();
     state_tests();
     node_tests();
     node_stream_tests();
@@ -2104,6 +2142,7 @@ int main(int argc, char **argv)
     create_stray_refusal_keeps_key_test();
     create_no_start_tests();
     restore_tests();
+    restore_check_tests();
     restore_unknown_tests();
     restore_busy_tests();
     restore_blocked_tests();

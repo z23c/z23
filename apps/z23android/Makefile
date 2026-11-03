@@ -343,7 +343,7 @@ test-devkey:
 test-setup:
 	@mkdir -p '$(BUILD_DIR)'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread -I. -I../../platform/modules/sha3/include -I../../platform/modules/json/include -I../../platform/modules/base/include \
-	  tests/setup_test.c setup_words.c setup_wordlist.c setup_state.c setup_node.c wallet_setup.c device_key.c ../../platform/modules/sha3/src/sha3.c $(SPEECH_JSON) -Wl,--wrap=free -o '$(BUILD_DIR)/setup-test'
+	  -I../../contexts/commons/packages/zsha256/include tests/setup_test.c setup_words.c setup_wordlist.c setup_state.c setup_node.c wallet_setup.c device_key.c ../../platform/modules/sha3/src/sha3.c ../../contexts/commons/packages/zsha256/src/zsha256.c $(SPEECH_JSON) -Wl,--wrap=free -o '$(BUILD_DIR)/setup-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/setup-test.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/setup-test' "$$(cd "$$scratch" && pwd)"
 	@sed -n '/^static const char \*const bip39_english\[2048\] = {$$/,/^};$$/p' ../../contexts/wallet/domain/src/mnemonic.c | sed '1d;$$d' > '$(BUILD_DIR)/wordlist.expect'; \
@@ -363,6 +363,8 @@ test-setup:
 	@grep -q 'v->refusal != WSU_NO_FAILURE' wallet_setup_ui.c || { echo 'a refused Start over must say why on the screen it returns to' >&2; exit 1; }
 	@grep -q 'ZAPP_FIELD_PRIVATE' wallet_setup_ui.c || { echo 'the word fields must be checked against ZAPP_FIELD_PRIVATE' >&2; exit 1; }
 	@sed -n '/^static void draw_words/,/^}/p' wallet_setup_ui.c | grep -q 'WSU_SCREEN_LOCK_NOTICE' || { echo 'the words screen must carry the screen lock notice' >&2; exit 1; }
+	@grep -q 'zj_text(env, ui.words_input, ui.form_words)' wallet_setup_ui.c || { echo 'the restore form must show the words kept from its last try' >&2; exit 1; }
+	@sed -n '/^void zapp_setup_ui_clear/,/^}/p' wallet_setup_ui.c | grep -q 'memory_cleanse(ui.form_words' || { echo 'leaving or hiding setup must cleanse the kept restore words' >&2; exit 1; }
 	@grep -q 'v->may_start_over' wallet_setup_ui.c || { echo 'Start over must be offered only for a create' >&2; exit 1; }
 	@grep -q 'wsu_view_can_recheck(v)' wallet_setup_ui.c || { echo 'the interrupted screen must offer Check again by the model' >&2; exit 1; }
 	@grep -q 'wsu_words_intro(v, line' wallet_setup_ui.c || { echo 'the words screen must write its intro by the model, which omits an unrecorded start height' >&2; exit 1; }

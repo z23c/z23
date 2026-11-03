@@ -27,6 +27,10 @@ bool zapp_words_join(const struct zapp_words *words, char *out, size_t cap);
 bool zapp_words_pick(size_t count, bool (*random)(void *ctx, uint8_t *out, size_t len), void *ctx, size_t n, size_t *positions);
 /* Whether every answer is the word at its position, ignoring case and the white space around it. */
 bool zapp_words_match(const struct zapp_words *words, const size_t *positions, const char *const *answers, size_t n);
+/* The local check of a parsed phrase, before any node is asked: a word that is not on the BIP39 list (position is its index,
+ * counted from 0) or a checksum that does not hold. */
+enum zapp_words_problem { ZAPP_WORDS_OK, ZAPP_WORDS_OFF_LIST, ZAPP_WORDS_CHECKSUM };
+enum zapp_words_problem zapp_words_check(const struct zapp_words *words, size_t *position);
 
 #define ZAPP_WORDLIST_SIZE 2048u
 #define ZAPP_WORD_CHOICES 4u

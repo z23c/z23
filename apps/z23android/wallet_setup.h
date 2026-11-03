@@ -112,6 +112,7 @@ enum wsu_failure {
     WSU_ASIDE,          /* The wallet could not be set aside; what had moved was put back and nothing changed. */
     WSU_ASIDE_STUCK,    /* Items moved aside could not be put back: leftover names them, and no new wallet is offered. */
     WSU_UNPROTECTED,    /* The window could not be protected: nothing is shown and no wallet is made. */
+    WSU_BAD_WORD,       /* A typed recovery word is not on the list; the form stays and bad_word says which. */
     WSU_WALLET_THERE    /* A create found a wallet already on the phone: the shown words are closed, and Start over or Restore is the way on. */
 };
 
@@ -131,6 +132,7 @@ struct wsu {
     unsigned mismatches;
     struct sun_birthday birthday;
     bool birthday_honoured;
+    size_t bad_word;     /* with BAD_WORD: the index of the word, counted from 0 */
     enum wsu_failure refusal;   /* with NO_BIRTHDAY: why the last Start over was refused, or none */
     bool confirmed;      /* the owner proved the words (create) or typed them (restore) */
     bool restored;       /* the setup was a restore */
@@ -170,6 +172,7 @@ struct wsu_view {
     bool birthday_dropped;
     enum wsu_failure refusal;   /* with NO_BIRTHDAY: why the last Start over was refused, or none */
     bool may_start_over;   /* the setup is a create whose words were not confirmed */
+    size_t bad_word;       /* with BAD_WORD: the index of the word, counted from 0 */
     char leftover[WSU_LEFTOVER_MAX];
     enum wsu_phase phase;   /* with WORKING or CHECKING */
     int64_t elapsed_s;      /* seconds since the job began */
@@ -192,6 +195,8 @@ const char *wsu_failure_text(enum wsu_failure failure);
 /* The sentence above the failure on the interrupted-setup screen: a wallet was started (the probe found it), or the node did not
  * answer. Empty for the other failures, whose failure text says what to do. */
 const char *wsu_interrupted_note(enum wsu_failure failure);
+/* The restore form's line for a word that is not on the list: the word's number, counted from 1. The word itself is never written. */
+void wsu_bad_word_text(size_t position, char *out, size_t cap);
 /* What Back says when setup cannot be left now: the words are shown once while they are held, and a running job goes on without the owner. */
 void wsu_leave_notice(const struct wsu_view *v, char *out, size_t cap);
 

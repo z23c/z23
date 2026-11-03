@@ -102,6 +102,7 @@ void wsu_view_read(struct wsu *w, struct wsu_view *out)
     out->step = w->step;
     out->failure = w->failure;
     out->refusal = w->refusal;
+    out->bad_word = w->bad_word;
     out->protected = w->protected;
     out->mismatches = w->mismatches;
     out->birthday_unknown = !w->birthday.known;
@@ -205,6 +206,7 @@ static const struct { enum wsu_failure failure; const char *text; } failure_text
     {WSU_ASIDE, "The wallet could not be set aside, so nothing was changed."},
     {WSU_ASIDE_STUCK, "Some items could not be put back. Do not create a new wallet. They need their original names back:"},
     {WSU_UNPROTECTED, "This phone would not protect the screen from capture, so no wallet was made."},
+    {WSU_BAD_WORD, "A recovery word is not on the word list. Check each word's spelling."},
     {WSU_WALLET_THERE, "A wallet is already on this phone. Start over to make a new one, or restore your words."},
 };
 const char *wsu_failure_text(enum wsu_failure failure)
@@ -212,6 +214,10 @@ const char *wsu_failure_text(enum wsu_failure failure)
     for (size_t i = 0; i < sizeof(failure_texts) / sizeof(failure_texts[0]); ++i)
         if (failure_texts[i].failure == failure) return failure_texts[i].text;
     return "";
+}
+void wsu_bad_word_text(size_t position, char *out, size_t cap)
+{
+    snprintf(out, cap, "Word %zu is not in the recovery word list. Check its spelling.", position + 1);
 }
 /* Only a probe that found the wallet says a wallet was started; a busy node or a failed check gets its failure text alone. */
 const char *wsu_interrupted_note(enum wsu_failure failure)
@@ -611,6 +617,17 @@ void wsu_restore_job(struct wsu *w, const char *text, int64_t birthday_height)
     memset(&words, 0, sizeof(words));
     if (!begin_job(w, WSU_RESTORE_FORM)) return;
     if (!zapp_words_parse(text, &words)) { set_step(w, WSU_RESTORE_FORM, WSU_BAD_WORDS); goto out; }
+    size_t position = 0;
+    enum zapp_words_problem problem = zapp_words_check(&words, &position);
+    if (problem != ZAPP_WORDS_OK) {
+        pthread_mutex_lock(&w->lock);
+        w->step = WSU_RESTORE_FORM;
+        w->failure = problem == ZAPP_WORDS_OFF_LIST ? WSU_BAD_WORD : WSU_BAD_PHRASE;
+        w->bad_word = position;
+        w->refusal = WSU_NO_FAILURE;
+        pthread_mutex_unlock(&w->lock);
+        goto out;
+    }
     phase(w, WSU_PHASE_KEY);
     enum wsu_failure failure = new_passphrase(w, secret, hex);
     if (failure != WSU_NO_FAILURE) { set_step(w, WSU_RESTORE_FORM, failure); goto out; }
