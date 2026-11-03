@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for the dev.batch ledger leaf. */
+ZCL_MODULE_CAPABILITY("tools/command/native_dev_batch_ledger.c", CAP_FS_READ|CAP_FS_WRITE, "reads and rewrites the lab batch ledgers (stacked.tsv, stack-pending.txt) under one flock(2) lock and runs git through the spawn seam with no shell")

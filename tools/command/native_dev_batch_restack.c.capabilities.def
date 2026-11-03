@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for the dev.batch restack leaf. */
+ZCL_MODULE_CAPABILITY("tools/command/native_dev_batch_restack.c", CAP_FS_READ|CAP_FS_WRITE, "reads the lab batch ledgers, land outcomes and gate logs and, outside --dry-run, rewrites stacked.tsv and appends stack-pending.txt and restacked.tsv; git, the dev land status program and systemctl run through the spawn seam with no shell")

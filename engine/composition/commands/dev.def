@@ -1509,6 +1509,97 @@ ZCL_COMMAND_DEV_COMMAND(
     "the unattended train keeper requires the dev binary",
     "z23-dev dev train keep --train=<N>")
 
+/* ── dev.batch ─────────────────────────────────────────────────────────────
+ * The lab conveyor's batch ledger, moving from the shell bridges outside the
+ * repo (requeue.sh, restack-failed.sh, slim-stacks.sh) into C. SHADOW STEP:
+ * each leaf computes the decision its bridge makes and keeps the bridge's
+ * state-file bytes (stacked.tsv, stack-pending.txt, restacked.tsv); the
+ * bridges keep acting. One file per leaf: native_dev_batch_ledger.c,
+ * native_dev_batch_restack.c and native_dev_batch_slim.c. */
+ZCL_COMMAND_BRANCH("dev.batch", "dev",
+                   "Requeue, restack and slim the lab's batch stacks",
+                   ZCL_COMMAND_LAYER_DEV)
+
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.batch.requeue", "dev.batch", "",
+    "Put a triaged lane back in stack-pending, clearing its batch rows",
+    "A lane that restack leaves for triage keeps its stacked.tsv rows, so the "
+    "batch tick drops a plain re-add as already batched. Under the stack tick "
+    "lock (flock(2), the lock the shell bridges take) this drops every "
+    "stacked.tsv row of the lane and appends LANE<TAB>NOTE to "
+    "stack-pending.txt unless the lane is already there. A lane with "
+    "uncommitted tracked changes or that is not a directory is refused "
+    "(LANE_DIRTY, NOT_A_LANE) and nothing is written. --worktree is a lane "
+    "path or a bare lane name under development/lanes/z23; --state-dir "
+    "defaults to the lab handoff directory and --home relocates every lab "
+    "path for tests.", 4096,
+    "batch,requeue,stack,ledger,pending,lane,triage",
+    "zcl.batch_requeue_input.v1", "zcl.batch_requeue.v1",
+    "worktree,note,state_dir,home", "",
+    "z23 dev batch requeue --worktree=LANE --note=TEXT",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE, ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_batch_requeue,
+    "batch ledger maintenance requires the dev binary",
+    "z23-dev dev batch requeue --worktree=LANE --note=TEXT")
+
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.batch.restack", "dev.batch", "",
+    "Return the lanes of failed or stranded batches to stack-pending",
+    "Finds stacks whose last land row failed or conflicted, or whose gate "
+    "failed without submitting (run.log ends in rc=N), and returns their "
+    "reviewed lanes to stack-pending at most twice per lane head. A gate "
+    "failure with no land row names its culprit files from lint.log, fast.log "
+    "or av-fail.txt (compiler, devbuild and gen_templates lines and tab-led "
+    "wrapped lines are ignored); those lanes stay out for triage. Lanes moved "
+    "since review (tree compare), already on origin/main (git cherry) and "
+    "cx-* lanes whose baseline rows are gone are skipped. --dry-run writes "
+    "nothing (not even the bridge's stamp) and ignores the ten-minute "
+    "spacing; it returns the decision and the bridge's message lines. The "
+    "write path rewrites stacked.tsv and appends stack-pending.txt and "
+    "restacked.tsv, and does NOT take the stack tick lock because the batch "
+    "tick calls the bridge while holding it; a caller that is not the tick "
+    "must hold it. --now ignores the spacing. --dev-bin and --systemctl name "
+    "the programs behind `dev land status` and the running gate units.", 65536,
+    "batch,restack,stack,failed,stranded,ledger,pending",
+    "zcl.batch_restack_input.v1", "zcl.batch_restack.v1",
+    "dry_run,now,state_dir,home,dev_bin,systemctl", "",
+    "z23 dev batch restack --dry-run",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE, ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_batch_restack,
+    "batch ledger maintenance requires the dev binary",
+    "z23-dev dev batch restack --dry-run")
+
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.batch.slim", "dev.batch", "",
+    "Free the build directories of finished stack worktrees",
+    "Deletes build/ and test-tmp/ of finished development/z23/z23-stacks* "
+    "worktrees: no running user unit names the stack, no process has its "
+    "cwd inside it and its build/ is older than two hours. At most --max "
+    "(default 4) stacks per call, in version order. --dry-run lists them and "
+    "deletes nothing. --systemctl and --proc-dir name the unit lister and "
+    "the process table for tests.", 65536,
+    "batch,slim,stack,build,cleanup,disk",
+    "zcl.batch_slim_input.v1", "zcl.batch_slim.v1",
+    "dry_run,max,home,proc_dir,systemctl", "",
+    "z23 dev batch slim --dry-run",
+    ZCL_COMMAND_EFFECT_DESTRUCTIVE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE, ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_batch_slim,
+    "stack build cleanup requires the dev binary",
+    "z23-dev dev batch slim --dry-run")
+
 /* ── dev.index ─────────────────────────────────────────────────────────────
  * Local data-source ingest/search over engine/composition/sources.def (the
  * board, the experiment ledger, the landing outcomes ledger, and every
