@@ -109,9 +109,11 @@ static bool dbr_state(struct dbr *r)
         const char *head = r->sha[i];
         if (i == L_M)
             head = r->moved_old;
-        (void)snprintf(row, sizeof(row), "%s\t%s\t%s\n",
-                       i == L_D ? "/nonexistent/lane-d" : r->lane[i], head,
-                       stack[i]);
+        /* cx-out is written with a trailing slash, as the live ledger holds
+         * some lanes: its basename must still be cx-out (a cx lane), not "". */
+        (void)snprintf(row, sizeof(row), "%s%s\t%s\t%s\n",
+                       i == L_D ? "/nonexistent/lane-d" : r->lane[i],
+                       i == L_CXO ? "/" : "", head, stack[i]);
         (void)strncat(rows, row, sizeof(rows) - strlen(rows) - 1);
     }
     (void)snprintf(restacked, sizeof(restacked),
