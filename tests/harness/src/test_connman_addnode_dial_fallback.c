@@ -17,6 +17,9 @@
 #include "net/onion_v3_address.h"
 #include "storage/census_read.h"
 #include "util/blocker.h"
+#include "platform/socket_compat.h"
+#include <netinet/in.h>
+#include <pthread.h>
 #include <unistd.h>
 #include "test/test_connman_addnode_fallback_priv.h"
 
@@ -997,6 +1000,225 @@ int check_connman_addnode_addrman_skips_saturated(void)
 
         ok = ok && addnode_saturated_pick_is_diverse(&cm);
 
+        connman_free(&cm);
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
+/* ── connman_dial_batch, reached through the dialer thread ────────────────
+ * connman_dial_batch() is static in connman_dialer.c. Its only caller is the
+ * dialer thread body thread_open_connections(), which gathers candidates
+ * for one pass and hands them to the batch. The checks below start that
+ * thread against loopback addnodes (and one onion addnode with Tor absent),
+ * let its first pass run, stop and join it, and only then read the
+ * per-addnode counters and the peer table. */
+void *thread_open_connections(void *arg);
+
+#define DIAL_BATCH_STEP_MS 50
+#define DIAL_BATCH_SETTLE_STEPS 6   /* 300 ms: the first pass runs at once */
+#define DIAL_BATCH_NODE_WAIT_STEPS 40 /* at most 2 s for a registered peer */
+
+static bool dial_batch_run_start(pthread_t *thread, struct connman *cm)
+{
+    connman_set_stop_for_test(false);
+    return pthread_create(thread, NULL, thread_open_connections, cm) == 0;
+}
+
+static void dial_batch_run_stop(pthread_t thread)
+{
+    connman_set_stop_for_test(true);
+    pthread_join(thread, NULL);
+    connman_set_stop_for_test(false);
+}
+
+static void dial_batch_settle(void)
+{
+    for (int i = 0; i < DIAL_BATCH_SETTLE_STEPS; i++)
+        platform_sleep_ms(DIAL_BATCH_STEP_MS);
+}
+
+static bool dial_batch_node_registered(struct connman *cm)
+{
+    zcl_mutex_lock(&cm->manager.cs_nodes);
+    bool registered = cm->manager.num_nodes >= 1;
+    zcl_mutex_unlock(&cm->manager.cs_nodes);
+    return registered;
+}
+
+static void dial_batch_wait_for_node(struct connman *cm)
+{
+    for (int i = 0; i < DIAL_BATCH_NODE_WAIT_STEPS &&
+                    !dial_batch_node_registered(cm); i++)
+        platform_sleep_ms(DIAL_BATCH_STEP_MS);
+}
+
+/* Loopback listener on an OS-assigned port. The kernel backlog completes the
+ * TCP handshake, so a client connect succeeds without any accept(). */
+static bool dial_batch_listen(platform_socket_t *fd, uint16_t *port)
+{
+    *fd = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
+    if (*fd == PLATFORM_SOCKET_INVALID)
+        return false;
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    size_t slen = sizeof(sa);
+    if (platform_socket_bind(*fd, (struct sockaddr *)&sa, sizeof(sa)) != 0 ||
+        platform_socket_listen(*fd, 8) != 0 ||
+        platform_socket_local_address(*fd, (struct sockaddr *)&sa,
+                                      &slen) != 0) {
+        (void)platform_socket_close(*fd);
+        *fd = PLATFORM_SOCKET_INVALID;
+        return false;
+    }
+    *port = ntohs(sa.sin_port);
+    return true;
+}
+
+/* A loopback port with no listener behind it: a connect there is refused. */
+static bool dial_batch_closed_port(uint16_t *port)
+{
+    platform_socket_t fd = PLATFORM_SOCKET_INVALID;
+    if (!dial_batch_listen(&fd, port))
+        return false;
+    (void)platform_socket_close(fd);
+    return true;
+}
+
+static void dial_batch_loopback_addnode(struct connman *cm, uint16_t port)
+{
+    test_set_ipv4(&cm->addnodes[0], 127, 0, 0, 1, port);
+    cm->num_addnodes = 1;
+}
+
+/* Refused loopback connect: one pass charges the addnode one TCP failure and
+ * registers no peer. */
+int check_connman_addnode_dial_batch_refused_loopback(void)
+{
+    int failures = 0;
+    printf("connman_addnode_fallback: dial batch charges a refused loopback "
+           "addnode and registers no peer... ");
+    {
+        chain_params_select(CHAIN_MAIN);
+        const struct chain_params *params = chain_params_get();
+        struct connman cm;
+        struct node_signals sigs;
+        memset(&sigs, 0, sizeof(sigs));
+        bool ok = connman_init(&cm, params, &sigs);
+        char datadir[512];
+        test_make_tmpdir(datadir, sizeof(datadir), "connman_dial_batch",
+                         "refused");
+        cm.datadir = datadir;
+        uint16_t port = 0;
+        ok = ok && dial_batch_closed_port(&port);
+        bool started = false;
+        pthread_t thread;
+        if (ok) {
+            dial_batch_loopback_addnode(&cm, port);
+            started = dial_batch_run_start(&thread, &cm);
+        }
+        if (started) {
+            dial_batch_settle();
+            dial_batch_run_stop(thread);
+        }
+        ok = started && cm.addnode_tcp_failures[0] >= 1 &&
+             cm.manager.num_nodes == 0;
+        connman_free(&cm);
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
+/* Accepted loopback connect: the batch registers one outbound peer and
+ * clears the addnode's failure streak with a success stamp. */
+int check_connman_addnode_dial_batch_accepted_loopback(void)
+{
+    int failures = 0;
+    printf("connman_addnode_fallback: dial batch registers an accepted "
+           "loopback addnode as one outbound peer... ");
+    {
+        chain_params_select(CHAIN_MAIN);
+        const struct chain_params *params = chain_params_get();
+        struct connman cm;
+        struct node_signals sigs;
+        memset(&sigs, 0, sizeof(sigs));
+        bool ok = connman_init(&cm, params, &sigs);
+        char datadir[512];
+        test_make_tmpdir(datadir, sizeof(datadir), "connman_dial_batch",
+                         "accepted");
+        cm.datadir = datadir;
+        platform_socket_t listener = PLATFORM_SOCKET_INVALID;
+        uint16_t port = 0;
+        ok = ok && dial_batch_listen(&listener, &port);
+        bool started = false;
+        pthread_t thread;
+        if (ok) {
+            dial_batch_loopback_addnode(&cm, port);
+            started = dial_batch_run_start(&thread, &cm);
+        }
+        if (started) {
+            dial_batch_wait_for_node(&cm);
+            dial_batch_run_stop(thread);
+        }
+        ok = started && cm.manager.num_nodes == 1 &&
+             !cm.manager.nodes[0]->inbound &&
+             cm.addnode_tcp_failures[0] == 0 &&
+             cm.addnode_last_attempt[0] != 0;
+        connman_free(&cm);
+        if (listener != PLATFORM_SOCKET_INVALID)
+            (void)platform_socket_close(listener);
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
+/* Onion addnode with Tor absent: the batch skips it without dialing and
+ * without charging its TCP backoff, so no peer and no failure appear. */
+int check_connman_addnode_dial_batch_onion_tor_absent(void)
+{
+    int failures = 0;
+    printf("connman_addnode_fallback: dial batch holds an onion addnode "
+           "uncharged while Tor is absent... ");
+    {
+        chain_params_select(CHAIN_MAIN);
+        const struct chain_params *params = chain_params_get();
+        struct connman cm;
+        struct node_signals sigs;
+        memset(&sigs, 0, sizeof(sigs));
+        bool ok = connman_init(&cm, params, &sigs);
+
+        char datadir[512];
+        test_make_tmpdir(datadir, sizeof(datadir), "connman_dial_batch",
+                         "onion");
+        cm.datadir = datadir;
+        uint8_t pub[32];
+        for (int i = 0; i < 32; i++)
+            pub[i] = (uint8_t)(0x90 + i);
+        char host[ONION_V3_ADDRESS_LEN + 1];
+        ok = ok && onion_v3_address_from_pubkey(pub, host);
+
+        struct net_address onion;
+        net_address_init(&onion);
+        ok = ok && net_addr_from_onion(host, &onion.svc.addr);
+        onion.svc.port = 8056;
+        bool started = false;
+        pthread_t thread;
+        if (ok) {
+            cm.addnodes[0] = onion;
+            cm.num_addnodes = 1;
+            started = dial_batch_run_start(&thread, &cm);
+        }
+        if (started) {
+            dial_batch_settle();
+            dial_batch_run_stop(thread);
+        }
+        ok = started && cm.addnode_tcp_failures[0] == 0 &&
+             cm.manager.num_nodes == 0;
         connman_free(&cm);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
