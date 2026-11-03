@@ -113,7 +113,9 @@ static void text_entry_is_private(void)
         free(src);
     }
     closedir(dir);
-    assert(fields >= 6);
+    /* Five fields: native_ui.c creates two and each of the three wallet screens creates one. The sixth field was in
+     * clip_screen.c, which was removed with the Clips screen. */
+    assert(fields == 5);
 }
 
 /* The node notification and its channel are secret on the lock screen. */
