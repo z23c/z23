@@ -264,14 +264,12 @@ void node_db_index_rebuild_test_set_hook(void (*hook)(void *ctx), void *ctx)
  * statement is the one busy write statement expected. */
 static bool index_rebuild_interrupt_is_local(sqlite3 *db)
 {
-    if (!sqlite3_get_autocommit(db))
-        return false;
     int writers = 0;
     for (sqlite3_stmt *s = sqlite3_next_stmt(db, NULL); s;
          s = sqlite3_next_stmt(db, s))
         if (sqlite3_stmt_busy(s) && !sqlite3_stmt_readonly(s))
             writers++;
-    return writers == 1;
+    return sqlite3_get_autocommit(db) && writers == 1;
 }
 
 static int index_rebuild_progress(void *arg)
