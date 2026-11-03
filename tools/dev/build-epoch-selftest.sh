@@ -781,9 +781,67 @@ VERIFY_EOF
 chmod +x "$VERIFY"
 
 set_state()
-{
-    printf '%s %s %s\n' "$1" 1 "$2" > "$STATE"
-}
+(
+    # Concurrent verifiers must see one complete source record. Truncating
+    # STATE in place lets a reader observe EOF before printf writes its row.
+    local staged
+    staged="$(mktemp "$STATE.tmp.XXXXXX")" || return 1
+    trap 'rc=$?; rm -f -- "$staged" || :; exit "$rc"' EXIT
+    printf '%s %s %s\n' "$1" 1 "$2" > "$staged" || return 1
+    mv -f -- "$staged" "$STATE" || return 1
+)
+
+phase fixture-state-publication
+set_state "$SOURCE_A" "$MUTATION_A1"
+STATE_WRITE_ENTERED="$WORK/state-write-entered"
+STATE_WRITE_RELEASE="$WORK/state-write-release"
+(
+    # Redirection happens before this child-local override runs. Holding the
+    # writer here exposes truncation deterministically, without a timing loop.
+    printf()
+    {
+        : > "$STATE_WRITE_ENTERED"
+        local started=$SECONDS
+        while [ ! -e "$STATE_WRITE_RELEASE" ]; do
+            [ $((SECONDS - started)) -lt "$SELFTEST_STEP_TIMEOUT" ] ||
+                return 1
+            sleep 0.01
+        done
+        builtin printf "$@"
+    }
+    set_state "$SOURCE_B" "$MUTATION_B"
+) &
+STATE_WRITER_PID=$!
+STATE_WRITER_INDEX=${#CHILD_PIDS[@]}
+CHILD_PIDS+=("$STATE_WRITER_PID")
+STATE_WRITE_START=$SECONDS
+while [ ! -e "$STATE_WRITE_ENTERED" ]; do
+    kill -0 "$STATE_WRITER_PID" 2>/dev/null ||
+        fail 'fixture state writer died before its write rendezvous'
+    [ $((SECONDS - STATE_WRITE_START)) -lt "$SELFTEST_STEP_TIMEOUT" ] ||
+        fail 'fixture state writer did not reach its write rendezvous'
+    sleep 0.01
+done
+STATE_READ_OK=0
+if read -r state_source state_complete state_mutation < "$STATE" &&
+   [ "$state_source" = "$SOURCE_A" ] && [ "$state_complete" = 1 ] &&
+   [ "$state_mutation" = "$MUTATION_A1" ]; then
+    STATE_READ_OK=1
+fi
+# Always release and reap before reporting the reader's verdict.
+: > "$STATE_WRITE_RELEASE"
+STATE_WRITE_RC=0
+wait "$STATE_WRITER_PID" || STATE_WRITE_RC=$?
+unset 'CHILD_PIDS[STATE_WRITER_INDEX]'
+rm -f "$STATE_WRITE_ENTERED" "$STATE_WRITE_RELEASE"
+[ "$STATE_WRITE_RC" -eq 0 ] || fail 'fixture state writer failed after release'
+[ "$STATE_READ_OK" -eq 1 ] ||
+    fail 'fixture state reader observed an incomplete record during publication'
+read -r state_source state_complete state_mutation < "$STATE" ||
+    fail 'fixture state publication left an unreadable record'
+[ "$state_source" = "$SOURCE_B" ] && [ "$state_complete" = 1 ] &&
+    [ "$state_mutation" = "$MUTATION_B" ] ||
+    fail 'fixture state publication did not replace the complete record'
 
 SESSION_CC_COMMAND="$CC_COMMAND"
 SESSION_CXX_COMMAND="$CXX_COMMAND"
@@ -1596,6 +1654,7 @@ publish "$CANDIDATE_A2" "$SOURCE_A" "$MUTATION_A2" "$EPOCH_MAIN" "$SESSION_MAIN"
 # the source record to B (with B's session re-acquire and candidate relink,
 # as a real B Make invocation would do), and start B behind it.  A must fail
 # its source check and B must be the only process allowed to publish.
+phase stale-publisher-refusal
 BLOCK_MARKER="$WORK/stale-a-blocked"
 BLOCK_RELEASE="$WORK/release-stale-a"
 BLOCK_ONCE="$WORK/stale-a-blocked-once"
