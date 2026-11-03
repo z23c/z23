@@ -22,6 +22,7 @@
     "src/os_binary_slots.c",
     "src/os_proc.c",
     "src/os_proc_fdclose_internal.h",
+    "src/os_proc_foreign_writer.c",
     "src/os_proc_mem.c",
     "tests/test_platform.c",
     "zcode-package.json"

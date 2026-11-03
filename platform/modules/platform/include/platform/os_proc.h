@@ -314,6 +314,25 @@ bool os_proc_bind_parent_death(int signal_number, uint64_t expected_parent);
  * (non-Linux). The caller owns and closes the descriptor. */
 int os_proc_fd_dir_open(void);
 
+/* Foreign writer on a database file (Linux). Scans /proc/<pid>/fd of the
+ * other processes owned by this uid for a descriptor whose link is `path`
+ * or `path`-wal and whose fdinfo flags grant write access (O_ACCMODE is not
+ * O_RDONLY). Returns the first such process; skips this process and any
+ * entry it cannot read; visits at most a fixed number of pids. Read-only:
+ * it never signals the holder or opens the file. UNSUPPORTED off Linux. */
+#define OS_PROC_COMM_MAX 16
+struct os_proc_foreign_writer {
+    uint64_t pid;
+    char comm[OS_PROC_COMM_MAX];   /* /proc/<pid>/comm, empty if unreadable */
+};
+enum os_proc_writer_result {
+    OS_PROC_WRITER_NONE = 0,
+    OS_PROC_WRITER_FOUND,
+    OS_PROC_WRITER_UNSUPPORTED,
+};
+enum os_proc_writer_result os_proc_foreign_writer_find(
+    const char *path, struct os_proc_foreign_writer *out);
+
 /* Seccomp filter layers attached to `pid` (0 = this process): the
  * Seccomp_filters field of /proc/<pid>/status, still readable for an exited
  * child that has not been reaped. False where the field or the process

@@ -25,6 +25,7 @@
 #include "jobs/stage_helpers.h"
 #include "jobs/tip_finalize_stage.h"
 #include "models/database.h"
+#include "platform/os_proc.h"
 #include "platform/time_compat.h"
 #include "services/utxo_recovery_service.h"
 #include "storage/coins_kv.h"
@@ -642,6 +643,61 @@ void invariant_sentinel_clear_commitment_blocker(void)
     audit_clear_latched_blocker("the auto-terminating owner");
 }
 
+/* ── foreign writer on node.db (diagnostic, no state change) ──────── */
+
+/* Another same-uid process holding node.db open read-write breaks the store
+ * (the 10-29 r1 failure). Log it loudly, once per pid per repeat window.
+ * No blocker and no sync effect: the operator decides what to close. */
+#define NODE_DB_WRITER_TRACK       4
+#define NODE_DB_WRITER_REPEAT_SECS 600
+
+/* Single sweep thread only (same discipline as the sweep memos above). */
+static struct { uint64_t pid; int64_t warned_unix; }
+    g_writer_warned[NODE_DB_WRITER_TRACK];
+
+/* True when `pid` has not been reported within the repeat window. */
+static bool sentinel_writer_repeat_due(uint64_t pid, int64_t now)
+{
+    int victim = 0;
+    for (int i = 0; i < NODE_DB_WRITER_TRACK; i++) {
+        if (g_writer_warned[i].pid == pid) {
+            if (now - g_writer_warned[i].warned_unix <
+                NODE_DB_WRITER_REPEAT_SECS)
+                return false;
+            g_writer_warned[i].warned_unix = now;
+            return true;
+        }
+        if (g_writer_warned[i].warned_unix <
+            g_writer_warned[victim].warned_unix)
+            victim = i;
+    }
+    g_writer_warned[victim].pid = pid;
+    g_writer_warned[victim].warned_unix = now;
+    return true;
+}
+
+static void sentinel_watch_node_db_writer(void)
+{
+    struct node_db *ndb = sentinel_ndb();
+    if (!ndb || ndb->path[0] == '\0')
+        return;
+    struct os_proc_foreign_writer writer;
+    if (os_proc_foreign_writer_find(ndb->path, &writer) !=
+        OS_PROC_WRITER_FOUND)
+        return;
+    if (!sentinel_writer_repeat_due(writer.pid, platform_time_wall_unix()))
+        return;
+    const char *comm = writer.comm[0] ? writer.comm : "(unknown)";
+    LOG_ERROR("invariant_sentinel",
+              "foreign writer holds node.db open read-write pid=%" PRIu64
+              " comm=%s path=%s; two writers can break the store, close "
+              "that process's handle",
+              writer.pid, comm, ndb->path);
+    event_emitf(EV_OPERATOR_NEEDED, 0,
+                "check=node_db.foreign_writer pid=%" PRIu64 " comm=%s",
+                writer.pid, comm);
+}
+
 /* ── supervisor children ────────────────────────────────────────── */
 
 static struct liveness_contract g_sweep_contract;
@@ -655,6 +711,7 @@ static void sweep_tick(struct liveness_contract *c)
 {
     (void)c;
     (void)invariant_sentinel_sweep_once();
+    sentinel_watch_node_db_writer();
     int64_t marker = atomic_fetch_add(&g_sweep_ticks, 1) + 1;
     supervisor_progress(atomic_load(&g_sweep_id), marker);
     supervisor_tick(atomic_load(&g_sweep_id));

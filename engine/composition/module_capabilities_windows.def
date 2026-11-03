@@ -101,6 +101,7 @@ ZCL_MODULE_CAPABILITY("platform/modules/platform/src/file_clone.c", CAP_NONE, "t
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/os_binary_slots.c", CAP_NONE, "")
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/os_proc.c", CAP_CLOCK|CAP_DYNLOAD|CAP_FS_READ|CAP_PROCESS, "Resolves Windows process APIs and creates or supervises bounded child processes.")
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/os_proc_mem.c", CAP_PROCESS, "Inspects memory accounting on a supplied process handle.")
+ZCL_MODULE_CAPABILITY("platform/modules/platform/src/os_proc_foreign_writer.c", CAP_NONE, "")
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/os_sandbox_stub.c", CAP_NONE, "")
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/positioned_file.c", CAP_DYNLOAD|CAP_FS_READ|CAP_FS_WRITE|CAP_PRIVILEGE, "Resolves optional kernel file APIs and applies handle and ACL controls.")
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/private_acl_internal.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PRIVILEGE, "Reads and writes Windows ownership and DACL state.")
