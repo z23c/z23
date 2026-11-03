@@ -55,6 +55,13 @@
 #include <time.h>
 #include <unistd.h>
 
+/* mingw's <fcntl.h> has no O_CLOEXEC: descriptors on Windows are not
+ * inherited unless the handle is explicitly marked inheritable, so the
+ * flag is a no-op there rather than a missing guarantee. */
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0
+#endif
+
 #define RS_BUF (4u * 1024u * 1024u)
 #define RS_SPACING_S 600
 
@@ -259,8 +266,9 @@ static bool rs_isclass(int ch)
     return isalnum(ch) || ch == '_' || ch == '.' || ch == '/' || ch == '-';
 }
 
-/* grep -o '[a-z][A-Za-z0-9_./-]*\.[ch]\b': the leftmost-longest match at or
- * after *pos; false when there is none. */
+/* The shell's grep -o of '[a-z][A-Za-z0-9_./-]*\.[ch]' ending at a word
+ * boundary: the leftmost-longest match at or after *pos; false when there is
+ * none. */
 static bool rs_next_name(const char *s, size_t len, size_t *pos, size_t *from,
                          size_t *to)
 {

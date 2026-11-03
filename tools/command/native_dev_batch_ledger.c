@@ -34,6 +34,13 @@
 #include <sys/file.h>
 #endif
 
+/* mingw's <fcntl.h> has no O_CLOEXEC: descriptors on Windows are not
+ * inherited unless the handle is explicitly marked inheritable, so the
+ * flag is a no-op there rather than a missing guarantee. */
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0
+#endif
+
 /* ── options and refusals ──────────────────────────────────────────────── */
 
 const char *db_opt_str(const struct json_value *in, const char *key)
