@@ -2245,6 +2245,7 @@ static void run_full_suite_late_and_specs(int *failures)
     { extern int test_wiki_code(void); *failures += test_wiki_code(); }
     { extern int test_wiki_docs_install(void); *failures += test_wiki_docs_install(); }
     { extern int test_fleet_wiki_mutation(void); *failures += test_fleet_wiki_mutation(); }
+    { extern int test_fleet_wiki_scope(void); *failures += test_fleet_wiki_scope(); }
     { extern int test_fleet_board_bridge(void); *failures += test_fleet_board_bridge(); }
     { extern int test_board_site(void); *failures += test_board_site(); }
 

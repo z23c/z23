@@ -260,13 +260,42 @@ static const enum qb_column k_board_slug_cols[] = {
 ZCL_MODEL_READ_ROW_FN(board_read_slug_ref, struct fleet_board_slug_ref,
                       FLEET_BOARD_SLUG_FIELDS)
 
-static int board_wiki_next_slug(struct node_db *ndb, const char *after,
+bool fleet_wiki_view_has(enum fleet_wiki_view view, uint8_t scope)
+{
+    if (view == FLEET_WIKI_VIEW_FLEET)
+        return scope == FLEET_BOARD_SCOPE_FLEET;
+    if (view == FLEET_WIKI_VIEW_PUBLIC)
+        return scope != FLEET_BOARD_SCOPE_FLEET;
+    return true;
+}
+
+uint8_t fleet_wiki_view_scope(enum fleet_wiki_view view)
+{
+    return view == FLEET_WIKI_VIEW_FLEET ? FLEET_BOARD_SCOPE_FLEET
+                                         : FLEET_BOARD_SCOPE_PUBLIC;
+}
+
+/* The same test as fleet_wiki_view_has, as a where clause, so the scope is
+ * decided before any ordering or row limit. */
+static void wiki_view_where(struct qb *q, enum fleet_wiki_view view)
+{
+    if (view == FLEET_WIKI_VIEW_FLEET)
+        qb_where_int(q, QB_C_fleet_board_posts_scope, QB_EQ,
+                     FLEET_BOARD_SCOPE_FLEET);
+    else if (view == FLEET_WIKI_VIEW_PUBLIC)
+        qb_where_int(q, QB_C_fleet_board_posts_scope, QB_NE,
+                     FLEET_BOARD_SCOPE_FLEET);
+}
+
+static int board_wiki_next_slug(struct node_db *ndb, enum fleet_wiki_view view,
+                                const char *after,
                                 char slug[FLEET_BOARD_SLUG_MAX + 1])
 {
     struct qb q;
     qb_select(&q, QB_T_fleet_board_posts);
     qb_select_columns(&q, k_board_slug_cols, BOARD_SLUG_NCOLS);
     qb_where_int(&q, QB_C_fleet_board_posts_kind, QB_EQ, FLEET_BOARD_KIND_WIKI);
+    wiki_view_where(&q, view);
     if (after[0])
         qb_where_text(&q, QB_C_fleet_board_posts_slug, QB_GT, after);
     qb_order_by(&q, QB_C_fleet_board_posts_slug, QB_ASC);
@@ -292,13 +321,14 @@ static int board_wiki_next_slug(struct node_db *ndb, const char *after,
 /* Same newest-verifying rule as wiki_read, with an explicit bound on this
  * query's total cryptographic revision reads. Plain text is still a winner. */
 static enum fleet_wiki_query_status board_wiki_query_latest(
-    struct node_db *ndb, const char *slug, unsigned *verified,
-    struct db_fleet_board_post *out, bool *found)
+    struct node_db *ndb, enum fleet_wiki_view view, const char *slug,
+    unsigned *verified, struct db_fleet_board_post *out, bool *found)
 {
     *found = false;
     struct qb q;
     fleet_board_select_row(&q);
     qb_where_int(&q, QB_C_fleet_board_posts_kind, QB_EQ, FLEET_BOARD_KIND_WIKI);
+    wiki_view_where(&q, view);
     qb_where_text(&q, QB_C_fleet_board_posts_slug, QB_EQ, slug);
     qb_order_by(&q, QB_C_fleet_board_posts_created_at, QB_DESC);
     qb_order_by(&q, QB_C_fleet_board_posts_id, QB_DESC);
@@ -357,6 +387,15 @@ int db_fleet_board_wiki_list_after(struct node_db *ndb, const char *after,
     struct db_fleet_board_post *out, size_t max,
     char last_scanned[FLEET_BOARD_SLUG_MAX + 1], bool *more)
 {
+    return db_fleet_board_wiki_list_after_in(ndb, FLEET_WIKI_VIEW_ANY, after,
+                                             out, max, last_scanned, more);
+}
+
+int db_fleet_board_wiki_list_after_in(struct node_db *ndb,
+    enum fleet_wiki_view view, const char *after,
+    struct db_fleet_board_post *out, size_t max,
+    char last_scanned[FLEET_BOARD_SLUG_MAX + 1], bool *more)
+{
     char last_sink[FLEET_BOARD_SLUG_MAX + 1];
     bool more_sink;
     char *last = last_scanned ? last_scanned : last_sink;
@@ -372,7 +411,7 @@ int db_fleet_board_wiki_list_after(struct node_db *ndb, const char *after,
     size_t scanned = 0;
     int written = 0;
     for (;;) {
-        int next = board_wiki_next_slug(ndb, last, slug);
+        int next = board_wiki_next_slug(ndb, view, last, slug);
         if (next < 0)
             return -1;
         if (next == 0)
@@ -382,7 +421,7 @@ int db_fleet_board_wiki_list_after(struct node_db *ndb, const char *after,
             break;
         }
         (void)snprintf(last, FLEET_BOARD_SLUG_MAX + 1, "%s", slug);
-        if (db_fleet_board_wiki_read(ndb, slug, &out[written]))
+        if (db_fleet_board_wiki_read_in(ndb, view, slug, &out[written]))
             written++;
     }
     return written;
@@ -392,17 +431,26 @@ bool db_fleet_board_wiki_query(struct node_db *ndb, const char *after,
     fleet_wiki_visit_fn visit, void *context,
     struct fleet_wiki_query_progress *progress)
 {
+    return db_fleet_board_wiki_query_in(ndb, FLEET_WIKI_VIEW_ANY, after, visit,
+                                        context, progress);
+}
+
+bool db_fleet_board_wiki_query_in(struct node_db *ndb,
+    enum fleet_wiki_view view, const char *after,
+    fleet_wiki_visit_fn visit, void *context,
+    struct fleet_wiki_query_progress *progress)
+{
     if (!board_wiki_query_arguments(ndb, after, visit, progress)) return false;
     memset(progress, 0, sizeof(*progress));
     (void)snprintf(progress->after_slug, sizeof(progress->after_slug), "%s", after);
     while (progress->scanned < FLEET_BOARD_LIST_MAX) {
         char slug[FLEET_BOARD_SLUG_MAX + 1];
-        int next = board_wiki_next_slug(ndb, progress->after_slug, slug);
+        int next = board_wiki_next_slug(ndb, view, progress->after_slug, slug);
         if (next < 0) { progress->status = FLEET_WIKI_QUERY_STORAGE; return false; }
         if (next == 0) return true;
         struct db_fleet_board_post row;
         bool found;
-        progress->status = board_wiki_query_latest(ndb, slug,
+        progress->status = board_wiki_query_latest(ndb, view, slug,
             &progress->verified, &row, &found);
         if (progress->status != FLEET_WIKI_QUERY_DONE) {
             (void)snprintf(progress->blocked_slug, sizeof(progress->blocked_slug), "%s", slug);
@@ -437,7 +485,7 @@ bool db_fleet_board_wiki_read_checked(struct node_db *ndb, const char *slug,
     bool found = false;
     *newer_unverified = false;
     enum fleet_wiki_query_status status =
-        board_wiki_query_latest(ndb, slug, &verified, out, &found);
+        board_wiki_query_latest(ndb, FLEET_WIKI_VIEW_ANY, slug, &verified, out, &found);
     if (status != FLEET_WIKI_QUERY_DONE || !found)
         return false; // raw-return-ok:absent-page-is-not-an-error
     /* Every attempt before the winner was a newer revision that failed. */
@@ -540,6 +588,15 @@ bool db_fleet_board_wiki_reviews(struct node_db *ndb, const uint8_t target[32],
     const uint8_t after[32], struct db_fleet_board_post *out, size_t max,
     size_t *count, uint8_t next[32], bool *more)
 {
+    return db_fleet_board_wiki_reviews_in(ndb, FLEET_WIKI_VIEW_PUBLIC, target,
+                                          after, out, max, count, next, more);
+}
+
+bool db_fleet_board_wiki_reviews_in(struct node_db *ndb,
+    enum fleet_wiki_view view, const uint8_t target[32],
+    const uint8_t after[32], struct db_fleet_board_post *out, size_t max,
+    size_t *count, uint8_t next[32], bool *more)
+{
     if (!review_page_arguments(ndb, target, after, out, max, count, next, more)) return false;
     *count = 0; *more = false;
     memcpy(next, after, 32);
@@ -547,8 +604,11 @@ bool db_fleet_board_wiki_reviews(struct node_db *ndb, const uint8_t target[32],
     fleet_board_select_row(&q);
     qb_where_int(&q, QB_C_fleet_board_posts_kind, QB_EQ, FLEET_BOARD_KIND_WIKI);
     qb_where_blob(&q, QB_C_fleet_board_posts_ref, QB_EQ, target, 32);
-    qb_where_int(&q, QB_C_fleet_board_posts_scope, QB_EQ, FLEET_BOARD_SCOPE_PUBLIC);
-    qb_where_text(&q, QB_C_fleet_board_posts_room, QB_EQ, FLEET_BOARD_ROOM_DEFAULT);
+    qb_where_int(&q, QB_C_fleet_board_posts_scope, QB_EQ, fleet_wiki_view_scope(view));
+    /* A fleet-scope post names no room; the signed public scope reads only
+     * the default room, exactly as before. */
+    qb_where_text(&q, QB_C_fleet_board_posts_room, QB_EQ,
+                  view == FLEET_WIKI_VIEW_FLEET ? "" : FLEET_BOARD_ROOM_DEFAULT);
     qb_where_blob(&q, QB_C_fleet_board_posts_id, QB_GT, after, 32);
     qb_order_by(&q, QB_C_fleet_board_posts_id, QB_ASC);
     qb_limit(&q, FLEET_BOARD_LIST_MAX + 1);
@@ -691,6 +751,13 @@ bool db_fleet_board_review_state(struct node_db *ndb,
 bool db_fleet_board_wiki_read(struct node_db *ndb, const char *slug,
                               struct db_fleet_board_post *out)
 {
+    return db_fleet_board_wiki_read_in(ndb, FLEET_WIKI_VIEW_ANY, slug, out);
+}
+
+bool db_fleet_board_wiki_read_in(struct node_db *ndb, enum fleet_wiki_view view,
+                                 const char *slug,
+                                 struct db_fleet_board_post *out)
+{
     /* raw-return-ok:absent-page-is-not-an-error — an illegal or unknown slug
      * has no page, and saying so in the log on every miss would drown the
      * one line that matters. */
@@ -700,6 +767,7 @@ bool db_fleet_board_wiki_read(struct node_db *ndb, const char *slug,
     fleet_board_select_row(&q);
     qb_where_int(&q, QB_C_fleet_board_posts_kind, QB_EQ,
                  FLEET_BOARD_KIND_WIKI);
+    wiki_view_where(&q, view);
     qb_where_text(&q, QB_C_fleet_board_posts_slug, QB_EQ, slug);
     /* Newest created_at wins; the larger id breaks a tie, so two nodes
      * holding the same revisions always resolve the same page. */
@@ -722,4 +790,36 @@ bool db_fleet_board_wiki_read(struct node_db *ndb, const char *slug,
     }
     sqlite3_finalize(s);
     return found;
+}
+
+int db_fleet_board_wiki_history_in(struct node_db *ndb,
+    enum fleet_wiki_view view, const char *slug,
+    struct db_fleet_board_post *out, size_t max)
+{
+    if (!ndb || !ndb->open || !out || max == 0 ||
+        !fleet_board_slug_valid(slug))
+        return 0;
+    if (max > FLEET_BOARD_LIST_MAX)
+        max = FLEET_BOARD_LIST_MAX;
+    struct qb q;
+    fleet_board_select_row(&q);
+    qb_where_int(&q, QB_C_fleet_board_posts_kind, QB_EQ, FLEET_BOARD_KIND_WIKI);
+    wiki_view_where(&q, view);
+    qb_where_text(&q, QB_C_fleet_board_posts_slug, QB_EQ, slug);
+    qb_order_by(&q, QB_C_fleet_board_posts_created_at, QB_DESC);
+    qb_order_by(&q, QB_C_fleet_board_posts_id, QB_DESC);
+    qb_limit(&q, (int64_t)max);
+    sqlite3_stmt *s = NULL;
+    int count = 0;
+    if (!QB_PREPARE(ndb, &q, s))
+        return 0;
+    while (AR_STEP_ROW(s) && (size_t)count < max) {
+        struct db_fleet_board_post row;
+        memset(&row, 0, sizeof(row));
+        if (!fleet_board_row_read(s, &row))
+            continue;
+        out[count++] = row;
+    }
+    sqlite3_finalize(s);
+    return count;
 }

@@ -13,6 +13,7 @@
  * once. Every op is bounded; no op takes a path, a command, or a key. */
 
 #include "config/boot_fleet_board.h"
+#include "boot_fleet_board_wiki_scope_internal.h"
 
 #include "config/runtime.h"
 #include "base/hex.h"
@@ -79,6 +80,17 @@ static bool fb_bool(const struct json_value *in, const char *key)
 {
     const struct json_value *v = json_get(in, key);
     return v && v->type == JSON_BOOL && json_get_bool(v);
+}
+
+/* The scope option of a wiki read: public (default) or fleet. */
+static bool fb_wiki_view(const struct json_value *in, struct json_value *result,
+                         enum fleet_wiki_view *view)
+{
+    const char *why = NULL;
+    if (boot_fleet_wiki_view_parse(in, view, &why))
+        return true;
+    fb_error(result, "BAD_SCOPE", why);
+    return false;
 }
 
 /* One post as a JSON object. Public projection: the host is rendered as its
@@ -339,12 +351,19 @@ static bool fb_compose(const struct json_value *in, struct json_value *result,
     return true;
 }
 
-static void fb_op_post(const struct json_value *in, struct json_value *result,
-                       int64_t now)
+static void fb_op_post(struct node_db *ndb, const struct json_value *in,
+                       struct json_value *result, int64_t now)
 {
     struct fleet_board_post post;
+    char why[320];
+    const char *code = NULL, *refusal;
     if (!fb_compose(in, result, now, &post))
         return;
+    refusal = boot_fleet_wiki_scope_refusal(ndb, &post, &code, why, sizeof(why));
+    if (refusal) {
+        fb_error(result, code, refusal);
+        return;
+    }
     enum fleet_board_result r = boot_fleet_board_publish(&post, now);
     if (r != FLEET_BOARD_OK) {
         fb_refuse_write(result, r);
@@ -701,7 +720,8 @@ static void fb_wiki_chunk_render(const struct db_fleet_board_post *row,
     if (!ok) fb_error(result, "CHUNK_PROJECTION_FAILED", "cannot faithfully construct signed body chunk");
 }
 
-static void fb_op_wiki_chunk(struct node_db *ndb, const struct json_value *in,
+static void fb_op_wiki_chunk(struct node_db *ndb, enum fleet_wiki_view view,
+                             const struct json_value *in,
                              struct json_value *result)
 {
     uint8_t id[32];
@@ -723,8 +743,9 @@ static void fb_op_wiki_chunk(struct node_db *ndb, const struct json_value *in,
         return;
     }
     struct db_fleet_board_post row;
-    if (!db_fleet_board_post_find(ndb, id, &row)) {
-        fb_error(result, "NOT_FOUND", "no verifying retained revision with that id is held here");
+    if (!db_fleet_board_post_find(ndb, id, &row) ||
+        !fleet_wiki_view_has(view, row.post.scope)) {
+        fb_error(result, "NOT_FOUND", "no verifying retained revision with that id is held here in this scope (a fleet revision needs scope=fleet)");
         return;
     }
     if (row.post.kind != FLEET_BOARD_KIND_WIKI) {
@@ -877,8 +898,13 @@ static void fb_wiki_read_body(const struct db_fleet_board_post *row,
 static void fb_op_wiki_read(struct node_db *ndb, const struct json_value *in,
                             struct json_value *result)
 {
+    enum fleet_wiki_view view;
+    if (!fb_wiki_view(in, result, &view))
+        return;
     if (json_get(in, "id")) {
-        fb_op_wiki_chunk(ndb, in, result);
+        /* An exact id names one revision; scope, when given, narrows it. */
+        fb_op_wiki_chunk(ndb, json_get(in, "scope") ? view : FLEET_WIKI_VIEW_ANY,
+                         in, result);
         return;
     }
     if (json_get(in, "offset") || json_get(in, "bytes")) {
@@ -887,7 +913,7 @@ static void fb_op_wiki_read(struct node_db *ndb, const struct json_value *in,
     }
     const char *slug = fb_str(in, "slug", NULL);
     struct db_fleet_board_post row;
-    if (!slug || !db_fleet_board_wiki_read(ndb, slug, &row)) {
+    if (!slug || !db_fleet_board_wiki_read_in(ndb, view, slug, &row)) {
         fb_error(result, "NO_PAGE", "no wiki page with that slug is held here");
         return;
     }
@@ -957,6 +983,9 @@ static void fb_op_wiki_list(struct node_db *ndb, const struct json_value *in,
                             struct json_value *result)
 {
     const char *after = fb_str(in, "after_slug", "");
+    enum fleet_wiki_view view;
+    if (!fb_wiki_view(in, result, &view))
+        return;
     if (after[0] && !fleet_board_slug_valid(after)) {
         fb_error(result, "BAD_AFTER", "after_slug must be a page slug");
         return;
@@ -970,8 +999,8 @@ static void fb_op_wiki_list(struct node_db *ndb, const struct json_value *in,
     }
     char last[FLEET_BOARD_SLUG_MAX + 1];
     bool more;
-    int n = db_fleet_board_wiki_list_after(ndb, after, rows, FLEET_BOARD_LIST_MAX,
-                                           last, &more);
+    int n = db_fleet_board_wiki_list_after_in(ndb, view, after, rows,
+                                              FLEET_BOARD_LIST_MAX, last, &more);
     if (n < 0) {
         free(rows);
         fb_error(result, "BOARD_STORAGE", "the wiki index could not be read from the board store");
@@ -1061,8 +1090,8 @@ static bool fb_review_result(struct json_value *result, const struct json_value 
     return ok;
 }
 
-static void fb_op_wiki_reviews(struct node_db *ndb, const struct json_value *in,
-    struct json_value *result)
+static void fb_op_wiki_reviews(struct node_db *ndb, enum fleet_wiki_view view,
+    const struct json_value *in, struct json_value *result)
 {
     size_t allowance;
     if (!fb_review_allowance(in, &allowance)) {
@@ -1081,7 +1110,7 @@ static void fb_op_wiki_reviews(struct node_db *ndb, const struct json_value *in,
     struct db_fleet_board_post rows[1];
     size_t count;
     bool more;
-    if (!db_fleet_board_wiki_reviews(ndb, target, after, rows, 1, &count, next, &more)) {
+    if (!db_fleet_board_wiki_reviews_in(ndb, view, target, after, rows, 1, &count, next, &more)) {
         fb_error(result, "REVIEW_QUERY_FAILED", "review page unavailable; no exhaustion is claimed");
         return;
     }
@@ -1090,8 +1119,8 @@ static void fb_op_wiki_reviews(struct node_db *ndb, const struct json_value *in,
     bool ok = true;
     for (size_t i = 0; i < count; i++) {
         const struct fleet_board_post *post = &rows[i].post;
-        if (post->scope != FLEET_BOARD_SCOPE_PUBLIC ||
-            strcmp(post->room, FLEET_BOARD_ROOM_DEFAULT)) continue;
+        if (post->scope != fleet_wiki_view_scope(view) ||
+            (view != FLEET_WIKI_VIEW_FLEET && strcmp(post->room, FLEET_BOARD_ROOM_DEFAULT))) continue;
         struct json_value item;
         json_init(&item); json_set_object(&item);
         ok = fb_review_render_row(ndb, &rows[i], &item);
@@ -1117,7 +1146,10 @@ static void fb_op_wiki_history(struct node_db *ndb,
                                const struct json_value *in,
                                struct json_value *result)
 {
-    if (json_get(in, "target")) { fb_op_wiki_reviews(ndb, in, result); return; }
+    enum fleet_wiki_view view;
+    if (!fb_wiki_view(in, result, &view))
+        return;
+    if (json_get(in, "target")) { fb_op_wiki_reviews(ndb, view, in, result); return; }
     const char *slug = fb_str(in, "slug", NULL);
     if (!slug || !slug[0]) {
         fb_error(result, "MISSING_SLUG", "slug is required");
@@ -1130,8 +1162,8 @@ static void fb_op_wiki_history(struct node_db *ndb,
                  "the bounded wiki result snapshot could not be allocated");
         return;
     }
-    int n = db_fleet_board_wiki_history(ndb, slug, rows,
-                                        FLEET_BOARD_LIST_MAX);
+    int n = db_fleet_board_wiki_history_in(ndb, view, slug, rows,
+                                           FLEET_BOARD_LIST_MAX);
     fb_render_list(result, rows, n);
     free(rows);
 }
@@ -1382,13 +1414,16 @@ static void fb_op_wiki_find(struct node_db *ndb, const struct json_value *in,
         return;
     }
     struct fb_find_context c = {.used = 512};
+    enum fleet_wiki_view view;
+    if (!fb_wiki_view(in, result, &view))
+        return;
     if (!fb_find_query_read(in, &c.query)) {
         fb_error(result, "BAD_QUERY", "q is at most 128 bytes; topic/applies_to at most 64 nonempty bytes; after_slug is a slug; response budget 2048..8192");
         return;
     }
     json_init(&c.entries); json_set_array(&c.entries);
     struct fleet_wiki_query_progress progress = {.status = FLEET_WIKI_QUERY_STORAGE};
-    bool ok = db_fleet_board_wiki_query(ndb, c.query.after, fb_find_visit, &c, &progress);
+    bool ok = db_fleet_board_wiki_query_in(ndb, view, c.query.after, fb_find_visit, &c, &progress);
     if (!ok) {
         LOG_WARN("fleet.board", "wiki query failed status=%d", (int)progress.status);
         fb_error(result, "QUERY_FAILED", "wiki query storage or projection failed; no exhaustion claimed");
@@ -1443,7 +1478,7 @@ static bool rpc_fleet_board(const struct json_value *params, bool help,
     }
     int64_t now = (int64_t)platform_time_wall_time_t();
 
-    if (strcmp(op, "post") == 0)            fb_op_post(in, result, now);
+    if (strcmp(op, "post") == 0)            fb_op_post(ndb, in, result, now);
     else if (strcmp(op, "wiki_write") == 0) fb_op_wiki_write(in, result, now);
     else if (strcmp(op, "list") == 0)       fb_op_list(ndb, in, result, now);
     else if (strcmp(op, "show") == 0)       fb_op_show(ndb, in, result);

@@ -7180,6 +7180,79 @@ static int test_fleet_board_fleet_wiki_full_is_final(void)
     return failures;
 }
 
+/* A fleet-scope wiki page travels only the paired channel: an unpaired peer
+ * is refused by name, a paired peer without the read role is refused before a
+ * row is read, and a paired one receives the fleet page but never a public
+ * one (public pages are flooded, not pulled). Once held, the page is visible
+ * to the fleet view of the receiver and to no public read. */
+static int test_fleet_board_fleet_wiki_carriage(void)
+{
+    int failures = 0;
+    static struct fbw w;
+    struct fleet_board_post fleet_page, public_page;
+    struct db_fleet_board_post row;
+    struct zcl_fleet_role_checker checker = {
+        .allow = fbw_role_check, .name = "fleet-board-wiki-carriage-test" };
+    struct boot_fleet_board_fleet_counts before, after;
+    size_t frames = 0;
+    g_fbw_deny_read = false;
+    g_fbw_deny_post = false;
+    zcl_fleet_role_checker_install(&checker);
+    bool opened = fbw_open(&w);
+
+    TEST("fleet board carriage: a fleet wiki page is refused to an unpaired "
+         "peer and to a peer without the read role, and a paired peer gets "
+         "only the fleet page, visible only in the fleet view") {
+        ASSERT(opened);
+        ASSERT(fbw_wiki(&w.a, 7, "fleet-only-page", 2000, 2000, &fleet_page));
+        /* A public wiki page on the same store, same author. */
+        uint8_t seed[32], pk[32];
+        fb_test_identity(7, seed, pk);
+        fb_test_compose(&public_page, FLEET_BOARD_KIND_WIKI, "carrier",
+                        "public-page", 2001, 3600);
+        fb_test_scope(&public_page, FLEET_BOARD_SCOPE_PUBLIC, "general");
+        (void)snprintf(public_page.slug, sizeof(public_page.slug), "public-page");
+        (void)snprintf(public_page.title, sizeof(public_page.title), "public-page");
+        ASSERT_EQ(fleet_board_post_sign(&public_page, seed, pk), FLEET_BOARD_OK);
+        ASSERT_EQ(db_fleet_board_post_ingest(&w.a, &public_page, 2001, NULL),
+                  FLEET_BOARD_OK);
+        boot_fleet_board_fleet_test_bind(&w.a);
+
+        /* No pairing row: refused by name, nothing opened. */
+        ASSERT_EQ(fbw_raw_open_verdict(&w, 1), MESH_STREAM_REFUSED_PEER_UNPAIRED);
+        ASSERT_EQ(mesh_stream_test_live_count(FLEET_BOARD_FLEET_SERVICE_NAME),
+                  (size_t)0);
+
+        /* Paired, but the key holds no read role: refused and counted. */
+        ASSERT(mesh_term_pair_row(&w.f, &w.f.term_peer,
+                                  MESH_PAIRING_CAP_STATUS_READ, FBW_PAIRED_AT,
+                                  FBW_PAIRING_EXPIRES));
+        boot_fleet_board_fleet_test_bind_authority(&w.f.term_peer.delegation,
+                                                   w.f.genesis, FBW_NOW);
+        g_fbw_deny_read = true;
+        boot_fleet_board_fleet_counts(&before);
+        ASSERT_EQ(fbw_pull(&w, w.box_a, &w.b, &frames), (size_t)0);
+        boot_fleet_board_fleet_counts(&after);
+        ASSERT_EQ(after.role_refused, before.role_refused + 1);
+        ASSERT(!db_fleet_board_have(&w.b, fleet_page.id));
+        g_fbw_deny_read = false;
+
+        /* Paired with the role: the fleet page, and only it. */
+        ASSERT_EQ(fbw_pull(&w, w.box_a, &w.b, &frames), (size_t)1);
+        ASSERT(db_fleet_board_have(&w.b, fleet_page.id));
+        ASSERT(!db_fleet_board_have(&w.b, public_page.id));
+        ASSERT(db_fleet_board_wiki_read_in(&w.b, FLEET_WIKI_VIEW_FLEET,
+                                           "fleet-only-page", &row));
+        ASSERT(!db_fleet_board_wiki_read_in(&w.b, FLEET_WIKI_VIEW_PUBLIC,
+                                            "fleet-only-page", &row));
+        PASS();
+    }
+    _test_next:
+    fbw_close(&w);
+    zcl_fleet_role_checker_install_permissive_for_testing();
+    return failures;
+}
+
 /* A role grant lets a key write fleet posts here; it does not let that key
  * fill the store every other key shares. */
 static int test_fleet_board_fleet_quota(void)
@@ -10842,6 +10915,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_fleet_cursor_resumes();
     failures += test_fleet_board_fleet_carriage_gap_free();
     failures += test_fleet_board_fleet_wiki_full_is_final();
+    failures += test_fleet_board_fleet_wiki_carriage();
     failures += test_fleet_board_fleet_quota();
     failures += test_fleet_board_roster_membership();
     failures += test_fleet_board_roster_revoked_box();

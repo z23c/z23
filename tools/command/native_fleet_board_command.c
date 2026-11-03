@@ -683,6 +683,10 @@ static void fb_wiki_plan_id(const struct json_value *in, char out[65])
         fb_wiki_hash_str(&ctx, json_get_str(json_get(in, keys[i])));
     fb_wiki_hash_str(&ctx, agent);
     fb_wiki_hash_str(&ctx, ttl);
+    /* A plan made for the public page cannot be confirmed as a fleet write.
+     * Public (or absent) hashes nothing, so its plan ids are unchanged. */
+    if (!strcmp(json_get_str(json_get(in, "scope")), "fleet"))
+        fb_wiki_hash_str(&ctx, "scope=fleet");
     sha3_256_finalize(&ctx, d);
     for (size_t i = 0; i < 32; i++)
         (void)snprintf(out + 2 * i, 3, "%02x", d[i]);
@@ -715,6 +719,8 @@ static bool fb_wiki_write_authorised(const struct zcl_command_request *request,
             (int64_t)strlen(json_get_str(json_get(in, "text"))));
         (void)json_push_kv_str(&reply->data, "supersedes",
                                json_get_str(json_get(in, "supersedes")));
+        (void)json_push_kv_str(&reply->data, "scope",
+            strcmp(json_get_str(json_get(in, "scope")), "fleet") ? "public" : "fleet");
         (void)json_push_kv_bool(&reply->data, "mutated", false);
         (void)json_push_kv_str(&reply->data, "next",
             "repeat the same call with this plan_id and confirm:true to write");
@@ -877,6 +883,7 @@ void zcl_native_handle_fleet_wiki_write(
     fb_forward_str(&out, in, "supersedes", NULL);
     fb_forward_int(&out, in, "ttl");
     fb_forward_str(&out, in, "format", NULL);
+    fb_forward_str(&out, in, "scope", NULL);
 
     struct json_value body;
     json_init(&body);
@@ -1142,6 +1149,8 @@ void zcl_native_handle_fleet_wiki_read(
     bool ready = json_push_kv_str(&out, "op", "wiki_read") &&
         (chunk ? fb_wiki_chunk_request(request, reply, &out)
                : fb_wiki_slug_request(request, reply, slug, &out));
+    if (ready)
+        fb_forward_str(&out, request->input, "scope", NULL);
     if (!ready) {
         if (reply->status == ZCL_COMMAND_STATUS_PASSED)
             fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
@@ -1239,22 +1248,25 @@ static bool fb_wiki_list_page_more(struct zcl_command_reply *reply,
 }
 
 /* One node call for the batch after `after`; false when the reply failed. */
-static bool fb_wiki_list_fetch(struct zcl_command_reply *reply, const char *after,
+static bool fb_wiki_list_fetch(struct zcl_command_reply *reply,
+                               const struct json_value *in, const char *after,
                                struct json_value *page)
 {
     struct json_value out;
     json_init(&out);
     json_set_object(&out);
     bool ok = json_push_kv_str(&out, "op", "wiki_list") &&
-        (!after[0] || json_push_kv_str(&out, "after_slug", after)) &&
-        fb_call(reply, &out, page, 0);
+        (!after[0] || json_push_kv_str(&out, "after_slug", after));
+    fb_forward_str(&out, in, "scope", NULL);
+    ok = ok && fb_call(reply, &out, page, 0);
     json_free(&out);
     return ok;
 }
 
 /* Fetch the whole index into body.posts, one node call per slug-ordered batch,
  * so every page is reachable through the command's own --cursor. */
-static bool fb_wiki_list_collect(struct zcl_command_reply *reply, struct json_value *body)
+static bool fb_wiki_list_collect(struct zcl_command_reply *reply,
+                                 const struct json_value *in, struct json_value *body)
 {
     struct json_value all, after, page;
     json_init(&all); json_set_array(&all);
@@ -1262,7 +1274,7 @@ static bool fb_wiki_list_collect(struct zcl_command_reply *reply, struct json_va
     bool ok = true, more = true;
     for (int call = 0; ok && more; call++) {
         json_init(&page);
-        ok = fb_wiki_list_fetch(reply, json_get_str(&after), &page) &&
+        ok = fb_wiki_list_fetch(reply, in, json_get_str(&after), &page) &&
             fb_wiki_list_page_more(reply, &page, json_get_str(&after), &more);
         if (ok && !fb_wiki_list_append(&all, &page)) {
             fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
@@ -1295,7 +1307,7 @@ void zcl_native_handle_fleet_wiki_list(
 {
     struct json_value body;
     json_init(&body);
-    if (!fb_wiki_list_collect(reply, &body)) {
+    if (!fb_wiki_list_collect(reply, request->input, &body)) {
         json_free(&body);
         return;
     }
@@ -1320,6 +1332,7 @@ void zcl_native_handle_fleet_wiki_history(
         if (prepared && cursor)
             prepared = cursor->type == JSON_STR && json_push_kv_str(&out, "after_id", cursor->val.s);
         size_t cap = fb_wiki_response_cap(request);
+        fb_forward_str(&out, request->input, "scope", NULL);
         prepared = prepared && json_push_kv_int(&out, "response_budget", (int64_t)cap);
         if (prepared && request->success_data_budget_provided)
             prepared = json_push_kv_int(&out, "data_budget", (int64_t)request->success_data_budget);
@@ -1343,6 +1356,7 @@ void zcl_native_handle_fleet_wiki_history(
     json_set_object(&out);
     (void)json_push_kv_str(&out, "op", "wiki_history");
     (void)json_push_kv_str(&out, "slug", slug);
+    fb_forward_str(&out, request->input, "scope", NULL);
 
     struct json_value body;
     json_init(&body);
@@ -1370,6 +1384,7 @@ static bool fb_wiki_find_request(const struct zcl_command_request *request,
     fb_forward_str(out, request->input, "topic", NULL);
     fb_forward_str(out, request->input, "applies_to", NULL);
     fb_forward_str(out, request->input, "after_slug", NULL);
+    fb_forward_str(out, request->input, "scope", NULL);
     (void)json_push_kv_int(out, "response_budget", (int64_t)budget);
     return true;
 }
@@ -1410,8 +1425,10 @@ static void fb_wiki_find(const struct zcl_command_request *request,
     for (size_t i = 0; valid_id && i < 64; i++)
         valid_id = (id[i] >= '0' && id[i] <= '9') || (id[i] >= 'a' && id[i] <= 'f');
     if (valid_id) {
-        char input[96];
-        (void)snprintf(input, sizeof(input), "{\"id\":\"%s\"}", id);
+        char input[128];
+        bool fleet = !strcmp(json_get_str(json_get(request->input, "scope")), "fleet");
+        (void)snprintf(input, sizeof(input), "{\"id\":\"%s\"%s}", id,
+                       fleet ? ",\"scope\":\"fleet\"" : "");
         (void)zcl_command_reply_add_next(reply, "fleet.wiki.read", input,
             "read exact revision body chunks and verify the reconstructed post");
     }

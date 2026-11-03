@@ -1227,33 +1227,8 @@ int db_fleet_board_list_checked(struct node_db *ndb,
 int db_fleet_board_wiki_history(struct node_db *ndb, const char *slug,
                                 struct db_fleet_board_post *out, size_t max)
 {
-    if (!ndb || !ndb->open || !out || max == 0 ||
-        !fleet_board_slug_valid(slug))
-        return 0;
-    if (max > FLEET_BOARD_LIST_MAX)
-        max = FLEET_BOARD_LIST_MAX;
-    struct qb q;
-    qb_select(&q, QB_T_fleet_board_posts);
-    qb_select_columns(&q, k_board_cols, BOARD_NCOLS);
-    qb_where_int(&q, QB_C_fleet_board_posts_kind, QB_EQ,
-                 FLEET_BOARD_KIND_WIKI);
-    qb_where_text(&q, QB_C_fleet_board_posts_slug, QB_EQ, slug);
-    qb_order_by(&q, QB_C_fleet_board_posts_created_at, QB_DESC);
-    qb_order_by(&q, QB_C_fleet_board_posts_id, QB_DESC);
-    qb_limit(&q, (int64_t)max);
-    sqlite3_stmt *s = NULL;
-    int count = 0;
-    if (!QB_PREPARE(ndb, &q, s))
-        return 0;
-    while (AR_STEP_ROW(s) && (size_t)count < max) {
-        struct db_fleet_board_post row;
-        memset(&row, 0, sizeof(row));
-        if (!fleet_board_row_read(s, &row))
-            continue;
-        out[count++] = row;
-    }
-    sqlite3_finalize(s);
-    return count;
+    return db_fleet_board_wiki_history_in(ndb, FLEET_WIKI_VIEW_ANY, slug, out,
+                                          max);
 }
 
 int db_fleet_board_wiki_list(struct node_db *ndb,

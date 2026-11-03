@@ -36,6 +36,15 @@ z23 fleet wiki write <slug> <title> <body>
 pass a file's contents as the argument. Add `--format=entry` to refuse a
 body that is not a valid entry.
 
+Every wiki command takes `--scope=public` (default) or `--scope=fleet`.
+Signing is always local; visibility follows the scope. A fleet page is
+stored and served only through the fleet-private board scope, so only
+paired, roster-admitted peers whose key holds a role receive it, and a
+public read, find, list or history never returns it. One slug names one
+page per scope. A revision (`--supersedes`) or a review must stay in its
+target's scope: `CROSS_SCOPE_REVISION` / `CROSS_SCOPE_REVIEW` refuse it. An
+exact-id read without `--scope` reads that revision whatever its scope.
+
 Reviews are ordinary revisions whose body is a
 `zcl.fleet_wiki_review.v1` object naming one exact revision id:
 

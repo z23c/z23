@@ -261,6 +261,31 @@ static inline int db_fleet_board_list(
 bool db_fleet_board_wiki_read(struct node_db *ndb, const char *slug,
                               struct db_fleet_board_post *out);
 
+/* Which side of the wiki a read sees. A wiki revision is signed under one
+ * scope and a page never mixes scopes: PUBLIC is every row that is not
+ * fleet-private (signed public and pre-scope legacy rows), FLEET is only
+ * fleet-private rows, and ANY is the unfiltered legacy view that callers
+ * which do their own scope test (the site renderer) keep. The filter is in
+ * the query, before the newest-revision ordering, so a newer revision in the
+ * other scope can never hide, replace or spend the budget of a visible page. */
+enum fleet_wiki_view {
+    FLEET_WIKI_VIEW_ANY = 0,
+    FLEET_WIKI_VIEW_PUBLIC,
+    FLEET_WIKI_VIEW_FLEET,
+};
+
+/* True when a row signed under `scope` is visible in `view`. */
+bool fleet_wiki_view_has(enum fleet_wiki_view view, uint8_t scope);
+
+/* The scope a revision written into `view` is signed under. */
+uint8_t fleet_wiki_view_scope(enum fleet_wiki_view view);
+
+/* db_fleet_board_wiki_read within one view. */
+bool db_fleet_board_wiki_read_in(struct node_db *ndb, enum fleet_wiki_view view,
+                                 const char *slug,
+                                 struct db_fleet_board_post *out);
+
+
 
 /* db_fleet_board_wiki_read with the same newest-verifying rule, bounded to
  * FLEET_BOARD_LIST_MAX revision verifications. *newer_unverified is set when
@@ -294,6 +319,10 @@ typedef enum fleet_wiki_visit_result (*fleet_wiki_visit_fn)(void *,
  * Observations are latest-held, not a snapshot or global completeness proof. */
 bool db_fleet_board_wiki_query(struct node_db *, const char *after_slug,
     fleet_wiki_visit_fn, void *, struct fleet_wiki_query_progress *);
+/* db_fleet_board_wiki_query within one view. */
+bool db_fleet_board_wiki_query_in(struct node_db *, enum fleet_wiki_view,
+    const char *after_slug, fleet_wiki_visit_fn, void *,
+    struct fleet_wiki_query_progress *);
 
 
 /* One row per slug: the latest revision of the first max pages. Pages past
@@ -310,9 +339,20 @@ int db_fleet_board_wiki_list_after(struct node_db *ndb, const char *after,
     struct db_fleet_board_post *out, size_t max,
     char last_scanned[FLEET_BOARD_SLUG_MAX + 1], bool *more);
 
+/* db_fleet_board_wiki_list_after within one view. */
+int db_fleet_board_wiki_list_after_in(struct node_db *ndb,
+    enum fleet_wiki_view view, const char *after,
+    struct db_fleet_board_post *out, size_t max,
+    char last_scanned[FLEET_BOARD_SLUG_MAX + 1], bool *more);
+
 /* Every revision of one slug, newest first. */
 int db_fleet_board_wiki_history(struct node_db *ndb, const char *slug,
                                 struct db_fleet_board_post *out, size_t max);
+
+/* db_fleet_board_wiki_history within one view. */
+int db_fleet_board_wiki_history_in(struct node_db *ndb,
+    enum fleet_wiki_view view, const char *slug,
+    struct db_fleet_board_post *out, size_t max);
 
 bool db_fleet_board_status(struct node_db *ndb, int64_t now,
                            struct fleet_board_status *out);
@@ -417,6 +457,11 @@ enum fleet_board_result db_fleet_board_review_local_check(
 bool db_fleet_board_wiki_reviews(struct node_db *, const uint8_t target[32],
     const uint8_t after[32], struct db_fleet_board_post *, size_t,
     size_t *, uint8_t next[32], bool *);
+/* db_fleet_board_wiki_reviews within one view: PUBLIC (and ANY) read the
+ * signed public scope in the default room, FLEET the fleet-private scope. */
+bool db_fleet_board_wiki_reviews_in(struct node_db *, enum fleet_wiki_view,
+    const uint8_t target[32], const uint8_t after[32],
+    struct db_fleet_board_post *, size_t, size_t *, uint8_t next[32], bool *);
 struct fleet_wiki_review_state {
     unsigned graph_verified;
     bool resolved, lineage_valid, current, fork, complete;
