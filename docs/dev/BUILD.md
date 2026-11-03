@@ -582,8 +582,8 @@ that need it as `UNOBSERVED`; the ADMIT path is not exercised there.
 `make vendor` produces every archive below. **Source class** is either
 *in-tree* (a source file already in the repo) or *fetched* (pulled from the
 pinned URL, verified against the pinned SHA256 in
-`tools/scripts/build_vendor.sh`, then built static). `./tools/dep_audit.sh`
-(`make audit`) re-detects versions from the built archives and checks each
+`tools/scripts/build_vendor.sh`, then built static). `build/bin/dep_audit`
+(`make audit`, source `tools/dep_audit.c`) re-detects versions from the built archives and checks each
 against its minimum-safe version.
 
 | Archive | Upstream | Version | Source class | Origin |
@@ -805,7 +805,7 @@ as a dirty boot.
 ### Verify
 
 ```bash
-make audit          # tools/dep_audit.sh — versions vs minimum-safe CVE floors
+make audit          # build/bin/dep_audit (tools/dep_audit.c) — versions vs minimum-safe CVE floors
 make -j"$(getconf _NPROCESSORS_ONLN)" build-only  # compile every .o (no link) — should be clean
 make -j"$(getconf _NPROCESSORS_ONLN)" dev-bin     # fast non-LTO local node binary: build/bin/z23-dev
 make vendor         # build the vendored archives from source

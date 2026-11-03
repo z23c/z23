@@ -3,7 +3,7 @@
 #
 # Shared deterministic stamp primitives for vendored static archives.
 # This file deliberately knows nothing about dependency versions or recipes;
-# build_vendor.sh supplies the checked expected descriptor, and dep_audit.sh
+# build_vendor.sh supplies the checked expected descriptor, and dep_audit.c
 # asks that same builder contract to verify the installed archive byte-for-byte.
 
 VP_SCHEMA="zclassic23.vendor-provenance.v1"

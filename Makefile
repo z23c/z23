@@ -818,7 +818,12 @@ ZCL_NODECTL_BIN = $(BIN_DIR)/zcl-nodectl
 # Gate E1 file-size policy checker (rule near check-file-size-ceiling below).
 # Declared here because the test binaries take it as an order-only prereq.
 FILE_SIZE_POLICY_BIN = $(BIN_DIR)/file_size_policy
-TOOLGEN_BIN = $(BIN_DIR)/z23-toolgen$(ZCL_HOST_EXEEXT)
+# Vendor dependency audit (tools/dep_audit.c). Declared here because
+# vendor-ready and audit name it as a prerequisite. It is a host tool: the
+# audit runs on the build machine even under a cross VENDOR_TARGET, so it is
+# compiled with HOST_CC rather than the target CC.
+DEP_AUDIT_BIN = $(BIN_DIR)/dep_audit
+TOOLGEN_BIN =$(BIN_DIR)/z23-toolgen$(ZCL_HOST_EXEEXT)
 # Tor archive provenance verifier — binds the four bundled Tor archives to the
 # vendor/tor commit, compiler identity, and configure flags that produced
 # them, instead of every readiness check asking only "do the bytes exist"
@@ -2185,9 +2190,9 @@ vendor-provenance:
 	@VENDOR_TARGET=$(ZCL_CROSS_TRIPLE) tools/scripts/build_vendor.sh --check-provenance
 # Link/release/deploy front door: repair stale archives, then independently
 # audit installed bytes before any binary can consume them.
-vendor-ready:
+vendor-ready: $(DEP_AUDIT_BIN)
 	@VENDOR_TARGET=$(ZCL_CROSS_TRIPLE) tools/scripts/build_vendor.sh
-	@tools/dep_audit.sh
+	@$(DEP_AUDIT_BIN)
 
 # Build the real embedded onion service from the pinned submodule. This
 # initializes the submodule, disables optional host-library integrations that
@@ -13535,6 +13540,25 @@ $(FILE_SIZE_POLICY_BIN): $(FILE_SIZE_POLICY_SRCS)
 	    -Iplatform/modules/platform/include -Iplatform/modules/base/include \
 	    -o $@ $(FILE_SIZE_POLICY_SRCS)
 
+# ── dep_audit: vendored-library version and provenance audit ─────────────
+# The former tools/dep_audit.sh as a host tool, compiled straight from source.
+# It spawns build_vendor.sh --check-provenance through zcl_spawn_capture_binary
+# (no shell) and links the same spawn source set as z23-contrib-inbox.
+DEP_AUDIT_SRCS = tools/dep_audit.c platform/modules/util/src/spawn.c \
+    platform/modules/base/src/cleanse.c platform/modules/base/src/log_level.c \
+    platform/modules/base/src/result.c platform/modules/base/src/safe_alloc.c \
+    platform/modules/platform/src/clock.c platform/modules/platform/src/os_proc.c
+DEP_AUDIT_INCLUDES = -Iplatform/modules/base/include \
+    -Iplatform/modules/platform/include -Iplatform/modules/util/include
+.PHONY: dep-audit
+dep-audit: $(DEP_AUDIT_BIN)
+$(DEP_AUDIT_BIN): $(DEP_AUDIT_SRCS)
+	@mkdir -p $(dir $@)
+	$(or $(HOST_CC),cc) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
+	    $(DEP_AUDIT_INCLUDES) \
+	    -o $@ $(DEP_AUDIT_SRCS) -lpthread
+
 # mutation-campaign measures whether a test group would NOTICE if the code it
 # covers were wrong: it enumerates one-token defects in a source file,
 # compiles each, runs ONLY the named group, and reports what survived. It is
@@ -16505,8 +16529,8 @@ ci: vendor-ready lint bench-regress zclassic23 $(TEST_PARALLEL_REL_CANDIDATE)
 	@echo ""
 	@echo "══ CI: ALL STAGES PASSED ══"
 
-audit:
-	@tools/dep_audit.sh
+audit: $(DEP_AUDIT_BIN)
+	@$(DEP_AUDIT_BIN)
 
 check-restart-follow:
 	$(ZCL_NODECTL_BIN) verify-follow --restart

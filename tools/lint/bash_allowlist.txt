@@ -28,7 +28,6 @@ tests/harness/mvp_c8_judge_cases.sh
 tools/agent/gate-receipt.sh
 tools/agent_fast_ci.sh
 tools/agent_test_runner.sh
-tools/dep_audit.sh
 tools/deploy_guard.sh
 tools/deploy_verify.sh
 tools/dev/agent-baseline.sh
