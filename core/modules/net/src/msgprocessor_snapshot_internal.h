@@ -24,6 +24,10 @@
  *                                   state with the rest of the dispatcher
  *                                   except the two calls into it from the
  *                                   MSG_FC_CHALLENGE branch.
+ *   msgprocessor_snapshot_receive.c — receiver-side zsnapshot offer,
+ *                                   zsnapdata, zsnapend and FlyClient
+ *                                   challenge/proofs handlers, split out
+ *                                   of the dispatcher as pure code motion.
  *   msgprocessor_snapshot_payload.c — verified block-piece reducer intake
  *                                   (mp_block_payload_submit_all).
  *   msgprocessor_snapshot_serve.c — the SERVE side: cached offer/manifest
@@ -115,6 +119,28 @@ bool fc_rate_acquire(node_id_t peer_id, int64_t now_ms);
  * on subsequent calls within the same flood. dropped_out, if non-NULL, gets
  * the peer's current lifetime drop count. */
 bool fc_rate_should_score(node_id_t peer_id, uint32_t *dropped_out);
+
+/* ── msgprocessor_snapshot_receive.c: receiver-side handlers the
+ * mp_handle_zcl23_sync dispatcher in msgprocessor_snapshot.c routes to ── */
+
+/* zsnapshot offer: parse, gate, hand to snapsync_handle_offer, react. */
+void mp_zs_on_snapshot_offer(struct msg_processor *mp, struct p2p_node *node,
+                             struct byte_stream *s);
+
+/* zsnapdata: apply one snapshot chunk to the snapshot sync service. */
+void mp_zs_on_snapshot_data(struct msg_processor *mp, struct p2p_node *node,
+                            struct byte_stream *s);
+
+/* zsnapend: finalize and verify the received snapshot. */
+void mp_zs_on_snapshot_end(struct msg_processor *mp, struct p2p_node *node);
+
+/* zfcchallenge: rate-limit, parse and answer with FlyClient proofs. */
+void mp_zs_on_fc_challenge(struct msg_processor *mp, struct p2p_node *node,
+                           struct byte_stream *s);
+
+/* zfcproofs: verify the peer's FlyClient proofs, then request the snapshot. */
+void mp_zs_on_fc_proofs(struct msg_processor *mp, struct p2p_node *node,
+                        struct byte_stream *s);
 
 /* ── msgprocessor_snapshot_serve.c: called from the mp_handle_zcl23_sync
  * dispatcher and mp_snapshot_send_tick in msgprocessor_snapshot.c ──── */

@@ -727,6 +727,61 @@ static bool ed_batch_serial(const uint8_t *const *msgs, const size_t *msg_lens,
     return true;
 }
 
+/* h = SHA-512(R || pk || msg) mod L. */
+static inline void ed_batch_challenge_h(uint8_t h[64], const uint8_t *sig,
+                                        const uint8_t *pk, const uint8_t *msg,
+                                        size_t msg_len)
+{
+    struct sha512_ctx hs;
+    sha512_init(&hs);
+    sha512_write(&hs, sig, 32);
+    sha512_write(&hs, pk, 32);
+    sha512_write(&hs, msg, msg_len);
+    sha512_finalize(&hs, h);
+    reduce(h);
+}
+
+/* True when [L](R + [h mod 8]A) is the identity (no 8-torsion component). */
+static inline bool ed_batch_torsion_screen_clear(const gep ap, const gep rp,
+                                                 const uint8_t h[64])
+{
+    gep w, t;
+    set_identity(t);
+    unsigned e3 = (unsigned)h[0] & 7u;
+    for (int b = 2; b >= 0; b--) {
+        point_add(t, t);
+        if ((e3 >> b) & 1u)
+            point_add(t, ap);
+    }
+    memcpy(w, rp, sizeof(gep));
+    point_add(w, t);
+
+    gep lw;
+    point_mul_scalar(lw, w, L_LE);
+    return point_is_identity(lw);
+}
+
+/* Copies the 128-bit randomiser into z, forcing it non-zero. */
+static inline void ed_batch_load_nonzero_z(uint8_t z[32], const uint8_t *src)
+{
+    memcpy(z, src, 16);
+    int znz = 0;
+    for (int b = 0; b < 16; b++) znz |= z[b];
+    if (znz == 0) z[0] = 1;
+}
+
+/* r8 = [8]rp, a8 = [8]ap. */
+static inline void ed_batch_clear_cofactor(gep r8, gep a8, const gep rp,
+                                           const gep ap)
+{
+    memcpy(r8, rp, sizeof(gep));
+    memcpy(a8, ap, sizeof(gep));
+    for (int d = 0; d < 3; d++) {
+        point_add(r8, r8);
+        point_add(a8, a8);
+    }
+}
+
 /* Steps 1-3 of the header comment. `*rng_failed` is set when the CSPRNG
  * refused, which is not a verdict — the caller then answers serially. */
 static bool ed_batch_core(const uint8_t *const *msgs, const size_t *msg_lens,
@@ -791,30 +846,11 @@ static bool ed_batch_core(const uint8_t *const *msgs, const size_t *msg_lens,
             /* h = SHA-512(R || pk || msg) mod L — byte-identical to the
              * single path, including msg_len == 0. */
             uint8_t h[64];
-            struct sha512_ctx hs;
-            sha512_init(&hs);
-            sha512_write(&hs, sig, 32);
-            sha512_write(&hs, pk, 32);
-            sha512_write(&hs, msgs[i], msg_lens[i]);
-            sha512_finalize(&hs, h);
-            reduce(h);
+            ed_batch_challenge_h(h, sig, pk, msgs[i], msg_lens[i]);
 
             /* (2) Torsion screen: [L](R_i + [h_i mod 8]A_i) must be O. */
             {
-                gep w, t;
-                set_identity(t);
-                unsigned e3 = (unsigned)h[0] & 7u;
-                for (int b = 2; b >= 0; b--) {
-                    point_add(t, t);
-                    if ((e3 >> b) & 1u)
-                        point_add(t, ap);
-                }
-                memcpy(w, rp, sizeof(gep));
-                point_add(w, t);
-
-                gep lw;
-                point_mul_scalar(lw, w, L_LE);
-                if (!point_is_identity(lw)) {
+                if (!ed_batch_torsion_screen_clear(ap, rp, h)) {
                     memory_cleanse(zbuf, sizeof(zbuf));
                     LOG_FAIL("ed25519",
                              "batch[%zu]: R + [h mod 8]A has 8-torsion — [S]B - [h]A != R",
@@ -825,19 +861,11 @@ static bool ed_batch_core(const uint8_t *const *msgs, const size_t *msg_lens,
             /* z_i: uniform 128-bit, never zero (a zero randomiser would
              * silently drop this signature from the combined equation). */
             uint8_t z[32] = {0};
-            memcpy(z, zbuf + k * 16, 16);
-            int znz = 0;
-            for (int b = 0; b < 16; b++) znz |= z[b];
-            if (znz == 0) z[0] = 1;
+            ed_batch_load_nonzero_z(z, zbuf + k * 16);
 
             /* (3) Cofactor-cleared points; mod-L scalars are then exact. */
             gep r8, a8;
-            memcpy(r8, rp, sizeof(gep));
-            memcpy(a8, ap, sizeof(gep));
-            for (int d = 0; d < 3; d++) {
-                point_add(r8, r8);
-                point_add(a8, a8);
-            }
+            ed_batch_clear_cofactor(r8, a8, rp, ap);
 
             mx_build_table(ws->tab[np], r8);
             memcpy(ws->scal[np], z, 32);

@@ -6,27 +6,5 @@
 # no longer exists, or a pin whose function is now within the cap fails the gate.
 # A shrunk function still over the cap passes; --tighten-baseline lowers its pin.
 contexts/wallet/controllers/src/wallet_view_sync.c:wv_sync_wallet_from_zclassicd:43
-core/consensus/src/script_interp.c:domain_consensus_eval_script:260
-core/modules/crypto/src/blake2b_avx2.c:finalize_states:18
-core/modules/crypto/src/ed25519.c:ed_batch_core:18
-core/modules/crypto/src/equihash.c:equihash_basic_solve:35
-core/modules/crypto/src/equihash.c:equihash_is_valid_solution:33
-core/modules/crypto/src/sha3_256_x4.c:sha3_256_x4_avx512:17
-core/modules/crypto/src/sha3_256_x4.c:sha3_256_x4_neon:17
-core/modules/crypto_registry/src/crypto_registry.c:crypto_registry_register:16
-core/modules/net/src/msgprocessor_snapshot.c:mp_handle_zcl23_sync:174
-core/modules/net/src/msgprocessor_snapshot.c:mp_snapshot_maybe_offer:17
-core/modules/net/src/msgprocessor_snapshot.c:mp_snapshot_send_tick:33
-core/modules/net/src/rom_fetch.c:rf_download_verified_core:23
-core/modules/net/src/rom_fetch.c:rom_fetch_download:18
-core/modules/primitives/src/transaction.c:js_description_deserialize:16
-core/modules/primitives/src/transaction.c:js_description_serialize:16
-core/modules/primitives/src/transaction.c:transaction_deserialize:59
-core/modules/primitives/src/transaction.c:transaction_serialize:39
-core/modules/sapling/src/circuit_spend.c:sapling_spend_synthesize_traced:49
-core/modules/sapling/src/groth16_prover.c:g1_msm:18
-core/modules/sapling/src/groth16_prover.c:g2_msm:18
-core/modules/sapling/src/groth16_prover.c:groth16_pk_read:20
-core/modules/sapling/src/groth16_prover.c:groth16_prove:63
 tests/harness/src/test_zcode_package_dev.c:zpd_test_twelve_task_benchmark:30
 tests/harness/src/test_zcode_package_dev.c:zpd_test_work_start:56

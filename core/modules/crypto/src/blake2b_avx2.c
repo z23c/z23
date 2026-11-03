@@ -562,14 +562,27 @@ static bool blake2b_neon_kat(void)
  *  (x86-64: 8-way / 4-way / scalar; arm64: 4-way / scalar)
  * ══════════════════════════════════════════════════════════════ */
 
-/* Internal: finalize N states that share the same base + 4-byte index */
-static void finalize_states(const struct blake2b_ctx *base,
-                            const uint32_t *indices, int n,
-                            unsigned char **hashes, size_t hash_len)
+/* Scalar reference for indices[from .. n): one update + final per index. */
+static inline void blake2b_finalize_scalar_range(const struct blake2b_ctx *base,
+                                                 const uint32_t *indices,
+                                                 int from, int n,
+                                                 unsigned char **hashes,
+                                                 size_t hash_len)
 {
-#if ZCL_BLAKE2B_X86_SIMD
-    struct blake2b_ctx states[8];
-    uint8_t blocks[8][128];
+    for (int i = from; i < n; i++) {
+        struct blake2b_ctx s = *base;
+        blake2b_update(&s, &indices[i], sizeof(uint32_t));
+        blake2b_final(&s, hashes[i], hash_len);
+    }
+}
+
+#if ZCL_BLAKE2B_X86_SIMD || ZCL_BLAKE2B_ARM_NEON
+/* Builds the n per-index states and their single padded final blocks. */
+static inline void blake2b_prepare_batch_states(const struct blake2b_ctx *base,
+                                                const uint32_t *indices, int n,
+                                                struct blake2b_ctx states[8],
+                                                uint8_t blocks[8][128])
+{
     size_t bl = base->buflen;
 
     for (int i = 0; i < n; i++) {
@@ -581,6 +594,47 @@ static void finalize_states(const struct blake2b_ctx *base,
         states[i].t[1] = 0;
         states[i].f[0] = (uint64_t)-1;
     }
+}
+#endif
+
+#if ZCL_BLAKE2B_X86_SIMD
+#define BLAKE2B_COMPRESS_GROUP_OF_4 blake2b_compress_4way
+#elif ZCL_BLAKE2B_ARM_NEON
+#define BLAKE2B_COMPRESS_GROUP_OF_4 blake2b_compress_4way_neon
+#endif
+
+#if ZCL_BLAKE2B_X86_SIMD || ZCL_BLAKE2B_ARM_NEON
+static inline void blake2b_finalize_groups_of_4(const struct blake2b_ctx *base,
+                                                const uint32_t *indices, int n,
+                                                struct blake2b_ctx states[8],
+                                                uint8_t blocks[8][128],
+                                                unsigned char **hashes,
+                                                size_t hash_len)
+{
+    int done = 0;
+    while (n - done >= 4) {
+        struct blake2b_ctx *cp[4] = {&states[done],   &states[done+1],
+                                     &states[done+2], &states[done+3]};
+        const uint8_t *bp[4] = {blocks[done],   blocks[done+1],
+                                blocks[done+2], blocks[done+3]};
+        BLAKE2B_COMPRESS_GROUP_OF_4(cp, bp);
+        for (int i = done; i < done + 4; i++)
+            memcpy(hashes[i], states[i].h, hash_len);
+        done += 4;
+    }
+    blake2b_finalize_scalar_range(base, indices, done, n, hashes, hash_len);
+}
+#endif
+
+/* Internal: finalize N states that share the same base + 4-byte index */
+static void finalize_states(const struct blake2b_ctx *base,
+                            const uint32_t *indices, int n,
+                            unsigned char **hashes, size_t hash_len)
+{
+#if ZCL_BLAKE2B_X86_SIMD
+    struct blake2b_ctx states[8];
+    uint8_t blocks[8][128];
+    blake2b_prepare_batch_states(base, indices, n, states, blocks);
 
     if (n == 8 && atomic_load_explicit(&g_use_avx512f, memory_order_relaxed)) {
         struct blake2b_ctx *cp[8];
@@ -605,38 +659,14 @@ static void finalize_states(const struct blake2b_ctx *base,
          * silently produced wrong Equihash hashes. Splitting on the group
          * boundary removes the aliasing rather than relying on nobody ever
          * passing the wrong n. */
-        int done = 0;
-        while (n - done >= 4) {
-            struct blake2b_ctx *cp[4] = {&states[done],   &states[done+1],
-                                         &states[done+2], &states[done+3]};
-            const uint8_t *bp[4] = {blocks[done],   blocks[done+1],
-                                    blocks[done+2], blocks[done+3]};
-            blake2b_compress_4way(cp, bp);
-            for (int i = done; i < done + 4; i++)
-                memcpy(hashes[i], states[i].h, hash_len);
-            done += 4;
-        }
-        for (int i = done; i < n; i++) {
-            struct blake2b_ctx s = *base;
-            blake2b_update(&s, &indices[i], sizeof(uint32_t));
-            blake2b_final(&s, hashes[i], hash_len);
-        }
+        blake2b_finalize_groups_of_4(base, indices, n, states, blocks,
+                                     hashes, hash_len);
         return;
     }
 #elif ZCL_BLAKE2B_ARM_NEON
     struct blake2b_ctx states[8];
     uint8_t blocks[8][128];
-    size_t bl = base->buflen;
-
-    for (int i = 0; i < n; i++) {
-        states[i] = *base;
-        memset(blocks[i], 0, 128);
-        memcpy(blocks[i], base->buf, bl);
-        memcpy(blocks[i] + bl, &indices[i], 4);
-        states[i].t[0] += bl + 4;
-        states[i].t[1] = 0;
-        states[i].f[0] = (uint64_t)-1;
-    }
+    blake2b_prepare_batch_states(base, indices, n, states, blocks);
 
     if (n >= 4 && atomic_load_explicit(&g_use_neon, memory_order_relaxed)) {
         /* Same group-boundary split as the AVX2 arm above: whole groups of 4
@@ -644,32 +674,14 @@ static void finalize_states(const struct blake2b_ctx *base,
          * reference. Repeating a context into a spare lane would XOR four lane
          * results into one state — the aliasing bug the AVX2 arm documents —
          * so the split, not the caller's discipline, is what prevents it. */
-        int done = 0;
-        while (n - done >= 4) {
-            struct blake2b_ctx *cp[4] = {&states[done],   &states[done+1],
-                                         &states[done+2], &states[done+3]};
-            const uint8_t *bp[4] = {blocks[done],   blocks[done+1],
-                                    blocks[done+2], blocks[done+3]};
-            blake2b_compress_4way_neon(cp, bp);
-            for (int i = done; i < done + 4; i++)
-                memcpy(hashes[i], states[i].h, hash_len);
-            done += 4;
-        }
-        for (int i = done; i < n; i++) {
-            struct blake2b_ctx s = *base;
-            blake2b_update(&s, &indices[i], sizeof(uint32_t));
-            blake2b_final(&s, hashes[i], hash_len);
-        }
+        blake2b_finalize_groups_of_4(base, indices, n, states, blocks,
+                                     hashes, hash_len);
         return;
     }
 #endif
 
     /* Scalar fallback */
-    for (int i = 0; i < n; i++) {
-        struct blake2b_ctx s = *base;
-        blake2b_update(&s, &indices[i], sizeof(uint32_t));
-        blake2b_final(&s, hashes[i], hash_len);
-    }
+    blake2b_finalize_scalar_range(base, indices, 0, n, hashes, hash_len);
 }
 
 /* Public API: generate 4 hashes (backward compatible) */

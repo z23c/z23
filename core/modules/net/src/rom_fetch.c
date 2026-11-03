@@ -124,84 +124,6 @@ bool rom_fetch_manifest_sane(const struct rom_fetch_manifest *m)
     return true;
 }
 
-/* Parse one hex digest field: exactly 64 hex chars → 32 bytes. */
-static bool rf_parse_digest(const struct json_value *obj, const char *key,
-                            uint8_t out[32])
-{
-    const char *hex = json_get_str(json_get(obj, key));
-    if (!hex || strlen(hex) != 64)
-        return false;
-    return ParseHex(hex, out, 32) == 32;
-}
-
-/* Parse one directory.json artifact entry into *m; false = skip the entry. */
-static bool rf_parse_dir_entry(const struct json_value *e,
-                               struct rom_fetch_manifest *m)
-{
-    /* directory.json entries carry digests + layout, no filename. */
-    if (!rf_parse_digest(e, "digest", m->chunk_root) ||
-        !rf_parse_digest(e, "whole_sha3", m->whole_sha3))
-        return false;
-    int64_t size = json_get_int(json_get(e, "size"));
-    int64_t csize = json_get_int(json_get(e, "chunk_size"));
-    int64_t chunks = json_get_int(json_get(e, "chunks"));
-    if (size <= 0 || csize <= 0 || chunks <= 0)
-        return false;
-    m->size_bytes = (uint64_t)size;
-    m->chunk_size = (uint32_t)csize;
-    m->num_chunks = (uint32_t)chunks;
-    /* "kind", "height" and "source_root" are OPTIONAL untrusted peer
-     * claims, outside manifest_sane's trust check on purpose: the first
-     * two steer the picker, source_root only lets a caller FIND a bundle
-     * before re-proving it. Detail is on struct rom_fetch_manifest. */
-    m->kind = rom_seed_kind_from_name(json_get_str(json_get(e, "kind")));
-    int64_t height = json_get_int(json_get(e, "height"));
-    m->height = height > 0 ? height : 0;
-    m->has_source_root = rf_parse_digest(e, "source_root", m->source_root);
-    return rom_fetch_manifest_sane(m);
-}
-
-int rom_fetch_parse_directory(const char *json_body,
-                              struct rom_fetch_manifest *out, size_t max)
-{
-    if (!json_body || !out || max == 0)
-        return -1;
-    if (max > ROM_FETCH_MAX_ARTIFACTS)
-        max = ROM_FETCH_MAX_ARTIFACTS;
-
-    struct json_value doc;
-    json_init(&doc);
-    if (!json_read(&doc, json_body, strlen(json_body)) ||
-        doc.type != JSON_OBJ) {
-        json_free(&doc);
-        return -1;
-    }
-
-    const struct json_value *arts = json_get(&doc, "artifacts");
-    if (!arts || arts->type != JSON_ARR) {
-        json_free(&doc);
-        return 0; /* no artifacts advertised — not an error */
-    }
-
-    int n = 0;
-    for (size_t i = 0; i < arts->num_children && (size_t)n < max; i++) {
-        const struct json_value *e = json_at(arts, i);
-        if (!e || e->type != JSON_OBJ)
-            continue;
-
-        struct rom_fetch_manifest m;
-        memset(&m, 0, sizeof(m));
-        if (!rf_parse_dir_entry(e, &m))
-            continue;
-        m.used = true;
-        out[n++] = m;
-    }
-
-    json_free(&doc);
-    return n;
-}
-
-
 /* ── Whole-file verification + download driver ──────────────────────── */
 
 /* Size of the chunk starting `done` bytes into a size_bytes artifact. */
@@ -393,6 +315,49 @@ static int rf_build_paths(const char *out_dir, const char *filename,
 
 /* ── Download driver ────────────────────────────────────────────────── */
 
+/* One fetch attempt of chunk `ci` and the retry decision: true while the
+ * chunk was refused and attempts remain (the caller logs and sleeps). */
+static RF_MUTATION_ONLY bool rf_dl_chunk_refused_retry(
+    const char *peer_addr, uint16_t port, const struct rom_fetch_manifest *mc,
+    uint32_t ci, uint8_t *buf, uint32_t *got, bool *chunk_ok, uint32_t attempt)
+{
+    return !(*chunk_ok = rom_fetch_chunk(peer_addr, port, mc->chunk_root, ci,
+                                         buf, ROM_SEED_CHUNK_SIZE, got)) &&
+           attempt < ROM_FETCH_CHUNK_RETRIES;
+}
+
+/* True when a progress callback is set and asks the download to stop. */
+static RF_MUTATION_ONLY bool rf_dl_cb_aborts(rom_fetch_progress_cb cb,
+                                             uint32_t done, uint32_t total,
+                                             uint64_t bytes_done, void *ctx)
+{
+    return cb && !cb(done, total, bytes_done, ctx);
+}
+
+/* Tail of the whole-file download: on failure close the staging fd and note
+ * the reason; otherwise sync, close, and install through the whole-file
+ * gate. False = the download failed (status already noted). */
+static RF_MUTATION_ONLY bool rf_dl_close_and_install(
+    int fd, bool ok, const char *part_path, const char *final_path,
+    const struct rom_fetch_manifest *mc, const char *fail_reason)
+{
+    if (!ok) {
+        close(fd);
+        rf_note_end(false, fail_reason);
+        return false;
+    }
+    platform_data_sync(fd);
+    close(fd);
+
+    if (!rf_install_verified(part_path, final_path, mc, &fail_reason)) {
+        rf_note_end(false, fail_reason);
+        return false;
+    }
+
+    rf_note_end(true, final_path);
+    return true;
+}
+
 bool rom_fetch_download(const char *peer_addr, uint16_t port,
                         const struct rom_fetch_manifest *m,
                         const char *out_dir,
@@ -455,9 +420,8 @@ bool rom_fetch_download(const char *peer_addr, uint16_t port,
         uint32_t got = 0;
         bool chunk_ok = false;
         for (uint32_t attempt = 0;
-             !(chunk_ok = rom_fetch_chunk(peer_addr, port, mc.chunk_root, ci,
-                                          buf, ROM_SEED_CHUNK_SIZE, &got)) &&
-             attempt < ROM_FETCH_CHUNK_RETRIES;
+             rf_dl_chunk_refused_retry(peer_addr, port, &mc, ci, buf, &got,
+                                       &chunk_ok, attempt);
              attempt++) {
             LOG_INFO(RF_SUBSYS, "download: chunk %u/%u from %s:%u refused; "
                      "retry %u/%u in %u ms (seeder rate window)",
@@ -492,7 +456,7 @@ bool rom_fetch_download(const char *peer_addr, uint16_t port,
         }
         bytes_done += got;
         rf_note_progress(ci + 1, bytes_done);
-        if (cb && !cb(ci + 1, mc.num_chunks, bytes_done, cb_ctx)) {
+        if (rf_dl_cb_aborts(cb, ci + 1, mc.num_chunks, bytes_done, cb_ctx)) {
             LOG_WARN(RF_SUBSYS, "download: aborted by caller at chunk %u/%u",
                      ci + 1, mc.num_chunks);
             ok = false;
@@ -503,20 +467,9 @@ bool rom_fetch_download(const char *peer_addr, uint16_t port,
 
     free(buf);
 
-    if (!ok) {
-        close(fd);
-        rf_note_end(false, fail_reason);
+    if (!rf_dl_close_and_install(fd, ok, part_path, final_path, &mc,
+                                 fail_reason))
         return false;
-    }
-    platform_data_sync(fd);
-    close(fd);
-
-    if (!rf_install_verified(part_path, final_path, &mc, &fail_reason)) {
-        rf_note_end(false, fail_reason);
-        return false;
-    }
-
-    rf_note_end(true, final_path);
     LOG_INFO(RF_SUBSYS, "download: fetched '%s' (%llu bytes, %u chunks) "
              "from %s:%u — verified against committed digests",
              final_path, (unsigned long long)mc.size_bytes, mc.num_chunks,
@@ -772,58 +725,6 @@ bool rom_fetch_verify_chunk(const uint8_t *data, uint32_t len,
     for (int i = 0; i < 32; i++)
         diff |= h[i] ^ expected_chunk_sha3[i];
     return diff == 0;
-}
-
-/* Manifest blob header: length shape, version 1, num_chunks bounds. */
-static bool rf_manifest_hdr_ok(const uint8_t *blob, size_t len,
-                               uint32_t out_cap, uint32_t *nc_out)
-{
-    if (len < 8u || len > ROM_SEED_MANIFEST_BLOB_MAX || ((len - 8u) % 32u) != 0u)
-        return false;
-
-    uint32_t version = (uint32_t)blob[0] | ((uint32_t)blob[1] << 8) |
-                       ((uint32_t)blob[2] << 16) | ((uint32_t)blob[3] << 24);
-    uint32_t nc = (uint32_t)blob[4] | ((uint32_t)blob[5] << 8) |
-                  ((uint32_t)blob[6] << 16) | ((uint32_t)blob[7] << 24);
-    if (version != 1u)
-        return false;
-    if (nc == 0u || nc > ROM_SEED_MAX_CHUNKS || nc > out_cap ||
-        (size_t)nc * 32u != (len - 8u))
-        return false;
-    *nc_out = nc;
-    return true;
-}
-
-bool rom_fetch_parse_manifest_blob(const uint8_t *blob, size_t len,
-                                   const uint8_t chunk_root[32],
-                                   uint8_t (*out_chunk_sha3)[32],
-                                   uint32_t out_cap, uint32_t *out_num_chunks)
-{
-    if (!blob || !chunk_root || !out_chunk_sha3 || out_cap == 0 ||
-        !out_num_chunks)
-        return false; /* raw-return-ok: predicate; NULL is "not a manifest" */
-    *out_num_chunks = 0;
-
-    uint32_t nc = 0;
-    if (!rf_manifest_hdr_ok(blob, len, out_cap, &nc))
-        return false;
-
-    /* Content bind: fold the per-chunk digests exactly as the seeder derived
-     * chunk_root (SHA3 over the concatenated per-chunk digests). A mismatch
-     * means these digests are not the committed artifact's. */
-    struct sha3_256_ctx root_ctx;
-    sha3_256_init(&root_ctx);
-    for (uint32_t i = 0; i < nc; i++)
-        sha3_256_write(&root_ctx, blob + 8u + (size_t)i * 32u, 32);
-    uint8_t computed_root[32];
-    sha3_256_finalize(&root_ctx, computed_root);
-    if (memcmp(computed_root, chunk_root, 32) != 0)
-        return false;
-
-    for (uint32_t i = 0; i < nc; i++)
-        memcpy(out_chunk_sha3[i], blob + 8u + (size_t)i * 32u, 32);
-    *out_num_chunks = nc;
-    return true;
 }
 
 bool rom_fetch_get_manifest(const char *peer_addr, uint16_t port,
@@ -1295,6 +1196,138 @@ static bool rf_ver_spotcheck_resume(int fd, const struct rom_fetch_manifest *m,
     return ok;
 }
 
+/* Resume gate: true when a resume was wanted but the existing .part could not
+ * be opened or failed the spot-check (fd closed, caller restarts fresh).
+ * False when no resume was wanted, or when the resume passed (*fd is then the
+ * open .part). */
+static RF_MUTATION_ONLY bool rf_ver_resume_rejected(
+    bool resume, int *fd, const char *part_path,
+    const struct rom_fetch_manifest *mc, const uint8_t (*chunk_sha3)[32],
+    uint32_t num_chunks, struct rom_journal *jrnl)
+{
+    if (!resume)
+        return false;
+    *fd = open(part_path, O_RDWR | O_CLOEXEC);
+    if (*fd < 0 ||
+        !rf_ver_spotcheck_resume(*fd, mc, chunk_sha3, num_chunks, jrnl)) {
+        if (*fd >= 0) close(*fd);
+        return true;
+    }
+    return false;
+}
+
+/* Discard the journal and .part and reopen a fresh journal. False = the
+ * reopen failed (*jrnl is then NULL). */
+static RF_MUTATION_ONLY bool rf_ver_journal_restart(
+    struct rom_journal **jrnl, const char *jrnl_path, const char *part_path,
+    const struct rom_fetch_manifest *mc)
+{
+    rom_journal_close(*jrnl);
+    (void)rom_journal_discard(jrnl_path);
+    (void)unlink(part_path);
+    *jrnl = rom_journal_open(jrnl_path, mc->chunk_root, mc->whole_sha3,
+                             mc->chunk_size, mc->num_chunks);
+    return *jrnl != NULL;
+}
+
+/* The staging fd: the already-open resumed one, or a fresh truncated .part.
+ * On a fresh-open failure the journal is closed and the status noted; the
+ * negative fd is returned for the caller to log. */
+static RF_MUTATION_ONLY int rf_ver_stage_fd(bool resume, int fd,
+                                            const char *part_path,
+                                            struct rom_journal *jrnl)
+{
+    if (resume)
+        return fd;
+    fd = open(part_path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) {
+        rom_journal_close(jrnl);
+        rf_note_end(false, "could not open staging file");
+    }
+    return fd;
+}
+
+/* Fill the worker-pool job record for a verified download. */
+static RF_MUTATION_ONLY void rf_ver_job_init(
+    struct rf_ver_job *job, const struct rom_fetch_peer *peers, size_t npeers,
+    const struct rom_fetch_manifest *mc, const uint8_t (*chunk_sha3)[32],
+    uint32_t num_chunks, int fd, struct rom_journal *jrnl,
+    rom_fetch_progress_cb cb, void *cb_ctx)
+{
+    memset(job, 0, sizeof(*job));
+    job->peers = peers;
+    job->npeers = npeers;
+    job->m = *mc;
+    job->chunk_sha3 = chunk_sha3;
+    job->num_chunks = num_chunks;
+    job->fd = fd;
+    job->jrnl = jrnl;
+    job->cb = cb;
+    job->cb_ctx = cb_ctx;
+    atomic_store(&job->bytes_done,
+                 (uint64_t)rom_journal_count_done(jrnl) * mc->chunk_size);
+    pthread_mutex_init(&job->cb_mutex, NULL);
+}
+
+/* Start up to `workers` fetch threads; returns how many actually started. */
+static RF_MUTATION_ONLY uint32_t rf_ver_spawn_workers(struct rf_ver_job *job,
+                                                      uint32_t workers,
+                                                      pthread_t *tids)
+{
+    uint32_t spawned = 0;
+    for (uint32_t i = 0; i < workers; i++) {
+        // thread-supervision-ok: bounded joined worker pool (drain/abort exit).
+        if (thread_registry_spawn("zcl_romver", rf_ver_worker, job,
+                                  &tids[i]) == 0)
+            spawned++;
+        else {
+            LOG_WARN_IN("rf_download_verified_core", RF_SUBSYS, "ver: failed to spawn worker %u", i);
+            break;
+        }
+    }
+    return spawned;
+}
+
+/* Join the first `spawned` workers. */
+static RF_MUTATION_ONLY void rf_ver_join_workers(const pthread_t *tids,
+                                                 uint32_t spawned)
+{
+    for (uint32_t i = 0; i < spawned; i++)
+        pthread_join(tids[i], NULL);
+}
+
+/* True when a worker failed or fewer chunks than the manifest are journalled. */
+static RF_MUTATION_ONLY bool rf_ver_job_incomplete(struct rf_ver_job *job,
+                                                   uint32_t done)
+{
+    return atomic_load(&job->failed) || done < job->m.num_chunks;
+}
+
+/* Sync + close the .part, run the whole-file gate and install; on success
+ * retire the journal. False = failed (status noted, journal closed). */
+static RF_MUTATION_ONLY bool rf_ver_sync_install(
+    int fd, struct rom_journal *jrnl, const char *jrnl_path,
+    const char *part_path, const char *final_path,
+    const struct rom_fetch_manifest *mc)
+{
+    platform_data_sync(fd);
+    close(fd);
+
+    /* Whole-file content proof stays the final gate before install. */
+    const char *why = "";
+    if (!rf_install_verified(part_path, final_path, mc, &why)) {
+        rom_journal_close(jrnl);
+        rf_note_end(false, why);
+        return false;
+    }
+    /* Installed: the resume journal has served its purpose. */
+    rom_journal_close(jrnl);
+    (void)rom_journal_discard(jrnl_path);
+
+    rf_note_end(true, final_path);
+    return true;
+}
+
 /* Shared per-chunk-verified download core for both the single-peer and
  * multi-seeder public entry points. `peers` holds npeers>=1 seeder endpoints;
  * the worker ring content-verifies every chunk and fails OVER across them
@@ -1348,64 +1381,29 @@ static RF_MUTATION_ONLY bool rf_download_verified_core(
      * start fresh (no partial trust). */
     bool resume = rom_journal_count_done(jrnl) > 0;
     int fd = -1;
-    if (resume) {
-        fd = open(part_path, O_RDWR | O_CLOEXEC);
-        if (fd < 0 ||
-            !rf_ver_spotcheck_resume(fd, &mc, chunk_sha3, num_chunks, jrnl)) {
-            if (fd >= 0) close(fd);
-            LOG_WARN(RF_SUBSYS, "ver: resume rejected for '%s' — restarting "
-                     "the download fresh", part_path);
-            rom_journal_close(jrnl);
-            (void)rom_journal_discard(jrnl_path);
-            (void)unlink(part_path);
-            jrnl = rom_journal_open(jrnl_path, mc.chunk_root, mc.whole_sha3,
-                                    mc.chunk_size, mc.num_chunks);
-            if (!jrnl) {
-                rf_note_end(false, "could not reopen resume journal");
-                LOG_FAIL(RF_SUBSYS, "ver: journal reopen failed");
-            }
-            resume = false;
+    if (rf_ver_resume_rejected(resume, &fd, part_path, &mc, chunk_sha3,
+                               num_chunks, jrnl)) {
+        LOG_WARN(RF_SUBSYS, "ver: resume rejected for '%s' — restarting "
+                 "the download fresh", part_path);
+        if (!rf_ver_journal_restart(&jrnl, jrnl_path, part_path, &mc)) {
+            rf_note_end(false, "could not reopen resume journal");
+            LOG_FAIL(RF_SUBSYS, "ver: journal reopen failed");
         }
+        resume = false;
     }
-    if (!resume) {
-        fd = open(part_path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-        if (fd < 0) {
-            rom_journal_close(jrnl);
-            rf_note_end(false, "could not open staging file");
-            LOG_FAIL(RF_SUBSYS, "ver: open '%s' failed errno=%d",
-                     part_path, errno);
-        }
-    }
+    fd = rf_ver_stage_fd(resume, fd, part_path, jrnl);
+    if (fd < 0)
+        LOG_FAIL(RF_SUBSYS, "ver: open '%s' failed errno=%d",
+                 part_path, errno);
 
     uint32_t workers = rf_clamp_workers(ROM_FETCH_MAX_WORKERS, mc.num_chunks);
 
     struct rf_ver_job job;
-    memset(&job, 0, sizeof(job));
-    job.peers = peers;
-    job.npeers = npeers;
-    job.m = mc;
-    job.chunk_sha3 = chunk_sha3;
-    job.num_chunks = num_chunks;
-    job.fd = fd;
-    job.jrnl = jrnl;
-    job.cb = cb;
-    job.cb_ctx = cb_ctx;
-    atomic_store(&job.bytes_done,
-                 (uint64_t)rom_journal_count_done(jrnl) * mc.chunk_size);
-    pthread_mutex_init(&job.cb_mutex, NULL);
+    rf_ver_job_init(&job, peers, npeers, &mc, chunk_sha3, num_chunks, fd, jrnl,
+                    cb, cb_ctx);
 
     pthread_t tids[ROM_FETCH_MAX_WORKERS];
-    uint32_t spawned = 0;
-    for (uint32_t i = 0; i < workers; i++) {
-        // thread-supervision-ok: bounded joined worker pool (drain/abort exit).
-        if (thread_registry_spawn("zcl_romver", rf_ver_worker, &job,
-                                  &tids[i]) == 0)
-            spawned++;
-        else {
-            LOG_WARN(RF_SUBSYS, "ver: failed to spawn worker %u", i);
-            break;
-        }
-    }
+    uint32_t spawned = rf_ver_spawn_workers(&job, workers, tids);
     if (spawned == 0) {
         pthread_mutex_destroy(&job.cb_mutex);
         close(fd);
@@ -1413,12 +1411,11 @@ static RF_MUTATION_ONLY bool rf_download_verified_core(
         rf_note_end(false, "could not spawn any fetch worker");
         LOG_FAIL(RF_SUBSYS, "ver: no workers spawned");
     }
-    for (uint32_t i = 0; i < spawned; i++)
-        pthread_join(tids[i], NULL);
+    rf_ver_join_workers(tids, spawned);
     pthread_mutex_destroy(&job.cb_mutex);
 
     uint32_t done = rom_journal_count_done(jrnl);
-    if (atomic_load(&job.failed) || done < mc.num_chunks) {
+    if (rf_ver_job_incomplete(&job, done)) {
         close(fd);
         rom_journal_close(jrnl);
         rf_note_end(false, "chunk fetch/verify failed (leaving .part + "
@@ -1428,21 +1425,8 @@ static RF_MUTATION_ONLY bool rf_download_verified_core(
         return false;
     }
 
-    platform_data_sync(fd);
-    close(fd);
-
-    /* Whole-file content proof stays the final gate before install. */
-    const char *why = "";
-    if (!rf_install_verified(part_path, final_path, &mc, &why)) {
-        rom_journal_close(jrnl);
-        rf_note_end(false, why);
+    if (!rf_ver_sync_install(fd, jrnl, jrnl_path, part_path, final_path, &mc))
         return false;
-    }
-    /* Installed: the resume journal has served its purpose. */
-    rom_journal_close(jrnl);
-    (void)rom_journal_discard(jrnl_path);
-
-    rf_note_end(true, final_path);
     LOG_INFO(RF_SUBSYS, "ver: fetched '%s' (%llu bytes, %u chunks) from %s:%u "
              "(+%zu failover peer(s)) — per-chunk + whole-file verified",
              final_path, (unsigned long long)mc.size_bytes, mc.num_chunks,

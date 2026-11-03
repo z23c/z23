@@ -387,6 +387,216 @@ static void eh_round_free(struct eh_row *X, size_t count,
     free(Xc);
 }
 
+/* Frees the partially-built leaf rows [0, built), the row array, the index
+ * array and the hash scratch on a leaf-row allocation failure. */
+static inline void eh_verify_leaf_abort(struct eh_row *X, size_t built,
+                                        eh_index *indices,
+                                        unsigned char *tmp_hash)
+{
+    for (size_t j = 0; j < built; j++) free(X[j].data);
+    free(X); free(indices); free(tmp_hash);
+}
+
+static inline bool eh_verify_leaf_rows_batch8(const struct equihash_params *p,
+                                              const struct blake2b_ctx *base_state,
+                                              eh_index *indices,
+                                              size_t num_indices,
+                                              struct eh_row *X,
+                                              unsigned char *tmp_hash,
+                                              size_t width, size_t *i_io,
+                                              size_t *fail_at)
+{
+    unsigned char *th0 = tmp_hash;
+    unsigned char *th1 = tmp_hash + p->hash_output;
+    unsigned char *th2 = tmp_hash + p->hash_output * 2;
+    unsigned char *th3 = tmp_hash + p->hash_output * 3;
+
+    /* 8-way batch hash generation (AVX-512 -> AVX2 -> scalar) */
+    size_t i = *i_io;
+    unsigned int iph = (unsigned int)p->indices_per_hash_output;
+    unsigned char *th_arr[8] = {th0, th1, th2, th3,
+                                tmp_hash + p->hash_output * 4,
+                                tmp_hash + p->hash_output * 5,
+                                tmp_hash + p->hash_output * 6,
+                                tmp_hash + p->hash_output * 7};
+    for (; i + 8 <= num_indices; i += 8) {
+        uint32_t gi[8];
+        for (int k = 0; k < 8; k++)
+            gi[k] = indices[i+k] / iph;
+        equihash_generate_hash_batch8(base_state, gi, th_arr,
+                                       p->hash_output);
+        for (int k = 0; k < 8; k++) {
+            size_t offset = (indices[i+k] % iph) * p->N / 8;
+            eh_row_from_hash(&X[i+k], th_arr[k] + offset,
+                             p->N / 8, p->hash_length,
+                             p->collision_bit_length, indices[i+k], width);
+            if (!X[i+k].data) {
+                eh_verify_leaf_abort(X, i + (size_t)k, indices, tmp_hash);
+                *fail_at = i + (size_t)k;
+                return false;
+            }
+        }
+    }
+    *i_io = i;
+    return true;
+}
+
+static inline bool eh_verify_leaf_rows_batch4(const struct equihash_params *p,
+                                              const struct blake2b_ctx *base_state,
+                                              eh_index *indices,
+                                              size_t num_indices,
+                                              struct eh_row *X,
+                                              unsigned char *tmp_hash,
+                                              size_t width, size_t *i_io,
+                                              size_t *fail_at)
+{
+    unsigned char *th0 = tmp_hash;
+    unsigned char *th1 = tmp_hash + p->hash_output;
+    unsigned char *th2 = tmp_hash + p->hash_output * 2;
+    unsigned char *th3 = tmp_hash + p->hash_output * 3;
+
+    size_t i = *i_io;
+    unsigned int iph = (unsigned int)p->indices_per_hash_output;
+    /* Handle remaining indices with 4-way or scalar */
+    for (; i + 4 <= num_indices; i += 4) {
+        uint32_t gi[4] = {
+            indices[i]/iph, indices[i+1]/iph,
+            indices[i+2]/iph, indices[i+3]/iph
+        };
+        equihash_generate_hash_batch4(base_state, gi,
+                                       th0, th1, th2, th3,
+                                       p->hash_output);
+        for (int k = 0; k < 4; k++) {
+            unsigned char *th = tmp_hash + (size_t)k * p->hash_output;
+            size_t offset = (indices[i+k] % iph) * p->N / 8;
+            eh_row_from_hash(&X[i+k], th + offset,
+                             p->N / 8, p->hash_length,
+                             p->collision_bit_length, indices[i+k], width);
+            if (!X[i+k].data) {
+                eh_verify_leaf_abort(X, i + (size_t)k, indices, tmp_hash);
+                *fail_at = i + (size_t)k;
+                return false;
+            }
+        }
+    }
+    *i_io = i;
+    return true;
+}
+
+static inline bool eh_verify_leaf_rows_scalar(const struct equihash_params *p,
+                                              const struct blake2b_ctx *base_state,
+                                              eh_index *indices,
+                                              size_t num_indices,
+                                              struct eh_row *X,
+                                              unsigned char *tmp_hash,
+                                              size_t width, size_t *i_io,
+                                              size_t *fail_at)
+{
+    unsigned char *th0 = tmp_hash;
+    size_t i = *i_io;
+    unsigned int iph = (unsigned int)p->indices_per_hash_output;
+    for (; i < num_indices; i++) {
+        generate_hash(base_state, indices[i] / iph, th0, p->hash_output);
+        size_t offset = (indices[i] % iph) * p->N / 8;
+        eh_row_from_hash(&X[i], th0 + offset,
+                         p->N / 8, p->hash_length,
+                         p->collision_bit_length, indices[i], width);
+        if (!X[i].data) {
+            eh_verify_leaf_abort(X, i, indices, tmp_hash);
+            *fail_at = i;
+            return false;
+        }
+    }
+    *i_io = i;
+    return true;
+}
+
+enum eh_verify_status {
+    EH_VERIFY_OK = 0,
+    EH_VERIFY_ROUND_ALLOC,
+    EH_VERIFY_NO_COLLISION,
+    EH_VERIFY_OUT_OF_ORDER,
+    EH_VERIFY_NON_DISTINCT,
+    EH_VERIFY_MERGE_ALLOC
+};
+
+/* Runs every collision round of the verifier over X (count rows). On
+ * EH_VERIFY_OK, *X_io / *count_io / *hash_len_io hold the final layer and
+ * the caller owns it. On any other status everything is already freed and
+ * *fail_at is the row position (or the row count for ROUND_ALLOC). */
+static inline enum eh_verify_status eh_verify_collision_rounds(
+        const struct equihash_params *p, struct eh_row **X_io,
+        size_t *count_io, size_t *hash_len_io, size_t width,
+        size_t *fail_at)
+{
+    struct eh_row *X = *X_io;
+    size_t count = *count_io;
+    size_t hash_len = *hash_len_io;
+    size_t len_indices = sizeof(eh_index);
+
+    while (count > 1) {
+        struct eh_row *Xc = zcl_malloc((count / 2) * sizeof(struct eh_row), "equihash_collision_rows");
+        if (!Xc) {
+            for (size_t i = 0; i < count; i++) free(X[i].data);
+            free(X);
+            *fail_at = count;
+            return EH_VERIFY_ROUND_ALLOC;
+        }
+
+        for (size_t i = 0; i < count; i += 2) {
+            if (!eh_row_has_collision(&X[i], &X[i + 1],
+                                      p->collision_byte_length)) {
+                eh_round_free(X, count, Xc, i / 2);
+                *fail_at = i;
+                return EH_VERIFY_NO_COLLISION;
+            }
+            if (eh_row_indices_before(&X[i + 1], &X[i],
+                                       hash_len, len_indices)) {
+                eh_round_free(X, count, Xc, i / 2);
+                *fail_at = i;
+                return EH_VERIFY_OUT_OF_ORDER;
+            }
+            if (!eh_row_distinct_indices(&X[i], &X[i + 1],
+                                          hash_len, len_indices)) {
+                eh_round_free(X, count, Xc, i / 2);
+                *fail_at = i;
+                return EH_VERIFY_NON_DISTINCT;
+            }
+            eh_row_xor_merge(&Xc[i / 2], &X[i], &X[i + 1],
+                              hash_len, len_indices,
+                              p->collision_byte_length, width);
+            if (!Xc[i / 2].data) {
+                eh_round_free(X, count, Xc, i / 2);
+                *fail_at = i;
+                return EH_VERIFY_MERGE_ALLOC;
+            }
+        }
+
+        for (size_t i = 0; i < count; i++) free(X[i].data);
+        free(X);
+        X = Xc;
+        hash_len -= p->collision_byte_length;
+        len_indices *= 2;
+        count /= 2;
+    }
+
+    *X_io = X;
+    *count_io = count;
+    *hash_len_io = hash_len;
+    return EH_VERIFY_OK;
+}
+
+/* Final check: a single surviving row whose remaining hash is all zero.
+ * Frees the row and the row array. */
+static inline bool eh_verify_final_row(struct eh_row *X, size_t count,
+                                       size_t hash_len)
+{
+    bool valid = (count == 1) && eh_row_is_zero(&X[0], hash_len);
+    free(X[0].data);
+    free(X);
+    return valid;
+}
+
 bool equihash_is_valid_solution(const struct equihash_params *p,
                                 const struct blake2b_ctx *base_state,
                                 const unsigned char *soln, size_t soln_len)
@@ -424,136 +634,54 @@ bool equihash_is_valid_solution(const struct equihash_params *p,
         free(indices); free(X);
         LOG_FAIL("equihash", "is_valid_solution: zcl_malloc for tmp_hash failed");
     }
-    unsigned char *th0 = tmp_hash;
-    unsigned char *th1 = tmp_hash + p->hash_output;
-    unsigned char *th2 = tmp_hash + p->hash_output * 2;
-    unsigned char *th3 = tmp_hash + p->hash_output * 3;
 
-    /* 8-way batch hash generation (AVX-512 -> AVX2 -> scalar) */
     size_t i = 0;
-    unsigned int iph = (unsigned int)p->indices_per_hash_output;
-    unsigned char *th_arr[8] = {th0, th1, th2, th3,
-                                tmp_hash + p->hash_output * 4,
-                                tmp_hash + p->hash_output * 5,
-                                tmp_hash + p->hash_output * 6,
-                                tmp_hash + p->hash_output * 7};
-    for (; i + 8 <= num_indices; i += 8) {
-        uint32_t gi[8];
-        for (int k = 0; k < 8; k++)
-            gi[k] = indices[i+k] / iph;
-        equihash_generate_hash_batch8(base_state, gi, th_arr,
-                                       p->hash_output);
-        for (int k = 0; k < 8; k++) {
-            size_t offset = (indices[i+k] % iph) * p->N / 8;
-            eh_row_from_hash(&X[i+k], th_arr[k] + offset,
-                             p->N / 8, p->hash_length,
-                             p->collision_bit_length, indices[i+k], width);
-            if (!X[i+k].data) {
-                for (size_t j = 0; j < i+k; j++) free(X[j].data);
-                free(X); free(indices); free(tmp_hash);
-                LOG_FAIL("equihash",
-                         "is_valid_solution: eh_row_from_hash alloc failed (batch8 i=%zu)",
-                         i + (size_t)k);
-            }
-        }
+    size_t fail_at = 0;
+    if (!eh_verify_leaf_rows_batch8(p, base_state, indices, num_indices, X,
+                                    tmp_hash, width, &i, &fail_at)) {
+        LOG_FAIL("equihash",
+                 "is_valid_solution: eh_row_from_hash alloc failed (batch8 i=%zu)",
+                 fail_at);
     }
-    /* Handle remaining indices with 4-way or scalar */
-    for (; i + 4 <= num_indices; i += 4) {
-        uint32_t gi[4] = {
-            indices[i]/iph, indices[i+1]/iph,
-            indices[i+2]/iph, indices[i+3]/iph
-        };
-        equihash_generate_hash_batch4(base_state, gi,
-                                       th0, th1, th2, th3,
-                                       p->hash_output);
-        for (int k = 0; k < 4; k++) {
-            unsigned char *th = tmp_hash + (size_t)k * p->hash_output;
-            size_t offset = (indices[i+k] % iph) * p->N / 8;
-            eh_row_from_hash(&X[i+k], th + offset,
-                             p->N / 8, p->hash_length,
-                             p->collision_bit_length, indices[i+k], width);
-            if (!X[i+k].data) {
-                for (size_t j = 0; j < i+k; j++) free(X[j].data);
-                free(X); free(indices); free(tmp_hash);
-                LOG_FAIL("equihash",
-                         "is_valid_solution: eh_row_from_hash alloc failed (batch4 i=%zu)",
-                         i + (size_t)k);
-            }
-        }
+    if (!eh_verify_leaf_rows_batch4(p, base_state, indices, num_indices, X,
+                                    tmp_hash, width, &i, &fail_at)) {
+        LOG_FAIL("equihash",
+                 "is_valid_solution: eh_row_from_hash alloc failed (batch4 i=%zu)",
+                 fail_at);
     }
-    for (; i < num_indices; i++) {
-        generate_hash(base_state, indices[i] / iph, th0, p->hash_output);
-        size_t offset = (indices[i] % iph) * p->N / 8;
-        eh_row_from_hash(&X[i], th0 + offset,
-                         p->N / 8, p->hash_length,
-                         p->collision_bit_length, indices[i], width);
-        if (!X[i].data) {
-            for (size_t j = 0; j < i; j++) free(X[j].data);
-            free(X); free(indices); free(tmp_hash);
-            LOG_FAIL("equihash",
-                     "is_valid_solution: eh_row_from_hash alloc failed (scalar i=%zu)",
-                     i);
-        }
+    if (!eh_verify_leaf_rows_scalar(p, base_state, indices, num_indices, X,
+                                    tmp_hash, width, &i, &fail_at)) {
+        LOG_FAIL("equihash",
+                 "is_valid_solution: eh_row_from_hash alloc failed (scalar i=%zu)",
+                 fail_at);
     }
     free(tmp_hash);
     free(indices);
 
     size_t hash_len = p->hash_length;
-    size_t len_indices = sizeof(eh_index);
     size_t count = num_indices;
 
-    while (count > 1) {
-        struct eh_row *Xc = zcl_malloc((count / 2) * sizeof(struct eh_row), "equihash_collision_rows");
-        if (!Xc) {
-            for (size_t i = 0; i < count; i++) free(X[i].data);
-            free(X);
-            LOG_FAIL("equihash",
-                     "is_valid_solution: zcl_malloc for collision rows failed (count=%zu)",
-                     count);
-        }
+    enum eh_verify_status st =
+        eh_verify_collision_rounds(p, &X, &count, &hash_len, width, &fail_at);
+    if (st == EH_VERIFY_ROUND_ALLOC)
+        LOG_FAIL("equihash",
+                 "is_valid_solution: zcl_malloc for collision rows failed (count=%zu)",
+                 fail_at);
+    if (st == EH_VERIFY_NO_COLLISION)
+        LOG_FAIL("equihash",
+                 "is_valid_solution: expected collision at i=%zu (PoW reject)", fail_at);
+    if (st == EH_VERIFY_OUT_OF_ORDER)
+        LOG_FAIL("equihash",
+                 "is_valid_solution: indices out of order at i=%zu (PoW reject)", fail_at);
+    if (st == EH_VERIFY_NON_DISTINCT)
+        LOG_FAIL("equihash",
+                 "is_valid_solution: non-distinct indices at i=%zu (PoW reject)", fail_at);
+    if (st == EH_VERIFY_MERGE_ALLOC)
+        LOG_FAIL("equihash",
+                 "is_valid_solution: eh_row_xor_merge alloc failed at i=%zu",
+                 fail_at);
 
-        for (size_t i = 0; i < count; i += 2) {
-            if (!eh_row_has_collision(&X[i], &X[i + 1],
-                                      p->collision_byte_length)) {
-                eh_round_free(X, count, Xc, i / 2);
-                LOG_FAIL("equihash",
-                         "is_valid_solution: expected collision at i=%zu (PoW reject)", i);
-            }
-            if (eh_row_indices_before(&X[i + 1], &X[i],
-                                       hash_len, len_indices)) {
-                eh_round_free(X, count, Xc, i / 2);
-                LOG_FAIL("equihash",
-                         "is_valid_solution: indices out of order at i=%zu (PoW reject)", i);
-            }
-            if (!eh_row_distinct_indices(&X[i], &X[i + 1],
-                                          hash_len, len_indices)) {
-                eh_round_free(X, count, Xc, i / 2);
-                LOG_FAIL("equihash",
-                         "is_valid_solution: non-distinct indices at i=%zu (PoW reject)", i);
-            }
-            eh_row_xor_merge(&Xc[i / 2], &X[i], &X[i + 1],
-                              hash_len, len_indices,
-                              p->collision_byte_length, width);
-            if (!Xc[i / 2].data) {
-                eh_round_free(X, count, Xc, i / 2);
-                LOG_FAIL("equihash",
-                         "is_valid_solution: eh_row_xor_merge alloc failed at i=%zu",
-                         i);
-            }
-        }
-
-        for (size_t i = 0; i < count; i++) free(X[i].data);
-        free(X);
-        X = Xc;
-        hash_len -= p->collision_byte_length;
-        len_indices *= 2;
-        count /= 2;
-    }
-
-    bool valid = (count == 1) && eh_row_is_zero(&X[0], hash_len);
-    free(X[0].data);
-    free(X);
-    return valid;
+    return eh_verify_final_row(X, count, hash_len);
 }
 
 /* ── Generic Wagner-algorithm solver (BasicSolve) ──────────────────
@@ -588,27 +716,35 @@ static void eh_rows_free(struct eh_row *rows, size_t count)
     free(rows);
 }
 
-bool equihash_basic_solve(const struct equihash_params *p,
-                          const struct blake2b_ctx *base_state,
-                          unsigned char *soln_out, size_t soln_out_len)
+/* Per-round state shared by the BasicSolve pair helpers. */
+struct eh_solve_ctx {
+    const struct equihash_params *p;
+    unsigned int round;
+    size_t hash_len;
+    size_t len_indices;
+    size_t collision_byte_len;
+    size_t width;
+    unsigned char *soln_out;
+    size_t soln_out_len;
+    struct eh_row *Xc;
+    size_t cap;
+    size_t out_count;
+};
+
+enum eh_solve_step {
+    EH_SOLVE_MORE = 0,
+    EH_SOLVE_OOM,
+    EH_SOLVE_FOUND
+};
+
+/* Builds the init_size leaf rows into X (and frees the hash scratch). On
+ * failure X and every row built so far are freed too. */
+static inline bool eh_solve_build_leaves(const struct equihash_params *p,
+                                         const struct blake2b_ctx *base_state,
+                                         struct eh_row *X, size_t init_size,
+                                         size_t width, size_t *count_out)
 {
-    if (!p || !base_state || !soln_out)
-        return false;
-    if (soln_out_len < p->solution_width)
-        return false;
-
-    const size_t width = p->final_full_width;
     const size_t iph = p->indices_per_hash_output;
-    const size_t collision_byte_len = p->collision_byte_length;
-
-    /* init_size = number of leaf rows = 2^(collision_bit_length+1). Each
-     * BLAKE2b call yields `iph` sub-hashes, so we make init_size/iph calls. */
-    const size_t init_size = (size_t)1 << (p->collision_bit_length + 1);
-
-    struct eh_row *X = zcl_malloc(init_size * sizeof(struct eh_row),
-                                  "eh_solve_rows");
-    if (!X)
-        return false;
 
     unsigned char *tmp = zcl_malloc(p->hash_output, "eh_solve_tmp_hash");
     if (!tmp) {
@@ -631,6 +767,135 @@ bool equihash_basic_solve(const struct equihash_params *p,
         count++;
     }
     free(tmp);
+    *count_out = count;
+    return true;
+}
+
+/* Final-round pair: accept only a complete solution. */
+static inline enum eh_solve_step eh_solve_pair_final(struct eh_solve_ctx *c,
+                                                     struct eh_row *X,
+                                                     size_t l, size_t m)
+{
+    const struct equihash_params *p = c->p;
+    size_t hash_len = c->hash_len;
+    size_t len_indices = c->len_indices;
+
+    /* Final round: accept only a FULL collision over
+     * the whole remaining hash with all-distinct
+     * indices — that is a complete solution. */
+    if (memcmp(X[l].data, X[m].data, hash_len) != 0)
+        return EH_SOLVE_MORE;
+    if (!eh_row_distinct_indices(&X[l], &X[m],
+                                 hash_len, len_indices))
+        return EH_SOLVE_MORE;
+
+    size_t num_idx = (size_t)1 << p->K;
+    eh_index *indices = zcl_malloc(
+            num_idx * sizeof(eh_index), "eh_solve_indices");
+    if (!indices) return EH_SOLVE_OOM;
+    /* Canonical ordering: the lexicographically-smaller
+     * index block comes first (matches xor_merge). */
+    const struct eh_row *a = &X[l], *b = &X[m];
+    if (eh_row_indices_before(b, a, hash_len, len_indices)) {
+        const struct eh_row *t = a; a = b; b = t;
+    }
+    /* The row stores each index as a big-endian byte
+     * array (eh_index_to_array). eh_get_minimal_from_indices
+     * expects a NATIVE eh_index array (it re-encodes), so
+     * decode here with eh_array_to_index. */
+    for (size_t t = 0; t < num_idx / 2; t++) {
+        indices[t] = eh_array_to_index(
+                a->data + hash_len + t * sizeof(eh_index));
+        indices[num_idx / 2 + t] = eh_array_to_index(
+                b->data + hash_len + t * sizeof(eh_index));
+    }
+
+    size_t got = eh_get_minimal_from_indices(
+            indices, num_idx, p->collision_bit_length,
+            c->soln_out, c->soln_out_len);
+    free(indices);
+    if (got == p->solution_width)
+        return EH_SOLVE_FOUND;
+    /* Encoding mismatch (should not happen) — keep
+     * searching other pairs. */
+    return EH_SOLVE_MORE;
+}
+
+/* Non-final pair: merge into the next layer, growing it as needed. */
+static inline enum eh_solve_step eh_solve_pair_merge(struct eh_solve_ctx *c,
+                                                     struct eh_row *X,
+                                                     size_t l, size_t m)
+{
+    if (!eh_row_distinct_indices(&X[l], &X[m],
+                                 c->hash_len, c->len_indices))
+        return EH_SOLVE_MORE;
+    if (c->out_count >= c->cap) {
+        size_t ncap = c->cap * 2;
+        struct eh_row *grown = zcl_realloc(
+                c->Xc, ncap * sizeof(struct eh_row),
+                "eh_solve_round_grow");
+        if (!grown) return EH_SOLVE_OOM;
+        c->Xc = grown;
+        c->cap = ncap;
+    }
+    eh_row_xor_merge(&c->Xc[c->out_count], &X[l], &X[m],
+                     c->hash_len, c->len_indices,
+                     c->collision_byte_len, c->width);
+    if (!c->Xc[c->out_count].data) return EH_SOLVE_OOM;
+    c->out_count++;
+    return EH_SOLVE_MORE;
+}
+
+/* Walks every colliding run of the sorted layer X and feeds each pair to
+ * the final or merge helper. Stops at the first OOM or FOUND. */
+static inline enum eh_solve_step eh_solve_collide_round(struct eh_solve_ctx *c,
+                                                        struct eh_row *X,
+                                                        size_t count)
+{
+    enum eh_solve_step st = EH_SOLVE_MORE;
+    for (size_t i = 0; i + 1 < count && st == EH_SOLVE_MORE; ) {
+        /* Find the run [i, j) colliding on the leading collision bytes. */
+        size_t j = i + 1;
+        while (j < count &&
+               eh_row_has_collision(&X[i], &X[j], c->collision_byte_len))
+            j++;
+
+        for (size_t l = i; l + 1 < j && st == EH_SOLVE_MORE; l++) {
+            for (size_t m = l + 1; m < j && st == EH_SOLVE_MORE; m++) {
+                st = (c->round == c->p->K)
+                         ? eh_solve_pair_final(c, X, l, m)
+                         : eh_solve_pair_merge(c, X, l, m);
+            }
+        }
+        i = j;
+    }
+    return st;
+}
+
+bool equihash_basic_solve(const struct equihash_params *p,
+                          const struct blake2b_ctx *base_state,
+                          unsigned char *soln_out, size_t soln_out_len)
+{
+    if (!p || !base_state || !soln_out)
+        return false;
+    if (soln_out_len < p->solution_width)
+        return false;
+
+    const size_t width = p->final_full_width;
+    const size_t collision_byte_len = p->collision_byte_length;
+
+    /* init_size = number of leaf rows = 2^(collision_bit_length+1). Each
+     * BLAKE2b call yields `iph` sub-hashes, so we make init_size/iph calls. */
+    const size_t init_size = (size_t)1 << (p->collision_bit_length + 1);
+
+    struct eh_row *X = zcl_malloc(init_size * sizeof(struct eh_row),
+                                  "eh_solve_rows");
+    if (!X)
+        return false;
+
+    size_t count = 0;
+    if (!eh_solve_build_leaves(p, base_state, X, init_size, width, &count))
+        return false;
 
     size_t hash_len = p->hash_length;
     size_t len_indices = sizeof(eh_index);
@@ -645,105 +910,41 @@ bool equihash_basic_solve(const struct equihash_params *p,
          * use (each colliding run contributes a bounded number of pairs);
          * grow geometrically to stay safe against dense regtest hashes. */
         size_t cap = count > 0 ? count : 1;
-        size_t out_count = 0;
-        struct eh_row *Xc = zcl_malloc(cap * sizeof(struct eh_row),
-                                       "eh_solve_round_rows");
-        if (!Xc) {
+        struct eh_solve_ctx ctx = {
+            .p = p, .round = round, .hash_len = hash_len,
+            .len_indices = len_indices,
+            .collision_byte_len = collision_byte_len, .width = width,
+            .soln_out = soln_out, .soln_out_len = soln_out_len,
+            .Xc = zcl_malloc(cap * sizeof(struct eh_row),
+                             "eh_solve_round_rows"),
+            .cap = cap, .out_count = 0
+        };
+        if (!ctx.Xc) {
             eh_rows_free(X, count);
             return false;
         }
 
-        bool oom = false;
-        for (size_t i = 0; i + 1 < count && !oom; ) {
-            /* Find the run [i, j) colliding on the leading collision bytes. */
-            size_t j = i + 1;
-            while (j < count &&
-                   eh_row_has_collision(&X[i], &X[j], collision_byte_len))
-                j++;
-
-            for (size_t l = i; l + 1 < j && !oom; l++) {
-                for (size_t m = l + 1; m < j && !oom; m++) {
-                    if (round == p->K) {
-                        /* Final round: accept only a FULL collision over
-                         * the whole remaining hash with all-distinct
-                         * indices — that is a complete solution. */
-                        if (memcmp(X[l].data, X[m].data, hash_len) != 0)
-                            continue;
-                        if (!eh_row_distinct_indices(&X[l], &X[m],
-                                                     hash_len, len_indices))
-                            continue;
-
-                        size_t num_idx = (size_t)1 << p->K;
-                        eh_index *indices = zcl_malloc(
-                                num_idx * sizeof(eh_index), "eh_solve_indices");
-                        if (!indices) { oom = true; break; }
-                        /* Canonical ordering: the lexicographically-smaller
-                         * index block comes first (matches xor_merge). */
-                        const struct eh_row *a = &X[l], *b = &X[m];
-                        if (eh_row_indices_before(b, a, hash_len, len_indices)) {
-                            const struct eh_row *t = a; a = b; b = t;
-                        }
-                        /* The row stores each index as a big-endian byte
-                         * array (eh_index_to_array). eh_get_minimal_from_indices
-                         * expects a NATIVE eh_index array (it re-encodes), so
-                         * decode here with eh_array_to_index. */
-                        for (size_t t = 0; t < num_idx / 2; t++) {
-                            indices[t] = eh_array_to_index(
-                                    a->data + hash_len + t * sizeof(eh_index));
-                            indices[num_idx / 2 + t] = eh_array_to_index(
-                                    b->data + hash_len + t * sizeof(eh_index));
-                        }
-
-                        size_t got = eh_get_minimal_from_indices(
-                                indices, num_idx, p->collision_bit_length,
-                                soln_out, soln_out_len);
-                        free(indices);
-                        if (got == p->solution_width) {
-                            eh_rows_free(Xc, out_count);
-                            eh_rows_free(X, count);
-                            return true;
-                        }
-                        /* Encoding mismatch (should not happen) — keep
-                         * searching other pairs. */
-                        continue;
-                    }
-
-                    if (!eh_row_distinct_indices(&X[l], &X[m],
-                                                 hash_len, len_indices))
-                        continue;
-                    if (out_count >= cap) {
-                        size_t ncap = cap * 2;
-                        struct eh_row *grown = zcl_realloc(
-                                Xc, ncap * sizeof(struct eh_row),
-                                "eh_solve_round_grow");
-                        if (!grown) { oom = true; break; }
-                        Xc = grown;
-                        cap = ncap;
-                    }
-                    eh_row_xor_merge(&Xc[out_count], &X[l], &X[m],
-                                     hash_len, len_indices,
-                                     collision_byte_len, width);
-                    if (!Xc[out_count].data) { oom = true; break; }
-                    out_count++;
-                }
-            }
-            i = j;
+        enum eh_solve_step st = eh_solve_collide_round(&ctx, X, count);
+        if (st == EH_SOLVE_FOUND) {
+            eh_rows_free(ctx.Xc, ctx.out_count);
+            eh_rows_free(X, count);
+            return true;
         }
 
         eh_rows_free(X, count);
-        if (oom) {
-            eh_rows_free(Xc, out_count);
+        if (st == EH_SOLVE_OOM) {
+            eh_rows_free(ctx.Xc, ctx.out_count);
             return false;
         }
 
         if (round == p->K) {
             /* No full-collision solution found this challenge. */
-            eh_rows_free(Xc, out_count);
+            eh_rows_free(ctx.Xc, ctx.out_count);
             return false;
         }
 
-        X = Xc;
-        count = out_count;
+        X = ctx.Xc;
+        count = ctx.out_count;
         hash_len -= collision_byte_len;
         len_indices *= 2;
 

@@ -39,24 +39,18 @@
 
 #define SHA3_256_RATE_BYTES 136u  /* 17 * 8 */
 
-/* Scalar reference: four independent one-shot SHA3-256 hashes. Always safe. */
-static void sha3_256_x4_scalar(const uint8_t *const msgs[4], const size_t lens[4],
-                               uint8_t out[4][32])
-{
-    for (int i = 0; i < 4; ++i)
-        sha3_256(msgs[i], lens[i], out[i]);
-}
-
-#if defined(__x86_64__)
-
-__attribute__((target("avx512f,avx512vl,avx512dq")))
-void sha3_256_x4_avx512(const uint8_t *const msgs[4], const size_t lens[4],
-                        uint8_t out[4][32])
+/* Per-lane geometry shared by the vector lanes. Fills full_blocks[] and the
+ * padded final rate block of every lane, and returns the largest block count
+ * in *maxblocks_out. */
+static inline void sha3_x4_prepare_lanes(const uint8_t *const msgs[4],
+                                         const size_t lens[4],
+                                         size_t full_blocks[4],
+                                         uint8_t padbuf[4][SHA3_256_RATE_BYTES],
+                                         size_t *maxblocks_out)
 {
     /* Per-lane geometry. blockcount = full_blocks + 1 (the +1 is the pad block,
      * present even for len%136==0 and len==0). */
-    size_t full_blocks[4], rem[4], blockcount[4], maxblocks = 1;
-    uint8_t padbuf[4][SHA3_256_RATE_BYTES];
+    size_t rem[4], blockcount[4], maxblocks = 1;
     for (int i = 0; i < 4; ++i) {
         full_blocks[i] = lens[i] / SHA3_256_RATE_BYTES;
         rem[i]         = lens[i] % SHA3_256_RATE_BYTES;
@@ -72,50 +66,101 @@ void sha3_256_x4_avx512(const uint8_t *const msgs[4], const size_t lens[4],
         padbuf[i][rem[i]] |= 0x06;
         padbuf[i][SHA3_256_RATE_BYTES - 1] |= 0x80;
     }
+    *maxblocks_out = maxblocks;
+}
+
+/* Resolve each lane's 136-byte block for this index (NULL = lane done). */
+static inline void sha3_x4_resolve_blocks(size_t b,
+                                          const uint8_t *const msgs[4],
+                                          const size_t full_blocks[4],
+                                          uint8_t padbuf[4][SHA3_256_RATE_BYTES],
+                                          const uint8_t *blk[4])
+{
+    for (int i = 0; i < 4; ++i) {
+        if (b < full_blocks[i])
+            blk[i] = msgs[i] + b * SHA3_256_RATE_BYTES;
+        else if (b == full_blocks[i])
+            blk[i] = padbuf[i];
+        else
+            blk[i] = NULL;
+    }
+}
+
+/* Loads word w of every live lane's block into slot[0..3]. */
+static inline void sha3_x4_load_slot_words(uint64_t *slot,
+                                           const uint8_t *const blk[4], int w)
+{
+    for (int i = 0; i < 4; ++i)
+        if (blk[i])
+            slot[i] = ReadLE64(blk[i] + w * 8);
+}
+
+/* A lane finishes at b == blockcount[i]-1 == full_blocks[i]; its 32-byte
+ * digest is words 0..3 of the state right after THIS permutation. */
+static inline bool sha3_x4_any_lane_done(const size_t full_blocks[4], size_t b)
+{
+    bool any_done = false;
+    for (int i = 0; i < 4; ++i)
+        if (full_blocks[i] == b) { any_done = true; break; }
+    return any_done;
+}
+
+/* Writes the digest of every lane that finished at block b from the
+ * extracted state words w0..w3 (one entry per lane). */
+static inline void sha3_x4_write_digests(uint8_t out[4][32],
+                                         const size_t full_blocks[4], size_t b,
+                                         const uint64_t *w0, const uint64_t *w1,
+                                         const uint64_t *w2, const uint64_t *w3)
+{
+    for (int i = 0; i < 4; ++i) {
+        if (full_blocks[i] != b) continue;
+        WriteLE64(out[i] + 0,  w0[i]);
+        WriteLE64(out[i] + 8,  w1[i]);
+        WriteLE64(out[i] + 16, w2[i]);
+        WriteLE64(out[i] + 24, w3[i]);
+    }
+}
+
+/* Scalar reference: four independent one-shot SHA3-256 hashes. Always safe. */
+static void sha3_256_x4_scalar(const uint8_t *const msgs[4], const size_t lens[4],
+                               uint8_t out[4][32])
+{
+    for (int i = 0; i < 4; ++i)
+        sha3_256(msgs[i], lens[i], out[i]);
+}
+
+#if defined(__x86_64__)
+
+__attribute__((target("avx512f,avx512vl,avx512dq")))
+void sha3_256_x4_avx512(const uint8_t *const msgs[4], const size_t lens[4],
+                        uint8_t out[4][32])
+{
+    size_t full_blocks[4], maxblocks;
+    uint8_t padbuf[4][SHA3_256_RATE_BYTES];
+    sha3_x4_prepare_lanes(msgs, lens, full_blocks, padbuf, &maxblocks);
 
     __m512i st[25];
     for (int i = 0; i < 25; ++i) st[i] = _mm512_setzero_si512();
 
     for (size_t b = 0; b < maxblocks; ++b) {
-        /* Resolve each lane's 136-byte block for this index (NULL = lane done). */
         const uint8_t *blk[4];
-        for (int i = 0; i < 4; ++i) {
-            if (b < full_blocks[i])
-                blk[i] = msgs[i] + b * SHA3_256_RATE_BYTES;
-            else if (b == full_blocks[i])
-                blk[i] = padbuf[i];
-            else
-                blk[i] = NULL;
-        }
+        sha3_x4_resolve_blocks(b, msgs, full_blocks, padbuf, blk);
 
         for (int w = 0; w < 17; ++w) {
             uint64_t slot[8] __attribute__((aligned(64))) = {0};
-            for (int i = 0; i < 4; ++i)
-                if (blk[i])
-                    slot[i] = ReadLE64(blk[i] + w * 8);
+            sha3_x4_load_slot_words(slot, blk, w);
             st[w] = _mm512_xor_si512(st[w], _mm512_load_si512((const void *)slot));
         }
 
         keccak_x4_permute(st);
 
-        /* A lane finishes at b == blockcount[i]-1 == full_blocks[i]; its 32-byte
-         * digest is words 0..3 of the state right after THIS permutation. */
-        bool any_done = false;
-        for (int i = 0; i < 4; ++i)
-            if (full_blocks[i] == b) { any_done = true; break; }
-        if (any_done) {
+        if (sha3_x4_any_lane_done(full_blocks, b)) {
             uint64_t w0[8], w1[8], w2[8], w3[8];
             _mm512_storeu_si512((void *)w0, st[0]);
             _mm512_storeu_si512((void *)w1, st[1]);
             _mm512_storeu_si512((void *)w2, st[2]);
             _mm512_storeu_si512((void *)w3, st[3]);
-            for (int i = 0; i < 4; ++i) {
-                if (full_blocks[i] != b) continue;
-                WriteLE64(out[i] + 0,  w0[i]);
-                WriteLE64(out[i] + 8,  w1[i]);
-                WriteLE64(out[i] + 16, w2[i]);
-                WriteLE64(out[i] + 24, w3[i]);
-            }
+            sha3_x4_write_digests(out, full_blocks, b, w0, w1, w2, w3);
         }
     }
 }
@@ -136,20 +181,9 @@ void sha3_256_x4_avx512(const uint8_t *const msgs[4], const size_t lens[4],
 void sha3_256_x4_neon(const uint8_t *const msgs[4], const size_t lens[4],
                       uint8_t out[4][32])
 {
-    size_t full_blocks[4], rem[4], blockcount[4], maxblocks = 1;
+    size_t full_blocks[4], maxblocks;
     uint8_t padbuf[4][SHA3_256_RATE_BYTES];
-    for (int i = 0; i < 4; ++i) {
-        full_blocks[i] = lens[i] / SHA3_256_RATE_BYTES;
-        rem[i]         = lens[i] % SHA3_256_RATE_BYTES;
-        blockcount[i]  = full_blocks[i] + 1;
-        if (blockcount[i] > maxblocks) maxblocks = blockcount[i];
-
-        memset(padbuf[i], 0, SHA3_256_RATE_BYTES);
-        if (rem[i] > 0)
-            memcpy(padbuf[i], msgs[i] + full_blocks[i] * SHA3_256_RATE_BYTES, rem[i]);
-        padbuf[i][rem[i]] |= 0x06;
-        padbuf[i][SHA3_256_RATE_BYTES - 1] |= 0x80;
-    }
+    sha3_x4_prepare_lanes(msgs, lens, full_blocks, padbuf, &maxblocks);
 
     uint64x2_t st_a[25], st_b[25];
     for (int i = 0; i < 25; ++i) {
@@ -159,42 +193,24 @@ void sha3_256_x4_neon(const uint8_t *const msgs[4], const size_t lens[4],
 
     for (size_t b = 0; b < maxblocks; ++b) {
         const uint8_t *blk[4];
-        for (int i = 0; i < 4; ++i) {
-            if (b < full_blocks[i])
-                blk[i] = msgs[i] + b * SHA3_256_RATE_BYTES;
-            else if (b == full_blocks[i])
-                blk[i] = padbuf[i];
-            else
-                blk[i] = NULL;
-        }
+        sha3_x4_resolve_blocks(b, msgs, full_blocks, padbuf, blk);
 
         for (int w = 0; w < 17; ++w) {
             uint64_t slot[4] = {0, 0, 0, 0};
-            for (int i = 0; i < 4; ++i)
-                if (blk[i])
-                    slot[i] = ReadLE64(blk[i] + w * 8);
+            sha3_x4_load_slot_words(slot, blk, w);
             st_a[w] = veorq_u64(st_a[w], vld1q_u64(slot));
             st_b[w] = veorq_u64(st_b[w], vld1q_u64(slot + 2));
         }
 
         keccak_x4_permute_neon(st_a, st_b);
 
-        bool any_done = false;
-        for (int i = 0; i < 4; ++i)
-            if (full_blocks[i] == b) { any_done = true; break; }
-        if (any_done) {
+        if (sha3_x4_any_lane_done(full_blocks, b)) {
             uint64_t w0[4], w1[4], w2[4], w3[4];
             vst1q_u64(w0, st_a[0]); vst1q_u64(w0 + 2, st_b[0]);
             vst1q_u64(w1, st_a[1]); vst1q_u64(w1 + 2, st_b[1]);
             vst1q_u64(w2, st_a[2]); vst1q_u64(w2 + 2, st_b[2]);
             vst1q_u64(w3, st_a[3]); vst1q_u64(w3 + 2, st_b[3]);
-            for (int i = 0; i < 4; ++i) {
-                if (full_blocks[i] != b) continue;
-                WriteLE64(out[i] + 0,  w0[i]);
-                WriteLE64(out[i] + 8,  w1[i]);
-                WriteLE64(out[i] + 16, w2[i]);
-                WriteLE64(out[i] + 24, w3[i]);
-            }
+            sha3_x4_write_digests(out, full_blocks, b, w0, w1, w2, w3);
         }
     }
 }

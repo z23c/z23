@@ -47,13 +47,41 @@ static bool status_is_valid(enum crypto_scheme_status s)
            s == CRYPTO_STATUS_RETIRED;
 }
 
+/* True when (int)scheme->id <= 0 or (int)scheme->id >= CRYPTO_SCHEME_MAX. */
+static bool scheme_id_out_of_range(const struct crypto_scheme *scheme)
+{
+    return (int)scheme->id <= 0 || (int)scheme->id >= CRYPTO_SCHEME_MAX;
+}
+
+/* scheme->name, or "(null)" when scheme->name is NULL. */
+static const char *scheme_name_or_null_label(const struct crypto_scheme *scheme)
+{
+    return scheme->name ? scheme->name : "(null)";
+}
+
+/* 1 when name is NULL or empty; else 2 when impl is NULL or empty; else 0. */
+static int scheme_missing_tag(const struct crypto_scheme *scheme)
+{
+    if (!scheme->name || !scheme->name[0])
+        return 1;
+    if (!scheme->impl || !scheme->impl[0])
+        return 2;
+    return 0;
+}
+
+/* expected->name, or "(unknown)" when expected or expected->name is NULL. */
+static const char *scheme_slot_occupant_label(const struct crypto_scheme *expected)
+{
+    return expected && expected->name ? expected->name : "(unknown)";
+}
+
 bool crypto_registry_register(const struct crypto_scheme *scheme)
 {
     if (!scheme) {
         LOG_FAIL("crypto_registry", "register: scheme is NULL");
         return false;
     }
-    if ((int)scheme->id <= 0 || (int)scheme->id >= CRYPTO_SCHEME_MAX) {
+    if (scheme_id_out_of_range(scheme)) {
         LOG_FAIL("crypto_registry",
                  "register: bad id=%d (must be in [1, %d))",
                  (int)scheme->id, CRYPTO_SCHEME_MAX);
@@ -64,7 +92,7 @@ bool crypto_registry_register(const struct crypto_scheme *scheme)
         LOG_FAIL("crypto_registry",
                  "register: id=%d (%s) bad kind=%d",
                  (int)scheme->id,
-                 scheme->name ? scheme->name : "(null)",
+                 scheme_name_or_null_label(scheme),
                  (int)scheme->kind);
         return false;
     }
@@ -72,16 +100,17 @@ bool crypto_registry_register(const struct crypto_scheme *scheme)
         LOG_FAIL("crypto_registry",
                  "register: id=%d (%s) bad status=%d",
                  (int)scheme->id,
-                 scheme->name ? scheme->name : "(null)",
+                 scheme_name_or_null_label(scheme),
                  (int)scheme->status);
         return false;
     }
-    if (!scheme->name || !scheme->name[0]) {
+    int missing_tag = scheme_missing_tag(scheme);
+    if (missing_tag == 1) {
         LOG_FAIL("crypto_registry",
                  "register: id=%d missing name", (int)scheme->id);
         return false;
     }
-    if (!scheme->impl || !scheme->impl[0]) {
+    if (missing_tag == 2) {
         LOG_FAIL("crypto_registry",
                  "register: id=%d (%s) missing impl tag",
                  (int)scheme->id, scheme->name);
@@ -102,7 +131,7 @@ bool crypto_registry_register(const struct crypto_scheme *scheme)
         LOG_FAIL("crypto_registry",
                  "register: id=%d (%s) slot already taken by '%s'",
                  (int)scheme->id, scheme->name,
-                 expected && expected->name ? expected->name : "(unknown)");
+                 scheme_slot_occupant_label(expected));
         return false;
     }
 

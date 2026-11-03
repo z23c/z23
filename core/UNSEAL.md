@@ -911,3 +911,7 @@ later lane flips it HARD.
 - 2026-11-03T00:24:31Z — REASON: Owner grant 2026-10-30 'you have authority to unseal core': record each peer's best accepted header height for getpeerinfo best_height; P2P bookkeeping only, no consensus predicate or validation change.
   old ROOT: c3d19ca28d8e99e3ff7be0ccaab4021d1409c6370e99b85b74951e4c591637a4
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-03T08:29:20Z — REASON: behaviour-preserving complexity splits of 22 core functions (8 reviewed lanes: crypto_registry, transaction, script_interp, msgprocessor_snapshot, circuit_spend, crypto pkg, rom_fetch, groth16_prover); owner-authorized 2026-10-19 hardening program
+  old ROOT: af865887b569d4501530707471b29c636349ac80b113d6dd152c36c9136d99f4
+  by: owner unseal ritual (make core-unseal)

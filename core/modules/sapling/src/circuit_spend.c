@@ -268,29 +268,49 @@ static void probe_reset(struct spend_wire_probe *probe)
         probe->value_bit[i] = SIZE_MAX;
 }
 
-bool sapling_spend_synthesize_traced(struct constraint_system *cs,
-                                     const struct sapling_spend_witness *wit,
-                                     const struct sapling_spend_inputs *pub,
-                                     struct spend_section_shape *sections,
-                                     size_t max_sections,
-                                     size_t *n_sections_out,
-                                     struct spend_wire_probe *probe)
-{
-    size_t nsec = 0;
-    if (n_sections_out)
-        *n_sections_out = 0;
-    probe_reset(probe);
+/* State threaded through the spend-circuit synthesis steps. The steps run in
+ * the fixed order of spend_steps[]; each reads and writes only the fields the
+ * section comments name, so the allocation order of variables and constraints
+ * is exactly the section order of the circuit. */
+struct spend_synth {
+    struct constraint_system *cs;
+    const struct sapling_spend_witness *wit;
+    const struct sapling_spend_inputs *pub;
+    struct spend_section_shape *sections;
+    size_t max_sections;
+    size_t nsec;
+    struct spend_wire_probe *probe;
 
-    /* ── Public inputs 1..7 (allocated up front — see header note) ── */
-    struct fr rk_x, rk_y;
-    if (!point_to_xy(&rk_x, &rk_y, pub->rk))
-        LOG_FAIL("circuit_spend", "spend: point_to_xy(rk) failed");
-    struct fr cv_x, cv_y;
-    if (!point_to_xy(&cv_x, &cv_y, pub->cv))
-        LOG_FAIL("circuit_spend", "spend: point_to_xy(cv) failed");
     struct fr anchor_fr;
-    fr_from_bytes(&anchor_fr, pub->anchor);
+    struct fr nf0, nf1;
+    size_t in_rk_x, in_rk_y, in_cv_x, in_cv_y, in_anchor, in_nf0, in_nf1;
 
+    size_t ak_x_var, ak_y_var;
+    size_t nk_var_x, nk_var_y;
+    size_t ivk_preimage[512];
+    size_t nf_preimage[256];
+    size_t nf_pre_bits[512];
+    struct cbit ivk_bits[256];
+    size_t gd_x_var, gd_y_var;
+    size_t pkd_x_var, pkd_y_var;
+    size_t note_contents[SPEND_NOTE_CONTENT_BITS];
+    size_t note_hash_x, note_hash_y;
+    size_t cm_x_var, cm_y_var;
+    size_t anchor_var;
+    size_t position_bits[SAPLING_MERKLE_DEPTH];
+    size_t rt_var;
+    size_t pos_pt_x, pos_pt_y;
+    size_t rho_x, rho_y;
+    struct cbit nf_bits[256];
+};
+
+static void spend_record(struct spend_synth *s, const char *name)
+{
+    section_record(s->cs, s->sections, s->max_sections, &s->nsec, name);
+}
+
+static bool spend_pack_nullifier(struct spend_synth *s)
+{
     /* The nullifier's two packed scalars. multipack_bytes_to_fr writes PLAIN
      * integer limbs — the representation the VERIFIER wants (sapling.c pairs it
      * with jub_to_affine_raw/bytes_le_to_fr_raw for exactly that reason) —
@@ -305,77 +325,120 @@ bool sapling_spend_synthesize_traced(struct constraint_system *cs,
      * always canonical and fr_from_bytes cannot reject it. */
     uint64_t nf_packed[2][4];
     size_t nf_count = 0;
-    multipack_bytes_to_fr(nf_packed, &nf_count, pub->nullifier, 32);
-    struct fr nf0, nf1;
-    fr_zero(&nf0);
-    fr_zero(&nf1);
-    for (size_t s = 0; s < 2 && s < nf_count; s++) {
+    multipack_bytes_to_fr(nf_packed, &nf_count, s->pub->nullifier, 32);
+    fr_zero(&s->nf0);
+    fr_zero(&s->nf1);
+    for (size_t k = 0; k < 2 && k < nf_count; k++) {
         uint8_t le[32];
         for (size_t limb = 0; limb < 4; limb++)
-            zcl_write_u64_le(le + limb * 8, nf_packed[s][limb]);
-        if (!fr_from_bytes(s == 0 ? &nf0 : &nf1, le))
-            LOG_FAIL("circuit_spend",
-                     "spend: packed nullifier scalar %zu is not a canonical Fr "
-                     "encoding (multipack emits <= 253 bits, so this cannot "
-                     "happen without a multipack change)", s);
+            zcl_write_u64_le(le + limb * 8, nf_packed[k][limb]);
+        if (!fr_from_bytes(k == 0 ? &s->nf0 : &s->nf1, le)) {
+            LOG_ERROR_IN("sapling_spend_synthesize_traced", "circuit_spend",
+                         "spend: packed nullifier scalar %zu is not a canonical Fr "
+                         "encoding (multipack emits <= 253 bits, so this cannot "
+                         "happen without a multipack change)", k);
+            return false;
+        }
     }
+    return true;
+}
 
-    size_t in_rk_x = cs_alloc_input(cs, &rk_x);  /* input 1: rk.x */
-    size_t in_rk_y = cs_alloc_input(cs, &rk_y);  /* input 2: rk.y */
-    size_t in_cv_x = cs_alloc_input(cs, &cv_x);  /* input 3: cv.x */
-    size_t in_cv_y = cs_alloc_input(cs, &cv_y);  /* input 4: cv.y */
+/* ── Public inputs 1..7 (allocated up front — see header note) ── */
+static bool spend_step_inputs(struct spend_synth *s)
+{
+    struct constraint_system *cs = s->cs;
+    struct fr rk_x, rk_y;
+    if (!point_to_xy(&rk_x, &rk_y, s->pub->rk)) {
+        LOG_ERROR_IN("sapling_spend_synthesize_traced", "circuit_spend",
+                     "spend: point_to_xy(rk) failed");
+        return false;
+    }
+    struct fr cv_x, cv_y;
+    if (!point_to_xy(&cv_x, &cv_y, s->pub->cv)) {
+        LOG_ERROR_IN("sapling_spend_synthesize_traced", "circuit_spend",
+                     "spend: point_to_xy(cv) failed");
+        return false;
+    }
+    fr_from_bytes(&s->anchor_fr, s->pub->anchor);
+
+    if (!spend_pack_nullifier(s))
+        return false;
+
+    s->in_rk_x = cs_alloc_input(cs, &rk_x);  /* input 1: rk.x */
+    s->in_rk_y = cs_alloc_input(cs, &rk_y);  /* input 2: rk.y */
+    s->in_cv_x = cs_alloc_input(cs, &cv_x);  /* input 3: cv.x */
+    s->in_cv_y = cs_alloc_input(cs, &cv_y);  /* input 4: cv.y */
     /* input 5: anchor (bound in section 23) */
-    size_t in_anchor = cs_alloc_input(cs, &anchor_fr);
+    s->in_anchor = cs_alloc_input(cs, &s->anchor_fr);
     /* inputs 6, 7: the packed nullifier (bound in section 28) */
-    size_t in_nf0 = cs_alloc_input(cs, &nf0);
-    size_t in_nf1 = cs_alloc_input(cs, &nf1);
+    s->in_nf0 = cs_alloc_input(cs, &s->nf0);
+    s->in_nf1 = cs_alloc_input(cs, &s->nf1);
+    return true;
+}
+
+/* Sections 1..5: ak, ar, rk. */
+static bool spend_step_rk(struct spend_synth *s)
+{
+    struct constraint_system *cs = s->cs;
+    struct spend_wire_probe *probe = s->probe;
 
     /* ════ Section 1: witness ak, on-curve + not-small-order (20) ════ */
     struct fr ak_x, ak_y;
-    if (!point_to_xy(&ak_x, &ak_y, wit->ak))
-        LOG_FAIL("circuit_spend", "spend: point_to_xy(ak) failed");
+    if (!point_to_xy(&ak_x, &ak_y, s->wit->ak)) {
+        LOG_ERROR_IN("sapling_spend_synthesize_traced", "circuit_spend",
+                     "spend: point_to_xy(ak) failed");
+        return false;
+    }
     size_t ak_x_var, ak_y_var;
     witness_point(cs, &ak_x, &ak_y, &ak_x_var, &ak_y_var);  /* (4) */
     gadget_assert_not_small_order(cs, ak_x_var, ak_y_var);   /* (16) */
     if (probe) { probe->ak_x = ak_x_var; probe->ak_y = ak_y_var; }
-    section_record(cs, sections, max_sections, &nsec,
-                   "1:ak witness+on-curve+not-small-order");
+    s->ak_x_var = ak_x_var;
+    s->ak_y_var = ak_y_var;
+    spend_record(s, "1:ak witness+on-curve+not-small-order");
 
     /* ════ Section 2: ar into 252 boolean bits (252) ════ */
     struct fr ar_fr;
-    fr_from_bytes(&ar_fr, wit->ar);
+    fr_from_bytes(&ar_fr, s->wit->ar);
     size_t ar_bits[252];
     boolean_vec_le(cs, ar_bits, 252, &ar_fr);
     memory_cleanse(&ar_fr, sizeof(ar_fr));
-    section_record(cs, sections, max_sections, &nsec, "2:ar bits");
+    spend_record(s, "2:ar bits");
 
     /* ════ Section 3: ar_g = [ar] SpendAuthGenerator (750) ════ */
     struct fr sag_x, sag_y;
     sapling_spend_auth_generator(&sag_x, &sag_y);
     size_t arg_x, arg_y;
     gadget_fixed_base_mul(cs, ar_bits, 252, &sag_x, &sag_y, &arg_x, &arg_y);
-    section_record(cs, sections, max_sections, &nsec,
-                   "3:randomization of signing key");
+    spend_record(s, "3:randomization of signing key");
 
     /* ════ Section 4: rk = ak + ar_g (6) ════ */
     size_t rk_var_x, rk_var_y;
     gadget_edwards_add(cs, ak_x_var, ak_y_var, arg_x, arg_y,
                        &rk_var_x, &rk_var_y);
     if (probe) { probe->rk_x = rk_var_x; probe->rk_y = rk_var_y; }
-    section_record(cs, sections, max_sections, &nsec, "4:computation of rk");
+    spend_record(s, "4:computation of rk");
 
     /* ════ Section 5: rk inputize — bind to input slots 1,2 (2) ════ */
-    enforce_equal(cs, rk_var_x, in_rk_x);
-    enforce_equal(cs, rk_var_y, in_rk_y);
-    section_record(cs, sections, max_sections, &nsec, "5:rk inputize");
+    enforce_equal(cs, rk_var_x, s->in_rk_x);
+    enforce_equal(cs, rk_var_y, s->in_rk_y);
+    spend_record(s, "5:rk inputize");
+    return true;
+}
+
+/* Sections 6..9: nsk, nk, and the representations of ak and nk. */
+static bool spend_step_nk(struct spend_synth *s)
+{
+    struct constraint_system *cs = s->cs;
+    struct spend_wire_probe *probe = s->probe;
 
     /* ════ Section 6: nsk into 252 boolean bits (252) ════ */
     struct fr nsk_fr;
-    fr_from_bytes(&nsk_fr, wit->nsk);
+    fr_from_bytes(&nsk_fr, s->wit->nsk);
     size_t nsk_bits[252];
     boolean_vec_le(cs, nsk_bits, 252, &nsk_fr);
     memory_cleanse(&nsk_fr, sizeof(nsk_fr));
-    section_record(cs, sections, max_sections, &nsec, "6:nsk bits");
+    spend_record(s, "6:nsk bits");
 
     /* ════ Section 7: nk = [nsk] ProofGenerationKeyGenerator (750) ════ */
     struct fr pgg_x, pgg_y;
@@ -384,26 +447,33 @@ bool sapling_spend_synthesize_traced(struct constraint_system *cs,
     gadget_fixed_base_mul(cs, nsk_bits, 252, &pgg_x, &pgg_y,
                           &nk_var_x, &nk_var_y);
     if (probe) { probe->nk_x = nk_var_x; probe->nk_y = nk_var_y; }
-    section_record(cs, sections, max_sections, &nsec,
-                   "7:computation of nk");
+    s->nk_var_x = nk_var_x;
+    s->nk_var_y = nk_var_y;
+    spend_record(s, "7:computation of nk");
 
     /* ════ Section 8: representation of ak (776) ════
      * ivk_preimage starts with ak's 256-bit representation. */
-    size_t ivk_preimage[512];
-    section_point_repr(cs, ak_x_var, ak_y_var, &ivk_preimage[0],
+    section_point_repr(cs, s->ak_x_var, s->ak_y_var, &s->ivk_preimage[0],
                        probe ? probe->ak_repr : NULL);
-    section_record(cs, sections, max_sections, &nsec, "8:representation of ak");
+    spend_record(s, "8:representation of ak");
 
     /* ════ Section 9: representation of nk (776) ════
      * nk's 256-bit representation is used TWICE: it completes the 512-bit
      * ivk preimage and is the whole 256-bit nf preimage. One gadget, two
      * consumers — the bits are shared wires, not re-derived. */
-    size_t nf_preimage[256];
-    section_point_repr(cs, nk_var_x, nk_var_y, &ivk_preimage[256],
+    section_point_repr(cs, nk_var_x, nk_var_y, &s->ivk_preimage[256],
                        probe ? probe->nk_repr : NULL);
-    memcpy(nf_preimage, &ivk_preimage[256], sizeof(nf_preimage));
-    section_record(cs, sections, max_sections, &nsec, "9:representation of nk");
-    (void)nf_preimage; /* consumed by section 27, the twin blake2s */
+    memcpy(s->nf_preimage, &s->ivk_preimage[256], sizeof(s->nf_preimage));
+    spend_record(s, "9:representation of nk");
+    /* consumed by section 27, the twin blake2s */
+    return true;
+}
+
+/* Section 10: computation of ivk. */
+static bool spend_step_ivk(struct spend_synth *s)
+{
+    struct constraint_system *cs = s->cs;
+    struct spend_wire_probe *probe = s->probe;
 
     /* ════ Section 10: computation of ivk (21006) ════
      * ivk = BLAKE2s-256("Zcashivk", repr(ak) || repr(nk)), in-circuit. The 512
@@ -412,15 +482,16 @@ bool sapling_spend_synthesize_traced(struct constraint_system *cs,
      * boolean-constrained by gadget_point_repr, so wrapping costs nothing). */
     struct cbit ivk_pre[512];
     for (size_t i = 0; i < 512; i++)
-        ivk_pre[i] = cbit_from_var(cs, ivk_preimage[i]);
+        ivk_pre[i] = cbit_from_var(cs, s->ivk_preimage[i]);
 
     static const uint8_t CRH_IVK_PERSONALIZATION[8] =
         { 'Z', 'c', 'a', 's', 'h', 'i', 'v', 'k' };
-    struct cbit ivk_bits[256];
+    struct cbit *ivk_bits = s->ivk_bits;
     if (!gadget_blake2s(cs, ivk_pre, 512, CRH_IVK_PERSONALIZATION, ivk_bits)) {
         memory_cleanse(ivk_pre, sizeof(ivk_pre));
-        LOG_FAIL("circuit_spend",
-                 "spend: in-circuit blake2s(CRH^ivk) synthesis failed");
+        LOG_ERROR_IN("sapling_spend_synthesize_traced", "circuit_spend",
+                     "spend: in-circuit blake2s(CRH^ivk) synthesis failed");
+        return false;
     }
     if (probe) {
         for (size_t i = 0; i < 256; i++) {
@@ -433,30 +504,42 @@ bool sapling_spend_synthesize_traced(struct constraint_system *cs,
      * is a valid Jubjub scalar. A Vec truncate: zero constraints, and the
      * dropped wires stay constrained inside blake2s. */
     memory_cleanse(ivk_pre, sizeof(ivk_pre));
-    section_record(cs, sections, max_sections, &nsec, "10:computation of ivk");
+    spend_record(s, "10:computation of ivk");
+    return true;
+}
+
+/* Sections 11..13: g_d and pk_d. */
+static bool spend_step_pkd(struct spend_synth *s)
+{
+    struct constraint_system *cs = s->cs;
+    struct spend_wire_probe *probe = s->probe;
 
     /* ════ Section 11: witness g_d, on-curve (4) ════
      * g_d = GH("Zcash_gd", diversifier). bellman witnesses it rather than
      * deriving it in-circuit; the note commitment in section 17 is what binds
      * it to the diversifier the recipient published. */
     struct jub_point gd_pt;
-    if (!sapling_diversifier_to_gd(&gd_pt, wit->diversifier))
-        LOG_FAIL("circuit_spend",
-                 "spend: diversifier does not hash to a Jubjub point "
-                 "(g_d would be the identity) — section 11 cannot witness g_d");
+    if (!sapling_diversifier_to_gd(&gd_pt, s->wit->diversifier)) {
+        LOG_ERROR_IN("sapling_spend_synthesize_traced", "circuit_spend",
+                     "spend: diversifier does not hash to a Jubjub point "
+                     "(g_d would be the identity) — section 11 cannot witness g_d");
+        return false;
+    }
     struct fr gd_x, gd_y;
     jub_get_x(&gd_x, &gd_pt);
     jub_get_y(&gd_y, &gd_pt);
     size_t gd_x_var, gd_y_var;
     witness_point(cs, &gd_x, &gd_y, &gd_x_var, &gd_y_var);
     if (probe) { probe->gd_x = gd_x_var; probe->gd_y = gd_y_var; }
-    section_record(cs, sections, max_sections, &nsec, "11:witness g_d");
+    s->gd_x_var = gd_x_var;
+    s->gd_y_var = gd_y_var;
+    spend_record(s, "11:witness g_d");
 
     /* ════ Section 12: g_d not small order (16) ════
      * Redundant with the Output circuit's own check by construction, and
      * bellman keeps it anyway for defence in depth. Cheap, so do the same. */
     gadget_assert_not_small_order(cs, gd_x_var, gd_y_var);
-    section_record(cs, sections, max_sections, &nsec, "12:g_d not small order");
+    spend_record(s, "12:g_d not small order");
 
     /* ════ Section 13: pk_d = [ivk] g_d (3252) ════
      * The FIRST variable-base multiplication in the circuit — the base is a
@@ -465,47 +548,69 @@ bool sapling_spend_synthesize_traced(struct constraint_system *cs,
      * section 10's Boolean digest truncated to Fs::CAPACITY bits, consumed as
      * Booleans (a `Not` view costs nothing to multiply by). */
     size_t pkd_x_var, pkd_y_var;
-    gadget_variable_base_mul_cbits(cs, gd_x_var, gd_y_var, ivk_bits,
+    gadget_variable_base_mul_cbits(cs, gd_x_var, gd_y_var, s->ivk_bits,
                                    SPEND_IVK_TRUNCATED_BITS,
                                    &pkd_x_var, &pkd_y_var);
-    if (pkd_x_var == SIZE_MAX || pkd_y_var == SIZE_MAX)
-        LOG_FAIL("circuit_spend",
-                 "spend: section 13 [ivk] g_d produced no point "
-                 "(variable-base multiplication refused the scalar)");
+    if (pkd_x_var == SIZE_MAX || pkd_y_var == SIZE_MAX) {
+        LOG_ERROR_IN("sapling_spend_synthesize_traced", "circuit_spend",
+                     "spend: section 13 [ivk] g_d produced no point "
+                     "(variable-base multiplication refused the scalar)");
+        return false;
+    }
     if (probe) { probe->pkd_x = pkd_x_var; probe->pkd_y = pkd_y_var; }
-    section_record(cs, sections, max_sections, &nsec, "13:compute pk_d");
+    s->pkd_x_var = pkd_x_var;
+    s->pkd_y_var = pkd_y_var;
+    spend_record(s, "13:compute pk_d");
+    return true;
+}
+
+/* Sections 14..16: value commitment and the note's representations. */
+static bool spend_step_note(struct spend_synth *s)
+{
+    struct constraint_system *cs = s->cs;
+    struct spend_wire_probe *probe = s->probe;
+    size_t *note_contents = s->note_contents;
 
     /* ════ Section 14: value commitment (1265) ════
      * Booleanize value + rcv, commit, and bind cv to public inputs 3 and 4.
      * This is the first section that CONSTRAINS a caller-supplied public input
      * other than rk: pass a cv that is not [value]G_v + [rcv]G_rcv and the
      * copy constraint makes the system unsatisfiable, by design. */
-    size_t note_contents[SPEND_NOTE_CONTENT_BITS];
     size_t cv_var_x = SIZE_MAX, cv_var_y = SIZE_MAX;
-    if (!expose_value_commitment(cs, wit->value, wit->rcv, in_cv_x, in_cv_y,
-                                 &note_contents[0], &cv_var_x, &cv_var_y))
-        LOG_FAIL("circuit_spend", "spend: section 14 value commitment failed");
+    if (!expose_value_commitment(cs, s->wit->value, s->wit->rcv,
+                                 s->in_cv_x, s->in_cv_y,
+                                 &note_contents[0], &cv_var_x, &cv_var_y)) {
+        LOG_ERROR_IN("sapling_spend_synthesize_traced", "circuit_spend",
+                     "spend: section 14 value commitment failed");
+        return false;
+    }
     if (probe) {
         probe->cv_x = cv_var_x;
         probe->cv_y = cv_var_y;
         memcpy(probe->value_bit, &note_contents[0],
                SPEND_NOTE_VALUE_BITS * sizeof(note_contents[0]));
     }
-    section_record(cs, sections, max_sections, &nsec, "14:value commitment");
+    spend_record(s, "14:value commitment");
 
     /* ════ Section 15: representation of g_d (776) ════ */
-    section_point_repr(cs, gd_x_var, gd_y_var,
+    section_point_repr(cs, s->gd_x_var, s->gd_y_var,
                        &note_contents[SPEND_NOTE_VALUE_BITS],
                        probe ? probe->gd_repr : NULL);
-    section_record(cs, sections, max_sections, &nsec,
-                   "15:representation of g_d");
+    spend_record(s, "15:representation of g_d");
 
     /* ════ Section 16: representation of pk_d (776) ════ */
-    section_point_repr(cs, pkd_x_var, pkd_y_var,
+    section_point_repr(cs, s->pkd_x_var, s->pkd_y_var,
                        &note_contents[SPEND_NOTE_VALUE_BITS + 256],
                        probe ? probe->pkd_repr : NULL);
-    section_record(cs, sections, max_sections, &nsec,
-                   "16:representation of pk_d");
+    spend_record(s, "16:representation of pk_d");
+    return true;
+}
+
+/* Sections 17..20: the note commitment. */
+static bool spend_step_cm(struct spend_synth *s)
+{
+    struct constraint_system *cs = s->cs;
+    struct spend_wire_probe *probe = s->probe;
 
     /* note_contents is now the complete 576-bit note: value || repr(g_d) ||
      * repr(pk_d). Sections 17..20 turn it into the note commitment. */
@@ -523,28 +628,30 @@ bool sapling_spend_synthesize_traced(struct constraint_system *cs,
     bool note_pers[PEDERSEN_PERSONALIZATION_BITS];
     gadget_pedersen_personalization_note_commitment(note_pers);
     size_t note_hash_x, note_hash_y;
-    gadget_pedersen_hash_pers(cs, note_pers, note_contents,
+    gadget_pedersen_hash_pers(cs, note_pers, s->note_contents,
                               SPEND_NOTE_CONTENT_BITS,
                               &note_hash_x, &note_hash_y);
-    if (note_hash_x >= cs->num_vars || note_hash_y >= cs->num_vars)
-        LOG_FAIL("circuit_spend",
-                 "spend: section 17 note content hash produced no point "
-                 "(x=%zu y=%zu num_vars=%zu)",
-                 note_hash_x, note_hash_y, cs->num_vars);
+    if (note_hash_x >= cs->num_vars || note_hash_y >= cs->num_vars) {
+        LOG_ERROR_IN("sapling_spend_synthesize_traced", "circuit_spend",
+                     "spend: section 17 note content hash produced no point "
+                     "(x=%zu y=%zu num_vars=%zu)",
+                     note_hash_x, note_hash_y, cs->num_vars);
+        return false;
+    }
     if (probe) { probe->note_hash_x = note_hash_x;
                  probe->note_hash_y = note_hash_y; }
-    section_record(cs, sections, max_sections, &nsec, "17:note content hash");
+    spend_record(s, "17:note content hash");
 
     /* ════ Section 18: rcm into 252 boolean bits (252) ════
      * The same boolean-only decomposition sections 2, 6 and 14 use — rcm is
      * consumed only as bits by the fixed-base multiplication below, so there is
      * no packing constraint back to a field element. */
     struct fr rcm_fr;
-    fr_from_bytes(&rcm_fr, wit->rcm);
+    fr_from_bytes(&rcm_fr, s->wit->rcm);
     size_t rcm_bits[252];
     boolean_vec_le(cs, rcm_bits, 252, &rcm_fr);
     memory_cleanse(&rcm_fr, sizeof(rcm_fr));
-    section_record(cs, sections, max_sections, &nsec, "18:rcm bits");
+    spend_record(s, "18:rcm bits");
 
     /* ════ Section 19: [rcm] NoteCommitmentRandomness (750) ════
      * Identical shape to sections 3 and 7: 84 windows over 252 bits, so
@@ -556,8 +663,7 @@ bool sapling_spend_synthesize_traced(struct constraint_system *cs,
     size_t rcm_pt_x, rcm_pt_y;
     gadget_fixed_base_mul(cs, rcm_bits, 252, &grcm_x, &grcm_y,
                           &rcm_pt_x, &rcm_pt_y);
-    section_record(cs, sections, max_sections, &nsec,
-                   "19:commitment randomness");
+    spend_record(s, "19:commitment randomness");
 
     /* ════ Section 20: cm = note_hash + [rcm] G_rcm (6) ════
      * One Edwards addition. A Pedersen hash is not itself a hiding commitment,
@@ -565,14 +671,24 @@ bool sapling_spend_synthesize_traced(struct constraint_system *cs,
     size_t cm_x_var, cm_y_var;
     gadget_edwards_add(cs, note_hash_x, note_hash_y, rcm_pt_x, rcm_pt_y,
                        &cm_x_var, &cm_y_var);
-    if (cm_x_var >= cs->num_vars || cm_y_var >= cs->num_vars)
-        LOG_FAIL("circuit_spend",
-                 "spend: section 20 cm wires out of range "
-                 "(x=%zu y=%zu num_vars=%zu)", cm_x_var, cm_y_var,
-                 cs->num_vars);
+    if (cm_x_var >= cs->num_vars || cm_y_var >= cs->num_vars) {
+        LOG_ERROR_IN("sapling_spend_synthesize_traced", "circuit_spend",
+                     "spend: section 20 cm wires out of range "
+                     "(x=%zu y=%zu num_vars=%zu)", cm_x_var, cm_y_var,
+                     cs->num_vars);
+        return false;
+    }
     if (probe) { probe->cm_x = cm_x_var; probe->cm_y = cm_y_var; }
-    section_record(cs, sections, max_sections, &nsec,
-                   "20:randomization of note commitment");
+    s->cm_x_var = cm_x_var;
+    s->cm_y_var = cm_y_var;
+    spend_record(s, "20:randomization of note commitment");
+    return true;
+}
+
+/* Sections 21..23: the Merkle path and the conditional anchor. */
+static bool spend_step_anchor(struct spend_synth *s)
+{
+    struct constraint_system *cs = s->cs;
 
     /* ════ Section 21: 32-level Merkle authentication path (44224) ════
      * The single largest section of the circuit — 45% of all 98777 constraints.
@@ -588,16 +704,17 @@ bool sapling_spend_synthesize_traced(struct constraint_system *cs,
      * loses nothing by it: Jubjub's x determines the point up to sign and the
      * tree stores exactly this value (the protocol's `cmu`). */
     size_t anchor_var = SIZE_MAX;
-    size_t position_bits[SAPLING_MERKLE_DEPTH];
-    if (!gadget_merkle_auth_path(cs, cm_x_var, wit->auth_path,
-                                 wit->auth_path_bits, &anchor_var,
-                                 position_bits))
-        LOG_FAIL("circuit_spend",
-                 "spend: section 21 Merkle authentication path failed");
-    if (probe)
-        probe->anchor = anchor_var;
-    section_record(cs, sections, max_sections, &nsec,
-                   "21:merkle tree hash 0..31");
+    if (!gadget_merkle_auth_path(cs, s->cm_x_var, s->wit->auth_path,
+                                 s->wit->auth_path_bits, &anchor_var,
+                                 s->position_bits)) {
+        LOG_ERROR_IN("sapling_spend_synthesize_traced", "circuit_spend",
+                     "spend: section 21 Merkle authentication path failed");
+        return false;
+    }
+    if (s->probe)
+        s->probe->anchor = anchor_var;
+    s->anchor_var = anchor_var;
+    spend_record(s, "21:merkle tree hash 0..31");
 
     /* ════ Section 22: conditionally enforce correct root (1) ════
      * bellman allocates a SECOND wire for the anchor — the "conditional
@@ -615,7 +732,7 @@ bool sapling_spend_synthesize_traced(struct constraint_system *cs,
      * B-matrix row of 64 terms, not a wire, so there is nothing to allocate.
      * Writing it as a packed wire instead would satisfy the same identity over
      * a different QAP. */
-    size_t rt_var = cs_alloc_aux(cs, &anchor_fr);
+    size_t rt_var = cs_alloc_aux(cs, &s->anchor_fr);
     {
         struct linear_combination la, lb, lcc;
         struct fr one_val, neg_one, coeff;
@@ -627,22 +744,29 @@ bool sapling_spend_synthesize_traced(struct constraint_system *cs,
         lc_init(&lb);
         fr_one(&coeff);
         for (size_t i = 0; i < SPEND_NOTE_VALUE_BITS; i++) {
-            lc_add_term(&lb, note_contents[i], &coeff);
+            lc_add_term(&lb, s->note_contents[i], &coeff);
             fr_add(&coeff, &coeff, &coeff);
         }
         lc_init(&lcc);
         cs_enforce(cs, &la, &lb, &lcc);
         lc_free(&la); lc_free(&lb); lc_free(&lcc);
     }
-    section_record(cs, sections, max_sections, &nsec,
-                   "22:conditionally enforce correct root");
+    s->rt_var = rt_var;
+    spend_record(s, "22:conditionally enforce correct root");
 
     /* ════ Section 23: anchor inputize — bind rt to input slot 5 (1) ════
      * Note WHICH wire is exposed: the conditional anchor rt, not the folded
      * root. That is what lets a zero-value dummy input publish an anchor it
      * cannot prove a path to. */
-    enforce_equal(cs, rt_var, in_anchor);
-    section_record(cs, sections, max_sections, &nsec, "23:anchor inputize");
+    enforce_equal(cs, rt_var, s->in_anchor);
+    spend_record(s, "23:anchor inputize");
+    return true;
+}
+
+/* Sections 24..26: g^position, rho and its representation. */
+static bool spend_step_rho(struct spend_synth *s)
+{
+    struct constraint_system *cs = s->cs;
 
     /* ════ Section 24: g^position (92) ════
      * The 32 position bits section 21 collected, least significant first,
@@ -654,14 +778,16 @@ bool sapling_spend_synthesize_traced(struct constraint_system *cs,
     struct fr npg_x, npg_y;
     sapling_nullifier_position_generator(&npg_x, &npg_y);
     size_t pos_pt_x, pos_pt_y;
-    gadget_fixed_base_mul(cs, position_bits, SAPLING_MERKLE_DEPTH,
+    gadget_fixed_base_mul(cs, s->position_bits, SAPLING_MERKLE_DEPTH,
                           &npg_x, &npg_y, &pos_pt_x, &pos_pt_y);
-    if (pos_pt_x >= cs->num_vars || pos_pt_y >= cs->num_vars)
-        LOG_FAIL("circuit_spend",
-                 "spend: section 24 g^position produced no point "
-                 "(x=%zu y=%zu num_vars=%zu)",
-                 pos_pt_x, pos_pt_y, cs->num_vars);
-    section_record(cs, sections, max_sections, &nsec, "24:g^position");
+    if (pos_pt_x >= cs->num_vars || pos_pt_y >= cs->num_vars) {
+        LOG_ERROR_IN("sapling_spend_synthesize_traced", "circuit_spend",
+                     "spend: section 24 g^position produced no point "
+                     "(x=%zu y=%zu num_vars=%zu)",
+                     pos_pt_x, pos_pt_y, cs->num_vars);
+        return false;
+    }
+    spend_record(s, "24:g^position");
 
     /* ════ Section 25: faerie gold prevention (6) ════
      * rho = cm + [position] G_pos. One Edwards addition, and the operand order
@@ -671,23 +797,29 @@ bool sapling_spend_synthesize_traced(struct constraint_system *cs,
      * contents at different tree positions would share a nullifier: one of them
      * would be unspendable ("faerie gold"). */
     size_t rho_x, rho_y;
-    gadget_edwards_add(cs, cm_x_var, cm_y_var, pos_pt_x, pos_pt_y,
+    gadget_edwards_add(cs, s->cm_x_var, s->cm_y_var, pos_pt_x, pos_pt_y,
                        &rho_x, &rho_y);
-    if (rho_x >= cs->num_vars || rho_y >= cs->num_vars)
-        LOG_FAIL("circuit_spend",
-                 "spend: section 25 rho wires out of range "
-                 "(x=%zu y=%zu num_vars=%zu)", rho_x, rho_y, cs->num_vars);
-    section_record(cs, sections, max_sections, &nsec,
-                   "25:faerie gold prevention");
+    if (rho_x >= cs->num_vars || rho_y >= cs->num_vars) {
+        LOG_ERROR_IN("sapling_spend_synthesize_traced", "circuit_spend",
+                     "spend: section 25 rho wires out of range "
+                     "(x=%zu y=%zu num_vars=%zu)", rho_x, rho_y, cs->num_vars);
+        return false;
+    }
+    spend_record(s, "25:faerie gold prevention");
 
     /* ════ Section 26: representation of rho (776) ════
      * Completes the 512-bit nf preimage: repr(nk) from section 9, then
      * repr(rho). Same body as sections 8/9/15/16. */
-    size_t nf_pre_bits[512];
-    memcpy(nf_pre_bits, nf_preimage, sizeof(nf_preimage));
-    section_point_repr(cs, rho_x, rho_y, &nf_pre_bits[256], NULL);
-    section_record(cs, sections, max_sections, &nsec,
-                   "26:representation of rho");
+    memcpy(s->nf_pre_bits, s->nf_preimage, sizeof(s->nf_preimage));
+    section_point_repr(cs, rho_x, rho_y, &s->nf_pre_bits[256], NULL);
+    spend_record(s, "26:representation of rho");
+    return true;
+}
+
+/* Section 27: nf computation. */
+static bool spend_step_nf(struct spend_synth *s)
+{
+    struct constraint_system *cs = s->cs;
 
     /* ════ Section 27: nf computation (21006) ════
      * nf = BLAKE2s-256("Zcash_nf", repr(nk) || repr(rho)) — the SAME gadget as
@@ -696,19 +828,46 @@ bool sapling_spend_synthesize_traced(struct constraint_system *cs,
      * initial state vector. */
     struct cbit nf_pre[512];
     for (size_t i = 0; i < 512; i++)
-        nf_pre[i] = cbit_from_var(cs, nf_pre_bits[i]);
+        nf_pre[i] = cbit_from_var(cs, s->nf_pre_bits[i]);
 
     static const uint8_t PRF_NF_PERSONALIZATION[8] =
         { 'Z', 'c', 'a', 's', 'h', '_', 'n', 'f' };
-    struct cbit nf_bits[256];
-    if (!gadget_blake2s(cs, nf_pre, 512, PRF_NF_PERSONALIZATION, nf_bits)) {
+    if (!gadget_blake2s(cs, nf_pre, 512, PRF_NF_PERSONALIZATION, s->nf_bits)) {
         memory_cleanse(nf_pre, sizeof(nf_pre));
-        LOG_FAIL("circuit_spend",
-                 "spend: in-circuit blake2s(PRF^nf) synthesis failed");
+        LOG_ERROR_IN("sapling_spend_synthesize_traced", "circuit_spend",
+                     "spend: in-circuit blake2s(PRF^nf) synthesis failed");
+        return false;
     }
     memory_cleanse(nf_pre, sizeof(nf_pre));
-    section_record(cs, sections, max_sections, &nsec, "27:nf computation");
+    spend_record(s, "27:nf computation");
+    return true;
+}
 
+/* One packing constraint for nf chunk `chunk` covering `n` bits from `bit`. */
+static void spend_pack_chunk(struct spend_synth *s, size_t input,
+                             size_t bit, size_t n)
+{
+    struct fr one_val;
+    fr_one(&one_val);
+    struct linear_combination la, lb, lcc;
+    struct fr coeff;
+    lc_init(&la);
+    fr_one(&coeff);
+    for (size_t i = 0; i < n; i++) {
+        cbit_lc_add(&la, s->nf_bits[bit + i], &coeff);
+        fr_add(&coeff, &coeff, &coeff);
+    }
+    lc_init(&lb);
+    lc_add_term(&lb, CS_ONE, &one_val);
+    lc_init(&lcc);
+    lc_add_term(&lcc, input, &one_val);
+    cs_enforce(s->cs, &la, &lb, &lcc);
+    lc_free(&la); lc_free(&lb); lc_free(&lcc);
+}
+
+/* Section 28: pack nullifier. */
+static bool spend_step_pack(struct spend_synth *s)
+{
     /* ════ Section 28: pack nullifier (2) ════
      * multipack::pack_into_inputs — the 256 nf bits little-endian in chunks of
      * Fr::CAPACITY = 254, one packing constraint per chunk (254 + 2 bits).
@@ -716,38 +875,55 @@ bool sapling_spend_synthesize_traced(struct constraint_system *cs,
      * C = the public input (the mirror of `inputize`, which puts the input in
      * A). The two inputs were allocated up front so their INDICES match
      * bellman's allocation order; only the constraints land here. */
-    {
-        const size_t nf_input[2] = { in_nf0, in_nf1 };
-        struct fr one_val;
-        fr_one(&one_val);
-        for (size_t chunk = 0, bit = 0; bit < 256; chunk++) {
-            if (chunk >= 2)
-                LOG_FAIL("circuit_spend",
+    const size_t nf_input[2] = { s->in_nf0, s->in_nf1 };
+    for (size_t chunk = 0, bit = 0; bit < 256; chunk++) {
+        if (chunk >= 2) {
+            LOG_ERROR_IN("sapling_spend_synthesize_traced", "circuit_spend",
                          "spend: section 28 wants >2 nf chunks (capacity=%u)",
                          (unsigned)CBIT_FR_CAPACITY);
-            const size_t n = (256 - bit < CBIT_FR_CAPACITY)
-                           ? 256 - bit : CBIT_FR_CAPACITY;
-            struct linear_combination la, lb, lcc;
-            struct fr coeff;
-            lc_init(&la);
-            fr_one(&coeff);
-            for (size_t i = 0; i < n; i++) {
-                cbit_lc_add(&la, nf_bits[bit + i], &coeff);
-                fr_add(&coeff, &coeff, &coeff);
-            }
-            lc_init(&lb);
-            lc_add_term(&lb, CS_ONE, &one_val);
-            lc_init(&lcc);
-            lc_add_term(&lcc, nf_input[chunk], &one_val);
-            cs_enforce(cs, &la, &lb, &lcc);
-            lc_free(&la); lc_free(&lb); lc_free(&lcc);
-            bit += n;
+            return false;
         }
+        const size_t n = (256 - bit < CBIT_FR_CAPACITY)
+                       ? 256 - bit : CBIT_FR_CAPACITY;
+        spend_pack_chunk(s, nf_input[chunk], bit, n);
+        bit += n;
     }
-    section_record(cs, sections, max_sections, &nsec, "28:pack nullifier");
+    spend_record(s, "28:pack nullifier");
+    return true;
+}
+
+typedef bool (*spend_step_fn)(struct spend_synth *s);
+
+/* The synthesis steps, in circuit order. */
+static const spend_step_fn spend_steps[] = {
+    spend_step_inputs, spend_step_rk,   spend_step_nk,     spend_step_ivk,
+    spend_step_pkd,    spend_step_note, spend_step_cm,     spend_step_anchor,
+    spend_step_rho,    spend_step_nf,   spend_step_pack,
+};
+
+bool sapling_spend_synthesize_traced(struct constraint_system *cs,
+                                     const struct sapling_spend_witness *wit,
+                                     const struct sapling_spend_inputs *pub,
+                                     struct spend_section_shape *sections,
+                                     size_t max_sections,
+                                     size_t *n_sections_out,
+                                     struct spend_wire_probe *probe)
+{
+    if (n_sections_out)
+        *n_sections_out = 0;
+    probe_reset(probe);
+
+    struct spend_synth s = {
+        .cs = cs, .wit = wit, .pub = pub, .sections = sections,
+        .max_sections = max_sections, .probe = probe,
+    };
+    for (size_t i = 0; i < sizeof(spend_steps) / sizeof(spend_steps[0]); i++) {
+        if (!spend_steps[i](&s))
+            return false;
+    }
 
     if (n_sections_out)
-        *n_sections_out = nsec;
+        *n_sections_out = s.nsec;
     return true;
 }
 

@@ -409,17 +409,65 @@ bool fr_fft(struct fr *coeffs, size_t n, bool inverse)
 
 /* ── Multi-scalar multiplication (Pippenger's) ──────────────────── */
 
+/* Window size: c ≈ log2(n), clamped to [4, 16] */
+static unsigned int msm_window_bits(size_t n)
+{
+    unsigned int c = 1;
+    { size_t v = n; while (v > 1) { c++; v >>= 1; } }
+    if (c > 16) c = 16;
+    if (c < 4 && n > 16) c = 4;
+    return c;
+}
+
+/* The c-bit digit of one raw scalar at bit_offset (0 when past the top word). */
+static uint64_t msm_window_digit(const uint64_t raw[4], unsigned int bit_offset,
+                                 unsigned int c)
+{
+    unsigned int word = bit_offset / 64;
+    unsigned int bit = bit_offset % 64;
+    if (word >= 4) return 0;
+    uint64_t val = raw[word] >> bit;
+    if (bit + c > 64 && word + 1 < 4)
+        val |= raw[word + 1] << (64 - bit);
+    val &= ((uint64_t)1 << c) - 1;
+    return val;
+}
+
+static void g1_msm_reduce_buckets(struct g1_point *window_sum,
+                                  const struct g1_point *buckets,
+                                  size_t num_buckets)
+{
+    struct g1_point running_sum;
+    g1_identity(&running_sum);
+    g1_identity(window_sum);
+    for (size_t b = num_buckets; b > 0; b--) {
+        g1_add(&running_sum, &running_sum, &buckets[b - 1]);
+        g1_add(window_sum, window_sum, &running_sum);
+    }
+}
+
+static void g2_msm_reduce_buckets(struct g2_point *window_sum,
+                                  const struct g2_point *buckets,
+                                  size_t num_buckets)
+{
+    struct g2_point running_sum;
+    g2_identity(&running_sum);
+    g2_identity(window_sum);
+    size_t remaining = num_buckets;
+    while (remaining > 0) {
+        remaining--;
+        g2_add(&running_sum, &running_sum, &buckets[remaining]);
+        g2_add(window_sum, window_sum, &running_sum);
+    }
+}
+
 void g1_msm(struct g1_point *result,
             const struct g1_point *points, const struct fr *scalars,
             size_t n)
 {
     if (n == 0) { g1_identity(result); return; }
 
-    /* Window size: c ≈ log2(n), clamped to [4, 16] */
-    unsigned int c = 1;
-    { size_t v = n; while (v > 1) { c++; v >>= 1; } }
-    if (c > 16) c = 16;
-    if (c < 4 && n > 16) c = 4;
+    unsigned int c = msm_window_bits(n);
 
     size_t num_buckets = ((size_t)1 << c) - 1;
     struct g1_point *buckets = zcl_calloc(num_buckets, sizeof(struct g1_point), "g1_msm_buckets");
@@ -443,24 +491,13 @@ void g1_msm(struct g1_point *result,
 
         unsigned int bit_offset = (unsigned int)w * c;
         for (size_t i = 0; i < n; i++) {
-            unsigned int word = bit_offset / 64;
-            unsigned int bit = bit_offset % 64;
-            if (word >= 4) continue;
-            uint64_t val = raw_scalars[i][word] >> bit;
-            if (bit + c > 64 && word + 1 < 4)
-                val |= raw_scalars[i][word + 1] << (64 - bit);
-            val &= ((uint64_t)1 << c) - 1;
+            uint64_t val = msm_window_digit(raw_scalars[i], bit_offset, c);
             if (val == 0) continue;
             g1_add(&buckets[val - 1], &buckets[val - 1], &points[i]);
         }
 
-        struct g1_point running_sum, window_sum;
-        g1_identity(&running_sum);
-        g1_identity(&window_sum);
-        for (size_t b = num_buckets; b > 0; b--) {
-            g1_add(&running_sum, &running_sum, &buckets[b - 1]);
-            g1_add(&window_sum, &window_sum, &running_sum);
-        }
+        struct g1_point window_sum;
+        g1_msm_reduce_buckets(&window_sum, buckets, num_buckets);
         g1_add(result, result, &window_sum);
     }
 
@@ -475,10 +512,7 @@ void g2_msm(struct g2_point *result,
 {
     if (n == 0) { g2_identity(result); return; }
 
-    unsigned int c = 1;
-    { size_t v = n; while (v > 1) { c++; v >>= 1; } }
-    if (c > 16) c = 16;
-    if (c < 4 && n > 16) c = 4;
+    unsigned int c = msm_window_bits(n);
 
     size_t num_buckets = ((size_t)1 << c) - 1;
     struct g2_point *buckets = zcl_calloc(num_buckets, sizeof(struct g2_point), "g2_msm_buckets");
@@ -502,24 +536,13 @@ void g2_msm(struct g2_point *result,
 
         unsigned int bit_offset = (unsigned int)w * c;
         for (size_t i = 0; i < n; i++) {
-            unsigned int word = bit_offset / 64;
-            unsigned int bit = bit_offset % 64;
-            if (word >= 4) continue;
-            uint64_t val = raw_scalars[i][word] >> bit;
-            if (bit + c > 64 && word + 1 < 4)
-                val |= raw_scalars[i][word + 1] << (64 - bit);
-            val &= ((uint64_t)1 << c) - 1;
+            uint64_t val = msm_window_digit(raw_scalars[i], bit_offset, c);
             if (val == 0) continue;
             g2_add(&buckets[val - 1], &buckets[val - 1], &points[i]);
         }
 
-        struct g2_point running_sum, window_sum;
-        g2_identity(&running_sum);
-        g2_identity(&window_sum);
-        for (size_t b = num_buckets; b > 0; b--) {
-            g2_add(&running_sum, &running_sum, &buckets[b - 1]);
-            g2_add(&window_sum, &window_sum, &running_sum);
-        }
+        struct g2_point window_sum;
+        g2_msm_reduce_buckets(&window_sum, buckets, num_buckets);
         g2_add(result, result, &window_sum);
     }
 
@@ -637,24 +660,34 @@ static struct g2_point *pkr_g2_array(struct pk_reader *r, uint32_t count)
     return arr;
 }
 
-bool groth16_pk_read(struct groth16_pk *pk, const uint8_t *data, size_t len)
+/* Reads the VK section and the IC array of the proving key. */
+static bool groth16_pk_read_vk_ic(struct groth16_pk *pk, struct pk_reader *r)
 {
-    memset(pk, 0, sizeof(*pk));
-    struct pk_reader r = { data, len, 0 };
-
     /* Read VK */
-    if (!pkr_g1(&r, &pk->alpha_g1))
-        LOG_FAIL("groth16_pk", "pk_read: alpha_g1 parse failed");
-    if (!pkr_g1(&r, &pk->beta_g1))
-        LOG_FAIL("groth16_pk", "pk_read: beta_g1 parse failed");
-    if (!pkr_g2(&r, &pk->beta_g2))
-        LOG_FAIL("groth16_pk", "pk_read: beta_g2 parse failed");
-    if (!pkr_g2(&r, &pk->gamma_g2))
-        LOG_FAIL("groth16_pk", "pk_read: gamma_g2 parse failed");
-    if (!pkr_g1(&r, &pk->delta_g1))
-        LOG_FAIL("groth16_pk", "pk_read: delta_g1 parse failed");
-    if (!pkr_g2(&r, &pk->delta_g2))
-        LOG_FAIL("groth16_pk", "pk_read: delta_g2 parse failed");
+    if (!pkr_g1(r, &pk->alpha_g1)) {
+        LOG_ERROR_IN("groth16_pk_read", "groth16_pk", "pk_read: alpha_g1 parse failed");
+        return false;
+    }
+    if (!pkr_g1(r, &pk->beta_g1)) {
+        LOG_ERROR_IN("groth16_pk_read", "groth16_pk", "pk_read: beta_g1 parse failed");
+        return false;
+    }
+    if (!pkr_g2(r, &pk->beta_g2)) {
+        LOG_ERROR_IN("groth16_pk_read", "groth16_pk", "pk_read: beta_g2 parse failed");
+        return false;
+    }
+    if (!pkr_g2(r, &pk->gamma_g2)) {
+        LOG_ERROR_IN("groth16_pk_read", "groth16_pk", "pk_read: gamma_g2 parse failed");
+        return false;
+    }
+    if (!pkr_g1(r, &pk->delta_g1)) {
+        LOG_ERROR_IN("groth16_pk_read", "groth16_pk", "pk_read: delta_g1 parse failed");
+        return false;
+    }
+    if (!pkr_g2(r, &pk->delta_g2)) {
+        LOG_ERROR_IN("groth16_pk_read", "groth16_pk", "pk_read: delta_g2 parse failed");
+        return false;
+    }
 
     /* Copy to VK struct for verification */
     pk->vk.alpha_g1 = pk->alpha_g1;
@@ -664,15 +697,28 @@ bool groth16_pk_read(struct groth16_pk *pk, const uint8_t *data, size_t len)
 
     /* IC points */
     uint32_t ic_len;
-    if (!pkr_u32_be(&r, &ic_len))
-        LOG_FAIL("groth16_pk", "pk_read: ic_len u32 parse failed");
+    if (!pkr_u32_be(r, &ic_len)) {
+        LOG_ERROR_IN("groth16_pk_read", "groth16_pk", "pk_read: ic_len u32 parse failed");
+        return false;
+    }
     pk->vk.ic_len = ic_len;
     pk->num_inputs = ic_len - 1;
-    pk->vk.ic = pkr_g1_array(&r, ic_len);
+    pk->vk.ic = pkr_g1_array(r, ic_len);
     if (!pk->vk.ic) {
         groth16_pk_free(pk);
-        LOG_FAIL("groth16_pk", "pk_read: ic[] parse failed (ic_len=%u)", ic_len);
+        LOG_ERROR_IN("groth16_pk_read", "groth16_pk", "pk_read: ic[] parse failed (ic_len=%u)", ic_len);
+        return false;
     }
+    return true;
+}
+
+bool groth16_pk_read(struct groth16_pk *pk, const uint8_t *data, size_t len)
+{
+    memset(pk, 0, sizeof(*pk));
+    struct pk_reader r = { data, len, 0 };
+
+    if (!groth16_pk_read_vk_ic(pk, &r))
+        return false;
 
     /* H query */
     uint32_t h_len;
@@ -779,6 +825,416 @@ void groth16_pk_free(struct groth16_pk *pk)
  *   r, s are random blinding scalars
  *   h(x) = (A(x)*B(x) - C(x)) / z_H(x) is the quotient polynomial */
 
+/* Per-proof compacted query state: density maps, their totals and the
+ * compacted witness scalars. */
+struct groth16_prove_dense {
+    bool *a_aux_dense;
+    bool *b_in_dense;
+    bool *b_aux_dense;
+    size_t a_aux_total;
+    size_t b_in_total;
+    size_t b_aux_total;
+    struct fr *a_aux_w;
+    struct fr *b_in_w;
+    struct fr *b_aux_w;
+};
+
+/* Domain size: smallest power of 2 >= n_rows (EvaluationDomain::from_coeffs). */
+static size_t groth16_prove_domain_for_rows(size_t n_rows)
+{
+    size_t domain = 1;
+    while (domain < n_rows)
+        domain <<= 1;
+
+    /* test hook: force a non-pow-2 domain to exercise the fr_fft
+     * failure-propagation path. Never set outside tests. */
+    if (g_force_domain)
+        domain = g_force_domain;
+    return domain;
+}
+
+static bool groth16_prove_draw_blinds(struct fr *r_blind, struct fr *s_blind)
+{
+    uint8_t rb[32];
+    if (!groth16_blind_bytes(rb, 32, "groth16_r_blind"))
+        return false;
+    fr_from_bytes(r_blind, rb);
+    if (!groth16_blind_bytes(rb, 32, "groth16_s_blind")) {
+        memory_cleanse(rb, 32);
+        return false;
+    }
+    fr_from_bytes(s_blind, rb);
+    memory_cleanse(rb, 32);
+    return true;
+}
+
+static bool groth16_prove_alloc_abc(size_t domain, struct fr **a_eval,
+                                    struct fr **b_eval, struct fr **c_eval)
+{
+    *a_eval = zcl_calloc(domain, sizeof(struct fr), "groth16_a_eval");
+    *b_eval = zcl_calloc(domain, sizeof(struct fr), "groth16_b_eval");
+    *c_eval = zcl_calloc(domain, sizeof(struct fr), "groth16_c_eval");
+    if (!*a_eval || !*b_eval || !*c_eval) {
+        free(*a_eval); free(*b_eval); free(*c_eval);
+        return false;
+    }
+    return true;
+}
+
+static void groth16_prove_fill_abc(const struct constraint_system *cs,
+                                   struct fr *a_eval, struct fr *b_eval,
+                                   struct fr *c_eval, size_t domain,
+                                   size_t num_in)
+{
+    size_t n_con = cs->num_constraints;
+    for (size_t i = 0; i < n_con; i++) {
+        lc_evaluate(&a_eval[i], &cs->constraints[i].a, cs->witness);
+        lc_evaluate(&b_eval[i], &cs->constraints[i].b, cs->witness);
+        lc_evaluate(&c_eval[i], &cs->constraints[i].c, cs->witness);
+    }
+    /* The appended `Input(i) * 0 = 0` rows: A = w[i], B = C = 0. */
+    for (size_t i = 0; i < num_in && n_con + i < domain; i++)
+        a_eval[n_con + i] = cs->witness[i];
+}
+
+static bool groth16_prove_fft_abc(struct fr *a_eval, struct fr *b_eval,
+                                  struct fr *c_eval, size_t domain, bool inverse)
+{
+    return fr_fft(a_eval, domain, inverse) &&
+           fr_fft(b_eval, domain, inverse) &&
+           fr_fft(c_eval, domain, inverse);
+}
+
+/* Failure tail shared by the fft failure paths: scrub and free the evaluation
+ * buffers (h_eval may be NULL), zero proof_out and scrub the blinding factors. */
+static void groth16_prove_abort_eval(struct fr *a_eval, struct fr *b_eval,
+                                     struct fr *c_eval, struct fr *h_eval,
+                                     size_t domain,
+                                     struct groth16_proof *proof_out,
+                                     struct fr *r_blind, struct fr *s_blind)
+{
+    memory_cleanse(a_eval, domain * sizeof(struct fr));
+    memory_cleanse(b_eval, domain * sizeof(struct fr));
+    memory_cleanse(c_eval, domain * sizeof(struct fr));
+    if (h_eval)
+        memory_cleanse(h_eval, domain * sizeof(struct fr));
+    free(a_eval); free(b_eval); free(c_eval);
+    if (h_eval)
+        free(h_eval);
+    memset(proof_out, 0, sizeof(*proof_out));
+    memory_cleanse(r_blind, sizeof(*r_blind));
+    memory_cleanse(s_blind, sizeof(*s_blind));
+}
+
+/* Failure tail once only h_eval is live: scrub and free it, zero proof_out and
+ * scrub the blinding factors. */
+static void groth16_prove_abort_h(struct fr *h_eval, size_t domain,
+                                  struct groth16_proof *proof_out,
+                                  struct fr *r_blind, struct fr *s_blind)
+{
+    memory_cleanse(h_eval, domain * sizeof(struct fr));
+    free(h_eval);
+    memset(proof_out, 0, sizeof(*proof_out));
+    memory_cleanse(r_blind, sizeof(*r_blind));
+    memory_cleanse(s_blind, sizeof(*s_blind));
+}
+
+static void groth16_prove_coset_generator(struct fr *g_coset)
+{
+    uint8_t g_bytes[32] = {0};
+    g_bytes[0] = 7; /* Fr multiplicative generator = 7 (little-endian) */
+    fr_from_bytes(g_coset, g_bytes);
+}
+
+static void groth16_prove_coset_shift(struct fr *a_eval, struct fr *b_eval,
+                                      struct fr *c_eval, size_t domain,
+                                      const struct fr *g_coset)
+{
+    struct fr g_pow;
+    fr_one(&g_pow);
+    for (size_t i = 0; i < domain; i++) {
+        fr_mul(&a_eval[i], &a_eval[i], &g_pow);
+        fr_mul(&b_eval[i], &b_eval[i], &g_pow);
+        fr_mul(&c_eval[i], &c_eval[i], &g_pow);
+        fr_mul(&g_pow, &g_pow, g_coset);
+    }
+}
+
+static void groth16_prove_release_abc(struct fr *a_eval, struct fr *b_eval,
+                                      struct fr *c_eval, size_t domain)
+{
+    memory_cleanse(a_eval, domain * sizeof(struct fr));
+    memory_cleanse(b_eval, domain * sizeof(struct fr));
+    memory_cleanse(c_eval, domain * sizeof(struct fr));
+    free(a_eval);
+    free(b_eval);
+    free(c_eval);
+}
+
+static void groth16_prove_h_pointwise(struct fr *h_eval, const struct fr *a_eval,
+                                      const struct fr *b_eval,
+                                      const struct fr *c_eval, size_t domain)
+{
+    for (size_t i = 0; i < domain; i++) {
+        struct fr ab;
+        fr_mul(&ab, &a_eval[i], &b_eval[i]);
+        fr_sub(&h_eval[i], &ab, &c_eval[i]);
+    }
+}
+
+static void groth16_prove_h_divide_zh(struct fr *h_eval, size_t domain,
+                                      const struct fr *g_coset)
+{
+    struct fr z_h_coset;
+    fr_pow_u64(&z_h_coset, g_coset, (uint64_t)domain);
+    struct fr one_val;
+    fr_one(&one_val);
+    fr_sub(&z_h_coset, &z_h_coset, &one_val);
+    struct fr z_h_inv;
+    fr_inv(&z_h_inv, &z_h_coset);
+    for (size_t i = 0; i < domain; i++)
+        fr_mul(&h_eval[i], &h_eval[i], &z_h_inv);
+}
+
+static void groth16_prove_h_unshift(struct fr *h_eval, size_t domain,
+                                    const struct fr *g_coset)
+{
+    struct fr g_inv;
+    fr_inv(&g_inv, g_coset);
+    struct fr g_inv_pow;
+    fr_one(&g_inv_pow);
+    for (size_t i = 0; i < domain; i++) {
+        fr_mul(&h_eval[i], &h_eval[i], &g_inv_pow);
+        fr_mul(&g_inv_pow, &g_inv_pow, &g_inv);
+    }
+}
+
+static bool groth16_prove_alloc_dense(struct groth16_prove_dense *d,
+                                      size_t num_in, size_t num_aux)
+{
+    d->a_aux_dense = zcl_calloc(num_aux ? num_aux : 1, 1, "groth16_a_dense");
+    d->b_in_dense  = zcl_calloc(num_in ? num_in : 1, 1, "groth16_b_in_dense");
+    d->b_aux_dense = zcl_calloc(num_aux ? num_aux : 1, 1, "groth16_b_dense");
+    if (!d->a_aux_dense || !d->b_in_dense || !d->b_aux_dense) {
+        free(d->a_aux_dense); free(d->b_in_dense); free(d->b_aux_dense);
+        return false;
+    }
+    return true;
+}
+
+static void groth16_prove_mark_dense(const struct constraint_system *cs,
+                                     struct groth16_prove_dense *d,
+                                     size_t num_in, size_t num_aux)
+{
+    size_t n_con = cs->num_constraints;
+    for (size_t i = 0; i < n_con; i++) {
+        const struct linear_combination *la = &cs->constraints[i].a;
+        for (size_t t = 0; t < la->num_terms; t++) {
+            size_t v = la->terms[t].var;
+            if (v >= num_in && v - num_in < num_aux)
+                d->a_aux_dense[v - num_in] = true;
+        }
+        const struct linear_combination *lb = &cs->constraints[i].b;
+        for (size_t t = 0; t < lb->num_terms; t++) {
+            size_t v = lb->terms[t].var;
+            if (v < num_in)
+                d->b_in_dense[v] = true;
+            else if (v - num_in < num_aux)
+                d->b_aux_dense[v - num_in] = true;
+        }
+    }
+}
+
+static void groth16_prove_count_dense(struct groth16_prove_dense *d,
+                                      size_t num_in, size_t num_aux)
+{
+    size_t a_aux_total = 0, b_in_total = 0, b_aux_total = 0;
+    for (size_t i = 0; i < num_aux; i++) {
+        if (d->a_aux_dense[i]) a_aux_total++;
+        if (d->b_aux_dense[i]) b_aux_total++;
+    }
+    for (size_t i = 0; i < num_in; i++)
+        if (d->b_in_dense[i]) b_in_total++;
+    d->a_aux_total = a_aux_total;
+    d->b_in_total = b_in_total;
+    d->b_aux_total = b_aux_total;
+}
+
+static void groth16_prove_free_dense(struct groth16_prove_dense *d)
+{
+    free(d->a_aux_dense);
+    free(d->b_in_dense);
+    free(d->b_aux_dense);
+}
+
+/* True when the proving key has the query shape this circuit generates. */
+static bool groth16_prove_key_shape_ok(const struct groth16_pk *pk, size_t l,
+                                       size_t num_in, size_t num_aux,
+                                       size_t domain,
+                                       const struct groth16_prove_dense *d)
+{
+    return !(pk->num_inputs != l || pk->l_len != num_aux ||
+             pk->h_len != domain - 1 ||
+             pk->a_len != num_in + d->a_aux_total ||
+             pk->b_len != d->b_in_total + d->b_aux_total);
+}
+
+static bool groth16_prove_alloc_compact(struct groth16_prove_dense *d)
+{
+    d->a_aux_w = zcl_calloc(d->a_aux_total ? d->a_aux_total : 1,
+                            sizeof(struct fr), "groth16_a_aux_w");
+    d->b_in_w  = zcl_calloc(d->b_in_total ? d->b_in_total : 1,
+                            sizeof(struct fr), "groth16_b_in_w");
+    d->b_aux_w = zcl_calloc(d->b_aux_total ? d->b_aux_total : 1,
+                            sizeof(struct fr), "groth16_b_aux_w");
+    if (!d->a_aux_w || !d->b_in_w || !d->b_aux_w) {
+        free(d->a_aux_w); free(d->b_in_w); free(d->b_aux_w);
+        return false;
+    }
+    return true;
+}
+
+static void groth16_prove_fill_compact(const struct constraint_system *cs,
+                                       struct groth16_prove_dense *d,
+                                       size_t num_in, size_t num_aux)
+{
+    size_t ka = 0, kb = 0;
+    for (size_t i = 0; i < num_aux; i++) {
+        if (d->a_aux_dense[i]) d->a_aux_w[ka++] = cs->witness[num_in + i];
+        if (d->b_aux_dense[i]) d->b_aux_w[kb++] = cs->witness[num_in + i];
+    }
+    size_t ki = 0;
+    for (size_t i = 0; i < num_in; i++)
+        if (d->b_in_dense[i]) d->b_in_w[ki++] = cs->witness[i];
+}
+
+/* ── Step 3: Compute proof element A ── */
+static void groth16_prove_element_a(struct g1_point *A,
+                                    const struct groth16_pk *pk,
+                                    const struct constraint_system *cs,
+                                    size_t num_in,
+                                    const struct groth16_prove_dense *d,
+                                    const struct fr *r_blind)
+{
+    /* A = alpha + sum(w[i] * a_g1[i]) + r * delta_g1 */
+    struct g1_point a_aux_sum;
+    g1_msm(A, pk->a_g1, cs->witness, num_in);
+    g1_msm(&a_aux_sum, pk->a_g1 + num_in, d->a_aux_w, d->a_aux_total);
+    g1_add(A, A, &a_aux_sum);
+    g1_add(A, A, &pk->alpha_g1);
+
+    uint64_t r_raw[4];
+    fr_to_raw(r_raw, r_blind);
+    struct g1_point r_delta;
+    g1_scalar_mul(&r_delta, &pk->delta_g1, r_raw);
+    g1_add(A, A, &r_delta);
+}
+
+/* ── Step 4: Compute proof element B (G2) ── */
+static void groth16_prove_element_b_g2(struct g2_point *B_g2,
+                                       const struct groth16_pk *pk,
+                                       const struct groth16_prove_dense *d,
+                                       const struct fr *s_blind)
+{
+    struct g2_point b_aux_sum;
+    g2_msm(B_g2, pk->b_g2, d->b_in_w, d->b_in_total);
+    g2_msm(&b_aux_sum, pk->b_g2 + d->b_in_total, d->b_aux_w, d->b_aux_total);
+    g2_add(B_g2, B_g2, &b_aux_sum);
+    g2_add(B_g2, B_g2, &pk->beta_g2);
+
+    /* + s * delta_g2 */
+    /* (need g2_scalar_mul — use MSM with 1 point as workaround) */
+    struct g2_point s_delta;
+    g2_msm(&s_delta, &pk->delta_g2, s_blind, 1);
+    g2_add(B_g2, B_g2, &s_delta);
+}
+
+/* ── Step 5: Compute B_g1 (needed for C) ── */
+static void groth16_prove_element_b_g1(struct g1_point *B_g1,
+                                       const struct groth16_pk *pk,
+                                       const struct groth16_prove_dense *d,
+                                       const struct fr *s_blind)
+{
+    struct g1_point b_aux_sum;
+    g1_msm(B_g1, pk->b_g1, d->b_in_w, d->b_in_total);
+    g1_msm(&b_aux_sum, pk->b_g1 + d->b_in_total, d->b_aux_w, d->b_aux_total);
+    g1_add(B_g1, B_g1, &b_aux_sum);
+    g1_add(B_g1, B_g1, &pk->beta_g1);
+
+    uint64_t s_raw[4];
+    fr_to_raw(s_raw, s_blind);
+    struct g1_point s_delta;
+    g1_scalar_mul(&s_delta, &pk->delta_g1, s_raw);
+    g1_add(B_g1, B_g1, &s_delta);
+}
+
+/* ── Step 6: Compute proof element C ── */
+static void groth16_prove_element_c(struct g1_point *C,
+                                    const struct groth16_pk *pk,
+                                    const struct constraint_system *cs,
+                                    size_t num_in, size_t num_aux, size_t domain,
+                                    const struct fr *h_eval,
+                                    const struct g1_point *A,
+                                    const struct g1_point *B_g1,
+                                    const struct fr *r_blind,
+                                    const struct fr *s_blind)
+{
+    /* H polynomial contribution: sum(h[i] * h_g1[i]) */
+    size_t h_msm_len = domain - 1;
+    if (h_msm_len > pk->h_len) h_msm_len = pk->h_len;
+    struct g1_point H_contrib;
+    g1_msm(&H_contrib, pk->h_g1, h_eval, h_msm_len);
+
+    /* Private variable contribution: sum(w[num_in..m] * l_g1[i]). The L
+     * query is FullDensity by construction — the setup rejects a key with
+     * an unconstrained variable — so it is indexed by aux number directly. */
+    struct g1_point L_contrib;
+    g1_msm(&L_contrib, pk->l_g1, &cs->witness[num_in], num_aux);
+
+    g1_add(C, &H_contrib, &L_contrib);
+
+    /* Blinding: + s*A */
+    {
+        uint64_t s_raw[4];
+        fr_to_raw(s_raw, s_blind);
+        struct g1_point sA;
+        g1_scalar_mul(&sA, A, s_raw);
+        g1_add(C, C, &sA);
+    }
+
+    /* + r*B_g1 */
+    {
+        uint64_t r_raw[4];
+        fr_to_raw(r_raw, r_blind);
+        struct g1_point rB;
+        g1_scalar_mul(&rB, B_g1, r_raw);
+        g1_add(C, C, &rB);
+    }
+
+    /* - r*s*delta_g1 */
+    {
+        struct fr rs;
+        fr_mul(&rs, r_blind, s_blind);
+        uint64_t rs_raw[4];
+        fr_to_raw(rs_raw, &rs);
+        struct g1_point rs_delta;
+        g1_scalar_mul(&rs_delta, &pk->delta_g1, rs_raw);
+        struct g1_point neg_rs_delta;
+        g1_neg(&neg_rs_delta, &rs_delta);
+        g1_add(C, C, &neg_rs_delta);
+    }
+}
+
+static void groth16_prove_release_compact(struct groth16_prove_dense *d)
+{
+    memory_cleanse(d->a_aux_w, (d->a_aux_total ? d->a_aux_total : 1) * sizeof(struct fr));
+    memory_cleanse(d->b_in_w, (d->b_in_total ? d->b_in_total : 1) * sizeof(struct fr));
+    memory_cleanse(d->b_aux_w, (d->b_aux_total ? d->b_aux_total : 1) * sizeof(struct fr));
+    free(d->a_aux_w);
+    free(d->b_in_w);
+    free(d->b_aux_w);
+}
+
 bool groth16_prove(const struct groth16_pk *pk,
                    const struct constraint_system *cs,
                    struct groth16_proof *proof_out)
@@ -810,50 +1266,22 @@ bool groth16_prove(const struct groth16_pk *pk,
      * every QAP polynomial. */
     size_t n_rows = n_con + num_in;
 
-    /* Domain size: smallest power of 2 >= n_rows (EvaluationDomain::from_coeffs). */
-    size_t domain = 1;
-    while (domain < n_rows)
-        domain <<= 1;
-
-    /* test hook: force a non-pow-2 domain to exercise the fr_fft
-     * failure-propagation path. Never set outside tests. */
-    if (g_force_domain)
-        domain = g_force_domain;
+    size_t domain = groth16_prove_domain_for_rows(n_rows);
 
     /* Generate random blinding factors */
     struct fr r_blind, s_blind;
-    {
-        uint8_t rb[32];
-        if (!groth16_blind_bytes(rb, 32, "groth16_r_blind"))
-            return false;
-        fr_from_bytes(&r_blind, rb);
-        if (!groth16_blind_bytes(rb, 32, "groth16_s_blind")) {
-            memory_cleanse(rb, 32);
-            return false;
-        }
-        fr_from_bytes(&s_blind, rb);
-        memory_cleanse(rb, 32);
-    }
+    if (!groth16_prove_draw_blinds(&r_blind, &s_blind))
+        return false;
 
     /* ── Step 1: Evaluate constraints to get a[], b[], c[] coefficient vectors ── */
-    struct fr *a_eval = zcl_calloc(domain, sizeof(struct fr), "groth16_a_eval");
-    struct fr *b_eval = zcl_calloc(domain, sizeof(struct fr), "groth16_b_eval");
-    struct fr *c_eval = zcl_calloc(domain, sizeof(struct fr), "groth16_c_eval");
-    if (!a_eval || !b_eval || !c_eval) {
-        free(a_eval); free(b_eval); free(c_eval);
+    struct fr *a_eval, *b_eval, *c_eval;
+    if (!groth16_prove_alloc_abc(domain, &a_eval, &b_eval, &c_eval)) {
         LOG_FAIL("groth16",
                  "prove: OOM allocating a/b/c eval buffers (domain=%zu x 3 x %zu)",
                  domain, sizeof(struct fr));
     }
 
-    for (size_t i = 0; i < n_con; i++) {
-        lc_evaluate(&a_eval[i], &cs->constraints[i].a, cs->witness);
-        lc_evaluate(&b_eval[i], &cs->constraints[i].b, cs->witness);
-        lc_evaluate(&c_eval[i], &cs->constraints[i].c, cs->witness);
-    }
-    /* The appended `Input(i) * 0 = 0` rows: A = w[i], B = C = 0. */
-    for (size_t i = 0; i < num_in && n_con + i < domain; i++)
-        a_eval[n_con + i] = cs->witness[i];
+    groth16_prove_fill_abc(cs, a_eval, b_eval, c_eval, domain, num_in);
 
     /* ── Step 2: Compute h(x) = (a(x)*b(x) - c(x)) / z_H(x) via coset FFT ──
      *
@@ -861,16 +1289,9 @@ bool groth16_prove(const struct groth16_pk *pk,
      * bellman interpolates first (ifft) and only then evaluates on the coset
      * (distribute powers of g, then fft). Skipping the ifft coset-evaluates the
      * wrong polynomial and yields an h that no verifier accepts. */
-    if (!fr_fft(a_eval, domain, true) ||
-        !fr_fft(b_eval, domain, true) ||
-        !fr_fft(c_eval, domain, true)) {
-        memory_cleanse(a_eval, domain * sizeof(struct fr));
-        memory_cleanse(b_eval, domain * sizeof(struct fr));
-        memory_cleanse(c_eval, domain * sizeof(struct fr));
-        free(a_eval); free(b_eval); free(c_eval);
-        memset(proof_out, 0, sizeof(*proof_out));
-        memory_cleanse(&r_blind, sizeof(r_blind));
-        memory_cleanse(&s_blind, sizeof(s_blind));
+    if (!groth16_prove_fft_abc(a_eval, b_eval, c_eval, domain, true)) {
+        groth16_prove_abort_eval(a_eval, b_eval, c_eval, NULL, domain,
+                                 proof_out, &r_blind, &s_blind);
         LOG_FAIL("groth16",
                  "prove: interpolating fr_fft failed on a/b/c_eval "
                  "(domain=%zu); proof_out zeroed", domain);
@@ -880,23 +1301,10 @@ bool groth16_prove(const struct groth16_pk *pk,
      * Multiply coefficients by g^i to shift evaluation to coset {g*ω^i}.
      * z_H(g*ω^i) = (g*ω^i)^domain - 1 = g^domain - 1 ≠ 0 on the coset. */
     struct fr g_coset;
-    {
-        uint8_t g_bytes[32] = {0};
-        g_bytes[0] = 7; /* Fr multiplicative generator = 7 (little-endian) */
-        fr_from_bytes(&g_coset, g_bytes);
-    }
+    groth16_prove_coset_generator(&g_coset);
 
     /* Apply coset shift: coeff[i] *= g^i */
-    {
-        struct fr g_pow;
-        fr_one(&g_pow);
-        for (size_t i = 0; i < domain; i++) {
-            fr_mul(&a_eval[i], &a_eval[i], &g_pow);
-            fr_mul(&b_eval[i], &b_eval[i], &g_pow);
-            fr_mul(&c_eval[i], &c_eval[i], &g_pow);
-            fr_mul(&g_pow, &g_pow, &g_coset);
-        }
-    }
+    groth16_prove_coset_shift(a_eval, b_eval, c_eval, domain, &g_coset);
 
     /* FFT → evaluations at coset points g*ω^i.
      * fr_fft refuses non-pow-2 domains (returns false). Silent-
@@ -904,16 +1312,9 @@ bool groth16_prove(const struct groth16_pk *pk,
      * computed from un-transformed coefficients do not satisfy the
      * Groth16 verifier's pairing check, and the prover would still
      * return true. Bail immediately, free buffers, zero proof_out. */
-    if (!fr_fft(a_eval, domain, false) ||
-        !fr_fft(b_eval, domain, false) ||
-        !fr_fft(c_eval, domain, false)) {
-        memory_cleanse(a_eval, domain * sizeof(struct fr));
-        memory_cleanse(b_eval, domain * sizeof(struct fr));
-        memory_cleanse(c_eval, domain * sizeof(struct fr));
-        free(a_eval); free(b_eval); free(c_eval);
-        memset(proof_out, 0, sizeof(*proof_out));
-        memory_cleanse(&r_blind, sizeof(r_blind));
-        memory_cleanse(&s_blind, sizeof(s_blind));
+    if (!groth16_prove_fft_abc(a_eval, b_eval, c_eval, domain, false)) {
+        groth16_prove_abort_eval(a_eval, b_eval, c_eval, NULL, domain,
+                                 proof_out, &r_blind, &s_blind);
         LOG_FAIL("groth16",
                  "prove: forward fr_fft failed on a/b/c_eval "
                  "(domain=%zu); proof_out zeroed", domain);
@@ -922,33 +1323,16 @@ bool groth16_prove(const struct groth16_pk *pk,
     /* Compute (a*b - c) pointwise on coset */
     struct fr *h_eval = zcl_calloc(domain, sizeof(struct fr), "groth16_h_eval");
     if (!h_eval) {
-        memory_cleanse(a_eval, domain * sizeof(struct fr));
-        memory_cleanse(b_eval, domain * sizeof(struct fr));
-        memory_cleanse(c_eval, domain * sizeof(struct fr));
-        free(a_eval); free(b_eval); free(c_eval);
+        groth16_prove_release_abc(a_eval, b_eval, c_eval, domain);
         LOG_FAIL("groth16",
                  "prove: OOM allocating h eval buffer (domain=%zu x %zu)",
                  domain, sizeof(struct fr));
     }
 
-    for (size_t i = 0; i < domain; i++) {
-        struct fr ab;
-        fr_mul(&ab, &a_eval[i], &b_eval[i]);
-        fr_sub(&h_eval[i], &ab, &c_eval[i]);
-    }
+    groth16_prove_h_pointwise(h_eval, a_eval, b_eval, c_eval, domain);
 
     /* Divide by z_H on coset: z_H(g*ω^i) = g^domain - 1 (constant) */
-    {
-        struct fr z_h_coset;
-        fr_pow_u64(&z_h_coset, &g_coset, (uint64_t)domain);
-        struct fr one_val;
-        fr_one(&one_val);
-        fr_sub(&z_h_coset, &z_h_coset, &one_val);
-        struct fr z_h_inv;
-        fr_inv(&z_h_inv, &z_h_coset);
-        for (size_t i = 0; i < domain; i++)
-            fr_mul(&h_eval[i], &h_eval[i], &z_h_inv);
-    }
+    groth16_prove_h_divide_zh(h_eval, domain, &g_coset);
 
     /* IFFT back to coefficient form.
      * same refuse-on-non-pow-2 contract. If we reached here the
@@ -956,37 +1340,17 @@ bool groth16_prove(const struct groth16_pk *pk,
      * anomalous — but the guard is cheap and keeps the call sites
      * symmetric. */
     if (!fr_fft(h_eval, domain, true)) {
-        memory_cleanse(a_eval, domain * sizeof(struct fr));
-        memory_cleanse(b_eval, domain * sizeof(struct fr));
-        memory_cleanse(c_eval, domain * sizeof(struct fr));
-        memory_cleanse(h_eval, domain * sizeof(struct fr));
-        free(a_eval); free(b_eval); free(c_eval); free(h_eval);
-        memset(proof_out, 0, sizeof(*proof_out));
-        memory_cleanse(&r_blind, sizeof(r_blind));
-        memory_cleanse(&s_blind, sizeof(s_blind));
+        groth16_prove_abort_eval(a_eval, b_eval, c_eval, h_eval, domain,
+                                 proof_out, &r_blind, &s_blind);
         LOG_FAIL("groth16",
                  "prove: inverse fr_fft failed on h_eval "
                  "(domain=%zu); proof_out zeroed", domain);
     }
 
     /* Undo coset shift: coeff[i] *= g^{-i} */
-    {
-        struct fr g_inv;
-        fr_inv(&g_inv, &g_coset);
-        struct fr g_inv_pow;
-        fr_one(&g_inv_pow);
-        for (size_t i = 0; i < domain; i++) {
-            fr_mul(&h_eval[i], &h_eval[i], &g_inv_pow);
-            fr_mul(&g_inv_pow, &g_inv_pow, &g_inv);
-        }
-    }
+    groth16_prove_h_unshift(h_eval, domain, &g_coset);
 
-    memory_cleanse(a_eval, domain * sizeof(struct fr));
-    memory_cleanse(b_eval, domain * sizeof(struct fr));
-    memory_cleanse(c_eval, domain * sizeof(struct fr));
-    free(a_eval);
-    free(b_eval);
-    free(c_eval);
+    groth16_prove_release_abc(a_eval, b_eval, c_eval, domain);
 
     /* ── Step 2b: query densities ──
      *
@@ -997,200 +1361,54 @@ bool groth16_prove(const struct groth16_pk *pk,
      * wrong group elements. Density is syntactic appearance in a linear
      * combination (bellman's DensityTracker::inc / KeypairAssembly's per-
      * variable term list), not "has a nonzero summed coefficient". */
-    bool *a_aux_dense = zcl_calloc(num_aux ? num_aux : 1, 1, "groth16_a_dense");
-    bool *b_in_dense  = zcl_calloc(num_in ? num_in : 1, 1, "groth16_b_in_dense");
-    bool *b_aux_dense = zcl_calloc(num_aux ? num_aux : 1, 1, "groth16_b_dense");
-    if (!a_aux_dense || !b_in_dense || !b_aux_dense) {
-        free(a_aux_dense); free(b_in_dense); free(b_aux_dense);
-        memory_cleanse(h_eval, domain * sizeof(struct fr));
-        free(h_eval);
-        memset(proof_out, 0, sizeof(*proof_out));
-        memory_cleanse(&r_blind, sizeof(r_blind));
-        memory_cleanse(&s_blind, sizeof(s_blind));
+    struct groth16_prove_dense dense;
+    if (!groth16_prove_alloc_dense(&dense, num_in, num_aux)) {
+        groth16_prove_abort_h(h_eval, domain, proof_out, &r_blind, &s_blind);
         LOG_FAIL("groth16", "prove: OOM allocating density maps (aux=%zu)",
                  num_aux);
     }
-    for (size_t i = 0; i < n_con; i++) {
-        const struct linear_combination *la = &cs->constraints[i].a;
-        for (size_t t = 0; t < la->num_terms; t++) {
-            size_t v = la->terms[t].var;
-            if (v >= num_in && v - num_in < num_aux)
-                a_aux_dense[v - num_in] = true;
-        }
-        const struct linear_combination *lb = &cs->constraints[i].b;
-        for (size_t t = 0; t < lb->num_terms; t++) {
-            size_t v = lb->terms[t].var;
-            if (v < num_in)
-                b_in_dense[v] = true;
-            else if (v - num_in < num_aux)
-                b_aux_dense[v - num_in] = true;
-        }
-    }
-    size_t a_aux_total = 0, b_in_total = 0, b_aux_total = 0;
-    for (size_t i = 0; i < num_aux; i++) {
-        if (a_aux_dense[i]) a_aux_total++;
-        if (b_aux_dense[i]) b_aux_total++;
-    }
-    for (size_t i = 0; i < num_in; i++)
-        if (b_in_dense[i]) b_in_total++;
+    groth16_prove_mark_dense(cs, &dense, num_in, num_aux);
+    groth16_prove_count_dense(&dense, num_in, num_aux);
 
     /* Refuse rather than emit a proof against a key whose query shape is not
      * the one this circuit generates — that is a silent wrong-circuit proof. */
-    if (pk->num_inputs != l || pk->l_len != num_aux ||
-        pk->h_len != domain - 1 ||
-        pk->a_len != num_in + a_aux_total ||
-        pk->b_len != b_in_total + b_aux_total) {
-        free(a_aux_dense); free(b_in_dense); free(b_aux_dense);
-        memory_cleanse(h_eval, domain * sizeof(struct fr));
-        free(h_eval);
-        memset(proof_out, 0, sizeof(*proof_out));
-        memory_cleanse(&r_blind, sizeof(r_blind));
-        memory_cleanse(&s_blind, sizeof(s_blind));
+    if (!groth16_prove_key_shape_ok(pk, l, num_in, num_aux, domain, &dense)) {
+        groth16_prove_free_dense(&dense);
+        groth16_prove_abort_h(h_eval, domain, proof_out, &r_blind, &s_blind);
         LOG_FAIL("groth16",
                  "prove: proving-key shape does not match this circuit — "
                  "key(inputs=%zu l=%zu h=%zu a=%zu b=%zu) vs "
                  "circuit(inputs=%zu aux=%zu h=%zu a=%zu b=%zu)",
                  pk->num_inputs, pk->l_len, pk->h_len, pk->a_len, pk->b_len,
                  l, num_aux, domain - 1,
-                 num_in + a_aux_total, b_in_total + b_aux_total);
+                 num_in + dense.a_aux_total,
+                 dense.b_in_total + dense.b_aux_total);
     }
 
-    struct fr *a_aux_w = zcl_calloc(a_aux_total ? a_aux_total : 1,
-                                    sizeof(struct fr), "groth16_a_aux_w");
-    struct fr *b_in_w  = zcl_calloc(b_in_total ? b_in_total : 1,
-                                    sizeof(struct fr), "groth16_b_in_w");
-    struct fr *b_aux_w = zcl_calloc(b_aux_total ? b_aux_total : 1,
-                                    sizeof(struct fr), "groth16_b_aux_w");
-    if (!a_aux_w || !b_in_w || !b_aux_w) {
-        free(a_aux_w); free(b_in_w); free(b_aux_w);
-        free(a_aux_dense); free(b_in_dense); free(b_aux_dense);
-        memory_cleanse(h_eval, domain * sizeof(struct fr));
-        free(h_eval);
-        memset(proof_out, 0, sizeof(*proof_out));
-        memory_cleanse(&r_blind, sizeof(r_blind));
-        memory_cleanse(&s_blind, sizeof(s_blind));
+    if (!groth16_prove_alloc_compact(&dense)) {
+        groth16_prove_free_dense(&dense);
+        groth16_prove_abort_h(h_eval, domain, proof_out, &r_blind, &s_blind);
         LOG_FAIL("groth16", "prove: OOM allocating compacted query scalars");
     }
-    {
-        size_t ka = 0, kb = 0;
-        for (size_t i = 0; i < num_aux; i++) {
-            if (a_aux_dense[i]) a_aux_w[ka++] = cs->witness[num_in + i];
-            if (b_aux_dense[i]) b_aux_w[kb++] = cs->witness[num_in + i];
-        }
-        size_t ki = 0;
-        for (size_t i = 0; i < num_in; i++)
-            if (b_in_dense[i]) b_in_w[ki++] = cs->witness[i];
-    }
-    free(a_aux_dense);
-    free(b_in_dense);
-    free(b_aux_dense);
+    groth16_prove_fill_compact(cs, &dense, num_in, num_aux);
+    groth16_prove_free_dense(&dense);
 
-    /* ── Step 3: Compute proof element A ── */
     struct g1_point A;
-    {
-        /* A = alpha + sum(w[i] * a_g1[i]) + r * delta_g1 */
-        struct g1_point a_aux_sum;
-        g1_msm(&A, pk->a_g1, cs->witness, num_in);
-        g1_msm(&a_aux_sum, pk->a_g1 + num_in, a_aux_w, a_aux_total);
-        g1_add(&A, &A, &a_aux_sum);
-        g1_add(&A, &A, &pk->alpha_g1);
+    groth16_prove_element_a(&A, pk, cs, num_in, &dense, &r_blind);
 
-        uint64_t r_raw[4];
-        fr_to_raw(r_raw, &r_blind);
-        struct g1_point r_delta;
-        g1_scalar_mul(&r_delta, &pk->delta_g1, r_raw);
-        g1_add(&A, &A, &r_delta);
-    }
-
-    /* ── Step 4: Compute proof element B (G2) ── */
     struct g2_point B_g2;
-    {
-        struct g2_point b_aux_sum;
-        g2_msm(&B_g2, pk->b_g2, b_in_w, b_in_total);
-        g2_msm(&b_aux_sum, pk->b_g2 + b_in_total, b_aux_w, b_aux_total);
-        g2_add(&B_g2, &B_g2, &b_aux_sum);
-        g2_add(&B_g2, &B_g2, &pk->beta_g2);
+    groth16_prove_element_b_g2(&B_g2, pk, &dense, &s_blind);
 
-        /* + s * delta_g2 */
-        /* (need g2_scalar_mul — use MSM with 1 point as workaround) */
-        struct g2_point s_delta;
-        g2_msm(&s_delta, &pk->delta_g2, &s_blind, 1);
-        g2_add(&B_g2, &B_g2, &s_delta);
-    }
-
-    /* ── Step 5: Compute B_g1 (needed for C) ── */
     struct g1_point B_g1;
-    {
-        struct g1_point b_aux_sum;
-        g1_msm(&B_g1, pk->b_g1, b_in_w, b_in_total);
-        g1_msm(&b_aux_sum, pk->b_g1 + b_in_total, b_aux_w, b_aux_total);
-        g1_add(&B_g1, &B_g1, &b_aux_sum);
-        g1_add(&B_g1, &B_g1, &pk->beta_g1);
+    groth16_prove_element_b_g1(&B_g1, pk, &dense, &s_blind);
 
-        uint64_t s_raw[4];
-        fr_to_raw(s_raw, &s_blind);
-        struct g1_point s_delta;
-        g1_scalar_mul(&s_delta, &pk->delta_g1, s_raw);
-        g1_add(&B_g1, &B_g1, &s_delta);
-    }
-
-    /* ── Step 6: Compute proof element C ── */
     struct g1_point C;
-    {
-        /* H polynomial contribution: sum(h[i] * h_g1[i]) */
-        size_t h_msm_len = domain - 1;
-        if (h_msm_len > pk->h_len) h_msm_len = pk->h_len;
-        struct g1_point H_contrib;
-        g1_msm(&H_contrib, pk->h_g1, h_eval, h_msm_len);
-
-        /* Private variable contribution: sum(w[num_in..m] * l_g1[i]). The L
-         * query is FullDensity by construction — the setup rejects a key with
-         * an unconstrained variable — so it is indexed by aux number directly. */
-        struct g1_point L_contrib;
-        g1_msm(&L_contrib, pk->l_g1, &cs->witness[num_in], num_aux);
-
-        g1_add(&C, &H_contrib, &L_contrib);
-
-        /* Blinding: + s*A */
-        {
-            uint64_t s_raw[4];
-            fr_to_raw(s_raw, &s_blind);
-            struct g1_point sA;
-            g1_scalar_mul(&sA, &A, s_raw);
-            g1_add(&C, &C, &sA);
-        }
-
-        /* + r*B_g1 */
-        {
-            uint64_t r_raw[4];
-            fr_to_raw(r_raw, &r_blind);
-            struct g1_point rB;
-            g1_scalar_mul(&rB, &B_g1, r_raw);
-            g1_add(&C, &C, &rB);
-        }
-
-        /* - r*s*delta_g1 */
-        {
-            struct fr rs;
-            fr_mul(&rs, &r_blind, &s_blind);
-            uint64_t rs_raw[4];
-            fr_to_raw(rs_raw, &rs);
-            struct g1_point rs_delta;
-            g1_scalar_mul(&rs_delta, &pk->delta_g1, rs_raw);
-            struct g1_point neg_rs_delta;
-            g1_neg(&neg_rs_delta, &rs_delta);
-            g1_add(&C, &C, &neg_rs_delta);
-        }
-    }
+    groth16_prove_element_c(&C, pk, cs, num_in, num_aux, domain, h_eval, &A,
+                            &B_g1, &r_blind, &s_blind);
 
     memory_cleanse(h_eval, domain * sizeof(struct fr));
     free(h_eval);
-    memory_cleanse(a_aux_w, (a_aux_total ? a_aux_total : 1) * sizeof(struct fr));
-    memory_cleanse(b_in_w, (b_in_total ? b_in_total : 1) * sizeof(struct fr));
-    memory_cleanse(b_aux_w, (b_aux_total ? b_aux_total : 1) * sizeof(struct fr));
-    free(a_aux_w);
-    free(b_in_w);
-    free(b_aux_w);
+    groth16_prove_release_compact(&dense);
 
     proof_out->a = A;
     proof_out->b = B_g2;

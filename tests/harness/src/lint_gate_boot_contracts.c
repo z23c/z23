@@ -641,7 +641,6 @@ int t_flyclient_proof_builder_is_callback_injected(void)
         ASSERT(repo_path(path, sizeof(path),
                          "core/modules/net/src/msgprocessor_snapshot.c") == 0);
         ASSERT(read_entire_file(path, &buf) == 0);
-        ASSERT(strstr(buf, "mp->flyclient_proof") != NULL);
         ASSERT(strstr(buf, "net/snapshot_sync_contract.h") != NULL);
         ASSERT(strstr(buf, "msg_snapshot_sync(") != NULL);
         ASSERT(strstr(buf, "msg_snapshot_sync_ensure") != NULL);
@@ -658,6 +657,14 @@ int t_flyclient_proof_builder_is_callback_injected(void)
         ASSERT(strstr(buf, "models/database.h") == NULL);
         ASSERT(strstr(buf, "services/chain_state_service.h") == NULL);
         ASSERT(strstr(buf, "services/" "snapshot_sync_" "service.h") == NULL);
+        free(buf);
+        buf = NULL;
+        /* The FlyClient proof builder is injected into the receiver-side
+         * zfcchallenge handler, which lives in msgprocessor_snapshot_receive.c. */
+        ASSERT(repo_path(path, sizeof(path),
+                         "core/modules/net/src/msgprocessor_snapshot_receive.c") == 0);
+        ASSERT(read_entire_file(path, &buf) == 0);
+        ASSERT(strstr(buf, "mp->flyclient_proof") != NULL);
         free(buf);
         buf = NULL;
         /* The only caller of mp->block_hashes_range is the zblkreq SERVE handler

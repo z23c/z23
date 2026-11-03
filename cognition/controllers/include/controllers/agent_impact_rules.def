@@ -300,7 +300,7 @@ AGENT_IMPACT_RULE("core/modules/net/src/fast_sync*.c|core/modules/net/include/ne
 AGENT_IMPACT_RULE("core/modules/net/src/puzzle.c|core/modules/net/include/net/puzzle.h|tests/harness/src/test_puzzle.c", "puzzle net file_service_pow_gate snapshot_sync_service make_lint_gates")
 AGENT_IMPACT_RULE("core/modules/net/src/file_service_handshake.c|core/modules/net/src/file_service_private_chunk.c|tests/harness/src/test_file_service_session.c", "file_service_session file_market make_lint_gates")
 AGENT_IMPACT_RULE("core/modules/net/src/onion_service.c|core/modules/net/include/net/onion_service.h|core/modules/net/src/onion_ratelimit.c|core/modules/net/include/net/onion_ratelimit.h", "net onion_bootstrap tor make_lint_gates")
-AGENT_IMPACT_RULE("core/modules/net/src/rom_fetch.c|core/modules/net/src/rom_fetch_directory.c|core/modules/net/src/rom_fetch_session.c|core/modules/net/src/rom_fetch_transport.c|core/modules/net/src/rom_fetch_transport.h|core/modules/net/src/rom_fetch_status.c|core/modules/net/src/rom_fetch_internal.h|core/modules/net/include/net/rom_fetch.h|tests/harness/src/test_rom_fetch.c|tests/harness/src/test_rom_fetch_onion.c|engine/controllers/src/rom_fetch_controller.c", "rom_fetch rom_fetch_onion rom_manifest rom_journal_resume file_controller source_bundle_fetch make_lint_gates")
+AGENT_IMPACT_RULE("core/modules/net/src/rom_fetch.c|core/modules/net/src/rom_fetch_directory.c|core/modules/net/src/rom_fetch_manifest.c|core/modules/net/src/rom_fetch_session.c|core/modules/net/src/rom_fetch_transport.c|core/modules/net/src/rom_fetch_transport.h|core/modules/net/src/rom_fetch_status.c|core/modules/net/src/rom_fetch_internal.h|core/modules/net/include/net/rom_fetch.h|tests/harness/src/test_rom_fetch.c|tests/harness/src/test_rom_fetch_onion.c|engine/controllers/src/rom_fetch_controller.c", "rom_fetch rom_fetch_onion rom_manifest rom_journal_resume file_controller source_bundle_fetch make_lint_gates")
 AGENT_IMPACT_RULE("core/modules/net/src/rom_seed.c|core/modules/net/src/rom_seed_classify.c|core/modules/net/src/rom_seed_throttle.c|core/modules/net/src/rom_seed_report.c|core/modules/net/src/rom_seed_internal.h|core/modules/net/include/net/rom_seed.h|tests/harness/src/test_rom_seed.c|engine/controllers/src/rom_seed_controller.c", "rom_seed rom_manifest file_controller source_bundle_fetch source_bundle_publish make_lint_gates")
 /* Identity-free source retrieval rides the ROM artifact transport, so its own
  * group AND the ROM groups are the honest impact set: a change to either half
@@ -556,6 +556,7 @@ AGENT_IMPACT_RULE("core/modules/net/src/msgprocessor_snapshot_pow.c", "net snaps
  * calls the msgprocessor_test_fc_rate_acquire / _dropped /
  * _should_score / _reset surface defined here by name. */
 AGENT_IMPACT_RULE("core/modules/net/src/msgprocessor_snapshot_fcrate.c", "net make_lint_gates")
+AGENT_IMPACT_RULE("core/modules/net/src/msgprocessor_snapshot_receive.c", "snapshot_sync_service peer_snapshot_conditions net snapshot_serve_loopback make_lint_gates")
 /* The one seam through which core/modules/net reaches the composition root: node_db
  * handle, snapshot-sync service, and the two snapshot-serving trust
  * predicates. Touching it moves the P2P serving gate, so it pulls the

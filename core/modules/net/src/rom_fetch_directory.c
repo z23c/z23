@@ -20,6 +20,8 @@
 #include "rom_fetch_transport.h"
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
+#include "encoding/utilstrencodings.h"
+#include "json/json.h"
 #include "platform/socket_compat.h"
 #include "platform/time_compat.h"
 #include "support/cleanse.h"
@@ -211,3 +213,83 @@ bool rom_fetch_get_directory(const char *peer_addr, uint16_t port,
              size, peer_addr, (unsigned)port);
     return true;
 }
+
+/* ── Directory.json parsing (moved from rom_fetch.c; pure, no I/O) ──── */
+
+/* Parse one hex digest field: exactly 64 hex chars → 32 bytes. */
+static bool rf_parse_digest(const struct json_value *obj, const char *key,
+                            uint8_t out[32])
+{
+    const char *hex = json_get_str(json_get(obj, key));
+    if (!hex || strlen(hex) != 64)
+        return false;
+    return ParseHex(hex, out, 32) == 32;
+}
+
+/* Parse one directory.json artifact entry into *m; false = skip the entry. */
+static bool rf_parse_dir_entry(const struct json_value *e,
+                               struct rom_fetch_manifest *m)
+{
+    /* directory.json entries carry digests + layout, no filename. */
+    if (!rf_parse_digest(e, "digest", m->chunk_root) ||
+        !rf_parse_digest(e, "whole_sha3", m->whole_sha3))
+        return false;
+    int64_t size = json_get_int(json_get(e, "size"));
+    int64_t csize = json_get_int(json_get(e, "chunk_size"));
+    int64_t chunks = json_get_int(json_get(e, "chunks"));
+    if (size <= 0 || csize <= 0 || chunks <= 0)
+        return false;
+    m->size_bytes = (uint64_t)size;
+    m->chunk_size = (uint32_t)csize;
+    m->num_chunks = (uint32_t)chunks;
+    /* "kind", "height" and "source_root" are OPTIONAL untrusted peer
+     * claims, outside manifest_sane's trust check on purpose: the first
+     * two steer the picker, source_root only lets a caller FIND a bundle
+     * before re-proving it. Detail is on struct rom_fetch_manifest. */
+    m->kind = rom_seed_kind_from_name(json_get_str(json_get(e, "kind")));
+    int64_t height = json_get_int(json_get(e, "height"));
+    m->height = height > 0 ? height : 0;
+    m->has_source_root = rf_parse_digest(e, "source_root", m->source_root);
+    return rom_fetch_manifest_sane(m);
+}
+
+int rom_fetch_parse_directory(const char *json_body,
+                              struct rom_fetch_manifest *out, size_t max)
+{
+    if (!json_body || !out || max == 0)
+        return -1;
+    if (max > ROM_FETCH_MAX_ARTIFACTS)
+        max = ROM_FETCH_MAX_ARTIFACTS;
+
+    struct json_value doc;
+    json_init(&doc);
+    if (!json_read(&doc, json_body, strlen(json_body)) ||
+        doc.type != JSON_OBJ) {
+        json_free(&doc);
+        return -1;
+    }
+
+    const struct json_value *arts = json_get(&doc, "artifacts");
+    if (!arts || arts->type != JSON_ARR) {
+        json_free(&doc);
+        return 0; /* no artifacts advertised — not an error */
+    }
+
+    int n = 0;
+    for (size_t i = 0; i < arts->num_children && (size_t)n < max; i++) {
+        const struct json_value *e = json_at(arts, i);
+        if (!e || e->type != JSON_OBJ)
+            continue;
+
+        struct rom_fetch_manifest m;
+        memset(&m, 0, sizeof(m));
+        if (!rf_parse_dir_entry(e, &m))
+            continue;
+        m.used = true;
+        out[n++] = m;
+    }
+
+    json_free(&doc);
+    return n;
+}
+
