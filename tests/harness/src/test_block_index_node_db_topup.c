@@ -397,20 +397,30 @@ static bool ndt_range_capture(struct main_state *ms, struct node_db *ndb,
 {
     char path[320];
     snprintf(path, sizeof(path), "%s/stdout_capture.txt", dir);
+    line[0] = '\0';
     fflush(stdout);
     int saved = dup(1);
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (saved < 0 || fd < 0)
+    if (saved < 0)
         return false;
-    dup2(fd, 1);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        close(saved);
+        return false;
+    }
+    if (dup2(fd, 1) < 0) {
+        close(fd);
+        close(saved);
+        return false;
+    }
     close(fd);
     g_node_db_topup_perheight_oracle = oracle;
     bool ok = block_index_node_db_topup_with(ms, ndb, progress, dir);
     g_node_db_topup_perheight_oracle = false;
     fflush(stdout);
-    dup2(saved, 1);
+    bool restored = dup2(saved, 1) >= 0;
     close(saved);
-    line[0] = '\0';
+    if (!restored)
+        return false;
     FILE *fp = fopen(path, "r");
     if (fp) {
         while (fgets(line, (int)line_cap, fp) &&
@@ -955,7 +965,7 @@ static int ndt_clean_prefix_cases(const char *dir)
             ndt_insert_entry(&b, NDT_CLEAN_SEED) &&
             ndt_insert_entry(&c, NDT_CLEAN_SEED);
     const size_t window = NDT_CLEAN_BEST - NDT_CLEAN_SEED;
-    size_t r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0, ro = 0;
+    size_t r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0, r6 = 0, ro = 0;
     if (ready) {
         /* Cold: inserts the window (not a no-op, so no mark yet). */
         NDT_CHECK("clean: cold fold ok",
@@ -994,13 +1004,20 @@ static int ndt_clean_prefix_cases(const char *dir)
         /* A node.db row the mark never saw forces the whole window too. */
         NDT_CHECK("clean: refold records the mark again",
                   ndt_clean_topup(&c, &ndb, progress, dir, false, &r4));
-        sqlite3_exec(ndb.db,
-                     "UPDATE blocks SET status=2 WHERE height=6000",
-                     NULL, NULL, NULL);
+        NDT_CHECK("clean: row 6000 de-connected",
+                  sqlite3_exec(ndb.db,
+                               "UPDATE blocks SET status=2 WHERE height=6000",
+                               NULL, NULL, NULL) == SQLITE_OK);
         NDT_CHECK("clean: changed row count fold ok",
                   ndt_clean_topup(&c, &ndb, progress, dir, false, &r5));
         NDT_CHECK("clean: changed row count read the whole window",
                   r5 == window - 1);
+        /* The fold above missed row 6000, so it must record no mark: the
+         * next fold over the same map reads the whole window again. */
+        NDT_CHECK("clean: fold after a missed row ok",
+                  ndt_clean_topup(&c, &ndb, progress, dir, false, &r6));
+        NDT_CHECK("clean: fold after a missed row read the whole window",
+                  r6 == window - 1);
     }
     main_state_free(&a);
     main_state_free(&b);
