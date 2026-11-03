@@ -1078,10 +1078,13 @@ void boot_mint_anchor_rom_keystone_assert(struct sqlite3 *pdb,
 /* Read-only producer-marker/lane refusal before node.db, wallet, or progress.kv
  * is opened for writing. */
 bool boot_mint_anchor_normal_boot_preflight(const char *datadir);
-/* Test seam (POSIX): `hook` runs with stage "copied" after the preflight has
- * copied the database family and before it re-checks the source files, so a
- * test can change a source file at exactly that point. Pass NULL to clear. */
+#ifdef ZCL_TESTING
+/* Test seam (POSIX, test builds only): `hook` runs with stage "copied" after
+ * the preflight has copied the database family and before it re-checks the
+ * source files, so a test can change a source file at exactly that point.
+ * Pass NULL to clear. Release builds have no seam to set. */
 void boot_mint_anchor_preflight_stage_hook_for_test(void (*hook)(const char *stage, void *ctx), void *ctx);
+#endif
 bool boot_mint_anchor_normal_boot_gate(struct sqlite3 *progress_db);
 void boot_mint_anchor_require_producer_lane(struct sqlite3 *progress_db,
                                             bool checkpoint_fold);

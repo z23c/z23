@@ -409,10 +409,12 @@ bool boot_mint_anchor_normal_boot_preflight(const char *datadir) {
     (void)projection_present;
     return ok;
 }
+#ifdef ZCL_TESTING
 void boot_mint_anchor_preflight_stage_hook_for_test(void (*hook)(const char *stage, void *ctx), void *ctx) {
     (void)hook;
     (void)ctx;
 }
+#endif
 bool boot_mint_anchor_preflight_dump_state_json(struct json_value *out, const char *key) {
     (void)out;
     (void)key;
@@ -466,6 +468,7 @@ static const char *preflight_temp_base(void) {
     return (base && base[0] == '/') ? base : "/tmp";
 }
 
+#ifdef ZCL_TESTING
 static void (*g_preflight_stage_hook)(const char *stage, void *ctx);
 static void *g_preflight_stage_hook_ctx;
 
@@ -478,6 +481,12 @@ static void preflight_stage_hook(const char *stage) {
     if (g_preflight_stage_hook)
         g_preflight_stage_hook(stage, g_preflight_stage_hook_ctx);
 }
+#else
+/* Release builds carry no settable seam. */
+static void preflight_stage_hook(const char *stage) {
+    (void)stage;
+}
+#endif
 
 /* Name the first stat field that differs, or NULL when identical. */
 static const char *identity_diff_field(const struct stat *a, const struct stat *b) {

@@ -528,6 +528,7 @@ static bool map_refused_with(const char *dir, const char *needle)
            !strstr(text, "could not be proven stable");
 }
 
+#ifdef ZCL_TESTING
 static void map_touch_wal_hook(const char *stage, void *ctx)
 {
     const char *dir = ctx;
@@ -537,6 +538,7 @@ static void map_touch_wal_hook(const char *stage, void *ctx)
     if (strcmp(stage, "copied") == 0)
         (void)utimensat(AT_FDCWD, path, times, 0);
 }
+#endif
 
 /* The silent refusal on r5: every false path of the copy path must name its
  * stage instead of the generic "could not be proven stable" text. */
@@ -565,10 +567,12 @@ static int map_failure_reasons(const char *dir)
     free(saved);
     (void)unlink(not_a_dir);
 
+#ifdef ZCL_TESTING
     boot_mint_anchor_preflight_stage_hook_for_test(map_touch_wal_hook, (void *)dir);
     MAP_CHECK("reasons: source changed during the copy names field and file",
               map_refused_with(dir, "source_changed stage=copy field=mtime file=consensus.db-wal"));
     boot_mint_anchor_preflight_stage_hook_for_test(NULL, NULL);
+#endif
     return failures;
 }
 
