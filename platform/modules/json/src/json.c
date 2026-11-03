@@ -425,13 +425,21 @@ static size_t json_write_number(const struct json_value *v, char *buf, size_t ca
     return json_write_literal(tmp, (size_t)n, buf, cap);
 }
 
+/* The write cursor for a child. A sizing probe (buf == NULL, cap == 0) or a
+ * position past cap yields NULL: forming buf + pos from a NULL buffer is UB
+ * even though the callee never writes through it. */
+static char *json_cursor(char *buf, size_t pos, size_t cap)
+{
+    return buf != NULL && pos < cap ? buf + pos : NULL;
+}
+
 static size_t json_write_array(const struct json_value *v, char *buf, size_t cap)
 {
     size_t pos = 0;
     if (pos < cap) { buf[pos] = '['; } pos++;
     for (size_t i = 0; i < v->num_children; i++) {
         if (i > 0) { if (pos < cap) buf[pos] = ','; pos++; }
-        pos += json_write(&v->children[i], buf + pos, cap > pos ? cap - pos : 0);
+        pos += json_write(&v->children[i], json_cursor(buf, pos, cap), cap > pos ? cap - pos : 0);
     }
     if (pos < cap) { buf[pos] = ']'; } pos++;
     return pos;
@@ -443,10 +451,10 @@ static size_t json_write_object(const struct json_value *v, char *buf, size_t ca
     if (pos < cap) { buf[pos] = '{'; } pos++;
     for (size_t i = 0; i < v->num_children; i++) {
         if (i > 0) { if (pos < cap) buf[pos] = ','; pos++; }
-        pos += json_escape_str(v->keys[i] ? v->keys[i] : "", buf + pos,
+        pos += json_escape_str(v->keys[i] ? v->keys[i] : "", json_cursor(buf, pos, cap),
                                cap > pos ? cap - pos : 0);
         if (pos < cap) { buf[pos] = ':'; } pos++;
-        pos += json_write(&v->children[i], buf + pos, cap > pos ? cap - pos : 0);
+        pos += json_write(&v->children[i], json_cursor(buf, pos, cap), cap > pos ? cap - pos : 0);
     }
     if (pos < cap) { buf[pos] = '}'; } pos++;
     return pos;
