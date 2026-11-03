@@ -1310,7 +1310,7 @@ Z23_FLAG("ZCL_JOURNEY_SCRATCH", "env_build", "-", "-",
 Z23_FLAG("ZCL_JOURNEY_SEED_REF", "env_build", "-", "-",
           "undocumented; first use tools/dev/landed-journey-bench.sh:auto")
 Z23_FLAG("ZCL_JSONQ", "env_build", "-", "-",
-          "undocumented; first use tools/dev/retrieval-eval-selftest.sh:auto")
+          "undocumented; first use tests/harness/src/test_retrieval_eval_selftest.c:auto")
 Z23_FLAG("ZCL_K9_DB", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_kill9_recovery.c:auto")
 Z23_FLAG("ZCL_K9_DIR", "env_test", "-", "-",
@@ -2064,7 +2064,7 @@ Z23_FLAG("ZCL_RETRIEVAL_BENCH_Z23", "env_build", "-", "-",
 Z23_FLAG("ZCL_RETRIEVAL_CAPTURE_Z23", "env_build", "-", "-",
           "undocumented; first use tools/dev/retrieval-gold-benchmark.sh:auto")
 Z23_FLAG("ZCL_RETRIEVAL_EVAL", "env_build", "-", "-",
-          "undocumented; first use tools/dev/retrieval-eval-selftest.sh:auto")
+          "undocumented; first use tests/harness/src/test_retrieval_eval_selftest.c:auto")
 Z23_FLAG("ZCL_RETRIEVAL_GOLD_CHECK", "env_build", "-", "-",
           "undocumented; first use tools/dev/retrieval-gold-benchmark.sh:auto")
 Z23_FLAG("ZCL_RETRIEVAL_GOLD_CORPUS", "env_build", "-", "-",

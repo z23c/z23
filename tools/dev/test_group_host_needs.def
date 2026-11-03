@@ -362,6 +362,13 @@ ZCL_TEST_GROUP_BUILD_NEED("test_cli_argv_strict", "build/bin/zcl-rpc",
 ZCL_TEST_GROUP_BUILD_NEED("test_importblockindex_cli_dispatch",
                           "build/bin/zclassic23", "zclassic23")
 
+/* tests/harness/src/test_retrieval_eval_selftest.c runs the strict batch
+ * adapter and the jsonq reader it uses to read each evaluator document. */
+ZCL_TEST_GROUP_BUILD_NEED("test_retrieval_eval_selftest",
+                          "build/bin/retrieval-eval", "retrieval-eval")
+ZCL_TEST_GROUP_BUILD_NEED("test_retrieval_eval_selftest",
+                          "build/bin/jsonq", "jsonq")
+
 /* tests/harness/src/test_wallet_e2e_regtest.c drives the built z23 as a real
  * regtest node and self-skips where it is absent. */
 ZCL_TEST_GROUP_BUILD_NEED("test_wallet_e2e_regtest", "build/bin/z23", "z23")

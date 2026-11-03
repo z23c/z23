@@ -9497,7 +9497,7 @@ check-retrieval-historical-evidence: jsonq agent-sha3 retrieval-eval \
 	@./tools/dev/retrieval-gold-identifier-graph-receipt-check.sh --check
 
 retrieval-eval-selftest: retrieval-eval jsonq
-	@./tools/dev/retrieval-eval-selftest.sh
+	@$(MAKE) --no-print-directory t-fast-exact ONLY=retrieval_eval_selftest
 
 retrieval-profile-sweep-check: retrieval-eval jsonq agent-sha3
 	@./tools/dev/retrieval-profile-sweep.sh --check

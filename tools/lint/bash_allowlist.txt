@@ -115,7 +115,6 @@ tools/dev/reflex-hotfork-watch-core-acceptance.sh
 tools/dev/reflex-hotfork-zcode-package-view-acceptance.sh
 tools/dev/reflex-hotfork-zcode-work-acceptance.sh
 tools/dev/reflex-reactor-bench.sh
-tools/dev/retrieval-eval-selftest.sh
 tools/dev/retrieval-gold-benchmark.sh
 tools/dev/retrieval-gold-corpus-check.sh
 tools/dev/retrieval-gold-current-receipt-check.sh

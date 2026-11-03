@@ -1036,6 +1036,12 @@ ZCL_TEST_GROUP(territory)
  * common one; and an index that failed an insertion answers nothing at all
  * rather than answering from a corpus with holes in it. */
 ZCL_TEST_GROUP(retrieval)
+/* Strict batch adapter for the maintained retrieval evaluator, run as a real
+ * subprocess: valid batches reproduce the evaluator's metrics and roots, and
+ * every malformed, overflowing, contradictory or boundary-violating mutation
+ * is refused with no partial evidence. Proposal and evaluation identities stay
+ * separate under gold, literal, scope and baseline mutations. */
+ZCL_TEST_GROUP(retrieval_eval_selftest)
 /* One relevance-free retrieval experiment over a sealed BM25 baseline.
  * An immutable profile can use only features observed by the exact snapshot;
  * the first live extractor exposes context bytes and refuses all other
