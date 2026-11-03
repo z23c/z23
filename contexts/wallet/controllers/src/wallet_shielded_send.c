@@ -1098,22 +1098,18 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
         memset(&from_dest, 0, sizeof(from_dest));
     } else if (!wallet_decode_address(from_addr, &from_dest)) {
         json_set_str(result, "Invalid from address");
-        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: decode_destination failed for from=%s", from_addr);
-        return false;
+        LOG_FAIL("wallet_shielded", "z_sendmany: decode_destination failed for from=%s", from_addr);
     }
 
     struct z_sendmany_outs outs;
     struct z_sendmany_fail f = { .why = Z_SENDMANY_WHY_NONE };
     if (!z_sendmany_collect_recipients(recipients, &outs, result, &f)) {
         if (f.why == Z_SENDMANY_WHY_BAD_AMOUNT)
-            LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: recipient %zu has invalid addr or amount=%lld", f.index, (long long)f.amount);
-            return false;
+            LOG_FAIL("wallet_shielded", "z_sendmany: recipient %zu has invalid addr or amount=%lld", f.index, (long long)f.amount);
         if (f.why == Z_SENDMANY_WHY_BAD_SAPLING)
-            LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: cannot decode sapling recipient addr=%s", f.addr);
-            return false;
+            LOG_FAIL("wallet_shielded", "z_sendmany: cannot decode sapling recipient addr=%s", f.addr);
         if (f.why == Z_SENDMANY_WHY_BAD_TRANSPARENT)
-            LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: cannot decode transparent recipient addr=%s", f.addr);
-            return false;
+            LOG_FAIL("wallet_shielded", "z_sendmany: cannot decode transparent recipient addr=%s", f.addr);
         return false;
     }
 
@@ -1125,8 +1121,7 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
     if (!z_sendmany_spend_transparent(ctx, cp, &from_dest, &outs, prepared,
                                       result, spend_floor, &f)) {
         if (f.why == Z_SENDMANY_WHY_BINDING)
-            LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany: binding_sig failed, value_balance=%lld", (long long)f.value_balance);
-            return false;
+            LOG_FAIL("wallet_shielded", "z_sendmany: binding_sig failed, value_balance=%lld", (long long)f.value_balance);
         return false;
     }
     return true;
@@ -1165,8 +1160,7 @@ bool z_sendmany_prepare(const struct json_value *params,
                         struct json_value *result)
 {
     if (!prepared || !result)
-        LOG_ERROR_IN("z_sendmany_run", "wallet_shielded", "z_sendmany_prepare: NULL output");
-        return false;
+        LOG_FAIL("wallet_shielded", "z_sendmany_prepare: NULL output");
     memset(prepared, 0, sizeof(*prepared));
     return z_sendmany_run(params, false, prepared, result, false);
 }
