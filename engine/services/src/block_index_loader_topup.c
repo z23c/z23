@@ -1313,7 +1313,10 @@ bool block_index_node_db_topup_with(struct main_state *ms,
 #ifdef ZCL_TESTING
     g_node_db_topup_last_rows_seen = fold.rows_seen;
 #endif
-    const bool fold_was_noop = node_db_fold_changed_nothing(&fold);
+    /* A fold that missed a window row (a scan abort or a hole) has not seen
+     * every row, so it proves nothing about the rest and records no mark. */
+    const bool fold_was_noop = node_db_fold_changed_nothing(&fold) &&
+                               fold.missing_rows == 0;
     struct block_index **new_entries = fold.new_entries;
     const size_t new_count = fold.new_count;
     const size_t inserted = fold.inserted, data_applied = fold.data_applied,
