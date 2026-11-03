@@ -1035,16 +1035,14 @@ static void ticks_cannot_starve_a_lock(void)
     f.route = WS_ROUTE_SENT; f.now += 4000; wss_on_tick(s); drain(&f);
     assert(view_of(s).state == WS_DONE && wss_end(s) && wss_destroy(s));
 }
-/* No worker thread: the UI thread runs nothing. The flow fails before any commit and the lock is still owed. */
 /* ---- the start page, the amount page and Max ---- */
 
 /* With the balance known to be 0 the start page says so and asks for no address; otherwise it asks for the address with its
- * keyboard, and offers Paste only for a clipboard that holds an address. A reading from Funds shows at once; a reading from
- * the node shows when it answers; a hidden or old reading is unknown, never 0. */
+ * keyboard, and offers Paste only for a clipboard that holds an address. */
 static void the_start_page_follows_the_balance(void)
 {
     struct wss_start st;
-    struct wss_balance zero = {.known = true}, some = {.known = true, .spendable_zat = 1}, unknown = {0}, b;
+    struct wss_balance zero = {.known = true}, some = {.known = true, .spendable_zat = 1}, unknown = {0};
     wss_start_page(&zero, true, &st);
     assert(st.zero && !st.paste && st.focus == WSS_FOCUS_NONE && !strcmp(st.line, "You have 0 ZCL to send. Receive some first."));
     wss_start_page(&some, true, &st);
@@ -1053,7 +1051,13 @@ static void the_start_page_follows_the_balance(void)
     assert(!st.zero && !st.paste && st.focus == WSS_FOCUS_ADDRESS);
     wss_start_page(NULL, true, &st);
     assert(!st.zero && st.paste && st.focus == WSS_FOCUS_ADDRESS);
-
+}
+/* A reading from Funds shows at once; a reading from the node shows when it answers; a hidden or old reading is unknown,
+ * never 0. */
+static void the_balance_reading_is_fresh_or_unknown(void)
+{
+    struct wss_start st;
+    struct wss_balance b;
     struct fake f; fake_init(&f);
     struct wss *s = screen_of(&f);
     wss_balance(s, &b);
@@ -1149,15 +1153,17 @@ static void max_is_the_balance_less_the_planned_fee(void)
     tap_and_run(s, &f);
     assert(f.commits == 1 && f.commit_amount == 500000000u - 12345u && f.commit_fee == 12345u);
     wss_destroy(s);
-
-    /* On a review, Max uses the reviewed balance and that review's fee. */
-    fake_init(&f);
-    p = pay_of(priv, "?amount=1");
-    s = reviewed(&f, &p);
+}
+/* On a review, Max uses the reviewed balance and that review's fee. */
+static void max_on_a_review_uses_its_fee(void)
+{
+    struct fake f; fake_init(&f);
+    struct zapp_payment p = pay_of(priv, "?amount=1");
+    struct wss *s = reviewed(&f, &p);
     assert(view_of(s).can_max);
-    plans = f.plans;
+    int plans = f.plans;
     wss_tap_max(s); drain(&f);
-    v = view_of(s);
+    struct wss_view v = view_of(s);
     assert(v.state == WS_REVIEW && !strcmp(v.amount, "4.9999 ZCL") && !v.can_max && f.plans == plans + 1);
     wss_destroy(s);
 }
@@ -1202,6 +1208,7 @@ static void the_keyboard_opens_once_per_page(void)
     assert(!wss_keyboard_due(WSS_FOCUS_NONE, &asked) && asked == WSS_FOCUS_NONE);
     assert(wss_keyboard_due(WSS_FOCUS_AMOUNT, &asked));
 }
+/* No worker thread: the UI thread runs nothing. The flow fails before any commit and the lock is still owed. */
 static void a_missing_worker_fails_the_flow(void)
 {
     struct zapp_payment p = pay_of(priv, "?amount=1");
@@ -1632,9 +1639,11 @@ int main(void)
     a_fresh_process_asks_the_node_and_the_node_decides();
     the_key_follows_the_request();
     the_start_page_follows_the_balance();
+    the_balance_reading_is_fresh_or_unknown();
     paste_is_offered_only_for_an_address();
     the_amount_page_shows_what_can_be_sent();
     max_is_the_balance_less_the_planned_fee();
+    max_on_a_review_uses_its_fee();
     max_says_why_it_set_no_amount();
     the_keyboard_opens_once_per_page();
     puts("wallet_send_screen_test: ok");

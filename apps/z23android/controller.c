@@ -249,6 +249,12 @@ static void observe_fleet_peers(struct controller *c, bool responding)
     } else if (!ok && c->fleet_source == FLEET_PEERS) c->view.fleet_stale = true;
     pthread_mutex_unlock(&c->lock);
 }
+/* Files in the datadir of a node that answers: it published its onion address, and boot_status.json says it serves. */
+static void read_node_files(const struct controller *c, bool responding, bool *onion, bool *serving)
+{
+    *onion = responding && zapp_onion_ready(&c->runtime);
+    *serving = responding && zapp_node_serving(&c->runtime);
+}
 static void observe_node(struct controller *c)
 {
     char *output = calloc(1, ZAPP_TEXT_CAP);
@@ -259,8 +265,8 @@ static void observe_node(struct controller *c)
     free(output);
     bool process_running = zapp_node_running(&c->runtime), stopping = zapp_node_stopping(&c->runtime);
     bool wanted = zapp_node_wanted(&c->runtime);
-    bool onion = n.responding && zapp_onion_ready(&c->runtime);
-    bool serving = n.responding && zapp_node_serving(&c->runtime);
+    bool onion, serving;
+    read_node_files(c, n.responding, &onion, &serving);
     char status[1024], line[96];
     /* Evidence outside the node: how long its tip has been still, and the fleet's height while that report is current. */
     const int64_t now = monotonic_secs();

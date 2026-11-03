@@ -232,22 +232,25 @@ static bool show_by_insets(JNIEnv *env, jobject view)
     if (show) (*env)->CallVoidMethod(env, controller, show, mask);
     return show && zj_clean(env);
 }
+static bool show_keyboard(JNIEnv *env, jobject service, jobject view)
+{
+    jmethodID focus = zj_method(env, view, "requestFocus", "()Z");
+    jmethodID open = focus ? zj_method(env, service, "showSoftInput", "(Landroid/view/View;I)Z") : NULL;
+    bool focused = open && (*env)->CallBooleanMethod(env, view, focus) && zj_clean(env);
+    bool ok = focused && (*env)->CallBooleanMethod(env, service, open, view, 0) && zj_clean(env);
+    return ok || (focused && show_by_insets(env, view));
+}
+static bool hide_keyboard(JNIEnv *env, jobject service, jobject view)
+{
+    jobject token = zj_object_property(env, view, "getWindowToken", "()Landroid/os/IBinder;");
+    jmethodID hide = token ? zj_method(env, service, "hideSoftInputFromWindow", "(Landroid/os/IBinder;I)Z") : NULL;
+    return hide && (*env)->CallBooleanMethod(env, service, hide, token, 0) && zj_clean(env);
+}
 bool zj_keyboard(JNIEnv *env, jobject activity, jobject view, bool show)
 {
     if (!activity || !view || (*env)->PushLocalFrame(env, 12) != JNI_OK) { (void)zj_clean(env); return false; }
     jobject service = input_methods(env, activity);
-    bool ok = false;
-    if (service && show) {
-        jmethodID focus = zj_method(env, view, "requestFocus", "()Z");
-        jmethodID open = focus ? zj_method(env, service, "showSoftInput", "(Landroid/view/View;I)Z") : NULL;
-        bool focused = open && (*env)->CallBooleanMethod(env, view, focus) && zj_clean(env);
-        ok = focused && (*env)->CallBooleanMethod(env, service, open, view, 0) && zj_clean(env);
-        if (focused && !ok) ok = show_by_insets(env, view);
-    } else if (service) {
-        jobject token = zj_object_property(env, view, "getWindowToken", "()Landroid/os/IBinder;");
-        jmethodID hide = token ? zj_method(env, service, "hideSoftInputFromWindow", "(Landroid/os/IBinder;I)Z") : NULL;
-        ok = hide && (*env)->CallBooleanMethod(env, service, hide, token, 0) && zj_clean(env);
-    }
+    bool ok = service && (show ? show_keyboard(env, service, view) : hide_keyboard(env, service, view));
     (void)zj_clean(env);
     (*env)->PopLocalFrame(env, NULL);
     return ok;

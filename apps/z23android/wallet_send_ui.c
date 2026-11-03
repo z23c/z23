@@ -498,10 +498,15 @@ static void draw_amount_page(JNIEnv *env, const struct wss_view *v)
 }
 /* Another code can follow a finished payment, not a sweep and not a payment the node still holds. */
 static bool offers_scan(const struct wss_view *v) { return v->can_leave && v->state != WS_BROADCAST && !v->sweep; }
-static void draw_flow(JNIEnv *env, const struct wss_view *v)
+/* Above the status of a payment: the review of its plan, or the amount page when it was named without an amount. */
+static void draw_head(JNIEnv *env, const struct wss_view *v)
 {
     if (v->review) draw_review(env, v);
     else if (v->state == WS_PARSED && !v->sweep) draw_amount_page(env, v);
+}
+static void draw_flow(JNIEnv *env, const struct wss_view *v)
+{
+    draw_head(env, v);
     line_if(env, v->status, 16.0f, v->check_history ? AMBER : SOFT);
     if (v->state == WS_PAID) draw_paid(env, v);
     line_if(env, ui.hint, 14.0f, AMBER);

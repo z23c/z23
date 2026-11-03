@@ -264,19 +264,25 @@ static bool build_settings(JNIEnv *env, jobject root)
     if (content) (*env)->DeleteLocalRef(env, content);
     return ok;
 }
+/* The line under the camera picture that says what to aim at. */
+static bool scan_hint(JNIEnv *env, jobject camera)
+{
+    jobject hint = zj_widget(env, "android/widget/TextView", shell.activity);
+    bool ok = hint && zj_typography(env, hint, 17.0f, (jint)WHITE) && zj_padding(env, hint, 16, 10) &&
+        zj_int_property(env, hint, "setGravity", GRAVITY_CENTER_HORIZONTAL) &&
+        zj_text(env, hint, zapp_camera_screen(ZAPP_CAMERA_GRANTED).hint) && zj_margins(env, hint, MATCH, WRAP, 0.0f, 0, 0, 0, 0) &&
+        zj_append(env, camera, hint);
+    if (hint) (*env)->DeleteLocalRef(env, hint);
+    return ok;
+}
 /* The camera preview, the line that says what to point it at, and Cancel. */
 static bool build_scan_camera(JNIEnv *env, jobject root)
 {
     jobject camera = column(env, 0xff000000u, 0, false);
     jobject image = zj_widget(env, "android/widget/ImageView", shell.activity);
-    jobject hint = zj_widget(env, "android/widget/TextView", shell.activity);
-    bool ok = camera && image && hint && zj_margins(env, image, MATCH, 0, 1.0f, 0, 0, 0, 0) && zj_append(env, camera, image) &&
-        zj_keep(env, &shell.scan_view, image) && zj_typography(env, hint, 17.0f, (jint)WHITE) && zj_padding(env, hint, 16, 10) &&
-        zj_int_property(env, hint, "setGravity", GRAVITY_CENTER_HORIZONTAL) &&
-        zj_text(env, hint, zapp_camera_screen(ZAPP_CAMERA_GRANTED).hint) && zj_margins(env, hint, MATCH, WRAP, 0.0f, 0, 0, 0, 0) &&
-        zj_append(env, camera, hint) && button(env, camera, "Cancel", CMD_SCAN_CANCEL, 0, 0) &&
+    bool ok = camera && image && zj_margins(env, image, MATCH, 0, 1.0f, 0, 0, 0, 0) && zj_append(env, camera, image) &&
+        zj_keep(env, &shell.scan_view, image) && scan_hint(env, camera) && button(env, camera, "Cancel", CMD_SCAN_CANCEL, 0, 0) &&
         zj_margins(env, camera, MATCH, 0, 1.0f, 0, 0, 0, 0) && zj_append(env, root, camera) && zj_keep(env, &shell.scan_camera, camera);
-    if (hint) (*env)->DeleteLocalRef(env, hint);
     if (image) (*env)->DeleteLocalRef(env, image);
     if (camera) (*env)->DeleteLocalRef(env, camera);
     return ok;
