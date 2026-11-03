@@ -279,45 +279,6 @@ line stays.
 
 The phone caps the node's block-index cache at 32 MiB (`ZCL_BIP_PAGE_CACHE_KIB=32768`) to lower memory pressure.
 
-## Clips
-
-`clip_screen` records and plays short vertical clips on the phone. The launch
-extra `org.z23.clips` selects the screen: `record` or `watch`
-(`am start -n <package>/android.app.NativeActivity -e org.z23.clips record`). The
-extra is read when the activity is created and removed from the in-process
-intent; sending it to an activity that already exists does nothing, so stop the
-app first, and after the process is killed the system can deliver it again. The
-camera stays closed until the first Record tap, which opens the preview; the next
-tap records.
-
-- Recording uses the rear camera, the hardware AVC encoder (the screen refuses
-  to record without one), and the microphone through AAudio (AAC-LC). The
-  profile is 30 fps, 800 kbit/s constant bitrate, a key frame every 2 s,
-  64 kbit/s audio and a 60 s cap. The file carries a rotation hint so it plays
-  upright. Recording stops when the phone reaches critical thermal status or
-  the activity pauses. Stop, the 60 s cap and Back leave the closing of the
-  file to a worker while the screen shows "Saving..."; pausing the activity
-  waits for the worker for at most 2 s (866 ms measured once). If another app takes
-  the camera, the screen says so and Record opens it again.
-- After stop, the person chooses a content level: 1 General, 2 Mild,
-  3 Sensitive, 4 Mature, 5 Explicit (General is highlighted). Nothing is saved
-  until Save; Discard deletes the recording. A caption is optional.
-- `files/clips/<SHA3-512 hex of the bytes>.mp4` holds the clip and
-  `<same name>.json` holds level, caption, creation time and duration. The
-  recording is synced to storage, then both files are renamed into place; the
-  clips folder is cleaned of interrupted saves each time the screen opens. The
-  level in the sidecar is private to the app: nothing outside it reads or
-  enforces it until a signed post carries it.
-- Watching plays clips newest first, full screen. A vertical swipe moves to
-  the next or previous clip, a tap pauses. Before playing, the player hashes
-  the opened file again and refuses a clip whose bytes no longer match its
-  name, then plays that same descriptor. The screen lists the newest 64 clips
-  and says when older ones exist.
-
-Host tests: `clip_store_test`, `clips_capture_test`, `clips_player_test`
-(run by `make test`). Measurements are in the
-[clip capture experiment](../../docs/experiments/2026-10-31-pixel3-clip-capture.md).
-
 ## Private voice and fleet host
 
 A laptop connected over USB runs the private assistant. The C23 host

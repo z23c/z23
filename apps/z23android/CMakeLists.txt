@@ -22,7 +22,6 @@ add_library(z23android SHARED
     setup_words.c setup_wordlist.c setup_state.c setup_node.c wallet_setup.c wallet_setup_ui.c
     audio.c speech_client.c voice.c hosts.c private.c pairing.c scan.c thermal.c nodelog.c params.c params_install.c params_job.c params_android.c
     wallet_screens.c wallet_ui.c
-    clip_store.c clip_capture.c clip_player.c clip_screen.c
     "${Z23_ROOT}/platform/modules/sha3/src/sha3.c"
     "${Z23_ROOT}/contexts/commons/packages/zutf8/src/zutf8.c"
     "${Z23_ROOT}/contexts/commons/packages/zsha256/src/zsha256.c"
