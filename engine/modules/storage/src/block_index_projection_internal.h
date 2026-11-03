@@ -88,6 +88,7 @@ struct block_index_projection {
 
     /* Counters (snapshotted under mu by dump_state). */
     unsigned       last_bind_threads;   /* threads of the last covered bind */
+    uint64_t       last_bind_rows;      /* rows the last covered bind checked */
     uint64_t       last_consumed_offset;
     uint64_t       events_consumed_total;
     uint64_t       replace_collisions_total;

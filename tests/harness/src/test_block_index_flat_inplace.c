@@ -4,11 +4,15 @@
  * byte-identical to the full atomic rewrite, a crash between the payload sync
  * and the header write is rejected by the embedded verifier, and the full
  * rewrite remains the fallback (no file, or more than a quarter of the rows
- * changed). */
+ * changed). A stop that saved in place binds the projection after proving
+ * only the changed rows, with the full proof's verdict. */
 
 #include "test/test_core.h"
 #include "services/block_index_loader.h"
 #include "services/block_index_integrity.h"
+#include "storage/block_index_projection.h"
+#include "storage/event_log.h"
+#include "storage/event_log_payloads.h"
 #include "storage/sha3_sidecar_io.h"
 #include "validation/main_state.h"
 #include "chain/chain.h"
@@ -329,14 +333,234 @@ static int bfip_live_header_ext(void)
     return failures;
 }
 
+
+/* ---- Incremental shutdown bind -----------------------------------------
+ * A stop that saves the flat in place, against the file this process fully
+ * hashed at load, proves the projection binding over only the dirty rows and
+ * the rows whose hashes sit at changed positions. Its verdict must equal the
+ * full proof's, and the next boot must find exactly the flat it bound. */
+
+#define BFR_ROWS 3000u
+#define BFR_NEW 100u
+#define BFR_UPD 10u
+
+struct bfr_fixture {
+    struct bfip_fixture f;
+    const char *dir;
+    char db_path[PATH_MAX + 32];
+    event_log_t *log;
+    block_index_projection_t *bip;
+    struct block_index_flat_identity id;
+};
+
+/* One projection row for map entry `e`, at a validity the entry meets. */
+static bool bfr_emit(event_log_t *log, const struct block_index *e)
+{
+    struct ev_block_header ev;
+    memset(&ev, 0, sizeof(ev));
+    memcpy(ev.hash, e->phashBlock->data, 32);
+    if (e->pprev)
+        memcpy(ev.hashPrev, e->pprev->phashBlock->data, 32);
+    ev.height = e->nHeight; ev.nStatus = BLOCK_VALID_SCRIPTS;
+    ev.nFile = -1; ev.nTime = e->nTime; ev.nBits = e->nBits;
+    ev.nVersion = e->nVersion; ev.nTx = 1;
+    uint8_t buf[512];
+    size_t written = 0;
+    return ev_block_header_serialize(&ev, NULL, buf, sizeof(buf), &written) &&
+           event_log_append(log, EV_BLOCK_HEADER, buf, written) != UINT64_MAX;
+}
+
+static bool bfr_project(struct bfr_fixture *x, size_t first, size_t end)
+{
+    event_log_set_deferred_sync(x->log, true);
+    bool ok = true;
+    for (size_t i = first; ok && i < end; i++)
+        ok = bfr_emit(x->log, &x->f.arena[i]);
+    ok = event_log_flush(x->log) && ok;
+    event_log_set_deferred_sync(x->log, false);
+    return ok && block_index_projection_catch_up(x->bip) != UINT64_MAX;
+}
+
+static bool bfr_save(struct bfr_fixture *x, const char *path)
+{
+    return save_block_index_flat_identity(x->dir, &x->f.ms, &x->id).ok &&
+           bfip_path_is(path);
+}
+
+static bool bfr_bind(struct bfr_fixture *x)
+{
+    return block_index_projection_bind_saved_flat_state(x->bip, &x->id,
+                                                        &x->f.ms);
+}
+
+static uint64_t bfr_checked(const struct bfr_fixture *x)
+{
+    return block_index_projection_last_bind_rows(x->bip);
+}
+
+static bool bfr_count_row(const uint8_t hash[32],
+                          const struct disk_block_index *row, void *user)
+{
+    (void)hash; (void)row;
+    (*(uint64_t *)user)++;
+    return true;
+}
+
+/* What the next boot reads: 1 and the dirty rows when the projection is
+ * bound to this exact flat, 0 when it must run the full scan. */
+static int bfr_boot_bound(struct bfr_fixture *x, uint64_t *dirty)
+{
+    *dirty = 0;
+    return block_index_projection_iterate_dirty_if_bound(
+        x->bip, x->id.payload_sha3, x->id.payload_size, x->id.row_count,
+        bfr_count_row, dirty);
+}
+
+/* First stop: every row is proven against a fresh full save. */
+static bool bfr_open(struct bfr_fixture *x, const char *dir)
+{
+    memset(x, 0, sizeof(*x));
+    x->dir = dir;
+    bool built = bfip_open(&x->f, BFR_ROWS + BFR_NEW);
+    char log_path[PATH_MAX + 16];
+    snprintf(log_path, sizeof(log_path), "%s/events", dir);
+    snprintf(x->db_path, sizeof(x->db_path), "%s/projection.db", dir);
+    x->log = event_log_open(log_path);
+    x->bip = x->log ? block_index_projection_open(x->db_path, x->log) : NULL;
+    return built && x->bip && bfip_insert_to(&x->f, BFR_ROWS) &&
+           bfr_project(x, 0, BFR_ROWS) && bfr_save(x, "full") &&
+           bfr_bind(x) && bfr_checked(x) == BFR_ROWS;
+}
+
+static void bfr_close(struct bfr_fixture *x)
+{
+    if (x->bip) block_index_projection_close(x->bip);
+    if (x->log) event_log_close(x->log);
+    bfip_close(&x->f);
+}
+
+/* One session: blocks arrive at the tip and the blocks below gain undo
+ * data; the map changes, the projection adds rows. */
+static bool bfr_session(struct bfr_fixture *x)
+{
+    for (size_t i = BFR_ROWS - BFR_UPD; i < BFR_ROWS; i++) {
+        x->f.arena[i].nStatus |= BLOCK_HAVE_UNDO;
+        x->f.arena[i].nUndoPos = (uint32_t)(i * 7);
+    }
+    return bfip_insert_to(&x->f, BFR_ROWS + BFR_NEW) &&
+           bfr_project(x, BFR_ROWS, BFR_ROWS + BFR_NEW);
+}
+
+static int bfr_incremental(struct bfr_fixture *x)
+{
+    int failures = 0;
+    uint64_t dirty = 0;
+    bool ok = bii_verify_embedded(x->dir, NULL, NULL) == 0 &&
+              bfr_session(x) && bfr_save(x, "incremental");
+    BFIP_CHECK("rebind: the session stop saves in place", ok);
+    bool bound = ok && bfr_bind(x);
+    uint64_t checked = bfr_checked(x);
+    BFIP_CHECK("rebind: the stop binds after checking only changed rows",
+               bound && checked >= BFR_NEW &&
+               checked <= 2u * (BFR_NEW + BFR_UPD) &&
+               checked < (BFR_ROWS + BFR_NEW) / 10u);
+    BFIP_CHECK("rebind: the next boot finds this flat bound, nothing dirty",
+               bfr_boot_bound(x, &dirty) == 1 && dirty == 0);
+    BFIP_CHECK("rebind: the next boot loads every saved row",
+               bfip_loads(x->dir, BFR_ROWS + BFR_NEW));
+    struct block_index_flat_identity incremental = x->id;
+    bii_verified_body_forget();
+    ok = bfr_save(x, "incremental") &&
+         memcmp(&incremental, &x->id, sizeof(x->id)) == 0;
+    BFIP_CHECK("rebind: without a proven base the full proof binds the same "
+               "flat over every row",
+               ok && bfr_bind(x) && bfr_checked(x) == BFR_ROWS + BFR_NEW &&
+               bfr_boot_bound(x, &dirty) == 1 && dirty == 0);
+    return failures;
+}
+
+/* A map row that falls behind its unchanged projection row must be found
+ * through the changed positions alone, and refused as the full proof does. */
+static int bfr_refusal(struct bfr_fixture *x)
+{
+    int failures = 0;
+    uint64_t dirty = 0;
+    struct block_index *e = &x->f.arena[500];
+    bool ok = bii_verify_embedded(x->dir, NULL, NULL) == 0;
+    e->nStatus = BLOCK_VALID_TREE | BLOCK_HAVE_DATA;
+    ok = ok && bfr_save(x, "incremental");
+    BFIP_CHECK("rebind: a row behind its projection row refuses",
+               ok && !bfr_bind(x) && bfr_checked(x) >= 1 &&
+               bfr_checked(x) <= 2);
+    BFIP_CHECK("rebind: the refused flat is not bound",
+               bfr_boot_bound(x, &dirty) == 0);
+    bii_verified_body_forget();
+    BFIP_CHECK("rebind: the full proof refuses it too",
+               bfr_save(x, "incremental") && !bfr_bind(x));
+    e->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+    BFIP_CHECK("rebind: the corrected row binds again",
+               bfr_save(x, "incremental") && bfr_bind(x) &&
+               bfr_boot_bound(x, &dirty) == 1);
+    return failures;
+}
+
+/* A save that fails after writing rows leaves a file the load-time hash no
+ * longer describes: the next stop must prove every row. */
+static int bfr_failed_save(struct bfr_fixture *x)
+{
+    int failures = 0;
+    uint64_t dirty = 0;
+    struct block_index *e = &x->f.arena[700];
+    bool ok = bii_verify_embedded(x->dir, NULL, NULL) == 0;
+    e->nStatus = BLOCK_VALID_TREE | BLOCK_HAVE_DATA;
+    g_block_index_flat_inplace_fault = 1;
+    bool saved = save_block_index_flat_identity(x->dir, &x->f.ms, NULL).ok;
+    g_block_index_flat_inplace_fault = 0;
+    BFIP_CHECK("rebind: a save stopped after the payload sync fails",
+               ok && !saved);
+    BFIP_CHECK("rebind: after it the stop runs the full proof and refuses",
+               bfr_save(x, "incremental") && !bfr_bind(x) &&
+               bfr_boot_bound(x, &dirty) == 0);
+    e->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+    BFIP_CHECK("rebind: and binds every row once the row is corrected",
+               bfr_save(x, "incremental") && bfr_bind(x) &&
+               bfr_checked(x) == BFR_ROWS + BFR_NEW);
+    uint8_t other[32];
+    memset(other, 0x3c, sizeof(other));
+    BFIP_CHECK("rebind: a base the binding does not name is left to the "
+               "full proof",
+               block_index_projection_rebind_flat_if_covered(
+                   x->bip, other, x->id.payload_size, x->id.row_count,
+                   x->id.payload_sha3, x->id.payload_size, x->id.row_count,
+                   NULL, 0, bfr_count_row, &dirty) == 0);
+    return failures;
+}
+
+static int bfip_rebind(const char *dir)
+{
+    int failures = 0;
+    struct bfr_fixture x;
+    bool ok = bfr_open(&x, dir);
+    BFIP_CHECK("rebind: the first stop saves in full and proves every row",
+               ok);
+    if (ok) {
+        failures += bfr_incremental(&x);
+        failures += bfr_refusal(&x);
+        failures += bfr_failed_save(&x);
+    }
+    bfr_close(&x);
+    return failures;
+}
+
 int test_block_index_flat_inplace(void)
 {
     int failures = 0;
-    char da[PATH_MAX], db[PATH_MAX], dc[PATH_MAX], dd[PATH_MAX];
+    char da[PATH_MAX], db[PATH_MAX], dc[PATH_MAX], dd[PATH_MAX], de[PATH_MAX];
     if (!test_mkdtemp(da, sizeof(da), "bfip_a") ||
         !test_mkdtemp(db, sizeof(db), "bfip_b") ||
         !test_mkdtemp(dc, sizeof(dc), "bfip_c") ||
-        !test_mkdtemp(dd, sizeof(dd), "bfip_d")) {
+        !test_mkdtemp(dd, sizeof(dd), "bfip_d") ||
+        !test_mkdtemp(de, sizeof(de), "bfip_e")) {
         printf("block_index_flat_inplace: tmpdir FAIL\n");
         return 1;
     }
@@ -344,5 +568,6 @@ int test_block_index_flat_inplace(void)
     failures += bfip_crash_and_fallback(dc);
     failures += bfip_roundtrip_no_ext(dd);
     failures += bfip_live_header_ext();
+    failures += bfip_rebind(de);
     return failures;
 }

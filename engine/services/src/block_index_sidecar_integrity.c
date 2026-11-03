@@ -155,6 +155,29 @@ static bool bii_memo_covers(const char *datadir, const char *body_path,
            memcmp(hdr.body_sha3, g_verified.sha3, 32) == 0;
 }
 
+bool bii_verified_body_current(const char *datadir,
+                               struct ssio_sidecar_header *out)
+{
+    char body_path[1024];
+    struct platform_file_metadata now;
+    int n = datadir ? snprintf(body_path, sizeof(body_path), "%s/%s", datadir,
+                               bii_embedded_spec.body_name)
+                    : -1;
+    if (n < 0 || (size_t)n >= sizeof(body_path) ||
+        platform_file_metadata_read(body_path, &now) !=
+            PLATFORM_FILE_METADATA_OK ||
+        !bii_memo_covers(datadir, body_path, &now))
+        return false;
+    if (out) {
+        memset(out, 0, sizeof(*out));
+        memcpy(out->magic, bii_embedded_spec.magic, 4);
+        out->version = bii_embedded_spec.version;
+        out->body_size = g_verified.body_size;
+        memcpy(out->body_sha3, g_verified.sha3, 32);
+    }
+    return true;
+}
+
 int bii_verify_embedded(const char *datadir,
                         struct ssio_sidecar_header *out,
                         uint64_t *out_payload_off)

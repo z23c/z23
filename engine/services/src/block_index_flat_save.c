@@ -119,6 +119,35 @@ static int save_height_cmp(const void *a, const void *b)
     return aa->nHeight < bb->nHeight ? -1 : aa->nHeight > bb->nHeight;
 }
 
+/* Height order in two linear passes: heights are dense, so a counting sort
+ * replaces an O(n log n) comparison sort of millions of pointers. Equal
+ * heights keep map order. False (and `sorted` untouched) when a height is
+ * negative, the range is not dense or an allocation fails; the caller then
+ * uses qsort. */
+static bool save_counting_sort(struct block_index **sorted, size_t n)
+{
+    int32_t max = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (sorted[i]->nHeight < 0) return false;
+        if (sorted[i]->nHeight > max) max = sorted[i]->nHeight;
+    }
+    if ((uint64_t)max > 4ull * n + 1024u || (uint64_t)n > UINT32_MAX)
+        return false;
+    uint32_t *start = zcl_calloc((size_t)max + 2u, sizeof(*start),
+                                 "flat save sort counts");
+    struct block_index **out = zcl_malloc(n * sizeof(*out), "flat save sort");
+    bool ok = start && out;
+    if (ok) {
+        for (size_t i = 0; i < n; i++) start[sorted[i]->nHeight + 1]++;
+        for (int32_t h = 0; h <= max; h++) start[h + 1] += start[h];
+        for (size_t i = 0; i < n; i++) out[start[sorted[i]->nHeight]++] = sorted[i];
+        memcpy(sorted, out, n * sizeof(*out));
+    }
+    free(start);
+    free(out);
+    return ok;
+}
+
 static const char *g_last_path = "none";
 static uint64_t g_last_bytes;
 
@@ -164,7 +193,8 @@ struct zcl_result block_index_flat_write_identity(
     size_t n = 0, iter = 0; struct block_index *entry;
     while (block_map_next(&ms->map_block_index, &iter, NULL, &entry))
         if (entry && n < count) sorted[n++] = entry;
-    qsort(sorted, n, sizeof(*sorted), save_height_cmp);
+    if (!save_counting_sort(sorted, n))
+        qsort(sorted, n, sizeof(*sorted), save_height_cmp);
     int64_t started = (int64_t)platform_time_wall_time_t();
     struct emit_ctx ctx = { .ms = ms, .sorted = sorted, .count = n };
     struct zcl_result written = flat_save_publish(datadir, ms, &ctx);

@@ -2,8 +2,11 @@
  * In-place incremental save of the block-index flat file: only the rows that
  * changed since the previous save are rewritten, the payload is synced
  * BEFORE the 48-byte embedded header, and the result is byte-identical to the
- * full atomic rewrite of the same in-memory index. */
+ * full atomic rewrite of the same in-memory index. The diff also records the
+ * row hashes at changed positions, which lets the shutdown bind prove only
+ * those rows. */
 // one-result-type-ok:flat-inplace-internal-bool-helpers
+// supervisor-ok:bounded-save-hasher — one SHA3 thread per save, closed and joined before the save returns; no resident service
 
 #include "block_index_flat_internal.h"
 #include "services/block_index_flat_anchor.h"
@@ -13,8 +16,10 @@
 #include "crypto/sha3.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
+#include "util/thread_registry.h"
 
 #include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -46,15 +51,63 @@ struct bfi {
     uint64_t changed;
     uint8_t prefix[BFI_PREFIX];
     uint8_t old_prefix[BFI_PREFIX];
+    uint32_t old_count;      /* rows in the file being replaced */
     uint8_t anchor[BIFA_TRAILER_MAX];
     size_t anchor_len;
     uint8_t *enc;
+    uint8_t *enc2;           /* second pass-1 buffer for the hasher */
     uint8_t *old;
     uint64_t written;
     bool crashed;
     struct sha3_256_ctx sha3;
     struct sha3_256_ctx diff_sha3;
+    struct ssio_sidecar_header old_hdr;
+    uint8_t (*hashes)[32];   /* row hashes at changed positions, old and new */
+    size_t nhashes, cap_hashes;
+    bool hashes_lost;        /* an allocation failed: no delta */
 };
+
+/* What the last in-place save changed, kept for the shutdown bind. */
+static struct {
+    bool valid;
+    struct block_index_flat_identity base, saved;
+    uint8_t (*hashes)[32];
+    size_t nhashes;
+} g_delta;
+
+void block_index_flat_delta_forget(void)
+{
+    free(g_delta.hashes);
+    memset(&g_delta, 0, sizeof(g_delta));
+}
+
+bool block_index_flat_delta_for(const struct block_index_flat_identity *saved,
+                                struct block_index_flat_delta *out)
+{
+    if (!saved || !out || !g_delta.valid ||
+        memcmp(g_delta.saved.payload_sha3, saved->payload_sha3, 32) != 0 ||
+        g_delta.saved.payload_size != saved->payload_size ||
+        g_delta.saved.row_count != saved->row_count)
+        return false;
+    out->base = g_delta.base;
+    out->hashes = (const uint8_t (*)[32])g_delta.hashes;
+    out->nhashes = g_delta.nhashes;
+    return true;
+}
+
+static void bfi_note_hash(struct bfi *b, const uint8_t *hash)
+{
+    if (b->hashes_lost) return;
+    if (b->nhashes == b->cap_hashes) {
+        size_t cap = b->cap_hashes ? b->cap_hashes * 2 : 1024;
+        uint8_t (*grown)[32] = zcl_realloc(b->hashes, cap * sizeof(*grown),
+                                           "bfi delta hashes");
+        if (!grown) { b->hashes_lost = true; return; }
+        b->hashes = grown;
+        b->cap_hashes = cap;
+    }
+    memcpy(b->hashes[b->nhashes++], hash, 32);
+}
 
 static bool bfi_pread_full(int fd, void *buf, size_t len, uint64_t off,
                            size_t *got)
@@ -102,25 +155,28 @@ static bool bfi_old_shape_ok(struct bfi *b)
         h.version != BII_EMBEDDED_VERSION ||
         h.body_size != b->old_size - BFI_HDR)
         return false;
+    b->old_hdr = h;
     uint32_t magic, count;
     if (!bfi_pread_full(b->fd, b->old_prefix, BFI_PREFIX, BFI_HDR, &got) ||
         got != BFI_PREFIX)
         return false;
     memcpy(&magic, b->old_prefix, 4);
     memcpy(&count, b->old_prefix + 4, 4);
+    b->old_count = count;
     if (magic != 0x5A434C49 || h.body_size < BFI_PREFIX + (uint64_t)count * BFI_ROW)
         return false;
     return h.body_size - BFI_PREFIX - (uint64_t)count * BFI_ROW <=
            BIFA_TRAILER_MAX;
 }
 
-/* Encode rows [first, first+cnt) into b->enc. */
-static void bfi_encode_rows(struct bfi *b, uint64_t first, size_t cnt)
+/* Encode rows [first, first+cnt) into enc. */
+static void bfi_encode_rows(const struct bfi *b, uint8_t *enc, uint64_t first,
+                            size_t cnt)
 {
     for (size_t j = 0; j < cnt; j++) {
         struct block_index_flat row;
         block_index_flat_encode_row(b->sorted[first + j], &row);
-        memcpy(b->enc + j * BFI_ROW, &row, BFI_ROW);
+        memcpy(enc + j * BFI_ROW, &row, BFI_ROW);
     }
 }
 
@@ -138,11 +194,11 @@ static bool bfi_note_row(struct bfi *b, uint64_t row)
     return b->changed <= b->n / 4;
 }
 
-/* Pass 1 over one chunk: hash every encoded row, diff against the file. */
-static bool bfi_scan_chunk(struct bfi *b, uint64_t first, size_t cnt)
+/* Pass 1 over one chunk: encode into `enc` and diff against the file. */
+static bool bfi_scan_chunk(struct bfi *b, uint8_t *enc, uint64_t first,
+                           size_t cnt)
 {
-    bfi_encode_rows(b, first, cnt);
-    sha3_256_write(&b->sha3, b->enc, cnt * BFI_ROW);
+    bfi_encode_rows(b, enc, first, cnt);
     uint64_t off = BFI_HDR + BFI_PREFIX + first * BFI_ROW;
     size_t got = 0;
     if (off < b->old_size && !bfi_pread_full(b->fd, b->old, cnt * BFI_ROW,
@@ -150,22 +206,121 @@ static bool bfi_scan_chunk(struct bfi *b, uint64_t first, size_t cnt)
         return false;
     for (size_t j = 0; j < cnt; j++) {
         bool same = (j + 1) * BFI_ROW <= got &&
-            memcmp(b->enc + j * BFI_ROW, b->old + j * BFI_ROW, BFI_ROW) == 0;
+            memcmp(enc + j * BFI_ROW, b->old + j * BFI_ROW, BFI_ROW) == 0;
         if (same) continue;
-        sha3_256_write(&b->diff_sha3, b->enc + j * BFI_ROW, BFI_ROW);
+        sha3_256_write(&b->diff_sha3, enc + j * BFI_ROW, BFI_ROW);
         if (!bfi_note_row(b, first + j)) return false;
+        /* A row's hash is its first 32 bytes. */
+        bfi_note_hash(b, enc + j * BFI_ROW);
+        if (first + j < b->old_count && (j + 1) * BFI_ROW <= got)
+            bfi_note_hash(b, b->old + j * BFI_ROW);
+    }
+    return true;
+}
+
+/* The payload digest is one sequential SHA3 stream, the largest cost of the
+ * save. A second thread absorbs chunk i while the caller encodes and diffs
+ * chunk i+1 into the other buffer; the digest is the same bytes in the same
+ * order, so it equals the single-threaded one. */
+struct bfi_hasher {
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    struct sha3_256_ctx *sha3;
+    uint8_t *buf[2];
+    size_t len[2];
+    uint64_t produced, consumed;
+    bool closed;
+};
+
+static void *bfi_hasher_main(void *arg)
+{
+    struct bfi_hasher *h = arg;
+    pthread_mutex_lock(&h->mu);
+    for (;;) {
+        while (h->consumed == h->produced && !h->closed)
+            pthread_cond_wait(&h->cv, &h->mu);
+        if (h->consumed == h->produced)
+            break; /* closed and drained */
+        unsigned slot = (unsigned)(h->consumed % 2u);
+        pthread_mutex_unlock(&h->mu);
+        sha3_256_write(h->sha3, h->buf[slot], h->len[slot]);
+        pthread_mutex_lock(&h->mu);
+        h->consumed++;
+        pthread_cond_broadcast(&h->cv);
+    }
+    pthread_mutex_unlock(&h->mu);
+    return NULL;
+}
+
+/* The buffer chunk `i` may be encoded into, once the hasher has released
+ * the chunk that last used it. */
+static uint8_t *bfi_hasher_slot(struct bfi_hasher *h, uint64_t i)
+{
+    pthread_mutex_lock(&h->mu);
+    while (i - h->consumed >= 2u)
+        pthread_cond_wait(&h->cv, &h->mu);
+    pthread_mutex_unlock(&h->mu);
+    return h->buf[i % 2u];
+}
+
+static void bfi_hasher_push(struct bfi_hasher *h, uint64_t i, size_t len)
+{
+    pthread_mutex_lock(&h->mu);
+    h->len[i % 2u] = len;
+    h->produced = i + 1;
+    pthread_cond_broadcast(&h->cv);
+    pthread_mutex_unlock(&h->mu);
+}
+
+static void bfi_hasher_close(struct bfi_hasher *h)
+{
+    pthread_mutex_lock(&h->mu);
+    h->closed = true;
+    pthread_cond_broadcast(&h->cv);
+    pthread_mutex_unlock(&h->mu);
+}
+
+static bool bfi_scan_rows_with(struct bfi *b, struct bfi_hasher *h)
+{
+    uint64_t chunk = 0;
+    for (uint64_t i = 0; i < b->n; i += BFI_CHUNK_ROWS, chunk++) {
+        size_t cnt = b->n - i < BFI_CHUNK_ROWS ? (size_t)(b->n - i)
+                                               : BFI_CHUNK_ROWS;
+        uint8_t *enc = bfi_hasher_slot(h, chunk);
+        if (!bfi_scan_chunk(b, enc, i, cnt)) return false;
+        bfi_hasher_push(h, chunk, cnt * BFI_ROW);
+    }
+    return true;
+}
+
+static bool bfi_scan_rows_inline(struct bfi *b)
+{
+    for (uint64_t i = 0; i < b->n; i += BFI_CHUNK_ROWS) {
+        size_t cnt = b->n - i < BFI_CHUNK_ROWS ? (size_t)(b->n - i)
+                                               : BFI_CHUNK_ROWS;
+        if (!bfi_scan_chunk(b, b->enc, i, cnt)) return false;
+        sha3_256_write(&b->sha3, b->enc, cnt * BFI_ROW);
     }
     return true;
 }
 
 static bool bfi_scan_rows(struct bfi *b)
 {
-    for (uint64_t i = 0; i < b->n; i += BFI_CHUNK_ROWS) {
-        size_t cnt = b->n - i < BFI_CHUNK_ROWS ? (size_t)(b->n - i)
-                                               : BFI_CHUNK_ROWS;
-        if (!bfi_scan_chunk(b, i, cnt)) return false;
+    struct bfi_hasher h = { .sha3 = &b->sha3, .buf = { b->enc, b->enc2 } };
+    pthread_t tid;
+    pthread_mutex_init(&h.mu, NULL);
+    pthread_cond_init(&h.cv, NULL);
+    // thread-supervision-ok: one bounded hasher, closed and joined below
+    bool threaded = thread_registry_spawn("bfi-sha3", bfi_hasher_main, &h,
+                                          &tid) == 0;
+    bool ok = threaded ? bfi_scan_rows_with(b, &h) : bfi_scan_rows_inline(b);
+    if (threaded) {
+        bfi_hasher_close(&h);
+        pthread_join(tid, NULL);
     }
-    return true;
+    pthread_cond_destroy(&h.cv);
+    pthread_mutex_destroy(&h.mu);
+    return ok;
 }
 
 static bool bfi_scan(struct bfi *b, struct main_state *ms,
@@ -199,7 +354,7 @@ static bool bfi_write_runs(struct bfi *b)
             uint64_t left = b->runs[r].rows - k;
             size_t cnt = left < BFI_CHUNK_ROWS ? (size_t)left : BFI_CHUNK_ROWS;
             uint64_t first = b->runs[r].first + k;
-            bfi_encode_rows(b, first, cnt);
+            bfi_encode_rows(b, b->enc, first, cnt);
             sha3_256_write(&again, b->enc, cnt * BFI_ROW);
             if (!bfi_pwrite_full(b, b->enc, cnt * BFI_ROW,
                                  BFI_HDR + BFI_PREFIX + first * BFI_ROW))
@@ -297,14 +452,47 @@ static bool bfi_open(struct bfi *b, const char *datadir, size_t n)
     b->old_size = (uint64_t)st.st_size;
     b->runs = zcl_malloc((n / 4 + 1) * sizeof(*b->runs), "bfi runs");
     b->enc = zcl_malloc(BFI_CHUNK_ROWS * BFI_ROW, "bfi enc");
+    b->enc2 = zcl_malloc(BFI_CHUNK_ROWS * BFI_ROW, "bfi enc2");
     b->old = zcl_malloc(BFI_CHUNK_ROWS * BFI_ROW, "bfi old");
-    return b->runs && b->enc && b->old && bfi_old_shape_ok(b);
+    return b->runs && b->enc && b->enc2 && b->old && bfi_old_shape_ok(b);
 }
 
 static void bfi_close(struct bfi *b)
 {
     if (b->fd >= 0) close(b->fd);
-    free(b->runs); free(b->enc); free(b->old);
+    free(b->runs); free(b->enc); free(b->enc2); free(b->old);
+    free(b->hashes);
+}
+
+/* The file about to be replaced, when this process's full hash proved it:
+ * then its rows are the ones the diff read, and the changed hashes are a
+ * complete account of what differs. Asked before anything is written. */
+static bool bfi_base_identity(const struct bfi *b, const char *datadir,
+                              struct block_index_flat_identity *base)
+{
+    struct ssio_sidecar_header proven;
+    if (!bii_verified_body_current(datadir, &proven) ||
+        proven.body_size != b->old_hdr.body_size ||
+        memcmp(proven.body_sha3, b->old_hdr.body_sha3, 32) != 0 ||
+        b->old_count > b->n)
+        return false;
+    memcpy(base->payload_sha3, proven.body_sha3, 32);
+    base->payload_size = proven.body_size;
+    base->row_count = b->old_count;
+    return true;
+}
+
+/* Keep the changed hashes for the bind that follows this save. */
+static void bfi_keep_delta(struct bfi *b,
+                           const struct block_index_flat_identity *base,
+                           const struct block_index_flat_identity *saved)
+{
+    g_delta.valid = true;
+    g_delta.base = *base;
+    g_delta.saved = *saved;
+    g_delta.hashes = b->hashes;
+    g_delta.nhashes = b->nhashes;
+    b->hashes = NULL;
 }
 
 enum bif_inplace block_index_flat_save_inplace(
@@ -315,8 +503,14 @@ enum bif_inplace block_index_flat_save_inplace(
     memset(&b, 0, sizeof(b));
     b.fd = -1; b.sorted = sorted; b.n = n;
     uint8_t sha3[32]; uint64_t size = 0;
+    struct block_index_flat_identity base;
     enum bif_inplace verdict = BIF_INPLACE_DECLINED;
+    block_index_flat_delta_forget();
     if (n && bfi_open(&b, datadir, n) && bfi_scan(&b, ms, sha3, &size)) {
+        bool base_proven = bfi_base_identity(&b, datadir, &base);
+        /* From the first write on, the file is no longer the one the memo
+         * proved, as bii_write_embedded also declares. */
+        bii_verified_body_forget();
         verdict = bfi_publish(&b, datadir, size, sha3) ? BIF_INPLACE_DONE
                                                        : BIF_INPLACE_FAILED;
         if (b.crashed) verdict = BIF_INPLACE_CRASHED;
@@ -324,6 +518,8 @@ enum bif_inplace block_index_flat_save_inplace(
             memcpy(ident->payload_sha3, sha3, 32);
             ident->payload_size = size; ident->row_count = n;
             *rewritten = b.written;
+            if (base_proven && !b.hashes_lost)
+                bfi_keep_delta(&b, &base, ident);
         }
     }
     bfi_close(&b);
@@ -331,6 +527,17 @@ enum bif_inplace block_index_flat_save_inplace(
 }
 
 #else /* _WIN32 */
+
+void block_index_flat_delta_forget(void)
+{
+}
+
+bool block_index_flat_delta_for(const struct block_index_flat_identity *saved,
+                                struct block_index_flat_delta *out)
+{
+    (void)saved; (void)out;
+    return false;
+}
 
 enum bif_inplace block_index_flat_save_inplace(
     const char *datadir, struct main_state *ms, struct block_index **sorted,

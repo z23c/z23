@@ -7,6 +7,7 @@
  * to the event-derived projection's dirty journal. */
 
 #include "services/block_index_loader.h"
+#include "block_index_flat_internal.h"
 
 #include "chain/chain.h"
 #include "chain/chainparams.h"
@@ -65,14 +66,29 @@ static bool flat_state_covers_projection_row(
                                        row->nBits, ctx->cp, NULL);
 }
 
+/* When the save that produced `identity` diffed against the flat the stored
+ * binding names, prove only the dirty rows and the rows its changed hashes
+ * name. A refusal there is final: the full proof checks the same rows with
+ * the same predicate. Any other outcome runs the full proof. */
 bool block_index_projection_bind_saved_flat_state(
     struct block_index_projection *bip,
     const struct block_index_flat_identity *identity,
     struct main_state *state)
 {
+    if (!bip || !identity || !state)
+        return false;
     struct flat_cover_ctx ctx = { .state = state, .cp = chain_params_get() };
-    return bip && identity && state &&
-        block_index_projection_bind_flat_if_covered(
-            bip, identity->payload_sha3, identity->payload_size,
-            identity->row_count, flat_state_covers_projection_row, &ctx);
+    struct block_index_flat_delta delta;
+    if (block_index_flat_delta_for(identity, &delta)) {
+        int verdict = block_index_projection_rebind_flat_if_covered(
+            bip, delta.base.payload_sha3, delta.base.payload_size,
+            delta.base.row_count, identity->payload_sha3,
+            identity->payload_size, identity->row_count, delta.hashes,
+            delta.nhashes, flat_state_covers_projection_row, &ctx);
+        if (verdict == 1 || verdict == -1)
+            return verdict == 1;
+    }
+    return block_index_projection_bind_flat_if_covered(
+        bip, identity->payload_sha3, identity->payload_size,
+        identity->row_count, flat_state_covers_projection_row, &ctx);
 }

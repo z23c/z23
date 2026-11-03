@@ -394,6 +394,16 @@ unsigned block_index_projection_last_bind_threads(block_index_projection_t *p)
     return n;
 }
 
+uint64_t block_index_projection_last_bind_rows(block_index_projection_t *p)
+{
+    if (!p)
+        return 0;
+    pthread_mutex_lock(&p->mu);
+    uint64_t n = p->last_bind_rows;
+    pthread_mutex_unlock(&p->mu);
+    return n;
+}
+
 bool block_index_projection_bind_flat_if_covered(
     block_index_projection_t *p, const uint8_t digest[32], uint64_t size,
     uint64_t rows, block_index_projection_cb covered, void *user)
@@ -415,6 +425,7 @@ bool block_index_projection_bind_flat_if_covered(
     bool ok = projection_rows <= rows &&
         bind_verify_ranges(p, n, projection_rows, rows, covered, user,
                            &verified);
+    p->last_bind_rows = verified;
     if (!ok) {
         fprintf(stderr, // obs-ok:block-index-projection-storage-boundary
                 "[block_index_projection] covered flat bind refused "
@@ -440,6 +451,140 @@ static bool binding_matches(block_index_projection_t *p,
            binding_meta_u64(p->db, "flat_row_count", UINT64_MAX) == rows &&
            binding_meta_u64(p->db, "flat_covered_offset", UINT64_MAX) <=
                p->last_consumed_offset;
+}
+
+/* ---- Incremental coverage proof --------------------------------------
+ * The previous covered bind proved every projection row against the flat it
+ * named, and every row written since is in the dirty set. A row that is not
+ * dirty and whose hash sits at no changed flat position has the same
+ * projection bytes and the same flat row as when it was proven, so the proof
+ * re-runs only on dirty rows and on the rows a changed hash names. */
+
+/* 1 covered, -1 refused; a malformed row refuses, as in the full proof. */
+static int rebind_row_verdict(const void *hash, const void *blob, int len,
+                              block_index_projection_cb covered, void *user)
+{
+    struct disk_block_index idx;
+    uint8_t hash_copy[32];
+    memcpy(hash_copy, hash, sizeof(hash_copy));
+    return binding_blob_parse(blob, len, &idx) &&
+           covered(hash_copy, &idx, user) ? 1 : -1;
+}
+
+/* The LEFT JOIN keeps the dirty journal as the outer loop, as the boot
+ * delta scan does: an inner join lets the planner scan every projection row
+ * instead. A dirty hash with no projection row has nothing to prove. */
+static int rebind_verify_dirty(block_index_projection_t *p,
+                               block_index_projection_cb covered, void *user,
+                               uint64_t *checked)
+{
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(p->db,
+            "SELECT d.hash,b.blob FROM block_index_dirty d LEFT JOIN "
+            "block_index b ON b.hash=d.hash", -1, &stmt, NULL) != SQLITE_OK)
+        return -2;
+    int verdict = 1, rc = SQLITE_DONE;
+    while (verdict == 1 &&
+           (rc = sqlite3_step(stmt)) == SQLITE_ROW) { // raw-sql-ok:kernel-primitive
+        const void *hash = sqlite3_column_blob(stmt, 0);
+        if (sqlite3_column_type(stmt, 1) == SQLITE_NULL)
+            continue;
+        (*checked)++;
+        verdict = hash && sqlite3_column_bytes(stmt, 0) == 32
+            ? rebind_row_verdict(hash, sqlite3_column_blob(stmt, 1),
+                                 sqlite3_column_bytes(stmt, 1), covered, user)
+            : -1;
+    }
+    if (verdict == 1 && rc != SQLITE_DONE)
+        verdict = -2;
+    sqlite3_finalize(stmt);
+    return verdict;
+}
+
+static int rebind_verify_changed(block_index_projection_t *p,
+                                 const uint8_t (*changed)[32], size_t n,
+                                 block_index_projection_cb covered,
+                                 void *user, uint64_t *checked)
+{
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(p->db, "SELECT blob FROM block_index WHERE hash=?",
+                           -1, &stmt, NULL) != SQLITE_OK)
+        return -2;
+    int verdict = 1;
+    for (size_t i = 0; verdict == 1 && i < n; i++) {
+        sqlite3_reset(stmt);
+        sqlite3_bind_blob(stmt, 1, changed[i], 32, SQLITE_STATIC);
+        int rc = sqlite3_step(stmt); // raw-sql-ok:kernel-primitive
+        if (rc == SQLITE_DONE)
+            continue; /* no projection row carries this hash */
+        if (rc != SQLITE_ROW) {
+            verdict = -2;
+            break;
+        }
+        (*checked)++;
+        verdict = rebind_row_verdict(changed[i], sqlite3_column_blob(stmt, 0),
+                                     sqlite3_column_bytes(stmt, 0), covered,
+                                     user);
+    }
+    sqlite3_finalize(stmt);
+    return verdict;
+}
+
+/* Under p->mu, after the stored binding matched the base: the same row-count
+ * bound as the full proof, then the changed rows. */
+static int rebind_prove(block_index_projection_t *p, uint64_t row_count,
+                        const uint8_t (*changed)[32], size_t n_changed,
+                        block_index_projection_cb covered, void *user,
+                        uint64_t *projection_rows, uint64_t *checked)
+{
+    int rc = SQLITE_OK;
+    *projection_rows = bind_count_rows(p->db, &rc);
+    if (*projection_rows == UINT64_MAX)
+        return -2;
+    if (*projection_rows > row_count)
+        return -1;
+    int verdict = rebind_verify_dirty(p, covered, user, checked);
+    return verdict == 1 ? rebind_verify_changed(p, changed, n_changed,
+                                                covered, user, checked)
+                        : verdict;
+}
+
+int block_index_projection_rebind_flat_if_covered(
+    block_index_projection_t *p, const uint8_t base_sha3[32],
+    uint64_t base_size, uint64_t base_rows, const uint8_t payload_sha3[32],
+    uint64_t payload_size, uint64_t row_count, const uint8_t (*changed)[32],
+    size_t n_changed, block_index_projection_cb covered, void *user)
+{
+    if (!p || !p->db || !base_sha3 || !payload_sha3 || !covered ||
+        (n_changed && !changed)) {
+        fprintf(stderr, // obs-ok:block-index-projection-storage-boundary
+                "[block_index_projection] incremental flat bind invalid "
+                "argument\n");
+        return -2;
+    }
+    char digest_hex[65];
+    zcl_hex_encode(payload_sha3, 32, digest_hex);
+    pthread_mutex_lock(&p->mu);
+    uint64_t projection_rows = 0, checked = 0;
+    int verdict = binding_matches(p, base_sha3, base_size, base_rows)
+        ? rebind_prove(p, row_count, changed, n_changed, covered, user,
+                       &projection_rows, &checked)
+        : 0;
+    if (verdict == 1 && !binding_commit(p, digest_hex, payload_size,
+                                        row_count))
+        verdict = -2;
+    if (verdict != 0) {
+        p->last_bind_threads = 1;
+        p->last_bind_rows = checked;
+    }
+    if (verdict < 0)
+        fprintf(stderr, // obs-ok:block-index-projection-storage-boundary
+                "[block_index_projection] incremental flat bind %s "
+                "projection=%" PRIu64 " checked=%" PRIu64 " changed=%zu "
+                "flat=%" PRIu64 "\n", verdict == -1 ? "refused" : "failed",
+                projection_rows, checked, n_changed, row_count);
+    pthread_mutex_unlock(&p->mu);
+    return verdict;
 }
 
 /* Dirty-iterate argument gate: every pointer the scan dereferences. */

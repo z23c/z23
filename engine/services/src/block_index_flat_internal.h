@@ -43,6 +43,19 @@ enum bif_inplace block_index_flat_save_inplace(
 extern int g_block_index_flat_inplace_fault;
 #endif
 
+/* What the most recent in-place save changed: the proven file it replaced
+ * (`base`) and every row hash at a position where the two differ, old and
+ * new. Only a save that diffed against a file this process fully hashed
+ * keeps one; every save replaces it. The hash list stays owned here. */
+struct block_index_flat_delta {
+    struct block_index_flat_identity base;
+    const uint8_t (*hashes)[32];
+    size_t nhashes;
+};
+bool block_index_flat_delta_for(const struct block_index_flat_identity *saved,
+                                struct block_index_flat_delta *out);
+void block_index_flat_delta_forget(void);
+
 void block_index_flat_identity_remember(
     const char *datadir, const struct block_index_flat_identity *identity);
 void block_index_flat_identity_forget(void);

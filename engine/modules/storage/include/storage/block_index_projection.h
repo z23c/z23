@@ -53,6 +53,7 @@
 #include "storage/block_index_db.h"   /* for struct disk_block_index */
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 typedef struct block_index_projection block_index_projection_t;
@@ -124,10 +125,31 @@ bool block_index_projection_bind_flat_if_covered(
     uint64_t payload_size, uint64_t row_count,
     block_index_projection_cb covered, void *user);
 
+/* Move a covered binding from the flat it names to its successor, proving
+ * only what changed. The stored binding must name `base` exactly (the
+ * previous covered bind proved every projection row against it, and every
+ * row written since is in the dirty set). `changed` lists every row hash at
+ * a position where the two flats differ, old and new. The proof re-runs
+ * `covered` on every dirty row and every projection row a changed hash
+ * names, requires the projection row count to stay within the new flat's
+ * row count, then commits exactly what block_index_projection_bind_flat_if_
+ * covered commits. Returns 1 bound, 0 the stored binding does not name
+ * `base` (run the full proof), -1 a row is not covered (the full proof would
+ * refuse it too), -2 a storage error (run the full proof). */
+int block_index_projection_rebind_flat_if_covered(
+    block_index_projection_t *p, const uint8_t base_sha3[32],
+    uint64_t base_size, uint64_t base_rows, const uint8_t payload_sha3[32],
+    uint64_t payload_size, uint64_t row_count, const uint8_t (*changed)[32],
+    size_t n_changed, block_index_projection_cb covered, void *user);
+
 /* Threads the last covered bind used to verify rows (1 = single pass). The
  * `covered` callback of block_index_projection_bind_flat_if_covered runs on up
  * to 8 threads at once, so it must be thread-safe and side-effect free. */
 unsigned block_index_projection_last_bind_threads(block_index_projection_t *p);
+
+/* Projection rows the last full or incremental covered bind ran `covered`
+ * on. */
+uint64_t block_index_projection_last_bind_rows(block_index_projection_t *p);
 
 #ifdef ZCL_TESTING
 void block_index_projection_bind_workers_for_test(unsigned workers);
