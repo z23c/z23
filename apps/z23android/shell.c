@@ -235,18 +235,31 @@ static bool build_apps(JNIEnv *env, jobject root)
         zj_keep(env, &shell.apps_list, list);
     return ok;
 }
+/* A scroll view filling the rest of root around a column for the screen's content, so large text or a sideways
+ * phone cuts nothing off. Returns the column as a local reference the caller deletes, or NULL on failure. */
+static jobject scroll_column(JNIEnv *env, jobject root, int padding_dp)
+{
+    jobject scroll = zj_widget(env, "android/widget/ScrollView", shell.activity), content = column(env, DARK, padding_dp, false);
+    bool ok = scroll && content && zj_margins(env, scroll, MATCH, 0, 1.0f, 0, 0, 0, 0) && zj_append(env, scroll, content) &&
+        zj_append(env, root, scroll);
+    if (scroll) (*env)->DeleteLocalRef(env, scroll);
+    if (!ok && content) { (*env)->DeleteLocalRef(env, content); content = NULL; }
+    return content;
+}
 static bool build_settings(JNIEnv *env, jobject root)
 {
     jobject status = zj_widget(env, "android/widget/TextView", shell.activity);
-    bool ok = add_notice(env, root, SCREEN_SETTINGS) && label(env, root, "Home settings", 24.0f, WHITE) && status && zj_typography(env, status, 15.0f, (jint)0xffb0b0b0u) &&
-        zj_append(env, root, status) && zj_keep(env, &shell.status_view, status);
+    jobject content = status && add_notice(env, root, SCREEN_SETTINGS) ? scroll_column(env, root, 0) : NULL;
+    bool ok = content && label(env, content, "Home settings", 24.0f, WHITE) && zj_typography(env, status, 15.0f, (jint)0xffb0b0b0u) &&
+        zj_append(env, content, status) && zj_keep(env, &shell.status_view, status);
     for (size_t i = 0; ok && i < zapp_home_layout_count(); ++i) {
         char text[ZAPP_NAME_CAP + 16];
         snprintf(text, sizeof(text), "Layout: %s", zapp_home_layout_name(i));
-        ok = button(env, root, text, CMD_LAYOUT, i, 0);
+        ok = button(env, content, text, CMD_LAYOUT, i, 0);
     }
-    ok = ok && button(env, root, "Android home settings", CMD_HOME_SETTINGS, 0, 0) && button(env, root, "Home", CMD_HOME, 0, 0);
+    ok = ok && button(env, content, "Android home settings", CMD_HOME_SETTINGS, 0, 0) && button(env, content, "Home", CMD_HOME, 0, 0);
     if (status) (*env)->DeleteLocalRef(env, status);
+    if (content) (*env)->DeleteLocalRef(env, content);
     return ok;
 }
 /* The camera preview with Cancel. */
@@ -286,28 +299,22 @@ static void show_scan_screen(JNIEnv *env, enum zapp_camera_access access)
 }
 static bool build_wallet(JNIEnv *env, jobject root)
 {
-    jobject scroll = zj_widget(env, "android/widget/ScrollView", shell.activity), content = column(env, DARK, 16, false);
-    bool ok = scroll && content && zj_margins(env, scroll, MATCH, 0, 1.0f, 0, 0, 0, 0) && zj_append(env, scroll, content) &&
-        zj_append(env, root, scroll) && zapp_wallet_ui_create(env, shell.activity, content);
-    if (scroll) (*env)->DeleteLocalRef(env, scroll);
+    jobject content = scroll_column(env, root, 16);
+    bool ok = content && zapp_wallet_ui_create(env, shell.activity, content);
     if (content) (*env)->DeleteLocalRef(env, content);
     return ok;
 }
 static bool build_send(JNIEnv *env, jobject root)
 {
-    jobject scroll = zj_widget(env, "android/widget/ScrollView", shell.activity), content = column(env, DARK, 16, false);
-    bool ok = scroll && content && add_notice(env, root, SCREEN_SEND) && zj_margins(env, scroll, MATCH, 0, 1.0f, 0, 0, 0, 0) && zj_append(env, scroll, content) &&
-        zj_append(env, root, scroll) && zapp_send_ui_create(env, shell.activity, content);
-    if (scroll) (*env)->DeleteLocalRef(env, scroll);
+    jobject content = add_notice(env, root, SCREEN_SEND) ? scroll_column(env, root, 16) : NULL;
+    bool ok = content && zapp_send_ui_create(env, shell.activity, content);
     if (content) (*env)->DeleteLocalRef(env, content);
     return ok;
 }
 static bool build_setup(JNIEnv *env, jobject root)
 {
-    jobject scroll = zj_widget(env, "android/widget/ScrollView", shell.activity), content = column(env, DARK, 16, false);
-    bool ok = scroll && content && add_notice(env, root, SCREEN_SETUP) && zj_margins(env, scroll, MATCH, 0, 1.0f, 0, 0, 0, 0) && zj_append(env, scroll, content) &&
-        zj_append(env, root, scroll) && zapp_setup_ui_create(env, shell.activity, content);
-    if (scroll) (*env)->DeleteLocalRef(env, scroll);
+    jobject content = add_notice(env, root, SCREEN_SETUP) ? scroll_column(env, root, 16) : NULL;
+    bool ok = content && zapp_setup_ui_create(env, shell.activity, content);
     if (content) (*env)->DeleteLocalRef(env, content);
     return ok;
 }
