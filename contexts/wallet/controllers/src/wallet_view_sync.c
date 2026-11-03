@@ -174,9 +174,9 @@ static bool wv_sync_utxo_row_fields(const char *p, const char *txid_s,
     int64_t val = 0;
     const char *scan = p;
 
+    memset(row, 0, sizeof(*row));
     if (txid_l != 64)
         return false;
-    memset(row, 0, sizeof(*row));
     if (ParseHex(txid_s, row->txid, 32) != 32)
         return false;
     json_next_int(&scan, "vout", &vout);
@@ -269,9 +269,9 @@ static bool wv_sync_note_row_fill(const char *p, const char *txid_s,
     const char *scan = p;
     uint8_t div_full[32];
 
+    memset(row, 0, sizeof(*row));
     if (txid_l != 64)
         return false;
-    memset(row, 0, sizeof(*row));
     if (ParseHex(txid_s, row->txid, 32) != 32)
         return false;
     json_next_int(&scan, "outindex", &outindex);
