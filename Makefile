@@ -4024,10 +4024,13 @@ templates-no-touch-selftest: $(VIEW_GEN_HEADERS)
 # Makefile for the tunnel binding) reruns exactly that generator; deleting a
 # header regenerates it. Generator runs are counted through a logging wrapper
 # passed as TMPL_TOOL; the tunnel rule has no tool, so its stamp mtime is the
-# witness.
+# witness. The scratch worktree is primed with worktree-prime (vendor archives
+# and Tor copied from this checkout) before its first make; a fresh worktree
+# otherwise rebuilds them inside that make, which took ~200 s. Each step prints
+# one progress line first, so the group output never goes silent for long.
 .PHONY: gen-stamps-selftest
 gen-stamps-selftest:
-	@set -eu; \
+	@set -eu; t0=$$(date +%s); p() { echo "gen-stamps-selftest: $$1 (+$$(( $$(date +%s) - t0 ))s)"; }; \
 	d="$$(mktemp -d)"; trap 'rm -rf "$$d"' EXIT HUP INT TERM; \
 	printf '%s\n' 'GEN = out.h' 'STAMP = out.stamp' \
 	  '$$(STAMP): in.txt gen.sh' '	@./gen.sh in.txt $$(GEN) && touch $$@' \
@@ -4051,8 +4054,8 @@ gen-stamps-selftest:
 	root="$$(pwd)"; sc="$${GEN_STAMPS_SCRATCH:-$$HOME/.cache/development-scratch/z23}"; \
 	mkdir -p "$$sc"; w="$$(mktemp -d "$$sc/gen-stamps-selftest.XXXXXX")"; rmdir "$$w"; \
 	trap 'git -C "$$root" worktree remove --force "$$w" >/dev/null 2>&1 || :; rm -rf "$$d" "$$w"; git -C "$$root" worktree prune' EXIT HUP INT TERM; \
-	git -C "$$root" worktree add --detach "$$w" HEAD >/dev/null 2>&1 || fail "cannot create the scratch worktree"; \
-	cp Makefile "$$w/Makefile"; \
+	p "real build in scratch worktree"; git -C "$$root" worktree add --detach "$$w" HEAD >/dev/null 2>&1 || fail "cannot create the scratch worktree"; \
+	cp Makefile "$$w/Makefile"; (cd "$$w" && $(MAKE) --no-print-directory -s worktree-prime SRC="$$root" >"$$d/prime.log" 2>&1) || { tail -n 20 "$$d/prime.log" >&2; fail "worktree-prime failed"; }; \
 	hdrs="$(TMPL_GEN) $(SITE_CSS_GEN) $(INSTALL_SH_GEN) $(TUNNEL_EXPORT_BINDING)"; \
 	stamps="$(TMPL_STAMP) $(SITE_CSS_STAMP) $(INSTALL_SH_STAMP) $(TUNNEL_EXPORT_BINDING_STAMP)"; \
 	chtml="$$(ls "$$w"/$(TMPL_DIR)/*.chtml | head -n 1)"; \
@@ -4066,7 +4069,7 @@ gen-stamps-selftest:
 	    if [ "$$m" = 1 ]; then [ "$$a" != "$$b" ] || fail "$$what: file $$i did not change"; \
 	    else [ "$$a" = "$$b" ] || fail "$$what: file $$i changed but should not have"; fi; i=$$((i+1)); done; \
 	    [ "$$(tr '\n' ' ' < "$$d/gen.log" | sed 's/ $$//')" = "$$glog" ] || fail "$$what: generator runs were '$$(tr '\n' ' ' < "$$d/gen.log")', expected '$$glog'"; }; \
-	rmk; for f in $$stamps $$hdrs; do [ -e "$$w/$$f" ] || fail "real build did not produce $$f"; done; \
+	p "real build of the four headers"; rmk; for f in $$stamps $$hdrs; do [ -e "$$w/$$f" ] || fail "real build did not produce $$f"; done; \
 	cp "$$w/tools/dev/source-identity.sh" "$$w/tools/dev/source-identity-real.sh"; \
 	printf '%s\n' '#!/bin/sh' "[ \"\$$1\" != capture-record ] || echo capture >> '$$d/captures'" \
 	  'exec "$$(dirname "$$0")/source-identity-real.sh" "$$@"' > "$$w/tools/dev/source-identity.sh"; \
@@ -4083,21 +4086,21 @@ gen-stamps-selftest:
 	done; \
 	mv "$$w/tools/dev/source-identity-real.sh" "$$w/tools/dev/source-identity.sh"; \
 	for h in $$hdrs; do touch -d '2001-01-01' "$$w/$$h"; done; \
-	before="$$(snap)"; lmk; lmk; after="$$(snap)"; \
+	p "settled-tree rerun"; before="$$(snap)"; lmk; lmk; after="$$(snap)"; \
 	expect "settled tree" 00000000 ""; \
-	sleep 1; touch "$$chtml"; before="$$(snap)"; lmk; after="$$(snap)"; \
+	p "touched .chtml rerun"; sleep 1; touch "$$chtml"; before="$$(snap)"; lmk; after="$$(snap)"; \
 	expect "touched .chtml" 10000000 "$(TMPL_DIR)"; \
-	sleep 1; touch "$$w/$(SITE_CSS_SRC)"; before="$$(snap)"; lmk; after="$$(snap)"; \
+	p "touched site.css rerun"; sleep 1; touch "$$w/$(SITE_CSS_SRC)"; before="$$(snap)"; lmk; after="$$(snap)"; \
 	expect "touched site.css" 01000000 "--single-css"; \
-	sleep 1; touch "$$w/$(INSTALL_SH_SRC)"; before="$$(snap)"; lmk; after="$$(snap)"; \
+	p "touched install script rerun"; sleep 1; touch "$$w/$(INSTALL_SH_SRC)"; before="$$(snap)"; lmk; after="$$(snap)"; \
 	expect "touched install script" 00100000 "--single-text"; \
-	sleep 1; touch "$$w/Makefile"; before="$$(snap)"; lmk; after="$$(snap)"; \
+	p "touched Makefile rerun"; sleep 1; touch "$$w/Makefile"; before="$$(snap)"; lmk; after="$$(snap)"; \
 	expect "touched Makefile" 00010000 ""; \
 	for n in 1 2 3 4; do \
 	  h="$$(echo "$$hdrs" | cut -d' ' -f$$n)"; \
 	  case $$n in 1) g="$(TMPL_DIR)"; mask=10001000;; 2) g="--single-css"; mask=01000100;; \
 	    3) g="--single-text"; mask=00100010;; 4) g=""; mask=00010001;; esac; \
-	  sleep 1; rm -f "$$w/$$h"; \
+	  p "deleted $$h rerun"; sleep 1; rm -f "$$w/$$h"; \
 	  before="$$(for f in $$stamps $$hdrs; do if [ -e "$$w/$$f" ]; then stat -c '%y' "$$w/$$f" | tr -d ' :.+-'; else echo gone; fi; done | tr '\n' ' ')"; \
 	  lmk; [ -e "$$w/$$h" ] || fail "deleted $$h was not regenerated"; after="$$(snap)"; \
 	  expect "deleted $$h" "$$mask" "$$g"; \
