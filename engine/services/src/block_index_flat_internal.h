@@ -45,8 +45,9 @@ extern int g_block_index_flat_inplace_fault;
 
 /* What the most recent in-place save changed: the proven file it replaced
  * (`base`) and every row hash at a position where the two differ, old and
- * new. Only a save that diffed against a file this process fully hashed
- * keeps one; every save replaces it. The hash list stays owned here. */
+ * new. Only a save that returns its identity and diffed against a file this
+ * process fully hashed keeps one; every save replaces it. The hash list stays
+ * owned here. */
 struct block_index_flat_delta {
     struct block_index_flat_identity base;
     const uint8_t (*hashes)[32];

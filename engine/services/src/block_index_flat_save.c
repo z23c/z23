@@ -202,7 +202,10 @@ struct zcl_result block_index_flat_write_identity(
     if (!written.ok)
         return written;
     block_index_flat_identity_remember(datadir, &ctx.identity);
+    /* Only a caller that takes the identity can bind this save, so any other
+     * caller drops the changed-hash list instead of holding it for the run. */
     if (out) *out = ctx.identity;
+    else block_index_flat_delta_forget();
     LOG_INFO("block_index_flat", "Block index flat file: %zu entries, "
              "%zuMB (%llds) path=%s", n, n * sizeof(struct block_index_flat) /
              (1024 * 1024), (long long)((int64_t)platform_time_wall_time_t() - started), g_last_path);

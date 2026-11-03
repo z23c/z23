@@ -536,6 +536,30 @@ static int bfr_failed_save(struct bfr_fixture *x)
     return failures;
 }
 
+/* A save that returns no identity cannot be bound, so it keeps no changed
+ * hashes: with the index unchanged and its base proven, a bind after it
+ * still finds no delta and proves every row. */
+static int bfr_identityless_save(struct bfr_fixture *x)
+{
+    int failures = 0;
+    uint64_t dirty = 0;
+    struct block_index_flat_identity before = x->id;
+    bool ok = bii_verify_embedded(x->dir, NULL, NULL) == 0 &&
+              save_block_index_flat_identity(x->dir, &x->f.ms, NULL).ok &&
+              bfip_path_is("incremental") &&
+              bii_verify_embedded(x->dir, NULL, NULL) == 0;
+    BFIP_CHECK("rebind: a save without an identity saves in place", ok);
+    BFIP_CHECK("rebind: it keeps no changed hashes, so the bind proves every "
+               "row",
+               ok && bfr_bind(x) && bfr_checked(x) == BFR_ROWS + BFR_NEW &&
+               bfr_boot_bound(x, &dirty) == 1 && dirty == 0);
+    BFIP_CHECK("rebind: a save that returns its identity keeps them again",
+               bfr_save(x, "incremental") &&
+               memcmp(&before, &x->id, sizeof(x->id)) == 0 && bfr_bind(x) &&
+               bfr_checked(x) == 0 && bfr_boot_bound(x, &dirty) == 1);
+    return failures;
+}
+
 static int bfip_rebind(const char *dir)
 {
     int failures = 0;
@@ -547,6 +571,7 @@ static int bfip_rebind(const char *dir)
         failures += bfr_incremental(&x);
         failures += bfr_refusal(&x);
         failures += bfr_failed_save(&x);
+        failures += bfr_identityless_save(&x);
     }
     bfr_close(&x);
     return failures;
