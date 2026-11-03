@@ -162,6 +162,60 @@ static bool dbr_row_in(const char *file_text, const char *lane)
     return strstr(file_text, key) != NULL;
 }
 
+static int dbr_t_registered(void)
+{
+    int failures = 0;
+    TEST("restack: the leaf is registered and declares its keys") {
+        const struct zcl_command_spec *spec = zcl_command_registry_find(
+            zcl_command_catalog(), "dev.batch.restack", NULL);
+        ASSERT(spec != NULL);
+        ASSERT(strstr(spec->input_keys, "dry_run") != NULL);
+        ASSERT(strstr(spec->input_keys, "now") != NULL);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int dbr_t_unreadable(struct dbr *r, const char *l0)
+{
+    int failures = 0;
+    char dump[DBR_MAX * 4], tmp[DBR_MAX * 4], bad[1000];
+    struct zcl_command_reply reply;
+    const char *now[] = {"now", NULL};
+    TEST("restack: land status that is not ok restacks nothing") {
+        (void)snprintf(bad, sizeof(bad), "%s/bad-dev", r->f.fakes);
+        ASSERT(dbf_exec(bad, "#!/bin/sh\necho oops\n"));
+        dbr_restack(r, now, &reply, dump, sizeof(dump), bad);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(strstr(dump, "restack-failed: land status unreadable; nothing restacked") != NULL);
+        zcl_command_reply_free(&reply);
+        ASSERT(dbf_slurp(r->ledger, tmp, sizeof(tmp)) && strcmp(tmp, l0) == 0);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int dbr_t_spaced(struct dbr *r, const char *devbin)
+{
+    int failures = 0;
+    char dump[DBR_MAX * 4];
+    struct zcl_command_reply reply;
+    const char *now[] = {"now", NULL};
+    TEST("restack: the next pass without --now is spaced out; with --now it has nothing left") {
+        dbr_restack(r, NULL, &reply, dump, sizeof(dump), devbin);
+        ASSERT(strstr(dump, "\"spaced\":true") != NULL);
+        zcl_command_reply_free(&reply);
+        dbr_restack(r, now, &reply, dump, sizeof(dump), devbin);
+        ASSERT(strstr(dump, "\"count\":0") != NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int test_dev_batch_restack(void);
 int test_dev_batch_restack(void)
 {
@@ -180,14 +234,7 @@ int test_dev_batch_restack(void)
     ASSERT(dbf_slurp(r.pending, p0, sizeof(p0)));
     ASSERT(dbf_slurp(r.done, d0, sizeof(d0)));
 
-    TEST("restack: the leaf is registered and declares its keys") {
-        const struct zcl_command_spec *spec = zcl_command_registry_find(
-            zcl_command_catalog(), "dev.batch.restack", NULL);
-        ASSERT(spec != NULL);
-        ASSERT(strstr(spec->input_keys, "dry_run") != NULL);
-        ASSERT(strstr(spec->input_keys, "now") != NULL);
-        PASS();
-    }
+    failures += dbr_t_registered();
 
     TEST("restack --dry-run: names the lanes that would go back and writes nothing") {
         dbr_restack(&r, dry, &reply, dump, sizeof(dump), devbin);
@@ -221,17 +268,7 @@ int test_dev_batch_restack(void)
         PASS();
     }
 
-    TEST("restack: land status that is not ok restacks nothing") {
-        char bad[1000];
-        (void)snprintf(bad, sizeof(bad), "%s/bad-dev", r.f.fakes);
-        ASSERT(dbf_exec(bad, "#!/bin/sh\necho oops\n"));
-        dbr_restack(&r, now, &reply, dump, sizeof(dump), bad);
-        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
-        ASSERT(strstr(dump, "restack-failed: land status unreadable; nothing restacked") != NULL);
-        zcl_command_reply_free(&reply);
-        ASSERT(dbf_slurp(r.ledger, tmp, sizeof(tmp)) && strcmp(tmp, l0) == 0);
-        PASS();
-    }
+    failures += dbr_t_unreadable(&r, l0);
 
     TEST("restack --now: drops the taken ledger rows, appends pending and restacked rows in the bridge's bytes") {
         char want[1400], when[64];
@@ -268,15 +305,7 @@ int test_dev_batch_restack(void)
         PASS();
     }
 
-    TEST("restack: the next pass without --now is spaced out; with --now it has nothing left") {
-        dbr_restack(&r, NULL, &reply, dump, sizeof(dump), devbin);
-        ASSERT(strstr(dump, "\"spaced\":true") != NULL);
-        zcl_command_reply_free(&reply);
-        dbr_restack(&r, now, &reply, dump, sizeof(dump), devbin);
-        ASSERT(strstr(dump, "\"count\":0") != NULL);
-        zcl_command_reply_free(&reply);
-        PASS();
-    }
+    failures += dbr_t_spaced(&r, devbin);
 
     TEST("11-03: a lane left for triage keeps its stacked.tsv row, and requeue clears it") {
         ASSERT(dbr_row_in(l1, r.lane[L_N]));
