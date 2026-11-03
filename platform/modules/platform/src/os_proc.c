@@ -470,8 +470,10 @@ bool os_proc_exe_path(char *buf, size_t n)
     }
     return true;
 #else
+    /* readlink neither terminates nor reports truncation: a target that
+     * fills n - 1 bytes may have been cut short, so it is a refusal. */
     ssize_t len = readlink("/proc/self/exe", buf, n - 1);
-    if (len <= 0)
+    if (len <= 0 || (size_t)len >= n - 1)
         return false; // raw-return-ok:optional-exe-path-unavailable
     buf[len] = '\0';
     return true;

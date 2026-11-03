@@ -527,6 +527,28 @@ static int os_proc_exe_path_checks(void)
     return failures;
 }
 
+/* exe_path fails rather than cutting a path short: a buffer too small for
+ * the real path is a refusal, and a PATH_MAX buffer names /proc/self/exe. */
+static int os_proc_exe_path_fit_checks(void)
+{
+    int failures = 0;
+    char tiny[4];
+    OSPROC_CHECK("exe_path refuses a 4-byte buffer instead of truncating",
+                 !os_proc_exe_path(tiny, sizeof(tiny)));
+    char path[PATH_MAX];
+    bool ok = os_proc_exe_path(path, sizeof(path));
+    OSPROC_CHECK("exe_path fills a PATH_MAX buffer", ok);
+#if defined(__linux__)
+    struct stat by_name, by_magic;
+    OSPROC_CHECK("exe_path names the file /proc/self/exe names",
+                 ok && stat(path, &by_name) == 0 &&
+                 stat("/proc/self/exe", &by_magic) == 0 &&
+                 by_name.st_dev == by_magic.st_dev &&
+                 by_name.st_ino == by_magic.st_ino);
+#endif
+    return failures;
+}
+
 /* open_self_exe hands back real bytes of the running image. */
 static int os_proc_open_self_exe_read_checks(void)
 {
@@ -1003,6 +1025,7 @@ int test_os_proc(void)
     failures += os_proc_uptime_checks();
     failures += os_proc_pid_start_token_checks();
     failures += os_proc_exe_path_checks();
+    failures += os_proc_exe_path_fit_checks();
     failures += os_proc_open_self_exe_read_checks();
     failures += os_proc_self_exe_identity_rung_checks();
     failures += os_proc_cgroup_dir_checks();
