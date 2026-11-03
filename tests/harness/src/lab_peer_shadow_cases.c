@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * test_lab_peer_shadow: whole runs of "z23-lab-peer shadow" (tools/
+ * lab_peer_shadow_cases: whole runs of "z23-lab-peer shadow" (tools/
  * lab_peer_shadow.c) on real throwaway git repos, one per stack, with the peer
  * child and z23 replaced by the lab-peer-fake program. No shell, no network.
  *
@@ -306,7 +306,7 @@ static int case_usage(void)
     return failures;
 }
 
-int test_lab_peer_shadow(void)
+int lab_peer_shadow_cases(void)
 {
     int failures = 0;
     struct stat st;
