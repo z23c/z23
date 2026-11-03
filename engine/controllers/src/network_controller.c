@@ -18,6 +18,7 @@
 #include "json/json.h"
 #include "base/cleanse.h"
 #include "base/hex.h"
+#include "base/safe_alloc.h"
 #include "net/connman.h"
 #include "net/noise_transport.h"
 #include "net/v2_identity.h"
@@ -1014,6 +1015,126 @@ static void network_ban_push_entry(struct json_value *result,
     json_free(&entry);
 }
 
+/* Longest bantime setban accepts: ten years, in seconds. */
+#define NETWORK_BAN_MAX_SECS (10LL * 365 * 24 * 3600)
+
+/* Strict digits-only parse: no sign, no spaces, no trailing text. A value that
+ * is not a whole number is refused rather than read as 0 (which would mean the
+ * 24h default). The digit loop stops at the cap, so it cannot overflow. */
+static bool network_ban_bantime_from_string(const char *text, int64_t *out,
+                                            struct json_value *result)
+{
+    if (text[0] == '-') {
+        LOG_WARN("net", "setban: refused a negative bantime");
+        json_set_str(result, "setban bantime must not be negative");
+        return false;
+    }
+    if (text[0] == '\0') {
+        LOG_WARN("net", "setban: refused an empty bantime");
+        json_set_str(result, "setban bantime must be a whole number of seconds");
+        return false;
+    }
+    int64_t value = 0;
+    for (const char *c = text; *c; c++) {
+        if (*c < '0' || *c > '9') {
+            LOG_WARN("net", "setban: refused a non-numeric bantime");
+            json_set_str(result, "setban bantime must be a whole number of seconds");
+            return false;
+        }
+        if (value > NETWORK_BAN_MAX_SECS / 10) {
+            LOG_WARN("net", "setban: refused a bantime past the cap");
+            json_set_str(result, "setban bantime is too large (at most 10 years)");
+            return false;
+        }
+        value = value * 10 + (*c - '0');
+    }
+    *out = value;
+    return true;
+}
+
+/* Reads the optional bantime (params[2]). A JSON integer is taken as is; the
+ * range checks run afterwards in network_ban_check_bantime(). */
+static bool network_ban_bantime_from_param(const struct json_value *params,
+                                           int64_t *out,
+                                           struct json_value *result)
+{
+    *out = 0;
+    if (json_size(params) < 3)
+        return true;
+    const struct json_value *v = json_at(params, 2);
+    if (v->type == JSON_NULL)
+        return true;
+    if (v->type == JSON_INT) {
+        *out = json_get_int(v);
+        return true;
+    }
+    if (v->type == JSON_STR)
+        return network_ban_bantime_from_string(json_get_str(v), out, result);
+    LOG_WARN("net", "setban: refused a bantime that is not a whole number");
+    json_set_str(result, "setban bantime must be a whole number of seconds");
+    return false;
+}
+
+/* Range: not negative, at most ten years, and not past the largest value that
+ * GetTime() + offset can hold. */
+static bool network_ban_check_bantime(int64_t bantime, struct json_value *result)
+{
+    if (bantime < 0) {
+        LOG_WARN("net", "setban: refused a negative bantime");
+        json_set_str(result, "setban bantime must not be negative");
+        return false;
+    }
+    if (bantime > NETWORK_BAN_MAX_SECS) {
+        LOG_WARN("net", "setban: refused a bantime past the cap");
+        json_set_str(result, "setban bantime is too large (at most 10 years)");
+        return false;
+    }
+    if (bantime > INT64_MAX - GetTime()) {
+        LOG_WARN("net", "setban: refused a bantime that would overflow the clock");
+        json_set_str(result, "setban bantime would overflow the clock");
+        return false;
+    }
+    return true;
+}
+
+/* The same bytes core's is_banned() exempts (net.c, localhost is never banned),
+ * so an add here would report success and ban nothing. */
+static bool network_ban_is_loopback(const struct net_addr *a)
+{
+    static const uint8_t lo_prefix[13] = {
+        0,0,0,0,0,0,0,0,0,0,0xff,0xff,127
+    };
+    return memcmp(a->ip, lo_prefix, sizeof lo_prefix) == 0;
+}
+
+static bool network_ban_add(struct net_manager *nm, const struct net_addr *addr,
+                            int64_t bantime, struct json_value *result)
+{
+    if (network_ban_is_loopback(addr)) {
+        LOG_WARN("net", "setban: refused a loopback address (localhost is never banned)");
+        json_set_str(result, "setban refuses a loopback address (localhost is never banned)");
+        return false;
+    }
+    ban_addr(nm, addr, bantime, false);
+    /* ban_addr() returns nothing; a refused insert (table full of manual
+     * entries, or a failed grow) leaves the address unbanned, so check. */
+    if (is_banned(nm, addr))
+        return true;
+    LOG_WARN("net", "setban: ban table is full of manual entries, add refused");
+    json_set_str(result, "setban refused: the ban table is full of manual entries");
+    return false;
+}
+
+static bool network_ban_remove(struct net_manager *nm, const struct net_addr *addr,
+                               struct json_value *result)
+{
+    if (unban_addr(nm, addr))
+        return true;
+    LOG_WARN("net", "setban: remove found no ban entry for the address");
+    json_set_str(result, "setban entry not found");
+    return false;
+}
+
 static bool rpc_listbanned(const struct json_value *params, bool help,
                            struct json_value *result)
 {
@@ -1026,16 +1147,31 @@ static bool rpc_listbanned(const struct json_value *params, bool help,
     struct net_manager *nm = network_ban_manager();
     if (!nm) return true;
 
-    int64_t now = GetTime();
+    /* Copy the rows under cs_banned, then release it before any JSON is built:
+     * allocation and JSON work never run while peers wait on the ban lock. */
+    struct ban_entry *rows = zcl_malloc(NET_BAN_TABLE_MAX * sizeof(*rows),
+                                        "listbanned_rows");
+    if (!rows) {
+        LOG_WARN("net", "listbanned: could not allocate the ban copy");
+        json_set_str(result, "listbanned: out of memory");
+        return false;
+    }
     zcl_mutex_lock(&nm->cs_banned);
-    for (size_t i = 0; i < nm->num_banned; i++) {
+    size_t n = nm->num_banned < NET_BAN_TABLE_MAX ? nm->num_banned
+                                                  : NET_BAN_TABLE_MAX;
+    if (n > 0)
+        memcpy(rows, nm->banned, n * sizeof(*rows));
+    zcl_mutex_unlock(&nm->cs_banned);
+
+    int64_t now = GetTime();
+    for (size_t i = 0; i < n; i++) {
         /* An expired row stays until the next lazy prune; it is not a live
          * ban (is_banned() ignores it too), so it is not reported. */
-        if (now >= nm->banned[i].ban_until)
+        if (now >= rows[i].ban_until)
             continue;
-        network_ban_push_entry(result, &nm->banned[i]);
+        network_ban_push_entry(result, &rows[i]);
     }
-    zcl_mutex_unlock(&nm->cs_banned);
+    free(rows);
     return true;
 }
 
@@ -1045,43 +1181,52 @@ static bool rpc_setban(const struct json_value *params, bool help,
     RPC_HELP(help, result,
         "setban \"ip\" \"add|remove\" ( bantime )\n"
         "Adds an IP address to the ban list, or lifts its ban. bantime is "
-        "seconds from now (default 24h) and applies to add only.");
+        "whole seconds from now (default 24h, at most 10 years) and applies "
+        "to add only. add does not disconnect a peer that is already "
+        "connected.");
 
     struct rpc_params p;
     rpc_params_init(&p, params);
     rpc_params_expect(&p, 2, 3);
     const char *ip = rpc_require_str(&p, 0, "ip");
     const char *cmd = rpc_require_str(&p, 1, "command");
-    int64_t bantime = rpc_permit_int(&p, 2, "bantime", 0);
-    if (rpc_params_invalid(&p)) { rpc_params_error(&p, result); return false; }
+    if (rpc_params_invalid(&p)) {
+        LOG_WARN("net", "setban: refused a bad argument count or type");
+        rpc_params_error(&p, result);
+        return false;
+    }
 
     struct net_manager *nm = network_ban_manager();
     if (!nm) {
+        LOG_WARN("net", "setban: refused, P2P is not initialized");
         json_set_str(result, "P2P not initialized");
         return false;
     }
-    if (strcmp(cmd, "add") != 0 && strcmp(cmd, "remove") != 0) {
+    bool is_add = strcmp(cmd, "add") == 0;
+    if (!is_add && strcmp(cmd, "remove") != 0) {
+        LOG_WARN("net", "setban: refused an unknown command");
         json_set_str(result, "setban command must be add or remove");
         return false;
     }
-    if (bantime < 0) {
-        json_set_str(result, "setban bantime must not be negative");
+    int64_t bantime = 0;
+    if (!network_ban_bantime_from_param(params, &bantime, result)) {
+        LOG_WARN("net", "setban: refused the request (bantime)");
+        return false;
+    }
+    if (!network_ban_check_bantime(bantime, result)) {
+        LOG_WARN("net", "setban: refused the request (bantime range)");
         return false;
     }
     struct net_addr addr;
     if (!network_ban_parse_ip(nm, ip, &addr, result)) {
-        LOG_WARN("net", "setban: refused a non-IP target");
+        LOG_WARN("net", "setban: refused the request (target)");
         return false;
     }
 
-    if (strcmp(cmd, "remove") == 0) {
-        if (!unban_addr(nm, &addr)) {
-            json_set_str(result, "setban entry not found");
-            return false;
-        }
-    } else {
-        ban_addr(nm, &addr, bantime, false);
-    }
+    bool done = is_add ? network_ban_add(nm, &addr, bantime, result)
+                       : network_ban_remove(nm, &addr, result);
+    if (!done)
+        return false;
     json_set_null(result);
     return true;
 }
