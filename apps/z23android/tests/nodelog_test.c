@@ -269,6 +269,11 @@ static void peer_names_are_redacted(void)
     redacted("Peer 2001:db8:0:0:0:0:0:1 handshake complete", "Peer <peer> handshake complete");
     redacted("peer=203.0.113.9:8033 and peer=x.onion", "peer=<peer> and peer=<peer>");
     redacted("Peer a.onion b.onion handshake", "Peer <peer> <peer> handshake");
+    redacted("Addnode:203.0.113.9 failed", "Addnode:<peer> failed");
+    redacted("peer-203.0.113.9:8033 closed", "peer-<peer> closed");
+    redacted("connect to:2001:db8::1 failed", "connect to:<peer> failed");
+    redacted("dial:[2001:db8::1]:8033 failed", "dial:<peer> failed");
+    redacted("Addnode:2001:db8::1", "Addnode:<peer>");
     /* Lines with no address are unchanged. */
     redacted("2026-10-29T10:00:05Z INFO  [net] handshake complete version=170012 height=3301698", "2026-10-29T10:00:05Z INFO  [net] handshake complete version=170012 height=3301698");
     redacted("[boot-stage] crypto_ready -> db_open 10:00:01 v1.2.3 onion service", "[boot-stage] crypto_ready -> db_open 10:00:01 v1.2.3 onion service");

@@ -209,6 +209,16 @@ static bool peer_name(const char *t, size_t n)
 {
     return onion_name(t, n) || ipv4_name(t, n) || ipv6_name(t, n);
 }
+/* Offset of the first peer name in the token t, tried at its start and after each ':', '-' or '[' inside it so a prefix such as
+ * "Addnode:" or "peer-" does not hide the address; n when the token holds none. */
+static size_t peer_start(const char *t, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (i > 0 && t[i - 1] != ':' && t[i - 1] != '-' && t[i] != '[') continue;
+        if (peer_name(t + i, n - i)) return i;
+    }
+    return n;
+}
 static size_t append(char *out, size_t used, size_t cap, const char *s, size_t n)
 {
     for (size_t i = 0; i < n && used + 1 < cap; i++) out[used++] = s[i];
@@ -225,8 +235,9 @@ void zapp_nodelog_redact(const char *line, char *out, size_t cap)
         if (run == 0) { out[used++] = *line++; continue; }
         size_t core = run;
         while (core > 0 && (line[core - 1] == '.' || line[core - 1] == ':' || line[core - 1] == '-')) core--;
-        bool peer = peer_name(line, core);
-        used = peer ? append(out, used, cap, mark, sizeof(mark) - 1) : append(out, used, cap, line, core);
+        size_t at = peer_start(line, core);
+        used = append(out, used, cap, line, at);
+        if (at < core) used = append(out, used, cap, mark, sizeof(mark) - 1);
         used = append(out, used, cap, line + core, run - core);
         line += run;
     }
