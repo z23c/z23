@@ -2065,6 +2065,17 @@ static void phase_order_tests(void)
     wsu_destroy(&w);
 }
 
+/* The interrupted-setup screen says a wallet was started only when the probe found one. */
+static void interrupted_note_tests(void)
+{
+    const char *found = wsu_interrupted_note(WSU_NO_FAILURE);
+    assert(strstr(found, "A wallet was started on this phone") && strstr(found, "The app cannot show these words again."));
+    assert(!strstr(found, "node has no command"));
+    assert(!wsu_interrupted_note(WSU_NODE_BUSY)[0] && !wsu_interrupted_note(WSU_COULD_NOT_CHECK)[0]);
+    assert(!strstr(wsu_interrupted_note(WSU_UNKNOWN), "wallet was started"));
+    assert(strstr(wsu_failure_text(WSU_NODE_BUSY), "Try again in a minute.") && strstr(wsu_failure_text(WSU_COULD_NOT_CHECK), "Try again."));
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2);
@@ -2123,6 +2134,7 @@ int main(int argc, char **argv)
     working_line_tests();
     leave_notice_tests();
     failure_text_tests();
+    interrupted_note_tests();
     saving_after_confirm_tests();
     choices_tests();
     pick_tests();

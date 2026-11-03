@@ -394,7 +394,7 @@ static void draw_interrupted(JNIEnv *env, const struct wsu_view *v)
         break;
     default:
         (void)text_view(env, "Setup was interrupted", 24.0f, WHITE);
-        if (v->failure != WSU_WALLET_THERE) (void)text_view(env, v->failure == WSU_UNKNOWN ? "Your node did not answer, so the app cannot tell whether a wallet exists." : "A wallet was started on this phone and its recovery words were not confirmed. The node has no command that shows them again. Receive stays closed until setup is confirmed.", 15.0f, AMBER);
+        if (v->failure != WSU_WALLET_THERE && wsu_interrupted_note(v->failure)[0]) (void)text_view(env, wsu_interrupted_note(v->failure), 15.0f, AMBER);
         if (wsu_view_can_recheck(v)) (void)button_view(env, B_RECHECK, "Check again", BUTTON_COLOR);
         if (v->may_start_over && (v->failure == WSU_NO_FAILURE || v->failure == WSU_COULD_NOT_CHECK || v->failure == WSU_NODE_BUSY || v->failure == WSU_WALLET_THERE))
             (void)button_view(env, B_START_OVER_ASK, "Start over", BUTTON_COLOR);

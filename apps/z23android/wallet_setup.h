@@ -189,6 +189,9 @@ void wsu_working_line(const struct wsu_view *v, char *out, size_t cap);
 void wsu_elapsed_text(const struct wsu_view *v, char *out, size_t cap);
 /* One plain sentence and the action for a failed job; empty for none. */
 const char *wsu_failure_text(enum wsu_failure failure);
+/* The sentence above the failure on the interrupted-setup screen: a wallet was started (the probe found it), or the node did not
+ * answer. Empty for the other failures, whose failure text says what to do. */
+const char *wsu_interrupted_note(enum wsu_failure failure);
 /* What Back says when setup cannot be left now: the words are shown once while they are held, and a running job goes on without the owner. */
 void wsu_leave_notice(const struct wsu_view *v, char *out, size_t cap);
 

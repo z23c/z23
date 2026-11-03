@@ -213,6 +213,13 @@ const char *wsu_failure_text(enum wsu_failure failure)
         if (failure_texts[i].failure == failure) return failure_texts[i].text;
     return "";
 }
+/* Only a probe that found the wallet says a wallet was started; a busy node or a failed check gets its failure text alone. */
+const char *wsu_interrupted_note(enum wsu_failure failure)
+{
+    if (failure == WSU_UNKNOWN) return "Your node did not answer, so the app cannot tell whether a wallet exists.";
+    if (failure == WSU_NO_FAILURE) return "A wallet was started on this phone and its recovery words were not confirmed. The app cannot show these words again. Receive stays closed until setup is confirmed.";
+    return "";
+}
 void wsu_leave_notice(const struct wsu_view *v, char *out, size_t cap)
 {
     bool words = v->step == WSU_WORDS || v->step == WSU_CONFIRM;
