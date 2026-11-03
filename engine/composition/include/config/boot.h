@@ -246,6 +246,10 @@ struct app_context {
                                   * See app_private_listeners_refusal(). */
     int wallet_broadcast;        /* -walletbroadcast=public|private: 0 public
                                   * (default), 1 private. */
+    bool wallet_backup_off;      /* -walletbackup=0 : the scheduled wallet backup
+                                  * service is not started and no backup
+                                  * directory is created. Default OFF (the
+                                  * service runs). */
     bool observation_off;        /* -observation=0 : /observation.json answers
                                   * 404 on the onion. Default OFF (served). */
     bool allow_tor_stub_dev;     /* -allow-tor-stub-dev : let a stub-linked
@@ -1328,6 +1332,8 @@ void app_stop_metrics(void);
 
 #ifdef ZCL_TESTING
 #include "config/boot_postmortem.h"
+void boot_test_bind_app_context(const struct app_context *ctx);
+bool boot_test_wallet_backup_start(struct node_db *db);
 bool boot_test_params_thread_failure_is_fatal(bool has_params_dir,
                                               bool is_mainnet,
                                               bool mint_anchor_fast);

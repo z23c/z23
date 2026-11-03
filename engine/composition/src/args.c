@@ -90,6 +90,8 @@ void print_usage_all(const char *prog)
     printf("                      to one outbound onion peer after a random 2-20 s delay;\n");
     printf("                      held when none is connected, never clearnet. REFUSED\n");
     printf("                      without -onlynet=onion, or with -externalip.\n");
+    printf("  -walletbackup=0     Do not run the scheduled wallet backup (hourly copies of\n");
+    printf("                      wallet rows). Default on (=1).\n");
     printf("  -observation=0      /observation.json on the onion answers 404 (hides\n");
     printf("                      hardware and peer telemetry). Default on (=1).\n");
     printf("  -no-tor             Turn Tor off: no hidden service, clearnet\n");
@@ -874,6 +876,21 @@ static int args_arm_wallet_broadcast(const char *arg,
     return 1;
 }
 
+/* -walletbackup=0 skips the scheduled wallet backup; =1 keeps the default. */
+static int args_arm_wallet_backup(const char *arg,
+                                  struct args_arm_state *st)
+{
+    if (strncmp(arg, "-walletbackup=", 14) != 0) return ARGS_ARM_NOMATCH;
+    if (strcmp(arg + 14, "0") == 0) st->ctx->wallet_backup_off = true;
+    else if (strcmp(arg + 14, "1") == 0) st->ctx->wallet_backup_off = false;
+    else {
+        fprintf(stderr, "Invalid option: %s (use -walletbackup=0 or "
+                        "-walletbackup=1)\n", arg);
+        return 1;
+    }
+    return ARGS_ARM_TAKEN;
+}
+
 static int args_arm_enum_env_modes(const char *arg,
                                    struct args_arm_state *st)
 {
@@ -1263,6 +1280,7 @@ static const args_arm_fn k_args_arms[] = {
     args_arm_reindex_backfill,
     args_arm_tor,
     args_arm_wallet_broadcast,
+    args_arm_wallet_backup,
     args_arm_enum_env_modes,
     args_arm_profile_lane,
     args_arm_validation_filesync,

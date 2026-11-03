@@ -701,6 +701,10 @@ static bool boot_wallet_backup_service_start(void *ctx)
 {
     struct node_db *db = ctx;
     static char backup_dir[1024];
+    if (g_boot_app_ctx && g_boot_app_ctx->wallet_backup_off) {
+        printf("Wallet backup is off (-walletbackup=0)\n");
+        return true;
+    }
     if (!db || !db->open || !db->db) {
         printf("Wallet backup deferred until node DB is open\n");
         return true;
@@ -743,6 +747,12 @@ static void boot_wallet_backup_service_stop(void *ctx)
     (void)ctx;
     wallet_backup_stop();
 }
+#ifdef ZCL_TESTING
+bool boot_test_wallet_backup_start(struct node_db *db)
+{
+    return boot_wallet_backup_service_start(db);
+}
+#endif
 /* node.db WAL bound: ON by default; see "Boot policy" in services/db_maintenance.h. */
 static bool boot_db_maintenance_service_start(void *ctx)
 {

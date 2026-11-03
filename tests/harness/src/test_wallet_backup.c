@@ -32,6 +32,9 @@
 #include "test/test_core.h"
 #include "json/json.h"
 
+#include "config/args.h"
+#include "config/boot.h"
+#include "chain/chainparams.h"
 #include "services/wallet_backup_service.h"
 #include "services/wallet_backup_internal.h"
 #include "core/serialize.h"
@@ -2101,6 +2104,70 @@ static int t_rotation_isolated_between_networks(void)
     return failures;
 }
 
+static bool wb_boot_dir(const char *home, char *out, size_t cap)
+{
+    return wallet_backup_default_dir(home, chain_params_get()->strNetworkID,
+                                     out, cap, NULL, 0);
+}
+
+/* -walletbackup=0 parses; the boot start hook then creates no backup
+ * directory and leaves the service stopped. Without it the hook starts the
+ * service as before. */
+static int t_boot_backup_option(void)
+{
+    int failures = 0;
+    struct app_context ctx;
+    bool metrics = false;
+    char *off[] = {"z23", "-walletbackup=0"};
+    char *on[] = {"z23", "-walletbackup=1"};
+    char *bad[] = {"z23", "-walletbackup=2"};
+    app_context_defaults(&ctx);
+    WB_RUN("wb: the backup is on by default", !ctx.wallet_backup_off);
+    WB_RUN("wb: -walletbackup=0 turns it off",
+           args_parse_node_options(2, off, &ctx, &metrics) == -1 &&
+               ctx.wallet_backup_off);
+    WB_RUN("wb: -walletbackup=1 keeps it on",
+           args_parse_node_options(2, on, &ctx, &metrics) == -1 &&
+               !ctx.wallet_backup_off);
+    WB_RUN("wb: an unknown -walletbackup value is refused",
+           args_parse_node_options(2, bad, &ctx, &metrics) != -1);
+
+    struct wb_fixture f;
+    char home[512], dir[700] = "", old_home[512] = "";
+    const char *prev = getenv("HOME");
+    if (prev) snprintf(old_home, sizeof(old_home), "%s", prev);
+    bool ready = wb_fixture_init(&f, "bootopt");
+    test_fmt_tmpdir(home, sizeof(home), "zcl_wb_home", "bootopt");
+    platform_directory_create(home, 0755);
+    ready = ready && platform_environment_set("HOME", home, 1) == 0 &&
+            wb_boot_dir(home, dir, sizeof(dir));
+
+    app_context_defaults(&ctx);
+    ctx.wallet_backup_off = true;
+    boot_test_bind_app_context(&ctx);
+    struct wallet_backup_status st;
+    bool ok_off = ready && boot_test_wallet_backup_start(&f.ndb);
+    wallet_backup_status_snapshot(&st);
+    WB_RUN("wb: with -walletbackup=0 the service is not started",
+           ok_off && !st.running);
+    WB_RUN("wb: with -walletbackup=0 no backup directory is created",
+           ready && !wb_iso_is_dir(dir));
+
+    ctx.wallet_backup_off = false;
+    bool ok_on = ready && boot_test_wallet_backup_start(&f.ndb);
+    wallet_backup_status_snapshot(&st);
+    WB_RUN("wb: without the option the service starts",
+           ok_on && st.running && wb_iso_is_dir(dir));
+    wallet_backup_stop();
+    boot_test_bind_app_context(NULL);
+
+    if (prev) platform_environment_set("HOME", old_home, 1);
+    test_cleanup_tmpdir(dir);
+    test_cleanup_tmpdir(home);
+    wb_fixture_tear_down(&f);
+    return failures;
+}
+
 int test_wallet_backup(void)
 {
     printf("\n=== wallet_backup tests ===\n");
@@ -2110,6 +2177,7 @@ int test_wallet_backup(void)
 #endif
     failures += t_authority_sync_backend();
     failures += t_default_dir_per_network();
+    failures += t_boot_backup_option();
     failures += t_rotation_isolated_between_networks();
     failures += t_happy();
     failures += t_small_output_path_is_refused_before_backup();

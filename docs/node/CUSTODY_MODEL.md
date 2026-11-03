@@ -53,6 +53,12 @@ is deliberately absent from the rendered `commit_input`. Setting one layer
 does not set the other, and leaving scheduled-backup encryption unset logs one
 warning and proceeds.
 
+`-walletbackup=0` turns the scheduled backup service off: it is not started and
+no `wallet_backups` directory is created, so no copies of the wallet
+transaction, UTXO or note tables are written. The default (`-walletbackup=1`)
+keeps the service on. A node whose owner holds the recovery words can use the
+option to avoid keeping those copies.
+
 **Export paths:** `dumpprivkey` / `z_exportkey` over authenticated JSON-RPC
 export directly; `core.wallet.address.export-key` is OWNER-gated and uses
 plan/commit on the typed surface
