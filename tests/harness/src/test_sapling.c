@@ -3622,6 +3622,7 @@ static int test_sapling_groth16_vk_read_sapling_spend(void)
         const char *path = getenv("HOME");
         char fpath[512];
         snprintf(fpath, sizeof(fpath), "%s/.zcash-params/sapling-spend.params", path ? path : ".");
+        const struct groth16_vk *prev = sapling_test_published_spend_vk();
         FILE *f = fopen(fpath, "rb");
         const bool f_present = f != NULL;
         bool ok = false;
@@ -3648,6 +3649,10 @@ static int test_sapling_groth16_vk_read_sapling_spend(void)
             fclose(f);
         }
         failures += sapling_params_verdict(f_present, ok);
+        if (sapling_test_published_spend_vk() != prev) {
+            printf("FAIL (spend VK global not restored after block)\n");
+            failures++;
+        }
     }
 
     return failures;
@@ -3662,6 +3667,7 @@ static int test_sapling_groth16_vk_read_sapling_output(void)
         const char *path = getenv("HOME");
         char fpath[512];
         snprintf(fpath, sizeof(fpath), "%s/.zcash-params/sapling-output.params", path ? path : ".");
+        const struct groth16_vk *prev = sapling_test_published_output_vk();
         FILE *f = fopen(fpath, "rb");
         bool ok = false;
         const bool f_present = f != NULL;
@@ -3686,6 +3692,10 @@ static int test_sapling_groth16_vk_read_sapling_output(void)
             fclose(f);
         }
         failures += sapling_params_verdict(f_present, ok);
+        if (sapling_test_published_output_vk() != prev) {
+            printf("FAIL (output VK global not restored after block)\n");
+            failures++;
+        }
     }
 
     return failures;
@@ -3773,6 +3783,7 @@ static int test_sapling_groth16_vk_read_sprout_groth16(void)
         const char *path = getenv("HOME");
         char fpath[512];
         snprintf(fpath, sizeof(fpath), "%s/.zcash-params/sprout-groth16.params", path ? path : ".");
+        const struct groth16_vk *prev = sprout_test_published_vk();
         FILE *f = fopen(fpath, "rb");
         const bool f_present = f != NULL;
         bool ok = false;
@@ -3797,6 +3808,10 @@ static int test_sapling_groth16_vk_read_sprout_groth16(void)
             fclose(f);
         }
         failures += sapling_params_verdict(f_present, ok);
+        if (sprout_test_published_vk() != prev) {
+            printf("FAIL (sprout VK global not restored after block)\n");
+            failures++;
+        }
     }
 
     return failures;
