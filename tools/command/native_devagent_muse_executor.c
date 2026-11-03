@@ -360,7 +360,7 @@ static void mx_evidence(struct wkr_result *res,
 bool zcl_devagent_worker_muse_executor(const struct wkr_job *job,
     struct wkr_result *res)
 {
-    char workspace[4096], scope[512], gate[128], model[160];
+    char workspace[4096], scope[512], gate[128], model[sizeof(job->task)];
     const char *prompt = NULL;
     const char *refusal;
     char cworker[64], csession[64];

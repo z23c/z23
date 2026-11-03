@@ -50,6 +50,24 @@ struct mr_dirs {
     char wt[4096];
 };
 
+/* Exercise the production glue with an inert adapter; never launch a host. */
+static int mr_glue_calls;
+static char mr_glue_model[160];
+static int mr_glue_run(const struct muse_run_task *task,
+    struct muse_run_result *result, char err[MUSE_RUN_ERROR_MAX])
+{
+    (void)snprintf(mr_glue_model, sizeof(mr_glue_model), "%s", task->model);
+    (void)result;
+    (void)err;
+    mr_glue_calls++;
+    return 1;
+}
+#define muse_run_task(...) mr_glue_run(__VA_ARGS__)
+#define zcl_devagent_worker_muse_executor mr_glue_executor
+#include "../../../tools/command/native_devagent_muse_executor.c"
+#undef zcl_devagent_worker_muse_executor
+#undef muse_run_task
+
 static bool mr_write(const char *path, const char *text, mode_t mode)
 {
     FILE *f = fopen(path, "wb");
@@ -3643,6 +3661,7 @@ static int mr_failures_glue(void)
     struct mr_dirs d;
     struct wkr_job job;
     struct wkr_result res;
+    char task[1024], model[161];
     MR_CHECK("glue lane", mr_lane(&d));
     memset(&res, 0, sizeof(res));
     MR_CHECK("glue null job",
@@ -3701,6 +3720,58 @@ static int mr_failures_glue(void)
         zcl_devagent_worker_muse_executor(&job, &res) == true);
     MR_CHECK("glue cap verdict", strcmp(res.terminal, "refused") == 0 &&
         res.rc == 1);
+    memset(model, 'x', sizeof(model) - 1);
+    model[sizeof(model) - 1] = '\0';
+    (void)snprintf(task, sizeof(task),
+        "muse-workspace: /tmp\nmuse-scope: src/\nmuse-gate: g\n"
+        "muse-model: %s\n\nDo it.\n", model);
+    MR_CHECK("glue oversized model task", mr_glue_job(&job, &d, task) == 0);
+    (void)snprintf(job.model, sizeof(job.model), "fallback-model");
+    mr_glue_calls = 0;
+    MR_CHECK("glue oversized model refuses",
+        mr_glue_executor(&job, &res) && strcmp(res.terminal, "refused") == 0 &&
+        strstr(res.evidence, "model does not fit") != NULL);
+    MR_CHECK("glue oversized model never runs", mr_glue_calls == 0);
+    (void)snprintf(task, sizeof(task),
+        "muse-workspace: /tmp\nmuse-scope: src/\nmuse-gate: g\n"
+        "muse-model: chosen-model\n\nDo it.\n");
+    MR_CHECK("glue chosen model task", mr_glue_job(&job, &d, task) == 0);
+    (void)snprintf(job.model, sizeof(job.model), "fallback-model");
+    mr_glue_calls = 0;
+    (void)mr_glue_executor(&job, &res);
+    MR_CHECK("glue chosen model forwarded", mr_glue_calls == 1 &&
+        strcmp(mr_glue_model, "chosen-model") == 0);
+    {
+        char maximum[sizeof(((struct muse_run_task *)0)->model)];
+        memset(maximum, 'm', sizeof(maximum) - 1);
+        maximum[sizeof(maximum) - 1] = '\0';
+        (void)snprintf(task, sizeof(task),
+            "muse-workspace: /tmp\nmuse-scope: src/\nmuse-gate: g\n"
+            "muse-model: %s\n\nDo it.\n", maximum);
+        MR_CHECK("glue maximum model task", mr_glue_job(&job, &d, task) == 0);
+        (void)snprintf(job.model, sizeof(job.model), "fallback-model");
+        mr_glue_calls = 0;
+        (void)mr_glue_executor(&job, &res);
+        MR_CHECK("glue maximum model forwarded", mr_glue_calls == 1 &&
+            strcmp(mr_glue_model, maximum) == 0);
+    }
+    (void)snprintf(task, sizeof(task),
+        "muse-workspace: /tmp\nmuse-scope: src/\nmuse-gate: g\n"
+        "muse-model: \n\nDo it.\n");
+    MR_CHECK("glue empty model task", mr_glue_job(&job, &d, task) == 0);
+    (void)snprintf(job.model, sizeof(job.model), "fallback-model");
+    mr_glue_calls = 0;
+    (void)mr_glue_executor(&job, &res);
+    MR_CHECK("glue empty model falls back", mr_glue_calls == 1 &&
+        strcmp(mr_glue_model, "fallback-model") == 0);
+    (void)snprintf(task, sizeof(task),
+        "muse-workspace: /tmp\nmuse-scope: src/\nmuse-gate: g\n\nDo it.\n");
+    MR_CHECK("glue absent model task", mr_glue_job(&job, &d, task) == 0);
+    (void)snprintf(job.model, sizeof(job.model), "fallback-model");
+    mr_glue_calls = 0;
+    (void)mr_glue_executor(&job, &res);
+    MR_CHECK("glue absent model falls back", mr_glue_calls == 1 &&
+        strcmp(mr_glue_model, "fallback-model") == 0);
     return failures;
 }
 
