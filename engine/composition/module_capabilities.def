@@ -1056,7 +1056,7 @@ ZCL_MODULE_CAPABILITY("engine/modules/storage/src/progress_store.c", CAP_FS_READ
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/progress_store_directory.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/projection_consumer.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/projection_store.c", CAP_FS_READ|CAP_FS_WRITE, "")
-ZCL_MODULE_CAPABILITY("engine/modules/storage/src/projection_store_digest.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/modules/storage/src/projection_store_digest.c", CAP_FS_WRITE, "read and allocation failure diagnostics to stderr; the file is read through the positioned-file port")
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/repair_marker.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/seal_kv.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/sha3_sidecar_io.c", CAP_FS_READ|CAP_FS_WRITE, "")
