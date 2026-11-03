@@ -369,6 +369,8 @@ test-setup:
 	@grep -q 'next == SCREEN_SETUP) shell.gate.protect = true' shell.c || { echo 'the shell must drop obscured touches on the setup screens' >&2; exit 1; }
 	@grep -q 'setTextIsSelectable", false' wallet_setup_ui.c || { echo 'the recovery words must not be selectable' >&2; exit 1; }
 	@grep -q 'next = screen_for(next);' shell.c || { echo 'the shell must send the wallet and payment screens through setup until it is confirmed' >&2; exit 1; }
+	@test "$$(grep -c 'go(env, SCREEN_SEND)' shell.c)" = 2 && grep -q 'take_reshow()) go(env, SCREEN_SEND);' shell.c || { echo 'Send must be entered through open_send, except to show a kept flow' >&2; exit 1; }
+	@grep -q 'case CMD_CAMERA_PASTE: open_send(env, NULL, "");' shell.c || { echo 'Paste instead must open the Send flow' >&2; exit 1; }
 	@grep -q 'memory_cleanse(buffer, sizeof(buffer))' operations.c || { echo 'the command reader must wipe its read buffer' >&2; exit 1; }
 	@grep -q 'zapp_setup_state(r->files) != ZAPP_SETUP_READY' operations.c || { echo 'the receive command must be refused until setup is confirmed' >&2; exit 1; }
 
