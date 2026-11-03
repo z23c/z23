@@ -279,3 +279,47 @@ bool sd_bans_clearbanned_scenario(void)
     ok = ok && ctx.result.type == JSON_NULL;
     return sd_bans_teardown(&ctx, ok);
 }
+
+/* case: a bantime past the cap (a year-2038-style huge value that would wrap
+ * GetTime() + offset) is refused, and bans nothing. */
+bool sd_bans_overflow_bantime_scenario(void)
+{
+    struct sd_bans_ctx ctx;
+    bool ok = sd_bans_setup(&ctx);
+    struct net_addr addr;
+    ok = ok && sd_bans_addr(&ctx, BANS_PEER_B, &addr);
+    ok = ok && !sd_bans_call(&ctx, "setban", BANS_PEER_B, "add",
+                             "9223372036854775807");
+    ok = ok && sd_bans_error_has(&ctx.result, "too large");
+    ok = ok && !is_banned(&ctx.cm.manager, &addr);
+    ok = ok && sd_bans_disk_count(ctx.dir) != 1;
+    return sd_bans_teardown(&ctx, ok);
+}
+
+/* case: a bantime that is not a whole number of seconds is refused rather
+ * than read as 0 (which would silently mean the 24h default). */
+bool sd_bans_nonnumeric_bantime_scenario(void)
+{
+    struct sd_bans_ctx ctx;
+    bool ok = sd_bans_setup(&ctx);
+    struct net_addr addr;
+    ok = ok && sd_bans_addr(&ctx, BANS_PEER_B, &addr);
+    ok = ok && !sd_bans_call(&ctx, "setban", BANS_PEER_B, "add", "abc");
+    ok = ok && sd_bans_error_has(&ctx.result, "whole number");
+    ok = ok && !sd_bans_call(&ctx, "setban", BANS_PEER_B, "add", "12abc");
+    ok = ok && sd_bans_error_has(&ctx.result, "whole number");
+    ok = ok && !is_banned(&ctx.cm.manager, &addr);
+    return sd_bans_teardown(&ctx, ok);
+}
+
+/* case: setban add on a loopback address is refused, because core never bans
+ * localhost and a success reply would be a silent no-op. */
+bool sd_bans_loopback_add_scenario(void)
+{
+    struct sd_bans_ctx ctx;
+    bool ok = sd_bans_setup(&ctx);
+    ok = ok && !sd_bans_call(&ctx, "setban", "127.0.0.1", "add", NULL);
+    ok = ok && sd_bans_error_has(&ctx.result, "loopback");
+    ok = ok && sd_bans_disk_count(ctx.dir) != 1;
+    return sd_bans_teardown(&ctx, ok);
+}

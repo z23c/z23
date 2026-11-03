@@ -42,5 +42,8 @@ bool sd_getpeerinfo_transport_scenario(void);
 bool sd_bans_listbanned_remove_scenario(void);
 bool sd_bans_setban_add_scenario(void);
 bool sd_bans_clearbanned_scenario(void);
+bool sd_bans_overflow_bantime_scenario(void);
+bool sd_bans_nonnumeric_bantime_scenario(void);
+bool sd_bans_loopback_add_scenario(void);
 
 #endif

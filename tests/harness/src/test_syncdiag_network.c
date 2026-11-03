@@ -75,6 +75,14 @@ int syncdiag_cases_network(void)
     sd_report("clearbanned: empties the table and banlist.dat; listbanned "
               "skips expired bans... ",
               sd_bans_clearbanned_scenario(), &failures);
+    sd_report("setban add: refuses a bantime past the cap or one that would "
+              "overflow... ",
+              sd_bans_overflow_bantime_scenario(), &failures);
+    sd_report("setban add: refuses a bantime that is not a whole number... ",
+              sd_bans_nonnumeric_bantime_scenario(), &failures);
+    sd_report("setban add: refuses a loopback address instead of a silent "
+              "no-op... ",
+              sd_bans_loopback_add_scenario(), &failures);
 
     return failures;
 }
