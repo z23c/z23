@@ -1875,7 +1875,34 @@ static int case_prompt_shape(void)
 /* ── the CLI argument vector ──────────────────────────────────────────────
  * CLI vendor arguments come from the registry, not a fixed array. */
 
-static int case_cli_argv(void)
+static struct engine_cli_inputs cli_argv_base_inputs(void)
+{
+    return (struct engine_cli_inputs) {
+        .prompt  = "/p.txt",
+        .workdir = "/w",
+        .turns   = "3",
+        .model   = "m-1",
+        .reasoning_effort = "high",
+    };
+}
+
+static bool cli_argv_has(const char *const *argv, size_t n, const char *text)
+{
+    for (size_t i = 1; i < n; i++)
+        if (strcmp(argv[i], text) == 0)
+            return true;
+    return false;
+}
+
+static bool cli_argv_has_brace(const char *const *argv, size_t n)
+{
+    for (size_t i = 1; i < n; i++)
+        if (argv[i][0] == '{')
+            return true;
+    return false;
+}
+
+static int case_cli_argv_turns(void)
 {
     int failures = 0;
 
@@ -1894,6 +1921,12 @@ static int case_cli_argv(void)
         EN_CHECK("malformed CLI turns are refused without changing output",
                  !engine_cli_turns_parse(text, &turns) && turns == 77);
     }
+    return failures;
+}
+
+static int case_cli_argv_rows(void)
+{
+    int failures = 0;
 
     /* Every CLI row is complete, and no other row pretends to be one. */
     bool cli_rows_complete = true;
@@ -1920,226 +1953,268 @@ static int case_cli_argv(void)
              grok_cap && engine_cli_accepts_turns(grok_cap));
     EN_CHECK("GLM does not claim a CLI turn slot",
              glm_cap && !engine_cli_accepts_turns(glm_cap));
+    return failures;
+}
 
-    const struct engine_cli_inputs in = {
-        .prompt  = "/p.txt",
+static int case_cli_argv_file_flags(const char *const *argv, size_t n,
+                                    struct engine_cli_inputs in)
+{
+    int failures = 0;
+    bool carries_prompt = cli_argv_has(argv, n, in.prompt);
+    bool carries_workdir = cli_argv_has(argv, n, in.workdir);
+    bool carries_bypass = cli_argv_has(argv, n, "bypassPermissions");
+    bool carries_no_plan = cli_argv_has(argv, n, "--no-plan");
+    bool carries_model = cli_argv_has(argv, n, in.model);
+    bool carries_effort = cli_argv_has(argv, n, in.reasoning_effort);
+    bool carries_effort_flag = cli_argv_has(argv, n, "--reasoning-effort");
+    bool disables_subagents = cli_argv_has(argv, n, "--no-subagents");
+    bool disables_web = cli_argv_has(argv, n, "--disable-web-search");
+    bool pins_tools = cli_argv_has(argv, n, "Read,Grep,Glob,Bash,Edit");
+    bool carries_no_placeholders = !cli_argv_has_brace(argv, n);
+    EN_CHECK("and carries the prompt path", carries_prompt);
+    EN_CHECK("and the working directory", carries_workdir);
+    EN_CHECK("and selects the measured autonomous permission mode",
+             carries_bypass);
+    EN_CHECK("and disables the interactive plan approval stop",
+             carries_no_plan);
+    EN_CHECK("and passes the requested model", carries_model);
+    EN_CHECK("and passes explicit reasoning effort as its own flag/value",
+             carries_effort_flag && carries_effort);
+    EN_CHECK("and disables hidden subagent work", disables_subagents);
+    EN_CHECK("and disables unrelated web retrieval", disables_web);
+    EN_CHECK("and pins the observable repository tool schema", pins_tools);
+    EN_CHECK("and no placeholder survived substitution",
+             carries_no_placeholders);
+    return failures;
+}
+
+static int case_cli_argv_effort(const struct engine_vendor *fileq,
+                                struct engine_cli_inputs in)
+{
+    int failures = 0;
+    const char *argv[ENGINE_CLI_ARGV_MAX];
+    struct engine_cli_inputs provider_default = in;
+    provider_default.reasoning_effort =
+        ENGINE_REASONING_EFFORT_PROVIDER_DEFAULT;
+    size_t n = engine_cli_argv_build(fileq, &provider_default, argv,
+                                     ENGINE_CLI_ARGV_MAX);
+    bool omitted_effort = n > 0;
+    for (size_t i = 1; i < n; i++)
+        if (strcmp(argv[i], "--reasoning-effort") == 0)
+            omitted_effort = false;
+    EN_CHECK("provider-default effort emits no empty CLI flag",
+             omitted_effort);
+    struct engine_cli_inputs invalid_effort = in;
+    invalid_effort.reasoning_effort = "maximum";
+    EN_CHECK("an unknown CLI effort is refused",
+             engine_cli_argv_build(fileq, &invalid_effort, argv,
+                                   ENGINE_CLI_ARGV_MAX) == 0);
+    return failures;
+}
+
+static int case_cli_argv_grok_resume_shape(const char *const *argv,
+                                           const char *const *base_argv,
+                                           const char *session,
+                                           size_t base_n, size_t resumed_n)
+{
+    int failures = 0;
+    bool has_resume = false, has_id = false, has_restore = false;
+    bool preserved = resumed_n == base_n + 2;
+    for (size_t i = 0; preserved && i < base_n; i++)
+        preserved = strcmp(base_argv[i], argv[i]) == 0;
+    for (size_t i = 1; i < resumed_n; i++) {
+        if (strcmp(argv[i], "--resume") == 0) has_resume = true;
+        if (strcmp(argv[i], session) == 0) has_id = true;
+        if (strcmp(argv[i], "--restore-code") == 0) has_restore = true;
+    }
+    EN_CHECK("valid Grok resume appends exactly flag and session",
+             base_n > 0 && resumed_n == base_n + 2
+             && preserved && has_resume && has_id && !has_restore);
+    return failures;
+}
+
+static int case_cli_argv_grok_capacity(const struct engine_vendor *grok,
+                                       struct engine_cli_inputs base_resume,
+                                       struct engine_cli_inputs resumed,
+                                       size_t base_n, size_t resumed_n,
+                                       struct engine_cli_inputs in)
+{
+    int failures = 0;
+    const char *argv[ENGINE_CLI_ARGV_MAX];
+    EN_CHECK("Grok resume needs the additional argv capacity",
+             engine_cli_argv_build(grok, &base_resume, argv, base_n + 1) == base_n
+             && engine_cli_argv_build(grok, &resumed, argv, resumed_n)
+                    == 0
+             && engine_cli_argv_build(grok, &resumed, argv, resumed_n + 1)
+                    == resumed_n);
+    const char *combined_argv[25];
+    size_t combined_n = engine_cli_argv_build(grok, &resumed,
+                                              combined_argv, 25);
+    EN_CHECK("Grok effort and resume fit 25 slots including NULL",
+             combined_n == 24 && combined_argv[combined_n] == NULL);
+    EN_CHECK("Grok effort and resume refuse only 24 slots",
+             engine_cli_argv_build(grok, &resumed, combined_argv, 24)
+                 == 0);
+    struct engine_vendor malformed_resume = *grok;
+    static const char *const unknown_resume[] = {
+        "--resume", "{unknown_session}", NULL
+    };
+    malformed_resume.resume_argv = unknown_resume;
+    EN_CHECK("an unknown resume placeholder is refused",
+             engine_cli_argv_build(&malformed_resume, &resumed, argv,
+                                   ENGINE_CLI_ARGV_MAX) == 0);
+
+    const char *bad[] = { "", " ",
+        "23c9be10-5084-43a4-8e1a-2735a465098",
+        "23c9be10-5084-43a4-8e1a-2735a4650981\n",
+        "23C9BE10-5084-43A4-8E1A-2735A4650981", NULL };
+    for (size_t i = 0; bad[i]; i++) {
+        struct engine_cli_inputs invalid = in;
+        invalid.resume_session_id = bad[i];
+        EN_CHECK("malformed Grok resume session is refused",
+                 engine_cli_argv_build(grok, &invalid, argv,
+                                       ENGINE_CLI_ARGV_MAX) == 0);
+    }
+    return failures;
+}
+
+static int case_cli_argv_grok_resume(const struct engine_vendor *grok,
+                                     struct engine_cli_inputs in)
+{
+    int failures = 0;
+    const char *argv[ENGINE_CLI_ARGV_MAX];
+    const char *session = "23c9be10-5084-43a4-8e1a-2735a4650981";
+    struct engine_cli_inputs base_resume = in;
+    base_resume.reasoning_effort = "low";
+    struct engine_cli_inputs resumed = base_resume;
+    resumed.resume_session_id = session;
+    size_t base_n = engine_cli_argv_build(grok, &base_resume, argv,
+                                          ENGINE_CLI_ARGV_MAX);
+    const char *base_argv[ENGINE_CLI_ARGV_MAX];
+    memcpy(base_argv, argv, sizeof(base_argv));
+    size_t resumed_n = engine_cli_argv_build(grok, &resumed, argv,
+                                             ENGINE_CLI_ARGV_MAX);
+    size_t verbatim_hits = 0;
+    for (size_t i = 0; i < resumed_n; i++)
+        if (strcmp(argv[i], "--verbatim") == 0)
+            verbatim_hits++;
+    EN_CHECK("Grok argv preserves the supplied prompt exactly once",
+             resumed_n > 0 && verbatim_hits == 1);
+    failures += case_cli_argv_grok_resume_shape(argv, base_argv, session,
+                                                base_n, resumed_n);
+    failures += case_cli_argv_grok_capacity(grok, base_resume, resumed,
+                                            base_n, resumed_n, in);
+    return failures;
+}
+
+static int case_cli_argv_grok(struct engine_cli_inputs in)
+{
+    int failures = 0;
+    const struct engine_vendor *grok = engine_by_id("grok-cli");
+    EN_CHECK("grok-cli exposes its resume argv", grok != NULL
+             && grok->resume_argv != NULL
+             && strcmp(grok->resume_argv[0], "--resume") == 0
+             && strcmp(grok->resume_argv[1], ENGINE_CLI_RESUME_TOKEN) == 0);
+    if (grok) {
+        EN_CHECK("resume accessor returns the registered extension",
+                 engine_registry_resume_argv("grok-cli") == grok->resume_argv
+                 && engine_registry_resume_argv("glm-cli") == NULL
+                 && engine_registry_resume_argv("unknown-engine") == NULL);
+        failures += case_cli_argv_grok_resume(grok, in);
+    }
+    return failures;
+}
+
+static int case_cli_argv_file_vector(const struct engine_vendor *fileq)
+{
+    int failures = 0;
+    const struct engine_cli_inputs in = cli_argv_base_inputs();
+    const char *argv[ENGINE_CLI_ARGV_MAX];
+    size_t n = engine_cli_argv_build(fileq, &in, argv, ENGINE_CLI_ARGV_MAX);
+    EN_CHECK("a file-prompt vendor builds a vector", n > 0);
+    EN_CHECK("whose argv[0] is the program",
+             n > 0 && strcmp(argv[0], fileq->program) == 0);
+    EN_CHECK("which is NULL-terminated", n > 0 && argv[n] == NULL);
+    failures += case_cli_argv_file_flags(argv, n, in);
+    failures += case_cli_argv_effort(fileq, in);
+    failures += case_cli_argv_grok(in);
+    return failures;
+}
+
+static int case_cli_argv_arg_prompt(const struct engine_vendor *argq)
+{
+    int failures = 0;
+    const char *argv[ENGINE_CLI_ARGV_MAX];
+    const struct engine_cli_inputs argin = {
+        .prompt  = "THE WHOLE PROMPT TEXT",
         .workdir = "/w",
         .turns   = "3",
         .model   = "m-1",
-        .reasoning_effort = "high",
     };
+    size_t n = engine_cli_argv_build(argq, &argin, argv,
+                                     ENGINE_CLI_ARGV_MAX);
+    bool carries_text = false;
+    for (size_t i = 1; i < n; i++)
+        if (strcmp(argv[i], argin.prompt) == 0) carries_text = true;
+    EN_CHECK("an argument-prompt vendor receives the prompt TEXT, not a "
+             "path", n > 0 && carries_text);
+    struct engine_cli_inputs unsupported = argin;
+    unsupported.reasoning_effort = "low";
+    EN_CHECK("a CLI with no effort flag refuses an explicit effort",
+             engine_cli_argv_build(argq, &unsupported, argv,
+                                   ENGINE_CLI_ARGV_MAX) == 0);
+    unsupported.reasoning_effort = NULL;
+    unsupported.resume_session_id =
+        "23c9be10-5084-43a4-8e1a-2735a4650981";
+    EN_CHECK("an unsupported CLI refuses a resume session",
+             engine_cli_argv_build(argq, &unsupported, argv,
+                                   ENGINE_CLI_ARGV_MAX) == 0);
+
+    /* The kernel caps one argv string far below the prompt ceiling. */
+    size_t over = ENGINE_CLI_ARG_PROMPT_MAX + 1u;
+    char *huge = zcl_malloc(over + 1, "test_engine_cli_huge");
+    if (huge) {
+        memset(huge, 'x', over);
+        huge[over] = '\0';
+        struct engine_cli_inputs bigin = argin;
+        bigin.prompt = huge;
+        EN_CHECK("an argument-mode prompt over the limit is refused",
+                 engine_cli_argv_build(argq, &bigin, argv,
+                                       ENGINE_CLI_ARGV_MAX) == 0);
+        free(huge);
+    } else {
+        EN_CHECK("the over-length CLI fixture allocates", false);
+    }
+    return failures;
+}
+
+static int case_cli_argv_missing(const struct engine_vendor *fileq)
+{
+    int failures = 0;
+    const struct engine_cli_inputs in = cli_argv_base_inputs();
     const char *argv[ENGINE_CLI_ARGV_MAX];
-
-    /* A file-mode vendor: the exact exec'd vector, not just its count. */
-    const struct engine_vendor *fileq = NULL;
-    const struct engine_vendor *argq = NULL;
-    for (size_t i = 0; i < engine_count(); i++) {
-        const struct engine_vendor *v = engine_at(i);
-        if (v->wire != ENGINE_WIRE_LOCAL_CLI) continue;
-        if (v->cli_prompt == ENGINE_CLI_PROMPT_FILE && !fileq) fileq = v;
-        if (v->cli_prompt == ENGINE_CLI_PROMPT_ARG && !argq) argq = v;
-    }
-    EN_CHECK("a file-prompt CLI vendor is registered", fileq != NULL);
-    EN_CHECK("an argument-prompt CLI vendor is registered", argq != NULL);
-
-    if (fileq) {
-        size_t n = engine_cli_argv_build(fileq, &in, argv, ENGINE_CLI_ARGV_MAX);
-        EN_CHECK("a file-prompt vendor builds a vector", n > 0);
-        EN_CHECK("whose argv[0] is the program",
-                 n > 0 && strcmp(argv[0], fileq->program) == 0);
-        EN_CHECK("which is NULL-terminated", n > 0 && argv[n] == NULL);
-        bool carries_prompt = false, carries_workdir = false;
-        bool carries_bypass = false, carries_no_plan = false;
-        bool carries_model = false, carries_effort = false;
-        bool carries_effort_flag = false, disables_subagents = false;
-        bool disables_web = false, pins_tools = false;
-        bool carries_no_placeholders = true;
-        for (size_t i = 1; i < n; i++) {
-            if (strcmp(argv[i], in.prompt) == 0)  carries_prompt = true;
-            if (strcmp(argv[i], in.workdir) == 0) carries_workdir = true;
-            if (strcmp(argv[i], "bypassPermissions") == 0)
-                carries_bypass = true;
-            if (strcmp(argv[i], "--no-plan") == 0) carries_no_plan = true;
-            if (strcmp(argv[i], in.model) == 0) carries_model = true;
-            if (strcmp(argv[i], in.reasoning_effort) == 0)
-                carries_effort = true;
-            if (strcmp(argv[i], "--reasoning-effort") == 0)
-                carries_effort_flag = true;
-            if (strcmp(argv[i], "--no-subagents") == 0)
-                disables_subagents = true;
-            if (strcmp(argv[i], "--disable-web-search") == 0)
-                disables_web = true;
-            if (strcmp(argv[i], "Read,Grep,Glob,Bash,Edit") == 0)
-                pins_tools = true;
-            if (argv[i][0] == '{') carries_no_placeholders = false;
-        }
-        EN_CHECK("and carries the prompt path", carries_prompt);
-        EN_CHECK("and the working directory", carries_workdir);
-        EN_CHECK("and selects the measured autonomous permission mode",
-                 carries_bypass);
-        EN_CHECK("and disables the interactive plan approval stop",
-                 carries_no_plan);
-        EN_CHECK("and passes the requested model", carries_model);
-        EN_CHECK("and passes explicit reasoning effort as its own flag/value",
-                 carries_effort_flag && carries_effort);
-        EN_CHECK("and disables hidden subagent work", disables_subagents);
-        EN_CHECK("and disables unrelated web retrieval", disables_web);
-        EN_CHECK("and pins the observable repository tool schema", pins_tools);
-        EN_CHECK("and no placeholder survived substitution",
-                 carries_no_placeholders);
-        struct engine_cli_inputs provider_default = in;
-        provider_default.reasoning_effort =
-            ENGINE_REASONING_EFFORT_PROVIDER_DEFAULT;
-        n = engine_cli_argv_build(fileq, &provider_default, argv,
-                                  ENGINE_CLI_ARGV_MAX);
-        bool omitted_effort = n > 0;
-        for (size_t i = 1; i < n; i++)
-            if (strcmp(argv[i], "--reasoning-effort") == 0)
-                omitted_effort = false;
-        EN_CHECK("provider-default effort emits no empty CLI flag",
-                 omitted_effort);
-        struct engine_cli_inputs invalid_effort = in;
-        invalid_effort.reasoning_effort = "maximum";
-        EN_CHECK("an unknown CLI effort is refused",
-                 engine_cli_argv_build(fileq, &invalid_effort, argv,
-                                       ENGINE_CLI_ARGV_MAX) == 0);
-
-        const struct engine_vendor *grok = engine_by_id("grok-cli");
-        EN_CHECK("grok-cli exposes its resume argv", grok != NULL
-                 && grok->resume_argv != NULL
-                 && strcmp(grok->resume_argv[0], "--resume") == 0
-                 && strcmp(grok->resume_argv[1], ENGINE_CLI_RESUME_TOKEN) == 0);
-        if (grok) {
-            EN_CHECK("resume accessor returns the registered extension",
-                     engine_registry_resume_argv("grok-cli") == grok->resume_argv
-                     && engine_registry_resume_argv("glm-cli") == NULL
-                     && engine_registry_resume_argv("unknown-engine") == NULL);
-            const char *session = "23c9be10-5084-43a4-8e1a-2735a4650981";
-            struct engine_cli_inputs base_resume = in;
-            base_resume.reasoning_effort = "low";
-            struct engine_cli_inputs resumed = base_resume;
-            resumed.resume_session_id = session;
-            size_t base_n = engine_cli_argv_build(grok, &base_resume, argv,
-                                                   ENGINE_CLI_ARGV_MAX);
-            const char *base_argv[ENGINE_CLI_ARGV_MAX];
-            memcpy(base_argv, argv, sizeof(base_argv));
-            size_t resumed_n = engine_cli_argv_build(grok, &resumed, argv,
-                                                      ENGINE_CLI_ARGV_MAX);
-            size_t verbatim_hits = 0;
-            for (size_t i = 0; i < resumed_n; i++)
-                if (strcmp(argv[i], "--verbatim") == 0)
-                    verbatim_hits++;
-            EN_CHECK("Grok argv preserves the supplied prompt exactly once",
-                     resumed_n > 0 && verbatim_hits == 1);
-            bool has_resume = false, has_id = false, has_restore = false;
-            bool preserved = resumed_n == base_n + 2;
-            for (size_t i = 0; preserved && i < base_n; i++)
-                preserved = strcmp(base_argv[i], argv[i]) == 0;
-            for (size_t i = 1; i < resumed_n; i++) {
-                if (strcmp(argv[i], "--resume") == 0) has_resume = true;
-                if (strcmp(argv[i], session) == 0) has_id = true;
-                if (strcmp(argv[i], "--restore-code") == 0) has_restore = true;
-            }
-            EN_CHECK("valid Grok resume appends exactly flag and session",
-                     base_n > 0 && resumed_n == base_n + 2
-                     && preserved && has_resume && has_id && !has_restore);
-            EN_CHECK("Grok resume needs the additional argv capacity",
-                     engine_cli_argv_build(grok, &base_resume, argv, base_n + 1) == base_n
-                     && engine_cli_argv_build(grok, &resumed, argv, resumed_n)
-                            == 0
-                     && engine_cli_argv_build(grok, &resumed, argv, resumed_n + 1)
-                            == resumed_n);
-            const char *combined_argv[25];
-            size_t combined_n = engine_cli_argv_build(grok, &resumed,
-                                                       combined_argv, 25);
-            EN_CHECK("Grok effort and resume fit 25 slots including NULL",
-                     combined_n == 24 && combined_argv[combined_n] == NULL);
-            EN_CHECK("Grok effort and resume refuse only 24 slots",
-                     engine_cli_argv_build(grok, &resumed, combined_argv, 24)
-                         == 0);
-            struct engine_vendor malformed_resume = *grok;
-            static const char *const unknown_resume[] = {
-                "--resume", "{unknown_session}", NULL
-            };
-            malformed_resume.resume_argv = unknown_resume;
-            EN_CHECK("an unknown resume placeholder is refused",
-                     engine_cli_argv_build(&malformed_resume, &resumed, argv,
-                                           ENGINE_CLI_ARGV_MAX) == 0);
-
-            const char *bad[] = { "", " ",
-                "23c9be10-5084-43a4-8e1a-2735a465098",
-                "23c9be10-5084-43a4-8e1a-2735a4650981\n",
-                "23C9BE10-5084-43A4-8E1A-2735A4650981", NULL };
-            for (size_t i = 0; bad[i]; i++) {
-                struct engine_cli_inputs invalid = in;
-                invalid.resume_session_id = bad[i];
-                EN_CHECK("malformed Grok resume session is refused",
-                         engine_cli_argv_build(grok, &invalid, argv,
-                                               ENGINE_CLI_ARGV_MAX) == 0);
-            }
-        }
-    }
-
-    if (argq) {
-        const struct engine_cli_inputs argin = {
-            .prompt  = "THE WHOLE PROMPT TEXT",
-            .workdir = "/w",
-            .turns   = "3",
-            .model   = "m-1",
-        };
-        size_t n = engine_cli_argv_build(argq, &argin, argv,
-                                         ENGINE_CLI_ARGV_MAX);
-        bool carries_text = false;
-        for (size_t i = 1; i < n; i++)
-            if (strcmp(argv[i], argin.prompt) == 0) carries_text = true;
-        EN_CHECK("an argument-prompt vendor receives the prompt TEXT, not a "
-                 "path", n > 0 && carries_text);
-        struct engine_cli_inputs unsupported = argin;
-        unsupported.reasoning_effort = "low";
-        EN_CHECK("a CLI with no effort flag refuses an explicit effort",
-                 engine_cli_argv_build(argq, &unsupported, argv,
-                                       ENGINE_CLI_ARGV_MAX) == 0);
-        unsupported.reasoning_effort = NULL;
-        unsupported.resume_session_id =
-            "23c9be10-5084-43a4-8e1a-2735a4650981";
-        EN_CHECK("an unsupported CLI refuses a resume session",
-                 engine_cli_argv_build(argq, &unsupported, argv,
-                                       ENGINE_CLI_ARGV_MAX) == 0);
-
-        /* The kernel caps one argv string far below the prompt ceiling. */
-        size_t over = ENGINE_CLI_ARG_PROMPT_MAX + 1u;
-        char *huge = zcl_malloc(over + 1, "test_engine_cli_huge");
-        if (huge) {
-            memset(huge, 'x', over);
-            huge[over] = '\0';
-            struct engine_cli_inputs bigin = argin;
-            bigin.prompt = huge;
-            EN_CHECK("an argument-mode prompt over the limit is refused",
-                     engine_cli_argv_build(argq, &bigin, argv,
-                                           ENGINE_CLI_ARGV_MAX) == 0);
-            free(huge);
-        } else {
-            EN_CHECK("the over-length CLI fixture allocates", false);
-        }
-    }
-
     /* A placeholder the caller left empty is a refusal, not an empty slot: an
      * argv entry silently filled with nothing is a different command. */
-    if (fileq) {
-        struct engine_cli_inputs missing = in;
-        missing.workdir = NULL;
-        EN_CHECK("a placeholder with no value is refused",
-                 engine_cli_argv_build(fileq, &missing, argv,
-                                       ENGINE_CLI_ARGV_MAX) == 0);
-        missing = in;
-        missing.workdir = "";
-        EN_CHECK("and an empty string counts as no value",
-                 engine_cli_argv_build(fileq, &missing, argv,
-                                       ENGINE_CLI_ARGV_MAX) == 0);
-        EN_CHECK("a cap too small to hold the vector is refused",
-                 engine_cli_argv_build(fileq, &in, argv, 2) == 0);
-    }
+    struct engine_cli_inputs missing = in;
+    missing.workdir = NULL;
+    EN_CHECK("a placeholder with no value is refused",
+             engine_cli_argv_build(fileq, &missing, argv,
+                                   ENGINE_CLI_ARGV_MAX) == 0);
+    missing = in;
+    missing.workdir = "";
+    EN_CHECK("and an empty string counts as no value",
+             engine_cli_argv_build(fileq, &missing, argv,
+                                   ENGINE_CLI_ARGV_MAX) == 0);
+    EN_CHECK("a cap too small to hold the vector is refused",
+             engine_cli_argv_build(fileq, &in, argv, 2) == 0);
+    return failures;
+}
 
+static int case_cli_argv_unknown(const struct engine_vendor *fileq)
+{
+    int failures = 0;
+    const struct engine_cli_inputs in = cli_argv_base_inputs();
+    const char *argv[ENGINE_CLI_ARGV_MAX];
     /* An unknown brace-shaped slot is refused rather than passed through as a
      * literal, which is what a CLI would receive as a confident wrong value. */
     static const char *const bogus_argv[] = { "--flag", "{mdoel}", NULL };
@@ -2163,26 +2238,56 @@ static int case_cli_argv(void)
     return failures;
 }
 
-static int case_cli_observation(void)
+static int case_cli_argv(void)
 {
     int failures = 0;
-    static const char good[] =
-        "{\"text\":\"done\",\"stopReason\":\"end_turn\","
-        "\"sessionId\":\"23c9be10-5084-43a4-8e1a-2735a4650981\","
-        "\"requestId\":\"ddc16017-2c5f-4c34-9fa9-ce50a4ec48a0\","
-        "\"thought\":\"must never escape\","
-        "\"usage\":{\"input_tokens\":100,"
-        "\"cache_read_input_tokens\":60,"
-        "\"cache_creation_input_tokens\":10,\"output_tokens\":25,"
-        "\"reasoning_tokens\":7,\"total_tokens\":125},"
-        "\"num_turns\":4,\"total_cost_usd\":0.125,"
-        "\"modelUsage\":{\"grok-4.6-build\":{\"inputTokens\":100,"
-        "\"outputTokens\":25,\"cacheReadInputTokens\":60,"
-        "\"cacheCreationInputTokens\":10,\"modelCalls\":4,"
-        "\"costUSD\":0.125}}}";
+
+    failures += case_cli_argv_turns();
+    failures += case_cli_argv_rows();
+
+    const struct engine_vendor *fileq = NULL;
+    const struct engine_vendor *argq = NULL;
+    /* A file-mode vendor: the exact exec'd vector, not just its count. */
+    for (size_t i = 0; i < engine_count(); i++) {
+        const struct engine_vendor *v = engine_at(i);
+        if (v->wire != ENGINE_WIRE_LOCAL_CLI) continue;
+        if (v->cli_prompt == ENGINE_CLI_PROMPT_FILE && !fileq) fileq = v;
+        if (v->cli_prompt == ENGINE_CLI_PROMPT_ARG && !argq) argq = v;
+    }
+    EN_CHECK("a file-prompt CLI vendor is registered", fileq != NULL);
+    EN_CHECK("an argument-prompt CLI vendor is registered", argq != NULL);
+
+    if (fileq)
+        failures += case_cli_argv_file_vector(fileq);
+    if (argq)
+        failures += case_cli_argv_arg_prompt(argq);
+    if (fileq)
+        failures += case_cli_argv_missing(fileq);
+    failures += case_cli_argv_unknown(fileq);
+    return failures;
+}
+
+static const char cli_observation_good[] =
+    "{\"text\":\"done\",\"stopReason\":\"end_turn\","
+    "\"sessionId\":\"23c9be10-5084-43a4-8e1a-2735a4650981\","
+    "\"requestId\":\"ddc16017-2c5f-4c34-9fa9-ce50a4ec48a0\","
+    "\"thought\":\"must never escape\","
+    "\"usage\":{\"input_tokens\":100,"
+    "\"cache_read_input_tokens\":60,"
+    "\"cache_creation_input_tokens\":10,\"output_tokens\":25,"
+    "\"reasoning_tokens\":7,\"total_tokens\":125},"
+    "\"num_turns\":4,\"total_cost_usd\":0.125,"
+    "\"modelUsage\":{\"grok-4.6-build\":{\"inputTokens\":100,"
+    "\"outputTokens\":25,\"cacheReadInputTokens\":60,"
+    "\"cacheCreationInputTokens\":10,\"modelCalls\":4,"
+    "\"costUSD\":0.125}}}";
+
+static int case_cli_observation_grok_metadata(void)
+{
+    int failures = 0;
     struct engine_cli_observation observed;
-    bool ok = engine_cli_observation_parse(engine_by_id("grok-cli"), good,
-                                            sizeof(good) - 1u, &observed);
+    bool ok = engine_cli_observation_parse(engine_by_id("grok-cli"), cli_observation_good,
+                                            sizeof(cli_observation_good) - 1u, &observed);
     EN_CHECK("Grok CLI observable metadata parses",
              ok && observed.known
              && strcmp(observed.resolved_model, "grok-4.6-build") == 0
@@ -2194,7 +2299,14 @@ static int case_cli_observation(void)
              && observed.output_tokens == 25
              && observed.reasoning_tokens == 7
              && observed.total_tokens == 125);
+    return failures;
+}
 
+static int case_cli_observation_additive_plain(void)
+{
+    int failures = 0;
+    struct engine_cli_observation observed;
+    bool ok;
     /* Both Grok accounting shapes (cache-inclusive input, additive cache
      * reads) are accepted only when the total is arithmetically consistent. */
     static const char additive_cache[] =
@@ -2224,7 +2336,13 @@ static int case_cli_observation(void)
                                       &observed);
     EN_CHECK("plain CLI metadata stays truthful UNKNOWN",
              ok && !observed.known && observed.session_id[0] == '\0');
+    return failures;
+}
 
+static int case_cli_observation_bad_missing(void)
+{
+    int failures = 0;
+    struct engine_cli_observation observed;
     static const char bad_total[] =
         "{\"text\":\"done\",\"stopReason\":\"end_turn\","
         "\"sessionId\":\"s\",\"requestId\":\"r\","
@@ -2243,19 +2361,25 @@ static int case_cli_observation(void)
                                             sizeof(bad_total) - 1u, &observed)
              && !observed.known && observed.resolved_model[0] == '\0');
 
-    char missing[sizeof(good)];
-    memcpy(missing, good, sizeof(good));
+    char missing[sizeof(cli_observation_good)];
+    memcpy(missing, cli_observation_good, sizeof(cli_observation_good));
     char *session_key = strstr(missing, "sessionId");
     if (session_key) session_key[0] = 'x';
     memset(&observed, 0xa5, sizeof(observed));
     EN_CHECK("missing required Grok metadata fails closed atomically",
              session_key != NULL &&
              !engine_cli_observation_parse(engine_by_id("grok-cli"), missing,
-                                            sizeof(good) - 1u, &observed)
+                                            sizeof(cli_observation_good) - 1u, &observed)
              && !observed.known && observed.session_id[0] == '\0');
+    return failures;
+}
 
-    char negative[sizeof(good)];
-    memcpy(negative, good, sizeof(good));
+static int case_cli_observation_negative_huge_nul(void)
+{
+    int failures = 0;
+    struct engine_cli_observation observed;
+    char negative[sizeof(cli_observation_good)];
+    memcpy(negative, cli_observation_good, sizeof(cli_observation_good));
     char *input_count = strstr(negative, "input_tokens\":100");
     if (input_count) {
         input_count = strchr(input_count, ':');
@@ -2265,7 +2389,7 @@ static int case_cli_observation(void)
     EN_CHECK("negative Grok metadata fails closed atomically",
              input_count != NULL &&
              !engine_cli_observation_parse(engine_by_id("grok-cli"), negative,
-                                            sizeof(good) - 1u, &observed)
+                                            sizeof(cli_observation_good) - 1u, &observed)
              && !observed.known && observed.total_tokens == 0);
 
     static const char huge_integer[] =
@@ -2287,14 +2411,24 @@ static int case_cli_observation(void)
                                             &observed)
              && !observed.known && observed.input_tokens == 0);
 
-    char nul_body[sizeof(good)];
-    memcpy(nul_body, good, sizeof(good));
+    char nul_body[sizeof(cli_observation_good)];
+    memcpy(nul_body, cli_observation_good, sizeof(cli_observation_good));
     nul_body[20] = '\0';
     memset(&observed, 0xa5, sizeof(observed));
     EN_CHECK("embedded NUL Grok metadata fails closed atomically",
              !engine_cli_observation_parse(engine_by_id("grok-cli"), nul_body,
-                                            sizeof(good) - 1u, &observed)
+                                            sizeof(cli_observation_good) - 1u, &observed)
              && !observed.known && observed.request_id[0] == '\0');
+    return failures;
+}
+
+static int case_cli_observation(void)
+{
+    int failures = 0;
+    failures += case_cli_observation_grok_metadata();
+    failures += case_cli_observation_additive_plain();
+    failures += case_cli_observation_bad_missing();
+    failures += case_cli_observation_negative_huge_nul();
     return failures;
 }
 
@@ -3148,6 +3282,100 @@ static int case_engine_unit_codex_review_e2e(void)
 
 #endif
 
+static int engine_unit_state_carry_check(const char *dir, const char *state_dir)
+{
+    int failures = 0;
+    char state_txt[512] = {0};
+    char prompt_txt[64 * 1024] = {0};
+    char state_txt_path[700], prompt_txt_path[700];
+    char run_log_txt[4096] = {0};
+    char run_log_path[700];
+    (void)snprintf(state_txt_path, sizeof(state_txt_path), "%s/state.txt",
+                   state_dir);
+    (void)snprintf(prompt_txt_path, sizeof(prompt_txt_path),
+                   "%s/prompt.txt", state_dir);
+    const bool have_state = read_whole_file(state_txt_path, state_txt,
+                                            sizeof(state_txt));
+    const bool have_prompt = read_whole_file(prompt_txt_path, prompt_txt,
+                                             sizeof(prompt_txt));
+    (void)snprintf(run_log_path, sizeof(run_log_path), "%s/run.log", dir);
+    const bool have_run_log = read_whole_file(run_log_path, run_log_txt,
+                                              sizeof(run_log_txt));
+    EN_CHECK("--no-group fixture skips worktree-prime",
+             have_run_log
+             && strstr(run_log_txt, "prime skipped") != NULL
+             && strstr(run_log_txt, "could not prime") == NULL);
+    EN_CHECK("the harness wrote state.txt after turn 1's reply", have_state);
+    EN_CHECK("state.txt holds what turn 1's model wrote",
+             have_state
+             && strstr(state_txt, "turn two should see this exact sentence")
+                    != NULL);
+    EN_CHECK("prompt.txt (turn 2's, since each turn overwrites it) exists",
+             have_prompt);
+    EN_CHECK("turn 2's prompt was handed turn 1's carried state verbatim",
+             have_prompt
+             && strstr(prompt_txt, "turn two should see this exact sentence")
+                    != NULL);
+    EN_CHECK("turn 2's prompt announces it as carried state, not raw prose",
+             have_prompt
+             && strstr(prompt_txt, "carried state from the previous turn")
+                    != NULL);
+    return failures;
+}
+
+static int engine_unit_state_receipt_check(const char *state_dir)
+{
+    int failures = 0;
+    char receipt_path[700];
+    char receipt[8192] = {0};
+    (void)snprintf(receipt_path, sizeof(receipt_path), "%s/receipt.json",
+                   state_dir);
+    const bool have_receipt = read_whole_file(receipt_path,receipt,
+                                              sizeof(receipt));
+    EN_CHECK("HTTP usage reaches the durable one-run receipt without loss",
+             have_receipt && strstr(receipt,"\"input_tokens\":10") &&
+             strstr(receipt,"\"output_tokens\":4") &&
+             strstr(receipt,"\"total_tokens\":14") &&
+             strstr(receipt,"\"cache_read_input_tokens\":6") &&
+             strstr(receipt,"\"reasoning_tokens\":2") &&
+             strstr(receipt,"\"cache_creation_input_tokens\":null"));
+    failures += case_receipt_tokens_and_wall(receipt, have_receipt);
+    return failures;
+}
+
+static int engine_unit_state_chain_check(const char *dir, const char *state_dir,
+                                         const char *worktree, const char *cmd)
+{
+    int failures = 0;
+    char chain_path[700];
+    char chain[32768] = {0};
+    char run_log_path[700];
+    (void)snprintf(chain_path, sizeof(chain_path), "%s/%s", state_dir,
+                   ENGINE_RECEIPT_FILENAME);
+    const bool have_chain = read_whole_file(chain_path, chain, sizeof(chain));
+    (void)snprintf(run_log_path, sizeof(run_log_path), "%s/run.log", dir);
+    EN_CHECK("both repair dispatches reach one authoritative chain receipt",
+             have_chain &&
+             strstr(chain, "\"ordinal\":1,\"phase\":\"turn\"") &&
+             strstr(chain, "\"ordinal\":2,\"phase\":\"turn\"") &&
+             strstr(chain, "\"total_prompt_tokens\":20") &&
+             strstr(chain, "\"total_completion_tokens\":8") &&
+             strstr(chain, "\"total_cache_read_input_tokens\":12") &&
+             strstr(chain, "\"total_cache_creation_input_tokens\":-1") &&
+             strstr(chain, "\"total_reasoning_tokens\":4") &&
+             strstr(chain, "\"total_reported_tokens\":28") &&
+             strstr(chain, "\"accounting_scope\":\"terminal_dispatch\"") &&
+             strstr(chain, "\"total_invocation_elapsed_ms\":") &&
+             strstr(chain, "\"cumulative_proof_ms\":0") &&
+             strstr(chain, "\"unit_elapsed_ms\":"));
+
+    failures += case_receipt_absent_attempt(chain, have_chain);
+
+    failures += case_template_cas_dispatch(cmd, worktree, chain_path,
+                                           run_log_path);
+    return failures;
+}
+
 static int case_engine_unit_state_e2e(void)
 {
     int failures = 0;
@@ -3216,79 +3444,9 @@ static int case_engine_unit_state_e2e(void)
         ENGINE_UNIT_BIN, task_path, worktree, state_dir, reply_path, dir);
      TEST_DISCARD(system(cmd)); /* verdict is read from the files it wrote, not this */
 
-    char state_txt[512] = {0};
-    char prompt_txt[64 * 1024] = {0};
-    char state_txt_path[700], prompt_txt_path[700], receipt_path[700];
-    char chain_path[700];
-    (void)snprintf(state_txt_path, sizeof(state_txt_path), "%s/state.txt",
-                   state_dir);
-    (void)snprintf(prompt_txt_path, sizeof(prompt_txt_path),
-                   "%s/prompt.txt", state_dir);
-    (void)snprintf(receipt_path, sizeof(receipt_path), "%s/receipt.json",
-                   state_dir);
-    (void)snprintf(chain_path, sizeof(chain_path), "%s/%s", state_dir,
-                   ENGINE_RECEIPT_FILENAME);
-    const bool have_state = read_whole_file(state_txt_path, state_txt,
-                                            sizeof(state_txt));
-    const bool have_prompt = read_whole_file(prompt_txt_path, prompt_txt,
-                                             sizeof(prompt_txt));
-    char receipt[8192] = {0};
-    const bool have_receipt = read_whole_file(receipt_path,receipt,
-                                              sizeof(receipt));
-    char chain[32768] = {0};
-    const bool have_chain = read_whole_file(chain_path, chain, sizeof(chain));
-
-    char run_log_txt[4096] = {0};
-    char run_log_path[700];
-    (void)snprintf(run_log_path, sizeof(run_log_path), "%s/run.log", dir);
-    const bool have_run_log = read_whole_file(run_log_path, run_log_txt,
-                                              sizeof(run_log_txt));
-    EN_CHECK("--no-group fixture skips worktree-prime",
-             have_run_log
-             && strstr(run_log_txt, "prime skipped") != NULL
-             && strstr(run_log_txt, "could not prime") == NULL);
-    EN_CHECK("the harness wrote state.txt after turn 1's reply", have_state);
-    EN_CHECK("state.txt holds what turn 1's model wrote",
-             have_state
-             && strstr(state_txt, "turn two should see this exact sentence")
-                    != NULL);
-    EN_CHECK("prompt.txt (turn 2's, since each turn overwrites it) exists",
-             have_prompt);
-    EN_CHECK("turn 2's prompt was handed turn 1's carried state verbatim",
-             have_prompt
-             && strstr(prompt_txt, "turn two should see this exact sentence")
-                    != NULL);
-    EN_CHECK("turn 2's prompt announces it as carried state, not raw prose",
-             have_prompt
-             && strstr(prompt_txt, "carried state from the previous turn")
-                    != NULL);
-    EN_CHECK("HTTP usage reaches the durable one-run receipt without loss",
-             have_receipt && strstr(receipt,"\"input_tokens\":10") &&
-             strstr(receipt,"\"output_tokens\":4") &&
-             strstr(receipt,"\"total_tokens\":14") &&
-             strstr(receipt,"\"cache_read_input_tokens\":6") &&
-             strstr(receipt,"\"reasoning_tokens\":2") &&
-             strstr(receipt,"\"cache_creation_input_tokens\":null"));
-    failures += case_receipt_tokens_and_wall(receipt, have_receipt);
-    EN_CHECK("both repair dispatches reach one authoritative chain receipt",
-             have_chain &&
-             strstr(chain, "\"ordinal\":1,\"phase\":\"turn\"") &&
-             strstr(chain, "\"ordinal\":2,\"phase\":\"turn\"") &&
-             strstr(chain, "\"total_prompt_tokens\":20") &&
-             strstr(chain, "\"total_completion_tokens\":8") &&
-             strstr(chain, "\"total_cache_read_input_tokens\":12") &&
-             strstr(chain, "\"total_cache_creation_input_tokens\":-1") &&
-             strstr(chain, "\"total_reasoning_tokens\":4") &&
-             strstr(chain, "\"total_reported_tokens\":28") &&
-             strstr(chain, "\"accounting_scope\":\"terminal_dispatch\"") &&
-             strstr(chain, "\"total_invocation_elapsed_ms\":") &&
-             strstr(chain, "\"cumulative_proof_ms\":0") &&
-             strstr(chain, "\"unit_elapsed_ms\":"));
-
-    failures += case_receipt_absent_attempt(chain, have_chain);
-
-    failures += case_template_cas_dispatch(cmd, worktree, chain_path,
-                                           run_log_path);
+    failures += engine_unit_state_carry_check(dir, state_dir);
+    failures += engine_unit_state_receipt_check(state_dir);
+    failures += engine_unit_state_chain_check(dir, state_dir, worktree, cmd);
 
     /* Remove the worktree path so a killed run leaves no registered
      * worktree under test-tmp. Best-effort. */
@@ -4032,39 +4190,38 @@ static int case_receipt_exact_attempt(const char *chain, const char *path,
     return failures;
 }
 
-static int case_engine_unit_grok_projection_e2e(void)
-{
-    int failures = 0;
-    if (!engine_unit_binary_present()) {
-        printf("engine: FAIL (%s is required for Grok projection e2e)\n",
-               ENGINE_UNIT_BIN);
-        return 1;
-    }
-
-    char rel[512], dir[600];
-    test_make_tmpdir(rel, sizeof(rel), "engine_grok_projection", "run");
-    if (!test_abs_path(rel, dir, sizeof(dir))) {
-        printf("engine: FAIL (could not absolutize Grok fixture)\n");
-        return 1;
-    }
+struct grok_projection_paths {
     char bin_dir[700], source[700], fake_grok[700], task[700];
     char first[700], second[700], counter[700], state[700], worktree[700];
     char receipt_path[740], chain_path[740], log_path[740];
-    (void)snprintf(bin_dir, sizeof(bin_dir), "%s/bin", dir);
-    (void)snprintf(source, sizeof(source), "%s/fake-grok.c", dir);
-    (void)snprintf(fake_grok, sizeof(fake_grok), "%s/grok", bin_dir);
-    (void)snprintf(task, sizeof(task), "%s/task.txt", dir);
-    (void)snprintf(first, sizeof(first), "%s/inclusive.json", dir);
-    (void)snprintf(second, sizeof(second), "%s/additive.json", dir);
-    (void)snprintf(counter, sizeof(counter), "%s/counter", dir);
-    (void)snprintf(state, sizeof(state), "%s/state", dir);
-    (void)snprintf(worktree, sizeof(worktree), "%s/wt", dir);
-    (void)snprintf(receipt_path, sizeof(receipt_path), "%s/receipt.json", state);
-    (void)snprintf(chain_path, sizeof(chain_path), "%s/%s", state,
-                   ENGINE_RECEIPT_FILENAME);
-    (void)snprintf(log_path, sizeof(log_path), "%s/run.log", dir);
-    const bool dirs_ok = mkdir(bin_dir, 0700) == 0 && mkdir(state, 0700) == 0;
+    char q_bin[1404], q_source[1404], q_grok[1404], q_task[1404];
+    char q_first[1404], q_second[1404], q_counter[1404], q_state[1404];
+    char q_worktree[1404], q_log[1404];
+};
 
+static void grok_projection_set_paths(struct grok_projection_paths *p,
+                                      const char *dir)
+{
+    (void)snprintf(p->bin_dir, sizeof(p->bin_dir), "%s/bin", dir);
+    (void)snprintf(p->source, sizeof(p->source), "%s/fake-grok.c", dir);
+    (void)snprintf(p->fake_grok, sizeof(p->fake_grok), "%s/grok", p->bin_dir);
+    (void)snprintf(p->task, sizeof(p->task), "%s/task.txt", dir);
+    (void)snprintf(p->first, sizeof(p->first), "%s/inclusive.json", dir);
+    (void)snprintf(p->second, sizeof(p->second), "%s/additive.json", dir);
+    (void)snprintf(p->counter, sizeof(p->counter), "%s/counter", dir);
+    (void)snprintf(p->state, sizeof(p->state), "%s/state", dir);
+    (void)snprintf(p->worktree, sizeof(p->worktree), "%s/wt", dir);
+    (void)snprintf(p->receipt_path, sizeof(p->receipt_path), "%s/receipt.json",
+                   p->state);
+    (void)snprintf(p->chain_path, sizeof(p->chain_path), "%s/%s", p->state,
+                   ENGINE_RECEIPT_FILENAME);
+    (void)snprintf(p->log_path, sizeof(p->log_path), "%s/run.log", dir);
+}
+
+static int grok_projection_write_fixtures(const struct grok_projection_paths *p,
+                                          bool dirs_ok, bool *files_ok_out)
+{
+    int failures = 0;
     static const char fake_source[] =
         "#include <stdio.h>\n#include <stdlib.h>\n"
         "int main(void){const char*c=getenv(\"ZCL_FAKE_COUNT\");"
@@ -4100,67 +4257,78 @@ static int case_engine_unit_grok_projection_e2e(void)
         "\"cacheReadInputTokens\":265088,"
         "\"cacheCreationInputTokens\":0,\"modelCalls\":10}}}";
     const bool files_ok = dirs_ok
-        && write_whole_file(source, fake_source)
-        && write_whole_file(task, "kind: fix-gate\n\nMeasure accounting.\n")
-        && write_whole_file(first, inclusive)
-        && write_whole_file(second, additive);
+        && write_whole_file(p->source, fake_source)
+        && write_whole_file(p->task, "kind: fix-gate\n\nMeasure accounting.\n")
+        && write_whole_file(p->first, inclusive)
+        && write_whole_file(p->second, additive);
     EN_CHECK("Grok dispatch fixtures are written", files_ok);
+    *files_ok_out = files_ok;
+    return failures;
+}
 
+static bool grok_projection_quote(struct grok_projection_paths *p)
+{
+    return engine_test_shell_quote(p->bin_dir, p->q_bin, sizeof(p->q_bin))
+        && engine_test_shell_quote(p->source, p->q_source, sizeof(p->q_source))
+        && engine_test_shell_quote(p->fake_grok, p->q_grok, sizeof(p->q_grok))
+        && engine_test_shell_quote(p->task, p->q_task, sizeof(p->q_task))
+        && engine_test_shell_quote(p->first, p->q_first, sizeof(p->q_first))
+        && engine_test_shell_quote(p->second, p->q_second, sizeof(p->q_second))
+        && engine_test_shell_quote(p->counter, p->q_counter, sizeof(p->q_counter))
+        && engine_test_shell_quote(p->state, p->q_state, sizeof(p->q_state))
+        && engine_test_shell_quote(p->worktree, p->q_worktree, sizeof(p->q_worktree))
+        && engine_test_shell_quote(p->log_path, p->q_log, sizeof(p->q_log));
+}
+
+static void grok_projection_compile(const struct grok_projection_paths *p,
+                                    bool *detached, bool *compiled)
+{
     char command[8192];
-    char q_bin[1404], q_source[1404], q_grok[1404], q_task[1404];
-    char q_first[1404], q_second[1404], q_counter[1404], q_state[1404];
-    char q_worktree[1404], q_log[1404];
-    const bool quoted = engine_test_shell_quote(bin_dir, q_bin, sizeof(q_bin))
-        && engine_test_shell_quote(source, q_source, sizeof(q_source))
-        && engine_test_shell_quote(fake_grok, q_grok, sizeof(q_grok))
-        && engine_test_shell_quote(task, q_task, sizeof(q_task))
-        && engine_test_shell_quote(first, q_first, sizeof(q_first))
-        && engine_test_shell_quote(second, q_second, sizeof(q_second))
-        && engine_test_shell_quote(counter, q_counter, sizeof(q_counter))
-        && engine_test_shell_quote(state, q_state, sizeof(q_state))
-        && engine_test_shell_quote(worktree, q_worktree, sizeof(q_worktree))
-        && engine_test_shell_quote(log_path, q_log, sizeof(q_log));
-    bool compiled = false;
-    bool detached = false;
-    if (files_ok && quoted) {
-        (void)snprintf(command, sizeof(command),
-                       "git -c core.hooksPath=/dev/null worktree add "
-                       "--detach %s HEAD >/dev/null 2>&1",
-                       q_worktree);
-        detached = system(command) == 0;
-        (void)snprintf(command, sizeof(command),
-                       "cc -std=c23 -O0 -o %s %s", q_grok, q_source);
-        compiled = system(command) == 0;
-    }
-    EN_CHECK("the fixture owns a detached worktree", detached);
-    EN_CHECK("the fake Grok CLI fixture compiles as C23", compiled);
-    if (compiled && detached) {
-        const struct attempt_cli_fixture attempt_fixture = {
-            .counter = counter, .log_path = log_path, .bin = q_bin,
-            .count = q_counter, .first = q_first, .second = q_second,
-            .task = q_task, .worktree = q_worktree, .state = q_state,
-            .log = q_log,
-        };
-        failures += case_attempt_cli_refusals(&attempt_fixture);
+    (void)snprintf(command, sizeof(command),
+                   "git -c core.hooksPath=/dev/null worktree add "
+                   "--detach %s HEAD >/dev/null 2>&1",
+                   p->q_worktree);
+    *detached = system(command) == 0;
+    (void)snprintf(command, sizeof(command),
+                   "cc -std=c23 -O0 -o %s %s", p->q_grok, p->q_source);
+    *compiled = system(command) == 0;
+}
 
-        (void)snprintf(command, sizeof(command),
-            "PATH=%s:$PATH ZCL_FAKE_COUNT=%s ZCL_FAKE_FIRST=%s "
-            "ZCL_FAKE_SECOND=%s %s --engine grok-cli --task %s --no-group "
-            "--yes-dispatch --turns 2 --worktree %s --state-dir %s --attempt-id %s "
-            ">%s 2>&1", q_bin, q_counter, q_first, q_second, ENGINE_UNIT_BIN,
-            q_task, q_worktree, q_state, attempt_a, q_log);
-        TEST_DISCARD(system(command)); /* durable receipts are the evidence */
-    }
+static int grok_projection_run(const struct grok_projection_paths *p)
+{
+    int failures = 0;
+    char command[8192];
+    const struct attempt_cli_fixture attempt_fixture = {
+        .counter = p->counter, .log_path = p->log_path, .bin = p->q_bin,
+        .count = p->q_counter, .first = p->q_first, .second = p->q_second,
+        .task = p->q_task, .worktree = p->q_worktree, .state = p->q_state,
+        .log = p->q_log,
+    };
+    failures += case_attempt_cli_refusals(&attempt_fixture);
 
+    (void)snprintf(command, sizeof(command),
+        "PATH=%s:$PATH ZCL_FAKE_COUNT=%s ZCL_FAKE_FIRST=%s "
+        "ZCL_FAKE_SECOND=%s %s --engine grok-cli --task %s --no-group "
+        "--yes-dispatch --turns 2 --worktree %s --state-dir %s --attempt-id %s "
+        ">%s 2>&1", p->q_bin, p->q_counter, p->q_first, p->q_second, ENGINE_UNIT_BIN,
+        p->q_task, p->q_worktree, p->q_state, attempt_a, p->q_log);
+    TEST_DISCARD(system(command)); /* durable receipts are the evidence */
+    return failures;
+}
+
+static int grok_projection_check_receipts(const struct grok_projection_paths *p,
+                                          bool ran)
+{
+    int failures = 0;
     char receipt[8192] = {0};
     char chain[32768] = {0};
-    const bool have_receipt = compiled && detached
-        && read_whole_file(receipt_path, receipt, sizeof(receipt));
-    const bool have_chain = compiled && detached
-        && read_whole_file(chain_path, chain, sizeof(chain));
+    const bool have_receipt = ran
+        && read_whole_file(p->receipt_path, receipt, sizeof(receipt));
+    const bool have_chain = ran
+        && read_whole_file(p->chain_path, chain, sizeof(chain));
     EN_CHECK("the Grok dispatch wrote its one-run receipt", have_receipt);
     EN_CHECK("the Grok dispatch wrote its receipt chain", have_chain);
-    failures += case_receipt_exact_attempt(chain, chain_path, have_chain);
+    failures += case_receipt_exact_attempt(chain, p->chain_path, have_chain);
     EN_CHECK("additive Grok projection preserves raw and normalized counters",
              have_receipt
              && strstr(receipt, "\"prompt_tokens\":496667")
@@ -4175,14 +4343,55 @@ static int case_engine_unit_grok_projection_e2e(void)
              && strstr(chain, "\"total_prompt_tokens\":496767")
              && strstr(chain, "\"total_completion_tokens\":9855")
              && strstr(chain, "\"total_reported_tokens\":506622"));
+    return failures;
+}
 
-    if (detached) {
-        (void)snprintf(command, sizeof(command),
-                       "git worktree remove --force %s >/dev/null 2>&1",
-                       q_worktree);
-        EN_CHECK("only the fixture's detached worktree is removed",
-                 system(command) == 0);
+static int grok_projection_remove_worktree(const struct grok_projection_paths *p)
+{
+    int failures = 0;
+    char command[8192];
+    (void)snprintf(command, sizeof(command),
+                   "git worktree remove --force %s >/dev/null 2>&1",
+                   p->q_worktree);
+    EN_CHECK("only the fixture's detached worktree is removed",
+             system(command) == 0);
+    return failures;
+}
+
+static int case_engine_unit_grok_projection_e2e(void)
+{
+    int failures = 0;
+    if (!engine_unit_binary_present()) {
+        printf("engine: FAIL (%s is required for Grok projection e2e)\n",
+               ENGINE_UNIT_BIN);
+        return 1;
     }
+
+    char rel[512], dir[600];
+    test_make_tmpdir(rel, sizeof(rel), "engine_grok_projection", "run");
+    if (!test_abs_path(rel, dir, sizeof(dir))) {
+        printf("engine: FAIL (could not absolutize Grok fixture)\n");
+        return 1;
+    }
+    struct grok_projection_paths p;
+    grok_projection_set_paths(&p, dir);
+    const bool dirs_ok = mkdir(p.bin_dir, 0700) == 0 && mkdir(p.state, 0700) == 0;
+    bool files_ok = false;
+    failures += grok_projection_write_fixtures(&p, dirs_ok, &files_ok);
+
+    const bool quoted = grok_projection_quote(&p);
+    bool compiled = false;
+    bool detached = false;
+    if (files_ok && quoted)
+        grok_projection_compile(&p, &detached, &compiled);
+    EN_CHECK("the fixture owns a detached worktree", detached);
+    EN_CHECK("the fake Grok CLI fixture compiles as C23", compiled);
+    if (compiled && detached)
+        failures += grok_projection_run(&p);
+
+    failures += grok_projection_check_receipts(&p, compiled && detached);
+    if (detached)
+        failures += grok_projection_remove_worktree(&p);
     return failures;
 }
 #endif
@@ -4619,6 +4828,323 @@ static int case_receipt_attempt_binding(void)
     return failures;
 }
 
+static int receipt_chain_unicode_check(struct engine_receipt *a,
+                                       struct engine_receipt_chain_report *report)
+{
+    int failures = 0;
+    /* UTF-8 boundary: spaces and a non-ASCII filename. */
+    char unicode_path[PATH_MAX];
+    (void)test_ensure_tmproot();
+    receipt_unicode_path(unicode_path, sizeof(unicode_path));
+    receipt_unlink(unicode_path);
+    EN_CHECK("a receipt appends through a UTF-8 path containing spaces",
+             engine_receipt_append(unicode_path, a, NULL));
+    EN_CHECK("the UTF-8 receipt chain verifies byte-exactly",
+             engine_receipt_verify_chain(unicode_path, report)
+             && report->records == 1 && report->first_bad_line == 0);
+    receipt_unlink(unicode_path);
+    return failures;
+}
+
+static int receipt_chain_first_copy_check(const char *line1, size_t line1_n,
+                                          char *first, size_t first_cap)
+{
+    int failures = 0;
+    static const char k_genesis[] =
+        "\"prev_sha3\":\"0000000000000000000000000000000000000000000000000000000000000000\"";
+    if (line1 && line1_n < first_cap) {
+        memcpy(first, line1, line1_n);
+        first[line1_n] = '\0';
+    } else {
+        first[0] = '\0';
+    }
+    EN_CHECK("the first record's prev_sha3 is 64 zeros",
+             strstr(first, k_genesis) != NULL);
+    EN_CHECK("groups_ran is a JSON integer, not a float",
+             strstr(first, "\"groups_ran\":0") != NULL
+             && strstr(first, "\"groups_ran\":0.") == NULL);
+    EN_CHECK("ts is a JSON integer, not a float",
+             strstr(first, "\"ts\":1000") != NULL
+             && strstr(first, "\"ts\":1000.") == NULL);
+    return failures;
+}
+
+static int receipt_chain_first_model_check(const char *first)
+{
+    int failures = 0;
+    EN_CHECK("the durable receipt preserves requested and resolved model",
+             strstr(first, "\"model\":\"grok-4.6\"") != NULL &&
+             strstr(first, "\"requested_model\":\"grok-4.6\"") != NULL &&
+             strstr(first, "\"resolved_model\":\"grok-4.6-build\"") != NULL);
+    EN_CHECK("the durable receipt preserves effort and complete CLI usage",
+             strstr(first, "\"reasoning_effort\":\"high\"") != NULL &&
+             strstr(first, "\"cache_read_input_tokens\":60") != NULL &&
+             strstr(first, "\"cache_creation_input_tokens\":10") != NULL &&
+             strstr(first, "\"reasoning_tokens\":7") != NULL &&
+             strstr(first, "\"total_tokens\":125") != NULL &&
+             strstr(first, "\"turns\":4") != NULL);
+    return failures;
+}
+
+static int receipt_chain_first_timing_check(const char *first)
+{
+    int failures = 0;
+    EN_CHECK("dispatch and proof timing remain separately measurable",
+             strstr(first, "\"dispatch_ms\":2018") != NULL &&
+             strstr(first, "\"proof_ms\":91") != NULL &&
+             strstr(first, "\"wall_ms\":2109") != NULL &&
+             strstr(first, "\"accounting_scope\":\"terminal_dispatch\"") != NULL);
+    EN_CHECK("whole-loop timing is separate from terminal compatibility timing",
+             strstr(first, "\"total_invocation_elapsed_ms\":100") != NULL &&
+             strstr(first, "\"cumulative_proof_ms\":180") != NULL &&
+             strstr(first, "\"unit_elapsed_ms\":2200") != NULL);
+    EN_CHECK("retry, repair, and compaction calls remain separate observations",
+             strstr(first, "\"ordinal\":1,\"phase\":\"turn\",\"result\":\"network\"") != NULL &&
+             strstr(first, "\"ordinal\":3,\"phase\":\"compaction\",\"result\":\"ok\"") != NULL &&
+             strstr(first, "\"ordinal\":4,\"phase\":\"turn\",\"result\":\"ok\"") != NULL);
+    EN_CHECK("each invocation preserves its own resolved model identity",
+             strstr(first, "\"resolved_model\":\"grok-build-a\"") != NULL &&
+             strstr(first, "\"resolved_model\":\"grok-build-b\"") != NULL);
+    EN_CHECK("missing and zero raw counters remain distinguishable",
+             strstr(first, "\"cache_creation_input_tokens\":-1") != NULL &&
+             strstr(first, "\"cache_creation_input_tokens\":0") != NULL);
+    EN_CHECK("partial reporting makes only the affected checked totals unknown",
+             strstr(first, "\"total_prompt_tokens\":-1") != NULL &&
+             strstr(first, "\"total_completion_tokens\":-1") != NULL &&
+             strstr(first, "\"total_reasoning_tokens\":-1") != NULL &&
+             strstr(first, "\"total_reported_tokens\":-1") != NULL);
+    return failures;
+}
+
+static int receipt_chain_second_check(const char *whole, size_t whole_n)
+{
+    int failures = 0;
+    const char *line2 = NULL;
+    size_t line2_n = 0;
+    char second[ENGINE_RECEIPT_LINE_MAX + 2u] = {0};
+    EN_CHECK("the unknown-metadata receipt is readable",
+             receipt_nth_line(whole, whole_n, 2, &line2, &line2_n) &&
+             line2_n < sizeof(second));
+    if (line2 && line2_n < sizeof(second)) {
+        memcpy(second, line2, line2_n);
+        second[line2_n] = '\0';
+    }
+    EN_CHECK("unreported measurement remains explicit UNKNOWN",
+             strstr(second, "\"resolved_model\":null") != NULL &&
+             strstr(second, "\"reasoning_effort\":\"provider_default\"") != NULL &&
+             strstr(second, "\"reasoning_tokens\":-1") != NULL &&
+             strstr(second, "\"cache_read_input_tokens\":-1") != NULL);
+    EN_CHECK("overflow refuses a fabricated aggregate while preserving raw counters",
+             strstr(second, "\"prompt_tokens\":9223372036854775807") != NULL &&
+             strstr(second, "\"total_prompt_tokens\":-1") != NULL &&
+             strstr(second, "\"total_completion_tokens\":0") != NULL &&
+             strstr(second, "\"total_reasoning_tokens\":0") != NULL);
+    return failures;
+}
+
+static int receipt_chain_third_check(const char *whole, size_t whole_n)
+{
+    int failures = 0;
+    const char *line3 = NULL;
+    size_t line3_n = 0;
+    char third[ENGINE_RECEIPT_LINE_MAX + 2u] = {0};
+    EN_CHECK("the resumed-session receipt is readable",
+             receipt_nth_line(whole, whole_n, 3, &line3, &line3_n) &&
+             line3_n < sizeof(third));
+    if (line3 && line3_n < sizeof(third)) {
+        memcpy(third, line3, line3_n);
+        third[line3_n] = '\0';
+    }
+    EN_CHECK("cumulative-session ambiguity keeps raw calls but refuses totals",
+             strstr(third, "\"usage_scope\":\"non_additive_observation\"") != NULL &&
+             strstr(third, "\"prompt_tokens\":10") != NULL &&
+             strstr(third, "\"prompt_tokens\":20") != NULL &&
+             strstr(third, "\"total_prompt_tokens\":-1") != NULL &&
+             strstr(third, "\"total_reported_tokens\":-1") != NULL);
+    return failures;
+}
+
+static int receipt_chain_resumed_check(const char *path,
+                                       struct engine_receipt *c)
+{
+    int failures = 0;
+    char resumed_path[512], resumed_text[ENGINE_RECEIPT_LINE_MAX + 2u];
+    (void)snprintf(resumed_path, sizeof(resumed_path), "%s.resumed", path);
+    receipt_unlink(resumed_path);
+    c->invocations_count = 1;
+    size_t resumed_n = 0;
+    EN_CHECK("a first externally resumed observation is non-additive too",
+             engine_receipt_append(resumed_path, c, NULL) &&
+             receipt_read_whole(resumed_path, resumed_text,
+                                sizeof(resumed_text), &resumed_n) &&
+             strstr(resumed_text, "\"usage_scope\":\"non_additive_observation\"") &&
+             strstr(resumed_text, "\"prompt_tokens\":10") &&
+             strstr(resumed_text, "\"total_reported_tokens\":-1"));
+    receipt_unlink(resumed_path);
+    return failures;
+}
+
+static int receipt_chain_score_check(const char *whole, size_t whole_n)
+{
+    int failures = 0;
+    struct zcl_rule_receipt_log scored;
+    uint32_t bad_line = 0;
+    EN_CHECK("the score reader keeps one trial per outer receipt",
+             zcl_rule_receipts_parse(whole, whole_n, &scored, &bad_line)
+                 == ZCL_RULE_CHAIN_OK &&
+             scored.count == 3 && scored.r[0].prompt_tokens == 100);
+    return failures;
+}
+
+static int receipt_chain_null_kind_check(const char *path)
+{
+    int failures = 0;
+    struct engine_receipt knull = receipt_fixture("fixture", 1003);
+    knull.kind = NULL;
+    char kpath[512];
+    (void)snprintf(kpath, sizeof(kpath), "%s.kind", path);
+    receipt_unlink(kpath);
+    EN_CHECK("a NULL kind appends", engine_receipt_append(kpath, &knull, NULL));
+    char kbuf[65536];
+    size_t kn = 0;
+    EN_CHECK("and is written as an empty kind string",
+             receipt_read_whole(kpath, kbuf, sizeof(kbuf), &kn)
+             && strstr(kbuf, "\"kind\":\"\"") != NULL);
+    receipt_unlink(kpath);
+    return failures;
+}
+
+static int receipt_chain_refusal_check(const char *path,
+                                       struct engine_receipt_chain_report *report)
+{
+    int failures = 0;
+    struct engine_receipt bad = receipt_fixture("", 1003);
+    bad.engine = "";
+    EN_CHECK("a receipt with no engine id is refused",
+             !engine_receipt_append(path, &bad, NULL));
+    EN_CHECK("refusing an append leaves the chain intact",
+             engine_receipt_verify_chain(path, report) && report->records == 3);
+    return failures;
+}
+
+static int receipt_chain_mutation_check(const char *path)
+{
+    int failures = 0;
+    char mut[512];
+    (void)snprintf(mut, sizeof(mut), "%s.mut", path);
+
+    EN_CHECK("copied the honest chain for mutation", receipt_copy(path, mut));
+    EN_CHECK("tampering an earlier line is detected", tamper_first_line(mut));
+    EN_CHECK("and verification names a bad line", verify_refuses(mut));
+    receipt_unlink(mut);
+
+    EN_CHECK("a first line whose prev_sha3 is not genesis is refused",
+             mutate_first_prev_sha3(path, mut) && verify_refuses(mut));
+    receipt_unlink(mut);
+    EN_CHECK("swapping lines 1 and 2 is refused",
+             mutate_swap_first_two(path, mut) && verify_refuses(mut));
+    receipt_unlink(mut);
+    EN_CHECK("dropping the middle line is refused",
+             mutate_drop_line_two(path, mut) && verify_refuses(mut));
+    receipt_unlink(mut);
+    EN_CHECK("a last line with no newline is refused",
+             mutate_drop_last_newline(path, mut) && verify_refuses(mut));
+    receipt_unlink(mut);
+    EN_CHECK("rewriting the last line's groups_ran is refused",
+             mutate_last_groups_ran(path, mut) && verify_refuses(mut));
+    receipt_unlink(mut);
+    return failures;
+}
+
+static int receipt_chain_unreadable_dir_check(const char *path,
+                                              struct engine_receipt *a,
+                                              struct engine_receipt_chain_report *report)
+{
+    int failures = 0;
+    {
+        char directory[600];
+        (void)snprintf(directory, sizeof(directory), "%s.directory", path);
+        receipt_unlink(directory);
+#if defined(_WIN32)
+        const int made_directory = _mkdir(directory);
+#else
+        const int made_directory = mkdir(directory, 0700);
+#endif
+        EN_CHECK("created the unreadable chain fixture", made_directory == 0);
+        EN_CHECK("an unreadable path is not an empty chain",
+                 !engine_receipt_verify_chain(directory, report));
+        EN_CHECK("and an append to it is refused",
+                 !engine_receipt_append(directory, a, NULL));
+#if defined(_WIN32)
+        (void)_rmdir(directory);
+#else
+        (void)rmdir(directory);
+#endif
+    }
+    return failures;
+}
+
+#ifndef _WIN32
+static int receipt_chain_chmod_check(const char *path,
+                                     struct engine_receipt *a,
+                                     struct engine_receipt_chain_report *report)
+{
+    int failures = 0;
+    if (geteuid() != 0) {
+        char locked[512];
+        (void)snprintf(locked, sizeof(locked), "%s.locked", path);
+        EN_CHECK("copied the chain to chmod 000", receipt_copy(path, locked));
+        EN_CHECK("chmod 000 of the chainlog", chmod(locked, 0) == 0);
+        bool unreadable_empty = engine_receipt_verify_chain(locked, report)
+                                && report->records == 0;
+        bool append_genesis = engine_receipt_append(locked, a, NULL);
+        (void)chmod(locked, 0644);
+        EN_CHECK("chmod 000 does not verify as an empty chain",
+                 !unreadable_empty);
+        EN_CHECK("and does not append a genesis record over unread bytes",
+                 !append_genesis);
+        receipt_unlink(locked);
+    }
+    return failures;
+}
+
+static int receipt_chain_concurrency_check(const char *path,
+                                           struct engine_receipt_chain_report *report)
+{
+    int failures = 0;
+    {
+        char cpath[512];
+        (void)snprintf(cpath, sizeof(cpath), "%s.conc", path);
+        receipt_unlink(cpath);
+        pid_t pids[8];
+        int started = 0;
+        for (int i = 0; i < 8; i++) {
+            pid_t pid = fork();
+            if (pid < 0)
+                break;
+            if (pid == 0) {
+                struct engine_receipt r = receipt_fixture("fixture", 2000 + i);
+                _exit(engine_receipt_append(cpath, &r, NULL) ? 0 : 1);
+            }
+            pids[started++] = pid;
+        }
+        int kids_ok = started == 8;
+        for (int i = 0; i < started; i++) {
+            int st = 0;
+            if (waitpid(pids[i], &st, 0) != pids[i] || !WIFEXITED(st)
+                || WEXITSTATUS(st) != 0)
+                kids_ok = 0;
+        }
+        EN_CHECK("eight concurrent appends all finish", kids_ok);
+        EN_CHECK("and the chain verifies with eight records",
+                 engine_receipt_verify_chain(cpath, report)
+                 && report->records == 8 && report->first_bad_line == 0);
+        receipt_unlink(cpath);
+    }
+    return failures;
+}
+#endif
+
 static int case_receipt_chain(void)
 {
     int failures = 0;
@@ -4721,17 +5247,7 @@ static int case_receipt_chain(void)
              engine_receipt_verify_chain(path, &report)
              && report.records == 3 && report.first_bad_line == 0);
 
-    /* UTF-8 boundary: spaces and a non-ASCII filename. */
-    char unicode_path[PATH_MAX];
-    (void)test_ensure_tmproot();
-    receipt_unicode_path(unicode_path, sizeof(unicode_path));
-    receipt_unlink(unicode_path);
-    EN_CHECK("a receipt appends through a UTF-8 path containing spaces",
-             engine_receipt_append(unicode_path, &a, NULL));
-    EN_CHECK("the UTF-8 receipt chain verifies byte-exactly",
-             engine_receipt_verify_chain(unicode_path, &report)
-             && report.records == 1 && report.first_bad_line == 0);
-    receipt_unlink(unicode_path);
+    failures += receipt_chain_unicode_check(&a, &report);
 
     char whole[65536];
     size_t whole_n = 0;
@@ -4740,231 +5256,22 @@ static int case_receipt_chain(void)
     EN_CHECK("the three-record file is readable",
              receipt_read_whole(path, whole, sizeof(whole), &whole_n)
              && receipt_nth_line(whole, whole_n, 1, &line1, &line1_n));
-    static const char k_genesis[] =
-        "\"prev_sha3\":\"0000000000000000000000000000000000000000000000000000000000000000\"";
     char first[ENGINE_RECEIPT_LINE_MAX + 2u];
-    if (line1 && line1_n < sizeof(first)) {
-        memcpy(first, line1, line1_n);
-        first[line1_n] = '\0';
-    } else {
-        first[0] = '\0';
-    }
-    EN_CHECK("the first record's prev_sha3 is 64 zeros",
-             strstr(first, k_genesis) != NULL);
-    EN_CHECK("groups_ran is a JSON integer, not a float",
-             strstr(first, "\"groups_ran\":0") != NULL
-             && strstr(first, "\"groups_ran\":0.") == NULL);
-    EN_CHECK("ts is a JSON integer, not a float",
-             strstr(first, "\"ts\":1000") != NULL
-             && strstr(first, "\"ts\":1000.") == NULL);
-    EN_CHECK("the durable receipt preserves requested and resolved model",
-             strstr(first, "\"model\":\"grok-4.6\"") != NULL &&
-             strstr(first, "\"requested_model\":\"grok-4.6\"") != NULL &&
-             strstr(first, "\"resolved_model\":\"grok-4.6-build\"") != NULL);
-    EN_CHECK("the durable receipt preserves effort and complete CLI usage",
-             strstr(first, "\"reasoning_effort\":\"high\"") != NULL &&
-             strstr(first, "\"cache_read_input_tokens\":60") != NULL &&
-             strstr(first, "\"cache_creation_input_tokens\":10") != NULL &&
-             strstr(first, "\"reasoning_tokens\":7") != NULL &&
-             strstr(first, "\"total_tokens\":125") != NULL &&
-             strstr(first, "\"turns\":4") != NULL);
-    EN_CHECK("dispatch and proof timing remain separately measurable",
-             strstr(first, "\"dispatch_ms\":2018") != NULL &&
-             strstr(first, "\"proof_ms\":91") != NULL &&
-             strstr(first, "\"wall_ms\":2109") != NULL &&
-             strstr(first, "\"accounting_scope\":\"terminal_dispatch\"") != NULL);
-    EN_CHECK("whole-loop timing is separate from terminal compatibility timing",
-             strstr(first, "\"total_invocation_elapsed_ms\":100") != NULL &&
-             strstr(first, "\"cumulative_proof_ms\":180") != NULL &&
-             strstr(first, "\"unit_elapsed_ms\":2200") != NULL);
-    EN_CHECK("retry, repair, and compaction calls remain separate observations",
-             strstr(first, "\"ordinal\":1,\"phase\":\"turn\",\"result\":\"network\"") != NULL &&
-             strstr(first, "\"ordinal\":3,\"phase\":\"compaction\",\"result\":\"ok\"") != NULL &&
-             strstr(first, "\"ordinal\":4,\"phase\":\"turn\",\"result\":\"ok\"") != NULL);
-    EN_CHECK("each invocation preserves its own resolved model identity",
-             strstr(first, "\"resolved_model\":\"grok-build-a\"") != NULL &&
-             strstr(first, "\"resolved_model\":\"grok-build-b\"") != NULL);
-    EN_CHECK("missing and zero raw counters remain distinguishable",
-             strstr(first, "\"cache_creation_input_tokens\":-1") != NULL &&
-             strstr(first, "\"cache_creation_input_tokens\":0") != NULL);
-    EN_CHECK("partial reporting makes only the affected checked totals unknown",
-             strstr(first, "\"total_prompt_tokens\":-1") != NULL &&
-             strstr(first, "\"total_completion_tokens\":-1") != NULL &&
-             strstr(first, "\"total_reasoning_tokens\":-1") != NULL &&
-             strstr(first, "\"total_reported_tokens\":-1") != NULL);
-
-    const char *line2 = NULL;
-    size_t line2_n = 0;
-    char second[ENGINE_RECEIPT_LINE_MAX + 2u] = {0};
-    EN_CHECK("the unknown-metadata receipt is readable",
-             receipt_nth_line(whole, whole_n, 2, &line2, &line2_n) &&
-             line2_n < sizeof(second));
-    if (line2 && line2_n < sizeof(second)) {
-        memcpy(second, line2, line2_n);
-        second[line2_n] = '\0';
-    }
-    EN_CHECK("unreported measurement remains explicit UNKNOWN",
-             strstr(second, "\"resolved_model\":null") != NULL &&
-             strstr(second, "\"reasoning_effort\":\"provider_default\"") != NULL &&
-             strstr(second, "\"reasoning_tokens\":-1") != NULL &&
-             strstr(second, "\"cache_read_input_tokens\":-1") != NULL);
-    EN_CHECK("overflow refuses a fabricated aggregate while preserving raw counters",
-             strstr(second, "\"prompt_tokens\":9223372036854775807") != NULL &&
-             strstr(second, "\"total_prompt_tokens\":-1") != NULL &&
-             strstr(second, "\"total_completion_tokens\":0") != NULL &&
-             strstr(second, "\"total_reasoning_tokens\":0") != NULL);
-
-    const char *line3 = NULL;
-    size_t line3_n = 0;
-    char third[ENGINE_RECEIPT_LINE_MAX + 2u] = {0};
-    EN_CHECK("the resumed-session receipt is readable",
-             receipt_nth_line(whole, whole_n, 3, &line3, &line3_n) &&
-             line3_n < sizeof(third));
-    if (line3 && line3_n < sizeof(third)) {
-        memcpy(third, line3, line3_n);
-        third[line3_n] = '\0';
-    }
-    EN_CHECK("cumulative-session ambiguity keeps raw calls but refuses totals",
-             strstr(third, "\"usage_scope\":\"non_additive_observation\"") != NULL &&
-             strstr(third, "\"prompt_tokens\":10") != NULL &&
-             strstr(third, "\"prompt_tokens\":20") != NULL &&
-             strstr(third, "\"total_prompt_tokens\":-1") != NULL &&
-             strstr(third, "\"total_reported_tokens\":-1") != NULL);
-
-    char resumed_path[512], resumed_text[ENGINE_RECEIPT_LINE_MAX + 2u];
-    (void)snprintf(resumed_path, sizeof(resumed_path), "%s.resumed", path);
-    receipt_unlink(resumed_path);
-    c.invocations_count = 1;
-    size_t resumed_n = 0;
-    EN_CHECK("a first externally resumed observation is non-additive too",
-             engine_receipt_append(resumed_path, &c, NULL) &&
-             receipt_read_whole(resumed_path, resumed_text,
-                                sizeof(resumed_text), &resumed_n) &&
-             strstr(resumed_text, "\"usage_scope\":\"non_additive_observation\"") &&
-             strstr(resumed_text, "\"prompt_tokens\":10") &&
-             strstr(resumed_text, "\"total_reported_tokens\":-1"));
-    receipt_unlink(resumed_path);
-
-    struct zcl_rule_receipt_log scored;
-    uint32_t bad_line = 0;
-    EN_CHECK("the score reader keeps one trial per outer receipt",
-             zcl_rule_receipts_parse(whole, whole_n, &scored, &bad_line)
-                 == ZCL_RULE_CHAIN_OK &&
-             scored.count == 3 && scored.r[0].prompt_tokens == 100);
-
-    struct engine_receipt knull = receipt_fixture("fixture", 1003);
-    knull.kind = NULL;
-    char kpath[512];
-    (void)snprintf(kpath, sizeof(kpath), "%s.kind", path);
-    receipt_unlink(kpath);
-    EN_CHECK("a NULL kind appends", engine_receipt_append(kpath, &knull, NULL));
-    char kbuf[65536];
-    size_t kn = 0;
-    EN_CHECK("and is written as an empty kind string",
-             receipt_read_whole(kpath, kbuf, sizeof(kbuf), &kn)
-             && strstr(kbuf, "\"kind\":\"\"") != NULL);
-    receipt_unlink(kpath);
-
-    struct engine_receipt bad = receipt_fixture("", 1003);
-    bad.engine = "";
-    EN_CHECK("a receipt with no engine id is refused",
-             !engine_receipt_append(path, &bad, NULL));
-    EN_CHECK("refusing an append leaves the chain intact",
-             engine_receipt_verify_chain(path, &report) && report.records == 3);
-
-    char mut[512];
-    (void)snprintf(mut, sizeof(mut), "%s.mut", path);
-
-    EN_CHECK("copied the honest chain for mutation", receipt_copy(path, mut));
-    EN_CHECK("tampering an earlier line is detected", tamper_first_line(mut));
-    EN_CHECK("and verification names a bad line", verify_refuses(mut));
-    receipt_unlink(mut);
-
-    EN_CHECK("a first line whose prev_sha3 is not genesis is refused",
-             mutate_first_prev_sha3(path, mut) && verify_refuses(mut));
-    receipt_unlink(mut);
-    EN_CHECK("swapping lines 1 and 2 is refused",
-             mutate_swap_first_two(path, mut) && verify_refuses(mut));
-    receipt_unlink(mut);
-    EN_CHECK("dropping the middle line is refused",
-             mutate_drop_line_two(path, mut) && verify_refuses(mut));
-    receipt_unlink(mut);
-    EN_CHECK("a last line with no newline is refused",
-             mutate_drop_last_newline(path, mut) && verify_refuses(mut));
-    receipt_unlink(mut);
-    EN_CHECK("rewriting the last line's groups_ran is refused",
-             mutate_last_groups_ran(path, mut) && verify_refuses(mut));
-    receipt_unlink(mut);
-
-    {
-        char directory[600];
-        (void)snprintf(directory, sizeof(directory), "%s.directory", path);
-        receipt_unlink(directory);
-#if defined(_WIN32)
-        const int made_directory = _mkdir(directory);
-#else
-        const int made_directory = mkdir(directory, 0700);
-#endif
-        EN_CHECK("created the unreadable chain fixture", made_directory == 0);
-        EN_CHECK("an unreadable path is not an empty chain",
-                 !engine_receipt_verify_chain(directory, &report));
-        EN_CHECK("and an append to it is refused",
-                 !engine_receipt_append(directory, &a, NULL));
-#if defined(_WIN32)
-        (void)_rmdir(directory);
-#else
-        (void)rmdir(directory);
-#endif
-    }
-
+    failures += receipt_chain_first_copy_check(line1, line1_n, first,
+                                               sizeof(first));
+    failures += receipt_chain_first_model_check(first);
+    failures += receipt_chain_first_timing_check(first);
+    failures += receipt_chain_second_check(whole, whole_n);
+    failures += receipt_chain_third_check(whole, whole_n);
+    failures += receipt_chain_resumed_check(path, &c);
+    failures += receipt_chain_score_check(whole, whole_n);
+    failures += receipt_chain_null_kind_check(path);
+    failures += receipt_chain_refusal_check(path, &report);
+    failures += receipt_chain_mutation_check(path);
+    failures += receipt_chain_unreadable_dir_check(path, &a, &report);
 #ifndef _WIN32
-    if (geteuid() != 0) {
-        char locked[512];
-        (void)snprintf(locked, sizeof(locked), "%s.locked", path);
-        EN_CHECK("copied the chain to chmod 000", receipt_copy(path, locked));
-        EN_CHECK("chmod 000 of the chainlog", chmod(locked, 0) == 0);
-        bool unreadable_empty = engine_receipt_verify_chain(locked, &report)
-                                && report.records == 0;
-        bool append_genesis = engine_receipt_append(locked, &a, NULL);
-        (void)chmod(locked, 0644);
-        EN_CHECK("chmod 000 does not verify as an empty chain",
-                 !unreadable_empty);
-        EN_CHECK("and does not append a genesis record over unread bytes",
-                 !append_genesis);
-        receipt_unlink(locked);
-    }
-#endif
-
-#ifndef _WIN32
-    {
-        char cpath[512];
-        (void)snprintf(cpath, sizeof(cpath), "%s.conc", path);
-        receipt_unlink(cpath);
-        pid_t pids[8];
-        int started = 0;
-        for (int i = 0; i < 8; i++) {
-            pid_t pid = fork();
-            if (pid < 0)
-                break;
-            if (pid == 0) {
-                struct engine_receipt r = receipt_fixture("fixture", 2000 + i);
-                _exit(engine_receipt_append(cpath, &r, NULL) ? 0 : 1);
-            }
-            pids[started++] = pid;
-        }
-        int kids_ok = started == 8;
-        for (int i = 0; i < started; i++) {
-            int st = 0;
-            if (waitpid(pids[i], &st, 0) != pids[i] || !WIFEXITED(st)
-                || WEXITSTATUS(st) != 0)
-                kids_ok = 0;
-        }
-        EN_CHECK("eight concurrent appends all finish", kids_ok);
-        EN_CHECK("and the chain verifies with eight records",
-                 engine_receipt_verify_chain(cpath, &report)
-                 && report.records == 8 && report.first_bad_line == 0);
-        receipt_unlink(cpath);
-    }
+    failures += receipt_chain_chmod_check(path, &a, &report);
+    failures += receipt_chain_concurrency_check(path, &report);
 #endif
 
     receipt_unlink(path);

@@ -28,10 +28,5 @@ core/modules/sapling/src/groth16_prover.c:g1_msm:18
 core/modules/sapling/src/groth16_prover.c:g2_msm:18
 core/modules/sapling/src/groth16_prover.c:groth16_pk_read:20
 core/modules/sapling/src/groth16_prover.c:groth16_prove:63
-tests/harness/src/test_engine.c:case_cli_argv:71
-tests/harness/src/test_engine.c:case_cli_observation:33
-tests/harness/src/test_engine.c:case_engine_unit_grok_projection_e2e:36
-tests/harness/src/test_engine.c:case_engine_unit_state_e2e:29
-tests/harness/src/test_engine.c:case_receipt_chain:74
 tests/harness/src/test_zcode_package_dev.c:zpd_test_twelve_task_benchmark:30
 tests/harness/src/test_zcode_package_dev.c:zpd_test_work_start:56
