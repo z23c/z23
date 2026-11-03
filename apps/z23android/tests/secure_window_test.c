@@ -332,7 +332,7 @@ static void recover_leaves_someone_elses_clip(const char *dir)
     assert(!zapp_clip_recover(NULL, path, 0));
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
     struct fake f = {.flag_ok = true, .filter_ok = true};
     struct zapp_secure_ops ops = {.ctx = &f, .flag_secure = f_flag, .filter_touches = f_filter,
@@ -362,13 +362,12 @@ int main(void)
     a_refused_clear_is_reported();
     an_unreadable_clipboard_is_never_reported_cleared();
     the_clear_retries_until_the_app_has_focus();
-    char dir[] = "/tmp/zapp-clip-XXXXXX";
-    assert(mkdtemp(dir));
+    assert(argc == 2);
+    const char *dir = argv[1];
     mark_files_hold_only_the_stamp(dir);
     leftover_decision();
     recover_clears_an_overdue_clip_and_removes_the_mark(dir);
     recover_leaves_someone_elses_clip(dir);
-    assert(rmdir(dir) == 0);
     puts("secure_window_test: ok");
     return 0;
 }

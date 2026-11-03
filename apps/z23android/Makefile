@@ -330,7 +330,8 @@ test-devkey:
 	@grep -q 'android:allowAudioPlaybackCapture="false"' AndroidManifest.xml || { echo "AndroidManifest.xml must set android:allowAudioPlaybackCapture=false: otherwise another app can record what the Assistant says aloud" >&2; exit 1; }
 	@if $(MAKE) --no-print-directory check-probe DEVKEY_PROBE=ON 2>/dev/null; then echo "production manifest accepted DEVKEY_PROBE=ON" >&2; exit 1; fi
 	$(HOST_CC) $(HOST_WARNINGS) -I. tests/secure_window_test.c secure_window.c -o '$(BUILD_DIR)/secure-window-test'
-	'$(BUILD_DIR)/secure-window-test'
+	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/secure-window-test.XXXXXX'); \
+	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/secure-window-test' "$$scratch"
 
 # First-run wallet setup: the words, the state files, the node adapter and the wizard model over a fake device and node.
 # None of these files may log or write the words and the passphrase that pass through them.
