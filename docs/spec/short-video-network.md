@@ -66,15 +66,13 @@ the content-addressed package swarm with flag-gated hosting
 (`docs/commons/P2P_SOURCE_HOSTING.md`), zid identity documents and signed
 endpoint records (`docs/spec/sovereign-identity-layer.md`), embedded Tor onion
 streams, the signed fleet roster, the node pace, and the app's NDK camera
-code, its local MP4 recorder and player (hardware AVC encoder, muxer, extractor,
-decoder; `apps/z23android/clip_*.c`). **New**: the Clips
+code. The MP4 recorder and player (hardware AVC encoder, muxer, extractor, decoder) were removed from
+the app with the Clips screen. **New**: the Clips
 records, frames, API and UI.
 
 <!-- claim: symbol-present node_pace_get engine/jobs/src/node_pace.c # the pace word is read by the node -->
 <!-- claim: symbol-present zapp_pace_next apps/z23android/thermal.c # the app maps thermal status to a pace -->
 <!-- claim: file-present apps/z23android/camera.c # NDK camera code exists for QR scanning -->
-<!-- claim: symbol-present AMediaCodec_createInputSurface apps/z23android/clip_capture.c # the app records through a hardware encoder input surface -->
-<!-- claim: symbol-present AMediaMuxer_new apps/z23android/clip_capture.c # the app writes MP4 files with the platform muxer -->
 <!-- claim: file-present contexts/clips/modules/clips_codec/include/clips_codec/clips_codec.h # the Clips room exists; its first code is the codec header -->
 
 ---
@@ -325,7 +323,7 @@ platform widgets (`apps/z23android/native_ui.c`). Clips adds only NDK C APIs.
 - `camera.c` already opens the rear camera, creates an `AImageReader` and
   reads YUV planes for QR scanning. Recording adds the encoder's input surface
   (`AMediaCodec_createInputSurface`, API 26) as a second capture output. The
-  encoder, muxer and audio-encode code is in `apps/z23android/clip_capture.c`.
+  encoder, muxer and audio-encode code was in `apps/z23android/clip_capture.c`, removed with the Clips screen.
 - Without a hardware AVC encoder the app refuses to record and says why,
   instead of burning CPU on a software encode.
 - Camera and microphone permissions are declared today in
@@ -1175,7 +1173,7 @@ Groups to add:
   every widening action without a spent confirmation token refused; a change from
   shown to hidden purges the clip's objects without adding a block; Commons routes
   refuse a Clips package root.
-- App units `clips_capture_test` and `clips_player_test`: profile parameters
+- Removed with the Clips screen: App units `clips_capture_test` and `clips_player_test`: profile parameters
   and thermal refusal, ranged-read mapping and deadline.
 
 Live checks on the Pixel:
