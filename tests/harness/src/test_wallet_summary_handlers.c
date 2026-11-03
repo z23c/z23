@@ -845,10 +845,23 @@ static bool rig_locked_seed(struct rig *r, const uint8_t seed[32])
            WALLET_SEED_LOCKED;
 }
 
+/* One key row stored by insert, with no key loaded, as a locked wallet that
+ * kept no viewing key leaves it: keys_present is true and seed_present
+ * false. remove deletes the row after. */
+static bool stored_key_counts(struct rig *r, const char *insert,
+                              const char *remove)
+{
+    sqlite3 *db = r->ndb.db;
+    bool held = sqlite3_exec(db, insert, NULL, NULL, NULL) == SQLITE_OK &&
+                holdings_are(0, 1);
+    return sqlite3_exec(db, remove, NULL, NULL, NULL) == SQLITE_OK && held;
+}
+
 /* seed_present and keys_present read the wallet tables by presence and the
- * loaded keystores: an empty wallet is false and false, a key row or a
- * loaded key is a key, a seed row is a seed whether it is plaintext or
- * encrypted and locked, and tables that cannot be read are null. */
+ * loaded keystores: an empty wallet is false and false, a transparent or
+ * Sapling key row or a loaded key is a key, a seed row is a seed whether it
+ * is plaintext or encrypted and locked, and tables that cannot be read are
+ * null. */
 static int test_summary_holdings(void)
 {
     int failures = 0;
@@ -870,13 +883,15 @@ static int test_summary_holdings(void)
         r.ws.open = false;
         ASSERT(holdings_are(-1, -1));
         r.ws.open = true;
-        ASSERT(sqlite3_exec(r.ndb.db, "INSERT INTO wallet_keys"
+        ASSERT(stored_key_counts(&r, "INSERT INTO wallet_keys"
             "(pubkey_hash,pubkey,privkey) VALUES"
             "(zeroblob(20),zeroblob(33),zeroblob(32))",
-            NULL, NULL, NULL) == SQLITE_OK);
-        ASSERT(holdings_are(0, 1));
-        ASSERT(sqlite3_exec(r.ndb.db, "DELETE FROM wallet_keys", NULL, NULL,
-                            NULL) == SQLITE_OK);
+            "DELETE FROM wallet_keys"));
+        ASSERT(stored_key_counts(&r, "INSERT INTO wallet_sapling_keys"
+            "(ivk,xsk,xfvk,diversifier,pk_d,child_index) VALUES"
+            "(zeroblob(32),zeroblob(169),zeroblob(96),zeroblob(11),"
+            "zeroblob(32),0)",
+            "DELETE FROM wallet_sapling_keys"));
         ASSERT(wallet_sqlite_write_sapling_seed(&r.ws, seed));
         ASSERT(holdings_are(1, 0));
         rig_close(&r);
