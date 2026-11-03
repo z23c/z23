@@ -16,7 +16,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_status)
 
 ZCL_COMMAND_DEV_COMMAND(
-    "dev.begin", "dev", "", "Start or reattach the warm C23 dev service",
+    "dev.begin", "dev", "", "Start or reattach the dev service",
     "Starts one checkout-local verify watcher by default, or reattaches "
     "idempotently to the existing watcher. The response names the resident "
     "watcher and one next command; it grants no canonical-node, wallet, "
@@ -35,7 +35,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "z23-dev dev begin")
 
 ZCL_COMMAND_DEV_READ(
-    "dev.drive", "dev", "", "Wait for feedback, return the next action",
+    "dev.drive", "dev", "", "Wait for feedback, next action",
     "The first action-changing result newer than after_epoch, compacted with "
     "its live or fallback latency, proof state, ZVCS root and restart-safe publication "
     "phase. If a publication job exists, drive verifies and renders that "
@@ -139,7 +139,7 @@ ZCL_COMMAND_DEV_READ(
     "z23-dev dev retrieval experiment")
 
 ZCL_COMMAND_BRANCH("dev.publication", "dev",
-                   "Inspect asynchronous proven-source publication",
+                   "Inspect async source publication",
                    ZCL_COMMAND_LAYER_DEV)
 ZCL_COMMAND_BRANCH("dev.publication.mirror", "dev.publication",
                    "Record optional non-authoritative mirror evidence",
@@ -1390,7 +1390,7 @@ ZCL_COMMAND_READY_READ(
  * worktree without mutating anything. `drop` removes a stack worktree, and
  * refuses one with commits origin/main does not have unless --force. */
 ZCL_COMMAND_BRANCH("dev.train", "dev",
-                   "Stack lanes onto main without waiting on lint",
+                   "Stack lanes onto main",
                    ZCL_COMMAND_LAYER_DEV)
 
 ZCL_COMMAND_DEV_COMMAND(
@@ -1517,7 +1517,7 @@ ZCL_COMMAND_DEV_COMMAND(
  * bridges keep acting. One file per leaf: native_dev_batch_ledger.c,
  * native_dev_batch_restack.c and native_dev_batch_slim.c. */
 ZCL_COMMAND_BRANCH("dev.batch", "dev",
-                   "Lab batch ledger",
+                   "Batch ledger",
                    ZCL_COMMAND_LAYER_DEV)
 
 ZCL_COMMAND_DEV_COMMAND(
@@ -2108,7 +2108,7 @@ ZCL_COMMAND_READY_READ(
  * command instead of running a second mutation path. */
 ZCL_COMMAND_DEV_READ(
     "dev.ci", "dev", "",
-    "Answer every CI and landing question from one screen",
+    "CI and landing answers on one screen",
     "Composition only: every fact is read in-process from dev.land "
     "(action=status), dev.agent.queue (action=status) and dev.proof.status, "
     "and `sources` names each sibling with whether it answered and how long "
@@ -2178,7 +2178,7 @@ ZCL_COMMAND_DEV_COMMAND(
  * registry resolved; the older `action` input still selects a verb for
  * in-process callers. */
 ZCL_COMMAND_BRANCH("dev.land", "dev",
-                   "Queue a tip, prove it and publish it to origin/main",
+                   "Queue, prove and publish a tip",
                    ZCL_COMMAND_LAYER_DEV)
 
 ZCL_COMMAND_READY_COMMAND(
