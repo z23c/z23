@@ -42,6 +42,7 @@
 #endif
 #include "lab_peer_shadow.h"
 #include "platform/clock.h"
+#include "platform/os_proc.h"
 #include "util/spawn.h"
 
 #include <ctype.h>
@@ -729,11 +730,8 @@ static bool ls_self(struct ls_ctx *c)
     const char *b = ls_opt(c, "bin", NULL);
     if (b)
         return ls_fmt(c->bin, sizeof(c->bin), "%s", b);
-    const ssize_t n = readlink("/proc/self/exe", c->bin, sizeof(c->bin) - 1);
-    if (n > 0) {
-        c->bin[n] = '\0';
+    if (os_proc_exe_path(c->bin, sizeof(c->bin)))
         return true;
-    }
     return ls_fmt(c->bin, sizeof(c->bin), "%s", c->argv[0]);
 }
 
