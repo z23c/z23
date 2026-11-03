@@ -454,7 +454,7 @@ static enum device_host_psk_result psk_queue_record(struct device_host_psk_sessi
     bool ok = true; size_t in = 0, out = 24;
     for (size_t i = 0; i < chunks && ok; ++i) {
         size_t take = length - in < DEVICE_HOST_PSK_CHUNK ? length - in : DEVICE_HOST_PSK_CHUNK;
-        ok = shake_wrap_seal(&session->send, ad, ad_length, plaintext + in, take, session->pending + out, sizeof(session->pending) - out);
+        ok = shake_wrap_seal(&session->send, ad, ad_length, plaintext ? plaintext + in : plaintext, take, session->pending + out, sizeof(session->pending) - out);
         in += take; out += take + SHAKE_WRAP_TAG_SIZE;
     }
     memory_cleanse(ad, sizeof(ad)); device_pairing_guard_release(&own);

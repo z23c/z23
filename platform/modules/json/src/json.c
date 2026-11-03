@@ -853,9 +853,9 @@ bool json_read(struct json_value *v, const char *raw, size_t len)
 bool json_valid(const char *raw, size_t len)
 {
     const char *p = raw;
-    const char *end = raw + len;
     if (!raw)
         return false;
+    const char *end = raw + len;
     return parse_value_r(NULL, &p, end, 0) && skip_ws(p, end) == end;
 }
 
