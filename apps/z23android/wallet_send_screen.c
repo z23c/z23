@@ -39,6 +39,8 @@ struct wss {
     struct wss_send_req tapped;   /* The plan the owner tapped Send on; the commit is bound to it. */
     struct wss_balance balance;   /* the latest spendable reading */
     uint64_t balance_ms;          /* when it was taken */
+    uint64_t tried_ms;            /* when the last reading ended or was noted, whether or not it gave a balance */
+    bool tried;                   /* tried_ms holds a time */
     bool balance_wanted;          /* a reading is asked for and not yet started */
     bool balance_reading;         /* the worker is taking a reading */
     bool quoting, quote_wanted;   /* Max on the amount page waits for the node to quote the fee */
@@ -238,6 +240,19 @@ bool wss_paste_offered(const char *clip, enum zapp_pay_network network)
     memory_cleanse(text, sizeof(text));
     memory_cleanse(&pay, sizeof(pay));
     return ok;
+}
+void wss_clip_check(struct wss_clip *c, enum zapp_clip_state state, int64_t stamp,
+                    bool (*read_text)(void *ctx, char *out, size_t cap), void *ctx, enum zapp_pay_network network)
+{
+    const size_t cap = ZAPP_PAY_INPUT_MAX + 1;
+    if (state == ZAPP_CLIP_EMPTY) *c = (struct wss_clip){0};
+    if (state != ZAPP_CLIP_HELD || (c->read && c->stamp == stamp) || !read_text) return;
+    char *text = calloc(1, cap);
+    if (!text) return;
+    bool got = read_text(ctx, text, cap);
+    *c = (struct wss_clip){.read = true, .stamp = stamp, .address = got && wss_paste_offered(text, network)};
+    memory_cleanse(text, cap);
+    free(text);
 }
 void wss_view(struct wss *s, struct wss_view *v)
 {
@@ -643,7 +658,9 @@ static void do_balance(struct wss *s)
     if (!s->d.node.read_balance || !s->d.node.read_balance(s->d.node.ctx, &b)) b.known = false;
     pthread_mutex_lock(&s->lock);
     /* An unanswered or hidden reading leaves the last one, which goes out of date by itself. */
-    if (b.known) { s->balance = b; s->balance_ms = now_of(s); }
+    s->tried_ms = now_of(s);
+    s->tried = true;
+    if (b.known) { s->balance = b; s->balance_ms = s->tried_ms; }
     s->balance_reading = false;
     pthread_mutex_unlock(&s->lock);
     if (s->d.host.redraw) s->d.host.redraw(s->d.host.ctx);
@@ -889,13 +906,14 @@ void wss_read_balance(struct wss *s)
     pthread_mutex_unlock(&s->lock);
     kick(s);
 }
-void wss_keep_balance(struct wss *s)
+void wss_keep_balance(struct wss *s, bool start)
 {
     if (!s->d.node.read_balance) return;
     pthread_mutex_lock(&s->lock);
     uint64_t now = now_of(s);
-    bool old = !s->balance.known || now < s->balance_ms || now - s->balance_ms >= WSS_BALANCE_FRESH_MS / 2;
-    bool ask = s->begun && s->ws.state == WS_PARSED && !s->ws.sweep && old && !s->balance_wanted && !s->balance_reading;
+    bool old = !s->tried || now < s->tried_ms || now - s->tried_ms >= WSS_BALANCE_FRESH_MS / 2;
+    bool shown = start || (s->begun && s->ws.state == WS_PARSED && !s->ws.sweep);
+    bool ask = shown && old && !s->balance_wanted && !s->balance_reading;
     if (ask) s->balance_wanted = true;
     pthread_mutex_unlock(&s->lock);
     if (ask) kick(s);
@@ -910,7 +928,8 @@ void wss_note_balance(struct wss *s, uint64_t spendable_zat)
 {
     pthread_mutex_lock(&s->lock);
     s->balance = (struct wss_balance){.known = true, .spendable_zat = spendable_zat};
-    s->balance_ms = now_of(s);
+    s->balance_ms = s->tried_ms = now_of(s);
+    s->tried = true;
     pthread_mutex_unlock(&s->lock);
 }
 void wss_balance(struct wss *s, struct wss_balance *out)

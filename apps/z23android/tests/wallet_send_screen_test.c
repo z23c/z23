@@ -1117,10 +1117,10 @@ static void the_amount_page_shows_what_can_be_sent(void)
     struct wss_view v = view_of(s);
     assert(v.state == WS_PARSED && v.focus == WSS_FOCUS_AMOUNT && !strcmp(v.status, "Enter an amount to send."));
     assert(!strcmp(v.available, "Available: 5 ZCL") && v.can_max && f.balance_reads == 1 && !strncmp(v.address, "zs1 qqqq", 8));
-    wss_keep_balance(s);
+    wss_keep_balance(s, false);
     assert(!f.job && f.balance_reads == 1);   /* a fresh reading is not asked for again */
     f.now += WSS_BALANCE_FRESH_MS / 2;
-    wss_keep_balance(s); drain(&f);
+    wss_keep_balance(s, false); drain(&f);
     assert(f.balance_reads == 2 && view_of(s).can_max);
     f.now += WSS_BALANCE_FRESH_MS + 1;
     f.balance = (struct wss_balance){0};
@@ -1207,6 +1207,87 @@ static void the_keyboard_opens_once_per_page(void)
     assert(!wss_keyboard_due(WSS_FOCUS_AMOUNT, &asked));
     assert(!wss_keyboard_due(WSS_FOCUS_NONE, &asked) && asked == WSS_FOCUS_NONE);
     assert(wss_keyboard_due(WSS_FOCUS_AMOUNT, &asked));
+}
+/* The Send page with no payment open reads the balance again while it is shown, so its zero line stays past the time a
+ * reading goes out of date and never turns into the address page by itself. Without a page that shows the balance, nothing
+ * is read and the reading goes out of date. */
+static void the_start_page_keeps_its_zero_line(void)
+{
+    struct wss_start st;
+    struct wss_balance b;
+    struct fake f; fake_init(&f);
+    f.balance.spendable_zat = 0;
+    struct wss *s = screen_of(&f);
+    wss_note_balance(s, 0);
+    for (unsigned second = 1; second <= 2 * WSS_BALANCE_FRESH_MS / 1000; ++second) {
+        f.now += 1000;
+        wss_keep_balance(s, true); drain(&f);
+        wss_balance(s, &b);
+        wss_start_page(&b, true, &st);
+        assert(st.zero && !st.paste && st.focus == WSS_FOCUS_NONE && !strcmp(st.line, WSS_ZERO_BALANCE));
+    }
+    assert(f.balance_reads == 4);   /* at 15, 30, 45 and 60 seconds */
+    wss_destroy(s);
+
+    fake_init(&f);
+    f.balance.spendable_zat = 0;
+    s = screen_of(&f);
+    wss_note_balance(s, 0);
+    f.now += WSS_BALANCE_FRESH_MS + 1000;
+    wss_keep_balance(s, false); drain(&f);   /* no flow is open, so no amount page is shown */
+    wss_balance(s, &b);
+    assert(f.balance_reads == 0 && !b.known);
+    wss_destroy(s);
+}
+/* A reading that gives no balance (a locked wallet hides it, or the node does not answer) is asked for again after
+ * WSS_BALANCE_FRESH_MS / 2, not on every tick. */
+static void an_unknown_balance_is_not_read_on_every_tick(void)
+{
+    struct fake f; fake_init(&f);
+    f.balance = (struct wss_balance){0};
+    struct wss *s = screen_of(&f);
+    wss_read_balance(s); drain(&f);
+    for (unsigned second = 1; second <= WSS_BALANCE_FRESH_MS / 1000; ++second) {
+        f.now += 1000;
+        wss_keep_balance(s, true); drain(&f);
+    }
+    assert(f.balance_reads == 3);   /* at open, at 15 and at 30 seconds */
+    wss_destroy(s);
+}
+/* The clipboard for wss_clip_check: its text, or none (a photo), and how often it was read, as the system counts the
+ * notices it shows. */
+struct clip_fake { const char *text; int reads; };
+static bool clip_text(void *c, char *out, size_t cap)
+{
+    struct clip_fake *f = c;
+    f->reads++;
+    bool fits = f->text && strlen(f->text) < cap;
+    snprintf(out, cap, "%s", fits ? f->text : "");
+    return fits;
+}
+/* Each new clip is read once, whether its text is an address, other text, text longer than a payment code, or no text at
+ * all: opening Send again or regaining focus on the same clip reads nothing. An empty clipboard forgets the clip. */
+static void each_clip_is_read_once(void)
+{
+    struct wss_clip clip = {0};
+    char *big = calloc(1, ZAPP_PAY_INPUT_MAX + 8);
+    assert(big);
+    memset(big, 'a', ZAPP_PAY_INPUT_MAX + 4);
+    struct clip_fake photo = {0}, longer = {.text = big}, note = {.text = "Meet at 5"}, address = {.text = priv};
+    struct { struct clip_fake *fake; int64_t stamp; bool address; } clips[] = {
+        {&photo, 11, false}, {&longer, 12, false}, {&note, 13, false}, {&address, 14, true}};
+    for (size_t i = 0; i < sizeof(clips) / sizeof(clips[0]); ++i) {
+        for (int again = 0; again < 3; ++again)
+            wss_clip_check(&clip, ZAPP_CLIP_HELD, clips[i].stamp, clip_text, clips[i].fake, ZAPP_PAY_MAINNET);
+        assert(clips[i].fake->reads == 1 && clip.read && clip.stamp == clips[i].stamp && clip.address == clips[i].address);
+    }
+    wss_clip_check(&clip, ZAPP_CLIP_UNREADABLE, 0, clip_text, &address, ZAPP_PAY_MAINNET);
+    assert(address.reads == 1 && clip.read && clip.address);   /* a read refused in the background keeps what is known */
+    wss_clip_check(&clip, ZAPP_CLIP_EMPTY, 0, clip_text, &address, ZAPP_PAY_MAINNET);
+    assert(address.reads == 1 && !clip.read && !clip.address);
+    wss_clip_check(&clip, ZAPP_CLIP_HELD, 15, clip_text, &address, ZAPP_PAY_MAINNET);
+    assert(address.reads == 2 && clip.address);
+    free(big);
 }
 /* No worker thread: the UI thread runs nothing. The flow fails before any commit and the lock is still owed. */
 static void a_missing_worker_fails_the_flow(void)
@@ -1646,6 +1727,9 @@ int main(void)
     max_on_a_review_uses_its_fee();
     max_says_why_it_set_no_amount();
     the_keyboard_opens_once_per_page();
+    the_start_page_keeps_its_zero_line();
+    an_unknown_balance_is_not_read_on_every_tick();
+    each_clip_is_read_once();
     puts("wallet_send_screen_test: ok");
     return 0;
 }

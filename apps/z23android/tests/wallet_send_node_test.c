@@ -803,7 +803,6 @@ static void node_message_text_never_reaches_the_screen(void)
     wss_destroy(s);
 }
 
-/* A declined or failed authentication commits nothing and the passphrase never exists on the node side. */
 /* The balance the Send pages show is the summary's spendable amount, read with the summary alone. A summary that hides the
  * private amounts, a summary of another shape and a node that does not answer give no balance, never 0. */
 static void the_send_balance_is_the_summary_spendable(void)
@@ -830,6 +829,7 @@ static void the_send_balance_is_the_summary_spendable(void)
     assert(!ops.read_balance(ops.ctx, &b) && !b.known);
     assert(!strcmp(f.calls, "sssss"));
 }
+/* A declined or failed authentication commits nothing and the passphrase never exists on the node side. */
 static void a_declined_prompt_commits_nothing(void)
 {
     struct fake f; struct wsn n; struct host h;

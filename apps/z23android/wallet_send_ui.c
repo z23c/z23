@@ -56,8 +56,7 @@ static struct {
     void (*changed)(void);
     bool flow;       /* a payment is open on the screen and has not been left */
     bool dropped;    /* a tap was dropped because another window covered the app */
-    bool clip_read, clip_address;   /* the clip with clip_stamp was read, and it holds an address or a payment code */
-    int64_t clip_stamp;
+    struct wss_clip clip;           /* the clip last read, and whether it holds an address or a payment code */
     enum wss_focus asked;           /* the field whose keyboard the page on screen asked for */
     char notice[WSS_LINE];
     char hint[WSS_LINE];
@@ -542,7 +541,7 @@ static void start_of(struct wss_start *start)
 {
     struct wss_balance balance = {0};
     if (ui.keeper.screen) wss_balance(ui.keeper.screen, &balance);
-    wss_start_page(&balance, ui.clip_address, start);
+    wss_start_page(&balance, ui.clip.address, start);
 }
 
 /* What the owner typed into the field of the page on screen, carried across a redraw of that same page with the focus. */
@@ -681,21 +680,13 @@ void zapp_send_ui_open_sweep(JNIEnv *env)
     else flow_refused();
     zapp_send_ui_render(env);
 }
-/* Whether the clipboard holds an address or a payment code. A clip is read once: the same clip keeps its answer, so the
- * system notice that the app read the clipboard comes once for each new clip. The text read is wiped here. */
+static bool clip_text(void *activity, char *out, size_t cap) { return zapp_clipboard_text(activity, out, cap); }
+/* Whether the clipboard holds an address or a payment code, read once for each new clip (wss_clip_check). */
 static void check_clip(void)
 {
     int64_t stamp = 0;
     enum zapp_clip_state state = ui.activity ? zapp_clipboard_stamp(ui.activity, &stamp) : ZAPP_CLIP_UNREADABLE;
-    if (state == ZAPP_CLIP_EMPTY) ui.clip_read = ui.clip_address = false;
-    if (state != ZAPP_CLIP_HELD || (ui.clip_read && stamp == ui.clip_stamp)) return;
-    char *text = calloc(1, TEXT_CAP);
-    if (!text) return;
-    ui.clip_read = zapp_clipboard_text(ui.activity, text, TEXT_CAP);
-    ui.clip_stamp = stamp;
-    ui.clip_address = ui.clip_read && wss_paste_offered(text, ZAPP_SCAN_NETWORK);
-    memory_cleanse(text, TEXT_CAP);
-    free(text);
+    wss_clip_check(&ui.clip, state, stamp, clip_text, ui.activity, ZAPP_SCAN_NETWORK);
 }
 void zapp_send_ui_open(JNIEnv *env, const struct zapp_payment *pay, const char *notice)
 {
@@ -766,8 +757,10 @@ void zapp_send_ui_tick(JNIEnv *env)
     if (ui.flow && ui.keeper.screen && !ui.away) {
         wss_view(ui.keeper.screen, &v);
         if (v.can_send) gate_poll();
-        wss_keep_balance(ui.keeper.screen);
+        wss_keep_balance(ui.keeper.screen, false);
     }
+    /* The Send page with no payment open keeps its reading too, so the zero line stays while it is shown. */
+    if (!ui.flow && ui.is_drawn && !ui.drawn_flow && ui.keeper.screen) wss_keep_balance(ui.keeper.screen, true);
     finish_away();
     wsk_tick(&ui.keeper);
     if (reveal.view) wrv_tick(reveal.view);
@@ -852,7 +845,7 @@ static void paste_address(void)
     if (!text) return;
     bool read = ui.activity && zapp_clipboard_text(ui.activity, text, TEXT_CAP) && text[0];
     if (!read) say(ui.notice, PASTE_GONE);
-    if (!read || !open_text(text)) ui.clip_address = false;
+    if (!read || !open_text(text)) ui.clip.address = false;
     memory_cleanse(text, TEXT_CAP);
     free(text);
 }

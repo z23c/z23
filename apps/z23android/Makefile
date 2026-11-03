@@ -440,3 +440,5 @@ test-wallet-send:
 	@! grep -q 'Enter address' wallet_send_ui.c || { echo 'the Send page must show the address field without a tap on Enter address' >&2; exit 1; }
 	@grep -q 'ask_keyboard(env, flow ? v.focus : start.focus);' wallet_send_ui.c || { echo 'a Send page with a field must ask for its keyboard when it opens' >&2; exit 1; }
 	@grep -q 'wallet_screens_spendable(&spendable)) zapp_send_ui_known_balance(spendable);' shell.c || { echo 'Send opened from Funds must start from the balance Funds shows' >&2; exit 1; }
+	@grep -q 'ui.drawn_flow && ui.keeper.screen) wss_keep_balance(ui.keeper.screen, true);' wallet_send_ui.c || { echo 'the Send page with no payment open must keep its balance reading while it is shown' >&2; exit 1; }
+	@grep -q 'wss_clip_check(&ui.clip, state, stamp, clip_text, ui.activity, ZAPP_SCAN_NETWORK);' wallet_send_ui.c || { echo 'the Send page must read each clip once, through wss_clip_check' >&2; exit 1; }

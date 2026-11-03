@@ -51,14 +51,15 @@ enum zapp_scan_target { ZAPP_SCAN_TO_HOME, ZAPP_SCAN_TO_FLEET_REVIEW, ZAPP_SCAN_
 /* A fleet invitation opens its review, and a laptop pairing code opens the pairing review when the
  * controller holds an offer for it, whether or not the owner saw an earlier offer.
  * A payment code, accepted or refused by payment_code.h, goes to the Send screen: an accepted one opens the review and
- * nothing more, a refused one stays there with its reason, Scan again and Enter address. Everything else is shown on
- * Home. */
+ * nothing more, a refused one stays there with its reason, Scan again, the address field and, when the clipboard holds an
+ * address, Paste address. Everything else is shown on Home. */
 enum zapp_scan_target zapp_home_scan_target(enum zapp_scan_kind kind, bool pair_offer);
 /* Whether a finished scan returns to the wallet screen it began on, with its words there, instead of to Home: when it
  * began on a wallet screen and is not a review (a payment code opens Send). */
 bool zapp_home_scan_returns_to_wallet(enum zapp_scan_target target, bool began_in_wallet);
 /* Whether a scan that was started on the Send screen and is not a payment, a fleet invitation or a pairing code stays
- * on Send, with Scan code and Enter address, instead of dropping to Home. */
+ * on Send, with Scan again, the address field and, when the clipboard holds an address, Paste address, instead of dropping
+ * to Home. */
 bool zapp_home_scan_stays_on_send(bool started_on_send, enum zapp_scan_target target);
 /* The label of the Send screen camera button: Scan code until a scan has ended without a payment, then Scan again. */
 const char *zapp_home_send_scan_label(const char *notice);

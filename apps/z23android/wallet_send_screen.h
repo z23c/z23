@@ -171,6 +171,18 @@ struct wss_start {
 void wss_start_page(const struct wss_balance *balance, bool clip_holds_address, struct wss_start *out);
 /* Whether clip, trimmed of the spaces and control bytes at its ends, is an address or a payment code of network. */
 bool wss_paste_offered(const char *clip, enum zapp_pay_network network);
+/* What the Send page knows of the clipboard. Each new clip is read once, whether or not its text could be read (a photo, a
+ * file, text longer than a payment code), so the system notice that the app read the clipboard comes once for each clip. */
+struct wss_clip {
+    bool read;      /* the clip with stamp was read */
+    bool address;   /* its text is an address or a payment code (wss_paste_offered) */
+    int64_t stamp;
+};
+/* state and stamp are what the clip's description reports (zapp_clipboard_stamp). An empty clipboard forgets the clip. A
+ * held clip not read before is read through read_text, which fills out with the clip's text and returns false when there
+ * is none or it does not fit in cap; the text is wiped before this returns. */
+void wss_clip_check(struct wss_clip *clip, enum zapp_clip_state state, int64_t stamp,
+                    bool (*read_text)(void *ctx, char *out, size_t cap), void *ctx, enum zapp_pay_network network);
 /* The most one payment can send: the spendable amount less the fee, 0 when the fee takes it all. */
 uint64_t wss_max_amount(uint64_t spendable_zat, uint64_t fee_zat);
 /* The keyboard opens once each time a page with a field comes up, not on every redraw of that page: true when focus names
@@ -223,9 +235,11 @@ void wss_tap_max(struct wss *screen);
 /* Asks the node for the spendable balance on the worker; the redraw follows the answer. A flow named without an amount
  * asks by itself. */
 void wss_read_balance(struct wss *screen);
-/* Reads the balance again while the amount page is shown and its reading is older than half of WSS_BALANCE_FRESH_MS, so
- * Available and Max stay on the page. Call on the ticks. */
-void wss_keep_balance(struct wss *screen);
+/* Reads the balance again while a page that shows it is on screen: the amount page of a flow, or, with start true, the Send
+ * page before a payment is named. A reading is asked for once the last one, answered or not, is half of
+ * WSS_BALANCE_FRESH_MS old, so Available, Max and the zero line stay on their page and a hidden balance is not asked for
+ * on every tick. Call on the ticks. */
+void wss_keep_balance(struct wss *screen, bool start);
 /* A reading the wallet screen took from the node moments ago, used until the node answers again. */
 void wss_note_balance(struct wss *screen, uint64_t spendable_zat);
 /* The latest reading, known only while it is at most WSS_BALANCE_FRESH_MS old. */
