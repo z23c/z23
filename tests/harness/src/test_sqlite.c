@@ -4136,6 +4136,7 @@ static int check_sqlite_tx_statement_ownership(void)
 struct rebuild_stop_case {
     char dir[256], path[320];
     struct node_db ndb;
+    bool (*rebuild)(struct node_db *ndb);
     pthread_mutex_t mu;
     pthread_cond_t cv;
     int hook_calls;
@@ -4169,7 +4170,7 @@ static void rebuild_stop_hook(void *ctx)
 static void *rebuild_stop_rebuilder(void *arg)
 {
     struct rebuild_stop_case *c = arg;
-    bool ok = node_db_normal_mode(&c->ndb);
+    bool ok = c->rebuild(&c->ndb);
     pthread_mutex_lock(&c->mu);
     c->rebuild_ok = ok;
     c->rebuild_done = true;
@@ -4186,12 +4187,14 @@ static void *rebuild_stop_reader(void *arg)
     return NULL;
 }
 
-static bool rebuild_stop_open(struct rebuild_stop_case *c)
+static bool rebuild_stop_open(struct rebuild_stop_case *c, const char *tag,
+                              bool (*rebuild)(struct node_db *ndb))
 {
     memset(c, 0, sizeof(*c));
+    c->rebuild = rebuild;
     pthread_mutex_init(&c->mu, NULL);
     pthread_cond_init(&c->cv, NULL);
-    test_make_tmpdir(c->dir, sizeof(c->dir), "sqlite", "rebuild_shutdown");
+    test_make_tmpdir(c->dir, sizeof(c->dir), "sqlite", tag);
     snprintf(c->path, sizeof(c->path), "%s/node.db", c->dir);
     char sql[384];
     snprintf(sql, sizeof(sql),
@@ -4204,6 +4207,25 @@ static bool rebuild_stop_open(struct rebuild_stop_case *c)
            sqlite3_exec(c->ndb.db, sql, NULL, NULL, NULL) == SQLITE_OK;
 }
 
+/* Waits until the rebuild parks in the hook or finishes without parking. */
+static bool rebuild_stop_wait_parked(struct rebuild_stop_case *c)
+{
+    pthread_mutex_lock(&c->mu);
+    while (!c->parked && !c->rebuild_done)
+        pthread_cond_wait(&c->cv, &c->mu);
+    bool parked = c->parked;
+    pthread_mutex_unlock(&c->mu);
+    return parked;
+}
+
+static void rebuild_stop_release(struct rebuild_stop_case *c)
+{
+    pthread_mutex_lock(&c->mu);
+    c->released = true;
+    pthread_cond_broadcast(&c->cv);
+    pthread_mutex_unlock(&c->mu);
+}
+
 /* Park the rebuild, queue the reader behind it, then run the shutdown
  * order. True when both threads ran and were joined. */
 static bool rebuild_stop_drive(struct rebuild_stop_case *c)
@@ -4211,19 +4233,12 @@ static bool rebuild_stop_drive(struct rebuild_stop_case *c)
     pthread_t rebuilder, reader;
     if (pthread_create(&rebuilder, NULL, rebuild_stop_rebuilder, c) != 0)
         return false;
-    pthread_mutex_lock(&c->mu);
-    while (!c->parked && !c->rebuild_done)
-        pthread_cond_wait(&c->cv, &c->mu);
-    bool parked = c->parked;
-    pthread_mutex_unlock(&c->mu);
+    bool parked = rebuild_stop_wait_parked(c);
     bool queued = parked &&
         pthread_create(&reader, NULL, rebuild_stop_reader, c) == 0;
     thread_registry_request_shutdown();
     shutdown_stagewatch_enter("network-quiesce", 120, true, false);
-    pthread_mutex_lock(&c->mu);
-    c->released = true;
-    pthread_cond_broadcast(&c->cv);
-    pthread_mutex_unlock(&c->mu);
+    rebuild_stop_release(c);
     bool joined = !queued || pthread_join(reader, NULL) == 0;
     joined = pthread_join(rebuilder, NULL) == 0 && joined;
     return parked && queued && joined;
@@ -4286,16 +4301,18 @@ static void check_sqlite_rebuild_stops_on_shutdown(int *failures)
     printf("SQLite shutdown stops the index rebuild; quiesce and "
            "durability finish clean... ");
     struct rebuild_stop_case c;
-    bool ok = rebuild_stop_open(&c);
+    bool ok = rebuild_stop_open(&c, "rebuild_shutdown", node_db_normal_mode);
     int64_t indexes = ok ? rebuild_stop_index_count(&c.ndb) : -1;
-    ok = ok && node_db_ibd_turbo_mode(&c.ndb) &&
-         rebuild_stop_index_count(&c.ndb) < indexes;
+    ok = ok && node_db_ibd_turbo_mode(&c.ndb);
+    int64_t dropped = ok ? rebuild_stop_index_count(&c.ndb) : -1;
+    ok = ok && dropped < indexes;
     thread_registry_reset_for_test();
     shutdown_stagewatch_reset_for_test();
     shutdown_stagewatch_set_clock_for_test(rebuild_stop_clock);
     shutdown_stagewatch_begin(c.dir);
     node_db_index_rebuild_test_set_hook(rebuild_stop_hook, &c);
-    ok = ok && rebuild_stop_drive(&c) && rebuild_stop_stopped(&c);
+    ok = ok && rebuild_stop_drive(&c) && rebuild_stop_stopped(&c) &&
+         rebuild_stop_index_count(&c.ndb) == dropped;
     node_db_index_rebuild_test_set_hook(NULL, NULL);
     ok = rebuild_stop_persist(&c) && ok && rebuild_stop_receipt_clean(&c);
     shutdown_stagewatch_set_clock_for_test(NULL);
@@ -4305,6 +4322,117 @@ static void check_sqlite_rebuild_stops_on_shutdown(int *failures)
     pthread_cond_destroy(&c.cv);
     pthread_mutex_destroy(&c.mu);
     test_rm_rf_recursive(c.dir);
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); (*failures)++; }
+}
+
+/* ── The shutdown stop spares other work on the shared connection ───────
+ *
+ * The rebuild runs on node.db's shared connection, so its statement can run
+ * inside another thread's explicit transaction, or beside another write
+ * statement whose rows are not yet committed; an interrupt of the rebuild
+ * statement would roll that work back with it. Here such work is open on
+ * the connection while the rebuild parks inside its first CREATE INDEX and
+ * a shutdown is requested. The index must finish, the rebuild must stop
+ * before the next one, and the other work must commit whole. */
+#define REBUILD_SPARE_ROW \
+    "(randomblob(32), 0, 1, x'76a9', 1, randomblob(20), 0, 0)"
+#define REBUILD_SPARE_INSERT \
+    "INSERT INTO utxos(txid, vout, value, script, script_type," \
+    " address_hash, height, is_coinbase) VALUES " REBUILD_SPARE_ROW
+
+enum rebuild_spare_work { REBUILD_SPARE_TXN, REBUILD_SPARE_STMT };
+
+/* Opens the other work: an explicit transaction holding one row, or an
+ * INSERT ... RETURNING stepped once, its two rows written, not committed. */
+static bool rebuild_spare_open_work(struct rebuild_stop_case *c,
+                                    enum rebuild_spare_work work,
+                                    sqlite3_stmt **stmt)
+{
+    if (work == REBUILD_SPARE_TXN)
+        return node_db_begin(&c->ndb) &&
+               node_db_exec(&c->ndb, REBUILD_SPARE_INSERT);
+    return sqlite3_prepare_v2(c->ndb.db, REBUILD_SPARE_INSERT ","
+                              REBUILD_SPARE_ROW " RETURNING height", -1,
+                              stmt, NULL) == SQLITE_OK &&
+           sqlite3_step(*stmt) == SQLITE_ROW;
+}
+
+/* Finishes the other work: one more row and COMMIT, or the remaining steps
+ * of the INSERT. True when the work committed. */
+static bool rebuild_spare_finish_work(struct rebuild_stop_case *c,
+                                      enum rebuild_spare_work work,
+                                      sqlite3_stmt *stmt)
+{
+    if (work == REBUILD_SPARE_TXN) {
+        if (node_db_exec(&c->ndb, REBUILD_SPARE_INSERT) &&
+            node_db_commit(&c->ndb))
+            return true;
+        (void)node_db_rollback(&c->ndb);
+        return false;
+    }
+    int rc;
+    do
+        rc = sqlite3_step(stmt);
+    while (rc == SQLITE_ROW);
+    return sqlite3_finalize(stmt) == SQLITE_OK && rc == SQLITE_DONE;
+}
+
+/* Runs the rebuild into its first CREATE INDEX, requests shutdown there and
+ * waits for it to return. True when it parked and was joined. */
+static bool rebuild_spare_run(struct rebuild_stop_case *c)
+{
+    pthread_t rebuilder;
+    if (pthread_create(&rebuilder, NULL, rebuild_stop_rebuilder, c) != 0)
+        return false;
+    bool parked = rebuild_stop_wait_parked(c);
+    thread_registry_request_shutdown();
+    rebuild_stop_release(c);
+    return pthread_join(rebuilder, NULL) == 0 && parked;
+}
+
+/* The parked index ran on past the request and finished, the rebuild
+ * stopped before the next index, and both rows of the other work are in. */
+static bool rebuild_spare_spared(struct rebuild_stop_case *c, int64_t dropped)
+{
+    return !c->rebuild_ok && c->hook_calls > 1 &&
+           rebuild_stop_index_count(&c->ndb) == dropped + 1 &&
+           sqlite_test_pragma_i64(c->ndb.db, "SELECT count(*) FROM"
+               " sqlite_master WHERE name='idx_utxo_address'") == 1 &&
+           sqlite_test_pragma_i64(c->ndb.db, "SELECT count(*) FROM utxos") ==
+               REBUILD_STOP_ROWS + 2;
+}
+
+static bool rebuild_spare_case(enum rebuild_spare_work work)
+{
+    struct rebuild_stop_case c;
+    sqlite3_stmt *stmt = NULL;
+    bool ok = rebuild_stop_open(&c, "rebuild_spare", node_db_rebuild_indexes) &&
+              node_db_ibd_turbo_mode(&c.ndb);
+    int64_t dropped = ok ? rebuild_stop_index_count(&c.ndb) : -1;
+    ok = ok && rebuild_spare_open_work(&c, work, &stmt);
+    thread_registry_reset_for_test();
+    node_db_index_rebuild_test_set_hook(rebuild_stop_hook, &c);
+    bool ran = ok && rebuild_spare_run(&c);
+    node_db_index_rebuild_test_set_hook(NULL, NULL);
+    bool committed = ok && rebuild_spare_finish_work(&c, work, stmt);
+    if (!ok)
+        sqlite3_finalize(stmt);
+    thread_registry_reset_for_test();
+    ok = ran && committed && rebuild_spare_spared(&c, dropped);
+    node_db_close(&c.ndb);
+    pthread_cond_destroy(&c.cv);
+    pthread_mutex_destroy(&c.mu);
+    test_rm_rf_recursive(c.dir);
+    return ok;
+}
+
+static void check_sqlite_rebuild_stop_spares_other_work(int *failures)
+{
+    printf("SQLite shutdown stop of the index rebuild spares an open "
+           "transaction and an unfinished write... ");
+    bool ok = rebuild_spare_case(REBUILD_SPARE_TXN);
+    ok = rebuild_spare_case(REBUILD_SPARE_STMT) && ok;
     if (ok) printf("OK\n");
     else { printf("FAIL\n"); (*failures)++; }
 }
@@ -4560,6 +4688,7 @@ int test_sqlite(void) {
     failures += check_sqlite_projection_writer_reservation();
     failures += check_sqlite_54_tx_index_shutdown_abort();
     check_sqlite_rebuild_stops_on_shutdown(&failures);
+    check_sqlite_rebuild_stop_spares_other_work(&failures);
 
 #if !defined(_WIN32)
     failures += check_sqlite_tx_statement_ownership();

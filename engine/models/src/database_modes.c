@@ -253,36 +253,53 @@ void node_db_index_rebuild_test_set_hook(void (*hook)(void *ctx), void *ctx)
 }
 #endif
 
+/* True when interrupting the running rebuild statement rolls back only that
+ * statement. SQLite answers an interrupted write statement by rolling back
+ * the connection's whole transaction (sqlite3VdbeHalt), and on the shared
+ * connection that transaction can hold another thread's work: an explicit
+ * transaction, or the uncommitted rows of another write statement still in
+ * progress. The progress handler runs inside the rebuild statement with the
+ * connection mutex held, so no other thread can begin a transaction or step,
+ * prepare or finalize a statement while this reads them; the rebuild
+ * statement is the one busy write statement expected. */
+static bool index_rebuild_interrupt_is_local(sqlite3 *db)
+{
+    if (!sqlite3_get_autocommit(db))
+        return false;
+    int writers = 0;
+    for (sqlite3_stmt *s = sqlite3_next_stmt(db, NULL); s;
+         s = sqlite3_next_stmt(db, s))
+        if (sqlite3_stmt_busy(s) && !sqlite3_stmt_readonly(s))
+            writers++;
+    return writers == 1;
+}
+
 static int index_rebuild_progress(void *arg)
 {
-    (void)arg;
     if (!t_index_rebuild_running)
         return 0;
 #ifdef ZCL_TESTING
     if (g_index_rebuild_test_hook)
         g_index_rebuild_test_hook(g_index_rebuild_test_ctx);
 #endif
-    return thread_registry_shutdown_requested();
+    return thread_registry_shutdown_requested() &&
+           index_rebuild_interrupt_is_local(arg);
 }
 
-/* Creates one index. An interrupt inside an explicit transaction rolls back
- * the whole transaction, so the in-statement check runs only in autocommit
- * mode. The handler is installed for each statement, so one that another
- * caller of the shared connection set and cleared in between does not leave
- * the rest of the rebuild without it. */
+/* Creates one index with the progress handler installed. The handler is
+ * installed for each statement, so one that another caller of the shared
+ * connection set and cleared in between does not leave the rest of the
+ * rebuild without it. Whether an interrupt is safe is decided inside the
+ * handler, not before the statement: another thread can begin a transaction
+ * between such a check and the statement. */
 static int index_rebuild_one(struct node_db *ndb, const char *sql)
 {
-    bool watch = sqlite3_get_autocommit(ndb->db) != 0;
-    if (watch) {
-        t_index_rebuild_running = true;
-        sqlite3_progress_handler(ndb->db, INDEX_REBUILD_PROGRESS_OPS,
-                                 index_rebuild_progress, NULL);
-    }
+    t_index_rebuild_running = true;
+    sqlite3_progress_handler(ndb->db, INDEX_REBUILD_PROGRESS_OPS,
+                             index_rebuild_progress, ndb->db);
     int rc = db_exec_checked(ndb->db, sql, "rebuild_indexes");
-    if (watch) {
-        sqlite3_progress_handler(ndb->db, 0, NULL, NULL);
-        t_index_rebuild_running = false;
-    }
+    sqlite3_progress_handler(ndb->db, 0, NULL, NULL);
+    t_index_rebuild_running = false;
     return rc;
 }
 

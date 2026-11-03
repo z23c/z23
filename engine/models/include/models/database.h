@@ -382,8 +382,11 @@ bool node_db_drop_indexes(struct node_db *ndb);
 
 /* Rebuild secondary indexes after bulk load. A shutdown request
  * (thread_registry_shutdown_requested) stops the rebuild before the next
- * index and interrupts the one in progress; the open after it recreates the
- * rest. Returns false when an index failed or the rebuild was stopped. */
+ * index and interrupts the one in progress, unless the interrupt would roll
+ * back other work on the shared connection (an open transaction or another
+ * write statement in progress): that index then finishes first. The open
+ * after it recreates the rest. Returns false when an index failed or the
+ * rebuild was stopped. */
 bool node_db_rebuild_indexes(struct node_db *ndb);
 #ifdef ZCL_TESTING
 /* Called from the rebuild's progress handler on the rebuilding thread. */
