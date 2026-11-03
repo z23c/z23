@@ -625,17 +625,51 @@ static void create_tests(void)
     wsu_words_seen(&w);
     assert(wsu_confirm(&w, right, 3));
     /* The marker is written by the finishing job, not by the tap that confirmed. */
-    assert(w.step == WSU_WORKING && w.held.count == 0 && zapp_setup_state(dir) == ZAPP_SETUP_INTERRUPTED && !wsu_created(&w));
+    assert(w.step == WSU_WORKING && w.held.count == 0 && zapp_setup_state(dir) == ZAPP_SETUP_INTERRUPTED);
     wsu_finish_job(&w);
     assert(w.step == WSU_DONE && zapp_setup_state(dir) == ZAPP_SETUP_READY && !wsu_busy(&w));
-    assert(wsu_created(&w));     /* the wallet starts at the tip and has shown no address: the app may show it as 0 ZCL */
     wsu_finish_job(&w);
     assert(w.step == WSU_DONE);
     wsu_destroy(&w);
-    init_with(&f, &w);           /* a setup finished before the app started is not a new wallet */
-    assert(w.step == WSU_DONE && !wsu_created(&w));
+
+}
+/* Only a create confirmed in this run is a new wallet, which starts at the tip and has shown no address, so the app may show it
+ * as 0 ZCL. A restore, whose balance is unknown until the node has read the chain, and a setup finished before the app started
+ * are not. */
+static void created_tests(void)
+{
+    struct fake f;
+    struct wsu w;
+    struct wsu_view v;
+    struct zapp_words all;
+    fresh(&f, &w, true);
+    script_say(&f.script, true, CREATED);
+    create_all(&w);
+    wsu_words_seen(&w);
+    wsu_view_read(&w, &v);
+    assert(zapp_words_parse(PHRASE, &all));
+    const char *right[3] = {all.word[v.asked[0]], all.word[v.asked[1]], all.word[v.asked[2]]};
+    assert(wsu_confirm(&w, right, 3));
+    assert(!wsu_created(&w));
+    wsu_finish_job(&w);
+    assert(w.step == WSU_DONE);
+    assert(wsu_created(&w));
+    wsu_destroy(&w);
+    init_with(&f, &w);
+    assert(w.step == WSU_DONE);
+    assert(!wsu_created(&w));
     wsu_destroy(&w);
 
+    fresh(&f, &w, true);
+    wsu_open_restore(&w);
+    script_say(&f.script, true, "{\"ok\":true,\"data\":{\"recovered\":true,\"birthday_recorded\":false}}");
+    wsu_restore_job(&w, VALID_PHRASE, 0);
+    assert(w.step == WSU_READING);
+    assert(!wsu_created(&w));
+    wsu_finish_reading(&w);
+    assert(w.step == WSU_DONE);
+    assert(!wsu_created(&w));
+    wsu_destroy(&w);
 }
 static void create_failure_decline_tests(void)
 {
@@ -903,13 +937,13 @@ static void restore_tests(void)
     wsu_restore_job(&w, VALID_PHRASE, 2999000);
     wsu_view_read(&w, &v);
     assert(v.step == WSU_READING && !v.birthday_dropped && f.restore_while_running == 0 && f.stops == 1 && f.starts == 1);
-    assert(zapp_setup_state(dir) == ZAPP_SETUP_READY && f.wraps == 1 && !wsu_created(&w));
+    assert(zapp_setup_state(dir) == ZAPP_SETUP_READY && f.wraps == 1);
     assert(strstr(f.script.input, "\"passphrase\":\"abab") && strstr(f.script.input, "\"confirm\":true"));
     f.scanned = 100; f.tip = 3000000;
     int64_t a, b;
     assert(wsu_reading(&w, &a, &b) && a == 100 && b == 3000000);
     wsu_finish_reading(&w);
-    assert(w.step == WSU_DONE && !wsu_created(&w));   /* a restore's balance is unknown until the node has read the chain */
+    assert(w.step == WSU_DONE);
     wsu_destroy(&w);
 
 }
@@ -2375,6 +2409,7 @@ int main(int argc, char **argv)
     node_restore_tests();
     node_hash_tests();
     create_tests();
+    created_tests();
     create_failure_decline_tests();
     create_failure_refused_tests();
     create_failure_unknown_tests();

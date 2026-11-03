@@ -744,20 +744,47 @@ static bool cached_shown(const struct wallet_screen *s, const char *amount, cons
            !strcmp(text_at(s, at - 1), "Last known balance") && !strcmp(text_at(s, at + 1), age);
 }
 
-static void test_cache_roundtrip(void)
+/* The balance file is sealed: the tag of its format, then nothing of the plain body. */
+static bool sealed_only(size_t *size)
+{
+    uint8_t bytes[1024];
+    size_t n = get_bytes(CACHE, bytes, sizeof(bytes));
+    if (size) *size = n;
+    bool plain = bytes_hold(bytes, n, "ZCL") || bytes_hold(bytes, n, "1.23456789") || bytes_hold(bytes, n, "1700000000");
+    return n > SEALED_HEAD + WALLET_SEAL_TAG && !memcmp(bytes, SEALED_TAG, SEALED_TAG_LEN) && !plain;
+}
+
+/* The first live summary leaves one sealed file of 0600 that holds the body and its tag, with no plain text in it, for an encrypted
+ * wallet that is locked and for a wallet without encryption alike. */
+static void test_cache_sealed_file(void)
 {
     wallet_with_balance();
-    uint8_t bytes[1024];
     char path[PATH_MAX + 32];
     struct stat info;
+    size_t n = 0;
     snprintf(path, sizeof(path), "%s/" CACHE, cache_dir);
-    CHECK(stat(path, &info) == 0 && (info.st_mode & 0777) == 0600 && !file_exists(CACHE ".tmp") && !file_exists(PLAIN_CACHE));
-    size_t n = get_bytes(CACHE, bytes, sizeof(bytes));
+    CHECK(stat(path, &info) == 0 && (info.st_mode & 0777) == 0600);
+    CHECK(!file_exists(CACHE ".tmp") && !file_exists(PLAIN_CACHE) && keystore.seals == 1);
     size_t body = strlen("z23-balance-cache-v1\n") + 17 + strlen("1700000000\n1.23456789 ZCL\n") +
                   strlen("0.5 ZCL pending in 2 payments. The next arrives in 7 confirmations.\n") +
                   strlen("0.1 ZCL public: visible to everyone, not part of the spendable amount\n");
-    CHECK(n == SEALED_HEAD + body + WALLET_SEAL_TAG && !memcmp(bytes, SEALED_TAG, SEALED_TAG_LEN) && keystore.seals == 1);
-    CHECK(!bytes_hold(bytes, n, "ZCL") && !bytes_hold(bytes, n, "1.23456789") && !bytes_hold(bytes, n, "1700000000"));
+    CHECK(sealed_only(&n) && n == SEALED_HEAD + body + WALLET_SEAL_TAG);
+    remove_dir();
+
+    make_dir();
+    put_file("wallet_key.blob", "key file one");
+    start(false);
+    fake.summary = GOOD_SUMMARY_PLAIN;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS) && has("1.23456789 ZCL"));
+    wallet_screens_close();
+    CHECK(sealed_only(NULL));
+    remove_dir();
+}
+
+/* Before the node answers Funds shows the kept balance with its age, and the live summary replaces all of it. */
+static void test_cache_roundtrip(void)
+{
+    wallet_with_balance();
     wall += 300;                                                   /* five minutes later, before the node answers */
     struct wallet_screen *s = open_waiting();
     CHECK(find_text(s, "Loading") < 0 && !item_is("Balance") && keystore.unseals == 1);
@@ -772,16 +799,6 @@ static void test_cache_roundtrip(void)
     wait_for(live_shown);
     CHECK(!has("Last known") && !has("As of") && item_is("Balance") && has("Up to date at block 3000000"));
     wallet_screens_close();
-    remove_dir();
-
-    make_dir();                                                    /* a wallet without encryption is kept the same way */
-    put_file("wallet_key.blob", "key file one");
-    start(false);
-    fake.summary = GOOD_SUMMARY_PLAIN;
-    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS) && has("1.23456789 ZCL"));
-    wallet_screens_close();
-    n = get_bytes(CACHE, bytes, sizeof(bytes));
-    CHECK(n > SEALED_HEAD && !memcmp(bytes, SEALED_TAG, SEALED_TAG_LEN) && !bytes_hold(bytes, n, "ZCL"));
     remove_dir();
 }
 
@@ -2178,6 +2195,7 @@ int main(int argc, char **argv)
     test_refresh_and_stale();
     test_send_line();
     test_send_line_before_answer();
+    test_cache_sealed_file();
     test_cache_roundtrip();
     test_cache_other_wallet();
     test_cache_not_trusted();
