@@ -19,6 +19,7 @@
 #include "platform/time_compat.h"
 #include "../../../contexts/commons/modules/plugin/src/plugin_internal.h"
 #include "sha3/sha3.h"
+#include "test/plugin_dev_cases.h"
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -2335,6 +2336,8 @@ static int pst_case_registered(void)
         ASSERT(s && s->handler == zcl_native_handle_plugin_rollback);
         s = zcl_command_registry_find(reg, "plugin.pack", NULL);
         ASSERT(s && s->handler == zcl_native_handle_plugin_pack);
+        s = zcl_command_registry_find(reg, "plugin.dev", NULL);
+        ASSERT(s && s->handler == zcl_native_handle_plugin_dev);
         s = zcl_command_registry_find(reg, "plugin.keygen", NULL);
         ASSERT(s && s->handler == zcl_native_handle_plugin_keygen);
         ASSERT(zcl_native_command_is_root("plugin"));
@@ -2445,5 +2448,6 @@ int test_plugin_store(void)
     failures += pst_case_crashed_install();
     failures += pst_case_run_status_text();
     failures += pst_case_registered();
+    failures += plugin_dev_cases();
     return failures;
 }

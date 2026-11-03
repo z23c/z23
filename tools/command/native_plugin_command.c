@@ -139,7 +139,7 @@ static void plg_next_install(struct zcl_command_reply *reply, const char *manife
 
 /* The interface version from a JSON integer or its decimal string; absent
  * means 1. false = not 1 or 2. */
-static bool plg_interface(const struct zcl_command_request *request, int *out)
+bool plg_interface(const struct zcl_command_request *request, int *out)
 {
     const struct json_value *v = request->input ? json_get(request->input, "interface") : NULL;
     int64_t n = 1;

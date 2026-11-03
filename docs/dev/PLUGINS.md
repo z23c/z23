@@ -190,9 +190,28 @@ z23 plugin switch hello <128-hex generation>
 z23 plugin rollback hello
 z23 plugin run hello [seconds]             # supervise the current generation
 z23 plugin call upper --stdin=abc          # run an interface 2 plugin once
+z23 plugin dev ./hello                     # pack, install and switch in one step
 z23 plugin keygen ./publisher.key          # publisher: create a signing key
 z23 plugin pack ./hello --name=hello --version=1.0.0 --key=./publisher.key
 ```
+
+### Development loop: `plugin dev`
+
+```sh
+z23 plugin dev ./hello                     # key, pack, publisher, install, switch
+```
+
+`plugin dev DIR` takes the built executable `DIR/NAME` (`NAME` is the last
+component of `DIR` unless `name=` is given; `version=` defaults to
+`0.0.0-dev`, `cap=` and `interface=` are as for `pack`). It creates the
+developer key `~/.z23/plugin_dev.key` only when it is missing (`key=` names
+another), packs into `DIR/dist`, lists the key as a publisher key when it is
+not listed, installs the packed generation and makes it current. The reply
+lists each step and carries the new generation id and its `sequence`, the
+number of generations stored for the plugin. A running `plugin run` restarts
+on the new generation when it receives SIGHUP. A failed step is named in the
+refusal and the current generation stays active. The command calls the store
+functions directly; it does not spawn the CLI and does not send the signal.
 
 - `install` verifies the source files, copies them to a staging directory,
   verifies the copy again, then renames it into `generations/`. Installing a

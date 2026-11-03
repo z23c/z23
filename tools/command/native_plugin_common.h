@@ -15,5 +15,7 @@ const char *plg_str(const struct zcl_command_request *request, const char *key);
 void plg_push_capabilities(struct json_value *obj, unsigned mask);
 /* Reads "cap" (comma list or JSON array) into mask; false when invalid. */
 bool plg_capabilities(const struct zcl_command_request *request, unsigned *mask);
+/* Reads "interface" (1 or 2, integer or string; absent means 1); false otherwise. */
+bool plg_interface(const struct zcl_command_request *request, int *out);
 
 #endif

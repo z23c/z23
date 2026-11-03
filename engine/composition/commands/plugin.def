@@ -179,6 +179,31 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_plugin_rollback)
 
 ZCL_COMMAND_READY_COMMAND(
+    "plugin.dev", "plugin", "",
+    "Pack, install and switch to a plugin in one step for development",
+    "Runs the developer loop for the executable dir/NAME (NAME defaults to the "
+    "last component of dir): creates the developer signing key "
+    "(~/.z23/plugin_dev.key, or key) only when it is missing, packs the "
+    "executable into dir/dist, lists the key as a publisher key when it is not "
+    "listed, installs the packed generation and makes it current. Each step is "
+    "reported with the new generation id and its sequence number. A running "
+    "plugin run takes the generation up on SIGHUP. A failed step is named in "
+    "the refusal and the current generation stays active. It calls the plugin "
+    "store functions directly and starts nothing.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "plugin,dev,hot,swap,reload,pack,install,switch,generation,develop",
+    "zcl.plugin_dev.input.v1", "zcl.plugin_dev.v1",
+    "dir,name,version,key,cap,interface", "dir",
+    "z23 plugin dev ./hello",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_REVERSIBLE,
+    zcl_native_handle_plugin_dev)
+
+ZCL_COMMAND_READY_COMMAND(
     "plugin.run", "plugin", "",
     "Run an installed plugin confined, health-checked and restarted on failure",
     "Starts the plugin's current verified executable as a confined child "
