@@ -61,7 +61,6 @@
 #include "platform/os_proc.h"             /* os_proc_exe_path (banned: raw /proc/self/exe) */
 #include "base/utc_tm.h"                  /* zcl_utc_tm: gmtime_s/gmtime_r */
 #include "test/verify_bench_fixture.h"    /* baked real (200,9) witness */
-#include "controllers/explorer_internal.h"
 #include "services/wallet_backup_service.h"
 #include "services/chain_tip_watchdog.h"  /* #8: self-respawn when off-systemd */
 #include "util/supervisor_backstop.h"     /* Pillar 7: self-respawn on a frozen
