@@ -23,6 +23,8 @@ struct zapp_app_entry {
  * from the view: no fleet token, host plan, pairing offer, key or path. preview marks the voice
  * preview package, which never runs a node. Returns the JSON length, or 0 when cap is too small. */
 size_t zapp_home_phone_card(const struct zapp_view *view, bool preview, char *out, size_t cap);
+/* The plain node line the Home card shows for the view, copied into out. */
+const char *zapp_home_node_line(const struct zapp_view *view, char *out, size_t cap);
 /* One launchable app: zcl.z23_app_card.v1 for an org.z23.* app signed with this app's key, else
  * zcl.app_card.v1. Returns the JSON length or 0. */
 size_t zapp_home_app_card(const struct zapp_app_entry *app, char *out, size_t cap);

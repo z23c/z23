@@ -1,8 +1,16 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include "node_service.h"
 #include "controller.h"
 #include "payment_notice.h"
 #include "node_watch.h"
+#include "node_notice.h"
+#include "home.h"
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
 #include <android/log.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -100,8 +108,37 @@ static jobject new_builder(JNIEnv *env, jobject service)
     return new_object(env, "android/app/Notification$Builder", "(Landroid/content/Context;Ljava/lang/String;)V",
                       service, jstr(env, "node"));
 }
+/* The text the foreground notification shows, and when it was last posted. enter_foreground and the watch tick use it. */
+static pthread_mutex_t notice_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct zapp_node_notice notice;
+static int64_t now_secs(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (int64_t)t.tv_sec;
+}
+/* The plain node line Home shows, from a copy of the view; empty while it is not known yet. */
+static void current_line(char *out, size_t cap)
+{
+    struct zapp_view *view = calloc(1, sizeof(*view));
+    if (out && cap) out[0] = 0;
+    if (!view) return;
+    zapp_controller_snapshot(view);
+    (void)zapp_home_node_line(view, out, cap);
+    free(view);
+}
+/* The text at start: the node line, or the neutral text while it is unknown. Starts the notice afresh. */
+static void foreground_text(char *text, size_t cap)
+{
+    char line[ZAPP_NODE_NOTICE_CAP];
+    current_line(line, sizeof(line));
+    pthread_mutex_lock(&notice_lock);
+    memset(&notice, 0, sizeof(notice));
+    (void)zapp_node_notice_due(&notice, line, now_secs(), text, cap);
+    pthread_mutex_unlock(&notice_lock);
+}
 /* The full notification; a missing tap action only costs the tap. */
-static jobject build_notification(JNIEnv *env, jobject service)
+static jobject build_notification(JNIEnv *env, jobject service, const char *text)
 {
     jstring package = call_object(env, service, "getPackageName", "()Ljava/lang/String;");
     jobject tap = package ? tap_action(env, service, package) : NULL;
@@ -110,7 +147,7 @@ static jobject build_notification(JNIEnv *env, jobject service)
     if (!b) return NULL;
     snprintf(sig, sizeof(sig), "(Ljava/lang/CharSequence;)%s", builder_class);
     (void)call_object(env, b, "setContentTitle", sig, jstr(env, "Z23 node"));
-    (void)call_object(env, b, "setContentText", sig, jstr(env, "Running and in sync while hidden"));
+    (void)call_object(env, b, "setContentText", sig, jstr(env, text));
     snprintf(sig, sizeof(sig), "(I)%s", builder_class);
     (void)call_object(env, b, "setSmallIcon", sig, app_icon(env, service));
     snprintf(sig, sizeof(sig), "(Z)%s", builder_class);
@@ -136,7 +173,9 @@ static jobject minimal_notification(JNIEnv *env, jobject service)
 }
 static bool enter_foreground(JNIEnv *env, jobject service)
 {
-    jobject n = build_notification(env, service);
+    char text[ZAPP_NODE_NOTICE_CAP];
+    foreground_text(text, sizeof(text));
+    jobject n = build_notification(env, service, text);
     if (!n) n = minimal_notification(env, service);
     return n && call_void(env, service, "startForeground", "(ILandroid/app/Notification;I)V",
                           NOTIFICATION_ID, n, SERVICE_TYPE_SPECIAL_USE);
@@ -213,7 +252,46 @@ static void release_service(JNIEnv *env)
     if (service) (*env)->DeleteGlobalRef(env, service);
 }
 static atomic_bool ended;
-static bool node_alive(void *context) { (void)context; return zapp_controller_node_running(); }
+/* Posts the foreground notification again with the new text, as a notify on its own ID. Runs on the watch thread,
+ * which attaches for the call; the caller holds held.lock so the service stays alive. */
+static void post_text(JavaVM *vm, jobject service, const char *text)
+{
+    JNIEnv *env = NULL;
+    if ((*vm)->AttachCurrentThread(vm, &env, NULL) != JNI_OK) return;
+    if ((*env)->PushLocalFrame(env, 64) == JNI_OK) {
+        jobject n = build_notification(env, service, text);
+        jobject manager = call_object(env, service, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;",
+                                      jstr(env, "notification"));
+        if (n && manager) (void)call_void(env, manager, "notify", "(ILandroid/app/Notification;)V", NOTIFICATION_ID, n);
+        (*env)->PopLocalFrame(env, NULL);
+    }
+    (void)failed(env, "notice");
+    (*vm)->DetachCurrentThread(vm);
+}
+/* Called on each watch tick while the node runs: posts the notice when it is due. */
+static void refresh_notice(void)
+{
+    char line[ZAPP_NODE_NOTICE_CAP], text[ZAPP_NODE_NOTICE_CAP];
+    bool due = false;
+    current_line(line, sizeof(line));
+    pthread_mutex_lock(&held.lock);
+    JavaVM *vm = held.vm;
+    jobject service = held.service;
+    if (vm && service) {
+        pthread_mutex_lock(&notice_lock);
+        due = zapp_node_notice_due(&notice, line, now_secs(), text, sizeof(text));
+        pthread_mutex_unlock(&notice_lock);
+    }
+    if (due) post_text(vm, service, text);
+    pthread_mutex_unlock(&held.lock);
+}
+static bool node_alive(void *context)
+{
+    (void)context;
+    const bool running = zapp_controller_node_running();
+    if (running) refresh_notice();
+    return running;
+}
 /* The node exited with nothing in the app watching: end the service from the watch thread. Returns
  * false when the stop could not be issued, so the watch tries again. */
 static bool node_gone(void *context)

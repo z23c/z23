@@ -119,6 +119,11 @@ static const char *plain_node_line(const struct zapp_view *view, char *out, size
     else snprintf(out, cap, "%s", view->node_line);
     return out;
 }
+/* The plain node line the Home card shows, copied into out; the foreground notification shows the same line. */
+const char *zapp_home_node_line(const struct zapp_view *view, char *out, size_t cap)
+{
+    return plain_node_line(view, out, cap);
+}
 size_t zapp_home_phone_card(const struct zapp_view *view, bool preview, char *out, size_t cap)
 {
     struct json_value card;

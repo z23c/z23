@@ -305,6 +305,8 @@ test-host:
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/layout-test' "$$scratch"
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) -pthread -I../../vendor/qrcodegen tests/home_test.c home.c layout.c hosts.c pairing.c scan.c payment_code.c wallet_screens.c wallet_view.c fleet.c speech_client.c bridge_client.c bridge_auth.c voice.c ../../contexts/commons/packages/zutf8/src/zutf8.c ../../vendor/qrcodegen/qrcodegen.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/home-test'
 	'$(BUILD_DIR)/home-test'
+	$(HOST_CC) $(HOST_WARNINGS) -I. tests/node_notice_test.c node_notice.c -o '$(BUILD_DIR)/node-notice-test'
+	'$(BUILD_DIR)/node-notice-test'
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/clip_store_test.c clip_store.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/clip-store-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/clip-store-test.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/clip-store-test' "$$scratch"
