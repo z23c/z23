@@ -2,7 +2,7 @@
  *
  * Reads the fingerprint of the block files under <datadir>/blocks that the
  * clean-shutdown marker records, so a verified fast restart can tell that no
- * block file changed while the node was down. */
+ * block file changed size or modification time while the node was down. */
 
 #include "config/boot_block_files_fingerprint.h"
 

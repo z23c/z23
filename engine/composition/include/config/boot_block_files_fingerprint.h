@@ -2,7 +2,7 @@
  *
  * Fingerprint of the block files under <datadir>/blocks, recorded in the
  * clean-shutdown marker so a verified fast restart can tell that no block
- * file changed while the node was down. */
+ * file changed size or modification time while the node was down. */
 
 #ifndef ZCL_CONFIG_BOOT_BLOCK_FILES_FINGERPRINT_H
 #define ZCL_CONFIG_BOOT_BLOCK_FILES_FINGERPRINT_H
