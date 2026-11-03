@@ -205,6 +205,10 @@ bool debug_bundle_write(const char *trigger, const char *trigger_child,
                         int trigger_reason,
                         struct debug_bundle_result *res);
 
+/* Delete all but the newest `keep` debug-bundle-*.json files in `datadir`.
+ * debug_bundle_write calls it after each successful write. */
+void debug_bundle_prune(const char *datadir, size_t keep);
+
 /* supervisor_stall_observer_fn implementation: rate-limited auto-capture.
  * Never blocks the detecting (supervisor) thread — at most one capture per
  * DEBUG_BUNDLE_AUTO_MIN_INTERVAL_SECS and one in flight at a time; the

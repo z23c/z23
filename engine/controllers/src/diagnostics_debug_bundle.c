@@ -43,6 +43,7 @@
 #include "controllers/node_binary_identity_json.h"
 #include "controllers/strong_params.h"
 #include "json/json.h"
+#include "platform/directory_compat.h"
 #include "platform/private_file.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
@@ -53,6 +54,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -315,6 +317,55 @@ static int debug_bundle_create_exclusive(const char *datadir,
     return DEBUG_BUNDLE_CREATE_NO_FREE_NAME;
 }
 
+/* Bundles kept in the datadir. Older debug-bundle-*.json files are deleted
+ * after each successful write so repeated stalls cannot fill the disk. */
+#define DEBUG_BUNDLE_KEEP 3
+
+static bool debug_bundle_name_is_bundle(const char *name)
+{
+    static const char prefix[] = "debug-bundle-";
+    static const char suffix[] = ".json";
+    size_t n = strlen(name);
+    return n > sizeof(prefix) - 1 + sizeof(suffix) - 1 &&
+           strncmp(name, prefix, sizeof(prefix) - 1) == 0 &&
+           strcmp(name + n - (sizeof(suffix) - 1), suffix) == 0;
+}
+
+/* Order by the name without ".json", so "<utc>" sorts before "<utc>-1". */
+static int debug_bundle_name_cmp(const void *a, const void *b)
+{
+    const char *x = *(const char *const *)a;
+    const char *y = *(const char *const *)b;
+    size_t lx = strlen(x) - 5, ly = strlen(y) - 5;
+    int c = strncmp(x, y, lx < ly ? lx : ly);
+    if (c != 0) return c;
+    return lx < ly ? -1 : (lx > ly ? 1 : 0);
+}
+
+void debug_bundle_prune(const char *datadir, size_t keep)
+{
+    struct platform_directory_list list;
+    if (!platform_directory_list_regular_sorted(datadir, &list))
+        return;
+    const char **names = list.count
+        ? zcl_malloc(list.count * sizeof(*names), "debug_bundle_prune") : NULL;
+    size_t n = 0;
+    for (size_t i = 0; names && i < list.count; i++)
+        if (debug_bundle_name_is_bundle(list.entries[i].name))
+            names[n++] = list.entries[i].name;
+    if (n > 1)
+        qsort(names, n, sizeof(*names), debug_bundle_name_cmp);
+    for (size_t i = 0; i + keep < n; i++) {
+        char path[1100];
+        int len = snprintf(path, sizeof(path), "%s/%s", datadir, names[i]);
+        if (len > 0 && (size_t)len < sizeof(path) &&
+            !platform_private_file_unlink_missing_ok(path))
+            LOG_WARN(DBB_SUBSYS, "could not remove old bundle %s", names[i]);
+    }
+    free(names);
+    platform_directory_list_free(&list);
+}
+
 static bool debug_bundle_write_leased(const char *trigger,
                                       const char *trigger_child,
                                       int trigger_reason,
@@ -402,6 +453,7 @@ static bool debug_bundle_write_leased(const char *trigger,
         LOG_FAIL(DBB_SUBSYS, "debug bundle parent durability check failed");
     }
 
+    debug_bundle_prune(datadir, DEBUG_BUNDLE_KEEP);
     res->bytes = (int64_t)wrote;
     return true;
 }

@@ -241,6 +241,53 @@ static int debug_bundle_check_rpc_capture(char (*bundle_path)[1200])
     return failures;
 }
 
+/* Retention: only the newest 3 bundles survive. */
+static int debug_bundle_check_prune(void)
+{
+    int failures = 0;
+    {
+        char pdir[256];
+        test_fmt_tmpdir(pdir, sizeof(pdir), "debug_bundle", "prune");
+        mkdir("./test-tmp", 0755);
+        mkdir(pdir, 0755);
+        static const char *const names[] = {
+            "debug-bundle-20260101T000000Z.json",
+            "debug-bundle-20260101T000100Z.json",
+            "debug-bundle-20260101T000100Z-1.json",
+            "debug-bundle-20260101T000200Z.json",
+            "debug-bundle-20260101T000300Z.json",
+        };
+        bool made = true;
+        for (size_t i = 0; i < 5; i++) {
+            char p[320];
+            snprintf(p, sizeof(p), "%s/%s", pdir, names[i]);
+            FILE *fp = fopen(p, "wb");
+            made = made && fp && fputs("{}", fp) >= 0;
+            if (fp) fclose(fp);
+        }
+        char other[320];
+        snprintf(other, sizeof(other), "%s/node.log", pdir);
+        FILE *ofp = fopen(other, "wb");
+        if (ofp) fclose(ofp);
+        debug_bundle_prune(pdir, 3);
+        struct stat sb;
+        bool gone = true, kept = true;
+        for (size_t i = 0; i < 5; i++) {
+            char p[320];
+            snprintf(p, sizeof(p), "%s/%s", pdir, names[i]);
+            bool present = stat(p, &sb) == 0;
+            if (i < 2) gone = gone && !present;
+            else kept = kept && present;
+        }
+        DBB_CHECK("prune: fixture of 5 bundles created", made);
+        DBB_CHECK("prune: the 2 oldest bundles are deleted", gone);
+        DBB_CHECK("prune: the newest 3 bundles remain", kept);
+        DBB_CHECK("prune: other files are untouched", stat(other, &sb) == 0);
+        test_rm_rf(pdir);
+    }
+    return failures;
+}
+
 int test_debug_bundle(void)
 {
     printf("\n=== debug_bundle tests ===\n");
@@ -288,6 +335,8 @@ int test_debug_bundle(void)
             json_free(&doc);
         }
     }
+
+    failures += debug_bundle_check_prune();
 
     /* ── (c) no datadir: clean failure, no surprise write ────────── */
     {
