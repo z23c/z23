@@ -24,7 +24,7 @@ int main(void)
     assert(!strstr(zapp_payment_notice_of(ZAPP_PAYMENT_UNKNOWN).title, "not sent"));
     /* The public version is one fixed title: it cannot reveal the outcome, the amount or the address. */
     assert(!strcmp(ZAPP_PAYMENT_PUBLIC_TITLE, "Z23 payment update"));
-    no_amount_or_address(ZAPP_PAYMENT_PUBLIC_TITLE + 3);   /* past the product name */
+    no_amount_or_address(&ZAPP_PAYMENT_PUBLIC_TITLE[3]);   /* past the product name */
     for (int r = ZAPP_PAYMENT_SENT; r <= ZAPP_PAYMENT_UNKNOWN; ++r)
         assert(strcmp(ZAPP_PAYMENT_PUBLIC_TITLE, zapp_payment_notice_of((enum zapp_payment_result)r).title) != 0);
     puts("payment_notice_test: ok");
