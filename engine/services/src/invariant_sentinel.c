@@ -643,17 +643,20 @@ void invariant_sentinel_clear_commitment_blocker(void)
     audit_clear_latched_blocker("the auto-terminating owner");
 }
 
-/* ── foreign writer on node.db (diagnostic, no state change) ──────── */
+/* ── foreign writer on node.db (diagnostic, never latches) ─────────── */
 
 /* Another same-uid process holding node.db open read-write breaks the store
- * (the 10-29 r1 failure). Log it loudly, once per pid per repeat window.
- * No blocker and no sync effect: the operator decides what to close. */
+ * (the 10-29 r1 failure). The report is an alert only: EV_OPERATOR_NEEDED with
+ * the terminal=0 marker, the non-latching form, so DEGRADED, the heartbeat
+ * stop and the restart remedy are never driven by a transient outside writer.
+ * One report per pid per repeat window. */
 #define NODE_DB_WRITER_TRACK       4
 #define NODE_DB_WRITER_REPEAT_SECS 600
 
 /* Single sweep thread only (same discipline as the sweep memos above). */
 static struct { uint64_t pid; int64_t warned_unix; }
     g_writer_warned[NODE_DB_WRITER_TRACK];
+static int64_t g_writer_scan_warned_unix;
 
 /* True when `pid` has not been reported within the repeat window. */
 static bool sentinel_writer_repeat_due(uint64_t pid, int64_t now)
@@ -676,26 +679,56 @@ static bool sentinel_writer_repeat_due(uint64_t pid, int64_t now)
     return true;
 }
 
+bool invariant_sentinel_node_db_writer_report(uint64_t pid, const char *comm,
+                                              const char *path, int64_t now)
+{
+    if (!sentinel_writer_repeat_due(pid, now))
+        return false; // raw-return-ok:suppressed-repeat-is-reported-by-return-value
+    const char *name = comm && comm[0] ? comm : "(unknown)";
+    LOG_ERROR("invariant_sentinel",
+              "foreign writer holds node.db open read-write pid=%" PRIu64
+              " comm=%s path=%s; two writers can break the store, close "
+              "that process's handle",
+              pid, name, path ? path : "(unknown)");
+    event_emitf(EV_OPERATOR_NEEDED, 0,
+                "check=node_db.foreign_writer terminal=0 pid=%" PRIu64
+                " comm=%s",
+                pid, name);
+    return true;
+}
+
+/* The bounded scan stopped with pids left unseen. Warn at most once per
+ * repeat window, because a sweep that cannot finish cannot clear a writer. */
+static void sentinel_writer_scan_incomplete(int64_t now)
+{
+    if (now - g_writer_scan_warned_unix < NODE_DB_WRITER_REPEAT_SECS)
+        return;
+    g_writer_scan_warned_unix = now;
+    LOG_WARN("invariant_sentinel",
+             "node.db foreign-writer scan stopped after %zu pids; the writer "
+             "check is incomplete for this sweep",
+             (size_t)OS_PROC_WRITER_MAX_PIDS);
+}
+
 static void sentinel_watch_node_db_writer(void)
 {
     struct node_db *ndb = sentinel_ndb();
     if (!ndb || ndb->path[0] == '\0')
         return;
     struct os_proc_foreign_writer writer;
-    if (os_proc_foreign_writer_find(ndb->path, &writer) !=
-        OS_PROC_WRITER_FOUND)
-        return;
-    if (!sentinel_writer_repeat_due(writer.pid, platform_time_wall_unix()))
-        return;
-    const char *comm = writer.comm[0] ? writer.comm : "(unknown)";
-    LOG_ERROR("invariant_sentinel",
-              "foreign writer holds node.db open read-write pid=%" PRIu64
-              " comm=%s path=%s; two writers can break the store, close "
-              "that process's handle",
-              writer.pid, comm, ndb->path);
-    event_emitf(EV_OPERATOR_NEEDED, 0,
-                "check=node_db.foreign_writer pid=%" PRIu64 " comm=%s",
-                writer.pid, comm);
+    int64_t now = platform_time_wall_unix();
+    switch (os_proc_foreign_writer_find(ndb->path, &writer)) {
+    case OS_PROC_WRITER_FOUND:
+        (void)invariant_sentinel_node_db_writer_report(writer.pid,
+                                                       writer.comm,
+                                                       ndb->path, now);
+        break;
+    case OS_PROC_WRITER_INCOMPLETE:
+        sentinel_writer_scan_incomplete(now);
+        break;
+    default:
+        break;
+    }
 }
 
 /* ── supervisor children ────────────────────────────────────────── */

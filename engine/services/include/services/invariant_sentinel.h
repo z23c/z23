@@ -146,6 +146,13 @@ bool invariant_sentinel_commitment_audit_once(void);
  * audit thread; this clears only the operator-facing signal. */
 void invariant_sentinel_clear_commitment_blocker(void);
 
+/* Report a foreign read-write holder of node.db found by the sweep: one
+ * LOG_ERROR and one non-latching EV_OPERATOR_NEEDED (terminal=0), so it
+ * alerts without driving DEGRADED or any remedy. `now` is unix seconds.
+ * Returns false when the per-pid repeat window suppressed the report. */
+bool invariant_sentinel_node_db_writer_report(uint64_t pid, const char *comm,
+                                              const char *path, int64_t now);
+
 /* ── `z23 dumpstate validation_pack` ─────────────────────── */
 bool invariant_sentinel_dump_state_json(struct json_value *out,
                                         const char *key);
