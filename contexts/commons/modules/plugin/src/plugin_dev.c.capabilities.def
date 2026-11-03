@@ -1,3 +1,3 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Source-owned capability declaration for the plugin developer loop. */
-ZCL_MODULE_CAPABILITY("contexts/commons/modules/plugin/src/plugin_dev.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("contexts/commons/modules/plugin/src/plugin_dev.c", CAP_FS_WRITE, "creates the developer key directory and drives keygen, pack, install and switch; the reads and writes themselves happen in plugin_fs.c, plugin_key.c, plugin_pack.c and plugin_store.c, which declare their own reach")
