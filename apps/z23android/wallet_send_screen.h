@@ -204,6 +204,26 @@ bool wss_send_busy(enum ws_state state);
 void wss_gate_prover(struct wss_view *view, bool ready, const char *why);
 /* True when the passphrase and the unlock request hold no byte: proof that every path cleansed them. */
 bool wss_secrets_clear(struct wss *screen);
+/* The wallet secret and the unlock request of one unlock. wss_unlock_node cleanses both before it returns. */
+struct wss_unlock_buf {
+    uint8_t secret[32];
+    char json[WSS_UNLOCK_JSON];
+};
+/* What one unlock did: the device key's answer, whether the unlock request was handed to the node (the wallet may be open
+ * from then on, whatever the answer), and whether the node said it was unlocked. */
+struct wss_unlock_result {
+    enum wss_key_status key;
+    bool sent, ok;
+};
+/* Opens the wallet once for the owner. It unwraps the wallet secret with the device key, which shows the system prompt and
+ * blocks, and only when the owner authenticated and wanted (optional) still returns true, asks the node to unlock for
+ * seconds. The send flow and the private balance view both unlock through this one function. Run it on a worker. */
+struct wss_unlock_result wss_unlock_node(const struct wss_device_ops *device, const struct wss_node_ops *node,
+                                         struct wss_unlock_buf *buf, uint32_t seconds, bool (*wanted)(void *ctx),
+                                         void *wanted_ctx);
+void wss_unlock_cleanse(struct wss_unlock_buf *buf);
+/* True when buf holds no byte. */
+bool wss_unlock_buf_clear(const struct wss_unlock_buf *buf);
 /* Formats zatoshi as "1.5 ZCL" into out. */
 void wss_format_zat(uint64_t zat, char *out, size_t cap);
 

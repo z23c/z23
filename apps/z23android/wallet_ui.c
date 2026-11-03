@@ -5,6 +5,7 @@
 #include "fleet.h"
 #include "jni_util.h"
 #include "secure_window.h"
+#include "wallet_reveal.h"
 #include "wallet_send_ui.h"
 #include <stdlib.h>
 #include <string.h>
@@ -273,6 +274,9 @@ static bool bound_run(void *ctx, const char *op, const char *arg, char *out, siz
     (void)ctx;
     return zapp_controller_wallet_run(op, arg, out, cap);
 }
+static bool bound_reveal_start(void *ctx) { (void)ctx; return zapp_reveal_start(); }
+static enum wallet_reveal bound_reveal_state(void *ctx) { (void)ctx; return zapp_reveal_state(); }
+static void bound_reveal_end(void *ctx) { (void)ctx; zapp_reveal_end(); }
 static bool bound_node_running(void *ctx)
 {
     (void)ctx;
@@ -294,7 +298,8 @@ static void bound_changed(void *ctx)
 bool zapp_wallet_attach(ANativeActivity *activity, void (*changed)(void))
 {
     struct wallet_env env = {activity, bound_secure, bound_run, bound_changed, bound_now, true, bound_refusal, bound_node_running, bound_copy_address,
-                             activity ? activity->internalDataPath : NULL, NULL, bound_send_progress, bound_send_dismiss};
+                             activity ? activity->internalDataPath : NULL, NULL, bound_send_progress, bound_send_dismiss,
+                             bound_reveal_start, bound_reveal_state, bound_reveal_end};
     bound.changed = changed;
     return activity && wallet_screens_init(&env);
 }

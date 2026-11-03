@@ -280,6 +280,7 @@ static int signal_ready(int fd, int events, void *context)
     if (activity) { refresh(env); (*env)->DeleteLocalRef(env, activity); }
     return 1;
 }
+static bool arm_tick(bool on);
 static int tick_ready(int fd, int events, void *context)
 {
     uint64_t expirations;
@@ -288,9 +289,11 @@ static int tick_ready(int fd, int events, void *context)
     if (!(events & ALOOPER_EVENT_INPUT)) return 1;
     while (read(fd, &expirations, sizeof(expirations)) > 0) {}
     if (!current_vm || (*current_vm)->GetEnv(current_vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) return 1;
-    /* Out of view the timer runs only while a payment may have left the wallet open: ticks ask for the lock again. */
+    /* Out of view the timer runs only while the wallet may be open, after a payment or Show private balance: ticks ask for
+     * the lock again, and the timer stops once none is owed. */
     if (foreground) zapp_native_ui_tick(env);
     else if (zapp_send_ui_owes()) zapp_send_ui_tick(env);
+    else (void)arm_tick(false);
     return 1;
 }
 static int input_ready(int fd, int events, void *context)

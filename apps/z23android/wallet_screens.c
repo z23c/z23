@@ -77,6 +77,7 @@ struct data {
     char memo[MEMO_MAX];
     struct cache cache; /* the last balance the node gave, read from the files directory when Funds opened */
     char send_line[WALLET_TEXT_MAX]; /* the payment line the send flow gave, read when Funds opened and on every refresh */
+    enum wallet_reveal reveal; /* the private balance request as last read from the environment */
 };
 
 struct job {
@@ -192,7 +193,7 @@ static void title(struct wallet_screen *s, const char *text)
 #define CACHE_FUTURE_S 120 /* a file dated further ahead than this was not written by this clock, and is deleted */
 #define KEY_FILE_MAX 65536u
 
-struct cache_job { bool go; char path[CACHE_PATH_MAX], body[CACHE_BODY_MAX]; };
+struct cache_job { bool go, drop; char path[CACHE_PATH_MAX], body[CACHE_BODY_MAX]; };
 
 static void send_lines(struct wallet_screen *s, const struct data *d);
 static int64_t wall_s(void) { return st.env.wall_s ? st.env.wall_s(st.env.ctx) : (int64_t)time(NULL); }
@@ -267,13 +268,20 @@ static void cache_load(void)
     if (!ok) { memset(&st.d.cache, 0, sizeof(st.d.cache)); (void)unlink(path); }
     memory_cleanse(body, sizeof(body));
 }
-/* Under the lock, after a summary reply: what to write, if the reply is a real balance that is new or old enough to date again. */
+/* Under the lock, after a summary reply: what to write, if the reply is a real balance that is new or old enough to date again.
+ * An encrypted wallet shows its private amounts only while it is unlocked, so none is kept: the reply instead removes a file
+ * that an earlier build wrote from an unlocked read. */
 static void cache_prepare(struct cache_job *job)
 {
     const struct wallet_view *v = &st.d.view;
     struct cache *c = &st.d.cache;
     char wallet[17];
     int64_t at = wall_s();
+    if (v->known && v->encrypted) {
+        memset(c, 0, sizeof(*c));
+        job->drop = files_path(job->path, CACHE_FILE);
+        return;
+    }
     bool same = c->valid && !strcmp(c->balance, v->balance) && !strcmp(c->pending, v->pending) && !strcmp(c->public_line, v->public_line);
     if (!v->known || !ends_in_zcl(v->balance) || (same && at >= c->at && at - c->at < CACHE_REFRESH_S)) return;
     if (!files_path(job->path, CACHE_FILE) || !wallet_identity(wallet)) return;
@@ -289,6 +297,7 @@ static void cache_prepare(struct cache_job *job)
 static void cache_commit(struct cache_job *job)
 {
     char tmp[CACHE_PATH_MAX + 8];
+    if (job->drop) (void)unlink(job->path);
     if (job->go && snprintf(tmp, sizeof(tmp), "%s.tmp", job->path) < (int)sizeof(tmp)) {
         (void)unlink(tmp);
         int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
@@ -372,6 +381,38 @@ static void memo_items(struct wallet_screen *s, const char *raw)
     if (used) { chunk[used] = '\0'; (void)add(s, WALLET_ITEM_MEMO, WALLET_ACT_NONE, chunk); }
 }
 
+/* ---- private balance on request ---- */
+
+#define REVEAL_ASKING "Confirm with your screen lock to show your private balance."
+#define REVEAL_OPEN "Your private balance hides again after a short time, or when you leave this screen."
+#define REVEAL_CANCELLED "Cancelled. Your private balance is still hidden."
+#define REVEAL_NO_SCREEN_LOCK "Set a screen lock on this phone to show your private balance."
+#define REVEAL_KEY_GONE "The wallet key on this phone is gone. Restore the wallet from its recovery phrase."
+#define REVEAL_FAILED "Could not unlock the wallet. Your private balance is still hidden. Try again."
+#define REVEAL_SENDING "A payment is in progress. Try again when it ends."
+
+static const char *reveal_words(enum wallet_reveal state)
+{
+    switch (state) {
+    case WALLET_REVEAL_ASKING: return REVEAL_ASKING;
+    case WALLET_REVEAL_OPEN: return REVEAL_OPEN;
+    case WALLET_REVEAL_CANCELLED: return REVEAL_CANCELLED;
+    case WALLET_REVEAL_NO_SCREEN_LOCK: return REVEAL_NO_SCREEN_LOCK;
+    case WALLET_REVEAL_KEY_GONE: return REVEAL_KEY_GONE;
+    case WALLET_REVEAL_FAILED: return REVEAL_FAILED;
+    case WALLET_REVEAL_SENDING: return REVEAL_SENDING;
+    case WALLET_REVEAL_NONE: break;
+    }
+    return NULL;
+}
+/* The words about the request and, on a locked wallet that hides its private balance, the button that asks to show it. */
+static void reveal_items(struct wallet_screen *s, const struct data *d)
+{
+    const char *words = reveal_words(d->reveal);
+    bool idle = d->reveal != WALLET_REVEAL_ASKING && d->reveal != WALLET_REVEAL_OPEN;
+    if (words) note(s, words);
+    if (d->view.can_reveal && idle && st.env.reveal_start) button(s, WALLET_ACT_SHOW_PRIVATE, "Show private balance");
+}
 /* What the node reported, in the order the owner asks: spendable now, what is arriving, waiting, public and maturing, then
  * how current it is. */
 static void funds_lines(struct wallet_screen *s, const struct data *d)
@@ -379,6 +420,7 @@ static void funds_lines(struct wallet_screen *s, const struct data *d)
     line(s, "Balance");
     (void)add(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE, d->view.balance);
     send_lines(s, d);
+    reveal_items(s, d);
     if (d->view.pending[0]) line(s, d->view.pending);
     if (d->view.unready_line[0]) line(s, d->view.unready_line);
     if (d->view.total_line[0]) line(s, d->view.total_line);
@@ -963,6 +1005,30 @@ static bool submit(struct job *jobs, size_t *count, enum kind kind, const char *
     return !refused;
 }
 
+/* Caller holds the lock. Reads where the request stands. The summary is asked for again when the wallet opened or locked,
+ * so the private lines appear or return to hidden at once. */
+static size_t reveal_poll(struct job *jobs)
+{
+    size_t count = 0;
+    if (!st.env.reveal_state) return 0;
+    enum wallet_reveal state = st.env.reveal_state(st.env.ctx);
+    if (state == st.d.reveal) return 0;
+    bool amounts_change = state == WALLET_REVEAL_OPEN || st.d.reveal == WALLET_REVEAL_OPEN;
+    st.d.reveal = state;
+    touch();
+    if (amounts_change) (void)submit(jobs, &count, K_SUMMARY, "summary", "");
+    return count;
+}
+/* The tap on Show private balance: only on a wallet whose summary offers it, and not while a request runs. */
+static size_t show_private(struct job *jobs)
+{
+    bool offered = st.d.view.can_reveal && st.env.reveal_start && st.d.reveal != WALLET_REVEAL_ASKING &&
+                   st.d.reveal != WALLET_REVEAL_OPEN;
+    if (!offered) return 0;
+    (void)st.env.reveal_start(st.env.ctx);
+    return reveal_poll(jobs);
+}
+
 /* ---- navigation ---- */
 
 static void wipe(void) { memory_cleanse(&st.d, sizeof(st.d)); }
@@ -1014,6 +1080,7 @@ bool wallet_screens_init(const struct wallet_env *env)
 
 static void leave_locked(bool keep_protection)
 {
+    if (st.env.reveal_end) st.env.reveal_end(st.env.ctx);
     st.held = keep_protection && st.secure;
     st.held_at = st.held ? now() : 0;
     st.held_ticks = 0;
@@ -1156,6 +1223,7 @@ static size_t from_funds(enum wallet_action action, struct job *jobs, enum walle
     if (action == WALLET_ACT_SEND) *outcome = WALLET_SEND;
     if (action == WALLET_ACT_START_NODE) *outcome = WALLET_START_NODE;
     if (action == WALLET_ACT_DISMISS_SEND) dismiss_send();
+    if (action == WALLET_ACT_SHOW_PRIVATE) return show_private(jobs);
     return 0;
 }
 /* The jobs a tap on the History page starts. */
@@ -1217,9 +1285,15 @@ void wallet_screens_scan_notice(const char *text)
 
 void wallet_screens_refresh_send(void)
 {
+    struct job jobs[1];
+    size_t count = 0;
     pthread_mutex_lock(&st.lock);
-    if (st.ready && !st.blocked && st.page == WALLET_PAGE_FUNDS) send_refresh();
+    if (st.ready && !st.blocked && st.page == WALLET_PAGE_FUNDS) {
+        send_refresh();
+        count = reveal_poll(jobs);
+    }
     pthread_mutex_unlock(&st.lock);
+    dispatch(jobs, count);
 }
 
 void wallet_screens_dropped(unsigned taps)
@@ -1231,11 +1305,12 @@ void wallet_screens_dropped(unsigned taps)
 
 void wallet_screens_tick(void)
 {
-    struct job jobs[2];
+    struct job jobs[3];
     size_t count = 0;
     pthread_mutex_lock(&st.lock);
     if (st.ready && !st.blocked && st.page == WALLET_PAGE_FUNDS) {
         send_refresh();
+        count = reveal_poll(jobs);
         uint64_t t = now();
         bool funds = st.d.funds_loaded && t - st.d.summary_at <= WALLET_STALE_MS;
         bool fleet = st.d.fleet_loaded && t - st.d.fleet_at <= WALLET_STALE_MS;

@@ -112,6 +112,22 @@ static void unwrap_is_a_payment(const char *files)
     assert(unlink(device.blob) == 0);
 }
 
+/* Show private balance is not a payment: its prompt is the unlock prompt, and the payment prompt is never shown for it. */
+static void unwrap_for_the_balance_is_an_unlock(const char *files)
+{
+    struct fake f = {0};
+    struct wsd device;
+    struct wss_device_ops ops;
+    uint8_t made[32], secret[32];
+    make_blob(&f, files, &device, made);
+    f.opens = f.prompts = 0;
+    wsd_set_purpose(&device, ZAPP_DEVKEY_PURPOSE_UNLOCK);
+    wsd_ops(&device, &ops);
+    assert(ops.unwrap(ops.ctx, secret) == WSS_KEY_OK);
+    assert(f.opens == 1 && f.purposes[0] == ZAPP_DEVKEY_PURPOSE_UNLOCK && !memcmp(secret, made, 32));
+    assert(unlink(device.blob) == 0);
+}
+
 /* Every refusal leaves the caller's secret zero, whatever the backend left behind. */
 static void refusals_leave_no_secret(const char *files)
 {
@@ -156,6 +172,7 @@ int main(int argc, char **argv)
     assert(argc == 2 && argv[1][0] == '/');
     every_real_status_maps();
     unwrap_is_a_payment(argv[1]);
+    unwrap_for_the_balance_is_an_unlock(argv[1]);
     refusals_leave_no_secret(argv[1]);
     no_keystore_no_prompt(argv[1]);
     puts("wallet_send_device_test: ok");

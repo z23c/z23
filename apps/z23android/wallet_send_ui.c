@@ -12,6 +12,7 @@
 #include "secure_window.h"
 #include "wallet_send_device.h"
 #include "wallet_send_keeper.h"
+#include "wallet_reveal.h"
 #include "wallet_send_node.h"
 #include "wallet_view.h"
 #include <pthread.h>
@@ -287,6 +288,42 @@ static void bind_screen(void *ctx, struct wss *screen)
     zapp_secure_window_ops(&secure, ui.activity);
     (void)wss_rebind(screen, &secure);
 }
+/* ---- the private balance on request ---- */
+
+/* One view for the process, made on the first tap: it outlives the activity that asked, because the lock it owes is asked
+ * for on the ticks that follow. It uses the node and the device key as a payment does, with ops of its own. */
+static struct { struct wsn node; struct wsd device; struct wrv *view; } reveal;
+static bool reveal_busy(void *ctx)
+{
+    (void)ctx;
+    return zapp_send_busy();
+}
+static struct wrv *reveal_view(void)
+{
+    struct wrv_deps deps = {0};
+    if (reveal.view) return reveal.view;
+    if (!ui.activity) return NULL;
+    wsn_init(&reveal.node, &(struct wsn_runner){NULL, node_run, node_paused}, ZAPP_SCAN_NETWORK);
+    wsn_ops(&reveal.node, &deps.node);
+    if (!wsd_init(&reveal.device, NULL, key_ops, ui.activity->internalDataPath)) return NULL;
+    wsd_set_purpose(&reveal.device, ZAPP_DEVKEY_PURPOSE_UNLOCK);
+    wsd_ops(&reveal.device, &deps.device);
+    deps.host = (struct wss_host_ops){.random = host_random, .now_ms = host_now, .spawn = host_spawn, .redraw = host_redraw};
+    deps.busy = reveal_busy;
+    reveal.view = wrv_create(&deps);
+    return reveal.view;
+}
+bool zapp_reveal_start(void)
+{
+    struct wrv *view = reveal_view();
+    return view && wrv_begin(view);
+}
+enum wallet_reveal zapp_reveal_state(void) { return reveal.view ? wrv_state(reveal.view) : WALLET_REVEAL_NONE; }
+void zapp_reveal_end(void)
+{
+    if (reveal.view) wrv_end(reveal.view);
+}
+
 static void wait_for_lock(void *ctx)
 {
     struct timespec step = {.tv_nsec = 250000000L};
@@ -575,6 +612,7 @@ void zapp_send_ui_tick(JNIEnv *env)
     }
     finish_away();
     wsk_tick(&ui.keeper);
+    if (reveal.view) wrv_tick(reveal.view);
     (void)env;
 }
 bool zapp_send_ui_take_background(void)
@@ -597,7 +635,7 @@ void zapp_send_progress_dismiss(void)
     if (s) wss_progress_dismiss(s);
     ui.final_line[0] = 0;
 }
-bool zapp_send_ui_owes(void) { return ui.flow || wsk_owes(&ui.keeper); }
+bool zapp_send_ui_owes(void) { return ui.flow || wsk_owes(&ui.keeper) || (reveal.view && wrv_owes(reveal.view)); }
 bool zapp_send_busy(void) { return atomic_load(&send_busy); }
 void zapp_send_ui_dropped(JNIEnv *env)
 {

@@ -438,6 +438,32 @@ static void test_hidden_private_amounts(void)
     printf("  hidden private amounts\n");
 }
 
+/* Show private balance is offered only when the wallet is encrypted, locked, and the node hid the private amounts. */
+static void test_can_reveal(void)
+{
+    static const char hidden[] =
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"shielded_state\":\"keys_unavailable\","
+        "\"spendable_zat\":null,\"spendable\":null,\"pending_zat\":null,\"pending\":null,\"pending_notes\":null,"
+        "\"pending_min_confirmations_needed\":null,\"unready_zat\":null,\"unready\":null,\"unready_notes\":null,"
+        "\"public_zat\":0,\"public\":\"0.00000000\",\"immature_zat\":0,\"immature\":\"0.00000000\","
+        "\"tip_height\":3000000,\"header_height\":3000000,\"scanned_through_height\":null,\"blocks_behind\":0,"
+        "\"current\":false,\"locked\":true,\"encrypted\":true,\"shielded_keys\":0,\"send_allowed\":false,"
+        "\"send_blocked_reason\":\"progress_store_unavailable\"}}";
+    char json[2048];
+    struct wallet_view v;
+    assert(wallet_view_from_summary(hidden, &v) && v.encrypted && v.can_reveal);
+    replace_once(json, sizeof(json), hidden, "\"locked\":true", "\"locked\":false");
+    assert(wallet_view_from_summary(json, &v) && v.encrypted && !v.can_reveal);
+    replace_once(json, sizeof(json), hidden, "\"encrypted\":true", "\"encrypted\":false");
+    assert(wallet_view_from_summary(json, &v) && !v.encrypted && !v.can_reveal);
+    /* A locked wallet whose node did not hide the amounts has nothing to reveal. */
+    replace_once(json, sizeof(json), VALID_REPLY, "\"locked\":false", "\"locked\":true");
+    assert(wallet_view_from_summary(json, &v) && v.encrypted && !v.can_reveal && !strcmp(v.balance, "1.23456789 ZCL"));
+    assert(wallet_view_from_summary(VALID_REPLY, &v) && v.encrypted && !v.can_reveal);
+    assert(!wallet_view_from_summary("{}", &v) && !v.encrypted && !v.can_reveal);
+    printf("  show private balance offered only on an encrypted, locked, hidden wallet\n");
+}
+
 /* The pasted address is trimmed at both ends only: inside bytes and bytes outside ASCII are kept. */
 static void test_trim_address(void)
 {
@@ -474,6 +500,7 @@ int main(void)
     test_trim_address();
     test_unready_total_and_hidden();
     test_hidden_private_amounts();
+    test_can_reveal();
     test_reply_text_is_wiped();
     printf("wallet view model: all tests passed\n");
     return 0;

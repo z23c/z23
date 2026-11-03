@@ -49,6 +49,7 @@ struct summary {
     int64_t blocks_behind;
     bool current;
     bool send_allowed;
+    bool locked, encrypted;
     const char *send_reason;
 };
 
@@ -160,13 +161,12 @@ static bool parse_chain(const struct json_value *data, struct summary *s)
            read_flag(data, "current", &s->current) && (!s->current || s->tip >= 0);
 }
 
-/* locked is read but not shown. send_allowed may be true while locked, because sending unlocks
- * after device authentication, so the send line follows send_allowed alone. */
-static bool parse_keystore(const struct json_value *data)
+/* send_allowed may be true while locked, because sending unlocks after device authentication, so the send line
+ * follows send_allowed alone. locked and encrypted decide whether the private balance can be shown on request. */
+static bool parse_keystore(const struct json_value *data, struct summary *s)
 {
-    bool locked = false, encrypted = false;
     int64_t keys = 0;
-    return read_flag(data, "locked", &locked) && read_flag(data, "encrypted", &encrypted) &&
+    return read_flag(data, "locked", &s->locked) && read_flag(data, "encrypted", &s->encrypted) &&
            read_count(data, "shielded_keys", &keys);
 }
 
@@ -183,7 +183,7 @@ static bool parse_summary(const struct json_value *data, struct summary *s)
     const struct json_value *schema = json_get(data, "schema");
     return schema && schema->type == JSON_STR &&
            !strcmp(json_get_str(schema), WALLET_VIEW_SCHEMA) && parse_state(data, s) && parse_amounts(data, s) &&
-           parse_chain(data, s) && parse_keystore(data) &&
+           parse_chain(data, s) && parse_keystore(data, s) &&
            parse_send(data, s);
 }
 
@@ -319,6 +319,8 @@ static void render_known(const struct summary *s, struct wallet_view *out)
     render_immature(s, out);
     out->scanning = s->blocks_behind > 0 || s->scanned < s->header;
     out->current = s->current;
+    out->encrypted = s->encrypted;
+    out->can_reveal = s->encrypted && s->locked && s->hidden;
     render_sync(s, out);
     render_send(s, out);
     out->send_allowed = s->send_allowed;

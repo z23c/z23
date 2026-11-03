@@ -36,14 +36,15 @@ _Static_assert(sizeof(A1) == 79 && sizeof(A2) == 79 && sizeof(PUBLIC_ADDR) == 36
 #define TX_D TXID("d")
 #define CURSOR_1 "3000000:" TXID("e")
 
-#define SUMMARY_SEND(spendable_zat, spendable, pending_zat, pending, public_zat, public, allowed, why)                   \
+#define SUMMARY_SEND_E(enc, spendable_zat, spendable, pending_zat, pending, public_zat, public, allowed, why)           \
     "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"spendable_zat\":" spendable_zat ","  \
     "\"spendable\":\"" spendable "\",\"pending_zat\":" pending_zat ",\"pending\":\"" pending "\","      \
     "\"pending_notes\":2,\"pending_min_confirmations_needed\":7,\"sending_zat\":0,\"sending\":\"0.00000000\"," \
     "\"public_zat\":" public_zat ",\"public\":\"" public "\",\"immature_zat\":0,"                       \
     "\"immature\":\"0.00000000\",\"tip_height\":3000000,\"header_height\":3000000,"                     \
     "\"scanned_through_height\":3000000,\"blocks_behind\":0,\"current\":true,\"locked\":false,"         \
-    "\"encrypted\":true,\"shielded_keys\":1,\"send_allowed\":" allowed ",\"send_blocked_reason\":\"" why "\"}}"
+    "\"encrypted\":" enc ",\"shielded_keys\":1,\"send_allowed\":" allowed ",\"send_blocked_reason\":\"" why "\"}}"
+#define SUMMARY_SEND(...) SUMMARY_SEND_E("true", __VA_ARGS__)
 #define SUMMARY(spendable_zat, spendable, pending_zat, pending, public_zat, public) \
     SUMMARY_SEND(spendable_zat, spendable, pending_zat, pending, public_zat, public, "true", "")
 /* Summaries with one thing changed: a wallet that has scanned up to a height, immature coins, a node that is not current. */
@@ -88,12 +89,18 @@ _Static_assert(sizeof(A1) == 79 && sizeof(A2) == 79 && sizeof(PUBLIC_ADDR) == 36
 #define PRIVATE_HIDDEN                                                                                   \
     "\"spendable_zat\":null,\"spendable\":null,\"pending_zat\":null,\"pending\":null,\"pending_notes\":null," \
     "\"pending_min_confirmations_needed\":null,\"unready_zat\":null,\"unready\":null,"
-#define SUMMARY_STATE(state, private_part, public_zat, public)                                            \
+#define SUMMARY_STATE_L(state, locked, private_part, public_zat, public)                                  \
     "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"shielded_state\":\"" state "\"," private_part \
     "\"public_zat\":" public_zat ",\"public\":\"" public "\",\"immature_zat\":0,\"immature\":\"0.00000000\"," \
     "\"tip_height\":3000000,\"header_height\":3000000,\"scanned_through_height\":3000000,\"blocks_behind\":0," \
-    "\"current\":true,\"locked\":false,\"encrypted\":true,\"shielded_keys\":1,\"send_allowed\":true,\"send_blocked_reason\":\"\"}}"
+    "\"current\":true,\"locked\":" locked ",\"encrypted\":true,\"shielded_keys\":1,\"send_allowed\":true,\"send_blocked_reason\":\"\"}}"
+#define SUMMARY_STATE(state, private_part, public_zat, public) SUMMARY_STATE_L(state, "false", private_part, public_zat, public)
 #define GOOD_SUMMARY SUMMARY("123456789", "1.23456789", "50000000", "0.50000000", "10000000", "0.10000000")
+/* The same wallet without encryption: it never locks, so its amounts are always shown. */
+#define GOOD_SUMMARY_PLAIN \
+    SUMMARY_SEND_E("false", "123456789", "1.23456789", "50000000", "0.50000000", "10000000", "0.10000000", "true", "")
+/* A locked wallet whose node hides the private amounts. */
+#define LOCKED_SUMMARY SUMMARY_STATE_L("keys_unavailable", "true", PRIVATE_HIDDEN, "10000000", "0.10000000")
 #define UNKNOWN_COMMAND_ERROR "{\"ok\":false,\"error\":{\"code\":\"UNKNOWN_COMMAND\"}}"
 #define NODE_UNAVAILABLE_ERROR "{\"ok\":false,\"error\":{\"code\":\"NODE_UNAVAILABLE\"}}"
 #define OTHER_ERROR "{\"ok\":false,\"error\":{\"code\":\"WALLET_LOCKED\"}}"
@@ -132,6 +139,9 @@ _Static_assert(sizeof(A1) == 79 && sizeof(A2) == 79 && sizeof(PUBLIC_ADDR) == 36
 struct fake {
     bool secure_ok, secure_on, block, async, always_ok, node_up, copy_ok;
     int copy_calls, dismissed;
+    enum wallet_reveal reveal, reveal_after_start; /* the state the environment reports; the state a tap on Show private balance moves it to */
+    int reveal_started, reveal_ended;
+    bool reveal_refused; /* reveal_start returns false and changes nothing */
     const char *progress;
     char copied[128];
     int secure_on_calls, secure_off_calls, changed, active, active_max, op_active[8];
@@ -216,6 +226,18 @@ static bool fake_progress(void *ctx, char *line, size_t cap)
     return true;
 }
 static void fake_dismiss(void *ctx) { (void)ctx; ++fake.dismissed; fake.progress = NULL; }
+static bool fake_reveal_start(void *ctx)
+{
+    (void)ctx;
+    ++fake.reveal_started;
+    if (fake.reveal_refused) return false;
+    fake.reveal = fake.reveal_after_start;
+    return true;
+}
+static enum wallet_reveal fake_reveal_state(void *ctx) { (void)ctx; return fake.reveal; }
+static void fake_reveal_end(void *ctx) { (void)ctx; ++fake.reveal_ended; fake.reveal = WALLET_REVEAL_NONE; }
+/* Whether the environment offers Show private balance at all. */
+static bool with_reveal = true;
 static bool fake_copy_address(void *ctx, const char *address)
 {
     (void)ctx;
@@ -227,7 +249,9 @@ static bool fake_copy_address(void *ctx, const char *address)
 static void start(bool async)
 {
     struct wallet_env env = {NULL, fake_secure, fake_run, fake_changed, fake_now, async, fake_refusal, fake_node_running, fake_copy_address,
-                             cache_dir[0] ? cache_dir : NULL, fake_wall, fake_progress, fake_dismiss};
+                             cache_dir[0] ? cache_dir : NULL, fake_wall, fake_progress, fake_dismiss,
+                             with_reveal ? fake_reveal_start : NULL, with_reveal ? fake_reveal_state : NULL,
+                             with_reveal ? fake_reveal_end : NULL};
     wallet_screens_shutdown();
     memset(&fake, 0, sizeof(fake));
     pthread_mutex_init(&fake.lock, NULL);
@@ -237,7 +261,8 @@ static void start(bool async)
     fake.now = 1000000;
     fake.node_up = true;
     fake.copy_ok = true;
-    fake.summary = GOOD_SUMMARY;
+    fake.summary = cache_dir[0] ? GOOD_SUMMARY_PLAIN : GOOD_SUMMARY;   /* a balance is kept only for a wallet that never locks */
+    fake.reveal_after_start = WALLET_REVEAL_ASKING;
     fake.latest = "{\"ok\":true,\"data\":{\"address\":\"" A1 "\"}}";
     fake.receive = "{\"ok\":true,\"data\":{\"address\":\"" A2 "\"}}";
     fake.history[0] = HISTORY_PAGE0;
@@ -774,6 +799,167 @@ static void test_cache_silent_node(void)
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
     CHECK(has("Last known balance, 2 min ago") && has("Waiting for your node") && item_is("1.23456789 ZCL"));
     wallet_screens_close();
+    remove_dir();
+}
+
+/* ---- Show private balance ---- */
+
+static long reveal_button(void) { return find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_SHOW_PRIVATE); }
+#define HIDDEN_LINE "Your private balance is hidden because the wallet is locked"
+
+/* The button is drawn only for a wallet that is encrypted, locked, and hides its private amounts, and only where the app
+ * can unlock it. */
+static void test_reveal_offer(void)
+{
+    start(false);
+    fake.summary = LOCKED_SUMMARY;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    long at = reveal_button();
+    CHECK(at >= 0 && !strcmp(text_at(snap(), at), "Show private balance") && has(HIDDEN_LINE));
+    CHECK(fake.reveal_started == 0);                                  /* drawing it asks for nothing */
+    wallet_screens_close();
+
+    static const char *const none[] = {
+        GOOD_SUMMARY,                                                 /* encrypted and unlocked: the amounts are shown */
+        GOOD_SUMMARY_PLAIN,                                           /* not encrypted: nothing to unlock */
+        SUMMARY_STATE_L("ok", "true", PRIVATE_OK("100000000", "1.00000000", "\"unready_zat\":0,\"unready\":\"0.00000000\","), "0", "0.00000000"),
+        SUMMARY_STATE("keys_unavailable", PRIVATE_HIDDEN, "10000000", "0.10000000"),   /* hidden but not reported locked */
+        NODE_UNAVAILABLE_ERROR, "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\"}}",
+    };
+    for (size_t i = 0; i < sizeof(none) / sizeof(none[0]); ++i) {
+        start(false);
+        fake.summary = none[i];
+        fake.node_up = true;
+        CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+        CHECK(reveal_button() < 0);
+        wallet_screens_close();
+    }
+    with_reveal = false;                                              /* an environment that cannot unlock draws no button */
+    start(false);
+    fake.summary = LOCKED_SUMMARY;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS) && has(HIDDEN_LINE) && reveal_button() < 0);
+    tap(WALLET_ACT_SHOW_PRIVATE, 0, WALLET_STAY);
+    CHECK(fake.reveal_started == 0);
+    wallet_screens_close();
+    with_reveal = true;
+}
+
+/* The tap asks the environment once; the lines appear when the wallet opens and hide again when it locks. */
+static void test_reveal_window(void)
+{
+    start(false);
+    fake.summary = LOCKED_SUMMARY;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS) && count_ops("summary") == 1);
+    tap(WALLET_ACT_SHOW_PRIVATE, 0, WALLET_STAY);
+    CHECK(fake.reveal_started == 1 && has("Confirm with your screen lock to show your private balance."));
+    CHECK(reveal_button() < 0 && has(HIDDEN_LINE));                   /* no second tap while the prompt is up */
+    tap(WALLET_ACT_SHOW_PRIVATE, 0, WALLET_STAY);
+    CHECK(fake.reveal_started == 1);
+
+    fake.summary = GOOD_SUMMARY;                                      /* the owner confirmed: the node is unlocked */
+    fake.reveal = WALLET_REVEAL_OPEN;
+    wallet_screens_refresh_send();                                    /* what the next draw does */
+    CHECK(count_ops("summary") == 2);
+    CHECK(has("1.23456789 ZCL") && !has(HIDDEN_LINE) && reveal_button() < 0 && !has("Confirm with your screen lock"));
+    CHECK(has("hides again"));
+
+    fake.summary = LOCKED_SUMMARY;                                    /* the window ended and the wallet was locked */
+    fake.reveal = WALLET_REVEAL_NONE;
+    wallet_screens_tick();
+    CHECK(count_ops("summary") == 3);
+    CHECK(has(HIDDEN_LINE) && !has("1.23456789") && reveal_button() >= 0 && !has("hides again"));
+    CHECK(fake.reveal_ended == 0);
+    wallet_screens_close();
+    CHECK(fake.reveal_ended == 1);
+}
+
+/* A cancelled or refused prompt changes nothing on the wallet and says so; the button asks again. */
+static void test_reveal_cancelled(void)
+{
+    static const struct { enum wallet_reveal state; const char *words; } cases[] = {
+        {WALLET_REVEAL_CANCELLED, "Cancelled. Your private balance is still hidden."},
+        {WALLET_REVEAL_NO_SCREEN_LOCK, "Set a screen lock on this phone to show your private balance."},
+        {WALLET_REVEAL_KEY_GONE, "The wallet key on this phone is gone. Restore the wallet from its recovery phrase."},
+        {WALLET_REVEAL_FAILED, "Could not unlock the wallet. Your private balance is still hidden. Try again."},
+        {WALLET_REVEAL_SENDING, "A payment is in progress. Try again when it ends."},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        start(false);
+        fake.summary = LOCKED_SUMMARY;
+        CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+        fake.reveal_after_start = cases[i].state;
+        tap(WALLET_ACT_SHOW_PRIVATE, 0, WALLET_STAY);
+        CHECK(has(cases[i].words) && has(HIDDEN_LINE) && reveal_button() >= 0);
+        CHECK(count_ops("summary") == 1);                             /* nothing opened: no reason to read it again */
+        fake.reveal_after_start = WALLET_REVEAL_ASKING;
+        tap(WALLET_ACT_SHOW_PRIVATE, 0, WALLET_STAY);
+        CHECK(fake.reveal_started == 2 && has("Confirm with your screen lock") && !has(cases[i].words));
+        wallet_screens_close();
+    }
+    start(false);                                                     /* an environment that refuses the tap changes nothing */
+    fake.summary = LOCKED_SUMMARY;
+    fake.reveal_refused = true;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    tap(WALLET_ACT_SHOW_PRIVATE, 0, WALLET_STAY);
+    CHECK(fake.reveal_started == 1 && has(HIDDEN_LINE) && reveal_button() >= 0 && !has("Confirm with"));
+    wallet_screens_close();
+}
+
+/* Hiding the app, leaving the wallet screens and shutting down each ask the environment to lock the wallet again. */
+static void test_reveal_ends_on_leaving(void)
+{
+    start(false);
+    fake.summary = LOCKED_SUMMARY;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    tap(WALLET_ACT_SHOW_PRIVATE, 0, WALLET_STAY);
+    wallet_screens_pause();                                           /* the app goes out of view */
+    CHECK(fake.reveal_ended == 1 && !wallet_screens_active());
+    wallet_screens_close();
+    CHECK(fake.reveal_ended == 2);
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    wallet_screens_close();                                           /* leaving Funds for Home */
+    CHECK(fake.reveal_ended == 3);
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    wallet_screens_shutdown();
+    CHECK(fake.reveal_ended == 4);
+    start(false);
+}
+
+/* The page stays open between Funds, Receive and History: the window follows the owner there. */
+static void test_reveal_across_pages(void)
+{
+    start(false);
+    fake.summary = LOCKED_SUMMARY;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    tap(WALLET_ACT_SHOW_PRIVATE, 0, WALLET_STAY);
+    fake.summary = GOOD_SUMMARY;
+    fake.reveal = WALLET_REVEAL_OPEN;
+    wallet_screens_refresh_send();
+    tap(WALLET_ACT_RECEIVE, 0, WALLET_STAY);
+    CHECK(fake.reveal_ended == 0);
+    CHECK(wallet_screens_back() && has("1.23456789 ZCL"));            /* Funds is read again and the wallet is still open */
+    wallet_screens_refresh_send();
+    CHECK(has("hides again") && fake.reveal_ended == 0);
+    wallet_screens_close();
+}
+
+/* A private amount read from an unlocked wallet never reaches the balance file, and a file an earlier build kept from
+ * such a read is removed. A wallet that never locks keeps its balance as before. */
+static void test_reveal_amount_not_kept(void)
+{
+    wallet_with_balance();                                            /* a wallet that never locks keeps its balance */
+    CHECK(file_exists("wallet_balance_cache"));
+    start(false);                                                     /* the same files, now an encrypted wallet that is locked */
+    fake.summary = LOCKED_SUMMARY;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    CHECK(!file_exists("wallet_balance_cache"));                      /* a file an earlier build kept is removed */
+    tap(WALLET_ACT_SHOW_PRIVATE, 0, WALLET_STAY);
+    fake.summary = GOOD_SUMMARY;                                      /* encrypted, unlocked, 1.23456789 ZCL */
+    fake.reveal = WALLET_REVEAL_OPEN;
+    wallet_screens_refresh_send();
+    CHECK(has("1.23456789 ZCL"));
+    wallet_screens_close();
+    CHECK(!file_exists("wallet_balance_cache") && !file_exists("wallet_balance_cache.tmp"));
     remove_dir();
 }
 
@@ -1758,6 +1944,12 @@ int main(int argc, char **argv)
     test_cache_from_the_future();
     test_cache_only_real_summaries();
     test_cache_silent_node();
+    test_reveal_offer();
+    test_reveal_window();
+    test_reveal_cancelled();
+    test_reveal_ends_on_leaving();
+    test_reveal_across_pages();
+    test_reveal_amount_not_kept();
     test_receive();
     test_receive_amount();
     test_receive_new_address();

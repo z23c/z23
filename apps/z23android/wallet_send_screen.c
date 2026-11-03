@@ -30,8 +30,7 @@ struct wss {
     bool replayed; /* the node answered this payment's commit from its record of an earlier one */
     bool progress_seen; /* the owner dismissed the line of the ended payment; cleared when the next payment begins or runs */
     bool closed;   /* the owner left the flow's outcome and no later payment has begun */
-    uint8_t secret[32];
-    char unlock_json[WSS_UNLOCK_JSON];
+    struct wss_unlock_buf unlock;
     bool unprotected;   /* the window protections are not in force: the payment is not shown */
     struct wss_send_req tapped;   /* The plan the owner tapped Send on; the commit is bound to it. */
 };
@@ -349,25 +348,47 @@ static void post(struct wss *s, struct ws_event *ev)
     if (s->d.host.redraw) s->d.host.redraw(s->d.host.ctx);
     if (result >= 0 && s->d.host.outcome) s->d.host.outcome(s->d.host.ctx, result);
 }
-static void cleanse_secrets(struct wss *s)
+void wss_unlock_cleanse(struct wss_unlock_buf *buf)
 {
-    memory_cleanse(s->secret, sizeof(s->secret));
-    memory_cleanse(s->unlock_json, sizeof(s->unlock_json));
+    memory_cleanse(buf->secret, sizeof(buf->secret));
+    memory_cleanse(buf->json, sizeof(buf->json));
 }
+bool wss_unlock_buf_clear(const struct wss_unlock_buf *buf)
+{
+    uint8_t any = 0;
+    for (size_t i = 0; i < sizeof(buf->secret); ++i) any |= buf->secret[i];
+    for (size_t i = 0; i < sizeof(buf->json); ++i) any |= (uint8_t)buf->json[i];
+    return any == 0;
+}
+static void cleanse_secrets(struct wss *s) { wss_unlock_cleanse(&s->unlock); }
 /* The passphrase is 32 random bytes written as 64 lowercase hex characters on standard input. */
-static bool build_unlock_json(struct wss *s)
+static bool build_unlock_json(struct wss_unlock_buf *buf, uint32_t seconds)
 {
     static const char hex[] = "0123456789abcdef";
     char pass[65];
-    for (size_t i = 0; i < sizeof(s->secret); ++i) {
-        pass[2 * i] = hex[s->secret[i] >> 4];
-        pass[2 * i + 1] = hex[s->secret[i] & 15];
+    for (size_t i = 0; i < sizeof(buf->secret); ++i) {
+        pass[2 * i] = hex[buf->secret[i] >> 4];
+        pass[2 * i + 1] = hex[buf->secret[i] & 15];
     }
     pass[64] = 0;
-    int n = snprintf(s->unlock_json, sizeof(s->unlock_json), "{\"passphrase\":\"%s\",\"timeout_seconds\":%u}\n", pass,
-                     WS_UNLOCK_SECONDS);
+    int n = snprintf(buf->json, sizeof(buf->json), "{\"passphrase\":\"%s\",\"timeout_seconds\":%u}\n", pass, seconds);
     memory_cleanse(pass, sizeof(pass));
-    return n > 0 && (size_t)n < sizeof(s->unlock_json);
+    return n > 0 && (size_t)n < sizeof(buf->json);
+}
+struct wss_unlock_result wss_unlock_node(const struct wss_device_ops *device, const struct wss_node_ops *node,
+                                         struct wss_unlock_buf *buf, uint32_t seconds, bool (*wanted)(void *ctx),
+                                         void *wanted_ctx)
+{
+    struct wss_unlock_result r = {.key = WSS_KEY_ERROR};
+    /* One call authenticates the owner for this use and returns the secret; it blocks while the prompt is up. */
+    r.key = device->unwrap(device->ctx, buf->secret);
+    /* The owner may have cancelled during the prompt: then the wallet is not opened. */
+    if (r.key == WSS_KEY_OK && (!wanted || wanted(wanted_ctx)) && build_unlock_json(buf, seconds)) {
+        r.sent = true;
+        r.ok = node->unlock(node->ctx, buf->json, strlen(buf->json), seconds);
+    }
+    wss_unlock_cleanse(buf);
+    return r;
 }
 static enum ws_auth_result auth_of(enum wss_key_status key)
 {
@@ -378,16 +399,20 @@ static enum ws_auth_result auth_of(enum wss_key_status key)
     default: return WS_AUTH_OK;
     }
 }
+struct auth_ticket { struct wss *s; uint32_t ticket; };
+static bool still_authenticating(void *arg)
+{
+    const struct auth_ticket *t = arg;
+    return live(t->s, t->ticket, WS_AUTH);
+}
 static void do_unlock(struct wss *s, uint32_t ticket)
 {
     struct ws_event ev = {.kind = WS_EV_UNLOCK, .ticket = ticket};
-    /* One call authenticates the owner for this use and returns the secret; it blocks while the prompt is up. */
-    enum wss_key_status key = s->d.device.unwrap(s->d.device.ctx, s->secret);
-    /* The owner may have cancelled during the prompt: then the wallet is not opened. */
-    if (key == WSS_KEY_OK && live(s, ticket, WS_AUTH) && build_unlock_json(s))
-        ev.ok = s->d.node.unlock(s->d.node.ctx, s->unlock_json, strlen(s->unlock_json), WS_UNLOCK_SECONDS);
-    ev.auth = auth_of(key);
-    cleanse_secrets(s);
+    struct auth_ticket t = {s, ticket};
+    struct wss_unlock_result r =
+        wss_unlock_node(&s->d.device, &s->d.node, &s->unlock, WS_UNLOCK_SECONDS, still_authenticating, &t);
+    ev.ok = r.ok;
+    ev.auth = auth_of(r.key);
     post(s, &ev);
 }
 /* The commit carries the plan the owner tapped, not whatever the machine holds now, and only while its
@@ -642,12 +667,10 @@ void wss_edit_memo(struct wss *s, const char *memo, size_t len)
 }
 bool wss_secrets_clear(struct wss *s)
 {
-    uint8_t any = 0;
     pthread_mutex_lock(&s->lock);
-    for (size_t i = 0; i < sizeof(s->secret); ++i) any |= s->secret[i];
-    for (size_t i = 0; i < sizeof(s->unlock_json); ++i) any |= (uint8_t)s->unlock_json[i];
+    bool clear = wss_unlock_buf_clear(&s->unlock);
     pthread_mutex_unlock(&s->lock);
-    return any == 0;
+    return clear;
 }
 
 /* ---- mappings ---- */

@@ -66,7 +66,14 @@ enum wallet_item_kind {
 enum wallet_action {
     WALLET_ACT_NONE, WALLET_ACT_RECEIVE, WALLET_ACT_SEND, WALLET_ACT_HISTORY, WALLET_ACT_NEW_ADDRESS,
     WALLET_ACT_SET_AMOUNT, WALLET_ACT_NEWER, WALLET_ACT_OLDER, WALLET_ACT_DETAIL, WALLET_ACT_BACK,
-    WALLET_ACT_START_NODE, WALLET_ACT_COPY_ADDRESS, WALLET_ACT_DISMISS_SEND
+    WALLET_ACT_START_NODE, WALLET_ACT_COPY_ADDRESS, WALLET_ACT_DISMISS_SEND,
+    WALLET_ACT_SHOW_PRIVATE /* ask the screen lock and show the private balance of a locked wallet for a short while */
+};
+/* Where the private balance request stands, as the environment reports it. WALLET_REVEAL_OPEN: the wallet is unlocked for
+ * the owner and not yet locked again. The reasons after it say why the last request left the wallet locked. */
+enum wallet_reveal {
+    WALLET_REVEAL_NONE, WALLET_REVEAL_ASKING, WALLET_REVEAL_OPEN, WALLET_REVEAL_CANCELLED, WALLET_REVEAL_NO_SCREEN_LOCK,
+    WALLET_REVEAL_KEY_GONE, WALLET_REVEAL_FAILED, WALLET_REVEAL_SENDING
 };
 enum wallet_outcome {
     WALLET_STAY,  /* the screen changed or nothing happened */
@@ -124,6 +131,14 @@ struct wallet_env {
     bool (*send_progress)(void *ctx, char *line, size_t cap);
     /* Clears a finished line. Optional. Called on the UI thread. */
     void (*send_dismiss)(void *ctx);
+    /* Show private balance. reveal_start asks the owner for the screen lock on a worker and unlocks the wallet for a short
+     * window, without waiting; it is offered only on a wallet that is encrypted and locked. reveal_state is read on the UI
+     * thread, at every tick and draw, and the summary is read again whenever the wallet opens or locks. reveal_end is called
+     * when the owner leaves the wallet screens or the app is hidden: the wallet is locked again, unless a payment holds it.
+     * All three are optional; without reveal_start the button is not drawn. All three return at once. */
+    bool (*reveal_start)(void *ctx);
+    enum wallet_reveal (*reveal_state)(void *ctx);
+    void (*reveal_end)(void *ctx);
 };
 
 bool wallet_screens_init(const struct wallet_env *env);
@@ -152,7 +167,8 @@ bool wallet_screens_set_amount(const char *text);
 /* Call about every two seconds on the UI thread while the app is in front. On Funds it asks the node
  * again every WALLET_REFRESH_MS and marks a reading older than WALLET_STALE_MS as out of date. */
 void wallet_screens_tick(void);
-/* Reads the payment line again now, for a screen that was just shown again. Does nothing unless Funds is in front. */
+/* Reads the payment line and the private balance request again now, for a screen that was just shown again. Does nothing
+ * unless Funds is in front. */
 void wallet_screens_refresh_send(void);
 /* Taps that were dropped because another window was drawing over the app. The screen then says why nothing
  * happened, until a tap reaches it. Call on the UI thread; the count is of new drops. */

@@ -399,12 +399,15 @@ test-wallet-send:
 	  secure_window.c wallet_view.c $(WALLET_SEND_SOURCES) $(SPEECH_JSON) -o '$(BUILD_DIR)/wallet-send-device-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/wallet-send-device.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/wallet-send-device-test' "$$(cd "$$scratch" && pwd)"
+	$(HOST_CC) $(HOST_WARNINGS) -pthread $(WALLET_SEND_INCLUDES) tests/wallet_reveal_test.c wallet_reveal.c wallet_send_screen.c \
+	  secure_window.c wallet_view.c $(WALLET_SEND_SOURCES) $(SPEECH_JSON) -o '$(BUILD_DIR)/wallet-reveal-test'
+	'$(BUILD_DIR)/wallet-reveal-test'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) -I../../vendor/qrcodegen tests/pay_stash_test.c pay_stash.c scan.c payment_code.c fleet.c speech_client.c bridge_client.c bridge_auth.c ../../platform/modules/sha3/src/sha3.c voice.c \
 	  ../../contexts/commons/packages/zutf8/src/zutf8.c ../../vendor/qrcodegen/qrcodegen.c $(SPEECH_JSON) -o '$(BUILD_DIR)/pay-stash-test'
 	'$(BUILD_DIR)/pay-stash-test'
 	$(HOST_CC) $(HOST_WARNINGS) -I. tests/payment_notice_test.c payment_notice.c -o '$(BUILD_DIR)/payment-notice-test'
 	'$(BUILD_DIR)/payment-notice-test'
-	@if grep -nE '(^|[^a-z_])(printf|fprintf|puts|fputs|perror|syslog)\(|nodelog|__android_log' wallet_send.c wallet_send_screen.c wallet_send_node.c wallet_send_device.c wallet_send_keeper.c wallet_send_ui.c pay_stash.c send_key.c; then \
+	@if grep -nE '(^|[^a-z_])(printf|fprintf|puts|fputs|perror|syslog)\(|nodelog|__android_log' wallet_send.c wallet_send_screen.c wallet_send_node.c wallet_send_device.c wallet_send_keeper.c wallet_send_ui.c wallet_reveal.c pay_stash.c send_key.c; then \
 	  echo 'wallet_send must not log' >&2; exit 1; fi
 	@if grep -n 'zapp_pay_stash_take' $(WALLET_FREE); then \
 	  echo 'only the shell may take the payment out of the stash' >&2; exit 1; fi
