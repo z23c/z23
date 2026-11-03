@@ -411,8 +411,8 @@ int test_dev_batch_culprit(void)
     }
 
     TEST("culprit: a malformed git log line is BAD_STACK, not NO_MEMORY") {
-        ASSERT(strcmp(cd_parse_probe("\001short\nsrc/a.c\n"), "BAD_STACK") == 0);
-        ASSERT(strcmp(cd_parse_probe("\0010123456789012345678901234567890123456789 s\nsrc/a.c\n"),
+        ASSERT(strcmp(dev_batch_culprit_test_parse_code("\001short\nsrc/a.c\n"), "BAD_STACK") == 0);
+        ASSERT(strcmp(dev_batch_culprit_test_parse_code("\0010123456789012345678901234567890123456789 s\nsrc/a.c\n"),
                       "") == 0);
         PASS();
     }

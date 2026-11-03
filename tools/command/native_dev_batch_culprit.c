@@ -175,7 +175,7 @@ static const char *cd_parse_code(const struct cd_ctx *x)
     return x->malformed ? "BAD_STACK" : "NO_MEMORY";
 }
 
-const char *cd_parse_probe(const char *log_text)
+const char *dev_batch_culprit_test_parse_code(const char *log_text)
 {
     struct cd_ctx x;
     char *copy = zcl_malloc(strlen(log_text) + 1, "cd_probe");
@@ -313,9 +313,6 @@ static void cd_mark_lane(struct cd_ctx *x, size_t li, char *out, bool cherry)
     }
 }
 
-/* By patch identity (`git cherry LANEHEAD HEAD origin/main`), and by sha for
- * a stack commit that IS the lane's commit (a fast-forwarded pick, which
- * cherry cannot list: it is reachable from both sides). */
 /* One lane lookup. Success needs exit 0 and an output that fits: the capture
  * truncates silently at the cap, so a full buffer is a failed lookup. */
 static bool cd_lane_git(struct cd_ctx *x, size_t li, const char *const *args,
@@ -333,6 +330,11 @@ static bool cd_lane_git(struct cd_ctx *x, size_t li, const char *const *args,
     return true;
 }
 
+/* By patch identity (`git cherry LANEHEAD HEAD origin/main`), and by sha for
+ * a stack commit that IS the lane's commit (a fast-forwarded pick, which
+ * cherry cannot list: it is reachable from both sides). A failed lookup
+ * refuses; a timed-out git is killed and reports 128 + SIGKILL, so it
+ * refuses too. */
 static bool cd_map_lanes(struct cd_ctx *x)
 {
     size_t li;

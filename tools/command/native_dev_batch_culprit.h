@@ -39,6 +39,6 @@ bool cp_log_paths(const struct db_text *log, bool agent_verify,
 
 /* Test probe: parses `git log` text as the leaf does and returns the typed
  * refusal code that failure would give ("" when it parses). */
-const char *cd_parse_probe(const char *log_text);
+const char *dev_batch_culprit_test_parse_code(const char *log_text);
 
 #endif
