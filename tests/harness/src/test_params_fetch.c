@@ -1573,6 +1573,140 @@ static int test_state_reverify_branches(void)
     return failures;
 }
 
+/* ── 8b. Streaming recomputation: each reachable branch ─────────────── */
+
+static bool digest_is_hex(const uint8_t d[32], const char *want)
+{
+    char hex[65];
+    for (int k = 0; k < 32; k++)
+        snprintf(hex + k * 2, 3, "%02x", d[k]);
+    return strcmp(hex, want) == 0;
+}
+
+static bool write_scratch(const char *name, const uint8_t *body, size_t len)
+{
+    char p[900];
+    snprintf(p, sizeof(p), "%s/%s", g_dir, name);
+    FILE *f = fopen(p, "wb");
+    if (!f)
+        return false;
+    bool wrote = len == 0 || fwrite(body, 1, len, f) == len;
+    return fclose(f) == 0 && wrote;
+}
+
+static int test_recompute_small(void)
+{
+    int failures = 0;
+    printf("  [recompute] a one-chunk file: length, SHA-256, root\n");
+
+    static const uint8_t hello[5] = {'h', 'e', 'l', 'l', 'o'};
+    char path[900];
+    snprintf(path, sizeof(path), "%s/rc_hello.bin", g_dir);
+    CHECK(write_scratch("rc_hello.bin", hello, sizeof(hello)),
+          "scratch one-chunk file is written");
+
+    uint64_t bytes = 0;
+    uint8_t sha[32], root[32];
+    CHECK(zcl_param_pin_recompute_from_file(path, &bytes, sha, root),
+          "one-chunk file recomputes");
+    CHECK(bytes == 5, "length is the byte count streamed");
+    CHECK(digest_is_hex(sha, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"),
+          "SHA-256 is the standard digest of \"hello\"");
+
+    uint8_t leaf[ZCL_PARAM_HASH_BYTES], want_root[ZCL_PARAM_HASH_BYTES];
+    zcl_param_leaf_hash(hello, sizeof(hello), leaf);
+    CHECK(zcl_param_merkle_root(leaf, 1, want_root) &&
+              memcmp(root, want_root, 32) == 0,
+          "root is the fold of the one leaf hash");
+
+    /* Every out-parameter is optional; the length is still reported. */
+    uint64_t bytes2 = 0;
+    CHECK(zcl_param_pin_recompute_from_file(path, &bytes2, NULL, NULL) &&
+              bytes2 == 5,
+          "NULL digest and root outputs are skipped");
+    CHECK(zcl_param_pin_recompute_from_file(path, NULL, sha, NULL),
+          "NULL length output is skipped");
+
+    unlink(path);
+    return failures;
+}
+
+static int test_recompute_chunked(void)
+{
+    int failures = 0;
+    printf("  [recompute] a two-chunk file: boundary and short tail leaf\n");
+
+    const size_t len = (size_t)ZCL_PARAM_CHUNK_BYTES + 17;
+    uint8_t *body = zcl_malloc(len, "test_recompute_body");
+    if (!body) {
+        printf("  FAIL: cannot allocate the two-chunk fixture\n");
+        return 1;
+    }
+    fill_pattern(body, len, 7u);
+    char path[900];
+    snprintf(path, sizeof(path), "%s/rc_two_chunks.bin", g_dir);
+    CHECK(write_scratch("rc_two_chunks.bin", body, len),
+          "scratch two-chunk file is written");
+
+    uint64_t bytes = 0;
+    uint8_t sha[32], root[32];
+    CHECK(zcl_param_pin_recompute_from_file(path, &bytes, sha, root),
+          "two-chunk file recomputes");
+    CHECK(bytes == len, "length is the full streamed size");
+
+    struct sha256_ctx ctx;
+    sha256_init(&ctx);
+    sha256_write(&ctx, body, len);
+    uint8_t want_sha[32];
+    sha256_finalize(&ctx, want_sha);
+    CHECK(memcmp(sha, want_sha, 32) == 0,
+          "SHA-256 covers the whole file across the chunk boundary");
+
+    uint8_t leaves[2 * ZCL_PARAM_HASH_BYTES], want_root[ZCL_PARAM_HASH_BYTES];
+    zcl_param_leaf_hash(body, ZCL_PARAM_CHUNK_BYTES, leaves);
+    zcl_param_leaf_hash(body + ZCL_PARAM_CHUNK_BYTES, 17,
+                        leaves + ZCL_PARAM_HASH_BYTES);
+    CHECK(zcl_param_merkle_root(leaves, 2, want_root) &&
+              memcmp(root, want_root, 32) == 0,
+          "root folds two leaves, the tail leaf covering 17 bytes");
+
+    unlink(path);
+    free(body);
+    return failures;
+}
+
+static int test_recompute_refusals(void)
+{
+    int failures = 0;
+    printf("  [recompute] refusals: zero length, one byte over the cap\n");
+
+    uint64_t bytes = 0;
+    uint8_t sha[32], root[32];
+
+    char zero[900];
+    snprintf(zero, sizeof(zero), "%s/rc_zero.bin", g_dir);
+    CHECK(write_scratch("rc_zero.bin", NULL, 0),
+          "scratch zero-length file is written");
+    CHECK(!zcl_param_pin_recompute_from_file(zero, &bytes, sha, root),
+          "a zero-length file is refused");
+
+    /* A sparse file one byte past the cap: refused before any data is read. */
+    char big[900];
+    snprintf(big, sizeof(big), "%s/rc_oversize.bin", g_dir);
+    int fd = open(big, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    bool sized = fd >= 0 &&
+                 ftruncate(fd, (off_t)(ZCL_PARAM_MAX_FILE_BYTES + 1)) == 0;
+    if (fd >= 0)
+        close(fd);
+    CHECK(sized, "sparse fixture one byte over the cap is created");
+    CHECK(!zcl_param_pin_recompute_from_file(big, &bytes, sha, root),
+          "a file one byte over the size cap is refused");
+
+    unlink(zero);
+    unlink(big);
+    return failures;
+}
+
 /* ── entry point ────────────────────────────────────────────────────── */
 
 int test_params_fetch(void);
@@ -1596,6 +1730,9 @@ int test_params_fetch(void)
     failures += test_state_reverify_branches();
     failures += test_verify_installed_refusals();
     failures += test_pins_match_real_files();
+    failures += test_recompute_small();
+    failures += test_recompute_chunked();
+    failures += test_recompute_refusals();
     failures += test_serving_off_by_default();
     failures += test_serve_roundtrip();
     failures += test_param_have_handler();
