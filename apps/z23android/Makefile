@@ -307,6 +307,8 @@ test-host:
 	'$(BUILD_DIR)/home-test'
 	$(HOST_CC) $(HOST_WARNINGS) -I. tests/node_notice_test.c node_notice.c -o '$(BUILD_DIR)/node-notice-test'
 	'$(BUILD_DIR)/node-notice-test'
+	$(HOST_CC) $(HOST_WARNINGS) -I. tests/node_restart_test.c node_restart.c -o '$(BUILD_DIR)/node-restart-test'
+	'$(BUILD_DIR)/node-restart-test'
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/clip_store_test.c clip_store.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/clip-store-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/clip-store-test.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/clip-store-test' "$$scratch"

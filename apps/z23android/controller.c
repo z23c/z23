@@ -15,6 +15,7 @@
 #include "voice.h"
 #include "speech_client.h"
 #include "fleet.h"
+#include "node_restart.h"
 #include "json/json.h"
 #include "base/cleanse.h"
 #include <errno.h>
@@ -55,6 +56,7 @@ struct controller {
     atomic_bool voice_cancel, voice_stop;
     bool pace_seen;            /* A thermal status or the startup default has set the pace file. */
     pthread_mutex_t pace_lock; /* Serializes thermal callbacks: previous pace, file write, view. */
+    struct zapp_restart restart; /* Restarts of a node that exits while the app is open. Guarded by lock. */
 };
 static pthread_mutex_t startup_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct controller *current;
@@ -276,7 +278,8 @@ static void observe_node(struct controller *c)
     c->view.node_reference = chain.reference;
     snprintf(c->view.chain_doubt, sizeof(c->view.chain_doubt), "%s", chain.reason);
     record_height(&c->view, &n, now, process_running);
-    copy_text(c->view.sync_status, sizeof(c->view.sync_status), status);
+    const char *restart = zapp_restart_notice(&c->restart);
+    copy_text(c->view.sync_status, sizeof(c->view.sync_status), restart ? restart : status);
     copy_text(c->view.node_line, sizeof(c->view.node_line), line);
     c->seen_responding = n.responding; c->seen_height = n.height; c->seen_target = n.target; c->seen_peers = n.peers;
     refresh_suggestion(c);
@@ -713,13 +716,28 @@ static bool pair_voice_host(struct controller *c, const char *arg, char *out)
     memory_cleanse(error, sizeof(error));
     return ok;
 }
+/* Records a start or stop that the owner or wallet setup asked for. Caller does not hold c->lock. */
+static void restart_event(struct controller *c, bool started)
+{
+    pthread_mutex_lock(&c->lock);
+    if (started) zapp_restart_started(&c->restart);
+    else zapp_restart_stopped(&c->restart);
+    pthread_mutex_unlock(&c->lock);
+}
 static bool execute_action(struct controller *c, const char *action, const char *arg,
                            uint64_t ticket, char *out)
 {
     if (!strncmp(action, "fleet_", 6)) return execute_fleet(c, action, arg, out);
     if (!strncmp(action, "ops_", 4)) return execute_ops(c, arg, out);
-    if (!strcmp(action, "node_start")) return zapp_node_start(&c->runtime, out, ZAPP_TEXT_CAP);
-    if (!strcmp(action, "node_stop")) return zapp_node_stop(&c->runtime, out, ZAPP_TEXT_CAP);
+    if (!strcmp(action, "node_start")) {
+        bool started = zapp_node_start(&c->runtime, out, ZAPP_TEXT_CAP);
+        if (started) restart_event(c, true);
+        return started;
+    }
+    if (!strcmp(action, "node_stop")) {
+        restart_event(c, false);
+        return zapp_node_stop(&c->runtime, out, ZAPP_TEXT_CAP);
+    }
     if (!strcmp(action, "chat")) return conversation_chat(c, arg, out);
     if (!strcmp(action, "voice_start")) return voice_conversation(c, out);
     if (!strcmp(action, "voice_pair")) return pair_voice_host(c, arg, out);
@@ -837,6 +855,18 @@ static void start_if_wanted(struct controller *c)
     if (wanted && idle) queue_action(c, "node_start", "");
     pthread_mutex_unlock(&c->lock);
 }
+/* Schedules or issues the restart of a node that exited on its own, from the latest observation. */
+static void restart_check(struct controller *c)
+{
+    struct zapp_restart_seen seen = {.stopping = zapp_node_stopping(&c->runtime),
+        .held = zapp_node_pace(&c->runtime) == ZAPP_PACE_PAUSE, .now = monotonic_secs()};
+    pthread_mutex_lock(&c->lock);
+    seen.running = c->view.node_process_running;
+    seen.wanted = c->view.node_wanted;
+    seen.ready = !c->hidden && !c->pending && !c->view.busy;
+    if (zapp_restart_observe(&c->restart, &seen) == ZAPP_RESTART_RUN) queue_action(c, "node_start", "");
+    pthread_mutex_unlock(&c->lock);
+}
 static void *worker(void *opaque)
 {
     struct controller *c = opaque;
@@ -877,6 +907,7 @@ static void *worker(void *opaque)
             notify_view(c);
         }
         observe_node(c);
+        restart_check(c);
         if (after.observe_fleet) observe_fleet(c);
         if (!c->autostart_checked) start_if_wanted(c);
     }
@@ -1118,7 +1149,10 @@ bool zapp_controller_node_control(bool start)
     struct controller *c = current;
     pthread_mutex_unlock(&startup_lock);
     if (!c) return false;
-    return start ? zapp_node_start(&c->runtime, text, sizeof(text)) : zapp_node_stop(&c->runtime, text, sizeof(text));
+    if (!start) restart_event(c, false);
+    bool ok = start ? zapp_node_start(&c->runtime, text, sizeof(text)) : zapp_node_stop(&c->runtime, text, sizeof(text));
+    if (start && ok) restart_event(c, true);
+    return ok;
 }
 bool zapp_controller_node_pause_for_setup(void)
 {
@@ -1126,7 +1160,9 @@ bool zapp_controller_node_pause_for_setup(void)
     pthread_mutex_lock(&startup_lock);
     struct controller *c = current;
     pthread_mutex_unlock(&startup_lock);
-    return c && zapp_node_stop_for_setup(&c->runtime, text, sizeof(text));
+    if (!c) return false;
+    restart_event(c, false);
+    return zapp_node_stop_for_setup(&c->runtime, text, sizeof(text));
 }
 bool zapp_controller_prover_ready(char *why, size_t cap)
 {
