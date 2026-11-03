@@ -1166,7 +1166,7 @@ COMMAND_CATALOG_DEFS = $(wildcard engine/composition/commands/*.def) \
 	contexts/commons/packages/zbase64/include/zbase64/zbase64.h
 
 NODE_ENTRY_SRCS = engine/entry/main.c engine/entry/main_cli_modes.c \
-	engine/entry/main_cli_modes_repair_utxos.c \
+	engine/entry/main_cli_modes_repair_utxos.c engine/entry/main_cli_modes_import_shielded.c \
 	engine/entry/main_cli_dispatch.c \
 	engine/entry/cli_compare_runtime.c
 # The per-node mind. Release-visible for the same reason COMMAND_SRCS is:

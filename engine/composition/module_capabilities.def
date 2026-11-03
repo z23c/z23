@@ -1242,6 +1242,7 @@ ZCL_MODULE_CAPABILITY("contexts/wallet/modules/wallet/src/wallet_sqlite_scan_sta
 ZCL_MODULE_CAPABILITY("engine/entry/main.c", CAP_CLOCK|CAP_FS_READ|CAP_FS_WRITE|CAP_PROCESS, "the node's own entry point: sets process environment variables before boot and is the one place startup env is legitimately mutated")
 ZCL_MODULE_CAPABILITY("engine/entry/main_cli_modes.c", CAP_FS_READ|CAP_NETWORK|CAP_FS_WRITE|CAP_CLOCK, "offline CLI modes split from main: several dial the local RPC port or a peer directly to answer a one-shot operator query")
 ZCL_MODULE_CAPABILITY("engine/entry/main_cli_modes_repair_utxos.c", CAP_FS_READ|CAP_FS_WRITE, "offline repair-utxos mode split from main_cli_modes.c: opens the node database and rewrites its utxos rows from blocks fetched over the local RPC port")
+ZCL_MODULE_CAPABILITY("engine/entry/main_cli_modes_import_shielded.c", CAP_FS_READ|CAP_FS_WRITE, "offline import-complete-shielded mode split from main_cli_modes.c: reads a zclassicd chainstate copy and writes the target datadir progress and anchor rows")
 ZCL_MODULE_CAPABILITY("engine/entry/main_cli_dispatch.c", CAP_FS_WRITE, "cli_main steps split from main_cli_modes.c: prints a selected-field rendering of a raw RPC reply to stdout and its diagnostics to stderr")
 ZCL_MODULE_CAPABILITY("tools/command/host_gc_paths.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/host_gc_disposable.c", CAP_FS_READ|CAP_FS_WRITE, "")

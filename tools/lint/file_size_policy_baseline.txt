@@ -31,4 +31,4 @@ core/modules/net/src/net.c 2215
 core/modules/net/src/onion_directory.c 1516
 contexts/commons/modules/vcs/src/package_reward.c 1886
 contexts/commons/modules/vcs/src/package_swarm_node.c 1977
-engine/entry/main_cli_modes.c 3993
+engine/entry/main_cli_modes.c 3717
