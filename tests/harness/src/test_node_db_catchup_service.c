@@ -13,6 +13,7 @@
 #include "models/explorer_index.h"
 #include "controllers/sync_controller.h"
 #include "util/blocker.h"
+#include "util/safe_alloc.h"
 #include "validation/chainstate.h"
 #include "validation/connect_block.h"
 #include "chain/chain.h"
@@ -2182,10 +2183,15 @@ static int ndc_seed_case(struct ndc_sap_fix *f, const char *name, bool option,
 static int ndc_seed_wallet_cases(struct ndc_sap_fix *f)
 {
     int failures = 0;
-    struct wallet w;
-    wallet_init(&w);
-    w.keystore.keys[0].used = true;
-    w.keystore.num_keys = 1;
+    /* sizeof(struct wallet) is about 66 MiB: on the stack it overflows the
+     * 64 MiB hard stack limit macOS allows (Linux raises it to unlimited),
+     * so the SIGSEGV hit under the sanitizer builds on Darwin. */
+    struct wallet *w = zcl_calloc(1, sizeof(*w), "ndc_seed_wallet");
+    NDC_CHECK("seed walk: the wallet fixture allocates", w != NULL);
+    if (!w) return failures;
+    wallet_init(w);
+    w->keystore.keys[0].used = true;
+    w->keystore.num_keys = 1;
     NDC_CHECK("seed walk: a wallet with an unknown birthday needs the prefix",
               node_db_catchup_prefix_needed(2, 1, 0));
     NDC_CHECK("seed walk: a wallet born above the seed does not",
@@ -2196,12 +2202,13 @@ static int ndc_seed_wallet_cases(struct ndc_sap_fix *f)
               !node_db_catchup_prefix_needed(-1, 1, 0));
     /* Birthday unknown: height 1 and 2 are indexed despite the option. */
     failures += ndc_seed_case(f, "wallet_below_seed", true, 2, 0, NDC_SAP_N,
-                              true, &w);
+                              true, w);
     /* Birthday above the seed: the prefix is skipped. */
-    w.initial_scan_floor = (int)ndc_sap_h(3);
+    w->initial_scan_floor = (int)ndc_sap_h(3);
     failures += ndc_seed_case(f, "wallet_above_seed", true, 2, 0, 2, false,
-                              &w);
-    wallet_free(&w);
+                              w);
+    wallet_free(w);
+    free(w);
     return failures;
 }
 
