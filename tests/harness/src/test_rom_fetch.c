@@ -2082,7 +2082,7 @@ static void rf_char_manifest(struct rom_fetch_manifest *m)
 /* Start the real serve path on sdir; 0 when it did not come up. */
 static uint16_t rf_char_serve(const char *sdir)
 {
-    fs_server_start(sdir, 0); /* OS-assigned: no cross-checkout port collisions */
+    fs_server_start(sdir, 0, NULL); /* OS-assigned: no cross-checkout port collisions */
     for (int w = 0; w < 40 && !fs_server_is_running(); w++)
         platform_sleep_ms(50);
     return fs_server_is_running() ? fs_server_get_port() : 0;
