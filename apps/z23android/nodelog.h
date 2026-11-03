@@ -37,6 +37,9 @@ struct zapp_nodelog {
 
 /* A NULL sink writes to logcat on Android and discards on other systems. */
 void zapp_nodelog_init(struct zapp_nodelog *l, zapp_nodelog_sink sink, void *arg);
+/* Copies line to out (cap bytes, always terminated), replacing every .onion name, IPv4 address and IPv6 address, each with
+ * its optional port, by "<peer>". Everything else is copied unchanged. */
+void zapp_nodelog_redact(const char *line, char *out, size_t cap);
 /* Handles one console line: records a boot stage and forwards the line when it explains progress,
  * at most ZAPP_NODELOG_PER_SECOND lines in each second of now_ms. */
 void zapp_nodelog_line(struct zapp_nodelog *l, const char *line, int64_t now_ms);

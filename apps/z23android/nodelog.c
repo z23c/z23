@@ -155,6 +155,83 @@ static void note_stage(struct zapp_nodelog *l, const char *line)
             atomic_store(&l->stage, (int)i + 1);
 }
 
+
+/* Peer names: a ".onion" host, an IPv4 address or an IPv6 address, each with an optional port. */
+static bool peer_char(char c)
+{
+    return word_char(c) || c == '.' || c == ':' || c == '-' || c == '[' || c == ']';
+}
+static bool all_digits(const char *s, size_t n)
+{
+    if (n == 0) return false;
+    for (size_t i = 0; i < n; i++)
+        if (s[i] < '0' || s[i] > '9') return false;
+    return true;
+}
+/* ":port" or nothing for the whole of s. */
+static bool port_or_end(const char *s, size_t n)
+{
+    return n == 0 || (s[0] == ':' && all_digits(s + 1, n - 1));
+}
+static bool onion_name(const char *t, size_t n)
+{
+    for (size_t i = 0; i + 6 <= n; i++)
+        if (strncasecmp(t + i, ".onion", 6) == 0 && port_or_end(t + i + 6, n - i - 6)) return true;
+    return false;
+}
+static bool ipv4_name(const char *t, size_t n)
+{
+    size_t at = 0;
+    for (int group = 0; group < 4; group++) {
+        size_t digits = strspn(t + at, "0123456789");
+        if (digits == 0 || digits > 3 || at + digits > n) return false;
+        at += digits;
+        if (group < 3 && (at >= n || t[at++] != '.')) return false;
+    }
+    return port_or_end(t + at, n - at);
+}
+/* Bracketed, or holding "::", or a full eight groups; a clock time such as 10:00:01 is none of these. */
+static bool ipv6_name(const char *t, size_t n)
+{
+    bool bracket = n > 0 && t[0] == '[';
+    size_t at = bracket ? 1 : 0, body = strspn(t + at, "0123456789abcdefABCDEF:.");
+    if (at + body > n) body = n - at;
+    if (body == 0) return false;
+    size_t colons = 0;
+    for (size_t i = at; i < at + body; i++) colons += t[i] == ':';
+    bool compressed = memmem(t + at, body, "::", 2) != NULL;
+    if (colons < 2 || !(bracket || compressed || colons == 7)) return false;
+    at += body;
+    if (bracket && (at >= n || t[at++] != ']')) return false;
+    return port_or_end(t + at, n - at);
+}
+static bool peer_name(const char *t, size_t n)
+{
+    return onion_name(t, n) || ipv4_name(t, n) || ipv6_name(t, n);
+}
+static size_t append(char *out, size_t used, size_t cap, const char *s, size_t n)
+{
+    for (size_t i = 0; i < n && used + 1 < cap; i++) out[used++] = s[i];
+    return used;
+}
+void zapp_nodelog_redact(const char *line, char *out, size_t cap)
+{
+    static const char mark[] = "<peer>";
+    size_t used = 0;
+    if (cap == 0) return;
+    while (*line && used + 1 < cap) {
+        size_t run = 0;
+        while (peer_char(line[run])) run++;
+        if (run == 0) { out[used++] = *line++; continue; }
+        size_t core = run;
+        while (core > 0 && (line[core - 1] == '.' || line[core - 1] == ':' || line[core - 1] == '-')) core--;
+        bool peer = peer_name(line, core);
+        used = peer ? append(out, used, cap, mark, sizeof(mark) - 1) : append(out, used, cap, line, core);
+        used = append(out, used, cap, line + core, run - core);
+        line += run;
+    }
+    out[used] = 0;
+}
 static bool take_slot(struct zapp_nodelog *l, int64_t now_ms)
 {
     if (l->window_count == 0 || now_ms - l->window_start >= 1000 || now_ms < l->window_start) {
@@ -178,7 +255,9 @@ void zapp_nodelog_line(struct zapp_nodelog *l, const char *line, int64_t now_ms)
     if (!take_slot(l, now_ms)) return;
     char summary[ZAPP_NODELOG_LINE_MAX + 1];
     if (warning) level_summary(&header, summary, sizeof(summary));
-    l->sink(l->sink_arg, warning ? 1 : 0, warning ? summary : text);
+    char shown[ZAPP_NODELOG_LINE_MAX + 1];
+    zapp_nodelog_redact(warning ? summary : text, shown, sizeof(shown));
+    l->sink(l->sink_arg, warning ? 1 : 0, shown);
 }
 
 static void logcat_sink(void *arg, int level, const char *text)

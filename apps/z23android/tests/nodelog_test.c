@@ -250,12 +250,52 @@ static void cap_cases(const char *dir)
     under_cap_left_alone(dir);
 }
 
+static void redacted(const char *in, const char *want)
+{
+    char out[ZAPP_NODELOG_LINE_MAX + 1];
+    zapp_nodelog_redact(in, out, sizeof(out));
+    if (strcmp(out, want)) { fprintf(stderr, "redact: got [%s] want [%s]\n", out, want); assert(0); }
+}
+/* Peer names never reach the sink; the rest of a progress line does. */
+static void peer_names_are_redacted(void)
+{
+    redacted("Addnode abcdefghijklmnop.onion: protocol failure before handshake (eof)", "Addnode <peer>: protocol failure before handshake (eof)");
+    redacted("Addnode ABCDEFGH.ONION:8033 handshake complete", "Addnode <peer> handshake complete");
+    redacted("Peer 203.0.113.9 handshake complete", "Peer <peer> handshake complete");
+    redacted("Peer 203.0.113.9:8033 handshake complete.", "Peer <peer> handshake complete.");
+    redacted("Peer 2001:db8::1 handshake complete", "Peer <peer> handshake complete");
+    redacted("Peer [2001:db8::1]:8033 handshake complete", "Peer <peer> handshake complete");
+    redacted("Peer [::1]:8033, then ::ffff:203.0.113.9.", "Peer <peer>, then <peer>.");
+    redacted("Peer 2001:db8:0:0:0:0:0:1 handshake complete", "Peer <peer> handshake complete");
+    redacted("peer=203.0.113.9:8033 and peer=x.onion", "peer=<peer> and peer=<peer>");
+    redacted("Peer a.onion b.onion handshake", "Peer <peer> <peer> handshake");
+    /* Lines with no address are unchanged. */
+    redacted("2026-10-29T10:00:05Z INFO  [net] handshake complete version=170012 height=3301698", "2026-10-29T10:00:05Z INFO  [net] handshake complete version=170012 height=3301698");
+    redacted("[boot-stage] crypto_ready -> db_open 10:00:01 v1.2.3 onion service", "[boot-stage] crypto_ready -> db_open 10:00:01 v1.2.3 onion service");
+    char tiny[8];
+    zapp_nodelog_redact("Peer 203.0.113.9 handshake", tiny, sizeof(tiny));
+    assert(!strcmp(tiny, "Peer <p"));
+}
+static void sink_lines_carry_no_peer(void)
+{
+    struct zapp_nodelog l;
+    int before = count;
+    zapp_nodelog_init(&l, sink, NULL);
+    zapp_nodelog_line(&l, "Addnode abcdefghijklmnop.onion: protocol failure before handshake (eof)", 9000);
+    zapp_nodelog_line(&l, "2026-10-29T10:00:05Z INFO  [net] handshake complete peer=203.0.113.9:8033 version=1", 9001);
+    assert(count == before + 2);
+    assert(!strcmp(seen[before], "Addnode <peer>: protocol failure before handshake (eof)"));
+    assert(!strcmp(seen[before + 1], "2026-10-29T10:00:05Z INFO  [net] handshake complete peer=<peer> version=1"));
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2);
     filter_cases();
     level_lines_hide_their_text();
     progress_words_do_not_leak();
+    peer_names_are_redacted();
+    sink_lines_carry_no_peer();
     limit_cases();
     tail_cases(argv[1]);
     cap_cases(argv[1]);
