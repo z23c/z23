@@ -61,6 +61,65 @@ _test_next:;
     return failures;
 }
 
+/* ── git windows: date pruning and future commits ───────────────────── */
+
+static int rpr_git(const char *repo, const char *a, const char *b,
+                   const char *c, const char *d)
+{
+    const char *argv[] = {"git", "-C", repo, "-c", "user.name=fixture",
+                          "-c", "user.email=fixture@example.invalid",
+                          "-c", "commit.gpgsign=false", a, b, c, d, NULL};
+    char out[4096];
+    return zcl_spawn_capture(argv, out, sizeof(out), 20000);
+}
+
+static bool rpr_repo_init(const char *repo)
+{
+    return mkdir(repo, 0700) == 0 && rpr_git(repo, "init", "-q", NULL, NULL) == 0;
+}
+
+/* Writes f.txt with a fresh body and commits it at unix time `when`. */
+static bool rpr_commit(const char *repo, long long when, int serial)
+{
+    char path[1200], body[32], date[64];
+    bool ok;
+    (void)snprintf(path, sizeof(path), "%s/f.txt", repo);
+    (void)snprintf(body, sizeof(body), "%d\n", serial);
+    (void)snprintf(date, sizeof(date), "%lld +0000", when);
+    if (!rpr_write(path, body))
+        return false;
+    (void)setenv("GIT_AUTHOR_DATE", date, 1);
+    (void)setenv("GIT_COMMITTER_DATE", date, 1);
+    ok = rpr_git(repo, "add", "f.txt", NULL, NULL) == 0 &&
+         rpr_git(repo, "commit", "-q", "-m", "fixture") == 0;
+    (void)unsetenv("GIT_AUTHOR_DATE");
+    (void)unsetenv("GIT_COMMITTER_DATE");
+    return ok;
+}
+
+/* An old-dated HEAD must not prune the walk before today's commit. */
+static int rpr_case_git_skew(const char *root)
+{
+    int failures = 0;
+    char repo[1024];
+    struct zcl_objectives_options o = {0};
+    (void)snprintf(repo, sizeof(repo), "%s/skew", root);
+    o.now = RPR_NOW;
+    o.repo = repo;
+    TEST("objectives: an old-dated commit cannot hide recent ancestors from today's count") {
+        struct zcl_objective_value v;
+        ASSERT(rpr_repo_init(repo));
+        ASSERT(rpr_commit(repo, RPR_NOW - 3600, 1));
+        ASSERT(rpr_commit(repo, RPR_NOW - 400 * RPR_DAY, 2));
+        v = zcl_objectives_measure(&o, "commits_landed_today");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, (int64_t)1);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int fox_repair_cases(void);
 int fox_repair_cases(void)
 {
@@ -68,6 +127,7 @@ int fox_repair_cases(void)
     char root[512];
     test_make_tmpdir(root, sizeof(root), "fleet_objectives", "repair");
     failures += rpr_case_window_future(root);
+    failures += rpr_case_git_skew(root);
     (void)test_rm_rf_recursive(root);
     return failures;
 }

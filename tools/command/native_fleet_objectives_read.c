@@ -1293,7 +1293,8 @@ static const char *obj_git_main_ref(const char *repo)
 /* Commits reachable from the main ref with a committer time at or after
  * `since`, limited to `paths` when any. One %ct per commit keeps the output
  * small; the count is a bounded read, and a full buffer is a failure rather
- * than a short count. */
+ * than a short count. The date filter must not prune recent ancestors behind
+ * an old-dated commit (Git 2.37 and later). */
 static bool obj_git_count_since(const char *repo, int64_t since,
                                 const char *const *paths, size_t npaths,
                                 int64_t *count)
@@ -1305,7 +1306,7 @@ static bool obj_git_count_since(const char *repo, int64_t since,
     int64_t seen = 0;
     bool ok;
     if (!out || npaths > OBJ_GIT_PATHS_MAX ||
-        snprintf(since_arg, sizeof(since_arg), "--since=%lld",
+        snprintf(since_arg, sizeof(since_arg), "--since-as-filter=%lld",
                  (long long)since) >= (int)sizeof(since_arg)) {
         free(out);
         return false;
