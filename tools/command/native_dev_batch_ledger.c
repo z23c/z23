@@ -452,11 +452,16 @@ static void db_requeue_report(struct zcl_command_reply *reply, const char *lane,
                               size_t dropped)
 {
     const char *rp[] = {"rev-parse", "--short", "HEAD", NULL};
-    char head[64] = "", msg[DB_PATH + 128];
-    const char *base = strrchr(lane, '/');
+    char head[64] = "", msg[DB_PATH + 128], name[DB_PATH];
+    size_t n = strlen(lane);
+    const char *base;
+    while (n > 1 && lane[n - 1] == '/')
+        n--;
+    (void)snprintf(name, sizeof(name), "%.*s", (int)n, lane);
+    base = strrchr(name, '/');
     (void)db_git_line(lane, rp, head, sizeof(head));
     (void)snprintf(msg, sizeof(msg), "requeue: %s at %s is pending",
-                   base ? base + 1 : lane, head);
+                   base ? base + 1 : name, head);
     (void)json_push_kv_str(&reply->data, "leaf", "dev.batch.requeue");
     (void)json_push_kv_str(&reply->data, "worktree", lane);
     (void)json_push_kv_str(&reply->data, "head", head);
