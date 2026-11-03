@@ -37,6 +37,11 @@ bool zapp_fleet_peers(const char *peerinfo_json, const char *roster_text, struct
  * "Fleet · not paired yet" for none. " · at 3,306,214" follows only when height is known. Never names an
  * onion address. Returns out. */
 const char *zapp_fleet_peers_line(const struct zapp_fleet_peers *peers, char *out, size_t cap);
+/* True when the fleet line shown comes from a laptop report that is not marked old. */
+bool zapp_fleet_laptop_current(bool laptop_source, bool stale);
+/* Whether a node-derived reading may replace the fleet line: never while a current laptop report is shown, and not
+ * an empty roster on a paired phone, which keeps its "checking" state until the first laptop report. */
+bool zapp_fleet_peers_wanted(bool laptop_source, bool laptop_stale, const struct zapp_fleet_peers *peers, bool paired);
 /* Writes value with comma thousands separators, which models copy more reliably than long digit
  * runs; negative values are written plainly. Returns out. */
 const char *zapp_grouped(int64_t value, char out[32]);

@@ -277,7 +277,7 @@ test-host:
 	  ../../contexts/commons/packages/zsha256/src/zsha256.c -Wl,--wrap=fsync -Wl,--wrap=write -Wl,--wrap=pread -Wl,--wrap=close -Wl,--wrap=calloc -Wl,--wrap=free -Wl,--wrap=pthread_create -pthread -o '$(BUILD_DIR)/params-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/params-test.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/params-test' "$$scratch"
-	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/hosts_test.c hosts.c pairing.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/hosts-test'
+	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/hosts_test.c hosts.c pairing.c private.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/hosts-test'
 	'$(BUILD_DIR)/hosts-test'
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/private_test.c private.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/private-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/private-test.XXXXXX'); \
@@ -303,7 +303,7 @@ test-host:
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/layout_test.c layout.c $(SPEECH_JSON) -o '$(BUILD_DIR)/layout-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/layout-test.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/layout-test' "$$scratch"
-	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) -pthread -I../../vendor/qrcodegen tests/home_test.c home.c layout.c hosts.c pairing.c scan.c payment_code.c wallet_screens.c wallet_view.c fleet.c speech_client.c bridge_client.c bridge_auth.c voice.c ../../contexts/commons/packages/zutf8/src/zutf8.c ../../vendor/qrcodegen/qrcodegen.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/home-test'
+	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) -pthread -I../../vendor/qrcodegen tests/home_test.c home.c layout.c hosts.c private.c pairing.c scan.c payment_code.c wallet_screens.c wallet_view.c fleet.c speech_client.c bridge_client.c bridge_auth.c voice.c ../../contexts/commons/packages/zutf8/src/zutf8.c ../../vendor/qrcodegen/qrcodegen.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/home-test'
 	'$(BUILD_DIR)/home-test'
 	$(HOST_CC) $(HOST_WARNINGS) -I. tests/node_notice_test.c node_notice.c -o '$(BUILD_DIR)/node-notice-test'
 	'$(BUILD_DIR)/node-notice-test'

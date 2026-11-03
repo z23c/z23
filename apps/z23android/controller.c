@@ -214,7 +214,7 @@ static void observe_fleet_peers(struct controller *c, bool responding)
 {
     const int64_t now = monotonic_secs();
     pthread_mutex_lock(&c->lock);
-    const bool laptop_current = c->fleet_source == FLEET_LAPTOP && !c->view.fleet_stale;
+    const bool laptop_current = zapp_fleet_laptop_current(c->fleet_source == FLEET_LAPTOP, c->view.fleet_stale);
     const bool due = !c->peers_at || now - c->peers_at >= FLEET_PEERS_SECS;
     if (!responding && c->fleet_source == FLEET_PEERS) c->view.fleet_stale = true;
     const bool read = responding && !laptop_current && due;
@@ -230,14 +230,16 @@ static void observe_fleet_peers(struct controller *c, bool responding)
     free(reply);
     if (ok) zapp_fleet_peers_line(&peers, line, sizeof(line));
     pthread_mutex_lock(&c->lock);
-    if (ok) {
+    /* A laptop report may have arrived while the node was asked; it still wins, and an empty roster on a paired
+     * phone leaves the "checking" state alone. */
+    if (ok && zapp_fleet_peers_wanted(c->fleet_source == FLEET_LAPTOP, c->view.fleet_stale, &peers, c->view.fleet_paired)) {
         copy_text(c->view.fleet_status, sizeof(c->view.fleet_status), line + strlen(ZAPP_FLEET_LINE_PREFIX));
         c->fleet_height = peers.height;
         c->fleet_height_at = now;
         c->fleet_source = FLEET_PEERS;
         c->view.fleet_stale = false;
         refresh_suggestion(c);
-    } else if (c->fleet_source == FLEET_PEERS) c->view.fleet_stale = true;
+    } else if (!ok && c->fleet_source == FLEET_PEERS) c->view.fleet_stale = true;
     pthread_mutex_unlock(&c->lock);
 }
 static void observe_node(struct controller *c)

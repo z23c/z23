@@ -390,20 +390,34 @@ bool zapp_ops_view(const char *json, char *text, size_t cap, char plan[33])
     json_cleanse_strings(&root); json_free(&root);
     return ok;
 }
+/* True when text[0..len) is one token of [a-z0-9-]. */
+static bool name_token(const char *text, size_t len)
+{
+    for (size_t i = 0; i < len; i++)
+        if (!((text[i] >= 'a' && text[i] <= 'z') || (text[i] >= '0' && text[i] <= '9') || text[i] == '-')) return false;
+    return len > 0;
+}
 /* Roster lines as written by zapp_fleet_onion_peers: the onion token, then an optional name. */
+static bool roster_new(const char *line, size_t token, char onion[][ZAPP_ONION_PEER_MAX + 1], size_t known)
+{
+    char one[ZAPP_ONION_PEER_MAX + 1];
+    memcpy(one, line, token);
+    one[token] = 0;
+    if (!zapp_onion_peer_valid(one)) return false;
+    for (size_t i = 0; i < known; i++)
+        if (!strcmp(onion[i], one)) return false;
+    return true;
+}
 static size_t roster_parse(const char *text, char onion[][ZAPP_ONION_PEER_MAX + 1], struct zapp_fleet_peers *out)
 {
     size_t known = 0;
     for (const char *line = text; line && *line && known < ZAPP_PRIVATE_PEERS_MAX; line += strcspn(line, "\n"), line += *line == '\n') {
         const size_t end = strcspn(line, "\n"), token = strcspn(line, " \n");
-        if (!token || token > ZAPP_ONION_PEER_MAX) continue;
-        bool repeat = false;
-        for (size_t i = 0; i < known; i++) repeat = repeat || (strlen(onion[i]) == token && !memcmp(onion[i], line, token));
-        if (repeat) continue;
+        if (!token || token > ZAPP_ONION_PEER_MAX || !roster_new(line, token, onion, known)) continue;
         memcpy(onion[known], line, token);
         onion[known][token] = 0;
         const size_t name = end > token + 1 && line[token] == ' ' ? end - token - 1 : 0;
-        if (name && name <= ZAPP_FLEET_NAME_MAX) memcpy(out->peer[known].name, line + token + 1, name);
+        if (name && name <= ZAPP_FLEET_NAME_MAX && name_token(line + token + 1, name)) memcpy(out->peer[known].name, line + token + 1, name);
         known++;
     }
     return known;
@@ -471,4 +485,12 @@ const char *zapp_fleet_peers_line(const struct zapp_fleet_peers *p, char *out, s
     if (p->height >= 0) used = append(out, cap, used, " \xc2\xb7 at %s", zapp_grouped(p->height, grouped));
     if (used >= cap && cap) out[cap - 1] = 0;
     return out;
+}
+bool zapp_fleet_laptop_current(bool laptop_source, bool stale)
+{
+    return laptop_source && !stale;
+}
+bool zapp_fleet_peers_wanted(bool laptop_source, bool laptop_stale, const struct zapp_fleet_peers *peers, bool paired)
+{
+    return !zapp_fleet_laptop_current(laptop_source, laptop_stale) && !(paired && !peers->known);
 }

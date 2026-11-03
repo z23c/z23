@@ -353,6 +353,16 @@ static void fleet_peer_names(void)
     peer_json(json, sizeof(json), FA, 3306214, FA, 3306215);
     assert(zapp_fleet_peers(json, NAMED, &p) && p.connected == 1 && p.height == -1);
 }
+static void fleet_source_rules(void)
+{
+    struct zapp_fleet_peers some = {.known = 2}, none = {0};
+    /* A current laptop report is never replaced by a node reading; an old one is. */
+    assert(zapp_fleet_laptop_current(true, false) && !zapp_fleet_laptop_current(true, true) && !zapp_fleet_laptop_current(false, false));
+    assert(!zapp_fleet_peers_wanted(true, false, &some, true) && !zapp_fleet_peers_wanted(true, false, &some, false));
+    assert(zapp_fleet_peers_wanted(true, true, &some, true) && zapp_fleet_peers_wanted(false, false, &some, true));
+    /* An empty roster on a paired phone keeps "checking"; on an unpaired one it reads "not paired yet". */
+    assert(!zapp_fleet_peers_wanted(false, false, &none, true) && zapp_fleet_peers_wanted(false, false, &none, false));
+}
 static void fleet_peer_malformed(void)
 {
     struct zapp_fleet_peers p;
@@ -363,7 +373,10 @@ static void fleet_peer_malformed(void)
     assert(!zapp_fleet_peers(NULL, NAMED, &p) && !zapp_fleet_peers("{\"result\":null,\"error\":{\"code\":-1}}", NAMED, &p));
     assert(!zapp_fleet_peers("{\"result\":{\"addr\":1}}", NAMED, &p));
     assert(zapp_fleet_peers("[1,\"x\",{\"addr\":5},{}]", NAMED, &p) && !p.connected);
-    assert(zapp_fleet_peers(json, "junk\n\n  \nbogus name\n", &p) && p.connected == 0);
+    assert(zapp_fleet_peers(json, "junk\n\n  \nbogus name\n", &p) && p.connected == 0 && p.known == 0);
+    /* A name is one [a-z0-9-] token. */
+    assert(zapp_fleet_peers(json, FA " r1 extra\n" FB " R2\n", &p) && p.known == 2 && !p.peer[0].name[0] && !p.peer[1].name[0]);
+    assert(zapp_fleet_peers(json, FA " r-1\n", &p) && !strcmp(p.peer[0].name, "r-1"));
     /* Three names read as a list. */
     memset(&p, 0, sizeof(p));
     p.known = 3; p.connected = 3; p.height = -1;
@@ -401,6 +414,7 @@ int main(void)
     fleet_peer_height();
     fleet_peer_names();
     fleet_peer_malformed();
+    fleet_source_rules();
     lone_liar_tests();
     chain_state_reasons();
     static const char snapshot[] = "{\"hosts\":["
