@@ -402,7 +402,7 @@ test-wallet-send:
 	  secure_window.c wallet_view.c $(WALLET_SEND_SOURCES) $(SPEECH_JSON) -o '$(BUILD_DIR)/wallet-send-device-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/wallet-send-device.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/wallet-send-device-test' "$$(cd "$$scratch" && pwd)"
-	$(HOST_CC) $(HOST_WARNINGS) -pthread $(WALLET_SEND_INCLUDES) tests/wallet_reveal_test.c wallet_reveal.c wallet_send_screen.c \
+	$(HOST_CC) $(HOST_WARNINGS) -pthread $(WALLET_SEND_INCLUDES) tests/wallet_reveal_test.c wallet_reveal.c wallet_send_screen.c wallet_screens.c \
 	  secure_window.c wallet_view.c $(WALLET_SEND_SOURCES) $(SPEECH_JSON) -o '$(BUILD_DIR)/wallet-reveal-test'
 	'$(BUILD_DIR)/wallet-reveal-test'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) -I../../vendor/qrcodegen tests/pay_stash_test.c pay_stash.c scan.c payment_code.c fleet.c speech_client.c bridge_client.c bridge_auth.c ../../platform/modules/sha3/src/sha3.c voice.c \
