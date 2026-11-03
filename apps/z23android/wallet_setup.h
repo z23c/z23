@@ -75,6 +75,8 @@ enum wsu_phase {
     WSU_PHASE_NONE,
     WSU_PHASE_KEY,       /* securing the key; the phone may ask for the screen lock */
     WSU_PHASE_PAUSE,     /* waiting for the node to exit so the wallet files are written safely */
+    WSU_PHASE_PAUSE_CHECK,   /* waiting for the node to exit so the wallet files can be read */
+    WSU_PHASE_PAUSE_ASIDE,   /* waiting for the node to exit so the wallet can be set aside */
     WSU_PHASE_WRITE,     /* the node writes the wallet */
     WSU_PHASE_RESTART,   /* starting the node again */
     WSU_PHASE_CHECK,     /* reading the wallet files or asking the node about the wallet */
@@ -141,7 +143,7 @@ struct wsu {
     enum zapp_setup_kind kind;   /* what the interrupted setup was, read when the datadir is checked */
     char leftover[WSU_LEFTOVER_MAX];   /* with ASIDE_STUCK: the paths that stay moved aside, one per line */
     enum wsu_phase phase;     /* the sub-step of the running job */
-    int64_t phase_since_s;
+    int64_t phase_since_s;    /* when that sub-step began, for its clock */
     bool paused_node;         /* setup asked the node to exit and has not started it again */
     struct zapp_words phrase;   /* a create: the words being written, wiped when the write is done */
     char write_pass[SUN_PASSPHRASE_HEX + 1];
@@ -176,8 +178,8 @@ struct wsu_view {
     bool may_start_over;   /* the setup is a create whose words were not confirmed */
     size_t bad_word;       /* with BAD_WORD: the index of the word, counted from 0 */
     char leftover[WSU_LEFTOVER_MAX];
-    enum wsu_phase phase;   /* with WORKING or CHECKING */
-    int64_t elapsed_s;      /* seconds since the job began */
+    enum wsu_phase phase;   /* with WORKING or CHECKING, and while the wallet behind the words is written */
+    int64_t elapsed_s;      /* seconds the sub-step has taken so far */
     enum wsu_write write;    /* with WORDS or CONFIRM: whether the wallet behind the words is written */
     enum wsu_failure write_failure;
     bool start_pending;      /* with WORDS: a words-first create, before and after the write; the wallet start is the node's own, so no height is shown */
@@ -189,12 +191,24 @@ bool wsu_view_can_recheck(const struct wsu_view *v);
 /* The sentence above the recovery words. With a recorded start height it names the height; when the wallet recorded none it says so
  * and names no height. */
 void wsu_words_intro(const struct wsu_view *v, char *out, size_t cap);
-/* The line a working screen shows: the sub-step in plain words. With no sub-step set yet it is "Starting…"; after the words are confirmed it is "Saving…". */
+/* Room for the live line of a waiting screen. */
+#define WSU_LINE_MAX 160
+/* The live line of a screen that waits: the sub-step in plain words, then the minutes and seconds it has taken, then the most the
+ * app waits for it while that is not reached, as in "Pausing your node so your wallet can be saved safely - 0:45 (up to 3:00)". */
 void wsu_working_line(const struct wsu_view *v, char *out, size_t cap);
-/* "2 min 05 s since setup began": the seconds of the job so far, so a long wait shows it is alive. */
-void wsu_elapsed_text(const struct wsu_view *v, char *out, size_t cap);
+/* Whether a step runs that the screen shows with a live line: a job, the check after a restart, or the write of the wallet behind
+ * the shown words. The screen moves the clock of that line every second while this holds. */
+bool wsu_waiting(struct wsu *w);
 /* One plain sentence and the action for a failed job; empty for none. */
 const char *wsu_failure_text(enum wsu_failure failure);
+/* With WORDS or CONFIRM, after a failed write: what happened in plain words and the one next step, Try again, which writes the same
+ * words again. Empty for none. */
+const char *wsu_write_failure_text(enum wsu_failure failure);
+/* With CONFIRM: every asked word is picked and the wallet behind the words is written, so Confirm acts. */
+bool wsu_view_confirm_ready(const struct wsu_view *v);
+/* With CONFIRM: why there is no Confirm button yet, shown in its place. Empty while a word is still to pick, once Confirm is ready,
+ * and after a failed write, whose own text says what to do. */
+const char *wsu_confirm_note(const struct wsu_view *v);
 /* The sentence above the failure on the interrupted-setup screen: a wallet was started (the probe found it), or the node did not
  * answer. Empty for the other failures, whose failure text says what to do. */
 const char *wsu_interrupted_note(enum wsu_failure failure);

@@ -435,12 +435,37 @@ struct fake {
     int starts_refused, step_at_start, phase_key, step_at_stop, step_at_write;
     bool tap_on_start;
     int tapped_write, tapped_phase, tapped_give_up, tapped_retry;
+    /* The live line as the screen would draw it: the wall clock moves with the simulated time, the line is read at sample_ms of a
+     * wait, as the write starts and after it has run write_takes_ms, and as the node is started. */
+    bool clock_follows;
+    int64_t sample_ms, write_takes_ms;
+    char line_at_sample[WSU_LINE_MAX], line_at_write[WSU_LINE_MAX], line_after_write[WSU_LINE_MAX], line_at_start[WSU_LINE_MAX];
+    int step_at_sample, write_at_sample;
+    bool waiting_at_sample, waiting_at_write, ready_at_sample;
+    const char *note_at_sample;
 };
 static struct fake *fake_of;
 static struct wsu *model_of;
+/* The live line of the model's screen now; the words of the view are wiped. */
+static void line_now(char out[WSU_LINE_MAX])
+{
+    struct wsu_view v;
+    wsu_view_read(model_of, &v);
+    wsu_working_line(&v, out, WSU_LINE_MAX);
+    zapp_words_cleanse(&v.words);
+}
+/* A write that takes write_takes_ms of simulated time: the line is read as it starts and as it ends. */
+static void write_runs(struct fake *f)
+{
+    line_now(f->line_at_write);
+    f->waiting_at_write = wsu_waiting(model_of);
+    f->now_ms += f->write_takes_ms;
+    line_now(f->line_after_write);
+}
 static bool fake_hook(struct script *s, const char *op)
 {
     struct fake *f = fake_of;
+    if (!strcmp(op, "restore") && f->clock_follows) write_runs(f);
     if (!strcmp(op, "restore") && f->watch) f->step_at_write = (int)model_of->step;
     if (!strcmp(op, "create")) { f->create_while_running += f->running; f->kind_at_create = (int)zapp_setup_kind_read(dir); }
     if (!strcmp(op, "restore")) { f->restore_while_running += f->running; f->kind_at_restore = (int)zapp_setup_kind_read(dir); }
@@ -481,6 +506,7 @@ static void f_control(void *ctx, bool start)
     if (start && f_running(f)) { ++f->starts_refused; return; }   /* the app refuses a start while the old process exists */
     if (start) {
         ++f->starts;
+        if (f->clock_follows) line_now(f->line_at_start);
         if (f->tap_on_start) {
             f->tap_on_start = false;
             wsu_view_read(model_of, &v);
@@ -504,8 +530,18 @@ static void f_control(void *ctx, bool start)
 static void f_pause(void *ctx, unsigned ms)
 {
     struct fake *f = ctx;
+    struct wsu_view v;
     ++f->pauses;
     f->now_ms += ms;
+    if (!f->sample_ms || f->now_ms != f->sample_ms) return;
+    wsu_view_read(model_of, &v);
+    f->step_at_sample = (int)v.step;
+    f->write_at_sample = (int)v.write;
+    f->ready_at_sample = wsu_view_confirm_ready(&v);
+    f->note_at_sample = wsu_confirm_note(&v);
+    zapp_words_cleanse(&v.words);
+    f->waiting_at_sample = wsu_waiting(model_of);
+    line_now(f->line_at_sample);
 }
 static bool f_random(void *ctx, uint8_t *out, size_t len) { return counter_random(&((struct fake *)ctx)->random_state, out, len); }
 static bool f_protect(void *ctx, bool on)
@@ -514,7 +550,11 @@ static bool f_protect(void *ctx, bool on)
     return ((struct fake *)ctx)->protect_ok;
 }
 static enum wsu_idle f_idle(void *ctx) { return ((struct fake *)ctx)->idle; }
-static int64_t f_wall(void *ctx) { return 1793534400 + ((struct fake *)ctx)->wall_offset; }
+static int64_t f_wall(void *ctx)
+{
+    const struct fake *f = ctx;
+    return 1793534400 + f->wall_offset + (f->clock_follows ? f->now_ms / 1000 : 0);
+}
 static bool f_progress(void *ctx, int64_t *scanned, int64_t *tip)
 {
     struct fake *f = ctx;
@@ -1879,43 +1919,41 @@ static void failed_jobs_other_tests(void)
     wsu_destroy(&w);
 }
 
-/* The text of each sub-step, as the working screen shows it. */
-static void working_line_tests(void)
+/* The live line of a sub-step at elapsed seconds. */
+static const char *line_at(enum wsu_phase phase, int64_t elapsed, char line[WSU_LINE_MAX])
 {
     struct wsu_view v;
-    char line[320];
     memset(&v, 0, sizeof(v));
-    v.phase = WSU_PHASE_KEY;
-    wsu_working_line(&v, line, sizeof(line));
-    assert(!strcmp(line, "Confirm with your screen lock"));
-    v.phase = WSU_PHASE_PAUSE;
-    wsu_working_line(&v, line, sizeof(line));
-    assert(!strcmp(line, "Pausing your node to write the new wallet… (under a minute)"));
-    v.phase = WSU_PHASE_WRITE;
-    wsu_working_line(&v, line, sizeof(line));
-    assert(!strcmp(line, "Writing your wallet…"));
-    v.phase = WSU_PHASE_RESTART;
-    wsu_working_line(&v, line, sizeof(line));
-    assert(!strcmp(line, "Starting your node again…"));
-    v.phase = WSU_PHASE_NONE;
-    wsu_working_line(&v, line, sizeof(line));
-    assert(!strcmp(line, "Starting…"));
-    v.phase = WSU_PHASE_SAVE;
-    wsu_working_line(&v, line, sizeof(line));
-    assert(!strcmp(line, "Saving…"));
-    v.phase = WSU_PHASE_ASIDE;
-    wsu_working_line(&v, line, sizeof(line));
-    assert(!strcmp(line, "Setting aside your old wallet…"));
+    v.phase = phase;
+    v.elapsed_s = elapsed;
+    wsu_working_line(&v, line, WSU_LINE_MAX);
+    return line;
+}
+/* The live line of each sub-step: what is happening, its clock, and the most the app waits while that is not reached. */
+static void working_line_tests(void)
+{
+    char line[WSU_LINE_MAX];
+    assert(!strcmp(line_at(WSU_PHASE_KEY, 5, line), "Confirm with your screen lock - 0:05"));
+    assert(!strcmp(line_at(WSU_PHASE_PAUSE, 45, line), "Pausing your node so your wallet can be saved safely - 0:45 (up to 3:00)"));
+    assert(!strcmp(line_at(WSU_PHASE_PAUSE, 179, line), "Pausing your node so your wallet can be saved safely - 2:59 (up to 3:00)"));
+    assert(!strcmp(line_at(WSU_PHASE_PAUSE, 181, line), "Pausing your node so your wallet can be saved safely - 3:01"));
+    assert(!strcmp(line_at(WSU_PHASE_PAUSE_CHECK, 30, line), "Pausing your node so this phone's wallet can be checked safely - 0:30 (up to 3:00)"));
+    assert(!strcmp(line_at(WSU_PHASE_PAUSE_ASIDE, 0, line), "Pausing your node so your old wallet can be set aside safely - 0:00 (up to 3:00)"));
+    assert(!strcmp(line_at(WSU_PHASE_WRITE, 782, line), "Saving your wallet - 13:02 (up to 15:00)"));
+    assert(!strcmp(line_at(WSU_PHASE_WRITE, 900, line), "Saving your wallet - 15:00"));
+    assert(!strcmp(line_at(WSU_PHASE_RESTART, 0, line), "Starting your node again - 0:00 (up to 3:00)"));
+    assert(!strcmp(line_at(WSU_PHASE_NONE, 2, line), "Getting ready - 0:02"));
+    assert(!strcmp(line_at(WSU_PHASE_CHECK, 7, line), "Checking your wallet - 0:07"));
+    assert(!strcmp(line_at(WSU_PHASE_ASIDE, 125, line), "Setting aside your old wallet - 2:05"));
+    assert(!strcmp(line_at(WSU_PHASE_SAVE, 0, line), "Finishing setup - 0:00"));
+    assert(!strcmp(line_at(WSU_PHASE_CHECK, 3725, line), "Checking your wallet - 62:05"));
+    assert(!strcmp(line_at(WSU_PHASE_CHECK, -4, line), "Checking your wallet - 0:00"));
+    assert(!strcmp(line_at((enum wsu_phase)99, 1, line), "Getting ready - 0:01"));
+    struct wsu_view v;
+    memset(&v, 0, sizeof(v));
     v.phase = WSU_PHASE_KEY;
     wsu_working_line(&v, line, 12);
     assert(strlen(line) == 11);
-    v.phase = WSU_PHASE_NONE;
-    v.elapsed_s = 7;
-    wsu_elapsed_text(&v, line, sizeof(line));
-    assert(!strcmp(line, "7 s since setup began"));
-    v.elapsed_s = 125;
-    wsu_elapsed_text(&v, line, sizeof(line));
-    assert(!strcmp(line, "2 min 05 s since setup began"));
 }
 
 /* Back says the true thing: the words are shown once while they are held, and a running job goes on without the owner. */
@@ -1974,7 +2012,7 @@ static void saving_after_confirm_tests(void)
     assert(wsu_confirm(&w, right, 3));
     wsu_view_read(&w, &v);
     wsu_working_line(&v, line, sizeof(line));
-    assert(v.step == WSU_WORKING && v.phase == WSU_PHASE_SAVE && !strcmp(line, "Saving…"));
+    assert(v.step == WSU_WORKING && v.phase == WSU_PHASE_SAVE && !strcmp(line, "Finishing setup - 0:00"));
     wsu_destroy(&w);
 }
 
@@ -2085,6 +2123,134 @@ static void confirm_waits_for_write_tests(void)
     assert(w.write == WSU_WRITE_DONE && wsu_confirm_picked(&w) && w.step == WSU_WORKING && w.held.count == 0);
     wsu_finish_job(&w);
     assert(w.step == WSU_DONE && zapp_setup_state(dir) == ZAPP_SETUP_READY);
+    wsu_destroy(&w);
+}
+
+/* ---- the live line of every wait ---- */
+
+/* The right word tapped at every asked position, with no Confirm. */
+static void pick_each_right(struct wsu *w, const struct zapp_words *all)
+{
+    struct wsu_view v;
+    wsu_view_read(w, &v);
+    for (size_t i = 0; i < ZAPP_WORDS_ASKED; ++i) {
+        size_t s = 0;
+        while (strcmp(v.choice[i][s], all->word[v.asked[i]])) ++s;
+        assert(wsu_pick(w, i, s));
+    }
+}
+/* The create of 2026-11-03 replayed on simulated time: the node takes 2 min 40 s to exit, and the node command that writes the
+ * wallet runs 13 min 02 s and ends with no answer. The words stay on screen; the live line names each step with a clock that starts
+ * at zero for that step and the most the app waits for it; the end says in plain words what happened and what to tap. */
+static void live_line_slow_write_tests(void)
+{
+    struct fake f;
+    struct wsu w;
+    struct wsu_view v;
+    fresh(&f, &w, true);
+    f.clock_follows = true;
+    f.exit_after_ms = 160000;
+    f.sample_ms = 45000;
+    f.write_takes_ms = 782000;
+    script_say(&f.script, false, "The command timed out.");
+    wsu_create_job(&w);
+    assert(w.step == WSU_WORDS && w.write == WSU_WRITE_PENDING && !wsu_waiting(&w));
+    wsu_write_job(&w);
+    assert(f.step_at_sample == WSU_WORDS && f.write_at_sample == WSU_WRITE_RUNNING && f.waiting_at_sample && f.waiting_at_write);
+    assert(!strcmp(f.line_at_sample, "Pausing your node so your wallet can be saved safely - 0:45 (up to 3:00)"));
+    assert(!strcmp(f.line_at_write, "Saving your wallet - 0:00 (up to 15:00)"));
+    assert(!strcmp(f.line_after_write, "Saving your wallet - 13:02 (up to 15:00)"));
+    assert(!strcmp(f.line_at_start, "Starting your node again - 0:00 (up to 3:00)"));
+    wsu_view_read(&w, &v);
+    assert(v.step == WSU_WORDS && v.words.count == 24 && v.write == WSU_WRITE_FAILED && v.write_failure == WSU_UNKNOWN);
+    zapp_words_cleanse(&v.words);
+    assert(!wsu_waiting(&w) && f.starts == 1 && f.running && f.discards == 0);
+    assert(!strcmp(wsu_write_failure_text(v.write_failure),
+                   "Saving your wallet stopped before your node answered, so the app cannot tell whether it was saved. Tap Try again."));
+    assert(wsu_retry_write(&w) && w.write == WSU_WRITE_PENDING && w.phrase.count == 24);
+    wsu_destroy(&w);
+}
+/* While the wallet behind the words is saved, the check screen says why there is no Confirm yet; once saved, Confirm acts. After a
+ * failed write only its own text speaks, and it names the button that is there. */
+static void confirm_note_tests(void)
+{
+    static const char note[] = "All three words are right. Confirm appears here once your wallet is saved.";
+    struct fake f;
+    struct wsu w;
+    struct wsu_view v;
+    struct zapp_words all;
+    assert(zapp_words_parse(PHRASE, &all));
+    fresh(&f, &w, true);
+    f.clock_follows = true;
+    f.exit_after_ms = 20000;
+    f.sample_ms = 10000;
+    script_say(&f.script, true, RESTORED_TIP);
+    wsu_create_job(&w);
+    wsu_words_seen(&w);
+    wsu_view_read(&w, &v);
+    assert(v.step == WSU_CONFIRM && !wsu_view_confirm_ready(&v) && !wsu_confirm_note(&v)[0]);
+    pick_each_right(&w, &all);
+    wsu_view_read(&w, &v);
+    assert(!wsu_view_confirm_ready(&v) && !strcmp(wsu_confirm_note(&v), note));
+    wsu_write_job(&w);
+    assert(f.write_at_sample == WSU_WRITE_RUNNING && !f.ready_at_sample && !strcmp(f.note_at_sample, note));
+    assert(!strcmp(f.line_at_sample, "Pausing your node so your wallet can be saved safely - 0:10 (up to 3:00)"));
+    wsu_view_read(&w, &v);
+    assert(v.write == WSU_WRITE_DONE && wsu_view_confirm_ready(&v) && !wsu_confirm_note(&v)[0] && !wsu_waiting(&w));
+    wsu_destroy(&w);
+    fresh(&f, &w, true);
+    error_reply(&f.script, "NO_LOCAL_CHAIN");
+    create_all(&w);
+    wsu_words_seen(&w);
+    pick_each_right(&w, &all);
+    wsu_view_read(&w, &v);
+    assert(v.write == WSU_WRITE_FAILED && !wsu_view_confirm_ready(&v) && !wsu_confirm_note(&v)[0]);
+    assert(strstr(wsu_write_failure_text(v.write_failure), "It keeps syncing. Tap Try again in a few minutes."));
+    wsu_destroy(&w);
+}
+/* Each failed write says what happened in plain words and the one next step, Try again. None sends the owner to Check again, a
+ * button the words and the check do not have, and none says the words cannot be shown while they are on screen. */
+static void write_failure_text_tests(void)
+{
+    static const char *const jargon[] = {"datadir", "RPC", "pid", "database", "JSON", "marker", "birthday", "Check again", "cannot be shown"};
+    static const enum wsu_failure own[] = {WSU_NODE_BUSY, WSU_NO_TIP, WSU_STORAGE, WSU_NOT_RUN, WSU_UNKNOWN};
+    static const enum wsu_failure other[] = {WSU_REFUSED, WSU_BAD_PHRASE};
+    for (size_t i = 0; i < sizeof(own) / sizeof(own[0]); ++i) {
+        const char *text = wsu_write_failure_text(own[i]);
+        assert(text[0] && strlen(text) < 200 && strstr(text, "Tap Try again"));
+        for (size_t j = 0; j < sizeof(jargon) / sizeof(jargon[0]); ++j) assert(!strstr(text, jargon[j]));
+        for (size_t k = i + 1; k < sizeof(own) / sizeof(own[0]); ++k) assert(strcmp(text, wsu_write_failure_text(own[k])));
+    }
+    for (size_t i = 0; i < sizeof(other) / sizeof(other[0]); ++i)
+        assert(!strcmp(wsu_write_failure_text(other[i]), "Your node refused to save your wallet, so nothing was saved. Tap Try again."));
+    assert(!strcmp(wsu_write_failure_text(WSU_NODE_BUSY), "Your node did not pause in time, so your wallet is not saved yet. Tap Try again."));
+    assert(!wsu_write_failure_text(WSU_NO_FAILURE)[0]);
+}
+/* The check after a restart and Start over each name their own pause, with its clock, while the node exits. */
+static void check_and_aside_live_line_tests(void)
+{
+    struct fake f;
+    struct wsu w;
+    char node_dir[700];
+    fresh(&f, &w, true);
+    touch("wallet_key.blob");
+    w.step = WSU_CHECKING;
+    f.clock_follows = true;
+    f.exit_after_ms = 60000;
+    f.sample_ms = 30000;
+    wsu_resume_job(&w);
+    assert(f.step_at_sample == WSU_CHECKING && f.waiting_at_sample && w.step == WSU_BLOCKED && !wsu_waiting(&w));
+    assert(!strcmp(f.line_at_sample, "Pausing your node so this phone's wallet can be checked safely - 0:30 (up to 3:00)"));
+    assert(!strcmp(f.line_at_start, "Starting your node again - 0:00 (up to 3:00)"));
+    wsu_destroy(&w);
+    blocked_create(&f, &w, node_dir);
+    f.clock_follows = true;
+    f.exit_after_ms = 30000;
+    f.sample_ms = 20000;
+    assert(wsu_ask_start_over(&w));
+    wsu_start_over_job(&w);
+    assert(f.step_at_sample == WSU_WORKING && f.waiting_at_sample && w.step == WSU_CHOICE && !wsu_waiting(&w));
+    assert(!strcmp(f.line_at_sample, "Pausing your node so your old wallet can be set aside safely - 0:20 (up to 3:00)"));
     wsu_destroy(&w);
 }
 
@@ -2257,6 +2423,10 @@ int main(int argc, char **argv)
     choices_tests();
     pick_tests();
     confirm_waits_for_write_tests();
+    live_line_slow_write_tests();
+    confirm_note_tests();
+    write_failure_text_tests();
+    check_and_aside_live_line_tests();
     pick_random_failure_tests();
     phase_order_tests();
     slow_exit_tests();

@@ -10,8 +10,8 @@
 #include "setup_field.h"
 #include "wallet_setup.h"
 #include <pthread.h>
-#include <string.h>
 #include <stdatomic.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,13 +34,13 @@ _Static_assert(ZAPP_FIELD_PRIVATE(ZAPP_FIELD_INPUT_WORDS | ZAPP_FIELD_FLAG_MULTI
 #define SUMMARY_MAX 8192
 
 enum button { B_CREATE, B_RESTORE_FORM, B_RESTORE, B_RESTORE_UNKNOWN, B_SEEN, B_CONFIRM, B_AGAIN, B_BACK, B_CONTINUE, B_RECHECK, B_SAVE_AGAIN, B_NEW_WALLET, B_START_OVER_ASK, B_START_OVER_GO, B_START_OVER_CANCEL, B_RETRY_WRITE, B_GIVE_UP, B_PICK };   /* B_PICK + 4 * position + slot: one of the words offered */
-enum job_kind { JOB_WRITE, JOB_CREATE, JOB_RESTORE, JOB_PROGRESS, JOB_FINISH, JOB_RESUME, JOB_ASIDE, JOB_START_OVER };
+enum job_kind { JOB_WRITE, JOB_CREATE, JOB_RESTORE, JOB_PROGRESS, JOB_FINISH, JOB_RESUME, JOB_ASIDE, JOB_START_OVER, JOB_CLOCK };
 struct job { enum job_kind kind; char text[TYPED_MAX]; int64_t height; };
 
 static struct {
     ANativeActivity *activity;
     JavaVM *vm;
-    jobject app, key_app, container, words_input, height_input, buttons[BUTTONS_MAX];
+    jobject app, key_app, container, words_input, height_input, live, buttons[BUTTONS_MAX];   /* live: the line whose clock moves */
     pthread_mutex_t key_lock;   /* guards key_app, which a worker reads while the activity is replaced */
     enum button button_id[BUTTONS_MAX];
     size_t button_count;
@@ -48,7 +48,7 @@ static struct {
     bool model_ready;
     char blob[512];
     bool dropped;
-    atomic_bool progress_busy, resume_busy;
+    atomic_bool progress_busy, resume_busy, clock_busy;
     pthread_mutex_t progress_lock;
     int64_t scanned, tip;
     bool progress_known;
@@ -56,7 +56,7 @@ static struct {
     unsigned version, drawn_version;
     struct wsu_view drawn;
     int64_t drawn_scanned, drawn_tip;
-    bool is_drawn;
+    atomic_bool is_drawn;   /* read by the clock, which wakes only a screen that is drawn */
 } ui = {.key_lock = PTHREAD_MUTEX_INITIALIZER, .progress_lock = PTHREAD_MUTEX_INITIALIZER};
 
 /* ---- the host: random bytes, a JVM-attached worker, the device key and the node ---- */
@@ -98,6 +98,25 @@ static bool spawn_job(enum job_kind kind, const char *text, int64_t height)
     if (pthread_create(&thread, NULL, worker_main, job) != 0) { memory_cleanse(job, sizeof(*job)); free(job); return false; }
     (void)pthread_detach(thread);
     return true;
+}
+/* The UI ticks every two seconds, so a waiting screen gets its own clock: one worker that wakes the screen each second while a step
+ * runs. It runs at least one second, so a job a tap has just started is under way when it first looks. */
+static void start_clock(void)
+{
+    if (!atomic_exchange(&ui.clock_busy, true) && !spawn_job(JOB_CLOCK, NULL, 0)) atomic_store(&ui.clock_busy, false);
+}
+static void run_clock(void)
+{
+    static const struct timespec second = {.tv_sec = 1};
+    for (;;) {
+        do {
+            nanosleep(&second, NULL);
+            if (atomic_load(&ui.is_drawn) && ui.changed) ui.changed();
+        } while (wsu_waiting(&ui.model));
+        atomic_store(&ui.clock_busy, false);
+        /* A step that began while this clock was stopping found it busy and started none: this clock takes that step up. */
+        if (!wsu_waiting(&ui.model) || atomic_exchange(&ui.clock_busy, true)) return;
+    }
 }
 static bool key_ops(struct zapp_devkey_ops *out)
 {
@@ -198,6 +217,7 @@ static bool setup_runner(void *ctx, const char *op, const char *input, unsigned 
 static void run_job(struct job *job)
 {
     if (!ui.model_ready) return;
+    if (job->kind == JOB_CLOCK) { run_clock(); return; }
     if (job->kind == JOB_CREATE) { wsu_create_job(&ui.model); woken(); wsu_write_job(&ui.model); }
     else if (job->kind == JOB_WRITE) wsu_write_job(&ui.model);
     else if (job->kind == JOB_RESTORE) wsu_restore_job(&ui.model, job->text, job->height);
@@ -228,15 +248,17 @@ bool zapp_setup_attach(ANativeActivity *activity, void (*changed)(void))
 
 /* ---- widgets ---- */
 
-static bool text_view(JNIEnv *env, const char *text, float sp, uint32_t color)
+/* A line of text; keep, when given, holds the view so its text can change in place. */
+static bool text_view_kept(JNIEnv *env, const char *text, float sp, uint32_t color, jobject *keep)
 {
     jobject view = zj_widget(env, "android/widget/TextView", ui.app);
     bool ok = view && zj_typography(env, view, sp, (jint)color) && zj_padding(env, view, 0, 6) && zj_text(env, view, text) &&
               zj_bool_property(env, view, "setTextIsSelectable", false) && zj_bool_property(env, view, "setLongClickable", false) &&
-              zj_margins(env, view, MATCH, WRAP, 0.0f, 0, 0, 0, 0) && zj_append(env, ui.container, view);
+              zj_margins(env, view, MATCH, WRAP, 0.0f, 0, 0, 0, 0) && zj_append(env, ui.container, view) && (!keep || zj_keep(env, keep, view));
     if (view) (*env)->DeleteLocalRef(env, view);
     return ok;
 }
+static bool text_view(JNIEnv *env, const char *text, float sp, uint32_t color) { return text_view_kept(env, text, sp, color, NULL); }
 static bool words_view(JNIEnv *env, const char *text)
 {
     jobject view = zj_widget(env, "android/widget/TextView", ui.app);
@@ -281,11 +303,29 @@ static void release_widgets(JNIEnv *env)
     ui.button_count = 0;
     if (ui.words_input) (*env)->DeleteGlobalRef(env, ui.words_input);
     if (ui.height_input) (*env)->DeleteGlobalRef(env, ui.height_input);
-    ui.words_input = ui.height_input = NULL;
+    if (ui.live) (*env)->DeleteGlobalRef(env, ui.live);
+    ui.words_input = ui.height_input = ui.live = NULL;
 }
 
 /* ---- drawing ---- */
 
+/* What a waiting screen is doing and how long it has taken; kept, so the clock moves each second without a redraw. */
+static void live_line(JNIEnv *env, const struct wsu_view *v)
+{
+    char line[WSU_LINE_MAX];
+    wsu_working_line(v, line, sizeof(line));
+    (void)text_view_kept(env, line, 17.0f, WHITE, &ui.live);
+}
+/* The wallet behind the shown words: the live line while it is saved, and after a failure what happened and Try again. The check
+ * screen also offers the way out, which closes the words. */
+static void draw_write(JNIEnv *env, const struct wsu_view *v, bool way_out)
+{
+    if (v->write == WSU_WRITE_RUNNING) live_line(env, v);
+    if (v->write != WSU_WRITE_FAILED) return;
+    (void)text_view(env, wsu_write_failure_text(v->write_failure), 15.0f, AMBER);
+    (void)button_view(env, B_RETRY_WRITE, "Try again", GO_COLOR);
+    if (way_out) (void)button_view(env, B_GIVE_UP, "Stop and check this phone", BUTTON_COLOR);
+}
 static void draw_words(JNIEnv *env, const struct wsu_view *v)
 {
     const struct zapp_words *words = &v->words;
@@ -300,12 +340,12 @@ static void draw_words(JNIEnv *env, const struct wsu_view *v)
         (void)words_view(env, line);
     }
     memory_cleanse(line, sizeof(line));
+    draw_write(env, v, false);
     (void)button_view(env, B_SEEN, "I wrote them down", GO_COLOR);
 }
 static void draw_confirm(JNIEnv *env, const struct wsu_view *v)
 {
     char hint[48];
-    bool all = true;
     (void)text_view(env, "Check your words", 24.0f, WHITE);
     (void)text_view(env, "Tap the word you wrote down at each position.", 15.0f, SOFT);
     for (size_t i = 0; i < ZAPP_WORDS_ASKED; ++i) {
@@ -313,21 +353,14 @@ static void draw_confirm(JNIEnv *env, const struct wsu_view *v)
         (void)text_view(env, hint, 17.0f, WHITE);
         for (size_t s = 0; s < ZAPP_WORD_CHOICES; ++s)
             (void)button_view(env, (enum button)(B_PICK + ZAPP_WORD_CHOICES * i + s), v->choice[i][s], strcmp(v->choice[i][s], v->picked[i]) ? BUTTON_COLOR : GO_COLOR);
-        all = all && v->picked[i][0];
     }
     if (v->wrong_position) {
         snprintf(hint, sizeof(hint), "That is not word %zu. Check your paper.", v->wrong_position);
         (void)text_view(env, hint, 15.0f, AMBER);
     }
-    if (v->write == WSU_WRITE_FAILED) {
-        (void)text_view(env, wsu_failure_text(v->write_failure), 15.0f, AMBER);
-        (void)button_view(env, B_RETRY_WRITE, "Try again", GO_COLOR);
-        (void)button_view(env, B_GIVE_UP, "Stop and check this phone", BUTTON_COLOR);
-    } else if (all && v->write != WSU_WRITE_DONE) {
-        (void)text_view(env, v->phase == WSU_PHASE_RESTART ? "Restarting your node…" : "Saving your wallet…", 15.0f, SOFT);
-    } else if (all) {
-        (void)button_view(env, B_CONFIRM, "Confirm", GO_COLOR);
-    }
+    draw_write(env, v, true);
+    if (wsu_view_confirm_ready(v)) (void)button_view(env, B_CONFIRM, "Confirm", GO_COLOR);
+    else if (wsu_confirm_note(v)[0]) (void)text_view(env, wsu_confirm_note(v), 15.0f, SOFT);
     (void)button_view(env, B_AGAIN, "Show the words again", BUTTON_COLOR);
 }
 static void draw_form(JNIEnv *env, const struct wsu_view *v)
@@ -390,13 +423,7 @@ static void draw_interrupted(JNIEnv *env, const struct wsu_view *v)
     case WSU_CHECKING:
         (void)text_view(env, "Checking this phone's wallet", 24.0f, WHITE);
         (void)text_view(env, "Setup was interrupted. The app is reading what it left behind.", 15.0f, SOFT);
-        if (v->phase != WSU_PHASE_NONE) {
-            char line[320];
-            wsu_working_line(v, line, sizeof(line));
-            (void)text_view(env, line, 15.0f, SOFT);
-            wsu_elapsed_text(v, line, sizeof(line));
-            (void)text_view(env, line, 15.0f, SOFT);
-        }
+        live_line(env, v);
         break;
     default:
         (void)text_view(env, "Setup was interrupted", 24.0f, WHITE);
@@ -419,12 +446,8 @@ static void draw_model(JNIEnv *env, const struct wsu_view *v, bool known, int64_
         (void)button_view(env, B_RESTORE_FORM, "Restore from words", BUTTON_COLOR);
         break;
     case WSU_WORKING:
-        char line[320], elapsed[64];
-        wsu_working_line(v, line, sizeof(line));
         (void)text_view(env, "Working", 24.0f, WHITE);
-        (void)text_view(env, line, 17.0f, WHITE);
-        wsu_elapsed_text(v, elapsed, sizeof(elapsed));
-        (void)text_view(env, elapsed, 15.0f, SOFT);
+        live_line(env, v);
         (void)text_view(env, "Keep this screen open until this finishes.", 15.0f, SOFT);
         break;
     case WSU_WORDS: draw_words(env, v); break;
@@ -446,6 +469,20 @@ static void draw_model(JNIEnv *env, const struct wsu_view *v, bool known, int64_
     }
 }
 
+/* Whether the screen on display still shows v: nothing changed, or only the clock of its live line, which then moves in place. */
+static bool drawn_holds(JNIEnv *env, const struct wsu_view *v, int64_t scanned, int64_t tip)
+{
+    char line[WSU_LINE_MAX];
+    const size_t at = offsetof(struct wsu_view, elapsed_s), past = at + sizeof(v->elapsed_s);
+    bool same = atomic_load(&ui.is_drawn) && ui.drawn_version == ui.version && ui.drawn_scanned == scanned && ui.drawn_tip == tip &&
+                !memcmp(v, &ui.drawn, at) && !memcmp((const char *)v + past, (const char *)&ui.drawn + past, sizeof(*v) - past);
+    if (!same) return false;
+    if (v->elapsed_s == ui.drawn.elapsed_s) return true;
+    wsu_working_line(v, line, sizeof(line));
+    if (!ui.live || !zj_text(env, ui.live, line)) return false;
+    ui.drawn.elapsed_s = v->elapsed_s;
+    return true;
+}
 void zapp_setup_ui_render(JNIEnv *env)
 {
     struct wsu_view v;
@@ -456,7 +493,7 @@ void zapp_setup_ui_render(JNIEnv *env)
     pthread_mutex_lock(&ui.progress_lock);
     known = ui.progress_known; scanned = ui.scanned; tip = ui.tip;
     pthread_mutex_unlock(&ui.progress_lock);
-    if (ui.is_drawn && ui.drawn_version == ui.version && !memcmp(&v, &ui.drawn, sizeof(v)) && ui.drawn_scanned == scanned && ui.drawn_tip == tip) {
+    if (drawn_holds(env, &v, scanned, tip)) {
         memory_cleanse(&v, sizeof(v));
         return;
     }
@@ -536,6 +573,7 @@ void zapp_setup_ui_tick(JNIEnv *env)
     if (v.step == WSU_CHECKING && !atomic_exchange(&ui.resume_busy, true) && !spawn_job(JOB_RESUME, NULL, 0))
         atomic_store(&ui.resume_busy, false);
     memory_cleanse(&v, sizeof(v));
+    if (wsu_waiting(&ui.model)) start_clock();
     zapp_setup_ui_render(env);
 }
 void zapp_setup_ui_dropped(JNIEnv *env)
@@ -631,7 +669,7 @@ enum zapp_setup_outcome zapp_setup_ui_press(JNIEnv *env, size_t button)
     if (button >= ui.button_count || !ui.model_ready) return outcome;
     ui.dropped = false;
     if (ui.button_id[button] == B_CONTINUE) outcome = ZAPP_SETUP_LEAVE;
-    else press_model(env, ui.button_id[button]);
+    else { press_model(env, ui.button_id[button]); start_clock(); }
     ui.version++;
     if (outcome == ZAPP_SETUP_STAY) zapp_setup_ui_render(env);
     return outcome;
