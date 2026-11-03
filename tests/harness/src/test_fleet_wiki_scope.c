@@ -205,8 +205,13 @@ static int fws_hidden_cases(struct node_db *db)
         ASSERT(fws_read("fleet-only", "public", &got));
         ASSERT_EQ(got.status, ZCL_COMMAND_STATUS_FAILED);
         zcl_command_reply_free(&got);
-        /* An exact id read narrowed to the public scope refuses it too; the
-         * fleet scope (or no narrowing) reads the revision. */
+        /* An exact id read with no scope is public and refuses it, as does
+         * scope=public; only scope=fleet reads the revision. */
+        const char *bare_id[] = {"id", fleet_id, NULL};
+        ASSERT(fws_run(zcl_native_handle_fleet_wiki_read, "zcl.fleet_wiki_read.v1", bare_id, &got));
+        ASSERT_EQ(got.status, ZCL_COMMAND_STATUS_FAILED);
+        ASSERT(strstr(got.error.message, "scope=fleet") != NULL);
+        zcl_command_reply_free(&got);
         const char *by_id[] = {"id", fleet_id, "scope", "public", NULL};
         ASSERT(fws_run(zcl_native_handle_fleet_wiki_read, "zcl.fleet_wiki_read.v1", by_id, &got));
         ASSERT_EQ(got.status, ZCL_COMMAND_STATUS_FAILED);

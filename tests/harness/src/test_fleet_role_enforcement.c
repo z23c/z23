@@ -213,6 +213,10 @@ static enum fleet_board_result re_post_scoped(struct node_db *db,
     post.created_at = (uint64_t)RE_POST_NOW;
     post.ttl = 3600;
     (void)snprintf(post.agent, sizeof post.agent, "%s", "role-lane");
+    if (kind == FLEET_BOARD_KIND_WIKI) {
+        (void)snprintf(post.slug, sizeof post.slug, "%s", "role-page");
+        (void)snprintf(post.title, sizeof post.title, "%s", "role page");
+    }
     size_t n = strlen(text);
     memcpy(post.text, text, n);
     post.text[n] = '\0';
@@ -364,6 +368,16 @@ int test_fleet_role_enforcement(void)
         ASSERT_EQ(re_post(&db, op_sk, op_pub, FLEET_BOARD_KIND_OFFER,
                           "a kind this role was never granted"),
                   FLEET_BOARD_ERR_ROLE);
+        /* Nor may a worker key sign a FLEET-scope wiki page: worker's board
+         * kinds exclude `wiki`, so a fleet-scope wiki write by a worker-role
+         * key is refused. A public-scope page is open to any node key, so
+         * the same key's public page is stored. */
+        ASSERT_EQ(re_post_scoped(&db, op_sk, op_pub, FLEET_BOARD_KIND_WIKI,
+                                 FLEET_BOARD_SCOPE_FLEET, "worker fleet page"),
+                  FLEET_BOARD_ERR_ROLE);
+        ASSERT_EQ(re_post_scoped(&db, op_sk, op_pub, FLEET_BOARD_KIND_WIKI,
+                                 FLEET_BOARD_SCOPE_PUBLIC, "worker public page"),
+                  FLEET_BOARD_OK);
         /* A key with no grant at all is refused. */
         ASSERT_EQ(re_post(&db, stranger_sk, stranger_pub,
                           FLEET_BOARD_KIND_NOTE, "no grant anywhere"),

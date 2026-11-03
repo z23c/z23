@@ -43,7 +43,13 @@ paired, roster-admitted peers whose key holds a role receive it, and a
 public read, find, list or history never returns it. One slug names one
 page per scope. A revision (`--supersedes`) or a review must stay in its
 target's scope: `CROSS_SCOPE_REVISION` / `CROSS_SCOPE_REVIEW` refuse it. An
-exact-id read without `--scope` reads that revision whatever its scope.
+exact-id read without `--scope` is public like the other ops; name
+`--scope=fleet` to read a fleet revision. The cross-scope check runs before
+signing and only against a target this node already holds, so a target that
+arrives later is not checked. Only the operator role signs fleet-scope wiki
+pages: a worker-role key's fleet wiki row is refused (its fleet.board.post
+grant omits `wiki`); workers and observers read. Public pages are open to any
+node key.
 
 Reviews are ordinary revisions whose body is a
 `zcl.fleet_wiki_review.v1` object naming one exact revision id:

@@ -902,9 +902,9 @@ static void fb_op_wiki_read(struct node_db *ndb, const struct json_value *in,
     if (!fb_wiki_view(in, result, &view))
         return;
     if (json_get(in, "id")) {
-        /* An exact id names one revision; scope, when given, narrows it. */
-        fb_op_wiki_chunk(ndb, json_get(in, "scope") ? view : FLEET_WIKI_VIEW_ANY,
-                         in, result);
+        /* An id read defaults to public like the other ops: a fleet revision
+         * is served only when scope=fleet is named. */
+        fb_op_wiki_chunk(ndb, view, in, result);
         return;
     }
     if (json_get(in, "offset") || json_get(in, "bytes")) {

@@ -3965,12 +3965,13 @@ static void fb_max_entry(char *out, size_t cap, const char *topic)
 }
 
 static bool fb_chunk_envelope_as(struct fb_rpc_env *e, const char *id,
-                              int64_t offset, struct json_value *envelope, bool wrapper, size_t budget)
+                              int64_t offset, struct json_value *envelope, bool wrapper, size_t budget, bool fleet)
 {
     struct json_value input;
     json_init(&input); json_set_object(&input);
     (void)json_push_kv_str(&input, "id", id);
     (void)json_push_kv_int(&input, "offset", offset);
+    if (fleet && !wrapper) (void)json_push_kv_str(&input, "scope", "fleet");
     (void)json_push_kv_int(&input, "bytes", 1024);
     const char *path = wrapper ? "fleet.steer.wiki-read" : "fleet.wiki.read";
     const struct zcl_command_registry *reg = zcl_command_catalog();
@@ -3996,7 +3997,7 @@ static bool fb_chunk_envelope_as(struct fb_rpc_env *e, const char *id,
 static bool fb_chunk_envelope(struct fb_rpc_env *e, const char *id,
                               int64_t offset, struct json_value *envelope)
 {
-    return fb_chunk_envelope_as(e, id, offset, envelope, false, 4096);
+    return fb_chunk_envelope_as(e, id, offset, envelope, false, 4096, false);
 }
 
 static bool fb_chunk_metadata(const struct json_value *data,
@@ -4027,7 +4028,7 @@ static bool fb_chunk_reassemble_as(struct fb_rpc_env *e, const char *id,
     int64_t offset = 0;
     while ((uint64_t)offset < expected->text_len) {
         struct json_value envelope;
-        if (!fb_chunk_envelope_as(e, id, offset, &envelope, wrapper, budget)) {
+        if (!fb_chunk_envelope_as(e, id, offset, &envelope, wrapper, budget, expected->scope == FLEET_BOARD_SCOPE_FLEET)) {
             json_free(&envelope);
             return false;
         }
@@ -4958,8 +4959,17 @@ static bool fb_chunk_scope_roundtrip(struct fb_rpc_env *e, uint8_t scope,
         db_fleet_board_post_ingest(&e->db, &post, now, NULL) != FLEET_BOARD_OK)
         return false;
     char id[65]; fleet_board_id_to_hex(post.id, id);
+    if (scope != FLEET_BOARD_SCOPE_FLEET)
+        return fb_chunk_reassemble(e, id, &post) &&
+            fb_chunk_reassemble_as(e, id, &post, true, 4096);
+    /* A fleet revision reads in chunks only with scope=fleet named; an id
+     * read with no scope is public and the steer wrapper (no scope option)
+     * is refused. */
+    struct fleet_board_post publicly = post;
+    publicly.scope = FLEET_BOARD_SCOPE_PUBLIC;
     return fb_chunk_reassemble(e, id, &post) &&
-        fb_chunk_reassemble_as(e, id, &post, true, 4096);
+        !fb_chunk_reassemble(e, id, &publicly) &&
+        !fb_chunk_reassemble_as(e, id, &post, true, 4096);
 }
 
 /* Read a page by slug through the registry path the CLI uses. */
