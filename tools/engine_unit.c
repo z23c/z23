@@ -862,11 +862,10 @@ static bool compose_prompt_advance(size_t cap, int *n, int emitted)
     return true;
 }
 
-/* The two sections that lead the prompt, in order: the carried state, then
- * the kind's constraints. False when either does not fit the cap. */
-static bool compose_prompt_leading(const struct unit_opts *o,
-                                   const char *carried_preamble,
-                                   char *p, size_t cap, int *n)
+/* The carried state leads everything else, including the kind's own
+ * constraints. False when it does not fit the cap. */
+static bool compose_prompt_carried(const char *carried_preamble, char *p,
+                                   size_t cap, int *n)
 {
     /* Carried state leads everything else, including the kind's own
      * constraints: it is what THIS run already knows about itself, from an
@@ -877,6 +876,14 @@ static bool compose_prompt_leading(const struct unit_opts *o,
         if (!compose_prompt_advance(cap, n, pn))
             return false;
     }
+    return true;
+}
+
+/* The kind's constraints, which lead the rest of the prompt. False when they
+ * do not fit the cap. */
+static bool compose_prompt_kind(const struct unit_opts *o, char *p,
+                                size_t cap, int *n)
+{
     /* The kind's own constraints lead the rest, because they are the frame
      * the task is read in. A unit that must not edit anything should learn
      * that before it reads a job description full of file names. */
@@ -903,7 +910,11 @@ static char *compose_prompt(const struct unit_opts *o,
     if (!p)
         LOG_NULL("engine_unit", "cannot allocate the prompt buffer");
     int n = 0;
-    if (!compose_prompt_leading(o, carried_preamble, p, cap, &n)) {
+    if (!compose_prompt_carried(carried_preamble, p, cap, &n)) {
+        free(p);
+        LOG_NULL("engine_unit", "the composed prompt does not fit its cap");
+    }
+    if (!compose_prompt_kind(o, p, cap, &n)) {
         free(p);
         LOG_NULL("engine_unit", "the composed prompt does not fit its cap");
     }
