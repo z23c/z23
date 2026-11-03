@@ -609,11 +609,18 @@ static void remove_dir(void)
 }
 static bool live_shown(void) { return find_text(snap(), "Up to date") >= 0; }
 static bool cache_present(void) { return file_exists("wallet_balance_cache"); }
+/* A fresh files directory under TMPDIR, which the Makefile points at the build directory so no test writes to /tmp. */
+static void make_dir(void)
+{
+    const char *base = getenv("TMPDIR");
+    CHECK(base && base[0]);
+    snprintf(cache_dir, sizeof(cache_dir), "%s/z23-balance-XXXXXX", base && base[0] ? base : ".");
+    CHECK(mkdtemp(cache_dir) != NULL);
+}
 /* A wallet directory holding key file "one", whose first live summary leaves the balance file. */
 static void wallet_with_balance(void)
 {
-    snprintf(cache_dir, sizeof(cache_dir), "%s/z23-balance-XXXXXX", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
-    CHECK(mkdtemp(cache_dir) != NULL);
+    make_dir();
     put_file("wallet_key.blob", "key file one");
     wall = 1700000000;
     start(false);
@@ -714,10 +721,10 @@ static void test_cache_not_trusted(void)
 /* Only a real summary is kept: an unreadable reply, a stopped node and a locked wallet leave nothing. */
 static void test_cache_only_real_summaries(void)
 {
-    static const char *const replies[] = {NODE_UNAVAILABLE_ERROR, "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\"}}"};
-    for (size_t i = 0; i < 2; ++i) {
-        snprintf(cache_dir, sizeof(cache_dir), "%s/z23-balance-XXXXXX", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
-        CHECK(mkdtemp(cache_dir) != NULL);
+    static const char *const replies[] = {NODE_UNAVAILABLE_ERROR, "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\"}}",
+                                          SUMMARY_STATE("keys_unavailable", PRIVATE_HIDDEN, "10000000", "0.10000000")};
+    for (size_t i = 0; i < 3; ++i) {
+        make_dir();
         put_file("wallet_key.blob", "key file one");
         start(false);
         fake.summary = replies[i];
@@ -726,6 +733,35 @@ static void test_cache_only_real_summaries(void)
         wallet_screens_close();
         remove_dir();
     }
+}
+
+/* A balance file dated ahead of this clock was not written by it: nothing is shown and the file is deleted. A small lead is clock slack. */
+static void test_cache_from_the_future(void)
+{
+    make_dir();
+    put_file("wallet_key.blob", "key file one");
+    wall = 1700007200;                                             /* written when the clock said two hours later */
+    start(false);
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS) && has("1.23456789 ZCL"));
+    wallet_screens_close();
+    CHECK(file_exists("wallet_balance_cache"));
+    wall = 1700000000;
+    struct wallet_screen *s = open_waiting();
+    CHECK(find_text(s, "Last known") < 0 && find_text(s, "Loading") >= 0 && !file_exists("wallet_balance_cache"));
+    finish_waiting();
+    remove_dir();
+
+    make_dir();
+    put_file("wallet_key.blob", "key file one");
+    wall = 1700000100;                                             /* 100 s ahead: within the slack */
+    start(false);
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    wallet_screens_close();
+    wall = 1700000000;
+    s = open_waiting();
+    CHECK(find_text(s, "Last known balance, less than a minute ago") >= 0);
+    finish_waiting();
+    remove_dir();
 }
 
 /* A node that stops answering after it did answer shows the last balance with its age, beside the notice that it is waiting. */
@@ -1308,7 +1344,7 @@ static void test_receive_copy(void)
     tap(WALLET_ACT_COPY_ADDRESS, 0, WALLET_STAY);
     CHECK(fake.copy_calls == 1 && !strcmp(fake.copied, A1));                      /* the bare address, not the groups of four */
     s = snap();
-    CHECK(!strcmp(text_at(s, find_text(s, "Address copied")), "Address copied. It clears in 1 minute."));
+    CHECK(!strcmp(text_at(s, find_text(s, "Address copied")), "Address copied. It clears after a minute."));
     CHECK(find_text(s, "Could not copy") < 0);
     fake.copy_ok = false;
     tap(WALLET_ACT_COPY_ADDRESS, 0, WALLET_STAY);
@@ -1660,6 +1696,7 @@ int main(int argc, char **argv)
     test_cache_roundtrip();
     test_cache_other_wallet();
     test_cache_not_trusted();
+    test_cache_from_the_future();
     test_cache_only_real_summaries();
     test_cache_silent_node();
     test_receive();

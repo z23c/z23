@@ -22,7 +22,7 @@
 #define TXID_MAX (WALLET_TXID_LEN + 1u)
 #define MEMO_MAX 1025u /* 512 bytes of text, or 512 bytes as hex, and the NUL */
 #define NOTE_MAX 192u
-#define WALLET_COPIED_NOTE "Address copied. It clears in 1 minute."
+#define WALLET_COPIED_NOTE "Address copied. It clears after a minute."
 #define WALLET_COPY_FAILED_NOTE "Could not copy the address."
 #define MAX_UNIX 253402300799LL
 #define MACHINES_MAX 64u
@@ -189,6 +189,7 @@ static void title(struct wallet_screen *s, const char *text)
 #define CACHE_BODY_MAX 640u
 #define CACHE_PATH_MAX 512u
 #define CACHE_REFRESH_S 60 /* an unchanged balance is written again after this long, so its age stays honest */
+#define CACHE_FUTURE_S 120 /* a file dated further ahead than this was not written by this clock, and is deleted */
 #define KEY_FILE_MAX 65536u
 
 struct cache_job { bool go; char path[CACHE_PATH_MAX], body[CACHE_BODY_MAX]; };
@@ -231,7 +232,7 @@ static bool plain_line(const char *text)
     return n < WALLET_VIEW_LINE;
 }
 /* The file is: tag, wallet, time, balance, pending, public, each ended by a newline, and nothing after. */
-static bool cache_parse(char *body, const char *wallet, struct cache *out)
+static bool cache_parse(char *body, const char *wallet, int64_t now_s, struct cache *out)
 {
     char *line[6], *end = NULL;
     for (int i = 0; i < 6; ++i) {
@@ -242,7 +243,7 @@ static bool cache_parse(char *body, const char *wallet, struct cache *out)
         body = nl + 1;
     }
     long long at = line[2][0] ? strtoll(line[2], &end, 10) : 0;
-    if (*body || strcmp(line[0], CACHE_TAG) || strcmp(line[1], wallet) || !end || *end || at <= 0) return false;
+    if (*body || strcmp(line[0], CACHE_TAG) || strcmp(line[1], wallet) || !end || *end || at <= 0 || at > now_s + CACHE_FUTURE_S) return false;
     for (int i = 3; i < 6; ++i) if (!plain_line(line[i])) return false;
     if (!ends_in_zcl(line[3])) return false;
     out->valid = true;
@@ -262,7 +263,7 @@ static void cache_load(void)
     ssize_t n = read(fd, body, sizeof(body) - 1);
     (void)close(fd);
     if (n > 0) body[n] = '\0';
-    bool ok = n > 0 && wallet_identity(wallet) && cache_parse(body, wallet, &st.d.cache);
+    bool ok = n > 0 && wallet_identity(wallet) && cache_parse(body, wallet, wall_s(), &st.d.cache);
     if (!ok) { memset(&st.d.cache, 0, sizeof(st.d.cache)); (void)unlink(path); }
     memory_cleanse(body, sizeof(body));
 }

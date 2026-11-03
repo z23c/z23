@@ -197,7 +197,7 @@ test-wallet:
 	@mkdir -p '$(BUILD_DIR)'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) tests/wallet_screens_test.c wallet_screens.c payment_code.c wallet_view.c \
 	  ../../contexts/commons/packages/zutf8/src/zutf8.c $(SPEECH_JSON) -o '$(BUILD_DIR)/wallet-screens-test'
-	'$(BUILD_DIR)/wallet-screens-test'
+	TMPDIR="$$(cd '$(BUILD_DIR)' && pwd)" '$(BUILD_DIR)/wallet-screens-test'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) tests/wallet_run_test.c operations.c setup_state.c private.c params.c rpc.c nodelog.c \
 	  ../../platform/modules/sha3/src/sha3.c $(SPEECH_JSON) -Wl,--wrap=posix_spawn -o '$(BUILD_DIR)/wallet-run-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/wallet-run.XXXXXX'); \
@@ -211,8 +211,10 @@ test-wallet:
 	  echo 'only the wallet files, the command layer and the shell may include the wallet headers' >&2; exit 1; fi
 	@if test "$$(grep -c wallet_screens_close shell.c)" != 1; then \
 	  echo 'the shell may close the wallet screens only when it is destroyed; every other exit pauses them' >&2; exit 1; fi
-	@if grep -nE 'setTextIsSelectable", true|ClipboardManager|setPrimaryClip' wallet_ui.c; then \
-	  echo 'wallet text must not be selectable or copied' >&2; exit 1; fi
+	@if grep -nE 'setTextIsSelectable", true|ClipboardManager|setPrimaryClip' wallet_screens.c wallet_view.c wallet_ui.c wallet_send_*.c; then \
+	  echo 'wallet text must not be selectable or copied; the one exception is Copy address on Receive, which copies the bare receive address only, through secure_window.c' >&2; exit 1; fi
+	@if grep -n zapp_clipboard_copy_sensitive wallet_screens.c wallet_view.c wallet_ui.c wallet_send_*.c | grep -v 'wallet_ui.c:[0-9]*:static bool bound_copy_address'; then \
+	  echo 'zapp_clipboard_copy_sensitive may be called only from bound_copy_address in wallet_ui.c' >&2; exit 1; fi
 
 check-node:
 	@test -x '$(NODE_BIN)' || { echo 'Build the Android node first' >&2; exit 1; }

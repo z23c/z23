@@ -155,8 +155,9 @@ static void a_missing_protection_is_a_refusal(void)
     zapp_secure_window_release();
 }
 
-/* A fake clipboard holding one clip: its text and the stamp the system gave it. */
-struct board { char text[64]; int64_t stamp, next_stamp; bool has, put_ok, clear_ok; int clears; };
+/* A fake clipboard holding one clip: its text and the stamp the system gave it. While unreadable it answers like an
+ * app in the background: it cannot be read. */
+struct board { char text[64]; int64_t stamp, next_stamp; bool has, put_ok, clear_ok, unreadable; int clears, reads, pauses, readable_after; };
 static bool b_put(void *c, const char *text, int64_t *stamp)
 {
     struct board *b = c;
@@ -166,7 +167,15 @@ static bool b_put(void *c, const char *text, int64_t *stamp)
     b->has = true;
     return true;
 }
-static bool b_current(void *c, int64_t *stamp) { struct board *b = c; if (b->has) *stamp = b->stamp; return b->has; }
+static enum zapp_clip_state b_current(void *c, int64_t *stamp)
+{
+    struct board *b = c;
+    b->reads++;
+    if (b->unreadable) return ZAPP_CLIP_UNREADABLE;
+    if (!b->has) return ZAPP_CLIP_EMPTY;
+    *stamp = b->stamp;
+    return ZAPP_CLIP_HELD;
+}
 static bool b_clear(void *c)
 {
     struct board *b = c;
@@ -174,10 +183,16 @@ static bool b_clear(void *c)
     if (b->clear_ok) { b->has = false; b->text[0] = '\0'; }
     return b->clear_ok;
 }
+static void b_pause(void *c)
+{
+    struct board *b = c;
+    if (++b->pauses == b->readable_after) b->unreadable = false;    /* the app came back to the front */
+}
+static struct board fresh_board(void) { return (struct board){.put_ok = true, .clear_ok = true, .next_stamp = 100}; }
 static void an_empty_copy_is_refused(void)
 {
-    struct board b = {.put_ok = true, .clear_ok = true, .next_stamp = 100};
-    struct zapp_clip_ops ops = {&b, b_put, b_current, b_clear};
+    struct board b = fresh_board();
+    struct zapp_clip_ops ops = {&b, b_put, b_current, b_clear, b_pause};
     int64_t stamp = 0;
     assert(!zapp_clip_copy(&ops, "", &stamp) && !zapp_clip_copy(&ops, NULL, &stamp) && !b.has);
     assert(!zapp_clip_copy(NULL, "zs1abc", &stamp));
@@ -186,8 +201,8 @@ static void an_empty_copy_is_refused(void)
 }
 static void the_clipboard_clears_only_our_clip(void)
 {
-    struct board b = {.put_ok = true, .clear_ok = true, .next_stamp = 100};
-    struct zapp_clip_ops ops = {&b, b_put, b_current, b_clear};
+    struct board b = fresh_board();
+    struct zapp_clip_ops ops = {&b, b_put, b_current, b_clear, b_pause};
     int64_t stamp = 0, other = 0;
     assert(zapp_clip_copy(&ops, "zs1abc", &stamp) && b.has && !strcmp(b.text, "zs1abc") && stamp == 100);
     assert(zapp_clip_expire(&ops, stamp) && !b.has && b.clears == 1);        /* untouched for a minute: cleared */
@@ -199,11 +214,45 @@ static void the_clipboard_clears_only_our_clip(void)
 }
 static void a_refused_clear_is_reported(void)
 {
-    struct board b = {.put_ok = true, .clear_ok = false, .next_stamp = 100};
-    struct zapp_clip_ops ops = {&b, b_put, b_current, b_clear};
+    struct board b = fresh_board();
+    struct zapp_clip_ops ops = {&b, b_put, b_current, b_clear, b_pause};
     int64_t stamp = 0;
+    b.clear_ok = false;
     assert(zapp_clip_copy(&ops, "zs1abc", &stamp) && !zapp_clip_expire(&ops, stamp) && b.has);
     assert(!zapp_clip_expire(NULL, stamp));
+}
+/* In the background the clipboard cannot be read: that is not "gone", so expire reports false and clears nothing. */
+static void an_unreadable_clipboard_is_never_reported_cleared(void)
+{
+    struct board b = fresh_board();
+    struct zapp_clip_ops ops = {&b, b_put, b_current, b_clear, b_pause};
+    int64_t stamp = 0;
+    assert(zapp_clip_copy(&ops, "zs1abc", &stamp));
+    b.unreadable = true;
+    assert(!zapp_clip_expire(&ops, stamp) && b.clears == 0 && b.has);
+    b.unreadable = false;
+    assert(zapp_clip_expire(&ops, stamp) && b.clears == 1 && !b.has);        /* back in the front: cleared */
+}
+static void the_clear_retries_until_the_app_has_focus(void)
+{
+    struct board b = fresh_board();
+    struct zapp_clip_ops ops = {&b, b_put, b_current, b_clear, b_pause};
+    int64_t stamp = 0;
+    assert(zapp_clip_copy(&ops, "zs1abc", &stamp));
+    b.unreadable = true;
+    b.readable_after = 3;                                                    /* readable again after the third wait */
+    assert(zapp_clip_settle(&ops, stamp, 10) && b.reads == 4 && b.pauses == 3 && b.clears == 1 && !b.has);
+    b = fresh_board();                                                       /* never in front: gives up, clears nothing */
+    assert(zapp_clip_copy(&ops, "zs1abc", &stamp));
+    b.unreadable = true;
+    assert(!zapp_clip_settle(&ops, stamp, 5) && b.reads == 5 && b.pauses == 4 && b.clears == 0 && b.has);
+    b = fresh_board();                                                       /* a clip someone else put there is left alone */
+    assert(zapp_clip_copy(&ops, "zs1abc", &stamp));
+    b.unreadable = true;
+    b.readable_after = 1;
+    int64_t other = 0;
+    assert(b_put(&b, "someone else", &other));
+    assert(zapp_clip_settle(&ops, stamp, 5) && b.clears == 0 && b.has && !strcmp(b.text, "someone else"));
 }
 
 int main(void)
@@ -234,6 +283,8 @@ int main(void)
     an_empty_copy_is_refused();
     the_clipboard_clears_only_our_clip();
     a_refused_clear_is_reported();
+    an_unreadable_clipboard_is_never_reported_cleared();
+    the_clear_retries_until_the_app_has_focus();
     puts("secure_window_test: ok");
     return 0;
 }

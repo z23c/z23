@@ -590,7 +590,12 @@ bool zapp_send_progress(char *line, size_t cap)
     snprintf(line, cap, "%s", ui.final_line);
     return true;
 }
-void zapp_send_progress_dismiss(void) { ui.final_line[0] = 0; }
+void zapp_send_progress_dismiss(void)
+{
+    struct wss *s = ui.keeper.screen ? ui.keeper.screen : ui.keeper.retired;
+    if (s) wss_progress_dismiss(s);
+    ui.final_line[0] = 0;
+}
 bool zapp_send_ui_owes(void) { return ui.flow || wsk_owes(&ui.keeper); }
 bool zapp_send_busy(void) { return atomic_load(&send_busy); }
 void zapp_send_ui_dropped(JNIEnv *env)

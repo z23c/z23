@@ -60,10 +60,19 @@ bool zapp_clip_copy(const struct zapp_clip_ops *ops, const char *text, int64_t *
 }
 bool zapp_clip_expire(const struct zapp_clip_ops *ops, int64_t stamp)
 {
-    int64_t held;
+    int64_t held = 0;
     if (!ops || !ops->current || !ops->clear) return false;
-    if (!ops->current(ops->ctx, &held)) return true;
-    return held != stamp || ops->clear(ops->ctx);
+    enum zapp_clip_state state = ops->current(ops->ctx, &held);
+    if (state == ZAPP_CLIP_UNREADABLE) return false;
+    return state == ZAPP_CLIP_EMPTY || held != stamp || ops->clear(ops->ctx);
+}
+bool zapp_clip_settle(const struct zapp_clip_ops *ops, int64_t stamp, unsigned attempts)
+{
+    for (unsigned i = 0; i < attempts; ++i) {
+        if (zapp_clip_expire(ops, stamp)) return true;
+        if (ops && ops->pause && i + 1 < attempts) ops->pause(ops->ctx);
+    }
+    return false;
 }
 
 #ifdef __ANDROID__
@@ -185,9 +194,11 @@ static_assert(ZAPP_MOTION_ACTION_MASK == AMOTION_EVENT_ACTION_MASK && ZAPP_MOTIO
 
 #define CLIP_SENSITIVE_EXTRA "android.content.extra.IS_SENSITIVE" /* ClipDescription.EXTRA_IS_SENSITIVE */
 #define CLIP_LABEL "Z23 address"
+#define CLIP_RETRY_SECONDS 10 /* between tries of a clear that was refused */
+#define CLIP_RETRY_ATTEMPTS 2160u /* six hours of tries */
 #define CLIP_LOG(what) __android_log_print(ANDROID_LOG_WARN, "z23", "clipboard: %s", what)
 
-struct jni_clip { JNIEnv *env; jobject manager; };
+struct jni_clip { JNIEnv *env; jobject manager; bool refusal_logged; };
 static bool jni_clip_clear(void *context);
 
 /* A ClipData of plain text. */
@@ -221,13 +232,18 @@ static jobject sensitive_clip(JNIEnv *env, const char *text)
     if (set) (*env)->CallVoidMethod(env, description, set, extras);
     return set && zj_clean(env) ? clip : NULL;
 }
-static bool stamp_of(JNIEnv *env, jobject manager, int64_t *stamp)
+/* A refused read (SecurityException while the app has no focus) is UNREADABLE; no clip at all is EMPTY. */
+static enum zapp_clip_state stamp_of(JNIEnv *env, jobject manager, int64_t *stamp)
 {
-    jobject description = zj_object_property(env, manager, "getPrimaryClipDescription", "()Landroid/content/ClipDescription;");
-    jmethodID get = description ? zj_method(env, description, "getTimestamp", "()J") : NULL;
+    jmethodID read = zj_method(env, manager, "getPrimaryClipDescription", "()Landroid/content/ClipDescription;");
+    jobject description = read ? (*env)->CallObjectMethod(env, manager, read) : NULL;
+    if (!read || !zj_clean(env)) return ZAPP_CLIP_UNREADABLE;
+    if (!description) return ZAPP_CLIP_EMPTY;
+    jmethodID get = zj_method(env, description, "getTimestamp", "()J");
     jlong value = get ? (*env)->CallLongMethod(env, description, get) : 0;
-    if (get && zj_clean(env)) *stamp = (int64_t)value;
-    return get && description;
+    if (!get || !zj_clean(env)) return ZAPP_CLIP_UNREADABLE;
+    *stamp = (int64_t)value;
+    return ZAPP_CLIP_HELD;
 }
 static bool jni_clip_put(void *context, const char *text, int64_t *stamp)
 {
@@ -237,19 +253,23 @@ static bool jni_clip_put(void *context, const char *text, int64_t *stamp)
     jobject data = sensitive_clip(env, text);
     jmethodID set = data ? zj_method(env, clip->manager, "setPrimaryClip", "(Landroid/content/ClipData;)V") : NULL;
     if (set) (*env)->CallVoidMethod(env, clip->manager, set, data);
-    bool placed = set && zj_clean(env), ok = placed && stamp_of(env, clip->manager, stamp);
+    bool placed = set && zj_clean(env), ok = placed && stamp_of(env, clip->manager, stamp) == ZAPP_CLIP_HELD;
     if (placed && !ok) (void)jni_clip_clear(context);
     (*env)->PopLocalFrame(env, NULL);
     return ok;
 }
-static bool jni_clip_current(void *context, int64_t *stamp)
+static enum zapp_clip_state jni_clip_current(void *context, int64_t *stamp)
 {
     struct jni_clip *clip = context;
     JNIEnv *env = clip->env;
-    if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)zj_clean(env); return false; }
-    bool ok = stamp_of(env, clip->manager, stamp);
+    if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)zj_clean(env); return ZAPP_CLIP_UNREADABLE; }
+    enum zapp_clip_state state = stamp_of(env, clip->manager, stamp);
     (*env)->PopLocalFrame(env, NULL);
-    return ok;
+    if (state == ZAPP_CLIP_UNREADABLE && !clip->refusal_logged) {
+        clip->refusal_logged = true;
+        CLIP_LOG("the copied address cannot be read now (the app is in the background); trying again");
+    }
+    return state;
 }
 static bool jni_clip_clear(void *context)
 {
@@ -258,23 +278,34 @@ static bool jni_clip_clear(void *context)
     if (clear) (*clip->env)->CallVoidMethod(clip->env, clip->manager, clear);
     return clear && zj_clean(clip->env);
 }
+/* On the clock that keeps counting while the phone sleeps. */
+static void sleep_seconds(time_t seconds)
+{
+    struct timespec left = {seconds, 0};
+    while (clock_nanosleep(CLOCK_BOOTTIME, 0, &left, &left) == EINTR) {}
+}
+static void jni_clip_pause(void *context)
+{
+    (void)context;
+    sleep_seconds(CLIP_RETRY_SECONDS);
+}
 static struct zapp_clip_ops clip_ops(struct jni_clip *clip)
 {
-    return (struct zapp_clip_ops){clip, jni_clip_put, jni_clip_current, jni_clip_clear};
+    return (struct zapp_clip_ops){clip, jni_clip_put, jni_clip_current, jni_clip_clear, jni_clip_pause};
 }
 
 struct clip_expiry { JavaVM *vm; jobject manager; int64_t stamp; };
-/* Waits out the delay on the clock that keeps counting while the phone sleeps, then clears the clip if it is still ours. */
+/* Waits out the delay, then clears the clip while it is still ours. From Android 10 a background app cannot read the
+ * clipboard, so a refused read is retried every few seconds until the app has focus again. */
 static void *clip_expiry_run(void *argument)
 {
     struct clip_expiry *job = argument;
-    struct timespec left = {ZAPP_CLIP_CLEAR_SECONDS, 0};
     JNIEnv *env = NULL;
-    while (clock_nanosleep(CLOCK_BOOTTIME, 0, &left, &left) == EINTR) {}
+    sleep_seconds(ZAPP_CLIP_CLEAR_SECONDS);
     if ((*job->vm)->AttachCurrentThread(job->vm, &env, NULL) != JNI_OK) { CLIP_LOG("clearing the copied address failed: no JNI thread"); free(job); return NULL; }
-    struct jni_clip clip = {env, job->manager};
+    struct jni_clip clip = {env, job->manager, false};
     struct zapp_clip_ops ops = clip_ops(&clip);
-    if (!zapp_clip_expire(&ops, job->stamp)) CLIP_LOG("clearing the copied address failed");
+    if (!zapp_clip_settle(&ops, job->stamp, CLIP_RETRY_ATTEMPTS)) CLIP_LOG("the copied address could not be cleared and may still be on the clipboard");
     (*env)->DeleteGlobalRef(env, job->manager);
     (*job->vm)->DetachCurrentThread(job->vm);
     free(job);
@@ -301,7 +332,7 @@ bool zapp_clipboard_copy_sensitive(ANativeActivity *activity, const char *text)
     jstring service = zj_string(env, "clipboard");
     jmethodID get = service ? zj_method(env, activity->clazz, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;") : NULL;
     jobject manager = get ? (*env)->CallObjectMethod(env, activity->clazz, get, service) : NULL;
-    struct jni_clip clip = {env, zj_clean(env) ? manager : NULL};
+    struct jni_clip clip = {env, zj_clean(env) ? manager : NULL, false};
     struct zapp_clip_ops ops = clip_ops(&clip);
     if (!clip.manager) CLIP_LOG("copy failed: no clipboard service");
     else if (!zapp_clip_copy(&ops, text, &stamp)) CLIP_LOG("copy failed: setPrimaryClip refused the address");

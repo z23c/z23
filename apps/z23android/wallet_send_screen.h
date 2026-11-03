@@ -192,6 +192,9 @@ void wss_view(struct wss *screen, struct wss_view *out);
  *   "Payment status unknown: ..."                                     no usable answer; it may have been sent
  * False before the commit starts and after the owner closed the outcome. */
 bool wss_progress(struct wss *screen, char *line, size_t cap);
+/* The owner dismissed the line of a payment that ended: wss_progress returns false until the next payment begins or runs,
+ * whether or not the screen is still open. Does nothing while the payment is in flight. */
+void wss_progress_dismiss(struct wss *screen);
 /* True while the commit runs or the node holds the payment: the flow must keep running whatever screen is shown. */
 bool wss_in_flight(struct wss *screen);
 /* True in the states from the owner's confirmation to the outcome of the payment: authentication, the commit and the

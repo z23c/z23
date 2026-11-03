@@ -1238,6 +1238,8 @@ static void a_payment_in_flight_keeps_running_and_reports_once(void)
     assert(wss_in_flight(s) && wss_progress(s, line, sizeof(line)));
     assert(!strcmp(line, "Sending 1 ZCL to " TO ": building the payment (about 2 min)"));
     assert(!strstr(line, priv));   /* only the first eight and the last six characters */
+    wss_progress_dismiss(s);       /* a payment in flight cannot be dismissed */
+    assert(wss_progress(s, line, sizeof(line)) && !strcmp(line, "Sending 1 ZCL to " TO ": building the payment (about 2 min)"));
     wss_on_pause(s);               /* the owner left the screen and the app */
     assert(wss_in_flight(s) && f->commits == 0 && f->outcomes == 0);
     pthread_mutex_lock(&f->mu);
@@ -1247,6 +1249,10 @@ static void a_payment_in_flight_keeps_running_and_reports_once(void)
     wait_state(s, WS_DONE);
     assert(f->commits == 1 && f->repeated_keys == 0);
     assert(wss_progress(s, line, sizeof(line)) && !strcmp(line, "Sent 1 ZCL") && !wss_in_flight(s));
+    wss_progress_dismiss(s);       /* dismissed while the screen is still open: the line stays gone */
+    assert(!wss_progress(s, line, sizeof(line)));
+    wss_on_tick(s);
+    assert(!wss_progress(s, line, sizeof(line)));
     wss_on_tick(s); wss_on_tick(s);
     pause_ms(20);
     assert(f->outcomes == 1 && f->last_outcome == ZAPP_PAYMENT_SENT);

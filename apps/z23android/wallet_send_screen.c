@@ -29,6 +29,7 @@ struct wss {
     bool protected_window;
     bool begun;
     bool replayed; /* the node answered this payment's commit from its record of an earlier one */
+    bool progress_seen; /* the owner dismissed the line of the ended payment; cleared when the next payment begins or runs */
     bool closed;   /* the owner left the flow's outcome and no later payment has begun */
     uint8_t secret[32];
     char unlock_json[WSS_UNLOCK_JSON];
@@ -181,6 +182,12 @@ static bool failed_after_tap(enum ws_fail fail)
 {
     return fail == WS_FAIL_COMMIT_REFUSED || fail == WS_FAIL_FEE_CHANGED || fail == WS_FAIL_COMMIT_UNKNOWN;
 }
+/* Under the lock: whether the screen has a payment line to give. A payment that runs again clears the owner's dismissal. */
+static bool progress_shown(struct wss *s, enum ws_state state)
+{
+    if (state == WS_COMMIT || state == WS_BROADCAST) s->progress_seen = false;
+    return s->begun && !s->closed && !s->progress_seen;
+}
 bool wss_progress(struct wss *s, char *line, size_t cap)
 {
     char amount[WSS_AMOUNT], to[40];
@@ -188,7 +195,7 @@ bool wss_progress(struct wss *s, char *line, size_t cap)
     const struct ws *ws = &s->ws;
     enum ws_state state = ws->state;
     enum ws_fail fail = ws->fail;
-    bool shown = s->begun && !s->closed;
+    bool shown = progress_shown(s, state);
     bool replayed = s->replayed;
     wss_format_zat(ws->pay.amount_zat, amount, sizeof(amount));
     short_address(ws->pay.address, to, sizeof(to));
@@ -204,6 +211,12 @@ bool wss_progress(struct wss *s, char *line, size_t cap)
         snprintf(line, cap, "Payment not sent: %s. Your coins were not spent.", refusal_cause(fail));
     else return false;
     return true;
+}
+void wss_progress_dismiss(struct wss *s)
+{
+    pthread_mutex_lock(&s->lock);
+    if (s->ws.state != WS_COMMIT && s->ws.state != WS_BROADCAST) s->progress_seen = true;
+    pthread_mutex_unlock(&s->lock);
 }
 bool wss_in_flight(struct wss *s)
 {
@@ -562,6 +575,7 @@ bool wss_begin(struct wss *s, const struct zapp_payment *pay)
     s->unprotected = false;
     s->closed = false;
     s->replayed = false;
+    s->progress_seen = false;
     ws_open(&s->ws, &env, pay, s->d.host.now_ms ? s->d.host.now_ms(s->d.host.ctx) : 0, &acts);
     enqueue(s, &acts);
     pthread_mutex_unlock(&s->lock);

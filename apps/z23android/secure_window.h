@@ -62,19 +62,28 @@ void zapp_secure_window_release(void);
 /* A copied address is marked sensitive, so the system hides it in its clipboard preview, and is taken off the
  * clipboard after this many seconds, if the clip is still the one the app put there. */
 #define ZAPP_CLIP_CLEAR_SECONDS 60
+/* What the app can learn of the clipboard. From Android 10 a clip can be read only while the app has focus, so a refused
+ * read is its own answer and never means the clipboard is empty. */
+enum zapp_clip_state { ZAPP_CLIP_EMPTY, ZAPP_CLIP_HELD, ZAPP_CLIP_UNREADABLE };
 struct zapp_clip_ops {
     void *ctx;
     /* Puts text on the clipboard as a sensitive clip and reports the stamp that identifies that clip. */
     bool (*put)(void *ctx, const char *text, int64_t *stamp);
-    /* The stamp of the clip on the clipboard now; false when it holds none. */
-    bool (*current)(void *ctx, int64_t *stamp);
+    /* What the clipboard holds now; stamp is set only for ZAPP_CLIP_HELD. */
+    enum zapp_clip_state (*current)(void *ctx, int64_t *stamp);
     bool (*clear)(void *ctx);
+    /* Waits before the next try of zapp_clip_settle. Optional. */
+    void (*pause)(void *ctx);
 };
 /* False for empty text, a missing member or a clipboard that refused the clip. */
 bool zapp_clip_copy(const struct zapp_clip_ops *ops, const char *text, int64_t *stamp);
-/* Clears the clipboard only while its clip is the one with this stamp. True when the clipboard no longer holds
- * that clip: it was cleared, or something else replaced it first. False when that could not be settled. */
+/* Clears the clipboard only while its clip is the one with this stamp. True when the clipboard no longer holds that
+ * clip: it was empty, something else replaced it, or it was cleared. False when that could not be settled: the clip
+ * could not be read (the app is in the background) or the clear was refused. Never true without one of those. */
 bool zapp_clip_expire(const struct zapp_clip_ops *ops, int64_t stamp);
+/* zapp_clip_expire again, after ops->pause, up to attempts times, so a clear that was due in the background happens at
+ * the next focus. False when every attempt failed. */
+bool zapp_clip_settle(const struct zapp_clip_ops *ops, int64_t stamp, unsigned attempts);
 
 #ifdef __ANDROID__
 #include <android/input.h>
