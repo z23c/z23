@@ -286,8 +286,122 @@ static void chain_state_reasons(void)
     assert(s.state == ZAPP_CHAIN_NONE && s.reference == -1 && !s.reason[0]);
 }
 
+#define FA "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion:8033"
+#define FB "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.onion:8033"
+#define FC "cccccccccccccccccccccccccccccccccccccccccccccccccccccccc.onion:8033"
+#define NAMED FA " r1\n" FB " r2\n"
+static void peer_json(char *out, size_t cap, const char *addr_a, long best_a, const char *addr_b, long best_b)
+{
+    char one[2][200];
+    const char *addr[2] = {addr_a, addr_b};
+    const long best[2] = {best_a, best_b};
+    for (int i = 0; i < 2; i++) {
+        if (!addr[i]) { one[i][0] = 0; continue; }
+        if (best[i] == -2) snprintf(one[i], sizeof(one[i]), "{\"addr\":\"%s\",\"startingheight\":3306999,\"inbound\":false}", addr[i]);
+        else snprintf(one[i], sizeof(one[i]), "{\"addr\":\"%s\",\"startingheight\":3306999,\"best_height\":%ld}", addr[i], best[i]);
+    }
+    snprintf(out, cap, "{\"result\":[%s%s%s],\"error\":null,\"id\":1}", one[0], addr_a && addr_b ? "," : "", one[1]);
+}
+static void fleet_peer_tests(void)
+{
+    struct zapp_fleet_peers p;
+    char json[1024], line[160];
+    /* No peers at all, and no roster. */
+    assert(zapp_fleet_peers("{\"result\":[]}", "", &p) && !p.known && !p.connected && p.height == -1);
+    assert(!strcmp(zapp_fleet_peers_line(&p, line, sizeof(line)), "Fleet \xc2\xb7 not paired yet"));
+    assert(zapp_fleet_peers("[]", NULL, &p) && !p.known);
+    /* A known roster with nobody connected; a peer outside the roster is ignored. */
+    peer_json(json, sizeof(json), FC, 3306214, NULL, 0);
+    assert(zapp_fleet_peers(json, NAMED, &p) && p.known == 2 && !p.connected && p.height == -1);
+    assert(!strcmp(zapp_fleet_peers_line(&p, line, sizeof(line)), "Fleet \xc2\xb7 not connected yet"));
+    /* One of two. */
+    peer_json(json, sizeof(json), FB, 3306214, FC, 3306999);
+    assert(zapp_fleet_peers(json, NAMED, &p) && p.known == 2 && p.connected == 1 && p.height == -1);
+    assert(!strcmp(zapp_fleet_peers_line(&p, line, sizeof(line)), "Fleet \xc2\xb7 r2 connected \xc2\xb7 r1 not reachable"));
+}
+static void fleet_peer_height(void)
+{
+    struct zapp_fleet_peers p;
+    char json[1024], line[160];
+    /* Two of two: the height is the lower of the two, in either order, and startingheight is never used. */
+    peer_json(json, sizeof(json), FA, 3306214, FB, 3306210);
+    assert(zapp_fleet_peers(json, NAMED, &p) && p.connected == 2 && p.height == 3306210);
+    assert(!strcmp(zapp_fleet_peers_line(&p, line, sizeof(line)), "Fleet \xc2\xb7 r1 and r2 connected \xc2\xb7 at 3,306,210"));
+    peer_json(json, sizeof(json), FB, 3306210, FA, 3306214);
+    assert(zapp_fleet_peers(json, NAMED, &p) && p.height == 3306210);
+    /* best_height absent (an older node) or unknown (-1): connected, but no height. */
+    peer_json(json, sizeof(json), FA, -2, FB, -2);
+    assert(zapp_fleet_peers(json, NAMED, &p) && p.connected == 2 && p.height == -1);
+    assert(!strcmp(zapp_fleet_peers_line(&p, line, sizeof(line)), "Fleet \xc2\xb7 r1 and r2 connected"));
+    peer_json(json, sizeof(json), FA, 3306214, FB, -1);
+    assert(zapp_fleet_peers(json, NAMED, &p) && p.connected == 2 && p.height == -1);
+}
+static void fleet_peer_names(void)
+{
+    struct zapp_fleet_peers p;
+    char json[1024], line[160];
+    /* Without names the line counts. */
+    peer_json(json, sizeof(json), FA, 3306214, FC, 3306214);
+    assert(zapp_fleet_peers(json, FA "\n" FB "\n", &p) && p.connected == 1);
+    assert(!strcmp(zapp_fleet_peers_line(&p, line, sizeof(line)), "Fleet \xc2\xb7 1 of 2 connected"));
+    peer_json(json, sizeof(json), FA, 3306214, FB, 3306215);
+    assert(zapp_fleet_peers(json, FA "\n" FB " r2\n", &p) && p.connected == 2 && p.height == 3306214);
+    assert(!strcmp(zapp_fleet_peers_line(&p, line, sizeof(line)), "Fleet \xc2\xb7 2 of 2 connected \xc2\xb7 at 3,306,214"));
+    assert(!strstr(line, "onion"));
+    /* A repeated roster line counts once, and so does a repeated peer. */
+    assert(zapp_fleet_peers(json, FA " r1\n" FA " other\n", &p) && p.known == 1 && p.connected == 1 && !strcmp(p.peer[0].name, "r1"));
+    peer_json(json, sizeof(json), FA, 3306214, FA, 3306215);
+    assert(zapp_fleet_peers(json, NAMED, &p) && p.connected == 1 && p.height == -1);
+}
+static void fleet_peer_malformed(void)
+{
+    struct zapp_fleet_peers p;
+    char json[1024], line[160];
+    peer_json(json, sizeof(json), FA, 3306214, FB, 3306215);
+    /* Malformed replies say nothing about the fleet. */
+    assert(!zapp_fleet_peers("nope", NAMED, &p) && p.known == 2 && !p.connected && p.height == -1);
+    assert(!zapp_fleet_peers(NULL, NAMED, &p) && !zapp_fleet_peers("{\"result\":null,\"error\":{\"code\":-1}}", NAMED, &p));
+    assert(!zapp_fleet_peers("{\"result\":{\"addr\":1}}", NAMED, &p));
+    assert(zapp_fleet_peers("[1,\"x\",{\"addr\":5},{}]", NAMED, &p) && !p.connected);
+    assert(zapp_fleet_peers(json, "junk\n\n  \nbogus name\n", &p) && p.connected == 0);
+    /* Three names read as a list. */
+    memset(&p, 0, sizeof(p));
+    p.known = 3; p.connected = 3; p.height = -1;
+    snprintf(p.peer[0].name, sizeof(p.peer[0].name), "r1"); snprintf(p.peer[1].name, sizeof(p.peer[1].name), "r2");
+    snprintf(p.peer[2].name, sizeof(p.peer[2].name), "mac");
+    for (int i = 0; i < 3; i++) p.peer[i].connected = true;
+    assert(!strcmp(zapp_fleet_peers_line(&p, line, sizeof(line)), "Fleet \xc2\xb7 r1, r2 and mac connected"));
+    p.peer[1].connected = p.peer[2].connected = false; p.connected = 1;
+    assert(!strcmp(zapp_fleet_peers_line(&p, line, sizeof(line)), "Fleet \xc2\xb7 r1 connected \xc2\xb7 r2 and mac not reachable"));
+}
+/* The fleet height is evidence only from two peers. One peer that claims a high chain cannot make the phone
+ * current: it stays BEHIND when the node itself is behind, and unconfirmed when it matches the claim. */
+static void lone_liar_tests(void)
+{
+    struct zapp_fleet_peers p;
+    char json[1024];
+    peer_json(json, sizeof(json), FA, 3306214, NULL, 0);
+    assert(zapp_fleet_peers(json, NAMED, &p) && p.connected == 1 && p.height == -1);
+    struct zapp_chain_evidence ev = {.fleet_height = p.height, .quiet_secs = 10, .onion_only = true};
+    struct zapp_chain_status s = zapp_chain_check(3300000, 3306214, 1, &ev);
+    assert(s.state == ZAPP_CHAIN_BEHIND && s.reference == 3306214);
+    s = zapp_chain_check(3300000, 0, 1, &ev);
+    assert(s.state == ZAPP_CHAIN_WAITING);
+    s = zapp_chain_check(3306214, 3306214, 1, &ev);
+    assert(s.state == ZAPP_CHAIN_UNCONFIRMED);
+    /* Two peers that agree do let a node within the skew be called current. */
+    peer_json(json, sizeof(json), FA, 3306214, FB, 3306215);
+    assert(zapp_fleet_peers(json, NAMED, &p) && p.height == 3306214);
+    ev.fleet_height = p.height;
+    assert(zapp_chain_check(3306213, 0, 1, &ev).state == ZAPP_CHAIN_CURRENT);
+}
 int main(void)
 {
+    fleet_peer_tests();
+    fleet_peer_height();
+    fleet_peer_names();
+    fleet_peer_malformed();
+    lone_liar_tests();
     chain_state_reasons();
     static const char snapshot[] = "{\"hosts\":["
         "{\"host\":\"r1\",\"reachable\":true,\"probe_ms\":1080,\"node\":\"blocked\",\"synced\":\"yes\","

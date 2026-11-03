@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include "thermal.h"
 #include "app.h"
+#include "private.h"
 /* Formats the laptop host's fleet snapshot as a headline and one block per host.
  * Unknown or missing values are shown as unknown, never as zero. */
 bool zapp_hosts_format(const char *json, char *out, size_t cap);
@@ -16,6 +17,26 @@ bool zapp_hosts_verdicts(const char *json, char *out, size_t cap);
  * once a request has failed, or "checking" while a paired laptop host has not answered, so the
  * line holds its place from the first frame. Empty when no host is paired and none answered. */
 const char *zapp_fleet_line(const char *report, bool stale, bool paired, char *out, size_t cap);
+/* The fleet as the phone's own node sees it: which of the roster's onion peers are connected right now.
+ * name is empty for a roster line without one. height is the fleet's height, or -1 (see zapp_fleet_peers). */
+struct zapp_fleet_peers {
+    size_t known, connected;
+    int64_t height;
+    struct { char name[ZAPP_FLEET_NAME_MAX + 1]; bool connected; } peer[ZAPP_PRIVATE_PEERS_MAX];
+};
+#define ZAPP_FLEET_LINE_PREFIX "Fleet \xc2\xb7 "
+/* Matches the "addr" of each peer in a getpeerinfo reply (a bare array, or an object with a "result" array)
+ * to the lines of a fleet-onion-peers roster ("onion" or "onion name" per line; repeats and invalid lines
+ * count once or not at all). Peers outside the roster are ignored. height is the lower of the two highest
+ * best_height values among connected fleet peers, and -1 unless at least two connected fleet peers report
+ * one: a single peer can never set it, and startingheight is never read. Returns false when the reply is
+ * not a peer array; known is still filled from the roster. */
+bool zapp_fleet_peers(const char *peerinfo_json, const char *roster_text, struct zapp_fleet_peers *out);
+/* "Fleet · r1 and r2 connected", "Fleet · r1 connected · r2 not reachable", "Fleet · 1 of 2 connected" when a
+ * roster line has no name, "Fleet · not connected yet" for a known roster with none connected and
+ * "Fleet · not paired yet" for none. " · at 3,306,214" follows only when height is known. Never names an
+ * onion address. Returns out. */
+const char *zapp_fleet_peers_line(const struct zapp_fleet_peers *peers, char *out, size_t cap);
 /* Writes value with comma thousands separators, which models copy more reliably than long digit
  * runs; negative values are written plainly. Returns out. */
 const char *zapp_grouped(int64_t value, char out[32]);

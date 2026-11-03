@@ -22,15 +22,25 @@ bool zapp_onion_peer_valid(const char *text)
     }
     return digits && port >= 1 && port <= 65535;
 }
-/* True when line (n bytes, no newline) is already one of the first count lines of list. */
-static bool listed(const char *list, size_t count, const char *line)
+/* True when peer is the first token of one of the first count lines of list. */
+static bool listed(const char *list, size_t count, const char *peer)
 {
+    const size_t want = strlen(peer);
     for (size_t i = 0; i < count && *list; i++) {
         size_t n = strcspn(list, "\n");
-        if (n == strlen(line) && !memcmp(list, line, n)) return true;
+        if (strcspn(list, " \n") == want && !memcmp(list, peer, want)) return true;
         list += n + (list[n] == '\n');
     }
     return false;
+}
+/* The host name a roster line may carry: 1 to ZAPP_FLEET_NAME_MAX characters of a-z, 0-9 and "-". */
+static bool name_valid(const char *name)
+{
+    size_t n = name ? strlen(name) : 0;
+    if (!n || n > ZAPP_FLEET_NAME_MAX) return false;
+    for (size_t i = 0; i < n; i++)
+        if (!((name[i] >= 'a' && name[i] <= 'z') || (name[i] >= '0' && name[i] <= '9') || name[i] == '-')) return false;
+    return true;
 }
 size_t zapp_fleet_onion_peers(const char *json, char *out, size_t cap)
 {
@@ -39,9 +49,10 @@ size_t zapp_fleet_onion_peers(const char *json, char *out, size_t cap)
     if (cap) out[0] = 0;
     const struct json_value *hosts = cap && json && json_read(&root, json, strlen(json)) ? json_get(&root, "hosts") : NULL;
     for (size_t i = 0; hosts && hosts->type == JSON_ARR && i < hosts->num_children && count < ZAPP_PRIVATE_PEERS_MAX; i++) {
-        const char *peer = json_get_str(json_get(json_at(hosts, i), "onion"));
+        const struct json_value *row = json_at(hosts, i);
+        const char *peer = json_get_str(json_get(row, "onion")), *name = json_get_str(json_get(row, "host"));
         if (!peer || !zapp_onion_peer_valid(peer) || listed(out, count, peer)) continue;
-        int n = snprintf(out + used, cap - used, "%s\n", peer);
+        int n = name_valid(name) ? snprintf(out + used, cap - used, "%s %s\n", peer, name) : snprintf(out + used, cap - used, "%s\n", peer);
         if (n < 0 || (size_t)n >= cap - used) break;
         used += (size_t)n;
         count++;
@@ -56,7 +67,7 @@ static bool roster_path(const char *directory, const char *name, char *out, size
 }
 bool zapp_private_roster_save(const char *directory, const char *json)
 {
-    char peers[ZAPP_PRIVATE_PEERS_MAX * (ZAPP_ONION_PEER_MAX + 1) + 1], final[1100], temporary[1110];
+    char peers[ZAPP_ROSTER_MAX], final[1100], temporary[1110];
     if (!zapp_fleet_onion_peers(json, peers, sizeof(peers)) || !roster_path(directory, "fleet-onion-peers", final, sizeof(final)) ||
         !roster_path(directory, "fleet-onion-peers.tmp", temporary, sizeof(temporary))) return false;
     int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
@@ -93,7 +104,7 @@ void zapp_private_args(struct zapp_private_args *a, const char *roster_text)
     a->argv[a->argc++] = "-bind=127.0.0.1";
     size_t peers = 0;
     for (const char *line = roster_text; line && *line && peers < ZAPP_PRIVATE_PEERS_MAX;) {
-        size_t n = strcspn(line, "\n");
+        size_t n = strcspn(line, " \n");
         char one[ZAPP_ONION_PEER_MAX + 1];
         if (n < sizeof(one)) {
             memcpy(one, line, n);
@@ -105,6 +116,7 @@ void zapp_private_args(struct zapp_private_args *a, const char *roster_text)
                 a->argv[a->argc++] = a->peer[peers++];
             }
         }
-        line += n + (line[n] == '\n');
+        line += strcspn(line, "\n");
+        line += *line == '\n';
     }
 }

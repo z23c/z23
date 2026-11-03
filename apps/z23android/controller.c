@@ -48,6 +48,8 @@ struct controller {
     int64_t fleet_height;                         /* Highest height the last fleet report named, or -1. */
     int64_t height_moved_at;                      /* Monotonic seconds when seen_height last changed, or 0 when unknown. */
     int64_t fleet_height_at;                      /* Monotonic seconds when fleet_height was taken from a current snapshot. */
+    enum { FLEET_NONE, FLEET_LAPTOP, FLEET_PEERS } fleet_source; /* Where view.fleet_status came from. */
+    int64_t peers_at;                             /* Monotonic seconds of the last getpeerinfo reading, or 0. */
     char asked[96];                               /* Question last answered by the model. */
     atomic_bool reply_cancel;
     atomic_bool voice_cancel, voice_stop;
@@ -203,12 +205,48 @@ static enum zapp_pace read_node_pace(struct controller *c)
     free(reply);
     return pace;
 }
+/* The node's own view of the fleet: which roster peers it is connected to, read at most this often. */
+#define FLEET_PEERS_SECS 30
+#define PEERINFO_TIMEOUT_MS 1500
+/* Shows the peer-derived fleet line while no current laptop report exists. A laptop report that is current wins.
+ * Once the node stops answering, or a reading fails, a line taken from peers is marked old. */
+static void observe_fleet_peers(struct controller *c, bool responding)
+{
+    const int64_t now = monotonic_secs();
+    pthread_mutex_lock(&c->lock);
+    const bool laptop_current = c->fleet_source == FLEET_LAPTOP && !c->view.fleet_stale;
+    const bool due = !c->peers_at || now - c->peers_at >= FLEET_PEERS_SECS;
+    if (!responding && c->fleet_source == FLEET_PEERS) c->view.fleet_stale = true;
+    const bool read = responding && !laptop_current && due;
+    if (read) c->peers_at = now;
+    pthread_mutex_unlock(&c->lock);
+    if (!read) return;
+    char *reply = calloc(1, ZAPP_TEXT_CAP), roster[ZAPP_ROSTER_MAX], why[96], line[160];
+    struct zapp_fleet_peers peers;
+    bool ok = reply && zapp_rpc_call(c->runtime.directory, "getpeerinfo", "[]", PEERINFO_TIMEOUT_MS, reply, ZAPP_TEXT_CAP,
+                                     why, sizeof(why)) == ZAPP_RPC_OK;
+    (void)zapp_private_roster_load(c->runtime.directory, roster, sizeof(roster));
+    ok = ok && zapp_fleet_peers(reply, roster, &peers);
+    free(reply);
+    if (ok) zapp_fleet_peers_line(&peers, line, sizeof(line));
+    pthread_mutex_lock(&c->lock);
+    if (ok) {
+        copy_text(c->view.fleet_status, sizeof(c->view.fleet_status), line + strlen(ZAPP_FLEET_LINE_PREFIX));
+        c->fleet_height = peers.height;
+        c->fleet_height_at = now;
+        c->fleet_source = FLEET_PEERS;
+        c->view.fleet_stale = false;
+        refresh_suggestion(c);
+    } else if (c->fleet_source == FLEET_PEERS) c->view.fleet_stale = true;
+    pthread_mutex_unlock(&c->lock);
+}
 static void observe_node(struct controller *c)
 {
     char *output = calloc(1, ZAPP_TEXT_CAP);
     bool ran = output && zapp_operation_run(&c->runtime, "status", output, ZAPP_TEXT_CAP);
     struct node_reading n = read_status(ran ? output : NULL);
     enum zapp_pace pace = n.responding ? read_node_pace(c) : ZAPP_PACE_NORMAL;
+    observe_fleet_peers(c, n.responding);
     free(output);
     bool process_running = zapp_node_running(&c->runtime), stopping = zapp_node_stopping(&c->runtime);
     bool wanted = zapp_node_wanted(&c->runtime);
@@ -386,6 +424,7 @@ static bool fleet_hosts(struct controller *c, bool refresh, char *out)
         copy_text(c->view.fleet_status, sizeof(c->view.fleet_status), formatted);
         c->fleet_height = zapp_fleet_height(out, (int64_t)time(NULL));
         c->fleet_height_at = monotonic_secs();
+        c->fleet_source = FLEET_LAPTOP;
         c->view.fleet_stale = false;
         ops_track(c, formatted);
         /* An answered fleet request proves the paired host is reachable. */
@@ -393,7 +432,8 @@ static bool fleet_hosts(struct controller *c, bool refresh, char *out)
         copy_text(c->view.connection, sizeof(c->view.connection), "Laptop host connected.");
     } else {
         /* The last report, if any, stays visible, marked old, once no current one arrives. */
-        c->view.fleet_stale = true;
+        /* A line read from the node's own peers is kept current by observe_fleet_peers. */
+        if (c->fleet_source != FLEET_PEERS) c->view.fleet_stale = true;
         if (c->view.fleet_paired) copy_text(c->view.connection, sizeof(c->view.connection), answered ?
                   "Laptop host connected. It sent no fleet report." :
                   "Laptop host not answering. Connect it over USB and keep it running.");

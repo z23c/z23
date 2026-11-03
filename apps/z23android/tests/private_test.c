@@ -45,21 +45,36 @@ static void roster(const char *dir)
     snprintf(snapshot, sizeof(snapshot), "{\"hosts\":[{\"host\":\"r1\",\"onion\":\"%s:8033\"},{\"host\":\"r2\",\"onion\":\"%s:8033\"},"
              "{\"host\":\"r3\",\"onion\":\"1.2.3.4:8033\"},{\"host\":\"r4\"},{\"host\":\"r5\",\"onion\":\"%s:8033\"}]}", A, B, A);
     assert(zapp_fleet_onion_peers(snapshot, peers, sizeof(peers)) == 2);
-    assert(!strcmp(peers, A ":8033\n" B ":8033\n"));
+    assert(!strcmp(peers, A ":8033 r1\n" B ":8033 r2\n"));
     assert(zapp_fleet_onion_peers("{\"hosts\":[{\"host\":\"r1\"}]}", peers, sizeof(peers)) == 0 && !peers[0]);
     assert(zapp_fleet_onion_peers("nope", peers, sizeof(peers)) == 0 && zapp_fleet_onion_peers(NULL, peers, sizeof(peers)) == 0);
-    assert(zapp_fleet_onion_peers(snapshot, peers, 70) == 1);                 /* too small for the second line */
+    assert(zapp_fleet_onion_peers(snapshot, peers, 80) == 1);                 /* too small for the second line */
 
     char text[512], file[128];
     assert(zapp_private_roster_load(dir, text, sizeof(text)) == 0 && !text[0]);
     assert(zapp_private_roster_save(dir, snapshot) && zapp_private_roster_load(dir, text, sizeof(text)) > 0);
-    assert(!strcmp(text, A ":8033\n" B ":8033\n"));
+    assert(!strcmp(text, A ":8033 r1\n" B ":8033 r2\n"));
     /* A snapshot without a valid peer keeps what the app already holds. */
     assert(!zapp_private_roster_save(dir, "{\"hosts\":[{\"host\":\"r1\"}]}") && !zapp_private_roster_save(dir, "nope"));
-    assert(zapp_private_roster_load(dir, text, sizeof(text)) > 0 && !strcmp(text, A ":8033\n" B ":8033\n"));
+    assert(zapp_private_roster_load(dir, text, sizeof(text)) > 0 && !strcmp(text, A ":8033 r1\n" B ":8033 r2\n"));
     assert(!zapp_private_roster_save("/nonexistent-zapp-dir", snapshot));
     snprintf(file, sizeof(file), "%s/fleet-onion-peers", dir);
     assert(unlink(file) == 0);
+}
+/* A roster line is "onion" or "onion name": a name is kept only when it is a short host label, and dialing
+ * reads the onion token alone. */
+static void named_roster(void)
+{
+    char peers[ZAPP_ROSTER_MAX], row[512];
+    snprintf(row, sizeof(row), "{\"hosts\":[{\"host\":\"Bad Name\",\"onion\":\"%s:8033\"},{\"host\":\"mac-1\",\"onion\":\"%s:8033\"},"
+             "{\"host\":\"r1\",\"onion\":\"%s:8033\"},{\"host\":\"averyveryverylonghost\",\"onion\":\"%s:8033\"}]}", A, B, B, A);
+    assert(zapp_fleet_onion_peers(row, peers, sizeof(peers)) == 2);
+    assert(!strcmp(peers, A ":8033\n" B ":8033 mac-1\n"));
+    struct zapp_private_args a;
+    zapp_private_args(&a, A ":8033 r1\n" B ":8033\n" A ":8033 again\n" B ":8033 r2\n");
+    assert(a.argc == 4 && !strcmp(a.argv[2], "-addnode=" A ":8033") && !strcmp(a.argv[3], "-addnode=" B ":8033"));
+    zapp_private_args(&a, A ":8033 r1 extra\nbogus.example:1 name\n");
+    assert(a.argc == 3 && !strcmp(a.argv[2], "-addnode=" A ":8033"));
 }
 int main(int argc, char **argv)
 {
@@ -67,6 +82,7 @@ int main(int argc, char **argv)
     validation();
     arguments();
     roster(argv[1]);
+    named_roster();
     puts("private tests passed");
     return 0;
 }

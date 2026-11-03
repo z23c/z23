@@ -390,3 +390,85 @@ bool zapp_ops_view(const char *json, char *text, size_t cap, char plan[33])
     json_cleanse_strings(&root); json_free(&root);
     return ok;
 }
+/* Roster lines as written by zapp_fleet_onion_peers: the onion token, then an optional name. */
+static size_t roster_parse(const char *text, char onion[][ZAPP_ONION_PEER_MAX + 1], struct zapp_fleet_peers *out)
+{
+    size_t known = 0;
+    for (const char *line = text; line && *line && known < ZAPP_PRIVATE_PEERS_MAX; line += strcspn(line, "\n"), line += *line == '\n') {
+        const size_t end = strcspn(line, "\n"), token = strcspn(line, " \n");
+        if (!token || token > ZAPP_ONION_PEER_MAX) continue;
+        bool repeat = false;
+        for (size_t i = 0; i < known; i++) repeat = repeat || (strlen(onion[i]) == token && !memcmp(onion[i], line, token));
+        if (repeat) continue;
+        memcpy(onion[known], line, token);
+        onion[known][token] = 0;
+        const size_t name = end > token + 1 && line[token] == ' ' ? end - token - 1 : 0;
+        if (name && name <= ZAPP_FLEET_NAME_MAX) memcpy(out->peer[known].name, line + token + 1, name);
+        known++;
+    }
+    return known;
+}
+/* Marks the roster entry that peer's addr names as connected and folds its best_height into the two highest. */
+static void peer_connect(const struct json_value *peer, char onion[][ZAPP_ONION_PEER_MAX + 1], struct zapp_fleet_peers *out,
+                         int64_t *top, int64_t *second)
+{
+    const char *addr = peer && peer->type == JSON_OBJ ? json_get_str(json_get(peer, "addr")) : NULL;
+    for (size_t k = 0; addr && k < out->known; k++) {
+        if (out->peer[k].connected || strcmp(addr, onion[k])) continue;
+        int64_t height = -1;
+        (void)count_of(peer, "best_height", &height);
+        out->peer[k].connected = true;
+        out->connected++;
+        if (height > *top) { *second = *top; *top = height; }
+        else if (height > *second) *second = height;
+    }
+}
+bool zapp_fleet_peers(const char *peerinfo_json, const char *roster_text, struct zapp_fleet_peers *out)
+{
+    char onion[ZAPP_PRIVATE_PEERS_MAX][ZAPP_ONION_PEER_MAX + 1] = {{0}};
+    int64_t top = -1, second = -1;
+    memset(out, 0, sizeof(*out));
+    out->height = -1;
+    out->known = roster_parse(roster_text, onion, out);
+    struct json_value root = {0};
+    const bool read = peerinfo_json && json_read(&root, peerinfo_json, strlen(peerinfo_json));
+    const struct json_value *list = read && root.type == JSON_OBJ ? json_get(&root, "result") : read ? &root : NULL;
+    const bool ok = list && list->type == JSON_ARR;
+    for (size_t i = 0; ok && i < list->num_children; i++) peer_connect(json_at(list, i), onion, out, &top, &second);
+    out->height = second;
+    json_free(&root);
+    return ok;
+}
+/* Appends names joined as "a", "a and b" or "a, b and c": those with connected == want. */
+static size_t join_names(const struct zapp_fleet_peers *p, bool want, char *out, size_t cap, size_t used)
+{
+    size_t left = 0;
+    for (size_t i = 0; i < p->known; i++) left += p->peer[i].connected == want;
+    for (size_t i = 0; i < p->known; i++) {
+        if (p->peer[i].connected != want) continue;
+        used = append(out, cap, used, "%s%s", p->peer[i].name, --left > 1 ? ", " : left == 1 ? " and " : "");
+    }
+    return used;
+}
+const char *zapp_fleet_peers_line(const struct zapp_fleet_peers *p, char *out, size_t cap)
+{
+    bool named = p->known > 0;
+    for (size_t i = 0; i < p->known; i++) named = named && p->peer[i].name[0];
+    size_t used = append(out, cap, 0, ZAPP_FLEET_LINE_PREFIX);
+    if (!p->known) used = append(out, cap, used, "not paired yet");
+    else if (!p->connected) used = append(out, cap, used, "not connected yet");
+    else if (!named) used = append(out, cap, used, "%zu of %zu connected", p->connected, p->known);
+    else {
+        used = join_names(p, true, out, cap, used);
+        used = append(out, cap, used, " connected");
+        if (p->connected < p->known) {
+            used = append(out, cap, used, " \xc2\xb7 ");
+            used = join_names(p, false, out, cap, used);
+            used = append(out, cap, used, " not reachable");
+        }
+    }
+    char grouped[32];
+    if (p->height >= 0) used = append(out, cap, used, " \xc2\xb7 at %s", zapp_grouped(p->height, grouped));
+    if (used >= cap && cap) out[cap - 1] = 0;
+    return out;
+}
