@@ -16,6 +16,7 @@
 #include "util/safe_alloc.h"
 #include "validation/chainstate.h"
 #include "validation/connect_block.h"
+#include "validation/main_state.h"
 #include "chain/chain.h"
 #include "chain/chainparams.h"
 #include "primitives/block.h"
@@ -35,6 +36,7 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -1550,6 +1552,7 @@ struct ndc_tip_auth {
     int deny_reads;
     int denied;
     int index_drops;
+    int sync_off;
 };
 
 static int ndc_tip_authorizer(void *arg, int action, const char *table,
@@ -1557,11 +1560,13 @@ static int ndc_tip_authorizer(void *arg, int action, const char *table,
                               const char *trigger)
 {
     struct ndc_tip_auth *auth = arg;
-    (void)column;
     (void)db_name;
     (void)trigger;
     if (action == SQLITE_DROP_INDEX)
         auth->index_drops++;
+    if (action == SQLITE_PRAGMA && table && column &&
+        strcasecmp(table, "synchronous") == 0 && strcasecmp(column, "OFF") == 0)
+        auth->sync_off++;
     if (action != SQLITE_READ || auth->deny_reads <= 0 || !table ||
         strcmp(table, "node_state") != 0)
         return SQLITE_OK;
@@ -1697,6 +1702,160 @@ static int ndc_check_tip_read_failure(struct ndc_fix_ctx *fx)
         failures += ndc_check_unreadable_tip_skips_pass(&ndb, fx);
         failures += ndc_check_absent_tip_walks_from_genesis(&ndb, fx);
     }
+    node_db_catchup_lock_guard_test_reset();
+    if (up) node_db_close(&ndb);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+enum { NDC_SECONDARY_INDEXES = 19 };
+
+/* The secondary indexes node_db_ibd_turbo_mode drops (database_modes.c). */
+static int ndc_secondary_index_count(struct node_db *ndb)
+{
+    static const char sql[] =
+        "SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN "
+        "('idx_utxo_address','idx_utxo_value','idx_utxo_height',"
+        "'idx_utxo_height_value','idx_tx_block','idx_tx_height',"
+        "'idx_txo_addr','idx_txo_height','idx_txo_hodl_scan','idx_txi_prev',"
+        "'idx_txi_prev_height','idx_txi_height','idx_ss_nf','idx_ss_height',"
+        "'idx_so_height','idx_js_height','idx_spnf_height',"
+        "'idx_opret_height','idx_opret_slp')";
+    sqlite3_stmt *stmt = NULL;
+    int n = -1;
+    if (sqlite3_prepare_v2(ndb->db, sql, -1, &stmt, NULL) == SQLITE_OK &&
+        sqlite3_step(stmt) == SQLITE_ROW)
+        n = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return n;
+}
+
+/* One pass from genesis under the authorizer, with `ms` registered as the
+ * runtime main_state; NULL registers no runtime. */
+static int ndc_genesis_pass(struct node_db *ndb, struct ndc_fix_ctx *fx,
+                            struct main_state *ms, struct ndc_tip_auth *auth)
+{
+    char log[16384];
+    struct app_runtime_context rt = {.main_state = ms};
+    if (!node_db_state_delete(ndb, "sync_projection_tip_height"))
+        return -99;
+    app_runtime_set_current(ms ? &rt : NULL);
+    int res = ndc_tip_auth_run(ndb, fx, auth, log, sizeof(log));
+    app_runtime_set_current(NULL);
+    return res;
+}
+
+/* A main_state whose tip reads as validated and recent, so
+ * is_initial_block_download() returns false for it. */
+static bool ndc_at_tip_main_state(struct main_state *ms,
+                                  struct block_index *tip)
+{
+    main_state_init(ms);
+    memset(tip, 0, sizeof(*tip));
+    memset(tip->nChainWork.pn, 0xff, sizeof(tip->nChainWork.pn));
+    ms->nMaxTipAge = INT64_MAX / 2;
+    return active_chain_install_tip_slot(&ms->chain_active, tip);
+}
+
+/* ── A node serving its tip keeps node.db's indexes ────────────────────
+ * 2026-11-03: a phone at its tip ran a catch-up pass from height 1 in turbo
+ * mode and dropped idx_txo_addr with the other secondary indexes; the wallet
+ * restore that followed scanned the whole node.db for each derived address.
+ * The pass now asks the registered main_state. During initial block download
+ * it still drops the indexes; at a validated tip it prepares no DROP INDEX and
+ * no synchronous=OFF. is_initial_block_download() latches false once it reads
+ * a recent tip, so the download fixture runs first. */
+static int ndc_check_serving_tip_keeps_indexes(struct ndc_fix_ctx *fx)
+{
+    int failures = 0;
+    struct node_db ndb;
+    char dir[256], path[512];
+    test_make_tmpdir(dir, sizeof(dir), "node_db_catchup", "serving");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    bool up = fx->built && node_db_open(&ndb, path);
+    int fresh = up ? ndc_secondary_index_count(&ndb) : -1;
+    node_db_catchup_lock_guard_test_reset();
+    node_db_catchup_lock_guard_test_set_bulk_threshold(2);
+
+    struct main_state ibd;
+    main_state_init(&ibd);
+    struct ndc_tip_auth in_ibd = {0};
+    int res = up ? ndc_genesis_pass(&ndb, fx, &ibd, &in_ibd) : -99;
+    printf("download pass: result=%d index_drops=%d sync_off=%d indexes=%d\n",
+           res, in_ibd.index_drops, in_ibd.sync_off, fresh);
+    NDC_CHECK("a fresh node.db carries every secondary index",
+              fresh == NDC_SECONDARY_INDEXES);
+    NDC_CHECK("a bulk pass during initial block download runs in turbo mode",
+              res == NDC_FIX_N && in_ibd.index_drops > 0);
+    NDC_CHECK("normal mode rebuilds the indexes after the download pass",
+              up && ndc_secondary_index_count(&ndb) == NDC_SECONDARY_INDEXES);
+
+    struct main_state at_tip;
+    struct block_index tip;
+    bool tipped = ndc_at_tip_main_state(&at_tip, &tip);
+    struct ndc_tip_auth serving = {0};
+    res = up && tipped ? ndc_genesis_pass(&ndb, fx, &at_tip, &serving) : -99;
+    printf("serving pass: result=%d index_drops=%d sync_off=%d tip=%d\n",
+           res, serving.index_drops, serving.sync_off,
+           up ? node_db_sync_get_tip_height(&ndb) : -1);
+    NDC_CHECK("a bulk pass on a node serving its tip indexes every block",
+              res == NDC_FIX_N && node_db_sync_get_tip_height(&ndb) == NDC_FIX_N);
+    NDC_CHECK("that pass never drops an index or turns synchronous off",
+              tipped && serving.index_drops == 0 && serving.sync_off == 0);
+    NDC_CHECK("every secondary index is in sqlite_master after that pass",
+              up && ndc_secondary_index_count(&ndb) == NDC_SECONDARY_INDEXES);
+
+    main_state_free(&at_tip);
+    main_state_free(&ibd);
+    node_db_catchup_lock_guard_test_reset();
+    if (up) node_db_close(&ndb);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* ── Another writer's open transaction yields the pass ─────────────────
+ * The 2026-11-03 phone log holds 14 "catchup: BEGIN failed — aborting"
+ * passes, each "cannot start a transaction within a transaction": the db
+ * worker, the wallet and RPC readers share node.db's one connection. Each
+ * pass counted toward the abort-streak park, and a bulk pass had already
+ * entered turbo mode inside the other writer's transaction. Such a pass now
+ * yields: no mode change, no abort, the other transaction untouched, and the
+ * next pass walks from the cursor. */
+static int ndc_check_foreign_txn_yields(struct ndc_fix_ctx *fx)
+{
+    int failures = 0;
+    struct node_db ndb;
+    char dir[256], path[512], log[16384];
+    test_make_tmpdir(dir, sizeof(dir), "node_db_catchup", "foreign");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    bool up = fx->built && node_db_open(&ndb, path);
+    node_db_catchup_lock_guard_test_reset();
+    node_db_catchup_lock_guard_test_set_bulk_threshold(2);
+    bool held = up && sqlite3_exec(ndb.db, "BEGIN IMMEDIATE", NULL, NULL,
+                                   NULL) == SQLITE_OK;
+    struct ndc_tip_auth auth = {0};
+    int res = held ? ndc_tip_auth_run(&ndb, fx, &auth, log, sizeof(log)) : -99;
+    bool still_held = held && !sqlite3_get_autocommit(ndb.db);
+    int yields = node_db_catchup_lock_guard_test_open_yields();
+    int streak = node_db_catchup_lock_guard_test_abort_streak();
+    printf("foreign transaction: result=%d index_drops=%d sync_off=%d "
+           "yields=%d streak=%d held=%d\n", res, auth.index_drops,
+           auth.sync_off, yields, streak, still_held);
+    NDC_CHECK("a pass inside another writer's transaction yields unwalked",
+              held && res == 0);
+    NDC_CHECK("the yielding pass enters no turbo mode",
+              held && auth.index_drops == 0 && auth.sync_off == 0);
+    NDC_CHECK("the yield is not an aborted pass", yields == 1 && streak == 0);
+    NDC_CHECK("the other writer's transaction is left open", still_held);
+
+    bool released = still_held &&
+        sqlite3_exec(ndb.db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK;
+    struct ndc_tip_auth next = {0};
+    res = released ? ndc_tip_auth_run(&ndb, fx, &next, log, sizeof(log)) : -99;
+    NDC_CHECK("the next pass walks from the cursor once the writer is done",
+              res == NDC_FIX_N &&
+              node_db_sync_get_tip_height(&ndb) == NDC_FIX_N &&
+              node_db_catchup_lock_guard_test_open_yields() == 0);
     node_db_catchup_lock_guard_test_reset();
     if (up) node_db_close(&ndb);
     test_cleanup_tmpdir(dir);
@@ -2857,6 +3016,8 @@ int test_node_db_catchup_service(void)
     failures += ndc_check_yield_sleep_not_hold_time(&fx);
     failures += ndc_check_timed_commit_survives_abort(&fx);
     failures += ndc_check_tip_read_failure(&fx);
+    failures += ndc_check_serving_tip_keeps_indexes(&fx);
+    failures += ndc_check_foreign_txn_yields(&fx);
     failures += ndc_check_durable_reopen(&fx);
     failures += ndc_check_maintenance_defers_while_active(&fx);
     failures += ndc_check_abort_storm_parks_worker();

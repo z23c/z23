@@ -903,9 +903,8 @@ static void catchup_pass_init(struct catchup_pass *ps, struct node_db *ndb,
            " (%d keys)\n", ps->total, ps->start, chain_tip, wallet_keys);
     fflush(stdout);
 
-    /* Turbo mode: disable fsync, drop indexes, enlarge cache. */
-    ps->cb.bulk_mode =
-        ps->total > node_db_catchup_lock_guard_bulk_threshold();
+    /* Turbo mode (no fsync, indexes dropped, larger cache) is for IBD only. */
+    ps->cb.bulk_mode = node_db_catchup_lock_guard_bulk_pass(ps->total);
 }
 
 /* Leave turbo mode and close the pass after a failed transaction open. */
@@ -916,13 +915,28 @@ static void catchup_unwind_open(struct catchup_pass *ps, const char *restore_msg
     catchup_abort_pass(&ps->restore_ok);
 }
 
-static bool catchup_open_pass(struct catchup_pass *ps)
+enum catchup_open { CATCHUP_OPEN_READY, CATCHUP_OPEN_YIELD, CATCHUP_OPEN_FAILED };
+
+/* Another thread's transaction is open on the shared connection: leave any
+ * mode this pass entered and let the next trigger walk from the cursor. */
+static enum catchup_open catchup_yield_open(struct catchup_pass *ps)
 {
+    if (!sync_db_turbo_scope_end(&ps->turbo_mode))
+        fprintf(stderr, "catchup: failed to restore normal mode after yielding\n");
+    node_db_catchup_lock_guard_note_open_yield(ps->start);
+    catchup_active_finish();
+    return CATCHUP_OPEN_YIELD;
+}
+
+static enum catchup_open catchup_open_pass(struct catchup_pass *ps)
+{
+    if (node_db_catchup_lock_guard_foreign_txn(ps->ndb))
+        return catchup_yield_open(ps);
     if (!sync_db_turbo_scope_begin(&ps->turbo_mode, ps->ndb, ps->cb.bulk_mode)) {
         fprintf(stderr, "catchup: failed to enter turbo mode\n");
         node_db_catchup_lock_guard_note_outcome(true);
         catchup_active_finish();
-        return false; // raw-return-ok:logged-above
+        return CATCHUP_OPEN_FAILED;
     }
 
     /* Verify connection works before starting. BEGIN IMMEDIATE (all three
@@ -931,16 +945,19 @@ static bool catchup_open_pass(struct catchup_pass *ps)
      * deferred BEGIN would only discover the contention at the first
      * write, as SQLITE_BUSY_SNAPSHOT, which no busy-handler wait can cure. */
     if (!node_db_begin_immediate(ps->ndb)) {
+        if (node_db_catchup_lock_guard_foreign_txn(ps->ndb))
+            return catchup_yield_open(ps);
         LOG_WARN_IN("node_db_catchup_service_run", "catchup", "catchup: BEGIN failed — aborting");
         catchup_unwind_open(ps, "catchup: failed to restore normal mode after BEGIN failure");
-        return false; // raw-return-ok:logged-above
+        return CATCHUP_OPEN_FAILED;
     }
+    node_db_catchup_lock_guard_note_opened();
     ps->cb.tx_open = true;
     if (!node_db_commit(ps->ndb)) {
         LOG_WARN_IN("node_db_catchup_service_run", "catchup", "catchup: initial COMMIT failed — aborting");
         node_db_rollback(ps->ndb);
         catchup_unwind_open(ps, "catchup: failed to restore normal mode after initial COMMIT failure");
-        return false; // raw-return-ok:logged-above
+        return CATCHUP_OPEN_FAILED;
     }
     ps->cb.tx_open = false;
 
@@ -964,9 +981,11 @@ static bool catchup_open_pass(struct catchup_pass *ps)
     catchup_sapling_tree_load(ps->ndb, ps->chain, &ps->sapling_tree);
 
     if (!node_db_begin_immediate(ps->ndb)) {
+        if (node_db_catchup_lock_guard_foreign_txn(ps->ndb))
+            return catchup_yield_open(ps);
         LOG_WARN_IN("node_db_catchup_service_run", "catchup", "catchup: failed to open main transaction");
         catchup_unwind_open(ps, "catchup: failed to restore normal mode after tx open failure");
-        return false; // raw-return-ok:logged-above
+        return CATCHUP_OPEN_FAILED;
     }
     ps->cb.tx_open = true;
     catchup_sapling_tree_persist_dirty(ps->ndb, &ps->sapling_tree);
@@ -976,7 +995,7 @@ static bool catchup_open_pass(struct catchup_pass *ps)
      * threaded into sync_block_lean so the per-height SHA3 receipt chains
      * across the whole ascending walk without a per-block SELECT. */
     catchup_seed_receipt(ps->ndb, ps->start, ps->prev_receipt);
-    return true;
+    return CATCHUP_OPEN_READY;
 }
 
 /* How one height of the walk ended. NEXT and GO carry on; a hole is NEXT. */
@@ -1395,7 +1414,10 @@ int node_db_catchup_service_run(struct node_db *ndb,
                 db_tip, chain_tip);
 
     catchup_pass_init(&ps, ndb, chain, w, datadir, db_tip, chain_tip);
-    if (!catchup_open_pass(&ps))
+    enum catchup_open opened = catchup_open_pass(&ps);
+    if (opened == CATCHUP_OPEN_YIELD)
+        return 0;
+    if (opened == CATCHUP_OPEN_FAILED)
         return -1; // raw-return-ok:logged-above
 
     catchup_walk_heights(&ps);

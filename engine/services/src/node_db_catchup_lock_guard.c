@@ -2,8 +2,9 @@
  * Distributed under the MIT software license, see the accompanying
  * file COPYING or http://www.opensource.org/licenses/mit-license.php. */
 
-/* node_db_catchup_lock_guard — see the header for the three-mechanism
- * contract (commit cadence, BUSY_SNAPSHOT restart, abort-streak park). */
+/* node_db_catchup_lock_guard — see the header for the four-mechanism
+ * contract (commit cadence, BUSY_SNAPSHOT restart, abort-streak park,
+ * shared-connection yield) and the bulk-mode decision. */
 
 // one-result-type-ok:seatbelt-plain-bool — E2 (one way out):
 // node_db_catchup_lock_guard is a small predicate/counter module behind
@@ -18,10 +19,12 @@
 #include "services/node_db_catchup_lock_guard.h"
 
 #include "config/db_service.h"
+#include "config/runtime.h"
 #include "models/database.h"
 #include "platform/time_compat.h"
 #include "util/blocker.h"
 #include "util/log_macros.h"
+#include "validation/main_logic.h"
 
 #include <signal.h>
 #include <stdatomic.h>
@@ -89,6 +92,21 @@ int node_db_catchup_lock_guard_bulk_threshold(void)
         return override;
 #endif
     return NODE_DB_CATCHUP_BULK_THRESHOLD;
+}
+
+/* is_initial_block_download() takes cs_main until it latches false; the pass
+ * asks before it opens a transaction, and only for a bulk-sized pass. */
+bool node_db_catchup_lock_guard_bulk_pass(int total)
+{
+    if (total <= node_db_catchup_lock_guard_bulk_threshold())
+        return false;
+    struct main_state *ms = app_runtime_main_state();
+    if (!ms || is_initial_block_download(ms))
+        return true;
+    LOG_INFO("catchup", "catchup: %d blocks behind while the node serves its "
+             "tip; the pass keeps node.db's indexes and synchronous=NORMAL",
+             total);
+    return false;
 }
 
 void node_db_catchup_lock_guard_yield_to_writers(struct db_service *svc,
@@ -212,6 +230,28 @@ void node_db_catchup_lock_guard_note_outcome(bool pass_failed)
         catchup_lock_guard_raise_abort_blocker(streak);
 }
 
+/* ── Shared-connection yield ────────────────────────────────────── */
+static _Atomic int g_open_yields = 0;
+
+bool node_db_catchup_lock_guard_foreign_txn(const struct node_db *ndb)
+{
+    return ndb && ndb->db && !sqlite3_get_autocommit(ndb->db);
+}
+
+void node_db_catchup_lock_guard_note_open_yield(int height)
+{
+    int run = atomic_fetch_add(&g_open_yields, 1) + 1;
+    if (run == 1 || run % NODE_DB_CATCHUP_OPEN_YIELD_LOG_EVERY == 0)
+        LOG_INFO("catchup", "catchup: the shared node.db connection is inside "
+                 "another writer's transaction; the pass from height %d "
+                 "yields to the next trigger (%d in a row)", height, run);
+}
+
+void node_db_catchup_lock_guard_note_opened(void)
+{
+    atomic_store(&g_open_yields, 0);
+}
+
 /* ── Test hooks ─────────────────────────────────────────────────── */
 #ifdef ZCL_TESTING
 static _Atomic int g_test_force_snapshot_failures = 0;
@@ -295,6 +335,11 @@ int node_db_catchup_lock_guard_test_abort_streak(void)
     return atomic_load(&g_abort_streak);
 }
 
+int node_db_catchup_lock_guard_test_open_yields(void)
+{
+    return atomic_load(&g_open_yields);
+}
+
 void node_db_catchup_lock_guard_test_force_snapshot_failures(int n)
 {
     atomic_store(&g_test_force_snapshot_failures, n);
@@ -328,6 +373,7 @@ void node_db_catchup_lock_guard_test_reset(void)
     atomic_store(&g_yield_sleeps, 0);
     atomic_store(&g_batch_commits, 0);
     atomic_store(&g_abort_streak, 0);
+    atomic_store(&g_open_yields, 0);
     atomic_store(&g_test_force_snapshot_failures, 0);
     atomic_store(&g_snapshot_restarts_total, 0);
     t_snapshot_restart_depth = 0;

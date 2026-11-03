@@ -192,6 +192,8 @@ void node_db_catchup_test_reset_reopen(void);
 /* Indexes blocks from (sqlite_tip+1) to chain_tip into SQLite. Also scans
  * for wallet transactions if a wallet is provided. Returns the number of
  * blocks indexed, or -1 on a setup failure (turbo enter / BEGIN / COMMIT).
+ * Returns 0 without walking when the shared connection is inside another
+ * writer's transaction; the next trigger retries from the durable cursor.
  * Logs every failure path internally. */
 int node_db_catchup_service_run(struct node_db *ndb,
                                 const struct active_chain *chain,

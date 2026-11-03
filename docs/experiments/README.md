@@ -166,6 +166,7 @@ Commands: `discover.wiki`, `discover.read`
 | 2026-10-18 | [New-agent front door](./2026-10-18-new-agent-front-door.md) | See the record. |
 | 2026-10-18 | [Agentic development baselines](./AGENTIC_DEV_BASELINES_2026-10-18.md) | See the record. |
 | 2026-10-18 | [Product health census](./PRODUCT_HEALTH_CENSUS_2026-10-18.md) | See the record. |
+| 2026-11-03 | [Catch-up pass rate with node.db's indexes kept at tip](./2026-11-03-catchup-indexes-at-tip.md) | Keeping the indexes runs a 60000-block pass at 0.58-0.76x the turbo rate with node.db on tmpfs and 0.19-0.26x on disk. |
 | undated | [C23 download performance laboratory](./C3_DOWNLOAD_PERF_LAB.md) | See the record. |
 | undated | [Historical C23 speed-contract baseline](./C3_SPEED_BASELINE.md) | See the record. |
 | undated | [Fleet ledger column integrity](./FLEET_LEDGER_COLUMNS.md) | See the record. |
@@ -179,3 +180,4 @@ Attachments referenced by the records above:
 - [`2026-09-25-factory-join-audit.json`](./2026-09-25-factory-join-audit.json): raw JSON data recorded with the experiments of that date.
 - [`2026-09-25-reflex-stages-post.json`](./2026-09-25-reflex-stages-post.json): raw JSON data recorded with the experiments of that date.
 - [`2026-09-25-reflex-stages-pre.json`](./2026-09-25-reflex-stages-pre.json): raw JSON data recorded with the experiments of that date.
+- [`2026-11-03-catchup-indexes-at-tip-measure.patch`](./2026-11-03-catchup-indexes-at-tip-measure.patch): patch recorded with the experiments of that date.

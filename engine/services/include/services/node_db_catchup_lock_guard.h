@@ -5,8 +5,8 @@
 /* node_db_catchup_lock_guard — the node.db lock-contention seatbelts for
  * the bulk catchup projection walk (node_db_catchup_service.c).
  *
- * Three small, always-on mechanisms, kept out of the service file so the
- * service stays under the E1 file-size ratchet:
+ * Four small, always-on mechanisms and the bulk-mode decision, kept out of
+ * the service file so the service stays under the E1 file-size ratchet:
  *
  *   1. Commit cadence — the per-batch COMMIT cap (blocks + monotonic-clock
  *      window) so the single WAL write lock is never held across an
@@ -33,6 +33,13 @@
  *      (half-open: one real pass, which either succeeds and resets the
  *      streak or re-fails and re-parks).
  *
+ *   4. Shared-connection yield — node.db has one FULLMUTEX connection that
+ *      the db worker, the wallet and RPC readers share. While another
+ *      thread's transaction is open on it, BEGIN fails at once with
+ *      "cannot start a transaction within a transaction". That is
+ *      contention, not a failed pass: the pass yields to the next trigger
+ *      without changing modes or adding to the abort streak.
+ *
  * I/O-scheduling only: no validation semantics live here. */
 
 #ifndef ZCL_SERVICES_NODE_DB_CATCHUP_LOCK_GUARD_H
@@ -51,7 +58,8 @@ struct db_service;
  * contending writer's busy-handler wait can still land. */
 #define NODE_DB_CATCHUP_COMMIT_BATCH_MAX_SECS 5
 
-/* A pass over more blocks than this runs in bulk (turbo) mode. */
+/* A pass over more blocks than this runs in bulk (turbo) mode during
+ * initial block download. */
 #define NODE_DB_CATCHUP_BULK_THRESHOLD 50000
 /* Pause after every batch COMMIT with no write transaction open. SQLite
  * WAL grants the write lock to whichever writer asks first, and a busy
@@ -97,6 +105,14 @@ void node_db_catchup_lock_guard_yield_to_writers(struct db_service *svc,
 /* Number of blocks a pass must cover to run in bulk (turbo) mode. */
 int node_db_catchup_lock_guard_bulk_threshold(void);
 
+/* True when a pass over `total` blocks runs in bulk (turbo) mode
+ * (synchronous=OFF, node.db's secondary indexes dropped): the pass is over
+ * the threshold and no live node reads node.db. A node whose registered
+ * main_state reads !is_initial_block_download() serves its tip, so the pass
+ * projects in normal mode and wallet, explorer and recovery queries keep
+ * their indexes. Boot replay and tools run with no main_state registered. */
+bool node_db_catchup_lock_guard_bulk_pass(int total);
+
 /* Record one mid-walk batch COMMIT (test/diagnostic counter). */
 void node_db_catchup_lock_guard_note_batch_commit(void);
 
@@ -138,6 +154,20 @@ bool node_db_catchup_lock_guard_parked(void);
  * success resets the streak and retires the blocker. */
 void node_db_catchup_lock_guard_note_outcome(bool pass_failed);
 
+/* ── Shared-connection yield ────────────────────────────────────── */
+/* A run of yields logs its first pass and every this-many after it. */
+#define NODE_DB_CATCHUP_OPEN_YIELD_LOG_EVERY 100
+
+/* True when the shared node.db connection is inside a transaction that the
+ * calling pass did not open. */
+bool node_db_catchup_lock_guard_foreign_txn(const struct node_db *ndb);
+
+/* Record a pass from `height` that yielded on a foreign transaction. */
+void node_db_catchup_lock_guard_note_open_yield(int height);
+
+/* Record a pass that opened its transaction; it ends a run of yields. */
+void node_db_catchup_lock_guard_note_opened(void);
+
 #ifdef ZCL_TESTING
 /* Commit-cadence override: blocks <= 0 restores the default. */
 void node_db_catchup_lock_guard_test_set_batch_size(int blocks);
@@ -163,6 +193,8 @@ int  node_db_catchup_lock_guard_test_batch_commits(void);
 /* Abort-streak fixtures. */
 void node_db_catchup_lock_guard_test_set_abort_streak(int streak);
 int  node_db_catchup_lock_guard_test_abort_streak(void);
+/* Passes in the current run of shared-connection yields. */
+int  node_db_catchup_lock_guard_test_open_yields(void);
 /* Arm n test-injected BUSY_SNAPSHOT write failures, consumed one per
  * block by the walk; the restart plumbing then runs for real. */
 void node_db_catchup_lock_guard_test_force_snapshot_failures(int n);
