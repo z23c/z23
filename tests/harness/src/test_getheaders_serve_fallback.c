@@ -664,6 +664,73 @@ static int gsf_arm_gate_cases(struct main_state *ms,
     return failures;
 }
 
+/* Pins the best-header authority branch of header_serve_repair_arm, which runs
+ * only when the target is off the active chain: a target on the ancestor path
+ * of pindex_best_header arms, a dead-end ancestor walk refuses, and with no
+ * best header only the active tip arms. pindex_best_header is restored to D. */
+static int gsf_arm_authority_cases(struct main_state *ms,
+                                   struct block_index *bi_d,
+                                   const struct uint256 *hash_d)
+{
+    int failures = 0;
+    struct block_index probe;
+    struct block_index fork;
+    struct uint256 stale = *hash_d;
+    stale.data[0] ^= 0x66;   /* on neither the active chain nor the best path */
+
+    /* (a) a best path that reaches the off-chain target accepts it */
+    memset(&probe, 0, sizeof(probe));
+    probe.nHeight = 2;   /* active chain at height 2 is B, not this hash */
+    probe.phashBlock = &stale;
+    memset(&fork, 0, sizeof(fork));
+    fork.nHeight = 3;
+    fork.phashBlock = hash_d;
+    fork.pprev = &probe;
+    ms->pindex_best_header = &fork;
+    header_serve_repair_test_reset();
+    header_serve_repair_arm(ms, &probe);
+    GSF_CHECK("arm accepts an off-chain target on the best-header path",
+              header_serve_repair_test_armed() &&
+              header_serve_repair_wants(&probe));
+
+    /* (b) a best-header ancestor walk that dead-ends refuses the target */
+    memset(&fork, 0, sizeof(fork));
+    fork.nHeight = 5;
+    fork.phashBlock = hash_d;
+    fork.pprev = NULL;
+    ms->pindex_best_header = &fork;
+    memset(&probe, 0, sizeof(probe));
+    probe.nHeight = 3;
+    probe.phashBlock = &stale;
+    header_serve_repair_test_reset();
+    header_serve_repair_arm(ms, &probe);
+    GSF_CHECK("arm refuses an off-chain target whose best walk dead-ends",
+              !header_serve_repair_test_armed());
+
+    /* (c) no best header: the off-chain target is refused, the tip is not */
+    ms->pindex_best_header = NULL;
+    header_serve_repair_arm(ms, &probe);
+    GSF_CHECK("arm refuses an off-chain target with no best header",
+              !header_serve_repair_test_armed());
+    header_serve_repair_arm(ms, bi_d);
+    GSF_CHECK("arm accepts the active tip with no best header",
+              header_serve_repair_test_armed() &&
+              header_serve_repair_wants(bi_d));
+
+    /* (d) a negative height is refused like a height-0 target */
+    header_serve_repair_test_reset();
+    memset(&probe, 0, sizeof(probe));
+    probe.nHeight = -1;
+    probe.phashBlock = hash_d;
+    header_serve_repair_arm(ms, &probe);
+    GSF_CHECK("arm refuses a negative-height target",
+              !header_serve_repair_test_armed());
+
+    ms->pindex_best_header = bi_d;
+    header_serve_repair_test_reset();
+    return failures;
+}
+
 static bool gsf_repair_send_from(struct msg_processor *mp,
                                  struct p2p_node *peer, int64_t now)
 {
@@ -1326,6 +1393,7 @@ int test_getheaders_serve_fallback(void)
     failures += gsf_sendheaders_one_tip_proof(&ms, &mp, bi_d, &hash_d);
 
     failures += gsf_arm_gate_cases(&ms, bi_b, bi_d, &hash_d);
+    failures += gsf_arm_authority_cases(&ms, bi_d, &hash_d);
     failures += gsf_send_gate_cases(&mp, &ms, bi_a, bi_d, &hash_d);
 
     /* Locator anchoring (headers_start_from_locator) and the getheaders
