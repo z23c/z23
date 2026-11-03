@@ -910,8 +910,8 @@ static void test_history(void)
     struct wallet_screen *s = snap();
     CHECK(s->page == WALLET_PAGE_HISTORY && count_ops("history") == 1 && !fake.args[fake.op_count - 1][0]);
     long row0 = find_text(s, "Sent ·");
-    CHECK(row0 >= 0 && !strcmp(text_at(s, row0), "1.5 ZCL\nSent · Confirmed · 2023-11-14"));
-    CHECK(!strcmp(text_at(s, row0 + 1), "Amount unknown\nReceived · Pending · 2023-11-14"));
+    CHECK(row0 >= 0 && !strcmp(text_at(s, row0), "1.5 ZCL\nSent · Confirmed · Today 22:13"));
+    CHECK(!strcmp(text_at(s, row0 + 1), "Amount unknown\nReceived · Pending · Today 23:13"));
     CHECK(!strcmp(text_at(s, row0 + 2), "0.00000001 ZCL\nMoved inside your wallet · State unknown · Date unknown"));
     CHECK(!has(TX_A) && !has("MEMO"));
     CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_OLDER) >= 0 && find(s, WALLET_ITEM_BUTTON, WALLET_ACT_NEWER) < 0);
@@ -929,7 +929,7 @@ static void test_history_detail(void)
     CHECK(s->page == WALLET_PAGE_DETAIL && count_ops("detail") == 1 && !strcmp(fake.args[fake.op_count - 1], TX_A));
     long memo = find(s, WALLET_ITEM_MEMO, WALLET_ACT_NONE);
     CHECK(has(TX_A) && memo >= 0 && !strcmp(text_at(s, memo), "MEMO-MARKER thanks") && find_text(s, "written by the sender") >= 0);
-    CHECK(has("2023-11-14 22:13 UTC") && !has("Public"));
+    CHECK(has("Today 22:13") && !has("Public"));
     CHECK(wallet_screens_back() && snap()->page == WALLET_PAGE_HISTORY && count_ops("history") == 1);
     CHECK(find_text(snap(), "MEMO-MARKER") < 0);                                    /* leaving a detail forgets its memo */
     CHECK(!wallet_screens_residue("MEMO-MARKER", 11));                              /* nor does the screen keep it */
@@ -950,7 +950,7 @@ static void test_history_pages(void)
     tap(WALLET_ACT_OLDER, 0, WALLET_STAY);
     struct wallet_screen *s = snap();
     CHECK(count_ops("history") == 2 && !strcmp(fake.args[fake.op_count - 1], CURSOR_1));
-    CHECK(has("21000000 ZCL\nReceived · Confirmed · 2023-11-15"));
+    CHECK(has("21000000 ZCL\nReceived · Confirmed · 15 Nov 22:13"));
     CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_OLDER) < 0 && find(s, WALLET_ITEM_BUTTON, WALLET_ACT_NEWER) >= 0);
     tap(WALLET_ACT_NEWER, 0, WALLET_STAY);
     CHECK(count_ops("history") == 3 && !fake.args[fake.op_count - 1][0] && has("Sent ·"));
@@ -1682,8 +1682,44 @@ static void test_history_incomplete(void)
     wallet_screens_close();
 }
 
+static int64_t at_utc(int year, int month, int day, int hour, int minute)
+{
+    struct tm t = {.tm_year = year - 1900, .tm_mon = month - 1, .tm_mday = day, .tm_hour = hour, .tm_min = minute};
+    return (int64_t)timegm(&t);
+}
+static void label(int64_t now, int64_t when, int64_t offset, const char *want)
+{
+    char text[48];
+    wallet_time_label(now, when, offset, text, sizeof(text));
+    if (strcmp(text, want)) fprintf(stderr, "label: got \"%s\", want \"%s\"\n", text, want);
+    CHECK(!strcmp(text, want));
+}
+static void test_time_labels(void)
+{
+    int64_t now = at_utc(2026, 11, 2, 12, 0);
+    label(now, at_utc(2026, 11, 2, 14, 5), 0, "Today 14:05");
+    label(now, at_utc(2026, 11, 2, 0, 0), 0, "Today 00:00");
+    label(now, at_utc(2026, 11, 1, 9, 12), 0, "Yesterday 09:12");
+    label(now, at_utc(2026, 10, 31, 23, 59), 0, "31 Oct 23:59");
+    label(now, at_utc(2026, 11, 3, 0, 0), 0, "3 Nov 00:00");                 /* a time ahead of the clock */
+    label(now, at_utc(2025, 11, 2, 8, 30), 0, "2 Nov 2025 08:30");           /* the year is shown when it is not this year */
+    now = at_utc(2027, 1, 1, 0, 30);
+    label(now, at_utc(2026, 12, 31, 23, 10), 0, "Yesterday 23:10");         /* across the year boundary */
+    label(now, at_utc(2026, 12, 30, 8, 0), 0, "30 Dec 2026 08:00");
+    now = at_utc(2028, 3, 1, 10, 0);
+    label(now, at_utc(2028, 2, 29, 10, 0), 0, "Yesterday 10:00");           /* a leap day */
+    label(now, at_utc(2028, 2, 28, 10, 0), 0, "28 Feb 10:00");
+    label(now, at_utc(2027, 2, 28, 10, 0), 0, "28 Feb 2027 10:00");
+    now = at_utc(2026, 11, 2, 3, 0);
+    label(now, at_utc(2026, 11, 2, 2, 0), -5 * 3600, "Today 21:00");        /* the phone is five hours behind UTC */
+    now = at_utc(2026, 11, 2, 12, 0);
+    label(now, at_utc(2026, 11, 2, 11, 30), 14 * 3600, "Today 01:30");      /* the phone is fourteen hours ahead */
+    label(now, at_utc(2026, 11, 2, 9, 0), 5 * 3600 + 1800, "Today 14:30");  /* a half-hour zone */
+}
 int main(int argc, char **argv)
 {
+    setenv("TZ", "UTC", 1);
+    tzset();
     if (argc > 1 && !strcmp(argv[1], "stale")) test_refresh_and_stale();
     else if (argc > 1 && !strcmp(argv[1], "async")) test_async();
     if (argc > 1) { puts("wallet_screens_test: ok"); return 0; }
@@ -1732,6 +1768,7 @@ int main(int argc, char **argv)
     test_nothing_left_behind();
     test_single_flight();
     test_async();
+    test_time_labels();
     puts("wallet_screens_test: ok");
     return 0;
 }

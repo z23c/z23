@@ -162,6 +162,9 @@ void wallet_screens_dropped(unsigned taps);
  * it, with the Send button reading "Scan again". Does nothing unless Funds is in front. */
 void wallet_screens_scan_notice(const char *text);
 
+/* The phone's local label for a Unix time: "Today 14:05", "Yesterday 09:12" or "3 Nov 14:05", with the year after the
+ * day when it is not the year of now. offset is the phone's offset from UTC in seconds at that time. */
+void wallet_time_label(int64_t now, int64_t when, int64_t offset, char *out, size_t cap);
 /* Copies the current screen. Returns its version, which changes whenever it does. */
 unsigned wallet_screens_snapshot(struct wallet_screen *out);
 /* Whether a wallet screen is in front. */

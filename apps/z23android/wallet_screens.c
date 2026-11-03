@@ -462,24 +462,57 @@ static void amount_label(const struct entry *e, char *out, size_t cap)
     if (e->amount_known && zapp_zat_format(e->amount_zat, zcl, sizeof(zcl))) snprintf(out, cap, "%s ZCL", zcl);
     else copy(out, cap, "Amount unknown");
 }
-/* The date of a Unix time as UTC "YYYY-MM-DD", and with the time of day when full. */
-static void date_label(const struct entry *e, bool full, char *out, size_t cap)
+/* Calendar arithmetic on the proleptic Gregorian calendar, in days since 1970-01-01. */
+static int64_t days_of(int64_t year, int64_t month, int64_t day)
 {
-    if (!e->time_known) { copy(out, cap, "Date unknown"); return; }
-    int64_t days = e->time / 86400 + 719468, secs = e->time % 86400;
-    int64_t era = days / 146097, doe = days - era * 146097;
+    year -= month <= 2;
+    int64_t era = (year >= 0 ? year : year - 399) / 400, yoe = year - era * 400;
+    int64_t doy = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+    return era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468;
+}
+static void civil_of(int64_t days, int64_t *year, int64_t *month, int64_t *day)
+{
+    days += 719468;
+    int64_t era = (days >= 0 ? days : days - 146096) / 146097, doe = days - era * 146097;
     int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
     int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100), mp = (5 * doy + 2) / 153;
-    int64_t day = doy - (153 * mp + 2) / 5 + 1, month = mp < 10 ? mp + 3 : mp - 9;
-    int64_t year = yoe + era * 400 + (month <= 2 ? 1 : 0);
-    if (full) snprintf(out, cap, "%04lld-%02lld-%02lld %02lld:%02lld UTC", (long long)year, (long long)month, (long long)day, (long long)(secs / 3600), (long long)(secs % 3600 / 60));
-    else snprintf(out, cap, "%04lld-%02lld-%02lld", (long long)year, (long long)month, (long long)day);
+    *day = doy - (153 * mp + 2) / 5 + 1;
+    *month = mp < 10 ? mp + 3 : mp - 9;
+    *year = yoe + era * 400 + (*month <= 2);
+}
+static int64_t floor_div(int64_t a, int64_t b) { return a / b - (a % b < 0); }
+static int64_t tm_seconds(const struct tm *t)
+{
+    return days_of(t->tm_year + 1900, t->tm_mon + 1, t->tm_mday) * 86400 + t->tm_hour * 3600 + t->tm_min * 60 + t->tm_sec;
+}
+void wallet_time_label(int64_t now, int64_t when, int64_t offset, char *out, size_t cap)
+{
+    static const char *const months[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    int64_t local = when + offset, day = floor_div(local, 86400), today = floor_div(now + offset, 86400);
+    int64_t secs = local - day * 86400, year, month, dom, this_year, this_month, this_day;
+    char clock[32];
+    snprintf(clock, sizeof(clock), "%02lld:%02lld", (long long)(secs / 3600), (long long)(secs % 3600 / 60));
+    civil_of(day, &year, &month, &dom);
+    civil_of(today, &this_year, &this_month, &this_day);
+    if (day == today) snprintf(out, cap, "Today %s", clock);
+    else if (day == today - 1) snprintf(out, cap, "Yesterday %s", clock);
+    else if (year == this_year) snprintf(out, cap, "%lld %s %s", (long long)dom, months[month - 1], clock);
+    else snprintf(out, cap, "%lld %s %lld %s", (long long)dom, months[month - 1], (long long)year, clock);
+}
+/* The time of an entry in the phone's time zone, or "Date unknown". The entry keeps its time in UTC. */
+static void date_label(const struct entry *e, char *out, size_t cap)
+{
+    struct tm local;
+    time_t at = (time_t)e->time;
+    if (!e->time_known) { copy(out, cap, "Date unknown"); return; }
+    int64_t offset = localtime_r(&at, &local) ? tm_seconds(&local) - e->time : 0;
+    wallet_time_label(wall_s(), e->time, offset, out, cap);
 }
 static void row_text(const struct entry *e, char *out, size_t cap)
 {
     char amount[48], date[32];
     amount_label(e, amount, sizeof(amount));
-    date_label(e, false, date, sizeof(date));
+    date_label(e, date, sizeof(date));
     const char *pool = pool_label(e);
     snprintf(out, cap, "%s\n%s%s%s · %s · %s", amount, direction_label(e->direction), pool[0] ? " · " : "", pool, state_label(e->status), date);
 }
@@ -549,7 +582,7 @@ static void detail_items(struct wallet_screen *s)
     amount_label(e, text, sizeof(text));
     (void)add(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE, text);
     line(s, state_label(e->status));
-    date_label(e, true, text, sizeof(text));
+    date_label(e, text, sizeof(text));
     line(s, text);
     line(s, "Transaction id");
     line(s, e->txid[0] ? e->txid : "unknown");
