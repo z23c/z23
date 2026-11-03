@@ -1143,6 +1143,44 @@ static int mb_socket_identity(void)
     return failures;
 }
 
+/* Known answer for a deep checkout: when the test root alone would put
+ * "<root>/mvs_<pid>_l/a.sock" past the AF_UNIX limit, the socket round must
+ * still listen (from a short directory) and attribute the expected peer. The
+ * root is a fresh 0700 directory whose name is padded past the limit, and
+ * ZCL_TEST_TMPROOT is restored afterwards. */
+static int mb_socket_identity_deep_root(void)
+{
+    int failures = 0;
+    char deep[PATH_MAX], pad[PATH_MAX], leaf[121], saved[PATH_MAX];
+    bool had_root = false;
+
+    if (!test_mkdtemp(deep, sizeof(deep), "mvdeep")) {
+        MB_CHECK("a deep fixture root can be made", false);
+        return 1;
+    }
+    memset(leaf, 'p', 120);
+    leaf[120] = '\0';
+    (void)snprintf(pad, sizeof(pad), "%s/%s", deep, leaf);
+    (void)mkdir(pad, 0700);
+
+    const char *old = getenv("ZCL_TEST_TMPROOT");
+    if (old) {
+        had_root = true;
+        (void)snprintf(saved, sizeof(saved), "%s", old);
+    }
+    (void)setenv("ZCL_TEST_TMPROOT", pad, 1);
+
+    int round = mb_socket_identity();
+    MB_CHECK("the socket round listens and attributes the peer on a deep root",
+             round == 0);
+    failures += round != 0;
+
+    if (had_root) (void)setenv("ZCL_TEST_TMPROOT", saved, 1);
+    else (void)unsetenv("ZCL_TEST_TMPROOT");
+    test_rm_rf_recursive(deep);
+    return failures;
+}
+
 /* ── (f)(g)(h)(i) a real confined child ─────────────────────────────────── */
 
 /* Read a file into `buf` (NUL-terminated). Returns bytes read, 0 on failure. */
@@ -1691,6 +1729,9 @@ int test_metaverse_agent_broker(void)
     failures += mb_peercred();
     failures += mb_sender_cred();
     failures += mb_socket_identity();
+#if !defined(_WIN32)
+    failures += mb_socket_identity_deep_root();
+#endif
 
     int abi = os_sandbox_landlock_abi();
     bool seccomp = os_sandbox_seccomp_supported();
