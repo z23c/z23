@@ -1364,6 +1364,26 @@ static void the_prover_gate_hides_send(void)
     wss_destroy(s);
 }
 
+static void busy_from_confirm_to_outcome(void)
+{
+    struct fake f; fake_init(&f);
+    struct zapp_payment p = pay_of(priv, "?amount=2");
+    struct wss *s = reviewed(&f, &p);
+    assert(view_of(s).state == WS_REVIEW && !wss_send_busy(view_of(s).state));
+    wss_tap_send(s, view_of(s).serial);
+    assert(view_of(s).state == WS_AUTH && wss_send_busy(view_of(s).state));
+    drain(&f);
+    assert(view_of(s).state == WS_DONE && !wss_send_busy(view_of(s).state));
+    wss_destroy(s);
+}
+static void busy_states_are_the_send_states(void)
+{
+    for (int st = WS_IDLE; st <= WS_PAID; ++st) {
+        bool want = st == WS_AUTH || st == WS_COMMIT || st == WS_BROADCAST;
+        assert(wss_send_busy((enum ws_state)st) == want);
+    }
+}
+
 int main(void)
 {
     memcpy(priv, "zs1", 3); memset(priv + 3, 'q', 75); priv[78] = 0;
@@ -1372,6 +1392,8 @@ int main(void)
     review_shows_the_plan();
     review_shows_the_address_and_calls_nothing_else();
     tap_runs_the_whole_send();
+    busy_from_confirm_to_outcome();
+    busy_states_are_the_send_states();
     public_destination_is_flagged();
     refusals_are_said_in_plain_words();
     insufficient_says_why_and_emits_nothing();

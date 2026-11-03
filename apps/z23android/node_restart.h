@@ -44,4 +44,6 @@ void zapp_restart_stopped(struct zapp_restart *r);
 enum zapp_restart_action zapp_restart_observe(struct zapp_restart *r, const struct zapp_restart_seen *s);
 /* The plain sentence to show while a restart is pending or after the last try, else NULL. */
 const char *zapp_restart_notice(const struct zapp_restart *r);
+/* The notice for a node stop while a payment is being sent, or NULL when the stop may proceed. */
+const char *zapp_node_stop_refusal(bool send_busy);
 #endif

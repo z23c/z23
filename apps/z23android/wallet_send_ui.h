@@ -42,6 +42,8 @@ void zapp_send_ui_clear(JNIEnv *env);
 void zapp_send_ui_tick(JNIEnv *env);
 /* True while the flow holds, or may hold, the wallet open: the app keeps ticking. */
 bool zapp_send_ui_owes(void);
+/* True from the owner's confirmation of a payment until its outcome (see wss_send_busy). Any thread may call it. */
+bool zapp_send_busy(void);
 /* True once after the app attached to a flow kept from an earlier activity: the shell shows the Send screen. */
 bool zapp_send_ui_take_reshow(void);
 /* The app left the foreground. */

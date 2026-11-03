@@ -14,6 +14,7 @@
 #include "wallet_send_keeper.h"
 #include "wallet_send_node.h"
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -221,7 +222,21 @@ struct parts {
     struct wsd device;
     struct zapp_send_id id;   /* the wallet id the payment keys derive from */
     bool id_ok;
+    struct wss *screen;       /* the flow this ops set serves; set once the screen exists */
 };
+
+/* The payment in flight. zapp_send_busy reads it from any thread; the flow's redraw writes it under send_busy_lock, so
+ * the last write carries the latest state of the flow. */
+static atomic_bool send_busy;
+static pthread_mutex_t send_busy_lock = PTHREAD_MUTEX_INITIALIZER;
+static void send_busy_update(struct wss *screen)
+{
+    struct wss_view v;
+    pthread_mutex_lock(&send_busy_lock);
+    wss_view(screen, &v);
+    atomic_store(&send_busy, wss_send_busy(v.state));
+    pthread_mutex_unlock(&send_busy_lock);
+}
 static bool host_derive(void *ctx, const struct zapp_payment *pay, char out[WS_KEY_HEX + 1])
 {
     const struct parts *parts = ctx;
@@ -229,8 +244,18 @@ static bool host_derive(void *ctx, const struct zapp_payment *pay, char out[WS_K
 }
 static void parts_release(void *ctx)
 {
+    pthread_mutex_lock(&send_busy_lock);
+    atomic_store(&send_busy, false);
+    pthread_mutex_unlock(&send_busy_lock);
     memory_cleanse(ctx, sizeof(struct parts));
     free(ctx);
+}
+/* The flow's redraw hook: the flag follows the flow's state, then the flow is drawn. */
+static void flow_redraw(void *ctx)
+{
+    const struct parts *parts = ctx;
+    if (parts && parts->screen) send_busy_update(parts->screen);
+    host_redraw(ctx);
 }
 static struct wss *make_screen(void *ctx)
 {
@@ -243,12 +268,13 @@ static struct wss *make_screen(void *ctx)
     if (!wsd_init(&parts->device, NULL, key_ops, ui.activity->internalDataPath)) { free(parts); return NULL; }
     wsd_ops(&parts->device, &deps.device);
     parts->id_ok = zapp_send_id_load(ui.activity->internalDataPath, &parts->id);
-    deps.host = (struct wss_host_ops){parts, host_random, host_now, host_spawn, host_redraw, host_derive, host_wall, host_outcome};
+    deps.host = (struct wss_host_ops){parts, host_random, host_now, host_spawn, flow_redraw, host_derive, host_wall, host_outcome};
     zapp_secure_window_ops(&deps.secure, ui.activity);
     deps.release = parts_release;
     deps.release_ctx = parts;
     struct wss *screen = wss_create(&deps);
     if (!screen) free(parts);
+    else parts->screen = screen;
     return screen;
 }
 /* A flow adopted from the replaced activity is bound to this activity's window, and protected, before it is drawn. */
@@ -566,6 +592,7 @@ bool zapp_send_progress(char *line, size_t cap)
 }
 void zapp_send_progress_dismiss(void) { ui.final_line[0] = 0; }
 bool zapp_send_ui_owes(void) { return ui.flow || wsk_owes(&ui.keeper); }
+bool zapp_send_busy(void) { return atomic_load(&send_busy); }
 void zapp_send_ui_dropped(JNIEnv *env)
 {
     ui.dropped = true;

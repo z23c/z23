@@ -168,6 +168,12 @@ static void a_node_already_running_is_taken_over(void)
     assert(obs(&unwanted, down(500)) == ZAPP_RESTART_NONE);
 }
 
+static void a_node_stop_is_refused_while_a_payment_is_sent(void)
+{
+    assert(zapp_node_stop_refusal(false) == NULL);
+    assert(!strcmp(zapp_node_stop_refusal(true), "Your payment is still being sent. Stop the node after it finishes."));
+}
+
 int main(void)
 {
     first_exit_restarts_after_thirty_seconds();
@@ -179,5 +185,6 @@ int main(void)
     the_heat_pause_holds_every_restart();
     a_hidden_app_waits_for_the_restart();
     a_node_already_running_is_taken_over();
+    a_node_stop_is_refused_while_a_payment_is_sent();
     return 0;
 }

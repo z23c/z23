@@ -16,6 +16,7 @@
 #include "speech_client.h"
 #include "fleet.h"
 #include "node_restart.h"
+#include "wallet_send_ui.h"
 #include "json/json.h"
 #include "base/cleanse.h"
 #include <errno.h>
@@ -735,6 +736,11 @@ static bool execute_action(struct controller *c, const char *action, const char 
         return started;
     }
     if (!strcmp(action, "node_stop")) {
+        const char *refusal = zapp_node_stop_refusal(zapp_send_busy());
+        if (refusal) {
+            copy_text(out, ZAPP_TEXT_CAP, refusal);
+            return false;
+        }
         restart_event(c, false);
         return zapp_node_stop(&c->runtime, out, ZAPP_TEXT_CAP);
     }
@@ -1149,7 +1155,17 @@ bool zapp_controller_node_control(bool start)
     struct controller *c = current;
     pthread_mutex_unlock(&startup_lock);
     if (!c) return false;
-    if (!start) restart_event(c, false);
+    if (!start) {
+        const char *refusal = zapp_node_stop_refusal(zapp_send_busy());
+        if (refusal) {
+            pthread_mutex_lock(&c->lock);
+            copy_text(c->view.notice, ZAPP_NOTICE_CAP, refusal);
+            pthread_mutex_unlock(&c->lock);
+            notify_view(c);
+            return false;
+        }
+        restart_event(c, false);
+    }
     bool ok = start ? zapp_node_start(&c->runtime, text, sizeof(text)) : zapp_node_stop(&c->runtime, text, sizeof(text));
     if (start && ok) restart_event(c, true);
     return ok;

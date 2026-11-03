@@ -212,6 +212,10 @@ bool wss_in_flight(struct wss *s)
     pthread_mutex_unlock(&s->lock);
     return flying;
 }
+bool wss_send_busy(enum ws_state state)
+{
+    return state == WS_AUTH || state == WS_COMMIT || state == WS_BROADCAST;
+}
 void wss_gate_prover(struct wss_view *v, bool ready, const char *why)
 {
     if (ready || !v->can_send) return;

@@ -194,6 +194,9 @@ void wss_view(struct wss *screen, struct wss_view *out);
 bool wss_progress(struct wss *screen, char *line, size_t cap);
 /* True while the commit runs or the node holds the payment: the flow must keep running whatever screen is shown. */
 bool wss_in_flight(struct wss *screen);
+/* True in the states from the owner's confirmation to the outcome of the payment: authentication, the commit and the
+ * broadcast. A payment in these states is not stopped. */
+bool wss_send_busy(enum ws_state state);
 /* Applies the prover check to a view: while it is not ready the review offers no Send and says why. */
 void wss_gate_prover(struct wss_view *view, bool ready, const char *why);
 /* True when the passphrase and the unlock request hold no byte: proof that every path cleansed them. */

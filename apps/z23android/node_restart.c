@@ -77,3 +77,8 @@ const char *zapp_restart_notice(const struct zapp_restart *r)
     if (r->phase == ZAPP_RESTART_GAVE_UP) return "The node stopped. Tap Start to try again.";
     return NULL;
 }
+
+const char *zapp_node_stop_refusal(bool send_busy)
+{
+    return send_busy ? "Your payment is still being sent. Stop the node after it finishes." : NULL;
+}
