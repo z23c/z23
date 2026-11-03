@@ -176,7 +176,22 @@ uint64_t bg_validation_undo_from_rev_scan_blocks(void)
     return atomic_load(&g_undo_from_rev_scan_blocks);
 }
 
+/* Shape of the block being verified: one tx undo per non-coinbase tx, each
+ * naming exactly that tx's inputs. A fork sibling sharing the parent hash
+ * passes the checksum but rarely fits this. */
+static bool rev_scan_shape_fits(const struct block_undo *u, void *ctx)
+{
+    const struct block *block = ctx;
+    if (block->num_vtx == 0 || u->num_txundo != block->num_vtx - 1)
+        return false;
+    for (size_t i = 1; i < block->num_vtx; i++)
+        if (u->vtxundo[i - 1].num_prevout != block->vtx[i].num_vin)
+            return false;
+    return true;
+}
+
 static bool read_rev_scan_undo(struct block_undo *undo,
+                               const struct block *block,
                                const struct block_index *pindex,
                                const char *datadir,
                                const struct chain_params *params)
@@ -186,7 +201,12 @@ static bool read_rev_scan_undo(struct block_undo *undo,
         return false; // raw-return-ok:missing-undo-is-counted-as-script-skip
     enum undo_rev_status st = undo_rev_shared_read(
         datadir, params->pchMessageStart, pindex->pprev->phashBlock,
-        block_index_file_load(pindex), NULL, NULL, undo);
+        block_index_file_load(pindex), rev_scan_shape_fits, (void *)block,
+        undo);
+    if (st == UNDO_REV_AMBIGUOUS)
+        LOG_WARN("bg_validation", "read_rev_scan_undo: h=%d has two rev "
+                 "records matching its parent and shape; neither is used",
+                 pindex->nHeight);
     if (st != UNDO_REV_FOUND)
         return false; // raw-return-ok:missing-undo-is-counted-as-script-skip
     atomic_fetch_add(&g_undo_from_rev_scan_blocks, 1);
@@ -208,7 +228,7 @@ static bool read_undo_rev_or_delta(struct block_undo *undo,
     if (read_delta_undo(undo, block, pindex))
         return true;
     block_undo_free(undo);
-    return read_rev_scan_undo(undo, pindex, datadir, params);
+    return read_rev_scan_undo(undo, block, pindex, datadir, params);
 }
 
 /* ── Undo-missing script-skip suppression ─────────────────────

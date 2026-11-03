@@ -16,6 +16,7 @@
 #include "base/serialize_le.h"
 #include "core/hash.h"
 #include "core/serialize.h"
+#include "platform/time_compat.h"
 #include "storage/disk_block_io.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
@@ -28,18 +29,14 @@
 #define UNDO_REV_CHECKSUM 32u
 #define UNDO_REV_HASH_SIZE 32u
 #define UNDO_REV_WINDOW 8u
-#define UNDO_REV_FULLSCAN_BUDGET 3u
+#define UNDO_REV_SCAN_COST_MS 10000
+#define UNDO_REV_SCAN_BURST 8
+#define UNDO_REV_SCAN_CAP_MS (UNDO_REV_SCAN_COST_MS * UNDO_REV_SCAN_BURST)
 #define UNDO_REV_MAX_GAP 4
 #define UNDO_REV_MAX_FILE_NO 99999
 #define UNDO_REV_MAX_SLOTS (8u * 1024u * 1024u)
 
 enum undo_rev_load { UNDO_REV_LOAD_OK, UNDO_REV_LOAD_ABSENT, UNDO_REV_LOAD_ERROR };
-
-struct undo_rev_scan {
-    const struct uint256 *parent;
-    struct block_undo *out;
-    bool any_file;
-};
 
 /* ── per-file slot list ─────────────────────────────────────── */
 
@@ -174,9 +171,28 @@ static bool checksum_matches(const unsigned char *buf, size_t size)
                   UNDO_REV_CHECKSUM) == 0;
 }
 
+/* Lookup state: what is being asked for and what the scan has found so far.
+ * The checksum binds only the PARENT, so siblings that share a parent (an
+ * orphan or reorged block still in the rev file) also pass it. A record is
+ * therefore taken only if `accept` (the caller's shape check against THIS
+ * block) agrees, and only when exactly one record in the scanned range does:
+ * two matches are AMBIGUOUS and neither is returned. */
+struct undo_rev_scan {
+    const struct uint256 *parent;
+    undo_rev_accept_fn accept;
+    void *accept_ctx;
+    struct block_undo *out;
+    bool found;
+    bool ambiguous;
+    bool error;
+    bool any_file;
+    int file;
+    size_t slot;
+};
+
 static enum undo_rev_status slot_check(const struct undo_rev_cached_file *e,
                                        const struct undo_rev_slot *slot,
-                                       const struct uint256 *parent,
+                                       const struct undo_rev_scan *sc,
                                        struct block_undo *out)
 {
     size_t body = (size_t)slot->size + UNDO_REV_CHECKSUM;
@@ -186,111 +202,165 @@ static enum undo_rev_status slot_check(const struct undo_rev_cached_file *e,
         LOG_RETURN(UNDO_REV_ERROR, "undo_rev",
                    "malloc failed for %zu byte record in rev %d",
                    UNDO_REV_HASH_SIZE + body, e->file_no);
-    memcpy(buf, parent->data, UNDO_REV_HASH_SIZE);
+    memcpy(buf, sc->parent->data, UNDO_REV_HASH_SIZE);
     bool ok = platform_positioned_file_read(&e->file, buf + UNDO_REV_HASH_SIZE,
                                             body, slot->offset) ==
                   (int64_t)body &&
               checksum_matches(buf, slot->size) &&
               payload_parse(buf + UNDO_REV_HASH_SIZE, slot->size, out);
     free(buf);
+    if (ok && sc->accept && !sc->accept(out, sc->accept_ctx)) {
+        block_undo_free(out);
+        block_undo_init(out);
+        ok = false;
+    }
     return ok ? UNDO_REV_FOUND : UNDO_REV_NOT_FOUND;
 }
 
-/* Try slots [from, to) of one cached file; a hit moves the cursor to the
- * record after it. */
-static enum undo_rev_status try_slots(struct undo_rev_locator *loc,
-                                      const struct undo_rev_cached_file *e,
-                                      size_t from, size_t to,
-                                      const struct uint256 *parent,
-                                      struct block_undo *out)
+/* Fold one verified record into the scan: the first is kept, a second makes
+ * the lookup ambiguous. */
+static void scan_note_match(struct undo_rev_scan *sc, int file, size_t slot,
+                            struct block_undo *rec)
+{
+    if (sc->found) {
+        block_undo_free(rec);
+        sc->ambiguous = true;
+        return;
+    }
+    *sc->out = *rec;
+    sc->found = true;
+    sc->file = file;
+    sc->slot = slot;
+}
+
+/* Try slots [from, to) of one cached file. Stops at an error or ambiguity. */
+static void try_slots(const struct undo_rev_cached_file *e, size_t from,
+                      size_t to, struct undo_rev_scan *sc)
 {
     if (to > e->count)
         to = e->count;
-    for (size_t i = from; i < to; i++) {
-        enum undo_rev_status st = slot_check(e, &e->slots[i], parent, out);
-        if (st == UNDO_REV_NOT_FOUND)
-            continue;
-        if (st == UNDO_REV_FOUND) {
-            loc->cursor_file = e->file_no;
-            loc->cursor_slot = i + 1;
-        }
-        return st;
+    for (size_t i = from; i < to && !sc->error && !sc->ambiguous; i++) {
+        struct block_undo rec;
+        block_undo_init(&rec);
+        enum undo_rev_status st = slot_check(e, &e->slots[i], sc, &rec);
+        if (st == UNDO_REV_ERROR)
+            sc->error = true;
+        else if (st == UNDO_REV_FOUND)
+            scan_note_match(sc, e->file_no, i, &rec);
     }
-    return UNDO_REV_NOT_FOUND;
+}
+
+/* Turn the scan into a status; a clean single match moves the cursor to the
+ * record after it. Anything else leaves *out empty. */
+static enum undo_rev_status scan_finish(struct undo_rev_locator *loc,
+                                        struct undo_rev_scan *sc)
+{
+    if (sc->error || sc->ambiguous) {
+        if (sc->found)
+            block_undo_free(sc->out);
+        block_undo_init(sc->out);
+        return sc->error ? UNDO_REV_ERROR : UNDO_REV_AMBIGUOUS;
+    }
+    if (!sc->found)
+        return UNDO_REV_NOT_FOUND;
+    loc->cursor_file = sc->file;
+    loc->cursor_slot = sc->slot + 1;
+    return UNDO_REV_FOUND;
 }
 
 /* ── lookup ─────────────────────────────────────────────────── */
 
-/* Records are written in connect order, so the block after the last hit is
- * almost always the next record of the same file (or the head of the next). */
+/* Records are written in connect order, so the block is almost always near
+ * the last hit: a window around the cursor (a stale sibling is written before
+ * the winner, so it looks back too) and the head of the next file. */
 static enum undo_rev_status try_window(struct undo_rev_locator *loc,
-                                       const struct uint256 *parent,
-                                       struct block_undo *out)
+                                       struct undo_rev_scan *sc)
 {
     if (loc->cursor_file < 0)
         return UNDO_REV_NOT_FOUND;
     int file = loc->cursor_file;
+    size_t cur = loc->cursor_slot;
     struct undo_rev_cached_file *e = cache_get(loc, file);
+    bool near_end = !e || cur + UNDO_REV_WINDOW > e->count;
     if (e) {
-        enum undo_rev_status st = try_slots(
-            loc, e, loc->cursor_slot, loc->cursor_slot + UNDO_REV_WINDOW,
-            parent, out);
-        if (st != UNDO_REV_NOT_FOUND)
-            return st;
+        sc->any_file = true;
+        try_slots(e, cur > UNDO_REV_WINDOW ? cur - UNDO_REV_WINDOW : 0,
+                  cur + UNDO_REV_WINDOW, sc);
     }
-    e = cache_get(loc, file + 1);
-    if (!e)
-        return UNDO_REV_NOT_FOUND;
-    return try_slots(loc, e, 0, UNDO_REV_WINDOW, parent, out);
+    if (near_end && !sc->ambiguous && !sc->error &&
+        (e = cache_get(loc, file + 1)) != NULL) {
+        sc->any_file = true;
+        try_slots(e, 0, UNDO_REV_WINDOW, sc);
+    }
+    return scan_finish(loc, sc);
 }
 
-static enum undo_rev_status scan_file(struct undo_rev_locator *loc, int n,
-                                      struct undo_rev_scan *sc, bool *present)
+static void scan_file(struct undo_rev_locator *loc, int n,
+                      struct undo_rev_scan *sc, bool *present)
 {
     struct undo_rev_cached_file *e = cache_get(loc, n);
     *present = e != NULL;
     if (!e)
-        return UNDO_REV_NOT_FOUND;
+        return;
     sc->any_file = true;
-    return try_slots(loc, e, 0, e->count, sc->parent, sc->out);
+    try_slots(e, 0, e->count, sc);
 }
 
-static enum undo_rev_status scan_ascending(struct undo_rev_locator *loc,
-                                           int skip_a, int skip_b,
-                                           struct undo_rev_scan *sc)
+static bool scan_done(const struct undo_rev_scan *sc)
+{
+    return sc->found || sc->ambiguous || sc->error;
+}
+
+static void scan_ascending(struct undo_rev_locator *loc, int skip_a,
+                           int skip_b, struct undo_rev_scan *sc)
 {
     int gap = 0;
-    for (int n = 0; n <= UNDO_REV_MAX_FILE_NO && gap < UNDO_REV_MAX_GAP; n++) {
+    for (int n = 0; n <= UNDO_REV_MAX_FILE_NO && gap < UNDO_REV_MAX_GAP &&
+                    !scan_done(sc); n++) {
         if (n == skip_a || n == skip_b)
             continue;
         bool present = false;
-        enum undo_rev_status st = scan_file(loc, n, sc, &present);
-        if (st != UNDO_REV_NOT_FOUND)
-            return st;
+        scan_file(loc, n, sc, &present);
         gap = present ? 0 : gap + 1;
     }
-    return UNDO_REV_NOT_FOUND;
 }
 
+/* Scan whole files (hint, cursor, then ascending) and stop after the first
+ * file that holds a match: a sibling in ANOTHER file is not looked for. */
 static enum undo_rev_status full_scan(struct undo_rev_locator *loc,
-                                      const struct uint256 *parent,
-                                      int hint_file, struct block_undo *out)
+                                      int hint_file,
+                                      struct undo_rev_scan *sc)
 {
-    struct undo_rev_scan sc = { .parent = parent, .out = out };
     int hint = hint_file <= UNDO_REV_MAX_FILE_NO ? hint_file : -1;
     int first[2] = { hint, loc->cursor_file };
-    for (int i = 0; i < 2; i++) {
-        if (first[i] < 0 || (i == 1 && first[1] == first[0]))
-            continue;
+    for (int i = 0; i < 2 && !scan_done(sc); i++) {
         bool present = false;
-        enum undo_rev_status st = scan_file(loc, first[i], &sc, &present);
-        if (st != UNDO_REV_NOT_FOUND)
-            return st;
+        if (first[i] >= 0 && !(i == 1 && first[1] == first[0]))
+            scan_file(loc, first[i], sc, &present);
     }
-    enum undo_rev_status st = scan_ascending(loc, first[0], first[1], &sc);
-    if (st == UNDO_REV_NOT_FOUND && !sc.any_file)
+    if (!scan_done(sc))
+        scan_ascending(loc, first[0], first[1], sc);
+    enum undo_rev_status st = scan_finish(loc, sc);
+    if (st == UNDO_REV_NOT_FOUND && !sc->any_file)
         return UNDO_REV_NO_FILE;
     return st;
+}
+
+/* Whole-file scans cost a full pass over a rev file, so they are metered:
+ * a token bucket (one scan per UNDO_REV_SCAN_COST_MS, a burst of
+ * UNDO_REV_SCAN_BURST) that keeps refilling. Misses slow the scan down; they
+ * never switch it off, and the cheap cursor window is never metered. */
+static bool scan_credit_take(struct undo_rev_locator *loc)
+{
+    int64_t now = platform_time_monotonic_ms();
+    loc->scan_credit_ms += now - loc->scan_stamp_ms;
+    loc->scan_stamp_ms = now;
+    if (loc->scan_credit_ms > UNDO_REV_SCAN_CAP_MS)
+        loc->scan_credit_ms = UNDO_REV_SCAN_CAP_MS;
+    if (loc->scan_credit_ms < UNDO_REV_SCAN_COST_MS)
+        return false;
+    loc->scan_credit_ms -= UNDO_REV_SCAN_COST_MS;
+    return true;
 }
 
 /* ── public API ─────────────────────────────────────────────── */
@@ -311,6 +381,8 @@ bool undo_rev_locator_init(struct undo_rev_locator *loc, const char *datadir,
         platform_positioned_file_init(&loc->cache[i].file);
     }
     loc->cursor_file = -1;
+    loc->scan_credit_ms = UNDO_REV_SCAN_CAP_MS;
+    loc->scan_stamp_ms = platform_time_monotonic_ms();
     zcl_mutex_init(&loc->lock);
     return true;
 }
@@ -327,22 +399,22 @@ void undo_rev_locator_free(struct undo_rev_locator *loc)
 enum undo_rev_status undo_rev_locator_read(struct undo_rev_locator *loc,
                                            const struct uint256 *parent,
                                            int hint_file,
-                                           undo_rev_accept_fn accept, void *accept_ctx,
+                                           undo_rev_accept_fn accept,
+                                           void *accept_ctx,
                                            struct block_undo *out)
 {
     if (!loc || !parent || !out)
         LOG_RETURN(UNDO_REV_ERROR, "undo_rev",
                    "locator read received invalid arguments");
-    (void)accept; (void)accept_ctx;
     block_undo_init(out);
+    struct undo_rev_scan sc = { .parent = parent, .accept = accept,
+                                .accept_ctx = accept_ctx, .out = out };
     zcl_mutex_lock(&loc->lock);
-    enum undo_rev_status st = try_window(loc, parent, out);
-    if (st == UNDO_REV_NOT_FOUND && loc->full_misses < UNDO_REV_FULLSCAN_BUDGET)
-        st = full_scan(loc, parent, hint_file, out);
-    if (st == UNDO_REV_FOUND)
-        loc->full_misses = 0;
-    else if (st != UNDO_REV_ERROR && loc->full_misses < UNDO_REV_FULLSCAN_BUDGET)
-        loc->full_misses++;
+    enum undo_rev_status st = try_window(loc, &sc);
+    if (st == UNDO_REV_NOT_FOUND && scan_credit_take(loc)) {
+        struct undo_rev_scan full = sc;
+        st = full_scan(loc, hint_file, &full);
+    }
     zcl_mutex_unlock(&loc->lock);
     return st;
 }

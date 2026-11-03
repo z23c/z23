@@ -32,8 +32,8 @@
 
 enum undo_rev_status {
     UNDO_REV_FOUND = 0,   /* verified record deserialized into *out */
-    UNDO_REV_NOT_FOUND,   /* rev files read, no record binds this parent */
-    UNDO_REV_AMBIGUOUS,   /* two records pass checksum and shape */
+    UNDO_REV_NOT_FOUND,   /* rev files read, no record binds this parent and shape */
+    UNDO_REV_AMBIGUOUS,   /* two records pass checksum and shape: neither is returned */
     UNDO_REV_NO_FILE,     /* no rev file could be opened */
     UNDO_REV_ERROR,       /* bad arguments or allocation failure */
 };
@@ -58,7 +58,8 @@ struct undo_rev_locator {
     int mru;              /* cache index used last; the other is evicted */
     int cursor_file;      /* file of the last hit, -1 when cold */
     size_t cursor_slot;   /* the record expected next in that file */
-    unsigned full_misses; /* consecutive lookups that scanned and found nothing */
+    int64_t scan_credit_ms; /* token bucket metering whole-file scans */
+    int64_t scan_stamp_ms;  /* monotonic time of the last refill */
     zcl_mutex_t lock;
 };
 
@@ -66,16 +67,28 @@ bool undo_rev_locator_init(struct undo_rev_locator *loc, const char *datadir,
                            const unsigned char magic[UNDO_REV_MAGIC_SIZE]);
 void undo_rev_locator_free(struct undo_rev_locator *loc);
 
+/* Shape check against THIS block. The checksum binds only the parent, so a
+ * stale sibling sharing it also passes; `accept` rejects a record whose
+ * per-tx prevout counts do not fit the block. NULL accepts every record. */
 typedef bool (*undo_rev_accept_fn)(const struct block_undo *undo, void *ctx);
 
 /* Find and parse the undo record bound to `parent` (the hash of the block's
- * PARENT). hint_file < 0 means unknown; a known file is tried first. On
- * UNDO_REV_FOUND *out owns its allocations (block_undo_free); on any other
- * status *out is empty. */
+ * PARENT) that `accept` agrees with. hint_file < 0 means unknown; a known file
+ * is tried first. Exactly one match is required within the range scanned: two
+ * give UNDO_REV_AMBIGUOUS and nothing is returned (a sibling in a different
+ * rev file than the match is not looked for). On UNDO_REV_FOUND *out owns its
+ * allocations (block_undo_free); on any other status *out is empty.
+ *
+ * Cost: the 8 records either side of the last hit (and the next file's head)
+ * are tried first. Only a miss there triggers a whole-file scan, metered by a
+ * token bucket (one per 10 s, burst of 8, always refilling), so absent blocks
+ * slow the scan down but never switch it off. The lookup holds the locator
+ * lock, including through a whole-file scan; concurrent callers wait. */
 enum undo_rev_status undo_rev_locator_read(struct undo_rev_locator *loc,
                                            const struct uint256 *parent,
                                            int hint_file,
-                                           undo_rev_accept_fn accept, void *accept_ctx,
+                                           undo_rev_accept_fn accept,
+                                           void *accept_ctx,
                                            struct block_undo *out);
 
 /* Process-wide locator behind its own lock, for the validation walk and the
