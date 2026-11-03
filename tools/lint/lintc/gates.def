@@ -227,3 +227,4 @@ LINT_GATE("check-no-stale-pinned-facts", check_no_stale_pinned_facts, LINT_CMD_N
 LINT_GATE("check-doc-no-false-deleted", check_doc_no_false_deleted, LINT_CMD_NONE)
 LINT_GATE("check-outparam-init-before-return", check_outparam_init_before_return, LINT_CMD_PAIR)
 LINT_GATE("check-hidden-return-under-lock", check_hidden_return_under_lock, LINT_CMD_PAIR)
+LINT_GATE("check-ci-symbol-floor", check_ci_symbol_floor, LINT_CMD_NONE)

@@ -2428,7 +2428,7 @@ Z23_FLAG("ZCL_SUPREG_COVERAGE_ONLY", "env_build", "0", "-",
 Z23_FLAG("ZCL_SV_PARALLEL_MIN_INPUTS", "env_runtime", "-", "-",
           "undocumented; first use engine/jobs/src/script_validate_verify.c:auto")
 Z23_FLAG("ZCL_SYMBOL_FLOOR_BIN", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/ci_symbol_floor_gate.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_ci_symbol_floor.c:auto")
 Z23_FLAG("ZCL_SYM_EXPECT_FIRST_ID", "env_build", "-", "-",
           "undocumented; first use tools/scripts/stopwatch_artifact_symmetry_check.sh:auto")
 Z23_FLAG("ZCL_SYM_PEER_PORT", "env_build", "39178", "-",

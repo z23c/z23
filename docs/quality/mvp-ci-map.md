@@ -43,7 +43,7 @@ human-readable echo of the same regression.
 
 | # | MVP.md criterion | Mechanical check `make mvp` runs | Full-claim resource |
 |---|---|---|---|
-| C1 | Single-binary install on clean Ubuntu/Debian | `ci_symbol_floor_gate.sh` (portability GLIBC/GLIBCXX/CXXABI floor) + built-binary existence | full claim = real `make install` + `systemctl --user start` → `make ci-install-linger` (a `mvp-verify` member) |
+| C1 | Single-binary install on clean Ubuntu/Debian | `gate_ci_symbol_floor.c` (portability GLIBC/GLIBCXX/CXXABI floor) + built-binary existence | full claim = real `make install` + `systemctl --user start` → `make ci-install-linger` (a `mvp-verify` member) |
 | C2 | Tor onion bootstrap in <60s | `test_zcl` slice `ZCL_TEST_ONLY=onion_slice` (<60s budget + v3 address format) + Tor-egress probe | real <60s over Tor needs egress → `make mvp-onion-local` |
 | C3 | Cold-start sync to tip in <10 min | `test_zcl` slice `ZCL_TEST_ONLY=cold_start` (sync FSM → at_tip, ~7s) | real <10min sync to the ~3.15M-block tip needs a serving peer + a **fresh** node → `make mvp-coldstart-to-tip-local` / `make mvp-coldstart-to-tip-stopwatch` (see `FORWARD_PLAN.md` #1 item 1) |
 | C4 | Receive shielded payment end-to-end | `test_zcl` slices `shielded_receive` + `shielded_receive_persist` (params-free RECEIVE half: note→ivk→z-balance→durable reopen) + `~/.zcash-params` probe | full Groth16 t→z send+decrypt needs ~770MB proving params → `make test-shielded-payment` |

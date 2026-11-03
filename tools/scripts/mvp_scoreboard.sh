@@ -209,7 +209,7 @@ echo ""
 {
     if [ -x "$REPO_ROOT/build/bin/zclassic23" ] && [ -x "$ZCL_RPC_BIN" ]; then
         sf_log="$(mktemp)"
-        if bash "$SELF_DIR/ci_symbol_floor_gate.sh" >"$sf_log" 2>&1; then
+        if ZCL_SYMBOL_FLOOR_BIN="$REPO_ROOT/build/bin/zclassic23" "$REPO_ROOT/build/bin/z23-lint" check-ci-symbol-floor >"$sf_log" 2>&1; then
             VERDICT[1]="PASS"; FULL_PASS[1]=1
             DETAIL[1]="binaries built; portability symbol-floor gate PASS (full make-install+systemctl claim: make ci-install-linger, a mvp-verify member)"
         else

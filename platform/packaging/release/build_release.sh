@@ -47,13 +47,13 @@
 # zclassic23 members are two names for one set of bytes and are produced here
 # from the built node, so only the other members must pre-exist.
 # Honors the documented glibc/GLIBCXX floor on Linux
-# (ci_symbol_floor_gate) and the PE dependency audit on Windows, both through
-# check_c23_node_binary. Exit 0 on PASS, 1 on refusal.
+# (z23-lint check-ci-symbol-floor) and the PE dependency audit on Windows, both
+# through check_c23_node_binary. Exit 0 on PASS, 1 on refusal.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-FLOOR_GATE="$REPO_ROOT/tools/scripts/ci_symbol_floor_gate.sh"
+FLOOR_GATE="$REPO_ROOT/build/bin/z23-lint"
 NODE_AUDIT="$REPO_ROOT/tools/scripts/check_c23_node_binary.sh"
 # shellcheck source=tools/scripts/tor_stamp_lib.sh
 . "$REPO_ROOT/tools/scripts/tor_stamp_lib.sh"
@@ -460,11 +460,11 @@ package_from_bin() {
     # graded -- the certificate worker is packaged on every platform too.
     case "$platform" in
         linux-x86_64)
-            ZCL_SYMBOL_FLOOR_BIN="$out_dir/z23" bash "$FLOOR_GATE" \
+            ZCL_SYMBOL_FLOOR_BIN="$out_dir/z23" "$FLOOR_GATE" check-ci-symbol-floor \
                 || die "stripped z23 exceeds documented glibc/GLIBCXX symbol floor"
             ZCL_C23_MAX_GLIBC=GLIBC_2.38 bash "$NODE_AUDIT" "$out_dir/z23" \
                 || die "stripped z23 failed the C23 node ABI audit"
-            ZCL_SYMBOL_FLOOR_BIN="$out_dir/z23-acme" bash "$FLOOR_GATE" \
+            ZCL_SYMBOL_FLOOR_BIN="$out_dir/z23-acme" "$FLOOR_GATE" check-ci-symbol-floor \
                 || die "certificate worker exceeds documented glibc/GLIBCXX symbol floor"
             ZCL_C23_MAX_GLIBC=GLIBC_2.38 bash "$NODE_AUDIT" \
                 "$out_dir/z23-acme" \

@@ -124,7 +124,7 @@ a stripped PATH you silently get 8 workers. Prefer
 |---|---|---|
 | Release packager | `platform/packaging/release/build_release.sh:57-59` | dies with "this packager produces x86_64-linux only (host is …)" — an intentional refusal, not a defect |
 | Release split-debug via `objcopy --add-gnu-debuglink` | `Makefile:4228` takes the Darwin branch instead (`cp` sidecar + `strip -S -x`) | Mach-O has no `.gnu_debuglink`; there is no back-reference, so symbolize against `build/bin/z23.debug` explicitly |
-| `ci-symbol-floor` | `Makefile:10131` | designed SKIP (exit 2 → 0) when `objdump`/`ldd` are absent; both are absent here, so the gate passes by skipping, not by proving |
+| `ci-symbol-floor` | `Makefile:10131` | designed SKIP (exit 2 → 0) when `ldd` is absent; `ldd` is absent here, so the gate passes by skipping, not by proving |
 | Standalone tool links | `ZCL_GC_SECTIONS_LDFLAG` and `ZCL_TOOL_SANDBOX_SRC` in `Makefile` | host-specific linker and sandbox selections are centralized; a red gate is a regression |
 | Linux Landlock/seccomp resident confinement, signal-context self-backtrace, `O_TMPFILE` snapshot export | `docs/node/GETTING_STARTED.md` §"Platform capability boundary" | refuse or report unavailable; the separate package verifier instead qualifies Seatbelt filesystem/network confinement plus rlimits, and the macOS `self_backtrace` test proves its own refusal boundary |
 

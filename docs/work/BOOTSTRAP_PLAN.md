@@ -280,7 +280,7 @@ worker, bootstrap helper, SQLite, secp256k1, OpenSSL, libevent, and embedded
 Tor have all been observed at that floor. The closed manifest verifies with
 stock macOS tools, and `z23`/`zclassic23` remain one hardlinked payload.
 
-The Linux-only audits are already correctly skipped: `ci_symbol_floor_gate.sh`
+The Linux-only audits are already correctly skipped: `gate_ci_symbol_floor.c`
 is a glibc-symbol question and runs only for `linux-x86_64`, and
 `tools/scripts/check_c23_node_binary.sh` already carries a Mach-O branch that
 audits `otool -L` dependencies and weak-undefined symbols.

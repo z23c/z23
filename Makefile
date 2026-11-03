@@ -16332,14 +16332,15 @@ verdict:
 # ci` (and the pre-push gate that runs it) reliable + armable. The monolith
 # full run remains available as `make test-full` and its global-isolation
 # hardening is tracked separately.
-# ci-symbol-floor (C1 portability floor): pure-static objdump/ldd check of the
-# built binary's GLIBC/GLIBCXX/CXXABI symbol-version floor — hermetic (no node,
-# net, params, docker, wall-clock), so unlike ci-install* it lives IN `make ci`.
-# SKIPs cleanly (exit 2 -> 0) when objdump/ldd are absent.
+# ci-symbol-floor (C1 portability floor): z23-lint check-ci-symbol-floor reads the
+# built binary's GLIBC/GLIBCXX/CXXABI symbol-version floor from its ELF version
+# tables and runs ldd — hermetic (no node, net, params, docker, wall-clock), so
+# unlike ci-install* it lives IN `make ci`. SKIPs cleanly (exit 2 -> 0) when ldd
+# is absent.
 .PHONY: ci-symbol-floor
-ci-symbol-floor: zclassic23
-	@bash -c 'bash tools/scripts/ci_symbol_floor_gate.sh; rc=$$?; \
-	 if [ "$$rc" -eq 2 ]; then echo "ci-symbol-floor: SKIP (objdump/ldd absent)"; exit 0; fi; exit $$rc'
+ci-symbol-floor: zclassic23 $(LINTC_TOOL)
+	@$(LINTC_TOOL) check-ci-symbol-floor; rc=$$?; \
+	 if [ "$$rc" -eq 2 ]; then echo "ci-symbol-floor: SKIP (ldd absent)"; exit 0; fi; exit $$rc
 
 # ci-reproducible: build-twice byte-identity gate. Builds the zclassic23 binary
 # TWICE in two isolated temp build dirs under the EXACT release flag profile

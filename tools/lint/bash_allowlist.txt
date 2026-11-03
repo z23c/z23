@@ -210,7 +210,6 @@ tools/scripts/check_systemd_memory_budget.sh
 tools/scripts/check_test_registration.sh
 tools/scripts/ci_install_gate.sh
 tools/scripts/ci_install_linger_gate.sh
-tools/scripts/ci_symbol_floor_gate.sh
 tools/scripts/cold_start_test.sh
 tools/scripts/cold_start_to_tip_probe.sh
 tools/scripts/cold_start_to_tip_stopwatch.sh
