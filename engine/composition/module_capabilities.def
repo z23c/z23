@@ -375,6 +375,7 @@ ZCL_MODULE_CAPABILITY("engine/services/src/block_index_integrity.c", CAP_FS_READ
 ZCL_MODULE_CAPABILITY("engine/services/src/block_index_loader.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/block_index_loader_rebuild.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/block_index_loader_topup.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/services/src/block_index_sidecar_integrity.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/block_index_sqlite_cache.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/block_pruning_service.c", CAP_FS_WRITE|CAP_CLOCK|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/block_sync_service.c", CAP_FS_WRITE, "")
