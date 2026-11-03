@@ -148,6 +148,11 @@ static const char *SCHEMA[] = {
     "CREATE INDEX IF NOT EXISTS idx_utxo_height"
     " ON utxos(height)",
 
+    /* Every index node_db_drop_indexes() drops is in this schema, so the open
+     * after a rebuild that a shutdown stopped recreates each of them. */
+    "CREATE INDEX IF NOT EXISTS idx_utxo_height_value"
+    " ON utxos(height, value)",
+
     /* Snapshot receive staging.
      * P2P snapshot sync must never write directly to active utxos before
      * FlyClient and SHA3 verification pass. This table is cleared at boot

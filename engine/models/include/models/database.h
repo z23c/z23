@@ -337,7 +337,9 @@ bool node_db_ibd_turbo_mode(struct node_db *ndb);
 int node_db_synchronous_level(struct node_db *ndb);
 
 /* Normal mode: synchronous=NORMAL, rebuild indexes, truncate WAL.
- * Call after IBD completes. */
+ * Call after IBD completes. A shutdown request leaves the index rebuild to
+ * the next open (see node_db_rebuild_indexes); the pragmas are restored
+ * either way. */
 bool node_db_normal_mode(struct node_db *ndb);
 
 /* WAL checkpoint (TRUNCATE, falling back to PASSIVE when a lock refuses the
@@ -378,8 +380,15 @@ bool node_db_turbo_maybe_checkpoint(struct node_db *ndb,
 /* Drop secondary indexes for bulk load throughput. */
 bool node_db_drop_indexes(struct node_db *ndb);
 
-/* Rebuild secondary indexes after bulk load. */
+/* Rebuild secondary indexes after bulk load. A shutdown request
+ * (thread_registry_shutdown_requested) stops the rebuild before the next
+ * index and interrupts the one in progress; the open after it recreates the
+ * rest. Returns false when an index failed or the rebuild was stopped. */
 bool node_db_rebuild_indexes(struct node_db *ndb);
+#ifdef ZCL_TESTING
+/* Called from the rebuild's progress handler on the rebuilding thread. */
+void node_db_index_rebuild_test_set_hook(void (*hook)(void *ctx), void *ctx);
+#endif
 
 /* ── Schema ────────────────────────────────────────────────────── */
 

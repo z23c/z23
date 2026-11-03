@@ -20,6 +20,7 @@
 #include "models/utxo_count_cache.h"
 #include "platform/time_compat.h"
 #include "support/log_throttle.h"
+#include "util/thread_registry.h"
 #include <limits.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -228,16 +229,93 @@ bool node_db_drop_indexes(struct node_db *ndb)
     return all_ok;
 }
 
+/* A shutdown request ends the index rebuild. Every index here is derived data
+ * that create_schema() recreates on the next open, while a rebuild over a
+ * multi-GB node.db holds the shared connection, and the DB worker running it,
+ * for minutes: longer than the shutdown watchdog grants a durability-critical
+ * stage, so waiting for it turns a stop into a forced unclean exit. Rows,
+ * commits and checkpoints are unaffected. The rebuild checks before each
+ * index and, through a progress handler, inside one. The handler belongs to
+ * the shared connection, so it acts only on the rebuilding thread and never
+ * interrupts a statement another thread runs between two rebuild statements. */
+#define INDEX_REBUILD_PROGRESS_OPS 1000
+
+static _Thread_local bool t_index_rebuild_running;
+
+#ifdef ZCL_TESTING
+static void (*g_index_rebuild_test_hook)(void *ctx);
+static void *g_index_rebuild_test_ctx;
+
+void node_db_index_rebuild_test_set_hook(void (*hook)(void *ctx), void *ctx)
+{
+    g_index_rebuild_test_hook = hook;
+    g_index_rebuild_test_ctx = ctx;
+}
+#endif
+
+static int index_rebuild_progress(void *arg)
+{
+    (void)arg;
+    if (!t_index_rebuild_running)
+        return 0;
+#ifdef ZCL_TESTING
+    if (g_index_rebuild_test_hook)
+        g_index_rebuild_test_hook(g_index_rebuild_test_ctx);
+#endif
+    return thread_registry_shutdown_requested();
+}
+
+/* Creates one index. An interrupt inside an explicit transaction rolls back
+ * the whole transaction, so the in-statement check runs only in autocommit
+ * mode. The handler is installed for each statement, so one that another
+ * caller of the shared connection set and cleared in between does not leave
+ * the rest of the rebuild without it. */
+static int index_rebuild_one(struct node_db *ndb, const char *sql)
+{
+    bool watch = sqlite3_get_autocommit(ndb->db) != 0;
+    if (watch) {
+        t_index_rebuild_running = true;
+        sqlite3_progress_handler(ndb->db, INDEX_REBUILD_PROGRESS_OPS,
+                                 index_rebuild_progress, NULL);
+    }
+    int rc = db_exec_checked(ndb->db, sql, "rebuild_indexes");
+    if (watch) {
+        sqlite3_progress_handler(ndb->db, 0, NULL, NULL);
+        t_index_rebuild_running = false;
+    }
+    return rc;
+}
+
+/* Creates each secondary index until a shutdown is requested; *deferred_out
+ * says the request left the remaining ones for the next open. */
+static bool index_rebuild_run(struct node_db *ndb, bool *deferred_out)
+{
+    bool all_ok = true;
+    size_t built = 0;
+    *deferred_out = false;
+    for (size_t i = 0; i < NUM_DB_INDEXES && !*deferred_out; i++) {
+        int rc = thread_registry_shutdown_requested()
+            ? SQLITE_INTERRUPT
+            : index_rebuild_one(ndb, DB_CREATE_INDEXES[i]);
+        if (rc == SQLITE_OK)
+            built++;
+        else if (rc == SQLITE_INTERRUPT && thread_registry_shutdown_requested())
+            *deferred_out = true;
+        else
+            all_ok = false;
+    }
+    if (*deferred_out)
+        LOG_WARN("db", "[db] index rebuild stopped by a shutdown request "
+                 "after %zu of %zu indexes; the next open recreates the rest",
+                 built, (size_t)NUM_DB_INDEXES);
+    return all_ok && !*deferred_out;
+}
+
 bool node_db_rebuild_indexes(struct node_db *ndb)
 {
     if (!ndb || !ndb->open) return false;
-    bool all_ok = true;
-    for (size_t i = 0; i < NUM_DB_INDEXES; i++) {
-        if (db_exec_checked(ndb->db, DB_CREATE_INDEXES[i],
-                            "rebuild_indexes") != SQLITE_OK)
-            all_ok = false;
-    }
-    return all_ok;
+    bool deferred = false;
+    return index_rebuild_run(ndb, &deferred);
 }
 
 static bool wal_checkpoint_run(struct node_db *ndb, struct wal_ckpt_record *out,
@@ -379,10 +457,13 @@ bool node_db_normal_mode(struct node_db *ndb)
     db_exec_checked(ndb->db, "PRAGMA journal_size_limit="
                     ZCL_NODE_DB_PRAGMA_NUM(ZCL_NODE_DB_JOURNAL_SIZE_LIMIT),
                     "normal_mode journal_size_limit");
-    node_db_rebuild_indexes(ndb);
+    bool deferred = false;
+    (void)index_rebuild_run(ndb, &deferred);
     node_db_wal_checkpoint(ndb);
     node_db_note_turbo_mode(ndb, false, "normal_mode", SQLITE_OK);
-    printf("db: normal mode (synchronous=NORMAL, indexes rebuilt)\n");
+    printf("db: normal mode (synchronous=NORMAL, %s)\n",
+           deferred ? "index rebuild left for the next open"
+                    : "indexes rebuilt");
     return true;
 }
 

@@ -27,6 +27,7 @@
 #include "validation/main_state.h"
 #include "util/safe_alloc.h"
 #include "util/hw_profile.h"
+#include "util/shutdown_stagewatch.h"
 #include "util/thread_registry.h"
 #include "util/wal_checkpoint_stats.h"
 #include "chain/chain.h"
@@ -4118,6 +4119,196 @@ static int check_sqlite_tx_statement_ownership(void)
 }
 #endif
 
+/* ── A shutdown stops the secondary-index rebuild ───────────────────────
+ *
+ * A catch-up stopped by SIGTERM leaves IBD turbo mode by rebuilding every
+ * secondary index; over a multi-GB node.db that holds the shared connection
+ * for minutes while the connman message thread waits on it, so the
+ * network-quiesce join never returns and the watchdog forces an unclean
+ * exit. Here the rebuild parks inside its first CREATE INDEX, holding the
+ * connection, and a reader stands in for the message thread behind it. The
+ * shutdown order then requests shutdown, releases the rebuild and joins the
+ * reader as network-quiesce does. The rebuild must stop at the request, the
+ * reader must finish, durability must end in a clean receipt, and the next
+ * open must recreate every dropped index. */
+#define REBUILD_STOP_ROWS 4000
+
+struct rebuild_stop_case {
+    char dir[256], path[320];
+    struct node_db ndb;
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    int hook_calls;
+    bool parked, released, rebuild_done, rebuild_ok;
+    int64_t reader_rows;
+};
+
+static int64_t rebuild_stop_clock(void) { return 0; }
+
+static int64_t rebuild_stop_index_count(struct node_db *ndb)
+{
+    return sqlite_test_pragma_i64(ndb->db, "SELECT count(*) FROM sqlite_master"
+                                  " WHERE type='index' AND name LIKE 'idx_%'");
+}
+
+/* Progress hook on the rebuilding thread: the first call parks it inside
+ * the statement, holding the connection, until the shutdown order runs. */
+static void rebuild_stop_hook(void *ctx)
+{
+    struct rebuild_stop_case *c = ctx;
+    pthread_mutex_lock(&c->mu);
+    if (++c->hook_calls == 1) {
+        c->parked = true;
+        pthread_cond_broadcast(&c->cv);
+        while (!c->released)
+            pthread_cond_wait(&c->cv, &c->mu);
+    }
+    pthread_mutex_unlock(&c->mu);
+}
+
+static void *rebuild_stop_rebuilder(void *arg)
+{
+    struct rebuild_stop_case *c = arg;
+    bool ok = node_db_normal_mode(&c->ndb);
+    pthread_mutex_lock(&c->mu);
+    c->rebuild_ok = ok;
+    c->rebuild_done = true;
+    pthread_cond_broadcast(&c->cv);
+    pthread_mutex_unlock(&c->mu);
+    return NULL;
+}
+
+static void *rebuild_stop_reader(void *arg)
+{
+    struct rebuild_stop_case *c = arg;
+    c->reader_rows = sqlite_test_pragma_i64(c->ndb.db,
+                                            "SELECT count(*) FROM utxos");
+    return NULL;
+}
+
+static bool rebuild_stop_open(struct rebuild_stop_case *c)
+{
+    memset(c, 0, sizeof(*c));
+    pthread_mutex_init(&c->mu, NULL);
+    pthread_cond_init(&c->cv, NULL);
+    test_make_tmpdir(c->dir, sizeof(c->dir), "sqlite", "rebuild_shutdown");
+    snprintf(c->path, sizeof(c->path), "%s/node.db", c->dir);
+    char sql[384];
+    snprintf(sql, sizeof(sql),
+             "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n"
+             " WHERE x < %d) INSERT INTO utxos(txid, vout, value, script,"
+             " script_type, address_hash, height, is_coinbase) SELECT"
+             " randomblob(32), 0, x, x'76a9', 1, randomblob(20), x, 0 FROM n",
+             REBUILD_STOP_ROWS);
+    return node_db_open(&c->ndb, c->path) &&
+           sqlite3_exec(c->ndb.db, sql, NULL, NULL, NULL) == SQLITE_OK;
+}
+
+/* Park the rebuild, queue the reader behind it, then run the shutdown
+ * order. True when both threads ran and were joined. */
+static bool rebuild_stop_drive(struct rebuild_stop_case *c)
+{
+    pthread_t rebuilder, reader;
+    if (pthread_create(&rebuilder, NULL, rebuild_stop_rebuilder, c) != 0)
+        return false;
+    pthread_mutex_lock(&c->mu);
+    while (!c->parked && !c->rebuild_done)
+        pthread_cond_wait(&c->cv, &c->mu);
+    bool parked = c->parked;
+    pthread_mutex_unlock(&c->mu);
+    bool queued = parked &&
+        pthread_create(&reader, NULL, rebuild_stop_reader, c) == 0;
+    thread_registry_request_shutdown();
+    shutdown_stagewatch_enter("network-quiesce", 120, true, false);
+    pthread_mutex_lock(&c->mu);
+    c->released = true;
+    pthread_cond_broadcast(&c->cv);
+    pthread_mutex_unlock(&c->mu);
+    bool joined = !queued || pthread_join(reader, NULL) == 0;
+    joined = pthread_join(rebuilder, NULL) == 0 && joined;
+    return parked && queued && joined;
+}
+
+/* The runtime-persist barrier: the strongest sync, a checkpoint, the close,
+ * then the durability mark and the clean receipt. */
+static bool rebuild_stop_persist(struct rebuild_stop_case *c)
+{
+    if (!c->ndb.open)
+        return false;
+    shutdown_stagewatch_enter("runtime-persist", 45, true, false);
+    bool ok = node_db_exec(&c->ndb, "PRAGMA synchronous=FULL") &&
+              node_db_wal_checkpoint(&c->ndb);
+    node_db_close(&c->ndb);
+    if (ok)
+        shutdown_stagewatch_mark_durable();
+    return ok && shutdown_stagewatch_complete_clean();
+}
+
+static bool rebuild_stop_receipt_clean(const struct rebuild_stop_case *c)
+{
+    char path[352], buf[4096];
+    snprintf(path, sizeof(path), "%s/shutdown-receipt.v1", c->dir);
+    FILE *f = fopen(path, "r");
+    size_t n = f ? fread(buf, 1, sizeof(buf) - 1, f) : 0;
+    if (f)
+        fclose(f);
+    buf[n] = '\0';
+    return strstr(buf, "outcome=clean\n") && strstr(buf, "durable=1\n") &&
+           strstr(buf, "stage.network-quiesce_ms=");
+}
+
+static bool rebuild_stop_reopen_heals(const struct rebuild_stop_case *c,
+                                      int64_t indexes)
+{
+    struct node_db again;
+    memset(&again, 0, sizeof(again));
+    bool ok = node_db_open(&again, c->path) &&
+              rebuild_stop_index_count(&again) == indexes &&
+              sqlite_test_pragma_i64(again.db, "SELECT count(*) FROM utxos") ==
+                  REBUILD_STOP_ROWS;
+    node_db_close(&again);
+    return ok;
+}
+
+/* The rebuild stopped at the request: one hook call (no index work after
+ * it), the parked index absent, normal pragmas restored, the reader done. */
+static bool rebuild_stop_stopped(struct rebuild_stop_case *c)
+{
+    return c->rebuild_ok && c->hook_calls == 1 &&
+           c->reader_rows == REBUILD_STOP_ROWS &&
+           node_db_synchronous_level(&c->ndb) == 1 &&
+           sqlite_test_pragma_i64(c->ndb.db, "SELECT count(*) FROM"
+               " sqlite_master WHERE name='idx_utxo_address'") == 0;
+}
+
+static void check_sqlite_rebuild_stops_on_shutdown(int *failures)
+{
+    printf("SQLite shutdown stops the index rebuild; quiesce and "
+           "durability finish clean... ");
+    struct rebuild_stop_case c;
+    bool ok = rebuild_stop_open(&c);
+    int64_t indexes = ok ? rebuild_stop_index_count(&c.ndb) : -1;
+    ok = ok && node_db_ibd_turbo_mode(&c.ndb) &&
+         rebuild_stop_index_count(&c.ndb) < indexes;
+    thread_registry_reset_for_test();
+    shutdown_stagewatch_reset_for_test();
+    shutdown_stagewatch_set_clock_for_test(rebuild_stop_clock);
+    shutdown_stagewatch_begin(c.dir);
+    node_db_index_rebuild_test_set_hook(rebuild_stop_hook, &c);
+    ok = ok && rebuild_stop_drive(&c) && rebuild_stop_stopped(&c);
+    node_db_index_rebuild_test_set_hook(NULL, NULL);
+    ok = rebuild_stop_persist(&c) && ok && rebuild_stop_receipt_clean(&c);
+    shutdown_stagewatch_set_clock_for_test(NULL);
+    shutdown_stagewatch_reset_for_test();
+    thread_registry_reset_for_test();
+    ok = ok && rebuild_stop_reopen_heals(&c, indexes);
+    pthread_cond_destroy(&c.cv);
+    pthread_mutex_destroy(&c.mu);
+    test_rm_rf_recursive(c.dir);
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); (*failures)++; }
+}
+
 int test_sqlite(void) {
     int failures = 0;
 
@@ -4368,6 +4559,7 @@ int test_sqlite(void) {
     failures += check_sqlite_53_cached_readers_release_the_snap();
     failures += check_sqlite_projection_writer_reservation();
     failures += check_sqlite_54_tx_index_shutdown_abort();
+    check_sqlite_rebuild_stops_on_shutdown(&failures);
 
 #if !defined(_WIN32)
     failures += check_sqlite_tx_statement_ownership();
