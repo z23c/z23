@@ -10,6 +10,7 @@
 
 #include "test/test_core.h"
 
+#include "base/serialize_le.h"
 #include "coins/undo.h"
 #include "core/hash.h"
 #include "core/serialize.h"
@@ -53,12 +54,6 @@ static bool make_payload(int64_t value, struct byte_stream *s)
     return ok;
 }
 
-static void put_le32(unsigned char *p, uint32_t v)
-{
-    p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8);
-    p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24);
-}
-
 /* Append [magic][size][payload][checksum] to f; the checksum binds
  * `bind_parent`. Flaws are applied to the written bytes. */
 static bool append_record(FILE *f, const struct uint256 *bind_parent,
@@ -78,7 +73,7 @@ static bool append_record(FILE *f, const struct uint256 *bind_parent,
         sum[7] ^= 0x01;
     unsigned char head[8];
     memcpy(head, TEST_MAGIC, 4);
-    put_le32(head + 4, (uint32_t)n);
+    zcl_write_u32_le(head + 4, (uint32_t)n);
     size_t keep = flaw == FLAW_TRUNCATE ? sizeof(sum) - 10 : sizeof(sum);
     bool ok = fwrite(head, 1, 8, f) == 8 && fwrite(s.data, 1, n, f) == n &&
               fwrite(sum, 1, keep, f) == keep;
@@ -182,37 +177,53 @@ static int test_missing_file(void)
     return check(st == UNDO_REV_NO_FILE, "missing rev file is reported cleanly");
 }
 
-/* Records for p1,p2 in rev00000 and p3 in rev00001: a wrong hint still
- * finds p3, and p2 is then reached from the cursor without a rescan. */
+/* Prevout value of the undo found for `p`, or -1 when nothing is found. */
+static int64_t found_value(struct undo_rev_locator *loc,
+                           const struct uint256 *p, int hint)
+{
+    struct block_undo u;
+    if (undo_rev_locator_read(loc, p, hint, &u) != UNDO_REV_FOUND)
+        return -1;
+    int64_t v = u.vtxundo[0].vprevout[0].txout.value;
+    block_undo_free(&u);
+    return v;
+}
+
+/* p1,p2 in rev00000 and p3 in rev00001. */
+static bool write_two_files(const char *dir, const struct uint256 *p1,
+                            const struct uint256 *p2, const struct uint256 *p3)
+{
+    FILE *f0 = open_rev(dir, 0);
+    FILE *f1 = open_rev(dir, 1);
+    bool wrote = f0 && f1 && append_record(f0, p1, 1, FLAW_NONE) &&
+                 append_record(f0, p2, 2, FLAW_NONE) &&
+                 append_record(f1, p3, 3, FLAW_NONE);
+    if (f0)
+        fclose(f0);
+    if (f1)
+        fclose(f1);
+    return wrote;
+}
+
+/* A wrong hint still finds p3; on a fresh locator p2 is then reached from the
+ * cursor after p1 (cursor_slot 2). */
 static int test_hint_and_cursor(void)
 {
     char dir[512];
     if (!make_datadir(dir, sizeof(dir)))
         return check(false, "hint: temp datadir");
     struct uint256 p1 = make_hash(1), p2 = make_hash(2), p3 = make_hash(3);
-    FILE *f0 = open_rev(dir, 0);
-    FILE *f1 = open_rev(dir, 1);
-    bool wrote = f0 && f1 && append_record(f0, &p1, 1, FLAW_NONE) &&
-                 append_record(f0, &p2, 2, FLAW_NONE) &&
-                 append_record(f1, &p3, 3, FLAW_NONE);
-    if (f0) fclose(f0);
-    if (f1) fclose(f1);
     struct undo_rev_locator loc;
-    struct block_undo u;
-    bool ok = wrote && undo_rev_locator_init(&loc, dir, TEST_MAGIC);
+    bool ok = write_two_files(dir, &p1, &p2, &p3) &&
+              undo_rev_locator_init(&loc, dir, TEST_MAGIC);
     if (ok) {
-        ok = undo_rev_locator_read(&loc, &p3, 0, &u) == UNDO_REV_FOUND &&
-             u.vtxundo[0].vprevout[0].txout.value == 3;
-        block_undo_free(&u);
+        ok = found_value(&loc, &p3, 0) == 3;
         undo_rev_locator_free(&loc);
         ok = ok && undo_rev_locator_init(&loc, dir, TEST_MAGIC);
     }
     if (ok) {
-        ok = undo_rev_locator_read(&loc, &p1, -1, &u) == UNDO_REV_FOUND;
-        block_undo_free(&u);
-        ok = ok && undo_rev_locator_read(&loc, &p2, -1, &u) == UNDO_REV_FOUND &&
-             u.vtxundo[0].vprevout[0].txout.value == 2 && loc.cursor_slot == 2;
-        block_undo_free(&u);
+        ok = found_value(&loc, &p1, -1) == 1 &&
+             found_value(&loc, &p2, -1) == 2 && loc.cursor_slot == 2;
         undo_rev_locator_free(&loc);
     }
     remove_datadir(dir);

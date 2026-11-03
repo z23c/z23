@@ -7,6 +7,7 @@
 
 #include "services/undo_rev_index.h"
 
+#include "base/serialize_le.h"
 #include "core/hash.h"
 #include "core/serialize.h"
 #include "storage/disk_block_io.h"
@@ -85,15 +86,15 @@ static bool entry_index_frames(struct undo_rev_cached_file *e,
             break;
         if (memcmp(h, magic, UNDO_REV_MAGIC_SIZE) != 0)
             break;
-        uint32_t size = (uint32_t)h[4] | (uint32_t)h[5] << 8 |
-                        (uint32_t)h[6] << 16 | (uint32_t)h[7] << 24;
+        uint32_t size = zcl_read_u32_le(h + UNDO_REV_MAGIC_SIZE);
         if (size == 0 || size > UNDO_REV_MAX_RECORD)
             break;
         uint64_t end = pos + UNDO_REV_FRAME_HEAD + size + UNDO_REV_CHECKSUM;
         if (end > file_size)
             break;
         if (!slots_push(e, pos + UNDO_REV_FRAME_HEAD, size))
-            return false;
+            LOG_FAIL("undo_rev", "rev %d: cannot index record at offset %llu",
+                     e->file_no, (unsigned long long)pos);
         pos = end;
     }
     return true;
