@@ -61,6 +61,7 @@ struct lt_cfg {
     const char *verdict; /* the review's last line */
     const char *gate_rc; /* what the fake agent-verify gate prints (lint prints rc=0) */
     const char *rerun;   /* exit status of the r1 agent-verify rerun, NULL = 0 */
+    const char *gate_die; /* "always" or "once": agent-verify exits 0 with an empty log */
 };
 
 struct lt_env {
@@ -384,6 +385,10 @@ static bool lt_fakes(const struct lt_env *e, const struct lt_cfg *c)
            lt_script(e, "zgate",
                "d='%s'; l=\"$d\"/zgate.$$.log\n"
                "case \"$*\" in *agent-verify*) r='%s' ;; *) r='rc=0' ;; esac\n"
+               "case \"$*\" in *agent-verify*) n=$(cat '%s/av.n' 2>/dev/null || echo 0);"
+               " n=$((n+1)); echo $n > '%s/av.n';"
+               " if [ '%s' = always ] || { [ '%s' = once ] && [ $n -eq 1 ]; };"
+               " then : > \"$l\"; echo \"log: $l\"; exit 0; fi ;; esac\n"
                "[ -e '%s/claim.live' ] && echo saw >> '%s/gate_saw_claim.txt'\n"
                "if [ -e \"$d/slowgate\" ]; then\n"
                " case \"$*\" in *agent-verify*) kind=agent-verify ;; *) kind=lint ;; esac\n"
@@ -392,7 +397,8 @@ static bool lt_fakes(const struct lt_env *e, const struct lt_cfg *c)
                "  echo 'loop_tick: slow gate request publication failed' >&2; exit 1\n"
                " fi\n"
                "else echo \"$r\" > \"$l\"; fi\necho \"log: $l\"",
-               e->d, c->gate_rc, e->d, e->d) &&
+               e->d, c->gate_rc, e->d, e->d, c->gate_die ? c->gate_die : "",
+               c->gate_die ? c->gate_die : "", e->d, e->d) &&
            lt_script(e, "precheck",
                "n=$(cat '%s/pre.count' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '%s/pre.count'\n"
                "echo \"$1\" >> '%s/pre.args'\n"
@@ -685,6 +691,49 @@ static int case_gate_failure_hold(void)
     LT_CHECK("the failing r1 rerun is what holds it",
              lt_file_has(&e, "state/loop-t1.HOLD", "the r1 rerun failed"));
     LT_CHECK("it does not submit", !lt_exists("%s/%s", e.d, "submit.txt"));
+    return failures;
+}
+
+/* A gate that exits 0 having written nothing is a dead gate: one rerun, then a
+ * typed HOLD in seconds, not a wait out of --gate-wait-s. */
+static int case_gate_dies_twice(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL, "always" };
+    const bool ready = lt_setup(&e, "gatedead", &c, "run", "claude-haiku");
+    LT_CHECK("the dead-gate scenario fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    const time_t t0 = time(NULL);
+    (void)lt_tick(&e, NULL, NULL, NULL, 0);
+    LT_CHECK("a gate dying twice holds as gate_died_no_rc",
+             lt_file_has(&e, "state/loop-t1.HOLD", "gate_died_no_rc"));
+    LT_CHECK("the hold comes in seconds, not the gate wait", time(NULL) - t0 < 9);
+    LT_CHECK("it logs the one rerun",
+             lt_file_has(&e, "state/tick.log", "gate died without rc; rerun 1/1"));
+    LT_CHECK("agent-verify was started exactly twice", lt_file_has(&e, "av.n", "2"));
+    LT_CHECK("it does not submit", !lt_exists("%s/%s", e.d, "submit.txt"));
+    return failures;
+}
+
+/* A gate that dies once and then succeeds lets the tick carry on. */
+static int case_gate_dies_once(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL, "once" };
+    const bool ready = lt_setup(&e, "gateonce", &c, "run", "claude-haiku");
+    LT_CHECK("the died-once scenario fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    (void)lt_tick(&e, NULL, NULL, NULL, 0);
+    LT_CHECK("it logs the one rerun",
+             lt_file_has(&e, "state/tick.log", "gate died without rc; rerun 1/1"));
+    LT_CHECK("it logs both gate verdicts after the rerun",
+             lt_file_has(&e, "state/tick.log", "gates: agent-verify rc=0 / lint rc=0"));
+    LT_CHECK("it does not hold", !lt_exists("%s/%s", e.d, "state/loop-t1.HOLD"));
+    LT_CHECK("it submits", lt_exists("%s/%s", e.d, "submit.txt"));
     return failures;
 }
 
@@ -1680,6 +1729,8 @@ int test_loop_tick(void)
     failures += case_baseline_rise_hold();
     failures += case_review_hold();
     failures += case_gate_failure_hold();
+    failures += case_gate_dies_twice();
+    failures += case_gate_dies_once();
     failures += case_rerun_pass();
     failures += case_unsigned_refused();
     failures += case_no_lane_actions();

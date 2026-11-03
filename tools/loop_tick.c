@@ -60,6 +60,7 @@
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "json/json.h"
+#include "loop_tick_gate.h"
 #include "platform/clock.h"
 #include "platform/rng.h"
 #include "util/spawn.h"
@@ -1650,17 +1651,59 @@ static bool gate_rc(const char *log, char *out, size_t cap)
     return found;
 }
 
-static bool wait_gates(struct tick *t, const char *l1, const char *l2,
-                       char *rc1, char *rc2, size_t cap)
+/* One zgate run the loop started: its log, its last rc= line, and whether the
+ * one allowed rerun after a death without rc= has been spent. */
+struct gate {
+    const char *what, *extra;
+    char log[LT_PATH], rc[256];
+    bool done, reran;
+};
+
+enum { LT_WAIT_OK, LT_WAIT_TIMEOUT, LT_WAIT_DIED };
+
+/* One poll of one gate. A run that wrote rc= is done. A run whose log exists,
+ * has no rc= and is held by nobody died unreported: rerun it once, and the
+ * second death is LT_WAIT_DIED. */
+static int gate_poll(struct tick *t, struct gate *g)
+{
+    if (g->done)
+        return LT_WAIT_OK;
+    /* Sample liveness BEFORE the log: a run writes rc= before it exits, so an
+     * exit seen first always has its rc= visible to the read that follows. */
+    const bool orphan = lt_log_orphaned(g->log);
+    if (gate_rc(g->log, g->rc, sizeof(g->rc))) {
+        g->done = true;
+        return LT_WAIT_OK;
+    }
+    if (!orphan)
+        return LT_WAIT_OK;
+    if (g->reran) {
+        say(t, "gate died without rc again (%s %s)", g->what, g->log);
+        return LT_WAIT_DIED;
+    }
+    say(t, "gate died without rc; rerun 1/1 (%s %s)", g->what, g->log);
+    g->reran = true;
+    if (!start_gate(t, g->what, g->extra, g->log, sizeof(g->log)))
+        return LT_WAIT_DIED;
+    return LT_WAIT_OK;
+}
+
+static int wait_gates(struct tick *t, struct gate *g, size_t n)
 {
     const long limit_ms = oint(t, LT_O_GATE_WAIT) * 1000;
     const long poll_ms = oint(t, LT_O_POLL) > 0 ? oint(t, LT_O_POLL) : 1000;
     long since_ms = 0;
     for (long waited = 0;; waited += poll_ms) {
-        if (gate_rc(l1, rc1, cap) && gate_rc(l2, rc2, cap))
-            return true;
+        size_t done = 0;
+        for (size_t i = 0; i < n; i++) {
+            if (gate_poll(t, &g[i]) == LT_WAIT_DIED)
+                return LT_WAIT_DIED;
+            done += g[i].done ? 1 : 0;
+        }
+        if (done == n)
+            return LT_WAIT_OK;
         if (waited >= limit_ms)
-            return false;
+            return LT_WAIT_TIMEOUT;
         claim_renew(t, &since_ms, poll_ms);
         const struct timespec ts = { (time_t)(poll_ms / 1000),
                                      (long)(poll_ms % 1000) * 1000000L };
@@ -1689,28 +1732,34 @@ static int gate_rerun(struct tick *t, const char *rc1, const char *l1)
 
 static int stage_gates(struct tick *t)
 {
-    char log[LT_PATH], l1[LT_PATH], l2[LT_PATH], rc1[256], rc2[256];
+    char log[LT_PATH];
+    struct gate g[2] = { { .what = "agent-verify", .extra = "ONLY=@changed" },
+                         { .what = "lint", .extra = NULL } };
     const char *const quick[] = { O(t, LT_O_DEVBUILD), "--wait", "make",
                                   "lint-land", "lint-preflight", NULL };
     (void)fmt(t->gatenote, sizeof(t->gatenote), "zgate agent-verify+lint rc=0");
     (void)fmt(log, sizeof(log), "%s/lintland.log", t->unit);
     if (run_logged(t, t->dir, quick, LT_BUILD_TIMEOUT_MS, log) != 0)
         return hold(t, t->lane, "lint-land failed (%s)", log);
-    const bool a = start_gate(t, "agent-verify", "ONLY=@changed", l1, sizeof(l1));
-    const bool b = start_gate(t, "lint", NULL, l2, sizeof(l2));
+    const bool a = start_gate(t, g[0].what, g[0].extra, g[0].log, sizeof(g[0].log));
+    const bool b = start_gate(t, g[1].what, g[1].extra, g[1].log, sizeof(g[1].log));
     if (!a || !b)
         return hold(t, t->lane, "zgate did not start");
-    if (!wait_gates(t, l1, l2, rc1, rc2, sizeof(rc1)))
+    const int w = wait_gates(t, g, 2);
+    if (w == LT_WAIT_DIED)
+        return hold(t, t->lane, "gate_died_no_rc: a zgate run died twice without "
+                    "an rc= line (%s %s)", g[0].log, g[1].log);
+    if (w != LT_WAIT_OK)
         return hold(t, t->lane, "gates did not finish in %ld h (%s %s)",
-                    oint(t, LT_O_GATE_WAIT) / 3600, l1, l2);
-    say(t, "gates: agent-verify %s / lint %s", rc1, rc2);
-    if (strncmp(rc1, "rc=0", 4) != 0) {
-        const int rr = gate_rerun(t, rc1, l1);
+                    oint(t, LT_O_GATE_WAIT) / 3600, g[0].log, g[1].log);
+    say(t, "gates: agent-verify %s / lint %s", g[0].rc, g[1].rc);
+    if (strncmp(g[0].rc, "rc=0", 4) != 0) {
+        const int rr = gate_rerun(t, g[0].rc, g[0].log);
         if (rr != LT_GO)
             return rr;
     }
-    if (strncmp(rc2, "rc=0", 4) != 0)
-        return hold(t, t->lane, "lint %s (%s)", rc2, l2);
+    if (strncmp(g[1].rc, "rc=0", 4) != 0)
+        return hold(t, t->lane, "lint %s (%s)", g[1].rc, g[1].log);
     return LT_GO;
 }
 
