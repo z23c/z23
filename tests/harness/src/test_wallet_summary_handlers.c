@@ -25,6 +25,7 @@
 #include "storage/progress_store.h"
 #include "test/wallet_summary_fixture.h"
 #include "wallet/wallet.h"
+#include "wallet/wallet_keystore.h"
 #include "wallet/wallet_lock.h"
 #include "wallet/wallet_sqlite.h"
 
@@ -811,6 +812,95 @@ static int test_summary_peer_count(void)
     return failures;
 }
 
+/* 1 true, 0 false, -1 null, -2 absent or another type. */
+static int held(const struct json_value *j, const char *key)
+{
+    const struct json_value *v = json_get(j, key);
+    if (v && v->type == JSON_BOOL)
+        return json_get_bool(v) ? 1 : 0;
+    return v && v->type == JSON_NULL ? -1 : -2;
+}
+
+static bool holdings_are(int seed, int keys)
+{
+    struct json_value j;
+    bool ok;
+    call_summary(&j, &ok);
+    bool match = ok && held(&j, "seed_present") == seed &&
+                 held(&j, "keys_present") == keys;
+    json_free(&j);
+    return match;
+}
+
+/* An encrypted seed row, written under a passphrase that is then forgotten,
+ * with the wallet locked as a boot without the passphrase leaves it. */
+static bool rig_locked_seed(struct rig *r, const uint8_t seed[32])
+{
+    if (!wallet_lock_unlock(NULL, NULL, "summary-holdings-pass").ok ||
+        !wallet_sqlite_write_sapling_seed(&r->ws, seed))
+        return false;
+    wallet_lock_reset_for_test();
+    wallet_lock_note_encrypted_at_rest();
+    return wallet_sqlite_sapling_seed_state(&r->ws, NULL) ==
+           WALLET_SEED_LOCKED;
+}
+
+/* seed_present and keys_present read the wallet tables by presence and the
+ * loaded keystores: an empty wallet is false and false, a key row or a
+ * loaded key is a key, a seed row is a seed whether it is plaintext or
+ * encrypted and locked, and tables that cannot be read are null. */
+static int test_summary_holdings(void)
+{
+    int failures = 0;
+    TEST_CASE("walletsummary: seed_present and keys_present") {
+        struct rig r;
+        uint8_t seed[32];
+        char iters[16], saved[32] = {0};
+        const char *old = getenv("ZCL_WALLET_KDF_ITERS");
+        bool had = old != NULL;
+        if (had)
+            snprintf(saved, sizeof(saved), "%s", old);
+        memset(seed, 0x5c, sizeof(seed));
+        ASSERT(rig_open(&r, true));
+        rig_key(&r, false);
+        ASSERT(holdings_are(0, 0));
+        rig_key(&r, true);
+        ASSERT(holdings_are(0, 1));
+        rig_key(&r, false);
+        r.ws.open = false;
+        ASSERT(holdings_are(-1, -1));
+        r.ws.open = true;
+        ASSERT(sqlite3_exec(r.ndb.db, "INSERT INTO wallet_keys"
+            "(pubkey_hash,pubkey,privkey) VALUES"
+            "(zeroblob(20),zeroblob(33),zeroblob(32))",
+            NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(holdings_are(0, 1));
+        ASSERT(sqlite3_exec(r.ndb.db, "DELETE FROM wallet_keys", NULL, NULL,
+                            NULL) == SQLITE_OK);
+        ASSERT(wallet_sqlite_write_sapling_seed(&r.ws, seed));
+        ASSERT(holdings_are(1, 0));
+        rig_close(&r);
+
+        snprintf(iters, sizeof(iters), "%u", (unsigned)WKS_MIN_ITERS);
+        setenv("ZCL_WALLET_KDF_ITERS", iters, 1);
+        ASSERT(rig_open(&r, true));
+        rig_key(&r, false);
+        ASSERT(rig_locked_seed(&r, seed));
+        ASSERT(holdings_are(1, 0));
+        struct json_value j;
+        bool ok;
+        call_summary(&j, &ok);
+        ASSERT(ok && json_get_bool(json_get(&j, "locked")));
+        json_free(&j);
+        rig_close(&r);
+        if (had)
+            setenv("ZCL_WALLET_KDF_ITERS", saved, 1);
+        else
+            unsetenv("ZCL_WALLET_KDF_ITERS");
+    } TEST_END
+    return failures;
+}
+
 static int run_rig_tests(void)
 {
     struct rig r;
@@ -836,6 +926,7 @@ static int run_rig_tests(void)
     failures += test_send_negative_minconf();
     failures += test_send_cap_after_filter();
     failures += test_summary_peer_count();
+    failures += test_summary_holdings();
     return failures;
 }
 

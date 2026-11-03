@@ -1,9 +1,10 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * walletsummary and wallethistory node RPCs behind core.wallet.summary and
- * core.wallet.history. Read-only: they read the wallet fact rows and the
- * loaded viewing keys (ivk), never a spending key, and write nothing. No
- * amount, address or memo reaches a log line. */
+ * core.wallet.history. Read-only: they read the wallet fact rows, the loaded
+ * viewing keys (ivk) and whether seed and key rows exist, never a seed or a
+ * spending key, and write nothing. No amount, address or memo reaches a log
+ * line. */
 
 #include "controllers/wallet_shielded_internal.h"
 #include "controllers/wallet_activity.h"
@@ -96,6 +97,17 @@ static void wa_summary_chain(const struct wallet_chain_view *v,
                       wa_chain_live(v));
 }
 
+/* A holding that is held is true, one the wallet tables were read without is
+ * false, and any other is unknown: null, never false. */
+static void wa_kv_held(struct json_value *obj, const char *key, bool held,
+                       bool read)
+{
+    if (held || read)
+        json_push_kv_bool(obj, key, held);
+    else
+        wa_kv_null(obj, key);
+}
+
 void wallet_summary_to_json(const struct wallet_summary *s,
                             const struct wallet_chain_view *v,
                             bool send_allowed, const char *send_reason,
@@ -132,6 +144,8 @@ void wallet_summary_to_json(const struct wallet_summary *s,
     json_push_kv_bool(out, "locked", v->locked);
     json_push_kv_bool(out, "encrypted", v->encrypted);
     json_push_kv_int(out, "shielded_keys", (int64_t)v->shielded_keys);
+    wa_kv_held(out, "seed_present", v->seed_held, v->holdings_read);
+    wa_kv_held(out, "keys_present", v->keys_held, v->holdings_read);
     json_push_kv_bool(out, "send_allowed", send_allowed);
     json_push_kv_str(out, "send_blocked_reason",
                      send_allowed || !send_reason ? "" : send_reason);
@@ -247,6 +261,26 @@ static bool wa_chain_view(struct wallet_rpc_context *ctx,
     v->shielded_keys = k->n;
     v->shielded_known = k->known;
     return true;
+}
+
+/* Whether the wallet holds a seed and any transparent or Sapling key, from its
+ * tables and its loaded keystores. The tables are read by presence alone, so
+ * no secret is read and a locked wallet answers too. */
+static void wa_holdings(struct wallet_rpc_context *ctx,
+                        struct wallet_chain_view *v)
+{
+    struct wallet *w = ctx->wallet;
+    int stored = wallet_sqlite_holdings(ctx->wallet_db);
+    zcl_mutex_lock(&w->sapling_keys.cs);
+    bool seed = w->sapling_keys.has_seed;
+    bool keys = w->sapling_keys.num_keys > 0;
+    zcl_mutex_unlock(&w->sapling_keys.cs);
+    zcl_mutex_lock(&w->keystore.cs);
+    keys = keys || w->keystore.num_keys > 0;
+    zcl_mutex_unlock(&w->keystore.cs);
+    v->holdings_read = stored >= 0;
+    v->seed_held = seed || (stored > 0 && (stored & WALLET_HOLDS_SEED));
+    v->keys_held = keys || (stored > 0 && (stored & WALLET_HOLDS_KEYS));
 }
 
 struct wa_facts {
@@ -410,6 +444,7 @@ bool rpc_walletsummary(const struct json_value *params, bool help,
     }
     char reason[96] = {0};
     bool allowed = wallet_send_gate(reason, sizeof(reason));
+    wa_holdings(ctx, &st.view);
     wallet_summary_to_json(&sum, &st.view, allowed, reason, result);
     wa_state_free(&st);
     return true;

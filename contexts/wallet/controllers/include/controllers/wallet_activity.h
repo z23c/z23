@@ -183,6 +183,12 @@ struct wallet_chain_view {
     /* False when the viewing keys were not loaded (a locked wallet that
      * kept none), so no shielded amount can be read. */
     bool shielded_known;
+    /* Whether the wallet holds a seed, and any transparent or Sapling key,
+     * stored or loaded. Each is unknown, rendered null, unless it is held or
+     * the wallet tables were read (holdings_read). */
+    bool holdings_read;
+    bool seed_held;
+    bool keys_held;
 };
 
 void wallet_summary_to_json(const struct wallet_summary *s,

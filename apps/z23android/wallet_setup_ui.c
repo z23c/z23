@@ -199,6 +199,21 @@ static enum wsu_idle env_idle(void *ctx)
     if (amounts == 0 || transactions == 0) return WSU_IDLE_FUNDS;
     return amounts == 1 && transactions == 1 ? WSU_IDLE_EMPTY : WSU_IDLE_UNKNOWN;
 }
+/* seed_present and keys_present of `core wallet summary`, which the running node answers from its open wallet. */
+static bool env_held(void *ctx, enum sun_probe *out)
+{
+    char text[SUMMARY_MAX];
+    struct json_value root = {0};
+    (void)ctx;
+    text[0] = 0;
+    bool ok = zapp_controller_send_run("summary", NULL, 60000, text, sizeof(text));
+    const char *json = strchr(text, '{');
+    ok = ok && json && json_read(&root, json, strlen(json)) && wsu_summary_wallet(&root, out);
+    json_cleanse_strings(&root);
+    json_free(&root);
+    memory_cleanse(text, sizeof(text));
+    return ok;
+}
 static int64_t env_wall(void *ctx)
 {
     (void)ctx;
@@ -531,7 +546,7 @@ bool zapp_setup_ui_open(JNIEnv *env)
     if (!ui.model_ready) {
         struct sun node;
         char datadir[600];
-        struct wsu_env host = {NULL, env_wrap_new, env_discard, env_running, env_control, env_pause, host_random, env_progress, env_protect, env_idle, env_wall};
+        struct wsu_env host = {NULL, env_wrap_new, env_discard, env_running, env_control, env_pause, host_random, env_progress, env_protect, env_idle, env_held, env_wall};
         snprintf(datadir, sizeof(datadir), "%s/node", ui.activity->internalDataPath);
         sun_init(&node, &(struct sun_runner){NULL, setup_runner}, datadir);
         ui.model_ready = wsu_init(&ui.model, &host, &node, ui.activity->internalDataPath);

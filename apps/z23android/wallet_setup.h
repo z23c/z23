@@ -34,6 +34,10 @@ enum wsu_idle { WSU_IDLE_UNKNOWN, WSU_IDLE_EMPTY, WSU_IDLE_FUNDS };
 int wsu_summary_state(const struct json_value *data);
 /* What the node's history data says: 1 when every list is empty, 0 when one holds an item, -1 when the reply has no list. */
 int wsu_history_state(const struct json_value *data);
+/* What a whole `core wallet summary` reply says about the wallet the running node holds open, by the rule of sun_wallet_probe:
+ * PRESENT when seed_present or keys_present is true, NONE only when both are false, UNKNOWN when either is null. False, with out
+ * untouched, when the reply is not an ok summary carrying both as true, false or null: the node gave no answer. */
+bool wsu_summary_wallet(const struct json_value *reply, enum sun_probe *out);
 
 struct wsu_env {
     void *ctx;
@@ -52,6 +56,9 @@ struct wsu_env {
     bool (*protect)(void *ctx, bool on);
     /* Whether the running node's wallet holds nothing: zero amounts and no transactions. */
     enum wsu_idle (*wallet_idle)(void *ctx);
+    /* What the running node says its open wallet holds, as wsu_summary_wallet reads it; false until the node answers. The node keeps
+     * running. */
+    bool (*wallet_held)(void *ctx, enum sun_probe *out);
     /* Seconds since the epoch, for the names of files set aside. */
     int64_t (*wall_s)(void *ctx);
 };
@@ -261,8 +268,10 @@ void wsu_finish_job(struct wsu *w);
 bool wsu_retry_marker(struct wsu *w);
 /* BLOCKED, or FAILED after a wallet may exist, to CHECKING; the caller then runs wsu_resume_job. */
 bool wsu_recheck(struct wsu *w);
-/* After a restart, on the worker: learns from the datadir whether the interrupted setup left a wallet. A finished restore
- * completes setup; a create whose words were not confirmed stays blocked; no wallet frees the choice again. */
+/* After a restart, on the worker: learns whether the interrupted setup left a wallet. A running node is asked and never stopped
+ * for it; the datadir is read only when no node runs, or when the node gives no answer while it starts, and then a running node is
+ * paused for the read. A finished restore completes setup; a create whose words were not confirmed stays blocked; no wallet frees
+ * the choice again. */
 void wsu_resume_job(struct wsu *w);
 
 /* NO_WALLET to CHOICE after the owner's tap: the wrapped key is renamed aside, never deleted. */

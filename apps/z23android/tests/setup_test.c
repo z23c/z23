@@ -443,6 +443,11 @@ struct fake {
     int step_at_sample, write_at_sample;
     bool waiting_at_sample, waiting_at_write, ready_at_sample;
     const char *note_at_sample;
+    /* The running node's answer about its open wallet: given from question held_after + 1 on when held_answers is set; the node
+     * exits on its own at question held_exit_at when that is not 0. */
+    bool held_answers;
+    enum sun_probe held;
+    int held_calls, held_while_stopped, held_after, held_exit_at;
 };
 static struct fake *fake_of;
 static struct wsu *model_of;
@@ -550,6 +555,16 @@ static bool f_protect(void *ctx, bool on)
     return ((struct fake *)ctx)->protect_ok;
 }
 static enum wsu_idle f_idle(void *ctx) { return ((struct fake *)ctx)->idle; }
+static bool f_held(void *ctx, enum sun_probe *out)
+{
+    struct fake *f = ctx;
+    ++f->held_calls;
+    if (!f_running(f)) { ++f->held_while_stopped; return false; }
+    if (f->held_exit_at && f->held_calls == f->held_exit_at) f->running = false;
+    if (!f->running || !f->held_answers || f->held_calls <= f->held_after) return false;
+    *out = f->held;
+    return true;
+}
 static int64_t f_wall(void *ctx)
 {
     const struct fake *f = ctx;
@@ -578,7 +593,7 @@ static void fresh(struct fake *f, struct wsu *w, bool running)
     f->script.hook = fake_hook;
     snprintf(f->script.chain, sizeof(f->script.chain), "%s", CHAIN);
     struct sun node = node_of(&f->script);
-    struct wsu_env env = {f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_wall};
+    struct wsu_env env = {f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_held, f_wall};
     model_of = w;
     assert(wsu_init(w, &env, &node, dir));
     assert(wsu_open(w));
@@ -1081,11 +1096,13 @@ static void blocked_create(struct fake *f, struct wsu *w, char node_dir[700])
     struct sun node;
     struct sun_runner runner = {&f->script, script_run};
     sun_init(&node, &runner, node_dir);
-    struct wsu_env env = {f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_wall};
+    struct wsu_env env = {f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_held, f_wall};
+    f->held_answers = true;
+    f->held = SUN_PROBE_PRESENT;
     assert(wsu_init(w, &env, &node, dir) && wsu_open(w));
     wsu_resume_job(w);
-    assert(w->step == WSU_BLOCKED && w->failure == WSU_NO_FAILURE);
-    f->stops = f->starts = 0;   /* the read stopped and restarted the node; count what follows */
+    /* The running node holds the wallet and says so: nothing is stopped or started for the check. */
+    assert(w->step == WSU_BLOCKED && w->failure == WSU_NO_FAILURE && f->stops == 0 && f->starts == 0 && f->script.status_calls == 0);
 }
 static void files_untouched(const char *node_dir)
 {
@@ -1298,7 +1315,7 @@ static void field_tests(void)
 static void init_with(struct fake *f, struct wsu *w)
 {
     struct sun node = node_of(&f->script);
-    struct wsu_env env = {f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_wall};
+    struct wsu_env env = {f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_held, f_wall};
     assert(wsu_init(w, &env, &node, dir));
     assert(wsu_open(w));
 }
@@ -1392,7 +1409,8 @@ static void resume_unknown_tests(void)
 }
 
 /* A Restore killed before the node wrote leaves an empty database: that is no wallet and asks, never "finished". An unreadable
- * wallet (NO_WALLET) is not known and keeps everything. The node is stopped for the read and started again after. */
+ * wallet (NO_WALLET) is not known and keeps everything. A running node that gives no answer is stopped for the read and started
+ * again after. */
 static void probe_meaning_tests(void)
 {
     struct fake f;
@@ -1428,6 +1446,133 @@ static void probe_meaning_tests(void)
     init_with(&f, &w);
     wsu_resume_job(&w);
     assert(w.step == WSU_BLOCKED && w.failure == WSU_NODE_BUSY && f.script.status_calls == 0);
+    wsu_destroy(&w);
+}
+
+/* The model's bound on asking a running node: ASK_TIMES questions, ASK_GAP_MS apart (IDLE_POLLS and IDLE_POLL_MS). */
+#define ASK_TIMES 24
+#define ASK_GAP_MS 5000
+#define SUMMARY_HELD(seed, keys) \
+    "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"shielded_keys\":0,\"seed_present\":" seed ",\"keys_present\":" keys "}}"
+/* The summary's answer keeps the rule of the status probe: a seed or a key is a wallet, both false is none, a null is not known,
+ * and a reply without both fields, a failed reply or another schema is no answer. Amounts and shielded_keys alone never answer. */
+static void summary_wallet_tests(void)
+{
+    static const struct { const char *reply; bool answered; enum sun_probe probe; } cases[] = {
+        {SUMMARY_HELD("false", "false"), true, SUN_PROBE_NONE},
+        {SUMMARY_HELD("true", "false"), true, SUN_PROBE_PRESENT},
+        {SUMMARY_HELD("false", "true"), true, SUN_PROBE_PRESENT},
+        {SUMMARY_HELD("true", "null"), true, SUN_PROBE_PRESENT},
+        {SUMMARY_HELD("null", "true"), true, SUN_PROBE_PRESENT},
+        {SUMMARY_HELD("null", "false"), true, SUN_PROBE_UNKNOWN},
+        {SUMMARY_HELD("false", "null"), true, SUN_PROBE_UNKNOWN},
+        {SUMMARY_HELD("null", "null"), true, SUN_PROBE_UNKNOWN},
+        {SUMMARY_HELD("0", "false"), false, SUN_PROBE_UNKNOWN},
+        {SUMMARY_HELD("false", "\"no\""), false, SUN_PROBE_UNKNOWN},
+        {"{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"shielded_keys\":0,\"spendable_zat\":0,\"public_zat\":0,"
+         "\"current\":true}}", false, SUN_PROBE_UNKNOWN},
+        {"{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"seed_present\":false}}", false, SUN_PROBE_UNKNOWN},
+        {"{\"ok\":false,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"seed_present\":false,\"keys_present\":false}}", false, SUN_PROBE_UNKNOWN},
+        {"{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_status.v1\",\"seed_present\":false,\"keys_present\":false}}", false, SUN_PROBE_UNKNOWN},
+        {"{\"ok\":true,\"data\":{\"seed_present\":false,\"keys_present\":false}}", false, SUN_PROBE_UNKNOWN},
+        {"{\"ok\":\"true\",\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"seed_present\":false,\"keys_present\":false}}", false, SUN_PROBE_UNKNOWN},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        struct json_value root = {0};
+        enum sun_probe probe = (enum sun_probe)7;
+        assert(json_read(&root, cases[i].reply, strlen(cases[i].reply)));
+        assert(wsu_summary_wallet(&root, &probe) == cases[i].answered);
+        assert(cases[i].answered ? probe == cases[i].probe : probe == (enum sun_probe)7);
+        json_free(&root);
+    }
+    enum sun_probe probe = (enum sun_probe)7;
+    assert(!wsu_summary_wallet(NULL, &probe) && probe == (enum sun_probe)7);
+}
+
+/* An interrupted setup over a fake whose running node answers held, after held_after questions it cannot answer yet. */
+static void interrupted_with(struct fake *f, struct wsu *w, enum zapp_setup_kind kind, enum sun_probe held, int held_after)
+{
+    fresh(f, w, true);
+    touch("wallet_key.blob");
+    zapp_setup_kind_write(dir, kind);
+    wsu_destroy(w);
+    f->held_answers = true;
+    f->held = held;
+    f->held_after = held_after;
+    init_with(f, w);
+}
+/* With the node running, the check asks the node and never stops or starts it: the node's answer alone decides each step. */
+static void running_check_tests(void)
+{
+    static const struct { enum zapp_setup_kind kind; bool confirmed; enum sun_probe held; enum wsu_step step; enum wsu_failure failure; } cases[] = {
+        {ZAPP_KIND_RESTORE, false, SUN_PROBE_NONE, WSU_NO_WALLET, WSU_NO_FAILURE},
+        {ZAPP_KIND_CREATE, false, SUN_PROBE_NONE, WSU_NO_WALLET, WSU_NO_FAILURE},
+        {ZAPP_KIND_RESTORE, false, SUN_PROBE_PRESENT, WSU_READING, WSU_NO_FAILURE},
+        {ZAPP_KIND_CREATE, false, SUN_PROBE_PRESENT, WSU_BLOCKED, WSU_NO_FAILURE},
+        {ZAPP_KIND_CREATE, true, SUN_PROBE_PRESENT, WSU_DONE, WSU_NO_FAILURE},
+        {ZAPP_KIND_RESTORE, false, SUN_PROBE_UNKNOWN, WSU_BLOCKED, WSU_UNKNOWN},
+    };
+    struct fake f;
+    struct wsu w;
+    int stops = 0;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        interrupted_with(&f, &w, cases[i].kind, cases[i].held, 0);
+        if (cases[i].confirmed) assert(zapp_setup_mark_confirmed(dir, true));
+        wsu_resume_job(&w);
+        assert(w.step == cases[i].step && w.failure == cases[i].failure && f.discards == 0 && exists_in(dir, "wallet_key.blob"));
+        assert(f.stops == 0 && f.starts == 0 && f.starts_refused == 0 && f.running && f.script.status_calls == 0);
+        assert(f.held_calls == 1 && f.held_while_stopped == 0 && f.pauses == 0 && f.now_ms == 0);
+        stops += f.stops;
+        wsu_destroy(&w);
+    }
+    /* A node still starting answers at the fourth question, 15 s on; the screen names the check meanwhile and nothing stops. */
+    interrupted_with(&f, &w, ZAPP_KIND_RESTORE, SUN_PROBE_NONE, 3);
+    f.clock_follows = true;
+    f.sample_ms = 2 * ASK_GAP_MS;
+    wsu_resume_job(&w);
+    assert(w.step == WSU_NO_WALLET && f.held_calls == 4 && f.now_ms == 3 * ASK_GAP_MS && f.stops == 0 && f.starts == 0);
+    assert(f.script.status_calls == 0 && f.step_at_sample == WSU_CHECKING && !strcmp(f.line_at_sample, "Checking your wallet - 0:10"));
+    stops += f.stops;
+    wsu_destroy(&w);
+    printf("  wallet check, node running and answering: %d node stops in %zu opens\n", stops, sizeof(cases) / sizeof(cases[0]) + 1);
+}
+/* A running node that gives no answer within the bound is read as before: stopped once, read, started once. One that exits on its
+ * own while it is asked is read without a stop or a start. */
+static void silent_check_tests(void)
+{
+    struct fake f;
+    struct wsu w;
+    interrupted_with(&f, &w, ZAPP_KIND_RESTORE, SUN_PROBE_NONE, ASK_TIMES);
+    snprintf(f.script.status, sizeof(f.script.status), EMPTY_REPLY);
+    wsu_resume_job(&w);
+    assert(w.step == WSU_NO_WALLET && f.held_calls == ASK_TIMES && f.held_while_stopped == 0 && f.now_ms >= (ASK_TIMES - 1) * ASK_GAP_MS);
+    assert(f.stops == 1 && f.starts == 1 && f.starts_refused == 0 && f.running && f.script.status_calls == 1 && f.script.status_while_running == 0);
+    printf("  wallet check, node running and silent past the bound: %d node stop, %d start\n", f.stops, f.starts);
+    wsu_destroy(&w);
+
+    interrupted_with(&f, &w, ZAPP_KIND_CREATE, SUN_PROBE_NONE, ASK_TIMES);
+    f.held_exit_at = 2;
+    wsu_resume_job(&w);
+    assert(w.step == WSU_BLOCKED && w.failure == WSU_NO_FAILURE && f.held_calls == 2 && f.held_while_stopped == 0);
+    assert(f.stops == 0 && f.starts == 0 && !f.running && f.script.status_calls == 1);
+    wsu_destroy(&w);
+}
+/* With no node running, the datadir is read at once: the node is not asked, stopped or started. */
+static void stopped_check_tests(void)
+{
+    struct fake f;
+    struct wsu w;
+    fresh(&f, &w, false);
+    touch("wallet_key.blob");
+    zapp_setup_kind_write(dir, ZAPP_KIND_RESTORE);
+    wsu_destroy(&w);
+    snprintf(f.script.status, sizeof(f.script.status), EMPTY_REPLY);
+    f.held_answers = true;
+    init_with(&f, &w);
+    wsu_resume_job(&w);
+    assert(w.step == WSU_NO_WALLET && f.held_calls == 0 && f.stops == 0 && f.starts == 0 && !f.running && f.script.status_calls == 1);
+    assert(f.pauses == 0);
+    printf("  wallet check, node stopped: %d node stops, %d starts, datadir read %d time\n", f.stops, f.starts, f.script.status_calls);
     wsu_destroy(&w);
 }
 
@@ -1533,7 +1678,7 @@ static void confirmed_no_start_restart_tests(struct fake *fp)
     struct sun node;
     struct sun_runner runner = {&f.script, script_run};
     sun_init(&node, &runner, node_dir);
-    struct wsu_env env = {&f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_wall};
+    struct wsu_env env = {&f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_held, f_wall};
     assert(wsu_init(&w, &env, &node, dir) && wsu_open(&w));
     wsu_resume_job(&w);
     assert(w.step == WSU_FAILED && w.failure == WSU_NO_BIRTHDAY && !w.birthday.known && w.confirmed);
@@ -1584,7 +1729,7 @@ static void confirmed_restart_tests(void)
     struct sun node;
     struct sun_runner runner = {&f.script, script_run};
     sun_init(&node, &runner, node_dir);
-    struct wsu_env env = {&f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_wall};
+    struct wsu_env env = {&f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_held, f_wall};
     /* The marker still cannot be written after the restart: not "words never confirmed", and Save again is offered. */
     assert(wsu_init(&w, &env, &node, dir) && wsu_open(&w));
     wsu_resume_job(&w);
@@ -2276,7 +2421,7 @@ static void check_and_aside_live_line_tests(void)
     w.step = WSU_CHECKING;
     f.clock_follows = true;
     f.exit_after_ms = 60000;
-    f.sample_ms = 30000;
+    f.sample_ms = (ASK_TIMES - 1) * ASK_GAP_MS + 30000;   /* a node that gave no answer, 30 s into its pause */
     wsu_resume_job(&w);
     assert(f.step_at_sample == WSU_CHECKING && f.waiting_at_sample && w.step == WSU_BLOCKED && !wsu_waiting(&w));
     assert(!strcmp(f.line_at_sample, "Pausing your node so this phone's wallet can be checked safely - 0:30 (up to 3:00)"));
@@ -2446,6 +2591,10 @@ int main(int argc, char **argv)
     start_over_undo_tests();
     start_over_stuck_tests();
     probe_meaning_tests();
+    summary_wallet_tests();
+    running_check_tests();
+    silent_check_tests();
+    stopped_check_tests();
     key_kept_tests();
     confirmed_record_tests();
     confirmed_restart_tests();

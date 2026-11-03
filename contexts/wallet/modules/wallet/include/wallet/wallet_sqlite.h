@@ -326,6 +326,14 @@ bool wallet_sqlite_read_sapling_keys(struct wallet_sqlite *ws,
  * read. Read-only. */
 int wallet_sqlite_sapling_key_count(struct wallet_sqlite *ws);
 
+/* What the wallet tables hold, read by presence alone: WALLET_HOLDS_SEED when
+ * a seed row is stored and WALLET_HOLDS_KEYS when any transparent or Sapling
+ * key row is. No seed or key byte is read, so a locked wallet answers as an
+ * unlocked one does, and each read stops at the first row. -1 when the tables
+ * cannot be read. Read-only. */
+enum { WALLET_HOLDS_SEED = 1, WALLET_HOLDS_KEYS = 2 };
+int wallet_sqlite_holdings(struct wallet_sqlite *ws);
+
 /* Diversifier indexes at or past this are never issued. */
 #define WALLET_DIVERSIFIER_INDEX_MAX ((uint64_t)1 << 62)
 

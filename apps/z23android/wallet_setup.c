@@ -11,6 +11,8 @@
  * again before the node is started; the screen shows the bound beside the clock of the wait. */
 #define STOP_WAIT_MS 180000u
 #define STOP_POLL_MS 250u
+/* A node that runs may still be starting: a question it cannot answer yet is asked again IDLE_POLL_MS later, IDLE_POLLS times in
+ * all. The two minutes are over twice the 50 s a Pixel node took on 2026-11-03 to answer after a start. */
 #define IDLE_POLLS 24u
 #define IDLE_POLL_MS 5000u
 #define CONFIRM_TRIES 5u
@@ -750,6 +752,34 @@ static void confirmed_create_resumes(struct wsu *w)
     wsu_finish_job(w);
 }
 
+/* The running node holds the wallet open and answers from it, so nothing is stopped. It is asked until it answers, while it may
+ * still be starting; false when no node runs, or it stops, or it gives no answer within IDLE_POLLS questions. */
+static bool running_probe(struct wsu *w, enum sun_probe *probe)
+{
+    if (!w->env.node_running(w->env.ctx)) return false;
+    phase(w, WSU_PHASE_CHECK);
+    for (unsigned asked = 1;; ++asked) {
+        if (w->env.wallet_held(w->env.ctx, probe)) return true;
+        if (asked >= IDLE_POLLS) return false;
+        w->env.pause_ms(w->env.ctx, IDLE_POLL_MS);
+        if (!w->env.node_running(w->env.ctx)) return false;
+    }
+}
+/* The datadir read: the status command refuses a datadir a running node holds, so a node that runs is stopped for the read and
+ * started again after, except after a finished restore, which starts it itself. False when the node did not stop. */
+static bool offline_probe(struct wsu *w, enum zapp_setup_kind kind, enum sun_probe *probe)
+{
+    bool was_running = w->env.node_running(w->env.ctx);
+    if (!stop_node(w, WSU_PHASE_PAUSE_CHECK)) {
+        if (was_running) (void)start_node(w);
+        return false;
+    }
+    phase(w, WSU_PHASE_CHECK);
+    *probe = sun_wallet_probe(&w->node);
+    if (was_running && !(*probe == SUN_PROBE_PRESENT && kind == ZAPP_KIND_RESTORE)) (void)start_node(w);
+    return true;
+}
+
 void wsu_resume_job(struct wsu *w)
 {
     pthread_mutex_lock(&w->lock);
@@ -758,16 +788,11 @@ void wsu_resume_job(struct wsu *w)
     enum zapp_setup_kind kind = w->kind;
     pthread_mutex_unlock(&w->lock);
     if (!go) return;
-    /* The status command refuses a datadir a running node holds, so the node is stopped for the read and started again after. */
-    bool was_running = w->env.node_running(w->env.ctx);
-    if (!stop_node(w, WSU_PHASE_PAUSE_CHECK)) {
-        if (was_running) (void)start_node(w);
+    enum sun_probe probe = SUN_PROBE_UNKNOWN;
+    if (!running_probe(w, &probe) && !offline_probe(w, kind, &probe)) {
         set_step(w, WSU_BLOCKED, WSU_NODE_BUSY);
         return;
     }
-    phase(w, WSU_PHASE_CHECK);
-    enum sun_probe probe = sun_wallet_probe(&w->node);
-    if (was_running && !(probe == SUN_PROBE_PRESENT && kind == ZAPP_KIND_RESTORE)) (void)start_node(w);
     switch (probe) {
     case SUN_PROBE_NONE:
         set_step(w, WSU_NO_WALLET, WSU_NO_FAILURE);
@@ -952,6 +977,25 @@ int wsu_summary_state(const struct json_value *data)
     const struct json_value *current = json_get(data, "current"), *listed = json_get(data, "shielded_keys");
     bool ready = current && current->type == JSON_BOOL && json_get_bool(current) && listed && listed->type == JSON_INT && json_get_int(listed) > 0;
     return ready ? 1 : -1;
+}
+/* true or false, or null for not known; false when the value is absent or of another type. */
+static bool held_of(const struct json_value *data, const char *key, int *out)
+{
+    const struct json_value *v = json_get(data, key);
+    if (v && v->type == JSON_BOOL) *out = json_get_bool(v) ? 1 : 0;
+    else if (v && v->type == JSON_NULL) *out = -1;
+    else return false;
+    return true;
+}
+bool wsu_summary_wallet(const struct json_value *reply, enum sun_probe *out)
+{
+    const struct json_value *ok = json_get(reply, "ok"), *data = json_get(reply, "data"), *schema = json_get(data, "schema");
+    bool summary = ok && ok->type == JSON_BOOL && json_get_bool(ok) && schema && schema->type == JSON_STR &&
+                   !strcmp(json_get_str(schema), "zcl.wallet_summary.v1");
+    int seed = 0, keys = 0;
+    if (!summary || !held_of(data, "seed_present", &seed) || !held_of(data, "keys_present", &keys)) return false;
+    *out = seed == 1 || keys == 1 ? SUN_PROBE_PRESENT : seed == 0 && keys == 0 ? SUN_PROBE_NONE : SUN_PROBE_UNKNOWN;
+    return true;
 }
 int wsu_history_state(const struct json_value *data)
 {
