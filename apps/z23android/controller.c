@@ -8,6 +8,7 @@
 #include "operations.h"
 #include "params_job.h"
 #include "rpc.h"
+#include "node_notice.h"
 #include "pay_stash.h"
 #include "camera.h"
 #include "audio.h"
@@ -803,14 +804,14 @@ static void *worker(void *opaque)
         pthread_mutex_lock(&c->lock);
         struct timespec until;
         if (clock_gettime(CLOCK_REALTIME, &until)) { pthread_mutex_unlock(&c->lock); break; }
-        until.tv_sec += 10;
-        /* While hidden no screen shows the node or fleet; only an action or showing the app wakes it.
-         * shown also covers an app shown while the worker was busy, when no waiter took the signal. */
+        until.tv_sec += zapp_worker_step_for(c->hidden, 10).wait_secs;
+        /* The notification is a screen while the app is hidden, so the node is observed on every step; the fleet is
+         * observed only while shown. An action, or showing the app, wakes the worker at once; shown also covers an app
+         * shown while the worker was busy, when no waiter took the signal. */
         bool wait = !c->pending && !first && !c->shown;
-        if (wait && c->hidden) (void)pthread_cond_wait(&c->changed, &c->lock);
-        else if (wait) (void)pthread_cond_timedwait(&c->changed, &c->lock, &until);
+        if (wait) (void)pthread_cond_timedwait(&c->changed, &c->lock, &until);
         first = false; c->shown = false;
-        bool hidden = c->hidden;
+        const struct zapp_worker_step after = zapp_worker_step_for(c->hidden, 10);
         if (c->pending) {
             copy_text(action, sizeof(action), c->action); copy_text(arg, sizeof(arg), c->argument);
             ticket = c->camera_ticket; c->pending = false;
@@ -833,7 +834,8 @@ static void *worker(void *opaque)
             pthread_mutex_unlock(&c->lock);
             notify_view(c);
         }
-        if (!hidden) { observe_node(c); observe_fleet(c); }
+        observe_node(c);
+        if (after.observe_fleet) observe_fleet(c);
         if (!c->autostart_checked) start_if_wanted(c);
     }
     return NULL;

@@ -21,4 +21,12 @@ struct zapp_node_notice {
  * last posted text and ZAPP_NOTICE_INTERVAL_SECS have passed since that post. When it returns true, text (cap
  * bytes) holds the text to post. */
 bool zapp_node_notice_due(struct zapp_node_notice *n, const char *line, int64_t now, char *text, size_t cap);
+
+/* What the controller worker does on each wait. While hidden the notification is a screen, so the node is observed every
+ * ZAPP_NOTICE_INTERVAL_SECS and the fleet is not observed; while shown it keeps visible_secs and observes the node and the fleet. */
+struct zapp_worker_step {
+    unsigned wait_secs;
+    bool observe_fleet;
+};
+struct zapp_worker_step zapp_worker_step_for(bool hidden, unsigned visible_secs);
 #endif

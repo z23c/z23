@@ -14,3 +14,13 @@ bool zapp_node_notice_due(struct zapp_node_notice *n, const char *line, int64_t 
     n->posted_at = now;
     return true;
 }
+
+struct zapp_worker_step zapp_worker_step_for(bool hidden, unsigned visible_secs)
+{
+    struct zapp_worker_step step = {visible_secs, true};
+    if (hidden) {
+        step.wait_secs = ZAPP_NOTICE_INTERVAL_SECS;
+        step.observe_fleet = false;
+    }
+    return step;
+}

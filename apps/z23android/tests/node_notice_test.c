@@ -45,12 +45,22 @@ static void changed_text_waits_for_interval(void)
     assert(!strcmp(text, "Catching up: 790 blocks to go"));
 }
 
+/* Hidden, the worker waits the notice interval and observes the node only; shown, the visible cadence and the fleet. */
+static void worker_step_follows_visibility(void)
+{
+    struct zapp_worker_step hidden = zapp_worker_step_for(true, 10);
+    assert(hidden.wait_secs == ZAPP_NOTICE_INTERVAL_SECS && !hidden.observe_fleet);
+    struct zapp_worker_step shown = zapp_worker_step_for(false, 10);
+    assert(shown.wait_secs == 10 && shown.observe_fleet);
+}
+
 int main(void)
 {
     known_line_posts_at_once();
     unknown_line_uses_neutral();
     unchanged_text_never_posts();
     changed_text_waits_for_interval();
+    worker_step_follows_visibility();
     puts("node notice tests passed");
     return 0;
 }
