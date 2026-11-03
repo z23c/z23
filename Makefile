@@ -827,6 +827,21 @@ DEP_AUDIT_BIN = $(BIN_DIR)/dep_audit
 # here because Make runs it at parse time (ONLY= validation, t-list) and the
 # test binaries take it as an order-only prerequisite. Host tool.
 TEST_GROUP_LIST_BIN = $(BIN_DIR)/test-group-list$(ZCL_HOST_EXEEXT)
+TEST_GROUP_LIST_SRCS = tools/dev/test_group_list_main.c \
+    tools/dev/test_group_list.c tools/dev/test_group_list_umbrella.c \
+    tools/dev/test_group_list_rules.c tools/dev/test_group_list_report.c \
+    platform/modules/util/src/spawn.c platform/modules/base/src/cleanse.c \
+    platform/modules/base/src/log_level.c platform/modules/base/src/result.c \
+    platform/modules/base/src/safe_alloc.c platform/modules/platform/src/clock.c \
+    platform/modules/platform/src/os_proc.c
+TEST_GROUP_LIST_HDRS = tools/dev/test_group_list.h tools/dev/test_group_list_int.h
+TEST_GROUP_LIST_BUILD = mkdir -p $(dir $(TEST_GROUP_LIST_BIN)) && \
+    $(or $(HOST_CC),cc) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Itools/dev \
+    -Iplatform/modules/base/include -Iplatform/modules/platform/include \
+    -Iplatform/modules/util/include -o $(TEST_GROUP_LIST_BIN).tmp \
+    $(TEST_GROUP_LIST_SRCS) -lpthread && \
+    mv -f $(TEST_GROUP_LIST_BIN).tmp $(TEST_GROUP_LIST_BIN)
 TOOLGEN_BIN =$(BIN_DIR)/z23-toolgen$(ZCL_HOST_EXEEXT)
 # Tor archive provenance verifier — binds the four bundled Tor archives to the
 # vendor/tor commit, compiler identity, and configure flags that produced
@@ -4730,9 +4745,10 @@ ONLY_REQUIRED_GOALS := t t-fast t-tsan t-hotswap
 ONLY_SELECTOR_GOALS := $(ONLY_REQUIRED_GOALS) t-asan
 ONLY_ACTIVE_GOALS := $(filter $(ONLY_SELECTOR_GOALS),$(MAKECMDGOALS))
 # The list tool is a small host binary, so a parse-time use builds it first
-# (its own rule, below) in a child make that shares no flags with this one.
+# (TEST_GROUP_LIST_BUILD) when it is missing or older than its sources. It
+# starts no recursive Make: the build-epoch fixtures count those.
 ifneq ($(strip $(ONLY_ACTIVE_GOALS) $(filter t-fast-exact,$(MAKECMDGOALS))),)
-  T_LIST_READY := $(shell env -u MAKEFLAGS -u MFLAGS $(MAKE) --no-print-directory -s $(T_LIST_TOOL) 1>&2)
+  T_LIST_READY := $(shell [ -x $(T_LIST_TOOL) ] && [ -z "$$(find $(TEST_GROUP_LIST_SRCS) $(TEST_GROUP_LIST_HDRS) -newer $(T_LIST_TOOL) -print -quit)" ] || { $(TEST_GROUP_LIST_BUILD); } 1>&2)
 endif
 ifneq ($(ONLY_ACTIVE_GOALS),)
   ONLY_GOAL := $(firstword $(ONLY_ACTIVE_GOALS))
@@ -5189,25 +5205,13 @@ $(TEST_GROUP_WEIGHTS_BIN): tools/dev/test_group_weights.c \
 	    -Iplatform/modules/platform/include \
 	    -o $@ $^ -lpthread
 # test-group-list: the registered test-group names and their resolvers, the C
-# form of the former tools/dev/test-group-list.sh and test-registry-report.sh.
-# A host tool compiled straight from source, so Make can run it at parse time
-# before anything else is built; the same body is `z23-dev dev test-groups`.
-TEST_GROUP_LIST_SRCS = tools/dev/test_group_list_main.c \
-    tools/dev/test_group_list.c tools/dev/test_group_list_umbrella.c \
-    tools/dev/test_group_list_rules.c tools/dev/test_group_list_report.c \
-    platform/modules/util/src/spawn.c platform/modules/base/src/cleanse.c \
-    platform/modules/base/src/log_level.c platform/modules/base/src/result.c \
-    platform/modules/base/src/safe_alloc.c platform/modules/platform/src/clock.c \
-    platform/modules/platform/src/os_proc.c
+# form of the former test-group-list.sh and test-registry-report.sh. A host tool
+# compiled straight from source (TEST_GROUP_LIST_BUILD, declared near the top
+# because Make runs it at parse time); the same body is `z23-dev dev test groups`.
 .PHONY: test-group-list
 test-group-list: $(TEST_GROUP_LIST_BIN)
-$(TEST_GROUP_LIST_BIN): $(TEST_GROUP_LIST_SRCS) tools/dev/test_group_list.h \
-		tools/dev/test_group_list_int.h
-	@mkdir -p $(dir $@)
-	$(or $(HOST_CC),cc) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Itools/dev \
-	    $(DEP_AUDIT_INCLUDES) \
-	    -o $@ $(TEST_GROUP_LIST_SRCS) -lpthread
+$(TEST_GROUP_LIST_BIN): $(TEST_GROUP_LIST_SRCS) $(TEST_GROUP_LIST_HDRS)
+	$(TEST_GROUP_LIST_BUILD)
 test-group-weights-regen: $(TEST_GROUP_WEIGHTS_BIN)
 	$(TEST_GROUP_WEIGHTS_BIN) --timing=$(TEST_GROUP_WEIGHTS_TIMING) \
 	    --out=tools/dev/test_group_weights.tsv

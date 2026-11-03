@@ -1,5 +1,5 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: dev.test-groups, the leaf form of the former
+ * purpose: dev.test.groups, the leaf form of the former
  *          tools/dev/test-group-list.sh and test-registry-report.sh. It runs
  *          the one body (tools/dev/test_group_list.c) the standalone
  *          build/bin/test-group-list host tool runs, so the two cannot
@@ -65,7 +65,7 @@ static void tg_fail(struct zcl_command_reply *reply, int rc)
         rc == 2 ? "TEST_GROUPS_USAGE" : "TEST_GROUPS_REFUSED", "run", false,
         false, rc == 2 ? "missing proof source or bad mode"
                        : "no match, or the selection was refused",
-        "z23-dev dev test-groups --mode=list");
+        "z23-dev dev test groups --mode=list");
 }
 
 void zcl_native_handle_dev_test_groups(const struct zcl_command_request *request,
@@ -92,5 +92,5 @@ void zcl_native_handle_dev_test_groups(const struct zcl_command_request *request
         tg_fail(reply, rc);
         return;
     }
-    (void)json_push_kv_str(&reply->data, "leaf", "dev.test-groups");
+    (void)json_push_kv_str(&reply->data, "leaf", "dev.test.groups");
 }

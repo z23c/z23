@@ -9,6 +9,8 @@
 
 #include "test_group_list_int.h"
 
+#include "base/safe_alloc.h"
+
 #include "platform/glob_match.h"
 
 #include <ctype.h>
@@ -119,7 +121,7 @@ static bool um_seen(const struct um_parse *p, const char *id, size_t len)
 static bool um_add(struct um_parse *p, const char *id, size_t il,
                    const char *g, size_t gl)
 {
-    struct um_decl *bigger = realloc(p->decl, (p->n + 1) * sizeof(*p->decl));
+    struct um_decl *bigger = zcl_realloc(p->decl, (p->n + 1) * sizeof(*p->decl), "tgl_decl");
     if (!bigger)
         return false;
     p->decl = bigger;
@@ -196,7 +198,7 @@ static bool um_parse_file(struct tgl_ctx *c, struct um_parse *p, char *text)
     size_t n = tgl_split_lines(text, &lines), at = 0;
     bool ok = lines != NULL;
     for (size_t i = 0; ok && i < n; i++) {
-        char *clean = malloc(strlen(lines[i]) + 2);
+        char *clean = zcl_malloc(strlen(lines[i]) + 2, "tgl_clean");
         at = i + 1;
         if (!clean) {
             ok = false;

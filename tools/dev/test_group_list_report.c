@@ -13,6 +13,8 @@
 
 #include "test_group_list_int.h"
 
+#include "base/safe_alloc.h"
+
 #include <ctype.h>
 #include <locale.h>
 #include <stdlib.h>
@@ -203,7 +205,7 @@ static int reconcile(struct tgl_ctx *c, const struct tgl_strs *gated,
     char **lines = NULL, count[32];
     struct art a;
     size_t nl = tgl_split_lines(text, &lines);
-    const char **regsorted = malloc((c->reg.n + 1) * sizeof(*regsorted));
+    const char **regsorted = zcl_malloc((c->reg.n + 1) * sizeof(*regsorted), "tgl_regsorted");
     bool ok = lines && regsorted && executed_names(lines, nl, &exec);
     if (ok) {
         for (size_t i = 0; i < c->reg.n; i++)

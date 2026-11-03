@@ -2522,11 +2522,11 @@ Z23_FLAG("ZCL_TEST_PERF_ASSERTS", "env_test", "-", "-",
 Z23_FLAG("ZCL_TEST_PERF_BUDGET_SEC", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_stage_crash_sweep.c:auto")
 Z23_FLAG("ZCL_TEST_PROOF_FAMILIES_SRC", "env_build", "-", "-",
-          "undocumented; first use tools/dev/test_group_list_main.c:auto")
+          "undocumented; first use tools/dev/test_group_list.c:auto")
 Z23_FLAG("ZCL_TEST_REGISTRY_SRC", "env_build", "-", "-",
-          "undocumented; first use tools/dev/test_group_list_main.c:auto")
+          "undocumented; first use tools/dev/test_group_list.c:auto")
 Z23_FLAG("ZCL_TEST_RUNNER_SRC", "env_build", "-", "-",
-          "undocumented; first use tools/dev/test_group_list_main.c:auto")
+          "undocumented; first use tools/dev/test_group_list.c:auto")
 Z23_FLAG("ZCL_TEST_RUNNING", "env_build", "/invalid", "-",
           "undocumented; first use tools/dev/deploy-dev-lane-selftest.sh:auto")
 Z23_FLAG("ZCL_TEST_TIMEOUT_SCALE", "env_test", "-", "-",
@@ -2534,9 +2534,9 @@ Z23_FLAG("ZCL_TEST_TIMEOUT_SCALE", "env_test", "-", "-",
 Z23_FLAG("ZCL_TEST_TIMING_DIR", "env_test", "-", "-",
           "first use tests/harness/src/test_parallel.c:auto; redirects the runner timing report so a test that starts a nested runner reads its own last-run.json")
 Z23_FLAG("ZCL_TEST_TIMING_JSON", "env_build", "-", "-",
-          "undocumented; first use tools/dev/test_group_list_main.c:auto")
+          "undocumented; first use tools/dev/test_group_list.c:auto")
 Z23_FLAG("ZCL_TEST_UMBRELLAS_SRC", "env_build", "-", "-",
-          "first use tools/dev/test_group_list_main.c:auto; umbrella declaration fixture source")
+          "first use tools/dev/test_group_list.c:auto; umbrella declaration fixture source")
 Z23_FLAG("ZCL_TEST_VERIFY_ATTEST_PUBKEY", "env_test", "-", "-",
           "replaces the root-pinned verifier public key path, and also accepts a key file owned by the effective uid, only in a ZCL_TESTING build; a production build does not compile the read")
 Z23_FLAG("ZCL_THREADSUP_BASELINE", "env_build", "-", "-",

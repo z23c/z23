@@ -7,6 +7,8 @@
 
 #include "test_group_list_int.h"
 
+#include "base/safe_alloc.h"
+
 #include "platform/glob_match.h"
 #include "util/spawn.h"
 
@@ -30,7 +32,7 @@ static bool list_test_sources(struct rules_state *st)
                                 "--exclude-standard", "--",
                                 "tests/harness/src/test_*.c", NULL};
     struct zcl_spawn_binary_observation obs;
-    char *buf = malloc(TGL_GIT_OUT_MAX + 1);
+    char *buf = zcl_malloc(TGL_GIT_OUT_MAX + 1, "tgl_git_out");
     bool ok;
     if (!buf)
         return false;
@@ -47,7 +49,7 @@ static bool list_test_sources(struct rules_state *st)
         }
     }
     free(buf);
-    st->plans = calloc(st->tests.n + 1, sizeof(*st->plans));
+    st->plans = zcl_calloc(st->tests.n + 1, sizeof(*st->plans), "tgl_plans");
     return ok && st->plans;
 }
 
@@ -62,7 +64,7 @@ static void rules_free(struct rules_state *st)
 static bool plan_append(struct rules_state *st, size_t idx, const char *plan)
 {
     size_t old = st->plans[idx] ? strlen(st->plans[idx]) : 0;
-    char *bigger = realloc(st->plans[idx], old + strlen(plan) + 2);
+    char *bigger = zcl_realloc(st->plans[idx], old + strlen(plan) + 2, "tgl_plan");
     if (!bigger)
         return false;
     st->plans[idx] = bigger;

@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for the test-group list TU. */
+ZCL_MODULE_CAPABILITY("tools/dev/test_group_list_umbrella.c", CAP_FS_READ|CAP_FS_WRITE, "reads the test-group catalog, proof-family, umbrella and impact-rule declarations, the runner source and the run artifact under the checkout, and writes the listing to the caller-supplied stream; the impact-rules check runs git ls-files through the spawn seam with no shell")

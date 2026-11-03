@@ -31,6 +31,8 @@
 
 #include "test_group_list_int.h"
 
+#include "base/safe_alloc.h"
+
 #include "platform/glob_match.h"
 
 #include <ctype.h>
@@ -66,13 +68,13 @@ bool tgl_strs_push(struct tgl_strs *s, const char *str, size_t len)
     char *copy;
     if (s->n == s->cap) {
         size_t cap = s->cap ? s->cap * 2 : 64;
-        char **v = realloc(s->v, cap * sizeof(*v));
+        char **v = zcl_realloc(s->v, cap * sizeof(*v), "tgl_strs");
         if (!v)
             return false;
         s->v = v;
         s->cap = cap;
     }
-    copy = malloc(len + 1);
+    copy = zcl_malloc(len + 1, "tgl_str");
     if (!copy)
         return false;
     memcpy(copy, str, len);
@@ -101,11 +103,11 @@ char *tgl_read_file(const char *path, size_t *len)
 {
     FILE *f = fopen(path, "rb");
     size_t used = 0, cap = 65536;
-    char *buf = f ? malloc(cap) : NULL;
+    char *buf = f ? zcl_malloc(cap, "tgl_file") : NULL;
     while (buf && !feof(f)) {
         size_t got;
         if (used + 1 >= cap) {
-            char *bigger = cap < TGL_FILE_CAP ? realloc(buf, cap * 2) : NULL;
+            char *bigger = cap < TGL_FILE_CAP ? zcl_realloc(buf, cap * 2, "tgl_file") : NULL;
             if (!bigger) {
                 free(buf);
                 buf = NULL;
@@ -132,13 +134,13 @@ char *tgl_read_file(const char *path, size_t *len)
 size_t tgl_split_lines(char *text, char ***lines)
 {
     size_t n = 0, cap = 256;
-    char **v = malloc(cap * sizeof(*v));
+    char **v = zcl_malloc(cap * sizeof(*v), "tgl_lines");
     char *p = text;
     *lines = v;
     while (v && *p) {
         char *nl = strchr(p, '\n');
         if (n == cap) {
-            char **bigger = realloc(v, cap * 2 * sizeof(*v));
+            char **bigger = zcl_realloc(v, cap * 2 * sizeof(*v), "tgl_lines");
             if (!bigger)
                 break;
             v = *lines = bigger;
@@ -240,7 +242,7 @@ bool tgl_load_registry(struct tgl_ctx *c)
     free(text);
     if (!ok)
         return false;
-    c->sorted = malloc((c->reg.n + 1) * sizeof(*c->sorted));
+    c->sorted = zcl_malloc((c->reg.n + 1) * sizeof(*c->sorted), "tgl_sorted");
     if (!c->sorted)
         return false;
     for (size_t i = 0; i < c->reg.n; i++)
@@ -331,7 +333,7 @@ static bool family_row(struct tgl_ctx *c, const char *line)
         free(glob);
         return true;
     }
-    bigger = realloc(c->fam, (c->nfam + 1) * sizeof(*c->fam));
+    bigger = zcl_realloc(c->fam, (c->nfam + 1) * sizeof(*c->fam), "tgl_family");
     if (!bigger) {
         free(token);
         free(glob);
@@ -541,8 +543,8 @@ static int ranked_cmp(const void *a, const void *b)
 /* The three registered names (whole or without prefix) nearest `token`. */
 static void closest_names(struct tgl_ctx *c, const char *token)
 {
-    struct ranked *r = malloc((c->reg.n + 1) * sizeof(*r));
-    size_t *row = malloc((strlen(token) + TGL_NAME_LIMIT * 4) * sizeof(*row));
+    struct ranked *r = zcl_malloc((c->reg.n + 1) * sizeof(*r), "tgl_ranked");
+    size_t *row = zcl_malloc((strlen(token) + TGL_NAME_LIMIT * 4) * sizeof(*row), "tgl_row");
     size_t shown = c->reg.n < 3 ? c->reg.n : 3;
     if (!r || !row) {
         free(r);
@@ -779,19 +781,20 @@ static int dispatch(struct tgl_ctx *c, int argc, const char *const *argv)
     return usage(c);
 }
 
-static const char *env_or(const char *name, const char *fallback)
+static const char *or_default(const char *v, const char *fallback)
 {
-    const char *v = getenv(name);
     return v ? v : fallback;
 }
 
 void tgl_sources_from_env(struct tgl_sources *s)
 {
-    s->registry = env_or("ZCL_TEST_REGISTRY_SRC", TGL_DEFAULT_REGISTRY);
-    s->runner = env_or("ZCL_TEST_RUNNER_SRC", TGL_DEFAULT_RUNNER);
-    s->families = env_or("ZCL_TEST_PROOF_FAMILIES_SRC", TGL_DEFAULT_FAMILIES);
-    s->umbrellas = env_or("ZCL_TEST_UMBRELLAS_SRC", TGL_DEFAULT_UMBRELLAS);
-    s->timing = env_or("ZCL_TEST_TIMING_JSON", TGL_DEFAULT_TIMING);
+    s->registry = or_default(getenv("ZCL_TEST_REGISTRY_SRC"), TGL_DEFAULT_REGISTRY);
+    s->runner = or_default(getenv("ZCL_TEST_RUNNER_SRC"), TGL_DEFAULT_RUNNER);
+    s->families = or_default(getenv("ZCL_TEST_PROOF_FAMILIES_SRC"),
+                             TGL_DEFAULT_FAMILIES);
+    s->umbrellas = or_default(getenv("ZCL_TEST_UMBRELLAS_SRC"),
+                              TGL_DEFAULT_UMBRELLAS);
+    s->timing = or_default(getenv("ZCL_TEST_TIMING_JSON"), TGL_DEFAULT_TIMING);
 }
 
 static bool sources_present(const struct tgl_ctx *c)

@@ -3,7 +3,7 @@
  *          tools/dev/test-group-list.sh and test-registry-report.sh. Make
  *          runs it at parse time (ONLY= validation, t-list, t-fast-exact), so
  *          it needs neither the node nor a test binary. The same body is the
- *          `z23-dev dev test-groups` leaf (tools/command/native_dev_test_groups.c).
+ *          `z23-dev dev test groups` leaf (tools/command/native_dev_test_groups.c).
  *          The sources default to the repository root; when the current
  *          directory is not one, the root is found from this binary's own
  *          path (<root>/build/bin/test-group-list). */

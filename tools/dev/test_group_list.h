@@ -2,7 +2,7 @@
  * purpose: Public API of the test-group list and registry report. It is the
  *          one body behind the standalone build/bin/test-group-list host
  *          tool (Make parse time, agent_fast_ci, the selector tests) and the
- *          `z23-dev dev test-groups` leaf. */
+ *          `z23-dev dev test groups` leaf. */
 
 #ifndef ZCL_TEST_GROUP_LIST_H
 #define ZCL_TEST_GROUP_LIST_H

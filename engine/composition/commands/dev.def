@@ -1509,12 +1509,12 @@ ZCL_COMMAND_DEV_COMMAND(
     "the unattended train keeper requires the dev binary",
     "z23-dev dev train keep --train=<N>")
 
-/* ── dev.test-groups ────────────────────────────────────────────────────
+/* ── dev.test.groups ──────────────────────────────────────────────────
  * The registered test-group names and their resolvers, from the catalog
  * file with no build (tools/command/native_dev_test_groups.c over
  * tools/dev/test_group_list.c, the body of build/bin/test-group-list). */
 ZCL_COMMAND_DEV_READ(
-    "dev.test-groups", "dev", "", "List and resolve registered test groups",
+    "dev.test.groups", "dev.test", "", "List and resolve test groups",
     "Prints the registered test-group names, or resolves them, as the raw "
     "lines of the former test-group-list.sh on stdout (the envelope follows "
     "on stderr). mode: list (default), count, match, resolve-exact, "
@@ -1525,7 +1525,7 @@ ZCL_COMMAND_DEV_READ(
     ".cache/test-timing/last-run.json. Read-only.", 4096,
     "test,group,registry,list,resolve,proof,impact,report",
     "zcl.dev_test_groups_input.v1", "zcl.dev_test_groups.v1", "mode,args", "",
-    "z23-dev dev test-groups --mode=match --args=bloom",
+    "z23-dev dev test groups --mode=match --args=bloom",
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
     ZCL_COMMAND_LATENCY_INSTANT, ZCL_COMMAND_COST_LOW,
     ZCL_COMMAND_LANE_LOCAL,
@@ -1533,7 +1533,7 @@ ZCL_COMMAND_DEV_READ(
     ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
     zcl_native_handle_dev_test_groups,
     "test group resolution is a development-lane surface",
-    "z23-dev dev test-groups")
+    "z23-dev dev test groups")
 
 /* ── dev.batch ─────────────────────────────────────────────────────────────
  * The lab conveyor's batch ledger, moving from the shell bridges outside the
