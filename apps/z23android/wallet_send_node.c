@@ -10,6 +10,7 @@
 #define TEXT_NOT_ENCRYPTED "This wallet is not protected by this phone's screen lock yet, so the app does not send from it."
 #define TEXT_FLEET_DISAGREES "Your fleet disagrees with this node about the latest block. Sending waits until they agree."
 #define TEXT_FLEET_UNREADABLE "This node could not read your fleet's status, so sending waits."
+#define BROADCAST_SCHEMA "zcl.wallet_broadcast_status.v1"
 #define TOKEN_HEX 16
 
 const char *wsn_scope(enum zapp_pay_network network)
@@ -313,6 +314,7 @@ static bool plan(void *ctx, const struct wss_send_req *req, struct ws_plan *out)
     struct reply r;
     memset(n->from, 0, sizeof(n->from));
     memset(n->token, 0, sizeof(n->token));
+    memset(n->txid, 0, sizeof(n->txid));
     if (!read_sender(n, from, sizeof(from)) || !wsn_format_amount(req->amount_zat, amount, sizeof(amount)) ||
         !request_json(n, req, from, amount, false, input, sizeof(input)))
         return false;
@@ -407,17 +409,46 @@ static enum wss_commit_outcome commit(void *ctx, const struct wss_send_req *req,
     memory_cleanse(input, sizeof(input));
     reply_read(&r, text);
     bool committed = commit_answer(&r, token_echo, info);
+    if (committed) snprintf(n->txid, sizeof(n->txid), "%s", info->txid);
     enum wss_commit_outcome outcome = wss_commit_outcome_of(r.parsed, committed, r.code);
     reply_free(&r);
     memory_cleanse(text, sizeof(text));
     return outcome;
 }
 
+/* Whether the payment is still pending in the broadcast list: its transaction is listed in a state other than sent or
+ * seen. With no transaction id, any listed send counts. */
+static bool still_pending(const struct json_value *list, const char *txid)
+{
+    if (!txid[0]) return json_size(list) > 0;
+    for (size_t i = 0; i < json_size(list); ++i) {
+        const struct json_value *item = json_at(list, i);
+        const char *listed = text_of(item, "txid"), *state = text_of(item, "state");
+        if (listed && !strcmp(listed, txid)) return !state || (strcmp(state, "sent") && strcmp(state, "seen"));
+    }
+    return false;
+}
+/* core wallet broadcast status. A payment counts as sent when its transaction is listed as sent or seen, or is not
+ * listed at all: a public send and a transaction already relayed are not pending. waiting_for_route, scheduled and
+ * any other state keep waiting, as does a failed or unreadable read; the machine asks again. When the commit reported
+ * no transaction id, only an empty list proves the payment is not pending. */
 static bool route(void *ctx, enum ws_route *out)
 {
-    (void)ctx;
+    struct wsn *n = ctx;
+    char text[WSN_REPLY_MAX];
+    struct reply r;
     *out = WS_ROUTE_WAITING;
-    return false;
+    text[0] = 0;
+    bool ran = n->runner.run(n->runner.ctx, "broadcast", NULL, WSN_STEP_TIMEOUT_MS, text, sizeof(text));
+    if (ran) reply_read(&r, text);
+    else memset(&r, 0, sizeof(r));
+    const char *schema = r.parsed && r.ok && is_object(r.data) ? text_of(r.data, "schema") : NULL;
+    const struct json_value *list = schema && !strcmp(schema, BROADCAST_SCHEMA) ? json_get(r.data, "transactions") : NULL;
+    bool read = list && list->type == JSON_ARR;
+    if (read) *out = still_pending(list, n->txid) ? WS_ROUTE_WAITING : WS_ROUTE_SENT;
+    reply_free(&r);
+    memory_cleanse(text, sizeof(text));
+    return read;
 }
 
 void wsn_ops(struct wsn *node, struct wss_node_ops *ops)

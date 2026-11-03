@@ -15,7 +15,7 @@
 #define INSUFFICIENT_PUBLIC_NOTE INSUFFICIENT_NOTE " Public funds cannot be spent from this phone. Move them to your private balance from your fleet node."
 #define FLEET_CHECKED "Checked by your fleet"
 #define ALREADY_PAID "Already paid. Your node has this payment, so nothing new was sent."
-#define SENT_TO_NODE "The node has your payment. History shows when it leaves the phone."
+#define SENT_TO_NODE "Sending privately. Waiting for an onion peer to carry it. You can leave this screen."
 #define SWEEP_DONE "Done. It shows in your private balance after the next block."
 #define SWEEP_REPLAYED "Done. This move was already made. It shows in your private balance after the next block."
 

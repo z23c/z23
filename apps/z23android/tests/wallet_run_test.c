@@ -83,6 +83,7 @@ static void send_commands_run(struct zapp_runtime *r)
     assert(zapp_wallet_send_run(r, "summary", NULL, 60000, got, sizeof(got)) && strstr(got, "core wallet summary"));
     assert(zapp_wallet_send_run(r, "fleet", NULL, 60000, got, sizeof(got)) && strstr(got, "core wallet fleet status"));
     assert(zapp_wallet_send_run(r, "latest", NULL, 60000, got, sizeof(got)) && strstr(got, "core wallet shielded latest"));
+    assert(zapp_wallet_send_run(r, "broadcast", NULL, 60000, got, sizeof(got)) && strstr(got, "core wallet broadcast status"));
 }
 /* Input where none is taken, none where it is required, no time, too much time, and any other command: refused. */
 static void send_refusals_run(struct zapp_runtime *r)
@@ -96,6 +97,7 @@ static void send_refusals_run(struct zapp_runtime *r)
     assert(!zapp_wallet_send_run(r, "shieldcommit", "{}", ZAPP_WALLET_SEND_TIMEOUT_MAX_MS + 1, got, sizeof(got)) && !strstr(got, "argv"));
     assert(!zapp_wallet_send_run(r, "commit", "{}", ZAPP_WALLET_SEND_TIMEOUT_MAX_MS + 1, got, sizeof(got)) && !strstr(got, "argv"));
     assert(!zapp_wallet_send_run(r, "summary", "{}", 60000, got, sizeof(got)));
+    assert(!zapp_wallet_send_run(r, "broadcast", "{}", 60000, got, sizeof(got)));
     static const char *const other[] = {"export", "create", "restore", "send", "address", "history", "", "Plan"};
     for (size_t i = 0; i < sizeof(other) / sizeof(other[0]); ++i) {
         assert(!zapp_wallet_send_run(r, other[i], "{}", 60000, got, sizeof(got)));
@@ -236,6 +238,7 @@ int main(int argc, char **argv)
     expect_args(&r, "summary", "", "core wallet summary");
     expect_args(&r, "fleet", "", "core wallet fleet status");
     expect_args(&r, "latest", "", "core wallet shielded latest");
+    expect_args(&r, "broadcast", "", "core wallet broadcast status");
     expect_args(&r, "receive", "", "core wallet shielded receive");
     expect_args(&r, "history", "", "core wallet history --limit=10");
     expect_args(&r, "history", "3000000:" TXID, "core wallet history --limit=10 --cursor=3000000:" TXID);

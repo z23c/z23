@@ -61,14 +61,14 @@ bool zapp_node_pace_write(struct zapp_runtime *r, enum zapp_pace pace);
  * reason is logged once until the next success. */
 bool zapp_operation_run(struct zapp_runtime *r, const char *id, char *out, size_t cap);
 /* Runs one wallet command for the wallet screens and leaves its reply in out: op is "summary", "fleet",
- * "latest", "receive", "history" (arg is the cursor of the page, "" for the newest) or "detail"
+ * "latest", "broadcast", "receive", "history" (arg is the cursor of the page, "" for the newest) or "detail"
  * (arg is the transaction id). Command line only, never logged. False, with a plain sentence or the node
  * error text in out, when the command fails, does not exist or is given an argument that is not valid. */
 bool zapp_wallet_run(struct zapp_runtime *r, const char *op, const char *arg, char *out, size_t cap);
 /* The commit of a send may take this long at the least; a shorter request is raised to it. */
 #define ZAPP_WALLET_COMMIT_MIN_MS 300000u
 #define ZAPP_WALLET_SEND_TIMEOUT_MAX_MS 600000u
-/* Runs one step of a send and leaves its reply in out. op is "summary", "fleet" or "latest" (the read commands of
+/* Runs one step of a send and leaves its reply in out. op is "summary", "fleet", "latest" or "broadcast" (the read commands of
  * zapp_wallet_run, no input), "validateaddress" (input is the JSON-RPC parameter array, sent to the node over its local
  * RPC port), "lock" (no input), or "unlock", "plan", "commit", "shieldplan" or "shieldcommit" (input is the request; the
  * last two are the plan and the commit of the move of public funds into the private balance). The request of those five goes

@@ -574,6 +574,7 @@ static const struct { const char *id; const char *args[5]; enum wallet_arg arg; 
     {"summary", {"core", "wallet", "summary"}, ARG_NONE},
     {"fleet", {"core", "wallet", "fleet", "status"}, ARG_NONE},
     {"latest", {"core", "wallet", "shielded", "latest"}, ARG_NONE},
+    {"broadcast", {"core", "wallet", "broadcast", "status"}, ARG_NONE},
     {"receive", {"core", "wallet", "shielded", "receive"}, ARG_NONE},
     {"history", {"core", "wallet", "history"}, ARG_CURSOR},
     {"detail", {"core", "wallet", "history"}, ARG_TXID},
@@ -662,7 +663,7 @@ static unsigned send_timeout(const char *op, unsigned timeout_ms)
 bool zapp_wallet_send_run(struct zapp_runtime *r, const char *op, const char *input, unsigned timeout_ms, char *out, size_t cap)
 {
     if (!r || !op || !out || cap < 64) return false;
-    if (!strcmp(op, "summary") || !strcmp(op, "fleet") || !strcmp(op, "latest")) return !input && zapp_wallet_run(r, op, "", out, cap);
+    if (!strcmp(op, "summary") || !strcmp(op, "fleet") || !strcmp(op, "latest") || !strcmp(op, "broadcast")) return !input && zapp_wallet_run(r, op, "", out, cap);
     if (!strcmp(op, "validateaddress")) return input && validate_address_run(r, input, out, cap);
     const struct send_command *c = send_command_of(op);
     if (!c) { snprintf(out, cap, "This wallet command is not available in the phone's permission set."); return false; }

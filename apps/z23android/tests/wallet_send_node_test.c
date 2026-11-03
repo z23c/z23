@@ -16,7 +16,7 @@
 /* A runner that answers each op from a script and records what it was asked. */
 struct reply { bool ran; char text[WSN_REPLY_MAX]; };
 struct fake {
-    struct reply summary, fleet, latest, plan, commit, unlock, lock, validate;
+    struct reply summary, fleet, latest, broadcast, plan, commit, unlock, lock, validate;
     char calls[256];                 /* one letter per op, in order */
     char plan_input[WSN_INPUT_MAX], commit_input[WSN_INPUT_MAX], unlock_input[WSN_INPUT_MAX], validate_input[256];
     unsigned commit_timeout, step_timeout_max;
@@ -60,6 +60,20 @@ static void committed_json(char *out, size_t cap, bool replayed)
              "\"plan_token\":\"" TOKEN "\"}}",
              replayed ? "true" : "false", 7);
 }
+#define COMMIT_TXID "0000000000000000000000000000000000000000000000000000000000000007"
+#define OTHER_TXID "0000000000000000000000000000000000000000000000000000000000000009"
+/* The reply of core wallet broadcast status; entries is the inside of the transactions array, NULL for none. */
+static void broadcast_json(char *out, size_t cap, const char *entries)
+{
+    snprintf(out, cap,
+             "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_broadcast_status.v1\",\"mode\":\"private\",\"pending\":0,\"expired\":0,"
+             "\"eligible_onion_peers\":0,\"transactions\":[%s]}}",
+             entries ? entries : "");
+}
+static void broadcast_entry(char *out, size_t cap, const char *txid, const char *state)
+{
+    snprintf(out, cap, "{\"txid\":\"%s\",\"state\":\"%s\",\"next_step\":\"x\",\"attempts\":1,\"seconds_since_last_attempt\":2}", txid, state);
+}
 static void error_json(char *out, size_t cap, const char *code, const char *message)
 {
     snprintf(out, cap, "{\"ok\":false,\"error\":{\"code\":\"%s\",\"error_code\":\"%s\",\"message\":\"%s\"}}", code, code, message);
@@ -72,6 +86,8 @@ static void fake_init(struct fake *f)
     fleet_json(f->fleet.text, sizeof(f->fleet.text), "not_member", false, false);
     f->fleet.ran = true;
     say(&f->latest, true, "{\"ok\":true,\"data\":{\"address\":\"" FROM "\"}}");
+    broadcast_json(f->broadcast.text, sizeof(f->broadcast.text), NULL);
+    f->broadcast.ran = true;
     plan_json(f->plan.text, sizeof(f->plan.text), TO, 125000000ull, 10000ull, "1.25000000");
     f->plan.ran = true;
     committed_json(f->commit.text, sizeof(f->commit.text), false);
@@ -88,6 +104,7 @@ static bool run(void *ctx, const char *op, const char *input, unsigned timeout_m
     if (!strcmp(op, "summary")) { r = &f->summary; letter = 's'; }
     else if (!strcmp(op, "fleet")) { r = &f->fleet; letter = 'f'; }
     else if (!strcmp(op, "latest")) { r = &f->latest; letter = 'a'; }
+    else if (!strcmp(op, "broadcast")) { r = &f->broadcast; letter = 'b'; assert(!input); }
     else if (!strcmp(op, "validateaddress")) { r = &f->validate; letter = 'v'; snprintf(f->validate_input, sizeof(f->validate_input), "%s", input); }
     else if (!strcmp(op, "plan")) { r = &f->plan; letter = 'p'; f->plans++; snprintf(f->plan_input, sizeof(f->plan_input), "%s", input); }
     else if (!strcmp(op, "unlock")) { r = &f->unlock; letter = 'u'; snprintf(f->unlock_input, sizeof(f->unlock_input), "%s", input); }
@@ -485,6 +502,95 @@ static void validate_accepts_only_a_valid_reply(void)
     assert(ops.validate_address(ops.ctx, "zs1\\x", &valid) && !valid && !f.calls[0]);   /* a backslash too */
 }
 
+/* ---- the route ---- */
+
+/* Plans and commits a payment over a fresh adapter whose broadcast status is the given reply, then asks for the route. */
+static bool route_of(const char *status, bool ran, bool with_txid, enum ws_route *out)
+{
+    struct fake f; struct wsn n; struct wss_node_ops ops;
+    struct zapp_payment p = pay_of("");
+    struct wss_send_req req; struct ws_plan plan = {0};
+    char echo[WS_TOKEN_MAX];
+    struct wss_commit_info info;
+    fake_init(&f);
+    adapter(&f, &n, &ops);
+    request_of(&req, 125000000ull, &p);
+    assert(ops.plan(ops.ctx, &req, &plan));
+    req.fee_zat = plan.fee_zat;
+    snprintf(req.plan_token, sizeof(req.plan_token), "%s", plan.token);
+    if (!with_txid) say(&f.commit, true, "{\"ok\":true,\"data\":{\"committed\":true,\"plan_token\":\"" TOKEN "\"}}");
+    assert(ops.commit(ops.ctx, &req, echo, &info) == WSS_COMMITTED);
+    say(&f.broadcast, ran, status);
+    *out = WS_ROUTE_SENT;
+    bool read = ops.route(ops.ctx, out);
+    assert(strchr(f.calls, 'b') && f.calls[strlen(f.calls) - 1] == 'b');
+    return read;
+}
+static enum ws_route route_with(const char *entries, bool with_txid)
+{
+    char text[WSN_REPLY_MAX];
+    enum ws_route route;
+    broadcast_json(text, sizeof(text), entries);
+    assert(route_of(text, true, with_txid, &route));
+    return route;
+}
+static enum ws_route route_for_state(const char *state)
+{
+    char entry[256];
+    broadcast_entry(entry, sizeof(entry), COMMIT_TXID, state);
+    return route_with(entry, true);
+}
+
+/* Only sent and seen release the payment; every other state of its transaction keeps it waiting. */
+static void a_payment_is_sent_when_its_transaction_is_sent_or_seen(void)
+{
+    assert(route_for_state("waiting_for_route") == WS_ROUTE_WAITING);
+    assert(route_for_state("scheduled") == WS_ROUTE_WAITING);
+    assert(route_for_state("preparing") == WS_ROUTE_WAITING);
+    assert(route_for_state("expired") == WS_ROUTE_WAITING);
+    assert(route_for_state("something_new") == WS_ROUTE_WAITING);
+    assert(route_for_state("") == WS_ROUTE_WAITING);
+    assert(route_for_state("sent") == WS_ROUTE_SENT);
+    assert(route_for_state("seen") == WS_ROUTE_SENT);
+}
+
+/* A transaction that is not pending was sent in public mode or relayed already; other payments never decide this one. */
+static void a_payment_that_is_not_pending_is_sent(void)
+{
+    char other[256], ours[256], both[600];
+    assert(route_with(NULL, true) == WS_ROUTE_SENT);
+    broadcast_entry(other, sizeof(other), OTHER_TXID, "waiting_for_route");
+    assert(route_with(other, true) == WS_ROUTE_SENT);
+    broadcast_entry(ours, sizeof(ours), COMMIT_TXID, "waiting_for_route");
+    snprintf(both, sizeof(both), "%s,%s", other, ours);
+    assert(route_with(both, true) == WS_ROUTE_WAITING);
+    broadcast_entry(ours, sizeof(ours), COMMIT_TXID, "seen");
+    snprintf(both, sizeof(both), "%s,%s", other, ours);
+    assert(route_with(both, true) == WS_ROUTE_SENT);
+    /* A commit that named no transaction: only an empty list proves nothing is pending. */
+    assert(route_with(NULL, false) == WS_ROUTE_SENT);
+    assert(route_with(other, false) == WS_ROUTE_WAITING);
+}
+
+/* A read that fails or is not the documented shape is not an answer: the payment keeps waiting and the poll repeats. */
+static void a_failed_status_read_keeps_waiting(void)
+{
+    static const char *const bad[] = {
+        "", "garbage", "{\"ok\":false,\"error\":{\"code\":\"UNKNOWN_COMMAND\"}}", "{\"ok\":true,\"data\":{}}",
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.other.v1\",\"transactions\":[]}}",
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_broadcast_status.v1\"}}",
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_broadcast_status.v1\",\"transactions\":{}}}",
+    };
+    enum ws_route route;
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
+        assert(!route_of(bad[i], true, true, &route) && route == WS_ROUTE_WAITING);
+        assert(!route_of(bad[i], false, true, &route) && route == WS_ROUTE_WAITING);
+    }
+    char text[WSN_REPLY_MAX];
+    broadcast_json(text, sizeof(text), NULL);
+    assert(!route_of(text, false, true, &route) && route == WS_ROUTE_WAITING);   /* the command itself failed */
+}
+
 /* ---- the whole flow over the adapter ---- */
 
 #define LOG_CAP 256
@@ -493,13 +599,14 @@ struct host {
     void (*job)(void *);
     void *arg;
     uint64_t now;
-    int unwraps;
+    int unwraps, outcomes, last_outcome;
     enum wss_key_status key;
 };
 static bool h_random(void *c, uint8_t *out, size_t len) { (void)c; for (size_t i = 0; i < len; ++i) out[i] = (uint8_t)(i * 7 + 3); return true; }
 static uint64_t h_now(void *c) { return ((struct host *)c)->now; }
 static bool h_spawn(void *c, void (*job)(void *), void *arg) { struct host *h = c; assert(!h->job); h->job = job; h->arg = arg; return true; }
 static void h_redraw(void *c) { (void)c; }
+static void h_outcome(void *c, int result) { struct host *h = c; h->outcomes++; h->last_outcome = result; }
 static bool s_on(void *c, bool on) { (void)c; (void)on; return true; }
 static enum wss_key_status d_unwrap(void *c, uint8_t secret[32])
 {
@@ -520,7 +627,7 @@ static struct wss *screen_over(struct fake *f, struct wsn *n, struct host *h)
     memset(h, 0, sizeof(*h));
     h->f = f; h->now = 10000; h->key = WSS_KEY_OK;
     d.device = (struct wss_device_ops){h, d_unwrap};
-    d.host = (struct wss_host_ops){h, h_random, h_now, h_spawn, h_redraw, NULL, NULL, NULL};
+    d.host = (struct wss_host_ops){h, h_random, h_now, h_spawn, h_redraw, NULL, NULL, h_outcome};
     d.secure = (struct zapp_secure_ops){h, s_on, s_on, s_on, s_on, s_on};
     struct wss *s = wss_create(&d);
     assert(s);
@@ -577,11 +684,19 @@ static void a_fleet_that_is_not_configured_allows_send_and_says_so(void)
     wss_destroy(s);
 }
 
+/* The node lists the payment of commit as waiting for a private route. */
+static void broadcast_waiting(struct fake *f)
+{
+    char entry[256];
+    broadcast_entry(entry, sizeof(entry), COMMIT_TXID, "waiting_for_route");
+    broadcast_json(f->broadcast.text, sizeof(f->broadcast.text), entry);
+}
 /* A commit that commits: the node holds the payment, the screen never says Sent, and Done is offered once the wallet is locked. */
 static void a_committed_payment_is_not_called_sent(void)
 {
     struct fake f; struct wsn n; struct host h;
     fake_init(&f);
+    broadcast_waiting(&f);
     struct wss *s = reviewed(&f, &n, &h, "?amount=1.25");
     assert(f.commits == 0 && h.unwraps == 0);   /* nothing is committed or authenticated before the tap */
     wss_tap_send(s, view_of(s).serial);
@@ -590,11 +705,40 @@ static void a_committed_payment_is_not_called_sent(void)
     assert(f.commits == 1 && h.unwraps == 1 && v.state == WS_BROADCAST);
     assert(strstr(f.unlock_input, "\"passphrase\"") && strstr(f.unlock_input, "\"timeout_seconds\":300"));
     assert(f.commit_timeout >= 300000u);
-    assert(strstr(v.status, "The node has your payment") && strstr(v.status, "History"));
+    assert(strstr(v.status, "Sending privately") && strstr(v.status, "onion peer"));
     assert(!strstr(v.status, "Sent") && !strstr(v.status, "sent"));
     assert(v.can_leave && !v.can_retry && !v.can_send);
     drain(&h);
     assert(f.calls[strlen(f.calls) - 1] == 'l' || strchr(f.calls, 'l'));   /* the wallet is locked right after the answer */
+    assert(wss_end(s) && wss_destroy(s));
+}
+
+/* The flow leaves the broadcast only when the node lists the payment as sent or seen: one notice, then the stop guard lets go. */
+static void a_payment_is_done_when_the_node_has_sent_it(void)
+{
+    static const char *const states[] = {"waiting_for_route", "scheduled", "sent"};
+    struct fake f; struct wsn n; struct host h;
+    char entry[256];
+    fake_init(&f);
+    struct wss *s = reviewed(&f, &n, &h, "?amount=1.25");
+    broadcast_waiting(&f);
+    wss_tap_send(s, view_of(s).serial);
+    drain(&h);
+    assert(view_of(s).state == WS_BROADCAST && wss_in_flight(s) && h.outcomes == 0);
+    for (int i = 0; i < 3; ++i) {   /* waiting and scheduled: still in the broadcast, no notice, the guard holds */
+        broadcast_entry(entry, sizeof(entry), COMMIT_TXID, states[i]);
+        broadcast_json(f.broadcast.text, sizeof(f.broadcast.text), entry);
+        h.now += 3000; wss_on_tick(s); drain(&h);
+        struct wss_view v = view_of(s);
+        if (i < 2) {
+            assert(v.state == WS_BROADCAST && wss_in_flight(s) && h.outcomes == 0);
+            assert(strstr(v.status, "onion peer") && !strstr(v.status, "left the phone"));
+        }
+    }
+    assert(view_of(s).state == WS_DONE && !wss_in_flight(s));
+    assert(h.outcomes == 1 && h.last_outcome == ZAPP_PAYMENT_SENT);
+    for (int i = 0; i < 3; ++i) { h.now += 3000; wss_on_tick(s); drain(&h); }
+    assert(h.outcomes == 1 && view_of(s).state == WS_DONE);
     assert(wss_end(s) && wss_destroy(s));
 }
 
@@ -678,6 +822,10 @@ int main(void)
     a_refusing_fleet_stops_the_flow_before_the_plan();
     a_fleet_that_is_not_configured_allows_send_and_says_so();
     a_committed_payment_is_not_called_sent();
+    a_payment_is_done_when_the_node_has_sent_it();
+    a_payment_is_sent_when_its_transaction_is_sent_or_seen();
+    a_payment_that_is_not_pending_is_sent();
+    a_failed_status_read_keeps_waiting();
     a_killed_commit_is_unknown_and_never_repeated();
     node_message_text_never_reaches_the_screen();
     a_declined_prompt_commits_nothing();

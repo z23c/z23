@@ -21,10 +21,10 @@
 
 struct wsn_runner {
     void *ctx;
-    /* Runs one command and leaves its reply in out. op is "summary", "fleet", "latest", "plan", "commit", "unlock" or
-     * "lock", or "validateaddress" with input the JSON-RPC parameter array of the node's validateaddress. input is NULL
-     * for a read and for lock. False when the command failed, was killed or does not exist; out may still hold a typed
-     * error reply. */
+    /* Runs one command and leaves its reply in out. op is "summary", "fleet", "latest", "broadcast", "plan", "commit",
+     * "unlock" or "lock", or "validateaddress" with input the JSON-RPC parameter array of the node's validateaddress.
+     * input is NULL for a read and for lock. False when the command failed, was killed or does not exist; out may still
+     * hold a typed error reply. */
     bool (*run)(void *ctx, const char *op, const char *input, unsigned timeout_ms, char *out, size_t cap);
     /* The phone's thermal pause has stopped the node. */
     bool (*paused)(void *ctx);
@@ -35,11 +35,13 @@ struct wsn {
     enum zapp_pay_network network;
     char from[ZAPP_PAY_ADDRESS_MAX];   /* the sender of the last plan, sent unchanged with its commit */
     char token[WS_TOKEN_MAX];          /* the token of that plan */
+    char txid[WS_TXID_MAX];            /* the transaction that commit reported, empty when it reported none */
 };
 
 void wsn_init(struct wsn *node, const struct wsn_runner *runner, enum zapp_pay_network network);
-/* Fills ops with the node calls of a send. route is not available (the node has no route command), so it reports
- * false and the machine stays in WS_BROADCAST. */
+/* Fills ops with the node calls of a send. route reads
+ * the pending sends of core wallet broadcast status: the machine leaves WS_BROADCAST for WS_DONE when the payment is
+ * listed as sent or seen, or is not pending. A failed read keeps it waiting. */
 void wsn_ops(struct wsn *node, struct wss_node_ops *ops);
 
 /* The wallet_scope the node requires for the network the app is built for: mainnet "prod"; testnet and regtest "test",

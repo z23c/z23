@@ -568,7 +568,7 @@ static void progress_shows_the_wait(void)
     f.commit_outcome = WSS_COMMITTED; f.route = WS_ROUTE_WAITING;
     tap_and_run(s, &f);
     v = view_of(s);
-    assert(v.state == WS_BROADCAST && v.busy && strstr(v.status, "The node has your payment") && !strstr(v.status, "Sent") && !v.can_cancel && v.can_leave);
+    assert(v.state == WS_BROADCAST && v.busy && strstr(v.status, "onion peer") && !strstr(v.status, "Sent") && !v.can_cancel && v.can_leave);
     f.route = WS_ROUTE_SENT; f.now += 4000; wss_on_tick(s); drain(&f);
     assert(view_of(s).state == WS_DONE);
     wss_destroy(s);
