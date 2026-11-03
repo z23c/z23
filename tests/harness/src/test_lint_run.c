@@ -5,6 +5,7 @@
  *          really run at once. Also the shell-free command parser, the
  *          check_*.sh wrapper rewrite, the run_lint.sh table reader, the
  *          serial and long-pole ordering, and the artifacts it leaves.
+ *          check-core-seal's pipe reaches EOF and keeps core_seal's rc.
  * NOT proven here: the real gates, or the Make wiring (lint-fast-c). */
 #if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
 #define _DEFAULT_SOURCE
@@ -17,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #if !defined(_WIN32)
@@ -345,9 +347,46 @@ static int test_lrun_table(void)
     return failures;
 }
 
+/* check-core-seal's in-process pipe: a stub core_seal that, like the real
+ * one, reads stdin to EOF must see EOF once git ls-files exits. A pipe end
+ * leaked into the reader would hang it; alarm turns that hang into a kill. */
+static int test_lrun_seal(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_run: check-core-seal feeds git ls-files to core_seal, which sees EOF, and keeps its rc") {
+        struct lrun_fx fx;
+        char bin[PATH_MAX + 8], stub[PATH_MAX + 24], in[PATH_MAX + 16], text[PATH_MAX + 96];
+        static char got[1 << 16];
+        int st = 0;
+        ASSERT(lrun_plant(&fx));
+        (void)snprintf(bin, sizeof bin, "%s/bin", fx.root);
+        ASSERT_EQ(mkdir(bin, 0755), 0);
+        (void)snprintf(stub, sizeof stub, "%s/core_seal", bin);
+        (void)snprintf(in, sizeof in, "%s/seal-in", fx.root);
+        (void)snprintf(text, sizeof text, "#!/bin/sh\ncat > '%s'\nexit 7\n", in);
+        ASSERT(lrun_write(stub, text));
+        ASSERT_EQ(chmod(stub, 0755), 0);
+        (void)fflush(NULL);
+        pid_t pid = fork();
+        ASSERT(pid >= 0);
+        if (pid == 0) {
+            (void)alarm(30);
+            _exit(lr_core_seal(bin));
+        }
+        ASSERT_EQ(waitpid(pid, &st, 0), pid);
+        ASSERT(WIFEXITED(st));            /* a leaked write end ends in SIGALRM */
+        ASSERT_EQ(WEXITSTATUS(st), 7);    /* core_seal's rc is the gate's rc */
+        ASSERT(lrun_read(in, got, sizeof got));
+        ASSERT(strstr(got, "core/MANIFEST.sha3") != NULL);
+        test_rm_rf_recursive(fx.root);
+    } TEST_END
+    return failures;
+}
+
 int test_lint_run(void)
 {
     int failures = 0;
+    failures += test_lrun_seal();
     failures += test_lrun_verdicts();
     failures += test_lrun_green();
     failures += test_lrun_chain();

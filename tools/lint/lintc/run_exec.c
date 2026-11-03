@@ -88,7 +88,7 @@ static const char *const k_seal_paths[] = {
     "core/modules/validation/include/validation/chainstate.h",
 };
 
-static pid_t spawn_ls_files(int wfd)
+static pid_t spawn_ls_files(int wfd, int rfd)
 {
     char *argv[3 + sizeof k_seal_paths / sizeof k_seal_paths[0] + 1];
     int n = 0;
@@ -101,6 +101,7 @@ static pid_t spawn_ls_files(int wfd)
     (void)fflush(NULL);
     pid_t pid = fork();
     if (pid == 0) {
+        (void)close(rfd); /* the reader's end stays with core_seal only */
         (void)dup2(wfd, STDOUT_FILENO);
         (void)close(wfd);
         (void)execvp("git", argv);
@@ -109,7 +110,7 @@ static pid_t spawn_ls_files(int wfd)
     return pid;
 }
 
-static pid_t spawn_seal_check(int rfd, const char *bin_dir)
+static pid_t spawn_seal_check(int rfd, int wfd, const char *bin_dir)
 {
     char tool[LR_PATH];
     (void)snprintf(tool, sizeof tool, "%s/core_seal", bin_dir);
@@ -117,6 +118,9 @@ static pid_t spawn_seal_check(int rfd, const char *bin_dir)
     pid_t pid = fork();
     if (pid == 0) {
         char *argv[] = { tool, "check", "core/MANIFEST.sha3", NULL };
+        /* Drop the inherited write end, or core_seal, which reads stdin to
+         * EOF, waits on itself forever after git exits. */
+        (void)close(wfd);
         (void)dup2(rfd, STDIN_FILENO);
         (void)close(rfd);
         (void)execv(tool, argv);
@@ -137,8 +141,8 @@ int lr_core_seal(const char *bin_dir)
     }
     if (pipe(fds) != 0)
         return 1;
-    pid_t ls = spawn_ls_files(fds[1]);
-    pid_t seal = spawn_seal_check(fds[0], bin_dir);
+    pid_t ls = spawn_ls_files(fds[1], fds[0]);
+    pid_t seal = spawn_seal_check(fds[0], fds[1], bin_dir);
     (void)close(fds[0]);
     (void)close(fds[1]);
     if (ls < 0 || seal < 0)
