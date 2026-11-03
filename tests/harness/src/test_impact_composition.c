@@ -11575,8 +11575,9 @@ static int test_ic_local_selection_build_needs(void)
         n = 99;
         ASSERT(zcl_test_selection_build_needs("test_sqlq", true, NULL,
                                               needs, 19, &n));
-        ASSERT(n == 1);
+        ASSERT(n == 2);
         ASSERT(ic_needs_have(needs, n, "sqlq", "build/bin/sqlq"));
+        ASSERT(ic_needs_have(needs, n, "z23", "build/bin/z23"));
         n = 99;
         ASSERT(zcl_test_selection_build_needs("test_rpc", true, NULL,
                                               needs, 19, &n));
