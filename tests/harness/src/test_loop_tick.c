@@ -1132,8 +1132,8 @@ static int case_haiku_lock_held(void)
 {
     int failures = 0;
     struct lt_env e, f;
-    const struct lt_cfg ct = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
-    const struct lt_cfg cf = { NULL, "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg ct = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
+    const struct lt_cfg cf = { NULL, "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
     char out[8192] = "";
     const bool ready = lt_setup(&e, "hlocktick", &ct, "run", "claude-haiku") &&
                        lt_setup(&f, "hlockfin", &cf, "none", "claude-haiku") &&
