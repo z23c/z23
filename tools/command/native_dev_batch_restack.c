@@ -90,10 +90,20 @@ static void rs_say(struct rs_ctx *c, const char *fmt, ...)
     db_push_str(&c->lines, msg);
 }
 
+/* basename(1): trailing slashes do not count (the ledger holds lane paths
+ * written with one). The result lives until the next call. */
 static const char *rs_base(const char *path)
 {
-    const char *b = strrchr(path, '/');
-    return b ? b + 1 : path;
+    static char buf[256];
+    size_t n = strlen(path);
+    const char *b;
+    while (n > 1 && path[n - 1] == '/')
+        n--;
+    b = path + n;
+    while (b > path && b[-1] != '/')
+        b--;
+    (void)snprintf(buf, sizeof(buf), "%.*s", (int)(path + n - b), b);
+    return buf;
 }
 
 /* ── the live picture: land status, running gate units ─────────────────── */
