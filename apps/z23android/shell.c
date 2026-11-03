@@ -28,7 +28,7 @@
 #define WHITE 0xffffffffu
 
 enum screen { SCREEN_HOME, SCREEN_ASSISTANT, SCREEN_APPS, SCREEN_SETTINGS, SCREEN_SCAN, SCREEN_WALLET, SCREEN_SEND, SCREEN_SETUP, SCREEN_COUNT };
-enum command { CMD_HOME, CMD_APPS, CMD_SETTINGS, CMD_HOME_SETTINGS, CMD_LAYOUT, CMD_SCAN_CANCEL };
+enum command { CMD_HOME, CMD_APPS, CMD_SETTINGS, CMD_HOME_SETTINGS, CMD_LAYOUT, CMD_SCAN_CANCEL, CMD_CAMERA_SETTINGS, CMD_CAMERA_PASTE };
 enum target_kind { TARGET_NONE, TARGET_NAV, TARGET_ROW, TARGET_TILE, TARGET_WALLET, TARGET_SEND, TARGET_SETUP };
 
 struct nav { jobject view; enum command command; size_t arg; };
@@ -37,10 +37,10 @@ struct target { enum target_kind kind; size_t index; char id[ZAPP_NAME_CAP]; siz
 static struct {
     jobject activity, roots[SCREEN_COUNT];
     zapp_native_action send;
-    jobject notice_views[SCREEN_COUNT], outcome_view, status_view, scan_view, apps_list;
+    jobject notice_views[SCREEN_COUNT], outcome_view, status_view, scan_view, scan_camera, scan_panel, apps_list;
     enum screen current, before_scan;
     bool send_from_wallet;
-    bool preview, pair_seen, scan_dismissed, user_layout, rendered;
+    bool preview, pair_seen, scan_dismissed, user_layout, rendered, camera_waiting;
     bool setup_offered;   /* the first launch without a wallet opened the setup screens once */
     unsigned scans_seen;
     struct zapp_layout *layout;
@@ -249,13 +249,40 @@ static bool build_settings(JNIEnv *env, jobject root)
     if (status) (*env)->DeleteLocalRef(env, status);
     return ok;
 }
+/* The camera preview with Cancel. */
+static bool build_scan_camera(JNIEnv *env, jobject root)
+{
+    jobject camera = column(env, 0xff000000u, 0, false);
+    jobject image = zj_widget(env, "android/widget/ImageView", shell.activity);
+    bool ok = camera && image && zj_margins(env, image, MATCH, 0, 1.0f, 0, 0, 0, 0) && zj_append(env, camera, image) &&
+        zj_keep(env, &shell.scan_view, image) && button(env, camera, "Cancel", CMD_SCAN_CANCEL, 0, 0) &&
+        zj_margins(env, camera, MATCH, 0, 1.0f, 0, 0, 0, 0) && zj_append(env, root, camera) && zj_keep(env, &shell.scan_camera, camera);
+    if (image) (*env)->DeleteLocalRef(env, image);
+    if (camera) (*env)->DeleteLocalRef(env, camera);
+    return ok;
+}
+/* The words and the two buttons that lead on when camera access is off. Hidden until that state. */
+static bool build_scan_panel(JNIEnv *env, jobject root)
+{
+    struct zapp_camera_screen words = zapp_camera_screen(ZAPP_CAMERA_SETTINGS);
+    jobject panel = column(env, DARK, 16, false);
+    bool ok = panel && zj_margins(env, panel, MATCH, WRAP, 0.0f, 0, 0, 0, 0) && zj_append(env, root, panel) &&
+        zj_keep(env, &shell.scan_panel, panel) && label(env, panel, words.text, 17.0f, WHITE) &&
+        button(env, panel, words.open, CMD_CAMERA_SETTINGS, 0, 0) && button(env, panel, words.paste, CMD_CAMERA_PASTE, 0, 0) &&
+        zj_visible(env, panel, false);
+    if (panel) (*env)->DeleteLocalRef(env, panel);
+    return ok;
+}
 static bool build_scan(JNIEnv *env, jobject root)
 {
-    jobject image = zj_widget(env, "android/widget/ImageView", shell.activity);
-    bool ok = image && zj_margins(env, image, MATCH, 0, 1.0f, 0, 0, 0, 0) && zj_append(env, root, image) &&
-        zj_keep(env, &shell.scan_view, image) && button(env, root, "Cancel", CMD_SCAN_CANCEL, 0, 0);
-    if (image) (*env)->DeleteLocalRef(env, image);
-    return ok;
+    return build_scan_camera(env, root) && build_scan_panel(env, root);
+}
+/* The scan screen shows the camera, or, when camera access is off, the words and the buttons that lead on. */
+static void show_scan_screen(JNIEnv *env, enum zapp_camera_access access)
+{
+    bool preview = zapp_camera_screen(access).preview;
+    (void)zj_visible(env, shell.scan_camera, preview);
+    (void)zj_visible(env, shell.scan_panel, !preview);
 }
 static bool build_wallet(JNIEnv *env, jobject root)
 {
@@ -425,7 +452,7 @@ static void enter_screen(JNIEnv *env, enum screen next)
 {
     if (next == SCREEN_APPS) { refresh_apps(env, true); fill_apps(env); }
     if (next == SCREEN_SETTINGS) settings_status(env);
-    if (next == SCREEN_SCAN) zapp_shell_immersive(env);
+    if (next == SCREEN_SCAN) { zapp_shell_immersive(env); show_scan_screen(env, ZAPP_CAMERA_GRANTED); }
     if (next == SCREEN_WALLET) enter_wallet(env);
     if (next == SCREEN_SETUP) (void)zapp_setup_ui_open(env);
 }
@@ -438,6 +465,7 @@ static void go(JNIEnv *env, enum screen next)
     if (shell.current == SCREEN_WALLET) leave_wallet(env);
     if (next == SCREEN_WALLET || next == SCREEN_SEND || next == SCREEN_SETUP) shell.gate.protect = true;
     else zapp_touch_gate_release(&shell.gate);
+    if (next != SCREEN_SCAN) shell.camera_waiting = false;
     shell.current = next;
     shell.action_notice[0] = 0;
     set_text(env, shell.outcome_view, "");
@@ -489,6 +517,32 @@ static void open_home_settings(JNIEnv *env)
     snprintf(shell.action_notice, sizeof(shell.action_notice), "Could not open Android settings.");
     show_notice(env);
 }
+/* Opens the system settings page for this app, where the camera permission is allowed. */
+static void open_camera_settings(JNIEnv *env)
+{
+    if (zapp_camera_open_settings()) { set_text(env, shell.outcome_view, ""); return; }
+    snprintf(shell.action_notice, sizeof(shell.action_notice), "Could not open Android settings.");
+    show_notice(env);
+}
+/* Starts a camera scan. With camera access off, the scan screen opens with its words and buttons instead: nothing is
+ * requested and no scan runs until the owner returns with access given. */
+static void begin_scan(JNIEnv *env)
+{
+    enum zapp_camera_access access = zapp_camera_access_now();
+    if (access != ZAPP_CAMERA_SETTINGS) { shell.send("scan", ""); return; }
+    shell.before_scan = shell.current;
+    go(env, SCREEN_SCAN);
+    shell.camera_waiting = true;
+    show_scan_screen(env, access);
+}
+/* Shown again with camera access given, the scan that the screen was waiting for starts by itself. */
+static void resume_scan(JNIEnv *env)
+{
+    if (!shell.camera_waiting || zapp_camera_access_now() != ZAPP_CAMERA_GRANTED) return;
+    shell.camera_waiting = false;
+    show_scan_screen(env, ZAPP_CAMERA_GRANTED);
+    shell.send("scan", "");
+}
 static void run_nav(JNIEnv *env, const struct nav *nav)
 {
     switch (nav->command) {
@@ -498,6 +552,8 @@ static void run_nav(JNIEnv *env, const struct nav *nav)
     case CMD_HOME_SETTINGS: open_home_settings(env); break;
     case CMD_LAYOUT: choose_layout(env, nav->arg); break;
     case CMD_SCAN_CANCEL: back(env); break;
+    case CMD_CAMERA_SETTINGS: open_camera_settings(env); break;
+    case CMD_CAMERA_PASTE: go(env, SCREEN_SEND); break;
     }
 }
 static void launch(JNIEnv *env, const char *package, const char *activity, const char *name)
@@ -509,7 +565,7 @@ static void launch(JNIEnv *env, const char *package, const char *activity, const
 static void run_tile(JNIEnv *env, const struct target *target)
 {
     char package[ZAPP_APP_PACKAGE_CAP] = "", activity[ZAPP_APP_ACTIVITY_CAP] = "", name[ZAPP_APP_LABEL_CAP] = "";
-    if (!strcmp(target->id, "scan")) shell.send("scan", "");
+    if (!strcmp(target->id, "scan")) begin_scan(env);
     else if (!strcmp(target->id, "assistant")) go(env, SCREEN_ASSISTANT);
     else if (!strcmp(target->id, "wallet")) go(env, shell.preview || zapp_setup_state(shell.files) == ZAPP_SETUP_READY ? SCREEN_WALLET : SCREEN_SETUP);
     else if (!strcmp(target->id, "apps")) go(env, SCREEN_APPS);
@@ -564,7 +620,7 @@ static void run_wallet(JNIEnv *env, size_t button)
 static void run_send(JNIEnv *env, size_t button)
 {
     enum zapp_send_outcome outcome = zapp_send_ui_press(env, button);
-    if (outcome == ZAPP_SEND_SCAN && leave_send(env)) shell.send("scan", "");
+    if (outcome == ZAPP_SEND_SCAN && leave_send(env)) begin_scan(env);
     else if (outcome == ZAPP_SEND_LEAVE) go(env, shell.send_from_wallet ? SCREEN_WALLET : SCREEN_HOME);
 }
 /* The setup screens: Continue leaves for the wallet once setup finished, and for Home otherwise. */
@@ -675,6 +731,7 @@ static void render_scan(JNIEnv *env, const struct zapp_view *view, bool finished
         return;
     }
     shell.scan_dismissed = false;
+    if (shell.camera_waiting) return;
     if (finished && dismissed) zapp_pay_stash_clear();
     if (shell.current == SCREEN_SCAN && !(finished && !dismissed && scan_goes_to_send(view))) go(env, shell.before_scan);
     if (finished && !dismissed) finish_scan(env, view);
@@ -754,6 +811,7 @@ void zapp_shell_resume(JNIEnv *env)
     refresh_apps(env, false);
     load_layout();
     if (shell.current == SCREEN_SETUP) zapp_setup_ui_render(env);
+    else if (shell.current == SCREEN_SCAN) resume_scan(env);
     else if (shell.current == SCREEN_APPS || shell.current == SCREEN_SETTINGS || shell.current == SCREEN_WALLET) go(env, SCREEN_HOME);
     else show_home(env);
 }
@@ -770,7 +828,7 @@ void zapp_shell_destroy(JNIEnv *env)
     for (size_t i = 0; i < shell.nav_count; ++i) (*env)->DeleteGlobalRef(env, shell.navs[i].view);
     for (size_t i = 0; i < shell.row_count; ++i) (*env)->DeleteGlobalRef(env, shell.rows[i]);
     for (int i = 0; i < SCREEN_COUNT; ++i) if (shell.roots[i]) (*env)->DeleteGlobalRef(env, shell.roots[i]);
-    jobject *views[] = {&shell.notice_views[SCREEN_HOME], &shell.notice_views[SCREEN_APPS], &shell.notice_views[SCREEN_SETTINGS], &shell.notice_views[SCREEN_SEND], &shell.notice_views[SCREEN_SETUP], &shell.outcome_view, &shell.status_view, &shell.scan_view, &shell.apps_list};
+    jobject *views[] = {&shell.notice_views[SCREEN_HOME], &shell.notice_views[SCREEN_APPS], &shell.notice_views[SCREEN_SETTINGS], &shell.notice_views[SCREEN_SEND], &shell.notice_views[SCREEN_SETUP], &shell.outcome_view, &shell.status_view, &shell.scan_view, &shell.scan_camera, &shell.scan_panel, &shell.apps_list};
     for (size_t i = 0; i < sizeof(views) / sizeof(views[0]); ++i) if (*views[i]) (*env)->DeleteGlobalRef(env, *views[i]);
     release_cards();
     zapp_launcher_release(env, shell.apps, ZAPP_LAUNCHER_MAX);

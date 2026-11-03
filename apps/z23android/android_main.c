@@ -148,6 +148,41 @@ static bool permission_held(JNIEnv *env, jobject activity, const char *name)
     (void)clean(env); (*env)->PopLocalFrame(env, NULL);
     return granted;
 }
+/* The camera permission has been requested once. The marker lives in the app's private files directory, because
+ * Android reports no rationale both before the first request and after a permanent denial. */
+static bool camera_asked_path(char *path, size_t cap)
+{
+    return state_dir[0] && snprintf(path, cap, "%s/camera_permission_asked", state_dir) < (int)cap;
+}
+static bool camera_asked(void)
+{
+    char path[320];
+    return camera_asked_path(path, sizeof(path)) && access(path, F_OK) == 0;
+}
+static void camera_remember_asked(void)
+{
+    char path[320];
+    int fd = camera_asked_path(path, sizeof(path)) ? open(path, O_WRONLY | O_CREAT | O_CLOEXEC, 0600) : -1;
+    if (fd >= 0) close(fd);
+}
+/* The camera access state of the activity, read without requesting anything. */
+static enum zapp_camera_access activity_camera_access(JNIEnv *env, jobject activity)
+{
+    if ((*env)->PushLocalFrame(env, 4) != JNI_OK) { (void)clean(env); return ZAPP_CAMERA_ASK_AGAIN; }
+    jclass cls = (*env)->GetObjectClass(env, activity);
+    jmethodID check = cls ? (*env)->GetMethodID(env, cls, "checkSelfPermission", "(Ljava/lang/String;)I") : NULL;
+    jmethodID rationale_of = clean(env) && cls ? (*env)->GetMethodID(env, cls, "shouldShowRequestPermissionRationale", "(Ljava/lang/String;)Z") : NULL;
+    jstring permission = clean(env) && check && rationale_of ? (*env)->NewStringUTF(env, "android.permission.CAMERA") : NULL;
+    bool granted = false, rationale = false;
+    if (permission && clean(env)) {
+        jint status = (*env)->CallIntMethod(env, activity, check, permission);
+        granted = clean(env) && status == 0;
+    }
+    if (permission && clean(env)) rationale = (*env)->CallBooleanMethod(env, activity, rationale_of, permission) && clean(env);
+    (void)clean(env);
+    (*env)->PopLocalFrame(env, NULL);
+    return zapp_camera_access_state(granted, rationale, camera_asked());
+}
 /* While the node process runs and the app is visible, run the foreground service that keeps the
  * process out of the hidden-app kill class; stop it once the node has exited. */
 static void sync_node_service(JNIEnv *env, const struct zapp_view *view)
@@ -278,23 +313,24 @@ static void queue_created(ANativeActivity *activity, AInputQueue *queue)
 }
 static void queue_destroyed(ANativeActivity *activity, AInputQueue *queue)
 { (void)activity; AInputQueue_detachLooper(queue); }
-static bool permission_wait(JNIEnv *env, jobject activity, jmethodID check,
-                            jstring permission, uint64_t ticket)
+/* Waits for the system dialog that was asked for. It returns when the dialog has closed (resume_activity clears
+ * camera_dialog), when the denial is reported, or when the wait runs out. The caller then reads the access state. */
+static void permission_wait(uint64_t ticket)
 {
     pthread_mutex_lock(&lock);
     bool queued = active && ticket == zapp_camera_ticket() && signal_pipe[1] >= 0;
     if (queued) { char byte = 1; permission_ticket = ticket; queued = write(signal_pipe[1], &byte, 1) == 1; if (!queued) permission_ticket = 0; }
     pthread_mutex_unlock(&lock);
     struct timespec pause = { .tv_sec = 0, .tv_nsec = 200000000 };
+    bool shown = false;
     for (int i = 0; queued && i < 150; ++i) {
         nanosleep(&pause, NULL);
         pthread_mutex_lock(&lock); bool alive = active && ticket == zapp_camera_ticket(); pthread_mutex_unlock(&lock);
         if (!alive || atomic_load(&camera_denied)) break;
-        bool granted = (*env)->CallIntMethod(env, activity, check, permission) == 0;
-        if (!clean(env)) break;
-        if (granted && !atomic_load(&camera_dialog)) return true;
+        bool dialog = atomic_load(&camera_dialog);
+        shown = shown || dialog;
+        if (shown && !dialog) break;
     }
-    return false;
 }
 
 static bool permission_attach(JavaVM *current_vm, JNIEnv **env, bool *attached)
@@ -309,32 +345,95 @@ static bool permission_attach(JavaVM *current_vm, JNIEnv **env, bool *attached)
     return rc == JNI_OK;
 }
 
-bool zapp_camera_permission(uint64_t ticket)
+/* The access state for a scan. ASK and ASK_AGAIN request the permission and wait for the dialog; SETTINGS neither
+ * requests nor waits, so the owner is sent to the system settings page instead. */
+enum zapp_camera_access zapp_camera_permission(uint64_t ticket)
 {
-    JavaVM *current_vm = atomic_load(&vm); JNIEnv *env = NULL; bool attached = false, granted = false;
-    if (!permission_attach(current_vm, &env, &attached)) return false;
+    JavaVM *current_vm = atomic_load(&vm); JNIEnv *env = NULL; bool attached = false;
+    enum zapp_camera_access access = ZAPP_CAMERA_ASK_AGAIN;
+    if (!permission_attach(current_vm, &env, &attached)) return access;
     atomic_store(&camera_denied, false);
     atomic_store(&camera_dialog, false);
     pthread_mutex_lock(&lock);
     jobject activity = active && ticket == zapp_camera_ticket() ? (*env)->NewLocalRef(env, active) : NULL;
     pthread_mutex_unlock(&lock);
     if (!activity) goto out;
-    jclass cls = (*env)->GetObjectClass(env, activity);
-    jmethodID check = cls ? (*env)->GetMethodID(env, cls, "checkSelfPermission", "(Ljava/lang/String;)I") : NULL;
-    jstring permission = (*env)->NewStringUTF(env, "android.permission.CAMERA");
-    if (!clean(env) || !check || !permission) goto done;
-    jint permission_status = (*env)->CallIntMethod(env, activity, check, permission);
-    if (!clean(env)) goto done;
-    granted = permission_status == 0;
-    if (!granted) granted = permission_wait(env, activity, check, permission, ticket);
-done:
-    (void)clean(env);
-    if (permission) (*env)->DeleteLocalRef(env, permission);
-    if (cls) (*env)->DeleteLocalRef(env, cls);
+    access = activity_camera_access(env, activity);
+    if (access == ZAPP_CAMERA_ASK || access == ZAPP_CAMERA_ASK_AGAIN) {
+        camera_remember_asked();
+        permission_wait(ticket);
+        access = activity_camera_access(env, activity);
+    }
     (*env)->DeleteLocalRef(env, activity);
 out:
     if (attached) (*current_vm)->DetachCurrentThread(current_vm);
-    return granted;
+    return access;
+}
+/* The access state now, read on the calling thread without requesting anything. */
+enum zapp_camera_access zapp_camera_access_now(void)
+{
+    JavaVM *current_vm = atomic_load(&vm); JNIEnv *env = NULL; bool attached = false;
+    enum zapp_camera_access access = ZAPP_CAMERA_ASK_AGAIN;
+    if (!permission_attach(current_vm, &env, &attached)) return access;
+    pthread_mutex_lock(&lock);
+    jobject activity = active ? (*env)->NewLocalRef(env, active) : NULL;
+    pthread_mutex_unlock(&lock);
+    if (activity) {
+        access = activity_camera_access(env, activity);
+        (*env)->DeleteLocalRef(env, activity);
+    }
+    if (attached) (*current_vm)->DetachCurrentThread(current_vm);
+    return access;
+}
+/* This app's package name as a Java string, or NULL. */
+static jstring own_package(JNIEnv *env, jobject activity)
+{
+    jclass cls = (*env)->GetObjectClass(env, activity);
+    jmethodID name = cls ? (*env)->GetMethodID(env, cls, "getPackageName", "()Ljava/lang/String;") : NULL;
+    jstring package = clean(env) && name ? (*env)->CallObjectMethod(env, activity, name) : NULL;
+    return clean(env) ? package : NULL;
+}
+/* The system page of the settings of package, as an Intent, or NULL. */
+static jobject app_settings_intent(JNIEnv *env, jstring package)
+{
+    jobject uri = package ? package_uri(env, package) : NULL;
+    jclass cls = clean(env) && uri ? (*env)->FindClass(env, "android/content/Intent") : NULL;
+    jmethodID ctor = clean(env) && cls ? (*env)->GetMethodID(env, cls, "<init>", "(Ljava/lang/String;Landroid/net/Uri;)V") : NULL;
+    jstring action = clean(env) && ctor ? (*env)->NewStringUTF(env, "android.settings.APPLICATION_DETAILS_SETTINGS") : NULL;
+    jobject intent = clean(env) && action ? (*env)->NewObject(env, cls, ctor, action, uri) : NULL;
+    return clean(env) ? intent : NULL;
+}
+/* Starts the system page of this app's settings, where the camera permission can be allowed. False when it does not start. */
+static bool open_app_settings(JNIEnv *env, jobject activity)
+{
+    if ((*env)->PushLocalFrame(env, 16) != JNI_OK) { (void)clean(env); return false; }
+    jstring package = own_package(env, activity);
+    jobject intent = package ? app_settings_intent(env, package) : NULL;
+    jclass cls = clean(env) ? (*env)->GetObjectClass(env, activity) : NULL;
+    jmethodID start = cls && clean(env) ? (*env)->GetMethodID(env, cls, "startActivity", "(Landroid/content/Intent;)V") : NULL;
+    bool ok = intent && start && clean(env);
+    if (ok) {
+        (*env)->CallVoidMethod(env, activity, start, intent);
+        ok = clean(env);
+    }
+    (void)clean(env);
+    (*env)->PopLocalFrame(env, NULL);
+    return ok;
+}
+/* Opens the system settings page of this app from the activity. False when the page does not open. */
+bool zapp_camera_open_settings(void)
+{
+    JavaVM *current_vm = atomic_load(&vm); JNIEnv *env = NULL; bool attached = false, ok = false;
+    if (!permission_attach(current_vm, &env, &attached)) return false;
+    pthread_mutex_lock(&lock);
+    jobject activity = active ? (*env)->NewLocalRef(env, active) : NULL;
+    pthread_mutex_unlock(&lock);
+    if (activity) {
+        ok = open_app_settings(env, activity);
+        (*env)->DeleteLocalRef(env, activity);
+    }
+    if (attached) (*current_vm)->DetachCurrentThread(current_vm);
+    return ok;
 }
 
 static bool native_directory(JNIEnv *env, jobject activity, char *out, size_t cap)

@@ -194,6 +194,13 @@ static void close_capture(struct camera_scan *r)
     if (r->manager) ACameraManager_delete(r->manager);
     if (r->qr) quirc_destroy(r->qr);
 }
+/* The error a scan reports when the camera does not open: cancelled, the settings words, or a refused request. */
+static void refusal(enum zapp_camera_access access, bool cancelled, char *error, size_t error_cap)
+{
+    if (cancelled) snprintf(error, error_cap, "Camera scan cancelled.");
+    else if (access == ZAPP_CAMERA_SETTINGS) snprintf(error, error_cap, "%s", zapp_camera_screen(access).text);
+    else snprintf(error, error_cap, "Camera permission was not given. Tap Scan again to allow it.");
+}
 bool zapp_camera_scan(uint64_t ticket, char *result, size_t cap, char *error, size_t error_cap)
 {
     if (!result || cap < 2 || !error || !error_cap) return false;
@@ -207,10 +214,10 @@ bool zapp_camera_scan(uint64_t ticket, char *result, size_t cap, char *error, si
     pthread_mutex_unlock(&lock);
     bool ok = false;
     struct camera_scan state = {0};
-    bool allowed = zapp_camera_permission(ticket);
-    if (!allowed || atomic_load(&stopped)) {
-        snprintf(error, error_cap, atomic_load(&stopped) ? "Camera scan cancelled." :
-                 "Camera permission was not given. Allow Camera for this app in Android Settings, under Apps and Permissions, then tap Scan again."); goto out;
+    enum zapp_camera_access access = zapp_camera_permission(ticket);
+    if (access != ZAPP_CAMERA_GRANTED || atomic_load(&stopped)) {
+        refusal(access, atomic_load(&stopped), error, error_cap);
+        goto out;
     }
     const char *id = rear_camera(&state, error, error_cap);
     if (!id || !open_capture(&state, id, sequence)) goto out;
