@@ -87,6 +87,11 @@ struct zcl_result build_fabric_runtime_try_attach_queued_for_test(
     const uint8_t signer_secret[32], const uint8_t signer_pubkey[32],
     struct db_build_receipt *receipt,
     struct build_fabric_attach_report *report);
+
+/* One requester or observing-worker tick body on the calling thread, against
+ * app_runtime_node_db(), exactly as the supervisor's tick runner calls it. */
+void build_fabric_runtime_requester_tick_for_test(void);
+void build_fabric_runtime_worker_tick_for_test(void);
 #endif
 
 #endif /* ZCL_SERVICES_BUILD_FABRIC_RUNTIME_H */

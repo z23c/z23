@@ -11,6 +11,7 @@
 #include "services/build_fabric_proof_context.h"
 #include "services/build_fabric_service.h"
 #include "services/build_fabric_worker.h"
+#include "services/chain_state_service.h"
 #include "services/subordinate_work_admission.h"
 
 #include "config/runtime.h"
@@ -57,6 +58,7 @@ static _Atomic uint64_t g_jobs_terminal;
 static _Atomic uint64_t g_accepted_or_cache;
 static _Atomic uint64_t g_leases_recovered;
 static _Atomic uint64_t g_recovery_failures;
+static _Atomic uint64_t g_node_db_busy_skips;
 static _Atomic uint64_t g_worker_dispatches;
 static _Atomic uint64_t g_worker_failures;
 static _Atomic uint64_t g_worker_resource_deferrals;
@@ -230,54 +232,108 @@ static bool bf_runtime_state_terminal(const char *state)
                      strcmp(state, "FAILED") == 0);
 }
 
-static void bf_runtime_snapshot(uint64_t *active_jobs,
-                                uint64_t *active_actions,
-                                uint64_t *terminal_jobs,
-                                uint64_t *accepted)
+struct bf_runtime_counts {
+    uint64_t active_jobs;
+    uint64_t active_actions;
+    uint64_t terminal_jobs;
+    uint64_t accepted;
+};
+
+/* Count the recent jobs and their actions on ndb and publish the counts. */
+static void bf_runtime_snapshot(struct node_db *ndb,
+                                struct bf_runtime_counts *counts)
 {
-    *active_jobs = *active_actions = *terminal_jobs = *accepted = 0;
-    struct node_db *ndb = app_runtime_node_db();
+    *counts = (struct bf_runtime_counts){0};
     if (!ndb || !ndb->open) return;
     struct db_build_job jobs[BF_RUNTIME_JOB_LIMIT];
     int count = db_build_jobs_recent(ndb, jobs, BF_RUNTIME_JOB_LIMIT);
     for (int i = 0; i < count; i++) {
-        if (bf_runtime_state_active(jobs[i].state)) (*active_jobs)++;
-        if (bf_runtime_state_terminal(jobs[i].state)) (*terminal_jobs)++;
+        if (bf_runtime_state_active(jobs[i].state)) counts->active_jobs++;
+        if (bf_runtime_state_terminal(jobs[i].state)) counts->terminal_jobs++;
         if (strcmp(jobs[i].state, "ACCEPTED") == 0 ||
-            strcmp(jobs[i].state, "CACHE_HIT") == 0) (*accepted)++;
+            strcmp(jobs[i].state, "CACHE_HIT") == 0) counts->accepted++;
         struct db_build_action actions[16];
         int action_count = db_build_job_actions(ndb, jobs[i].job_id,
                                                  actions, 16);
         for (int j = 0; j < action_count; j++)
-            if (bf_runtime_state_active(actions[j].state)) (*active_actions)++;
+            if (bf_runtime_state_active(actions[j].state))
+                counts->active_actions++;
     }
-    atomic_store(&g_jobs_active, *active_jobs);
-    atomic_store(&g_actions_active, *active_actions);
-    atomic_store(&g_jobs_terminal, *terminal_jobs);
-    atomic_store(&g_accepted_or_cache, *accepted);
+    atomic_store(&g_jobs_active, counts->active_jobs);
+    atomic_store(&g_actions_active, counts->active_actions);
+    atomic_store(&g_jobs_terminal, counts->terminal_jobs);
+    atomic_store(&g_accepted_or_cache, counts->accepted);
+}
+
+/* node.db is one serialized connection, and a writer waiting out its busy
+ * timeout keeps that connection's mutex for up to ZCL_NODE_DB_BUSY_TIMEOUT_MS.
+ * Both ticks run on the supervisor's shared tick runner, so each node.db step
+ * try-enters the mutex and, when it is held, is skipped and counted. */
+static bool bf_runtime_db_enter(struct node_db *ndb, void **token)
+{
+    if (csr_ndb_try_enter(ndb, token).ok) return true;
+    atomic_fetch_add(&g_node_db_busy_skips, 1);
+    return false;
+}
+
+/* The snapshot, or the last published one while node.db is busy. */
+static void bf_runtime_observe(struct node_db *ndb,
+                               struct bf_runtime_counts *counts)
+{
+    void *token = NULL;
+    if (!bf_runtime_db_enter(ndb, &token)) {
+        *counts = (struct bf_runtime_counts){
+            .active_jobs = atomic_load(&g_jobs_active),
+            .active_actions = atomic_load(&g_actions_active),
+            .terminal_jobs = atomic_load(&g_jobs_terminal),
+            .accepted = atomic_load(&g_accepted_or_cache),
+        };
+        return;
+    }
+    bf_runtime_snapshot(ndb, counts);
+    csr_ndb_leave(token);
+}
+
+/* A LIMIT 1 read of the expired-lease query: true when a leased action's
+ * lease has expired. Recovery runs only then, so an idle tick never reaches
+ * its write path; a busy node.db defers recovery to a later tick. */
+static bool bf_requester_lease_expired(struct node_db *ndb, int64_t now)
+{
+    void *token = NULL;
+    if (!ndb || !ndb->open || !bf_runtime_db_enter(ndb, &token))
+        return false;
+    struct db_build_action expired;
+    bool found = db_build_actions_expired(ndb, now, &expired, 1) > 0;
+    csr_ndb_leave(token);
+    return found;
+}
+
+static void bf_requester_recover(struct node_db *ndb, int64_t now)
+{
+    size_t recovered = 0;
+    struct zcl_result recovery = build_fabric_recover_expired(ndb, now,
+                                                              &recovered);
+    if (recovery.ok)
+        atomic_fetch_add(&g_leases_recovered, recovered);
+    else {
+        atomic_fetch_add(&g_recovery_failures, 1);
+        LOG_WARN("build_fabric", "expired lease recovery failed: %s",
+                 recovery.message);
+    }
 }
 
 static void bf_requester_tick(struct liveness_contract *contract)
 {
     (void)contract;
     struct node_db *ndb = app_runtime_node_db();
-    if (ndb && ndb->open) {
-        size_t recovered = 0;
-        struct zcl_result recovery = build_fabric_recover_expired(
-            ndb, (int64_t)platform_time_wall_unix(), &recovered);
-        if (recovery.ok)
-            atomic_fetch_add(&g_leases_recovered, recovered);
-        else {
-            atomic_fetch_add(&g_recovery_failures, 1);
-            LOG_WARN("build_fabric", "expired lease recovery failed: %s",
-                     recovery.message);
-        }
-    }
-    uint64_t active_jobs, active_actions, terminal_jobs, accepted;
-    bf_runtime_snapshot(&active_jobs, &active_actions, &terminal_jobs, &accepted);
+    int64_t now = (int64_t)platform_time_wall_unix();
+    if (bf_requester_lease_expired(ndb, now))
+        bf_requester_recover(ndb, now);
+    struct bf_runtime_counts counts;
+    bf_runtime_observe(ndb, &counts);
     supervisor_child_id id = atomic_load(&g_requester_id);
-    if (active_jobs == 0) supervisor_progress_idle(id);
-    else supervisor_progress(id, (int64_t)terminal_jobs);
+    if (counts.active_jobs == 0) supervisor_progress_idle(id);
+    else supervisor_progress(id, (int64_t)counts.terminal_jobs);
     atomic_fetch_add(&g_requester_ticks, 1);
     supervisor_tick(id);
 }
@@ -285,16 +341,28 @@ static void bf_requester_tick(struct liveness_contract *contract)
 static void bf_worker_tick(struct liveness_contract *contract)
 {
     (void)contract;
-    uint64_t active_jobs, active_actions, terminal_jobs, accepted;
-    bf_runtime_snapshot(&active_jobs, &active_actions, &terminal_jobs, &accepted);
+    struct bf_runtime_counts counts;
+    bf_runtime_observe(app_runtime_node_db(), &counts);
     supervisor_child_id id = atomic_load(&g_worker_id);
     if (atomic_load(&g_worker_enabled)) {
-        if (active_actions == 0) supervisor_progress_idle(id);
-        else supervisor_progress(id, (int64_t)accepted);
+        if (counts.active_actions == 0) supervisor_progress_idle(id);
+        else supervisor_progress(id, (int64_t)counts.accepted);
     }
     atomic_fetch_add(&g_worker_ticks, 1);
     supervisor_tick(id);
 }
+
+#ifdef ZCL_TESTING
+void build_fabric_runtime_requester_tick_for_test(void)
+{
+    bf_requester_tick(&g_requester_contract);
+}
+
+void build_fabric_runtime_worker_tick_for_test(void)
+{
+    bf_worker_tick(&g_worker_contract);
+}
+#endif
 
 static void bf_worker_log_admission(enum subordinate_work_refusal admission)
 {
@@ -721,6 +789,7 @@ bool build_fabric_dump_state_json(struct json_value *out, const char *key)
     (void)json_push_kv_int(out, "accepted_or_cache", (int64_t)atomic_load(&g_accepted_or_cache));
     (void)json_push_kv_int(out, "leases_recovered", (int64_t)atomic_load(&g_leases_recovered));
     (void)json_push_kv_int(out, "recovery_failures", (int64_t)atomic_load(&g_recovery_failures));
+    (void)json_push_kv_int(out, "node_db_busy_skips", (int64_t)atomic_load(&g_node_db_busy_skips));
     (void)json_push_kv_int(out, "worker_dispatches", (int64_t)atomic_load(&g_worker_dispatches));
     (void)json_push_kv_int(out, "worker_failures", (int64_t)atomic_load(&g_worker_failures));
     enum subordinate_work_refusal admission =
