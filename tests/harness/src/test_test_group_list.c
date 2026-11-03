@@ -131,7 +131,7 @@ static int test_exact_set_and_suggest(void)
         struct tglt t;
         const char *set[] = {"--resolve-exact-set", "gamma,alpha,gamma"};
         const char *bad[] = {"--resolve-exact-set", "alph"};
-        const char *sug[] = {"--suggest", "test-alph"};
+        const char *sug[] = {"--suggest", "alphaz"};
         const char *miss[] = {"--resolve-exact", "spec_gamma", "nope"};
         char out[TGL_T_OUT], err[TGL_T_OUT];
         ASSERT(tglt_setup(&t, "exact", TGLT_RUNNER));
