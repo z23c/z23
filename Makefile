@@ -6697,6 +6697,7 @@ LINT_FAST_GATES := \
     check-before-save-hooks \
     check-pthread-create \
     check-log-macro-return-type \
+    check-outparam-init-before-return \
     check-hidden-return-under-lock \
     check-wallet-raw-prepare-log \
     check-wallet-log-privacy \
@@ -6723,7 +6724,8 @@ LINT_FAST_GATES := \
     check-silent-errors-bool \
     check-no-raw-clock-outside-platform \
     check-hex-codec-single \
-    check-byte-order-codec-single
+    check-byte-order-codec-single \
+    check-no-operator-paths
 
 # These gates check the generated capability inventory and package registry
 # roots, including zcode-package.json dependency pins. Both also run in full lint.
