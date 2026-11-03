@@ -17,7 +17,7 @@ enum { A1, A2, B1, C1, C2, D1, E1, F1, G1, U1, U2, NCOMMITS };
 
 struct dbc {
     struct dbf f;
-    char stack[900];
+    char stack[900], stack8[900], stack7[900];
     char log[1000];
     char sha[NCOMMITS][41];
 };
@@ -124,15 +124,77 @@ static bool dbc_ledger_make(const struct dbc *d, const struct dbc_lanes *l)
     return ok && dbf_put(path, tsv);
 }
 
+/* Two more stacks in the same lab. s8: lanes H (h1, h2) and I (h1 again, the
+ * identical patch) so H's first commit is ambiguous, K (k1) and L, a lane
+ * whose head is already origin/main. s7: lane K and lane M, plus a ledger row
+ * whose head names no object (the lane lookup must fail closed). */
+static bool dbc_extra_stack(struct dbc *d, const char *name, char out[900])
+{
+    const char *clone[] = {"clone", "-q", d->f.origin, out, NULL};
+    char par[900];
+    (void)snprintf(par, sizeof(par), "%s/development/z23", d->f.home);
+    (void)snprintf(out, 900, "%s/%s", par, name);
+    return dbf_git(par, clone);
+}
+
+struct dbc_extra {
+    char h[900], i[900], k[900], l[900], m[900];
+    char hh[41], hi[41], hk[41], hl[41], hm[41];
+};
+
+static bool dbc_extra_lanes(struct dbc *d, struct dbc_extra *e)
+{
+    return dbc_lane(d, "lane-h", "src/h1.c", "src/h2.c", e->h, e->hh) &&
+           dbc_lane(d, "lane-i", "src/h1.c", NULL, e->i, e->hi) &&
+           dbc_lane(d, "lane-k", "src/k.c", NULL, e->k, e->hk) &&
+           dbc_lane(d, "lane-m", "src/m.c", NULL, e->m, e->hm) &&
+           dbf_lane(&d->f, "lane-l", NULL, e->l, e->hl);
+}
+
+static bool dbc_extra_picks(const struct dbc *d, const struct dbc_extra *e)
+{
+    char sha[41];
+    return dbc_pick(d->stack8, e->h, "HEAD~1", sha) &&
+           dbc_pick(d->stack8, e->h, "HEAD", sha) &&
+           dbc_pick(d->stack8, e->k, "HEAD", sha) &&
+           dbc_pick(d->stack7, e->k, "HEAD", sha) &&
+           dbc_pick(d->stack7, e->m, "HEAD", sha);
+}
+
+static bool dbc_extra_rows(char *tsv, size_t cap, const struct dbc_extra *e)
+{
+    return dbc_row(tsv, cap, e->h, e->hh, "s8") &&
+           dbc_row(tsv, cap, e->i, e->hi, "s8") &&
+           dbc_row(tsv, cap, e->k, e->hk, "s8") &&
+           dbc_row(tsv, cap, e->l, e->hl, "s8") &&
+           dbc_row(tsv, cap, e->k, e->hk, "s7") &&
+           dbc_row(tsv, cap, e->m, e->hm, "s7") &&
+           dbc_row(tsv, cap, "/lanes/lane-bad",
+                   "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "s7");
+}
+
+static bool dbc_extra_make(struct dbc *d)
+{
+    struct dbc_extra e;
+    char tsv[8192], path[1000];
+    if (!dbc_extra_lanes(d, &e) ||
+        !dbc_extra_stack(d, "z23-stacks8", d->stack8) ||
+        !dbc_extra_stack(d, "z23-stacks7", d->stack7))
+        return false;
+    (void)snprintf(path, sizeof(path), "%s/stacked.tsv", d->f.state);
+    return dbf_slurp(path, tsv, sizeof(tsv)) && dbc_extra_picks(d, &e) &&
+           dbc_extra_rows(tsv, sizeof(tsv), &e) && dbf_put(path, tsv);
+}
+
 static bool dbc_setup(struct dbc *d)
 {
     struct dbc_lanes l;
     memset(d, 0, sizeof(*d));
     return dbf_setup(&d->f, "culprit") && dbc_lanes_make(d, &l) &&
            dbc_stack_make(d, &l) && dbc_ledger_make(d, &l) &&
+           dbc_extra_make(d) &&
            snprintf(d->log, sizeof(d->log), "%s/fail.log", d->f.root) > 0;
 }
-
 static void dbc_run(struct dbc *d, const char *text, const char *stage,
                     const char *const *flags, struct zcl_command_reply *reply,
                     char *dump, size_t cap)
@@ -306,6 +368,52 @@ int test_dev_batch_culprit(void)
         ASSERT(dbf_rev(d.stack, "HEAD", head1) && strcmp(head0, head1) == 0);
         (void)snprintf(path, sizeof(path), "%s/stack-pending.txt", d.f.state);
         ASSERT(!dbf_exists(path));
+        PASS();
+    }
+
+    TEST("culprit: a failed lane lookup refuses instead of skipping the lane") {
+        char main_stack[900];
+        (void)snprintf(main_stack, sizeof(main_stack), "%s", d.stack);
+        (void)snprintf(d.stack, sizeof(d.stack), "%s", d.stack7);
+        dbc_run(&d, "FAIL: x\n  src/k.c bad\n", "lint", NULL, &reply, dump,
+                sizeof(dump));
+        (void)snprintf(d.stack, sizeof(d.stack), "%s", main_stack);
+        ASSERT(strstr(dump, "\"decision\":\"refuse\"") != NULL);
+        ASSERT(strstr(dump, "\"refusal\":\"lane_lookup_failed\"") != NULL);
+        ASSERT(strstr(dump, "lane-bad") != NULL);
+        ASSERT(strstr(dump, "\"drop\":[]") != NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+
+    TEST("culprit: a lane sharing a patch with another is never dropped in part") {
+        char main_stack[900];
+        (void)snprintf(main_stack, sizeof(main_stack), "%s", d.stack);
+        (void)snprintf(d.stack, sizeof(d.stack), "%s", d.stack8);
+        ASSERT(dbc_refused(&d, "FAIL: x\n  src/h2.c bad\n", "ambiguous_lane"));
+        (void)snprintf(d.stack, sizeof(d.stack), "%s", main_stack);
+        PASS();
+    }
+
+    TEST("culprit: a lane head already on origin/main drops no other lane") {
+        char main_stack[900];
+        (void)snprintf(main_stack, sizeof(main_stack), "%s", d.stack);
+        (void)snprintf(d.stack, sizeof(d.stack), "%s", d.stack8);
+        dbc_run(&d, "FAIL: x\n  src/k.c bad\n", "lint", NULL, &reply, dump,
+                sizeof(dump));
+        (void)snprintf(d.stack, sizeof(d.stack), "%s", main_stack);
+        ASSERT(strstr(dump, "\"decision\":\"drop\"") != NULL);
+        ASSERT(strstr(dump, "lane-k") != NULL);
+        ASSERT(strstr(dump, "lane-l") == NULL);
+        ASSERT(strstr(dump, "lane-h") == NULL && strstr(dump, "lane-i") == NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+
+    TEST("culprit: a malformed git log line is BAD_STACK, not NO_MEMORY") {
+        ASSERT(strcmp(cd_parse_probe("\001short\nsrc/a.c\n"), "BAD_STACK") == 0);
+        ASSERT(strcmp(cd_parse_probe("\0010123456789012345678901234567890123456789 s\nsrc/a.c\n"),
+                      "") == 0);
         PASS();
     }
 

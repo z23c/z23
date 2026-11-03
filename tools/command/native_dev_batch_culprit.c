@@ -63,12 +63,13 @@ struct cd_lane {
     char name[DB_PATH];
     char head[41];
     bool pulled;
+    bool ambiguous; /* git ties one of its commits to a second lane */
 };
 
 struct cd_ctx {
     char stack[DB_PATH];
     char sid[32];
-    bool agent_verify;
+    bool agent_verify, malformed;
     struct db_text log, ledger;
     struct cp_set paths, net;
     struct cd_commit *c;
@@ -119,6 +120,10 @@ static struct cd_commit *cd_commit_new(struct cd_ctx *x, const char *line)
 {
     struct cd_commit *c;
     size_t len = strlen(line);
+    if (len < 40) { /* a malformed line, not an allocation failure */
+        x->malformed = true;
+        return NULL;
+    }
     if (x->nc == x->capc) {
         size_t cap = x->capc ? x->capc * 2 : 32;
         struct cd_commit *grown =
@@ -128,8 +133,6 @@ static struct cd_commit *cd_commit_new(struct cd_ctx *x, const char *line)
         x->c = grown;
         x->capc = cap;
     }
-    if (len < 40)
-        return NULL;
     c = &x->c[x->nc];
     memset(c, 0, sizeof(*c));
     memcpy(c->sha, line, 40);
@@ -166,6 +169,27 @@ static bool cd_parse_log(struct cd_ctx *x, char *out)
     return true;
 }
 
+/* A failed log parse: BAD_STACK for a malformed line, NO_MEMORY otherwise. */
+static const char *cd_parse_code(const struct cd_ctx *x)
+{
+    return x->malformed ? "BAD_STACK" : "NO_MEMORY";
+}
+
+const char *cd_parse_probe(const char *log_text)
+{
+    struct cd_ctx x;
+    char *copy = zcl_malloc(strlen(log_text) + 1, "cd_probe");
+    const char *code = "NO_MEMORY";
+    if (!copy)
+        return code;
+    memcpy(copy, log_text, strlen(log_text) + 1);
+    memset(&x, 0, sizeof(x));
+    code = cd_parse_log(&x, copy) ? "" : cd_parse_code(&x);
+    free(copy);
+    cd_free(&x);
+    return code;
+}
+
 static bool cd_load_commits(struct cd_ctx *x)
 {
     const char *log[] = {"log", "--no-renames", "--name-only",
@@ -176,7 +200,9 @@ static bool cd_load_commits(struct cd_ctx *x)
     if (db_git(x->stack, log, x->buf, CD_BUF) != 0)
         return cd_no(x, "BAD_STACK", "git log failed in the stack");
     if (!cd_parse_log(x, x->buf))
-        return cd_no(x, "NO_MEMORY", "out of memory reading the stack");
+        return cd_no(x, cd_parse_code(x),
+                     x->malformed ? "git log printed a malformed line"
+                                  : "out of memory reading the stack");
     if (db_git(x->stack, net, x->buf, CD_BUF) != 0)
         return cd_no(x, "BAD_STACK", "git diff failed in the stack");
     for (p = x->buf; *p; p = nl ? nl + 1 : p + strlen(p)) {
@@ -255,10 +281,16 @@ static void cd_mark(struct cd_ctx *x, size_t li, const char *sha)
     for (i = 0; i < x->nc; i++) {
         if (strncmp(x->c[i].sha, sha, 40) != 0)
             continue;
-        if (x->c[i].lane == CD_UNMAPPED)
+        if (x->c[i].lane == CD_UNMAPPED) {
             x->c[i].lane = (int)li;
-        else if (x->c[i].lane != (int)li)
+        } else if (x->c[i].lane != (int)li) {
+            /* both claimants are partly ambiguous: dropping either lane
+             * would leave this commit behind */
+            if (x->c[i].lane >= 0)
+                x->lane[x->c[i].lane].ambiguous = true;
+            x->lane[li].ambiguous = true;
             x->c[i].lane = CD_AMBIGUOUS;
+        }
     }
 }
 
@@ -284,7 +316,24 @@ static void cd_mark_lane(struct cd_ctx *x, size_t li, char *out, bool cherry)
 /* By patch identity (`git cherry LANEHEAD HEAD origin/main`), and by sha for
  * a stack commit that IS the lane's commit (a fast-forwarded pick, which
  * cherry cannot list: it is reachable from both sides). */
-static void cd_map_lanes(struct cd_ctx *x)
+/* One lane lookup. Success needs exit 0 and an output that fits: the capture
+ * truncates silently at the cap, so a full buffer is a failed lookup. */
+static bool cd_lane_git(struct cd_ctx *x, size_t li, const char *const *args,
+                        bool cherry)
+{
+    if (db_git(x->stack, args, x->buf, CD_BUF) != 0 ||
+        strlen(x->buf) >= CD_BUF - 1) {
+        char msg[sizeof(x->detail)];
+        (void)snprintf(msg, sizeof(msg),
+                       "the lane lookup for %.150s failed or was cut short",
+                       x->lane[li].name);
+        return cd_no(x, "lane_lookup_failed", msg);
+    }
+    cd_mark_lane(x, li, x->buf, cherry);
+    return true;
+}
+
+static bool cd_map_lanes(struct cd_ctx *x)
 {
     size_t li;
     for (li = 0; li < x->nl; li++) {
@@ -292,11 +341,11 @@ static void cd_map_lanes(struct cd_ctx *x)
                                 "origin/main", NULL};
         const char *own[] = {"rev-list", x->lane[li].head, "^origin/main",
                              NULL};
-        if (db_git(x->stack, cherry, x->buf, CD_BUF) == 0)
-            cd_mark_lane(x, li, x->buf, true);
-        if (db_git(x->stack, own, x->buf, CD_BUF) == 0)
-            cd_mark_lane(x, li, x->buf, false);
+        if (!cd_lane_git(x, li, cherry, true) ||
+            !cd_lane_git(x, li, own, false))
+            return false;
     }
+    return true;
 }
 
 /* ── the decision ──────────────────────────────────────────────────────── */
@@ -309,6 +358,24 @@ static bool cd_touches(const struct cd_ctx *x, const struct cd_commit *c)
             cp_set_has(&x->net, c->files.v[i]))
             return true;
     return false;
+}
+
+/* No lane chosen for dropping may hold a commit another lane also holds:
+ * that commit would stay while the rest of its lane drops. */
+static bool cd_pulled_clean(struct cd_ctx *x)
+{
+    size_t i;
+    char msg[sizeof(x->detail)];
+    for (i = 0; i < x->nl; i++) {
+        if (!x->lane[i].pulled || !x->lane[i].ambiguous)
+            continue;
+        (void)snprintf(msg, sizeof(msg),
+                       "a commit of lane %.150s is also held by another "
+                       "lane; dropping part of it is refused",
+                       x->lane[i].name);
+        return cd_no(x, "ambiguous_lane", msg);
+    }
+    return true;
 }
 
 /* Steps 3 and 4: the commits the failure names, then their lanes. */
@@ -330,6 +397,8 @@ static bool cd_pick(struct cd_ctx *x)
         return cd_no_n(x, "unmapped",
                        "%zu named commit(s) map to no single lane; never a culprit",
                        hits);
+    if (!cd_pulled_clean(x))
+        return false;
     for (i = 0; i < x->nc; i++)
         x->c[i].drop = x->c[i].lane >= 0 && x->lane[x->c[i].lane].pulled;
     return true;
@@ -565,10 +634,7 @@ void zcl_native_handle_dev_batch_culprit(const struct zcl_command_request *reque
     }
     ok = cd_load_commits(&x) &&
          (cd_load_lanes(&x) || cd_no(&x, "NO_MEMORY", "out of memory"));
-    if (ok) {
-        cd_map_lanes(&x);
-        ok = cd_decide(&x);
-    }
+    ok = ok && cd_map_lanes(&x) && cd_decide(&x);
     cd_publish(reply, &x, ok, db_opt_flag(in, "dry_run"),
                db_opt_str(in, "stage"));
     cd_free(&x);
