@@ -158,6 +158,28 @@ static void inputs_are_gated(void)
     free(src);
 }
 
+/* The Clips screen opens from no launch path: no intent extra names it, no source file but its own opens it and the
+ * manifest declares no Clips filter. */
+static void clips_is_unreachable(void)
+{
+    char *src = slurp("android_main.c");
+    assert(!strstr(src, "org.z23.clips") && !strstr(src, "clip_screen.h"));
+    free(src);
+    DIR *dir = opendir(".");
+    assert(dir);
+    for (struct dirent *e; (e = readdir(dir));) {
+        size_t n = strlen(e->d_name);
+        if (n < 3 || strcmp(e->d_name + n - 2, ".c") || !strcmp(e->d_name, "clip_screen.c")) continue;
+        src = slurp(e->d_name);
+        if (strstr(src, "zapp_clip_screen_open(")) { fprintf(stderr, "%s opens the Clips screen\n", e->d_name); abort(); }
+        free(src);
+    }
+    closedir(dir);
+    char *m = slurp("AndroidManifest.xml");
+    assert(!strstr(m, "clips") && !strstr(m, "Clips"));
+    free(m);
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && chdir(argv[1])) { perror(argv[1]); return 1; }
@@ -166,6 +188,7 @@ int main(int argc, char **argv)
     text_entry_is_private();
     node_notification_is_secret();
     inputs_are_gated();
+    clips_is_unreachable();
     puts("surface_test: ok");
     return 0;
 }

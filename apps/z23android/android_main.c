@@ -3,7 +3,6 @@
 #include "app.h"
 #include "base/cleanse.h"
 #include "camera.h"
-#include "clip_screen.h"
 #include "controller.h"
 #include "jni_util.h"
 #include "device_key.h"
@@ -303,7 +302,7 @@ static int input_ready(int fd, int events, void *context)
     while (AInputQueue_getEvent(queue, &event) >= 0) {
         if (AInputQueue_preDispatchEvent(queue, event)) continue;
         if (zapp_secure_window_drops(event)) { zapp_native_ui_dropped(env); AInputQueue_finishEvent(queue, event, true); continue; }
-        bool taken = zapp_clip_screen_input(env, event) || zapp_native_ui_input(env, event);
+        bool taken = zapp_native_ui_input(env, event);
         AInputQueue_finishEvent(queue, event, taken);
     }
     return 1;
@@ -503,29 +502,6 @@ static bool intent_pairing(JNIEnv *env, jobject activity, char *out, size_t cap)
     if (ok && !pairing_caller_allowed(env, activity)) { memory_cleanse(out, cap); ok = false; }
     (void)clean(env); (*env)->PopLocalFrame(env, NULL); return ok;
 }
-/* Reads the org.z23.clips launch extra and removes it from the in-process intent, so a later resume or
- * configuration change does not see it. After the process is killed the system can deliver the original
- * intent again; the screen then returns with the camera closed. False when the extra is absent. */
-static bool take_clips_extra(JNIEnv *env, jobject intent, char *out, size_t cap)
-{
-    jclass intent_cls = clean(env) && intent ? (*env)->GetObjectClass(env, intent) : NULL;
-    jmethodID extra = intent_cls ? (*env)->GetMethodID(env, intent_cls, "getStringExtra", "(Ljava/lang/String;)Ljava/lang/String;") : NULL;
-    jmethodID remove = intent_cls ? (*env)->GetMethodID(env, intent_cls, "removeExtra", "(Ljava/lang/String;)V") : NULL;
-    jstring key = clean(env) ? (*env)->NewStringUTF(env, "org.z23.clips") : NULL;
-    jstring value = clean(env) && extra && remove && key ? (*env)->CallObjectMethod(env, intent, extra, key) : NULL;
-    bool ok = copy_utf(env, value, out, cap);
-    if (value) (*env)->CallVoidMethod(env, intent, remove, key);
-    return ok;
-}
-/* Opens the clips screen named by the org.z23.clips launch extra: record or watch. */
-static void intent_clips(JNIEnv *env, jobject activity, const char *files)
-{
-    char word[16];
-    if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)clean(env); return; }
-    if (take_clips_extra(env, launch_intent(env, activity), word, sizeof(word)) && (!strcmp(word, "record") || !strcmp(word, "watch")))
-        (void)zapp_clip_screen_open(env, activity, files, strcmp(word, "record") ? ZAPP_CLIP_WATCH : ZAPP_CLIP_RECORD);
-    (void)clean(env); (*env)->PopLocalFrame(env, NULL);
-}
 static bool release_surface(JNIEnv *env, jobject activity)
 {
     if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)clean(env); return false; }
@@ -560,7 +536,6 @@ static void finish_previous(JNIEnv *env)
  * destroyed, so the newest activity takes this state over and the old one skips it. */
 static void detach_activity(JNIEnv *env)
 {
-    zapp_clip_screen_close(env);
     /* Before the controller goes: a lock still owed is asked for through it. */
     zapp_send_detach(env);
     zapp_pay_stash_clear();
@@ -607,7 +582,6 @@ static void pause_activity(ANativeActivity *activity)
     zapp_native_ui_pause(activity->env);
     foreground = false;
     if (!zapp_send_ui_owes()) (void)arm_tick(false);
-    zapp_clip_screen_pause(activity->env);
     zapp_controller_visible(false);
     if (!atomic_load(&camera_dialog)) zapp_camera_stop();
     else atomic_store(&camera_paused, true);
@@ -625,7 +599,6 @@ static void resume_activity(ANativeActivity *activity)
     pthread_mutex_unlock(&lock);
     if (!owner) { ANativeActivity_finish(activity); return; }
     foreground = true;
-    zapp_clip_screen_resume(activity->env);
     zapp_controller_visible(true);
     zapp_native_ui_resume(activity->env);
     refresh(activity->env);
@@ -704,7 +677,6 @@ JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, 
     request_full_brightness(env, activity->clazz);
     zapp_camera_set_frame_notify(notify);
     forward_pairing(env, activity->clazz);
-    intent_clips(env, activity->clazz, activity->internalDataPath);
     refresh(env); return;
 fail:
     (void)clean(env); ANativeActivity_finish(activity);
