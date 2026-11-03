@@ -13,6 +13,7 @@
 #endif
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <signal.h>
 #include <spawn.h>
@@ -60,6 +61,16 @@ static bool runtime_directory(const char *name, bool private_mode)
            st.st_uid == getuid() && (!private_mode || (st.st_mode & 077) == 0);
 }
 
+/* The roots the node reads from its environment, named without links. Android names the files directory through
+ * /data/user/0, a link the system keeps to /data/data, and the node refuses a state root with a link among its
+ * parents, so under that name it never finds the fleet record `fleet join` keeps below XDG_STATE_HOME. */
+static bool environment_roots(struct zapp_runtime *r, const char *files)
+{
+    char real[PATH_MAX];
+    return realpath(files, real) && path(r->state_root, sizeof(r->state_root), real, "state") &&
+           path(r->temporary_root, sizeof(r->temporary_root), real, "tmp");
+}
+
 bool zapp_runtime_init(struct zapp_runtime *r, const char *files, const char *libs, bool preview)
 {
     memset(r, 0, sizeof(*r));
@@ -69,8 +80,7 @@ bool zapp_runtime_init(struct zapp_runtime *r, const char *files, const char *li
     bool ok = strlen(files) < sizeof(r->files) && snprintf(r->files, sizeof(r->files), "%s", files) > 0 &&
               path(r->directory, sizeof(r->directory), files, "node") &&
               path(r->executable, sizeof(r->executable), libs, "libz23node.so") &&
-              path(r->state_root, sizeof(r->state_root), files, "state") &&
-              path(r->temporary_root, sizeof(r->temporary_root), files, "tmp");
+              environment_roots(r, files);
     if (ok) ok = runtime_directory(r->directory, false);
     if (ok) ok = runtime_directory(r->state_root, true);
     if (ok) ok = runtime_directory(r->temporary_root, true);

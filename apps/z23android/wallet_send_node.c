@@ -9,6 +9,7 @@
 #define FLEET_SCHEMA "zcl.fleet_status.v1"
 #define TEXT_NOT_ENCRYPTED "This wallet is not protected by this phone's screen lock yet, so the app does not send from it."
 #define TEXT_FLEET_DISAGREES "Your fleet disagrees with this node about the latest block. Sending waits until they agree."
+#define TEXT_FLEET_NOT_CHECKED "Your fleet has not been checked yet: this node cannot read which fleet it joined. Sending waits until it can."
 #define TEXT_FLEET_UNREADABLE "This node could not read your fleet's status, so sending waits."
 #define BROADCAST_SCHEMA "zcl.wallet_broadcast_status.v1"
 #define TOKEN_HEX 16
@@ -107,7 +108,15 @@ static bool summary_numbers(const char *text, struct summary_numbers *s)
     return ok;
 }
 
-enum fleet_verdict { FLEET_UNREADABLE, FLEET_CLEAR, FLEET_REFUSES };
+enum fleet_verdict { FLEET_UNREADABLE, FLEET_CLEAR, FLEET_DISAGREES, FLEET_NOT_CHECKED };
+/* A refusal keeps its cause: the node refuses with verdict disagree when a machine named another block, and with
+ * verdict unchecked when it cannot read its recorded fleet root, so nothing was checked. A refusal with any other
+ * verdict is not the documented reply and reads as unreadable. */
+static enum fleet_verdict refusal_of(const char *verdict)
+{
+    if (!strcmp(verdict, "disagree")) return FLEET_DISAGREES;
+    return strcmp(verdict, "unchecked") ? FLEET_UNREADABLE : FLEET_NOT_CHECKED;
+}
 /* The fleet answer of the node. Only the documented shape counts; a missing command, an error, a garbled reply and a
  * reply with another schema are unreadable, and an unreadable fleet blocks the send. `checked` is true when the
  * fleet's own verdict is agree; any other clear verdict, not a member included, is shown as not checked. */
@@ -126,7 +135,7 @@ static enum fleet_verdict read_fleet(const struct wsn *n, bool *checked)
     enum fleet_verdict result = FLEET_UNREADABLE;
     if (schema && !strcmp(schema, FLEET_SCHEMA) && flag_of(r.data, "member", &member) &&
         flag_of(r.data, "refuses_send", &refuses)) {
-        result = refuses ? FLEET_REFUSES : FLEET_CLEAR;
+        result = refuses ? refusal_of(verdict) : FLEET_CLEAR;
         *checked = !refuses && !strcmp(verdict, "agree");
     }
     reply_free(&r);
@@ -165,7 +174,8 @@ static bool read_gate(void *ctx, struct ws_gate *out)
     out->send_allowed = true;
     if (!view.send_allowed) block(out, view.send);
     else if (!s.encrypted) block(out, TEXT_NOT_ENCRYPTED);
-    else if (fleet == FLEET_REFUSES) block(out, TEXT_FLEET_DISAGREES);
+    else if (fleet == FLEET_DISAGREES) block(out, TEXT_FLEET_DISAGREES);
+    else if (fleet == FLEET_NOT_CHECKED) block(out, TEXT_FLEET_NOT_CHECKED);
     else if (fleet == FLEET_UNREADABLE) block(out, TEXT_FLEET_UNREADABLE);
     return true;
 }

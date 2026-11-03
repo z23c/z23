@@ -14,11 +14,17 @@
  */
 
 #define _POSIX_C_SOURCE 200809L
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
 
 #include "test/test_core.h"
 
 #include "command/native_command.h"
+#include "config/boot_fleet_roster.h"
 #include "config/command_catalog.h"
+#include "controllers/fleet_status_controller.h"
+#include "controllers/fleet_tip.h"
 #include "base/hex.h"
 #include "crypto/ed25519.h"
 #include "controllers/rpc_client.h"
@@ -33,6 +39,7 @@
 #include "net/acme_b64url.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -3377,6 +3384,197 @@ static int test_fe_join_onion_from_datadir(void)
     return failures;
 }
 
+/* ── a phone: the app's files directory is the only state root ──────────── */
+
+/* The layout the Android app gives its node, with no HOME: <files>/node is
+ * the datadir and <files>/state is XDG_STATE_HOME. `linked_state` names the
+ * same directory through <base>/user/0, a link to <base>/data, the way
+ * Android names an app's files through /data/user/0. */
+struct fe_phone {
+    char files[PATH_MAX / 2];
+    char state[PATH_MAX / 2 + 16];
+    char linked_state[PATH_MAX / 2 + 32];
+    char datadir[PATH_MAX / 2 + 16];
+    char db[PATH_MAX / 2 + 32];
+};
+
+#define FE_PHONE_TIP 3306844
+#define FE_PHONE_HASH \
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+#define FE_PHONE_MONO 10000
+
+static struct fleet_status g_fe_phone_status;
+
+static bool fe_phone_dir(char *out, size_t cap, const char *parent,
+                         const char *leaf)
+{
+    int n = snprintf(out, cap, "%s/%s", parent, leaf);
+    return n > 0 && (size_t)n < cap && mkdir(out, 0700) == 0;
+}
+
+static bool fe_phone_layout(struct fe_phone *p)
+{
+    char tmp[PATH_MAX - 64], base[PATH_MAX], data[PATH_MAX / 4];
+    char user[PATH_MAX / 4], link[PATH_MAX / 4];
+    test_make_tmpdir(tmp, sizeof(tmp), "fleet_enrol", "phone");
+    if (!realpath(tmp, base) || strlen(base) >= PATH_MAX / 8 ||
+        !fe_phone_dir(data, sizeof(data), base, "data") ||
+        !fe_phone_dir(user, sizeof(user), base, "user") ||
+        !fe_phone_dir(p->files, sizeof(p->files), data, "files") ||
+        !fe_phone_dir(p->state, sizeof(p->state), p->files, "state") ||
+        !fe_phone_dir(p->datadir, sizeof(p->datadir), p->files, "node"))
+        return false;
+    int n = snprintf(link, sizeof(link), "%s/0", user);
+    int m = snprintf(p->linked_state, sizeof(p->linked_state),
+                     "%s/files/state", link);
+    int k = snprintf(p->db, sizeof(p->db), "%s/node.db", p->datadir);
+    return n > 0 && (size_t)n < sizeof(link) && m > 0 &&
+           (size_t)m < sizeof(p->linked_state) && k > 0 &&
+           (size_t)k < sizeof(p->db) && symlink(data, link) == 0;
+}
+
+static bool fe_phone_hash_at(int64_t height, char hex[65], void *ctx)
+{
+    (void)ctx;
+    if (height != FE_PHONE_TIP)
+        return false;
+    (void)snprintf(hex, 65, "%s", FE_PHONE_HASH);
+    return true;
+}
+
+static const struct fleet_status_local g_fe_phone_local = {
+    .tip = FE_PHONE_TIP, .hash_at = fe_phone_hash_at, .ctx = NULL };
+
+/* The wallet's fleet status over `db`, with `peers` connected. */
+static const struct fleet_status *fe_phone_status(
+    struct node_db *db, const struct fleet_status_peer *peers, size_t n)
+{
+    fleet_status_collect(db, FE_NOW, &g_fe_phone_status);
+    fleet_status_apply(&g_fe_phone_status, peers, n, &g_fe_phone_local,
+                       FE_PHONE_MONO);
+    return &g_fe_phone_status;
+}
+
+/* Join through the shipped leaf, bound to the phone's datadir as the app's
+ * command is, then import one machine the operator sealed. */
+static bool fe_phone_join(const struct fe_phone *p, const uint8_t op_seed[32],
+                          const uint8_t op_pub[32])
+{
+    char token[FLEET_ENROL_MACHINE_TEXT_MAX], row[FLEET_ENROL_MACHINE_TEXT_MAX];
+    char body[FLEET_ENROL_MACHINE_TEXT_MAX + 32], recorded[PATH_MAX];
+    struct fleet_invite invite;
+    struct zcl_command_reply reply;
+    struct stat st;
+    const char *why = NULL;
+    bool joined = false, imported = false;
+    if (!fleet_invite_mint("phone", FE_TTL, "", op_seed, op_pub,
+                           (int64_t)time(NULL), token, sizeof(token), &invite,
+                           &why))
+        return false;
+    zcl_native_bridge_bind_rpc(p->datadir, 0);
+    if (fe_join_call(token, NULL, &reply)) {
+        joined = reply.exit_code == ZCL_COMMAND_EXIT_OK;
+        zcl_command_reply_free(&reply);
+    }
+    zcl_native_bridge_bind_rpc("", 0);
+    if (joined && fe_signer_row(0xa1, 0xc3, "studio", row, sizeof(row)) &&
+        snprintf(body, sizeof(body), "{\"line\":\"%s\"}", row) > 0 &&
+        fe_leaf_call("fleet.import", "zcl.fleet.import.v1", body, &reply)) {
+        imported = reply.exit_code == ZCL_COMMAND_EXIT_OK;
+        zcl_command_reply_free(&reply);
+    }
+    return imported &&
+           snprintf(recorded, sizeof(recorded),
+                    "%s/z23/dev/fleet/operator.pub", p->state) > 0 &&
+           stat(recorded, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static int test_fe_phone_state_root(void)
+{
+    int failures = 0;
+    static struct fe_phone phone;
+    struct node_db db;
+    struct boot_fleet_roster_counts before, after;
+    struct fleet_status_peer peer = { .host = FE_ONION ":8033",
+                                      .inbound = false };
+    struct fleet_tip tip = { .height = FE_PHONE_TIP,
+                             .fetched_at = FE_PHONE_MONO };
+    const struct fleet_status *s;
+    uint8_t op_seed[32], op_pub[32], root[32], key[32];
+    bool present = true, manager = true, opened = false;
+    TEST("fleet on a phone: with the app's files directory as the only state "
+         "root and no HOME, a box that never joined is unarmed and counts "
+         "nothing unverifiable; through a link the root is unverifiable; "
+         "after `fleet join` the root is read and the status lists the "
+         "fleet's machines and their agreement") {
+        fe_isolate("phone-env");
+        ASSERT(fe_phone_layout(&phone));
+        ASSERT(setenv("XDG_STATE_HOME", phone.state, 1) == 0);
+        ASSERT(unsetenv("HOME") == 0);
+        zcl_fleet_roster_gate_start();
+        boot_fleet_roster_test_reset();
+        ASSERT(node_db_open(&db, phone.db));
+        opened = true;
+        fe_key(0xd4, op_seed, key);
+
+        /* Never joined: no root, a state, and no refusal is counted. */
+        boot_fleet_roster_counts(&before);
+        ASSERT(zcl_fleet_roster_root(root, &present, &manager));
+        ASSERT(!present && !manager);
+        ASSERT(boot_fleet_roster_check(&db, key, FE_NOW) ==
+               BOOT_FLEET_ROSTER_UNARMED);
+        ASSERT(boot_fleet_roster_admits_peer(&db, key, FE_NOW));
+        boot_fleet_roster_counts(&after);
+        ASSERT_EQ(after.unverifiable, before.unverifiable);
+        s = fe_phone_status(&db, NULL, 0);
+        ASSERT(!s->member && !s->unverifiable && !s->refuses_send);
+        ASSERT_EQ(s->verdict, FLEET_STATUS_NOT_MEMBER);
+
+        /* Through the link the node refuses the state root: the reply the
+         * phone gave, a member that checked nothing and refuses to send. */
+        ASSERT(setenv("XDG_STATE_HOME", phone.linked_state, 1) == 0);
+        boot_fleet_roster_invalidate();
+        ASSERT(!zcl_fleet_roster_root(root, &present, &manager));
+        ASSERT(boot_fleet_roster_check(&db, key, FE_NOW) ==
+               BOOT_FLEET_ROSTER_UNVERIFIABLE);
+        s = fe_phone_status(&db, NULL, 0);
+        ASSERT(s->member && s->unverifiable && s->refuses_send);
+        ASSERT_EQ(s->verdict, FLEET_STATUS_UNCHECKED);
+        ASSERT(setenv("XDG_STATE_HOME", phone.state, 1) == 0);
+        boot_fleet_roster_invalidate();
+
+        /* Joined: the root is the operator key, read from <files>/state. */
+        fe_key(0xa1, op_seed, op_pub);
+        ASSERT(fe_phone_join(&phone, op_seed, op_pub));
+        ASSERT(zcl_fleet_roster_root(root, &present, &manager));
+        ASSERT(present && !manager && memcmp(root, op_pub, 32) == 0);
+        s = fe_phone_status(&db, NULL, 0);
+        ASSERT(s->member && !s->unverifiable && !s->refuses_send);
+        ASSERT_EQ(s->machine_count, (size_t)1);
+        ASSERT_STR_EQ(s->machines[0].name, "studio");
+        ASSERT_EQ(s->verdict, FLEET_STATUS_NONE_CONNECTED);
+
+        /* Connected over its onion, with a fresh check naming this node's
+         * tip block: one machine connected, and it agrees. */
+        fleet_tip_cache_reset();
+        (void)snprintf(tip.hash, sizeof(tip.hash), "%s", FE_PHONE_HASH);
+        fleet_tip_cache_put(FE_ONION, &tip);
+        s = fe_phone_status(&db, &peer, 1);
+        ASSERT_EQ(s->connected_count, (size_t)1);
+        ASSERT(s->machines[0].connected);
+        ASSERT_EQ(s->machines[0].agreement, FLEET_STATUS_AGREES);
+        ASSERT_EQ(s->verdict, FLEET_STATUS_AGREE);
+        ASSERT(!s->refuses_send);
+        PASS();
+    } _test_next:;
+    fleet_tip_cache_reset();
+    zcl_fleet_roster_provider_install(NULL);
+    boot_fleet_roster_test_reset();
+    if (opened)
+        node_db_close(&db);
+    return failures;
+}
+
 int test_fleet_enrol(void)
 {
     int failures = 0;
@@ -3398,6 +3596,7 @@ int test_fleet_enrol(void)
     failures += test_fe_onion_from_datadir();
     failures += test_fe_onion_refused_at_mint();
     failures += test_fe_join_onion_from_datadir();
+    failures += test_fe_phone_state_root();
     failures += test_fe_machines_collapse();
     failures += test_fe_machines_page();
     failures += test_fe_render();

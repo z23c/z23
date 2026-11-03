@@ -1,9 +1,13 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #define _POSIX_C_SOURCE 200809L
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
 #include "operations.h"
 #include "params.h"
 #include <assert.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -513,6 +517,39 @@ static void onion_tests(void)
     pthread_mutex_destroy(&r.mutex);
 }
 
+static void fixture_dir(char *out, size_t cap, const char *base, const char *leaf)
+{
+    int n = snprintf(out, cap, "%s/%s", base, leaf);
+    assert(n > 0 && (size_t)n < cap && mkdir(out, 0700) == 0);
+}
+/* Android names the files directory through /data/user/0, a link to /data/data. The state and temporary roots the
+ * node gets are named without the link, because the node refuses a state root with a link among its parents and
+ * would never find its fleet record; the node data keeps the name the app was given. */
+static void linked_files_tests(void)
+{
+    char base[] = "/tmp/zapp-files-test-XXXXXX", data[100], user[100], real_files[160], link[120], files[160];
+    char real[PATH_MAX], want[PATH_MAX + 16], made[PATH_MAX + 16];
+    assert(mkdtemp(base));
+    fixture_dir(data, sizeof(data), base, "data");
+    fixture_dir(user, sizeof(user), base, "user");
+    fixture_dir(real_files, sizeof(real_files), data, "files");
+    assert(snprintf(link, sizeof(link), "%s/0", user) > 0 && symlink(data, link) == 0);
+    assert(snprintf(files, sizeof(files), "%s/files", link) > 0 && realpath(real_files, real));
+    struct zapp_runtime r;
+    assert(zapp_runtime_init(&r, files, "/lib", false));
+    assert(snprintf(want, sizeof(want), "%s/state", real) > 0 && !strcmp(r.state_root, want));
+    assert(snprintf(want, sizeof(want), "%s/tmp", real) > 0 && !strcmp(r.temporary_root, want));
+    assert(snprintf(want, sizeof(want), "%s/node", files) > 0 && !strcmp(r.directory, want));
+    assert(!strcmp(r.files, files));
+    zapp_runtime_destroy(&r);
+    static const char *const made_dirs[] = {"node", "state", "tmp"};
+    for (size_t i = 0; i < sizeof(made_dirs) / sizeof(made_dirs[0]); ++i)
+        assert(snprintf(made, sizeof(made), "%s/%s", real, made_dirs[i]) > 0 && rmdir(made) == 0);
+    struct zapp_runtime missing;
+    assert(snprintf(want, sizeof(want), "%s/absent", base) > 0 && !zapp_runtime_init(&missing, want, "/lib", false));
+    assert(rmdir(real_files) == 0 && unlink(link) == 0 && rmdir(user) == 0 && rmdir(data) == 0 && rmdir(base) == 0);
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 3 && (!strcmp(argv[2], "orphan") || !strcmp(argv[2], "saving"))) return orphan(argv[2], argv[1]);
@@ -521,6 +558,7 @@ int main(int argc, char **argv)
     plain_text_tests();
     pace_tests();
     onion_tests();
+    linked_files_tests();
     struct zapp_runtime r = {0};
     assert(pthread_mutex_init(&r.mutex, NULL) == 0);
     assert(snprintf(r.executable, sizeof(r.executable), "%s", argv[0]) > 0);

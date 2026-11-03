@@ -431,15 +431,6 @@ static void the_fleet_decides_by_its_own_field(void)
     fleet_json(f.fleet.text, sizeof(f.fleet.text), "none_connected", true, false);
     g = gate_of(&f, &ok);
     assert(ok && g.send_allowed && !g.fleet_checked);
-    /* refuses_send true blocks, whatever the verdict says. */
-    fake_init(&f);
-    fleet_json(f.fleet.text, sizeof(f.fleet.text), "disagree", true, true);
-    g = gate_of(&f, &ok);
-    assert(ok && !g.send_allowed && strstr(g.blocked_reason, "fleet") && !g.fleet_checked);
-    fake_init(&f);
-    fleet_json(f.fleet.text, sizeof(f.fleet.text), "agree", true, true);
-    g = gate_of(&f, &ok);
-    assert(!g.send_allowed);
     /* A missing command, an error, and every garbled reply block. */
     static const char *const garbled[] = {
         "", "garbage", "{\"ok\":true}", "{\"ok\":true,\"data\":{}}",
@@ -460,6 +451,27 @@ static void the_fleet_decides_by_its_own_field(void)
             assert(ok && g.known && !g.send_allowed && strstr(g.blocked_reason, "fleet"));
         }
     }
+}
+/* The gate of a member whose node reports refuses_send true with `verdict`: the send is blocked whatever the verdict. */
+static struct ws_gate refused_with(const char *verdict)
+{
+    struct fake f; bool ok;
+    fake_init(&f);
+    fleet_json(f.fleet.text, sizeof(f.fleet.text), verdict, true, true);
+    struct ws_gate g = gate_of(&f, &ok);
+    assert(ok && !g.send_allowed && !g.fleet_checked);
+    return g;
+}
+/* The reason follows the verdict. A node that cannot read its recorded fleet root refuses with verdict unchecked:
+ * nothing was compared, so the reason says the fleet has not been checked and never that it disagrees. */
+static void a_refusal_says_why(void)
+{
+    struct ws_gate g = refused_with("disagree");
+    assert(strstr(g.blocked_reason, "fleet disagrees"));
+    g = refused_with("unchecked");
+    assert(strstr(g.blocked_reason, "has not been checked yet") && !strstr(g.blocked_reason, "disagree"));
+    g = refused_with("agree");
+    assert(strstr(g.blocked_reason, "could not read") && !strstr(g.blocked_reason, "disagree"));
 }
 
 /* ---- the address ---- */
@@ -818,6 +830,7 @@ int main(void)
     an_unencrypted_wallet_never_sends();
     a_summary_that_is_not_the_documented_one_is_unknown();
     the_fleet_decides_by_its_own_field();
+    a_refusal_says_why();
     validate_accepts_only_a_valid_reply();
     a_refusing_fleet_stops_the_flow_before_the_plan();
     a_fleet_that_is_not_configured_allows_send_and_says_so();

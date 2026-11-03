@@ -377,9 +377,13 @@ status reads. A refusing machine reads `disagree`
 and the verdict is `disagree` even while it is not connected. Failing to
 learn is never agreement.
 
-When the recorded fleet root cannot be read (a truncated operator file), the
-roster and the refusals against it cannot be told: the reply then has
-`member` true, verdict `unchecked` and `refuses_send` true, never `not_member`.
+When the fleet root cannot be read (a truncated operator file, or a state root
+the node refuses because a link sits among its parents), the roster and the
+refusals against it cannot be told: the reply then has `member` true, verdict
+`unchecked` and `refuses_send` true, never `not_member`. A computer that never
+joined and is not a manager has no root to read: `member` false and verdict
+`not_member`. The Android app gives its node a state root without links (see
+`apps/z23android/README.md`).
 
 ## What comes next
 
