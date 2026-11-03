@@ -172,6 +172,28 @@ static int tls_client_set_path(const char *authority, struct tls_client_url *out
     return TLS_PATH_OK;
 }
 
+/* Logs the refusal for an authority that tls_client_split_authority rejected.
+ * Returns true when the authority is usable and the caller should go on. */
+static bool tls_client_check_authority_status(int authority_status)
+{
+    switch (authority_status) {
+    case TLS_AUTHORITY_NO_BRACKET:
+        LOG_FAIL("tlsclient", "refusing a URL with an unterminated IPv6 literal");
+    case TLS_AUTHORITY_JUNK_AFTER_V6:
+        LOG_FAIL("tlsclient", "refusing junk after an IPv6 literal in a URL");
+    case TLS_AUTHORITY_EMPTY_PORT_V6:
+        LOG_FAIL("tlsclient", "refusing a URL with an empty port");
+    case TLS_AUTHORITY_BAD_PORT_V6:
+        LOG_FAIL("tlsclient", "refusing an invalid URL port");
+    case TLS_AUTHORITY_EMPTY_PORT:
+        LOG_FAIL("tlsclient", "refusing a URL with an empty port");
+    case TLS_AUTHORITY_BAD_PORT:
+        LOG_FAIL("tlsclient", "refusing an invalid URL port");
+    default:
+        return true;
+    }
+}
+
 bool tls_client_url_parse(const char *url, struct tls_client_url *out)
 {
     if (!url || !out)
@@ -199,18 +221,8 @@ bool tls_client_url_parse(const char *url, struct tls_client_url *out)
     int port = 443;
     const int authority_status = tls_client_split_authority(
         authority, authority_end, &host_start, &host_end, &port);
-    if (authority_status == TLS_AUTHORITY_NO_BRACKET)
-        LOG_FAIL("tlsclient", "refusing a URL with an unterminated IPv6 literal");
-    if (authority_status == TLS_AUTHORITY_JUNK_AFTER_V6)
-        LOG_FAIL("tlsclient", "refusing junk after an IPv6 literal in a URL");
-    if (authority_status == TLS_AUTHORITY_EMPTY_PORT_V6)
-        LOG_FAIL("tlsclient", "refusing a URL with an empty port");
-    if (authority_status == TLS_AUTHORITY_BAD_PORT_V6)
-        LOG_FAIL("tlsclient", "refusing an invalid URL port");
-    if (authority_status == TLS_AUTHORITY_EMPTY_PORT)
-        LOG_FAIL("tlsclient", "refusing a URL with an empty port");
-    if (authority_status == TLS_AUTHORITY_BAD_PORT)
-        LOG_FAIL("tlsclient", "refusing an invalid URL port");
+    if (!tls_client_check_authority_status(authority_status))
+        return false;
 
     if (!tls_client_port_valid(port))
         LOG_FAIL("tlsclient", "refusing a URL port outside 1..65535");
@@ -508,6 +520,89 @@ static bool parse_status_line(const char *raw, size_t len, int *status,
     return true;
 }
 
+/* Resolves the body cap for a response of `len` bytes and refuses a zero cap
+ * or a response longer than the cap plus the header allowance. On success
+ * *cap_out holds the resolved cap. */
+static bool tls_client_check_response_bounds(size_t len, size_t body_cap, size_t *cap_out)
+{
+    const size_t cap = effective_body_cap(body_cap);
+    if (cap == 0)
+        LOG_FAIL("tlsclient",
+                 "refusing a %zu-byte body cap: over the %u-byte ceiling",
+                 body_cap, (unsigned)TLS_CLIENT_ABS_MAX_BODY);
+    if (len > cap + TLS_CLIENT_MAX_HEADER_BLOB)
+        LOG_FAIL("tlsclient", "refusing a %zu-byte response: over the read cap", len);
+    *cap_out = cap;
+    return true;
+}
+
+/* Finds the end of the header block that follows the status line and refuses
+ * a block that is unterminated or over the header cap. On success *hdr_end_out
+ * is the offset just past the blank line. */
+static bool tls_client_locate_header_end(const char *raw, size_t len, size_t status_len,
+                                         size_t *hdr_end_out)
+{
+    const size_t hdr_end = header_block_end(raw, len);
+    if (hdr_end == 0 || hdr_end <= status_len)
+        LOG_FAIL("tlsclient", "refusing a response with an unterminated header block");
+    if (hdr_end > TLS_CLIENT_MAX_HEADER_BLOB)
+        LOG_FAIL("tlsclient", "refusing a %zu-byte header block: over the cap", hdr_end);
+    *hdr_end_out = hdr_end;
+    return true;
+}
+
+/* Sizes and decodes a chunked body in two passes. On success *body_out is a
+ * NUL-terminated buffer holding *body_len_out decoded bytes. */
+static bool tls_client_decode_chunked_body(const char *p, size_t len, size_t cap,
+                                           char **body_out, size_t *body_len_out)
+{
+    bool complete = false;
+    size_t decoded = 0;
+    if (!chunked_walk(p, len, cap, &complete, &decoded, NULL))
+        LOG_FAIL("tlsclient", "refusing a response with a malformed chunked body");
+    if (!complete)
+        LOG_FAIL("tlsclient", "refusing a truncated chunked response body");
+    if (decoded > cap)
+        LOG_FAIL("tlsclient", "refusing a %zu-byte chunked body: over the cap", decoded);
+    char *body = zcl_malloc(decoded + 1, "tls_client_body");
+    if (!body)
+        LOG_FAIL("tlsclient", "cannot allocate %zu bytes for a response body", decoded + 1);
+    size_t written = 0;
+    if (!chunked_walk(p, len, cap, &complete, &written, body) ||
+        written != decoded) {
+        free(body);
+        LOG_FAIL("tlsclient", "chunked body decode disagreed with its sizing pass");
+    }
+    body[decoded] = '\0';
+    *body_out = body;
+    *body_len_out = decoded;
+    return true;
+}
+
+/* Works out how many body bytes a non-chunked response carries: the declared
+ * Content-Length when one is present, else all `received` bytes. Refuses an
+ * unparsable, over-cap or truncated length. */
+static bool tls_client_plain_body_span(size_t received, bool has_len, const char *v,
+                                       size_t n, size_t cap, size_t *span_out)
+{
+    size_t available = received;
+    if (has_len) {
+        size_t declared = 0;
+        if (!parse_content_length(v, n, cap, &declared))
+            LOG_FAIL("tlsclient", "refusing a response with an unparsable Content-Length");
+        if (declared > cap)
+            LOG_FAIL("tlsclient", "refusing a %zu-byte body: over the cap", declared);
+        if (available < declared)
+            LOG_FAIL("tlsclient", "refusing a truncated response body: %zu of %zu bytes",
+                     available, declared);
+        available = declared;
+    }
+    if (available > cap)
+        LOG_FAIL("tlsclient", "refusing a %zu-byte body: over the cap", available);
+    *span_out = available;
+    return true;
+}
+
 bool tls_client_response_parse_bounded(const char *raw, size_t len,
                                        size_t body_cap,
                                        struct tls_client_response *out)
@@ -517,24 +612,18 @@ bool tls_client_response_parse_bounded(const char *raw, size_t len,
     memset(out, 0, sizeof(*out));
     if (!raw || len == 0)
         return false;
-    const size_t cap = effective_body_cap(body_cap);
-    if (cap == 0)
-        LOG_FAIL("tlsclient",
-                 "refusing a %zu-byte body cap: over the %u-byte ceiling",
-                 body_cap, (unsigned)TLS_CLIENT_ABS_MAX_BODY);
-    if (len > cap + TLS_CLIENT_MAX_HEADER_BLOB)
-        LOG_FAIL("tlsclient", "refusing a %zu-byte response: over the read cap", len);
+    size_t cap = 0;
+    if (!tls_client_check_response_bounds(len, body_cap, &cap))
+        return false;
 
     int status = 0;
     size_t status_len = 0;
     if (!parse_status_line(raw, len, &status, &status_len))
         LOG_FAIL("tlsclient", "refusing a response without a well-formed HTTP status line");
 
-    const size_t hdr_end = header_block_end(raw, len);
-    if (hdr_end == 0 || hdr_end <= status_len)
-        LOG_FAIL("tlsclient", "refusing a response with an unterminated header block");
-    if (hdr_end > TLS_CLIENT_MAX_HEADER_BLOB)
-        LOG_FAIL("tlsclient", "refusing a %zu-byte header block: over the cap", hdr_end);
+    size_t hdr_end = 0;
+    if (!tls_client_locate_header_end(raw, len, status_len, &hdr_end))
+        return false;
 
     const char *blob = raw + status_len;
     const size_t blob_len = hdr_end - status_len;
@@ -552,40 +641,13 @@ bool tls_client_response_parse_bounded(const char *raw, size_t len,
     char *body = NULL;
 
     if (chunked) {
-        bool complete = false;
-        size_t decoded = 0;
-        if (!chunked_walk(raw + hdr_end, len - hdr_end, cap, &complete, &decoded, NULL))
-            LOG_FAIL("tlsclient", "refusing a response with a malformed chunked body");
-        if (!complete)
-            LOG_FAIL("tlsclient", "refusing a truncated chunked response body");
-        if (decoded > cap)
-            LOG_FAIL("tlsclient", "refusing a %zu-byte chunked body: over the cap", decoded);
-        body = zcl_malloc(decoded + 1, "tls_client_body");
-        if (!body)
-            LOG_FAIL("tlsclient", "cannot allocate %zu bytes for a response body", decoded + 1);
-        size_t written = 0;
-        if (!chunked_walk(raw + hdr_end, len - hdr_end, cap, &complete, &written, body) ||
-            written != decoded) {
-            free(body);
-            LOG_FAIL("tlsclient", "chunked body decode disagreed with its sizing pass");
-        }
-        body[decoded] = '\0';
-        body_len = decoded;
+        if (!tls_client_decode_chunked_body(raw + hdr_end, len - hdr_end, cap,
+                                            &body, &body_len))
+            return false;
     } else {
-        size_t available = len - hdr_end;
-        if (has_len) {
-            size_t declared = 0;
-            if (!parse_content_length(v, n, cap, &declared))
-                LOG_FAIL("tlsclient", "refusing a response with an unparsable Content-Length");
-            if (declared > cap)
-                LOG_FAIL("tlsclient", "refusing a %zu-byte body: over the cap", declared);
-            if (available < declared)
-                LOG_FAIL("tlsclient", "refusing a truncated response body: %zu of %zu bytes",
-                         available, declared);
-            available = declared;
-        }
-        if (available > cap)
-            LOG_FAIL("tlsclient", "refusing a %zu-byte body: over the cap", available);
+        size_t available = 0;
+        if (!tls_client_plain_body_span(len - hdr_end, has_len, v, n, cap, &available))
+            return false;
         body = zcl_malloc(available + 1, "tls_client_body");
         if (!body)
             LOG_FAIL("tlsclient", "cannot allocate %zu bytes for a response body", available + 1);
@@ -989,14 +1051,13 @@ static int tls_client_read_alloc(SSL *ssl, char **buf_out, size_t read_cap,
                                     deadline, used, err);
 }
 
-bool tls_client_fetch(const struct tls_client_request *req,
-                      struct tls_client_response *out)
+/* Logs the refusal for request arguments that tls_client_validate_request
+ * rejected. Returns true when the arguments are usable and the caller should
+ * go on. */
+static bool tls_client_check_request_status(const struct tls_client_request *req,
+                                            int validate_status)
 {
-    if (!out)
-        return false;
-    memset(out, 0, sizeof(*out));
-    size_t body_cap = 0;
-    switch (tls_client_validate_request(req, &body_cap)) {
+    switch (validate_status) {
     case TLS_V_NO_URL:
         LOG_FAIL("tlsclient", "refusing a request with no URL");
     case TLS_V_BAD_CAP:
@@ -1011,8 +1072,152 @@ bool tls_client_fetch(const struct tls_client_request *req,
     case TLS_V_HEADERS:
         return false;
     default:
-        break;
+        return true;
     }
+}
+
+/* Logs the refusal for a handshake status other than TLS_HS_OK. Returns true
+ * when the handshake succeeded and the caller should go on. */
+static bool tls_client_check_handshake_status(int hs_status, SSL *ssl,
+                                              const char *host)
+{
+    switch (hs_status) {
+    case TLS_HS_NEW:
+        LOG_WARN("tlsclient", "SSL_new failed");
+        return false;
+    case TLS_HS_BIND:
+#if defined(_WIN32)
+        LOG_WARN("tlsclient", "cannot bind the socket to the TLS session");
+#else
+        LOG_WARN("tlsclient", "cannot bind the socket to the TLS session");
+#endif
+        return false;
+    case TLS_HS_SNI:
+        LOG_WARN("tlsclient", "cannot set SNI for %s", host);
+        return false;
+    case TLS_HS_HOST:
+        LOG_WARN("tlsclient", "cannot pin the verified hostname to %s", host);
+        return false;
+    case TLS_HS_CONNECT:
+        LOG_WARN("tlsclient", "TLS handshake with %s failed: ssl_error=%d",
+                 host, SSL_get_error(ssl, -1));
+        return false;
+    case TLS_HS_VERIFY:
+        LOG_WARN("tlsclient",
+                 "certificate chain for %s did not verify against the CA trust store",
+                 host);
+        return false;
+    default:
+        return true;
+    }
+}
+
+/* Logs the refusal for a read status other than TLS_READ_DONE. Returns true
+ * when a response was read and the caller should parse it. */
+static bool tls_client_check_read_status(int read_status, size_t read_cap, int err)
+{
+    switch (read_status) {
+    case TLS_READ_ALLOC:
+        LOG_WARN("tlsclient", "cannot allocate the bounded response buffer");
+        return false;
+    case TLS_READ_DEADLINE:
+        LOG_WARN("tlsclient", "response read exceeded the deadline");
+        return false;
+    case TLS_READ_CAP:
+        LOG_WARN("tlsclient",
+                 "refusing a response over the %zu-byte read cap", read_cap);
+        return false;
+    case TLS_READ_FAILED:
+        LOG_WARN("tlsclient", "TLS read failed: ssl_error=%d", err);
+        return false;
+    default:
+        return true;
+    }
+}
+
+/* Formats the request line and this client's own headers into head, leaving
+ * *n_out at the end of what was written. Returns false after logging when the
+ * head does not fit its buffer. */
+static bool tls_client_format_request_head(const struct tls_client_request *req,
+                                           const struct tls_client_url *url,
+                                           char *head, size_t head_cap, int *n_out)
+{
+    const char *method = req->method ? req->method : "GET";
+    int n = snprintf(head, head_cap,
+                     "%s %s HTTP/1.1\r\n"
+                     "Host: %s\r\n"
+                     "User-Agent: %s\r\n"
+                     "Accept: */*\r\n"
+                     "Connection: close\r\n",
+                     method, url->path, url->host,
+                     req->user_agent ? req->user_agent : "zclassic23");
+    if (n < 0 || (size_t)n >= head_cap) {
+        LOG_WARN("tlsclient", "request head does not fit its buffer");
+        return false;
+    }
+    if (req->body_len) {
+        const int m = snprintf(head + n, head_cap - (size_t)n,
+                               "Content-Type: %s\r\nContent-Length: %zu\r\n",
+                               req->content_type ? req->content_type
+                                                 : "application/octet-stream",
+                               req->body_len);
+        if (m < 0 || (size_t)(n + m) >= head_cap) {
+            LOG_WARN("tlsclient", "request head does not fit its buffer");
+            return false;
+        }
+        n += m;
+    }
+    *n_out = n;
+    return true;
+}
+
+/* Formats the request head, writes it and then any body over the TLS
+ * session. Returns false after logging when the head does not fit or a
+ * write fails. */
+static bool tls_client_send_request(SSL *ssl, const struct tls_client_request *req,
+                                    const struct tls_client_url *url, int64_t deadline)
+{
+    char head[2048];
+    int n = 0;
+    if (!tls_client_format_request_head(req, url, head, sizeof(head), &n))
+        return false;
+    /* Caller-supplied headers last, after this client's own, so a caller
+     * cannot displace Host or Connection. Each was validated above for
+     * control bytes; this is the point at which an API credential enters
+     * the process's outbound path. */
+    bool head_ok = tls_client_append_extra_headers(req, head, sizeof(head), &n);
+    if (!head_ok)
+        LOG_WARN("tlsclient", "request head does not fit its buffer");
+    if (head_ok && (size_t)n + 2 >= sizeof(head)) {
+        LOG_WARN("tlsclient", "request head does not fit its buffer");
+        head_ok = false;
+    }
+    if (head_ok) {
+        head[n++] = '\r';
+        head[n++] = '\n';
+        head_ok = ssl_write_all(ssl, head, (size_t)n, deadline);
+    }
+    /* An Authorization header may have lived in this buffer. Wipe it
+     * before the scope ends rather than leaving a credential in a stack
+     * page that a later core dump would carry off the machine. The write
+     * is through a volatile pointer so it survives optimization. */
+    tls_client_wipe(head, sizeof(head));
+    if (!head_ok)
+        return false;
+    if (req->body_len && !ssl_write_all(ssl, req->body, req->body_len, deadline))
+        return false;
+    return true;
+}
+
+bool tls_client_fetch(const struct tls_client_request *req,
+                      struct tls_client_response *out)
+{
+    if (!out)
+        return false;
+    memset(out, 0, sizeof(*out));
+    size_t body_cap = 0;
+    if (!tls_client_check_request_status(req, tls_client_validate_request(req, &body_cap)))
+        return false;
     const size_t read_cap = body_cap + TLS_CLIENT_MAX_HEADER_BLOB;
 
     struct tls_client_url url;
@@ -1033,107 +1238,16 @@ bool tls_client_fetch(const struct tls_client_request *req,
     char *buf = NULL;
     size_t used = 0;
     int err = 0;
-    switch (tls_client_handshake(ctx, sock, url.host, timeout_ms, &ssl)) {
-    case TLS_HS_NEW:
-        LOG_WARN("tlsclient", "SSL_new failed");
+    const int hs_status = tls_client_handshake(ctx, sock, url.host, timeout_ms, &ssl);
+    if (!tls_client_check_handshake_status(hs_status, ssl, url.host))
         goto done;
-    case TLS_HS_BIND:
-#if defined(_WIN32)
-        LOG_WARN("tlsclient", "cannot bind the socket to the TLS session");
-#else
-        LOG_WARN("tlsclient", "cannot bind the socket to the TLS session");
-#endif
-        goto done;
-    case TLS_HS_SNI:
-        LOG_WARN("tlsclient", "cannot set SNI for %s", url.host);
-        goto done;
-    case TLS_HS_HOST:
-        LOG_WARN("tlsclient", "cannot pin the verified hostname to %s", url.host);
-        goto done;
-    case TLS_HS_CONNECT:
-        LOG_WARN("tlsclient", "TLS handshake with %s failed: ssl_error=%d",
-                 url.host, SSL_get_error(ssl, -1));
-        goto done;
-    case TLS_HS_VERIFY:
-        LOG_WARN("tlsclient",
-                 "certificate chain for %s did not verify against the CA trust store",
-                 url.host);
-        goto done;
-    default:
-        break;
-    }
 
-    {
-        const char *method = req->method ? req->method : "GET";
-        char head[2048];
-        int n = snprintf(head, sizeof(head),
-                         "%s %s HTTP/1.1\r\n"
-                         "Host: %s\r\n"
-                         "User-Agent: %s\r\n"
-                         "Accept: */*\r\n"
-                         "Connection: close\r\n",
-                         method, url.path, url.host,
-                         req->user_agent ? req->user_agent : "zclassic23");
-        if (n < 0 || (size_t)n >= sizeof(head)) {
-            LOG_WARN("tlsclient", "request head does not fit its buffer");
-            goto done;
-        }
-        if (req->body_len) {
-            const int m = snprintf(head + n, sizeof(head) - (size_t)n,
-                                   "Content-Type: %s\r\nContent-Length: %zu\r\n",
-                                   req->content_type ? req->content_type
-                                                     : "application/octet-stream",
-                                   req->body_len);
-            if (m < 0 || (size_t)(n + m) >= sizeof(head)) {
-                LOG_WARN("tlsclient", "request head does not fit its buffer");
-                goto done;
-            }
-            n += m;
-        }
-        /* Caller-supplied headers last, after this client's own, so a caller
-         * cannot displace Host or Connection. Each was validated above for
-         * control bytes; this is the point at which an API credential enters
-         * the process's outbound path. */
-        bool head_ok = tls_client_append_extra_headers(req, head, sizeof(head), &n);
-        if (!head_ok)
-            LOG_WARN("tlsclient", "request head does not fit its buffer");
-        if (head_ok && (size_t)n + 2 >= sizeof(head)) {
-            LOG_WARN("tlsclient", "request head does not fit its buffer");
-            head_ok = false;
-        }
-        if (head_ok) {
-            head[n++] = '\r';
-            head[n++] = '\n';
-            head_ok = ssl_write_all(ssl, head, (size_t)n, deadline);
-        }
-        /* An Authorization header may have lived in this buffer. Wipe it
-         * before the scope ends rather than leaving a credential in a stack
-         * page that a later core dump would carry off the machine. The write
-         * is through a volatile pointer so it survives optimization. */
-        tls_client_wipe(head, sizeof(head));
-        if (!head_ok)
-            goto done;
-        if (req->body_len && !ssl_write_all(ssl, req->body, req->body_len, deadline))
-            goto done;
-    }
-
-    switch (tls_client_read_alloc(ssl, &buf, read_cap, body_cap, deadline, &used, &err)) {
-    case TLS_READ_ALLOC:
-        LOG_WARN("tlsclient", "cannot allocate the bounded response buffer");
+    if (!tls_client_send_request(ssl, req, &url, deadline))
         goto done;
-    case TLS_READ_DEADLINE:
-        LOG_WARN("tlsclient", "response read exceeded the deadline");
+    const int read_status =
+        tls_client_read_alloc(ssl, &buf, read_cap, body_cap, deadline, &used, &err);
+    if (!tls_client_check_read_status(read_status, read_cap, err))
         goto done;
-    case TLS_READ_CAP:
-        LOG_WARN("tlsclient",
-                 "refusing a response over the %zu-byte read cap", read_cap);
-        goto done;
-    case TLS_READ_FAILED:
-        LOG_WARN("tlsclient", "TLS read failed: ssl_error=%d", err);
-        goto done;
-    default:
-        break;
-    }
     ok = tls_client_response_parse_bounded(buf, used, body_cap, out);
 
 done:
