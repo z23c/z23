@@ -228,7 +228,7 @@ static bool re_refused_text(const char *dir, const char *name,
                             const char *text)
 {
     static const char *const argv[] = {RE_EVAL_BIN, NULL};
-    struct re_capture cap;
+    struct re_capture cap = {};
     int status = 0;
     return re_eval_text(dir, name, text, argv, &status, &cap) && status != 0;
 }
@@ -248,7 +248,7 @@ static bool re_field(const char *dir, const char *doc, const char *key,
                      char *value, size_t cap)
 {
     char path[PATH_MAX];
-    struct re_capture got;
+    struct re_capture got = {};
     const char *argv[] = {RE_JSONQ_BIN, "get", key, NULL};
     if (!re_path(path, sizeof path, dir, "doc.json") || !re_write(path, doc))
         return false;
@@ -323,7 +323,7 @@ static int test_re_valid_batch(const char *dir)
         {"bm25.wrong_scope_at_5.available", "false"},
     };
     static const char *const argv[] = {RE_EVAL_BIN, NULL};
-    struct re_capture cap;
+    struct re_capture cap = {};
     int status = 0;
     TEST("retrieval-eval: valid batch is accepted with maintained metrics") {
         RE_CHECK(re_eval_text(dir, "valid.batch", RE_VALID, argv, &status,
@@ -403,7 +403,7 @@ static int test_re_experiment(const char *dir)
                                             "5", NULL};
     static const char *const over_argv[] = {RE_EVAL_BIN, "--experiment-prefix",
                                             "6", NULL};
-    struct re_capture parent, base, refused;
+    struct re_capture parent = {}, base = {}, refused = {};
     int status = 0;
     TEST("retrieval-eval: experiment boundary and metrics match the evaluator") {
         RE_CHECK(re_eval_text(dir, "experiment.batch", RE_EXPERIMENT, parent_argv,
@@ -448,7 +448,7 @@ static int test_re_profile_replay(const char *dir)
     static const char *const argv[] = {RE_EVAL_BIN, "--profile-hex", RE_PROFILE,
                                        "--evaluator-root", RE_EVALUATOR_ROOT,
                                        NULL};
-    struct re_capture first, second;
+    struct re_capture first = {}, second = {};
     int status = 0;
     TEST("retrieval-eval: context-only profile replay identity and boundary") {
         RE_CHECK(re_eval_text(dir, "experiment.batch", RE_EXPERIMENT, argv,
@@ -472,7 +472,7 @@ static int test_re_profile_mutations(const char *dir)
     static const char *const argv[] = {RE_EVAL_BIN, "--profile-hex", RE_PROFILE,
                                        "--evaluator-root", RE_EVALUATOR_ROOT,
                                        NULL};
-    struct re_capture base, gold, literal, scope, bm25;
+    struct re_capture base = {}, gold = {}, literal = {}, scope = {}, bm25 = {};
     char text[RE_TEXT_MAX];
     int status = 0;
     TEST("retrieval-eval: base profile replay accepted for mutation checks") {
@@ -536,7 +536,7 @@ static int test_re_profile_refusals(const char *dir)
 {
     int failures = 0;
     char profile[sizeof RE_PROFILE], top_four[sizeof RE_PROFILE];
-    struct re_capture cap;
+    struct re_capture cap = {};
     int status = 0;
     const char *arg_argv[] = {RE_EVAL_BIN, "--profile-hex", profile,
                               "--evaluator-root", RE_EVALUATOR_ROOT, NULL};
