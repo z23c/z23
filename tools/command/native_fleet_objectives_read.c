@@ -539,6 +539,9 @@ static void obj_test_wall_line(const char *line, void *user)
     if (strncmp(line, "ALL TESTS PASSED", 16) != 0 &&
         strncmp(line, "SOME TESTS FAILED", 17) != 0)
         return;
+    /* The runner marks module bodies separately from the linked binary. */
+    if (strstr(line, " (HOTSWAP MODULE "))
+        return;
     at = strstr(line, "s wall,");
     if (!at)
         return;

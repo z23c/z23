@@ -331,6 +331,43 @@ _test_next:;
     return failures;
 }
 
+/* ── hotswap module runs out of ordinary proof timing ─────────────────── */
+
+/* A hotswap module run marks its own suite line; that body is not the wall
+ * of the ordinary proof, so a log holding only such a line measures nothing,
+ * while an ordinary line still measures. */
+static int rpr_case_module_wall(const char *root)
+{
+    int failures = 0;
+    char dir[1024], outcomes[1024], log[1200];
+    struct zcl_objectives_options o = {0};
+    (void)snprintf(dir, sizeof(dir), "%s/hotswap", root);
+    (void)snprintf(outcomes, sizeof(outcomes), "%s/hotswap_outcomes.jsonl", root);
+    (void)snprintf(log, sizeof(log), "%s/hot-base.r1/logs/hot-base.test.log", dir);
+    o.attempts_dir = dir;
+    o.outcomes = outcomes;
+    o.now = RPR_NOW;
+    TEST("objectives: a hotswap module run does not supply the ordinary suite wall") {
+        struct zcl_objective_value v;
+        ASSERT(rpr_mkdir(dir));
+        ASSERT(rpr_write(outcomes, ""));
+        ASSERT(rpr_attempt(dir, "hot-base.r1", 1000000, "10.0", 1000000000L));
+        ASSERT(rpr_write(log,
+            "ALL TESTS PASSED (HOTSWAP MODULE 0123456789ab) 0/1 groups failed "
+            "(30.0s wall, 1 workers)\n"));
+        v = zcl_objectives_measure(&o, "proof_test_wall_s");
+        ASSERT(!v.measured);
+        ASSERT(rpr_write(log,
+            "ALL TESTS PASSED 0/1 groups failed (12.0s wall, 1 workers)\n"));
+        v = zcl_objectives_measure(&o, "proof_test_wall_s");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, (int64_t)12);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int fox_repair_cases(void);
 int fox_repair_cases(void)
 {
@@ -343,6 +380,7 @@ int fox_repair_cases(void)
     failures += rpr_case_attempt_growth(root);
     failures += rpr_case_lane_labels(root);
     failures += rpr_case_outcome_fallback(root);
+    failures += rpr_case_module_wall(root);
     (void)test_rm_rf_recursive(root);
     return failures;
 }
