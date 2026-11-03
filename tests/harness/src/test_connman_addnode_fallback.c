@@ -118,6 +118,7 @@ int test_connman_addnode_fallback(void)
     failures += check_connman_addnode_retire_revive_on_readd();
     failures += check_connman_addnode_census_harvest_to_addrman();
     failures += check_connman_addnode_fixed_seeds_onion_noop();
+    failures += check_connman_onion_seed_pass_early_returns();
     failures += check_connman_addnode_relay_block_handshaked_only();
     failures += check_connman_addnode_noise_capability_upgrade();
     failures += check_connman_addnode_evict_inbound_when_outbound();

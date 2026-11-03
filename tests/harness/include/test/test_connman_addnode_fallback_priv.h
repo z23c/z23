@@ -83,6 +83,7 @@ int check_connman_addnode_retire_revive_on_success(void);
 int check_connman_addnode_retire_revive_on_readd(void);
 int check_connman_addnode_census_harvest_to_addrman(void);
 int check_connman_addnode_fixed_seeds_onion_noop(void);
+int check_connman_onion_seed_pass_early_returns(void);
 int check_connman_addnode_relay_block_handshaked_only(void);
 int check_connman_addnode_noise_capability_upgrade(void);
 int check_connman_addnode_evict_inbound_when_outbound(void);

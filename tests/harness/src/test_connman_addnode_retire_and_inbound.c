@@ -16,6 +16,7 @@
 #include "net/onion_v3_address.h"
 #include "storage/census_read.h"
 #include "util/blocker.h"
+#include <stdatomic.h>
 #include <unistd.h>
 #include "test/test_connman_addnode_fallback_priv.h"
 
@@ -409,6 +410,69 @@ int check_connman_addnode_fixed_seeds_onion_noop(void)
         ok = ok && !tor_integration_is_ready();
         connman_kick_onion_seeds(&cm);
         ok = ok && addrman_size(&cm.manager.addrman) == after_fixed;
+
+        connman_free(&cm);
+
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
+int check_connman_onion_seed_pass_early_returns(void)
+{
+    int failures = 0;
+    /* connman_run_onion_seed_pass() (core/modules/net/src/connman_onion_seeds.c)
+     * returns at its first gates, in order: !cm, !cm->params, g_stop,
+     * g_connect_only and !tor_integration_is_dial_ready(). Every tier, the
+     * seed race and the apply step sit behind those gates, so without a
+     * bootstrapped Tor the observable contract is: return, no crash, and no
+     * addrman or addnode state change. Each row restores what it touched. */
+    printf("connman seed discovery: onion seed pass returns early (NULL cm, "
+           "NULL params, stop flag, connect-only, Tor not dial-ready) and "
+           "leaves addrman untouched... ");
+    {
+        extern _Atomic bool g_stop;        /* connman_internal.h */
+        extern bool g_connect_only;        /* connman_internal.h */
+        chain_params_select(CHAIN_MAIN);
+        const struct chain_params *params = chain_params_get();
+        struct connman cm;
+        struct node_signals sigs;
+        memset(&sigs, 0, sizeof(sigs));
+        bool ok = connman_init(&cm, params, &sigs);
+        ok = ok && addrman_size(&cm.manager.addrman) == 0;
+        ok = ok && !tor_integration_is_dial_ready();
+
+        /* Row 1: no connman at all. */
+        connman_run_onion_seed_pass(NULL);
+        ok = ok && addrman_size(&cm.manager.addrman) == 0;
+
+        /* Row 2: connman without chain params. */
+        const struct chain_params *saved_params = cm.params;
+        cm.params = NULL;
+        connman_run_onion_seed_pass(&cm);
+        cm.params = saved_params;
+        ok = ok && cm.params == params;
+        ok = ok && addrman_size(&cm.manager.addrman) == 0;
+
+        /* Row 3: shutdown already requested. */
+        bool saved_stop = atomic_load(&g_stop);
+        atomic_store(&g_stop, true);
+        connman_run_onion_seed_pass(&cm);
+        atomic_store(&g_stop, saved_stop);
+        ok = ok && addrman_size(&cm.manager.addrman) == 0;
+
+        /* Row 4: -connect= mode (no onion dialing at all). */
+        bool saved_connect_only = g_connect_only;
+        g_connect_only = true;
+        connman_run_onion_seed_pass(&cm);
+        g_connect_only = saved_connect_only;
+        ok = ok && addrman_size(&cm.manager.addrman) == 0;
+
+        /* Row 5: default state, Tor not dial-ready, so the pass is a no-op. */
+        connman_run_onion_seed_pass(&cm);
+        ok = ok && addrman_size(&cm.manager.addrman) == 0;
+        ok = ok && cm.num_addnodes == 0;
 
         connman_free(&cm);
 
