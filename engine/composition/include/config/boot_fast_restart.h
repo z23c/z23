@@ -153,6 +153,11 @@ struct boot_bg_quick_check_pace {
     uint64_t slices;            /* slices finished (token given back)      */
     int64_t  next_log_ms;       /* throttle for the per-slice progress line */
     const char *label;          /* which store this scan is reading        */
+    /* Host pace (node_pace): set once PAUSE or GENTLE shaped this scan. */
+    bool     thermal;
+    int64_t  thermal_wait_ms;   /* time spent held by PAUSE                 */
+    int64_t  thermal_slice_started_ms; /* GENTLE duty-cycle slice start       */
+    uint64_t thermal_naps;      /* GENTLE idle gaps taken                  */
 };
 
 /* Fill `pace` for `klass`, taking the gap from the resolved policy so the

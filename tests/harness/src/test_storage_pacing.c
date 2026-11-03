@@ -22,6 +22,7 @@
 #include "test/test_core.h"
 
 #include "config/boot_fast_restart.h"
+#include "jobs/node_pace.h"
 #include "json/json.h"
 #include "platform/clock.h"
 #include "platform/storage_probe.h"
@@ -1010,6 +1011,103 @@ static int test_bg_quick_check_names_corrupt_table(void)
     return failures;
 }
 
+/* Host pace. PAUSE: the progress handler must not return, so SQLite cannot
+ * step, until the pace leaves PAUSE; a shutdown request during the wait ends
+ * the scan with the abort code (INCOMPLETE, never FAILED). */
+struct thermal_probe {
+    struct boot_bg_quick_check_pace pace;
+    _Atomic int rc;
+    _Atomic bool done;
+};
+
+static void *thermal_probe_main(void *arg)
+{
+    struct thermal_probe *p = (struct thermal_probe *)arg;
+    atomic_store(&p->rc, boot_bg_quick_check_progress_for_test(&p->pace));
+    atomic_store(&p->done, true);
+    return NULL;
+}
+
+static int test_bg_quick_check_thermal_pause(void)
+{
+    int failures = 0;
+    storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_SOLID);
+    thread_registry_reset_for_test();
+    node_pace_set(NODE_PACE_NORMAL);
+
+    struct thermal_probe p;
+    memset(&p, 0, sizeof(p));
+    boot_bg_quick_check_pace_init(&p.pace, storage_pacing_class());
+    SPC("at normal pace the handler continues at once and stays unmarked",
+        boot_bg_quick_check_progress_for_test(&p.pace) == 0 &&
+        !p.pace.thermal);
+
+    node_pace_set(NODE_PACE_PAUSE);
+    pthread_t th;
+    bool started = pthread_create(&th, NULL, thermal_probe_main, &p) == 0;
+    platform_sleep_ms(600);
+    SPC("under pause the scan makes no progress", started &&
+        !atomic_load(&p.done));
+    node_pace_set(NODE_PACE_NORMAL);
+    if (started) pthread_join(th, NULL);
+    SPC("on resume the scan continues and completes the callback",
+        atomic_load(&p.done) && atomic_load(&p.rc) == 0);
+    SPC("the pause is reported as thermal pacing with its wait",
+        p.pace.thermal && p.pace.thermal_wait_ms >= 400);
+
+    memset(&p, 0, sizeof(p));
+    boot_bg_quick_check_pace_init(&p.pace, storage_pacing_class());
+    node_pace_set(NODE_PACE_PAUSE);
+    started = pthread_create(&th, NULL, thermal_probe_main, &p) == 0;
+    platform_sleep_ms(300);
+    thread_registry_request_shutdown();
+    if (started) pthread_join(th, NULL);
+    SPC("shutdown during pause aborts the VM (INCOMPLETE)",
+        atomic_load(&p.done) && atomic_load(&p.rc) == 1);
+    SPC("an aborted paused scan holds no maintenance token",
+        !p.pace.token_held);
+
+    node_pace_set(NODE_PACE_NORMAL);
+    thread_registry_reset_for_test();
+    storage_pacing_reset_for_testing();
+    return failures;
+}
+
+/* GENTLE on flash paces like rotational storage: a slice of work, then an
+ * idle gap. Slice expiry is driven by the injected clock. */
+static int test_bg_quick_check_thermal_gentle(void)
+{
+    int failures = 0;
+    storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_SOLID);
+    thread_registry_reset_for_test();
+    g_pace_clock_us = platform_time_monotonic_ms() * 1000;
+    struct platform_clock_source src = {
+        .monotonic_us = pace_clock_monotonic_us,
+        .wall_unix = pace_clock_wall_unix,
+        .user = NULL,
+    };
+    platform_clock_set_source(&src);
+
+    struct boot_bg_quick_check_pace pace;
+    boot_bg_quick_check_pace_init(&pace, storage_pacing_class());
+    node_pace_set(NODE_PACE_GENTLE);
+    bool first = boot_bg_quick_check_progress_for_test(&pace) == 0;
+    SPC("gentle: the first callback starts a slice without idling",
+        first && pace.thermal && pace.thermal_naps == 0);
+    g_pace_clock_us += 100 * 1000;
+    (void)boot_bg_quick_check_progress_for_test(&pace);
+    SPC("gentle: no idle inside the slice", pace.thermal_naps == 0);
+    g_pace_clock_us += 600 * 1000;
+    bool second = boot_bg_quick_check_progress_for_test(&pace) == 0;
+    SPC("gentle: one idle gap after the slice, then the scan continues",
+        second && pace.thermal_naps == 1);
+
+    node_pace_set(NODE_PACE_NORMAL);
+    platform_clock_clear_source();
+    storage_pacing_reset_for_testing();
+    return failures;
+}
+
 int test_storage_pacing(void)
 
 {
@@ -1031,6 +1129,8 @@ int test_storage_pacing(void)
     failures += test_bg_quick_check_never_queues();
     failures += test_bg_quick_check_real_scan();
     failures += test_bg_quick_check_outcome_str();
+    failures += test_bg_quick_check_thermal_pause();
+    failures += test_bg_quick_check_thermal_gentle();
     failures += test_bg_quick_check_names_corrupt_table();
     if (failures == 0)
         printf("=== storage_pacing tests: ALL PASS ===\n");

@@ -13,6 +13,7 @@
 #include "validation/chainstate.h"
 #include "chain/chain.h"
 #include "core/uint256.h"
+#include "jobs/node_pace.h"
 #include "jobs/reducer_frontier.h"
 #include "jobs/tip_finalize_stage.h"
 #include "storage/event_log.h"
@@ -326,6 +327,80 @@ static void boot_bg_quick_check_pace_note_slice(
  * ZCL_MAINTENANCE_GAP_MS (which accepts up to 60 s). */
 #define BG_QUICK_CHECK_MAX_CALLBACK_WAIT_MS 50
 
+/* Host-requested pace (node_pace). PAUSE is a thermal emergency: the scan
+ * holds nothing and waits in short steps until the pace leaves PAUSE. GENTLE
+ * paces the scan like rotational storage. Neither shortens, skips or samples
+ * the check; it still runs to completion once the phone has cooled. */
+#define BG_QUICK_CHECK_THERMAL_STEP_MS 200
+#define BG_QUICK_CHECK_THERMAL_NAP_STEP_MS 50
+
+/* Wait out a PAUSE. Returns true when shutdown was requested meanwhile
+ * (the caller then ends the scan as INCOMPLETE). `waited_ms` accumulates the
+ * time spent paused. `pace` may be NULL; any token it holds is given back
+ * first so a paused scan never blocks a maintenance writer. */
+static bool boot_bg_quick_check_thermal_hold(
+    struct boot_bg_quick_check_pace *pace, int64_t *waited_ms)
+{
+    node_pace_poll();
+    if (node_pace_get() != NODE_PACE_PAUSE)
+        return false;
+    boot_bg_quick_check_pace_release(pace);
+    int64_t t0 = platform_time_monotonic_ms();
+    bool stop = thread_registry_shutdown_requested();
+    while (!stop && node_pace_get() == NODE_PACE_PAUSE) {
+        platform_sleep_ms(BG_QUICK_CHECK_THERMAL_STEP_MS);
+        node_pace_poll();
+        stop = thread_registry_shutdown_requested();
+    }
+    *waited_ms += platform_time_monotonic_ms() - t0;
+    if (pace)
+        pace->thermal_slice_started_ms = 0;
+    return stop;
+}
+
+/* GENTLE on storage that is not rotational: after each slice of work, idle for
+ * the rotational class's gap in bounded steps. Returns true on shutdown. */
+static bool boot_bg_quick_check_thermal_gentle(
+    struct boot_bg_quick_check_pace *pace)
+{
+    int64_t gap = boot_bg_quick_check_pace_gap_ms(
+        PLATFORM_STORAGE_CLASS_ROTATIONAL);
+    int64_t now = platform_time_monotonic_ms();
+    if (gap <= 0 || pace->thermal_slice_started_ms == 0) {
+        pace->thermal_slice_started_ms = now;
+        return false;
+    }
+    if (now - pace->thermal_slice_started_ms < 2 * gap)
+        return false;
+    pace->thermal_naps++;
+    for (int64_t idle = 0; idle < gap; idle += BG_QUICK_CHECK_THERMAL_NAP_STEP_MS) {
+        if (thread_registry_shutdown_requested())
+            return true;
+        platform_sleep_ms(BG_QUICK_CHECK_THERMAL_NAP_STEP_MS);
+        node_pace_poll();
+        if (node_pace_get() != NODE_PACE_GENTLE)
+            break;
+    }
+    pace->thermal_slice_started_ms = platform_time_monotonic_ms();
+    return false;
+}
+
+/* True when the scan must stop (shutdown during the wait). */
+static bool boot_bg_quick_check_thermal(struct boot_bg_quick_check_pace *pace)
+{
+    if (boot_bg_quick_check_thermal_hold(pace, &pace->thermal_wait_ms)) {
+        pace->thermal = true;
+        return true;
+    }
+    if (pace->thermal_wait_ms > 0)
+        pace->thermal = true;
+    if (node_pace_get() != NODE_PACE_GENTLE)
+        return false;
+    pace->thermal = true;
+    /* Rotational storage is already sliced by the maintenance token. */
+    return pace->gap_ms <= 0 && boot_bg_quick_check_thermal_gentle(pace);
+}
+
 /* SQLite's progress callback, every 100 VM ops. Three jobs, in this order:
  *
  *   1. cancellation. Tested FIRST and before any wait, so a shutdown request
@@ -357,6 +432,10 @@ static int boot_bg_quick_check_progress(void *arg)
     if (thread_registry_shutdown_requested()) {
         boot_bg_quick_check_pace_release(pace);
         return 1;  /* SQLite abort code: stop the VM now */
+    }
+    if (pace && boot_bg_quick_check_thermal(pace)) {
+        boot_bg_quick_check_pace_release(pace);
+        return 1;  /* shutdown while paused: INCOMPLETE, never FAILED */
     }
     if (!pace || pace->gap_ms <= 0)
         return 0;  /* SQLite continue code: unpaced, keep stepping */
@@ -616,11 +695,11 @@ static void *boot_bg_quick_check_entry(void *arg)
      * NOT answer ok — a cancelled or failed scan is exactly what an operator
      * comes here to read. */
     printf("[boot] bg_quick_check %s target=%s (%s) paced=%s gap_ms=%lld "
-           "slices=%llu calls=%llu\n",
+           "slices=%llu calls=%llu thermal_wait_ms=%lld\n",
            boot_bg_quick_check_outcome_str(outcome), t->label, t->kind,
-           pace.gap_ms > 0 ? "yes" : "no", (long long)pace.gap_ms,
-           (unsigned long long)pace.slices,
-           (unsigned long long)pace.calls);
+           pace.thermal ? "thermal" : pace.gap_ms > 0 ? "yes" : "no",
+           (long long)pace.gap_ms, (unsigned long long)pace.slices,
+           (unsigned long long)pace.calls, (long long)pace.thermal_wait_ms);
     boot_bg_quick_check_report(t, outcome);
     free(t);
     return NULL;
@@ -650,9 +729,15 @@ bool boot_bg_quick_check_start(const struct boot_bg_quick_check_target *target)
  * instead of re-reading it (storage/event_log.h, "Verified-prefix receipt").
  * This background pass re-proves that prefix, off the boot path, so a flipped
  * byte is still found — after READY instead of at boot. */
+static int64_t g_audit_thermal_wait_ms;
+
+/* Polled by the audit between chunks: holds through a PAUSE like the SQLite
+ * scans do, and ends the audit as incomplete on shutdown. */
 static bool boot_event_log_audit_should_stop(void)
 {
-    return thread_registry_shutdown_requested();
+    if (thread_registry_shutdown_requested())
+        return true;
+    return boot_bg_quick_check_thermal_hold(NULL, &g_audit_thermal_wait_ms);
 }
 
 static void *boot_event_log_audit_entry(void *arg)
@@ -680,10 +765,12 @@ static void *boot_event_log_audit_entry(void *arg)
                     "condition=bg_quick_check_failed detail=event_log_integrity");
     }
     printf("[boot] bg_quick_check %s target=event_log (receipt prefix audit) "
-           "bytes=%llu ms=%lld\n",
+           "paced=%s bytes=%llu ms=%lld thermal_wait_ms=%lld\n",
            rc == 0 ? "ok" : rc < 0 ? "FAILED" : "did not complete",
+           g_audit_thermal_wait_ms > 0 ? "thermal" : "no",
            (unsigned long long)audited,
-           (long long)(platform_time_monotonic_ms() - t0));
+           (long long)(platform_time_monotonic_ms() - t0),
+           (long long)g_audit_thermal_wait_ms);
     return NULL;
 }
 
