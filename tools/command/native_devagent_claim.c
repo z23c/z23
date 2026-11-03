@@ -668,11 +668,36 @@ static bool dvc_line_is_ours(const char *line, const char *toplevel)
            strcmp(wt, toplevel) == 0;
 }
 
+/* Only a unique root member can grant expiry authority; nested metadata and
+ * ambiguous or unreadable rows retain their owner. */
+static long long dvc_root_expiry(const char *line)
+{
+    struct json_value row;
+    json_init(&row);
+    size_t len = strlen(line), keys = 0;
+    long long expiry = 0;
+    if (zutf8_validate_n(line, len) && json_read(&row, line, len) &&
+        row.type == JSON_OBJ) {
+        for (size_t i = 0; i < row.num_children; i++) {
+            if (strcmp(row.keys[i], "expires_unix") == 0) {
+                keys++;
+                const struct json_value *value = &row.children[i];
+                expiry = value->type == JSON_INT ? json_get_int(value) : 0;
+            }
+        }
+    }
+    json_free(&row);
+    return keys == 1 && expiry > 0 ? expiry : 0;
+}
+
 /* Old rows and malformed expiry fields remain live: guessing that an owned
  * worktree is idle would permit an overlapping writer. New rows are short
  * leases; the owner renews by repeating the same claim before expiry. */
 static bool dvc_line_expired(const char *line, long long now)
 {
+    long long root_expiry = dvc_root_expiry(line);
+    if (root_expiry == 0)
+        return false;
     char *end = NULL;
     const char *key = "\"expires_unix\":";
     const char *p = strstr(line, key);
@@ -687,7 +712,7 @@ static bool dvc_line_expired(const char *line, long long now)
         return false;
     errno = 0;
     expiry = strtoll(p, &end, 10);
-    return errno == 0 && end != p && expiry > 0 &&
+    return errno == 0 && end != p && expiry == root_expiry &&
            (*end == ',' || *end == '}') && !strstr(end, key) && expiry <= now;
 }
 

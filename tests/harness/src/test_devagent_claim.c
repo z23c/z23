@@ -291,6 +291,48 @@ _test_next:;
     return failures;
 }
 
+static int dvx_expiry_scope_tests(void)
+{
+    int failures = 0;
+    TEST("claim: only an unambiguous root expiry can release a foreign file") {
+        char repo[512], row[2048], ledger[1024];
+        const char *fields[] = {
+            "\"meta\":{\"expires_unix\":1},",
+            "\"meta\":[{\"expires_unix\":1}],",
+            "\"meta\":{\"expires_unix\":1},\"expires_unix\":9223372036854775807,",
+            "\"expires_unix\": 1,", "\"expires_unix\":1 ,",
+            "\"expires_unix\":-1,", "\"expires_unix\":1.0,",
+            "\"expires_unix\":1e0,", "\"expires_unix\":0,",
+            "\"expires_unix\":1,", NULL};
+        test_make_tmpdir(repo, sizeof repo, "devagent_claim", "expiry-scope");
+        ASSERT(dvx_fixture(repo));
+        (void)snprintf(ledger, sizeof ledger, "%s/.git/z23-agent-claims.jsonl", repo);
+        for (size_t i = 0; fields[i]; i++) {
+            const char *tail = i == 9 ? "garbage" : "";
+            (void)snprintf(row, sizeof row,
+                "{%s\"worktree\":\"/foreign\",\"files\":[\"engine/a.c\"]}%s\n", fields[i], tail);
+            ASSERT(dvx_write(repo, ".git/z23-agent-claims.jsonl", row));
+            const char *files[] = {"engine/a.c", NULL};
+            struct dvx_call c;
+            dvx_claim(&c, repo, "expiry-scope-probe", files, false);
+            ASSERT(dvx_run(&c) && !dvx_ok(&c));
+            ASSERT_STR_EQ(c.reply.error.code, "CLAIM_OVERLAP");
+            dvx_end(&c);
+            char *after = NULL;
+            size_t len = 0;
+            ASSERT(zcl_read_whole_file_text(ledger, sizeof row, &after, &len,
+                                            "claim_expiry_scope_after"));
+            bool unchanged = len == strlen(row) && memcmp(after, row, len) == 0;
+            free(after);
+            ASSERT(unchanged);
+        }
+        ASSERT_EQ(test_rm_rf_recursive(repo), 0);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 static int dvx_metadata_tests(void)
 {
     int failures = 0;
@@ -675,7 +717,8 @@ static int dvx_release_input_tests(void)
 int test_devagent_claim(void);
 int test_devagent_claim(void)
 {
-    int failures = dvx_lease_tests() + dvx_metadata_tests() + dvx_unreadable_tests() +
+    int failures = dvx_lease_tests() + dvx_expiry_scope_tests() +
+                   dvx_metadata_tests() + dvx_unreadable_tests() +
                    dvx_write_failure_tests() + dvx_interleaved_tests() +
                    dvx_release_input_tests();
     char one[512], two[600];
