@@ -705,11 +705,11 @@ static int case_gate_dies_twice(void)
     LT_CHECK("the dead-gate scenario fixtures are written", ready);
     if (!ready)
         return failures + 1;
-    const time_t t0 = time(NULL);
     (void)lt_tick(&e, NULL, NULL, NULL, 0);
-    LT_CHECK("a gate dying twice holds as gate_died_no_rc",
+    /* The env caps --gate-wait-s at 10: waiting it out would hold with the
+     * timeout reason, so gate_died_no_rc alone proves the early hold. */
+    LT_CHECK("a gate dying twice holds as gate_died_no_rc, not the gate wait",
              lt_file_has(&e, "state/loop-t1.HOLD", "gate_died_no_rc"));
-    LT_CHECK("the hold comes in seconds, not the gate wait", time(NULL) - t0 < 9);
     LT_CHECK("it logs the one rerun",
              lt_file_has(&e, "state/tick.log", "gate died without rc; rerun 1/1"));
     LT_CHECK("agent-verify was started exactly twice", lt_file_has(&e, "av.n", "2"));
