@@ -1,4 +1,10 @@
+// one-result-type-ok:read-only-undo-lookup-status-enum
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * E2 override: every fallible call reports through enum undo_rev_status
+ * (FOUND / NOT_FOUND / NO_FILE / ERROR) after a contextual LOG_*; the caller
+ * must tell "no record" from "no file" from "failed", which a zcl_result would
+ * only duplicate. The bool helpers are init and internal predicates.
  *
  * undo_rev_index — see services/undo_rev_index.h. Finds a block's undo record
  * in the zclassicd rev files by verifying the PARENT-hash checksum, so a
