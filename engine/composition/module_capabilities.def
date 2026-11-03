@@ -511,6 +511,7 @@ ZCL_MODULE_CAPABILITY("contexts/market/services/src/store_buyer.c", CAP_FS_WRITE
 ZCL_MODULE_CAPABILITY("contexts/market/services/src/store_buyer_pay.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/telemetry_rollup.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/txindex_projection_service.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/services/src/undo_rev_index.c", CAP_FS_WRITE, "reports undo-file read and parse failures through the stderr log macros; it opens rev files read-only through the positioned-file seam and writes nothing")
 ZCL_MODULE_CAPABILITY("engine/services/src/utxo_import_pipeline.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/utxo_mirror_delta.c", CAP_FS_WRITE|CAP_CLOCK|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/utxo_mirror_sync_service.c", CAP_CLOCK|CAP_FS_WRITE|CAP_FS_READ, "")
