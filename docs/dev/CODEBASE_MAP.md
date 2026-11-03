@@ -345,7 +345,8 @@ Fleet-wide checkout truth is `z23 dev fleet truth`, implemented by
 `tools/command/native_dev_fleet*.c`. It enumerates only `origin/main` and
 `origin/agent/*`, joins matching attached worktrees, and admits lint claims
 only from locally validated `.cache/agent-receipts` chains. Its isolated
-three-worktree acceptance is `tools/scripts/dev_fleet_selftest.sh`; neither
+three-worktree acceptance is the `dev_fleet` test group
+(`tests/harness/src/test_dev_fleet.c`); neither
 path reads a live node or datadir.
 The sibling `z23 dev fleet start` (`tools/command/native_dev_fleet_start.c`,
 group `dev_fleet_start`) answers the orchestrator's opening question instead:

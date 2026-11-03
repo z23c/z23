@@ -179,7 +179,6 @@ tools/scripts/cold_start_to_tip_stopwatch.sh
 tools/scripts/commons_fix_admit.sh
 tools/scripts/copy_vendor_include.sh
 tools/scripts/deploy_z23_release.sh
-tools/scripts/dev_fleet_selftest.sh
 tools/scripts/devbox_init.sh
 tools/scripts/doctor.sh
 tools/scripts/first_build_timing.sh

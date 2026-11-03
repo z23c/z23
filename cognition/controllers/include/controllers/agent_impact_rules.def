@@ -3131,7 +3131,7 @@ AGENT_IMPACT_RULE("tools/dev/test_group_host_needs.def", "test_group_selector te
 AGENT_IMPACT_RULE("engine/composition/agent_rules.def", "devagent_rules devagent_start devagent_situation command_registry_catalog make_lint_gates")
 /* Fleet truth is a release-visible native command. Its three-worktree
  * acceptance exercises Git ref/worktree discovery plus receipt freshness. */
-AGENT_IMPACT_RULE("tools/command/native_dev_fleet.c|tools/command/native_dev_fleet.h|tools/command/native_dev_fleet_internal.h|tools/command/native_dev_fleet_command.c|tools/command/native_dev_fleet_process.c|tools/command/native_dev_fleet_receipts.c|tools/scripts/dev_fleet_selftest.sh|tests/harness/src/test_dev_fleet.c", "dev_fleet command_registry_catalog native_api_contract command_handler_snapshot command_input_bounds make_lint_gates")
+AGENT_IMPACT_RULE("tools/command/native_dev_fleet.c|tools/command/native_dev_fleet.h|tools/command/native_dev_fleet_internal.h|tools/command/native_dev_fleet_command.c|tools/command/native_dev_fleet_process.c|tools/command/native_dev_fleet_receipts.c|tests/harness/src/test_dev_fleet.c", "dev_fleet command_registry_catalog native_api_contract command_handler_snapshot command_input_bounds make_lint_gates")
 /* The fleet agent dashboard. It reads three unrelated surfaces — the
  * workspace directories, /proc, and the delegation ledger — so its own group
  * owns the arithmetic and the fixtures, and the registry groups own the fact

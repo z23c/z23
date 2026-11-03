@@ -1115,7 +1115,7 @@ Neither is green. Core-seal and repository-hook failures are marked
 This command intentionally does not fetch. Run `git fetch origin` first when
 you need newer remote-tracking refs. It reads Git metadata and self-sealed lint
 receipt/log pairs only; it never opens a node datadir or contacts a live node.
-The permanent acceptance is `make dev-fleet-selftest`, which constructs an
+The permanent acceptance is `make t-fast-exact ONLY=dev_fleet`, which constructs an
 isolated origin with three worktrees and no node.
 
 Run `z23 dev fleet start` when the question is not "what is one lane doing"

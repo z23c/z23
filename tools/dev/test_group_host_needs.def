@@ -450,6 +450,8 @@ ZCL_TEST_GROUP_BUILD_NEED("test_consensus_rule_sweep",
 ZCL_TEST_GROUP_BUILD_NEED("test_dev_platform_shard_06", "build/bin/z23-dev",
                           "dev-bin")
 ZCL_TEST_GROUP_BUILD_NEED("test_dev_platform", "build/bin/z23-dev", "dev-bin")
+/* dev_fleet runs the real z23-dev binary on its fixture checkout. */
+ZCL_TEST_GROUP_BUILD_NEED("test_dev_fleet", "build/bin/z23-dev", "dev-bin")
 
 /* Bounded native pipe preparation; actual guest SSH route remains refused. */
 ZCL_TEST_GROUP_BUILD_NEED("test_rvmachine_freebsd_ssh_fd", "build/bin/z23-machine-freebsd-ssh",
