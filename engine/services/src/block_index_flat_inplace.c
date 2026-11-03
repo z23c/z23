@@ -471,7 +471,7 @@ static bool bfi_base_identity(const struct bfi *b, const char *datadir,
                               struct block_index_flat_identity *base)
 {
     struct ssio_sidecar_header proven;
-    if (!bii_verified_body_current(datadir, &proven) ||
+    if (!bii_verified_body_current(datadir, &proven).ok ||
         proven.body_size != b->old_hdr.body_size ||
         memcmp(proven.body_sha3, b->old_hdr.body_sha3, 32) != 0 ||
         b->old_count > b->n)

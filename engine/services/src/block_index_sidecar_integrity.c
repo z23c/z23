@@ -155,19 +155,24 @@ static bool bii_memo_covers(const char *datadir, const char *body_path,
            memcmp(hdr.body_sha3, g_verified.sha3, 32) == 0;
 }
 
-bool bii_verified_body_current(const char *datadir,
-                               struct ssio_sidecar_header *out)
+struct zcl_result bii_verified_body_current(const char *datadir,
+                                            struct ssio_sidecar_header *out)
 {
     char body_path[1024];
     struct platform_file_metadata now;
     int n = datadir ? snprintf(body_path, sizeof(body_path), "%s/%s", datadir,
                                bii_embedded_spec.body_name)
                     : -1;
-    if (n < 0 || (size_t)n >= sizeof(body_path) ||
-        platform_file_metadata_read(body_path, &now) !=
-            PLATFORM_FILE_METADATA_OK ||
-        !bii_memo_covers(datadir, body_path, &now))
-        return false;
+    if (n < 0 || (size_t)n >= sizeof(body_path))
+        return ZCL_ERR(-1, "bii_verified_body_current: no usable datadir "
+                           "path");
+    if (platform_file_metadata_read(body_path, &now) !=
+        PLATFORM_FILE_METADATA_OK)
+        return ZCL_ERR(-2, "bii_verified_body_current: block_index.bin "
+                           "metadata unreadable");
+    if (!bii_memo_covers(datadir, body_path, &now))
+        return ZCL_ERR(-3, "bii_verified_body_current: the file differs from "
+                           "the one this process hashed");
     if (out) {
         memset(out, 0, sizeof(*out));
         memcpy(out->magic, bii_embedded_spec.magic, 4);
@@ -175,7 +180,7 @@ bool bii_verified_body_current(const char *datadir,
         out->body_size = g_verified.body_size;
         memcpy(out->body_sha3, g_verified.sha3, 32);
     }
-    return true;
+    return ZCL_OK;
 }
 
 int bii_verify_embedded(const char *datadir,

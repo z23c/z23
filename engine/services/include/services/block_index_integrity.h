@@ -206,12 +206,12 @@ int bii_verify_embedded(const char *datadir,
  * difference takes the full hash. */
 void bii_verified_body_forget(void);
 
-/* True when the block_index.bin now in `datadir` is, under the same memo
+/* OK when the block_index.bin now in `datadir` is, under the same memo
  * rule, the file this process fully hashed; `out` (nullable) receives its
  * header. The in-place save asks before it writes, so the rows it diffs
  * against are the ones that hash proved. */
-bool bii_verified_body_current(const char *datadir,
-                               struct ssio_sidecar_header *out);
+struct zcl_result bii_verified_body_current(const char *datadir,
+                                            struct ssio_sidecar_header *out);
 
 /* Number of full-file embedded hashes this process has run. */
 uint64_t bii_full_hash_count(void);
