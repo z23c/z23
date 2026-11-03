@@ -652,7 +652,7 @@ else ifneq ($(filter dev-tsan z23-dev-tsan zclassic23-dev-tsan,$(ZCL_EPOCH_SINGL
 ZCL_EPOCH_PROFILES := dev-tsan
 else ifneq ($(filter coverage coverage-locked,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := coverage
-else ifneq ($(filter lint-fast lint-land watcher-safety-gates check-dev-loop-profiles dev-loop-profile-flags print-dev-profile-dirs dev-failure-execution-id t-changed fast-changed-compile fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild fast-ci agent-fast-ci agent-plan agent-loop agent-dev-loop pre-push-ci t-list templates site-css explorer-css,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter lint-fast lint-fast-c lint-land watcher-safety-gates check-dev-loop-profiles dev-loop-profile-flags print-dev-profile-dirs dev-failure-execution-id t-changed fast-changed-compile fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild fast-ci agent-fast-ci agent-plan agent-loop agent-dev-loop pre-push-ci t-list templates site-css explorer-css,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES :=
 endif
 endif
@@ -2190,7 +2190,7 @@ else ifneq ($(filter coverage coverage-locked,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := coverage
 else ifneq ($(filter fuzz fuzz-ci fuzz-ci-leaks fuzz-replay fuzz_block fuzz_script fuzz_p2p fuzz_http fuzz_compactblock fuzz_snapshot fuzz_tx_bundle fuzz_rom_manifest fuzz_overlay fuzz_ecdsa fuzz_mesh_status_proto,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := fuzz
-else ifneq ($(filter lint-fast lint-land watcher-safety-gates check-dev-loop-profiles dev-loop-profile-flags print-dev-profile-dirs dev-failure-execution-id t-changed fast-changed-compile fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild fast-ci agent-fast-ci agent-plan agent-loop agent-dev-loop pre-push-ci,$(ZCL_DEPFILE_SINGLE_GOAL)),)
+else ifneq ($(filter lint-fast lint-fast-c lint-land watcher-safety-gates check-dev-loop-profiles dev-loop-profile-flags print-dev-profile-dirs dev-failure-execution-id t-changed fast-changed-compile fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild fast-ci agent-fast-ci agent-plan agent-loop agent-dev-loop pre-push-ci,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES :=
 endif
 endif
@@ -3573,9 +3573,14 @@ LINTC_PREMISE_CORE_SRCS = tools/lint/lintc/premise.c tools/lint/lintc/premise_tr
 	tools/lint/lintc/premise_git.c tools/lint/lintc/premise_include.c \
 	tools/lint/lintc/premise_make.c tools/lint/lintc/premise_catalog.c \
 	tools/lint/lintc/premise_doc_claims.c tools/lint/lintc/unit_exec.c
+# The z23-lint run driver core (everything but its run_main.c entry, which needs
+# the real gate table) is proven by the lint_run group.
+LINTC_RUN_CORE_SRCS = tools/lint/lintc/run_table.c tools/lint/lintc/run_cmd.c \
+	tools/lint/lintc/run_exec.c tools/lint/lintc/run_pool.c \
+	tools/lint/lintc/run_drive.c tools/lint/lintc/run_report.c
 # precheck.c is the fork/waitpid runner behind `z23-lint precheck`; its test
 # supplies its own gate table, so the test binary never links the real gates.
-TEST_LINT_SELECTION_SRCS = $(if $(ZCL_HOST_WINDOWS),,$(LINTC_PREMISE_CORE_SRCS) tools/lint/lintc/precheck.c tools/lint/lintc/precheck_base.c tools/lint/lintc/lib.c)
+TEST_LINT_SELECTION_SRCS = $(if $(ZCL_HOST_WINDOWS),,$(LINTC_PREMISE_CORE_SRCS) $(LINTC_RUN_CORE_SRCS) tools/lint/lintc/precheck.c tools/lint/lintc/precheck_base.c tools/lint/lintc/lib.c)
 
 # test.c and test_parallel.c each own their own main() — never both in
 # one binary. test_parallel_zcl uses the latter + the same test/spec
@@ -4746,7 +4751,7 @@ prove-cold-join: $(TEST_PARALLEL_REL_CANDIDATE)
 # the default `all`), so running build/bin/test_parallel directly after editing a test
 # can false-green an old binary or report "matched no groups" for a new test.
 # `make t ONLY=<group>` always rebuilds the harness first, closing that trap.
-.PHONY: t t-fast t-fast-exact t-asan asan-ci t-tsan tsan-ci t-changed ff verify-change watcher-safety-gates syntax-check build-only fast-compile fast-changed-compile dev-build-only dev-bin dev-asan z23-dev-asan zclassic23-dev-asan dev-tsan z23-dev-tsan zclassic23-dev-tsan z23-dev zclassic23-dev dev print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild lint-fast lint-land lint-preflight fast-ci agent-fast-ci agent-plan agent-loop agent-dev-loop dev-watch dev-watch-once dev-watch-selftest dev-activation-selftest dev-loop-selftest native-dev-loop-wait-selftest native-dev-failure-selftest watcher-session-stop-selftest agent-index compdb dev-loop-bench dev-loop-bench-selftest hotswap-sim immutable-history-canaries historical-canaries agent-dev-status agent-dev-recover dev-recovery-selftest agent-clear-stale-dev-reindex agent-doctor doctor-build stage-dev-bin agent-stage-dev deploy-dev-fast agent-deploy-fast
+.PHONY: t t-fast t-fast-exact t-asan asan-ci t-tsan tsan-ci t-changed ff verify-change watcher-safety-gates syntax-check build-only fast-compile fast-changed-compile dev-build-only dev-bin dev-asan z23-dev-asan zclassic23-dev-asan dev-tsan z23-dev-tsan zclassic23-dev-tsan z23-dev zclassic23-dev dev print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild lint-fast lint-land lint-fast-c lint-preflight fast-ci agent-fast-ci agent-plan agent-loop agent-dev-loop dev-watch dev-watch-once dev-watch-selftest dev-activation-selftest dev-loop-selftest native-dev-loop-wait-selftest native-dev-failure-selftest watcher-session-stop-selftest agent-index compdb dev-loop-bench dev-loop-bench-selftest hotswap-sim immutable-history-canaries historical-canaries agent-dev-status agent-dev-recover dev-recovery-selftest agent-clear-stale-dev-reindex agent-doctor doctor-build stage-dev-bin agent-stage-dev deploy-dev-fast agent-deploy-fast
 
 # ── ONLY= is validated BEFORE anything compiles ──────────────────────────
 # Every focused target below carried its ONLY= check in the RECIPE. Make builds
@@ -6921,6 +6926,17 @@ lint-fast: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN
 	@ZCL_LINT_INVENTORY_TOOL="$(CAPABILITY_INVENTORY_TOOL)" tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_FAST_GATES)
 	@echo "lint-fast: OK"
 endif
+
+# lint-fast-c — SHADOW of lint-fast on the C23 driver (`z23-lint run`, the
+# tools/lint/lintc/run_*.c files): the same LINT_FAST_GATES, jobs, bin dir and
+# prerequisites, run without run_lint.sh. Artifacts go to .cache/lint-timing-c
+# so a shadow run never overwrites the shell driver's last-run.json. Nothing
+# depends on it yet; lint-fast, lint-land and lint still use run_lint.sh.
+.PHONY: lint-fast-c
+lint-fast-c: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN_BIN) tor-provenance-ready $(TOR_PROVENANCE_BIN) \
+		$(HOTSWAP_ACTION_PLAN) $(CAPABILITY_INVENTORY_TOOL)
+	@ZCL_LINT_TIMING_DIR="$${ZCL_LINT_TIMING_DIR:-.cache/lint-timing-c}" ZCL_LINT_INVENTORY_TOOL="$(CAPABILITY_INVENTORY_TOOL)" $(LINTC_TOOL) run --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_FAST_GATES)
+	@echo "lint-fast-c: OK"
 
 # lint-land — what `dev land` runs in its landing worktree before it starts an
 # exact proof: LINT_FAST_GATES plus LINT_LAND_EXTRA_GATES. The extra list is
@@ -17059,7 +17075,7 @@ native-tunnel-static: $(BIN_DIR)/tunnel-static
 TUNNEL_EXPORT_BINDING := tools/dev/native_tunnel_export_binding.h
 .PHONY: native-tunnel-export-binding check-native-tunnel-export-binding
 native-tunnel-export-binding: $(TUNNEL_EXPORT_BINDING)
-lint lint-fast: check-native-tunnel-export-binding
+lint lint-fast lint-fast-c: check-native-tunnel-export-binding
 # Stamp-gated like the view headers (see GEN_STAMP_DIR): this one depends on the
 # whole Makefile, so every Makefile edit or fresh checkout left the unchanged
 # header permanently older than its input and restarted every later parse.

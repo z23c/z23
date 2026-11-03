@@ -36,6 +36,7 @@ static const struct {
     { "premise", lint_premise_main },
     { "precheck", lint_precheck_main },
     { "module-linkgraph", lmg_main },
+    { "run", lint_run_main },
 };
 
 /* The premise-selection tool named by argv[1], or NULL. */

@@ -160,6 +160,7 @@ test_fastobj_carrier	178
 test_zcode_dev_objects	120
 test_zcode_science_store	24
 test_lint_selection	15
+test_lint_run	10
 test_zcode_benchmark_exec	21
 test_zcode_discovery_projection	22
 test_vcs_devloop	42

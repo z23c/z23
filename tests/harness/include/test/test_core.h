@@ -1131,6 +1131,8 @@ int test_territory(void);
 int test_lint_selection(void);
 /* z23-lint precheck on a fixture gate table (tests/harness/src/test_lint_precheck.c). */
 int test_lint_precheck(void);
+/* z23-lint run, the C23 lint driver, on fixture gates (tests/harness/src/test_lint_run.c). */
+int test_lint_run(void);
 
 /* Spec-based user story tests (one per feature area) */
 int spec_wallet_dashboard(void);
