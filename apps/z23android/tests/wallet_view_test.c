@@ -438,6 +438,25 @@ static void test_hidden_private_amounts(void)
     printf("  hidden private amounts\n");
 }
 
+/* The pasted address is trimmed at both ends only: inside bytes and bytes outside ASCII are kept. */
+static void test_trim_address(void)
+{
+    char a[64];
+    snprintf(a, sizeof(a), "  zs1abc \n");
+    wallet_view_trim_address(a);
+    assert(!strcmp(a, "zs1abc"));
+    snprintf(a, sizeof(a), "\t\x01zs1 ab\x7f\r\n");
+    wallet_view_trim_address(a);
+    assert(!strcmp(a, "zs1 ab"));
+    snprintf(a, sizeof(a), " \t\r\n");
+    wallet_view_trim_address(a);
+    assert(a[0] == '\0');
+    snprintf(a, sizeof(a), "\xc3\xa9zs1\xc2\xa0");
+    wallet_view_trim_address(a);
+    assert(!strcmp(a, "\xc3\xa9zs1\xc2\xa0"));
+    printf("  pasted address trimmed at both ends only\n");
+}
+
 int main(void)
 {
     printf("wallet view model:\n");
@@ -452,6 +471,7 @@ int main(void)
     test_malformed_fields_are_unknown();
     test_bad_input_is_unknown();
     test_group_address();
+    test_trim_address();
     test_unready_total_and_hidden();
     test_hidden_private_amounts();
     test_reply_text_is_wiped();

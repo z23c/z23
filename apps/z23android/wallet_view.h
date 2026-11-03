@@ -52,4 +52,7 @@ bool wallet_view_from_summary(const char *json, struct wallet_view *out);
  * without space, or an output buffer of cap bytes that is too small. */
 bool wallet_view_group_address(const char *address, char *out, size_t cap);
 
+/* Removes the ASCII whitespace and control bytes at both ends of text, in place. Bytes inside the text are kept. */
+void wallet_view_trim_address(char *text);
+
 #endif

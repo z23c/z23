@@ -13,6 +13,7 @@
 #include "wallet_send_device.h"
 #include "wallet_send_keeper.h"
 #include "wallet_send_node.h"
+#include "wallet_view.h"
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -632,6 +633,7 @@ static void use_address(JNIEnv *env)
     struct zapp_payment pay;
     if (!text) return;
     if (!read_input(env, ui.address_input, text, TEXT_CAP)) text[0] = 0;
+    wallet_view_trim_address(text);
     enum zapp_pay_refusal why = zapp_scan_payment(text, &pay);
     memory_cleanse(text, TEXT_CAP);
     free(text);

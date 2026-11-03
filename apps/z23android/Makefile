@@ -420,4 +420,5 @@ test-wallet-send:
 	@grep -q zapp_send_key_derive wallet_send_ui.c || { echo 'the send screen must derive the payment key from the request' >&2; exit 1; }
 	@grep -q "v->can_pay_again) (void)button_view(env, B_PAY_AGAIN" wallet_send_ui.c || { echo 'the send screen must draw Pay again when the view offers it' >&2; exit 1; }
 	@grep -q "make_screen, wait_for_lock, bind_screen}" wallet_send_ui.c || { echo 'the send screen must bind an adopted flow to the new window' >&2; exit 1; }
+	@grep -q 'wallet_view_trim_address(text);' wallet_send_ui.c || { echo 'the address field must be trimmed before it is parsed' >&2; exit 1; }
 	@grep -q zapp_send_ui_take_reshow shell.c || { echo 'the shell must show a payment kept from the replaced activity' >&2; exit 1; }

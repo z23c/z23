@@ -383,3 +383,19 @@ bool wallet_view_group_address(const char *address, char *out, size_t cap)
     out[o] = '\0';
     return true;
 }
+
+/* Removes the ASCII whitespace and control bytes at both ends of text, in place. The text between them is unchanged,
+ * and bytes outside ASCII are kept. */
+static bool is_trimmed(unsigned char c)
+{
+    return c <= 0x20 || c == 0x7f;
+}
+void wallet_view_trim_address(char *text)
+{
+    if (!text) return;
+    size_t n = strlen(text), start = 0, end = n;
+    while (start < end && is_trimmed((unsigned char)text[start])) start++;
+    while (end > start && is_trimmed((unsigned char)text[end - 1])) end--;
+    memmove(text, text + start, end - start);
+    text[end - start] = '\0';
+}
