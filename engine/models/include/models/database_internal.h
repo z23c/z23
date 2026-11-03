@@ -266,11 +266,11 @@ void node_db_note_tx_state(struct node_db *ndb, bool tx_open,
  *
  * The progress-handler wrappers and the lock-free busy-op registry that backs
  * the public node_db_long_op_active() live in database_long_op.c so database.c
- * stays focused on the connection open/migration lifecycle. db_quick_check_ok()
- * and node_db_open() (in database.c) call db_long_op_start/finish and
- * db_exec_checked_progress;
- * the progress callback raises the deadline blocker via note_deadline. See
- * database.h for the public reader and database_long_op.c for the rationale. */
+ * stays focused on the connection open/migration lifecycle.
+ * node_db_quick_check_ok() and node_db_open() (in database.c) call
+ * db_long_op_start/finish and db_exec_checked_progress; the progress callback
+ * raises the deadline blocker via note_deadline. See database.h for the
+ * public reader and database_long_op.c for the rationale. */
 #define ZCL_DB_LONG_OP_DEADLINE_MS  (15 * 60 * 1000)
 
 struct db_long_op_progress {

@@ -223,7 +223,7 @@ static bool apply_pragmas(sqlite3 *db)
     return true;
 }
 
-/* Integrity gate on open. Mirrors node.db's db_quick_check_ok
+/* Integrity gate on open. Mirrors node.db's node_db_quick_check_ok
  * (engine/models/src/database.c). consensus.db hosts every stage cursor AND the
  * coins_kv UTXO table; if SQLite reports a malformed file, a mid-fold
  * SQLITE_CORRUPT turns into a permanent JOB_FATAL that pins H* forever with no

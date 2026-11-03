@@ -809,10 +809,13 @@ static struct zcl_result wrc_open_existing_target_ro(
     const struct wallet_recovery_request *req,
     struct wallet_recovery_report *out, struct wrc_run *st)
 {
-    /* A commit holds the writer's lock, so no node can start, write or shut
-     * down under it: the node's own last clean shutdown, bound to this exact
-     * file identity, already proves it intact. Read before any handle opens
-     * the file. A plan holds no lock, so it always runs the check. */
+    /* The node's own last clean shutdown, bound to this exact file identity,
+     * proves node.db intact as it stands now. The writer's lock serializes
+     * recovery runs only and a node never takes it; a node that starts after
+     * this read holds node.db's owner lease while it runs, so the commit's
+     * write open is refused (-63) instead of writing under it. A plan opens
+     * no write handle for that lease to refuse, so it always runs the check.
+     * Read before any handle opens the file. */
     bool verified_clean = !req->dry_run &&
         boot_shutdown_marker_peek_verified_clean(req->datadir, out->target_db);
     char ro_path[1200];
@@ -889,10 +892,11 @@ static struct zcl_result wrc_swap_to_write_handle(
         st->ro_open = false;
         st->have_db = false;
     }
-    /* An existing target was proven intact by the read-only inspection, so
-     * it gets the runtime open: no second full read of the file and no boot
-     * repair that could rename it aside. Only a target this run creates
-     * gets the boot open. */
+    /* An existing target was proven intact before this point, by its
+     * clean-shutdown binding or by the read-only check, so it gets the
+     * runtime open: no second full read of the file and no boot repair that
+     * could rename it aside. Only a target this run creates gets the boot
+     * open. */
     bool opened = out->target_created
         ? node_db_open(&st->ndb, out->target_db)
         : node_db_open_runtime(&st->ndb, out->target_db,

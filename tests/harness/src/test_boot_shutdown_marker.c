@@ -7,6 +7,7 @@
 #include "config/boot_fast_restart.h"
 #include "chain/chain.h"
 #include "event/event.h"
+#include "platform/private_file.h"
 #include "util/thread_registry.h"
 #include "sha3/sha3.h"
 
@@ -322,6 +323,67 @@ static int bsm_check_detect_caches_fr_binding(void)
               peeked.fr_block_index_count == b.fr_block_index_count &&
               access(marker, F_OK) != 0 /* consumed (unlinked) */);
     boot_shutdown_marker_reset_for_test();
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
+/* A one-page file carrying node.db's header identity fields. */
+static bool bsm_write_db_header(const char *path, uint32_t counter)
+{
+    unsigned char page[4096];
+    memset(page, 0, sizeof(page));
+    memcpy(page, "SQLite format 3", 16);
+    for (int i = 0; i < 4; i++) {
+        page[24 + i] = (unsigned char)(counter >> (24 - 8 * i));
+        page[92 + i] = page[24 + i];
+    }
+    FILE *f = fopen(path, "wb");
+    bool ok = f && fwrite(page, 1, sizeof(page), f) == sizeof(page);
+    if (f && fclose(f) != 0)
+        ok = false;
+    return ok;
+}
+
+/* The offline writer's peek: verified-clean only for the bound identity,
+ * readable while a booting node holds the marker locked, and the marker is
+ * still the boot's to consume afterwards. */
+static int bsm_check_peek_verified_clean(void)
+{
+    int failures = 0;
+    char dir[256], marker[512], db[512], buf[1024];
+    test_make_tmpdir(dir, sizeof(dir), "boot_shutdown_marker", "peek");
+    snprintf(marker, sizeof(marker), "%s/.shutdown_clean", dir);
+    snprintf(db, sizeof(db), "%s/node.db", dir);
+    struct shutdown_clean_binding b = {
+        .valid = true, .node_db_size = 4096, .change_counter = 7,
+        .version_valid_for = 7, .schema_version = 3,
+    };
+    int n = boot_shutdown_marker_format(buf, sizeof(buf), 1713100000LL, &b);
+    bool ok = bsm_write_db_header(db, 7) &&
+              !boot_shutdown_marker_peek_verified_clean(dir, db) &&
+              bsm_store_marker_text(marker, buf, n);
+    BSM_CHECK("peek: no marker is not verified-clean, a bound one is",
+              ok && boot_shutdown_marker_peek_verified_clean(dir, db));
+#if !defined(_WIN32)
+    /* A peek that locked the marker would make a booting node that tried
+     * at the same moment treat it as absent. */
+    struct platform_private_file held;
+    platform_private_file_init(&held);
+    bool locked = platform_private_file_open_locked(marker, &held);
+    BSM_CHECK("peek: reads the marker while another holder locks it",
+              locked && boot_shutdown_marker_peek_verified_clean(dir, db));
+    platform_private_file_close(&held);
+#endif
+    boot_shutdown_marker_reset_for_test();
+    bool unclean = boot_shutdown_marker_detect_unclean(dir);
+    bool skipped = boot_shutdown_marker_quick_check_probe(db) &&
+                   boot_shutdown_marker_quick_check_was_skipped();
+    BSM_CHECK("peek: the boot still consumes the marker and skips",
+              ok && !unclean && skipped && access(marker, F_OK) != 0);
+    boot_shutdown_marker_reset_for_test();
+    ok = bsm_store_marker_text(marker, buf, n) && bsm_write_db_header(db, 8);
+    BSM_CHECK("peek: a binding for another identity is not verified-clean",
+              ok && !boot_shutdown_marker_peek_verified_clean(dir, db));
     test_rm_rf_recursive(dir);
     return failures;
 }
@@ -807,6 +869,7 @@ int test_boot_shutdown_marker(void)
     failures += bsm_check_v3_binding_roundtrip();
     failures += bsm_check_v2_only_marker();
     failures += bsm_check_detect_caches_fr_binding();
+    failures += bsm_check_peek_verified_clean();
     failures += bsm_check_evaluate_verdicts();
     failures += bsm_check_block_file_marker_roundtrip();
     failures += bsm_check_block_file_fingerprint();

@@ -58,7 +58,9 @@
  *      node's last clean shutdown bound this exact node.db, and the marker
  *      is left for the next boot; exactly one without a matching binding;
  *      a damaged node.db is refused and never renamed aside, with or
- *      without a binding.
+ *      without a binding; and with the check skipped, a process that holds
+ *      node.db's owner lease (as a node that started afterwards would)
+ *      still keeps the commit from writing (-63).
  *
  * Every case runs against a fixture datadir under ./test-tmp. Nothing here
  * reads, writes or dials a live node.
@@ -74,6 +76,7 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "models/database.h"
+#include "models/database_owner_lease.h"
 #include "models/wallet_key.h"
 #include "services/wallet_recovery_service.h"
 #include "support/cleanse.h"
@@ -1146,6 +1149,103 @@ static int t_damaged_sqlite_node_db_is_refused_not_reset(void)
     return failures;
 }
 
+#if !defined(_WIN32)
+/* A node that started after the run's peek, reduced to the part that
+ * refuses the run: node.db's owner lease, held in another process until
+ * `release_fd` reaches end of file. Writes 1 to `ready_fd` once it holds
+ * the lease, 0 when it could not take it. Never returns. */
+static void wrs_child_hold_lease(const char *db_path, int ready_fd,
+                                 int release_fd)
+{
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    ndb.lifetime_owner_lease_slot = -1;
+    snprintf(ndb.path, sizeof(ndb.path), "%s", db_path);
+    char held = node_db_owner_lease_acquire(&ndb, false) ? 1 : 0;
+    bool told = write(ready_fd, &held, 1) == 1;
+    close(ready_fd);
+    char go = 0;
+    while (told && held && read(release_fd, &go, 1) < 0)
+        ;
+    close(release_fd);
+    if (held)
+        node_db_owner_lease_release(&ndb);
+    _exit(told && held ? 0 : 1);
+}
+
+/* With the lease held by a child, commit phrase A into fx; returns the
+ * quick_checks the run started, -1 when the child never held the lease.
+ * The child is released and reaped before this returns. */
+static int wrs_commit_under_held_lease(const struct wrs_node_db *fx,
+                                       struct wallet_recovery_report *rep,
+                                       struct zcl_result *r, bool *reaped)
+{
+    int ready[2] = { -1, -1 }, release[2] = { -1, -1 };
+    *reaped = false;
+    if (pipe(ready) != 0)
+        return -1;
+    if (pipe(release) != 0) {
+        close(ready[0]);
+        close(ready[1]);
+        return -1;
+    }
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(ready[0]);
+        close(release[1]);
+        wrs_child_hold_lease(fx->db_path, ready[1], release[0]);
+    }
+    close(ready[1]);
+    close(release[0]);
+    char held = 0;
+    bool holding = pid > 0 && read(ready[0], &held, 1) == 1 && held == 1;
+    int checks = holding ? wrs_counted_run(fx->dir, false, rep, r) : -1;
+    close(release[1]);
+    close(ready[0]);
+    int status = 0;
+    *reaped = pid > 0 && waitpid(pid, &status, 0) == pid &&
+              WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    return checks;
+}
+
+/* The binding matched at the peek and no check ran; a node that took
+ * node.db afterwards still keeps the run from writing. */
+static int t_node_lease_refuses_a_bound_commit(void)
+{
+    int failures = 0;
+    struct wrs_node_db fx;
+    struct wallet_recovery_report rep;
+    struct zcl_result r;
+    memset(&rep, 0, sizeof(rep));
+    memset(&r, 0, sizeof(r));
+    bool made = wrs_mk_node_db(&fx, "lease_held", NULL, true);
+    char marker[1300];
+    snprintf(marker, sizeof(marker), "%s/.shutdown_clean", fx.dir);
+    int64_t db_size = -1, mk_size = -1, db_after = -1, mk_after = -1;
+    uint64_t db_hash = wrs_file_hash(fx.db_path, &db_size);
+    uint64_t mk_hash = wrs_file_hash(marker, &mk_size);
+    bool reaped = false;
+    int checks = made ? wrs_commit_under_held_lease(&fx, &rep, &r, &reaped)
+                      : -1;
+    WRS_CHECK("lease held: another process held node.db's owner lease",
+              checks >= 0);
+    WRS_CHECK("lease held: the binding matched, so no full check ran",
+              checks == 0);
+    WRS_CHECK("lease held: the write open is refused (-63)",
+              checks >= 0 && !r.ok && r.code == -63 && !rep.seed_installed);
+    WRS_CHECK("lease held: node.db and the marker are byte-for-byte as they "
+              "were, nothing quarantined",
+              db_hash != 0 && wrs_file_hash(fx.db_path, &db_after) == db_hash &&
+              db_after == db_size && mk_hash != 0 &&
+              wrs_file_hash(marker, &mk_after) == mk_hash &&
+              mk_after == mk_size &&
+              wrs_count_entries(fx.dir, "node.db.corrupt-") == 0);
+    WRS_CHECK("lease held: the holder released it and exited cleanly", reaped);
+    test_rm_rf(fx.dir);
+    return failures;
+}
+#endif
+
 int test_wallet_recovery_safety(void);
 int test_wallet_recovery_safety(void)
 {
@@ -1209,6 +1309,9 @@ int test_wallet_recovery_safety(void)
     failures += t_verified_clean_binding_skips_every_full_check();
     failures += t_unbound_node_db_is_checked_exactly_once();
     failures += t_damaged_sqlite_node_db_is_refused_not_reset();
+#if !defined(_WIN32)
+    failures += t_node_lease_refuses_a_bound_commit();
+#endif
     wrs_set_at_rest(NULL, NULL);
 
     wallet_lock_reset_for_test();

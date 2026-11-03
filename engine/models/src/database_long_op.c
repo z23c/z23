@@ -18,7 +18,7 @@
  * healthy, tip-ingesting node's status command once went dark for ~11 minutes
  * (db_long_op_progress_cb logged elapsed_ms=647514 for a live quick_check).
  *
- * db_long_op_start/finish (called by db_quick_check_ok and node_db_open in
+ * db_long_op_start/finish (called by node_db_quick_check_ok and node_db_open in
  * database.c) publish the running op into this lock-free registry so the
  * responsive status/health surfaces can NAME the maintenance op and route
  * around the busy connection by serving an in-memory snapshot, instead of

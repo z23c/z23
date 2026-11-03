@@ -1694,7 +1694,7 @@ int test_progress_store(void)
      * On open the store runs PRAGMA quick_check; a non-"ok" verdict
      * quarantines the file aside (rename -> progress.kv.corrupt.<ts>...) and
      * reopens a FRESH, empty store so boot can re-seed and re-fold; mirrors
-     * node.db's db_quick_check_ok path. Proves three things:
+     * node.db's node_db_quick_check_ok path. Proves three things:
      *   (a) a HEALTHY store reopens with NO quarantine (no false positive),
      *   (b) a page-garbled store is detected, quarantined, and reopens as a
      *       fresh, queryable, EMPTY store,

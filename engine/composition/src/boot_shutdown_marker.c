@@ -543,23 +543,42 @@ static void boot_shutdown_marker_cache_locked(
         g_cached_cdb = parsed;
 }
 
+/* The marker is only ever replaced whole, by rename, so a reader that takes
+ * no lock still sees one complete version. Taking none matters: a booting
+ * node whose detect_unclean found the marker locked would treat it as absent
+ * and leave it on disk, where it would still claim a clean shutdown after
+ * that run crashed. */
+static bool boot_shutdown_marker_read_unlocked(
+    const char *marker_path, struct shutdown_clean_binding *out)
+{
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before;
+    struct platform_positioned_file_snapshot after;
+    char buf[2048];
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, marker_path))
+        return false;
+    bool ok = platform_positioned_file_snapshot(&file, &before) &&
+              before.size > 0 && before.size < sizeof(buf) &&
+              platform_positioned_file_read(&file, buf, (size_t)before.size,
+                                            0) == (int64_t)before.size &&
+              platform_positioned_file_snapshot(&file, &after) &&
+              marker_snapshot_equal(&before, &after);
+    platform_positioned_file_close(&file);
+    return ok && boot_shutdown_marker_parse(buf, (size_t)before.size, out);
+}
+
 bool boot_shutdown_marker_peek_verified_clean(const char *datadir,
                                               const char *node_db_path)
 {
     char marker_path[1024];
     struct node_db_file_identity cur;
-    if (!boot_shutdown_marker_path(marker_path, sizeof(marker_path), datadir,
-                                   ZCL_SHUTDOWN_MARKER_NAME) ||
-        !node_db_file_identity_read(node_db_path, &cur))
-        return false;
-    struct platform_private_file marker;
     struct shutdown_clean_binding b;
-    platform_private_file_init(&marker);
-    if (!platform_private_file_open_locked(marker_path, &marker))
-        return false;
-    bool parsed = boot_shutdown_marker_read_locked(&marker, &b);
-    platform_private_file_close(&marker);
-    return parsed && boot_shutdown_marker_can_skip(&b, &cur);
+    return boot_shutdown_marker_path(marker_path, sizeof(marker_path), datadir,
+                                     ZCL_SHUTDOWN_MARKER_NAME) &&
+           node_db_file_identity_read(node_db_path, &cur) &&
+           boot_shutdown_marker_read_unlocked(marker_path, &b) &&
+           boot_shutdown_marker_can_skip(&b, &cur);
 }
 
 static void boot_shutdown_marker_report_state(
