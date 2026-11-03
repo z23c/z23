@@ -74,6 +74,42 @@ void boot_refold_staged_init(bool refold_staged)
     (void)refold_progress_boot_init(progress_store_db(), refold_staged);
 }
 
+static int boot_drop_bodiless_file_present(const char *datadir, int fn, int8_t *file_present,
+                                           off_t *file_size, size_t memo_cap, off_t *present_size)
+{
+    if (fn < 0)
+        return 0;  /* HAVE_DATA but no file slot — definitionally absent */
+    if (fn < (int)memo_cap && file_present[fn] >= 0) {
+        *present_size = file_size[fn];
+        return file_present[fn];
+    }
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat", datadir, fn);
+    struct stat st;
+    int present = (n > 0 && (size_t)n < sizeof(path) &&
+                   stat(path, &st) == 0 && st.st_size > 0) ? 1 : 0;
+    *present_size = present ? st.st_size : 0;
+    if (fn < (int)memo_cap) {
+        file_present[fn] = (int8_t)present;
+        file_size[fn] = *present_size;
+    }
+    return present;
+}
+
+static bool boot_drop_bodiless_body_readable(struct block_index *p, const char *datadir,
+                                             off_t present_size, size_t *verified, size_t *rejected)
+{
+    if (!p->phashBlock || p->nDataPos == 0 ||
+        (present_size > 0 && (off_t)p->nDataPos >= present_size))
+        return false;
+    if (block_index_have_data_readable(p, datadir)) {
+        (*verified)++;
+        return true;
+    }
+    (*rejected)++;
+    return false;
+}
+
 /* Blocks-less bundle repair (the v2 snapshot judge bundle: block_index.bin +
  * snapshot, NO blocks/ dir). block_index.bin carries each entry's nStatus
  * INCLUDING BLOCK_HAVE_DATA plus the SOURCE datadir's (nFile, nDataPos). When
@@ -135,40 +171,13 @@ size_t boot_snapshot_drop_bodiless_have_data_above_seed(
         if (!(p->nStatus & BLOCK_HAVE_DATA))
             continue;
 
-        int present;
         off_t present_size = 0;
-        int fn = p->nFile;
-        if (fn < 0) {
-            present = 0;  /* HAVE_DATA but no file slot — definitionally absent */
-        } else if (fn < (int)(sizeof(file_present) / sizeof(file_present[0])) &&
-                   file_present[fn] >= 0) {
-            present = file_present[fn];
-            present_size = file_size[fn];
-        } else {
-            char path[PATH_MAX];
-            int n = snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat",
-                             datadir, fn);
-            struct stat st;
-            present = (n > 0 && (size_t)n < sizeof(path) &&
-                       stat(path, &st) == 0 && st.st_size > 0) ? 1 : 0;
-            present_size = present ? st.st_size : 0;
-            if (fn < (int)(sizeof(file_present) / sizeof(file_present[0]))) {
-                file_present[fn] = (int8_t)present;
-                file_size[fn] = present_size;
-            }
-        }
+        int present = boot_drop_bodiless_file_present(datadir, p->nFile, file_present,
+            file_size, BOOT_NELEM(file_present), &present_size);
 
-        if (present && !trust_existing_block_files) {
-            if (!p->phashBlock || p->nDataPos == 0 ||
-                (present_size > 0 && (off_t)p->nDataPos >= present_size)) {
-                present = 0;
-            } else if (block_index_have_data_readable(p, datadir)) {
-                verified++;
-            } else {
-                present = 0;
-                rejected++;
-            }
-        }
+        if (present && !trust_existing_block_files)
+            present = boot_drop_bodiless_body_readable(p, datadir, present_size,
+                                                       &verified, &rejected);
 
         if (present) {
             kept++;
@@ -1029,6 +1038,125 @@ static const char *const k_applied_step_reason[] = {
 };
 
 
+static bool boot_own_height_defer_or_resume(const char *path, struct uss_handle *h, struct uss_header *hdr,
+                                            uint8_t *sha, struct main_state *ms, int32_t seed_h)
+{
+    if (ms) {
+        int32_t hdr_tip = -1;
+        if (boot_refold_snapshot_anchor_bind(h, ms, hdr, seed_h, &hdr_tip)) {
+            LOG_WARN("boot",
+                     "[boot] -load-snapshot-at-own-height: header tip h=%d "
+                     "< snapshot height h=%d — headers not synced yet; "
+                     "SKIPPING the snapshot seed and falling back to normal "
+                     "P2P IBD (re-run once headers reach the snapshot "
+                     "height).",
+                     hdr_tip, seed_h);
+            event_emitf(EV_RECOVERY_ACTION, 0,
+                        "load_snapshot_at_own_height deferred "
+                        "header_tip=%d seed_h=%d",
+                        hdr_tip, seed_h);
+            uss_close(h);
+            return true;  /* normal boot continues; coins_kv left as-is for IBD */
+        }
+    } else {
+        LOG_WARN("boot", "[boot] ZCL_TESTING fixture has no anchor binding");
+    }
+
+    int32_t applied = -1;
+    bool marker_matches = false, install_pending = true;
+    bool prior_frontier_verified = false;
+    bool resume = boot_snapshot_install_resume_allowed(
+        progress_store_db(), hdr, sha, &applied,
+        &install_pending, &marker_matches, &prior_frontier_verified);
+    if (install_pending)
+        LOG_WARN("boot", "[boot] snapshot install pending/read-failed "
+                 "(binding=%s): RESUME-FAST disabled; rerunning",
+                 marker_matches ? "matches" : "unknown_or_mismatch");
+    if (resume) {
+        boot_snapshot_resume_finish(h, path, hdr, sha, ms,
+                                    applied, seed_h, prior_frontier_verified);
+        return true;
+    }
+    return false;
+}
+
+static bool boot_own_height_begin_install(const char *datadir, sqlite3 **rpdb, struct uss_header *hdr,
+                                          uint8_t *sha, int32_t seed_h, bool *authority_retry_used)
+{
+    *rpdb = progress_store_db();
+    if (!*rpdb) {
+        if (boot_snapshot_authority_retry(authority_retry_used, datadir,
+                                          rpdb, "progress_store_not_open"))
+            return true;
+        fprintf(stderr, "FATAL: -load-snapshot-at-own-height: progress store not "
+                "open after verified snapshot; cannot seed\n");
+        event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
+                    "load_snapshot_at_own_height progress_store_not_open");
+        _exit(EXIT_FAILURE);
+    }
+
+    /* Interim crash convergence (not atomic): journal before mutation. */
+    if (!boot_snapshot_install_marker_begin(*rpdb, hdr, sha)) {
+        if (boot_snapshot_authority_retry(authority_retry_used, datadir,
+                                          rpdb, "install_marker_begin_failed"))
+            return true;
+        fprintf(stderr, "FATAL: snapshot install marker failed before mutation\n");
+        event_emitf(EV_BOOT_VALIDATION_FAILED, 0, "load_snapshot install_marker_begin_failed");
+        _exit(EXIT_FAILURE);
+    }
+    /* Publish an incomplete-history boundary before destructive coin writes. */
+    if (!boot_shielded_prepare_assisted_boundary(*rpdb, seed_h)) {
+        fprintf(stderr, "FATAL: snapshot shielded boundary failed h=%d\n", seed_h);
+        event_emitf(EV_BOOT_VALIDATION_FAILED, 0, "load_snapshot shielded_boundary_failed h=%d", seed_h);
+        _exit(EXIT_FAILURE);
+    }
+    return false;
+}
+
+static bool boot_own_height_repair_and_publish(struct main_state *ms, const char *datadir,
+                                               int32_t seed_h, bool trust_existing_block_files, sqlite3 **rpdb, bool *authority_retry_used)
+{
+    if (ms)
+        boot_refold_snapshot_repair_bodiless_above_seed(
+            ms, datadir, seed_h, trust_existing_block_files);
+
+    /* Publish the durable applied frontier BEFORE the Sapling
+     * rebuild runs, in its own committed transaction (the snapshot-load tx
+     * above already COMMITted, and the Phase-2 stage-cursor tx below has not
+     * begun yet — no tx is open here). sapling_tree_rebuild reads the durable
+     * applied height to cap its endpoint; without this write it would still see
+     * a stale/contaminated applied height and could rebuild past the seed. The
+     * Phase-2 write at ~line 1014 sets the same value and is now idempotent. */
+    {
+        char *aherr = NULL;
+        enum boot_applied_step step = boot_refold_snapshot_publish_applied_height(
+            *rpdb, seed_h, *authority_retry_used, &aherr);
+        if (step != BOOT_APPLIED_OK) {
+            if (boot_snapshot_authority_retry(authority_retry_used, datadir,
+                                              rpdb,
+                                              k_applied_step_reason[step]))
+                return true;
+            boot_refold_snapshot_applied_height_die(step, seed_h, aherr);
+        }
+        if (aherr) sqlite3_free(aherr);
+        LOG_INFO("boot", "[boot] -load-snapshot-at-own-height: pre-rebuild "
+                 "applied-height=%d (seed_h+1) committed so the Sapling "
+                 "rebuild endpoint caps to the seed", seed_h + 1);
+    }
+    return false;
+}
+
+static void boot_own_height_rebuild_sapling(struct node_db *ndb, struct main_state *ms, bool sapling_installed_from_frontier)
+{
+    if (ms && !sapling_installed_from_frontier) {
+        boot_refold_snapshot_rebuild_sapling_tree(ndb, ms);
+    } else if (!ms) {
+        LOG_WARN("boot", "[boot] -load-snapshot-at-own-height: no main_state — "
+                 "cleared sapling_tree to NULL; the catchup service rebuilds it "
+                 "from genesis on next run");
+    }
+}
+
 void boot_load_snapshot_at_own_height_reset(struct node_db *ndb,
                                             const char *path,
                                             const char *datadir,
@@ -1060,76 +1188,17 @@ void boot_load_snapshot_at_own_height_reset(struct node_db *ndb,
     uint32_t embedded_sprout_len = 0;
     uint64_t embedded_nullifier_count = 0;
 
-    if (ms) {
-        int32_t hdr_tip = -1;
-        if (boot_refold_snapshot_anchor_bind(h, ms, &hdr, seed_h, &hdr_tip)) {
-            LOG_WARN("boot",
-                     "[boot] -load-snapshot-at-own-height: header tip h=%d "
-                     "< snapshot height h=%d — headers not synced yet; "
-                     "SKIPPING the snapshot seed and falling back to normal "
-                     "P2P IBD (re-run once headers reach the snapshot "
-                     "height).",
-                     hdr_tip, seed_h);
-            event_emitf(EV_RECOVERY_ACTION, 0,
-                        "load_snapshot_at_own_height deferred "
-                        "header_tip=%d seed_h=%d",
-                        hdr_tip, seed_h);
-            uss_close(h);
-            return;  /* normal boot continues; coins_kv left as-is for IBD */
-        }
-    } else {
-        LOG_WARN("boot", "[boot] ZCL_TESTING fixture has no anchor binding");
-    }
-
-    int32_t applied = -1;
-    bool marker_matches = false, install_pending = true;
-    bool prior_frontier_verified = false;
-    bool resume = boot_snapshot_install_resume_allowed(
-        progress_store_db(), &hdr, artifact_sha256, &applied,
-        &install_pending, &marker_matches, &prior_frontier_verified);
-    if (install_pending)
-        LOG_WARN("boot", "[boot] snapshot install pending/read-failed "
-                 "(binding=%s): RESUME-FAST disabled; rerunning",
-                 marker_matches ? "matches" : "unknown_or_mismatch");
-    if (resume) {
-        boot_snapshot_resume_finish(h, path, &hdr, artifact_sha256, ms,
-                                    applied, seed_h, prior_frontier_verified);
-        return;
-    }
+    if (boot_own_height_defer_or_resume(path, h, &hdr, artifact_sha256, ms, seed_h)) return;
 
     uss_close(h);
     h = NULL;
 
     bool authority_retry_used = false;
+    sqlite3 *rpdb = NULL;
 
 retry_authority_store:
-    sqlite3 *rpdb = progress_store_db();
-    if (!rpdb) {
-        if (boot_snapshot_authority_retry(&authority_retry_used, datadir,
-                                          &rpdb, "progress_store_not_open"))
-            goto retry_authority_store;
-        fprintf(stderr, "FATAL: -load-snapshot-at-own-height: progress store not "
-                "open after verified snapshot; cannot seed\n");
-        event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-                    "load_snapshot_at_own_height progress_store_not_open");
-        _exit(EXIT_FAILURE);
-    }
-
-    /* Interim crash convergence (not atomic): journal before mutation. */
-    if (!boot_snapshot_install_marker_begin(rpdb, &hdr, artifact_sha256)) {
-        if (boot_snapshot_authority_retry(&authority_retry_used, datadir,
-                                          &rpdb, "install_marker_begin_failed"))
-            goto retry_authority_store;
-        fprintf(stderr, "FATAL: snapshot install marker failed before mutation\n");
-        event_emitf(EV_BOOT_VALIDATION_FAILED, 0, "load_snapshot install_marker_begin_failed");
-        _exit(EXIT_FAILURE);
-    }
-    /* Publish an incomplete-history boundary before destructive coin writes. */
-    if (!boot_shielded_prepare_assisted_boundary(rpdb, seed_h)) {
-        fprintf(stderr, "FATAL: snapshot shielded boundary failed h=%d\n", seed_h);
-        event_emitf(EV_BOOT_VALIDATION_FAILED, 0, "load_snapshot shielded_boundary_failed h=%d", seed_h);
-        _exit(EXIT_FAILURE);
-    }
+    if (boot_own_height_begin_install(datadir, &rpdb, &hdr, artifact_sha256, seed_h, &authority_retry_used))
+        goto retry_authority_store;
 #ifdef ZCL_TESTING
     if (boot_shielded_consume_boundary_interrupt_for_test()) return;
 #endif
@@ -1194,33 +1263,9 @@ retry_authority_store:
             "(body SHA3 OK, height=%d, count=%llu) — seeded coins_kv\n",
             path, seed_h, (unsigned long long)hdr.count);
 
-    if (ms)
-        boot_refold_snapshot_repair_bodiless_above_seed(
-            ms, datadir, seed_h, trust_existing_block_files);
-
-    /* Publish the durable applied frontier BEFORE the Sapling
-     * rebuild runs, in its own committed transaction (the snapshot-load tx
-     * above already COMMITted, and the Phase-2 stage-cursor tx below has not
-     * begun yet — no tx is open here). sapling_tree_rebuild reads the durable
-     * applied height to cap its endpoint; without this write it would still see
-     * a stale/contaminated applied height and could rebuild past the seed. The
-     * Phase-2 write at ~line 1014 sets the same value and is now idempotent. */
-    {
-        char *aherr = NULL;
-        enum boot_applied_step step = boot_refold_snapshot_publish_applied_height(
-            rpdb, seed_h, authority_retry_used, &aherr);
-        if (step != BOOT_APPLIED_OK) {
-            if (boot_snapshot_authority_retry(&authority_retry_used, datadir,
-                                              &rpdb,
-                                              k_applied_step_reason[step]))
-                goto retry_authority_store;
-            boot_refold_snapshot_applied_height_die(step, seed_h, aherr);
-        }
-        if (aherr) sqlite3_free(aherr);
-        LOG_INFO("boot", "[boot] -load-snapshot-at-own-height: pre-rebuild "
-                 "applied-height=%d (seed_h+1) committed so the Sapling "
-                 "rebuild endpoint caps to the seed", seed_h + 1);
-    }
+    if (boot_own_height_repair_and_publish(ms, datadir, seed_h, trust_existing_block_files,
+                                           &rpdb, &authority_retry_used))
+        goto retry_authority_store;
 
     (void)boot_index_clear_coins_state(ndb);
 
@@ -1258,13 +1303,7 @@ retry_authority_store:
     bool sapling_installed_from_frontier = boot_refold_snapshot_install_embedded_frontier(
         ndb, ms, seed_h, embedded_frontier, embedded_frontier_len);
 
-    if (ms && !sapling_installed_from_frontier) {
-        boot_refold_snapshot_rebuild_sapling_tree(ndb, ms);
-    } else if (!ms) {
-        LOG_WARN("boot", "[boot] -load-snapshot-at-own-height: no main_state — "
-                 "cleared sapling_tree to NULL; the catchup service rebuilds it "
-                 "from genesis on next run");
-    }
+    boot_own_height_rebuild_sapling(ndb, ms, sapling_installed_from_frontier);
 
     bool refold_ok = boot_snapshot_arm_cursors(
         rpdb, ms, seed_h, sapling_installed_from_frontier, embedded_shielded_v3,
