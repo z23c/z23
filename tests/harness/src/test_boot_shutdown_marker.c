@@ -5,6 +5,7 @@
 #include "config/boot_block_files_fingerprint.h"
 #include "config/boot_shutdown_marker.h"
 #include "config/boot_fast_restart.h"
+#include "chain/chain.h"
 #include "event/event.h"
 #include "util/thread_registry.h"
 
@@ -566,6 +567,55 @@ static int bsm_check_block_file_shutdown_wiring(void)
     return failures;
 }
 
+/* ── Shutdown binding: container tip versus durable tip ── */
+
+static int bsm_check_container_tip_relation(void)
+{
+    int failures = 0;
+    enum { N = 300 };
+    static struct block_index chain[N];
+    static struct block_index fork[N];
+    memset(chain, 0, sizeof(chain));
+    memset(fork, 0, sizeof(fork));
+    for (int i = 0; i < N; i++) {
+        chain[i].nHeight = i;
+        chain[i].pprev = i ? &chain[i - 1] : NULL;
+        fork[i].nHeight = i;
+        fork[i].pprev = i > 150 ? &fork[i - 1] : (i ? &chain[i - 1] : NULL);
+    }
+    const struct block_index *d = &chain[200];
+
+    BSM_CHECK("tip relation: identical tips match",
+              boot_fast_restart_tip_matches_container(d, d));
+    BSM_CHECK("tip relation: container one block behind durable matches",
+              boot_fast_restart_tip_matches_container(&chain[199], d));
+    BSM_CHECK("tip relation: container one block ahead of durable matches",
+              boot_fast_restart_tip_matches_container(&chain[201], d));
+    BSM_CHECK("tip relation: container at the gap bound matches",
+              boot_fast_restart_tip_matches_container(
+                  &chain[200 - BOOT_FR_CONTAINER_GAP_MAX], d));
+    BSM_CHECK("tip relation: container past the gap bound is refused",
+              !boot_fast_restart_tip_matches_container(
+                  &chain[200 - BOOT_FR_CONTAINER_GAP_MAX - 1], d) &&
+              !boot_fast_restart_tip_matches_container(
+                  &chain[200 + BOOT_FR_CONTAINER_GAP_MAX + 1], d));
+    BSM_CHECK("tip relation: container on another branch is refused",
+              !boot_fast_restart_tip_matches_container(&fork[199], d) &&
+              !boot_fast_restart_tip_matches_container(&fork[201], d));
+    BSM_CHECK("tip relation: a tip near genesis is refused",
+              !boot_fast_restart_tip_matches_container(&chain[10], &chain[12]));
+    BSM_CHECK("tip relation: missing tips are refused",
+              !boot_fast_restart_tip_matches_container(NULL, d) &&
+              !boot_fast_restart_tip_matches_container(d, NULL));
+    struct block_index broken = chain[199];
+    broken.pprev = NULL;
+    BSM_CHECK("tip relation: a broken pprev chain is refused",
+              !boot_fast_restart_tip_matches_container(&broken, d) &&
+              !boot_fast_restart_tip_matches_container(
+                  &chain[201], &broken));
+    return failures;
+}
+
 int test_boot_shutdown_marker(void)
 {
     int failures = 0;
@@ -595,6 +645,7 @@ int test_boot_shutdown_marker(void)
     failures += bsm_check_block_file_marker_roundtrip();
     failures += bsm_check_block_file_fingerprint();
     failures += bsm_check_block_file_shutdown_wiring();
+    failures += bsm_check_container_tip_relation();
 
     return failures;
 }

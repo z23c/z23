@@ -37,6 +37,19 @@ bool boot_fast_restart_try(struct main_state *ms, struct block_index **out_tip);
  * + progress.kv are still live, just before boot_shutdown_marker_write_clean. */
 void boot_fast_restart_capture_shutdown_facts(struct main_state *ms);
 
+/* Largest distance, in blocks, between the container tip and the durable tip
+ * at which shutdown still records a binding (a block applied just before
+ * the stop). */
+#define BOOT_FR_CONTAINER_GAP_MAX 64
+
+/* Pure: true when the container tip is the durable tip, or lies within
+ * BOOT_FR_CONTAINER_GAP_MAX blocks of it on one unbroken pprev chain (either
+ * side ahead). A tip near genesis, a gap past the bound, a broken or forked
+ * chain, or a missing tip is false. */
+bool boot_fast_restart_tip_matches_container(
+    const struct block_index *container_tip,
+    const struct block_index *durable_tip);
+
 /* Cheaply-derived current-boot facts, gathered AFTER the block index + coins
  * frontier have loaded, to verify against the shutdown marker's fast-restart
  * binding. Each field is an O(1)/O(log n) read — never a full recompute. */

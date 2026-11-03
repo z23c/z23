@@ -146,62 +146,98 @@ bool boot_fast_restart_try(struct main_state *ms,
     return true;
 }
 
+bool boot_fast_restart_tip_matches_container(
+    const struct block_index *container_tip,
+    const struct block_index *durable_tip)
+{
+    if (!container_tip || !durable_tip)
+        return false;
+    if (container_tip == durable_tip)
+        return true;
+    bool container_ahead = container_tip->nHeight > durable_tip->nHeight;
+    const struct block_index *hi = container_ahead ? container_tip : durable_tip;
+    const struct block_index *lo = container_ahead ? durable_tip : container_tip;
+    int gap = hi->nHeight - lo->nHeight;
+    if (gap <= 0 || gap > BOOT_FR_CONTAINER_GAP_MAX ||
+        lo->nHeight < BOOT_FR_CONTAINER_GAP_MAX)
+        return false;
+    const struct block_index *p = hi;
+    for (int i = 0; i < gap; i++) {
+        if (!p->pprev || p->pprev->nHeight != p->nHeight - 1)
+            return false;
+        p = p->pprev;
+    }
+    return p == lo;
+}
+
+/* Fill `fr` from the live state. Returns NULL when a binding was filled, else
+ * the reason none may be recorded. The binding names the DURABLE tip (what
+ * progress.kv and coins hold); the container tip only has to be the same
+ * block or sit within BOOT_FR_CONTAINER_GAP_MAX blocks of it on one pprev
+ * chain, which is what a block applied in the last seconds before shutdown
+ * looks like. Every other disagreement refuses. */
+static const char *boot_fast_restart_fill_facts(
+    struct main_state *ms, struct fast_restart_shutdown_facts *fr)
+{
+    /* Raw container tip (active_chain_cached_tip): the tip authority may
+     * already be stopped at teardown. */
+    struct block_index *ctip = active_chain_cached_tip(&ms->chain_active);
+    int dh = -1;
+    uint8_t dhash[32];
+    if (!ctip || !ctip->phashBlock || ctip->nHeight < 0)
+        return "no_container_tip";
+    if (!tip_finalize_stage_resolve_durable_tip(progress_store_db(), &dh,
+                                                dhash) || dh <= 0)
+        return "no_durable_tip";
+    struct uint256 dkey;
+    memcpy(dkey.data, dhash, 32);
+    const struct block_index *dtip = block_map_find(&ms->map_block_index,
+                                                    &dkey);
+    if (!dtip || dtip->nHeight != dh ||
+        !boot_fast_restart_tip_matches_container(ctip, dtip)) {
+        printf("[shutdown] container tip h=%d, durable tip h=%d (%s)\n",
+               ctip->nHeight, dh,
+               dtip ? "durable block in index" : "durable block absent");
+        return "container_tip_lags_durable_tip";
+    }
+    bool exact = ctip == dtip;
+    int32_t cb_h = -1;
+    uint8_t cb_hash[32];
+    bool cb_found = false;
+    bool cb_ok = reducer_frontier_derive_coins_best_now(&cb_h, cb_hash,
+                                                        &cb_found);
+    bool cb_durable = cb_ok && cb_found && cb_h == dh &&
+                      memcmp(cb_hash, dhash, 32) == 0;
+    /* Off the exact tip, only a coins frontier AT the durable tip proves
+     * that the block above it never reached the stores. */
+    if (!exact && !cb_durable)
+        return "coins_best_not_durable_tip";
+    fr->valid = true;
+    fr->tip_height = dh;
+    memcpy(fr->tip_hash, dhash, 32);
+    /* Prefer the durable coins-best frontier; on a healthy at-tip node it
+     * equals the tip, so fall back to the tip when the derive is unavailable
+     * at teardown (a boot-side mismatch just declines). */
+    fr->coins_best_height = cb_ok && cb_found ? cb_h : dh;
+    memcpy(fr->coins_best_hash, cb_ok && cb_found ? cb_hash : dhash, 32);
+    fr->block_index_count = (int64_t)ms->map_block_index.size;
+    if (!exact)
+        printf("[shutdown] container tip h=%d is within %d blocks of durable "
+               "tip h=%d on one chain; binding the durable tip\n",
+               ctip->nHeight, BOOT_FR_CONTAINER_GAP_MAX, dh);
+    return NULL;
+}
+
 void boot_fast_restart_capture_shutdown_facts(struct main_state *ms)
 {
     struct fast_restart_shutdown_facts fr;
     memset(&fr, 0, sizeof(fr));
-    const char *why = "no_state";
-    if (ms) {
-        /* Bind ONLY the healthy at-tip case: the raw container tip
-         * (active_chain_cached_tip — no authority resolve, since the tip
-         * authority may already be stopped at teardown) must EQUAL the durable
-         * finalized-tip authority read straight from progress.kv. When they
-         * diverge — a reconciling / detached-island / snapshot-loader datadir
-         * whose container tip lags the served (durable) tip — we refuse to
-         * record a binding, so the next boot takes the full path. This is the
-         * load-bearing safety: binding a lagging container tip (e.g. genesis on
-         * a detached-island datadir) would fast-restart the node onto the WRONG
-         * height. Equality guarantees a genesis-rooted, fully-installed tip. */
-        struct block_index *ctip = active_chain_cached_tip(&ms->chain_active);
-        int dh = -1;
-        uint8_t dhash[32];
-        bool durable = tip_finalize_stage_resolve_durable_tip(
-                           progress_store_db(), &dh, dhash) && dh > 0;
-        if (!ctip || !ctip->phashBlock || ctip->nHeight < 0) {
-            why = "no_container_tip";
-        } else if (!durable) {
-            why = "no_durable_tip";
-        } else if (ctip->nHeight != dh ||
-                   memcmp(ctip->phashBlock->data, dhash, 32) != 0) {
-            why = "container_tip_lags_durable_tip";
-        } else {
-            int32_t cb_h = -1;
-            uint8_t cb_hash[32];
-            bool cb_found = false;
-            bool cb_ok = reducer_frontier_derive_coins_best_now(&cb_h, cb_hash,
-                                                                &cb_found);
-            fr.valid = true;
-            fr.tip_height = ctip->nHeight;
-            memcpy(fr.tip_hash, ctip->phashBlock->data, 32);
-            /* Prefer the durable coins-best frontier; on a healthy at-tip node
-             * it equals the tip, so fall back to the tip when the derive is
-             * unavailable at teardown (a boot-side mismatch just declines). */
-            if (cb_ok && cb_found) {
-                fr.coins_best_height = cb_h;
-                memcpy(fr.coins_best_hash, cb_hash, 32);
-            } else {
-                fr.coins_best_height = ctip->nHeight;
-                memcpy(fr.coins_best_hash, ctip->phashBlock->data, 32);
-            }
-            fr.block_index_count = (int64_t)ms->map_block_index.size;
-            /* mmb_leaves / sapling_ckpt_height reserved (not in the active
-             * gate); the sapling checkpoint load self-verifies independently. */
-            printf("[shutdown] fast-restart binding: tip_h=%lld coins_best_h=%lld"
-                   " block_index=%zu\n", (long long)fr.tip_height,
-                   (long long)fr.coins_best_height, ms->map_block_index.size);
-        }
-    }
-    if (!fr.valid)
+    const char *why = ms ? boot_fast_restart_fill_facts(ms, &fr) : "no_state";
+    if (!why)
+        printf("[shutdown] fast-restart binding: tip_h=%lld coins_best_h=%lld"
+               " block_index=%zu\n", (long long)fr.tip_height,
+               (long long)fr.coins_best_height, ms->map_block_index.size);
+    else
         printf("[shutdown] fast-restart binding NOT recorded (%s) — next boot "
                "takes the full path\n", why);
     boot_shutdown_marker_set_fast_restart_facts(fr.valid ? &fr : NULL);
