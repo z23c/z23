@@ -59,6 +59,19 @@ static char g_ai_digest_hex[65];
 
 static struct liveness_contract g_ai_contract;
 static _Atomic supervisor_child_id g_ai_id = SUPERVISOR_INVALID_ID;
+static _Atomic int64_t g_ai_hstar_override = -1;   /* test-only; -1 = none */
+
+void address_index_service_set_hstar_for_test(int64_t hstar)
+{
+    atomic_store(&g_ai_hstar_override, hstar);
+}
+
+/* The fold frontier H*: the tip_finalize cursor, or the height a test pinned. */
+static int64_t ai_finalized_height(void)
+{
+    int64_t o = atomic_load(&g_ai_hstar_override);
+    return o >= 0 ? o : (int64_t)tip_finalize_stage_cursor();
+}
 
 /* Census of a store folded before the row count was persisted. Touched only
  * under the projection tx lock, by the one fold caller. */
@@ -166,13 +179,17 @@ static void ai_fold_pending_blocks(struct main_state *ms, const char *datadir,
     }
 }
 
-/* `rows` is the persisted count before this batch, -1 while it is unknown. */
+/* `rows` is the persisted count before this batch, -1 while it is unknown.
+ * SQLite answers some errors (FULL, IOERR, NOMEM, BUSY) by rolling back the
+ * whole batch. The handle is then in autocommit mode, where a cursor or count
+ * write would commit alone and claim rows that are gone. */
 static bool ai_try_commit_fold(sqlite3 *db, int folded, int64_t last_good,
                                uint8_t digest[32], int64_t rows,
                                int total_added)
 {
     bool commit = false;
-    if (folded > 0 && address_index_set_cursor(db, last_good, digest) &&
+    if (folded > 0 && !sqlite3_get_autocommit(db) &&
+        address_index_set_cursor(db, last_good, digest) &&
         (rows < 0 || address_index_set_rows(db, rows + total_added)) &&
         sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK) {
         commit = true;
@@ -221,7 +238,7 @@ static int ai_do_batch(struct main_state *ms, const char *datadir, sqlite3 *db)
 
     int64_t cursor = -1;
     (void)address_index_get_cursor(db, &cursor);
-    int64_t hstar = (int64_t)tip_finalize_stage_cursor();
+    int64_t hstar = ai_finalized_height();
     atomic_store(&g_ai_hstar, hstar);
     atomic_store(&g_ai_cursor, cursor);
 

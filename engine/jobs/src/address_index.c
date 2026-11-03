@@ -122,13 +122,38 @@ bool address_index_drop(sqlite3 *db)
     return true;
 }
 
-/* Pass 1: create a row per output + fold it into the digest. */
+/* An insert its key blocked: *own=1 when the present row is at `height`, a
+ * row an earlier attempt at this block wrote before failing. *st is prepared
+ * on first use, so a block without a blocked insert never prepares it.
+ * Returns SQLITE_DONE, else the failing sqlite rc. */
+static int ai_present_row_is_own(sqlite3 *db, sqlite3_stmt **st,
+                                 const uint8_t sh[32], const uint8_t txid[32],
+                                 size_t vo, int height, int *own)
+{
+    if (!*st && sqlite3_prepare_v2(db,
+            "SELECT 1 FROM address_index "
+            "WHERE scripthash=? AND txid=? AND vout=? AND height=?",
+            -1, st, NULL) != SQLITE_OK)
+        return sqlite3_errcode(db);
+    sqlite3_reset(*st);
+    sqlite3_bind_blob (*st, 1, sh, 32, SQLITE_STATIC);
+    sqlite3_bind_blob (*st, 2, txid, 32, SQLITE_STATIC);
+    sqlite3_bind_int64(*st, 3, (sqlite3_int64)vo);
+    sqlite3_bind_int64(*st, 4, (sqlite3_int64)height);
+    int rc = sqlite3_step(*st);  // raw-sql-ok:progress-kv-kernel-store
+    *own = rc == SQLITE_ROW;
+    return rc == SQLITE_ROW ? SQLITE_DONE : rc;
+}
+
+/* Pass 1: create a row per output + fold it into the digest. *added counts
+ * the block's own rows: those inserted and those an earlier attempt at this
+ * block left behind. */
 /* Returns SQLITE_DONE when every insert succeeds, else the failing sqlite rc
  * with its tx and vout indexes. */
 static int ai_put_block_outputs(sqlite3 *db, sqlite3_stmt *ins,
-                                const struct block *blk, int height,
-                                struct sha3_256_ctx *dctx, int *added,
-                                size_t *ti_out, size_t *vo_out)
+                                sqlite3_stmt **own, const struct block *blk,
+                                int height, struct sha3_256_ctx *dctx,
+                                int *added, size_t *ti_out, size_t *vo_out)
 {
     for (size_t ti = 0; ti < blk->num_vtx; ti++) {
         const struct transaction *tx = &blk->vtx[ti];
@@ -160,12 +185,16 @@ static int ai_put_block_outputs(sqlite3 *db, sqlite3_stmt *ins,
             sqlite3_bind_int64(ins, 5, (sqlite3_int64)o->value);
             sqlite3_bind_int  (ins, 6, (int)stype);
             int rc = sqlite3_step(ins);  // raw-sql-ok:progress-kv-kernel-store
+            int n = rc == SQLITE_DONE ? sqlite3_changes(db) : 0;
+            if (rc == SQLITE_DONE && n == 0)
+                rc = ai_present_row_is_own(db, own, sh, tx->hash.data, vo,
+                                           height, &n);
             if (rc != SQLITE_DONE) {
                 *ti_out = ti;
                 *vo_out = vo;
                 return rc;
             }
-            *added += sqlite3_changes(db);
+            *added += n;
         }
     }
     return SQLITE_DONE;
@@ -244,8 +273,10 @@ bool address_index_put_block(sqlite3 *db, const struct block *blk, int height,
     bool ok = true;
     int added = 0;
     size_t ti = 0, vo = 0, vi = 0;
+    sqlite3_stmt *own = NULL;
 
-    int rc = ai_put_block_outputs(db, ins, blk, height, &dctx, &added, &ti, &vo);
+    int rc = ai_put_block_outputs(db, ins, &own, blk, height, &dctx, &added,
+                                  &ti, &vo);
     if (rc != SQLITE_DONE) {
         LOG_WARN("address_index",
                  "[address_index] insert h=%d tx=%zu vout=%zu rc=%d",
@@ -264,6 +295,7 @@ bool address_index_put_block(sqlite3 *db, const struct block *blk, int height,
     }
 
     sqlite3_finalize(ins);
+    sqlite3_finalize(own);
     sqlite3_finalize(spend);
     if (!ok)
         return false;

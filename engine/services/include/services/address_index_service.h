@@ -18,6 +18,7 @@
 #define ZCL_SERVICES_ADDRESS_INDEX_SERVICE_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 struct json_value;
 
@@ -35,12 +36,18 @@ bool address_index_service_registered(void);
  * (0 when caught up, disabled, unwired, or the store was busy). */
 int address_index_service_tick_once(void);
 
+/* Test-only: fold toward `hstar` instead of the tip_finalize cursor, so a
+ * test without a tip_finalize stage can fold past genesis. A negative value
+ * restores the tip_finalize cursor. */
+void address_index_service_set_hstar_for_test(int64_t hstar);
+
 /* dumpstate `address_index` (CLAUDE.md "Adding state introspection").
  * key == NULL/empty  -> projection status (enabled, cursor, H*, gap, rows,
  *                        digest, counters, coverage blocker). `rows` is the
- *                        exact persisted count, or -1 before the first tick
- *                        and while a store folded before the count was
- *                        persisted is counted once in bounded steps.
+ *                        exact persisted count of the rows at or below the
+ *                        cursor, or -1 before the first tick and while a
+ *                        store folded before the count was persisted is
+ *                        counted once in bounded steps.
  * key == "<64-hex scripthash>[:<from_height>]" -> up to a bounded page of
  *                        appearances + confirmed balance for that script. */
 bool address_index_dump_state_json(struct json_value *out, const char *key);

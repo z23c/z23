@@ -56,13 +56,17 @@ bool address_index_ensure_schema(sqlite3 *db);
  * the whole projection. Returns false on a real SQLite error. */
 bool address_index_drop(sqlite3 *db);
 
-/* Fold one block at `height`: INSERT OR IGNORE a creation row for every output
- * (preserving any spent link already recorded on a re-fold), then mark every
+/* Fold one block at `height`: write a creation row for every output whose key
+ * is absent (a present key keeps its row and any spent link), then mark every
  * non-coinbase input's referenced output spent. Advances the running digest
  * `digest` (32 bytes, in/out) by chaining the block's deterministic content
- * hash. rows_added_out (nullable) receives the number of creation rows written.
- * Returns false on a real SQLite error (caller -> reset/stall). Caller holds
- * the tx lock and typically wraps a batch of blocks in one transaction. */
+ * hash. rows_added_out (nullable) receives the block's own creation rows: the
+ * rows written plus those already present at `height`, which only an earlier
+ * attempt at this block that failed midway leaves behind. A key held at
+ * another height is not counted. Summed over the blocks folded through the
+ * cursor, this is the exact number of rows at or below the cursor. Returns
+ * false on a real SQLite error (caller -> reset/stall). Caller holds the tx
+ * lock and typically wraps a batch of blocks in one transaction. */
 bool address_index_put_block(sqlite3 *db, const struct block *blk, int height,
                              uint8_t digest[32], int *rows_added_out);
 
@@ -79,11 +83,13 @@ bool address_index_set_cursor(sqlite3 *db, int64_t cursor,
  * projection has never been folded. Returns false on a real SQLite error. */
 bool address_index_get_digest(sqlite3 *db, uint8_t digest[32], bool *found);
 
-/* Exact appearance-row count, persisted in address_index_state beside the
- * cursor. The fold writes it in the same transaction as the cursor, and a
- * drop removes it with the state table. *found=false when it is absent: a
- * store folded before the count was persisted, or a freshly reset one.
- * Returns false on a real SQLite error. */
+/* Exact count of the appearance rows at or below the cursor, persisted in
+ * address_index_state beside it. The fold writes it in the same transaction
+ * as the cursor, and a drop removes it with the state table. It equals the
+ * table's row count except while a block that failed midway has rows above
+ * the cursor; they count when that block folds. *found=false when it is
+ * absent: a store folded before the count was persisted, or a freshly reset
+ * one. Returns false on a real SQLite error. */
 bool address_index_get_rows(sqlite3 *db, int64_t *rows_out, bool *found);
 bool address_index_set_rows(sqlite3 *db, int64_t rows);
 

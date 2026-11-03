@@ -308,16 +308,23 @@ static int ai_check_idempotent_refold(sqlite3 *db,
 {
     int failures = 0;
     /* ── idempotent re-fold PRESERVES rows + spent links ─────────── */
-    /* Row writes are INSERT OR IGNORE, so re-folding a block adds no rows and
-     * never clobbers a spent link recorded by a later block (the digest is a
-     * forward-only running chain and is NOT expected to be idempotent — a full
-     * rebuild's determinism is asserted separately below). */
+    /* A present key keeps its row, so re-folding a block writes no row and
+     * never clobbers a spent link recorded by a later block. The block still
+     * counts the rows at its own height; a key held at another height is not
+     * counted (the digest is a forward-only running chain and is NOT expected
+     * to be idempotent — a full rebuild's determinism is asserted separately
+     * below). */
     {
         uint8_t d2[32]; memcpy(d2, digest, 32);
         int added = -1;
         AI_CHECK("re-put block 100 idempotent (rows)",
                  address_index_put_block(db, blk100, 100, d2, &added));
-        AI_CHECK("re-put added 0 rows (IGNORE)", added == 0);
+        AI_CHECK("re-put writes no row", address_index_row_count(db) == 4);
+        AI_CHECK("re-put counts block 100's own 3 rows", added == 3);
+        added = -1;
+        AI_CHECK("re-put at another height writes and counts no row",
+                 address_index_put_block(db, blk100, 105, d2, &added) &&
+                 added == 0 && address_index_row_count(db) == 4);
         int64_t bal = -1;
         struct json_value row;
         int n = ai_query(db, shA, &bal, &row);
@@ -606,7 +613,7 @@ static int ai_check_backfill_safety(sqlite3 *db, const char *dir)
  * The tick runs on the shared supervisor runner, so it reads the persisted
  * row count. A store folded before that count existed is counted once in
  * bounded steps while folding continues. */
-enum { AI_GENESIS_OUTS = 3 };
+enum { AI_GENESIS_OUTS = 3, AI_BLOCK_OUTS = 2, AI_CHAIN_BLOCKS = 3 };
 
 /* What one tick ran on the projection handle: count() aggregates authorized
  * at prepare, and full-table-scan steps and sorts at statement end. */
@@ -699,30 +706,49 @@ static bool ai_insert_legacy_rows(sqlite3 *db, int64_t n)
            address_index_row_count(db) == n;
 }
 
-/* A readable genesis body with AI_GENESIS_OUTS outputs under `datadir`,
- * indexed at height 0. No phashBlock: the read skips the hash comparison. */
-static bool ai_write_genesis(const char *datadir, struct block_index *bi)
+/* Rows at heights 0..h of the fixture chain. */
+static int64_t ai_rows_through(int64_t h)
 {
-    static const unsigned char s0[1] = { 0x51 }, s1[1] = { 0x52 },
-                               s2[1] = { 0x53 };
-    const unsigned char *scripts[AI_GENESIS_OUTS] = { s0, s1, s2 };
-    size_t lens[AI_GENESIS_OUTS] = { 1, 1, 1 };
-    int64_t values[AI_GENESIS_OUTS] = { 10, 20, 30 };
-    struct block b;
-    block_init(&b);
-    b.header.nVersion = 4;
-    b.header.nBits = 0x2000ffff;
-    b.num_vtx = 1;
-    b.vtx = zcl_calloc(1, sizeof(struct transaction), "ai_genesis_vtx");
-    transaction_init(&b.vtx[0]);
-    ai_set_spend(&b.vtx[0], NULL, 0);
-    ai_set_vouts(&b.vtx[0], AI_GENESIS_OUTS, values, scripts, lens);
-    struct disk_block_pos pos = {0};
+    return h < 0 ? 0 : AI_GENESIS_OUTS + h * AI_BLOCK_OUTS;
+}
+
+/* A one-tx block paying `nout` outputs to the one-byte scripts first,
+ * first+1, ... Its tx spends (prev, 0), or is coinbase-shaped when prev is
+ * NULL. The txid is the one a body read computes. */
+static void ai_make_block(struct block *b, const struct uint256 *prev,
+                          size_t nout, unsigned char first)
+{
+    unsigned char sc[AI_GENESIS_OUTS];
+    const unsigned char *scripts[AI_GENESIS_OUTS];
+    size_t lens[AI_GENESIS_OUTS];
+    int64_t values[AI_GENESIS_OUTS];
+    for (size_t i = 0; i < nout; i++) {
+        sc[i] = (unsigned char)(first + i);
+        scripts[i] = &sc[i];
+        lens[i] = 1;
+        values[i] = 10 * (int64_t)(i + 1);
+    }
+    block_init(b);
+    b->header.nVersion = 4;
+    b->header.nBits = 0x2000ffff;
+    b->num_vtx = 1;
+    b->vtx = zcl_calloc(1, sizeof(struct transaction), "ai_fixture_vtx");
+    transaction_init(&b->vtx[0]);
+    ai_set_spend(&b->vtx[0], prev, 0);
+    ai_set_vouts(&b->vtx[0], nout, values, scripts, lens);
+    transaction_compute_hash(&b->vtx[0]);
+}
+
+/* Appends `b` under `datadir` and indexes it at `height`. No phashBlock: the
+ * read skips the hash comparison. */
+static bool ai_store_block(const char *datadir, struct block *b, int height,
+                           struct block_index *bi)
+{
+    struct disk_block_pos pos = { .nFile = -1, .nPos = 0 };
     unsigned char magic[4] = { 0x24, 0xe9, 0x27, 0x64 };
-    bool ok = write_block_to_disk(&b, &pos, datadir, magic);
-    block_free(&b);
+    bool ok = write_block_to_disk(b, &pos, datadir, magic);
     block_index_init(bi);
-    bi->nHeight = 0;
+    bi->nHeight = height;
     bi->nStatus |= BLOCK_HAVE_DATA;
     block_index_disk_pos_store(bi, pos.nFile, pos.nPos);
     return ok;
@@ -731,15 +757,38 @@ static bool ai_write_genesis(const char *datadir, struct block_index *bi)
 struct ai_tick_fixture {
     struct main_state ms;
     struct app_runtime_context runtime;
-    struct block_index genesis;
+    struct block blocks[AI_CHAIN_BLOCKS];
+    struct block_index chain[AI_CHAIN_BLOCKS];
 };
 
-/* The runtime one tick needs: datadir, main state with a readable genesis,
- * no disk floor, and H* = 0 (no tip_finalize stage in this process). */
+/* Readable bodies at heights 0..2 in the active chain. Genesis pays
+ * AI_GENESIS_OUTS outputs; blocks 1 and 2 pay AI_BLOCK_OUTS each, and block
+ * 2 spends block 1's first output. */
+static bool ai_tick_fixture_chain(struct ai_tick_fixture *f,
+                                  const char *datadir)
+{
+    for (int h = 0; h < AI_CHAIN_BLOCKS; h++) {
+        const struct uint256 *prev =
+            h == 2 ? &f->blocks[1].vtx[0].hash : NULL;
+        ai_make_block(&f->blocks[h], prev,
+                      h == 0 ? AI_GENESIS_OUTS : AI_BLOCK_OUTS,
+                      (unsigned char)(0x51 + 3 * h));
+        if (!ai_store_block(datadir, &f->blocks[h], h, &f->chain[h]) ||
+            !active_chain_install_tip_slot(&f->ms.chain_active, &f->chain[h]))
+            return false;
+    }
+    return true;
+}
+
+/* The runtime one tick needs: datadir, main state with the fixture chain, no
+ * disk floor, and H* = 0 (no tip_finalize stage in this process) until a
+ * check pins it. */
 static bool ai_tick_fixture_open(struct ai_tick_fixture *f, const char *dir)
 {
     char netdir[1024];
     memset(f, 0, sizeof(*f));
+    for (int h = 0; h < AI_CHAIN_BLOCKS; h++)
+        block_init(&f->blocks[h]);
     main_state_init(&f->ms);
     f->runtime.main_state = &f->ms;
     if (!SetDataDir(dir))
@@ -747,17 +796,19 @@ static bool ai_tick_fixture_open(struct ai_tick_fixture *f, const char *dir)
     GetDataDir(true, netdir, sizeof(netdir));
     index_fold_set_min_free_for_test(0);
     app_runtime_set_current(&f->runtime);
-    return netdir[0] && ai_write_genesis(netdir, &f->genesis) &&
-           active_chain_install_tip_slot(&f->ms.chain_active, &f->genesis) &&
+    return netdir[0] && ai_tick_fixture_chain(f, netdir) &&
            tip_finalize_stage_cursor() == 0;
 }
 
 static void ai_tick_fixture_close(struct ai_tick_fixture *f)
 {
+    address_index_service_set_hstar_for_test(-1);
     app_runtime_set_current(NULL);
     index_fold_set_min_free_for_test(-1);
     (void)SetDataDir(NULL);
     main_state_free(&f->ms);
+    for (int h = 0; h < AI_CHAIN_BLOCKS; h++)
+        block_free(&f->blocks[h]);
 }
 
 /* A store without a persisted count: the first tick runs no count() and no
@@ -821,15 +872,135 @@ static int ai_check_reset_refold(sqlite3 *db)
     return failures;
 }
 
+/* Fails block 2's spend of block 1's output, after block 2's outputs are
+ * written, with RAISE(`action`). TEMP: the trigger never reaches the file. */
+static bool ai_fault_spend(sqlite3 *db, const char *action)
+{
+    char sql[256];
+    snprintf(sql, sizeof(sql),
+             "CREATE TEMP TRIGGER ai_fault BEFORE UPDATE ON main.address_index "
+             "WHEN NEW.spent_height = 2 "
+             "BEGIN SELECT RAISE(%s, 'injected fault'); END",
+             action);
+    return sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK;
+}
+
+/* Fails block 2's second output insert, after its first is written. */
+static bool ai_fault_insert(sqlite3 *db)
+{
+    return sqlite3_exec(db,
+        "CREATE TEMP TRIGGER ai_fault BEFORE INSERT ON main.address_index "
+        "WHEN NEW.height = 2 AND NEW.vout = 1 "
+        "BEGIN SELECT RAISE(ABORT, 'injected fault'); END",
+        NULL, NULL, NULL) == SQLITE_OK;
+}
+
+static bool ai_fault_clear(sqlite3 *db)
+{
+    return sqlite3_exec(db, "DROP TRIGGER temp.ai_fault",
+                        NULL, NULL, NULL) == SQLITE_OK;
+}
+
+static int64_t ai_cursor(sqlite3 *db)
+{
+    int64_t c = -2;
+    return address_index_get_cursor(db, &c) ? c : -2;
+}
+
+/* Full-scan oracle: rows at or below `height`. */
+static int64_t ai_rows_at_or_below(sqlite3 *db, int64_t height)
+{
+    sqlite3_stmt *st = NULL;
+    int64_t n = -1;
+    if (sqlite3_prepare_v2(db,
+            "SELECT COUNT(*) FROM address_index WHERE height <= ?",
+            -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(st, 1, height);
+        if (sqlite3_step(st) == SQLITE_ROW)
+            n = sqlite3_column_int64(st, 0);
+    }
+    sqlite3_finalize(st);
+    return n;
+}
+
+/* The persisted cursor and count describe rows that exist: every fixture
+ * block at or below the cursor has its rows, and the count is theirs. */
+static bool ai_state_matches_rows(sqlite3 *db)
+{
+    int64_t cursor = ai_cursor(db);
+    int64_t want = ai_rows_through(cursor);
+    return cursor >= 0 && ai_persisted_rows_are(db, want) &&
+           ai_rows_at_or_below(db, cursor) == want;
+}
+
+/* An error SQLite answers by rolling back the whole batch (RAISE(ROLLBACK)
+ * stands in for FULL or IOERR): the tick persists no cursor or count for
+ * the rows it lost. Blocks 1 and 2 share one batch unless its wall budget
+ * ends after block 1; then block 1 commits alone and block 2 fails first in
+ * the next batch. Either way the fold stops at block 2. */
+static int ai_check_rolled_back_batch(sqlite3 *db)
+{
+    int failures = 0;
+    address_index_service_set_hstar_for_test(2);
+    AI_CHECK("rolled-back batch: fault installed",
+             ai_fault_spend(db, "ROLLBACK"));
+    for (int i = 0; i < 2 && ai_dump_int("blocked_height") != 2; i++)
+        (void)address_index_service_tick_once();
+    AI_CHECK("rolled-back batch: the fold stops at block 2",
+             ai_dump_int("blocked_height") == 2);
+    AI_CHECK("rolled-back batch: cursor and count only for rows that exist",
+             ai_state_matches_rows(db));
+    AI_CHECK("rolled-back batch: fault removed", ai_fault_clear(db));
+    return failures;
+}
+
+/* Block 2 fails midway twice, once in each pass, and leaves its outputs
+ * above the cursor: what a failed batch commits beside the blocks before it,
+ * and what a store written before the count was persisted may hold. Folding
+ * block 2 then counts those rows exactly once. */
+static int ai_check_part_written_block(sqlite3 *db, struct ai_tick_fixture *f)
+{
+    int failures = 0;
+    address_index_service_set_hstar_for_test(1);
+    for (int i = 0; i < 2 && ai_cursor(db) < 1; i++)
+        (void)address_index_service_tick_once();
+    AI_CHECK("part-written block: cursor 1 with an exact count",
+             ai_cursor(db) == 1 && ai_rows_exact(db, ai_rows_through(1)));
+    uint8_t digest[32] = {0};
+    int added = 0;
+    bool insert_fault = ai_fault_insert(db) &&
+        !address_index_put_block(db, &f->blocks[2], 2, digest, &added) &&
+        ai_fault_clear(db) && address_index_row_count(db) ==
+                              ai_rows_through(1) + 1;
+    bool spend_fault = ai_fault_spend(db, "ABORT") &&
+        !address_index_put_block(db, &f->blocks[2], 2, digest, &added) &&
+        ai_fault_clear(db) && address_index_row_count(db) ==
+                              ai_rows_through(2);
+    AI_CHECK("part-written block: insert fault after one output written",
+             insert_fault);
+    AI_CHECK("part-written block: spend fault after every output written",
+             spend_fault);
+    AI_CHECK("part-written block: the count covers rows at or below cursor",
+             ai_state_matches_rows(db));
+    address_index_service_set_hstar_for_test(2);
+    int folded = address_index_service_tick_once();
+    AI_CHECK("part-written block: its fold counts its rows once",
+             folded == 1 && ai_cursor(db) == 2 &&
+             ai_rows_exact(db, ai_rows_through(2)));
+    return failures;
+}
+
 static int ai_check_row_gauge(sqlite3 *db, const char *dir)
 {
     int failures = 0;
     struct ai_tick_fixture f;
     bool up = ai_tick_fixture_open(&f, dir);
-    AI_CHECK("tick fixture: datadir, genesis body, runtime, H* 0", up);
+    AI_CHECK("tick fixture: datadir, chain bodies, runtime, H* 0", up);
     if (up) {
         failures += ai_check_legacy_census(db);
         failures += ai_check_reset_refold(db);
+        failures += ai_check_rolled_back_batch(db);
+        failures += ai_check_part_written_block(db, &f);
     }
     ai_tick_fixture_close(&f);
     return failures;
@@ -958,6 +1129,6 @@ int test_address_index(void)
     free(blk101.vtx);
     projection_store_close();
     progress_store_close();
-    test_cleanup_tmpdir(dir);
+    (void)test_rm_rf_recursive(dir);   /* the tick fixture adds blocks/ */
     return failures;
 }
