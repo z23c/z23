@@ -865,6 +865,7 @@ static bool obj_row_when(const struct json_value *row, int64_t *out)
 }
 
 struct obj_window {
+    int64_t end;
     int64_t today_start;
     int64_t week_start;
     int64_t landed_today;
@@ -879,6 +880,8 @@ static void obj_window_row(const struct json_value *row, void *user)
     bool landed = strcmp(state, "landed") == 0;
     int64_t when;
     if ((!landed && strcmp(state, "failed") != 0) || !obj_row_when(row, &when))
+        return;
+    if (when > w->end)
         return;
     if (when >= w->week_start) {
         if (landed)
@@ -898,6 +901,7 @@ static bool obj_outcomes_window(const struct zcl_objectives_options *options,
     const char *use;
     int64_t now = obj_now(options);
     memset(w, 0, sizeof(*w));
+    w->end = now;
     w->today_start = obj_utc_midnight(now);
     w->week_start = now - (int64_t)OBJ_HISTORY_DAYS_RATE * OBJ_DAY_S;
     if (!obj_resolve_outcomes(options, path, sizeof(path), &use)) {

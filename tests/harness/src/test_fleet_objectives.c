@@ -1293,6 +1293,7 @@ static int fox_case_attempt_allocations(void)
     return failures;
 }
 
+int fox_repair_cases(void);
 int test_fleet_objectives(void);
 int test_fleet_objectives(void)
 {
@@ -1313,6 +1314,7 @@ int test_fleet_objectives(void)
     failures += fox_case_next();
     failures += fox_case_node_cache();
     failures += fox_case_attempt_allocations();
+    failures += fox_repair_cases();
     char root[512];
     char outcomes_ok[1024], outcomes_missing[1024];
     char attempts_dir[1024], inflight_dir[1024];
