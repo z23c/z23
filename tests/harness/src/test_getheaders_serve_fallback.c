@@ -605,6 +605,229 @@ static int gsf_sendheaders_one_tip_proof(struct main_state *ms,
     return failures;
 }
 
+/* Pins header_serve_repair_arm: each refusal leaves the single global flight
+ * unarmed, and only an authoritative target arms it, once. The active chain
+ * already tips at D here, so D is authoritative through the active path. */
+static int gsf_arm_gate_cases(struct main_state *ms,
+                              struct block_index *bi_b,
+                              struct block_index *bi_d,
+                              const struct uint256 *hash_d)
+{
+    int failures = 0;
+    struct block_index probe;
+    struct uint256 stale = *hash_d;
+    stale.data[0] ^= 0x33;   /* on neither the active chain nor the best path */
+
+    header_serve_repair_test_reset();
+    header_serve_repair_arm(NULL, bi_d);
+    GSF_CHECK("arm refuses a NULL main_state",
+              !header_serve_repair_test_armed());
+    header_serve_repair_arm(ms, NULL);
+    GSF_CHECK("arm refuses a NULL target",
+              !header_serve_repair_test_armed());
+
+    memset(&probe, 0, sizeof(probe));
+    probe.nHeight = 0;
+    probe.phashBlock = hash_d;
+    header_serve_repair_arm(ms, &probe);
+    GSF_CHECK("arm refuses a height-0 target",
+              !header_serve_repair_test_armed());
+
+    probe.nHeight = 3;
+    probe.phashBlock = NULL;
+    header_serve_repair_arm(ms, &probe);
+    GSF_CHECK("arm refuses a target with no block hash",
+              !header_serve_repair_test_armed());
+
+    probe.phashBlock = &stale;
+    header_serve_repair_arm(ms, &probe);
+    GSF_CHECK("arm refuses an off-authority hash at the tip height",
+              !header_serve_repair_test_armed());
+
+    probe.nHeight = 4;
+    header_serve_repair_arm(ms, &probe);
+    GSF_CHECK("arm refuses an off-authority target above the best header",
+              !header_serve_repair_test_armed());
+
+    header_serve_repair_arm(ms, bi_d);
+    GSF_CHECK("arm accepts the authoritative tip once",
+              header_serve_repair_test_armed() &&
+              header_serve_repair_test_expected_count() == 1 &&
+              header_serve_repair_wants(bi_d) &&
+              !header_serve_repair_wants(bi_b));
+    header_serve_repair_arm(ms, bi_b);
+    GSF_CHECK("a second arm while armed keeps the first target",
+              header_serve_repair_test_armed() &&
+              header_serve_repair_wants(bi_d) &&
+              !header_serve_repair_wants(bi_b));
+    header_serve_repair_test_reset();
+    return failures;
+}
+
+static bool gsf_repair_send_from(struct msg_processor *mp,
+                                 struct p2p_node *peer, int64_t now)
+{
+    header_serve_repair_maybe_send(mp, peer, now);
+    return peer && peer->send_size > 0;
+}
+
+/* Pins header_serve_repair_maybe_send gates: an unarmed flight, a missing
+ * processor, and peers that cannot serve the target are all refused before
+ * any span state or throttle window moves. */
+static int gsf_send_refusal_cases(struct msg_processor *mp,
+                                  struct main_state *ms,
+                                  struct block_index *bi_d)
+{
+    int failures = 0;
+    struct p2p_node peer;
+    struct msg_processor bare;
+
+    header_serve_repair_test_reset();
+    gsf_setup_outbound_peer(&peer, 3);
+    GSF_CHECK("maybe_send is inert while unarmed",
+              !gsf_repair_send_from(mp, &peer, 1));
+    gsf_free_outbound_peer(&peer);
+
+    header_serve_repair_arm(ms, bi_d);
+    gsf_setup_outbound_peer(&peer, 3);
+    GSF_CHECK("maybe_send refuses a NULL msg_processor",
+              !gsf_repair_send_from(NULL, &peer, 1));
+    memset(&bare, 0, sizeof(bare));
+    GSF_CHECK("maybe_send refuses a processor without a main_state",
+              !gsf_repair_send_from(&bare, &peer, 1));
+    GSF_CHECK("maybe_send refuses a NULL node",
+              !gsf_repair_send_from(mp, NULL, 1));
+    peer.inbound = true;
+    GSF_CHECK("maybe_send refuses an inbound peer",
+              !gsf_repair_send_from(mp, &peer, 1));
+    peer.inbound = false;
+    atomic_store(&peer.disconnect, true);
+    GSF_CHECK("maybe_send refuses a disconnecting peer",
+              !gsf_repair_send_from(mp, &peer, 1));
+    atomic_store(&peer.disconnect, false);
+    atomic_store(&peer.state, PEER_CONNECTING);
+    GSF_CHECK("maybe_send refuses a peer still connecting",
+              !gsf_repair_send_from(mp, &peer, 1));
+    gsf_free_outbound_peer(&peer);
+
+    gsf_setup_outbound_peer(&peer, 2);
+    GSF_CHECK("maybe_send refuses a peer below the target height",
+              !gsf_repair_send_from(mp, &peer, 1));
+    gsf_free_outbound_peer(&peer);
+    GSF_CHECK("refusals leave the flight armed on the same target",
+              header_serve_repair_test_armed() &&
+              header_serve_repair_test_expected_count() == 1 &&
+              header_serve_repair_test_cached_count() == 0);
+    return failures;
+}
+
+/* Pins header_serve_repair_maybe_send success and throttle: the first usable
+ * peer publishes the span, a peer 2 s later is throttled, and a peer 6 s later
+ * re-sends the same single-member span. */
+static int gsf_send_throttle_cases(struct msg_processor *mp)
+{
+    int failures = 0;
+    struct p2p_node peer;
+
+    gsf_setup_outbound_peer(&peer, 3);
+    GSF_CHECK("first usable peer publishes the one-member span",
+              gsf_repair_send_from(mp, &peer, 10) &&
+              header_serve_repair_test_expected_count() == 1 &&
+              header_serve_repair_test_cached_count() == 0);
+    gsf_free_outbound_peer(&peer);
+
+    gsf_setup_outbound_peer(&peer, 3);
+    GSF_CHECK("usable peer 2 s later is throttled",
+              !gsf_repair_send_from(mp, &peer, 12));
+    gsf_free_outbound_peer(&peer);
+
+    gsf_setup_outbound_peer(&peer, 3);
+    GSF_CHECK("usable peer 6 s later re-sends the same span",
+              gsf_repair_send_from(mp, &peer, 16) &&
+              header_serve_repair_test_expected_count() == 1);
+    gsf_free_outbound_peer(&peer);
+    return failures;
+}
+
+/* Pins the target-authority gate in header_serve_repair_maybe_send. Each probe
+ * is armed through pindex_best_header, which is restored to D afterwards. */
+static int gsf_send_target_authority_cases(struct msg_processor *mp,
+                                           struct main_state *ms,
+                                           struct block_index *bi_a,
+                                           struct block_index *bi_d,
+                                           const struct uint256 *hash_d)
+{
+    int failures = 0;
+    struct p2p_node peer;
+    struct block_index probe;
+    struct uint256 fake = *hash_d;
+    fake.data[0] ^= 0x44;
+
+    /* (a) the armed hash is absent from the block map */
+    memset(&probe, 0, sizeof(probe));
+    probe.nHeight = 3;
+    probe.phashBlock = &fake;
+    probe.pprev = bi_d->pprev;
+    ms->pindex_best_header = &probe;
+    header_serve_repair_test_reset();
+    header_serve_repair_arm(ms, &probe);
+    gsf_setup_outbound_peer(&peer, 3);
+    GSF_CHECK("maybe_send refuses an armed hash absent from the map",
+              header_serve_repair_test_armed() &&
+              !gsf_repair_send_from(mp, &peer, 1));
+    gsf_free_outbound_peer(&peer);
+
+    /* (b) the map entry for the armed hash sits at a different height */
+    memset(&probe, 0, sizeof(probe));
+    probe.nHeight = 2;
+    probe.phashBlock = hash_d;
+    probe.pprev = bi_a;
+    ms->pindex_best_header = &probe;
+    header_serve_repair_test_reset();
+    header_serve_repair_arm(ms, &probe);
+    gsf_setup_outbound_peer(&peer, 3);
+    GSF_CHECK("maybe_send refuses a map height that disagrees with the flight",
+              header_serve_repair_test_armed() &&
+              !gsf_repair_send_from(mp, &peer, 1));
+    gsf_free_outbound_peer(&peer);
+
+    /* (c) the map entry for the armed hash has no parent */
+    struct uint256 hash_e = *hash_d;
+    hash_e.data[0] ^= 0x55;
+    struct block_index *bi_e =
+        chainstate_insert_block_index((struct chainstate *)ms, &hash_e);
+    GSF_CHECK("parentless fixture entry inserted", bi_e != NULL);
+    if (bi_e) {
+        bi_e->nHeight = 1;
+        bi_e->pprev = NULL;
+        ms->pindex_best_header = bi_e;
+        header_serve_repair_test_reset();
+        header_serve_repair_arm(ms, bi_e);
+        gsf_setup_outbound_peer(&peer, 3);
+        GSF_CHECK("maybe_send refuses a target with no parent",
+                  header_serve_repair_test_armed() &&
+                  !gsf_repair_send_from(mp, &peer, 1));
+        gsf_free_outbound_peer(&peer);
+    }
+    ms->pindex_best_header = bi_d;
+    header_serve_repair_test_reset();
+    return failures;
+}
+
+static int gsf_send_gate_cases(struct msg_processor *mp,
+                               struct main_state *ms,
+                               struct block_index *bi_a,
+                               struct block_index *bi_d,
+                               const struct uint256 *hash_d)
+{
+    int failures = 0;
+    failures += gsf_send_refusal_cases(mp, ms, bi_d);
+    failures += gsf_send_throttle_cases(mp);
+    header_serve_repair_test_reset();
+    failures += gsf_send_target_authority_cases(mp, ms, bi_a, bi_d, hash_d);
+    return failures;
+}
+
 /* ---- Locator anchoring and getheaders request choice ----
  *
  * Pins headers_start_from_locator (static; driven through process_getheaders),
@@ -1101,6 +1324,9 @@ int test_getheaders_serve_fallback(void)
               (size_t)64 * 1024 * 1024);
 
     failures += gsf_sendheaders_one_tip_proof(&ms, &mp, bi_d, &hash_d);
+
+    failures += gsf_arm_gate_cases(&ms, bi_b, bi_d, &hash_d);
+    failures += gsf_send_gate_cases(&mp, &ms, bi_a, bi_d, &hash_d);
 
     /* Locator anchoring (headers_start_from_locator) and the getheaders
      * request choice (exec_getheaders_action) on an independent chain. */
