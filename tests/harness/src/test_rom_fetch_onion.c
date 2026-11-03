@@ -54,7 +54,10 @@ struct rf_stub {
     void                 *ctx;
 
     pthread_t    tid;
-    bool         tid_valid;
+    /* Set by stub_open, cleared by whichever side joins the thread (the pump's close or stub_reset): atomic, so the two never race. */
+    _Atomic bool tid_valid;
+    /* Set once a pump thread was created; cleared only by stub_reset's memset. closed means that thread was joined. */
+    _Atomic bool started;
     _Atomic bool stop;
     _Atomic bool terminal;
     _Atomic bool closed;
@@ -124,7 +127,8 @@ static struct onion_stream_raw *stub_open(const char *onion, uint16_t port,
     s->ctx = ctx;
     if (pthread_create(&s->tid, NULL, stub_thread, s) != 0)
         return NULL;
-    s->tid_valid = true;
+    atomic_store(&s->started, true);
+    atomic_store(&s->tid_valid, true);
     return (struct onion_stream_raw *)s;
 }
 
@@ -149,10 +153,8 @@ static void stub_close(struct onion_stream_raw *raw)
 {
     struct rf_stub *s = (struct rf_stub *)raw;
     atomic_store(&s->stop, true);
-    if (s->tid_valid) {
+    if (atomic_exchange(&s->tid_valid, false))
         pthread_join(s->tid, NULL);
-        s->tid_valid = false;
-    }
     atomic_store(&s->closed, true);
 }
 
@@ -175,15 +177,31 @@ static bool stub_dial_active(void)
  * that acquire load orders the pump's last telemetry writes before the reset.
  * A dial still active after the bound resets nothing and returns false, so
  * the calling check fails instead of racing the pump. */
+/* Ends a pump that is still running.  Whichever side takes tid_valid joins
+ * the thread; the other side waits for closed, which the joiner sets after
+ * the join.  Returns true only once the pump has been joined. */
+static bool stub_force_join(void)
+{
+    atomic_store(&g_stub.stop, true);
+    if (atomic_exchange(&g_stub.tid_valid, false)) {
+        pthread_join(g_stub.tid, NULL);
+        atomic_store(&g_stub.closed, true);
+        return true;
+    }
+    for (int i = 0; i < 1200 && !atomic_load(&g_stub.closed); i++)
+        usleep(5 * 1000);
+    return atomic_load(&g_stub.closed);
+}
+
 static bool stub_reset(void)
 {
-    if (g_stub.tid_valid || atomic_load(&g_stub.closed)) {
+    if (atomic_load(&g_stub.started) && !atomic_load(&g_stub.closed)) {
         for (int i = 0; i < 1200 && !atomic_load(&g_stub.closed); i++)
             usleep(5 * 1000);
-        if (!atomic_load(&g_stub.closed) && g_stub.tid_valid) {
-            atomic_store(&g_stub.stop, true);
-            pthread_join(g_stub.tid, NULL);
-            g_stub.tid_valid = false;
+        if (!atomic_load(&g_stub.closed) && !stub_force_join()) {
+            fprintf(stderr, "rom_fetch_onion: the pump stayed running past "
+                            "6 s; stub not reset\n");
+            return false;
         }
     }
     for (int i = 0; i < 1200 && stub_dial_active(); i++)
