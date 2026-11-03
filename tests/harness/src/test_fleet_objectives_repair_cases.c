@@ -227,6 +227,68 @@ _test_next:;
     return failures;
 }
 
+/* ── agent lane labels kept whole ─────────────────────────────────────── */
+
+/* One agent-<id>.meta.json under <root>/s/subagents/workflows/r. */
+static bool rpr_lane_meta(const char *root, const char *id, const char *label)
+{
+    char dir[512], path[640];
+    FILE *f;
+    bool ok;
+    (void)snprintf(dir, sizeof(dir), "%s/s", root);
+    (void)mkdir(dir, 0700);
+    (void)snprintf(dir, sizeof(dir), "%s/s/subagents", root);
+    (void)mkdir(dir, 0700);
+    (void)snprintf(dir, sizeof(dir), "%s/s/subagents/workflows", root);
+    (void)mkdir(dir, 0700);
+    (void)snprintf(dir, sizeof(dir), "%s/s/subagents/workflows/r", root);
+    (void)mkdir(dir, 0700);
+    (void)snprintf(path, sizeof(path), "%s/agent-%s.meta.json", dir, id);
+    f = fopen(path, "wb");
+    if (!f)
+        return false;
+    ok = fprintf(f, "{\"agentType\":\"x\",\"description\":\"%s\"}\n", label) > 0;
+    return fclose(f) == 0 && ok;
+}
+
+/* A 103-byte lane is the longest the index keeps. A 104-byte lane must be
+ * refused, not truncated into the 103-byte lane it shares a prefix with. */
+static int rpr_case_lane_labels(const char *root)
+{
+    int failures = 0;
+    char meta[512], lane[104], label[112];
+    (void)snprintf(meta, sizeof(meta), "%s/lane_labels", root);
+    TEST("objectives: an overlong agent lane label is refused, not truncated") {
+        struct zcl_agent_index ix;
+        const char *exact;
+        bool built, matched, refused, oom;
+        memset(lane, 'a', 103);
+        lane[103] = '\0';
+        ASSERT(rpr_mkdir(meta));
+        ASSERT(setenv("Z23_AGENT_META_ROOT", meta, 1) == 0);
+        (void)snprintf(label, sizeof(label), "write:%s", lane);
+        ASSERT(rpr_lane_meta(meta, "lane_exact", label));
+        (void)snprintf(label, sizeof(label), "write:%sx", lane);
+        ASSERT(rpr_lane_meta(meta, "lane_overlong", label));
+        (void)snprintf(label, sizeof(label), "write:%sxy", lane);
+        ASSERT(rpr_lane_meta(meta, "lane_longer", label));
+        built = zcl_objectives_agent_index_build(&ix);
+        exact = zcl_objectives_agent_lane(&ix, "lane_exact");
+        matched = exact && strcmp(exact, lane) == 0;
+        refused = zcl_objectives_agent_lane(&ix, "lane_overlong") == NULL &&
+                  zcl_objectives_agent_lane(&ix, "lane_longer") == NULL;
+        oom = ix.oom;
+        zcl_objectives_agent_index_free(&ix);
+        (void)unsetenv("Z23_AGENT_META_ROOT");
+        ASSERT(built && !oom);
+        ASSERT(matched);
+        ASSERT(refused);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int fox_repair_cases(void);
 int fox_repair_cases(void)
 {
@@ -237,6 +299,7 @@ int fox_repair_cases(void)
     failures += rpr_case_git_skew(root);
     failures += rpr_case_train_identity(root);
     failures += rpr_case_attempt_growth(root);
+    failures += rpr_case_lane_labels(root);
     (void)test_rm_rf_recursive(root);
     return failures;
 }

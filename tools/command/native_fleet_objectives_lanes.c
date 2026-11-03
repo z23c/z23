@@ -65,6 +65,8 @@ static bool lanes_meta_id(const char *name, char *id, size_t cap)
 static bool lanes_push(struct zcl_agent_index *ix, const char *id,
                        const char *lane, const char *kind)
 {
+    if (strlen(lane) >= sizeof(ix->items[0].lane))
+        return false;
     if (ix->n == ix->cap) {
         size_t cap = ix->cap ? ix->cap * 2u : 1024u;
         struct zcl_agent_lane *grown = zcl_realloc(ix->items, cap * sizeof(*grown), "agent_lane_index");
