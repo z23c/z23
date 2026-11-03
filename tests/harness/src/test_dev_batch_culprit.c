@@ -195,6 +195,8 @@ int test_dev_batch_culprit(void)
     TEST("culprit: a named commit pulls in every commit of its lane, named or not") {
         dbc_run(&d, "FAIL: check-no-new-bash\n  tools/shell_a.sh is a shell file\n",
                 "lint", NULL, &reply, dump, sizeof(dump));
+        if (!strstr(dump, "\"decision\":\"drop\""))
+            printf("\n  culprit reply: %.1800s\n", dump);
         ASSERT(strstr(dump, "\"decision\":\"drop\"") != NULL);
         ASSERT(strstr(dump, d.sha[A1]) != NULL);
         ASSERT(strstr(dump, d.sha[A2]) != NULL); /* the budget cut, never named */
