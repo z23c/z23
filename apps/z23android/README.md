@@ -424,7 +424,8 @@ change hosts or spend funds.
   are not served there. The onion answers 404 for `/observation.json` (`-observation=0`), so a stranger
   cannot fingerprint the phone. `adb logcat -s z23node` shows the node log; the app's
   own commands use the loopback RPC with the credentials in its private data
-  directory.
+  directory. The node also starts with `-walletbackup=0`: it keeps no hourly cleartext copies of the wallet's
+  transaction and note tables under its home, because on the phone the recovery words are the backup if the key is lost.
 - `org.z23.nativeapp` is not debuggable, so `run-as` refuses it. For the
   preview package, pipe a script: `adb shell 'run-as org.z23.voicepreview sh
   -s' < script.sh`. A `run-as … sh -c '…'` command passed through `adb shell`

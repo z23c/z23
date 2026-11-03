@@ -116,16 +116,17 @@ static int node_arguments(int argc, char **argv)
     bool with_params = want && strcmp(want, "none") != 0;
     if (strcmp(argv[2], "-operator-lane=canonical") || strcmp(argv[3], "-tor") ||
         strcmp(argv[4], "-onion-persist")) return 4;
-    int next = 5, first = with_params ? 8 : 7;
+    int next = 5, first = with_params ? 9 : 8;
     if (with_params && strcmp(argv[next++], want) != 0) return 7;
     if (strcmp(argv[next++], "-private-listeners") || strcmp(argv[next++], "-observation=0")) return 5;
+    if (strcmp(argv[next++], "-walletbackup=0")) return 10;
     return private_tail(argc, argv, first, getenv("ZAPP_TEST_ADDNODE"));
 }
 
 static int child(int argc, char **argv)
 {
     if (!child_environment()) return 3;
-    if ((argc >= 9 && argc <= 11) && !strncmp(argv[1], "-datadir=", 9)) {
+    if ((argc >= 10 && argc <= 12) && !strncmp(argv[1], "-datadir=", 9)) {
         int bad = node_arguments(argc, argv);
         if (bad) return bad;
         puts("full node arguments accepted");

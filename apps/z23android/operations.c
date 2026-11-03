@@ -315,6 +315,7 @@ static int spawn_node(struct zapp_runtime *r)
     if (zapp_params_arg(r->files, params, sizeof(params))) argv[argc++] = params;
     argv[argc++] = "-private-listeners";
     argv[argc++] = "-observation=0";
+    argv[argc++] = "-walletbackup=0";
     (void)zapp_private_roster_load(r->directory, roster, sizeof(roster));
     zapp_private_args(&private_mode, roster);
     for (size_t i = 0; i < private_mode.argc; i++) argv[argc++] = private_mode.argv[i];
