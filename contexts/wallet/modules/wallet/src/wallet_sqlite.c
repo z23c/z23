@@ -1047,6 +1047,13 @@ bool wallet_sqlite_read_watch_only(struct wallet_sqlite *ws, struct wallet *w)
 
 /* ── Flush all wallet state to SQLite ──────────────────────────── */
 
+/* True when this flush writes the seed, no seed is held, or the row exists. */
+static bool wsql_flush_seed_row_present(struct wallet_sqlite *ws,
+                                        const struct wallet *w, bool writes_secrets)
+{
+    return writes_secrets || !w->sapling_keys.has_seed || wsql_sapling_seed_row_exists(ws);
+}
+
 /* A full flush that cannot write secrets must find a row for every used key,
  * transparent or Sapling, and a seed row when a Sapling seed is held. An
  * entry minted in RAM and sealed before its first flush has a public
@@ -1073,10 +1080,7 @@ static bool wsql_used_entries_stored(struct wallet_sqlite *ws,
             !wsql_sapling_key_row_exists(ws, e->ivk))
             return false;
     }
-    if (!writes_secrets && w->sapling_keys.has_seed &&
-        !wsql_sapling_seed_row_exists(ws))
-        return false;
-    return true;
+    return wsql_flush_seed_row_present(ws, w, writes_secrets);
 }
 
 /* Create/load the wallet data-encryption key before BEGIN. A sealed wallet
@@ -1111,6 +1115,277 @@ static struct zcl_result wsql_flush_precheck(struct wallet_sqlite *ws,
     return ZCL_OK;
 }
 
+/* Counters and the first write error from one flush attempt. */
+struct wsql_flush_halt {
+    bool halt;
+    struct zcl_result first_fail;
+    int n_key_fail, n_keypool_fail, n_tx_fail;
+    int n_zseed_fail, n_zkey_fail, n_script_fail, n_scanh_fail;
+};
+
+/* A flush halt with no failure recorded. */
+static struct wsql_flush_halt wsql_flush_halt_none(void)
+{
+    struct wsql_flush_halt h = { 0 };
+    h.first_fail = ZCL_OK;
+    return h;
+}
+
+/* True for SQLITE_BUSY, SQLITE_LOCKED, or SQLITE_ERROR inside a transaction. */
+static bool wsql_flush_begin_is_retryable(sqlite3 *db, int rc)
+{
+    if (rc == SQLITE_BUSY || rc == SQLITE_LOCKED)
+        return true;
+    /* The wallet shares ONE FULLMUTEX connection with every other
+     * node.db writer (wallet_sqlite wraps g_node_db.db; db_service's
+     * query_db IS node_db->db). A db-service job mid-transaction — e.g.
+     * an async projection write enqueued by the regtest tip-finalize
+     * feed — makes this BEGIN fail with SQLITE_ERROR "cannot start a
+     * transaction within a transaction": same-connection contention,
+     * reported outside the BUSY family. It is transient exactly like
+     * BUSY (the competing COMMIT restores autocommit), so retry it on
+     * the same time budget. A tx leaked by THIS thread would spin the
+     * full budget and still fail — the same verdict as without this
+     * clause, only slower, and a leak is a bug either way. */
+    return rc == SQLITE_ERROR && !sqlite3_get_autocommit(db);
+}
+
+static void wsql_flush_begin_backoff(struct wallet_sqlite *ws,
+                                    int begin_attempt)
+{
+    /* Backoff OUTSIDE the sqlite call so the shared connection mutex
+     * is released between attempts (other node.db threads — the
+     * db-service worker, coordinator/evidence writers, readers — can
+     * run, and any WAL checkpoint / competing writer can complete and
+     * drop the write lock). Exponential, capped. Then re-reset the
+     * cached statements: a read cursor re-armed by another thread on
+     * the shared handle can itself force SQLITE_BUSY on the next
+     * BEGIN IMMEDIATE even once the external writer has released. */
+    int backoff_ms = 10 << (begin_attempt < 5 ? begin_attempt : 5);
+    if (backoff_ms > WALLET_FLUSH_BEGIN_BACKOFF_MAX_MS)
+        backoff_ms = WALLET_FLUSH_BEGIN_BACKOFF_MAX_MS;
+    platform_sleep_ms(backoff_ms);
+    wallet_sqlite_reset_all_statements(ws);
+}
+
+static struct zcl_result wsql_flush_begin_immediate(struct wallet_sqlite *ws)
+{
+    /* Acquire the write transaction with BEGIN IMMEDIATE + a time-budgeted
+     * retry.
+     *
+     * The wallet shares the node.db file with the reducer/coins and projection
+     * writers (separate WAL connections). During bulk catch-up a coins/reducer
+     * commit can hold the single WAL write lock longer than one busy_timeout
+     * window, so a key persist that waits only one window fails with
+     * SQLITE_BUSY and strands keypool keys in RAM (getnewaddress then refuses,
+     * correctly, to hand out an unsaved address). BEGIN IMMEDIATE takes the
+     * write lock atomically at begin (each sqlite3_exec already blocks up to
+     * the connection busy_timeout via the busy handler); retrying the begin
+     * until the wall-clock budget expires (WALLET_FLUSH_BEGIN_BUDGET_MS)
+     * waits out even a sustained stream of same-connection db-service jobs.
+     * Key persistence is rare and not latency-critical, so a slower success
+     * beats losing the key.
+     *
+     * The retry runs BEFORE taking w->cs, so a contended flush never blocks
+     * other wallet operations on the wallet mutex, and this path is only ever
+     * reached from RPC handlers — never the reducer drive — so waiting here
+     * cannot violate the reducer lock-order invariant. */
+    const int64_t begin_deadline =
+        platform_time_monotonic_ms() + g_flush_begin_budget_ms;
+    for (int begin_attempt = 0; ; begin_attempt++) {
+        char *begin_err = NULL;
+        int rc = sqlite3_exec(ws->db, "BEGIN IMMEDIATE", NULL, NULL, &begin_err);
+        if (rc == SQLITE_OK) {
+            if (begin_err) sqlite3_free(begin_err);
+            return ZCL_OK;
+        }
+        if (wsql_flush_begin_is_retryable(ws->db, rc) &&
+            platform_time_monotonic_ms() < begin_deadline) {
+            if (begin_attempt == 0 || (begin_attempt & 0x3F) == 0x3F)
+                LOG_WARN_IN("wallet_sqlite_flush_scope_r",
+                         "wallet_sqlite",
+                         "flush: BEGIN IMMEDIATE busy (rc=%d), retrying "
+                         "(attempt %d, budget %lld ms)",
+                         rc, begin_attempt + 1,
+                         (long long)g_flush_begin_budget_ms);
+            if (begin_err) sqlite3_free(begin_err);
+            wsql_flush_begin_backoff(ws, begin_attempt);
+            continue;
+        }
+        struct zcl_result r = ZCL_ERR(WSQL_TXN_BEGIN_FAIL,
+            "flush: BEGIN IMMEDIATE failed after %d attempt(s) over %lld ms: %s",
+            begin_attempt + 1,
+            (long long)(platform_time_monotonic_ms() -
+                        (begin_deadline - g_flush_begin_budget_ms)),
+            begin_err ? begin_err : "(unknown)");
+        if (begin_err) sqlite3_free(begin_err);
+        return wsql_fail(ws, r);
+    }
+}
+
+/* Fail when a sealed entry has no row, then write used transparent keys. */
+static struct wsql_flush_halt wsql_flush_write_transparent_keys(
+    struct wallet_sqlite *ws, struct wallet *w, bool full_state, bool held)
+{
+    struct wsql_flush_halt h = wsql_flush_halt_none();
+    if (held && !wsql_used_entries_stored(ws, w, full_state)) {
+        h.n_key_fail++;
+        h.first_fail = ZCL_ERR(WSQL_WRITE_FAIL,
+            "flush: a sealed key has no stored row; refusing to report it "
+            "persisted");
+        h.halt = true;
+        return h;
+    }
+    for (size_t i = 0; full_state && i < w->keystore.num_keys; i++) {
+        if (!w->keystore.keys[i].used) continue;
+        if (!w->keystore.keys[i].key.fValid) continue;
+
+        struct pubkey pk;
+        if (!privkey_get_pubkey(&w->keystore.keys[i].key, &pk))
+            continue;
+
+        struct zcl_result kr = wallet_sqlite_write_key_r(ws, &pk,
+                                    &w->keystore.keys[i].key);
+        if (!kr.ok) {
+            fprintf(stderr,  // obs-ok:flush-failure-propagated-via-first_fail
+                "[wallet_sqlite] flush: key slot %zu write failed: "
+                "code=%d (%s:%d) %s\n",
+                i, kr.code, kr.source_file, kr.source_line, kr.message);
+            if (h.first_fail.ok) h.first_fail = kr;
+            h.n_key_fail++;
+            h.halt = true;
+            return h;
+        }
+    }
+    return h;
+}
+
+/* Replace the keypool, then write every used wallet transaction. */
+static struct wsql_flush_halt wsql_flush_write_keypool_and_tx(
+    struct wallet_sqlite *ws, struct wallet *w, bool held)
+{
+    struct wsql_flush_halt h = wsql_flush_halt_none();
+    if (!wallet_sqlite_replace_keypool_locked(ws, w, !held)) {
+        h.n_keypool_fail++;
+        if (h.first_fail.ok) h.first_fail = ZCL_ERR(WSQL_WRITE_FAIL,
+            "flush: replace_keypool failed: %s", sqlite3_errmsg(ws->db));
+        h.halt = true;
+        return h;
+    }
+    for (size_t i = 0; i < MAX_WALLET_TX; i++) {
+        if (!w->map_wallet[i].used) continue;
+        if (!wallet_sqlite_write_tx(ws, &w->map_wallet[i])) {
+            h.n_tx_fail++;
+            if (h.first_fail.ok) h.first_fail = ZCL_ERR(WSQL_WRITE_FAIL,
+                "flush: write_tx slot %zu failed", i);
+            h.halt = true;
+            return h;
+        }
+    }
+    return h;
+}
+
+/* Write the Sapling seed and every unsealed Sapling key on a full flush. */
+static struct wsql_flush_halt wsql_flush_write_sapling_material(
+    struct wallet_sqlite *ws, struct wallet *w, bool full_state)
+{
+    struct wsql_flush_halt h = wsql_flush_halt_none();
+    struct sapling_keystore *sks = &w->sapling_keys;
+    if (full_state && sks->has_seed) {
+        if (!wallet_sqlite_write_sapling_seed(ws, sks->seed)) {
+            h.n_zseed_fail++;
+            if (h.first_fail.ok) h.first_fail = ZCL_ERR(WSQL_WRITE_FAIL,
+                "flush: write_sapling_seed failed");
+            h.halt = true;
+            return h;
+        }
+    }
+    for (size_t i = 0; full_state && i < sks->num_keys; i++) {
+        if (!sks->keys[i].used || sks->keys[i].secret_wiped) continue;
+        if (!wallet_sqlite_write_sapling_key(ws, sks->keys[i].child_index,
+                                              &sks->keys[i])) {
+            h.n_zkey_fail++;
+            if (h.first_fail.ok) h.first_fail = ZCL_ERR(WSQL_WRITE_FAIL,
+                "flush: write_sapling_key child=%u failed",
+                sks->keys[i].child_index);
+            h.halt = true;
+            return h;
+        }
+    }
+    return h;
+}
+
+/* Write used redeem scripts on a full flush, then the scan cursor. */
+static struct wsql_flush_halt wsql_flush_write_scripts_and_scan(
+    struct wallet_sqlite *ws, struct wallet *w, bool full_state)
+{
+    struct wsql_flush_halt h = wsql_flush_halt_none();
+    for (size_t i = 0; full_state && i < w->keystore.num_scripts; i++) {
+        if (!w->keystore.scripts[i].used) continue;
+        if (!wallet_sqlite_write_script(ws,
+                                         &w->keystore.scripts[i].script_id,
+                                         &w->keystore.scripts[i].redeem_script)) {
+            h.n_script_fail++;
+            if (h.first_fail.ok) h.first_fail = ZCL_ERR(WSQL_WRITE_FAIL,
+                "flush: write_script slot %zu failed", i);
+            h.halt = true;
+            return h;
+        }
+    }
+    if (!wallet_sqlite_write_scan_state(ws, w)) {
+        h.n_scanh_fail++;
+        if (h.first_fail.ok) h.first_fail = ZCL_ERR(WSQL_WRITE_FAIL,
+            "flush: write_scan_state failed");
+        h.halt = true;
+        return h;
+    }
+    return h;
+}
+
+/* COMMIT the open flush transaction, rolling it back if COMMIT fails. */
+static struct zcl_result wsql_flush_commit_txn(struct wallet_sqlite *ws)
+{
+    char *commit_err = NULL;
+    int rc = sqlite3_exec(ws->db, "COMMIT", NULL, NULL, &commit_err);
+    if (rc != SQLITE_OK) {
+        struct zcl_result r = ZCL_ERR(WSQL_TXN_COMMIT_FAIL,
+            "flush: COMMIT failed: %s", commit_err ? commit_err : "(unknown)");
+        if (commit_err) sqlite3_free(commit_err);
+        /* best-effort rollback */
+        sqlite3_exec(ws->db, "ROLLBACK", NULL, NULL, NULL);
+        return wsql_fail(ws, r);
+    }
+    return ZCL_OK;
+}
+
+/* Unlock the wallet domains, roll the transaction back, and report it. */
+static struct zcl_result wsql_flush_rollback_txn(struct wallet_sqlite *ws,
+                                                 struct wallet *w, bool held,
+                                                 struct wsql_flush_halt h)
+{
+    if (held) zcl_mutex_unlock(&w->sapling_keys.cs);
+    if (held) zcl_mutex_unlock(&w->keystore.cs);
+    zcl_mutex_unlock(&w->cs);
+    {
+        char *rb_err = NULL;
+        int rb_rc = sqlite3_exec(ws->db, "ROLLBACK", NULL, NULL, &rb_err);
+        if (rb_rc != SQLITE_OK) {
+            fprintf(stderr,  // obs-ok:rollback-fallback-error-propagated
+                "[wallet_sqlite] flush: ROLLBACK after write failure "
+                "also failed rc=%d: %s\n",
+                rb_rc, rb_err ? rb_err : "(unknown)");
+            if (rb_err) sqlite3_free(rb_err);
+        }
+    }
+    return wsql_fail(ws, ZCL_ERR(WSQL_WRITE_FAIL,
+        "flush: rolled back — keys=%d keypool=%d tx=%d zseed=%d zkey=%d "
+        "script=%d scanh=%d; first failure: [%d] %s",
+        h.n_key_fail, h.n_keypool_fail, h.n_tx_fail, h.n_zseed_fail,
+        h.n_zkey_fail, h.n_script_fail, h.n_scanh_fail,
+        h.first_fail.ok ? 0 : h.first_fail.code,
+        h.first_fail.ok ? "(none captured)" : h.first_fail.message));
+}
+
 static struct zcl_result wallet_sqlite_flush_scope_r(
     struct wallet_sqlite *ws, struct wallet *w, bool full_state)
 {
@@ -1133,82 +1408,9 @@ static struct zcl_result wallet_sqlite_flush_scope_r(
      * the flush boundary release every cached VM before taking the write txn. */
     wallet_sqlite_reset_all_statements(ws);
 
-    /* Acquire the write transaction with BEGIN IMMEDIATE + a time-budgeted
-     * retry.
-     *
-     * The wallet shares the node.db file with the reducer/coins and projection
-     * writers (separate WAL connections). During bulk catch-up a coins/reducer
-     * commit can hold the single WAL write lock longer than one busy_timeout
-     * window, so a key persist that waits only one window fails with
-     * SQLITE_BUSY and strands keypool keys in RAM (getnewaddress then refuses,
-     * correctly, to hand out an unsaved address). BEGIN IMMEDIATE takes the
-     * write lock atomically at begin (each sqlite3_exec already blocks up to
-     * the connection busy_timeout via the busy handler); retrying the begin
-     * until the wall-clock budget expires (WALLET_FLUSH_BEGIN_BUDGET_MS)
-     * waits out even a sustained stream of same-connection db-service jobs.
-     * Key persistence is rare and not latency-critical, so a slower success
-     * beats losing the key.
-     *
-     * The retry runs BEFORE taking w->cs, so a contended flush never blocks
-     * other wallet operations on the wallet mutex, and this path is only ever
-     * reached from RPC handlers — never the reducer drive — so waiting here
-     * cannot violate the reducer lock-order invariant. */
-    int rc = SQLITE_OK;
-    const int64_t begin_deadline =
-        platform_time_monotonic_ms() + g_flush_begin_budget_ms;
-    for (int begin_attempt = 0; ; begin_attempt++) {
-        char *begin_err = NULL;
-        rc = sqlite3_exec(ws->db, "BEGIN IMMEDIATE", NULL, NULL, &begin_err);
-        if (rc == SQLITE_OK) {
-            if (begin_err) sqlite3_free(begin_err);
-            break;
-        }
-        bool busy = (rc == SQLITE_BUSY || rc == SQLITE_LOCKED);
-        /* The wallet shares ONE FULLMUTEX connection with every other
-         * node.db writer (wallet_sqlite wraps g_node_db.db; db_service's
-         * query_db IS node_db->db). A db-service job mid-transaction — e.g.
-         * an async projection write enqueued by the regtest tip-finalize
-         * feed — makes this BEGIN fail with SQLITE_ERROR "cannot start a
-         * transaction within a transaction": same-connection contention,
-         * reported outside the BUSY family. It is transient exactly like
-         * BUSY (the competing COMMIT restores autocommit), so retry it on
-         * the same time budget. A tx leaked by THIS thread would spin the
-         * full budget and still fail — the same verdict as without this
-         * clause, only slower, and a leak is a bug either way. */
-        if (!busy && rc == SQLITE_ERROR && !sqlite3_get_autocommit(ws->db))
-            busy = true;
-        if (busy && platform_time_monotonic_ms() < begin_deadline) {
-            if (begin_attempt == 0 || (begin_attempt & 0x3F) == 0x3F)
-                LOG_WARN("wallet_sqlite",
-                         "flush: BEGIN IMMEDIATE busy (rc=%d), retrying "
-                         "(attempt %d, budget %lld ms)",
-                         rc, begin_attempt + 1,
-                         (long long)g_flush_begin_budget_ms);
-            if (begin_err) sqlite3_free(begin_err);
-            /* Backoff OUTSIDE the sqlite call so the shared connection mutex
-             * is released between attempts (other node.db threads — the
-             * db-service worker, coordinator/evidence writers, readers — can
-             * run, and any WAL checkpoint / competing writer can complete and
-             * drop the write lock). Exponential, capped. Then re-reset the
-             * cached statements: a read cursor re-armed by another thread on
-             * the shared handle can itself force SQLITE_BUSY on the next
-             * BEGIN IMMEDIATE even once the external writer has released. */
-            int backoff_ms = 10 << (begin_attempt < 5 ? begin_attempt : 5);
-            if (backoff_ms > WALLET_FLUSH_BEGIN_BACKOFF_MAX_MS)
-                backoff_ms = WALLET_FLUSH_BEGIN_BACKOFF_MAX_MS;
-            platform_sleep_ms(backoff_ms);
-            wallet_sqlite_reset_all_statements(ws);
-            continue;
-        }
-        struct zcl_result r = ZCL_ERR(WSQL_TXN_BEGIN_FAIL,
-            "flush: BEGIN IMMEDIATE failed after %d attempt(s) over %lld ms: %s",
-            begin_attempt + 1,
-            (long long)(platform_time_monotonic_ms() -
-                        (begin_deadline - g_flush_begin_budget_ms)),
-            begin_err ? begin_err : "(unknown)");
-        if (begin_err) sqlite3_free(begin_err);
-        return wsql_fail(ws, r);
-    }
+    struct zcl_result begun = wsql_flush_begin_immediate(ws);
+    if (!begun.ok)
+        return begun;
 
     zcl_mutex_lock(&w->cs);
     /* Snapshot all three mutable wallet domains under one documented order:
@@ -1226,137 +1428,27 @@ static struct zcl_result wallet_sqlite_flush_scope_r(
      * Every writer's rc is observed; the first failure short-circuits
      * the remaining work so we don't bloat the rolled-back txn with
      * more doomed writes. */
-    struct zcl_result first_fail = ZCL_OK;
-    int n_key_fail = 0;
-    int n_keypool_fail = 0;
-    int n_tx_fail = 0;
-    int n_zseed_fail = 0;
-    int n_zkey_fail = 0;
-    int n_script_fail = 0;
-    int n_scanh_fail = 0;
-
-    if (held && !wsql_used_entries_stored(ws, w, full_state)) {
-        n_key_fail++;
-        first_fail = ZCL_ERR(WSQL_WRITE_FAIL,
-            "flush: a sealed key has no stored row; refusing to report it "
-            "persisted");
+    struct wsql_flush_halt h =
+        wsql_flush_write_transparent_keys(ws, w, full_state, held);
+    if (h.halt)
         goto rollback;
-    }
-
-    for (size_t i = 0; full_state && i < w->keystore.num_keys; i++) {
-        if (!w->keystore.keys[i].used) continue;
-        if (!w->keystore.keys[i].key.fValid) continue;
-
-        struct pubkey pk;
-        if (!privkey_get_pubkey(&w->keystore.keys[i].key, &pk))
-            continue;
-
-        struct zcl_result kr = wallet_sqlite_write_key_r(ws, &pk,
-                                    &w->keystore.keys[i].key);
-        if (!kr.ok) {
-            fprintf(stderr,  // obs-ok:flush-failure-propagated-via-first_fail
-                "[wallet_sqlite] flush: key slot %zu write failed: "
-                "code=%d (%s:%d) %s\n",
-                i, kr.code, kr.source_file, kr.source_line, kr.message);
-            if (first_fail.ok) first_fail = kr;
-            n_key_fail++;
-            goto rollback;
-        }
-    }
-    if (!wallet_sqlite_replace_keypool_locked(ws, w, !held)) {
-        n_keypool_fail++;
-        if (first_fail.ok) first_fail = ZCL_ERR(WSQL_WRITE_FAIL,
-            "flush: replace_keypool failed: %s", sqlite3_errmsg(ws->db));
+    h = wsql_flush_write_keypool_and_tx(ws, w, held);
+    if (h.halt)
         goto rollback;
-    }
-    for (size_t i = 0; i < MAX_WALLET_TX; i++) {
-        if (!w->map_wallet[i].used) continue;
-        if (!wallet_sqlite_write_tx(ws, &w->map_wallet[i])) {
-            n_tx_fail++;
-            if (first_fail.ok) first_fail = ZCL_ERR(WSQL_WRITE_FAIL,
-                "flush: write_tx slot %zu failed", i);
-            goto rollback;
-        }
-    }
-    struct sapling_keystore *sks = &w->sapling_keys;
-    if (full_state && sks->has_seed) {
-        if (!wallet_sqlite_write_sapling_seed(ws, sks->seed)) {
-            n_zseed_fail++;
-            if (first_fail.ok) first_fail = ZCL_ERR(WSQL_WRITE_FAIL,
-                "flush: write_sapling_seed failed");
-            goto rollback;
-        }
-    }
-    for (size_t i = 0; full_state && i < sks->num_keys; i++) {
-        if (!sks->keys[i].used || sks->keys[i].secret_wiped) continue;
-        if (!wallet_sqlite_write_sapling_key(ws, sks->keys[i].child_index,
-                                              &sks->keys[i])) {
-            n_zkey_fail++;
-            if (first_fail.ok) first_fail = ZCL_ERR(WSQL_WRITE_FAIL,
-                "flush: write_sapling_key child=%u failed",
-                sks->keys[i].child_index);
-            goto rollback;
-        }
-    }
-
-    for (size_t i = 0; full_state && i < w->keystore.num_scripts; i++) {
-        if (!w->keystore.scripts[i].used) continue;
-        if (!wallet_sqlite_write_script(ws,
-                                         &w->keystore.scripts[i].script_id,
-                                         &w->keystore.scripts[i].redeem_script)) {
-            n_script_fail++;
-            if (first_fail.ok) first_fail = ZCL_ERR(WSQL_WRITE_FAIL,
-                "flush: write_script slot %zu failed", i);
-            goto rollback;
-        }
-    }
-
-    if (!wallet_sqlite_write_scan_state(ws, w)) {
-        n_scanh_fail++;
-        if (first_fail.ok) first_fail = ZCL_ERR(WSQL_WRITE_FAIL,
-            "flush: write_scan_state failed");
+    h = wsql_flush_write_sapling_material(ws, w, full_state);
+    if (h.halt)
         goto rollback;
-    }
+    h = wsql_flush_write_scripts_and_scan(ws, w, full_state);
+    if (h.halt)
+        goto rollback;
 
     if (held) zcl_mutex_unlock(&w->sapling_keys.cs);
     if (held) zcl_mutex_unlock(&w->keystore.cs);
     zcl_mutex_unlock(&w->cs);
-
-    char *commit_err = NULL;
-    rc = sqlite3_exec(ws->db, "COMMIT", NULL, NULL, &commit_err);
-    if (rc != SQLITE_OK) {
-        struct zcl_result r = ZCL_ERR(WSQL_TXN_COMMIT_FAIL,
-            "flush: COMMIT failed: %s", commit_err ? commit_err : "(unknown)");
-        if (commit_err) sqlite3_free(commit_err);
-        /* best-effort rollback */
-        sqlite3_exec(ws->db, "ROLLBACK", NULL, NULL, NULL);
-        return wsql_fail(ws, r);
-    }
-
-    return ZCL_OK;
+    return wsql_flush_commit_txn(ws);
 
 rollback:
-    if (held) zcl_mutex_unlock(&w->sapling_keys.cs);
-    if (held) zcl_mutex_unlock(&w->keystore.cs);
-    zcl_mutex_unlock(&w->cs);
-    {
-        char *rb_err = NULL;
-        int rb_rc = sqlite3_exec(ws->db, "ROLLBACK", NULL, NULL, &rb_err);
-        if (rb_rc != SQLITE_OK) {
-            fprintf(stderr,  // obs-ok:rollback-fallback-error-propagated
-                "[wallet_sqlite] flush: ROLLBACK after write failure "
-                "also failed rc=%d: %s\n",
-                rb_rc, rb_err ? rb_err : "(unknown)");
-            if (rb_err) sqlite3_free(rb_err);
-        }
-    }
-    return wsql_fail(ws, ZCL_ERR(WSQL_WRITE_FAIL,
-        "flush: rolled back — keys=%d keypool=%d tx=%d zseed=%d zkey=%d "
-        "script=%d scanh=%d; first failure: [%d] %s",
-        n_key_fail, n_keypool_fail, n_tx_fail, n_zseed_fail, n_zkey_fail,
-        n_script_fail, n_scanh_fail,
-        first_fail.ok ? 0 : first_fail.code,
-        first_fail.ok ? "(none captured)" : first_fail.message));
+    return wsql_flush_rollback_txn(ws, w, held, h);
 }
 
 struct zcl_result wallet_sqlite_flush_r(struct wallet_sqlite *ws, struct wallet *w) { return wallet_sqlite_flush_scope_r(ws, w, true); }
@@ -1389,7 +1481,7 @@ wallet_sqlite_get_health(struct wallet_sqlite *ws, int keystore_count)
     h.canary_ok = ws->canary_ok;
     h.canary_last_ok_ts = ws->canary_last_ok_ts;
     size_t n = sizeof(h.last_error) - 1;
-    strncpy(h.last_error, ws->last_error, n);
+    memcpy(h.last_error, ws->last_error, strnlen(ws->last_error, n));
     h.last_error[n] = '\0';
 
     if (ws->open && ws->db) {
