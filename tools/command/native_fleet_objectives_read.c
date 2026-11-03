@@ -692,15 +692,18 @@ static bool obj_newest_completed_attempt(const char *dir,
     struct dirent *e;
     struct obj_attempts set = {0};
     size_t best = 0;
+    bool complete = true;
     if (!d)
         return false;
     while ((e = readdir(d))) {
         struct obj_attempt a = {0};
-        if (obj_attempt_load(dir, e->d_name, &a) && !obj_attempts_add(&set, &a))
+        if (obj_attempt_load(dir, e->d_name, &a) && !obj_attempts_add(&set, &a)) {
+            complete = false;
             break;
+        }
     }
     (void)closedir(d);
-    if (set.n == 0) {
+    if (!complete || set.n == 0) {
         free(set.items);
         return false;
     }

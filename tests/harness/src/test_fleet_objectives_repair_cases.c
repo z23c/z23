@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 /* 2026-10-22T10:00:00Z: the captured clock every case measures from. */
@@ -151,6 +152,81 @@ _test_next:;
     return failures;
 }
 
+/* ── attempt collections complete or refused ──────────────────────────── */
+
+static bool rpr_mkdir(const char *path) { return mkdir(path, 0700) == 0; }
+
+static bool rpr_set_mtime(const char *path, long sec)
+{
+    struct timeval tv[2] = {{sec, 0}, {sec, 0}};
+    return utimes(path, tv) == 0;
+}
+
+/* One completed proof attempt <dir>/<name>/logs/ in the layout the proof
+ * writes it; the key is the name before its last dot. */
+static bool rpr_attempt(const char *dir, const char *name, long long cumulative_ms,
+                        const char *test_wall_s, long mtime)
+{
+    char path[1400], logs[1200], attempt[1100], text[4096], key[200];
+    const char *dot = strrchr(name, '.');
+    (void)snprintf(key, sizeof(key), "%.*s", dot ? (int)(dot - name) : (int)strlen(name), name);
+    (void)snprintf(attempt, sizeof(attempt), "%s/%s", dir, name);
+    (void)snprintf(logs, sizeof(logs), "%s/logs", attempt);
+    if (!rpr_mkdir(attempt) || !rpr_mkdir(logs))
+        return false;
+    (void)snprintf(text, sizeof(text),
+        "zcl.dev_proof_phase.v1 worktree_exact_root               167 ms  "
+        "(cumulative      167 ms)\n"
+        "zcl.dev_proof_phase.v1 dimension_lint_and_test %10lld ms  "
+        "(cumulative %10lld ms)\n", cumulative_ms - 972798, cumulative_ms);
+    (void)snprintf(path, sizeof(path), "%s/phases.txt", logs);
+    if (!rpr_write(path, text) || !rpr_set_mtime(path, mtime))
+        return false;
+    (void)snprintf(text, sizeof(text), "PASS check-toolchain 1607 ms\n"
+                   "run_lint.sh: NOTE - wall 1000 ms within budget\n");
+    (void)snprintf(path, sizeof(path), "%s/%s.lint.log", logs, key);
+    if (!rpr_write(path, text))
+        return false;
+    (void)snprintf(text, sizeof(text),
+        "ALL TESTS PASSED - 0/1359 groups failed, 0 skipped "
+        "(%ss wall, 28 workers) [--exact filtered]\n", test_wall_s);
+    (void)snprintf(path, sizeof(path), "%s/%s.test.log", logs, key);
+    return rpr_write(path, text);
+}
+
+/* Seventeen completed attempts force one growth of the candidate set. A
+ * failed growth must refuse the whole collection, not rank the first sixteen. */
+static int rpr_case_attempt_growth(const char *root)
+{
+    int failures = 0;
+    char dir[1024], outcomes[1024], name[64];
+    struct zcl_objectives_options o = {0};
+    (void)snprintf(dir, sizeof(dir), "%s/growth", root);
+    (void)snprintf(outcomes, sizeof(outcomes), "%s/growth_outcomes.jsonl", root);
+    o.attempts_dir = dir;
+    o.outcomes = outcomes;
+    o.now = RPR_NOW;
+    TEST("objectives: a failed growth of the attempt collection is never measured") {
+        struct zcl_objective_value v;
+        bool consumed;
+        ASSERT(rpr_mkdir(dir));
+        ASSERT(rpr_write(outcomes, ""));
+        for (int i = 0; i < 17; i++) {
+            (void)snprintf(name, sizeof(name), "tip%02d-base.r%02d", i, i);
+            ASSERT(rpr_attempt(dir, name, 1000000 + i, "10.0", 1000000000L + i));
+        }
+        zcl_alloc_fault_fail_nth("fleet_objectives_attempts", 2);
+        v = zcl_objectives_measure(&o, "proof_wall_s");
+        consumed = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(consumed);
+        ASSERT(!v.measured);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int fox_repair_cases(void);
 int fox_repair_cases(void)
 {
@@ -160,6 +236,7 @@ int fox_repair_cases(void)
     failures += rpr_case_window_future(root);
     failures += rpr_case_git_skew(root);
     failures += rpr_case_train_identity(root);
+    failures += rpr_case_attempt_growth(root);
     (void)test_rm_rf_recursive(root);
     return failures;
 }
