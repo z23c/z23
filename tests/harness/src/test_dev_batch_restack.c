@@ -216,28 +216,15 @@ _test_next:;
     return failures;
 }
 
-int test_dev_batch_restack(void);
-int test_dev_batch_restack(void)
+static int dbr_t_dry(struct dbr *r, const char *devbin, const char *l0,
+                     const char *p0, const char *d0)
 {
     int failures = 0;
-    static struct dbr r;
-    char devbin[1000], sysctl[1000], dump[DBR_MAX * 4], l0[DBR_MAX * 4],
-        p0[DBR_MAX], d0[DBR_MAX], l1[DBR_MAX * 4], p1[DBR_MAX * 2],
-        d1[DBR_MAX * 2], tmp[DBR_MAX];
+    char dump[DBR_MAX * 4], tmp[DBR_MAX * 4];
     struct zcl_command_reply reply;
     const char *dry[] = {"dry_run", NULL};
-    const char *now[] = {"now", NULL};
-
-    ASSERT(dbr_build(&r));
-    ASSERT(dbr_fakes(&r.f, devbin, sysctl));
-    ASSERT(dbf_slurp(r.ledger, l0, sizeof(l0)));
-    ASSERT(dbf_slurp(r.pending, p0, sizeof(p0)));
-    ASSERT(dbf_slurp(r.done, d0, sizeof(d0)));
-
-    failures += dbr_t_registered();
-
     TEST("restack --dry-run: names the lanes that would go back and writes nothing") {
-        dbr_restack(&r, dry, &reply, dump, sizeof(dump), devbin);
+        dbr_restack(r, dry, &reply, dump, sizeof(dump), devbin);
         ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
         ASSERT(strstr(dump, "\"count\":5") != NULL);
         /* restacked: stranded, not named, not moved, new commits */
@@ -260,13 +247,37 @@ int test_dev_batch_restack(void)
         ASSERT(strstr(dump, "lane-l") == NULL && strstr(dump, "lane-r") == NULL);
         ASSERT(strstr(dump, "lane-u") == NULL && strstr(dump, "lane-x") == NULL);
         zcl_command_reply_free(&reply);
-        ASSERT(dbf_slurp(r.ledger, tmp, sizeof(tmp)));
+        ASSERT(dbf_slurp(r->ledger, tmp, sizeof(tmp)));
         ASSERT(strcmp(tmp, l0) == 0);
-        ASSERT(dbf_slurp(r.pending, tmp, sizeof(tmp)) && strcmp(tmp, p0) == 0);
-        ASSERT(dbf_slurp(r.done, tmp, sizeof(tmp)) && strcmp(tmp, d0) == 0);
-        ASSERT(!dbf_exists(r.stamp));
+        ASSERT(dbf_slurp(r->pending, tmp, sizeof(tmp)) && strcmp(tmp, p0) == 0);
+        ASSERT(dbf_slurp(r->done, tmp, sizeof(tmp)) && strcmp(tmp, d0) == 0);
+        ASSERT(!dbf_exists(r->stamp));
         PASS();
     }
+_test_next:;
+    return failures;
+}
+
+int test_dev_batch_restack(void);
+int test_dev_batch_restack(void)
+{
+    int failures = 0;
+    static struct dbr r;
+    char devbin[1000], sysctl[1000], dump[DBR_MAX * 4], l0[DBR_MAX * 4],
+        p0[DBR_MAX], d0[DBR_MAX], l1[DBR_MAX * 4], p1[DBR_MAX * 2],
+        d1[DBR_MAX * 2];
+    struct zcl_command_reply reply;
+    const char *now[] = {"now", NULL};
+
+    ASSERT(dbr_build(&r));
+    ASSERT(dbr_fakes(&r.f, devbin, sysctl));
+    ASSERT(dbf_slurp(r.ledger, l0, sizeof(l0)));
+    ASSERT(dbf_slurp(r.pending, p0, sizeof(p0)));
+    ASSERT(dbf_slurp(r.done, d0, sizeof(d0)));
+
+    failures += dbr_t_registered();
+
+    failures += dbr_t_dry(&r, devbin, l0, p0, d0);
 
     failures += dbr_t_unreadable(&r, l0);
 
