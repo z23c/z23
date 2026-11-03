@@ -23,6 +23,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+/* Absolute foreign-owner path on every platform: platform_path_is_absolute
+ * rejects a bare "/foreign" on Windows before the overlap payload is built. */
+#ifdef _WIN32
+#define DVX_FOREIGN "C:/foreign"
+#else
+#define DVX_FOREIGN "/foreign"
+#endif
 #if !defined(_WIN32)
 #include <signal.h>
 #include <sys/resource.h>
@@ -310,7 +317,7 @@ static int dvx_expiry_scope_tests(void)
         for (size_t i = 0; fields[i]; i++) {
             const char *tail = i == 9 ? "garbage" : "";
             (void)snprintf(row, sizeof row,
-                "{%s\"worktree\":\"/foreign\",\"files\":[\"engine/a.c\"]}%s\n", fields[i], tail);
+                "{%s\"worktree\":\"" DVX_FOREIGN "\",\"files\":[\"engine/a.c\"]}%s\n", fields[i], tail);
             ASSERT(dvx_write(repo, ".git/z23-agent-claims.jsonl", row));
             const char *files[] = {"engine/a.c", NULL};
             struct dvx_call c;
@@ -326,6 +333,113 @@ static int dvx_expiry_scope_tests(void)
             free(after);
             ASSERT(unchanged);
         }
+        ASSERT_EQ(test_rm_rf_recursive(repo), 0);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static bool dvx_ledger_matches(const char *ledger, const char *expected)
+{
+    char *actual = NULL;
+    size_t len = 0;
+    if (!zcl_read_whole_file_text(ledger, 16384, &actual, &len,
+                                  "claim_owner_ledger")) return false;
+    bool same = len == strlen(expected) && memcmp(actual, expected, len) == 0;
+    free(actual);
+    return same;
+}
+
+static int dvx_owner_authority_tests(void)
+{
+    int failures = 0;
+    TEST("claim: root owner identity controls overlap and release authority") {
+        char repo[512], ledger[1024], nested[2048], duplicate[2048], reverse[2048];
+        char long_owner[5000], oversized[8192];
+#ifdef _WIN32
+        const char *foreign = "C:/foreign";
+#else
+        const char *foreign = "/foreign";
+#endif
+        test_make_tmpdir(repo, sizeof repo, "devagent_claim", "owner-authority");
+        ASSERT(dvx_fixture(repo));
+        (void)snprintf(ledger, sizeof ledger, "%s/.git/z23-agent-claims.jsonl", repo);
+        (void)snprintf(nested, sizeof nested,
+            "{\"meta\":{\"worktree\":\"%s\"},\"worktree\":\"%s\",\"files\":[\"engine/a.c\"]}\n", repo, foreign);
+        (void)snprintf(duplicate, sizeof duplicate,
+            "{\"worktree\":\"%s\",\"worktree\":\"%s\",\"files\":[\"engine/a.c\"]}\n", repo, foreign);
+        (void)snprintf(reverse, sizeof reverse,
+            "{\"worktree\":\"%s\",\"worktree\":\"%s\",\"files\":[\"engine/a.c\"]}\n", foreign, repo);
+        memset(long_owner, 'a', sizeof long_owner - 1);
+        long_owner[sizeof long_owner - 1] = '\0';
+        (void)snprintf(oversized, sizeof oversized,
+            "{\"worktree\":\"//server/share/%s\",\"files\":[\"engine/a.c\"]}\n", long_owner);
+        const char *rows[] = {nested, duplicate, reverse,
+            "{\"story\":\"missing\",\"files\":[\"engine/a.c\"]}\n",
+            "{\"worktree\":null,\"files\":[\"engine/a.c\"]}\n",
+            "{\"worktree\":42,\"files\":[\"engine/a.c\"]}\n",
+            "{\"worktree\":\"\",\"files\":[\"engine/a.c\"]}\n",
+            "{\"worktree\":\"relative\",\"files\":[\"engine/a.c\"]}\n",
+            "{\"worktree\":\"" DVX_FOREIGN "\xff\",\"files\":[\"engine/a.c\"]}\n",
+            "[{\"worktree\":\"" DVX_FOREIGN "\",\"files\":[\"engine/a.c\"]}]\n",
+            "{\"worktree\":\"" DVX_FOREIGN "\",\"files\":[\"engine/a.c\"]\n",
+            "{\"worktree\":\"" DVX_FOREIGN "\\u0000x\",\"files\":[\"engine/a.c\"]}\n",
+            "{\"expires_unix\":1,\"worktree\":null,\"files\":[\"engine/a.c\"]}\n",
+            oversized, NULL};
+        const char *files[] = {"engine/a.c", NULL};
+        for (size_t i = 0; rows[i]; i++) {
+            ASSERT(dvx_write(repo, ".git/z23-agent-claims.jsonl", rows[i]));
+            struct dvx_call c;
+            dvx_claim(&c, repo, "owner-probe", files, false);
+            ASSERT(dvx_run(&c) && !dvx_ok(&c));
+            ASSERT_STR_EQ(c.reply.error.code, "CLAIM_OVERLAP");
+            dvx_end(&c);
+            ASSERT(dvx_ledger_matches(ledger, rows[i]));
+            dvx_claim(&c, repo, NULL, NULL, true);
+            ASSERT(dvx_run(&c) && dvx_ok(&c));
+            ASSERT_EQ(dvx_int(&c, "released"), 0);
+            dvx_end(&c);
+            ASSERT(dvx_ledger_matches(ledger, rows[i]));
+        }
+        ASSERT_EQ(test_rm_rf_recursive(repo), 0);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int dvx_owner_roundtrip_tests(void)
+{
+    int failures = 0;
+    TEST("claim: escaped root owner identity permits genuine renewal and release") {
+        char repo[512], ledger[1024], suffix[2048], row[4096];
+        test_make_tmpdir(repo, sizeof repo, "devagent_claim", "owner-roundtrip");
+        ASSERT(dvx_fixture(repo));
+        (void)snprintf(ledger, sizeof ledger, "%s/.git/z23-agent-claims.jsonl", repo);
+        struct json_value text;
+        json_init(&text);
+        json_set_str(&text, repo + 1);
+        size_t n = json_write(&text, suffix, sizeof suffix);
+        json_free(&text);
+        ASSERT(n > 1 && n < sizeof suffix);
+        (void)snprintf(row, sizeof row,
+            "{\"worktree\":\"\\u%04x%s,\"files\":[\"engine/a.c\"]}\n",
+            (unsigned char)repo[0], suffix + 1);
+        ASSERT(json_valid(row, strlen(row)));
+        ASSERT(dvx_write(repo, ".git/z23-agent-claims.jsonl", row));
+        const char *files[] = {"engine/a.c", NULL};
+        struct dvx_call c;
+        dvx_claim(&c, repo, "genuine-renewal", files, false);
+        ASSERT(dvx_run(&c) && dvx_ok(&c));
+        ASSERT_EQ(dvx_int(&c, "live"), 1);
+        dvx_end(&c);
+        ASSERT(dvx_write(repo, ".git/z23-agent-claims.jsonl", row));
+        dvx_claim(&c, repo, NULL, NULL, true);
+        ASSERT(dvx_run(&c) && dvx_ok(&c));
+        ASSERT_EQ(dvx_int(&c, "released"), 1);
+        dvx_end(&c);
+        ASSERT(dvx_ledger_matches(ledger, ""));
         ASSERT_EQ(test_rm_rf_recursive(repo), 0);
         PASS();
     }
@@ -718,6 +832,7 @@ int test_devagent_claim(void);
 int test_devagent_claim(void)
 {
     int failures = dvx_lease_tests() + dvx_expiry_scope_tests() +
+                   dvx_owner_authority_tests() + dvx_owner_roundtrip_tests() +
                    dvx_metadata_tests() + dvx_unreadable_tests() +
                    dvx_write_failure_tests() + dvx_interleaved_tests() +
                    dvx_release_input_tests();

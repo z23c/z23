@@ -661,10 +661,38 @@ static bool dvc_ledger_load(const char *path, struct dvc_ledger *lg,
     return true;
 }
 
+/* Owner identity grants skip/delete authority, so only an unambiguous root
+ * string qualifies. Do not resolve another worktree's path on the filesystem. */
+static bool dvc_line_owner(const char *line, char *out, size_t cap)
+{
+    struct json_value row;
+    json_init(&row);
+    size_t len = strlen(line), keys = 0;
+    const char *owner = NULL;
+    bool valid = false;
+    if (zutf8_validate_n(line, len) && json_read(&row, line, len) &&
+        row.type == JSON_OBJ) {
+        for (size_t i = 0; i < row.num_children; i++) {
+            if (strcmp(row.keys[i], "worktree") == 0) {
+                keys++;
+                const struct json_value *value = &row.children[i];
+                owner = value->type == JSON_STR ? json_get_str(value) : NULL;
+            }
+        }
+        if (keys == 1 && owner && platform_path_is_absolute(owner)) {
+            size_t owner_len = strlen(owner);
+            valid = owner_len < cap;
+            if (valid) memcpy(out, owner, owner_len + 1);
+        }
+    }
+    json_free(&row);
+    return valid;
+}
+
 static bool dvc_line_is_ours(const char *line, const char *toplevel)
 {
     char wt[PATH_MAX];
-    return dvc_line_str(line, "worktree", wt, sizeof(wt)) &&
+    return dvc_line_owner(line, wt, sizeof(wt)) &&
            strcmp(wt, toplevel) == 0;
 }
 
@@ -1271,10 +1299,16 @@ static bool dvc_check_overlap(const struct dvc_facts *facts,
     size_t nconf = 0;
     for (size_t i = 0; i < lg->n; i++) {
         char wt[PATH_MAX];
-        if (dvc_line_expired(lg->lines[i], now) ||
-            !dvc_line_str(lg->lines[i], "worktree", wt, sizeof(wt)) ||
-            strcmp(wt, facts->toplevel) == 0)
-            continue; /* unreadable or our own line: never conflicts */
+        if (!dvc_line_owner(lg->lines[i], wt, sizeof(wt))) {
+            json_free(&conflicts);
+            dvc_fail(reply, "CLAIM_OVERLAP", "claim",
+                     "the claim ledger has an invalid or ambiguous worktree owner",
+                     facts->ledger);
+            return false;
+        }
+        if (strcmp(wt, facts->toplevel) == 0 ||
+            dvc_line_expired(lg->lines[i], now))
+            continue;
         nconf += dvc_line_conflicts(lg->lines[i], wt, norm, &conflicts);
     }
     if (nconf > 0) {
