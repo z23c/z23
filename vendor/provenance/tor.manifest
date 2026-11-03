@@ -1,0 +1,13 @@
+schema=zclassic23.committed-vendor-manifest.v1
+component=tor
+source_status=submodule-pinned
+source_url=https://github.com/RhettCreighton/tor.git
+source_revision=f4e28103c0eb9016e0b500d02486b7a59d20ee5d
+license=BSD-3-Clause (Tor); Apache-2.0 (src/feature/dynhost)
+archive=none
+build=make tor-full -> vendor/tor (host, compiled in place) or vendor/cross/<triple>/tor (cross, from a clean export of the pin)
+build_time_patch=vendor/patches/tor-dynhost-stream-shutdown.patch
+build_time_patch_sha256=999e074bf3b444bbc32ba1889633bd6b77677557450c8798a45b3f2fc7d4580f
+build_time_patch_base=f4e28103c0eb9016e0b500d02486b7a59d20ee5d
+archive_attestation=<tor tree>/.provenance source_patch=dynhost-stream-shutdown-v1, written only when libtor.a defines dynhost_stream_init
+note=The patch makes the dynhost subsystem shutdown fire the terminal event for every pending and active stream and refuse later opens. The host build applies it only for the compile and reverts it, so the submodule checkout keeps the pinned bytes.

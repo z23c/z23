@@ -5,8 +5,13 @@
  * These tests verify that invariant is never violated. */
 
 #include "test/test_core.h"
+#include "base/compiler.h"
 #include "net/tor_integration.h"
 #include "net/onion_service.h"
+#include "net/onion_stream.h"
+#include "net/onion_v3_address.h"
+#include "net/netaddr.h"
+#include "net/netbase.h"
 #include "util/log_rotate.h"
 #include "config/boot_internal.h"
 #include "platform/time_compat.h"
@@ -19,6 +24,8 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <stdatomic.h>
 
 /* Remove a fixture tree by delegating to the shared test_rm_rf_recursive():
  * the top argument is normalized (trailing separators stripped) and classified
@@ -1268,6 +1275,201 @@ static int test_tor_leaves_sigterm_to_the_node(void)
     return 1;
 }
 
+/* ── Node stop with an onion dial in flight ──────────────────────────────
+ *
+ * Measured on a phone: Stop node took 165 s because a peer dial was queued
+ * in dynhost when Tor exited. Nothing fired the stream's terminal event, so
+ * the dial waited out its 60 s circuit budget, its 5 s terminal wait, and
+ * then the same again for a retry that dynhost queued after Tor had gone.
+ *
+ * The real thing: embedded Tor with DisableNetwork 1 never completes a
+ * circuit and never processes the queued stream, exactly as on a phone
+ * without a reachable network. The dial runs on the production budget
+ * (two 60 s attempts) through a backend that forwards to the real dynhost
+ * calls and counts what they do. Stopping Tor must end the dial within a
+ * few seconds: one terminal event for the queued stream, and the retry's
+ * open refused at once. */
+extern struct dynhost_stream *dynhost_stream_open(const char *onion,
+    uint16_t port,
+    void (*read_cb)(struct dynhost_stream *, const uint8_t *, size_t, void *),
+    void (*event_cb)(struct dynhost_stream *, int, void *),
+    void *ctx, int timeout_secs) ZCL_WEAK_IMPORT;
+extern int dynhost_stream_write(struct dynhost_stream *, const uint8_t *,
+                                size_t) ZCL_WEAK_IMPORT;
+extern void dynhost_stream_close(struct dynhost_stream *) ZCL_WEAK_IMPORT;
+
+#define STOP_DIAL_BUDGET_MS ONION_STREAM_RETRY_MIN_TOTAL_MS
+#define STOP_DIAL_END_LIMIT_MS 5000
+
+struct stop_dial_stream {
+    onion_stream_read_fn  read_cb;
+    onion_stream_event_fn event_cb;
+    void                 *ctx;
+    _Atomic int           terminal_events;
+};
+
+static struct stop_dial_stream g_stop_dial_streams[2];
+static _Atomic int g_stop_dial_opens;
+static _Atomic int g_stop_dial_queued;
+static _Atomic int g_stop_dial_refused;
+
+static void stop_dial_read(struct dynhost_stream *s, const uint8_t *data,
+                           size_t len, void *ctx)
+{
+    struct stop_dial_stream *rec = ctx;
+    rec->read_cb((struct onion_stream_raw *)s, data, len, rec->ctx);
+}
+
+static void stop_dial_event(struct dynhost_stream *s, int event, void *ctx)
+{
+    struct stop_dial_stream *rec = ctx;
+    if (event == ONION_STREAM_EVENT_CLOSED || event == ONION_STREAM_EVENT_TIMEOUT)
+        atomic_fetch_add(&rec->terminal_events, 1);
+    rec->event_cb((struct onion_stream_raw *)s, event, rec->ctx);
+}
+
+static struct onion_stream_raw *stop_dial_open(
+    const char *onion, uint16_t port, onion_stream_read_fn read_cb,
+    onion_stream_event_fn event_cb, void *ctx, int lifetime_secs)
+{
+    int slot = atomic_fetch_add(&g_stop_dial_opens, 1);
+    if (slot >= 2)
+        return NULL;
+    struct stop_dial_stream *rec = &g_stop_dial_streams[slot];
+    rec->read_cb = read_cb;
+    rec->event_cb = event_cb;
+    rec->ctx = ctx;
+    atomic_store(&rec->terminal_events, 0);
+    struct dynhost_stream *s = dynhost_stream_open(onion, port, stop_dial_read,
+                                                   stop_dial_event, rec,
+                                                   lifetime_secs);
+    atomic_fetch_add(s ? &g_stop_dial_queued : &g_stop_dial_refused, 1);
+    return (struct onion_stream_raw *)s;
+}
+
+static int stop_dial_write(struct onion_stream_raw *s, const uint8_t *data,
+                           size_t len)
+{
+    return dynhost_stream_write((struct dynhost_stream *)s, data, len);
+}
+
+static void stop_dial_close(struct onion_stream_raw *s)
+{
+    dynhost_stream_close((struct dynhost_stream *)s);
+}
+
+static const struct onion_stream_backend g_stop_dial_backend = {
+    .open = stop_dial_open,
+    .write = stop_dial_write,
+    .close = stop_dial_close,
+};
+
+struct stop_dial_run {
+    struct net_service svc;
+    bool               connected;
+    _Atomic bool       done;
+    int64_t            done_ms;
+};
+
+static void *stop_dial_thread(void *arg)
+{
+    struct stop_dial_run *run = arg;
+    zcl_socket_t sock = ZCL_INVALID_SOCKET;
+    run->connected = onion_stream_connect_backend_for_test(
+        &run->svc, &sock, STOP_DIAL_BUDGET_MS, &g_stop_dial_backend);
+    if (sock != ZCL_INVALID_SOCKET)
+        close_socket(&sock);
+    run->done_ms = platform_time_monotonic_ms();
+    atomic_store(&run->done, true);
+    return NULL;
+}
+
+static bool stop_dial_service(struct net_service *svc)
+{
+    uint8_t pub[32];
+    for (int i = 0; i < 32; i++)
+        pub[i] = (uint8_t)(0x51 + i);
+    char host[ONION_V3_ADDRESS_LEN + 1];
+    net_service_init(svc);
+    if (!onion_v3_address_from_pubkey(pub, host) ||
+        !net_addr_from_onion(host, &svc->addr))
+        return false;
+    svc->port = 8033;
+    return true;
+}
+
+/* Returns true once the dial thread finished; waits at most limit_ms. */
+static bool stop_dial_wait_done(struct stop_dial_run *run, int limit_ms)
+{
+    for (int waited = 0; waited < limit_ms && !atomic_load(&run->done);
+         waited += 25)
+        platform_sleep_ms(25); /* real-clock: the dial runs on its own thread */
+    return atomic_load(&run->done);
+}
+
+/* Queue one dial against a running Tor, stop Tor, and time the end. */
+static const char *stop_dial_measure(const char *tmpdir, int64_t *end_ms)
+{
+    static struct stop_dial_run run;
+    memset(&run, 0, sizeof(run));
+    pthread_t tid;
+    if (!stop_dial_service(&run.svc))
+        return "onion fixture address";
+    if (!tor_integration_start(tmpdir, 39251))
+        return "tor_integration_start";
+    if (!wait_tor_main_loop(tmpdir, 90))
+        return "tor main loop never reached";
+    if (pthread_create(&tid, NULL, stop_dial_thread, &run) != 0)
+        return "dial thread";
+    for (int i = 0; i < 200 && atomic_load(&g_stop_dial_queued) == 0; i++)
+        platform_sleep_ms(25); /* real-clock: the dial thread queues the stream */
+    int64_t stop_ms = platform_time_monotonic_ms();
+    tor_integration_stop();
+    bool ended = stop_dial_wait_done(&run, STOP_DIAL_BUDGET_MS + 15000);
+    pthread_join(tid, NULL);
+    *end_ms = run.done_ms - stop_ms;
+    if (!ended)
+        return "dial never ended";
+    return run.connected ? "dial reported a circuit" : NULL;
+}
+
+static int test_tor_stop_ends_onion_dial(void)
+{
+    printf("test_tor_stop_ends_onion_dial: ");
+    if (!app_tor_real_build_linked() || !dynhost_stream_open ||
+        !dynhost_stream_write || !dynhost_stream_close) {
+        printf("OK (stub Tor linked: no dynhost streams to end)\n");
+        return 0;
+    }
+    tor_integration_stop();
+    memset(g_stop_dial_streams, 0, sizeof(g_stop_dial_streams));
+    atomic_store(&g_stop_dial_opens, 0);
+    atomic_store(&g_stop_dial_queued, 0);
+    atomic_store(&g_stop_dial_refused, 0);
+    char tmpdir[512];
+    test_make_tmpdir(tmpdir, sizeof(tmpdir), "torrc", "stopdial");
+    /* Local fixtures only: Tor must not bootstrap to the public network. */
+    tor_integration_set_extra_torrc_for_test("DisableNetwork 1");
+
+    int64_t end_ms = -1;
+    const char *why = stop_dial_measure(tmpdir, &end_ms);
+    tor_integration_stop();
+    tor_integration_set_extra_torrc_for_test("");
+    remove_tree(tmpdir);
+
+    int queued = atomic_load(&g_stop_dial_queued);
+    int refused = atomic_load(&g_stop_dial_refused);
+    int terminal = atomic_load(&g_stop_dial_streams[0].terminal_events);
+    if (!why && end_ms > STOP_DIAL_END_LIMIT_MS)
+        why = "dial outlived the stop";
+    if (!why && (queued != 1 || terminal != 1 || refused != 1))
+        why = "stream events";
+    printf("%s (end_after_stop_ms=%lld queued=%d terminal=%d refused=%d%s%s)\n",
+           why ? "FAIL" : "OK", (long long)end_ms, queued, terminal, refused,
+           why ? " reason=" : "", why ? why : "");
+    return why ? 1 : 0;
+}
+
 static int test_tor_write_torrc_reduced_padding(void)
 {
     int failures = 0;
@@ -1528,6 +1730,7 @@ int test_tor(void)
     failures += test_tor_write_torrc_disables_signal_handlers();
     failures += test_tor_write_torrc_reports_write_failure();
     failures += test_tor_leaves_sigterm_to_the_node();
+    failures += test_tor_stop_ends_onion_dial();
     failures += test_tor_write_torrc_no_collision();
     failures += test_tor_write_torrc_datadir();
     failures += test_tor_write_torrc_idempotent();

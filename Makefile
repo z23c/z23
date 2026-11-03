@@ -2272,6 +2272,7 @@ check-vendor-provenance: tor-provenance-ready $(TOR_PROVENANCE_BIN) $(BIN_DIR)/z
 	@sha256sum --check vendor/typography/SHA256SUMS
 	@sha256sum --check vendor/x11/SHA256SUMS
 	@sha256sum --check vendor/freebsd-sh/SHA256SUMS
+	@test "$$(sha256sum < vendor/patches/tor-dynhost-stream-shutdown.patch | cut -d" " -f1)" = "$$(sed -n 's/^build_time_patch_sha256=//p' vendor/provenance/tor.manifest)" || { echo "check-vendor-provenance: vendor/provenance/tor.manifest does not record the digest of vendor/patches/tor-dynhost-stream-shutdown.patch" >&2; exit 1; }
 	@./build/bin/z23-lint check-tor-provenance
 
 # Reusable native presentation package. This deliberately has a tiny source

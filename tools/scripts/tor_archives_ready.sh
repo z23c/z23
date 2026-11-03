@@ -334,7 +334,7 @@ case "${1:-ready}" in
         mkdir -p "$fake_primary" "$fake_wt"
         for a in "${ARCHIVES[@]}"; do
             mkdir -p "$fake_primary/${a%/*}"
-            printf 'fixture tor archive bytes\n' >"$fake_primary/$a"
+            printf 'fixture tor archive bytes dynhost_stream_init\n' >"$fake_primary/$a"
         done
         # Fixture and have_all derive the same compiler identity from the
         # missing-Makefile fallback; copied bytes retain producer provenance.
@@ -441,7 +441,20 @@ case "${1:-ready}" in
         # on tor_provenance.c). Reuse fake_wt: it already holds the four
         # archives link_from just populated, and it also now holds the
         # carried manifest, so delete only the manifest.
-        sed '/^fatal_handler_policy=/d' "$fake_primary/$TOR_TREE/.provenance" > \
+        # A manifest from before the source patch existed is an older
+        # producer's complete record: rebuild-eligible, never ready.
+        sed '/^source_patch=/d' "$fake_primary/$TOR_TREE/.provenance" > \
+            "$fake_wt/$TOR_TREE/.provenance"
+        "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" check-legacy-policy-rebuild \
+            "$fake_wt/$TOR_TREE" "$(printf '%040x' 1)" "$selftest_cid" >/dev/null || {
+            echo 'tor-ready: selftest FAILED intact pre-patch bundle refused' >&2
+            exit 1
+        }
+        if (ROOT="$fake_wt"; cd "$fake_wt" && have_all) >/dev/null 2>&1; then
+            echo 'tor_archives_ready: selftest FAILED — pre-patch manifest passed readiness' >&2
+            exit 1
+        fi
+        sed '/^fatal_handler_policy=/d; /^source_patch=/d' "$fake_primary/$TOR_TREE/.provenance" > \
             "$fake_wt/$TOR_TREE/.provenance"
         "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" check-legacy-policy-rebuild \
             "$fake_wt/$TOR_TREE" "$(printf '%040x' 1)" "$selftest_cid" >/dev/null || {
@@ -527,7 +540,7 @@ case "${1:-ready}" in
             mkdir -p "$fake_wt3"
             for a in "${ARCHIVES[@]}"; do
                 mkdir -p "$fake_wt3/${a%/*}"
-                printf 'fixture tor archive bytes\n' >"$fake_wt3/$a"
+                printf 'fixture tor archive bytes dynhost_stream_init\n' >"$fake_wt3/$a"
             done
             alias_cid="$(zcl_tor_compiler_identity_for_cc "$SCRIPT_ROOT" gcc 2>/dev/null)" || {
                 echo "tor_archives_ready: selftest FAILED — could not derive the gcc alias compiler id" >&2

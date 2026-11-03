@@ -74,6 +74,14 @@ TOR_BUILD_DIR="$TOR_DIR"
 # instead; see the cross block below.
 TOR_SRC_DIR="$TOR_DIR"
 VENDOR_ROOT_DIR="$ROOT/vendor"
+# The one local deviation from the pinned fork (vendor/AGENTS.md: deviations
+# live only as patches). It ends every dynhost stream when Tor's dynhost
+# subsystem shuts down and refuses opens afterwards, so a node stop never
+# waits out an onion dial. tools/tor_provenance.c attests that libtor.a
+# carries it; vendor/provenance/tor.manifest records its digest.
+TOR_PATCH="$ROOT/vendor/patches/tor-dynhost-stream-shutdown.patch"
+[ -s "$TOR_PATCH" ] || { echo "tor-full: missing $TOR_PATCH" >&2; exit 1; }
+tor_patch_sha256="$(sha256sum "$TOR_PATCH" | awk '{print $1}')"
 if [ -n "$VENDOR_TARGET" ]; then
     TOR_BUILD_DIR="$ROOT/vendor/cross/$VENDOR_TARGET/tor"
     TOR_SRC_DIR="$ROOT/vendor/cross/$VENDOR_TARGET/tor-src"
@@ -103,17 +111,20 @@ fi
 # only reason a Windows cross build works at all on a box that already ran
 # `make tor-full` for the host, which is every box that develops here.
 #
-# Re-exported only when the export is absent or its recorded pin differs, so
-# the ordinary rerun costs one file read.
+# Re-exported only when the export is absent or its recorded pin or patch
+# digest differs, so the ordinary rerun costs one file read. The export is a
+# build-time copy, so the patch stays applied there.
 if [ -n "$VENDOR_TARGET" ]; then
     pin="$(git -C "$TOR_DIR" rev-parse HEAD)"
+    export_id="$pin patch_sha256=$tor_patch_sha256"
     if [ ! -f "$TOR_SRC_DIR/.zcl-tor-pin" ] ||
-       [ "$(cat "$TOR_SRC_DIR/.zcl-tor-pin" 2>/dev/null)" != "$pin" ]; then
+       [ "$(cat "$TOR_SRC_DIR/.zcl-tor-pin" 2>/dev/null)" != "$export_id" ]; then
         echo "tor-full: exporting the pinned Tor source for $VENDOR_TARGET (clean srcdir; the host build configured vendor/tor in place)"
         rm -rf "$TOR_SRC_DIR"
         mkdir -p "$TOR_SRC_DIR"
         git -C "$TOR_DIR" archive --format=tar HEAD | tar -x -C "$TOR_SRC_DIR"
-        printf '%s\n' "$pin" > "$TOR_SRC_DIR/.zcl-tor-pin"
+        patch -p1 -s -f -d "$TOR_SRC_DIR" <"$TOR_PATCH"
+        printf '%s\n' "$export_id" > "$TOR_SRC_DIR/.zcl-tor-pin"
     fi
 fi
 
@@ -339,7 +350,37 @@ esac
 if [ "$clean_rebuild" = true ]; then
     make -C "$TOR_BUILD_DIR" -j"$jobs" clean
 fi
+
+# The host build compiles the submodule checkout in place, so the patch is
+# applied only for the compile and reverted afterwards: the checkout keeps
+# the pinned bytes and reports no local modification. A run interrupted
+# before the revert leaves it applied; the next run recognises that state.
+# Any other difference is local Tor work, which this script never rewrites.
+tor_patch_reverted=true
+revert_host_patch() {
+    if [ "$tor_patch_reverted" != true ]; then
+        patch -p1 -R -s -f -d "$TOR_DIR" <"$TOR_PATCH" >/dev/null &&
+            tor_patch_reverted=true
+    fi
+}
+if [ -z "$VENDOR_TARGET" ]; then
+    if ! patch -p1 -R --dry-run -s -f -d "$TOR_DIR" <"$TOR_PATCH" >/dev/null 2>&1; then
+        if ! patch -p1 --dry-run -s -f -d "$TOR_DIR" <"$TOR_PATCH" >/dev/null 2>&1; then
+            echo "tor-full: vendor/tor differs from its pin where ${TOR_PATCH#"$ROOT"/} applies" >&2
+            echo "tor-full: preserve that local Tor work, restore the pinned files, then rerun" >&2
+            exit 3
+        fi
+        patch -p1 -s -f -d "$TOR_DIR" <"$TOR_PATCH" >/dev/null
+    fi
+    tor_patch_reverted=false
+    trap revert_host_patch EXIT
+fi
 make -C "$TOR_BUILD_DIR" -j"$jobs" libtor.a
+revert_host_patch
+if [ "$tor_patch_reverted" != true ]; then
+    echo "tor-full: could not restore the pinned vendor/tor files after the patched compile" >&2
+    exit 1
+fi
 
 for archive in \
     libtor.a \

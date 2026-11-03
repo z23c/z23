@@ -785,7 +785,7 @@ if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--selftest-dev-guard" ]; then
              "$test_tmp/tor-missing-one/vendor/tor/src/ext/keccak-tiny"
     # An empty file is not an archive to the verifier, so these fixtures need
     # real bytes, not just existence.
-    printf 'real bytes\n' >"$test_tmp/tor-present/vendor/tor/libtor.a"
+    printf 'real bytes dynhost_stream_init\n' >"$test_tmp/tor-present/vendor/tor/libtor.a"
     printf 'real bytes\n' >"$test_tmp/tor-present/vendor/tor/src/ext/ed25519/donna/libed25519_donna.a"
     printf 'real bytes\n' >"$test_tmp/tor-present/vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a"
     printf 'real bytes\n' >"$test_tmp/tor-present/vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a"
@@ -798,7 +798,7 @@ if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--selftest-dev-guard" ]; then
     mkdir -p "$test_tmp/tor-bad-provenance/vendor/tor/src/ext/ed25519/donna" \
              "$test_tmp/tor-bad-provenance/vendor/tor/src/ext/ed25519/ref10" \
              "$test_tmp/tor-bad-provenance/vendor/tor/src/ext/keccak-tiny"
-    printf 'real bytes\n' >"$test_tmp/tor-bad-provenance/vendor/tor/libtor.a"
+    printf 'real bytes dynhost_stream_init\n' >"$test_tmp/tor-bad-provenance/vendor/tor/libtor.a"
     printf 'real bytes\n' >"$test_tmp/tor-bad-provenance/vendor/tor/src/ext/ed25519/donna/libed25519_donna.a"
     printf 'real bytes\n' >"$test_tmp/tor-bad-provenance/vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a"
     printf 'real bytes\n' >"$test_tmp/tor-bad-provenance/vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a"

@@ -553,6 +553,17 @@ without the doctor learning about it. Prose here can only describe it.
   manifest is simply absent (an honest gap, safe to close); a manifest that
   is present and does not match the archives on disk still fails instead of
   being silently re-attested.
+- Tor carries one local patch,
+  `vendor/patches/tor-dynhost-stream-shutdown.patch`, recorded with its
+  digest in `vendor/provenance/tor.manifest`. When the dynhost subsystem
+  shuts down it fires the terminal event for every pending and active
+  stream and refuses later opens, so a node stop never waits out an onion
+  dial. `make tor-full` applies it to the clean export a cross build
+  compiles, and to `vendor/tor` only for the host compile, reverting it
+  afterwards so the submodule keeps its pinned bytes. The manifest's
+  `source_patch` line is written only when `libtor.a` defines
+  `dynhost_stream_init`, and every check requires it; archives from before
+  the patch are an older complete record, so plain `make` rebuilds them.
 
 ### macOS build-and-check host
 
