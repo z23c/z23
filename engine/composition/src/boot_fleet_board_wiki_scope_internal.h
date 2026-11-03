@@ -27,4 +27,9 @@ const char *boot_fleet_wiki_scope_refusal(struct node_db *ndb,
     const struct fleet_board_post *post, const char **code, char *buf,
     size_t cap);
 
+/* Is a stored review one this view projects: its scope, and for the public
+ * view the default room. */
+bool boot_fleet_wiki_review_in_view(enum fleet_wiki_view view,
+                                    const struct fleet_board_post *post);
+
 #endif

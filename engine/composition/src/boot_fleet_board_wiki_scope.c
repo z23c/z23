@@ -85,3 +85,12 @@ const char *boot_fleet_wiki_scope_refusal(struct node_db *ndb,
     }
     return NULL;
 }
+
+bool boot_fleet_wiki_review_in_view(enum fleet_wiki_view view,
+                                    const struct fleet_board_post *post)
+{
+    if (post->scope != fleet_wiki_view_scope(view))
+        return false;
+    return view == FLEET_WIKI_VIEW_FLEET ||
+           !strcmp(post->room, FLEET_BOARD_ROOM_DEFAULT);
+}

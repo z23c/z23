@@ -1119,8 +1119,7 @@ static void fb_op_wiki_reviews(struct node_db *ndb, enum fleet_wiki_view view,
     bool ok = true;
     for (size_t i = 0; i < count; i++) {
         const struct fleet_board_post *post = &rows[i].post;
-        if (post->scope != fleet_wiki_view_scope(view) ||
-            (view != FLEET_WIKI_VIEW_FLEET && strcmp(post->room, FLEET_BOARD_ROOM_DEFAULT))) continue;
+        if (!boot_fleet_wiki_review_in_view(view, post)) continue;
         struct json_value item;
         json_init(&item); json_set_object(&item);
         ok = fb_review_render_row(ndb, &rows[i], &item);
