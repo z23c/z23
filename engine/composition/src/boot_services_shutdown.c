@@ -19,6 +19,7 @@
 #include "util/thread_registry.h"
 #include "util/log_macros.h"
 #include "health/heartbeat.h"
+#include "controllers/wallet_private_broadcast.h"
 #include "supervisors/self_heal.h"
 #include "services/sync_monitor.h"
 #include "supervisors/staged_sync_supervisor.h"
@@ -285,6 +286,9 @@ static bool shutdown_stop_runtime_and_drain_workers(struct boot_svc_ctx *svc)
      * network-quiesce stage (before connman_free); this idempotent call only
      * covers paths that skip that stage. */
     self_heal_stop();
+    /* The wallet private-broadcast ticker is caller-joined (not registry-owned);
+     * join it before the registry drain and before the node DB closes. */
+    wallet_private_broadcast_stop();
     /* The sweeper (health_stop above) was the last periodic
      * node_health_collect caller (RPC and diagnostics stopped earlier). Stop
      * the chain-evidence maintenance helper it fed. A run parked behind

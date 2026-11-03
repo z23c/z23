@@ -2,7 +2,10 @@
  *
  * Wallet send glue for the private relay and its status read. */
 
-// supervisor-ok:bounded-tick-thread-stopped-by-registry-shutdown
+// supervisor-ok:bounded-tick-thread-joined-by-wallet_private_broadcast_stop
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE  /* pthread_timedjoin_np */
+#endif
 #include "controllers/wallet_private_broadcast.h"
 
 #include "controllers/strong_params.h"
@@ -15,12 +18,14 @@
 #include "json/json.h"
 #include "net/connman.h"
 #include "platform/clock.h"
+#include "platform/thread_compat.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
 #include "util/thread_registry.h"
 #include "validation/main_state.h"
 #include "wallet/wallet.h"
 
+#include <pthread.h>
 #include <stdatomic.h>
 #include <string.h>
 
@@ -302,11 +307,30 @@ static void *wallet_private_broadcast_thread(void *arg)
     return NULL;
 }
 
+/* The ticker is spawned with a caller-owned tid, so its stop path must join
+ * it: a registry-owned (NULL out_tid) row stays joinable until the process
+ * wide join_all, which leaked one pthread per restart and tripped TSan's
+ * thread-leak check in every test that cycles start/stop. */
+static pthread_mutex_t g_ticker_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t g_ticker_tid;
+static bool g_ticker_joinable;
+
 void wallet_private_broadcast_stop(void)
 {
     atomic_store(&g_ticker_stop, true);
-    for (int i = 0; i < 200 && atomic_load(&g_ticker_running); i++)
-        platform_sleep_ms(25);
+    pthread_mutex_lock(&g_ticker_mu);
+    if (g_ticker_joinable) {
+        /* A tick can be mid-flight (network, DB); wait it out rather than
+         * detach, bounded so a wedged tick cannot hang the caller forever. */
+        struct timespec deadline;
+        platform_time_realtime_timespec(&deadline);
+        deadline.tv_sec += 30;
+        if (platform_thread_join_until(g_ticker_tid, NULL, &deadline) == 0)
+            g_ticker_joinable = false;
+        else
+            LOG_WARN("wallet", "private broadcast ticker did not stop in time");
+    }
+    pthread_mutex_unlock(&g_ticker_mu);
 }
 
 void wallet_private_broadcast_reserve_spends(const struct wpr_env *env,
@@ -350,15 +374,23 @@ bool wallet_private_broadcast_start(enum wpr_mode mode,
                  resumed.message);
     /* A previous ticker must be gone before the next one starts. */
     wallet_private_broadcast_stop();
+    pthread_mutex_lock(&g_ticker_mu);
+    if (g_ticker_joinable) {
+        pthread_mutex_unlock(&g_ticker_mu);
+        LOG_FAIL("wallet", "previous private broadcast ticker still running");
+    }
     atomic_store(&g_ticker_stop, false);
     atomic_store(&g_ticker_running, true);
-    // thread-supervision-ok:one-second tick owned by the thread registry, stops on shutdown
+    // thread-supervision-ok:one-second tick, tid retained and joined by wallet_private_broadcast_stop
     if (thread_registry_spawn("zcl_wallet_pbcast",
                               wallet_private_broadcast_thread, NULL,
-                              NULL) != 0) {
+                              &g_ticker_tid) != 0) {
         atomic_store(&g_ticker_running, false);
+        pthread_mutex_unlock(&g_ticker_mu);
         LOG_FAIL("wallet", "private broadcast thread did not start");
     }
+    g_ticker_joinable = true;
+    pthread_mutex_unlock(&g_ticker_mu);
     return true;
 }
 
