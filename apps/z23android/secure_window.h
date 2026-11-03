@@ -85,6 +85,29 @@ bool zapp_clip_expire(const struct zapp_clip_ops *ops, int64_t stamp);
  * the next focus. False when every attempt failed. */
 bool zapp_clip_settle(const struct zapp_clip_ops *ops, int64_t stamp, unsigned attempts);
 
+/* A copied address must also leave the clipboard when the process dies during the wait. Each copy writes a mark, the
+ * clip's stamp and the wall-clock time of the copy and never the address, to a 0600 file in the app's files directory.
+ * When the window next has focus, a clip that still carries the marked stamp and is older than the clear interval is
+ * cleared, and the mark is removed. */
+#define ZAPP_CLIP_MARK_FILE "clip_stamp"
+struct zapp_clip_mark { int64_t stamp, copied_ms; };
+/* Writes the mark atomically with mode 0600. */
+bool zapp_clip_mark_save(const char *path, const struct zapp_clip_mark *mark);
+/* False when the file is absent or not a mark. */
+bool zapp_clip_mark_load(const char *path, struct zapp_clip_mark *mark);
+/* Removes the file when it holds this stamp or is not a mark; a newer copy's mark stays. */
+void zapp_clip_mark_forget(const char *path, int64_t stamp);
+enum zapp_clip_verdict {
+    ZAPP_CLIP_LEAVE,      /* Nothing to do yet: unreadable, or the clip is still within the clear interval. */
+    ZAPP_CLIP_DROP_MARK,  /* The clipboard no longer holds the marked clip. */
+    ZAPP_CLIP_PURGE       /* The marked clip is still there past the interval (or the clock went back): clear it. */
+};
+/* held is meaningful only for ZAPP_CLIP_HELD. */
+enum zapp_clip_verdict zapp_clip_leftover(enum zapp_clip_state state, int64_t held, const struct zapp_clip_mark *mark, int64_t now_ms);
+/* Settles the mark at path once: clears our clip when it is overdue and removes the mark. True when no mark is left;
+ * false when the clipboard cannot be read now, the clip is not yet due or the clear was refused. */
+bool zapp_clip_recover(const struct zapp_clip_ops *ops, const char *path, int64_t now_ms);
+
 #ifdef __ANDROID__
 #include <android/input.h>
 #include <android/native_activity.h>
@@ -99,5 +122,8 @@ bool zapp_secure_window_drops(const AInputEvent *event);
  * that clip. Call on the UI thread. False, with a contextual line in the log, when the clipboard refused or the
  * clearing could not be scheduled; the clipboard then does not keep the text. */
 bool zapp_clipboard_copy_sensitive(ANativeActivity *activity, const char *text);
+/* Runs zapp_clip_recover on the system clipboard. Call on the UI thread when the window gains focus, the first moment
+ * the clipboard can be read. */
+void zapp_clipboard_recover(ANativeActivity *activity);
 #endif
 #endif

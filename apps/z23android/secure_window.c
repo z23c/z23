@@ -1,6 +1,12 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+#define _GNU_SOURCE
 #include "secure_window.h"
+#include <fcntl.h>
+#include <inttypes.h>
 #include <stddef.h>
+#include <stdio.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 static struct zapp_touch_gate gate;
 
@@ -73,6 +79,59 @@ bool zapp_clip_settle(const struct zapp_clip_ops *ops, int64_t stamp, unsigned a
         if (ops && ops->pause && i + 1 < attempts) ops->pause(ops->ctx);
     }
     return false;
+}
+
+#define MARK_TEXT_MAX 64
+#define MARK_PATH_MAX 1200
+bool zapp_clip_mark_save(const char *path, const struct zapp_clip_mark *mark)
+{
+    char tmp[MARK_PATH_MAX], text[MARK_TEXT_MAX];
+    int length = snprintf(text, sizeof(text), "%" PRId64 " %" PRId64 "\n", mark->stamp, mark->copied_ms);
+    if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp) || length <= 0) return false;
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) return false;
+    bool ok = fchmod(fd, 0600) == 0 && write(fd, text, (size_t)length) == length && fsync(fd) == 0;
+    ok = close(fd) == 0 && ok;
+    if (ok) ok = rename(tmp, path) == 0;
+    if (!ok) (void)unlink(tmp);
+    return ok;
+}
+bool zapp_clip_mark_load(const char *path, struct zapp_clip_mark *mark)
+{
+    char text[MARK_TEXT_MAX];
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return false;
+    ssize_t got = read(fd, text, sizeof(text) - 1);
+    (void)close(fd);
+    if (got <= 0) return false;
+    text[got] = '\0';
+    int consumed = 0;
+    return sscanf(text, "%" SCNd64 " %" SCNd64 "%n", &mark->stamp, &mark->copied_ms, &consumed) == 2 && consumed > 0;
+}
+void zapp_clip_mark_forget(const char *path, int64_t stamp)
+{
+    struct zapp_clip_mark mark;
+    if (!zapp_clip_mark_load(path, &mark) || mark.stamp == stamp) (void)unlink(path);
+}
+enum zapp_clip_verdict zapp_clip_leftover(enum zapp_clip_state state, int64_t held, const struct zapp_clip_mark *mark, int64_t now_ms)
+{
+    if (state == ZAPP_CLIP_UNREADABLE) return ZAPP_CLIP_LEAVE;
+    if (state == ZAPP_CLIP_EMPTY || held != mark->stamp) return ZAPP_CLIP_DROP_MARK;
+    int64_t age = now_ms - mark->copied_ms;
+    return age < 0 || age >= (int64_t)ZAPP_CLIP_CLEAR_SECONDS * 1000 ? ZAPP_CLIP_PURGE : ZAPP_CLIP_LEAVE;
+}
+bool zapp_clip_recover(const struct zapp_clip_ops *ops, const char *path, int64_t now_ms)
+{
+    struct zapp_clip_mark mark;
+    int64_t held = 0;
+    if (!ops || !ops->current || !ops->clear) return false;
+    if (!zapp_clip_mark_load(path, &mark)) { (void)unlink(path); return true; }
+    enum zapp_clip_state state = ops->current(ops->ctx, &held);
+    enum zapp_clip_verdict verdict = zapp_clip_leftover(state, held, &mark, now_ms);
+    if (verdict == ZAPP_CLIP_LEAVE) return false;
+    if (verdict == ZAPP_CLIP_PURGE && !ops->clear(ops->ctx)) return false;
+    zapp_clip_mark_forget(path, mark.stamp);
+    return true;
 }
 
 #ifdef __ANDROID__
@@ -294,7 +353,7 @@ static struct zapp_clip_ops clip_ops(struct jni_clip *clip)
     return (struct zapp_clip_ops){clip, jni_clip_put, jni_clip_current, jni_clip_clear, jni_clip_pause};
 }
 
-struct clip_expiry { JavaVM *vm; jobject manager; int64_t stamp; };
+struct clip_expiry { JavaVM *vm; jobject manager; int64_t stamp; char path[MARK_PATH_MAX]; };
 /* Waits out the delay, then clears the clip while it is still ours. From Android 10 a background app cannot read the
  * clipboard, so a refused read is retried every few seconds until the app has focus again. */
 static void *clip_expiry_run(void *argument)
@@ -305,42 +364,74 @@ static void *clip_expiry_run(void *argument)
     if ((*job->vm)->AttachCurrentThread(job->vm, &env, NULL) != JNI_OK) { CLIP_LOG("clearing the copied address failed: no JNI thread"); free(job); return NULL; }
     struct jni_clip clip = {env, job->manager, false};
     struct zapp_clip_ops ops = clip_ops(&clip);
-    if (!zapp_clip_settle(&ops, job->stamp, CLIP_RETRY_ATTEMPTS)) CLIP_LOG("the copied address could not be cleared and may still be on the clipboard");
+    if (zapp_clip_settle(&ops, job->stamp, CLIP_RETRY_ATTEMPTS)) zapp_clip_mark_forget(job->path, job->stamp);
+    else CLIP_LOG("the copied address could not be cleared and may still be on the clipboard");
     (*env)->DeleteGlobalRef(env, job->manager);
     (*job->vm)->DetachCurrentThread(job->vm);
     free(job);
     return NULL;
 }
-static bool schedule_expiry(ANativeActivity *activity, jobject manager, int64_t stamp)
+static bool schedule_expiry(ANativeActivity *activity, jobject manager, int64_t stamp, const char *path)
 {
     pthread_t thread;
     struct clip_expiry *job = malloc(sizeof(*job));
     if (!job) return false;
-    *job = (struct clip_expiry){activity->vm, (*activity->env)->NewGlobalRef(activity->env, manager), stamp};
+    *job = (struct clip_expiry){.vm = activity->vm, .manager = (*activity->env)->NewGlobalRef(activity->env, manager), .stamp = stamp};
+    snprintf(job->path, sizeof(job->path), "%s", path);
     bool ok = job->manager && pthread_create(&thread, NULL, clip_expiry_run, job) == 0;
     if (ok) { (void)pthread_detach(thread); return true; }
     if (job->manager) (*activity->env)->DeleteGlobalRef(activity->env, job->manager);
     free(job);
     return false;
 }
+static int64_t realtime_ms(void)
+{
+    struct timespec now;
+    return clock_gettime(CLOCK_REALTIME, &now) == 0 ? (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000 : 0;
+}
+/* The mark file sits in the app's private files directory. */
+static bool mark_path(ANativeActivity *activity, char *path)
+{
+    return activity->internalDataPath &&
+           snprintf(path, MARK_PATH_MAX, "%s/%s", activity->internalDataPath, ZAPP_CLIP_MARK_FILE) < MARK_PATH_MAX;
+}
+/* The clipboard service, valid in the caller's local frame; NULL when the system gives none. */
+static jobject clipboard_manager(ANativeActivity *activity)
+{
+    JNIEnv *env = activity->env;
+    jstring service = zj_string(env, "clipboard");
+    jmethodID get = service ? zj_method(env, activity->clazz, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;") : NULL;
+    jobject manager = get ? (*env)->CallObjectMethod(env, activity->clazz, get, service) : NULL;
+    return zj_clean(env) ? manager : NULL;
+}
 bool zapp_clipboard_copy_sensitive(ANativeActivity *activity, const char *text)
 {
     JNIEnv *env = activity->env;
     int64_t stamp = 0;
+    char path[MARK_PATH_MAX];
     bool ok = false;
     if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)zj_clean(env); CLIP_LOG("copy failed: no local frame"); return false; }
-    jstring service = zj_string(env, "clipboard");
-    jmethodID get = service ? zj_method(env, activity->clazz, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;") : NULL;
-    jobject manager = get ? (*env)->CallObjectMethod(env, activity->clazz, get, service) : NULL;
-    struct jni_clip clip = {env, zj_clean(env) ? manager : NULL, false};
+    struct jni_clip clip = {env, clipboard_manager(activity), false};
     struct zapp_clip_ops ops = clip_ops(&clip);
-    if (!clip.manager) CLIP_LOG("copy failed: no clipboard service");
+    if (!clip.manager || !mark_path(activity, path)) CLIP_LOG("copy failed: no clipboard service or files directory");
     else if (!zapp_clip_copy(&ops, text, &stamp)) CLIP_LOG("copy failed: setPrimaryClip refused the address");
-    else if (!schedule_expiry(activity, clip.manager, stamp)) {
+    else if (!zapp_clip_mark_save(path, &(struct zapp_clip_mark){stamp, realtime_ms()}) || !schedule_expiry(activity, clip.manager, stamp, path)) {
         CLIP_LOG("copy undone: the clear could not be scheduled");
         (void)zapp_clip_expire(&ops, stamp);
+        zapp_clip_mark_forget(path, stamp);
     } else ok = true;
     (*env)->PopLocalFrame(env, NULL);
     return ok;
+}
+void zapp_clipboard_recover(ANativeActivity *activity)
+{
+    JNIEnv *env = activity->env;
+    char path[MARK_PATH_MAX];
+    if (!mark_path(activity, path) || access(path, F_OK) != 0) return;
+    if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)zj_clean(env); return; }
+    struct jni_clip clip = {env, clipboard_manager(activity), false};
+    struct zapp_clip_ops ops = clip_ops(&clip);
+    if (clip.manager) (void)zapp_clip_recover(&ops, path, realtime_ms());
+    (*env)->PopLocalFrame(env, NULL);
 }
 #endif

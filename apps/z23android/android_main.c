@@ -588,7 +588,9 @@ static void pause_activity(ANativeActivity *activity)
 }
 static void focus_changed(ANativeActivity *activity, int focused)
 {
-    if (focused) zapp_native_ui_focus(activity->env);
+    if (!focused) return;
+    zapp_clipboard_recover(activity);
+    zapp_native_ui_focus(activity->env);
 }
 static void resume_activity(ANativeActivity *activity)
 {
