@@ -1624,6 +1624,8 @@ void zcl_dev_proof_changed_set_release(struct zcl_dev_proof_changed_set *set)
     set->fresh_path = NULL;
     set->fresh_count = 0;
     set->fresh_sidecars = 0;
+    set->deleted_path = NULL;
+    set->deleted_count = 0;
 }
 
 /* Read a captured list whole. Refuses with the observed byte count rather than
@@ -2844,14 +2846,76 @@ static void dp_changed_set_split_classify(
     dp_changed_set_sidecar_classify(c, refs, status, set);
 }
 
-/* Mark a structural row. With `kinds` the caller settles an added `.c`
- * itself (it may be a split out of a modified sibling); without it every add
- * is structural. */
+/* ---- Deleted shell script ----
+ *
+ * A script deleted outright (the shell-to-C program does this in almost every
+ * lane) adds no include edge and no `__has_include` probe. It is admitted as
+ * exact only when ALL of these hold, each read at `local`, the revision being
+ * verified:
+ *   - the row's status is `D` and its safe path ends in `.sh`;
+ *   - no tracked file at `local` names its basename anywhere. A plain
+ *     substring search over every tracked file, so no Makefile rule, test,
+ *     script, C source, rule table, baseline or document can run or read it,
+ *     and an include or embed line that names it (an `#include`, `#embed`,
+ *     `__has_include`, a continuation or a macro-pasted name) is caught
+ *     without being parsed.
+ * It keeps its own path in the plan, so the groups the rule table maps that
+ * path to still run, and it never takes the docs-only shortcut. Any other
+ * deleted, renamed or type-changed row, and any git failure, leaves the row
+ * structural. */
+#define DP_DELETED_CANDIDATES_MAX 64
+#define DP_DELETED_REASON "deleted-script-closure"
+
+static bool dp_deleted_is_sh(const char *path)
+{
+    size_t n = strlen(path);
+    return n > 3 && strcmp(path + n - 3, ".sh") == 0;
+}
+
+static bool dp_deleted_admit(const struct dp_split_ctx *c, const char *path)
+{
+    const char *leaf = dp_split_leaf(path);
+    if (!dp_split_name_safe(path) || strlen(leaf) > DP_SPLIT_LEAF_MAX ||
+        leaf[0] == '-')
+        return false;
+    const char *argv[] = {"git", "grep", "-q", "-a", "-F", "-e", leaf,
+                          c->local, NULL};
+    return dp_split_git(c->root, argv, NULL, 0) == 1;
+}
+
+/* Settle every deleted `.sh` row: an unreferenced one is counted and stays in
+ * the plan; the rest become structural exactly as a deletion always was. */
+static void dp_changed_set_deleted_classify(
+    const struct dp_split_ctx *c, const char **refs, const char *status,
+    struct zcl_dev_proof_changed_set *set)
+{
+    size_t candidates = 0;
+    for (size_t i = 0; i < set->count; i++) {
+        if (status[i] != 'D' || !dp_deleted_is_sh(refs[i])) continue;
+        if (candidates++ < DP_DELETED_CANDIDATES_MAX &&
+            dp_deleted_admit(c, refs[i])) {
+            if (!set->deleted_path) set->deleted_path = refs[i];
+            set->deleted_count++;
+        } else {
+            if (!set->structural_path) {
+                set->structural_path = refs[i];
+                set->structural_status = 'D';
+            }
+            set->structural_count++;
+        }
+    }
+}
+
+/* Mark a structural row. With `kinds` the caller settles an added `.c` or a
+ * deleted `.sh` itself (it may be a split out of a modified sibling, or a
+ * script nothing names); without it every add and delete is structural. */
 static void dp_changed_set_mark_row(struct zcl_dev_proof_changed_set *mark,
                                     const char *path, char status, bool kinds)
 {
-    bool deferred = kinds && status == 'A' &&
-                    (dp_split_is_c(path) || dp_fresh_is_sidecar(path));
+    bool deferred = kinds &&
+                    ((status == 'A' &&
+                      (dp_split_is_c(path) || dp_fresh_is_sidecar(path))) ||
+                     (status == 'D' && dp_deleted_is_sh(path)));
     if (!dp_changed_set_structural_change(status) || deferred) return;
     if (!mark->structural_path) {
         mark->structural_path = path;
@@ -3002,6 +3066,7 @@ bool zcl_dev_proof_changed_set_capture(const char *repo_root, const char *base,
     out->count = count;
     const struct dp_split_ctx split = {repo_root, base, local, scratch_path};
     dp_changed_set_split_classify(&split, refs, kinds, out);
+    dp_changed_set_deleted_classify(&split, refs, kinds, out);
     free(kinds);
     out->bytes = bytes;
     out->files = refs;
@@ -8269,13 +8334,15 @@ bool zcl_dev_proof_test_needs_argv_for_files(const char *jobs,
  * test-selection.log and `dev proof select`, so a lane verify and the proof
  * cannot word the same decision differently. */
 static const char *dp_selection_reason(const struct zcl_devloop_plan *plan,
-                                       bool widened, bool split, bool fresh)
+                                       bool widened, bool split, bool fresh,
+                                       bool deleted)
 {
     return widened                   ? "changed-input-structure"
            : plan->path_universal    ? "path-group-cap"
            : plan->closure_universal ? "closure-universal"
            : split                   ? "split-sibling-closure"
            : fresh                   ? "fresh-source-closure"
+           : deleted                 ? DP_DELETED_REASON
                                      : "impact-plan";
 }
 
@@ -8317,7 +8384,8 @@ void zcl_dev_proof_test_capacity_note(FILE *f, const struct zcl_devloop_plan *pl
  * (reason closure-universal), because its path floor outgrew the group cap
  * (reason path-group-cap), or because an input was added, deleted or
  * type-changed (reason changed-input-structure), and an exact plan says
- * split-sibling-closure when an added `.c` rode on its modified sibling;
+ * split-sibling-closure when an added `.c` rode on its modified sibling and
+ * deleted-script-closure when only unreferenced `.sh` files were deleted;
  * "exact" is the enumerated plan. `host_gated` names every catalog group the
  * universal selector left out because this tree cannot meet the group's
  * declared host need, and which need it was -- so a reader of this file never
@@ -8325,11 +8393,13 @@ void zcl_dev_proof_test_capacity_note(FILE *f, const struct zcl_devloop_plan *pl
 static bool proof_note_test_selection(const struct proof_paths *paths,
                                       const struct zcl_devloop_plan *plan,
                                       bool widened, bool split, bool fresh,
+                                      bool deleted,
                                       uint32_t selected,
                                       const char *host_gated)
 {
     bool universal = plan->closure_universal;
-    const char *reason = dp_selection_reason(plan, widened, split, fresh);
+    const char *reason = dp_selection_reason(plan, widened, split, fresh,
+                                              deleted);
     char path[PATH_MAX];
     if (snprintf(path, sizeof(path), "%s/%s.test-selection.log", paths->logs,
                  paths->key) >= (int)sizeof(path))
@@ -8606,6 +8676,9 @@ static bool dp_changed_set_widen(const struct zcl_dev_proof_changed_set *set,
         if (set->fresh_sidecars > 0)
             zcl_devloop_plan_take_rule_path(plan, DP_FRESH_CAPS_PATH);
     }
+    /* An unreferenced deleted script keeps its path in the plan so its rule
+     * groups run; a deletion is never a docs-only change. */
+    if (set && set->deleted_count > 0) plan->docs_only = false;
     if (!set || !set->structural_path) return false;
     plan->closure_universal = true;
     plan->docs_only = false;
@@ -8637,7 +8710,8 @@ const char *zcl_dev_proof_test_changed_set_reason(
         !zcl_devloop_plan_files(set->files, set->count, &plan))
         return NULL;
     bool widened = dp_changed_set_widen(set, &plan);
-    return dp_selection_reason(&plan, widened, set->split_count > 0, set->fresh_count > 0);
+    return dp_selection_reason(&plan, widened, set->split_count > 0,
+                               set->fresh_count > 0, set->deleted_count > 0);
 }
 #endif
 
@@ -8784,7 +8858,8 @@ static void dp_select_close(const char *root,
     bool widened = dp_changed_set_widen(set, plan);
     if (admitted) {
         out->reason = dp_selection_reason(plan, widened, set->split_count > 0,
-                                         set->fresh_count > 0);
+                                         set->fresh_count > 0,
+                                         set->deleted_count > 0);
         dp_select_capacity_detail(out, plan);
         if (widened) dp_select_structure_detail(out, set);
         return;
@@ -10201,6 +10276,7 @@ struct dp_worker {
     struct dp_docs_fresh_run *docs;
     bool split_closure;
     bool fresh_closure;
+    bool deleted_closure;
     bool structure_widened;
     struct zcl_devloop_plan plan;
     char plan_json[ZCL_DEVLOOP_PLAN_WIRE_MAX];
@@ -10289,6 +10365,7 @@ static void dp_worker_widen(struct dp_worker *w, size_t file_count)
         dp_changed_set_widen(w->changed, &w->plan);
     w->split_closure = w->changed && w->changed->split_count > 0;
     w->fresh_closure = w->changed && w->changed->fresh_count > 0;
+    w->deleted_closure = w->changed && w->changed->deleted_count > 0;
     if (!w->paths->phases[0]) return;
     char note[PROOF_CHANGED_PATH_MAX + 96];
     if (w->structure_widened)
@@ -10310,6 +10387,11 @@ static void dp_worker_widen(struct dp_worker *w, size_t file_count)
         (void)snprintf(note, sizeof(note),
                        "fresh_source_closure path=%s rows=%zu",
                        w->changed->fresh_path, w->changed->fresh_count);
+    else if (w->deleted_closure && !w->plan.closure_universal)
+        (void)snprintf(note, sizeof(note),
+                       "deleted_script_closure path=%s rows=%zu "
+                       "reason=unreferenced_basename",
+                       w->changed->deleted_path, w->changed->deleted_count);
     else
         return;
     (void)zcl_dev_proof_phase_note(w->paths->phases, "changed_set", note);
@@ -10583,7 +10665,7 @@ static bool dp_worker_select(struct dp_worker *w, char *why, size_t why_len)
      * whole-catalog run. */
     if (!proof_note_test_selection(&w->execution, &w->plan,
                                    w->structure_widened, w->split_closure,
-                                   w->fresh_closure,
+                                   w->fresh_closure, w->deleted_closure,
                                    test_count, host_gated)) {
         proof_why(why, why_len, "test_selection_note_unwritable");
         return false;

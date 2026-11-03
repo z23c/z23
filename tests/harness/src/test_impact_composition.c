@@ -7337,6 +7337,218 @@ static int test_ic_changed_set_fresh_source_closure(void)
 }
 
 
+/* ── a deleted shell script that nothing names stays exact ─────────────────
+ *
+ * The shell-to-C program deletes a script in almost every lane. When no
+ * tracked file at the verified revision names its basename, nothing can run
+ * or read it: the selection is the groups the rule table maps its own path
+ * to, under the reason deleted-script-closure. A script that is still named,
+ * any other deleted kind (.c, .h, .def, .txt) and any git failure stay the
+ * full catalog. */
+static bool ic_del_rm(const char *what)
+{
+    return ic_split_git(what);
+}
+
+static bool ic_del_edit_unnamed(void)
+{
+    return ic_del_rm("git rm -q tools/scripts/gone.sh");
+}
+
+static bool ic_del_edit_named_mk(void)
+{
+    return ic_del_rm("git rm -q tools/scripts/named_mk.sh");
+}
+
+static bool ic_del_edit_named_c(void)
+{
+    return ic_del_rm("git rm -q tools/scripts/named_c.sh");
+}
+
+static bool ic_del_edit_named_doc(void)
+{
+    return ic_del_rm("git rm -q tools/scripts/named_doc.sh");
+}
+
+static bool ic_del_edit_mixed(void)
+{
+    return ic_del_rm("git rm -q tools/scripts/gone.sh "
+                     "tools/scripts/named_mk.sh");
+}
+
+static bool ic_del_edit_dot_c(void)
+{
+    return ic_del_rm("git rm -q core/a/lonely.c");
+}
+
+static bool ic_del_edit_dot_h(void)
+{
+    return ic_del_rm("git rm -q core/a/lonely.h");
+}
+
+static bool ic_del_edit_dot_def(void)
+{
+    return ic_del_rm("git rm -q core/a/lonely.def");
+}
+
+static bool ic_del_edit_dot_txt(void)
+{
+    return ic_del_rm("git rm -q docs/lonely.txt");
+}
+
+static bool ic_del_base_build(void)
+{
+    if (system("rm -rf " IC_FIX_SPLIT " && mkdir -p " IC_SPLIT_REPO
+               " && cd " IC_SPLIT_REPO " && git init -q . && git config "
+               "user.email f@example.invalid && git config user.name f && "
+               "git config commit.gpgsign false >/dev/null 2>&1") != 0)
+        return false;
+    return ic_split_w("tools/scripts/gone.sh", "echo gone\n") &&
+           ic_split_w("tools/scripts/named_mk.sh", "echo mk\n") &&
+           ic_split_w("tools/scripts/named_c.sh", "echo c\n") &&
+           ic_split_w("tools/scripts/named_doc.sh", "echo doc\n") &&
+           ic_split_w("Makefile", "all:\n\tsh tools/scripts/named_mk.sh\n") &&
+           ic_split_w("core/a/ref.c", "/* runs named_c.sh */\n") &&
+           ic_split_w("docs/NOTES.md", "run named_doc.sh by hand\n") &&
+           ic_split_w("core/a/lonely.c", "int lonely(void)\n{\n    return 0;\n}\n") &&
+           ic_split_w("core/a/lonely.h", "/* lonely */\n") &&
+           ic_split_w("core/a/lonely.def", "/* lonely */\n") &&
+           ic_split_w("docs/lonely.txt", "lonely\n") &&
+           ic_split_git("git add -A && git commit -qm base && git checkout -q "
+                        "-B base");
+}
+
+static bool ic_del_fixture_build(void)
+{
+    static const struct {
+        const char *name;
+        bool (*edit)(void);
+    } branches[] = {
+        {"unnamed", ic_del_edit_unnamed},
+        {"named_mk", ic_del_edit_named_mk},
+        {"named_c", ic_del_edit_named_c},
+        {"named_doc", ic_del_edit_named_doc},
+        {"mixed", ic_del_edit_mixed},
+        {"dot_c", ic_del_edit_dot_c},
+        {"dot_h", ic_del_edit_dot_h},
+        {"dot_def", ic_del_edit_dot_def},
+        {"dot_txt", ic_del_edit_dot_txt},
+        {"gitfail", ic_del_edit_unnamed},
+    };
+    if (!ic_del_base_build()) return false;
+    for (size_t i = 0; i < sizeof branches / sizeof branches[0]; i++)
+        if (!ic_split_branch(branches[i].name, branches[i].edit)) return false;
+    return ic_split_git("git rev-parse base > ../base.sha");
+}
+
+struct ic_del_case {
+    const char *name;
+    bool exact;
+    bool break_grep;   /* make `git grep` fail while `git diff` still works */
+};
+
+static const struct ic_del_case ic_del_cases[] = {
+    {"unnamed", true, false},     /* a script nothing names */
+    {"named_mk", false, false},   /* still named by the Makefile */
+    {"named_c", false, false},    /* still named by a C source */
+    {"named_doc", false, false},  /* still named by a document */
+    {"mixed", false, false},      /* one unnamed script, one named */
+    {"dot_c", false, false},      /* a deleted .c */
+    {"dot_h", false, false},      /* a deleted .h */
+    {"dot_def", false, false},    /* a deleted .def */
+    {"dot_txt", false, false},    /* a deleted .txt */
+    {"gitfail", false, true},     /* the reference search itself fails */
+};
+
+static bool ic_del_read_sha(const char *name, char *sha, size_t size)
+{
+    char rel[96];
+    if (snprintf(rel, sizeof(rel), IC_FIX_SPLIT "/%s.sha", name) >=
+        (int)sizeof(rel))
+        return false;
+    FILE *f = fopen(rel, "r");
+    bool ok = f && fgets(sha, (int)size, f);
+    if (f) fclose(f);
+    sha[strcspn(sha, "\n")] = '\0';
+    return ok;
+}
+
+static bool ic_del_check(const struct ic_del_case *c,
+                         const struct zcl_dev_proof_changed_set *set,
+                         bool universal, uint32_t selected,
+                         const char *selector, const char *reason)
+{
+    if (!reason || universal != !c->exact) return false;
+    if (!c->exact)
+        return set->structural_path &&
+               strcmp(reason, "changed-input-structure") == 0;
+    bool kept = false;
+    for (size_t i = 0; i < set->count; i++)
+        kept = kept || strcmp(set->files[i], "tools/scripts/gone.sh") == 0;
+    return !set->structural_path && set->deleted_count == 1 && kept &&
+           set->deleted_path &&
+           strcmp(set->deleted_path, "tools/scripts/gone.sh") == 0 &&
+           strcmp(reason, "deleted-script-closure") == 0 &&
+           (size_t)selected < zcl_test_group_catalog_count() &&
+           strstr(selector, "make_lint_gates") != NULL;
+}
+
+static bool ic_del_run_case(const struct ic_del_case *c, const char *base)
+{
+    static char selector[ZCL_DEVLOOP_MAX_PLAN_SELECTIONS *
+                         (ZCL_TEST_GROUP_FULL_MAX + 1)];
+    char head[65], scratch[640], cwd[512], why[256] = {0}, gated[PROOF_HOST_GATED_MAX];
+    struct zcl_dev_proof_changed_set set = {0};
+    uint32_t selected = 0;
+    bool universal = false;
+    if (!ic_del_read_sha(c->name, head, sizeof(head)) ||
+        !getcwd(cwd, sizeof(cwd)) ||
+        snprintf(scratch, sizeof(scratch), "%s/" IC_FIX_SPLIT "/%s.cap", cwd,
+                 c->name) >= (int)sizeof(scratch) ||
+        (c->break_grep && !ic_split_git("git config grep.threads bogus")))
+        return false;
+    bool got = zcl_dev_proof_changed_set_capture(IC_SPLIT_REPO, base, head,
+                                                 scratch, NULL, &set, why,
+                                                 sizeof(why));
+    if (c->break_grep) (void)ic_split_git("git config --unset grep.threads");
+    memset(selector, 0, sizeof(selector));
+    if (!got || !zcl_dev_proof_test_changed_set_selector(
+            &set, IC_FIX_HOST_FULL, selector, sizeof(selector), &selected,
+            &universal, gated, sizeof(gated)))
+        return false;
+    const char *reason = zcl_dev_proof_test_changed_set_reason(&set);
+    printf("invariant=deleted_script case=%s rows=%zu structural=%zu "
+           "deleted=%zu universal=%d selected=%u reason=%s\n", c->name,
+           set.count, set.structural_count, set.deleted_count,
+           universal ? 1 : 0, (unsigned)selected, reason ? reason : "-");
+    bool ok = ic_del_check(c, &set, universal, selected, selector, reason);
+    zcl_dev_proof_changed_set_release(&set);
+    return ok;
+}
+
+static int test_ic_changed_set_deleted_script_closure(void)
+{
+    int failures = 0;
+    static char saved[4096];
+    bool was_set = ic_host_fixture_save(saved, sizeof(saved));
+    TEST("proof changed set: a deleted script nothing names stays exact") {
+        ASSERT(ic_del_fixture_build());
+        ASSERT(ic_host_need_full_root(IC_FIX_HOST_FULL));
+        ic_host_fixture_env(true);
+        char base[65];
+        ASSERT(setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+        ASSERT(ic_del_read_sha("base", base, sizeof(base)));
+        bool bad_case = false;
+        for (size_t i = 0; i < sizeof ic_del_cases / sizeof ic_del_cases[0]; i++)
+            bad_case = !ic_del_run_case(&ic_del_cases[i], base) || bad_case;
+        ASSERT(!bad_case);
+        PASS();
+    } _test_next:;
+    (void)unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
+    ic_host_fixture_restore(saved, was_set);
+    return failures;
+}
+
 /* `dev proof select` / `make agent-verify ONLY=@changed`: a lane verify runs
  * the proof worker's own selection for base..local. Pinned here: a structural
  * range selects the proof's universal set under the proof's own reason, and a
@@ -15821,6 +16033,7 @@ int test_impact_composition(void)
     failures += test_ic_changed_set_widens_structural_changes();
     failures += test_ic_changed_set_split_sibling_closure();
     failures += test_ic_changed_set_fresh_source_closure();
+    failures += test_ic_changed_set_deleted_script_closure();
     failures += test_ic_proof_select_range_matches_proof_selector();
     failures += test_ic_proof_select_route_only();
     failures += test_ic_deleted_input_closes_current_graph();
