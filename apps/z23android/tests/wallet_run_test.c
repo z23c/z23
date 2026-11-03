@@ -13,17 +13,45 @@
 #include <unistd.h>
 
 #include <errno.h>
+#include <fcntl.h>
 #include <spawn.h>
+#include <time.h>
 
 #define TXID "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
-static int spawn_error;   /* when set, the next posix_spawn fails with it */
+static int spawn_error;          /* when set, the next posix_spawn fails with it */
+static atomic_bool stuck_next;   /* when set, the next posix_spawn forks a child that never reaches exec */
+static atomic_bool silent_next;  /* when set, the next posix_spawn runs a program that never answers */
+static atomic_int spawned;       /* the child the last stuck or silent spawn made */
 int __real_posix_spawn(pid_t *pid, const char *path, const posix_spawn_file_actions_t *actions, const posix_spawnattr_t *attr,
                        char *const argv[], char *const envp[]);
+/* The child the app's spawn left on the emulator: forked, every signal blocked, never at exec and never in a process group of
+ * its own. It ends by itself after a minute, so a run that fails to stop it leaves nothing behind. */
+static int stuck_spawn(pid_t *pid)
+{
+    pid_t child = fork();
+    if (child < 0) return errno;
+    if (child == 0) {
+        sigset_t all;
+        sigfillset(&all);
+        sigprocmask(SIG_BLOCK, &all, NULL);
+        struct timespec minute = {.tv_sec = 60};
+        while (nanosleep(&minute, &minute) != 0) {}
+        _exit(0);
+    }
+    *pid = child;
+    atomic_store(&spawned, child);
+    return 0;
+}
 int __wrap_posix_spawn(pid_t *pid, const char *path, const posix_spawn_file_actions_t *actions, const posix_spawnattr_t *attr,
                        char *const argv[], char *const envp[])
 {
-    return spawn_error ? spawn_error : __real_posix_spawn(pid, path, actions, attr, argv, envp);
+    static char *const silent[] = {"sleep", "60", NULL};
+    if (atomic_exchange(&stuck_next, false)) return stuck_spawn(pid);
+    if (!atomic_exchange(&silent_next, false)) return spawn_error ? spawn_error : __real_posix_spawn(pid, path, actions, attr, argv, envp);
+    int rc = __real_posix_spawn(pid, "/bin/sleep", actions, attr, silent, envp);
+    if (!rc) atomic_store(&spawned, *pid);
+    return rc;
 }
 
 /* Run with arguments, this program stands in for the node's command line: it prints what it was asked. */
@@ -114,6 +142,93 @@ static void send_timeouts_run(struct zapp_runtime *r)
     assert(zapp_wallet_send_run(r, "shieldcommit", "SLEEP", 1, got, sizeof(got)) && strstr(got, "\"stdin\":\"SLEEP\""));
     assert(!zapp_wallet_send_run(r, "shieldplan", "SLEEP", 300, got, sizeof(got)) && strstr(got, "timed out"));
     assert(ZAPP_WALLET_COMMIT_MIN_MS >= 300000u);
+}
+
+/* One command on its own thread, so the test can see whether it ends while other calls run. */
+struct call { struct zapp_runtime *r; const char *op; unsigned ms; bool ok; char out[512]; atomic_bool done; };
+static void *call_main(void *arg)
+{
+    struct call *c = arg;
+    c->ok = c->op ? zapp_wallet_send_run(c->r, c->op, "{}", c->ms, c->out, sizeof(c->out)) :
+                    zapp_operation_run(c->r, "status", c->out, sizeof(c->out));
+    atomic_store(&c->done, true);
+    return NULL;
+}
+/* Waits up to the seconds given for a call to end. A call that is still running then has no bound, the defect this test is
+ * for, so the wait is on the real clock, many times longer than the limit under test. */
+static bool ended_within(struct call *c, int seconds)
+{
+    for (int i = 0; i < seconds * 100 && !atomic_load(&c->done); ++i) usleep(10000);
+    return atomic_load(&c->done);
+}
+/* The child is gone and reaped: no zombie is left for this process to collect. */
+static bool reaped(pid_t pid)
+{
+    errno = 0;
+    return pid > 0 && waitpid(pid, NULL, WNOHANG) == -1 && errno == ECHILD;
+}
+/* Runs a plan step of 300 ms on a stuck or silent child, with standard error in a file read back into log. */
+static void limited_plan(const char *root, struct call *c, char *log, size_t cap)
+{
+    char path[500];
+    snprintf(path, sizeof(path), "%s/stderr", root);
+    fflush(stderr);
+    int saved = dup(STDERR_FILENO), fd = open(path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    assert(saved >= 0 && fd >= 0 && dup2(fd, STDERR_FILENO) == STDERR_FILENO);
+    pthread_t thread;
+    assert(pthread_create(&thread, NULL, call_main, c) == 0);
+    assert(ended_within(c, 10) && pthread_join(thread, NULL) == 0);
+    fflush(stderr);
+    assert(dup2(saved, STDERR_FILENO) == STDERR_FILENO && close(saved) == 0);
+    ssize_t n = pread(fd, log, cap - 1, 0);
+    assert(n >= 0 && close(fd) == 0 && unlink(path) == 0);
+    log[n] = 0;
+}
+/* A child stuck between fork and exec, and one that runs and never answers, are each stopped at the limit: the call fails, the
+ * child is killed and reaped, and the log names the command, the pid and whether it had reached exec. */
+static void stopped_children_run(struct zapp_runtime *r, const char *root)
+{
+    char log[1024], want[160];
+    struct call stuck = {.r = r, .op = "plan", .ms = 300}, silent = {.r = r, .op = "plan", .ms = 300};
+    atomic_store(&stuck_next, true);
+    limited_plan(root, &stuck, log, sizeof(log));
+    pid_t child = atomic_load(&spawned);
+    assert(!stuck.ok && strstr(stuck.out, "The command timed out.") && reaped(child));
+    snprintf(want, sizeof(want), "core wallet shielded: no answer within 300 ms, stopped pid %d; it was still between fork and exec", (int)child);
+    assert(strstr(log, want));
+    atomic_store(&silent_next, true);
+    limited_plan(root, &silent, log, sizeof(log));
+    child = atomic_load(&spawned);
+    assert(!silent.ok && strstr(silent.out, "The command timed out.") && reaped(child));
+    snprintf(want, sizeof(want), "no answer within 300 ms, stopped pid %d\n", (int)child);
+    assert(strstr(log, want) && !strstr(log, "between fork and exec"));
+    char got[512];
+    assert(zapp_wallet_send_run(r, "plan", "{}", 60000, got, sizeof(got)) && strstr(got, "core wallet shielded send"));
+}
+/* While a status read waits on a stuck child, another status read and a node start each run at once; the stuck read then fails
+ * at its own limit and its child is reaped. */
+static void stuck_status_run(struct zapp_runtime *r)
+{
+    char got[512];
+    int status;
+    struct call probe = {.r = r};
+    r->read_ms = 3000;
+    atomic_store(&spawned, 0);
+    atomic_store(&stuck_next, true);
+    pthread_t thread;
+    assert(pthread_create(&thread, NULL, call_main, &probe) == 0);
+    for (int i = 0; i < 1000 && !atomic_load(&spawned); ++i) usleep(1000);
+    pid_t child = atomic_load(&spawned);
+    assert(child > 0);
+    assert(zapp_operation_run(r, "status", got, sizeof(got)) && strstr(got, "\"argv\":\"core status -datadir="));
+    assert(zapp_node_start(r, got, sizeof(got)) && r->node > 0);
+    assert(!atomic_load(&probe.done));
+    assert(ended_within(&probe, 10) && pthread_join(thread, NULL) == 0);
+    assert(!probe.ok && strstr(probe.out, "The command timed out.") && reaped(child));
+    assert(waitpid(r->node, &status, 0) == r->node && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    r->node = 0;
+    assert(zapp_node_stop(r, got, sizeof(got)) && !zapp_node_wanted(r));
+    r->read_ms = 0;
 }
 
 #define SECRET "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
@@ -227,6 +342,7 @@ int main(int argc, char **argv)
     assert(setenv("ZCL_WALLET_PASSPHRASE", "decoy", 1) == 0 && setenv("ZCL_ALLOW_PLAINTEXT_WALLET", "1", 1) == 0);
     assert(setenv("ZCL_RECOVERY_PHRASE", "decoy words", 1) == 0 && setenv("ZCL_WALLET_NO_PHRASE_BACKUP", "1", 1) == 0);
     assert(pthread_mutex_init(&r.mutex, NULL) == 0);
+    zapp_nodelog_init(&r.log, NULL, NULL);
     snprintf(r.executable, sizeof(r.executable), "%s", argv[0]);
     snprintf(r.directory, sizeof(r.directory), "%s", root);
     snprintf(r.state_root, sizeof(r.state_root), "%s/state", root);
@@ -268,6 +384,8 @@ int main(int argc, char **argv)
     send_commands_run(&r);
     send_refusals_run(&r);
     send_timeouts_run(&r);
+    stopped_children_run(&r, root);
+    stuck_status_run(&r);
     setup_commands_run(&r);
     setup_refusals_run(&r);
     setup_node_running_run(&r);

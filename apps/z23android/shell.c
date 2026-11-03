@@ -45,6 +45,7 @@ static struct {
     unsigned scans_seen;
     struct zapp_layout *layout;
     char builtin[ZAPP_NAME_CAP], layout_notice[320], action_notice[160];
+    char node_notice[sizeof(((struct zapp_view *)0)->node_action_notice)]; /* shown when the shell has no notice of its own */
     char files[PATH_CAP], external[PATH_CAP];
     struct timespec user_stamp;
     struct json_value phone, app_cards[ZAPP_LAUNCHER_MAX];
@@ -379,7 +380,7 @@ static void set_text(JNIEnv *env, jobject view, const char *text)
 }
 static void show_notice(JNIEnv *env)
 {
-    const char *text = shell.action_notice[0] ? shell.action_notice : shell.layout_notice;
+    const char *text = shell.action_notice[0] ? shell.action_notice : shell.node_notice[0] ? shell.node_notice : shell.layout_notice;
     for (int i = 0; i < SCREEN_COUNT; ++i) set_text(env, shell.notice_views[i], text);
 }
 static void settings_status(JNIEnv *env)
@@ -794,6 +795,10 @@ void zapp_shell_render(JNIEnv *env, const struct zapp_view *view)
     render_scan(env, view, finished, dismissed);
     if (zapp_home_offer_jump(view->pair_offer[0] != 0, shell.current == SCREEN_SCAN, &shell.pair_seen)) go(env, SCREEN_ASSISTANT);
     set_phone_card(view);
+    if (strcmp(shell.node_notice, view->node_action_notice)) {
+        snprintf(shell.node_notice, sizeof(shell.node_notice), "%s", view->node_action_notice);
+        show_notice(env);
+    }
     show_home(env);
     if (shell.current == SCREEN_WALLET) zapp_wallet_ui_render(env);
     if (shell.current == SCREEN_SEND) { zapp_send_ui_render(env); to_wallet_when_building(env); }

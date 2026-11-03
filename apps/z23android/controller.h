@@ -5,7 +5,9 @@
 /* notify may finish concurrently with detach; it must guard its own UI handle. */
 bool zapp_controller_start(const char *files, const char *libs, bool preview, void (*notify)(void));
 void zapp_controller_snapshot(struct zapp_view *view);
-bool zapp_controller_action(const char *action, const char *argument, const char *model);
+/* Takes an owner request: a control runs at once and an action is queued, its view saying at once what it does. False when
+ * the request is refused, with the plain reason in why (which may be NULL). */
+bool zapp_controller_action(const char *action, const char *argument, char *why, size_t cap);
 void zapp_controller_detach(void);
 /* Hidden, the app cancels voice and stops observing the node and fleet, which keep running on
  * their own; shown again, it observes at once. */

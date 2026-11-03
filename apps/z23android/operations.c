@@ -403,7 +403,8 @@ void zapp_runtime_destroy(struct zapp_runtime *r)
 }
 
 #define COMMAND_TIMEOUT_MS 15000
-struct pump { int input, output; pid_t pid; const char *body; size_t sent, length, used; bool truncated; unsigned timeout_ms; };
+struct pump { int input, output; pid_t pid; const char *body; size_t sent, length, used; bool truncated; unsigned timeout_ms;
+              const char *const *args; };
 
 static void pump_output(struct pump *p, char *out, size_t cap)
 {
@@ -429,11 +430,51 @@ static void pump_input(struct pump *p)
     }
 }
 
+static ssize_t read_head(const char *file, char *out, size_t cap)
+{
+    int fd = open(file, O_RDONLY | O_CLOEXEC);
+    ssize_t n = fd >= 0 ? read(fd, out, cap) : -1;
+    if (fd >= 0) close(fd);
+    return n;
+}
+/* Whether a child still has the app's own command line: it was forked and has not reached exec, which gives it the command's. */
+static bool before_exec(pid_t pid)
+{
+    char file[32], self[512], child[512];
+    snprintf(file, sizeof(file), "/proc/%d/cmdline", (int)pid);
+    ssize_t a = read_head("/proc/self/cmdline", self, sizeof(self)), b = read_head(file, child, sizeof(child));
+    return a > 0 && a == b && !memcmp(self, child, (size_t)a);
+}
+/* Logs a command stopped at its limit by its first three words, which are fixed command words, never an argument the owner
+ * gave. */
+static void command_note(const struct pump *p, bool forked_only)
+{
+    char words[64] = "";
+    for (size_t i = 0, at = 0; i < 3 && p->args[i] && at < sizeof(words); ++i)
+        at += (size_t)snprintf(words + at, sizeof(words) - at, "%s%s", i ? " " : "", p->args[i]);
+    const char *how = forked_only ? "; it was still between fork and exec" : "";
+#ifdef __ANDROID__
+    __android_log_print(ANDROID_LOG_ERROR, "z23", "%s: no answer within %u ms, stopped pid %d%s", words, p->timeout_ms, (int)p->pid, how);
+#else
+    fprintf(stderr, "z23: %s: no answer within %u ms, stopped pid %d%s\n", words, p->timeout_ms, (int)p->pid, how);
+#endif
+}
+/* Stops a command that did not answer in time: the child itself first, because one stuck between fork and exec has not made
+ * its process group yet, then the group it made for anything it started. The child stays unreaped until here, so neither id
+ * can name another process, and SIGKILL ends it even with every other signal blocked. */
+static void pump_stop(struct pump *p, int *status)
+{
+    bool forked_only = before_exec(p->pid);
+    (void)kill(p->pid, SIGKILL);
+    (void)kill(-p->pid, SIGKILL);
+    while (waitpid(p->pid, status, 0) < 0 && errno == EINTR) {}
+    command_note(p, forked_only);
+}
 static void pump_finish(struct pump *p, char *out, size_t cap, bool ended, int *status)
 {
     if (p->input >= 0) close(p->input);
     if (p->output >= 0) close(p->output);
-    if (!ended) { (void)kill(-p->pid, SIGKILL); while (waitpid(p->pid, status, 0) < 0 && errno == EINTR) {} }
+    if (!ended) pump_stop(p, status);
     if (!ended) snprintf(out + p->used, cap - p->used, "\nThe command timed out.");
     if (p->truncated && cap > 32) {
         const char marker[] = "\n[Output limit reached]\n";
@@ -482,7 +523,7 @@ static bool command_run(struct zapp_runtime *r, const char *const *args, const c
     argv[n++] = data;
     if (input) argv[n++] = "--input=-";
     argv[n] = NULL;
-    struct pump pump = {.input = stdin_pipe[1], .output = pipes[0], .body = input ? input : "", .length = input ? strlen(input) : 0, .timeout_ms = timeout_ms};
+    struct pump pump = {.input = stdin_pipe[1], .output = pipes[0], .body = input ? input : "", .length = input ? strlen(input) : 0, .timeout_ms = timeout_ms, .args = args};
     pthread_mutex_lock(&r->mutex);
     int rc = r->stopping ? ECANCELED :
              spawn_redirect(r, argv, stdin_pipe[0], pipes[1], &pump.pid);
@@ -498,9 +539,13 @@ static bool command_timed(struct zapp_runtime *r, const char *const *args, const
 {
     return command_run(r, args, input, timeout_ms, out, cap, NULL);
 }
+static unsigned read_limit(const struct zapp_runtime *r)
+{
+    return r->read_ms ? r->read_ms : COMMAND_TIMEOUT_MS;
+}
 static bool command(struct zapp_runtime *r, const char *const *args, const char *input, char *out, size_t cap)
 {
-    return command_timed(r, args, input, COMMAND_TIMEOUT_MS, out, cap);
+    return command_timed(r, args, input, read_limit(r), out, cap);
 }
 
 static void direct_note(const char *id, const char *why)
@@ -723,7 +768,7 @@ static bool setup_stateless(struct zapp_runtime *r, const char *const *args, con
 static bool setup_status(struct zapp_runtime *r, const char *input, char *out, size_t cap)
 {
     static const char *const args[] = {"core", "wallet", "recovery", "status", NULL};
-    return command_timed(r, args, input, COMMAND_TIMEOUT_MS, out, cap);
+    return command_timed(r, args, input, read_limit(r), out, cap);
 }
 bool zapp_wallet_setup_run(struct zapp_runtime *r, const char *op, const char *input, unsigned timeout_ms, char *out, size_t cap)
 {

@@ -28,6 +28,8 @@ struct zapp_runtime {
     struct zapp_nodelog log;
     /* The largest app-console.log kept before it is rotated or truncated; 0 means ZAPP_CONSOLE_CAP. Tests set it small. */
     off_t console_cap;
+    /* The limit of a read command in milliseconds; 0 means 15 s. Tests set it short. */
+    unsigned read_ms;
     /* The last direct node query failed and its reason is logged; cleared by the next success. */
     atomic_bool direct_reported;
     /* A wallet setup command is running: the node is not started until it ends. */
@@ -56,6 +58,9 @@ enum zapp_pace zapp_node_pace(const struct zapp_runtime *r);
  * later calls with an unchanged pace do nothing. Returns false and logs when the file cannot be
  * replaced, leaving the recorded pace unchanged. Not thread safe; callers serialize. */
 bool zapp_node_pace_write(struct zapp_runtime *r, enum zapp_pace pace);
+/* Every command below has a limit. A command that has not answered by then, one still stuck between fork and exec included,
+ * is killed by its own pid and then by the process group it made, reaped and logged, and its call returns false with "The
+ * command timed out." in out. */
 /* Runs one read-only operation and leaves its JSON reply in out. The reply comes from the running
  * node over its local RPC port; when that fails the same operation runs through the CLI, and the
  * reason is logged once until the next success. */

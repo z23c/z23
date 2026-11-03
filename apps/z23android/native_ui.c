@@ -418,7 +418,7 @@ bool zapp_native_ui_input(JNIEnv *env, const AInputEvent *event)
 void zapp_native_ui_update(JNIEnv *env, const char *status, const char *output)
 {
     if (voice_view && status) (void)zj_text(env, voice_view, status);
-    if (notice_view && output) { (void)zj_text(env, notice_view, output); (void)zj_visible(env, notice_view, true); }
+    if (notice_view && output) { (void)zj_text(env, notice_view, output); (void)zj_visible(env, notice_view, output[0] != 0); }
     if (output) zapp_shell_notice(env, output);
 }
 

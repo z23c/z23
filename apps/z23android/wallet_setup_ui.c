@@ -407,7 +407,8 @@ static void draw_reading(JNIEnv *env, const struct wsu_view *v, bool known, int6
     (void)text_view(env, line, 18.0f, WHITE);
     (void)button_view(env, B_CONTINUE, "Continue", GO_COLOR);
 }
-/* What the owner can do after a failure: a wallet that may exist is never offered the choice again. */
+/* What the owner can do after a failure: a wallet that may exist is never offered the choice again, and a phone that cannot
+ * protect a wallet key is offered no Try again. */
 static void draw_failed_buttons(JNIEnv *env, enum wsu_failure failure)
 {
     if (failure == WSU_ASIDE_STUCK) return;
@@ -416,7 +417,7 @@ static void draw_failed_buttons(JNIEnv *env, enum wsu_failure failure)
     } else if (failure == WSU_UNKNOWN || failure == WSU_NO_BIRTHDAY) {
         (void)button_view(env, B_RECHECK, "Check again", BUTTON_COLOR);
         if (failure == WSU_NO_BIRTHDAY) (void)button_view(env, B_START_OVER_ASK, "Start over", BUTTON_COLOR);
-    } else {
+    } else if (wsu_failure_retries(failure)) {
         (void)button_view(env, B_BACK, "Try again", BUTTON_COLOR);
     }
 }

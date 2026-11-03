@@ -704,6 +704,37 @@ static void create_failure_decline_tests(void)
     assert(w.failure == WSU_NO_SCREEN_LOCK);
     wsu_destroy(&w);
 }
+/* A phone that keeps keys only in software: no wallet and no node call, one plain reason and no Try again, from Create and from
+ * Restore, whose typed words are wiped. The other device key refusals keep Try again. */
+static void no_hardware_key_tests(void)
+{
+    struct fake f;
+    struct wsu w;
+    struct wsu_view v;
+    fresh(&f, &w, true);
+    f.wrap_status = ZAPP_DEVKEY_NOT_HARDWARE;
+    create_all(&w);
+    wsu_view_read(&w, &v);
+    assert(v.step == WSU_FAILED && v.failure == WSU_NO_HARDWARE_KEY && !wsu_failure_retries(v.failure));
+    assert(f.script.calls == 0 && f.script.phrase_calls == 0 && f.stops == 0 && f.running && zapp_setup_state(dir) == ZAPP_SETUP_NEEDED);
+    const char *text = wsu_failure_text(v.failure);
+    assert(strstr(text, "cannot protect a wallet key in hardware") && strstr(text, "will not make a wallet here") && !strstr(text, "Try again"));
+    wsu_destroy(&w);
+    fresh(&f, &w, true);
+    f.wrap_status = ZAPP_DEVKEY_NOT_HARDWARE;
+    wsu_open_restore(&w);
+    wsu_set_form(&w, VALID_PHRASE);
+    wsu_restore_job(&w, VALID_PHRASE, 0);
+    wsu_view_read(&w, &v);
+    assert(v.step == WSU_FAILED && v.failure == WSU_NO_HARDWARE_KEY && !v.form[0] && f.script.calls == 0 && f.stops == 0);
+    wsu_destroy(&w);
+    fresh(&f, &w, true);
+    f.wrap_status = ZAPP_DEVKEY_NOT_PER_USE;
+    create_all(&w);
+    assert(w.step == WSU_FAILED && w.failure == WSU_KEY && wsu_failure_retries(w.failure) && f.script.calls == 0);
+    wsu_destroy(&w);
+    assert(wsu_failure_retries(WSU_DECLINED) && wsu_failure_retries(WSU_NO_SCREEN_LOCK) && wsu_failure_retries(WSU_REFUSED));
+}
 /* The failed write left the setup interrupted with its key, and exactly one phrase was asked for. */
 static bool retryable_state(const struct fake *f)
 {
@@ -2589,6 +2620,7 @@ int main(int argc, char **argv)
     create_tests();
     created_tests();
     create_failure_decline_tests();
+    no_hardware_key_tests();
     create_failure_refused_tests();
     create_failure_unknown_tests();
     create_failure_present_after_refusal_tests();

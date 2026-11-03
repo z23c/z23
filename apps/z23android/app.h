@@ -23,6 +23,9 @@ enum zapp_chain { ZAPP_CHAIN_NONE, ZAPP_CHAIN_WAITING, ZAPP_CHAIN_BEHIND, ZAPP_C
 struct zapp_view {
     char notice[ZAPP_NOTICE_CAP];
     char result[ZAPP_NOTICE_CAP];
+    /* The latest Start node or Stop node for screens with no notice line of their own: what it does while queued, then why it
+     * did not take effect; empty once the node line shows the outcome. */
+    char node_action_notice[256];
     char transcript[ZAPP_TEXT_CAP];
     char connection[256];
     char sync_status[1024];

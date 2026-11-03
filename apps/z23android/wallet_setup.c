@@ -213,6 +213,7 @@ static const struct { enum wsu_failure failure; const char *text; } failure_text
     {WSU_DECLINED, "The screen lock was not confirmed, so nothing was changed. Try again."},
     {WSU_NO_SCREEN_LOCK, "This phone has no screen lock, and the wallet is protected by it. Set one in the phone's settings, then try again."},
     {WSU_KEY, "This phone could not make a protected key, so no wallet was made. Try again."},
+    {WSU_NO_HARDWARE_KEY, "This phone cannot protect a wallet key in hardware, so the app will not make a wallet here."},
     {WSU_NODE_BUSY, "Your node is still stopping. Try again in a minute."},
     {WSU_PRESENT, "This phone already has a wallet. Nothing was changed."},
     {WSU_BAD_PHRASE, "Those words are not a valid recovery phrase. Check each word and its order."},
@@ -234,6 +235,10 @@ static const struct { enum wsu_failure failure; const char *text; } failure_text
     {WSU_BAD_WORD, "A recovery word is not on the word list. Check each word's spelling."},
     {WSU_WALLET_THERE, "A wallet is already on this phone. Start over to make a new one, or restore your words."},
 };
+bool wsu_failure_retries(enum wsu_failure failure)
+{
+    return failure != WSU_NO_HARDWARE_KEY;
+}
 const char *wsu_failure_text(enum wsu_failure failure)
 {
     for (size_t i = 0; i < sizeof(failure_texts) / sizeof(failure_texts[0]); ++i)
@@ -340,6 +345,7 @@ static enum wsu_failure failure_of_key(enum zapp_devkey_status status)
 {
     if (status == ZAPP_DEVKEY_DECLINED) return WSU_DECLINED;
     if (status == ZAPP_DEVKEY_NO_SCREEN_LOCK) return WSU_NO_SCREEN_LOCK;
+    if (status == ZAPP_DEVKEY_NOT_HARDWARE) return WSU_NO_HARDWARE_KEY;
     return WSU_KEY;
 }
 static enum wsu_failure failure_of_node(enum sun_result result)
@@ -715,7 +721,8 @@ void wsu_restore_job(struct wsu *w, const char *text, int64_t birthday_height)
     }
     phase(w, WSU_PHASE_KEY);
     enum wsu_failure failure = new_passphrase(w, secret, hex);
-    if (failure != WSU_NO_FAILURE) { set_step(w, WSU_RESTORE_FORM, failure); goto out; }
+    /* A refusal no retry changes leaves the form, whose Restore would only ask again. */
+    if (failure != WSU_NO_FAILURE) { set_step(w, wsu_failure_retries(failure) ? WSU_RESTORE_FORM : WSU_FAILED, failure); goto out; }
     bool was_running = w->env.node_running(w->env.ctx);
     struct sun_birthday birthday = birthday_at(w, birthday_height);
     pthread_mutex_lock(&w->lock);

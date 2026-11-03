@@ -318,6 +318,9 @@ test-host:
 	'$(BUILD_DIR)/node-notice-test'
 	$(HOST_CC) $(HOST_WARNINGS) -I. tests/node_restart_test.c node_restart.c -o '$(BUILD_DIR)/node-restart-test'
 	'$(BUILD_DIR)/node-restart-test'
+	$(HOST_CC) $(HOST_WARNINGS) -I. tests/action_text_test.c action_text.c -o '$(BUILD_DIR)/action-text-test'
+	'$(BUILD_DIR)/action-text-test'
+	@! sed -n '/^static void \*worker(/,/^}/p' controller.c | grep -n 'observe_node' || { echo 'the action worker must not read the node status: a stuck read would hold every tap' >&2; exit 1; }
 
 .PHONY: test-devkey
 test-devkey:
@@ -361,6 +364,7 @@ test-setup:
 	@! grep -q 'nothing can have been sent' wallet_setup_ui.c || { echo 'the setup screens must not claim a wallet is empty' >&2; exit 1; }
 	@sed -n '/^static void draw_failed_buttons/,/^}/p' wallet_setup_ui.c | grep -q 'WSU_ASIDE_STUCK) return;' || { echo 'a wallet that could not be put back must be offered no button' >&2; exit 1; }
 	@sed -n '/^static void draw_failed_buttons/,/^}/p' wallet_setup_ui.c | grep -q 'WSU_NO_BIRTHDAY) (void)button_view(env, B_START_OVER_ASK' || { echo 'a wallet with no start height must be offered Start over' >&2; exit 1; }
+	@sed -n '/^static void draw_failed_buttons/,/^}/p' wallet_setup_ui.c | grep -q 'else if (wsu_failure_retries(failure))' || { echo 'a phone that cannot protect a wallet key in hardware must be offered no Try again' >&2; exit 1; }
 	@sed -n '/^static bool by_button/,/^}/p' shell.c | grep -q 'TARGET_SETUP' || { echo 'a setup tap must be matched by button identity at release' >&2; exit 1; }
 	@grep -q 'v->refusal != WSU_NO_FAILURE' wallet_setup_ui.c || { echo 'a refused Start over must say why on the screen it returns to' >&2; exit 1; }
 	@grep -q 'ZAPP_FIELD_PRIVATE' wallet_setup_ui.c || { echo 'the word fields must be checked against ZAPP_FIELD_PRIVATE' >&2; exit 1; }

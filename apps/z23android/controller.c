@@ -17,6 +17,7 @@
 #include "fleet.h"
 #include "node_restart.h"
 #include "wallet_send_ui.h"
+#include "action_text.h"
 #include "json/json.h"
 #include "base/cleanse.h"
 #include <errno.h>
@@ -35,7 +36,10 @@
 #define VOICE_FOLLOW_UP_WAIT_MS 6000u
 struct controller {
     pthread_mutex_t lock;
-    pthread_cond_t changed;
+    pthread_cond_t changed; /* Wakes the worker: an action is queued or the app is shown. */
+    pthread_cond_t watch;   /* Wakes the watcher: watch_due is set. */
+    bool watch_due;         /* Read the node status now: an action ended or the app was shown or hidden. */
+    bool quit;              /* Set only when a thread could not be started: both threads leave at once. */
     struct zapp_runtime runtime;
     struct zapp_view view;
     struct zapp_history history;
@@ -393,17 +397,19 @@ static void ops_next(struct controller *c)
 }
 /* Caller holds c->lock. Builds the request for the selected host; a restart is confirmed only with
  * the plan id its own planning step returned, which is spent here. */
-static bool ops_scope(struct controller *c, const char *action, const char **arg)
+static enum zapp_refusal ops_scope(struct controller *c, const char *action, const char **arg)
 {
     const char *host = c->view.ops_host;
     bool confirm = !strcmp(action, "ops_confirm");
-    int n = !host[0] ? -1 : confirm ? snprintf(c->ops_scope, sizeof(c->ops_scope), "confirm %s %s", host, c->view.ops_plan) :
+    if (!host[0]) return ZAPP_REFUSAL_NO_HOST;
+    if (confirm && !c->view.ops_plan[0]) return ZAPP_REFUSAL_NO_PLAN;
+    int n = confirm ? snprintf(c->ops_scope, sizeof(c->ops_scope), "confirm %s %s", host, c->view.ops_plan) :
         snprintf(c->ops_scope, sizeof(c->ops_scope), "%s %s", !strcmp(action, "ops_errors") ? "errors" : "plan", host);
-    if (n < 0 || (size_t)n >= sizeof(c->ops_scope) || (confirm && !c->view.ops_plan[0])) return false;
+    if (n < 0 || (size_t)n >= sizeof(c->ops_scope)) return ZAPP_REFUSAL_TOO_LONG;
     snprintf(c->view.ops_text, sizeof(c->view.ops_text), "Asking %s…", host);
     c->view.ops_plan[0] = 0;
     *arg = c->ops_scope;
-    return true;
+    return ZAPP_REFUSAL_NONE;
 }
 /* Sends the request to the laptop host and shows its reply under the host controls. */
 static bool execute_ops(struct controller *c, const char *scope, char *out)
@@ -799,16 +805,24 @@ static bool node_choice_saved(struct controller *c, const char *action)
     if (strcmp(action, "node_start") && strcmp(action, "node_stop")) return false;
     return zapp_node_wanted(&c->runtime) == !strcmp(action, "node_start");
 }
-/* Caller holds c->lock. Actions under More report beside their controls and the rest on the main
- * screen; a success already shown by the node line, transcript or host list leaves no notice. */
+/* Actions under More report beside their controls and the rest on the main screen. */
+static bool reports_beside(const char *action)
+{
+    return !strncmp(action, "fleet_", 6) || !strncmp(action, "ops_", 4) || !strcmp(action, "voice_pair") || !strcmp(action, "scan");
+}
+static bool node_action(const char *action)
+{
+    return !strcmp(action, "node_start") || !strcmp(action, "node_stop");
+}
+/* Caller holds c->lock. A success already shown by the node line, transcript or host list leaves no notice; a node start
+ * or stop also reports on the screens that have no notice line. */
 static void report(struct controller *c, const char *action, bool ok, const char *out)
 {
-    bool more = !strncmp(action, "fleet_", 6) || !strncmp(action, "ops_", 4) || !strcmp(action, "voice_pair") ||
-                !strcmp(action, "scan");
     bool shown = !strncmp(action, "ops_", 4) || (ok && (!strcmp(action, "chat") || !strcmp(action, "voice_start") ||
                         !strcmp(action, "fleet_hosts") || node_choice_saved(c, action)));
-    copy_text(more ? c->view.result : c->view.notice, ZAPP_NOTICE_CAP,
-              shown ? "" : out[0] ? out : "Operation could not complete.");
+    const char *text = shown ? "" : out[0] ? out : "Operation could not complete.";
+    copy_text(reports_beside(action) ? c->view.result : c->view.notice, ZAPP_NOTICE_CAP, text);
+    copy_text(c->view.node_action_notice, sizeof(c->view.node_action_notice), node_action(action) ? text : "");
 }
 static void execute_result(struct controller *c, const char *action, const char *arg,
                            char *out, bool ok)
@@ -874,22 +888,45 @@ static void restart_check(struct controller *c)
     if (zapp_restart_observe(&c->restart, &seen) == ZAPP_RESTART_RUN) queue_action(c, "node_start", "");
     pthread_mutex_unlock(&c->lock);
 }
+/* Caller holds c->lock. Asks the watcher to read the node status now. */
+static void watch_now(struct controller *c)
+{
+    c->watch_due = true;
+    pthread_cond_signal(&c->watch);
+}
+/* Runs one owner action, then shows what the node process does now and asks the watcher for a fresh status. */
+static void act(struct controller *c, const char *action, const char *arg, uint64_t ticket)
+{
+    execute(c, action, arg, ticket);
+    bool process_running = zapp_node_running(&c->runtime), stopping = zapp_node_stopping(&c->runtime);
+    bool wanted = zapp_node_wanted(&c->runtime);
+    pthread_mutex_lock(&c->lock);
+    c->view.node_process_running = process_running;
+    c->view.node_wanted = wanted;
+    c->view.node_stopping = stopping;
+    if (!c->view.node_running) {
+        zapp_sync_line(false, process_running, -1, -1, -1, NULL, c->view.sync_status, sizeof(c->view.sync_status));
+        zapp_node_line(false, process_running, stopping, false, -1, -1, -1, NULL, c->view.node_line, sizeof(c->view.node_line));
+    }
+    c->view.busy = false;
+    watch_now(c);
+    pthread_mutex_unlock(&c->lock);
+    notify_view(c);
+}
+/* The owner's actions, one at a time, and the laptop's fleet report while the app is shown. The node status is read by the
+ * watcher, so a status command that hangs until its limit never holds back a tap. An action, or showing the app, wakes the
+ * worker at once; shown also covers an app shown while the worker was busy, when no waiter took the signal. */
 static void *worker(void *opaque)
 {
     struct controller *c = opaque;
-    bool first = true;
-    for (;;) {
+    for (bool first = true;; first = false) {
         char action[32] = "", arg[24000] = ""; uint64_t ticket = 0;
         pthread_mutex_lock(&c->lock);
         struct timespec until;
-        if (clock_gettime(CLOCK_REALTIME, &until)) { pthread_mutex_unlock(&c->lock); break; }
+        if (c->quit || clock_gettime(CLOCK_REALTIME, &until)) { pthread_mutex_unlock(&c->lock); break; }
         until.tv_sec += zapp_worker_step_for(c->hidden, 10).wait_secs;
-        /* The notification is a screen while the app is hidden, so the node is observed on every step; the fleet is
-         * observed only while shown. An action, or showing the app, wakes the worker at once; shown also covers an app
-         * shown while the worker was busy, when no waiter took the signal. */
-        bool wait = !c->pending && !first && !c->shown;
-        if (wait) (void)pthread_cond_timedwait(&c->changed, &c->lock, &until);
-        first = false; c->shown = false;
+        if (!c->pending && !first && !c->shown) (void)pthread_cond_timedwait(&c->changed, &c->lock, &until);
+        c->shown = false;
         const struct zapp_worker_step after = zapp_worker_step_for(c->hidden, 10);
         if (c->pending) {
             copy_text(action, sizeof(action), c->action); copy_text(arg, sizeof(arg), c->argument);
@@ -897,29 +934,57 @@ static void *worker(void *opaque)
             memory_cleanse(c->argument, sizeof(c->argument));
         }
         pthread_mutex_unlock(&c->lock);
-        if (action[0]) {
-            execute(c, action, arg, ticket);
-            memory_cleanse(arg, sizeof(arg));
-            bool process_running = zapp_node_running(&c->runtime), stopping = zapp_node_stopping(&c->runtime);
-            bool wanted = zapp_node_wanted(&c->runtime);
-            pthread_mutex_lock(&c->lock);
-            c->view.node_process_running = process_running;
-            c->view.node_wanted = wanted;
-            c->view.node_stopping = stopping;
-            if (!c->view.node_running) {
-                zapp_sync_line(false, process_running, -1, -1, -1, NULL, c->view.sync_status, sizeof(c->view.sync_status));
-                zapp_node_line(false, process_running, stopping, false, -1, -1, -1, NULL, c->view.node_line, sizeof(c->view.node_line));
-            }
-            c->view.busy = false;
-            pthread_mutex_unlock(&c->lock);
-            notify_view(c);
-        }
+        if (action[0]) { act(c, action, arg, ticket); memory_cleanse(arg, sizeof(arg)); }
+        if (after.observe_fleet) observe_fleet(c);
+    }
+    return NULL;
+}
+/* Reads the node status on every step, and at once when watch_due is set. The notification is a screen while the app is
+ * hidden, so the node is read then too. A read that hangs ends at its command limit and delays only the next read. */
+static void *watcher(void *opaque)
+{
+    struct controller *c = opaque;
+    for (bool first = true;; first = false) {
+        pthread_mutex_lock(&c->lock);
+        struct timespec until;
+        if (c->quit || clock_gettime(CLOCK_REALTIME, &until)) { pthread_mutex_unlock(&c->lock); break; }
+        until.tv_sec += zapp_worker_step_for(c->hidden, 10).wait_secs;
+        if (!first && !c->watch_due) (void)pthread_cond_timedwait(&c->watch, &c->lock, &until);
+        c->watch_due = false;
+        pthread_mutex_unlock(&c->lock);
         observe_node(c);
         restart_check(c);
-        if (after.observe_fleet) observe_fleet(c);
         if (!c->autostart_checked) start_if_wanted(c);
     }
     return NULL;
+}
+static bool sync_init(struct controller *c)
+{
+    if (pthread_mutex_init(&c->lock, NULL)) return false;
+    if (!pthread_cond_init(&c->changed, NULL)) {
+        if (!pthread_cond_init(&c->watch, NULL)) return true;
+        pthread_cond_destroy(&c->changed);
+    }
+    pthread_mutex_destroy(&c->lock);
+    return false;
+}
+static void sync_destroy(struct controller *c)
+{
+    pthread_cond_destroy(&c->watch); pthread_cond_destroy(&c->changed); pthread_mutex_destroy(&c->lock);
+}
+/* Starts both threads under c->lock, which each takes first, so neither runs before both exist; when the second cannot be
+ * started, the first sees quit and leaves. */
+static bool start_threads(struct controller *c)
+{
+    pthread_t watching, working;
+    pthread_mutex_lock(&c->lock);
+    bool watched = !pthread_create(&watching, NULL, watcher, c);
+    bool worked = watched && !pthread_create(&working, NULL, worker, c);
+    c->quit = !worked;
+    pthread_mutex_unlock(&c->lock);
+    if (watched && !worked) (void)pthread_join(watching, NULL);
+    if (worked) { pthread_detach(watching); pthread_detach(working); }
+    return worked;
 }
 bool zapp_controller_start(const char *files, const char *libs, bool preview, void (*notify)(void))
 {
@@ -936,9 +1001,8 @@ bool zapp_controller_start(const char *files, const char *libs, bool preview, vo
     atomic_init(&c->voice_cancel, false);
     atomic_init(&c->voice_stop, false);
     c->pace_lock = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
-    if (pthread_mutex_init(&c->lock, NULL)) goto fail;
-    if (pthread_cond_init(&c->changed, NULL)) { pthread_mutex_destroy(&c->lock); goto fail; }
-    if (!zapp_runtime_init(&c->runtime, files, libs, preview)) { pthread_cond_destroy(&c->changed); pthread_mutex_destroy(&c->lock); goto fail; }
+    if (!sync_init(c)) goto fail;
+    if (!zapp_runtime_init(&c->runtime, files, libs, preview)) { sync_destroy(c); goto fail; }
     c->view.node_process_running = zapp_node_running(&c->runtime);
     c->view.node_wanted = zapp_node_wanted(&c->runtime);
     copy_text(c->files, sizeof(c->files), files); c->notify = notify;
@@ -947,11 +1011,8 @@ bool zapp_controller_start(const char *files, const char *libs, bool preview, vo
     c->view.fleet_paired = zapp_speech_client_has_host(files);
     copy_text(c->view.connection, sizeof(c->view.connection), c->view.fleet_paired ?
               "Laptop host paired. Connecting." : "Private assistant: pair your laptop host over USB.");
-    pthread_t thread;
-    if (pthread_create(&thread, NULL, worker, c)) {
-        zapp_runtime_destroy(&c->runtime); pthread_cond_destroy(&c->changed); pthread_mutex_destroy(&c->lock); goto fail;
-    }
-    pthread_detach(thread); current = c;
+    if (!start_threads(c)) { zapp_runtime_destroy(&c->runtime); sync_destroy(c); goto fail; }
+    current = c;
 #ifdef __ANDROID__
     /* The listener outlives the activity: the foreground service keeps the process, and so the pace,
      * alive while the app is hidden. The controller lives as long as the process. */
@@ -996,11 +1057,12 @@ static bool cancel_reply(void)
     return true;
 }
 
-static bool valid_action_request(const char *action, const char *arg)
+static enum zapp_refusal request_refusal(const char *action, const char *arg)
 {
-    return action && arg && strlen(action) < 32 && strlen(arg) < 24000 &&
+    bool known = action && strlen(action) < 32 &&
         (!strcmp(action, "chat_cancel") || !strcmp(action, "voice_finish") || !strcmp(action, "voice_cancel") || !strcmp(action, "pair_offer") || !strcmp(action, "pair_reject") || !strcmp(action, "ops_next") ||
         action_allowed(action));
+    return !known || !arg ? ZAPP_REFUSAL_UNKNOWN : strlen(arg) >= 24000 ? ZAPP_REFUSAL_TOO_LONG : ZAPP_REFUSAL_NONE;
 }
 
 static bool is_voice_control(const char *action)
@@ -1040,18 +1102,19 @@ static const char *confirmed_action(const struct controller *c)
     if (!strcmp(c->view.voice_proposal, "node_stop")) return "node_stop";
     return NULL;
 }
-/* Caller holds c->lock. Rewrites `action` and `arg` for confirmations; false rejects the request. */
-static bool resolve_action(struct controller *c, const char **action, const char **arg)
+/* Caller holds c->lock. Rewrites `action` and `arg` for confirmations, or says why the request is refused. */
+static enum zapp_refusal resolve_action(struct controller *c, const char **action, const char **arg)
 {
-    if (c->view.busy) return false;
+    if (c->view.busy) return ZAPP_REFUSAL_BUSY;
     if (!strcmp(*action, "pair_accept")) {
-        if (!c->view.pair_offer[0]) return false;
+        if (!c->view.pair_offer[0]) return ZAPP_REFUSAL_NO_OFFER;
         *action = "voice_pair"; *arg = c->view.pair_offer;
     }
-    if (!strcmp(*action, "voice_confirm") && !(*action = confirmed_action(c))) return false;
+    if (!strcmp(*action, "voice_confirm") && !(*action = confirmed_action(c))) return ZAPP_REFUSAL_NO_PROPOSAL;
     if (!strncmp(*action, "ops_", 4)) return ops_scope(c, *action, arg);
     if (!strcmp(*action, "fleet_join")) *arg = c->view.fleet_token;
-    return (*arg)[0] || (strcmp(*action, "chat") && strcmp(*action, "fleet_join"));
+    if ((*arg)[0] || (strcmp(*action, "chat") && strcmp(*action, "fleet_join"))) return ZAPP_REFUSAL_NONE;
+    return !strcmp(*action, "chat") ? ZAPP_REFUSAL_NO_QUESTION : ZAPP_REFUSAL_NO_INVITATION;
 }
 /* Caller holds c->lock. */
 static void queue_action(struct controller *c, const char *action, const char *arg)
@@ -1065,6 +1128,10 @@ static void queue_action(struct controller *c, const char *action, const char *a
     copy_text(c->action, sizeof(c->action), action); copy_text(c->argument, sizeof(c->argument), arg);
     c->camera_ticket = zapp_camera_ticket(); c->pending = true; c->view.busy = true;
     c->view.scanning = !strcmp(action, "scan"); c->view.notice[0] = 0; c->view.result[0] = 0;
+    /* The tap shows at once what it does, unless its own screen already shows that. */
+    const char *doing = zapp_action_shows_itself(action) ? NULL : zapp_action_doing(action);
+    if (doing) copy_text(reports_beside(action) ? c->view.result : c->view.notice, ZAPP_NOTICE_CAP, doing);
+    copy_text(c->view.node_action_notice, sizeof(c->view.node_action_notice), doing && node_action(action) ? doing : "");
     if (c->view.scanning) { c->view.scan_kind = ZAPP_SCAN_TEXT; c->view.scan_text[0] = 0; }
     if (!strcmp(action, "chat")) {
         atomic_store(&c->reply_cancel, false);
@@ -1073,23 +1140,40 @@ static void queue_action(struct controller *c, const char *action, const char *a
     }
     pthread_cond_signal(&c->changed);
 }
-bool zapp_controller_action(const char *action, const char *arg, const char *model)
+/* Caller holds c->lock. Carries out a control at once or queues an action, or says why the request is refused. */
+static enum zapp_refusal take_request(struct controller *c, const char *action, const char *arg)
 {
-    (void)model;
-    if (!valid_action_request(action, arg)) return false;
-    if (!strcmp(action, "chat_cancel")) return cancel_reply();
+    if (is_voice_control(action)) { voice_control(c, action); return ZAPP_REFUSAL_NONE; }
+    if (!strcmp(action, "ops_next")) {
+        if (c->view.busy) return ZAPP_REFUSAL_BUSY;
+        ops_next(c);
+        return ZAPP_REFUSAL_NONE;
+    }
+    if (is_pair_control(action)) return pair_control(c, action, arg) ? ZAPP_REFUSAL_NONE : ZAPP_REFUSAL_BAD_OFFER;
+    enum zapp_refusal refusal = resolve_action(c, &action, &arg);
+    if (!refusal) queue_action(c, action, arg);
+    return refusal;
+}
+/* running receives the action the worker runs or ran last, which a busy refusal names. */
+static enum zapp_refusal controller_request(const char *action, const char *arg, char running[32])
+{
     pthread_mutex_lock(&startup_lock); struct controller *c = current;
-    if (!c) { pthread_mutex_unlock(&startup_lock); return false; }
+    if (!c) { pthread_mutex_unlock(&startup_lock); return ZAPP_REFUSAL_NOT_READY; }
     pthread_mutex_lock(&c->lock);
-    bool control = is_voice_control(action), pairing = is_pair_control(action);
-    bool ok = true;
-    if (control) voice_control(c, action);
-    else if (!strcmp(action, "ops_next")) { ok = !c->view.busy; if (ok) ops_next(c); }
-    else if (pairing) ok = pair_control(c, action, arg);
-    else if ((ok = resolve_action(c, &action, &arg))) queue_action(c, action, arg);
+    enum zapp_refusal refusal = take_request(c, action, arg);
+    copy_text(running, 32, c->action);
     pthread_mutex_unlock(&c->lock); pthread_mutex_unlock(&startup_lock);
-    if (ok) notify_view(c);
-    return ok;
+    if (!refusal) notify_view(c);
+    return refusal;
+}
+bool zapp_controller_action(const char *action, const char *arg, char *why, size_t cap)
+{
+    char running[32] = "";
+    enum zapp_refusal refusal = request_refusal(action, arg);
+    if (!refusal && !strcmp(action, "chat_cancel")) refusal = cancel_reply() ? ZAPP_REFUSAL_NONE : ZAPP_REFUSAL_NOT_READY;
+    else if (!refusal) refusal = controller_request(action, arg, running);
+    if (refusal) zapp_action_refusal(refusal, running, action, why, cap);
+    return !refusal;
 }
 void zapp_controller_detach(void)
 {
@@ -1100,12 +1184,13 @@ void zapp_controller_detach(void)
 }
 void zapp_controller_visible(bool visible)
 {
-    if (!visible) (void)zapp_controller_action("voice_cancel", "", "");
+    if (!visible) (void)zapp_controller_action("voice_cancel", "", NULL, 0);
     pthread_mutex_lock(&startup_lock);
     if (current) {
         pthread_mutex_lock(&current->lock);
         current->shown = visible && current->hidden; current->hidden = !visible;
         pthread_cond_signal(&current->changed);
+        watch_now(current);
         pthread_mutex_unlock(&current->lock);
     }
     pthread_mutex_unlock(&startup_lock);

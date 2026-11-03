@@ -223,11 +223,11 @@ static void action(const char *name, const char *argument)
     JNIEnv *env = NULL; JavaVM *current_vm = atomic_load(&vm);
     if (!current_vm || (*current_vm)->GetEnv(current_vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) env = NULL;
     if (!strcmp(name, "voice_start") && (!foreground || !env || !active || !microphone_allowed(env, active))) return;
-    if (!zapp_controller_action(name, argument, "")) {
-        if (env) zapp_native_ui_update(env, NULL, "Unable to start that action.");
-        return;
-    }
-    notify();
+    char why[160] = "";
+    bool taken = zapp_controller_action(name, argument, why, sizeof(why));
+    /* A refusal says why; a taken tap clears an earlier refusal, so its own progress shows. */
+    if (env) zapp_native_ui_update(env, NULL, taken ? "" : why);
+    if (taken) notify();
 }
 static void request_permission(JNIEnv *env, jobject activity, const char *name)
 {
@@ -640,7 +640,7 @@ static void forward_pairing(JNIEnv *env, jobject activity)
 {
     char offer[256];
     if (!intent_pairing(env, activity, offer, sizeof(offer))) return;
-    (void)zapp_controller_action("pair_offer", offer, "");
+    (void)zapp_controller_action("pair_offer", offer, NULL, 0);
     memory_cleanse(offer, sizeof(offer));
 }
 /* Copies the packaged proving parameters to <files>/params on a worker thread. Once per process unless the

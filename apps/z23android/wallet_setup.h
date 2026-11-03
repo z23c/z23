@@ -104,6 +104,7 @@ enum wsu_failure {
     WSU_DECLINED,       /* The owner did not authenticate. */
     WSU_NO_SCREEN_LOCK,
     WSU_KEY,            /* The device key refused. */
+    WSU_NO_HARDWARE_KEY, /* The phone keeps keys only in software: no wallet is made here, and trying again cannot change that. */
     WSU_NODE_BUSY,      /* The node did not stop. */
     WSU_PRESENT,        /* The node holds a wallet already. */
     WSU_BAD_PHRASE,
@@ -209,6 +210,8 @@ void wsu_working_line(const struct wsu_view *v, char *out, size_t cap);
 bool wsu_waiting(struct wsu *w);
 /* One plain sentence and the action for a failed job; empty for none. */
 const char *wsu_failure_text(enum wsu_failure failure);
+/* Whether the failed screen offers Try again: not on a phone that keeps keys only in software, which no retry changes. */
+bool wsu_failure_retries(enum wsu_failure failure);
 /* With WORDS or CONFIRM, after a failed write: what happened in plain words and the one next step, Try again, which writes the same
  * words again. Empty for none. */
 const char *wsu_write_failure_text(enum wsu_failure failure);
