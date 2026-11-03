@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for the dev.batch culprit leaf. */
+ZCL_MODULE_CAPABILITY("tools/command/native_dev_batch_culprit.c", CAP_FS_READ, "reads a stack's failure log and the lab stacked.tsv, and asks the stack worktree's git for its commit list and patch identities through the spawn seam with no shell; it writes nothing")

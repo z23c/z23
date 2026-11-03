@@ -1541,7 +1541,8 @@ ZCL_COMMAND_DEV_READ(
  * each leaf computes the decision its bridge makes and keeps the bridge's
  * state-file bytes (stacked.tsv, stack-pending.txt, restacked.tsv); the
  * bridges keep acting. One file per leaf: native_dev_batch_ledger.c,
- * native_dev_batch_restack.c and native_dev_batch_slim.c. */
+ * native_dev_batch_restack.c, native_dev_batch_slim.c and
+ * native_dev_batch_culprit.c (the decision half of gate-submit.sh drop_culprit). */
 ZCL_COMMAND_BRANCH("dev.batch", "dev",
                    "Batch ledger",
                    ZCL_COMMAND_LAYER_DEV)
@@ -1625,6 +1626,36 @@ ZCL_COMMAND_DEV_COMMAND(
     zcl_native_handle_dev_batch_slim,
     "stack build cleanup requires the dev binary",
     "z23-dev dev batch slim --dry-run")
+
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.batch.culprit", "dev.batch", "",
+    "Decide which commits of a failed stack to drop, by lane",
+    "The decision half of the gate bridge's drop_culprit, with lane "
+    "granularity. From the files a failure log names (lint, fast or "
+    "agent-verify; the shared ratchet files never count) it finds the stack "
+    "commits that touch them, maps every stack commit to its lane by patch "
+    "identity against the lanes the stack holds in stacked.tsv, and drops "
+    "each culprit's whole lane. A commit that maps to no lane is never a "
+    "culprit. It refuses, typed, when the failure prints its own fix "
+    "(fix_printed), names no stack file (no_paths), names only unmapped "
+    "commits (unmapped), would drop more than half the stack (over_half, "
+    "after the lane expansion), would drop a header (header_touched) or a "
+    "file a kept commit touches (shared_file). It never rebases and never "
+    "writes the ledger; --dry-run is accepted and changes nothing. --stack "
+    "is the stack worktree, --log the failure log, --ledger the directory "
+    "holding stacked.tsv.", 65536,
+    "batch,culprit,drop,stack,lane,gate,failure",
+    "zcl.batch_culprit_input.v1", "zcl.batch_culprit.v1",
+    "stack,log,stage,ledger,dry_run", "",
+    "z23 dev batch culprit --stack=DIR --log=FILE --stage=lint --ledger=DIR",
+    ZCL_COMMAND_EFFECT_READ, ZCL_COMMAND_RISK_READ,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_batch_culprit,
+    "batch ledger maintenance requires the dev binary",
+    "z23-dev dev batch culprit --stack=DIR --log=FILE --stage=lint --ledger=DIR")
 
 /* ── dev.index ─────────────────────────────────────────────────────────────
  * Local data-source ingest/search over engine/composition/sources.def (the
