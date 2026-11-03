@@ -600,7 +600,9 @@ ZCL_COMMAND_READY_READ(
     "Every currently connected peer's address, version, and stats, "
     "read live from the running node's peer table at call time; "
     "bounded to the list budget row cap. Z23 peers are listed first, "
-    "then MagicBean, then other. Per-peer lifecycle is dumpstate "
+    "then MagicBean, then other. best_height is the highest block "
+    "height the peer has shown (its start height, raised by headers "
+    "accepted from it), or -1 when unknown. Per-peer lifecycle is dumpstate "
     "peer_lifecycle. Continue with --cursor when _page.truncated is true.",
     ZCL_COMMAND_LIST_BUDGET,
     "peers,list,addresses,latency,diagnosing peers",

@@ -55,6 +55,7 @@ static void ph_setup_node(struct p2p_node *node)
     node->addr.svc.addr.ip[13] = 2;
     node->addr.svc.addr.ip[14] = 3;
     node->addr.svc.addr.ip[15] = 4;
+    atomic_store(&node->best_height, 1);   /* as if its version announced height 1 */
 }
 
 /* Mine a consensus-valid regtest header at `height` on `prev`: PoW-true
@@ -142,6 +143,7 @@ static int ph_case_oversize(struct main_state *ms, struct msg_processor *mp,
              ms->map_block_index.size == map0);
     PH_CHECK("oversize: no batch counted",
              st1.batches_received == st0.batches_received);
+    PH_CHECK("oversize: best height untouched", atomic_load(&node->best_height) == 1);
     stream_free(&s);
     return failures;
 }
@@ -172,6 +174,7 @@ static int ph_case_truncated(struct main_state *ms, struct msg_processor *mp,
     PH_CHECK("truncated: nothing accepted",
              st1.total_accepted == st0.total_accepted &&
              st1.batches_received == st0.batches_received);
+    PH_CHECK("truncated: best height untouched", atomic_load(&node->best_height) == 1);
     stream_free(&s);
     return failures;
 }
@@ -232,6 +235,8 @@ static int ph_case_valid_batch(struct main_state *ms, struct msg_processor *mp,
              s.read_pos == payload_end);
     PH_CHECK("valid batch: best header promoted to h=2",
              ms->pindex_best_header == bi2);
+    PH_CHECK("valid batch: peer best height rises from its start height 1 to 2",
+             atomic_load(&node->best_height) == 2);
     char h2_hex[65];
     uint256_get_hex(&h2_hash, h2_hex);
     PH_CHECK("valid batch: standard peer contributes header vote",
@@ -241,6 +246,18 @@ static int ph_case_valid_batch(struct main_state *ms, struct msg_processor *mp,
              strcmp(g_ph_header_vote_hash, h2_hex) == 0);
     PH_CHECK("valid batch: honest peer not penalized",
              atomic_load(&node->misbehavior) == 0 && !node->disconnect);
+    /* Headers it already showed, delivered again below a higher announced height, never lower it. */
+    atomic_store(&node->best_height, 10);
+    struct byte_stream again;
+    stream_init(&again, 1024);
+    stream_write_compact_size(&again, 2);
+    bool wrote_again = ph_write_header(&again, h1) && ph_write_header(&again, h2);
+    PH_CHECK("valid batch: replay payload built", wrote_again);
+    bool again_ok = process_headers(mp, node, &again);
+    PH_CHECK("valid batch: a lower accepted height never lowers best height",
+             again_ok && atomic_load(&node->best_height) == 10);
+    atomic_store(&node->best_height, 2);
+    stream_free(&again);
     stream_free(&s);
     return failures;
 }
@@ -284,6 +301,8 @@ static int ph_case_non_connecting(struct main_state *ms,
                  ms->map_block_index.size == map0);
         PH_CHECK("non-connecting: counted as rejected",
                  st1.total_rejected == st0.total_rejected + 1);
+        PH_CHECK("non-connecting: a refused header does not raise best height",
+                 atomic_load(&node->best_height) == 2);
         PH_CHECK("non-connecting: DoS 0 — orphan peer NOT penalized",
                  atomic_load(&node->misbehavior) == 0 && !node->disconnect);
         PH_CHECK("non-connecting: recovery probe rate-limited, not fired",

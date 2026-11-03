@@ -10,6 +10,7 @@
  * and add no file-scope mutable state of their own.
  */
 
+#include <stdatomic.h>
 #include "test/syncdiag_rpc_fixture.h"
 #include "test/test_syncdiag_network_priv.h"
 
@@ -928,8 +929,10 @@ static bool sd_reachability_setup(struct sd_reach_ctx *ctx)
     struct p2p_node *inbound = syncdiag_add_peer(
         &ctx->cm, 12, true, PEER_HANDSHAKE_COMPLETE);
     ok = ok && outbound != NULL && inbound != NULL;
-    if (inbound)
+    if (inbound) {
         inbound->accepted_local_port = 8055;
+        atomic_store(&inbound->best_height, 3117080);
+    }
     /* One peer publishes a build identity in its subversion, one does
      * not (the fixture's default is the pre-change string an older node
      * still sends). getpeerinfo must report both — the identity for the
@@ -1141,6 +1144,7 @@ static bool sd_reachability_peerinfo_peer0(const struct json_value *result,
         result->type == JSON_ARR ? json_at(result, 0) : NULL;
     ok = ok && peer0 && json_get_bool(json_get(peer0, "zclassic23"));
     ok = ok && peer0 && json_get_bool(json_get(peer0, "zclassic_c23"));
+    ok = ok && peer0 && json_get_int(json_get(peer0, "best_height")) == -1;   /* unknown */
     ok = ok && peer0 && json_get(peer0, "lifecycle") == NULL;
     ok = ok && peer0 &&
          json_get_int(json_get(peer0, "accepted_local_port")) == 0;
@@ -1154,6 +1158,8 @@ static bool sd_reachability_peerinfo_peer1(const struct json_value *result,
         result->type == JSON_ARR ? json_at(result, 1) : NULL;
     ok = ok && peer1 &&
          json_get_int(json_get(peer1, "accepted_local_port")) == 8055;
+    ok = ok && peer1 && json_get_int(json_get(peer1, "best_height")) == 3117080;
+    ok = ok && peer1 && json_get_int(json_get(peer1, "startingheight")) == 3117074;   /* unchanged */
     ok = ok && peer1 &&
          !json_get_bool(json_get(peer1, "source_is_loopback"));
     ok = ok && peer1 &&

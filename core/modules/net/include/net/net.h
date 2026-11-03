@@ -351,6 +351,10 @@ struct p2p_node {
 
     struct uint256 hash_continue;
     int starting_height;
+    /* The highest block height this peer has shown us: its announced start height, raised to the height of the last
+     * header of every batch we accepted from it. -1 until known. Bookkeeping for getpeerinfo only; no validation,
+     * acceptance or scoring reads it. Written by the message thread, read under cs_nodes by the RPC. */
+    _Atomic int best_height;
 
     struct net_address *addr_to_send;
     size_t addr_to_send_count;
@@ -575,6 +579,15 @@ struct p2p_node {
      * and the two seams (net.c write, connman.c recv) touch its fields. */
     struct noise_transport *transport;
 };
+
+/* Raises the peer's best shown height to height. It never falls, and a negative height (no accepted header) changes
+ * nothing. */
+static inline void p2p_node_note_best_height(struct p2p_node *node, int height)
+{
+    int seen = atomic_load(&node->best_height);
+    while (height > seen && !atomic_compare_exchange_weak(&node->best_height, &seen, height)) {
+    }
+}
 
 struct node_signals {
     int (*get_height)(void *ctx);

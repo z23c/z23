@@ -2166,7 +2166,6 @@ bool process_headers(struct msg_processor *mp, struct p2p_node *node,
     if (headers_drop_for_snapshot(mp, node))
         return true;
     atomic_store(&g_headers_recv_snapshot_streak, false);
-
     uint64_t count = 0;
     bool got_count = headers_read_batch_count(s, node, &count);
     if (!got_count)
@@ -2190,6 +2189,7 @@ bool process_headers(struct msg_processor *mp, struct p2p_node *node,
     atomic_fetch_add(&g_headers_total_rejected, count - acc.accepted);
     atomic_fetch_add(&g_headers_newly_added, acc.newly_added);
     atomic_fetch_add(&g_headers_already_known, acc.accepted - acc.newly_added);
+    p2p_node_note_best_height(node, acc.pindex_last ? acc.pindex_last->nHeight : -1);
 
     /* Per-peer usefulness credit (P1). MUST pass newly_added, NEVER
      * accepted: `accepted` also counts headers we already had in the

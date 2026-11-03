@@ -838,6 +838,8 @@ static bool rpc_getpeerinfo(const struct json_value *params, bool help,
         json_push_kv_bool(&entry, "inbound", node->inbound);
         json_push_kv_int(&entry, "startingheight",
                           (int64_t)node->starting_height);
+        json_push_kv_int(&entry, "best_height",
+                          (int64_t)atomic_load(&node->best_height));
         json_push_kv_int(&entry, "conntime", node->time_connected);
         json_push_kv_int(&entry, "lastsend", node->last_send);
         json_push_kv_int(&entry, "lastrecv", node->last_recv);

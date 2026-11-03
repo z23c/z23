@@ -399,9 +399,9 @@ struct p2p_node *p2p_node_create(struct net_manager *nm, zcl_socket_t sock,
     atomic_store_explicit(&node->last_activity_monotonic_us, connected_us,
                           memory_order_relaxed);
     node->starting_height = -1;
+    atomic_init(&node->best_height, -1);
     uint256_set_null(&node->hash_continue);
     net_service_init(&node->addr_local);
-
     zcl_mutex_init(&node->cs_send);
     zcl_mutex_init(&node->cs_recv);
     zcl_mutex_init(&node->cs_inventory);

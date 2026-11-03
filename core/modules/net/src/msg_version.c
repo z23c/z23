@@ -594,6 +594,7 @@ static void msg_version_apply_peer_fields(struct p2p_node *node,
     strncpy(node->clean_sub_ver, ver->sub_version, MAX_SUBVERSION_LENGTH - 1);
     node->clean_sub_ver[MAX_SUBVERSION_LENGTH - 1] = '\0';
     node->starting_height = ver->start_height;
+    atomic_store(&node->best_height, ver->start_height >= 0 ? ver->start_height : -1);
     node->time_offset =
         peer_time_offset(ver->timestamp,
                          (int64_t)platform_time_wall_time_t());

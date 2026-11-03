@@ -24,6 +24,7 @@
  * addr-timestamp sanitization is tested against addr_info_is_terrible() with
  * a fixed "now" anchor. */
 
+#include <stdatomic.h>
 #include "test/test_core.h"
 #include "platform/socket_compat.h"
 
@@ -379,6 +380,7 @@ static int test_version_extreme_timestamp_no_ub(void)
         bool ok = process_version(&f.mp, &f.node, &payload);
         ASSERT(ok);
         ASSERT(f.node.time_offset == 0);
+        ASSERT(atomic_load(&f.node.best_height) == 100); /* the announced start height */
 
         stream_free(&payload);
         hs_fixture_teardown(&f);
