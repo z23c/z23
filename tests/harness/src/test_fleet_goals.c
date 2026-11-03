@@ -565,6 +565,53 @@ static int fgl_case_claims(const char *root)
     return failures;
 }
 
+static int fgl_case_claim_expiry_numeric(const char *root)
+{
+    int failures = 0;
+    char path[600];
+    struct zcl_goals_options o;
+    fgl_options(&o);
+    (void)snprintf(path, sizeof(path), "%s/claims_numeric.jsonl", root);
+    o.claims = path;
+    TEST("G13: nonpositive expiry integers retain legacy ownership") {
+        struct zcl_goal_result r;
+        ASSERT(fgl_write(path,
+            "{\"worktree\":\"/zero\",\"expires_unix\":0}\n"
+            "{\"worktree\":\"/negative\",\"expires_unix\":-1}\n"
+            "{\"worktree\":\"/minimum\",\"expires_unix\":-9223372036854775808}\n"));
+        r = zcl_goals_measure(&o, "G13");
+        ASSERT(r.grade == ZCL_GOAL_PARTIAL);
+        ASSERT(fgl_has(r.evidence, "3 live lane claim(s)"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int fgl_case_claim_expiry_positive(const char *root)
+{
+    int failures = 0;
+    char path[600];
+    struct zcl_goals_options o;
+    fgl_options(&o);
+    (void)snprintf(path, sizeof(path), "%s/claims_positive.jsonl", root);
+    o.claims = path;
+    TEST("G13: positive expiry boundary remains expired at now") {
+        struct zcl_goal_result r;
+        ASSERT(fgl_write(path,
+            "{\"worktree\":\"/expired\",\"expires_unix\":1799999999}\n"
+            "{\"worktree\":\"/now\",\"expires_unix\":1800000000}\n"));
+        r = zcl_goals_measure(&o, "G13");
+        ASSERT(r.grade == ZCL_GOAL_FAIL);
+        ASSERT(fgl_write(path,
+            "{\"worktree\":\"/future\",\"expires_unix\":1800000001}\n"));
+        r = zcl_goals_measure(&o, "G13");
+        ASSERT(r.grade == ZCL_GOAL_PARTIAL);
+        ASSERT(fgl_has(r.evidence, "1 live lane claim(s)"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int fgl_case_claims_read_error(const char *root)
 {
     int failures = 0;
@@ -1632,6 +1679,8 @@ int test_fleet_goals(void)
     failures += fgl_case_files(root);
     failures += fgl_case_inventory_lines(root);
     failures += fgl_case_claims(root);
+    failures += fgl_case_claim_expiry_numeric(root);
+    failures += fgl_case_claim_expiry_positive(root);
     failures += fgl_case_claims_read_error(root);
     failures += fgl_case_receipt_c3(root);
     failures += fgl_case_receipt_c6(root);

@@ -1269,12 +1269,13 @@ static bool gr_claims_path(const struct zcl_goals_options *o, const char *repo,
     return snprintf(out, cap, "%s/z23-agent-claims.jsonl", common) < (int)cap;
 }
 
-/* A claim is live when its lease has not expired; a legacy row without an
- * expiry stays live until released. */
+/* A claim is live when its lease has not expired; missing, noninteger and
+ * nonpositive expiries retain legacy ownership until released. */
 static bool gr_claim_live(const struct json_value *row, int64_t now)
 {
     const struct json_value *e = json_get(row, "expires_unix");
-    return !e || e->type != JSON_INT || json_get_int(e) > now;
+    return !e || e->type != JSON_INT || json_get_int(e) <= 0 ||
+           json_get_int(e) > now;
 }
 
 /* Counts live claim rows. A line that is not a JSON object is counted as
