@@ -363,54 +363,46 @@ static bool dvc_windows_path_equal(const char *a, const char *b)
     return comparison == 0 || comparison == CSTR_EQUAL;
 }
 #endif
-static bool dvc_read_line_item(const char **cursor, char item[DVC_PATH_CAP])
+/* Unreadable stored paths cannot authorize a second writer. */
+static bool dvc_files_have_path(const struct json_value *files, const char *path)
 {
-    const char *p = *cursor;
-    size_t used = 0;
-    while (*p && *p != '"') {
-#ifdef _WIN32
-        if (used + 1 >= DVC_PATH_CAP) return false;
-        if (*p == '\\' && p[1] != '\\' && p[1] != '"') return false;
-#endif
-        if (*p == '\\' && p[1]) p++;
-        if (used + 1 < DVC_PATH_CAP) item[used++] = *p;
-        p++;
-    }
-    item[used] = '\0';
-    if (*p == '"') p++;
-    *cursor = p;
-    return true;
-}
-static bool dvc_line_has_file(const char *line, const char *path)
-{
-    const char *p = strstr(line, "\"files\":[");
-    if (!p)
-        return false;
-    p += strlen("\"files\":[");
-    while (*p && *p != ']') {
-        if (*p != '"') {
-            p++;
-            continue;
-        }
-        p++;
-        char item[DVC_PATH_CAP];
-        if (!dvc_read_line_item(&p, item)) return true;
+    if (!files || files->type != JSON_ARR) return true;
+    for (size_t i = 0; i < files->num_children; i++) {
+        const struct json_value *value = &files->children[i];
+        const char *item = value->type == JSON_STR ? json_get_str(value) : NULL;
         char norm[DVC_PATH_CAP];
+        if (!item || strlen(item) >= DVC_PATH_CAP ||
+            dvc_path_normalize(item, norm, sizeof(norm))) return true;
 #ifdef _WIN32
-        if (dvc_path_normalize(item, norm, sizeof(norm))) return true;
-        const char *cmp = norm;
+        if (dvc_windows_path_equal(norm, path))
 #else
-        const char *cmp =
-            dvc_path_normalize(item, norm, sizeof(norm)) ? item : norm;
-#endif
-#ifdef _WIN32
-        if (dvc_windows_path_equal(cmp, path))
-#else
-        if (strcmp(cmp, path) == 0)
+        if (strcmp(norm, path) == 0)
 #endif
             return true;
     }
     return false;
+}
+
+static bool dvc_line_has_file(const char *line, const char *path)
+{
+    struct json_value row;
+    json_init(&row);
+    bool conflict = true;
+    size_t len = strlen(line);
+    if (zutf8_validate_n(line, len) && json_read(&row, line, len) &&
+        row.type == JSON_OBJ) {
+        size_t keys = 0;
+        const struct json_value *files = NULL;
+        for (size_t i = 0; i < row.num_children; i++) {
+            if (strcmp(row.keys[i], "files") == 0) {
+                keys++;
+                files = &row.children[i];
+            }
+        }
+        if (keys == 1) conflict = dvc_files_have_path(files, path);
+    }
+    json_free(&row);
+    return conflict;
 }
 
 /* ── input accessors ────────────────────────────────────────────────────── */

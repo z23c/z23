@@ -484,6 +484,45 @@ _test_next:;
     return failures;
 }
 
+static int dvx_stored_path_tests(const char *one)
+{
+    int failures = 0;
+    TEST("claim: unreadable stored paths refuse without rewriting") {
+        char oversized[1100], row[2048], ledger[1024];
+        memset(oversized, 'a', sizeof oversized - 1);
+        oversized[sizeof oversized - 1] = '\0';
+        const char *fields[] = {"\"files\":[17]", "\"files\":[\"a\\q.c\"]",
+            "\"files\":[\"../outside\"]", "\"files\":{}",
+            "\"files\":[],\"files\":[]", "\"other\":[]",
+            "\"files\":[\"a\xff" "b.c\"]", NULL};
+        (void)snprintf(ledger, sizeof ledger, "%s/.git/z23-agent-claims.jsonl", one);
+        for (size_t i = 0; i < sizeof fields / sizeof fields[0]; i++) {
+            if (fields[i])
+                (void)snprintf(row, sizeof row, "{\"worktree\":\"/foreign\",%s}\n", fields[i]);
+            else
+                (void)snprintf(row, sizeof row, "{\"worktree\":\"/foreign\",\"files\":[\"%s\"]}\n", oversized);
+            ASSERT(dvx_write(one, ".git/z23-agent-claims.jsonl", row));
+            const char *files[] = {"engine/a.c", NULL};
+            struct dvx_call c;
+            dvx_claim(&c, one, "stored-path-probe", files, false);
+            ASSERT(dvx_run(&c) && !dvx_ok(&c));
+            ASSERT_STR_EQ(c.reply.error.code, "CLAIM_OVERLAP");
+            dvx_end(&c);
+            char *after = NULL;
+            size_t len = 0;
+            ASSERT(zcl_read_whole_file_text(ledger, sizeof row, &after, &len,
+                                            "claim_stored_path_after"));
+            bool unchanged = len == strlen(row) && memcmp(after, row, len) == 0;
+            free(after);
+            ASSERT(unchanged);
+        }
+        ASSERT(dvx_write(one, ".git/z23-agent-claims.jsonl", ""));
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 static int dvx_encoding_tests(const char *one)
 {
     int failures = 0;
@@ -506,6 +545,56 @@ static int dvx_encoding_tests(const char *one)
             if (f) { int byte = fgetc(f); ASSERT_EQ(fclose(f), 0); ASSERT_EQ(byte, EOF); }
             else { ASSERT_EQ(errno, ENOENT); }
         }
+        PASS();
+    }
+
+_test_next:;
+    return failures;
+}
+
+static int dvx_escaped_path_tests(const char *one, const char *two)
+{
+    int failures = 0;
+    TEST("claim: escaped path identity survives foreign overlap checks") {
+#ifndef _WIN32
+        const char *paths[] = {"engine/a\nb.c", "engine/a\"b.c", "engine/a\\b.c"};
+        for (size_t i = 0; i < sizeof paths / sizeof paths[0]; i++) {
+            const char *files[] = {paths[i], NULL};
+            struct dvx_call c;
+            dvx_claim(&c, one, "escaped-owner", files, false);
+            ASSERT(dvx_run(&c) && dvx_ok(&c));
+            char ledger[1024], before[8192], after[8192];
+            (void)snprintf(ledger, sizeof ledger, "%s", dvx_str(&c, "ledger"));
+            dvx_end(&c);
+            FILE *f = fopen(ledger, "rb");
+            ASSERT(f != NULL);
+            size_t n = fread(before, 1, sizeof before, f);
+            ASSERT(feof(f) && !ferror(f));
+            ASSERT_EQ(fclose(f), 0);
+            dvx_claim(&c, two, "escaped-contender", files, false);
+            ASSERT(dvx_run(&c) && !dvx_ok(&c));
+            ASSERT_STR_EQ(c.reply.error.code, "CLAIM_OVERLAP");
+            dvx_end(&c);
+            f = fopen(ledger, "rb");
+            ASSERT(f != NULL);
+            size_t m = fread(after, 1, sizeof after, f);
+            ASSERT(feof(f) && !ferror(f));
+            ASSERT_EQ(fclose(f), 0);
+            ASSERT_EQ(n, m);
+            ASSERT(memcmp(before, after, n) == 0);
+            if (i == 0) {
+                const char *literal[] = {"engine/au000ab.c", NULL};
+                dvx_claim(&c, two, "distinct-literal", literal, false);
+                ASSERT(dvx_run(&c) && dvx_ok(&c));
+                dvx_end(&c);
+                dvx_claim(&c, two, NULL, NULL, true);
+                ASSERT(dvx_run(&c) && dvx_ok(&c));
+                dvx_end(&c);
+            }
+        }
+#else
+        (void)two;
+#endif
         PASS();
     }
 
@@ -615,7 +704,9 @@ int test_devagent_claim(void)
         ASSERT(dvx_git(one, wt));
     }
 
+    failures += dvx_stored_path_tests(one);
     failures += dvx_encoding_tests(one);
+    failures += dvx_escaped_path_tests(one, two);
 
     TEST("claim: a first claim is recorded in the shared ledger") {
         struct dvx_call c;
