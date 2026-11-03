@@ -541,7 +541,7 @@ static int case_run_submits(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
     char out[8192];
     const bool ready = lt_setup(&e, "run", &c, "run", "claude-haiku");
     LT_CHECK("the run scenario fixtures are written", ready);
@@ -581,7 +581,7 @@ static int case_scope_hold(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "other.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg c = { "other.c", "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
     const bool ready = lt_setup(&e, "scope", &c, "run", "claude-haiku");
     LT_CHECK("the scope scenario fixtures are written", ready);
     if (!ready)
@@ -600,7 +600,7 @@ static int case_baseline_growth_hold(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "owned.c", "grow", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg c = { "owned.c", "grow", "VERDICT: LAND", "rc=0", NULL, NULL };
     const bool ready = lt_setup(&e, "grow", &c, "run", "claude-haiku");
     LT_CHECK("the growth scenario fixtures are written", ready);
     if (!ready)
@@ -620,7 +620,7 @@ static int case_baseline_lower_commits(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "owned.c", "lower", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg c = { "owned.c", "lower", "VERDICT: LAND", "rc=0", NULL, NULL };
     const bool ready = lt_setup(&e, "lower", &c, "run", "claude-haiku");
     LT_CHECK("the lowered-score scenario fixtures are written", ready);
     if (!ready)
@@ -646,7 +646,7 @@ static int case_baseline_rise_hold(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "owned.c", "rise", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg c = { "owned.c", "rise", "VERDICT: LAND", "rc=0", NULL, NULL };
     const bool ready = lt_setup(&e, "rise", &c, "run", "claude-haiku");
     LT_CHECK("the rising-score scenario fixtures are written", ready);
     if (!ready)
@@ -664,7 +664,7 @@ static int case_review_hold(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: HOLD owned.c:1 bad split", "rc=0", NULL };
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: HOLD owned.c:1 bad split", "rc=0", NULL, NULL };
     const bool ready = lt_setup(&e, "review", &c, "run", "claude-haiku");
     LT_CHECK("the review scenario fixtures are written", ready);
     if (!ready)
@@ -681,7 +681,7 @@ static int case_gate_failure_hold(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=1", "1" };
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=1", "1", NULL };
     const bool ready = lt_setup(&e, "gate", &c, "run", "claude-haiku");
     LT_CHECK("the gate scenario fixtures are written", ready);
     if (!ready)
@@ -741,7 +741,7 @@ static int case_rerun_pass(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=1", "0" };
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=1", "0", NULL };
     char out[8192] = "";
     const bool ready = lt_setup(&e, "rerun", &c, "run", "claude-haiku");
     LT_CHECK("the rerun scenario fixtures are written", ready);
@@ -762,7 +762,7 @@ static int case_unsigned_refused(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
     char out[8192] = "";
     const bool ready = lt_setup(&e, "unsigned", &c, "run", "claude-haiku");
     LT_CHECK("the unsigned scenario fixtures are written", ready);
@@ -779,7 +779,7 @@ static int case_no_lane_actions(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
     static const char *const actions[] = { "wait", "paused", "none" };
     bool ready = lt_setup(&e, "wait", &c, "wait", "claude-haiku");
     LT_CHECK("the no-lane scenario fixtures are written", ready);
@@ -807,7 +807,7 @@ static int case_lock(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
     char lock[900], state[900];
     const bool ready = lt_setup(&e, "lock", &c, "run", "claude-haiku");
     LT_CHECK("the lock scenario fixtures are written", ready);
@@ -834,7 +834,7 @@ static int case_retire_and_held(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
     char main_[700], lane[900], hold_a[900], hold_b[900], out[1024];
     const bool ready = lt_setup(&e, "retire", &c, "none", "claude-haiku");
     LT_CHECK("the retire scenario fixtures are written", ready);
@@ -957,7 +957,7 @@ static int case_finish_submits(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { NULL, "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg c = { NULL, "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
     char out[8192] = "";
     const bool ready = lt_setup(&e, "finish", &c, "none", "claude-haiku") &&
                        lt_make_lane(&e, "ok");
@@ -1005,7 +1005,7 @@ static int case_finish_holds(void)
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         struct lt_env e;
         char out[8192] = "", name[160];
-        const struct lt_cfg c = { NULL, "shrink", cases[i].verdict, "rc=0", NULL };
+        const struct lt_cfg c = { NULL, "shrink", cases[i].verdict, "rc=0", NULL, NULL };
         const bool ready = lt_setup(&e, cases[i].tag, &c, "none", "claude-haiku") &&
                            lt_make_lane(&e, cases[i].kind);
         (void)snprintf(name, sizeof(name), "the %s fixtures are written", cases[i].tag);
@@ -1029,7 +1029,7 @@ static int case_finish_usage(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { NULL, "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg c = { NULL, "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
     char out[4096] = "";
     char lane[800];
     const bool ready = lt_setup(&e, "fusage", &c, "none", "claude-haiku");
@@ -1050,7 +1050,7 @@ static int case_finish_locks(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { NULL, "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg c = { NULL, "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
     char out[8192] = "", state[900], lock[900];
     const bool ready = lt_setup(&e, "flock", &c, "none", "claude-haiku") &&
                        lt_make_lane(&e, "ok");
@@ -1101,7 +1101,7 @@ static int case_finish_rebase_conflict(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { NULL, "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg c = { NULL, "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
     char out[8192] = "", lane[800], gitdir[900] = "", p[1100], tracked[256] = "x";
     const bool ready = lt_setup(&e, "frebase", &c, "none", "claude-haiku") &&
                        lt_make_lane(&e, "ok") && lt_push_conflict(&e);
@@ -1154,7 +1154,7 @@ static int case_finish_long_credit(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { NULL, "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg c = { NULL, "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
     char out[8192] = "", credit[400] = "x", want[800];
     const bool ready = lt_setup(&e, "fcredit", &c, "none", "claude-haiku") &&
                        lt_make_lane(&e, "ok");
@@ -1210,7 +1210,7 @@ static int case_tick_long_pins(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
     char out[8192];
     const bool ready = lt_setup(&e, "tlong", &c, "run", "claude-haiku") &&
                        lt_step_doc(&e, "run", "claude-haiku", "loop:obj1:", "owned.c", 80);
@@ -1242,7 +1242,7 @@ static int case_tick_note_cannot_fit(void)
     memset(name, 'x', 240);
     memset(prefix, 'p', 159);
     prefix[159] = '\0';
-    const struct lt_cfg c = { name, "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg c = { name, "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
     char out[8192];
     const bool ready = lt_setup(&e, "tfit", &c, "run", "claude-haiku") &&
                        lt_main_file(&e, name) &&
@@ -1262,7 +1262,7 @@ static int case_tick_no_sequence(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
     char out[8192];
     const bool ready = lt_setup(&e, "tseq", &c, "run", "claude-haiku") &&
                        lt_script(&e, "dev",
@@ -1289,7 +1289,7 @@ static int case_finish_note_cannot_fit(void)
     memset(lane + 4, 'x', 60);
     memset(target, 'y', 240);
     (void)snprintf(target + 240, sizeof(target) - 240, ".c");
-    const struct lt_cfg c = { NULL, "shrink", "VERDICT: LAND", "rc=1", "0" };
+    const struct lt_cfg c = { NULL, "shrink", "VERDICT: LAND", "rc=1", "0", NULL };
     char out[8192] = "";
     const bool ready = lt_setup(&e, "ffit", &c, "none", "claude-haiku") &&
                        lt_make_lane_for(&e, "ok", lane, target);
@@ -1322,7 +1322,7 @@ static int case_finish_claims(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { NULL, "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg c = { NULL, "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
     char out[8192] = "";
     const bool ready = lt_setup(&e, "claim", &c, "none", "claude-haiku") &&
                        lt_make_lane(&e, "ok");
@@ -1360,7 +1360,7 @@ static int case_claim_released_on_hold(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { NULL, "shrink", "VERDICT: HOLD owned.c:1 bad split", "rc=0", NULL };
+    const struct lt_cfg c = { NULL, "shrink", "VERDICT: HOLD owned.c:1 bad split", "rc=0", NULL, NULL };
     char out[8192] = "";
     const bool ready = lt_setup(&e, "claimhold", &c, "none", "claude-haiku") &&
                        lt_make_lane(&e, "ok");
@@ -1380,7 +1380,7 @@ static int case_claim_refused_hold(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { NULL, "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg c = { NULL, "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
     char out[8192] = "", fail[900];
     const bool ready = lt_setup(&e, "claimno", &c, "none", "claude-haiku") &&
                        lt_make_lane(&e, "ok");
@@ -1421,7 +1421,7 @@ static int case_precheck_retry(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
     const bool ready = lt_setup(&e, "pre1", &c, "run", "claude-haiku") &&
                        lt_put(&e, "pre.red", "1");
     LT_CHECK("the precheck retry fixtures are written", ready);
@@ -1478,7 +1478,7 @@ static int case_model_call_receipts(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
     const bool ready = lt_setup(&e, "rcpt", &c, "run", "claude-haiku") &&
                        lt_put(&e, "pre.red", "1");
     LT_CHECK("the receipt fixtures are written", ready);
@@ -1513,7 +1513,7 @@ static int case_precheck_hold(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
     const bool ready = lt_setup(&e, "pre2", &c, "run", "claude-haiku") &&
                        lt_put(&e, "pre.red", "9");
     LT_CHECK("the precheck hold fixtures are written", ready);
@@ -1534,7 +1534,7 @@ static int case_precheck_setup_error(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
     const bool ready = lt_setup(&e, "pre3", &c, "run", "claude-haiku") &&
                        lt_script(&e, "precheck", "exit 2");
     LT_CHECK("the precheck setup-error fixtures are written", ready);
@@ -1553,7 +1553,7 @@ static int case_duplicate_target(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
     char main_[700], lane[900];
     bool ready = lt_setup(&e, "dup", &c, "run", "claude-haiku");
     (void)snprintf(main_, sizeof(main_), "%s/main", e.d);
@@ -1585,7 +1585,7 @@ static int case_no_exclude_without_lanes(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
     const bool ready = lt_setup(&e, "noexcl", &c, "run", "claude-haiku");
     LT_CHECK("the no-exclude fixtures are written", ready);
     if (!ready)
@@ -1620,7 +1620,7 @@ static bool lt_card_doc(const struct lt_env *e, const char *row, const char *ver
 static bool lt_card_tick(struct lt_env *e, const char *tag, const char *row,
                          const char *verify, const char *extra, bool verify_fail)
 {
-    const struct lt_cfg c = { "owned.c", "verify", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg c = { "owned.c", "verify", "VERDICT: LAND", "rc=0", NULL, NULL };
     const bool ready = lt_setup(e, tag, &c, "run", "claude-haiku") &&
                        lt_card_doc(e, row, verify) &&
                        (!extra || lt_put(e, "eu_extra.sh", extra)) &&
