@@ -195,6 +195,7 @@ static enum undo_rev_status slot_check(const struct undo_rev_cached_file *e,
                                        const struct undo_rev_scan *sc,
                                        struct block_undo *out)
 {
+    block_undo_init(out);
     size_t body = (size_t)slot->size + UNDO_REV_CHECKSUM;
     unsigned char *buf = zcl_malloc(UNDO_REV_HASH_SIZE + body,
                                     "undo_rev record");
