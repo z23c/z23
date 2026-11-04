@@ -658,6 +658,29 @@ static int test_lab_unconfined_seam(void)
     return failures;
 }
 
+static int test_lab_complete_case_file(void)
+{
+    int failures = 0;
+    TEST("lab test: invalid bytes after a valid case array refuse the file") {
+        static const char cases[] = "[{\"name\":\"visible\"}]\0[{\"name\":\"hidden\"}]";
+        char path[600], input[1024];
+        (void)snprintf(path, sizeof(path), "%s/cases.json", g_lt_dir);
+        FILE *file = fopen(path, "wb");
+        ASSERT(file != NULL);
+        size_t written = fwrite(cases, 1, sizeof(cases) - 1, file);
+        int closed = fclose(file);
+        ASSERT(written == sizeof(cases) - 1 && closed == 0);
+        (void)snprintf(input, sizeof(input), "{\"file\":\"nope/none.c\",\"cases\":\"%s\"}", path);
+        struct zcl_command_reply reply;
+        ASSERT(lt_call(zcl_native_handle_lab_test, input, "zcl.lab_test.v1", &reply));
+        bool refused = lt_failed_with(&reply, "LAB_BAD_CASES");
+        zcl_command_reply_free(&reply);
+        ASSERT(refused);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_lab_workload(void)
 {
     int failures = 0;
@@ -807,6 +830,7 @@ int test_lab(void)
     failures += test_lab_stdin_args();
     failures += test_lab_cache();
     failures += test_lab_test_cases();
+    failures += test_lab_complete_case_file();
     failures += test_lab_reverse_cases();
     failures += test_lab_test_inline_and_cache();
     failures += test_lab_test_stderr();

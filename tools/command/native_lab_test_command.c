@@ -93,26 +93,43 @@ static bool lab_fd_owner_is_self(int fd, const struct stat *st)
 #endif
 }
 
-static char *lab_cases_read_file(const char *path)
+static bool lab_cases_read_extent(int fd, char *buf, size_t size)
+{
+    size_t used = 0;
+    while (used <= size) {
+        ssize_t count = read(fd, buf + used, size + 1 - used);
+        if (count < 0 && errno == EINTR)
+            continue;
+        if (count <= 0)
+            return count == 0 && used == size;
+        used += (size_t)count;
+    }
+    return false;
+}
+
+static bool lab_cases_read_file(const char *path, struct json_value *doc)
 {
     struct stat st;
-    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-    char *buf = NULL;
+    int flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC;
+#if defined(_WIN32)
+    flags |= _O_BINARY;
+#endif
+    int fd = open(path, flags);
     if (fd < 0)
-        return NULL;
-    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
-        lab_fd_owner_is_self(fd, &st) &&
-        st.st_size > 0 && st.st_size <= LAB_CASES_FILE_MAX)
-        buf = zcl_malloc((size_t)st.st_size + 1, "lab.cases");
-    ssize_t n = buf ? read(fd, buf, (size_t)st.st_size) : -1;
-    close(fd);
-    if (n != (ssize_t)st.st_size && buf) {
-        free(buf);
-        return NULL;
+        return false;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+        !lab_fd_owner_is_self(fd, &st) || st.st_size <= 0 ||
+        st.st_size > LAB_CASES_FILE_MAX) {
+        close(fd);
+        return false;
     }
-    if (buf)
-        buf[n] = '\0';
-    return buf;
+    size_t size = (size_t)st.st_size;
+    char *buf = zcl_malloc(size + 1, "lab.cases");
+    bool complete = buf && lab_cases_read_extent(fd, buf, size);
+    int closed = close(fd);
+    bool ok = complete && closed == 0 && json_read(doc, buf, size);
+    free(buf);
+    return ok;
 }
 
 static bool lab_cases_text(const char *text, struct json_value *doc)
@@ -120,11 +137,9 @@ static bool lab_cases_text(const char *text, struct json_value *doc)
     const char *p = text;
     while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
         p++;
-    char *file = *p == '[' ? NULL : lab_cases_read_file(text);
-    const char *src = *p == '[' ? text : file;
-    bool ok = src && json_read(doc, src, strlen(src));
-    free(file);
-    return ok;
+    if (*p == '[')
+        return json_read(doc, text, strlen(text));
+    return lab_cases_read_file(text, doc);
 }
 
 static bool lab_case_args(const struct json_value *v, struct lab_case *c)
