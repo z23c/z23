@@ -733,6 +733,7 @@ ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_fresh_memo.c", 
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_capability.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_capability_alias.c", CAP_NONE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_deps.c", CAP_FS_WRITE|CAP_FS_READ, "")
+ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_docs_read.c", CAP_FS_READ|CAP_FS_WRITE, "queries the derived docs and symbols index and reads matched source files to check staleness")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_focus.c", CAP_FS_READ|CAP_FS_WRITE, "reads recorded focus evidence and reports contextual read or parse failures through the diagnostic stream")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_emitter.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_fetch.c", CAP_FS_READ|CAP_FS_WRITE, "copies a verified fetched image into <root>/.codeindex through the rebuild lock, a private staging inode, and the atomic rename; reads this checkout's source bytes for the sealed-root comparison")
