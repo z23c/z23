@@ -39,13 +39,17 @@ static bool rpc_roots(struct json_value *out,
 static bool rpc_wires(struct json_value *out,
                        const struct zcode_retrieval_science_result_bundle *b)
 {
-    return rpc_hex(out, "parent_result_wire_hex", b->parent_retrieval_result_wire,
-                    sizeof(b->parent_retrieval_result_wire)) &&
-        rpc_hex(out, "child_result_wire_hex", b->child_retrieval_result_wire,
-                  sizeof(b->child_retrieval_result_wire)) &&
-        rpc_hex(out, "observation_wire_hex", b->observation_wire,
-                  sizeof(b->observation_wire)) &&
-        rpc_hex(out, "result_wire_hex", b->result_wire, sizeof(b->result_wire));
+    const struct { const char *key; const uint8_t *bytes; size_t len; } wires[] = {
+        {"parent_result_wire_hex", b->parent_retrieval_result_wire,
+            sizeof(b->parent_retrieval_result_wire)},
+        {"child_result_wire_hex", b->child_retrieval_result_wire,
+            sizeof(b->child_retrieval_result_wire)},
+        {"observation_wire_hex", b->observation_wire, sizeof(b->observation_wire)},
+        {"result_wire_hex", b->result_wire, sizeof(b->result_wire)},
+    };
+    for (size_t i = 0; i < sizeof(wires) / sizeof(wires[0]); i++)
+        if (!rpc_hex(out, wires[i].key, wires[i].bytes, wires[i].len)) return false;
+    return true;
 }
 
 static bool rpc_status(struct json_value *out,
