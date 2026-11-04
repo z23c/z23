@@ -595,7 +595,31 @@ struct plugin_wait {
     int fd;            /* ".lock", read for the stamp */
     int64_t deadline;  /* monotonic ms */
     uint64_t seen;     /* last stamp observed */
+    int64_t quiet;     /* polls of this waiter that saw the stamp unchanged */
 };
+
+#ifdef ZCL_TESTING
+static int64_t g_lock_clock_jump_ms;
+
+/* One-shot: the next expiry check sees the clock this far ahead, as after a
+ * host-wide stall that froze the waiter and the holder alike. */
+void plugin_lock_test_clock_jump(int64_t ms)
+{
+    g_lock_clock_jump_ms = ms;
+}
+
+static int64_t plugin_lock_clock_jump(void)
+{
+    int64_t j = g_lock_clock_jump_ms;
+    g_lock_clock_jump_ms = 0;
+    return j;
+}
+#else
+static inline int64_t plugin_lock_clock_jump(void)
+{
+    return 0;
+}
+#endif
 
 static uint64_t plugin_lock_stamp_read(int fd)
 {
@@ -612,17 +636,24 @@ static void plugin_lock_stamp(int fd)
     }
 }
 
-/* True when the budget is spent with no handover since the last check. */
+/* True when the budget is spent with no handover since the last check. The
+ * clock alone is not trusted: a stall that freezes the whole host (the holder
+ * too) moves it past the deadline in one step although the lock never stuck.
+ * The waiter must also have seen the stamp unchanged on enough polls of its
+ * own, a quarter of the polls a budget holds, so a jump cannot refuse it. */
 static bool plugin_wait_expired(struct plugin_wait *w)
 {
-    int64_t now = platform_time_monotonic_ms();
+    int64_t now = platform_time_monotonic_ms() + plugin_lock_clock_jump();
     uint64_t stamp = plugin_lock_stamp_read(w->fd);
     if (stamp != w->seen) {
         w->seen = stamp;
+        w->quiet = 0;
         w->deadline = now + plugin_lock_budget_ms();
         return false;
     }
-    return now >= w->deadline;
+    w->quiet++;
+    return now >= w->deadline &&
+           w->quiet >= plugin_lock_budget_ms() / (4 * PLUGIN_LOCK_STEP_MS);
 }
 
 /* Poll until the lock is taken; *st is BUSY on a spent budget, IO on error. */
@@ -657,7 +688,7 @@ static bool plugin_gate_pass(int qfd, struct plugin_wait *w, enum plugin_status 
 /* Take ".lock" with qfd and fd open; see the comment above. */
 static enum plugin_status plugin_lock_take(int qfd, int fd, int64_t deadline)
 {
-    struct plugin_wait w = { fd, deadline, plugin_lock_stamp_read(fd) };
+    struct plugin_wait w = { fd, deadline, plugin_lock_stamp_read(fd), 0 };
     enum plugin_status st = PLUGIN_OK;
     if (!plugin_gate_pass(qfd, &w, &st))
         return st;

@@ -97,6 +97,8 @@ void plugin_lock_release(struct plugin_lock *lock);
  * modelling a loaded host where holds are long against the budget. A budget
  * <= 0 restores PLUGIN_LOCK_WAIT_MS; a pause <= 0 removes the pause. */
 void plugin_lock_test_timing(int64_t budget_ms, int64_t hold_pause_ms);
+/* Test seam: the next lock expiry check sees the clock ms ahead, once. */
+void plugin_lock_test_clock_jump(int64_t ms);
 #endif
 /* Create one new owner-private directory; false if it exists. */
 bool plugin_mkdir_new(const char *path);

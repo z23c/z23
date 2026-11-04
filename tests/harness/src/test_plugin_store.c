@@ -2212,6 +2212,42 @@ static int pst_case_lock_fairness(void)
     return failures;
 }
 
+/* A stall that freezes the whole host moves the waiter's clock past its
+ * deadline in one step, although the holder is only slow, not stuck. The
+ * seam jumps the clock once at the first expiry check; the waiter must keep
+ * polling and take the lock when the holder lets go, not answer BUSY. */
+static int pst_case_lock_clock_jump(void)
+{
+    int failures = 0;
+    TEST_CASE("a clock jump across a stall does not refuse a waiter whose holder then lets go") {
+        struct pst_fx fx;
+        char plugdir[PATH_MAX], lockpath[PATH_MAX];
+        ASSERT(pst_fx_open(&fx, true) && pst_install(&fx, "hello", "version a", &(struct pst_opts){0}) == PLUGIN_OK);
+        ASSERT(pst_plug_path(&fx, NULL, plugdir, sizeof(plugdir)));
+        ASSERT(pst_plug_path(&fx, ".lock", lockpath, sizeof(lockpath)));
+        int held = open(lockpath, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        ASSERT(held >= 0);
+        ASSERT_EQ(flock(held, LOCK_EX | LOCK_NB), 0);
+        fflush(NULL);
+        pid_t pid = fork();
+        ASSERT(pid >= 0);
+        if (pid == 0) {
+            struct plugin_lock lk;
+            plugin_lock_test_clock_jump(10 * PLUGIN_LOCK_WAIT_MS);
+            enum plugin_status st = plugin_lock_acquire(plugdir, &lk);
+            if (st == PLUGIN_OK)
+                plugin_lock_release(&lk);
+            _exit((int)st);
+        }
+        platform_sleep_ms(100); /* the waiter polls and sees the jump meanwhile */
+        ASSERT_EQ(flock(held, LOCK_UN), 0);
+        ASSERT_EQ(pst_reap(pid), (int)PLUGIN_OK);
+        close(held);
+        pst_fx_close(&fx);
+    } TEST_END
+    return failures;
+}
+
 static int pst_case_lock_budget(void)
 {
     int failures = 0;
@@ -2542,6 +2578,7 @@ int test_plugin_store(void)
     failures += pst_case_slow_holds();
     failures += pst_case_gate_owner();
     failures += pst_case_lock_fairness();
+    failures += pst_case_lock_clock_jump();
     failures += pst_case_lock_budget();
     failures += pst_case_lock_gate_leftover();
     failures += pst_case_threaded_install();
