@@ -2504,6 +2504,36 @@ ZCL_COMMAND_DEV_COMMAND(
     "landing windows are a development-lane coordination surface",
     "z23 dev land window")
 
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.land.intake", "dev.land", "",
+    "Take in READY board posts: verify, scope, merge-check, verdict",
+    "For each READY post (one id, or a room since a time, or a saved "
+    "posts_file) it checks the post signature, that the author key is in the "
+    "allow file, fetches the offered bundle (a sha256 token; bundle_dir/"
+    "<sha256>.bundle is reused), refuses a path under core/, engine/reducer/, "
+    "contexts/wallet/ or the deny file, and runs git merge-tree against "
+    "origin/main and pairwise against the earlier accepted posts. One "
+    "verdict per post: ACCEPT_FOR_QUEUE, REFUSE(reason) or CONFLICT(with). "
+    "Without commit it posts and queues nothing. commit=true returns the "
+    "plan_id; with that plan_id and confirm=true it submits each accepted "
+    "bundle through dev.land.receive and posts one result reply per post.",
+    65536,
+    "intake,ready,board,bundle,scope,merge,verdict,land",
+    "zcl.dev_intake_input.v1", "zcl.dev_intake.v1",
+    "id,room,since,posts_file,repo,bundle_dir,allow,deny,commit,confirm,plan_id",
+    "",
+    "z23-dev dev land intake --room=fleet --since=T --allow=FILE --bundle_dir=/abs/dir",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_PERSISTENT,
+    ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_intake,
+    "intake of READY posts is a development-lane coordination surface",
+    "z23-dev dev land intake --room=fleet --allow=FILE --bundle_dir=/abs/dir")
+
 /* ── dev.land.receive / dev.land.send ─────────────────────────────────────
  * Submit from another machine (tools/command/native_dev_land_remote.c). */
 ZCL_COMMAND_DEV_COMMAND(
