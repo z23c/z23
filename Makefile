@@ -12730,7 +12730,7 @@ tip-agreement-status: $(Z23_DEV_BIN) $(JSONQ_BIN)
 # harness) AND the judge (the tip_agreement_judge test group). Fixture node
 # readers, no live node, no network. The recorder gates on the PASS token, not
 # on an exit code alone.
-tip-agreement-selftest:
+tip-agreement-selftest: $(Z23_DEV_BIN)
 	@bash -c 'set -uo pipefail; \
 	 set +e; out=$$(bash tools/scripts/test_tip_agreement_evidence.sh 2>&1); rc=$$?; set -e; \
 	 echo "$$out"; \
