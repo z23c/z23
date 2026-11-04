@@ -449,7 +449,7 @@ assert green).
   must use `AR_BEGIN_SAVE`, `AR_ADHOC_SAVE`, `AR_CACHED_SAVE`, and
   `AR_FINISH_SAVE` so `before_validate -> validate -> before_save -> SQL ->
   after_save` stays one mechanically enforced lifecycle. Impl:
-  `tools/scripts/check_model_ar_lifecycle.sh`.
+  `./build/bin/z23-lint check-model-ar-lifecycle`.
 
 - **Gate #11c: `check-model-sql-literals`** (RATCHET, shrink-only) — a model
   file must not carry a hand-written SQL statement. Reads and writes build
@@ -536,7 +536,7 @@ assert green).
   `tools/scripts/check_long_functions_lib_baseline.txt`. Long functions
   conceal multiple concerns. Override `// long-function-ok:<tag>` on the
   signature line (tag matches `[A-Za-z][A-Za-z0-9_-]+`) exempts a function
-  entirely in either tier. Impl: `tools/scripts/check_long_functions.sh`.
+  entirely in either tier. Impl: `./build/bin/z23-lint check-long-functions`.
 
 - **Gate #13: `check-rpc-registrar`** — every RPC handler declared in
   `engine/modules/rpc/src/` must appear in the registrar table at the bottom of the same
@@ -560,7 +560,7 @@ assert green).
   `../../../config/*.def` X-macro data tables are not matched and carry no
   link edge. Baseline `tools/scripts/lib_layering_baseline.txt` is empty (98
   originals all remediated). Override `// lib-layer-ok:<tag>`. Impl:
-  `tools/scripts/check_lib_layering.sh`.
+  `./build/bin/z23-lint check-lib-layering`.
 
 - **Gate #49: `check-shape-include-direction`** (RATCHET) — the eight app/
   shapes include DOWNWARD only (`controllers -> services -> models ->
@@ -578,7 +578,7 @@ assert green).
   edge (undiscovered until this gate existed). New edges fail, and stale
   baseline rows fail until removed so paid-down debt cannot silently return.
   Override `// shape-layer-ok:<tag>`. Impl:
-  `tools/scripts/check_shape_include_direction.sh`.
+  `./build/bin/z23-lint check-shape-include-direction`.
 
 - **Gate #55: `check-controller-private-headers`** (RATCHET) — derives the
   owner of each `controllers/*_internal.h` and `*_private.h` include from its
@@ -856,7 +856,7 @@ assert green).
   independently. Standing children include `sync.watchdog`,
   `net.outbound_floor`, `chain.coord_escalation`. Baseline
   `tools/scripts/supervisor_baseline.txt` (drained to 0 entries). Impl:
-  `tools/scripts/check_supervisor_registration.sh`.
+  `./build/bin/z23-lint check-supervisor-registration`.
 
 - **Gate #17: `check-typed-blocker`** — any code raising a `block_id` must use a
   typed kind from `enum blocker_kind` (`platform/modules/util/src/blocker.c`); raw string
@@ -1181,7 +1181,7 @@ outstanding the oracle is red and the item is fresh; the day the work lands the
 oracle turns green and `check-doc-claims` turns RED, naming the plan file and
 the stale line. Every `check-no-*` ratchet already in `LINT_GATES` is usable as
 an oracle, so items they watch get freshness checking for free. Gates are
-resolved through the same `gate_command()` table `tools/lint/run_lint.sh` uses,
+resolved through the same `LINT_ROW` table `tools/lint/lintc/gate_commands.def` holds,
 run at most once per invocation, and a gate may not name itself. A name that
 table cannot resolve is reported as malformed straight away — nothing waits on
 a verdict for a gate that does not exist. Under `make lint` the verdict for a
@@ -1545,8 +1545,8 @@ source's hash.
 `check-lint-gate-wiring` (`tools/lint/lintc/gate_lint_gate_wiring.c`, run as
 `z23-lint check-lint-gate-wiring`) keeps the three files of a lint
 gate in step. **Adding a gate is a THREE-file operation**: the Makefile gets a
-`check-*:` target plus a line in `LINT_GATES`, `tools/lint/run_lint.sh` gets an
-entry in `gate_command()`'s case table (because the parallel driver execs each
+`check-*:` target plus a line in `LINT_GATES`, `tools/lint/lintc/gate_commands.def` gets a
+`LINT_ROW` (because the parallel driver, `z23-lint run`, execs each
 gate's script directly and never reads the Make recipe), and
 `docs/DEFENSIVE_CODING.md`'s own LINT-GATES marker block (below) gets the
 gate name. Nothing enforced the second and third files, so gates shipped with
@@ -1560,8 +1560,8 @@ no list names, and a doc-only phantom gate), plus a real Make target behind
 every listed name (the `ZCL_LINT_SERIAL=1` fallback runs the list as
 prerequisites) and an existing script behind every table entry. It reads the
 Makefile lists with the same backslash-continuation scan `check-doc-accuracy`
-uses, reads the case table through `run_lint.sh --list` (which greps its own
-case labels), and reads the doc block by scanning between the same
+uses, reads the command table from the `LINT_ROW` lines of `gate_commands.def` (the same parser
+the driver compiles), and reads the doc block by scanning between the same
 `LINT-GATES-BEGIN`/`LINT-GATES-END` markers the `check-doc-accuracy` gate scans —
 never a second, divergent parser of any of the three files. Its `--selftest`
 plants each defect class in a throwaway fixture tree and asserts the gate
@@ -1841,8 +1841,8 @@ name a genuinely unique structural property
 - `long-function-ok:` — `legacy-import-state-machine`.
 
 Implementation: `tools/check_observability_pairing.c`,
-`lintc` gate `check-raw-sqlite`, `tools/scripts/check_raw_malloc.sh`,
-`tools/scripts/check_long_functions.sh`, and the inline `check-silent-errors*`
+`lintc` gate `check-raw-sqlite`, `./build/bin/z23-lint check-raw-malloc`,
+`./build/bin/z23-lint check-long-functions`, and the inline `check-silent-errors*`
 recipes in `Makefile:1481+`.
 
 ---

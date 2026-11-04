@@ -1,12 +1,12 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: --selftest for check-lint-gate-wiring (gate_lint_gate_wiring.c).
- * Builds a scratch fixture tree carrying the REAL run_lint.sh (so --list
- * and --print-command are the code under test,
- * not a mock) stripped of its real case table, plants one defect per case
+ * Builds a scratch fixture tree carrying an empty gate_commands.def (the
+ * gate reads its LINT_ROW lines through the same parser the driver shares,
+ * not a mock), plants one defect per case
  * (A-G, I, J, K, M) and asserts lgw_check_root() rejects it and names the
  * offender, then a positive control (H) that a correctly wired
- * three-file fixture (Makefile, run_lint.sh, DEFENSIVE_CODING.md doc
+ * three-file fixture (Makefile, gate_commands.def, DEFENSIVE_CODING.md doc
  * block) passes. Cases I and J cover the doc-block three-way parity by
  * name: a listed gate missing from the doc, and a doc-only phantom gate.
  * Case K wires the same case label twice — only the duplicate-label check
@@ -29,64 +29,6 @@
 
 enum { LGWS_BUF = 1 << 20 };
 
-static int lgws_copy(const char *root, const char *rel, const char *dst_dir)
-{
-    char src[4096], dst[4096];
-    if (ovf(snprintf(src, sizeof src, "%s/%s", root, rel), sizeof src)
-        || ovf(snprintf(dst, sizeof dst, "%s/%s", dst_dir, rel), sizeof dst))
-        return 2;
-    FILE *f = fopen(src, "r");
-    if (!f)
-        return die("z23-lint: cannot open %s\n", src);
-    static char buf[LGWS_BUF];
-    size_t n = fread(buf, 1, sizeof buf - 1, f);
-    int bad = ferror(f);
-    fclose(f);
-    if (bad)
-        return die("z23-lint: read failed: %s\n", src);
-    buf[n] = '\0';
-    return csr_write(dst, buf);
-}
-
-/* Strips every existing case-table entry line so only the sentinels the
- * caller wires in are visible — otherwise every real gate would read as an
- * orphan in the fixture. Matches the SAME pattern --list's own self-grep
- * uses: 8-space indent, "check-<name>)", whitespace, "echo". */
-/* True for a line matching --list's own self-grep: 8-space indent,
- * "check-<name>)", whitespace, "echo". */
-static int lgws_is_table_line(const char *p)
-{
-    if (strncmp(p, "        check-", 14) != 0)
-        return 0;
-    const char *q = p + 14;
-    while (*q && (islower((unsigned char)*q) || isdigit((unsigned char)*q) || *q == '-'))
-        q++;
-    if (q[0] != ')')
-        return 0;
-    while (*q == ' ' || *q == '\t' || *q == ')')
-        q++;
-    return strncmp(q, "echo", 4) == 0;
-}
-static int lgws_strip_table(char *text)
-{
-    static char out[LGWS_BUF];
-    size_t used = 0;
-    char *save = NULL;
-    for (char *ln = strtok_r(text, "\n", &save); ln; ln = strtok_r(NULL, "\n", &save)) {
-        if (lgws_is_table_line(ln))
-            continue;
-        size_t ll = strlen(ln);
-        if (used + ll + 2 >= sizeof out)
-            return die("z23-lint: fixture buffer overflow\n", "");
-        memcpy(out + used, ln, ll);
-        used += ll;
-        out[used++] = '\n';
-    }
-    out[used] = '\0';
-    memcpy(text, out, used + 1);
-    return 0;
-}
-
 static int lgws_seed_dirs(const char *d)
 {
     char toollint[4096], toolscripts[4096];
@@ -96,22 +38,20 @@ static int lgws_seed_dirs(const char *d)
         return 2;
     return csr_write(toollint, "") || csr_write(toolscripts, "");
 }
+
+/* The fixture's gate_commands.def: the real file's header and no rows, so
+ * only the sentinels the caller wires in are visible — otherwise every real
+ * gate would read as an orphan in the fixture. */
 static int lgws_strip_driver(const char *d)
 {
-    char driver[4096];
-    if (ovf(snprintf(driver, sizeof driver, "%s/tools/lint/run_lint.sh", d), sizeof driver))
+    char driver[4096], dir[4096];
+    if (ovf(snprintf(driver, sizeof driver, "%s/tools/lint/lintc/gate_commands.def", d),
+            sizeof driver)
+        || ovf(snprintf(dir, sizeof dir, "%s/tools/lint/lintc", d), sizeof dir))
         return 2;
-    FILE *f = fopen(driver, "r");
-    if (!f) return die("z23-lint: cannot open %s\n", driver);
-    static char text[LGWS_BUF];
-    size_t n = fread(text, 1, sizeof text - 1, f);
-    int bad = ferror(f);
-    fclose(f);
-    if (bad) return die("z23-lint: read failed: %s\n", driver);
-    text[n] = '\0';
-    if (lgws_strip_table(text)) return 2;
-    if (csr_write(driver, text)) return 2;
-    return chmod(driver, 0700) != 0 ? die("z23-lint: chmod failed: %s\n", driver) : 0;
+    if (csr_mkdirs(dir))
+        return 2;
+    return csr_write(driver, "/* fixture gate command table: LINT_ROW(name, command) rows */\n");
 }
 static int lgws_write_sentinels(const char *d)
 {
@@ -123,8 +63,8 @@ static int lgws_write_sentinels(const char *d)
 }
 static int lgws_make_fixture(const char *repo_root, const char *d)
 {
+    (void)repo_root;
     if (lgws_seed_dirs(d)) return 2;
-    if (lgws_copy(repo_root, "tools/lint/run_lint.sh", d)) return 2;
     if (lgws_strip_driver(d)) return 2;
     return lgws_write_sentinels(d);
 }
@@ -175,31 +115,19 @@ static int lgws_write_makefile(const char *d, const char *const *gates, int n)
     return csr_write(path, body);
 }
 
-/* Inserts one case entry right before the driver's own `*) return 1 ;;`
- * default arm — the exact anchor the shell selftest used. */
+/* Appends one LINT_ROW(gate, cmd) line to the fixture's gate_commands.def.
+ * cmd is plain text without quotes or backslashes. */
 static int lgws_wire(const char *d, const char *gate, const char *cmd)
 {
     char driver[4096];
-    if (ovf(snprintf(driver, sizeof driver, "%s/tools/lint/run_lint.sh", d), sizeof driver))
+    if (ovf(snprintf(driver, sizeof driver, "%s/tools/lint/lintc/gate_commands.def", d),
+            sizeof driver))
         return 2;
-    FILE *f = fopen(driver, "r");
+    FILE *f = fopen(driver, "a");
     if (!f) return die("z23-lint: cannot open %s\n", driver);
-    static char text[LGWS_BUF];
-    size_t n = fread(text, 1, sizeof text - 1, f);
-    int bad = ferror(f);
-    fclose(f);
-    if (bad) return die("z23-lint: read failed: %s\n", driver);
-    text[n] = '\0';
-    const char *anchor = "        *) \"$BIN_DIR/z23-lint\" --gate-command";
-    char *pos = strstr(text, anchor);
-    if (!pos) return die("z23-lint: fixture driver has no default arm\n", "");
-    static char merged[LGWS_BUF];
-    size_t prelen = (size_t)(pos - text);
-    int k = snprintf(merged, sizeof merged, "%.*s        %s)   echo '%s' ;;\n%s",
-                     (int)prelen, text, gate, cmd, pos);
-    if (ovf(k, sizeof merged)) return 2;
-    if (csr_write(driver, merged)) return 2;
-    return chmod(driver, 0700) != 0 ? die("z23-lint: chmod failed: %s\n", driver) : 0;
+    int k = fprintf(f, "LINT_ROW(\"%s\", \"%s\")\n", gate, cmd);
+    if (fclose(f) != 0 || k < 0) return die("z23-lint: write failed: %s\n", driver);
+    return 0;
 }
 
 static int lgws_expect_reject(const char *label, const char *needle, const char *d,
@@ -484,8 +412,8 @@ static int lgws_case_m(const char *base, int *fails)
                               "check-sentinel-nocmd", d, fails);
 }
 
-/* run_lint.sh cd's to its own resolved root before self-grepping $0, so a
- * relative fixture path stops resolving the moment it does. Always hand it
+/* The scanned root is handed around as a path; a relative fixture path stops
+ * resolving once anything changes directory. Always hand it
  * an absolute one. */
 static const char *lgws_absolutize(char *d0, char *scratch, size_t cap, int *rc)
 {

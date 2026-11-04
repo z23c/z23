@@ -48,7 +48,7 @@
  * Every symbol below is a pre-existing, already-shipped READ accessor
  * owned by its app/ home file (named per symbol). None is #include'd —
  * see catalog_completeness.h's layering note and
- * tools/scripts/check_lib_layering.sh's own "Fix option 2". This module
+ * ./build/bin/z23-lint check-lib-layering's own "Fix option 2". This module
  * adds no new mutation surface: it only composes reads that already ship
  * elsewhere. */
 

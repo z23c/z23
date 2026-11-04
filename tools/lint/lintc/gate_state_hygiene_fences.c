@@ -268,7 +268,7 @@ static int jvi_fail_msg(void)
 
 int check_json_value_init_run(int argc, char **argv)
 {
-    /* run_lint.sh still forwards the shell original's hyphenated flag. */
+    /* gate_commands.def still forwards the shell original's hyphenated flag. */
     if (argc >= 1 && strcmp(argv[0], "--self-test") == 0)
         return check_json_value_init_selftest();
     (void)argv;
@@ -394,7 +394,7 @@ static int owp_compile(struct owp_re *r)
     if (rc)
         return rc;
     /* connect_tip/disconnect_tip/process_new_block were in the shell
-     * pattern this ported (tools/scripts/check_one_write_path.sh) but
+     * pattern this ported (./build/bin/z23-lint check-one-write-path) but
      * are themselves deleted engine entry points (see the stale[] list
      * in check_deleted_engine_names_file) — a .sh file was never walked
      * by that gate, but this .c file is, so naming them here trips it.
@@ -626,7 +626,7 @@ static int owp_report(const struct owp_acc *a)
 /* ZCL_OWP_SCAN_ROOTS override, when set and non-empty, replaces the
  * default root list AND drops the floor to 1 (a test-fed empty dir has
  * no 200-file production floor to meet) — the same SCAN_FLOOR_OVERRIDE
- * contract tools/scripts/check_one_write_path.sh used. */
+ * contract ./build/bin/z23-lint check-one-write-path used. */
 static int owp_scan(struct owp_acc *a, int *floor_out)
 {
     const char *env = getenv("ZCL_OWP_SCAN_ROOTS");

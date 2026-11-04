@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: gate — check-no-uncited-victory (replaces
- * tools/scripts/check_no_uncited_victory.sh). Guards the one live-state
+ * ./build/bin/z23-lint check-no-uncited-victory). Guards the one live-state
  * page, docs/agent/HANDOFF.md (ZCL_LINT_MODE override), against uncited
  * "cured / at tip / fully synced" claims in prose — this repo shipped 9+
  * such claims in six weeks, every one later false (~103 wedge-FIXED-then-

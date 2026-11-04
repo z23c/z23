@@ -233,46 +233,34 @@ void dc_memo_clear(void)
         dc_memo[i].set = 0;
 }
 
-/* Extracts the recipe from a run_lint.sh-style table line: NAME) echo '...'
- * ;;. Returns 0 when out holds the command. */
+/* Finds the recipe of gate g in a gate_commands.def-style table:
+ * LINT_ROW("NAME", "..."). The first row for a name wins. Returns 0 when
+ * out holds the command. */
 static int dc_table_lookup(const char *path, const char *g, char *out,
                            size_t cap)
 {
-    char pat[DC_MEMO_NAME + 64];
-    if (ovf(snprintf(pat, sizeof pat,
-                     "^[[:space:]]*%s\\)[[:space:]]*echo '(.*)'"
-                     "[[:space:]]*;;", g), sizeof pat))
-        return 1;
-    regex_t re;
-    if (regcomp(&re, pat, REG_EXTENDED) != 0)
-        return 1;
     FILE *f = fopen(path, "r");
-    if (!f) {
-        regfree(&re);
+    if (!f)
         return 1;
-    }
-    char line[DC_LINE];
-    regmatch_t m[2];
+    char line[DC_LINE], name[DC_MEMO_NAME], cmd[DC_LINE];
     int found = 0;
     while (!found && fgets(line, sizeof line, f)) {
-        if (regexec(&re, line, 2, m, 0) == 0) {
-            size_t n = (size_t)(m[1].rm_eo - m[1].rm_so);
-            if (n < cap) {
-                memcpy(out, line + m[1].rm_so, n);
-                out[n] = '\0';
-                found = 1;
-            }
+        if (lint_cmdrow_parse(line, name, sizeof name, cmd, sizeof cmd) != 0
+            || strcmp(name, g) != 0)
+            continue;
+        if (strlen(cmd) < cap) {
+            memcpy(out, cmd, strlen(cmd) + 1);
+            found = 1;
         }
     }
     fclose(f);
-    regfree(&re);
     return found ? 0 : 1;
 }
 
 static int dc_gate_cmd_for(const char *g, char *out, size_t cap)
 {
     const char *tbl = dc_table_override ? dc_table_path
-                                        : "tools/lint/run_lint.sh";
+                                        : "tools/lint/lintc/gate_commands.def";
     if (dc_table_lookup(tbl, g, out, cap) == 0)
         return 0;
     return lint_gate_command(g, out, cap) == 0 ? 0 : 1;
@@ -481,9 +469,9 @@ static int dc_eval_gate(const char *pred, int nt, const char *g,
     int rc = dc_gate_rc(g);
     if (rc < 0) {
         dc_setr(reason, cap,
-                "gate '%s' has no entry in gate_command() in %s (or is not "
+                "gate '%s' has no entry in the gate table %s (or is not "
                 "runnable as an oracle)", g,
-                dc_table_override ? dc_table_path : "tools/lint/run_lint.sh");
+                dc_table_override ? dc_table_path : "tools/lint/lintc/gate_commands.def");
         return 2;
     }
     if (rc == 0) {

@@ -8,9 +8,9 @@
  * Row order is the `--list` order. Add a gate by appending one row here; the
  * run and selftest functions must be named base_run and base_selftest.
  * cmd is the gate's canonical lint command, which `z23-lint --gate-command`
- * prints for run_lint.sh: LINT_CMD_PLAIN = `./build/bin/z23-lint NAME`,
+ * prints for z23-lint run: LINT_CMD_PLAIN = `./build/bin/z23-lint NAME`,
  * LINT_CMD_PAIR = the same after a `--selftest` run joined by `&&`,
- * LINT_CMD_NONE = run_lint.sh keeps its own table line for the gate.
+ * LINT_CMD_NONE = gate_commands.def holds its own LINT_ROW for the gate.
  */
 
 LINT_GATE("check-live-datadir-isolation", check_live_datadir_isolation, LINT_CMD_PAIR)

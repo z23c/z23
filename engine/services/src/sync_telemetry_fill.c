@@ -7,7 +7,7 @@
 // the one thing that is not a per-leaf fact — a NULL snapshot — and the
 // signature itself is fixed by the frozen render contract
 // (util/telemetry_render.h) and by the `*_dump_state_fill` shape
-// tools/scripts/check_dumper_never_blocks.sh scans.
+// ./build/bin/z23-lint check-dumper-never-blocks scans.
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * sync_telemetry_fill — the `sync` domain's typed snapshot provider.

@@ -7,15 +7,15 @@
  * docs/zrc/0006-knowledge-in-the-checkout.md. */
 
 ZCL_FACT("lint.gates", "gate_wiring_three_files",
-         "Adding a lint gate touches three files: Makefile (check-<name> target and LINT_GATES line), run_lint.sh gate_command(), and the DEFENSIVE_CODING.md gate block.",
+         "Adding a lint gate touches three files: the Makefile (target and LINT_GATES line), gate_commands.def, and the DEFENSIVE_CODING.md block.",
          "tools/lint/lintc/gate_lint_gate_wiring.c",
          "Adding a lint gate is a THREE-FILE operation")
 ZCL_FACT("lint.gates", "gate_wiring_assertion_a",
-         "z23-lint check-lint-gate-wiring asserts A that every LINT_GATES/LINT_FAST_GATES member has a gate_command() case entry.",
+         "z23-lint check-lint-gate-wiring asserts A that every LINT_GATES/LINT_FAST_GATES member has a gate_commands.def LINT_ROW or a native command.",
          "tools/lint/lintc/gate_lint_gate_wiring.c",
          "gate(s) in LINT_GATES/LINT_FAST_GATES with NO gate_command() entry")
 ZCL_FACT("lint.gates", "gate_wiring_assertion_b",
-         "z23-lint check-lint-gate-wiring asserts B that every gate_command() entry is named by one of the two gate lists, else it is dead wiring.",
+         "z23-lint check-lint-gate-wiring asserts B that every gate_commands.def row is named by one of the two gate lists, else it is dead wiring.",
          "tools/lint/lintc/gate_lint_gate_wiring.c",
          "gate_command() entries that NO gate list names (dead wiring)")
 ZCL_FACT("lint.gates", "gate_wiring_assertion_c",
@@ -23,7 +23,7 @@ ZCL_FACT("lint.gates", "gate_wiring_assertion_c",
          "tools/lint/lintc/gate_lint_gate_wiring.c",
          "listed gate(s) with no 'check-...:' target")
 ZCL_FACT("lint.gates", "gate_wiring_assertion_d",
-         "z23-lint check-lint-gate-wiring asserts D that every gate_command() .sh script path actually exists on disk.",
+         "z23-lint check-lint-gate-wiring asserts D that every gate_commands.def .sh script path actually exists on disk.",
          "tools/lint/lintc/gate_lint_gate_wiring.c",
          "gate_command() entries naming a script that does not exist")
 ZCL_FACT("lint.gates", "lint_gates_list_defined",
@@ -35,45 +35,45 @@ ZCL_FACT("lint.gates", "lint_fast_gates_list_defined",
          "Makefile",
          "LINT_FAST_GATES :=")
 ZCL_FACT("lint.gates", "lint_target_invokes_driver",
-         "The default (non-serial) make lint recipe invokes tools/lint/run_lint.sh with the full LINT_GATES list as arguments.",
+         "The default (non-serial) make lint recipe invokes z23-lint run with the full LINT_GATES list as arguments.",
          "Makefile",
          "$(LINT_GATES)")
 ZCL_FACT("lint.gates", "lint_fast_target_invokes_driver",
-         "The default lint-fast recipe invokes the same run_lint.sh driver but passes LINT_FAST_GATES instead of LINT_GATES.",
+         "The default lint-fast recipe invokes the same z23-lint run driver but passes LINT_FAST_GATES instead of LINT_GATES.",
          "Makefile",
          "$(LINT_FAST_GATES)")
 ZCL_FACT("lint.gates", "lint_serial_fallback_makefile",
-         "Setting ZCL_LINT_SERIAL=1 makes the lint target run LINT_GATES as plain Make prerequisites instead of calling run_lint.sh.",
+         "Setting ZCL_LINT_SERIAL=1 makes the lint target run LINT_GATES as plain Make prerequisites instead of calling z23-lint run.",
          "Makefile",
          "lint: $(LINT_GATES)")
 ZCL_FACT("lint.gates", "driver_execs_scripts_directly",
-         "run_lint.sh execs each gate's own script directly via its gate_command() table and never reads the Makefile recipe.",
+         "z23-lint run execs each gate's own command directly via its gate_commands.def table and never reads the Makefile recipe.",
          "Makefile",
          "the parallel driver execs each gate's script directly and never reads")
 ZCL_FACT("lint.gates", "driver_list_flag",
-         "run_lint.sh --list derives gate names by grepping its own gate_command() case labels so reformatting cannot desync the probe.",
-         "tools/lint/run_lint.sh",
-         "Gate names = the case labels in gate_command() (read from")
+         "z23-lint run --list prints the gate names of the compiled gate_commands.def table, sorted.",
+         "tools/lint/lintc/run_main.c",
+         "qsort(names, (size_t)g_table.n")
 ZCL_FACT("lint.gates", "driver_print_command_flag",
-         "run_lint.sh --print-command GATE is the one supported external reader of a single gate's exact invocation string.",
-         "tools/lint/run_lint.sh",
-         "--print-command GATE   (one gate's exact command)")
+         "z23-lint run --print-command GATE is the one supported external reader of a single gate's exact invocation string.",
+         "tools/lint/lintc/run_main.c",
+         "--print-command")
 ZCL_FACT("lint.gates", "driver_jobs_env_default",
-         "run_lint.sh defaults its parallel worker count to 8 via the ZCL_LINT_JOBS environment variable when --jobs is not given.",
-         "tools/lint/run_lint.sh",
-         "${ZCL_LINT_JOBS:-8}")
+         "z23-lint run defaults its parallel worker count to 8 via the ZCL_LINT_JOBS environment variable when --jobs is not given.",
+         "tools/lint/lintc/run_main.c",
+         "DEFAULT_JOBS = 8")
 ZCL_FACT("lint.gates", "driver_budget_env_default",
-         "run_lint.sh applies a soft 75-second wall-time budget via ZCL_LINT_BUDGET_SEC, warning rather than failing past it.",
-         "tools/lint/run_lint.sh",
-         "${ZCL_LINT_BUDGET_SEC:-75}")
+         "z23-lint run applies a soft 75-second wall-time budget via ZCL_LINT_BUDGET_SEC, warning rather than failing past it.",
+         "tools/lint/lintc/run_main.c",
+         "DEFAULT_BUDGET = 75")
 ZCL_FACT("lint.gates", "driver_timing_dir_default",
-         "run_lint.sh writes per-run gate timing artifacts under .cache/lint-timing by default, overridable via ZCL_LINT_TIMING_DIR.",
-         "tools/lint/run_lint.sh",
-         "${ZCL_LINT_TIMING_DIR:-$ROOT/.cache/lint-timing}")
+         "z23-lint run writes per-run gate timing artifacts under .cache/lint-timing by default, overridable via ZCL_LINT_TIMING_DIR.",
+         "tools/lint/lintc/run_main.c",
+         "%s/.cache/lint-timing")
 ZCL_FACT("lint.gates", "driver_serial_prologue",
-         "run_lint.sh forces check-git-hooks-installed to run serially and first, ahead of the parallel gate pool.",
-         "tools/lint/run_lint.sh",
-         "check-git-hooks-installed")
+         "z23-lint run forces check-git-hooks-installed to run serially and first, ahead of the parallel gate pool.",
+         "tools/lint/lintc/run_main.c",
+         "check-git-hooks-installed check-build-epoch-integrity")
 ZCL_FACT("lint.gates", "scan_floor_capability_closure",
          "The check-capability-closure gate enforces an anti-hollow floor of 500 scanned objects via CCG_MIN_OBJECTS.",
          "tools/lint/lintc/gate_capability_closure.c",

@@ -36,8 +36,8 @@ static int resolve_all(struct lr_run *r, char *const *gates)
         (void)snprintf(g->name, sizeof g->name, "%s", gates[i]);
         if (o->resolve(o->rctx, g->name, g->cmd, sizeof g->cmd) != 0) {
             (void)fprintf(o->err, "z23-lint run: FATAL \xe2\x80\x94 gate '%s' has no "
-                          "invocation-table entry.\n  Add its exact recipe command to "
-                          "gate_command() in tools/lint/run_lint.sh\n", g->name);
+                          "invocation-table entry.\n  Add its exact recipe command as "
+                          "a LINT_ROW in tools/lint/lintc/gate_commands.def\n", g->name);
             missing = 1;
         }
     }

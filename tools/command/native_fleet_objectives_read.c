@@ -456,7 +456,7 @@ static bool obj_ends_with(const char *s, const char *suffix)
 /* ── the newest completed proof attempt ───────────────────────────────── */
 
 /* Where the proof numbers live, read-only, written by tools/dev/dev_proof.c
- * and tools/lint/run_lint.sh into <attempt>/logs/:
+ * and `z23-lint run` into <attempt>/logs/:
  *
  *   phases.txt     "zcl.dev_proof_phase.v1 <phase> <ms> ms (cumulative <ms> ms)",
  *                  one row per finished phase. The dimension_lint_and_test
@@ -465,7 +465,7 @@ static bool obj_ends_with(const char *s, const char *suffix)
  *                  a COMPLETED attempt (an in-flight one is skipped) and its
  *                  cumulative is the proof wall through lint and test.
  *   *.lint.log     "-- lint timing: N gates, wall W ms, jobs J --" (the
- *                  rule is U+2500 dashes), run_lint.sh's own wall.
+ *                  rule is U+2500 dashes), the lint driver's own wall.
  *   *.test.log     "ALL TESTS PASSED ... (S.Ss wall, N workers)" or
  *                  "SOME TESTS FAILED ...", test_parallel's suite wall.
  *

@@ -253,7 +253,7 @@ UTXO application order) and `core/modules/validation/src/chainstate.c` (chain-st
 ordering) sat outside it — and an ordering bug forks the node exactly as
 hard as a bug in a sealed `check_block` predicate. The sealed set is now
 `core/` **plus** those two files and their public headers, enumerated in
-the Makefile's `CORE_SEAL_PATHS` (mirrored in `tools/lint/run_lint.sh`).
+the Makefile's `CORE_SEAL_PATHS` (mirrored in `tools/lint/lintc/run_exec.c`).
 Same ritual: editing any of them requires `make core-unseal REASON=…` and
 re-freezing with `make core-seal`.
 

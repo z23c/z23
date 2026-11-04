@@ -12,12 +12,12 @@
 # tree identity, the last lint run, the last test run, and one VERDICT line.
 #
 # SOURCES (all machine-written, all gitignored, read-only):
-#   .cache/lint-timing/last-run.json           tools/lint/run_lint.sh
+#   .cache/lint-timing/last-run.json           z23-lint run
 #   .cache/lint-timing/gates/run.<pid>/<gate>.log   same driver, per-gate
 #                                               captured output (kept for the
 #                                               most recent run at least; see
 #                                               the 120-minute prune in
-#                                               run_lint.sh). The NEWEST
+#                                               z23-lint run). The NEWEST
 #                                               run.* directory by mtime is
 #                                               assumed to belong to the
 #                                               last-run.json this read; there
@@ -108,7 +108,7 @@ receipt_state() {
 }
 
 # Newest lint gate-log directory — best-effort link from last-run.json to the
-# per-gate .log files run_lint.sh wrote alongside it (no stronger link is
+# per-gate .log files z23-lint run wrote alongside it (no stronger link is
 # recorded on disk; see the header note).
 lint_gates_dir() {
     local d
@@ -120,7 +120,7 @@ lint_gates_dir() {
 
 # First non-empty line of a failed lint gate's captured output, or a concrete
 # reproduction command when nothing was captured (a gate that fails silently
-# is itself a defect — see run_lint.sh's own FAIL-log handling — but this
+# is itself a defect — see the z23-lint run FAIL-log handling — but this
 # reader still owes the caller something actionable).
 lint_fix_hint() {
     local name="$1" gdir line script

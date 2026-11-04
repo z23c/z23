@@ -27,7 +27,7 @@
  * by test.c but absent here does not merely "skip the parallel runner": it
  * executes in NO gate at all and proves nothing.
  *
- * That drift is no longer unpoliced. tools/scripts/check_test_registration.sh
+ * That drift is no longer unpoliced. ./build/bin/z23-lint check-test-registration
  * has two prongs: (A) every filename-matching entry point is dispatched by at
  * least one runner, and (B) every name dispatched by test.c is either in
  * the canonical catalog or is a sub-test of a file whose own group IS
@@ -2559,7 +2559,7 @@ static void timing_publish(const char *tmp_path, const char *final_path)
 }
 
 /* Per-group JSON timing artifact — the same "make results visible so
- * regressions are visible" pattern as tools/lint/run_lint.sh's
+ * regressions are visible" pattern as z23-lint run's
  * .cache/lint-timing/last-run.json (schema zcl.lint_timing.v1), applied
  * to the parallel test runner: which test GROUP is the long pole. Written
  * once per invocation (a focused `make t-fast ONLY=X` writes its own

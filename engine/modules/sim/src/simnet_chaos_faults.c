@@ -95,7 +95,7 @@ static void chaos_result_init(struct chaos_fault_result *out)
 
 /* Forward declaration, not `#include "services/block_index_loader.h"`:
  * lib/ → app/services|controllers|models|views is a HARD layering gate
- * (tools/scripts/check_lib_layering.sh) — engine/modules/sim must not depend on the
+ * (./build/bin/z23-lint check-lib-layering) — engine/modules/sim must not depend on the
  * app/ shape headers. The real symbol still links fine (one binary, see
  * this file's header comment); only the SOURCE INCLUDE crosses the
  * boundary, and a bare prototype avoids that without an override marker.

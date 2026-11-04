@@ -901,7 +901,7 @@ static const struct lint_gate_entry g_lint_gate_entries[] = {
     N_(t_sync_state_no_ordinal_gate),
     S_(t_lint_gates_fail_loud_on_empty_scan),
     /* Hermetic: builds its fixture trees under TMPDIR and reads Makefile /
-     * run_lint.sh, never writing into the worktree. */
+     * gate_commands.def, never writing into the worktree. */
     N_(t_lint_gate_wiring_gate),
     N_(t_lint_umbrellas_share_built_prereqs),
     /* Dispatch regression runs directly in the exact base group below. */
@@ -1350,15 +1350,15 @@ static int t_lint_fast_tor_graph(void)
         "cp \"$1/engine/composition/lib_module_order.def\" engine/composition/\n"
         "printf '#!/bin/sh\\nexit 0\\n' > tools/dev/check-toolchain.sh\n"
         "printf '#!/bin/sh\\nprintf fixture\\n' > tools/dev/process-start-token.sh\n"
-        "printf '#!/bin/sh\\nprintf \"%%s\\\\n\" \"$@\" > \"$HOME/args\"\\n' > tools/lint/run_lint.sh\n"
-        "chmod +x tools/dev/check-toolchain.sh tools/dev/process-start-token.sh tools/lint/run_lint.sh\n"
+        "printf '#!/bin/sh\\nprintf \"%%s\\\\n\" \"$@\" > \"$HOME/args\"\\n' > stub-lint\n"
+        "chmod +x tools/dev/check-toolchain.sh tools/dev/process-start-token.sh stub-lint\n"
         "printf '%s\\n' '.PHONY: tor-provenance-ready check-native-tunnel-export-binding' 'tor-provenance-ready:' '\t@printf called > \"$(HOME)/tor\"; exit 77' 'check-native-tunnel-export-binding:' '\t@printf binding > \"$(HOME)/binding\"' 'fixture-print-gates:' '\t@printf \"%s\\\\n\" $(LINT_FAST_GATES)' > overlay.mk\n"
         "HOME=\"$2/home\" TMPDIR=\"$2/tmp\"; export HOME TMPDIR\n"
-        "fixture_make() { make --no-print-directory -o /dev/null -f Makefile -f overlay.mk ZCL_USE_CCACHE=0 MAKE_RESTARTS=1 LIB_MODULES=platform LIB_TREE_MODULES=platform ZCL_EPOCH_PROFILES= ZCL_DEPFILE_PROFILES= 'BUILD_SOURCE_RECORD=0000000000000000000000000000000000000000000000000000000000000000 1 0000000000000000000000000000000000000000000000000000000000000000' EQUIHASH_FACT_TOOL=/dev/null LINTC_TOOL=/dev/null FILE_SIZE_POLICY_BIN=/dev/null TOOLGEN_BIN=/dev/null TOR_PROVENANCE_BIN=/dev/null HOTSWAP_ACTION_PLAN=/dev/null CAPABILITY_INVENTORY_TOOL=/dev/null \"$@\"; }\n"
+        "fixture_make() { make --no-print-directory -o /dev/null -f Makefile -f overlay.mk ZCL_USE_CCACHE=0 MAKE_RESTARTS=1 LIB_MODULES=platform LIB_TREE_MODULES=platform ZCL_EPOCH_PROFILES= ZCL_DEPFILE_PROFILES= 'BUILD_SOURCE_RECORD=0000000000000000000000000000000000000000000000000000000000000000 1 0000000000000000000000000000000000000000000000000000000000000000' EQUIHASH_FACT_TOOL=/dev/null LINTC_TOOL=./stub-lint FILE_SIZE_POLICY_BIN=/dev/null TOOLGEN_BIN=/dev/null TOR_PROVENANCE_BIN=/dev/null HOTSWAP_ACTION_PLAN=/dev/null CAPABILITY_INVENTORY_TOOL=/dev/null \"$@\"; }\n"
         "fixture_make fixture-print-gates > expected 2>parse.log\n"
         "if ! fixture_make lint-fast > run.log 2>&1; then cat run.log >&2; exit 1; fi\n"
         "[ ! -e \"$HOME/tor\" ]; [ -e \"$HOME/binding\" ]; [ -s \"$HOME/args\" ]\n"
-        "tail -n +5 \"$HOME/args\" > actual; cmp expected actual\n"
+        "tail -n +6 \"$HOME/args\" > actual; cmp expected actual\n"
         "grep -qx check-vendor-provenance actual\n"
         "fixture_make -n -p ZCL_LINT_SERIAL=1 lint-fast > serial.db 2>&1 || :\n"
         "grep -E '^lint-fast: .*check-vendor-provenance' serial.db >/dev/null\n"
@@ -1422,27 +1422,26 @@ static int t_lint_inventory_dispatch(void)
     static const char script[] =
         "set -eu; cd \"$2\"\n"
         "mkdir -p tools/lint bin fake build/gen build/bin\n"
-        "cp \"$1/tools/lint/run_lint.sh\" tools/lint/\n"
         "printf '#!/bin/sh\necho generator >> calls\nexit ${GEN_RC:-0}\n' > bin/gen_capability_inventory.exe\n"
         "printf '#!/bin/sh\necho make >> calls\nexit 0\n' > fake/make\n"
-        "printf '#!/bin/sh\necho \"echo worker >> calls\"\n' > bin/z23-lint\n"
+        "printf '#!/bin/sh\necho worker >> calls\n' > bin/z23-lint\n"
         "chmod +x bin/gen_capability_inventory.exe bin/z23-lint fake/make; cp bin/z23-lint build/bin/z23-lint\n"
         "export PATH=\"$2/fake:$PATH\" ZCL_HOST_EXEEXT=.exe\n"
-        "bash tools/lint/run_lint.sh --jobs 1 --bin-dir bin check-kpi-floor >log 2>&1\n"
+        "\"$1/build/bin/z23-lint\" run --jobs 1 --bin-dir bin check-capability-inventory-generated >log 2>&1\n"
         "printf 'make\nworker\n' > expected; cmp expected calls\n"
         ": > calls\n"
-        "ZCL_LINT_INVENTORY_TOOL=bin/gen_capability_inventory.exe bash tools/lint/run_lint.sh --jobs 1 --bin-dir bin check-kpi-floor >log 2>&1\n"
+        "ZCL_LINT_INVENTORY_TOOL=bin/gen_capability_inventory.exe \"$1/build/bin/z23-lint\" run --jobs 1 --bin-dir bin check-capability-inventory-generated >log 2>&1\n"
         "printf 'generator\nworker\n' > expected; cmp expected calls\n"
         ": > calls; GEN_RC=9; export GEN_RC\n"
-        "if ZCL_LINT_INVENTORY_TOOL=bin/gen_capability_inventory.exe bash tools/lint/run_lint.sh --jobs 1 --bin-dir bin check-kpi-floor >log 2>&1; then exit 1; fi\n"
+        "if ZCL_LINT_INVENTORY_TOOL=bin/gen_capability_inventory.exe \"$1/build/bin/z23-lint\" run --jobs 1 --bin-dir bin check-capability-inventory-generated >log 2>&1; then exit 1; fi\n"
         "printf 'generator\n' > expected; cmp expected calls\n"
         "rm bin/gen_capability_inventory.exe; : > calls; GEN_RC=0\n"
-        "bash tools/lint/run_lint.sh --jobs 1 --bin-dir bin check-kpi-floor >log 2>&1\n"
+        "\"$1/build/bin/z23-lint\" run --jobs 1 --bin-dir bin check-capability-inventory-generated >log 2>&1\n"
         "printf 'make\nworker\n' > expected; cmp expected calls\n"
-        "printf '#!/bin/sh\ntouch driver-ran\n' > tools/lint/run_lint.sh\n"
-        "chmod +x tools/lint/run_lint.sh\n"
-        "awk '/^lint-fast: .*EQUIHASH_FACT_TOOL/{f=1; next} /^lint-land: .*EQUIHASH_FACT_TOOL/{f=2; next} /^lint: .*LINTC_TOOL.*NETWORK_TOOL_HARDENING_BINS/{f=3; next} f && /^\\t@.*run_lint.sh/{print (f==1 ? \"fast:\" : f==2 ? \"land:\" : \"full:\"); print; f=0}' \"$1/Makefile\" > Fixture.mk\n"
-        "printf '.PHONY: fast land full\nLINT_PARALLEL_GATES=x\n' >> Fixture.mk\n"
+        "printf '#!/bin/sh\ntouch driver-ran\n' > stub-lint\n"
+        "chmod +x stub-lint\n"
+        "awk '/^lint-fast: .*EQUIHASH_FACT_TOOL/{f=1; next} /^lint-land: .*EQUIHASH_FACT_TOOL/{f=2; next} /^lint: .*LINTC_TOOL.*NETWORK_TOOL_HARDENING_BINS/{f=3; next} f && /^\\t@.*LINTC_TOOL\\) run --jobs/{print (f==1 ? \"fast:\" : f==2 ? \"land:\" : \"full:\"); print; f=0}' \"$1/Makefile\" > Fixture.mk\n"
+        "printf '.PHONY: fast land full\nLINT_PARALLEL_GATES=x\nLINTC_TOOL=./stub-lint\n' >> Fixture.mk\n"
         "for target in fast land full; do for mode in n t q; do /usr/bin/make -f Fixture.mk -$mode $target >/dev/null 2>&1 || [ $mode = q ]; test ! -e driver-ran; done; done\n";
     char fixture[PATH_MAX] = {0};
     test_make_tmpdir(fixture, sizeof(fixture), "lint_inventory", "dispatch");

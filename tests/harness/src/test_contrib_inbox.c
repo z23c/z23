@@ -343,7 +343,7 @@ static int case_helper_on_maint_host(void)
              ci_setup_list_one(&e, "helper", c, CI_MAINT, "helper-codex",
                                "question", "how does the gate work"));
     CI_CHECK("a fixture answer for the helper is staged",
-             ci_model_reply(&e, "ANSWER: see the gate at tools/lint/run_lint.sh"));
+             ci_model_reply(&e, "ANSWER: see the gate at tools/lint/lintc/gate_commands.def"));
     CI_CHECK("the pass exits 0", ci_pass(&e) == 0);
     CI_CHECK("the helper post on a maintainer host is never announced",
              !ci_has_events(&e, "NEW "));

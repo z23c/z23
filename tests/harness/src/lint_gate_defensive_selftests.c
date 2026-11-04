@@ -455,7 +455,7 @@ int t_coins_guard_fixture_trips_gate(void)
     return failures;
 }
 
-/* Invokes tools/scripts/check_raw_malloc.sh and returns the script's
+/* Invokes ./build/bin/z23-lint check-raw-malloc and returns the script's
  * exit status (0 = clean, non-zero = violations). */
 int run_check_raw_malloc_script(void)
 {
@@ -538,7 +538,7 @@ int t_coins_guard_gate_fails_loud_on_no_lookup_surface(void)
         "int coins_lookup_nohit_fixture(void){ return 23; }\n");
     int trip_rc = planted == 0
         ? run_gate_script_with_env(
-              "tools/scripts/check_coins_lookup_nullcheck.sh",
+              "build/bin/z23-lint check-coins-lookup-nullcheck",
               "ZCL_COINS_LOOKUP_SCAN_DIR",
               scan_dir)
         : -1;
@@ -546,7 +546,7 @@ int t_coins_guard_gate_fails_loud_on_no_lookup_surface(void)
     (void)rmdir(scan_dir);
 
     int green_rc = run_gate_script(
-        "tools/scripts/check_coins_lookup_nullcheck.sh", NULL);
+        "build/bin/z23-lint check-coins-lookup-nullcheck", NULL);
 
     TEST("[lint-gate] coins lookup guard fails loud when lookup surface disappears") {
         ASSERT(planted == 0);

@@ -34,7 +34,7 @@
  *     arithmetic would wrap silently; no doc cites one.
  *   - a doc that cannot be read is fatal (exit 2), not a silent skip.
  *   - with no argument the root is the cwd (the shell fell back to its own
- *     script directory); the Makefile and run_lint pass ".".
+ *     script directory); the Makefile and the lint driver pass ".".
  */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L

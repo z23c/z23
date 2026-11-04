@@ -170,7 +170,7 @@ once by whoever learns it first.
   is missing or its anchor is not in that path, and fails when zero rows were
   scanned. It carries no baseline file.
 - `check-orient-facts` is in both `LINT_GATES` and `LINT_FAST_GATES` in
-  `Makefile` and in `gate_command()` in `tools/lint/run_lint.sh`, so
+  `Makefile` and as a `LINT_ROW` in `tools/lint/lintc/gate_commands.def`, so
   `make check-lint-gate-wiring` reports exact parity.
 - The `test_dev_orient` group proves the three query forms, the refusal, and
   that the checker rejects a fixture row whose anchor has moved.

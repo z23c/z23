@@ -183,7 +183,7 @@ static bool rpr_attempt(const char *dir, const char *name, long long cumulative_
     if (!rpr_write(path, text) || !rpr_set_mtime(path, mtime))
         return false;
     (void)snprintf(text, sizeof(text), "PASS check-toolchain 1607 ms\n"
-                   "run_lint.sh: NOTE - wall 1000 ms within budget\n");
+                   "z23-lint run: NOTE - wall 1000 ms within budget\n");
     (void)snprintf(path, sizeof(path), "%s/%s.lint.log", logs, key);
     if (!rpr_write(path, text))
         return false;

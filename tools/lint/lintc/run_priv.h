@@ -60,8 +60,8 @@ struct lr_table {
     int n;
 };
 
-/* Load run_lint.sh's gate_command() rows (name, single-quoted echo text). */
-int lr_table_load(struct lr_table *t, const char *path);
+/* Fill T from the compiled gate_commands.def rows (first row per name wins). */
+int lr_table_load(struct lr_table *t);
 const struct lr_table_row *lr_table_find(const struct lr_table *t,
                                          const char *gate);
 

@@ -168,7 +168,7 @@ int t_thread_supervision_ratchet(void)
  * (the acceptance-bar shape: "a planted unsupervised thread in
  * app/controllers") trips the gate; a baseline entry OR a
  * // supervisor-ok: marker clears it; the real (widened) tree stays green. */
-#define SUPREG_SCRIPT_REL   "tools/scripts/check_supervisor_registration.sh"
+#define SUPREG_SCRIPT_REL   "build/bin/z23-lint check-supervisor-registration"
 #define SUPREG_SCAN_DIR_REL "test-tmp/_supreg_scan_dir_tmp"
 #define SUPREG_KEEP_REL     "test-tmp/_supreg_scan_dir_tmp/keep.c"
 #define SUPREG_FIXTURE_REL  "test-tmp/_supreg_scan_dir_tmp/_supreg_probe_tmp.c"
@@ -1222,17 +1222,17 @@ int t_lint_gates_fail_loud_on_empty_scan(void)
     failures += arm_line_boundaries();
 
     failures += meta_gate_empty_scan_trips(
-        "tools/scripts/check_one_write_path.sh", "ZCL_OWP_SCAN_ROOTS", empty_dir);
+        "build/bin/z23-lint check-one-write-path", "ZCL_OWP_SCAN_ROOTS", empty_dir);
     failures += meta_gate_empty_scan_trips(
-        "tools/scripts/check_projections_pure.sh", "ZCL_PROJ_SCAN_DIR", empty_dir);
+        "build/bin/z23-lint check-projections-pure", "ZCL_PROJ_SCAN_DIR", empty_dir);
     failures += meta_gate_empty_scan_trips(
-        "tools/scripts/check_stage_advances_or_blocks.sh", "ZCL_JOBS_DIR", empty_dir);
+        "build/bin/z23-lint check-stage-advances-or-blocks", "ZCL_JOBS_DIR", empty_dir);
     failures += meta_gate_empty_scan_trips(
-        "tools/scripts/check_supervisor_registration.sh", "ZCL_SERVICES_DIR", empty_dir);
+        "build/bin/z23-lint check-supervisor-registration", "ZCL_SERVICES_DIR", empty_dir);
     failures += meta_gate_empty_scan_trips(
-        "tools/scripts/check_coins_lookup_nullcheck.sh", "ZCL_COINS_LOOKUP_SCAN_DIR", empty_dir);
+        "build/bin/z23-lint check-coins-lookup-nullcheck", "ZCL_COINS_LOOKUP_SCAN_DIR", empty_dir);
     failures += meta_gate_empty_scan_trips(
-        "tools/scripts/check_no_secret_printf.sh", "ZCL_SECRET_PRINTF_SCAN_DIRS", empty_dir);
+        "build/bin/z23-lint check-no-secret-printf", "ZCL_SECRET_PRINTF_SCAN_DIRS", empty_dir);
     failures += meta_gate_empty_scan_trips(
         "build/bin/z23-lint check-supervisor-domain", "ZCL_SUPDOM_SCAN_ROOTS", empty_dir);
     failures += meta_gate_empty_scan_trips(

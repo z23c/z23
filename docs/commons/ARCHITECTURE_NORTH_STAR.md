@@ -125,7 +125,7 @@ Checkpoint installation is a labeled splice:
 ## Regression evidence
 
 The architecture decision is settled; whole-tree conformance is not yet
-proved. `tools/scripts/check_frontier_single_writer.sh` delegates to the
+proved. `./build/bin/z23-lint check-frontier-single-writer` delegates to the
 native `build/bin/z23-lint check-frontier-single-writer` gate. It reads
 `tools/scripts/arch_frontier_owners.tsv` and, for each declared row, requires
 exactly one file with the owner basename under its configured scan roots.

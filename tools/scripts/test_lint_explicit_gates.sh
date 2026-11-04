@@ -18,6 +18,7 @@ fixture=${1:?expected caller-owned fixture directory}
 [ -d "$fixture" ] || { echo 'FAIL: fixture directory missing' >&2; exit 2; }
 mkdir -p "$fixture/tools/lint"
 cat > "$fixture/Makefile" <<'EOF'
+LINTC_TOOL := $(CURDIR)/stub-lint
 LINT_GATES := check-windows-acceptance check-other
 ZCL_LINT_JOBS := 2
 .PHONY: tor-provenance-ready check-windows-acceptance check-other
@@ -29,18 +30,19 @@ check-windows-acceptance check-other:
 EOF
 awk '/^lint:/{copy=1} /^# Everything the lint dimension/{copy=0} copy' \
     "$root/Makefile" >> "$fixture/Makefile"
-cat > "$fixture/tools/lint/run_lint.sh" <<'EOF'
+cat > "$fixture/stub-lint" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        run) shift ;;
         --jobs|--bin-dir) shift 2 ;;
         --cache|--cold-audit) shift ;;
         *) make --no-print-directory "$1"; shift ;;
     esac
 done
 EOF
-chmod +x "$fixture/tools/lint/run_lint.sh"
+chmod +x "$fixture/stub-lint"
 for mode in alone combined all_explicit; do
     rm -f "$fixture/calls"
     goals=(lint)

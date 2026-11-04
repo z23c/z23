@@ -3,10 +3,10 @@
  *          fixture gates: pass, fail (rc and log), silent fail, killed, a
  *          && chain, and a rendezvous pair that only passes when two gates
  *          really run at once. Also the shell-free command parser, the
- *          check_*.sh wrapper rewrite, the run_lint.sh table reader, the
+ *          check_*.sh wrapper rewrite, the compiled gate table, the
  *          serial and long-pole ordering, and the artifacts it leaves.
  *          check-core-seal's pipe reaches EOF and keeps core_seal's rc.
- * NOT proven here: the real gates, or the Make wiring (lint-fast-c). */
+ * NOT proven here: the real gates, or the Make wiring. */
 #if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
 #define _DEFAULT_SOURCE
 #endif
@@ -324,25 +324,25 @@ static int test_lrun_wrapper(void)
 static int test_lrun_table(void)
 {
     int failures = 0;
-    TEST_CASE("lint_run: the run_lint.sh table reader takes the first row and ignores prose") {
+    TEST_CASE("lint_run: the compiled gate_commands.def table loads, one row per name") {
         static struct lr_table t;
-        struct lrun_fx fx;
-        char path[PATH_MAX + 16];
-        ASSERT(lrun_plant(&fx));
-        (void)snprintf(path, sizeof path, "%s/table.sh", fx.root);
-        ASSERT(lrun_write(path,
-            "# check-cc)  echo 'prose'\n"
-            "        check-aa)                  echo 'a --x \"q\" && b' ;;\n"
-            "        check-bb) echo 'second' ;; # trailing\n"
-            "        check-aa)                  echo 'dup' ;;\n"
-            "        *) \"$BIN_DIR/z23-lint\" --gate-command \"$1\" || return 1 ;;\n"));
-        ASSERT_EQ(lr_table_load(&t, path), 0);
-        ASSERT_EQ(t.n, 2);
-        ASSERT_STR_EQ(lr_table_find(&t, "check-aa")->cmd, "a --x \"q\" && b");
-        ASSERT_STR_EQ(lr_table_find(&t, "check-bb")->cmd, "second");
-        ASSERT(lr_table_find(&t, "check-cc") == NULL);
-        ASSERT(lr_table_load(&t, "/nonexistent/lrun-table") != 0);
-        test_rm_rf_recursive(fx.root);
+        const struct lr_table_row *row;
+        ASSERT_EQ(lr_table_load(&t), 0);
+        ASSERT(t.n > 80);
+        row = lr_table_find(&t, "check-toolchain");
+        ASSERT(row != NULL);
+        ASSERT_STR_EQ(row->cmd,
+            "./tools/dev/check-toolchain.sh --selftest && ./tools/dev/check-toolchain.sh");
+        row = lr_table_find(&t, "check-core-seal");
+        ASSERT(row != NULL);
+        ASSERT_STR_EQ(row->cmd, LR_CORE_SEAL);
+        row = lr_table_find(&t, "check-observability-pairing");
+        ASSERT(row != NULL);
+        ASSERT_STR_EQ(row->cmd, "\"$ZCL_LINT_BIN_DIR/check_observability_pairing\"");
+        ASSERT(lr_table_find(&t, "check-no-such-gate") == NULL);
+        for (int i = 0; i < t.n; i++)
+            for (int j = i + 1; j < t.n; j++)
+                ASSERT(strcmp(t.rows[i].name, t.rows[j].name) != 0);
     } TEST_END
     return failures;
 }

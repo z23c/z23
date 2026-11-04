@@ -5,7 +5,7 @@
  * cross-referenced against src/chainparams.cpp and src/consensus/upgrades.cpp.
  * To change a value, change zclassicd first and ship it network-wide.
  *
- * Companion: tools/scripts/check_consensus_parity.sh (lint gate E13) bans the
+ * Companion: ./build/bin/z23-lint check-consensus-parity (lint gate E13) bans the
  * mechanism class (versionbits / dynamic Equihash override); this test pins
  * the values. */
 

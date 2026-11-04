@@ -1204,15 +1204,15 @@ int t_no_stray_root_files(void)
 }
 
 /* check-lint-gate-wiring - the umbrella's two files must agree: a gate is
- * a Makefile target + LINT_GATES line and a gate_command() case in
- * tools/lint/run_lint.sh. Proof:
+ * a Makefile target + LINT_GATES line and a LINT_ROW in
+ * tools/lint/lintc/gate_commands.def. Proof:
  * (1) the real tree passes;
  * (2) the gate's --selftest passes (plants a listed-but-unwired gate, a
  *     wired-but-unlisted one, a listed name with no Make target, a missing
  *     script, an unreadable LINT_GATES; each is rejected and named, plus a
  *     positive control);
- * (3) a tree with no run_lint.sh FAILS rather than reporting clean;
- * (4) the gate is itself in LINT_GATES, run_lint.sh's case table, and
+ * (3) a tree with no gate_commands.def FAILS rather than reporting clean;
+ * (4) the gate is itself in LINT_GATES, the gate_commands.def table, and
  *     DEFENSIVE_CODING.md's canonical block. */
 /* ── check-doc-inline-paths, C port: the native gate on two generated
  * fixtures. A clean tree must PASS (exit 0); one seeded dead path must
@@ -1458,9 +1458,9 @@ int t_lint_gate_wiring_gate(void)
             strstr(makefile_buf, "check-lint-gate-wiring \\") != NULL;
     }
     int driver_wired = 0;
-    if (repo_path(path, sizeof(path), "tools/lint/run_lint.sh") == 0 &&
+    if (repo_path(path, sizeof(path), "tools/lint/lintc/gate_commands.def") == 0 &&
         read_entire_file(path, &driver_buf) == 0) {
-        driver_wired = strstr(driver_buf, "check-lint-gate-wiring)") != NULL;
+        driver_wired = strstr(driver_buf, "LINT_ROW(\"check-lint-gate-wiring\"") != NULL;
     }
     int doc_wired = 0;
     if (repo_path(path, sizeof(path), "docs/DEFENSIVE_CODING.md") == 0 &&
@@ -1470,7 +1470,7 @@ int t_lint_gate_wiring_gate(void)
 
     TEST("[lint-gate] check-lint-gate-wiring: real umbrella is fully wired, "
          "selftest proves each desync class trips, missing tree fails closed, "
-         "gate is itself in LINT_GATES + the case table + the doc block") {
+         "gate is itself in LINT_GATES + the command table + the doc block") {
         ASSERT(baseline_rc == 0);
         ASSERT(selftest_rc == 0);
         ASSERT(empty_ready == 0);
@@ -1487,7 +1487,7 @@ int t_lint_gate_wiring_gate(void)
     return failures;
 }
 
-/* All three lint umbrellas execute the same run_lint.sh gate catalog, so
+/* All three lint umbrellas execute the same gate_commands.def gate catalog, so
  * their built tools form one shared prerequisite set. Grade the real
  * Makefile and two in-memory mutations for helper-membership and exact
  * target-set. */

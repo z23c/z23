@@ -65,7 +65,7 @@ filesystem and `grep`. Each section names the actual failure it was written for.
 
 ## `check-no-uncited-victory` — a win must come with a receipt
 
-**Script:** `tools/scripts/check_no_uncited_victory.sh`
+**Script:** `./build/bin/z23-lint check-no-uncited-victory`
 
 **The failure it was written for.** Quoting the script's own header: *"this repo
 shipped 9+ 'cured / at tip / fully synced' claims in six weeks, every one later
@@ -212,7 +212,7 @@ remains the rule for the entry documents regardless of gate coverage.
 
 ## `check-test-registration` — a test that never runs is worse than no test
 
-**Script:** `tools/scripts/check_test_registration.sh`
+**Script:** `./build/bin/z23-lint check-test-registration`
 
 **The failure it was written for.** Three test entry points — `test_refold_from_anchor_fatal`,
 `test_refold_auto_arm`, and `test_anchor_selfmint` — lived in dedicated

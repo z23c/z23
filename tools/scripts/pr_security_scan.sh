@@ -130,9 +130,9 @@ fi
 
 # 5) Static security lint gates against the resulting tree.
 GATE_FAIL=""
-for g in check_consensus_parity.sh check_no_secret_printf.sh; do
-    if [ -x "tools/scripts/$g" ]; then
-        if ! out="$(./tools/scripts/$g 2>&1)"; then
+for g in check-consensus-parity check-no-secret-printf; do
+    if [ -x build/bin/z23-lint ]; then
+        if ! out="$(./build/bin/z23-lint "$g" 2>&1)"; then
             GATE_FAIL+="$g"$'\n'"$out"$'\n'
         fi
     fi

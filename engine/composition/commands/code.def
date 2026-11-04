@@ -678,7 +678,7 @@ ZCL_COMMAND_READY_READ(
     "(public functions no test reaches, files no rule routes anywhere, and a "
     "duplicate-code answer reported UNKNOWN because cognition/modules/fingerprint has not "
     "landed), and "
-    "what it REFUSES (the lint gates that bind it, derived from run_lint.sh's "
+    "what it REFUSES (the lint gates that bind it, derived from gate_commands.def's "
     "gate table, each gate script's own text and the baseline ledgers those "
     "scripts name; a gate that names no territory path lands in an explicit "
     "scope_unknown bucket and is never guessed either way). With no argument, "

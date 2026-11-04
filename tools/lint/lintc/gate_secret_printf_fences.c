@@ -424,7 +424,7 @@ int check_no_secret_printf_run(int argc, char **argv)
     if (rc)
         return rc;
     fputs("\nIf any of these are false positives, add a regex to ALLOWLIST_RE "
-          "in\ntools/scripts/check_no_secret_printf.sh (with a justification)."
+          "in\n./build/bin/z23-lint check-no-secret-printf (with a justification)."
           "\nIf they're real leaks, fix the call and run the script again.\n",
           stdout);
     return 1;

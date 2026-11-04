@@ -17,7 +17,7 @@
  * lock-free atomic, and the single durable read goes through
  * progress_store_tx_trylock(); losing that race reports the affected leaves
  * UNAVAILABLE with the static reason `progress_store_busy`, never a stale or
- * zero value. Enforced by tools/scripts/check_dumper_never_blocks.sh, which
+ * zero value. Enforced by ./build/bin/z23-lint check-dumper-never-blocks, which
  * scans `*_dump_state_fill` bodies exactly as it scans `*_dump_state_json`.
  *
  * Reentrant. Allocates nothing. Callable before boot and during shutdown: it

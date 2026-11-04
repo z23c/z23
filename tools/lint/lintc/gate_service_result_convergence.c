@@ -9,7 +9,7 @@
  * gate_zclassicd_reach.c (each holds ONE gate, says so in its own
  * header), this port lands in its own file rather than folding in.
  *
- * Byte-parity C23 port of tools/scripts/check_service_result_convergence.sh
+ * Byte-parity C23 port of ./build/bin/z23-lint check-service-result-convergence
  * — Phase 3 of the framework refactor. E2 ratchets at FILE granularity (a
  * file is "clean" once it references struct zcl_result anywhere, even
  * with other bare-bool top-level functions left in it); this gate counts

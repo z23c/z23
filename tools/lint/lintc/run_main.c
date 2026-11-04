@@ -1,15 +1,13 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * purpose: `z23-lint run` — the C23 lint driver (shadow of tools/lint/run_lint.sh).
+ * purpose: `z23-lint run` — the C23 lint driver behind `make lint`, `lint-fast` and `lint-land`.
  *
  *   z23-lint run [--jobs N] [--bin-dir DIR] [--list] [--print-command GATE] GATE...
  *
- * Runs each gate's command from run_lint.sh's gate_command() table (the one
- * source of truth while both drivers exist; a gate absent there asks
- * gates.def) with fork/execvp and no shell, up to --jobs at a time, and
- * prints the run_lint.sh verdict lines, `lint timing` table and FAIL logs.
- * tools/scripts/check_*.sh wrappers that only exec z23-lint run as
- * `z23-lint <gate>` directly. Env as run_lint.sh: ZCL_LINT_JOBS,
+ * Runs each gate's command from the compiled table gate_commands.def (a gate
+ * absent there asks gates.def) with fork/execvp and no shell, up to --jobs at
+ * a time, and prints the PASS/FAIL verdict lines, `lint timing` table and FAIL
+ * logs the land queue and fleet readers parse. Env: ZCL_LINT_JOBS,
  * ZCL_LINT_BUDGET_SEC, ZCL_LINT_TIMING_DIR, ZCL_LINT_VERBOSE,
  * ZCL_LINT_INVENTORY_TOOL, ZCL_HOST_JOBS (nested sweep worker counts).
  * Exit: 0 every gate passed, 1 a gate failed (all still run), 2 misuse.
@@ -31,7 +29,7 @@ enum { DEFAULT_JOBS = 8, DEFAULT_BUDGET = 75, DEFAULT_HOST = 8 };
 
 static struct lr_table g_table;
 
-/* Same sets as run_lint.sh: SERIAL_PROLOGUE, SERIAL_EPILOGUE, LONG_POLE_FIRST. */
+/* The serial prologue, serial epilogue and long-pole-first gate sets. */
 static const char k_serial_pro[] = " check-git-hooks-installed check-build-epoch-integrity ";
 static const char k_serial_epi[] = " check-codeindex-coverage check-cookbook ";
 static const char k_poles[] =
@@ -58,9 +56,9 @@ static bool all_digits(const char *s)
     return true;
 }
 
-static int env_int(const char *name, int dflt)
+/* V parsed as a small decimal; DFLT when unset, empty or not all digits. */
+static int env_int(const char *v, int dflt)
 {
-    const char *v = getenv(name);
     return (v && all_digits(v) && strlen(v) < 9) ? atoi(v) : dflt;
 }
 
@@ -92,7 +90,7 @@ static void setup_env(char *const *gates, int n, const char *bin_dir)
 {
     long host = sysconf(_SC_NPROCESSORS_ONLN);
     char buf[24];
-    int sweep = env_int("ZCL_HOST_JOBS", host > 0 ? (int)host : DEFAULT_HOST);
+    int sweep = env_int(getenv("ZCL_HOST_JOBS"), host > 0 ? (int)host : DEFAULT_HOST);
     if (wants(gates, n, "check-clang-portability")
         || wants(gates, n, "check-windows-cross-syntax")) {
         (void)snprintf(buf, sizeof buf, "%d", clamp(sweep * 3 / 8, 4, 12));
@@ -135,7 +133,7 @@ static int pregen_inventory(const char *tool, char *const *gates, int n)
     return rc;
 }
 
-/* Table gates absent from this run are named (non-fatal), as run_lint.sh does. */
+/* Table gates absent from this run are named (non-fatal). */
 static void note_unrequested(char *const *gates, int n)
 {
     for (int i = 0; i < g_table.n; i++) {
@@ -257,7 +255,7 @@ static int start_run(const struct run_args *a)
         (void)snprintf(state, sizeof state, "%s/.cache/lint-timing", cwd);
     (void)snprintf(lint_bin, sizeof lint_bin, "%s/z23-lint", a->bin_dir);
     o = (struct lr_opts){ a->jobs, state, lint_bin, a->bin_dir,
-                          env_int("ZCL_LINT_BUDGET_SEC", DEFAULT_BUDGET),
+                          env_int(getenv("ZCL_LINT_BUDGET_SEC"), DEFAULT_BUDGET),
                           getenv("ZCL_LINT_VERBOSE") && !strcmp(getenv("ZCL_LINT_VERBOSE"), "1"),
                           stdout, stderr, resolve_default, &g_table,
                           k_serial_pro, k_serial_epi, k_poles };
@@ -270,16 +268,16 @@ static int start_run(const struct run_args *a)
 
 int lint_run_main(int argc, char **argv)
 {
-    struct run_args a = { env_int("ZCL_LINT_JOBS", DEFAULT_JOBS), "build/bin", { 0 }, 0, 0, NULL };
+    struct run_args a = { env_int(getenv("ZCL_LINT_JOBS"), DEFAULT_JOBS), "build/bin", { 0 }, 0, 0, NULL };
     int rc = parse_args(&a, argc, argv);
     if (rc != 0)
         return rc;
     a.jobs = clamp(a.jobs, 1, LR_MAX_JOBS);
     if (a.mode == 3)
         return usage(0);
-    if (lr_table_load(&g_table, "tools/lint/run_lint.sh") != 0) {
-        (void)fputs("z23-lint run: cannot read the gate table tools/lint/run_lint.sh "
-                    "(run from the repository root)\n", stderr);
+    if (lr_table_load(&g_table) != 0) {
+        (void)fputs("z23-lint run: the compiled gate table gate_commands.def is oversized "
+                    "or duplicated beyond its capacity\n", stderr);
         return 2;
     }
     if (a.mode == 1)

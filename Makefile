@@ -652,7 +652,7 @@ else ifneq ($(filter dev-tsan z23-dev-tsan zclassic23-dev-tsan,$(ZCL_EPOCH_SINGL
 ZCL_EPOCH_PROFILES := dev-tsan
 else ifneq ($(filter coverage coverage-locked,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := coverage
-else ifneq ($(filter lint-fast lint-fast-c lint-land watcher-safety-gates check-dev-loop-profiles dev-loop-profile-flags print-dev-profile-dirs dev-failure-execution-id t-changed fast-changed-compile fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild fast-ci agent-fast-ci agent-plan agent-loop agent-dev-loop pre-push-ci t-list templates site-css explorer-css,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter lint-fast lint-land watcher-safety-gates check-dev-loop-profiles dev-loop-profile-flags print-dev-profile-dirs dev-failure-execution-id t-changed fast-changed-compile fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild fast-ci agent-fast-ci agent-plan agent-loop agent-dev-loop pre-push-ci t-list templates site-css explorer-css,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES :=
 endif
 endif
@@ -2192,7 +2192,7 @@ else ifneq ($(filter coverage coverage-locked,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := coverage
 else ifneq ($(filter fuzz fuzz-ci fuzz-ci-leaks fuzz-replay fuzz_block fuzz_script fuzz_p2p fuzz_http fuzz_compactblock fuzz_snapshot fuzz_tx_bundle fuzz_rom_manifest fuzz_overlay fuzz_ecdsa fuzz_mesh_status_proto,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := fuzz
-else ifneq ($(filter lint-fast lint-fast-c lint-land watcher-safety-gates check-dev-loop-profiles dev-loop-profile-flags print-dev-profile-dirs dev-failure-execution-id t-changed fast-changed-compile fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild fast-ci agent-fast-ci agent-plan agent-loop agent-dev-loop pre-push-ci,$(ZCL_DEPFILE_SINGLE_GOAL)),)
+else ifneq ($(filter lint-fast lint-land watcher-safety-gates check-dev-loop-profiles dev-loop-profile-flags print-dev-profile-dirs dev-failure-execution-id t-changed fast-changed-compile fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild fast-ci agent-fast-ci agent-plan agent-loop agent-dev-loop pre-push-ci,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES :=
 endif
 endif
@@ -4757,7 +4757,7 @@ prove-cold-join: $(TEST_PARALLEL_REL_CANDIDATE)
 # the default `all`), so running build/bin/test_parallel directly after editing a test
 # can false-green an old binary or report "matched no groups" for a new test.
 # `make t ONLY=<group>` always rebuilds the harness first, closing that trap.
-.PHONY: t t-fast t-fast-exact t-asan asan-ci t-tsan tsan-ci t-changed ff verify-change watcher-safety-gates syntax-check build-only fast-compile fast-changed-compile dev-build-only dev-bin dev-asan z23-dev-asan zclassic23-dev-asan dev-tsan z23-dev-tsan zclassic23-dev-tsan z23-dev zclassic23-dev dev print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild lint-fast lint-land lint-fast-c lint-preflight fast-ci agent-fast-ci agent-plan agent-loop agent-dev-loop dev-watch dev-watch-once dev-watch-selftest dev-activation-selftest dev-loop-selftest native-dev-loop-wait-selftest native-dev-failure-selftest watcher-session-stop-selftest agent-index compdb dev-loop-bench dev-loop-bench-selftest hotswap-sim immutable-history-canaries historical-canaries agent-dev-status agent-dev-recover dev-recovery-selftest agent-clear-stale-dev-reindex agent-doctor doctor-build stage-dev-bin agent-stage-dev deploy-dev-fast agent-deploy-fast
+.PHONY: t t-fast t-fast-exact t-asan asan-ci t-tsan tsan-ci t-changed ff verify-change watcher-safety-gates syntax-check build-only fast-compile fast-changed-compile dev-build-only dev-bin dev-asan z23-dev-asan zclassic23-dev-asan dev-tsan z23-dev-tsan zclassic23-dev-tsan z23-dev zclassic23-dev dev print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild lint-fast lint-land lint-preflight fast-ci agent-fast-ci agent-plan agent-loop agent-dev-loop dev-watch dev-watch-once dev-watch-selftest dev-activation-selftest dev-loop-selftest native-dev-loop-wait-selftest native-dev-failure-selftest watcher-session-stop-selftest agent-index compdb dev-loop-bench dev-loop-bench-selftest hotswap-sim immutable-history-canaries historical-canaries agent-dev-status agent-dev-recover dev-recovery-selftest agent-clear-stale-dev-reindex agent-doctor doctor-build stage-dev-bin agent-stage-dev deploy-dev-fast agent-deploy-fast
 
 # ── ONLY= is validated BEFORE anything compiles ──────────────────────────
 # Every focused target below carried its ONLY= check in the RECIPE. Make builds
@@ -6931,27 +6931,16 @@ lint-fast: $(LINT_FAST_GATES)
 else
 lint-fast: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN_BIN) $(TOR_PROVENANCE_BIN) \
 		$(HOTSWAP_ACTION_PLAN) $(CAPABILITY_INVENTORY_TOOL)
-	@ZCL_LINT_INVENTORY_TOOL="$(CAPABILITY_INVENTORY_TOOL)" tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_FAST_GATES)
+	@ZCL_LINT_INVENTORY_TOOL="$(CAPABILITY_INVENTORY_TOOL)" $(LINTC_TOOL) run --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_FAST_GATES)
 	@echo "lint-fast: OK"
 endif
-
-# lint-fast-c — SHADOW of lint-fast on the C23 driver (`z23-lint run`, the
-# tools/lint/lintc/run_*.c files): the same LINT_FAST_GATES, jobs, bin dir and
-# prerequisites, run without run_lint.sh. Artifacts go to .cache/lint-timing-c
-# so a shadow run never overwrites the shell driver's last-run.json. Nothing
-# depends on it yet; lint-fast, lint-land and lint still use run_lint.sh.
-.PHONY: lint-fast-c
-lint-fast-c: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN_BIN) tor-provenance-ready $(TOR_PROVENANCE_BIN) \
-		$(HOTSWAP_ACTION_PLAN) $(CAPABILITY_INVENTORY_TOOL)
-	@ZCL_LINT_TIMING_DIR="$${ZCL_LINT_TIMING_DIR:-.cache/lint-timing-c}" ZCL_LINT_INVENTORY_TOOL="$(CAPABILITY_INVENTORY_TOOL)" $(LINTC_TOOL) run --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_FAST_GATES)
-	@echo "lint-fast-c: OK"
 
 # lint-land — what `dev land` runs in its landing worktree before it starts an
 # exact proof: LINT_FAST_GATES plus LINT_LAND_EXTRA_GATES. The extra list is
 # provenance-driven: every entry is a cheap gate (p50 at or under ~2.5 s) that
 # is NOT in lint-fast yet failed in the full proof lint of a landing candidate,
 # wasting a whole ~7-minute proof on a failure that costs milliseconds to see.
-# Members of LINT_GATES already wired in run_lint.sh's gate_command() table.
+# Members of LINT_GATES already wired in the gate_commands.def table.
 # Environment-dependent gates (check-git-hooks-installed) are deliberately out.
 # Keep the fast set suitable for the edit loop; move cheap recurring failures
 # there when they can save a failed landing submission.
@@ -7003,14 +6992,14 @@ else
 lint-land: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN_BIN) tor-provenance-ready $(TOR_PROVENANCE_BIN) \
 		$(HOTSWAP_ACTION_PLAN) tools/core_seal $(BIN_DIR)/check_no_hardlink_seeding \
 		$(NETWORK_TOOL_HARDENING_BINS) $(CAPABILITY_INVENTORY_TOOL)
-	@ZCL_LINT_INVENTORY_TOOL="$(CAPABILITY_INVENTORY_TOOL)" tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_LAND_GATES)
+	@ZCL_LINT_INVENTORY_TOOL="$(CAPABILITY_INVENTORY_TOOL)" $(LINTC_TOOL) run --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_LAND_GATES)
 	@echo "lint-land: OK"
 endif
 
 # lint-preflight — the gates most likely to trip on a change
 # to tools/command/*.c, engine/composition/**/*.def, contexts/**/*.def, or a
 # new .c file. These are members of LINT_GATES, already wired in
-# run_lint.sh's gate_command() table and named in docs/DEFENSIVE_CODING.md's
+# the gate_commands.def table and named in docs/DEFENSIVE_CODING.md's
 # LINT-GATES block. Inventory freshness also runs in lint-fast. This target
 # adds no new gate and needs no new wiring — it is a second, narrower
 # aggregate over gates that already exist, the same relationship lint-fast
@@ -7030,7 +7019,7 @@ lint-preflight: $(LINT_PREFLIGHT_GATES)
 	@echo "lint-preflight: OK (serial)"
 else
 lint-preflight: $(Z23_DEV_BIN) $(DEV_PACKAGE_VERIFY_BIN) $(LINTC_TOOL) $(TOOLGEN_BIN)
-	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_PREFLIGHT_GATES)
+	@$(LINTC_TOOL) run --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_PREFLIGHT_GATES)
 	@echo "lint-preflight: OK"
 endif
 
@@ -8629,7 +8618,7 @@ arena-view-syntax: $(LINTC_TOOL)
 	@./build/bin/z23-lint check-arena-view-stub
 
 # Lint-lane wiring for the stub compile above (also in LINT_FAST_GATES and
-# the gate_command() table in tools/lint/run_lint.sh — a gate is a two-file
+# the LINT_ROW table in tools/lint/lintc/gate_commands.def — a gate is a two-file
 # operation; check-lint-gate-wiring asserts both halves stay in step).
 check-arena-view-stub: $(LINTC_TOOL)
 	@echo "══ LINT: arena_view compiles against the raylib stub ══"
@@ -9722,7 +9711,7 @@ determinism-receipt-abi:
 
 # Gate — the NONDETERMINISTIC set may only shrink (HARD).
 # Wiring lives in THREE files: this recipe, the gate_command() case in
-# tools/lint/run_lint.sh, and the LINT-GATES block in docs/DEFENSIVE_CODING.md.
+# tools/lint/lintc/gate_commands.def, and the LINT-GATES block in docs/DEFENSIVE_CODING.md.
 .PHONY: check-determinism-ratchet
 check-determinism-ratchet: $(LINTC_TOOL)
 	@echo "══ LINT: determinism ratchet (shrink-only) ══"
@@ -13025,8 +13014,8 @@ install-hooks: $(GIT_HOOK_BIN)
 .PHONY: check-git-hooks-installed
 check-git-hooks-installed: $(GIT_HOOK_BIN) $(LINTC_TOOL)
 	@echo "══ LINT: local pre-push hook installed ══"
-	@./tools/scripts/check_git_hooks_installed.sh --self-test
-	@./tools/scripts/check_git_hooks_installed.sh
+	@./build/bin/z23-lint check-git-hooks-installed --self-test
+	@./build/bin/z23-lint check-git-hooks-installed
 
 # Read-only: whether THIS worktree's Git hooks are armed, which config file
 # says so, and what the armed pre-push hook actually runs. Never installs —
@@ -13042,7 +13031,7 @@ hooks-status:
 LINT_READY_TARGETS := fix-doc-counts docs-executor-routing
 .PHONY: lint-ready
 lint-ready: $(GIT_HOOK_BIN) $(LINTC_TOOL)
-	@./tools/scripts/check_git_hooks_installed.sh >/dev/null 2>&1 || \
+	@./build/bin/z23-lint check-git-hooks-installed >/dev/null 2>&1 || \
 	  { echo "lint-ready: hooks differ from the tracked hook; running make install-hooks"; \
 	    $(MAKE) --no-print-directory install-hooks; }
 	@echo "lint-ready: regenerating: $(LINT_READY_TARGETS)"
@@ -13536,7 +13525,7 @@ check-stable-publish-contained: $(LINTC_TOOL)
 
 check-raw-malloc: $(LINTC_TOOL)
 	@echo "══ LINT: raw malloc/calloc/realloc in production code ══"
-	@tools/scripts/check_raw_malloc.sh --selftest && tools/scripts/check_raw_malloc.sh
+	@./build/bin/z23-lint check-raw-malloc --selftest && ./build/bin/z23-lint check-raw-malloc
 
 check-json-value-init: $(LINTC_TOOL)
 	@echo "══ LINT: struct json_value initialised before first use ══"
@@ -13588,7 +13577,7 @@ check-fortify-masked-decls: $(LINTC_TOOL)
 
 check-coins-lookup-nullcheck:
 	@echo "══ LINT: guarded controller coin lookups ══"
-	@tools/scripts/check_coins_lookup_nullcheck.sh
+	@./build/bin/z23-lint check-coins-lookup-nullcheck
 
 .PHONY: tools/check_observability_pairing
 tools/check_observability_pairing: $(BIN_DIR)/check_observability_pairing
@@ -14120,7 +14109,7 @@ check-model-validation: $(LINTC_TOOL)
 
 check-model-ar-lifecycle: $(LINTC_TOOL)
 	@echo "══ LINT: model ActiveRecord lifecycle saves ══"
-	@./tools/scripts/check_model_ar_lifecycle.sh --selftest && ./tools/scripts/check_model_ar_lifecycle.sh
+	@./build/bin/z23-lint check-model-ar-lifecycle --selftest && ./build/bin/z23-lint check-model-ar-lifecycle
 
 # A model file must not carry a hand-written SQL statement: reads and writes
 # build one with engine/models/include/models/query_builder.h, whose identifiers
@@ -14203,7 +14192,7 @@ check-rule-vocabulary: $(LINTC_TOOL)
 # a `// long-function-ok:<tag>` override marker explaining WHY.
 check-long-functions: $(LINTC_TOOL)
 	@echo "══ LINT: long function cap (500 lines) ══"
-	@./tools/scripts/check_long_functions.sh --selftest && ./tools/scripts/check_long_functions.sh
+	@./build/bin/z23-lint check-long-functions --selftest && ./build/bin/z23-lint check-long-functions
 
 # Cyclomatic complexity cap 15 per C function definition (decision points:
 # if/for/while/case keywords, && and || operators, ternary ?, with comments
@@ -14240,8 +14229,8 @@ check-lag-slo-observable: $(LINTC_TOOL)
 # debt incrementally.
 check-lib-layering: $(LINTC_TOOL)
 	@echo "══ LINT: lib/ layer purity ══"
-	@./tools/scripts/check_lib_layering.sh --selftest
-	@./tools/scripts/check_lib_layering.sh
+	@./build/bin/z23-lint check-lib-layering --selftest
+	@./build/bin/z23-lint check-lib-layering
 
 # lib/ module link order. engine/composition/lib_module_order.def declares every lib module
 # in link order (rank = line position) and a module may reference only strictly
@@ -14286,8 +14275,8 @@ lint-armed:
 # debt; override with `// shape-layer-ok:<tag>`.
 check-shape-include-direction: $(LINTC_TOOL)
 	@echo "══ LINT: inter-shape include direction ══"
-	@./tools/scripts/check_shape_include_direction.sh --selftest
-	@./tools/scripts/check_shape_include_direction.sh
+	@./build/bin/z23-lint check-shape-include-direction --selftest
+	@./build/bin/z23-lint check-shape-include-direction
 
 # Controller private headers belong to their dynamically-derived source
 # family. Existing external production edges are exact shrink-only debt;
@@ -14315,7 +14304,7 @@ check-domain-purity: $(LINTC_TOOL)
 # opt-in adoption of the supervisor primitive over Rounds 6-8.
 check-supervisor-registration: $(LINTC_TOOL)
 	@echo "══ LINT: supervisor registration ══"
-	@./tools/scripts/check_supervisor_registration.sh --selftest && ./tools/scripts/check_supervisor_registration.sh
+	@./build/bin/z23-lint check-supervisor-registration --selftest && ./build/bin/z23-lint check-supervisor-registration
 
 # Test-registration drift guard. A test entry point (test_<name>.c defining
 # int test_<name>(void)) that is in NEITHER the canonical test group catalog
@@ -14324,8 +14313,8 @@ check-supervisor-registration: $(LINTC_TOOL)
 # refold orphans (2026-06-22). Fails CI on any such orphan.
 check-test-registration: $(LINTC_TOOL)
 	@echo "══ LINT: test registration ══"
-	@./tools/scripts/check_test_registration.sh --selftest
-	@./tools/scripts/check_test_registration.sh
+	@./build/bin/z23-lint check-test-registration --selftest
+	@./build/bin/z23-lint check-test-registration
 
 # Gate — no NEW runtime abort primitive in network-reachable code (RATCHET,
 # shrink-only baseline tools/lint/no_runtime_abort_baseline.txt). assert() is
@@ -14706,7 +14695,7 @@ check-windows-platform-seam: $(LINTC_TOOL)
 # removed.
 #
 # Wired into LINT_GATES, which takes three files as a set: the list entry
-# below, a gate_command() row in tools/lint/run_lint.sh, and a row in
+# below, a LINT_ROW in tools/lint/lintc/gate_commands.def, and a row in
 # docs/DEFENSIVE_CODING.md. check-lint-gate-wiring enforces all three
 # together, because a half-wired gate makes `make lint` exit 2 for EVERY
 # gate, not just this one.
@@ -14843,7 +14832,7 @@ check-no-orphan-placement: $(LINTC_TOOL)
 # test_consensus_parity test group.
 check-consensus-parity: $(LINTC_TOOL)
 	@echo "══ LINT: consensus parity with zclassicd (E13) ══"
-	@./tools/scripts/check_consensus_parity.sh --selftest && ./tools/scripts/check_consensus_parity.sh
+	@./build/bin/z23-lint check-consensus-parity --selftest && ./build/bin/z23-lint check-consensus-parity
 
 # Gate — command-contract ratchet (lane OS-B1). Every native command leaf in
 # engine/composition/commands/*.def must supply a non-empty `semantics` argument (the
@@ -14906,7 +14895,7 @@ check-telemetry-ontology: $(LINTC_TOOL)
 # downstream with another rung.
 check-no-new-repair-rung: $(LINTC_TOOL)
 	@echo "══ LINT: no new repair rung (TENACITY I3) ══"
-	@./tools/scripts/check_no_new_repair_rung.sh --selftest && ./tools/scripts/check_no_new_repair_rung.sh
+	@./build/bin/z23-lint check-no-new-repair-rung --selftest && ./build/bin/z23-lint check-no-new-repair-rung
 
 # Gate — no NEW coordination shell (the project goal: no shell on the
 # coordination path). Every tracked top-level tools/dev/*.sh and
@@ -15076,10 +15065,10 @@ check-file-size-ceiling: $(FILE_SIZE_POLICY_BIN)
 # "lane <N><letter>", "future slice") from production contract surfaces
 # (*.h under any **/include/**, *.def tables) — INCORRECT MODEL CONTEXT once
 # the real body has landed. docs/, vendor/, and test paths narrate history on
-# purpose and are excluded. See tools/scripts/check_no_dev_history_in_contracts.sh.
+# purpose and are excluded. See ./build/bin/z23-lint check-no-dev-history-in-contracts.
 check-no-dev-history-in-contracts: $(LINTC_TOOL)
 	@echo "══ LINT: no dev-history phrasing in production contracts ══"
-	@./tools/scripts/check_no_dev_history_in_contracts.sh --selftest && ./tools/scripts/check_no_dev_history_in_contracts.sh
+	@./build/bin/z23-lint check-no-dev-history-in-contracts --selftest && ./build/bin/z23-lint check-no-dev-history-in-contracts
 
 # Funded transaction receipts and isolated recipient-wallet manifests are
 # private local state. Tracked baselines may contain reproducible simnet and
@@ -15100,7 +15089,7 @@ check-operator-needed-sink: $(LINTC_TOOL)
 # fails explicit MemoryMax=infinity. Prevents host OOM from cap drift.
 check-systemd-memory-budget: $(LINTC_TOOL)
 	@echo "══ LINT: systemd memory budget (P1-3) ══"
-	@./tools/scripts/check_systemd_memory_budget.sh --selftest && ./tools/scripts/check_systemd_memory_budget.sh
+	@./build/bin/z23-lint check-systemd-memory-budget --selftest && ./build/bin/z23-lint check-systemd-memory-budget
 
 # Gate E14 — a COND_CRITICAL condition whose detect() depends on external/
 # network state (peer/connman liveness, the legacy zclassicd RPC oracle)
@@ -15364,10 +15353,10 @@ check-no-stale-pinned-facts: $(LINTC_TOOL)
 # open", ...) must also carry a machine-checkable citation token (VERDICT=PASS,
 # gap_vs_oracle, uptime-ledger, a ts= stamp, slo-summary:, WALL_CLOCK_SECONDS)
 # or the explicit historical override <!-- victory-ok: <reason> -->. See
-# tools/scripts/check_no_uncited_victory.sh (has --selftest).
+# ./build/bin/z23-lint check-no-uncited-victory (has --selftest).
 check-no-uncited-victory: $(LINTC_TOOL)
 	@echo "══ LINT: no uncited victory claim (docs/agent/HANDOFF.md) ══"
-	@./tools/scripts/check_no_uncited_victory.sh
+	@./build/bin/z23-lint check-no-uncited-victory
 
 # Bound doc claims. An author binds ONE prose assertion to ONE machine-checkable
 # predicate with an invisible HTML comment next to it:
@@ -15663,13 +15652,13 @@ check-hex-codec-single: $(LINTC_TOOL)
 # tools/scripts/one_result_type_baseline.txt may only shrink).
 check-one-result-type: $(LINTC_TOOL)
 	@echo "══ LINT: one result type (E2) ══"
-	@./tools/scripts/check_one_result_type.sh --selftest
-	@./tools/scripts/check_one_result_type.sh
+	@./build/bin/z23-lint check-one-result-type --selftest
+	@./build/bin/z23-lint check-one-result-type
 
 check-no-secret-printf: $(LINTC_TOOL)
 	@echo "══ LINT: no secret printf ══"
-	@./tools/scripts/check_no_secret_printf.sh --selftest
-	@./tools/scripts/check_no_secret_printf.sh
+	@./build/bin/z23-lint check-no-secret-printf --selftest
+	@./build/bin/z23-lint check-no-secret-printf
 
 # Gate — service-shape convergence SHRINKING-FLOOR ratchet (Phase 3, sibling
 # to E2): counts exported bool-returning function DEFINITIONS per
@@ -15679,7 +15668,7 @@ check-no-secret-printf: $(LINTC_TOOL)
 # see docs/work/service-result-convergence.md for the inventory + lane plan.
 check-service-result-convergence: $(LINTC_TOOL)
 	@echo "══ LINT: service-result convergence (Phase 3 ratchet) ══"
-	@./tools/scripts/check_service_result_convergence.sh
+	@./build/bin/z23-lint check-service-result-convergence
 
 # ── Shape-skeleton generator (Workstream A5, FRAMEWORK.md Law 3) ──────
 # Emit a correct, compiling, readable skeleton for one of the four shapes
@@ -15720,13 +15709,13 @@ scenario:
 # supervisors -> supervisor header). HARD: the tree already complies.
 check-shape-includes-header: $(LINTC_TOOL)
 	@echo "══ LINT: shape includes header (E3) ══"
-	@./tools/scripts/check_shape_includes_header.sh
+	@./build/bin/z23-lint check-shape-includes-header
 
 # Gate E4 — projections are pure folds: no app-layer (services/controllers)
 # includes and no AR model saves. HARD: the projection set already complies.
 check-projections-pure: $(LINTC_TOOL)
 	@echo "══ LINT: projections pure (E4) ══"
-	@./tools/scripts/check_projections_pure.sh
+	@./build/bin/z23-lint check-projections-pure
 
 # Gate E6 — one chain-state write path (RATCHET). Legacy writer surfaces
 # would be grandfathered in tools/scripts/one_write_path_baseline.txt (empty
@@ -15734,13 +15723,13 @@ check-projections-pure: $(LINTC_TOOL)
 # outside the reducer's single write path fails.
 check-one-write-path: $(LINTC_TOOL)
 	@echo "══ LINT: one write path (E6) ══"
-	@./tools/scripts/check_one_write_path.sh
+	@./build/bin/z23-lint check-one-write-path
 
 # Gate E7 — no authoritative RAM state (RATCHET). Direct active_chain
 # internals/global active_chain state are forbidden outside the baseline.
 check-no-authoritative-ram-state: $(LINTC_TOOL)
 	@echo "══ LINT: no authoritative RAM state (E7) ══"
-	@./tools/scripts/check_no_authoritative_ram_state.sh
+	@./build/bin/z23-lint check-no-authoritative-ram-state
 
 # Gate E5 — Job stages advance OR block (HARD). Every engine/jobs/src/*_stage.c
 # step must surface JOB_BLOCKED/JOB_IDLE on non-progress AND reference a cursor
@@ -15748,15 +15737,15 @@ check-no-authoritative-ram-state: $(LINTC_TOOL)
 # stages already comply, so the gate runs HARD.
 check-stage-advances-or-blocks: $(LINTC_TOOL)
 	@echo "══ LINT: stage advances-or-blocks (E5) ══"
-	@./tools/scripts/check_stage_advances_or_blocks.sh
+	@./build/bin/z23-lint check-stage-advances-or-blocks
 
 check-frontier-single-writer: $(LINTC_TOOL)
 	@echo "══ LINT: one canonical writer per frontier ══"
-	@./tools/scripts/check_frontier_single_writer.sh --selftest && ./tools/scripts/check_frontier_single_writer.sh
+	@./build/bin/z23-lint check-frontier-single-writer --selftest && ./build/bin/z23-lint check-frontier-single-writer
 
 check-dumper-never-blocks: $(LINTC_TOOL)
 	@echo "══ LINT: no dumpstate view blocks behind the reducer ══"
-	@./tools/scripts/check_dumper_never_blocks.sh
+	@./build/bin/z23-lint check-dumper-never-blocks
 
 # Program H enforcement gates (OBSERVE-style ratchets, baselined at today's
 # consumer set). Each lands BEFORE its deletion wave, proving non-growth, and
@@ -16038,7 +16027,7 @@ check-tor-provenance: tor-provenance-ready $(TOR_PROVENANCE_BIN) $(LINTC_TOOL)
 
 # Adding a lint gate is a THREE-FILE operation and nothing enforced the
 # other two: the Makefile gets a `check-*:` target plus a LINT_GATES line,
-# tools/lint/run_lint.sh's gate_command() case table gets the invocation
+# tools/lint/lintc/gate_commands.def table gets the invocation
 # (the parallel driver execs each gate's script directly and never reads
 # the Make recipe), and docs/DEFENSIVE_CODING.md's <!-- LINT-GATES-BEGIN
 # --> block gets the gate name (the doc gate + check-doc-accuracy only
@@ -16051,7 +16040,7 @@ check-tor-provenance: tor-provenance-ready $(TOR_PROVENANCE_BIN) $(LINTC_TOOL)
 # files, plus a Make target for every listed name (ZCL_LINT_SERIAL=1 needs
 # it) and an existing script behind every table entry.
 check-lint-gate-wiring: $(LINTC_TOOL)
-	@echo "══ LINT: every listed gate is wired in run_lint.sh and the doc block, and back ══"
+	@echo "══ LINT: every listed gate is wired in gate_commands.def and the doc block, and back ══"
 	@./build/bin/z23-lint check-lint-gate-wiring --selftest
 	@./build/bin/z23-lint check-lint-gate-wiring
 
@@ -16060,7 +16049,7 @@ check-lint-gate-wiring: $(LINTC_TOOL)
 # (E11 check-doc-accuracy cross-checks it against DEFENSIVE_CODING.md).
 #
 # Two execution modes:
-#   default            — tools/lint/run_lint.sh execs every gate's script
+#   default            — z23-lint run execs every gate's command
 #                        directly (no per-gate Make parse), times each in ms
 #                        (.cache/lint-timing/), and runs independent gates in
 #                        parallel (ZCL_LINT_JOBS workers). All gates run even
@@ -16073,7 +16062,7 @@ check-lint-gate-wiring: $(LINTC_TOOL)
 #
 # Wall-time budget (SOFT, warn-only — never fails the build): the umbrella
 # carries a budget in seconds — ZCL_LINT_BUDGET_SEC, defaulted in
-# tools/lint/run_lint.sh and echoed into every timing artifact as
+# z23-lint run and echoed into every timing artifact as
 # "budget_sec", which is where to read its current value. Per-gate ms lands in
 # .cache/lint-timing/last-run.json and every run prints the slowest 10, so a
 # creeping gate is visible before it eats the budget. Do NOT type an observed
@@ -16115,7 +16104,7 @@ ZCL_DEFAULT_JOBS = $(if $(filter -j%,$(MAKEFLAGS)),,-j$(ZCL_HOST_JOBS))
 # RAISING THIS DOES NOT HELP, MEASURED 2026-09-19 and recorded in
 # docs/quality/BENCHMARKS_LOG.md. `make lint` under the build scheduler's 28-processor
 # grant, same tree, lint cache warm, three alternating runs each, wall taken
-# from run_lint.sh's own timing line so scheduler queue time is excluded:
+# from the z23-lint run timing line so scheduler queue time is excluded:
 # 21 workers (this derivation) 196.7 / 190.9 / 197.1 s, 28 workers (the full
 # mask) 190.0 / 190.3 / 190.2 s. The whole difference is under 5 s because the
 # wall is floored by ONE gate -- check-doc-claims runs ~185 s by itself at
@@ -16368,7 +16357,7 @@ LINT_GATES := \
 # build it here before the parallel lint driver bypasses check-* Make recipes.
 # Name those artifacts here so a parallel cold lint never depends on ambient
 # output from an earlier development build. Keep one set for all three
-# umbrellas: run_lint.sh dispatches the same gate set for each of them, so
+# umbrellas: z23-lint run dispatches the same gate set for each of them, so
 # their build prerequisites must not drift apart.
 # The ordering gate's runtime orphan scenario execs and copies both the
 # launcher and the journey helper; nothing in the default build set makes
@@ -16384,7 +16373,7 @@ LINT_BUILT_PREREQS = tools/core_seal tools/check_observability_pairing \
 	$(TOR_PROVENANCE_BIN) $(GIT_HOOK_BIN) $(HOTSWAP_ACTION_PLAN) \
 	$(PROCESS_GROUP_EXEC_BIN) $(BIN_DIR)/arena_product_journey_c23
 # tor-provenance-ready runs BEFORE the lint driver ever forks a gate script:
-# run_lint.sh (both the parallel dispatcher above and the serial LINT_GATES
+# z23-lint run (both the parallel dispatcher above and the serial LINT_GATES
 # chain below) executes gate SCRIPTS directly, not Make recipes, so a
 # Makefile prerequisite on check-tor-provenance alone never reaches the
 # parallel path. Naming it here means a checkout whose vendor/tor archives
@@ -16407,7 +16396,7 @@ else
 # (notably two Windows linkers in `make lint check-windows-acceptance`).
 LINT_PARALLEL_GATES = $(filter-out $(MAKECMDGOALS),$(LINT_GATES))
 lint: $(LINTC_TOOL) $(NETWORK_TOOL_HARDENING_BINS) $(CAPABILITY_INVENTORY_TOOL) $(filter $(LINT_GATES),$(MAKECMDGOALS))
-	@$(if $(LINT_PARALLEL_GATES),ZCL_LINT_INVENTORY_TOOL="$(CAPABILITY_INVENTORY_TOOL)" tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_PARALLEL_GATES),:)
+	@$(if $(LINT_PARALLEL_GATES),ZCL_LINT_INVENTORY_TOOL="$(CAPABILITY_INVENTORY_TOOL)" $(LINTC_TOOL) run --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_PARALLEL_GATES),:)
 	@echo "══ LINT: all checks passed ══"
 endif
 
@@ -16456,7 +16445,7 @@ endif
 
 # One screen of truth from the LAST recorded lint and test runs — reads only
 # .cache/lint-timing/last-run.json and .cache/test-timing/last-run.json (plus
-# the per-gate logs run_lint.sh drops alongside its own), runs no gate itself,
+# the per-gate logs z23-lint run drops alongside its own), runs no gate itself,
 # and prints at most 40 lines: tree identity, both receipts' verdicts and
 # staleness, every failed gate/group by name, and one closing VERDICT line.
 # Exit 0 green / 1 red / 2 a receipt is missing. See tools/scripts/verdict.sh
@@ -17123,7 +17112,7 @@ native-tunnel-static: $(BIN_DIR)/tunnel-static
 TUNNEL_EXPORT_BINDING := tools/dev/native_tunnel_export_binding.h
 .PHONY: native-tunnel-export-binding check-native-tunnel-export-binding
 native-tunnel-export-binding: $(TUNNEL_EXPORT_BINDING)
-lint lint-fast lint-fast-c: check-native-tunnel-export-binding
+lint lint-fast: check-native-tunnel-export-binding
 # Stamp-gated like the view headers (see GEN_STAMP_DIR): this one depends on the
 # whole Makefile, so every Makefile edit or fresh checkout left the unchanged
 # header permanently older than its input and restarted every later parse.

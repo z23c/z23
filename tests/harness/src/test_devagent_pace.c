@@ -184,7 +184,7 @@ int test_devagent_pace(void)
         READ "Read a7\n" READ "Read a8\n" READ "Read a9\n"
         SHELL "ls tools\n"
         SHELL "cat Makefile\n"
-        WRITE "Edit tools/lint/run_lint.sh\n"
+        WRITE "Edit tools/lint/lintc/gate_commands.def\n"
         SHELL "git commit -m fix\n"
         "rc=0 DONE\n";
 
@@ -245,7 +245,7 @@ int test_devagent_pace(void)
         ASSERT_EQ(dvx_int(&c, "calls_before_first_edit"), 12);
         ASSERT_EQ(dvx_int(&c, "commits"), 1);
         ASSERT(dvx_arr_has(dvx_arr(&c, "files_edited"),
-                           "tools/lint/run_lint.sh"));
+                           "tools/lint/lintc/gate_commands.def"));
         dvx_end(&c);
         PASS();
     }

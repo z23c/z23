@@ -54,13 +54,13 @@ observability. Here z23 is free to be better than zclassicd.
 
 | Layer | What | Where |
 |---|---|---|
-| **1. `check-consensus-parity` (lint gate E13)** | Forbids the *shape* of a divergence: forbidden mechanism tokens, plus registry-checked future-height literals and wall-clock reads | `tools/scripts/check_consensus_parity.sh`; run by `make lint` / `make ci` / `make deploy` |
+| **1. `check-consensus-parity` (lint gate E13)** | Forbids the *shape* of a divergence: forbidden mechanism tokens, plus registry-checked future-height literals and wall-clock reads | `./build/bin/z23-lint check-consensus-parity`; run by `make lint` / `make ci` / `make deploy` |
 | **2. `test_consensus_parity` (test group)** | Pins the consensus *values* | `tests/harness/src/test_consensus_parity.c`; run by `make test_parallel` / `make ci` |
 | **3. Runtime cross-check** | Compares live block hashes against zclassicd | `legacy_mirror` / `z23 ops mirror` / `z23 core consensus report` |
 
 **Lint gate E13** fails if a **non-zclassicd consensus mechanism** appears in
 the consensus source path — the `PATHS` array in
-`tools/scripts/check_consensus_parity.sh`: `core/params`, `core/chainparams`,
+`./build/bin/z23-lint check-consensus-parity`: `core/params`, `core/chainparams`,
 `core/consensus`, `core/modules/validation`, `core/modules/chain`, `core/modules/mining`, `engine/jobs`.
 Every entry must exist on disk or the gate hard-fails rather than scanning
 nothing. Banned token classes:

@@ -26,7 +26,7 @@
 #include "lintc.h"
 
 /* ── check-projections-pure (Gate E4) ────────────────────────────────────
- * Port of tools/scripts/check_projections_pure.sh. A projection rebuilds a
+ * Port of ./build/bin/z23-lint check-projections-pure. A projection rebuilds a
  * read-optimized view by folding the event/storage log into its own
  * table(s). It must never invert the storage → services/controllers
  * dependency arrow, and must never write through AR_ADHOC_SAVE /

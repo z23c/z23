@@ -822,7 +822,7 @@ static int test_code_guide_lint_catalog(void)
         ASSERT_EQ(json_size(next), 3u);
         ASSERT_STR_EQ(json_get_str(json_at(next, 0)), "make -j\"$(getconf _NPROCESSORS_ONLN)\" agent-verify ONLY=@changed");
         ASSERT_STR_EQ(json_get_str(json_at(next, 1)), "make lint-fast");
-        ASSERT_STR_EQ(json_get_str(json_at(next, 2)), "tools/lint/run_lint.sh --list");
+        ASSERT_STR_EQ(json_get_str(json_at(next, 2)), "build/bin/z23-lint run --list");
         zcl_command_reply_free(&reply);
         ASSERT(brief_run(root,
                          "{\"paths\":[\"tools/guide_catalog" "_fixture.def\"],\"budget\":8192}",
@@ -832,7 +832,7 @@ static int test_code_guide_lint_catalog(void)
         ASSERT_STR_EQ(json_get_str(json_at(next, 0)), "make -j\"$(getconf _NPROCESSORS_ONLN)\" agent-verify ONLY=@changed");
         ASSERT_STR_EQ(json_get_str(json_at(next, 1)), "make lint-fast");
         ASSERT_STR_EQ(json_get_str(json_at(next, 2)), "make lint-preflight");
-        ASSERT_STR_EQ(json_get_str(json_at(next, 3)), "tools/lint/run_lint.sh --list");
+        ASSERT_STR_EQ(json_get_str(json_at(next, 3)), "build/bin/z23-lint run --list");
         zcl_command_reply_free(&reply);
         ASSERT(brief_run(root,
                          "{\"paths\":[\"tools/guide_catalog" "_fixture.def\"],\"budget\":256}",
@@ -841,7 +841,7 @@ static int test_code_guide_lint_catalog(void)
         ASSERT(json_write(&reply.data, NULL, 0) <= 256);
         ASSERT(json_get_bool(json_get(&reply.data, "truncated")));
         ASSERT(brief_array_has(json_get(&reply.data, "cut"), "next"));
-        ASSERT(!brief_array_has(json_get(&reply.data, "next"), "tools/lint/run_lint.sh --list"));
+        ASSERT(!brief_array_has(json_get(&reply.data, "next"), "build/bin/z23-lint run --list"));
         zcl_command_reply_free(&reply);
         test_rm_rf_recursive(root);
         PASS();
@@ -865,7 +865,7 @@ static int test_code_guide_lint_catalog_exclusions(void)
         for (size_t i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
             ASSERT(brief_run(root, inputs[i], &reply, why, sizeof(why)));
             ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
-            ASSERT(!brief_array_has(json_get(&reply.data, "next"), "tools/lint/run_lint.sh --list"));
+            ASSERT(!brief_array_has(json_get(&reply.data, "next"), "build/bin/z23-lint run --list"));
             zcl_command_reply_free(&reply);
         }
         test_rm_rf_recursive(root);

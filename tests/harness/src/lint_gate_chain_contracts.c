@@ -25,7 +25,7 @@
 
 #include "lint_gate_selftests.h"
 
-#define RRUNG_SCRIPT_REL  "tools/scripts/check_no_new_repair_rung.sh"
+#define RRUNG_SCRIPT_REL  "build/bin/z23-lint check-no-new-repair-rung"
 /* A new repair-rung-named file (basename contains "reconcile") planted under
  * engine/services/src so the gate's `find app -name '*.c'` scan sees it. */
 #define RRUNG_FIXTURE_DST "engine/services/src/_repair_rung_fixture_tmp_reconcile.c"

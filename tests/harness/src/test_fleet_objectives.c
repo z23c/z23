@@ -109,7 +109,7 @@ static bool fox_attempt(const char *dir, const char *name, bool complete,
         "PASS check-toolchain                               1607 ms\n"
         "\xe2\x94\x80\xe2\x94\x80 lint timing: 222 gates, wall %lld ms, jobs 21 "
         "\xe2\x94\x80\xe2\x94\x80\n"
-        "run_lint.sh: NOTE \xe2\x80\x94 wall 539041 ms exceeds the 75s soft "
+        "z23-lint run: NOTE \xe2\x80\x94 wall 539041 ms exceeds the 75s soft "
         "budget\n", lint_ms);
     (void)snprintf(path, sizeof(path), "%s/%s.lint.log", logs, key);
     if (!fox_write(path, text))

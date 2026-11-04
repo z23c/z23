@@ -586,8 +586,8 @@ static int pc_file_purpose_run(struct pc_run *r)
 {
     char command[4096];
     const char *reader[] = {"sh", "-c",
-        "cd \"$1\" || exit 126; exec bash tools/lint/run_lint.sh --print-command check-file-purpose 2>&1",
-        "sh", r->wt, NULL};
+        "cd \"$1\" || exit 126; exec \"$2\" run --print-command check-file-purpose 2>&1",
+        "sh", r->wt, r->bin, NULL};
     int rc = pc_canonical_capture(r, reader, command, sizeof(command));
     if (rc < 0)
         return -1;

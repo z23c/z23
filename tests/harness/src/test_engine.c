@@ -1567,7 +1567,7 @@ static int case_key_gate(void)
     EN_CHECK("the clean gate fixture was written", clean_written);
     (void)setenv("ZCL_API_KEY_SCAN_FILES", clean, 1);
     EN_CHECK("the key gate passes on a clean tree",
-             system("sh -c \"./build/bin/z23-lint check-no-api-keys "
+             system("sh -c \"build/bin/z23-lint check-no-api-keys "
                     ">/dev/null 2>&1\"") == 0); /* shellout-ok: test */
 
     /* Now plant one. Assembled at run time so this source file does not
@@ -1583,7 +1583,7 @@ static int case_key_gate(void)
     EN_CHECK("the planted-key fixture was written", leak_written);
     (void)setenv("ZCL_API_KEY_SCAN_FILES", leak, 1);
     EN_CHECK("the key gate FAILS on a planted key",
-             system("sh -c \"./build/bin/z23-lint check-no-api-keys "
+             system("sh -c \"build/bin/z23-lint check-no-api-keys "
                     ">/dev/null 2>&1\"") != 0); /* shellout-ok: test */
 
     (void)unsetenv("ZCL_API_KEY_SCAN_FILES");

@@ -4,7 +4,7 @@
  * inventory is complete, internally consistent output of the C23 source
  * scanner. Ported from tools/lint/check_capability_inventory_generated.sh
  * (deleted). With no argument the gate runs the generator binary at
- * <ZCL_LINT_BIN_DIR or build/bin>/gen_capability_inventory (run_lint.sh
+ * <ZCL_LINT_BIN_DIR or build/bin>/gen_capability_inventory (the lint driver
  * exports ZCL_LINT_BIN_DIR from --bin-dir; make lint builds it first); an
  * explicit path may be given as argv[0]. Its absence is a FATAL, exit 2,
  * exactly as in the script. The gate runs that binary to produce

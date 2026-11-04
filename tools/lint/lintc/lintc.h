@@ -260,12 +260,17 @@ int lint_base_write(struct lint_base *b, const char *path, const char *hdr);
  * when the requested argument exists. Input length must fit INT_MAX. */
 int lint_macro_arg(const char *s, int want, int *off, int *len);
 
-/* How gates.def says a gate's run_lint.sh command is built. */
+/* How gates.def says a gate's driver command is built. */
 enum { LINT_CMD_NONE = 0, LINT_CMD_PLAIN = 1, LINT_CMD_PAIR = 2 };
 
 /* The canonical lint command of a gate gates.def owns (command_table.c):
  * 0 and the command in out, 1 for a gate it does not own, 2 if cap is too small. */
 int lint_gate_command(const char *gate, char *out, size_t cap);
+
+/* Parse one LINT_ROW("name", "command") line of gate_commands.def text (the
+ * driver's command table, command_table.c): 0 a row, 1 not a row, 2 too long. */
+int lint_cmdrow_parse(const char *line, char *name, size_t ncap, char *cmd,
+                      size_t ccap);
 
 /* Gate prototypes int NAME_run(int, char **) / int NAME_selftest(void),
  * generated from gates.def. */

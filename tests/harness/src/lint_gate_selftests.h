@@ -76,7 +76,7 @@
 #define RAW_MALLOC_FIXTURE_DST_REL "engine/controllers/src/_raw_malloc_lint_fixture_tmp.c"
 #define RAW_MALLOC_OK_FIXTURE_DST_REL "engine/controllers/src/_raw_malloc_ok_lint_fixture_tmp.c"
 #define RAW_SQLITE_SCRIPT_REL "build/bin/z23-lint check-raw-sqlite"
-#define RAW_MALLOC_SCRIPT_REL "tools/scripts/check_raw_malloc.sh"
+#define RAW_MALLOC_SCRIPT_REL "build/bin/z23-lint check-raw-malloc"
 #define HOTSWAP_SCOPE_SCRIPT_REL  "build/bin/z23-lint check-hotswap-eligible-scope"
 #define HOTSWAP_STATIC_SCRIPT_REL "build/bin/z23-lint check-hotswap-static-state"
 #define HOTSWAP_SERVICE_SCRIPT_REL \
@@ -107,7 +107,7 @@
     "tests/harness/fixtures/hotswap_islands_bad_scope.def"
 #define HOTSWAP_ISLAND_BAD_STATIC_REL \
     "tests/harness/fixtures/hotswap_islands_bad_static.def"
-#define GIT_HOOKS_SCRIPT_REL "tools/scripts/check_git_hooks_installed.sh"
+#define GIT_HOOKS_SCRIPT_REL "build/bin/z23-lint check-git-hooks-installed"
 #define PRIV_RECEIPT_SCRIPT_REL \
     "build/bin/z23-lint check-privileged-transition-receipt"
 /* Gate — no ordinal comparison of enum sync_trust_state. The gate owns a
@@ -123,14 +123,14 @@
 #define GIT_HOOKS_PRECOMMIT_REL "tools/githooks/pre-commit"
 #define GIT_HOOKS_PRECOMMIT_FIXTURE_REL \
     "test-tmp/_pre_commit_hook_fixture_tmp"
-/* Gate — the lint umbrella's two files (Makefile LINT_GATES and run_lint.sh's
+/* Gate — the lint umbrella's two files (Makefile LINT_GATES and gate_commands.def's
  * gate_command() case table) must agree in both directions. Hermetic: its
  * --selftest builds fixture trees under TMPDIR, so it belongs to the REALROOT
  * lane. */
 #define LINT_GATE_WIRING_SCRIPT_REL \
     "build/bin/z23-lint check-lint-gate-wiring"
 #define NO_DEV_HISTORY_SCRIPT_REL \
-    "tools/scripts/check_no_dev_history_in_contracts.sh"
+    "build/bin/z23-lint check-no-dev-history-in-contracts"
 #define NO_DEV_HISTORY_FIXTURE_DST \
     "platform/modules/util/include/util/_dev_history_lint_fixture_tmp.h"
 #define NO_DEV_HISTORY_ALLOWLIST_FIXTURE_DST \
@@ -139,7 +139,7 @@
  * overridden via ZCL_LINT_MODE (run_gate_script's 2nd arg), pointing at a
  * planted fixture .md. */
 #define NO_UNCITED_VICTORY_SCRIPT_REL \
-    "tools/scripts/check_no_uncited_victory.sh"
+    "build/bin/z23-lint check-no-uncited-victory"
 #define NO_UNCITED_VICTORY_FIXTURE_REL \
     "test-tmp/_uncited_victory_fixture_tmp.md"
 #define NO_UNCITED_VICTORY_CITED_FIXTURE_REL \
@@ -172,7 +172,7 @@
  * tiers run against an isolated test-tmp/ scan dir + baseline
  * (ZCL_LONGFN_ENFORCED_ROOTS/_BASELINE, ZCL_LONGFN_LIB_ROOTS/_LIB_BASELINE),
  * as SVC_CONV above. */
-#define LONGFN_SCRIPT_REL          "tools/scripts/check_long_functions.sh"
+#define LONGFN_SCRIPT_REL          "build/bin/z23-lint check-long-functions"
 #define LONGFN_ENFORCED_DIR_REL    "test-tmp/_longfn_enforced_scan_dir_tmp"
 #define LONGFN_ENFORCED_FIXTURE_REL \
     "test-tmp/_longfn_enforced_scan_dir_tmp/fixture.c"
@@ -186,7 +186,7 @@
 #define LONGFN_LIB_KEEP_REL        "test-tmp/_longfn_lib_scan_dir_tmp/keep.c"
 #define LONGFN_LIB_BASELINE_REL    "test-tmp/_longfn_lib_baseline_tmp.txt"
 #define E9_SCRIPT_REL    "build/bin/z23-lint check-operator-needed-sink"
-#define SYSMEM_SCRIPT_REL "tools/scripts/check_systemd_memory_budget.sh"
+#define SYSMEM_SCRIPT_REL "build/bin/z23-lint check-systemd-memory-budget"
 #define QUALITY_GUARD_TEST_REL "tools/scripts/test_quality_job_guard.sh"
 /* ── the two hermetic copy-prove selftests, and how their bound is derived ──
  * Both run through run_gate_script_watched(), whose bound is on SILENCE, not
@@ -230,7 +230,7 @@
 /* check-dumper-never-blocks: the script owns its fixture sandbox behind
  * `--selftest`, so this side only dispatches the flag and asserts 0. Covers a
  * blocking primitive inside a `*_dump_state_fill` provider. */
-#define DUMPER_BLOCKING_SCRIPT_REL "tools/scripts/check_dumper_never_blocks.sh"
+#define DUMPER_BLOCKING_SCRIPT_REL "build/bin/z23-lint check-dumper-never-blocks"
 #define E10_SQL_SCRIPT_REL "build/bin/z23-lint check-no-raw-sqlite-in-controllers"
 #define E10_SQL_FIXTURE_DST \
     "engine/controllers/src/sync_controller_e10_rawsql_fixture_tmp.c"
@@ -240,21 +240,21 @@
 /* Not gitignored: E11's repo-wide prong scans tracked and non-ignored files,
  * so an ignored path would make the trip case vacuous. */
 #define E11_FIXTURE_DST  "docs/_e11_doc_count_fixture_tmp.md"
-#define MODEL_AR_SCRIPT_REL "tools/scripts/check_model_ar_lifecycle.sh"
+#define MODEL_AR_SCRIPT_REL "build/bin/z23-lint check-model-ar-lifecycle"
 #define MODEL_AR_FIXTURE_DST "engine/models/src/_model_ar_lifecycle_fixture_tmp.c"
-#define E2_SCRIPT_REL    "tools/scripts/check_one_result_type.sh"
+#define E2_SCRIPT_REL    "build/bin/z23-lint check-one-result-type"
 #define E2_FIXTURE_DST   "engine/services/src/_e2_one_result_fixture_tmp.c"
 /* Phase 3 shrinking-floor ratchet (sibling to E2): counts exported bool
  * definitions per file. Runs against an isolated test-tmp/ scan dir and
  * baseline (ZCL_SERVICE_RESULT_CONVERGENCE_SCAN_DIR / _BASELINE). */
-#define SVC_CONV_SCRIPT_REL   "tools/scripts/check_service_result_convergence.sh"
+#define SVC_CONV_SCRIPT_REL   "build/bin/z23-lint check-service-result-convergence"
 #define SVC_CONV_SCAN_DIR_REL "test-tmp/_svc_conv_scan_dir_tmp"
 #define SVC_CONV_KEEP_REL     "test-tmp/_svc_conv_scan_dir_tmp/keep.c"
 #define SVC_CONV_FIXTURE_REL  "test-tmp/_svc_conv_scan_dir_tmp/fixture.c"
 #define SVC_CONV_BASELINE_REL "test-tmp/_svc_conv_baseline_tmp.txt"
-#define E3_SCRIPT_REL    "tools/scripts/check_shape_includes_header.sh"
+#define E3_SCRIPT_REL    "build/bin/z23-lint check-shape-includes-header"
 #define E3_FIXTURE_DST   "engine/conditions/src/_e3_shape_include_fixture_tmp.c"
-#define E4_SCRIPT_REL    "tools/scripts/check_projections_pure.sh"
+#define E4_SCRIPT_REL    "build/bin/z23-lint check-projections-pure"
 #define E4_FIXTURE_DST   "engine/modules/storage/src/_e4_pure_fixture_projection.c"
 /* Gate #45 — domain/ source purity (hard). The fixture is a domain/ src file
  * with a forbidden include; clean tree exits 0, fixture non-zero. */
@@ -263,13 +263,13 @@
 /* Gate #49 — inter-shape include direction (ratchet). The fixture is an
  * engine/models/src/ file with an upward #include "services/..."; the clean
  * tree (grandfathered baseline entries) exits 0, the fixture non-zero. */
-#define SHAPE_DIR_SCRIPT_REL  "tools/scripts/check_shape_include_direction.sh"
+#define SHAPE_DIR_SCRIPT_REL  "build/bin/z23-lint check-shape-include-direction"
 #define SHAPE_DIR_FIXTURE_DST "engine/models/src/_shape_dir_fixture_tmp.c"
-#define E5_SCRIPT_REL    "tools/scripts/check_stage_advances_or_blocks.sh"
+#define E5_SCRIPT_REL    "build/bin/z23-lint check-stage-advances-or-blocks"
 #define E5_FIXTURE_DST   "engine/jobs/src/_e5_stage_fixture_tmp_stage.c"
-#define E6_SCRIPT_REL    "tools/scripts/check_one_write_path.sh"
+#define E6_SCRIPT_REL    "build/bin/z23-lint check-one-write-path"
 #define E6_FIXTURE_DST   "engine/services/src/_e6_write_path_fixture_tmp.c"
-#define E7_SCRIPT_REL    "tools/scripts/check_no_authoritative_ram_state.sh"
+#define E7_SCRIPT_REL    "build/bin/z23-lint check-no-authoritative-ram-state"
 #define E7_FIXTURE_DST   "engine/services/src/_e7_ram_state_fixture_tmp.c"
 #define FSUF_SCRIPT_REL  "build/bin/z23-lint check-framework-filename-suffix"
 /* A foreign-shape suffix (*_controller) planted under engine/services/src. */
@@ -277,7 +277,7 @@
 /* Gate E13 — check-consensus-parity (hard, no baseline). Scans the consensus
  * trees for a forbidden miner-signaled/versionbits token; the fixture plants
  * the verbatim identifier VersionBitsState. */
-#define CONSENSUS_PARITY_SCRIPT_REL "tools/scripts/check_consensus_parity.sh"
+#define CONSENSUS_PARITY_SCRIPT_REL "build/bin/z23-lint check-consensus-parity"
 #define CONSENSUS_PARITY_FIXTURE_DST \
     "core/modules/validation/src/_consensus_parity_fixture_tmp.c"
 /* Gate check-silent-errors-bool — ratchet (shrink-only

@@ -201,9 +201,9 @@ static int dc_st_table_write(const char *vr, const char *gate,
                              const char *cmd)
 {
     char p[ST_PATH], t[512];
-    if (ovf(snprintf(p, sizeof p, "%s/fake_run_lint.sh", vr), sizeof p))
+    if (ovf(snprintf(p, sizeof p, "%s/fake_gate_commands.def", vr), sizeof p))
         return 2;
-    if (ovf(snprintf(t, sizeof t, "        %s) echo '%s' ;;\n", gate, cmd),
+    if (ovf(snprintf(t, sizeof t, "LINT_ROW(\"%s\", \"%s\")\n", gate, cmd),
             sizeof t))
         return 2;
     return csr_write(p, t);
@@ -221,7 +221,7 @@ static void dc_st_arm(const char *vr)
 {
     dc_table_override = 1;
     if (ovf(snprintf(dc_table_path, sizeof dc_table_path, "%s/"
-                     "fake_run_lint.sh", vr), sizeof dc_table_path))
+                     "fake_gate_commands.def", vr), sizeof dc_table_path))
         dc_table_path[0] = '\0';
     setenv("ZCL_LINT_GATES_DIR_X", vr, 1);
 }

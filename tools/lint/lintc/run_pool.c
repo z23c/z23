@@ -3,7 +3,7 @@
  * purpose: the gate worker pool of `z23-lint run`. Each gate runs in its own
  * forked worker whose stdout and stderr are the gate's log file; the parent
  * keeps up to JOBS workers alive in dispatch order (the xargs -P contract of
- * run_lint.sh), times each from fork to reap, writes the .ms/.rc artifacts,
+ * the former shell driver), times each from fork to reap, writes the .ms/.rc artifacts,
  * and prints one PASS/FAIL line per finished gate.
  */
 #ifndef _POSIX_C_SOURCE

@@ -916,7 +916,7 @@ static void general_brief_emit_refuses(struct zcl_command_reply *reply,
                                b->gates_unknown_named_none);
     (void)json_push_kv_bool(&refuses, "rows_truncated", b->refusals_truncated);
     (void)json_push_kv_str(&refuses, "note",
-                           "derived from tools/lint/run_lint.sh's gate table, "
+                           "derived from tools/lint/lintc/gate_commands.def's gate table, "
                            "each gate script's own text, and the baseline "
                            "ledgers those scripts name. Only `binds` is a "
                            "claim, and it carries its evidence. Both unknown "

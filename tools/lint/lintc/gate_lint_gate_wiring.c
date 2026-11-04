@@ -1,8 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate — the lint umbrella's three files must agree by NAME
- * (Makefile LINT_GATES/LINT_FAST_GATES, run_lint.sh's gate_command() case
- * table, and the docs/DEFENSIVE_CODING.md LINT-GATES doc block), plus the
+ * (Makefile LINT_GATES/LINT_FAST_GATES, the LINT_ROW table in gate_commands.def
+ * that `z23-lint run` compiles, and the docs/DEFENSIVE_CODING.md LINT-GATES doc block), plus the
  * lintc family-file line ceiling. Ported from
  * tools/lint/lintc/gate_lint_gate_wiring.c, which is now a 3-line exec shim
  * onto this binary. Selftest: gate_lint_gate_wiring_selftest.c.
@@ -10,10 +10,9 @@
  * Sources of truth this gate never re-parses by hand: the Makefile's
  * backslash-continued LINT_GATES/LINT_FAST_GATES blocks (read directly,
  * same shape the check-doc-accuracy gate (gate_doc_accuracy.c) and
- * tools/dev/agent-baseline.sh already assume), and run_lint.sh's own
- * `--list` / `--print-command <gate>` outputs (spawned via capture_cmd,
- * the same producer the shell original invoked — this gate never
- * re-implements gate_command()'s case table).
+ * tools/dev/agent-baseline.sh already assume), and gate_commands.def's own
+ * LINT_ROW lines (read with lint_cmdrow_parse, the parser the driver's
+ * table shares; this gate never re-implements the table).
  *
  * Checks (all fail-closed, all run and all reported before returning):
  *   A. every LINT_GATES/LINT_FAST_GATES member has a gate_command() entry or
@@ -29,12 +28,12 @@
  *      <!-- LINT-GATES-BEGIN/END --> block of docs/DEFENSIVE_CODING.md.
  *   G. every check-* token in that doc block belongs to LINT_GATES or
  *      LINT_FAST_GATES (no doc-only phantom gate).
- *   H. no gate_command() case label appears twice (bash case is
- *      first-match-wins; a repeat is a dead shadowing row). Read via the
- *      driver's --list-raw (--list dedups by design).
+ *   H. no gate_commands.def row name appears twice (the first row
+ *      wins; a repeat is a dead shadowing row). The set read for A/B
+ *      dedups by design, so H walks every row.
  *
  * Adding a lint gate is a THREE-file operation: Makefile LINT_GATES,
- * run_lint.sh gate_command(), and the DEFENSIVE_CODING.md doc block. F/G
+ * gate_commands.def, and the DEFENSIVE_CODING.md doc block. F/G
  * catch the third file the same way A/B catch the second — by NAME, not
  * just by count, so a doc block that swaps one gate for another (same
  * count, wrong names) still fails. The doc-block extraction mirrors the
@@ -150,33 +149,61 @@ static int lgw_extract_doc_block(const char *doc, struct sr_set *out)
     return fin(f, line, doc, rc);
 }
 
-/* ── the driver's own outputs (never re-parsed as text elsewhere) ──────── */
+/* ── the driver's command table: LINT_ROW lines of gate_commands.def ───── */
+/* Calls VISIT(ctx, name, cmd) for each row in file order; stops at its first
+ * non-zero. 0 ok, 2 on a missing file or an over-long row. */
+typedef int (*lgw_row_fn)(void *ctx, const char *name, const char *cmd);
+static int lgw_each_row(const char *driver, lgw_row_fn visit, void *ctx)
+{
+    static char line[LGW_LINE], name[SR_NAME], cmd[LGW_LINE];
+    FILE *f = fopen(driver, "r");
+    int rc = 0;
+    if (!f)
+        return die("z23-lint: cannot open %s\n", driver);
+    while (rc == 0 && fgets(line, sizeof line, f)) {
+        int pr = lint_cmdrow_parse(line, name, sizeof name, cmd, sizeof cmd);
+        if (pr == 2)
+            rc = die("z23-lint: over-long gate table row in %s\n", driver);
+        else if (pr == 0)
+            rc = visit(ctx, name, cmd);
+    }
+    fclose(f);
+    return rc;
+}
+
+static int lgw_row_add(void *ctx, const char *name, const char *cmd)
+{
+    (void)cmd;
+    return sr_add(ctx, name);
+}
+
 static int lgw_driver_list(const char *driver, struct sr_set *out)
 {
-    char q[8192], cmd[8192], buf[LGW_BUF];
-    int code = 0;
-    if (sh_single_quote(driver, q, sizeof q)
-        || ovf(snprintf(cmd, sizeof cmd, "%s --list 2>/dev/null", q), sizeof cmd))
-        return 2;
-    int rc = capture_cmd(cmd, buf, sizeof buf, &code);
-    if (rc)
-        return rc;
-    char *save = NULL;
-    for (char *ln = strtok_r(buf, "\n", &save); ln; ln = strtok_r(NULL, "\n", &save)) {
-        if (strncmp(ln, "check-", 6) == 0 && sr_add(out, ln))
-            return 2;
-    }
-    return 0;
+    return lgw_each_row(driver, lgw_row_add, out);
 }
+
+struct lgw_find {
+    const char *gate;
+    char *out;
+    size_t cap;
+    int found;
+};
+
+static int lgw_row_find(void *ctx, const char *name, const char *cmd)
+{
+    struct lgw_find *q = ctx;
+    if (q->found || strcmp(name, q->gate) != 0)
+        return 0;
+    q->found = 1;
+    return ovf(snprintf(q->out, q->cap, "%s", cmd), q->cap) ? 2 : 0;
+}
+
+/* The first row's command for GATE; empty when there is no row. */
 static int lgw_print_command(const char *driver, const char *gate, char *out, size_t cap)
 {
-    char qd[8192], qg[SR_NAME + 8], cmd[8192];
-    int code = 0;
-    if (sh_single_quote(driver, qd, sizeof qd) || sh_single_quote(gate, qg, sizeof qg)
-        || ovf(snprintf(cmd, sizeof cmd, "%s --print-command %s 2>/dev/null", qd, qg),
-              sizeof cmd))
-        return 2;
-    return capture_cmd(cmd, out, cap, &code);
+    struct lgw_find q = { gate, out, cap, 0 };
+    out[0] = '\0';
+    return lgw_each_row(driver, lgw_row_find, &q);
 }
 
 /* ── set arithmetic + report accumulation ───────────────────────────────── */
@@ -202,7 +229,7 @@ int lgw_appendf_pub(char *out, size_t cap, size_t *used, const char *fmt, ...)
 }
 
 /* A gate z23-lint owns (gates.def LINT_CMD_PLAIN/PAIR) has its command
- * natively; run_lint.sh falls back to z23-lint for it, so no table line is
+ * natively; the driver falls back to z23-lint for it, so no table line is
  * needed. Anything else with no table line has no command at all. */
 static int lgw_has_command(const struct sr_set *table, const char *gate)
 {
@@ -231,10 +258,10 @@ static int lgw_check_a(const struct sr_set *listed, const struct sr_set *table,
     }
     return lgw_append(out, cap, used,
                       "\n  Adding a lint gate is a THREE-FILE operation. You did the Makefile part.\n"
-                      "  Add the run_lint.sh part to gate_command() in tools/lint/run_lint.sh, one\n"
+                      "  Add the driver part as a LINT_ROW in tools/lint/lintc/gate_commands.def, one\n"
                       "  line per gate, reproducing the Make recipe EXACTLY (script path, args, any\n"
                       "  ZCL_LINT_MODE prefix). A recipe with two steps is joined with &&:\n\n"
-                      "        <gate>)   echo './tools/lint/<script>.sh --selftest && ./tools/lint/<script>.sh' ;;\n\n"
+                      "        LINT_ROW(\"<gate>\", \"./tools/lint/<script>.sh --selftest && ./tools/lint/<script>.sh\")\n\n"
                       "  Without it 'make lint' exits 2 for everyone and reports NO gate results.\n"
                       "  (The doc part — docs/DEFENSIVE_CODING.md's LINT-GATES block — is checked\n"
                       "  separately below.)\n");
@@ -287,7 +314,7 @@ static int lgw_check_f(const struct sr_set *listed, const struct sr_set *doc,
     }
     return lgw_appendf_pub(out, cap, used,
                       "\n  Adding a lint gate is a THREE-file operation. You wired the Makefile\n"
-                      "  and run_lint.sh; add the gate name to the <!-- LINT-GATES-BEGIN/END -->\n"
+                      "  and gate_commands.def; add the gate name to the <!-- LINT-GATES-BEGIN/END -->\n"
                       "  block in %s too.\n", doc_path);
 }
 static int lgw_check_g(const struct sr_set *listed, const struct sr_set *doc,
@@ -548,49 +575,48 @@ static int lgw_check_e(const char *root, char *out, size_t cap, size_t *used, in
                       "  is what keeps each family file reviewable in one sitting.\n");
 }
 
-/* ── check H: no gate_command() case label may appear twice ───────────────
- * bash case is first-match-wins, so a duplicated label is a DEAD row
+/* ── check H: no gate_commands.def row name may appear twice ──────────────
+ * The first row for a name wins, so a duplicated name is a DEAD row
  * shadowing the live one — the 2026-09-29 drift that silently dropped
  * --selftest from check-no-new-repair-rung in driver runs (the Make recipe
- * kept it). --list dedups (sort -u) by design, so this check reads the
- * driver's --list-raw (same anchored self-grep, no dedup) and fails on any
- * repeated label, naming it. */
+ * kept it). The set read for A/B dedups by design, so this check walks every
+ * row and fails on any repeated name, naming it. */
 static int lgw_cmp_label(const void *a, const void *b)
 {
     return strcmp((const char *)a, (const char *)b);
 }
 
+struct lgw_labels {
+    char (*names)[SR_NAME];
+    int n;
+};
+
+static int lgw_row_label(void *ctx, const char *name, const char *cmd)
+{
+    struct lgw_labels *l = ctx;
+    (void)cmd;
+    if (l->n >= SR_ALLOW || strlen(name) >= SR_NAME)
+        return die("z23-lint: gate label overflow\n", "");
+    memcpy(l->names[l->n], name, strlen(name) + 1);
+    l->n++;
+    return 0;
+}
+
 static int lgw_check_dup(const char *driver, char *out, size_t cap,
                          size_t *used, int *fail)
 {
-    char q[8192], cmd[8192], buf[LGW_BUF];
-    if (sh_single_quote(driver, q, sizeof q)
-        || ovf(snprintf(cmd, sizeof cmd, "%s --list-raw 2>/dev/null", q),
-               sizeof cmd))
-        return 2;
-    int code = 0;
-    int rc = capture_cmd(cmd, buf, sizeof buf, &code);
+    static char labels[SR_ALLOW][SR_NAME];
+    struct lgw_labels l = { labels, 0 };
+    int rc = lgw_each_row(driver, lgw_row_label, &l);
     if (rc)
         return rc;
-    static char labels[SR_ALLOW][SR_NAME];
-    int n = 0;
-    char *save = NULL;
-    for (char *ln = strtok_r(buf, "\n", &save); ln;
-         ln = strtok_r(NULL, "\n", &save)) {
-        if (strncmp(ln, "check-", 6) != 0)
-            continue;
-        if (n >= SR_ALLOW || strlen(ln) >= SR_NAME)
-            return die("z23-lint: gate label overflow\n", "");
-        memcpy(labels[n], ln, strlen(ln) + 1);
-        n++;
-    }
-    if (code != 0 || n == 0) {
+    int n = l.n;
+    if (n == 0) {
         *fail = 1;
         return lgw_appendf_pub(out, cap, used,
-                           "FAIL: '%s --list-raw' produced no labels (rc=%d).\n"
-                           "      The duplicate-label check cannot prove the case table is\n"
-                           "      shadow-free; fix the driver's --list-raw probe.\n",
-                           driver, code);
+                           "FAIL: '%s' holds no LINT_ROW lines.\n"
+                           "      The duplicate-label check cannot prove the command table is\n"
+                           "      shadow-free; restore the table.\n", driver);
     }
     qsort(labels, (size_t)n, SR_NAME, lgw_cmp_label);
     for (int i = 1; i < n; i++) {
@@ -598,9 +624,9 @@ static int lgw_check_dup(const char *driver, char *out, size_t cap,
             continue;
         *fail = 1;
         if (lgw_appendf_pub(out, cap, used,
-                        "FAIL: gate_command() case label '%s' appears twice — bash case\n"
-                        "      is first-match-wins, so one row is dead shadowing. Delete the\n"
-                        "      stale row.\n", labels[i]))
+                        "FAIL: gate_commands.def row name '%s' appears twice — the first row\n"
+                        "      wins, so the other is dead shadowing. Delete the stale row.\n",
+                        labels[i]))
             return 2;
         while (i + 1 < n && strcmp(labels[i], labels[i + 1]) == 0)
             i++;
@@ -620,7 +646,7 @@ static int lgw_paths_exist(const char *makefile, const char *driver, const char 
         return 1;
     }
     if (stat(driver, &st) != 0) {
-        fprintf(out, "FAIL: no run_lint.sh at %s\n", driver);
+        fprintf(out, "FAIL: no gate_commands.def at %s\n", driver);
         return 1;
     }
     if (stat(doc, &st) != 0) {
@@ -643,7 +669,7 @@ static int lgw_load_doc_set(const char *doc, FILE *out, struct sr_set *docset)
         fprintf(out, "FAIL: missing or empty <!-- LINT-GATES-BEGIN/END --> block in %s\n",
                doc);
         fputs("      Add the canonical gate list so this gate can verify three-way\n"
-             "      parity between the Makefile, run_lint.sh, and the doc.\n", out);
+             "      parity between the Makefile, gate_commands.def, and the doc.\n", out);
         return 1;
     }
     return 0;
@@ -679,9 +705,9 @@ static int lgw_load_sets(const char *makefile, const char *driver, FILE *out,
     if (rc)
         return rc;
     if (table->count == 0) {
-        fprintf(out, "FAIL: '%s --list' produced no gate names.\n", driver);
-        fputs("      Either the driver is broken or its --list self-grep no longer\n"
-             "      matches its case labels. Both are worse than a missing entry.\n",
+        fprintf(out, "FAIL: '%s' holds no LINT_ROW gate names.\n", driver);
+        fputs("      Either the table file is truncated or its rows no longer match\n"
+             "      the LINT_ROW(\"name\", \"command\") shape. Worse than a missing entry.\n",
              out);
         return 1;
     }
@@ -707,7 +733,7 @@ int lgw_check_root(const char *root, FILE *out)
 {
     char makefile[4096], driver[4096], doc[4096];
     if (ovf(snprintf(makefile, sizeof makefile, "%s/Makefile", root), sizeof makefile)
-        || ovf(snprintf(driver, sizeof driver, "%s/tools/lint/run_lint.sh", root),
+        || ovf(snprintf(driver, sizeof driver, "%s/tools/lint/lintc/gate_commands.def", root),
               sizeof driver)
         || ovf(snprintf(doc, sizeof doc, "%s/docs/DEFENSIVE_CODING.md", root), sizeof doc))
         return 2;

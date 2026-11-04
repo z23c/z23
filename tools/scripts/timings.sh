@@ -6,7 +6,7 @@
 # and it never carries a number forward from another machine or another commit.
 #
 # Sources (all machine-written, all gitignored):
-#   .cache/lint-timing/last-run.json      written by tools/lint/run_lint.sh
+#   .cache/lint-timing/last-run.json      written by z23-lint run
 #   .cache/test-timing/last-run.json      written by the parallel test runner
 #   .cache/zcl-dev-loop/bench-latest.json written by tools/dev/dev-loop-bench.sh
 #   .cache/first-build-timing/last-run.json  written by

@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: gate — check-no-dev-history-in-contracts (replaces
- * tools/scripts/check_no_dev_history_in_contracts.sh). No .h header under
+ * ./build/bin/z23-lint check-no-dev-history-in-contracts). No .h header under
  * an include dir, and no .def table, may carry stale dev-history
  * phrasing ("STEP-0 STATUS", "stub bodies"/"stub body", "lane <N><letter>",
  * "future slice") once the real body has landed — an agent or operator

@@ -141,7 +141,7 @@ RECIPE_READ("impact-rule",
 
 RECIPE_READ("new-lint-gate",
             "I want a rule the build enforces. Where does a gate get wired?",
-            "tools/lint/run_lint.sh", "gate_command")
+            "tools/lint/lintc/gate_commands.def", "LINT_ROW")
 
 RECIPE_READ("group-purpose",
             "The build says my module has no purpose string. Where does it go?",

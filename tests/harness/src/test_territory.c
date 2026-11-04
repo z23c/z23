@@ -185,15 +185,11 @@ static const char *TEST_ENTRY_C =
  * Three gates, one of each bucket, so a test can assert the partition rather
  * than a magic number: one names platform/modules/base (and owes it a baseline row), one
  * names core/modules/net only, and one names no territory path at all. */
-static const char *RUN_LINT_SH =
-    "#!/bin/sh\n"
-    "gate_command() {\n"
-    "    case \"$1\" in\n"
-    "        check-base-shape) echo './tools/lint/check_base_shape.sh' ;;\n"
-    "        check-net-shape)  echo './tools/lint/check_net_shape.sh' ;;\n"
-    "        check-treewide)   echo './tools/lint/check_treewide.sh' ;;\n"
-    "    esac\n"
-    "}\n";
+static const char *GATE_COMMANDS_DEF =
+    "/* fixture gate table */\n"
+    "LINT_ROW(\"check-base-shape\", \"./tools/lint/check_base_shape.sh\")\n"
+    "LINT_ROW(\"check-net-shape\", \"./tools/lint/check_net_shape.sh\")\n"
+    "LINT_ROW(\"check-treewide\", \"./tools/lint/check_treewide.sh\")\n";
 
 static const char *GATE_BASE_SH =
     "#!/bin/sh\n"
@@ -263,7 +259,7 @@ static bool write_fixture_tree(void)
            terr_write(TERR_FIX, "platform/modules/base/src/registry.c", REGISTRY_C) &&
            terr_write(TERR_FIX, "core/modules/net/src/caller.c", CALLER_C) &&
            terr_write(TERR_FIX, "tests/harness/src/test_fixgroup.c", TEST_ENTRY_C) &&
-           terr_write(TERR_FIX, "tools/lint/run_lint.sh", RUN_LINT_SH) &&
+           terr_write(TERR_FIX, "tools/lint/lintc/gate_commands.def", GATE_COMMANDS_DEF) &&
            terr_write(TERR_FIX, "tools/lint/check_base_shape.sh", GATE_BASE_SH) &&
            terr_write(TERR_FIX, "tools/lint/check_net_shape.sh", GATE_NET_SH) &&
            terr_write(TERR_FIX, "tools/lint/check_treewide.sh", GATE_TREEWIDE_SH) &&
@@ -552,7 +548,7 @@ int test_territory(void)
     gates = territory_gates_open(TERR_FIX, gnames, gcount);
     struct territory_router frouter = { .route = fix_route, .user = NULL };
 
-    TEST("gates: the wiring table is read from run_lint.sh's case rows") {
+    TEST("gates: the wiring table is read from gate_commands.def rows") {
         ASSERT(gates != NULL);
         ASSERT(territory_gates_wiring_found(gates));
         ASSERT_EQ(territory_gates_total(gates), 3);

@@ -45,22 +45,12 @@ static bool dlx_pc_no_build(const struct dlx_rig *rig)
 
 static bool dlx_pc_mode_setup(struct dlx_rig *rig)
 {
-    char cwd[4096], source[8192], target[1400], reader[65536];
-    size_t len;
+    char cwd[4096], source[8192], target[1400];
     if (!getcwd(cwd, sizeof(cwd)) ||
-        snprintf(source, sizeof(source), "%s/tools/lint/run_lint.sh", cwd) >= (int)sizeof(source) ||
-        !dlx_slurp(source, reader, sizeof(reader), &len) ||
         !dlx_pc_rig(rig, "precheck_canonical", true,
                     "check-core-seal\ncheck-file-purpose\n"))
         return false;
     if (!dlx_pc_select_purpose())
-        return false;
-    reader[len] = 0;
-    (void)snprintf(target, sizeof(target), "%s/tools/lint", rig->clone);
-    if (!dlx_mkdir_p(target))
-        return false;
-    (void)snprintf(target, sizeof(target), "%s/tools/lint/run_lint.sh", rig->clone);
-    if (!dlx_write(target, reader))
         return false;
     (void)snprintf(source, sizeof(source), "%s/build/bin/z23-lint", cwd);
     (void)snprintf(target, sizeof(target), "%s/build/bin/real-lint", rig->clone);
@@ -92,6 +82,7 @@ static bool dlx_pc_canonical_mode_inner(void)
     (void)snprintf(path, sizeof(path), "%s/build/bin/z23-lint", rig.clone);
     if (!dlx_write(path, "#!/bin/sh\n"
         "if [ \"$1\" = --list ]; then cat build/precheck-known; exit 0; fi\n"
+        "if [ \"$1\" = run ]; then exec ./build/bin/real-lint \"$@\"; fi\n"
         "if [ \"$1\" = check-file-purpose ]; then\n"
         "  exec ./build/bin/real-lint \"$@\"\nfi\n"
         "exit 0\n"))
@@ -152,7 +143,7 @@ static bool dlx_pc_bad_metadata_one(const char *body)
     (void)snprintf(path, sizeof(path), "%s/tools/lint", rig.clone);
     if (!dlx_mkdir_p(path))
         return false;
-    (void)snprintf(path, sizeof(path), "%s/tools/lint/run_lint.sh", rig.clone);
+    (void)snprintf(path, sizeof(path), "%s/build/print-command", rig.clone);
     if (!dlx_pc_build_sentinel(&rig))
         return false;
     if (body && !dlx_write(path, body))
@@ -189,7 +180,7 @@ static bool dlx_pc_deadline_one(bool reader_only)
     (void)snprintf(path, sizeof(path), "%s/tools/lint", rig.clone);
     if (!dlx_mkdir_p(path))
         return false;
-    (void)snprintf(path, sizeof(path), "%s/tools/lint/run_lint.sh", rig.clone);
+    (void)snprintf(path, sizeof(path), "%s/build/print-command", rig.clone);
     const char *body = reader_only
         ? "touch build/deadline-reader-started\nsleep 6\nprintf 'touch build/deadline-completed\\n'\n"
         : "touch build/deadline-reader-started\nsleep 2\nprintf 'touch build/deadline-command-started; sleep 4; touch build/deadline-completed\\n'\n";

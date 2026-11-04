@@ -5,7 +5,7 @@
  * stdout / stderr / the event log / an RPC response.
  *
  * This test file is the runtime half of the audit. The static half is
- * tools/scripts/check_no_secret_printf.sh, a grep-based scan for
+ * ./build/bin/z23-lint check-no-secret-printf, a grep-based scan for
  * printf-family calls that reference variables with key-shaped
  * identifier names. The shell script is the first line of defence (it
  * catches new leaks at CI time); the tests here are the second (they
@@ -205,14 +205,14 @@ static int test_native_registry_clean(void)
     return failures;
 }
 
-/* Resolve the path to tools/scripts/check_no_secret_printf.sh relative
+/* Resolve the path to ./build/bin/z23-lint check-no-secret-printf relative
  * to the current working directory. Test is invoked from the repo root
  * via build/bin/test_zcl. */
 static int test_check_no_secret_printf_script(void)
 {
     int failures = 0;
     TEST("secrets_hygiene: check_no_secret_printf.sh runs clean") {
-        const char *path = "tools/scripts/check_no_secret_printf.sh";
+        const char *path = "build/bin/z23-lint";
         struct stat st;
         ASSERT(stat(path, &st) == 0);
         /* Must be executable — CI runs it directly. */
@@ -221,10 +221,10 @@ static int test_check_no_secret_printf_script(void)
         /* Run silently and inspect the exit code. If the script ever
          * flags a real leak, the test blows up with a clear signal. */
 #if defined(_WIN32)
-        int rc = system("sh -c \"tools/scripts/check_no_secret_printf.sh"
+        int rc = system("sh -c \"build/bin/z23-lint check-no-secret-printf"
                         " >/dev/null 2>&1\"");
 #else
-        int rc = system("tools/scripts/check_no_secret_printf.sh >/dev/null 2>&1");
+        int rc = system("build/bin/z23-lint check-no-secret-printf >/dev/null 2>&1");
 #endif
         ASSERT(WIFEXITED(rc));
         int exit_status = WEXITSTATUS(rc);
@@ -234,10 +234,10 @@ static int test_check_no_secret_printf_script(void)
             failures++;
             /* Re-run with output so the diff is visible. */
 #if defined(_WIN32)
-            (void)system("sh -c \"tools/scripts/check_no_secret_printf.sh"
+            (void)system("sh -c \"build/bin/z23-lint check-no-secret-printf"
                          " 2>&1 | head -40\"");
 #else
-            TEST_DISCARD(system("tools/scripts/check_no_secret_printf.sh 2>&1 "
+            TEST_DISCARD(system("build/bin/z23-lint check-no-secret-printf 2>&1 "
                          "| head -40"));
 #endif
             goto _test_next;

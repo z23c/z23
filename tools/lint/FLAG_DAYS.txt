@@ -1,5 +1,5 @@
 # tools/lint/FLAG_DAYS.txt — registry for check_consensus_parity.sh (E13)
-# scan classes HEIGHT and CLOCK. See tools/scripts/check_consensus_parity.sh
+# scan classes HEIGHT and CLOCK. See ./build/bin/z23-lint check-consensus-parity
 # (header comment) and docs/CONSENSUS_PARITY_DOCTRINE.md for the full story.
 #
 # WHY THIS FILE EXISTS
@@ -91,7 +91,7 @@
 # a height comparison anywhere in the scanned surface; this section is
 # empty because nothing needed exempting, not because the class is unused.
 # The selftest below proves the class still fires: see
-# `./tools/scripts/check_consensus_parity.sh --selftest`.)
+# `./build/bin/z23-lint check-consensus-parity --selftest`.)
 
 # ── CLASS: CLOCK ────────────────────────────────────────────────────────
 core/modules/validation/src/process_block_tip_publish.c:273|CLOCK|-|02ece7a19ccb402cd94b39224ddc01d15d22ae2fdae467a9b767d35f469ea360|tip-log-speed-metric|Progress-log blocks/sec metric printed to stdout only; the value never feeds block acceptance, subsidy, or any consensus decision.

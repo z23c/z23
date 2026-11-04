@@ -3,7 +3,7 @@
  * purpose: the artifacts and report of `z23-lint run`: the per-run gates dir,
  * old-run pruning, the lint timing table, the zcl.lint_timing.v1 last-run.json
  * and the failure summary with each failed gate's log, in the formats
- * run_lint.sh prints (the land queue and fleet readers parse them).
+ * the shell driver printed (the land queue and fleet readers parse them).
  */
 #ifndef _XOPEN_SOURCE
 #define _XOPEN_SOURCE 700

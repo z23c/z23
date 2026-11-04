@@ -317,7 +317,7 @@ static int sh_log_bounded(void)
 
 /* ── Sub-test entry point ─────────────────────────────────────────
  * Named for its subject, not its file: a filename-matching name would be a
- * test-registration entry point (tools/scripts/check_test_registration.sh).
+ * test-registration entry point (./build/bin/z23-lint check-test-registration).
  * Dispatched from the `onion_directory` group in test_onion_directory.c. */
 static int64_t sh_fixture_wall_ms(void *self)
 {

@@ -94,4 +94,4 @@ See
 `tools/lint/lintc/gate_flag_registry_lex.c` for the implementation
 and `tools/lint/lintc/gate_lint_gate_wiring.c` for how every lint gate,
 including this one, stays wired into both `Makefile` and
-`tools/lint/run_lint.sh`.
+`tools/lint/lintc/gate_commands.def`.

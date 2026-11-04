@@ -853,6 +853,7 @@ _test_next:;
 #define DLX_PC_SCRIPT                                                        \
     "#!/bin/sh\n"                                                            \
     "if [ \"$1\" = --list ]; then cat build/precheck-known; exit 0; fi\n"    \
+    "if [ \"$1\" = run ]; then [ -f build/print-command ] || exit 127; sh build/print-command; exit $?; fi\n" \
     "echo \"$1\" >> build/precheck-ran\n"                                    \
     "if [ -f build/precheck-fail ] && [ \"$1\" = \"$(cat build/precheck-fail)\" ]; then\n" \
     "  echo \"first line of $1\"; echo \"second line\"; echo \"stderr line\" >&2; exit 1\n" \

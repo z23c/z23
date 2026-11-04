@@ -5,8 +5,8 @@
  * in this file approves, gates, permits, or blocks. It reports.
  *
  * ── refuses, and how it is derived ───────────────────────────────────────
- * The set of lint gates is read from tools/lint/run_lint.sh's gate_command()
- * case table, because that is the one place a gate must be wired to run at
+ * The set of lint gates is read from the LINT_ROW rows of tools/lint/lintc/gate_commands.def
+ * (the driver's command table), because that is the one place a gate must be wired to run at
  * all: a gate not in that table does not exist. From each row we take the
  * gate's name and the script paths it invokes. Each script is then read once
  * and scanned for path-like tokens; a token that starts with a territory's
@@ -50,7 +50,7 @@
 #include <unistd.h>
 
 enum {
-    TG_LINT_MAX     = 1u << 20,  /* run_lint.sh, bounded */
+    TG_LINT_MAX     = 1u << 20,  /* gate_commands.def, bounded */
     TG_SCRIPT_MAX   = 1u << 21,  /* one gate script, bounded */
     TG_BASELINE_MAX = 1u << 21,  /* one baseline ledger, bounded */
     TG_MAX_SCRIPTS  = 512,
@@ -130,7 +130,7 @@ static bool tg_path_byte(char c)
 }
 
 /* Shell scripts spell the same path both ways — `tools/lint/x.sh` and
- * `./tools/lint/x.sh` appear on adjacent lines of run_lint.sh. '.' and '/'
+ * `./tools/lint/x.sh` appear on adjacent rows of gate_commands.def. '.' and '/'
  * are both path bytes, so the leading "./" arrives inside the token and would
  * silently defeat every prefix comparison below. Strip it once, here, rather
  * than at each of the three call sites. */
@@ -211,7 +211,7 @@ static void tg_sink_baseline(int terr, const char *tok, size_t len, void *user)
     else s->unattributed++;
 }
 
-/* Collect the script paths a gate_command() row invokes, and any baseline
+/* Collect the script paths a gate_commands.def row invokes, and any baseline
  * ledger a script names. Both are just path tokens with a known suffix. */
 struct tg_path_list {
     char path[TG_MAX_SCRIPTS][TERRITORY_PATH_MAX];
@@ -261,7 +261,7 @@ static void tg_sink_ledgers(int terr, const char *tok, size_t len, void *user)
     tg_path_push(s->out, tok, len);
 }
 
-/* Extract every `tools/…` script path named on one gate_command() line. */
+/* Extract every `tools/…` script path named on one gate_commands.def row. */
 static void tg_line_scripts(const char *line, size_t len,
                             struct tg_path_list *out)
 {
@@ -286,15 +286,16 @@ static bool tg_name_byte(char c)
     return c == '-' || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
 }
 
-/* A gate_command() row: leading whitespace, then `check-<name>)`. */
+/* A gate_commands.def row: `LINT_ROW("check-<name>", ...`. */
 static bool tg_gate_row(const char *line, size_t len, char *name, size_t cap)
 {
-    size_t i = 0;
-    while (i < len && (line[i] == ' ' || line[i] == '\t')) i++;
-    if (len - i < 7 || memcmp(line + i, "check-", 6) != 0) return false;
+    static const char open[] = "LINT_ROW(\"";
+    size_t i = sizeof(open) - 1;
+    if (len < i + 7 || memcmp(line, open, i) != 0) return false;
+    if (memcmp(line + i, "check-", 6) != 0) return false;
     size_t start = i;
     while (i < len && tg_name_byte(line[i])) i++;
-    if (i >= len || line[i] != ')') return false;
+    if (i >= len || line[i] != '"') return false;
     size_t nl = i - start;
     if (nl == 0 || nl >= cap) return false;
     memcpy(name, line + start, nl);
@@ -378,7 +379,7 @@ static void tg_gate_scan_scripts(const char *root, struct territory_gates *g,
     }
 }
 
-/* One line of the case table. A line that is not a new gate changes nothing.
+/* One line of the command table. A line that is not a new gate changes nothing.
  * False only when the new gate's scope vectors cannot be allocated. */
 static bool tg_gate_add_line(const char *root, struct territory_gates *g,
                              const char *line, size_t len,
@@ -418,7 +419,7 @@ struct territory_gates *territory_gates_open(
     }
 
     size_t lint_len = 0;
-    char *lint = tg_slurp(root, "tools/lint/run_lint.sh", TG_LINT_MAX,
+    char *lint = tg_slurp(root, "tools/lint/lintc/gate_commands.def", TG_LINT_MAX,
                           &lint_len);
     if (!lint) {
         /* Not an error the caller has to handle: the brief reports the wiring
@@ -438,7 +439,7 @@ struct territory_gates *territory_gates_open(
         LOG_NULL("territory", "gate path lists");
     }
 
-    /* Pass 1: the case table. One row per gate, in wiring order. */
+    /* Pass 1: the command table. One row per gate, in wiring order. */
     size_t pos = 0;
     while (pos < lint_len && g->count < TERRITORY_MAX_GATES) {
         const char *nl = memchr(lint + pos, '\n', lint_len - pos);

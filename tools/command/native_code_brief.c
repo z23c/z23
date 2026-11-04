@@ -726,7 +726,7 @@ static void cb_build_next(struct cb_brief *b)
     if (cb_needs_preflight(b))
         cb_push_next(b, "%s", "make lint-preflight");
     if (b->ntests == 1 && strcmp(b->tests[0], "make_lint_gates") == 0)
-        cb_push_next(b, "%s", "tools/lint/run_lint.sh --list");
+        cb_push_next(b, "%s", "build/bin/z23-lint run --list");
 }
 
 /* ── render ───────────────────────────────────────────────────────────── */

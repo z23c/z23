@@ -103,7 +103,7 @@ Worked example: `cognition/controllers/include/controllers/agent_impact_rules.de
 
 ### I want a rule the build enforces. Where does a gate get wired?
 
-Worked example: `tools/lint/run_lint.sh`, look for `gate_command`. (`new-lint-gate`, READ)
+Worked example: `tools/lint/lintc/gate_commands.def`, look for `LINT_ROW`. (`new-lint-gate`, READ)
 
 ### The build says my module has no purpose string. Where does it go?
 

@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: split a gate's command text into argv steps with no shell. The
- * run_lint.sh table writes plain commands (quotes, $VAR, NAME=v prefixes,
+ * gate_commands.def table writes plain commands (quotes, $VAR, NAME=v prefixes,
  * `&&`); `z23-lint run` parses exactly that and refuses everything else a
  * shell would act on, so a table row it cannot run is an error, never a
  * silently different command.
