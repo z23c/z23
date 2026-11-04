@@ -648,8 +648,8 @@ static int case_select(struct ms *m)
         /* The whole projection, exact: no unselected field is projected.
          * select_missing lists the data keys, registry_digest among them. */
         ASSERT(has(m, "\"select\\\":{\\\"data.matches.*.path\\\":[\\\"core.status.brief\\\","
-                      "\\\"status\\\",\\\"dev.agent.queue\\\",\\\"fleet.objectives\\\","
-                      "\\\"app.market.moderation.status\\\"],\\\"data.matches.0.risk\\\":"
+                      "\\\"lab.brief\\\",\\\"status\\\",\\\"dev.agent.queue\\\","
+                      "\\\"fleet.objectives\\\"],\\\"data.matches.0.risk\\\":"
                       "\\\"read\\\",\\\"data.nope\\\":null},\\\"select_missing\\\":"
                       "{\\\"data.nope\\\":{\\\"resolved\\\":\\\"data\\\",\\\"keys\\\":"
                       "[\\\"schema\\\",\\\"query\\\",\\\"registry_digest\\\",\\\"matches\\\","
