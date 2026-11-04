@@ -72,6 +72,12 @@ static const struct tj_case g_cases[] = {
     {"a far-future stamp cannot refresh a stale ledger",
      {GOOD(8, DAY_AGO, 600), ROW(1, -31536000, 0, AG, 2, 2, 0, 0)},
      TJK_NONE, 0, "STALE", 2},
+    {"future samples cannot accrue agreement", {GOOD(6, -4200, 600)},
+     TJK_NONE, 0, "STALE", 2},
+    {"now is in the window but a second in the future is not",
+     {GOOD(5, 0, 600), ROW(1, 0, 0, AG, 2, 2, 0, 0),
+      ROW(1, -1, 0, AG, 2, 2, 0, 0)}, TJK_MINAGREE, 7,
+     "THIN_EVIDENCE", 1},
     {"a single disagreement fails as DISAGREE",
      {GOOD(12, 0, 600), ROW(1, 300, 0, "disagrees", 2, 2, 0, 0)},
      TJK_NONE, 0, "DISAGREE", 1},
@@ -294,6 +300,29 @@ static int tj_case_negative(void)
     return failures;
 }
 
+static int tj_case_nul(void)
+{
+    int failures = 0;
+    char path[600];
+    struct zcl_tip_judge_opts o;
+    TEST("a NUL cannot hide a subsequent disagreement") {
+        (void)snprintf(path, sizeof(path), "%s/nul.jsonl", g_root);
+        FILE *f = fopen(path, "wb");
+        ASSERT(f != NULL);
+        struct tj_run agree = ROW(6, 0, 600, AG, 2, 2, 0, 0);
+        struct tj_run disagree = ROW(1, 0, 0, "disagrees", 2, 2, 0, 0);
+        tj_write_run(f, &agree);
+        ASSERT(fputc(0, f) == 0);
+        tj_row(f, TJ_NOW - 1, &disagree);
+        ASSERT(fclose(f) == 0);
+        tj_opts(&o, path);
+        ASSERT(zcl_tip_agreement_judge(&o, &g_res));
+        ASSERT(strcmp(g_res.verdict, "PASS") != 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ZCL_PARITY_JUDGE_NOW is the hermetic clock seam; a malformed value is
  * refused, never read as an epoch. */
 static int tj_case_env(void)
@@ -322,6 +351,7 @@ int test_tip_agreement_judge(void)
     failures += tj_run_cases();
     failures += tj_case_contract();
     failures += tj_case_negative();
+    failures += tj_case_nul();
     failures += tj_case_env();
     (void)test_rm_rf_recursive(g_root);
     if (failures == 0)

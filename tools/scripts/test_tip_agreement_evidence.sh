@@ -639,9 +639,42 @@ STUB
     fi
 }
 
+judge_recorded() {
+    local d="$1" want="$2" rc="$3" out
+    out="$(build/bin/z23-dev ops tip-agreement judge --ledger="$(ledger_of "$d")" --now="$NOW" 2>&1)" || {
+        bad "native judge could not read the recorder ledger: $out"; return; }
+    if [[ "$out" == *"\"verdict\":\"$want\""* && "$out" == *"\"judge_rc\":$rc"* ]]; then
+        ok "recorder to native judge -> $want"
+    else
+        bad "recorder to native judge expected $want/$rc: $out"
+    fi
+}
+
+recorder_judge_cases() {
+    local d i hash_by_height
+    d="$TMP/live-good"; sql_stub "$TMP/live-good.sh" "[[$HEIGHT,\"$HASH_OURS\",2]]" 1 false
+    for i in 1 2 3 4 5 6 7 8; do
+        run_probe "$d" "$TMP/live-good.sh" "printf '{\"result\":\"$HASH_OURS\"}'" "$((NOW - i * 600))"
+    done
+    judge_recorded "$d" PASS 0
+    d="$TMP/live-unknown"
+    for i in 1 2 3 4 5 6 7 8; do
+        run_probe "$d" "exit 1" "printf '{\"result\":\"$HASH_OURS\"}'" "$((NOW - i * 600))"
+    done
+    judge_recorded "$d" NO_EVIDENCE 1
+    d="$TMP/live-rival"
+    make_ranked_clusters_retained_rival "$TMP/live-rival.tsv"
+    query_aware_cluster_stub "$TMP/live-rival.sh" "$TMP/live-rival.tsv"
+    hash_by_height='printf -v h "%064x" "$((3197949 - ZCL_PARITY_HEIGHT + 1))"; printf "{\"result\":\"%s\"}" "$h"'
+    for i in 1 2 3 4 5 6 7 8; do
+        run_probe "$d" "$TMP/live-rival.sh" "$hash_by_height" "$((NOW - i * 600))"
+    done
+    judge_recorded "$d" DISAGREE 1
+}
+
 case "$ONLY" in
     recorder) recorder_cases ;;
-    all)      recorder_cases ;;
+    all)      recorder_cases; recorder_judge_cases ;;
     *) echo "selftest: FAIL unknown --only '$ONLY'" >&2; exit 2 ;;
 esac
 
