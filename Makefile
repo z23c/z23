@@ -15587,6 +15587,8 @@ build/lintc-obj/gate_capability_closure_data.o \
 build/lintc-obj/gate_capability_closure_selftest.o: \
     tools/lint/lintc/gate_capability_closure_priv.h
 
+build/lintc-obj/run_table.o: tools/lint/lintc/gate_commands.def
+
 build/lintc-obj/%.o: tools/lint/lintc/%.c tools/lint/lintc/lintc.h tools/lint/lintc/gates.def tools/lint/lintc/precheck_base.h
 	@mkdir -p $(dir $@)
 	$(CC) $(LINTC_CFLAGS) -c -o $@ $<

@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -134,7 +135,8 @@ static pid_t spawn_seal_check(int rfd, int wfd, const char *bin_dir)
 int lr_core_seal(const char *bin_dir)
 {
     int fds[2];
-    int unsealed = access(".core-unseal-token", F_OK) == 0;
+    struct stat token;
+    int unsealed = stat(".core-unseal-token", &token) == 0 && S_ISREG(token.st_mode);
     if (unsealed) {
         puts("check-core-seal: unseal token present \xe2\x80\x94 seal check lifted for this commit");
         puts("  (owner unseal ritual active; re-run 'make core-seal' to refreeze before commit.)");

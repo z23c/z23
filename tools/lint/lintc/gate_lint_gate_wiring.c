@@ -163,10 +163,11 @@ static int lgw_each_row(const char *driver, lgw_row_fn visit, void *ctx)
     while (rc == 0 && fgets(line, sizeof line, f)) {
         int pr = lint_cmdrow_parse(line, name, sizeof name, cmd, sizeof cmd);
         if (pr == 2)
-            rc = die("z23-lint: over-long gate table row in %s\n", driver);
+            rc = die("z23-lint: malformed or over-long gate table row in %s\n", driver);
         else if (pr == 0)
             rc = visit(ctx, name, cmd);
     }
+    if (ferror(f) && rc == 0) rc = die("z23-lint: cannot read %s\n", driver);
     fclose(f);
     return rc;
 }

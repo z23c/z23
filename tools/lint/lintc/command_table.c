@@ -7,6 +7,7 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 #include "lintc.h"
@@ -36,15 +37,17 @@ int lint_gate_command(const char *gate, char *out, size_t cap)
 
 /* Parse one `LINT_ROW("name", "command")` line of gate_commands.def text:
  * the name and the unescaped command (`\"` and `\\`). 0 if LINE is a row,
- * 1 if it is not one, 2 if a field does not fit. */
+ * 1 if it is not one, 2 if a row is malformed or a field does not fit. */
 int lint_cmdrow_parse(const char *line, char *name, size_t ncap, char *cmd,
                       size_t ccap)
 {
     static const char k_open[] = "LINT_ROW(\"";
     const char *p = line;
     size_t n = 0;
+    while (*p == ' ' || *p == '\t') p++;
     if (strncmp(p, k_open, sizeof k_open - 1) != 0)
-        return 1;
+        return strncmp(p, "LINT_ROW", 8) == 0 &&
+               !(isalnum((unsigned char)p[8]) || p[8] == '_') ? 2 : 1;
     p += sizeof k_open - 1;
     for (; *p && *p != '"'; p++) {
         if (n + 1 >= ncap)
@@ -53,16 +56,21 @@ int lint_cmdrow_parse(const char *line, char *name, size_t ncap, char *cmd,
     }
     name[n] = '\0';
     if (strncmp(p, "\", \"", 4) != 0)
-        return 1;
+        return 2;
     p += 4;
     n = 0;
     for (; *p && !(p[0] == '"' && p[1] == ')'); p++) {
-        if (*p == '\\' && (p[1] == '"' || p[1] == '\\'))
+        if (*p == '\\') {
+            if (p[1] != '"' && p[1] != '\\') return 2;
             p++;
+        }
         if (n + 1 >= ccap)
             return 2;
         cmd[n++] = *p;
     }
     cmd[n] = '\0';
-    return p[0] == '"' && p[1] == ')' ? 0 : 1;
+    if (p[0] != '"' || p[1] != ')') return 2;
+    p += 2;
+    while (*p && isspace((unsigned char)*p)) p++;
+    return *p ? 2 : 0;
 }
