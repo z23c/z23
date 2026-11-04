@@ -741,3 +741,168 @@ long long test_forked_exec_data_mb(long long budget_mb)
         (void)fclose(f);
     return budget_mb + (data_kb > 0 ? (data_kb + 1023) / 1024 : 0);
 }
+
+/* ── Failure flight recorder ──────────────────────────────────────────
+ *
+ * A bounded per-TEST record of what the test just observed (child exit
+ * status and output tails, response bodies, observation fields). TEST resets
+ * it; a passing test prints nothing; an ASSERT failure prints it once, framed
+ * by "--- evidence <file>:<line> ---" / "--- end evidence ---". The record
+ * keeps the first TEST_EVIDENCE_HEAD bytes and the last TEST_EVIDENCE_TAIL
+ * bytes, so the total never exceeds TEST_EVIDENCE_CAP whatever is noted. */
+#include <stdarg.h>
+#include <stdatomic.h>
+
+enum {
+    TEST_EVIDENCE_HEAD = 1024,
+    TEST_EVIDENCE_TAIL = TEST_EVIDENCE_CAP - TEST_EVIDENCE_HEAD,
+    TEST_EVIDENCE_NOTE = 1024,      /* longest single formatted note */
+    TEST_EVIDENCE_BYTES_HEAD = 384, /* test_note_bytes keeps head+tail */
+    TEST_EVIDENCE_BYTES_TAIL = 1152,
+};
+
+static struct {
+    char head[TEST_EVIDENCE_HEAD];
+    char tail[TEST_EVIDENCE_TAIL];
+    uint64_t total;
+} g_evidence;
+static atomic_flag g_evidence_lock = ATOMIC_FLAG_INIT;
+
+static void evidence_lock(void)
+{
+    while (atomic_flag_test_and_set_explicit(&g_evidence_lock,
+                                             memory_order_acquire)) {
+    }
+}
+
+static void evidence_unlock(void)
+{
+    atomic_flag_clear_explicit(&g_evidence_lock, memory_order_release);
+}
+
+static void evidence_append(const char *s, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        uint64_t at = g_evidence.total++;
+        if (at < TEST_EVIDENCE_HEAD)
+            g_evidence.head[at] = s[i];
+        else
+            g_evidence.tail[(at - TEST_EVIDENCE_HEAD) % TEST_EVIDENCE_TAIL] =
+                s[i];
+    }
+}
+
+void test_evidence_reset(void)
+{
+    evidence_lock();
+    g_evidence.total = 0;
+    evidence_unlock();
+}
+
+void test_note(const char *fmt, ...)
+{
+    char line[TEST_EVIDENCE_NOTE];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(line, sizeof(line) - 1, fmt, ap);
+    va_end(ap);
+    if (n < 0) return;
+    size_t len = (size_t)n < sizeof(line) - 1 ? (size_t)n : sizeof(line) - 2;
+    line[len++] = '\n';
+    evidence_lock();
+    evidence_append(line, len);
+    evidence_unlock();
+}
+
+/* Text passes through; a control byte other than newline and tab becomes
+ * \xNN so a binary reply cannot garble the transcript. */
+static void evidence_note_span(const unsigned char *p, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        char esc[5];
+        if (p[i] == '\n' || p[i] == '\t' || (p[i] >= 32 && p[i] < 127)) {
+            esc[0] = (char)p[i];
+            evidence_append(esc, 1);
+        } else {
+            int w = snprintf(esc, sizeof(esc), "\\x%02x", p[i]);
+            evidence_append(esc, (size_t)w);
+        }
+    }
+}
+
+void test_note_bytes(const char *label, const void *buf, size_t len)
+{
+    const unsigned char *p = buf;
+    char hdr[TEST_EVIDENCE_NOTE];
+    int n = snprintf(hdr, sizeof(hdr), "%s (%zu bytes):\n",
+                     label ? label : "bytes", len);
+    if (n < 0) return;
+    bool cut = len > TEST_EVIDENCE_BYTES_HEAD + TEST_EVIDENCE_BYTES_TAIL;
+    size_t head = cut ? TEST_EVIDENCE_BYTES_HEAD : len;
+    evidence_lock();
+    evidence_append(hdr, (size_t)n < sizeof(hdr) ? (size_t)n : sizeof(hdr) - 1);
+    if (p) evidence_note_span(p, head);
+    if (p && cut) {
+        char gap[64];
+        int w = snprintf(gap, sizeof(gap), "\n...[%zu bytes elided]...\n",
+                         len - head - TEST_EVIDENCE_BYTES_TAIL);
+        evidence_append(gap, (size_t)w);
+        evidence_note_span(p + len - TEST_EVIDENCE_BYTES_TAIL,
+                           TEST_EVIDENCE_BYTES_TAIL);
+    }
+    evidence_append("\n", 1);
+    evidence_unlock();
+}
+
+void test_note_child(const char *label, int rc, const char *out)
+{
+    test_note("%s: exit=%d%s", label ? label : "child", rc,
+              rc < 0 ? " (spawn, timeout or harness failure)" : "");
+    if (out) test_note_bytes("output", out, strlen(out));
+}
+
+size_t test_evidence_render(char *out, size_t cap, const char *file, int line)
+{
+    if (!out || cap == 0) return 0;
+    out[0] = '\0';
+    evidence_lock();
+    uint64_t total = g_evidence.total;
+    size_t used = 0;
+    int n = snprintf(out, cap, "--- evidence %s:%d ---\n", file, line);
+    used = n > 0 ? ((size_t)n < cap ? (size_t)n : cap - 1) : 0;
+    uint64_t headlen = total < TEST_EVIDENCE_HEAD ? total : TEST_EVIDENCE_HEAD;
+    for (uint64_t i = 0; i < headlen && used + 1 < cap; i++)
+        out[used++] = g_evidence.head[i];
+    if (total > TEST_EVIDENCE_CAP) {
+        n = snprintf(out + used, cap - used, "\n...[%llu bytes elided]...\n",
+                     (unsigned long long)(total - TEST_EVIDENCE_CAP));
+        used += n > 0 ? ((size_t)n < cap - used ? (size_t)n : cap - used - 1)
+                      : 0;
+    }
+    uint64_t taillen = total > TEST_EVIDENCE_HEAD ? total - TEST_EVIDENCE_HEAD
+                                                  : 0;
+    uint64_t first = taillen > TEST_EVIDENCE_TAIL ? taillen - TEST_EVIDENCE_TAIL
+                                                  : 0;
+    for (uint64_t i = first; i < taillen && used + 1 < cap; i++)
+        out[used++] = g_evidence.tail[i % TEST_EVIDENCE_TAIL];
+    if (used > 0 && out[used - 1] != '\n' && used + 1 < cap) out[used++] = '\n';
+    out[used] = '\0';
+    evidence_unlock();
+    n = snprintf(out + used, cap - used, "--- end evidence ---\n");
+    return used + (n > 0 ? ((size_t)n < cap - used ? (size_t)n : cap - used - 1)
+                         : 0);
+}
+
+/* Called by every ASSERT variant just before it fails the test. Prints
+ * nothing when nothing was noted; clears the record so it prints once. */
+void test_evidence_dump(const char *file, int line)
+{
+    char block[TEST_EVIDENCE_CAP + 512];
+    evidence_lock();
+    bool empty = g_evidence.total == 0;
+    evidence_unlock();
+    if (empty) return;
+    size_t n = test_evidence_render(block, sizeof(block), file, line);
+    (void)fwrite(block, 1, n, stdout);
+    test_evidence_reset();
+}

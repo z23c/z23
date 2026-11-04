@@ -879,6 +879,27 @@ static bool cas_bind_refusal_observed(const char *out,
         cas_contains(out, "stage_reached=network_ready") &&
         !cas_contains(out, "stage_reached=ready");
 }
+
+/* Flight-recorder evidence for the refusal check: every component of
+ * cas_bind_refusal_observed() as its own fact, and which expected boot
+ * message was missing, so a failure shows WHY without a rerun. */
+static void cas_note_bind_refusal(bool dispatched, const char *out,
+                                  const struct zcl_spawn_binary_observation *o)
+{
+    static const char *const want[] = {
+        "P2P explicit bind failed:", "(no fallback)", "BOOT_INIT_FAILED",
+        "stage_reached=network_ready",
+    };
+    test_note("bind refusal: dispatched=%d exit_observed=%d exit_code=%d "
+              "eof=%d timed_out=%d overflow=%d output_len=%zu",
+              dispatched, o->exit_observed, o->exit_code, o->eof,
+              o->timed_out, o->overflow, o->output_len);
+    for (size_t i = 0; i < sizeof(want) / sizeof(want[0]); i++)
+        if (!cas_contains(out, want[i])) test_note("missing: %s", want[i]);
+    if (cas_contains(out, "stage_reached=ready"))
+        test_note("unexpected: stage_reached=ready present");
+    test_note_bytes("child output", out, strlen(out));
+}
 #endif
 
 static int cas_test_explicit_bind_failure_exits(void)
@@ -897,6 +918,7 @@ static int cas_test_explicit_bind_failure_exits(void)
         struct zcl_spawn_binary_observation observed = {0};
         bool dispatched = held != PLATFORM_SOCKET_INVALID &&
             cas_capture_bind_refusal(root, port, out, sizeof(out), &observed);
+        cas_note_bind_refusal(dispatched, out, &observed);
         bool qualified = dispatched && cas_bind_refusal_observed(out, &observed);
         if (!qualified) fprintf(stderr, "explicit P2P bind fixture output:\n%s\n", out);
         bool closed = held == PLATFORM_SOCKET_INVALID || platform_socket_close(held) == 0;

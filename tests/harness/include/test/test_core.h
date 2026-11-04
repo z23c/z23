@@ -404,6 +404,22 @@ bool test_abs_path(const char *path, char *abs, size_t n);
  * which varies with load. Without /proc the result is the bare budget. */
 long long test_forked_exec_data_mb(long long budget_mb);
 
+/* Failure flight recorder (test_helpers.c). TEST/TEST_CASE clear it; an
+ * ASSERT failure prints what was noted, once, between
+ * "--- evidence <file>:<line> ---" and "--- end evidence ---"; a pass prints
+ * nothing. The record is capped at TEST_EVIDENCE_CAP bytes, keeping the head
+ * and the tail. test_note: one formatted line (cut at ~1 KiB).
+ * test_note_bytes: a labelled buffer, escaped, head+tail kept when long.
+ * test_note_child: a child's exit status (negative: spawn/timeout failure)
+ * and its captured output. */
+#define TEST_EVIDENCE_CAP 4096
+void test_evidence_reset(void);
+void test_note(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void test_note_bytes(const char *label, const void *buf, size_t len);
+void test_note_child(const char *label, int rc, const char *out);
+void test_evidence_dump(const char *file, int line);
+size_t test_evidence_render(char *out, size_t cap, const char *file, int line);
+
 /* Build the smallest exact bounded replay fixture (genesis only) and publish
  * shielded completeness through the production atomic completion API. */
 bool test_complete_genesis_shielded_replay(sqlite3 *db);
@@ -1175,7 +1191,8 @@ int spec_consensus_compat(void);
  * Requires `int failures = 0;` in scope. */
 
 #define TEST(name) \
-    for (int _t_once = (printf("%s... ", name), 1); _t_once; _t_once = 0)
+    for (int _t_once = (test_evidence_reset(), printf("%s... ", name), 1); \
+         _t_once; _t_once = 0)
 
 /* ── Assertion failure reporting ──────────────────────────────────
  *
@@ -1278,6 +1295,7 @@ static inline void zcl_test_print_opaque(const void *v)
 #define ASSERT(cond) do { \
     if (!(cond)) { \
         printf("FAIL at %s:%d (%s)\n", __FILE__, __LINE__, #cond); \
+        test_evidence_dump(__FILE__, __LINE__); \
         failures++; goto _test_next; \
     } \
 } while(0)
@@ -1292,6 +1310,7 @@ static inline void zcl_test_print_opaque(const void *v)
         printf(" != "); \
         ZCL_TEST_PRINT_VALUE((b), zcl_assert_rhs_); \
         printf("\n"); \
+        test_evidence_dump(__FILE__, __LINE__); \
         failures++; goto _test_next; \
     } \
 } while(0)
@@ -1303,6 +1322,7 @@ static inline void zcl_test_print_opaque(const void *v)
         printf("FAIL at %s:%d (%s != %s): \"%s\" != \"%s\"\n", \
                __FILE__, __LINE__, #a, #b, \
                zcl_assert_lhs_, zcl_assert_rhs_); \
+        test_evidence_dump(__FILE__, __LINE__); \
         failures++; goto _test_next; \
     } \
 } while(0)
@@ -1317,6 +1337,7 @@ static inline void zcl_test_print_opaque(const void *v)
     if (!(r).ok) { \
         printf("FAIL at %s:%d (%s not ok): %s\n", \
                __FILE__, __LINE__, #r, (r).message); \
+        test_evidence_dump(__FILE__, __LINE__); \
         failures++; goto _test_next; \
     } \
 } while(0)
@@ -1330,7 +1351,7 @@ static inline void zcl_test_print_opaque(const void *v)
  *       // if we reach here, test passed
  *   } TEST_END */
 #define TEST_CASE(name) \
-    printf("%s... ", name); \
+    test_evidence_reset(); printf("%s... ", name); \
     {
 
 #define TEST_END \

@@ -39,7 +39,10 @@ static inline int test_host_tool_capture(const char *const argv[], char *out,
     return (int)result.exit_code;
 #else
     if (timeout_ms > INT_MAX) return -1;
-    return zcl_spawn_capture(argv, out, out_size, (int)timeout_ms);
+    int rc = zcl_spawn_capture(argv, out, out_size, (int)timeout_ms);
+    test_note_child(argv && argv[0] ? argv[0] : "host tool", rc,
+                    out_size && rc >= 0 ? out : NULL);
+    return rc;
 #endif
 }
 

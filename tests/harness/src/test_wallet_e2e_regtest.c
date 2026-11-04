@@ -320,6 +320,8 @@ static bool e2e_json(const struct e2e *e, enum e2e_cmd_id id,
     static char raw[E2E_RAW];
     json_init(out);
     int rc = e2e_exec(e, id, args, raw, sizeof(raw));
+    test_note("e2e %s exit=%d", e2e_cmds[id].w[0], rc);
+    test_note_bytes("e2e reply", raw, strnlen(raw, sizeof(raw)));
     const char *start = strchr(raw, '{');
     bool parsed = start && json_read(out, start, strlen(start));
     bool ok = rc == 0 && parsed;
@@ -344,6 +346,8 @@ static bool e2e_call(const struct e2e *e, enum e2e_cmd_id id,
     static char raw[E2E_RAW];
     json_init(out);
     int rc = e2e_exec(e, id, args, raw, sizeof(raw));
+    test_note("e2e %s exit=%d", e2e_cmds[id].w[0], rc);
+    test_note_bytes("e2e reply", raw, strnlen(raw, sizeof(raw)));
     const char *start = strchr(raw, '{');
     bool parsed = rc >= 0 && start && json_read(out, start, strlen(start));
     const struct json_value *flag = parsed ? json_get(out, "ok") : NULL;
@@ -411,8 +415,11 @@ static bool e2e_mine_reconcile(struct e2e *e, int blocks)
     char hash[80] = "";
     long deadline = e2e_now_ms() + E2E_RECONCILE_MS;
     while (e2e_now_ms() < deadline) {
-        if (!e2e_chain_now(e, &height, hash, sizeof(hash)) || height > want)
+        if (!e2e_chain_now(e, &height, hash, sizeof(hash)) || height > want) {
+            test_note("e2e mine reconcile: height=%d want=%d (gave up)",
+                      height, want);
             return false;
+        }
         if (height == want) {
             e->tip = height;
             snprintf(e->tip_hash, sizeof(e->tip_hash), "%s", hash);
@@ -607,6 +614,9 @@ static bool e2e_send_run(struct e2e *e, struct e2e_send *s)
         }
     }
     s->elapsed_ms = e2e_now_ms() - t0;
+    test_note("e2e send: stage=%s txid_len=%zu attempts=%d elapsed_ms=%ld",
+              e2e_str(&done, "data.stage"), strlen(e2e_str(&done, "data.txid")),
+              attempts, s->elapsed_ms);
     bool ok = strcmp(e2e_str(&done, "data.stage"), "committed") == 0 &&
          strlen(e2e_str(&done, "data.txid")) == 64;
     snprintf(s->txid, sizeof(s->txid), "%s", e2e_str(&done, "data.txid"));
