@@ -75,15 +75,24 @@ struct su_state {
     char previous[ZCL_LAND_SELFUPGRADE_PATH_MAX];
     char trial[SU_SHA_LEN + 1];
 };
+#endif
 
 bool zcl_land_selfupgrade_enabled(void)
 {
+#if defined(_WIN32)
+    return false;
+#else
     const char *v = getenv(ZCL_LAND_SELFUPGRADE_ENV);
     return v && strcmp(v, "1") == 0;
+#endif
 }
 
 bool zcl_land_selfupgrade_touches_driver(const char *paths)
 {
+#if defined(_WIN32)
+    (void)paths;
+    return false;
+#else
     static const char *const pre[] = {"tools/command/native_dev_land",
                                       "tools/dev/dev_land"};
     const char *p = paths;
@@ -96,22 +105,31 @@ bool zcl_land_selfupgrade_touches_driver(const char *paths)
             p++;
     }
     return false;
+#endif
 }
 
+#if !defined(_WIN32)
 static bool su_sha_ok(const char *sha)
 {
     return zcl_is_lower_hex(sha, SU_SHA_LEN);
 }
+#endif
 
 bool zcl_land_selfupgrade_slot_path(const char *root, const char *sha,
                                     char *out, size_t cap)
 {
+#if defined(_WIN32)
+    (void)root; (void)sha; (void)out; (void)cap;
+    return false;
+#else
     if (!root || !root[0] || !su_sha_ok(sha))
         return false;
     int n = snprintf(out, cap, "%s/slots/%s/z23-dev", root, sha);
     return n > 0 && (size_t)n < cap;
+#endif
 }
 
+#if !defined(_WIN32)
 static bool su_copy(const char *src, const char *dst)
 {
     FILE *in = fopen(src, "rb");
@@ -150,10 +168,15 @@ static bool su_same(const char *a, const char *b)
         fclose(fb);
     return same;
 }
+#endif
 
 bool zcl_land_selfupgrade_slot_install(const char *root, const char *sha,
                                        const char *src)
 {
+#if defined(_WIN32)
+    (void)root; (void)sha; (void)src;
+    return false;
+#else
     char slot[ZCL_LAND_SELFUPGRADE_PATH_MAX];
     char dir[ZCL_LAND_SELFUPGRADE_PATH_MAX];
     char tmp[ZCL_LAND_SELFUPGRADE_PATH_MAX + 32];
@@ -178,10 +201,15 @@ bool zcl_land_selfupgrade_slot_install(const char *root, const char *sha,
         return false;
     }
     return true;
+#endif
 }
 
 bool zcl_land_selfupgrade_pointer_read(const char *root, char *out, size_t cap)
 {
+#if defined(_WIN32)
+    (void)root; (void)out; (void)cap;
+    return false;
+#else
     char link[ZCL_LAND_SELFUPGRADE_PATH_MAX];
     ssize_t n;
     if (!zcl_path_join(link, sizeof(link), root, "current"))
@@ -191,8 +219,10 @@ bool zcl_land_selfupgrade_pointer_read(const char *root, char *out, size_t cap)
         return false;
     out[n] = '\0';
     return true;
+#endif
 }
 
+#if !defined(_WIN32)
 /* Atomic: a symlink at a temp name, then rename over <root>/current. */
 static bool su_pointer_set(const char *root, const char *target)
 {
@@ -338,12 +368,17 @@ static bool su_trial_lapsed(const char *root, struct su_state *s)
     s->matches = 0;
     return su_state_write(root, s);
 }
+#endif
 
 enum zcl_land_selfupgrade_verdict
 zcl_land_selfupgrade_observe(const char *root, const char *current_bin,
                              const char *sha, const char *const *args,
                              int need_rows)
 {
+#if defined(_WIN32)
+    (void)root; (void)current_bin; (void)sha; (void)args; (void)need_rows;
+    return ZCL_LAND_SU_ERROR;
+#else
     char cand_bin[ZCL_LAND_SELFUPGRADE_PATH_MAX];
     struct su_state s;
     if (!current_bin || need_rows < 1 ||
@@ -359,10 +394,15 @@ zcl_land_selfupgrade_observe(const char *root, const char *current_bin,
     }
     return su_count(root, &s, su_agree(current_bin, cand_bin, args), need_rows,
                     sha, cand_bin);
+#endif
 }
 
 bool zcl_land_selfupgrade_row_result(const char *root, bool row_ok)
 {
+#if defined(_WIN32)
+    (void)root; (void)row_ok;
+    return false;
+#else
     char link[ZCL_LAND_SELFUPGRADE_PATH_MAX];
     struct su_state s;
     bool restored = false;
@@ -382,39 +422,5 @@ bool zcl_land_selfupgrade_row_result(const char *root, bool row_ok)
     s.matches = 0;
     (void)su_state_write(root, &s);
     return restored;
-}
-
-#else /* _WIN32: the lander is not run there; every call refuses. */
-
-bool zcl_land_selfupgrade_enabled(void) { return false; }
-bool zcl_land_selfupgrade_touches_driver(const char *p) { (void)p; return false; }
-bool zcl_land_selfupgrade_slot_path(const char *r, const char *s, char *o,
-                                    size_t c)
-{
-    (void)r; (void)s; (void)o; (void)c;
-    return false;
-}
-bool zcl_land_selfupgrade_slot_install(const char *r, const char *s,
-                                       const char *src)
-{
-    (void)r; (void)s; (void)src;
-    return false;
-}
-bool zcl_land_selfupgrade_pointer_read(const char *r, char *o, size_t c)
-{
-    (void)r; (void)o; (void)c;
-    return false;
-}
-enum zcl_land_selfupgrade_verdict
-zcl_land_selfupgrade_observe(const char *r, const char *c, const char *s,
-                             const char *const *a, int n)
-{
-    (void)r; (void)c; (void)s; (void)a; (void)n;
-    return ZCL_LAND_SU_ERROR;
-}
-bool zcl_land_selfupgrade_row_result(const char *r, bool ok)
-{
-    (void)r; (void)ok;
-    return false;
-}
 #endif
+}
