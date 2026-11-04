@@ -1,2 +1,2 @@
 /* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
-ZCL_MODULE_CAPABILITY("tools/command/native_dev_land_selfupgrade.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PROCESS, "reads and writes only under the caller-named self-upgrade root (slots, current symlink, upgrade.state); runs two driver binaries (current and candidate) through the spawn seam with an argv for a read-only decision, 20 s each")
+ZCL_MODULE_CAPABILITY("tools/command/native_dev_land_selfupgrade.c", CAP_FS_READ|CAP_FS_WRITE, "reads and writes only under the caller-named self-upgrade root (slots, current symlink, upgrade.state); driver decisions go through the shared spawn seam, whose own module owns process reach")
