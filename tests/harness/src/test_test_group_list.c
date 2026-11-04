@@ -9,11 +9,16 @@
 
 #include "test/test_core.h"
 #include "test/test_home_isolation.h"
+#include "command/native_command.h"
+#include "json/json.h"
+#include "kernel/command_registry.h"
 #include "test_group_list.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
+#include <stdlib.h>
 
 #define TGL_T_OUT 16384
 
@@ -149,11 +154,129 @@ static int test_exact_set_and_suggest(void)
     return failures;
 }
 
+/* The leaf writes to the process stdout and stderr, so each call is captured
+ * by pointing fds 1 and 2 at temp files for its duration. */
+static bool tglt_slurp(FILE *f, char *buf)
+{
+    long n;
+    (void)fflush(f);
+    n = ftell(f);
+    rewind(f);
+    buf[0] = '\0';
+    if (n < 0 || n >= TGL_T_OUT)
+        return false;
+    buf[fread(buf, 1, (size_t)n, f)] = '\0';
+    return true;
+}
+
+/* Points the five source variables the leaf reads at the fixture, or (t NULL)
+ * clears them. */
+static bool tglt_env(const struct tglt *t)
+{
+    static const char *const names[] = {
+        "ZCL_TEST_REGISTRY_SRC", "ZCL_TEST_RUNNER_SRC",
+        "ZCL_TEST_PROOF_FAMILIES_SRC", "ZCL_TEST_UMBRELLAS_SRC",
+        "ZCL_TEST_TIMING_JSON"};
+    const char *vals[5] = {0};
+    bool ok = true;
+    if (t) {
+        vals[0] = t->registry, vals[1] = t->runner, vals[2] = t->families;
+        vals[3] = t->umbrellas, vals[4] = t->timing;
+    }
+    for (int i = 0; i < 5; i++)
+        ok = (t ? setenv(names[i], vals[i], 1) : unsetenv(names[i])) == 0 && ok;
+    return ok;
+}
+
+static bool tglt_leaf(const struct tglt *t, const char *mode, const char *args,
+                      char *out, char *err, struct zcl_command_reply *reply)
+{
+    struct json_value in;
+    struct zcl_command_request req = {.input = &in};
+    FILE *o = tmpfile(), *e = tmpfile();
+    int so, se;
+    bool ok = o && e;
+    json_init(&in);
+    json_set_object(&in);
+    ok = ok && json_push_kv_str(&in, "mode", mode) &&
+         json_push_kv_str(&in, "args", args);
+    ok = ok && tglt_env(t);
+    zcl_command_reply_init(reply, "zcl.dev_test_groups.v1");
+    if (ok) {
+        (void)fflush(stdout);
+        (void)fflush(stderr);
+        so = dup(STDOUT_FILENO);
+        se = dup(STDERR_FILENO);
+        ok = so >= 0 && se >= 0;
+        if (ok) {
+            (void)dup2(fileno(o), STDOUT_FILENO);
+            (void)dup2(fileno(e), STDERR_FILENO);
+            zcl_native_handle_dev_test_groups(&req, reply);
+            (void)fflush(stdout);
+            (void)fflush(stderr);
+            (void)dup2(so, STDOUT_FILENO);
+            (void)dup2(se, STDERR_FILENO);
+        }
+        if (so >= 0)
+            close(so);
+        if (se >= 0)
+            close(se);
+        ok = ok && tglt_slurp(o, out) && tglt_slurp(e, err);
+    }
+    (void)tglt_env(NULL);
+    if (o)
+        fclose(o);
+    if (e)
+        fclose(e);
+    json_free(&in);
+    return ok;
+}
+
+static int test_leaf_end_to_end(void)
+{
+    int failures = 0;
+    TEST("dev.test.groups leaf: --mode/--args splitting, stdout lines, reply status") {
+        struct tglt t;
+        struct zcl_command_reply r;
+        char out[TGL_T_OUT], err[TGL_T_OUT];
+        ASSERT(tglt_setup(&t, "leaf", TGLT_RUNNER));
+        ASSERT(tglt_leaf(&t, "list", "", out, err, &r));
+        ASSERT_EQ((int)r.status, (int)ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(strstr(out, "test_alpha\n") != NULL);
+        ASSERT(strstr(out, "spec_gamma\n") != NULL);
+        zcl_command_reply_free(&r);
+        ASSERT(tglt_leaf(&t, "report", "", out, err, &r));
+        ASSERT_EQ((int)r.status, (int)ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(strstr(out, "executed_groups=UNKNOWN") != NULL);
+        zcl_command_reply_free(&r);
+        /* operand splitting: blanks, tabs and a newline separate operands */
+        ASSERT(tglt_leaf(&t, "resolve-exact", " spec_gamma\t test_alpha\n", out,
+                         err, &r));
+        ASSERT_EQ((int)r.status, (int)ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(out, "spec_gamma\ntest_alpha\n");
+        zcl_command_reply_free(&r);
+        ASSERT(tglt_put(t.runner, "int unrelated(void) { return 0; }\n"));
+        ASSERT(tglt_leaf(&t, "params-gated", "", out, err, &r));
+        ASSERT_EQ((int)r.status, (int)ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_EQ((int)r.exit_code, (int)ZCL_COMMAND_EXIT_INVALID);
+        ASSERT(out[0] == '\0');
+        ASSERT(strstr(err, "yielded no names") != NULL);
+        zcl_command_reply_free(&r);
+        ASSERT(tglt_leaf(&t, "resolve-exact", "no_such_group", out, err, &r));
+        ASSERT_EQ((int)r.status, (int)ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_EQ((int)r.exit_code, (int)ZCL_COMMAND_EXIT_FAILED);
+        zcl_command_reply_free(&r);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_test_group_list(void)
 {
     int failures = 0;
     failures += test_report_verdicts();
     failures += test_params_gated_refusal();
     failures += test_exact_set_and_suggest();
+    failures += test_leaf_end_to_end();
     return failures;
 }

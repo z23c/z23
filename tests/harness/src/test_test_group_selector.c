@@ -32,7 +32,10 @@
 #endif
 #include <unistd.h>
 
-/* The list tool the Makefile builds beside the test binaries. */
+/* The list tool the Makefile builds beside the test binaries. This calls the
+ * host tool, not the dev.test.groups leaf: Make-time group selection must run
+ * without the command registry or a built node, and both run one body
+ * (tgl_run), the leaf being verified end to end in test_test_group_list. */
 #define TGS_LIST "build/bin/test-group-list"
 
 #ifndef PATH_MAX
