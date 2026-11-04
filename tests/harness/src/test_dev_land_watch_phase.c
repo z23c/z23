@@ -877,6 +877,7 @@ static const char k_dlx_evidence_test_script[] =
     " 'FAIL at tests/harness/src/test_golden_dev_cycle.c:367 (hotswap_ms < 1000.0)' \\\n"
     " '--- evidence test.c:1 ---' 'FRAME-HEAD'\n"
     "printf '\\033[31munsafe-control\\n'\n"
+    "printf 'FRAME-LONG-%09000d-FRAME-LONG-END\\n' 0\n"
     "printf '%s\\n' 'FRAME-TAIL' '--- end evidence ---' \\\n"
     " '  first| L11: --- evidence retry.c:2 ---' \\\n"
     " '  first| L12: RETRY-HEAD' '  first| L13: RETRY-TAIL' \\\n"
@@ -992,7 +993,7 @@ static bool dlx_evidence_outcome_ok(const struct dlx_evidence_case *k,
                                     const char *real_wt)
 {
     struct dlx_call c;
-    char landdir[1200], path[1400], text[4096];
+    char landdir[1200], path[1400], text[32768];
     size_t len = 0;
     char steplog[96];
     (void)snprintf(steplog, sizeof(steplog), ".%s.log", k->land_dimension);
@@ -1023,6 +1024,7 @@ static bool dlx_evidence_outcome_ok(const struct dlx_evidence_case *k,
            dlx_evidence_text_ok(k, text, real_wt) &&
            (!k->frame || (strstr(text, "--- evidence test.c:1 ---") &&
                           strstr(text, "FRAME-HEAD") && strstr(text, "FRAME-TAIL") &&
+                          strstr(text, "FRAME-LONG-END") &&
                           strstr(text, "--- end evidence ---") &&
                           strstr(text, "RETRY-HEAD") && strstr(text, "RETRY-TAIL") &&
                           !strstr(text, "BAD-PREFIX-FRAME") && !strchr(text, '\033')));
