@@ -942,6 +942,22 @@ static bool impact_has_group(const struct agent_impact_acc *acc, const char *gro
     return false;
 }
 
+static int test_registration_gate_impact(void)
+{
+    int failures = 0;
+    TEST("test-registration gate source selects the test runner proofs") {
+        struct agent_impact_acc acc = {0};
+        ASSERT(agent_impact_apply_shared_rules("tools/lint/lintc/gate_test_registration.c", &acc));
+        ASSERT(impact_has_group(&acc, "test_group_selector"));
+        ASSERT(impact_has_group(&acc, "test_test_group_selector"));
+        ASSERT(impact_has_group(&acc, "boot_shutdown_marker"));
+        ASSERT(impact_has_group(&acc, "make_lint_gates"));
+        ASSERT(!acc.groups_lost);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_code_devagent_routes(void)
 {
     int failures = 0;
@@ -2047,6 +2063,7 @@ int test_code_impact(void)
     failures += test_code_impact_rule_predicate();
     failures += test_code_rule_prefix_parity();
     failures += test_code_devagent_routes();
+    failures += test_registration_gate_impact();
     failures += test_code_route_completeness();
     failures += test_code_route_consumer_bounds();
     failures += test_code_impact_unsafe_narrow();
