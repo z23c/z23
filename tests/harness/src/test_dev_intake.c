@@ -259,6 +259,7 @@ int test_dev_intake(void)
         ASSERT(strstr(dump, "\"verdict\":\"ACCEPT_FOR_QUEUE\"") != NULL);
         ASSERT(strstr(dump, head) != NULL);
         ASSERT(strstr(dump, "REFUSE(needs_operator_step)") != NULL);
+        ASSERT(strstr(dump, "\"operator_step\":\"the lane is not on this host") != NULL);
         zcl_command_reply_free(&reply);
         PASS();
     }
@@ -277,6 +278,30 @@ int test_dev_intake(void)
         di_run(&d, false, &reply, dump, sizeof(dump));
         ASSERT(strstr(dump, "REFUSE(invalid_lane)") != NULL);
         ASSERT(strstr(dump, "ACCEPT_FOR_QUEUE") == NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+
+    TEST("intake: outside-root repository and lane subdirectory are refused") {
+        char lane[900], head[41], outside[900], sub[1000], text[1200];
+        const char *clone[] = {"clone", "-q", d.f.origin, outside, NULL};
+        ASSERT(dbf_lane(&d.f, "inside", NULL, lane, head));
+        (void)snprintf(sub, sizeof(sub), "%s/sub", lane);
+        ASSERT(dbf_mkdirs(sub));
+        (void)snprintf(outside, sizeof(outside), "%s/outside", d.f.root);
+        ASSERT(dbf_git(d.f.root, clone));
+        json_init(&arr);
+        json_set_array(&arr);
+        (void)snprintf(text, sizeof(text), "READY %s %s outside", outside, head);
+        di_post_r(&d, &arr, 10, (uint64_t)platform_time_wall_unix(), text, "", false, false);
+        (void)snprintf(text, sizeof(text), "READY %s %s subdir", sub, head);
+        di_post_r(&d, &arr, 11, (uint64_t)platform_time_wall_unix(), text, "", false, false);
+        ASSERT(di_write_posts(&d, &arr));
+        json_free(&arr);
+        di_run(&d, false, &reply, dump, sizeof(dump));
+        char *first = strstr(dump, "REFUSE(invalid_lane)");
+        ASSERT(first != NULL);
+        ASSERT(strstr(first + 1, "REFUSE(invalid_lane)") != NULL);
         zcl_command_reply_free(&reply);
         PASS();
     }
