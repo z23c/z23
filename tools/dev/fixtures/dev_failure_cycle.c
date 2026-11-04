@@ -1,5 +1,6 @@
-/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
-/* Judge direct cycle evidence for the isolated compiler-failure selftest. */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Judge direct cycle evidence for the isolated compiler-failure selftest. */
 #include "json/json.h"
 #include "zutf8/zutf8.h"
 #include <errno.h>
