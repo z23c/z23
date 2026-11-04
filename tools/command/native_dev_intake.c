@@ -39,6 +39,7 @@
 #include "session/fleet_board_proto.h"
 #include "sha3/sha3.h"
 
+#include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -70,7 +71,7 @@ struct in_post {
 };
 
 struct in_ctx {
-    char repo[IN_PATH], lane_root[IN_PATH], bundle_dir[IN_PATH], scratch[IN_PATH + 16];
+    char repo[IN_PATH], bundle_dir[IN_PATH], scratch[IN_PATH + 16];
     bool board; /* posts come from the live board (show can re-read a post) */
     char main_sha[41], *out;
     struct in_list allow, deny;
@@ -300,10 +301,11 @@ static void in_ingest(struct in_ctx *x, const struct json_value *j)
     in_str(p->agent, sizeof(p->agent), src, "agent");
     in_str(p->room, sizeof(p->room), src, "room");
     p->created = json_get_int(json_get(src, "created_at"));
+    int64_t ttl = json_get_int(json_get(src, "ttl"));
     struct fleet_board_post timed = {0};
     timed.kind = FLEET_BOARD_KIND_NOTE;
     timed.created_at = (uint64_t)p->created;
-    timed.ttl = (uint32_t)json_get_int(json_get(src, "ttl"));
+    timed.ttl = ttl > 0 && ttl <= UINT32_MAX ? (uint32_t)ttl : 0;
     if (fleet_board_post_check_time(&timed, platform_time_wall_unix()) != FLEET_BOARD_OK)
         in_refuse(p, "post_expired_or_invalid_time");
     else if (!in_allowed(&x->allow, p->host))
@@ -463,15 +465,25 @@ static bool in_scratch(struct in_ctx *x)
     return fclose(f) == 0;
 }
 
-static bool in_lane_valid(const struct in_ctx *x, const char *lane)
+static bool in_lane_syntax(const char *lane)
 {
-    char resolved[IN_PATH], top[IN_PATH];
+    size_t n = strlen(lane);
+    return !strstr(lane, "/../") && !(n >= 3 && !strcmp(lane + n - 3, "/.."));
+}
+
+static bool in_lane_valid(const char *lane)
+{
+    char resolved[PATH_MAX], top[IN_PATH], root[PATH_MAX];
+    const char *home = getenv("HOME");
     const char *args[] = {"rev-parse", "--show-toplevel", NULL};
-    size_t n = strlen(x->lane_root);
-    if (strstr(lane, "/../") || !strcmp(lane + (strlen(lane) >= 3 ? strlen(lane) - 3 : 0), "/.."))
+    if (!home || snprintf(root, sizeof(root), "%s/development/lanes/z23", home) >= (int)sizeof(root))
         return false;
+    char canonical_root[PATH_MAX];
+    if (!realpath(root, canonical_root))
+        return false;
+    size_t n = strlen(canonical_root);
     if (!realpath(lane, resolved) || strcmp(resolved, lane) ||
-        strncmp(resolved, x->lane_root, n) || resolved[n] != '/')
+        strncmp(resolved, canonical_root, n) || resolved[n] != '/')
         return false;
     return db_git_line(lane, args, top, sizeof(top)) && !strcmp(top, lane);
 }
@@ -492,7 +504,8 @@ static void in_import_lane(struct in_ctx *x, struct in_post *p, int i)
     char spec[64];
     const char *upd[] = {"update-ref", ref, p->commit, NULL};
     FILE *f;
-    if (!in_lane_valid(x, p->lane)) {
+    if (!in_lane_syntax(p->lane) ||
+        (access(p->lane, F_OK) == 0 && !in_lane_valid(p->lane))) {
         in_refuse(p, "invalid_lane");
         return;
     }
@@ -756,15 +769,6 @@ static bool in_inputs(struct in_ctx *x, const struct json_value *in,
                       struct zcl_command_reply *reply)
 {
     const char *repo = db_opt_str(in, "repo"), *bd = db_opt_str(in, "bundle_dir");
-    const char *home = db_opt_str(in, "home");
-    char root[IN_PATH];
-    if (!home[0])
-        home = getenv("HOME");
-    if (!home || snprintf(root, sizeof(root), "%s/development/lanes/z23", home) >= (int)sizeof(root) ||
-        !realpath(root, x->lane_root)) {
-        db_refuse(reply, "BAD_PATH", "input", "cannot resolve the lane root");
-        return false;
-    }
     if (!repo[0] && !getcwd(x->repo, sizeof(x->repo)))
         return false;
     if (repo[0])

@@ -115,8 +115,16 @@ static void di_run(struct di *d, bool commit, struct zcl_command_reply *reply,
     const char *pairs[] = {"posts_file", d->posts, "repo", d->f.mainco,
                            "bundle_dir", d->bdir, "allow", d->allow, NULL};
     const char *flags[] = {"commit", NULL};
+    const char *old = getenv("HOME");
+    char saved[4096];
+    (void)snprintf(saved, sizeof(saved), "%s", old ? old : "");
+    (void)setenv("HOME", d->f.home, 1);
     dbf_call(zcl_native_handle_dev_intake, &d->f, pairs, commit ? flags : NULL,
              reply, dump, cap);
+    if (old)
+        (void)setenv("HOME", saved, 1);
+    else
+        (void)unsetenv("HOME");
 }
 
 static bool di_refs(const struct di *d, char *out, size_t cap)
@@ -250,7 +258,7 @@ int test_dev_intake(void)
         di_run(&d, false, &reply, dump, sizeof(dump));
         ASSERT(strstr(dump, "\"verdict\":\"ACCEPT_FOR_QUEUE\"") != NULL);
         ASSERT(strstr(dump, head) != NULL);
-        ASSERT(strstr(dump, "REFUSE(invalid_lane)") != NULL);
+        ASSERT(strstr(dump, "REFUSE(needs_operator_step)") != NULL);
         zcl_command_reply_free(&reply);
         PASS();
     }
