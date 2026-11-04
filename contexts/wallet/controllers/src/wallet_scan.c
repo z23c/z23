@@ -347,6 +347,10 @@ enum wallet_birthday_state wallet_birthday_check(
     if (birthday <= WALLET_BIRTHDAY_MARGIN || birthday > INT_MAX)
         return WALLET_BIRTHDAY_CHANGED;
     int at = (int)birthday - WALLET_BIRTHDAY_MARGIN;
+    if (chain && active_chain_tip(chain) && active_chain_height(chain) < at) {
+        *floor = at;
+        return WALLET_BIRTHDAY_AHEAD;
+    }
     const struct block_index *bi = chain ? active_chain_at(chain, at) : NULL;
     if (!bi || !bi->phashBlock || bi->nHeight != at ||
         memcmp(bi->phashBlock->data, hash, sizeof(hash)) != 0)
@@ -355,8 +359,67 @@ enum wallet_birthday_state wallet_birthday_check(
     return WALLET_BIRTHDAY_VALID;
 }
 
-/* --- Main entry point --- */
+/* Called with chain->write_lock held; no locks or I/O may run here. */
+static bool birthday_floor_matches_locked(struct active_chain *chain,
+                                          const struct block_index *reached,
+                                          int threshold, bool stored,
+                                          const uint8_t hash[32], bool *current)
+{
+    struct block_index **slots = chain->chain;
+    *current = slots && reached->nHeight <= chain->height &&
+        reached->nHeight < chain->capacity && slots[reached->nHeight] == reached;
+    if (!*current || !stored || threshold < 0 || threshold > chain->height ||
+        threshold >= chain->capacity)
+        return false;
+    struct block_index *floor = slots[threshold];
+    return floor && floor->phashBlock && floor->nHeight == threshold &&
+           memcmp(floor->phashBlock->data, hash, 32) == 0;
+}
 
+static void birthday_update_locked(struct wallet *w, int threshold, bool current, bool matches)
+{
+    if (current && w->scan_retry.pending && w->initial_scan_floor == threshold &&
+        strcmp(w->scan_retry.blocker, WALLET_BIRTHDAY_PENDING) == 0) {
+        if (matches) {
+            w->scan_retry.from = threshold;
+            snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker),
+                     "%s", WALLET_BIRTHDAY_SCAN_PENDING);
+        } else {
+            w->initial_scan_floor = 0;
+            snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker),
+                     "%s", WALLET_BIRTHDAY_CHANGED_BLOCKER);
+        }
+    }
+}
+
+void wallet_birthday_reconcile(struct wallet *w, struct node_db *ndb,
+                               struct active_chain *chain,
+                               const struct block_index *reached)
+{
+    zcl_mutex_lock(&w->cs);
+    bool pending = w->scan_retry.pending &&
+        strcmp(w->scan_retry.blocker, WALLET_BIRTHDAY_PENDING) == 0;
+    int threshold = w->initial_scan_floor;
+    zcl_mutex_unlock(&w->cs);
+    if (!pending || !chain || !reached || reached->nHeight < 0 ||
+        reached->nHeight < threshold || active_chain_height(chain) < threshold)
+        return;
+    int64_t birthday = 0;
+    uint8_t hash[32] = {0};
+    bool stored = db_wallet_birthday_get(ndb, &birthday, hash) &&
+        birthday > WALLET_BIRTHDAY_MARGIN && birthday <= INT_MAX &&
+        birthday - WALLET_BIRTHDAY_MARGIN == threshold;
+    zcl_mutex_lock(&w->cs);
+    zcl_mutex_lock(&chain->write_lock);
+    bool current = false;
+    bool matches = birthday_floor_matches_locked(chain, reached, threshold,
+                                                  stored, hash, &current);
+    birthday_update_locked(w, threshold, current, matches);
+    zcl_mutex_unlock(&chain->write_lock);
+    zcl_mutex_unlock(&w->cs);
+}
+
+/* --- Main entry point --- */
 int wallet_scan_blocks(struct node_db *ndb,
                        const struct active_chain *chain,
                        const struct wallet *w,

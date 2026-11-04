@@ -158,11 +158,6 @@ struct wallet_env {
 bool wallet_screens_init(const struct wallet_env *env);
 /* Leaves any wallet screen and wipes everything. */
 void wallet_screens_shutdown(void);
-/* Setup has just finished a create, whose wallet starts at the node's chain tip and has shown no address yet, so it holds
- * 0 ZCL. Keeps that as the last balance, so Funds shows 0 ZCL at once while the node restarts, until the node answers. Not
- * for a restore, whose balance is unknown until the node has read the chain. Blocks for the seal; call from a worker. */
-void wallet_screens_new_wallet(void);
-
 /* Enters a page (Funds from Home) and starts its commands. False, with only a plain notice to show, when
  * the screen protection is not in force. */
 bool wallet_screens_open(enum wallet_page page);

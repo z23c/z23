@@ -701,7 +701,6 @@ static void remove_dir(void)
     CHECK(false);
 }
 static bool live_shown(void) { return find_text(snap(), "Up to date") >= 0; }
-static bool node_waited(void) { return find_text(snap(), "Waiting for your node") >= 0; }
 static bool cache_present(void) { return file_exists(CACHE); }
 /* A fresh files directory under TMPDIR, which the Makefile points at the build directory so no test writes to /tmp. */
 static void make_dir(void)
@@ -961,53 +960,20 @@ static void test_cache_silent_node(void)
     remove_dir();
 }
 
-/* Setup has just made a wallet: Funds shows 0 ZCL at once while the node restarts, never as the live balance, until the node
- * answers. Without the call, as after a restore, Funds waits for the node. */
-static void test_new_wallet_zero(void)
+/* A newly created wallet has no known balance until the node answers. */
+static void test_new_wallet_unknown(void)
 {
     make_dir();
     put_file("wallet_key.blob", "key file one");
     wall = 1700000000;
-    struct wallet_screen *s = open_waiting();                       /* no call: nothing is known before the node answers */
+    struct wallet_screen *s = open_waiting();
     CHECK(find_text(s, "Loading") >= 0 && find(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE) < 0);
-    finish_waiting();
-    remove_dir();
-
-    make_dir();
-    put_file("wallet_key.blob", "key file one");
-    start(true);
-    wallet_screens_new_wallet();
-    uint8_t bytes[1024];
-    size_t n = get_bytes(CACHE, bytes, sizeof(bytes));
-    CHECK(n > SEALED_HEAD && !memcmp(bytes, SEALED_TAG, SEALED_TAG_LEN) && !bytes_hold(bytes, n, "ZCL") && keystore.seals == 1);
-    wall += 70;                                                     /* the owner opens Funds while the node restarts */
-    set_block();
-    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
-    s = snap();
-    CHECK(cached_shown(s, "0 ZCL", "As of 1 min ago, updating") && find_text(s, "Loading") < 0 && !item_is("Balance"));
-    CHECK(find_text(s, "Up to date") < 0 && find_text(s, "Updating your wallet") < 0);
-    fake.summary = NODE_UNAVAILABLE_ERROR;                          /* the node is still starting */
+    CHECK(!file_exists(CACHE));
+    fake.summary = GOOD_SUMMARY_LOCKED;
     release_block();
-    wait_for(node_waited);
-    CHECK(cached_shown(snap(), "0 ZCL", "As of 1 min ago, updating"));
-    fake.summary = GOOD_SUMMARY_LOCKED;                             /* it answers: the live summary replaces the kept zero */
-    fake.now += WALLET_REFRESH_MS;
-    wallet_screens_tick();
     wait_for(live_shown);
-    CHECK(!has("Last known") && !has("As of") && item_is("Balance") && item_is("1.23456789 ZCL"));
+    CHECK(!has("Last known") && item_is("Balance") && item_is("1.23456789 ZCL"));
     wallet_screens_close();
-    remove_dir();
-
-    make_dir();                                                     /* no key file, or no seal: nothing is kept */
-    start(false);
-    wallet_screens_new_wallet();
-    CHECK(!file_exists(CACHE));
-    put_file("wallet_key.blob", "key file one");
-    with_seal = false;
-    start(false);
-    wallet_screens_new_wallet();
-    CHECK(!file_exists(CACHE));
-    with_seal = true;
     remove_dir();
 }
 
@@ -2257,7 +2223,7 @@ int main(int argc, char **argv)
     test_cache_from_the_future();
     test_cache_only_real_summaries();
     test_cache_silent_node();
-    test_new_wallet_zero();
+    test_new_wallet_unknown();
     test_make_private_offer();
     test_make_private_hidden();
     test_reveal_offer();

@@ -222,7 +222,6 @@ static const struct { enum wsu_failure failure; const char *text; } failure_text
     {WSU_REFUSED, "Your node refused the request. Nothing was changed. Try again."},
     {WSU_UNKNOWN, "Your node gave no clear answer, so a wallet may have been started. Its words cannot be shown again. Tap Check again."},
     {WSU_NOT_RECORDED, "The wallet exists, but the app could not record that setup finished. Tap Save again."},
-    {WSU_NO_TIP, "Your node has not read enough of the chain yet to save the wallet. It keeps syncing. Try again in a few minutes."},
     {WSU_NO_BIRTHDAY, "Your words were confirmed, but the wallet has no start block, so setup is not finished. Tap Check again, or Start over to set it aside; nothing is deleted."},
     {WSU_NOT_RUN, "The wallet could not start, so nothing was changed. Try again."},
     {WSU_NOT_CREATE, "Start over is only for a new wallet. This one was restored from words."},
@@ -285,11 +284,12 @@ void wsu_working_line(const struct wsu_view *v, char *out, size_t cap)
         snprintf(out, cap, "%s - %lld:%02lld", phase_lines[p].text, s / 60, s % 60);
 }
 
-/* A failed write behind the shown words. The words and their passphrase are kept, so Try again writes the same words again. */
+/* A failed write behind the shown words. The words and their passphrase are kept, so Try again writes the same words again; a
+ * failure a new attempt would meet again offers no Try again and says what happens instead. */
 static const struct { enum wsu_failure failure; const char *text; } write_failure_texts[] = {
     {WSU_NODE_BUSY, "Your node did not pause in time, so your wallet is not saved yet. Tap Try again."},
-    {WSU_NO_TIP, "Your node has not read enough of the chain to save your wallet yet. It keeps syncing. Tap Try again in a few minutes."},
-    {WSU_STORAGE, "Your node could not read its saved data, so your wallet is not saved. Tap Try again."},
+    {WSU_STORAGE, "Your node could not read its saved data, so your wallet was not saved, and saving again would fail the same way. "
+                  "Your node keeps running. Tap Stop and check this phone."},
     {WSU_NOT_RUN, "Saving your wallet could not start, so nothing was saved. Tap Try again."},
     {WSU_UNKNOWN, "Saving your wallet stopped before your node answered, so the app cannot tell whether it was saved. Tap Try again."},
 };
@@ -298,7 +298,12 @@ const char *wsu_write_failure_text(enum wsu_failure failure)
     if (failure == WSU_NO_FAILURE) return "";
     for (size_t i = 0; i < sizeof(write_failure_texts) / sizeof(write_failure_texts[0]); ++i)
         if (write_failure_texts[i].failure == failure) return write_failure_texts[i].text;
-    return "Your node refused to save your wallet, so nothing was saved. Tap Try again.";
+    return "Your node refused to save your wallet, so nothing was saved, and saving again would be refused the same way. "
+           "Your node keeps running. Tap Stop and check this phone.";
+}
+bool wsu_write_retryable(enum wsu_failure failure)
+{
+    return failure == WSU_NODE_BUSY || failure == WSU_NOT_RUN || failure == WSU_UNKNOWN;
 }
 static bool all_picked(const struct wsu_view *v)
 {
@@ -352,7 +357,6 @@ static enum wsu_failure failure_of_node(enum sun_result result)
 {
     switch (result) {
     case SUN_NODE_RUNNING: return WSU_NODE_BUSY;
-    case SUN_NO_CHAIN: return WSU_NO_TIP;
     case SUN_ALREADY_PRESENT: return WSU_PRESENT;
     case SUN_INVALID_PHRASE: return WSU_BAD_PHRASE;
     case SUN_STORAGE: return WSU_STORAGE;
@@ -500,7 +504,7 @@ out:
 }
 
 /* Records the kind first, so a restart can tell what was begun, then restores the phrase with no node holding the files. The wallet
- * starts at the datadir's own chain tip, which is sound because the phrase was made moments ago. */
+ * uses the fixed release anchor, so a delayed write cannot skip payments after the words were shown. */
 static enum sun_result write_once(struct wsu *w, struct sun_restored *restored)
 {
     if (!zapp_setup_kind_write(w->files, ZAPP_KIND_CREATE)) return SUN_REFUSED;
@@ -549,7 +553,7 @@ void wsu_write_job(struct wsu *w)
 bool wsu_retry_write(struct wsu *w)
 {
     pthread_mutex_lock(&w->lock);
-    bool ok = w->write == WSU_WRITE_FAILED && (w->step == WSU_WORDS || w->step == WSU_CONFIRM);
+    bool ok = w->write == WSU_WRITE_FAILED && (w->step == WSU_WORDS || w->step == WSU_CONFIRM) && wsu_write_retryable(w->write_failure);
     if (ok) { w->write = WSU_WRITE_PENDING; w->write_failure = WSU_NO_FAILURE; }
     pthread_mutex_unlock(&w->lock);
     return ok;

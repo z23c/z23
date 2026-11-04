@@ -16,9 +16,11 @@
  *      nothing the process wrote to stderr; the reply carries the phrase once.
  *   4. The seed is encrypted at rest: its raw bytes are in no file, it reads
  *      back as LOCKED without the passphrase and as the phrase's seed with it.
- *   5. The active tip (height and hash, never a reorganised-away row) is the
- *      birthday; only the first scan of the wallet starts below it, and only
- *      while its block is still active. No other scan range is raised.
+ *   5. The birthday is never above the highest height the datadir or the
+ *      release proves (connected tip, shipped anchor, best header); only the
+ *      first scan of the wallet starts below it, once the chain reaches its
+ *      floor block and only while that block is still active. No other scan
+ *      range is raised.
  *   6. An empty, short or missing passphrase is refused and nothing is made.
  *   7. An agent-ceiling caller is refused before the handler, and a caller
  *      that did not use standard input is refused by the handler.
@@ -28,29 +30,42 @@
  *      created wallet; a closed store mints nothing.
  *  12. A wrong passphrase is refused and a payment is found while locked
  *      (these two depend on the wallet-lock work).
+ *  13. The restore inputs the phone flow needs: a passphrase on standard
+ *      input, shielded_only, a verified birthday and birthday_at_local_tip.
+ *  14. A node whose blocks are behind still creates: the birthday comes from
+ *      its shipped anchor or best header, never above either, and boot waits
+ *      for the chain to reach its floor without marking anything unread. A
+ *      node whose blocks are well past the anchor takes its own tip and never
+ *      opens block_index.bin.
  */
 
 #define _POSIX_C_SOURCE 200809L
 
 #include "test/test_core.h"
 
+#include "chain/chain.h"
 #include "chain/chainparams.h"
+#include "chain/checkpoints.h"
+#include "chain/pow.h"
 #include "config/boot_internal.h"
 #include "config/boot_wallet_phrase.h"
 #include "command/native_command.h"
 #include "config/command_catalog.h"
 #include "controllers/wallet_native_handlers.h"
 #include "controllers/wallet_scan.h"
+#include "core/arith_uint256.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "keys/key.h"
 #include "keys/pubkey.h"
 #include "models/database.h"
 #include "models/wallet_key.h"
+#include "services/block_index_loader.h"
 #include "services/wallet_create_service.h"
 #include "services/wallet_recovery_service.h"
 #include "support/cleanse.h"
 #include "validation/chainstate.h"
+#include "validation/main_state.h"
 #include "sapling/constants.h"
 #include "sapling/note_encryption.h"
 #include "sapling/sapling.h"
@@ -704,6 +719,27 @@ static int birthday_stored(const char *dir, const struct wcr_run *run)
     return failures;
 }
 
+static int birthday_pending(struct node_db *ndb, struct wcr_chain *other)
+{
+    int failures = 0;
+    struct wallet *pending = calloc(1, sizeof(*pending));
+    if (pending) {
+        wallet_init(pending);
+        pending->best_block_height = 1002;
+        pending->scan_retry.pending = true;
+        pending->scan_retry.from = 100;
+        pending->scan_retry.since = 123;
+        snprintf(pending->scan_retry.blocker, sizeof(pending->scan_retry.blocker),
+                 "%s", "OTHER_UNREAD");
+        (void)boot_wallet_boot_catch_up(pending, &other->chain, "/nonexistent", ndb);
+    }
+    WCR_CHECK("a changed birthday lowers existing unread coverage to genesis",
+              pending && pending->scan_retry.pending &&
+              pending->scan_retry.from == 0 && pending->scan_retry.since == 123);
+    if (pending) { wallet_free(pending); free(pending); }
+    return failures;
+}
+
 /* What boot does with a wallet that has `best` scanned, per chain. */
 static int birthday_boot_wallets(struct node_db *ndb, struct wcr_chain *same,
                                  struct wcr_chain *other)
@@ -717,8 +753,10 @@ static int birthday_boot_wallets(struct node_db *ndb, struct wcr_chain *same,
               "catch-up defers on a long chain and records it",
               b && b->initial_scan_floor == 0 && wcr_marked_unread(b));
     struct wallet *c = wcr_boot_wallet(ndb, other, 7);
-    WCR_CHECK("a wallet that has already scanned is left to its scan height",
-              c && c->initial_scan_floor == 0 && !wcr_marked_unread(c));
+    WCR_CHECK("a scanned wallet on a changed chain is marked unread",
+              c && c->initial_scan_floor == 0 && c->scan_retry.pending &&
+              c->scan_retry.from == 0 && wallet_scanned_through_height(c) < 0);
+    failures += birthday_pending(ndb, other);
     struct wallet *all[] = { a, b, c };
     for (size_t i = 0; i < 3; i++)
         if (all[i]) {
@@ -746,9 +784,9 @@ static int birthday_chain_checks(const char *dir)
     WCR_CHECK("a chain with another block at 900 changes the birthday",
               made && wallet_birthday_check(&ndb, &other.chain, &floor) ==
                           WALLET_BIRTHDAY_CHANGED);
-    WCR_CHECK("a chain shorter than the floor changes the birthday",
+    WCR_CHECK("a chain that has not reached the floor waits for it at 900",
               made && wallet_birthday_check(&ndb, &shorter.chain, &floor) ==
-                          WALLET_BIRTHDAY_CHANGED);
+                          WALLET_BIRTHDAY_AHEAD && floor == 900);
     if (made) {
         failures += birthday_boot_wallets(&ndb, &same, &other);
         wcr_chain_free(&same);
@@ -762,31 +800,98 @@ static int birthday_chain_checks(const char *dir)
 
 /* The datadir held connected rows above a rewound tip: 4900 and 5000 are both
  * status 3 (the demotion path never touches them), the active chain is back at
- * 3000. The birthday records 5000 and the floor block 4900; the chain does
- * not hold it, so the wallet scans everything. A chain that does hold the
- * block makes the same birthday valid: every block up to it was in the
- * datadir before the wallet. */
+ * 3000. The birthday records 5000 and the floor block 4900. The chain has not
+ * reached it, so coverage stays unread while the first scan waits. A chain
+ * that holds the block makes the same birthday valid: every
+ * block up to it was in the datadir before the wallet. A chain that reaches
+ * 4900 with another block there scans everything. */
+static int birthday_rewound_at_floor(struct node_db *ndb, struct wcr_chain *regrown, struct wallet *w);
+
+static int birthday_rewound_floor(struct node_db *ndb, struct wcr_chain *regrown, struct wallet *w, bool made)
+{
+    int failures = 0;
+    WCR_CHECK("a chain rewound to 3000 keeps the floor for when it reaches "
+              "4900, runs no catch-up and remains unread",
+              w && w->initial_scan_floor == 4900 && w->scan_retry.pending &&
+              wallet_scanned_through_height(w) < 0);
+    int floor = 0;
+    WCR_CHECK("a chain that holds block 4900 makes it valid",
+              made && wallet_birthday_check(ndb, &regrown->chain, &floor) ==
+                          WALLET_BIRTHDAY_VALID && floor == 4900);
+    if (w)
+        wallet_birthday_reconcile(w, ndb, &regrown->chain, &regrown->idx[4899]);
+    WCR_CHECK("before floor the running wallet remains unread",
+              w && w->scan_retry.pending && wallet_scanned_through_height(w) < 0);
+    failures += birthday_rewound_at_floor(ndb, regrown, w);
+    return failures;
+}
+
+static int birthday_rewound_at_floor(struct node_db *ndb, struct wcr_chain *regrown, struct wallet *w)
+{
+    int failures = 0;
+    if (w)
+        wallet_birthday_reconcile(w, ndb, &regrown->chain, &regrown->idx[4900]);
+    WCR_CHECK("matching floor requires a scan from the verified floor",
+              w && w->scan_retry.pending && w->scan_retry.from == 4900 &&
+              w->initial_scan_floor == 4900 &&
+              strcmp(w->scan_retry.blocker, WALLET_BIRTHDAY_SCAN_PENDING) == 0);
+    return failures;
+}
+
+static int birthday_rewound_restart(struct node_db *ndb, struct wcr_chain *regrown, struct wallet *w, bool made)
+{
+    int failures = 0;
+    struct wallet *restarted = made ? wcr_boot_wallet(ndb, regrown, 5001) : NULL;
+    WCR_CHECK("restart restores the verified floor",
+              restarted && restarted->initial_scan_floor == 4900 &&
+              !restarted->scan_retry.pending);
+    if (restarted)
+        (void)wallet_rewind_confirmations(restarted, 4899);
+    WCR_CHECK("restart then rewind below floor marks the prefix unread",
+              restarted && restarted->initial_scan_floor == 0 &&
+              wcr_marked_unread(restarted));
+    if (restarted) { wallet_free(restarted); free(restarted); }
+    if (w) {
+        w->best_block_height = 4900;
+        (void)wallet_rewind_confirmations(w, 4899);
+    }
+    WCR_CHECK("rewind below verified floor marks the prefix unread",
+              w && w->initial_scan_floor == 0 && wcr_marked_unread(w));
+    return failures;
+}
+
+static int birthday_rewound_replaced(struct node_db *ndb, struct wcr_chain *rewound, struct wcr_chain *replaced, struct wallet *w, bool made)
+{
+    int failures = 0;
+    struct wallet *live = made ? wcr_boot_wallet(ndb, rewound, 0) : NULL;
+    if (live)
+        wallet_birthday_reconcile(live, ndb, &replaced->chain, &replaced->idx[4900]);
+    WCR_CHECK("different floor keeps the running wallet unread",
+              live && live->initial_scan_floor == 0 && wcr_marked_unread(live));
+    if (live) { wallet_free(live); free(live); }
+    struct wallet *r = made ? wcr_boot_wallet(ndb, replaced, 0) : NULL;
+    WCR_CHECK("a chain with another block at 4900 marks the whole chain unread",
+              r && r->initial_scan_floor == 0 && wcr_marked_unread(r));
+    if (w) { wallet_free(w); free(w); }
+    if (r) { wallet_free(r); free(r); }
+    return failures;
+}
+
 static int birthday_rewound_chains(struct node_db *ndb)
 {
     int failures = 0;
-    struct wcr_chain rewound, regrown;
+    struct wcr_chain rewound, regrown, replaced;
     bool made = wcr_chain_make(&rewound, 3001, -1, 0) &&
-                wcr_chain_make(&regrown, 5002, 4900, 0x49);
+                wcr_chain_make(&regrown, 5002, 4900, 0x49) &&
+                wcr_chain_make(&replaced, 5002, 4900, 0x77);
     struct wallet *w = made ? wcr_boot_wallet(ndb, &rewound, 0) : NULL;
-    WCR_CHECK("a chain rewound to 3000 does not hold the floor block: the "
-              "blocks 3001..4899 are not skipped",
-              w && w->initial_scan_floor == 0 && wcr_marked_unread(w));
-    int floor = 0;
-    WCR_CHECK("a chain that holds block 4900 makes it valid",
-              made && wallet_birthday_check(ndb, &regrown.chain, &floor) ==
-                          WALLET_BIRTHDAY_VALID && floor == 4900);
-    if (w) {
-        wallet_free(w);
-        free(w);
-    }
+    failures += birthday_rewound_floor(ndb, &regrown, w, made);
+    failures += birthday_rewound_restart(ndb, &regrown, w, made);
+    failures += birthday_rewound_replaced(ndb, &rewound, &replaced, w, made);
     if (made) {
         wcr_chain_free(&rewound);
         wcr_chain_free(&regrown);
+        wcr_chain_free(&replaced);
     }
     return failures;
 }
@@ -1513,16 +1618,21 @@ static int restore_shielded_only_case(void)
 }
 
 /* The persisted scan marker of `dir`, or false when none is pending. */
-static bool wcr_unread_from_zero(const char *dir)
+static bool wcr_unread_blocker(const char *dir, const char *blocker)
 {
     struct wallet *w = calloc(1, sizeof(*w));
     bool read = w && wcr_scan_marker(dir, w);
     bool unread = read && w->scan_retry.pending && w->scan_retry.from == 0 &&
-                  strcmp(w->scan_retry.blocker, "WALLET_RESTORE_UNREAD") == 0;
+                  strcmp(w->scan_retry.blocker, blocker) == 0;
     if (read)
         wallet_free(w);
     free(w);
     return unread;
+}
+
+static bool wcr_unread_from_zero(const char *dir)
+{
+    return wcr_unread_blocker(dir, WALLET_RESTORE_BLOCKER_UNREAD);
 }
 
 /* A birthday counts only when this datadir holds its block. */
@@ -2004,15 +2114,16 @@ static int restore_tip_recorded(void)
     bool ran = wcr_restore_cli(dir, ",\"birthday_at_local_tip\":true", true,
                                &run);
     bool open = ran && run.rc == 0 && wcr_open(&ndb, dir);
-    WCR_CHECK("the datadir's tip is stored with the floor block's hash",
-              open && db_wallet_birthday_get(&ndb, &b, hash) && b == 1000 &&
-              hash[0] == 0x09 && hash[31] == 0x09);
+    WCR_CHECK("without a release anchor mutable rows cannot set the birthday",
+              open && !db_wallet_birthday_get(&ndb, &b, hash));
     if (open)
         node_db_close(&ndb);
-    WCR_CHECK("the wallet carries no unread marker",
-              ran && !wcr_unread_from_zero(dir));
-    WCR_CHECK("the reply reports a recorded birthday and nothing hidden",
-              wcr_data_bool(&run, "birthday_recorded") &&
+    WCR_CHECK("the wallet remains unread until coverage is verified",
+              ran && wcr_unread_blocker(dir,
+                  wcr_data_bool(&run, "birthday_recorded")
+                      ? WALLET_BIRTHDAY_PENDING : WALLET_RESTORE_BLOCKER_UNREAD));
+    WCR_CHECK("the reply reports no birthday without a release anchor",
+              !wcr_data_bool(&run, "birthday_recorded") &&
               !wcr_data_bool(&run, "birthday_rejected") &&
               !wcr_data_bool(&run, "history_below_seed_hidden"));
     return failures;
@@ -2032,33 +2143,43 @@ static int restore_tip_edge(void)
               wcr_chain_at(dir, sizeof(dir), "tip_edge", edge, 2));
     bool ran = wcr_restore_cli(dir, ",\"birthday_at_local_tip\":true", true, &run);
     bool open = ran && run.rc == 0 && wcr_open(&ndb, dir);
-    WCR_CHECK("a tip one above the margin is accepted and stored",
-              open && db_wallet_birthday_get(&ndb, &b, hash) && b == 101 &&
-              hash[0] == 0x10);
+    WCR_CHECK("a short chain saves without claiming a mutable birthday",
+              open && !db_wallet_birthday_get(&ndb, &b, hash) &&
+              wcr_unread_from_zero(dir));
     if (open)
         node_db_close(&ndb);
     return failures;
 }
 
-static int restore_tip_refused(void)
+/* A phrase made now saves on a chain too short for a floor block, with no
+ * anchor and no headers: no birthday is stored and nothing is refused, so its
+ * first scan starts at genesis. */
+static int restore_tip_short(void)
 {
     int failures = 0;
     char dir[1024];
     struct wcr_run run;
+    struct node_db ndb;
+    int64_t b = 0;
+    uint8_t hash[32];
     const int low[] = {1, 100};
     WCR_CHECK("setup: a chain exactly at the margin",
               wcr_chain_at(dir, sizeof(dir), "tip_low", low, 2));
     bool ran = wcr_restore_cli(dir, ",\"birthday_at_local_tip\":true", true,
                                &run);
-    WCR_CHECK("a tip at the margin is refused as NO_LOCAL_CHAIN",
-              ran && run.rc != 0 && wcr_error_is(&run, "NO_LOCAL_CHAIN"));
-    WCR_CHECK("and nothing was written: no wallet rows, no birthday",
-              !wcr_wallet_rows_exist(dir));
+    bool open = ran && run.rc == 0 && wcr_open(&ndb, dir);
+    WCR_CHECK("a tip at the margin saves the wallet with no birthday",
+              open && !db_wallet_birthday_get(&ndb, &b, hash) &&
+              wcr_data_bool(&run, "committed") &&
+              !wcr_data_bool(&run, "birthday_recorded"));
+    if (open)
+        node_db_close(&ndb);
+    WCR_CHECK("and its rows are written", wcr_wallet_rows_exist(dir));
     wcr_fixture(dir, sizeof(dir), "tip_none");
     ran = wcr_restore_cli(dir, ",\"birthday_at_local_tip\":true", true, &run);
-    WCR_CHECK("an empty datadir is refused the same way and gets no node.db",
-              ran && wcr_error_is(&run, "NO_LOCAL_CHAIN") &&
-              !wcr_exists(dir, "node.db"));
+    WCR_CHECK("an empty datadir saves the same way",
+              ran && run.rc == 0 && wcr_wallet_rows_exist(dir) &&
+              !wcr_data_bool(&run, "birthday_recorded"));
     WCR_CHECK("setup: a seeded datadir for the conflict",
               wcr_seeded_chain(dir, sizeof(dir), "tip_conflict", false));
     ran = wcr_restore_cli(dir, ",\"birthday_at_local_tip\":true,"
@@ -2114,7 +2235,7 @@ static bool wcr_commit_plan(const struct wcr_run *plan, struct wcr_run *run)
     return ok;
 }
 
-/* The plan's commit input carries the flag, and running it records the tip. */
+/* The plan keeps the flag; no release anchor means full genesis coverage. */
 static int restore_tip_plan_then_commit(void)
 {
     int failures = 0;
@@ -2134,16 +2255,17 @@ static int restore_tip_plan_then_commit(void)
               strstr(plan.wire, "birthday_at_local_tip") != NULL);
     bool ran = wcr_commit_plan(&plan, &run);
     bool open = ran && run.rc == 0 && wcr_open(&ndb, dir);
-    WCR_CHECK("the commit input from the plan records the tip birthday",
-              open && db_wallet_birthday_get(&ndb, &b, hash) && b == 1000 &&
-              hash[0] == 0x09);
+    WCR_CHECK("the commit preserves genesis coverage without a release anchor",
+              open && !db_wallet_birthday_get(&ndb, &b, hash) &&
+              wcr_unread_from_zero(dir));
     if (open)
         node_db_close(&ndb);
     return failures;
 }
 
-/* A plan is refused where a commit is, and writes nothing. */
-static int restore_tip_plan_refused(void)
+/* A plan on a chain too short for a floor block is not refused either, and
+ * writes nothing. */
+static int restore_tip_plan_short(void)
 {
     int failures = 0;
     char dir[1024];
@@ -2152,14 +2274,13 @@ static int restore_tip_plan_refused(void)
     WCR_CHECK("setup: a chain exactly at the margin for a plan",
               wcr_chain_at(dir, sizeof(dir), "tip_plan_low", low, 2));
     bool ran = wcr_restore_plan(dir, ",\"birthday_at_local_tip\":true", &run);
-    WCR_CHECK("a plan on a short chain is refused as NO_LOCAL_CHAIN",
-              ran && run.rc != 0 && wcr_error_is(&run, "NO_LOCAL_CHAIN") &&
+    WCR_CHECK("a plan on a short chain succeeds and writes nothing",
+              ran && run.rc == 0 && !wcr_data_bool(&run, "committed") &&
               !wcr_wallet_rows_exist(dir));
     wcr_fixture(dir, sizeof(dir), "tip_plan_none");
     ran = wcr_restore_plan(dir, ",\"birthday_at_local_tip\":true", &run);
-    WCR_CHECK("a plan on an empty datadir is refused and creates no node.db",
-              ran && wcr_error_is(&run, "NO_LOCAL_CHAIN") &&
-              !wcr_exists(dir, "node.db"));
+    WCR_CHECK("a plan on an empty datadir succeeds and creates no node.db",
+              ran && run.rc == 0 && !wcr_exists(dir, "node.db"));
     return failures;
 }
 
@@ -2195,10 +2316,12 @@ static int restore_refusal_keeps_phrase_out(void)
     struct wcr_run run;
     WCR_CHECK("setup: an empty datadir",
               (wcr_fixture(dir, sizeof(dir), "tip_quiet"), true));
-    bool ran = wcr_restore_cli(dir, ",\"birthday_at_local_tip\":true", true,
-                               &run);
+    bool ran = wcr_restore_cli(dir, ",\"birthday_at_local_tip\":true,"
+                               "\"birthday\":{\"height\":1000,\"hash\":\""
+                               WCR_HASH_09 "\"}", true, &run);
     WCR_CHECK("a refused restore echoes the phrase on neither stream",
-              ran && run.rc != 0 && strstr(run.wire, WCR_RESTORE_PHRASE) == NULL &&
+              ran && run.rc != 0 && wcr_error_is(&run, "BIRTHDAY_CONFLICT") &&
+              strstr(run.wire, WCR_RESTORE_PHRASE) == NULL &&
               strstr(run.err, WCR_RESTORE_PHRASE) == NULL &&
               strstr(run.err, "abandon abandon abandon") == NULL);
     return failures;
@@ -2381,7 +2504,8 @@ static int restore_tip_reads_no_history(void)
     WCR_CHECK("an at-tip restore asks the chain nothing and says so",
               ran && asks == 0 && !rep.chain_history_consulted &&
               rep.history_skip == WALLET_RECOVERY_HISTORY_NEW_PHRASE &&
-              rep.receiving_keys_used == 0 && rep.birthday_recorded);
+              rep.receiving_keys_used == 0 && !rep.birthday_recorded &&
+              wcr_unread_from_zero(dir));
     wcr_fixture(bare, sizeof(bare), "tip_floor");
     bool floored = wcr_restore_counted(bare, &plain, &bare_rep, &bare_asks);
     WCR_CHECK("its keys are the floor keys a restore with no chain derives",
@@ -2412,7 +2536,8 @@ static int restore_tip_shielded_reads_nothing(void)
     WCR_CHECK("the app's shielded at-tip create runs no history statement",
               ran && asks == 0 && !rep.chain_history_consulted &&
               rep.history_skip == WALLET_RECOVERY_HISTORY_SHIELDED_ONLY &&
-              rep.receiving_keys == 0 && rep.birthday_recorded);
+              rep.receiving_keys == 0 && !rep.birthday_recorded &&
+              wcr_unread_from_zero(dir));
     return failures;
 }
 
@@ -2449,7 +2574,7 @@ static int restore_other_birthdays_read_history(void)
 /* Words from each address_coverage line, one per reason the chain was not
  * read. */
 #define WCR_SAYS_NO_CHAIN "has no chain to check against"
-#define WCR_SAYS_NEW_PHRASE "marks this phrase as made just now"
+#define WCR_SAYS_NEW_PHRASE "requires a phrase generated after this release"
 #define WCR_SAYS_SHIELDED "shielded_only derives no transparent address"
 
 /* The reply reports the chain unread with the coverage line that contains
@@ -2500,8 +2625,8 @@ static int restore_tip_reply_names_reason(void)
 static int t_restore_at_local_tip(void)
 {
     return restore_tip_recorded() + restore_tip_edge() +
-           restore_tip_refused() + restore_tip_plan_then_commit() +
-           restore_tip_plan_refused() + restore_default_no_birthday() +
+           restore_tip_short() + restore_tip_plan_then_commit() +
+           restore_tip_plan_short() + restore_default_no_birthday() +
            restore_refusal_keeps_phrase_out() + recovery_new_makes_no_state() +
            restore_tip_reads_no_history() +
            restore_tip_shielded_reads_nothing() +
@@ -2536,11 +2661,315 @@ static int t_scan_positive_control(void)
     return failures;
 }
 
+/* ── case 14: a node whose blocks are behind still creates ─────────────── */
+
+/* The anchor the rest of this group runs with: none, so its fixtures keep the
+ * birthdays their connected rows give. The cases below install a scaled-down
+ * one, or the anchor this release ships. */
+static const struct sha3_utxo_checkpoint wcr_no_anchor = { .height = 0 };
+static struct sha3_utxo_checkpoint wcr_anchor;
+
+static void wcr_anchor_at(int height, uint8_t fill)
+{
+    memset(&wcr_anchor, 0, sizeof(wcr_anchor));
+    wcr_anchor.height = height;
+    memset(wcr_anchor.block_hash, fill, sizeof(wcr_anchor.block_hash));
+    checkpoints_set_sha3_override_for_test(&wcr_anchor);
+}
+
+static struct uint256 wcr_header_hash(int h, uint8_t branch)
+{
+    struct uint256 x;
+    memset(&x, 0, sizeof(x));
+    x.data[0] = (uint8_t)h;
+    x.data[1] = (uint8_t)(h >> 8);
+    x.data[2] = (uint8_t)(h >> 16);
+    x.data[3] = (uint8_t)(0xb0 | branch);
+    return x;
+}
+
+static struct block_index *wcr_header(struct main_state *ms,
+                                      struct block_index *prev, int h,
+                                      uint8_t branch, uint32_t bits,
+                                      uint32_t status)
+{
+    struct uint256 hash = wcr_header_hash(h, branch);
+    struct block_index *pi =
+        chainstate_insert_block_index((struct chainstate *)ms, &hash);
+    if (!pi)
+        return NULL;
+    pi->nHeight = h;
+    pi->nBits = bits;
+    pi->nTime = 1000000 + (uint32_t)h * 150;
+    pi->nVersion = 4;
+    pi->nStatus = status;
+    pi->pprev = prev;
+    struct arith_uint256 proof = GetBlockProof(pi);
+    if (prev)
+        arith_uint256_add(&pi->nChainWork, &prev->nChainWork, &proof);
+    else
+        pi->nChainWork = proof;
+    return pi;
+}
+
+/* block_index.bin holding headers 0..n-1 the node accepted and holds no body
+ * for. With `forks`, beside them a fork from 1101 to 1250 with a 256-fold
+ * easier target, so longer and lighter, and a failed child of the last
+ * header: the best header stays n-1, by chain work. */
+static bool wcr_header_chain(const char *dir, int n, bool forks)
+{
+    struct main_state ms;
+    main_state_init(&ms);
+    struct block_index *prev = NULL, *base = NULL;
+    bool ok = true;
+    for (int h = 0; ok && h < n; h++) {
+        prev = wcr_header(&ms, prev, h, 0, 0x1f07ffff, BLOCK_VALID_TREE);
+        ok = prev != NULL;
+        if (h == 1100)
+            base = prev;
+    }
+    if (ok && forks) {
+        ok = base != NULL &&
+             wcr_header(&ms, prev, n, 2, 0x1f07ffff,
+                        BLOCK_VALID_TREE | BLOCK_FAILED_VALID) != NULL;
+        for (int h = 1101; ok && h <= 1250; h++)
+            ok = (base = wcr_header(&ms, base, h, 1, 0x2007ffff,
+                                    BLOCK_VALID_TREE)) != NULL;
+    }
+    ok = ok && save_block_index_flat_identity(dir, &ms, NULL).ok;
+    main_state_free(&ms);
+    return ok;
+}
+
+static bool wcr_birthday_of(const char *dir, int64_t *height,
+                            uint8_t hash[32])
+{
+    struct node_db ndb;
+    bool open = wcr_open(&ndb, dir);
+    bool got = open && db_wallet_birthday_get(&ndb, height, hash);
+    if (open)
+        node_db_close(&ndb);
+    printf("    birthday %lld\n", got ? (long long)*height : -1LL);
+    return got;
+}
+
+/* Headers to 1199, an anchor at 1000, no block row: the best header wins and
+ * its ancestor 100 below is the floor block. */
+static int unsynced_headers(void)
+{
+    int failures = 0;
+    char dir[1024];
+    struct wcr_run run;
+    int64_t b = 0;
+    uint8_t hash[32];
+    struct uint256 want = wcr_header_hash(1099, 0);
+    wcr_fixture(dir, sizeof(dir), "unsynced_headers");
+    wcr_anchor_at(1000, 0xa0);
+    WCR_CHECK("setup: no block rows, an anchor at 1000, headers to 1199, a "
+              "longer lighter fork and a failed child",
+              wcr_header_chain(dir, 1200, true));
+    memset(&run, 0, sizeof(run));
+    uint64_t opens = block_index_flat_cursor_opens_for_testing();
+    bool created = wcr_create(dir, WCR_PASS, &run) && run.rc == 0;
+    WCR_CHECK("a node with headers and no blocks creates a wallet, opening "
+              "block_index.bin once",
+              created && block_index_flat_cursor_opens_for_testing() ==
+                             opens + 1);
+    WCR_CHECK("the birthday is the best header 1199, not the fork's 1250, "
+              "with the hash of its ancestor at 1099",
+              created && wcr_birthday_of(dir, &b, hash) && b == 1199 &&
+              memcmp(hash, want.data, 32) == 0 &&
+              wcr_data_int(&run, "birthday_height") == 1199);
+    return failures;
+}
+
+/* Exposed new words use the release anchor even when saved headers lag. */
+static int unsynced_short_headers(void)
+{
+    int failures = 0;
+    char dir[1024];
+    struct wcr_run run;
+    int64_t b = 0;
+    uint8_t hash[32];
+    uint8_t want[32];
+    memset(want, 0xa0, sizeof(want));
+    wcr_fixture(dir, sizeof(dir), "unsynced_short");
+    wcr_anchor_at(1000, 0xa0);
+    WCR_CHECK("setup: headers to 299 under an anchor at 1000",
+              wcr_header_chain(dir, 300, false));
+    bool ran = wcr_restore_cli(dir, ",\"birthday_at_local_tip\":true", true,
+                               &run);
+    WCR_CHECK("the saved phrase keeps the release anchor despite short headers",
+              ran && run.rc == 0 && wcr_birthday_of(dir, &b, hash) &&
+              b == 1100 && memcmp(hash, want, 32) == 0 &&
+              wcr_unread_blocker(dir, WALLET_BIRTHDAY_PENDING));
+    return failures;
+}
+
+/* A save delayed while the node advances cannot skip payments received
+ * after phrase exposure. The release anchor stays below that whole range. */
+static int unsynced_sparse_row(void)
+{
+    int failures = 0;
+    char dir[1024];
+    struct wcr_run run;
+    int64_t b = 0;
+    uint8_t hash[32], want[32];
+    memset(want, 0xa0, sizeof(want));
+    wcr_fixture(dir, sizeof(dir), "unsynced_sparse");
+    wcr_anchor_at(1000, 0xa0);
+    WCR_CHECK("setup: after words are exposed at anchor 1000, the chain advances",
+              wcr_block(dir, 0x11, 1001, 3) &&
+              wcr_block(dir, 0x12, 4900, 3) &&
+              wcr_block(dir, 0x13, 5000, 3));
+    bool ran = wcr_restore_cli(dir, ",\"birthday_at_local_tip\":true", true,
+                               &run);
+    WCR_CHECK("delayed save still scans payment height 1001 after tip reaches 5000",
+              ran && run.rc == 0 && wcr_birthday_of(dir, &b, hash) &&
+              b == 1100 && b - WALLET_BIRTHDAY_MARGIN < 1001 &&
+              memcmp(hash, want, 32) == 0 &&
+              wcr_unread_blocker(dir, WALLET_BIRTHDAY_PENDING));
+    return failures;
+}
+
+/* Connected rows well past the anchor: the birthday is the node's own tip
+ * and block_index.bin, whose open hashes the whole file, is never opened,
+ * even though it holds headers past that tip. */
+static int synced_reads_no_headers(void)
+{
+    int failures = 0;
+    char dir[1024];
+    struct wcr_run run;
+    int64_t b = 0;
+    uint8_t hash[32];
+    wcr_fixture(dir, sizeof(dir), "synced_no_headers");
+    wcr_anchor_at(1000, 0xa0);
+    WCR_CHECK("setup: connected rows at 1900 and 2000, an anchor at 1000 and "
+              "headers to 2499",
+              wcr_block(dir, 0x19, 1900, 3) && wcr_block(dir, 0x20, 2000, 3) &&
+              wcr_header_chain(dir, 2500, false));
+    memset(&run, 0, sizeof(run));
+    uint64_t opens = block_index_flat_cursor_opens_for_testing();
+    bool created = wcr_create(dir, WCR_PASS, &run) && run.rc == 0;
+    WCR_CHECK("a synced node creates a wallet without opening block_index.bin",
+              created && block_index_flat_cursor_opens_for_testing() == opens);
+    WCR_CHECK("the birthday is its tip 2000 on the row at 1900",
+              created && wcr_birthday_of(dir, &b, hash) && b == 2000 &&
+              hash[0] == 0x19 && hash[31] == 0x19 &&
+              wcr_data_int(&run, "birthday_height") == 2000);
+    return failures;
+}
+
+/* What boot then does with the wallet on a chain still at 1001. */
+static int unsynced_boot(const char *dir, int floor_height)
+{
+    int failures = 0;
+    struct node_db ndb;
+    struct wcr_chain k;
+    bool open = wcr_open(&ndb, dir);
+    bool made = open && wcr_chain_make(&k, 1002, -1, 0);
+    int floor = 0;
+    WCR_CHECK("a chain at 1001 has not reached the floor: AHEAD",
+              made && wallet_birthday_check(&ndb, &k.chain, &floor) ==
+                          WALLET_BIRTHDAY_AHEAD && floor == floor_height);
+    struct wallet *w = made ? wcr_boot_wallet(&ndb, &k, 0) : NULL;
+    WCR_CHECK("boot keeps the floor but remains unread until it is verified",
+              w && w->initial_scan_floor == floor_height &&
+              w->scan_retry.pending && wallet_scanned_through_height(w) < 0);
+    if (w) {
+        wallet_free(w);
+        free(w);
+    }
+    if (made)
+        wcr_chain_free(&k);
+    if (open)
+        node_db_close(&ndb);
+    return failures;
+}
+
+/* A fresh node stores the release anchor and remains unread until the
+ * active chain verifies that floor and a scan covers the remaining blocks. */
+static int unsynced_release_anchor(void)
+{
+    int failures = 0;
+    char dir[1024];
+    struct wcr_run run;
+    int64_t b = 0;
+    uint8_t hash[32];
+    struct uint256 want;
+    checkpoints_reset_sha3_override_for_test();
+    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+    int anchor = cp ? cp->height : 0;
+    int floor = anchor;
+    if (cp) memcpy(want.data, cp->block_hash, sizeof(want.data));
+    WCR_CHECK("setup: the release ships an anchor above a checkpoint",
+              anchor > 0 && floor > 0);
+    wcr_fixture(dir, sizeof(dir), "unsynced_fresh");
+    bool ran = wcr_restore_cli(dir, ",\"birthday_at_local_tip\":true", true,
+                               &run);
+    WCR_CHECK("an empty datadir saves a phrase made now",
+              ran && run.rc == 0 && wcr_data_bool(&run, "committed"));
+    WCR_CHECK("its birthday retains the release anchor as the scan floor",
+              ran && wcr_birthday_of(dir, &b, hash) &&
+              b == floor + WALLET_BIRTHDAY_MARGIN &&
+              memcmp(hash, want.data, 32) == 0);
+    WCR_CHECK("the wallet remains unread until coverage is verified",
+              ran && wcr_unread_blocker(dir,
+                  wcr_data_bool(&run, "birthday_recorded")
+                      ? WALLET_BIRTHDAY_PENDING : WALLET_RESTORE_BLOCKER_UNREAD));
+    failures += unsynced_boot(dir, floor);
+    checkpoints_set_sha3_override_for_test(&wcr_no_anchor);
+    return failures;
+}
+
+/* An older phrase restored on the same unsynced node is unchanged: no
+ * birthday from headers or the anchor, and a named one counts only when the
+ * datadir holds its block. */
+static int unsynced_older_phrase(void)
+{
+    int failures = 0;
+    char dir[1024], extra[256], hex[65];
+    struct wcr_run run;
+    int64_t b = 0;
+    uint8_t hash[32];
+    wcr_fixture(dir, sizeof(dir), "unsynced_older");
+    wcr_anchor_at(1000, 0xa0);
+    WCR_CHECK("setup: headers to 1199 under an anchor at 1000",
+              wcr_header_chain(dir, 1200, false));
+    bool ran = wcr_restore_cli(dir, "", true, &run);
+    WCR_CHECK("a restore without a birthday stores none and reads unread "
+              "from 0", ran && run.rc == 0 && !wcr_birthday_of(dir, &b, hash) &&
+              wcr_unread_from_zero(dir));
+    struct uint256 header = wcr_header_hash(1099, 0);
+    for (int i = 0; i < 32; i++)
+        snprintf(hex + 2 * i, 3, "%02x", header.data[i]);
+    wcr_fixture(dir, sizeof(dir), "unsynced_named");
+    snprintf(extra, sizeof(extra),
+             ",\"birthday\":{\"height\":1199,\"hash\":\"%s\"}", hex);
+    ran = wcr_header_chain(dir, 1200, false) &&
+          wcr_restore_cli(dir, extra, true, &run);
+    WCR_CHECK("a named birthday only a header holds is rejected and the "
+              "wallet reads unread from 0",
+              ran && run.rc == 0 && wcr_data_bool(&run, "birthday_rejected") &&
+              !wcr_birthday_of(dir, &b, hash) && wcr_unread_from_zero(dir));
+    checkpoints_set_sha3_override_for_test(&wcr_no_anchor);
+    return failures;
+}
+
+static int t_unsynced_create(void)
+{
+    int failures = unsynced_headers() + unsynced_short_headers() +
+                   unsynced_sparse_row() + synced_reads_no_headers();
+    checkpoints_set_sha3_override_for_test(&wcr_no_anchor);
+    return failures + unsynced_release_anchor() + unsynced_older_phrase();
+}
+
 int test_wallet_create(void);
 int test_wallet_create(void)
 {
     int failures = 0;
     chain_params_select(CHAIN_MAIN);
+    checkpoints_set_sha3_override_for_test(&wcr_no_anchor);
     failures += t_round_trip();
     failures += t_refusals();
     failures += t_phrase_not_captured_and_encrypted();
@@ -2561,6 +2990,8 @@ int test_wallet_create(void)
     failures += t_recovery_new();
     failures += t_restore_at_local_tip();
     failures += t_scan_positive_control();
+    failures += t_unsynced_create();
+    checkpoints_reset_sha3_override_for_test();
     if (failures == 0)
         printf("wallet_create: OK (all wallet creation gates pass)\n");
     else

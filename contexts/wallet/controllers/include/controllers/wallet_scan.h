@@ -39,20 +39,31 @@ int wallet_scan_blocks(struct node_db *ndb,
  *           restored wallet carries a pending retry until a rescan reads it.
  *   VALID   the active chain holds the recorded floor block; `*floor` is its
  *           height and the first scan may start there.
+ *   AHEAD   the active chain has a tip below the floor height (a node still
+ *           syncing toward a birthday set from its anchor or headers, or one
+ *           rewound below it); `*floor` is that height. The first scan starts
+ *           there only after the floor block is verified. Until then coverage
+ *           remains unread and the catch-up walk cannot skip the prefix. A
+ *           matching floor starts a pending scan from that floor.
  *   CHANGED a birthday exists but the active chain does not hold the floor
- *           block (reorganised away, rewound below it, or chain not loaded):
- *           nothing about the blocks below it can be assumed, the scan is
- *           from genesis.
+ *           block (another block at its height, or no chain loaded): nothing
+ *           about the blocks below it can be assumed, the scan is from
+ *           genesis.
  * wallet_scan_blocks never applies the floor: a transparent scan, a rescan and
  * the scan an imported key triggers cover their whole range. Only the boot
  * catch-up of a wallet that has scanned nothing yet uses it. */
 enum wallet_birthday_state {
     WALLET_BIRTHDAY_NONE,
     WALLET_BIRTHDAY_VALID,
+    WALLET_BIRTHDAY_AHEAD,
     WALLET_BIRTHDAY_CHANGED,
 };
 enum wallet_birthday_state wallet_birthday_check(
     struct node_db *ndb, const struct active_chain *chain, int *floor);
+
+void wallet_birthday_reconcile(struct wallet *w, struct node_db *ndb,
+                               struct active_chain *chain,
+                               const struct block_index *reached);
 
 /* OS-S2 #4 Pass-1 file-match cache (exposed for unit tests). */
 

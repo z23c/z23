@@ -36,6 +36,9 @@
 #include "storage/coins_kv.h"
 #include "storage/coins_ram.h"
 #include "controllers/sync_controller.h"
+#include "controllers/wallet_scan.h"
+#include "models/wallet_key.h"
+#include "config/boot_internal.h"
 #include "config/db_service.h"
 #include "core/serialize.h"
 #include "models/database.h"
@@ -661,6 +664,61 @@ static int tp_witness_wiring(void)
 }
 
 int test_tip_finalize_post_step(void);
+static int tp_birthday_verdict(struct wallet *w, bool match, bool stepped)
+{
+    int failures = 0;
+    TP_CHECK("birthday live floor verdict", stepped &&
+             (match ? (w->scan_retry.pending && w->scan_retry.from == 3 &&
+                       strcmp(w->scan_retry.blocker, WALLET_BIRTHDAY_SCAN_PENDING) == 0) :
+              (w->scan_retry.pending && w->initial_scan_floor == 0 &&
+               wallet_scanned_through_height(w) < 0 &&
+               strcmp(w->scan_retry.blocker, WALLET_BIRTHDAY_CHANGED_BLOCKER) == 0)));
+    return failures;
+}
+
+static int tp_birthday_live(bool match)
+{
+    int failures = 0;
+    static struct tp_wire x;
+    static struct main_state ms;
+    memset(&x, 0, sizeof(x));
+    memset(&ms, 0, sizeof(ms));
+    bool up = tp_wire_chain(&x) && tp_wire_wallet(&x);
+    if (!up) {
+        TP_CHECK("birthday live fixture", false);
+        tp_wire_close(&x);
+        return failures;
+    }
+    main_state_init(&ms);
+    x.rt.main_state = &ms;
+    x.t.bi[0].phashBlock = &x.t.bi[0].hashBlock;
+    uint8_t expected[32];
+    memcpy(expected, x.t.bi[2].phashBlock->data, sizeof(expected));
+    if (!match)
+        expected[0] ^= 1;
+    bool ready = db_wallet_birthday_set(&x.ndb, 103, expected) &&
+        active_chain_move_window_tip(&ms.chain_active, &x.t.bi[0]);
+    if (match)
+        x.w->sapling_keys.num_unscannable = 1;
+    if (ready)
+        (void)boot_wallet_boot_catch_up(x.w, &ms.chain_active, x.dir, &x.ndb);
+    TP_CHECK("birthday waits unread before live floor", ready &&
+             x.w->scan_retry.pending && wallet_scanned_through_height(x.w) < 0);
+    bool stepped = ready && active_chain_move_window_tip(&ms.chain_active, &x.t.bi[1]) &&
+        tip_finalize_run_wallet_reconcile(&x.t.bi[1]);
+    TP_CHECK("birthday stays unread at the preceding tip", stepped &&
+             x.w->scan_retry.pending && wallet_scanned_through_height(x.w) < 0);
+    stepped = stepped && active_chain_move_window_tip(&ms.chain_active, &x.t.bi[2]) &&
+        tip_finalize_run_wallet_reconcile(&x.t.bi[2]);
+    failures += tp_birthday_verdict(x.w, match, stepped);
+    (void)db_service_run_write(&x.svc, tp_noop_write, NULL);
+    x.w->sapling_keys.num_unscannable = 0;
+    x.rt.main_state = NULL;
+    main_state_free(&ms);
+    tp_wire_close(&x);
+    return failures;
+}
+
 int test_tip_finalize_post_step(void)
 {
     int failures = 0;
@@ -947,6 +1005,8 @@ out_early:
     test_rm_rf(dir);
 
     failures += tp_witness_wiring();
+    failures += tp_birthday_live(true);
+    failures += tp_birthday_live(false);
     printf("tip_finalize_post_step tests: %s\n",
            failures ? "FAILED" : "PASSED");
     return failures;

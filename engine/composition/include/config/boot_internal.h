@@ -342,9 +342,9 @@ int boot_wallet_catch_up(struct wallet *w, const struct active_chain *chain,
                          struct wallet_rescan_report *report);
 
 /* The boot-time catch-up: gives a wallet made by `core wallet create` the
- * verified birthday floor for its first scan (wallet_birthday_check), or marks
- * the whole chain unread when the chain no longer holds the floor block, then
- * runs boot_wallet_catch_up. */
+ * verified birthday floor for its first scan (wallet_birthday_check). A chain
+ * below the floor keeps coverage unread until the floor is verified; a changed
+ * floor marks the whole chain unread. Otherwise runs boot_wallet_catch_up. */
 int boot_wallet_boot_catch_up(struct wallet *w, const struct active_chain *chain,
                               const char *datadir, struct node_db *ndb);
 void boot_stop_db_service_kernel(void);

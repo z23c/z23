@@ -756,11 +756,11 @@ static void create_failure_refused_tests(void)
 {
     struct fake f;
     struct wsu w;
-    /* The node cannot write yet: the words stay, the key stays, the node runs, and the same phrase is written on a retry. */
+    /* The node still held its files: the words stay, the key stays, the node runs, and the same phrase is written on a retry. */
     fresh(&f, &w, true);
-    error_reply(&f.script, "NO_LOCAL_CHAIN");
+    error_reply(&f.script, "DATADIR_LOCKED");
     create_all(&w);
-    assert(w.step == WSU_WORDS && w.write == WSU_WRITE_FAILED && w.write_failure == WSU_NO_TIP && f.discards == 0 && f.running && f.starts == 1);
+    assert(w.step == WSU_WORDS && w.write == WSU_WRITE_FAILED && w.write_failure == WSU_NODE_BUSY && f.discards == 0 && f.running && f.starts == 1);
     assert(retryable_state(&f));
     script_say(&f.script, true, RESTORED_TIP);
     assert(wsu_retry_write(&w) && w.write == WSU_WRITE_PENDING);
@@ -797,9 +797,9 @@ static void create_failure_present_after_refusal_tests(void)
     struct fake f;
     struct wsu w;
     fresh(&f, &w, true);
-    error_reply(&f.script, "NO_LOCAL_CHAIN");
+    error_reply(&f.script, "DATADIR_LOCKED");
     create_all(&w);
-    assert(w.write == WSU_WRITE_FAILED && w.write_failure == WSU_NO_TIP && w.held.count == 24 && w.phrase.count == 24);
+    assert(w.write == WSU_WRITE_FAILED && w.write_failure == WSU_NODE_BUSY && w.held.count == 24 && w.phrase.count == 24);
     error_reply(&f.script, "WALLET_ALREADY_PRESENT");
     assert(wsu_retry_write(&w));
     wsu_write_job(&w);
@@ -832,7 +832,7 @@ static void create_give_up_present_tests(void)
     struct wsu w;
     /* A wallet found there is blocked, not claimed. */
     fresh(&f, &w, true);
-    error_reply(&f.script, "NO_LOCAL_CHAIN");
+    error_reply(&f.script, "DATADIR_LOCKED");
     create_all(&w);
     assert(wsu_give_up_write(&w));
     snprintf(f.script.status, sizeof(f.script.status), PRESENT_REPLY);
@@ -853,15 +853,15 @@ static void create_buttons_wait_for_start_test(void)
     struct fake f;
     struct wsu w;
     fresh(&f, &w, true);
-    error_reply(&f.script, "NO_LOCAL_CHAIN");
+    error_reply(&f.script, "DATADIR_LOCKED");
     f.tap_on_start = true;
     create_all(&w);
     assert(f.tapped_write == WSU_WRITE_RUNNING && f.tapped_phase == WSU_PHASE_RESTART && !f.tapped_give_up && !f.tapped_retry);
-    assert(w.write == WSU_WRITE_FAILED && w.write_failure == WSU_NO_TIP && f.running && f.starts == 1 && f.starts_refused == 0);
+    assert(w.write == WSU_WRITE_FAILED && w.write_failure == WSU_NODE_BUSY && f.running && f.starts == 1 && f.starts_refused == 0);
     assert(wsu_give_up_write(&w) && w.step == WSU_CHECKING);
     wsu_destroy(&w);
     fresh(&f, &w, true);
-    error_reply(&f.script, "NO_LOCAL_CHAIN");
+    error_reply(&f.script, "DATADIR_LOCKED");
     create_all(&w);
     assert(wsu_retry_write(&w) && w.write == WSU_WRITE_PENDING);
     wsu_destroy(&w);
@@ -2248,7 +2248,7 @@ static void failure_text_tests(void)
     }
     assert(!strcmp(wsu_failure_text(WSU_NODE_BUSY), "Your node is still stopping. Try again in a minute."));
     assert(strstr(wsu_failure_text(WSU_DECLINED), "nothing was changed") && strstr(wsu_failure_text(WSU_PRESENT), "Nothing was changed"));
-    assert(strstr(wsu_failure_text(WSU_UNKNOWN), "a wallet may have been started") && strstr(wsu_failure_text(WSU_NO_TIP), "keeps syncing"));
+    assert(strstr(wsu_failure_text(WSU_UNKNOWN), "a wallet may have been started"));
     assert(strstr(wsu_failure_text(WSU_NO_BIRTHDAY), "nothing is deleted") && strstr(wsu_failure_text(WSU_ASIDE_STUCK), "Do not create a new wallet"));
     assert(!wsu_failure_text(WSU_NO_FAILURE)[0]);
 }
@@ -2459,32 +2459,60 @@ static void confirm_note_tests(void)
     assert(v.write == WSU_WRITE_DONE && wsu_view_confirm_ready(&v) && !wsu_confirm_note(&v)[0] && !wsu_waiting(&w));
     wsu_destroy(&w);
     fresh(&f, &w, true);
-    error_reply(&f.script, "NO_LOCAL_CHAIN");
+    error_reply(&f.script, "DATADIR_LOCKED");
     create_all(&w);
     wsu_words_seen(&w);
     pick_each_right(&w, &all);
     wsu_view_read(&w, &v);
     assert(v.write == WSU_WRITE_FAILED && !wsu_view_confirm_ready(&v) && !wsu_confirm_note(&v)[0]);
-    assert(strstr(wsu_write_failure_text(v.write_failure), "It keeps syncing. Tap Try again in a few minutes."));
+    assert(!strcmp(wsu_write_failure_text(v.write_failure), "Your node did not pause in time, so your wallet is not saved yet. Tap Try again."));
     wsu_destroy(&w);
 }
-/* Each failed write says what happened in plain words and the one next step, Try again. None sends the owner to Check again, a
- * button the words and the check do not have, and none says the words cannot be shown while they are on screen. */
+/* Each failed write says what happened in plain words and the one next step. One a new attempt can clear names Try again; one that
+ * would fail the same way names no Try again, says the node keeps running and names Stop and check this phone. None sends the owner
+ * to Check again, a button the words and the check do not have, and none says the words cannot be shown while they are on screen. */
 static void write_failure_text_tests(void)
 {
     static const char *const jargon[] = {"datadir", "RPC", "pid", "database", "JSON", "marker", "birthday", "Check again", "cannot be shown"};
-    static const enum wsu_failure own[] = {WSU_NODE_BUSY, WSU_NO_TIP, WSU_STORAGE, WSU_NOT_RUN, WSU_UNKNOWN};
-    static const enum wsu_failure other[] = {WSU_REFUSED, WSU_BAD_PHRASE};
+    static const enum wsu_failure own[] = {WSU_NODE_BUSY, WSU_STORAGE, WSU_NOT_RUN, WSU_UNKNOWN, WSU_REFUSED};
     for (size_t i = 0; i < sizeof(own) / sizeof(own[0]); ++i) {
         const char *text = wsu_write_failure_text(own[i]);
-        assert(text[0] && strlen(text) < 200 && strstr(text, "Tap Try again"));
+        assert(text[0] && strlen(text) < 200);
+        if (wsu_write_retryable(own[i])) assert(strstr(text, "Tap Try again") && !strstr(text, "Stop and check"));
+        else assert(!strstr(text, "Try again") && strstr(text, "the same way. Your node keeps running. Tap Stop and check this phone."));
         for (size_t j = 0; j < sizeof(jargon) / sizeof(jargon[0]); ++j) assert(!strstr(text, jargon[j]));
         for (size_t k = i + 1; k < sizeof(own) / sizeof(own[0]); ++k) assert(strcmp(text, wsu_write_failure_text(own[k])));
     }
-    for (size_t i = 0; i < sizeof(other) / sizeof(other[0]); ++i)
-        assert(!strcmp(wsu_write_failure_text(other[i]), "Your node refused to save your wallet, so nothing was saved. Tap Try again."));
+    assert(wsu_write_retryable(WSU_NODE_BUSY) && wsu_write_retryable(WSU_NOT_RUN) && wsu_write_retryable(WSU_UNKNOWN));
+    assert(!wsu_write_retryable(WSU_STORAGE) && !wsu_write_retryable(WSU_REFUSED) && !wsu_write_retryable(WSU_BAD_PHRASE));
+    assert(!strcmp(wsu_write_failure_text(WSU_BAD_PHRASE), wsu_write_failure_text(WSU_REFUSED)));
+    assert(!strcmp(wsu_write_failure_text(WSU_REFUSED), "Your node refused to save your wallet, so nothing was saved, and saving again would be "
+                                                        "refused the same way. Your node keeps running. Tap Stop and check this phone."));
     assert(!strcmp(wsu_write_failure_text(WSU_NODE_BUSY), "Your node did not pause in time, so your wallet is not saved yet. Tap Try again."));
     assert(!wsu_write_failure_text(WSU_NO_FAILURE)[0]);
+}
+/* A write that would fail the same way again offers no Try again that pauses the node: the retry is refused and the node is not
+ * paused again, the words stay until the owner takes the way out, and the way out works under the words. */
+static void create_failure_repeats_case(const char *code, enum wsu_failure failure)
+{
+    struct fake f;
+    struct wsu w;
+    fresh(&f, &w, true);
+    error_reply(&f.script, code);
+    create_all(&w);
+    assert(w.step == WSU_WORDS && w.write == WSU_WRITE_FAILED && w.write_failure == failure);
+    assert(f.stops == 1 && f.starts == 1 && f.running && f.discards == 0);
+    assert(!wsu_retry_write(&w) && w.write == WSU_WRITE_FAILED && w.held.count == 24 && w.phrase.count == 24);
+    wsu_write_job(&w);
+    assert(f.stops == 1 && f.starts == 1 && w.write == WSU_WRITE_FAILED);
+    assert(wsu_give_up_write(&w) && w.step == WSU_CHECKING && w.held.count == 0 && w.phrase.count == 0 && !w.write_pass[0]);
+    wsu_destroy(&w);
+}
+static void create_failure_repeats_tests(void)
+{
+    create_failure_repeats_case("NODE_DB_UNREADABLE", WSU_STORAGE);
+    create_failure_repeats_case("BIRTHDAY_CONFLICT", WSU_REFUSED);
+    create_failure_repeats_case("INVALID_PHRASE", WSU_BAD_PHRASE);
 }
 /* The check after a restart and Start over each name their own pause, with its clock, while the node exits. */
 static void check_and_aside_live_line_tests(void)
@@ -2694,6 +2722,7 @@ int main(int argc, char **argv)
     live_line_slow_write_tests();
     confirm_note_tests();
     write_failure_text_tests();
+    create_failure_repeats_tests();
     check_and_aside_live_line_tests();
     pick_random_failure_tests();
     phase_order_tests();

@@ -72,16 +72,18 @@ int db_sapling_key_count(struct node_db *ndb);
 /* Blocks kept below a wallet's birthday tip. */
 #define WALLET_BIRTHDAY_MARGIN 100
 
-/* Wallet birthday: the tip height a wallet was created at, and the hash of the
- * block WALLET_BIRTHDAY_MARGIN below it (the floor block). Every block up to
- * the floor existed when the wallet was made, so none can pay it; the first
- * scan starts at the floor, and only while the active chain holds that exact
- * block (which proves every block below it is unchanged). The tip need not be
+/* Wallet birthday: the scan floor plus WALLET_BIRTHDAY_MARGIN, and the
+ * hash of the block at that floor (the
+ * floor block). Every block up to the floor existed when the wallet was made,
+ * so none can pay it; the first scan starts at the floor once the active
+ * chain reaches it, and only while the active chain holds that exact block
+ * (which proves every block below it is unchanged). The birthday need not be
  * on the active chain: the floor block is what is checked. Absent for wallets
- * created before birthdays, for restored wallets and for chains of at most the
- * margin; those scan from the beginning (a chain above 1000 blocks defers the
- * first boot catch-up, so a restored wallet records a pending retry that only
- * a rescan over the whole range clears). Written once, with the wallet. */
+ * created before birthdays, for restored wallets and for a create that knows
+ * no block at least the margin below any height it proves; those scan from
+ * the beginning (a chain above 1000 blocks defers the first boot catch-up,
+ * so a restored wallet records a pending retry that only a rescan over the
+ * whole range clears). Written once, with the wallet. */
 bool db_wallet_birthday_get(struct node_db *ndb, int64_t *height,
                             uint8_t floor_hash[32]);
 bool db_wallet_birthday_set(struct node_db *ndb, int64_t height,

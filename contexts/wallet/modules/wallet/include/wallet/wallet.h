@@ -16,6 +16,10 @@
 #include "util/result.h"
 #include "util/sync.h"
 #include <stdbool.h>
+
+#define WALLET_BIRTHDAY_PENDING "WALLET_BIRTHDAY_PENDING"
+#define WALLET_BIRTHDAY_SCAN_PENDING "WALLET_BIRTHDAY_SCAN_PENDING"
+#define WALLET_BIRTHDAY_CHANGED_BLOCKER "WALLET_BIRTHDAY_CHAIN_CHANGED"
 #include <stdint.h>
 
 struct tx_mempool;

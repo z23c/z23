@@ -2,33 +2,12 @@
  * Distributed under the MIT software license, see the accompanying
  * file COPYING or http://www.opensource.org/licenses/mit-license.php. */
 
-/* node_db_catchup_service: the bulk node_db sync-catchup orchestration.
- *
- * node_db_catchup_service_run is the core catchup algorithm lifted
- * verbatim out of sync_controller_catchup.c (node_db_sync_catchup). It
- * drives the turbo-mode scope, the DB connection verify, Sapling-tree
- * init, the main transaction/commit block-index loop (lean index +
- * wallet scan + witness advance), and turbo-mode teardown.
- *
- * The block-level helper it owns (sync_block_lean) is a single-use
- * orchestration detail of catchup and lives here as a static; the
- * Sapling try-decrypt helper moved to node_db_catchup_decrypt.c (E1
- * file-size ratchet) and the lock-contention seatbelts (commit cadence,
- * BUSY_SNAPSHOT restart, abort-streak park) live in
- * node_db_catchup_lock_guard.c. The shared sync-controller helpers
- * it calls (turbo scope, job-status setters, wallet-tx checked write,
- * witness advance, block-file mmap) are defined in the sync controller
- * siblings and reached here by forward declaration — their definitions
- * are not duplicated. */
+/* Bulk node database catch-up coordinates block indexing, wallet scanning,
+ * witness advancement, transaction commits and turbo-mode teardown.
+ * Decryption and lock-contention recovery live in their dedicated services. */
 
-// one-result-type-ok:recovery-primitive-int — E2 (one way out):
-// node_db_catchup_service_run keeps the LOCKED plain-int contract (blocks
-// indexed, or -1 on setup failure). Its single caller is the catchup job
-// thread, which stores the int into job->result; the recovery-primitive
-// int is consumed across the coins-wedge recovery surface. A zcl_result
-// here buys nothing and forces a job-struct rewrite. Every failure path
-// is logged via LOG_*/fprintf before the return, so the reason still
-// travels with the failure.
+// one-result-type-ok:recovery-primitive-int — the catchup job consumes the
+// indexed block count or -1 on setup failure; failures are logged before return.
 
 #include "platform/time_compat.h"
 #include "controllers/sync_controller.h"
@@ -810,8 +789,15 @@ static bool catchup_wallet_needs_prefix(const struct wallet *w)
     int keys = catchup_count_wallet_keys(w);
     if (w)
         keys += (int)w->sapling_keys.num_keys;
-    return node_db_catchup_prefix_needed(node_db_catchup_seed_height(), keys,
-                                         w ? w->initial_scan_floor : 0);
+    int floor = 0;
+    if (w) {
+        zcl_mutex_lock(&((struct wallet *)w)->cs);
+        floor = w->initial_scan_floor;
+        if (w->scan_retry.pending && w->scan_retry.from < floor)
+            floor = w->scan_retry.from;
+        zcl_mutex_unlock(&((struct wallet *)w)->cs);
+    }
+    return node_db_catchup_prefix_needed(node_db_catchup_seed_height(), keys, floor);
 }
 
 /* First height a pass walks: the cursor next height, or with

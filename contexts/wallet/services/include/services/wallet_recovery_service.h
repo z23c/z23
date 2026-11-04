@@ -56,7 +56,11 @@ struct wallet_recovery_request {
     /* Wallet creation (wallet_create_service) drives this same writer. */
     const char *passphrase;     /* at-rest passphrase; NULL = environment policy */
     bool        shielded_only;  /* mint no transparent key */
-    bool        record_birthday; /* store the datadir chain tip as the birthday */
+    /* A phrase made now: store a birthday no higher than the highest of the
+     * datadir's connected tip, the shipped anchor and its best header, never
+     * a height a peer only claims (wallet_recovery_service.c). With no floor
+     * above genesis nothing is stored and the first scan starts at genesis. */
+    bool        record_birthday;
     /* A restore of a phrase made just now: the birthday its create reply
      * named. height is the birthday, hash the block WALLET_BIRTHDAY_MARGIN
      * below it. Honoured only when this datadir holds that block; otherwise
@@ -64,10 +68,11 @@ struct wallet_recovery_request {
     bool        has_birthday;
     int64_t     birthday_height;
     uint8_t     birthday_hash[32];
-    /* A phrase made just now: record the datadir's own chain tip as the
-     * birthday at write time, as a create does. Refused with -72 when the
-     * datadir holds no chain above WALLET_BIRTHDAY_MARGIN, and with -71 when
-     * has_birthday is also set. */
+    /* Only for a phrase generated after the running release was built. The
+     * birthday uses its shipped mainnet anchor, never
+     * mutable chain data, so retries remain safe after payments arrive. With
+     * no usable anchor the wallet reads from genesis. Old phrases must use an
+     * ordinary restore. Refused with -71 when has_birthday is also set. */
     bool        birthday_at_local_tip;
 };
 
@@ -188,7 +193,6 @@ struct wallet_recovery_report {
  *   -68 passphrase shorter than the minimum
  *   -70 this process already serves a wallet (a commit refuses; a plan answers)
  *   -71 birthday and birthday_at_local_tip were both given
- *   -72 birthday_at_local_tip, and the datadir holds no chain above the margin
  */
 struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
                                       struct wallet_recovery_report *out);

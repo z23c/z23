@@ -153,7 +153,24 @@ struct zcl_result block_index_flat_cursor_open(
 struct zcl_result block_index_flat_cursor_read(
     struct block_index_flat_cursor *cur, int32_t height,
     uint8_t out_hash[32], uint8_t out_root[32]);
+/* The best header the file holds: of the rows the node accepted as headers
+ * (BLOCK_VALID_TREE or above) that carry no failure mark, the one with the
+ * most chain work, the highest among equals. -112 when there is none. */
+struct zcl_result block_index_flat_cursor_best(
+    struct block_index_flat_cursor *cur, int32_t *height);
+/* The hash of the best header's ancestor at `height`, walked down through
+ * prev_hash, so it is a block of the chain that header extends, never a
+ * sibling at that height. Each step is one binary search, so the cost grows
+ * with the distance below the best header. -110 above the best header,
+ * -113 when a parent row is missing. */
+struct zcl_result block_index_flat_cursor_best_ancestor(
+    struct block_index_flat_cursor *cur, int32_t height, uint8_t out_hash[32]);
 void block_index_flat_cursor_close(struct block_index_flat_cursor *cur);
+/* Test-only count of block_index_flat_cursor_open calls this process made
+ * that tried to open the file, whether or not it opened. Not gated behind
+ * ZCL_TESTING: a cheap atomic read, the convention of
+ * block_index_cache_envelope_demotions_for_testing. */
+uint64_t block_index_flat_cursor_opens_for_testing(void);
 
 /* load_block_index_flat ALWAYS re-derives the pointer-graph-derived fields
  * (nChainWork, nChainTx, skip links, cached branch id) through the canonical

@@ -139,10 +139,10 @@ static const char *wrp_coverage_text(enum wallet_recovery_history_skip why)
 {
     switch (why) {
     case WALLET_RECOVERY_HISTORY_NEW_PHRASE:
-        return "birthday_at_local_tip marks this phrase as made just now, so "
-               "it has no history below this datadir's tip to find: the "
+        return "birthday_at_local_tip requires a phrase generated after this release "
+               "was built. Its fixed mainnet anchor bounds the scan, even on retry: the "
                "rebuild derived the standard lookahead without reading the "
-               "chain. Restore a phrase that has been used without "
+               "chain. Without an anchor it reads from genesis. Restore an older phrase without "
                "birthday_at_local_tip, so the scan follows its history";
     case WALLET_RECOVERY_HISTORY_SHIELDED_ONLY:
         return "shielded_only derives no transparent address, so there was "
@@ -479,7 +479,6 @@ static const char *wrp_failure_code(int code, enum zcl_command_exit *ex)
         { -68, "PASSPHRASE_TOO_SHORT", ZCL_COMMAND_EXIT_INVALID },
         { -70, "WALLET_LIVE_IN_PROCESS", ZCL_COMMAND_EXIT_BLOCKED },
         { -71, "BIRTHDAY_CONFLICT", ZCL_COMMAND_EXIT_INVALID },
-        { -72, "NO_LOCAL_CHAIN", ZCL_COMMAND_EXIT_BLOCKED },
     };
     for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
         if (map[i].code == code) {

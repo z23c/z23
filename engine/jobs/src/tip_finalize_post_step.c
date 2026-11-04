@@ -27,6 +27,7 @@
 #include "util/blocker.h"                /* typed evidence blocker */
 #include "controllers/blockchain_controller.h"
 #include "controllers/sync_controller.h"
+#include "controllers/wallet_scan.h"
 #include "core/uint256.h"
 #include "models/database.h"            /* struct node_db */
 #include "chain/mmr.h"                  /* MMR_COMMITMENT_INTERVAL boundary */
@@ -316,26 +317,12 @@ static void tip_finalize_advance_witnesses(bool regtest_on_demand,
                  pindex_new->nHeight);
 }
 
-/* Idempotent wallet subset of post-finalize publication. A body can become
- * visible after another authority already published this height; in that
- * case MMR/MMB must not append twice, but wallet confirmation, Sapling note,
- * nullifier, and derived wallet rows still have to observe the exact body. */
-static void tip_finalize_reconcile_wallet_body(
-    struct block_index *pindex_new, const struct block *blk)
+static void tip_finalize_wallet_transactions(struct block_index *pindex_new,
+                                             const struct block *blk,
+                                             struct wallet *wallet,
+                                             struct node_db *ndb,
+                                             bool regtest_on_demand)
 {
-    if (!pindex_new || !blk ||
-        atomic_load_explicit(&g_body_pull_active, memory_order_relaxed))
-        return;
-
-    struct wallet *wallet = app_runtime_wallet();
-    struct node_db *ndb = app_runtime_node_db();
-    const bool regtest_on_demand = tip_finalize_regtest_on_demand();
-    if (!wallet)
-        return;
-
-    if (regtest_on_demand)
-        (void)wallet_advance_confirmations(wallet, pindex_new->nHeight);
-
     for (size_t i = 0; i < blk->num_vtx; i++) {
         const struct transaction *tx = &blk->vtx[i];
         bool wallet_involved = wallet_sync_transaction(wallet, tx, pindex_new);
@@ -358,8 +345,34 @@ static void tip_finalize_reconcile_wallet_body(
         if (tx->num_shielded_spend > 0)
             wallet_mark_sapling_nullifiers_spent(wallet, tx);
     }
+}
+
+/* Idempotent wallet subset of post-finalize publication. A body can become
+ * visible after another authority already published this height; in that
+ * case MMR/MMB must not append twice, but wallet confirmation, Sapling note,
+ * nullifier, and derived wallet rows still have to observe the exact body. */
+static void tip_finalize_reconcile_wallet_body(
+    struct block_index *pindex_new, const struct block *blk)
+{
+    if (!pindex_new || !blk ||
+        atomic_load_explicit(&g_body_pull_active, memory_order_relaxed))
+        return;
+
+    struct wallet *wallet = app_runtime_wallet();
+    struct node_db *ndb = app_runtime_node_db();
+    const bool regtest_on_demand = tip_finalize_regtest_on_demand();
+    if (!wallet)
+        return;
+
+    if (regtest_on_demand)
+        (void)wallet_advance_confirmations(wallet, pindex_new->nHeight);
+
+    tip_finalize_wallet_transactions(pindex_new, blk, wallet, ndb, regtest_on_demand);
     tip_finalize_advance_witnesses(regtest_on_demand, ndb, blk, pindex_new,
                                    wallet);
+    struct main_state *ms = app_runtime_main_state();
+    if (ms && ndb && active_chain_at(&ms->chain_active, pindex_new->nHeight) == pindex_new)
+        wallet_birthday_reconcile(wallet, ndb, &ms->chain_active, pindex_new);
     zcl_mutex_lock(&wallet->cs);
     wallet->best_block_height = pindex_new->nHeight;
     zcl_mutex_unlock(&wallet->cs);

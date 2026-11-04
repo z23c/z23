@@ -371,14 +371,6 @@ static void cache_commit(struct cache_job *job)
     }
     memory_cleanse(job, sizeof(*job));
 }
-void wallet_screens_new_wallet(void)
-{
-    struct cache_job keep = {0};
-    pthread_mutex_lock(&st.lock);
-    if (st.ready) (void)cache_body(&keep, wall_s(), "0 ZCL", "", "");
-    pthread_mutex_unlock(&st.lock);
-    cache_commit(&keep);
-}
 /* Whole minutes since the kept balance was given; a clock that went back reads as 0. */
 static int64_t cache_minutes(const struct cache *c)
 {

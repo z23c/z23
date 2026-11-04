@@ -177,8 +177,11 @@ static void wallet_rescan_clear_marker(struct wallet *w, int start_height,
     zcl_mutex_lock(&w->cs);
     if (w->scan_retry.pending && start_height <= w->scan_retry.from &&
         stop_height >= tip && r->blocks_scanned == r->blocks_in_range &&
-        r->shielded_txs_unscanned == 0 && w->sapling_keys.num_unscannable == 0)
+        r->shielded_txs_unscanned == 0 && w->sapling_keys.num_unscannable == 0) {
+        if (strcmp(w->scan_retry.blocker, WALLET_BIRTHDAY_PENDING) == 0)
+            w->initial_scan_floor = 0;
         memset(&w->scan_retry, 0, sizeof(w->scan_retry));
+    }
     zcl_mutex_unlock(&w->cs);
 }
 

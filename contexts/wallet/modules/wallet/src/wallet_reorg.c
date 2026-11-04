@@ -6,6 +6,8 @@
 #include "coins/coins_view.h"
 #include "support/cleanse.h"
 #include "util/log_macros.h"
+#include "core/utiltime.h"
+#include <stdio.h>
 #include <string.h>
 
 void wallet_verify_utxos(struct wallet *w, struct coins_view_cache *coins_tip)
@@ -155,6 +157,17 @@ int wallet_rewind_confirmations(struct wallet *w, int new_best_height)
     if (delta <= 0) {
         zcl_mutex_unlock(&w->cs);
         return 0;
+    }
+    if (w->initial_scan_floor > 0 &&
+        w->best_block_height >= w->initial_scan_floor &&
+        new_best_height < w->initial_scan_floor) {
+        w->initial_scan_floor = 0;
+        if (!w->scan_retry.pending)
+            w->scan_retry.since = GetTime();
+        w->scan_retry.pending = true;
+        w->scan_retry.from = 0;
+        snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker),
+                 "%s", WALLET_BIRTHDAY_CHANGED_BLOCKER);
     }
     int lowered = 0;
     for (size_t i = 0; i < MAX_WALLET_TX; i++) {

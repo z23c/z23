@@ -152,8 +152,12 @@ static int wrc_boot_floor_and_marker(struct wallet *w, struct main_state *ms,
     w->scan_retry.from = 0;
     snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker), "%s",
              WALLET_RESTORE_BLOCKER_UNREAD);
+    w->time_first_key = 2000000000;
     memset(&rep, 0, sizeof(rep));
     (void)boot_wallet_catch_up(w, &ms->chain_active, datadir, &rep);
+    WRC_CHECK("J: a pending marker overrides the key timestamp",
+              rep.start_height == 0);
+    w->time_first_key = 0;
     WRC_CHECK("J: a boot read that tried no Sapling key keeps the marker",
               w->scan_retry.pending && rep.blocks_scanned == rep.blocks_in_range &&
               rep.shielded_txs_unscanned > 0);
@@ -223,6 +227,22 @@ static int wrc_rescan_marker(struct wallet *w, struct main_state *ms,
     WRC_CHECK("I: a whole rescan that read every body clears it",
               !w->scan_retry.pending && rep.blocks_scanned == WRC_NBLOCKS &&
               wallet_scanned_through_height(w) == WRC_NBLOCKS - 1);
+    w->scan_retry.pending = true;
+    w->scan_retry.from = 100;
+    w->initial_scan_floor = 100;
+    snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker), "%s",
+             WALLET_BIRTHDAY_SCAN_PENDING);
+    (void)wallet_rescan_report(w, &ms->chain_active, 100, -1, netdir, &rep);
+    WRC_CHECK("I: verified floor scan clears its marker",
+              !w->scan_retry.pending && w->initial_scan_floor == 100);
+    w->scan_retry.pending = true;
+    w->scan_retry.from = 0;
+    w->initial_scan_floor = WRC_NBLOCKS + 100;
+    snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker), "%s",
+             WALLET_BIRTHDAY_PENDING);
+    (void)wallet_rescan_report(w, &ms->chain_active, 0, -1, netdir, &rep);
+    WRC_CHECK("I: a full scan retires an unverified birthday floor",
+              !w->scan_retry.pending && w->initial_scan_floor == 0);
     sapling_keystore_free(&w->sapling_keys);
     sapling_keystore_init(&w->sapling_keys);
     return failures;

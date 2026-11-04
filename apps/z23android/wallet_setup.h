@@ -113,7 +113,6 @@ enum wsu_failure {
     WSU_REFUSED,
     WSU_UNKNOWN,        /* No usable answer: a wallet may exist. The key is kept. */
     WSU_NOT_RECORDED,   /* The wallet exists; its setup marker could not be written. */
-    WSU_NO_TIP,         /* The node did not learn the chain tip in time: no wallet was made. */
     WSU_NO_BIRTHDAY,    /* The wallet exists and recorded no start height, so setup stays unfinished. */
     WSU_NOT_RUN,        /* The node command was never started. Nothing was written. */
     WSU_NOT_CREATE,     /* Start over is only for a create. */
@@ -212,9 +211,12 @@ bool wsu_waiting(struct wsu *w);
 const char *wsu_failure_text(enum wsu_failure failure);
 /* Whether the failed screen offers Try again: not on a phone that keeps keys only in software, which no retry changes. */
 bool wsu_failure_retries(enum wsu_failure failure);
-/* With WORDS or CONFIRM, after a failed write: what happened in plain words and the one next step, Try again, which writes the same
- * words again. Empty for none. */
+/* With WORDS or CONFIRM, after a failed write: what happened in plain words and the one next step. That is Try again, which writes
+ * the same words again, when wsu_write_retryable holds, and otherwise Stop and check this phone. Empty for none. */
 const char *wsu_write_failure_text(enum wsu_failure failure);
+/* Whether a new attempt can clear a failed write: the node did not pause, the command did not start, or no answer came. Storage
+ * the node cannot read and a refusal fail the same way again within minutes, so they offer no Try again that pauses the node. */
+bool wsu_write_retryable(enum wsu_failure failure);
 /* With CONFIRM: every asked word is picked and the wallet behind the words is written, so Confirm acts. */
 bool wsu_view_confirm_ready(const struct wsu_view *v);
 /* With CONFIRM: why there is no Confirm button yet, shown in its place. Empty while a word is still to pick, once Confirm is ready,
@@ -234,8 +236,8 @@ void wsu_back(struct wsu *w);           /* RESTORE_FORM or FAILED to CHOICE */
 void wsu_words_seen(struct wsu *w);     /* WORDS to CONFIRM */
 void wsu_show_again(struct wsu *w);     /* CONFIRM to WORDS */
 bool wsu_busy(struct wsu *w);           /* A job runs, or words are held: leaving would lose them. */
-/* Setup has finished a create whose words the owner confirmed in this run of the app: its wallet starts at the node's chain
- * tip and has shown no address yet. False for a restore, and for a setup that was finished before the app started. */
+/* Setup has finished a create whose words the owner confirmed in this run of the app. False for a restore, and for a setup
+ * that was finished before the app started. */
 bool wsu_created(struct wsu *w);
 
 /* Jobs, for the worker thread. */
@@ -243,9 +245,10 @@ bool wsu_created(struct wsu *w);
  * wsu_write_job then writes the wallet behind them. */
 void wsu_create_job(struct wsu *w);
 /* On the worker, after the words are shown (or again after wsu_retry_write): records the kind, waits for the node to exit, restores the
- * phrase into the datadir at its own chain tip and starts the node. The node runs again on every path. */
+ * phrase into the datadir using the fixed release anchor and starts the node. The node runs again on every path. */
 void wsu_write_job(struct wsu *w);
-/* A failed write to a new attempt with the same words, never a second phrase; the caller then runs wsu_write_job. */
+/* A failed write to a new attempt with the same words, never a second phrase; the caller then runs wsu_write_job. False for a
+ * failure wsu_write_retryable rejects. */
 bool wsu_retry_write(struct wsu *w);
 /* A failed write the owner leaves: the words are closed and wiped, and the setup goes to the check of what the phone holds (the
  * interrupted-setup path), where Start over and Back work. False unless the write has failed. */

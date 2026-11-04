@@ -8,7 +8,6 @@
 #include "json/json.h"
 #include "secure_window.h"
 #include "setup_field.h"
-#include "wallet_screens.h"
 #include "wallet_setup.h"
 #include <pthread.h>
 #include <stdatomic.h>
@@ -237,7 +236,7 @@ static void run_job(struct job *job)
     if (job->kind == JOB_CREATE) { wsu_create_job(&ui.model); woken(); wsu_write_job(&ui.model); }
     else if (job->kind == JOB_WRITE) wsu_write_job(&ui.model);
     else if (job->kind == JOB_RESTORE) wsu_restore_job(&ui.model, job->text, job->height);
-    else if (job->kind == JOB_FINISH) { wsu_finish_job(&ui.model); if (wsu_created(&ui.model)) wallet_screens_new_wallet(); }
+    else if (job->kind == JOB_FINISH) wsu_finish_job(&ui.model);
     else if (job->kind == JOB_ASIDE) wsu_set_aside_job(&ui.model);
     else if (job->kind == JOB_START_OVER) wsu_start_over_job(&ui.model);
     else if (job->kind == JOB_RESUME) { wsu_resume_job(&ui.model); atomic_store(&ui.resume_busy, false); }
@@ -332,15 +331,16 @@ static void live_line(JNIEnv *env, const struct wsu_view *v)
     wsu_working_line(v, line, sizeof(line));
     (void)text_view_kept(env, line, 17.0f, WHITE, &ui.live);
 }
-/* The wallet behind the shown words: the live line while it is saved, and after a failure what happened and Try again. The check
- * screen also offers the way out, which closes the words. */
+/* The wallet behind the shown words: the live line while it is saved, and after a failure what happened and Try again when a new
+ * attempt can succeed. The check screen, and any screen whose failure would repeat, offers the way out, which closes the words. */
 static void draw_write(JNIEnv *env, const struct wsu_view *v, bool way_out)
 {
     if (v->write == WSU_WRITE_RUNNING) live_line(env, v);
     if (v->write != WSU_WRITE_FAILED) return;
+    bool retry = wsu_write_retryable(v->write_failure);
     (void)text_view(env, wsu_write_failure_text(v->write_failure), 15.0f, AMBER);
-    (void)button_view(env, B_RETRY_WRITE, "Try again", GO_COLOR);
-    if (way_out) (void)button_view(env, B_GIVE_UP, "Stop and check this phone", BUTTON_COLOR);
+    if (retry) (void)button_view(env, B_RETRY_WRITE, "Try again", GO_COLOR);
+    if (way_out || !retry) (void)button_view(env, B_GIVE_UP, "Stop and check this phone", BUTTON_COLOR);
 }
 static void draw_words(JNIEnv *env, const struct wsu_view *v)
 {

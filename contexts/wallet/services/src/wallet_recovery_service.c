@@ -6,6 +6,7 @@
 #include "services/wallet_recovery_service.h"
 
 #include "chain/chainparams.h"
+#include "chain/checkpoints.h"                 /* pinned blocks */
 #include "command/native_command.h"            /* the ONE read-only db open */
 #include "config/boot_shutdown_marker.h"       /* verified-clean binding */
 #include "keys/key.h"                          /* ecc_start_once */
@@ -16,6 +17,7 @@
 #include "models/wallet_tx.h"                    /* note count */
 #include "platform/private_directory.h"
 #include "platform/private_file.h"
+#include "services/block_index_loader.h"       /* the best header */
 #include "services/wallet_restore_service.h"   /* datadir single-writer proof */
 #include "services/wallet_create_service.h"    /* the passphrase minimum */
 #include "support/cleanse.h"
@@ -420,29 +422,60 @@ static struct zcl_result wrc_load_passphrase(
     return ZCL_OK;
 }
 
+static bool wrc_release_floor_usable(void);
+
 /* A restored wallet claims no scanned-through height until it is read; a
  * created one has its birthday instead. */
 static void wrc_mark_unread(const struct wallet_recovery_request *req,
                             struct wallet *w, bool birthday_honoured)
 {
-    if (req->record_birthday || birthday_honoured)
+    if ((req->record_birthday && !req->birthday_at_local_tip) ||
+        birthday_honoured)
         return;
     w->scan_retry.pending = true;
     w->scan_retry.from = 0;
     w->scan_retry.since = GetTime();
     snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker), "%s",
-             WALLET_RESTORE_BLOCKER_UNREAD);
+             req->birthday_at_local_tip && wrc_release_floor_usable()
+                 ? WALLET_BIRTHDAY_PENDING : WALLET_RESTORE_BLOCKER_UNREAD);
 }
 
-/* For a created wallet, store the birthday: the highest connected block
- * (status >= 3) this datadir holds, and the hash of the block
- * WALLET_BIRTHDAY_MARGIN below it. Rows above
- * a rewound tip keep their status, so the tip itself may be stale; that is
- * safe because every row here existed before the wallet did, and boot checks
- * the floor block, not the tip, against the active chain. A datadir with no
- * chain, or one no longer than the margin, records nothing: the wallet has no
- * birthday and its first catch-up starts at genesis, or, when boot defers a
- * long range, marks it unread so the wallet reads incomplete. */
+/* The birthday of a phrase made now. Nothing can pay it in a block mined
+ * before it, so its first scan may start at any block that already exists.
+ * Three heights are each at or below the real chain tip:
+ *   (a) the highest connected block (status >= 3) in node.db, which this node
+ *       validated;
+ *   (b) the SHA3 UTXO anchor this release ships (mainnet only), the
+ *       height the reducer never folds below and a bundle install must match,
+ *       mined before this binary was built;
+ *   (c) the best header in block_index.bin, the accepted header with the
+ *       most chain work: a peer that sends headers past the real tip must
+ *       mine them, and a chain of them outweighs the real chain only for one
+ *       that out-mined it.
+ * A height a peer only claims is never used. P is the highest of the three,
+ * with (c) read only while (a) is below (b) + WALLET_BIRTHDAY_MARGIN
+ * (wrc_best_header). The floor block is the highest block at or below P - WALLET_BIRTHDAY_MARGIN
+ * whose hash is known: a connected row, an ancestor of the best header, or a
+ * block this release pins (a header checkpoint or the anchor). The stored
+ * birthday is the floor plus the margin, so it is never above P, and a
+ * reorganisation shorter than the margin cannot replace the floor. Rows above
+ * a rewound tip keep their status; that is safe because boot checks the floor
+ * block, not the birthday, against the active chain. With no floor above
+ * genesis the wallet records no birthday and scans from genesis. */
+struct wrc_floor {
+    int height;
+    uint8_t hash[32];
+};
+
+static void wrc_floor_offer(struct wrc_floor *f, int height,
+                            const uint8_t hash[32])
+{
+    if (height <= f->height)
+        return;
+    f->height = height;
+    memcpy(f->hash, hash, sizeof(f->hash));
+}
+
 static bool wrc_floor_cb(int height, const struct db_block *row, void *ctx)
 {
     (void)height;
@@ -450,37 +483,127 @@ static bool wrc_floor_cb(int height, const struct db_block *row, void *ctx)
     return false;
 }
 
-/* The ordered range probe reads through a plain handle, so this serves the
- * read-only inspection handle as well as the write handle. */
-static bool wrc_local_tip(struct node_db *ndb, int *tip,
-                          struct db_block *floor_block)
+/* (a) The connected row at `height`. The ordered range probe reads through a
+ * plain handle, so this serves the read-only handle as well as the write one. */
+static void wrc_offer_row(struct node_db *ndb, int height, struct wrc_floor *f)
 {
-    if (!ndb || !ndb->open)
-        return false;
-    *tip = db_block_max_height(ndb);
-    if (*tip <= WALLET_BIRTHDAY_MARGIN)
-        return false;
-    int at = *tip - WALLET_BIRTHDAY_MARGIN;
-    memset(floor_block, 0, sizeof(*floor_block));
-    (void)db_block_scan_height_range_probe(ndb, at, at, wrc_floor_cb,
-                                           floor_block);
-    return floor_block->height == at;
+    struct db_block row;
+    memset(&row, 0, sizeof(row));
+    if (height <= 0 || !ndb || !ndb->open)
+        return;
+    (void)db_block_scan_height_range_probe(ndb, height, height, wrc_floor_cb,
+                                           &row);
+    if (row.height == height)
+        wrc_floor_offer(f, height, row.hash);
+}
+
+/* (c) The best header's ancestor at `height`. */
+static void wrc_offer_header(struct block_index_flat_cursor *headers,
+                             int height, struct wrc_floor *f)
+{
+    uint8_t hash[32];
+    if (headers && height > 0 &&
+        block_index_flat_cursor_best_ancestor(headers, height, hash).ok)
+        wrc_floor_offer(f, height, hash);
+}
+
+/* (b) The anchor's height, or 0 on a network that ships none: the network
+ * rule reducer_frontier_floor() applies to the same compiled checkpoint. */
+static int wrc_shipped_anchor(uint8_t hash[32])
+{
+    const struct chain_params *p = chain_params_get();
+    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+    if (!p || strcmp(p->strNetworkID, "main") != 0 || !cp || cp->height <= 0)
+        return 0;
+    memcpy(hash, cp->block_hash, 32);
+    return cp->height;
+}
+
+/* The pinned blocks at or below `top`: every header checkpoint of this
+ * network and the anchor. */
+static void wrc_offer_pinned(int top, int anchor, const uint8_t anchor_hash[32],
+                             struct wrc_floor *f)
+{
+    const struct checkpoint_data *cps = &chain_params_get()->checkpointData;
+    for (int i = 0; i < cps->nEntries; i++)
+        if (cps->entries[i].height <= top)
+            wrc_floor_offer(f, cps->entries[i].height,
+                            cps->entries[i].hash.data);
+    if (anchor <= top)
+        wrc_floor_offer(f, anchor, anchor_hash);
+}
+
+static void wrc_release_floor(struct wrc_floor *f)
+{
+    uint8_t anchor_hash[32] = {0};
+    int anchor = wrc_shipped_anchor(anchor_hash);
+    memset(f, 0, sizeof(*f));
+    wrc_floor_offer(f, anchor, anchor_hash);
+}
+
+static bool wrc_release_floor_usable(void)
+{
+    struct wrc_floor f;
+    wrc_release_floor(&f);
+    return f.height > 0 && f.height <= INT_MAX - WALLET_BIRTHDAY_MARGIN;
+}
+
+static int wrc_max(int a, int b) { return a > b ? a : b; }
+static int wrc_min(int a, int b) { return a < b ? a : b; }
+
+/* (c) The best header's height, or 0. Opening block_index.bin hashes the
+ * whole file and finding the best header reads every row, so it is read only
+ * while (a) is below (b) + WALLET_BIRTHDAY_MARGIN. From there on the connected
+ * row WALLET_BIRTHDAY_MARGIN below (a), or else the anchor, is a floor no lower
+ * than the anchor, and a synced node's birthday is its own tip. */
+static int wrc_best_header(const char *datadir, int tip, int anchor,
+                           struct block_index_flat_cursor **headers)
+{
+    int32_t best = 0;
+    if (tip >= anchor + WALLET_BIRTHDAY_MARGIN ||
+        !block_index_flat_cursor_open(datadir, headers).ok ||
+        !block_index_flat_cursor_best(*headers, &best).ok)
+        return 0;
+    return best;
+}
+
+static void wrc_birthday_floor(const char *datadir, struct node_db *ndb,
+                               struct wrc_floor *f)
+{
+    uint8_t anchor_hash[32] = {0};
+    struct block_index_flat_cursor *headers = NULL;
+    int tip = ndb && ndb->open ? db_block_max_height(ndb) : 0;
+    int anchor = wrc_shipped_anchor(anchor_hash);
+    int best = wrc_best_header(datadir, tip, anchor, &headers);
+    int top = wrc_max(wrc_max(tip, anchor), best) - WALLET_BIRTHDAY_MARGIN;
+    memset(f, 0, sizeof(*f));
+    if (top > 0) {
+        wrc_offer_row(ndb, wrc_min(tip, top), f);
+        wrc_offer_header(headers, wrc_min(best, top), f);
+        wrc_offer_pinned(top, anchor, anchor_hash, f);
+    }
+    block_index_flat_cursor_close(headers);
 }
 
 static void wrc_record_birthday(const struct wallet_recovery_request *req,
                                 struct node_db *ndb,
                                 struct wallet_recovery_report *out)
 {
-    struct db_block floor_block;
-    int tip = 0;
+    struct wrc_floor f;
     if (!req->record_birthday)
         return;
+    if (req->birthday_at_local_tip) {
+        wrc_release_floor(&f);
+    } else {
+        wrc_birthday_floor(req->datadir, ndb, &f);
+    }
+    int64_t birthday = (int64_t)f.height + WALLET_BIRTHDAY_MARGIN;
     out->birthday_recorded =
-        wrc_local_tip(ndb, &tip, &floor_block) &&
-        db_wallet_birthday_set(ndb, tip, floor_block.hash);
-    out->birthday_height = out->birthday_recorded ? tip : 0;
+        f.height > 0 && f.height <= INT_MAX - WALLET_BIRTHDAY_MARGIN &&
+        db_wallet_birthday_set(ndb, birthday, f.hash);
+    out->birthday_height = out->birthday_recorded ? birthday : 0;
     if (out->birthday_recorded)
-        memcpy(out->birthday_hash, floor_block.hash, sizeof(floor_block.hash));
+        memcpy(out->birthday_hash, f.hash, sizeof(f.hash));
 }
 
 /* True when the caller's birthday names a block this datadir holds: the block
@@ -634,8 +757,7 @@ static struct zcl_result wrc_check_request(
 
 /* ── recover ─────────────────────────────────────────────────────── */
 
-/* A phrase made seconds ago cannot have received anything below this
- * datadir's own tip, so the tip is stored the way a create stores it. */
+/* Mark a release-new phrase for the pinned birthday path and new-phrase scan. */
 static const struct wallet_recovery_request *
 wrc_with_tip_birthday(const struct wallet_recovery_request *req,
                       struct wallet_recovery_request *scratch)
@@ -648,15 +770,9 @@ wrc_with_tip_birthday(const struct wallet_recovery_request *req,
 }
 
 /* What the inspected target allows, before any write handle exists: -62 when
- * it already holds a wallet, -72 when birthday_at_local_tip cannot be honoured
- * (on a plan as on a commit; the flag never falls back to scanning from
- * genesis). */
-static struct zcl_result wrc_target_gate(const struct wallet_recovery_request *req,
-                                         struct node_db *ndb,
-                                         const struct wallet_recovery_report *out)
+ * it already holds a wallet, on a plan as on a commit. */
+static struct zcl_result wrc_target_gate(const struct wallet_recovery_report *out)
 {
-    struct db_block tip_floor;
-    int tip_height = 0;
     if (wrc_wallet_present(out)) {
         LOG_WARN(WRC_TAG, "refusing recovery: %s already holds a wallet "
                  "(%lld keys, seed_state=%d)", out->target_db,
@@ -667,17 +783,6 @@ static struct zcl_result wrc_target_gate(const struct wallet_recovery_request *r
             "way to tell them apart. Recover into an empty datadir instead, "
             "then move what you need",
             out->datadir, (long long)out->keys_before);
-    }
-    if (req->birthday_at_local_tip &&
-        !wrc_local_tip(ndb, &tip_height, &tip_floor)) {
-        LOG_WARN(WRC_TAG, "refusing recovery: %s holds no chain above the "
-                 "birthday margin", out->target_db);
-        return ZCL_ERR(-72,
-            "birthday_at_local_tip needs a datadir that already holds more "
-            "than %d connected blocks, and %s does not. Recording no birthday "
-            "would make the wallet scan from genesis, so nothing was "
-            "written. Let the node sync first, or send no birthday_at_local_tip",
-            WALLET_BIRTHDAY_MARGIN, out->datadir);
     }
     return ZCL_OK;
 }
@@ -1031,7 +1136,7 @@ static struct zcl_result wrc_inspect_and_open_target(
     *seeded = wrc_assess_history(req, &st->ndb, out);
 
     /* Never write a second seed over a wallet that already has keys. */
-    struct zcl_result gate = wrc_target_gate(req, &st->ndb, out);
+    struct zcl_result gate = wrc_target_gate(out);
     if (!gate.ok) {
         wrc_run_release(st);
         return gate;

@@ -40,7 +40,6 @@ enum sun_result {
     SUN_INVALID_PHRASE,    /* The words are not a valid recovery phrase. Nothing was written. */
     SUN_STORAGE,           /* NODE_DB_UNREADABLE. Nothing was written. */
     SUN_REFUSED,           /* Any other typed refusal. Nothing was written. */
-    SUN_NO_CHAIN,          /* NO_LOCAL_CHAIN: the datadir holds too little chain for a start height. Nothing was written. */
     SUN_NOT_RUN,           /* The command was never started (node running, spawn failed, app not ready). Nothing was written. */
     SUN_UNKNOWN            /* No usable answer: the wallet may have been written. */
 };
@@ -62,8 +61,8 @@ struct sun_restored {
 enum sun_result sun_create(const struct sun *node, const char *passphrase, struct sun_created *out);
 /* A new 24-word phrase from the node. It needs no datadir and no stopped node, and writes nothing; nothing is kept anywhere. */
 enum sun_result sun_new_phrase(const struct sun *node, struct zapp_words *out);
-/* sun_restore for a phrase made moments ago: the wallet starts at the datadir's own chain tip. SUN_NO_CHAIN when the datadir holds
- * 100 blocks or fewer; nothing is written then. */
+/* Only for a phrase generated after the running node release was built. The immutable release anchor stays safe
+ * across delayed writes and retries; without a usable anchor the wallet reads from genesis. Restore old phrases normally. */
 enum sun_result sun_restore_at_tip(const struct sun *node, const struct zapp_words *words, const char *passphrase, struct sun_restored *out);
 /* words is joined with single spaces; birthday may be NULL or unknown. */
 enum sun_result sun_restore(const struct sun *node, const struct zapp_words *words, const char *passphrase,
