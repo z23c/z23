@@ -13,6 +13,7 @@
 
 #include "base/safe_alloc.h"
 #include "json/json.h"
+#include "zutf8/zutf8.h"
 #include "services/stopwatch_skip_watch.h"
 
 #include <limits.h>
@@ -50,37 +51,52 @@ static void sw_emit(struct zcl_judge_result *out, int code, const char *verdict,
     (void)snprintf(out->artifact, sizeof(out->artifact), "%s", artifact);
 }
 
-/* Last line of the file as `tail -n 1` prints it. 0 = no data, 1 = empty
- * last line, 2 = read. */
-static int sw_last_line(const char *path, char *line, size_t cap)
+enum sw_tail { SW_NO_DATA, SW_EMPTY, SW_INVALID, SW_ROW };
+
+static enum sw_tail sw_decode_tail(const char *buf, size_t n, bool prefix_missing,
+                                   struct json_value *row)
+{
+    if (n && buf[n - 1] == '\n') n--;
+    size_t start = n;
+    while (start && buf[start - 1] != '\n') start--;
+    size_t len = n - start;
+    if ((!start && prefix_missing) || len > SW_LAST_LINE_MAX) return SW_INVALID;
+    if (!len) return SW_EMPTY;
+    if (!zutf8_validate_n(buf + start, len)) return SW_INVALID;
+    if (!json_read(row, buf + start, len) || row->type != JSON_OBJ) return SW_INVALID;
+    return SW_ROW;
+}
+
+static enum sw_tail sw_last_row(const char *path, struct json_value *row)
 {
     FILE *f = fopen(path, "rb");
+    if (!f) return SW_NO_DATA;
+    enum sw_tail status = SW_NO_DATA;
     long size;
-    size_t take, n, start;
-    char *buf;
-    if (!f)
-        return 0;
-    if (fseek(f, 0, SEEK_END) != 0 || (size = ftell(f)) <= 0) {
-        (void)fclose(f);
-        return 0;
-    }
-    take = (size_t)size < SW_LAST_LINE_MAX ? (size_t)size : SW_LAST_LINE_MAX;
-    buf = zcl_malloc(take + 1, "stopwatch tail");
-    if (!buf || fseek(f, size - (long)take, SEEK_SET) != 0) {
+    if (fseek(f, 0, SEEK_END) == 0 && (size = ftell(f)) > 0) {
+        /* Include room for both the final LF and the preceding delimiter. */
+        size_t take = (size_t)size < SW_LAST_LINE_MAX + 2 ? (size_t)size : SW_LAST_LINE_MAX + 2;
+        char *buf = zcl_malloc(take, "stopwatch tail");
+        if (buf && fseek(f, size - (long)take, SEEK_SET) == 0 &&
+            fread(buf, 1, take, f) == take)
+            status = sw_decode_tail(buf, take, (size_t)size > take, row);
         free(buf);
-        (void)fclose(f);
-        return 0;
     }
-    n = fread(buf, 1, take, f);
-    (void)fclose(f);
-    if (n > 0 && buf[n - 1] == '\n')
-        n--;
-    buf[n] = '\0';
-    for (start = n; start > 0 && buf[start - 1] != '\n'; start--)
-        ;
-    (void)snprintf(line, cap, "%s", buf + start);
-    free(buf);
-    return line[0] ? 2 : 1;
+    return fclose(f) == 0 ? status : SW_NO_DATA;
+}
+
+/* Only guarded fields participate in the verdict. Their order is immaterial. */
+static bool sw_unambiguous(const struct json_value *row)
+{
+    static const char *const fields[] = {
+        "ts", "verdict", "artifact_dir", "node_bin_sha256", "final_network_tip", "result_class"
+    };
+    for (size_t j = 0; j < sizeof fields / sizeof fields[0]; j++) {
+        unsigned count = 0;
+        for (size_t i = 0; i < row->num_children; i++)
+            if (strcmp(row->keys[i], fields[j]) == 0 && ++count > 1) return false;
+    }
+    return true;
 }
 
 /* The oracle height of the newest SLO row that carries one, if that row is
@@ -149,11 +165,12 @@ static bool sw_proof_says_pass(const char *artifact)
     return pass;
 }
 
-static bool sw_qualify(const struct zcl_stopwatch_judge_opts *o, const char *line,
+static bool sw_qualify(const struct zcl_stopwatch_judge_opts *o, const struct json_value *row,
                        const char *artifact, struct zcl_judge_result *out)
 {
-    char sha[SW_FIELD_MAX], reason[ZCL_JUDGE_REASON_MAX];
-    if (!ej_field_str(line, "node_bin_sha256", sha, sizeof(sha)) || !sha[0]) {
+    const char *sha = json_get_str(json_get(row, "node_bin_sha256"));
+    char reason[ZCL_JUDGE_REASON_MAX];
+    if (!sha[0]) {
         sw_emit(out, 1, "UNBOUND", "row_names_no_executable_digest", "", artifact);
         return false;
     }
@@ -163,7 +180,7 @@ static bool sw_qualify(const struct zcl_stopwatch_judge_opts *o, const char *lin
         sw_emit(out, 1, "WRONG_ARTIFACT", reason, "", artifact);
         return false;
     }
-    if (!sw_proof_says_pass(artifact)) {
+    if (!json_get_str(json_get(row, "artifact_dir"))[0] || !sw_proof_says_pass(artifact)) {
         sw_emit(out, 1, "INCOMPLETE", "artifact_proof_json_missing_or_not_pass",
                 "", artifact);
         return false;
@@ -172,25 +189,29 @@ static bool sw_qualify(const struct zcl_stopwatch_judge_opts *o, const char *lin
 }
 
 static bool sw_gate_fixture(const struct zcl_stopwatch_judge_opts *o, int64_t now,
-                            const char *line, const char *artifact, bool *ledger,
+                            const struct json_value *row, const char *artifact, bool *ledger,
                             struct zcl_judge_result *out)
 {
-    struct ej_num tip = ej_field_num(line, "final_network_tip", false);
+    const struct json_value *tip = json_get(row, "final_network_tip");
     char reason[ZCL_JUDGE_REASON_MAX];
     int64_t oracle = 0;
-    if (tip.kind == EJ_NUM && tip.n < o->checkpoint_height) {
+    if (tip && tip->type != JSON_INT && tip->type != JSON_NULL) {
+        sw_emit(out, 1, "INCOMPLETE", "invalid_final_network_tip", "", artifact);
+        return false;
+    }
+    if (tip && tip->type == JSON_INT && tip->val.i < o->checkpoint_height) {
         (void)snprintf(reason, sizeof(reason),
                        "final_network_tip_%lld_below_checkpoint_%lld",
-                       (long long)tip.n, (long long)o->checkpoint_height);
+                       (long long)tip->val.i, (long long)o->checkpoint_height);
         sw_emit(out, 1, "THIN_FIXTURE", reason, "", artifact);
         return false;
     }
     *ledger = sw_oracle(o, now, &oracle);
-    if (*ledger && tip.kind == EJ_NUM && oracle - tip.n > o->oracle_lag_budget) {
+    if (*ledger && tip && tip->type == JSON_INT && oracle - tip->val.i > o->oracle_lag_budget) {
         (void)snprintf(reason, sizeof(reason),
                        "final_network_tip_%lld_lags_oracle_%lld_by_%lld_gt_budget_%lld",
-                       (long long)tip.n, (long long)oracle,
-                       (long long)(oracle - tip.n),
+                       (long long)tip->val.i, (long long)oracle,
+                       (long long)(oracle - tip->val.i),
                        (long long)o->oracle_lag_budget);
         sw_emit(out, 1, "LAGGING_FIXTURE", reason, " ledger_available=true",
                 artifact);
@@ -200,14 +221,14 @@ static bool sw_gate_fixture(const struct zcl_stopwatch_judge_opts *o, int64_t no
 }
 
 static void sw_judge_pass(const struct zcl_stopwatch_judge_opts *o, int64_t now,
-                          int64_t age, const char *line, const char *artifact,
+                          int64_t age, const struct json_value *row, const char *artifact,
                           struct zcl_judge_result *out)
 {
     char reason[ZCL_JUDGE_REASON_MAX], extra[SW_FIELD_MAX];
     bool ledger = false, bound = o->expect_sha256 && o->expect_sha256[0];
-    if (!sw_gate_fixture(o, now, line, artifact, &ledger, out))
+    if (!sw_gate_fixture(o, now, row, artifact, &ledger, out))
         return;
-    if (bound && !sw_qualify(o, line, artifact, out))
+    if (bound && !sw_qualify(o, row, artifact, out))
         return;
     (void)snprintf(reason, sizeof(reason), "last_run_verdict_pass_age_%llds",
                    (long long)age);
@@ -241,22 +262,21 @@ static void sw_report_streaks(const struct zcl_stopwatch_judge_opts *o,
 }
 
 static void sw_judge_row(const struct zcl_stopwatch_judge_opts *o, int64_t now,
-                         const char *line, struct zcl_judge_result *out)
+                         const struct json_value *row, struct zcl_judge_result *out)
 {
-    char verdict[SW_FIELD_MAX] = "", artifact[SW_FIELD_MAX] = "";
-    char klass[SW_FIELD_MAX] = "", reason[ZCL_JUDGE_REASON_MAX], extra[SW_FIELD_MAX];
-    struct ej_num ts = ej_field_num(line, "ts", false);
+    const char *verdict = json_get_str(json_get(row, "verdict"));
+    const char *artifact = json_get_str(json_get(row, "artifact_dir"));
+    const char *klass = json_get_str(json_get(row, "result_class"));
+    char reason[ZCL_JUDGE_REASON_MAX], extra[SW_FIELD_MAX];
+    const struct json_value *ts = json_get(row, "ts");
     int64_t age;
-    (void)ej_field_str(line, "verdict", verdict, sizeof(verdict));
-    (void)ej_field_str(line, "artifact_dir", artifact, sizeof(artifact));
     if (!artifact[0])
-        (void)snprintf(artifact, sizeof(artifact), "-");
-    sw_report_streaks(o, now, out);
-    if (ts.kind != EJ_NUM) {
+        artifact = "-";
+    if (!ts || ts->type != JSON_INT) {
         sw_emit(out, 2, "STALE", "malformed_last_line_no_ts", "", artifact);
         return;
     }
-    if (!sw_row_age(now, ts.n, &age)) {
+    if (!sw_row_age(now, ts->val.i, &age)) {
         sw_emit(out, 2, "STALE", "last_sample_age_unrepresentable", "", artifact);
         return;
     }
@@ -271,10 +291,9 @@ static void sw_judge_row(const struct zcl_stopwatch_judge_opts *o, int64_t now,
         return;
     }
     if (strcmp(verdict, "pass") == 0) {
-        sw_judge_pass(o, now, age, line, artifact, out);
+        sw_judge_pass(o, now, age, row, artifact, out);
         return;
     }
-    (void)ej_field_str(line, "result_class", klass, sizeof(klass));
     (void)snprintf(reason, sizeof(reason), "last_run_verdict_%s_age_%llds",
                    verdict, (long long)age);
     (void)snprintf(extra, sizeof(extra), " class=%s", klass[0] ? klass : "unrecorded");
@@ -285,18 +304,24 @@ static void sw_judge_row(const struct zcl_stopwatch_judge_opts *o, int64_t now,
 bool zcl_stopwatch_judge(const struct zcl_stopwatch_judge_opts *opts,
                          struct zcl_judge_result *out)
 {
-    static char line[SW_LAST_LINE_MAX + 1];
-    int have;
+    struct json_value row = {0};
     if (!opts || !opts->history || !out)
         return false;
     memset(out, 0, sizeof(*out));
-    have = sw_last_line(opts->history, line, sizeof(line));
-    if (have == 0)
+    enum sw_tail have = sw_last_row(opts->history, &row);
+    int64_t now = ej_now(opts->now_unix);
+    if (have == SW_ROW || have == SW_INVALID) sw_report_streaks(opts, now, out);
+    if (have == SW_NO_DATA)
         sw_emit(out, 2, "STALE", "no_evidence_file", "", "-");
-    else if (have == 1)
+    else if (have == SW_EMPTY)
         sw_emit(out, 2, "STALE", "empty_last_line", "", "-");
+    else if (have == SW_INVALID)
+        sw_emit(out, 2, "STALE", "malformed_last_line_no_ts", "", "-");
+    else if (!sw_unambiguous(&row))
+        sw_emit(out, 2, "STALE", "ambiguous_last_row", "", "-");
     else
-        sw_judge_row(opts, ej_now(opts->now_unix), line, out);
+        sw_judge_row(opts, now, &row, out);
+    json_free(&row);
     return true;
 }
 

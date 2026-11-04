@@ -160,6 +160,48 @@ static int ejt_case_sw_fixture_gates(void)
     return failures;
 }
 
+static int ejt_case_sw_history_fields(void)
+{
+    int failures = 0;
+    char led[600], art[600], proof[700], row[1400];
+    ejt_path(led, sizeof led, "sw_fields.jsonl");
+    ejt_path(art, sizeof art, "sw_fields_art");
+    (void)snprintf(proof, sizeof proof, "%s/proof.json", art);
+    TEST("stopwatch: bound history fields retain their root identity and JSON types") {
+        ASSERT(mkdir(art, 0700) == 0);
+        ASSERT(ejt_write(proof, "{\"verdict\":\"pass\"}\n", "wb"));
+        ejt_row(row, sizeof(row),
+                "{\"ts\":2000000000,\"meta\":{\"verdict\":\"pass\"},\"verdict\":\"fail\","
+                "\"exit_code\":7,\"node_bin_sha256\":\"%s\",\"artifact_dir\":\"%s\"}\n",
+                EJT_SHA_A, art);
+        ASSERT(ejt_write(led, row, "wb"));
+        ASSERT(ejt_sw(led, NULL, EJT_SHA_A) && ejt_is("FAIL", 1));
+        ejt_row(row, sizeof(row),
+                "{\"ts\":2000000000,\"verdict\":\"pass\",\"ver\\u0064ict\":\"fail\","
+                "\"node_bin_sha256\":\"%s\",\"artifact_dir\":\"%s\"}\n", EJT_SHA_A, art);
+        ASSERT(ejt_write(led, row, "wb"));
+        ASSERT(ejt_sw(led, NULL, EJT_SHA_A) && ejt_is("STALE", 2));
+        static const char *const bad_tips[] = {"\"1\"", "true", "[]", "{}", "1.0", "1e0"};
+        for (size_t i = 0; i < sizeof bad_tips / sizeof bad_tips[0]; i++) {
+            ejt_row(row, sizeof(row),
+                    "{\"ts\":2000000000,\"verdict\":\"pass\",\"final_network_tip\":%s,"
+                    "\"node_bin_sha256\":\"%s\",\"artifact_dir\":\"%s\"}\n", bad_tips[i], EJT_SHA_A, art);
+            ASSERT(ejt_write(led, row, "wb") && ejt_sw(led, NULL, EJT_SHA_A));
+            ASSERT(ejt_is("INCOMPLETE", 1));
+        }
+        ejt_row(row, sizeof(row),
+                "{\"ts\":2000000000,\"verdict\":\"pass\",\"note\":\"\xff\","
+                "\"node_bin_sha256\":\"%s\",\"artifact_dir\":\"%s\"}\n", EJT_SHA_A, art);
+        ASSERT(ejt_write(led, row, "wb") && ejt_sw(led, NULL, EJT_SHA_A) && ejt_is("STALE", 2));
+        ejt_row(row, sizeof(row),
+                "{\"ts\":2000000000,\"verdict\":\"pass\",\"note\":\"\xc3\xa9\",\"final_network_tip\":null,"
+                "\"node_bin_sha256\":\"%s\",\"artifact_dir\":\"%s\"}\n", EJT_SHA_A, art);
+        ASSERT(ejt_write(led, row, "wb") && ejt_sw(led, NULL, EJT_SHA_A) && ejt_is("PASS", 0));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int ejt_case_sw_qualify(void)
 {
     int failures = 0;
@@ -201,6 +243,38 @@ static int ejt_case_sw_qualify(void)
                 (long long)(EJT_NOW - 2000000), EJT_SHA_A, art);
         ASSERT(ejt_write(led, row, "wb"));
         ASSERT(ejt_sw(led, NULL, EJT_SHA_A) && ejt_is("STALE", 2));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Judge relative paths only while inside the isolated fixture directory. */
+static bool ejt_sw_relative_artifact(const char *dir, const char *body, const char *verdict, int rc)
+{
+    char saved[4096];
+    if (!getcwd(saved, sizeof saved) || chdir(dir) != 0) return false;
+    bool ok = ejt_write("history.jsonl", body, "wb") &&
+              ejt_sw("history.jsonl", NULL, EJT_SHA_A) && ejt_is(verdict, rc);
+    return chdir(saved) == 0 && ok;
+}
+
+static int ejt_case_sw_missing_artifact(void)
+{
+    int failures = 0;
+    char dir[600], dash[700], proof[750];
+    ejt_path(dir, sizeof dir, "sw_relative");
+    (void)snprintf(dash, sizeof dash, "%s/-", dir);
+    (void)snprintf(proof, sizeof proof, "%s/proof.json", dash);
+    TEST("stopwatch: bound proof lookup requires a recorded artifact directory") {
+        ASSERT(mkdir(dir, 0700) == 0);
+        ASSERT(mkdir(dash, 0700) == 0);
+        ASSERT(ejt_write(proof, "{\"verdict\":\"pass\"}\n", "wb"));
+        ASSERT(ejt_sw_relative_artifact(dir,
+            "{\"ts\":2000000000,\"verdict\":\"pass\",\"node_bin_sha256\":\"" EJT_SHA_A "\"}\n",
+            "INCOMPLETE", 1));
+        ASSERT(ejt_sw_relative_artifact(dir,
+            "{\"ts\":2000000000,\"verdict\":\"pass\",\"node_bin_sha256\":\"" EJT_SHA_A
+            "\",\"artifact_dir\":\"-\"}\n", "PASS", 0));
         PASS();
     } _test_next:;
     return failures;
@@ -764,6 +838,8 @@ int test_evidence_judge(void)
     failures += ejt_case_sw_passes();
     failures += ejt_case_sw_fixture_gates();
     failures += ejt_case_sw_qualify();
+    failures += ejt_case_sw_history_fields();
+    failures += ejt_case_sw_missing_artifact();
     failures += ejt_case_sw_proof_shapes();
     failures += ejt_case_sw_stale();
     failures += ejt_case_integer_parser_boundaries();
