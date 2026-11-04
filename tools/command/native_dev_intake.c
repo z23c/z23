@@ -25,6 +25,10 @@
  * each ACCEPT_FOR_QUEUE bundle to dev.land.receive and posts one result reply
  * (ref = the READY post) per post through fleet.board.post. */
 
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
+
 #include "command/native_command.h"
 #include "command/native_dev_batch.h"
 #include "command/native_dev_land_remote_shared.h"
