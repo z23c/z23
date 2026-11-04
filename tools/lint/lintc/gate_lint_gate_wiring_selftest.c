@@ -383,10 +383,34 @@ static int lgws_case_k(const char *base, int *fails)
             sizeof driver)) return 2;
     FILE *f = fopen(driver, "a");
     if (!f) return 2;
-    int wrote = fputs("  LINT_ROW(\"check-sentinel-wired\", \"./tools/lint/sentinel_b.sh\")\n", f);
+    int wrote = fputs("\f\vLINT_ROW(\"check-sentinel-wired\", \"./tools/lint/sentinel_b.sh\")\n", f);
     if (fclose(f) != 0 || wrote < 0) return 2;
     return lgws_expect_reject("K: a duplicated case label is caught",
                               "appears twice", d, fails);
+}
+
+static int lgws_case_n(const char *base, int *fails)
+{
+    char d[4096], root[4096], driver[4096];
+    if (ovf(snprintf(d, sizeof d, "%s/n", base), sizeof d) ||
+        ovf(snprintf(driver, sizeof driver, "%s/tools/lint/lintc/gate_commands.def", d), sizeof driver)) return 2;
+    if (csr_mkdirs(d) || cic_repo_root(root, sizeof root) || lgws_make_fixture(root, d)) return 2;
+    const char *gates[] = { "check-sentinel-wired" };
+    if (lgws_write_makefile(d, gates, 1) || lgws_write_doc(d, gates, 1) ||
+        lgws_wire(d, gates[0], "./tools/lint/sentinel_a.sh")) return 2;
+    FILE *f = fopen(driver, "a");
+    if (!f) return 2;
+    int wrote = fputs("/* leading */ LINT_ROW(\"check-sentinel-wired\", \"./tools/lint/sentinel_b.sh\")\n", f);
+    if (fclose(f) != 0 || wrote < 0) return 2;
+    FILE *out = tmpfile();
+    if (!out) return 2;
+    int rc = lgw_check_root(d, out);
+    fclose(out);
+    if (rc != 2) {
+        fprintf(stderr, "SELFTEST FAIL: N: commented-prefix row was not refused (rc=%d)\n", rc);
+        (*fails)++;
+    } else printf("  selftest ok: N: commented-prefix row is refused\n");
+    return 0;
 }
 
 /* A native-command gate (gates.def owns check-malloc) needs no table line:
@@ -442,7 +466,7 @@ typedef int (*lgws_case_fn)(const char *, int *);
 static const lgws_case_fn k_lgws_cases[] = {
     lgws_case_a, lgws_case_b, lgws_case_c, lgws_case_d,
     lgws_case_e, lgws_case_f, lgws_case_g, lgws_case_h,
-    lgws_case_i, lgws_case_j, lgws_case_k, lgws_case_l, lgws_case_m,
+    lgws_case_i, lgws_case_j, lgws_case_k, lgws_case_l, lgws_case_m, lgws_case_n,
 };
 
 int check_lint_gate_wiring_selftest(void)
@@ -473,6 +497,6 @@ int check_lint_gate_wiring_selftest(void)
         printf("\xe2\x95\x90\xe2\x95\x90 selftest: FAIL \xe2\x95\x90\xe2\x95\x90\n");
         return 1;
     }
-    printf("\xe2\x95\x90\xe2\x95\x90 selftest: PASS (13/13) \xe2\x95\x90\xe2\x95\x90\n");
+    printf("\xe2\x95\x90\xe2\x95\x90 selftest: PASS (14/14) \xe2\x95\x90\xe2\x95\x90\n");
     return 0;
 }
