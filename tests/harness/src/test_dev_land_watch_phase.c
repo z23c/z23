@@ -997,6 +997,13 @@ static bool dlx_evidence_frame_ok(const char *text)
            !strstr(text, "BAD-PREFIX-FRAME") && !strchr(text, '\033');
 }
 
+static bool dlx_evidence_result_ok(const struct dlx_evidence_case *k,
+                                   const char *text, const char *real_wt)
+{
+    return dlx_has(text, k->token) && (!k->no_frame || !strstr(text, "FRAME-HEAD")) &&
+           dlx_evidence_text_ok(k, text, real_wt) && (!k->frame || dlx_evidence_frame_ok(text));
+}
+
 /* Consume the settled failure through the production status reader and
  * check the outcome row and the attempt's evidence file. */
 static bool dlx_evidence_outcome_ok(const struct dlx_evidence_case *k,
@@ -1030,9 +1037,7 @@ static bool dlx_evidence_outcome_ok(const struct dlx_evidence_case *k,
         return false;
     }
     text[len] = '\0';
-    return dlx_has(text, k->token) && (!k->no_frame || !strstr(text, "FRAME-HEAD")) &&
-           dlx_evidence_text_ok(k, text, real_wt) &&
-           (!k->frame || dlx_evidence_frame_ok(text));
+    return dlx_evidence_result_ok(k, text, real_wt);
 }
 
 static bool dlx_evidence_case_run(const struct dlx_evidence_case *k)

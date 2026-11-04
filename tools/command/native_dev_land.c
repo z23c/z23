@@ -2438,6 +2438,11 @@ static bool dl_actionable_compile(const char *s)
             strncmp(s, "cc ", 3) == 0);
 }
 
+static bool dl_actionable_pass(const char *s)
+{
+    return strncmp(s, "PASS", 4) == 0 && (s[4] == '\0' || strchr(" \t\r", s[4]));
+}
+
 /* The first line a person can act on: the earliest line naming an error, a
  * failure, or a refusal. A tail is not an answer; this is. */
 static void dl_first_actionable(const char *text, char *out, size_t cap)
@@ -2462,9 +2467,7 @@ static void dl_first_actionable(const char *text, char *out, size_t cap)
         /* Gate names can contain "fail" (check-pipefail-status-pipe).
          * A passing result is not the failure that stopped the candidate. */
         const char *result = line + strspn(line, " \t\r");
-        if (strncmp(result, "PASS", 4) == 0 &&
-            (result[4] == '\0' || strchr(" \t\r", result[4])))
-            continue;
+        if (dl_actionable_pass(result)) continue;
         if (dl_actionable_strong(result)) {
             dl_sanitize_copy(line, out, cap);
             free(copy);
