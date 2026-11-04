@@ -1072,8 +1072,13 @@ static bool spawn_evidence_read(struct spawn_evidence_capture *c, int which)
     ssize_t n = read(c->pipes[which].fd, data, sizeof(data));
     if (n < 0 && errno == EINTR) return true;
     if (n < 0) return false;
-    if (n == 0) { close(c->pipes[which].fd); c->pipes[which].fd = -1; return true; }
-    uint64_t *total = which == 0 ? &c->e->stdout_total : &c->e->stderr_total;
+    if (n == 0) {
+        close(c->pipes[which].fd); c->pipes[which].fd = -1;
+        if (which == 0) c->e->stdout_complete = true;
+        else c->e->stderr_complete = true;
+        return true;
+    }
+    uint64_t *total = which == 0 ? &c->e->stdout_observed : &c->e->stderr_observed;
     *total = UINT64_MAX - *total < (uint64_t)n ? UINT64_MAX : *total + (uint64_t)n;
     if (which == 0) {
         size_t room = c->cap - 1 - c->used;
@@ -1113,6 +1118,26 @@ static bool spawn_evidence_drain(pid_t pid, struct spawn_evidence_capture *c,
         }
     }
     return true;
+}
+
+/* Drain already buffered bytes after containment stops without waiting for
+ * inherited writers; incomplete EOF remains explicit when the budget ends. */
+static bool spawn_evidence_drain_pending(struct spawn_evidence_capture *c)
+{
+    uint64_t start = c->e->stdout_observed + c->e->stderr_observed;
+    int64_t deadline = platform_time_monotonic_ms() + 25;
+    for (;;) {
+        if (c->pipes[0].fd < 0 && c->pipes[1].fd < 0) return true;
+        uint64_t now = c->e->stdout_observed + c->e->stderr_observed;
+        if (now - start >= 4u * 1024u * 1024u || platform_time_monotonic_ms() >= deadline)
+            return true;
+        int ready = poll(c->pipes, 2, 0);
+        if (ready < 0 && errno == EINTR) continue;
+        if (ready <= 0) return ready == 0;
+        for (int i = 0; i < 2; i++)
+            if (c->pipes[i].fd >= 0 && c->pipes[i].revents && !spawn_evidence_read(c, i))
+                return false;
+    }
 }
 
 static void spawn_evidence_child(int out, int err)
@@ -1161,10 +1186,11 @@ int zcl_spawn_capture_evidence(const char *const argv[], char *buf, size_t cap,
     int64_t deadline = timeout_ms > 0 ? platform_time_monotonic_ms() + timeout_ms : 0;
     bool ok = spawn_evidence_drain(pid, &c, timeout_ms, deadline, anchor.enabled);
     if (!ok || e->timed_out) spawn_capture_kill_group(pid, anchor.enabled);
-    for (int i = 0; i < 2; i++) if (c.pipes[i].fd >= 0) close(c.pipes[i].fd);
     int status = 0; bool cancelled = false;
     bool reaped = spawn_capture_reap(pid, &status, deadline, NULL, NULL,
                                      &e->timed_out, &cancelled, anchor.enabled, NULL);
+    ok = spawn_evidence_drain_pending(&c) && ok;
+    for (int i = 0; i < 2; i++) if (c.pipes[i].fd >= 0) close(c.pipes[i].fd);
     if (anchor.enabled) close(anchor.hold[1]);
     buf[c.used] = '\0'; e->exit_observed = reaped;
     if (reaped) e->exit_code = spawn_capture_status(true, status);

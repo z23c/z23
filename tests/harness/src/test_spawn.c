@@ -676,7 +676,7 @@ static int test_spawn_evidence_dual_flood(void)
         struct zcl_spawn_evidence e;
         int rc = zcl_spawn_capture_evidence(argv, out, sizeof(out), 10000, &e);
         ASSERT(rc == 0 && e.exit_observed && !e.timed_out);
-        ASSERT(e.stdout_total > 65536 && e.stderr_total > 65536);
+        ASSERT(e.stdout_observed > 65536 && e.stderr_observed > 65536);
         ASSERT(e.stdout_len >= 7 && memcmp(e.stdout_tail + e.stdout_len - 7, "out-end", 7) == 0);
         ASSERT(e.stderr_len >= 7 && memcmp(e.stderr_tail + e.stderr_len - 7, "err-end", 7) == 0);
         PASS();
@@ -693,7 +693,7 @@ static int test_spawn_evidence_flood_timeout(void)
         struct zcl_spawn_evidence e;
         int rc = zcl_spawn_capture_evidence(argv, out, sizeof(out), 100, &e);
         ASSERT(rc != 0 && e.timed_out && e.exit_observed);
-        ASSERT(e.stdout_total > 0 && e.stderr_total > 0);
+        ASSERT(e.stdout_observed > 0 && e.stderr_observed > 0);
         PASS();
     } _test_next:;
     return failures;
@@ -746,6 +746,7 @@ static int test_spawn_evidence_exited_buffer(void)
         int rc = zcl_spawn_capture_evidence(argv, out, sizeof(out), 3000, &e);
         zcl_spawn_evidence_test_hook(NULL, NULL);
         ASSERT(observed && rc == 0 && e.exit_observed);
+        ASSERT(e.stdout_complete && e.stderr_complete);
         ASSERT(e.stdout_len >= 7 && memcmp(e.stdout_tail + e.stdout_len - 7, "OUT-END", 7) == 0);
         ASSERT(e.stderr_len >= 7 && memcmp(e.stderr_tail + e.stderr_len - 7, "ERR-END", 7) == 0);
         PASS();

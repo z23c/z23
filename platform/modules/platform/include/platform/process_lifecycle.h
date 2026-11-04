@@ -42,7 +42,8 @@ struct platform_process_evidence {
     unsigned char stdout_tail[PLATFORM_PROCESS_EVIDENCE_TAIL];
     unsigned char stderr_tail[PLATFORM_PROCESS_EVIDENCE_TAIL];
     size_t stdout_len, stderr_len;
-    uint64_t stdout_total, stderr_total;
+    uint64_t stdout_observed, stderr_observed;
+    bool stdout_complete, stderr_complete;
 };
 
 enum platform_process_wait_result {

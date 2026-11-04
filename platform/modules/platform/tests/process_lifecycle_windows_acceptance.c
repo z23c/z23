@@ -489,6 +489,8 @@ static bool child_mode_capture_evidence(struct child_mode_session *s)
     bool ok = platform_process_capture_evidence(&options, out, sizeof(out), 10000u,
                                                &result, &evidence);
     return ok && result.exit_code == 7u && result.output_truncated && !result.timed_out &&
+           evidence.stdout_complete && evidence.stderr_complete &&
+           evidence.stdout_observed > 65536 && evidence.stderr_observed > 65536 &&
            strlen(out) == sizeof(out) - 1u && evidence.stdout_len == sizeof(evidence.stdout_tail) &&
            evidence.stderr_len == sizeof(evidence.stderr_tail) &&
            memcmp(evidence.stdout_tail + evidence.stdout_len - 11, "stdout-tail", 11) == 0 &&

@@ -754,7 +754,7 @@ static bool process_capture_stdout_stdio(
                                             &available, result,
                                             evidence ? evidence->stdout_tail : NULL,
                                             evidence ? &evidence->stdout_len : NULL,
-                                            evidence ? &evidence->stdout_total : NULL)) {
+                                            evidence ? &evidence->stdout_observed : NULL)) {
             ok = false;
             break;
         }
@@ -763,7 +763,7 @@ static bool process_capture_stdout_stdio(
             !process_capture_read_available(error_read, ignored, sizeof(ignored), &ignored_used,
                                             &error_available, &ignored_result,
                                             evidence->stderr_tail, &evidence->stderr_len,
-                                            &evidence->stderr_total))) {
+                                            &evidence->stderr_observed))) {
             ok = false; break;
         }
 
@@ -803,11 +803,18 @@ static bool process_capture_stdout_stdio(
     ok = process_capture_drain(read_handle, out, out_size, &used, result,
                                evidence ? evidence->stdout_tail : NULL,
                                evidence ? &evidence->stdout_len : NULL,
-                               evidence ? &evidence->stdout_total : NULL) && ok;
+                               evidence ? &evidence->stdout_observed : NULL) && ok;
     if (evidence)
         ok = process_capture_drain(error_read, ignored, sizeof(ignored), &ignored_used,
                                    &ignored_result, evidence->stderr_tail, &evidence->stderr_len,
-                                   &evidence->stderr_total) && ok;
+                                   &evidence->stderr_observed) && ok;
+    if (evidence) {
+        DWORD remaining = 0;
+        if (process_capture_peek(read_handle, &pipe_closed, &remaining))
+            evidence->stdout_complete = pipe_closed && remaining == 0;
+        if (process_capture_peek(error_read, &error_closed, &remaining))
+            evidence->stderr_complete = error_closed && remaining == 0;
+    }
     out[used] = 0;
     CloseHandle(read_handle);
     if (error_read) CloseHandle(error_read);

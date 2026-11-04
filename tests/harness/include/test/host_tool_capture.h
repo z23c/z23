@@ -40,8 +40,9 @@ static inline int test_host_tool_capture(const char *const argv[], char *out,
     test_note("child %s exit=%u return=%d observed=%d timeout=%d stdout_truncated=%d",
               argv[0], result.exit_code, rc, captured && !result.timed_out, result.timed_out,
               result.output_truncated);
-    test_note("child stdout_bytes=%llu stderr_bytes=%llu",
-              (unsigned long long)evidence.stdout_total, (unsigned long long)evidence.stderr_total);
+    test_note("child stdout_observed=%llu complete=%d stderr_observed=%llu complete=%d",
+              (unsigned long long)evidence.stdout_observed, evidence.stdout_complete,
+              (unsigned long long)evidence.stderr_observed, evidence.stderr_complete);
     test_note_bytes("stdout tail", evidence.stdout_tail, evidence.stdout_len);
     test_note_bytes("stderr tail", evidence.stderr_tail, evidence.stderr_len);
     return rc;
@@ -52,8 +53,9 @@ static inline int test_host_tool_capture(const char *const argv[], char *out,
     test_note("child %s exit=%d observed=%d timeout=%d stdout_truncated=%d",
               argv && argv[0] ? argv[0] : "host tool", rc,
               evidence.exit_observed, evidence.timed_out, evidence.stdout_truncated);
-    test_note("child stdout_bytes=%llu stderr_bytes=%llu",
-              (unsigned long long)evidence.stdout_total, (unsigned long long)evidence.stderr_total);
+    test_note("child stdout_observed=%llu complete=%d stderr_observed=%llu complete=%d",
+              (unsigned long long)evidence.stdout_observed, evidence.stdout_complete,
+              (unsigned long long)evidence.stderr_observed, evidence.stderr_complete);
     test_note_bytes("stdout tail", evidence.stdout_tail, evidence.stdout_len);
     test_note_bytes("stderr tail", evidence.stderr_tail, evidence.stderr_len);
     return rc;

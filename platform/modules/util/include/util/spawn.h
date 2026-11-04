@@ -166,7 +166,8 @@ struct zcl_spawn_evidence {
     unsigned char stdout_tail[ZCL_SPAWN_EVIDENCE_TAIL];
     unsigned char stderr_tail[ZCL_SPAWN_EVIDENCE_TAIL];
     size_t stdout_len, stderr_len;
-    uint64_t stdout_total, stderr_total;
+    uint64_t stdout_observed, stderr_observed;
+    bool stdout_complete, stderr_complete;
     bool stdout_truncated, timed_out, exit_observed;
     int exit_code;
 };
