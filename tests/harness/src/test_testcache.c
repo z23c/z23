@@ -2775,6 +2775,14 @@ static int tc_load_flaky_excerpt(void)
     return failures;
 }
 
+static bool tc_excerpt_agent_verify(const char *cap, const char *log)
+{
+    return tc_shell("make --no-print-directory agent-verify-evidence LOG=%s > %s", cap, log) &&
+           file_contains(log, "  first| L11: --- evidence x.c:1 ---") &&
+           file_contains(log, "deadline") &&
+           file_contains(log, "  first| L14: --- end evidence ---");
+}
+
 /* Flight-recorder evidence: see testcache_print_log_excerpt. */
 static int tc_excerpt_evidence_case(void)
 {
@@ -2812,10 +2820,7 @@ static int tc_excerpt_evidence_case(void)
     TC_CHECK("nothing past the evidence block or outside the tail is kept",
              !file_contains(cap, "L15:") && !file_contains(cap, "L30:"));
     TC_CHECK("agent verify retains the prefixed evidence excerpt",
-             tc_shell("make --no-print-directory agent-verify-evidence LOG=%s > %s", cap, log) &&
-             file_contains(log, "  first| L11: --- evidence x.c:1 ---") &&
-             file_contains(log, "deadline") &&
-             file_contains(log, "  first| L14: --- end evidence ---"));
+             tc_excerpt_agent_verify(cap, log));
     (void)unlink(log);
     (void)unlink(cap);
     return failures;
