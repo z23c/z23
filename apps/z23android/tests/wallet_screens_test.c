@@ -2213,9 +2213,7 @@ static void test_compact_unavailable(void)
     wallet_screens_close();
 }
 
-/* With "stale" or "async" as the argument only that test runs, so a thread sanitizer can cover it in reasonable time. */
-/* Funds says in plain words what can be spent now, what is arriving, what is maturing and what is public, and
- * shows no number the node did not report. */
+static bool compact_balance_ready(void) { return item_is("1.23456789 ZCL"); }
 static bool compact_retry_visible(void)
 {
     fake.now += WALLET_INITIAL_RETRY_MS;
@@ -2236,11 +2234,15 @@ static void test_compact_retry_once_async(void)
     tap(WALLET_ACT_RETRY_SUMMARY, 0, WALLET_STAY);
     CHECK(item_is("Loading…") && count_ops("summary") == requests);
     release_block();
+    wait_for(compact_balance_ready);
     wait_for(settled);
-    CHECK(item_is("1.23456789 ZCL") && count_ops("summary") == requests);
+    CHECK(count_ops("summary") == requests);
+    CHECK(item_is("1.23456789 ZCL"));
     wallet_screens_close();
 }
 
+/* Funds says in plain words what can be spent now, what is arriving, what is maturing and what is public, and
+ * shows no number the node did not report. */
 static void test_funds_plain_words(void)
 {
     start(false);
@@ -2435,6 +2437,7 @@ static void test_receive_redraw(void)
     wallet_screens_close();
 }
 
+/* With "stale" or "async" only that test runs for focused thread-sanitizer checks. */
 int main(int argc, char **argv)
 {
     setenv("TZ", "UTC", 1);

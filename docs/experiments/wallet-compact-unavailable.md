@@ -19,3 +19,11 @@ scale 1.5 used a fake failing summary. Retry, Receive, Send, History and Home
 were within the viewport; Retry showed loading and then the failure again.
 This was not a real-wallet or physical-phone result. A later change prevents
 a second stale Retry tap from queuing another summary while one is running.
+The asynchronous duplicate-tap fixture failed its request-count assertion
+with the guard removed and passed with it restored. The complete focused
+wallet test passed after restoring the candidate source.
+
+A simulator run of candidate `f0102d17` at the same screen settings showed
+all five actions within the viewport. Two Retry taps returned through Loading
+to a stable failure, and Home followed by Wallet reopened the same layout.
+This used a failing mock backend; physical-phone behavior remains unverified.
