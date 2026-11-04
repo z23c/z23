@@ -641,7 +641,7 @@ STUB
 
 judge_recorded() {
     local d="$1" want="$2" rc="$3" out
-    out="$(build/bin/z23-dev ops tip-agreement judge --ledger="$(ledger_of "$d")" --now="$NOW" 2>&1)" || {
+    out="$(build/bin/z23-dev ops tip-agreement judge --format=json --ledger="$(ledger_of "$d")" --now="$NOW" 2>&1)" || {
         bad "native judge could not read the recorder ledger: $out"; return; }
     if [[ "$out" == *"\"verdict\":\"$want\""* && "$out" == *"\"judge_rc\":$rc"* ]]; then
         ok "recorder to native judge -> $want"

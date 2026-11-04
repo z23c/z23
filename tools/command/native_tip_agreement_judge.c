@@ -24,7 +24,6 @@
 #include <string.h>
 
 #define TIP_FILE_MAX ((size_t)1 << 30)
-#define TIP_FUTURE_SLACK_SECS 3600
 #define TIP_DEF_MIN_DISTINCT_PEERS TIP_AGREEMENT_MIN_DISTINCT_PEERS
 
 struct tip_sum {
@@ -129,8 +128,8 @@ static void tip_grade_line(const char *line, int64_t now, int64_t winsecs,
         s->malformed++;
         return;
     }
-    if (!tip_num(line, "ts", &ts) || ts > now + TIP_FUTURE_SLACK_SECS)
-        return; /* a far-future stamp is not evidence and must not look fresh */
+    if (!tip_num(line, "ts", &ts) || ts > now)
+        return; /* future samples cannot refresh or accrue evidence */
     s->parseable++;
     if (ts > s->newest)
         s->newest = ts;
@@ -303,7 +302,9 @@ bool zcl_tip_agreement_judge(const struct zcl_tip_judge_opts *opts,
         tip_emit(&ctx, out, "STALE", "no_ledger_file");
         return true;
     }
+    bool embedded_nul = memchr(buf, '\0', len) != NULL;
     tip_scan(buf, now, opts->window_hours * 3600, &sum);
+    if (embedded_nul) sum.malformed++;
     if (sum.parseable > 0) {
         ctx.age = now - sum.newest;
         if (ctx.age < 0)
