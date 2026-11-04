@@ -1143,6 +1143,9 @@ static size_t lint_stale_kind_len(const char *kind)
     return 0;
 }
 
+/* Minimum age before a dead-owner sandbox of ANOTHER base is reaped. */
+#define LINT_STALE_OTHER_AGE_S (6 * 3600)
+
 /* True when pidstr names a process that is GONE, so its base is stale. */
 static bool lint_stale_owner_is_dead(const char *pidstr)
 {
@@ -1158,6 +1161,41 @@ static bool lint_stale_owner_is_dead(const char *pidstr)
      * the same dead owner and goes on the next run. */
     errno = 0;
     return kill((pid_t)owner_pid, 0) != 0 && errno == ESRCH;
+}
+
+/* Pid text of a sandbox entry name, or NULL. Our own base matches by prefix;
+ * any other base by the first ".lint_sb_"/".lint_meta_" tag after a name. */
+static const char *lint_stale_pid_text(const char *name, const char *base,
+                                       size_t blen, bool *own)
+{
+    *own = strncmp(name, base, blen) == 0 &&
+           lint_stale_kind_len(name + blen) != 0;
+    const char *tag = name + blen;
+    if (!*own) {
+        tag = strstr(name, ".lint_sb_");
+        if (!tag) tag = strstr(name, ".lint_meta_");
+        if (!tag || tag == name) return NULL;
+    }
+    return tag + lint_stale_kind_len(tag);
+}
+
+/* Our own base: a dead owner is enough. Any other base (one-shot gate copies
+ * are never run again under the same name): the owner must be dead AND the
+ * entry older than LINT_STALE_OTHER_AGE_S, so a reused pid cannot make a
+ * live neighbour's sandbox look stale. Fills victim with the full path. */
+static bool lint_stale_is_reapable(const char *parent, const char *name,
+                                   const char *base, size_t blen,
+                                   char *victim, size_t vsz)
+{
+    bool own;
+    const char *pidstr = lint_stale_pid_text(name, base, blen, &own);
+    if (!pidstr || pidstr == name || !lint_stale_owner_is_dead(pidstr))
+        return false;
+    if (snprintf(victim, vsz, "%s/%s", parent, name) >= (int)vsz) return false;
+    if (own) return true;
+    struct stat vst;
+    return lstat(victim, &vst) == 0 && S_ISDIR(vst.st_mode) &&
+           time(NULL) - vst.st_mtime >= LINT_STALE_OTHER_AGE_S;
 }
 
 /* Remove sandbox bases leaked by a killed run: shard bases (.lint_sb_) and
@@ -1180,16 +1218,11 @@ static void lint_purge_stale_sandboxes(const char *real_root)
     if (!d) return;
     struct dirent *e;
     while ((e = readdir(d)) != NULL) {
-        if (strncmp(e->d_name, base, blen) != 0) continue;
-        const char *kind = e->d_name + blen;
-        size_t klen = lint_stale_kind_len(kind);
-        if (klen == 0) continue;
-        if (!lint_stale_owner_is_dead(kind + klen)) continue;
-
         char victim[PATH_MAX];
-        if (snprintf(victim, sizeof(victim), "%s/%s", parent, e->d_name) <
-            (int)sizeof(victim))
-            (void)test_rm_rf_recursive(victim);
+        if (!lint_stale_is_reapable(parent, e->d_name, base, blen, victim,
+                                    sizeof(victim)))
+            continue;
+        (void)test_rm_rf_recursive(victim);
     }
     closedir(d);
 }
@@ -1664,7 +1697,34 @@ static int t_purge_reaps_dead_owner_copies(void)
         ASSERT(lint_plant_copy(fixture, "tree.lint_sb_ 2147483647") == 0);
         ASSERT(lint_plant_copy(fixture, "tree.lint_meta_99999999999") == 0);
         ASSERT(lint_plant_copy(fixture, "other.lint_meta_2147483647") == 0);
+        /* Other bases (leaked by killed one-shot gate copies): an aged
+         * dead-owner sandbox is reaped, an aged live-owner one, a fresh
+         * dead-owner one and a non-sandbox name are kept. */
+        char aged_live[80];
+        ASSERT(snprintf(aged_live, sizeof(aged_live), "gone.lint_sb_%d",
+                        (int)getpid()) < (int)sizeof(aged_live));
+        ASSERT(lint_plant_copy(fixture, "gone.lint_sb_2147483647") == 0);
+        ASSERT(lint_plant_copy(fixture, "gone2.lint_meta_2147483647") == 0);
+        ASSERT(lint_plant_copy(fixture, aged_live) == 0);
+        ASSERT(lint_plant_copy(fixture, "notes.lint_sb_x") == 0);
+        ASSERT(lint_plant_copy(fixture, "gone3.lint_sb_2147483647") == 0);
+        const char *aged[] = {"gone.lint_sb_2147483647",
+                              "gone2.lint_meta_2147483647", aged_live,
+                              "notes.lint_sb_x"};
+        for (size_t i = 0; i < sizeof(aged) / sizeof(aged[0]); i++) {
+            char p[PATH_MAX];
+            ASSERT(snprintf(p, sizeof(p), "%s/%s", fixture, aged[i]) <
+                   (int)sizeof(p));
+            struct timespec ts[2] = {{.tv_sec = time(NULL) - 7 * 3600},
+                                     {.tv_sec = time(NULL) - 7 * 3600}};
+            ASSERT(utimensat(AT_FDCWD, p, ts, 0) == 0);
+        }
         lint_purge_stale_sandboxes(root);
+        ASSERT(!lint_copy_exists(fixture, "gone.lint_sb_2147483647"));
+        ASSERT(!lint_copy_exists(fixture, "gone2.lint_meta_2147483647"));
+        ASSERT(lint_copy_exists(fixture, aged_live));
+        ASSERT(lint_copy_exists(fixture, "notes.lint_sb_x"));
+        ASSERT(lint_copy_exists(fixture, "gone3.lint_sb_2147483647"));
         ASSERT(!lint_copy_exists(fixture, "tree.lint_sb_2147483647"));
         ASSERT(!lint_copy_exists(fixture, "tree.lint_meta_2147483647"));
         ASSERT(lint_copy_exists(fixture, "tree"));
