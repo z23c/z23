@@ -17,12 +17,18 @@
 #include "base/hex.h"
 #include "sha3/sha3.h"
 #include "platform/directory_compat.h"
+#include "platform/process_lock.h"
+#include "platform/time_compat.h"
 #include "vcs/vcs_object.h"
 
 #include <stdio.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 #if defined(_WIN32)
 #define VM_STATE_ENV "ZCL_STATE_ROOT"
@@ -334,6 +340,69 @@ _test_next:;
     return failures;
 }
 
+#if !defined(_WIN32)
+static int vm_failure_checks(void)
+{
+    int failures = 0;
+    struct vm_rig r;
+    TEST("verdict_mmr: a non-ENOENT open failure is not an empty chain") {
+        char path[4100], why[96];
+        struct zcl_dev_vmmr_chain c;
+        ASSERT(vm_rig_open(&r, "open_error"));
+        (void)snprintf(path, sizeof(path), "%s/chain.log", r.mmr);
+        ASSERT(symlink("chain.log", path) == 0);
+        ASSERT(!zcl_dev_vmmr_load(r.mmr, &c, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "verdict_mmr_unreadable");
+        PASS();
+    }
+    TEST("verdict_mmr: rollback of a conflicting FAIL cannot admit PASS") {
+        uint8_t roots[2][32];
+        char path[4100], why[96];
+        struct stat st;
+        enum zcl_dev_observation_verdict v;
+        uint64_t ms = 0;
+        ASSERT(vm_rig_open(&r, "rollback"));
+        ASSERT(vm_leaf(r.pair, 7, "test_vm_rollback", ZCL_DEV_VERDICT_LEAF_PASS, 10, roots[0]));
+        ASSERT(vm_leaf(r.pair, 7, "test_vm_rollback", ZCL_DEV_VERDICT_LEAF_FAIL, 10, roots[1]));
+        ASSERT(vm_copy(r.pair, r.objects, roots[0]) && vm_copy(r.pair, r.objects, roots[1]));
+        ASSERT(zcl_dev_vmmr_append(r.mmr, (const uint8_t (*)[32])roots, 1, 1000, NULL, why, sizeof(why)));
+        (void)snprintf(path, sizeof(path), "%s/chain.log", r.mmr);
+        ASSERT(stat(path, &st) == 0);
+        ASSERT(zcl_dev_vmmr_append(r.mmr, (const uint8_t (*)[32])(roots + 1), 1, 1001, NULL, why, sizeof(why)));
+        ASSERT(vm_open_admit(&r, 7, "test_vm_rollback", &v, &ms));
+        ASSERT(v == ZCL_DEV_OBSERVATION_CONFLICT);
+        ASSERT(truncate(path, st.st_size) == 0);
+        ASSERT(vm_open_admit(&r, 7, "test_vm_rollback", &v, &ms));
+        ASSERT(v == ZCL_DEV_OBSERVATION_MISSING);
+        PASS();
+    }
+    TEST("verdict_mmr: append waits for the shared transaction lock") {
+        char path[4100], why[96];
+        struct platform_process_lock lock;
+        uint8_t root[32] = {1};
+        int status = 0;
+        ASSERT(vm_rig_open(&r, "lock"));
+        (void)snprintf(path, sizeof(path), "%s/chain.lock", r.mmr);
+        platform_process_lock_init(&lock);
+        ASSERT(platform_process_lock_acquire(&lock, path, true));
+        pid_t child = fork();
+        ASSERT(child >= 0);
+        if (child == 0)
+            _exit(zcl_dev_vmmr_append(r.mmr, (const uint8_t (*)[32])root, 1,
+                                      1000, NULL, why, sizeof(why)) ? 0 : 1);
+        platform_sleep_ms(200);
+        pid_t early = waitpid(child, &status, WNOHANG);
+        platform_process_lock_release(&lock);
+        if (early == 0)
+            ASSERT(waitpid(child, &status, 0) == child);
+        ASSERT(early == 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+#endif
+
 static int vm_rewrite_check(void)
 {
     int failures = 0;
@@ -553,6 +622,9 @@ int test_dev_proof_verdict_mmr(void)
     failures += vm_chain_checks();
     failures += vm_tamper_check();
     failures += vm_conflict_check();
+#if !defined(_WIN32)
+    failures += vm_failure_checks();
+#endif
     failures += vm_rewrite_check();
     failures += vm_divergence_check();
     failures += vm_sample_check();
