@@ -343,7 +343,7 @@ _test_next:;
 }
 
 #if !defined(_WIN32)
-static int vm_failure_checks(void)
+static int vm_open_failure_check(void)
 {
     int failures = 0;
     struct vm_rig r;
@@ -357,6 +357,14 @@ static int vm_failure_checks(void)
         ASSERT_STR_EQ(why, "verdict_mmr_unreadable");
         PASS();
     }
+_test_next:;
+    return failures;
+}
+
+static int vm_rollback_check(void)
+{
+    int failures = 0;
+    struct vm_rig r;
     TEST("verdict_mmr: rollback of a conflicting FAIL cannot admit PASS") {
         uint8_t roots[2][32];
         char path[4100], why[96];
@@ -378,6 +386,31 @@ static int vm_failure_checks(void)
         ASSERT(v == ZCL_DEV_OBSERVATION_MISSING);
         PASS();
     }
+_test_next:;
+    return failures;
+}
+
+static bool vm_join_writers(pid_t child[2], int status[2])
+{
+    bool ok = true;
+    for (int i = 0; i < 2; i++) {
+        if (child[i] <= 0) continue;
+        pid_t got = 0;
+        for (int n = 0; n < 100 && got == 0; n++) {
+            got = waitpid(child[i], &status[i], WNOHANG);
+            if (got == 0) platform_sleep_ms(50);
+        }
+        if (got == 0) { (void)kill(child[i], SIGKILL); (void)waitpid(child[i], &status[i], 0); }
+        if (got != child[i] || !WIFEXITED(status[i]) || WEXITSTATUS(status[i]) != 0)
+            ok = false;
+    }
+    return ok;
+}
+
+static int vm_concurrent_check(void)
+{
+    int failures = 0;
+    struct vm_rig r;
     TEST("verdict_mmr: concurrent appenders serialize against the shared lock") {
         char path[4100], why[96];
         struct platform_process_lock lock;
@@ -422,17 +455,7 @@ static int vm_failure_checks(void)
                 }
         }
         platform_process_lock_release(&lock);
-        for (int i = 0; i < 2; i++) {
-            if (child[i] <= 0) continue;
-            pid_t got = 0;
-            for (int n = 0; n < 100 && got == 0; n++) {
-                got = waitpid(child[i], &status[i], WNOHANG);
-                if (got == 0) platform_sleep_ms(50);
-            }
-            if (got == 0) { (void)kill(child[i], SIGKILL); (void)waitpid(child[i], &status[i], 0); }
-            if (got != child[i] || !WIFEXITED(status[i]) || WEXITSTATUS(status[i]) != 0)
-                ok = false;
-        }
+        if (!vm_join_writers(child, status)) ok = false;
         ASSERT(ok && zcl_dev_vmmr_load(r.mmr, &c, why, sizeof(why)));
         ASSERT(c.records == 2 && c.leaf_count == 2);
         zcl_dev_vmmr_release(&c);
@@ -663,7 +686,9 @@ int test_dev_proof_verdict_mmr(void)
     failures += vm_tamper_check();
     failures += vm_conflict_check();
 #if !defined(_WIN32)
-    failures += vm_failure_checks();
+    failures += vm_open_failure_check();
+    failures += vm_rollback_check();
+    failures += vm_concurrent_check();
 #endif
     failures += vm_rewrite_check();
     failures += vm_divergence_check();
