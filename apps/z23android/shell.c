@@ -326,6 +326,33 @@ static void show_scan_screen(JNIEnv *env, enum zapp_camera_access access)
  * keyboard under adjustResize), so its scroll view ends above the keyboard and the focused field scrolls into view. The
  * window draws behind the system bars (setDecorFitsSystemWindows false), so no screen is resized unless it asks. */
 static bool fits_keyboard(JNIEnv *env, jobject root) { return zj_bool_property(env, root, "setFitsSystemWindows", true); }
+static bool fleet_review_heading(JNIEnv *env, jobject content, jobject summary)
+{
+    bool ok = label(env, content, "Review fleet code", 24.0f, WHITE) &&
+        zj_append(env, content, summary) && zj_keep(env, &shell.fleet_review_text, summary) &&
+        button(env, content, "Join fleet", CMD_FLEET_JOIN, 0, 0);
+    if (ok) shell.fleet_join_button = shell.navs[shell.nav_count - 1].view;
+    return ok;
+}
+
+static bool fleet_review_result_widgets(JNIEnv *env, jobject content, jobject result, jobject qr)
+{
+    bool ok = zj_append(env, content, result) && zj_keep(env, &shell.fleet_review_result, result) &&
+        zj_margins(env, qr, zj_dp(260), zj_dp(260), 0.0f, 0, 8, 0, 8) &&
+        zj_append(env, content, qr) && zj_keep(env, &shell.fleet_review_qr, qr) &&
+        button(env, content, "Copy code", CMD_FLEET_COPY, 0, 0);
+    if (ok) shell.fleet_copy_button = shell.navs[shell.nav_count - 1].view;
+    return ok;
+}
+
+static bool fleet_review_footer(JNIEnv *env, jobject root, jobject footer)
+{
+    bool ok = zj_padding4(env, footer, 16, 0, 16, 8) && zj_append(env, root, footer) &&
+        button(env, footer, "Cancel", CMD_FLEET_BACK, 0, 0);
+    if (ok) shell.fleet_back_button = shell.navs[shell.nav_count - 1].view;
+    return ok;
+}
+
 static bool build_fleet_review(JNIEnv *env, jobject root)
 {
     jobject content = add_notice(env, root, SCREEN_FLEET_REVIEW) ? scroll_column(env, root, 16) : NULL;
@@ -333,18 +360,9 @@ static bool build_fleet_review(JNIEnv *env, jobject root)
     jobject summary = bar(env, DARK), result = bar(env, DARK);
     jobject qr = zj_widget(env, "android/widget/ImageView", shell.activity);
     bool ok = content && footer && summary && result && qr &&
-        label(env, content, "Review fleet code", 24.0f, WHITE) &&
-        zj_append(env, content, summary) && zj_keep(env, &shell.fleet_review_text, summary) &&
-        button(env, content, "Join fleet", CMD_FLEET_JOIN, 0, 0);
-    if (ok) shell.fleet_join_button = shell.navs[shell.nav_count - 1].view;
-    ok = ok && zj_append(env, content, result) && zj_keep(env, &shell.fleet_review_result, result) &&
-        zj_margins(env, qr, zj_dp(260), zj_dp(260), 0.0f, 0, 8, 0, 8) &&
-        zj_append(env, content, qr) && zj_keep(env, &shell.fleet_review_qr, qr) &&
-        button(env, content, "Copy code", CMD_FLEET_COPY, 0, 0);
-    if (ok) shell.fleet_copy_button = shell.navs[shell.nav_count - 1].view;
-    ok = ok && zj_padding4(env, footer, 16, 0, 16, 8) && zj_append(env, root, footer) &&
-        button(env, footer, "Cancel", CMD_FLEET_BACK, 0, 0);
-    if (ok) shell.fleet_back_button = shell.navs[shell.nav_count - 1].view;
+        fleet_review_heading(env, content, summary) &&
+        fleet_review_result_widgets(env, content, result, qr) &&
+        fleet_review_footer(env, root, footer);
     if (content) (*env)->DeleteLocalRef(env, content);
     if (footer) (*env)->DeleteLocalRef(env, footer);
     if (summary) (*env)->DeleteLocalRef(env, summary);
@@ -384,15 +402,23 @@ static bool add_screen(JNIEnv *env, jobject stage, enum screen which, jobject ro
     if (root && which != SCREEN_ASSISTANT) (*env)->DeleteLocalRef(env, root);
     return ok;
 }
+static bool attach_extra_pages(JNIEnv *env, jobject stage, jobject review, jobject wallet, jobject send, jobject setup)
+{
+    return build_fleet_review(env, review) && build_wallet(env, wallet) &&
+        build_send(env, send) && build_setup(env, setup) &&
+        add_screen(env, stage, SCREEN_FLEET_REVIEW, review) &&
+        add_screen(env, stage, SCREEN_WALLET, wallet) &&
+        add_screen(env, stage, SCREEN_SEND, send) && add_screen(env, stage, SCREEN_SETUP, setup);
+}
+
 static bool build_pages(JNIEnv *env, jobject stage, jobject home, jobject apps, jobject settings)
 {
     jobject review = column(env, DARK, 0, false);
     jobject scan = column(env, 0xff000000u, 0, false), wallet = column(env, DARK, 0, false), send = column(env, DARK, 0, false), setup = column(env, DARK, 0, false);
     return build_home(env, home) && build_apps(env, apps) && build_settings(env, settings) && build_scan(env, scan) &&
-           build_fleet_review(env, review) && build_wallet(env, wallet) && build_send(env, send) && build_setup(env, setup) && add_screen(env, stage, SCREEN_HOME, home) &&
+           add_screen(env, stage, SCREEN_HOME, home) &&
            add_screen(env, stage, SCREEN_APPS, apps) && add_screen(env, stage, SCREEN_SETTINGS, settings) &&
-           add_screen(env, stage, SCREEN_SCAN, scan) && add_screen(env, stage, SCREEN_FLEET_REVIEW, review) && add_screen(env, stage, SCREEN_WALLET, wallet) &&
-           add_screen(env, stage, SCREEN_SEND, send) && add_screen(env, stage, SCREEN_SETUP, setup);
+           add_screen(env, stage, SCREEN_SCAN, scan) && attach_extra_pages(env, stage, review, wallet, send, setup);
 }
 static bool build_stage(JNIEnv *env, jobject assistant)
 {

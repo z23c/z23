@@ -107,6 +107,15 @@ static bool fleet_review_run(struct controller *c, const char *token, bool expli
         zapp_fleet_preview_text(reply, preview, 2048);
     return *machine || invite;
 }
+static const char *invitation_message(bool cancelled, bool ok, bool valid, bool explicit_join,
+                                      const char *preview, const char *machine_error)
+{
+    if (cancelled) return "";
+    if (ok) return preview;
+    if (!valid) return "This is not a fleet code.";
+    return explicit_join ? "Could not verify this invitation. Ask your manager for a fresh code." : machine_error;
+}
+
 static bool invitation(struct controller *c, const char *text, bool typed)
 {
     char token[8192], preview[2048] = "", onion[128] = "";
@@ -138,7 +147,8 @@ static bool invitation(struct controller *c, const char *text, bool typed)
         if (typed) copy_text(c->view.fleet_review_input, sizeof(c->view.fleet_review_input), text);
         if (machine) copy_text(c->view.fleet_onion, sizeof(c->view.fleet_onion), onion);
     }
-    copy_text(c->view.fleet_preview, sizeof(c->view.fleet_preview), !typed && c->scan_cancelled ? "" : ok ? preview : !valid_input ? "This is not a fleet code." : explicit_join ? "Could not verify this invitation. Ask your manager for a fresh code." : machine_error);
+    copy_text(c->view.fleet_preview, sizeof(c->view.fleet_preview),
+              invitation_message(!typed && c->scan_cancelled, ok, valid_input, explicit_join, preview, machine_error));
     pthread_mutex_unlock(&c->lock);
     if (reply) { memory_cleanse(reply, ZAPP_TEXT_CAP); free(reply); }
     memory_cleanse(token, sizeof(token)); return ok;
