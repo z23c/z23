@@ -354,7 +354,10 @@ static size_t shadow_skip_comment(const char *s, size_t n, size_t i)
     return i + 1 < n ? i + 2 : n;
 }
 
-/* Comments dropped, every whitespace run collapsed to one space, trimmed.
+/* Comments dropped, whitespace runs collapsed and trimmed. A run containing
+ * an outside-comment newline stays a newline: replacing it with a space can
+ * absorb a public declaration or another directive into a macro definition.
+ * Comment-only lines coalesce; block-comment contents do not add separators.
  * Literals are kept byte-exact. */
 static bool shadow_is_blank(char c)
 {
@@ -366,20 +369,45 @@ static bool shadow_is_comment(const char *s, size_t n, size_t i)
     return s[i] == '/' && i + 1 < n && (s[i + 1] == '*' || s[i + 1] == '/');
 }
 
-static bool shadow_normalize(const char *s, size_t n, struct shadow_buf *out)
+/* C line splicing precedes comment recognition. In particular, a continued
+ * // comment consumes the next physical line, while an extra blank line
+ * after a macro continuation terminates the directive. */
+static bool shadow_splice_lines(const char *s, size_t n, struct shadow_buf *out)
 {
-    bool ok = true, space = false;
+    if (n == 0) return shadow_buf_put(out, "", 0);
+    size_t start = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] != '\\' || i + 1 >= n) continue;
+        size_t end = i + 1;
+        if (s[end] == '\r') {
+            if (end + 1 < n && s[end + 1] == '\n') end++;
+        } else if (s[end] != '\n') {
+            continue;
+        }
+        if (!shadow_buf_put(out, s + start, i - start)) return false;
+        i = end;
+        start = end + 1;
+    }
+    return shadow_buf_put(out, s + start, n - start);
+}
+
+static bool shadow_normalize_tokens(const char *s, size_t n, struct shadow_buf *out)
+{
+    bool ok = true, space = false, newline = false;
     out->len = 0;
     if (!shadow_buf_put(out, "", 0)) return false;
     for (size_t i = 0; i < n && ok;) {
         char c = s[i];
         if (shadow_is_comment(s, n, i) || shadow_is_blank(c)) {
+            newline = newline || c == '\n' || c == '\r';
             i = shadow_is_blank(c) ? i + 1 : shadow_skip_comment(s, n, i);
             space = true;
             continue;
         }
-        if (space && out->len > 0) ok = shadow_buf_put(out, " ", 1);
+        if (space && out->len > 0)
+            ok = shadow_buf_put(out, newline ? "\n" : " ", 1);
         space = false;
+        newline = false;
         if (c == '"' || c == '\'') {
             i = shadow_copy_literal(s, n, i, out, &ok);
             continue;
@@ -387,6 +415,15 @@ static bool shadow_normalize(const char *s, size_t n, struct shadow_buf *out)
         ok = ok && shadow_buf_put(out, &c, 1);
         i++;
     }
+    return ok;
+}
+
+static bool shadow_normalize(const char *s, size_t n, struct shadow_buf *out)
+{
+    struct shadow_buf spliced = {0};
+    bool ok = shadow_splice_lines(s, n, &spliced) &&
+              shadow_normalize_tokens(spliced.bytes, spliced.len, out);
+    free(spliced.bytes);
     return ok;
 }
 
@@ -443,10 +480,9 @@ static bool shadow_flush_file(struct shadow_patch_state *st)
                 memcmp(st->norm_a.bytes, st->norm_b.bytes, st->norm_a.len) == 0;
     if (!same) {
         st->any_changed = true;
-        if (!shadow_normalize(st->removed.bytes, st->removed.len,
-                              &st->norm_a))
-            return false;
-        st->any_moved = st->any_moved || st->norm_a.len > 0;
+        /* Even deleting a blank/comment line can remove a directive boundary
+         * after splicing. Only pure additions may claim additive change. */
+        st->any_moved = st->any_moved || st->removed.len > 0;
     }
     st->side_before.len = st->side_after.len = 0;
     st->removed.len = st->added.len = 0;
@@ -525,7 +561,7 @@ static void shadow_patch_begin(struct shadow_patch_state *st,
     memset(out, 0, sizeof(*out));
     st->component = component;
     st->facts = out;
-    static const char domain[] = "zcl.shadow.contract_delta.v1";
+    static const char domain[] = "zcl.shadow.contract_delta.v2";
     sha3_256_init(&st->before);
     sha3_256_init(&st->after);
     sha3_256_write(&st->before, (const unsigned char *)domain, sizeof(domain));

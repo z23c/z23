@@ -222,6 +222,73 @@ static int ss_test_contract_tokens(void)
         ASSERT(ss_analyze_text(comment_only, &p));
         ASSERT(p.contract_change == ZCL_SHADOW_CONTRACT_NONE);
         ASSERT(memcmp(p.contract_before, p.contract_after, 32) == 0);
+        static const struct {
+            const char *name;
+            const char *body;
+            enum zcl_shadow_contract_change expected;
+        } boundaries[] = {
+            {"declaration absorbed into macro",
+             "@@ -1,2 +1,1 @@\n"
+             "-#define DECL extern\n-int a;\n"
+             "+#define DECL extern int a;\n", ZCL_SHADOW_CONTRACT_MOVED},
+            {"two directives become one replacement list",
+             "@@ -1,2 +1,1 @@\n"
+             "-#define A 1\n-#define B 2\n"
+             "+#define A 1 #define B 2\n", ZCL_SHADOW_CONTRACT_MOVED},
+            {"comment-only lines preserve boundaries",
+             "@@ -1,2 +1,3 @@\n"
+             " #define DECL extern\n+/* new comment-only line */\n int a;\n",
+             ZCL_SHADOW_CONTRACT_NONE},
+            {"block comment newlines do not end a directive",
+             "@@ -1,2 +1,3 @@\n"
+             "-#define DECL extern /* old */\n"
+             "+#define DECL extern /* new\n+ comment */\n int a;\n",
+             ZCL_SHADOW_CONTRACT_NONE},
+            {"continuation consumes a declaration",
+             "@@ -1,3 +1,2 @@\n"
+             " #define DECL extern \\\n-\n int a;\n",
+             ZCL_SHADOW_CONTRACT_MOVED},
+            {"continued line comment hides a declaration",
+             "@@ -1,2 +1,2 @@\n"
+             "-// old comment\n+// new comment \\\n int a;\n",
+             ZCL_SHADOW_CONTRACT_MOVED},
+            {"equivalent directive continuation",
+             "@@ -1,2 +1,1 @@\n"
+             "-#define DECL extern \\\n-int a;\n"
+             "+#define DECL extern int a;\n",
+             ZCL_SHADOW_CONTRACT_NONE},
+            {"equivalent CRLF directive continuation",
+             "@@ -1,2 +1,1 @@\n"
+             "-#define DECL extern \\\r\n-int a;\r\n"
+             "+#define DECL extern int a;\r\n",
+             ZCL_SHADOW_CONTRACT_NONE},
+            {"continued comment spelling only",
+             "@@ -1,3 +1,3 @@\n"
+             "-// old \\\n- continued old\n"
+             "+// new \\\n+ continued new\n int a;\n",
+             ZCL_SHADOW_CONTRACT_NONE},
+        };
+        for (size_t i = 0; i < sizeof(boundaries) / sizeof(boundaries[0]); i++) {
+            char patch[1024];
+            int n = snprintf(patch, sizeof(patch),
+                "diff --git a/platform/modules/codec/include/codec/cursor.h "
+                "b/platform/modules/codec/include/codec/cursor.h\n%s", boundaries[i].body);
+            ASSERT(n > 0 && (size_t)n < sizeof(patch));
+            ASSERT(ss_analyze_text(patch, &p));
+            printf("boundary=%s observed=%s expected=%s roots_equal=%d\n",
+                   boundaries[i].name, zcl_shadow_contract_change_name(p.contract_change),
+                   zcl_shadow_contract_change_name(boundaries[i].expected),
+                   memcmp(p.contract_before, p.contract_after, 32) == 0);
+            ASSERT(p.contract_change == boundaries[i].expected);
+            ASSERT((memcmp(p.contract_before, p.contract_after, 32) == 0) ==
+                   (boundaries[i].expected == ZCL_SHADOW_CONTRACT_NONE));
+            struct zcl_shadow_scope_facts scope = {
+                .contract_moved = p.contract_change == ZCL_SHADOW_CONTRACT_MOVED,
+            };
+            ASSERT(zcl_shadow_classify(&scope) ==
+                (scope.contract_moved ? ZCL_SHADOW_FALLBACK_UNKNOWN_SCOPE
+                                      : ZCL_SHADOW_FALLBACK_NONE));
+        }
         const char *additive =
             "diff --git a/platform/modules/codec/include/codec/cursor.h "
             "b/platform/modules/codec/include/codec/cursor.h\n"
