@@ -316,6 +316,10 @@ static int pr_confirm_roundtrip(void)
         ASSERT_EQ(json_get_int(json_get(&r.data, "epoch")), 2);
         ASSERT(pr_bool(&r, "smoke_passed", true)); ASSERT(pr_bool(&r, "previous_retired", true));
         ASSERT_EQ(strlen(pr_str(&r, "psk_fingerprint")), 16u);
+        const struct json_value *ops = json_get(&r.data, "operator_steps");
+        ASSERT(ops && json_size(ops) == 2);
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(ops, 0), "kind")), "operator_step");
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(ops, 0), "action")), "restart_hub_receiver_unit");
         zcl_command_reply_free(&r);
         uint64_t c1, h1, c2, h2;
         ASSERT(pr_epoch_revoked(&fx, 1, &c1, &h1)); ASSERT(pr_epoch_revoked(&fx, 2, &c2, &h2));
@@ -486,6 +490,36 @@ static int pr_plan_binding(void)
     return failures;
 }
 
+static int pr_refusals(void)
+{
+    int failures = 0;
+    TEST_CASE("pair_renew: a missing grant and a wrong epoch are refused and create nothing") {
+        struct pr_fx fx;
+        ASSERT(pr_fixture(&fx, 86400));
+        struct zcl_command_reply r = {0};
+        char path[1400];
+        /* Wrong epoch: epoch 2 already exists on a side after the plan, so the plan no longer binds. */
+        ASSERT(pr_plan(&fx, NULL, 0, &r)); ASSERT(pr_passed(&r));
+        char id[65]; snprintf(id, sizeof(id), "%s", pr_str(&r, "plan_id")); zcl_command_reply_free(&r);
+        snprintf(path, sizeof(path), "%s/r2-e2", fx.cs); ASSERT(mkdir(path, 0700) == 0);
+        ASSERT(pr_confirm(&fx, id, false, &r)); ASSERT(!pr_passed(&r)); ASSERT(!r.error.mutated);
+        zcl_command_reply_free(&r);
+        ASSERT(pr_plan(&fx, NULL, 0, &r)); ASSERT(pr_passed(&r));
+        ASSERT_EQ(json_get_int(json_get(&r.data, "current_epoch")), 1); ASSERT_EQ(json_get_int(json_get(&r.data, "next_epoch")), 3);
+        zcl_command_reply_free(&r);
+        snprintf(path, sizeof(path), "%s/r1-e2", fx.hs); ASSERT(!pr_exists(path));
+        uint64_t c1, h1; ASSERT(pr_epoch_revoked(&fx, 1, &c1, &h1)); ASSERT_EQ(c1, 0u); ASSERT_EQ(h1, 0u);
+        /* Missing grant: no readable client route for the peer. */
+        snprintf(path, sizeof(path), "%s/client.json", fx.c_dir); ASSERT(unlink(path) == 0);
+        ASSERT(pr_plan(&fx, NULL, 0, &r)); ASSERT(pr_code(&r, "RENEW_NO_CURRENT_EPOCH")); ASSERT(!r.error.mutated);
+        zcl_command_reply_free(&r);
+        ASSERT(pr_confirm(&fx, id, false, &r)); ASSERT(pr_code(&r, "RENEW_NO_CURRENT_EPOCH")); ASSERT(!r.error.mutated);
+        zcl_command_reply_free(&r);
+        pr_close(&fx);
+    } TEST_END
+    return failures;
+}
+
 static int pr_status(void)
 {
     int failures = 0;
@@ -631,6 +665,7 @@ int test_pair_renew(void)
     failures += pr_smoke_failure();
     failures += pr_no_secret_bytes();
     failures += pr_plan_binding();
+    failures += pr_refusals();
     failures += pr_status();
     failures += pr_bounds();
 #endif

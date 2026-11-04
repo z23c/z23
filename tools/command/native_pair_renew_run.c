@@ -477,6 +477,37 @@ static void prr_receipt(struct prr *run, char name[96], char digest_hex[65])
     else name[0] = 0;
 }
 
+/* The restarts this leaf never performs: it has no ssh or systemctl, so each
+ * is returned as a typed operator_step for a human (or a leaf that owns
+ * service control) to carry out. */
+static bool prr_operator_step(struct json_value *list, const char *action, const char *host, const char *detail)
+{
+    struct json_value item = {0};
+    json_set_object(&item);
+    bool ok = json_push_kv_str(&item, "kind", "operator_step") && json_push_kv_str(&item, "action", action) &&
+              json_push_kv_str(&item, "host", host) && json_push_kv_str(&item, "detail", detail) && json_push_back(list, &item);
+    json_free(&item);
+    return ok;
+}
+
+static bool prr_operator_steps(struct json_value *out)
+{
+    struct json_value list = {0};
+    json_set_array(&list);
+    bool ok = prr_operator_step(&list, "restart_hub_receiver_unit", "hub",
+                                "restart the hub tunnel receiver unit so it serves the new epoch route; the unit environment already names it") &&
+              prr_operator_step(&list, "restart_client_tunnel_runtime", "client",
+                                "restart the client tunnel runtime so it reads the new client route") &&
+              json_push_kv(out, "operator_steps", &list);
+    json_free(&list);
+    return ok;
+}
+
+static bool prr_emit_tail(struct json_value *data, const char *receipt, const char *digest)
+{
+    return json_push_kv_str(data, "receipt", receipt) && json_push_kv_str(data, "receipt_digest", digest) && prr_operator_steps(data);
+}
+
 static void prr_emit(struct prr *run, bool retired)
 {
     char receipt[96] = {0}, digest[65] = {0}, cred[65];
@@ -489,8 +520,7 @@ static void prr_emit(struct prr *run, bool retired)
               json_push_kv_str(&run->reply->data, "route_id", run->route_id) && json_push_kv_str(&run->reply->data, "credential_id", cred) &&
               json_push_kv_str(&run->reply->data, "psk_fingerprint", run->psk_fp) && json_push_kv_int(&run->reply->data, "expires_at", (int64_t)run->expires) &&
               json_push_kv_bool(&run->reply->data, "smoke_passed", true) && json_push_kv_int(&run->reply->data, "smoke_listen_port", run->smoke.listen_port) &&
-              json_push_kv_bool(&run->reply->data, "previous_retired", retired) && json_push_kv_str(&run->reply->data, "receipt", receipt) &&
-              json_push_kv_str(&run->reply->data, "receipt_digest", digest);
+              json_push_kv_bool(&run->reply->data, "previous_retired", retired) && prr_emit_tail(&run->reply->data, receipt, digest);
     if (!ok) pr_fail(run->reply, "RENEW_SERIALIZE_FAILED", "emit", "epoch N+1 is in force but its result did not fit the bounded reply", true);
     else if (!receipt[0])
         pr_fail(run->reply, "RENEW_RECEIPT_FAILED", "receipt", "epoch N+1 is in force and smoked but its renewal receipt could not be written under state_dir; the pairing is valid, record it by hand", true);
