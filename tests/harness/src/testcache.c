@@ -2955,11 +2955,14 @@ static bool tc_excerpt_next_line(FILE *fp, char *buf, size_t cap)
     size_t len = strlen(buf);
     bool complete = len > 0 && buf[len - 1] == '\n';
     if (complete) buf[--len] = '\0';
+    bool truncated = !complete && len == cap - 1;
     char spill[512];
     while (!complete && fgets(spill, sizeof(spill), fp)) {
         size_t sl = strlen(spill);
         complete = sl > 0 && spill[sl - 1] == '\n';
     }
+    if (truncated && cap > sizeof(" [truncated]"))
+        memcpy(buf + cap - sizeof(" [truncated]"), " [truncated]", sizeof(" [truncated]"));
     return true;
 }
 
@@ -2972,7 +2975,7 @@ static void tc_excerpt_print(FILE *out, const char *prefix, size_t lineno,
 }
 
 /* Ring of the last TESTCACHE_EXCERPT_CONTEXT log lines, slot = n % ring size. */
-#define TC_EXCERPT_BUF 8192
+#define TC_EXCERPT_BUF 16385
 
 static void tc_excerpt_keep(char ring[][TC_EXCERPT_BUF], size_t n,
                             const char *text)

@@ -881,6 +881,8 @@ static const char k_dlx_evidence_test_script[] =
     " '  first| L11: --- evidence retry.c:2 ---' \\\n"
     " '  first| L12: RETRY-HEAD' '  first| L13: RETRY-TAIL' \\\n"
     " '  first| L14: --- end evidence ---' \\\n"
+    " '  first| L20: --- evidence bad.c:3 ---' \\\n"
+    " '  first| L22: BAD-PREFIX-FRAME' '  first| L23: --- end evidence ---' \\\n"
     " 'SOME TESTS FAILED - 1/2 groups failed' \\\n"
     " 'Failed groups:' \\\n"
     " '  - test_golden_dev_cycle: exit code=1 log=./test-tmp/test_parallel_1_822.log'\n"
@@ -1023,7 +1025,7 @@ static bool dlx_evidence_outcome_ok(const struct dlx_evidence_case *k,
                           strstr(text, "FRAME-HEAD") && strstr(text, "FRAME-TAIL") &&
                           strstr(text, "--- end evidence ---") &&
                           strstr(text, "RETRY-HEAD") && strstr(text, "RETRY-TAIL") &&
-                          !strchr(text, '\033')));
+                          !strstr(text, "BAD-PREFIX-FRAME") && !strchr(text, '\033')));
 }
 
 static bool dlx_evidence_case_run(const struct dlx_evidence_case *k)

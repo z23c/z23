@@ -7225,6 +7225,46 @@ static void dl_proof_evidence_read(const char *wt, const char *local,
     }
 }
 
+static const char *dl_frame_text(const char *line, bool *prefixed, unsigned long *number)
+{
+    static const char prefix[] = "  first| L";
+    if (strncmp(line, prefix, sizeof(prefix) - 1) != 0) {
+        *prefixed = false;
+        return line;
+    }
+    const char *p = line + sizeof(prefix) - 1;
+    if (!isdigit((unsigned char)*p)) return NULL;
+    char *end;
+    errno = 0;
+    unsigned long value = strtoul(p, &end, 10);
+    if (errno || end[0] != ':' || end[1] != ' ') return NULL;
+    *prefixed = true;
+    *number = value;
+    return end + 2;
+}
+
+static bool dl_frame_safe_append(char *out, size_t cap, size_t *used, const char *line)
+{
+    size_t n = strlen(line);
+    if (!zutf8_validate_n(line, n)) return false;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)line[i];
+        bool c1 = c == 0xc2 && i + 1 < n &&
+                  (unsigned char)line[i + 1] >= 0x80 && (unsigned char)line[i + 1] <= 0x9f;
+        if ((c < 0x20 && c != '\n' && c != '\t') || c == 0x7f || c1) {
+            unsigned char next = c1 ? (unsigned char)line[++i] : 0;
+            int wrote = c1 ? snprintf(out + *used, cap - *used, "\\x%02X\\x%02X", c, next)
+                           : snprintf(out + *used, cap - *used, "\\x%02X", c);
+            if (wrote < 0 || (size_t)wrote >= cap - *used) return false;
+            *used += (size_t)wrote;
+        } else {
+            if (*used + 1 >= cap) return false;
+            out[(*used)++] = (char)c;
+        }
+    }
+    return true;
+}
+
 /* The retained log is an observation associated with the validated failure
  * attempt; its bytes are not covered by the failure-record binding. */
 static void dl_retained_frames(const char *wt, const char *local, const char *base,
@@ -7258,20 +7298,32 @@ static void dl_retained_frames(const char *wt, const char *local, const char *ba
     }
     FILE *f = fdopen(logfd, "r");
     if (!f) { close(logfd); return; }
-    char line[8192], frame[16384];
+    char line[8192], frame[32768];
     size_t used = 0, frame_used = 0;
     unsigned count = 0;
-    bool inside = false, overflow = false;
+    bool inside = false, overflow = false, frame_prefixed = false;
+    unsigned long previous = 0;
     while (count < 4 && fgets(line, sizeof(line), f)) {
-        if (!inside && strncmp(line, "--- evidence ", 13) == 0) {
+        bool prefixed = false;
+        unsigned long number = 0;
+        const char *text = dl_frame_text(line, &prefixed, &number);
+        if (!text) { if (inside) overflow = true; continue; }
+        if (!inside && strncmp(text, "--- evidence ", 13) == 0) {
             inside = true; overflow = false; frame_used = 0;
+            frame_prefixed = prefixed;
+            previous = number;
+        } else if (inside && (prefixed != frame_prefixed ||
+                   (prefixed && (previous == ULONG_MAX || number != previous + 1)))) {
+            overflow = true;
         }
         if (!inside) continue;
-        size_t len = strlen(line);
-        if (!len || line[len - 1] != '\n' || frame_used + len >= sizeof(frame))
+        if (prefixed) previous = number;
+        size_t len = strlen(text);
+        if (!len || text[len - 1] != '\n' || frame_used + len >= sizeof(frame))
             overflow = true;
-        if (!overflow) { memcpy(frame + frame_used, line, len); frame_used += len; }
-        if (strncmp(line, "--- end evidence ---", 20) != 0) continue;
+        if (!overflow && !dl_frame_safe_append(frame, sizeof(frame), &frame_used, text))
+            overflow = true;
+        if (strncmp(text, "--- end evidence ---", 20) != 0) continue;
         if (!overflow && used + frame_used < cap) {
             memcpy(out + used, frame, frame_used); used += frame_used; out[used] = '\0';
             count++;
@@ -7359,7 +7411,7 @@ static void dl_failed_proof_evidence(const struct dl_dirs *d,
     dl_log(row, "proof evidence:\n");
     dl_log(row, evidence);
     dl_log(row, "\n");
-    char frames[65536] = {0};
+    char frames[131072] = {0};
     if (strcmp(row->dimension, "test") == 0)
         dl_retained_frames(d->wt, row->local, row->base, &identity,
                            frames, sizeof(frames));
