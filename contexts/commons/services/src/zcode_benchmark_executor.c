@@ -989,7 +989,12 @@ static struct zcl_result exec_run_verdict(
     uint64_t a = original_evidence.median_ns, b = out->evidence.median_ns;
     uint64_t lo = a < b ? a : b;
     uint64_t delta = a > b ? a - b : b - a;
-    if (lo == 0) {
+    if (original->status == VCS_ZCODE_BENCHMARK_EXECUTION_FAILED ||
+        original->status == VCS_ZCODE_BENCHMARK_NULL_RESULT ||
+        out->reproduced.status == VCS_ZCODE_BENCHMARK_EXECUTION_FAILED ||
+        out->reproduced.status == VCS_ZCODE_BENCHMARK_NULL_RESULT || lo == 0) {
+        /* Placeholder or overhead timings do not turn a failed/missing
+         * observation into comparable evidence. Negative results can. */
         out->verdict = VCS_ZCODE_REPRODUCTION_INCONCLUSIVE;
     } else {
         uint64_t deviation_ppm = delta * 1000000u / lo;

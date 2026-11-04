@@ -1247,15 +1247,30 @@ static int test_zbex_closed_inputs(void)
 
 /* ── 10: reproduction flow ───────────────────────────────────────────── */
 
-static int test_zbex_reproduction(void)
+static bool zbex_empty_workload(const char *workspace, struct zbex_context *ctx)
+{
+    uint8_t wire[VCS_ZCODE_BENCHMARK_WORKLOAD_HEADER_BYTES];
+    if (vcs_zcode_benchmark_workload_v1_serialize(NULL, 0, wire, sizeof(wire)) !=
+            VCS_ZCODE_RECEIPT_OK ||
+        vcs_zcode_benchmark_workload_v1_root(wire, sizeof(wire),
+            ctx->workload_root) != VCS_ZCODE_RECEIPT_OK ||
+        !vcs_object_put_addressed(workspace, ctx->workload_root, wire, sizeof(wire)))
+        return false;
+    zbex_method(ctx->workload_root, &ctx->method);
+    return zbex_store_context_objects(workspace, ctx);
+}
+
+static int test_zbex_reproduction_status(uint8_t original_status)
 {
     int failures = 0;
-    TEST("zcode_benchmark_exec: reproduction re-runs the same action, contradicts, commits") {
+    TEST("zcode_benchmark_exec: reproduction preserves original observation status") {
         struct node_db ndb = {0};
         char dir[ZBEX_DIR_CAP];
         ASSERT(zbex_setup(&ndb, dir, sizeof(dir)));
         struct zbex_context ctx;
         ASSERT(zbex_seed_context(dir, &ctx));
+        if (original_status == VCS_ZCODE_BENCHMARK_NULL_RESULT)
+            ASSERT(zbex_empty_workload(dir, &ctx));
         /* A benchmark run produces the action/profile provenance the
          * hand-built v1 original borrows. */
         struct zcode_benchmark_execute_request req;
@@ -1265,7 +1280,8 @@ static int test_zbex_reproduction(void)
         ASSERT(base.committed);
         /* Hand-build the v1 original with a rigged evidence median of
          * 1 ns: any real re-run is slower, so the verdict is
-         * deterministically CONTRADICTED (a negative observation). */
+         * deterministically CONTRADICTED for measurable originals. Failed
+         * or null originals cannot justify a conclusive comparison. */
         uint64_t rigged_samples[16];
         for (size_t i = 0; i < 16; i++)
             rigged_samples[i] = 1;
@@ -1315,7 +1331,7 @@ static int test_zbex_reproduction(void)
         original_evidence.min_ns = 1;
         original_evidence.median_ns = 1;
         original_evidence.max_ns = 1;
-        original_evidence.status = VCS_ZCODE_BENCHMARK_OBSERVED;
+        original_evidence.status = original_status;
         original_evidence.isolation = VCS_ZCODE_BENCHMARK_ISOLATION_FULL;
         uint8_t original_evidence_wire[VCS_ZCODE_BENCHMARK_EVIDENCE_WIRE_BYTES];
         uint8_t original_evidence_root[32];
@@ -1339,7 +1355,7 @@ static int test_zbex_reproduction(void)
                base.run.hardware_profile_root, 32);
         memcpy(original.raw_sample_root, original_manifest_root, 32);
         memcpy(original.evidence_root, original_evidence_root, 32);
-        original.status = VCS_ZCODE_BENCHMARK_OBSERVED;
+        original.status = original_status;
         original.challenge_block_height = 3200000;
         zbex_root(original.challenge_block_hash, 0x34);
         original.sequence = 1;
@@ -1358,6 +1374,7 @@ static int test_zbex_reproduction(void)
         static char original_hex[65], repro_method_hex[65];
         zcl_hex_encode(original_root, 32, original_hex);
         zcl_hex_encode(ctx.method_root, 32, repro_method_hex);
+        ASSERT(zcode_benchmark_executor_verify_receipt(dir, original_hex).ok);
         struct zcode_benchmark_execute_request repro;
         memset(&repro, 0, sizeof(repro));
         repro.workspace = dir;
@@ -1377,12 +1394,18 @@ static int test_zbex_reproduction(void)
             zcode_benchmark_execute(&ndb, &repro, &repro_out);
         ASSERT(!mismatch.ok);
         ASSERT(strstr(mismatch.message, "action-mismatch") != NULL);
-        /* The matching sequence re-runs the same fixed action and the
-         * slower re-observation is a committed CONTRADICTION. */
+        /* The matching sequence re-runs the same fixed action and commits
+         * a status-aware comparison. */
         repro.action_sequence = 1;
         ASSERT(zcode_benchmark_execute(&ndb, &repro, &repro_out).ok);
         ASSERT(repro_out.committed);
-        ASSERT_EQ(repro_out.run.verdict, VCS_ZCODE_REPRODUCTION_CONTRADICTED);
+        uint8_t expected = original_status == VCS_ZCODE_BENCHMARK_EXECUTION_FAILED ||
+                           original_status == VCS_ZCODE_BENCHMARK_NULL_RESULT
+            ? VCS_ZCODE_REPRODUCTION_INCONCLUSIVE
+            : VCS_ZCODE_REPRODUCTION_CONTRADICTED;
+        fprintf(stderr, "reproduction original_status=%u verdict=%u committed=%d\n",
+                original_status, repro_out.run.verdict, repro_out.committed);
+        ASSERT_EQ(repro_out.run.verdict, expected);
         ASSERT(vcs_object_has(dir, repro_out.run.reproduced_root));
         char repro_hex[65];
         zcl_hex_encode(repro_out.run.reproduction_root, 32, repro_hex);
@@ -1393,7 +1416,7 @@ static int test_zbex_reproduction(void)
                                          &found).ok);
         ASSERT(found);
         ASSERT_STR_EQ(kind, "reproduction");
-        ASSERT_EQ(row.code, VCS_ZCODE_REPRODUCTION_CONTRADICTED);
+        ASSERT_EQ(row.code, expected);
         /* The reproduced v1 wire's receipt chain verifies end to end. */
         char reproduced_hex[65];
         zcl_hex_encode(repro_out.run.reproduced_root, 32, reproduced_hex);
@@ -1441,6 +1464,15 @@ static int test_zbex_reproduction(void)
         zbex_teardown(&ndb, dir);
         PASS();
     } _test_next:;
+    return failures;
+}
+
+static int test_zbex_reproduction(void)
+{
+    int failures = test_zbex_reproduction_status(VCS_ZCODE_BENCHMARK_OBSERVED);
+    failures += test_zbex_reproduction_status(VCS_ZCODE_BENCHMARK_NEGATIVE_RESULT);
+    failures += test_zbex_reproduction_status(VCS_ZCODE_BENCHMARK_EXECUTION_FAILED);
+    failures += test_zbex_reproduction_status(VCS_ZCODE_BENCHMARK_NULL_RESULT);
     return failures;
 }
 
