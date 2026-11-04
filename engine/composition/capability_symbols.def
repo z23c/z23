@@ -468,6 +468,8 @@ ZCL_CAPABILITY_SYMBOL("ftell", CAP_FS_READ, "")
 ZCL_CAPABILITY_SYMBOL("getcwd", CAP_FS_READ,
     "Discloses where in the operator filesystem this process is "
     "standing.")
+ZCL_CAPABILITY_SYMBOL("__getcwd_chk", CAP_FS_READ,
+    "Fortified getcwd; bounds checking does not change its filesystem read reach.")
 ZCL_CAPABILITY_SYMBOL("getpwuid_r", CAP_FS_READ,
     "Reads the system account database, and through the name service "
     "switch it can pull in a shared object. Classed FS_READ because "
