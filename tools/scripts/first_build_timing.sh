@@ -121,6 +121,8 @@ measure() {
     local clone_rc=$?
     t1="$(now_ms)"
     [ "$clone_rc" -eq 0 ] || die "git clone $ORIGIN failed"
+    local commit
+    commit="$(git -C "$clone" rev-parse --verify 'HEAD^{commit}')" || die "cannot identify the measured clone"
     names+=(clone); cmds+=("git clone $ORIGIN"); secs+=($(( (t1 - t0 + 500) / 1000 )))
     rcs+=(0); disks+=("$(dir_bytes "$clone")")
     say "  clone     $(( (t1 - t0 + 500) / 1000 ))s"
@@ -172,8 +174,9 @@ measure() {
     # --- write the artifact -------------------------------------------------
     load_end="$(awk '{print $1}' /proc/loadavg 2>/dev/null || echo 0)"
     mkdir -p "$OUT_DIR" || die "cannot create $OUT_DIR"
-    local commit total=0 peak=0 i
-    commit="$(git -C "$ROOT" log -1 --format='%H' 2>/dev/null || echo unknown)"
+    local total=0 peak=0 i final_commit
+    final_commit="$(git -C "$clone" rev-parse --verify 'HEAD^{commit}')" || die "cannot verify the measured clone"
+    [ "$final_commit" = "$commit" ] || die "measured clone changed commits during the run"
     for i in "${!names[@]}"; do
         total=$(( total + secs[i] ))
         [ "${disks[$i]:-0}" -gt "$peak" ] && peak="${disks[$i]}"
@@ -223,6 +226,14 @@ run_selftest() {
     tmp="$SELFTEST_TMP"
     self="${BASH_SOURCE[0]}"
 
+    # Measure a source independent of the checkout running this driver.
+    local origin="$tmp/origin.git" tree measured
+    git init --bare --quiet "$origin" || die "cannot create fixture origin"
+    tree="$(git -C "$origin" mktree </dev/null)" || die "cannot create fixture tree"
+    measured="$(git -C "$origin" -c user.name=fixture -c user.email=fixture@localhost \
+        -c commit.gpgSign=false commit-tree "$tree" -m 'timing fixture')" || die "cannot create fixture commit"
+    git -C "$origin" update-ref HEAD "$measured" || die "cannot set fixture HEAD"
+    export ZCL_FIRST_BUILD_ORIGIN="$origin"
     # (1) A successful run records every stage, in order, with a real command.
     out="$(ZCL_FIRST_BUILD_FAKE=ok ZCL_TIMINGS_CACHE="$tmp/ok" \
            ZCL_FIRST_BUILD_WORKDIR="$tmp/w1" bash "$self" 2>&1)"
@@ -232,6 +243,8 @@ run_selftest() {
     local art="$tmp/ok/first-build-timing/last-run.json"
     [ -f "$art" ] ||
         { echo "first-build-timing selftest: FAIL — no artifact written" >&2; exit 1; }
+    grep -Fq "\"commit\":\"$measured\"" "$art" ||
+        die "timing artifact does not identify the measured clone"
     local n
     n="$(grep -o '"name":"[a-z]*"' "$art" | wc -l)"
     [ "$n" -eq 5 ] ||
