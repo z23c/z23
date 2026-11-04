@@ -519,15 +519,35 @@ static void silent_node_items(struct wallet_screen *s)
     line(s, st.env.node_running ? "Node stopped. Start it to see your funds." : "The node is not answering. Start it to see your funds.");
     button(s, WALLET_ACT_START_NODE, "Start node");
 }
+static bool funds_unavailable(const struct data *d)
+{
+    return d->summary_failed && !d->view.known &&
+           !d->cache.valid && !d->node_silent;
+}
+
+static void funds_unavailable_items(struct wallet_screen *s, const struct data *d)
+{
+    line(s, "Balance unknown");
+    send_lines(s, d);
+    note(s, "The wallet could not be read. Try again.");
+    button(s, WALLET_ACT_RETRY_SUMMARY, "Try again");
+}
+
+static void funds_balance_items(struct wallet_screen *s, const struct data *d)
+{
+    if (!d->funds_loaded) { if (d->cache.valid) cache_lines(s, d); else { line(s, "Balance"); (void)add(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE, "Loading…"); send_lines(s, d); } }
+    else if (d->summary_failed && d->view.known) { funds_lines(s, d); if (d->node_silent) silent_node_items(s); }
+    else if (d->node_silent) { if (d->cache.valid) cache_lines(s, d); else send_lines(s, d); silent_node_items(s); }
+    else if (funds_unavailable(d)) funds_unavailable_items(s, d);
+    else funds_lines(s, d);
+}
+
 static void funds_items(struct wallet_screen *s)
 {
     const struct data *d = &st.d;
     title(s, "Wallet");
     if (d->scan_note[0]) note(s, d->scan_note);
-    if (!d->funds_loaded) { if (d->cache.valid) cache_lines(s, d); else { line(s, "Balance"); (void)add(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE, "Loading…"); send_lines(s, d); } }
-    else if (d->summary_failed && d->view.known) { funds_lines(s, d); if (d->node_silent) silent_node_items(s); }
-    else if (d->node_silent) { if (d->cache.valid) cache_lines(s, d); else send_lines(s, d); silent_node_items(s); }
-    else funds_lines(s, d);
+    funds_balance_items(s, d);
     if (d->fleet_loaded && !d->node_silent) line(s, d->fleet_fresh ? d->fleet : WALLET_FLEET_UNCHECKED);
     button(s, WALLET_ACT_RECEIVE, "Receive");
     if (!(d->summary_failed && d->view.known))
@@ -1316,11 +1336,24 @@ static void copy_address(void)
     touch();
 }
 
+static size_t retry_summary(struct job *jobs)
+{
+    size_t count = 0;
+    if (!funds_unavailable(&st.d) || !submit(jobs, &count, K_SUMMARY, "summary", "")) return 0;
+    st.d.funds_loaded = false;
+    st.d.initial_failures = 0;
+    st.d.initial_retry_wait = false;
+    st.d.requested_at = now();
+    touch();
+    return count;
+}
+
 /* The jobs a tap on the Funds page starts, or WALLET_SEND for Send. */
 static size_t from_funds(enum wallet_action action, struct job *jobs, enum wallet_outcome *outcome)
 {
     if (action == WALLET_ACT_RECEIVE) return enter(WALLET_PAGE_RECEIVE, jobs);
     if (action == WALLET_ACT_HISTORY) return enter(WALLET_PAGE_HISTORY, jobs);
+    if (action == WALLET_ACT_RETRY_SUMMARY) return retry_summary(jobs);
     if (action == WALLET_ACT_SEND && !(st.d.summary_failed && st.d.view.known)) *outcome = WALLET_SEND;
     if (action == WALLET_ACT_MAKE_PRIVATE && st.d.funds_loaded && !st.d.summary_failed && !st.d.node_silent && st.d.view.can_make_private)
         *outcome = WALLET_MAKE_PRIVATE;

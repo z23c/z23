@@ -577,6 +577,10 @@ static void test_balance_refresh_failure(void)
     fake.now += WALLET_REFRESH_MS;
     wallet_screens_tick();
     CHECK(has("Balance unknown") && !has("1.23456789 ZCL"));
+    CHECK(has("Try again") && !has("Pending amount unknown"));
+    fake.summary = GOOD_SUMMARY;
+    tap(WALLET_ACT_RETRY_SUMMARY, 0, WALLET_STAY);
+    CHECK(item_is("1.23456789 ZCL") && !has("Balance unknown"));
     wallet_screens_close();
 
     char scanning[] = SUMMARY_SCAN("2999999");
@@ -2189,6 +2193,26 @@ static void test_async(void)
     CHECK(!wallet_screens_open(WALLET_PAGE_FUNDS) && snap()->count == 0);
 }
 
+static void test_compact_unavailable(void)
+{
+    start(false);
+    fake.summary = OTHER_ERROR;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    finish_initial_failures();
+    wallet_screens_scan_notice("Payment code refused.");
+    struct wallet_screen *s = snap();
+    CHECK(find_text(s, "Balance unknown") >= 0 && find_text(s, "Try again") >= 0);
+    CHECK(find_text(s, "Pending amount unknown") < 0 && find_text(s, "Maturing amount unknown") < 0);
+    CHECK(find_text(s, "0 ZCL") < 0 && find(s, WALLET_ITEM_BUTTON, WALLET_ACT_RECEIVE) >= 0);
+    CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_RETRY_SUMMARY) >= 0);
+    CHECK(has("Payment code refused."));
+    fake.summary = GOOD_SUMMARY;
+    tap(WALLET_ACT_RETRY_SUMMARY, 0, WALLET_STAY);
+    CHECK(has("Payment code refused."));
+    CHECK(has("1.23456789 ZCL") && !has("Balance unknown"));
+    wallet_screens_close();
+}
+
 /* With "stale" or "async" as the argument only that test runs, so a thread sanitizer can cover it in reasonable time. */
 /* Funds says in plain words what can be spent now, what is arriving, what is maturing and what is public, and
  * shows no number the node did not report. */
@@ -2207,7 +2231,7 @@ static void test_funds_plain_words(void)
     fake.always_ok = true;
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
     finish_initial_failures();
-    CHECK(has("Balance unknown") && has("Pending amount unknown") && has("Public amount unknown") && has("Maturing amount unknown"));
+    CHECK(has("Balance unknown") && !has("Pending amount unknown") && !has("Public amount unknown") && !has("Maturing amount unknown"));
     CHECK(!has(" 0 ZCL") && !has("0.0") && !has("Up to date"));
     wallet_screens_close();
 }
@@ -2445,6 +2469,7 @@ int main(int argc, char **argv)
     test_history_while_scanning();
     test_funds_lines();
     test_funds_plain_words();
+    test_compact_unavailable();
     test_funds_unready();
     test_history_incomplete();
     test_null_privacy();
