@@ -32,6 +32,9 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#if defined(__linux__)
+#include <sys/sysmacros.h> /* major()/minor() of a /proc/locks device */
+#endif
 #if !defined(_WIN32)
 #include <sys/file.h>
 #include <sys/wait.h>
@@ -1975,24 +1978,36 @@ struct pst_gate_watch {
     _Atomic unsigned at_queue;
 };
 
-/* True while process owner holds the gate inode's flock shared (a queued waiter).
+/* True when one /proc/locks line is a shared flock that process owner holds on
+ * the file st names. /proc/locks names a file as MAJ:MIN:INODE (hex device
+ * numbers), so device and inode must both match: an inode number alone also
+ * names a file on another filesystem. */
+static bool pst_lock_line_is_reader(const char *line, const struct stat *st, pid_t owner)
+{
+    char kind[16], rw[16];
+    unsigned int maj = 0, min = 0;
+    unsigned long lino = 0;
+    int lpid = 0;
+    if (strstr(line, "->") != NULL ||
+        sscanf(line, "%*s %15s %*s %15s %d %x:%x:%lu", kind, rw, &lpid, &maj, &min, &lino) != 6)
+        return false;
+    return strcmp(kind, "FLOCK") == 0 && strcmp(rw, "READ") == 0 && lpid == (int)owner &&
+           maj == (unsigned int)major(st->st_dev) && min == (unsigned int)minor(st->st_dev) &&
+           lino == (unsigned long)st->st_ino;
+}
+
+/* True while process owner holds the gate's flock shared (a queued waiter).
  * The holders' own momentary exclusive gate test is a WRITE lock and is
  * ignored, which a plain failed exclusive try could not tell apart. *known is
  * false where /proc/locks is not readable. */
-static bool pst_gate_has_reader(unsigned long ino, pid_t owner, bool *known)
+static bool pst_gate_has_reader(const struct stat *st, pid_t owner, bool *known)
 {
     FILE *f = fopen("/proc/locks", "r");
     char line[256];
     bool found = false;
     *known = f != NULL;
-    while (f && !found && fgets(line, sizeof(line), f)) {
-        char kind[16], rw[16];
-        unsigned long lino = 0;
-        int lpid = 0;
-        if (strstr(line, "->") == NULL &&
-            sscanf(line, "%*s %15s %*s %15s %d %*x:%*x:%lu", kind, rw, &lpid, &lino) == 4)
-            found = strcmp(kind, "FLOCK") == 0 && strcmp(rw, "READ") == 0 && lino == ino && lpid == (int)owner;
-    }
+    while (f && !found && fgets(line, sizeof(line), f))
+        found = pst_lock_line_is_reader(line, st, owner);
     if (f)
         fclose(f);
     return found;
@@ -2011,7 +2026,7 @@ static void *pst_gate_watch_thread(void *arg)
     }
     while (!atomic_load(&g->stop)) {
         bool known = false;
-        bool queued = pst_gate_has_reader((unsigned long)st.st_ino, getpid(), &known);
+        bool queued = pst_gate_has_reader(&st, getpid(), &known);
         if (!known) {
             /* No /proc/locks: a failed exclusive try that persists across two
              * probes is a waiter; the holders' own test is momentary. */
@@ -2109,13 +2124,17 @@ static void pst_gate_foreign_child(const char *gatepath, int up_fd, int hold_fd)
     _exit(read(hold_fd, &c, 1) >= 0 ? 0 : 1);
 }
 
-/* A shared flock on the gate inode taken by another process is not a queued
- * waiter of this one. /proc/locks identifies the inode by number only, so
- * without the owner pid a lock on a same-numbered inode elsewhere on a loaded
- * host looks like a queued waiter, the cycle snapshot is taken long before the
- * waiter really enqueues, and the figure counts the whole gap. Returns 0 when
- * only the owner pid decides the answer as expected, 1 on a wrong answer, 2 on
- * setup failure, 3 when /proc/locks is unreadable (nothing to test). */
+/* A shared flock on the gate taken by another process is not a queued waiter
+ * of this one. Matched on the inode number alone, a shared lock on a
+ * same-numbered inode elsewhere on a loaded host looks like a queued waiter.
+ * The cycle snapshot is then taken long before the waiter really enqueues,
+ * and the figure counts the whole gap. The observer therefore matches the
+ * owner pid and the gate's device and inode. Seeing this process's own lock
+ * ("mine") also proves the device numbers agree on this filesystem; if they
+ * did not, the fairness case would never see a waiter and would pass
+ * vacuously. Returns 0 when the answers are as expected, 1 on a wrong
+ * answer, 2 on setup failure, 3 when /proc/locks is unreadable (nothing to
+ * test). */
 static int pst_gate_owner_probe(const char *gatepath)
 {
     int fd = open(gatepath, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
@@ -2134,12 +2153,11 @@ static int pst_gate_owner_probe(const char *gatepath)
     close(up[1]);
     char c;
     if (pid > 0 && read(up[0], &c, 1) == 1) { /* the child holds the gate now */
-        unsigned long ino = (unsigned long)st.st_ino;
         bool known = false;
-        bool foreign = pst_gate_has_reader(ino, pid, &known);
-        bool as_ours = pst_gate_has_reader(ino, getpid(), &known);
+        bool foreign = pst_gate_has_reader(&st, pid, &known);
+        bool as_ours = pst_gate_has_reader(&st, getpid(), &known);
         flock(fd, LOCK_SH);
-        bool mine = pst_gate_has_reader(ino, getpid(), &known);
+        bool mine = pst_gate_has_reader(&st, getpid(), &known);
         rc = !known ? 3 : (foreign && !as_ours && mine) ? 0 : 1;
     }
     close(hold[1]);
