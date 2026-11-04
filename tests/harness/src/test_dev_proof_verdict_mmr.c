@@ -247,7 +247,7 @@ static int vm_chain_checks(void)
 {
     int failures = 0;
     struct vm_rig r;
-    TEST("verdict_mmr: accepted leaves chain across batches and admit PASS") {
+    TEST("verdict_mmr: accepted leaves chain but local PASS remains unqualified") {
         char *log = calloc(80, 400);
         struct zcl_dev_vmmr_adopt a;
         struct zcl_dev_vmmr_chain c;
@@ -276,7 +276,7 @@ static int vm_chain_checks(void)
                                       sizeof(why)));
         ASSERT(a.adopted == 0 && a.leaf_count == 70);
         ASSERT(vm_open_admit(&r, 5, "test_vm_g5", &v, &ms));
-        ASSERT(v == ZCL_DEV_OBSERVATION_PASS && ms == 105);
+        ASSERT(v == ZCL_DEV_OBSERVATION_MISSING && ms == 0);
         ASSERT(vm_open_admit(&r, 5, "test_vm_other", &v, &ms));
         ASSERT(v == ZCL_DEV_OBSERVATION_MISSING);
         free(log);
@@ -530,7 +530,7 @@ static int vm_closure_checks(void)
         zcl_dev_vmmr_release(&c);
         ASSERT(ix != NULL);
         ASSERT(zcl_dev_vmmr_admit(ix, k1, "test_vm_closure", &ms, why,
-                                  sizeof(why)) == ZCL_DEV_OBSERVATION_PASS);
+                                  sizeof(why)) == ZCL_DEV_OBSERVATION_MISSING);
         ASSERT(zcl_dev_vmmr_admit(ix, k2, "test_vm_closure", &ms, why,
                                   sizeof(why)) == ZCL_DEV_OBSERVATION_MISSING);
         zcl_dev_vmmr_index_close(ix);
@@ -566,12 +566,12 @@ static int vm_producer_check(void)
         vm_key(key_box, 3);
         vm_key(key_ver, 4);
         ASSERT(zcl_dev_vmmr_load(r.mmr, &c, why, sizeof(why)));
-        /* Pinned verifier key (loaded by the single root-pinned loader):
-         * the leaf it signed is admitted, the box-signed one is not. */
+        /* Neither a pinned verifier leaf nor a box leaf is admitted without
+         * an independently protected history checkpoint. */
         ix = zcl_dev_vmmr_index_open(r.mmr, &c, &vm_trust, why, sizeof(why));
         ASSERT(ix != NULL);
         ASSERT(zcl_dev_vmmr_admit(ix, key_ver, "test_vm_p", &ms, why,
-                                  sizeof(why)) == ZCL_DEV_OBSERVATION_PASS);
+                                  sizeof(why)) == ZCL_DEV_OBSERVATION_MISSING);
         ASSERT(zcl_dev_vmmr_admit(ix, key_box, "test_vm_p", &ms, why,
                                   sizeof(why)) == ZCL_DEV_OBSERVATION_MISSING);
         zcl_dev_vmmr_index_close(ix);

@@ -21,8 +21,10 @@
  * [VCS_ZCODE_OBSERVATION_MMR_WIRE_BYTES] || count roots [32]. Loading
  * replays every record from the empty log with verify_extension, so a
  * rewritten, reordered or foreign-issuer history is refused as a whole. A
- * truncated tail also refuses; dropping whole trailing records only
- * forgets leaves (fewer groups admitted), it cannot add one. */
+ * truncated partial record refuses. A whole-record rollback is undetectable:
+ * it can remove a FAIL and turn a conflict into an apparent PASS. Therefore
+ * local history cannot authorize reuse without an independently protected
+ * monotonic checkpoint, which this audit-only slice does not provide. */
 #ifndef ZCL_DEV_PROOF_VERDICT_MMR_H
 #define ZCL_DEV_PROOF_VERDICT_MMR_H
 
@@ -113,10 +115,9 @@ struct zcl_dev_vmmr_index *zcl_dev_vmmr_index_open(
     char *why, size_t why_len);
 void zcl_dev_vmmr_index_close(struct zcl_dev_vmmr_index *index);
 
-/* PASS only when an eligible signed PASS for exactly (key, group) is in the
- * chain, signed by the pinned verifier key, and no eligible FAIL (from any
- * signer) contradicts it. Producer-signed PASS leaves yield MISSING. `elapsed_ms` receives the
- * newest eligible PASS leaf's cold time. */
+/* Audit-only: conflicts and FAIL remain diagnostic, but PASS always returns
+ * MISSING/unqualified because local history has no independent rollback
+ * anchor. No test may be skipped on this result. */
 enum zcl_dev_observation_verdict zcl_dev_vmmr_admit(
     const struct zcl_dev_vmmr_index *index,
     const uint8_t key[ZCL_DEV_VERDICT_LEAF_KEY_BYTES], const char *group,

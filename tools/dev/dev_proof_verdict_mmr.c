@@ -10,11 +10,13 @@
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "platform/directory_compat.h"
+#include "platform/process_lock.h"
 #include "platform/time_compat.h"
 #include "sha3/sha3.h"
 #include "vcs/vcs_object.h"
 
 #include <limits.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -58,7 +60,7 @@ static bool vm_read_file(const char *path, uint8_t **bytes, size_t *len,
     *bytes = NULL;
     *len = 0;
     *present = f != NULL;
-    if (!f) return true;
+    if (!f) return errno == ENOENT;
     if (fseek(f, 0, SEEK_END) != 0 || (size = ftell(f)) < 0 ||
         (unsigned long)size > VM_FILE_MAX || fseek(f, 0, SEEK_SET) != 0) {
         fclose(f);
@@ -234,30 +236,43 @@ bool zcl_dev_vmmr_append(const char *dir, const uint8_t (*roots)[32],
                          char *why, size_t why_len)
 {
     struct zcl_dev_vmmr_chain chain;
-    char path[PATH_MAX];
+    char path[PATH_MAX], lock_path[PATH_MAX];
     uint8_t issuer[32], *records;
     size_t len = 0;
-
+    struct platform_process_lock lock;
     bool ok;
     if (!roots || count == 0 || now_unix <= 0 ||
-        !vm_path(dir, "chain.log", path, sizeof(path)))
+        !vm_path(dir, "chain.log", path, sizeof(path)) ||
+        !vm_path(dir, "chain.lock", lock_path, sizeof(lock_path)))
         return vm_fail(why, why_len, "verdict_mmr_arguments");
     if (!platform_directory_ensure(dir, 0700))
         return vm_fail(why, why_len, "verdict_mmr_dir");
-    if (!zcl_dev_vmmr_load(dir, &chain, why, why_len)) return false;
+    platform_process_lock_init(&lock);
+    if (!platform_process_lock_acquire(&lock, lock_path, true))
+        return vm_fail(why, why_len, "verdict_mmr_lock");
+    if (!zcl_dev_vmmr_load(dir, &chain, why, why_len)) {
+        platform_process_lock_release(&lock);
+        return false;
+    }
     if (count > ZCL_DEV_VMMR_MAX_LEAVES - chain.leaf_count ||
         !vm_issuer(issuer)) {
         zcl_dev_vmmr_release(&chain);
+        platform_process_lock_release(&lock);
         return vm_fail(why, why_len, "verdict_mmr_full_or_no_signer");
     }
     records = vm_build_records(&chain, &roots[0][0], count, now_unix, issuer,
                                &len);
     zcl_dev_vmmr_release(&chain);
-    if (!records) return vm_fail(why, why_len, "verdict_mmr_extend_refused");
+    if (!records) {
+        platform_process_lock_release(&lock);
+        return vm_fail(why, why_len, "verdict_mmr_extend_refused");
+    }
     ok = vm_write_records(path, records, len);
     free(records);
-    if (!ok) return vm_fail(why, why_len, "verdict_mmr_write_failed");
-    return !out || zcl_dev_vmmr_load(dir, out, why, why_len);
+    if (ok && out) ok = zcl_dev_vmmr_load(dir, out, why, why_len);
+    platform_process_lock_release(&lock);
+    if (!ok) return vm_fail(why, why_len, "verdict_mmr_write_or_reload_failed");
+    return true;
 }
 
 size_t zcl_dev_vmmr_test_argv(const char *binary, const char *only,
@@ -586,11 +601,10 @@ enum zcl_dev_observation_verdict zcl_dev_vmmr_admit(
     free(roots);
     if (v == ZCL_DEV_OBSERVATION_PASS) {
         uint64_t ms = 0;
-        if (!vm_newest_pass_ms(ix, key, group, &ms)) {
-            (void)vm_fail(why, why_len, ZCL_DEV_VMMR_UNQUALIFIED);
-            return ZCL_DEV_OBSERVATION_MISSING;
-        }
-        if (elapsed_ms) *elapsed_ms = ms;
+        (void)vm_newest_pass_ms(ix, key, group, &ms);
+        /* A valid local prefix cannot prove that a later FAIL was retained. */
+        (void)vm_fail(why, why_len, ZCL_DEV_VMMR_UNQUALIFIED);
+        return ZCL_DEV_OBSERVATION_MISSING;
     }
     return v;
 }
