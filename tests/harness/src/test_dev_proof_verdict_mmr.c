@@ -26,6 +26,8 @@
 #include <stdlib.h>
 #include <string.h>
 #if !defined(_WIN32)
+#include <poll.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -376,26 +378,64 @@ static int vm_failure_checks(void)
         ASSERT(v == ZCL_DEV_OBSERVATION_MISSING);
         PASS();
     }
-    TEST("verdict_mmr: append waits for the shared transaction lock") {
+    TEST("verdict_mmr: concurrent appenders serialize against the shared lock") {
         char path[4100], why[96];
         struct platform_process_lock lock;
-        uint8_t root[32] = {1};
-        int status = 0;
+        struct zcl_dev_vmmr_chain c;
+        int ready[2], status[2] = {0}, started = 0;
+        pid_t child[2] = {-1, -1};
+        bool ok = true;
         ASSERT(vm_rig_open(&r, "lock"));
         (void)snprintf(path, sizeof(path), "%s/chain.lock", r.mmr);
         platform_process_lock_init(&lock);
+        ASSERT(pipe(ready) == 0);
         ASSERT(platform_process_lock_acquire(&lock, path, true));
-        pid_t child = fork();
-        ASSERT(child >= 0);
-        if (child == 0)
-            _exit(zcl_dev_vmmr_append(r.mmr, (const uint8_t (*)[32])root, 1,
-                                      1000, NULL, why, sizeof(why)) ? 0 : 1);
-        platform_sleep_ms(200);
-        pid_t early = waitpid(child, &status, WNOHANG);
+        for (int i = 0; i < 2; i++) {
+            child[i] = fork();
+            if (child[i] < 0) { ok = false; break; }
+            if (child[i] == 0) {
+                uint8_t root[32] = {0};
+                root[0] = (uint8_t)(i + 1);
+                (void)close(ready[0]);
+                /* Close, do not unlock, the inherited open file description. */
+                (void)close((int)lock.file.native);
+                if (write(ready[1], "x", 1) != 1) _exit(2);
+                (void)close(ready[1]);
+                _exit(zcl_dev_vmmr_append(r.mmr, (const uint8_t (*)[32])root, 1,
+                                          1000, NULL, why, sizeof(why)) ? 0 : 1);
+            }
+        }
+        (void)close(ready[1]);
+        while (ok && started < 2) {
+            struct pollfd p = {ready[0], POLLIN, 0};
+            char byte;
+            if (poll(&p, 1, 5000) != 1 || read(ready[0], &byte, 1) != 1) ok = false;
+            else started++;
+        }
+        (void)close(ready[0]);
+        if (ok) {
+            platform_sleep_ms(200);
+            for (int i = 0; i < 2; i++)
+                if (waitpid(child[i], &status[i], WNOHANG) != 0) {
+                    child[i] = -1;
+                    ok = false;
+                }
+        }
         platform_process_lock_release(&lock);
-        if (early == 0)
-            ASSERT(waitpid(child, &status, 0) == child);
-        ASSERT(early == 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        for (int i = 0; i < 2; i++) {
+            if (child[i] <= 0) continue;
+            pid_t got = 0;
+            for (int n = 0; n < 100 && got == 0; n++) {
+                got = waitpid(child[i], &status[i], WNOHANG);
+                if (got == 0) platform_sleep_ms(50);
+            }
+            if (got == 0) { (void)kill(child[i], SIGKILL); (void)waitpid(child[i], &status[i], 0); }
+            if (got != child[i] || !WIFEXITED(status[i]) || WEXITSTATUS(status[i]) != 0)
+                ok = false;
+        }
+        ASSERT(ok && zcl_dev_vmmr_load(r.mmr, &c, why, sizeof(why)));
+        ASSERT(c.records == 2 && c.leaf_count == 2);
+        zcl_dev_vmmr_release(&c);
         PASS();
     }
 _test_next:;

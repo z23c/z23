@@ -538,40 +538,6 @@ void zcl_dev_vmmr_index_close(struct zcl_dev_vmmr_index *ix)
     free(ix);
 }
 
-/* The one pinned verifier key admits; this box's own signer key never does,
- * even if it were pinned (the producer runs as the candidate's uid). */
-static bool vm_trusted(const struct zcl_dev_vmmr_index *ix,
-                       const uint8_t pubkey[32])
-{
-    if (ix->trust.box_present && memcmp(ix->trust.box, pubkey, 32) == 0)
-        return false;
-    return memcmp(ix->trust.verifier, pubkey, 32) == 0;
-}
-
-/* Newest eligible PASS leaf signed by a listed verifier for exactly
- * (key, group); false when there is none. */
-static bool vm_newest_pass_ms(const struct zcl_dev_vmmr_index *ix,
-                              const uint8_t key[32], const char *group,
-                              uint64_t *ms_out)
-{
-    uint64_t newest = 0;
-    bool found = false;
-    for (size_t i = 0; i < ix->count; i++) {
-        const struct vm_entry *e = &ix->entries[i];
-        if (!e->eligible || e->leaf.verdict != ZCL_DEV_VERDICT_LEAF_PASS ||
-            !vm_trusted(ix, e->leaf.producer_pubkey) ||
-            memcmp(e->leaf.key, key, 32) != 0 ||
-            !zcl_dev_observation_group_matches(&e->leaf, e->leaf.group_len,
-                                               group) ||
-            (found && e->leaf.observed_unix < newest))
-            continue;
-        newest = e->leaf.observed_unix;
-        *ms_out = e->leaf.elapsed_ms;
-        found = true;
-    }
-    return found;
-}
-
 enum zcl_dev_observation_verdict zcl_dev_vmmr_admit(
     const struct zcl_dev_vmmr_index *ix,
     const uint8_t key[ZCL_DEV_VERDICT_LEAF_KEY_BYTES], const char *group,
@@ -600,8 +566,6 @@ enum zcl_dev_observation_verdict zcl_dev_vmmr_admit(
                                   why_len);
     free(roots);
     if (v == ZCL_DEV_OBSERVATION_PASS) {
-        uint64_t ms = 0;
-        (void)vm_newest_pass_ms(ix, key, group, &ms);
         /* A valid local prefix cannot prove that a later FAIL was retained. */
         (void)vm_fail(why, why_len, ZCL_DEV_VMMR_UNQUALIFIED);
         return ZCL_DEV_OBSERVATION_MISSING;
