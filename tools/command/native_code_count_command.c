@@ -19,6 +19,7 @@
 
 #include "base/hex.h"
 #include "json/json.h"
+#include "platform/directory_compat.h"
 #include "util/safe_alloc.h"
 
 #include <errno.h>
@@ -28,7 +29,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
 enum {
     CC_CAPTURE_INITIAL = 1024 * 1024,
@@ -339,7 +339,7 @@ static size_t cc_cache_store(const char *path, const struct cc_tree *t,
     char *slash = strrchr(dir, '/');
     if (slash) {
         *slash = '\0';
-        if (mkdir(dir, 0777) != 0 && errno != EEXIST)
+        if (platform_directory_create(dir, 0777) != 0 && errno != EEXIST)
             return 0;
     }
     char *text = zcl_malloc(want * 64 + 2, "code_count_store");
