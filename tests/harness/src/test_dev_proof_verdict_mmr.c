@@ -398,13 +398,24 @@ static bool vm_join_writers(pid_t child[2], int status[2])
         pid_t got = 0;
         for (int n = 0; n < 100 && got == 0; n++) {
             got = waitpid(child[i], &status[i], WNOHANG);
-            if (got == 0) platform_sleep_ms(50);
+            if (got == 0) platform_sleep_ms(50); /* real-clock: bound a real child process wait and reap it on timeout */
         }
         if (got == 0) { (void)kill(child[i], SIGKILL); (void)waitpid(child[i], &status[i], 0); }
         if (got != child[i] || !WIFEXITED(status[i]) || WEXITSTATUS(status[i]) != 0)
             ok = false;
     }
     return ok;
+}
+
+static bool vm_wait_starts(int fd)
+{
+    for (int started = 0; started < 2; started++) {
+        struct pollfd p = {fd, POLLIN, 0};
+        char byte;
+        if (poll(&p, 1, 5000) != 1 || read(fd, &byte, 1) != 1)
+            return false;
+    }
+    return true;
 }
 
 static int vm_concurrent_check(void)
@@ -415,7 +426,7 @@ static int vm_concurrent_check(void)
         char path[4100], why[96];
         struct platform_process_lock lock;
         struct zcl_dev_vmmr_chain c;
-        int ready[2], status[2] = {0}, started = 0;
+        int ready[2], status[2] = {0};
         pid_t child[2] = {-1, -1};
         bool ok = true;
         ASSERT(vm_rig_open(&r, "lock"));
@@ -439,12 +450,7 @@ static int vm_concurrent_check(void)
             }
         }
         (void)close(ready[1]);
-        while (ok && started < 2) {
-            struct pollfd p = {ready[0], POLLIN, 0};
-            char byte;
-            if (poll(&p, 1, 5000) != 1 || read(ready[0], &byte, 1) != 1) ok = false;
-            else started++;
-        }
+        if (ok && !vm_wait_starts(ready[0])) ok = false;
         (void)close(ready[0]);
         if (ok) {
             platform_sleep_ms(200);
