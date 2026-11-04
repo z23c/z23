@@ -1484,6 +1484,27 @@ static void test_receive_new_address(void)
     wallet_screens_close();
 }
 
+static void reopen_during_receive(const char *op, const char *arg)
+{
+    (void)arg;
+    if (strcmp(op, "receive")) return;
+    fake.during = NULL;
+    wallet_screens_close();
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+}
+
+static void test_receive_closed_pending(void)
+{
+    start(false);
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    CHECK(wallet_screens_set_amount("1.5"));
+    fake.during = reopen_during_receive;
+    tap(WALLET_ACT_NEW_ADDRESS, 0, WALLET_STAY);
+    CHECK(snap()->page == WALLET_PAGE_RECEIVE && has(A1) && !has(A2) && !has("Asking for 1.5 ZCL"));
+    wallet_screens_close();
+    memset(&screen, 0, sizeof(screen));
+}
+
 static void test_receive_never_makes_keys(void)
 {
     start(false);
@@ -2442,7 +2463,8 @@ int main(int argc, char **argv)
 {
     setenv("TZ", "UTC", 1);
     tzset();
-    if (argc > 1 && !strcmp(argv[1], "stale")) test_refresh_and_stale();
+    if (argc > 1 && !strcmp(argv[1], "receive-lifecycle")) test_receive_closed_pending();
+    else if (argc > 1 && !strcmp(argv[1], "stale")) test_refresh_and_stale();
     else if (argc > 1 && !strcmp(argv[1], "async")) test_async();
     if (argc > 1) { puts("wallet_screens_test: ok"); return 0; }
     test_funds();
@@ -2482,6 +2504,7 @@ int main(int argc, char **argv)
     test_receive_copy();
     test_receive_copy_without_address();
     test_receive_never_makes_keys();
+    test_receive_closed_pending();
     test_receive_replies();
     test_receive_without_new_address();
     test_history();
