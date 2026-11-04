@@ -1174,28 +1174,65 @@ static bool topup_clean_measure(struct main_state *ms, struct node_db *ndb,
     return db_block_count_height_range(ndb, lo, hi, &m->row_count);
 }
 
+/* Why a stored mark does not fit this window before it is remeasured, or
+ * NULL when it does. */
+static const char *topup_clean_mark_unfit(const struct topup_clean_mark *got,
+                                          const uint8_t anchor[32], int lo,
+                                          int coins_best)
+{
+    if (got->version != NODE_DB_TOPUP_CLEAN_VERSION)
+        return "older mark version";
+    if (memcmp(got->anchor, anchor, 32) != 0)
+        return "seed anchor changed";
+    if (got->lo != lo)
+        return "window start moved";
+    if (got->clean_to < lo || got->clean_to >= coins_best)
+        return "clean_to outside the window";
+    return NULL;
+}
+
+/* Why the remeasured prefix differs from the stored mark, or NULL. */
+static const char *topup_clean_mark_moved(const struct topup_clean_mark *got,
+                                          const struct topup_clean_mark *now)
+{
+    if (now->map_count != got->map_count)
+        return "map entry count changed";
+    if (now->map_fp != got->map_fp)
+        return "map entry fingerprint changed";
+    if (now->row_count != got->row_count)
+        return "node.db connected-row count changed";
+    return NULL;
+}
+
 /* The first height still to fold: clean_to+1 when the stored prefix mark
- * re-verifies against the map and node.db, else `lo`. */
+ * re-verifies against the map and node.db, else `lo`. A refused mark prints
+ * its reason, so a restart that folds the whole window says why. */
 static int topup_clean_resume(struct main_state *ms, struct node_db *ndb,
                               const uint8_t anchor[32], int lo, int coins_best)
 {
-    struct topup_clean_mark got;
+    struct topup_clean_mark got, now;
     size_t gn = 0;
     memset(&got, 0, sizeof(got));
-    if (!node_db_state_get(ndb, NODE_DB_TOPUP_CLEAN_KEY, &got, sizeof(got),
-                           &gn) || gn != sizeof(got))
-        return lo;
-    if (got.version != NODE_DB_TOPUP_CLEAN_VERSION ||
-        memcmp(got.anchor, anchor, 32) != 0 || got.lo != lo ||
-        got.clean_to < lo || got.clean_to >= coins_best)
-        return lo;
-    struct topup_clean_mark now;
     memset(&now, 0, sizeof(now));
-    if (!topup_clean_measure(ms, ndb, lo, got.clean_to, &now))
+    if (!node_db_state_get(ndb, NODE_DB_TOPUP_CLEAN_KEY, &got, sizeof(got),
+                           &gn) || gn != sizeof(got)) {
+        printf("[boot] block index top-up clean mark: none stored; folding %d..%d\n",
+               lo, coins_best);
         return lo;
-    if (now.map_count != got.map_count || now.map_fp != got.map_fp ||
-        now.row_count != got.row_count)
+    }
+    const char *why = topup_clean_mark_unfit(&got, anchor, lo, coins_best);
+    if (!why)
+        why = topup_clean_measure(ms, ndb, lo, got.clean_to, &now)
+                  ? topup_clean_mark_moved(&got, &now)
+                  : "prefix could not be remeasured";
+    if (why) {
+        printf("[boot] block index top-up clean mark: mark to %d refused (%s: "
+               "map %u/%u rows %lld/%lld); folding %d..%d\n",
+               got.clean_to, why, got.map_count, now.map_count,
+               (long long)got.row_count, (long long)now.row_count, lo,
+               coins_best);
         return lo;
+    }
     return got.clean_to + 1;
 }
 
@@ -1209,11 +1246,17 @@ static void topup_clean_record(struct main_state *ms, struct node_db *ndb,
     if (!fold_was_noop || clean_to < lo ||
         !topup_clean_measure(ms, ndb, lo, clean_to, &m)) {
         (void)node_db_state_delete(ndb, NODE_DB_TOPUP_CLEAN_KEY);
+        printf("[boot] block index top-up clean mark: none recorded (%s)\n",
+               !fold_was_noop ? "the fold changed rows or missed a connected row"
+               : clean_to < lo ? "window shorter than the margin"
+                               : "prefix could not be measured");
         return;
     }
     memcpy(m.anchor, anchor, 32);
     m.version = NODE_DB_TOPUP_CLEAN_VERSION;
-    (void)node_db_state_set(ndb, NODE_DB_TOPUP_CLEAN_KEY, &m, sizeof(m));
+    if (!node_db_state_set(ndb, NODE_DB_TOPUP_CLEAN_KEY, &m, sizeof(m)))
+        printf("[boot] block index top-up clean mark: mark to %d could not be stored\n",
+               clean_to);
 }
 
 /* True when the fold changed nothing AND saw every connected row in
