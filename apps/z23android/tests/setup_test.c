@@ -2416,7 +2416,8 @@ static void launch_failure_tests(void)
 static void height_parse_tests(void)
 {
     int64_t height = 7;
-    assert(!wsu_parse_height("", &height) && height == 7);
+    assert(wsu_parse_height("", &height) && height == 0);
+    height = 7;
     assert(!wsu_parse_height("0", &height) && height == 7);
     assert(!wsu_parse_height("12x", &height) && height == 7);
     assert(!wsu_parse_height("9223372036854775808", &height) && height == 7);

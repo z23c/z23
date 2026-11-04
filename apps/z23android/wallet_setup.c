@@ -681,7 +681,8 @@ bool wsu_launch_marker(struct wsu *w, bool (*launch)(void *), void *ctx)
 bool wsu_parse_height(const char *text, int64_t *height)
 {
     int64_t value = 0;
-    if (!text || !*text || !height) return false;
+    if (!text || !height) return false;
+    if (!*text) { *height = 0; return true; }
     for (const char *p = text; *p; ++p) {
         if (*p < '0' || *p > '9' || value > (INT64_MAX - (*p - '0')) / 10) return false;
         value = value * 10 + (*p - '0');

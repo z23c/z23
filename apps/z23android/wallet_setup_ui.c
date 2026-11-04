@@ -33,21 +33,21 @@ _Static_assert(ZAPP_FIELD_PRIVATE(ZAPP_FIELD_INPUT_WORDS | ZAPP_FIELD_FLAG_MULTI
 #define TYPED_MAX 640
 #define SUMMARY_MAX 8192
 
-enum button { B_CREATE, B_RESTORE_FORM, B_RESTORE, B_RESTORE_UNKNOWN, B_SEEN, B_CONFIRM, B_AGAIN, B_BACK, B_CONTINUE, B_RECHECK, B_SAVE_AGAIN, B_NEW_WALLET, B_START_OVER_ASK, B_START_OVER_GO, B_START_OVER_CANCEL, B_RETRY_WRITE, B_GIVE_UP, B_PICK };   /* B_PICK + 4 * position + slot: one of the words offered */
+enum button { B_CREATE, B_RESTORE_FORM, B_RESTORE, B_SEEN, B_CONFIRM, B_AGAIN, B_BACK, B_CONTINUE, B_RECHECK, B_SAVE_AGAIN, B_NEW_WALLET, B_START_OVER_ASK, B_START_OVER_GO, B_START_OVER_CANCEL, B_RETRY_WRITE, B_GIVE_UP, B_PICK };   /* B_PICK + 4 * position + slot: one of the words offered */
 enum job_kind { JOB_WRITE, JOB_CREATE, JOB_RESTORE, JOB_PROGRESS, JOB_FINISH, JOB_RESUME, JOB_ASIDE, JOB_START_OVER, JOB_CLOCK };
 struct job { enum job_kind kind; char text[TYPED_MAX]; int64_t height; };
 
 static struct {
     ANativeActivity *activity;
     JavaVM *vm;
-    jobject app, key_app, container, words_input, height_input, live, buttons[BUTTONS_MAX];   /* live: the line whose clock moves */
+    jobject app, key_app, container, words_input, height_input, height_saved, live, buttons[BUTTONS_MAX];   /* live: the line whose clock moves */
     pthread_mutex_t key_lock;   /* guards key_app, which a worker reads while the activity is replaced */
     enum button button_id[BUTTONS_MAX];
     size_t button_count;
     struct wsu model;
     bool model_ready;
     char blob[512];
-    bool dropped, launch_failed, height_bad;
+    bool dropped, launch_failed, height_bad, height_locked;
     char height_text[24];
     atomic_bool progress_busy, resume_busy, clock_busy, job_busy;
     pthread_mutex_t progress_lock;
@@ -392,17 +392,22 @@ static void draw_form(JNIEnv *env, const struct wsu_view *v)
     (void)text_view(env, "Type your recovery words, separated by spaces.", 15.0f, SOFT);
     (void)input_view(env, "Recovery words", ZAPP_FIELD_INPUT_WORDS | ZAPP_FIELD_FLAG_MULTI_LINE, &ui.words_input);
     if (ui.words_input && v->form[0]) (void)zj_text(env, ui.words_input, v->form);
-    (void)text_view(env, "If you know the block height where this wallet began, type it: the wallet then reads the chain from there. Without it the wallet reads the whole chain, which takes longer.", 14.0f, SOFT);
-    (void)input_view(env, "Block height", ZAPP_FIELD_NUMBER, &ui.height_input);
-    if (ui.height_text[0] && ui.height_input) (void)zj_text(env, ui.height_input, ui.height_text);
-    if (ui.height_bad) (void)text_view(env, "Enter a valid positive block height, or choose I do not know the height.", 15.0f, AMBER);
+    (void)text_view(env, "Leave blank to read the whole chain. This can take longer.", 14.0f, SOFT);
+    (void)input_view(env, "Start block (optional)", ZAPP_FIELD_NUMBER, &ui.height_input);
+    if (ui.height_saved && ui.height_input) {
+        jmethodID set = zj_method(env, ui.height_input, "setText", "(Ljava/lang/CharSequence;)V");
+        if (set) (*env)->CallVoidMethod(env, ui.height_input, set, ui.height_saved);
+        bool clean = zj_clean(env);
+        if (!set || !clean) ui.height_locked = true;
+    }
+    if (ui.height_locked) (void)text_view(env, "Could not retain the start block. Go back and reopen Restore.", 15.0f, AMBER);
+    else if (ui.height_bad) (void)text_view(env, "Enter a valid positive start block, or leave it blank.", 15.0f, AMBER);
     if (v->failure == WSU_BAD_WORD) {
         char line[120];
         wsu_bad_word_text(v->bad_word, line, sizeof(line));
         (void)text_view(env, line, 15.0f, AMBER);
     } else if (v->failure) (void)text_view(env, wsu_failure_text(v->failure), 15.0f, AMBER);
-    (void)button_view(env, B_RESTORE, "Restore", GO_COLOR);
-    (void)button_view(env, B_RESTORE_UNKNOWN, "I do not know the height", BUTTON_COLOR);
+    (void)button_view(env, B_RESTORE, "Restore wallet", GO_COLOR);
     (void)button_view(env, B_BACK, "Back", BUTTON_COLOR);
 }
 static void draw_reading(JNIEnv *env, const struct wsu_view *v, bool known, int64_t scanned, int64_t tip)
@@ -543,6 +548,7 @@ void zapp_setup_ui_clear(JNIEnv *env)
 {
     release_widgets(env);
     if (ui.model_ready) wsu_forget_form(&ui.model);
+    if (ui.height_saved) { (*env)->DeleteGlobalRef(env, ui.height_saved); ui.height_saved = NULL; }
     (void)zj_bool_property(env, ui.container, "setKeepScreenOn", false);
     memory_cleanse(&ui.drawn, sizeof(ui.drawn));
     ui.is_drawn = false;
@@ -629,14 +635,27 @@ static bool read_input(JNIEnv *env, jobject input, char *out, size_t cap)
     (*env)->PopLocalFrame(env, NULL);
     return ok;
 }
-static void start_restore(JNIEnv *env, bool with_height)
+static bool save_height(JNIEnv *env)
+{
+    if (!ui.height_input || (*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)zj_clean(env); return false; }
+    jobject text = zj_object_property(env, ui.height_input, "getText", "()Landroid/text/Editable;");
+    jobject string = text ? zj_object_property(env, text, "toString", "()Ljava/lang/String;") : NULL;
+    jobject saved = string ? (*env)->NewGlobalRef(env, string) : NULL;
+    (*env)->PopLocalFrame(env, NULL);
+    if (!saved) { (void)zj_clean(env); return false; }
+    if (ui.height_saved) (*env)->DeleteGlobalRef(env, ui.height_saved);
+    ui.height_saved = saved;
+    return true;
+}
+static void start_restore(JNIEnv *env)
 {
     char typed[TYPED_MAX];
     int64_t height = 0;
     if (!read_input(env, ui.words_input, typed, sizeof(typed))) typed[0] = 0;
     wsu_set_form(&ui.model, typed);
-    bool valid = !with_height || (read_input(env, ui.height_input, ui.height_text, sizeof(ui.height_text)) &&
-                                  wsu_parse_height(ui.height_text, &height));
+    if (!ui.height_locked && !save_height(env)) ui.height_locked = true;
+    bool valid = !ui.height_locked && read_input(env, ui.height_input, ui.height_text, sizeof(ui.height_text)) &&
+                 wsu_parse_height(ui.height_text, &height);
     ui.height_bad = !valid;
     if (valid) ui.launch_failed = !spawn_job(JOB_RESTORE, typed, height);
     memory_cleanse(typed, sizeof(typed));
@@ -675,9 +694,11 @@ static void press_model(JNIEnv *env, enum button id)
 {
     switch (id) {
     case B_CREATE: ui.launch_failed = !spawn_job(JOB_CREATE, NULL, 0); break;
-    case B_RESTORE_FORM: wsu_open_restore(&ui.model); break;
-    case B_RESTORE: start_restore(env, true); break;
-    case B_RESTORE_UNKNOWN: start_restore(env, false); break;
+    case B_RESTORE_FORM:
+        ui.height_bad = false; ui.height_locked = false; ui.height_text[0] = 0;
+        if (ui.height_saved) { (*env)->DeleteGlobalRef(env, ui.height_saved); ui.height_saved = NULL; }
+        wsu_open_restore(&ui.model); break;
+    case B_RESTORE: start_restore(env); break;
     case B_BACK: wsu_back(&ui.model); break;
     case B_SAVE_AGAIN: (void)wsu_launch_marker(&ui.model, launch_finish, NULL); break;
     case B_CONTINUE: break;
@@ -691,7 +712,7 @@ enum zapp_setup_outcome zapp_setup_ui_press(JNIEnv *env, size_t button)
     ui.dropped = false;
     ui.launch_failed = false;
     enum button id = ui.button_id[button];
-    bool starts = id == B_CREATE || id == B_RESTORE || id == B_RESTORE_UNKNOWN || id == B_NEW_WALLET ||
+    bool starts = id == B_CREATE || id == B_RESTORE || id == B_NEW_WALLET ||
                   id == B_START_OVER_GO || id == B_RETRY_WRITE || id == B_CONFIRM || id == B_SAVE_AGAIN;
     if (starts && atomic_load(&ui.job_busy)) return outcome;
     if (ui.button_id[button] == B_CONTINUE) outcome = ZAPP_SETUP_LEAVE;
