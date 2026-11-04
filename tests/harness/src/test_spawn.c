@@ -723,10 +723,13 @@ static void spawn_evidence_exit_barrier(int pid, int phase, void *context)
     bool *observed = context;
     if (phase == 0) {
         siginfo_t info = {0};
-        int rc;
-        do { rc = waitid(P_PID, (id_t)pid, &info, WEXITED | WNOWAIT); }
-        while (rc < 0 && errno == EINTR);
-        *observed = rc == 0 && info.si_pid == pid;
+        int64_t deadline = platform_time_monotonic_ms() + 2000;
+        while (platform_time_monotonic_ms() < deadline) {
+            int rc = waitid(P_PID, (id_t)pid, &info, WEXITED | WNOWAIT | WNOHANG);
+            if (rc == 0 && info.si_pid == pid) { *observed = true; break; }
+            if (rc < 0 && errno != EINTR) break;
+            nanosleep(&(struct timespec){.tv_nsec = 1000000}, NULL);
+        }
         return;
     }
     int64_t until = platform_time_monotonic_ms() + 35;

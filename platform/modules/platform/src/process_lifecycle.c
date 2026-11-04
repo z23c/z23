@@ -708,6 +708,99 @@ static bool process_capture_drain(HANDLE read_handle, char *out,
                                &received, result, tail, tail_used, total)) return false;
     }
 }
+
+struct process_capture_context {
+    HANDLE read_handle, error_read;
+    struct platform_process process;
+    struct platform_process_capture_result *result, ignored_result;
+    struct platform_process_evidence *evidence;
+    char *out, ignored[1];
+    size_t out_size, used, ignored_used;
+    bool pipe_closed, error_closed, exited, containment_stopped;
+};
+
+static bool process_capture_start(struct process_capture_context *c,
+                                  const struct platform_process_options *options,
+                                  uintptr_t stdin_native)
+{
+    HANDLE write_handle = NULL, error_write = NULL;
+    if (!process_capture_pipe(&c->read_handle, &write_handle)) return false;
+    if (c->evidence && !process_capture_pipe(&c->error_read, &error_write)) {
+        CloseHandle(c->read_handle); CloseHandle(write_handle); return false;
+    }
+    platform_process_init(&c->process);
+    bool started = process_start_hidden_with_stdout(&c->process, options, write_handle,
+                                                    (HANDLE)stdin_native, error_write);
+    CloseHandle(write_handle);
+    if (error_write) CloseHandle(error_write);
+    if (!started) {
+        CloseHandle(c->read_handle);
+        if (c->error_read) CloseHandle(c->error_read);
+    }
+    return started;
+}
+
+static bool process_capture_available(struct process_capture_context *c,
+                                      DWORD *out_available, DWORD *err_available)
+{
+    struct platform_process_evidence *e = c->evidence;
+    if (!process_capture_peek(c->read_handle, &c->pipe_closed, out_available) ||
+        !process_capture_read_available(c->read_handle, c->out, c->out_size, &c->used,
+                                        out_available, c->result, e ? e->stdout_tail : NULL,
+                                        e ? &e->stdout_len : NULL, e ? &e->stdout_observed : NULL))
+        return false;
+    *err_available = 0;
+    if (!e) return true;
+    return process_capture_peek(c->error_read, &c->error_closed, err_available) &&
+           process_capture_read_available(c->error_read, c->ignored, sizeof(c->ignored),
+                                          &c->ignored_used, err_available, &c->ignored_result,
+                                          e->stderr_tail, &e->stderr_len, &e->stderr_observed);
+}
+
+static bool process_capture_loop(struct process_capture_context *c, uint32_t timeout_ms)
+{
+    ULONGLONG began = GetTickCount64();
+    for (;;) {
+        DWORD available = 0, error_available = 0;
+        if (!process_capture_available(c, &available, &error_available)) return false;
+        uint32_t exit_code = 0;
+        enum platform_process_wait_result waited = platform_process_wait(&c->process, 0, &exit_code);
+        if (waited == PLATFORM_PROCESS_WAIT_FAILED) return false;
+        if (waited == PLATFORM_PROCESS_WAIT_EXITED) {
+            c->exited = true; c->result->exit_code = exit_code;
+            process_capture_stop_containment(&c->process, exit_code, &c->containment_stopped);
+            if (available == 0 && c->pipe_closed && c->error_closed) return true;
+        }
+        if (GetTickCount64() - began >= timeout_ms) {
+            bool ok = process_capture_expire(&c->process, c->result);
+            c->exited = true; return ok;
+        }
+        if (available == 0 && error_available == 0) Sleep(1u);
+    }
+}
+
+static bool process_capture_finish(struct process_capture_context *c, bool ok)
+{
+    struct platform_process_evidence *e = c->evidence;
+    process_capture_reap(&c->process, c->exited);
+    ok = process_capture_drain(c->read_handle, c->out, c->out_size, &c->used, c->result,
+                               e ? e->stdout_tail : NULL, e ? &e->stdout_len : NULL,
+                               e ? &e->stdout_observed : NULL) && ok;
+    if (e) {
+        ok = process_capture_drain(c->error_read, c->ignored, sizeof(c->ignored), &c->ignored_used,
+                                   &c->ignored_result, e->stderr_tail, &e->stderr_len,
+                                   &e->stderr_observed) && ok;
+        DWORD remaining = 0;
+        if (process_capture_peek(c->read_handle, &c->pipe_closed, &remaining))
+            e->stdout_complete = c->pipe_closed && remaining == 0;
+        if (process_capture_peek(c->error_read, &c->error_closed, &remaining))
+            e->stderr_complete = c->error_closed && remaining == 0;
+    }
+    c->out[c->used] = 0;
+    CloseHandle(c->read_handle);
+    if (c->error_read) CloseHandle(c->error_read);
+    return ok;
+}
 #endif
 
 static bool process_capture_stdout_stdio(
@@ -720,105 +813,12 @@ static bool process_capture_stdout_stdio(
     if (!process_capture_begin(options, out, out_size, timeout_ms, result))
         return false;
 
-    HANDLE read_handle = NULL, write_handle = NULL;
-    if (!process_capture_pipe(&read_handle, &write_handle)) return false;
-    HANDLE error_read = NULL, error_write = NULL;
-    if (evidence && !process_capture_pipe(&error_read, &error_write)) {
-        CloseHandle(read_handle); CloseHandle(write_handle); return false;
-    }
-
-    struct platform_process process;
-    platform_process_init(&process);
-    bool started = process_start_hidden_with_stdout(
-        &process, options, write_handle, (HANDLE)stdin_native, error_write);
-    CloseHandle(write_handle);
-    if (error_write) CloseHandle(error_write);
-    write_handle = NULL;
-    if (!started) {
-        CloseHandle(read_handle);
-        if (error_read) CloseHandle(error_read);
-        return false;
-    }
-
-    ULONGLONG began = GetTickCount64();
-    size_t used = 0;
-    bool ok = true, exited = false, containment_stopped = false;
-    bool pipe_closed = false;
-    bool error_closed = !evidence;
-    char ignored[1]; size_t ignored_used = 0;
-    struct platform_process_capture_result ignored_result = {0};
-    for (;;) {
-        DWORD available = 0;
-        if (!process_capture_peek(read_handle, &pipe_closed, &available) ||
-            !process_capture_read_available(read_handle, out, out_size, &used,
-                                            &available, result,
-                                            evidence ? evidence->stdout_tail : NULL,
-                                            evidence ? &evidence->stdout_len : NULL,
-                                            evidence ? &evidence->stdout_observed : NULL)) {
-            ok = false;
-            break;
-        }
-        DWORD error_available = 0;
-        if (evidence && (!process_capture_peek(error_read, &error_closed, &error_available) ||
-            !process_capture_read_available(error_read, ignored, sizeof(ignored), &ignored_used,
-                                            &error_available, &ignored_result,
-                                            evidence->stderr_tail, &evidence->stderr_len,
-                                            &evidence->stderr_observed))) {
-            ok = false; break;
-        }
-
-        uint32_t exit_code = 0;
-        enum platform_process_wait_result waited =
-            platform_process_wait(&process, 0, &exit_code);
-        if (waited == PLATFORM_PROCESS_WAIT_FAILED) {
-            ok = false;
-            break;
-        }
-        if (waited == PLATFORM_PROCESS_WAIT_EXITED) {
-            exited = true;
-            result->exit_code = exit_code;
-            /* A trusted query has no authority to leave helpers behind. Stop
-             * any process that retained the pipe, then drain bytes already
-             * committed by the primary process. */
-            process_capture_stop_containment(&process, exit_code,
-                                             &containment_stopped);
-            if (available == 0 && pipe_closed && error_closed)
-                break;
-        }
-
-        ULONGLONG now = GetTickCount64();
-        if (now - began >= timeout_ms) {
-            ok = process_capture_expire(&process, result) && ok;
-            exited = true;
-            break;
-        }
-        if (available == 0 && error_available == 0) Sleep(1u);
-    }
-    out[used] = 0;
-
-    /* Closing containment is the final fail-closed cleanup even after a pipe
-     * or wait failure. Bytes already in the pipe are drained once more so a
-     * short-lived child cannot lose its final write between signal and poll. */
-    process_capture_reap(&process, exited);
-    ok = process_capture_drain(read_handle, out, out_size, &used, result,
-                               evidence ? evidence->stdout_tail : NULL,
-                               evidence ? &evidence->stdout_len : NULL,
-                               evidence ? &evidence->stdout_observed : NULL) && ok;
-    if (evidence)
-        ok = process_capture_drain(error_read, ignored, sizeof(ignored), &ignored_used,
-                                   &ignored_result, evidence->stderr_tail, &evidence->stderr_len,
-                                   &evidence->stderr_observed) && ok;
-    if (evidence) {
-        DWORD remaining = 0;
-        if (process_capture_peek(read_handle, &pipe_closed, &remaining))
-            evidence->stdout_complete = pipe_closed && remaining == 0;
-        if (process_capture_peek(error_read, &error_closed, &remaining))
-            evidence->stderr_complete = error_closed && remaining == 0;
-    }
-    out[used] = 0;
-    CloseHandle(read_handle);
-    if (error_read) CloseHandle(error_read);
-    return ok;
+    struct process_capture_context c = {
+        .out = out, .out_size = out_size, .result = result, .evidence = evidence,
+        .error_closed = !evidence,
+    };
+    if (!process_capture_start(&c, options, stdin_native)) return false;
+    return process_capture_finish(&c, process_capture_loop(&c, timeout_ms));
 #else
     (void)process_capture_begin(options, out, out_size, timeout_ms, result);
     (void)stdin_native;

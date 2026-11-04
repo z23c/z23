@@ -1092,20 +1092,42 @@ static bool spawn_evidence_read(struct spawn_evidence_capture *c, int which)
     return true;
 }
 
+#if defined(ZCL_TESTING)
+static void spawn_evidence_test_barrier(pid_t pid, struct spawn_evidence_capture *c,
+                                        bool *barrier)
+{
+    if (!*barrier && spawn_evidence_hook && c->e->stdout_observed >= 4096 &&
+        c->e->stderr_observed >= 4096) {
+        *barrier = true;
+        spawn_evidence_hook((int)pid, 0, spawn_evidence_hook_context);
+    }
+}
+
+static void spawn_evidence_test_exited(pid_t pid, const struct spawn_capture_exit_state *state,
+                                       bool barrier, bool *hooked)
+{
+    if (barrier && !*hooked && state->exited_now && spawn_evidence_hook) {
+        *hooked = true;
+        spawn_evidence_hook((int)pid, 1, spawn_evidence_hook_context);
+    }
+}
+#endif
+
 static bool spawn_evidence_drain(pid_t pid, struct spawn_evidence_capture *c,
                                  int timeout_ms, int64_t deadline, bool anchored)
 {
     struct spawn_capture_exit_state state = {.started_ms = -1};
 #if defined(ZCL_TESTING)
-    bool hooked = false;
-    if (spawn_evidence_hook) spawn_evidence_hook((int)pid, 0, spawn_evidence_hook_context);
+    bool hooked = false, barrier = false;
 #endif
     while (c->pipes[0].fd >= 0 || c->pipes[1].fd >= 0) {
-        if (spawn_capture_exit_observe(pid, &state, anchored)) break;
 #if defined(ZCL_TESTING)
-        if (!hooked && state.exited_now && spawn_evidence_hook) {
-            hooked = true; spawn_evidence_hook((int)pid, 1, spawn_evidence_hook_context);
-        }
+        if ((!spawn_evidence_hook || barrier) && spawn_capture_exit_observe(pid, &state, anchored)) break;
+#else
+        if (spawn_capture_exit_observe(pid, &state, anchored)) break;
+#endif
+#if defined(ZCL_TESTING)
+        spawn_evidence_test_exited(pid, &state, barrier, &hooked);
 #endif
         int wait = spawn_capture_poll_timeout(timeout_ms, deadline, &state, &c->e->timed_out);
         if (c->e->timed_out) break;
@@ -1116,6 +1138,9 @@ static bool spawn_evidence_drain(pid_t pid, struct spawn_evidence_capture *c,
             if (c->pipes[i].fd >= 0 && c->pipes[i].revents && !spawn_evidence_read(c, i))
                 return false;
         }
+#if defined(ZCL_TESTING)
+        spawn_evidence_test_barrier(pid, c, &barrier);
+#endif
     }
     return true;
 }
@@ -1150,6 +1175,33 @@ static void spawn_evidence_child(int out, int err)
     if (input > STDERR_FILENO) close(input);
 }
 
+static pid_t spawn_evidence_launch(const char *const argv[], int out[2], int err[2],
+                                   struct spawn_capture_anchor *anchor)
+{
+    if (!spawn_evidence_pipe(out)) return -1;
+    if (!spawn_evidence_pipe(err)) { close(out[0]); close(out[1]); return -1; }
+    if (!spawn_capture_anchor_prepare(anchor)) {
+        close(out[0]); close(out[1]); close(err[0]); close(err[1]); return -1;
+    }
+    pid_t pid = fork();
+    if (pid < 0) {
+        spawn_capture_anchor_close(anchor);
+        close(out[0]); close(out[1]); close(err[0]); close(err[1]); return -1;
+    }
+    if (pid == 0) {
+        close(out[0]); close(err[0]);
+        spawn_capture_anchor_child(anchor, out[1], err[1]);
+        spawn_evidence_child(out[1], err[1]);
+        execvp(argv[0], (char *const *)argv); _exit(127);
+    }
+    spawn_count_launch(); close(out[1]); close(err[1]); (void)setpgid(pid, pid);
+    if (!spawn_capture_anchor_parent(anchor)) {
+        spawn_capture_anchor_close(anchor); close(out[0]); close(err[0]);
+        (void)spawn_reap(pid, NULL); return -1;
+    }
+    return pid;
+}
+
 int zcl_spawn_capture_evidence(const char *const argv[], char *buf, size_t cap,
                                int timeout_ms, struct zcl_spawn_evidence *e)
 {
@@ -1157,28 +1209,9 @@ int zcl_spawn_capture_evidence(const char *const argv[], char *buf, size_t cap,
     if (!argv || !argv[0] || !buf || !cap || !e) return -1;
     buf[0] = '\0'; e->exit_code = -1;
     int out[2], err[2];
-    if (!spawn_evidence_pipe(out)) return -1;
-    if (!spawn_evidence_pipe(err)) { close(out[0]); close(out[1]); return -1; }
     struct spawn_capture_anchor anchor;
-    if (!spawn_capture_anchor_prepare(&anchor)) {
-        close(out[0]); close(out[1]); close(err[0]); close(err[1]); return -1;
-    }
-    pid_t pid = fork();
-    if (pid < 0) {
-        spawn_capture_anchor_close(&anchor);
-        close(out[0]); close(out[1]); close(err[0]); close(err[1]); return -1;
-    }
-    if (pid == 0) {
-        close(out[0]); close(err[0]);
-        spawn_capture_anchor_child(&anchor, out[1], err[1]);
-        spawn_evidence_child(out[1], err[1]);
-        execvp(argv[0], (char *const *)argv); _exit(127);
-    }
-    spawn_count_launch(); close(out[1]); close(err[1]); (void)setpgid(pid, pid);
-    if (!spawn_capture_anchor_parent(&anchor)) {
-        spawn_capture_anchor_close(&anchor); close(out[0]); close(err[0]);
-        (void)spawn_reap(pid, NULL); return -1;
-    }
+    pid_t pid = spawn_evidence_launch(argv, out, err, &anchor);
+    if (pid < 0) return -1;
     struct spawn_evidence_capture c = {
         .pipes = {{.fd = out[0], .events = POLLIN}, {.fd = err[0], .events = POLLIN}},
         .buf = buf, .cap = cap, .e = e,
