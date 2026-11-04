@@ -37,8 +37,10 @@ bool cp_log_fix_printed(const struct db_text *log);
 bool cp_log_paths(const struct db_text *log, bool agent_verify,
                   struct cp_set *out);
 
+#ifdef ZCL_TESTING
 /* Test probe: parses `git log` text as the leaf does and returns the typed
  * refusal code that failure would give ("" when it parses). */
 const char *dev_batch_culprit_test_parse_code(const char *log_text);
+#endif
 
 #endif

@@ -175,6 +175,7 @@ static const char *cd_parse_code(const struct cd_ctx *x)
     return x->malformed ? "BAD_STACK" : "NO_MEMORY";
 }
 
+#ifdef ZCL_TESTING
 const char *dev_batch_culprit_test_parse_code(const char *log_text)
 {
     struct cd_ctx x;
@@ -189,6 +190,7 @@ const char *dev_batch_culprit_test_parse_code(const char *log_text)
     cd_free(&x);
     return code;
 }
+#endif
 
 static bool cd_load_commits(struct cd_ctx *x)
 {
