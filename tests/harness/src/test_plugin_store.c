@@ -2184,6 +2184,7 @@ static int pst_case_lock_gate_leftover(void)
  * flock serializes them: exactly one stages, the other sees the generation
  * present and stages nothing, and both end consistent. This does NOT prove
  * staging-name uniqueness (the lock hides it); pst_case_unique_names does. */
+enum { PST_THREAD_BUDGET_MS = 120000 };
 struct pst_thread_job {
     zcl_barrier_t *go;
     const struct pst_fx *fx;
@@ -2212,10 +2213,21 @@ static int pst_case_threaded_install(void)
         ASSERT(pst_fx_open(&fx, true));
         ASSERT(pst_publish(&fx, "hello", "version t", &o));
         ASSERT_EQ(zcl_barrier_init(&bar, 2), 0);
+        /* The second installer waits for the whole first install, and that
+         * is one hold with no handover in between. On a loaded host an
+         * install that fsyncs can outlast the production 5 s no-progress
+         * budget and the waiter honestly answers PLUGIN_ERR_BUSY (25). This
+         * case checks serialization, not the budget (pst_case_lock_budget
+         * does), so give the wait a budget no loaded host reaches. */
+        plugin_lock_test_timing(PST_THREAD_BUDGET_MS, 0);
+        int created = 0;
         for (int i = 0; i < 2; i++)
-            ASSERT_EQ(pthread_create(&th[i], NULL, pst_install_thread, &job[i]), 0);
-        for (int i = 0; i < 2; i++)
-            ASSERT_EQ(pthread_join(th[i], NULL), 0);
+            if (pthread_create(&th[i], NULL, pst_install_thread, &job[i]) == 0)
+                created++;
+        for (int i = 0; i < created; i++)
+            (void)pthread_join(th[i], NULL);
+        plugin_lock_test_timing(0, 0);
+        ASSERT_EQ(created, 2);
         zcl_barrier_destroy(&bar);
         ASSERT_EQ(job[0].st, PLUGIN_OK);
         ASSERT_EQ(job[1].st, PLUGIN_OK);

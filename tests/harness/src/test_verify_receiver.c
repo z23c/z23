@@ -1072,11 +1072,20 @@ static int vrt_test_cold_trust(struct vrt_fx *f)
         ASSERT(vrt_cold(f, "no_verifier_key"));
         ASSERT(setenv(VRT_KEY_ENV, f->pubfile, 1) == 0);
 
-        char path[PATH_MAX], away[PATH_MAX];
-        ASSERT(vrt_path(away, f->root, "store-away"));
-        ASSERT(rename(f->vstore, away) == 0);
+        /* Park the store beside itself, in its own parent directory, so the
+         * move is a same-directory, same-filesystem rename that never
+         * touches the store's ".." entry or a second fixture tree. The
+         * errno is printed so a failure under load names its cause. */
+        char path[PATH_MAX], away[PATH_MAX], lib[PATH_MAX];
+        ASSERT(vrt_path(lib, f->anchor, "var/lib"));
+        ASSERT(vrt_path(away, lib, "store-away"));
+        int moved = rename(f->vstore, away);
+        if (moved != 0) fprintf(stderr, "verify receiver: park store: %s\n", strerror(errno));
+        ASSERT(moved == 0);
         ASSERT(vrt_cold(f, "store_path_unsafe"));
-        ASSERT(rename(away, f->vstore) == 0);
+        moved = rename(away, f->vstore);
+        if (moved != 0) fprintf(stderr, "verify receiver: restore store: %s\n", strerror(errno));
+        ASSERT(moved == 0);
 
         f->fixture.allow_same_uid = false;
         ASSERT(vrt_cold(f, "store_owner_same_uid"));
