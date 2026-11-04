@@ -86,25 +86,22 @@ bool zcl_dev_vmmr_adopt_log(const char *dir, const char *pair_store,
  * Leaves this module's recorder writes are signed by the proof producer,
  * which is candidate code running as the candidate's uid: they are AUDIT
  * data and never admit a group. Admission accepts a PASS only from a leaf
- * signed by a key listed in the verifier key file named by
- * ZCL_DEV_PROOF_VERIFIER_KEYS (one 64-hex key per line, # comments). That
- * file must be absolute, a regular file owned by a uid other than the
- * caller's effective uid, and writable by neither group nor world, in a
- * directory with the same properties. Unset or failing any check means no
- * verifier account: reuse stays unqualified, exactly as before. */
-#define ZCL_DEV_VMMR_KEYS_MAX 64u
-struct zcl_dev_vmmr_keys {
-    uint8_t key[ZCL_DEV_VMMR_KEYS_MAX][32];
-    size_t count;
+ * signed by the ONE pinned verifier key, loaded by the repo's single
+ * root-pinned loader (zcl_verify_attest_trust_root_load: pinned path, root
+ * owner, no symlinks, never this box's own key). A leaf whose producer key
+ * equals this box's signer key is refused structurally, even if that key
+ * were pinned. No pinned key means no verifier account: reuse stays
+ * unqualified, exactly as before. */
+struct zcl_dev_vmmr_trust {
+    uint8_t verifier[32];
+    uint8_t box[32];
+    bool box_present;
 };
 #define ZCL_DEV_VMMR_UNQUALIFIED "test-reuse: unqualified(no_verifier_account)"
-/* Parse key text (no ownership check; for fixtures and the strict loader). */
-bool zcl_dev_vmmr_keys_parse(const char *text, size_t len,
-                             struct zcl_dev_vmmr_keys *out);
-/* The strict loader over ZCL_DEV_PROOF_VERIFIER_KEYS. Refuses by writing
+/* Load the pinned verifier key and this box's signer key. Refuses by writing
  * ZCL_DEV_VMMR_UNQUALIFIED into `why`. */
-bool zcl_dev_vmmr_keys_load(struct zcl_dev_vmmr_keys *out,
-                            char *why, size_t why_len);
+bool zcl_dev_vmmr_trust_load(struct zcl_dev_vmmr_trust *out,
+                             char *why, size_t why_len);
 
 /* Reuse admission against a verified chain. Opening loads every leaf of the
  * chain once; one unreadable or re-rooting-mismatched object makes the index
@@ -112,12 +109,12 @@ bool zcl_dev_vmmr_keys_load(struct zcl_dev_vmmr_keys *out,
 struct zcl_dev_vmmr_index;
 struct zcl_dev_vmmr_index *zcl_dev_vmmr_index_open(
     const char *dir, const struct zcl_dev_vmmr_chain *chain,
-    const struct zcl_dev_vmmr_keys *verifiers,
+    const struct zcl_dev_vmmr_trust *trust,
     char *why, size_t why_len);
 void zcl_dev_vmmr_index_close(struct zcl_dev_vmmr_index *index);
 
 /* PASS only when an eligible signed PASS for exactly (key, group) is in the
- * chain, signed by a listed verifier key, and no eligible FAIL (from any
+ * chain, signed by the pinned verifier key, and no eligible FAIL (from any
  * signer) contradicts it. Producer-signed PASS leaves yield MISSING. `elapsed_ms` receives the
  * newest eligible PASS leaf's cold time. */
 enum zcl_dev_observation_verdict zcl_dev_vmmr_admit(

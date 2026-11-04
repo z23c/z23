@@ -7,17 +7,20 @@
  * reads or writes a live store. */
 
 #include "test/test_core.h"
+#include "test/verify_contract_fixture.h"
 
 #include "dev_proof.h"
 #include "dev_proof_verdict_mmr.h"
 #include "dev_proof_observation.h"
 #include "dev_proof_signer.h"
+#include <sys/stat.h>
 #include "base/hex.h"
 #include "sha3/sha3.h"
 #include "platform/directory_compat.h"
 #include "vcs/vcs_object.h"
 
 #include <stdio.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -29,23 +32,39 @@
 
 struct vm_rig {
     char base[3800];
-    char pair[4000], mmr[4000], objects[4040];
+    char state[4000], vstate[4000], pair[4000], mmr[4000], objects[4040];
 };
+
+static const struct vm_rig *vm_cur; /* the open rig, for signer-root swaps */
+static bool vm_set_trust(const struct vm_rig *r);
 
 static bool vm_rig_open(struct vm_rig *r, const char *tag)
 {
-    char state[4000];
     test_make_tmpdir(r->base, sizeof(r->base), "dev_proof_vmmr", tag);
-    (void)snprintf(state, sizeof(state), "%s/state", r->base);
+    (void)snprintf(r->state, sizeof(r->state), "%s/state", r->base);
+    (void)snprintf(r->vstate, sizeof(r->vstate), "%s/vstate", r->base);
     (void)snprintf(r->pair, sizeof(r->pair), "%s/pair", r->base);
     (void)snprintf(r->mmr, sizeof(r->mmr), "%s/mmr", r->base);
     (void)snprintf(r->objects, sizeof(r->objects), "%s/objects", r->mmr);
-    return platform_directory_ensure(state, 0700) &&
+    vm_cur = r;
+    if (!(platform_directory_ensure(r->state, 0700) &&
+          setenv(VM_STATE_ENV, r->state, 1) == 0))
+        return false;
+    { /* mint this box's own signer key so recorders can extend the MMR */
+        uint8_t pub[32], sig[64];
+        const char *w = NULL;
+        if (!zcl_dev_proof_signer_sign((const uint8_t *)"x", 1, pub, sig, &w))
+            return false;
+    }
+    if (!(platform_directory_ensure(r->state, 0700) &&
+          platform_directory_ensure(r->vstate, 0700) &&
            platform_directory_ensure(r->pair, 0700) &&
            platform_directory_ensure(r->mmr, 0700) &&
-           setenv(VM_STATE_ENV, state, 1) == 0 &&
+           setenv(VM_STATE_ENV, r->state, 1) == 0 &&
            platform_directory_ensure(r->objects, 0700) &&
-           vcs_object_store_init(r->objects);
+           vcs_object_store_init(r->objects)))
+        return false;
+    return vm_set_trust(r); /* verifier key minted and allow-listed */
 }
 
 static void vm_key(uint8_t key[32], unsigned seed)
@@ -53,15 +72,28 @@ static void vm_key(uint8_t key[32], unsigned seed)
     for (unsigned i = 0; i < 32; i++) key[i] = (uint8_t)(seed * 31u + i);
 }
 
+/* Record a leaf signed by the signer root named by `state_dir`. */
+static bool vm_leaf_as(const char *state_dir, const char *store,
+                       unsigned seed, const char *group,
+                       enum zcl_dev_verdict_leaf_verdict v, uint64_t ms,
+                       uint8_t root[32])
+{
+    uint8_t key[32];
+    char why[96];
+    bool ok;
+    vm_key(key, seed);
+    if (setenv(VM_STATE_ENV, state_dir, 1) != 0) return false;
+    ok = zcl_dev_observation_record(store, key, group, v, ms, root, why,
+                                    sizeof(why));
+    return setenv(VM_STATE_ENV, vm_cur->state, 1) == 0 && ok;
+}
+
+/* The ordinary fixture leaf: signed by the (fixture) verifier account. */
 static bool vm_leaf(const char *store, unsigned seed, const char *group,
                     enum zcl_dev_verdict_leaf_verdict v, uint64_t ms,
                     uint8_t root[32])
 {
-    uint8_t key[32];
-    char why[96];
-    vm_key(key, seed);
-    return zcl_dev_observation_record(store, key, group, v, ms, root, why,
-                                      sizeof(why));
+    return vm_leaf_as(vm_cur->vstate, store, seed, group, v, ms, root);
 }
 
 static void vm_line(char *out, size_t cap, unsigned seed, const char *group,
@@ -106,31 +138,54 @@ static bool vm_copy(const char *from, const char *to, const uint8_t root[32])
     return ok;
 }
 
-/* Fixture verifier list: this box's own key stands in for the separate
- * account's key so the admission mechanics can be exercised. The real list
- * comes only from the strict loader, which refuses a file this uid owns. */
-static struct zcl_dev_vmmr_keys vm_verifiers;
+/* Fixture trust: a second signer state root stands in for the separate
+ * verifier account. Its public key is written to a fixture file and loaded
+ * through the repo's single root-pinned loader (the ZCL_TESTING override,
+ * which accepts a file this uid owns); this box's own key is the box key. */
+static struct zcl_dev_vmmr_trust vm_trust;
 
-static bool vm_set_verifiers(bool include_self)
+/* The verifier key fixture lives in the shared system-temp key root the
+ * verify tests use (test_vs_key_root_make): the loader accepts a test key
+ * only under root-owned sticky parents, which test-tmp's ancestors may not
+ * be. */
+static char vm_keydir[PATH_MAX];
+
+static bool vm_keydir_path(const char *leaf, char *out, size_t cap)
 {
-    uint8_t pub[32];
-    bool present = false;
+    if (!vm_keydir[0] && !test_vs_key_root_make(vm_keydir)) {
+        vm_keydir[0] = '\0';
+        return false;
+    }
+    return snprintf(out, cap, "%s/%s", vm_keydir, leaf) < (int)cap;
+}
+
+static bool vm_put_key_file(const char *path, const char text[65])
+{
+    FILE *f = fopen(path, "w");
+    bool ok = f && fwrite(text, 1, 65, f) == 65;
+    if (f && fclose(f) != 0) ok = false;
+    return ok && chmod(path, 0600) == 0;
+}
+
+static bool vm_set_trust(const struct vm_rig *r)
+{
+    uint8_t pub[32], box_pub[32], sig[64];
     const char *w = NULL;
-    char text[80];
-    memset(&vm_verifiers, 0, sizeof(vm_verifiers));
-    if (!zcl_dev_proof_signer_public(pub, &present, &w) && !present) {
-        /* No key yet on this fresh state root: mint one by signing. */
-        uint8_t sig[64];
-        if (!zcl_dev_proof_signer_sign((const uint8_t *)"x", 1, pub, sig, &w))
-            return false;
-    }
-    if (!include_self) {
-        pub[0] ^= 0xff; /* a different, unrelated key */
-    }
+    char path[PATH_MAX], allow[4100], text[80], why[96];
+    if (setenv(VM_STATE_ENV, r->vstate, 1) != 0 ||
+        !zcl_dev_proof_signer_sign((const uint8_t *)"x", 1, pub, sig, &w) ||
+        setenv(VM_STATE_ENV, r->state, 1) != 0 ||
+        !zcl_dev_proof_signer_sign((const uint8_t *)"x", 1, box_pub, sig, &w))
+        return false;
     zcl_hex_encode(pub, 32, text);
     text[64] = '\n';
-    return zcl_dev_vmmr_keys_parse(text, 65, &vm_verifiers) &&
-           vm_verifiers.count == 1;
+    /* The box also lists the verifier in signers.allow, as an operator must
+     * for leaf signatures to verify at all. */
+    if (!vm_keydir_path("verifier.pub", path, sizeof(path))) return false;
+    return zcl_dev_proof_signer_paths(NULL, 0, allow, sizeof(allow)) &&
+           vm_put_key_file(allow, text) && vm_put_key_file(path, text) &&
+           setenv("ZCL_TEST_VERIFY_ATTEST_PUBKEY", path, 1) == 0 &&
+           zcl_dev_vmmr_trust_load(&vm_trust, why, sizeof(why));
 }
 
 static bool vm_open_admit(struct vm_rig *r, unsigned seed, const char *group,
@@ -140,10 +195,10 @@ static bool vm_open_admit(struct vm_rig *r, unsigned seed, const char *group,
     struct zcl_dev_vmmr_index *ix;
     uint8_t key[32];
     char why[96];
-    if (!vm_set_verifiers(true) ||
+    if (!vm_set_trust(r) ||
         !zcl_dev_vmmr_load(r->mmr, &chain, why, sizeof(why)))
         return false;
-    ix = zcl_dev_vmmr_index_open(r->mmr, &chain, &vm_verifiers, why,
+    ix = zcl_dev_vmmr_index_open(r->mmr, &chain, &vm_trust, why,
                                  sizeof(why));
     zcl_dev_vmmr_release(&chain);
     if (!ix) return false;
@@ -390,17 +445,19 @@ static int vm_closure_checks(void)
         char why[96];
         uint64_t ms;
         ASSERT(vm_rig_open(&r, "closure"));
-        ASSERT(vm_set_verifiers(true));
+        ASSERT(vm_set_trust(&r));
         vm_closure_key("int f(void){return 1;}", k1);
         vm_closure_key("int f(void){return 2;}", k2);
         ASSERT(memcmp(k1, k2, 32) != 0);
+        ASSERT(setenv(VM_STATE_ENV, r.vstate, 1) == 0);
         ASSERT(zcl_dev_observation_record(r.pair, k1, "test_vm_closure",
                    ZCL_DEV_VERDICT_LEAF_PASS, 9, root, why, sizeof(why)));
+        ASSERT(setenv(VM_STATE_ENV, r.state, 1) == 0);
         ASSERT(vm_copy(r.pair, r.objects, root));
         ASSERT(zcl_dev_vmmr_append(r.mmr, (const uint8_t (*)[32])root, 1, 1000,
                                    NULL, why, sizeof(why)));
         ASSERT(zcl_dev_vmmr_load(r.mmr, &c, why, sizeof(why)));
-        ix = zcl_dev_vmmr_index_open(r.mmr, &c, &vm_verifiers, why, sizeof(why));
+        ix = zcl_dev_vmmr_index_open(r.mmr, &c, &vm_trust, why, sizeof(why));
         zcl_dev_vmmr_release(&c);
         ASSERT(ix != NULL);
         ASSERT(zcl_dev_vmmr_admit(ix, k1, "test_vm_closure", &ms, why,
@@ -418,52 +475,74 @@ static int vm_producer_check(void)
 {
     int failures = 0;
     struct vm_rig r;
-    TEST("verdict_mmr: a producer-signed leaf is audit only, never admitted") {
-        uint8_t root[32], key[32];
+    TEST("verdict_mmr: a box-signed leaf is audit only, never admitted") {
+        uint8_t roots[2][32], key_box[32], key_ver[32], pub[32];
         struct zcl_dev_vmmr_chain c;
         struct zcl_dev_vmmr_index *ix;
-        struct zcl_dev_vmmr_keys none;
-        char why[96], path[4100];
+        struct zcl_dev_vmmr_trust trust, none;
+        char why[96], path[PATH_MAX], text[80];
         uint64_t ms = 0;
+        bool present = false;
         FILE *f;
         ASSERT(vm_rig_open(&r, "producer"));
-        ASSERT(vm_leaf(r.pair, 3, "test_vm_p", ZCL_DEV_VERDICT_LEAF_PASS, 4,
-                       root));
-        ASSERT(vm_copy(r.pair, r.objects, root));
-        ASSERT(zcl_dev_vmmr_append(r.mmr, (const uint8_t (*)[32])root, 1, 1000,
-                                   NULL, why, sizeof(why)));
-        vm_key(key, 3);
+        ASSERT(vm_set_trust(&r));
+        ASSERT(vm_leaf_as(r.state, r.pair, 3, "test_vm_p",
+                          ZCL_DEV_VERDICT_LEAF_PASS, 4, roots[0]));
+        ASSERT(vm_leaf(r.pair, 4, "test_vm_p", ZCL_DEV_VERDICT_LEAF_PASS, 4,
+                       roots[1]));
+        ASSERT(vm_copy(r.pair, r.objects, roots[0]));
+        ASSERT(vm_copy(r.pair, r.objects, roots[1]));
+        ASSERT(zcl_dev_vmmr_append(r.mmr, (const uint8_t (*)[32])roots, 2,
+                                   1000, NULL, why, sizeof(why)));
+        vm_key(key_box, 3);
+        vm_key(key_ver, 4);
         ASSERT(zcl_dev_vmmr_load(r.mmr, &c, why, sizeof(why)));
-        /* Verifier list does not hold the producer's key: MISSING. */
-        ASSERT(vm_set_verifiers(false));
-        ix = zcl_dev_vmmr_index_open(r.mmr, &c, &vm_verifiers, why,
-                                     sizeof(why));
+        /* Pinned verifier key (loaded by the single root-pinned loader):
+         * the leaf it signed is admitted, the box-signed one is not. */
+        ix = zcl_dev_vmmr_index_open(r.mmr, &c, &vm_trust, why, sizeof(why));
         ASSERT(ix != NULL);
-        ASSERT(zcl_dev_vmmr_admit(ix, key, "test_vm_p", &ms, why,
+        ASSERT(zcl_dev_vmmr_admit(ix, key_ver, "test_vm_p", &ms, why,
+                                  sizeof(why)) == ZCL_DEV_OBSERVATION_PASS);
+        ASSERT(zcl_dev_vmmr_admit(ix, key_box, "test_vm_p", &ms, why,
                                   sizeof(why)) == ZCL_DEV_OBSERVATION_MISSING);
         zcl_dev_vmmr_index_close(ix);
-        /* An empty verifier list cannot even open an index. */
-        memset(&none, 0, sizeof(none));
-        ASSERT(zcl_dev_vmmr_index_open(r.mmr, &c, &none, why, sizeof(why)) ==
+        /* Even with the box key listed as the verifier, its leaf never
+         * admits (structural refusal), and neither does anything else. */
+        ASSERT(zcl_dev_proof_signer_public(pub, &present, NULL) && present);
+        memset(&trust, 0, sizeof(trust));
+        memcpy(trust.verifier, pub, 32);
+        memcpy(trust.box, pub, 32);
+        trust.box_present = true;
+        ix = zcl_dev_vmmr_index_open(r.mmr, &c, &trust, why, sizeof(why));
+        ASSERT(ix != NULL);
+        ASSERT(zcl_dev_vmmr_admit(ix, key_box, "test_vm_p", &ms, why,
+                                  sizeof(why)) == ZCL_DEV_OBSERVATION_MISSING);
+        ASSERT(zcl_dev_vmmr_admit(ix, key_ver, "test_vm_p", &ms, why,
+                                  sizeof(why)) == ZCL_DEV_OBSERVATION_MISSING);
+        zcl_dev_vmmr_index_close(ix);
+        /* No trust cannot even open an index. */
+        ASSERT(zcl_dev_vmmr_index_open(r.mmr, &c, NULL, why, sizeof(why)) ==
                NULL);
         zcl_dev_vmmr_release(&c);
-        /* Unset flag: unqualified, exactly as before. */
-        ASSERT(unsetenv("ZCL_DEV_PROOF_VERIFIER_KEYS") == 0);
-        ASSERT(!zcl_dev_vmmr_keys_load(&none, why, sizeof(why)));
-        ASSERT_STR_EQ(why, ZCL_DEV_VMMR_UNQUALIFIED);
-        /* A key file this uid owns is candidate-writable: refused. */
-        (void)snprintf(path, sizeof(path), "%s/verifiers.keys", r.base);
+        /* The loader refuses a pinned key equal to this box's own key. */
+        zcl_hex_encode(pub, 32, text);
+        text[64] = '\n';
+        ASSERT(vm_keydir_path("boxkey.pub", path, sizeof(path)));
         f = fopen(path, "w");
-        ASSERT(f != NULL);
-        ASSERT(fputs("0000000000000000000000000000000000000000000000000000000000000001\n", f) >= 0);
-        ASSERT(fclose(f) == 0);
-        ASSERT(setenv("ZCL_DEV_PROOF_VERIFIER_KEYS", path, 1) == 0);
-        ASSERT(!zcl_dev_vmmr_keys_load(&none, why, sizeof(why)));
+        ASSERT(f != NULL && fwrite(text, 1, 65, f) == 65);
+        ASSERT(fclose(f) == 0 && chmod(path, 0600) == 0);
+        ASSERT(setenv("ZCL_TEST_VERIFY_ATTEST_PUBKEY", path, 1) == 0);
+        ASSERT(!zcl_dev_vmmr_trust_load(&none, why, sizeof(why)));
+        ASSERT_STR_EQ(why, ZCL_DEV_VMMR_UNQUALIFIED);
+        /* No pinned key file at all: unqualified, exactly as before. */
+        ASSERT(vm_keydir_path("absent.pub", path, sizeof(path)));
+        ASSERT(setenv("ZCL_TEST_VERIFY_ATTEST_PUBKEY", path, 1) == 0);
+        ASSERT(!zcl_dev_vmmr_trust_load(&none, why, sizeof(why)));
         ASSERT_STR_EQ(why, ZCL_DEV_VMMR_UNQUALIFIED);
         PASS();
     }
 _test_next:;
-    (void)unsetenv("ZCL_DEV_PROOF_VERIFIER_KEYS");
+    (void)unsetenv("ZCL_TEST_VERIFY_ATTEST_PUBKEY");
     return failures;
 }
 
@@ -479,5 +558,6 @@ int test_dev_proof_verdict_mmr(void)
     failures += vm_sample_check();
     failures += vm_closure_checks();
     failures += vm_producer_check();
+    if (vm_keydir[0]) (void)test_rm_rf_recursive(vm_keydir);
     return failures;
 }

@@ -5,6 +5,7 @@
 
 #include "dev_proof_observation_walk.h"
 #include "dev_proof_signer.h"
+#include "verify_attest.h"
 
 #include "base/hex.h"
 #include "base/safe_alloc.h"
@@ -425,74 +426,24 @@ bool zcl_dev_vmmr_adopt_log(const char *dir, const char *pair_store,
     return vm_adopt_finish(dir, &c, out, why, why_len);
 }
 
-/* ── Verifier keys ──────────────────────────────────────────────────────── */
+/* ── Trust root ─────────────────────────────────────────────────────────── */
 
-bool zcl_dev_vmmr_keys_parse(const char *text, size_t len,
-                             struct zcl_dev_vmmr_keys *out)
+bool zcl_dev_vmmr_trust_load(struct zcl_dev_vmmr_trust *out,
+                             char *why, size_t why_len)
 {
-    size_t i = 0;
-    if (!out || (!text && len)) return false;
-    memset(out, 0, sizeof(*out));
-    while (i < len) {
-        const char *eol = memchr(text + i, '\n', len - i);
-        size_t n = eol ? (size_t)(eol - (text + i)) : len - i;
-        char hex[65];
-        if (n == 64 && out->count < ZCL_DEV_VMMR_KEYS_MAX) {
-            memcpy(hex, text + i, 64);
-            hex[64] = '\0';
-            if (zcl_hex_decode_lower(hex, out->key[out->count], 32))
-                out->count++;
-        }
-        i += n + 1;
-    }
-    return true;
-}
-
-#if !defined(_WIN32)
-/* A path the candidate's uid cannot rewrite: not ours, not group/world
- * writable. */
-static bool vm_not_ours(const char *path, bool want_dir)
-{
-    struct stat st;
-    if (stat(path, &st) != 0) return false;
-    return (want_dir ? S_ISDIR(st.st_mode) : S_ISREG(st.st_mode)) &&
-           st.st_uid != geteuid() && (st.st_mode & (S_IWGRP | S_IWOTH)) == 0;
-}
-
-static bool vm_keys_path_ok(const char *path)
-{
-    char parent[PATH_MAX];
-    const char *slash = strrchr(path, '/');
-    size_t n = slash ? (size_t)(slash - path) : 0;
-    if (path[0] != '/' || strlen(path) >= PATH_MAX || n >= sizeof(parent))
-        return false;
-    memcpy(parent, path, n);
-    parent[n] = '\0';
-    return vm_not_ours(path, false) && vm_not_ours(n ? parent : "/", true);
-}
-#else
-static bool vm_keys_path_ok(const char *path)
-{
-    (void)path;
-    return false;
-}
-#endif
-
-bool zcl_dev_vmmr_keys_load(struct zcl_dev_vmmr_keys *out,
-                            char *why, size_t why_len)
-{
-    const char *path = getenv("ZCL_DEV_PROOF_VERIFIER_KEYS");
-    uint8_t *bytes = NULL;
-    size_t len = 0;
-    bool present = false, ok;
+    struct zcl_verify_attest_box_key box = {0};
+    struct zcl_verify_attest_trust_root root;
+    const char *w = NULL;
     if (out) memset(out, 0, sizeof(*out));
-    if (!out || !path || !vm_keys_path_ok(path) ||
-        !vm_read_file(path, &bytes, &len, &present) || !present)
+    box.known = out && zcl_dev_proof_signer_public(box.pubkey, &box.present,
+                                                   &w);
+    if (!box.known ||
+        !zcl_verify_attest_trust_root_load(NULL, &box, &root, &w))
         return vm_fail(why, why_len, ZCL_DEV_VMMR_UNQUALIFIED);
-    ok = zcl_dev_vmmr_keys_parse((const char *)bytes, len, out) &&
-         out->count > 0;
-    free(bytes);
-    return ok || vm_fail(why, why_len, ZCL_DEV_VMMR_UNQUALIFIED);
+    memcpy(out->verifier, root.verifier_pubkey, 32);
+    memcpy(out->box, box.pubkey, 32);
+    out->box_present = box.present;
+    return true;
 }
 
 /* ── Admission ──────────────────────────────────────────────────────────── */
@@ -504,7 +455,7 @@ struct vm_entry {
 };
 struct zcl_dev_vmmr_index {
     char objects[PATH_MAX];
-    struct zcl_dev_vmmr_keys verifiers;
+    struct zcl_dev_vmmr_trust trust;
     struct vm_entry *entries;
     size_t count;
 };
@@ -534,11 +485,11 @@ static bool vm_entry_load(const char *objects, const uint8_t root[32],
 
 struct zcl_dev_vmmr_index *zcl_dev_vmmr_index_open(
     const char *dir, const struct zcl_dev_vmmr_chain *chain,
-    const struct zcl_dev_vmmr_keys *verifiers, char *why, size_t why_len)
+    const struct zcl_dev_vmmr_trust *trust, char *why, size_t why_len)
 {
     struct zcl_dev_vmmr_index *ix;
     char probe[PATH_MAX];
-    if (!chain || !verifiers || verifiers->count == 0 ||
+    if (!chain || !trust ||
         !vm_path(dir, "objects", probe, sizeof(probe))) {
         (void)vm_fail(why, why_len, "verdict_mmr_arguments");
         return NULL;
@@ -546,7 +497,7 @@ struct zcl_dev_vmmr_index *zcl_dev_vmmr_index_open(
     ix = zcl_calloc(1, sizeof(*ix), "vmmr_index");
     if (!ix) return NULL;
     (void)vm_path(dir, "objects", ix->objects, sizeof(ix->objects));
-    ix->verifiers = *verifiers;
+    ix->trust = *trust;
     ix->entries = zcl_calloc(chain->leaf_count ? chain->leaf_count : 1u,
                              sizeof(*ix->entries), "vmmr_index_entries");
     if (!ix->entries) {
@@ -572,12 +523,14 @@ void zcl_dev_vmmr_index_close(struct zcl_dev_vmmr_index *ix)
     free(ix);
 }
 
+/* The one pinned verifier key admits; this box's own signer key never does,
+ * even if it were pinned (the producer runs as the candidate's uid). */
 static bool vm_trusted(const struct zcl_dev_vmmr_index *ix,
                        const uint8_t pubkey[32])
 {
-    for (size_t i = 0; i < ix->verifiers.count; i++)
-        if (memcmp(ix->verifiers.key[i], pubkey, 32) == 0) return true;
-    return false;
+    if (ix->trust.box_present && memcmp(ix->trust.box, pubkey, 32) == 0)
+        return false;
+    return memcmp(ix->trust.verifier, pubkey, 32) == 0;
 }
 
 /* Newest eligible PASS leaf signed by a listed verifier for exactly
