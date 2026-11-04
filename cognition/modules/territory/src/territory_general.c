@@ -44,6 +44,7 @@
 #endif
 #include "sha3/sha3.h"
 
+#include <ctype.h>
 #include <stddef.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -287,25 +288,49 @@ static bool tg_name_byte(char c);
 /* Resolve a gate through its registered handler and the source index.  The
  * command name is never converted into a guessed filename. Duplicate or
  * unreadable registry rows leave the gate's native source unknown. */
+static bool tg_registry_row(const char *row, bool *comment,
+                            char name[128], char base[128], bool *is_row)
+{
+    while (isspace((unsigned char)*row)) row++;
+    *is_row = false;
+    if (*comment || strncmp(row, "/*", 2) == 0) {
+        const char *end = strstr(row, "*/");
+        *comment = end == NULL;
+        if (!end) return true;
+        row = end + 2;
+        while (isspace((unsigned char)*row)) row++;
+        return !*row;
+    }
+    if (!*row || strncmp(row, "//", 2) == 0) return true;
+    char mode[32];
+    int used = 0;
+    if (sscanf(row, "LINT_GATE(\"%127[^\"]\", %127[a-zA-Z0-9_], %31[A-Z_]) %n",
+               name, base, mode, &used) != 3 || used == 0 || row[used])
+        return false;
+    *is_row = true;
+    return true;
+}
+
 static bool tg_registered_handler(const char *registry, const char *gate,
                                   char *out, size_t cap)
 {
     char name[128], base[128], row[512];
     unsigned matches = 0;
+    bool comment = false;
     for (const char *p = registry; p && *p;) {
         size_t len = strcspn(p, "\n");
-        if (len < sizeof(row)) {
-            memcpy(row, p, len); row[len] = '\0';
-            if (sscanf(row, "LINT_GATE(\"%127[^\"]\", %127[a-zA-Z0-9_]", name, base) == 2 &&
-                strcmp(name, gate) == 0) {
-                if (snprintf(out, cap, "%s_run", base) >= (int)cap) return false;
-                matches++;
-            }
+        if (len >= sizeof(row)) return false;
+        memcpy(row, p, len); row[len] = '\0';
+        bool is_row;
+        if (!tg_registry_row(row, &comment, name, base, &is_row)) return false;
+        if (is_row && strcmp(name, gate) == 0) {
+            if (snprintf(out, cap, "%s_run", base) >= (int)cap) return false;
+            matches++;
         }
         p += len;
         if (*p == '\n') p++;
     }
-    return matches == 1;
+    return !comment && matches == 1;
 }
 
 static void tg_native_sources(const char *line, size_t len, const char *registry,

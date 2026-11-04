@@ -261,7 +261,8 @@ static bool write_fixture_tree(void)
            terr_write(TERR_FIX, "tests/harness/src/test_fixgroup.c", TEST_ENTRY_C) &&
            terr_write(TERR_FIX, "tools/lint/lintc/gate_commands.def", GATE_COMMANDS_DEF) &&
            terr_write(TERR_FIX, "tools/lint/lintc/gates.def",
-                      "LINT_GATE(\"check-base-shape\", fixture_base, LINT_CMD_NONE)\n") &&
+                      "LINT_GATE(\"check-base-shape\", fixture_base, LINT_CMD_NONE)\n"
+                      "LINT_GATE(\"check-no-handler\", absent_handler, LINT_CMD_NONE)\n") &&
            terr_write(TERR_FIX, "tools/lint/lintc/native_fixture.c",
                       "/* platform/modules/base/src/ tools/lint/base_shape_baseline.txt */\n"
                       "int fixture_base_run(int argc, char **argv) { return argc && argv; }\n") &&
@@ -591,17 +592,30 @@ int test_territory(void)
 
     TEST("gates: a registered native gate preserves wrapper scope and ledger evidence") {
         ASSERT(terr_write(TERR_FIX, "tools/lint/lintc/gate_commands.def",
-            "LINT_ROW(\"check-base-shape\", \"./build/bin/z23-lint check-base-shape\")\n"));
+            "LINT_ROW(\"check-base-shape\", \"./build/bin/z23-lint check-base-shape\")\n"
+            "LINT_ROW(\"check-no-handler\", \"./build/bin/z23-lint check-no-handler\")\n"));
         struct territory_gates *native = territory_gates_open(TERR_FIX, ci, gnames, gcount);
         ASSERT(native != NULL);
         struct territory_brief *nb = territory_brief_build(ci, TERR_FIX,
             "platform/modules/base", rs, &frouter, native, NULL);
         ASSERT(nb != NULL);
         ASSERT_EQ(nb->gates_binding, 1);
+        ASSERT_EQ(nb->gates_unknown_named_none, 1);
         ASSERT_EQ(nb->refusal_count, 1);
         ASSERT_STR_EQ(nb->refuses[0].gate, "check-base-shape");
         ASSERT(nb->refuses[0].named_in_gate);
         ASSERT_EQ(nb->refuses[0].baseline_rows, 1);
+        territory_brief_free(nb);
+        territory_gates_free(native);
+        ASSERT(terr_write(TERR_FIX, "tools/lint/lintc/gates.def",
+            "/*\nLINT_GATE(\"check-base-shape\", fixture_base, LINT_CMD_NONE)\n*/\n"));
+        native = territory_gates_open(TERR_FIX, ci, gnames, gcount);
+        ASSERT(native != NULL);
+        nb = territory_brief_build(ci, TERR_FIX, "platform/modules/base", rs,
+                                   &frouter, native, NULL);
+        ASSERT(nb != NULL);
+        ASSERT_EQ(nb->gates_binding, 0);
+        ASSERT_EQ(nb->gates_unknown_named_none, 2);
         territory_brief_free(nb);
         territory_gates_free(native);
         ASSERT(terr_write(TERR_FIX, "tools/lint/lintc/gate_commands.def", GATE_COMMANDS_DEF));
