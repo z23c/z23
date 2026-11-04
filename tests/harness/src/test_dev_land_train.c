@@ -422,6 +422,27 @@ _test_next:;
     return failures;
 }
 
+static int test_dev_land_train_red_bisects(void)
+{
+    int failures = 0;
+    TEST("land: opt-in red train retries its first bounded half") {
+        struct dlx_rig rig;
+        char b[64], c[64];
+        dlx_isolate("train_bisect_red");
+        ASSERT(dlx_tr_rig(&rig, "train_bisect_red_rig", "fail", "b.txt", b, c));
+        setenv("ZCL_LAND_TRAIN_WIDTH", "3", 1);
+        setenv("ZCL_LAND_TRAIN_BISECT", "1", 1);
+        ASSERT(dlx_tr_beat("started", 2, 1));
+        ASSERT(dlx_tr_beat("rebased", 0, 1));
+        ASSERT(dlx_tr_beat("started", 1, 1));
+        PASS();
+    }
+_test_next:;
+    unsetenv("ZCL_LAND_TRAIN_BISECT");
+    dlx_restore();
+    return failures;
+}
+
 static int test_dev_land_train_red_then_singles_land(void)
 {
     int failures = 0;
@@ -874,6 +895,7 @@ int test_dev_land_train_cases(void)
     failures += test_dev_land_train_default_off();
     failures += test_dev_land_train_conflict_skipped();
     failures += test_dev_land_train_red_falls_back_to_singles();
+    failures += test_dev_land_train_red_bisects();
     failures += test_dev_land_train_red_then_singles_land();
     failures += test_dev_land_train_held_row_skipped();
     failures += test_dev_land_train_cancelled_row_skipped();
