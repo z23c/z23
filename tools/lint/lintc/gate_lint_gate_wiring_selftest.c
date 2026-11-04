@@ -400,7 +400,7 @@ static int lgws_case_n(const char *base, int *fails)
         lgws_wire(d, gates[0], "./tools/lint/sentinel_a.sh")) return 2;
     FILE *f = fopen(driver, "a");
     if (!f) return 2;
-    int wrote = fputs("/* leading */ LINT_ROW(\"check-sentinel-wired\", \"./tools/lint/sentinel_b.sh\")\n", f);
+    int wrote = fputs("/* leading\nhidden */ LINT_ROW(\"check-sentinel-wired\", \"./tools/lint/sentinel_b.sh\")\n", f);
     if (fclose(f) != 0 || wrote < 0) return 2;
     FILE *out = tmpfile();
     if (!out) return 2;
