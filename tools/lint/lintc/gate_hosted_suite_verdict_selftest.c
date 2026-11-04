@@ -167,6 +167,100 @@ static int hsv_selftest_rejections(void)
     return 0;
 }
 
+/* Exercise the real release wrapper, replacing only its make subprocesses. */
+static int hsv_wrapper_make(void)
+{
+    static const char *const lines[] = {
+        "#!/bin/sh",
+        "if [ \"$1\" = test-parallel ]; then",
+        "  cat \"$HSV_WRAPPER_LOG\" || exit 125",
+        "  exit \"$HSV_WRAPPER_RC\"",
+        "fi",
+        "exit 0"
+    };
+    char path[4096];
+    if (hsv_write_fixture(g_hsv_fixture_dir, "make", lines,
+                          sizeof lines / sizeof lines[0]) != 0 ||
+        snprintf(path, sizeof path, "%s/make", g_hsv_fixture_dir)
+            >= (int)sizeof path || chmod(path, 0700) != 0)
+        return -1;
+    return 0;
+}
+
+static void hsv_wrapper_child(const char *fixture, const char *rc)
+{
+    char path[8192], log[4096], out[4096];
+    lsc_reset_in_child();
+    if (setpgid(0, 0) != 0 ||
+        snprintf(path, sizeof path, "%s:%s", g_hsv_fixture_dir,
+                 env_or("PATH", "/usr/bin:/bin")) >= (int)sizeof path ||
+        snprintf(log, sizeof log, "%s/%s", g_hsv_fixture_dir, fixture)
+            >= (int)sizeof log ||
+        snprintf(out, sizeof out, "%s/wrapper.out", g_hsv_fixture_dir)
+            >= (int)sizeof out)
+        _exit(125);
+    if (setenv("PATH", path, 1) != 0 ||
+        setenv("HSV_WRAPPER_LOG", log, 1) != 0 ||
+        setenv("HSV_WRAPPER_RC", rc, 1) != 0 ||
+        freopen(out, "w", stdout) == NULL || dup2(1, 2) < 0)
+        _exit(125);
+    unsetenv("GIT_DIR");
+    unsetenv("GIT_WORK_TREE");
+    if (snprintf(log, sizeof log, "%s/wrapper-lint.log", g_hsv_fixture_dir)
+            >= (int)sizeof log ||
+        snprintf(out, sizeof out, "%s/wrapper-suite.log", g_hsv_fixture_dir)
+            >= (int)sizeof out)
+        _exit(125);
+    execl("/bin/bash", "bash", "tools/scripts/gate-and-report.sh", log, out,
+          (char *)NULL);
+    _exit(125);
+}
+
+static int hsv_wrapper_wait(pid_t pid)
+{
+    struct timespec pause = { 0, 10 * 1000 * 1000 };
+    int status = 0;
+    for (int i = 0; i < 1000 && !lsc_pending(); i++) {
+        pid_t got = waitpid(pid, &status, WNOHANG);
+        if (got == pid)
+            return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        if (got < 0 && errno != EINTR)
+            break;
+        nanosleep(&pause, NULL);
+    }
+    kill(-pid, SIGKILL);
+    kill(pid, SIGKILL);
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    return -1;
+}
+
+static int hsv_wrapper_cases(void)
+{
+    static const struct { const char *log, *rc; int expected; } cases[] = {
+        { "good.log", "0", 0 },
+        { "good.log", "7", 2 },
+        { "cached.log", "0", 2 },
+        { "zero-run.log", "0", 2 },
+        { "duplicate.log", "0", 2 },
+        { "unobserved.log", "0", 2 }
+    };
+    if (hsv_wrapper_make() != 0)
+        return -1;
+    int failed = 0;
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        pid_t pid = fork();
+        if (pid == 0)
+            hsv_wrapper_child(cases[i].log, cases[i].rc);
+        int got = pid > 0 ? hsv_wrapper_wait(pid) : -1;
+        if (got != cases[i].expected) {
+            hsv_fail("release wrapper %s runner_rc=%s expected=%d actual=%d",
+                     cases[i].log, cases[i].rc, cases[i].expected, got);
+            failed = -1;
+        }
+    }
+    return failed;
+}
+
 /* Removes the fixture tree with signals blocked, then re-raises a recorded
  * signal under its default disposition. */
 static void hsv_cleanup(void)
@@ -210,11 +304,13 @@ static int hsv_run(int ready_fd)
         hsv_cleanup();
     if (!failed)
         failed = hsv_selftest_rejections() != 0;
+    if (!failed)
+        failed = hsv_wrapper_cases() != 0;
     hsv_cleanup();
     if (failed)
         return 1;
     printf("hosted-suite-verdict self-test: PASS "
-           "(valid cold + 4 rejecting mutations)\n");
+           "(valid cold + 4 rejecting mutations + 6 release wrapper cases)\n");
     return 0;
 }
 

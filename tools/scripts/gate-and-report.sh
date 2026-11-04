@@ -5,8 +5,8 @@
 # Usage: gate-and-report.sh <lintlog> <testlog>
 #
 # Manual release-boundary tool — intentionally no in-repo caller. The
-# PASS-TOKEN and complete suite accounting, never a substring match, are the
-# acceptance bar this wraps. Normal worker handoff uses focused acceptance;
+# Native cold-suite validation and a clean runner exit are the acceptance
+# bar this wraps. Normal worker handoff uses focused acceptance;
 # see docs/dev/DEVELOPING.md.
 set -u
 LINTLOG="${1:?lintlog}"; TESTLOG="${2:?testlog}"
@@ -21,30 +21,18 @@ if ! make -j"$(nproc)" >>"$LINTLOG" 2>&1; then
   echo "GATE: FULL BUILD FAILED"; grep -iE "error:|undefined reference|Error 1" "$LINTLOG" | tail -8; exit 1
 fi
 echo "GATE: FULL BUILD OK"
-make test-parallel >"$TESTLOG" 2>&1
-# A green token is NOT enough. The runner prints the same "ALL TESTS PASSED"
-# whether it executed every group or returned almost all of them from the
-# content-addressed cache, so this gate reads the machine-greppable
-# `SUITE VERDICT` line and refuses anything that did not actually run cold.
-VERDICT="$(grep -E '^SUITE VERDICT ' "$TESTLOG" | tail -1)"
-if [ -z "$VERDICT" ]; then
-  echo "GATE: SUITE FAILED — no SUITE VERDICT line (runner too old, or the run died before reporting)"
+suite_rc=0
+make test-parallel >"$TESTLOG" 2>&1 || suite_rc=$?
+if [ "$suite_rc" -ne 0 ]; then
+  echo "GATE: SUITE FAILED — runner exited $suite_rc"
   tail -20 "$TESTLOG"; exit 2
 fi
-echo "GATE: $VERDICT"
-if grep -q "ALL TESTS PASSED (CACHED)" "$TESTLOG"; then
-  echo "GATE: SUITE REJECTED — this run was CACHED, not cold. A cached run proves"
-  echo "      only that nothing downstream of the cached groups changed; it is not"
-  echo "      a gate. Re-run with: make test-parallel TEST_PARALLEL_ARGS=--no-cache"
+# The existing C23 gate checks complete, unique and coherent suite fields,
+# nonzero execution and the cold pass headline. It also rejects
+# ALL TESTS PASSED (CACHED), failed groups and environment-unobserved runs.
+if ! build/bin/z23-lint check-hosted-suite-verdict "$TESTLOG"; then
+  echo "GATE: SUITE REJECTED — invalid cold-suite evidence (see native diagnostics)"
   exit 2
 fi
-case "$VERDICT" in
-  *" mode=cold "*) : ;;
-  *) echo "GATE: SUITE REJECTED — mode is not cold: $VERDICT"; exit 2 ;;
-esac
-if grep -q "ALL TESTS PASSED" "$TESTLOG" && ! grep -q "SOME TESTS FAILED" "$TESTLOG"; then
-  echo "GATE: SUITE OK — $(grep -E 'ALL TESTS PASSED' "$TESTLOG" | tail -1)"; exit 0
-fi
-echo "GATE: SUITE FAILED — $(grep -E 'SOME TESTS FAILED' "$TESTLOG" | tail -1)"
-grep -B1 "FAIL," "$TESTLOG" | grep "====" | head -12
-exit 2
+echo "GATE: SUITE OK — native cold-suite evidence accepted"
+exit 0
