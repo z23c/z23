@@ -263,7 +263,7 @@ a premise in `tools/lint/lintc/selection_gates.def`:
 
 That lane also widened what counts as gate code, for all six gates:
 
-- every gate's premise now carries the lint driver (`tools/lint/run_lint.sh`
+- every gate's premise now carries the lint driver (`tools/lint/run_lint.sh` <!-- doc-path-ok: deleted by the C23 lint driver switch; kept as history -->
   and `tools/lint/lint_cache.sh`) and its own Makefile rule and recipe <!-- doc-path-ok: deleted lint cache, kept for git recovery -->
   (`"gate:"` in make_vars). The first two declarations omitted both;
 - a `dir/` entry names every path under it;
@@ -450,7 +450,7 @@ These are the checks the lane asked for:
   Every unit went fresh with `gate-code:<file>` in all 11 cases:
   - `check-no-api-keys` (8383/8383): `tools/lint/lintc/gate_git_scan_a.c`,
     `tools/lint/lintc/lib.c`, `platform/modules/base/include/base/hex.h`
-    (reached through the lintc include closure) and `tools/lint/run_lint.sh`;
+    (reached through the lintc include closure) and `tools/lint/run_lint.sh`; <!-- doc-path-ok: deleted by the C23 lint driver switch; kept as history -->
   - `check-windows-platform-seam` (41/41):
     `tools/lint/windows_platform_seam_baseline.txt`, `Makefile` and
     `tools/lint/lintc/gate_windows_platform_seam.c`;
@@ -552,7 +552,7 @@ The z23-lint binary was built at `b089f792ba`, sha256 `9a2a7176…94d2`.
     both runs, and the new id is fresh as `unit-new`.
 - **(d) Gate-code-only edits** (real-01). All 68 finite rows went fresh
   with `gate-code:<file>` for each of `tools/lint/lintc/gate_windows_acceptance.c`,
-  `tools/scripts/sh_str.sh`, `Makefile`, `tools/lint/run_lint.sh` and
+  `tools/scripts/sh_str.sh`, `Makefile`, `tools/lint/run_lint.sh` and <!-- doc-path-ok: deleted by the C23 lint driver switch; kept as history -->
   `engine/composition/lib_module_order.def`. Edits to the catalog itself:
   - a new shared variable made all 68 fresh as `catalog-residue`;
   - a new comment line made none fresh;

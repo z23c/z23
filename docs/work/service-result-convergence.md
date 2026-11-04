@@ -40,7 +40,7 @@ exactly — file-level, no new syntax) judging its bool surface deliberate
 int/bool contracts, `*_dump_state_json` functions — see the CLAUDE.md
 "Adding state introspection" convention, which mandates a `bool` return
 there, not `struct zcl_result`). Re-run
-`./tools/scripts/check_service_result_convergence.sh`, or read
+`./tools/scripts/check_service_result_convergence.sh`, or read <!-- doc-path-ok: wrapper deleted; kept as history -->
 `tools/scripts/service_result_convergence_baseline.txt` directly, for the
 live file count and legacy-export count — both shrink as lanes land and
 must not be pinned here.

@@ -41,15 +41,16 @@ static int lgws_seed_dirs(const char *d)
 
 /* The fixture's gate_commands.def: the real file's header and no rows, so
  * only the sentinels the caller wires in are visible — otherwise every real
- * gate would read as an orphan in the fixture. */
+ * gate would read as an orphan in the fixture. The directory also holds the
+ * lintc.h ceiling definition that check E reads from any root with a lintc/. */
 static int lgws_strip_driver(const char *d)
 {
-    char driver[4096], dir[4096];
+    char driver[4096], hdr[4096];
     if (ovf(snprintf(driver, sizeof driver, "%s/tools/lint/lintc/gate_commands.def", d),
             sizeof driver)
-        || ovf(snprintf(dir, sizeof dir, "%s/tools/lint/lintc", d), sizeof dir))
+        || ovf(snprintf(hdr, sizeof hdr, "%s/tools/lint/lintc/lintc.h", d), sizeof hdr))
         return 2;
-    if (csr_mkdirs(dir))
+    if (csr_write(hdr, "#define LINT_FAMILY_CEILING 1500\n"))
         return 2;
     return csr_write(driver, "/* fixture gate command table: LINT_ROW(name, command) rows */\n");
 }
