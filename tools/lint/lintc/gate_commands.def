@@ -29,7 +29,7 @@ LINT_ROW("check-hotswap-service-islands", "build/bin/z23-lint check-hotswap-serv
 LINT_ROW("check-hotswap-swappable-shape", "build/bin/z23-lint check-hotswap-swappable-shape")
 LINT_ROW("check-hotswap-package-receipt-is-not-authority", "build/bin/z23-lint check-hotswap-package-receipt-is-not-authority --selftest && build/bin/z23-lint check-hotswap-package-receipt-is-not-authority")
 LINT_ROW("check-hotswap-module-imports", "build/bin/z23-lint check-hotswap-module-imports --selftest && build/bin/z23-lint check-hotswap-module-imports")
-LINT_ROW("check-stable-publish-contained", "./build/bin/z23-lint check-stable-publish-contained --selftest && ./build/bin/z23-lint check-stable-publish-contained")
+LINT_ROW("check-stable-publish-contained", "bash tools/scripts/check_stable_publish_containment.sh --self-test && bash tools/scripts/check_stable_publish_containment.sh")
 LINT_ROW("check-raw-malloc", "./build/bin/z23-lint check-raw-malloc --selftest && ./build/bin/z23-lint check-raw-malloc")
 LINT_ROW("check-json-value-init", "./build/bin/z23-lint check-json-value-init --self-test && ./build/bin/z23-lint check-json-value-init")
 LINT_ROW("check-coins-lookup-nullcheck", "./build/bin/z23-lint check-coins-lookup-nullcheck")
