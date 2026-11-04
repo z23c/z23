@@ -7,7 +7,7 @@ license=BSD-3-Clause (Tor); Apache-2.0 (src/feature/dynhost)
 archive=none
 build=make tor-full -> vendor/tor (host, compiled in place) or vendor/cross/<triple>/tor (cross, from a clean export of the pin)
 build_time_patch=vendor/patches/tor-dynhost-stream-shutdown.patch
-build_time_patch_sha256=2aeaab9ee2574e704be21e5d7dd45637dd30c1acbebb000439137f74392c3e66
+build_time_patch_sha256=c4c135447e85c5934b2c8af8ea4e52566c50ab15cc4219d2dbefa3daa75599d8
 build_time_patch_base=f4e28103c0eb9016e0b500d02486b7a59d20ee5d
 archive_attestation=<tor tree>/.provenance source_patch=dynhost-stream-shutdown-v2, written only when libtor.a defines dynhost_stream_init
 note=The patch makes the dynhost subsystem shutdown fire the terminal event for every pending and active stream and refuse later opens. The host build applies it only for the compile and reverts it, so the submodule checkout keeps the pinned bytes.
