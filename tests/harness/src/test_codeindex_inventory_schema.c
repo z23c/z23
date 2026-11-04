@@ -217,6 +217,30 @@ static int cis_index_checks(struct codeindex *ix, const char *root)
     return failures;
 }
 
+/* A prose walk must refuse an oversized tree instead of sealing a prefix. */
+static bool cis_doc_limit(void)
+{
+    char root[PLATFORM_TEMP_PATH_MAX] = {0};
+    if (!platform_temp_directory_create("z23-doc-limit-", root, sizeof(root)))
+        return false;
+    bool ready = true;
+    int made = 0;
+    for (; ready && made <= 16384; made++) {
+        char rel[64];
+        snprintf(rel, sizeof(rel), "docs/cap-%d.md", made);
+        ready = cis_put(root, rel, "# Bounded prose\n");
+    }
+    struct codeindex *ix = ready ? codeindex_open_retrieval_view(root) : NULL;
+    bool refused = ready && !ix;
+    codeindex_close(ix);
+    for (int i = 0; i < made; i++) {
+        char path[PLATFORM_TEMP_PATH_MAX + 64];
+        snprintf(path, sizeof(path), "%s/docs/cap-%d.md", root, i);
+        if (remove(path) != 0) refused = false;
+    }
+    return refused;
+}
+
 int test_codeindex_inventory_schema(void)
 {
     int failures = 0;
@@ -234,5 +258,7 @@ int test_codeindex_inventory_schema(void)
     codeindex_close(ix);
 
     failures += cis_rebuild_checks(ready, root);
+    CIS_CHECK("more than 16384 prose files refuses the generation",
+              cis_doc_limit());
     return failures;
 }
