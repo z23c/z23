@@ -334,7 +334,8 @@ case "${1:-ready}" in
         mkdir -p "$fake_primary" "$fake_wt"
         for a in "${ARCHIVES[@]}"; do
             mkdir -p "$fake_primary/${a%/*}"
-            printf 'fixture tor archive bytes dynhost_stream_init\n' >"$fake_primary/$a"
+            printf 'void dynhost_stream_init(void) {}\n' | cc -x c -c -o "$fixture/patch.o" - || exit 1
+            ar rcs "$fake_primary/$a" "$fixture/patch.o" || exit 1
         done
         # Fixture and have_all derive the same compiler identity from the
         # missing-Makefile fallback; copied bytes retain producer provenance.
@@ -540,7 +541,8 @@ case "${1:-ready}" in
             mkdir -p "$fake_wt3"
             for a in "${ARCHIVES[@]}"; do
                 mkdir -p "$fake_wt3/${a%/*}"
-                printf 'fixture tor archive bytes dynhost_stream_init\n' >"$fake_wt3/$a"
+                printf 'void dynhost_stream_init(void) {}\n' | cc -x c -c -o "$fixture/patch.o" - || exit 1
+                ar rcs "$fake_wt3/$a" "$fixture/patch.o" || exit 1
             done
             alias_cid="$(zcl_tor_compiler_identity_for_cc "$SCRIPT_ROOT" gcc 2>/dev/null)" || {
                 echo "tor_archives_ready: selftest FAILED — could not derive the gcc alias compiler id" >&2

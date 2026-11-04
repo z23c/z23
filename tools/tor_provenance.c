@@ -98,7 +98,11 @@
 
 #if defined(_WIN32)
 #include <direct.h>
+#include <process.h>
 #else
+#include <spawn.h>
+#include <sys/wait.h>
+extern char **environ;
 #define O_BINARY 0
 #endif
 
@@ -106,7 +110,7 @@
 #define FATAL_HANDLER_POLICY "owner-v1"
 /* vendor/patches/tor-dynhost-stream-shutdown.patch. Bump the version when
  * the patch changes, so archives built from an older patch fail check. */
-#define SOURCE_PATCH_POLICY "dynhost-stream-shutdown-v1"
+#define SOURCE_PATCH_POLICY "dynhost-stream-shutdown-v2"
 /* A symbol only the patched dynhost sources define. */
 #define SOURCE_PATCH_SYMBOL "dynhost_stream_init"
 #define TOR_COMMIT_HEX_LEN 40
@@ -343,35 +347,56 @@ static int embedded_config_without_backtrace(const char *tor_dir)
     return disabled && !enabled && !unreadable;
 }
 
-/* True when libtor.a contains SOURCE_PATCH_SYMBOL: the archive was compiled
- * from the patched sources. Fixed buffer with a carried tail, so a name
- * split across two reads is still found. */
+/* Build tools receive argv directly; paths never pass through a shell. */
+static int archive_tool(char *const argv[], FILE *output)
+{
+#if defined(_WIN32)
+    fflush(stdout);
+    int saved = dup(STDOUT_FILENO);
+    if (saved < 0) return -1;
+    if (dup2(fileno(output), STDOUT_FILENO) < 0) { close(saved); return -1; }
+    intptr_t status = _spawnvp(_P_WAIT, argv[0], (const char *const *)argv);
+    int restored = dup2(saved, STDOUT_FILENO);
+    close(saved);
+    return restored < 0 || status != 0 ? -1 : 0;
+#else
+    posix_spawn_file_actions_t actions;
+    if (posix_spawn_file_actions_init(&actions) != 0) return -1;
+    int rc = posix_spawn_file_actions_adddup2(&actions, fileno(output), STDOUT_FILENO);
+    pid_t pid = -1;
+    if (!rc) rc = posix_spawnp(&pid, argv[0], &actions, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    if (rc) return -1;
+    int status = 0;
+    pid_t waited;
+    do { waited = waitpid(pid, &status, 0); } while (waited < 0 && errno == EINTR);
+    return waited == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
+#endif
+}
+
+/* Require a global text definition, not an undefined reference or a string
+ * in an object. POSIX nm format is shared by GNU and LLVM; Mach-O prefixes
+ * external C symbols with an underscore. A failed inspection never attests. */
 static int archive_carries_source_patch(const char *tor_dir)
 {
     char path[PATH_BUF_MAX];
-    if (join_path(path, tor_dir, ARCHIVE_RELPATHS[0]) != 0)
-        return 0;
-    int fd = open(path, O_RDONLY | O_BINARY);
-    if (fd < 0)
-        return 0;
-    enum { NAME_LEN = sizeof(SOURCE_PATCH_SYMBOL) - 1, CHUNK = 65536 };
-    static _Thread_local char buf[NAME_LEN + CHUNK];
-    size_t kept = 0;
+    if (join_path(path, tor_dir, ARCHIVE_RELPATHS[0]) != 0) return 0;
+    FILE *output = tmpfile();
+    if (!output) return 0;
+    char *argv[] = {"nm", "-g", "-P", path, NULL};
+    int ok = archive_tool(argv, output) == 0;
+    rewind(output);
+    char line[LINE_BUF_MAX], name[LINE_BUF_MAX], type;
     int found = 0;
-    for (;;) {
-        ssize_t n = read(fd, buf + NAME_LEN, CHUNK);
-        if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) break;
-        const char *window = buf + NAME_LEN - kept;
-        size_t len = kept + (size_t)n;
-        for (size_t i = 0; !found && i + NAME_LEN <= len; i++)
-            found = memcmp(window + i, SOURCE_PATCH_SYMBOL, NAME_LEN) == 0;
-        if (found) break;
-        kept = len < NAME_LEN - 1 ? len : NAME_LEN - 1;
-        memmove(buf + NAME_LEN - kept, window + len - kept, kept);
+    while (ok && fgets(line, sizeof(line), output)) {
+        if (!strchr(line, '\n') && !feof(output)) { ok = 0; break; }
+        if (sscanf(line, "%1023s %c", name, &type) == 2 && type == 'T' &&
+            (!strcmp(name, SOURCE_PATCH_SYMBOL) ||
+             !strcmp(name, "_" SOURCE_PATCH_SYMBOL))) found = 1;
     }
-    close(fd);
-    return found;
+    ok = ok && !ferror(output);
+    fclose(output);
+    return ok && found;
 }
 
 static int validate_manifest_build(const char *tor_dir, const char *tor_commit,
@@ -988,6 +1013,26 @@ static int selftest_create_directories(const char *base)
     return 0;
 }
 
+/* Real object/archive fixtures distinguish definitions from references. */
+static int selftest_patch_archive(const char *base, const char *source)
+{
+    char c[PATH_BUF_MAX], object[PATH_BUF_MAX], archive[PATH_BUF_MAX];
+    if (join_path(c, base, "patch-fixture.c") ||
+        join_path(object, base, "patch-fixture.o") ||
+        join_path(archive, base, ARCHIVE_RELPATHS[0]) ||
+        write_fixture_archive(c, source)) return 1;
+    FILE *output = tmpfile();
+    if (!output) { unlink(c); return 1; }
+    char *compile[] = {"cc", "-c", c, "-o", object, NULL};
+    char *pack[] = {"ar", "rcs", archive, object, NULL};
+    int rc = archive_tool(compile, output);
+    if (!rc && unlink(archive) != 0 && errno != ENOENT) rc = -1;
+    if (!rc) rc = archive_tool(pack, output);
+    fclose(output);
+    unlink(c); unlink(object);
+    return rc != 0;
+}
+
 static int selftest_create_archives(const char *base)
 
 {
@@ -1016,7 +1061,7 @@ static int selftest_create_archives(const char *base)
             return 1;
         }
     }
-    return 0;
+    return selftest_patch_archive(base, "void " SOURCE_PATCH_SYMBOL "(void) {}\n");
 }
 
 static int selftest_prepare(const char *base)
@@ -1234,16 +1279,21 @@ static int selftest_unpatched_archive(const char *base, const char *commit,
                                       const char *compiler,
                                       const char *configure_sha)
 {
-    char path[PATH_BUF_MAX];
-    if (join_path(path, base, ARCHIVE_RELPATHS[0]) != 0 ||
-        write_fixture_archive(path, "fixture tor archive bytes 0 dynhost_stream_\n") != 0 ||
-        cmd_write(base, commit, compiler, configure_sha) == 0 ||
-        write_fixture_archive(path, "fixture tor archive bytes 0 " SOURCE_PATCH_SYMBOL "\n") != 0 ||
-        cmd_write(base, commit, compiler, configure_sha) != 0) {
-        fprintf(stderr, "tor-provenance: selftest FAILED — an archive without the source patch was attested\n");
-        return 1;
+    static const char *const refused[] = {
+        "extern void " SOURCE_PATCH_SYMBOL "(void);\n"
+        "void call_patch(void) { " SOURCE_PATCH_SYMBOL "(); }\n",
+        "const char patch_name[] = \"" SOURCE_PATCH_SYMBOL "\";\n",
+        "void " SOURCE_PATCH_SYMBOL "_suffix(void) {}\n",
+    };
+    for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); ++i) {
+        if (selftest_patch_archive(base, refused[i]) ||
+            cmd_write(base, commit, compiler, configure_sha) == 0) {
+            fprintf(stderr, "tor-provenance: selftest FAILED — archive without a patch definition was attested\n");
+            return 1;
+        }
     }
-    return 0;
+    return selftest_patch_archive(base, "void " SOURCE_PATCH_SYMBOL "(void) {}\n") ||
+           cmd_write(base, commit, compiler, configure_sha) != 0;
 }
 
 static const char *selftest_tmp_root(void)

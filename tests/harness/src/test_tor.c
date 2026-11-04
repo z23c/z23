@@ -1433,6 +1433,88 @@ static const char *stop_dial_measure(const char *tmpdir, int64_t *end_ms)
     return run.connected ? "dial reported a circuit" : NULL;
 }
 
+extern void dynhost_stream_init(void) ZCL_WEAK_IMPORT;
+extern void dynhost_stream_cleanup(void) ZCL_WEAK_IMPORT;
+
+struct stop_race {
+    _Atomic int entered;
+    _Atomic int closed;
+    _Atomic int events;
+    _Atomic int write_result;
+};
+
+static void stop_race_read(struct dynhost_stream *s, const uint8_t *data,
+                           size_t len, void *ctx)
+{
+    (void)s; (void)data; (void)len; (void)ctx;
+}
+
+static void stop_race_event(struct dynhost_stream *s, int event, void *ctx)
+{
+    struct stop_race *race = ctx;
+    if (event != ONION_STREAM_EVENT_CLOSED) return;
+    atomic_fetch_add(&race->events, 1);
+    atomic_store(&race->entered, 1);
+    for (int i = 0; i < 5000 && !atomic_load(&race->closed); i++)
+        platform_sleep_ms(1); /* real-clock: synchronize with close thread */
+    const uint8_t byte = 0;
+    atomic_store(&race->write_result, dynhost_stream_write(s, &byte, 1));
+}
+
+static void *stop_race_cleanup(void *ctx)
+{
+    (void)ctx;
+    dynhost_stream_cleanup();
+    return NULL;
+}
+
+static bool stop_lifecycle_available(void)
+{
+    return app_tor_real_build_linked() && dynhost_stream_init &&
+           dynhost_stream_cleanup && dynhost_stream_open &&
+           dynhost_stream_close && dynhost_stream_write;
+}
+
+static int test_tor_stop_close_race(void)
+{
+    printf("test_tor_stop_close_race: ");
+    if (!stop_lifecycle_available()) {
+        printf("OK (stub Tor linked)\n");
+        return 0;
+    }
+    struct stop_race race = {0};
+    dynhost_stream_init();
+    struct dynhost_stream *s = dynhost_stream_open("fixture.onion", 80,
+        stop_race_read, stop_race_event, &race, 60);
+    if (!s) { printf("FAIL (open)\n"); return 1; }
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, stop_race_cleanup, NULL) != 0) {
+        dynhost_stream_close(s);
+        dynhost_stream_cleanup();
+        printf("FAIL (thread)\n"); return 1;
+    }
+    for (int i = 0; i < 5000 && !atomic_load(&race.entered); i++)
+        platform_sleep_ms(1); /* real-clock: wait for terminal callback */
+    bool entered = atomic_load(&race.entered) != 0;
+    dynhost_stream_close(s);
+    atomic_store(&race.closed, 1);
+    pthread_join(tid, NULL);
+    bool ok = entered && atomic_load(&race.events) == 1 &&
+              atomic_load(&race.write_result) == -1;
+    struct dynhost_stream *refused = dynhost_stream_open("fixture.onion", 80,
+        stop_race_read, stop_race_event, &race, 60);
+    ok = ok && !refused;
+    if (refused) dynhost_stream_close(refused);
+    dynhost_stream_init();
+    struct dynhost_stream *again = dynhost_stream_open("fixture.onion", 80,
+        stop_race_read, stop_race_event, &race, 60);
+    ok = ok && again;
+    if (again) dynhost_stream_close(again);
+    dynhost_stream_cleanup();
+    printf("%s\n", ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
 static int test_tor_stop_ends_onion_dial(void)
 {
     printf("test_tor_stop_ends_onion_dial: ");
@@ -1731,6 +1813,7 @@ int test_tor(void)
     failures += test_tor_write_torrc_reports_write_failure();
     failures += test_tor_leaves_sigterm_to_the_node();
     failures += test_tor_stop_ends_onion_dial();
+    failures += test_tor_stop_close_race();
     failures += test_tor_write_torrc_no_collision();
     failures += test_tor_write_torrc_datadir();
     failures += test_tor_write_torrc_idempotent();
