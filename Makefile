@@ -856,7 +856,7 @@ TEST_GROUP_LIST_SRCS = tools/dev/test_group_list_main.c \
 TEST_GROUP_LIST_HDRS = tools/dev/test_group_list.h tools/dev/test_group_list_int.h
 TEST_GROUP_LIST_BUILD = mkdir -p $(dir $(TEST_GROUP_LIST_BIN)) && \
     $(or $(HOST_CC),cc) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Itools/dev \
+    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(if $(filter Darwin,$(ZCL_BUILD_OS)),-D_DARWIN_C_SOURCE,) -Itools/dev \
     -Iplatform/modules/base/include -Iplatform/modules/platform/include \
     -Iplatform/modules/util/include -o $(TEST_GROUP_LIST_BIN).tmp \
     $(TEST_GROUP_LIST_SRCS) -lpthread && \
@@ -13671,7 +13671,7 @@ dep-audit: $(DEP_AUDIT_BIN)
 $(DEP_AUDIT_BIN): $(DEP_AUDIT_SRCS)
 	@mkdir -p $(dir $@)
 	$(or $(HOST_CC),cc) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
+	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(if $(filter Darwin,$(ZCL_BUILD_OS)),-D_DARWIN_C_SOURCE,) \
 	    $(DEP_AUDIT_INCLUDES) \
 	    -o $@ $(DEP_AUDIT_SRCS) -lpthread
 
