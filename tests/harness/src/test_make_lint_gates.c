@@ -850,6 +850,14 @@ static const struct lint_gate_entry g_lint_gate_entries[] = {
     N_(t_git_hooks_gate_enforces_tracked_pre_push),  /* reads .git/hooks */
     N_(t_git_hooks_gate_rejects_noop_pre_push),      /* writes only test-tmp/ */
     N_(t_git_hooks_gate_rejects_noop_pre_commit),    /* writes only test-tmp/ */
+    N_(t_git_hooks_installer_scope),                 /* private repo under test-tmp/ */
+    N_(t_git_hooks_installer_relative_hooks_path),   /* private repo under test-tmp/ */
+    N_(t_git_hooks_installer_idempotent),            /* private repo under test-tmp/ */
+    N_(t_git_hooks_refresh_updates_armed_only),      /* private repo under test-tmp/ */
+    N_(t_git_hooks_quiet_stale_residue),             /* private repo under test-tmp/ */
+    N_(t_git_hooks_quiet_env_suppresses),            /* private repo under test-tmp/ */
+    N_(t_git_hooks_quiet_held_ready_notifies),       /* private repo under test-tmp/ */
+    N_(t_git_hooks_bootstrap_goal_filter),           /* make -s in a test-tmp/ fixture */
     S_(t_telemetry_ontology_gate),
     /* Hermetic: the script's --selftest builds its scan root and baseline in
      * its own mktemp dir and never mutates a tracked path. */

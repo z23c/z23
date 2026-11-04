@@ -229,7 +229,6 @@ tools/scripts/host_gc_selftest.sh
 tools/scripts/import-copy-prove-selftest.sh
 tools/scripts/import-copy-prove.sh
 tools/scripts/install_git_hooks.sh
-tools/scripts/install_git_hooks_selftest.sh
 tools/scripts/install_host_gc.sh
 tools/scripts/install_z23.sh
 tools/scripts/intervention_ledger.sh

@@ -12943,7 +12943,6 @@ install-hooks: $(GIT_HOOK_BIN)
 check-git-hooks-installed: $(GIT_HOOK_BIN) $(LINTC_TOOL)
 	@echo "══ LINT: local pre-push hook installed ══"
 	@./tools/scripts/check_git_hooks_installed.sh --self-test
-	@./tools/scripts/install_git_hooks_selftest.sh
 	@./tools/scripts/check_git_hooks_installed.sh
 
 # Read-only: whether THIS worktree's Git hooks are armed, which config file

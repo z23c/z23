@@ -18,6 +18,8 @@
  *   lint_gate_supervision_selftests.c thread and supervisor registration
  *                                     ratchets, hot-swap manifests, blocker
  *                                     escape, the empty-scan meta gate
+ *   lint_gate_git_hooks_selftests.c   hook installer scope, refresh, quiet
+ *                                     post-commit, bootstrap goal filter
  *   lint_gate_hygiene_selftests.c     git hooks, memory budget, ephemeral
  *                                     fixture filtering, dev-history and
  *                                     uncited-victory prose gates
@@ -402,6 +404,14 @@ int run_git_hooks_gate_with_precommit_file(const char *hook_path,
 int t_git_hooks_gate_enforces_tracked_pre_push(void);
 int t_git_hooks_gate_rejects_noop_pre_push(void);
 int t_git_hooks_gate_rejects_noop_pre_commit(void);
+int t_git_hooks_installer_scope(void);
+int t_git_hooks_installer_relative_hooks_path(void);
+int t_git_hooks_installer_idempotent(void);
+int t_git_hooks_refresh_updates_armed_only(void);
+int t_git_hooks_quiet_stale_residue(void);
+int t_git_hooks_quiet_env_suppresses(void);
+int t_git_hooks_quiet_held_ready_notifies(void);
+int t_git_hooks_bootstrap_goal_filter(void);
 int plant_oversized_file(const char *rel, int n_lines);
 void unlink_rel(const char *rel);
 int plant_long_function_file(const char *rel, const char *func_name,
