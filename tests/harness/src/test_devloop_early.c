@@ -55,6 +55,7 @@
 #define DE_CHANGED "tools/dev/early_fixture.c"
 #define DE_LOG_ENV "ZCL_DEVLOOP_EARLY_TEST_LOG"
 #define DE_FAIL_ENV "ZCL_DEVLOOP_EARLY_TEST_FAIL"
+#define DE_SUMMARY_ENV "DEVLOOP_EARLY_SUMMARY_FIXTURE"
 
 #if defined(__linux__)
 static bool de_write(const char *root, const char *rel, const char *body)
@@ -231,6 +232,35 @@ static const char k_de_runner[] =
     "#include <stdio.h>\n"
     "#include <stdlib.h>\n"
     "#include <string.h>\n"
+    "#include <signal.h>\n"
+    "static int summary_case(const char *mode, unsigned count)\n"
+    "{\n"
+    "    if (!strcmp(mode, \"signal\")) { raise(SIGTERM); return 1; }\n"
+    "    if (!strcmp(mode, \"no-summary\")) return 0;\n"
+    "    if (!strcmp(mode, \"padded\")) { printf(\"SUITE VERDICT groups_ran=000000000000%u groups_cached=000000000000 groups_failed=000000000000 self_skips=000000000000\\n\", count); return 0; }\n"
+    "    if (!strcmp(mode, \"truncated\")) { for(unsigned i=0;i<131072;i++) putchar('x'); putchar('\\n'); }\n"
+    "    if (!strcmp(mode, \"embedded\")) fputs(\"noise \", stdout);\n"
+    "    if (!strcmp(mode, \"cross-line\")) {\n"
+    "        printf(\"SUITE VERDICT groups_ran=%u\\nnoise groups_cached=0 groups_failed=0 self_skips=0\\n\", count); return 0;\n"
+    "    }\n"
+    "    if (!strcmp(mode, \"prefix\")) {\n"
+    "        printf(\"SUITE VERDICT groups_ran=%ujunk groups_cached=0junk groups_failed=0junk self_skips=0junk\\n\", count); return 0;\n"
+    "    }\n"
+    "    if (!strcmp(mode, \"wrap\")) {\n"
+    "        printf(\"SUITE VERDICT groups_ran=4294967295 groups_cached=%u groups_failed=0 self_skips=0\\n\", count+1); return 0;\n"
+    "    }\n"
+    "    if (!strcmp(mode, \"negative-zero\")) { printf(\"SUITE VERDICT groups_ran=%u groups_cached=-0 groups_failed=0 self_skips=0\\n\", count); return 0; }\n"
+    "    if (!strcmp(mode, \"out-of-range\")) { puts(\"SUITE VERDICT groups_ran=4294967296 groups_cached=0 groups_failed=0 self_skips=0\"); return 0; }\n"
+    "    if (!strcmp(mode, \"alias\")) fputs(\"SUITE VERDICT not_\", stdout); else fputs(\"SUITE VERDICT \", stdout);\n"
+    "    printf(\"groups_ran=%u groups_cached=%u groups_failed=0 self_skips=%u\",\n"
+    "           !strcmp(mode, \"cached\") ? 0 : count, !strcmp(mode, \"cached\") ? count : !strcmp(mode, \"cached-extra\") ? 1 : 0, !strcmp(mode, \"skip\") ? 1 : 0);\n"
+    "    if (!strcmp(mode, \"duplicate-field\")) fputs(\" groups_ran=0\", stdout);\n"
+    "    if (!strcmp(mode, \"crlf\")) putchar('\\r');\n"
+    "    if (strcmp(mode, \"unterminated\")) putchar('\\n');\n"
+    "    if (!strcmp(mode, \"duplicate-row\")) printf(\"SUITE VERDICT groups_ran=%u groups_cached=0 groups_failed=1 self_skips=0\\n\", count);\n"
+    "    if (!strcmp(mode, \"raw-nul\")) putchar(0);\n"
+    "    return !strcmp(mode, \"exit7\") ? 7 : 0;\n"
+    "}\n"
     "int main(int argc, char **argv)\n"
     "{\n"
     "    const char *groups = \"\";\n"
@@ -246,6 +276,8 @@ static const char k_de_runner[] =
     "    if (f) { fprintf(f, \"%s %s\\n\", early ? \"early\" : \"proof\", groups); fclose(f); }\n"
     "    const char *fail = getenv(\"" DE_FAIL_ENV "\");\n"
     "    unsigned failed = early && fail && strcmp(fail, \"1\") == 0;\n"
+    "    const char *mode = getenv(\"" DE_SUMMARY_ENV "\");\n"
+    "    if (early && mode && mode[0]) return summary_case(mode, count);\n"
     "    printf(\"SUITE VERDICT mode=cold groups_total=%u groups_ran=%u \"\n"
     "           \"groups_cached=0 groups_gated=0 groups_failed=%u \"\n"
     "           \"self_skips=0\\n\", count, count, failed);\n"
@@ -532,6 +564,75 @@ static int de_test_red(struct de_state *s)
     return failures;
 }
 
+static void de_public_summary_log(const struct zcl_devloop_early_receipt *r)
+{
+    struct json_value doc = {0};
+    json_set_object(&doc);
+    zcl_devloop_early_json(r, &doc);
+    char wire[16384];
+    size_t n = json_write(&doc, wire, sizeof(wire));
+    if (n < sizeof(wire)) printf("\npublic early receipt: %s\n", wire);
+    json_free(&doc);
+}
+
+static bool de_public_summary_case(struct de_state *s, const char *mode,
+                                    const char *status, const char *reason)
+{
+    if (platform_environment_set(DE_SUMMARY_ENV, mode, 1) != 0) return false;
+    bool cancel = strcmp(mode, "cancel") == 0;
+    if (cancel) zcl_devloop_process_cancel_request();
+    zcl_devloop_early_run(s->fx.root, s->with.artifact_path,
+                          s->with.artifact_sha256, &s->early_plan, "",
+                          platform_time_monotonic_us(), &s->early);
+    if (cancel) zcl_devloop_process_cancel_clear();
+    bool ok = de_receipt_is_feedback(&s->early, status, reason);
+    if (!ok) {
+        printf("[summary %s expected %s/%s, got %s/%s] ", mode, status,
+               reason, s->early.status, s->early.reason);
+        de_public_summary_log(&s->early);
+    }
+    return ok;
+}
+
+static int de_test_public_summaries(struct de_state *s)
+{
+    int failures = 0;
+    TEST("devloop_early: public feedback refuses malformed and incomplete runner accounting") {
+        static const struct { const char *mode, *status, *reason; } cases[] = {
+            {"cold", "green", ""}, {"cached", "green", ""}, {"crlf", "green", ""},
+            {"padded", "green", ""},
+            {"skip", "red", "runner_incomplete"},
+            {"exit7", "red", "runner_incomplete"},
+            {"signal", "red", "runner_signalled"},
+            {"cancel", "cancelled", "cancelled"},
+            {"cross-line", "red", "runner_summary_missing"},
+            {"prefix", "red", "runner_summary_missing"},
+            {"wrap", "red", "runner_incomplete"},
+            {"embedded", "red", "runner_summary_missing"},
+            {"duplicate-field", "red", "runner_summary_missing"},
+            {"duplicate-row", "red", "runner_summary_missing"},
+            {"raw-nul", "red", "runner_summary_missing"},
+            {"alias", "red", "runner_summary_missing"},
+            {"negative-zero", "red", "runner_summary_missing"},
+            {"out-of-range", "red", "runner_summary_missing"},
+            {"no-summary", "red", "runner_summary_missing"},
+            {"unterminated", "red", "runner_summary_missing"},
+            {"cached-extra", "red", "runner_incomplete"},
+            {"truncated", "red", "runner_output_truncated"}
+        };
+        bool all = true;
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)
+            all &= de_public_summary_case(s, cases[i].mode,
+                                           cases[i].status, cases[i].reason);
+        int cleared = unsetenv(DE_SUMMARY_ENV);
+        (void)unlink(s->fx.log);
+        ASSERT(cleared == 0);
+        ASSERT(all);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int de_test_missing(struct de_state *s)
 {
     int failures = 0;
@@ -794,6 +895,18 @@ static int de_test_skip_verify(struct de_state *s)
         const char *only[] = { "devloop_early" };
         ASSERT(de_skip_plan(&s->proof_plan, only, 1, &s->early_plan));
         ASSERT(platform_environment_set(DE_SKIP_ENV, "verify", 1) == 0);
+        const char *modes[] = {"cold", "skip", "cached-extra"};
+        const char *statuses[] = {"green", "incomplete", "incomplete"};
+        for (size_t i = 0; i < 3; ++i) {
+            ASSERT(platform_environment_set(DE_SUMMARY_ENV, modes[i], 1) == 0);
+            bool verified = de_prove(s, &s->early_plan);
+            ASSERT(unsetenv(DE_SUMMARY_ENV) == 0);
+            ASSERT(verified);
+            ASSERT_STR_EQ(s->early.skip.verify_status, statuses[i]);
+            ASSERT_EQ(s->early.skip.false_narrows, 0u);
+            ASSERT(de_log_is(&s->fx, "early " DE_VOUCHED, s->with.test_processes));
+            ASSERT(de_same_proof(&s->base, &s->with));
+        }
         ASSERT(platform_environment_set(DE_FAIL_ENV, "1", 1) == 0);
         bool proved = de_prove(s, &s->early_plan);
         ASSERT(platform_environment_set(DE_FAIL_ENV, "0", 1) == 0);
@@ -1559,6 +1672,7 @@ static int de_test_restart(void)
     if (ready) {
         failures += de_test_order(s);
         failures += de_test_red(s);
+        failures += de_test_public_summaries(s);
         failures += de_test_missing(s);
         failures += de_test_skip_unchanged(s);
         failures += de_test_skip_edit(s);

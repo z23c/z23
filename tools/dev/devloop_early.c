@@ -9,10 +9,10 @@
 #include "crypto/sha256.h"
 #include "json/json.h"
 #include "platform/time_compat.h"
+#include "util/parse_num.h"
 #include "util/safe_alloc.h"
 #include "vcs/semantic_manifest.h"
 
-#include <errno.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -264,20 +264,77 @@ static const char *early_select(const struct zcl_devloop_plan *plan,
     return refused;
 }
 
-static bool early_summary(const char *output, const char *key, uint32_t *out)
+static bool early_count(const char *text, size_t n, uint32_t *out)
 {
-    const char *line = output ? strstr(output, "SUITE VERDICT ") : NULL;
-    const char *at = line ? strstr(line, key) : NULL;
-    if (!at)
-        return false;
-    at += strlen(key);
-    errno = 0;
-    char *end = NULL;
-    unsigned long value = strtoul(at, &end, 10);
-    if (errno || end == at || value > UINT32_MAX)
+    char token[sizeof("4294967295")];
+    if (n == 0) return false;
+    while (n > 1 && *text == '0') { ++text; --n; }
+    if (n >= sizeof(token)) return false;
+    for (size_t i = 0; i < n; ++i)
+        if (text[i] < '0' || text[i] > '9') return false;
+    memcpy(token, text, n);
+    token[n] = '\0';
+    int64_t value;
+    if (!zcl_parse_i64(token, &value) || value < 0 || value > UINT32_MAX)
         return false;
     *out = (uint32_t)value;
     return true;
+}
+
+static bool early_summary_field(const char *token, size_t n,
+                                  unsigned *seen, uint32_t counts[4])
+{
+    static const char *const keys[] = {
+        "groups_ran=", "groups_cached=", "groups_failed=", "self_skips="
+    };
+    for (size_t i = 0; i < 4; ++i) {
+        size_t key_len = strlen(keys[i]);
+        if (n < key_len || memcmp(token, keys[i], key_len) != 0) continue;
+        if ((*seen & (1u << i)) ||
+            !early_count(token + key_len, n - key_len, &counts[i])) return false;
+        *seen |= 1u << i;
+        break;
+    }
+    return true;
+}
+
+static bool early_summary_line(const char *at, const char *end,
+                                 uint32_t counts[4])
+{
+    unsigned seen = 0;
+    if (end > at && end[-1] == '\r') --end;
+    while (at < end) {
+        if (*at == ' ' || *at == '\t') { ++at; continue; }
+        const char *token = at;
+        while (at < end && *at != ' ' && *at != '\t') ++at;
+        if (!early_summary_field(token, (size_t)(at - token), &seen, counts))
+            return false;
+    }
+    return seen == 15u;
+}
+
+/* One complete physical verdict row in the complete captured byte stream.
+ * Counters cannot come from another line, duplicate key, prefix or tail. */
+static bool early_summary(const struct zcl_devloop_process_result *p,
+                            uint32_t counts[4])
+{
+    if (p->output_truncated || p->output_len >= sizeof(p->output) ||
+        p->output[p->output_len] != '\0' || memchr(p->output, 0, p->output_len))
+        return false;
+    const char *end = p->output + p->output_len;
+    bool found = false;
+    for (const char *line = p->output; line < end;) {
+        const char *nl = memchr(line, '\n', (size_t)(end - line));
+        const char *stop = nl ? nl : end;
+        if (stop - line >= 14 && memcmp(line, "SUITE VERDICT ", 14) == 0) {
+            if (!nl || found || !early_summary_line(line + 14, stop, counts))
+                return false;
+            found = true;
+        }
+        if (!nl) break;
+        line = nl + 1;
+    }
+    return found;
 }
 
 static const char *early_red_reason(const struct zcl_devloop_process_result *p,
@@ -290,6 +347,8 @@ static const char *early_red_reason(const struct zcl_devloop_process_result *p,
         return "runner_timed_out";
     if (p->term_signal)
         return "runner_signalled";
+    if (p->output_truncated)
+        return "runner_output_truncated";
     if (!summary)
         return "runner_summary_missing";
     return r->groups_failed ? "groups_failed" : "runner_incomplete";
@@ -300,11 +359,14 @@ static const char *early_red_reason(const struct zcl_devloop_process_result *p,
 static void early_judge(const struct zcl_devloop_process_result *p, bool ran,
                         struct zcl_devloop_early_receipt *r)
 {
-    bool summary = ran &&
-        early_summary(p->output, "groups_ran=", &r->groups_ran) &&
-        early_summary(p->output, "groups_cached=", &r->groups_cached) &&
-        early_summary(p->output, "groups_failed=", &r->groups_failed) &&
-        early_summary(p->output, "self_skips=", &r->self_skips);
+    uint32_t counts[4] = {0};
+    bool summary = ran && early_summary(p, counts);
+    if (summary) {
+        r->groups_ran = counts[0];
+        r->groups_cached = counts[1];
+        r->groups_failed = counts[2];
+        r->self_skips = counts[3];
+    }
     r->exit_code = p->exit_code;
     if (p->cancelled) {
         r->status = "cancelled";
@@ -313,7 +375,7 @@ static void early_judge(const struct zcl_devloop_process_result *p, bool ran,
     }
     bool green = summary && !p->timed_out && !p->term_signal &&
         p->exit_code == 0 && r->groups_failed == 0 && r->self_skips == 0 &&
-        r->groups_ran + r->groups_cached == r->run_count;
+        (uint64_t)r->groups_ran + r->groups_cached == r->run_count;
     r->status = green ? "green" : "red";
     r->reason = green ? "" : early_red_reason(p, ran, summary, r);
 }
@@ -422,11 +484,11 @@ static bool early_verify_clean(const struct zcl_devloop_process_result *p,
 static void early_verify_judge(const struct zcl_devloop_process_result *p,
                                bool ran, struct zcl_devloop_early_skip *s)
 {
-    uint32_t failed = 0, groups_ran = 0;
-    bool summary = ran && early_summary(p->output, "groups_failed=", &failed) &&
-                   early_summary(p->output, "groups_ran=", &groups_ran);
-    bool clean = summary &&
-                 early_verify_clean(p, failed, groups_ran, s->verify_groups);
+    uint32_t counts[4] = {0};
+    bool summary = ran && early_summary(p, counts);
+    uint32_t failed = summary ? counts[2] : 0;
+    bool clean = summary && counts[1] == 0 && counts[3] == 0 &&
+                 early_verify_clean(p, failed, counts[0], s->verify_groups);
     s->verify_status = p->cancelled ? "cancelled" : clean ? "green"
                      : summary && failed == 0 ? "incomplete" : "red";
     /* A runner that died without a summary attributes nothing: every
