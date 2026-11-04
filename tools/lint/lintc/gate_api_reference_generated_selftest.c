@@ -29,6 +29,9 @@ enum { ARS_LOG = 65536, ARS_SEG_STEP = 100, ARS_SEG_SLACK = 101 };
 static const char ars_name[] = "check_api_reference_generated selftest";
 
 static const char *const ars_fixed[] = {
+    /* Transitive shared declarations included by the direct catalog inputs. */
+    "engine/composition/commands/discover_describe.def",
+    "engine/composition/commands/retrieval_pair.def",
     "engine/modules/kernel/include/kernel/command_registry.h",
     "platform/modules/json/include/json/json.h",
     "platform/modules/base/include/base/cleanse.h",

@@ -293,7 +293,7 @@ page changing with it.
 port_interfaces: 13
 persistence_adapters: 14
 condition_registrations: 56
-command_bundles: 36
+command_bundles: 38
 command_roots: 16
 dumpstate_subsystems: 167
 app_shape_folders: 7

@@ -2,7 +2,7 @@
 
 # Paired retrieval observation
 
-<!-- claim: symbol-present dev.retrieval.pair engine/composition/commands/dev.def # CAS-backed observational command -->
+<!-- claim: symbol-present dev.retrieval.pair engine/composition/commands/retrieval_pair.def # CAS-backed observational command -->
 <!-- claim: symbol-present zcode_retrieval_science_result_compose cognition/services/src/zcode_retrieval_science_adapter_service.c # maintained measurement adapter -->
 <!-- claim: symbol-present zcl_native_retrieval_pair_load tools/command/native_dev_retrieval_pair_input.c # artifact decoder -->
 

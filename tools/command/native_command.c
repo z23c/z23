@@ -18,6 +18,7 @@
 
 #define _GNU_SOURCE
 #include "command/native_command.h"
+#include "command/native_json_input.h"
 #include "command/native_command_priv.h"
 #include "command/refold_rate_verdict.h"
 #include "base/hex.h"
@@ -2897,56 +2898,8 @@ static bool nc_parse_size_control(const char *value, size_t minimum,
  * so the CLI can name the rule instead of reporting a generic parse error. */
 static char *nc_read_stdin(size_t max_bytes, bool *oversize)
 {
-    if (oversize)
-        *oversize = false;
-    if (max_bytes < 2)
-        max_bytes = 2;
-    /* One byte past the budget so an OVER-limit document is detected by
-     * actually reading the extra byte, never inferred from a full buffer —
-     * a document of exactly max_bytes must be accepted, not refused. */
-    const size_t hard_cap = max_bytes + 2; /* +1 sentinel, +1 NUL */
-    size_t cap = 4096, len = 0;
-    if (cap > hard_cap)
-        cap = hard_cap;
-    char *buf = (char *)zcl_malloc(cap, "native_command.stdin");
-    if (!buf)
-        return NULL;
-    for (;;) {
-        if (len + 1 >= cap) {
-            if (cap >= hard_cap)
-                break; /* read the sentinel byte; length check below rules */
-            size_t ncap = cap * 2;
-            if (ncap > hard_cap)
-                ncap = hard_cap;
-            char *nb = (char *)zcl_realloc(buf, ncap, "native_command.stdin");
-            if (!nb) {
-                free(buf);
-                return NULL;
-            }
-            buf = nb;
-            cap = ncap;
-        }
-        ssize_t r = read(STDIN_FILENO, buf + len, cap - len - 1);
-        if (r < 0) {
-            if (errno == EINTR)
-                continue;
-            free(buf);
-            return NULL;
-        }
-        if (r == 0)
-            break;
-        len += (size_t)r;
-    }
-    if (len > max_bytes) {
-        if (oversize)
-            *oversize = true;
-        free(buf);
-        return NULL;
-    }
-    buf[len] = 0;
-    return buf;
+    return zcl_native_read_stdin(max_bytes, oversize, NULL);
 }
-
 #ifdef ZCL_DEV_BUILD
 enum nc_dev_retrieval_flags_result {
     NC_DEV_RETRIEVAL_NOT_REQUESTED,
@@ -3167,34 +3120,6 @@ static void nc_print_doc(const char *doc, const char *command_path)
 }
 
 /* Build the `error` object (code/message/phase/blockers/next_action). */
-static void nc_print_error_build_error(const char *code, const char *phase,
-                                       const char *message,
-                                       const char *evidence,
-                                       const char *next_reason,
-                                       bool has_next,
-                                       struct json_value *error)
-{
-    struct json_value blockers;
-    json_init(&blockers);
-    json_set_array(&blockers);
-    (void)json_push_kv_str(error, "code", code);
-    (void)json_push_kv_str(error, "error_code", code);
-    (void)json_push_kv_str(error, "message", message);
-    (void)json_push_kv_str(error, "phase", phase);
-    (void)json_push_kv_str(error, "current_state", "REQUEST_FAILED");
-    (void)json_push_kv_bool(error, "retryable", false);
-    (void)json_push_kv_bool(error, "human_action_required", true);
-    (void)json_push_kv_str(error, "next_action",
-                           next_reason && next_reason[0]
-                               ? next_reason
-                               : has_next ? "follow the first next command"
-                                          : "inspect the command contract");
-    (void)json_push_kv_bool(error, "mutated", false);
-    if (evidence && evidence[0])
-        (void)json_push_kv_str(error, "evidence", evidence);
-    (void)json_push_kv(error, "blockers", &blockers);
-    json_free(&blockers);
-}
 
 /* Initialize fresh caller-owned storage even when parsing is skipped, so
  * the next-action builder can unconditionally release it. */
@@ -3243,32 +3168,17 @@ static void nc_print_error(const char *command, const char *code,
                            const char *next_command,
                            const char *next_input, const char *next_reason)
 {
-    struct json_value root, error, next, item;
-    json_init(&root);
-    json_init(&error);
+    struct json_value next, item;
     json_init(&next);
     json_init(&item);
-    json_set_object(&root);
-    json_set_object(&error);
     json_set_array(&next);
     json_set_object(&item);
 
-    (void)json_push_kv_str(&root, "schema", "zcl.result.v1");
-    (void)json_push_kv_str(&root, "command", command ? command : "");
-    (void)json_push_kv_bool(&root, "ok", false);
-    (void)json_push_kv_str(&root, "status", "failed");
-    (void)json_push_kv_str(&root, "request_id", "local-cli");
-    (void)json_push_kv_int(&root, "elapsed_us", 0);
     nc_print_error_build_next(command, next_command, next_input, next_reason,
                               &next, &item);
-    nc_print_error_build_error(code, phase, message, evidence, next_reason,
-                               next.num_children > 0,
-                               &error);
-    (void)json_push_kv(&root, "error", &error);
-    (void)json_push_kv(&root, "next", &next);
-
     char out[ZCL_COMMAND_ERROR_BUDGET + 1];
-    size_t n = json_write(&root, out, sizeof(out));
+    size_t n = zcl_native_error_json(command, code, phase, message, evidence,
+                                    next_reason, &next, out, sizeof(out));
     if (n == 0 || n >= sizeof(out))
         (void)snprintf(out, sizeof(out),
                        "{\"schema\":\"zcl.result.v1\",\"ok\":false,"
@@ -3280,8 +3190,6 @@ static void nc_print_error(const char *command, const char *code,
     nc_print_doc(out, command);
     json_free(&item);
     json_free(&next);
-    json_free(&error);
-    json_free(&root);
 }
 
 #ifdef ZCL_TESTING

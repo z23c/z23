@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for standalone retrieval transport. */
+ZCL_MODULE_CAPABILITY("tools/command/native_retrieval_cli.c", CAP_FS_READ|CAP_FS_WRITE, "Reads bounded command input and writes or flushes native result envelopes")

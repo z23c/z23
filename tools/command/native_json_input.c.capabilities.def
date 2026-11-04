@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for native JSON input helpers. */
+ZCL_MODULE_CAPABILITY("tools/command/native_json_input.c", CAP_FS_READ|CAP_FS_WRITE, "Reads bounded stdin bytes; allocator and serialization helpers can report diagnostics")

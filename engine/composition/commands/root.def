@@ -68,23 +68,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE,
     zcl_native_handle_discover_search)
 
-ZCL_COMMAND_READY_READ(
-    "discover.describe", "discover", "",
-    "Describe one leaf's schemas, safety, authority, and availability",
-    "One leaf's full contract — schemas, policy, semantics, and availability — "
-    "from the static in-binary registry; deterministic and complete for that "
-    "leaf.", 0,
-    "describe,schema,risk,authority,availability",
-    "zcl.discover.path_input.v1", "zcl.command_spec.v1", "path", "path",
-    "z23 discover describe dev.app.simulate",
-    ZCL_COMMAND_LAYER_DISCOVER, ZCL_COMMAND_SCOPE_LOCAL,
-    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_INSTANT,
-    ZCL_COMMAND_COST_TINY,
-    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
-    ZCL_COMMAND_CAP_NONE,
-    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
-    ZCL_COMMAND_TRANSPORT_NATIVE,
-    zcl_native_handle_discover_describe)
+#include "discover_describe.def"
 
 ZCL_COMMAND_READY_READ(
     "discover.schema", "discover", "",

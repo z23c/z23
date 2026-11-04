@@ -52,6 +52,13 @@
  * parse the fixture language.
  */
 
+#if defined(_WIN32)
+/* No supported POSIX descriptor runtime on native Windows. The runner gates
+ * this host requirement; forcing it still fails the test, never self-passes. */
+ZCL_TEST_GROUP_NEED("test_retrieval_pair_entrypoint", ZCL_HOST_NEED_ENV,
+    "ZCL_POSIX_DESCRIPTOR_TESTS")
+#endif
+
 #if defined(__linux__)
 ZCL_TEST_GROUP_BUILD_NEED("test_fingerprint", "build/bin/fpscan", "fpscan")
 #endif

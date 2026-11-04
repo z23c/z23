@@ -609,7 +609,7 @@ else ifneq ($(filter build-only,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := build-only
 else ifneq ($(filter zclassic23 z23 z23-package-verify zclassic23-package-verify z23-wiki-runtime,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := node-c23
-else ifneq ($(filter fast-compile dev-build-only dev,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter fast-compile dev-build-only dev rank-pair,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev
 else ifneq ($(filter print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES :=
@@ -2161,7 +2161,7 @@ else ifneq ($(filter build-only,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := build-only
 else ifneq ($(filter zclassic23 z23 z23-package-verify zclassic23-package-verify z23-wiki-runtime,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := node-c23
-else ifneq ($(filter fast-compile dev-build-only dev-package-verifier,$(ZCL_DEPFILE_SINGLE_GOAL)),)
+else ifneq ($(filter fast-compile dev-build-only dev-package-verifier rank-pair,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := dev
 else ifneq ($(filter dev-bin z23-dev zclassic23-dev,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := dev $(if $(ZCL_HOST_WINDOWS),,test-fast)
@@ -9538,6 +9538,46 @@ $(FLEET_GATEWAY_BIN): tools/fleet_gateway.c \
 # historical runner supplies two sealed rank lists per reviewed task; this
 # helper calls zcl_retrieval_evaluate once per ranker so metric math has one
 # implementation rather than a shell-side approximation.
+include tools/retrieval_pair_sources.mk
+RETRIEVAL_PAIR_BIN = $(BIN_DIR)/rank-pair$(ZCL_HOST_EXEEXT)
+RETRIEVAL_PAIR_CANDIDATE = $(BIN_DIR)/retrieval-pair/epochs/$(DEV_COMPILE_EPOCH)/rank-pair$(ZCL_HOST_EXEEXT)
+RETRIEVAL_PAIR_SQLITE = $(ZCL_VENDOR_LIB)/libsqlite3.a
+# Separate sectioned objects cannot alias the ordinary dev-object cache.
+# The existing dev epoch binds compiler, flags and this fixed Make policy.
+RETRIEVAL_PAIR_OBJ_DIR = $(DEV_OBJ_DIR)/retrieval-pair
+RETRIEVAL_PAIR_OBJS = $(patsubst %.c,$(RETRIEVAL_PAIR_OBJ_DIR)/%.o,$(RETRIEVAL_PAIR_SRCS))
+ifneq ($(filter dev,$(ZCL_DEPFILE_PROFILES)),)
+-include $(RETRIEVAL_PAIR_OBJS:.o=.d)
+endif
+.PHONY: rank-pair
+rank-pair: $(RETRIEVAL_PAIR_BIN)
+$(RETRIEVAL_PAIR_BIN): $(RETRIEVAL_PAIR_CANDIDATE) FORCE
+	@$(BUILD_EPOCH_PUBLISH_TOOL) "$(RETRIEVAL_PAIR_CANDIDATE)" "$@" "$(DEV_SESSION)" \
+	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
+	  "$(DEV_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(DEV_PROFILE)" \
+	  "$(DEV_EPOCH_COMPILE_FLAGS)" "$(DEV_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
+$(RETRIEVAL_PAIR_OBJ_DIR)/%.o: %.c $(OBJECT_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) $(BUILD_EPOCH_OBJECT_FORCE) | $(DEV_LEASE)
+	@mkdir -p $(dir $@)
+	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
+	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
+	  "$(DEV_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(DEV_SESSION)" -- \
+	  $(CC) $(DEV_CFLAGS) -I. -ffunction-sections -fdata-sections $(ZCL_TU_RANDOM_SEED)
+$(RETRIEVAL_PAIR_CANDIDATE): $(RETRIEVAL_PAIR_OBJS) $(BUILD_IDENTITY_STAMP) $(RETRIEVAL_PAIR_SQLITE)
+	@mkdir -p $(dir $@)
+	$(file >$(RETRIEVAL_PAIR_OBJ_DIR)/link-inputs.rsp,$(RETRIEVAL_PAIR_OBJS))
+	@set -eu; \
+	tmp="$$(mktemp "$@.link.XXXXXX")"; \
+	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	$(CC) $(filter-out -rdynamic,$(DEV_LDFLAGS)) $(ZCL_GC_SECTIONS_LDFLAG) \
+	  -o "$$tmp" "@$(RETRIEVAL_PAIR_OBJ_DIR)/link-inputs.rsp" "$(RETRIEVAL_PAIR_SQLITE)" -lm -lpthread; \
+	$(BUILD_EPOCH_SESSION_TOOL) verify "$(DEV_SESSION)" "$(DEV_LEASE)" \
+	  "$(DEV_OBJ_ROOT)" "$(BIN_DIR)/dev" "$(BUILD_EPOCH_KEEP)" \
+	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" "$(BUILD_COMPILER_ID)" \
+	  "$(DEV_COMPILE_EPOCH)" "$(DEV_PROFILE)" "$(DEV_EPOCH_COMPILE_FLAGS)" \
+	  "$(DEV_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)" "$$PPID" >/dev/null; \
+	mv -f -- "$$tmp" "$@"; \
+	trap - EXIT HUP INT TERM
+
 RETRIEVAL_EVAL_BIN = $(BIN_DIR)/retrieval-eval
 .PHONY: retrieval-eval
 retrieval-eval: $(RETRIEVAL_EVAL_BIN)

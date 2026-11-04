@@ -1085,6 +1085,7 @@ ZCL_TEST_GROUP(retrieval_profile_pair_measure)
  * fixed action, typed observation, result status, and reproduction verdict,
  * and refuses stale generations or caller-controlled evidence. */
 ZCL_TEST_GROUP(retrieval_science_adapter)
+ZCL_TEST_GROUP(retrieval_pair_entrypoint)
 /* The profile-comparison service joins that arithmetic to one exact immediate
  * SPECIALIZE edge, frozen task/source/study/preregistration/evaluator roots,
  * and each heuristic's exact proposal and observation roots. */

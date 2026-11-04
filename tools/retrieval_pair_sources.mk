@@ -1,0 +1,108 @@
+# Copyright 2026 Rhett Creighton - Apache License 2.0
+# Maintained ranking/pair closure; no node entry or test fixture builders.
+RETRIEVAL_PAIR_SRCS = \
+cognition/modules/codeindex/src/codeindex.c \
+cognition/modules/codeindex/src/codeindex_build.c \
+cognition/modules/codeindex/src/codeindex_build_store.c \
+cognition/modules/codeindex/src/codeindex_build_windows.c \
+cognition/modules/codeindex/src/codeindex_capability.c \
+cognition/modules/codeindex/src/codeindex_closure.c \
+cognition/modules/codeindex/src/codeindex_context.c \
+cognition/modules/codeindex/src/codeindex_deps.c \
+cognition/modules/codeindex/src/codeindex_emitter.c \
+cognition/modules/codeindex/src/codeindex_fetch.c \
+cognition/modules/codeindex/src/codeindex_focus.c \
+cognition/modules/codeindex/src/codeindex_fresh_memo.c \
+cognition/modules/codeindex/src/codeindex_freshness.c \
+cognition/modules/codeindex/src/codeindex_group.c \
+cognition/modules/codeindex/src/codeindex_impact.c \
+cognition/modules/codeindex/src/codeindex_incremental.c \
+cognition/modules/codeindex/src/codeindex_inventory.c \
+cognition/modules/codeindex/src/codeindex_inventory_body.c \
+cognition/modules/codeindex/src/codeindex_inventory_evidence.c \
+cognition/modules/codeindex/src/codeindex_inventory_render.c \
+cognition/modules/codeindex/src/codeindex_inventory_scan.c \
+cognition/modules/codeindex/src/codeindex_merkle.c \
+cognition/modules/codeindex/src/codeindex_merkle_decode.c \
+cognition/modules/codeindex/src/codeindex_merkle_inventory.c \
+cognition/modules/codeindex/src/codeindex_merkle_settled.c \
+cognition/modules/codeindex/src/codeindex_merkle_snapshot_windows.c \
+cognition/modules/codeindex/src/codeindex_merkle_sources.c \
+cognition/modules/codeindex/src/codeindex_owner.c \
+cognition/modules/codeindex/src/codeindex_query.c \
+cognition/modules/codeindex/src/codeindex_scan.c \
+cognition/modules/codeindex/src/codeindex_scan_doc.c \
+cognition/modules/codeindex/src/codeindex_scan_file.c \
+cognition/modules/codeindex/src/codeindex_search.c \
+cognition/modules/codeindex/src/codeindex_seed.c \
+cognition/modules/codeindex/src/codeindex_semantic_candidate.c \
+cognition/modules/codeindex/src/codeindex_source_universe.c \
+cognition/modules/codeindex/src/codeindex_spare.c \
+cognition/modules/codeindex/src/codeindex_store.c \
+cognition/modules/codeindex/src/codeindex_store_hash.c \
+cognition/modules/codeindex/src/codeindex_store_identity.c \
+cognition/modules/codeindex/src/codeindex_store_read.c \
+cognition/modules/codeindex/src/codeindex_store_schema.c \
+cognition/modules/codeindex/src/codeindex_store_shard.c \
+cognition/modules/codeindex/src/codeindex_vector_hint.c \
+cognition/modules/retrieval/src/retrieval.c \
+cognition/modules/retrieval/src/retrieval_comparison.c \
+cognition/modules/retrieval/src/retrieval_eval.c \
+cognition/modules/retrieval/src/retrieval_eval_result.c \
+cognition/modules/retrieval/src/retrieval_evaluation_batch.c \
+cognition/modules/retrieval/src/retrieval_experiment.c \
+cognition/modules/retrieval/src/retrieval_pair_observation.c \
+cognition/modules/retrieval/src/retrieval_profile.c \
+cognition/services/src/zcode_goal_context_calc_service.c \
+cognition/services/src/zcode_goal_context_service.c \
+cognition/services/src/zcode_retrieval_profile_comparison_service.c \
+cognition/services/src/zcode_retrieval_profile_evolution_service.c \
+cognition/services/src/zcode_retrieval_profile_pair_measure_service.c \
+cognition/services/src/zcode_retrieval_science_adapter_service.c \
+contexts/commons/modules/vcs/src/build_action.c \
+contexts/commons/modules/vcs/src/signed_evidence.c \
+contexts/commons/modules/vcs/src/vcs_index.c \
+contexts/commons/modules/vcs/src/vcs_manifest.c \
+contexts/commons/modules/vcs/src/vcs_object.c \
+contexts/commons/modules/vcs/src/vcs_path_policy.c \
+contexts/commons/modules/vcs/src/vcs_walk.c \
+contexts/commons/modules/vcs/src/zcode_attention_bid.c \
+contexts/commons/modules/vcs/src/zcode_benchmark_receipt.c \
+contexts/commons/modules/vcs/src/zcode_dev.c \
+contexts/commons/modules/vcs/src/zcode_science.c \
+contexts/commons/packages/zjsonp/src/zjsonp.c \
+contexts/commons/packages/zutf8/src/zutf8.c \
+engine/models/src/database_lifetime.c \
+engine/modules/hotswap/src/hotswap_service.c \
+engine/modules/kernel/src/command_registry.c \
+engine/modules/kernel/src/command_registry_path.c \
+platform/modules/base/src/cleanse.c \
+platform/modules/base/src/log_level.c \
+platform/modules/base/src/result.c \
+platform/modules/base/src/safe_alloc.c \
+platform/modules/codec/src/cursor.c \
+platform/modules/json/src/json.c \
+platform/modules/platform/src/clock.c \
+platform/modules/platform/src/directory_compat.c \
+platform/modules/platform/src/file_metadata.c \
+platform/modules/platform/src/os_proc.c \
+platform/modules/platform/src/positioned_file.c \
+platform/modules/platform/src/private_directory.c \
+platform/modules/platform/src/private_file.c \
+platform/modules/platform/src/read_mapping.c \
+platform/modules/platform/src/toolchain.c \
+platform/modules/sha3/src/sha3.c \
+platform/modules/util/src/path_util.c \
+tools/command/native_command.c \
+tools/command/native_dev_retrieval_command.c \
+tools/command/native_dev_retrieval_pair_command.c \
+tools/command/native_dev_retrieval_pair_input.c
+RETRIEVAL_PAIR_SRCS += tools/retrieval_pair_main.c \
+    tools/command/native_retrieval_cli.c tools/command/native_json_input.c \
+    cognition/services/src/agent_spend_policy.c \
+    cognition/controllers/src/agent_session_client.c \
+    cognition/services/src/agent_session_service.c \
+    contexts/wallet/controllers/src/vault_intent_common.c \
+    engine/controllers/src/rpc_client.c \
+    $(wildcard engine/modules/kernel/src/command_registry*.c)
+RETRIEVAL_PAIR_SRCS := $(sort $(RETRIEVAL_PAIR_SRCS))

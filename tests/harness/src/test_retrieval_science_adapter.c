@@ -823,6 +823,21 @@ static int rsa_case_reproduction(void)
 
 #include "test/retrieval_pair_command.h"
 
+/* Public acceptance fixture only; the standalone production path links no
+ * test builder or synthetic authority identifier. */
+bool retrieval_pair_public_fixture(const char *workspace, char root[65])
+{
+    struct rsa_fixture fixture;
+    struct json_value artifact = {0};
+    char raw[16384];
+    bool ok = rpc_fixture_artifact(&fixture, &artifact);
+    size_t length = ok ? json_write(&artifact, raw, sizeof(raw)) : 0;
+    ok = ok && length > 0 && length < sizeof(raw) &&
+        rpc_store(workspace, raw, length, root);
+    json_free(&artifact);
+    return ok;
+}
+
 int test_retrieval_science_adapter(void)
 {
     int failures = 0;
