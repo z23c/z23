@@ -1,0 +1,63 @@
+{"q":"test result cache","answers":["tests/harness/src/testcache.c"]}
+{"q":"merkle mountain range","answers":["core/modules/chain/src/mmr.c","contexts/commons/modules/vcs/src/zcode_observation_mmr.c"]}
+{"q":"quantum secure tunnel shell","answers":["tools/native_tunnel.c","platform/modules/mlkem/","tools/command/native_mesh_terminal_hub"]}
+{"q":"where is the block subsidy reward amount worked out for a given height","answers":["core/consensus/src/subsidy.c"]}
+{"q":"where do we check that a block hash meets its difficulty target","answers":["core/consensus/src/pow.c"]}
+{"q":"where do we decide whether a transaction is final yet based on its lock time","answers":["core/consensus/src/locktime.c"]}
+{"q":"where is the saved spent-output record kept so a block can be disconnected","answers":["core/modules/coins/include/coins/undo.h"]}
+{"q":"where is the set of unspent transaction outputs tracked and looked up","answers":["core/modules/coins/src/coins.c","core/modules/coins/include/coins/coins.h"]}
+{"q":"equihash solution verification","answers":["core/modules/crypto/src/equihash.c","core/consensus/src/equihash.c"]}
+{"q":"verify_script opcode dispatch loop for transaction scripts","answers":["core/consensus/src/script_interp.c"]}
+{"q":"sapling note commitment incremental merkle tree","answers":["core/modules/sapling/src/incremental_merkle_tree.c"]}
+{"q":"groth16 proof generation for sapling spends","answers":["core/modules/sapling/src/groth16_prover.c"]}
+{"q":"sighash digest computed for transparent signature checks","answers":["core/consensus/src/sighash.c"]}
+{"q":"what makes the node start faster after a restart","answers":["engine/composition/src/boot_fast_restart.c"]}
+{"q":"how does the node stop a second copy from running on the same data folder","answers":["engine/composition/src/boot_datadir_lock.c"]}
+{"q":"how does the node clean up leftover lock files after a crash","answers":["engine/composition/src/boot_stale_locks.c"]}
+{"q":"how does the node remember that it shut down cleanly","answers":["engine/composition/src/boot_shutdown_marker.c"]}
+{"q":"how does the node avoid running out of memory during sync","answers":["engine/composition/src/boot_memory_guard.c"]}
+{"q":"block index load ladder","answers":["engine/composition/src/boot_blkidx_ladder.c"]}
+{"q":"reducer frontier replay","answers":["engine/reducer/jobs/src/reducer_frontier_replay.c"]}
+{"q":"proof validate stage","answers":["engine/jobs/src/proof_validate_stage.c"]}
+{"q":"repair controller for the chain","answers":["engine/controllers/src/repair_controller.c"]}
+{"q":"boot block prefetch","answers":["engine/composition/src/boot_block_prefetch.c"]}
+{"q":"how do we publish a package to other nodes","answers":["contexts/commons/modules/vcs/src/package_swarm_node.c","contexts/commons/modules/vcs/src/package_publish.c"]}
+{"q":"how does the explorer render a block page","answers":["contexts/explorer/views/include/views/explorer_block_view.h","contexts/explorer/controllers/src/explorer_controller_block.c"]}
+{"q":"how is a registered name resolved to its hosted site","answers":["contexts/explorer/controllers/src/name_site_controller.c"]}
+{"q":"how is a plugin packed into an archive","answers":["contexts/commons/modules/plugin/src/plugin_pack.c"]}
+{"q":"how are plugin runs started as child processes","answers":["contexts/commons/modules/plugin/src/plugin_run_spawn.c"]}
+{"q":"package swarm download of content chunks","answers":["contexts/commons/modules/vcs/src/package_swarm_download.c"]}
+{"q":"build action v2 decode","answers":["contexts/commons/modules/vcs/src/build_action_v2_decode.c"]}
+{"q":"zcode DHT record store","answers":["contexts/commons/modules/vcs/include/vcs/zcode_dht_record_store.h"]}
+{"q":"clips manifest codec","answers":["contexts/clips/modules/clips_codec/src/clips_manifest.c"]}
+{"q":"fastobj carrier fetch","answers":["contexts/commons/modules/vcs/src/fastobj_carrier_fetch.c"]}
+{"q":"what decides which tests run for my change","answers":["tools/command/native_dev_verify_change_command.c","tools/command/native_dev_land_qualify.c"]}
+{"q":"how can I tell whether my branch's commits would clash when replayed onto main","answers":["tools/command/native_dev_port_table.c"]}
+{"q":"which check tells me my function has grown too tangled to maintain","answers":["tools/command/native_dev_cx_check.c"]}
+{"q":"how do I see whether a feature already exists before I write it again","answers":["tools/command/native_code_have_command.c"]}
+{"q":"how does the text search over the code index match words","answers":["tools/command/native_dev_index_search.c"]}
+{"q":"land queue train width","answers":["tools/command/native_dev_land_train.c"]}
+{"q":"lint gate all checks passed verdict","answers":["tools/command/native_dev_land_qualify.c"]}
+{"q":"one-file lab compile confined with Landlock and seccomp","answers":["tools/command/lab_build.c"]}
+{"q":"fleet tunnel job startup","answers":["tools/command/native_dev_fleet_tunnel.c","engine/composition/src/mesh_tunnel.c"]}
+{"q":"host gc sweep disposable paths","answers":["tools/command/host_gc_sweep.c"]}
+{"q":"how agents post messages to other machines","answers":["cognition/modules/session/src/fleet_board_proto.c","cognition/modules/session/include/session/fleet_board_proto.h"]}
+{"q":"how an agent that acts for the operator is kept from reading its secrets","answers":["cognition/modules/session/src/agent_confined.c","cognition/modules/session/include/session/agent_broker.h"]}
+{"q":"where raw block data is written to disk files","answers":["platform/adapters/outbound/persistence/src/block_log_file.c"]}
+{"q":"how the repository is scanned to build a searchable catalog of its functions","answers":["cognition/modules/codeindex/src/codeindex_scan.c","cognition/modules/codeindex/src/codeindex_build.c"]}
+{"q":"how addresses get a checksum so typos are caught","answers":["platform/domain/encoding/src/bech32.c"]}
+{"q":"ML-KEM-768 key encapsulation","answers":["platform/modules/mlkem/include/mlkem/mlkem.h","platform/modules/mlkem/src/mlkem.c"]}
+{"q":"ML-KEM polynomial sampling from a seed","answers":["platform/modules/mlkem/src/sample.c"]}
+{"q":"Base58 address encoding","answers":["platform/domain/encoding/src/base58.c"]}
+{"q":"ontology Horn rule evaluation","answers":["cognition/modules/ontology/src/ontology_horn_evaluator.c","cognition/modules/ontology/src/ontology_horn_rule.c"]}
+{"q":"Merkle tree over the code index","answers":["cognition/modules/codeindex/src/codeindex_merkle.c"]}
+{"q":"do we cache test group results so unchanged groups are skipped","answers":["tests/harness/src/testcache.c"]}
+{"q":"which harness code picks the test groups that need rebuilding after a change","answers":["tests/harness/src/selection_build_needs.c"]}
+{"q":"where is the code that explains why a test cache entry was hit or missed","answers":["tests/harness/src/testcache_reason.c"]}
+{"q":"shared fixture setup for accepted work acceptance tests","answers":["tests/harness/src/accepted_work_fixture.c"]}
+{"q":"Android app entry point for the Z23 node","answers":["apps/z23android/android_main.c"]}
+{"q":"device review screen that shows a ledger transaction before signing","answers":["apps/zcl-ledger/device-blue-review/src/zcl_tx_review.c"]}
+{"q":"separate account verifier that may vouch for reusing compiled objects","answers":["docs/work/separate-verifier.md"]}
+{"q":"bounded spending authority for an AI agent over digital assets per transaction and per window","answers":["docs/work/agent-spend-policy-design.md"]}
+{"q":"node that keeps running with zero maintenance and never stalls waiting on a human","answers":["docs/work/sticky-node-plan.md"]}
+{"q":"sharing compiled builds across nodes so a machine does not recompile","answers":["docs/work/WIRE_COMPILE_CACHE.md"]}

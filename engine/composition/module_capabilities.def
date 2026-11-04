@@ -731,6 +731,7 @@ ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_build.c", CAP_F
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_build_store.c", CAP_FS_READ|CAP_FS_WRITE, "assembles the deterministic in-memory generation from stable source and depfile reads")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_fresh_memo.c", CAP_FS_READ|CAP_FS_WRITE, "arms an inotify change watch over the source and build trees and reads its events to keep a process-held freshness verdict honest")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_capability.c", CAP_FS_WRITE|CAP_FS_READ, "")
+ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_capability_alias.c", CAP_NONE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_deps.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_focus.c", CAP_FS_READ|CAP_FS_WRITE, "reads recorded focus evidence and reports contextual read or parse failures through the diagnostic stream")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_emitter.c", CAP_FS_WRITE, "")

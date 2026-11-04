@@ -36,6 +36,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #define CH_CHECK(name, expr) do {                                      \
     if (expr) { printf("  code_have: %s... OK\n", (name)); }           \
@@ -504,6 +505,88 @@ static int ch_check_hermetic_fixture(struct codeindex *fx,
     return failures;
 }
 
+
+/* ── known-answer fixture: real questions, real files ──────────────────
+ *
+ * tests/fixtures/code_have/cases.jsonl holds one {"q":..,"answers":[..]} per
+ * line. A case is a hit when any of the first HAVE_TOPK results equals an
+ * answer or lies under an answer prefix. The suite passes when the hit rate
+ * reaches HAVE_MIN_HIT_PERCENT; raise the constant as the ranker improves,
+ * never lower it to admit a regression. */
+#define HAVE_CASES_PATH   "tests/fixtures/code_have/cases.jsonl"
+#define HAVE_TOPK         5
+#define HAVE_MIN_HIT_PERCENT 30 /* of all cases: 21/63 (33%) on 2026-11-04, kept 2 hits of slack for path renames; ratchet up as lanes land */
+
+static bool ch_path_answers(const char *path, const struct json_value *answers)
+{
+    for (size_t i = 0; i < json_size(answers); i++) {
+        const char *a = json_get_str(json_at(answers, i));
+        if (a && a[0] && strncmp(path, a, strlen(a)) == 0) return true;
+    }
+    return false;
+}
+
+static bool ch_case_hit(struct codeindex *ci, const char *line, size_t len,
+                        double *ms)
+{
+    struct json_value v;
+    json_init(&v);
+    bool hit = false;
+    if (json_read(&v, line, len)) {
+        const char *qtext = json_get_str(json_get(&v, "q"));
+        const struct json_value *answers = json_get(&v, "answers");
+        struct ci_capability caps[HAVE_TOPK];
+        struct ci_capability_query q;
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        int n = qtext ? codeindex_capabilities(ci, qtext, caps, HAVE_TOPK, &q)
+                      : 0;
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        *ms = (double)(t1.tv_sec - t0.tv_sec) * 1e3 +
+              (double)(t1.tv_nsec - t0.tv_nsec) / 1e6;
+        for (int i = 0; i < n && answers; i++)
+            if (ch_path_answers(caps[i].header, answers)) hit = true;
+        printf("  code_have: case %-34s %s %.0f ms (top: %s)\n",
+               qtext ? qtext : "?", hit ? "HIT " : "MISS", *ms,
+               n > 0 ? caps[0].header : "-");
+    }
+    json_free(&v);
+    return hit;
+}
+
+static int ch_check_known_answers(void)
+{
+    int failures = 0;
+    struct codeindex *ci = codeindex_open_source_view(".");
+    FILE *f = fopen(HAVE_CASES_PATH, "rb");
+    CH_CHECK("known-answer cases open", f != NULL);
+    CH_CHECK("the checkout's own index opens for the cases", ci != NULL);
+    if (!f || !ci) {
+        if (f) fclose(f);
+        if (ci) codeindex_close(ci);
+        return failures + 1;
+    }
+    char line[2048];
+    int cases = 0, hits = 0, code_cases = 0, code_hits = 0;
+    while (fgets(line, sizeof(line), f)) {
+        size_t len = strlen(line);
+        if (len < 3) continue;
+        double ms = 0;
+        bool docs = strstr(line, "\"answers\":[\"docs/") != NULL;
+        bool hit = ch_case_hit(ci, line, len, &ms);
+        cases++;
+        hits += hit ? 1 : 0;
+        if (!docs) { code_cases++; code_hits += hit ? 1 : 0; }
+    }
+    fclose(f);
+    codeindex_close(ci);
+    printf("  code_have: known-answer top-%d hit rate all %d/%d, non-docs "
+           "%d/%d\n", HAVE_TOPK, hits, cases, code_hits, code_cases);
+    CH_CHECK("known-answer top-5 hit rate meets the threshold",
+             cases > 0 && hits * 100 >= cases * HAVE_MIN_HIT_PERCENT);
+    return failures;
+}
+
 int test_code_have(void)
 {
     int failures = 0;
@@ -521,6 +604,7 @@ int test_code_have(void)
 
     /* ── 1: the real tree ──────── */
     failures += ch_check_real_tree(caps, &q);
+    failures += ch_check_known_answers();
 
     /* ── 2, 3, 6, 7: the hermetic fixture ─────────────────────────────── */
  TEST_DISCARD(system("rm -rf " HAVE_FIX));

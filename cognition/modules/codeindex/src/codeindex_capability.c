@@ -28,6 +28,7 @@
 
 #include "codeindex_priv.h"
 #include "codeindex/codeindex_capability.h"
+#include "codeindex_capability_alias.h"
 
 #include "base/serialize_le.h"
 #include "util/log_macros.h"
@@ -55,6 +56,9 @@
  * many files, outside the pool entirely. The usage count is what actually
  * separates them, so the pool has to be wide enough for it to do its job. */
 #define CI_CAP_RANK_POOL  24
+/* Cap on directory peers credited, and the size of the directory hash. */
+#define CI_CAP_DIR_PEERS_CAP 4
+#define CI_CAP_DIR_SLOTS 8192u
 
 /* Score weights. Named so the ranking is readable rather than a pile of
  * integers: a matched symbol NAME is the strongest single signal, a matched
@@ -71,6 +75,16 @@ enum {
     /* A header is an API; a .c is an implementation. The caller is deciding
      * what to REUSE, and what you reuse is the thing you can include. */
     CI_W_HEADER        = 100,
+    /* The file stem itself carries a term ("testcache" holds "test" and
+     * "cache"): the author named the file for it. */
+    CI_W_FILE_STEM     = 90,
+    /* Path or purpose locating several terms: quadratic in the count, so two
+     * terms located is worth far more than one. */
+    CI_W_WHERE_SQ      = 40,
+    /* A path/purpose locating EVERY term outranks any symbol-name pile-up:
+     * the largest score without it stays well under this. */
+    CI_W_WHOLE_COVER   = 4000,
+    CI_W_DIR_PEER      = 10,   /* per other matched anchor in the directory */
 };
 
 /* Verdict thresholds. One place, read by both the per-candidate confidence
@@ -88,6 +102,8 @@ struct cap_anchor {
     uint32_t purpose_mask;   /* stems found in the file purpose */
     uint32_t path_mask;      /* stems found in the repo path */
     uint32_t group_mask;     /* stems found in the group id */
+    uint32_t stem_mask;      /* stems found in the file basename stem */
+    int      dir_peers;      /* other matched anchors in the same directory */
     int      name_hits;
     int      doc_hits;
     int      syms_listed;
@@ -101,7 +117,17 @@ struct cap_anchor {
  * and being something nobody calls twice. Power of two, load factor 1/2. */
 #define CI_CAP_SLOTS (CI_CAP_ANCHOR_CAP * 2)
 
+/* The query terms plus their aliases. Stem i stands for base term grp[i]; the
+ * first `base` entries are the base terms themselves. */
+struct cap_stemset {
+    int           term_count;      /* all stems, aliases included */
+    int           base;            /* the query's own terms */
+    char          stems[CI_CAP_STEM_CAP][CI_CAPABILITY_TERM_MAX];
+    unsigned char grp[CI_CAP_STEM_CAP];
+};
+
 struct cap_scan {
+    struct cap_stemset ss;
     struct cap_anchor *a;
     int                n;
     int                cap;
@@ -122,6 +148,11 @@ static const char *const cap_stopwords[] = {
     "a", "an", "the", "of", "for", "to", "in", "on", "and", "or", "do",
     "does", "is", "are", "it", "that", "this", "any", "we", "have", "has",
     "already", "something", "anything", "with", "my", "our", "some", "be",
+    "where", "how", "what", "which", "when", "why", "who", "can", "could",
+    "should", "would", "there", "their", "from", "into", "out", "about",
+    "than", "then", "these", "those", "all", "not", "but", "its", "you",
+    "your", "they", "them", "was", "were", "been", "will", "tell", "whether",
+    "one", "per", "given", "keep", "kept", "get", "also", "may", "up",
     NULL,
 };
 
@@ -309,7 +340,7 @@ static bool cap_where(char *sql, size_t cap, const char *const *cols,
 }
 
 static void cap_bind_patterns(sqlite3_stmt *stmt,
-                              const struct ci_capability_query *q)
+                              const struct cap_stemset *q)
 {
     for (int t = 0; t < q->term_count; t++) {
         char pattern[2 * CI_CAPABILITY_TERM_MAX + 3];
@@ -330,7 +361,7 @@ static void cap_bind_patterns(sqlite3_stmt *stmt,
 
 /* Which query terms the name (name mask) or, failing that, the doc and
  * signature (doc mask) contain. */
-static void cap_term_masks(const struct ci_capability_query *q,
+static void cap_term_masks(const struct cap_stemset *q,
                            const char *name, const char *doc, const char *sig,
                            uint32_t *nm, uint32_t *dm)
 {
@@ -374,7 +405,7 @@ static void cap_symbol_row(struct cap_scan *s, struct ci_capability_query *q,
     if (!a->group[0] && grp) ci_cpy(a->group, sizeof(a->group), grp);
 
     uint32_t nm = 0, dm = 0;
-    cap_term_masks(q, name, doc, sig, &nm, &dm);
+    cap_term_masks(&s->ss, name, doc, sig, &nm, &dm);
     if (nm) {
         cap_record_name_hit(a, name, nm);
     } else if (dm) {
@@ -456,7 +487,7 @@ static bool cap_ascii_has(const char *hay, const char *needle)
 
 static bool cap_row_prefilter(const char *name, const char *doc,
                               const char *sig,
-                              const struct ci_capability_query *q)
+                              const struct cap_stemset *q)
 {
     const char *fields[3] = { name, doc, sig };
     for (int t = 0; t < q->term_count; t++) {
@@ -612,7 +643,7 @@ static bool cap_pack_apply(struct cap_scan *s, struct ci_capability_query *q,
         const char *f[CAP_PACK_FIELDS];
         if (!cap_pack_next(&p, end, f)) return false;
         /* name, def, decl, group, doc, signature, kind */
-        if (!cap_row_prefilter(f[0], f[4], f[5], q)) continue;
+        if (!cap_row_prefilter(f[0], f[4], f[5], &s->ss)) continue;
         cap_symbol_row(s, q, f[0], f[1], f[2], f[3], f[4], f[5], f[6]);
     }
     return p == end;
@@ -693,10 +724,10 @@ static bool cap_scan_symbols(struct ci_store *st, struct cap_scan *s,
     (void)root;
 #endif
     static const char *const cols[] = { "name", "doc", "signature" };
-    char where[1024];
-    if (!cap_where(where, sizeof(where), cols, 3, q->term_count))
+    char where[4096];
+    if (!cap_where(where, sizeof(where), cols, 3, s->ss.term_count))
         LOG_FAIL("codeindex", "capability symbol predicate overflow");
-    char sql[1400];
+    char sql[4400];
     if (snprintf(sql, sizeof(sql),
                  "SELECT name,def_path,decl_path,\"group\",doc,signature,kind"
                  " FROM symbols WHERE %s ORDER BY name ASC,def_path ASC",
@@ -707,7 +738,7 @@ static bool cap_scan_symbols(struct ci_store *st, struct cap_scan *s,
     sqlite3_stmt *stmt = NULL;
     if (!db || sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         LOG_FAIL("codeindex", "prepare capability symbol scan");
-    cap_bind_patterns(stmt, q);
+    cap_bind_patterns(stmt, &s->ss);
 
     int rc;
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {  // raw-sql-ok:codeindex-derived
@@ -726,14 +757,29 @@ static bool cap_scan_symbols(struct ci_store *st, struct cap_scan *s,
     return true;
 }
 
+/* Which stems the file's purpose, path, group and basename contain. */
+static void cap_file_masks(const struct cap_scan *s, struct cap_anchor *a,
+                           const char *path, const char *grp,
+                           const char *purpose)
+{
+    const char *slash = strrchr(path, '/');
+    const char *base = slash ? slash + 1 : path;
+    for (int t = 0; t < s->ss.term_count; t++) {
+        if (cap_contains(purpose, s->ss.stems[t])) a->purpose_mask |= 1u << t;
+        if (cap_contains(path, s->ss.stems[t]))    a->path_mask |= 1u << t;
+        if (cap_contains(grp, s->ss.stems[t]))     a->group_mask |= 1u << t;
+        if (cap_contains(base, s->ss.stems[t]))    a->stem_mask |= 1u << t;
+    }
+}
+
 static bool cap_scan_files(struct ci_store *st, struct cap_scan *s,
                            struct ci_capability_query *q)
 {
     static const char *const cols[] = { "path", "purpose", "\"group\"" };
-    char where[1024];
-    if (!cap_where(where, sizeof(where), cols, 3, q->term_count))
+    char where[4096];
+    if (!cap_where(where, sizeof(where), cols, 3, s->ss.term_count))
         LOG_FAIL("codeindex", "capability file predicate overflow");
-    char sql[1400];
+    char sql[4400];
     if (snprintf(sql, sizeof(sql),
                  "SELECT path,\"group\",purpose FROM files WHERE %s"
                  " ORDER BY path ASC", where) >= (int)sizeof(sql))
@@ -743,7 +789,7 @@ static bool cap_scan_files(struct ci_store *st, struct cap_scan *s,
     sqlite3_stmt *stmt = NULL;
     if (!db || sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         LOG_FAIL("codeindex", "prepare capability file scan");
-    cap_bind_patterns(stmt, q);
+    cap_bind_patterns(stmt, &s->ss);
 
     int rc;
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {  // raw-sql-ok:codeindex-derived
@@ -755,11 +801,7 @@ static bool cap_scan_files(struct ci_store *st, struct cap_scan *s,
         struct cap_anchor *a = cap_anchor_for(s, path);
         if (!a) continue;
         if (!a->group[0] && grp) ci_cpy(a->group, sizeof(a->group), grp);
-        for (int t = 0; t < q->term_count; t++) {
-            if (cap_contains(purpose, q->stems[t])) a->purpose_mask |= 1u << t;
-            if (cap_contains(path, q->stems[t]))    a->path_mask |= 1u << t;
-            if (cap_contains(grp, q->stems[t]))     a->group_mask |= 1u << t;
-        }
+        cap_file_masks(s, a, path, grp, purpose);
     }
     bool ok = rc == SQLITE_DONE;
     sqlite3_finalize(stmt);
@@ -777,23 +819,23 @@ static bool cap_scan_files(struct ci_store *st, struct cap_scan *s,
  * The anchor is excluded from its own count. A header that declares a symbol
  * and a .c that defines it are different files, so a definition site is not
  * counted as a use of the header — only real callers are. */
-static bool cap_usage(struct ci_store *st, const struct ci_capability_query *q,
+static bool cap_usage(struct ci_store *st, const struct cap_stemset *q,
                       const char *anchor, bool name_matched,
                       int *out_files, char *example, size_t example_cap)
 {
     *out_files = 0;
     if (example && example_cap) example[0] = '\0';
 
-    char names[1024] = "";
+    char names[1500] = "";
     if (name_matched) {
         static const char *const cols[] = { "name" };
-        char w[900];
+        char w[1400];
         if (!cap_where(w, sizeof(w), cols, 1, q->term_count))
             LOG_FAIL("codeindex", "capability usage predicate overflow");
         if (snprintf(names, sizeof(names), " AND (%s)", w) >= (int)sizeof(names))
             LOG_FAIL("codeindex", "capability usage predicate overflow");
     }
-    char sql[1600];
+    char sql[2400];
     /* ?%d is the anchor: bound after the stems so the stem indices stay
      * 1..term_count in every statement this file builds. */
     int anchor_idx = q->term_count + 1;
@@ -840,23 +882,81 @@ static bool cap_is_header(const char *path)
     return n >= 2 && path[n - 2] == '.' && path[n - 1] == 'h';
 }
 
-static int cap_score(const struct cap_anchor *a)
+/* Base-term groups covered by a mask over the stem set. An alias hit covers
+ * the term it stands for. */
+static uint32_t cap_groups(const struct cap_stemset *ss, uint32_t mask)
 {
+    uint32_t r = 0;
+    for (int i = 0; i < ss->term_count; i++)
+        if (mask & (1u << i)) r |= 1u << ss->grp[i];
+    return r;
+}
+
+/* Every term located in the file's path or purpose: the file is ABOUT the
+ * question, not merely holding symbols that echo it. */
+static bool cap_whole_cover(const struct cap_scan *s,
+                            const struct cap_anchor *a)
+{
+    uint32_t full = (1u << s->ss.base) - 1u;
+    return s->ss.base >= 2 &&
+           (cap_groups(&s->ss, a->path_mask | a->purpose_mask) & full) == full;
+}
+
+static int cap_score(const struct cap_scan *s, const struct cap_anchor *a)
+{
+    const struct cap_stemset *ss = &s->ss;
     int name = a->name_hits * CI_W_SYM_NAME;
     if (name > CI_W_SYM_NAME_CAP) name = CI_W_SYM_NAME_CAP;
     int doc = a->doc_hits * CI_W_SYM_DOC;
     if (doc > CI_W_SYM_DOC_CAP) doc = CI_W_SYM_DOC_CAP;
-    return name + doc +
-           cap_popcount(a->purpose_mask) * CI_W_FILE_PURPOSE +
-           cap_popcount(a->path_mask) * CI_W_FILE_PATH +
-           cap_popcount(a->group_mask) * CI_W_FILE_GROUP +
+    int where = cap_popcount(cap_groups(ss, a->path_mask | a->purpose_mask));
+    int peers = a->dir_peers > CI_CAP_DIR_PEERS_CAP ? CI_CAP_DIR_PEERS_CAP
+                                                    : a->dir_peers;
+    int sc = name + doc +
+           cap_popcount(cap_groups(ss, a->purpose_mask)) * CI_W_FILE_PURPOSE +
+           cap_popcount(cap_groups(ss, a->path_mask)) * CI_W_FILE_PATH +
+           cap_popcount(cap_groups(ss, a->group_mask)) * CI_W_FILE_GROUP +
+           cap_popcount(cap_groups(ss, a->stem_mask)) * CI_W_FILE_STEM +
+           (ss->base >= 2 ? where * where * CI_W_WHERE_SQ : 0) +
+           peers * CI_W_DIR_PEER +
            (cap_is_header(a->path) ? CI_W_HEADER : 0);
+    if (cap_whole_cover(s, a)) sc += CI_W_WHOLE_COVER;
+    return sc;
 }
 
-static int cap_terms_matched(const struct cap_anchor *a)
+static int cap_terms_matched(const struct cap_scan *s,
+                             const struct cap_anchor *a)
 {
-    return cap_popcount(a->name_mask | a->doc_mask | a->purpose_mask |
-                        a->path_mask | a->group_mask);
+    return cap_popcount(cap_groups(&s->ss,
+                        a->name_mask | a->doc_mask | a->purpose_mask |
+                        a->path_mask | a->group_mask));
+}
+
+/* Directory credit: how many OTHER anchors in this anchor's directory matched
+ * the question. A module whose files all light up is a better answer than a
+ * lone file that happens to echo a word. Keyed by a directory hash; a rare
+ * collision only shares a little credit, it never drops a candidate. */
+static uint32_t cap_dir_key(const char *path)
+{
+    const char *slash = strrchr(path, '/');
+    size_t n = slash ? (size_t)(slash - path) : 0;
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < n; i++) { h ^= (unsigned char)path[i]; h *= 16777619u; }
+    return h & (CI_CAP_DIR_SLOTS - 1u);
+}
+
+static void cap_dir_credit(struct cap_scan *s)
+{
+    uint16_t counts[CI_CAP_DIR_SLOTS] = { 0 };
+    for (int i = 0; i < s->n; i++)
+        if (cap_terms_matched(s, &s->a[i]) > 0) {
+            uint16_t *c = &counts[cap_dir_key(s->a[i].path)];
+            if (*c < UINT16_MAX) (*c)++;
+        }
+    for (int i = 0; i < s->n; i++) {
+        int c = counts[cap_dir_key(s->a[i].path)];
+        s->a[i].dir_peers = c > 0 ? c - 1 : 0;
+    }
 }
 
 /* File stem: basename minus its extension. */
@@ -935,6 +1035,7 @@ static bool cap_scan_run(struct codeindex *ci, struct cap_scan *s,
     ci_store_lock(ci->store);
     bool ok = cap_scan_symbols(ci->store, s, q, ci->root) &&
               cap_scan_files(ci->store, s, q);
+    if (ok) cap_dir_credit(s);
     ci_store_unlock(ci->store);
     free(s->slot);
     s->slot = NULL;
@@ -951,7 +1052,7 @@ static void cap_pool_insert(const struct cap_scan *s, int *pool_idx,
     int at = *pool_n;
     while (at > 0) {
         int prev = pool_idx[at - 1];
-        int psc = cap_score(&s->a[prev]);
+        int psc = cap_score(s, &s->a[prev]);
         if (psc > sc ||
             (psc == sc && strcmp(s->a[prev].path, s->a[i].path) < 0))
             break;
@@ -968,8 +1069,8 @@ static void cap_admit_pass(const struct cap_scan *s, int need,
                            int *pool_idx, int *pool_n)
 {
     for (int i = 0; i < s->n; i++) {
-        if (cap_terms_matched(&s->a[i]) < need) continue;
-        int sc = cap_score(&s->a[i]);
+        if (cap_terms_matched(s, &s->a[i]) < need) continue;
+        int sc = cap_score(s, &s->a[i]);
         if (sc <= 0) continue;
         cap_pool_insert(s, pool_idx, pool_n, i, sc);
     }
@@ -978,25 +1079,25 @@ static void cap_admit_pass(const struct cap_scan *s, int need,
 static int cap_admit(const struct cap_scan *s, struct ci_capability_query *q,
                      int *pool_idx)
 {
-    /* Admission. Every stem must be matched. Only if that is empty do we drop
-     * to n-1, and then only for a multi-term query — a one-term query that
-     * matched nothing has nothing to relax to, and relaxing it would return
-     * the whole tree. */
+    /* Admission. Every term must be matched. Only if that is empty do we
+     * relax one term at a time, down to half the question (rounded up), and
+     * then only for a multi-term query: a one-term query that matched nothing
+     * has nothing to relax to, and relaxing it would return the whole tree.
+     * A relaxed answer is flagged and can never reach high confidence. A
+     * spoken-language question carries words no file shares, so n-1 alone
+     * answers almost none of them. */
+    int floor_need = (q->term_count + 1) / 2;
     int need = q->term_count;
     int pool_n = 0;
-    for (int round = 0; round < 2 && pool_n == 0; round++) {
-        if (round == 1) {
-            if (q->term_count < 2) break;
-            need = q->term_count - 1;
-            q->relaxed = true;
-        }
+    for (; pool_n == 0 && need >= floor_need && need >= 1; need--) {
+        if (need < q->term_count) q->relaxed = true;
         cap_admit_pass(s, need, pool_idx, &pool_n);
     }
     return pool_n;
 }
 
-static bool cap_fill_candidate(struct codeindex *ci, const struct cap_anchor *a,
-                               struct ci_capability_query *q,
+static bool cap_fill_candidate(struct codeindex *ci, const struct cap_scan *s,
+                               const struct cap_anchor *a,
                                struct ci_capability *c)
 {
     ci_cpy(c->header, sizeof(c->header), a->path);
@@ -1005,8 +1106,8 @@ static bool cap_fill_candidate(struct codeindex *ci, const struct cap_anchor *a,
     for (int k = 0; k < a->syms_listed; k++)
         ci_cpy(c->symbols[k], sizeof(c->symbols[k]), a->syms[k]);
     c->symbol_count = a->name_hits;
-    c->score = cap_score(a);
-    c->terms_matched = cap_terms_matched(a);
+    c->score = cap_score(s, a);
+    c->terms_matched = cap_terms_matched(s, a);
 
     struct ci_file f;
     bool found = false;
@@ -1018,7 +1119,7 @@ static bool cap_fill_candidate(struct codeindex *ci, const struct cap_anchor *a,
            by_name ? CI_CAPABILITY_BASIS_MATCHED
                    : CI_CAPABILITY_BASIS_FILE);
     ci_store_lock(ci->store);
-    bool uok = cap_usage(ci->store, q, c->header, by_name,
+    bool uok = cap_usage(ci->store, &s->ss, c->header, by_name,
                          &c->used_by_files, c->example_caller,
                          sizeof(c->example_caller));
     ci_store_unlock(ci->store);
@@ -1028,12 +1129,11 @@ static bool cap_fill_candidate(struct codeindex *ci, const struct cap_anchor *a,
 }
 
 static bool cap_fill_pool(struct codeindex *ci, struct cap_scan *s,
-                          struct ci_capability_query *q,
                           const int *pool_idx, int pool_n,
                           struct ci_capability *pool)
 {
     for (int i = 0; i < pool_n; i++) {
-        if (!cap_fill_candidate(ci, &s->a[pool_idx[i]], q, &pool[i])) {
+        if (!cap_fill_candidate(ci, s, &s->a[pool_idx[i]], &pool[i])) {
             free(s->a);
             return false;
         }
@@ -1042,25 +1142,28 @@ static bool cap_fill_pool(struct codeindex *ci, struct cap_scan *s,
     return true;
 }
 
+/* Ranking order after usage is known: terms answered, then whether the path or
+ * purpose covers the whole question, then how load-bearing the file is, then
+ * the cheap score, then path for determinism. Returns <0 when `p` goes first. */
+static int cap_order(const struct ci_capability *p,
+                     const struct ci_capability *k)
+{
+    if (p->terms_matched != k->terms_matched)
+        return p->terms_matched > k->terms_matched ? -1 : 1;
+    bool ps = p->score >= CI_W_WHOLE_COVER, ks = k->score >= CI_W_WHOLE_COVER;
+    if (ps != ks) return ps ? -1 : 1;
+    if (p->used_by_files != k->used_by_files)
+        return p->used_by_files > k->used_by_files ? -1 : 1;
+    if (p->score != k->score) return p->score > k->score ? -1 : 1;
+    return strcmp(p->header, k->header);
+}
+
 static void cap_rerank(struct ci_capability *pool, int pool_n)
 {
-    /* Re-rank with usage in hand: terms first (a candidate that answered more
-     * of the question wins), then how load-bearing it is, then the cheap
-     * score, then path for determinism. */
     for (int i = 1; i < pool_n; i++) {
         struct ci_capability key = pool[i];
         int j = i - 1;
-        while (j >= 0) {
-            const struct ci_capability *p = &pool[j];
-            bool p_first =
-                p->terms_matched > key.terms_matched ||
-                (p->terms_matched == key.terms_matched &&
-                 (p->used_by_files > key.used_by_files ||
-                  (p->used_by_files == key.used_by_files &&
-                   (p->score > key.score ||
-                    (p->score == key.score &&
-                     strcmp(p->header, key.header) <= 0)))));
-            if (p_first) break;
+        while (j >= 0 && cap_order(&pool[j], &key) > 0) {
             pool[j + 1] = pool[j];
             j--;
         }
@@ -1079,6 +1182,9 @@ int codeindex_capabilities(struct codeindex *ci, const char *text,
         return 0;   /* nothing searchable survived stopword/length filtering */
 
     struct cap_scan s = { 0 };
+    s.ss.base = q->term_count;
+    s.ss.term_count = ci_cap_alias_expand(q->stems, q->term_count,
+                                          s.ss.stems, s.ss.grp);
     if (!cap_scan_alloc(&s))
         LOG_ERR("codeindex", "alloc capability anchors");
     if (!cap_scan_run(ci, &s, q))
@@ -1091,7 +1197,7 @@ int codeindex_capabilities(struct codeindex *ci, const char *text,
     /* Materialise the pool, then buy the usage count for it. */
     struct ci_capability pool[CI_CAP_RANK_POOL];
     memset(pool, 0, sizeof(pool));
-    if (!cap_fill_pool(ci, &s, q, pool_idx, pool_n, pool))
+    if (!cap_fill_pool(ci, &s, pool_idx, pool_n, pool))
         LOG_ERR("codeindex", "capability usage failed");
 
     cap_rerank(pool, pool_n);
