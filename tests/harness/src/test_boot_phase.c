@@ -27,17 +27,78 @@
 #include <string.h>
 #include <signal.h>
 #include <errno.h>
+#include <unistd.h>
+#include <fcntl.h>
 #if !defined(_WIN32)
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#endif
+
+#if !defined(_WIN32)
+void boot_test_params_boundary(struct boot_svc_ctx *svc, const struct app_context *ctx,
+                               bool verifier_ready, bool phgr_ready);
+
+struct bp_params_barrier {
+    int ready[2], release[2], returned[2];
+    struct boot_svc_ctx svc;
+    struct app_context ctx;
+    _Atomic bool loaded;
+};
+
+static void *bp_params_worker(void *arg)
+{
+    struct bp_params_barrier *b = arg;
+    char byte = 'r';
+    if (write(b->ready[1], &byte, 1) != 1) return NULL;
+    if (read(b->release[0], &byte, 1) != 1) return NULL;
+    return NULL;
+}
+
+static void *bp_params_caller(void *arg)
+{
+    struct bp_params_barrier *b = arg;
+    boot_test_params_boundary(&b->svc, &b->ctx, true, true);
+    char byte = 'd';
+    if (write(b->returned[1], &byte, 1) != 1) return NULL;
+    return NULL;
+}
+
+static int bp_test_params_ready_boundary(void)
+{
+    int failures = 0;
+    struct bp_params_barrier b = {0};
+    b.ctx.params_dir = "fixture";
+    atomic_init(&b.loaded, true);
+    b.svc.params_loaded = &b.loaded;
+    if (pipe(b.ready) || pipe(b.release) || pipe(b.returned)) return 1;
+    pthread_t worker, caller;
+    if (pthread_create(&worker, NULL, bp_params_worker, &b) != 0) return 1;
+    b.svc.params_thread = worker;
+    b.svc.params_thread_started = true;
+    char byte;
+    if (read(b.ready[0], &byte, 1) != 1 ||
+        pthread_create(&caller, NULL, bp_params_caller, &b) != 0) {
+        (void)write(b.release[1], "x", 1);
+        pthread_join(worker, NULL);
+        return 1;
+    }
+    struct pollfd pfd = { .fd = b.returned[0], .events = POLLIN };
+    int before_release = poll(&pfd, 1, 2000); /* real-clock: bounded wait for an actual blocked pthread; no fake scheduler seam */
+    if (write(b.release[1], "x", 1) != 1) failures++;
+    pthread_join(caller, NULL);
+    if (b.svc.params_thread_started) pthread_join(worker, NULL);
+    if (before_release != 1) failures++;
+    close(b.ready[0]); close(b.ready[1]); close(b.release[0]); close(b.release[1]);
+    close(b.returned[0]); close(b.returned[1]);
+    return failures;
+}
 #endif
 #if defined(__linux__)
 #include <sys/vfs.h>
 #include <linux/magic.h>
 #endif
-#include <unistd.h>
-#include <fcntl.h>
 
 bool boot_wallet_rebuild_probe(sqlite3 *db, bool *has_utxos,
                                bool *has_keys);
@@ -1034,6 +1095,10 @@ int test_boot_phase(void)
     failures += bp_test_boot_stage_names();
     failures += bp_test_stage_predicates_and_steps();
     failures += bp_test_params_thread_failure_gating();
+#if !defined(_WIN32)
+    BP_CHECK("published verifier does not wait for blocked prover worker",
+             bp_test_params_ready_boundary() == 0);
+#endif
 
     /* ── export mode must not park on a permanent blocker ─────────
      * Shutdown is already requested so a missing export-mode branch cannot

@@ -778,6 +778,17 @@ static void boot_wait_params_thread(struct boot_svc_ctx *svc, const struct app_c
     }
 }
 
+#ifdef ZCL_TESTING
+/* Test seam invokes the current boundary; readiness arguments are introduced
+ * by the regression before the boundary learns to use them. */
+void boot_test_params_boundary(struct boot_svc_ctx *svc, const struct app_context *ctx,
+                               bool verifier_ready, bool phgr_ready)
+{
+    (void)verifier_ready; (void)phgr_ready;
+    boot_wait_params_thread(svc, ctx);
+}
+#endif
+
 static bool boot_fs_sync_timed(const struct app_context *ctx, const char *host, uint8_t *utxo_root)
 {
     int64_t t0 = (int64_t)platform_time_wall_time_t();
