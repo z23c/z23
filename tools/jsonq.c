@@ -630,29 +630,37 @@ static bool valid_document(const char *text, size_t len)
 
 static int cmd_unwrap(const char *text, size_t len)
 {
-    if (parse_path("error") != 0)
+    zjsonp parser;
+    zjsonp_event selected;
+    zjsonp_init(&parser, text, len);
+    if (zjsonp_next(&parser, &selected) != ZJRP_OK)
         return 2;
-    int has_err = walk(text, len, CMD_HAS, NULL);
-    if (has_err == 2)
-        return 2;
-    if (has_err == 0) {
-        if (parse_path("error") != 0)
-            return 2;
-        if (walk(text, len, CMD_EQ, "null") != 0) {
-            fputs("jsonq: json-rpc error\n", stderr);
-            return 2;
+    zjsonp selected_parser = parser;
+    bool have_result = false, have_error = false;
+    zjsonp_event event;
+    while (zjsonp_next(&parser, &event) == ZJRP_OK) {
+        if (event.kind != ZJRP_KEY || parser.depth != 1)
+            continue;
+        char key[6];
+        size_t size = zjsonp_str_decode(text, &event, key, sizeof key);
+        if (size == 5 && memcmp(key, "error", 5) == 0) {
+            if (have_error || zjsonp_next(&parser, &event) != ZJRP_OK ||
+                event.kind != ZJRP_NULL) {
+                fputs("jsonq: invalid json-rpc error member\n", stderr);
+                return 2;
+            }
+            have_error = true;
+        } else if (size == 6 && memcmp(key, "result", 6) == 0) {
+            if (have_result || zjsonp_next(&parser, &selected) != ZJRP_OK) {
+                fputs("jsonq: ambiguous json-rpc result\n", stderr);
+                return 2;
+            }
+            selected_parser = parser;
+            have_result = true;
         }
     }
-    if (parse_path("result") != 0)
-        return 2;
-    if (walk(text, len, CMD_HAS, NULL) == 0) {
-        if (parse_path("result") != 0)
-            return 2;
-        return walk(text, len, CMD_GET, NULL);
-    }
-    if (parse_path("") != 0)
-        return 2;
-    return walk(text, len, CMD_RAW, NULL);
+    return finish_matched_value(&selected_parser, text, &selected,
+                                is_open_event(&selected), have_result ? CMD_GET : CMD_RAW, NULL);
 }
 
 static bool read_document(size_t *len)

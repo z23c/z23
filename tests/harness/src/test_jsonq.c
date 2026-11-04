@@ -207,6 +207,19 @@ static int test_jsonq_unwrap(void)
                          (const char *const[]){JSONQ_FIXTURE_BIN, "unwrap", NULL}, buf, sizeof(buf)) == 2);
         ASSERT(jsonq_fixture_run("{\"result\":[1,2]}", (const char *const[]){JSONQ_FIXTURE_BIN, "unwrap", NULL}, buf, sizeof(buf)) == 0);
         ASSERT(strcmp(buf, "[1,2]" JSONQ_FIXTURE_EOL "") == 0);
+        const char *invalid[] = {
+            "{\"error\":null,\"result\":1,\"\\u0065rror\":{\"code\":-1}}",
+            "{\"result\":1,\"\\u0072esult\":2}",
+            "{\"result\":1,\"error\":\"null\"}"
+        };
+        for (size_t index = 0; index < sizeof invalid / sizeof invalid[0]; index++) {
+            ASSERT(jsonq_fixture_run(invalid[index],
+                   (const char *const[]){JSONQ_FIXTURE_BIN, "unwrap", NULL}, buf, sizeof(buf)) == 2);
+            ASSERT(buf[0] == '\0');
+        }
+        ASSERT(jsonq_fixture_run("{\"result\":{\"result\":2,\"error\":1},\"error\":null}",
+               (const char *const[]){JSONQ_FIXTURE_BIN, "unwrap", NULL}, buf, sizeof(buf)) == 0);
+        ASSERT_STR_EQ(buf, "{\"result\":2,\"error\":1}" JSONQ_FIXTURE_EOL);
         PASS();
     } _test_next:;
     return failures;
