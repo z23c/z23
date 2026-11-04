@@ -2821,6 +2821,29 @@ static int tc_excerpt_evidence_case(void)
              !file_contains(cap, "L15:") && !file_contains(cap, "L30:"));
     TC_CHECK("agent verify retains the prefixed evidence excerpt",
              tc_excerpt_agent_verify(cap, log));
+    ev = fopen(log, "w");
+    if (ev) {
+        fputs("FAIL at x.c:1\n--- evidence x.c:1 ---\nHEAD-BEGIN", ev);
+        for (int i = 0; i < 1000; i++) fputc('x', ev);
+        fputs("LONG-TAIL\n", ev);
+        for (int i = 0; i < 100; i++) fprintf(ev, "note %d\n", i);
+        fputs("TAIL-END\n--- end evidence ---\nFAIL at y.c:2\n"
+              "--- evidence y.c:2 ---\nSECOND-BLOCK\n--- end evidence ---\n", ev);
+        for (int i = 0; i < 20; i++) fputs("ordinary\n", ev);
+        fclose(ev);
+    }
+    out = fopen(cap, "w");
+    if (out) {
+        (void)testcache_print_log_excerpt(out, log, "  first| ", 5, 3);
+        fclose(out);
+    }
+    TC_CHECK("long multi-line and multiple evidence frames survive excerpt",
+             file_contains(cap, "HEAD-BEGIN") && file_contains(cap, "LONG-TAIL") &&
+             file_contains(cap, "TAIL-END") && file_contains(cap, "SECOND-BLOCK"));
+    TC_CHECK("agent verify keeps complete large prefixed frames",
+             tc_shell("make --no-print-directory agent-verify-evidence LOG=%s > %s", cap, log) &&
+             file_contains(log, "LONG-TAIL") && file_contains(log, "TAIL-END") &&
+             file_contains(log, "SECOND-BLOCK") && file_contains(log, "--- end evidence ---"));
     (void)unlink(log);
     (void)unlink(cap);
     return failures;
