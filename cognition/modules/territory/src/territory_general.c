@@ -8,7 +8,9 @@
  * The set of lint gates is read from the LINT_ROW rows of tools/lint/lintc/gate_commands.def
  * (the driver's command table), because that is the one place a gate must be wired to run at
  * all: a gate not in that table does not exist. From each row we take the
- * gate's name and the script paths it invokes. Each script is then read once
+ * gate's name and the script paths it invokes. Native lint handlers resolve
+ * through gates.def and the supplied source index; unresolved handlers stay
+ * unknown. Each identified source is then read once
  * and scanned for path-like tokens; a token that starts with a territory's
  * name is that gate NAMING that territory. Scripts also name their own
  * baseline ledgers (BASELINE=... tools/...baseline...txt), and those ledgers
@@ -280,6 +282,53 @@ static void tg_line_scripts(const char *line, size_t len,
     }
 }
 
+static bool tg_name_byte(char c);
+
+/* Resolve a gate through its registered handler and the source index.  The
+ * command name is never converted into a guessed filename. Duplicate or
+ * unreadable registry rows leave the gate's native source unknown. */
+static bool tg_registered_handler(const char *registry, const char *gate,
+                                  char *out, size_t cap)
+{
+    char name[128], base[128], row[512];
+    unsigned matches = 0;
+    for (const char *p = registry; p && *p;) {
+        size_t len = strcspn(p, "\n");
+        if (len < sizeof(row)) {
+            memcpy(row, p, len); row[len] = '\0';
+            if (sscanf(row, "LINT_GATE(\"%127[^\"]\", %127[a-zA-Z0-9_]", name, base) == 2 &&
+                strcmp(name, gate) == 0) {
+                if (snprintf(out, cap, "%s_run", base) >= (int)cap) return false;
+                matches++;
+            }
+        }
+        p += len;
+        if (*p == '\n') p++;
+    }
+    return matches == 1;
+}
+
+static void tg_native_sources(const char *line, size_t len, const char *registry,
+                              struct codeindex *ci, struct tg_path_list *out)
+{
+    static const char prefix[] = "z23-lint ";
+    if (!registry || !ci) return;
+    for (size_t i = 0; i + sizeof(prefix) - 1 < len; i++) {
+        if (memcmp(line + i, prefix, sizeof(prefix) - 1) != 0) continue;
+        size_t start = i + sizeof(prefix) - 1, end = start;
+        while (end < len && tg_name_byte(line[end])) end++;
+        if (end == start || end - start >= TERRITORY_GATE_NAME_MAX) continue;
+        char gate[TERRITORY_GATE_NAME_MAX], handler[160];
+        memcpy(gate, line + start, end - start); gate[end - start] = '\0';
+        struct ci_symbol sym;
+        bool found = false;
+        if (tg_registered_handler(registry, gate, handler, sizeof(handler)) &&
+            codeindex_symbol(ci, handler, &sym, &found) && found && sym.kind == 'T' &&
+            strncmp(sym.def_path, "tools/lint/lintc/", 17) == 0)
+            tg_path_push(out, sym.def_path, strlen(sym.def_path));
+    }
+}
+
 /* A byte of a gate name: lowercase letter, digit, or '-'. */
 static bool tg_name_byte(char c)
 {
@@ -357,7 +406,7 @@ static void tg_gate_count_rows(const char *root, struct territory_gates *g,
     }
 }
 
-/* Pass 2, per gate: read each script it runs, record which territories its
+/* Pass 2, per gate: read each identified source, record which territories its
  * text names, and remember any baseline ledger it points at. */
 static void tg_gate_scan_scripts(const char *root, struct territory_gates *g,
                                  struct tg_gate *gate,
@@ -383,6 +432,7 @@ static void tg_gate_scan_scripts(const char *root, struct territory_gates *g,
  * False only when the new gate's scope vectors cannot be allocated. */
 static bool tg_gate_add_line(const char *root, struct territory_gates *g,
                              const char *line, size_t len,
+                             const char *registry, struct codeindex *ci,
                              struct tg_path_list *scripts,
                              struct tg_path_list *ledgers)
 {
@@ -394,6 +444,7 @@ static bool tg_gate_add_line(const char *root, struct territory_gates *g,
     if (!tg_gate_alloc_vectors(gate, g->terr_count)) return false;
     scripts->count = 0;
     tg_line_scripts(line, len, scripts);
+    tg_native_sources(line, len, registry, ci, scripts);
     tg_gate_scan_scripts(root, g, gate, scripts, ledgers);
     g->count++;
     return true;
@@ -403,7 +454,6 @@ struct territory_gates *territory_gates_open(
     const char *root, struct codeindex *ci,
     const char (*names)[TERRITORY_NAME_MAX], int count)
 {
-    (void)ci;
     uint64_t t0 = tg_now_us();
     struct territory_gates *g = zcl_calloc(1, sizeof(*g), "territory_gates");
     if (!g) LOG_NULL("territory", "gate table");
@@ -430,13 +480,14 @@ struct territory_gates *territory_gates_open(
         return g;
     }
     g->wiring_found = true;
+    char *registry = tg_slurp(root, "tools/lint/lintc/gates.def", TG_LINT_MAX, NULL);
 
     struct tg_path_list *scripts =
         zcl_calloc(1, sizeof(*scripts), "tg_scripts");
     struct tg_path_list *ledgers =
         zcl_calloc(1, sizeof(*ledgers), "tg_ledgers");
     if (!scripts || !ledgers) {
-        free(scripts); free(ledgers); free(lint);
+        free(scripts); free(ledgers); free(registry); free(lint);
         territory_gates_free(g);
         LOG_NULL("territory", "gate path lists");
     }
@@ -446,9 +497,9 @@ struct territory_gates *territory_gates_open(
     while (pos < lint_len && g->count < TERRITORY_MAX_GATES) {
         const char *nl = memchr(lint + pos, '\n', lint_len - pos);
         size_t line_len = nl ? (size_t)(nl - (lint + pos)) : lint_len - pos;
-        if (!tg_gate_add_line(root, g, lint + pos, line_len, scripts,
+        if (!tg_gate_add_line(root, g, lint + pos, line_len, registry, ci, scripts,
                               ledgers)) {
-            free(scripts); free(ledgers); free(lint);
+            free(scripts); free(ledgers); free(registry); free(lint);
             territory_gates_free(g);
             LOG_NULL("territory", "gate scope vectors");
         }
@@ -458,6 +509,7 @@ struct territory_gates *territory_gates_open(
 
     free(scripts);
     free(ledgers);
+    free(registry);
     free(lint);
     g->build_us = tg_now_us() - t0;
     return g;

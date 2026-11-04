@@ -288,8 +288,9 @@ void territory_report_free(struct territory_report *r);
 /* ── refuses: the gates that bind a territory ────────────────────────────
  *
  * Derived from tools/lint/lintc/gate_commands.def LINT_ROW table — the one
- * place a gate must be wired to run — plus each gate script's own text and
- * the baseline ledgers that name files.
+ * place a gate must be wired to run — plus each gate script's own text or
+ * registered native handler's indexed source, and baseline ledgers that name
+ * files. Unresolved native handlers remain unknown.
  *
  * Exactly ONE of the three buckets is a positive fact:
  *   BINDS         the gate's script text names a path under this territory, or
@@ -328,7 +329,8 @@ struct territory_refusal {
  * pay it 64 times. */
 struct territory_gates;
 
-/* `root` is the checkout root; `names`/`count` are the territories to
+/* `root` is the checkout root; `ci` is its source index (or NULL when native
+ * handler scope is unavailable); `names`/`count` are the territories to
  * attribute paths to (territory_list()'s output — no second list). Returns
  * NULL only on allocation failure; a missing or unreadable gate_commands.def yields
  * a table whose wiring_found() is false and whose total is 0, so a caller
