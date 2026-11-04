@@ -199,6 +199,36 @@ const char *platform_toolchain_commons_feature_macros(void)
 #endif
 }
 
+const struct platform_toolchain_commons_gc *platform_toolchain_commons_gc(void)
+{
+#if defined(__linux__)
+    static const struct platform_toolchain_commons_gc policy = {
+        .compile_flags = {"-ffunction-sections", "-fdata-sections"},
+        .compile_count = 2u, .link_flag = "-Wl,--gc-sections",
+        .identity = "gc=elf2",
+        /* Explicit bounds prevent GNU start/stop synthesis from rooting all
+         * LLVM ASan records. Each record remains associated with its global's
+         * COMDAT group. Other registration sections retain normal semantics. */
+        .sanitizer_metadata_script =
+            "SECTIONS { asan_globals : {\n"
+            "__start_asan_globals = .;\n"
+            "*(asan_globals)\n"
+            "__stop_asan_globals = .;\n"
+            "} }\nINSERT AFTER .data;\n",
+    };
+    return &policy;
+#elif defined(__APPLE__)
+    static const struct platform_toolchain_commons_gc policy = {
+        .compile_flags = {"-fno-common", NULL},
+        .compile_count = 1u, .link_flag = "-Wl,-dead_strip",
+        .identity = "gc=macho1",
+    };
+    return &policy;
+#else
+    return NULL;
+#endif
+}
+
 const char *platform_toolchain_commons_flags_quick(void)
 {
     static _Thread_local char buf[256];
@@ -210,19 +240,21 @@ const char *platform_toolchain_commons_flags_quick(void)
             deployment, sizeof(deployment)))
         deployment[0] = '\0';
 #if defined(__linux__)
-    /* Preserve the historical Linux V2 flags string byte-for-byte so existing
-     * receipts and gates keep the same identity. */
+    /* The policy marker binds the fixed compile/link change without widening
+     * the receipt's 255-byte flags field or changing its wire grammar. */
     (void)snprintf(buf, sizeof(buf),
                    "-std=c23 -O1 -march=x86-64 -mtune=generic "
                    "-fno-omit-frame-pointer -D_POSIX_C_SOURCE=200809L "
-                   "-ffile-prefix-map=SOURCE=. -c");
+                   "-ffile-prefix-map=SOURCE=. -c;%s",
+                   platform_toolchain_commons_gc()->identity);
 #elif defined(__APPLE__)
     (void)snprintf(buf, sizeof(buf),
                    "-std=c23 -O1 %s %s "
                    "-fno-omit-frame-pointer "
                    "-D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE "
-                   "-ffile-prefix-map=SOURCE=. -c",
-                   arch[0] ? arch : "", deployment);
+                   "-ffile-prefix-map=SOURCE=. -c;%s",
+                   arch[0] ? arch : "", deployment,
+                   platform_toolchain_commons_gc()->identity);
 #else
     buf[0] = '\0';
 #endif
@@ -243,14 +275,16 @@ const char *platform_toolchain_commons_flags_standard_base(void)
     (void)snprintf(buf, sizeof(buf),
                    "-std=c23 -O1 -march=x86-64 -mtune=generic "
                    "-fno-omit-frame-pointer -D_POSIX_C_SOURCE=200809L "
-                   "-ffile-prefix-map=SOURCE=. -Wall -Wextra -Werror");
+                   "-ffile-prefix-map=SOURCE=. -Wall -Wextra -Werror;%s",
+                   platform_toolchain_commons_gc()->identity);
 #elif defined(__APPLE__)
     (void)snprintf(buf, sizeof(buf),
                    "-std=c23 -O1 %s %s "
                    "-fno-omit-frame-pointer "
                    "-D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE "
-                   "-ffile-prefix-map=SOURCE=. -Wall -Wextra -Werror",
-                   arch[0] ? arch : "", deployment);
+                   "-ffile-prefix-map=SOURCE=. -Wall -Wextra -Werror;%s",
+                   arch[0] ? arch : "", deployment,
+                   platform_toolchain_commons_gc()->identity);
 #else
     buf[0] = '\0';
 #endif

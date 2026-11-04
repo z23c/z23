@@ -72,6 +72,22 @@ bool platform_toolchain_commons_architecture_flag(char *out, size_t cap);
  * Darwin returns the same macOS minimum encoded in build receipts. */
 bool platform_toolchain_commons_deployment_flag(char *out, size_t cap);
 
+/* Closed final-executable collection policy, not recipe-supplied options.
+ * ELF needs separate input sections. Darwin already emits function/data atoms;
+ * -fno-common makes tentative data eligible too. Archives are never collected.
+ * identity versions the complete compile/link policy in existing receipts.
+ * NULL on unsupported package-builder platforms. */
+struct platform_toolchain_commons_gc {
+    const char *compile_flags[2];
+    size_t compile_count;
+    const char *link_flag;
+    const char *identity;
+    /* Fixed ELF sanitizer metadata bounds only; NULL on native-atom targets.
+     * Never a caller/recipe-supplied linker-script surface. */
+    const char *sanitizer_metadata_script;
+};
+const struct platform_toolchain_commons_gc *platform_toolchain_commons_gc(void);
+
 /* Return the archive creation flags for this platform.  GNU ar supports the
  * deterministic "D" flag; Apple ar does not, so macOS uses plain "rcs" and
  * relies on the caller to handle determinism if needed. */

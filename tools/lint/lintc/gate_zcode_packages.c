@@ -14,12 +14,21 @@
 #include <string.h>
 #include <sys/utsname.h>
 #include <unistd.h>
+#include "base/safe_alloc.h"
+#include "platform/toolchain.h"
+#include "util/spawn.h"
 #include "lintc.h"
 
 enum { ZPKG_MAX = 32, ZSRC_MAX = 512, ZMONO_MAX = 2048, ZINC_MAX = 32,
        ZSLURP = 32768, ZCAP = 256 * 1024 };
 struct zpkg_row { char name[RS_NAME]; char dir[RS_PATH]; };
 struct zpr_acc { char (*v)[RS_PATH]; int n, cap; };
+enum { ZPS_FLAGS_MAX = 16 };
+struct zps_compile_flags {
+    char architecture[128], deployment[64];
+    const char *argv[ZPS_FLAGS_MAX];
+    size_t count;
+};
 
 static const char *const k_zpkg_defs[] = {
     "engine/composition/zcode_package_registry.def",
@@ -28,8 +37,6 @@ static const char *const k_zpkg_defs[] = {
 static const char k_zpkg_defs_join[] =
     "engine/composition/zcode_package_registry.def "
     "engine/composition/zcode_c23_commons_app.def";
-static const char k_zps_profile[] = "engine/composition/include/config/c23_commons_build_profile.h";
-static const char k_zps_toolchain[] = "platform/modules/platform/src/toolchain.c";
 static const char *const k_zpr_groups[] = {
     "platform/modules/platform/src/os_sandbox_linux.c "
     "platform/modules/platform/src/os_sandbox_stub.c",
@@ -475,62 +482,43 @@ int check_zcode_package_registry_selftest(void)
     return st_ok(bad, "check_zcode_package_registry selftest: OK\n");
 }
 
-static int zps_linux_flags(const char *text, char *out, size_t cap)
+static int zps_flag_add(struct zps_compile_flags *flags, const char *arg)
 {
-    out[0] = '\0';
-    int infn = 0, collecting = 0;
-    size_t used = 0;
-    for (const char *p = text; *p; ) {
-        const char *eol = strchr(p, '\n');
-        size_t len = eol ? (size_t)(eol - p) : strlen(p);
-        char line[4096];
-        if (zpkg_copy(line, sizeof line, p, len)) return 2;
-        if (!infn)
-            infn = strstr(line, "platform_toolchain_commons_flags_quick(void)") != NULL;
-        else if (!collecting)
-            collecting = strstr(line, "#if defined(__linux__)") != NULL;
-        else if (line[0] == '#' && (strncmp(line, "#elif", 5) == 0
-                                    || strncmp(line, "#else", 5) == 0
-                                    || strncmp(line, "#endif", 6) == 0))
-            break;
-        else {
-            for (char *s = line; (s = strchr(s, '"')) != NULL; ) {
-                char *e = strchr(s + 1, '"');
-                if (!e) break;
-                size_t n = (size_t)(e - s - 1);
-                if (used + n >= cap) return ovf((int)(used + n), cap);
-                memcpy(out + used, s + 1, n); used += n; out[used] = '\0';
-                s = e + 1;
-            }
-        }
-        p = eol ? eol + 1 : p + len;
-    }
+    if (!arg || !arg[0]) return 0;
+    if (flags->count >= ZPS_FLAGS_MAX) return ovf((int)flags->count + 1, ZPS_FLAGS_MAX);
+    flags->argv[flags->count++] = arg;
     return 0;
 }
-static void zps_strip_sub(char *s, const char *needle)
-{ size_t n = strlen(needle); char *p; while ((p = strstr(s, needle))) memmove(p, p + n, strlen(p + n) + 1); }
-static int zps_quick_flags(char *out, size_t cap)
+
+static int zps_platform_flags(struct zps_compile_flags *flags)
 {
-    struct utsname u;
-    if (uname(&u) != 0) { u.sysname[0] = '\0'; u.machine[0] = '\0'; }
-    if (strcmp(u.sysname, "Darwin") == 0) {
-        const char *f = NULL;
-        if (strcmp(u.machine, "arm64") == 0 || strcmp(u.machine, "aarch64") == 0)
-            f = "-std=c23 -O1 -march=armv8-a -fno-omit-frame-pointer -D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE -ffile-prefix-map=SOURCE=. -c";
-        else if (strcmp(u.machine, "x86_64") == 0 || strcmp(u.machine, "amd64") == 0)
-            f = "-std=c23 -O1 -march=x86-64 -fno-omit-frame-pointer -D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE -ffile-prefix-map=SOURCE=. -c";
-        else
-            return fprintf(stderr, "FAIL: unsupported Darwin machine %s\n", u.machine) < 0
-                       ? die("z23-lint: write failed\n", "") : 2;
-        return ovf(snprintf(out, cap, "%s", f), cap);
-    }
-    if (strcmp(u.sysname, "Linux") == 0) {
-        char text[ZSLURP];
-        int rc = zpkg_slurp_path(k_zps_toolchain, text, sizeof text);
-        return rc ? rc : zps_linux_flags(text, out, cap);
-    }
-    return fprintf(stderr, "FAIL: unsupported host %s for standalone package gate\n", u.sysname) < 0
-               ? die("z23-lint: write failed\n", "") : 2;
+    const struct platform_toolchain_commons_gc *gc = platform_toolchain_commons_gc();
+    if (!gc || !platform_toolchain_commons_architecture_flag(
+            flags->architecture, sizeof flags->architecture) ||
+        !platform_toolchain_commons_deployment_flag(flags->deployment, sizeof flags->deployment))
+        return die("z23-lint: native Commons compile target unavailable\n", "");
+    char *save = NULL;
+    for (char *arg = strtok_r(flags->architecture, " \t", &save); arg;
+         arg = strtok_r(NULL, " \t", &save))
+        if (zps_flag_add(flags, arg)) return 2;
+    if (zps_flag_add(flags, flags->deployment) ||
+        zps_flag_add(flags, platform_toolchain_commons_feature_macros())) return 2;
+    for (size_t i = 0; i < gc->compile_count; i++)
+        if (zps_flag_add(flags, gc->compile_flags[i])) return 2;
+    return 0;
+}
+
+/* Object compilation operands only. Receipt policy/sanitizer metadata is not
+ * executable flags, and source literals are never scraped or shell-evaluated. */
+static int zps_quick_flags(struct zps_compile_flags *flags)
+{
+    memset(flags, 0, sizeof *flags);
+    static const char *const fixed[] = {
+        "-std=c23", "-O1", "-fno-omit-frame-pointer", "-D_POSIX_C_SOURCE=200809L", "-c",
+    };
+    for (size_t i = 0; i < sizeof fixed / sizeof fixed[0]; i++)
+        if (zps_flag_add(flags, fixed[i])) return 2;
+    return zps_platform_flags(flags);
 }
 static int zps_take_dep_name(const char *line, const struct zpkg_row *rows, int nr,
                              char out[][RS_PATH], int cap, int *n)
@@ -647,29 +635,44 @@ static int zps_print_errors(const char *errp)
     }
     return fin(f, line, errp, rc);
 }
-static int zps_cc(const char *cc, const char *flags, char incs[][RS_PATH], int ni,
+static int zps_exec(const char *const argv[], const char *errp, int *code)
+{
+    char *dump = zcl_malloc(ZCAP, "lint.package.compiler_diagnostics");
+    if (!dump) return die("z23-lint: compiler diagnostic allocation failed\n", "");
+    struct zcl_spawn_binary_observation ob = {0};
+    struct zcl_result result = zcl_spawn_capture_binary_merged(argv, dump, ZCAP, 60000, &ob);
+    /* The capture Result is success-only; a fully observed nonzero compiler
+     * exit is a genuine refusal, not a missing observation. */
+    if ((!result.ok && ob.exit_code == 0) || ob.exit_code < 0 ||
+        !ob.exit_observed || !ob.eof || ob.overflow || ob.timed_out) {
+        free(dump);
+        return die("z23-lint: compiler observation incomplete\n", "");
+    }
+    FILE *file = fopen(errp, "wb");
+    if (!file) { free(dump); return die("z23-lint: cannot open %s\n", errp); }
+    int failed = fwrite(dump, 1, ob.output_len, file) != ob.output_len;
+    if (fclose(file) != 0) failed = 1;
+    free(dump);
+    if (failed) return die("z23-lint: compiler diagnostic write failed: %s\n", errp);
+    *code = ob.exit_code;
+    return 0;
+}
+
+static int zps_cc(const char *cc, const struct zps_compile_flags *flags,
+                  char incs[][RS_PATH], int ni,
                   const char *src, const char *obj, const char *errp, int *code)
 {
-    char cmd[16384], q[8192];
-    if (sh_single_quote(cc, q, sizeof q)) return 2;
-    int k = snprintf(cmd, sizeof cmd, "%s %s", q, flags);
-    if (ovf(k, sizeof cmd)) return 2;
-    size_t used = (size_t)k;
-    for (int i = 0; i < ni; i++) {
-        char qi[RS_PATH + 8];
-        if (sh_single_quote(incs[i], qi, sizeof qi)) return 2;
-        k = snprintf(cmd + used, sizeof cmd - used, " %s", qi);
-        if (ovf(k, sizeof cmd - used)) return 2;
-        used += (size_t)k;
-    }
-    char qs[4096], qo[4096], qe[4096];
-    if (sh_single_quote(src, qs, sizeof qs) || sh_single_quote(obj, qo, sizeof qo)
-        || sh_single_quote(errp, qe, sizeof qe)
-        || ovf(k = snprintf(cmd + used, sizeof cmd - used, " %s -o %s 2>%s", qs, qo, qe),
-               sizeof cmd - used))
-        return 2;
-    static char dump[256];
-    return capture_cmd(cmd, dump, sizeof dump, code);
+    if (ni < 0 || ni > ZINC_MAX || flags->count > ZPS_FLAGS_MAX) return 2;
+    const char *argv[ZPS_FLAGS_MAX + ZINC_MAX + 5];
+    size_t n = 0;
+    argv[n++] = cc;
+    for (size_t i = 0; i < flags->count; i++) argv[n++] = flags->argv[i];
+    for (int i = 0; i < ni; i++) argv[n++] = incs[i];
+    argv[n++] = src;
+    argv[n++] = "-o";
+    argv[n++] = obj;
+    argv[n] = NULL;
+    return zps_exec(argv, errp, code);
 }
 static int zps_collect_dep_incs(const char *name, char deps[][RS_PATH], int nd,
                                 char incs[][RS_PATH], int *ni)
@@ -688,7 +691,7 @@ static int zps_collect_dep_incs(const char *name, char deps[][RS_PATH], int nd,
     }
     return missing ? 1 : 0;
 }
-static int zps_compile_each_src(const char *name, const char *cc, const char *flags,
+static int zps_compile_each_src(const char *name, const char *cc, const struct zps_compile_flags *flags,
                                 char incs[][RS_PATH], int ni,
                                 char srcs[][RS_PATH], int ns,
                                 const char *obj, const char *errp, int *compiled)
@@ -709,7 +712,7 @@ static int zps_compile_each_src(const char *name, const char *cc, const char *fl
     return fail;
 }
 static int zps_compile_package(const char *name, const char *dir, const char *cc,
-                               const char *flags, const struct zpkg_row *rows, int nr,
+                               const struct zps_compile_flags *flags, const struct zpkg_row *rows, int nr,
                                const char *work, int *compiled)
 {
     char man[RS_PATH];
@@ -733,19 +736,15 @@ static int zps_compile_package(const char *name, const char *dir, const char *cc
     return zps_compile_each_src(name, cc, flags, incs, ni, srcs, ns, obj, errp, compiled);
 }
 
-static int zps_run_prepare(char *flags, size_t fcap, struct zpkg_row *rows, int *nr,
+static int zps_run_prepare(struct zps_compile_flags *flags, struct zpkg_row *rows, int *nr,
                            const char **cc, char *tmpl, size_t tcap, char **work)
 {
     char root[4096];
     if (cic_repo_root(root, sizeof root) || chdir(root) != 0) {
         fputs("FAIL: cannot reach repo root\n", stderr); return 2;
     }
-    int rc = zps_quick_flags(flags, fcap);
+    int rc = zps_quick_flags(flags);
     if (rc) return rc;
-    if (!flags[0])
-        return fprintf(stderr, "FAIL: cannot read ZCL_C23_COMMONS_BUILD_FLAGS_QUICK_V2 from %s\n",
-                       k_zps_profile) < 0 ? die("z23-lint: write failed\n", "") : 2;
-    zps_strip_sub(flags, "-ffile-prefix-map=SOURCE=.");
     if ((rc = zpkg_load_rows(rows, ZPKG_MAX, nr))) return rc;
     if (*nr == 0)
         return fprintf(stderr, "FAIL: no packages parsed from %s — hollow scan\n",
@@ -759,7 +758,7 @@ static int zps_run_prepare(char *flags, size_t fcap, struct zpkg_row *rows, int 
     return 0;
 }
 static int zps_run_compile_all(const struct zpkg_row *rows, int nr, const char *cc,
-                               const char *flags, const char *work,
+                               const struct zps_compile_flags *flags, const char *work,
                                int *compiled, int *violations)
 {
     for (int i = 0; i < nr; i++) {
@@ -787,15 +786,15 @@ static int zps_run_report(int nr, int compiled, int violations)
 int check_zcode_package_standalone_run(int argc, char **argv)
 {
     (void)argc; (void)argv;
-    char flags[1024];
+    struct zps_compile_flags flags;
     struct zpkg_row rows[ZPKG_MAX];
     int nr = 0, rc;
     const char *cc = NULL;
     char tmpl[4096], *work = NULL;
-    if ((rc = zps_run_prepare(flags, sizeof flags, rows, &nr, &cc, tmpl, sizeof tmpl, &work)))
+    if ((rc = zps_run_prepare(&flags, rows, &nr, &cc, tmpl, sizeof tmpl, &work)))
         return rc;
     int compiled = 0, violations = 0;
-    if ((rc = zps_run_compile_all(rows, nr, cc, flags, work, &compiled, &violations)))
+    if ((rc = zps_run_compile_all(rows, nr, cc, &flags, work, &compiled, &violations)))
         return rc;
     if ((rc = rap_rm_rf(work))) return rc;
     return zps_run_report(nr, compiled, violations);
@@ -863,7 +862,7 @@ static int zps_st_message_shapes(int *bad)
 static int zps_st_write_fixtures(const char *work, char *okp, char *badp,
                                  char *obj, char *errp, size_t cap)
 {
-    if (ovf(snprintf(okp, cap, "%s/ok.c", work), cap)
+    if (ovf(snprintf(okp, cap, "%s/ok ; literal.c", work), cap)
         || ovf(snprintf(badp, cap, "%s/bad.c", work), cap)
         || ovf(snprintf(obj, cap, "%s/obj.o", work), cap)
         || ovf(snprintf(errp, cap, "%s/err.txt", work), cap)
@@ -871,6 +870,14 @@ static int zps_st_write_fixtures(const char *work, char *okp, char *badp,
         { rap_rm_rf(work); return 2; }
     return 0;
 }
+static int zps_st_native_flags(struct zps_compile_flags *flags, int *bad)
+{
+    if (zps_quick_flags(flags)) return 2;
+    for (size_t i = 0; i < flags->count; i++)
+        if (strchr(flags->argv[i], ';') || strchr(flags->argv[i], '%')) *bad = 1;
+    return 0;
+}
+
 static int zps_st_compile_preview(int *bad)
 {
     const char *cc = env_or("CC", "cc");
@@ -885,8 +892,10 @@ static int zps_st_compile_preview(int *bad)
     if (zps_st_write_fixtures(work, okp, badp, obj, errp, sizeof okp))
         return 2;
     int code = 0;
-    if (zps_cc(cc, "-std=c23 -c", incs, 0, okp, obj, errp, &code) || code != 0) *bad = 1;
-    if (zps_cc(cc, "-std=c23 -c", incs, 0, badp, obj, errp, &code)) *bad = 1;
+    struct zps_compile_flags flags;
+    if (zps_st_native_flags(&flags, bad)) { rap_rm_rf(work); return 2; }
+    if (zps_cc(cc, &flags, incs, 0, okp, obj, errp, &code) || code != 0) *bad = 1;
+    if (zps_cc(cc, &flags, incs, 0, badp, obj, errp, &code)) *bad = 1;
     else {
         char errb[ZSLURP], prev[2048];
         if (zpkg_slurp_path(errp, errb, sizeof errb) || zps_error_preview(errb, prev, sizeof prev))

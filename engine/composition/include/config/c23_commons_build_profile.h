@@ -3,8 +3,8 @@
  *
  * The concrete flags are platform-specific and are supplied by
  * platform/modules/platform/toolchain.h.  These macros remain the stable names so callers
- * do not need platform branches; on Linux they expand to the historical V2
- * string byte-for-byte. */
+ * do not need platform branches. The flags include the versioned, fixed
+ * executable-collection policy; archive members retain their public API. */
 
 #ifndef ZCL_CONFIG_C23_COMMONS_BUILD_PROFILE_H
 #define ZCL_CONFIG_C23_COMMONS_BUILD_PROFILE_H

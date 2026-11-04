@@ -1490,10 +1490,16 @@ static void pv_san_detail_from_stderr(const char *prefix,
 /* The fixed operands include NULL. Each architecture token needs at least
  * one byte plus a separator or terminator in the architecture buffer. */
 #define PV_COMPILE_ARGV_CAP \
-    (18u + PV_COMPILE_ARCH_BYTES / 2u + \
+    (20u + PV_COMPILE_ARCH_BYTES / 2u + \
      VCS_PACKAGE_RECIPE_MAX_PATHS_PER_LIST + PV_EMIT_MAX_DEPS + \
      VCS_PACKAGE_RECIPE_MAX_DEFINES)
 #define PV_PROBE_ARGV_CAP (PV_COMPILE_ARGV_CAP + 4u)
+/* All recipe/test objects, every bounded dependency archive, libraries,
+ * compiler, sanitizer pair, collection flag, metadata script, output/group
+ * pairs and NULL. */
+#define PV_LINK_ARGV_CAP \
+    (2u * VCS_PACKAGE_RECIPE_MAX_PATHS_PER_LIST + PV_EMIT_MAX_DEPS * 4u + \
+     VCS_PACKAGE_RECIPE_MAX_LIBRARIES + 10u)
 
 struct pv_compile_args {
     const char *argv[PV_COMPILE_ARGV_CAP];
@@ -1533,6 +1539,11 @@ static bool pv_append_arch_flag_tokens(struct pv_compile_args *store,
 
 static bool pv_compile_platform_argv(struct pv_compile_args *store, size_t *n)
 {
+    const struct platform_toolchain_commons_gc *gc =
+        platform_toolchain_commons_gc();
+    if (!gc) return false;
+    for (size_t i = 0; i < gc->compile_count; i++)
+        store->argv[(*n)++] = gc->compile_flags[i];
     /* Package artifacts are the Commons' reusable boundary. Make their CPU
      * floor explicit instead of inheriting a worker compiler's configured
      * default.  The platform abstraction supplies one or two argv tokens so
@@ -2855,6 +2866,17 @@ static bool pv_fast_preproc_sha3(struct pv_plan_ctx *ctx,
  * derivation itself lives in contexts/commons/modules/vcs (vcs/fastobj.h) so the carrier that
  * moves cache entries between nodes proves entry placement with the SAME
  * key — one authority, no second source of truth. */
+static const char *pv_fast_cache_profile(bool standard_profile)
+{
+    static _Thread_local char profile[32];
+    const struct platform_toolchain_commons_gc *gc =
+        platform_toolchain_commons_gc();
+    if (!gc) return NULL;
+    int n = snprintf(profile, sizeof(profile), "%s;%s",
+                     standard_profile ? "standard" : "quick", gc->identity);
+    return n > 0 && (size_t)n < sizeof(profile) ? profile : NULL;
+}
+
 static bool pv_fastobj_key(struct pv_plan_ctx *ctx, const char *profile,
                            const char *target, const uint8_t capsule_root[32],
                            const struct pv_compile_args *store,
@@ -5526,7 +5548,7 @@ static int pv_fast_cache_check_hit(
         return 5;
     if (!*eligible)
         return PV_CONTINUE;
-    if (!pv_fastobj_key(pctx, standard_profile ? "standard" : "quick",
+    if (!pv_fastobj_key(pctx, pv_fast_cache_profile(standard_profile),
                         fast_capsule->target, fast_capsule_root, args,
                         fast_preproc, fast_key)) {
         fprintf(stderr, "%s: fast cache key derivation failed\n", PV_LOG);
@@ -5591,7 +5613,7 @@ static int pv_run_and_finish_compile(
         char ferr[240];
         if (!pv_fast_cache_store(
                 pctx, fast_cache_dir, fast_key,
-                standard_profile ? "standard" : "quick",
+                pv_fast_cache_profile(standard_profile),
                 fast_capsule->target, fast_capsule_root, args, fast_preproc,
                 rel, package_root, recipe_root, emit_lock_root, obj_file,
                 ferr, sizeof(ferr))) {
@@ -5678,6 +5700,11 @@ static void pv_append_dep_archives_and_libs(
     const char *largv[], size_t *ln, size_t cap,
     struct pv_dep_archives *dep_archives, struct vcs_package_recipe *recipe)
 {
+    /* Only final executable links collect sections. The archive emitter still
+     * stores every complete source object, including unused public APIs. */
+    const struct platform_toolchain_commons_gc *gc =
+        platform_toolchain_commons_gc();
+    if (gc && *ln + 1u < cap) largv[(*ln)++] = gc->link_flag;
     /* Locked dependency archives come after the objects that
      * reference them. The transitive closure is wrapped in a
      * linker group on platforms whose linker needs it (GNU ld);
@@ -5752,7 +5779,7 @@ static int pv_build_one_program(
      * named by BASENAME: an absolute work-root path on the link
      * line can otherwise reach the produced bytes and two
      * verifiers building the same source would disagree. */
-    const char *largv[560];
+    const char *largv[PV_LINK_ARGV_CAP];
     char lobjs[512][96];
     char prog_obj[96];
     char prog_bin[96];
@@ -5800,6 +5827,25 @@ static int pv_build_one_program(
     return PV_CONTINUE;
 }
 
+static bool pv_sanitizer_metadata_link(bool sanitize, const char *build_root,
+                                       const char *argv[], size_t *count)
+{
+    const struct platform_toolchain_commons_gc *gc = platform_toolchain_commons_gc();
+    if (!sanitize || !gc || !gc->sanitizer_metadata_script) return true;
+    char path[4096];
+    int n = snprintf(path, sizeof(path), "%s/asan-globals.ld", build_root);
+    if (n <= 0 || (size_t)n >= sizeof(path) ||
+        !pv_atomic_write(path, (const uint8_t *)gc->sanitizer_metadata_script,
+                         strlen(gc->sanitizer_metadata_script))) {
+        fprintf(stderr, "%s: cannot stage fixed sanitizer metadata bounds\n", PV_LOG);
+        return false;
+    }
+    /* The compiler runs in build_root. Keep volatile roots out of argv and
+     * preserve default __start/__stop retention for all user registrations. */
+    argv[(*count)++] = "-Wl,-T,asan-globals.ld";
+    return true;
+}
+
 static int pv_link_test_binary(
     const char *cc, const char *cc_id, int variant, bool sanitize,
     const char *build_root, size_t total_sources,
@@ -5812,7 +5858,7 @@ static int pv_link_test_binary(
     char bin_file[4200];
     snprintf(bin_file, sizeof(bin_file), "%s/%s_%d_test",
              build_root, cc_id, variant);
-    const char *largv[560];
+    const char *largv[PV_LINK_ARGV_CAP];
     char lobjs[512][96];
     size_t ln = 0;
     largv[ln++] = cc;
@@ -5820,6 +5866,7 @@ static int pv_link_test_binary(
         largv[ln++] = "-fsanitize=address,undefined";
     if (sanitize)
         largv[ln++] = "-no-pie";
+    if (!pv_sanitizer_metadata_link(sanitize, build_root, largv, &ln)) return 5;
     for (size_t o = 0; o < total_sources &&
                        o < sizeof(lobjs) / sizeof(lobjs[0]);
          o++) {

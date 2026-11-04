@@ -4561,6 +4561,8 @@ static const struct vcs_package_build_output *zv_output_named(
     return NULL;
 }
 
+#include "test/package_section_collection.h"
+
 static int zpr_emit_one(const char *root_hex, const char *store,
                         const char *emit1, const char *lock_hex,
                         const char *work1, char *out, size_t out_sz,
@@ -4575,6 +4577,8 @@ static int zpr_emit_one(const char *root_hex, const char *store,
     if (e1 != 0)
         printf("  zcode_verify: programs emit rc=%d out=%s\n", e1, out);
     bool read1 = e1 == 0 && zv_read_receipt(emit1, rec1);
+    if (read1 && rec1->result_class != VCS_PACKAGE_BUILD_RESULT_TEST_PASS)
+        printf("  zcode_verify: programs canonical build refusal: %s\n", out);
     const struct vcs_package_build_output *prog_out =
         read1 ? zv_output_named(rec1, "bin/addpkg") : NULL;
     ZV_CHECK("programs: the receipt commits bin/<package short name>",
@@ -4584,6 +4588,8 @@ static int zpr_emit_one(const char *root_hex, const char *store,
     ZV_CHECK("programs: the archive and the public header still emit",
              read1 && zv_output_named(rec1, "lib/libaddpkg.a") != NULL &&
                  zv_output_named(rec1, "include/add.h") != NULL);
+    ZV_CHECK("sections: collection policy changes the actual receipt identity",
+             read1 && zpr_receipt_policy_bound(rec1));
     return failures;
 }
 
@@ -4731,7 +4737,25 @@ static int t_verifier_programs(void)
     }
 
     static const char k_src[] =
-        "#include \"add.h\"\nint add(int a, int b) { return a + b; }\n";
+        "#include \"add.h\"\n"
+        "extern int unused_unrelated_provider(void);\n"
+        "int unused_function(void) { return unused_unrelated_provider(); }\n"
+        "int (*unused_data)(void) = unused_unrelated_provider;\n"
+        "#if defined(__ELF__)\n"
+        "int registry_entry __attribute__((used,section(\"public_registry\"))) = 23;\n"
+        "extern int __start_public_registry[], __stop_public_registry[];\n"
+        "static int registry_ok(void) { return __stop_public_registry-__start_public_registry == 1 && __start_public_registry[0] == 23; }\n"
+        "#else\nstatic int registry_ok(void) { return 1; }\n#endif\n"
+        "static int initialized;\n"
+        "static void initialize(void) { initialized = 1; }\n"
+        "static void (*volatile registration[])(void) __attribute__((used)) = {initialize};\n"
+        "__attribute__((constructor)) static void add_init(void) { registration[0](); }\n"
+        "int add(int a, int b) { return initialized && registry_ok() ? a + b : -1000; }\n";
+    /* The actual canonical compiler/linker must discard BOTH unused function
+     * and data references to an unrelated provider, while retaining the live
+     * add() implementation and its initialization side effect. The existing
+     * emit, execute, second-work-root and reproduce assertions exercise this
+     * through the real package pipeline, not an argv-only surrogate. */
     static const char k_test[] =
         "#include \"add.h\"\n"
         "int main(void) { return add(2, 3) == 5 ? 0 : 1; }\n";
@@ -4777,13 +4801,21 @@ static int t_verifier_programs(void)
     failures += zpr_emit_one(root_hex, store, emit1, lock_hex, work1, out,
                              sizeof(out), &rec1);
     failures += zpr_exec(emit1, &rec1);
+    failures += zpr_archive_api(base, emit1);
     failures += zpr_second_emit(root_hex, store, emit2, lock_hex, work2, out,
                                 sizeof(out), &rec1);
     failures += zpr_reproduce(root_hex, store, emit1, emit3, lock_hex, work2,
                               out, sizeof(out));
     failures += zpr_progfail(base, lock_hex, work1, out, sizeof(out));
+    failures += zpr_live_providers(base, lock_hex, work1);
+    failures += ze_pass(base, package_root, recipe_root, release_id, root_hex, store);
+    failures += zpr_clean_sanitizers(store);
+    failures += zpr_live_global_sanitizer(base);
 
-    zv_rm_rf(base);
+    if (failures == 0)
+        zv_rm_rf(base);
+    else
+        printf("  zcode_verify: programs failure fixture retained=%s\n", base);
     return failures;
 }
 
@@ -5188,6 +5220,7 @@ static bool zv_include_cache_contents(const char *object, const char *key,
         zv_sha3_file(object, observed, &bytes) && memcmp(expected, observed, 32) == 0 &&
         bytes > 0 && json_get_int(json_get(json, "object_bytes")) == (int64_t)bytes &&
         zv_str_is(json, "admission", "local_candidate") &&
+        zpr_cache_policy_bound(json) &&
         zv_include_argv_complete(json_get(json_get(json, "key_components"), "argv"));
 }
 

@@ -6842,6 +6842,7 @@ LINTC_PREMISE_SRCS = $(LINTC_PREMISE_CORE_SRCS) tools/lint/lintc/selection.c
 # elsewhere) that unit-exec enters.
 LINTC_NODE_SRCS = platform/modules/sha3/src/sha3.c contexts/commons/packages/zsha256/src/zsha256.c $(ZCL_TOOL_SANDBOX_SRC) \
     platform/modules/util/src/spawn.c platform/modules/platform/src/clock.c \
+    platform/modules/platform/src/toolchain.c \
     platform/modules/platform/src/logical_cpu.c platform/modules/platform/src/os_proc_mem.c \
     platform/modules/base/src/log_level.c platform/modules/base/src/result.c \
     platform/modules/base/src/safe_alloc.c \
@@ -15614,6 +15615,10 @@ build/lintc-obj/gate_split_preserved_selftest.o: tools/lint/lintc/gate_split_pre
 build/lintc-obj/node/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(LINTC_CFLAGS) -c -o $@ $<
+
+build/lintc-obj/gate_zcode_packages.o \
+build/lintc-obj/node/platform/modules/platform/src/toolchain.o: \
+    platform/modules/platform/include/platform/toolchain.h
 
 $(LINTC_TOOL): $(LINTC_OBJS) $(LINTC_NODE_OBJS)
 	@mkdir -p $(dir $@)

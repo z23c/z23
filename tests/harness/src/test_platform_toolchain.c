@@ -316,19 +316,19 @@ static int pt_check_darwin_receipt_flags(const char *target, char *arch,
                     "-std=c23 -O1 -march=armv8-a "
                     "-mmacosx-version-min=14.0 -fno-omit-frame-pointer "
                     "-D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE "
-                    "-ffile-prefix-map=SOURCE=. -c") == 0);
+                    "-ffile-prefix-map=SOURCE=. -c;gc=macho1") == 0);
     PT_CHECK("Darwin standard flags bind architecture and deployment floor",
              strcmp(platform_toolchain_commons_flags_standard_base(),
                     "-std=c23 -O1 -march=armv8-a "
                     "-mmacosx-version-min=14.0 -fno-omit-frame-pointer "
                     "-D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE "
-                    "-ffile-prefix-map=SOURCE=. -Wall -Wextra -Werror") == 0);
+                    "-ffile-prefix-map=SOURCE=. -Wall -Wextra -Werror;gc=macho1") == 0);
     PT_CHECK("Darwin sanitizer receipt records ASLR honestly",
              strcmp(platform_toolchain_commons_flags_standard(),
                     "-std=c23 -O1 -march=armv8-a "
                     "-mmacosx-version-min=14.0 -fno-omit-frame-pointer "
                     "-D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE "
-                    "-ffile-prefix-map=SOURCE=. -Wall -Wextra -Werror;"
+                    "-ffile-prefix-map=SOURCE=. -Wall -Wextra -Werror;gc=macho1;"
                     "asan,ubsan=clean;sanitizer_pie=off;sanitizer_aslr=on") == 0);
     PT_CHECK("Darwin archive flags omit unsupported GNU D flag",
              strcmp(platform_toolchain_archive_flags(), "rcs") == 0);
@@ -359,21 +359,21 @@ static int pt_check_linux_receipt_flags(const char *target, char *arch,
                  arch, arch_cap) && arch[0] == '\0');
     PT_CHECK("Linux Commons feature macro set is empty",
              platform_toolchain_commons_feature_macros()[0] == '\0');
-    PT_CHECK("Linux quick flags preserve their receipt identity",
+    PT_CHECK("Linux quick flags bind the versioned collection policy",
              strcmp(platform_toolchain_commons_flags_quick(),
                     "-std=c23 -O1 -march=x86-64 -mtune=generic "
                     "-fno-omit-frame-pointer -D_POSIX_C_SOURCE=200809L "
-                    "-ffile-prefix-map=SOURCE=. -c") == 0);
-    PT_CHECK("Linux standard flags preserve their receipt identity",
+                    "-ffile-prefix-map=SOURCE=. -c;gc=elf2") == 0);
+    PT_CHECK("Linux standard flags bind the versioned collection policy",
              strcmp(platform_toolchain_commons_flags_standard_base(),
                     "-std=c23 -O1 -march=x86-64 -mtune=generic "
                     "-fno-omit-frame-pointer -D_POSIX_C_SOURCE=200809L "
-                    "-ffile-prefix-map=SOURCE=. -Wall -Wextra -Werror") == 0);
+                    "-ffile-prefix-map=SOURCE=. -Wall -Wextra -Werror;gc=elf2") == 0);
     PT_CHECK("Linux sanitizer receipt records fixed-ASLR execution",
              strcmp(platform_toolchain_commons_flags_standard(),
                     "-std=c23 -O1 -march=x86-64 -mtune=generic "
                     "-fno-omit-frame-pointer -D_POSIX_C_SOURCE=200809L "
-                    "-ffile-prefix-map=SOURCE=. -Wall -Wextra -Werror;"
+                    "-ffile-prefix-map=SOURCE=. -Wall -Wextra -Werror;gc=elf2;"
                     "asan,ubsan=clean;sanitizer_pie=off;sanitizer_aslr=off") == 0);
     PT_CHECK("Linux archive flags request deterministic GNU archives",
              strcmp(platform_toolchain_archive_flags(), "rcsD") == 0);
@@ -396,6 +396,34 @@ static int pt_check_portable_receipt_flags(const char *target)
 }
 #endif
 
+static int pt_commons_collection_policy(void)
+{
+    int failures = 0;
+    const struct platform_toolchain_commons_gc *gc = platform_toolchain_commons_gc();
+#if defined(__linux__)
+    PT_CHECK("ELF collection uses separate function/data input sections",
+             gc && gc->compile_count == 2u &&
+             strcmp(gc->compile_flags[0], "-ffunction-sections") == 0 &&
+             strcmp(gc->compile_flags[1], "-fdata-sections") == 0);
+    PT_CHECK("ELF collection uses the GNU-compatible final link flag",
+             gc && strcmp(gc->link_flag, "-Wl,--gc-sections") == 0);
+#elif defined(__APPLE__)
+    PT_CHECK("Mach-O collection preserves native atoms and eliminates common data",
+             gc && gc->compile_count == 1u &&
+             strcmp(gc->compile_flags[0], "-fno-common") == 0);
+    PT_CHECK("Mach-O collection uses Apple final dead stripping",
+             gc && strcmp(gc->link_flag, "-Wl,-dead_strip") == 0);
+#else
+    PT_CHECK("unsupported package platforms have no collection policy", gc == NULL);
+#endif
+#if defined(__linux__) || defined(__APPLE__)
+    PT_CHECK("longest sanitizer profile fits the unchanged receipt flags bound",
+             strlen(platform_toolchain_commons_flags_standard_base()) +
+                 strlen(";asan,ubsan=unavailable;sanitizer_pie=off;sanitizer_aslr=off") <= 255u);
+#endif
+    return failures;
+}
+
 int test_platform_toolchain(void)
 {
     int failures = 0;
@@ -404,6 +432,7 @@ int test_platform_toolchain(void)
 
     failures += pt_check_toolchain_argument_guards(
         target, sizeof(target), arch, sizeof(arch));
+    failures += pt_commons_collection_policy();
 #if defined(__APPLE__) && (defined(__arm64__) || defined(__aarch64__))
     failures += pt_check_darwin_receipt_flags(target, arch, sizeof(arch));
 #elif defined(__linux__)
