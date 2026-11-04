@@ -2,6 +2,7 @@
 #include "shell.h"
 #include "camera.h"
 #include "controller.h"
+#include "fleet.h"
 #include "home.h"
 #include "jni_util.h"
 #include "launcher.h"
@@ -22,15 +23,15 @@
 
 #define MATCH (-1)
 #define WRAP (-2)
-#define NAV_MAX 16u
+#define NAV_MAX 24u
 #define PATH_CAP 640
 #define DARK 0xff111111u
 #define BUTTON_COLOR 0xff2b2b2bu
 #define WHITE 0xffffffffu
 #define GRAVITY_CENTER_HORIZONTAL 1
 
-enum screen { SCREEN_HOME, SCREEN_ASSISTANT, SCREEN_APPS, SCREEN_SETTINGS, SCREEN_SCAN, SCREEN_WALLET, SCREEN_SEND, SCREEN_SETUP, SCREEN_COUNT };
-enum command { CMD_HOME, CMD_APPS, CMD_SETTINGS, CMD_HOME_SETTINGS, CMD_LAYOUT, CMD_SCAN_CANCEL, CMD_CAMERA_SETTINGS, CMD_CAMERA_PASTE, CMD_OUTCOME_DISMISS };
+enum screen { SCREEN_HOME, SCREEN_ASSISTANT, SCREEN_APPS, SCREEN_SETTINGS, SCREEN_SCAN, SCREEN_FLEET_REVIEW, SCREEN_WALLET, SCREEN_SEND, SCREEN_SETUP, SCREEN_COUNT };
+enum command { CMD_HOME, CMD_APPS, CMD_SETTINGS, CMD_HOME_SETTINGS, CMD_LAYOUT, CMD_SCAN_CANCEL, CMD_CAMERA_SETTINGS, CMD_CAMERA_PASTE, CMD_OUTCOME_DISMISS, CMD_FLEET_JOIN, CMD_FLEET_BACK, CMD_FLEET_COPY };
 enum target_kind { TARGET_NONE, TARGET_NAV, TARGET_ROW, TARGET_TILE, TARGET_WALLET, TARGET_SEND, TARGET_SETUP };
 
 struct nav { jobject view; enum command command; size_t arg; };
@@ -40,6 +41,9 @@ static struct {
     jobject activity, roots[SCREEN_COUNT];
     zapp_native_action send;
     jobject notice_views[SCREEN_COUNT], outcome_view, outcome_panel, status_view, scan_view, scan_hint_view, scan_camera, scan_panel, apps_list;
+    jobject fleet_review_text, fleet_review_result, fleet_review_qr, fleet_join_button, fleet_copy_button, fleet_back_button;
+    char fleet_receipt[8192];
+    bool fleet_review_started, fleet_qr_shown;
     enum screen current, before_scan;
     bool send_from_wallet;
     bool preview, pair_seen, scan_dismissed, user_layout, rendered, camera_waiting;
@@ -322,6 +326,33 @@ static void show_scan_screen(JNIEnv *env, enum zapp_camera_access access)
  * keyboard under adjustResize), so its scroll view ends above the keyboard and the focused field scrolls into view. The
  * window draws behind the system bars (setDecorFitsSystemWindows false), so no screen is resized unless it asks. */
 static bool fits_keyboard(JNIEnv *env, jobject root) { return zj_bool_property(env, root, "setFitsSystemWindows", true); }
+static bool build_fleet_review(JNIEnv *env, jobject root)
+{
+    jobject content = add_notice(env, root, SCREEN_FLEET_REVIEW) ? scroll_column(env, root, 16) : NULL;
+    jobject footer = content ? column(env, DARK, 0, false) : NULL;
+    jobject summary = bar(env, DARK), result = bar(env, DARK);
+    jobject qr = zj_widget(env, "android/widget/ImageView", shell.activity);
+    bool ok = content && footer && summary && result && qr &&
+        label(env, content, "Review fleet code", 24.0f, WHITE) &&
+        zj_append(env, content, summary) && zj_keep(env, &shell.fleet_review_text, summary) &&
+        button(env, content, "Join fleet", CMD_FLEET_JOIN, 0, 0);
+    if (ok) shell.fleet_join_button = shell.navs[shell.nav_count - 1].view;
+    ok = ok && zj_append(env, content, result) && zj_keep(env, &shell.fleet_review_result, result) &&
+        zj_margins(env, qr, zj_dp(260), zj_dp(260), 0.0f, 0, 8, 0, 8) &&
+        zj_append(env, content, qr) && zj_keep(env, &shell.fleet_review_qr, qr) &&
+        button(env, content, "Copy code", CMD_FLEET_COPY, 0, 0);
+    if (ok) shell.fleet_copy_button = shell.navs[shell.nav_count - 1].view;
+    ok = ok && zj_padding4(env, footer, 16, 0, 16, 8) && zj_append(env, root, footer) &&
+        button(env, footer, "Cancel", CMD_FLEET_BACK, 0, 0);
+    if (ok) shell.fleet_back_button = shell.navs[shell.nav_count - 1].view;
+    if (content) (*env)->DeleteLocalRef(env, content);
+    if (footer) (*env)->DeleteLocalRef(env, footer);
+    if (summary) (*env)->DeleteLocalRef(env, summary);
+    if (result) (*env)->DeleteLocalRef(env, result);
+    if (qr) (*env)->DeleteLocalRef(env, qr);
+    return ok;
+}
+
 /* The wallet pages scroll above a fixed bar that holds their Back. */
 static bool build_wallet(JNIEnv *env, jobject root)
 {
@@ -355,11 +386,12 @@ static bool add_screen(JNIEnv *env, jobject stage, enum screen which, jobject ro
 }
 static bool build_pages(JNIEnv *env, jobject stage, jobject home, jobject apps, jobject settings)
 {
+    jobject review = column(env, DARK, 0, false);
     jobject scan = column(env, 0xff000000u, 0, false), wallet = column(env, DARK, 0, false), send = column(env, DARK, 0, false), setup = column(env, DARK, 0, false);
     return build_home(env, home) && build_apps(env, apps) && build_settings(env, settings) && build_scan(env, scan) &&
-           build_wallet(env, wallet) && build_send(env, send) && build_setup(env, setup) && add_screen(env, stage, SCREEN_HOME, home) &&
+           build_fleet_review(env, review) && build_wallet(env, wallet) && build_send(env, send) && build_setup(env, setup) && add_screen(env, stage, SCREEN_HOME, home) &&
            add_screen(env, stage, SCREEN_APPS, apps) && add_screen(env, stage, SCREEN_SETTINGS, settings) &&
-           add_screen(env, stage, SCREEN_SCAN, scan) && add_screen(env, stage, SCREEN_WALLET, wallet) &&
+           add_screen(env, stage, SCREEN_SCAN, scan) && add_screen(env, stage, SCREEN_FLEET_REVIEW, review) && add_screen(env, stage, SCREEN_WALLET, wallet) &&
            add_screen(env, stage, SCREEN_SEND, send) && add_screen(env, stage, SCREEN_SETUP, setup);
 }
 static bool build_stage(JNIEnv *env, jobject assistant)
@@ -504,9 +536,9 @@ static void assistant_refused(char *out, size_t cap)
 /* The touch gate and the Assistant's window protection for the screen about to be shown. */
 static void set_protection(JNIEnv *env, enum screen next)
 {
-    if (wallet_screen(next) || next == SCREEN_ASSISTANT) shell.gate.protect = true;
+    if (wallet_screen(next) || next == SCREEN_ASSISTANT || next == SCREEN_FLEET_REVIEW) shell.gate.protect = true;
     else zapp_touch_gate_release(&shell.gate);
-    if (shell.current == SCREEN_ASSISTANT && next != SCREEN_ASSISTANT && !wallet_screen(next)) (void)protect_window(env, false);
+    if ((shell.current == SCREEN_ASSISTANT || shell.current == SCREEN_FLEET_REVIEW) && next != SCREEN_ASSISTANT && next != SCREEN_FLEET_REVIEW && !wallet_screen(next)) (void)protect_window(env, false);
 }
 /* What a screen does as it comes into view. */
 static void enter_screen(JNIEnv *env, enum screen next)
@@ -530,7 +562,7 @@ static void go(JNIEnv *env, enum screen next)
     note_send_origin(next);
     if (!leave_screen(env, next)) return;
     char why[sizeof(shell.action_notice)] = "";
-    if (next == SCREEN_ASSISTANT && !protect_window(env, true)) {
+    if ((next == SCREEN_ASSISTANT || next == SCREEN_FLEET_REVIEW) && !protect_window(env, true)) {
         assistant_refused(why, sizeof(why));
         next = SCREEN_HOME;
     }
@@ -538,6 +570,11 @@ static void go(JNIEnv *env, enum screen next)
     if (next != SCREEN_SCAN) shell.camera_waiting = false;
     /* An outcome line under More belongs to the visit that showed it; the camera screen is part of that visit. */
     if (shell.current == SCREEN_ASSISTANT && next != SCREEN_ASSISTANT && next != SCREEN_SCAN) zapp_controller_clear_result();
+    if (shell.current == SCREEN_FLEET_REVIEW && next != SCREEN_FLEET_REVIEW) {
+        memory_cleanse(shell.fleet_receipt, sizeof(shell.fleet_receipt));
+        (void)zj_bitmap(env, shell.fleet_review_qr, NULL, 0);
+        shell.fleet_qr_shown = false;
+    }
     shell.current = next;
     snprintf(shell.action_notice, sizeof(shell.action_notice), "%s", why);
     set_outcome(env, "");
@@ -574,6 +611,9 @@ static void back(JNIEnv *env)
     if (shell.current == SCREEN_SCAN) {
         zapp_controller_cancel_scan(); shell.scan_dismissed = true;
         zapp_pay_stash_clear();   /* a code still being decoded is dropped when it finishes */
+        go(env, shell.before_scan);
+    } else if (shell.current == SCREEN_FLEET_REVIEW) {
+        if (!shell.fleet_review_started) zapp_controller_cancel_scan();
         go(env, shell.before_scan);
     } else if (shell.current == SCREEN_WALLET) {
         if (wallet_screens_back()) zapp_wallet_ui_render(env);
@@ -636,6 +676,9 @@ static void run_nav(JNIEnv *env, const struct nav *nav)
     case CMD_CAMERA_SETTINGS: open_camera_settings(env); break;
     case CMD_CAMERA_PASTE: open_send(env, NULL, "", false); break;
     case CMD_OUTCOME_DISMISS: set_outcome(env, ""); break;
+    case CMD_FLEET_JOIN: shell.fleet_review_started = true; shell.send("fleet_join", ""); break;
+    case CMD_FLEET_BACK: back(env); break;
+    case CMD_FLEET_COPY: if (shell.fleet_receipt[0]) shell.send("fleet_copy", shell.fleet_receipt); break;
     }
 }
 static void launch(JNIEnv *env, const char *package, const char *activity, const char *name)
@@ -825,8 +868,10 @@ static void finish_scan(JNIEnv *env, const struct zapp_view *view)
         return;
     }
     bool home = target == ZAPP_SCAN_TO_HOME;
-    if (!home) go(env, SCREEN_ASSISTANT);
-    if (target == ZAPP_SCAN_TO_FLEET_REVIEW) zapp_native_ui_open_details(env);
+    if (target == ZAPP_SCAN_TO_FLEET_REVIEW) {
+        shell.fleet_review_started = false;
+        go(env, SCREEN_FLEET_REVIEW);
+    } else if (!home) go(env, SCREEN_ASSISTANT);
     if (!home) return;
     snprintf(text, sizeof(text), "%s%s%s", view->result, view->scan_text[0] ? "\n\n" : "", view->scan_text);
     go(env, SCREEN_HOME);
@@ -849,6 +894,26 @@ static void render_scan(JNIEnv *env, const struct zapp_view *view, bool finished
     if (shell.current == SCREEN_SCAN && !(finished && !dismissed && scan_goes_to_send(view))) go(env, shell.before_scan);
     if (finished && !dismissed) finish_scan(env, view);
 }
+static void render_fleet_review(JNIEnv *env, const struct zapp_view *view)
+{
+    if (shell.current != SCREEN_FLEET_REVIEW) return;
+    set_text(env, shell.fleet_review_text, view->fleet_preview);
+    set_text(env, shell.fleet_review_result, shell.fleet_review_started ? view->result : "");
+    bool receipt = shell.fleet_review_started && !view->busy && !view->fleet_token[0] && view->fleet_receipt[0];
+    if (receipt && strcmp(shell.fleet_receipt, view->fleet_receipt)) {
+        size_t size = 0;
+        unsigned char *bmp = zapp_fleet_qr_bmp(view->fleet_receipt, &size);
+        shell.fleet_qr_shown = bmp && zj_bitmap(env, shell.fleet_review_qr, bmp, size);
+        snprintf(shell.fleet_receipt, sizeof(shell.fleet_receipt), "%s", view->fleet_receipt);
+        free(bmp);
+    }
+    (void)zj_visible(env, shell.fleet_review_qr, receipt && shell.fleet_qr_shown);
+    (void)zj_visible(env, shell.fleet_copy_button, receipt);
+    (void)zj_visible(env, shell.fleet_join_button, view->fleet_token[0] && !view->busy);
+    (void)zj_text(env, shell.fleet_join_button, view->fleet_machine ? "Connect" : "Join fleet");
+    (void)zj_text(env, shell.fleet_back_button, shell.fleet_review_started ? "Back" : "Cancel");
+}
+
 /* Once the commit starts the owner returns to the wallet screen at once; the payment goes on in the background. */
 static void to_wallet_when_building(JNIEnv *env)
 {
@@ -867,6 +932,7 @@ void zapp_shell_render(JNIEnv *env, const struct zapp_view *view)
     bool finished = view->scans_done != shell.scans_seen, dismissed = shell.scan_dismissed;
     shell.scans_seen = view->scans_done;
     render_scan(env, view, finished, dismissed);
+    render_fleet_review(env, view);
     if (zapp_home_offer_jump(view->pair_offer[0] != 0, shell.current == SCREEN_SCAN, &shell.pair_seen)) go(env, SCREEN_ASSISTANT);
     set_phone_card(view);
     if (strcmp(shell.node_notice, view->node_action_notice)) {
@@ -936,7 +1002,7 @@ void zapp_shell_resume(JNIEnv *env)
     if (shell.current == SCREEN_SETUP) zapp_setup_ui_render(env);
     else if (shell.current == SCREEN_SCAN) resume_scan(env);
     else if (shell.current == SCREEN_APPS || shell.current == SCREEN_SETTINGS || shell.current == SCREEN_WALLET) go(env, SCREEN_HOME);
-    else if (shell.current == SCREEN_ASSISTANT && !protect_window(env, true)) go(env, SCREEN_HOME);
+    else if ((shell.current == SCREEN_ASSISTANT || shell.current == SCREEN_FLEET_REVIEW) && !protect_window(env, true)) go(env, SCREEN_HOME);
     else show_home(env);
 }
 void zapp_shell_destroy(JNIEnv *env)
@@ -952,7 +1018,7 @@ void zapp_shell_destroy(JNIEnv *env)
     for (size_t i = 0; i < shell.nav_count; ++i) (*env)->DeleteGlobalRef(env, shell.navs[i].view);
     for (size_t i = 0; i < shell.row_count; ++i) (*env)->DeleteGlobalRef(env, shell.rows[i]);
     for (int i = 0; i < SCREEN_COUNT; ++i) if (shell.roots[i]) (*env)->DeleteGlobalRef(env, shell.roots[i]);
-    jobject *views[] = {&shell.notice_views[SCREEN_HOME], &shell.notice_views[SCREEN_APPS], &shell.notice_views[SCREEN_SETTINGS], &shell.notice_views[SCREEN_SEND], &shell.notice_views[SCREEN_SETUP], &shell.outcome_view, &shell.outcome_panel, &shell.status_view, &shell.scan_view, &shell.scan_hint_view, &shell.scan_camera, &shell.scan_panel, &shell.apps_list};
+    jobject *views[] = {&shell.notice_views[SCREEN_HOME], &shell.notice_views[SCREEN_APPS], &shell.notice_views[SCREEN_SETTINGS], &shell.notice_views[SCREEN_SEND], &shell.notice_views[SCREEN_SETUP], &shell.notice_views[SCREEN_FLEET_REVIEW], &shell.outcome_view, &shell.outcome_panel, &shell.status_view, &shell.scan_view, &shell.scan_hint_view, &shell.scan_camera, &shell.scan_panel, &shell.fleet_review_text, &shell.fleet_review_result, &shell.fleet_review_qr, &shell.apps_list};
     for (size_t i = 0; i < sizeof(views) / sizeof(views[0]); ++i) if (*views[i]) (*env)->DeleteGlobalRef(env, *views[i]);
     release_cards();
     zapp_launcher_release(env, shell.apps, ZAPP_LAUNCHER_MAX);
