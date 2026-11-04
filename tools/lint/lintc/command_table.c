@@ -40,10 +40,13 @@ static int lint_row_name(const char **input, char *name, size_t cap)
     const char *p = *input;
     size_t n = 0;
     for (; *p && *p != '"'; p++) {
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || *p == '-'))
+            return 2;
         if (n + 1 >= cap) return 2;
         name[n++] = *p;
     }
     name[n] = '\0';
+    if (n <= 6 || strncmp(name, "check-", 6) != 0) return 2;
     if (strncmp(p, "\", \"", 4) != 0) return 2;
     *input = p + 4;
     return 0;

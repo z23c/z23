@@ -1,6 +1,7 @@
 // Copyright 2026 Rhett Creighton - Apache License 2.0
 // The lint driver's single gate command table, compiled and audited as text.
 // Each nonblank line is either a // comment or one canonical LINT_ROW.
+// Row names are check- followed by lowercase ASCII letters, digits or hyphens.
 // Commands support quotes, $VAR, NAME=v prefixes and && only.
 // "__core_seal__" names the built-in core-seal pipeline (run_exec.c).
 // One row per line, string escapes \" and \\ only; first row wins.
