@@ -260,6 +260,11 @@ static bool write_fixture_tree(void)
            terr_write(TERR_FIX, "core/modules/net/src/caller.c", CALLER_C) &&
            terr_write(TERR_FIX, "tests/harness/src/test_fixgroup.c", TEST_ENTRY_C) &&
            terr_write(TERR_FIX, "tools/lint/lintc/gate_commands.def", GATE_COMMANDS_DEF) &&
+           terr_write(TERR_FIX, "tools/lint/lintc/gates.def",
+                      "LINT_GATE(\"check-base-shape\", fixture_base, LINT_CMD_NONE)\n") &&
+           terr_write(TERR_FIX, "tools/lint/lintc/native_fixture.c",
+                      "/* platform/modules/base/src/ tools/lint/base_shape_baseline.txt */\n"
+                      "int fixture_base_run(int argc, char **argv) { return argc && argv; }\n") &&
            terr_write(TERR_FIX, "tools/lint/check_base_shape.sh", GATE_BASE_SH) &&
            terr_write(TERR_FIX, "tools/lint/check_net_shape.sh", GATE_NET_SH) &&
            terr_write(TERR_FIX, "tools/lint/check_treewide.sh", GATE_TREEWIDE_SH) &&
@@ -545,7 +550,7 @@ int test_territory(void)
     /* ── the general's brief ─────────────────────────────────────────── */
 
     gcount = clamp_negative_count(territory_list(ci, gnames, 128));
-    gates = territory_gates_open(TERR_FIX, gnames, gcount);
+    gates = territory_gates_open(TERR_FIX, ci, gnames, gcount);
     struct territory_router frouter = { .route = fix_route, .user = NULL };
 
     TEST("gates: the wiring table is read from gate_commands.def rows") {
@@ -584,6 +589,25 @@ int test_territory(void)
         PASS();
     }
 
+    TEST("gates: a registered native gate preserves wrapper scope and ledger evidence") {
+        ASSERT(terr_write(TERR_FIX, "tools/lint/lintc/gate_commands.def",
+            "LINT_ROW(\"check-base-shape\", \"./build/bin/z23-lint check-base-shape\")\n"));
+        struct territory_gates *native = territory_gates_open(TERR_FIX, ci, gnames, gcount);
+        ASSERT(native != NULL);
+        struct territory_brief *nb = territory_brief_build(ci, TERR_FIX,
+            "platform/modules/base", rs, &frouter, native, NULL);
+        ASSERT(nb != NULL);
+        ASSERT_EQ(nb->gates_binding, 1);
+        ASSERT_EQ(nb->refusal_count, 1);
+        ASSERT_STR_EQ(nb->refuses[0].gate, "check-base-shape");
+        ASSERT(nb->refuses[0].named_in_gate);
+        ASSERT_EQ(nb->refuses[0].baseline_rows, 1);
+        territory_brief_free(nb);
+        territory_gates_free(native);
+        ASSERT(terr_write(TERR_FIX, "tools/lint/lintc/gate_commands.def", GATE_COMMANDS_DEF));
+        PASS();
+    }
+
     TEST("brief: trusts is REPORTED as unknown, never omitted or guessed") {
         ASSERT(b->report != NULL);
         ASSERT(b->report->group_count > 0);
@@ -604,7 +628,7 @@ int test_territory(void)
 
     TEST("brief: absent gate wiring reports unreadable, not zero gates") {
         struct territory_gates *none_g =
-            territory_gates_open(TERR_FIX "/lib", gnames, gcount);
+            territory_gates_open(TERR_FIX "/lib", ci, gnames, gcount);
         ASSERT(none_g != NULL);
         ASSERT(!territory_gates_wiring_found(none_g));
         ASSERT_EQ(territory_gates_total(none_g), 0);

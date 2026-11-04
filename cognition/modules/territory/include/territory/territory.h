@@ -334,7 +334,8 @@ struct territory_gates;
  * a table whose wiring_found() is false and whose total is 0, so a caller
  * reports "gate wiring not readable" rather than "no gates bind here". */
 struct territory_gates *territory_gates_open(
-    const char *root, const char (*names)[TERRITORY_NAME_MAX], int count);
+    const char *root, struct codeindex *ci,
+    const char (*names)[TERRITORY_NAME_MAX], int count);
 void territory_gates_free(struct territory_gates *g);
 bool territory_gates_wiring_found(const struct territory_gates *g);
 int  territory_gates_total(const struct territory_gates *g);

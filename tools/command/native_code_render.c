@@ -1047,7 +1047,7 @@ static void general_render_brief(struct codeindex *ci, const char *root,
     static char names[CODE_TERRITORY_LIST_CAP][TERRITORY_NAME_MAX];
     int nt = territory_list(ci, names, CODE_TERRITORY_LIST_CAP);
     if (nt < 0) nt = 0;
-    struct territory_gates *gates = territory_gates_open(root, names, nt);
+    struct territory_gates *gates = territory_gates_open(root, ci, names, nt);
 
     struct territory_brief *b = territory_brief_build(ci, root, name, rs,
                                                       router, gates,

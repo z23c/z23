@@ -400,8 +400,10 @@ static bool tg_gate_add_line(const char *root, struct territory_gates *g,
 }
 
 struct territory_gates *territory_gates_open(
-    const char *root, const char (*names)[TERRITORY_NAME_MAX], int count)
+    const char *root, struct codeindex *ci,
+    const char (*names)[TERRITORY_NAME_MAX], int count)
 {
+    (void)ci;
     uint64_t t0 = tg_now_us();
     struct territory_gates *g = zcl_calloc(1, sizeof(*g), "territory_gates");
     if (!g) LOG_NULL("territory", "gate table");
