@@ -728,7 +728,7 @@ static int open_guard(int dfd)
     if(guard<0||fstat(guard,&gst)!=0||!S_ISREG(gst.st_mode)){if(guard>=0)close(guard);return -1;}
     return guard;
 }
-int main(int ac,char **av)
+static int bridge_main(int ac,char **av)
 {
     const char *dir=NULL;bool json=false;int i=1;
     while(i<ac){if(!strcmp(av[i],"--help")){help();return 0;}if(!strcmp(av[i],"--json")){json=true;i++;continue;}if(!strcmp(av[i],"--board-dir")&&i+1<ac){dir=av[i+1];i+=2;continue;}break;}
@@ -745,4 +745,15 @@ int main(int ac,char **av)
     struct list_opts lo={.lim=40,.json=json};
     if(strcmp(cmd,"list")||!list_args(ac,av,i,&lo)){close(guard);close(dfd);help();return 1;}
     return cmd_list(dfd,guard,&lo);
+}
+int main(int ac,char **av)
+{
+    int rc=bridge_main(ac,av);
+    /* Small replies can remain buffered until exit, after command success
+     * has been decided. Lost snapshots or acknowledgments must fail. */
+    if(fflush(stdout)==EOF||ferror(stdout)) {
+        error("cannot flush command output; any completed board write is retained");
+        return 1;
+    }
+    return rc;
 }

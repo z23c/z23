@@ -258,6 +258,44 @@ static int test_fleet_board_bridge_merge_bounds(void)
     } _test_next:;
     return failures;
 }
+static int run_readonly_stdout(const char *dir,const char *const args[])
+{
+    pid_t pid=fork();
+    if(pid<0)return -1;
+    if(pid==0) {
+        char path[PATH_MAX];
+        if(snprintf(path,sizeof(path),"%s/output",dir)>=(int)sizeof(path))_exit(126);
+        int fd=open(path,O_RDONLY|O_CLOEXEC);
+        if(fd<0||dup2(fd,STDOUT_FILENO)<0)_exit(126);
+        if(fd!=STDOUT_FILENO)close(fd);
+        char *av[24];size_t n=0;
+        av[n++]=(char*)bridge_bin();av[n++]="--board-dir";av[n++]=(char*)dir;
+        for(size_t i=0;args[i]&&n+1<24;i++)av[n++]=(char*)args[i];
+        av[n]=NULL;execv(av[0],av);_exit(127);
+    }
+    int status=0;
+    return waitpid(pid,&status,0)==pid&&WIFEXITED(status)?WEXITSTATUS(status):-1;
+}
+static int test_fleet_board_bridge_stdout(void)
+{
+    int failures=0;
+    TEST("fleet board bridge: buffered output failure cannot report success") {
+        char root[PATH_MAX],out[4096];
+        ASSERT(test_mkdtemp(root,sizeof(root),"fleet-board-stdout")!=NULL);
+        ASSERT(put(root,"output",""));
+        ASSERT(put(root,"beta.jsonl",ROW("2026-09-05T02:00:00Z","old","beta","note","","preserved")));
+        const char *text[]={"list",NULL},*json[]={"--json","list",NULL};
+        const char *help[]={"--help",NULL};
+        ASSERT(run_readonly_stdout(root,text)==1);
+        ASSERT(run_readonly_stdout(root,json)==1);
+        ASSERT(run_readonly_stdout(root,help)==1);
+        ASSERT(get(root,"output",out,sizeof(out)));ASSERT_STR_EQ(out,"");
+        ASSERT(run(root,json,out,sizeof(out),NULL,NULL)==0);
+        ASSERT(strstr(out,"preserved")!=NULL);
+        ASSERT(cleanup(root));PASS();
+    } _test_next:;
+    return failures;
+}
 static int test_fleet_board_bridge_post_file_bound(void)
 {
     int failures=0;
@@ -294,6 +332,7 @@ int test_fleet_board_bridge(void)
     return 1;
 #else
     return test_fleet_board_bridge_basics()+test_fleet_board_bridge_merge()+
-           test_fleet_board_bridge_merge_bounds()+test_fleet_board_bridge_post_file_bound();
+           test_fleet_board_bridge_merge_bounds()+test_fleet_board_bridge_post_file_bound()+
+           test_fleet_board_bridge_stdout();
 #endif
 }
