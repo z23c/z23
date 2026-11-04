@@ -92,7 +92,13 @@ static char *tg_slurp(const char *root, const char *rel, size_t cap,
     char *buf = zcl_malloc(cap + 1, "tg_slurp");
     if (!buf) { fclose(f); LOG_NULL("territory", "gate script buffer"); }
     size_t n = fread(buf, 1, cap, f);
-    fclose(f);
+    bool bad = ferror(f) != 0;
+    if (!bad && n == cap) {
+        int extra = fgetc(f);
+        bad = extra != EOF || ferror(f) != 0;
+    }
+    if (fclose(f) != 0) bad = true;
+    if (bad) { free(buf); return NULL; }
     buf[n] = '\0';
     /* A NUL inside the payload would truncate every scan below it. A shell
      * script with an embedded NUL is not a script this method can speak
