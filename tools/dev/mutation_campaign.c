@@ -58,13 +58,15 @@ static void mc_usage(FILE *f)
             "  --target=NAME    make target that builds the runner\n"
             "                   (default: test_parallel)\n"
             "  --work=DIR       scratch directory (default: build/mutation-campaign)\n"
-            "  --limit=N        stop after N mutants (a sample, not a score)\n"
+            "  --limit=N        stop after N mutants (0 = full campaign)\n"
             "  --report=PATH    also write a machine-readable report\n"
             "  --list           enumerate mutants and exit; builds nothing\n"
             "  --no-cache       ignore and do not write the per-mutant cache\n"
             "  --quiet          only the summary and the survivors\n"
-            "  --build-timeout=SEC   default 900\n"
-            "  --test-timeout=SEC    default 300\n");
+            "  --build-timeout=SEC   default 900; 0 = runner fallback\n"
+            "  --test-timeout=SEC    default 300; 0 = runner fallback\n"
+            "  Numeric values are unsigned decimal integers; timeouts must\n"
+            "  fit in int milliseconds.\n");
 }
 
 static bool mc_prefix(const char *arg, const char *key, const char **val)
@@ -73,6 +75,33 @@ static bool mc_prefix(const char *arg, const char *key, const char **val)
     if (strncmp(arg, key, n) != 0)
         return false;
     *val = arg + n;
+    return true;
+}
+
+static bool mc_unsigned(const char *text, size_t maximum, size_t *out)
+{
+    if (!*text)
+        return false;
+    size_t value = 0;
+    for (const char *digit = text; *digit; digit++) {
+        if (*digit < '0' || *digit > '9')
+            return false;
+        size_t next = (size_t)(*digit - '0');
+        if (value > maximum / 10 ||
+            (value == maximum / 10 && next > maximum % 10))
+            return false;
+        value = value * 10 + next;
+    }
+    *out = value;
+    return true;
+}
+
+static bool mc_timeout(const char *text, int *milliseconds)
+{
+    size_t seconds;
+    if (!mc_unsigned(text, INT_MAX / 1000, &seconds))
+        return false;
+    *milliseconds = (int)seconds * 1000;
     return true;
 }
 
@@ -93,11 +122,11 @@ static bool mc_parse_value_option(const char *a, struct mc_opts *o)
     else if (mc_prefix(a, "--report=", &v))
         o->report = v;
     else if (mc_prefix(a, "--limit=", &v))
-        o->limit = (size_t)strtoull(v, NULL, 10);
+        return mc_unsigned(v, SIZE_MAX, &o->limit);
     else if (mc_prefix(a, "--build-timeout=", &v))
-        o->build_timeout_ms = (int)(strtol(v, NULL, 10) * 1000);
+        return mc_timeout(v, &o->build_timeout_ms);
     else if (mc_prefix(a, "--test-timeout=", &v))
-        o->test_timeout_ms = (int)(strtol(v, NULL, 10) * 1000);
+        return mc_timeout(v, &o->test_timeout_ms);
     else
         return false;
     return true;

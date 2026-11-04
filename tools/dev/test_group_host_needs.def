@@ -56,6 +56,9 @@
 ZCL_TEST_GROUP_BUILD_NEED("test_fingerprint", "build/bin/fpscan", "fpscan")
 #endif
 
+ZCL_TEST_GROUP_BUILD_NEED("test_mutation_campaign_cli",
+                          "build/bin/mutation-campaign", "mutation-campaign")
+
 /* The admitted runner executes without rebuilding test-binary prerequisites.
  * Build each consumed fixture in the proof generation and bind its bytes. */
 #if defined(__linux__)
