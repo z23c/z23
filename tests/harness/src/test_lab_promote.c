@@ -292,11 +292,157 @@ static int lp_case_no_key(void)
     return failures;
 }
 
+/* Copies src to dst as an executable; the release image a promote wrote. */
+static bool lp_copy_exe(const char *src, const char *dst)
+{
+    char buf[1 << 16];
+    FILE *in = fopen(src, "rb"), *out = fopen(dst, "wb");
+    size_t n = 0;
+    bool ok = in && out;
+    while (ok && (n = fread(buf, 1, sizeof(buf), in)) > 0)
+        ok = fwrite(buf, 1, n, out) == n;
+    if (in)
+        fclose(in);
+    if (out)
+        ok = fclose(out) == 0 && ok;
+    return ok && chmod(dst, 0755) == 0;
+}
+
+/* Promote file into a fresh dist and copy the gated release image to exe. */
+static bool lp_build_into(struct lp_env *e, const char *file, const char *cases, const char *exe)
+{
+    struct zcl_command_reply p;
+    char img[PATH_MAX];
+    (void)test_rm_rf_recursive(e->dist);
+    lp_promote(e, file, cases, &p);
+    bool ok = p.exit_code == ZCL_COMMAND_EXIT_OK && lp_join(img, sizeof(img), e->dist, "upper");
+    zcl_command_reply_free(&p);
+    return ok && lp_copy_exe(img, exe);
+}
+
+static bool lp_dev(const char *dir, struct zcl_command_reply *r)
+{
+    char in[2 * PATH_MAX];
+    snprintf(in, sizeof(in), "{\"dir\":\"%s\",\"interface\":2}", dir);
+    return lp_call(zcl_native_handle_plugin_dev, in, r) && r->exit_code == ZCL_COMMAND_EXIT_OK;
+}
+
+/* plugin.call upper on "abc\n": its stdout, or "?" when the call did not succeed. */
+static void lp_call_upper(char out[32], char generation[PLUGIN_HEX_SHA3_512 + 1])
+{
+    struct zcl_command_reply c;
+    snprintf(out, 32, "?");
+    generation[0] = '\0';
+    if (!lp_call(zcl_native_handle_plugin_call, "{\"name\":\"upper\",\"stdin\":\"abc\\n\"}", &c))
+        return;
+    if (c.exit_code == ZCL_COMMAND_EXIT_OK) {
+        snprintf(out, 32, "%s", lp_str(json_get(&c.data, "run"), "stdout"));
+        snprintf(generation, PLUGIN_HEX_SHA3_512 + 1, "%s", lp_str(&c.data, "generation"));
+    }
+    zcl_command_reply_free(&c);
+}
+
+static bool lp_name_op(lp_handler h, const char *in, struct zcl_command_reply *r)
+{
+    bool ok = lp_call(h, in, r) && r->exit_code == ZCL_COMMAND_EXIT_OK;
+    zcl_command_reply_free(r);
+    return ok;
+}
+
+/* One develop step: replace the executable from a gated source, run plugin dev. */
+static bool lp_develop(struct lp_env *e, const char *dir, const char *exe, const char *file,
+                       const char *cases, char gen[PLUGIN_HEX_SHA3_512 + 1], int64_t *seq)
+{
+    struct zcl_command_reply r;
+    if (!lp_build_into(e, file, cases, exe) || !lp_dev(dir, &r))
+        return false;
+    snprintf(gen, PLUGIN_HEX_SHA3_512 + 1, "%s", lp_str(&r.data, "generation"));
+    *seq = json_get_int(json_get(&r.data, "sequence"));
+    zcl_command_reply_free(&r);
+    return true;
+}
+
+/* The store holds count generations, each with a signature, current on cur. */
+static bool lp_store_is(const struct lp_env *e, size_t count, const char *cur, const char *gens[2])
+{
+    struct plugin_info *infos = NULL;
+    size_t n = 0;
+    bool ok = plugin_store_list(e->root, &infos, &n) == PLUGIN_OK && n == 1 &&
+              infos[0].generation_count == count && strcmp(infos[0].current, cur) == 0;
+    if (infos)
+        plugin_store_list_free(infos, n);
+    for (int i = 0; ok && i < 2; i++) {
+        char sig[2 * PATH_MAX];
+        snprintf(sig, sizeof(sig), "%s/upper/generations/%s/upper.plugin.sig", e->root, gens[i]);
+        ok = access(sig, R_OK) == 0;
+    }
+    return ok;
+}
+
+/* The agent loop: dev, call, edit, dev, call (no restart), failed gates, rollback, switch. */
+static int lp_case_hotswap(void)
+{
+    int failures = 0;
+    struct lp_env e;
+    bool ready = lp_env_open(&e);
+    TEST_CASE("plugin dev hot-swaps: the next plugin.call runs the edited program, rollback restores") {
+        struct zcl_command_reply r;
+        char dir[PATH_MAX], exe[PATH_MAX], out[32], seen[PLUGIN_HEX_SHA3_512 + 1];
+        char g1[PLUGIN_HEX_SHA3_512 + 1], g2[PLUGIN_HEX_SHA3_512 + 1], in[1024];
+        int64_t seq = 0;
+        ASSERT(ready);
+        ASSERT(lp_join(dir, sizeof(dir), e.base, "upper"));
+        ASSERT_EQ(mkdir(dir, 0700), 0);
+        ASSERT(lp_join(exe, sizeof(exe), dir, "upper"));
+        /* Generation 1: build and gate the upper source, develop it, call it. */
+        ASSERT(lp_develop(&e, dir, exe, LP_UPPER, LP_CASES_OK, g1, &seq));
+        ASSERT_EQ(seq, 1);
+        lp_call_upper(out, seen);
+        ASSERT_STR_EQ(out, "ABC\n");
+        ASSERT_STR_EQ(seen, g1);
+        /* Edit: the source becomes the reverser. Same process, no restart. */
+        ASSERT(lp_develop(&e, dir, exe, "tests/fixtures/lab/rev.c",
+                          "[{\"name\":\"rev\",\"stdin\":\"abc\\n\",\"expect_stdout\":\"cba\\n\"}]",
+                          g2, &seq));
+        ASSERT_EQ(seq, 2);
+        ASSERT(strcmp(g1, g2) != 0);
+        lp_call_upper(out, seen);
+        ASSERT_STR_EQ(out, "cba\n");
+        ASSERT_STR_EQ(seen, g2);
+        ASSERT(lp_store_is(&e, 2, g2, (const char *[2]){ g1, g2 }));
+        /* A source whose cases fail, or that does not compile, yields no image to develop. */
+        (void)test_rm_rf_recursive(e.dist);
+        lp_promote(&e, "tests/fixtures/lab/rev.c",
+                   "[{\"name\":\"wrong\",\"stdin\":\"abc\\n\",\"expect_stdout\":\"ABC\\n\"}]", &r);
+        ASSERT_STR_EQ(r.error.code, "LAB_PROMOTE_CASES_FAILED");
+        zcl_command_reply_free(&r);
+        lp_promote(&e, "tests/fixtures/lab/compile_error.c", LP_CASES_OK, &r);
+        ASSERT(r.exit_code != ZCL_COMMAND_EXIT_OK);
+        zcl_command_reply_free(&r);
+        lp_call_upper(out, seen);
+        ASSERT_STR_EQ(out, "cba\n");
+        ASSERT_STR_EQ(seen, g2);
+        /* Rollback restores generation 1; switch returns to generation 2. */
+        ASSERT(lp_name_op(zcl_native_handle_plugin_rollback, "{\"name\":\"upper\"}", &r));
+        lp_call_upper(out, seen);
+        ASSERT_STR_EQ(out, "ABC\n");
+        ASSERT_STR_EQ(seen, g1);
+        snprintf(in, sizeof(in), "{\"name\":\"upper\",\"generation\":\"%s\"}", g2);
+        ASSERT(lp_name_op(zcl_native_handle_plugin_switch, in, &r));
+        lp_call_upper(out, seen);
+        ASSERT_STR_EQ(out, "cba\n");
+        ASSERT_STR_EQ(seen, g2);
+    } TEST_END
+    lp_env_close(&e);
+    return failures;
+}
+
 int test_lab_promote(void)
 {
     int failures = 0;
     printf("\n=== Lab promote tests ===\n");
     failures += lp_case_roundtrip();
+    failures += lp_case_hotswap();
     failures += lp_case_failed_case();
     failures += lp_case_disagree();
     failures += lp_case_capture_allocation();
