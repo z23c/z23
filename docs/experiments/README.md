@@ -32,25 +32,13 @@ Commands: `discover.wiki`, `discover.read`
 | 2026-09-03 | [Muse vs GLM as executors on one lint-gate task (2026-09-03)](./2026-09-03-muse-vs-glm-lint-gate.md) | Both gates are correct, both pass every check in this comparison (self-test, run_lint.sh, doc-accuracy, lint-fast, and all three mutation tests), and both are wired into lint-fast/Makefile/DEFENSIVE_CODING.md identically. |
 | 2026-09-03 | [Proof warm-start: cold-vs-warm measurement (2026-09-03)](./2026-09-03-proof-warm-start.md) | See the record. |
 | 2026-09-03 | [Initial block sync throughput: profile and two optimisations](./2026-09-03-sync-throughput.md) | See the record. |
-| 2026-09-24 | [One hundred cumulative C23 revisions and SkyCombat control](./2026-09-24-factory-100-skycombat-preview.md) | See the record. |
-| 2026-09-24 | [Evolving C23 factory qualification](./2026-09-24-factory-adversarial-qualification.md) | See the record. |
-| 2026-09-24 | [One hundred cumulative mixed C23 package revisions](./2026-09-24-factory-mixed-100.md) | See the record. |
-| 2026-09-24 | [Factory qualification handoff](./2026-09-24-factory-qualification-handoff.md) | See the record. |
-| 2026-09-24 | [SkyCombat complete-game source and peer build](./2026-09-24-skycombat-fullgame-peer.md) | See the record. |
-| 2026-09-24 | [SkyCombat executable package platform boundary](./2026-09-24-skycombat-platform-link-boundary.md) | See the record. |
-| 2026-09-25 | [Action-root reuse across real commits, 2026-09-25](./2026-09-25-action-root-reuse.md) | See the record. |
-| 2026-09-25 | [Distinct actions with one component input occupy two worker slots](./2026-09-25-component-input-duplicate.md) | See the record. |
 | 2026-09-25 | [Shadow proof-obligation selection](./2026-09-25-shadow-obligation-selector.md) | See the record. |
-| 2026-09-25 | [Factory qualification cohort, 2026-09-25](./FACTORY_QUALIFICATION_COHORT_20260925.md) | See the record. |
-| 2026-09-25 | [Queue outcome artifact roots, 2026-09-25](./QUEUE_COST_JOIN_20260925.md) | See the record. |
 | 2026-09-27 | [Exact output boundary before touch](./2026-09-27-ledger-blue-exact-output-stop.md) | The earlier review controller rejected a second completed output in one upload chunk, but accepted bytes after the first completed output if they did not complete another output. |
-| 2026-09-27 | [Ledger Blue linker SRAM accounting correction](./2026-09-27-ledger-blue-linker-sram.md) | See the record. |
 | 2026-09-27 | [Ledger Blue local SHA-256 and read-only approval](./2026-09-27-ledger-blue-local-sha-and-readonly-approval.md) | The C23 wallet reviewer uses Z23's self-contained zsha256 package for transaction replay, wire comparison, CLI preflight, and UTXO script hashes. |
 | 2026-09-27 | [Bounded transparent output review controller](./2026-09-27-ledger-blue-output-review.md) | The read-only controller retains one P2PKH or P2SH output at a time during pass three. |
 | 2026-09-27 | [Read-only transparent payment APDU boundary](./2026-09-27-ledger-blue-payment-apdu.md) | The C23 Wallet command candidate uses CLA A5, zero P1/P2, and an exact single-byte payload length. |
 | 2026-09-27 | [Transparent output screen preview](./2026-09-27-ledger-blue-payment-screen.md) | See the record. |
 | 2026-09-27 | [Transaction-driven transparent payment simulator](./2026-09-27-ledger-blue-payment-simulator.md) | The C23 host simulator runs the same bounded review controller used by the unit test. |
-| 2026-09-27 | [Previous-output parser sanitizer fuzzing](./2026-09-27-ledger-blue-prevout-fuzz.md) | See the record. |
 | 2026-09-27 | [One-context ZIP-243 replay bound to transaction bytes](./2026-09-27-ledger-blue-replay-zip243.md) | See the record. |
 | 2026-09-27 | [Ledger Blue transparent signing boundary](./2026-09-27-ledger-blue-signing-boundary.md) | Two portable C23 modules now compile for both host and ARM. |
 | 2026-09-27 | [Ledger Blue fixed-path signing callback](./2026-09-27-ledger-blue-signing-callback.md) | The callback selects only m/44'/147'/0'/0/0 or m/44'/147'/0'/1/0 after PIN validation. |
@@ -80,7 +68,6 @@ Commands: `discover.wiki`, `discover.read`
 | 2026-09-28 | [Ledger Blue payment reply cleanup](./2026-09-28-ledger-blue-payment-reply-cleanup.md) | See the record. |
 | 2026-09-28 | [Ledger Blue PIN loss during signing](./2026-09-28-ledger-blue-pin-loss-signing.md) | See the record. |
 | 2026-09-28 | [Ledger Blue totals after transparent approval](./2026-09-28-ledger-blue-post-approval-totals.md) | See the record. |
-| 2026-09-28 | [Ledger Blue previous-wire upload isolation](./2026-09-28-ledger-blue-previous-wire-snapshot.md) | See the record. |
 | 2026-09-28 | [Ledger Blue private-key initialization result](./2026-09-28-ledger-blue-private-key-init-result.md) | See the record. |
 | 2026-09-28 | [Ledger Blue reported APDU receive length](./2026-09-28-ledger-blue-receive-length-bound.md) | Wallet 0.3.30 checks the reported receive count before inspecting the instruction or passing the request to either handler. |
 | 2026-09-28 | [Ledger Blue repeated touch at final signing page](./2026-09-28-ledger-blue-repeat-tap-signing.md) | The final page now places SIGN ZCL at x=20..154 and NO SIGN at x=165..299. |
@@ -109,64 +96,10 @@ Commands: `discover.wiki`, `discover.read`
 | 2026-09-29 | [Ledger Blue approval-timeout APDU erasure](./2026-09-29-ledger-blue-timeout-apdu-erasure.md) | See the record. |
 | 2026-09-29 | [Commons journey across three physical hosts (2026-09-29)](./COMMONS_MULTIHOST_2026-09-29.md) | See the record. |
 | 2026-10-08 | [Passive accounting and fleet dispatch qualification](./2026-10-08-agent-fleet-accounting.md) | See the record. |
-| 2026-10-08 | [Bounded C23 procedures and unambiguous selection](./2026-10-08-c23-function-recipes.md) | See the record. |
-| 2026-10-08 | [Canary timestamp freshness admission](./2026-10-08-canary-future-freshness.md) | See the record. |
-| 2026-10-08 | [Current canary observation boundary](./2026-10-08-current-canary-observation.md) | See the record. |
-| 2026-10-08 | [Exact usage counters and visible incomplete hourly totals](./2026-10-08-exact-usage-counters.md) | See the record. |
-| 2026-10-08 | [RSS availability diagnostics](./2026-10-08-metrics-rss-transition.md) | See the record. |
-| 2026-10-08 | [MVP parity reporter evidence boundary](./2026-10-08-mvp-parity-evidence.md) | See the record. |
-| 2026-10-08 | [Owner-supplied receipt attempt correlation](./2026-10-08-receipt-attempt-binding.md) | See the record. |
-| 2026-10-09 | [Fleet board authority recheck before delayed delivery](./2026-10-09-board-revocation.md) | A private fleet board answer prepared at OPEN is sent only while the existing pairing, delegation window and read role remain authorized. |
-| 2026-10-09 | [Failed tunnel grant persistence](./2026-10-09-tunnel-allow-rollback.md) | See the record. |
-| 2026-10-10 | [Deferred mail scans during fleet brief assembly](./2026-10-10-deferred-mail-scans.md) | See the record. |
-| 2026-10-10 | [Native train checkout root normalization](./2026-10-10-dev-train-root-normalization.md) | See the record. |
-| 2026-10-10 | [Report-only engine-unit outcomes](./2026-10-10-engine-report-effects.md) | See the record. |
-| 2026-10-10 | [Fast-object staging and Apple SDK cache closure](./2026-10-10-fastobj-anonymous-staging.md) | See the record. |
-| 2026-10-10 | [Publication hold compatibility barrier](./2026-10-10-land-held-priority.md) | See the record. |
-| 2026-10-10 | [Native live-datadir isolation lint](./2026-10-10-live-datadir-native-lint.md) | See the record. |
-| 2026-10-10 | [Official Sv39 fixture provenance](./2026-10-10-official-sv39-fixtures.md) | See the record. |
-| 2026-10-10 | [Seccomp deny filter rejects alternate x86 syscall representations](./2026-10-10-seccomp-x32-abi.md) | See the record. |
-| 2026-10-10 | [Bounded Sv39 translation helper](./2026-10-10-sv39-translation-helper.md) | See the record. |
-| 2026-10-10 | [Generated Tor provenance and source identity](./2026-10-10-tor-provenance-source-inventory.md) | See the record. |
-| 2026-10-10 | [Verified cache reconstruction with caller-owned buffers](./2026-10-10-verified-cache-reads.md) | See the record. |
-| 2026-10-11 | [Licensed component delivery over loopback TCP](./2026-10-11-component-tcp-delivery.md) | See the record. |
 | 2026-10-11 | [Guest held-port raw helper](./2026-10-11-guest-port-raw-helper.md) | See the record. |
 | 2026-10-11 | [Guest loopback SSH with hybrid post-quantum key exchange](./2026-10-11-guest-pq-ssh-loopback.md) | See the record. |
-| 2026-10-11 | [Explicit operating-system entropy provider](./2026-10-11-host-entropy-provider.md) | See the record. |
-| 2026-10-11 | [HOT_FORK module reuse observations](./2026-10-11-hotfork-module-reuse-observer.md) | See the record. |
-| 2026-10-11 | [Local worker receipt identity](./2026-10-11-local-worker-receipt-identity.md) | See the record. |
-| 2026-10-11 | [Tunnel deny and pairing revocation end live streams](./2026-10-11-mesh-tunnel-deny-closes-streams.md) | See the record. |
-| 2026-10-11 | [Tunnel list reports entrance health and peer session state](./2026-10-11-mesh-tunnel-list-health.md) | See the record. |
-| 2026-10-11 | [Executing module-builder input identity](./2026-10-11-module-builder-harness-identity.md) | See the record. |
-| 2026-10-11 | [Package include-directory closure](./2026-10-11-package-include-closure.md) | See the record. |
-| 2026-10-11 | [Non-inheritable Linux running-image descriptor](./2026-10-11-self-image-cloexec.md) | See the record. |
-| 2026-10-11 | [Shipping refuses unpublished commits](./2026-10-11-ship-publication-refusal.md) | See the record. |
-| 2026-10-11 | [Windows entropy acceptance linkage](./2026-10-11-windows-entropy-linkage.md) | See the record. |
-| 2026-10-12 | [Fleet operating documentation consolidation](./2026-10-12-fleet-operations-consolidation.md) | See the record. |
-| 2026-10-12 | [Command catalog parent checks record each branch once](./2026-10-12-guest-boot-branch-index.md) | See the record. |
-| 2026-10-12 | [Command catalog validation records each name once](./2026-10-12-guest-boot-catalog-hash.md) | See the record. |
-| 2026-10-12 | [Headless z23-dev loads the wallet GUI only for an explicit launch](./2026-10-12-guest-boot-gui-load.md) | See the record. |
-| 2026-10-12 | [Package secp256k1 contexts are built on first use](./2026-10-12-guest-boot-secp-lazy.md) | See the record. |
-| 2026-10-12 | [Guest boot does not spawn the user-unit lookup](./2026-10-12-guest-boot-service-lookup.md) | See the record. |
-| 2026-10-12 | [Guest instruction decode cache](./2026-10-12-guest-decode-cache.md) | See the record. |
-| 2026-10-12 | [Release test compiler checks](./2026-10-12-release-test-compiler-checks.md) | See the record. |
-| 2026-10-12 | [Restart input closure and engine-unit run stamps](./2026-10-12-restart-input-closure.md) | See the record. |
-| 2026-10-12 | [Tiny guest boot work](./2026-10-12-tiny-guest-boot-work.md) | See the record. |
 | 2026-10-13 | [MCP workhorse qualification](./2026-10-13-mcp-workhorse.md) | See the record. |
-| 2026-10-14 | [Minimal C23 kernel acceptance](./2026-10-14-minimal-c23-kernel.md) | See the record. |
 | 2026-10-15 | [Four-host shell and transfer observation — 2026-10-15](./FLEET_SHELL_ROUTES_2026-10-15.md) | See the record. |
-| 2026-10-15 | [Gateway credential argument guidance](./GATEWAY_GRANT_ARGUMENT_2026-10-15.md) | See the record. |
-| 2026-10-15 | [Gateway directed-mail acceptance](./GATEWAY_MAILBOX_2026-10-15.md) | See the record. |
-| 2026-10-15 | [Retained gateway reproduction and tunnel fixture acceptance](./GATEWAY_REPRODUCTION_2026-10-15.md) | See the record. |
-| 2026-10-15 | [Plugin package transfer acceptance — 2026-10-15](./PLUGIN_PACKAGE_2026-10-15.md) | See the record. |
-| 2026-10-16 | [Ledger authorization at deferred effects](./2026-10-16-ledger-effect-authorization.md) | See the record. |
-| 2026-10-16 | [Inert release artifact carrier](./2026-10-16-release-artifact-carrier.md) | See the record. |
-| 2026-10-16 | [Latest fleet vitals provenance](./FLEET_VITALS_LATEST_2026-10-16.md) | See the record. |
-| 2026-10-16 | [Source-bound context capsule qualification](./SEMANTIC_CAPSULE_2026-10-16.md) | See the record. |
-| 2026-10-18 | [New-agent front door](./2026-10-18-new-agent-front-door.md) | See the record. |
-| 2026-10-18 | [Agentic development baselines](./AGENTIC_DEV_BASELINES_2026-10-18.md) | See the record. |
-| 2026-10-18 | [Product health census](./PRODUCT_HEALTH_CENSUS_2026-10-18.md) | See the record. |
-| 2026-11-03 | [Catch-up pass rate with node.db's indexes kept at tip](./2026-11-03-catchup-indexes-at-tip.md) | Keeping the indexes runs a 60000-block pass at 0.58-0.76x the turbo rate with node.db on tmpfs and 0.19-0.26x on disk. |
 | undated | [C23 download performance laboratory](./C3_DOWNLOAD_PERF_LAB.md) | See the record. |
 | undated | [Historical C23 speed-contract baseline](./C3_SPEED_BASELINE.md) | See the record. |
 | undated | [Fleet ledger column integrity](./FLEET_LEDGER_COLUMNS.md) | See the record. |
@@ -175,9 +108,3 @@ Commands: `discover.wiki`, `discover.read`
 
 Attachments referenced by the records above:
 
-- [`2026-09-25-chunk-resume-measure.patch`](./2026-09-25-chunk-resume-measure.patch): patch recorded with the experiments of that date.
-- [`2026-09-25-component-input-duplicate.patch`](./2026-09-25-component-input-duplicate.patch): patch recorded with the experiments of that date.
-- [`2026-09-25-factory-join-audit.json`](./2026-09-25-factory-join-audit.json): raw JSON data recorded with the experiments of that date.
-- [`2026-09-25-reflex-stages-post.json`](./2026-09-25-reflex-stages-post.json): raw JSON data recorded with the experiments of that date.
-- [`2026-09-25-reflex-stages-pre.json`](./2026-09-25-reflex-stages-pre.json): raw JSON data recorded with the experiments of that date.
-- [`2026-11-03-catchup-indexes-at-tip-measure.patch`](./2026-11-03-catchup-indexes-at-tip-measure.patch): patch recorded with the experiments of that date.
