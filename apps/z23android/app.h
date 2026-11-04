@@ -47,6 +47,7 @@ struct zapp_view {
     bool node_stopping; /* A stop was sent to the node process that is still running. */
     bool node_serving;  /* The node's boot status says it serves (zapp_node_serving), read while it answers. */
     bool scanning;
+    bool scan_checking; /* A decoded fleet code is being verified. */
     unsigned scans_done;           /* Scan actions that have finished, with or without a code. */
     enum zapp_scan_kind scan_kind; /* Kind of the last code scanned by the scan action. */
     char scan_text[256];           /* That code's text when it is shown, else empty. */

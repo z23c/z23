@@ -39,7 +39,7 @@ struct target { enum target_kind kind; size_t index; char id[ZAPP_NAME_CAP]; siz
 static struct {
     jobject activity, roots[SCREEN_COUNT];
     zapp_native_action send;
-    jobject notice_views[SCREEN_COUNT], outcome_view, outcome_panel, status_view, scan_view, scan_camera, scan_panel, apps_list;
+    jobject notice_views[SCREEN_COUNT], outcome_view, outcome_panel, status_view, scan_view, scan_hint_view, scan_camera, scan_panel, apps_list;
     enum screen current, before_scan;
     bool send_from_wallet;
     bool preview, pair_seen, scan_dismissed, user_layout, rendered, camera_waiting;
@@ -279,7 +279,7 @@ static bool scan_hint(JNIEnv *env, jobject camera)
     bool ok = hint && zj_typography(env, hint, 17.0f, (jint)WHITE) && zj_padding(env, hint, 16, 10) &&
         zj_int_property(env, hint, "setGravity", GRAVITY_CENTER_HORIZONTAL) &&
         zj_text(env, hint, zapp_camera_screen(ZAPP_CAMERA_GRANTED).hint) && zj_margins(env, hint, MATCH, WRAP, 0.0f, 0, 0, 0, 0) &&
-        zj_append(env, camera, hint);
+        zj_append(env, camera, hint) && zj_keep(env, &shell.scan_hint_view, hint);
     if (hint) (*env)->DeleteLocalRef(env, hint);
     return ok;
 }
@@ -572,7 +572,7 @@ static void show_home(JNIEnv *env)
 static void back(JNIEnv *env)
 {
     if (shell.current == SCREEN_SCAN) {
-        zapp_camera_stop(); shell.scan_dismissed = true;
+        zapp_controller_cancel_scan(); shell.scan_dismissed = true;
         zapp_pay_stash_clear();   /* a code still being decoded is dropped when it finishes */
         go(env, shell.before_scan);
     } else if (shell.current == SCREEN_WALLET) {
@@ -839,6 +839,7 @@ static void finish_scan(JNIEnv *env, const struct zapp_view *view)
 static void render_scan(JNIEnv *env, const struct zapp_view *view, bool finished, bool dismissed)
 {
     if (view->scanning) {
+        (void)zj_text(env, shell.scan_hint_view, view->scan_checking ? "Code scanned. Checking…" : zapp_camera_screen(ZAPP_CAMERA_GRANTED).hint);
         if (shell.current != SCREEN_SCAN && !dismissed) { shell.before_scan = shell.current; go(env, SCREEN_SCAN); }
         return;
     }
@@ -951,7 +952,7 @@ void zapp_shell_destroy(JNIEnv *env)
     for (size_t i = 0; i < shell.nav_count; ++i) (*env)->DeleteGlobalRef(env, shell.navs[i].view);
     for (size_t i = 0; i < shell.row_count; ++i) (*env)->DeleteGlobalRef(env, shell.rows[i]);
     for (int i = 0; i < SCREEN_COUNT; ++i) if (shell.roots[i]) (*env)->DeleteGlobalRef(env, shell.roots[i]);
-    jobject *views[] = {&shell.notice_views[SCREEN_HOME], &shell.notice_views[SCREEN_APPS], &shell.notice_views[SCREEN_SETTINGS], &shell.notice_views[SCREEN_SEND], &shell.notice_views[SCREEN_SETUP], &shell.outcome_view, &shell.outcome_panel, &shell.status_view, &shell.scan_view, &shell.scan_camera, &shell.scan_panel, &shell.apps_list};
+    jobject *views[] = {&shell.notice_views[SCREEN_HOME], &shell.notice_views[SCREEN_APPS], &shell.notice_views[SCREEN_SETTINGS], &shell.notice_views[SCREEN_SEND], &shell.notice_views[SCREEN_SETUP], &shell.outcome_view, &shell.outcome_panel, &shell.status_view, &shell.scan_view, &shell.scan_hint_view, &shell.scan_camera, &shell.scan_panel, &shell.apps_list};
     for (size_t i = 0; i < sizeof(views) / sizeof(views[0]); ++i) if (*views[i]) (*env)->DeleteGlobalRef(env, *views[i]);
     release_cards();
     zapp_launcher_release(env, shell.apps, ZAPP_LAUNCHER_MAX);

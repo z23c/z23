@@ -12,6 +12,7 @@ void zapp_controller_detach(void);
 /* The owner left the outcome line beside the controls under More (a scan, an invitation, a host control): it is cleared, so an
  * old failure is never shown as current. While an action runs the line is that action's own and stays. */
 void zapp_controller_clear_result(void);
+void zapp_controller_cancel_scan(void);
 /* Hidden, the app cancels voice and stops observing the node and fleet, which keep running on
  * their own; shown again, it observes at once. */
 void zapp_controller_visible(bool visible);

@@ -48,6 +48,7 @@ struct controller {
     uint64_t camera_ticket;
     void (*notify)(void);
     bool pending, autostart_checked, hidden, shown;
+    bool scan_cancelled, scan_fleet_owned;
     time_t fleet_at;
     bool seen_responding;
     int64_t seen_height, seen_target, seen_peers; /* Latest node reading, for the suggestion. */
@@ -114,6 +115,11 @@ static bool invitation(struct controller *c, const char *text, bool typed)
     bool ok = explicit_machine || zapp_fleet_invite_text(text, token, sizeof(token));
     bool valid_input = ok;
     pthread_mutex_lock(&c->lock);
+    if (!typed && c->scan_cancelled) {
+        pthread_mutex_unlock(&c->lock);
+        memory_cleanse(token, sizeof(token));
+        return false;
+    }
     c->view.fleet_token[0] = 0; c->view.fleet_machine = false; c->view.fleet_onion[0] = 0;
     c->view.fleet_review_typed = false; memory_cleanse(c->view.fleet_review_input, sizeof(c->view.fleet_review_input));
     copy_text(c->view.fleet_preview, sizeof(c->view.fleet_preview), ok ? "Checking fleet code…" : "This is not a fleet code.");
@@ -124,6 +130,7 @@ static bool invitation(struct controller *c, const char *text, bool typed)
     char machine_error[256] = "Could not verify the fleet machine record.";
     ok = fleet_review_run(c, token, explicit_join, explicit_machine, reply, preview, onion, machine_error, &machine);
     pthread_mutex_lock(&c->lock);
+    if (!typed && c->scan_cancelled) ok = false;
     if (ok) {
         copy_text(c->view.fleet_token, sizeof(c->view.fleet_token), token);
         c->view.fleet_machine = machine;
@@ -131,7 +138,7 @@ static bool invitation(struct controller *c, const char *text, bool typed)
         if (typed) copy_text(c->view.fleet_review_input, sizeof(c->view.fleet_review_input), text);
         if (machine) copy_text(c->view.fleet_onion, sizeof(c->view.fleet_onion), onion);
     }
-    copy_text(c->view.fleet_preview, sizeof(c->view.fleet_preview), ok ? preview : !valid_input ? "This is not a fleet code." : explicit_join ? "Could not verify this invitation. Ask your manager for a fresh code." : machine_error);
+    copy_text(c->view.fleet_preview, sizeof(c->view.fleet_preview), !typed && c->scan_cancelled ? "" : ok ? preview : !valid_input ? "This is not a fleet code." : explicit_join ? "Could not verify this invitation. Ask your manager for a fresh code." : machine_error);
     pthread_mutex_unlock(&c->lock);
     if (reply) { memory_cleanse(reply, ZAPP_TEXT_CAP); free(reply); }
     memory_cleanse(token, sizeof(token)); return ok;
@@ -696,7 +703,14 @@ static bool scan_payload(struct controller *c, uint64_t ticket, char *out)
     } else if (kind == ZAPP_SCAN_PAIR && !offer_pairing(c, value)) { kind = ZAPP_SCAN_UNREADABLE; value[0] = 0; }
     bool secret = kind == ZAPP_SCAN_FLEET || kind == ZAPP_SCAN_FLEET_MACHINE || kind == ZAPP_SCAN_PAIR;
     set_scan(c, kind, secret ? "" : value);
-    if (kind == ZAPP_SCAN_FLEET || kind == ZAPP_SCAN_FLEET_MACHINE) (void)invitation(c, out, false);
+    if (kind == ZAPP_SCAN_FLEET || kind == ZAPP_SCAN_FLEET_MACHINE) {
+        pthread_mutex_lock(&c->lock);
+        c->view.scan_checking = !c->scan_cancelled;
+        c->scan_fleet_owned = !c->scan_cancelled;
+        pthread_mutex_unlock(&c->lock);
+        notify_view(c);
+        (void)invitation(c, out, false);
+    }
     copy_text(out, ZAPP_TEXT_CAP, notice ? notice : scan_notice(kind));
     memory_cleanse(value, ZAPP_TEXT_CAP);
     free(value);
@@ -886,8 +900,10 @@ static void execute_result(struct controller *c, const char *action, const char 
     if (!strcmp(action, "fleet_join") && ok && !c->view.fleet_machine) ok = join_result(c, out);
     if (chat) chat_outcome(c, arg, ok, out);
     zapp_plain_text(out, ZAPP_TEXT_CAP);
-    report(c, action, ok, out);
+    if (!strcmp(action, "scan") && c->scan_cancelled) c->view.result[0] = 0;
+    else report(c, action, ok, out);
     c->view.scanning = false;
+    c->view.scan_checking = false;
     if (!strcmp(action, "scan")) ++c->view.scans_done;
     pthread_mutex_unlock(&c->lock);
 }
@@ -1178,7 +1194,7 @@ static void queue_action(struct controller *c, const char *action, const char *a
     }
     copy_text(c->action, sizeof(c->action), action); copy_text(c->argument, sizeof(c->argument), arg);
     c->camera_ticket = zapp_camera_ticket(); c->pending = true; c->view.busy = true;
-    c->view.scanning = !strcmp(action, "scan"); c->view.notice[0] = 0; c->view.result[0] = 0;
+    c->view.scanning = !strcmp(action, "scan"); c->view.scan_checking = false; c->scan_cancelled = false; c->scan_fleet_owned = false; c->view.notice[0] = 0; c->view.result[0] = 0;
     /* The tap shows at once what it does, unless its own screen already shows that. */
     const char *doing = zapp_action_shows_itself(action) ? NULL : zapp_action_doing(action);
     if (doing) copy_text(reports_beside(action) ? c->view.result : c->view.notice, ZAPP_NOTICE_CAP, doing);
@@ -1233,6 +1249,28 @@ void zapp_controller_detach(void)
     if (current) { pthread_mutex_lock(&current->lock); current->notify = NULL; pthread_mutex_unlock(&current->lock); }
     zapp_camera_stop(); pthread_mutex_unlock(&startup_lock);
 }
+void zapp_controller_cancel_scan(void)
+{
+    pthread_mutex_lock(&startup_lock);
+    struct controller *c = current;
+    if (c) {
+        pthread_mutex_lock(&c->lock);
+        if (c->view.scanning && !strcmp(c->action, "scan")) {
+            c->scan_cancelled = true;
+            c->view.scan_checking = false;
+            if (c->scan_fleet_owned) {
+                c->view.fleet_token[0] = 0;
+                c->view.fleet_preview[0] = 0;
+                c->view.fleet_onion[0] = 0;
+                c->view.fleet_machine = false;
+            }
+        }
+        pthread_mutex_unlock(&c->lock);
+    }
+    zapp_camera_stop();
+    pthread_mutex_unlock(&startup_lock);
+}
+
 void zapp_controller_clear_result(void)
 {
     pthread_mutex_lock(&startup_lock);
