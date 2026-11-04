@@ -513,7 +513,7 @@ static void funds_lines(struct wallet_screen *s, const struct data *d)
 static void silent_node_items(struct wallet_screen *s)
 {
     if (st.env.node_running && st.env.node_running(st.env.ctx)) {
-        line(s, "Waiting for your node. It is running and shows your balance as soon as it answers; after a restart that takes a few minutes.");
+        line(s, "Waiting for your node to answer. After a restart, this can take a few minutes.");
         return;
     }
     line(s, st.env.node_running ? "Node stopped. Start it to see your funds." : "The node is not answering. Start it to see your funds.");

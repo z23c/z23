@@ -173,3 +173,25 @@ app build passed after these changes. The admitted run took 46.04 seconds
 with maximum process RSS 77940 KiB. The installed phone app was inspected
 separately: Wallet opened to Balance, Receive, Send, and History. That older
 APK does not qualify the new source or establish the initial-frame timing.
+
+## Dismiss scan outcome
+
+A Home scan outcome has a Dismiss button. Dismiss clears that outcome without
+changing the node notice or wallet state. The wallet wait message is shorter
+while retaining the distinction between a running node and a stopped node.
+
+<!-- claim: symbol-present set_outcome apps/z23android/shell.c # controls Home scan outcome visibility -->
+<!-- claim: symbol-present silent_node_items apps/z23android/wallet_screens.c # distinguishes a running node -->
+
+On 2026-11-04 UTC, the installed APK built from commit `209db27d0179`
+retained the existing wallet. With the node stopped, Wallet showed its last
+known balance and age; after Start it retained that amount with updating and
+waiting status. Initial-frame flicker was not captured. The prior APK Stop
+was observed to finish within 67 seconds; this is an upper bound for that
+observation, not a measurement of the new APK shutdown latency.
+
+On the same installed APK, an invalid fleet code displayed duplicate error
+messages. The controller change keeps one error message; that change has not
+been measured on the device. A Stop tap at 06:22:18 UTC showed Stopping at
+06:22:37, and polling observed the node process gone at 06:22:50, about
+32 seconds after the tap, without forced termination.

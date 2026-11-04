@@ -112,6 +112,7 @@ static bool invitation(struct controller *c, const char *text, bool typed)
     bool explicit_join = text && !strncmp(text, "z23 fleet join ", 15);
     bool explicit_machine = zapp_fleet_machine_text(text, token, sizeof(token));
     bool ok = explicit_machine || zapp_fleet_invite_text(text, token, sizeof(token));
+    bool valid_input = ok;
     pthread_mutex_lock(&c->lock);
     c->view.fleet_token[0] = 0; c->view.fleet_machine = false; c->view.fleet_onion[0] = 0;
     c->view.fleet_review_typed = false; memory_cleanse(c->view.fleet_review_input, sizeof(c->view.fleet_review_input));
@@ -130,7 +131,7 @@ static bool invitation(struct controller *c, const char *text, bool typed)
         if (typed) copy_text(c->view.fleet_review_input, sizeof(c->view.fleet_review_input), text);
         if (machine) copy_text(c->view.fleet_onion, sizeof(c->view.fleet_onion), onion);
     }
-    copy_text(c->view.fleet_preview, sizeof(c->view.fleet_preview), ok ? preview : explicit_join ? "Could not verify this invitation. Ask your manager for a fresh code." : machine_error);
+    copy_text(c->view.fleet_preview, sizeof(c->view.fleet_preview), ok ? preview : !valid_input ? "This is not a fleet code." : explicit_join ? "Could not verify this invitation. Ask your manager for a fresh code." : machine_error);
     pthread_mutex_unlock(&c->lock);
     if (reply) { memory_cleanse(reply, ZAPP_TEXT_CAP); free(reply); }
     memory_cleanse(token, sizeof(token)); return ok;
@@ -742,7 +743,7 @@ static bool execute_fleet(struct controller *c, const char *action, const char *
     }
     else if (!strcmp(action, "fleet_preview")) {
         ok = invitation(c, arg, true);
-        copy_text(out, ZAPP_TEXT_CAP, ok ? "Review the fleet code." : "Could not verify the fleet code.");
+        out[0] = 0;
     }
     return ok;
 }
@@ -862,11 +863,12 @@ static bool node_action(const char *action)
 {
     return !strcmp(action, "node_start") || !strcmp(action, "node_stop");
 }
-/* Caller holds c->lock. A success already shown by the node line, transcript or host list leaves no notice; a node start
+/* Caller holds c->lock. A fleet preview outcome already shown beside its controls leaves no result; other successes
+ * already shown by the node line, transcript or host list leave no notice; a node start
  * or stop also reports on the screens that have no notice line. */
 static void report(struct controller *c, const char *action, bool ok, const char *out)
 {
-    bool shown = !strncmp(action, "ops_", 4) || (ok && (!strcmp(action, "chat") || !strcmp(action, "voice_start") ||
+    bool shown = (!strcmp(action, "fleet_preview") && !out[0]) || !strncmp(action, "ops_", 4) || (ok && (!strcmp(action, "chat") || !strcmp(action, "voice_start") ||
                         !strcmp(action, "fleet_hosts") || node_choice_saved(c, action)));
     const char *text = shown ? "" : out[0] ? out : "Operation could not complete.";
     copy_text(reports_beside(action) ? c->view.result : c->view.notice, ZAPP_NOTICE_CAP, text);

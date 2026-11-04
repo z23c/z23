@@ -419,7 +419,7 @@ static void funds_node_stopped_or_starting(void)
     fake.node_up = true;
     fake.copy_ok = true;
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
-    CHECK(has("Waiting for your node. It is running") && !has("Node stopped") && !has("Start it") && !has("ZCL"));
+    CHECK(has("Waiting for your node to answer. After a restart, this can take a few minutes.") && !has("Node stopped") && !has("Start it") && !has("ZCL"));
     CHECK(find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_START_NODE) < 0 && find(snap(), WALLET_ITEM_AMOUNT, WALLET_ACT_NONE) < 0);
 }
 static void finish_initial_failures(void)
