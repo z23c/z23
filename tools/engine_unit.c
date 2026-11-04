@@ -2045,6 +2045,46 @@ static void gate_feedback_from_log(const char *log, size_t log_len, char *out,
     out[used] = '\0';
 }
 
+static size_t gate_capture_text(char *log, size_t length)
+{
+    for (size_t i = 0; i < length; i++)
+        if (log[i] == '\0')
+            log[i] = '?';
+    log[length] = '\0';
+    engine_redact_inplace(log);
+    return strlen(log);
+}
+
+static const char *gate_capture_incomplete(
+    const struct zcl_spawn_binary_observation *observation)
+{
+    if (observation->overflow)
+        return "engine_unit: INCOMPLETE gate capture: output exceeds the bounded log buffer.\n";
+    if (observation->timed_out)
+        return "engine_unit: INCOMPLETE gate capture: deadline expired.\n";
+    if (!observation->exit_observed)
+        return "engine_unit: INCOMPLETE gate capture: child exit status unavailable.\n";
+    return "engine_unit: INCOMPLETE gate capture: stream EOF unavailable.\n";
+}
+
+static bool gate_capture_retire(const char *path)
+{
+    if (!path || unlink(path) == 0 || errno == ENOENT)
+        return true;
+    LOG_FAIL("engine_unit", "cannot retire the previous gate artifact");
+}
+
+static bool gate_capture_save(const char *path, const char *text, size_t length,
+                               struct engine_gate_reading *reading)
+{
+    if (!path || engine_emit_file(path, text, length))
+        return true;
+    memset(reading, 0, sizeof(*reading));
+    if (unlink(path) != 0 && errno != ENOENT)
+        LOG_WARN("engine_unit", "cannot remove an incomplete gate artifact");
+    LOG_FAIL("engine_unit", "cannot persist the gate evidence");
+}
+
 static bool run_gate(const struct unit_opts *o, const char *workdir,
                      struct engine_gate_reading *reading, bool *timed_out,
                      const char *log_path, char *feedback_out,
@@ -2052,6 +2092,8 @@ static bool run_gate(const struct unit_opts *o, const char *workdir,
 {
     memset(reading, 0, sizeof(*reading));
     *timed_out = false;
+    if (!gate_capture_retire(log_path))
+        return false;
     /* `t-fast-exact`, not `t-fast`. The convenience target's ONLY= is a
      * SUBSTRING selector, and a substring quietly widens the gate: the first
      * live run of this harness asked for `engine` and ran two groups, because
@@ -2064,7 +2106,7 @@ static bool run_gate(const struct unit_opts *o, const char *workdir,
     const char *const argv[] = { "make", "-C", workdir, "t-fast-exact", only,
                                  NULL };
 
-    char *log = zcl_malloc(UNIT_GATE_LOG_BYTES, "engine_unit_gate_log");
+    char *log = zcl_malloc(UNIT_GATE_LOG_BYTES + 1u, "engine_unit_gate_log");
     if (!log)
         LOG_FAIL("engine_unit", "cannot allocate the gate log buffer");
     if (unit_environment_set("ZCL_TEST_CACHE", "0") != 0) {
@@ -2082,28 +2124,43 @@ static bool run_gate(const struct unit_opts *o, const char *workdir,
      * and no verdict, so a compile failure looked identical to an unlaunched
      * child. Merging stderr into the same log is what lets a model's next
      * repair turn see what actually broke. */
-    const int rc = zcl_spawn_capture_merged_observed(
-        argv, log, UNIT_GATE_LOG_BYTES, gate_s * 1000, timed_out);
+    struct zcl_spawn_binary_observation observation = {0};
+    (void)zcl_spawn_capture_binary_merged(
+        argv, log, UNIT_GATE_LOG_BYTES, gate_s * 1000, &observation);
+    *timed_out = observation.timed_out;
     const int64_t elapsed_ms = (clock_now_monotonic_ns() - started) / 1000000;
 
-    if (log_path)
-        (void)engine_emit_file(log_path, log, strlen(log));
-    const bool read_ok = engine_gate_read(log, strlen(log), reading);
+    /* Nonzero child exits can carry genuine failed-suite evidence. Only a
+     * complete byte span can attest a result; its exit code is not a grade. */
+    const bool complete = observation.eof && observation.exit_observed &&
+                          !observation.overflow && !observation.timed_out;
+    const bool read_ok = complete &&
+        engine_gate_read(log, observation.output_len, reading);
+    size_t text_length = observation.output_len;
+    if (!complete) {
+        const char *refusal = gate_capture_incomplete(&observation);
+        text_length = strlen(refusal);
+        memcpy(log, refusal, text_length);
+    }
+    /* Grade original bytes first. Text artifacts and repair feedback need
+     * visible NULs and redaction over the entire captured span. An incomplete
+     * capture stores a refusal, never a prefix that could replay as PASS. */
+    text_length = gate_capture_text(log, text_length);
+    const bool saved = gate_capture_save(log_path, log, text_length, reading);
     if (feedback_out)
-        gate_feedback_from_log(log, strlen(log), feedback_out, feedback_cap);
+        gate_feedback_from_log(log, text_length, feedback_out, feedback_cap);
     free(log);
 
     /* A child killed by the deadline is a TIMEOUT, and saying so is the whole
      * point: an operator who sees FAIL raises nothing, and an operator who
-     * sees TIMEOUT raises the clock. zcl_spawn_capture_merged_observed()
+     * sees TIMEOUT raises the clock. The binary capture
      * reports that directly via *timed_out; the elapsed-time fallback stays
      * as a second signal for a child that exited exactly at the deadline
      * without a verdict. */
     if (!*timed_out && elapsed_ms >= (int64_t)gate_s * 1000
         && !reading->saw_verdict_line)
         *timed_out = true;
-    (void)rc;   /* never a verdict input; see engine/engine_verdict.h */
-    return read_ok;
+    return read_ok && saved;
 }
 
 /* ── receipt ─────────────────────────────────────────────────────────── */

@@ -272,6 +272,8 @@ ZCL_TEST_GROUP_BUILD_NEED("test_contrib_inbox", "build/bin/z23-contrib-inbox", "
 ZCL_TEST_GROUP_BUILD_NEED("test_lab_peer", "build/bin/z23-lab-peer", "lab-peer")
 ZCL_TEST_GROUP_BUILD_NEED("test_engine", "build/bin/z23-engine-unit",
                          "engine-unit")
+ZCL_TEST_GROUP_BUILD_NEED("test_engine_gate_capture", "build/bin/z23-engine-unit",
+                         "engine-unit")
 
 /* Request-boundary acceptance executes both real CLI entry points. */
 ZCL_TEST_GROUP_BUILD_NEED("test_rpc", "build/bin/zclassic-cli", "zclassic-cli")
