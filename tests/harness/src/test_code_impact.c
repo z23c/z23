@@ -1082,14 +1082,15 @@ static int test_code_impact_rule_predicate(void)
             const char *path;
             size_t hits;
             size_t group_count;
-            const char *groups[4];
+            const char *groups[6];
         } cases[] = {
             {"tests/harness/include/test/plugin_host_node_fixture.h", 1, 3,
              {"plugin_package", "plugin_run_hostcall", "make_lint_gates"}},
             {"engine/composition/goals.def", 1, 2,
              {"fleet_goals", "make_lint_gates"}},
-            {"tests/fixtures/lab/rev_cases.json", 1, 4,
-             {"lab", "lab_promote", "command_registry_catalog", "native_api_contract"}},
+            {"tests/fixtures/lab/rev_cases.json", 1, 6,
+             {"lab", "lab_case_members", "lab_diff_context", "lab_promote",
+              "command_registry_catalog", "native_api_contract"}},
             {"platform/adapters/outbound/persistence/src/hodl_history_sqlite.c", 1, 2,
              {"hodl_history_port", "make_lint_gates"}},
             {"tests/harness/src/test_zcode_policy.c", 1, 1,
