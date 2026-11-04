@@ -2972,7 +2972,7 @@ static void tc_excerpt_print(FILE *out, const char *prefix, size_t lineno,
 }
 
 /* Ring of the last TESTCACHE_EXCERPT_CONTEXT log lines, slot = n % ring size. */
-#define TC_EXCERPT_BUF 4096
+#define TC_EXCERPT_BUF 8192
 
 static void tc_excerpt_keep(char ring[][TC_EXCERPT_BUF], size_t n,
                             const char *text)
@@ -2995,18 +2995,18 @@ static size_t tc_excerpt_print_before(FILE *out, const char *prefix, size_t n,
     return count;
 }
 
-/* A failure flight-recorder block ("--- evidence ..." to "--- end evidence
- * ---", tests/harness test_note) follows its FAIL line and holds the reason,
- * so it is kept whole, line-for-line, up to a shared TESTCACHE_EXCERPT_EVIDENCE
- * lines. True when `line` is one to keep. */
+/* Keep at most four failure-recorder blocks. */
 static bool tc_excerpt_evidence(const char *line, bool *inside, size_t *budget)
 {
-    if (!*inside && strncmp(line, "--- evidence ", 13) == 0) *inside = true;
+    if (!*inside && strncmp(line, "--- evidence ", 13) == 0) {
+        *inside = true;
+        if (*budget && *budget != SIZE_MAX) (*budget)--;
+        else *budget = SIZE_MAX;
+    }
     if (!*inside) return false;
+    bool keep = *budget != SIZE_MAX;
     if (strncmp(line, "--- end evidence ---", 20) == 0) *inside = false;
-    if (*budget == 0) return false;
-    (*budget)--;
-    return true;
+    return keep;
 }
 
 size_t testcache_print_log_excerpt(FILE *out, const char *path,
@@ -3024,12 +3024,32 @@ size_t testcache_print_log_excerpt(FILE *out, const char *path,
     size_t tail_start = total > max_tail ? total - max_tail + 1 : 1;
     rewind(fp);
     size_t printed = 0, marks = 0, shown_upto = 0;
-    size_t evidence_budget = TESTCACHE_EXCERPT_EVIDENCE;
+    size_t evidence_budget = TESTCACHE_EXCERPT_EVIDENCE_BLOCKS;
     bool in_evidence = false;
+    size_t evidence_bytes = 0;
     for (size_t n = 1; tc_excerpt_next_line(fp, line, sizeof(line)); n++) {
         bool in_tail = n >= tail_start;
+        bool was_inside = in_evidence;
+        bool starts = !was_inside && strncmp(line, "--- evidence ", 13) == 0;
         bool evidence = tc_excerpt_evidence(line, &in_evidence,
                                             &evidence_budget);
+        if (starts) evidence_bytes = 0;
+        if ((was_inside || starts) && !evidence) {
+            shown_upto = n;
+            continue;
+        }
+        if (evidence) {
+            size_t prior_bytes = evidence_bytes;
+            evidence_bytes += strlen(line) + 1;
+            if (evidence_bytes > 16384) {
+                if (prior_bytes <= 16384)
+                    fprintf(out, "%sL%zu: [evidence frame exceeds bound]\n", prefix, n);
+                if (strncmp(line, "--- end evidence ---", 20) == 0)
+                    fprintf(out, "%sL%zu: %s\n", prefix, n, line);
+                shown_upto = n;
+                continue;
+            }
+        }
         if (!in_tail && !evidence &&
             (marks >= max_marks || !tc_excerpt_is_mark(line))) {
             tc_excerpt_keep(ring, n, line);
@@ -3040,7 +3060,10 @@ size_t testcache_print_log_excerpt(FILE *out, const char *path,
             printed += tc_excerpt_print_before(out, prefix, n, shown_upto,
                                                ring);
         }
-        tc_excerpt_print(out, prefix, n, line);
+        if (evidence)
+            fprintf(out, "%sL%zu: %s\n", prefix, n, line);
+        else
+            tc_excerpt_print(out, prefix, n, line);
         printed++;
         shown_upto = n;
         tc_excerpt_keep(ring, n, line);

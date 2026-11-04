@@ -2451,11 +2451,21 @@ static void dl_first_actionable(const char *text, char *out, size_t cap)
         if (strncmp(result, "PASS", 4) == 0 &&
             (result[4] == '\0' || strchr(" \t\r", result[4])))
             continue;
-        for (size_t i = 0; i < sizeof(needles) / sizeof(needles[0]); i++) {
+        if (strncmp(result, "FAIL", 4) == 0 || strstr(result, ": FAIL") ||
+            strstr(result, ": error:") || strstr(result, "fatal error:") ||
+            strstr(result, "undefined reference")) {
+            dl_sanitize_copy(line, out, cap);
+            free(copy);
+            return;
+        }
+        if (strstr(result, " -c ") &&
+            (strstr(result, "zcc ") || strstr(result, "clang ") ||
+             strstr(result, "gcc ") || strncmp(result, "cc ", 3) == 0))
+            continue;
+        for (size_t i = 0; !out[0] && i < sizeof(needles) / sizeof(needles[0]); i++) {
             if (strstr(line, needles[i])) {
                 dl_sanitize_copy(line, out, cap);
-                free(copy);
-                return;
+                break;
             }
         }
     }
@@ -7196,10 +7206,12 @@ bool dl_proof_intent_bind(const struct dl_dirs *d, struct dl_row *row)
 /* The settled failure's evidence digest, read through the same status
  * reader the verdict came from. Empty when the record carries none. */
 static void dl_proof_evidence_read(const char *wt, const char *local,
-                                   const char *base, char *out, size_t cap)
+                                   const char *base, char *out, size_t cap,
+                                   struct zcl_dev_proof_failure_identity *identity)
 {
     const char *stub = dl_stub();
     out[0] = '\0';
+    memset(identity, 0, sizeof(*identity));
 #if defined(ZCL_DEV_BUILD)
     if (stub && strcmp(stub, "status") != 0) return;
 #else
@@ -7207,8 +7219,75 @@ static void dl_proof_evidence_read(const char *wt, const char *local,
 #endif
     struct zcl_dev_proof_status status = {0};
     if (zcl_dev_proof_status_read(wt, local, base, &status) &&
-        status.state == ZCL_DEV_PROOF_STATE_FAILED)
+        status.state == ZCL_DEV_PROOF_STATE_FAILED) {
         (void)snprintf(out, cap, "%s", status.evidence);
+        *identity = status.failure_identity;
+    }
+}
+
+/* The retained log is an observation associated with the validated failure
+ * attempt; its bytes are not covered by the failure-record binding. */
+static void dl_retained_frames(const char *wt, const char *local, const char *base,
+                               const struct zcl_dev_proof_failure_identity *identity,
+                               char *out, size_t cap)
+{
+    out[0] = '\0';
+#if !defined(_WIN32)
+    if (!identity->valid) return;
+    int fd = open(identity->canonical_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    const char *parts[] = {".cache", "zcl-dev-proof", "attempts", identity->attempt, "logs"};
+    for (size_t i = 0; fd >= 0 && i < sizeof(parts) / sizeof(parts[0]); i++) {
+        int next = openat(fd, parts[i], O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        close(fd);
+        fd = next;
+    }
+    if (fd < 0) return;
+    char name[160];
+    int n = snprintf(name, sizeof(name), "%s-%s.test.log", local, base);
+    int logfd = n > 0 && (size_t)n < sizeof(name)
+                    ? openat(fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    if (logfd < 0 && errno == ENOENT)
+        logfd = openat(fd, "test.log", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    close(fd);
+    if (logfd < 0) return;
+    struct stat before, after;
+    if (fstat(logfd, &before) != 0 || !S_ISREG(before.st_mode) ||
+        before.st_size < 0 || before.st_size > 32 * 1024 * 1024) {
+        close(logfd);
+        return;
+    }
+    FILE *f = fdopen(logfd, "r");
+    if (!f) { close(logfd); return; }
+    char line[8192], frame[16384];
+    size_t used = 0, frame_used = 0;
+    unsigned count = 0;
+    bool inside = false, overflow = false;
+    while (count < 4 && fgets(line, sizeof(line), f)) {
+        if (!inside && strncmp(line, "--- evidence ", 13) == 0) {
+            inside = true; overflow = false; frame_used = 0;
+        }
+        if (!inside) continue;
+        size_t len = strlen(line);
+        if (!len || line[len - 1] != '\n' || frame_used + len >= sizeof(frame))
+            overflow = true;
+        if (!overflow) { memcpy(frame + frame_used, line, len); frame_used += len; }
+        if (strncmp(line, "--- end evidence ---", 20) != 0) continue;
+        if (!overflow && used + frame_used < cap) {
+            memcpy(out + used, frame, frame_used); used += frame_used; out[used] = '\0';
+            count++;
+        }
+        inside = false;
+    }
+    bool stable = fstat(fileno(f), &after) == 0 && dl_same_file_snapshot(&before, &after);
+    fclose(f);
+    struct zcl_dev_proof_status now = {0};
+    if (!stable || !zcl_dev_proof_status_read(wt, local, base, &now) ||
+        !now.failure_identity.valid ||
+        strcmp(identity->attempt, now.failure_identity.attempt) ||
+        strcmp(identity->archive_sha3, now.failure_identity.archive_sha3)) out[0] = '\0';
+#else
+    (void)wt; (void)local; (void)base; (void)identity; (void)cap;
+#endif
 }
 
 /* The failing step's own log, repo-relative, when the digest's `logs:` line
@@ -7254,8 +7333,9 @@ static void dl_failed_proof_evidence(const struct dl_dirs *d,
                                      struct dl_row *row, const char *token)
 {
     char evidence[1280], first[256], path[sizeof(row->log_path) + 16];
+    struct zcl_dev_proof_failure_identity identity;
     dl_proof_evidence_read(d->wt, row->local, row->base, evidence,
-                           sizeof(evidence));
+                           sizeof(evidence), &identity);
     if (!evidence[0]) return;
     size_t n = strcspn(evidence, "\n");
     char line[1280];
@@ -7279,6 +7359,14 @@ static void dl_failed_proof_evidence(const struct dl_dirs *d,
     dl_log(row, "proof evidence:\n");
     dl_log(row, evidence);
     dl_log(row, "\n");
+    char frames[65536] = {0};
+    if (strcmp(row->dimension, "test") == 0)
+        dl_retained_frames(d->wt, row->local, row->base, &identity,
+                           frames, sizeof(frames));
+    if (frames[0]) {
+        dl_log(row, "retained attempt log observation (unbound log bytes):\n");
+        dl_log(row, frames);
+    }
     size_t len = strlen(row->log_path);
     if (len < 4 || strcmp(row->log_path + len - 4, ".log") != 0) return;
     (void)snprintf(path, sizeof(path), "%.*s.evidence", (int)(len - 4),
@@ -7288,6 +7376,10 @@ static void dl_failed_proof_evidence(const struct dl_dirs *d,
     (void)dl_append_text(path, "\n");
     (void)dl_append_text(path, evidence);
     (void)dl_append_text(path, "\n");
+    if (frames[0]) {
+        (void)dl_append_text(path, "retained attempt log observation (unbound log bytes):\n");
+        (void)dl_append_text(path, frames);
+    }
 }
 #endif
 

@@ -416,17 +416,16 @@ size_t testcache_depfile_count(const struct testcache *tc);
  *     order, even when two marks share them), then
  *   - the last max_tail lines of the log.
  *   - every "--- evidence <file>:<line> ---" .. "--- end evidence ---" block
- *     (the test failure flight recorder), up to TESTCACHE_EXCERPT_EVIDENCE
- *     lines in all, in place of the mark/context rules.
+ *     (the test failure flight recorder), up to four blocks.
  *
- * Every printed line is "<prefix>L<n>: <text>", text truncated to
- * TESTCACHE_EXCERPT_LINE_MAX bytes. Returns the number of log lines printed
+ * Every printed line is "<prefix>L<n>: <text>". Ordinary lines are truncated
+ * to TESTCACHE_EXCERPT_LINE_MAX bytes; evidence lines retain their content.
+ * Returns the number of log lines printed
  * (0 when path cannot be opened or is empty). The runner calls this for a
  * LOAD-FLAKY group; the contract test drives it on a synthetic log. */
 #define TESTCACHE_EXCERPT_LINE_MAX 400
 #define TESTCACHE_EXCERPT_CONTEXT 3
-/* Lines of "--- evidence ---" flight-recorder blocks kept whole, in total. */
-#define TESTCACHE_EXCERPT_EVIDENCE 80
+#define TESTCACHE_EXCERPT_EVIDENCE_BLOCKS 4
 size_t testcache_print_log_excerpt(FILE *out, const char *path,
                                    const char *prefix, size_t max_marks,
                                    size_t max_tail);

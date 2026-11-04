@@ -865,6 +865,7 @@ struct dlx_evidence_case {
     const char *file;           /* repo-relative file the cause must name */
     const char *gate;           /* proof gate the cause must name */
     bool frame;
+    bool no_frame;
 };
 
 static const char k_dlx_evidence_test_script[] =
@@ -1011,7 +1012,7 @@ static bool dlx_evidence_outcome_ok(const struct dlx_evidence_case *k,
         return false;
     }
     text[len] = '\0';
-    return dlx_has(text, k->token) &&
+    return dlx_has(text, k->token) && (!k->no_frame || !strstr(text, "FRAME-HEAD")) &&
            dlx_evidence_text_ok(k, text, real_wt) &&
            (!k->frame || (strstr(text, "--- evidence test.c:1 ---") &&
                           strstr(text, "FRAME-HEAD") && strstr(text, "FRAME-TAIL") &&
@@ -1023,8 +1024,24 @@ static bool dlx_evidence_case_run(const struct dlx_evidence_case *k)
     char real_wt[PATH_MAX], local[64], base[64];
     dlx_isolate(k->tag);
     bool ok = dlx_evidence_settle(k, real_wt, local, base) &&
-              dlx_evidence_record_ok(k, real_wt, local, base) &&
-              dlx_evidence_outcome_ok(k, real_wt);
+              dlx_evidence_record_ok(k, real_wt, local, base);
+    struct zcl_dev_proof_status status = {0};
+    ok = ok && zcl_dev_proof_status_read(real_wt, local, base, &status) &&
+         status.failure_identity.valid;
+    if (ok && k->no_frame) {
+        char path[PATH_MAX + 200], record[4096];
+        size_t len = 0;
+        (void)snprintf(path, sizeof(path), "%s/.cache/zcl-dev-proof/%s-%s.failed",
+                       real_wt, local, base);
+        ok = dlx_slurp(path, record, sizeof(record) - 1, &len);
+        if (ok) {
+            record[len] = '\0';
+            char *binding = strstr(record, "\nzcl.dev_proof_failure_binding.v1\n");
+            if (!binding) ok = false;
+            else { *binding = '\0'; ok = dlx_write(path, record); }
+        }
+    }
+    ok = ok && dlx_evidence_outcome_ok(k, real_wt);
     dlx_restore();
     return ok;
 }
@@ -1048,6 +1065,11 @@ int test_dev_land_proof_evidence_test(void)
             .frame = true,
         };
         ASSERT(dlx_evidence_case_run(&k));
+        struct dlx_evidence_case unbound = k;
+        unbound.tag = "evidence_unbound";
+        unbound.frame = false;
+        unbound.no_frame = true;
+        ASSERT(dlx_evidence_case_run(&unbound));
         PASS();
     }
 _test_next:;
@@ -1066,6 +1088,13 @@ int test_dev_land_proof_evidence_compile(void)
         zcl_dev_land_test_first_actionable("widget.c:12:5: error: bad type\n",
                                           detail, sizeof(detail));
         ASSERT_STR_EQ(detail, "widget.c:12:5: error: bad type");
+        zcl_dev_land_test_first_actionable(
+            "PASS check-pipefail-status-pipe\nFAIL first-gate\nFAIL second-gate\n",
+            detail, sizeof(detail));
+        ASSERT_STR_EQ(detail, "FAIL first-gate");
+        zcl_dev_land_test_first_actionable("zcc -c gate_no_wallclock_assertion.o\n",
+                                          detail, sizeof(detail));
+        ASSERT_STR_EQ(detail, "");
         PASS();
     }
     TEST("land: a failed build names its first compiler error, relative") {

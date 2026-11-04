@@ -16805,11 +16805,15 @@ pr-check:
 # `code tests`: they are capped and miss groups the proof runs.
 # Logs: build/scratch/agent-verify.<step>.log; verdict lines: agent-verify.rc.
 # A failing step also copies the "--- evidence ... --- end evidence ---"
-# blocks (tests/harness test_note flight recorder, at most 60 lines) into the rc.
+# blocks (tests/harness test_note flight recorder, at most four) into the rc.
 # Pass = last rc line is `agent-verify: OK`; no such last line = interrupted.
 .PHONY: agent-verify-evidence
 agent-verify-evidence:
-	@sed -n '/^\(  first| L[0-9][0-9]*: \)\{0,1\}--- evidence /,/^\(  first| L[0-9][0-9]*: \)\{0,1\}--- end evidence ---/p' "$(LOG)" | head -60 | cut -c1-200
+	@awk 'BEGIN { n=0; bytes=0; active=0 } \
+	  /^(  first\| L[0-9]+: )?--- evidence / { active=(++n <= 4); bytes=0 } \
+	  active { bytes+=length($$0)+1; if (bytes <= 131072) print; \
+	           else if (active == 1) { print "[evidence frame exceeds bound]"; active=2 } } \
+	  /^(  first\| L[0-9]+: )?--- end evidence ---/ { active=0 }' "$(LOG)"
 
 .PHONY: agent-verify
 agent-verify:
