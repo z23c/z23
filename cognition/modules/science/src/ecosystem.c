@@ -7,6 +7,7 @@
 #include "base/log_macros.h"
 #include "json/json.h"
 #include "platform/directory_compat.h"
+#include "platform/positioned_file.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -38,29 +39,7 @@ static bool eco_add_named(struct science_ecosystem_named_count *rows,
     return true;
 }
 
-static bool eco_read_small(const char *path, char *buf, size_t cap,
-                           size_t *len)
-{
-    FILE *f = fopen(path, "rb");
-    if (!f)
-        return false;
-    size_t n = fread(buf, 1, cap - 1u, f);
-    bool err = ferror(f) != 0;
-    bool extra = false;
-    if (n == cap - 1u) {
-        char overflow;
-        extra = fread(&overflow, 1, 1, f) == 1u;
-    }
-    if (fclose(f) != 0)
-        err = true;
-    if (err || extra)
-        return false;
-    buf[n] = '\0';
-    *len = n;
-    return true;
-}
-
-static void eco_package_identity(const char *manifest, const char *dir_name,
+static void eco_package_identity(const struct platform_positioned_file *manifest, const char *dir_name,
                                  char name[SCIENCE_ECOSYSTEM_NAME_MAX],
                                  char detail[SCIENCE_ECOSYSTEM_DETAIL_MAX])
 {
@@ -68,11 +47,12 @@ static void eco_package_identity(const char *manifest, const char *dir_name,
                    dir_name ? dir_name : "");
     detail[0] = '\0';
     char buf[8192];
-    size_t len = 0;
+    uint64_t len = 0;
     struct json_value root;
     json_init(&root);
-    if (eco_read_small(manifest, buf, sizeof(buf), &len) &&
-        json_read(&root, buf, len) && root.type == JSON_OBJ) {
+    if (platform_positioned_file_size(manifest, &len) && len < sizeof(buf) &&
+        platform_positioned_file_read(manifest, buf, (size_t)len, 0) == (int64_t)len &&
+        json_read(&root, buf, (size_t)len) && root.type == JSON_OBJ) {
         const char *json_name = json_get_str(json_get(&root, "name"));
         const char *language = json_get_str(json_get(&root, "language"));
         if (json_name && json_name[0])
@@ -104,18 +84,19 @@ static bool eco_collect_packages(const char *root, const char *rel,
             continue;
         char manifest[ECO_WALK_PATH_MAX];
         int m = snprintf(manifest, sizeof(manifest), "%s/%s/zcode-package.json",
-                         full, name);
+                         rel, name);
         if (m <= 0 || (size_t)m >= sizeof(manifest)) {
             ok = false;
             break;
         }
-        FILE *probe = fopen(manifest, "rb");
-        if (!probe)
+        struct platform_positioned_file file;
+        platform_positioned_file_init(&file);
+        if (!platform_positioned_file_open_beneath(&file, root, manifest))
             continue;
-        (void)fclose(probe);
         char pkg_name[SCIENCE_ECOSYSTEM_NAME_MAX];
         char detail[SCIENCE_ECOSYSTEM_DETAIL_MAX];
-        eco_package_identity(manifest, name, pkg_name, detail);
+        eco_package_identity(&file, name, pkg_name, detail);
+        platform_positioned_file_close(&file);
         out->package_count++;
         ok = eco_add_named(out->packages, SCIENCE_ECOSYSTEM_PACKAGES_MAX,
                            &out->package_listed, &out->packages_truncated,

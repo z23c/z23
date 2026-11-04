@@ -399,6 +399,8 @@ static int eco_check_other_trees(const struct science_ecosystem_snapshot *snap,
     ECO_CHECK("a one-package tree builds",
               mkdir_p(dir_one, "docs") &&
                   write_pkg(dir_one, "only", "only/only"));
+    ECO_CHECK("a directory pretending to be a manifest is ignored",
+              mkdir_p(dir_one, "packages/decoy/zcode-package.json"));
     struct science_ecosystem_snapshot one;
     struct science_corpus_report partial;
     zcl_alloc_fault_fail_next("platform_directory_entries");

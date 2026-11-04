@@ -970,7 +970,6 @@ ZCL_MODULE_CAPABILITY("core/modules/sapling/src/sapling_circuit.c", CAP_FS_WRITE
 ZCL_MODULE_CAPABILITY("core/modules/sapling/src/sapling_prover_c23.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("core/modules/sapling/src/sapling_prover_native.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/science/src/code_growth.c", CAP_FS_WRITE, "groups bounded Git-reader output by UTC day and records diagnostic failures")
-ZCL_MODULE_CAPABILITY("cognition/modules/science/src/ecosystem.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/science/src/science_claim.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/science/src/science_corpus.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("core/modules/script/src/interpreter.c", CAP_FS_WRITE, "")
