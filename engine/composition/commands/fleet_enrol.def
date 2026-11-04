@@ -121,6 +121,7 @@ ZCL_COMMAND_READY_COMMAND(
     "key, that its nonce has never been spent, that the name is free, and "
     "that the box signed its own facts; then appends one operator-sealed row "
     "to the machine roster and assigns a relay port from a closed range. "
+    "A successful reply includes machine_line, the exact sealed row for import. "
     "When the receipt carried a dedicated ~/.ssh/z23_fleet.pub, it also adds "
     "ONE `restrict,port-forwarding,permitlisten=` line to the operator's "
     "authorized_keys — a loopback port forward, never a shell, never agent "

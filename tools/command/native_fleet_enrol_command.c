@@ -674,6 +674,12 @@ static void fe_admit(const struct zcl_command_request *request,
     fe_admit_role(reply, &receipt, now);
     fe_admit_bridge(reply, &receipt, port,
                     !(bridge && strcmp(bridge, "no") == 0));
+    if (!json_push_kv_str(&reply->data, "machine_line", sealed)) {
+        fe_fail_mut(reply, "FLEET_ADMIT_REPLY_INCOMPLETE", "render",
+                    "The machine was admitted, but its signed code could not be returned. Check the roster before retrying.",
+                    "machine_line_allocation_failed", true);
+        return;
+    }
     (void)zcl_command_reply_add_next(reply, "fleet.machines", "{}",
                                      "see the machine this fleet now holds");
 }

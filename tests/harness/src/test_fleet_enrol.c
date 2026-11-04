@@ -1958,6 +1958,86 @@ static bool fe_admit_with(const char *name, uint8_t box_byte,
     return fe_leaf_call("fleet.admit", "zcl.fleet.admit.v1", body, reply);
 }
 
+struct fe_line_match { const char *line; bool found; };
+static void fe_match_line(const char *line, void *user)
+{
+    struct fe_line_match *match = user;
+    if (!strcmp(line, match->line)) match->found = true;
+}
+
+static int test_fe_admitted_machine_line(void)
+{
+    int failures = 0;
+    TEST("fleet admit returns the exact signed machine row") {
+        uint8_t seed[32], pub[32], box_seed[32], box_pub[32];
+        char dd[PATH_MAX];
+        struct fleet_machine machine;
+        struct zcl_command_reply reply;
+        const char *why = NULL;
+        fe_isolate("admitted-machine-line");
+        ASSERT(fe_manager_key(seed, pub));
+        ASSERT(fe_datadir(dd, sizeof(dd), "admitted-machine-line-dd"));
+        ASSERT(fe_admit_with("studio", 0x72, seed, pub, dd, "yes", &reply));
+        ASSERT(reply.exit_code != ZCL_COMMAND_EXIT_OK);
+        ASSERT(json_get(&reply.data, "machine_line") == NULL);
+        zcl_command_reply_free(&reply);
+        ASSERT(fe_admit_with("studio", 0x72, seed, pub, dd, NULL, &reply));
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        const char *line = json_get_str(json_get(&reply.data, "machine_line"));
+        ASSERT(line && line[0]);
+        ASSERT(fleet_machine_parse(line, pub, &machine, &why));
+        fe_key(0x72, box_seed, box_pub);
+        ASSERT_STR_EQ(machine.receipt.invite.name, "studio");
+        ASSERT_STR_EQ(machine.receipt.onion, FE_ONION);
+        ASSERT(memcmp(machine.receipt.box_pubkey, box_pub, sizeof(box_pub)) == 0);
+        ASSERT_EQ(machine.relay_port, json_get_int(json_get(&reply.data, "relay_port")));
+        struct fe_line_match match = {.line = line};
+        ASSERT(fleet_roster_each_line(fe_match_line, &match, &why));
+        ASSERT(match.found);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fe_admit_append_refusal(void)
+{
+    int failures = 0;
+    TEST("fleet admit append refusal returns no machine code and leaves invite usable") {
+        uint8_t seed[32], pub[32];
+        int64_t issued_at = (int64_t)time(NULL);
+        char path[FLEET_ENROL_PATH_MAX], receipt[FLEET_ENROL_MACHINE_TEXT_MAX];
+        char body[FLEET_ENROL_MACHINE_TEXT_MAX + 64];
+        struct fleet_receipt parsed;
+        struct zcl_command_reply reply;
+        const char *why = NULL;
+        bool spent = false;
+        fe_isolate("admit-append-refusal");
+        ASSERT(fe_manager_key(seed, pub));
+        ASSERT(fe_receipt_for("studio", 0x72, seed, pub, issued_at,
+                              receipt, sizeof(receipt)));
+        ASSERT(fleet_receipt_parse(receipt, &parsed, NULL, 0, NULL, &why));
+        ASSERT(fleet_enrol_state_path("machines.roster", path, sizeof(path)));
+        FILE *file = fopen(path, "w");
+        ASSERT(file != NULL && fclose(file) == 0 && chmod(path, 0400) == 0);
+        (void)snprintf(body, sizeof(body), "{\"receipt\":\"%s\",\"bridge\":\"no\"}", receipt);
+        ASSERT(fe_leaf_call("fleet.admit", "zcl.fleet.admit.v1", body, &reply));
+        ASSERT(reply.exit_code != ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(reply.error.code, "FLEET_ROSTER_UNWRITABLE");
+        ASSERT(json_get(&reply.data, "machine_line") == NULL);
+        zcl_command_reply_free(&reply);
+        ASSERT(fleet_nonce_seen(parsed.invite.nonce, &spent, &why) && !spent);
+        ASSERT(chmod(path, 0600) == 0);
+        ASSERT(fe_leaf_call("fleet.admit", "zcl.fleet.admit.v1", body, &reply));
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(json_get_str(json_get(&reply.data, "machine_line")) != NULL);
+        zcl_command_reply_free(&reply);
+        ASSERT(fleet_nonce_seen(parsed.invite.nonce, &spent, &why) && spent);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_fe_anchor_require_spelling(void)
 {
     int failures = 0;
@@ -3816,6 +3896,8 @@ int test_fleet_enrol(void)
     failures += test_fe_admit_requires_anchor();
     failures += test_fe_import_requires_anchor();
     failures += test_fe_anchor_require_spelling();
+    failures += test_fe_admitted_machine_line();
+    failures += test_fe_admit_append_refusal();
     failures += test_fe_anchor_unreadable_fails_closed();
     failures += test_fe_anchor_rotation_and_invite();
     failures += test_fe_roster_gate_provider();
