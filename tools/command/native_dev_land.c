@@ -7298,8 +7298,8 @@ static void dl_retained_frames(const char *wt, const char *local, const char *ba
     }
     FILE *f = fdopen(logfd, "r");
     if (!f) { close(logfd); return; }
-    char line[8192], frame[32768];
-    size_t used = 0, frame_used = 0;
+    char line[16385], frame[65537];
+    size_t used = 0, frame_used = 0, raw_used = 0;
     unsigned count = 0;
     bool inside = false, overflow = false, frame_prefixed = false;
     unsigned long previous = 0;
@@ -7309,7 +7309,7 @@ static void dl_retained_frames(const char *wt, const char *local, const char *ba
         const char *text = dl_frame_text(line, &prefixed, &number);
         if (!text) { if (inside) overflow = true; continue; }
         if (!inside && strncmp(text, "--- evidence ", 13) == 0) {
-            inside = true; overflow = false; frame_used = 0;
+            inside = true; overflow = false; frame_used = 0; raw_used = 0;
             frame_prefixed = prefixed;
             previous = number;
         } else if (inside && (prefixed != frame_prefixed ||
@@ -7319,7 +7319,8 @@ static void dl_retained_frames(const char *wt, const char *local, const char *ba
         if (!inside) continue;
         if (prefixed) previous = number;
         size_t len = strlen(text);
-        if (!len || text[len - 1] != '\n' || frame_used + len >= sizeof(frame))
+        raw_used += len;
+        if (!len || text[len - 1] != '\n' || raw_used > 16384)
             overflow = true;
         if (!overflow && !dl_frame_safe_append(frame, sizeof(frame), &frame_used, text))
             overflow = true;
@@ -7411,7 +7412,7 @@ static void dl_failed_proof_evidence(const struct dl_dirs *d,
     dl_log(row, "proof evidence:\n");
     dl_log(row, evidence);
     dl_log(row, "\n");
-    char frames[131072] = {0};
+    char frames[262145] = {0};
     if (strcmp(row->dimension, "test") == 0)
         dl_retained_frames(d->wt, row->local, row->base, &identity,
                            frames, sizeof(frames));

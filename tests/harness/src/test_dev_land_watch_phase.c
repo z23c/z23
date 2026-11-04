@@ -877,6 +877,7 @@ static const char k_dlx_evidence_test_script[] =
     " 'FAIL at tests/harness/src/test_golden_dev_cycle.c:367 (hotswap_ms < 1000.0)' \\\n"
     " '--- evidence test.c:1 ---' 'FRAME-HEAD'\n"
     "printf '\\033[31munsafe-control\\n'\n"
+    "printf 'utf8-\\303\\251\\n'\n"
     "printf 'FRAME-LONG-%09000d-FRAME-LONG-END\\n' 0\n"
     "printf '%s\\n' 'FRAME-TAIL' '--- end evidence ---' \\\n"
     " '  first| L11: --- evidence retry.c:2 ---' \\\n"
@@ -1025,6 +1026,7 @@ static bool dlx_evidence_outcome_ok(const struct dlx_evidence_case *k,
            (!k->frame || (strstr(text, "--- evidence test.c:1 ---") &&
                           strstr(text, "FRAME-HEAD") && strstr(text, "FRAME-TAIL") &&
                           strstr(text, "FRAME-LONG-END") &&
+                          strstr(text, "utf8-\303\251") &&
                           strstr(text, "--- end evidence ---") &&
                           strstr(text, "RETRY-HEAD") && strstr(text, "RETRY-TAIL") &&
                           !strstr(text, "BAD-PREFIX-FRAME") && !strchr(text, '\033')));
