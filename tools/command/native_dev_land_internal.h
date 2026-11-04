@@ -115,6 +115,8 @@ struct dl_row {
      * in the stacked history; "" otherwise. */
     long long train_solo;
     char train_commit[80];
+    /* Versioned, replicated split cohort; empty retains legacy behavior. */
+    char train_group[768];
 };
 
 /* ── the objectives snapshot (native_dev_land_objectives.c) ───────────── */
@@ -190,11 +192,13 @@ bool dl_train_intent_bind(const struct dl_dirs *d, struct dl_row *row,
 /* The row heads a formed train (train_commit and the stacked proof_intent
  * persist together); false for every plain row, which no train code reads
  * the queue or the outcome history for. */
+void dl_train_forget_group(struct dl_row *rows, size_t n, const struct dl_row *hit);
+bool dl_train_group_valid(const struct dl_row *row);
 bool dl_train_formed(const struct dl_row *row);
 /* A failed train proof is no verdict on the head alone: requeue the head
  * and release its members, all marked to prove alone. False: not a train. */
 bool dl_train_fallback(const struct dl_dirs *d, struct dl_row *row,
-                       const char *detail, struct zcl_command_reply *reply);
+                       const char *detail, struct zcl_command_reply *reply, bool confirmed);
 /* A superseded pair can never publish: release the rows bound to it. */
 void dl_train_unbind(const struct dl_dirs *d, const char *intent,
                      long long head, bool solo);

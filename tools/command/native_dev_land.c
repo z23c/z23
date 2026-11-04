@@ -975,7 +975,7 @@ static bool dl_row_semantics_ok(const struct dl_row *r)
     if (strcmp(r->state, "fenced") == 0 && (!r->publication_signature[0] ||
         !dl_sha_ok(r->base) || !dl_sha_ok(r->local) || !dl_sha_ok(r->tree)))
         return false;
-    return dl_row_state_ok(r) && dl_row_phase_ok(r) && dl_row_pair_ok(r) &&
+    return dl_train_group_valid(r) && dl_row_state_ok(r) && dl_row_phase_ok(r) && dl_row_pair_ok(r) &&
            dl_publication_shape_ok(r) && dl_remote_receipt_shape_ok(r) && dl_hold_row_ok(r);
 }
 
@@ -1022,6 +1022,7 @@ static bool dl_optional_row_strings(const char *line, struct dl_row *r)
         { "local", r->local, sizeof(r->local) },
         { "tree", r->tree, sizeof(r->tree) },
         { "train_commit", r->train_commit, sizeof(r->train_commit) },
+        { "train_group", r->train_group, sizeof(r->train_group) },
         { "proof_intent", r->proof_intent, sizeof(r->proof_intent) },
         { "publication_target", r->publication_target, sizeof(r->publication_target) },
         { "publication_proof", r->publication_proof, sizeof(r->publication_proof) },
@@ -1248,7 +1249,7 @@ static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
                  "\"precheck_uncertain_main\":\"%s\","
                  "\"precheck_uncertain\":%lld,\"producer_recovered\":%lld,"
                  "\"phase_mail\":%lld,\"train_solo\":%lld,"
-                 "\"train_commit\":\"%s\",\"detail\":\"%s\","
+                 "\"train_commit\":\"%s\",\"train_group\":\"%s\",\"detail\":\"%s\","
                  "\"push_diagnostic_pending\":%d,\"fence_peer\":%lld,"
                  "\"publication_hold\":%s%s}\n",
                  r->seq, priority, e_ts, e_tip, e_wt, e_note, e_state, e_phase,
@@ -1260,7 +1261,7 @@ static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
                   * precheck admit only a 40-hex commit id or "". */
                  e_dim, e_log, r->prechecked, r->uncertain_main,
                  r->uncertain_tries, r->producer_recovered, r->phase_mail,
-                 r->train_solo, dl_sha_ok(r->train_commit) ? r->train_commit : "",
+                 r->train_solo, dl_sha_ok(r->train_commit) ? r->train_commit : "", r->train_group,
                  e_detail,
                  r->push_diagnostic_pending ? 1 : 0,
                  r->fence_peer, dl_hold_literal(r->publication_hold), dependency);
@@ -3855,6 +3856,7 @@ static int dl_cancel_take(const struct dl_dirs *d, struct dl_row *rows,
         }
         rows[kept++] = rows[i];
     }
+    if (found) dl_train_forget_group(rows, kept, hit);
     *nrows = kept;
     return found ? 1 : 0;
 }
@@ -7732,7 +7734,7 @@ static void dl_start_proof(const struct dl_dirs *d, struct dl_row *row,
     dl_log(row, detail);
     dl_log(row, "\n");
     if (p == DL_PROOF_UNAVAILABLE || p == DL_PROOF_FAILED) {
-        if (members && dl_train_fallback(d, row, detail, reply))
+        if (members && dl_train_fallback(d, row, detail, reply, p == DL_PROOF_FAILED))
             return;
         (void)snprintf(row->state, sizeof(row->state), "failed");
         (void)snprintf(row->dimension, sizeof(row->dimension), "proof");
@@ -9434,7 +9436,7 @@ static void dl_resume_failed_proof(const struct dl_dirs *d,
         dl_resume_interrupted_proof(d, row, detail, reply))
         return;
 #endif
-    if (dl_train_fallback(d, row, detail, reply))
+    if (dl_train_fallback(d, row, detail, reply, true))
         return;
     bool host_load = dl_host_load_failure(detail);
     dl_log(row, detail);
@@ -13313,6 +13315,7 @@ done:
     }
     struct dl_row *hit = dl_hold_pick(d, rows, count, seq, reply);
     if (!hit) goto done;
+    if (hold) dl_train_forget_group(rows, count, hit);
     hit->publication_hold = hold;
     if (!dl_rewrite_rows(d->land, path, rows, count)) {
         dl_fail(reply, "QUEUE_WRITE_FAILED", "hold", "cannot durably retain publication hold", path);

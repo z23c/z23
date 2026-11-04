@@ -62,8 +62,11 @@
 #include "command/native_dev_land_internal.h"
 
 #include "base/safe_alloc.h"
+#include "base/hex.h"
+#include "sha3/sha3.h"
 #include "json/json.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -72,6 +75,50 @@
 #endif
 
 #define DL_TRAIN_MAX 8
+struct dl_train_group {
+    size_t n;
+    long long seq[DL_TRAIN_MAX];
+    char tip[DL_TRAIN_MAX][41];
+};
+
+/* A descriptor is an authority, never a hint: accept only canonical bytes. */
+static bool dl_train_group_parse(const char *s, struct dl_train_group *g)
+{
+    memset(g, 0, sizeof(*g));
+    if (strncmp(s, "1:", 2) != 0) return false;
+    s += 2;
+    for (size_t i = 0; i < 64; i++)
+        if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return false;
+    s += 64;
+    if (*s++ != ':') return false;
+    while (*s && g->n < DL_TRAIN_MAX) {
+        if (*s < '1' || *s > '9') return false;
+        char *end = NULL;
+        errno = 0;
+        long long seq = strtoll(s, &end, 10);
+        if (errno || seq < 1 || !end || *end++ != '=') return false;
+        for (size_t i = 0; i < g->n; i++) if (g->seq[i] == seq) return false;
+        for (size_t i = 0; i < 40; i++)
+            if (!((end[i] >= '0' && end[i] <= '9') || (end[i] >= 'a' && end[i] <= 'f'))) return false;
+        g->seq[g->n] = seq;
+        memcpy(g->tip[g->n], end, 40);
+        g->tip[g->n++][40] = '\0';
+        s = end + 40;
+        if (!*s) break;
+        if (*s++ != ',') return false;
+    }
+    return !*s && g->n >= 2;
+}
+
+bool dl_train_group_valid(const struct dl_row *r)
+{
+    if (!r->train_group[0]) return true;
+    struct dl_train_group g;
+    if (!r->train_solo || !dl_train_group_parse(r->train_group, &g)) return false;
+    for (size_t i = 0; i < g.n; i++)
+        if (g.seq[i] == r->seq && strcmp(g.tip[i], r->tip) == 0) return true;
+    return false;
+}
 
 struct dl_train {
     size_t n;
@@ -91,7 +138,7 @@ static size_t dl_train_width(void)
 /* A row that may head a train or ride in one. */
 static bool dl_train_fresh(const struct dl_row *r)
 {
-    return r->attempt == 1 && !r->train_solo && !r->predecessor_seq &&
+    return (r->train_group[0] || (r->attempt == 1 && !r->train_solo)) && !r->predecessor_seq &&
            !r->fence_peer && !r->publication_hold;
 }
 
@@ -108,7 +155,7 @@ bool dl_train_formed(const struct dl_row *row)
 
 static bool dl_train_joinable(const struct dl_row *r, const struct dl_row *head)
 {
-    return r->seq != head->seq && strcmp(r->state, "queued") == 0 &&
+    return r->seq != head->seq && strcmp(r->train_group, head->train_group) == 0 && strcmp(r->state, "queued") == 0 &&
            dl_train_fresh(r) && !r->proof_intent[0] &&
            !r->publication_signature[0] && !r->pushed[0] &&
            !r->push_diagnostic_pending;
@@ -263,7 +310,111 @@ static bool dl_train_bound(const struct dl_dirs *d, const struct dl_row *row)
            u.count > 0;
 }
 
+/* Atomic split helpers. */
+/* Subgroup invalidation under the caller-held queue lock. */
+/* A hold/cancel releases the entire unbound subgroup to conservative solo. */
+void dl_train_forget_group(struct dl_row *rows, size_t n, const struct dl_row *hit)
+{
+    char group[sizeof(hit->train_group)];
+    (void)snprintf(group, sizeof(group), "%s", hit->train_group);
+    if (!group[0]) return;
+    for (size_t i = 0; i < n; i++) {
+        if (strcmp(rows[i].train_group, group) != 0) continue;
+        rows[i].train_solo = 1;
+        rows[i].train_group[0] = '\0';
+    }
+}
 /* ── red train: back to singles ────────────────────────────────────────── */
+struct dl_split_edit {
+    const struct dl_row *head;
+    struct dl_row result;
+    bool updated;
+};
+
+static bool dl_split_descriptor(char *out, size_t cap, const char *intent,
+                                struct dl_row **members, size_t n, unsigned half)
+{
+    struct sha3_256_ctx ctx;
+    unsigned char digest[32];
+    char hex[65];
+    sha3_256_init(&ctx);
+    sha3_256_write(&ctx, (const unsigned char *)intent, strlen(intent));
+    sha3_256_write(&ctx, (const unsigned char *)&half, sizeof(half));
+    sha3_256_finalize(&ctx, digest);
+    zcl_hex_encode(digest, sizeof(digest), hex);
+    int k = snprintf(out, cap, "1:%s:", hex);
+    if (k < 0 || (size_t)k >= cap) return false;
+    size_t used = (size_t)k;
+    for (size_t i = 0; i < n; i++) {
+        k = snprintf(out + used, cap - used, "%s%lld=%s", i ? "," : "",
+                     members[i]->seq, members[i]->tip);
+        if (k < 0 || (size_t)k >= cap - used) return false;
+        used += (size_t)k;
+    }
+    return true;
+}
+
+static bool dl_split_member_ok(const struct dl_row *r, const struct dl_row *head)
+{
+    return (r->seq == head->seq || strcmp(r->state, "queued") == 0) &&
+           strcmp(r->proof_intent, head->proof_intent) == 0 &&
+           strcmp(r->local, head->local) == 0 && strcmp(r->base, head->base) == 0 &&
+           strcmp(r->tree, head->tree) == 0 && !r->publication_hold && !r->fence_peer &&
+           !r->publication_signature[0] && !r->pushed[0] && !r->push_diagnostic_pending &&
+           strcmp(r->phase, "push") != 0;
+}
+
+static void dl_split_clear(struct dl_row *r, const char *group)
+{
+    r->train_solo = 1;
+    (void)snprintf(r->train_group, sizeof(r->train_group), "%s", group);
+    r->train_commit[0] = '\0'; r->local[0] = '\0'; r->base[0] = '\0';
+    r->tree[0] = '\0'; r->proof_intent[0] = '\0';
+    dl_publication_clear(r);
+    r->producer_recovered = 0;
+    (void)snprintf(r->state, sizeof(r->state), "queued");
+    (void)snprintf(r->phase, sizeof(r->phase), "rebase");
+}
+
+static int dl_split_edit_rows(struct dl_row *rows, size_t n, void *context)
+{
+    struct dl_split_edit *e = context;
+    struct dl_row *members[DL_TRAIN_MAX];
+    size_t count = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (rows[i].seq != e->head->seq && strcmp(rows[i].proof_intent, e->head->proof_intent)) continue;
+        if (count == DL_TRAIN_MAX || !dl_split_member_ok(&rows[i], e->head)) return -1;
+        members[count++] = &rows[i];
+    }
+    if (count < 2) return -1;
+    for (size_t i = 0; i < count; i++)
+        for (size_t j = i + 1; j < count; j++)
+            if (dl_queued_precedes(members[j], members[i])) {
+                struct dl_row *tmp = members[i]; members[i] = members[j]; members[j] = tmp;
+            }
+    if (members[0]->seq != e->head->seq || strcmp(members[0]->tip, e->head->tip)) return -1;
+    size_t first = (count + 1) / 2;
+    char group[2][768] = {{0}};
+    if ((first > 1 && !dl_split_descriptor(group[0], sizeof(group[0]), e->head->proof_intent, members, first, 0)) ||
+        (count - first > 1 && !dl_split_descriptor(group[1], sizeof(group[1]), e->head->proof_intent, members + first, count - first, 1))) return -1;
+    for (size_t i = 0; i < count; i++) dl_split_clear(members[i], group[i >= first]);
+    e->result = *members[0];
+    e->updated = true;
+    return 1;
+}
+
+static bool dl_train_split(const struct dl_dirs *d, struct dl_row *row,
+                           struct zcl_command_reply *reply)
+{
+    struct dl_split_edit edit = { .head = row };
+    if (!dl_rows_edit(d, dl_split_edit_rows, &edit) || !edit.updated) {
+        dl_fail(reply, "TRAIN_SPLIT_FAILED", "proof", "cannot atomically split the exact train", "queue changed or is unreadable");
+        return false;
+    }
+    *row = edit.result;
+    dl_step_reply(reply, row, "rebased");
+    return true;
+}
 
 /* Requeue the head in place to prove alone, then release its members, all
  * marked train_solo: in that order, so no crash leaves the train pair live
@@ -297,13 +448,15 @@ static void dl_train_requeue(const struct dl_dirs *d, struct dl_row *row,
 /* A failed train proof is no verdict on the head alone: it proves alone
  * next, as do the members it carried. */
 bool dl_train_fallback(const struct dl_dirs *d, struct dl_row *row,
-                       const char *detail, struct zcl_command_reply *reply)
+                       const char *detail, struct zcl_command_reply *reply, bool confirmed)
 {
     char why[640];
     if (!dl_train_bound(d, row))
         return false;
     (void)snprintf(why, sizeof(why), "proof failed: %.600s", detail);
-    dl_train_requeue(d, row, why, reply);
+    const char *bisect = getenv("ZCL_LAND_TRAIN_BISECT");
+    if (!confirmed || (bisect && strcmp(bisect, "0") == 0)) dl_train_requeue(d, row, why, reply);
+    else (void)dl_train_split(d, row, reply);
     return true;
 }
 
@@ -363,6 +516,27 @@ static const struct dl_row *dl_train_next(const struct dl_row *rows, size_t n,
     return best;
 }
 
+/* Validate replicated subgroup before attempting a new pair. */
+/* Verify every listed peer is still the exact unbound row before stacking. */
+static bool dl_train_group_intact(const struct dl_row *head,
+                                  const struct dl_row *rows, size_t n)
+{
+    if (!head->train_group[0]) return true;
+    struct dl_train_group g;
+    if (!dl_train_group_parse(head->train_group, &g)) return false;
+    for (size_t i = 0; i < g.n; i++) {
+        const struct dl_row *found = NULL;
+        for (size_t j = 0; j < n; j++) {
+            if (rows[j].seq != g.seq[i]) continue;
+            if (found) return false;
+            found = &rows[j];
+        }
+        if (!found || strcmp(found->tip, g.tip[i]) ||
+            strcmp(found->train_group, head->train_group)) return false;
+        if (found->seq != head->seq && !dl_train_joinable(found, head)) return false;
+    }
+    return g.seq[0] == head->seq;
+}
 /* Stack up to width-1 joinable rows onto the prepared head. Returns true
  * when any rebase ran, i.e. the worktree no longer holds the head. */
 static bool dl_train_stack(const struct dl_dirs *d, const struct dl_row *head,
@@ -381,6 +555,12 @@ static bool dl_train_stack(const struct dl_dirs *d, const struct dl_row *head,
         return false;
     bool loaded = dl_load_rows(qpath, &rows, &n, NULL, 0);
     dl_unlock(lock);
+    struct dl_train_group group;
+    if (loaded && head->train_group[0]) {
+        loaded = dl_train_group_parse(head->train_group, &group) &&
+                 dl_train_group_intact(head, rows, n);
+        if (loaded) width = group.n;
+    }
     const struct dl_row *after = head, *next;
     while (loaded && t->n + 1 < width &&
            (next = dl_train_next(rows, n, head, after)) != NULL) {
@@ -389,6 +569,7 @@ static bool dl_train_stack(const struct dl_dirs *d, const struct dl_row *head,
         if (dl_train_add(d, head, t, next) < 0)
             break;
     }
+    if (loaded && head->train_group[0] && t->n + 1 != width) t->n = 0;
     free(rows);
     return touched;
 }
@@ -425,7 +606,13 @@ static int dl_train_bind_edit(struct dl_row *rows, size_t n, void *context)
 {
     const struct dl_train_bind *b = context;
     size_t bound = 0;
+    bool head_seen = false;
     for (size_t i = 0; i < n; i++) {
+        if (rows[i].seq == b->head->seq) {
+            if (strcmp(rows[i].state, "inflight") || strcmp(rows[i].tip, b->head->tip) ||
+                strcmp(rows[i].train_group, b->head->train_group)) return -1;
+            head_seen = true;
+        }
         for (size_t j = 0; j < b->t->n; j++) {
             if (rows[i].seq != b->t->m[j].seq)
                 continue;
@@ -446,7 +633,7 @@ static int dl_train_bind_edit(struct dl_row *rows, size_t n, void *context)
             bound++;
         }
     }
-    return bound == b->t->n ? 1 : -1;
+    return head_seen && bound == b->t->n ? 1 : -1;
 }
 
 static void dl_train_log_bound(const struct dl_row *row,
@@ -537,6 +724,7 @@ static bool dl_train_member_intact(const struct dl_row *m,
                                    const struct dl_row *head)
 {
     return strcmp(m->state, "queued") == 0 && dl_train_fresh(m) &&
+           strcmp(m->train_group, head->train_group) == 0 &&
            strcmp(m->local, head->local) == 0 &&
            strcmp(m->base, head->base) == 0 &&
            strcmp(m->tree, head->tree) == 0 && !m->pushed[0] &&
