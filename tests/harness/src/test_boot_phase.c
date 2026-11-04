@@ -81,6 +81,37 @@ static void bp_close_pair(int pair[2])
     if (pair[1] >= 0) close(pair[1]);
 }
 
+static int bp_params_finish(struct bp_params_barrier *b, pthread_t caller,
+                            bool should_return_early, int before_release,
+                            bool worker_ok)
+{
+    int failures = 0;
+    char byte;
+    bool caller_joined = false, shutdown_started = false;
+    pthread_t shutdown_thread;
+    if (should_return_early && before_release == 1) {
+        if (read(b->returned[0], &byte, 1) != 1) failures++;
+        pthread_join(caller, NULL);
+        caller_joined = true;
+        if (pthread_create(&shutdown_thread, NULL, bp_params_shutdown_caller, b) == 0) {
+            shutdown_started = true;
+            struct pollfd pfd = { .fd = b->returned[0], .events = POLLIN };
+            if (poll(&pfd, 1, 2000) != 0) failures++; /* real-clock: shutdown must wait for the held real worker */
+        } else failures++;
+    }
+    if (write(b->release[1], "x", 1) != 1) failures++;
+    close(b->release[1]); b->release[1] = -1;
+    if (!caller_joined) pthread_join(caller, NULL);
+    if (shutdown_started) {
+        pthread_join(shutdown_thread, NULL);
+        if (read(b->returned[0], &byte, 1) != 1 || byte != 'j') failures++;
+    }
+    if (!boot_params_join_owned(&b->svc) || !boot_params_join_owned(&b->svc) ||
+        b->svc.params_thread_started || atomic_load(&b->loaded) != worker_ok)
+        failures++;
+    return failures;
+}
+
 static int bp_params_barrier_case(bool verifier, bool phgr, bool steady,
                                   bool confine, bool should_return_early,
                                   bool worker_ok)
@@ -119,28 +150,8 @@ static int bp_params_barrier_case(bool verifier, bool phgr, bool steady,
     int before_release = poll(&pfd, 1, 2000); /* real-clock: bounded wait for an actual blocked pthread; no fake scheduler seam */
     if (before_release != (should_return_early ? 1 : 0) || atomic_load(&b.loaded))
         failures++;
-    bool caller_joined = false, shutdown_started = false;
-    pthread_t shutdown_thread;
-    if (should_return_early && before_release == 1) {
-        if (read(b.returned[0], &byte, 1) != 1) failures++;
-        pthread_join(caller, NULL);
-        caller_joined = true;
-        if (pthread_create(&shutdown_thread, NULL, bp_params_shutdown_caller, &b) == 0) {
-            shutdown_started = true;
-            pfd.revents = 0;
-            if (poll(&pfd, 1, 2000) != 0) failures++; /* real-clock: shutdown must wait for the held real worker */
-        } else failures++;
-    }
-    if (write(b.release[1], "x", 1) != 1) failures++;
-    close(b.release[1]); b.release[1] = -1;
-    if (!caller_joined) pthread_join(caller, NULL);
-    if (shutdown_started) {
-        pthread_join(shutdown_thread, NULL);
-        if (read(b.returned[0], &byte, 1) != 1 || byte != 'j') failures++;
-    }
-    if (!boot_params_join_owned(&b.svc) || !boot_params_join_owned(&b.svc) ||
-        b.svc.params_thread_started || atomic_load(&b.loaded) != worker_ok)
-        failures++;
+    failures += bp_params_finish(&b, caller, should_return_early,
+                                 before_release, worker_ok);
 close_pipes:
     bp_close_pair(b.ready); bp_close_pair(b.release); bp_close_pair(b.returned);
     return failures;

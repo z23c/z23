@@ -850,6 +850,9 @@ struct block_index_projection *boot_ensure_block_index_projection(
 void app_shutdown_svc(struct boot_svc_ctx *svc);
 /* Joins the owned parameter loader at most once; false retains ownership. */
 bool boot_params_join_owned(struct boot_svc_ctx *svc);
+bool boot_wait_params_boundary(struct boot_svc_ctx *svc,
+                               const struct app_context *ctx,
+                               bool verifier_ready, bool phgr_ready);
 
 /* Clean-marker gate (pure; unit-tested in test_debug_bundle). The
  * verified-clean marker is written iff the durability barrier held (coins

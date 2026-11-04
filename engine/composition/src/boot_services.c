@@ -766,41 +766,6 @@ static void boot_init_connman(struct boot_svc_ctx *svc,
     app_log_bootstrap_sources(params, svc->connman);
 }
 
-bool boot_params_join_owned(struct boot_svc_ctx *svc)
-{
-    if (!svc || !svc->params_thread_started) return true;
-    int rc = pthread_join(svc->params_thread, NULL);
-    if (rc != 0) LOG_FAIL("boot", "parameter loader join failed: %d", rc);
-    svc->params_thread_started = false;
-    return true;
-}
-
-static bool boot_wait_params_boundary(struct boot_svc_ctx *svc,
-                                      const struct app_context *ctx,
-                                      bool verifier_ready, bool phgr_ready)
-{
-    if (!ctx->params_dir) return true;
-    /* A worker that predates confinement must not survive its boundary: the
-     * Landlock rules cannot be retrofitted onto this one-shot loader. */
-    if (svc->params_thread_started && verifier_ready && phgr_ready &&
-        !ctx->sandbox_steady && !ctx->confine)
-        return true;
-    if (!boot_params_join_owned(svc)) return false;
-    if (!atomic_load(svc->params_loaded))
-        fprintf(stderr, "Warning: ZK params not loaded\n");
-    return true;
-}
-
-#ifdef ZCL_TESTING
-/* Test seam invokes the current boundary; readiness arguments are introduced
- * by the regression before the boundary learns to use them. */
-void boot_test_params_boundary(struct boot_svc_ctx *svc, const struct app_context *ctx,
-                               bool verifier_ready, bool phgr_ready)
-{
-    (void)boot_wait_params_boundary(svc, ctx, verifier_ready, phgr_ready);
-}
-#endif
-
 static bool boot_fs_sync_timed(const struct app_context *ctx, const char *host, uint8_t *utxo_root)
 {
     int64_t t0 = (int64_t)platform_time_wall_time_t();
