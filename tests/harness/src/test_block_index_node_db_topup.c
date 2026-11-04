@@ -879,6 +879,7 @@ static int ndt_null_db_noop_checks(const char *dir, struct node_db *ndb,
 
 static int ndt_clean_prefix_cases(const char *dir);
 static int ndt_holes_cases(const char *dir);
+static int ndt_tail_advance_cases(const char *dir);
 
 int test_block_index_node_db_topup(void)
 {
@@ -907,7 +908,7 @@ int test_block_index_node_db_topup(void)
            ndt_range_equivalence_cases(dir) +
            ndt_probe_scan_cases(dir) +
            ndt_clean_prefix_cases(dir) +
-           ndt_holes_cases(dir);
+           ndt_holes_cases(dir) + ndt_tail_advance_cases(dir);
 }
 
 /* ── Proven-clean prefix: a warm re-fold reads only the tip region ─────────
@@ -1074,6 +1075,69 @@ static bool ndt_holes_old_mark(struct node_db *ndb)
         return false;
     memset(blob + NDT_MARK_VERSION_OFFSET, 0, 4);
     return node_db_state_set(ndb, "nodedb_topup_clean", blob, n);
+}
+
+/* A changed tip must not discard the previously verified sparse prefix. */
+static int ndt_tail_advance_cases(const char *dir)
+{
+    int failures = 0;
+    char ndb_path[320], prog_path[320];
+    snprintf(ndb_path, sizeof(ndb_path), "%s/node_tail.db", dir);
+    snprintf(prog_path, sizeof(prog_path), "%s/progress_tail.db", dir);
+    struct node_db ndb = {0};
+    sqlite3 *progress = NULL;
+    struct main_state actual, oracle;
+    main_state_init(&actual);
+    main_state_init(&oracle);
+    bool ready = node_db_open(&ndb, ndb_path) &&
+                 sqlite3_open(prog_path, &progress) == SQLITE_OK &&
+                 ndt_holes_build(&ndb) &&
+                 ndt_set_coins_best(progress, NDT_CLEAN_BEST) &&
+                 ndt_insert_entry(&actual, NDT_CLEAN_SEED) &&
+                 ndt_insert_entry(&oracle, NDT_CLEAN_SEED);
+    NDT_CHECK("tail advance: fixture built", ready);
+    size_t rows = 0;
+    if (ready) {
+        NDT_CHECK("tail advance: sparse mark established",
+                  ndt_holes_mark(&actual, &ndb, progress, dir));
+        NDT_CHECK("tail advance: prefix initially resumed",
+                  ndt_clean_topup(&actual, &ndb, progress, dir, false, &rows) &&
+                  rows > 0 && rows <= NDT_CLEAN_MARGIN);
+        bool wrote = true;
+        for (int h = NDT_CLEAN_BEST + 1; h <= NDT_CLEAN_BEST + 68; h++)
+            wrote = ndt_range_row(&ndb, h, false) && wrote;
+        NDT_CHECK("tail advance: new rows and frontier recorded",
+                  wrote && ndt_set_coins_best(progress, NDT_CLEAN_BEST + 68));
+        NDT_CHECK("tail advance: changed tail fold succeeds",
+                  ndt_clean_topup(&actual, &ndb, progress, dir, false, &rows));
+        struct uint256 last_hash;
+        ndt_hash_for(NDT_CLEAN_BEST + 68, &last_hash);
+        NDT_CHECK("tail advance: new tail was inserted",
+                  block_map_find(&actual.map_block_index, &last_hash) != NULL);
+        NDT_CHECK("tail advance: next fold succeeds",
+                  ndt_clean_topup(&actual, &ndb, progress, dir, false, &rows));
+        printf("block_index_node_db_topup: tail advance next rows=%zu\n", rows);
+        NDT_CHECK("tail advance: verified prefix remains bounded",
+                  rows > 0 && rows <= NDT_CLEAN_MARGIN + 68);
+        size_t oracle_rows = 0;
+        NDT_CHECK("tail advance: full oracle succeeds",
+                  ndt_clean_topup(&oracle, &ndb, progress, dir, true, &oracle_rows));
+        int diffs = actual.map_block_index.size != oracle.map_block_index.size;
+        for (int h = NDT_CLEAN_SEED; h <= NDT_CLEAN_BEST + 68; h++) {
+            struct uint256 hash;
+            ndt_hash_for(h, &hash);
+            struct block_index *a = block_map_find(&actual.map_block_index, &hash);
+            struct block_index *b = block_map_find(&oracle.map_block_index, &hash);
+            if ((a == NULL) != (b == NULL) || (a && !ndt_entries_equal(a, b)))
+                diffs++;
+        }
+        NDT_CHECK("tail advance: map equals full oracle", diffs == 0);
+    }
+    main_state_free(&actual);
+    main_state_free(&oracle);
+    if (progress) sqlite3_close(progress);
+    node_db_close(&ndb);
+    return failures;
 }
 
 static int ndt_holes_cases(const char *dir)
