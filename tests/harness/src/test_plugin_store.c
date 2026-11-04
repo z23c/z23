@@ -1975,11 +1975,11 @@ struct pst_gate_watch {
     _Atomic unsigned at_queue;
 };
 
-/* True while some process holds the gate inode's flock shared (a queued waiter).
+/* True while process owner holds the gate inode's flock shared (a queued waiter).
  * The holders' own momentary exclusive gate test is a WRITE lock and is
  * ignored, which a plain failed exclusive try could not tell apart. *known is
  * false where /proc/locks is not readable. */
-static bool pst_gate_has_reader(unsigned long ino, bool *known)
+static bool pst_gate_has_reader(unsigned long ino, pid_t owner, bool *known)
 {
     FILE *f = fopen("/proc/locks", "r");
     char line[256];
@@ -1988,9 +1988,10 @@ static bool pst_gate_has_reader(unsigned long ino, bool *known)
     while (f && !found && fgets(line, sizeof(line), f)) {
         char kind[16], rw[16];
         unsigned long lino = 0;
+        int lpid = 0;
         if (strstr(line, "->") == NULL &&
-            sscanf(line, "%*s %15s %*s %15s %*d %*x:%*x:%lu", kind, rw, &lino) == 3)
-            found = strcmp(kind, "FLOCK") == 0 && strcmp(rw, "READ") == 0 && lino == ino;
+            sscanf(line, "%*s %15s %*s %15s %d %*x:%*x:%lu", kind, rw, &lpid, &lino) == 4)
+            found = strcmp(kind, "FLOCK") == 0 && strcmp(rw, "READ") == 0 && lino == ino && lpid == (int)owner;
     }
     if (f)
         fclose(f);
@@ -2010,7 +2011,7 @@ static void *pst_gate_watch_thread(void *arg)
     }
     while (!atomic_load(&g->stop)) {
         bool known = false;
-        bool queued = pst_gate_has_reader((unsigned long)st.st_ino, &known);
+        bool queued = pst_gate_has_reader((unsigned long)st.st_ino, getpid(), &known);
         if (!known) {
             /* No /proc/locks: a failed exclusive try that persists across two
              * probes is a waiter; the holders' own test is momentary. */
@@ -2097,6 +2098,74 @@ static int pst_fair_run(_Atomic unsigned *cycles, unsigned *worst)
     return rc;
 }
 
+/* Foreign process: takes the gate shared on its own description, tells the
+ * parent through up_fd, then holds it until hold_fd closes. */
+static void pst_gate_foreign_child(const char *gatepath, int up_fd, int hold_fd)
+{
+    char c = 'x';
+    int cfd = open(gatepath, O_RDWR | O_CLOEXEC);
+    if (cfd < 0 || flock(cfd, LOCK_SH) != 0 || write(up_fd, &c, 1) != 1)
+        _exit(1);
+    _exit(read(hold_fd, &c, 1) >= 0 ? 0 : 1);
+}
+
+/* A shared flock on the gate inode taken by another process is not a queued
+ * waiter of this one. /proc/locks identifies the inode by number only, so
+ * without the owner pid a lock on a same-numbered inode elsewhere on a loaded
+ * host looks like a queued waiter, the cycle snapshot is taken long before the
+ * waiter really enqueues, and the figure counts the whole gap. Returns 0 when
+ * only the owner pid decides the answer as expected, 1 on a wrong answer, 2 on
+ * setup failure, 3 when /proc/locks is unreadable (nothing to test). */
+static int pst_gate_owner_probe(const char *gatepath)
+{
+    int fd = open(gatepath, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    struct stat st;
+    int hold[2], up[2], rc = 2;
+    if (fd < 0 || fstat(fd, &st) != 0 || pipe(hold) != 0 || pipe(up) != 0)
+        return 2;
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(fd);
+        close(hold[1]);
+        close(up[0]);
+        pst_gate_foreign_child(gatepath, up[1], hold[0]);
+    }
+    close(hold[0]);
+    close(up[1]);
+    char c;
+    if (pid > 0 && read(up[0], &c, 1) == 1) { /* the child holds the gate now */
+        unsigned long ino = (unsigned long)st.st_ino;
+        bool known = false;
+        bool foreign = pst_gate_has_reader(ino, pid, &known);
+        bool as_ours = pst_gate_has_reader(ino, getpid(), &known);
+        flock(fd, LOCK_SH);
+        bool mine = pst_gate_has_reader(ino, getpid(), &known);
+        rc = !known ? 3 : (foreign && !as_ours && mine) ? 0 : 1;
+    }
+    close(hold[1]);
+    if (pid > 0)
+        (void)pst_reap(pid);
+    close(up[0]);
+    close(fd);
+    return rc;
+}
+
+static int pst_case_gate_owner(void)
+{
+    int failures = 0;
+    TEST_CASE("the gate observer ignores a shared flock held by another process") {
+        struct pst_fx fx;
+        char gatepath[PATH_MAX];
+        ASSERT(pst_fx_open(&fx, true));
+        ASSERT(pst_install(&fx, "hello", "version a", &(struct pst_opts){0}) == PLUGIN_OK);
+        ASSERT(pst_plug_path(&fx, ".lock.q", gatepath, sizeof(gatepath)));
+        int rc = pst_gate_owner_probe(gatepath);
+        pst_fx_close(&fx);
+        ASSERT(rc == 0 || rc == 3); /* 3: no /proc/locks, the observer's fallback applies */
+    } TEST_END
+    return failures;
+}
+
 static int pst_case_lock_fairness(void)
 {
     int failures = 0;
@@ -2118,6 +2187,8 @@ static int pst_case_lock_fairness(void)
         int rc = pst_fair_run(cycles, &worst);
         munmap(cycles, sizeof(*cycles)); /* every path of the run lands here */
         ASSERT_EQ(rc, 0);
+        if (worst > MAX_PASSED)
+            fprintf(stderr, "plugin lock fairness: worst=%u (max %d)\n", worst, MAX_PASSED);
         ASSERT(worst <= MAX_PASSED);
     } TEST_END
     return failures;
@@ -2451,6 +2522,7 @@ int test_plugin_store(void)
     failures += pst_case_concurrent_switch();
     failures += pst_case_lock_exclusion();
     failures += pst_case_slow_holds();
+    failures += pst_case_gate_owner();
     failures += pst_case_lock_fairness();
     failures += pst_case_lock_budget();
     failures += pst_case_lock_gate_leftover();
