@@ -883,7 +883,11 @@ size_t test_evidence_render(char *out, size_t cap, const char *file, int line)
     char text[96];
     size_t used = 0;
     int n = snprintf(text, sizeof(text), "--- evidence %s:%d ---\n", file, line);
-    evidence_put(out, cap, &used, text, n > 0 ? (size_t)n : 0);
+    size_t header_len = n > 0 ? (size_t)n : 0;
+    if (header_len >= sizeof(text)) header_len = sizeof(text) - 1;
+    evidence_put(out, cap, &used, text, header_len);
+    if (header_len && text[header_len - 1] != '\n')
+        evidence_put(out, cap, &used, "\n", 1);
     evidence_lock();
     uint64_t total = g_evidence.total;
     uint64_t head = total < TEST_EVIDENCE_HEAD ? total : TEST_EVIDENCE_HEAD;

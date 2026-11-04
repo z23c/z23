@@ -166,6 +166,24 @@ static int fr_test_bytes_escape_and_cut(void)
     } _test_next:;
     return failures;
 }
+
+static int fr_test_long_file(void)
+{
+    int failures = 0;
+    TEST("failure recorder: long file names stay bounded") {
+        char file[512], out[TEST_EVIDENCE_CAP + 512];
+        memset(file, 'f', sizeof(file) - 1);
+        file[sizeof(file) - 1] = '\0';
+        test_note("long-file-note");
+        size_t n = test_evidence_render(out, sizeof(out), file, 9);
+        test_evidence_reset();
+        ASSERT(n == strlen(out));
+        ASSERT(strstr(out, "\nlong-file-note\n") != NULL);
+        ASSERT(strstr(out, "--- end evidence ---\n") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
 #endif
 
 int test_failure_recorder(void);
@@ -179,6 +197,7 @@ int test_failure_recorder(void)
     failures += fr_test_pass_prints_nothing();
     failures += fr_test_cap_keeps_head_and_tail();
     failures += fr_test_bytes_escape_and_cut();
+    failures += fr_test_long_file();
     printf("Failure recorder: %d failures\n", failures);
 #endif
     return failures;

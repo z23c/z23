@@ -16796,6 +16796,10 @@ pr-check:
 # A failing step also copies the "--- evidence ... --- end evidence ---"
 # blocks (tests/harness test_note flight recorder, at most 60 lines) into the rc.
 # Pass = last rc line is `agent-verify: OK`; no such last line = interrupted.
+.PHONY: agent-verify-evidence
+agent-verify-evidence:
+	@sed -n '/^\(  first| L[0-9][0-9]*: \)\{0,1\}--- evidence /,/^\(  first| L[0-9][0-9]*: \)\{0,1\}--- end evidence ---/p' "$(LOG)" | head -60 | cut -c1-200
+
 .PHONY: agent-verify
 agent-verify:
 	@if [ -z '$(strip $(ONLY))' ]; then \
@@ -16838,7 +16842,7 @@ agent-verify:
 	    { echo "agent-verify: $$step rc=$$rc"; \
 	      if [ "$$step" = t-fast-exact ]; then grep 'SUITE VERDICT' "$$log" | tail -1; fi; \
 	      if [ $$rc -ne 0 ]; then grep -E '^FAIL|FAIL at|error:|not a valid|unknown exact group|\*\*\*' "$$log" | head -5 | cut -c1-200; fi; \
-	      if [ $$rc -ne 0 ]; then sed -n '/^--- evidence /,/^--- end evidence ---/p' "$$log" | head -60 | cut -c1-200; fi; \
+	      if [ $$rc -ne 0 ]; then $(MAKE) --no-print-directory agent-verify-evidence LOG="$$log"; fi; \
 	    } | tee -a build/scratch/agent-verify.rc; \
 	    if [ $$rc -ne 0 ]; then failed="$$failed $$step"; fi; \
 	 }; \

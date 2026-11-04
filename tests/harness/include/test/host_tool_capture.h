@@ -32,11 +32,12 @@ static inline int test_host_tool_capture(const char *const argv[], char *out,
         .image = image, .argv = argv, .env = env,
     };
     struct platform_process_capture_result result = {0};
-    if (!platform_process_capture_stdout(&options, out, out_size, timeout_ms,
-                                         &result) || result.timed_out ||
-        result.output_truncated || result.exit_code > INT_MAX)
-        return -1;
-    return (int)result.exit_code;
+    bool captured = platform_process_capture_stdout(&options, out, out_size,
+                                                     timeout_ms, &result);
+    int rc = !captured || result.timed_out || result.output_truncated ||
+             result.exit_code > INT_MAX ? -1 : (int)result.exit_code;
+    test_note_child(argv[0], rc, out_size && rc >= 0 ? out : NULL);
+    return rc;
 #else
     if (timeout_ms > INT_MAX) return -1;
     int rc = zcl_spawn_capture(argv, out, out_size, (int)timeout_ms);
