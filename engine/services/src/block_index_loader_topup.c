@@ -1124,10 +1124,14 @@ static bool node_db_anchor_held_at(const struct block_index *anchor, int h)
 struct topup_clean_mark {
     uint8_t  anchor[32];
     int32_t  lo, clean_to;
-    uint32_t map_count, pad;
+    uint32_t map_count;
+    uint32_t version;   /* NODE_DB_TOPUP_CLEAN_VERSION; an older mark is ignored */
     uint64_t map_fp;
-    int64_t  row_count;
+    int64_t  row_count; /* status>=3 rows in lo..clean_to; span-row_count = holes */
 };
+/* v2: a mark may cover a window with fixed holes (v1 required none). The
+ * holes are pinned by row_count, so a filled hole fails the resume check. */
+#define NODE_DB_TOPUP_CLEAN_VERSION 2u
 
 static uint64_t topup_mix64(uint64_t x)
 {
@@ -1181,7 +1185,8 @@ static int topup_clean_resume(struct main_state *ms, struct node_db *ndb,
     if (!node_db_state_get(ndb, NODE_DB_TOPUP_CLEAN_KEY, &got, sizeof(got),
                            &gn) || gn != sizeof(got))
         return lo;
-    if (memcmp(got.anchor, anchor, 32) != 0 || got.lo != lo ||
+    if (got.version != NODE_DB_TOPUP_CLEAN_VERSION ||
+        memcmp(got.anchor, anchor, 32) != 0 || got.lo != lo ||
         got.clean_to < lo || got.clean_to >= coins_best)
         return lo;
     struct topup_clean_mark now;
@@ -1207,7 +1212,26 @@ static void topup_clean_record(struct main_state *ms, struct node_db *ndb,
         return;
     }
     memcpy(m.anchor, anchor, 32);
+    m.version = NODE_DB_TOPUP_CLEAN_VERSION;
     (void)node_db_state_set(ndb, NODE_DB_TOPUP_CLEAN_KEY, &m, sizeof(m));
+}
+
+/* True when the fold changed nothing AND saw every connected row in
+ * [from..hi]: its holes are then exactly the heights with no status>=3 row
+ * (a fixed hole is not a miss). A scan abort, a duplicate height or any
+ * other shortfall makes missing_rows differ from span - count, so the fold
+ * proves nothing about the rest and records no mark. */
+static bool node_db_fold_changed_nothing(const struct nodedb_fold *f);
+static bool topup_fold_was_noop(struct node_db *ndb,
+                                const struct nodedb_fold *f, int from, int hi)
+{
+    int64_t rows = 0;
+    if (!node_db_fold_changed_nothing(f) ||
+        !db_block_count_height_range(ndb, from, hi, &rows))
+        return false;
+    const int64_t span = (int64_t)hi - from + 1;
+    return rows >= 0 && rows <= span &&
+           (int64_t)f->missing_rows == span - rows;
 }
 
 /* First height to fold: the whole window under the per-height test oracle,
@@ -1304,19 +1328,17 @@ bool block_index_node_db_topup_with(struct main_state *ms,
     memset(&fold, 0, sizeof(fold));
     fold.ms = ms;
     fold.ndb = ndb;
-    if (!node_db_fold_window(&fold,
-            node_db_fold_start(ms, ndb, anchor_hash, lo, coins_best),
-            coins_best)) {
+    const int fold_from = node_db_fold_start(ms, ndb, anchor_hash, lo,
+                                             coins_best);
+    if (!node_db_fold_window(&fold, fold_from, coins_best)) {
         free(fold.new_entries);
         return false;
     }
 #ifdef ZCL_TESTING
     g_node_db_topup_last_rows_seen = fold.rows_seen;
 #endif
-    /* A fold that missed a window row (a scan abort or a hole) has not seen
-     * every row, so it proves nothing about the rest and records no mark. */
-    const bool fold_was_noop = node_db_fold_changed_nothing(&fold) &&
-                               fold.missing_rows == 0;
+    const bool fold_was_noop = topup_fold_was_noop(ndb, &fold, fold_from,
+                                                   coins_best);
     struct block_index **new_entries = fold.new_entries;
     const size_t new_count = fold.new_count;
     const size_t inserted = fold.inserted, data_applied = fold.data_applied,
