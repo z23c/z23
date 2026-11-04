@@ -231,6 +231,10 @@ bool store_package_complete(const struct vcs_package_store *store,
 bool store_package_commit(struct vcs_package_store *store,
                           struct store_package *pkg);
 
+/* With both admission locks held, finish a duplicate chunk's pending commit. */
+enum vcs_package_store_result store_finish_duplicate_chunk(
+    struct vcs_package_store *store, struct store_package *pkg);
+
 /* Count persisted release envelopes (64-hex names under releases/).
  * Best-effort for diagnostics: 0 when the directory is unreadable. */
 uint32_t store_releases_count(const struct vcs_package_store *store);

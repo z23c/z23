@@ -982,12 +982,12 @@ static enum vcs_package_store_result store_put_chunk_mode(
         return checked;
     }
 
-    /* Dedup: the content is already in the CAS, so it was already
-     * present-for-this-package too — nothing changes. */
+    /* Existing bytes may still need their staged manifest committed. */
     if (store_cas_contains(store, hash)) {
+        enum vcs_package_store_result result = store_finish_duplicate_chunk(store, pkg);
         store_process_unlock(store);
         pthread_mutex_unlock(&store->lock);
-        return VCS_PACKAGE_STORE_OK;
+        return result;
     }
     bool will_complete = false;
     enum vcs_package_store_result result = store_chunk_admit(

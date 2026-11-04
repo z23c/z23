@@ -1166,6 +1166,103 @@ static int t_store_history_observation(void)
     return failures;
 }
 
+typedef enum vcs_package_store_result (*retry_chunk_put)(
+    struct vcs_package_store *, const uint8_t [32], const char *, uint32_t,
+    const uint8_t *, size_t);
+
+static bool retry_shared_generation(const char *dd, uint8_t value[8])
+{
+    char path[512];
+    zs_store_path(path, sizeof(path), dd, "store-generation");
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    bool ok = fread(value, 1, 8, f) == 8;
+    return fclose(f) == 0 && ok;
+}
+
+static int retry_chunk_noop(struct vcs_package_store *store, const char *dd,
+    const struct zs_pkg *p, size_t i, retry_chunk_put put)
+{
+    int failures = 0;
+    uint8_t before[8], after[8];
+    uint64_t epoch = vcs_package_store_mutation_epoch(store);
+    bool captured = retry_shared_generation(dd, before);
+    ZS_CHECK("commit retry: ordinary duplicate succeeds",
+        put(store, p->root, p->paths[i], 0, p->contents[i], p->lens[i]) ==
+            VCS_PACKAGE_STORE_OK);
+    ZS_CHECK("commit retry: ordinary duplicate preserves both generations",
+        captured && retry_shared_generation(dd, after) &&
+        memcmp(before, after, sizeof(before)) == 0 &&
+        vcs_package_store_mutation_epoch(store) == epoch);
+    return failures;
+}
+
+static int retry_chunk_publication(struct vcs_package_store *store,
+    const char *dd, const struct zs_pkg *p, retry_chunk_put put)
+{
+    int failures = 0;
+    char final[640], staged[640];
+    snprintf(final, sizeof(final), "%s/zcode/manifests/%s", dd, p->root_hex);
+    snprintf(staged, sizeof(staged), "%s/zcode/staging/%s", dd, p->root_hex);
+    bool blocked = mkdir(final, 0700) == 0;
+    ZS_CHECK("commit retry: fixture obstructs final rename", blocked);
+    if (!blocked) return failures;
+    ZS_CHECK("commit retry: first final chunk reports commit failure",
+        put(store, p->root, p->paths[1], 0, p->contents[1], p->lens[1]) ==
+            VCS_PACKAGE_STORE_ERR_IO);
+    struct vcs_package_possession_receipt receipt;
+    ZS_CHECK("commit retry: CAS has last chunk but receipt is uncommitted",
+        vcs_package_store_chunk_present(store, p->root, 1, 0) &&
+        vcs_package_store_possession_snapshot(store, p->root, &receipt) &&
+        !receipt.complete);
+    ZS_CHECK("commit retry: blocked duplicate still reports commit failure",
+        put(store, p->root, p->paths[1], 0, p->contents[1], p->lens[1]) ==
+            VCS_PACKAGE_STORE_ERR_IO);
+    bool cleared = rmdir(final) == 0;
+    ZS_CHECK("commit retry: fixture removes obstruction", cleared);
+    if (!cleared) return failures;
+    ZS_CHECK("commit retry: same handle finishes final chunk",
+        put(store, p->root, p->paths[1], 0, p->contents[1], p->lens[1]) ==
+            VCS_PACKAGE_STORE_OK);
+    struct stat st;
+    ZS_CHECK("commit retry: regular committed manifest replaces staging",
+        stat(final, &st) == 0 && S_ISREG(st.st_mode) && !zs_path_exists(staged));
+    ZS_CHECK("commit retry: possession snapshot confirms commit",
+        vcs_package_store_possession_snapshot(store, p->root, &receipt) &&
+        receipt.complete);
+    failures += retry_chunk_noop(store, dd, p, 1, put);
+    return failures;
+}
+
+static int t_store_chunk_commit_retry(bool no_evict)
+{
+    int failures = 0;
+    char dd[256];
+    struct vcs_package_store *store = zs_open(dd, sizeof(dd),
+        no_evict ? "commit-retry-no-evict" : "commit-retry", 1000000u);
+    ZS_CHECK("commit retry: store opens", store != NULL);
+    if (!store) return failures;
+    retry_chunk_put put = no_evict ? vcs_package_store_put_chunk_no_evict
+                                   : vcs_package_store_put_chunk;
+    const char *paths[] = { "a", "b" };
+    const size_t lengths[] = { 8, 11 };
+    struct zs_pkg p;
+    bool ready = zs_make_package(&p, 2, paths, lengths, 0x33) &&
+        vcs_package_store_put_manifest(store, p.wire, p.wire_len, NULL) ==
+            VCS_PACKAGE_STORE_OK &&
+        put(store, p.root, paths[0], 0, p.contents[0], lengths[0]) ==
+            VCS_PACKAGE_STORE_OK;
+    ZS_CHECK("commit retry: package staged with first chunk", ready);
+    if (ready) {
+        failures += retry_chunk_noop(store, dd, &p, 0, put);
+        failures += retry_chunk_publication(store, dd, &p, put);
+    }
+    zs_free_package(&p);
+    vcs_package_store_close(store);
+    test_rm_rf_recursive(dd);
+    return failures;
+}
+
 int test_zcode_store(void)
 {
     printf("\n=== zcode_store: local content-addressed package store ===\n");
@@ -1174,6 +1271,8 @@ int test_zcode_store(void)
     failures += t_store_layout_and_flags();
     failures += t_store_manifest_admission();
     failures += t_store_chunk_flow();
+    failures += t_store_chunk_commit_retry(false);
+    failures += t_store_chunk_commit_retry(true);
     failures += t_store_dedup();
     failures += t_store_recovery();
     failures += t_store_open_scale();

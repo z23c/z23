@@ -339,9 +339,10 @@ void store_package_present(const struct vcs_package_store *store,
 bool store_package_complete(const struct vcs_package_store *store,
                             const struct store_package *pkg)
 {
-    uint32_t present = 0;
-    store_package_present(store, pkg, &present, NULL);
-    return (uint64_t)present == (uint64_t)pkg->chunk_count;
+    for (size_t i = 0; i < pkg->chunk_count; i++) {
+        if (!store_cas_contains(store, pkg->chunks[i].hash)) return false;
+    }
+    return true;
 }
 
 /* Staging directory, staged manifest and final manifest paths for a commit. */
@@ -389,6 +390,21 @@ bool store_package_commit(struct vcs_package_store *store,
     pkg->committed = true;
     store_package_touch(store, pkg);
     return true;
+}
+
+/* Called with both admission locks held. A final CAS write can succeed
+ * before the staged manifest rename fails. Finish that pending commit on
+ * retry. A failed cleanup after rename still requires recovery when the
+ * staging source is gone; only the normal commit path may report success. */
+enum vcs_package_store_result store_finish_duplicate_chunk(
+    struct vcs_package_store *store, struct store_package *pkg)
+{
+    if (pkg->committed || !store_package_complete(store, pkg))
+        return VCS_PACKAGE_STORE_OK;
+    if (!store_generation_advance(store) || !store_package_commit(store, pkg))
+        LOG_RETURN(VCS_PACKAGE_STORE_ERR_IO, STORE_LOG,
+                   "finish staged manifest on duplicate chunk for %s", pkg->root_hex);
+    return VCS_PACKAGE_STORE_OK;
 }
 
 /* ── open / recovery ──────────────────────────────────────────────── */
