@@ -2216,6 +2216,31 @@ static void test_compact_unavailable(void)
 /* With "stale" or "async" as the argument only that test runs, so a thread sanitizer can cover it in reasonable time. */
 /* Funds says in plain words what can be spent now, what is arriving, what is maturing and what is public, and
  * shows no number the node did not report. */
+static bool compact_retry_visible(void)
+{
+    fake.now += WALLET_INITIAL_RETRY_MS;
+    wallet_screens_tick();
+    return has("Try again") && has("Balance unknown");
+}
+static void test_compact_retry_once_async(void)
+{
+    start(true);
+    fake.summary = OTHER_ERROR;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    wait_for(compact_retry_visible);
+    set_block();
+    fake.summary = GOOD_SUMMARY;
+    tap(WALLET_ACT_RETRY_SUMMARY, 0, WALLET_STAY);
+    wait_for(summary_busy);
+    int requests = count_ops("summary");
+    tap(WALLET_ACT_RETRY_SUMMARY, 0, WALLET_STAY);
+    CHECK(item_is("Loading…") && count_ops("summary") == requests);
+    release_block();
+    wait_for(settled);
+    CHECK(item_is("1.23456789 ZCL") && count_ops("summary") == requests);
+    wallet_screens_close();
+}
+
 static void test_funds_plain_words(void)
 {
     start(false);
@@ -2470,6 +2495,7 @@ int main(int argc, char **argv)
     test_funds_lines();
     test_funds_plain_words();
     test_compact_unavailable();
+    test_compact_retry_once_async();
     test_funds_unready();
     test_history_incomplete();
     test_null_privacy();

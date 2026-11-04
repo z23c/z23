@@ -521,7 +521,7 @@ static void silent_node_items(struct wallet_screen *s)
 }
 static bool funds_unavailable(const struct data *d)
 {
-    return d->summary_failed && !d->view.known &&
+    return d->funds_loaded && d->summary_failed && !d->view.known &&
            !d->cache.valid && !d->node_silent;
 }
 

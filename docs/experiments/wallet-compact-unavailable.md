@@ -13,3 +13,9 @@ retain their existing handling.
 A focused fixture failed against the prior screen because no retry button was
 shown. After the change, the wallet screen tests passed with the retry, privacy,
 amount and scan-notice assertions enabled. Physical layout remains to be checked.
+
+A simulator run of candidate `4973f5b4` at 1080×2160, density 540 and font
+scale 1.5 used a fake failing summary. Retry, Receive, Send, History and Home
+were within the viewport; Retry showed loading and then the failure again.
+This was not a real-wallet or physical-phone result. A later change prevents
+a second stale Retry tap from queuing another summary while one is running.
