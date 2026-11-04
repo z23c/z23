@@ -79,6 +79,23 @@ check_value state '"unavailable"'
 check_value input null
 check_value coverage.unreported.input 1
 
+# Event type is a decoded JSON string, not its spelling in the JSON source.
+printf '%s\n' '{"type":"turn.\u0063ompleted","usage":{"input_tokens":7,"cached_input_tokens":2,"output_tokens":3}}' \
+    >"$fixture_root/escaped-terminal"
+result=$(bash "$reader" --usage-fixture exec "$fixture_root/escaped-terminal")
+check_value state '"measured"'
+check_value input 7
+check_value cached_input 2
+check_value output 3
+cat "$fixture_root/complete" "$fixture_root/escaped-terminal" >"$fixture_root/escaped-duplicate"
+refused exec "$fixture_root/escaped-duplicate"
+for suffix in '\u0000suffix' '\u0000' '\n'; do
+    printf '{"type":"turn.completed%s","usage":{"input_tokens":7}}\n' "$suffix" \
+        >"$fixture_root/not-terminal"
+    result=$(bash "$reader" --usage-fixture exec "$fixture_root/not-terminal")
+    check_value state '"unavailable"'
+done
+
 for value in -1 1.5 1e3 '"10"' true 9223372036854775808; do
     exec_fixture invalid "{\"input_tokens\":$value,\"cached_input_tokens\":0,\"output_tokens\":0}"
     refused exec "$fixture_root/invalid"

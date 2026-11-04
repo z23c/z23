@@ -90,15 +90,16 @@ usage_file_valid() {
 }
 
 usage_exec_file() {
-    local file=$1 line type root_type terminal=0
+    local file=$1 line root_type eq_status terminal=0
     [[ -x $jsonq_bin ]] || { usage_fail 'build/bin/jsonq is unavailable'; return 69; }
     usage_file_valid "$file" || return 65
     while IFS= read -r line || [[ -n $line ]]; do
         root_type=$("$jsonq_bin" type '' <<<"$line") || return 65
         [[ $root_type == object ]] || { usage_fail 'event is not an object'; return 65; }
         usage_unique_fields "$line" '' type usage || return 65
-        type=$(usage_value "$line" type) || return 65
-        if [[ $type == '"turn.completed"' ]]; then
+        # Compare decoded strings inside C23: shell text loses embedded NULs
+        # and trailing newlines, while raw JSON spellings may contain escapes.
+        if "$jsonq_bin" eq type turn.completed <<<"$line"; then
             terminal=$((terminal + 1))
             [[ $terminal == 1 ]] || {
                 usage_fail 'multiple terminal usage events have no deduplication identity'; return 65;
@@ -111,6 +112,9 @@ usage_exec_file() {
                 value=$(usage_value "$line" "usage.${paths[field]}") || return 65
                 usage_add "$field" "$value" || return 65
             done
+        else
+            eq_status=$?
+            [[ $eq_status == 1 ]] || return 65
         fi
     done <"$file"
     if [[ $terminal == 0 ]]; then

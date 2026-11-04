@@ -256,6 +256,11 @@ static const char *kind_type(zjsonp_event_kind k)
     }
 }
 
+static bool decoded_text_equals(const char *text, size_t length, const char *expected)
+{
+    return length == strlen(expected) && memcmp(text, expected, length) == 0;
+}
+
 static int emit_scalar(const char *text, const zjsonp_event *ev, bool raw)
 {
     if (ev->kind == ZJRP_STR) {
@@ -422,7 +427,7 @@ static int handle_matched_scalar(const char *text, const zjsonp_event *ev,
             if (n == SIZE_MAX || n >= sizeof g_decode)
                 return 2;
             g_decode[n] = '\0';
-            return strcmp(g_decode, eq) == 0 ? 0 : 1;
+            return decoded_text_equals(g_decode, n, eq) ? 0 : 1;
         }
         if (ev->len >= DECODE_CAP)
             return 2;

@@ -111,6 +111,32 @@ static int test_jsonq_key_count(void)
     return failures;
 }
 
+static int test_jsonq_string_equality(void)
+{
+    static const struct { const char *json, *want; int status; } cases[] = {
+        {"\"turn.\\u0063ompleted\"", "turn.completed", 0},
+        {"\"turn.completed\\u0000suffix\"", "turn.completed", 1},
+        {"\"turn.completed\\u0000\"", "turn.completed", 1},
+        {"\"\\u0000turn.completed\"", "", 1},
+        {"\"\\u0000\"", "", 1},
+        {"\"\"", "", 0},
+        {"\"turn.completed\\n\"", "turn.completed", 1},
+        {"\"turn.completed\"", "turn.completed", 0},
+    };
+    int failures = 0;
+    TEST("jsonq: eq compares the entire decoded string") {
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            char output[64];
+            ASSERT_EQ(jsonq_fixture_run(cases[i].json,
+                (const char *const[]){JSONQ_FIXTURE_BIN, "eq", "", cases[i].want, NULL},
+                output, sizeof(output)), cases[i].status);
+            ASSERT_STR_EQ(output, "");
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_jsonq_scalar_paths(void)
 {
     int failures = 0;
@@ -281,6 +307,7 @@ int test_jsonq(void)
     }
     failures += test_jsonq_count_and_keys();
     failures += test_jsonq_key_count();
+    failures += test_jsonq_string_equality();
     failures += test_jsonq_scalar_paths();
     failures += test_jsonq_array_index_bounds();
     failures += test_jsonq_unwrap();
