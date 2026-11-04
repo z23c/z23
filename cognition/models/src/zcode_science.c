@@ -355,11 +355,8 @@ bool db_zcode_science_projection_clear(struct node_db *ndb)
     };
     if (!ndb || !ndb->open)
         LOG_FAIL("model", "db_zcode_science_projection_clear: bad args");
-    bool ok = true;
     for (size_t i = 0; i < sizeof(tables) / sizeof(tables[0]); i++)
         if (!entry_delete_all(ndb, tables[i]))
-            ok = false;
-    if (!ok)
-        LOG_FAIL("model", "db_zcode_science_projection_clear: a delete failed");
+            LOG_FAIL("model", "db_zcode_science_projection_clear: delete failed: %s", tables[i]);
     return true;
 }

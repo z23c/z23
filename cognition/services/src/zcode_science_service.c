@@ -1006,27 +1006,24 @@ static void entry_from_study(struct db_zcode_science_entry *row,
     row->expires_at = e->expires_unix;
 }
 
-/* Each projection pass saves every row it indexes and never stops early:
- * a failed save only clears the caller's ok flag. */
+/* Stop on the first failed write; the owning rebuild transaction rolls back. */
 static bool science_rebuild_studies(struct node_db *ndb,
                                     struct vcs_zcode_science_index *index,
                                     struct zcode_science_rebuild_out *out)
 {
-    bool ok = true;
     for (size_t i = 0; i < vcs_zcode_science_index_study_count(index); i++) {
         struct db_zcode_science_entry row;
         entry_from_study(&row, vcs_zcode_science_index_study_at(index, i));
-        if (!db_zcode_science_study_save(ndb, &row)) ok = false;
+        if (!db_zcode_science_study_save(ndb, &row)) return false;
         out->studies++;
     }
-    return ok;
+    return true;
 }
 
 static bool science_rebuild_results(struct node_db *ndb,
                                     struct vcs_zcode_science_index *index,
                                     struct zcode_science_rebuild_out *out)
 {
-    bool ok = true;
     for (size_t i = 0; i < vcs_zcode_science_index_result_count(index); i++) {
         const struct vcs_zcode_science_index_result_entry *e =
             vcs_zcode_science_index_result_at(index, i);
@@ -1044,17 +1041,16 @@ static bool science_rebuild_results(struct node_db *ndb,
         row.sequence = (int64_t)e->sequence;
         row.created_at = e->started_unix;
         row.expires_at = e->finished_unix;
-        if (!db_zcode_science_result_save(ndb, &row)) ok = false;
+        if (!db_zcode_science_result_save(ndb, &row)) return false;
         out->results++;
     }
-    return ok;
+    return true;
 }
 
 static bool science_rebuild_reproductions(
     struct node_db *ndb, struct vcs_zcode_science_index *index,
     struct zcode_science_rebuild_out *out)
 {
-    bool ok = true;
     for (size_t i = 0; i < vcs_zcode_science_index_reproduction_count(index);
          i++) {
         const struct vcs_zcode_science_index_reproduction_entry *e =
@@ -1074,17 +1070,16 @@ static bool science_rebuild_reproductions(
         row.code = e->verdict;
         row.sequence = (int64_t)e->sequence;
         row.created_at = e->created_unix;
-        if (!db_zcode_science_reproduction_save(ndb, &row)) ok = false;
+        if (!db_zcode_science_reproduction_save(ndb, &row)) return false;
         out->reproductions++;
     }
-    return ok;
+    return true;
 }
 
 static bool science_rebuild_findings(struct node_db *ndb,
                                      struct vcs_zcode_science_index *index,
                                      struct zcode_science_rebuild_out *out)
 {
-    bool ok = true;
     for (size_t i = 0; i < vcs_zcode_science_index_findings_count(index);
          i++) {
         const struct vcs_zcode_science_index_findings_entry *e =
@@ -1102,17 +1097,16 @@ static bool science_rebuild_findings(struct node_db *ndb,
         row.flags = e->flags;
         row.sequence = (int64_t)e->sequence;
         row.created_at = e->created_unix;
-        if (!db_zcode_science_findings_save(ndb, &row)) ok = false;
+        if (!db_zcode_science_findings_save(ndb, &row)) return false;
         out->findings++;
     }
-    return ok;
+    return true;
 }
 
 static bool science_rebuild_votes(struct node_db *ndb,
                                   struct vcs_zcode_science_index *index,
                                   struct zcode_science_rebuild_out *out)
 {
-    bool ok = true;
     for (size_t i = 0; i < vcs_zcode_science_index_vote_count(index); i++) {
         const struct vcs_zcode_science_index_vote_entry *e =
             vcs_zcode_science_index_vote_at(index, i);
@@ -1134,10 +1128,10 @@ static bool science_rebuild_votes(struct node_db *ndb,
         row.code = e->signal;
         row.sequence = (int64_t)e->sequence;
         row.expires_at = e->expires_unix;
-        if (!db_zcode_science_vote_save(ndb, &row)) ok = false;
+        if (!db_zcode_science_vote_save(ndb, &row)) return false;
         out->votes++;
     }
-    return ok;
+    return true;
 }
 
 /* The findings entry whose root matches, or NULL. */
@@ -1159,7 +1153,6 @@ static bool science_rebuild_reviews(struct node_db *ndb,
                                     struct vcs_zcode_science_index *index,
                                     struct zcode_science_rebuild_out *out)
 {
-    bool ok = true;
     for (size_t i = 0; i < vcs_zcode_science_index_review_count(index); i++) {
         const struct vcs_zcode_science_index_review_entry *e =
             vcs_zcode_science_index_review_at(index, i);
@@ -1179,10 +1172,22 @@ static bool science_rebuild_reviews(struct node_db *ndb,
         row.code = e->verdict;
         row.sequence = (int64_t)e->sequence;
         row.created_at = e->created_unix;
-        if (!db_zcode_science_review_save(ndb, &row)) ok = false;
+        if (!db_zcode_science_review_save(ndb, &row)) return false;
         out->reviews++;
     }
-    return ok;
+    return true;
+}
+
+static bool science_rebuild_rows(struct node_db *ndb,
+                                  struct vcs_zcode_science_index *index,
+                                  struct zcode_science_rebuild_out *out)
+{
+    return science_rebuild_studies(ndb, index, out) &&
+           science_rebuild_results(ndb, index, out) &&
+           science_rebuild_reproductions(ndb, index, out) &&
+           science_rebuild_findings(ndb, index, out) &&
+           science_rebuild_votes(ndb, index, out) &&
+           science_rebuild_reviews(ndb, index, out);
 }
 
 struct zcl_result zcode_science_rebuild(
@@ -1191,24 +1196,28 @@ struct zcl_result zcode_science_rebuild(
 {
     if (!ndb || !ndb->open || !workspace || !out)
         return ZCL_ERR(-1, "science-rebuild-input-invalid");
+    memset(out, 0, sizeof(*out));
     struct vcs_zcode_science_index *index =
         vcs_zcode_science_index_build(workspace, now);
     if (!index)
         return ZCL_ERR(-1, "science-rebuild-index-failed");
-    if (!db_zcode_science_projection_clear(ndb)) {
+    if (!node_db_begin(ndb)) {
         vcs_zcode_science_index_free(index);
-        return ZCL_ERR(-1, "science-rebuild-clear-failed");
+        return ZCL_ERR(-1, "science-rebuild-begin-failed");
     }
-    memset(out, 0, sizeof(*out));
-    bool ok = true;
-    if (!science_rebuild_studies(ndb, index, out)) ok = false;
-    if (!science_rebuild_results(ndb, index, out)) ok = false;
-    if (!science_rebuild_reproductions(ndb, index, out)) ok = false;
-    if (!science_rebuild_findings(ndb, index, out)) ok = false;
-    if (!science_rebuild_votes(ndb, index, out)) ok = false;
-    if (!science_rebuild_reviews(ndb, index, out)) ok = false;
+    const char *failure = NULL;
+    if (!db_zcode_science_projection_clear(ndb))
+        failure = "science-rebuild-clear-failed";
+    else if (!science_rebuild_rows(ndb, index, out))
+        failure = "science-rebuild-projection-save-failed";
+    else if (!node_db_commit(ndb))
+        failure = "science-rebuild-commit-failed";
     vcs_zcode_science_index_free(index);
-    if (!ok)
-        return ZCL_ERR(-1, "science-rebuild-projection-save-failed");
+    if (failure) {
+        memset(out, 0, sizeof(*out));
+        if (!node_db_rollback(ndb))
+            return ZCL_ERR(-1, "science-rebuild-rollback-failed: %s", failure);
+        return ZCL_ERR(-1, "%s", failure);
+    }
     return ZCL_OK;
 }

@@ -391,6 +391,31 @@ static bool zstore_seed_context(
 
 /* ── 1 + 2: study plan/commit, retry, rebuild equivalence ────────── */
 
+struct zstore_rebuild_fault {
+    int action;
+    const char *table;
+    unsigned denied;
+    unsigned subsequent_writes;
+};
+
+static int zstore_deny_rebuild_write(void *context, int action,
+                                    const char *table, const char *column,
+                                    const char *database, const char *trigger)
+{
+    (void)column;
+    (void)database;
+    (void)trigger;
+    struct zstore_rebuild_fault *fault = context;
+    if (fault->denied && (action == SQLITE_DELETE || action == SQLITE_INSERT ||
+                          action == SQLITE_UPDATE))
+        fault->subsequent_writes++;
+    if (action == fault->action && table && strcmp(table, fault->table) == 0) {
+        fault->denied++;
+        return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+
 static int test_zstore_study_plan_commit(void)
 {
     int failures = 0;
@@ -485,6 +510,34 @@ static int test_zstore_study_plan_commit(void)
         ASSERT_EQ(count_before, 1);
         /* Rebuild equivalence: drop + rebuild from CAS, identical output. */
         struct zcode_science_rebuild_out rebuilt;
+        struct zstore_rebuild_fault faults[] = {
+            {SQLITE_DELETE, "zcode_science_results", 0, 0},
+            {SQLITE_INSERT, "zcode_science_studies", 0, 0},
+            {SQLITE_TRANSACTION, "COMMIT", 0, 0},
+        };
+        bool refused[3], preserved[3];
+        for (size_t i = 0; i < 3; ++i) {
+            ASSERT_EQ(sqlite3_set_authorizer(ndb.db, zstore_deny_rebuild_write,
+                                             &faults[i]), SQLITE_OK);
+            refused[i] = !zcode_science_rebuild(&ndb, dir, 1500, &rebuilt).ok;
+            ASSERT_EQ(sqlite3_set_authorizer(ndb.db, NULL, NULL), SQLITE_OK);
+            ASSERT(sqlite3_get_autocommit(ndb.db));
+            ASSERT_EQ(rebuilt.studies, 0);
+            ASSERT_EQ(faults[i].subsequent_writes, 0);
+            found = false;
+            ASSERT(zcode_science_study_show(&ndb, expected_hex, &after, &found).ok);
+            preserved[i] = found && memcmp(&before, &after, sizeof(before)) == 0;
+            ASSERT(zcode_science_rebuild(&ndb, dir, 1500, &rebuilt).ok);
+            ASSERT_EQ(rebuilt.studies, 1);
+        }
+        fprintf(stderr, "science-rebuild-write-error clear denied=%u refused=%d preserved=%d insert denied=%u refused=%d preserved=%d\n",
+                faults[0].denied, refused[0], preserved[0],
+                faults[1].denied, refused[1], preserved[1]);
+        ASSERT(faults[0].denied > 0 && faults[1].denied > 0);
+        ASSERT(refused[0] && refused[1]);
+        ASSERT(preserved[0] && preserved[1]);
+        ASSERT(faults[2].denied > 0);
+        ASSERT(refused[2] && preserved[2]);
         ASSERT(zcode_science_rebuild(&ndb, dir, 1500, &rebuilt).ok);
         ASSERT_EQ(rebuilt.studies, 1);
         found = false;
