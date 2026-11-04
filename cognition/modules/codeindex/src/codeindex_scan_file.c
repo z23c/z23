@@ -82,6 +82,16 @@ static void ci_scan_hash_contents(const char *buf, size_t len,
     sha3_256_finalize(&ctx, out_sha3);
 }
 
+/* Newline count, plus one when the last line has no terminator. */
+static int ci_scan_count_lines(const char *buf, size_t len)
+{
+    size_t lines = 0;
+    for (size_t i = 0; i < len; i++)
+        if (buf[i] == '\n') lines++;
+    if (len > 0 && buf[len - 1] != '\n') lines++;
+    return lines > INT32_MAX ? INT32_MAX : (int)lines;
+}
+
 static bool ci_scan_path_is_header(const char *relpath)
 {
     size_t rl = strlen(relpath);
@@ -90,9 +100,11 @@ static bool ci_scan_path_is_header(const char *relpath)
 
 bool ci_scan_file(const char *root, const char *relpath,
                   ci_sym_cb on_sym, ci_ref_cb on_ref, void *user,
-                  uint8_t out_sha3[32], char purpose_out[CI_FILE_PURPOSE_MAX])
+                  uint8_t out_sha3[32], char purpose_out[CI_FILE_PURPOSE_MAX],
+                  int *lines_out)
 {
     if (purpose_out) purpose_out[0] = '\0';
+    if (lines_out) *lines_out = 0;
     if (!root || !relpath || !on_sym || !on_ref)
         LOG_FAIL("codeindex", "null arg to scan_file");
 
@@ -118,6 +130,7 @@ bool ci_scan_file(const char *root, const char *relpath,
     }
 
     if (out_sha3) ci_scan_hash_contents(buf, len, out_sha3);
+    if (lines_out) *lines_out = ci_scan_count_lines(buf, len);
 
     bool is_header = ci_scan_path_is_header(relpath);
     char group[64];

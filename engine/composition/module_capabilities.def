@@ -749,6 +749,7 @@ ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_merkle_snapshot
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_owner.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_scan.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_scan_doc.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_scan_docs.c", CAP_FS_READ|CAP_FS_WRITE, "reads prose files under the checkout root with O_NOFOLLOW and writes only the in-memory docs table")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_scan_file.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_search.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_seed.c", CAP_FS_READ|CAP_FS_WRITE, "reads git's own worktree registry and a sibling checkout's published index image, and refreshes the copy inside this rebuild's private staging inode")

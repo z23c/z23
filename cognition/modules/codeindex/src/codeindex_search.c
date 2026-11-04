@@ -260,15 +260,15 @@ static bool search_text_fill_hit(sqlite3_stmt *stmt, struct ci_search_hit *hit)
     memset(hit, 0, sizeof(*hit));
     if (!ci_store_fill_symbol(stmt, &hit->symbol))
         return false;
-    if (sqlite3_column_int(stmt, 12))
-        hit->match_mask |= CI_SEARCH_MATCH_NAME;
     if (sqlite3_column_int(stmt, 13))
-        hit->match_mask |= CI_SEARCH_MATCH_SIGNATURE;
+        hit->match_mask |= CI_SEARCH_MATCH_NAME;
     if (sqlite3_column_int(stmt, 14))
-        hit->match_mask |= CI_SEARCH_MATCH_PATH;
+        hit->match_mask |= CI_SEARCH_MATCH_SIGNATURE;
     if (sqlite3_column_int(stmt, 15))
+        hit->match_mask |= CI_SEARCH_MATCH_PATH;
+    if (sqlite3_column_int(stmt, 16))
         hit->match_mask |= CI_SEARCH_MATCH_DOC;
-    hit->score = 1000 - sqlite3_column_int(stmt, 16) * 100;
+    hit->score = 1000 - sqlite3_column_int(stmt, 17) * 100;
     return true;
 }
 

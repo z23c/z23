@@ -325,6 +325,11 @@ static void emit_sym(struct scan_ctx *c, const char *name, char kind,
         snprintf(s.decl_path, sizeof(s.decl_path), "%s", c->relpath);
         s.decl_line = line;
     }
+    s.end_line = line;
+    if (c->seg_end > name_off) {
+        int end = line_of(c, c->seg_end);
+        if (end > line) s.end_line = end;
+    }
     if (partial)
         raw_first_line(c, seg_a, seg_b, s.signature, sizeof(s.signature));
     else
@@ -796,6 +801,20 @@ static void apply_directive(struct guard_stack *gs, const char *dir,
     }
 }
 
+/* 1-based last line of the directive that starts on 0-based line l: a trailing
+ * backslash continues it onto the next line. */
+static int macro_end_line(const struct scan_ctx *c, size_t l)
+{
+    while (l + 1 < c->nlines) {
+        size_t e = c->line_starts[l + 1];
+        while (e > c->line_starts[l] &&
+               (c->src[e - 1] == '\n' || c->src[e - 1] == '\r')) e--;
+        if (e == c->line_starts[l] || c->src[e - 1] != '\\') break;
+        l++;
+    }
+    return (int)(l + 1);
+}
+
 /* #define at line l (segment [a,b), first token t): emit a macro symbol. */
 static void emit_define(struct scan_ctx *c, const struct guard_stack *gs,
                         size_t l, size_t a, size_t b, size_t t, size_t d)
@@ -808,6 +827,7 @@ static void emit_define(struct scan_ctx *c, const struct guard_stack *gs,
     ms.kind = 'M';
     snprintf(ms.def_path, sizeof(ms.def_path), "%s", c->relpath);
     ms.def_line = (int)(l + 1);
+    ms.end_line = macro_end_line(c, l);
     clean_signature(c, a, b, ms.signature, sizeof(ms.signature));
     snprintf(ms.doc, sizeof(ms.doc), "%s", doc_for(c, a, t));
     if (gs->sp > 0)
@@ -881,17 +901,32 @@ struct struct_scan {
     char pkind;
 };
 
+/* Offset of the brace that closes the block opened at `open`; the last byte
+ * of the buffer when the block never closes. `clean` has comments, strings
+ * and preprocessor lines blanked, so every brace left is structural. */
+static size_t block_close_offset(const struct scan_ctx *c, size_t open)
+{
+    int depth = 0;
+    for (size_t i = open; i < c->len; i++) {
+        if (c->clean[i] == '{') depth++;
+        else if (c->clean[i] == '}' && --depth == 0) return i;
+    }
+    return c->len ? c->len - 1 : 0;
+}
+
 /* A '{', '}' or ';' at top level (brace 0, paren 0). */
 static void struct_top_level(struct scan_ctx *c, struct struct_scan *ss,
                              size_t i, char ch)
 {
     if (ch == '{') {
+        c->seg_end = block_close_offset(c, i);
         classify_block_open(c, ss->seg_start, i, &ss->pending, &ss->pkind);
         ss->brace++;
         ss->seg_start = i + 1;
     } else if (ch == '}') {
         ss->seg_start = i + 1;
     } else if (ch == ';') {
+        c->seg_end = i;
         classify_semicolon(c, ss->seg_start, i, &ss->pending, &ss->pkind);
         ss->seg_start = i + 1;
     }

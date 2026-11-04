@@ -1025,6 +1025,7 @@ ZCL_TEST_GROUP(codeindex_stale)
 ZCL_TEST_GROUP(codeindex_empty_dep_paths)
 ZCL_TEST_GROUP(codeindex_scale)
 ZCL_TEST_GROUP(codeindex_projection_integrity)
+ZCL_TEST_GROUP(codeindex_inventory_schema)
 ZCL_TEST_GROUP(codeindex_incremental)
 ZCL_TEST_GROUP(codeindex_static_callers)
 /* Cold-open seeding: a fresh worktree adopts the nearest sibling checkout's

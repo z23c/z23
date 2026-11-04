@@ -26,7 +26,7 @@
 #define CI_PATH_MAX 4096
 #define CI_SYM_COLS \
     "name,kind,def_path,def_line,decl_path,decl_line," \
-    "signature,doc,guard,\"group\",partial,row_sha3"
+    "signature,doc,guard,\"group\",partial,end_line,row_sha3"
 
 /* Derived-schema generation tag. Bump on ANY change to the derived table
  * layout or the meaning of a derived column (recompute, never repair). It is
@@ -51,8 +51,12 @@
  * generation dropped that edge while its depfile bytes were unchanged.
  * "ret5" stores include_narrow_cause beside include_narrow_unsafe, so a
  * refused narrow include answer names the rule and file behind it.
- * "ret6" excludes assertion keywords from derived declared-symbol names. */
-#define CI_SCHEMA_VERSION "ret6"
+ * "ret6" excludes assertion keywords from derived declared-symbol names.
+ * "ret7" is the inventory-schema generation: symbols.end_line, files.line_count
+ * and the docs table (prose of docs tree .md, AGENTS.md and README.md) join the
+ * sealed rows, so a ret6 store lacks the lines and the prose a reader now
+ * expects and must be recomputed, not read as if they were zero or absent. */
+#define CI_SCHEMA_VERSION "ret7"
 #define CI_STORE_FORMAT "zcl.codeindex.store.v5"
 #define CI_RETRIEVAL_PROJECTION_META "retrieval_projection_root_sha3"
 
@@ -111,6 +115,10 @@ bool ci_store_rollback(struct ci_store *s);
 
 /* writes (require an open txn) */
 bool ci_store_clear(struct ci_store *s);
+/* Rebuild the docs table from the prose files under `root` (inside the open
+ * write transaction). ci_docs_hash_file hashes one prose file the same way. */
+bool ci_docs_refresh(struct ci_store *store, const char *root);
+bool ci_docs_hash_file(const char *root, const char *relpath, uint8_t out[32]);
 bool ci_store_put_file(struct ci_store *s, const struct ci_file *f,
                        const uint8_t content_sha3[32], int64_t mtime,
                        int64_t *out_file_id);
@@ -407,7 +415,8 @@ typedef void (*ci_ref_cb)(const char *callee, const char *ref_file,
                           int ref_line, const char *enclosing, void *user);
 bool ci_scan_file(const char *root, const char *relpath,
                   ci_sym_cb on_sym, ci_ref_cb on_ref, void *user,
-                  uint8_t out_sha3[32], char purpose_out[CI_FILE_PURPOSE_MAX]);
+                  uint8_t out_sha3[32], char purpose_out[CI_FILE_PURPOSE_MAX],
+                  int *lines_out);
 
 /* Pure text scanner (no file I/O) — the testable core. `src`/`len` is the raw
  * file text; the group is stamped into every emitted symbol. `purpose_out`

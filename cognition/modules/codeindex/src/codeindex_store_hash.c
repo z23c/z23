@@ -24,11 +24,12 @@ void ci_symbol_row_hash(const struct ci_symbol *sym, uint8_t out[32])
     for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++)
         sha3_256_write(&ctx, (const unsigned char *)fields[i],
                        strlen(fields[i]) + 1);
-    unsigned char scalars[10] = {
+    unsigned char scalars[14] = {
         (unsigned char)sym->kind, sym->partial ? 1u : 0u,
     };
     zcl_write_i32_le(scalars + 2u, sym->def_line);
     zcl_write_i32_le(scalars + 6u, sym->decl_line);
+    zcl_write_i32_le(scalars + 10u, sym->end_line);
     sha3_256_write(&ctx, scalars, sizeof(scalars));
     sha3_256_finalize(&ctx, out);
 }
@@ -259,6 +260,11 @@ static bool projection_root_locked(struct ci_store *store, uint8_t out[32])
         {CI_PROJECTION_TEXT, sizeof(((struct ci_file *)0)->path)},
         {CI_PROJECTION_BLOB32, 0},
     };
+    static const struct ci_projection_column doc_columns[] = {
+        {CI_PROJECTION_TEXT, 256},  {CI_PROJECTION_TEXT, 256},
+        {CI_PROJECTION_TEXT, 512},  {CI_PROJECTION_TEXT, 1024},
+        {CI_PROJECTION_I32, 0},     {CI_PROJECTION_BLOB32, 0},
+    };
     static const struct ci_projection_table tables[] = {
         {0x10,
          "SELECT path,kind,parent,purpose FROM groups ORDER BY "
@@ -270,6 +276,11 @@ static bool projection_root_locked(struct ci_store *store, uint8_t out[32])
          "SELECT path,digest FROM scan_shards ORDER BY path COLLATE BINARY",
          shard_columns, sizeof(shard_columns) / sizeof(shard_columns[0]),
          UINT64_C(1048576)},
+        {0x30,
+         "SELECT path,title,summary,headings,line_count,content_sha3 FROM docs "
+         "ORDER BY path COLLATE BINARY",
+         doc_columns, sizeof(doc_columns) / sizeof(doc_columns[0]),
+         UINT64_C(65536)},
     };
 
     struct ci_projection_hash hash = {0};

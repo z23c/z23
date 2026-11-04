@@ -89,9 +89,10 @@ bool ci_store_fill_symbol(sqlite3_stmt *stmt, struct ci_symbol *out)
     t = sqlite3_column_text(stmt, 8);  ci_cpy(out->guard, sizeof(out->guard), (const char *)t);
     t = sqlite3_column_text(stmt, 9);  ci_cpy(out->group, sizeof(out->group), (const char *)t);
     out->partial = sqlite3_column_int(stmt, 10) != 0;
+    out->end_line = sqlite3_column_int(stmt, 11);
 
-    const void *rb = sqlite3_column_blob(stmt, 11);
-    int rn = sqlite3_column_bytes(stmt, 11);
+    const void *rb = sqlite3_column_blob(stmt, 12);
+    int rn = sqlite3_column_bytes(stmt, 12);
     uint8_t want[32];
     ci_symbol_row_hash(out, want);
     if (!rb || rn != 32 || memcmp(rb, want, 32) != 0)
@@ -319,7 +320,7 @@ bool ci_store_file_by_path(struct ci_store *s, const char *path,
     pthread_mutex_lock(&s->lock);
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2(s->db,
-        "SELECT path,\"group\",purpose FROM files WHERE path=?",
+        "SELECT path,\"group\",purpose,line_count FROM files WHERE path=?",
         -1, &stmt, NULL) != SQLITE_OK) {
         pthread_mutex_unlock(&s->lock);
         LOG_FAIL("codeindex", "prepare file_by_path");
@@ -332,6 +333,7 @@ bool ci_store_file_by_path(struct ci_store *s, const char *path,
         ci_cpy(out->path, sizeof(out->path), (const char *)sqlite3_column_text(stmt, 0));
         ci_cpy(out->group, sizeof(out->group), (const char *)sqlite3_column_text(stmt, 1));
         ci_cpy(out->purpose, sizeof(out->purpose), (const char *)sqlite3_column_text(stmt, 2));
+        out->line_count = sqlite3_column_int(stmt, 3);
         if (found) *found = true;
     } else if (rc != SQLITE_DONE) {
         ok = false;
@@ -377,7 +379,7 @@ int ci_store_files_in_group(struct ci_store *s, const char *group,
     pthread_mutex_lock(&s->lock);
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2(s->db,
-        "SELECT path,\"group\",purpose FROM files WHERE \"group\"=?"
+        "SELECT path,\"group\",purpose,line_count FROM files WHERE \"group\"=?"
         " ORDER BY path ASC",
         -1, &stmt, NULL) != SQLITE_OK) {
         pthread_mutex_unlock(&s->lock);
@@ -391,6 +393,7 @@ int ci_store_files_in_group(struct ci_store *s, const char *group,
         ci_cpy(out[n].path, sizeof(out[n].path), (const char *)sqlite3_column_text(stmt, 0));
         ci_cpy(out[n].group, sizeof(out[n].group), (const char *)sqlite3_column_text(stmt, 1));
         ci_cpy(out[n].purpose, sizeof(out[n].purpose), (const char *)sqlite3_column_text(stmt, 2));
+        out[n].line_count = sqlite3_column_int(stmt, 3);
         n++;
     }
     sqlite3_finalize(stmt);
@@ -426,7 +429,7 @@ int ci_store_files_page(struct ci_store *s, int offset,
     pthread_mutex_lock(&s->lock);
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2(s->db,
-        "SELECT path,\"group\",purpose FROM files ORDER BY path ASC "
+        "SELECT path,\"group\",purpose,line_count FROM files ORDER BY path ASC "
         "LIMIT ?1 OFFSET ?2",
         -1, &stmt, NULL) != SQLITE_OK) {
         pthread_mutex_unlock(&s->lock);
@@ -444,6 +447,7 @@ int ci_store_files_page(struct ci_store *s, int offset,
                (const char *)sqlite3_column_text(stmt, 1));
         ci_cpy(out[n].purpose, sizeof(out[n].purpose),
                (const char *)sqlite3_column_text(stmt, 2));
+        out[n].line_count = sqlite3_column_int(stmt, 3);
         n++;
     }
     sqlite3_finalize(stmt);

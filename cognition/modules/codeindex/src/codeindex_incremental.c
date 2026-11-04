@@ -94,14 +94,15 @@ static bool incremental_scan_file_into_store(const char *root,
                                              struct ci_store *store,
                                              const char *path,
                                              uint8_t content_sha3[32],
-                                             char purpose[CI_FILE_PURPOSE_MAX])
+                                             char purpose[CI_FILE_PURPOSE_MAX],
+                                             int *lines)
 {
     struct incremental_scan scan = {.store = store, .failed = false};
     bool registry = ci_path_is_registry(path);
     return ci_scan_file(root, path,
                         registry ? incremental_ignore_symbol : incremental_symbol,
                         registry ? incremental_ignore_ref : incremental_ref,
-                        &scan, content_sha3, purpose) &&
+                        &scan, content_sha3, purpose, lines) &&
            !scan.failed;
 }
 
@@ -123,14 +124,16 @@ static bool incremental_update_file_row(sqlite3 *db, const char *path,
 {
     sqlite3_stmt *statement = NULL;
     static const char update_sql[] =
-        "UPDATE files SET \"group\"=?,purpose=?,content_sha3=?,mtime=? WHERE path=?";
+        "UPDATE files SET \"group\"=?,purpose=?,content_sha3=?,mtime=?,line_count=?"
+        " WHERE path=?";
     if (sqlite3_prepare_v2(db, update_sql, -1, &statement, NULL) != SQLITE_OK)
         return false;
     bool ok = sqlite3_bind_text(statement, 1, file->group, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
               sqlite3_bind_text(statement, 2, file->purpose, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
               sqlite3_bind_blob(statement, 3, content_sha3, 32, SQLITE_TRANSIENT) == SQLITE_OK &&
               sqlite3_bind_int64(statement, 4, mtime_ns) == SQLITE_OK &&
-              sqlite3_bind_text(statement, 5, path, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+              sqlite3_bind_int(statement, 5, file->line_count) == SQLITE_OK &&
+              sqlite3_bind_text(statement, 6, path, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
               sqlite3_step(statement) == SQLITE_DONE && // raw-sql-ok:codeindex-derived
               sqlite3_changes(db) == 1;
     sqlite3_finalize(statement);
@@ -146,8 +149,9 @@ static bool incremental_replace_file(const char *root, struct ci_store *store,
 
     uint8_t content_sha3[32];
     char purpose[CI_FILE_PURPOSE_MAX] = "";
+    int lines = 0;
     if (!incremental_scan_file_into_store(root, store, path, content_sha3,
-                                          purpose))
+                                          purpose, &lines))
         return false;
 
     int64_t mtime_ns = 0;
@@ -159,6 +163,7 @@ static bool incremental_replace_file(const char *root, struct ci_store *store,
     ci_cpy(file.path, sizeof(file.path), path);
     ci_group_for_path(path, file.group);
     ci_cpy(file.purpose, sizeof(file.purpose), purpose);
+    file.line_count = lines;
     if (!incremental_update_file_row(db, path, &file, content_sha3, mtime_ns))
         return false;
     return ci_store_scan_shard_refresh(store, path);
@@ -251,6 +256,17 @@ static bool incremental_seal_roots(struct ci_store *store, const uint8_t dep_sta
            ci_store_meta_set(store, "source_merkle_root_sha3", merkle_root, 32);
 }
 
+/* Replace every changed file's rows, in leaf order. */
+static bool incremental_replace_changed(const char *root, struct ci_store *store,
+                                        const struct ci_merkle_leaf *changed,
+                                        int changed_count)
+{
+    for (int i = 0; i < changed_count; i++)
+        if (!incremental_replace_file(root, store, changed[i].path))
+            return false;
+    return true;
+}
+
 static bool incremental_build(const char *root, struct ci_store *store,
                               const struct ci_merkle_leaf *changed,
                               int changed_count, const uint8_t dep_stat[32],
@@ -261,8 +277,9 @@ static bool incremental_build(const char *root, struct ci_store *store,
         LOG_FAIL("codeindex", "invalid incremental store build");
     bool tx_open = ci_store_begin(store);
     bool ok = tx_open;
-    for (int i = 0; ok && i < changed_count; i++)
-        ok = incremental_replace_file(root, store, changed[i].path);
+    ok = ok && incremental_replace_changed(root, store, changed,
+                                              changed_count) &&
+         ci_docs_refresh(store, root);
     if (ok) ok = incremental_seal_roots(store, dep_stat, merkle_root);
     if (ok)
         ok = incremental_stamp_projection_and_counts(root, store, rescan_deps);

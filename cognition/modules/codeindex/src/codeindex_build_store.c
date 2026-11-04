@@ -120,11 +120,12 @@ static bool build_file_cb(const char *relpath, const struct stat *file_st,
 
     uint8_t sha[32];
     char purpose[CI_FILE_PURPOSE_MAX] = "";
+    int lines = 0;
     bool registry = ci_path_is_registry(relpath);
     if (!ci_scan_file(env->root, relpath,
                       registry ? ignore_sym_cb : on_sym_cb,
                       registry ? ignore_ref_cb : on_ref_cb, b, sha,
-                      purpose)) {
+                      purpose, &lines)) {
         b->err = true;
         return false;
     }
@@ -135,6 +136,7 @@ static bool build_file_cb(const char *relpath, const struct stat *file_st,
     (void)snprintf(file.path, sizeof(file.path), "%s", relpath);
     ci_group_for_path(relpath, file.group);
     (void)snprintf(file.purpose, sizeof(file.purpose), "%s", purpose);
+    file.line_count = lines;
 #if defined(_WIN32)
     int64_t mtime_ns = (int64_t)file_st->st_mtime * INT64_C(1000000000);
 #else
@@ -228,6 +230,12 @@ static bool build_files_with_shards(struct build_ctx *build, const char *root)
     return enumerated && closed && !build->err;
 }
 
+static bool build_files_and_docs(struct build_ctx *build, const char *root)
+{
+    return build_files_with_shards(build, root) &&
+           ci_docs_refresh(build->store, root);
+}
+
 /* Preserve diagnostic origins across the extracted metadata publication. */
 #define build (*build_state)
 static bool ci_publish_guarded_build_roots_and_projection(
@@ -294,7 +302,7 @@ bool ci_build_store_memory(const char *root, int64_t build_start_ms,
 
     bool tx_open = ci_store_begin(store);
     bool ok = tx_open && ci_store_clear(store) && ci_group_emit_all(store) &&
-              build_files_with_shards(&build, root);
+              build_files_and_docs(&build, root);
     if (ok) idmap_sort(&build);
 
     ok = ci_publish_guarded_build_roots_and_projection(

@@ -647,6 +647,7 @@ bool ci_store_clear(struct ci_store *s)
     if (sqlite3_exec(s->db,
         "DELETE FROM files; DELETE FROM symbols; DELETE FROM includes;"
         " DELETE FROM refs; DELETE FROM groups; DELETE FROM scan_shards;"
+        " DELETE FROM docs;"
         " DELETE FROM meta;",
         NULL, NULL, &err) != SQLITE_OK) {
         if (err) sqlite3_free(err);
@@ -702,8 +703,24 @@ static bool ci_store_bind_symbol(sqlite3_stmt *stmt,
            sqlite3_bind_text(stmt, 10, sym->group, -1,
                               SQLITE_TRANSIENT) == SQLITE_OK &&
            sqlite3_bind_int(stmt, 11, sym->partial ? 1 : 0) == SQLITE_OK &&
-           sqlite3_bind_blob(stmt, 12, row, 32,
+           sqlite3_bind_int(stmt, 12, sym->end_line) == SQLITE_OK &&
+           sqlite3_bind_blob(stmt, 13, row, 32,
                               SQLITE_TRANSIENT) == SQLITE_OK;
+}
+
+static bool ci_store_bind_file(sqlite3_stmt *stmt, const struct ci_file *f,
+                              const uint8_t content_sha3[32], int64_t mtime)
+{
+    return sqlite3_bind_text(stmt, 1, f->path, -1, SQLITE_TRANSIENT) ==
+               SQLITE_OK &&
+           sqlite3_bind_text(stmt, 2, f->group, -1, SQLITE_TRANSIENT) ==
+               SQLITE_OK &&
+           sqlite3_bind_text(stmt, 3, f->purpose, -1, SQLITE_TRANSIENT) ==
+               SQLITE_OK &&
+           sqlite3_bind_blob(stmt, 4, content_sha3, 32, SQLITE_TRANSIENT) ==
+               SQLITE_OK &&
+           sqlite3_bind_int64(stmt, 5, mtime) == SQLITE_OK &&
+           sqlite3_bind_int(stmt, 6, f->line_count) == SQLITE_OK;
 }
 
 bool ci_store_put_file(struct ci_store *s, const struct ci_file *f,
@@ -716,18 +733,11 @@ bool ci_store_put_file(struct ci_store *s, const struct ci_file *f,
     sqlite3_stmt *stmt = NULL;
     bool cached = false;
     if (!ci_store_insert_prepare(s, &s->put_file_stmt,
-        "INSERT OR REPLACE INTO files(path,\"group\",purpose,content_sha3,mtime)"
-        " VALUES(?,?,?,?,?)", &stmt, &cached))
+        "INSERT OR REPLACE INTO files(path,\"group\",purpose,content_sha3,mtime,"
+        "line_count)"
+        " VALUES(?,?,?,?,?,?)", &stmt, &cached))
         LOG_FAIL("codeindex", "prepare put_file: %s", sqlite3_errmsg(s->db));
-    bool bound = sqlite3_bind_text(stmt, 1, f->path, -1, SQLITE_TRANSIENT) ==
-                     SQLITE_OK &&
-                 sqlite3_bind_text(stmt, 2, f->group, -1, SQLITE_TRANSIENT) ==
-                     SQLITE_OK &&
-                 sqlite3_bind_text(stmt, 3, f->purpose, -1, SQLITE_TRANSIENT) ==
-                     SQLITE_OK &&
-                 sqlite3_bind_blob(stmt, 4, content_sha3, 32,
-                                   SQLITE_TRANSIENT) == SQLITE_OK &&
-                 sqlite3_bind_int64(stmt, 5, mtime) == SQLITE_OK;
+    bool bound = ci_store_bind_file(stmt, f, content_sha3, mtime);
     int rc = bound ? sqlite3_step(stmt) : SQLITE_ERROR; // raw-sql-ok:codeindex-derived
     int64_t file_id = rc == SQLITE_DONE ? sqlite3_last_insert_rowid(s->db) : -1;
     if (!ci_store_insert_finish(stmt, cached, rc))
@@ -748,8 +758,8 @@ bool ci_store_put_symbol(struct ci_store *s, const struct ci_symbol *sym)
     bool cached = false;
     if (!ci_store_insert_prepare(s, &s->put_symbol_stmt,
         "INSERT INTO symbols(name,kind,def_path,def_line,decl_path,decl_line,"
-        "signature,doc,guard,\"group\",partial,row_sha3)"
-        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", &stmt, &cached))
+        "signature,doc,guard,\"group\",partial,end_line,row_sha3)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", &stmt, &cached))
         LOG_FAIL("codeindex", "prepare put_symbol: %s", sqlite3_errmsg(s->db));
     bool bound = ci_store_bind_symbol(stmt, sym, kindstr, row);
     int rc = bound ? sqlite3_step(stmt) : SQLITE_ERROR; // raw-sql-ok:codeindex-derived

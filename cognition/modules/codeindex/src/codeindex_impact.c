@@ -596,7 +596,7 @@ static bool ci_closure_seed_all(
             uint8_t current_sha3[32];
             if (!ci_scan_file(overlay_root, changed_files[i], ci_overlay_sym,
                               ci_overlay_ignore_ref, &seed, current_sha3,
-                              NULL) || seed.failed)
+                              NULL, NULL) || seed.failed)
                 return false;
         }
     }

@@ -49,6 +49,7 @@ struct ci_symbol {
     int  def_line;
     char decl_path[256];
     int  decl_line;
+    int  end_line;   /* last line of the definition (declaration when def_line is 0) */
     char signature[512];
     char doc[256];
     char guard[128];
@@ -70,6 +71,7 @@ struct ci_file {
     char path[256];
     char group[64];
     char purpose[CI_FILE_PURPOSE_MAX];
+    int  line_count;   /* newline count, plus one for an unterminated last line */
 };
 
 /* A node in the group hierarchy (lib/<mod>, app/<shape>, core, …). */

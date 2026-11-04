@@ -20,6 +20,13 @@ static void shard_text(struct sha3_256_ctx *sha, const unsigned char *text)
     sha3_256_write(sha, text, strlen((const char *)text) + 1);
 }
 
+static void shard_i32(struct sha3_256_ctx *sha, int value)
+{
+    unsigned char encoded[4];
+    zcl_write_i32_le(encoded, value);
+    sha3_256_write(sha, encoded, sizeof(encoded));
+}
+
 bool ci_scan_shard_writer_close(struct ci_scan_shard_writer *writer)
 {
     if (!writer) return false;
@@ -48,7 +55,7 @@ bool ci_scan_shard_writer_open(struct ci_scan_shard_writer *writer,
         "SELECT callee_name,ref_line,enclosing FROM refs WHERE ref_file=? ORDER BY "
         "callee_name COLLATE BINARY,ref_line,enclosing COLLATE BINARY";
     bool ok = sqlite3_prepare_v2(db,
-        "SELECT \"group\",purpose,content_sha3 FROM files WHERE path=?",
+        "SELECT \"group\",purpose,content_sha3,line_count FROM files WHERE path=?",
         -1, &writer->file, NULL) == SQLITE_OK &&
         sqlite3_prepare_v2(db, symbol_sql, -1, &writer->symbols, NULL) ==
             SQLITE_OK &&
@@ -78,10 +85,12 @@ static bool shard_digest_file(struct ci_scan_shard_writer *writer,
     if (rc == SQLITE_ROW && sqlite3_column_type(statement, 0) == SQLITE_TEXT &&
         sqlite3_column_type(statement, 1) == SQLITE_TEXT &&
         sqlite3_column_type(statement, 2) == SQLITE_BLOB &&
-        sqlite3_column_bytes(statement, 2) == 32) {
+        sqlite3_column_bytes(statement, 2) == 32 &&
+        sqlite3_column_type(statement, 3) == SQLITE_INTEGER) {
         shard_text(sha, sqlite3_column_text(statement, 0));
         shard_text(sha, sqlite3_column_text(statement, 1));
         sha3_256_write(sha, sqlite3_column_blob(statement, 2), 32);
+        shard_i32(sha, sqlite3_column_int(statement, 3));
     } else {
         ok = false;
     }
@@ -98,12 +107,12 @@ static bool shard_digest_symbols(struct ci_scan_shard_writer *writer,
     while (ok && (rc = sqlite3_step(statement)) == SQLITE_ROW) { // raw-sql-ok:codeindex-derived
         struct ci_symbol symbol;
         if (!ci_store_fill_symbol(statement, &symbol) ||
-            sqlite3_column_type(statement, 11) != SQLITE_BLOB ||
-            sqlite3_column_bytes(statement, 11) != 32) {
+            sqlite3_column_type(statement, 12) != SQLITE_BLOB ||
+            sqlite3_column_bytes(statement, 12) != 32) {
             ok = false;
             break;
         }
-        sha3_256_write(sha, sqlite3_column_blob(statement, 11), 32);
+        sha3_256_write(sha, sqlite3_column_blob(statement, 12), 32);
     }
     if (rc != SQLITE_DONE) ok = false;
     return shard_statement_reset(statement) && ok;

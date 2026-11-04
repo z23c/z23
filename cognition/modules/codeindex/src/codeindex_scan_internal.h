@@ -55,6 +55,11 @@ struct scan_ctx {
     struct { int def_line; char name[128]; } *funcs;
     size_t      nfuncs;
     size_t      cap_funcs;
+
+    /* End offset of the top-level segment being classified: the matching
+     * close brace of a block, or the terminating semicolon. emit_sym turns it
+     * into symbols.end_line. */
+    size_t      seg_end;
 };
 
 /* ── the doc-comment layer (codeindex_scan_doc.c) ───────────────────── */
