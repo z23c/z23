@@ -380,6 +380,9 @@ static bool trc_env_is_cache_control(const char *name, size_t namelen)
         "ZCL_TEST_CACHE", "ZCL_TEST_CACHE_DUMP",
         "ZCL_TESTCACHE_STORE_ROOT", "ZCL_LINT_TU_CACHE",
         "ZCL_DEV_OBSERVATION_STORE",
+        /* Selects the dev-proof shadow lane's store; folding it in would
+         * give a proof run with the lane on keys no run without it shares. */
+        "ZCL_DEV_PROOF_SHADOW_STORE",
         /* Where fixtures live, never what a group computes: the runner mints
          * a fresh random tmpfs root per process, so keying on it would give
          * every nested run a different input key. */

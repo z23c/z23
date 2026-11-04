@@ -712,6 +712,8 @@ Z23_FLAG("ZCL_DEV_PROBE_INTERVAL_MS", "env_build", "250", "-",
           "undocumented; first use tools/dev/deploy-dev-lane.sh:auto")
 Z23_FLAG("ZCL_DEV_PROBE_TIMEOUT", "env_build", "-", "-",
           "undocumented; first use tools/dev/deploy-dev-lane.sh:auto")
+Z23_FLAG("ZCL_DEV_PROOF_SHADOW_STORE", "env_runtime", "-", "-",
+          "absolute directory of the dev-proof shadow verdict store, unset = off; measurement only, never skips a group; first use tools/dev/dev_proof.c:auto")
 Z23_FLAG("ZCL_DEV_PROOF_TEST_LINK_ERRNO", "env_runtime", "-", "-",
           "undocumented; first use tools/dev/dev_proof.c:auto")
 Z23_FLAG("ZCL_DEV_PROOF_WARM", "env_test", "-", "-",

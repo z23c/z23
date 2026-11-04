@@ -10227,6 +10227,9 @@ struct dp_worker {
     struct zcl_dev_proof_budget lint_budget;
     bool lint_reads_artifacts;
     bool bundle_built_prefork;
+    /* The shadow lane probed its store before the cold run and still owes
+     * the post-run audit (dp_worker_shadow_audit). */
+    bool shadow_probed;
     /* Wall time of the bundle make the include-graph refresh ran, kept for
      * the warm-start sidecar when that make is the proof's only one. */
     uint64_t refresh_bundle_ms;
@@ -12052,6 +12055,302 @@ static bool dp_preflight_log_read(const char *path, char **bytes, size_t *len)
     return true;
 }
 
+/* ── The shadow verdict lane ──────────────────────────────────────────────
+ *
+ * ZCL_DEV_PROOF_SHADOW_STORE (an absolute directory, default unset = off)
+ * names a PERSISTENT verdict store. Before the cold test dimension the
+ * lane probes it (the runner's --cache --cache-probe-only) and records
+ * what a cache WOULD reuse; after the cold run it compares every group the
+ * store predicted PASS with this proof's cold verdict and logs each
+ * disagreement; and only when the proof ended accepted does it seed PASS
+ * records for the groups the cold run just passed. It is measurement only:
+ * the cold test dimension (dp_test_dimension_argv) still runs every group
+ * with --no-cache and never reads this store, a skipped group is
+ * impossible by construction, and any failure here logs a note and never
+ * fails the proof. The store holds unsigned records any same-uid process
+ * can write, which is exactly why nothing may act on them yet. */
+struct dp_shadow_audit {
+    struct zcl_dev_proof_preflight probe;
+    uint32_t hits;
+    uint32_t divergences;
+    uint32_t cold_ran;
+    uint32_t cold_failed;
+};
+
+/* The SUITE VERDICT line of a cold test log, exactly one and whole. */
+static bool dp_shadow_cold_verdict(const char *cold, size_t len,
+                                   struct dp_shadow_audit *out)
+{
+    const char *p = cold;
+    uint32_t seen = 0;
+    char line[4096] = {0};
+    while (p < cold + len) {
+        const char *eol = memchr(p, '\n', (size_t)(cold + len - p));
+        size_t n = eol ? (size_t)(eol - p) : (size_t)(cold + len - p);
+        if (n > 14 && memcmp(p, "SUITE VERDICT ", 14) == 0 &&
+            n < sizeof(line) && eol) {
+            memcpy(line, p, n);
+            line[n] = '\0';
+            seen++;
+        }
+        p += n + (eol ? 1 : 0);
+    }
+    return seen == 1 && parse_uint_field(line, "groups_ran=", &out->cold_ran) &&
+           parse_uint_field(line, "groups_failed=", &out->cold_failed);
+}
+
+/* Is `name` an entry of the runner's "Failed groups:" report? The report is
+ * the last one in the log (a group's own captured output may print the same
+ * words); entries read `  - name: exit ...` and are followed by indented
+ * repro lines. */
+static bool dp_shadow_cold_failed(const char *cold, size_t len,
+                                  const char *name)
+{
+    static const char head[] = "\nFailed groups:\n";
+    const char *at = NULL, *p, *end = cold + len;
+    size_t nlen = strlen(name);
+    for (p = cold; (p = strstr(p, head)) != NULL; p += sizeof(head) - 1)
+        at = p;
+    if (!at) return false;
+    for (p = at + sizeof(head) - 1; p < end && *p == ' ';) {
+        const char *eol = memchr(p, '\n', (size_t)(end - p));
+        if (!eol) break;
+        if (strncmp(p, "  - ", 4) == 0 && (size_t)(eol - p) > 4 + nlen &&
+            memcmp(p + 4, name, nlen) == 0 && p[4 + nlen] == ':')
+            return true;
+        p = eol + 1;
+    }
+    return false;
+}
+
+/* One "PROBE <group> HIT ..." line: the group name when it is a HIT. */
+static bool dp_shadow_probe_hit(const char *line, size_t len, char *name,
+                                size_t name_cap)
+{
+    char buf[512], group[256], verdict[16];
+    if (len <= 6 || len >= sizeof(buf) || memcmp(line, "PROBE ", 6) != 0)
+        return false;
+    memcpy(buf, line, len);
+    buf[len] = '\0';
+    if (sscanf(buf, "PROBE %255s %15s", group, verdict) != 2 ||
+        strcmp(verdict, "HIT") != 0 || strlen(group) >= name_cap)
+        return false;
+    memcpy(name, group, strlen(group) + 1);
+    return true;
+}
+
+/* Compare every predicted-PASS group with the cold run. Refuses (false)
+ * when either log cannot be accounted from. */
+static bool dp_shadow_audit_logs(const char *probe, size_t plen,
+                                 const char *cold, size_t clen,
+                                 const char *phases,
+                                 struct dp_shadow_audit *out)
+{
+    size_t i = 0;
+    memset(out, 0, sizeof(*out));
+    if (!dp_preflight_parse(probe, plen, &out->probe) ||
+        !dp_shadow_cold_verdict(cold, clen, out))
+        return false;
+    while (i < plen) {
+        const char *eol = memchr(probe + i, '\n', plen - i);
+        size_t n = eol ? (size_t)(eol - (probe + i)) : plen - i;
+        char name[256], note[320];
+        if (dp_shadow_probe_hit(probe + i, n, name, sizeof(name))) {
+            out->hits++;
+            if (dp_shadow_cold_failed(cold, clen, name)) {
+                out->divergences++;
+                (void)snprintf(note, sizeof(note),
+                               "group=%s predicted=PASS cold=FAIL", name);
+                if (phases && phases[0])
+                    (void)zcl_dev_proof_phase_note(
+                        phases, "test_shadow_divergence", note);
+            }
+        }
+        i += n + 1;
+    }
+    return true;
+}
+
+#if defined(ZCL_TESTING)
+bool zcl_dev_proof_test_shadow_audit(const char *probe, size_t plen,
+                                     const char *cold, size_t clen,
+                                     const char *phases,
+                                     struct zcl_dev_proof_shadow_audit *out)
+{
+    struct dp_shadow_audit a;
+    bool ok = probe && cold && out &&
+              dp_shadow_audit_logs(probe, plen, cold, clen, phases, &a);
+    if (ok) {
+        out->groups = a.probe.groups;
+        out->would_reuse = a.probe.would_reuse;
+        out->hits = a.hits;
+        out->divergences = a.divergences;
+        out->cold_ran = a.cold_ran;
+    }
+    return ok;
+}
+#endif
+
+/* The last DP_SHADOW_TAIL_MAX bytes of a log: the cold test log can be
+ * large, and everything the audit reads sits at its end. */
+#define DP_SHADOW_TAIL_MAX (1024u * 1024u)
+static bool dp_shadow_tail_read(const char *path, char **bytes, size_t *len)
+{
+    FILE *f = fopen(path, "rb");
+    long size;
+    size_t want, got;
+    char *buf;
+    if (!f) return false;
+    if (fseek(f, 0, SEEK_END) != 0 || (size = ftell(f)) < 0) {
+        fclose(f);
+        return false;
+    }
+    want = (size_t)size > DP_SHADOW_TAIL_MAX ? DP_SHADOW_TAIL_MAX
+                                              : (size_t)size;
+    buf = zcl_malloc(want + 1, "proof_shadow_tail");
+    if (!buf || fseek(f, size - (long)want, SEEK_SET) != 0) {
+        free(buf);
+        fclose(f);
+        return false;
+    }
+    got = fread(buf, 1, want, f);
+    fclose(f);
+    buf[got] = '\0';
+    *bytes = buf;
+    *len = got;
+    return true;
+}
+
+/* The shadow store root: absolute, bounded, and only when asked for. */
+static const char *dp_shadow_store(void)
+{
+    const char *s = getenv("ZCL_DEV_PROOF_SHADOW_STORE");
+    return s && s[0] == '/' && strlen(s) < PATH_MAX - 64 ? s : NULL;
+}
+
+/* Spawn the runner's probe-only mode against the shadow store; `seed` adds
+ * --cache-seed-pass. No capsule, no empty-store skip. */
+static bool dp_shadow_spawn(struct dp_worker *w, const char *store,
+                            const char *step, const char *log, bool seed)
+{
+    const char *argv[11];
+    char store_env[PATH_MAX + 32];
+    size_t n = 0;
+    struct zcl_dev_proof_budget budget;
+    if (snprintf(store_env, sizeof(store_env), "ZCL_TESTCACHE_STORE_ROOT=%s",
+                 store) >= (int)sizeof(store_env))
+        return false;
+    (void)mkdir(store, 0700);
+    argv[n++] = "env";
+    argv[n++] = store_env;
+    argv[n++] = w->generation_binary;
+    argv[n++] = w->only;
+    argv[n++] = "--cache";
+    argv[n++] = "--activate-proof-contracts";
+    argv[n++] = "--cache-probe-only";
+    if (seed) argv[n++] = "--cache-seed-pass";
+    argv[n] = NULL;
+    budget = proof_step_budget(w->paths, "test_shadow",
+                               PROOF_PREFLIGHT_DEFAULT_MS);
+    return run_step(&w->execution, w->execution.root, log, argv, step,
+                    &budget, NULL) == 0;
+}
+
+static bool dp_shadow_log_path(const struct dp_worker *w, const char *what,
+                               char *out, size_t out_len)
+{
+    return snprintf(out, out_len, "%s/%s.%s.log", w->execution.logs,
+                    w->execution.key, what) < (int)out_len;
+}
+
+/* Before the cold run: what would the shadow store reuse? */
+static void dp_worker_shadow_probe(struct dp_worker *w)
+{
+    const char *store = dp_shadow_store();
+    char log[PATH_MAX], note[160], *bytes = NULL;
+    size_t len = 0;
+    struct zcl_dev_proof_preflight pf;
+    w->shadow_probed = false;
+    if (!store || !w->generation_binary[0] || !w->only[0] ||
+        !dp_shadow_log_path(w, "test-shadow", log, sizeof(log)))
+        return;
+    (void)dp_shadow_spawn(w, store, "test_shadow", log, false);
+    if (!dp_preflight_log_read(log, &bytes, &len) ||
+        !dp_preflight_parse(bytes, len, &pf)) {
+        (void)zcl_dev_proof_phase_note(w->paths->phases, "test_shadow",
+                                       "unavailable");
+        free(bytes);
+        return;
+    }
+    free(bytes);
+    (void)snprintf(note, sizeof(note),
+                   "groups=%u would_reuse=%u must_run=%u uncacheable=%u",
+                   pf.groups, pf.would_reuse, pf.must_run, pf.uncacheable);
+    (void)zcl_dev_proof_phase_note(w->paths->phases, "test_shadow", note);
+    w->shadow_probed = true;
+}
+
+/* Seed PASS records after an accepted proof: a second probe-only spawn
+ * keyed on the generation the receipt just sealed. */
+static void dp_worker_shadow_seed(struct dp_worker *w, const char *store)
+{
+    char log[PATH_MAX], note[96], *bytes = NULL;
+    size_t len = 0;
+    unsigned stored = 0;
+    const char *at;
+    if (!dp_shadow_log_path(w, "test-shadow-seed", log, sizeof(log)))
+        return;
+    (void)dp_shadow_spawn(w, store, "test_shadow_seed", log, true);
+    if (dp_preflight_log_read(log, &bytes, &len) &&
+        (at = strstr(bytes, "SEED-SUMMARY stored=")) != NULL &&
+        sscanf(at, "SEED-SUMMARY stored=%u", &stored) == 1) {
+        (void)snprintf(note, sizeof(note), "stored=%u", stored);
+        (void)zcl_dev_proof_phase_note(w->paths->phases, "test_shadow_seed",
+                                       note);
+    } else {
+        (void)zcl_dev_proof_phase_note(w->paths->phases, "test_shadow_seed",
+                                       "unavailable");
+    }
+    free(bytes);
+}
+
+/* After the cold run: audit the prediction, then (accepted only) seed. */
+static void dp_worker_shadow_audit(struct dp_worker *w, bool accepted)
+{
+    const char *store = dp_shadow_store();
+    char probe_log[PATH_MAX], cold_log[PATH_MAX], note[200];
+    char *probe = NULL, *cold = NULL;
+    size_t plen = 0, clen = 0;
+    struct dp_shadow_audit a;
+    bool ok;
+    if (!w->shadow_probed || !store) return;
+    w->shadow_probed = false;
+    ok = snprintf(cold_log, sizeof(cold_log), "%s/%s.%s.log",
+                  w->execution.logs, w->execution.key,
+                  zcl_dev_proof_dimension_name(ZCL_DEV_PROOF_TEST)) <
+             (int)sizeof(cold_log) &&
+         dp_shadow_log_path(w, "test-shadow", probe_log, sizeof(probe_log)) &&
+         dp_preflight_log_read(probe_log, &probe, &plen) &&
+         dp_shadow_tail_read(cold_log, &cold, &clen) &&
+         dp_shadow_audit_logs(probe, plen, cold, clen, w->paths->phases, &a);
+    free(probe);
+    free(cold);
+    if (!ok) {
+        (void)zcl_dev_proof_phase_note(w->paths->phases, "test_shadow_audit",
+                                       "unavailable");
+        return;
+    }
+    (void)snprintf(note, sizeof(note),
+                   "groups=%u hits=%u divergences=%u cold_ran=%u "
+                   "cold_matches_groups=%d",
+                   a.probe.groups, a.hits, a.divergences, a.cold_ran,
+                   a.cold_ran == a.probe.groups);
+    (void)zcl_dev_proof_phase_note(w->paths->phases, "test_shadow_audit",
+                                   note);
+    if (accepted && a.cold_failed == 0 && a.cold_ran == a.probe.groups)
+        dp_worker_shadow_seed(w, store);
+}
+
 /* The routed-group preflight: probe the candidate's whole required set
  * through the runner's batch path and record what a verdict cache WOULD
  * reuse. Advisory only: the test dimension below runs cold
@@ -12149,7 +12448,11 @@ static bool dp_worker_dimensions(struct dp_worker *w, char *why,
     if (test->selected && !dp_worker_test_env(w, why, why_len)) return false;
     if (!dp_worker_prefork(w, test->selected != 0, why, why_len)) return false;
     if (test->selected) dp_worker_test_preflight(w);
-    if (!dp_worker_dimensions_run(w, lint, test, why, why_len)) return false;
+    if (test->selected) dp_worker_shadow_probe(w);
+    if (!dp_worker_dimensions_run(w, lint, test, why, why_len)) {
+        dp_worker_shadow_audit(w, false);
+        return false;
+    }
     proof_phase_mark(w->phases, "dimension_lint_and_test");
     return true;
 }
@@ -12232,7 +12535,9 @@ static bool proof_worker_body(const struct proof_paths *paths,
                           w.receipt.dimensions);
     if (!cycle_reused && !dp_worker_dimensions(&w, why, why_len))
         return false;
-    return dp_worker_publish(&w, started_us, why, why_len);
+    bool published = dp_worker_publish(&w, started_us, why, why_len);
+    dp_worker_shadow_audit(&w, published);
+    return published;
 }
 
 /* A post-merge hook can queue before the submitting checkout has rebuilt its
@@ -12813,7 +13118,8 @@ static bool dp_evidence_step_pick(const struct dp_evidence_step *steps,
                                   size_t count, char *out, size_t out_len)
 {
     for (size_t i = 0; i < count; i++) {
-        if (!steps[i].failed || strcmp(steps[i].name, "test_preflight") == 0)
+        if (!steps[i].failed || strcmp(steps[i].name, "test_preflight") == 0 ||
+            strncmp(steps[i].name, "test_shadow", 11) == 0)
             continue;
         bool recovered = false;
         for (size_t j = i + 1; j < count && !recovered; j++)

@@ -1175,6 +1175,7 @@ ZCL_TEST_GROUP(ops_slot_activate)
 ZCL_TEST_GROUP(ops_node_restart)
 ZCL_TEST_GROUP(receipt)
 ZCL_TEST_GROUP(testcache)
+ZCL_TEST_GROUP(testcache_shadow)
 /* The push proof's test dimension must set ZCL_STRESS_TESTS=1 in its own
  * environ (execvp reuses it, unconditionally, regardless of what a
  * resident daemon's first environment held) or ~16 stress-marked groups

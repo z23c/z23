@@ -348,10 +348,16 @@ static size_t probe_slots_fill(const struct group_result *results,
                                size_t *back, bool activate_proof_contracts);
 
 /* Probe-only needs the cache on: with it off or auditing there is nothing
- * reusable to report. */
+ * reusable to report. Seeding passes is a probe-only act: it never runs a
+ * group, so it cannot be combined with a real run. */
 static bool probe_only_refused(bool cli_probe_only, bool cache_on)
 {
     return cli_probe_only && !cache_on;
+}
+
+static bool seed_pass_refused(bool cli_seed_pass, bool cli_probe_only)
+{
+    return cli_seed_pass && !cli_probe_only;
 }
 
 /* Fill the compact slot arrays with the selected groups; returns the slot
@@ -822,6 +828,29 @@ static void print_probe_only(const struct group_result *results,
            (unsigned long long)s.sha3_content_bytes,
            (unsigned long long)s.verdict_lookups,
            (unsigned long long)s.verdict_hits);
+}
+
+/* --cache-seed-pass: record a PASS for every selected group the probe found
+ * cacheable but absent. Nothing ran here; the caller (the dev-proof shadow
+ * lane) passes this only after a proof ended accepted, so every selected
+ * group did pass cold on exactly the bytes these keys name. */
+static void seed_probe_passes(const struct group_result *results,
+                              const struct testcache_probe *probes,
+                              struct testcache *tc)
+{
+    size_t stored = 0;
+    if (!tc || !probes) {
+        printf("SEED-SUMMARY stored=0\n");
+        return;
+    }
+    for (size_t i = 0; i < g_num_groups; i++) {
+        const struct testcache_probe *p = &probes[i];
+        if (results[i].skipped || !p->cacheable || !p->key_valid || p->hit)
+            continue;
+        testcache_store_pass(tc, p->key);
+        stored++;
+    }
+    printf("SEED-SUMMARY stored=%zu\n", stored);
 }
 
 /* ── The per-group watchdog is on SILENCE, not on runtime ──────────────────
@@ -3371,6 +3400,10 @@ struct run_opts {
     bool cli_no_cache;   /* --no-cache */
     bool cli_cold_audit; /* --cold-audit */
     bool cli_probe_only; /* --cache-probe-only */
+    /* --cache-seed-pass: with --cache-probe-only, write a PASS for every
+     * cacheable MISS the probe found. Only the dev-proof shadow lane passes
+     * it, after a proof ended accepted, against its own persistent store. */
+    bool cli_seed_pass;
     bool cli_collect_observations;
     bool cli_emit_observations;
     struct capsule_state cap_state;
@@ -3571,6 +3604,8 @@ static bool cli_parse_cache_flag(const char *a, struct run_opts *o)
         o->cli_cold_audit = true;
     } else if (strcmp(a, "--cache-probe-only") == 0) {
         o->cli_probe_only = true;
+    } else if (strcmp(a, "--cache-seed-pass") == 0) {
+        o->cli_seed_pass = true;
     } else if (strcmp(a, "--emit-observations") == 0) {
         o->cli_emit_observations = true;
     } else if (strcmp(a, "--collect-observations") == 0) {
@@ -3607,7 +3642,7 @@ static void cli_usage(const char *argv0)
             "[--cache-snapshot --changed-source=PATH] "
             "[--cold-audit] [--emit-observations|--collect-observations] "
             "[--activate-proof-contracts] "
-            "[--cache-probe-only] "
+            "[--cache-probe-only [--cache-seed-pass]] "
             "[--write-capsule=PATH|--use-capsule=PATH "
             "--capsule-source-id=ID --capsule-mutation-id=ID "
             "--capsule-source-cas=HEX --capsule-graph-root=HEX]\n",
@@ -3693,6 +3728,12 @@ static int run_cache_mode(struct run_ctx *c)
     if (probe_only_refused(o->cli_probe_only, c->cache_mode == CACHE_ON)) {
         fprintf(stderr, "test_parallel: --cache-probe-only requires --cache "
                         "(--no-cache and --cold-audit probe nothing reusable)\n");
+        return 2;
+    }
+
+    if (seed_pass_refused(o->cli_seed_pass, o->cli_probe_only)) {
+        fprintf(stderr, "test_parallel: --cache-seed-pass requires "
+                        "--cache-probe-only (it records verdicts, runs none)\n");
         return 2;
     }
 
@@ -3916,6 +3957,8 @@ static int run_cache_probe(struct run_ctx *c)
      * self-check refuses it. */
     if (c->o.cli_probe_only) {
         print_probe_only(c->results, c->probes, c->tc);
+        if (c->o.cli_seed_pass)
+            seed_probe_passes(c->results, c->probes, c->tc);
         testcache_close(c->tc);
         free(c->probes);
         free(c->results);

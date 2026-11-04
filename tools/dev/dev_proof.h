@@ -704,6 +704,24 @@ const char *zcl_dev_proof_test_changed_set_reason(
  * proof cycle or spawning a runner. */
 bool zcl_dev_proof_test_preflight_parse(const char *bytes, size_t len,
                                         struct zcl_dev_proof_preflight *out);
+/* Seam for the shadow lane's divergence audit: the exact comparison the
+ * proof worker makes between the pre-run probe log (`PROBE <group> HIT|MISS
+ * ...` lines with their PROBE-SUMMARY) and the cold test log (one SUITE
+ * VERDICT line, the runner's "Failed groups:" report). Every HIT group the
+ * cold log lists as failed appends `test_shadow_divergence=group=G
+ * predicted=PASS cold=FAIL` to phases_path (when non-empty). False means
+ * a log could not be accounted from. */
+struct zcl_dev_proof_shadow_audit {
+    uint32_t groups;
+    uint32_t would_reuse;
+    uint32_t hits;
+    uint32_t divergences;
+    uint32_t cold_ran;
+};
+bool zcl_dev_proof_test_shadow_audit(const char *probe, size_t plen,
+                                     const char *cold, size_t clen,
+                                     const char *phases,
+                                     struct zcl_dev_proof_shadow_audit *out);
 /* Seam for the preflight's empty-store skip: the exact decision the proof
  * worker makes before spawning the probe. True means the store provably
  * holds no verdict, the spawn is skipped, and phases_path received
