@@ -179,6 +179,57 @@ static int test_code_corpus_roots_follow_registry(void)
     return failures;
 }
 
+#ifndef _WIN32
+static bool write_corpus_inventory(const char *path, const char *evidence)
+{
+    FILE *file = fopen(path, "wb");
+    if (!file)
+        return false;
+    int wrote = fprintf(file,
+        "{\"record\":\"inventory\",\"files_scanned\":0,\"production_files\":0,\"test_files\":0}\n"
+        "{\"record\":\"capability\",\"symbols\":[{\"test_evidence\":\"%s\"}]}%*s\n",
+        evidence, (int)(40 - strlen(evidence)), "");
+    const struct timespec stamp[2] = {{1700000000, 0}, {1700000000, 0}};
+    return fclose(file) == 0 && wrote > 0 && utimensat(AT_FDCWD, path, stamp, 0) == 0;
+}
+
+static int64_t corpus_fixture_score(const char *root)
+{
+    struct zcl_command_context ctx = {.source_root = root};
+    struct zcl_command_request req = {.context = &ctx};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.corpus.v1");
+    zcl_native_handle_code_corpus(&req, &reply);
+    const struct json_value *score = json_get(json_get(&reply.data, "proof"), "proven_permille");
+    int64_t result = score && score->type == JSON_INT ? json_get_int(score) : -2;
+    zcl_command_reply_free(&reply);
+    return result;
+}
+
+static int test_corpus_inventory_replacement(void)
+{
+    int failures = 0;
+    char root[256] = "", path[512], next[512];
+    TEST("code.corpus notices an equal-size equal-mtime inventory replacement") {
+        ASSERT(test_mkdtemp(root, sizeof(root), "corpus_replace") != NULL);
+        snprintf(path, sizeof(path), "%s/build", root);
+        ASSERT(mkdir(path, 0700) == 0);
+        snprintf(path, sizeof(path), "%s/build/gen", root);
+        ASSERT(mkdir(path, 0700) == 0);
+        snprintf(path, sizeof(path), "%s/build/gen/CAPABILITY_INVENTORY.jsonl", root);
+        snprintf(next, sizeof(next), "%s/replacement", root);
+        ASSERT(write_corpus_inventory(path, "registered_test_reachable"));
+        ASSERT(write_corpus_inventory(next, "none_UNPROVEN"));
+        ASSERT_EQ(corpus_fixture_score(root), 1000);
+        ASSERT(rename(next, path) == 0);
+        ASSERT_EQ(corpus_fixture_score(root), 0);
+        PASS();
+    } _test_next:;
+    if (root[0]) (void)test_rm_rf_recursive(root);
+    return failures;
+}
+#endif
+
 static int test_code_map_governed_count_matches_corpus(void)
 {
     int failures = 0;
@@ -7323,6 +7374,9 @@ int test_command_registry_catalog(void)
     failures += test_app_sync_unknown_topic_guidance();
     failures += test_catalog_wellformed();
     failures += test_code_corpus_roots_follow_registry();
+#ifndef _WIN32
+    failures += test_corpus_inventory_replacement();
+#endif
     failures += test_code_map_governed_count_matches_corpus();
     failures += test_network_records_leaf_input();
     failures += test_producer_session_retire_rpc_port_input();

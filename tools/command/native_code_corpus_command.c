@@ -37,25 +37,20 @@ static const char corpus_source_roots[] =
 
 /* Warm reads reuse the last walk until the inventory artifact changes.
  * The first dispatch still walks; the latency contract is the second. */
-static struct {
+static thread_local struct {
     char root[1024];
-    uint64_t inv_size;
-    int64_t inv_mtime;
+    enum platform_file_metadata_result status;
+    struct platform_file_metadata stamp;
     struct science_corpus_report report;
     bool valid;
 } g_corpus_warm;
 
-static void corpus_inventory_stamp(const char *inventory, uint64_t *size,
-                                   int64_t *mtime)
+static bool same_inventory(const struct platform_file_metadata *a,
+                           const struct platform_file_metadata *b)
 {
-    struct platform_file_metadata meta;
-    *size = 0;
-    *mtime = 0;
-    if (platform_file_metadata_read(inventory, &meta) ==
-        PLATFORM_FILE_METADATA_OK) {
-        *size = meta.size;
-        *mtime = meta.modified_seconds;
-    }
+    return a->device == b->device && a->inode == b->inode &&
+           a->size == b->size && a->modified_seconds == b->modified_seconds &&
+           a->modified_nanoseconds == b->modified_nanoseconds;
 }
 
 void zcl_native_handle_code_corpus(const struct zcl_command_request *request,
@@ -74,28 +69,30 @@ void zcl_native_handle_code_corpus(const struct zcl_command_request *request,
     }
 
     struct science_corpus_report r;
-    uint64_t inv_size = 0;
-    int64_t inv_mtime = 0;
-    corpus_inventory_stamp(inventory, &inv_size, &inv_mtime);
-    if (g_corpus_warm.valid &&
+    struct platform_file_metadata stamp = {0};
+    enum platform_file_metadata_result status = platform_file_metadata_read(inventory, &stamp);
+    bool stamped = status == PLATFORM_FILE_METADATA_OK;
+    if (g_corpus_warm.valid && status == g_corpus_warm.status &&
         strncmp(g_corpus_warm.root, root, sizeof g_corpus_warm.root) == 0 &&
-        g_corpus_warm.inv_size == inv_size &&
-        g_corpus_warm.inv_mtime == inv_mtime) {
+        (!stamped || same_inventory(&g_corpus_warm.stamp, &stamp))) {
         r = g_corpus_warm.report;
-    } else if (!science_corpus_measure(root, inventory, &r)) {
+    } else if (!science_corpus_measure(root, stamped ? inventory : NULL, &r)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "CORPUS_WALK",
                                "dispatch", true, false,
                                "could not walk the maintained C23 source roots",
                                root);
         return;
-    } else if (strlen(root) < sizeof g_corpus_warm.root) {
+    } else {
+        struct platform_file_metadata after;
+        enum platform_file_metadata_result observed = platform_file_metadata_read(inventory, &after);
         (void)snprintf(g_corpus_warm.root, sizeof g_corpus_warm.root, "%s",
                        root);
-        g_corpus_warm.inv_size = inv_size;
-        g_corpus_warm.inv_mtime = inv_mtime;
+        g_corpus_warm.status = status;
+        g_corpus_warm.stamp = stamp;
         g_corpus_warm.report = r;
-        g_corpus_warm.valid = true;
+        g_corpus_warm.valid = observed == status &&
+            (!stamped || same_inventory(&stamp, &after));
     }
 
     char headline[1024];
