@@ -873,7 +873,10 @@ static int spawn_capture_impl_cwd(
 
     /* Parent. */
     spawn_count_launch();
-    if (measure) measure->launched = true;
+    if (measure) {
+        measure->launched = true;
+        measure->pid = (int)pid;
+    }
     close(outpipe[1]);
     (void)setpgid(pid, pid); /* child also does this; either side may win */
     if (!spawn_capture_anchor_parent(&anchor)) {
@@ -1054,6 +1057,27 @@ int zcl_spawn_capture_cancelable_measured(
 #else
     return spawn_capture_impl(argv, buf, cap, timeout_ms, should_cancel,
                               cancel_ctx, cancelled, NULL, false, NULL,
+                              -1, measure);
+#endif
+}
+
+/* zcl_spawn_capture_cancelable_measured() with the child's stderr merged
+ * into the captured stream. `measure->pid` names the launched child while
+ * `should_cancel` runs, so a caller can judge progress of its process group. */
+int zcl_spawn_capture_merged_cancelable_measured(
+    const char *const argv[], char *buf, size_t cap, int timeout_ms,
+    zcl_spawn_cancel_fn should_cancel, void *cancel_ctx, bool *cancelled,
+    struct zcl_spawn_measure *measure)
+{
+    if (measure) memset(measure, 0, sizeof(*measure));
+#ifdef _WIN32
+    (void)argv; (void)timeout_ms; (void)should_cancel; (void)cancel_ctx;
+    if (buf && cap > 0) buf[0] = '\0';
+    if (cancelled) *cancelled = false;
+    return -1;
+#else
+    return spawn_capture_impl(argv, buf, cap, timeout_ms, should_cancel,
+                              cancel_ctx, cancelled, NULL, true, NULL,
                               -1, measure);
 #endif
 }

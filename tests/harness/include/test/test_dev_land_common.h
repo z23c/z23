@@ -209,6 +209,7 @@ void dlx_land_wt(char *out, size_t cap);
 int test_dev_land_integrated_merge(bool signing_failure);
 int test_dev_land_proof_tools_preparation(void);
 int test_dev_land_final_plan_preparation(void);
+int dlx_prepare_budget(void);
 int test_dev_land_explicit_main(void);
 int test_dev_land_stale_file_retests(void);
 int test_dev_land_missing_main(void);

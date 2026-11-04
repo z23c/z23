@@ -186,14 +186,14 @@ static int dlx_prepare_failed_output(void)
         snprintf(log, sizeof(log), "%s/attempt.log", root);
         ASSERT(dlx_write_dep(root, "Makefile",
             "broken:\n\t@printf stdout-marker\n\t@printf stderr-marker >&2\n\t@exit 7\n"));
-        ASSERT(zcl_dev_land_prepare_make_for_test(root, "broken", 10000,
+        ASSERT(zcl_dev_land_prepare_make_for_test(root, "broken", 10000, 60000,
             false, zcl_dev_land_prepare_log_for_test, log, why, sizeof(why)) != 0);
         ASSERT(dlx_prepare_log_contains(log, "target=broken rc="));
         ASSERT(dlx_prepare_log_contains(log, "timed_out=0 elapsed_ms="));
         ASSERT(dlx_prepare_log_contains(log, "possibly_truncated=0"));
         ASSERT(dlx_prepare_log_contains(log, "stdout-markerstderr-marker"));
         ASSERT(dlx_prepare_log_contains(log, "\n--- preparation output end ---\n"));
-        ASSERT(zcl_dev_land_prepare_make_for_test(root, "allocation", 10000,
+        ASSERT(zcl_dev_land_prepare_make_for_test(root, "allocation", 10000, 60000,
             true, zcl_dev_land_prepare_log_for_test, log, why, sizeof(why)) == -1);
         ASSERT(dlx_prepare_log_contains(log, "target=allocation rc=-1"));
         ASSERT(dlx_prepare_log_contains(log, "out of memory running make allocation"));
@@ -225,11 +225,11 @@ static int dlx_prepare_bounded_output(void)
         ASSERT(dlx_write_dep(root, "Makefile",
             "large:\n\t@cat large.txt\n\t@exit 1\n"
             "slow:\n\t@printf before-timeout\n\t@sleep 20\n"));
-        ASSERT(zcl_dev_land_prepare_make_for_test(root, "large", 10000,
+        ASSERT(zcl_dev_land_prepare_make_for_test(root, "large", 10000, 60000,
             false, zcl_dev_land_prepare_log_for_test, log, why, sizeof(why)) != 0);
         ASSERT(dlx_prepare_log_contains(log, "captured_bytes=262143 possibly_truncated=1"));
         ASSERT(unlink(log) == 0);
-        ASSERT(zcl_dev_land_prepare_make_for_test(root, "slow", 5000,
+        ASSERT(zcl_dev_land_prepare_make_for_test(root, "slow", 5000, 60000,
             false, zcl_dev_land_prepare_log_for_test, log, why, sizeof(why)) != 0);
         ASSERT(dlx_prepare_log_contains(log, "timed_out=1"));
         ASSERT(dlx_prepare_log_contains(log, "before-timeout"));
@@ -245,6 +245,7 @@ int test_dev_land_final_plan_preparation(void)
     int failures = 0;
     failures += dlx_prepare_failed_output();
     failures += dlx_prepare_bounded_output();
+    failures += dlx_prepare_budget();
     TEST("land: final preparation refreshes an existing plan and preserves make failures") {
         char root[1024], path[1200], body[128], why[512];
         size_t len = 0;

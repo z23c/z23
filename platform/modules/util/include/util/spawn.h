@@ -234,6 +234,7 @@ struct zcl_spawn_measure {
     bool reaped;
     bool io_observed;
     int io_error;
+    int pid;                     /* the launched child (and its group); 0 before launch */
     int64_t wall_us;             /* fork() to reap, host monotonic clock */
     int64_t cpu_user_us;
     int64_t cpu_system_us;
@@ -250,6 +251,16 @@ struct zcl_spawn_measure {
  * NULL; when present it is always initialized. Windows returns -1 with
  * `launched` false, like every capture primitive here on that platform. */
 int zcl_spawn_capture_cancelable_measured(
+    const char *const argv[], char *buf, size_t cap, int timeout_ms,
+    zcl_spawn_cancel_fn should_cancel, void *cancel_ctx, bool *cancelled,
+    struct zcl_spawn_measure *measure);
+
+/* zcl_spawn_capture_cancelable_measured() with the child's stderr merged
+ * into the captured stream, as zcl_spawn_capture_merged_observed() does.
+ * `measure->pid` is set at launch, before `should_cancel` first runs, so the
+ * callback can observe the child's process group. Cancellation kills the
+ * whole group. Windows returns -1. */
+int zcl_spawn_capture_merged_cancelable_measured(
     const char *const argv[], char *buf, size_t cap, int timeout_ms,
     zcl_spawn_cancel_fn should_cancel, void *cancel_ctx, bool *cancelled,
     struct zcl_spawn_measure *measure);

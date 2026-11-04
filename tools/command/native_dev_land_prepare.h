@@ -23,8 +23,8 @@ bool zcl_dev_land_proof_tools_prepare_observed(const char *wt, char *why,
     size_t cap, zcl_land_prepare_sink sink, void *context);
 #ifdef ZCL_TESTING
 int zcl_dev_land_prepare_make_for_test(const char *wt, const char *target,
-    int timeout_ms, bool allocation_failure, zcl_land_prepare_sink sink,
-    void *context, char *why, size_t why_cap);
+    int idle_ms, int hard_ms, bool allocation_failure,
+    zcl_land_prepare_sink sink, void *context, char *why, size_t why_cap);
 void zcl_dev_land_prepare_log_for_test(void *path, const char *text);
 #endif
 
