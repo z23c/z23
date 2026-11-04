@@ -3484,6 +3484,7 @@ AGENT_IMPACT_RULE("tools/command/work_card.c|tools/command/work_card.h|tools/com
 AGENT_IMPACT_RULE("tools/command/lab.h|tools/command/lab_exec.h|tools/command/lab_exec.c|tools/command/lab_build.c|tools/command/lab_receipt.c|tools/command/lab_priv.h|tools/command/native_lab_command.c|tools/command/native_lab_test_command.c|tools/command/native_lab_promote_command.c|engine/composition/commands/lab.def|docs/dev/LAB.md|tests/harness/src/test_lab.c|tests/harness/src/test_lab_promote.c|tests/fixtures/lab/*", "lab lab_case_members lab_diff_context lab_promote command_registry_catalog native_api_contract")
 AGENT_IMPACT_RULE("tests/harness/src/test_lab_case_members.c", "lab_case_members")
 AGENT_IMPACT_RULE("tests/harness/src/test_lab_diff_context.c", "lab_diff_context")
+AGENT_IMPACT_RULE("tools/command/lab_exec.c|tests/harness/src/test_lab_exit_custody.c", "lab_exit_custody lab")
 /* Shared path helpers (zcl_path_join, zcl_path_is_dir, zcl_is_lower_hex): their
  * own contract group plus the lab and wiki leaves that resolve paths through
  * them. */

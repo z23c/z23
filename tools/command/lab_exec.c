@@ -420,12 +420,23 @@ static bool lab_disk_over(const struct lab_drain *d)
     return fd >= 0 && lab_tree_bytes(fd, 0, &budget) > d->watch_max;
 }
 
-static bool lab_child_exited(pid_t pid)
+static void lab_exit_unavailable(struct lab_proc *out)
+{
+    out->launch = LAB_LAUNCH_FAILED;
+    out->exit_code = -1;
+    snprintf(out->detail, sizeof(out->detail), "child exit status unavailable");
+}
+
+static bool lab_child_exited(pid_t pid, bool *exited)
 {
     siginfo_t si;
     memset(&si, 0, sizeof(si));
-    return waitid(P_PID, (id_t)pid, &si, WEXITED | WNOHANG | WNOWAIT) == 0 &&
-           si.si_pid == pid;
+    int result;
+    do {
+        result = waitid(P_PID, (id_t)pid, &si, WEXITED | WNOHANG | WNOWAIT);
+    } while (result < 0 && errno == EINTR);
+    *exited = result == 0 && si.si_pid == pid;
+    return result == 0;
 }
 
 /* One poll round; false once the deadline has passed. With both output pipes
@@ -456,14 +467,23 @@ static bool lab_drain_round(struct lab_drain *d, struct lab_proc *out,
     return true;
 }
 
-static void lab_drain(struct lab_drain *d, struct lab_proc *out, pid_t pid,
+static bool lab_drain(struct lab_drain *d, struct lab_proc *out, pid_t pid,
                       int64_t deadline_us)
 {
+    bool owned = true;
     if (d->in_len == 0)
         lab_close_fd(&d->in_fd);
     for (;;) {
         bool piping = d->out_fd >= 0 || d->err_fd >= 0;
-        if (!piping && lab_child_exited(pid))
+        bool exited;
+        if (!lab_child_exited(pid, &exited)) {
+            owned = errno != ECHILD;
+            lab_exit_unavailable(out);
+            if (owned)
+                (void)kill(-pid, SIGKILL);
+            break;
+        }
+        if (!piping && exited)
             break;
         if (!lab_drain_round(d, out, deadline_us))
             out->timed_out = true;
@@ -477,6 +497,7 @@ static void lab_drain(struct lab_drain *d, struct lab_proc *out, pid_t pid,
     lab_close_fd(&d->in_fd);
     lab_close_fd(&d->out_fd);
     lab_close_fd(&d->err_fd);
+    return owned;
 }
 
 static void lab_reap(pid_t pid, struct lab_proc *out, int64_t t0_us)
@@ -484,11 +505,20 @@ static void lab_reap(pid_t pid, struct lab_proc *out, int64_t t0_us)
     int status = 0;
     struct rusage ru;
     memset(&ru, 0, sizeof(ru));
-    while (wait4(pid, &status, 0, &ru) < 0 && errno == EINTR) {
+    pid_t waited;
+    do {
+        waited = wait4(pid, &status, 0, &ru);
+    } while (waited < 0 && errno == EINTR);
+    out->wall_us = lab_now_us() - t0_us;
+    if (waited != pid || (!WIFSIGNALED(status) && !WIFEXITED(status))) {
+        lab_exit_unavailable(out);
+        return;
     }
     (void)kill(-pid, SIGKILL);
-    out->wall_us = lab_now_us() - t0_us;
     out->max_rss_kb = (int64_t)ru.ru_maxrss;
+    if (out->launch != LAB_LAUNCHED)
+        return;
+    out->exit_code = 0;
     if (WIFSIGNALED(status))
         out->term_signal = WTERMSIG(status);
     else if (WIFEXITED(status))
@@ -545,16 +575,33 @@ static void lab_parent(const struct lab_spawn *s, struct lab_pipes *p,
     lab_set_nonblock(d.out_fd);
     lab_set_nonblock(d.err_fd);
     lab_close_fd(&p->fd[LAB_P_REPORT][0]);
-    lab_drain(&d, out, pid, t0_us + (int64_t)s->timeout_ms * 1000);
-    lab_reap(pid, out, t0_us);
+    if (lab_drain(&d, out, pid, t0_us + (int64_t)s->timeout_ms * 1000))
+        lab_reap(pid, out, t0_us);
+    else
+        out->wall_us = lab_now_us() - t0_us;
+}
+
+static bool lab_exit_policy(struct lab_proc *out)
+{
+    struct sigaction action;
+    if (sigaction(SIGCHLD, NULL, &action) != 0 ||
+        action.sa_handler == SIG_IGN || (action.sa_flags & SA_NOCLDWAIT)) {
+        snprintf(out->detail, sizeof(out->detail),
+                 "SIGCHLD policy cannot retain child exit status");
+        return false;
+    }
+    return true;
 }
 
 static void lab_spawn_linux(const struct lab_spawn *s, struct lab_proc *out)
 {
-    (void)lab_pidns_available();
     struct lab_pipes p;
     sigset_t old;
     out->launch = LAB_LAUNCH_FAILED;
+    out->exit_code = -1;
+    if (!lab_exit_policy(out))
+        return;
+    (void)lab_pidns_available();
     snprintf(out->detail, sizeof(out->detail), "pipe or fork failed");
     if (!lab_pipes_open(&p))
         return;
