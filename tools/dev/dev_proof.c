@@ -16,6 +16,7 @@
 #include "dependency_links.h"
 #include "dev_proof_budget.h"
 #include "dev_proof_observation.h"
+#include "dev_proof_verdict_mmr.h"
 #include "proof_dependencies.h"
 #include "devloop.h"
 #include "test_group_catalog.h"
@@ -8035,7 +8036,6 @@ static bool proof_zcc_private_close(const char *state, const char *key)
            unsetenv("ZCC_DIR") == 0 && removed;
 }
 
-#if defined(ZCL_TESTING)
 /* Fixture-only lifecycle for explicit observation runs. Automatic worker
  * collection is deferred until all required input closures qualify. */
 /* Explicit-run fixtures keep unsigned verdict scratch separate from durable
@@ -8092,7 +8092,6 @@ static bool proof_observation_env_close(const char *state, const char *key)
     return verdict_unset && observation_unset && removed;
 }
 
-#endif
 
 /* Fill the pre-fork make argv: everything EITHER dimension can build, built
  * once, before either starts.
@@ -10306,6 +10305,9 @@ struct dp_worker {
     /* The shadow lane probed its store before the cold run and still owes
      * the post-run audit (dp_worker_shadow_audit). */
     bool shadow_probed;
+    /* ZCL_DEV_PROOF_VERDICT_MMR armed this proof: the per-pair observation
+     * environment is open and the test child runs the cold audit. */
+    bool vmmr_armed;
     /* Wall time of the bundle make the include-graph refresh ran, kept for
      * the warm-start sidecar when that make is the proof's only one. */
     uint64_t refresh_bundle_ms;
@@ -11873,6 +11875,19 @@ static bool dp_check_finish(struct dp_worker *w,
     return true;
 }
 
+/* The test child's argv: the cold --no-cache dimension, or (only when the
+ * verdict MMR is armed for this proof) the cold audit that also emits the
+ * pair's signed PASS leaves. Both run every selected group. */
+static bool dp_worker_test_argv(const struct dp_worker *w, const char **argv,
+                                size_t cap)
+{
+    if (w->vmmr_armed)
+        return zcl_dev_vmmr_test_argv(w->generation_binary, w->only, argv,
+                                      cap) == ZCL_DEV_VMMR_TEST_ARGC;
+    return dp_test_dimension_argv(w->generation_binary, w->only, argv, cap) ==
+           DP_TEST_DIMENSION_ARGC;
+}
+
 static bool dp_worker_dimensions_run_clean(struct dp_worker *w,
                                      struct zcl_dev_proof_dimension *lint,
                                      struct zcl_dev_proof_dimension *test,
@@ -11883,14 +11898,13 @@ static bool dp_worker_dimensions_run_clean(struct dp_worker *w,
     struct dp_check_hold admitted = {0};
     /* The preflight probe is not consumed. Admission below is the only
      * path that can hold this test child back. */
-    const char *test_argv[DP_TEST_DIMENSION_ARGC + 1] = {0};
+    const char *test_argv[ZCL_DEV_VMMR_TEST_ARGC + 1] = {0};
     bool launched;
     bool dimensions_ok = true;
     if (!dp_check_prepare(w, test, &admitted, why, why_len)) return false;
     if (test->selected &&
-        dp_test_dimension_argv(w->generation_binary, w->only, test_argv,
-                               sizeof(test_argv) / sizeof(test_argv[0])) !=
-            DP_TEST_DIMENSION_ARGC) {
+        !dp_worker_test_argv(w, test_argv,
+                             sizeof(test_argv) / sizeof(test_argv[0]))) {
         proof_why(why, why_len, "test_runner_argv_invalid");
         if (admitted.skip) test->selected = admitted.selected;
         return false;
@@ -12511,6 +12525,71 @@ static void dp_worker_test_preflight(struct dp_worker *w)
     (void)zcl_dev_proof_phase_note(w->paths->phases, "test_preflight", note);
 }
 
+/* ── The verdict MMR lane ─────────────────────────────────────────────────
+ *
+ * ZCL_DEV_PROOF_VERDICT_MMR (an absolute directory, default unset = off).
+ * Armed, the test child runs the runner's cold audit with partial
+ * observation collection, so it still executes every selected group and
+ * also writes one signed PASS leaf per qualifying group into the pair's own
+ * observation CAS. Only when the proof ENDS ACCEPTED does the worker re-read
+ * each leaf named by the cold log, re-verify it for its exact key and
+ * group, copy it into the persistent store and extend the signed MMR
+ * (dev_proof_verdict_mmr.h). Nothing here skips a group or touches the
+ * receipt: the MMR root and leaf count go to the phase log only. A failure
+ * logs a note and never fails the proof. */
+static void dp_worker_vmmr_open(struct dp_worker *w, bool test_selected)
+{
+    w->vmmr_armed = test_selected && zcl_dev_vmmr_dir() != NULL &&
+                    proof_observation_env_open(w->paths->state,
+                                               w->execution.key);
+    if (w->vmmr_armed)
+        (void)zcl_dev_proof_phase_note(w->paths->phases, "verdict_mmr",
+                                       "armed");
+}
+
+static void dp_worker_vmmr_close(const struct dp_worker *w)
+{
+    if (w->vmmr_armed)
+        (void)proof_observation_env_close(w->paths->state, w->execution.key);
+}
+
+static void dp_worker_vmmr_record(struct dp_worker *w, bool accepted)
+{
+    const char *dir = zcl_dev_vmmr_dir();
+    char cold_log[PATH_MAX], store[PATH_MAX], note[256], why[96] = {0};
+    char hex[65], *cold = NULL;
+    size_t clen = 0;
+    struct dp_shadow_audit a;
+    struct zcl_dev_vmmr_adopt r;
+    bool ok;
+    if (!w->vmmr_armed || !dir) return;
+    w->vmmr_armed = false;
+    if (!accepted) return;
+    ok = snprintf(cold_log, sizeof(cold_log), "%s/%s.%s.log",
+                  w->execution.logs, w->execution.key,
+                  zcl_dev_proof_dimension_name(ZCL_DEV_PROOF_TEST)) <
+             (int)sizeof(cold_log) &&
+         proof_observation_store_path(w->paths->state, w->execution.key,
+                                      store) &&
+         dp_shadow_tail_read(cold_log, &cold, &clen) &&
+         dp_shadow_cold_verdict(cold, clen, &a) && a.cold_failed == 0 &&
+         a.cold_ran > 0 &&
+         zcl_dev_vmmr_adopt_log(dir, store, cold, clen, &r, why, sizeof(why));
+    free(cold);
+    if (!ok) {
+        (void)snprintf(note, sizeof(note), "unavailable why=%s",
+                       why[0] ? why : "cold_log");
+        (void)zcl_dev_proof_phase_note(w->paths->phases, "verdict_mmr", note);
+        return;
+    }
+    zcl_hex_encode(r.head_root, 32, hex);
+    (void)snprintf(note, sizeof(note),
+                   "seen=%u adopted=%u refused=%u mmr_leaf_count=%u "
+                   "admissible=0 mmr_root=%s", r.seen, r.adopted, r.refused, r.leaf_count,
+                   hex);
+    (void)zcl_dev_proof_phase_note(w->paths->phases, "verdict_mmr", note);
+}
+
 /* Every dimension this proof actually runs, in order. */
 static bool dp_worker_dimensions(struct dp_worker *w, char *why,
                                  size_t why_len)
@@ -12531,10 +12610,14 @@ static bool dp_worker_dimensions(struct dp_worker *w, char *why,
     if (!dp_worker_prefork(w, test->selected != 0, why, why_len)) return false;
     if (test->selected) dp_worker_test_preflight(w);
     if (test->selected) dp_worker_shadow_probe(w);
+    dp_worker_vmmr_open(w, test->selected != 0);
     if (!dp_worker_dimensions_run(w, lint, test, why, why_len)) {
+        dp_worker_vmmr_close(w);
+        dp_worker_vmmr_record(w, false);
         dp_worker_shadow_audit(w, false);
         return false;
     }
+    dp_worker_vmmr_close(w);
     proof_phase_mark(w->phases, "dimension_lint_and_test");
     return true;
 }
@@ -12619,6 +12702,7 @@ static bool proof_worker_body(const struct proof_paths *paths,
         return false;
     bool published = dp_worker_publish(&w, started_us, why, why_len);
     dp_worker_shadow_audit(&w, published);
+    dp_worker_vmmr_record(&w, published);
     return published;
 }
 

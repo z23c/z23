@@ -83,6 +83,17 @@ bool zcl_dev_proof_signer_public(
     uint8_t pubkey[ZCL_DEV_PROOF_SIGNER_PUBKEY_BYTES], bool *present,
     const char **why);
 
+/* Lend this box's seed to `use` for the duration of one call, then cleanse
+ * it. The seed never leaves the callee's stack frame and is never
+ * returned, logged or stored; `use` must not keep a pointer to it. This
+ * exists so a checkpoint signer (the verdict MMR) can sign in the same
+ * identity that signs receipts and verdict leaves without this module
+ * linking that signer. `use` returns whether it succeeded. */
+typedef bool (*zcl_dev_proof_signer_seed_user)(
+    const uint8_t seed[32], const uint8_t pubkey[32], void *ctx);
+bool zcl_dev_proof_signer_lend_seed(
+    zcl_dev_proof_signer_seed_user use, void *ctx, const char **why);
+
 struct zcl_dev_proof_allowlist_state {
     bool present;        /* signers.allow exists and was read */
     uint32_t trusted;    /* well-formed 64-hex keys accepted from the file */

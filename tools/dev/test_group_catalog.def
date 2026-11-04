@@ -1207,6 +1207,10 @@ ZCL_TEST_GROUP(dev_proof_coverage)
  * under the state root; reuse classification and coverage queries read it.
  * See tools/dev/dev_proof_observation_index.c. */
 ZCL_TEST_GROUP(dev_proof_observation_index)
+/* The append-only signed MMR over accepted-proof verdict leaves and the pure
+ * admission, sampling and divergence rules a reuse path would apply to it;
+ * nothing skips a test. See tools/dev/dev_proof_verdict_mmr.c. */
+ZCL_TEST_GROUP(dev_proof_verdict_mmr)
 ZCL_TEST_GROUP(test_group_selector)
 ZCL_TEST_GROUP(test_group_list)
 ZCL_TEST_GROUP(metaverse_catalog)

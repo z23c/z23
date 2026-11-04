@@ -185,6 +185,7 @@ test_ops_slot_activate	11
 test_testcache	39
 test_dev_proof_coverage	14
 test_dev_proof_observation_index	55
+test_dev_proof_verdict_mmr	20
 test_test_group_selector	29
 test_node_character_wire	17
 test_character_sheet	50

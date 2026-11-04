@@ -1165,6 +1165,7 @@ DEV_ONLY_SRCS = tools/dev/devloop_cli.c tools/dev/devloop_cycle.c \
 	tools/dev/dev_proof_coverage.c \
 	tools/dev/dev_proof_observation.c tools/dev/dev_proof_observation_walk.c \
 	tools/dev/dev_proof_observation_index.c \
+	tools/dev/dev_proof_verdict_mmr.c \
 	tools/dev/dev_proof_observation_lookup.c tools/dev/verify_store.c $(SHADOW_SELECT_SRCS) \
 	tools/dev/verify_receiver.c tools/dev/verify_receiver_input.c \
 	tools/verify/fixed_result_source.c \
@@ -3561,6 +3562,7 @@ TEST_DEV_EXECUTOR_SRCS = tools/dev/devloop_cycle.c tools/dev/dev_failure_store.c
 	tools/dev/dev_proof_coverage.c \
 	tools/dev/dev_proof_observation.c tools/dev/dev_proof_observation_walk.c \
 	tools/dev/dev_proof_observation_index.c \
+	tools/dev/dev_proof_verdict_mmr.c \
 	tools/dev/dev_proof_observation_lookup.c tools/dev/verify_store.c $(SHADOW_SELECT_SRCS) \
 	tools/dev/verify_receiver.c tools/dev/verify_receiver_input.c \
 	tools/verify/fixed_result_source.c \

@@ -255,6 +255,29 @@ bool zcl_dev_proof_signer_sign(
     return true;
 }
 
+bool zcl_dev_proof_signer_lend_seed(
+    zcl_dev_proof_signer_seed_user use, void *ctx, const char **why)
+{
+    uint8_t seed[SIGNER_SEED_BYTES];
+    uint8_t pubkey[ZCL_DEV_PROOF_SIGNER_PUBKEY_BYTES];
+    bool have = false, ok;
+    signer_why(why, NULL);
+    if (!use) {
+        signer_why(why, WHY_ARGUMENTS);
+        return false;
+    }
+    if (!signer_seed_load(seed, true, &have, why)) return false;
+    if (!have) {
+        memory_cleanse(seed, sizeof(seed));
+        signer_why(why, WHY_UNREADABLE);
+        return false;
+    }
+    signer_pubkey_from_seed(seed, pubkey);
+    ok = use(seed, pubkey, ctx);
+    memory_cleanse(seed, sizeof(seed));
+    return ok;
+}
+
 /* One pass over signers.allow. `target` (when non-NULL) is the key being
  * looked up; `own` (when present) is this box's key, so the same pass can
  * report whether the operator also listed it. */
