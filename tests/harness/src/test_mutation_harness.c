@@ -316,6 +316,48 @@ static int tmh_cache_records(const struct zcl_mut_config *cfg,
         }
         PASS();
     }
+    TEST("cache hits preserve exactly the six producer outcome/reason tuples") {
+        static const struct {
+            const char *record;
+            bool hit;
+            enum zcl_mut_outcome outcome;
+            const char *reason;
+        } tuples[] = {
+            {"KILLED test\n", true, ZCL_MUT_OUTCOME_KILLED, "test"},
+            {"KILLED timeout\n", true, ZCL_MUT_OUTCOME_KILLED, "timeout"},
+            {"KILLED crash\n", true, ZCL_MUT_OUTCOME_KILLED, "crash"},
+            {"SURVIVED -\n", true, ZCL_MUT_OUTCOME_SURVIVED, ""},
+            {"STILLBORN -\n", true, ZCL_MUT_OUTCOME_STILLBORN, ""},
+            {"EQUIVALENT -\n", true, ZCL_MUT_OUTCOME_EQUIVALENT, ""},
+            {"KILLED -\n", false, ZCL_MUT_OUTCOME_KILLED, "test"},
+            {"SURVIVED test\n", false, ZCL_MUT_OUTCOME_KILLED, "test"},
+            {"SURVIVED timeout\n", false, ZCL_MUT_OUTCOME_KILLED, "test"},
+            {"SURVIVED crash\n", false, ZCL_MUT_OUTCOME_KILLED, "test"},
+            {"STILLBORN test\n", false, ZCL_MUT_OUTCOME_KILLED, "test"},
+            {"STILLBORN timeout\n", false, ZCL_MUT_OUTCOME_KILLED, "test"},
+            {"STILLBORN crash\n", false, ZCL_MUT_OUTCOME_KILLED, "test"},
+            {"EQUIVALENT test\n", false, ZCL_MUT_OUTCOME_KILLED, "test"},
+            {"EQUIVALENT timeout\n", false, ZCL_MUT_OUTCOME_KILLED, "test"},
+            {"EQUIVALENT crash\n", false, ZCL_MUT_OUTCOME_KILLED, "test"},
+            {"ERROR -\n", false, ZCL_MUT_OUTCOME_KILLED, "test"},
+            {"ERROR test\n", false, ZCL_MUT_OUTCOME_KILLED, "test"},
+            {"ERROR timeout\n", false, ZCL_MUT_OUTCOME_KILLED, "test"},
+            {"ERROR crash\n", false, ZCL_MUT_OUTCOME_KILLED, "test"},
+        };
+        for (size_t i = 0; i < sizeof tuples / sizeof tuples[0]; i++) {
+            ASSERT(zcl_mut_write_file(path, tuples[i].record,
+                                      strlen(tuples[i].record)));
+            ASSERT(zcl_mut_campaign_run(&cached, plan, &r));
+            ASSERT_EQ(r.result_count, (size_t)1);
+            ASSERT_EQ(r.results[0].cached, tuples[i].hit);
+            ASSERT_EQ(r.results[0].outcome, tuples[i].outcome);
+            ASSERT_STR_EQ(r.results[0].killed_by, tuples[i].reason);
+            if (!tuples[i].hit)
+                ASSERT(tmh_exact(path, "KILLED test\n"));
+            zcl_mut_report_free(&r);
+        }
+        PASS();
+    }
 _test_next:;
     if (d) (void)closedir(d);
     zcl_mut_report_free(&r);

@@ -980,19 +980,31 @@ static bool mut_cache_get(const struct mut_ctx *c, const char *key,
         return false;
     if (len > 0 && text[len - 1] == '\n')
         len--;
-    static const char *const reasons[] = { "-", "test", "timeout", "crash" };
+    /* Only tuples the campaign can write are reusable. ERROR is never
+     * cached, and a kill always has exactly one execution failure reason. */
+    static const struct {
+        enum zcl_mut_outcome outcome;
+        const char *reason;
+    } allowed[] = {
+        {ZCL_MUT_OUTCOME_KILLED, "test"},
+        {ZCL_MUT_OUTCOME_KILLED, "timeout"},
+        {ZCL_MUT_OUTCOME_KILLED, "crash"},
+        {ZCL_MUT_OUTCOME_SURVIVED, ""},
+        {ZCL_MUT_OUTCOME_STILLBORN, ""},
+        {ZCL_MUT_OUTCOME_EQUIVALENT, ""},
+    };
     bool ok = false;
-    for (int i = 0; i < ZCL_MUT_OUTCOME_COUNT; i++) {
-        const char *name = zcl_mut_outcome_name((enum zcl_mut_outcome)i);
-        for (size_t j = 0; j < sizeof reasons / sizeof reasons[0]; j++) {
-            char record[128];
-            int n = snprintf(record, sizeof record, "%s %s", name, reasons[j]);
-            if (n > 0 && len == (size_t)n && memcmp(text, record, len) == 0) {
-                *out = (enum zcl_mut_outcome)i;
-                *killed_by = j == 0 ? "" : reasons[j];
-                ok = true;
-                break;
-            }
+    for (size_t i = 0; i < sizeof allowed / sizeof allowed[0]; i++) {
+        char record[128];
+        const char *reason = allowed[i].reason;
+        int n = snprintf(record, sizeof record, "%s %s",
+                         zcl_mut_outcome_name(allowed[i].outcome),
+                         reason[0] ? reason : "-");
+        if (n > 0 && len == (size_t)n && memcmp(text, record, len) == 0) {
+            *out = allowed[i].outcome;
+            *killed_by = reason;
+            ok = true;
+            break;
         }
     }
     free(text);
