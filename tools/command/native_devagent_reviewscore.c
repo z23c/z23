@@ -180,6 +180,32 @@ static bool drs_parse_range(const struct json_value *el, struct ers_range *r)
            r->line_hi <= DRS_LINE_NUM_MAX;
 }
 
+static int drs_range_order(const void *left, const void *right)
+{
+    const struct ers_range *first = left, *second = right;
+    int file_order = strcmp(first->file, second->file);
+    if (file_order)
+        return file_order;
+    return (first->line_lo > second->line_lo) - (first->line_lo < second->line_lo);
+}
+
+static size_t drs_canonical_ranges(struct ers_range *ranges, size_t count)
+{
+    qsort(ranges, count, sizeof(*ranges), drs_range_order);
+    size_t kept = 1;
+    for (size_t index = 1; index < count; index++) {
+        struct ers_range *previous = &ranges[kept - 1];
+        const struct ers_range *next = &ranges[index];
+        if (strcmp(previous->file, next->file) == 0 && next->line_lo <= previous->line_hi + 1) {
+            if (next->line_hi > previous->line_hi)
+                previous->line_hi = next->line_hi;
+        } else {
+            ranges[kept++] = *next;
+        }
+    }
+    return kept;
+}
+
 static enum drs_parse drs_parse_ranges(const struct json_value *arr,
                                        struct drs_case *cs)
 {
@@ -197,7 +223,7 @@ static enum drs_parse drs_parse_ranges(const struct json_value *arr,
         }
     }
     cs->c.ranges = cs->own;
-    cs->c.nranges = n;
+    cs->c.nranges = drs_canonical_ranges(cs->own, n);
     return DRS_PARSE_OK;
 }
 

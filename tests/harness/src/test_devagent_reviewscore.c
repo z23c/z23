@@ -845,6 +845,21 @@ static int rs_dup_defect(const char *root)
         ASSERT_EQ(rs_int(&c, "defect_cases"), 2);
         PASS();
     }
+    TEST("reordering or splitting ranges does not create independent defects") {
+        rs_end(&c);
+        ASSERT(rs_score(&c, root,
+            "{\"id\":\"original\",\"base_id\":\"b\",\"label\":\"defect\","
+            "\"locus\":\"code\",\"class\":\"logic\",\"defect\":["
+            RS_RANGE("a.c", 10, 20) "," RS_RANGE("b.c", 2, 3) "]}\n"
+            "{\"id\":\"repeat\",\"base_id\":\"b\",\"label\":\"defect\","
+            "\"locus\":\"code\",\"class\":\"logic\",\"defect\":["
+            RS_RANGE("b.c", 2, 3) "," RS_RANGE("a.c", 13, 18) ","
+            RS_RANGE("a.c", 10, 14) "," RS_RANGE("a.c", 19, 20) "]}\n",
+            ""));
+        ASSERT(!rs_ok(&c));
+        ASSERT_STR_EQ(rs_code(&c), "SET_DUPLICATE_DEFECT");
+        PASS();
+    }
     TEST("I3: the same base and class on a different range is accepted") {
         rs_end(&c);
         ASSERT(rs_score(&c, root,
