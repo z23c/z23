@@ -57,6 +57,12 @@ static sqlite3_stmt *sqlq_prepare(sqlite3 *db, const char *sql)
         sqlite3_finalize(st);
         return NULL;
     }
+    /* There is no binding interface: SQLite would silently substitute NULL. */
+    if (sqlite3_bind_parameter_count(st) != 0) {
+        fputs("sqlq: unbound SQL parameters are not supported; use literal values\n", stderr);
+        sqlite3_finalize(st);
+        return NULL;
+    }
     return st;
 }
 

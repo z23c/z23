@@ -119,6 +119,34 @@ static int test_sqlq_refusals(void)
     return failures;
 }
 
+static int test_sqlq_unbound_parameters(void)
+{
+    int failures = 0;
+    char dir[4096], db[4608], buf[256] = {0};
+    test_make_tmpdir(dir, sizeof(dir), "sqlq", "parameters");
+    TEST("sqlq: unbound parameters refuse instead of silently querying NULL") {
+        ASSERT(sqlq_fixture(dir, db, sizeof(db)));
+        const char *bad[] = {
+            "SELECT id FROM t WHERE id > ?",
+            "SELECT ?1", "SELECT ?12", "SELECT :id", "SELECT @id",
+            "SELECT $id", "SELECT 1 WHERE 0 AND ? IS NULL"
+        };
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            ASSERT(sqlq_run(db, bad[i], buf, sizeof(buf)) == 1);
+            ASSERT(strcmp(buf, "") == 0);
+        }
+        ASSERT(sqlq_run(db, "SELECT '?', ':id', '@id', '$id' /* ?1 */ -- ?\n",
+                        buf, sizeof(buf)) == 0);
+        ASSERT(strcmp(buf, "?\t:id\t@id\t$id" SQLQ_EOL) == 0);
+        ASSERT(sqlq_run(db, "SELECT id FROM t WHERE id > 1",
+                        buf, sizeof(buf)) == 0);
+        ASSERT(strcmp(buf, "2" SQLQ_EOL) == 0);
+        PASS();
+    } _test_next:;
+    (void)test_rm_rf_recursive(dir);
+    return failures;
+}
+
 static int test_sqlq_statement_tail(void)
 {
     int failures = 0;
@@ -244,6 +272,7 @@ int test_sqlq(void)
     }
     failures += test_sqlq_rows_and_typing();
     failures += test_sqlq_refusals();
+    failures += test_sqlq_unbound_parameters();
     failures += test_sqlq_statement_tail();
 #if !defined(_WIN32)
     failures += test_sqlq_multicall_names();
