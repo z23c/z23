@@ -273,4 +273,9 @@ void mesh_terminal_hub_client_run(
     const struct mesh_terminal_hub_client_cfg *cfg,
     struct mesh_terminal_hub_client_result *result);
 
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+/* Test-only wall-clock seam; elapsed limits must not follow wall jumps. */
+void mesh_terminal_hub_test_wall_clock(int64_t (*clock_fn)(void));
+#endif
+
 #endif /* ZCL_SESSION_MESH_TERMINAL_HUB_H */

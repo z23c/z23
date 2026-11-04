@@ -104,8 +104,19 @@ struct hub_sess {
     uint8_t out[MESH_TERMINAL_HUB_FRAME_MAX];
 };
 
+#if defined(ZCL_TESTING)
+static _Thread_local int64_t (*hub_test_wall_clock)(void);
+void mesh_terminal_hub_test_wall_clock(int64_t (*clock_fn)(void))
+{
+    hub_test_wall_clock = clock_fn;
+}
+#endif
+
 static int64_t hub_now(void)
 {
+#if defined(ZCL_TESTING)
+    if (hub_test_wall_clock) return hub_test_wall_clock();
+#endif
     return (int64_t)platform_time_wall_time_t();
 }
 

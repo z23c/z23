@@ -785,6 +785,26 @@ static int limit_cases(void)
     return failures;
 }
 
+#if defined(ZCL_TESTING)
+static unsigned hub_wall_reads;
+
+static int64_t hub_forward_wall_step(void)
+{
+    /* Each forked server sees the step after its audit and worker starts.
+     * Parent state is unchanged, so both limit cases get the same step. */
+    return INT64_C(2000000000) + (hub_wall_reads++ >= 2);
+}
+
+static int wall_step_limit_cases(void)
+{
+    hub_wall_reads = 0;
+    mesh_terminal_hub_test_wall_clock(hub_forward_wall_step);
+    int failures = limit_cases();
+    mesh_terminal_hub_test_wall_clock(NULL);
+    return failures;
+}
+#endif
+
 /* ── the production client loop against a real server ─────────────────── */
 
 struct cl_run {
@@ -1735,6 +1755,9 @@ int test_mesh_terminal_hub(void)
         failures += echo_and_resize_cases();
         failures += refusal_cases();
         failures += limit_cases();
+#if defined(ZCL_TESTING)
+        failures += wall_step_limit_cases();
+#endif
         failures += client_cases();
         failures += client_script_cases();
         failures += tidy_end_case();
