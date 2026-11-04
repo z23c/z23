@@ -790,6 +790,92 @@ static int case_measurement_unknowns(void)
     return failures;
 }
 
+/* Gate truth is a boolean or the schema's exact integer 0/1, never a
+ * truthiness coercion: malformed evidence must not train rule scores. */
+static int case_gate_pass_encoding(void)
+{
+    int failures = 0;
+    static const struct {
+        const char *value;
+        bool valid, pass;
+    } cases[] = {
+        {"true", true, true}, {"false", true, false},
+        {"1", true, true}, {"0", true, false},
+        {"2", false, false}, {"-1", false, false},
+        {"9223372036854775807", false, false},
+        {"-9223372036854775808", false, false},
+        {"1.0", false, false}, {"null", false, false},
+        {"\"true\"", false, false}, {"[]", false, false}
+    };
+    struct zcl_rule_receipt_log *parsed = calloc(1, sizeof *parsed);
+    ER_CHECK("gate-boolean fixture allocates", parsed != NULL);
+    if (!parsed) return failures;
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        char line[512], name[128];
+        int n = snprintf(line, sizeof line,
+            "{\"schema\":\"zcl.engine_unit_receipt.v1\","
+            "\"prev_sha3\":\"%064d\",\"unit_id\":\"gate-boolean\","
+            "\"task_sha3\":\"%064d\",\"rules_shown\":[\"grok:good\"],"
+            "\"outcome\":{\"gate_pass\":%s}}\n", 0, 0, cases[i].value);
+        uint32_t bad = 0;
+        bool bounded = n > 0 && (size_t)n < sizeof line;
+        enum zcl_rule_chain_status status = bounded
+            ? zcl_rule_receipts_parse(line, (size_t)n, parsed, &bad)
+            : ZCL_RULE_CHAIN_MALFORMED;
+        (void)snprintf(name, sizeof name, "gate_pass=%s has an exact boolean verdict", cases[i].value);
+        bool correct = bounded && (cases[i].valid
+            ? status == ZCL_RULE_CHAIN_OK && bad == 0 && parsed->count == 1 &&
+              parsed->r[0].gate_pass == cases[i].pass
+            : status == ZCL_RULE_CHAIN_MALFORMED && bad == 1 && parsed->count == 0);
+        ER_CHECK(name, correct);
+    }
+    free(parsed);
+    return failures;
+}
+
+static int case_optional_applied_encoding(void)
+{
+    int failures = 0;
+    static const struct {
+        const char *fields;
+        bool applied;
+    } cases[] = {
+        {"", false}, {"\"applied\":true,", true},
+        {"\"applied\":false,", false}, {"\"applied\":1,", true},
+        {"\"applied\":0,", false}, {"\"applied\":2,", false},
+        {"\"applied\":-1,", false}, {"\"applied\":1.0,", false},
+        {"\"applied\":null,", false}, {"\"applied\":\"true\",", false},
+        {"\"applied\":[],", false}
+    };
+    struct zcl_rule_receipt_log *parsed = calloc(1, sizeof *parsed);
+    ER_CHECK("optional-applied fixture allocates", parsed != NULL);
+    if (!parsed) return failures;
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        for (unsigned gate = 0; gate < 2; gate++) {
+            char line[512];
+            int n = snprintf(line, sizeof line,
+                "{\"schema\":\"zcl.engine_unit_receipt.v1\","
+                "\"prev_sha3\":\"%064d\",\"unit_id\":\"optional-applied\","
+                "\"task_sha3\":\"%064d\",\"outcome\":{%s\"gate_pass\":%u}}\n",
+                0, 0, cases[i].fields, gate);
+            uint32_t bad = 0;
+            bool bounded = n > 0 && (size_t)n < sizeof line;
+            enum zcl_rule_chain_status status = bounded
+                ? zcl_rule_receipts_parse(line, (size_t)n, parsed, &bad)
+                : ZCL_RULE_CHAIN_MALFORMED;
+            ER_CHECK("optional applied never invalidates a canonical gate receipt",
+                     bounded && status == ZCL_RULE_CHAIN_OK && bad == 0 && parsed->count == 1);
+            if (status != ZCL_RULE_CHAIN_OK || parsed->count != 1) continue;
+            ER_CHECK("optional applied is canonical or defaults false",
+                     parsed->r[0].applied == cases[i].applied);
+            ER_CHECK("optional applied never changes gate truth",
+                     parsed->r[0].gate_pass == (gate == 1));
+        }
+    }
+    free(parsed);
+    return failures;
+}
+
 int test_engine_rules(void)
 {
     int failures = 0;
@@ -801,6 +887,8 @@ int test_engine_rules(void)
     failures += case_rewrite();
     failures += case_builtin();
     failures += case_measurement_unknowns();
+    failures += case_gate_pass_encoding();
+    failures += case_optional_applied_encoding();
     printf("engine_rules: %d failure(s)\n", failures);
     return failures;
 }

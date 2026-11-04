@@ -338,7 +338,12 @@ static bool jbool(const struct json_value *o, const char *k, bool *out)
     const struct json_value *v = json_get(o, k);
     if (!v) return false;
     if (v->type == JSON_BOOL) { *out = json_get_bool(v); return true; }
-    if (v->type == JSON_INT)  { *out = json_get_int(v) != 0; return true; }
+    if (v->type == JSON_INT) {
+        int64_t n = json_get_int(v);
+        if (n != 0 && n != 1) return false;
+        *out = n == 1;
+        return true;
+    }
     return false;
 }
 
@@ -396,6 +401,7 @@ static bool receipt_outcome_from_json(const struct json_value *o,
     const struct json_value *out = json_get(o, "outcome");
     if (!out || out->type != JSON_OBJ) return false;
     if (!jbool(out, "gate_pass", &r->gate_pass)) return false;
+    /* Optional metadata: absent or malformed stays false, not a bad receipt. */
     (void)jbool(out, "applied", &r->applied);
     int64_t n = 0;
     if (jnonneg(out, "groups_ran", &n)) r->groups_ran = (uint32_t)n;
