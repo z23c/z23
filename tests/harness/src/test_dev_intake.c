@@ -11,6 +11,7 @@
 #include "test/test_dev_batch_fixture.h"
 
 #include "base/hex.h"
+#include "platform/time_compat.h"
 #include "crypto/ed25519.h"
 #include "session/fleet_board_proto.h"
 #include "command/native_dev_land_remote_shared.h"
@@ -173,7 +174,7 @@ int test_dev_intake(void)
     TEST("intake: a good post is ACCEPT_FOR_QUEUE") {
         json_init(&arr);
         json_set_array(&arr);
-        di_post(&d, &arr, 0, 1000, shaA, false);
+        di_post(&d, &arr, 0, (uint64_t)platform_time_wall_unix() + 0, shaA, false);
         ASSERT(di_write_posts(&d, &arr));
         json_free(&arr);
         di_run(&d, false, &reply, dump, sizeof(dump));
@@ -186,8 +187,8 @@ int test_dev_intake(void)
     TEST("intake: a bad signature and a core/ path are REFUSE") {
         json_init(&arr);
         json_set_array(&arr);
-        di_post(&d, &arr, 1, 1001, shaE, true);
-        di_post(&d, &arr, 2, 1002, shaB, false);
+        di_post(&d, &arr, 1, (uint64_t)platform_time_wall_unix() + 1, shaE, true);
+        di_post(&d, &arr, 2, (uint64_t)platform_time_wall_unix() + 2, shaB, false);
         ASSERT(di_write_posts(&d, &arr));
         json_free(&arr);
         di_run(&d, false, &reply, dump, sizeof(dump));
@@ -201,7 +202,7 @@ int test_dev_intake(void)
     TEST("intake: an author outside the allow file is REFUSE") {
         json_init(&arr);
         json_set_array(&arr);
-        di_post(&d, &arr, 3, 1003, shaA, false);
+        di_post(&d, &arr, 3, (uint64_t)platform_time_wall_unix() + 3, shaA, false);
         ASSERT(di_write_posts(&d, &arr));
         json_free(&arr);
         ASSERT(dbf_put(d.allow, "# nobody\n11111111111111111111111111111111"
@@ -218,8 +219,8 @@ int test_dev_intake(void)
         char want[96];
         json_init(&arr);
         json_set_array(&arr);
-        di_post(&d, &arr, 4, 1004, shaC, false);
-        di_post(&d, &arr, 5, 1005, shaD, false);
+        di_post(&d, &arr, 4, (uint64_t)platform_time_wall_unix() + 4, shaC, false);
+        di_post(&d, &arr, 5, (uint64_t)platform_time_wall_unix() + 5, shaD, false);
         ASSERT(di_write_posts(&d, &arr));
         json_free(&arr);
         di_run(&d, false, &reply, dump, sizeof(dump));
@@ -240,17 +241,74 @@ int test_dev_intake(void)
                        lane, head);
         json_init(&arr);
         json_set_array(&arr);
-        di_post_r(&d, &arr, 6, 1006, text, "", false, false);
+        di_post_r(&d, &arr, 6, (uint64_t)platform_time_wall_unix() + 6, text, "", false, false);
         (void)snprintf(text, sizeof(text),
                        "READY /nonexistent/other-host/lane %s remote lane", head);
-        di_post_r(&d, &arr, 7, 1007, text, "", false, false);
+        di_post_r(&d, &arr, 7, (uint64_t)platform_time_wall_unix() + 7, text, "", false, false);
         ASSERT(di_write_posts(&d, &arr));
         json_free(&arr);
         di_run(&d, false, &reply, dump, sizeof(dump));
         ASSERT(strstr(dump, "\"verdict\":\"ACCEPT_FOR_QUEUE\"") != NULL);
         ASSERT(strstr(dump, head) != NULL);
-        ASSERT(strstr(dump, "REFUSE(needs_operator_step)") != NULL);
-        ASSERT(strstr(dump, "\"operator_step\":\"the lane is not on this host") != NULL);
+        ASSERT(strstr(dump, "REFUSE(invalid_lane)") != NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+
+    TEST("intake: traversal and repository subdirectories are refused") {
+        char lane[900], head[41], text[1200];
+        ASSERT(dbf_lane(&d.f, "hostile", NULL, lane, head));
+        json_init(&arr);
+        json_set_array(&arr);
+        (void)snprintf(text, sizeof(text), "READY %s/../hostile %s traversal", lane, head);
+        di_post_r(&d, &arr, 10, (uint64_t)platform_time_wall_unix(), text, "", false, false);
+        (void)snprintf(text, sizeof(text), "READY %s/.. %s parent", lane, head);
+        di_post_r(&d, &arr, 11, (uint64_t)platform_time_wall_unix(), text, "", false, false);
+        ASSERT(di_write_posts(&d, &arr));
+        json_free(&arr);
+        di_run(&d, false, &reply, dump, sizeof(dump));
+        ASSERT(strstr(dump, "REFUSE(invalid_lane)") != NULL);
+        ASSERT(strstr(dump, "ACCEPT_FOR_QUEUE") == NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+
+    TEST("intake: rename into core is refused") {
+        char lane[900], head[41], text[1200], sha[65], tmp[1000], dst[1000];
+        const char *mv[] = {"mv", "a.c", "core/a.c", NULL};
+        const char *commit[] = {"commit", "-q", "-m", "rename", NULL};
+        const char *bundle[] = {"bundle", "create", tmp, "HEAD", "^origin/main", NULL};
+        char dir[1000];
+        ASSERT(dbf_lane(&d.f, "rename", NULL, lane, head));
+        (void)snprintf(dir, sizeof(dir), "%s/core", lane);
+        ASSERT(dbf_mkdirs(dir));
+        ASSERT(dbf_git(lane, mv));
+        ASSERT(dbf_git(lane, commit));
+        (void)snprintf(tmp, sizeof(tmp), "%s/rename.tmp", d.bdir);
+        ASSERT(dbf_git(lane, bundle));
+        ASSERT(zcl_dlr_file_sha256(tmp, sha));
+        (void)snprintf(dst, sizeof(dst), "%s/%s.bundle", d.bdir, sha);
+        ASSERT(rename(tmp, dst) == 0);
+        (void)snprintf(text, sizeof(text), "READY sha256=%s size=1 rename", sha);
+        json_init(&arr);
+        json_set_array(&arr);
+        di_post_r(&d, &arr, 10, (uint64_t)platform_time_wall_unix(), text, "", false, false);
+        ASSERT(di_write_posts(&d, &arr));
+        json_free(&arr);
+        di_run(&d, false, &reply, dump, sizeof(dump));
+        ASSERT(strstr(dump, "REFUSE(denied_path)") != NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+
+    TEST("intake: expired signed post is refused") {
+        json_init(&arr);
+        json_set_array(&arr);
+        di_post(&d, &arr, 10, 1000, shaA, false);
+        ASSERT(di_write_posts(&d, &arr));
+        json_free(&arr);
+        di_run(&d, false, &reply, dump, sizeof(dump));
+        ASSERT(strstr(dump, "REFUSE(post_expired_or_invalid_time)") != NULL);
         zcl_command_reply_free(&reply);
         PASS();
     }
@@ -258,7 +316,7 @@ int test_dev_intake(void)
     TEST("intake: a post with a receipt verifies; a row missing it is bad_signature") {
         json_init(&arr);
         json_set_array(&arr);
-        di_post_r(&d, &arr, 8, 1008, "READY sha256=0000000000000000000000000000000000000000000000000000000000000000 size=1 r",
+        di_post_r(&d, &arr, 8, (uint64_t)platform_time_wall_unix() + 8, "READY sha256=0000000000000000000000000000000000000000000000000000000000000000 size=1 r",
                   "unit=intake gate=ok", false, false);
         ASSERT(di_write_posts(&d, &arr));
         json_free(&arr);
@@ -268,7 +326,7 @@ int test_dev_intake(void)
         zcl_command_reply_free(&reply);
         json_init(&arr);
         json_set_array(&arr);
-        di_post_r(&d, &arr, 9, 1009, "READY sha256=0000000000000000000000000000000000000000000000000000000000000000 size=1 r",
+        di_post_r(&d, &arr, 9, (uint64_t)platform_time_wall_unix() + 9, "READY sha256=0000000000000000000000000000000000000000000000000000000000000000 size=1 r",
                   "unit=intake gate=ok", true, false);
         ASSERT(di_write_posts(&d, &arr));
         json_free(&arr);

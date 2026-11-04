@@ -34,6 +34,7 @@
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
+#include "platform/time_compat.h"
 #include "util/spawn.h"
 #include "session/fleet_board_proto.h"
 #include "sha3/sha3.h"
@@ -69,7 +70,7 @@ struct in_post {
 };
 
 struct in_ctx {
-    char repo[IN_PATH], bundle_dir[IN_PATH], scratch[IN_PATH + 16];
+    char repo[IN_PATH], lane_root[IN_PATH], bundle_dir[IN_PATH], scratch[IN_PATH + 16];
     bool board; /* posts come from the live board (show can re-read a post) */
     char main_sha[41], *out;
     struct in_list allow, deny;
@@ -299,7 +300,13 @@ static void in_ingest(struct in_ctx *x, const struct json_value *j)
     in_str(p->agent, sizeof(p->agent), src, "agent");
     in_str(p->room, sizeof(p->room), src, "room");
     p->created = json_get_int(json_get(src, "created_at"));
-    if (!in_allowed(&x->allow, p->host))
+    struct fleet_board_post timed = {0};
+    timed.kind = FLEET_BOARD_KIND_NOTE;
+    timed.created_at = (uint64_t)p->created;
+    timed.ttl = (uint32_t)json_get_int(json_get(src, "ttl"));
+    if (fleet_board_post_check_time(&timed, platform_time_wall_unix()) != FLEET_BOARD_OK)
+        in_refuse(p, "post_expired_or_invalid_time");
+    else if (!in_allowed(&x->allow, p->host))
         in_refuse(p, "author_not_allowed");
     else
         in_bundle_form(json_get_str(json_get(src, "text")), p);
@@ -456,6 +463,19 @@ static bool in_scratch(struct in_ctx *x)
     return fclose(f) == 0;
 }
 
+static bool in_lane_valid(const struct in_ctx *x, const char *lane)
+{
+    char resolved[IN_PATH], top[IN_PATH];
+    const char *args[] = {"rev-parse", "--show-toplevel", NULL};
+    size_t n = strlen(x->lane_root);
+    if (strstr(lane, "/../") || !strcmp(lane + (strlen(lane) >= 3 ? strlen(lane) - 3 : 0), "/.."))
+        return false;
+    if (!realpath(lane, resolved) || strcmp(resolved, lane) ||
+        strncmp(resolved, x->lane_root, n) || resolved[n] != '/')
+        return false;
+    return db_git_line(lane, args, top, sizeof(top)) && !strcmp(top, lane);
+}
+
 /* The live READY form names a lane on the poster's host and a commit. When
  * that lane is a repository here (the poster is this box, or shares its
  * filesystem) its objects join the scratch repository as a second alternate
@@ -472,6 +492,10 @@ static void in_import_lane(struct in_ctx *x, struct in_post *p, int i)
     char spec[64];
     const char *upd[] = {"update-ref", ref, p->commit, NULL};
     FILE *f;
+    if (!in_lane_valid(x, p->lane)) {
+        in_refuse(p, "invalid_lane");
+        return;
+    }
     (void)snprintf(spec, sizeof(spec), "%s^{commit}", p->commit);
     has[2] = spec;
     (void)snprintf(ref, sizeof(ref), "refs/intake/%d", i);
@@ -559,6 +583,22 @@ static int in_merge(struct in_ctx *x, const char *a, const char *b)
     return rc == 0 ? 0 : (rc == 1 ? 1 : -1);
 }
 
+static void in_batch_conflicts(struct in_ctx *x, struct in_post *p, int i)
+{
+    for (int j = 0; j < i; j++) {
+        const struct in_post *q = &x->posts[j];
+        int rc;
+        if (strcmp(q->verdict, "ACCEPT_FOR_QUEUE") ||
+            (rc = in_merge(x, q->tip, p->tip)) == 0)
+            continue;
+        in_set(p, rc > 0 ? "CONFLICT" : "REFUSE",
+               rc > 0 ? "batch" : "merge_tree_failed");
+        memcpy(p->with, q->id, 12);
+        p->with[12] = '\0';
+        break;
+    }
+}
+
 static void in_conflicts(struct in_ctx *x)
 {
     for (int i = 0; i < x->n; i++) {
@@ -575,17 +615,7 @@ static void in_conflicts(struct in_ctx *x)
             (void)snprintf(p->with, sizeof(p->with), "%s", "origin/main");
             continue;
         }
-        for (int j = 0; j < i; j++) {
-            const struct in_post *q = &x->posts[j];
-            if (strcmp(q->verdict, "ACCEPT_FOR_QUEUE") ||
-                (rc = in_merge(x, q->tip, p->tip)) == 0)
-                continue;
-            in_set(p, rc > 0 ? "CONFLICT" : "REFUSE",
-                   rc > 0 ? "batch" : "merge_tree_failed");
-            memcpy(p->with, q->id, 12);
-            p->with[12] = '\0';
-            break;
-        }
+        in_batch_conflicts(x, p, i);
         if (p->live)
             in_set(p, "ACCEPT_FOR_QUEUE", "");
     }
@@ -726,6 +756,15 @@ static bool in_inputs(struct in_ctx *x, const struct json_value *in,
                       struct zcl_command_reply *reply)
 {
     const char *repo = db_opt_str(in, "repo"), *bd = db_opt_str(in, "bundle_dir");
+    const char *home = db_opt_str(in, "home");
+    char root[IN_PATH];
+    if (!home[0])
+        home = getenv("HOME");
+    if (!home || snprintf(root, sizeof(root), "%s/development/lanes/z23", home) >= (int)sizeof(root) ||
+        !realpath(root, x->lane_root)) {
+        db_refuse(reply, "BAD_PATH", "input", "cannot resolve the lane root");
+        return false;
+    }
     if (!repo[0] && !getcwd(x->repo, sizeof(x->repo)))
         return false;
     if (repo[0])
@@ -789,10 +828,14 @@ void zcl_native_handle_dev_intake(const struct zcl_command_request *request,
         return;
     }
     x = zcl_calloc(1, sizeof(*x), "dev.land.intake");
-    if (!x)
+    if (!x) {
+        db_refuse(reply, "NO_MEMORY", "intake", "cannot allocate intake context");
         return;
+    }
     x->out = zcl_malloc(IN_OUT, "dev_intake_out");
-    if (x->out && in_inputs(x, in, reply))
+    if (!x->out)
+        db_refuse(reply, "NO_MEMORY", "intake", "cannot allocate intake output buffer");
+    else if (in_inputs(x, in, reply))
         in_run(x, in, reply);
     if (x->scratch[0])
         in_rm(x->scratch);
