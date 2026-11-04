@@ -67,32 +67,21 @@ static int lint_row_command(const char *p, char *cmd, size_t cap)
     return *p ? 2 : 0;
 }
 
-/* A comment before a row is valid C but outside the table's line grammar. */
-static const char *lint_row_prefix(const char *p, bool *commented)
-{
-    *commented = false;
-    for (;;) {
-        while (isspace((unsigned char)*p)) p++;
-        if (strncmp(p, "/*", 2) != 0 && strncmp(p, "*/", 2) != 0) return p;
-        const char *end = strstr(p, "*/");
-        if (!end) return NULL;
-        *commented = true;
-        p = end + 2;
-    }
-}
-
-/* Noncanonical row-like lines refuse rather than disappearing from audits. */
+/* The table permits only blank lines, // comments and canonical rows. */
 int lint_cmdrow_parse(const char *line, char *name, size_t ncap, char *cmd,
                       size_t ccap)
 {
     static const char k_open[] = "LINT_ROW(\"";
-    bool commented;
-    const char *p = lint_row_prefix(line, &commented);
-    if (!p) return 1;
-    if (commented && strncmp(p, "LINT_ROW", 8) == 0) return 2;
-    if (strncmp(p, k_open, sizeof k_open - 1) != 0)
-        return strncmp(p, "LINT_ROW", 8) == 0 &&
-               !(isalnum((unsigned char)p[8]) || p[8] == '_') ? 2 : 1;
+    const char *p = line;
+    while (isspace((unsigned char)*p)) p++;
+    if (!*p) return 1;
+    if (p[0] == '/' && p[1] == '/') {
+        size_t n = strlen(p);
+        if (n && p[n - 1] == '\n') n--;
+        if (n && p[n - 1] == '\r') n--;
+        return n && p[n - 1] == '\\' ? 2 : 1;
+    }
+    if (strncmp(p, k_open, sizeof k_open - 1) != 0) return 2;
     p += sizeof k_open - 1;
     return lint_row_name(&p, name, ncap) ? 2 : lint_row_command(p, cmd, ccap);
 }

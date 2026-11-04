@@ -161,6 +161,10 @@ static int lgw_each_row(const char *driver, lgw_row_fn visit, void *ctx)
     if (!f)
         return die("z23-lint: cannot open %s\n", driver);
     while (rc == 0 && fgets(line, sizeof line, f)) {
+        if (!strchr(line, '\n') && !feof(f)) {
+            rc = die("z23-lint: over-long gate table line in %s\n", driver);
+            break;
+        }
         int pr = lint_cmdrow_parse(line, name, sizeof name, cmd, sizeof cmd);
         if (pr == 2)
             rc = die("z23-lint: malformed or over-long gate table row in %s\n", driver);

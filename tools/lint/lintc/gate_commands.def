@@ -1,16 +1,9 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0
- *
- * purpose: the one source of truth for the lint driver's gate command table:
- * one LINT_ROW(name, command) per check-* gate whose command is not the plain
- * `z23-lint NAME` that gates.def derives. `z23-lint run` compiles this file
- * (run_table.c); check-lint-gate-wiring and check-doc-claims read these same
- * lines from the scanned root (cmdrows.c). The command is the exact line a
- * Make recipe would run: first row for a name wins, a repeated name is a dead
- * row that check-lint-gate-wiring refuses. Commands may use quotes, $VAR,
- * NAME=v prefixes and `&&` only (run_cmd.c refuses every other shell syntax).
- * "__core_seal__" names the built-in core-seal pipeline (run_exec.c).
- * One row per line, string escapes `\"` and `\\` only.
- */
+// Copyright 2026 Rhett Creighton - Apache License 2.0
+// The lint driver's single gate command table, compiled and audited as text.
+// Each nonblank line is either a // comment or one canonical LINT_ROW.
+// Commands support quotes, $VAR, NAME=v prefixes and && only.
+// "__core_seal__" names the built-in core-seal pipeline (run_exec.c).
+// One row per line, string escapes \" and \\ only; first row wins.
 
 LINT_ROW("check-toolchain", "./tools/dev/check-toolchain.sh --selftest && ./tools/dev/check-toolchain.sh")
 LINT_ROW("check-dev-linker-threads", "make check-dev-linker-threads")

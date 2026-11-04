@@ -52,7 +52,7 @@ static int lgws_strip_driver(const char *d)
         return 2;
     if (csr_write(hdr, "#define LINT_FAMILY_CEILING 1500\n"))
         return 2;
-    return csr_write(driver, "/* fixture gate command table: LINT_ROW(name, command) rows */\n");
+    return csr_write(driver, "// fixture gate command table\n");
 }
 static int lgws_write_sentinels(const char *d)
 {
