@@ -121,8 +121,13 @@ char *tgl_read_file(const char *path, size_t *len)
         if (got == 0)
             break;
     }
-    if (f)
-        fclose(f);
+    bool read_failed = f && ferror(f);
+    if (f && fclose(f) != 0)
+        read_failed = true;
+    if (read_failed) {
+        free(buf);
+        buf = NULL;
+    }
     if (buf) {
         buf[used] = '\0';
         if (len)

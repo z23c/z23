@@ -271,6 +271,64 @@ static int test_leaf_end_to_end(void)
     return failures;
 }
 
+static int test_registry_read_error(void)
+{
+    int failures = 0;
+    TEST("registry read errors cannot become a successful empty list or count") {
+        struct tglt t;
+        const char *list[] = {"list"}, *count[] = {"--count"};
+        char out[TGL_T_OUT], err[TGL_T_OUT];
+        ASSERT(tglt_setup(&t, "read_error", TGLT_RUNNER));
+        /* Linux fopen accepts directories; fread then fails with EISDIR.
+         * The directory is a real read failure, not a missing-path refusal. */
+        ASSERT_EQ(unlink(t.registry), 0);
+        ASSERT_EQ(mkdir(t.registry, 0700), 0);
+        int list_rc = tglt_run(&t, list, 1, out, err);
+        if (list_rc == 0)
+            printf("\nUnreadable registry admitted as list '%s'\n", out);
+        ASSERT_EQ(list_rc, 2);
+        ASSERT(out[0] == '\0');
+        ASSERT(strstr(err, "test-group-list:") != NULL);
+        ASSERT_EQ(tglt_run(&t, count, 1, out, err), 2);
+        ASSERT(out[0] == '\0');
+        ASSERT(strstr(err, "test-group-list:") != NULL);
+        /* Readable empty input remains distinct from a failed read. */
+        ASSERT_EQ(rmdir(t.registry), 0);
+        ASSERT(tglt_put(t.registry, ""));
+        ASSERT_EQ(tglt_run(&t, list, 1, out, err), 0);
+        ASSERT_STR_EQ(out, "");
+        ASSERT_EQ(tglt_run(&t, count, 1, out, err), 0);
+        ASSERT_STR_EQ(out, "0\n");
+        test_rm_rf_recursive(t.root);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_leaf_registry_read_error(void)
+{
+    int failures = 0;
+    TEST("dev.test.groups rejects a registry read error without zero-count output") {
+        struct tglt t;
+        struct zcl_command_reply reply;
+        char out[TGL_T_OUT], err[TGL_T_OUT];
+        ASSERT(tglt_setup(&t, "leaf_read_error", TGLT_RUNNER));
+        ASSERT_EQ(unlink(t.registry), 0);
+        ASSERT_EQ(mkdir(t.registry, 0700), 0);
+        ASSERT(tglt_leaf(&t, "count", "", out, err, &reply));
+        enum zcl_command_status status = reply.status;
+        int exit_code = reply.exit_code;
+        zcl_command_reply_free(&reply);
+        test_rm_rf_recursive(t.root);
+        ASSERT_EQ((int)status, (int)ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_EQ(exit_code, (int)ZCL_COMMAND_EXIT_INVALID);
+        ASSERT_STR_EQ(out, "");
+        ASSERT(strstr(err, "test-group-list:") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_test_group_list(void)
 {
     int failures = 0;
@@ -278,5 +336,7 @@ int test_test_group_list(void)
     failures += test_params_gated_refusal();
     failures += test_exact_set_and_suggest();
     failures += test_leaf_end_to_end();
+    failures += test_registry_read_error();
+    failures += test_leaf_registry_read_error();
     return failures;
 }
