@@ -861,36 +861,51 @@ void test_note_child(const char *label, int rc, const char *out)
     if (out) test_note_bytes("output", out, strlen(out));
 }
 
+/* Appends n bytes of src (or a formatted gap) to out at *used, never past
+ * cap - 1. */
+static void evidence_put(char *out, size_t cap, size_t *used, const char *src,
+                         size_t n)
+{
+    size_t room = cap - 1 - *used;
+    if (n > room) n = room;
+    memcpy(out + *used, src, n);
+    *used += n;
+}
+
+static char evidence_tail_byte(uint64_t tail_index)
+{
+    return g_evidence.tail[tail_index % TEST_EVIDENCE_TAIL];
+}
+
 size_t test_evidence_render(char *out, size_t cap, const char *file, int line)
 {
     if (!out || cap == 0) return 0;
-    out[0] = '\0';
+    char text[96];
+    size_t used = 0;
+    int n = snprintf(text, sizeof(text), "--- evidence %s:%d ---\n", file, line);
+    evidence_put(out, cap, &used, text, n > 0 ? (size_t)n : 0);
     evidence_lock();
     uint64_t total = g_evidence.total;
-    size_t used = 0;
-    int n = snprintf(out, cap, "--- evidence %s:%d ---\n", file, line);
-    used = n > 0 ? ((size_t)n < cap ? (size_t)n : cap - 1) : 0;
-    uint64_t headlen = total < TEST_EVIDENCE_HEAD ? total : TEST_EVIDENCE_HEAD;
-    for (uint64_t i = 0; i < headlen && used + 1 < cap; i++)
-        out[used++] = g_evidence.head[i];
+    uint64_t head = total < TEST_EVIDENCE_HEAD ? total : TEST_EVIDENCE_HEAD;
+    evidence_put(out, cap, &used, g_evidence.head, (size_t)head);
     if (total > TEST_EVIDENCE_CAP) {
-        n = snprintf(out + used, cap - used, "\n...[%llu bytes elided]...\n",
+        n = snprintf(text, sizeof(text), "\n...[%llu bytes elided]...\n",
                      (unsigned long long)(total - TEST_EVIDENCE_CAP));
-        used += n > 0 ? ((size_t)n < cap - used ? (size_t)n : cap - used - 1)
-                      : 0;
+        evidence_put(out, cap, &used, text, n > 0 ? (size_t)n : 0);
     }
-    uint64_t taillen = total > TEST_EVIDENCE_HEAD ? total - TEST_EVIDENCE_HEAD
-                                                  : 0;
-    uint64_t first = taillen > TEST_EVIDENCE_TAIL ? taillen - TEST_EVIDENCE_TAIL
-                                                  : 0;
-    for (uint64_t i = first; i < taillen && used + 1 < cap; i++)
-        out[used++] = g_evidence.tail[i % TEST_EVIDENCE_TAIL];
-    if (used > 0 && out[used - 1] != '\n' && used + 1 < cap) out[used++] = '\n';
-    out[used] = '\0';
+    uint64_t tail_len = total > head ? total - head : 0;
+    uint64_t first = tail_len > TEST_EVIDENCE_TAIL ? tail_len - TEST_EVIDENCE_TAIL
+                                                   : 0;
+    for (uint64_t i = first; i < tail_len; i++) {
+        char c = evidence_tail_byte(i);
+        evidence_put(out, cap, &used, &c, 1);
+    }
     evidence_unlock();
-    n = snprintf(out + used, cap - used, "--- end evidence ---\n");
-    return used + (n > 0 ? ((size_t)n < cap - used ? (size_t)n : cap - used - 1)
-                         : 0);
+    if (used > 0 && out[used - 1] != '\n') evidence_put(out, cap, &used, "\n", 1);
+    evidence_put(out, cap, &used, "--- end evidence ---\n",
+                 sizeof("--- end evidence ---\n") - 1);
+    out[used] = '\0';
+    return used;
 }
 
 /* Called by every ASSERT variant just before it fails the test. Prints

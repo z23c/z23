@@ -2770,6 +2770,21 @@ static int tc_load_flaky_excerpt(void)
                            "print_load_flaky_first_excerpt(name, first);") &&
              file_contains("tests/harness/src/test_parallel.c",
                            "preserve_retry_first(g_groups[i].name, first_log, preserved_log);"));
+    (void)unlink(log);
+    (void)unlink(cap);
+    return failures;
+}
+
+/* Flight-recorder evidence: see testcache_print_log_excerpt. */
+static int tc_excerpt_evidence_case(void)
+{
+    int failures = 0;
+    char log[96], cap[96];
+    (void)snprintf(log, sizeof(log), "test-tmp/tc_evidence.%ld.log",
+                   (long)getpid());
+    (void)snprintf(cap, sizeof(cap), "test-tmp/tc_evidence.%ld.out",
+                   (long)getpid());
+    (void)mkdir("test-tmp", 0755);
     /* The flight-recorder block after a FAIL line is kept whole, though none
      * of its lines is a failure mark and none is in the tail window. */
     FILE *ev = fopen(log, "w");
@@ -2784,7 +2799,7 @@ static int tc_load_flaky_excerpt(void)
         }
         fclose(ev);
     }
-    out = fopen(cap, "w");
+    FILE *out = fopen(cap, "w");
     size_t kept = out ? testcache_print_log_excerpt(out, log, "  first| ", 5,
                                                     3) : 0;
     if (out) fclose(out);
@@ -3930,6 +3945,7 @@ int test_testcache(void)
     failures += tc_action_inputs_phase();
     failures += tc_load_flaky_excerpt();
     failures += tc_excerpt_context_case();
+    failures += tc_excerpt_evidence_case();
     failures += tc_exec_rail_real_tree();
     failures += tc_exec_rail_fixture();
     failures += tc_exec_binding_fixture();
