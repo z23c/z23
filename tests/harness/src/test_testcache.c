@@ -2829,6 +2829,9 @@ static int tc_excerpt_evidence_case(void)
         for (int i = 0; i < 100; i++) fprintf(ev, "note %d\n", i);
         fputs("TAIL-END\n--- end evidence ---\nFAIL at y.c:2\n"
               "--- evidence y.c:2 ---\nSECOND-BLOCK\n--- end evidence ---\n", ev);
+        fputs("--- evidence z.c:3 ---\nOVERSIZE-HEAD", ev);
+        for (int i = 0; i < 9000; i++) fputc('z', ev);
+        fputs("OVERSIZE-TAIL\n--- end evidence ---\n", ev);
         for (int i = 0; i < 20; i++) fputs("ordinary\n", ev);
         fclose(ev);
     }
@@ -2840,6 +2843,8 @@ static int tc_excerpt_evidence_case(void)
     TC_CHECK("long multi-line and multiple evidence frames survive excerpt",
              file_contains(cap, "HEAD-BEGIN") && file_contains(cap, "LONG-TAIL") &&
              file_contains(cap, "TAIL-END") && file_contains(cap, "SECOND-BLOCK"));
+    TC_CHECK("overlong evidence lines retain their tail or explicitly refuse truncation",
+             file_contains(cap, "OVERSIZE-TAIL") || file_contains(cap, "[truncated]"));
     TC_CHECK("agent verify keeps complete large prefixed frames",
              tc_shell("make --no-print-directory agent-verify-evidence LOG=%s > %s", cap, log) &&
              file_contains(log, "LONG-TAIL") && file_contains(log, "TAIL-END") &&

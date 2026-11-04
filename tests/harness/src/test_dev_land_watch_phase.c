@@ -875,7 +875,12 @@ static const char k_dlx_evidence_test_script[] =
     " '==================== test_golden_dev_cycle (FAIL, 3s) ====================' \\\n"
     " 'golden dev cycle: a hot swap lands under a second... ' \\\n"
     " 'FAIL at tests/harness/src/test_golden_dev_cycle.c:367 (hotswap_ms < 1000.0)' \\\n"
-    " '--- evidence test.c:1 ---' 'FRAME-HEAD' 'FRAME-TAIL' '--- end evidence ---' \\\n"
+    " '--- evidence test.c:1 ---' 'FRAME-HEAD'\n"
+    "printf '\\033[31munsafe-control\\n'\n"
+    "printf '%s\\n' 'FRAME-TAIL' '--- end evidence ---' \\\n"
+    " '  first| L11: --- evidence retry.c:2 ---' \\\n"
+    " '  first| L12: RETRY-HEAD' '  first| L13: RETRY-TAIL' \\\n"
+    " '  first| L14: --- end evidence ---' \\\n"
     " 'SOME TESTS FAILED - 1/2 groups failed' \\\n"
     " 'Failed groups:' \\\n"
     " '  - test_golden_dev_cycle: exit code=1 log=./test-tmp/test_parallel_1_822.log'\n"
@@ -1016,7 +1021,9 @@ static bool dlx_evidence_outcome_ok(const struct dlx_evidence_case *k,
            dlx_evidence_text_ok(k, text, real_wt) &&
            (!k->frame || (strstr(text, "--- evidence test.c:1 ---") &&
                           strstr(text, "FRAME-HEAD") && strstr(text, "FRAME-TAIL") &&
-                          strstr(text, "--- end evidence ---")));
+                          strstr(text, "--- end evidence ---") &&
+                          strstr(text, "RETRY-HEAD") && strstr(text, "RETRY-TAIL") &&
+                          !strchr(text, '\033')));
 }
 
 static bool dlx_evidence_case_run(const struct dlx_evidence_case *k)
