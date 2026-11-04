@@ -21,7 +21,7 @@ Description=Z23 Off-Host Tip-Hash Agreement Recorder (read-only)
 # could-not-ask. The third is never an implicit pass: a query the node
 # interrupted, an envelope whose pager dropped the rows, a height we do not
 # hold, and a hash backed by fewer than two DISTINCT remote hosts all record
-# as could-not-ask, and tools/scripts/tip_agreement_judge.sh refuses to pass
+# as could-not-ask, and `z23 ops tip-agreement judge` refuses to pass
 # a window of them.
 #
 # After= the canonical node so a boot-time catch-up run samples a started

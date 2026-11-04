@@ -471,7 +471,7 @@ bool tip_agreement_dump_state_json(struct json_value *out, const char *key)
                      "REPORTER ONLY — describes the off-host tip-hash "
                      "agreement ledger on disk; never grades a sample, never "
                      "mints or clears an agreement claim, feeds no score. "
-                     "tools/scripts/tip_agreement_judge.sh is the judge");
+                     "`z23 ops tip-agreement judge` is the judge");
 
     char path[PATH_MAX];
     bool resolved = tip_agreement_resolve_ledger(path, sizeof(path));

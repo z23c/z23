@@ -2,12 +2,13 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
 # test_tip_agreement_evidence.sh — the hermetic proof for the off-host
-# tip-hash agreement ledger (tools/scripts/tip_agreement_probe.sh) and its
-# judge (tools/scripts/tip_agreement_judge.sh).
+# tip-hash agreement RECORDER (tools/scripts/tip_agreement_probe.sh). Its
+# judge is C now: `z23 ops tip-agreement judge`, proved by the
+# tip_agreement_judge test group (tests/harness/src/test_tip_agreement_judge.c).
 #
 # Hermetic: every node reader is stubbed with a fixture command, so this
 # never dials a node, never reads a datadir, and never touches the live
-# instance. It runs the REAL prober and the REAL judge — the stubs replace
+# instance. It runs the REAL prober — the stubs replace
 # only what the node would have answered.
 #
 # The three cases the whole design turns on are asserted SEPARATELY and by
@@ -17,7 +18,7 @@
 #   disagreement    recorded as outcome "disagrees" with both hashes
 #   could-not-ask   an unreachable or unusable source records
 #                   "could-not-ask" — never a zero, never a blank, never a
-#                   pass — AND the judge does not pass on a window of them
+#                   pass
 #
 # The could-not-ask family is tested in five distinct shapes, four of which
 # were observed against the live node while this was being written:
@@ -29,7 +30,6 @@
 # Usage:
 #   test_tip_agreement_evidence.sh                 # everything
 #   test_tip_agreement_evidence.sh --only recorder
-#   test_tip_agreement_evidence.sh --only judge
 #
 # Ends with "selftest: PASS" on success (the token every sibling harness in
 # tools/scripts uses and the Makefile gates on) and exits non-zero on any
@@ -42,24 +42,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tools/scripts/sh_str.sh
 . "$SCRIPT_DIR/sh_str.sh"
 PROBE="$SCRIPT_DIR/tip_agreement_probe.sh"
-JUDGE="$SCRIPT_DIR/tip_agreement_judge.sh"
 
 ONLY="all"
 case "${1:-}" in
-    --only) ONLY="${2:?--only needs recorder|judge}" ;;
+    --only) ONLY="${2:?--only needs recorder}" ;;
     '') ;;
-    *) echo "usage: test_tip_agreement_evidence.sh [--only recorder|judge]" >&2; exit 2 ;;
+    *) echo "usage: test_tip_agreement_evidence.sh [--only recorder]" >&2; exit 2 ;;
 esac
 
 FAILED=0
 ok()   { echo "  ok: $*"; }
 bad()  { echo "  FAIL: $*"; FAILED=1; }
 
-for f in "$PROBE" "$JUDGE"; do
+for f in "$PROBE"; do
     if [ ! -r "$f" ]; then
         echo "selftest: FAIL missing $f" >&2
         echo "selftest: this harness proves the off-host tip-hash agreement ledger;" >&2
-        echo "          on a tree without the recorder and judge it must fail, and does." >&2
+        echo "          on a tree without the recorder it must fail, and does." >&2
         exit 1
     fi
 done
@@ -640,280 +639,9 @@ STUB
     fi
 }
 
-# ── judge cases ────────────────────────────────────────────────────────
-
-# jrow <ts> <outcome> [peers] [control] [contested] [unresolved]
-jrow() {
-    local ts="$1" outcome="$2" peers="${3:-2}" ctl="${4:-2}"
-    local contested="${5:-0}" unres="${6:-0}"
-    local pnum="$peers"
-    case "$outcome" in could-not-ask) pnum="null" ;; esac
-    printf '{"ts":%s,"instance":"canonical","rpcport":18232,"datadir":"/x","window_secs":900,"min_distinct_peers":%s,"our_height":%s,"height":%s,"our_tip_hash":"%s","modal_remote_hash":"%s","modal_remote_peers":%s,"modal_remote_groups":2,"disagreeing_peers":%s,"contested_peers":%s,"rival_heights_unresolved":%s,"heights_above_tip":0,"disagreeing_hashes":[],"peers_total":21,"peers_with_height":20,"peers_usable":9,"clusters_seen":2,"outcome":"%s","reason":"fixture","error_detail":""}\n' \
-        "$ts" "$ctl" "$HEIGHT" "$HEIGHT" "$HASH_OURS" "$HASH_OURS" "$pnum" \
-        "$contested" "$contested" "$unres" "$outcome"
-}
-
-# jrow_legacy <ts> — a row in the pre-rival-scan shape: it says "agrees" and
-# carries no contested_peers / rival_heights_unresolved keys at all. A
-# recorder that never looked for rivals cannot testify that there were none,
-# so the judge must refuse to count it.
-jrow_legacy() {
-    printf '{"ts":%s,"min_distinct_peers":2,"modal_remote_peers":2,"disagreeing_peers":0,"outcome":"agrees","reason":"legacy"}\n' "$1"
-}
-
-# jcase <name> <ledger> <want-token> <want-rc> [judge flags...]
-jcase() {
-    local name="$1" ledger="$2" want="$3" wantrc="$4"; shift 4
-    local out rc tok
-    out="$(env "ZCL_PARITY_JUDGE_NOW=$NOW" bash "$JUDGE" "$ledger" "$@" 2>&1)"
-    rc=$?
-    tok="$(printf '%s' "$out" | sed -n 's/.*VERDICT=\([A-Z_]*\).*/\1/p' | head -n1)"
-    if str_contains "$out" "$ledger" ||
-       str_contains "$out" "rpcport" ||
-       str_contains "$out" "datadir" || str_contains "$out" "/x"; then
-        bad "$name -> public judge output leaked private ledger fields"
-        echo "        out: $out"
-    elif [ "$tok" = "$want" ] && [ "$rc" = "$wantrc" ]; then
-        ok "$name -> $tok (rc=$rc)"
-    else
-        bad "$name -> got tok='$tok' rc=$rc, wanted '$want' rc=$wantrc"
-        echo "        out: $out"
-    fi
-}
-
-judge_cases() {
-    echo "tip-agreement: judge cases"
-
-    # J1 — a healthy day: 8 agreeing samples across the window.
-    local f="$TMP/j_pass.jsonl"; : >"$f"
-    local i
-    for i in 1 2 3 4 5 6 7 8; do jrow "$((NOW - i * 600))" agrees >>"$f"; done
-    jcase "8 agreeing samples in a fresh window" "$f" PASS 0
-
-    # J2 — the case this judge exists for: the recorder ran all day and
-    # never got a comparable pair. NOT a pass.
-    f="$TMP/j_cna.jsonl"; : >"$f"
-    for i in $(seq 1 20); do jrow "$((NOW - i * 600))" could-not-ask >>"$f"; done
-    jcase "an all-could-not-ask window is NO_EVIDENCE, never PASS" "$f" NO_EVIDENCE 1
-
-    # J3 — the timer died two days ago holding a green ledger.
-    f="$TMP/j_stale.jsonl"; : >"$f"
-    for i in $(seq 1 8); do jrow "$((NOW - 172800 - i * 600))" agrees >>"$f"; done
-    jcase "a ledger whose newest sample is 2 days old is STALE" "$f" STALE 2
-
-    # J4 — no ledger at all.
-    jcase "a missing ledger is STALE" "$TMP/does-not-exist.jsonl" STALE 2
-
-    # J4b — a ledger with lines but none carrying a ts.
-    f="$TMP/j_garbage.jsonl"; printf 'not json\n{"nope":1}\n' >"$f"
-    jcase "a ledger with no parseable ts is STALE" "$f" STALE 2
-
-    # J4c — a far-future timestamp must not make a dead ledger look fresh.
-    # The stale rows are two days old; the bogus row is a year ahead.
-    f="$TMP/j_future.jsonl"; : >"$f"
-    for i in $(seq 1 8); do jrow "$((NOW - 172800 - i * 600))" agrees >>"$f"; done
-    jrow "$((NOW + 31536000))" agrees >>"$f"
-    jcase "a far-future stamp cannot refresh a stale ledger" "$f" STALE 2
-
-    # J5 — one disagreement in an otherwise perfect window still fails, and
-    # fails as DISAGREE (the named cause), not as a volume problem.
-    f="$TMP/j_dis.jsonl"; : >"$f"
-    for i in $(seq 1 12); do jrow "$((NOW - i * 600))" agrees >>"$f"; done
-    jrow "$((NOW - 300))" disagrees >>"$f"
-    jcase "a single disagreement fails as DISAGREE" "$f" DISAGREE 1
-
-    # J6 — three agreeing samples is not a day of agreement.
-    f="$TMP/j_thin.jsonl"; : >"$f"
-    for i in 1 2 3; do jrow "$((NOW - i * 600))" agrees >>"$f"; done
-    jcase "3 agreeing samples is THIN_EVIDENCE" "$f" THIN_EVIDENCE 1
-
-    # J7 — the anti-weakening rule: a ledger written by a prober whose own
-    # control was 1 cannot mint a PASS however many rows it has.
-    f="$TMP/j_weak.jsonl"; : >"$f"
-    for i in $(seq 1 10); do jrow "$((NOW - i * 600))" agrees 2 1 >>"$f"; done
-    jcase "a ledger written with a weakened control is THIN_EVIDENCE" "$f" THIN_EVIDENCE 1
-
-    # J8 — an agreeing sample backed by one witness poisons the window.
-    f="$TMP/j_onepeer.jsonl"; : >"$f"
-    for i in $(seq 1 10); do jrow "$((NOW - i * 600))" agrees >>"$f"; done
-    jrow "$((NOW - 60))" agrees 1 >>"$f"
-    jcase "one single-witness agreeing sample is THIN_EVIDENCE" "$f" THIN_EVIDENCE 1
-
-    # J9 — THE WINDOW IS THE CLAIM. Yesterday's agreement plus a fresh
-    # stretch of could-not-ask must not read as agreement today.
-    f="$TMP/j_window.jsonl"; : >"$f"
-    for i in $(seq 1 10); do jrow "$((NOW - 90000 - i * 600))" agrees >>"$f"; done
-    for i in $(seq 1 10); do jrow "$((NOW - i * 120))" could-not-ask >>"$f"; done
-    jcase "old agreement + fresh silence is NO_EVIDENCE (the window is graded)" \
-        "$f" NO_EVIDENCE 1
-
-    # J10 — and the mirror image, which is what proves this is not a
-    # tail -n 1 judge: the LAST line is could-not-ask and the window still
-    # passes on the agreeing samples inside it.
-    f="$TMP/j_lastline.jsonl"; : >"$f"
-    for i in $(seq 1 10); do jrow "$((NOW - i * 600))" agrees >>"$f"; done
-    jrow "$((NOW - 60))" could-not-ask >>"$f"
-    jcase "a could-not-ask LAST line does not sink a good window" "$f" PASS 0
-
-    # J11 — an outcome this judge does not know is never quietly bucketed.
-    f="$TMP/j_mal.jsonl"; : >"$f"
-    for i in $(seq 1 10); do jrow "$((NOW - i * 600))" agrees >>"$f"; done
-    jrow "$((NOW - 60))" probably-fine >>"$f"
-    jcase "an unrecognised outcome is MALFORMED" "$f" MALFORMED 1
-
-    # J12 — the control cannot be argued away on the command line.
-    f="$TMP/j_pass.jsonl"
-    jcase "--min-distinct-peers=1 is refused outright" "$f" "" 2 --min-distinct-peers=1
-
-    # J13 — end to end: a ledger the REAL prober wrote, graded by the REAL
-    # judge. Nothing hand-written in the middle.
-    local d="$TMP/j_e2e"; sql_stub "$TMP/j_e2e.sh" "[[$HEIGHT,\"$HASH_OURS\",2]]" 1 false
-    for i in $(seq 1 8); do
-        run_probe "$d" "$TMP/j_e2e.sh" \
-            "printf '{\"result\":\"$HASH_OURS\"}'" "$((NOW - i * 600))"
-    done
-    jcase "prober-written ledger judged end to end" "$(ledger_of "$d")" PASS 0
-
-    # J15 — a window of samples that each said "agrees" while remote hosts
-    # meeting the control held a different block at some height. Before
-    # contested_peers existed this window was a clean PASS.
-    f="$TMP/j_contested.jsonl"; : >"$f"
-    for i in $(seq 1 10); do jrow "$((NOW - i * 600))" agrees 3 2 2 >>"$f"; done
-    jcase "agreement carrying contesting remote hosts is DISAGREE" "$f" DISAGREE 1
-
-    # J16 — ROW COUNT IS NOT DURATION. Eight agreeing samples one second
-    # apart satisfied --min-agree 6 before --min-span-secs existed, so one
-    # moment sampled eight times graded as a day of repeated agreement.
-    f="$TMP/j_burst.jsonl"; : >"$f"
-    for i in $(seq 1 8); do jrow "$((NOW - i))" agrees >>"$f"; done
-    jcase "8 agreeing samples one second apart is THIN_EVIDENCE, not a day" \
-        "$f" THIN_EVIDENCE 1
-
-    # J17 — the knobs may only TIGHTEN. Each of these was accepted before,
-    # and --window-hours/--max-age-secs together turned an almost year-old
-    # ledger into PASS.
-    f="$TMP/j_pass.jsonl"
-    jcase "--window-hours above the shipped 24 is refused"  "$f" "" 2 --window-hours=87600
-    jcase "--max-age-secs above the shipped 1800 is refused" "$f" "" 2 --max-age-secs=999999999
-    jcase "--max-disagree above the shipped 0 is refused"    "$f" "" 2 --max-disagree=1000
-    jcase "--min-agree below the shipped 6 is refused"       "$f" "" 2 --min-agree=1
-    jcase "--min-span-secs below the shipped 2700 is refused" "$f" "" 2 --min-span-secs=0
-    # and tightening is still allowed
-    jcase "tightening the window is accepted"                "$f" PASS 0 --window-hours=24 --min-agree=8
-
-    # J18 — a ledger written by a recorder that never looked for rivals.
-    # Its "agrees" rows carry no contested_peers key; absence is UNKNOWN, so
-    # they cannot prove there was no disagreement and cannot mint a PASS.
-    f="$TMP/j_legacy.jsonl"; : >"$f"
-    for i in $(seq 1 10); do jrow_legacy "$((NOW - i * 600))" >>"$f"; done
-    jcase "a pre-rival-scan ledger cannot pass (missing key is unknown, not zero)" \
-        "$f" NO_EVIDENCE 1
-
-    # J19 — a SPLICED line: a torn append that a later append landed on top
-    # of, so one physical line carries two outcome keys. Reading the first
-    # and grading the rest is how a Frankenstein row becomes evidence.
-    f="$TMP/j_splice.jsonl"; : >"$f"
-    for i in $(seq 1 10); do jrow "$((NOW - i * 600))" agrees >>"$f"; done
-    printf '{"ts":%s,"instance":"cano' "$((NOW - 300))" >>"$f"
-    jrow "$((NOW - 60))" agrees >>"$f"
-    jcase "a spliced (torn + overwritten) line is MALFORMED" "$f" MALFORMED 1
-
-    # J20 — samples the recorder could not fully check do not count toward
-    # the accrual claim, and a window made only of them is not agreement.
-    f="$TMP/j_unres.jsonl"; : >"$f"
-    for i in $(seq 1 10); do jrow "$((NOW - i * 600))" agrees 2 2 0 1 >>"$f"; done
-    jcase "a window of unverifiable agreements is NO_EVIDENCE" "$f" NO_EVIDENCE 1
-
-    # J21 — eight real recorder observations span the accrual interval and
-    # are graded by the real judge. The parent LIMIT 12 omits a thirteenth
-    # qualifying rival and incorrectly accrues PASS; the candidate must refuse.
-    d="$TMP/j_e2e_cluster_cap"
-    make_ranked_clusters "$TMP/j_cluster_cap.tsv" yes
-    query_aware_cluster_stub "$TMP/j_cluster_cap.sh" "$TMP/j_cluster_cap.tsv"
-    local hash_by_height='printf -v h "%064x" "$((3197949 - ZCL_PARITY_HEIGHT + 1))"; printf "{\"result\":\"%s\"}" "$h"'
-    for ((i = 1; i <= 8; i++)); do
-        run_probe "$d" "$TMP/j_cluster_cap.sh" "$hash_by_height" "$((NOW - i * 600))"
-    done
-    jcase "thirteen qualifying clusters with omitted rival cannot accrue PASS" \
-        "$(ledger_of "$d")" NO_EVIDENCE 1
-
-    # J22 — retain agreement for a single subthreshold sentinel.
-    d="$TMP/j_e2e_one_witness"
-    make_ranked_clusters "$TMP/j_one_witness.tsv" no
-    append_one_witness_tails "$TMP/j_one_witness.tsv" 1
-    query_aware_cluster_stub "$TMP/j_one_witness.sh" "$TMP/j_one_witness.tsv"
-    for ((i = 1; i <= 8; i++)); do
-        run_probe "$d" "$TMP/j_one_witness.sh" "$hash_by_height" "$((NOW - i * 600))"
-    done
-    jcase "one-witness sentinel does not prevent valid agreement accrual" \
-        "$(ledger_of "$d")" PASS 0
-
-    # J23 — more rows beyond the sentinel remain below the threshold too.
-    d="$TMP/j_e2e_one_witness_tail"
-    make_ranked_clusters "$TMP/j_one_witness_tail.tsv" no
-    append_one_witness_tails "$TMP/j_one_witness_tail.tsv" 3
-    query_aware_cluster_stub "$TMP/j_one_witness_tail.sh" "$TMP/j_one_witness_tail.tsv"
-    for ((i = 1; i <= 8; i++)); do
-        run_probe "$d" "$TMP/j_one_witness_tail.sh" "$hash_by_height" "$((NOW - i * 600))"
-    done
-    jcase "additional below-threshold rows do not move the cap boundary" \
-        "$(ledger_of "$d")" PASS 0
-
-    # J24 — a missing sentinel count cannot accrue an otherwise sufficient
-    # window of clean observations.
-    d="$TMP/j_e2e_missing_sentinel_count"
-    make_ranked_clusters "$TMP/j_missing_count.tsv" no
-    query_aware_cluster_stub "$TMP/j_missing_count.sh" "$TMP/j_missing_count.tsv" missing-count
-    for ((i = 1; i <= 8; i++)); do
-        run_probe "$d" "$TMP/j_missing_count.sh" "$hash_by_height" "$((NOW - i * 600))"
-    done
-    jcase "missing sentinel count cannot accrue PASS" \
-        "$(ledger_of "$d")" NO_EVIDENCE 1
-
-    # J25 — an unrepresentable count is treated as unknown, not a clean window.
-    d="$TMP/j_e2e_oversized_sentinel_count"
-    make_ranked_clusters "$TMP/j_oversized_count.tsv" no
-    query_aware_cluster_stub "$TMP/j_oversized_count.sh" "$TMP/j_oversized_count.tsv" oversized-count
-    for ((i = 1; i <= 8; i++)); do
-        run_probe "$d" "$TMP/j_oversized_count.sh" "$hash_by_height" "$((NOW - i * 600))"
-    done
-    jcase "out-of-range sentinel count cannot accrue PASS" \
-        "$(ledger_of "$d")" NO_EVIDENCE 1
-
-    # J26 — the valid one-witness sentinel permits grading, while the
-    # qualifying conflict retained at rank 12 makes real recorder samples
-    # disagree; this must not be hidden by the sentinel.
-    d="$TMP/j_e2e_retained_rival"
-    make_ranked_clusters_retained_rival "$TMP/j_retained_rival.tsv"
-    query_aware_cluster_stub "$TMP/j_retained_rival.sh" "$TMP/j_retained_rival.tsv"
-    for ((i = 1; i <= 8; i++)); do
-        run_probe "$d" "$TMP/j_retained_rival.sh" "$hash_by_height" "$((NOW - i * 600))"
-    done
-    L="$(ledger_of "$d")"
-    if [ "$(grep -c '"outcome":"agrees"' "$L")" -eq 8 ] &&
-       [ "$(grep -c '"contested_peers":4' "$L")" -eq 8 ]; then
-        ok "eight real recorder samples retain the rank-12 four-witness conflict"
-    else
-        cat "$L" >&2; bad "J26 retained-rival recorder samples lost contest evidence"
-    fi
-    jcase "retained rank-12 rival is DISAGREE through real recorder and judge" \
-        "$L" DISAGREE 1
-
-    # J14 — the same end-to-end path with an unusable source: the prober
-    # writes could-not-ask, the judge refuses. This is the pair the whole
-    # design rests on and it is asserted as a pair.
-    d="$TMP/j_e2e_cna"
-    for i in $(seq 1 8); do
-        run_probe "$d" "exit 1" "printf '{\"result\":\"$HASH_OURS\"}'" "$((NOW - i * 600))"
-    done
-    jcase "prober-written could-not-ask ledger is refused end to end" \
-        "$(ledger_of "$d")" NO_EVIDENCE 1
-}
-
 case "$ONLY" in
     recorder) recorder_cases ;;
-    judge)    judge_cases ;;
-    all)      recorder_cases; judge_cases ;;
+    all)      recorder_cases ;;
     *) echo "selftest: FAIL unknown --only '$ONLY'" >&2; exit 2 ;;
 esac
 

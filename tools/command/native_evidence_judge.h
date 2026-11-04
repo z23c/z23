@@ -66,6 +66,42 @@ struct zcl_stopwatch_judge_opts {
     int64_t now_unix;            /* 0 = wall clock */
 };
 
+/* The windowed tip-hash agreement judge over the off-host agreement ledger
+ * (tools/scripts/tip_agreement_probe.sh). Every knob below may only move in
+ * the direction that makes a PASS harder to earn: zcl_tip_judge_check
+ * refuses a looser value. Verdicts: PASS 0; DISAGREE, NO_EVIDENCE,
+ * THIN_EVIDENCE and MALFORMED 1; STALE 2. */
+#define ZCL_TIP_AGREEMENT_JUDGE_SCHEMA "zcl.tip_agreement_judge.v1"
+#define ZCL_TIP_DEF_WINDOW_HOURS 24
+#define ZCL_TIP_DEF_MAX_AGE_SECS 1800
+#define ZCL_TIP_DEF_MIN_AGREE 6
+#define ZCL_TIP_DEF_MAX_DISAGREE 0
+#define ZCL_TIP_DEF_MIN_SPAN_SECS 2700
+
+struct zcl_tip_judge_opts {
+    const char *file;         /* agreement-ledger.jsonl */
+    int64_t window_hours;     /* graded window [now - hours*3600, now] */
+    int64_t max_age_secs;     /* newest sample older than this is STALE */
+    int64_t min_agree;        /* clean agreeing samples required */
+    int64_t min_distinct_peers; /* control: distinct remote witnesses */
+    int64_t max_disagree;     /* disagreeing or contested samples tolerated */
+    int64_t min_span_secs;    /* wall-clock span the clean samples must cover */
+    int64_t now_unix;         /* meaningful only when now_set */
+    bool now_set;             /* false = wall clock */
+};
+
+/* The shipped contract, with ZCL_PARITY_JUDGE_NOW honoured as the clock. On
+ * a malformed variable, false with the reason in `err`. */
+bool zcl_tip_judge_defaults(struct zcl_tip_judge_opts *opts, char *err,
+                            size_t err_cap);
+/* False with the reason in `err` when any knob is negative, loosens the
+ * shipped contract or lowers the distinct-peer control. */
+bool zcl_tip_judge_check(const struct zcl_tip_judge_opts *opts, char *err,
+                         size_t err_cap);
+/* False only for a missing argument; every shortfall is a verdict. */
+bool zcl_tip_agreement_judge(const struct zcl_tip_judge_opts *opts,
+                             struct zcl_judge_result *out);
+
 /* False for invalid soak options or when the ledger cannot be held in memory; every evidence
  * shortfall is a verdict, never a failure. */
 bool zcl_soak_judge(const struct zcl_soak_judge_opts *opts,
@@ -92,6 +128,8 @@ bool zcl_stopwatch_judge_defaults(struct zcl_stopwatch_judge_opts *opts,
 void zcl_native_handle_ops_soak_judge(const struct zcl_command_request *request,
                                       struct zcl_command_reply *reply);
 void zcl_native_handle_ops_stopwatch_judge(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply);
+void zcl_native_handle_ops_tip_agreement_judge(
     const struct zcl_command_request *request, struct zcl_command_reply *reply);
 
 #endif /* ZCL_NATIVE_EVIDENCE_JUDGE_H */

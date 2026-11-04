@@ -17,7 +17,7 @@ Description=Z23 Off-Host Tip-Hash Agreement Timer — every 10 minutes
 # fires one catch-up run after downtime so an outage shows up as one bounded
 # gap in the ledger rather than a silent stretch of nothing.
 #
-# The gap is not silent either way: tools/scripts/tip_agreement_judge.sh
+# The gap is not silent either way: `z23 ops tip-agreement judge`
 # returns STALE (never a stale PASS) once the newest sample is older than 30
 # minutes, which is three missed runs.
 OnCalendar=*-*-* *:0/10:00

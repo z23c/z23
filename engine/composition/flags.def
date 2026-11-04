@@ -1730,7 +1730,7 @@ Z23_FLAG("ZCL_PARITY_HASH_CMD", "env_build", "-", "-",
 Z23_FLAG("ZCL_PARITY_HEIGHT", "env_build", "-", "-",
           "undocumented; first use tools/scripts/test_tip_agreement_evidence.sh:auto")
 Z23_FLAG("ZCL_PARITY_JUDGE_NOW", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/tip_agreement_judge.sh:auto")
+          "undocumented; first use tools/command/native_tip_agreement_judge.c:auto")
 Z23_FLAG("ZCL_PARITY_LEDGER_DIR", "env_build", "-", "-",
           "first use tools/scripts/tip_agreement_probe.sh:auto; documented in the generated capability inventory (make docs-capability-inventory; z23 code have <name>)")
 Z23_FLAG("ZCL_PARITY_MIN_DISTINCT_PEERS", "env_build", "2", "-",

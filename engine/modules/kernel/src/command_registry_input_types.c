@@ -200,6 +200,12 @@ static const struct cr_int_bound *cr_find_int_bound(const char *key)
         { "raw_bytes", 1, 1024 },
         { "slot", 1, 100 },
         { "window_hours", 1, 168 },
+        /* ops.host.slo.tip_agreement: the handler owns the tighten-only contract. */
+        { "max_age_secs", 0, INT64_MAX },
+        { "min_agree", 0, INT64_MAX },
+        { "min_distinct_peers", 0, INT64_MAX },
+        { "max_disagree", 0, INT64_MAX },
+        { "min_span_secs", 0, INT64_MAX },
         /* core.mining.regtest-mine: the handler reads a JSON integer in 1..101. */
         { "blocks", 1, 101 },
         /* dev.factory report window in hours. */

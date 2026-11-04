@@ -22,7 +22,7 @@
  * ══ REPORTER ONLY — the load-bearing contract ══
  * This module NEVER grades. It cannot mint an agreement claim, cannot clear
  * one, is not wired into the architecture score, the MVP scoreboard, the
- * health rollup, or any Condition/blocker. tools/scripts/tip_agreement_judge.sh
+ * health rollup, or any Condition/blocker. `z23 ops tip-agreement judge`
  * is the judge; this describes what the judge will read. Two reasons, both
  * learned the hard way here:
  *   1. Cloning. The ledger file is the ONE authority. Latching a copy of its
@@ -111,8 +111,8 @@
 
 /* THE FLOOR on distinct remote hosts behind the modal hash, below which this
  * build will not grade a sample independent no matter what the row says about
- * itself. Same number as DEF_MIN_DISTINCT_PEERS in
- * tools/scripts/tip_agreement_judge.sh, and for the same stated reason: one
+ * itself. The tip-agreement judge (tools/command/native_tip_agreement_judge.c)
+ * uses this very constant as its control, for the same stated reason: one
  * peer must never be able to manufacture agreement. May be raised, never
  * lowered. */
 #define TIP_AGREEMENT_MIN_DISTINCT_PEERS 2

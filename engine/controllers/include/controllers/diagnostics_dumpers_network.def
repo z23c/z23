@@ -150,7 +150,7 @@
                "Independence is answered BEFORE any verdict: too few distinct "
                "remote hosts reports insufficient_independent_peers, never "
                "agreement. It grades nothing — "
-               "tools/scripts/tip_agreement_judge.sh is the judge",
+               "`z23 ops tip-agreement judge` is the judge",
                "chain_or_network", "service",
                "engine/services/src/tip_agreement_watch.c",
                "filesystem_snapshot", "bounded_lookup",

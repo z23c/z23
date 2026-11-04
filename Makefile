@@ -12706,7 +12706,7 @@ slo-probe-selftest:
 # genuinely REMOTE peers, rather than a height number against the sibling
 # zclassicd on this same box. Recorder: tools/scripts/tip_agreement_probe.sh
 # (external process, ledger under ~/.local/state). Judge:
-# tools/scripts/tip_agreement_judge.sh (windowed, fails closed).
+# `z23 ops tip-agreement judge` (windowed, fails closed).
 install-tip-agreement:
 	@install -d "$(HOME)/.config/systemd/user"
 	@set -eu; tmp="$$(mktemp "$(HOME)/.config/systemd/user/z23-tip-agreement.service.tmp.XXXXXX")"; \
@@ -12720,13 +12720,16 @@ install-tip-agreement:
 	@echo "ledger: owner-private state recorded"
 	@echo "verdict: make tip-agreement-status"
 
-tip-agreement-status:
+tip-agreement-status: $(Z23_DEV_BIN) $(JSONQ_BIN)
 	@systemctl --user list-timers z23-tip-agreement.timer --no-pager 2>/dev/null || true
-	@./tools/scripts/tip_agreement_judge.sh "$(HOME)/.local/state/zclassic23-parity/agreement-ledger.jsonl" || true
+	@bash -c 'res=$$($(Z23_DEV_BIN) ops tip-agreement judge --format=json --ledger="$(HOME)/.local/state/zclassic23-parity/agreement-ledger.jsonl" 2>/dev/null); \
+	 line=$$(printf "%s" "$$res" | $(JSONQ_BIN) get data.verdict_line); \
+	 if [ -n "$$line" ]; then echo "$$line"; else echo "tip-agreement-judge: no verdict from z23 ops tip-agreement judge"; fi' || true
 
-# tip-agreement-selftest: hermetic regression guard for the recorder AND the
-# judge. Fixture node readers, no live node, no network. Gates on the PASS
-# token, not on an exit code alone.
+# tip-agreement-selftest: hermetic regression guard for the recorder (shell
+# harness) AND the judge (the tip_agreement_judge test group). Fixture node
+# readers, no live node, no network. The recorder gates on the PASS token, not
+# on an exit code alone.
 tip-agreement-selftest:
 	@bash -c 'set -uo pipefail; \
 	 set +e; out=$$(bash tools/scripts/test_tip_agreement_evidence.sh 2>&1); rc=$$?; set -e; \
@@ -12736,6 +12739,7 @@ tip-agreement-selftest:
 	     exit 1; \
 	 fi; \
 	 echo "tip-agreement-selftest: PASS"'
+	@$(MAKE) -s t-fast-exact ONLY=tip_agreement_judge
 
 # evidence-selftest: hermetic regression guard for the three evidence
 # dimensions that were absent until the ledgers below existed —

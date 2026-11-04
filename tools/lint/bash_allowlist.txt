@@ -286,7 +286,6 @@ tools/scripts/test_tip_agreement_evidence.sh
 tools/scripts/test_tmp_clean.sh
 tools/scripts/test_vendor_provenance.sh
 tools/scripts/timings.sh
-tools/scripts/tip_agreement_judge.sh
 tools/scripts/tip_agreement_probe.sh
 tools/scripts/tor_archives_ready.sh
 tools/scripts/tor_provenance_lib.sh

@@ -1188,6 +1188,33 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_stopwatch_judge)
 
+ZCL_COMMAND_READY_READ(
+    "ops.host.slo.tip_agreement", "ops.host.slo", "ops.tip-agreement.judge",
+    "Judge the windowed off-host tip-hash agreement ledger",
+    "Reads the agreement ledger the off-host recorder appends to and answers "
+    "PASS, DISAGREE, NO_EVIDENCE, THIN_EVIDENCE, MALFORMED or STALE. Every "
+    "row in [now - window_hours*3600, now] is graded, not only the last one. "
+    "DISAGREE is checked before the evidence-volume rules, so a real "
+    "divergence is never masked by a thin window. Only clean agreeing samples "
+    "count, each backed by min_distinct_peers distinct remote witnesses; a "
+    "could-not-ask window is NO_EVIDENCE, and a dead recorder is STALE. Every "
+    "knob may only tighten the shipped contract; a looser one is refused. "
+    "ledger is required; now overrides ZCL_PARITY_JUDGE_NOW. verdict and "
+    "judge_rc (0, 1 or 2) carry the result. It reads the ledger and writes "
+    "nothing.",
+    8192,
+    "tip,agreement,judge,window,ledger,remote,peers,fork",
+    "zcl.ops_tip_agreement_judge.input.v1", "zcl.tip_agreement_judge.v1",
+    "ledger,window_hours,max_age_secs,min_agree,min_distinct_peers,"
+    "max_disagree,min_span_secs,now", "ledger",
+    "z23 ops tip-agreement judge --ledger=<agreement-ledger.jsonl>",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_tip_agreement_judge)
+
 ZCL_COMMAND_BRANCH("ops.mesh.device", "ops.mesh", "Offline owner device identity and grants",
                    ZCL_COMMAND_LAYER_OPS)
 ZCL_COMMAND_READY_COMMAND(
