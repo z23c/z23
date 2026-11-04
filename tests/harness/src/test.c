@@ -2226,6 +2226,7 @@ static void run_full_suite_late_and_specs(int *failures)
     { extern int test_code_capsule(void); *failures += test_code_capsule(); }
     { extern int test_code_packet(void); *failures += test_code_packet(); }
     { extern int test_code_impact(void); *failures += test_code_impact(); }
+    { extern int test_code_count(void); *failures += test_code_count(); }
     { extern int test_code_ontology(void); *failures += test_code_ontology(); }
     { extern int test_code_semantic_candidate(void);
       *failures += test_code_semantic_candidate(); }

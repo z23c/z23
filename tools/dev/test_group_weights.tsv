@@ -66,6 +66,7 @@ test_source_bundle_fetch	27
 test_source_bundle_publish	16
 test_rom_journal_resume	5
 test_code_impact	16
+test_code_count	10
 test_code_emitter	6
 test_fleet_board	159
 test_fleet_steer	64

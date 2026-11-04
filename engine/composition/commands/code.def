@@ -623,6 +623,32 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_corpus)
 
+ZCL_COMMAND_READY_READ(
+    "code.count", "code", "",
+    "Count the C23 lines of one commit",
+    "The exact number of .c and .h lines in one committed tree: commit sha, "
+    "tree sha, files, lines, and the split between tests/ and everything "
+    "else. It reads git objects (ls-tree blob ids and sizes), never the "
+    "working tree, so a stale checkout cannot change the answer. Line "
+    "counts are cached per blob id in .codeindex/code_count.v1, so a later "
+    "commit counts only blobs it has not seen. --at=REV (default HEAD), "
+    "--path=PREFIX (default the root), --lang=c, --exclude=PREFIX (default "
+    "vendor; none disables). Counting is `git grep -c ''`: symlinks are not "
+    "files. `code corpus` walks the working tree with its own roots and "
+    "gives a different, non-commit-addressed figure.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "code,count,lines,loc,c23,commit,exact,tree,blob",
+    "zcl.code_count_input.v1",
+    "zcl.code_count.v1", "at,path,lang,exclude", "",
+    "z23 code count --at=origin/main",
+    ZCL_COMMAND_LAYER_CODE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_count)
+
 /* `code.general` carries the bare `general` alias, so `z23 general core/modules/net`
  * works without a fourth word. It is a code.* child and NOT a new root: the
  * registry has exactly twelve roots and the root menu has a byte budget, both

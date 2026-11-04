@@ -166,6 +166,9 @@ void zcl_native_handle_code_corpus(const struct zcl_command_request *request,
     (void)json_push_kv_int(&scope, "inventory_test_files",
                            (int64_t)r.inventory_test_files);
     (void)json_push_kv_str(&scope, "roots", corpus_source_roots + 1);
+    (void)json_push_kv_str(&scope, "exact_count",
+                           "a working-tree walk, not commit-addressed; "
+                           "`z23 code count --at=REV` is the exact count");
     (void)json_push_kv_str(&scope, "excluded",
                            "vendor, build output, fixtures, scratch trees, and "
                            "top-level directories the capability inventory does "
