@@ -38,6 +38,8 @@ static _Atomic int g_test_batch_size = 0;
 static _Atomic int g_test_bulk_threshold = 0;
 static _Atomic int g_test_batch_max_secs = -1;
 static _Atomic int g_test_height_delay_ms = 0;
+enum { NODE_DB_CATCHUP_TEST_HOLD_MAX_MS = 30000 };
+static _Atomic bool g_test_hold_walk = false;
 static _Atomic bool g_test_fake_clock = false;
 static _Atomic int64_t g_test_clock_ms = 0;
 static _Atomic int g_timed_row_commits = 0;
@@ -128,6 +130,18 @@ void node_db_catchup_lock_guard_yield_to_writers(struct db_service *svc,
             (void)(drain_queue ? db_service_run_pending(svc)
                                : db_service_run_pending_bulk_safe(svc));
     }
+#ifdef ZCL_TESTING
+    /* Test-only hold: keep the walk open, serving the same queue, until the
+     * test releases it; the bound keeps a lost release from wedging a run. */
+    for (int i = 0; i < NODE_DB_CATCHUP_TEST_HOLD_MAX_MS / 5 &&
+                    atomic_load(&g_test_hold_walk) && !g_shutdown_requested;
+         i++) {
+        if (svc)
+            (void)(drain_queue ? db_service_run_pending(svc)
+                               : db_service_run_pending_bulk_safe(svc));
+        platform_sleep_ms(5);
+    }
+#endif
 }
 
 void node_db_catchup_lock_guard_note_batch_commit(void)
@@ -276,6 +290,11 @@ void node_db_catchup_lock_guard_test_set_height_delay_ms(int ms)
     atomic_store(&g_test_height_delay_ms, ms);
 }
 
+void node_db_catchup_lock_guard_test_hold_walk(bool on)
+{
+    atomic_store(&g_test_hold_walk, on);
+}
+
 int node_db_catchup_lock_guard_test_yield_sleeps(void)
 {
     return atomic_load(&g_yield_sleeps);
@@ -365,6 +384,7 @@ void node_db_catchup_lock_guard_test_reset(void)
     atomic_store(&g_test_bulk_threshold, 0);
     atomic_store(&g_test_batch_max_secs, -1);
     atomic_store(&g_test_height_delay_ms, 0);
+    atomic_store(&g_test_hold_walk, false);
     atomic_store(&g_test_fake_clock, false);
     atomic_store(&g_test_clock_ms, 0);
     atomic_store(&g_timed_row_commits, 0);

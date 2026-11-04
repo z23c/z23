@@ -1085,6 +1085,10 @@ static bool ndc_bulk_plain_job(struct node_db *ndb, void *ctx)
     return true;
 }
 
+/* The walk is held open (30 s bound in the seam), so wait for the job to run
+ * rather than for a wall-clock window the loaded walk can miss. */
+enum { NDC_TIP_WAIT_POLLS = 30000 / 5 };
+
 /* Queue the production tip witness job and record whether it started while
  * the walk was still running. */
 static void ndc_bulk_queue_tip_job(struct ndc_bulk *b)
@@ -1102,12 +1106,14 @@ static void ndc_bulk_queue_tip_job(struct ndc_bulk *b)
     int runs = node_db_sync_tip_witness_test_job_runs();
     bool queued = node_db_sync_advance_tip_witnesses_async(b->st.ndb, &blk,
                                                            &tipbi, NULL);
-    for (int i = 0; i < 100 && queued &&
+    for (int i = 0; i < NDC_TIP_WAIT_POLLS && queued &&
          node_db_sync_tip_witness_test_job_runs() == runs; i++)
         platform_sleep_ms(5);
     atomic_store(&b->tip_job_during_walk,
                  queued && node_db_sync_tip_witness_test_job_runs() > runs &&
                  !atomic_load(&b->st.walk_done));
+    /* The walk was held open at its batch yield until now. */
+    node_db_catchup_lock_guard_test_hold_walk(false);
 }
 
 static void *ndc_bulk_reducer_thread(void *arg)
@@ -1146,6 +1152,8 @@ static void ndc_bulk_run(struct ndc_bulk *b, struct db_service *svc,
     node_db_catchup_lock_guard_test_set_bulk_threshold(2);
     node_db_catchup_lock_guard_test_set_height_delay_ms(
         NDC_YIELD_HEIGHT_DELAY_MS);
+    /* Held at the walk's batch yield until the tip job is queued and seen. */
+    node_db_catchup_lock_guard_test_hold_walk(true);
     pthread_t walk, reducer;
     bool w = pthread_create(&walk, NULL, ndc_starve_walk_thread, &b->st) == 0;
     for (int i = 0; i < 200 && !node_db_catchup_service_active(); i++)

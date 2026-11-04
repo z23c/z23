@@ -177,6 +177,9 @@ void node_db_catchup_lock_guard_test_set_bulk_threshold(int blocks);
 void node_db_catchup_lock_guard_test_set_batch_max_secs(int secs);
 /* Per-height walk delay so a short fixture behaves like a long walk. */
 void node_db_catchup_lock_guard_test_set_height_delay_ms(int ms);
+/* While on, the walk stays open at its next batch yield, serving queued
+ * writers, until released (or 30 s pass). Reset clears it. */
+void node_db_catchup_lock_guard_test_hold_walk(bool on);
 /* Yield sleeps taken since the last reset. */
 int node_db_catchup_lock_guard_test_yield_sleeps(void);
 /* Substitute the cap clock with one only the height delay advances. */
