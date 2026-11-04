@@ -4,7 +4,7 @@
 
 After a fleet code is decoded, Scan shows `Code scanned. Checking…` while its
 preview runs. Cancel returns from Scan without waiting for that preview. A
-cancelled active scan discards its own late fleet review and result; it does
+cancelled current or just-completed scan discards its own late fleet review and result; it does
 not cancel a native command already in progress. The next action resets the
 scan state.
 

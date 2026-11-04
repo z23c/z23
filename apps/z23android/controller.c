@@ -1249,14 +1249,16 @@ void zapp_controller_detach(void)
     if (current) { pthread_mutex_lock(&current->lock); current->notify = NULL; pthread_mutex_unlock(&current->lock); }
     zapp_camera_stop(); pthread_mutex_unlock(&startup_lock);
 }
+/* UI dismissal applies to the current or just-completed scan until another action is queued. */
 void zapp_controller_cancel_scan(void)
 {
     pthread_mutex_lock(&startup_lock);
     struct controller *c = current;
     if (c) {
         pthread_mutex_lock(&c->lock);
-        if (c->view.scanning && !strcmp(c->action, "scan")) {
+        if (!strcmp(c->action, "scan") && (c->view.scanning || c->scan_fleet_owned)) {
             c->scan_cancelled = true;
+            c->view.result[0] = 0;
             c->view.scan_checking = false;
             if (c->scan_fleet_owned) {
                 c->view.fleet_token[0] = 0;
