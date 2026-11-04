@@ -1032,17 +1032,6 @@ static bool dlx_evidence_case_run(const struct dlx_evidence_case *k)
 int test_dev_land_proof_evidence_test(void)
 {
     int failures = 0;
-    TEST("land: compiler commands do not hide a later failing gate") {
-        char detail[256];
-        zcl_dev_land_test_first_actionable(
-            "zcc -c gate_no_wallclock_assertion.c -o gate_no_wallclock_assertion.o\n"
-            "FAIL check-kpi-floor\n", detail, sizeof(detail));
-        ASSERT_STR_EQ(detail, "FAIL check-kpi-floor");
-        zcl_dev_land_test_first_actionable("widget.c:12:5: error: bad type\n",
-                                          detail, sizeof(detail));
-        ASSERT_STR_EQ(detail, "widget.c:12:5: error: bad type");
-        PASS();
-    }
     TEST("land: a failed test group names its FAIL line in the outcome") {
         const struct dlx_evidence_case k = {
             .tag = "evidence_test",
@@ -1068,6 +1057,17 @@ _test_next:;
 int test_dev_land_proof_evidence_compile(void)
 {
     int failures = 0;
+    TEST("land: compiler commands do not hide a later failing gate") {
+        char detail[256];
+        zcl_dev_land_test_first_actionable(
+            "zcc -c gate_no_wallclock_assertion.c -o gate_no_wallclock_assertion.o\n"
+            "FAIL check-kpi-floor\n", detail, sizeof(detail));
+        ASSERT_STR_EQ(detail, "FAIL check-kpi-floor");
+        zcl_dev_land_test_first_actionable("widget.c:12:5: error: bad type\n",
+                                          detail, sizeof(detail));
+        ASSERT_STR_EQ(detail, "widget.c:12:5: error: bad type");
+        PASS();
+    }
     TEST("land: a failed build names its first compiler error, relative") {
         const struct dlx_evidence_case k = {
             .tag = "evidence_compile",

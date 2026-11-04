@@ -13955,6 +13955,14 @@ bool zcl_dev_proof_test_settle_child(const char *repo_root, const char *local,
         !proof_attempt_paths_prepare(&pair, &attempt) ||
         !proof_lease_publish(&attempt))
         return false;
+    char request[PATH_MAX], body[320];
+    size_t request_size;
+    if (snprintf(request, sizeof(request), "%s/request", attempt.attempt) >= (int)sizeof(request) ||
+        !proof_request_body(local, base, body, &request_size) ||
+        !write_atomic(request, body, request_size, 0600)) {
+        proof_lease_release(&attempt);
+        return false;
+    }
     why[0] = '\0';
     struct zcl_dev_proof_dimension dim = {0};
     dim.selected = 1;
