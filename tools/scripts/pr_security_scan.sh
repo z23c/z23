@@ -129,12 +129,15 @@ if grep -qE "$DANGER" <<<"$ADDED_SCAN"; then
 fi
 
 # 5) Static security lint gates against the resulting tree.
+# A missing z23-lint is a failure, not a skip: the deleted check_*.sh wrappers
+# exec'd it and failed when it was absent, and a security gate that cannot run
+# must never read as a clean scan.
 GATE_FAIL=""
 for g in check-consensus-parity check-no-secret-printf; do
-    if [ -x build/bin/z23-lint ]; then
-        if ! out="$(./build/bin/z23-lint "$g" 2>&1)"; then
-            GATE_FAIL+="$g"$'\n'"$out"$'\n'
-        fi
+    if [ ! -x build/bin/z23-lint ]; then
+        GATE_FAIL+="$g: build/bin/z23-lint is not built, so the gate could not run (make build/bin/z23-lint, then rescan)"$'\n'
+    elif ! out="$(./build/bin/z23-lint "$g" 2>&1)"; then
+        GATE_FAIL+="$g"$'\n'"$out"$'\n'
     fi
 done
 if [ -n "$GATE_FAIL" ]; then
