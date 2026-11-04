@@ -39,6 +39,7 @@
 #include "session/fleet_board_proto.h"
 #include "sha3/sha3.h"
 
+#include <errno.h>
 #include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -495,6 +496,16 @@ static bool in_lane_valid(const char *lane)
  * other host holds the commit where this leaf cannot reach: that is a typed
  * operator_step (the bridge reached it over ssh, which this leaf never does),
  * and the swarm form below is the way to avoid the step. */
+static void in_lane_remote(struct in_post *p)
+{
+    in_refuse(p, "needs_operator_step");
+    (void)snprintf(p->step, sizeof(p->step),
+                   "the lane is not on this host: on the poster's host run `git bundle "
+                   "create B.bundle origin/main..%.12s` and `z23 fleet bundle offer "
+                   "--file=B.bundle`, then re-post READY with root=, sha256= and size=",
+                   p->commit);
+}
+
 static void in_import_lane(struct in_ctx *x, struct in_post *p, int i)
 {
     char common[IN_PATH], alt[IN_PATH + 64], obj[IN_PATH + 16], ref[48];
@@ -504,8 +515,18 @@ static void in_import_lane(struct in_ctx *x, struct in_post *p, int i)
     char spec[64];
     const char *upd[] = {"update-ref", ref, p->commit, NULL};
     FILE *f;
-    if (!in_lane_syntax(p->lane) ||
-        (access(p->lane, F_OK) == 0 && !in_lane_valid(p->lane))) {
+    if (!in_lane_syntax(p->lane)) {
+        in_refuse(p, "invalid_lane");
+        return;
+    }
+    if (access(p->lane, F_OK) != 0) {
+        if (errno == ENOENT)
+            in_lane_remote(p);
+        else
+            in_refuse(p, "invalid_lane");
+        return;
+    }
+    if (!in_lane_valid(p->lane)) {
         in_refuse(p, "invalid_lane");
         return;
     }
@@ -514,12 +535,7 @@ static void in_import_lane(struct in_ctx *x, struct in_post *p, int i)
     (void)snprintf(ref, sizeof(ref), "refs/intake/%d", i);
     if (!db_git_line(p->lane, cd, common, sizeof(common)) ||
         snprintf(obj, sizeof(obj), "%s/objects", common) >= (int)sizeof(obj)) {
-        in_refuse(p, "needs_operator_step");
-        (void)snprintf(p->step, sizeof(p->step),
-                       "the lane is not on this host: on the poster's host run `git bundle "
-                       "create B.bundle origin/main..%.12s` and `z23 fleet bundle offer "
-                       "--file=B.bundle`, then re-post READY with root=, sha256= and size=",
-                       p->commit);
+        in_refuse(p, "invalid_lane");
         return;
     }
     (void)snprintf(alt, sizeof(alt), "%s/objects/info/alternates", x->scratch);
