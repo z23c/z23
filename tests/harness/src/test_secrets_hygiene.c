@@ -36,7 +36,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #if !defined(_WIN32)
+#include <signal.h>
 #include <sys/wait.h>
+#include "util/spawn.h"
 #endif
 #include <unistd.h>
 #include "util/safe_alloc.h"
@@ -355,6 +357,63 @@ static int test_recover_tool_path_documented(void)
 
 /* ── Entry point ─────────────────────────────────────────── */
 
+#if !defined(_WIN32)
+static int test_pr_scan_diff_case(const char *label, const char *base,
+                                 const char *head, bool valid)
+{
+    int failures = 0;
+    char output[8192];
+    struct sigaction saved, normal = { .sa_handler = SIG_DFL };
+    if (sigemptyset(&normal.sa_mask) != 0 ||
+        sigaction(SIGCHLD, &normal, &saved) != 0) {
+        perror("PR scan child status setup");
+        return 1;
+    }
+    const char *argv[] = { "bash", "-p", "tools/scripts/pr_security_scan.sh",
+                           base, head, NULL };
+    struct zcl_spawn_binary_observation observed = {0};
+    struct zcl_result capture = zcl_spawn_capture_binary_merged(
+        argv, output, sizeof(output) - 1, 10000, &observed);
+    if (sigaction(SIGCHLD, &saved, NULL) != 0) {
+        perror("PR scan child status restore");
+        return 1;
+    }
+    output[observed.output_len] = '\0';
+    TEST(label) {
+        ASSERT(observed.exit_observed && observed.eof);
+        ASSERT(!observed.timed_out && !observed.overflow);
+        ASSERT(capture.ok == (observed.exit_code == 0));
+        if (valid) {
+            ASSERT_EQ(observed.exit_code, 0);
+            ASSERT(strstr(output, "empty diff") != NULL);
+        } else {
+            if (observed.exit_code == 0)
+                printf("\nUnexpected successful scan: %s\n", output);
+            ASSERT_EQ(observed.exit_code, 2);
+            ASSERT(strstr(output, "cannot inspect requested diff") != NULL);
+            ASSERT(strstr(output, "nothing to review") == NULL);
+            ASSERT(strstr(output, "RESULT: CLEAN") == NULL);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_pr_scan_diff_failures(void)
+{
+    int failures = 0;
+    failures += test_pr_scan_diff_case("PR scan rejects a missing base",
+        "refs/z23-tests/missing-pr-scan-base", "HEAD", false);
+    failures += test_pr_scan_diff_case("PR scan rejects a missing head",
+        "HEAD", "refs/z23-tests/missing-pr-scan-head", false);
+    failures += test_pr_scan_diff_case("PR scan rejects a non-commit base",
+        "HEAD^{tree}", "HEAD", false);
+    failures += test_pr_scan_diff_case("PR scan preserves a valid empty diff",
+        "HEAD", "HEAD", true);
+    return failures;
+}
+#endif
+
 int test_secrets_hygiene(void);
 
 int test_secrets_hygiene(void)
@@ -368,6 +427,9 @@ int test_secrets_hygiene(void)
     failures += test_native_registry_clean();
     failures += test_check_no_secret_printf_script();
     failures += test_recover_tool_path_documented();
+#if !defined(_WIN32)
+    failures += test_pr_scan_diff_failures();
+#endif
 
     return failures;
 }

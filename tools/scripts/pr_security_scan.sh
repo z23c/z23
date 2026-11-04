@@ -19,7 +19,7 @@
 #   tools/scripts/pr_security_scan.sh --pr <N>        # fetch PR N (needs gh)
 #   tools/scripts/pr_security_scan.sh ... --fix       # apply safe auto-fixes
 #
-# Exit: 0 = clean (no HIGH findings), 1 = HIGH findings (block the PR).
+# Exit: 0 = clean (no HIGH findings), 1 = HIGH findings, 2 = diff unavailable.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -49,7 +49,11 @@ BASE="${BASE:-origin/main}"
 HEAD="${HEAD:-HEAD}"
 
 # Merge-base diff of ADDED lines only (new content the PR introduces).
-DIFF="$(git diff "$BASE...$HEAD" 2>/dev/null)"
+if ! DIFF="$(git diff "$BASE...$HEAD")"; then
+    echo "pr_security_scan: cannot inspect requested diff: $BASE...$HEAD" >&2
+    echo "RESULT: BLOCK — diff acquisition failed; no security verdict available." >&2
+    exit 2
+fi
 if [ -z "$DIFF" ]; then
     echo "pr_security_scan: empty diff for $BASE...$HEAD — nothing to review"
     exit 0
