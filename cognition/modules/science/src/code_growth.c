@@ -129,7 +129,7 @@ static void growth_contract_digest(uint8_t out[32])
 {
     static const char contract[] =
         "z23.code-growth.v1|first-parent|reverse|no-renames|"
-        "diff-merges=first-parent|root|numstat|utc-day|c-h|"
+        "diff-merges=first-parent|root|numstat-c-quoted-v2|utc-day|c-h|"
         "test-path-v1:tests/harness,lib/test,package-test-segments,test_";
     struct sha3_256_ctx digest;
     sha3_256_init(&digest);
@@ -624,6 +624,45 @@ static const char *growth_add_numstat(struct science_code_growth_day *day,
     return NULL;
 }
 
+/* Git's numstat quotes path bytes with C escapes unless -z is used. */
+static int growth_escape_byte(const char **cursor, const char *end)
+{
+    const char *p = *cursor;
+    if (p == end) return -1;
+    const char *keys = "abtnvfr\"\\";
+    const char *values = "\a\b\t\n\v\f\r\"\\";
+    const char *key = memchr(keys, *p, strlen(keys));
+    if (key) {
+        *cursor = p + 1;
+        return values[key - keys];
+    }
+    if (end - p < 3 || p[0] < '0' || p[0] > '3' ||
+        p[1] < '0' || p[1] > '7' || p[2] < '0' || p[2] > '7')
+        return -1;
+    *cursor = p + 3;
+    return (p[0] - '0') * 64 + (p[1] - '0') * 8 + p[2] - '0';
+}
+
+static bool growth_decode_path(const char *p, const char *end, char *out,
+                               size_t cap)
+{
+    if (p == end) return false;
+    bool quoted = *p == '"';
+    if (quoted) {
+        if (++p == end || *--end != '"') return false;
+    }
+    size_t used = 0;
+    while (p < end) {
+        int byte = (unsigned char)*p++;
+        if (quoted && byte == '"') return false;
+        if (quoted && byte == '\\') byte = growth_escape_byte(&p, end);
+        if (byte <= 0 || used + 1 >= cap) return false;
+        out[used++] = (char)byte;
+    }
+    out[used] = '\0';
+    return used != 0;
+}
+
 static const char *growth_parse_numstat_line(
     const char *at, const char *line_end, struct science_code_growth_day *current)
 {
@@ -634,11 +673,8 @@ static const char *growth_parse_numstat_line(
     const char *path = second ? second + 1 : NULL;
     if (!first || !second) return "Git numstat row is malformed";
     char bounded_path[4096];
-    size_t path_len = (size_t)(line_end - path);
-    if (path_len >= sizeof(bounded_path))
-        return "Git path exceeds the bounded path size";
-    memcpy(bounded_path, path, path_len);
-    bounded_path[path_len] = '\0';
+    if (!growth_decode_path(path, line_end, bounded_path, sizeof bounded_path))
+        return "Git path is malformed or exceeds the bounded path size";
     if (!growth_source_path(bounded_path)) return NULL;
     return growth_add_numstat(current, at, first, second, bounded_path);
 }

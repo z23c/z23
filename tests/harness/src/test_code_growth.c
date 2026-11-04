@@ -295,6 +295,15 @@ static int growth_check_parse_refusals(
     size_t error_cap)
 {
     int failures = 0;
+    static const char quoted[] =
+        "@@0000000000000000000000000000000000000001\t0\n"
+        "1\t0\t\"engine/caf\\303\\251.c\"\n"
+        "2\t0\t\"packages/caf\\303\\251/tests/test_\\tcase.c\"\n";
+    GROWTH_CHECK("Git-quoted production and test paths keep their line counts",
+                 science_code_growth_parse(quoted, sizeof(quoted) - 1u, history,
+                                           error, error_cap) &&
+                 history->non_test_lines == 1u && history->test_lines == 2u);
+
     static const char underflow[] =
         "@@0000000000000000000000000000000000000001\t0\n"
         "0\t1\tlib/demo/src/a.c\n";
