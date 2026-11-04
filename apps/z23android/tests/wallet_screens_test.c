@@ -1080,6 +1080,33 @@ static void test_initial_retry_busy(void)
     wallet_screens_close();
 }
 
+static void test_empty_success_retry(bool async)
+{
+    start(async);
+    fake.summary = "";
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    if (async) wait_for(funds_commands_done);
+    CHECK(item_is("Loading…") && !has("Balance unknown") && !has("0 ZCL"));
+    fake.summary = SUMMARY_SEND_EL("true", "true", "0", "0.00000000", "0", "0.00000000", "0", "0.00000000", "true", "");
+    fake.now += WALLET_INITIAL_RETRY_MS;
+    wallet_screens_tick();
+    if (async) wait_for(balance_zero);
+    CHECK(count_ops("summary") == 2 && item_is("0 ZCL"));
+    wallet_screens_close();
+
+    if (async) return;
+    start(false);
+    fake.summary = "";
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    CHECK(item_is("Loading…"));
+    for (int i = 0; i < 2; ++i) {
+        fake.now += WALLET_INITIAL_RETRY_MS;
+        wallet_screens_tick();
+    }
+    CHECK(count_ops("summary") == 3 && has("Balance unknown"));
+    wallet_screens_close();
+}
+
 static void test_initial_retry_reveal(void)
 {
     start(false);
@@ -2383,6 +2410,8 @@ int main(int argc, char **argv)
     test_new_wallet_unknown();
     test_initial_summary_retry();
     test_initial_retry_busy();
+    test_empty_success_retry(false);
+    test_empty_success_retry(true);
     test_initial_retry_reveal();
     test_initial_silent_then_retry();
     test_make_private_offer();

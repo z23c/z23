@@ -1038,7 +1038,7 @@ static void run_job(const struct job *j)
     r.ok = out && j->env.run && j->env.run(j->env.ctx, j->op, j->arg, out, OUT_CAP);
     r.missing = out && !r.ok && strstr(out, "UNKNOWN_COMMAND");
     r.silent = out && !r.ok && (strstr(out, "NODE_UNAVAILABLE") || strstr(out, "The command timed out."));
-    r.received = out && out[0];
+    r.received = r.ok || (out && out[0]);
     r.json = json_start(out ? out : "");
     finish(j, &r);
     if (out) memory_cleanse(out, OUT_CAP);
