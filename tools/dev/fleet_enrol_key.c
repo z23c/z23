@@ -53,6 +53,22 @@ bool fleet_enrol_state_path(const char *leaf, char *out, size_t cap)
     return n > 0 && (size_t)n < cap;
 }
 
+bool fleet_enrol_state_path_existing(const char *leaf, char *out, size_t cap)
+{
+    char root[FLEET_ENROL_PATH_MAX];
+    char dir[FLEET_ENROL_PATH_MAX];
+    uintptr_t handle;
+    if (!out || !leaf || !platform_state_root_existing(root, sizeof(root)))
+        return false;
+    int n = snprintf(dir, sizeof(dir), "%s/%s", root, FLEET_DIR_LEAF);
+    if (n <= 0 || (size_t)n >= sizeof(dir) ||
+        !platform_private_directory_open_validated_traverse(dir, &handle))
+        return false;
+    platform_private_directory_close(handle);
+    n = snprintf(out, cap, "%s/%s", dir, leaf);
+    return n > 0 && (size_t)n < cap;
+}
+
 /* Read the seed. A path that will not open at all reports ABSENT so a
  * caller that only verifies concludes "no key here" rather than "broken";
  * a file that opens but is not a private 32-byte regular file is the
@@ -107,9 +123,9 @@ static bool fe_seed_create(const char *path,
     return true;
 }
 
-bool fleet_enrol_key_load(uint8_t seed[FLEET_ENROL_SEED_BYTES],
+static bool fe_key_load_mode(uint8_t seed[FLEET_ENROL_SEED_BYTES],
                           uint8_t pubkey[FLEET_ENROL_PUBKEY_BYTES],
-                          bool create, bool *present, const char **why)
+                          bool create, bool *present, const char **why, bool readonly)
 {
     char path[FLEET_ENROL_PATH_MAX];
     uint8_t secret[FLEET_ENROL_SEED_BYTES];
@@ -117,7 +133,8 @@ bool fleet_enrol_key_load(uint8_t seed[FLEET_ENROL_SEED_BYTES],
     fe_why(why, NULL);
     if (present) *present = false;
     memset(pubkey, 0, FLEET_ENROL_PUBKEY_BYTES);
-    if (!fleet_enrol_state_path(FLEET_KEY_LEAF, path, sizeof(path))) {
+    if (!(readonly ? fleet_enrol_state_path_existing(FLEET_KEY_LEAF, path, sizeof(path))
+                   : fleet_enrol_state_path(FLEET_KEY_LEAF, path, sizeof(path)))) {
         fe_why(why, FLEET_ENROL_WHY_STATE_ROOT);
         return false;
     }
@@ -157,8 +174,18 @@ bool fleet_enrol_key_load(uint8_t seed[FLEET_ENROL_SEED_BYTES],
     return true;
 }
 
-bool fleet_enrol_operator_read(uint8_t pubkey[FLEET_ENROL_PUBKEY_BYTES],
-                               bool *present, const char **why)
+bool fleet_enrol_key_load(uint8_t seed[FLEET_ENROL_SEED_BYTES],
+                          uint8_t pubkey[FLEET_ENROL_PUBKEY_BYTES],
+                          bool create, bool *present, const char **why)
+{ return fe_key_load_mode(seed, pubkey, create, present, why, false); }
+
+bool fleet_enrol_key_read_existing(uint8_t seed[FLEET_ENROL_SEED_BYTES],
+                                   uint8_t pubkey[FLEET_ENROL_PUBKEY_BYTES],
+                                   bool *present, const char **why)
+{ return fe_key_load_mode(seed, pubkey, false, present, why, true); }
+
+static bool fe_operator_read_mode(uint8_t pubkey[FLEET_ENROL_PUBKEY_BYTES],
+                               bool *present, const char **why, bool readonly)
 {
     struct platform_positioned_file file;
     char path[FLEET_ENROL_PATH_MAX];
@@ -167,7 +194,8 @@ bool fleet_enrol_operator_read(uint8_t pubkey[FLEET_ENROL_PUBKEY_BYTES],
     fe_why(why, NULL);
     memset(pubkey, 0, FLEET_ENROL_PUBKEY_BYTES);
     if (present) *present = false;
-    if (!fleet_enrol_state_path(FLEET_OPERATOR_LEAF, path, sizeof(path))) {
+    if (!(readonly ? fleet_enrol_state_path_existing(FLEET_OPERATOR_LEAF, path, sizeof(path)) :
+                    fleet_enrol_state_path(FLEET_OPERATOR_LEAF, path, sizeof(path)))) {
         fe_why(why, FLEET_ENROL_WHY_STATE_ROOT);
         return false;
     }
@@ -192,6 +220,14 @@ bool fleet_enrol_operator_read(uint8_t pubkey[FLEET_ENROL_PUBKEY_BYTES],
     if (present) *present = true;
     return true;
 }
+
+bool fleet_enrol_operator_read(uint8_t pubkey[FLEET_ENROL_PUBKEY_BYTES],
+                               bool *present, const char **why)
+{ return fe_operator_read_mode(pubkey, present, why, false); }
+
+bool fleet_enrol_operator_read_existing(uint8_t pubkey[FLEET_ENROL_PUBKEY_BYTES],
+                                        bool *present, const char **why)
+{ return fe_operator_read_mode(pubkey, present, why, true); }
 
 bool fleet_enrol_operator_write(
     const uint8_t pubkey[FLEET_ENROL_PUBKEY_BYTES], const char **why)

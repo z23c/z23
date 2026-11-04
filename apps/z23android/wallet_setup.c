@@ -289,7 +289,7 @@ void wsu_working_line(const struct wsu_view *v, char *out, size_t cap)
 static const struct { enum wsu_failure failure; const char *text; } write_failure_texts[] = {
     {WSU_NODE_BUSY, "Your node did not pause in time, so your wallet is not saved yet. Tap Try again."},
     {WSU_STORAGE, "Your node could not read its saved data, so your wallet was not saved, and saving again would fail the same way. "
-                  "Your node keeps running. Tap Stop and check this phone."},
+                  "Your node keeps running. Tap Check wallet."},
     {WSU_NOT_RUN, "Saving your wallet could not start, so nothing was saved. Tap Try again."},
     {WSU_UNKNOWN, "Saving your wallet stopped before your node answered, so the app cannot tell whether it was saved. Tap Try again."},
 };
@@ -299,7 +299,7 @@ const char *wsu_write_failure_text(enum wsu_failure failure)
     for (size_t i = 0; i < sizeof(write_failure_texts) / sizeof(write_failure_texts[0]); ++i)
         if (write_failure_texts[i].failure == failure) return write_failure_texts[i].text;
     return "Your node refused to save your wallet, so nothing was saved, and saving again would be refused the same way. "
-           "Your node keeps running. Tap Stop and check this phone.";
+           "Your node keeps running. Tap Check wallet.";
 }
 bool wsu_write_retryable(enum wsu_failure failure)
 {

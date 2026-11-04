@@ -5,6 +5,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdatomic.h>
+#include <sys/stat.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -119,4 +121,92 @@ void zapp_private_args(struct zapp_private_args *a, const char *roster_text)
         line += strcspn(line, "\n");
         line += *line == '\n';
     }
+}
+
+static bool receipt_valid(const char *token, size_t n)
+{
+    if (n < ZAPP_FLEET_RECEIPT_MIN || n > ZAPP_FLEET_RECEIPT_MAX || n % 4 == 1) return false;
+    for (size_t i = 0; i < n; ++i) {
+        char c = token[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+              (c >= '0' && c <= '9') || c == '-' || c == '_')) return false;
+    }
+    return true;
+}
+
+static bool receipt_write(int fd, const char *token, size_t n)
+{
+    size_t done = 0;
+    while (done < n) {
+        ssize_t wrote = write(fd, token + done, n - done);
+        if (wrote > 0) done += (size_t)wrote;
+        else if (wrote < 0 && errno == EINTR) continue;
+        else return false;
+    }
+    return true;
+}
+
+static int receipt_temp_open(int dir, char *temp, size_t cap)
+{
+    static atomic_uint sequence;
+    int fd = -1;
+    for (unsigned i = 0; i < 64; ++i) {
+        unsigned id = atomic_fetch_add(&sequence, 1);
+        snprintf(temp, cap, ".fleet-join-receipt.%ld.%u", (long)getpid(), id);
+        fd = openat(dir, temp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+        if (fd >= 0 || errno != EEXIST) break;
+    }
+    return fd;
+}
+
+bool zapp_fleet_receipt_save(const char *directory, const char *token)
+{
+    size_t n = token ? strnlen(token, ZAPP_FLEET_RECEIPT_MAX + 1) : 0;
+    if (!directory || !receipt_valid(token, n)) return false;
+    int dir = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (dir < 0) return false;
+    char temp[80];
+    int fd = receipt_temp_open(dir, temp, sizeof(temp));
+    if (fd < 0) { close(dir); return false; }
+    bool ok = receipt_write(fd, token, n);
+    if (ok && fsync(fd) != 0) ok = false;
+    if (close(fd) != 0) ok = false;
+    bool renamed = ok && renameat(dir, temp, dir, "fleet-join-receipt") == 0;
+    if (!renamed) (void)unlinkat(dir, temp, 0);
+    ok = renamed && fsync(dir) == 0;
+    if (close(dir) != 0) ok = false;
+    return ok;
+}
+
+static bool receipt_read(int fd, char *buf, size_t cap, size_t *n)
+{
+    while (*n < cap) {
+        ssize_t got = read(fd, buf + *n, cap - *n);
+        if (got > 0) *n += (size_t)got;
+        else if (got == 0) break;
+        else if (errno != EINTR) return false;
+    }
+    return true;
+}
+
+size_t zapp_fleet_receipt_load(const char *directory, char *out, size_t cap)
+{
+    if (!out || !cap) return 0;
+    out[0] = 0;
+    if (!directory) return 0;
+    int dir = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (dir < 0) return 0;
+    int fd = openat(dir, "fleet-join-receipt", O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    close(dir);
+    if (fd < 0) return 0;
+    struct stat st;
+    char buf[ZAPP_FLEET_RECEIPT_MAX + 1];
+    size_t n = 0;
+    bool ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode);
+    if (ok) ok = receipt_read(fd, buf, sizeof(buf), &n);
+    if (close(fd) != 0) ok = false;
+    if (!ok || n >= cap || !receipt_valid(buf, n)) return 0;
+    memcpy(out, buf, n);
+    out[n] = 0;
+    return n;
 }

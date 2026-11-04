@@ -26,6 +26,13 @@ bool zapp_fleet_invite_text(const char *text, char *token, size_t cap)
     return true;
 }
 
+bool zapp_fleet_machine_text(const char *text, char *line, size_t cap)
+{
+    static const char prefix[] = "z23 fleet import ";
+    if (!text || strncmp(text, prefix, sizeof(prefix) - 1)) return false;
+    return zapp_fleet_invite_text(text + sizeof(prefix) - 1, line, cap);
+}
+
 static void put32(unsigned char *out, uint32_t value)
 { for (unsigned i = 0; i < 4; ++i) out[i] = (unsigned char)(value >> (8 * i)); }
 

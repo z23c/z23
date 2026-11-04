@@ -77,6 +77,7 @@ static void descriptors(void)
 }
 static void fleet_invitations(void)
 {
+    repeat("z23 fleet import ", 'a', 200); assert(scan(text) == ZAPP_SCAN_FLEET_MACHINE && !strcmp(value, text));
     repeat("z23 fleet join ", 'a', 200);
     assert(scan(text) == ZAPP_SCAN_FLEET && !strcmp(value, text + 15));
     repeat("", 'a', 128);
@@ -130,6 +131,7 @@ static void small_buffers(void)
     repeat("z23:clip:", 'a', 128);
     assert(zapp_scan_classify(text, small, 128) == ZAPP_SCAN_TEXT && strlen(small) < 128);
     assert(zapp_scan_classify(text, small, 129) == ZAPP_SCAN_CLIP);
+    repeat("z23 fleet import ", 'a', 200); assert(scan(text) == ZAPP_SCAN_FLEET_MACHINE && !strcmp(value, text));
     repeat("z23 fleet join ", 'a', 200);
     assert(zapp_scan_classify(text, small, 128) == ZAPP_SCAN_UNREADABLE && !small[0]);
     assert(zapp_scan_classify(text, small, 0) == ZAPP_SCAN_TEXT);

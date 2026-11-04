@@ -90,6 +90,9 @@ bool zapp_wallet_send_run(struct zapp_runtime *r, const char *op, const char *in
 #define ZAPP_WALLET_SETUP_TIMEOUT_MAX_MS 900000u
 bool zapp_wallet_setup_run(struct zapp_runtime *r, const char *op, const char *input, unsigned timeout_ms, char *out, size_t cap);
 bool zapp_fleet_join_run(struct zapp_runtime *r, const char *token, char *out, size_t cap);
+/* Verify an invitation without enrolling this phone or creating a key. */
+bool zapp_fleet_preview_run(struct zapp_runtime *r, const char *token, char *out, size_t cap);
+bool zapp_fleet_preview_text(const char *text, char *out, size_t cap);
 /* True when the node has published its onion address: a valid Tor v3 hostname file. */
 bool zapp_onion_ready(const struct zapp_runtime *r);
 /* True when boot_status.json in the node's datadir is a zcl.boot_status.v1 document of at most ZAPP_BOOT_STATUS_MAX bytes
@@ -103,6 +106,12 @@ enum zapp_onion zapp_onion_wait(struct zapp_runtime *r, unsigned seconds, void (
 /* The JSON object in command output: at its start, or on the first line beginning with {, after
  * warnings the command wrote first. NULL when there is none. */
 const char *zapp_json_object(const char *text);
+/* Extracts a successful join receipt after any command warnings. A refused or
+ * incomplete reply leaves the previous receipt unchanged. */
+bool zapp_fleet_machine_preview_run(struct zapp_runtime *r, const char *line, char *out, size_t cap);
+bool zapp_fleet_machine_preview_text(const char *text, char *out, size_t cap, char *onion, size_t onion_cap);
+bool zapp_fleet_connect_run(struct zapp_runtime *r, const char *line, const char *onion, char *out, size_t cap);
+bool zapp_fleet_join_receipt(const char *text, char *receipt, size_t cap);
 /* Replaces command output that holds a JSON object with that object's error message, or a plain
  * notice when it has none, so raw JSON never reaches the screen. Other text is left as it is. */
 void zapp_plain_text(char *text, size_t cap);

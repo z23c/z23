@@ -23,7 +23,6 @@
 #define MEMO_SP 14.0f
 #define QR_DP 260.0f
 #define INPUT_TYPE_DECIMAL 8194 /* TYPE_CLASS_NUMBER | TYPE_NUMBER_FLAG_DECIMAL */
-#define IME_NO_LEARNING 0x1000000 /* IME_FLAG_NO_PERSONALIZED_LEARNING */
 #define AMOUNT_TEXT_CAP 64
 #define GRAVITY_START_CENTER 0x800013 /* Gravity.START | Gravity.CENTER_VERTICAL */
 #define GRAVITY_CENTER_HORIZONTAL 1
@@ -76,7 +75,8 @@ static bool input_view(JNIEnv *env, const char *hint)
 {
     jobject view = zj_widget(env, "android/widget/EditText", ui.activity);
     bool ok = view && zj_typography(env, view, 18.0f, (jint)WHITE) && zj_int_property(env, view, "setInputType", INPUT_TYPE_DECIMAL) &&
-        zj_int_property(env, view, "setImeOptions", IME_NO_LEARNING) && zj_int_property(env, view, "setHintTextColor", (jint)0xff808080u) &&
+        zj_int_property(env, view, "setImeOptions", ZAPP_FIELD_IME_NO_LEARNING | ZAPP_FIELD_IME_ACTION_GO) && zj_editor_listener(env, view) &&
+        zj_int_property(env, view, "setHintTextColor", (jint)0xff808080u) &&
         zj_char_sequence(env, view, "setHint", hint) && zj_margins(env, view, MATCH, WRAP, 0.0f, 0, 8, 0, 0) &&
         zj_append(env, ui.container, view) && zj_keep(env, &ui.input, view);
     if (view) {
@@ -208,7 +208,7 @@ void zapp_wallet_ui_render(JNIEnv *env)
     memory_cleanse(&next, sizeof(next));
     for (size_t i = 0; i < ui.screen.count; ++i) (void)draw_item(env, i);
     if (ui.screen.count) (void)bottom_space(env);
-    if (kept && ui.input) (void)zj_text(env, ui.input, typed);
+    if (kept && ui.input) (void)zj_text_at_end(env, ui.input, typed);
     memory_cleanse(typed, sizeof(typed));
     ui.drawn = true;
 }
@@ -237,16 +237,43 @@ void zapp_wallet_ui_tick(JNIEnv *env)
     zapp_wallet_ui_render(env);
 }
 
+bool zapp_wallet_ui_field_button(JNIEnv *env, size_t *button)
+{
+    for (size_t i = 0; i < ui.button_count; ++i)
+        if (ui.screen.items[ui.button_item[i]].action == WALLET_ACT_SET_AMOUNT && zj_focused(env, ui.input)) { *button = i; return true; }
+    return false;
+}
+
+/* The page goes back to its top, where the code is drawn. */
+static void show_code(JNIEnv *env)
+{
+    jobject scroll = zj_object_property(env, ui.container, "getParent", "()Landroid/view/ViewParent;");
+    jmethodID to = scroll ? zj_method(env, scroll, "scrollTo", "(II)V") : NULL;
+    if (to) (*env)->CallVoidMethod(env, scroll, to, 0, 0);
+    (void)zj_clean(env);
+    if (scroll) (*env)->DeleteLocalRef(env, scroll);
+}
+/* A set amount closes the keyboard and shows the code that now carries it. A refused amount leaves the keyboard on the
+ * field, drawn again with what was typed, when the owner was typing in it. */
+static void set_amount(JNIEnv *env)
+{
+    char amount[AMOUNT_TEXT_CAP];
+    bool typing = zj_focused(env, ui.input);
+    bool set = wallet_screens_set_amount(read_input(env, amount, sizeof(amount)) ? amount : "?");
+    memory_cleanse(amount, sizeof(amount));
+    zapp_wallet_ui_render(env);
+    if (set) {
+        (void)zj_keyboard(env, ui.activity, ui.container, false);
+        show_code(env);
+    } else if (typing && ui.input) (void)zj_keyboard(env, ui.activity, ui.input, true);
+}
+
 enum wallet_outcome zapp_wallet_ui_press(JNIEnv *env, size_t button)
 {
-    enum wallet_outcome outcome = WALLET_STAY;
-    if (button >= ui.button_count) return outcome;
+    if (button >= ui.button_count) return WALLET_STAY;
     const struct wallet_item item = ui.screen.items[ui.button_item[button]];
-    if (item.action == WALLET_ACT_SET_AMOUNT) {
-        char amount[AMOUNT_TEXT_CAP];
-        (void)wallet_screens_set_amount(read_input(env, amount, sizeof(amount)) ? amount : "?");
-        memory_cleanse(amount, sizeof(amount));
-    } else outcome = wallet_screens_activate(item.action, item.arg);
+    if (item.action == WALLET_ACT_SET_AMOUNT) { set_amount(env); return WALLET_STAY; }
+    enum wallet_outcome outcome = wallet_screens_activate(item.action, item.arg);
     if (outcome == WALLET_STAY) zapp_wallet_ui_render(env);
     return outcome;
 }

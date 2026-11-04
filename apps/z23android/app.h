@@ -30,8 +30,13 @@ struct zapp_view {
     char connection[256];
     char sync_status[1024];
     char fleet_token[8192];
+    bool fleet_machine;
+    bool fleet_review_typed;
+    char fleet_review_input[8192];
+    char fleet_onion[128];
     char fleet_preview[2048];
     char fleet_receipt[8192];
+    bool fleet_receipt_saved;
     char fleet_status[8192];
     bool fleet_stale;
     bool fleet_paired;

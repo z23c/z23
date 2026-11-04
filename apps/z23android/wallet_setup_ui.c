@@ -340,7 +340,10 @@ static void draw_write(JNIEnv *env, const struct wsu_view *v, bool way_out)
     bool retry = wsu_write_retryable(v->write_failure);
     (void)text_view(env, wsu_write_failure_text(v->write_failure), 15.0f, AMBER);
     if (retry) (void)button_view(env, B_RETRY_WRITE, "Try again", GO_COLOR);
-    if (way_out || !retry) (void)button_view(env, B_GIVE_UP, "Stop and check this phone", BUTTON_COLOR);
+    if (way_out || !retry) {
+        (void)text_view(env, "Keep a copy of your recovery words. Check wallet closes these words and checks what is saved on this phone.", 15.0f, SOFT);
+        (void)button_view(env, B_GIVE_UP, "Check wallet", BUTTON_COLOR);
+    }
 }
 static void draw_words(JNIEnv *env, const struct wsu_view *v)
 {

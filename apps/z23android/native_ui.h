@@ -28,4 +28,6 @@ void zapp_native_ui_focus(JNIEnv *env);
 void zapp_native_ui_update(JNIEnv *env, const char *status, const char *output);
 void zapp_native_ui_render(JNIEnv *env, const struct zapp_view *view);
 void zapp_native_ui_preview(JNIEnv *env, const unsigned char *bmp, size_t len);
+/* Called by the Android editor action listener on the UI thread. */
+bool zapp_native_ui_editor(JNIEnv *env, jobject view);
 #endif

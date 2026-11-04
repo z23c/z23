@@ -127,6 +127,23 @@ static int node_arguments(int argc, char **argv)
     return private_tail(argc, argv, first, getenv("ZAPP_TEST_ADDNODE"));
 }
 
+static int fleet_child(int argc, char **argv)
+{
+    if (argc > 2 && !strcmp(argv[1], "fleet") && !strcmp(argv[2], "import")) {
+        char body[16384]; size_t n = fread(body, 1, sizeof(body) - 1, stdin); body[n] = 0;
+        if (strstr(body, "refused")) { puts("{\"ok\":false}"); return 0; }
+        if (strstr(body, "partial")) { puts("{\"ok\":false,\"error\":{\"code\":\"FLEET_IMPORT_PARTIAL\"}}"); return 0; }
+        puts("{\"ok\":true,\"data\":{\"schema\":\"zcl.fleet.import.v1\"}}"); return 0;
+    }
+    if (argc > 3 && !strcmp(argv[1], "core") && !strcmp(argv[2], "network") && !strcmp(argv[3], "peers")) {
+        for (int i = 1; i < argc; ++i) if (!strncmp(argv[i], "-datadir=", 9)) {
+            char marker[1024]; snprintf(marker, sizeof(marker), "%s/dial-called", argv[i] + 9);
+            FILE *f = fopen(marker, "w"); if (!f || fclose(f)) return 1;
+        }
+        puts("{\"ok\":true,\"data\":{\"schema\":\"zcl.peer_add.v1\"}}"); return 0;
+    }
+    return -1;
+}
 static int child(int argc, char **argv)
 {
     if (!child_environment()) return 3;
@@ -140,6 +157,8 @@ static int child(int argc, char **argv)
         for (int i = 0; i < 5000; ++i) putchar('x');
         return 0;
     }
+    int fleet = fleet_child(argc, argv);
+    if (fleet >= 0) return fleet;
     if (argc > 2 && strcmp(argv[1], "fleet") == 0 && strcmp(argv[2], "join") == 0) {
         char body[16384];
         size_t n = fread(body, 1, sizeof(body) - 1, stdin);
@@ -166,6 +185,67 @@ static void plain_text_tests(void)
     char words[32] = "Node starting.";
     zapp_plain_text(words, sizeof(words));
     assert(!strcmp(words, "Node starting."));
+}
+
+static void fleet_preview_tests(void)
+{
+    const char *key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    char reply[400], preview[512] = "";
+    assert(snprintf(reply, sizeof(reply), "warning: local cache\n{\"ok\":true,\"data\":{"
+                    "\"schema\":\"zcl.fleet.invite_preview.v1\",\"name\":\"phone\","
+                    "\"operator_pubkey\":\"%s\",\"expires_unix\":2000000000}}", key) > 0);
+    assert(zapp_fleet_preview_text(reply, preview, sizeof(preview)));
+    assert(strstr(preview, "Phone name: phone") && strstr(preview, "0123456789abcdef 0123456789abcdef"));
+    assert(!zapp_fleet_preview_text(reply, preview, 10));
+    assert(!zapp_fleet_preview_text("{\"ok\":false}", preview, sizeof(preview)));
+    assert(!zapp_fleet_preview_text("{\"ok\":true,\"data\":{\"schema\":\"zcl.fleet.join.v1\"}}", preview, sizeof(preview)));
+}
+
+static void fleet_machine_preview_tests(void)
+{
+    char reply[1000], display[512], onion[128];
+    const char *key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const char *host = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion";
+    assert(snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"schema\":\"zcl.fleet.preview.v1\",\"kind\":\"machine\",\"name\":\"manager\",\"operator_pubkey\":\"%s\",\"box_pubkey\":\"%s\",\"relay_port\":22200,\"enrolled_at\":1700000000,\"onion\":\"%s\"}}", key, key, host) > 0);
+    assert(zapp_fleet_machine_preview_text(reply, display, sizeof(display), onion, sizeof(onion)));
+    assert(strstr(display, "manager") && !strcmp(onion, host));
+    assert(!zapp_fleet_machine_preview_text("{\"ok\":true,\"data\":{\"schema\":\"zcl.fleet.preview.v1\",\"kind\":\"head\"}}", display, sizeof(display), onion, sizeof(onion)));
+    assert(snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"schema\":\"zcl.fleet.preview.v1\",\"kind\":\"machine\",\"name\":\"manager\",\"operator_pubkey\":\"%s\",\"box_pubkey\":\"%s\",\"relay_port\":22200,\"enrolled_at\":1700000000,\"onion\":\"bad.onion:0\"}}", key, key) > 0);
+    assert(!zapp_fleet_machine_preview_text(reply, display, sizeof(display), onion, sizeof(onion)));
+}
+static void fleet_receipt_tests(void)
+{
+    char receipt[160] = "previous", token[129], reply[300];
+    memset(token, 'A', sizeof(token) - 1); token[126] = '-'; token[127] = '_'; token[128] = 0;
+    assert(snprintf(reply, sizeof(reply), "warning: slow disk\n{\"ok\":true,\"data\":{\"schema\":\"zcl.fleet.join.v1\",\"receipt\":\"%s\"}}", token) > 0);
+    assert(zapp_fleet_join_receipt(reply, receipt, sizeof(receipt)));
+    assert(!strcmp(receipt, token));
+    assert(!zapp_fleet_join_receipt(reply, receipt, strlen(receipt)));
+    assert(!strcmp(receipt, token));
+    assert(snprintf(reply, sizeof(reply), "{\"ok\":false,\"data\":{\"schema\":\"zcl.fleet.join.v1\",\"receipt\":\"%s\"}}", token) > 0);
+    assert(!zapp_fleet_join_receipt(reply, receipt, sizeof(receipt)));
+    assert(!strcmp(receipt, token));
+    assert(snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"schema\":\"other\",\"receipt\":\"%s\"}}", token) > 0);
+    assert(!zapp_fleet_join_receipt(reply, receipt, sizeof(receipt)));
+    assert(!strcmp(receipt, token));
+    token[64] = ' ';
+    assert(snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"schema\":\"zcl.fleet.join.v1\",\"receipt\":\"%s\"}}", token) > 0);
+    assert(!zapp_fleet_join_receipt(reply, receipt, sizeof(receipt)));
+    token[64] = 'A';
+    assert(!strcmp(receipt, token));
+    const char *refused[] = {
+        NULL, "", "Node starting.", "{",
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.fleet.join.v1\",\"receipt\":\"a\"}}",
+        "{\"ok\":false,\"data\":{\"schema\":\"zcl.fleet.join.v1\",\"receipt\":\"refused\"}}",
+        "{\"ok\":true,\"data\":{\"schema\":\"other\",\"receipt\":\"wrong\"}}",
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.fleet.join.v1\",\"receipt\":\"\"}}",
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.fleet.join.v1\",\"receipt\":\"bad text\"}}"
+    };
+    for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); ++i) {
+        assert(!zapp_fleet_join_receipt(refused[i], receipt, sizeof(receipt)));
+        assert(!strcmp(receipt, token));
+    }
+    assert(!zapp_fleet_join_receipt(reply, NULL, sizeof(receipt)));
 }
 
 static pid_t spawn_orphan(const char *self, const char *first, const char *second, const char *pidfile)
@@ -287,6 +367,12 @@ static void command_cases(struct zapp_runtime *r)
     assert(strstr(out, "[Output limit reached]"));
     assert(zapp_fleet_join_run(r, "invitation", out, sizeof(out)));
     assert(strstr(out, "receipt"));
+    const char *onion = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion";
+    char dial[1200]; snprintf(dial, sizeof(dial), "%s/dial-called", r->directory); (void)unlink(dial);
+    assert(!zapp_fleet_connect_run(r, "refused", onion, out, sizeof(out)) && access(dial, F_OK) != 0);
+    assert(!zapp_fleet_connect_run(r, "partial", onion, out, sizeof(out)) && strstr(out, "changed some fleet state") && access(dial, F_OK) != 0);
+    assert(zapp_fleet_connect_run(r, "valid", onion, out, sizeof(out)) && strstr(out, "Admission is still pending") && access(dial, F_OK) == 0);
+    assert(unlink(dial) == 0);
     assert(strcmp(getenv("XDG_STATE_HOME"), "/tmp/parent-state") == 0);
     assert(strcmp(getenv("ZCL_CATCHUP_DRAIN_BUDGET_MS"), "77") == 0);
     assert(setenv("ZAPP_TEST_CLOCK_FAIL", "1", 1) == 0);
@@ -594,6 +680,9 @@ int main(int argc, char **argv)
     if (argc == 3 && !strcmp(argv[1], "command")) return orphan("orphan", argv[2]);
     if (argc > 1) return child(argc, argv);
     plain_text_tests();
+    fleet_receipt_tests();
+    fleet_preview_tests();
+    fleet_machine_preview_tests();
     pace_tests();
     onion_tests();
     linked_files_tests();

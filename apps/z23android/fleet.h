@@ -8,6 +8,8 @@
 bool zapp_fleet_invite_text(const char *text, char *token, size_t cap);
 /* Whether c may appear in an invitation token. */
 bool zapp_fleet_invite_char(char c);
+/* Extract a manager-sealed machine line or its exact import command. */
+bool zapp_fleet_machine_text(const char *text, char *line, size_t cap);
 /* Returns a heap-allocated 24-bit BMP for a public fleet receipt, or NULL. */
 unsigned char *zapp_fleet_qr_bmp(const char *text, size_t *size);
 #endif

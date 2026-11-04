@@ -1,12 +1,14 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "native_ui.h"
 #include "base/cleanse.h"
+#include "controller.h"
 #include "conversation.h"
 #include "fleet.h"
 #include "hosts.h"
 #include "jni_util.h"
 #include "setup_field.h"
 #include "shell.h"
+#include <android/keycodes.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -15,14 +17,15 @@
 static jobject root, status_view, result_view, prompt_view, invite_view;
 static jobject connection_view, transcript_view, fleet_view, receipt_view, details_view, notice_view;
 static jobject voice_view, pair_view, hosts_view, sync_view, ops_view;
-static jobject buttons[20];
+static jobject buttons[21];
 static enum zapp_voice_state voice_state;
 static bool details_open;
 static enum zapp_reply_state reply_state;
 static zapp_native_action callback;
 static int pressed = -1;
 static float down_x, down_y;
-static char last_receipt[8192];
+static char last_receipt[8192], copy_receipt[8192], review_input[8192];
+static bool review_typed, review_available;
 static bool voice_preview;
 static char suggestion[96]; /* The question on the button, so a tap sends exactly what was shown. */
 static const char *const actions[] = {"node_start", "node_stop", NULL, "chat", "scan", "fleet_preview", "fleet_join"};
@@ -102,7 +105,7 @@ static bool small_label(const char *label, const jobject *save)
 static float label_size(const char *label, const jobject *save)
 {
     if (!strcmp(label, "Fleet") || !strcmp(label, "Phone node") || !strcmp(label, "Type a question") ||
-        !strcmp(label, "Fleet invitation")) return 18.0f;
+        !strcmp(label, "Fleet code")) return 18.0f;
     if (save == &transcript_view) return 18.0f;
     return small_label(label, save) ? 14.0f : 16.0f;
 }
@@ -165,6 +168,8 @@ void zapp_native_ui_destroy(JNIEnv *env)
     }
     suggestion[0] = 0;
     callback = NULL; pressed = -1; details_open = false; reply_state = ZAPP_REPLY_READY; last_receipt[0] = 0;
+    memory_cleanse(copy_receipt, sizeof(copy_receipt));
+    memory_cleanse(review_input, sizeof(review_input)); review_typed = review_available = false;
 }
 /* The main screen keeps the status and the conversation in the scrolling content; the voice controls
  * sit in a bottom bar that stays put while the conversation scrolls. */
@@ -209,7 +214,7 @@ static bool chat_widgets(JNIEnv *env, jobject layout, jobject activity, jobject 
 static bool detail_controls(JNIEnv *env, jobject layout, jobject activity)
 {
     return add_button(env, layout, activity, "Stop node", 1) &&
-        add_text(env, layout, activity, "Fleet invitation", NULL);
+        add_text(env, layout, activity, "Fleet code", NULL);
 }
 static bool fleet_widgets(JNIEnv *env, jobject layout, jobject activity, jobject prompt, jobject invite, jobject receipt, jobject scroll)
 {
@@ -217,13 +222,14 @@ static bool fleet_widgets(JNIEnv *env, jobject layout, jobject activity, jobject
     return !(!detail_controls(env, layout, activity) ||
         !add_button(env, layout, activity, "Scan a code", 4) ||
         !zj_append(env, layout, invite) || !zj_keep(env, &invite_view, invite) ||
-        !add_button(env, layout, activity, "Review invitation", 5) ||
+        !add_button(env, layout, activity, "Review fleet code", 5) ||
         !add_button(env, layout, activity, "Join fleet", 6) ||
         !add_text(env, layout, activity, "", &fleet_view));
 }
 static bool finish_widgets(JNIEnv *env, jobject layout, jobject activity, jobject receipt)
 {
     return zj_append(env, layout, receipt) && zj_keep(env, &receipt_view, receipt) &&
+        add_button(env, layout, activity, "Copy code", 20) &&
         add_text(env, layout, activity, "", &result_view);
 }
 static bool orient_layout(JNIEnv *env, jobject layout)
@@ -235,13 +241,16 @@ static bool orient_layout(JNIEnv *env, jobject layout)
     return zj_clean(env);
 }
 /* Typed text, and a pasted pairing invitation, stay out of keyboard suggestions and personalised learning:
- * TYPE_CLASS_TEXT, TYPE_TEXT_FLAG_MULTI_LINE and TYPE_TEXT_FLAG_NO_SUGGESTIONS; IME_FLAG_NO_PERSONALIZED_LEARNING. Autofill is
- * off; long-click stays on so paste works. */
-static bool style_prompt(JNIEnv *env, jobject field)
+ * TYPE_CLASS_TEXT and TYPE_TEXT_FLAG_NO_SUGGESTIONS; IME_FLAG_NO_PERSONALIZED_LEARNING. Autofill is off; long-click stays on
+ * so paste works. A question may hold line breaks (TYPE_TEXT_FLAG_MULTI_LINE). An invitation is one line whose keyboard
+ * action key reviews it (IME_ACTION_GO); it still wraps onto up to four lines on screen. */
+static bool style_prompt(JNIEnv *env, jobject field, bool action)
 {
     bool ok = zj_typography(env, field, 16.0f, (jint)0xffffffff) &&
-           zj_int_property(env, field, "setInputType", 0xA0001) && zj_int_property(env, field, "setImeOptions", 0x1000000) &&
-           zj_int_property(env, field, "setMinLines", 1) && zj_int_property(env, field, "setMaxLines", 4);
+           zj_int_property(env, field, "setInputType", action ? 0x80001 : 0xA0001) &&
+           zj_int_property(env, field, "setImeOptions", 0x1000000 | (action ? ZAPP_FIELD_IME_ACTION_GO : 0)) &&
+           zj_int_property(env, field, "setMinLines", 1) && zj_int_property(env, field, "setMaxLines", 4) &&
+           (!action || (zj_bool_property(env, field, "setHorizontallyScrolling", false) && zj_editor_listener(env, field)));
     (void)zj_int_property(env, field, "setImportantForAutofill", ZAPP_FIELD_AUTOFILL_NO);
     return ok;
 }
@@ -249,8 +258,8 @@ static bool prepare_layouts(JNIEnv *env, jobject layout, jobject details, jobjec
 {
     return layout && prompt && invite && receipt && details &&
            orient_layout(env, layout) && orient_layout(env, details) &&
-           zj_padding(env, layout, 20, 20) && style_prompt(env, prompt) && style_prompt(env, invite) &&
-           zj_char_sequence(env, invite, "setHint", "Or paste an invitation");
+           zj_padding(env, layout, 20, 20) && style_prompt(env, prompt, false) && style_prompt(env, invite, true) &&
+           zj_char_sequence(env, invite, "setHint", "Or paste a fleet code");
 }
 /* The root stacks the scrolling content above a fixed bottom bar for the voice controls. */
 static bool assemble_root(JNIEnv *env, jobject root_layout, jobject scroll, jobject bar)
@@ -370,6 +379,7 @@ static bool fixed_action(int index, const char **action, const char **arg)
     case 17: *action = "ops_errors"; return true;
     case 18: *action = "ops_restart"; return true;
     case 19: *action = "ops_confirm"; return true;
+    case 20: *action = "fleet_copy"; *arg = copy_receipt; return copy_receipt[0] != 0;
     default: return false;
     }
 }
@@ -380,6 +390,18 @@ static void text_action(JNIEnv *env, const char *action, jobject field)
     callback(action, value);
     memory_cleanse(value, strlen(value)); free(value);
 }
+static bool review_field_matches(JNIEnv *env)
+{
+    if (!review_typed) return true;
+    char *value = prompt_utf8(env, invite_view);
+    bool same = value && !strcmp(review_input, value);
+    if (value) { memory_cleanse(value, strlen(value)); free(value); }
+    return same;
+}
+static void review_button(JNIEnv *env)
+{
+    if (buttons[6]) (void)zj_visible(env, buttons[6], review_available && review_field_matches(env));
+}
 static void input_up(JNIEnv *env, float x, float y)
 {
     int index = pressed; pressed = -1;
@@ -387,11 +409,15 @@ static void input_up(JNIEnv *env, float x, float y)
     if (index == 8) {
         bool next = !details_open;
         if (zj_visible(env, details_view, next)) { details_open = next; (void)zj_text(env, buttons[8], next ? "Less" : "More"); }
+        if (!next) zapp_controller_clear_result();
         return;
     }
     const char *action, *arg;
     if (fixed_action(index, &action, &arg)) { callback(action, arg); return; }
     if (index >= (int)(sizeof(actions) / sizeof(*actions)) || !actions[index]) return;
+    if (index == 6 && !review_field_matches(env)) {
+        zapp_native_ui_update(env, NULL, "The fleet code changed. Review it again."); return;
+    }
     if (index == 3 || index == 5) { text_action(env, actions[index], index == 3 ? prompt_view : invite_view); return; }
     callback(actions[index], "");
 }
@@ -408,10 +434,33 @@ static void assistant_touch(JNIEnv *env, const AInputEvent *event)
     } else if (action == AMOTION_EVENT_ACTION_CANCEL) pressed = -1;
     else if (action == AMOTION_EVENT_ACTION_UP) input_up(env, x, y);
 }
+/* The keyboard's action key in the invitation field reviews the invitation, as Review fleet code under it does, and puts the
+ * keyboard away so the review shows. */
+static bool invitation_key(JNIEnv *env, const AInputEvent *event)
+{
+    int32_t key = AInputEvent_getType(event) == AINPUT_EVENT_TYPE_KEY ? AKeyEvent_getKeyCode(event) : AKEYCODE_UNKNOWN;
+    if ((key != AKEYCODE_ENTER && key != AKEYCODE_NUMPAD_ENTER) || !zj_focused(env, invite_view)) return false;
+    if (AKeyEvent_getAction(event) != AKEY_EVENT_ACTION_UP) return true;
+    jobject context = zj_object_property(env, invite_view, "getContext", "()Landroid/content/Context;");
+    if (context) { (void)zj_keyboard(env, context, invite_view, false); (*env)->DeleteLocalRef(env, context); }
+    text_action(env, actions[5], invite_view);
+    return true;
+}
+bool zapp_native_ui_editor(JNIEnv *env, jobject view)
+{
+    if (!zj_focused(env, view)) return false;
+    if (zapp_shell_editor(env)) return true;
+    if (!callback || !zapp_shell_assistant() || !invite_view || !(*env)->IsSameObject(env, view, invite_view)) return false;
+    jobject context = zj_object_property(env, invite_view, "getContext", "()Landroid/content/Context;");
+    if (context) { (void)zj_keyboard(env, context, invite_view, false); (*env)->DeleteLocalRef(env, context); }
+    text_action(env, actions[5], invite_view);
+    return true;
+}
 bool zapp_native_ui_input(JNIEnv *env, const AInputEvent *event)
 {
     bool assistant = zapp_shell_assistant();
     if (zapp_shell_input(env, event)) return true;
+    if (callback && event && assistant && invitation_key(env, event)) return true;
     if (callback && event && assistant && AInputEvent_getType(event) == AINPUT_EVENT_TYPE_MOTION) assistant_touch(env, event);
     return false;
 }
@@ -522,8 +571,17 @@ static void render_fleet(JNIEnv *env, const struct zapp_view *view)
                  view->fleet_stale || !rows ? view->fleet_status : rows);
         (void)zj_text(env, hosts_view, fleet);
     }
-    snprintf(fleet, sizeof(fleet), "%s%s%s", view->fleet_preview,
-             view->fleet_receipt[0] ? "\nReceipt: " : "", view->fleet_receipt);
+    review_typed = view->fleet_review_typed;
+    snprintf(review_input, sizeof(review_input), "%s", view->fleet_review_input);
+    snprintf(copy_receipt, sizeof(copy_receipt), "%s", view->fleet_receipt);
+    snprintf(fleet, sizeof(fleet), "%s%s", view->fleet_preview,
+             view->fleet_receipt[0] ? "\nReturn this code to your fleet manager to finish joining." : "");
+    if (buttons[6]) {
+        (void)zj_text(env, buttons[6], view->fleet_machine ? "Connect" : "Join fleet");
+        review_available = view->fleet_token[0] && !view->busy;
+        review_button(env);
+    }
+    if (buttons[20]) (void)zj_visible(env, buttons[20], view->fleet_receipt[0] != 0);
     snprintf(pairing, sizeof(pairing), "Your laptop offers private voice and fleet control. "
              "Accept only if the laptop shows code %s.", view->pair_code);
     (void)zj_text(env, pair_view, pairing);
@@ -549,7 +607,11 @@ void zapp_native_ui_render(JNIEnv *env, const struct zapp_view *view)
 }
 void zapp_native_ui_pause(JNIEnv *env) { zapp_shell_pause(env); }
 void zapp_native_ui_resume(JNIEnv *env) { zapp_shell_resume(env); }
-void zapp_native_ui_tick(JNIEnv *env) { zapp_shell_tick(env); }
+void zapp_native_ui_tick(JNIEnv *env)
+{
+    zapp_shell_tick(env);
+    if (review_typed) review_button(env);
+}
 void zapp_native_ui_dropped(JNIEnv *env) { zapp_shell_dropped(env); }
 void zapp_native_ui_focus(JNIEnv *env) { zapp_shell_focus(env); }
 void zapp_native_ui_open_details(JNIEnv *env)

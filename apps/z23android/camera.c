@@ -18,7 +18,7 @@
 #define PREVIEW_STEP_X (WIDTH / PREVIEW_W)
 #define PREVIEW_STEP_Y (HEIGHT / PREVIEW_H)
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-static atomic_bool stopped;
+static atomic_bool stopped, device_failed;
 static bool scanning, preview_ready;
 static uint64_t generation = 1;
 static uintptr_t scan_sequence;
@@ -29,7 +29,10 @@ static unsigned char preview[PREVIEW_W * PREVIEW_H];
 static void cancel_device(void *ctx)
 {
     pthread_mutex_lock(&lock);
-    if (scanning && scan_sequence == (uintptr_t)ctx) atomic_store(&stopped, true);
+    if (scanning && scan_sequence == (uintptr_t)ctx) {
+        atomic_store(&device_failed, true);
+        atomic_store(&stopped, true);
+    }
     pthread_mutex_unlock(&lock);
 }
 static void device_disconnected(void *ctx, ACameraDevice *device) { (void)device; cancel_device(ctx); }
@@ -162,23 +165,28 @@ static bool open_capture(struct camera_scan *r, const char *id, uintptr_t sequen
         ACameraCaptureSession_setRepeatingRequest(r->session, NULL, 1, &r->request, NULL) != ACAMERA_OK) return false;
     return true;
 }
-static bool scan_frames(struct camera_scan *r, char *result, size_t cap, char *error, size_t error_cap)
+struct frame_loop { struct camera_scan *scan; char *result; size_t cap; };
+static bool next_frame(void *arg)
 {
-    bool ok = false;
-    r->qr = quirc_new(); if (!r->qr || quirc_resize(r->qr, WIDTH, HEIGHT) != 0) return false;
-    struct timespec start, now, pause = { .tv_sec = 0, .tv_nsec = 100000000 };
-    if (clock_gettime(CLOCK_MONOTONIC, &start)) return false;
-    snprintf(error, error_cap, "No QR code found before timeout.");
-    do {
-        AImage *image = NULL;
-        if (AImageReader_acquireLatestImage(r->reader, &image) == AMEDIA_OK && image) {
-            ok = frame(image, r->qr, result, cap); AImage_delete(image);
-            if (ok) break;
-        }
-        nanosleep(&pause, NULL);
-        if (clock_gettime(CLOCK_MONOTONIC, &now)) break;
-    } while (!atomic_load(&stopped) && now.tv_sec - start.tv_sec < 30);
+    struct frame_loop *loop = arg;
+    AImage *image = NULL;
+    if (AImageReader_acquireLatestImage(loop->scan->reader, &image) != AMEDIA_OK || !image) return false;
+    bool ok = frame(image, loop->scan->qr, loop->result, loop->cap);
+    AImage_delete(image);
     return ok;
+}
+static bool frame_stopped(void *arg) { (void)arg; return atomic_load(&stopped); }
+static void frame_pause(void *arg)
+{
+    (void)arg;
+    struct timespec pause = { .tv_sec = 0, .tv_nsec = 100000000 };
+    nanosleep(&pause, NULL);
+}
+static bool scan_frames(struct camera_scan *r, char *result, size_t cap)
+{
+    r->qr = quirc_new(); if (!r->qr || quirc_resize(r->qr, WIDTH, HEIGHT) != 0) return false;
+    struct frame_loop loop = { r, result, cap };
+    return zapp_camera_run_frames(&loop, next_frame, frame_stopped, frame_pause);
 }
 static void close_capture(struct camera_scan *r)
 {
@@ -201,6 +209,22 @@ static void refusal(enum zapp_camera_access access, bool cancelled, char *error,
     else if (access == ZAPP_CAMERA_SETTINGS) snprintf(error, error_cap, "%s", zapp_camera_screen(access).text);
     else snprintf(error, error_cap, "Camera permission was not given. Tap Scan again to allow it.");
 }
+static bool scan_result(uint64_t ticket, bool ok, char *result, char *error, size_t error_cap)
+{
+    pthread_mutex_lock(&lock);
+    bool was_stopped = atomic_load(&stopped), failed = atomic_load(&device_failed);
+    if (ticket != generation) failed = false;
+    scanning = false; preview_ready = false; memset(preview, 0, sizeof(preview));
+    pthread_mutex_unlock(&lock);
+    if (was_stopped) {
+        ok = false;
+        result[0] = 0;
+        snprintf(error, error_cap, "%s", failed
+                 ? "Camera stopped working. Try again." : "Camera scan cancelled.");
+    } else if (ok) error[0] = 0;
+    return ok;
+}
+
 bool zapp_camera_scan(uint64_t ticket, char *result, size_t cap, char *error, size_t error_cap)
 {
     if (!result || cap < 2 || !error || !error_cap) return false;
@@ -208,7 +232,7 @@ bool zapp_camera_scan(uint64_t ticket, char *result, size_t cap, char *error, si
     pthread_mutex_lock(&lock);
     if (!ticket || ticket != generation) { pthread_mutex_unlock(&lock); snprintf(error, error_cap, "Camera scan cancelled."); return false; }
     if (scanning) { pthread_mutex_unlock(&lock); snprintf(error, error_cap, "Camera is already scanning."); return false; }
-    scanning = true; preview_ready = false; atomic_store(&stopped, false);
+    scanning = true; preview_ready = false; atomic_store(&stopped, false); atomic_store(&device_failed, false);
     if (++scan_sequence == 0) ++scan_sequence;
     uintptr_t sequence = scan_sequence;
     pthread_mutex_unlock(&lock);
@@ -221,10 +245,8 @@ bool zapp_camera_scan(uint64_t ticket, char *result, size_t cap, char *error, si
     }
     const char *id = rear_camera(&state, error, error_cap);
     if (!id || !open_capture(&state, id, sequence)) goto out;
-    ok = scan_frames(&state, result, cap, error, error_cap);
+    ok = scan_frames(&state, result, cap);
 out:
     close_capture(&state);
-    pthread_mutex_lock(&lock); scanning = false; preview_ready = false; memset(preview, 0, sizeof(preview)); pthread_mutex_unlock(&lock);
-    if (ok) error[0] = 0;
-    return ok;
+    return scan_result(ticket, ok, result, error, error_cap);
 }

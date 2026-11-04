@@ -2469,7 +2469,7 @@ static void confirm_note_tests(void)
     wsu_destroy(&w);
 }
 /* Each failed write says what happened in plain words and the one next step. One a new attempt can clear names Try again; one that
- * would fail the same way names no Try again, says the node keeps running and names Stop and check this phone. None sends the owner
+ * would fail the same way names no Try again, says the node keeps running and names Check wallet. None sends the owner
  * to Check again, a button the words and the check do not have, and none says the words cannot be shown while they are on screen. */
 static void write_failure_text_tests(void)
 {
@@ -2478,8 +2478,8 @@ static void write_failure_text_tests(void)
     for (size_t i = 0; i < sizeof(own) / sizeof(own[0]); ++i) {
         const char *text = wsu_write_failure_text(own[i]);
         assert(text[0] && strlen(text) < 200);
-        if (wsu_write_retryable(own[i])) assert(strstr(text, "Tap Try again") && !strstr(text, "Stop and check"));
-        else assert(!strstr(text, "Try again") && strstr(text, "the same way. Your node keeps running. Tap Stop and check this phone."));
+        if (wsu_write_retryable(own[i])) assert(strstr(text, "Tap Try again") && !strstr(text, "Check wallet"));
+        else assert(!strstr(text, "Try again") && strstr(text, "the same way. Your node keeps running. Tap Check wallet."));
         for (size_t j = 0; j < sizeof(jargon) / sizeof(jargon[0]); ++j) assert(!strstr(text, jargon[j]));
         for (size_t k = i + 1; k < sizeof(own) / sizeof(own[0]); ++k) assert(strcmp(text, wsu_write_failure_text(own[k])));
     }
@@ -2487,7 +2487,7 @@ static void write_failure_text_tests(void)
     assert(!wsu_write_retryable(WSU_STORAGE) && !wsu_write_retryable(WSU_REFUSED) && !wsu_write_retryable(WSU_BAD_PHRASE));
     assert(!strcmp(wsu_write_failure_text(WSU_BAD_PHRASE), wsu_write_failure_text(WSU_REFUSED)));
     assert(!strcmp(wsu_write_failure_text(WSU_REFUSED), "Your node refused to save your wallet, so nothing was saved, and saving again would be "
-                                                        "refused the same way. Your node keeps running. Tap Stop and check this phone."));
+                                                        "refused the same way. Your node keeps running. Tap Check wallet."));
     assert(!strcmp(wsu_write_failure_text(WSU_NODE_BUSY), "Your node did not pause in time, so your wallet is not saved yet. Tap Try again."));
     assert(!wsu_write_failure_text(WSU_NO_FAILURE)[0]);
 }

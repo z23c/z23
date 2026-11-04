@@ -13,6 +13,8 @@ void zapp_shell_destroy(JNIEnv *env);
 void zapp_shell_render(JNIEnv *env, const struct zapp_view *view);
 /* Handles taps on shell screens and the Back key; true when the event was consumed. */
 bool zapp_shell_input(JNIEnv *env, const AInputEvent *event);
+/* Handle the focused field editor action. */
+bool zapp_shell_editor(JNIEnv *env);
 /* Whether the assistant tree is the screen in front. */
 bool zapp_shell_assistant(void);
 /* On pause: leaves the wallet screens for Home, which wipes everything they hold and draw. */

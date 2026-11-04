@@ -964,9 +964,9 @@ static bool cr_match_path_special(const struct zcl_command_spec *spec,
  * types by NAME rather than by leaf:
  *
  *   dev.agent.mutate `line`  a source line NUMBER, 1..1000000
- *   fleet.import     `line`  one whole base64url roster line, a STRING
+ *   fleet.import and fleet.preview `line`  one base64url roster line, a STRING
  *
- * The integer rule must not apply to fleet.import. Two leaves may declare
+ * The integer rule must not apply to these fleet leaves. Two leaves may declare
  * the same key with different meanings; only the leaf path tells them apart.
  * Any other `line` stays an integer. */
 static bool cr_match_chunks_and_lines(const struct zcl_command_spec *spec,
@@ -980,7 +980,8 @@ static bool cr_match_chunks_and_lines(const struct zcl_command_spec *spec,
         *type_ok = cr_int_range(value, lo, 4294967295LL);
         return true;
     }
-    if (strcmp(key, "line") == 0 && strcmp(path, "fleet.import") == 0) {
+    if (strcmp(key, "line") == 0 &&
+        (strcmp(path, "fleet.import") == 0 || strcmp(path, "fleet.preview") == 0)) {
         *type_ok = cr_nonempty_str(value,
                                    zcl_command_registry_input_str_max(key));
         return true;

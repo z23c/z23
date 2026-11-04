@@ -422,6 +422,13 @@ static void funds_node_stopped_or_starting(void)
     CHECK(has("Waiting for your node. It is running") && !has("Node stopped") && !has("Start it") && !has("ZCL"));
     CHECK(find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_START_NODE) < 0 && find(snap(), WALLET_ITEM_AMOUNT, WALLET_ACT_NONE) < 0);
 }
+static void finish_initial_failures(void)
+{
+    for (int i = 0; i < 2; ++i) {
+        fake.now += WALLET_INITIAL_RETRY_MS;
+        wallet_screens_tick();
+    }
+}
 static void funds_node_answers(void)
 {
     static const char *const answering[] = {                       /* a node that answers, even with an error, is running: Start would only say so */
@@ -430,11 +437,13 @@ static void funds_node_answers(void)
     for (size_t i = 0; i < sizeof(answering) / sizeof(answering[0]); ++i) {
         fake.summary = answering[i];
         CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+        finish_initial_failures();
         CHECK(has("Balance unknown") && !has("not answering") && !has("0 ZCL") && find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_START_NODE) < 0);
     }
     fake.summary = "{\"ok\":true,\"data\":{\"x\":1}}";             /* a node that answers with something else: unknown, never zero */
     fake.always_ok = true;
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    finish_initial_failures();
     CHECK(has("Balance unknown") && !has("0 ZCL") && has("could not be read") && !has("not answering"));
     CHECK(find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_START_NODE) < 0);
     fake.always_ok = false;
@@ -442,7 +451,9 @@ static void funds_node_answers(void)
     /* A reply that says ok:false is no reply, whatever data it carries. */
     fake.summary = "{\"ok\":false,\"data\":\"x\"}";
     fake.always_ok = true;
-    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS) && has("Balance unknown"));
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    finish_initial_failures();
+    CHECK(has("Balance unknown"));
     fake.always_ok = false;
     fake.summary = GOOD_SUMMARY;
 
@@ -533,6 +544,53 @@ static void test_fleet(void)
         CHECK(has(WALLET_FLEET_UNCHECKED) && !has("agree") && !has("disagree"));
         wallet_screens_close();
     }
+}
+
+static bool item_is(const char *text);
+
+static void test_balance_refresh_failure(void)
+{
+    start(false);
+    fake.summary = GOOD_SUMMARY_LOCKED;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS) && item_is("1.23456789 ZCL"));
+    uint64_t amount = 0;
+    CHECK(wallet_screens_spendable(&amount));
+    fake.summary = OTHER_ERROR;
+    fake.now += WALLET_REFRESH_MS;
+    wallet_screens_tick();
+    CHECK(has("Last known balance") && item_is("1.23456789 ZCL"));
+    CHECK(has("Could not refresh") && has("Sending waits") && !has("Up to date"));
+    CHECK(find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_SEND) < 0);
+    tap(WALLET_ACT_SEND, 0, WALLET_STAY);
+    CHECK(!wallet_screens_spendable(&amount));
+    fake.summary = GOOD_SUMMARY_LOCKED;
+    fake.now += WALLET_REFRESH_MS;
+    wallet_screens_tick();
+    CHECK(item_is("Balance") && item_is("1.23456789 ZCL") && !has("Last known"));
+    CHECK(wallet_screens_spendable(&amount));
+    wallet_screens_close();
+
+    start(false);
+    fake.summary = GOOD_SUMMARY;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS) && item_is("1.23456789 ZCL"));
+    fake.summary = OTHER_ERROR;
+    fake.now += WALLET_REFRESH_MS;
+    wallet_screens_tick();
+    CHECK(has("Balance unknown") && !has("1.23456789 ZCL"));
+    wallet_screens_close();
+
+    char scanning[] = SUMMARY_SCAN("2999999");
+    char *lock = strstr(scanning, "\"locked\":false");
+    CHECK(lock);
+    memcpy(lock, "\"locked\":true ", strlen("\"locked\":false"));
+    start(false);
+    fake.summary = scanning;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS) && has("Still scanning"));
+    fake.summary = OTHER_ERROR;
+    fake.now += WALLET_REFRESH_MS;
+    wallet_screens_tick();
+    CHECK(has("Last known balance") && has("Still scanning") && has("Could not refresh"));
+    wallet_screens_close();
 }
 
 static void test_refresh_and_stale(void)
@@ -961,18 +1019,114 @@ static void test_cache_silent_node(void)
 }
 
 /* A newly created wallet has no known balance until the node answers. */
+static void test_initial_summary_retry(void)
+{
+    start(false);
+    fake.summary = OTHER_ERROR;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    CHECK(item_is("Loading…") && !has("Balance unknown") && !has("0 ZCL"));
+    CHECK(count_ops("summary") == 1);
+    fake.now += WALLET_INITIAL_RETRY_MS - 1;
+    wallet_screens_tick();
+    CHECK(count_ops("summary") == 1 && item_is("Loading…"));
+    fake.summary = SUMMARY_SEND_EL("true", "true", "0", "0.00000000", "0", "0.00000000", "0", "0.00000000", "true", "");
+    ++fake.now;
+    wallet_screens_tick();
+    CHECK(count_ops("summary") == 2 && item_is("0 ZCL") && !has("Balance unknown"));
+    wallet_screens_close();
+
+    start(false);
+    fake.summary = OTHER_ERROR;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    CHECK(item_is("Loading…") && !has("Balance unknown"));
+    fake.now += WALLET_INITIAL_RETRY_MS;
+    wallet_screens_tick();
+    CHECK(count_ops("summary") == 2 && item_is("Loading…") && !has("Balance unknown"));
+    fake.now += WALLET_INITIAL_RETRY_MS;
+    wallet_screens_tick();
+    CHECK(count_ops("summary") == 3 && has("Balance unknown") && has("could not be read"));
+    fake.now += WALLET_INITIAL_RETRY_MS;
+    wallet_screens_tick();
+    CHECK(count_ops("summary") == 3 && has("Balance unknown"));
+    wallet_screens_close();
+}
+
+static bool summary_busy(void)
+{
+    pthread_mutex_lock(&fake.lock);
+    bool busy = fake.op_active[0] != 0;
+    pthread_mutex_unlock(&fake.lock);
+    return busy;
+}
+static bool balance_zero(void) { return item_is("0 ZCL"); }
+static void test_initial_retry_busy(void)
+{
+    start(true);
+    fake.summary = OTHER_ERROR;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    wait_for(funds_commands_done);
+    CHECK(item_is("Loading…") && !has("Balance unknown"));
+    set_block();
+    fake.summary = SUMMARY_SEND_EL("true", "true", "0", "0.00000000", "0", "0.00000000", "0", "0.00000000", "true", "");
+    fake.now += WALLET_INITIAL_RETRY_MS;
+    wallet_screens_tick();
+    wait_for(summary_busy);
+    fake.now += 3 * WALLET_INITIAL_RETRY_MS;
+    wallet_screens_tick();
+    CHECK(count_ops("summary") == 2 && item_is("Loading…"));
+    release_block();
+    wait_for(balance_zero);
+    CHECK(count_ops("summary") == 2 && !has("Balance unknown"));
+    wallet_screens_close();
+}
+
+static void test_initial_retry_reveal(void)
+{
+    start(false);
+    fake.summary = OTHER_ERROR;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    CHECK(count_ops("summary") == 1 && item_is("Loading…"));
+    fake.reveal = WALLET_REVEAL_OPEN;
+    fake.now += WALLET_INITIAL_RETRY_MS;
+    wallet_screens_tick();
+    CHECK(count_ops("summary") == 2 && item_is("Loading…") && !has("Balance unknown"));
+    fake.now += WALLET_INITIAL_RETRY_MS;
+    wallet_screens_tick();
+    CHECK(count_ops("summary") == 3 && has("Balance unknown"));
+    wallet_screens_close();
+}
+
+static void test_initial_silent_then_retry(void)
+{
+    start(false);
+    fake.summary = NODE_UNAVAILABLE_ERROR;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    CHECK(has("Waiting for your node") && !has("Balance unknown"));
+    fake.summary = OTHER_ERROR;
+    fake.now += WALLET_REFRESH_MS;
+    wallet_screens_tick();
+    CHECK(item_is("Loading…") && !has("Balance unknown") && !has("0 ZCL"));
+    fake.summary = SUMMARY_SEND_EL("true", "true", "0", "0.00000000", "0", "0.00000000", "0", "0.00000000", "true", "");
+    fake.now += WALLET_INITIAL_RETRY_MS;
+    wallet_screens_tick();
+    CHECK(item_is("0 ZCL") && !has("Balance unknown"));
+    wallet_screens_close();
+}
+
 static void test_new_wallet_unknown(void)
 {
     make_dir();
     put_file("wallet_key.blob", "key file one");
     wall = 1700000000;
     struct wallet_screen *s = open_waiting();
-    CHECK(find_text(s, "Loading") >= 0 && find(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE) < 0);
+    long slot = find(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE);
+    CHECK(slot >= 0 && !strcmp(text_at(s, slot), "Loading…") && find_text(s, "Balance") == slot - 1);
     CHECK(!file_exists(CACHE));
-    fake.summary = GOOD_SUMMARY_LOCKED;
+    fake.summary = SUMMARY_SEND_EL("true", "true", "0", "0.00000000", "0", "0.00000000", "0", "0.00000000", "true", "");
     release_block();
-    wait_for(live_shown);
-    CHECK(!has("Last known") && item_is("Balance") && item_is("1.23456789 ZCL"));
+    for (int i = 0; i < 1000 && !item_is("0 ZCL"); ++i) usleep(5000);
+    s = snap();
+    CHECK(find(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE) == slot && item_is("0 ZCL") && !has("unknown"));
     wallet_screens_close();
     remove_dir();
 }
@@ -2025,6 +2179,7 @@ static void test_funds_plain_words(void)
     fake.summary = "{\"ok\":true,\"data\":{\"x\":1}}";
     fake.always_ok = true;
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    finish_initial_failures();
     CHECK(has("Balance unknown") && has("Pending amount unknown") && has("Public amount unknown") && has("Maturing amount unknown"));
     CHECK(!has(" 0 ZCL") && !has("0.0") && !has("Up to date"));
     wallet_screens_close();
@@ -2099,6 +2254,7 @@ static void test_funds_unready(void)
     CHECK(has("Funds received but not spendable yet: amount unknown") && has("1 ZCL") && !has("catches up"));
     fake.summary = SUMMARY_STATE("ok", PRIVATE_OK("100000000", "1.00000000", "\"unready_zat\":5,\"unready\":\"0.5\","), "0", "0.00000000");   /* a malformed amount is no reply */
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    finish_initial_failures();
     CHECK(has("Balance unknown") && !has("catches up"));
     fake.summary = SUMMARY_STATE("keys_unavailable", PRIVATE_HIDDEN, "10000000", "0.10000000");
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
@@ -2214,6 +2370,7 @@ int main(int argc, char **argv)
     test_funds_replies();
     test_fleet();
     test_refresh_and_stale();
+    test_balance_refresh_failure();
     test_send_line();
     test_send_line_before_answer();
     test_cache_sealed_file();
@@ -2224,6 +2381,10 @@ int main(int argc, char **argv)
     test_cache_only_real_summaries();
     test_cache_silent_node();
     test_new_wallet_unknown();
+    test_initial_summary_retry();
+    test_initial_retry_busy();
+    test_initial_retry_reveal();
+    test_initial_silent_then_retry();
     test_make_private_offer();
     test_make_private_hidden();
     test_reveal_offer();

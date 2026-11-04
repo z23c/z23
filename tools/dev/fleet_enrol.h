@@ -408,6 +408,8 @@ bool fleet_head_revokes(const struct fleet_head *head,
 /* Absolute path of one leaf inside platform_state_root()/fleet/, creating
  * the private directory. `leaf` is a compiled-in constant, never input. */
 bool fleet_enrol_state_path(const char *leaf, char *out, size_t cap);
+/* Resolve only an existing owner-private fleet directory; never create it. */
+bool fleet_enrol_state_path_existing(const char *leaf, char *out, size_t cap);
 
 /* This box's Ed25519 key. `create` mints one on first use and announces it
  * with a typed log line; a creation is never silent. */
@@ -420,6 +422,11 @@ bool fleet_enrol_key_load(uint8_t seed[FLEET_ENROL_SEED_BYTES],
  * normal state of the manager itself, which trusts its own key. */
 bool fleet_enrol_operator_read(uint8_t pubkey[FLEET_ENROL_PUBKEY_BYTES],
                                bool *present, const char **why);
+bool fleet_enrol_operator_read_existing(uint8_t pubkey[FLEET_ENROL_PUBKEY_BYTES],
+                                        bool *present, const char **why);
+bool fleet_enrol_key_read_existing(uint8_t seed[FLEET_ENROL_SEED_BYTES],
+                                  uint8_t pubkey[FLEET_ENROL_PUBKEY_BYTES],
+                                  bool *present, const char **why);
 bool fleet_enrol_operator_write(
     const uint8_t pubkey[FLEET_ENROL_PUBKEY_BYTES], const char **why);
 
@@ -470,6 +477,11 @@ bool fleet_roster_import(const char *line,
                          const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES],
                          struct fleet_machine *out, bool *appended,
                          const char **why);
+
+/* Read-only advisory validation; import rechecks under its state lock. */
+bool fleet_roster_preview(const char *line,
+                          const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES],
+                          struct fleet_machine *out, const char **why);
 
 /* fleet_roster_import with the operator pin made explicit. The pin
  * (`operator.pin`, the operator key this box first imported from) is

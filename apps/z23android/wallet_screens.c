@@ -59,8 +59,11 @@ struct cache {
 
 /* Everything a wallet screen holds that is wiped when the owner leaves. */
 struct data {
-    bool funds_loaded, fleet_loaded, funds_fresh, fleet_fresh, node_silent;
+    bool funds_loaded, fleet_loaded, funds_fresh, fleet_fresh, node_silent, summary_failed;
     uint64_t summary_at, fleet_at, requested_at;
+    unsigned initial_failures;
+    bool initial_retry_wait, summary_validated;
+    uint64_t initial_retry_at;
     struct wallet_view view;
     char fleet[WALLET_TEXT_MAX];
     bool address_pending, has_amount, no_receive;
@@ -477,22 +480,32 @@ static void reveal_items(struct wallet_screen *s, const struct data *d)
 }
 /* What the node reported, in the order the owner asks: spendable now, what is arriving, waiting, public and maturing, then
  * how current it is. */
+static void funds_sync_lines(struct wallet_screen *s, const struct data *d, bool retained)
+{
+    if (retained) {
+        note(s, "Could not refresh your wallet. This balance may be out of date.");
+        if (d->view.scanning) line(s, d->view.sync);
+    } else if (d->funds_fresh || !d->view.known) line(s, d->view.sync);
+    else note(s, "Last read more than 30 seconds ago, so these amounts and the sync state may be out of date. Check that your node is running.");
+}
+
 static void funds_lines(struct wallet_screen *s, const struct data *d)
 {
-    line(s, "Balance");
+    bool retained = d->summary_failed && d->view.known;
+    line(s, retained ? "Last known balance" : "Balance");
     (void)add(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE, d->view.balance);
     send_lines(s, d);
-    reveal_items(s, d);
+    if (!d->summary_failed) reveal_items(s, d);
     if (d->view.pending[0]) line(s, d->view.pending);
     if (d->view.unready_line[0]) line(s, d->view.unready_line);
     if (d->view.total_line[0]) line(s, d->view.total_line);
     if (d->view.public_line[0]) line(s, d->view.public_line);
-    if (d->view.can_make_private) button(s, WALLET_ACT_MAKE_PRIVATE, "Make private");
+    if (!d->summary_failed && d->view.can_make_private) button(s, WALLET_ACT_MAKE_PRIVATE, "Make private");
     if (d->view.immature_line[0]) line(s, d->view.immature_line);
-    if (d->funds_fresh) line(s, d->view.sync);
-    else note(s, "Last read more than 30 seconds ago, so these amounts and the sync state may be out of date. Check that your node is running.");
+    funds_sync_lines(s, d, retained);
     if (!d->view.known) note(s, "The wallet could not be read. Check that your node is running, then open this screen again.");
-    if (d->view.send[0]) note(s, d->view.send);
+    if (retained) note(s, "Sending waits until your wallet answers.");
+    else if (d->view.send[0]) note(s, d->view.send);
 }
 
 /* A node that gave no answer. A process known to run is starting or busy: Start would only be refused, so the owner is told to
@@ -511,12 +524,14 @@ static void funds_items(struct wallet_screen *s)
     const struct data *d = &st.d;
     title(s, "Wallet");
     if (d->scan_note[0]) note(s, d->scan_note);
-    if (!d->funds_loaded) { if (d->cache.valid) cache_lines(s, d); else { line(s, "Loading…"); send_lines(s, d); } }
+    if (!d->funds_loaded) { if (d->cache.valid) cache_lines(s, d); else { line(s, "Balance"); (void)add(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE, "Loading…"); send_lines(s, d); } }
+    else if (d->summary_failed && d->view.known) { funds_lines(s, d); if (d->node_silent) silent_node_items(s); }
     else if (d->node_silent) { if (d->cache.valid) cache_lines(s, d); else send_lines(s, d); silent_node_items(s); }
     else funds_lines(s, d);
     if (d->fleet_loaded && !d->node_silent) line(s, d->fleet_fresh ? d->fleet : WALLET_FLEET_UNCHECKED);
     button(s, WALLET_ACT_RECEIVE, "Receive");
-    button(s, WALLET_ACT_SEND, d->scan_note[0] ? "Scan again" : "Send");
+    if (!(d->summary_failed && d->view.known))
+        button(s, WALLET_ACT_SEND, d->scan_note[0] ? "Scan again" : "Send");
     button(s, WALLET_ACT_HISTORY, "History");
     button(s, WALLET_ACT_BACK, "Home");
 }
@@ -733,15 +748,37 @@ unsigned wallet_screens_snapshot(struct wallet_screen *out)
 
 /* ---- replies ---- */
 
-/* silent: the node did not answer at all, as opposed to answering with an error of its own. */
-static void apply_summary(bool ok, bool silent, const char *json)
+static bool defer_initial_summary(bool valid, bool silent, bool received)
 {
+    if (st.d.summary_validated || st.d.cache.valid || valid || silent || !received ||
+        st.d.initial_failures >= 3 || ++st.d.initial_failures >= 3) return false;
+    st.d.funds_loaded = false;
+    st.d.node_silent = false;
+    st.d.summary_failed = true;
+    st.d.initial_retry_wait = true;
+    st.d.initial_retry_at = now();
+    return true;
+}
+
+/* silent: the node did not answer at all, as opposed to answering with an error of its own. */
+static void apply_summary(bool ok, bool silent, bool received, const char *json)
+{
+    struct wallet_view next;
+    bool valid = wallet_view_from_summary(ok && json ? json : "", &next);
+    if (defer_initial_summary(valid, silent, received)) {
+        memory_cleanse(&next, sizeof(next));
+        return;
+    }
+    st.d.initial_retry_wait = false;
+    bool keep = !valid && st.d.view.known && ends_in_zcl(st.d.view.balance) &&
+        (!st.d.view.encrypted || st.d.view.locked);
     st.d.funds_loaded = true;
-    st.d.funds_fresh = true;
+    st.d.summary_failed = !valid;
+    st.d.funds_fresh = valid;
     st.d.node_silent = !ok && silent;
-    st.d.summary_at = now();
-    if (!ok || !json) json = "";
-    (void)wallet_view_from_summary(json, &st.d.view);
+    if (valid) { st.d.summary_at = now(); st.d.initial_failures = 0; st.d.summary_validated = true; }
+    if (!keep) st.d.view = next;
+    memory_cleanse(&next, sizeof(next));
 }
 
 enum how { HOW_INVALID, HOW_UNKNOWN, HOW_AGREES, HOW_AHEAD, HOW_APART };
@@ -970,11 +1007,11 @@ static void apply_detail(bool ok, const char *json)
 
 /* ---- commands ---- */
 
-struct reply { bool ok, missing, silent; const char *json; };
+struct reply { bool ok, missing, silent, received; const char *json; };
 
 static void apply(const struct job *j, const struct reply *r)
 {
-    if (!strcmp(j->op, "summary")) apply_summary(r->ok, r->silent, r->json);
+    if (!strcmp(j->op, "summary")) apply_summary(r->ok, r->silent, r->received, r->json);
     else if (!strcmp(j->op, "fleet")) apply_fleet(r->ok, r->json);
     else if (!strcmp(j->op, "history")) apply_history(r->ok, r->json);
     else if (!strcmp(j->op, "detail")) apply_detail(r->ok, r->json);
@@ -988,7 +1025,7 @@ static void finish(const struct job *j, const struct reply *r)
     pthread_mutex_lock(&st.lock);
     live = st.ready && j->epoch == st.epoch;
     if (live) { apply(j, r); touch(); }
-    if (live && !strcmp(j->op, "summary")) cache_prepare(&keep);
+    if (live && !strcmp(j->op, "summary") && !st.d.summary_failed) cache_prepare(&keep);
     pthread_mutex_unlock(&st.lock);
     cache_commit(&keep);
     if (live && j->env.changed) j->env.changed(j->env.ctx);
@@ -1001,6 +1038,7 @@ static void run_job(const struct job *j)
     r.ok = out && j->env.run && j->env.run(j->env.ctx, j->op, j->arg, out, OUT_CAP);
     r.missing = out && !r.ok && strstr(out, "UNKNOWN_COMMAND");
     r.silent = out && !r.ok && (strstr(out, "NODE_UNAVAILABLE") || strstr(out, "The command timed out."));
+    r.received = out && out[0];
     r.json = json_start(out ? out : "");
     finish(j, &r);
     if (out) memory_cleanse(out, OUT_CAP);
@@ -1283,8 +1321,8 @@ static size_t from_funds(enum wallet_action action, struct job *jobs, enum walle
 {
     if (action == WALLET_ACT_RECEIVE) return enter(WALLET_PAGE_RECEIVE, jobs);
     if (action == WALLET_ACT_HISTORY) return enter(WALLET_PAGE_HISTORY, jobs);
-    if (action == WALLET_ACT_SEND) *outcome = WALLET_SEND;
-    if (action == WALLET_ACT_MAKE_PRIVATE && st.d.funds_loaded && !st.d.node_silent && st.d.view.can_make_private)
+    if (action == WALLET_ACT_SEND && !(st.d.summary_failed && st.d.view.known)) *outcome = WALLET_SEND;
+    if (action == WALLET_ACT_MAKE_PRIVATE && st.d.funds_loaded && !st.d.summary_failed && !st.d.node_silent && st.d.view.can_make_private)
         *outcome = WALLET_MAKE_PRIVATE;
     if (action == WALLET_ACT_START_NODE) *outcome = WALLET_START_NODE;
     if (action == WALLET_ACT_DISMISS_SEND) dismiss_send();
@@ -1368,6 +1406,23 @@ void wallet_screens_dropped(unsigned taps)
     pthread_mutex_unlock(&st.lock);
 }
 
+/* Schedule at most one summary in this tick, including a reveal-triggered read. */
+static void funds_schedule_refresh(struct job *jobs, size_t *count, uint64_t t)
+{
+    bool scheduled = *count != 0;
+    if (!scheduled && st.d.initial_retry_wait && !st.flight[K_SUMMARY].running &&
+        t - st.d.initial_retry_at >= WALLET_INITIAL_RETRY_MS &&
+        submit(jobs, count, K_SUMMARY, "summary", "")) {
+        st.d.initial_retry_wait = false;
+        scheduled = true;
+    }
+    if (t - st.d.requested_at < WALLET_REFRESH_MS) return;
+    st.d.requested_at = t;
+    if (!scheduled && (st.d.funds_loaded || !st.d.initial_failures))
+        (void)submit(jobs, count, K_SUMMARY, "summary", "");
+    (void)submit(jobs, count, K_FLEET, "fleet", "");
+}
+
 void wallet_screens_tick(void)
 {
     struct job jobs[3];
@@ -1377,18 +1432,14 @@ void wallet_screens_tick(void)
         send_refresh();
         count = reveal_poll(jobs);
         uint64_t t = now();
-        bool funds = st.d.funds_loaded && t - st.d.summary_at <= WALLET_STALE_MS;
+        bool funds = st.d.funds_loaded && !st.d.summary_failed && t - st.d.summary_at <= WALLET_STALE_MS;
         bool fleet = st.d.fleet_loaded && t - st.d.fleet_at <= WALLET_STALE_MS;
         if (funds != st.d.funds_fresh || fleet != st.d.fleet_fresh) { st.d.funds_fresh = funds; st.d.fleet_fresh = fleet; touch(); }
         if (st.d.cache.valid && (!st.d.funds_loaded || st.d.node_silent) && cache_minutes(&st.d.cache) != st.d.cache.minutes) {
             st.d.cache.minutes = cache_minutes(&st.d.cache);
             touch();
         }
-        if (t - st.d.requested_at >= WALLET_REFRESH_MS) {
-            st.d.requested_at = t;
-            (void)submit(jobs, &count, K_SUMMARY, "summary", "");
-            (void)submit(jobs, &count, K_FLEET, "fleet", "");
-        }
+        funds_schedule_refresh(jobs, &count, t);
     }
     pthread_mutex_unlock(&st.lock);
     dispatch(jobs, count);
@@ -1417,7 +1468,7 @@ bool wallet_screens_spendable(uint64_t *zat)
 {
     pthread_mutex_lock(&st.lock);
     const struct data *d = &st.d;
-    bool known = st.ready && !st.blocked && st.page == WALLET_PAGE_FUNDS && d->funds_loaded && !d->node_silent &&
+    bool known = st.ready && !st.blocked && st.page == WALLET_PAGE_FUNDS && d->funds_loaded && !d->summary_failed && !d->node_silent &&
                  now() - d->summary_at <= WALLET_STALE_MS && d->view.known && d->view.spendable_known;
     if (known) *zat = d->view.spendable_zat;
     pthread_mutex_unlock(&st.lock);

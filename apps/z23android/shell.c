@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "shell.h"
 #include "camera.h"
+#include "controller.h"
 #include "home.h"
 #include "jni_util.h"
 #include "launcher.h"
@@ -310,10 +311,14 @@ static void show_scan_screen(JNIEnv *env, enum zapp_camera_access access)
     (void)zj_visible(env, shell.scan_camera, preview);
     (void)zj_visible(env, shell.scan_panel, !preview);
 }
+/* A screen with a text field takes the keyboard's height as padding at its bottom (the system window insets include the
+ * keyboard under adjustResize), so its scroll view ends above the keyboard and the focused field scrolls into view. The
+ * window draws behind the system bars (setDecorFitsSystemWindows false), so no screen is resized unless it asks. */
+static bool fits_keyboard(JNIEnv *env, jobject root) { return zj_bool_property(env, root, "setFitsSystemWindows", true); }
 /* The wallet pages scroll above a fixed bar that holds their Back. */
 static bool build_wallet(JNIEnv *env, jobject root)
 {
-    jobject content = scroll_column(env, root, 16), footer = content ? column(env, DARK, 0, false) : NULL;
+    jobject content = fits_keyboard(env, root) ? scroll_column(env, root, 16) : NULL, footer = content ? column(env, DARK, 0, false) : NULL;
     bool ok = footer && zj_padding4(env, footer, 16, 0, 16, 8) && zj_append(env, root, footer) &&
         zapp_wallet_ui_create(env, shell.activity, content, footer);
     if (footer) (*env)->DeleteLocalRef(env, footer);
@@ -322,14 +327,14 @@ static bool build_wallet(JNIEnv *env, jobject root)
 }
 static bool build_send(JNIEnv *env, jobject root)
 {
-    jobject content = add_notice(env, root, SCREEN_SEND) ? scroll_column(env, root, 16) : NULL;
+    jobject content = fits_keyboard(env, root) && add_notice(env, root, SCREEN_SEND) ? scroll_column(env, root, 16) : NULL;
     bool ok = content && zapp_send_ui_create(env, shell.activity, content);
     if (content) (*env)->DeleteLocalRef(env, content);
     return ok;
 }
 static bool build_setup(JNIEnv *env, jobject root)
 {
-    jobject content = add_notice(env, root, SCREEN_SETUP) ? scroll_column(env, root, 16) : NULL;
+    jobject content = fits_keyboard(env, root) && add_notice(env, root, SCREEN_SETUP) ? scroll_column(env, root, 16) : NULL;
     bool ok = content && zapp_setup_ui_create(env, shell.activity, content);
     if (content) (*env)->DeleteLocalRef(env, content);
     return ok;
@@ -500,13 +505,18 @@ static void enter_screen(JNIEnv *env, enum screen next)
     if (next == SCREEN_WALLET) enter_wallet(env);
     if (next == SCREEN_SETUP) (void)zapp_setup_ui_open(env);
 }
+static bool leave_screen(JNIEnv *env, enum screen next)
+{
+    if (shell.current == SCREEN_SETUP && next != SCREEN_SETUP && !leave_setup(env)) return false;
+    if (shell.current == SCREEN_SEND && next != SCREEN_SEND && !leave_send(env)) return false;
+    if (shell.current == SCREEN_WALLET) leave_wallet(env);
+    return true;
+}
 static void go(JNIEnv *env, enum screen next)
 {
     next = screen_for(next);
     note_send_origin(next);
-    if (shell.current == SCREEN_SETUP && next != SCREEN_SETUP && !leave_setup(env)) return;
-    if (shell.current == SCREEN_SEND && next != SCREEN_SEND && !leave_send(env)) return;
-    if (shell.current == SCREEN_WALLET) leave_wallet(env);
+    if (!leave_screen(env, next)) return;
     char why[sizeof(shell.action_notice)] = "";
     if (next == SCREEN_ASSISTANT && !protect_window(env, true)) {
         assistant_refused(why, sizeof(why));
@@ -514,6 +524,8 @@ static void go(JNIEnv *env, enum screen next)
     }
     set_protection(env, next);
     if (next != SCREEN_SCAN) shell.camera_waiting = false;
+    /* An outcome line under More belongs to the visit that showed it; the camera screen is part of that visit. */
+    if (shell.current == SCREEN_ASSISTANT && next != SCREEN_ASSISTANT && next != SCREEN_SCAN) zapp_controller_clear_result();
     shell.current = next;
     snprintf(shell.action_notice, sizeof(shell.action_notice), "%s", why);
     set_text(env, shell.outcome_view, "");
@@ -720,14 +732,32 @@ static void touch(JNIEnv *env, const AInputEvent *event)
     } else if (action == AMOTION_EVENT_ACTION_CANCEL) shell.pressed.kind = TARGET_NONE;
     else if (action == AMOTION_EVENT_ACTION_UP) tap(env, x, y);
 }
+/* The keyboard's action key in a wallet field presses the button that belongs to the field: Set amount, or Use this address
+ * on Send. True when such a field has the focus: the key goes no further, and its release presses the button. */
+static bool field_key(JNIEnv *env, bool release)
+{
+    size_t button = 0;
+    if (shell.current == SCREEN_WALLET && zapp_wallet_ui_field_button(env, &button)) {
+        if (release) run_wallet(env, button);
+        return true;
+    }
+    if (shell.current == SCREEN_SEND && zapp_send_ui_field_button(env, &button)) {
+        if (release) run_send(env, button);
+        return true;
+    }
+    return false;
+}
+bool zapp_shell_editor(JNIEnv *env) { return field_key(env, true); }
 bool zapp_shell_input(JNIEnv *env, const AInputEvent *event)
 {
     if (!shell.activity || !event) return false;
     int32_t type = AInputEvent_getType(event);
-    if (type == AINPUT_EVENT_TYPE_KEY && AKeyEvent_getKeyCode(event) == AKEYCODE_BACK) {
+    int32_t key = type == AINPUT_EVENT_TYPE_KEY ? AKeyEvent_getKeyCode(event) : AKEYCODE_UNKNOWN;
+    if (key == AKEYCODE_BACK) {
         if (AKeyEvent_getAction(event) == AKEY_EVENT_ACTION_UP) back(env);
         return true;
     }
+    if ((key == AKEYCODE_ENTER || key == AKEYCODE_NUMPAD_ENTER) && field_key(env, AKeyEvent_getAction(event) == AKEY_EVENT_ACTION_UP)) return true;
     if (type == AINPUT_EVENT_TYPE_MOTION && zapp_touch_gate_drops(&shell.gate, AMotionEvent_getAction(event), AMotionEvent_getFlags(event))) {
         memset(&shell.pressed, 0, sizeof(shell.pressed));
         zapp_shell_dropped(env);
@@ -759,7 +789,8 @@ static bool scan_goes_to_send(const struct zapp_view *view)
 }
 /* After a scan: a payment code opens the Send screen with its review, or with the reason it was refused; a fleet
  * invitation opens the assistant with its review, a laptop pairing code opens its review, and anything else is shown
- * on Home with its text, or, when the scan began on Send, stays on Send. A cancelled scan never gets here. */
+ * on Home with its text, or, when the scan began on Send, stays on Send. A cancelled scan never gets here. An outcome
+ * shown on Home, the wallet or Send leaves the assistant's outcome line, so More never shows it later as current. */
 static void finish_scan(JNIEnv *env, const struct zapp_view *view)
 {
     char text[ZAPP_NOTICE_CAP + sizeof(view->scan_text) + 4];
@@ -771,11 +802,13 @@ static void finish_scan(JNIEnv *env, const struct zapp_view *view)
         const char *why = zapp_home_send_notice(view->scan_kind, view->scan_text, view->result);
         open_send(env, have ? &pay : NULL, have ? "" : why, false);
         memory_cleanse(&pay, sizeof(pay));
+        zapp_controller_clear_result();
         return;
     }
     if (zapp_home_scan_returns_to_wallet(target, shell.before_scan == SCREEN_WALLET && shell.current == SCREEN_WALLET)) {
         wallet_screens_scan_notice(view->result);
         zapp_wallet_ui_render(env);
+        zapp_controller_clear_result();
         return;
     }
     bool home = target == ZAPP_SCAN_TO_HOME;
@@ -785,6 +818,7 @@ static void finish_scan(JNIEnv *env, const struct zapp_view *view)
     snprintf(text, sizeof(text), "%s%s%s", view->result, view->scan_text[0] ? "\n\n" : "", view->scan_text);
     go(env, SCREEN_HOME);
     set_text(env, shell.outcome_view, text);
+    zapp_controller_clear_result();
 }
 
 /* The camera screen opens while a scan runs and closes when it ends; a payment code goes from the camera screen

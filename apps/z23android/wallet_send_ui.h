@@ -75,6 +75,9 @@ void zapp_send_progress_dismiss(void);
 void zapp_send_ui_dropped(JNIEnv *env);
 /* The button under a window point, or false. */
 bool zapp_send_ui_hit(JNIEnv *env, float x, float y, size_t *button, unsigned *id);
+/* The button the keyboard's action key presses: Set amount (or Change amount) from the amount field, Use this address from
+ * the address field; false when neither field has the focus. */
+bool zapp_send_ui_field_button(JNIEnv *env, size_t *button);
 /* Performs the button, then redraws. */
 enum zapp_send_outcome zapp_send_ui_press(JNIEnv *env, size_t button);
 

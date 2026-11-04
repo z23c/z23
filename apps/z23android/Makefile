@@ -323,6 +323,8 @@ test-host:
 	'$(BUILD_DIR)/node-restart-test'
 	$(HOST_CC) $(HOST_WARNINGS) -I. tests/action_text_test.c action_text.c -o '$(BUILD_DIR)/action-text-test'
 	'$(BUILD_DIR)/action-text-test'
+	$(HOST_CC) $(HOST_WARNINGS) -I. tests/view_hit_test.c view_hit.c -o '$(BUILD_DIR)/view-hit-test'
+	'$(BUILD_DIR)/view-hit-test'
 	@! sed -n '/^static void \*worker(/,/^}/p' controller.c | grep -n 'observe_node' || { echo 'the action worker must not read the node status: a stuck read would hold every tap' >&2; exit 1; }
 
 .PHONY: test-devkey

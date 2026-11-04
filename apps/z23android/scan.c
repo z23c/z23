@@ -74,7 +74,7 @@ static bool secret_shaped(const char *payload)
 {
     size_t run = 0;
     bool token_chars = true;
-    if (starts_loosely(payload, "z23:pair:") || starts_loosely(payload, "z23fleetjoin")) return true;
+    if (starts_loosely(payload, "z23:pair:") || starts_loosely(payload, "z23fleetjoin") || starts_loosely(payload, "z23fleetimport") || starts_loosely(payload, "fleet-head1:")) return true;
     for (const char *p = payload; *p; ++p) {
         if (starts_loosely(p, "\"token\"")) return true;
         if (ignorable((unsigned char)*p)) continue;
@@ -185,6 +185,10 @@ enum zapp_scan_kind zapp_scan_classify(const char *payload, char *value, size_t 
         if (typed_hex(payload, "z23:author:", 64, value, cap)) return ZAPP_SCAN_AUTHOR;
         if (typed_hex(payload, "z23:rater:", 64, value, cap)) return ZAPP_SCAN_RATER;
         if (typed_pair(payload, value, cap)) return ZAPP_SCAN_PAIR;
+        if (zapp_fleet_machine_text(payload, value, cap)) {
+            if (!fits(value, cap, payload)) { value[0] = 0; return ZAPP_SCAN_UNREADABLE; }
+            return ZAPP_SCAN_FLEET_MACHINE;
+        }
         if (zapp_fleet_invite_text(payload, value, cap)) return ZAPP_SCAN_FLEET;
     }
     if (payment_shaped(payload)) return classify_payment(payload, value, cap);

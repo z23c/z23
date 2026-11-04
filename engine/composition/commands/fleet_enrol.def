@@ -37,7 +37,7 @@
 
 ZCL_COMMAND_READY_COMMAND(
     "fleet.invite", "fleet", "",
-    "Mint one signed invite line that adds a computer to this fleet",
+    "Mint a signed fleet invitation",
     "One line of about three hundred characters: `z23 fleet join <token>`. "
     "--name is REQUIRED and is the human handle every fleet leaf prints "
     "first: 2 to 24 characters of a-z, 0-9 and interior dashes, unique "
@@ -70,8 +70,25 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_fleet_enrol_dispatch)
 
 ZCL_COMMAND_READY_COMMAND(
+    "fleet.preview", "fleet", "",
+    "Inspect an invitation or machine",
+    "Checks an invitation or a machine row without changing fleet state. "
+    "Compare the operator public key with the fleet manager before joining; "
+    "the signature alone does not identify its owner.", 0,
+    "fleet,preview,invite,verify",
+    "zcl.fleet_preview_input.v1", "zcl.fleet.preview.v1",
+    "token,line,datadir,require_anchor", "", "z23 fleet preview <token>",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_READ,
+    ZCL_COMMAND_RISK_READ, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_fleet_enrol_dispatch)
+
+ZCL_COMMAND_READY_COMMAND(
     "fleet.join", "fleet", "",
-    "Join this computer to a fleet from one pasted invite",
+    "Join this computer to a fleet",
     "Verifies the invite against the operator public key the invite itself "
     "carries, records that key as this box's fleet operator, creates this "
     "box's own Ed25519 key under the owner-private state root, collects what "
@@ -99,7 +116,7 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_COMMAND(
     "fleet.admit", "fleet", "",
-    "Admit one joined computer to this fleet's machine roster",
+    "Admit a joined computer",
     "Re-checks that the invite inside the receipt was minted by THIS box's "
     "key, that its nonce has never been spent, that the name is free, and "
     "that the box signed its own facts; then appends one operator-sealed row "
@@ -130,7 +147,7 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_COMMAND(
     "fleet.roster.head", "fleet", "",
-    "Sign a roster head that revokes lost or retired computers",
+    "Sign roster revocations",
     "Signs one roster HEAD with this box's operator key and prints it as a "
     "single line for pasting into `fleet import` on every box, this one "
     "included. A head carries a sequence number (--seq, at least 1, and "
@@ -158,7 +175,7 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_COMMAND(
     "fleet.import", "fleet", "",
-    "Copy one manager-sealed roster line onto this box's machine roster",
+    "Import a sealed roster line",
     "How a box that is not the manager learns which machines its fleet "
     "holds: paste one whole line from the manager's roster. The line is "
     "checked against the operator key this box already holds — the one "

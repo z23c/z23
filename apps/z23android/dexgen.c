@@ -9,15 +9,16 @@
  *       private static native int start(Service service, int id);
  *   }
  *
- *   public final class org.z23.nativeapp.KeyPrompt extends BiometricPrompt.AuthenticationCallback {
+ *   public final class org.z23.nativeapp.KeyPrompt extends BiometricPrompt.AuthenticationCallback
+ *       implements TextView.OnEditorActionListener {
  *       public KeyPrompt() { super(); }
  *       public native void onAuthenticationSucceeded(BiometricPrompt.AuthenticationResult result);
  *       public native void onAuthenticationError(int code, CharSequence text);
+ *       public native boolean onEditorAction(TextView view, int action, KeyEvent event);
  *   }
  *
- * KeyPrompt is the callback of the device key prompt (device_key_jni.c). It has no fields and no
- * logic: the device key code registers its two native methods with RegisterNatives after loading the
- * class, so the callback only wakes the native thread that waits for the owner.
+ * KeyPrompt supplies native callbacks for the device key prompt and editor action. The respective
+ * native modules register their methods with RegisterNatives after loading the class.
  * The output is deterministic. Usage: dexgen <output.dex> */
 #include <stdbool.h>
 #include <stdint.h>
@@ -29,46 +30,49 @@ enum { DEX_MAX = 4096, HEADER_SIZE = 0x70, NO_INDEX = -1 };
 /* String ids, in modified-UTF-8 byte order as the format requires. */
 enum {
     S_CLINIT, S_INIT, S_I, S_ILI, S_ILII, S_LL, S_SERVICE, S_INTENT, S_CALLBACK, S_RESULT, S_IBINDER,
-    S_CHARSEQ, S_STRING, S_SYSTEM, S_KEYPROMPT, S_NODE, S_V, S_VIL, S_VL, S_LOADLIB, S_ONERROR,
-    S_ONSUCCEEDED, S_ONBIND, S_ONSTART, S_START, S_LIB, S_COUNT
+    S_KEYEVENT, S_EDITORLISTENER, S_TEXTVIEW, S_CHARSEQ, S_STRING, S_SYSTEM, S_KEYPROMPT, S_NODE, S_V, S_VIL, S_VL, S_Z, S_ZLIL, S_LOADLIB, S_ONERROR,
+    S_ONSUCCEEDED, S_ONBIND, S_ONEDITOR, S_ONSTART, S_START, S_LIB, S_COUNT
 };
 static const char *const strings[S_COUNT] = {
     "<clinit>", "<init>", "I", "ILI", "ILII", "LL", "Landroid/app/Service;", "Landroid/content/Intent;",
     "Landroid/hardware/biometrics/BiometricPrompt$AuthenticationCallback;",
     "Landroid/hardware/biometrics/BiometricPrompt$AuthenticationResult;", "Landroid/os/IBinder;",
+    "Landroid/view/KeyEvent;", "Landroid/widget/TextView$OnEditorActionListener;", "Landroid/widget/TextView;",
     "Ljava/lang/CharSequence;", "Ljava/lang/String;", "Ljava/lang/System;", "Lorg/z23/nativeapp/KeyPrompt;",
-    "Lorg/z23/nativeapp/NodeService;", "V", "VIL", "VL", "loadLibrary", "onAuthenticationError",
-    "onAuthenticationSucceeded", "onBind", "onStartCommand", "start", "z23android"
+    "Lorg/z23/nativeapp/NodeService;", "V", "VIL", "VL", "Z", "ZLIL", "loadLibrary", "onAuthenticationError",
+    "onAuthenticationSucceeded", "onBind", "onEditorAction", "onStartCommand", "start", "z23android"
 };
 
 /* Type ids, ascending by string id. */
-enum { T_I, T_SERVICE, T_INTENT, T_CALLBACK, T_RESULT, T_IBINDER, T_CHARSEQ, T_STRING, T_SYSTEM, T_KEYPROMPT,
-       T_NODE, T_V, T_COUNT };
+enum { T_I, T_SERVICE, T_INTENT, T_CALLBACK, T_RESULT, T_IBINDER, T_KEYEVENT, T_EDITORLISTENER, T_TEXTVIEW, T_CHARSEQ, T_STRING, T_SYSTEM, T_KEYPROMPT,
+       T_NODE, T_V, T_Z, T_COUNT };
 static const uint8_t type_string[T_COUNT] = {
-    S_I, S_SERVICE, S_INTENT, S_CALLBACK, S_RESULT, S_IBINDER, S_CHARSEQ, S_STRING, S_SYSTEM, S_KEYPROMPT,
-    S_NODE, S_V
+    S_I, S_SERVICE, S_INTENT, S_CALLBACK, S_RESULT, S_IBINDER, S_KEYEVENT, S_EDITORLISTENER, S_TEXTVIEW, S_CHARSEQ, S_STRING, S_SYSTEM, S_KEYPROMPT,
+    S_NODE, S_V, S_Z
 };
 
 /* Parameter lists referenced by prototypes. */
-enum { L_NONE = -1, L_STRING, L_SERVICE_I, L_INTENT, L_INTENT_II, L_I_CHARSEQ, L_RESULT, L_COUNT };
+enum { L_NONE = -1, L_STRING, L_SERVICE_I, L_INTENT, L_INTENT_II, L_I_CHARSEQ, L_RESULT, L_EDITOR_ARGS, L_EDITOR_INTERFACE, L_COUNT };
 static const struct { uint8_t count; uint8_t types[3]; } lists[L_COUNT] = {
     { 1, { T_STRING } }, { 2, { T_SERVICE, T_I } }, { 1, { T_INTENT } }, { 3, { T_INTENT, T_I, T_I } },
-    { 2, { T_I, T_CHARSEQ } }, { 1, { T_RESULT } }
+    { 2, { T_I, T_CHARSEQ } }, { 1, { T_RESULT } },
+    { 3, { T_TEXTVIEW, T_I, T_KEYEVENT } }, { 1, { T_EDITORLISTENER } }
 };
 
 /* Prototypes, ascending by return type, then parameter types. */
-enum { P_I_SERVICE_I, P_I_INTENT_II, P_IBINDER_INTENT, P_V, P_V_I_CHARSEQ, P_V_RESULT, P_V_STRING, P_COUNT };
+enum { P_I_SERVICE_I, P_I_INTENT_II, P_IBINDER_INTENT, P_V, P_V_I_CHARSEQ, P_V_RESULT, P_V_STRING, P_Z_EDITOR, P_COUNT };
 static const struct { uint8_t shorty, ret; int8_t list; } protos[P_COUNT] = {
     { S_ILI, T_I, L_SERVICE_I }, { S_ILII, T_I, L_INTENT_II }, { S_LL, T_IBINDER, L_INTENT },
-    { S_V, T_V, L_NONE }, { S_VIL, T_V, L_I_CHARSEQ }, { S_VL, T_V, L_RESULT }, { S_VL, T_V, L_STRING }
+    { S_V, T_V, L_NONE }, { S_VIL, T_V, L_I_CHARSEQ }, { S_VL, T_V, L_RESULT }, { S_VL, T_V, L_STRING }, { S_ZLIL, T_Z, L_EDITOR_ARGS }
 };
 
 /* Methods, ascending by class, then name, then prototype. */
-enum { M_SERVICE_INIT, M_CALLBACK_INIT, M_LOADLIB, M_KP_INIT, M_KP_ERROR, M_KP_SUCCEEDED, M_CLINIT, M_INIT,
+enum { M_SERVICE_INIT, M_CALLBACK_INIT, M_LOADLIB, M_KP_INIT, M_KP_ERROR, M_KP_SUCCEEDED, M_KP_EDITOR, M_CLINIT, M_INIT,
        M_ONBIND, M_ONSTART, M_START, M_COUNT };
 static const struct { uint8_t cls, proto, name; } methods[M_COUNT] = {
     { T_SERVICE, P_V, S_INIT }, { T_CALLBACK, P_V, S_INIT }, { T_SYSTEM, P_V_STRING, S_LOADLIB },
     { T_KEYPROMPT, P_V, S_INIT }, { T_KEYPROMPT, P_V_I_CHARSEQ, S_ONERROR }, { T_KEYPROMPT, P_V_RESULT, S_ONSUCCEEDED },
+    { T_KEYPROMPT, P_Z_EDITOR, S_ONEDITOR },
     { T_NODE, P_V, S_CLINIT }, { T_NODE, P_V, S_INIT }, { T_NODE, P_IBINDER_INTENT, S_ONBIND },
     { T_NODE, P_I_INTENT_II, S_ONSTART }, { T_NODE, P_I_SERVICE_I, S_START }
 };
@@ -162,7 +166,7 @@ static void emit_strings(struct out *o, uint32_t ids_at)
         for (size_t j = 0; j <= len; ++j) put(o, (uint8_t)strings[i][j], 1);
     }
 }
-static void emit_lists(struct out *o, const uint32_t params[P_COUNT], uint32_t *first)
+static void emit_lists(struct out *o, const uint32_t params[P_COUNT], uint32_t *first, uint32_t *interface_at)
 {
     uint32_t at[L_COUNT];
     align4(o); *first = o->n;
@@ -173,6 +177,7 @@ static void emit_lists(struct out *o, const uint32_t params[P_COUNT], uint32_t *
     }
     for (int i = 0; i < P_COUNT; ++i)
         if (protos[i].list != L_NONE) patch32(o, params[i], at[protos[i].list]);
+    *interface_at = at[L_EDITOR_INTERFACE];
 }
 static void emit_code(struct out *o, uint32_t at[C_COUNT])
 {
@@ -201,13 +206,14 @@ static void emit_class_data(struct out *o, const uint32_t code[C_COUNT], uint32_
         { M_START, ACC_PRIVATE | ACC_STATIC | ACC_NATIVE, -1 }
     }, node_virtual[] = { { M_ONBIND, ACC_PUBLIC, C_ONBIND }, { M_ONSTART, ACC_PUBLIC, C_ONSTART } },
     prompt_direct[] = { { M_KP_INIT, ACC_PUBLIC | ACC_CONSTRUCTOR, C_KP_INIT } },
-    prompt_virtual[] = { { M_KP_ERROR, ACC_PUBLIC | ACC_NATIVE, -1 }, { M_KP_SUCCEEDED, ACC_PUBLIC | ACC_NATIVE, -1 } };
+    prompt_virtual[] = { { M_KP_ERROR, ACC_PUBLIC | ACC_NATIVE, -1 }, { M_KP_SUCCEEDED, ACC_PUBLIC | ACC_NATIVE, -1 },
+                         { M_KP_EDITOR, ACC_PUBLIC | ACC_NATIVE, -1 } };
     at[0] = o->n;
     uleb(o, 0); uleb(o, 0); uleb(o, 3); uleb(o, 2);
     emit_members(o, node_direct, 3, code); emit_members(o, node_virtual, 2, code);
     at[1] = o->n;
-    uleb(o, 0); uleb(o, 0); uleb(o, 1); uleb(o, 2);
-    emit_members(o, prompt_direct, 1, code); emit_members(o, prompt_virtual, 2, code);
+    uleb(o, 0); uleb(o, 0); uleb(o, 1); uleb(o, 3);
+    emit_members(o, prompt_direct, 1, code); emit_members(o, prompt_virtual, 3, code);
 }
 struct section { uint16_t type; uint32_t size, offset; };
 static void emit_map(struct out *o, const struct section *s, int count)
@@ -235,7 +241,7 @@ static void emit_header(struct out *o, const struct section *s, uint32_t map, ui
 size_t dexgen_build(uint8_t *out, size_t cap)
 {
     static struct out o;
-    uint32_t params[P_COUNT], code[C_COUNT], ids[2], lists_at, class_data[2];
+    uint32_t params[P_COUNT], code[C_COUNT], ids[2], lists_at, interface_at, class_data[2];
     memset(&o, 0, sizeof(o));
     for (int i = 0; i < HEADER_SIZE; ++i) put(&o, 0, 1);
     uint32_t string_ids = o.n;
@@ -250,7 +256,8 @@ size_t dexgen_build(uint8_t *out, size_t cap)
     }
     uint32_t data = o.n, string_data = o.n;
     emit_strings(&o, string_ids);
-    emit_lists(&o, params, &lists_at);
+    emit_lists(&o, params, &lists_at, &interface_at);
+    patch32(&o, class_def + 32 + 12, interface_at);
     emit_code(&o, code);
     emit_class_data(&o, code, class_data);
     for (uint32_t i = 0; i < 2; ++i) patch32(&o, class_def + 32 * i + 24, class_data[i]);

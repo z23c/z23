@@ -6,8 +6,8 @@
 #include <string.h>
 
 #define HOME_TILES \
-    "{\"type\":\"action\",\"id\":\"scan\"},{\"type\":\"action\",\"id\":\"assistant\"}," \
-    "{\"type\":\"action\",\"id\":\"wallet\"}"
+    "{\"type\":\"action\",\"id\":\"wallet\"},{\"type\":\"action\",\"id\":\"scan\"}," \
+    "{\"type\":\"action\",\"id\":\"assistant\"}"
 #define HOME_PHONE_TEXT \
     "{\"type\":\"text\",\"field\":\"node_line\",\"style\":\"title\",\"lines\":2}," \
     "{\"type\":\"text\",\"field\":\"sync\",\"style\":\"caption\",\"max_lines\":3}," \
@@ -16,22 +16,22 @@
     "{\"type\":\"grid\",\"columns\":" columns ",\"card\":\"z23_app\",\"children\":[" \
     "{\"type\":\"action\",\"id\":\"launch\",\"field\":\"label\"}]}"
 
-/* Black, immersive: the phone card, the Z23 apps, then big tiles that fill the screen. Apps and Settings stay in the fixed bar of the app, not in a layout. */
+/* The phone card and primary actions precede installed apps. Apps and Settings stay in the fixed bar. */
 static const char default_layout[] =
     "{\"schema\":\"zcl.layout_recipe.v1\",\"id\":\"default\","
     "\"theme\":{\"background\":\"#000000\",\"text\":\"#ffffff\",\"muted\":\"#9a9a9a\",\"accent\":\"#3ddc97\"},"
     "\"screens\":{\"home\":{\"container\":\"column\",\"children\":["
     "{\"type\":\"column\",\"card\":\"phone\",\"children\":[" HOME_PHONE_TEXT "]},"
-    HOME_Z23_APPS("2") ","
-    "{\"type\":\"grid\",\"columns\":2,\"children\":[" HOME_TILES "]}]}}}";
-/* Light: the phone card, the Z23 apps, three tiles (Scan, Assistant, Wallet), then every other launchable app. */
+    "{\"type\":\"grid\",\"columns\":2,\"children\":[" HOME_TILES "]},"
+    HOME_Z23_APPS("2") "]}}}";
+/* The light layout keeps the same primary actions, followed by every launchable app. */
 static const char classic_layout[] =
     "{\"schema\":\"zcl.layout_recipe.v1\",\"id\":\"classic\","
     "\"theme\":{\"background\":\"#f7f5ef\",\"text\":\"#262b2b\",\"muted\":\"#5f6662\",\"accent\":\"#235e50\"},"
     "\"screens\":{\"home\":{\"container\":\"list\",\"children\":["
     "{\"type\":\"column\",\"card\":\"phone\",\"children\":[" HOME_PHONE_TEXT "]},"
-    HOME_Z23_APPS("2") ","
     "{\"type\":\"grid\",\"columns\":2,\"children\":[" HOME_TILES "]},"
+    HOME_Z23_APPS("2") ","
     "{\"type\":\"column\",\"card\":\"app\",\"children\":["
     "{\"type\":\"action\",\"id\":\"launch\",\"field\":\"label\"}]}]}}}";
 static const struct { const char *name, *document; } layouts[] = {

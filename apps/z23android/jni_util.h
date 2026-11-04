@@ -22,6 +22,8 @@ jobject zj_widget(JNIEnv *env, const char *type, jobject activity);
 jstring zj_string(JNIEnv *env, const char *value);
 bool zj_char_sequence(JNIEnv *env, jobject view, const char *method, const char *value);
 bool zj_text(JNIEnv *env, jobject view, const char *value);
+/* Sets the text of a field and puts the cursor after it, so typing goes on where it stopped. */
+bool zj_text_at_end(JNIEnv *env, jobject field, const char *value);
 bool zj_append(JNIEnv *env, jobject group, jobject view);
 bool zj_keep(JNIEnv *env, jobject *dest, jobject value);
 bool zj_visible(JNIEnv *env, jobject view, bool visible);
@@ -30,8 +32,13 @@ bool zj_flatten(JNIEnv *env, jobject view);
 /* Gives a child of a LinearLayout its size (pixels or a LayoutParams constant), weight and margins. */
 bool zj_margins(JNIEnv *env, jobject view, int width, int height, float weight, int left_dp, int top_dp, int right_dp, int bottom_dp);
 bool zj_place(JNIEnv *env, jobject view, int width, int height, float weight, int bottom_dp);
-/* Whether a window point lies inside a shown view. */
+/* Whether a touch at a window point reaches the view: the point lies in the part of the shown view that is on screen
+ * (zapp_view_hit), so a view scrolled out of its ScrollView takes no tap. */
 bool zj_hit(JNIEnv *env, jobject view, float x, float y);
+/* Whether the view holds the input focus; false for NULL. */
+bool zj_focused(JNIEnv *env, jobject view);
+/* Attach the native editor action callback. */
+bool zj_editor_listener(JNIEnv *env, jobject view);
 /* Copies a Java string as UTF-8; false when it does not fit in cap. */
 bool zj_copy_utf(JNIEnv *env, jstring value, char *out, size_t cap);
 /* show: gives a text field focus and asks for its soft keyboard. Otherwise hides the keyboard from the window of the view.

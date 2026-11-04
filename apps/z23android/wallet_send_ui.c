@@ -36,7 +36,6 @@
 #define MEMO_PANEL 0xff1c2430u
 #define INPUT_TYPE_DECIMAL 8194          /* TYPE_CLASS_NUMBER | TYPE_NUMBER_FLAG_DECIMAL */
 #define INPUT_TYPE_ADDRESS 0x80001       /* TYPE_CLASS_TEXT | TYPE_TEXT_FLAG_NO_SUGGESTIONS */
-#define IME_NO_LEARNING 0x1000000        /* IME_FLAG_NO_PERSONALIZED_LEARNING */
 #define GRAVITY_CENTER_HORIZONTAL 1
 #define BUTTONS_MAX 8
 #define TEXT_CAP (ZAPP_PAY_INPUT_MAX + 1)
@@ -390,7 +389,8 @@ static bool input_view(JNIEnv *env, const char *hint, int type, jobject *keep)
 {
     jobject view = zj_widget(env, "android/widget/EditText", ui.app);
     bool ok = view && zj_typography(env, view, 18.0f, (jint)WHITE) && zj_int_property(env, view, "setInputType", type) &&
-              zj_int_property(env, view, "setImeOptions", IME_NO_LEARNING) && zj_int_property(env, view, "setHintTextColor", (jint)0xff808080u) &&
+              zj_int_property(env, view, "setImeOptions", ZAPP_FIELD_IME_NO_LEARNING | ZAPP_FIELD_IME_ACTION_GO) && zj_editor_listener(env, view) &&
+              zj_int_property(env, view, "setHintTextColor", (jint)0xff808080u) &&
               zj_char_sequence(env, view, "setHint", hint) && zj_margins(env, view, MATCH, WRAP, 0.0f, 0, 8, 0, 0) &&
               zj_append(env, ui.container, view) && zj_keep(env, keep, view);
     if (view) {
@@ -553,30 +553,18 @@ static bool same_page(bool flow, const struct wss_view *v)
     return !flow || (ui.drawn.state == v->state && ui.drawn.serial == v->serial);
 }
 static bool read_input(JNIEnv *env, jobject input, char *out, size_t cap);
-static bool field_focused(JNIEnv *env, jobject field)
-{
-    jmethodID focused = zj_method(env, field, "isFocused", "()Z");
-    bool yes = focused && (*env)->CallBooleanMethod(env, field, focused);
-    return zj_clean(env) && yes;
-}
 static void keep_typed(JNIEnv *env, bool flow, const struct wss_view *v, struct typed *t)
 {
     jobject field = page_field(ui.drawn_flow);
     memset(t, 0, sizeof(*t));
     if (!field || !same_page(flow, v)) return;
     t->kept = read_input(env, field, t->text, sizeof(t->text)) && t->text[0];
-    t->focused = field_focused(env, field);
+    t->focused = zj_focused(env, field);
 }
 static void restore_typed(JNIEnv *env, bool flow, struct typed *t)
 {
     jobject field = page_field(flow);
-    if (field && t->kept && zj_text(env, field, t->text)) {
-        jobject text = zj_object_property(env, field, "getText", "()Landroid/text/Editable;");
-        jmethodID length = text ? zj_method(env, text, "length", "()I") : NULL;
-        jint end = length ? (*env)->CallIntMethod(env, text, length) : 0;
-        if (zj_clean(env) && length) (void)zj_int_property(env, field, "setSelection", end);
-        if (text) (*env)->DeleteLocalRef(env, text);
-    }
+    if (field && t->kept) (void)zj_text_at_end(env, field, t->text);
     if (field && t->focused) (void)zj_keyboard(env, ui.app, field, true);
     memory_cleanse(t, sizeof(*t));
 }
@@ -803,6 +791,15 @@ bool zapp_send_ui_hit(JNIEnv *env, float x, float y, size_t *button, unsigned *i
         if (zj_hit(env, ui.buttons[i], x, y)) { *button = i; *id = (unsigned)ui.button_id[i]; return true; }
     return false;
 }
+bool zapp_send_ui_field_button(JNIEnv *env, size_t *button)
+{
+    bool amount = zj_focused(env, ui.amount_input);
+    if (!amount && !zj_focused(env, ui.address_input)) return false;
+    enum button wanted = amount ? B_SET_AMOUNT : B_USE_ADDRESS;
+    for (size_t i = 0; i < ui.button_count; ++i)
+        if (ui.button_id[i] == wanted) { *button = i; return true; }
+    return false;
+}
 /* The text of a field, or false when it cannot be read or does not fit. */
 static bool read_input(JNIEnv *env, jobject input, char *out, size_t cap)
 {
@@ -858,6 +855,8 @@ static void set_amount(JNIEnv *env)
     if (!ok) { say(ui.hint, "That is not an amount. Write it in ZCL, for example 1.5."); return; }
     ui.hint[0] = 0;
     ui.version++;
+    /* The keyboard goes away with the amount; a page drawn again with the field focused asks for it again. */
+    (void)zj_keyboard(env, ui.app, ui.container, false);
     wss_edit_amount(ui.keeper.screen, zat);
 }
 

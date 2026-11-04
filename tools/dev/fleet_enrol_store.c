@@ -59,15 +59,16 @@ static void fe_why(const char **why, const char *token)
 /* Read one whole state file into `buf`. A missing file is not an error: it
  * is an empty roster, which is what a manager has before the first box
  * joins. `len` is set to the byte count read, always NUL-terminated. */
-static bool fe_slurp(const char *leaf, char *buf, size_t cap, size_t *len,
-                     const char **why)
+static bool fe_slurp_mode(const char *leaf, char *buf, size_t cap, size_t *len,
+                          const char **why, bool readonly)
 {
     struct platform_positioned_file file;
     char path[FLEET_ENROL_PATH_MAX];
     uint64_t size = 0;
     *len = 0;
     buf[0] = '\0';
-    if (!fleet_enrol_state_path(leaf, path, sizeof(path))) {
+    if (!(readonly ? fleet_enrol_state_path_existing(leaf, path, sizeof(path)) :
+                      fleet_enrol_state_path(leaf, path, sizeof(path)))) {
         fe_why(why, FLEET_ENROL_WHY_STATE_ROOT);
         return false;
     }
@@ -89,6 +90,10 @@ static bool fe_slurp(const char *leaf, char *buf, size_t cap, size_t *len,
     buf[*len] = '\0';
     return true;
 }
+
+static bool fe_slurp(const char *leaf, char *buf, size_t cap, size_t *len,
+                     const char **why)
+{ return fe_slurp_mode(leaf, buf, cap, len, why, false); }
 
 /* Append one NUL-terminated line plus its newline, under an exclusive
  * whole-file lock so two admissions on one box cannot interleave halves of
@@ -179,7 +184,7 @@ static void fe_walk_line(char *line, void *user)
     if (w->visit) w->visit(&w->machine, w->user);
 }
 
-static bool fe_roster_walk(struct fe_walk *w, const char **why)
+static bool fe_roster_walk(struct fe_walk *w, const char **why, bool readonly)
 {
     char *text = zcl_malloc(FLEET_ROSTER_MAX_BYTES + 1u, "fleet-roster");
     size_t len = 0;
@@ -189,8 +194,8 @@ static bool fe_roster_walk(struct fe_walk *w, const char **why)
         fe_why(why, FLEET_ENROL_WHY_ROSTER_UNREADABLE);
         return false;
     }
-    if (!fe_slurp(FLEET_ROSTER_LEAF, text, FLEET_ROSTER_MAX_BYTES + 1u, &len,
-                  why)) {
+    if (!fe_slurp_mode(FLEET_ROSTER_LEAF, text, FLEET_ROSTER_MAX_BYTES + 1u, &len,
+                       why, readonly)) {
         free(text);
         return false;
     }
@@ -210,18 +215,30 @@ static bool fe_roster_walk(struct fe_walk *w, const char **why)
     return true;
 }
 
-bool fleet_roster_scan(const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES],
-                       const char *name,
-                       const uint8_t box_pubkey[FLEET_ENROL_PUBKEY_BYTES],
-                       struct fleet_roster_scan *out, const char **why)
+static bool fe_roster_query(const uint8_t *operator_pubkey, const char *name,
+                            const uint8_t *box_pubkey,
+                            void (*visit)(const struct fleet_machine *, void *),
+                            void *user, struct fleet_roster_scan *out,
+                            const char **why, bool readonly)
 {
     struct fe_walk w = {0};
     w.operator_pubkey = operator_pubkey;
     w.name = name;
     w.box_pubkey = box_pubkey;
     w.scan = out;
+    w.visit = visit;
+    w.user = user;
     fe_why(why, NULL);
-    return fe_roster_walk(&w, why);
+    return fe_roster_walk(&w, why, readonly);
+}
+
+bool fleet_roster_scan(const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES],
+                       const char *name,
+                       const uint8_t box_pubkey[FLEET_ENROL_PUBKEY_BYTES],
+                       struct fleet_roster_scan *out, const char **why)
+{
+    return fe_roster_query(operator_pubkey, name, box_pubkey, NULL, NULL,
+                           out, why, false);
 }
 
 bool fleet_roster_each(const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES],
@@ -229,13 +246,8 @@ bool fleet_roster_each(const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES],
                        void *user, struct fleet_roster_scan *out,
                        const char **why)
 {
-    struct fe_walk w = {0};
-    w.operator_pubkey = operator_pubkey;
-    w.scan = out;
-    w.visit = visit;
-    w.user = user;
-    fe_why(why, NULL);
-    return fe_roster_walk(&w, why);
+    return fe_roster_query(operator_pubkey, NULL, NULL, visit, user,
+                           out, why, false);
 }
 
 struct fe_raw_walk {
@@ -379,15 +391,16 @@ static bool fe_state_lock_take(struct fe_state_lock *l, const char **why)
 
 enum fe_read { FE_READ_OK = 0, FE_READ_ABSENT, FE_READ_BAD };
 
-static enum fe_read fe_read_strict(const char *leaf, char *buf, size_t cap,
-                                   size_t *len)
+static enum fe_read fe_read_strict_mode(const char *leaf, char *buf, size_t cap,
+                                        size_t *len, bool readonly)
 {
     struct platform_positioned_file file;
     char path[FLEET_ENROL_PATH_MAX];
     uint64_t size = 0;
     *len = 0;
     buf[0] = '\0';
-    if (!fleet_enrol_state_path(leaf, path, sizeof(path)))
+    if (!(readonly ? fleet_enrol_state_path_existing(leaf, path, sizeof(path)) :
+                      fleet_enrol_state_path(leaf, path, sizeof(path))))
         return FE_READ_BAD;
     if (platform_private_path_absent(path))
         return FE_READ_ABSENT;
@@ -405,6 +418,10 @@ static enum fe_read fe_read_strict(const char *leaf, char *buf, size_t cap,
     *len = (size_t)size;
     return FE_READ_OK;
 }
+
+static enum fe_read fe_read_strict(const char *leaf, char *buf, size_t cap,
+                                   size_t *len)
+{ return fe_read_strict_mode(leaf, buf, cap, len, false); }
 
 /* Flush the directory that holds `path`, so a rename into it is durable
  * before the next step of a multi-leaf transition. */
@@ -486,12 +503,12 @@ struct fe_pin {
     uint8_t key[FLEET_ENROL_PUBKEY_BYTES];
 };
 
-static bool fe_pin_read(struct fe_pin *pin, const char **why)
+static bool fe_pin_read(struct fe_pin *pin, const char **why, bool readonly)
 {
     char text[FLEET_ENROL_PUBKEY_HEX + 2];
     size_t len = 0;
     memset(pin, 0, sizeof(*pin));
-    enum fe_read r = fe_read_strict(FLEET_PIN_LEAF, text, sizeof(text), &len);
+    enum fe_read r = fe_read_strict_mode(FLEET_PIN_LEAF, text, sizeof(text), &len, readonly);
     if (r == FE_READ_ABSENT)
         return true;
     if (r != FE_READ_OK || len != (size_t)(FLEET_ENROL_PUBKEY_HEX - 1) ||
@@ -524,11 +541,11 @@ static bool fe_pin_write(const uint8_t key[FLEET_ENROL_PUBKEY_BYTES],
 /* May an import sealed by `fp` go ahead? `write` says the pin must be
  * (re)written once the import has succeeded. */
 static bool fe_pin_gate(const uint8_t fp[FLEET_ENROL_PUBKEY_BYTES],
-                        bool confirm, bool *write, const char **why)
+                        bool confirm, bool *write, const char **why, bool readonly)
 {
     struct fe_pin pin;
     *write = false;
-    if (!fe_pin_read(&pin, why))
+    if (!fe_pin_read(&pin, why, readonly))
         return false;
     if (!pin.present) {
         *write = true;
@@ -608,11 +625,11 @@ static bool fe_hwm_parse(char *text, size_t len, struct fe_hwm *m)
     return errno == 0 && end && *end == '\0';
 }
 
-static enum fe_hwm_state fe_hwm_read(struct fe_hwm *m)
+static enum fe_hwm_state fe_hwm_read_mode(struct fe_hwm *m, bool readonly)
 {
     char text[256];
     size_t len = 0;
-    enum fe_read r = fe_read_strict(FLEET_HWM_LEAF, text, sizeof(text), &len);
+    enum fe_read r = fe_read_strict_mode(FLEET_HWM_LEAF, text, sizeof(text), &len, readonly);
     memset(m, 0, sizeof(*m));
     if (r == FE_READ_ABSENT)
         return FE_HWM_ABSENT;
@@ -624,6 +641,9 @@ static enum fe_hwm_state fe_hwm_read(struct fe_hwm *m)
     }
     return FE_HWM_OK;
 }
+
+static enum fe_hwm_state fe_hwm_read(struct fe_hwm *m)
+{ return fe_hwm_read_mode(m, false); }
 
 static bool fe_hwm_write(const struct fe_hwm *m, bool *changed,
                          const char **why)
@@ -666,9 +686,9 @@ static const char *fe_head_vouched(
     return NULL;
 }
 
-enum fleet_head_state fleet_head_load(
+static enum fleet_head_state fe_head_load_mode(
     const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES],
-    struct fleet_head *out, const char **why)
+    struct fleet_head *out, const char **why, bool readonly)
 {
     char *text = zcl_malloc(FLEET_ENROL_HEAD_TEXT_MAX + 4u, "fleet-head");
     const char *bad;
@@ -682,9 +702,9 @@ enum fleet_head_state fleet_head_load(
         fe_why(why, FLEET_ENROL_WHY_HEAD_UNREADABLE);
         return FLEET_HEAD_BAD;
     }
-    r = fe_read_strict(FLEET_HEAD_LEAF, text, FLEET_ENROL_HEAD_TEXT_MAX + 4u,
-                       &len);
-    hs = fe_hwm_read(&m);
+    r = fe_read_strict_mode(FLEET_HEAD_LEAF, text, FLEET_ENROL_HEAD_TEXT_MAX + 4u,
+                            &len, readonly);
+    hs = fe_hwm_read_mode(&m, readonly);
     if (r == FE_READ_ABSENT && hs == FE_HWM_ABSENT) {
         free(text);
         return FLEET_HEAD_ABSENT;
@@ -925,7 +945,7 @@ static bool fe_head_import_locked(const char *line,
                  "an operator key other than the one this box trusts");
         return false;
     }
-    if (!fe_pin_gate(out->operator_pubkey, confirm_operator_change, &pin, why) ||
+    if (!fe_pin_gate(out->operator_pubkey, confirm_operator_change, &pin, why, false) ||
         !fe_head_rule(out, line, operator_pubkey, &store, why))
         return false;
     fe_test_after_check();
@@ -950,9 +970,15 @@ bool fleet_head_import(const char *line,
 
 /* A machine row must not be imported for a box the live head revokes, and
  * must not be imported past a head this box cannot trust. */
+enum fleet_head_state fleet_head_load(
+    const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES],
+    struct fleet_head *out, const char **why)
+{ return fe_head_load_mode(operator_pubkey, out, why, false); }
+
 static bool fe_row_head_gate(
     const struct fleet_machine *row,
-    const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES], const char **why)
+    const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES], const char **why,
+    bool readonly)
 {
     struct fleet_head *head = zcl_malloc(sizeof(*head), "fleet-head-gate");
     enum fleet_head_state state;
@@ -961,7 +987,7 @@ static bool fe_row_head_gate(
         fe_why(why, FLEET_ENROL_WHY_HEAD_UNREADABLE);
         return false;
     }
-    state = fleet_head_load(operator_pubkey, head, why);
+    state = fe_head_load_mode(operator_pubkey, head, why, readonly);
     revoked = state == FLEET_HEAD_OK &&
               (fleet_head_revokes(head, row->receipt.box_pubkey) ||
                fleet_head_revokes(head, row->receipt.signer_pubkey));
@@ -992,6 +1018,43 @@ static bool fe_row_pin_finish(bool pin, bool appended,
     return true;
 }
 
+static bool fe_row_validate(const char *line,
+                            const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES],
+                            bool confirm_operator_change, struct fleet_machine *out,
+                            struct fleet_roster_scan *scan, bool *pin,
+                            const char **why, bool readonly)
+{
+    fe_why(why, NULL);
+    if (!line || !operator_pubkey || !out ||
+        strlen(line) >= (size_t)FLEET_ENROL_MACHINE_TEXT_MAX) {
+        fe_why(why, FLEET_ENROL_WHY_ARGUMENTS);
+        return false;
+    }
+    if (!fleet_machine_parse(line, operator_pubkey, out, NULL)) {
+        fe_why(why, FLEET_ENROL_WHY_ROSTER_LINE_UNSEALED);
+        return false;
+    }
+    if (!fe_pin_gate(operator_pubkey, confirm_operator_change, pin, why, readonly) ||
+        !fe_row_head_gate(out, operator_pubkey, why, readonly) ||
+        !fe_roster_query(operator_pubkey, out->receipt.invite.name,
+                         out->receipt.box_pubkey, NULL, NULL, scan, why, readonly))
+        return false;
+    if (scan->name_taken && !scan->same_box) {
+        fe_why(why, FLEET_ENROL_WHY_NAME_TAKEN);
+        return false;
+    }
+    return true;
+}
+
+bool fleet_roster_preview(const char *line,
+                          const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES],
+                          struct fleet_machine *out, const char **why)
+{
+    struct fleet_roster_scan scan = {0};
+    bool pin = false;
+    return fe_row_validate(line, operator_pubkey, false, out, &scan, &pin, why, true);
+}
+
 static bool fe_row_import_locked(const char *line,
                                 const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES],
                                 bool confirm_operator_change,
@@ -1000,30 +1063,10 @@ static bool fe_row_import_locked(const char *line,
 {
     struct fleet_roster_scan scan = {0};
     bool pin = false;
-    fe_why(why, NULL);
     *appended = false;
-    if (!line || !operator_pubkey ||
-        strlen(line) >= (size_t)FLEET_ENROL_MACHINE_TEXT_MAX) {
-        fe_why(why, FLEET_ENROL_WHY_ARGUMENTS);
+    if (!fe_row_validate(line, operator_pubkey, confirm_operator_change, out,
+                         &scan, &pin, why, false))
         return false;
-    }
-    /* Verify FIRST, against the key this box already trusts, and only
-     * then look at the file: a line nobody this box trusts sealed never
-     * reaches the roster, not even as a counted unverifiable row. */
-    if (!fleet_machine_parse(line, operator_pubkey, out, NULL)) {
-        fe_why(why, FLEET_ENROL_WHY_ROSTER_LINE_UNSEALED);
-        return false;
-    }
-    if (!fe_pin_gate(operator_pubkey, confirm_operator_change, &pin, why) ||
-        !fe_row_head_gate(out, operator_pubkey, why))
-        return false;
-    if (!fleet_roster_scan(operator_pubkey, out->receipt.invite.name,
-                           out->receipt.box_pubkey, &scan, why))
-        return false;
-    if (scan.name_taken && !scan.same_box) {
-        fe_why(why, FLEET_ENROL_WHY_NAME_TAKEN);
-        return false;
-    }
     if (!scan.same_box) {
         if (!fleet_roster_append(line, why))
             return false;

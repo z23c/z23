@@ -110,6 +110,8 @@ static void test_key_prompt_methods(const char *dexdump, const char *path, const
     listing[got] = '\0';
     CHECK(key_prompt_method(listing, "onAuthenticationSucceeded", "(Landroid/hardware/biometrics/BiometricPrompt$AuthenticationResult;)V", true));
     CHECK(key_prompt_method(listing, "onAuthenticationError", "(ILjava/lang/CharSequence;)V", true));
+    CHECK(key_prompt_method(listing, "onEditorAction", "(Landroid/widget/TextView;ILandroid/view/KeyEvent;)Z", true));
+    CHECK(strstr(listing, "Landroid/widget/TextView$OnEditorActionListener;"));
     CHECK(key_prompt_method(listing, "<init>", "()V", false));
     remove(listing_path);
 }

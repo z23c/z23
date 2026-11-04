@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define A "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion"
@@ -76,6 +77,39 @@ static void named_roster(void)
     zapp_private_args(&a, A ":8033 r1 extra\nbogus.example:1 name\n");
     assert(a.argc == 3 && !strcmp(a.argv[2], "-addnode=" A ":8033"));
 }
+static void receipt(const char *dir)
+{
+    char token[ZAPP_FLEET_RECEIPT_MAX + 2], out[sizeof(token)], path[512], target[512];
+    memset(token, 65, 128); token[128] = 0;
+    assert(zapp_fleet_receipt_save(dir, token));
+    assert(zapp_fleet_receipt_load(dir, out, sizeof(out)) == 128 && !strcmp(out, token));
+    snprintf(path, sizeof(path), "%s/fleet-join-receipt", dir);
+    struct stat st; assert(stat(path, &st) == 0 && (st.st_mode & 0777) == 0600);
+    token[0] = 61;
+    assert(!zapp_fleet_receipt_save(dir, token));
+    assert(zapp_fleet_receipt_load(dir, out, sizeof(out)) == 128 && out[0] == 65);
+    assert(zapp_fleet_receipt_load(dir, out, 128) == 0 && !out[0]);
+    token[0] = 65;
+    assert(chmod(dir, 0500) == 0);
+    assert(!zapp_fleet_receipt_save(dir, token));
+    assert(chmod(dir, 0700) == 0);
+    assert(zapp_fleet_receipt_load(dir, out, sizeof(out)) == 128 && out[0] == 65);
+    int fd = open(path, O_WRONLY | O_TRUNC); assert(fd >= 0);
+    memset(token, 66, sizeof(token));
+    assert(write(fd, token, sizeof(token)) == (ssize_t)sizeof(token)); assert(close(fd) == 0);
+    assert(zapp_fleet_receipt_load(dir, out, sizeof(out)) == 0 && !out[0]);
+    fd = open(path, O_WRONLY | O_TRUNC); assert(fd >= 0);
+    assert(write(fd, token, 127) == 127); assert(close(fd) == 0);
+    assert(zapp_fleet_receipt_load(dir, out, sizeof(out)) == 0 && !out[0]);
+    assert(unlink(path) == 0);
+    snprintf(target, sizeof(target), "%s/receipt-target", dir);
+    fd = open(target, O_WRONLY | O_CREAT | O_EXCL, 0600); assert(fd >= 0); assert(close(fd) == 0);
+    assert(symlink(target, path) == 0);
+    assert(zapp_fleet_receipt_load(dir, out, sizeof(out)) == 0 && !out[0]);
+    assert(unlink(path) == 0); assert(mkfifo(path, 0600) == 0);
+    assert(zapp_fleet_receipt_load(dir, out, sizeof(out)) == 0 && !out[0]);
+    assert(unlink(path) == 0); assert(unlink(target) == 0);
+}
 int main(int argc, char **argv)
 {
     assert(argc == 2);
@@ -83,6 +117,7 @@ int main(int argc, char **argv)
     arguments();
     roster(argv[1]);
     named_roster();
+    receipt(argv[1]);
     puts("private tests passed");
     return 0;
 }

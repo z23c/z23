@@ -9,6 +9,9 @@ void zapp_controller_snapshot(struct zapp_view *view);
  * the request is refused, with the plain reason in why (which may be NULL). */
 bool zapp_controller_action(const char *action, const char *argument, char *why, size_t cap);
 void zapp_controller_detach(void);
+/* The owner left the outcome line beside the controls under More (a scan, an invitation, a host control): it is cleared, so an
+ * old failure is never shown as current. While an action runs the line is that action's own and stays. */
+void zapp_controller_clear_result(void);
 /* Hidden, the app cancels voice and stops observing the node and fleet, which keep running on
  * their own; shown again, it observes at once. */
 void zapp_controller_visible(bool visible);

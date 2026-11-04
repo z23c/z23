@@ -1,5 +1,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "jni_util.h"
+#include "view_hit.h"
+#include "native_ui.h"
 #include <string.h>
 
 static float density = 1.0f;
@@ -96,6 +98,16 @@ bool zj_text(JNIEnv *env, jobject view, const char *value)
 {
     return zj_char_sequence(env, view, "setText", value);
 }
+bool zj_text_at_end(JNIEnv *env, jobject field, const char *value)
+{
+    if (!zj_text(env, field, value)) return false;
+    jobject text = zj_object_property(env, field, "getText", "()Landroid/text/Editable;");
+    jmethodID length = text ? zj_method(env, text, "length", "()I") : NULL;
+    jint end = length ? (*env)->CallIntMethod(env, text, length) : 0;
+    bool ok = zj_clean(env) && length && zj_int_property(env, field, "setSelection", end);
+    if (text) (*env)->DeleteLocalRef(env, text);
+    return ok;
+}
 bool zj_append(JNIEnv *env, jobject group, jobject view)
 {
     jclass cls = (*env)->GetObjectClass(env, group);
@@ -165,25 +177,69 @@ bool zj_place(JNIEnv *env, jobject view, int width, int height, float weight, in
 {
     return zj_margins(env, view, width, height, weight, 0, 0, 0, bottom_dp);
 }
+/* A new object of a class with a public constructor that takes no argument, valid in the caller's local frame. */
+static jobject plain_object(JNIEnv *env, const char *type)
+{
+    jclass cls = (*env)->FindClass(env, type);
+    jmethodID ctor = zj_clean(env) && cls ? (*env)->GetMethodID(env, cls, "<init>", "()V") : NULL;
+    jobject obj = zj_clean(env) && ctor ? (*env)->NewObject(env, cls, ctor) : NULL;
+    return zj_clean(env) ? obj : NULL;
+}
+/* Reads count int fields of obj, in order, into out. */
+static bool int_fields(JNIEnv *env, jobject obj, const char *const names[], size_t count, jint *out)
+{
+    jclass cls = (*env)->GetObjectClass(env, obj);
+    for (size_t i = 0; zj_clean(env) && cls && i < count; ++i) {
+        jfieldID field = (*env)->GetFieldID(env, cls, names[i], "I");
+        if (!zj_clean(env) || !field) return false;
+        out[i] = (*env)->GetIntField(env, obj, field);
+    }
+    return zj_clean(env) && cls;
+}
+static bool view_part(JNIEnv *env, jobject part, jobject origin, struct zapp_view_box *box)
+{
+    static const char *const sides[] = {"left", "top", "right", "bottom"}, *const axes[] = {"x", "y"};
+    jint sides_at[4] = {0}, origin_at[2] = {0};
+    if (!zj_clean(env) || !int_fields(env, part, sides, 4, sides_at) || !int_fields(env, origin, axes, 2, origin_at)) return false;
+    box->part_left = sides_at[0]; box->part_top = sides_at[1]; box->part_right = sides_at[2]; box->part_bottom = sides_at[3];
+    box->part_origin_x = origin_at[0]; box->part_origin_y = origin_at[1];
+    return true;
+}
+/* The bounds of the view in the window and the part of it on screen. Call inside a local frame. */
+static bool view_box(JNIEnv *env, jobject view, struct zapp_view_box *box)
+{
+    jobject part = plain_object(env, "android/graphics/Rect"), origin = part ? plain_object(env, "android/graphics/Point") : NULL;
+    jintArray at = origin ? (*env)->NewIntArray(env, 2) : NULL;
+    jmethodID location = zj_clean(env) && at ? zj_method(env, view, "getLocationInWindow", "([I)V") : NULL;
+    jmethodID width = location ? zj_method(env, view, "getWidth", "()I") : NULL, height = width ? zj_method(env, view, "getHeight", "()I") : NULL;
+    jmethodID shown = height ? zj_method(env, view, "isShown", "()Z") : NULL;
+    jmethodID visible = shown ? zj_method(env, view, "getGlobalVisibleRect", "(Landroid/graphics/Rect;Landroid/graphics/Point;)Z") : NULL;
+    jint xy[2] = {0};
+    if (!visible) return false;
+    (*env)->CallVoidMethod(env, view, location, at);
+    if (!zj_clean(env)) return false;
+    (*env)->GetIntArrayRegion(env, at, 0, 2, xy);
+    box->left = xy[0]; box->top = xy[1];
+    box->width = (*env)->CallIntMethod(env, view, width);
+    box->height = zj_clean(env) ? (*env)->CallIntMethod(env, view, height) : 0;
+    box->shown = zj_clean(env) && (*env)->CallBooleanMethod(env, view, shown);
+    box->visible = zj_clean(env) && (*env)->CallBooleanMethod(env, view, visible, part, origin);
+    return view_part(env, part, origin, box);
+}
 bool zj_hit(JNIEnv *env, jobject view, float x, float y)
 {
-    jclass cls = (*env)->GetObjectClass(env, view);
-    if (!zj_clean(env) || !cls) return false;
-    jmethodID location = (*env)->GetMethodID(env, cls, "getLocationInWindow", "([I)V");
-    jmethodID width = (*env)->GetMethodID(env, cls, "getWidth", "()I");
-    jmethodID height = (*env)->GetMethodID(env, cls, "getHeight", "()I");
-    jmethodID visible = (*env)->GetMethodID(env, cls, "isShown", "()Z");
-    jintArray pos = (*env)->NewIntArray(env, 2); jint xy[2] = {0};
-    bool ok = zj_clean(env) && location && width && height && visible && pos;
-    if (ok) {
-        (*env)->CallVoidMethod(env, view, location, pos);
-        (*env)->GetIntArrayRegion(env, pos, 0, 2, xy);
-        jint w = (*env)->CallIntMethod(env, view, width), h = (*env)->CallIntMethod(env, view, height);
-        jboolean shown = (*env)->CallBooleanMethod(env, view, visible);
-        ok = zj_clean(env) && shown && x >= xy[0] && y >= xy[1] && x < xy[0] + w && y < xy[1] + h;
-    }
-    if (pos) (*env)->DeleteLocalRef(env, pos);
-    (*env)->DeleteLocalRef(env, cls); return ok;
+    struct zapp_view_box box = {0};
+    if (!view || (*env)->PushLocalFrame(env, 16) != JNI_OK) { (void)zj_clean(env); return false; }
+    bool read = view_box(env, view, &box);
+    (void)zj_clean(env);
+    (*env)->PopLocalFrame(env, NULL);
+    return read && zapp_view_hit(&box, x, y);
+}
+bool zj_focused(JNIEnv *env, jobject view)
+{
+    jmethodID focused = view ? zj_method(env, view, "isFocused", "()Z") : NULL;
+    bool yes = focused && (*env)->CallBooleanMethod(env, view, focused);
+    return zj_clean(env) && yes;
 }
 bool zj_copy_utf(JNIEnv *env, jstring value, char *out, size_t cap)
 {
@@ -252,6 +308,33 @@ bool zj_keyboard(JNIEnv *env, jobject activity, jobject view, bool show)
     jobject service = input_methods(env, activity);
     bool ok = service && (show ? show_keyboard(env, service, view) : hide_keyboard(env, service, view));
     (void)zj_clean(env);
+    (*env)->PopLocalFrame(env, NULL);
+    return ok;
+}
+
+static jboolean editor_action(JNIEnv *env, jobject listener, jobject view, jint action, jobject event)
+{
+    (void)listener; (void)event;
+    return action == 2 && zapp_native_ui_editor(env, view) ? JNI_TRUE : JNI_FALSE;
+}
+
+bool zj_editor_listener(JNIEnv *env, jobject view)
+{
+    if (!view || (*env)->PushLocalFrame(env, 12) != JNI_OK) { (void)zj_clean(env); return false; }
+    jobject context = zj_object_property(env, view, "getContext", "()Landroid/content/Context;");
+    jobject loader = context ? zj_object_property(env, context, "getClassLoader", "()Ljava/lang/ClassLoader;") : NULL;
+    jmethodID load = loader ? zj_method(env, loader, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;") : NULL;
+    jstring name = load ? (*env)->NewStringUTF(env, "org.z23.nativeapp.KeyPrompt") : NULL;
+    jclass cls = name ? (jclass)(*env)->CallObjectMethod(env, loader, load, name) : NULL;
+    static const JNINativeMethod native[] = {
+        {"onEditorAction", "(Landroid/widget/TextView;ILandroid/view/KeyEvent;)Z", (void *)editor_action}
+    };
+    bool ok = zj_clean(env) && cls && (*env)->RegisterNatives(env, cls, native, 1) == JNI_OK && zj_clean(env);
+    jmethodID ctor = ok ? (*env)->GetMethodID(env, cls, "<init>", "()V") : NULL;
+    jobject listener = ctor ? (*env)->NewObject(env, cls, ctor) : NULL;
+    jmethodID set = listener ? zj_method(env, view, "setOnEditorActionListener", "(Landroid/widget/TextView$OnEditorActionListener;)V") : NULL;
+    if (set) (*env)->CallVoidMethod(env, view, set, listener);
+    ok = set && zj_clean(env);
     (*env)->PopLocalFrame(env, NULL);
     return ok;
 }

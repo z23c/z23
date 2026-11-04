@@ -17,10 +17,20 @@ bool zapp_camera_wait_goes_on(unsigned tick, bool paused, bool dialog)
 
 struct zapp_camera_screen zapp_camera_screen(enum zapp_camera_access access)
 {
-    if (access != ZAPP_CAMERA_SETTINGS) return (struct zapp_camera_screen){ .preview = true, .hint = "Point at a payment code" };
+    if (access != ZAPP_CAMERA_SETTINGS) return (struct zapp_camera_screen){ .preview = true, .hint = "Point your camera at a QR code." };
     return (struct zapp_camera_screen){
         .text = "Camera access is off. Open Settings to allow it, or paste an address.",
         .open = "Open settings",
         .paste = "Paste instead",
     };
+}
+
+bool zapp_camera_run_frames(void *ctx, bool (*next)(void *),
+                            bool (*stopped)(void *), void (*pause)(void *))
+{
+    while (!stopped(ctx)) {
+        if (next(ctx)) return true;
+        pause(ctx);
+    }
+    return false;
 }

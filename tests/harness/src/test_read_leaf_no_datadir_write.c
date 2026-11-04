@@ -44,6 +44,8 @@
 #include "command/native_fleet.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
+#include "crypto/ed25519.h"
+#include "fleet_enrol.h"
 #include "kernel/command_registry.h"
 #include "models/database.h"
 #include "storage/consensus_db.h"
@@ -98,7 +100,13 @@ struct rlw_leaf {
 #define RLW_PROPERTY_ID "content:" RLW_ZID_PUBKEY
 #define RLW_DATADIR_VALUE "@fixture-datadir@"
 
+static char rlw_fleet_line[FLEET_ENROL_MACHINE_TEXT_MAX];
+void zcl_native_fleet_enrol_dispatch(const struct zcl_command_request *,
+                                     struct zcl_command_reply *);
+
 static const struct rlw_leaf g_rlw_leaves[] = {
+    { "fleet.preview", zcl_native_fleet_enrol_dispatch,
+      "line", rlw_fleet_line, "require_anchor", "yes", NULL },
     { "core.zdir.list",         zcl_native_handle_core_zdir_list,
       NULL, NULL,               NULL, NULL, NULL },
     { "app.service.access",     zcl_native_handle_service_access,
@@ -758,7 +766,9 @@ static bool rlw_invoke_refused(const struct rlw_leaf *lf, const char *datadir,
     struct json_value input;
     rlw_invoke_build_input(lf, datadir, &input);
 
-    struct zcl_command_request request = { .input = &input };
+    struct zcl_command_request request = { .input = &input,
+        .spec = strcmp(lf->path, "fleet.preview") == 0 ?
+            zcl_command_registry_find(zcl_command_catalog(), lf->path, NULL) : NULL };
     struct zcl_command_reply reply;
     zcl_command_reply_init(&reply, "zcl.read_leaf_probe.v1");
     lf->fn(&request, &reply);
@@ -795,7 +805,9 @@ static void rlw_invoke(const struct rlw_leaf *lf, const char *datadir)
             strcmp(lf->v2, RLW_DATADIR_VALUE) == 0 ? datadir : lf->v2);
     rlw_add_complex_input(lf, &input);
 
-    struct zcl_command_request request = { .input = &input };
+    struct zcl_command_request request = { .input = &input,
+        .spec = strcmp(lf->path, "fleet.preview") == 0 ?
+            zcl_command_registry_find(zcl_command_catalog(), lf->path, NULL) : NULL };
     struct zcl_command_reply reply;
     zcl_command_reply_init(&reply, "zcl.read_leaf_probe.v1");
     lf->fn(&request, &reply);
@@ -1709,10 +1721,65 @@ static int t_registry_coverage(void)
     return failures;
 }
 
+static bool rlw_fleet_fixture(void)
+{
+    uint8_t op_seed[32], op_pub[32], box_seed[32], box_pub[32], secret[32];
+    uint8_t iw[FLEET_ENROL_INVITE_WIRE_MAX], rw[FLEET_ENROL_RECEIPT_WIRE_MAX];
+    char token[FLEET_ENROL_MACHINE_TEXT_MAX], receipt[FLEET_ENROL_MACHINE_TEXT_MAX];
+    struct fleet_invite invite = {0};
+    struct fleet_receipt parsed = {0};
+    struct fleet_box_facts facts = {0};
+    size_t il = 0, rl = 0;
+    const char *why = NULL;
+    bool present = false;
+    memset(box_seed, 0x72, sizeof(box_seed));
+    ed25519_keypair(box_pub, secret, box_seed);
+    memset(secret, 0, sizeof(secret));
+    snprintf(facts.hostname, sizeof(facts.hostname), "read-probe");
+    snprintf(facts.os, sizeof(facts.os), "Linux");
+    snprintf(facts.os_version, sizeof(facts.os_version), "test");
+    snprintf(facts.arch, sizeof(facts.arch), "x86_64");
+    snprintf(facts.toolchain, sizeof(facts.toolchain), "test");
+    snprintf(facts.git_head, sizeof(facts.git_head), "0123456789abcdef");
+    facts.cores = 8; facts.ram_mb = 32768; facts.disk_free_mb = 900000;
+    return fleet_enrol_key_load(op_seed, op_pub, true, &present, &why) && present &&
+        fleet_invite_mint("read-probe", 24, "", op_seed, op_pub, 1757030400,
+                          token, sizeof(token), &invite, &why) &&
+        fleet_invite_parse(token, &invite, iw, sizeof(iw), &il, &why) &&
+        fleet_receipt_mint(iw, il, "", &facts, "", box_seed, box_pub, NULL,
+                           receipt, sizeof(receipt), &why) &&
+        fleet_receipt_parse(receipt, &parsed, rw, sizeof(rw), &rl, &why) &&
+        fleet_machine_mint(rw, rl, 1757030400, FLEET_ENROL_PORT_FIRST,
+                           op_seed, op_pub, rlw_fleet_line,
+                           sizeof(rlw_fleet_line), &why);
+}
+
 int test_read_leaf_no_datadir_write(void)
 {
     printf("\n=== read leaf writes nothing to the datadir ===\n");
     int failures = 0;
+    char state[256], probe[256], code[64] = {0};
+    const char *old_xdg = getenv("XDG_STATE_HOME");
+    char *saved_xdg = old_xdg ? strdup(old_xdg) : NULL;
+    bool saved = !old_xdg || saved_xdg != NULL;
+    rlw_mkfixture(state, sizeof(state), "fleet-state");
+    bool isolated = saved && setenv("XDG_STATE_HOME", state, 1) == 0;
+    bool minted = isolated && rlw_fleet_fixture();
+    RLW_CHECK("fleet.preview: isolated signed machine fixture minted", minted);
+    if (!minted) {
+        if (isolated) {
+            if (saved_xdg) setenv("XDG_STATE_HOME", saved_xdg, 1);
+            else unsetenv("XDG_STATE_HOME");
+        }
+        free(saved_xdg);
+        test_rm_rf(state);
+        return failures;
+    }
+    rlw_mkfixture(probe, sizeof(probe), "fleet-anchor");
+    bool refused = minted && rlw_invoke_refused(&g_rlw_leaves[0], probe, code, sizeof(code));
+    RLW_CHECK("fleet.preview: signed row reaches absent anchor check",
+              refused && strcmp(code, "FLEET_ROOT_NOT_ANCHORED") == 0);
+    test_rm_rf(probe);
 
     failures += t_registry_coverage();
     failures += t_absent_node_db_is_not_created();
@@ -1724,5 +1791,11 @@ int test_read_leaf_no_datadir_write(void)
     failures += t_wal_datadir_with_live_writer();
     failures += t_wal_snapshot_writer_arrives_after_open();
 
+    if (isolated) {
+        if (saved_xdg) setenv("XDG_STATE_HOME", saved_xdg, 1);
+        else unsetenv("XDG_STATE_HOME");
+    }
+    free(saved_xdg);
+    test_rm_rf(state);
     return failures;
 }

@@ -3575,10 +3575,216 @@ static int test_fe_phone_state_root(void)
     return failures;
 }
 
+static bool fe_preview_call(const char *token, struct zcl_command_reply *reply)
+{
+    char body[FLEET_ENROL_MACHINE_TEXT_MAX + 32];
+    int n = snprintf(body, sizeof(body), "{\"token\":\"%s\"}", token);
+    return n > 0 && (size_t)n < sizeof(body) &&
+        fe_leaf_call("fleet.preview", "zcl.fleet.invite_preview.v1", body, reply);
+}
+
+static int test_fe_preview(void)
+{
+    int failures = 0;
+    TEST("fleet preview verifies invitations without creating fleet state") {
+        uint8_t seed[32], pub[32];
+        char token[FLEET_ENROL_MACHINE_TEXT_MAX], hex[65];
+        struct fleet_invite invite;
+        struct zcl_command_reply reply;
+        const char *why = NULL;
+        int64_t now = (int64_t)time(NULL);
+        fe_isolate("preview");
+        fe_key(0x35, seed, pub);
+        for (int i = 0; i < 32; ++i) (void)snprintf(hex + 2 * i, 3, "%02x", pub[i]);
+        ASSERT(fleet_invite_mint("studio", FE_TTL, "", seed, pub, now,
+                                 token, sizeof(token), &invite, &why));
+        ASSERT(fe_preview_call(token, &reply));
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(fe_s(json_get_str(json_get(&reply.data, "name"))), "studio");
+        ASSERT_STR_EQ(fe_s(json_get_str(json_get(&reply.data, "operator_pubkey"))), hex);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "expires_unix")), invite.expires_unix);
+        zcl_command_reply_free(&reply);
+        token[20] = token[20] == 'A' ? 'B' : 'A';
+        ASSERT(fe_preview_call(token, &reply));
+        ASSERT(reply.exit_code != ZCL_COMMAND_EXIT_OK);
+        zcl_command_reply_free(&reply);
+        ASSERT(fe_preview_call("invalid", &reply));
+        ASSERT(reply.exit_code != ZCL_COMMAND_EXIT_OK);
+        zcl_command_reply_free(&reply);
+        ASSERT(fleet_invite_mint("studio", 1, "", seed, pub, FE_NOW,
+                                 token, sizeof(token), &invite, &why));
+        ASSERT(fe_preview_call(token, &reply));
+        ASSERT(reply.exit_code != ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(reply.error.code, "FLEET_INVITE_EXPIRED");
+        zcl_command_reply_free(&reply);
+        ASSERT(access(g_fe_state, F_OK) != 0);
+        ASSERT(access(g_fe_home, F_OK) != 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fe_preview_existing(void)
+{
+    int failures = 0;
+    TEST("fleet preview preserves existing operator and box keys") {
+        uint8_t seed[32], pub[32], old_seed[32], old_pub[32], pin[32], after[32];
+        char token[FLEET_ENROL_MACHINE_TEXT_MAX];
+        struct fleet_invite invite;
+        struct zcl_command_reply reply;
+        const char *why = NULL;
+        bool present = false;
+        fe_isolate("preview-existing");
+        ASSERT(fe_manager_key(old_seed, old_pub));
+        fe_key(0x36, seed, pub);
+        ASSERT(fleet_enrol_operator_write(pub, &why));
+        ASSERT(fleet_invite_mint("studio", FE_TTL, "", old_seed, old_pub,
+                                 (int64_t)time(NULL), token, sizeof(token), &invite, &why));
+        ASSERT(fe_preview_call(token, &reply));
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        zcl_command_reply_free(&reply);
+        ASSERT(fleet_enrol_operator_read(pin, &present, &why) && present);
+        ASSERT(memcmp(pin, pub, sizeof(pin)) == 0);
+        ASSERT(fleet_enrol_key_load(seed, after, false, &present, &why) && present);
+        ASSERT(memcmp(after, old_pub, sizeof(after)) == 0);
+        ASSERT(memcmp(seed, old_seed, sizeof(seed)) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fe_preview_inputs(void)
+{
+    int failures = 0;
+    TEST("fleet preview rejects ambiguous input and does not create state") {
+        struct zcl_command_reply reply;
+        fe_isolate("preview-row-empty");
+        ASSERT(fe_leaf_call("fleet.preview", "zcl.fleet.preview.v1", "{}", &reply));
+        ASSERT_STR_EQ(reply.error.code, "FLEET_PREVIEW_INPUT_INVALID");
+        zcl_command_reply_free(&reply);
+        ASSERT(fe_leaf_call("fleet.preview", "zcl.fleet.preview.v1",
+                            "{\"token\":\"x\",\"line\":\"x\"}", &reply));
+        ASSERT_STR_EQ(reply.error.code, "FLEET_PREVIEW_INPUT_INVALID");
+        zcl_command_reply_free(&reply);
+        ASSERT(!fe_leaf_call("fleet.preview", "zcl.fleet.preview.v1",
+                             "{\"line\":42}", &reply));
+        ASSERT(fe_leaf_call("fleet.preview", "zcl.fleet.preview.v1",
+                            "{\"line\":\"x\"}", &reply));
+        ASSERT(reply.exit_code != ZCL_COMMAND_EXIT_OK);
+        zcl_command_reply_free(&reply);
+        ASSERT(access(g_fe_state, F_OK) != 0);
+        ASSERT(access(g_fe_home, F_OK) != 0);
+        ASSERT(fe_leaf_call("fleet.machines", "zcl.fleet.machines.v1", "{}", &reply));
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "total")), 0);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fe_preview_row(void)
+{
+    int failures = 0;
+    TEST("fleet machine preview is advisory and observes later revocation") {
+        uint8_t seed[32], pub[32], box_seed[32], box_pub[32];
+        uint8_t before[32], after[32];
+        char path[FLEET_ENROL_PATH_MAX];
+        FILE *file;
+        char row[FLEET_ENROL_MACHINE_TEXT_MAX], body[FLEET_ENROL_MACHINE_TEXT_MAX + 64];
+        char head_text[FLEET_ENROL_HEAD_TEXT_MAX];
+        struct fleet_machine machine;
+        static struct fleet_head head;
+        struct zcl_command_reply reply;
+        const char *why = NULL;
+        bool replaced = false, appended = false;
+        fe_isolate("preview-row");
+        ASSERT(fe_manager_key(seed, pub));
+        ASSERT(fe_manager_row("studio", 0x72, seed, pub, FLEET_ENROL_PORT_FIRST,
+                              row, sizeof(row)));
+        ASSERT(fleet_enrol_state_path_existing("box.ed25519", path, sizeof(path)));
+        file = fopen(path, "rb");
+        ASSERT(file != NULL);
+        ASSERT_EQ(fread(before, 1, sizeof(before), file), sizeof(before));
+        ASSERT(fclose(file) == 0);
+        (void)snprintf(body, sizeof(body), "{\"line\":\"%s\"}", row);
+        ASSERT(fe_leaf_call("fleet.preview", "zcl.fleet.preview.v1", body, &reply));
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(fe_s(json_get_str(json_get(&reply.data, "kind"))), "machine");
+        ASSERT_STR_EQ(fe_s(json_get_str(json_get(&reply.data, "name"))), "studio");
+        ASSERT_STR_EQ(fe_s(json_get_str(json_get(&reply.data, "onion"))), FE_ONION);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "relay_port")), FLEET_ENROL_PORT_FIRST);
+        zcl_command_reply_free(&reply);
+        file = fopen(path, "rb");
+        ASSERT(file != NULL);
+        ASSERT_EQ(fread(after, 1, sizeof(after), file), sizeof(after));
+        ASSERT(fclose(file) == 0);
+        ASSERT(memcmp(before, after, sizeof(before)) == 0);
+        ASSERT(fleet_enrol_state_path_existing("operator.pin", path, sizeof(path)));
+        ASSERT(access(path, F_OK) != 0);
+        ASSERT(fleet_enrol_state_path_existing("machines.roster", path, sizeof(path)));
+        ASSERT(access(path, F_OK) != 0);
+        ASSERT(fleet_enrol_state_path_existing("fleet.lock", path, sizeof(path)));
+        ASSERT(access(path, F_OK) != 0);
+        ASSERT(fleet_machine_parse(row, pub, &machine, NULL));
+        fe_key(0x72, box_seed, box_pub);
+        ASSERT(fleet_head_mint(1, FE_NOW, box_pub, 1, seed, pub, head_text,
+                               sizeof(head_text), &why));
+        ASSERT(fleet_head_import(head_text, pub, false, &head, &replaced, &why));
+        ASSERT(fe_leaf_call("fleet.preview", "zcl.fleet.preview.v1", body, &reply));
+        ASSERT_STR_EQ(reply.error.code, "FLEET_BOX_REVOKED");
+        zcl_command_reply_free(&reply);
+        ASSERT(!fleet_roster_import(row, pub, &machine, &appended, &why));
+        ASSERT_STR_EQ(fe_s(why), FLEET_ENROL_WHY_BOX_REVOKED);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fe_preview_conflicts(void)
+{
+    int failures = 0;
+    TEST("fleet preview refuses name conflicts and a different pinned root") {
+        uint8_t seed[32], pub[32], other_seed[32], other_pub[32];
+        char row[FLEET_ENROL_MACHINE_TEXT_MAX], other[FLEET_ENROL_MACHINE_TEXT_MAX];
+        char body[FLEET_ENROL_MACHINE_TEXT_MAX + 64];
+        struct fleet_machine machine;
+        struct zcl_command_reply reply;
+        const char *why = NULL;
+        bool appended = false;
+        fe_isolate("preview-conflicts");
+        ASSERT(fe_manager_key(seed, pub));
+        ASSERT(fe_manager_row("studio", 0x61, seed, pub, FLEET_ENROL_PORT_FIRST,
+                              row, sizeof(row)));
+        ASSERT(fleet_roster_import(row, pub, &machine, &appended, &why));
+        ASSERT(fe_manager_row("studio", 0x62, seed, pub, FLEET_ENROL_PORT_FIRST,
+                              other, sizeof(other)));
+        (void)snprintf(body, sizeof(body), "{\"line\":\"%s\"}", other);
+        ASSERT(fe_leaf_call("fleet.preview", "zcl.fleet.preview.v1", body, &reply));
+        ASSERT_STR_EQ(fe_s(reply.error.evidence), FLEET_ENROL_WHY_NAME_TAKEN);
+        zcl_command_reply_free(&reply);
+        fe_key(0x63, other_seed, other_pub);
+        ASSERT(fleet_enrol_operator_write(other_pub, &why));
+        ASSERT(fe_manager_row("other", 0x64, other_seed, other_pub,
+                              FLEET_ENROL_PORT_FIRST, other, sizeof(other)));
+        (void)snprintf(body, sizeof(body), "{\"line\":\"%s\"}", other);
+        ASSERT(fe_leaf_call("fleet.preview", "zcl.fleet.preview.v1", body, &reply));
+        ASSERT_STR_EQ(reply.error.code, "FLEET_ROOT_CHANGED");
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_fleet_enrol(void)
 {
     int failures = 0;
     failures += test_fe_invite_round_trip();
+    failures += test_fe_preview();
+    failures += test_fe_preview_existing();
+    failures += test_fe_preview_row();
+    failures += test_fe_preview_inputs();
+    failures += test_fe_preview_conflicts();
     failures += test_fe_invite_tampered();
     failures += test_fe_invite_bounds();
     failures += test_fe_invite_ttl_flag();

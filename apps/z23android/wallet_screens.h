@@ -50,6 +50,7 @@
 #define WALLET_FLEET_UNCHECKED "Not checked by your fleet"
 /* Funds asks the node again this often while it is in front. */
 #define WALLET_REFRESH_MS 10000u
+#define WALLET_INITIAL_RETRY_MS 1000u
 /* A reading older than this is no longer shown as current. */
 #define WALLET_STALE_MS 30000u
 /* The nonce and the tag of the AES-256-GCM seal that keeps the last balance (wallet_env.seal). */

@@ -30,6 +30,8 @@ void zapp_wallet_ui_tick(JNIEnv *env);
 void zapp_wallet_ui_dropped(JNIEnv *env, unsigned shell_drops);
 /* The button under a window point, or false. */
 bool zapp_wallet_ui_hit(JNIEnv *env, float x, float y, size_t *button);
-/* Performs the button, then redraws. */
+/* The button the keyboard's action key presses: Set amount, while the amount field has the focus. */
+bool zapp_wallet_ui_field_button(JNIEnv *env, size_t *button);
+/* Performs the button, then redraws. A set amount closes the keyboard and scrolls the page to its code. */
 enum wallet_outcome zapp_wallet_ui_press(JNIEnv *env, size_t button);
 #endif

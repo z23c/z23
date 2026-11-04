@@ -306,6 +306,39 @@ static const struct fleet_signing_key *fe_signing_key(
     return out;
 }
 
+static void fe_preview_invite(const struct zcl_command_request *request,
+                       struct zcl_command_reply *reply)
+{
+    const char *token = json_get_str(json_get(request ? request->input : NULL, "token"));
+    const char *why = NULL;
+    struct fleet_invite invite = {0};
+    char hex[FLEET_ENROL_PUBKEY_HEX];
+    if (!fleet_invite_parse(token, &invite, NULL, 0, NULL, &why)) {
+        fe_fail(reply, "FLEET_INVITE_INVALID", "normalize",
+                "This invitation is invalid. Ask the manager for a new one.", why);
+        return;
+    }
+    if (invite.expires_unix <= fe_now()) {
+        fe_fail(reply, "FLEET_INVITE_EXPIRED", "normalize",
+                "This invitation has expired. Ask the manager for a new one.",
+                FLEET_ENROL_WHY_INVITE_EXPIRED);
+        return;
+    }
+    zcl_hex_encode(invite.operator_pubkey, FLEET_ENROL_PUBKEY_BYTES, hex);
+    bool ok = json_push_kv_str(&reply->data, "schema", "zcl.fleet.invite_preview.v1") &&
+        json_push_kv_str(&reply->data, "name", invite.name) &&
+        json_push_kv_str(&reply->data, "operator_pubkey", hex) &&
+        json_push_kv_int(&reply->data, "expires_unix", invite.expires_unix);
+    if (!ok) {
+        json_free(&reply->data);
+        json_init(&reply->data);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "FLEET_PREVIEW_UNAVAILABLE",
+                               "render", false, false,
+                               "Could not prepare the invitation preview.", "allocation failed");
+    }
+}
+
 static void fe_join(const struct zcl_command_request *request,
                     struct zcl_command_reply *reply)
 {
@@ -651,20 +684,28 @@ static void fe_admit(const struct zcl_command_request *request,
  * the manager, its own. A box that has neither trusts nobody yet and has no
  * key a line could be checked against. */
 static bool fe_import_operator(struct zcl_command_reply *reply,
-                               uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES])
+                               uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES], bool readonly)
 {
     uint8_t seed[FLEET_ENROL_SEED_BYTES];
     const char *why = NULL;
     bool joined = false, own = false;
-    if (!fleet_enrol_operator_read(operator_pubkey, &joined, &why)) {
+    if (!(readonly ? fleet_enrol_operator_read_existing(operator_pubkey, &joined, &why) :
+                     fleet_enrol_operator_read(operator_pubkey, &joined, &why))) {
         fe_fail(reply, "FLEET_OPERATOR_UNREADABLE", "resolve",
-                "this box has a recorded fleet operator key it cannot read.",
+                readonly ? "Could not read a trusted fleet identity. Check fleet setup before importing." :
+                           "this box has a recorded fleet operator key it cannot read.",
                 why);
         return false;
     }
     if (joined)
         return true;
-    if (!fe_key(reply, false, seed, operator_pubkey, &own))
+    if (readonly) {
+        if (!fleet_enrol_key_read_existing(seed, operator_pubkey, &own, &why)) {
+            fe_fail(reply, "FLEET_KEY_UNAVAILABLE", "resolve",
+                    "This box cannot read its fleet key.", why);
+            return false;
+        }
+    } else if (!fe_key(reply, false, seed, operator_pubkey, &own))
         return false;
     memset(seed, 0, sizeof(seed)); /* only the public half is needed */
     if (own)
@@ -826,6 +867,60 @@ static void fe_import_head(const struct zcl_command_request *request,
     free(head);
 }
 
+static void fe_preview_row(const struct zcl_command_request *request,
+                           struct zcl_command_reply *reply, const char *line)
+{
+    uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES];
+    char ophex[FLEET_ENROL_PUBKEY_HEX], boxhex[FLEET_ENROL_PUBKEY_HEX];
+    struct fleet_machine machine = {0};
+    struct fleet_anchor_fact anchor = {0};
+    const char *why = NULL;
+    if (!fe_import_operator(reply, operator_pubkey, true) ||
+        !fe_import_gate(request, reply, operator_pubkey, line, &anchor))
+        return;
+    if (!fleet_roster_preview(line, operator_pubkey, &machine, &why)) {
+        fe_import_refuse(reply, why);
+        return;
+    }
+    zcl_hex_encode(operator_pubkey, FLEET_ENROL_PUBKEY_BYTES, ophex);
+    zcl_hex_encode(machine.receipt.box_pubkey, FLEET_ENROL_PUBKEY_BYTES, boxhex);
+    bool ok = json_push_kv_str(&reply->data, "schema", "zcl.fleet.preview.v1") &&
+        json_push_kv_str(&reply->data, "kind", "machine") &&
+        json_push_kv_str(&reply->data, "name", machine.receipt.invite.name) &&
+        json_push_kv_str(&reply->data, "operator_pubkey", ophex) &&
+        json_push_kv_str(&reply->data, "box_pubkey", boxhex) &&
+        json_push_kv_str(&reply->data, "onion", machine.receipt.onion) &&
+        json_push_kv_int(&reply->data, "relay_port", machine.relay_port) &&
+        json_push_kv_int(&reply->data, "enrolled_at", machine.enrolled_at);
+    if (!ok) {
+        json_free(&reply->data);
+        json_init(&reply->data);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "FLEET_PREVIEW_UNAVAILABLE",
+                               "render", false, false,
+                               "Could not prepare the machine preview.", "allocation failed");
+    }
+}
+
+static void fe_preview(const struct zcl_command_request *request,
+                       struct zcl_command_reply *reply)
+{
+    const struct json_value *input = request ? request->input : NULL;
+    const struct json_value *token = json_get(input, "token");
+    const struct json_value *line = json_get(input, "line");
+    if (!!token == !!line || (token && !json_get_str(token)) ||
+        (line && !json_get_str(line))) {
+        fe_fail(reply, "FLEET_PREVIEW_INPUT_INVALID", "normalize",
+                "Provide one invitation or one machine line.",
+                FLEET_ENROL_WHY_ARGUMENTS);
+        return;
+    }
+    if (token)
+        fe_preview_invite(request, reply);
+    else
+        fe_preview_row(request, reply, json_get_str(line));
+}
+
 static void fe_import(const struct zcl_command_request *request,
                       struct zcl_command_reply *reply)
 {
@@ -837,7 +932,7 @@ static void fe_import(const struct zcl_command_request *request,
     const char *why = NULL;
     bool appended = false;
     struct fleet_anchor_fact anchor = {0};
-    if (!fe_import_operator(reply, operator_pubkey))
+    if (!fe_import_operator(reply, operator_pubkey, false))
         return;
     if (fleet_head_is_line(line)) {
         fe_import_head(request, reply, operator_pubkey, line);
@@ -1304,6 +1399,7 @@ void zcl_native_fleet_enrol_dispatch(
     } leaves[] = {
         { "fleet.invite", fe_invite },
         { "fleet.join", fe_join },
+        { "fleet.preview", fe_preview },
         { "fleet.roster.head", fe_roster_head },
         { "fleet.import", fe_import },
         { "fleet.admit", fe_admit },

@@ -32,7 +32,7 @@ static void screens(void)
     for (size_t i = 0; i < sizeof(camera) / sizeof(camera[0]); ++i) {
         struct zapp_camera_screen s = zapp_camera_screen(camera[i]);
         assert(s.preview && !s.text && !s.open && !s.paste);
-        assert(s.hint && !strcmp(s.hint, "Point at a payment code"));
+        assert(s.hint && !strcmp(s.hint, "Point your camera at a QR code."));
     }
     struct zapp_camera_screen s = zapp_camera_screen(ZAPP_CAMERA_SETTINGS);
     assert(!s.preview && !s.hint);
@@ -55,10 +55,33 @@ static void waits(void)
     assert(zapp_camera_wait_goes_on(1000, true, true));
 }
 
+struct scan_fixture { unsigned frames, success_at, stop_at; };
+static bool scan_next(void *arg)
+{
+    struct scan_fixture *f = arg;
+    return ++f->frames == f->success_at;
+}
+static bool scan_stopped(void *arg)
+{
+    struct scan_fixture *f = arg;
+    return f->frames >= f->stop_at;
+}
+static void scan_pause(void *arg) { (void)arg; }
+static void scan_lifetime(void)
+{
+    struct scan_fixture delayed = { .success_at = 400, .stop_at = 1000 };
+    assert(zapp_camera_run_frames(&delayed, scan_next, scan_stopped, scan_pause));
+    assert(delayed.frames == 400);
+    struct scan_fixture cancelled = { .success_at = 1000, .stop_at = 450 };
+    assert(!zapp_camera_run_frames(&cancelled, scan_next, scan_stopped, scan_pause));
+    assert(cancelled.frames == 450);
+}
+
 int main(void)
 {
     states();
     screens();
     waits();
+    scan_lifetime();
     return 0;
 }

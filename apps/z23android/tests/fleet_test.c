@@ -49,6 +49,7 @@ int main(void)
 {
     char token[8192], input[2334];
     memset(input, 'a', 200); input[200] = 0;
+    { char command[300]; snprintf(command, sizeof(command), "z23 fleet import %.200s", input); assert(zapp_fleet_machine_text(command, token, sizeof(token)) && !strcmp(token, input)); assert(!zapp_fleet_machine_text(input, token, sizeof(token))); }
     assert(zapp_fleet_invite_text(input, token, sizeof(token)) && !strcmp(token, input));
     input[10] = ':';
     assert(!zapp_fleet_invite_text(input, token, sizeof(token)));

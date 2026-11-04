@@ -36,6 +36,7 @@
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic(JavaVM *) vm;
 static jobject active;
+static ANativeActivity *copy_activity; /* UI-thread owner, cleared on detach. */
 static ALooper *looper;
 static int signal_pipe[2] = {-1, -1};
 /* Fires every two seconds so the wallet screens can refresh and notice an old reading. */
@@ -218,10 +219,21 @@ static void refresh(JNIEnv *env)
     zapp_native_ui_preview(env, bmp, size); free(bmp);
     free(view);
 }
+static void copy_fleet_code(JNIEnv *env, const char *argument)
+{
+    bool copied = foreground && env && copy_activity &&
+        zapp_clipboard_copy_sensitive(copy_activity, argument);
+    if (env) zapp_native_ui_update(env, NULL, copied
+        ? "Code copied. It clears after a minute." : "Could not copy the code. Try again.");
+}
 static void action(const char *name, const char *argument)
 {
     JNIEnv *env = NULL; JavaVM *current_vm = atomic_load(&vm);
     if (!current_vm || (*current_vm)->GetEnv(current_vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) env = NULL;
+    if (!strcmp(name, "fleet_copy")) {
+        copy_fleet_code(env, argument);
+        return;
+    }
     if (!strcmp(name, "voice_start") && (!foreground || !env || !active || !microphone_allowed(env, active))) return;
     char why[160] = "";
     bool taken = zapp_controller_action(name, argument, why, sizeof(why));
@@ -546,7 +558,7 @@ static void detach_activity(JNIEnv *env)
     zapp_camera_set_frame_notify(NULL);
     zapp_camera_stop();
     pthread_mutex_lock(&lock);
-    jobject retained = active; active = NULL; permission_ticket = 0;
+    jobject retained = active; active = NULL; copy_activity = NULL; permission_ticket = 0;
     if (looper && signal_pipe[0] >= 0) ALooper_removeFd(looper, signal_pipe[0]);
     if (looper && tick_fd >= 0) ALooper_removeFd(looper, tick_fd);
     if (tick_fd >= 0) close(tick_fd);
@@ -676,7 +688,7 @@ JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, 
     if (pipe2(signal_pipe, O_CLOEXEC | O_NONBLOCK) ||
         ALooper_addFd(looper, signal_pipe[0], ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, signal_ready, NULL) != 1) goto fail;
     if (!start_tick()) goto fail;
-    pthread_mutex_lock(&lock); active = (*env)->NewGlobalRef(env, activity->clazz); pthread_mutex_unlock(&lock);
+    pthread_mutex_lock(&lock); active = (*env)->NewGlobalRef(env, activity->clazz); copy_activity = activity; pthread_mutex_unlock(&lock);
     if (!clean(env) || !active || !start_services(env, activity, native_dir, &preview)) goto fail;
     (void)zapp_params_launch(prepare_params, activity->assetManager, activity->internalDataPath);
     request_full_brightness(env, activity->clazz);

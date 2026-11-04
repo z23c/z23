@@ -28,4 +28,8 @@ struct zapp_camera_screen {
     const char *hint, *text, *open, *paste;
 };
 struct zapp_camera_screen zapp_camera_screen(enum zapp_camera_access access);
+
+/* Poll frames until one succeeds or the owner stops the scan. */
+bool zapp_camera_run_frames(void *ctx, bool (*next)(void *),
+                            bool (*stopped)(void *), void (*pause)(void *));
 #endif

@@ -93,28 +93,46 @@ static void notify_view(struct controller *c)
     pthread_mutex_unlock(&c->lock);
     if (notify) notify();
 }
-static bool parse_receipt(const char *text, char *receipt, size_t cap)
+static bool fleet_review_run(struct controller *c, const char *token, bool explicit_join, bool explicit_machine,
+                             char *reply, char preview[2048], char onion[128], char machine_error[256], bool *machine)
 {
-    struct json_value root = {0};
-    bool ok = json_read(&root, text, strlen(text));
-    const char *value = json_get_str(json_get(json_get(&root, "data"), "receipt"));
-    ok = ok && value && value[0] && strlen(value) < cap;
-    if (ok) copy_text(receipt, cap, value);
-    json_free(&root); return ok;
+    *machine = reply && !explicit_join && zapp_fleet_machine_preview_run(&c->runtime, token, reply, ZAPP_TEXT_CAP) &&
+        zapp_fleet_machine_preview_text(reply, preview, 2048, onion, 128);
+    if (reply && !*machine && !explicit_join && zapp_json_object(reply)) {
+        zapp_plain_text(reply, ZAPP_TEXT_CAP);
+        copy_text(machine_error, 256, reply);
+    }
+    bool invite = reply && !explicit_machine && !*machine && zapp_fleet_preview_run(&c->runtime, token, reply, ZAPP_TEXT_CAP) &&
+        zapp_fleet_preview_text(reply, preview, 2048);
+    return *machine || invite;
 }
-static bool invitation(struct controller *c, const char *text)
+static bool invitation(struct controller *c, const char *text, bool typed)
 {
-    char token[8192];
-    bool ok = zapp_fleet_invite_text(text, token, sizeof(token));
+    char token[8192], preview[2048] = "", onion[128] = "";
+    bool explicit_join = text && !strncmp(text, "z23 fleet join ", 15);
+    bool explicit_machine = zapp_fleet_machine_text(text, token, sizeof(token));
+    bool ok = explicit_machine || zapp_fleet_invite_text(text, token, sizeof(token));
     pthread_mutex_lock(&c->lock);
-    c->view.fleet_token[0] = 0;
-    c->view.fleet_preview[0] = 0;
+    c->view.fleet_token[0] = 0; c->view.fleet_machine = false; c->view.fleet_onion[0] = 0;
+    c->view.fleet_review_typed = false; memory_cleanse(c->view.fleet_review_input, sizeof(c->view.fleet_review_input));
+    copy_text(c->view.fleet_preview, sizeof(c->view.fleet_preview), ok ? "Checking fleet code…" : "This is not a fleet code.");
+    pthread_mutex_unlock(&c->lock);
+    notify_view(c);
+    char *reply = ok ? calloc(1, ZAPP_TEXT_CAP) : NULL;
+    bool machine = false;
+    char machine_error[256] = "Could not verify the fleet machine record.";
+    ok = fleet_review_run(c, token, explicit_join, explicit_machine, reply, preview, onion, machine_error, &machine);
+    pthread_mutex_lock(&c->lock);
     if (ok) {
         copy_text(c->view.fleet_token, sizeof(c->view.fleet_token), token);
-        copy_text(c->view.fleet_preview, sizeof(c->view.fleet_preview),
-            "Invitation received. Join only if it came from your fleet manager. Z23 checks its signature and expiry when you join.");
+        c->view.fleet_machine = machine;
+        c->view.fleet_review_typed = typed;
+        if (typed) copy_text(c->view.fleet_review_input, sizeof(c->view.fleet_review_input), text);
+        if (machine) copy_text(c->view.fleet_onion, sizeof(c->view.fleet_onion), onion);
     }
+    copy_text(c->view.fleet_preview, sizeof(c->view.fleet_preview), ok ? preview : explicit_join ? "Could not verify this invitation. Ask your manager for a fresh code." : machine_error);
     pthread_mutex_unlock(&c->lock);
+    if (reply) { memory_cleanse(reply, ZAPP_TEXT_CAP); free(reply); }
     memory_cleanse(token, sizeof(token)); return ok;
 }
 /* Heights and peer count from a status reply; values the reply lacks stay negative. */
@@ -632,7 +650,8 @@ static void set_scan(struct controller *c, enum zapp_scan_kind kind, const char 
 static const char *scan_notice(enum zapp_scan_kind kind)
 {
     switch (kind) {
-    case ZAPP_SCAN_FLEET: return "Invitation scanned. Review before joining.";
+    case ZAPP_SCAN_FLEET: return "Fleet code scanned. Review before continuing.";
+    case ZAPP_SCAN_FLEET_MACHINE: return "Fleet code scanned. Review before continuing.";
     case ZAPP_SCAN_PAIR: return "Laptop pairing code scanned. Compare the six digits on the laptop before accepting.";
     case ZAPP_SCAN_CLIP: return "Found a Z23 clip address. Nothing was opened or paid.";
     case ZAPP_SCAN_AUTHOR: return "Found a Z23 author address. Nothing was followed.";
@@ -667,15 +686,16 @@ static bool scan_payload(struct controller *c, uint64_t ticket, char *out)
         return false;
     }
     enum zapp_scan_kind kind = zapp_scan_classify(out, value, ZAPP_TEXT_CAP);
+    if (kind == ZAPP_SCAN_FLEET_MACHINE) kind = ZAPP_SCAN_FLEET;
     /* The payment is handed to the send screen before out is replaced by the notice; the view never carries it. */
     (void)zapp_pay_stash_offer(out, kind);
     const char *notice = NULL;
     if (kind == ZAPP_SCAN_PAIR && zapp_speech_client_paired(c->files, value)) {
         kind = ZAPP_SCAN_TEXT; value[0] = 0; notice = "That laptop is already paired.";
     } else if (kind == ZAPP_SCAN_PAIR && !offer_pairing(c, value)) { kind = ZAPP_SCAN_UNREADABLE; value[0] = 0; }
-    bool secret = kind == ZAPP_SCAN_FLEET || kind == ZAPP_SCAN_PAIR;
+    bool secret = kind == ZAPP_SCAN_FLEET || kind == ZAPP_SCAN_FLEET_MACHINE || kind == ZAPP_SCAN_PAIR;
     set_scan(c, kind, secret ? "" : value);
-    if (kind == ZAPP_SCAN_FLEET) (void)invitation(c, value);
+    if (kind == ZAPP_SCAN_FLEET || kind == ZAPP_SCAN_FLEET_MACHINE) (void)invitation(c, out, false);
     copy_text(out, ZAPP_TEXT_CAP, notice ? notice : scan_notice(kind));
     memory_cleanse(value, ZAPP_TEXT_CAP);
     free(value);
@@ -702,16 +722,27 @@ static bool join_fleet(struct controller *c, const char *token, char *out)
         return false;
     case ZAPP_ONION_READY: break;
     }
-    return zapp_fleet_join_run(&c->runtime, token, out, ZAPP_TEXT_CAP);
+    bool ok = zapp_fleet_join_run(&c->runtime, token, out, ZAPP_TEXT_CAP);
+    char receipt[8192];
+    bool saved = ok && zapp_fleet_join_receipt(out, receipt, sizeof(receipt)) &&
+        zapp_fleet_receipt_save(c->files, receipt);
+    memory_cleanse(receipt, sizeof(receipt));
+    pthread_mutex_lock(&c->lock);
+    c->view.fleet_receipt_saved = saved;
+    pthread_mutex_unlock(&c->lock);
+    return ok;
 }
 static bool execute_fleet(struct controller *c, const char *action, const char *arg, char *out)
 {
     bool ok = false;
     if (!strcmp(action, "fleet_hosts")) ok = fleet_hosts(c, !strcmp(arg, "refresh"), out);
-    else if (!strcmp(action, "fleet_join")) ok = join_fleet(c, arg, out);
+    else if (!strcmp(action, "fleet_join")) {
+        if (c->view.fleet_machine) ok = zapp_fleet_connect_run(&c->runtime, arg, c->view.fleet_onion, out, ZAPP_TEXT_CAP);
+        else ok = join_fleet(c, arg, out);
+    }
     else if (!strcmp(action, "fleet_preview")) {
-        ok = invitation(c, arg);
-        copy_text(out, ZAPP_TEXT_CAP, ok ? "Review the manager invitation." : "This is not a valid fleet invitation.");
+        ok = invitation(c, arg, true);
+        copy_text(out, ZAPP_TEXT_CAP, ok ? "Review the fleet code." : "Could not verify the fleet code.");
     }
     return ok;
 }
@@ -803,8 +834,17 @@ static void chat_outcome(struct controller *c, const char *arg, bool ok, char *o
 /* Caller holds c->lock. */
 static bool join_result(struct controller *c, char *out)
 {
-    bool ok = parse_receipt(out, c->view.fleet_receipt, sizeof(c->view.fleet_receipt));
-    if (ok) { c->view.fleet_token[0] = 0; copy_text(out, ZAPP_TEXT_CAP, "Show this QR code to your fleet manager. The phone joins once they admit it."); }
+    bool ok = zapp_fleet_join_receipt(out, c->view.fleet_receipt, sizeof(c->view.fleet_receipt));
+    if (ok) {
+        memory_cleanse(c->view.fleet_token, sizeof(c->view.fleet_token));
+        memory_cleanse(c->view.fleet_review_input, sizeof(c->view.fleet_review_input));
+        c->view.fleet_review_typed = false;
+        c->view.fleet_preview[0] = 0;
+        copy_text(out, ZAPP_TEXT_CAP, c->view.fleet_receipt_saved
+            ? "Code saved. Show or copy it to your manager to finish joining."
+            : "Show or copy this code now. It could not be saved for later.");
+    }
+    else copy_text(out, ZAPP_TEXT_CAP, "Could not read the fleet reply. Try joining again.");
     return ok;
 }
 /* The node line already shows a start or stop; a notice is needed only when the choice was not saved. */
@@ -841,7 +881,7 @@ static void execute_result(struct controller *c, const char *action, const char 
         pthread_mutex_unlock(&c->lock); return;
     }
     if (chat && !chat_state(c)) { pthread_mutex_unlock(&c->lock); return; }
-    if (!strcmp(action, "fleet_join") && ok) ok = join_result(c, out);
+    if (!strcmp(action, "fleet_join") && ok && !c->view.fleet_machine) ok = join_result(c, out);
     if (chat) chat_outcome(c, arg, ok, out);
     zapp_plain_text(out, ZAPP_TEXT_CAP);
     report(c, action, ok, out);
@@ -1014,6 +1054,7 @@ bool zapp_controller_start(const char *files, const char *libs, bool preview, vo
     c->view.node_process_running = zapp_node_running(&c->runtime);
     c->view.node_wanted = zapp_node_wanted(&c->runtime);
     copy_text(c->files, sizeof(c->files), files); c->notify = notify;
+    c->view.fleet_receipt_saved = zapp_fleet_receipt_load(files, c->view.fleet_receipt, sizeof(c->view.fleet_receipt)) > 0;
     copy_text(c->view.sync_status, sizeof(c->view.sync_status), "Start the node to begin synchronization.");
     zapp_node_line(false, c->view.node_process_running, false, false, -1, -1, -1, NULL, c->view.node_line, sizeof(c->view.node_line));
     c->view.fleet_paired = zapp_speech_client_has_host(files);
@@ -1189,6 +1230,20 @@ void zapp_controller_detach(void)
     pthread_mutex_lock(&startup_lock);
     if (current) { pthread_mutex_lock(&current->lock); current->notify = NULL; pthread_mutex_unlock(&current->lock); }
     zapp_camera_stop(); pthread_mutex_unlock(&startup_lock);
+}
+void zapp_controller_clear_result(void)
+{
+    pthread_mutex_lock(&startup_lock);
+    struct controller *c = current;
+    bool cleared = false;
+    if (c) {
+        pthread_mutex_lock(&c->lock);
+        cleared = !c->view.busy && c->view.result[0];
+        if (cleared) c->view.result[0] = 0;
+        pthread_mutex_unlock(&c->lock);
+    }
+    pthread_mutex_unlock(&startup_lock);
+    if (cleared) notify_view(c);
 }
 void zapp_controller_visible(bool visible)
 {

@@ -8,6 +8,7 @@
 #include "rpc.h"
 #include "setup_state.h"
 #include "wallet_screens.h"
+#include "private.h"
 #ifdef __ANDROID__
 #include <android/log.h>
 #endif
@@ -780,18 +781,23 @@ bool zapp_wallet_setup_run(struct zapp_runtime *r, const char *op, const char *i
     return setup_not_run(out, cap, "This wallet command is not available in the phone's permission set.");
 }
 
-bool zapp_fleet_join_run(struct zapp_runtime *r, const char *token, char *out, size_t cap)
+static bool fleet_token_run(struct zapp_runtime *r, const char *token, bool preview, char *out, size_t cap)
 {
     if (!r || !token || !out || cap < 64) return false;
     struct json_value input = {0}; json_set_object(&input);
     bool ok = json_push_kv_str(&input, "token", token);
     char wire[16384]; size_t n = ok ? json_write(&input, wire, sizeof(wire)) : sizeof(wire);
     json_free(&input);
-    const char *args[] = {"fleet", "join", NULL};
-    ok = n < sizeof(wire) && command(r, args, wire, out, cap);
+    const char *args[] = {"fleet", preview ? "preview" : "join", NULL};
+    ok = n < sizeof(wire) && command_timed(r, args, wire, preview ? 5000u : COMMAND_TIMEOUT_MS, out, cap);
     memory_cleanse(wire, sizeof(wire));
     return ok;
 }
+
+bool zapp_fleet_join_run(struct zapp_runtime *r, const char *token, char *out, size_t cap)
+{ return fleet_token_run(r, token, false, out, cap); }
+bool zapp_fleet_preview_run(struct zapp_runtime *r, const char *token, char *out, size_t cap)
+{ return fleet_token_run(r, token, true, out, cap); }
 
 /* The node writes tor_data/onion_service/hostname once Tor has published its hidden service. */
 static void onion_error(const char *step, const char *file)
@@ -858,6 +864,157 @@ const char *zapp_json_object(const char *text)
 {
     const char *json = !text ? NULL : text[0] == '{' ? text : strstr(text, "\n{");
     return json && json[0] == '\n' ? json + 1 : json;
+}
+
+static bool fleet_preview_identity(const char *name, const char *key)
+{
+    return name && key && strlen(name) >= 2 && strlen(name) <= 24 &&
+        strspn(name, "abcdefghijklmnopqrstuvwxyz0123456789-") == strlen(name) &&
+        strlen(key) == 64 && strspn(key, "0123456789abcdef") == 64;
+}
+
+bool zapp_fleet_preview_text(const char *text, char *out, size_t cap)
+{
+    const char *json = zapp_json_object(text);
+    if (!json || !out || !cap) return false;
+    struct json_value root = {0};
+    bool ok = json_read(&root, json, strlen(json));
+    const struct json_value *data = json_get(&root, "data");
+    const char *schema = json_get_str(json_get(data, "schema"));
+    const char *name = json_get_str(json_get(data, "name"));
+    const char *key = json_get_str(json_get(data, "operator_pubkey"));
+    ok = ok && json_get_bool(json_get(&root, "ok")) && schema &&
+        !strcmp(schema, "zcl.fleet.invite_preview.v1") && fleet_preview_identity(name, key);
+    if (ok) {
+        int n = snprintf(out, cap, "Phone name: %s\nManager key:\n%.16s %.16s\n%.16s %.16s\n"
+                         "Check that this key matches your fleet manager before joining.",
+                         name, key, key + 16, key + 32, key + 48);
+        ok = n >= 0 && (size_t)n < cap;
+    }
+    json_free(&root);
+    return ok;
+}
+
+static bool fleet_line_command(struct zapp_runtime *r, const char *op, const char *field,
+                               const char *value, char *out, size_t cap)
+{
+    struct json_value input = {0}; json_set_object(&input);
+    bool ok = json_push_kv_str(&input, field, value);
+    char wire[16384]; size_t n = ok ? json_write(&input, wire, sizeof(wire)) : sizeof(wire);
+    json_free(&input);
+    const char *args[] = {"fleet", op, NULL};
+    ok = n < sizeof(wire) && command_timed(r, args, wire, !strcmp(op, "preview") ? 5000u : COMMAND_TIMEOUT_MS, out, cap);
+    memory_cleanse(wire, sizeof(wire));
+    return ok;
+}
+bool zapp_fleet_machine_preview_run(struct zapp_runtime *r, const char *line, char *out, size_t cap)
+{ return r && line && out && cap >= 64 && fleet_line_command(r, "preview", "line", line, out, cap); }
+
+static bool fleet_onion_valid(const char *host)
+{
+    if (!host) return false;
+    size_t n = strlen(host);
+    if (n == 62 && !memcmp(host + 56, ".onion", 6)) {
+        for (size_t i = 0; i < 56; ++i)
+            if (!((host[i] >= 97 && host[i] <= 122) || (host[i] >= 50 && host[i] <= 55))) return false;
+        return true;
+    }
+    return zapp_onion_peer_valid(host);
+}
+
+static bool fleet_reply_ok(const char *text, const char *schema)
+{
+    const char *json = zapp_json_object(text);
+    struct json_value root = {0};
+    bool ok = json && json_read(&root, json, strlen(json));
+    const struct json_value *data = json_get(&root, "data");
+    const char *s = json_get_str(json_get(data, "schema"));
+    ok = ok && json_get_bool(json_get(&root, "ok")) && s && !strcmp(s, schema);
+    json_free(&root); return ok;
+}
+
+static bool fleet_machine_metadata(const struct json_value *data)
+{
+    const char *box = json_get_str(json_get(data, "box_pubkey"));
+    const struct json_value *port = json_get(data, "relay_port"), *enrolled = json_get(data, "enrolled_at");
+    return box && strlen(box) == 64 && strspn(box, "0123456789abcdef") == 64 &&
+        port && port->type == JSON_INT && json_get_int(port) > 0 && json_get_int(port) <= 65535 &&
+        enrolled && enrolled->type == JSON_INT && json_get_int(enrolled) > 0;
+}
+static bool fleet_machine_identity(const struct json_value *root, const struct json_value *data)
+{
+    const char *schema = json_get_str(json_get(data, "schema")), *kind = json_get_str(json_get(data, "kind"));
+    const char *name = json_get_str(json_get(data, "name")), *key = json_get_str(json_get(data, "operator_pubkey"));
+    return json_get_bool(json_get(root, "ok")) && schema && !strcmp(schema, "zcl.fleet.preview.v1") &&
+        kind && !strcmp(kind, "machine") && fleet_preview_identity(name, key);
+}
+bool zapp_fleet_machine_preview_text(const char *text, char *out, size_t cap, char *onion, size_t onion_cap)
+{
+    const char *json = zapp_json_object(text);
+    if (!json || !out || !cap || !onion || !onion_cap) return false;
+    struct json_value root = {0};
+    bool ok = json_read(&root, json, strlen(json));
+    const struct json_value *data = json_get(&root, "data");
+    const char *name = json_get_str(json_get(data, "name"));
+    const char *key = json_get_str(json_get(data, "operator_pubkey"));
+    const char *host = json_get_str(json_get(data, "onion"));
+    ok = ok && fleet_machine_identity(&root, data) && fleet_machine_metadata(data) &&
+        host && fleet_onion_valid(host) && strlen(host) < onion_cap;
+    if (ok) {
+        int n = snprintf(out, cap, "Fleet computer: %s\nManager key:\n%.16s %.16s\n%.16s %.16s\nCheck this key with your manager before connecting.", name, key, key + 16, key + 32, key + 48);
+        ok = n >= 0 && (size_t)n < cap;
+        if (ok) memcpy(onion, host, strlen(host) + 1);
+    }
+    json_free(&root); return ok;
+}
+
+static bool fleet_import_partial(const char *text)
+{
+    const char *json = zapp_json_object(text);
+    struct json_value root = {0};
+    bool ok = json && json_read(&root, json, strlen(json));
+    const char *code = json_get_str(json_get(json_get(&root, "error"), "code"));
+    ok = ok && code && !strcmp(code, "FLEET_IMPORT_PARTIAL");
+    json_free(&root); return ok;
+}
+
+bool zapp_fleet_connect_run(struct zapp_runtime *r, const char *line, const char *onion, char *out, size_t cap)
+{
+    if (!r || !line || !onion || !fleet_onion_valid(onion) || !out || cap < 64) return false;
+    if (!fleet_line_command(r, "import", "line", line, out, cap) || !fleet_reply_ok(out, "zcl.fleet.import.v1")) {
+        bool partial = fleet_import_partial(out);
+        snprintf(out, cap, "%s", partial ? "Import changed some fleet state before failing. Ask your manager to check it before retrying." :
+                 "Could not confirm the import. Fleet state may have changed; ask your manager to check it before retrying.");
+        return false;
+    }
+    struct json_value input = {0}; json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "address", onion);
+    char wire[512]; size_t n = ok ? json_write(&input, wire, sizeof(wire)) : sizeof(wire);
+    json_free(&input);
+    const char *args[] = {"core", "network", "peers", "add", NULL};
+    ok = n < sizeof(wire) && command_timed(r, args, wire, COMMAND_TIMEOUT_MS, out, cap) && fleet_reply_ok(out, "zcl.peer_add.v1");
+    memory_cleanse(wire, sizeof(wire));
+    snprintf(out, cap, "%s", ok ? "Connecting to the fleet computer. Admission is still pending." :
+             "The computer was imported, but connection could not be scheduled. Try Connect again.");
+    return ok;
+}
+bool zapp_fleet_join_receipt(const char *text, char *receipt, size_t cap)
+{
+    const char *json = zapp_json_object(text);
+    if (!json || !receipt || !cap) return false;
+    struct json_value root = {0};
+    bool ok = json_read(&root, json, strlen(json));
+    const struct json_value *data = json_get(&root, "data");
+    const char *schema = json_get_str(json_get(data, "schema"));
+    const char *value = json_get_str(json_get(data, "receipt"));
+    ok = ok && json_get_bool(json_get(&root, "ok")) && schema &&
+        !strcmp(schema, "zcl.fleet.join.v1") && value && value[0];
+    size_t length = ok ? strlen(value) : 0;
+    ok = ok && length >= 128 && length < cap && length <= 2332 &&
+        strspn(value, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_") == length;
+    if (ok) memcpy(receipt, value, length + 1);
+    json_free(&root);
+    return ok;
 }
 
 void zapp_plain_text(char *text, size_t cap)

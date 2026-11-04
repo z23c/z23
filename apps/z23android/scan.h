@@ -9,7 +9,7 @@
 #define ZAPP_SCAN_NETWORK ZAPP_PAY_MAINNET
 #endif
 
-enum zapp_scan_kind { ZAPP_SCAN_TEXT, ZAPP_SCAN_FLEET, ZAPP_SCAN_PAIR, ZAPP_SCAN_CLIP, ZAPP_SCAN_AUTHOR,
+enum zapp_scan_kind { ZAPP_SCAN_TEXT, ZAPP_SCAN_FLEET, ZAPP_SCAN_FLEET_MACHINE, ZAPP_SCAN_PAIR, ZAPP_SCAN_CLIP, ZAPP_SCAN_AUTHOR,
     ZAPP_SCAN_RATER, ZAPP_SCAN_UNREADABLE,
     /* A payment code that payment_code.h accepts: it opens the send review, nothing else. value is empty. */
     ZAPP_SCAN_PAY,

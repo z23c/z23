@@ -25,6 +25,12 @@ bool zapp_private_roster_save(const char *directory, const char *json);
 /* Reads that file into out (empty when absent or unreadable). Returns its length. */
 size_t zapp_private_roster_load(const char *directory, char *out, size_t cap);
 
+enum { ZAPP_FLEET_RECEIPT_MIN = 128, ZAPP_FLEET_RECEIPT_MAX = 2332 };
+/* Atomically replace a private, bounded base64url receipt. False after a directory sync failure means durability is uncertain. */
+bool zapp_fleet_receipt_save(const char *directory, const char *token);
+/* Read one complete valid receipt; on failure return zero and empty out when possible. */
+size_t zapp_fleet_receipt_load(const char *directory, char *out, size_t cap);
+
 struct zapp_private_args {
     char peer[ZAPP_PRIVATE_PEERS_MAX][ZAPP_ONION_PEER_MAX + 16];
     char *argv[ZAPP_PRIVATE_ARGV_MAX + ZAPP_PRIVATE_PEERS_MAX]; /* NULL-terminated */
