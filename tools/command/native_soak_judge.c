@@ -334,25 +334,41 @@ static void soak_render_counts(const struct soak_stats *st,
            st->bin_id1[0] ? st->bin_id1 : "null");
 }
 
+/* Keep the observed history in ledger order, including samples exactly at now. */
+static size_t soak_observed_samples(struct soak_sample *samples, size_t count, int64_t now)
+{
+    size_t used = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (samples[i].ts > now) continue;
+        if (used != i) samples[used] = samples[i];
+        used++;
+    }
+    return used;
+}
+
 static bool soak_judge_samples(const struct zcl_soak_judge_opts *o,
-                               const struct soak_sample *s, size_t n,
+                               struct soak_sample *s, size_t n,
                                int64_t malformed, struct zcl_judge_result *out)
 {
     struct soak_stats st;
     int64_t now = ej_now(o->now_unix);
+    const size_t file_n = n;
+    n = soak_observed_samples(s, file_n, now);
+    if (file_n != n)
+        ej_cat(out, "soak-evidence: ignored_future_samples=%zu\n", file_n - n);
     size_t i0;
     double gap0_pct;
     if (n == 0) {
-        ej_cat(out, "soak-evidence: judge window_hours=%lld file=%s file_samples=0 malformed=%lld\n",
-               (long long)o->window_hours, o->file, (long long)malformed);
-        ej_verdictf(out, "INSUFFICIENT", "empty_log");
+        ej_cat(out, "soak-evidence: judge window_hours=%lld file=%s file_samples=%zu malformed=%lld\n",
+               (long long)o->window_hours, o->file, file_n, (long long)malformed);
+        ej_verdictf(out, "INSUFFICIENT", file_n ? "all_samples_in_future" : "empty_log");
         ej_finish(out, "soak-evidence");
         return true;
     }
     i0 = soak_window_start(s, n, o->window_hours);
     soak_scan(s, i0, n, &st);
     gap0_pct = st.ok_cnt > 0 ? 100.0 * (double)st.gap0 / (double)st.ok_cnt : 0.0;
-    soak_render(&st, s, n, i0, n, malformed, o, now, out);
+    soak_render(&st, s, n, i0, file_n, malformed, o, now, out);
     soak_render_counts(&st, out, gap0_pct);
     soak_ladder(&st, o->window_hours, out, gap0_pct);
     if (strcmp(out->verdict, "MET") == 0 && !o->allow_stale &&

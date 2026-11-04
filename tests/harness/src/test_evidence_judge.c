@@ -680,6 +680,12 @@ static int ejt_case_soak_window_edges(void)
     TEST("soak: the start slack covers timer jitter, a stale tail caps at "
          "INSUFFICIENT and allow_stale judges history") {
         ASSERT(ejt_soak_ledger(dir, 169, ejt_healthy));
+        ASSERT(ejt_soak_judge(dir, 168, EJT_SOAK_BASE - 1, true));
+        ASSERT(ejt_is("INSUFFICIENT", 2) && ejt_has("ignored_future_samples=169"));
+        ASSERT(ejt_soak_judge(dir, 168, EJT_SOAK_BASE + 167 * 3600, false));
+        ASSERT(ejt_is("INSUFFICIENT", 2) && ejt_has("ignored_future_samples=1"));
+        ASSERT(ejt_soak_judge(dir, 168, EJT_SOAK_BASE + 168 * 3600, false));
+        ASSERT(ejt_is("MET", 0) && g_res.newest_age_sec == 0);
         ASSERT(ejt_soak_judge(dir, 168, EJT_FRESH + 2592000, false));
         ASSERT(ejt_is("INSUFFICIENT", 2) &&
                strstr(g_res.reason, "stale_evidence_age_2592060s") != NULL);
