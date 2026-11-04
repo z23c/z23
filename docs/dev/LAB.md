@@ -31,6 +31,11 @@ strings), `sanitize` (default true), `timeout_ms` (default 5000, at most
 `lab test` takes `cases` (a JSON file path or an inline array of at most 256
 objects with `name` and optional `stdin`, `args`, `expect_stdout`,
 `expect_exit`) and the same `sanitize`, `timeout_ms`, `mem_mb`, `fresh`.
+Each case member must occur once, after JSON escape decoding. Literal or
+escaped duplicates refuse with `LAB_BAD_CASES` before hashing, cache lookup,
+or compilation. `lab promote` shares this validation before any build or
+publication work; valid case roots and ordinary cache reuse are unchanged.
+<!-- claim: symbol-present lab_case_known_keys tools/command/native_lab_test_command.c -->
 
 ```
 $ z23 lab run tests/fixtures/lab/hello.c        # data member, trimmed of compiler_id

@@ -160,10 +160,18 @@ static bool lab_case_known_keys(const struct json_value *o)
 {
     static const char *const known[] = { "name", "stdin", "args",
                                          "expect_stdout", "expect_exit" };
+    bool seen[sizeof(known) / sizeof(known[0])] = {false};
     for (size_t i = 0; i < o->num_children; i++) {
         bool found = false;
-        for (size_t k = 0; k < sizeof(known) / sizeof(known[0]); k++)
-            found = found || strcmp(o->keys[i], known[k]) == 0;
+        for (size_t k = 0; k < sizeof(known) / sizeof(known[0]); k++) {
+            if (strcmp(o->keys[i], known[k]) != 0)
+                continue;
+            if (seen[k])
+                return false;
+            seen[k] = true;
+            found = true;
+            break;
+        }
         if (!found)
             return false;
     }
