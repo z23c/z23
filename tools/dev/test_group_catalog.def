@@ -1142,6 +1142,7 @@ ZCL_TEST_GROUP(dev_land_shard_01)
 ZCL_TEST_GROUP(dev_land_shard_02)
 ZCL_TEST_GROUP(dev_land_shard_03)
 ZCL_TEST_GROUP(dev_land_shard_04)
+ZCL_TEST_GROUP(dev_land_selfupgrade)
 ZCL_TEST_GROUP(dev_land_window)
 ZCL_TEST_GROUP(dev_land_remote)
 /* dev.ci: the one read-only screen over this host's CI and landing state.
