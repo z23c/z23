@@ -26,6 +26,7 @@
 #include <limits.h>
 #include <pthread.h>
 #include <sched.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -2212,14 +2213,12 @@ static int pst_case_lock_fairness(void)
     return failures;
 }
 
-/* A stall that freezes the whole host moves the waiter's clock past its
- * deadline in one step, although the holder is only slow, not stuck. The
- * seam jumps the clock once at the first expiry check; the waiter must keep
- * polling and take the lock when the holder lets go, not answer BUSY. */
+/* A one-shot synthetic soft-clock spike must not cause an early refusal.
+ * The real monotonic deadline still bounds a genuine host-wide stall. */
 static int pst_case_lock_clock_jump(void)
 {
     int failures = 0;
-    TEST_CASE("a clock jump across a stall does not refuse a waiter whose holder then lets go") {
+    TEST_CASE("a one-shot soft-clock spike does not refuse a waiter whose holder then lets go") {
         struct pst_fx fx;
         char plugdir[PATH_MAX], lockpath[PATH_MAX];
         ASSERT(pst_fx_open(&fx, true) && pst_install(&fx, "hello", "version a", &(struct pst_opts){0}) == PLUGIN_OK);
@@ -2244,6 +2243,54 @@ static int pst_case_lock_clock_jump(void)
         ASSERT_EQ(pst_reap(pid), (int)PLUGIN_OK);
         close(held);
         pst_fx_close(&fx);
+    } TEST_END
+    return failures;
+}
+
+static int pst_case_lock_slow_poll(void)
+{
+    int failures = 0;
+    TEST_CASE("a stopped waiter refuses promptly once its no-handover budget expires") {
+        struct pst_fx fx;
+        char plugdir[PATH_MAX], lockpath[PATH_MAX], gatepath[PATH_MAX];
+        ASSERT(pst_fx_open(&fx, true) && pst_install(&fx, "hello", "version a", &(struct pst_opts){0}) == PLUGIN_OK);
+        ASSERT(pst_plug_path(&fx, NULL, plugdir, sizeof(plugdir)));
+        ASSERT(pst_plug_path(&fx, ".lock", lockpath, sizeof(lockpath)));
+        ASSERT(pst_plug_path(&fx, ".lock.q", gatepath, sizeof(gatepath)));
+        int held = open(lockpath, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        ASSERT(held >= 0 && flock(held, LOCK_EX | LOCK_NB) == 0);
+        fflush(NULL);
+        pid_t pid = fork();
+        ASSERT(pid >= 0);
+        if (pid == 0) {
+            struct plugin_lock lk;
+            plugin_lock_test_timing(2000, 0);
+            _exit((int)plugin_lock_acquire(plugdir, &lk));
+        }
+        int gate = open(gatepath, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        bool announced = false;
+        for (int i = 0; gate >= 0 && i < 1000; i++) {
+            if (flock(gate, LOCK_EX | LOCK_NB) != 0) { announced = true; break; }
+            flock(gate, LOCK_UN);
+            platform_sleep_ms(1);
+        }
+        if (gate >= 0) close(gate);
+        int stopped = kill(pid, SIGSTOP);
+        int status = 0;
+        int observed = waitpid(pid, &status, WUNTRACED) == pid && WIFSTOPPED(status);
+        platform_sleep_ms(2100);
+        int resumed = kill(pid, SIGCONT);
+        pid_t reaped = 0;
+        for (int i = 0; i < 300 && reaped == 0; i++) {
+            reaped = waitpid(pid, &status, WNOHANG);
+            if (reaped == 0) platform_sleep_ms(1);
+        }
+        bool prompt = reaped == pid;
+        if (!prompt) { kill(pid, SIGKILL); (void)waitpid(pid, &status, 0); }
+        close(held);
+        pst_fx_close(&fx);
+        ASSERT(announced && stopped == 0 && observed && resumed == 0);
+        ASSERT(prompt && WIFEXITED(status) && WEXITSTATUS(status) == (int)PLUGIN_ERR_BUSY);
     } TEST_END
     return failures;
 }
@@ -2579,6 +2626,7 @@ int test_plugin_store(void)
     failures += pst_case_gate_owner();
     failures += pst_case_lock_fairness();
     failures += pst_case_lock_clock_jump();
+    failures += pst_case_lock_slow_poll();
     failures += pst_case_lock_budget();
     failures += pst_case_lock_gate_leftover();
     failures += pst_case_threaded_install();
