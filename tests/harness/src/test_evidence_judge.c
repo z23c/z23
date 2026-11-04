@@ -343,6 +343,8 @@ static int ejt_case_sw_proof_shapes(void)
          "{\"verdict\":\"fail\",\"nested\":{\"verdict\":\"pass\"}}\n"},
         {"stopwatch: malformed proof with a PASS token is incomplete",
          "{\"verdict\":\"pass\",broken}\n"},
+        {"stopwatch: physically invalid UTF-8 cannot qualify a proof",
+         "{\"verdict\":\"pass\",\"detail\":\"\xff\"}\n"},
         {"stopwatch: truncated proof with a PASS token is incomplete",
          "{\"verdict\":\"pass\","},
         {"stopwatch: duplicate PASS then FAIL verdict is incomplete",

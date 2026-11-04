@@ -220,7 +220,7 @@ static bool sw_proof_says_pass(const char *artifact)
     if (n < 0 || (size_t)n >= sizeof(path)) return false;
     buf = ej_slurp(path, (size_t)16 << 20, &len);
     struct json_value proof = {0};
-    if (buf && json_read(&proof, buf, len))
+    if (buf && zutf8_validate_n(buf, len) && json_read(&proof, buf, len))
         pass = sw_proof_root_pass(&proof);
     json_free(&proof);
     free(buf);
