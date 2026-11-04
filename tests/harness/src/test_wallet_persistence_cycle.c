@@ -513,21 +513,27 @@ struct lock_holder_args {
     char path[128];
     int  hold_ms;
     int  acquired; /* set once BEGIN IMMEDIATE succeeds */
+    int  settled;  /* set when the holder gave up or acquired: the waiter's wake cause */
 };
 
 static void *lock_holder_thread(void *arg)
 {
     struct lock_holder_args *a = arg;
     sqlite3 *holder = NULL;
-    if (sqlite3_open(a->path, &holder) != SQLITE_OK) return NULL;
+    if (sqlite3_open(a->path, &holder) != SQLITE_OK) {
+        __atomic_store_n(&a->settled, 1, __ATOMIC_SEQ_CST);
+        return NULL;
+    }
     sqlite3_busy_timeout(holder, 0);
     if (sqlite3_exec(holder, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK &&
         sqlite3_exec(holder, "INSERT INTO node_state(key,value) VALUES('h',x'00')",
                      NULL, NULL, NULL) == SQLITE_OK) {
         __atomic_store_n(&a->acquired, 1, __ATOMIC_SEQ_CST);
+        __atomic_store_n(&a->settled, 1, __ATOMIC_SEQ_CST);
         platform_sleep_ms(a->hold_ms);
         sqlite3_exec(holder, "COMMIT", NULL, NULL, NULL);
     }
+    __atomic_store_n(&a->settled, 1, __ATOMIC_SEQ_CST);
     sqlite3_close(holder);
     return NULL;
 }
@@ -575,9 +581,11 @@ static int test_flush_waits_out_transient_lock(void)
         ASSERT(pthread_create(&th, NULL, lock_holder_thread, &ha) == 0);
 
         /* Wait until the holder actually owns the write lock, so the flush
-         * genuinely contends (bounded spin, not a fixed sleep). */
-        for (int i = 0; i < 200 &&
-             !__atomic_load_n(&ha.acquired, __ATOMIC_SEQ_CST); i++)
+         * genuinely contends. The wait ends on the holder's own outcome
+         * (acquired or gave up), not on a wall-clock count: a loaded host can
+         * leave the thread unscheduled for longer than any fixed spin, and
+         * the assert below still fails if it never acquired. */
+        while (!__atomic_load_n(&ha.settled, __ATOMIC_SEQ_CST))
             platform_sleep_ms(1);
         ASSERT(__atomic_load_n(&ha.acquired, __ATOMIC_SEQ_CST) == 1);
 
