@@ -215,8 +215,11 @@ static void soak_scan(const struct soak_sample *s, size_t i0, size_t n,
 static size_t soak_window_start(const struct soak_sample *s, size_t n,
                                 int64_t window_hours)
 {
-    int64_t cutoff = s[n - 1].ts - window_hours * 3600 -
-                     ZCL_SOAK_WINDOW_SLACK_SEC;
+    int64_t seconds = window_hours * 3600;
+    int64_t cutoff = s[n - 1].ts;
+    cutoff = cutoff < INT64_MIN + seconds ? INT64_MIN : cutoff - seconds;
+    cutoff = cutoff < INT64_MIN + ZCL_SOAK_WINDOW_SLACK_SEC ? INT64_MIN :
+        cutoff - ZCL_SOAK_WINDOW_SLACK_SEC;
     size_t i0 = 0;
     for (size_t i = 0; i < n; i++) {
         if (s[i].ts < cutoff)
@@ -351,7 +354,7 @@ static bool soak_judge_samples(const struct zcl_soak_judge_opts *o,
                                int64_t malformed, struct zcl_judge_result *out)
 {
     struct soak_stats st;
-    int64_t now = ej_now(o->now_unix);
+    int64_t now = o->now_supplied ? o->now_unix : ej_now(o->now_unix);
     const size_t file_n = n;
     n = soak_observed_samples(s, file_n, now);
     if (file_n != n)
@@ -387,7 +390,8 @@ bool zcl_soak_judge(const struct zcl_soak_judge_opts *opts,
     int64_t malformed = 0;
     char *buf;
     bool ok;
-    if (!opts || !opts->file || !out)
+    if (!opts || !opts->file || !out || opts->window_hours < 0 ||
+        opts->window_hours > ZCL_SOAK_WINDOW_HOURS_MAX)
         return false;
     memset(out, 0, sizeof(*out));
     buf = ej_slurp(opts->file, SOAK_FILE_MAX, &len);
@@ -416,6 +420,8 @@ bool zcl_soak_judge_defaults(struct zcl_soak_judge_opts *opts, char *path,
     if (ej_env_int("ZCL_SOAK_NOW", getenv("ZCL_SOAK_NOW"), &now, err, err_cap) < 0)
         return false;
     opts->now_unix = now;
+    const char *supplied = getenv("ZCL_SOAK_NOW");
+    opts->now_supplied = supplied && supplied[0];
     if (dir && dir[0])
         (void)snprintf(path, cap, "%s/evidence.jsonl", dir);
     else

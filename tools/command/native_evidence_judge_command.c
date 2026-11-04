@@ -110,9 +110,11 @@ void zcl_native_handle_ops_soak_judge(const struct zcl_command_request *request,
     }
     judge_set_int(request, "window_hours", &opts.window_hours);
     judge_set_int(request, "now", &opts.now_unix);
+    const struct json_value *now = judge_in(request, "now");
+    if (now && now->type == JSON_INT) opts.now_supplied = true;
     opts.allow_stale = stale && stale->type == JSON_BOOL && json_get_bool(stale);
-    if (opts.window_hours < 0) {
-        judge_invalid(reply, "window_hours must be a positive integer", "");
+    if (opts.window_hours < 0 || opts.window_hours > ZCL_SOAK_WINDOW_HOURS_MAX) {
+        judge_invalid(reply, "window_hours must fit nonnegative whole seconds", "");
         return;
     }
     if (!zcl_soak_judge(&opts, &res)) {

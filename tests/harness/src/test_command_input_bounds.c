@@ -20,6 +20,7 @@
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
+#include "command/native_evidence_judge.h"
 #include "session/fleet_board_proto.h"
 
 #include "fleetledger/fleet_ledger.h"
@@ -1637,6 +1638,100 @@ static int t_ops_state_explain_boolean(void)
     return failures;
 }
 
+static bool cib_soak_fixture(const char *file)
+{
+    FILE *f = fopen(file, "w");
+    if (!f) return false;
+    bool ok = true;
+    for (int ts = -3600; ts <= 0; ts += 3600)
+        if (fprintf(f, "{\"ts\":%d,\"soak_height\":1,\"zd_height\":1,\"gap\":0,"
+            "\"nrestarts\":0,\"active_enter_ts\":0,\"rss_kb\":1,"
+            "\"binary_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+            "\"security_review_required\":false,\"security_posture_ok\":true,"
+            "\"window_eligible\":true,\"ok\":true}\n", ts) < 0) ok = false;
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+
+static int t_soak_input_contract(void)
+{
+    int failures = 0;
+    const char *leaf = "ops.host.slo.soak";
+    CIB_CHECK("soak typed allow_stale accepted", cib_json_shape(leaf, "{\"allow_stale\":true}"));
+    CIB_CHECK("soak string allow_stale refused", !cib_json_shape(leaf, "{\"allow_stale\":\"true\"}"));
+    CIB_CHECK("soak zero-hour legacy window accepted", cib_accepts_int(leaf, "window_hours", 0));
+    CIB_CHECK("soak longer legacy window accepted", cib_accepts_int(leaf, "window_hours", 169));
+    CIB_CHECK("soak overflowing seconds refused",
+        !cib_accepts_int(leaf, "window_hours", INT64_MAX / 3600 + 1));
+    CIB_CHECK("neighbor window bound unchanged",
+        !cib_accepts_int("ops.host.slo.judge", "window_hours", 169));
+    CIB_CHECK("soak largest whole-second window accepted",
+        cib_accepts_int(leaf, "window_hours", INT64_MAX / 3600));
+    return failures;
+}
+
+static int cib_soak_command_zero(const char *root)
+{
+    int failures = 0;
+    struct json_value input;
+    json_init(&input); json_set_object(&input);
+    bool built = json_push_kv_str(&input, "dir", root) &&
+        json_push_kv_int(&input, "window_hours", 1) && json_push_kv_int(&input, "now", 0);
+    struct zcl_command_request request = {.input = &input};
+    struct zcl_command_reply reply;
+    zcl_native_handle_ops_soak_judge(&request, &reply);
+    const char *text = json_get_str(json_get(&reply.data, "text"));
+    CIB_CHECK("soak supplied command zero is literal epoch",
+        built && text && strstr(text, "last_sample_age_sec=0 "));
+    zcl_command_reply_free(&reply); json_free(&input);
+    return failures;
+}
+
+static int cib_soak_environment_time(const char *root, const char *file)
+{
+    int failures = 0;
+    const char *old = getenv("ZCL_SOAK_NOW");
+    char *saved = old ? strdup(old) : NULL;
+    if (old && !saved) return 1;
+    char path[512], err[160];
+    struct zcl_soak_judge_opts opts;
+    struct zcl_judge_result result;
+    bool defaults = setenv("ZCL_SOAK_NOW", "0", 1) == 0 &&
+        zcl_soak_judge_defaults(&opts, path, sizeof(path), err, sizeof(err));
+    opts.file = file; opts.window_hours = 1;
+    CIB_CHECK("soak supplied environment zero is literal epoch",
+        defaults && zcl_soak_judge(&opts, &result) &&
+        strstr(result.text, "last_sample_age_sec=0 ") != NULL);
+    defaults = unsetenv("ZCL_SOAK_NOW") == 0 &&
+        zcl_soak_judge_defaults(&opts, path, sizeof(path), err, sizeof(err));
+    opts.file = file; opts.window_hours = 1;
+    CIB_CHECK("soak absent environment retains wall-clock default",
+        defaults && zcl_soak_judge(&opts, &result) &&
+        strstr(result.text, "last_sample_age_sec=0 ") == NULL);
+    struct zcl_soak_judge_opts legacy = {.file = file, .window_hours = 1, .now_unix = 0};
+    CIB_CHECK("soak legacy C caller zero retains sentinel",
+        zcl_soak_judge(&legacy, &result) &&
+        strstr(result.text, "last_sample_age_sec=0 ") == NULL);
+    failures += cib_soak_command_zero(root);
+    if (saved) { if (setenv("ZCL_SOAK_NOW", saved, 1) != 0) failures++; }
+    else if (unsetenv("ZCL_SOAK_NOW") != 0) failures++;
+    free(saved);
+    return failures;
+}
+
+static int t_soak_time_contract(void)
+{
+    int failures = 0;
+    char root[512], file[600];
+    test_make_tmpdir(root, sizeof(root), "soak_time", "contract");
+    (void)snprintf(file, sizeof(file), "%s/evidence.jsonl", root);
+    bool ready = cib_soak_fixture(file);
+    CIB_CHECK("soak time isolated fixture", ready);
+    if (ready) failures += cib_soak_environment_time(root, file);
+    test_cleanup_tmpdir(root);
+    return failures;
+}
+
 int test_command_input_bounds(void)
 {
     printf("\n=== command_input_bounds: per-key input length rules ===\n");
@@ -1645,6 +1740,8 @@ int test_command_input_bounds(void)
     failures += t_discovery_transport_shapes();
     failures += t_discovery_transport_edges();
     failures += t_discovery_descriptor_contract();
+    failures += t_soak_input_contract();
+    failures += t_soak_time_contract();
     failures += t_key_edges();
     failures += t_machine_protected_object_types();
     failures += t_machine_protected_wrong_types();

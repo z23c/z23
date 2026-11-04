@@ -1114,6 +1114,23 @@ static bool cr_descriptor_declared(const struct zcl_command_spec *spec,
     return spec && spec->path && key && cr_csv_has(spec->input_keys, key);
 }
 
+static bool cr_soak_descriptor(const struct zcl_command_spec *spec, const char *key,
+                                struct zcl_command_input_descriptor *out)
+{
+    if (strcmp(spec->path, "ops.host.slo.soak") != 0) return false;
+    if (strcmp(key, "allow_stale") == 0) {
+        out->type = JSON_BOOL;
+        return true;
+    }
+    if (strcmp(key, "window_hours") == 0) {
+        out->type = JSON_INT;
+        out->minimum = 0;
+        out->maximum = INT64_MAX / 3600;
+        return true;
+    }
+    return false;
+}
+
 bool zcl_command_registry_input_descriptor(
     const struct zcl_command_spec *spec, const char *key,
     struct zcl_command_input_descriptor *out)
@@ -1128,6 +1145,7 @@ bool zcl_command_registry_input_descriptor(
     memset(out, 0, sizeof(*out));
     if (!cr_descriptor_declared(spec, key))
         return false;
+    if (cr_soak_descriptor(spec, key, out)) return true;
     const struct cr_int_bound *host_bound = cr_leaf_int_bound(spec->path, key);
     if (host_bound) {
         out->type = JSON_INT;

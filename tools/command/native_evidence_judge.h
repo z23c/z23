@@ -21,6 +21,7 @@
 #define ZCL_STOPWATCH_JUDGE_SCHEMA "zcl.stopwatch_judge.v1"
 
 #define ZCL_SOAK_WINDOW_HOURS 168
+#define ZCL_SOAK_WINDOW_HOURS_MAX (INT64_MAX / 3600)
 #define ZCL_SOAK_HOLE_THRESHOLD_SEC 8100
 #define ZCL_SOAK_WINDOW_SLACK_SEC 900
 #define ZCL_SOAK_GAP0_MIN_PCT 99
@@ -50,6 +51,7 @@ struct zcl_soak_judge_opts {
     int64_t window_hours; /* ZCL_SOAK_WINDOW_HOURS */
     bool allow_stale;     /* judge a historical window */
     int64_t now_unix;     /* 0 = wall clock */
+    bool now_supplied;    /* C6: true makes an explicit epoch 0 literal */
 };
 
 struct zcl_stopwatch_judge_opts {
@@ -63,7 +65,7 @@ struct zcl_stopwatch_judge_opts {
     int64_t now_unix;            /* 0 = wall clock */
 };
 
-/* False only when the ledger cannot be held in memory; every evidence
+/* False for invalid soak options or when the ledger cannot be held in memory; every evidence
  * shortfall is a verdict, never a failure. */
 bool zcl_soak_judge(const struct zcl_soak_judge_opts *opts,
                     struct zcl_judge_result *out);
