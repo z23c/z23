@@ -112,6 +112,11 @@
  * not supported, not refuted, and the caller can see it is unreadable rather
  * than merely small.
  *
+ * A PASS requires an edit and executed groups with zero
+ * failures. Cache participation alone does not establish a hollow run.
+ * A conflicting receipt leaves its arm's verdict-based rates
+ * undefined. The register retains the trial and its independent measurements.
+ *
  * DURABILITY
  * ----------
  * Claims and trials are appended to a chainlog (chainlog/chainlog.h): SHA3
@@ -463,7 +468,7 @@ struct science_receipt {
 struct science_arm_reading {
     uint32_t trials;
     int64_t  value_milli;    /* meaningless unless `defined` */
-    bool     defined;        /* false only for a zero-denominator ratio */
+    bool     defined;        /* false when the arm lacks usable evidence for the metric */
     uint32_t producers;      /* distinct producers in THIS arm */
 };
 

@@ -1065,6 +1065,7 @@ struct arm_totals {
     uint32_t trials;
     uint32_t passes;
     uint32_t hollow;
+    bool conflicting_pass;
     uint64_t files;      /* bounded: CAP * SCIENCE_FILES_MAX */
     int64_t  completion; /* bounded: CAP * SCIENCE_TOKENS_MAX */
 };
@@ -1078,8 +1079,12 @@ static void tally(const struct science_register *reg, uint32_t claim_index,
         if (row->claim_index != claim_index || row->arm != arm)
             continue;
         t->trials++;
-        if (engine_verdict_is_pass(row->verdict))
+        if (engine_verdict_is_pass(row->verdict)) {
             t->passes++;
+            if (row->files_changed == 0 || row->groups_ran <= 0 ||
+                row->groups_failed != 0)
+                t->conflicting_pass = true;
+        }
         if (row->verdict == ENGINE_VERDICT_HOLLOW)
             t->hollow++;
         t->files += row->files_changed;
@@ -1124,6 +1129,9 @@ static void read_arm(const struct science_register *reg,
     memset(out, 0, sizeof *out);
     out->trials = t.trials;
     out->producers = distinct_producers(reg, index, arm);
+    if (t.conflicting_pass && (claim->metric == SCIENCE_METRIC_VERDICT_PASS_RATE ||
+                               claim->metric == SCIENCE_METRIC_HOLLOW_RATE))
+        return;
     if (t.trials == 0)
         return;
 
@@ -1186,8 +1194,9 @@ static void compute_reading(const struct science_register *reg,
     if (!out->control.defined || !out->treatment.defined) {
         out->status = SCIENCE_INCONCLUSIVE;
         out->effect_readable = false;
-        out->reason = "an arm landed zero files, so the metric is undefined "
-                      "for it; no effect can be read";
+        out->reason = claim->metric == SCIENCE_METRIC_TOKENS_PER_LANDED_FILE
+            ? "an arm landed zero files, so the metric is undefined for it; no effect can be read"
+            : "an arm contains a PASS inconsistent with its edit or gate evidence";
         return;
     }
 

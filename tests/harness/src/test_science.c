@@ -289,6 +289,80 @@ static bool record_pair_rounds(struct science_register *reg,
     return true;
 }
 
+struct pass_evidence_case {
+    const char *name;
+    enum science_metric metric;
+    uint32_t files;
+    int32_t ran, failed;
+    bool cached, readable;
+};
+
+static const struct pass_evidence_case pass_cases[] = {
+    {"PASS with a failed group", SCIENCE_METRIC_VERDICT_PASS_RATE, 3, 1, 1, false, false},
+    {"PASS with zero groups", SCIENCE_METRIC_VERDICT_PASS_RATE, 3, 0, 0, false, false},
+    {"PASS with no edit", SCIENCE_METRIC_VERDICT_PASS_RATE, 0, 1, 0, false, false},
+    {"cached PASS with no executed groups", SCIENCE_METRIC_VERDICT_PASS_RATE, 3, 0, 0, true, false},
+    {"mixed cached and executed PASS", SCIENCE_METRIC_VERDICT_PASS_RATE, 3, 2, 0, true, true},
+    {"hollow rate with contradictory PASS", SCIENCE_METRIC_HOLLOW_RATE, 3, 1, 1, false, false},
+    {"file count with contradictory PASS", SCIENCE_METRIC_FILES_CHANGED, 3, 1, 1, false, true},
+};
+
+static bool record_pass_case(struct science_register *reg,
+                             const struct pass_evidence_case *item, uint8_t id[32])
+{
+    struct science_claim_spec spec = good_spec();
+    spec.statement = item->name;
+    spec.sample_floor = 1;
+    spec.metric = item->metric;
+    struct science_receipt c = receipt("control", SCIENCE_ARM_CONTROL, ENGINE_VERDICT_FAIL);
+    struct science_receipt t = receipt("treatment", SCIENCE_ARM_TREATMENT, ENGINE_VERDICT_PASS);
+    t.files_changed = item->files;
+    t.groups_ran = item->ran;
+    t.groups_failed = item->failed;
+    t.cached = item->cached;
+    return science_claim_register(reg, &spec, id) == SCIENCE_OK &&
+           record_pair_rounds(reg, id, 1, c, t);
+}
+
+static bool pass_case_agrees(struct science_register *reg, const uint8_t id[32],
+                             const struct pass_evidence_case *item)
+{
+    struct science_reading r;
+    bool readable = item->readable;
+    enum science_status expected = readable && item->metric == SCIENCE_METRIC_VERDICT_PASS_RATE
+                                       ? SCIENCE_SUPPORTED : SCIENCE_INCONCLUSIVE;
+    return science_claim_read(reg, id, &r) == SCIENCE_OK &&
+           r.status == expected && r.trials == 2 && r.producers == 2 &&
+           r.control.defined && r.treatment.defined == readable &&
+           r.effect_readable == readable && (readable || strstr(r.reason, "PASS"));
+}
+
+static int case_contradictory_pass(void)
+{
+    int failures = 0;
+    char dir[512], path[640];
+    struct science_register *reg = open_fresh(dir, sizeof dir, "pass-evidence", path, sizeof path);
+    enum { count = sizeof pass_cases / sizeof pass_cases[0] };
+    uint8_t ids[count][32] = {0};
+    if (reg) {
+        for (size_t i = 0; i < count; ++i) {
+            SC_CHECK("retain both original trial receipts", record_pass_case(reg, &pass_cases[i], ids[i]));
+            SC_CHECK(pass_cases[i].name, pass_case_agrees(reg, ids[i], &pass_cases[i]));
+        }
+        science_close(reg);
+        struct science_open_report report;
+        reg = science_open(path, &report);
+        SC_CHECK("original trial journal reopens", reg != NULL);
+        for (size_t i = 0; reg && i < count; ++i)
+            SC_CHECK(pass_cases[i].name, pass_case_agrees(reg, ids[i], &pass_cases[i]));
+        science_close(reg);
+    } else {
+        SC_CHECK("the register opens", false);
+    }
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 static int case_sample_floor_first(void)
 {
     int failures = 0;
@@ -2031,6 +2105,7 @@ int test_science(void)
     int failures = 0;
     failures += case_falsifier_required();
     failures += case_metric_closed();
+    failures += case_contradictory_pass();
     failures += case_sample_floor_first();
     failures += case_three_verdicts();
     failures += case_hollow_and_ratio();
