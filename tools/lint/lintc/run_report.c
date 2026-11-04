@@ -101,9 +101,8 @@ static int rank_cmp(const void *pa, const void *pb)
 {
     const struct lr_gate *a = *(const struct lr_gate *const *)pa;
     const struct lr_gate *b = *(const struct lr_gate *const *)pb;
-    if (a->ms != b->ms)
-        return a->ms < b->ms ? 1 : -1;
-    return strcmp(b->name, a->name);
+    int by_time = (b->ms > a->ms) - (b->ms < a->ms);
+    return by_time ? by_time : strcmp(b->name, a->name);
 }
 
 static int rank_gates(struct lr_run *r, const struct lr_gate **rank)

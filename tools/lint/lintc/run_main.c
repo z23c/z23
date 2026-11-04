@@ -145,17 +145,12 @@ static void note_unrequested(char *const *gates, int n)
     }
 }
 
-static int name_cmp(const void *a, const void *b)
-{
-    return strcmp(*(const char *const *)a, *(const char *const *)b);
-}
-
 static int list_gates(void)
 {
     const char *names[LR_TABLE_ROWS];
     for (int i = 0; i < g_table.n; i++)
         names[i] = g_table.rows[i].name;
-    qsort(names, (size_t)g_table.n, sizeof names[0], name_cmp);
+    qsort(names, (size_t)g_table.n, sizeof names[0], lintc_strcmp_ptr);
     for (int i = 0; i < g_table.n; i++)
         puts(names[i]);
     return 0;
