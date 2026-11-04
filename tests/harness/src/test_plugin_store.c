@@ -2254,7 +2254,7 @@ static bool pst_wait_for_announcement(const char *gatepath)
     for (int i = 0; gate >= 0 && i < 1000; i++) {
         if (flock(gate, LOCK_EX | LOCK_NB) != 0) { announced = true; break; }
         flock(gate, LOCK_UN);
-        platform_sleep_ms(1);
+        platform_sleep_ms(1); /* real-clock: forked waiter's kernel flock announcement has no injected scheduler. */
     }
     if (gate >= 0) close(gate);
     return announced;
@@ -2265,7 +2265,7 @@ static bool pst_wait_for_exit(pid_t pid, int *status)
     pid_t reaped = 0;
     for (int i = 0; i < 300 && reaped == 0; i++) {
         reaped = waitpid(pid, status, WNOHANG);
-        if (reaped == 0) platform_sleep_ms(1);
+        if (reaped == 0) platform_sleep_ms(1); /* real-clock: bound reaping of the SIGCONT-resumed child; waitpid has no virtual clock. */
     }
     if (reaped == pid) return true;
     kill(pid, SIGKILL);
