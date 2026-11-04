@@ -84,6 +84,32 @@ static int test_sqlq_rows_and_typing(void)
     return failures;
 }
 
+static int test_sqlq_embedded_nul_text(void)
+{
+    int failures = 0;
+    const struct { const char *sql, *expected; size_t size; } cases[] = {
+        {"SELECT CAST(x'006162' AS TEXT)", "\0ab" SQLQ_EOL, sizeof("\0ab" SQLQ_EOL)},
+        {"SELECT CAST(x'610062' AS TEXT)", "a\0b" SQLQ_EOL, sizeof("a\0b" SQLQ_EOL)},
+        {"SELECT CAST(x'616200' AS TEXT)", "ab\0" SQLQ_EOL, sizeof("ab\0" SQLQ_EOL)},
+        {"SELECT ''", SQLQ_EOL, sizeof(SQLQ_EOL)},
+        {"SELECT CAST(x'610062' AS TEXT), 7, x'00ff', NULL, ''",
+            "a\0b\t7\t00ff\tNULL\t" SQLQ_EOL,
+            sizeof("a\0b\t7\t00ff\tNULL\t" SQLQ_EOL)},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        char out[128];
+        memset(out, 0xa5, sizeof out);
+        TEST("sqlq: TEXT retains embedded NUL bytes and column boundaries") {
+            ASSERT_EQ(sqlq_run(":memory:", cases[i].sql, out, sizeof out), 0);
+            /* Include the capture terminator: zero-filled padding must not
+             * hide a truncated final NUL or a missing row delimiter. */
+            ASSERT(memcmp(out, cases[i].expected, cases[i].size) == 0);
+            PASS();
+        } _test_next:;
+    }
+    return failures;
+}
+
 static int test_sqlq_refusals(void)
 {
     int failures = 0;
@@ -271,6 +297,7 @@ int test_sqlq(void)
         return 1;
     }
     failures += test_sqlq_rows_and_typing();
+    failures += test_sqlq_embedded_nul_text();
     failures += test_sqlq_refusals();
     failures += test_sqlq_unbound_parameters();
     failures += test_sqlq_statement_tail();

@@ -75,6 +75,24 @@ static int finish_stdout(int rc)
     return rc;
 }
 
+static bool sqlq_print_text(sqlite3_stmt *st, int column)
+{
+    const unsigned char *text = sqlite3_column_text(st, column);
+    if (!text) {
+        fprintf(stderr, "sqlq: column %d text conversion failed: %s\n",
+                column, sqlite3_errmsg(sqlite3_db_handle(st)));
+        return false;
+    }
+    int length = sqlite3_column_bytes(st, column);
+    return fwrite(text, 1, (size_t)length, stdout) == (size_t)length;
+}
+
+static bool sqlq_allowed_prefix(const char *sql)
+{
+    return strncasecmp(sql, "SELECT", 6) == 0 ||
+           strncasecmp(sql, "PRAGMA", 6) == 0;
+}
+
 int sqlq_main(int argc, char **argv)
 {
     if (argc != 3) {
@@ -82,8 +100,7 @@ int sqlq_main(int argc, char **argv)
         return 1;
     }
     const char *sql = argv[2];
-    if (strncasecmp(sql, "SELECT", 6) != 0 &&
-        strncasecmp(sql, "PRAGMA", 6) != 0) {
+    if (!sqlq_allowed_prefix(sql)) {
         fprintf(stderr, "sqlq: read-only — SELECT/PRAGMA only\n");
         return 1;
     }
@@ -120,7 +137,11 @@ int sqlq_main(int argc, char **argv)
                 break;
             }
             default:
-                fputs((const char *)sqlite3_column_text(st, i), stdout);
+                if (!sqlq_print_text(st, i)) {
+                    sqlite3_finalize(st);
+                    sqlite3_close(db);
+                    return finish_stdout(1);
+                }
             }
         }
         fputc('\n', stdout);
