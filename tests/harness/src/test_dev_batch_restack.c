@@ -145,6 +145,24 @@ static bool dbr_build(struct dbr *r)
     return dbr_logs(&r->f) && dbr_state(r);
 }
 
+/* Replace every copy of path in dump with a short mark. The dump echoes
+ * fixture paths, and the fixture and the dev binary live under the checkout,
+ * whose name is arbitrary: a checkout at .../r1lane-dead-shell-8 contains
+ * "lane-d" and failed the not-named checks below. The checks must see only
+ * what the leaf decided, never where the tree happens to sit. */
+static void dbr_redact(char *dump, const char *path)
+{
+    static const char mark[] = "<path>";
+    size_t pl = strlen(path), ml = sizeof(mark) - 1;
+    char *p;
+    if (pl < ml)
+        return;
+    while ((p = strstr(dump, path)) != NULL) {
+        memmove(p + ml, p + pl, strlen(p + pl) + 1);
+        memcpy(p, mark, ml);
+    }
+}
+
 static void dbr_restack(struct dbr *r, const char *const *flags,
                         struct zcl_command_reply *reply, char *dump, size_t cap,
                         const char *devbin)
@@ -155,6 +173,7 @@ static void dbr_restack(struct dbr *r, const char *const *flags,
     (void)snprintf(sysctl, sizeof(sysctl), "%s/systemctl", r->f.fakes);
     dbf_call(zcl_native_handle_dev_batch_restack, &r->f, pairs, flags, reply,
              dump, cap);
+    dbr_redact(dump, r->f.root);
 }
 
 static bool dbr_row_in(const char *file_text, const char *lane)
