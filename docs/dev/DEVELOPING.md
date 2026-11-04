@@ -1551,9 +1551,14 @@ Before committing:
    unrelated local work.
 5. Rerun the minimum gates affected by that integration.
 6. Commit one coherent change with an evidence-backed message.
-   Build the candidate-owned `z23-dev` producer after the final signed commit
-   under `devbuild --wait`. A tool built before committing can identify a
-   different working state; its build pass is not exact proof qualification.
+   For direct local proof, build the candidate-owned `z23-dev` producer after
+   the final signed commit under `devbuild --wait`. A tool built before
+   committing can identify a different working state; its build pass is not
+   exact proof qualification. For queue submission, submit the signed source;
+   the queue builds its own producer from the prepared candidate for the exact
+   commit/base proof. Submission does not require building a lane producer.
+   <!-- claim: symbol-present dl_submit tools/command/native_dev_land.c # queue submits the source tip -->
+   <!-- claim: symbol-present dl_producer_reproof_log tools/command/native_dev_land.c # queue builds its own proof producer -->
 7. On Linux and macOS, require `dev proof status` to report `passed` for the
    exact commit/base under current policy before publication. The native
    pre-push hook reads only the exact sealed receipt, and it admits a main
