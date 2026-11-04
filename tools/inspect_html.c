@@ -18,17 +18,22 @@
 #include "util/safe_alloc.h"
 
 static char *read_file(const char *path, size_t *len_out) {
-    FILE *f = fopen(path, "r");
+    FILE *f = fopen(path, "rb");
     if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
     long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (sz <= 0) { fclose(f); return NULL; }
+    if (sz <= 0 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
     char *buf = zcl_malloc((size_t)sz + 1, "inspect_html read_file buf");
     if (!buf) { fclose(f); return NULL; }
-    *len_out = fread(buf, 1, (size_t)sz, f);
-    buf[*len_out] = '\0';
-    fclose(f);
+    size_t len = fread(buf, 1, (size_t)sz, f);
+    int extra = fgetc(f);
+    /* Every check uses C strings: a NUL must not silently hide the suffix. */
+    bool invalid = len != (size_t)sz || extra != EOF || ferror(f) ||
+                   memchr(buf, '\0', len);
+    if (fclose(f) != 0) invalid = true;
+    if (invalid) { free(buf); return NULL; }
+    *len_out = len;
+    buf[len] = '\0';
     return buf;
 }
 
@@ -107,7 +112,7 @@ int main(int argc, char **argv) {
     size_t len = 0;
     char *html = read_file(argv[1], &len);
     if (!html) {
-        fprintf(stderr, "Cannot read: %s\n", argv[1]);
+        fprintf(stderr, "Cannot read complete HTML text (I/O error or embedded NUL): %s\n", argv[1]);
         return 2;
     }
 
