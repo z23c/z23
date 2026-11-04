@@ -628,8 +628,12 @@ static bool boot_step_init_crypto_and_state(struct app_context *ctx,
     if (ctx->params_dir && params_files_present) {
         /* One-shot ZK params loader; joined at shutdown via
          * app_shutdown's params_thread field. raw-pthread-ok */
-        if (pthread_create(&g_params_thread, NULL, load_params_thread, NULL) == 0)
+        if (pthread_create(&g_params_thread, NULL, load_params_thread, NULL) == 0) {
             g_params_thread_started = true;
+            /* Own the worker even if an offline/early path never builds svc. */
+            g_svc.params_thread = g_params_thread;
+            g_svc.params_thread_started = true;
+        }
         else if (boot_params_thread_failure_is_fatal(
                      ctx, params ? params->strNetworkID : NULL)) {
             struct blocker_record rec;
@@ -3679,6 +3683,10 @@ void app_shutdown_offline(bool output_already_durable)
     boot_stop_db_service_kernel();
     staged_sync_supervisor_shutdown_stages();
     boot_offline_join_workers_or_exit(g_datadir);
+    if (!boot_params_join_owned(&g_svc)) {
+        fprintf(stderr, "[shutdown] parameter loader join failed; exiting unclean\n");
+        _exit(1);
+    }
     coins_view_cache_free(&g_coins_tip);
     coins_view_sqlite_close(&g_coins_sqlite);
     if (g_wallet_sqlite.open) {

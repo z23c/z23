@@ -45,6 +45,7 @@ struct bp_params_barrier {
     struct boot_svc_ctx svc;
     struct app_context ctx;
     _Atomic bool loaded;
+    bool verifier_ready, phgr_ready, worker_ok;
 };
 
 static void *bp_params_worker(void *arg)
@@ -53,46 +54,101 @@ static void *bp_params_worker(void *arg)
     char byte = 'r';
     if (write(b->ready[1], &byte, 1) != 1) return NULL;
     if (read(b->release[0], &byte, 1) != 1) return NULL;
+    atomic_store(&b->loaded, b->worker_ok);
     return NULL;
 }
 
 static void *bp_params_caller(void *arg)
 {
     struct bp_params_barrier *b = arg;
-    boot_test_params_boundary(&b->svc, &b->ctx, true, true);
+    boot_test_params_boundary(&b->svc, &b->ctx, b->verifier_ready, b->phgr_ready);
     char byte = 'd';
     if (write(b->returned[1], &byte, 1) != 1) return NULL;
     return NULL;
 }
 
-static int bp_test_params_ready_boundary(void)
+static void *bp_params_shutdown_caller(void *arg)
+{
+    struct bp_params_barrier *b = arg;
+    char byte = boot_params_join_owned(&b->svc) ? 'j' : 'e';
+    if (write(b->returned[1], &byte, 1) != 1) return NULL;
+    return NULL;
+}
+
+static void bp_close_pair(int pair[2])
+{
+    if (pair[0] >= 0) close(pair[0]);
+    if (pair[1] >= 0) close(pair[1]);
+}
+
+static int bp_params_barrier_case(bool verifier, bool phgr, bool steady,
+                                  bool confine, bool should_return_early,
+                                  bool worker_ok)
 {
     int failures = 0;
-    struct bp_params_barrier b = {0};
+    struct bp_params_barrier b = {
+        .ready = {-1, -1}, .release = {-1, -1}, .returned = {-1, -1},
+        .verifier_ready = verifier, .phgr_ready = phgr, .worker_ok = worker_ok,
+    };
     b.ctx.params_dir = "fixture";
-    atomic_init(&b.loaded, true);
+    b.ctx.sandbox_steady = steady;
+    b.ctx.confine = confine;
+    atomic_init(&b.loaded, false);
     b.svc.params_loaded = &b.loaded;
-    if (pipe(b.ready) || pipe(b.release) || pipe(b.returned)) return 1;
+    if (pipe(b.ready) || pipe(b.release) || pipe(b.returned)) {
+        failures++;
+        goto close_pipes;
+    }
     pthread_t worker, caller;
-    if (pthread_create(&worker, NULL, bp_params_worker, &b) != 0) return 1;
+    if (pthread_create(&worker, NULL, bp_params_worker, &b) != 0) {
+        failures++;
+        goto close_pipes;
+    }
     b.svc.params_thread = worker;
     b.svc.params_thread_started = true;
     char byte;
     if (read(b.ready[0], &byte, 1) != 1 ||
         pthread_create(&caller, NULL, bp_params_caller, &b) != 0) {
-        (void)write(b.release[1], "x", 1);
+        if (write(b.release[1], "x", 1) != 1) failures++;
+        close(b.release[1]); b.release[1] = -1;
         pthread_join(worker, NULL);
-        return 1;
+        failures++;
+        goto close_pipes;
     }
     struct pollfd pfd = { .fd = b.returned[0], .events = POLLIN };
     int before_release = poll(&pfd, 1, 2000); /* real-clock: bounded wait for an actual blocked pthread; no fake scheduler seam */
+    if (before_release != (should_return_early ? 1 : 0) || atomic_load(&b.loaded))
+        failures++;
+    bool caller_joined = false, shutdown_started = false;
+    pthread_t shutdown_thread;
+    if (should_return_early && before_release == 1) {
+        if (read(b.returned[0], &byte, 1) != 1) failures++;
+        pthread_join(caller, NULL);
+        caller_joined = true;
+        if (pthread_create(&shutdown_thread, NULL, bp_params_shutdown_caller, &b) == 0) {
+            shutdown_started = true;
+            pfd.revents = 0;
+            if (poll(&pfd, 1, 2000) != 0) failures++; /* real-clock: shutdown must wait for the held real worker */
+        } else failures++;
+    }
     if (write(b.release[1], "x", 1) != 1) failures++;
-    pthread_join(caller, NULL);
-    if (b.svc.params_thread_started) pthread_join(worker, NULL);
-    if (before_release != 1) failures++;
-    close(b.ready[0]); close(b.ready[1]); close(b.release[0]); close(b.release[1]);
-    close(b.returned[0]); close(b.returned[1]);
+    close(b.release[1]); b.release[1] = -1;
+    if (!caller_joined) pthread_join(caller, NULL);
+    if (shutdown_started) {
+        pthread_join(shutdown_thread, NULL);
+        if (read(b.returned[0], &byte, 1) != 1 || byte != 'j') failures++;
+    }
+    if (!boot_params_join_owned(&b.svc) || !boot_params_join_owned(&b.svc) ||
+        b.svc.params_thread_started || atomic_load(&b.loaded) != worker_ok)
+        failures++;
+close_pipes:
+    bp_close_pair(b.ready); bp_close_pair(b.release); bp_close_pair(b.returned);
     return failures;
+}
+
+static int bp_test_params_ready_boundary(void)
+{
+    return bp_params_barrier_case(true, true, false, false, true, true);
 }
 #endif
 #if defined(__linux__)
@@ -1098,6 +1154,16 @@ int test_boot_phase(void)
 #if !defined(_WIN32)
     BP_CHECK("published verifier does not wait for blocked prover worker",
              bp_test_params_ready_boundary() == 0);
+    BP_CHECK("unpublished verifier retains worker join",
+             bp_params_barrier_case(false, true, false, false, false, true) == 0);
+    BP_CHECK("missing PHGR key retains worker join",
+             bp_params_barrier_case(true, false, false, false, false, true) == 0);
+    BP_CHECK("failed worker retains join and false completion",
+             bp_params_barrier_case(false, false, false, false, false, false) == 0);
+    BP_CHECK("steady sandbox retains worker join",
+             bp_params_barrier_case(true, true, true, false, false, true) == 0);
+    BP_CHECK("strict confinement retains worker join",
+             bp_params_barrier_case(true, true, false, true, false, true) == 0);
 #endif
 
     /* ── export mode must not park on a permanent blocker ─────────

@@ -699,6 +699,10 @@ void app_shutdown_svc(struct boot_svc_ctx *svc)
      * not be closed while a consumer is live. A legitimate slow callback gets
      * bounded graces; a true wedge still exits loudly and unclean. */
     shutdown_stagewatch_enter("worker-drain", 60, true, true);
+    if (!boot_params_join_owned(svc)) {
+        fprintf(stderr, "[shutdown] parameter loader join failed; exiting unclean\n");
+        _exit(1);
+    }
     /* A parked chain-evidence maintenance run is an owned reader of node.db
      * and owned state, like an undrained diagnostics capture: either keeps
      * them open below. Durability (flush, checkpoint, marker) is unchanged. */

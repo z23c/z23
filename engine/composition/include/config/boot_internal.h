@@ -848,6 +848,8 @@ struct block_index_projection *boot_ensure_block_index_projection(
  * 5. clear runtime registry and free owned resources
  */
 void app_shutdown_svc(struct boot_svc_ctx *svc);
+/* Joins the owned parameter loader at most once; false retains ownership. */
+bool boot_params_join_owned(struct boot_svc_ctx *svc);
 
 /* Clean-marker gate (pure; unit-tested in test_debug_bundle). The
  * verified-clean marker is written iff the durability barrier held (coins

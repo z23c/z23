@@ -155,6 +155,7 @@
 #include "keys/key_io.h"
 #include "script/standard.h"
 #include "sapling/params_init.h"
+#include "sapling/bn254.h"
 #include "platform/socket_compat.h"
 #include <errno.h>
 #include <stdatomic.h>
@@ -765,17 +766,29 @@ static void boot_init_connman(struct boot_svc_ctx *svc,
     app_log_bootstrap_sources(params, svc->connman);
 }
 
-static void boot_wait_params_thread(struct boot_svc_ctx *svc, const struct app_context *ctx)
+bool boot_params_join_owned(struct boot_svc_ctx *svc)
 {
-    /* Wait for ZK params before P2P (needed for block verification) */
-    if (ctx->params_dir) {
-        if (svc->params_thread_started) {
-            pthread_join(svc->params_thread, NULL);
-            svc->params_thread_started = false;
-        }
-        if (!atomic_load(svc->params_loaded))
-            fprintf(stderr, "Warning: ZK params not loaded\n");
-    }
+    if (!svc || !svc->params_thread_started) return true;
+    int rc = pthread_join(svc->params_thread, NULL);
+    if (rc != 0) LOG_FAIL("boot", "parameter loader join failed: %d", rc);
+    svc->params_thread_started = false;
+    return true;
+}
+
+static bool boot_wait_params_boundary(struct boot_svc_ctx *svc,
+                                      const struct app_context *ctx,
+                                      bool verifier_ready, bool phgr_ready)
+{
+    if (!ctx->params_dir) return true;
+    /* A worker that predates confinement must not survive its boundary: the
+     * Landlock rules cannot be retrofitted onto this one-shot loader. */
+    if (svc->params_thread_started && verifier_ready && phgr_ready &&
+        !ctx->sandbox_steady && !ctx->confine)
+        return true;
+    if (!boot_params_join_owned(svc)) return false;
+    if (!atomic_load(svc->params_loaded))
+        fprintf(stderr, "Warning: ZK params not loaded\n");
+    return true;
 }
 
 #ifdef ZCL_TESTING
@@ -784,8 +797,7 @@ static void boot_wait_params_thread(struct boot_svc_ctx *svc, const struct app_c
 void boot_test_params_boundary(struct boot_svc_ctx *svc, const struct app_context *ctx,
                                bool verifier_ready, bool phgr_ready)
 {
-    (void)verifier_ready; (void)phgr_ready;
-    boot_wait_params_thread(svc, ctx);
+    (void)boot_wait_params_boundary(svc, ctx, verifier_ready, phgr_ready);
 }
 #endif
 
@@ -1414,7 +1426,11 @@ bool app_init_services(struct app_context *ctx, const struct chain_params *param
     }
     if (!boot_p2p_listen(&svc->connman->manager, ctx))
         return boot_step_fail("p2p_explicit_bind");
-    boot_wait_params_thread(svc, ctx);
+    /* Read the atomic publication before the PHGR pointer it publishes. */
+    bool verifier_ready = sapling_params_loaded();
+    bool phgr_ready = verifier_ready && sprout_phgr_vk_loaded();
+    if (!boot_wait_params_boundary(svc, ctx, verifier_ready, phgr_ready))
+        return boot_step_fail("params_thread_join");
     t_svc = boot_mark_step(t_svc, "svc.init_wallet", "svc.file_sync");
     if (!boot_file_sync_phase(svc, ctx, params))
         return boot_step_fail("snapshot_import_pending");
