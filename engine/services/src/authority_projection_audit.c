@@ -26,6 +26,7 @@
 #include "platform/time_compat.h"
 #include "storage/coins_kv.h"
 #include "storage/progress_store.h"
+#include "support/log_throttle.h"
 #include "supervisors/domains.h"
 #include "util/blocker.h"
 #include "util/log_macros.h"
@@ -584,4 +585,30 @@ bool ap_audit_diff_scan_error(void)
 bool ap_audit_diff_truncated(void)
 {
     return atomic_load(&g_ap_diff_truncated);
+}
+
+/* Growth-branch gate for the XOR checkpoint: true (with one throttled log line
+ * naming the remedy) when the checkpoint must NOT be rewritten from the
+ * projection because the latest authority audit sample saw them diverge
+ * (streak > 0 or the permanent blocker latched). A clean pass clears both, so
+ * the refusal can never outlive the divergence. */
+bool ap_audit_refuse_checkpoint_adoption(void)
+{
+    bool pending = atomic_load(&g_ap_divergence_streak) > 0 ||
+                   atomic_load(&g_ap_blocker_active);
+    static struct log_throttle th = LOG_THROTTLE_INIT;
+    uint64_t reps = 0;
+    if (pending &&
+        log_throttle_should_emit_changed(&th, false, platform_time_wall_unix(),
+                                         600, &reps))
+        LOG_WARN("validation_pack",
+                 "[ap-audit] utxos projection diverges from coins_kv "
+                 "(auth=%llu proj=%llu coins at h=%d): XOR checkpoint kept, "
+                 "not resynced from the projection; run "
+                 "`z23 ops recovery utxo_mirror` repeats=%llu",
+                 (unsigned long long)atomic_load(&g_ap_last_auth_count),
+                 (unsigned long long)atomic_load(&g_ap_last_proj_count),
+                 (int)atomic_load(&g_ap_last_height),
+                 (unsigned long long)reps);
+    return pending;
 }

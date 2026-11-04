@@ -589,13 +589,14 @@ bool invariant_sentinel_commitment_audit_once(void)
      * co-committed by the live coins_kv mirror writer, so the `utxos`
      * projection legitimately runs AHEAD of it during forward sync. Resync the
      * checkpoint to the recomputed digest (the same refresh the boot path
-     * performs) so it tracks the set, and release any blocker latched during an
-     * earlier transient — the only OTHER clear is gated on EXACT equality, which
-     * a perpetually-advancing set may never hit, so a transient latch would
-     * otherwise strand the chain forever (the live 3164076 wedge). */
+     * performs) and release any blocker latched during an earlier transient:
+     * the only OTHER clear needs EXACT equality, which an advancing set may
+     * never hit (the live 3164076 wedge). But never adopt a set the authority
+     * audit flagged as diverging from coins_kv. */
     if (!utxo_recovery_xor_mismatch_is_corruption_candidate(
             saved.count, computed.count)) {
         atomic_store(&g_isn_commitment_candidate_streak, 0);
+        if (ap_audit_refuse_checkpoint_adoption()) return true;
         (void)utxo_commitment_resync_from_db(ndb->db, NULL);
         audit_clear_latched_blocker("a growth/stale resync");
         return true;

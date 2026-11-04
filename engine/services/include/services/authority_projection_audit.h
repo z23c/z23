@@ -97,6 +97,13 @@ bool ap_audit_dump_state_json(struct json_value *out, const char *key);
 bool ap_audit_diff_scan_error(void);
 bool ap_audit_diff_truncated(void);
 
+/* True while the latest audit sample found the utxos projection diverging from
+ * the coins_kv authority (self-clears on the next clean pass), with one throttled
+ * log line naming the remedy
+ * (`z23 ops recovery utxo_mirror`). The sentinel's growth branch returns early
+ * when this is true, leaving the checkpoint and any latched blocker as is. */
+bool ap_audit_refuse_checkpoint_adoption(void);
+
 #ifdef ZCL_TESTING
 /* Make the nth projection-cursor step of the next diff scan fail. */
 void ap_audit_test_fail_proj_step(int nth);

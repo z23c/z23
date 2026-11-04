@@ -24,6 +24,7 @@
 #include "test/test_core.h"
 
 #include "models/database.h"
+#include "services/authority_projection_audit.h"
 #include "services/invariant_sentinel.h"
 #include "coins/utxo_commitment.h"
 #include "util/blocker.h"
@@ -319,6 +320,36 @@ static int isn_audit_seed_checkpoint_and_growth(struct node_db *ndb)
     return failures;
 }
 
+/* check 5, phase 1b: a projection that GREW but the authority audit flagged
+ * as diverging must leave the checkpoint unchanged (r1 11-02: +9 coins vs
+ * coins_kv was adopted as the checkpoint). Once the audit is clean again the
+ * same growth resyncs. */
+static int isn_audit_growth_refused_when_diverged(struct node_db *ndb)
+{
+    int failures = 0;
+    ap_audit_reset_for_test();
+    struct ap_audit_verdict v;
+    memset(&v, 0, sizeof(v));
+    v.violated = true;
+    uint8_t ra[32] = {1}, rp[32] = {2};
+    (void)ap_audit_apply_verdict(&v, 100, 10, 13, ra, rp); /* streak 1 */
+    bool grew = isn_insert_utxo(ndb, 300) && isn_insert_utxo(ndb, 301) &&
+                isn_insert_utxo(ndb, 302);
+    bool ran = invariant_sentinel_commitment_audit_once();
+    struct utxo_commitment ck;
+    bool loaded = utxo_commitment_load_checkpoint(ndb->db, &ck);
+    ISN_CHECK("audit: diverged growth -> checkpoint NOT adopted (stays 10)",
+              grew && ran && loaded && ck.count == 10 &&
+              !blocker_exists("coins.commitment_spot_check"));
+
+    ap_audit_reset_for_test(); /* == a clean audit pass */
+    ran = invariant_sentinel_commitment_audit_once();
+    loaded = utxo_commitment_load_checkpoint(ndb->db, &ck);
+    ISN_CHECK("audit: consistent growth after clean audit -> resynced to 13",
+              ran && loaded && ck.count == 13);
+    return failures;
+}
+
 /* check 5, phase 2: shrink streak gate, non-fatal diagnostic fire,
  * owner release, and growth self-heal of a latched blocker. */
 static int isn_audit_shrink_streak_and_self_heal(struct node_db *ndb)
@@ -389,6 +420,7 @@ static int isn_assert_commitment_audit(void)
         invariant_sentinel_set_node_db_for_testing(&ndb);
 
         failures += isn_audit_seed_checkpoint_and_growth(&ndb);
+        failures += isn_audit_growth_refused_when_diverged(&ndb);
         failures += isn_audit_shrink_streak_and_self_heal(&ndb);
 
         blocker_clear("coins.commitment_spot_check");
