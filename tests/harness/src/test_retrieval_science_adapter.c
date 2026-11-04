@@ -821,12 +821,15 @@ static int rsa_case_reproduction(void)
     return failures;
 }
 
+#include "test/retrieval_pair_command.h"
+
 int test_retrieval_science_adapter(void)
 {
     int failures = 0;
     failures += rsa_case_result_compose();
     failures += rsa_case_statuses_and_refusals();
     failures += rsa_case_reproduction();
+    failures += rsa_case_pair_command();
     printf("retrieval_science_adapter: %s (%d failure%s)\n",
            failures == 0 ? "PASS" : "FAIL", failures,
            failures == 1 ? "" : "s");

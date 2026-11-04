@@ -102,6 +102,31 @@ ZCL_COMMAND_DEV_READ(
     "z23-dev dev retrieval benchmark")
 
 ZCL_COMMAND_DEV_READ(
+    "dev.retrieval.pair", "dev.retrieval", "",
+    "Measure one frozen retrieval profile pair",
+    "Loads one bounded retrieval_pair_artifact.v1 from the workspace CAS, "
+    "verifies SHA3-256 of its exact bytes against artifact_root, parses the "
+    "existing canonical profile, heuristic, study, policy, task, candidate "
+    "and environment wires, derives both arms from the same context-byte "
+    "snapshot and joins reviewed gold through the maintained science adapter. "
+    "Returns both evaluation wires and the paired science observation/result. "
+    "Source provenance and run facts are declared, chronology and holdout "
+    "independence remain unverified, reproduction is not run. No evidence "
+    "is stored, no signing or promotion is authorized.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "dev,retrieval,pair,measurement,science",
+    "zcl.dev_retrieval_pair_input.v1", "zcl.dev_retrieval_pair.v1",
+    "workspace,artifact_root", "",
+    "z23-dev dev retrieval pair --input='{\"workspace\":\"<CAS-workspace>\",\"artifact_root\":\"<64-lowercase-hex>\"}'",
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_CHECKOUT_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_retrieval_pair,
+    "paired retrieval observation requires the dev binary",
+    "z23-dev dev retrieval pair")
+
+ZCL_COMMAND_DEV_READ(
     "dev.retrieval.experiment", "dev.retrieval", "",
     "Project one immutable direct-gold-input-free retrieval profile",
     "Recompute and bind the exact BM25 baseline, derive a feature snapshot "
