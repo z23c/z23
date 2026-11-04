@@ -151,11 +151,20 @@ static bool dbc_extra_lanes(struct dbc *d, struct dbc_extra *e)
            dbf_lane(&d->f, "lane-l", NULL, e->l, e->hl);
 }
 
+/* Lane I is never picked into s8, but git cherry needs its head object to
+ * compare patches: fetch it so the stack sees the lane as a real lane does. */
+static bool dbc_fetch(const char *stack, const char *lane)
+{
+    const char *fetch[] = {"fetch", "-q", lane, "HEAD", NULL};
+    return dbf_git(stack, fetch);
+}
+
 static bool dbc_extra_picks(const struct dbc *d, const struct dbc_extra *e)
 {
     char sha[41];
     return dbc_pick(d->stack8, e->h, "HEAD~1", sha) &&
            dbc_pick(d->stack8, e->h, "HEAD", sha) &&
+           dbc_fetch(d->stack8, e->i) &&
            dbc_pick(d->stack8, e->k, "HEAD", sha) &&
            dbc_pick(d->stack7, e->k, "HEAD", sha) &&
            dbc_pick(d->stack7, e->m, "HEAD", sha);
