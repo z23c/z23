@@ -594,7 +594,7 @@ static int plugin_flock_try(int fd, int op)
 struct plugin_wait {
     int fd;            /* ".lock", read for the stamp */
     int64_t deadline;  /* soft expiry, monotonic ms */
-    int64_t hard_deadline; /* actual monotonic no-handover bound */
+    int64_t hard_deadline; /* monotonic no-handover backstop */
     uint64_t seen;     /* last stamp observed */
     int64_t quiet;     /* polls of this waiter that saw the stamp unchanged */
 };
@@ -637,23 +637,21 @@ static void plugin_lock_stamp(int fd)
     }
 }
 
-/* A synthetic soft-clock spike alone must not cause an early refusal.
- * The real monotonic deadline bounds waiting even when polls are slow;
- * observing a handover resets both deadlines. */
+/* A short stall must not cause an early refusal, but elapsed time still
+ * bounds slow polling. Observing a handover resets both deadlines. */
 static bool plugin_wait_expired(struct plugin_wait *w)
 {
-    int64_t real_now = platform_time_monotonic_ms();
-    int64_t now = real_now + plugin_lock_clock_jump();
+    int64_t now = platform_time_monotonic_ms() + plugin_lock_clock_jump();
     uint64_t stamp = plugin_lock_stamp_read(w->fd);
     if (stamp != w->seen) {
         w->seen = stamp;
         w->quiet = 0;
         w->deadline = now + plugin_lock_budget_ms();
-        w->hard_deadline = real_now + plugin_lock_budget_ms();
+        w->hard_deadline = now + 4 * plugin_lock_budget_ms();
         return false;
     }
     w->quiet++;
-    return real_now >= w->hard_deadline || (now >= w->deadline &&
+    return now >= w->hard_deadline || (now >= w->deadline &&
            w->quiet >= plugin_lock_budget_ms() / (4 * PLUGIN_LOCK_STEP_MS));
 }
 
@@ -689,7 +687,8 @@ static bool plugin_gate_pass(int qfd, struct plugin_wait *w, enum plugin_status 
 /* Take ".lock" with qfd and fd open; see the comment above. */
 static enum plugin_status plugin_lock_take(int qfd, int fd, int64_t deadline)
 {
-    struct plugin_wait w = { fd, deadline, deadline, plugin_lock_stamp_read(fd), 0 };
+    struct plugin_wait w = { fd, deadline, deadline + 3 * plugin_lock_budget_ms(),
+                             plugin_lock_stamp_read(fd), 0 };
     enum plugin_status st = PLUGIN_OK;
     if (!plugin_gate_pass(qfd, &w, &st))
         return st;

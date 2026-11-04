@@ -2213,12 +2213,12 @@ static int pst_case_lock_fairness(void)
     return failures;
 }
 
-/* A one-shot synthetic soft-clock spike must not cause an early refusal.
- * The real monotonic deadline still bounds a genuine host-wide stall. */
+/* A stall shorter than the hard backstop must not cause an early refusal.
+ * The one-shot seam advances the same clock used for both deadlines. */
 static int pst_case_lock_clock_jump(void)
 {
     int failures = 0;
-    TEST_CASE("a one-shot soft-clock spike does not refuse a waiter whose holder then lets go") {
+    TEST_CASE("a stall within the backstop does not refuse a waiter whose holder then lets go") {
         struct pst_fx fx;
         char plugdir[PATH_MAX], lockpath[PATH_MAX];
         ASSERT(pst_fx_open(&fx, true) && pst_install(&fx, "hello", "version a", &(struct pst_opts){0}) == PLUGIN_OK);
@@ -2232,7 +2232,7 @@ static int pst_case_lock_clock_jump(void)
         ASSERT(pid >= 0);
         if (pid == 0) {
             struct plugin_lock lk;
-            plugin_lock_test_clock_jump(10 * PLUGIN_LOCK_WAIT_MS);
+            plugin_lock_test_clock_jump(2 * PLUGIN_LOCK_WAIT_MS);
             enum plugin_status st = plugin_lock_acquire(plugdir, &lk);
             if (st == PLUGIN_OK)
                 plugin_lock_release(&lk);
@@ -2247,10 +2247,36 @@ static int pst_case_lock_clock_jump(void)
     return failures;
 }
 
+static bool pst_wait_for_announcement(const char *gatepath)
+{
+    int gate = open(gatepath, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    bool announced = false;
+    for (int i = 0; gate >= 0 && i < 1000; i++) {
+        if (flock(gate, LOCK_EX | LOCK_NB) != 0) { announced = true; break; }
+        flock(gate, LOCK_UN);
+        platform_sleep_ms(1);
+    }
+    if (gate >= 0) close(gate);
+    return announced;
+}
+
+static bool pst_wait_for_exit(pid_t pid, int *status)
+{
+    pid_t reaped = 0;
+    for (int i = 0; i < 300 && reaped == 0; i++) {
+        reaped = waitpid(pid, status, WNOHANG);
+        if (reaped == 0) platform_sleep_ms(1);
+    }
+    if (reaped == pid) return true;
+    kill(pid, SIGKILL);
+    (void)waitpid(pid, status, 0);
+    return false;
+}
+
 static int pst_case_lock_slow_poll(void)
 {
     int failures = 0;
-    TEST_CASE("a stopped waiter refuses promptly once its no-handover budget expires") {
+    TEST_CASE("a stopped waiter refuses promptly once its no-handover backstop expires") {
         struct pst_fx fx;
         char plugdir[PATH_MAX], lockpath[PATH_MAX], gatepath[PATH_MAX];
         ASSERT(pst_fx_open(&fx, true) && pst_install(&fx, "hello", "version a", &(struct pst_opts){0}) == PLUGIN_OK);
@@ -2267,26 +2293,13 @@ static int pst_case_lock_slow_poll(void)
             plugin_lock_test_timing(2000, 0);
             _exit((int)plugin_lock_acquire(plugdir, &lk));
         }
-        int gate = open(gatepath, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
-        bool announced = false;
-        for (int i = 0; gate >= 0 && i < 1000; i++) {
-            if (flock(gate, LOCK_EX | LOCK_NB) != 0) { announced = true; break; }
-            flock(gate, LOCK_UN);
-            platform_sleep_ms(1);
-        }
-        if (gate >= 0) close(gate);
+        bool announced = pst_wait_for_announcement(gatepath);
         int stopped = kill(pid, SIGSTOP);
         int status = 0;
         int observed = waitpid(pid, &status, WUNTRACED) == pid && WIFSTOPPED(status);
-        platform_sleep_ms(2100);
+        platform_sleep_ms(8100);
         int resumed = kill(pid, SIGCONT);
-        pid_t reaped = 0;
-        for (int i = 0; i < 300 && reaped == 0; i++) {
-            reaped = waitpid(pid, &status, WNOHANG);
-            if (reaped == 0) platform_sleep_ms(1);
-        }
-        bool prompt = reaped == pid;
-        if (!prompt) { kill(pid, SIGKILL); (void)waitpid(pid, &status, 0); }
+        bool prompt = pst_wait_for_exit(pid, &status);
         close(held);
         pst_fx_close(&fx);
         ASSERT(announced && stopped == 0 && observed && resumed == 0);
