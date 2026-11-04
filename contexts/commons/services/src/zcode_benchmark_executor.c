@@ -643,6 +643,12 @@ static struct zcl_result exec_run_load_original(
         return ZCL_ERR(-1, "executor-original-not-v1-in-cas");
     return ZCL_OK;
 }
+static struct zcl_result exec_verify_manifest(
+    const char *workspace, const uint8_t raw_sample_root[32],
+    const uint8_t method_root[32],
+    const struct vcs_zcode_benchmark_method_v1 *method_or_null,
+    struct vcs_zcode_raw_sample_manifest_v1 *manifest);
+
 /* Load the run context and derive the fixed action. On failure the context
  * is freed here. */
 static struct zcl_result exec_run_prepare(
@@ -665,6 +671,18 @@ static struct zcl_result exec_run_prepare(
     if (is_repro && memcmp(action_root, original->action_root, 32) != 0) {
         exec_context_free(ctx);
         return ZCL_ERR(-1, "executor-action-mismatch");
+    }
+    if (is_repro) {
+        /* The action pins source/workload/toolchain, but not the sampling,
+         * timer or estimator discipline. The original manifest pins those. */
+        struct vcs_zcode_raw_sample_manifest_v1 manifest;
+        derived = exec_verify_manifest(req->workspace,
+            original->raw_sample_root, ctx->method_root, &ctx->method,
+            &manifest);
+        if (!derived.ok) {
+            exec_context_free(ctx);
+            return derived;
+        }
     }
     return ZCL_OK;
 }

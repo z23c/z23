@@ -1399,6 +1399,45 @@ static int test_zbex_reproduction(void)
         zcl_hex_encode(repro_out.run.reproduced_root, 32, reproduced_hex);
         ASSERT(zcode_benchmark_executor_verify_receipt(dir,
                                                        reproduced_hex).ok);
+        /* The action root alone does not pin the sampling discipline. */
+        ASSERT(zcode_benchmark_executor_verify_receipt(dir, original_hex).ok);
+        for (unsigned variant = 0; variant < 7; variant++) {
+            struct vcs_zcode_benchmark_method_v1 changed_method = ctx.method;
+            switch (variant) {
+            case 0: changed_method.measured_samples *= 2; break;
+            case 1: changed_method.warmup_samples++; break;
+            case 2: changed_method.timer_root[0] ^= 1; break;
+            case 3: changed_method.estimator_root[0] ^= 1; break;
+            case 4: changed_method.tolerance_ppm++; break;
+            case 5: changed_method.trim_percent++; break;
+            case 6:
+                changed_method.sample_distribution = VCS_ZCODE_SAMPLE_DIST_RAW_ALL;
+                changed_method.trim_percent = 0;
+                break;
+            }
+            uint8_t changed_wire[VCS_ZCODE_BENCHMARK_METHOD_WIRE_BYTES];
+            uint8_t changed_root[32];
+            ASSERT_EQ(vcs_zcode_benchmark_method_serialize(&changed_method, changed_wire),
+                      VCS_ZCODE_SCIENCE_OK);
+            ASSERT_EQ(vcs_zcode_benchmark_method_root(&changed_method, changed_root),
+                      VCS_ZCODE_SCIENCE_OK);
+            ASSERT(vcs_object_put_addressed(dir, changed_root, changed_wire,
+                                            sizeof(changed_wire)));
+            char changed_hex[65];
+            zcl_hex_encode(changed_root, 32, changed_hex);
+            repro.method_root_hex = changed_hex;
+            repro.reproduction_sequence = 2 + variant;
+            int objects_before = zbex_cas_object_count(dir);
+            struct zcode_benchmark_execute_out changed_out = {0};
+            struct zcl_result changed =
+                zcode_benchmark_execute(&ndb, &repro, &changed_out);
+            fprintf(stderr, "method mismatch variant=%u original_samples=%u requested_samples=%u ok=%d committed=%d verdict=%u\n",
+                    variant, ctx.method.measured_samples, changed_method.measured_samples,
+                    changed.ok, changed_out.committed, changed_out.run.verdict);
+            ASSERT(!changed.ok);
+            ASSERT_STR_EQ(changed.message, "receipt-manifest-method-mismatch");
+            ASSERT_EQ(zbex_cas_object_count(dir), objects_before);
+        }
         zbex_teardown(&ndb, dir);
         PASS();
     } _test_next:;
