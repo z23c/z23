@@ -718,6 +718,41 @@ static int test_spawn_evidence_unknown_status(void)
     return failures;
 }
 
+static void spawn_evidence_exit_barrier(int pid, int phase, void *context)
+{
+    bool *observed = context;
+    if (phase == 0) {
+        siginfo_t info = {0};
+        int rc;
+        do { rc = waitid(P_PID, (id_t)pid, &info, WEXITED | WNOWAIT); }
+        while (rc < 0 && errno == EINTR);
+        *observed = rc == 0 && info.si_pid == pid;
+        return;
+    }
+    int64_t until = platform_time_monotonic_ms() + 35;
+    while (platform_time_monotonic_ms() < until)
+        nanosleep(&(struct timespec){.tv_nsec = 1000000}, NULL);
+}
+
+static int test_spawn_evidence_exited_buffer(void)
+{
+    int failures = 0;
+    TEST("spawn: buffered tails survive a paused parent after child exit") {
+        const char *argv[] = {"/bin/sh", "-c",
+            "head -c 5000 /dev/zero; printf OUT-END; "
+            "head -c 5000 /dev/zero >&2; printf ERR-END >&2", NULL};
+        char out[32]; struct zcl_spawn_evidence e; bool observed = false;
+        zcl_spawn_evidence_test_hook(spawn_evidence_exit_barrier, &observed);
+        int rc = zcl_spawn_capture_evidence(argv, out, sizeof(out), 3000, &e);
+        zcl_spawn_evidence_test_hook(NULL, NULL);
+        ASSERT(observed && rc == 0 && e.exit_observed);
+        ASSERT(e.stdout_len >= 7 && memcmp(e.stdout_tail + e.stdout_len - 7, "OUT-END", 7) == 0);
+        ASSERT(e.stderr_len >= 7 && memcmp(e.stderr_tail + e.stderr_len - 7, "ERR-END", 7) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_spawn_platform_arm(void)
 {
     int failures = 0;
@@ -750,6 +785,7 @@ static int test_spawn_platform_arm(void)
     failures += test_spawn_evidence_dual_flood();
     failures += test_spawn_evidence_flood_timeout();
     failures += test_spawn_evidence_unknown_status();
+    failures += test_spawn_evidence_exited_buffer();
     failures += test_spawn_capture_in_dir();
     failures += test_spawn_capture_in_dir_fails_closed();
 

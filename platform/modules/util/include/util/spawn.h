@@ -172,6 +172,9 @@ struct zcl_spawn_evidence {
 };
 int zcl_spawn_capture_evidence(const char *const argv[], char *buf, size_t cap,
                                int timeout_ms, struct zcl_spawn_evidence *evidence);
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+void zcl_spawn_evidence_test_hook(void (*hook)(int, int, void *), void *context);
+#endif
 
 /* The same capture with the child started in `cwd`. A NULL `cwd` is exactly
  * zcl_spawn_capture_observed(). If the directory cannot be entered the child

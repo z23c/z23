@@ -1027,6 +1027,16 @@ int zcl_spawn_capture(const char *const argv[], char *buf, size_t cap,
 #endif
 
 #ifndef _WIN32
+#if defined(ZCL_TESTING)
+static _Thread_local void (*spawn_evidence_hook)(int, int, void *);
+static _Thread_local void *spawn_evidence_hook_context;
+void zcl_spawn_evidence_test_hook(void (*hook)(int, int, void *), void *context)
+{
+    spawn_evidence_hook = hook;
+    spawn_evidence_hook_context = context;
+}
+#endif
+
 static bool spawn_evidence_pipe(int p[2])
 {
     if (pipe(p) != 0) return false;
@@ -1081,8 +1091,17 @@ static bool spawn_evidence_drain(pid_t pid, struct spawn_evidence_capture *c,
                                  int timeout_ms, int64_t deadline, bool anchored)
 {
     struct spawn_capture_exit_state state = {.started_ms = -1};
+#if defined(ZCL_TESTING)
+    bool hooked = false;
+    if (spawn_evidence_hook) spawn_evidence_hook((int)pid, 0, spawn_evidence_hook_context);
+#endif
     while (c->pipes[0].fd >= 0 || c->pipes[1].fd >= 0) {
         if (spawn_capture_exit_observe(pid, &state, anchored)) break;
+#if defined(ZCL_TESTING)
+        if (!hooked && state.exited_now && spawn_evidence_hook) {
+            hooked = true; spawn_evidence_hook((int)pid, 1, spawn_evidence_hook_context);
+        }
+#endif
         int wait = spawn_capture_poll_timeout(timeout_ms, deadline, &state, &c->e->timed_out);
         if (c->e->timed_out) break;
         int n = poll(c->pipes, 2, wait);
