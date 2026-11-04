@@ -36,6 +36,12 @@ exist. Preserve this key securely: Android requires the same signing key to
 install an update over an existing app. This development key is not a
 production signing process. Preserve and back up wallet state before updates.
 
+For updates, set `KEYSTORE` to the securely preserved key outside the build
+directory and set `EXPECTED_SIGNER_SHA256` to the existing app signing
+certificate's 64 hexadecimal SHA-256 digits. The build refuses a missing key
+and rejects an APK whose signer differs. An unset expected digest permits a
+new disposable development key; it cannot update an app signed by another key.
+
 ## Sapling proving parameters
 
 A shielded send needs `sapling-spend.params` and `sapling-output.params`. They ship inside the

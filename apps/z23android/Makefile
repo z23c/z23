@@ -14,6 +14,7 @@ APP_ID := org.z23.nativeapp
 TOOLS := $(SDK_ROOT)/build-tools/$(BUILD_TOOLS_VERSION)
 ANDROID_JAR := $(SDK_ROOT)/platforms/android-$(ANDROID_API)/android.jar
 KEYSTORE ?= $(BUILD_DIR)/development.keystore
+export EXPECTED_SIGNER_SHA256
 APK := $(BUILD_DIR)/z23.apk
 APP_MANIFEST ?= AndroidManifest.xml
 QUIRC_DIR := $(abspath $(BUILD_DIR)/quirc)
@@ -246,13 +247,21 @@ native: check-config prepare-quirc
 	  -DZ23_ANDROID_API=$(ANDROID_API) -DZ23_QUIRC_DIR='$(QUIRC_DIR)' -DZ23_DEVKEY_PROBE=$(DEVKEY_PROBE) -DCMAKE_BUILD_TYPE=Release
 	cmake --build '$(BUILD_DIR)/native' --parallel 4
 
-$(KEYSTORE):
+.PHONY: check-signer-input check-signer-output
+check-signer-input:
+	@if test -n "$$EXPECTED_SIGNER_SHA256"; then \
+	  case "$$EXPECTED_SIGNER_SHA256" in *[!0-9a-fA-F]*) echo "EXPECTED_SIGNER_SHA256 must be 64 hex digits" >&2; exit 1;; esac; \
+	  test "$${#EXPECTED_SIGNER_SHA256}" -eq 64 || { echo "EXPECTED_SIGNER_SHA256 must be 64 hex digits" >&2; exit 1; }; \
+	  test -r '$(KEYSTORE)' || { echo "Expected signer requires an existing readable keystore" >&2; exit 1; }; \
+	fi
+
+$(KEYSTORE): | check-signer-input
 	@mkdir -p '$(dir $(KEYSTORE))'
 	'$(JAVA_HOME)/bin/keytool' -genkeypair -keystore '$@' -storepass android \
 	  -alias z23-development -keypass android -dname 'CN=Z23 Development' \
 	  -keyalg RSA -keysize 3072 -validity 3650 -noprompt
 
-apk: check-probe check-node $(if $(filter 1,$(PACK_PARAMS)),check-params) native dexgen $(KEYSTORE)
+apk: check-signer-input check-probe check-node $(if $(filter 1,$(PACK_PARAMS)),check-params) native dexgen $(KEYSTORE)
 	@test -x '$(NODE_BIN)' || { echo 'Build the Android node with make ZCL_TARGET=android-arm64 z23 first' >&2; exit 1; }
 	@mkdir -p '$(BUILD_DIR)/package/lib/arm64-v8a'
 	cp '$(BUILD_DIR)/native/libz23android.so' '$(BUILD_DIR)/package/lib/arm64-v8a/'
@@ -268,6 +277,15 @@ apk: check-probe check-node $(if $(filter 1,$(PACK_PARAMS)),check-params) native
 	'$(TOOLS)/apksigner' sign --ks '$(KEYSTORE)' --ks-key-alias z23-development \
 	  --ks-pass pass:android --key-pass pass:android --out '$(APK)' '$(BUILD_DIR)/aligned.apk'
 	'$(TOOLS)/apksigner' verify --verbose '$(APK)'
+	@$(MAKE) --no-print-directory check-signer-output
+
+check-signer-output: check-signer-input
+	@if test -n "$$EXPECTED_SIGNER_SHA256"; then \
+	  certs=$$('$(TOOLS)/apksigner' verify --print-certs '$(APK)') || { echo "APK signature verification failed" >&2; exit 1; }; \
+	  actual=$$(printf '%s\n' "$$certs" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p'); \
+	  expected=$$(printf '%s' "$$EXPECTED_SIGNER_SHA256" | tr 'A-F' 'a-f'); \
+	  test "$$actual" = "$$expected" || { echo "APK signer does not match EXPECTED_SIGNER_SHA256" >&2; exit 1; }; \
+	fi
 
 install: apk
 	@test -n '$(ANDROID_SERIAL)' || { echo 'Set ANDROID_SERIAL to one adb device serial' >&2; exit 1; }
