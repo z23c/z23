@@ -814,9 +814,72 @@ static bool ssw_typed_dump_rolls_up_no_pass_alarm(void)
     return ok;
 }
 
-int test_stopwatch_skip_watch(void)
+static bool ssw_utf8_report_matches(const struct stopwatch_skip_report *r,
+                                    bool valid)
+{
+    return r->rows_scanned == (valid ? 6u : 5u) &&
+        r->malformed_rows == (valid ? 0u : 1u) &&
+        r->incomplete_rows == 0u && r->last_ts == 1001 &&
+        r->last_pass_ts == (valid ? 1000 : -1) &&
+        r->no_pass_streak == (valid ? 1u : 5u) &&
+        r->no_pass_alarm == !valid && strcmp(r->last_verdict, "fail") == 0;
+}
+
+static bool ssw_utf8_metadata(const char *path, const char *metadata,
+                              unsigned shape, bool valid)
+{
+    char text[4096] = "";
+    for (unsigned i = 0; i < 4u; i++)
+        append(text, sizeof(text), "{\"ts\":100,\"verdict\":\"fail\"}\n");
+    const char *const formats[] = {
+        "{\"ts\":1000,\"verdict\":\"pass\",\"metadata\":\"%s\"}\n",
+        "{\"ts\":1000,\"verdict\":\"pass\",\"%s\":\"value\"}\n",
+        "{\"ts\":1000,\"verdict\":\"pass\",\"metadata\":[\"%s\"]}\n",
+        "{\"ts\":1000,\"verdict\":\"pass\",\"metadata\":[{\"note\":\"%s\"}]}\n",
+    };
+    char row[512];
+    snprintf(row, sizeof(row), formats[shape], metadata);
+    append(text, sizeof(text), row);
+    append(text, sizeof(text), "{\"ts\":1001,\"verdict\":\"fail\"}\n");
+    struct stopwatch_skip_report memory, file;
+    if (!stopwatch_skip_scan(text, strlen(text), &memory) ||
+        !write_file(path, text) || !stopwatch_skip_read_ledger(path, &file))
+        return false;
+    const struct stopwatch_skip_report *reports[] = {&memory, &file};
+    for (size_t i = 0; i < 2u; i++) {
+        if (!ssw_utf8_report_matches(reports[i], valid))
+            return false;
+    }
+    return true;
+}
+
+static int ssw_utf8_rows(void)
 {
     int failures = 0;
+    char dir[512], path[600];
+    test_make_tmpdir(dir, sizeof(dir), "stopwatch_utf8", "rows");
+    snprintf(path, sizeof(path), "%s/history.jsonl", dir);
+    const char *const valid[] = {"ASCII", "\xc2\xa2", "\xe2\x82\xac", "\xf0\x9f\x8c\x8d"};
+    const char *const invalid[] = {
+        "\x80", "\xc0\xaf", "\xc1\xbf", "\xc2", "\xe2\x28\xa1",
+        "\xe0\x80\xaf", "\xed\xa0\x80", "\xf0\x80\x80\xaf",
+        "\xf4\x90\x80\x80", "\xf5\x80\x80\x80", "\xff",
+    };
+    for (unsigned shape = 0; shape < 4u; shape++) {
+        for (size_t i = 0; i < sizeof(valid) / sizeof(valid[0]); i++)
+            SSW_CHECK("valid Unicode pass clears streak; next row survives",
+                      ssw_utf8_metadata(path, valid[i], shape, true));
+        for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++)
+            SSW_CHECK("invalid UTF8 pass cannot clear streak; next row survives",
+                      ssw_utf8_metadata(path, invalid[i], shape, false));
+    }
+    (void)test_rm_rf_recursive(dir);
+    return failures;
+}
+
+int test_stopwatch_skip_watch(void)
+{
+    int failures = ssw_utf8_rows();
 
     SSW_CHECK("one fixture_absent skip is quiet (below threshold)",
               ssw_one_fixture_absent_stays_quiet());

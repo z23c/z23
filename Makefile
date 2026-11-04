@@ -9823,11 +9823,13 @@ CRASH_RECOVERY_TEST_SRCS = tools/crash_recovery_test.c platform/modules/platform
     platform/modules/json/src/json.c platform/modules/base/src/cleanse.c \
     platform/modules/base/src/safe_alloc.c \
     engine/services/src/evidence_ledger_row.c contexts/commons/packages/zsha256/src/zsha256.c \
+    contexts/commons/packages/zutf8/src/zutf8.c \
     platform/modules/base/src/log_level.c
 $(CRASH_RECOVERY_TEST_BIN): $(CRASH_RECOVERY_TEST_SRCS) platform/modules/json/include/json/json.h engine/modules/storage/include/storage/consensus_db.h
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pthread $(ZCL_PLATFORM_CPPFLAGS) \
-	    -Iplatform/modules/platform/include -Iplatform/modules/base/include -Iplatform/modules/util/include -Iplatform/modules/json/include -Iengine/modules/storage/include -Iengine/services/include -Icontexts/commons/packages/zsha256/include -Ivendor/include -o $@ \
+	    -Iplatform/modules/platform/include -Iplatform/modules/base/include -Iplatform/modules/util/include -Iplatform/modules/json/include -Iengine/modules/storage/include -Iengine/services/include -Icontexts/commons/packages/zsha256/include \
+	    -Icontexts/commons/packages/zutf8/include -Ivendor/include -o $@ \
 	    $(CRASH_RECOVERY_TEST_SRCS) \
 	    -Lvendor/lib vendor/lib/libsqlite3.a -lpthread -ldl -lm
 

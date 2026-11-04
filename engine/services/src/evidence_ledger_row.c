@@ -14,6 +14,7 @@
 #include "services/evidence_ledger_row.h"
 
 #include "util/log_macros.h"
+#include "zutf8/zutf8.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -121,7 +122,7 @@ static bool row_skip_string(const char **pp, const char *end,
         }
         p++;
     }
-    if (p >= end)
+    if (p >= end || !zutf8_validate_n(start, (size_t)(p - start)))
         return false; // raw-return-ok:pure-flat-row-predicate
     if (content)
         *content = start;
