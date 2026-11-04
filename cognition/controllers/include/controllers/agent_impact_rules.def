@@ -55,6 +55,7 @@ AGENT_IMPACT_RULE("tools/command/native_devagent.c|tools/command/native_devagent
  * one registered group, so an edit to one leaf proves that leaf and nothing
  * else; the shared rule table and the catalog rows they all sit in are the
  * only reason the whole family is named on those two rows. */
+AGENT_IMPACT_RULE("tools/command/native_devagent_brief.c|tools/command/native_devagent_brief.h|tests/harness/src/test_devagent_brief.c", "devagent_brief command_registry_catalog native_api_contract command_input_bounds")
 AGENT_IMPACT_RULE("tools/command/native_devagent_situation.c|tests/harness/src/test_devagent_situation.c", "devagent_situation command_registry_catalog native_api_contract command_input_bounds")
 AGENT_IMPACT_RULE("tools/command/native_devagent_usage.c|tools/command/native_devagent_usage_internal.h|tools/command/native_devagent_outcomes.c|tests/harness/src/test_devagent_outcomes.c", "devagent_outcomes make_lint_gates")
 AGENT_IMPACT_RULE("tools/command/native_devagent_reviewscore.c|engine/modules/engine/src/engine_review_score.c|engine/modules/engine/include/engine/engine_review_score.h|engine/modules/engine/src/engine_findings.c|engine/modules/engine/include/engine/engine_findings.h|tests/harness/src/test_devagent_reviewscore.c", "devagent_reviewscore make_lint_gates")

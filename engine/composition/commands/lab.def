@@ -125,3 +125,26 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_lab_show)
+
+/* lab.brief: "where is the lab right now?" in at most 2 KiB. It composes
+ * existing leaves (native_devagent_brief.c) and keeps no state of its own. */
+ZCL_COMMAND_READY_READ(
+    "lab.brief", "lab", "",
+    "One 2 KiB answer to where the lab is right now",
+    "Node tip, gap and peers (core.status.brief), the land queue with its last "
+    "landed and last failed outcome (dev.land.status), the first three Now "
+    "titles of docs/work/FORWARD_PLAN.md at HEAD, queued and running agent "
+    "units (dev.agent.queue status), the soonest pairing expiry "
+    "(ops.mesh.device.pair.status) and the one command to run next. Every "
+    "section names the leaf it came from; a source that fails is a typed "
+    "`unavailable` field with a code and a reason, never an error; a clipped "
+    "string ends in `...`. Read at call time; nothing is written.", 2048,
+    "agent,brief,lab,state,orient,start,first,next,queue,plan,node",
+    "zcl.agent_brief_input.v1", "zcl.agent_brief.v1", "state_dir", "",
+    "z23 lab brief",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_MAINTENANCE,
+    ZCL_COMMAND_COST_MODERATE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_lab_brief)
