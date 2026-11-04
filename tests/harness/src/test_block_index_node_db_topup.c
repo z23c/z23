@@ -878,6 +878,7 @@ static int ndt_null_db_noop_checks(const char *dir, struct node_db *ndb,
 }
 
 static int ndt_clean_prefix_cases(const char *dir);
+static int ndt_holes_cases(const char *dir);
 
 int test_block_index_node_db_topup(void)
 {
@@ -905,7 +906,8 @@ int test_block_index_node_db_topup(void)
     return failures + ndt_undo_topup_cases(dir) +
            ndt_range_equivalence_cases(dir) +
            ndt_probe_scan_cases(dir) +
-           ndt_clean_prefix_cases(dir);
+           ndt_clean_prefix_cases(dir) +
+           ndt_holes_cases(dir);
 }
 
 /* ── Proven-clean prefix: a warm re-fold reads only the tip region ─────────
@@ -1012,16 +1014,129 @@ static int ndt_clean_prefix_cases(const char *dir)
                   ndt_clean_topup(&c, &ndb, progress, dir, false, &r5));
         NDT_CHECK("clean: changed row count read the whole window",
                   r5 == window - 1);
-        /* The fold above missed row 6000, so it must record no mark: the
-         * next fold over the same map reads the whole window again. */
-        NDT_CHECK("clean: fold after a missed row ok",
+        /* Row 6000 is now a fixed hole (no status>=3 row). The fold above
+         * saw every connected row and changed nothing, so it records a mark
+         * pinning the hole; the next fold resumes past it. */
+        NDT_CHECK("clean: fold after a fixed hole ok",
                   ndt_clean_topup(&c, &ndb, progress, dir, false, &r6));
-        NDT_CHECK("clean: fold after a missed row read the whole window",
-                  r6 == window - 1);
+        NDT_CHECK("clean: fold after a fixed hole resumed",
+                  r6 > 0 && r6 <= NDT_CLEAN_MARGIN);
     }
     main_state_free(&a);
     main_state_free(&b);
     main_state_free(&c);
+    if (progress)
+        sqlite3_close(progress);
+    node_db_close(&ndb);
+    return failures;
+}
+
+/* ── Known holes: a window with fixed interior holes still earns a mark ────
+ * The holes are heights with no status>=3 row. A no-op fold over them
+ * records the mark; the next top-up resumes past it. Filling a hole, changing
+ * an entry the mark covers, or a mark of an older format forces the whole
+ * window again. */
+#define NDT_HOLE_A 6001
+#define NDT_HOLE_B 7002
+#define NDT_HOLE_PROBE 6200
+#define NDT_MARK_VERSION_OFFSET 44
+
+static bool ndt_holes_build(struct node_db *ndb)
+{
+    bool ok = sqlite3_exec(ndb->db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK;
+    for (int h = NDT_CLEAN_SEED; ok && h <= NDT_CLEAN_BEST; h++)
+        if (h != NDT_HOLE_A && h != NDT_HOLE_B)
+            ok &= ndt_range_row(ndb, h, false);
+    ok &= sqlite3_exec(ndb->db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+    struct uint256 sh;
+    ndt_hash_for(NDT_CLEAN_SEED, &sh);
+    ok &= node_db_state_set_int(ndb, "cold_import_seed_anchor_height",
+                                NDT_CLEAN_SEED);
+    ok &= node_db_state_set(ndb, "cold_import_seed_anchor_hash", sh.data, 32);
+    return ok;
+}
+
+/* Fold twice so a mark is recorded over the unchanged window. */
+static bool ndt_holes_mark(struct main_state *ms, struct node_db *ndb,
+                           sqlite3 *progress, const char *dir)
+{
+    size_t r = 0;
+    return ndt_clean_topup(ms, ndb, progress, dir, false, &r) &&
+           ndt_clean_topup(ms, ndb, progress, dir, false, &r);
+}
+
+static bool ndt_holes_old_mark(struct node_db *ndb)
+{
+    uint8_t blob[256];
+    size_t n = 0;
+    if (!node_db_state_get(ndb, "nodedb_topup_clean", blob, sizeof(blob), &n) ||
+        n <= NDT_MARK_VERSION_OFFSET + 4)
+        return false;
+    memset(blob + NDT_MARK_VERSION_OFFSET, 0, 4);
+    return node_db_state_set(ndb, "nodedb_topup_clean", blob, n);
+}
+
+static int ndt_holes_cases(const char *dir)
+{
+    int failures = 0;
+    char ndb_path[320], prog_path[320];
+    snprintf(ndb_path, sizeof(ndb_path), "%s/node_holes.db", dir);
+    snprintf(prog_path, sizeof(prog_path), "%s/progress_holes.db", dir);
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    sqlite3 *progress = NULL;
+    bool ready = node_db_open(&ndb, ndb_path) &&
+                 sqlite3_open(prog_path, &progress) == SQLITE_OK &&
+                 ndt_holes_build(&ndb) &&
+                 ndt_set_coins_best(progress, NDT_CLEAN_BEST);
+    NDT_CHECK("holes: fixture db built", ready);
+    struct main_state a;
+    main_state_init(&a);
+    ready = ready && ndt_insert_entry(&a, NDT_CLEAN_SEED);
+    const size_t window = NDT_CLEAN_BEST - NDT_CLEAN_SEED;
+    size_t r = 0;
+    if (ready) {
+        NDT_CHECK("holes: cold fold ok",
+                  ndt_clean_topup(&a, &ndb, progress, dir, false, &r));
+        NDT_CHECK("holes: cold fold read every connected row", r == window - 2);
+        /* (1)+(2) a no-op fold over the holes records a mark; the next
+         * top-up resumes with the same holes. */
+        NDT_CHECK("holes: no-op fold ok",
+                  ndt_clean_topup(&a, &ndb, progress, dir, false, &r));
+        NDT_CHECK("holes: no-op fold read the whole window", r == window - 2);
+        NDT_CHECK("holes: warm fold ok",
+                  ndt_clean_topup(&a, &ndb, progress, dir, false, &r));
+        NDT_CHECK("holes: warm fold resumed past the prefix",
+                  r > 0 && r <= NDT_CLEAN_MARGIN);
+        /* (3) filling a hole forces the whole window. */
+        NDT_CHECK("holes: hole filled",
+                  ndt_range_row(&ndb, NDT_HOLE_A, false));
+        NDT_CHECK("holes: fill fold ok",
+                  ndt_clean_topup(&a, &ndb, progress, dir, false, &r));
+        NDT_CHECK("holes: fill fold read the whole window", r == window - 1);
+        /* (4) changing an entry the mark covers forces the whole window. */
+        NDT_CHECK("holes: mark re-recorded", ndt_holes_mark(&a, &ndb, progress, dir));
+        struct uint256 hh;
+        ndt_hash_for(NDT_HOLE_PROBE, &hh);
+        struct block_index *bi = block_map_find(&a.map_block_index, &hh);
+        NDT_CHECK("holes: probe entry present", bi != NULL);
+        if (bi)
+            bi->nTx += 1;
+        NDT_CHECK("holes: changed entry fold ok",
+                  ndt_clean_topup(&a, &ndb, progress, dir, false, &r));
+        NDT_CHECK("holes: changed entry read the whole window",
+                  r == window - 1);
+        /* (5) a mark of an older format is ignored. */
+        NDT_CHECK("holes: mark re-recorded again",
+                  ndt_holes_mark(&a, &ndb, progress, dir));
+        NDT_CHECK("holes: mark downgraded to the old format",
+                  ndt_holes_old_mark(&ndb));
+        NDT_CHECK("holes: old-format mark fold ok",
+                  ndt_clean_topup(&a, &ndb, progress, dir, false, &r));
+        NDT_CHECK("holes: old-format mark ignored, whole window read",
+                  r == window - 1);
+    }
+    main_state_free(&a);
     if (progress)
         sqlite3_close(progress);
     node_db_close(&ndb);
