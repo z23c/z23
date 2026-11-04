@@ -6875,6 +6875,7 @@ LINT_FAST_GATES := \
     check-no-stray-untracked-source \
     check-no-stray-root-files \
     check-architecture-tree \
+    check-controller-private-headers \
     check-no-live-lab-history \
     check-raw-sqlite \
     check-malloc \
