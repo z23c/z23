@@ -139,6 +139,74 @@ static int pdc_case_broken_pack(struct pdc_env *e)
     return failures;
 }
 
+static bool pdc_copy_cat(const char *dst)
+{
+    FILE *in = fopen("/bin/cat", "rb"), *out = fopen(dst, "wb");
+    char buf[4096];
+    size_t n = 0;
+    bool ok = in && out;
+    while (ok && (n = fread(buf, 1, sizeof(buf), in)) > 0)
+        ok = fwrite(buf, 1, n, out) == n;
+    if (in)
+        fclose(in);
+    if (out)
+        ok = fclose(out) == 0 && ok;
+    return ok && chmod(dst, 0755) == 0;
+}
+
+/* Run plugin dev with the given cases JSON array text. */
+static bool pdc_dev_cases(struct pdc_env *e, const char *cases, struct zcl_command_reply *r)
+{
+    int n = snprintf(e->input, sizeof(e->input), "{\"dir\":\"%s\",\"cases\":%s}", e->dir, cases);
+    return n > 0 && (size_t)n < sizeof(e->input) && pdc_dev(e, r);
+}
+
+static int pdc_case_cases(struct pdc_env *e)
+{
+    int failures = 0;
+    struct zcl_command_reply r;
+    char before[PLUGIN_HEX_SHA3_512 + 1], after[PLUGIN_HEX_SHA3_512 + 1];
+    size_t count = 0;
+    TEST_CASE("plugin dev with cases: malformed and failing cases are refused before any step") {
+        ASSERT(pdc_copy_cat(e->exe));
+        ASSERT(pdc_state(e, &count, before));
+        ASSERT_EQ(count, 2u);
+        ASSERT(pdc_dev_cases(e, "\"not an array\"", &r));
+        ASSERT_STR_EQ(r.error.code, "PLUGIN_DEV_BAD_CASES");
+        zcl_command_reply_free(&r);
+        ASSERT(pdc_dev_cases(e, "[{\"name\":\"upcase\",\"stdin\":\"abc\\n\",\"expect_stdout\":\"ABC\\n\"}]", &r));
+        ASSERT(r.exit_code != ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(r.error.code, "PLUGIN_DEV_CASES_FAILED");
+        ASSERT(strstr(r.error.message, "upcase") != NULL);
+        ASSERT(strstr(r.error.evidence, "upcase: line 1: expected") != NULL);
+        ASSERT(strstr(r.error.evidence, "ABC") != NULL && strstr(r.error.evidence, "abc") != NULL);
+        zcl_command_reply_free(&r);
+        ASSERT(pdc_state(e, &count, after));
+        ASSERT_EQ(count, 2u);
+        ASSERT_STR_EQ(after, before);
+    } TEST_END
+    return failures;
+}
+
+static int pdc_case_cases_pass(struct pdc_env *e)
+{
+    int failures = 0;
+    struct zcl_command_reply r;
+    char before[PLUGIN_HEX_SHA3_512 + 1], after[PLUGIN_HEX_SHA3_512 + 1];
+    size_t count = 0;
+    TEST_CASE("plugin dev with passing cases makes a new current generation") {
+        ASSERT(pdc_dev_cases(e, "[{\"name\":\"echo\",\"stdin\":\"abc\\n\",\"expect_stdout\":\"abc\\n\",\"expect_exit\":0}]", &r));
+        ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_EQ(json_get_int(json_get(&r.data, "sequence")), 3);
+        snprintf(before, sizeof(before), "%s", json_get_str(json_get(&r.data, "generation")));
+        zcl_command_reply_free(&r);
+        ASSERT(pdc_state(e, &count, after));
+        ASSERT_EQ(count, 3u);
+        ASSERT_STR_EQ(after, before);
+    } TEST_END
+    return failures;
+}
+
 int plugin_dev_cases(void)
 {
     int failures = 0;
@@ -155,6 +223,8 @@ int plugin_dev_cases(void)
         failures += pdc_case_fresh(&e, first);
         failures += pdc_case_second(&e, first);
         failures += pdc_case_broken_pack(&e);
+        failures += pdc_case_cases(&e);
+        failures += pdc_case_cases_pass(&e);
     }
     if (old_home)
         (void)setenv("HOME", saved, 1);

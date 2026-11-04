@@ -43,9 +43,17 @@ bool lab_tail(struct json_value *d, const struct lab_compile *comp,
 /* Run every case of the request's `cases` against a built binary, as lab.test
  * does, without compiling or storing a receipt. */
 enum lab_check { LAB_CHECK_RAN, LAB_CHECK_NO_CASES, LAB_CHECK_UNCONFINED, LAB_CHECK_ALLOC };
+enum { LAB_FAIL_NAME = 65, LAB_FAIL_DIFF = 1024 };
+struct lab_case_fail {
+    char name[LAB_FAIL_NAME];
+    char diff[LAB_FAIL_DIFF];
+};
+/* `fail`, when not NULL, receives the first failing case's name and diff. Only
+ * ctx->dirs is read. */
 enum lab_check lab_cases_check(const struct zcl_command_request *rq,
                                struct lab_ctx *ctx, const char *binary,
                                uint32_t timeout_ms, uint32_t mem_mb,
-                               size_t *passed, size_t *failed);
+                               size_t *passed, size_t *failed,
+                               struct lab_case_fail *fail);
 
 #endif

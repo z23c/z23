@@ -182,7 +182,7 @@ static void promote_verify(const struct zcl_command_request *rq,
     size_t passed = 0, failed = 0;
     char message[192];
     enum lab_check c = lab_cases_check(rq, ctx, rel->binary, p->timeout_ms,
-                                       p->mem_mb, &passed, &failed);
+                                       p->mem_mb, &passed, &failed, NULL);
     if (c == LAB_CHECK_UNCONFINED) {
         lab_unconfined(reply);
     } else if (c == LAB_CHECK_ALLOC) {

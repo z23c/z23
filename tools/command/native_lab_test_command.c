@@ -420,6 +420,7 @@ struct lab_tally {
     size_t passed, failed, findings, diffs_omitted;
     size_t diff_left;
     char first[LAB_FIRST_MAX + 1];
+    struct lab_case_fail *fail; /* optional: the first failing case */
 };
 
 /* Reserve added row framing inside the existing diagnostic allowance. Text
@@ -518,6 +519,10 @@ static enum lab_check lab_run_cases(struct lab_ctx *ctx, const struct lab_cases 
         bool pass = comp->ok && lab_case_verdict(c, &proc, timeout_ms, diff, sizeof(diff));
         if (!comp->ok)
             snprintf(diff, sizeof(diff), "compile failed");
+        if (!pass && t->fail && t->failed == 0) {
+            snprintf(t->fail->name, sizeof(t->fail->name), "%s", c->name);
+            snprintf(t->fail->diff, sizeof(t->fail->diff), "%s", diff);
+        }
         t->passed += pass;
         t->failed += !pass;
         lab_tally_findings(t, &proc, comp->sanitized);
@@ -545,11 +550,12 @@ static bool lab_build_test(struct json_value *d, const struct lab_ctx *ctx,
 enum lab_check lab_cases_check(const struct zcl_command_request *rq,
                                struct lab_ctx *ctx, const char *binary,
                                uint32_t timeout_ms, uint32_t mem_mb,
-                               size_t *passed, size_t *failed)
+                               size_t *passed, size_t *failed,
+                               struct lab_case_fail *fail)
 {
     struct lab_cases cs;
     struct lab_compile *comp = zcl_calloc(1, sizeof(*comp), "lab.compile");
-    struct lab_tally t = { .diff_left = LAB_DIFF_TOTAL };
+    struct lab_tally t = { .diff_left = LAB_DIFF_TOTAL, .fail = fail };
     struct json_value rows;
     enum lab_check res = comp ? LAB_CHECK_NO_CASES : LAB_CHECK_ALLOC;
     json_init(&rows);

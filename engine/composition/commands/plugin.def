@@ -182,7 +182,11 @@ ZCL_COMMAND_READY_COMMAND(
     "plugin.dev", "plugin", "",
     "Pack, install and switch to a plugin in one step for development",
     "Runs the developer loop for the executable dir/NAME (NAME defaults to the "
-    "last component of dir): creates the developer signing key "
+    "last component of dir). With cases (the lab.promote case array) it first "
+    "runs each case against that executable under the plugin.call confinement "
+    "and refuses with PLUGIN_DEV_CASES_FAILED, the failing case's name and "
+    "diff, before any other step; a malformed array is PLUGIN_DEV_BAD_CASES. "
+    "Then it creates the developer signing key "
     "(~/.z23/plugin_dev.key, or key) only when it is missing, packs the "
     "executable into dir/dist, lists the key as a publisher key when it is not "
     "listed, installs the packed generation and makes it current. Each step is "
@@ -193,7 +197,7 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_RESULT_BUDGET,
     "plugin,dev,hot,swap,reload,pack,install,switch,generation,develop",
     "zcl.plugin_dev.input.v1", "zcl.plugin_dev.v1",
-    "dir,name,version,key,cap,interface", "dir",
+    "dir,name,version,key,cap,interface,cases", "dir",
     "z23 plugin dev ./hello",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,

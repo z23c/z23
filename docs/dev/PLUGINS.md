@@ -264,6 +264,29 @@ The store then holds two signed generations. A source that fails its cases or
 does not compile makes `lab.promote` refuse and write nothing, so there is no
 image to develop and the previous generation keeps answering `plugin.call`.
 
+#### Gated hot swap in one step
+
+An agent that has built an executable can gate and swap it in one call:
+
+```sh
+z23 plugin dev dir=./upper interface=2 cases='[{"name":"up","stdin":"abc\n","expect_stdout":"ABC\n"}]'
+z23 plugin call name=upper stdin=abc   # runs the new generation at once
+z23 plugin rollback name=upper         # previous generation current again
+```
+
+`cases` is the array `lab.promote` takes: 1..256 objects with `name` and
+optional `stdin`, `args`, `expect_stdout`, `expect_exit`. Before any key, pack,
+publish, install or switch, `plugin dev` runs each case against `DIR/NAME`
+through the lab's case runner, confined as `plugin.call` runs a plugin. Any
+failing case refuses with `PLUGIN_DEV_CASES_FAILED`: `error.message` names the
+first failing case and `error.evidence` carries its `name: diff` (the first
+differing line, the exit code, or the signal). A `cases` value that is not a
+valid array refuses with `PLUGIN_DEV_BAD_CASES`; a host that cannot confine the
+run, or lab state that cannot be prepared, refuses with
+`PLUGIN_DEV_CASES_UNAVAILABLE`. Every refusal leaves the store untouched, so
+the current generation keeps answering `plugin.call`. Without `cases` the
+command behaves as before.
+
 ## Publisher keys and first use
 
 The behavior below was measured on an installed release on 2026-10-18.
