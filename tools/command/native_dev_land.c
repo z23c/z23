@@ -7237,6 +7237,7 @@ static void dl_proof_evidence_read(const char *wt, const char *local,
     }
 }
 
+#if !defined(_WIN32)
 static const char *dl_frame_text(const char *line, bool *prefixed, unsigned long *number)
 {
     static const char prefix[] = "  first| L";
@@ -7282,7 +7283,6 @@ static bool dl_frame_safe_append(char *out, size_t cap, size_t *used, const char
     return true;
 }
 
-#if !defined(_WIN32)
 static int dl_frame_open(const struct zcl_dev_proof_failure_identity *identity,
                          const char *local, const char *base)
 {
