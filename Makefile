@@ -6908,6 +6908,7 @@ LINT_FAST_GATES := \
     check-pipefail-status-pipe \
     check-doc-counts \
     check-capability-inventory-generated \
+    check-kpi-floor \
     check-zcode-package-registry \
     check-orient-facts \
     check-arena-view-stub \
@@ -6954,7 +6955,7 @@ lint-fast-c: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLG
 # Environment-dependent gates (check-git-hooks-installed) are deliberately out.
 # Keep the fast set suitable for the edit loop; move cheap recurring failures
 # there when they can save a failed landing submission.
-# check-kpi-floor (522 ms) failed land row 757's full proof lint after a whole stacked proof.
+# check-kpi-floor (522 ms) failed land row 757's full proof lint; it is in LINT_FAST_GATES.
 # check-no-new-bash (280 ms median) failed 2 lane full-lint runs on 2026-10-23.
 # check-no-block-index-flat (301 ms median) failed 1 lane full-lint run on 2026-10-23.
 # check-hardening-ratchet (835 ms median) failed 1 lane full-lint run on 2026-10-23.
@@ -6982,7 +6983,6 @@ LINT_LAND_EXTRA_GATES := \
     check-posix-ere-only \
     check-hotswap-dev-only \
     check-blocker-remedy \
-    check-kpi-floor \
     check-no-new-bash \
     check-no-block-index-flat \
     check-hardening-ratchet \
