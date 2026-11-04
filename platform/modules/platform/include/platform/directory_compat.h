@@ -52,7 +52,9 @@ int platform_directory_create(const char *path, int mode);
  * Symbolic links and Windows reparse points are refused. */
 bool platform_directory_ensure(const char *path, int mode);
 
-/* Return real, immediate child directories in bytewise name order. Dot
+/* Listing enumeration failures return false and clear the output lists;
+ * a successfully enumerated prefix is never returned as a complete list.
+ * Return real, immediate child directories in bytewise name order. Dot
  * entries, symbolic links, and Windows reparse points are omitted. */
 bool platform_directory_list_real_sorted(const char *path,
                                          struct platform_directory_list *out);

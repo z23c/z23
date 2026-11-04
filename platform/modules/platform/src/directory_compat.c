@@ -655,6 +655,17 @@ BOOL (WINAPI *__imp_PathMatchSpecA)(LPCSTR, LPCSTR) = PathMatchSpecA;
 #include <sys/stat.h>
 #include <unistd.h>
 
+/* A null entry is EOF only when this readdir call left errno clear. Reset
+ * before every call: successful child metadata/allocation work may leave
+ * errno nonzero, which must not turn a later ordinary EOF into a failure. */
+static struct dirent *directory_read_next(DIR *dir, bool *ok)
+{
+    errno = 0;
+    struct dirent *entry = readdir(dir);
+    if (!entry && errno != 0) *ok = false;
+    return entry;
+}
+
 static struct platform_directory_entry directory_entry_snapshot(
     const struct stat *st)
 {
@@ -730,7 +741,7 @@ bool platform_directory_list_real_sorted(const char *path,
     bool ok = true;
     int fd = dirfd(dir);
     struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
+    while ((entry = directory_read_next(dir, &ok)) != NULL) {
         if (strcmp(entry->d_name, ".") == 0 ||
             strcmp(entry->d_name, "..") == 0)
             continue;
@@ -762,7 +773,7 @@ bool platform_directory_list_regular_sorted(
     bool ok = true;
     int fd = dirfd(dir);
     struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
+    while ((entry = directory_read_next(dir, &ok)) != NULL) {
         if (strcmp(entry->d_name, ".") == 0 ||
             strcmp(entry->d_name, "..") == 0)
             continue;
@@ -800,7 +811,7 @@ static bool platform_directory_list_children_sorted_impl(
     bool ok = true;
     int fd = dirfd(dir);
     struct dirent *entry;
-    while (ok && (entry = readdir(dir)) != NULL) {
+    while (ok && (entry = directory_read_next(dir, &ok)) != NULL) {
         if (strcmp(entry->d_name, ".") == 0 ||
             strcmp(entry->d_name, "..") == 0)
             continue;
