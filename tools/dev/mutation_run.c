@@ -1109,17 +1109,20 @@ static int mut_prepare_swap_rsp(struct mut_ctx *c, char *detail,
 
 static void mut_prepare_tool_digest(struct mut_ctx *c)
 {
-    /* Tool digest: the compiler argv, so a flag change misses the cache. */
-    char tool[8192];
-    size_t to = 0;
-    for (size_t i = 0; i < c->plan->compile.count && to + 2 < sizeof tool; i++) {
-        int n = snprintf(tool + to, sizeof tool - to, "%s ",
-                         c->plan->compile.argv[i]);
-        if (n <= 0)
-            break;
-        to += (size_t)n;
+    /* Version away from the bounded space-joined identity. Stream every
+     * argument with its NUL terminator: internal spaces and empty arguments
+     * cannot alias argument boundaries, and no fixed buffer can truncate. */
+    static const unsigned char domain[] = "z23.mutation.compiler.argv.v2";
+    struct sha3_256_ctx hash;
+    unsigned char digest[SHA3_256_OUTPUT_SIZE];
+    sha3_256_init(&hash);
+    sha3_256_write(&hash, domain, sizeof domain);
+    for (size_t i = 0; i < c->plan->compile.count; i++) {
+        const char *arg = c->plan->compile.argv[i];
+        sha3_256_write(&hash, (const unsigned char *)arg, strlen(arg) + 1);
     }
-    zcl_mut_digest_hex(tool, to, c->tool_digest);
+    sha3_256_finalize(&hash, digest);
+    zcl_hex_encode(digest, sizeof digest, c->tool_digest);
 }
 
 static bool mut_prepare(struct mut_ctx *c, struct zcl_mut_report *rep)

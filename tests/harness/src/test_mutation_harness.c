@@ -364,6 +364,79 @@ _test_next:;
     return failures;
 }
 
+/* Unused macro flags keep the baseline binary identical, so only the compiler
+ * argv identity can distinguish these campaigns. Never execute the old
+ * overflowing path in red: the safe 8190-byte omission case comes first. */
+static int tmh_compiler_identity(const struct zcl_mut_config *cfg,
+                                  const struct zcl_mut_plan *plan)
+{
+    int failures = 0;
+    struct zcl_mut_report r = {0};
+    struct zcl_mut_config cached = *cfg;
+    struct zcl_mut_plan variant = *plan; /* borrowed argv; do not free it */
+    char work[1200], pad[9001];
+    size_t prefix = 0, base = plan->compile.count;
+    static const struct {
+        bool oversized;
+        const char *tail;
+        bool expected_hit;
+    } cases[] = {
+        {false, "-DMUT_TAIL=1", false}, {false, "-DMUT_TAIL=1", true},
+        {false, "-DMUT_TAIL=2", false}, {false, "-DMUT_TAIL=2", true},
+        {true, "-DMUT_TAIL=1", false}, {true, "-DMUT_TAIL=1", true},
+        {true, "-DMUT_TAIL=2", false}, {true, "-DMUT_TAIL=2", true},
+    };
+    cached.use_cache = true;
+    cached.abort_after = 1;
+    TEST("compiler identity includes flags past 8190 bytes and oversized arguments") {
+        ASSERT(base + 6 <= ZCL_MUT_ARGV_MAX);
+        for (size_t i = 0; i < base; i++)
+            prefix += strlen(plan->compile.argv[i]) + 1;
+        ASSERT(prefix < 8000);
+        ASSERT(snprintf(work, sizeof work, "%s/compiler", cfg->work_dir) <
+               (int)sizeof work);
+        cached.work_dir = work;
+        variant.compile.count = base + 2;
+        variant.compile.argv[base] = pad;
+        variant.compile.argv[base + 2] = NULL;
+        for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+            size_t n = cases[i].oversized ? sizeof pad - 1 : 8189 - prefix;
+            memset(pad, 'x', n);
+            memcpy(pad, "-DMUT_PAD=", strlen("-DMUT_PAD="));
+            pad[n] = '\0';
+            variant.compile.argv[base + 1] = (char *)cases[i].tail;
+            ASSERT(zcl_mut_campaign_run(&cached, &variant, &r));
+            ASSERT_EQ(r.result_count, (size_t)1);
+            ASSERT_EQ(r.results[0].cached, cases[i].expected_hit);
+            ASSERT_EQ(r.results[0].outcome, ZCL_MUT_OUTCOME_KILLED);
+            ASSERT_STR_EQ(r.results[0].killed_by, "test");
+            zcl_mut_report_free(&r);
+        }
+        PASS();
+    }
+    TEST("compiler identity preserves argv boundaries including internal spaces") {
+        static const struct { bool split, expected_hit; } boundaries[] = {
+            {false, false}, {false, true}, {true, false}, {true, true}, {false, true}
+        };
+        for (size_t i = 0; i < sizeof boundaries / sizeof boundaries[0]; i++) {
+            bool split = boundaries[i].split;
+            variant.compile.count = base + (split ? 2 : 1);
+            variant.compile.argv[base] = (char *)(split ? "-DMUT_PAIR=a"
+                                                       : "-DMUT_PAIR=a -DMUT_TAIL=b");
+            variant.compile.argv[base + 1] = split ? (char *)"-DMUT_TAIL=b" : NULL;
+            variant.compile.argv[base + 2] = NULL;
+            ASSERT(zcl_mut_campaign_run(&cached, &variant, &r));
+            ASSERT_EQ(r.result_count, (size_t)1);
+            ASSERT_EQ(r.results[0].cached, boundaries[i].expected_hit);
+            zcl_mut_report_free(&r);
+        }
+        PASS();
+    }
+_test_next:;
+    zcl_mut_report_free(&r);
+    return failures;
+}
+
 int test_mutation_harness(void);
 int test_mutation_harness(void)
 {
@@ -636,6 +709,7 @@ int test_mutation_harness(void)
     /* ─────────────── the interrupted run: the corrupting case ─────────── */
 
     failures += tmh_cache_records(&cfg, &plan);
+    failures += tmh_compiler_identity(&cfg, &plan);
 
     TEST("a run stopped partway still leaves the subject byte-identical") {
         struct zcl_mut_config cut_cfg = cfg;
