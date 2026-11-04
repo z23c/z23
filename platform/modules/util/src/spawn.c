@@ -748,9 +748,10 @@ static bool spawn_capture_anchor_prepare(struct spawn_capture_anchor *anchor)
 }
 
 static void spawn_capture_anchor_wait_child(
-    const struct spawn_capture_anchor *anchor, int output_fd)
+    const struct spawn_capture_anchor *anchor, int output_fd, int error_fd)
 {
     close(output_fd);
+    if (error_fd >= 0) close(error_fd);
     close(anchor->go[0]);
     char ready = 'r';
     if (write(anchor->ready[1], &ready, 1) != 1) _exit(126);
@@ -761,7 +762,7 @@ static void spawn_capture_anchor_wait_child(
 }
 
 static void spawn_capture_anchor_child(
-    const struct spawn_capture_anchor *anchor, int output_fd)
+    const struct spawn_capture_anchor *anchor, int output_fd, int error_fd)
 {
     if (!anchor->enabled) return;
     close(anchor->hold[1]); close(anchor->ready[0]);
@@ -769,7 +770,7 @@ static void spawn_capture_anchor_child(
     if (setpgid(0, 0) != 0) _exit(126);
     pid_t member = fork();
     if (member < 0) _exit(126);
-    if (member == 0) spawn_capture_anchor_wait_child(anchor, output_fd);
+    if (member == 0) spawn_capture_anchor_wait_child(anchor, output_fd, error_fd);
     close(anchor->hold[0]); close(anchor->ready[1]);
     char go = 0;
     ssize_t received;
@@ -854,7 +855,7 @@ static int spawn_capture_impl_cwd(
     if (pid == 0) {
         /* Child: only async-signal-safe calls until exec/_exit. */
         close(outpipe[0]);
-        spawn_capture_anchor_child(&anchor, outpipe[1]);
+        spawn_capture_anchor_child(&anchor, outpipe[1], -1);
         spawn_capture_child_stdio(outpipe[1], merge_stderr);
         /* A launch directory that cannot be entered must not run the child
          * somewhere else: exit before exec. */
@@ -1023,6 +1024,142 @@ int zcl_spawn_capture(const char *const argv[], char *buf, size_t cap,
     return zcl_spawn_capture_observed(argv, buf, cap, timeout_ms, NULL);
 }
 
+#endif
+
+#ifndef _WIN32
+static bool spawn_evidence_pipe(int p[2])
+{
+    if (pipe(p) != 0) return false;
+    for (int i = 0; i < 2; i++) {
+        if (p[i] > STDERR_FILENO) continue;
+        int fd = fcntl(p[i], F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+        if (fd < 0) { close(p[0]); close(p[1]); return false; }
+        close(p[i]); p[i] = fd;
+    }
+    return true;
+}
+
+static void spawn_evidence_tail(unsigned char *out, size_t *used,
+                                const unsigned char *data, size_t n)
+{
+    size_t cap = ZCL_SPAWN_EVIDENCE_TAIL;
+    if (n >= cap) { memcpy(out, data + n - cap, cap); *used = cap; return; }
+    size_t discard = *used + n > cap ? *used + n - cap : 0;
+    if (discard) { memmove(out, out + discard, *used - discard); *used -= discard; }
+    memcpy(out + *used, data, n); *used += n;
+}
+
+struct spawn_evidence_capture {
+    struct pollfd pipes[2];
+    char *buf;
+    size_t cap, used;
+    struct zcl_spawn_evidence *e;
+};
+
+static bool spawn_evidence_read(struct spawn_evidence_capture *c, int which)
+{
+    unsigned char data[4096];
+    ssize_t n = read(c->pipes[which].fd, data, sizeof(data));
+    if (n < 0 && errno == EINTR) return true;
+    if (n < 0) return false;
+    if (n == 0) { close(c->pipes[which].fd); c->pipes[which].fd = -1; return true; }
+    uint64_t *total = which == 0 ? &c->e->stdout_total : &c->e->stderr_total;
+    *total = UINT64_MAX - *total < (uint64_t)n ? UINT64_MAX : *total + (uint64_t)n;
+    if (which == 0) {
+        size_t room = c->cap - 1 - c->used;
+        size_t copy = (size_t)n < room ? (size_t)n : room;
+        memcpy(c->buf + c->used, data, copy); c->used += copy;
+        if (copy != (size_t)n) c->e->stdout_truncated = true;
+        spawn_evidence_tail(c->e->stdout_tail, &c->e->stdout_len, data, (size_t)n);
+    } else {
+        spawn_evidence_tail(c->e->stderr_tail, &c->e->stderr_len, data, (size_t)n);
+    }
+    return true;
+}
+
+static bool spawn_evidence_drain(pid_t pid, struct spawn_evidence_capture *c,
+                                 int timeout_ms, int64_t deadline, bool anchored)
+{
+    struct spawn_capture_exit_state state = {.started_ms = -1};
+    while (c->pipes[0].fd >= 0 || c->pipes[1].fd >= 0) {
+        if (spawn_capture_exit_observe(pid, &state, anchored)) break;
+        int wait = spawn_capture_poll_timeout(timeout_ms, deadline, &state, &c->e->timed_out);
+        if (c->e->timed_out) break;
+        int n = poll(c->pipes, 2, wait);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) return false;
+        for (int i = 0; i < 2; i++) {
+            if (c->pipes[i].fd >= 0 && c->pipes[i].revents && !spawn_evidence_read(c, i))
+                return false;
+        }
+    }
+    return true;
+}
+
+static void spawn_evidence_child(int out, int err)
+{
+    if (setpgid(0, 0) != 0 || dup2(out, STDOUT_FILENO) < 0 ||
+        dup2(err, STDERR_FILENO) < 0) _exit(126);
+    close(out); close(err);
+    int input = open("/dev/null", O_RDONLY);
+    if (input < 0 || dup2(input, STDIN_FILENO) < 0) _exit(126);
+    if (input > STDERR_FILENO) close(input);
+}
+
+int zcl_spawn_capture_evidence(const char *const argv[], char *buf, size_t cap,
+                               int timeout_ms, struct zcl_spawn_evidence *e)
+{
+    if (e) memset(e, 0, sizeof(*e));
+    if (!argv || !argv[0] || !buf || !cap || !e) return -1;
+    buf[0] = '\0'; e->exit_code = -1;
+    int out[2], err[2];
+    if (!spawn_evidence_pipe(out)) return -1;
+    if (!spawn_evidence_pipe(err)) { close(out[0]); close(out[1]); return -1; }
+    struct spawn_capture_anchor anchor;
+    if (!spawn_capture_anchor_prepare(&anchor)) {
+        close(out[0]); close(out[1]); close(err[0]); close(err[1]); return -1;
+    }
+    pid_t pid = fork();
+    if (pid < 0) {
+        spawn_capture_anchor_close(&anchor);
+        close(out[0]); close(out[1]); close(err[0]); close(err[1]); return -1;
+    }
+    if (pid == 0) {
+        close(out[0]); close(err[0]);
+        spawn_capture_anchor_child(&anchor, out[1], err[1]);
+        spawn_evidence_child(out[1], err[1]);
+        execvp(argv[0], (char *const *)argv); _exit(127);
+    }
+    spawn_count_launch(); close(out[1]); close(err[1]); (void)setpgid(pid, pid);
+    if (!spawn_capture_anchor_parent(&anchor)) {
+        spawn_capture_anchor_close(&anchor); close(out[0]); close(err[0]);
+        (void)spawn_reap(pid, NULL); return -1;
+    }
+    struct spawn_evidence_capture c = {
+        .pipes = {{.fd = out[0], .events = POLLIN}, {.fd = err[0], .events = POLLIN}},
+        .buf = buf, .cap = cap, .e = e,
+    };
+    int64_t deadline = timeout_ms > 0 ? platform_time_monotonic_ms() + timeout_ms : 0;
+    bool ok = spawn_evidence_drain(pid, &c, timeout_ms, deadline, anchor.enabled);
+    if (!ok || e->timed_out) spawn_capture_kill_group(pid, anchor.enabled);
+    for (int i = 0; i < 2; i++) if (c.pipes[i].fd >= 0) close(c.pipes[i].fd);
+    int status = 0; bool cancelled = false;
+    bool reaped = spawn_capture_reap(pid, &status, deadline, NULL, NULL,
+                                     &e->timed_out, &cancelled, anchor.enabled, NULL);
+    if (anchor.enabled) close(anchor.hold[1]);
+    buf[c.used] = '\0'; e->exit_observed = reaped;
+    if (reaped) e->exit_code = spawn_capture_status(true, status);
+    return ok ? spawn_capture_status(reaped, status) : -1;
+}
+#else
+int zcl_spawn_capture_evidence(const char *const argv[], char *buf, size_t cap,
+                               int timeout_ms, struct zcl_spawn_evidence *e)
+{
+    (void)argv; (void)timeout_ms;
+    if (buf && cap) buf[0] = '\0';
+    if (e) { memset(e, 0, sizeof(*e)); e->exit_code = -1; }
+    return -1;
+}
 #endif
 
 int zcl_spawn_capture_cancelable_fd(

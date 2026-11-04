@@ -203,7 +203,8 @@ static bool process_inheritable_handle(HANDLE handle)
 }
 
 static bool process_stdio_handles(HANDLE *handles, HANDLE stdout_handle,
-                                  HANDLE stdin_handle, bool capture_stdout,
+                                  HANDLE stdin_handle, HANDLE stderr_handle,
+                                  bool capture_stderr, bool capture_stdout,
                                   bool file_stdin)
 {
     bool ok = true;
@@ -216,6 +217,11 @@ static bool process_stdio_handles(HANDLE *handles, HANDLE stdout_handle,
         ok = ok && stdin_handle != stdout_handle &&
              process_inheritable_handle(stdin_handle);
     }
+    if (capture_stderr) {
+        handles[1u + (size_t)capture_stdout + (size_t)file_stdin] = stderr_handle;
+        ok = ok && stderr_handle != stdout_handle && stderr_handle != stdin_handle &&
+             process_inheritable_handle(stderr_handle);
+    }
     return ok;
 }
 
@@ -227,13 +233,14 @@ static bool process_real_handle(HANDLE handle)
 static bool process_inherited_handles(HANDLE *handles,
                                       const struct platform_process_options *options,
                                       size_t first, HANDLE stdout_handle,
-                                      HANDLE stdin_handle, bool ok)
+                                      HANDLE stdin_handle, HANDLE stderr_handle, bool ok)
 {
     for (size_t i = 0; i < options->inherited_count; i++) {
         DWORD flags = 0;
         handles[first + i] = (HANDLE)options->inherited[i];
         if (handles[first + i] == stdout_handle ||
             handles[first + i] == stdin_handle ||
+            handles[first + i] == stderr_handle ||
             !GetHandleInformation(handles[first + i], &flags) ||
             !(flags & HANDLE_FLAG_INHERIT)) ok = false;
         for (size_t j = 0; j < i; j++)
@@ -302,7 +309,7 @@ static bool process_start_strings(
 static bool process_start_hidden_with_stdout(
     struct platform_process *process,
     const struct platform_process_options *options, HANDLE stdout_handle,
-    HANDLE stdin_handle)
+    HANDLE stdin_handle, HANDLE stderr_handle)
 {
     if (!process_start_shape_ok(process, options)) return false;
     wchar_t *image = NULL, *cwd = NULL, *line = NULL, *environment = NULL;
@@ -315,25 +322,26 @@ static bool process_start_hidden_with_stdout(
     if (null_handle == INVALID_HANDLE_VALUE) goto done;
     bool capture_stdout = process_real_handle(stdout_handle);
     bool file_stdin = process_real_handle(stdin_handle);
+    bool capture_stderr = process_real_handle(stderr_handle);
     size_t handle_count = options->inherited_count + 1u + (size_t)file_stdin +
-                          (size_t)capture_stdout;
+                          (size_t)capture_stdout + (size_t)capture_stderr;
     HANDLE *handles = zcl_calloc(handle_count, sizeof(*handles),
                                  "process-inherited-handles");
     if (!handles) { CloseHandle(null_handle); goto done; }
     handles[0] = null_handle;
     bool handles_ok = process_stdio_handles(handles, stdout_handle,
-                                            stdin_handle, capture_stdout,
+                                            stdin_handle, stderr_handle, capture_stderr, capture_stdout,
                                             file_stdin);
     handles_ok = process_inherited_handles(
-        handles, options, 1u + (size_t)capture_stdout + (size_t)file_stdin,
-        stdout_handle, stdin_handle, handles_ok);
+        handles, options, 1u + (size_t)capture_stdout + (size_t)file_stdin + (size_t)capture_stderr,
+        stdout_handle, stdin_handle, stderr_handle, handles_ok);
     STARTUPINFOEXW startup = {0};
     startup.StartupInfo.cb = sizeof(startup);
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
     startup.StartupInfo.wShowWindow = SW_HIDE;
     startup.StartupInfo.hStdInput = file_stdin ? stdin_handle : null_handle;
     startup.StartupInfo.hStdOutput = capture_stdout ? stdout_handle : null_handle;
-    startup.StartupInfo.hStdError = null_handle;
+    startup.StartupInfo.hStdError = capture_stderr ? stderr_handle : null_handle;
     if (!process_startup_attributes(&startup, handles, handle_count,
                                     handles_ok)) {
         free(startup.lpAttributeList); free(handles); CloseHandle(null_handle);
@@ -369,7 +377,7 @@ done:
 bool platform_process_start_hidden(struct platform_process *process,
                                    const struct platform_process_options *options)
 {
-    return process_start_hidden_with_stdout(process, options, NULL, NULL);
+    return process_start_hidden_with_stdout(process, options, NULL, NULL, NULL);
 }
 
 /* process_lifecycle_internal.h: the confined launch reuses these exact
@@ -599,9 +607,22 @@ static bool process_capture_pipe(HANDLE *read_handle, HANDLE *write_handle)
 
 /* Reads at most `available` bytes: into the free tail of out while room
  * remains, otherwise into a discard buffer that marks the output truncated. */
+static void process_evidence_tail(unsigned char *tail, size_t *used,
+                                  uint64_t *total, const unsigned char *data, size_t n)
+{
+    if (!tail) return;
+    *total = UINT64_MAX - *total < n ? UINT64_MAX : *total + n;
+    size_t cap = PLATFORM_PROCESS_EVIDENCE_TAIL;
+    if (n >= cap) { memcpy(tail, data + n - cap, cap); *used = cap; return; }
+    size_t drop = *used + n > cap ? *used + n - cap : 0;
+    if (drop) { memmove(tail, tail + drop, *used - drop); *used -= drop; }
+    memcpy(tail + *used, data, n); *used += n;
+}
+
 static bool process_pipe_read(HANDLE read_handle, char *out, size_t out_size,
                               size_t *used, DWORD available, DWORD *received,
-                              struct platform_process_capture_result *result)
+                              struct platform_process_capture_result *result,
+                              unsigned char *tail, size_t *tail_used, uint64_t *total)
 {
     char discard[4096];
     size_t room = *used + 1u < out_size ? out_size - *used - 1u : 0u;
@@ -613,6 +634,7 @@ static bool process_pipe_read(HANDLE read_handle, char *out, size_t out_size,
     *received = 0;
     if (!ReadFile(read_handle, destination, wanted, received, NULL) ||
         *received == 0) return false;
+    process_evidence_tail(tail, tail_used, total, (const unsigned char *)destination, *received);
     if (room)
         *used += *received;
     else
@@ -622,12 +644,13 @@ static bool process_pipe_read(HANDLE read_handle, char *out, size_t out_size,
 
 static bool process_capture_read_available(
     HANDLE read_handle, char *out, size_t out_size, size_t *used,
-    DWORD *available, struct platform_process_capture_result *result)
+    DWORD *available, struct platform_process_capture_result *result,
+    unsigned char *tail, size_t *tail_used, uint64_t *total)
 {
     while (*available > 0) {
         DWORD received = 0;
         if (!process_pipe_read(read_handle, out, out_size, used, *available,
-                               &received, result)) return false;
+                               &received, result, tail, tail_used, total)) return false;
         *available -= received;
     }
     return true;
@@ -673,7 +696,8 @@ static void process_capture_reap(struct platform_process *process,
 
 static bool process_capture_drain(HANDLE read_handle, char *out,
                                   size_t out_size, size_t *used,
-                                  struct platform_process_capture_result *result)
+                                  struct platform_process_capture_result *result,
+                                  unsigned char *tail, size_t *tail_used, uint64_t *total)
 {
     for (;;) {
         DWORD available = 0;
@@ -681,7 +705,7 @@ static bool process_capture_drain(HANDLE read_handle, char *out,
             available == 0) return true;
         DWORD received = 0;
         if (!process_pipe_read(read_handle, out, out_size, used, available,
-                               &received, result)) return false;
+                               &received, result, tail, tail_used, total)) return false;
     }
 }
 #endif
@@ -689,23 +713,30 @@ static bool process_capture_drain(HANDLE read_handle, char *out,
 static bool process_capture_stdout_stdio(
     const struct platform_process_options *options, char *out, size_t out_size,
     uint32_t timeout_ms, struct platform_process_capture_result *result,
-    uintptr_t stdin_native)
+    uintptr_t stdin_native, struct platform_process_evidence *evidence)
 {
 #if defined(_WIN32)
+    if (evidence) memset(evidence, 0, sizeof(*evidence));
     if (!process_capture_begin(options, out, out_size, timeout_ms, result))
         return false;
 
     HANDLE read_handle = NULL, write_handle = NULL;
     if (!process_capture_pipe(&read_handle, &write_handle)) return false;
+    HANDLE error_read = NULL, error_write = NULL;
+    if (evidence && !process_capture_pipe(&error_read, &error_write)) {
+        CloseHandle(read_handle); CloseHandle(write_handle); return false;
+    }
 
     struct platform_process process;
     platform_process_init(&process);
     bool started = process_start_hidden_with_stdout(
-        &process, options, write_handle, (HANDLE)stdin_native);
+        &process, options, write_handle, (HANDLE)stdin_native, error_write);
     CloseHandle(write_handle);
+    if (error_write) CloseHandle(error_write);
     write_handle = NULL;
     if (!started) {
         CloseHandle(read_handle);
+        if (error_read) CloseHandle(error_read);
         return false;
     }
 
@@ -713,13 +744,27 @@ static bool process_capture_stdout_stdio(
     size_t used = 0;
     bool ok = true, exited = false, containment_stopped = false;
     bool pipe_closed = false;
+    bool error_closed = !evidence;
+    char ignored[1]; size_t ignored_used = 0;
+    struct platform_process_capture_result ignored_result = {0};
     for (;;) {
         DWORD available = 0;
         if (!process_capture_peek(read_handle, &pipe_closed, &available) ||
             !process_capture_read_available(read_handle, out, out_size, &used,
-                                            &available, result)) {
+                                            &available, result,
+                                            evidence ? evidence->stdout_tail : NULL,
+                                            evidence ? &evidence->stdout_len : NULL,
+                                            evidence ? &evidence->stdout_total : NULL)) {
             ok = false;
             break;
+        }
+        DWORD error_available = 0;
+        if (evidence && (!process_capture_peek(error_read, &error_closed, &error_available) ||
+            !process_capture_read_available(error_read, ignored, sizeof(ignored), &ignored_used,
+                                            &error_available, &ignored_result,
+                                            evidence->stderr_tail, &evidence->stderr_len,
+                                            &evidence->stderr_total))) {
+            ok = false; break;
         }
 
         uint32_t exit_code = 0;
@@ -737,7 +782,7 @@ static bool process_capture_stdout_stdio(
              * committed by the primary process. */
             process_capture_stop_containment(&process, exit_code,
                                              &containment_stopped);
-            if (available == 0 && pipe_closed)
+            if (available == 0 && pipe_closed && error_closed)
                 break;
         }
 
@@ -747,7 +792,7 @@ static bool process_capture_stdout_stdio(
             exited = true;
             break;
         }
-        if (available == 0) Sleep(1u);
+        if (available == 0 && error_available == 0) Sleep(1u);
     }
     out[used] = 0;
 
@@ -755,13 +800,22 @@ static bool process_capture_stdout_stdio(
      * or wait failure. Bytes already in the pipe are drained once more so a
      * short-lived child cannot lose its final write between signal and poll. */
     process_capture_reap(&process, exited);
-    ok = process_capture_drain(read_handle, out, out_size, &used, result) && ok;
+    ok = process_capture_drain(read_handle, out, out_size, &used, result,
+                               evidence ? evidence->stdout_tail : NULL,
+                               evidence ? &evidence->stdout_len : NULL,
+                               evidence ? &evidence->stdout_total : NULL) && ok;
+    if (evidence)
+        ok = process_capture_drain(error_read, ignored, sizeof(ignored), &ignored_used,
+                                   &ignored_result, evidence->stderr_tail, &evidence->stderr_len,
+                                   &evidence->stderr_total) && ok;
     out[used] = 0;
     CloseHandle(read_handle);
+    if (error_read) CloseHandle(error_read);
     return ok;
 #else
     (void)process_capture_begin(options, out, out_size, timeout_ms, result);
     (void)stdin_native;
+    if (evidence) memset(evidence, 0, sizeof(*evidence));
     return false;
 #endif
 }
@@ -771,7 +825,17 @@ bool platform_process_capture_stdout(
     uint32_t timeout_ms, struct platform_process_capture_result *result)
 {
     return process_capture_stdout_stdio(options, out, out_size, timeout_ms,
-                                         result, 0);
+                                         result, 0, NULL);
+}
+
+bool platform_process_capture_evidence(
+    const struct platform_process_options *options, char *out, size_t out_size,
+    uint32_t timeout_ms, struct platform_process_capture_result *result,
+    struct platform_process_evidence *evidence)
+{
+    if (!evidence) return false;
+    return process_capture_stdout_stdio(options, out, out_size, timeout_ms,
+                                        result, 0, evidence);
 }
 
 #if defined(_WIN32)
@@ -814,7 +878,7 @@ bool platform_process_capture_stdout_file_input(
     HANDLE input = process_open_stdin_file(stdin_path);
     if (input == INVALID_HANDLE_VALUE) return false;
     bool ok = process_stdin_file_regular(input) && process_capture_stdout_stdio(options, out, out_size,
-        timeout_ms, result, (uintptr_t)input);
+        timeout_ms, result, (uintptr_t)input, NULL);
     CloseHandle(input);
     return ok;
 #else

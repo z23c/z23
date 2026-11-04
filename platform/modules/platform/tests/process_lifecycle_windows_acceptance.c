@@ -268,6 +268,20 @@ static bool capture_file_stdin_paths(const char *cwd, char input_path[32768],
     return n > 0 && n < 32768;
 }
 
+static int capture_evidence_mode(void)
+{
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE), err = GetStdHandle(STD_ERROR_HANDLE);
+    char fill[1024]; memset(fill, 'x', sizeof(fill));
+    DWORD written;
+    for (int i = 0; i < 128; i++) {
+        if (!WriteFile(out, fill, sizeof(fill), &written, NULL) || written != sizeof(fill) ||
+            !WriteFile(err, fill, sizeof(fill), &written, NULL) || written != sizeof(fill)) return 64;
+    }
+    if (!WriteFile(out, "stdout-tail", 11, &written, NULL) || written != 11 ||
+        !WriteFile(err, "stderr-tail", 11, &written, NULL) || written != 11) return 64;
+    return 7;
+}
+
 static bool capture_file_stdin_cases(const char *image, const char *cwd,
                                      const char *const *env)
 {
@@ -303,6 +317,8 @@ static int capture_mode(int argc, char **argv)
         return capture_child_mode(argc, argv);
     if (argc == 2 && strcmp(argv[1], "--capture-large") == 0)
         return capture_large_mode();
+    if (argc == 2 && strcmp(argv[1], "--capture-evidence") == 0)
+        return capture_evidence_mode();
     if (argc == 2 && strcmp(argv[1], "--capture-tree") == 0)
         return capture_tree_mode();
     return -1;
@@ -334,6 +350,7 @@ struct child_mode_session {
     bool detached_parent_exited;
     bool detached_tree_reaped;
     bool captured_ok;
+    bool evidence_ok;
     bool empty_ok;
     bool boundary_ok;
     bool large_ok;
@@ -462,6 +479,22 @@ static bool child_mode_capture_stdout(struct child_mode_session *s)
         strstr(s->captured, "stderr") == NULL;
 }
 
+static bool child_mode_capture_evidence(struct child_mode_session *s)
+{
+    const char *const argv[] = {s->image, "--capture-evidence", NULL};
+    struct platform_process_options options = child_mode_capture_options(s, argv);
+    struct platform_process_capture_result result = {0};
+    struct platform_process_evidence evidence = {0};
+    char out[16];
+    bool ok = platform_process_capture_evidence(&options, out, sizeof(out), 10000u,
+                                               &result, &evidence);
+    return ok && result.exit_code == 7u && result.output_truncated && !result.timed_out &&
+           strlen(out) == sizeof(out) - 1u && evidence.stdout_len == sizeof(evidence.stdout_tail) &&
+           evidence.stderr_len == sizeof(evidence.stderr_tail) &&
+           memcmp(evidence.stdout_tail + evidence.stdout_len - 11, "stdout-tail", 11) == 0 &&
+           memcmp(evidence.stderr_tail + evidence.stderr_len - 11, "stderr-tail", 11) == 0;
+}
+
 static bool child_mode_capture_empty(struct child_mode_session *s)
 {
     const char *const empty_argv[] = {
@@ -556,6 +589,7 @@ static void child_mode_capture_refused(struct child_mode_session *s)
 static void child_mode_capture_checks(struct child_mode_session *s)
 {
     s->captured_ok = child_mode_capture_stdout(s);
+    s->evidence_ok = child_mode_capture_evidence(s);
     s->empty_ok = child_mode_capture_empty(s);
     s->boundary_ok = child_mode_capture_boundary(s);
     s->large_ok = child_mode_capture_large(s);
@@ -565,7 +599,7 @@ static void child_mode_capture_checks(struct child_mode_session *s)
 
 static bool child_mode_capture_ok(const struct child_mode_session *s)
 {
-    return s->captured_ok && s->empty_ok && s->boundary_ok && s->large_ok &&
+    return s->captured_ok && s->evidence_ok && s->empty_ok && s->boundary_ok && s->large_ok &&
            s->timed_tree_reaped && s->relative_refused &&
            s->relative_cwd_refused;
 }

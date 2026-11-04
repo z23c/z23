@@ -32,17 +32,30 @@ static inline int test_host_tool_capture(const char *const argv[], char *out,
         .image = image, .argv = argv, .env = env,
     };
     struct platform_process_capture_result result = {0};
-    bool captured = platform_process_capture_stdout(&options, out, out_size,
-                                                     timeout_ms, &result);
+    struct platform_process_evidence evidence = {0};
+    bool captured = platform_process_capture_evidence(&options, out, out_size,
+                                                       timeout_ms, &result, &evidence);
     int rc = !captured || result.timed_out || result.output_truncated ||
              result.exit_code > INT_MAX ? -1 : (int)result.exit_code;
-    test_note_child(argv[0], rc, out_size && rc >= 0 ? out : NULL);
+    test_note("child %s exit=%u return=%d observed=%d timeout=%d stdout_truncated=%d",
+              argv[0], result.exit_code, rc, captured && !result.timed_out, result.timed_out,
+              result.output_truncated);
+    test_note("child stdout_bytes=%llu stderr_bytes=%llu",
+              (unsigned long long)evidence.stdout_total, (unsigned long long)evidence.stderr_total);
+    test_note_bytes("stdout tail", evidence.stdout_tail, evidence.stdout_len);
+    test_note_bytes("stderr tail", evidence.stderr_tail, evidence.stderr_len);
     return rc;
 #else
     if (timeout_ms > INT_MAX) return -1;
-    int rc = zcl_spawn_capture(argv, out, out_size, (int)timeout_ms);
-    test_note_child(argv && argv[0] ? argv[0] : "host tool", rc,
-                    out_size && rc >= 0 ? out : NULL);
+    struct zcl_spawn_evidence evidence;
+    int rc = zcl_spawn_capture_evidence(argv, out, out_size, (int)timeout_ms, &evidence);
+    test_note("child %s exit=%d observed=%d timeout=%d stdout_truncated=%d",
+              argv && argv[0] ? argv[0] : "host tool", rc,
+              evidence.exit_observed, evidence.timed_out, evidence.stdout_truncated);
+    test_note("child stdout_bytes=%llu stderr_bytes=%llu",
+              (unsigned long long)evidence.stdout_total, (unsigned long long)evidence.stderr_total);
+    test_note_bytes("stdout tail", evidence.stdout_tail, evidence.stdout_len);
+    test_note_bytes("stderr tail", evidence.stderr_tail, evidence.stderr_len);
     return rc;
 #endif
 }

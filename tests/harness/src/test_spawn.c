@@ -631,6 +631,40 @@ static int test_spawn_binary_closed_stdio(void)
     return failures;
 }
 
+static int test_spawn_evidence_streams(void)
+{
+    int failures = 0;
+    TEST("spawn: evidence captures distinct binary tails and original stdout prefix") {
+        const char *argv[] = {"/bin/sh", "-c", "printf 'A\\000OUT'; printf 'B\\000ERR' >&2; exit 7", NULL};
+        char out[3];
+        struct zcl_spawn_evidence evidence;
+        int rc = zcl_spawn_capture_evidence(argv, out, sizeof(out), 3000, &evidence);
+        ASSERT(rc == 7 && evidence.exit_observed && evidence.exit_code == 7);
+        ASSERT(evidence.stdout_truncated && !evidence.timed_out);
+        ASSERT(memcmp(out, "A\0", 2) == 0);
+        ASSERT(evidence.stdout_len == 5 && memcmp(evidence.stdout_tail, "A\0OUT", 5) == 0);
+        ASSERT(evidence.stderr_len == 5 && memcmp(evidence.stderr_tail, "B\0ERR", 5) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_spawn_evidence_timeout(void)
+{
+    int failures = 0;
+    TEST("spawn: evidence retains output on timeout") {
+        const char *argv[] = {"/bin/sh", "-c", "printf early; printf fault >&2; exec sleep 10", NULL};
+        char out[32];
+        struct zcl_spawn_evidence evidence;
+        int rc = zcl_spawn_capture_evidence(argv, out, sizeof(out), 100, &evidence);
+        ASSERT(rc != 0 && evidence.timed_out);
+        ASSERT(strcmp(out, "early") == 0);
+        ASSERT(evidence.stderr_len == 5 && memcmp(evidence.stderr_tail, "fault", 5) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_spawn_platform_arm(void)
 {
     int failures = 0;
@@ -658,6 +692,8 @@ static int test_spawn_platform_arm(void)
     failures += test_spawn_binary_unknown_exit();
     failures += test_spawn_binary_empty();
     failures += test_spawn_binary_closed_stdio();
+    failures += test_spawn_evidence_streams();
+    failures += test_spawn_evidence_timeout();
     failures += test_spawn_capture_in_dir();
     failures += test_spawn_capture_in_dir_fails_closed();
 

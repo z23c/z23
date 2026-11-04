@@ -159,6 +159,20 @@ struct zcl_result zcl_spawn_capture_binary_merged(
 int zcl_spawn_capture_observed(const char *const argv[], char *buf, size_t cap,
                                int timeout_ms, bool *timed_out);
 
+/* Diagnostic observation of one trusted child. The caller's stdout prefix
+ * and return status match capture_observed; both stream tails are raw bytes. */
+#define ZCL_SPAWN_EVIDENCE_TAIL 512u
+struct zcl_spawn_evidence {
+    unsigned char stdout_tail[ZCL_SPAWN_EVIDENCE_TAIL];
+    unsigned char stderr_tail[ZCL_SPAWN_EVIDENCE_TAIL];
+    size_t stdout_len, stderr_len;
+    uint64_t stdout_total, stderr_total;
+    bool stdout_truncated, timed_out, exit_observed;
+    int exit_code;
+};
+int zcl_spawn_capture_evidence(const char *const argv[], char *buf, size_t cap,
+                               int timeout_ms, struct zcl_spawn_evidence *evidence);
+
 /* The same capture with the child started in `cwd`. A NULL `cwd` is exactly
  * zcl_spawn_capture_observed(). If the directory cannot be entered the child
  * exits 126 before exec and never runs elsewhere; Windows refuses a non-NULL

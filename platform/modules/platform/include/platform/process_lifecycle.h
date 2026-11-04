@@ -37,6 +37,14 @@ struct platform_process_capture_result {
     bool output_truncated;
 };
 
+#define PLATFORM_PROCESS_EVIDENCE_TAIL 512u
+struct platform_process_evidence {
+    unsigned char stdout_tail[PLATFORM_PROCESS_EVIDENCE_TAIL];
+    unsigned char stderr_tail[PLATFORM_PROCESS_EVIDENCE_TAIL];
+    size_t stdout_len, stderr_len;
+    uint64_t stdout_total, stderr_total;
+};
+
 enum platform_process_wait_result {
     PLATFORM_PROCESS_WAIT_EXITED = 0,
     PLATFORM_PROCESS_WAIT_RUNNING,
@@ -60,6 +68,13 @@ bool platform_process_start_hidden(struct platform_process *process,
 bool platform_process_capture_stdout(
     const struct platform_process_options *options, char *out, size_t out_size,
     uint32_t timeout_ms, struct platform_process_capture_result *result);
+
+/* Same trusted capture and stdout contract, with separate bounded byte tails
+ * from the same child. The result qualifies timeout and stdout truncation. */
+bool platform_process_capture_evidence(
+    const struct platform_process_options *options, char *out, size_t out_size,
+    uint32_t timeout_ms, struct platform_process_capture_result *result,
+    struct platform_process_evidence *evidence);
 
 /* Trusted Windows host-test capture with a private file as stdin. This is not
  * package/agent execution qualification. stdin_path must be a drive-absolute
