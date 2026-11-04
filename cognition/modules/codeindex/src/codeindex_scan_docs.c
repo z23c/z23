@@ -8,6 +8,7 @@
 
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
+#include "util/str_suffix.h"
 
 #include <sqlite3.h>
 
@@ -28,6 +29,7 @@
  * into memory; the largest tracked doc is far below it. */
 #define CI_DOC_FILE_CAP ((size_t)16u << 20)
 #define CI_DOC_PATH_ALLOC 512
+#define CI_DOC_COUNT_CAP 16384
 
 struct doc_paths {
     char (*v)[CI_DOC_PATH_ALLOC];
@@ -37,6 +39,8 @@ struct doc_paths {
 static bool doc_paths_push(struct doc_paths *p, const char *path)
 {
     if (strlen(path) >= CI_DOC_PATH_ALLOC) return true; /* unindexable */
+    if (p->n >= CI_DOC_COUNT_CAP)
+        LOG_FAIL("codeindex", "prose file count exceeds %d", CI_DOC_COUNT_CAP);
     if (p->n == p->cap) {
         size_t cap = p->cap ? p->cap * 2 : 256;
         void *next = zcl_realloc(p->v, cap * sizeof(*p->v), "ci_doc_paths");
@@ -63,18 +67,12 @@ static bool doc_name_pruned(const char *name)
     return false;
 }
 
-static bool doc_has_md_suffix(const char *name)
-{
-    size_t n = strlen(name);
-    return n > 3 && strcmp(name + n - 3, ".md") == 0;
-}
-
 /* docs tree .md, or an AGENTS.md / README.md anywhere under a scanned root. */
 static bool doc_wanted(const char *reldir, const char *name)
 {
     if (strcmp(name, "AGENTS.md") == 0 || strcmp(name, "README.md") == 0)
         return true;
-    return doc_has_md_suffix(name) &&
+    return strlen(name) > 3 && zcl_str_has_suffix(name, ".md") &&
            (strcmp(reldir, "docs") == 0 || strncmp(reldir, "docs/", 5) == 0);
 }
 
@@ -172,25 +170,6 @@ static bool doc_read_file(const char *root, const char *relpath, char **out,
 #endif /* !_WIN32 */
 
 /* ── parsing ──────────────────────────────────────────────────────────── */
-
-static void doc_hash(const char *buf, size_t len, uint8_t out[32])
-{
-    static const uint8_t tag = 0x02; /* same domain as files.content_sha3 */
-    struct sha3_256_ctx ctx;
-    sha3_256_init(&ctx);
-    sha3_256_write(&ctx, &tag, 1);
-    if (len) sha3_256_write(&ctx, (const unsigned char *)buf, len);
-    sha3_256_finalize(&ctx, out);
-}
-
-static int doc_count_lines(const char *buf, size_t len)
-{
-    size_t lines = 0;
-    for (size_t i = 0; i < len; i++)
-        if (buf[i] == '\n') lines++;
-    if (len > 0 && buf[len - 1] != '\n') lines++;
-    return lines > INT32_MAX ? INT32_MAX : (int)lines;
-}
 
 /* Append `text` to a capped field with `sep` between parts. A part that does
  * not fit is cut at a UTF-8 boundary and the field ends in a visible "...";
@@ -359,10 +338,10 @@ static bool doc_store_one(sqlite3 *db, const char *root, const char *relpath)
     struct ci_doc row;
     memset(&row, 0, sizeof(row));
     snprintf(row.path, sizeof(row.path), "%s", relpath);
-    row.line_count = doc_count_lines(buf, len);
+    row.line_count = ci_scan_count_lines(buf, len);
     doc_parse(buf, len, &row);
     uint8_t sha[32];
-    doc_hash(buf, len, sha);
+    ci_scan_hash_contents(buf, len, sha);
     free(buf);
     return strlen(relpath) < sizeof(row.path) && doc_insert(db, &row, sha);
 }
@@ -388,7 +367,7 @@ bool ci_docs_hash_file(const char *root, const char *relpath, uint8_t out[32])
     size_t len = 0;
     if (!root || !relpath || !out || !doc_read_file(root, relpath, &buf, &len))
         return false;
-    doc_hash(buf, len, out);
+    ci_scan_hash_contents(buf, len, out);
     free(buf);
     return true;
 }

@@ -118,6 +118,9 @@ bool ci_store_clear(struct ci_store *s);
 /* Rebuild the docs table from the prose files under `root` (inside the open
  * write transaction). ci_docs_hash_file hashes one prose file the same way. */
 bool ci_docs_refresh(struct ci_store *store, const char *root);
+/* Shared source/prose byte accounting; hashes use the file domain 0x02. */
+void ci_scan_hash_contents(const char *buf, size_t len, uint8_t out_sha3[32]);
+int ci_scan_count_lines(const char *buf, size_t len);
 bool ci_docs_hash_file(const char *root, const char *relpath, uint8_t out[32]);
 bool ci_store_put_file(struct ci_store *s, const struct ci_file *f,
                        const uint8_t content_sha3[32], int64_t mtime,

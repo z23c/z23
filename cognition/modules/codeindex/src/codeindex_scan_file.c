@@ -71,7 +71,7 @@ static bool ci_scan_source_unchanged(
         before->changed_nanoseconds == after->changed_nanoseconds;
 }
 
-static void ci_scan_hash_contents(const char *buf, size_t len,
+void ci_scan_hash_contents(const char *buf, size_t len,
                                   uint8_t out_sha3[32])
 {
     static const uint8_t tag = 0x02;
@@ -83,7 +83,7 @@ static void ci_scan_hash_contents(const char *buf, size_t len,
 }
 
 /* Newline count, plus one when the last line has no terminator. */
-static int ci_scan_count_lines(const char *buf, size_t len)
+int ci_scan_count_lines(const char *buf, size_t len)
 {
     size_t lines = 0;
     for (size_t i = 0; i < len; i++)
