@@ -406,16 +406,17 @@ static void lab_tally_findings(struct lab_tally *t, const struct lab_proc *p,
     t->findings += n;
 }
 
-/* Run every case; false when the host refused to confine one. */
-static bool lab_run_cases(struct lab_ctx *ctx, const struct lab_cases *cs,
-                          const struct lab_compile *comp, uint32_t timeout_ms,
-                          uint32_t mem_mb, struct json_value *rows,
-                          struct lab_tally *t)
+static enum lab_check lab_run_cases(struct lab_ctx *ctx, const struct lab_cases *cs,
+                                    const struct lab_compile *comp, uint32_t timeout_ms,
+                                    uint32_t mem_mb, struct json_value *rows,
+                                    struct lab_tally *t)
 {
     struct lab_proc proc;
     char diff[LAB_DIFF_CASE * 2];
-    bool ok = lab_proc_init(&proc);
-    for (size_t i = 0; ok && i < cs->n; i++) {
+    enum lab_check result = LAB_CHECK_RAN;
+    if (!lab_proc_init(&proc))
+        return LAB_CHECK_ALLOC;
+    for (size_t i = 0; i < cs->n; i++) {
         const struct lab_case *c = &cs->items[i];
         struct lab_inputs in = { .stdin_data = c->stdin_data,
             .stdin_len = strlen(c->stdin_data), .args = c->args,
@@ -426,17 +427,23 @@ static bool lab_run_cases(struct lab_ctx *ctx, const struct lab_cases *cs,
             lab_run_binary(&ctx->dirs, comp->binary, comp->sanitized, &in, &proc);
         else
             snprintf(proc.detail, sizeof(proc.detail), "compile failed");
-        ok = proc.launch != LAB_LAUNCH_UNCONFINED;
+        if (proc.launch == LAB_LAUNCH_UNCONFINED) {
+            result = LAB_CHECK_UNCONFINED;
+            break;
+        }
         bool pass = comp->ok && lab_case_verdict(c, &proc, timeout_ms, diff, sizeof(diff));
         if (!comp->ok)
             snprintf(diff, sizeof(diff), "compile failed");
         t->passed += pass;
         t->failed += !pass;
         lab_tally_findings(t, &proc, comp->sanitized);
-        ok = ok && lab_case_row(rows, c, &proc, pass, diff, t);
+        if (!lab_case_row(rows, c, &proc, pass, diff, t)) {
+            result = LAB_CHECK_ALLOC;
+            break;
+        }
     }
     lab_proc_free(&proc);
-    return ok;
+    return result;
 }
 
 static bool lab_build_test(struct json_value *d, const struct lab_ctx *ctx,
@@ -460,15 +467,14 @@ enum lab_check lab_cases_check(const struct zcl_command_request *rq,
     struct lab_compile *comp = zcl_calloc(1, sizeof(*comp), "lab.compile");
     struct lab_tally t = { .diff_left = LAB_DIFF_TOTAL };
     struct json_value rows;
-    enum lab_check res = LAB_CHECK_NO_CASES;
+    enum lab_check res = comp ? LAB_CHECK_NO_CASES : LAB_CHECK_ALLOC;
     json_init(&rows);
     json_set_array(&rows);
     if (comp && lab_cases_load(rq, &cs)) {
         lab_diagnostic_budget(&t, cs.n);
         comp->ok = true;
         snprintf(comp->binary, sizeof(comp->binary), "%s", binary);
-        res = lab_run_cases(ctx, &cs, comp, timeout_ms, mem_mb, &rows, &t)
-                  ? LAB_CHECK_RAN : LAB_CHECK_UNCONFINED;
+        res = lab_run_cases(ctx, &cs, comp, timeout_ms, mem_mb, &rows, &t);
         *passed = t.passed;
         *failed = t.failed;
     }
@@ -499,10 +505,12 @@ static void lab_test_execute(struct lab_ctx *ctx, const struct lab_cases *cs,
         return;
     }
     lab_compile_source(&ctx->dirs, &ctx->tc, &ctx->src, ctx->root, r->sanitize, comp);
-    bool ran = !comp->unconfined &&
-               lab_run_cases(ctx, cs, comp, r->timeout_ms, r->mem_mb, &rows, &t);
-    if (comp->unconfined || !ran)
+    enum lab_check result = comp->unconfined ? LAB_CHECK_UNCONFINED :
+        lab_run_cases(ctx, cs, comp, r->timeout_ms, r->mem_mb, &rows, &t);
+    if (result == LAB_CHECK_UNCONFINED)
         lab_unconfined(reply);
+    else if (result == LAB_CHECK_ALLOC)
+        lab_fail(reply, "LAB_ALLOC", "run", "the lab could not allocate case results");
     else if (!lab_build_test(&reply->data, ctx, comp, r->sanitize, &t, &rows) ||
              !lab_publish(ctx, reply))
         lab_fail(reply, "LAB_ALLOC", "serialize", "the receipt could not be built");

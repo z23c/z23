@@ -6,6 +6,7 @@
 
 #include "test/test_core.h"
 
+#include "base/safe_alloc.h"
 #include "command/lab.h"
 #include "command/native_command.h"
 #include "config/command_catalog.h"
@@ -634,6 +635,28 @@ static int test_lab_refusals(void)
     return failures;
 }
 
+static int test_lab_case_capture_allocation(void)
+{
+    int failures = 0;
+    TEST("lab test reports a failed case capture allocation") {
+        const char *input = "{\"file\":\"" LT_FIX "hello.c\",\"fresh\":true,"
+                            "\"sanitize\":false,\"cases\":[{\"name\":\"hello\"}]}";
+        struct zcl_command_reply r;
+        bool confined = lab_confinement_available();
+        /* The compiler uses the first capture. The case runner uses the second. */
+        zcl_alloc_fault_fail_nth("lab.out", 2);
+        bool called = lt_call(zcl_native_handle_lab_test, input, "zcl.lab_test.v1", &r);
+        bool hit = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(called);
+        ASSERT(hit == confined);
+        ASSERT(lt_failed_with(&r, confined ? "LAB_ALLOC" : "LAB_UNCONFINED"));
+        zcl_command_reply_free(&r);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_lab_unconfined_seam(void)
 {
     int failures = 0;
@@ -836,6 +859,7 @@ int test_lab(void)
     failures += test_lab_test_stderr();
     failures += test_lab_refusals();
     failures += test_lab_unconfined_seam();
+    failures += test_lab_case_capture_allocation();
     failures += test_lab_workload();
     lt_close();
     return failures;

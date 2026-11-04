@@ -7,6 +7,7 @@
 
 #include "test/test_core.h"
 
+#include "base/safe_alloc.h"
 #include "command/native_command.h"
 #include "json/json.h"
 #include "plugin/plugin_store.h"
@@ -248,6 +249,29 @@ static int lp_case_disagree(void)
     return failures;
 }
 
+static int lp_case_capture_allocation(void)
+{
+    int failures = 0;
+    struct lp_env e;
+    bool ready = lp_env_open(&e);
+    TEST_CASE("lab.promote reports a release case capture allocation failure and writes nothing") {
+        struct zcl_command_reply p;
+        ASSERT(ready);
+        ASSERT_EQ(mkdir(e.dist, 0700), 0);
+        /* First compile and run sanitized cases, then compile and run release cases. */
+        zcl_alloc_fault_fail_nth("lab.out", 4);
+        lp_promote(&e, LP_UPPER, LP_CASES_OK, &p);
+        bool hit = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(hit);
+        ASSERT_STR_EQ(p.error.code, "LAB_ALLOC");
+        ASSERT_EQ(lp_entries(e.dist), 0);
+        zcl_command_reply_free(&p);
+    } TEST_END
+    lp_env_close(&e);
+    return failures;
+}
+
 static int lp_case_no_key(void)
 {
     int failures = 0;
@@ -275,6 +299,7 @@ int test_lab_promote(void)
     failures += lp_case_roundtrip();
     failures += lp_case_failed_case();
     failures += lp_case_disagree();
+    failures += lp_case_capture_allocation();
     failures += lp_case_no_key();
     return failures;
 }

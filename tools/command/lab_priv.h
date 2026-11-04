@@ -42,7 +42,7 @@ bool lab_tail(struct json_value *d, const struct lab_compile *comp,
 
 /* Run every case of the request's `cases` against a built binary, as lab.test
  * does, without compiling or storing a receipt. */
-enum lab_check { LAB_CHECK_RAN, LAB_CHECK_NO_CASES, LAB_CHECK_UNCONFINED };
+enum lab_check { LAB_CHECK_RAN, LAB_CHECK_NO_CASES, LAB_CHECK_UNCONFINED, LAB_CHECK_ALLOC };
 enum lab_check lab_cases_check(const struct zcl_command_request *rq,
                                struct lab_ctx *ctx, const char *binary,
                                uint32_t timeout_ms, uint32_t mem_mb,

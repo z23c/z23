@@ -185,6 +185,8 @@ static void promote_verify(const struct zcl_command_request *rq,
                                        p->mem_mb, &passed, &failed);
     if (c == LAB_CHECK_UNCONFINED) {
         lab_unconfined(reply);
+    } else if (c == LAB_CHECK_ALLOC) {
+        lab_fail(reply, "LAB_ALLOC", "verify", "the lab could not allocate case results");
     } else if (c != LAB_CHECK_RAN) {
         lab_fail(reply, "LAB_BAD_CASES", "verify", "the cases could not be read again");
     } else if (failed > 0) {
