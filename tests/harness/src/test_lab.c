@@ -828,6 +828,39 @@ static int test_lab_signal_mutant(void)
     return failures;
 }
 
+#if !defined(_WIN32)
+static int test_lab_writerless_case_file(void)
+{
+    int failures = 0;
+    TEST("lab.test refuses a FIFO case file without waiting for a writer") {
+        char path[640], input[1024];
+        snprintf(path, sizeof path, "%s/writerless.json", g_lt_dir);
+        ASSERT(mkfifo(path, 0600) == 0);
+        snprintf(input, sizeof input, "{\"file\":\"" LT_FIX "hello.c\",\"cases\":\"%s\"}", path);
+        pid_t child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) {
+            signal(SIGALRM, SIG_DFL);
+            alarm(3);
+            struct zcl_command_reply reply;
+            bool called = lt_call(zcl_native_handle_lab_test, input, "zcl.lab_test.v1", &reply);
+            bool refused = called && lt_failed_with(&reply, "LAB_BAD_CASES");
+            if (called) zcl_command_reply_free(&reply);
+            _exit(refused ? 0 : 1);
+        }
+        int status = 0;
+        pid_t waited;
+        do {
+            waited = waitpid(child, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+        ASSERT(unlink(path) == 0);
+        ASSERT(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
 int test_lab(void)
 {
     int failures = 0;
@@ -853,6 +886,9 @@ int test_lab(void)
     failures += test_lab_stdin_args();
     failures += test_lab_cache();
     failures += test_lab_test_cases();
+#if !defined(_WIN32)
+    failures += test_lab_writerless_case_file();
+#endif
     failures += test_lab_complete_case_file();
     failures += test_lab_reverse_cases();
     failures += test_lab_test_inline_and_cache();

@@ -115,6 +115,8 @@ static bool lab_cases_read_file(const char *path, struct json_value *doc)
     int flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC;
 #if defined(_WIN32)
     flags |= _O_BINARY;
+#else
+    flags |= O_NONBLOCK; /* Inspect special files without waiting for a writer. */
 #endif
     int fd = open(path, flags);
     if (fd < 0)
