@@ -245,8 +245,6 @@ static struct metrics_context g_metrics;
  */
 /* Background ZK param loading */
 static char g_params_dir_buf[1024];
-static pthread_t g_params_thread;
-static bool g_params_thread_started = false;
 static _Atomic bool g_params_loaded = false;
 static struct boot_svc_ctx g_svc;
 /* Single source of truth for the live boot service context — the &g_svc handed
@@ -428,8 +426,8 @@ static void boot_step_build_svc_ctx(struct app_context *ctx,
         .metrics = &g_metrics,
         .running = &g_running,
         .datadir = g_datadir,
-        .params_thread = g_params_thread,
-        .params_thread_started = g_params_thread_started,
+        .params_thread = g_svc.params_thread,
+        .params_thread_started = g_svc.params_thread_started,
         .params_loaded = &g_params_loaded,
         .block_tree_open = g_block_tree_open,
         .block_tree = &g_block_tree,
@@ -603,7 +601,8 @@ static bool boot_step_init_crypto_and_state(struct app_context *ctx,
     boot_init_deferred_proof_validation(ctx, params);
     /* Defer ZK key loading to background thread — not needed for RPC startup.
      * Keys load in parallel while block index + wallet initialize. */
-    g_params_thread_started = false;
+    if (!boot_params_join_owned(&g_svc)) return false;
+    atomic_store(&g_params_loaded, false);
     if (ctx->params_dir)
         snprintf(g_params_dir_buf, sizeof(g_params_dir_buf), "%s", ctx->params_dir);
     /* zk-parameter gate. A missing ~/.zcash-params costs exactly one
@@ -628,10 +627,8 @@ static bool boot_step_init_crypto_and_state(struct app_context *ctx,
     if (ctx->params_dir && params_files_present) {
         /* One-shot ZK params loader; joined at shutdown via
          * app_shutdown's params_thread field. raw-pthread-ok */
-        if (pthread_create(&g_params_thread, NULL, load_params_thread, NULL) == 0) {
-            g_params_thread_started = true;
+        if (pthread_create(&g_svc.params_thread, NULL, load_params_thread, NULL) == 0) {
             /* Own the worker even if an offline/early path never builds svc. */
-            g_svc.params_thread = g_params_thread;
             g_svc.params_thread_started = true;
         }
         else if (boot_params_thread_failure_is_fatal(
