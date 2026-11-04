@@ -1301,6 +1301,43 @@ static int lint_run_shard(int shard)
 LINT_SHARD_LIST(LINT_SHARD_ENTRY)
 #undef LINT_SHARD_ENTRY
 
+/* Exercise the actual Makefile in a tiny private tree: the overlay replaces
+ * unrelated build tools and makes Tor readiness an observable refusal. */
+static int t_lint_fast_tor_graph(void)
+{
+    static const char script[] =
+        "set -eu; cd \"$2\"\n"
+        "mkdir -p platform/modules/platform/tests engine/composition tools/dev tools/lint home tmp\n"
+        "cp \"$1/Makefile\" Makefile\n"
+        "cp \"$1/platform/modules/platform/tests/windows_acceptance.mk\" platform/modules/platform/tests/\n"
+        "cp \"$1/platform/modules/platform/tests/android_acceptance.mk\" platform/modules/platform/tests/\n"
+        "cp \"$1/engine/composition/lib_module_order.def\" engine/composition/\n"
+        "printf '#!/bin/sh\\nexit 0\\n' > tools/dev/check-toolchain.sh\n"
+        "printf '#!/bin/sh\\nprintf fixture\\n' > tools/dev/process-start-token.sh\n"
+        "printf '#!/bin/sh\\nprintf \"%%s\\\\n\" \"$@\" > \"$HOME/args\"\\n' > tools/lint/run_lint.sh\n"
+        "chmod +x tools/dev/check-toolchain.sh tools/dev/process-start-token.sh tools/lint/run_lint.sh\n"
+        "printf '%s\\n' '.PHONY: tor-provenance-ready check-native-tunnel-export-binding' 'tor-provenance-ready:' '\t@printf called > \"$(HOME)/tor\"; exit 77' 'check-native-tunnel-export-binding:' '\t@printf binding > \"$(HOME)/binding\"' 'fixture-print-gates:' '\t@printf \"%s\\\\n\" $(LINT_FAST_GATES)' > overlay.mk\n"
+        "HOME=\"$2/home\" TMPDIR=\"$2/tmp\"; export HOME TMPDIR\n"
+        "fixture_make() { make --no-print-directory -o /dev/null -f Makefile -f overlay.mk ZCL_USE_CCACHE=0 MAKE_RESTARTS=1 LIB_MODULES=platform LIB_TREE_MODULES=platform ZCL_EPOCH_PROFILES= ZCL_DEPFILE_PROFILES= 'BUILD_SOURCE_RECORD=0000000000000000000000000000000000000000000000000000000000000000 1 0000000000000000000000000000000000000000000000000000000000000000' EQUIHASH_FACT_TOOL=/dev/null LINTC_TOOL=/dev/null FILE_SIZE_POLICY_BIN=/dev/null TOOLGEN_BIN=/dev/null TOR_PROVENANCE_BIN=/dev/null HOTSWAP_ACTION_PLAN=/dev/null CAPABILITY_INVENTORY_TOOL=/dev/null \"$@\"; }\n"
+        "fixture_make fixture-print-gates > expected 2>parse.log\n"
+        "if ! fixture_make lint-fast > run.log 2>&1; then cat run.log >&2; exit 1; fi\n"
+        "[ ! -e \"$HOME/tor\" ]; [ -e \"$HOME/binding\" ]; [ -s \"$HOME/args\" ]\n"
+        "tail -n +5 \"$HOME/args\" > actual; cmp expected actual\n"
+        "grep -qx check-vendor-provenance actual\n"
+        "fixture_make -n -p ZCL_LINT_SERIAL=1 lint-fast > serial.db 2>&1 || :\n"
+        "grep -E '^lint-fast: .*check-vendor-provenance' serial.db >/dev/null\n"
+        "grep -E '^check-vendor-provenance: .*tor-provenance-ready' serial.db >/dev/null\n"
+        "grep -E '^check-tor-provenance: .*tor-provenance-ready' serial.db >/dev/null\n"
+        "grep -E '^lint: .*check-tor-provenance' serial.db >/dev/null\n"
+        "fixture_make -n -p lint-land > land.db 2>&1 || :\n"
+        "grep -E '^lint-land: .*tor-provenance-ready' land.db >/dev/null\n";
+    char fixture[PATH_MAX] = {0};
+    test_make_tmpdir(fixture, sizeof(fixture), "lint_fast", "tor_graph");
+    int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    if (test_rm_rf_recursive(fixture) != 0) bad = 1;
+    return bad;
+}
+
 /* The real-worktree read-only lane: git grep / git ls-files / .git/hooks
  * probes. Mutates no tracked path, so it is pool-eligible. */
 int test_make_lint_gates_realroot(void)
@@ -1309,7 +1346,7 @@ int test_make_lint_gates_realroot(void)
     if (lint_resolve_real_root(real_root, sizeof(real_root)) != 0)
         return 1;
     printf("\n=== make_lint_gates real-worktree tests ===\n");
-    return lint_run_owned(LINT_OWNER_REALROOT);
+    return t_lint_fast_tor_graph() + lint_run_owned(LINT_OWNER_REALROOT);
 }
 
 /* One group per HEAVY check: heavy_01 is import-copy-prove, heavy_02 is

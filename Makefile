@@ -6916,7 +6916,7 @@ ifeq ($(ZCL_LINT_SERIAL),1)
 lint-fast: $(LINT_FAST_GATES)
 	@echo "lint-fast: OK (serial)"
 else
-lint-fast: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN_BIN) tor-provenance-ready $(TOR_PROVENANCE_BIN) \
+lint-fast: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN_BIN) $(TOR_PROVENANCE_BIN) \
 		$(HOTSWAP_ACTION_PLAN) $(CAPABILITY_INVENTORY_TOOL)
 	@ZCL_LINT_INVENTORY_TOOL="$(CAPABILITY_INVENTORY_TOOL)" tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_FAST_GATES)
 	@echo "lint-fast: OK"
