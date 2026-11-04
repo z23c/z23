@@ -378,7 +378,13 @@ static int lgws_case_k(const char *base, int *fails)
     /* The same case label twice: every set-based check passes (both scripts
      * exist), only the duplicate-label check can catch the dead row. */
     if (lgws_wire(d, "check-sentinel-wired", "./tools/lint/sentinel_a.sh")) return 2;
-    if (lgws_wire(d, "check-sentinel-wired", "./tools/lint/sentinel_b.sh")) return 2;
+    char driver[4096];
+    if (ovf(snprintf(driver, sizeof driver, "%s/tools/lint/lintc/gate_commands.def", d),
+            sizeof driver)) return 2;
+    FILE *f = fopen(driver, "a");
+    if (!f) return 2;
+    int wrote = fputs("  LINT_ROW(\"check-sentinel-wired\", \"./tools/lint/sentinel_b.sh\")\n", f);
+    if (fclose(f) != 0 || wrote < 0) return 2;
     return lgws_expect_reject("K: a duplicated case label is caught",
                               "appears twice", d, fails);
 }

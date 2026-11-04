@@ -1417,6 +1417,31 @@ int test_make_lint_gates_heavy_03(void)
 /* The exclusive lane: dispatch regressions, stale sandbox cleanup and root probe.
  * Keeps the group name `make_lint_gates` so `--only=make_lint_gates` (a
  * substring match) selects it plus every shard. */
+static int t_lint_table_rebuild(void)
+{
+    static const char script[] =
+        "set -eu; cd \"$2\"\n"
+        "mkdir -p tools/lint/lintc build/lintc-obj\n"
+        "for f in lintc.h gates.def precheck_base.h; do : > tools/lint/lintc/$f; done\n"
+        "printf '#define LINT_ROW(n,c) c,\\nconst char *rows[] = {\\n#include \"gate_commands.def\"\\n};\\n' > tools/lint/lintc/run_table.c\n"
+        "printf '#include <stdio.h>\\nextern const char *rows[]; int main(void) { return puts(rows[0]) < 0; }\\n' > main.c\n"
+        "printf 'LINT_ROW(\"check-fixture\", \"old\")\\n' > tools/lint/lintc/gate_commands.def\n"
+        "awk '/^build\\/lintc-obj\\/%.o:/{print; getline; print; getline; print; getline; print} /^build\\/lintc-obj\\/run_table.o:.*gate_commands.def/{print}' \"$1/Makefile\" > Fixture.mk\n"
+        "printf '\\nCC=cc\\nLINTC_CFLAGS=\\nLINTC_CLANG=\\n' >> Fixture.mk\n"
+        "make -s -f Fixture.mk build/lintc-obj/run_table.o >log 2>&1\n"
+        "cc main.c build/lintc-obj/run_table.o -o probe; test \"$(./probe)\" = old\n"
+        "touch -t 200001010000 tools/lint/lintc/*\n"
+        "touch -t 200101010000 build/lintc-obj/run_table.o\n"
+        "printf 'LINT_ROW(\"check-fixture\", \"new\")\\n' > tools/lint/lintc/gate_commands.def\n"
+        "make -s -f Fixture.mk build/lintc-obj/run_table.o >>log 2>&1\n"
+        "cc main.c build/lintc-obj/run_table.o -o probe; test \"$(./probe)\" = new\n";
+    char fixture[PATH_MAX] = {0};
+    test_make_tmpdir(fixture, sizeof(fixture), "lint_table", "rebuild");
+    int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    if (test_rm_rf_recursive(fixture) != 0) bad = 1;
+    return bad;
+}
+
 static int t_lint_inventory_dispatch(void)
 {
     static const char script[] =
@@ -1458,6 +1483,7 @@ int test_make_lint_gates(void)
 
     printf("\n=== make_lint_gates tests ===\n");
 
+    if (t_lint_table_rebuild() != 0) return 1;
     if (t_lint_inventory_dispatch() != 0) return 1;
     if (t_build_needs_overlap() != 0) return 1;
     if (t_lint_explicit_gates_run_once() != 0) return 1;
