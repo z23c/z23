@@ -243,6 +243,27 @@ from a mesh peer. Their authority is the publisher signature checked against
 the owner's publisher key file on every install, switch and rollback; the node daemon
 state is untouched.
 
+### Agent loop: edit, develop, call, roll back
+
+The harness case `plugin dev hot-swaps` (`tests/harness/src/test_lab_promote.c`)
+proves this sequence in one process, with no restart between steps:
+
+```text
+lab.promote file=SRC cases=[...] name=NAME dir=DIST   # build, gate on cases, sign
+cp DIST/NAME DIR/NAME                                 # the gated image
+plugin.dev dir=DIR interface=2                        # generation 1, current
+plugin.call name=NAME stdin=...                       # runs generation 1
+(edit SRC; lab.promote and cp again; plugin.dev)      # generation 2, current
+plugin.call name=NAME stdin=...                       # runs generation 2 at once
+plugin.rollback name=NAME                             # current is generation 1
+plugin.call name=NAME stdin=...                       # generation 1 output again
+plugin.switch name=NAME generation=<gen 2 id>         # forward again
+```
+
+The store then holds two signed generations. A source that fails its cases or
+does not compile makes `lab.promote` refuse and write nothing, so there is no
+image to develop and the previous generation keeps answering `plugin.call`.
+
 ## Publisher keys and first use
 
 The behavior below was measured on an installed release on 2026-10-18.
