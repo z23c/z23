@@ -77,9 +77,8 @@ const char *territory_trust_label(enum territory_trust t)
 }
 
 /* ── bounded whole-file read ─────────────────────────────────────────────
- * Returns a NUL-terminated buffer the caller frees, or NULL. A file larger
- * than `cap` is read up to `cap` and reported as truncated, because a gate
- * script that big is still worth scanning for the part we got. */
+ * Returns a NUL-terminated complete buffer the caller frees, or NULL for a
+ * read or close error, embedded NUL, or file larger than `cap`. */
 static char *tg_slurp(const char *root, const char *rel, size_t cap,
                       size_t *out_len)
 {
