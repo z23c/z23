@@ -1103,6 +1103,7 @@ DEVLOOP_INCLUDES = -Itools/dev
 # DEV_ONLY_SRCS split, because DEV_ONLY_SRCS is still linked (into the dev
 # binary) — filtering there would only move the duplicate-`main` link error.
 DEV_STANDALONE_SRCS = tools/dev/hotswap_verify_so.c \
+	tools/dev/dev_loop_timer.c \
 	tools/dev/make_depfile_scope_selftest.c \
 	tools/dev/native_tunnel_export.c \
 	tools/dev/mutation_campaign.c \
@@ -7106,11 +7107,18 @@ agent-index:
 # clangd/LSP (see root .clangd and the zclassic23-dev skill's LSP section).
 compdb: agent-index
 
-dev-loop-bench:
-	@bash tools/dev/dev-loop-bench.sh
+$(BIN_DIR)/dev-loop-timer: tools/dev/dev_loop_timer.c platform/modules/platform/src/clock.c platform/modules/platform/include/platform/clock.h
+	@mkdir -p $(dir $@)
+	$(ZCL_BUILD_CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -D_POSIX_C_SOURCE=200809L \
+	    -Iplatform/modules/platform/include -Iplatform/modules/util/include -Iplatform/modules/base/include \
+	    -o $@ tools/dev/dev_loop_timer.c platform/modules/platform/src/clock.c
 
-dev-loop-bench-selftest:
-	@bash tools/dev/dev-loop-bench.sh --self-test
+dev-loop-bench: $(BIN_DIR)/dev-loop-timer
+	@bash tools/dev/dev-loop-bench.sh --timer "$(abspath $(BIN_DIR)/dev-loop-timer)"
+
+dev-loop-bench-selftest: $(BIN_DIR)/dev-loop-timer
+	@$(BIN_DIR)/dev-loop-timer --self-test
+	@bash tools/dev/dev-loop-bench.sh --timer "$(abspath $(BIN_DIR)/dev-loop-timer)" --self-test
 
 # Fast deterministic network/generation proof. The focused group models
 # multiple peers plus an in-flight old-generation call; sim-fast remains the

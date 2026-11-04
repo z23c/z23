@@ -12,6 +12,15 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${ZCL_DEV_BENCH_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+TIMER="$SCRIPT_DIR/../../build/bin/dev-loop-timer"
+TIMER_SUPPLIED=false
+# Internal Make handoff; direct invocation keeps its default bootstrap path.
+if [ "${1:-}" = --timer ]; then
+    [ "$#" -ge 2 ] && [ -n "$2" ] || exit 2
+    TIMER="$2"
+    TIMER_SUPPLIED=true
+    shift 2
+fi
 # shellcheck source=tools/dev/dev_lib.sh
 . "$SCRIPT_DIR/dev_lib.sh"  # is_uint, is_true (fail() below satisfies is_true's contract)
 OUTPUT="${ZCL_DEV_BENCH_OUTPUT:-$ROOT/.cache/zcl-dev-loop/bench-latest.json}"
@@ -90,17 +99,6 @@ cleanup()
     [ -n "$TMP_DIR" ] && rm -rf "$TMP_DIR"
 }
 
-clock_ns()
-{
-    local now
-    now="$(date +%s%N 2>/dev/null || true)"
-    if [[ "$now" =~ ^[0-9]+$ ]]; then
-        printf '%s' "$now"
-    else
-        printf '%s000000000' "$(date +%s)"
-    fi
-}
-
 # Bind every sample to the exact v2 source-identity record used by the build:
 # current source bytes plus the host-local mutation token. Git history/object
 # ids are absent, and an edit/revert ABA still supersedes the campaign.
@@ -132,10 +130,19 @@ source_fingerprint_matches_campaign()
 capture_benchmark_contract_fingerprint()
 {
     local fingerprint
-    fingerprint="$(sha256sum "$SCRIPT_DIR/dev-loop-bench.sh" |
-        awk '{print $1}')" || return 2
+    fingerprint="$(sha256sum "$SCRIPT_DIR/dev-loop-bench.sh" "$TIMER" |
+        awk '{print $1}' | sha256sum | awk '{print $1}')" || return 2
     [[ "$fingerprint" =~ ^[0-9a-fA-F]{64}$ ]] || return 2
     printf '%s' "${fingerprint,,}"
+}
+
+prepare_timer()
+{
+    if [ "$TIMER_SUPPLIED" = false ]; then
+        make --no-print-directory -C "$SCRIPT_DIR/../.." BUILD_DIR=build \
+            build/bin/dev-loop-timer >/dev/null || return 1
+    fi
+    [ -x "$TIMER" ]
 }
 
 default_safe_watch_command()
@@ -187,7 +194,7 @@ percentile_nearest_rank()
 
 run_case()
 {
-    local name="$1" command="${CASE_COMMAND[$1]}" total run start end elapsed rc
+    local name="$1" command="${CASE_COMMAND[$1]}" total run elapsed rc
     local command_rc fingerprint_rc
     local samples="$TMP_DIR/$name.samples" case_log
     local successes=0 failures=0 last_rc=0
@@ -278,11 +285,12 @@ run_case()
             break
         fi
 
-        start="$(clock_ns)"
-        (cd "$ROOT" && /bin/sh -c "$command") >> "$case_log" 2>&1
+        (cd "$ROOT" && "$TIMER" "$TMP_DIR/elapsed" /bin/sh -c "$command") >> "$case_log" 2>&1
         command_rc=$?
-        end="$(clock_ns)"
-        elapsed=$(( (end - start + 999999) / 1000000 ))
+        elapsed="$(cat "$TMP_DIR/elapsed" 2>/dev/null)"
+        if [ "$command_rc" -eq 0 ] && ! is_uint "$elapsed"; then
+            command_rc=125
+        fi
 
         # An edit during the child invalidates its timing regardless of the
         # child exit code. Check immediately so even the final iteration can
@@ -481,6 +489,8 @@ emit_artifact()
 
 run_benchmark()
 {
+    prepare_timer ||
+        fail 'could not build native monotonic timer'
     local name status campaign_clean
     [ -d "$ROOT" ] || fail "repository root does not exist: $ROOT"
     is_uint "$ITERATIONS" && [ "$ITERATIONS" -gt 0 ] ||
@@ -527,6 +537,7 @@ run_benchmark()
 
 self_test()
 {
+    prepare_timer || return 1
     local sandbox first second third fourth fifth marker rc
     local failure_runs failure_marker fresh_status stale_status legacy_status
     local source_tool source_backup record_before record_after record_aba
@@ -535,6 +546,16 @@ self_test()
     source_tool="$SCRIPT_DIR/source-identity.sh"
     sandbox="$(mktemp -d "${TMPDIR:-/tmp}/zcl-dev-loop-selftest.XXXXXX")" ||
         return 1
+    local contract relocated
+    contract="$(capture_benchmark_contract_fingerprint)" || return 1
+    mkdir -p "$sandbox/relocated"
+    cp "$SCRIPT_DIR/dev-loop-bench.sh" "$TIMER" "$sandbox/relocated/" || return 1
+    relocated="$(SCRIPT_DIR="$sandbox/relocated" TIMER="$sandbox/relocated/dev-loop-timer"
+        capture_benchmark_contract_fingerprint)" || return 1
+    [ "$contract" = "$relocated" ] || {
+        echo '[dev-loop-bench-selftest] FAIL: relocated contract changed' >&2
+        rm -rf "$sandbox"; return 1
+    }
     ROOT="$sandbox/repo"
     mkdir -p "$ROOT/tools/dev"
     cp "$source_tool" "$ROOT/tools/dev/source-identity.sh" || {
@@ -757,6 +778,13 @@ self_test()
         rm -rf "$sandbox"
         return 1
     }
+    local absent_status
+    absent_status="$(TIMER="$sandbox/absent-timer" emit_status)"
+    grep -q '"reason":"benchmark_timer_unavailable"' <<< "$absent_status" &&
+        [ ! -e "$sandbox/absent-timer" ] || {
+        echo '[dev-loop-bench-selftest] FAIL: status built or trusted an absent timer' >&2
+        rm -rf "$sandbox"; return 1
+    }
     printf 'status drift\n' >> "$ROOT/source.txt"
     emit_status > "$stale_status"
     grep -q '"status":"stale"' "$stale_status" &&
@@ -878,6 +906,8 @@ emit_status()
            [[ ! "$stored_mutation" =~ ^[0-9a-fA-F]{64}$ ]] ||
            [[ ! "$stored_contract" =~ ^[0-9a-fA-F]{64}$ ]]; then
             reason=artifact_missing_source_binding
+        elif [ ! -x "$TIMER" ]; then
+            reason=benchmark_timer_unavailable
         elif [ "$current_contract" = unavailable ] ||
              [ "$current_source" = unavailable ] ||
              [ "$current_mutation" = unavailable ]; then
