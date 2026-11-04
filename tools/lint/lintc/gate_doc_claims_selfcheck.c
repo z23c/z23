@@ -229,13 +229,13 @@ static void dc_st_arm(const char *vr)
 static int dc_st_case_reuse(const char *vr, int *fail)
 {
     int got;
-    if (dc_st_table_write(vr, "zzz_verdict_reuse_gate", "exit 99"))
+    if (dc_st_table_write(vr, "check-zzz-verdict-reuse-gate", "exit 99"))
         return 2;
-    if (dc_st_rc_write(vr, "zzz_verdict_reuse_gate", "7\n"))
+    if (dc_st_rc_write(vr, "check-zzz-verdict-reuse-gate", "7\n"))
         return 2;
     dc_st_arm(vr);
-    dc_memo_forget("zzz_verdict_reuse_gate");
-    got = dc_gate_rc("zzz_verdict_reuse_gate");
+    dc_memo_forget("check-zzz-verdict-reuse-gate");
+    got = dc_gate_rc("check-zzz-verdict-reuse-gate");
     if (got == 7)
         return 0;
     fprintf(stderr, "FAIL: check_doc_claims verdict-reuse self-check broken"
@@ -251,15 +251,15 @@ static int dc_st_case_fallback(const char *vr, int *fail)
 {
     int got, old_t = dc_verdict_wait;
     char p[ST_PATH];
-    if (dc_st_table_write(vr, "zzz_verdict_fallback_gate", "exit 42"))
+    if (dc_st_table_write(vr, "check-zzz-verdict-fallback-gate", "exit 42"))
         return 2;
-    if (ovf(snprintf(p, sizeof p, "%s/zzz_verdict_fallback_gate.rc", vr),
+    if (ovf(snprintf(p, sizeof p, "%s/check-zzz-verdict-fallback-gate.rc", vr),
             sizeof p))
         return 2;
     unlink(p);
-    dc_memo_forget("zzz_verdict_fallback_gate");
+    dc_memo_forget("check-zzz-verdict-fallback-gate");
     dc_verdict_wait = 1;
-    got = dc_gate_rc("zzz_verdict_fallback_gate");
+    got = dc_gate_rc("check-zzz-verdict-fallback-gate");
     dc_verdict_wait = old_t;
     if (got == 42)
         return 0;
@@ -277,23 +277,23 @@ static int dc_st_case_budget(const char *vr, int *fail)
 {
     int old_t = dc_gate_timeout, old_c = dc_gate_cpu, old_v = dc_verdict_wait;
     int spin, slp;
-    if (dc_st_table_write(vr, "zzz_budget_spin_gate",
+    if (dc_st_table_write(vr, "check-zzz-budget-spin-gate",
                           "sh -c 'while :; do :; done'"))
         return 2;
-    dc_memo_forget("zzz_budget_spin_gate");
+    dc_memo_forget("check-zzz-budget-spin-gate");
     dc_gate_timeout = 120;
     dc_gate_cpu = 1;
-    spin = dc_gate_rc("zzz_budget_spin_gate");
+    spin = dc_gate_rc("check-zzz-budget-spin-gate");
     dc_gate_timeout = 1;
     dc_gate_cpu = 100;
-    if (dc_st_table_write(vr, "zzz_budget_sleep_gate", "sleep 30")) {
+    if (dc_st_table_write(vr, "check-zzz-budget-sleep-gate", "sleep 30")) {
         dc_gate_timeout = old_t;
         dc_gate_cpu = old_c;
         dc_verdict_wait = old_v;
         return 2;
     }
-    dc_memo_forget("zzz_budget_sleep_gate");
-    slp = dc_gate_rc("zzz_budget_sleep_gate");
+    dc_memo_forget("check-zzz-budget-sleep-gate");
+    slp = dc_gate_rc("check-zzz-budget-sleep-gate");
     dc_gate_timeout = old_t;
     dc_gate_cpu = old_c;
     dc_verdict_wait = old_v;
@@ -330,14 +330,14 @@ static int dc_st_case_absent(const char *vr, int *fail)
     char p[ST_PATH];
     if (ovf(snprintf(p, sizeof p, "%s/requested.list", vr), sizeof p))
         return 2;
-    if (csr_write(p, "zzz_verdict_other_gate\n"))
+    if (csr_write(p, "check-zzz-verdict-other-gate\n"))
         return 2;
-    if (dc_st_table_write(vr, "zzz_verdict_absent_gate", "exit 43"))
+    if (dc_st_table_write(vr, "check-zzz-verdict-absent-gate", "exit 43"))
         return 2;
-    dc_memo_forget("zzz_verdict_absent_gate");
+    dc_memo_forget("check-zzz-verdict-absent-gate");
     dc_verdict_wait = 30;
     int64_t t0 = clock_now_monotonic_ns();
-    got = dc_gate_rc("zzz_verdict_absent_gate");
+    got = dc_gate_rc("check-zzz-verdict-absent-gate");
     long el = (long)((clock_now_monotonic_ns() - t0) / 1000000000LL);
     dc_verdict_wait = old_t;
     if (got == 43 && el <= 5)
@@ -353,12 +353,12 @@ static int dc_st_case_absent(const char *vr, int *fail)
 static int dc_st_case_listed(const char *vr, int *fail)
 {
     int got;
-    if (dc_st_table_write(vr, "zzz_verdict_other_gate", "exit 99"))
+    if (dc_st_table_write(vr, "check-zzz-verdict-other-gate", "exit 99"))
         return 2;
-    if (dc_st_rc_write(vr, "zzz_verdict_other_gate", "7\n"))
+    if (dc_st_rc_write(vr, "check-zzz-verdict-other-gate", "7\n"))
         return 2;
-    dc_memo_forget("zzz_verdict_other_gate");
-    got = dc_gate_rc("zzz_verdict_other_gate");
+    dc_memo_forget("check-zzz-verdict-other-gate");
+    got = dc_gate_rc("check-zzz-verdict-other-gate");
     char p[ST_PATH];
     if (ovf(snprintf(p, sizeof p, "%s/requested.list", vr), sizeof p))
         return 2;
@@ -563,10 +563,10 @@ int dc_selfcheck(void)
     dc_memo_forget("check-zzz-doc-claims-unlisted");
     dc_memo_forget("check-zzz-doc-claims-memo");
     dc_memo_forget("check-zzz-doc-claims-split");
-    dc_memo_forget("zzz_verdict_reuse_gate");
-    dc_memo_forget("zzz_verdict_fallback_gate");
-    dc_memo_forget("zzz_verdict_absent_gate");
-    dc_memo_forget("zzz_verdict_other_gate");
+    dc_memo_forget("check-zzz-verdict-reuse-gate");
+    dc_memo_forget("check-zzz-verdict-fallback-gate");
+    dc_memo_forget("check-zzz-verdict-absent-gate");
+    dc_memo_forget("check-zzz-verdict-other-gate");
     dc_table_override = 0;
     if (g_st_had_vdir)
         setenv("ZCL_LINT_GATES_DIR_X", g_st_old_vdir, 1);
