@@ -596,6 +596,16 @@ static bool dva_test_verdict_proven(struct zcl_command_reply *reply,
                    "TEST_GROUP_FAILED", "verify", msg, verdict_line, next);
         return false;
     }
+    if (run->exit_code != 0) {
+        char msg[192];
+        (void)snprintf(msg, sizeof(msg),
+                       "runner returned status %d; a suite summary does not "
+                       "establish a successful process", run->exit_code);
+        dva_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+                   "RUNNER_EXIT_NONZERO", "verify", msg, verdict_line,
+                   run->command_line);
+        return false;
+    }
     return true;
 }
 

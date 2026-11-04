@@ -35,6 +35,59 @@
 #include <string.h>
 #include <unistd.h>
 
+/* Exercise the production admission predicate without spawning. */
+#define zcl_native_handle_dev_agent_ready tds_ready
+#define zcl_native_handle_dev_agent_test tds_test
+#define zcl_devagent_run_make tds_run_make
+#define zcl_devagent_run_group tds_run_group
+#include "../../../tools/command/native_devagent_command.c"
+#undef zcl_devagent_run_group
+#undef zcl_devagent_run_make
+#undef zcl_native_handle_dev_agent_test
+#undef zcl_native_handle_dev_agent_ready
+
+static int tds_runner_status(int code, bool present, long long ran, long long failed,
+                              const char *error)
+{
+    int failures = 0;
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.agent_test_run.v1");
+    TEST("agent test: footer cannot override runner failure") {
+        struct dva_run run = {.exit_code = code};
+        struct zcl_devagent_verdict v = {
+            .present = present, .mode = "cold", .groups_total = 1,
+            .groups_ran = ran, .groups_failed = failed, .groups_gated = ran == 0,
+        };
+        char line[256];
+        bool proven = dva_test_verdict_proven(&reply, &run, &v, line, sizeof(line));
+        if (proven != (error == NULL))
+            printf("  runner status=%d accepted=%d\n", code, proven);
+        ASSERT_EQ(proven, error == NULL);
+        if (error) {
+            ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_FAILED);
+            ASSERT_STR_EQ(reply.error.code, error);
+        }
+        PASS();
+    }
+_test_next:;
+    zcl_command_reply_free(&reply);
+    return failures;
+}
+
+static int tds_runner_status_tests(void)
+{
+    int failures = 0;
+    failures += tds_runner_status(0, true, 1, 0, NULL);
+    failures += tds_runner_status(23, true, 1, 0, "RUNNER_EXIT_NONZERO");
+    failures += tds_runner_status(143, true, 1, 0, "RUNNER_EXIT_NONZERO");
+    failures += tds_runner_status(137, true, 1, 0, "RUNNER_EXIT_NONZERO");
+    failures += tds_runner_status(-1, true, 1, 0, "RUNNER_EXIT_NONZERO");
+    failures += tds_runner_status(23, true, 1, 1, "TEST_GROUP_FAILED");
+    failures += tds_runner_status(23, false, 1, 0, "NO_SUITE_VERDICT");
+    failures += tds_runner_status(23, true, 0, 0, "NO_GROUP_RAN");
+    return failures;
+}
+
 /* Write an empty file at <dir>/<rel>, creating parent directories. */
 static bool tds_touch(const char *dir, const char *rel)
 {
@@ -61,7 +114,7 @@ static bool tds_touch(const char *dir, const char *rel)
 int test_devagent_surface(void);
 int test_devagent_surface(void)
 {
-    int failures = 0;
+    int failures = tds_runner_status_tests();
 
     /* ─────────────────────── SUITE VERDICT parsing ─────────────────────── */
 
