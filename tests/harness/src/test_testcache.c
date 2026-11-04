@@ -2770,6 +2770,31 @@ static int tc_load_flaky_excerpt(void)
                            "print_load_flaky_first_excerpt(name, first);") &&
              file_contains("tests/harness/src/test_parallel.c",
                            "preserve_retry_first(g_groups[i].name, first_log, preserved_log);"));
+    /* The flight-recorder block after a FAIL line is kept whole, though none
+     * of its lines is a failure mark and none is in the tail window. */
+    FILE *ev = fopen(log, "w");
+    if (ev) {
+        for (int n = 1; n <= 60; n++) {
+            if (n == 10) fputs("FAIL at x.c:1 (a == b)\n", ev);
+            else if (n == 11) fputs("--- evidence x.c:1 ---\n", ev);
+            else if (n == 12) fputs("child exit=139 signal=11\n", ev);
+            else if (n == 13) fputs("reply body: {\"why\":\"deadline\"}\n", ev);
+            else if (n == 14) fputs("--- end evidence ---\n", ev);
+            else fprintf(ev, "ok line %d\n", n);
+        }
+        fclose(ev);
+    }
+    out = fopen(cap, "w");
+    size_t kept = out ? testcache_print_log_excerpt(out, log, "  first| ", 5,
+                                                    3) : 0;
+    if (out) fclose(out);
+    TC_CHECK("an evidence block after a FAIL line is kept whole",
+             kept > 0 &&
+             file_contains(cap, "  first| L11: --- evidence x.c:1 ---\n") &&
+             file_contains(cap, "  first| L12: child exit=139 signal=11\n") &&
+             file_contains(cap, "deadline") &&
+             file_contains(cap, "  first| L14: --- end evidence ---\n") &&
+             !file_contains(cap, "L15:") && !file_contains(cap, "L30:"));
     (void)unlink(log);
     (void)unlink(cap);
     return failures;

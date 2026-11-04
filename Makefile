@@ -16793,6 +16793,8 @@ pr-check:
 # Never pick groups from the presentation lists of `code guide` or
 # `code tests`: they are capped and miss groups the proof runs.
 # Logs: build/scratch/agent-verify.<step>.log; verdict lines: agent-verify.rc.
+# A failing step also copies the "--- evidence ... --- end evidence ---"
+# blocks (tests/harness test_note flight recorder, at most 60 lines) into the rc.
 # Pass = last rc line is `agent-verify: OK`; no such last line = interrupted.
 .PHONY: agent-verify
 agent-verify:
@@ -16836,6 +16838,7 @@ agent-verify:
 	    { echo "agent-verify: $$step rc=$$rc"; \
 	      if [ "$$step" = t-fast-exact ]; then grep 'SUITE VERDICT' "$$log" | tail -1; fi; \
 	      if [ $$rc -ne 0 ]; then grep -E '^FAIL|FAIL at|error:|not a valid|unknown exact group|\*\*\*' "$$log" | head -5 | cut -c1-200; fi; \
+	      if [ $$rc -ne 0 ]; then sed -n '/^--- evidence /,/^--- end evidence ---/p' "$$log" | head -60 | cut -c1-200; fi; \
 	    } | tee -a build/scratch/agent-verify.rc; \
 	    if [ $$rc -ne 0 ]; then failed="$$failed $$step"; fi; \
 	 }; \
