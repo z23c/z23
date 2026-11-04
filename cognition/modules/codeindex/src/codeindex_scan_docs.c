@@ -345,9 +345,11 @@ static bool doc_store_one(sqlite3 *db, const char *root, const char *relpath)
     free(buf);
     return strlen(relpath) < sizeof(row.path) && doc_insert(db, &row, sha);
 }
+#endif
 
 bool ci_docs_refresh(struct ci_store *store, const char *root)
 {
+#if !defined(_WIN32)
     if (!store || !root) LOG_FAIL("codeindex", "null arg to docs_refresh");
     sqlite3 *db = ci_store_db(store);
     struct doc_paths paths = {0};
@@ -359,10 +361,18 @@ bool ci_docs_refresh(struct ci_store *store, const char *root)
     free(paths.v);
     if (!ok) LOG_FAIL("codeindex", "prose scan failed under %s", root);
     return true;
+#else
+    /* Windows generations carry an empty docs table until a native walk exists. */
+    (void)root;
+    sqlite3 *db = store ? ci_store_db(store) : NULL;
+    return db && sqlite3_exec(db, "DELETE FROM docs", NULL, NULL, NULL) ==
+                     SQLITE_OK;
+#endif
 }
 
 bool ci_docs_hash_file(const char *root, const char *relpath, uint8_t out[32])
 {
+#if !defined(_WIN32)
     char *buf = NULL;
     size_t len = 0;
     if (!root || !relpath || !out || !doc_read_file(root, relpath, &buf, &len))
@@ -370,23 +380,10 @@ bool ci_docs_hash_file(const char *root, const char *relpath, uint8_t out[32])
     ci_scan_hash_contents(buf, len, out);
     free(buf);
     return true;
-}
 #else
-/* The prose walk is POSIX-only for now; a Windows generation carries an empty
- * docs table, which its readers report as "no prose indexed". */
-bool ci_docs_refresh(struct ci_store *store, const char *root)
-{
-    (void)root;
-    sqlite3 *db = store ? ci_store_db(store) : NULL;
-    return db && sqlite3_exec(db, "DELETE FROM docs", NULL, NULL, NULL) ==
-                     SQLITE_OK;
-}
-
-bool ci_docs_hash_file(const char *root, const char *relpath, uint8_t out[32])
-{
     (void)root;
     (void)relpath;
     (void)out;
     return false;
-}
 #endif
+}
