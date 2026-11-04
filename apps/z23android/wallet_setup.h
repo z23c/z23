@@ -250,6 +250,10 @@ void wsu_write_job(struct wsu *w);
 /* A failed write to a new attempt with the same words, never a second phrase; the caller then runs wsu_write_job. False for a
  * failure wsu_write_retryable rejects. */
 bool wsu_retry_write(struct wsu *w);
+bool wsu_launch_retry_write(struct wsu *w, bool (*launch)(void *), void *ctx);
+bool wsu_launch_confirm(struct wsu *w, bool (*launch)(void *), void *ctx);
+bool wsu_launch_marker(struct wsu *w, bool (*launch)(void *), void *ctx);
+bool wsu_parse_height(const char *text, int64_t *height);
 /* A failed write the owner leaves: the words are closed and wiped, and the setup goes to the check of what the phone holds (the
  * interrupted-setup path), where Start over and Back work. False unless the write has failed. */
 bool wsu_give_up_write(struct wsu *w);

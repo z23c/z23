@@ -47,8 +47,9 @@ static struct {
     struct wsu model;
     bool model_ready;
     char blob[512];
-    bool dropped;
-    atomic_bool progress_busy, resume_busy, clock_busy;
+    bool dropped, launch_failed, height_bad;
+    char height_text[24];
+    atomic_bool progress_busy, resume_busy, clock_busy, job_busy;
     pthread_mutex_t progress_lock;
     int64_t scanned, tip;
     bool progress_known;
@@ -81,6 +82,7 @@ static void *worker_main(void *raw)
     bool attached = ui.vm && (*ui.vm)->AttachCurrentThread(ui.vm, &env, NULL) == JNI_OK;
     worker_env = attached ? env : NULL;
     run_job(job);
+    if (job->kind != JOB_CLOCK && job->kind != JOB_PROGRESS && job->kind != JOB_RESUME) atomic_store(&ui.job_busy, false);
     memory_cleanse(job, sizeof(*job));
     free(job);
     worker_env = NULL;
@@ -90,12 +92,14 @@ static void *worker_main(void *raw)
 static bool spawn_job(enum job_kind kind, const char *text, int64_t height)
 {
     pthread_t thread;
+    bool primary = kind != JOB_CLOCK && kind != JOB_PROGRESS && kind != JOB_RESUME;
+    if (primary && atomic_exchange(&ui.job_busy, true)) return false;
     struct job *job = calloc(1, sizeof(*job));
-    if (!job) return false;
+    if (!job) { if (primary) atomic_store(&ui.job_busy, false); return false; }
     job->kind = kind;
     job->height = height;
     if (text) snprintf(job->text, sizeof(job->text), "%s", text);
-    if (pthread_create(&thread, NULL, worker_main, job) != 0) { memory_cleanse(job, sizeof(*job)); free(job); return false; }
+    if (pthread_create(&thread, NULL, worker_main, job) != 0) { memory_cleanse(job, sizeof(*job)); free(job); if (primary) atomic_store(&ui.job_busy, false); return false; }
     (void)pthread_detach(thread);
     return true;
 }
@@ -389,7 +393,9 @@ static void draw_form(JNIEnv *env, const struct wsu_view *v)
     (void)input_view(env, "Recovery words", ZAPP_FIELD_INPUT_WORDS | ZAPP_FIELD_FLAG_MULTI_LINE, &ui.words_input);
     if (ui.words_input && v->form[0]) (void)zj_text(env, ui.words_input, v->form);
     (void)text_view(env, "If you know the block height where this wallet began, type it: the wallet then reads the chain from there. Without it the wallet reads the whole chain, which takes longer.", 14.0f, SOFT);
-    (void)input_view(env, "Block height (optional)", ZAPP_FIELD_NUMBER, &ui.height_input);
+    (void)input_view(env, "Block height", ZAPP_FIELD_NUMBER, &ui.height_input);
+    if (ui.height_text[0] && ui.height_input) (void)zj_text(env, ui.height_input, ui.height_text);
+    if (ui.height_bad) (void)text_view(env, "Enter a valid positive block height, or choose I do not know the height.", 15.0f, AMBER);
     if (v->failure == WSU_BAD_WORD) {
         char line[120];
         wsu_bad_word_text(v->bad_word, line, sizeof(line));
@@ -518,6 +524,7 @@ void zapp_setup_ui_render(JNIEnv *env)
         return;
     }
     release_widgets(env);
+    if (ui.launch_failed) (void)text_view(env, "Could not start that action. Please try again.", 15.0f, AMBER);
     if (!v.protected) {
         (void)text_view(env, "This phone would not protect the screen from capture, so wallet setup cannot show anything here.", 15.0f, AMBER);
     } else if (ui.dropped) {
@@ -622,35 +629,29 @@ static bool read_input(JNIEnv *env, jobject input, char *out, size_t cap)
     (*env)->PopLocalFrame(env, NULL);
     return ok;
 }
-static int64_t typed_height(JNIEnv *env)
-{
-    char text[24];
-    int64_t height = 0;
-    if (!read_input(env, ui.height_input, text, sizeof(text)) || !text[0]) return 0;
-    for (const char *p = text; *p; ++p) {
-        if (*p < '0' || *p > '9' || height > 100000000) return 0;
-        height = height * 10 + (*p - '0');
-    }
-    return height;
-}
 static void start_restore(JNIEnv *env, bool with_height)
 {
     char typed[TYPED_MAX];
-    int64_t height = with_height ? typed_height(env) : 0;
+    int64_t height = 0;
     if (!read_input(env, ui.words_input, typed, sizeof(typed))) typed[0] = 0;
     wsu_set_form(&ui.model, typed);
-    (void)spawn_job(JOB_RESTORE, typed, height);
+    bool valid = !with_height || (read_input(env, ui.height_input, ui.height_text, sizeof(ui.height_text)) &&
+                                  wsu_parse_height(ui.height_text, &height));
+    ui.height_bad = !valid;
+    if (valid) ui.launch_failed = !spawn_job(JOB_RESTORE, typed, height);
     memory_cleanse(typed, sizeof(typed));
 }
+static bool launch_write(void *ctx) { (void)ctx; return spawn_job(JOB_WRITE, NULL, 0); }
+static bool launch_finish(void *ctx) { (void)ctx; return spawn_job(JOB_FINISH, NULL, 0); }
 
 /* The buttons of the interrupted-setup screens. */
 static void press_interrupted(enum button id)
 {
     switch (id) {
     case B_RECHECK: (void)wsu_recheck(&ui.model); break;
-    case B_NEW_WALLET: (void)spawn_job(JOB_ASIDE, NULL, 0); break;
+    case B_NEW_WALLET: ui.launch_failed = !spawn_job(JOB_ASIDE, NULL, 0); break;
     case B_START_OVER_ASK: (void)wsu_ask_start_over(&ui.model); break;
-    case B_START_OVER_GO: (void)spawn_job(JOB_START_OVER, NULL, 0); break;
+    case B_START_OVER_GO: ui.launch_failed = !spawn_job(JOB_START_OVER, NULL, 0); break;
     case B_START_OVER_CANCEL: wsu_cancel_start_over(&ui.model); break;
     default: break;
     }
@@ -663,9 +664,9 @@ static void press_check(enum button id)
     if (id >= B_PICK) { (void)wsu_pick(&ui.model, (size_t)(id - B_PICK) / ZAPP_WORD_CHOICES, (size_t)(id - B_PICK) % ZAPP_WORD_CHOICES); return; }
     switch (id) {
     case B_SEEN: wsu_words_seen(&ui.model); break;
-    case B_RETRY_WRITE: if (wsu_retry_write(&ui.model)) (void)spawn_job(JOB_WRITE, NULL, 0); break;
+    case B_RETRY_WRITE: ui.launch_failed = !wsu_launch_retry_write(&ui.model, launch_write, NULL); break;
     case B_GIVE_UP: (void)wsu_give_up_write(&ui.model); break;
-    case B_CONFIRM: if (wsu_confirm_picked(&ui.model)) (void)spawn_job(JOB_FINISH, NULL, 0); break;
+    case B_CONFIRM: (void)wsu_launch_confirm(&ui.model, launch_finish, NULL); break;
     case B_AGAIN: wsu_show_again(&ui.model); break;
     default: press_interrupted(id); break;
     }
@@ -673,12 +674,12 @@ static void press_check(enum button id)
 static void press_model(JNIEnv *env, enum button id)
 {
     switch (id) {
-    case B_CREATE: (void)spawn_job(JOB_CREATE, NULL, 0); break;
+    case B_CREATE: ui.launch_failed = !spawn_job(JOB_CREATE, NULL, 0); break;
     case B_RESTORE_FORM: wsu_open_restore(&ui.model); break;
     case B_RESTORE: start_restore(env, true); break;
     case B_RESTORE_UNKNOWN: start_restore(env, false); break;
     case B_BACK: wsu_back(&ui.model); break;
-    case B_SAVE_AGAIN: if (wsu_retry_marker(&ui.model)) (void)spawn_job(JOB_FINISH, NULL, 0); break;
+    case B_SAVE_AGAIN: (void)wsu_launch_marker(&ui.model, launch_finish, NULL); break;
     case B_CONTINUE: break;
     default: press_check(id); break;
     }
@@ -688,6 +689,11 @@ enum zapp_setup_outcome zapp_setup_ui_press(JNIEnv *env, size_t button)
     enum zapp_setup_outcome outcome = ZAPP_SETUP_STAY;
     if (button >= ui.button_count || !ui.model_ready) return outcome;
     ui.dropped = false;
+    ui.launch_failed = false;
+    enum button id = ui.button_id[button];
+    bool starts = id == B_CREATE || id == B_RESTORE || id == B_RESTORE_UNKNOWN || id == B_NEW_WALLET ||
+                  id == B_START_OVER_GO || id == B_RETRY_WRITE || id == B_CONFIRM || id == B_SAVE_AGAIN;
+    if (starts && atomic_load(&ui.job_busy)) return outcome;
     if (ui.button_id[button] == B_CONTINUE) outcome = ZAPP_SETUP_LEAVE;
     else { press_model(env, ui.button_id[button]); start_clock(); }
     ui.version++;

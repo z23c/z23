@@ -554,7 +554,7 @@ bool wsu_retry_write(struct wsu *w)
 {
     pthread_mutex_lock(&w->lock);
     bool ok = w->write == WSU_WRITE_FAILED && (w->step == WSU_WORDS || w->step == WSU_CONFIRM) && wsu_write_retryable(w->write_failure);
-    if (ok) { w->write = WSU_WRITE_PENDING; w->write_failure = WSU_NO_FAILURE; }
+    if (ok) w->write = WSU_WRITE_PENDING;
     pthread_mutex_unlock(&w->lock);
     return ok;
 }
@@ -651,6 +651,43 @@ void wsu_finish_job(struct wsu *w)
     bool recorded = zapp_setup_mark_done(w->files);
     if (!recorded) set_step(w, WSU_FAILED, WSU_NOT_RECORDED);
     else set_step(w, restored ? WSU_READING : WSU_DONE, WSU_NO_FAILURE);
+}
+
+bool wsu_launch_retry_write(struct wsu *w, bool (*launch)(void *), void *ctx)
+{
+    if (!wsu_retry_write(w)) return false;
+    if (launch(ctx)) return true;
+    pthread_mutex_lock(&w->lock);
+    if (w->write == WSU_WRITE_PENDING) w->write = WSU_WRITE_FAILED;
+    pthread_mutex_unlock(&w->lock);
+    return false;
+}
+static bool finish_launch(struct wsu *w, bool (*launch)(void *), void *ctx)
+{
+    if (launch(ctx)) return true;
+    pthread_mutex_lock(&w->lock);
+    if (w->confirmed && w->step == WSU_WORKING) { w->step = WSU_FAILED; w->failure = WSU_NOT_RECORDED; }
+    pthread_mutex_unlock(&w->lock);
+    return false;
+}
+bool wsu_launch_confirm(struct wsu *w, bool (*launch)(void *), void *ctx)
+{
+    return wsu_confirm_picked(w) && finish_launch(w, launch, ctx);
+}
+bool wsu_launch_marker(struct wsu *w, bool (*launch)(void *), void *ctx)
+{
+    return wsu_retry_marker(w) && finish_launch(w, launch, ctx);
+}
+bool wsu_parse_height(const char *text, int64_t *height)
+{
+    int64_t value = 0;
+    if (!text || !*text || !height) return false;
+    for (const char *p = text; *p; ++p) {
+        if (*p < '0' || *p > '9' || value > (INT64_MAX - (*p - '0')) / 10) return false;
+        value = value * 10 + (*p - '0');
+    }
+    if (!value) return false;
+    *height = value; return true;
 }
 
 /* ---- restore ---- */

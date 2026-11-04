@@ -2357,6 +2357,8 @@ static void pick_random_failure_tests(void)
     wsu_destroy(&w);
 }
 
+static bool reject_launch(void *ctx);
+
 /* The check can be answered while the wallet is still being written, but Confirm completes only once the write is done, and a
  * confirm that waits counts no mismatch. */
 static void confirm_waits_for_write_tests(void)
@@ -2379,11 +2381,47 @@ static void confirm_waits_for_write_tests(void)
     assert(w.write == WSU_WRITE_PENDING && !wsu_confirm_picked(&w) && w.step == WSU_CONFIRM && w.mismatches == 0 && w.held.count == 24);
     const char *right[3] = {all.word[v.asked[0]], all.word[v.asked[1]], all.word[v.asked[2]]};
     assert(!wsu_confirm(&w, right, 3) && w.step == WSU_CONFIRM && w.mismatches == 0);
+    unsigned launches = 0;
     wsu_write_job(&w);
-    assert(w.write == WSU_WRITE_DONE && wsu_confirm_picked(&w) && w.step == WSU_WORKING && w.held.count == 0);
+    assert(w.write == WSU_WRITE_DONE && !wsu_launch_confirm(&w, reject_launch, &launches));
+    assert(launches == 1 && w.step == WSU_FAILED && w.failure == WSU_NOT_RECORDED && w.confirmed && w.held.count == 0);
+    assert(wsu_retry_marker(&w));
     wsu_finish_job(&w);
     assert(w.step == WSU_DONE && zapp_setup_state(dir) == ZAPP_SETUP_READY);
     wsu_destroy(&w);
+}
+
+static bool reject_launch(void *ctx) { ++*(unsigned *)ctx; return false; }
+static bool accept_launch(void *ctx) { ++*(unsigned *)ctx; return true; }
+static void launch_failure_tests(void)
+{
+    struct wsu w = {0};
+    unsigned calls = 0;
+    assert(pthread_mutex_init(&w.lock, NULL) == 0);
+    w.step = WSU_WORDS; w.write = WSU_WRITE_FAILED; w.write_failure = WSU_UNKNOWN;
+    w.held.count = 24; w.phrase.count = 24;
+    assert(!wsu_launch_retry_write(&w, reject_launch, &calls));
+    assert(calls == 1 && w.write == WSU_WRITE_FAILED && w.write_failure == WSU_UNKNOWN);
+    assert(w.held.count == 24 && w.phrase.count == 24);
+    assert(wsu_launch_retry_write(&w, accept_launch, &calls));
+    assert(calls == 2 && w.write == WSU_WRITE_PENDING);
+    assert(!wsu_launch_retry_write(&w, accept_launch, &calls) && calls == 2);
+    w.step = WSU_FAILED; w.failure = WSU_NOT_RECORDED; w.confirmed = true; w.held.count = 0;
+    assert(!wsu_launch_marker(&w, reject_launch, &calls));
+    assert(calls == 3 && w.step == WSU_FAILED && w.failure == WSU_NOT_RECORDED && w.confirmed && !w.held.count);
+    assert(wsu_launch_marker(&w, accept_launch, &calls) && calls == 4);
+    assert(!wsu_launch_marker(&w, accept_launch, &calls) && calls == 4);
+    assert(pthread_mutex_destroy(&w.lock) == 0);
+}
+static void height_parse_tests(void)
+{
+    int64_t height = 7;
+    assert(!wsu_parse_height("", &height) && height == 7);
+    assert(!wsu_parse_height("0", &height) && height == 7);
+    assert(!wsu_parse_height("12x", &height) && height == 7);
+    assert(!wsu_parse_height("9223372036854775808", &height) && height == 7);
+    assert(wsu_parse_height("125", &height) && height == 125);
+    assert(wsu_parse_height("9223372036854775807", &height) && height == INT64_MAX);
 }
 
 /* ---- the live line of every wait ---- */
@@ -2647,6 +2685,8 @@ static void interrupted_note_tests(void)
 
 int main(int argc, char **argv)
 {
+    launch_failure_tests();
+    height_parse_tests();
     assert(argc == 2);
     dir = argv[1];
     words_tests();
