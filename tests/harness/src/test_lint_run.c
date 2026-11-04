@@ -347,6 +347,22 @@ static int test_lrun_table(void)
     return failures;
 }
 
+static int lrun_seal_in_dir(const char *root, const char *bin)
+{
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        if (chdir(root) != 0) _exit(99);
+        (void)alarm(30);
+        _exit(lr_core_seal(bin));
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) return -1;
+    }
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
 /* check-core-seal's in-process pipe: a stub core_seal that, like the real
  * one, reads stdin to EOF must see EOF once git ls-files exits. A pipe end
  * leaked into the reader would hang it; alarm turns that hang into a kill. */
@@ -378,6 +394,18 @@ static int test_lrun_seal(void)
         ASSERT_EQ(WEXITSTATUS(st), 7);    /* core_seal's rc is the gate's rc */
         ASSERT(lrun_read(in, got, sizeof got));
         ASSERT(strstr(got, "core/MANIFEST.sha3") != NULL);
+        char token[PATH_MAX + 32], target[PATH_MAX + 32];
+        (void)snprintf(token, sizeof token, "%s/.core-unseal-token", fx.root);
+        (void)snprintf(target, sizeof target, "%s/token-target", fx.root);
+        ASSERT_EQ(mkdir(token, 0700), 0);
+        ASSERT_EQ(lrun_seal_in_dir(fx.root, bin), 7);
+        ASSERT_EQ(rmdir(token), 0);
+        ASSERT_EQ(mkfifo(token, 0600), 0);
+        ASSERT_EQ(lrun_seal_in_dir(fx.root, bin), 7);
+        ASSERT_EQ(unlink(token), 0);
+        ASSERT(lrun_write(target, "owner token\n"));
+        ASSERT_EQ(symlink(target, token), 0);
+        ASSERT_EQ(lrun_seal_in_dir(fx.root, bin), 0);
         test_rm_rf_recursive(fx.root);
     } TEST_END
     return failures;
