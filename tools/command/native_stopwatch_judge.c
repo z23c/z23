@@ -399,10 +399,10 @@ static bool sw_env(const char *name, const char *text, int64_t *value, char *err
 }
 
 bool zcl_stopwatch_judge_defaults(struct zcl_stopwatch_judge_opts *opts,
+                                  const char *ledger,
                                   char *slo_path, size_t cap, char *err,
                                   size_t err_cap)
 {
-    const char *slo = getenv("ZCL_STOPWATCH_SLO_LEDGER");
     const char *home = getenv("HOME");
     memset(opts, 0, sizeof(*opts));
     opts->max_age_secs = ZCL_STOPWATCH_MAX_AGE_SECS;
@@ -414,12 +414,17 @@ bool zcl_stopwatch_judge_defaults(struct zcl_stopwatch_judge_opts *opts,
         !sw_env("ZCL_STOPWATCH_ORACLE_MAX_AGE_SECS", getenv("ZCL_STOPWATCH_ORACLE_MAX_AGE_SECS"), &opts->oracle_max_age_secs, err, err_cap) ||
         !sw_env("ZCL_STOPWATCH_JUDGE_NOW", getenv("ZCL_STOPWATCH_JUDGE_NOW"), &opts->now_unix, err, err_cap))
         return false;
-    if (slo && slo[0])
-        (void)snprintf(slo_path, cap, "%s", slo);
-    else
-        (void)snprintf(slo_path, cap,
-                       "%s/.local/state/zclassic23-slo/uptime-ledger.jsonl",
-                       home && home[0] ? home : "/root");
+    if (!ledger) {
+        ledger = getenv("ZCL_STOPWATCH_SLO_LEDGER");
+        if (ledger && !ledger[0]) ledger = NULL;
+    }
+    int length = ledger ? snprintf(slo_path, cap, "%s", ledger)
+                        : snprintf(slo_path, cap, "%s/.local/state/zclassic23-slo/uptime-ledger.jsonl",
+                                   home && home[0] ? home : "/root");
+    if (length < 0 || (size_t)length >= cap) {
+        (void)snprintf(err, err_cap, "stopwatch oracle ledger path exceeds capacity (%zu bytes)", cap);
+        return false;
+    }
     opts->slo_ledger = slo_path;
     return true;
 }

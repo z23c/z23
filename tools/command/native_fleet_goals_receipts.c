@@ -135,7 +135,7 @@ static struct zcl_goal_result rc_c3(const struct zcl_goals_options *o)
 {
     static const char next[] = "make c3-stopwatch-report";
     static struct zcl_judge_result j;
-    char hist_buf[RC_PATH_MAX], slo[RC_PATH_MAX], err[RC_ERR_MAX];
+    char hist_buf[RC_PATH_MAX], slo[ZCL_STOPWATCH_LEDGER_PATH_CAP], err[RC_ERR_MAX];
     struct zcl_stopwatch_judge_opts opts;
     const char *hist =
         zcl_goals_state_path(o ? o->c3_history : NULL, "ZCL_C3_STOPWATCH_HISTORY",
@@ -152,7 +152,7 @@ static struct zcl_goal_result rc_c3(const struct zcl_goals_options *o)
         return zcl_goal_make(ZCL_GOAL_UNMEASURED, next,
                              "no receipt: %s is missing or has no timestamped row",
                              hist);
-    if (!zcl_stopwatch_judge_defaults(&opts, slo, sizeof(slo), err, sizeof(err)))
+    if (!zcl_stopwatch_judge_defaults(&opts, NULL, slo, sizeof(slo), err, sizeof(err)))
         return zcl_goal_make(ZCL_GOAL_UNMEASURED, next,
                              "the stopwatch judge settings are invalid: %s", err);
     opts.history = hist;

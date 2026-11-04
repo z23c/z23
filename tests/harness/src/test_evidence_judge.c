@@ -870,6 +870,53 @@ static int ejt_case_sw_oracle_distance_boundaries(void)
     return failures;
 }
 
+static int ejt_case_sw_oracle_path(void)
+{
+    int failures = 0;
+    TEST("stopwatch: an environment-selected ledger cannot alias its 511-byte prefix") {
+        char dir[520], ledger[514], hist[600];
+        ejt_path(dir, sizeof(dir), "sw_long_path");
+        ASSERT(mkdir(dir, 0700) == 0);
+        while (strlen(dir) < 380) {
+            strcat(dir, "/0123456789abcdef0123456789abcdef");
+            ASSERT(mkdir(dir, 0700) == 0);
+        }
+        size_t n = strlen(dir);
+        ASSERT(n < 510);
+        memcpy(ledger, dir, n);
+        ledger[n++] = '/';
+        memset(ledger + n, 'x', 511 - n);
+        ledger[511] = '\0';
+        ASSERT(ejt_write(ledger, "{\"ts\":2000000000,\"oracle_height\":3100000}\n", "wb"));
+        strcat(ledger, "y");
+        ASSERT(ejt_write(ledger, "{\"ts\":2000000000,\"oracle_height\":3200000}\n", "wb"));
+        ejt_path(hist, sizeof(hist), "sw_long_path_history");
+        ASSERT(ejt_write(hist, "{\"ts\":2000000000,\"verdict\":\"pass\",\"final_network_tip\":3100000}\n", "wb"));
+
+        struct json_value input = {0};
+        json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "history", hist));
+        ASSERT(json_push_kv_int(&input, "now", EJT_NOW));
+        const char *name = "ZCL_STOPWATCH_SLO_LEDGER";
+        const char *old = getenv(name);
+        char *saved = old ? strdup(old) : NULL;
+        ASSERT(!old || saved);
+        ASSERT(setenv(name, ledger, 1) == 0);
+        struct zcl_command_request request = {.input = &input};
+        struct zcl_command_reply reply;
+        zcl_native_handle_ops_stopwatch_judge(&request, &reply);
+        int restored = saved ? setenv(name, saved, 1) : unsetenv(name);
+        free(saved);
+        const struct json_value *v = json_get(&reply.data, "verdict");
+        bool lagged = v && v->type == JSON_STR && strcmp(json_get_str(v), "LAGGING_FIXTURE") == 0;
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        ASSERT(restored == 0 && lagged);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_evidence_judge(void);
 int test_evidence_judge(void)
 {
@@ -888,6 +935,7 @@ int test_evidence_judge(void)
     failures += ejt_case_sw_integer_boundaries();
     failures += ejt_case_sw_signed_age_boundaries();
     failures += ejt_case_sw_oracle_distance_boundaries();
+    failures += ejt_case_sw_oracle_path();
     failures += ejt_case_sw_streaks();
     failures += ejt_case_sw_skip_classes();
     failures += ejt_case_soak_verdicts();

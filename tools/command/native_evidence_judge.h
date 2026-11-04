@@ -26,6 +26,7 @@
 #define ZCL_SOAK_WINDOW_SLACK_SEC 900
 #define ZCL_SOAK_GAP0_MIN_PCT 99
 
+#define ZCL_STOPWATCH_LEDGER_PATH_CAP 4096u
 #define ZCL_STOPWATCH_MAX_AGE_SECS 86400
 #define ZCL_STOPWATCH_CHECKPOINT_HEIGHT 3056758
 #define ZCL_STOPWATCH_ORACLE_LAG_BUDGET 2000
@@ -83,6 +84,7 @@ bool zcl_stopwatch_judge(const struct zcl_stopwatch_judge_opts *opts,
 bool zcl_soak_judge_defaults(struct zcl_soak_judge_opts *opts, char *path,
                              size_t cap, char *err, size_t err_cap);
 bool zcl_stopwatch_judge_defaults(struct zcl_stopwatch_judge_opts *opts,
+                                  const char *ledger,
                                   char *slo_path, size_t cap, char *err,
                                   size_t err_cap);
 

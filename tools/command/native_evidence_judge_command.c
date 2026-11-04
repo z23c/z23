@@ -142,21 +142,20 @@ void zcl_native_handle_ops_stopwatch_judge(
 {
     static struct zcl_judge_result res;
     struct zcl_stopwatch_judge_opts opts;
-    char slo[JUDGE_PATH_MAX], err[JUDGE_ERR_MAX];
+    char slo[ZCL_STOPWATCH_LEDGER_PATH_CAP], err[JUDGE_ERR_MAX];
     if (!reply)
         return;
     zcl_command_reply_init(reply, ZCL_STOPWATCH_JUDGE_SCHEMA);
     const char *history = judge_str(request, "history");
     const char *sha = judge_str(request, "expect_artifact_sha256");
     const char *slo_in = judge_str(request, "slo_ledger");
-    if (!zcl_stopwatch_judge_defaults(&opts, slo, sizeof(slo), err, sizeof(err))) {
+    if (!zcl_stopwatch_judge_defaults(&opts, slo_in, slo, sizeof(slo), err, sizeof(err))) {
         judge_invalid(reply, "a ZCL_STOPWATCH variable is malformed", err);
         return;
     }
     judge_set_int(request, "max_age_secs", &opts.max_age_secs);
     judge_set_int(request, "now", &opts.now_unix);
     opts.history = history;
-    opts.slo_ledger = slo_in ? slo_in : opts.slo_ledger;
     opts.expect_sha256 = sha;
     if (!history || opts.max_age_secs < 0 || (sha && !judge_sha_ok(sha))) {
         judge_invalid(reply,
