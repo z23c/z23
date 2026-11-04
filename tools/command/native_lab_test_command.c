@@ -29,6 +29,8 @@ enum {
     LAB_DIFF_TOTAL = 16 * 1024,
     LAB_STDERR_CASE = 512,
     LAB_LINE_SHOW = 150,
+    LAB_CONTEXT_BYTES = 24,
+    LAB_CONTEXT_SHOW = LAB_CONTEXT_BYTES * 4 + 7,
 };
 
 struct lab_case {
@@ -256,7 +258,7 @@ static void lab_hash_case(struct lab_hasher *h, const struct lab_case *c)
 static bool lab_root_test(struct lab_ctx *ctx, const struct lab_cases *cs,
                           bool sanitize, uint32_t timeout_ms, uint32_t mem_mb)
 {
-    struct lab_hasher *h = lab_hasher_new("test.stderr.v1");
+    struct lab_hasher *h = lab_hasher_new("test.diff.v2");
     if (!h)
         return false;
     lab_hasher_field(h, "source", ctx->src.bytes, ctx->src.len);
@@ -294,6 +296,72 @@ static void lab_show_line(char *dst, size_t cap, const char *line, size_t n,
              line, n > LAB_LINE_SHOW ? "..." : "", nl ? "\\n" : "");
 }
 
+static bool lab_line_plain(const char *line, size_t length)
+{
+    if (length > LAB_LINE_SHOW)
+        return false;
+    for (size_t index = 0; index < length; index++) {
+        unsigned byte = (unsigned char)line[index];
+        if (byte < 0x20 || byte > 0x7e)
+            return false;
+    }
+    return true;
+}
+
+/* A small window around the differing byte; every escape is exactly two hex
+ * digits. Neither NUL nor a malformed UTF-8 byte can hide the remainder. */
+static void lab_show_context(char output[LAB_CONTEXT_SHOW], const char *line,
+                              size_t length, size_t column)
+{
+    size_t center = column < length ? column : length;
+    size_t start = center > 8 ? center - 8 : 0;
+    size_t count = length - start < LAB_CONTEXT_BYTES ? length - start : LAB_CONTEXT_BYTES;
+    size_t used = 0;
+    if (start) {
+        memcpy(output, "...", 3);
+        used = 3;
+    }
+    for (size_t index = start; index < start + count; index++) {
+        unsigned byte = (unsigned char)line[index];
+        if (byte >= 0x20 && byte <= 0x7e && byte != '\\' && byte != '"') {
+            output[used++] = (char)byte;
+        } else {
+            snprintf(output + used, 5, "\\x%02X", byte);
+            used += 4;
+        }
+    }
+    if (start + count < length) {
+        memcpy(output + used, "...", 3);
+        used += 3;
+    }
+    output[used] = '\0';
+}
+
+static void lab_show_byte(char output[5], const char *line, size_t length,
+                           size_t column, bool newline)
+{
+    if (column < length)
+        snprintf(output, 5, "\\x%02X", (unsigned)(unsigned char)line[column]);
+    else
+        snprintf(output, 5, "%s", newline ? "LF" : "EOF");
+}
+
+static void lab_diff_bytes(const char *want, size_t wn, bool wnl,
+                            const char *got, size_t gn, bool gnl,
+                            size_t line, char *diff, size_t cap)
+{
+    size_t column = 0;
+    while (column < wn && column < gn && want[column] == got[column])
+        column++;
+    char expected[5], actual[5], want_context[LAB_CONTEXT_SHOW], got_context[LAB_CONTEXT_SHOW];
+    lab_show_byte(expected, want, wn, column, wnl);
+    lab_show_byte(actual, got, gn, column, gnl);
+    lab_show_context(want_context, want, wn, column);
+    lab_show_context(got_context, got, gn, column);
+    snprintf(diff, cap, "line %zu, byte %zu: expected %s got %s; context \"%s\" / \"%s\"",
+             line, column + 1, expected, actual, want_context, got_context);
+}
+
 static void lab_diff_text(const char *want, size_t wl, const char *got,
                           size_t gl, char *diff, size_t cap)
 {
@@ -307,10 +375,18 @@ static void lab_diff_text(const char *want, size_t wl, const char *got,
             return;
         if (weof != geof || wn != gn || wnl != gnl ||
             memcmp(want + ws, got + gs, wn) != 0) {
+            if (!lab_line_plain(want + ws, wn) || !lab_line_plain(got + gs, gn)) {
+                lab_diff_bytes(want + ws, wn, wnl, got + gs, gn, gnl, line, diff, cap);
+                return;
+            }
             char w[LAB_LINE_SHOW + 8], g[LAB_LINE_SHOW + 8];
             lab_show_line(w, sizeof(w), want + ws, wn, wnl, weof);
             lab_show_line(g, sizeof(g), got + gs, gn, gnl, geof);
-            snprintf(diff, cap, "line %zu: expected \"%s\" got \"%s\"", line, w, g);
+            if (strcmp(w, g) == 0) {
+                lab_diff_bytes(want + ws, wn, wnl, got + gs, gn, gnl, line, diff, cap);
+            } else {
+                snprintf(diff, cap, "line %zu: expected \"%s\" got \"%s\"", line, w, g);
+            }
             return;
         }
     }

@@ -37,6 +37,14 @@ or compilation. `lab promote` shares this validation before any build or
 publication work; valid case roots and ordinary cache reuse are unchanged.
 <!-- claim: symbol-present lab_case_known_keys tools/command/native_lab_test_command.c -->
 
+Unambiguous short printable ASCII differences keep their existing line text. Long or
+unsafe lines identify the first differing byte column (one-based), expected
+and actual two-digit `\xHH` bytes or `EOF`/`LF`, and a bounded escaped window
+around that position. Raw invalid UTF-8 bytes remain distinct from the valid
+UTF-8 encoding of U+FFFD; receipt serialization does not erase that distinction.
+These diagnostics share the existing escaped per-case and total budgets.
+<!-- claim: symbol-present lab_diff_bytes tools/command/native_lab_test_command.c -->
+
 ```
 $ z23 lab run tests/fixtures/lab/hello.c        # data member, trimmed of compiler_id
 {"root":"59a65c99...eb7f185e","kind":"run","file":"tests/fixtures/lab/hello.c",
@@ -171,11 +179,11 @@ with `cache.hit:true`, without compiling or running. The cache keys the inputs,
 not the program's behavior: a program that reads the clock or a random source is
 replayed, not re-run. Pass `fresh:true` to compile and run again.
 
-Test roots use the `test.stderr.v1` kind so requests obtain receipts with case
-stderr even when an earlier test receipt is cached. Run roots are unchanged;
+Test roots use the `test.diff.v2` kind so requests obtain byte-aware diagnostics
+and case stderr even when an earlier test receipt is cached. Run roots are unchanged;
 `lab show` returns historical receipts with their original fields.
 
-<!-- claim: symbol-present test.stderr.v1 tools/command/native_lab_test_command.c # test-only receipt version -->
+<!-- claim: symbol-present test.diff.v2 tools/command/native_lab_test_command.c # test-only receipt version -->
 
 Receipt replay and compiled-artifact reuse are separate. Changing stdin,
 arguments or cases requires a new execution receipt and currently invokes the
