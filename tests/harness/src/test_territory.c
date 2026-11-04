@@ -60,6 +60,16 @@ static bool terr_write(const char *dir, const char *rel, const char *content)
     return true;
 }
 
+static bool terr_oversized_registry(void)
+{
+    FILE *f = fopen(TERR_FIX "/tools/lint/lintc/gates.def", "wb");
+    if (!f) return false;
+    bool ok = fputs("LINT_GATE(\"check-base-shape\", fixture_base, LINT_CMD_NONE)\n", f) >= 0;
+    for (size_t i = 0; ok && i < (1u << 20); i++) ok = fputc('\n', f) != EOF;
+    if (ok) ok = fputs("LINT_GATE(\"check-base-shape\", other_handler, LINT_CMD_NONE)\n", f) >= 0;
+    return fclose(f) == 0 && ok;
+}
+
 static const char *ALPHA_H =
     "/* Copyright 2026 Rhett Creighton - Apache License 2.0\n"
     " *\n"
@@ -605,6 +615,16 @@ int test_territory(void)
         ASSERT_STR_EQ(nb->refuses[0].gate, "check-base-shape");
         ASSERT(nb->refuses[0].named_in_gate);
         ASSERT_EQ(nb->refuses[0].baseline_rows, 1);
+        territory_brief_free(nb);
+        territory_gates_free(native);
+        ASSERT(terr_oversized_registry());
+        native = territory_gates_open(TERR_FIX, ci, gnames, gcount);
+        ASSERT(native != NULL);
+        nb = territory_brief_build(ci, TERR_FIX, "platform/modules/base", rs,
+                                   &frouter, native, NULL);
+        ASSERT(nb != NULL);
+        ASSERT_EQ(nb->gates_binding, 0);
+        ASSERT_EQ(nb->gates_unknown_named_none, 2);
         territory_brief_free(nb);
         territory_gates_free(native);
         ASSERT(terr_write(TERR_FIX, "tools/lint/lintc/gates.def",
