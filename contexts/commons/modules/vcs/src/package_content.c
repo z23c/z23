@@ -2,6 +2,7 @@
  * purpose: Shared byte/chunk mechanics for content.v2 carriers. */
 
 #include "vcs/package_content.h"
+#include "package_store_priv.h"
 
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
@@ -39,6 +40,32 @@ bool vcs_package_content_add_file(struct vcs_package_manifest *manifest,
     return ok;
 }
 
+/* The chunk API permits partial transfers. This whole-file API must reject
+ * omitted suffixes (including the zero-chunk case) before admitting bytes.
+ * Use the store's authoritative parsed manifest without copying its wire. */
+static enum vcs_package_store_result content_file_admission_check(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    const char *path, size_t bytes_len)
+{
+    pthread_mutex_lock(&store->lock);
+    bool process_locked = store_process_lock(store);
+    enum vcs_package_store_result result = VCS_PACKAGE_STORE_ERR_IO;
+    if (process_locked && store_generation_check(store)) {
+        struct store_package *pkg = store_find(store, package_root, NULL);
+        if (!store->catalog_incomplete) {
+            result = VCS_PACKAGE_STORE_ERR_UNKNOWN_PACKAGE;
+            if (pkg) {
+                const struct vcs_package_file *file = store_resolve_file(pkg, path);
+                result = file && file->size == (uint64_t)bytes_len
+                    ? VCS_PACKAGE_STORE_OK : VCS_PACKAGE_STORE_ERR_CHUNK_COORD;
+            }
+        }
+    }
+    if (process_locked) store_process_unlock(store);
+    pthread_mutex_unlock(&store->lock);
+    return result;
+}
+
 enum vcs_package_store_result vcs_package_content_put_file(
     struct vcs_package_store *store, const uint8_t package_root[32],
     const char *path, const uint8_t *bytes, size_t bytes_len)
@@ -47,6 +74,11 @@ enum vcs_package_store_result vcs_package_content_put_file(
         return VCS_PACKAGE_STORE_ERR_NULL;
     if ((uint64_t)bytes_len > VCS_PACKAGE_MAX_FILE_BYTES)
         return VCS_PACKAGE_STORE_ERR_CHUNK_COORD;
+    enum vcs_package_store_result checked = content_file_admission_check(
+        store, package_root, path, bytes_len);
+    if (checked != VCS_PACKAGE_STORE_OK)
+        LOG_RETURN(checked, CONTENT_LOG,
+                   "complete file admission refused for %s (%zu bytes)", path, bytes_len);
     uint32_t chunks = bytes_len == 0 ? 0u :
         (uint32_t)(1u + (bytes_len - 1u) / VCS_PACKAGE_CHUNK_BYTES);
     for (uint32_t i = 0; i < chunks; i++) {

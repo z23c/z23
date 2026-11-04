@@ -17,6 +17,7 @@
 #include "vcs/build_action.h"
 #include "vcs/build_execution_observation.h"
 #include "vcs/package_store.h"
+#include "vcs/package_content.h"
 
 #include "vcs/blob_store.h"
 #include "vcs/package_deps.h"
@@ -45,6 +46,7 @@
 #include "keys/key_io.h"
 #include "keys/pubkey.h"
 #include "util/util.h"
+#include "util/safe_alloc.h"
 
 #include <dirent.h>
 #include <stdio.h>
@@ -274,9 +276,113 @@ int t_store_manifest_admission(void)
 }
 
 /* ── 3: chunk flow ────────────────────────────────────────────────── */
-int t_store_chunk_flow(void)
+static int store_case_complete_file_refusals(struct vcs_package_store *store,
+    const uint8_t root[32], const uint8_t *bytes)
 {
     int failures = 0;
+    uint8_t unknown[32];
+    memcpy(unknown, root, sizeof(unknown));
+    unknown[0] ^= 1u;
+    struct vcs_package_store_status before, after;
+    bool tracked = vcs_package_store_package_status(store, root, &before);
+    ZS_CHECK("whole file: starts without content",
+        tracked && before.present_chunks == 0 && before.present_bytes == 0);
+    if (!tracked) return failures;
+    uint64_t epoch = vcs_package_store_mutation_epoch(store);
+    ZS_CHECK("whole file: empty unknown root refused",
+        vcs_package_content_put_file(store, unknown, "empty.bin", NULL, 0) ==
+            VCS_PACKAGE_STORE_ERR_UNKNOWN_PACKAGE);
+    ZS_CHECK("whole file: empty missing path refused",
+        vcs_package_content_put_file(store, root, "missing.bin", NULL, 0) ==
+            VCS_PACKAGE_STORE_ERR_CHUNK_COORD);
+    ZS_CHECK("whole file: empty nonempty file refused",
+        vcs_package_content_put_file(store, root, "payload.bin", NULL, 0) ==
+            VCS_PACKAGE_STORE_ERR_CHUNK_COORD);
+    ZS_CHECK("whole file: valid chunk prefix is not a complete file",
+        vcs_package_content_put_file(store, root, "payload.bin", bytes,
+            VCS_PACKAGE_CHUNK_BYTES) == VCS_PACKAGE_STORE_ERR_CHUNK_COORD);
+    ZS_CHECK("whole file: refusals preserve CAS accounting and generation",
+        vcs_package_store_package_status(store, root, &after) &&
+        after.present_chunks == 0 && after.present_bytes == 0 &&
+        !after.complete && after.mutation_generation == before.mutation_generation &&
+        vcs_package_store_mutation_epoch(store) == epoch);
+    return failures;
+}
+
+static int store_case_complete_file_roundtrip(struct vcs_package_store *store,
+    const uint8_t root[32], const struct vcs_package_manifest *manifest,
+    const uint8_t *bytes, size_t len)
+{
+    int failures = 0;
+    struct vcs_package_store_status after;
+    uint8_t *readback = NULL;
+    size_t readback_len = 0;
+    ZS_CHECK("whole file: declared empty file accepted",
+        vcs_package_content_put_file(store, root, "empty.bin", NULL, 0) ==
+            VCS_PACKAGE_STORE_OK);
+    ZS_CHECK("whole file: complete multichunk file accepted",
+        vcs_package_content_put_file(store, root, "payload.bin", bytes, len) ==
+            VCS_PACKAGE_STORE_OK);
+    ZS_CHECK("whole file: complete package accounted exactly",
+        vcs_package_store_package_status(store, root, &after) &&
+        after.complete && after.present_chunks == 2 && after.present_bytes == len);
+    ZS_CHECK("whole file: full bytes reconstruct exactly",
+        vcs_package_content_get_file_at(store, root, manifest, 1,
+            &readback, &readback_len) == VCS_PACKAGE_STORE_OK &&
+        readback_len == len && memcmp(readback, bytes, len) == 0);
+    free(readback);
+    readback = NULL;
+    ZS_CHECK("whole file: declared empty file reconstructs",
+        vcs_package_content_get_file_at(store, root, manifest, 0,
+            &readback, &readback_len) == VCS_PACKAGE_STORE_OK && readback_len == 0);
+    free(readback);
+    return failures;
+}
+
+static int store_case_complete_file(void)
+{
+    int failures = 0;
+    char dd[256];
+    struct vcs_package_store *store = zs_open(dd, sizeof(dd), "whole-file",
+        VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+    ZS_CHECK("whole file: store opens", store != NULL);
+    if (!store) return failures;
+    size_t len = (size_t)VCS_PACKAGE_CHUNK_BYTES + 1u;
+    uint8_t *bytes = zcl_malloc(len, "test_complete_file");
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    struct vcs_package_manifest manifest;
+    vcs_package_manifest_init(&manifest);
+    ZS_CHECK("whole file: allocation succeeds", bytes != NULL);
+    if (!bytes) goto done;
+    memset(bytes, 0x39, len);
+    bytes[len - 1u] = 0xa7;
+    uint8_t root[32];
+    bool built = vcs_package_content_add_file(&manifest, "empty.bin",
+            VCS_PACKAGE_MODE_FILE, NULL, 0) &&
+        vcs_package_content_add_file(&manifest, "payload.bin",
+            VCS_PACKAGE_MODE_FILE, bytes, len) &&
+        vcs_package_manifest_serialize(&manifest, &wire, &wire_len) &&
+        vcs_package_store_put_manifest(store, wire, wire_len, root) ==
+            VCS_PACKAGE_STORE_OK;
+    ZS_CHECK("whole file: manifest admitted", built);
+    if (built) {
+        failures += store_case_complete_file_refusals(store, root, bytes);
+        failures += store_case_complete_file_roundtrip(store, root, &manifest,
+            bytes, len);
+    }
+done:
+    free(wire);
+    free(bytes);
+    vcs_package_manifest_free(&manifest);
+    vcs_package_store_close(store);
+    test_rm_rf_recursive(dd);
+    return failures;
+}
+
+int t_store_chunk_flow(void)
+{
+    int failures = store_case_complete_file();
     char dd[256];
     struct vcs_package_store *s = zs_open(dd, sizeof(dd), "chunks", 1000000u);
     ZS_CHECK("chunks: store opens", s != NULL);
