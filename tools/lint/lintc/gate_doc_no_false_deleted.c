@@ -16,7 +16,10 @@
  *
  * PART 2 — every "<N> MB" that CLAUDE.md, FRAMEWORK.md or the ADR cites must
  * be within 6 MB of the real build/bin/z23 (or build/bin/z23.exe) size. A
- * missing release binary skips this part with an INFO line.
+ * missing release binary skips this part with an INFO line. A line carrying
+ * the <!-- stale-ok: <reason> --> marker (the escape hatch
+ * gate_no_stale_pinned_facts.c honors) is a historical record and is not
+ * checked: the binary grows with the code, so a dated figure goes stale.
  *
  * SHELL SEMANTICS MIRRORED
  *   - the doc list is `find docs -name '*.md'` plus CLAUDE.md, sorted and
@@ -326,9 +329,10 @@ static int dfn_num_add(struct dfn_nums *s, const char *digits, size_t len)
     return 0;
 }
 
-struct dfn_size_ctx { regex_t *re; struct dfn_nums *nums; };
+struct dfn_size_ctx { regex_t *re; regex_t *stale; struct dfn_nums *nums; };
 
-/* Every "<N> MB" on the line; the digit run at the match start is N. */
+/* Every "<N> MB" on the line; the digit run at the match start is N. A
+ * stale-ok line cites nothing. */
 static int dfn_size_cb(void *ctx, const char *line, size_t len)
 {
     struct dfn_size_ctx *c = ctx;
@@ -336,6 +340,8 @@ static int dfn_size_cb(void *ctx, const char *line, size_t len)
     regmatch_t m[1];
     int flags = 0, r = REG_NOMATCH;
     (void)len;
+    if (regexec(c->stale, line, 0, NULL, 0) == 0)
+        return 0;
     while ((r = regexec(c->re, p, 1, m, flags)) == 0) {
         size_t d = 0;
         while (isdigit((unsigned char)p[m[0].rm_so + d]))
@@ -377,15 +383,22 @@ static int dfn_size_check_doc(struct dfn_state *st, const char *doc,
                               const char *bin, long long real_mb)
 {
     struct dfn_nums nums;
-    regex_t re;
+    regex_t re, stale;
     struct dfn_size_ctx c;
     int rc;
     if (compile_pat(&re, REG_EXTENDED, "[0-9]+ ?MB", "", "", ""))
         return 2;
+    if (compile_pat(&stale, REG_EXTENDED | REG_NOSUB,
+                    "<!--[[:space:]]*stale-ok:[[:space:]]*[^[:space:]].*-->", "", "", "")) {
+        regfree(&re);
+        return 2;
+    }
     nums.n = 0;
     c.re = &re;
+    c.stale = &stale;
     c.nums = &nums;
     rc = lc_each_line(doc, dfn_size_cb, &c, 0) ? 2 : 0;
+    regfree(&stale);
     regfree(&re);
     if (rc)
         return rc;

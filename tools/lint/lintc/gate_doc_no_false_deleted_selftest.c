@@ -46,6 +46,11 @@ static const struct dfns_case k_dfns_cases[] = {
       "Plain text.\n", 1, 1, 16, "Size: 30 MB binary.\n", 1 },
     { "size cited inside the band passes",
       "Plain text.\n", 1, 1, 16, "Size: 18 MB binary.\n", 0 },
+    { "size cited outside the band on a stale-ok line passes",
+      "Plain text.\n", 1, 1, 37, "Was ~30 MB binary. <!-- stale-ok: historical -->\n", 0 },
+    { "stale-ok exempts only its own line",
+      "Plain text.\n", 1, 1, 37,
+      "Was ~30 MB. <!-- stale-ok: historical -->\nNow 30 MB binary.\n", 1 },
     { "missing release binary skips the size check",
       "Plain text.\n", 1, 1, 0, "Size: 30 MB binary.\n", 0 },
 };
