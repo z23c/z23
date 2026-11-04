@@ -70,7 +70,6 @@ void gtr_sha3_sink(void *ctx, const char *p, size_t n);
 void gtr_sha3_done(struct sha3_256_ctx *ctx, char hex[65]);
 int gtr_map_open(const char *path, struct gtr_map *m);
 void gtr_map_close(struct gtr_map *m);
-int gtr_sha3_file(const char *path, char hex[65]);
 void gtr_quote_word(struct gtr_buf *b, const char *s);
 bool gtr_is_digits(const char *s);
 bool gtr_slug_ok(const char *s);

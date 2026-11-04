@@ -551,18 +551,31 @@ struct gtr_rec {
     char argv_sha3[65];
 };
 
+static FILE *gtr_open_predecessor(const char *path)
+{
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | O_NOCTTY);
+    if (fd < 0)
+        gtr_die("cannot open predecessor %s: %s", path, strerror(errno));
+    struct stat st;
+    if (fstat(fd, &st) != 0)
+        gtr_die("cannot inspect predecessor %s: %s", path, strerror(errno));
+    if (!S_ISREG(st.st_mode))
+        gtr_die("predecessor is not a regular file: %s", path);
+    FILE *stream = fdopen(fd, "rb");
+    if (stream == nullptr)
+        gtr_die("cannot read predecessor %s: %s", path, strerror(errno));
+    return stream;
+}
+
 /* The recorded index of a receipt: the first `chain_index=` line. Anything
  * that is not a plain decimal counts as 0; a decimal too large to compare is
  * reported as -1 and never becomes the newest. */
-static long long gtr_receipt_index(const char *path)
+static long long gtr_receipt_index(FILE *f, const char *path)
 {
-    FILE *f = fopen(path, "r");
     char *line = nullptr;
     size_t cap = 0;
     long long idx = 0;
 
-    if (f == nullptr)
-        gtr_die("cannot read %s: %s", path, strerror(errno));
     while (getline(&line, &cap, f) >= 0) {
         if (strncmp(line, "chain_index=", 12) != 0)
             continue;
@@ -576,7 +589,8 @@ static long long gtr_receipt_index(const char *path)
         break;
     }
     free(line);
-    fclose(f);
+    if (ferror(f))
+        gtr_die("cannot read %s: %s", path, strerror(errno));
     return idx;
 }
 
@@ -587,44 +601,69 @@ static bool gtr_is_receipt_name(const char *name)
     return name[0] != '.' && n > 8 && strcmp(name + n - 8, ".receipt") == 0;
 }
 
+static void gtr_hash_predecessor(FILE *stream, const char *name, char hex[65])
+{
+    struct sha3_256_ctx ctx;
+    char buf[8192];
+    size_t n;
+
+    if (fseeko(stream, 0, SEEK_SET) != 0)
+        gtr_die("cannot seek %s: %s", name, strerror(errno));
+    sha3_256_init(&ctx);
+    while ((n = fread(buf, 1, sizeof(buf), stream)) != 0)
+        gtr_sha3_sink(&ctx, buf, n);
+    if (ferror(stream))
+        gtr_die("cannot hash %s: %s", name, strerror(errno));
+    gtr_sha3_done(&ctx, hex);
+}
+
 static void gtr_chain_find(const char *dir, struct gtr_chain *c)
 {
     DIR *d = opendir(dir);
     struct dirent *e;
     long long best = -1;
+    FILE *selected = nullptr;
     char *name = nullptr;
 
-    c->index = 0;
-    snprintf(c->prev_sha3, sizeof c->prev_sha3, "GENESIS");
-    c->prev_name = gtr_fmt("NONE");
     if (d == nullptr)
-        return;
-    while ((e = readdir(d)) != nullptr) {
-        char *path = gtr_fmt("%s/%s", dir, e->d_name);
-        struct stat st;
-        long long idx;
-
-        if (gtr_is_receipt_name(e->d_name) && stat(path, &st) == 0) {
-            idx = gtr_receipt_index(path);
-            if (idx > best || (idx == best && name != nullptr && strcmp(e->d_name, name) < 0)) {
-                best = idx;
-                free(name);
-                name = gtr_fmt("%s", e->d_name);
-            }
+        gtr_die("cannot list %s: %s", dir, strerror(errno));
+    for (;;) {
+        errno = 0;
+        e = readdir(d);
+        if (e == nullptr) {
+            if (errno != 0)
+                gtr_die("cannot list %s: %s", dir, strerror(errno));
+            break;
         }
+        if (!gtr_is_receipt_name(e->d_name))
+            continue;
+        char *path = gtr_fmt("%s/%s", dir, e->d_name);
+        FILE *stream = gtr_open_predecessor(path);
+        long long idx = gtr_receipt_index(stream, path);
         free(path);
+        if (idx > best || (idx == best && name != nullptr && strcmp(e->d_name, name) < 0)) {
+            if (selected != nullptr)
+                fclose(selected);
+            selected = stream;
+            best = idx;
+            free(name);
+            name = gtr_fmt("%s", e->d_name);
+        } else {
+            fclose(stream);
+        }
     }
     closedir(d);
-    if (name == nullptr)
-        return;
     if (best == LLONG_MAX)
         gtr_die("chain_index %lld cannot be extended", best);
     c->index = best + 1;
+    if (selected == nullptr) {
+        c->prev_name = gtr_fmt("NONE");
+        snprintf(c->prev_sha3, sizeof c->prev_sha3, "GENESIS");
+        return;
+    }
     c->prev_name = name;
-    char *newest = gtr_fmt("%s/%s", dir, name);
-
-    if (gtr_sha3_file(newest, c->prev_sha3) != 0)
-        gtr_die("cannot read %s: %s", newest, strerror(errno));
+    gtr_hash_predecessor(selected, name, c->prev_sha3);
+    fclose(selected);
 }
 
 static void gtr_render_head(struct gtr_buf *b, const struct gtr_rec *r, const struct gtr_chain *c)

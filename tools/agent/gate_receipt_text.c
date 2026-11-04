@@ -166,17 +166,6 @@ void gtr_map_close(struct gtr_map *m)
         munmap((void *)m->p, m->len);
 }
 
-int gtr_sha3_file(const char *path, char hex[65])
-{
-    struct gtr_map m;
-
-    if (gtr_map_open(path, &m) != 0)
-        return -1;
-    gtr_sha3_buf(m.p, m.len, hex);
-    gtr_map_close(&m);
-    return 0;
-}
-
 /* ---- shell-compatible argv display (printf %q) -------------------------- */
 
 static bool gtr_mb_char(const char *s, size_t left, size_t *clen)
