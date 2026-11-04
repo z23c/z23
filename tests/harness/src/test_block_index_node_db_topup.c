@@ -41,6 +41,8 @@
 #include "validation/chainstate.h"
 #include "chain/chain.h"
 #include "core/uint256.h"
+#include "config/db_service.h"
+#include "config/runtime.h"
 
 #include <sqlite3.h>
 #include <stdio.h>
@@ -886,6 +888,8 @@ static int ndt_null_db_noop_checks(const char *dir, struct node_db *ndb,
 static int ndt_clean_prefix_cases(const char *dir);
 static int ndt_holes_cases(const char *dir);
 static int ndt_tail_advance_cases(const char *dir, bool prefix_change);
+static int ndt_transaction_ownership(const char *dir);
+static int ndt_service_dispatch(const char *dir);
 
 int test_block_index_node_db_topup(void)
 {
@@ -915,7 +919,8 @@ int test_block_index_node_db_topup(void)
            ndt_probe_scan_cases(dir) +
            ndt_clean_prefix_cases(dir) +
            ndt_holes_cases(dir) + ndt_tail_advance_cases(dir, false) +
-           ndt_tail_advance_cases(dir, true);
+           ndt_tail_advance_cases(dir, true) + ndt_transaction_ownership(dir) +
+           ndt_service_dispatch(dir);
 }
 
 /* ── Proven-clean prefix: a warm re-fold reads only the tip region ─────────
@@ -940,6 +945,96 @@ static bool ndt_clean_build(struct node_db *ndb)
                                 NDT_CLEAN_SEED);
     ok &= node_db_state_set(ndb, "cold_import_seed_anchor_hash", sh.data, 32);
     return ok;
+}
+
+static int ndt_transaction_ownership(const char *dir)
+{
+    int failures = 0;
+    char ndb_path[320], prog_path[320];
+    snprintf(ndb_path, sizeof(ndb_path), "%s/node_tx.db", dir);
+    snprintf(prog_path, sizeof(prog_path), "%s/progress_tx.db", dir);
+    struct node_db ndb = {0};
+    sqlite3 *progress = NULL;
+    struct main_state ms;
+    main_state_init(&ms);
+    bool ready = node_db_open(&ndb, ndb_path) &&
+                 sqlite3_open(prog_path, &progress) == SQLITE_OK &&
+                 ndt_clean_build(&ndb) &&
+                 ndt_set_coins_best(progress, NDT_CLEAN_BEST) &&
+                 ndt_insert_entry(&ms, NDT_CLEAN_SEED);
+    NDT_CHECK("transaction: fixture opened", ready);
+    if (ready) {
+        bool begun = node_db_begin(&ndb);
+        NDT_CHECK("transaction: caller began", begun);
+        bool wrote = begun && node_db_state_set_int(&ndb, "topup_tx_probe", 7);
+        NDT_CHECK("transaction: caller write succeeds", wrote);
+        NDT_CHECK("transaction: topup runs inside caller transaction",
+                  wrote && block_index_node_db_topup_with(&ms, &ndb, progress, dir) &&
+                  g_node_db_topup_last_rows_seen == NDT_CLEAN_BEST - NDT_CLEAN_SEED);
+        int64_t value = 0;
+        NDT_CHECK("transaction: caller transaction remains open and intact",
+                  sqlite3_get_autocommit(ndb.db) == 0 &&
+                  node_db_state_get_int(&ndb, "topup_tx_probe", &value) && value == 7);
+        NDT_CHECK("transaction: caller rollback succeeds", begun && node_db_rollback(&ndb));
+        NDT_CHECK("transaction: caller write rolled back",
+                  !node_db_state_get_int(&ndb, "topup_tx_probe", &value));
+    }
+    main_state_free(&ms);
+    if (progress) sqlite3_close(progress);
+    node_db_close(&ndb);
+    return failures;
+}
+
+struct ndt_service_call {
+    struct db_service *svc;
+    struct main_state *ms;
+    sqlite3 *progress;
+    const char *dir;
+};
+
+static bool ndt_service_reentrant(struct node_db *ndb, void *arg)
+{
+    struct ndt_service_call *call = arg;
+    return db_service_is_worker_thread(call->svc) &&
+           block_index_node_db_topup_with(call->ms, ndb, call->progress, call->dir);
+}
+
+static int ndt_service_dispatch(const char *dir)
+{
+    int failures = 0;
+    char ndb_path[320], prog_path[320];
+    snprintf(ndb_path, sizeof(ndb_path), "%s/node_service.db", dir);
+    snprintf(prog_path, sizeof(prog_path), "%s/progress_service.db", dir);
+    struct node_db ndb = {0};
+    sqlite3 *progress = NULL;
+    struct main_state ms;
+    struct db_service svc;
+    struct app_runtime_context runtime = {0};
+    main_state_init(&ms);
+    db_service_init(&svc);
+    bool ready = node_db_open(&ndb, ndb_path) &&
+                 sqlite3_open(prog_path, &progress) == SQLITE_OK &&
+                 ndt_clean_build(&ndb) &&
+                 ndt_set_coins_best(progress, NDT_CLEAN_BEST) &&
+                 ndt_insert_entry(&ms, NDT_CLEAN_SEED) &&
+                 db_service_attach(&svc, &ndb) && db_service_start_test_worker(&svc);
+    NDT_CHECK("service: fixture and writer started", ready);
+    if (ready) {
+        runtime.db_service = &svc;
+        app_runtime_set_current(&runtime);
+        NDT_CHECK("service: topup dispatched to matching writer",
+                  block_index_node_db_topup_with(&ms, &ndb, progress, dir) &&
+                  g_node_db_topup_last_rows_seen == NDT_CLEAN_BEST - NDT_CLEAN_SEED);
+        struct ndt_service_call call = { &svc, &ms, progress, dir };
+        NDT_CHECK("service: worker reentrant topup succeeds",
+                  db_service_run_write(&svc, ndt_service_reentrant, &call));
+        app_runtime_set_current(NULL);
+    }
+    db_service_stop(&svc);
+    main_state_free(&ms);
+    if (progress) sqlite3_close(progress);
+    node_db_close(&ndb);
+    return failures;
 }
 
 static bool ndt_clean_topup(struct main_state *ms, struct node_db *ndb,

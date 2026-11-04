@@ -48,8 +48,13 @@
 #include "jobs/block_header_emit.h"
 #include "models/database.h"
 #include "models/block.h"
+#include "config/db_service.h"
+#include "config/runtime.h"
+#include "base/serialize_le.h"
+#include "sha3/sha3.h"
 
 #include <stdint.h>
+#include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1109,15 +1114,11 @@ static bool node_db_anchor_held_at(const struct block_index *anchor, int h)
  *   - the seed anchor hash and the window floor (a new import or a moved
  *     floor invalidates it),
  *   - a fingerprint of every map entry in the prefix (count + an
- *     order-independent sum over hash, status, file, data/undo position and
- *     nTx), so a map rebuilt from an older flat file or the log cannot match,
- *   - the number of connected rows node.db holds in the prefix (index-only
- *     count), so an inserted, deleted or de-connected row cannot match.
+ *     digest over complete hashes, heights, status, file, positions and nTx),
+ *   - a digest of the ordered connected node.db rows and their same fields.
  * The next boot re-verifies all three and folds only the rows above the
  * prefix; any mismatch folds the whole window exactly as before. The margin
- * keeps the volatile tip region out of the prefix. In-place edits of a row's
- * position columns that leave status>=3 and the count unchanged are not
- * detected; connect-time writes only touch the tip region. */
+ * keeps the volatile tip region out of the prefix. */
 #define NODE_DB_TOPUP_CLEAN_KEY "nodedb_topup_clean"
 #define NODE_DB_TOPUP_CLEAN_MARGIN 1024
 
@@ -1126,19 +1127,51 @@ struct topup_clean_mark {
     int32_t  lo, clean_to;
     uint32_t map_count;
     uint32_t version;   /* NODE_DB_TOPUP_CLEAN_VERSION; an older mark is ignored */
-    uint64_t map_fp;
+    uint8_t  map_digest[32];
+    uint8_t  row_digest[32];
     int64_t  row_count; /* status>=3 rows in lo..clean_to; span-row_count = holes */
 };
-/* v2: a mark may cover a window with fixed holes (v1 required none). The
- * holes are pinned by row_count, so a filled hole fails the resume check. */
-#define NODE_DB_TOPUP_CLEAN_VERSION 2u
+/* v3 binds the complete map and database row contents in the prefix. */
+#define NODE_DB_TOPUP_CLEAN_VERSION 3u
 
-static uint64_t topup_mix64(uint64_t x)
+static void topup_hash_u32(struct sha3_256_ctx *ctx, uint32_t value)
 {
-    x += 0x9E3779B97F4A7C15ULL;
-    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
-    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
-    return x ^ (x >> 31);
+    uint8_t bytes[4];
+    zcl_write_u32_le(bytes, value);
+    sha3_256_write(ctx, bytes, sizeof(bytes));
+}
+
+static void topup_hash_fields(struct sha3_256_ctx *ctx, int height,
+                              const uint8_t hash[32], uint32_t status,
+                              uint32_t file, uint32_t data, uint32_t undo,
+                              uint32_t ntx)
+{
+    topup_hash_u32(ctx, (uint32_t)height);
+    sha3_256_write(ctx, hash, 32);
+    topup_hash_u32(ctx, status);
+    topup_hash_u32(ctx, file);
+    topup_hash_u32(ctx, data);
+    topup_hash_u32(ctx, undo);
+    topup_hash_u32(ctx, ntx);
+}
+
+static int topup_map_hash_cmp(const void *a, const void *b)
+{
+    const struct block_index *const *x = a, *const *y = b;
+    if (!*x || !*y) return (*x != NULL) - (*y != NULL);
+    return memcmp((*x)->hashBlock.data, (*y)->hashBlock.data, 32);
+}
+
+struct topup_row_hash { struct sha3_256_ctx ctx; int64_t count; };
+
+static bool topup_hash_row(int height, const struct db_block *row, void *arg)
+{
+    struct topup_row_hash *h = arg;
+    topup_hash_fields(&h->ctx, height, row->hash, (uint32_t)row->status,
+                      (uint32_t)row->file_num, (uint32_t)row->data_pos,
+                      (uint32_t)row->undo_pos, (uint32_t)row->num_tx);
+    h->count++;
+    return true;
 }
 
 static bool topup_clean_measure(struct main_state *ms, struct node_db *ndb,
@@ -1148,30 +1181,42 @@ static bool topup_clean_measure(struct main_state *ms, struct node_db *ndb,
     size_t n = 0;
     if (!block_map_snapshot_indices(&ms->map_block_index, &all, &n))
         return false; // raw-return-ok:caller treats a failed fingerprint as "no clean prefix" and folds the whole window
+    size_t selected = 0;
+    for (size_t i = 0; i < n; i++)
+        if (all[i] && all[i]->nHeight >= lo && all[i]->nHeight <= hi)
+            all[selected++] = all[i];
+    if (selected > 1) qsort(all, selected, sizeof(*all), topup_map_hash_cmp);
+    struct sha3_256_ctx map;
+    sha3_256_init(&map);
+    topup_hash_u32(&map, (uint32_t)lo);
+    topup_hash_u32(&map, (uint32_t)hi);
     uint32_t count = 0;
-    uint64_t fp = 0;
-    for (size_t i = 0; i < n; i++) {
+    for (size_t i = 0; i < selected; i++) {
         const struct block_index *bi = all[i];
         if (!bi || bi->nHeight < lo || bi->nHeight > hi)
             continue;
-        uint64_t h8;
-        memcpy(&h8, bi->hashBlock.data, 8);
-        uint64_t x = topup_mix64(h8);
-        x = topup_mix64(x ^ (((uint64_t)bi->nStatus << 32) |
-                             (uint32_t)bi->nFile));
-        x = topup_mix64(x ^ (((uint64_t)bi->nDataPos << 32) |
-                             bi->nUndoPos));
-        x = topup_mix64(x ^ (((uint64_t)bi->nTx << 32) |
-                             (uint32_t)bi->nHeight));
-        fp += x;
+        if (count == UINT32_MAX) { free(all); return false; }
+        topup_hash_fields(&map, bi->nHeight, bi->hashBlock.data, bi->nStatus,
+                          (uint32_t)bi->nFile, bi->nDataPos, bi->nUndoPos,
+                          bi->nTx);
         count++;
     }
     free(all);
     m->lo = lo;
     m->clean_to = hi;
     m->map_count = count;
-    m->map_fp = fp;
-    return db_block_count_height_range(ndb, lo, hi, &m->row_count);
+    topup_hash_u32(&map, count);
+    sha3_256_finalize(&map, m->map_digest);
+    struct topup_row_hash rows = {0};
+    sha3_256_init(&rows.ctx);
+    topup_hash_u32(&rows.ctx, (uint32_t)lo);
+    topup_hash_u32(&rows.ctx, (uint32_t)hi);
+    if (!db_block_scan_height_range_probe(ndb, lo, hi, topup_hash_row, &rows))
+        return false;
+    m->row_count = rows.count;
+    topup_hash_u32(&rows.ctx, (uint32_t)rows.count);
+    sha3_256_finalize(&rows.ctx, m->row_digest);
+    return true;
 }
 
 /* Why a stored mark does not fit this window before it is remeasured, or
@@ -1197,10 +1242,12 @@ static const char *topup_clean_mark_moved(const struct topup_clean_mark *got,
 {
     if (now->map_count != got->map_count)
         return "map entry count changed";
-    if (now->map_fp != got->map_fp)
+    if (memcmp(now->map_digest, got->map_digest, sizeof(got->map_digest)))
         return "map entry fingerprint changed";
     if (now->row_count != got->row_count)
         return "node.db connected-row count changed";
+    if (memcmp(now->row_digest, got->row_digest, sizeof(got->row_digest)))
+        return "node.db row fingerprint changed";
     return NULL;
 }
 
@@ -1208,12 +1255,14 @@ static const char *topup_clean_mark_moved(const struct topup_clean_mark *got,
  * re-verifies against the map and node.db, else `lo`. A refused mark prints
  * its reason, so a restart that folds the whole window says why. */
 static int topup_clean_resume(struct main_state *ms, struct node_db *ndb,
-                              const uint8_t anchor[32], int lo, int coins_best)
+                              const uint8_t anchor[32], int lo, int coins_best,
+                              bool *verified)
 {
     struct topup_clean_mark got, now;
     size_t gn = 0;
     memset(&got, 0, sizeof(got));
     memset(&now, 0, sizeof(now));
+    *verified = false;
     if (!node_db_state_get(ndb, NODE_DB_TOPUP_CLEAN_KEY, &got, sizeof(got),
                            &gn) || gn != sizeof(got)) {
         printf("[boot] block index top-up clean mark: none stored; folding %d..%d\n",
@@ -1233,6 +1282,7 @@ static int topup_clean_resume(struct main_state *ms, struct node_db *ndb,
                coins_best);
         return lo;
     }
+    *verified = true;
     return got.clean_to + 1;
 }
 
@@ -1280,13 +1330,15 @@ static bool topup_fold_was_noop(struct node_db *ndb,
 /* First height to fold: the whole window under the per-height test oracle,
  * else the first height above a re-verified clean prefix. */
 static int node_db_fold_start(struct main_state *ms, struct node_db *ndb,
-                              const uint8_t anchor[32], int lo, int coins_best)
+                              const uint8_t anchor[32], int lo, int coins_best,
+                              bool *verified)
 {
+    *verified = false;
 #ifdef ZCL_TESTING
     if (g_node_db_topup_perheight_oracle)
         return lo;
 #endif
-    return topup_clean_resume(ms, ndb, anchor, lo, coins_best);
+    return topup_clean_resume(ms, ndb, anchor, lo, coins_best, verified);
 }
 
 /* True when the fold neither inserted nor raised anything. */
@@ -1297,10 +1349,9 @@ static bool node_db_fold_changed_nothing(const struct nodedb_fold *f)
            f->undo.cleared == 0 && f->height_conflicts == 0;
 }
 
-bool block_index_node_db_topup_with(struct main_state *ms,
-                                    struct node_db *ndb,
-                                    struct sqlite3 *progress_db,
-                                    const char *datadir)
+static bool node_db_topup_locked(struct main_state *ms, struct node_db *ndb,
+                                 struct sqlite3 *progress_db,
+                                 const char *datadir)
 {
     if (!ms)
         LOG_FAIL("block_index", "node.db topup: null main_state");
@@ -1371,8 +1422,9 @@ bool block_index_node_db_topup_with(struct main_state *ms,
     memset(&fold, 0, sizeof(fold));
     fold.ms = ms;
     fold.ndb = ndb;
+    bool verified = false;
     const int fold_from = node_db_fold_start(ms, ndb, anchor_hash, lo,
-                                             coins_best);
+                                             coins_best, &verified);
     if (!node_db_fold_window(&fold, fold_from, coins_best)) {
         free(fold.new_entries);
         return false;
@@ -1419,9 +1471,49 @@ bool block_index_node_db_topup_with(struct main_state *ms,
                ntx_applied,
                valid_raised, height_conflicts, missing_rows);
     }
-    topup_clean_record(ms, ndb, anchor_hash, lo, coins_best, fold_was_noop);
+    if (fold_was_noop || !verified)
+        topup_clean_record(ms, ndb, anchor_hash, lo, coins_best, fold_was_noop);
     (void)datadir;  /* reserved for a future on-disk re-verify pass */
     return true;
+}
+
+struct node_db_topup_call {
+    struct main_state *ms;
+    struct sqlite3 *progress_db;
+    const char *datadir;
+};
+
+/* Reuse a caller-owned transaction without closing it. Dispatch must happen
+ * before taking cs_main. A failed BEGIN never rolls back another owner. */
+static bool node_db_topup_write(struct node_db *ndb, void *arg)
+{
+    struct node_db_topup_call *call = arg;
+    bool owned = sqlite3_get_autocommit(ndb->db) != 0;
+    if (owned && !node_db_begin_immediate(ndb)) return false;
+    zcl_mutex_lock(&call->ms->cs_main);
+    bool ok = node_db_topup_locked(call->ms, ndb, call->progress_db,
+                                   call->datadir);
+    zcl_mutex_unlock(&call->ms->cs_main);
+    if (!owned) return ok;
+    if (ok && node_db_commit(ndb)) return true;
+    if (!node_db_rollback(ndb))
+        LOG_FAIL("block_index", "node.db topup: transaction rollback failed");
+    return false;
+}
+
+bool block_index_node_db_topup_with(struct main_state *ms, struct node_db *ndb,
+                                    struct sqlite3 *progress_db,
+                                    const char *datadir)
+{
+    if (!ms) LOG_FAIL("block_index", "node.db topup: null main_state");
+    if (!ndb || !ndb->open || !progress_db) return true;
+    struct node_db_topup_call call = { ms, progress_db, datadir };
+    struct db_service *svc = app_runtime_db_service();
+    if (!svc) return node_db_topup_write(ndb, &call);
+    if (db_service_node_db(svc) != ndb)
+        LOG_FAIL("block_index", "node.db topup: database service mismatch");
+    if (!db_service_is_started(svc)) return node_db_topup_write(ndb, &call);
+    return db_service_run_write(svc, node_db_topup_write, &call);
 }
 
 bool block_index_node_db_topup(struct main_state *ms,
