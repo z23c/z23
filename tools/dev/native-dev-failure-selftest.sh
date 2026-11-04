@@ -32,6 +32,16 @@ cleanup()
 }
 trap cleanup EXIT HUP INT TERM
 
+JUDGE="$SANDBOX/cycle-judge"
+cc -std=c23 -D_POSIX_C_SOURCE=200809L -O2 -Wall -Wextra -Werror -pedantic \
+    -I"$ROOT/platform/modules/json/include" -I"$ROOT/platform/modules/base/include" \
+    -I"$ROOT/contexts/commons/packages/zutf8/include" \
+    "$ROOT/tools/dev/fixtures/dev_failure_cycle.c" \
+    "$ROOT/platform/modules/json/src/json.c" "$ROOT/platform/modules/base/src/cleanse.c" \
+    "$ROOT/platform/modules/base/src/safe_alloc.c" \
+    "$ROOT/contexts/commons/packages/zutf8/src/zutf8.c" -lm -o "$JUDGE"
+"$JUDGE" --selftest
+
 mkdir -p "$REPO/.git" "$REPO/tools/dev"
 printf '%064d 1 %064d\n' 0 1 >"$REPO/source.record"
 printf '%064d\n' 2 >"$REPO/execution.id"
@@ -124,48 +134,36 @@ WATCHER_SESSION="$(sed -n 's/.*"watcher_session":"\([0-9a-f][0-9a-f]*\)".*/\1/p'
 
 wait_after()
 {
-    local after="$1" result status epoch
+    local after="$1" expected="$2" judged rc wire="$SANDBOX/cycle-wire.json"
     # The native stream deliberately exposes EDIT_SEEN/IMPACT_READY. A fast
     # Linux reactor often reaches the terminal verdict before this client is
     # exec'd, while kqueue can truthfully expose those earlier stages. Consume
     # them by epoch instead of making the self-test depend on scheduler speed.
     for _ in 1 2 3 4 5 6 7 8; do
-        result="$(native dev loop wait \
+        native dev loop wait \
             --input="{\"after_epoch\":$after,\"timeout_ms\":10000}" \
-            --view=summary)"
-        status="$(sed -n 's/.*\"status\":\"\([^\"]*\)\".*/\1/p' \
-            <<<"$result")"
-        case "$status" in
-            edit_seen|impact_ready|proof_pending|superseded)
-                epoch="$(sed -n 's/.*\"epoch\":\([0-9][0-9]*\).*/\1/p' \
-                    <<<"$result")"
-                [[ -n "$epoch" ]] || fail "transient cycle epoch missing"
-                after="$epoch"
-                ;;
-            *)
-                printf '%s\n' "$result"
-                return 0
-                ;;
-        esac
+            --view=summary >"$wire" || fail "cycle observation command failed"
+        if judged="$("$JUDGE" "$after" "$expected" <"$wire")"; then
+            printf '%s\n' "$judged"
+            return 0
+        else
+            rc=$?
+            [[ "$rc" -eq 3 ]] || fail "invalid or unexpected $expected cycle evidence"
+            after="$judged"
+        fi
     done
     fail "cycle did not reach a terminal verdict"
 }
 
 touch "$REPO/fixture.c"
-FIRST="$(wait_after 0)"
-[[ "$FIRST" == *'"status":"rejected"'* &&
-   "$FIRST" == *'"failure_id":'* ]] ||
-    fail "first compiler red did not produce a durable failure"
+FIRST="$(wait_after 0 compiler)"
 [[ "$(cat "$REPO/ff.count")" == 1 ]] ||
     fail "first compiler red did not execute exactly once"
 EPOCH1="$(sed -n 's/.*"epoch":\([0-9][0-9]*\).*/\1/p' <<<"$FIRST")"
 [[ -n "$EPOCH1" ]] || fail "first epoch missing"
 
 touch "$REPO/fixture.c"
-SECOND="$(wait_after "$EPOCH1")"
-[[ "$SECOND" == *'"status":"unchanged_failure"'* &&
-   "$SECOND" == *'"coalesced":true'* ]] ||
-    fail "identical compiler red was not coalesced"
+SECOND="$(wait_after "$EPOCH1" coalesced)"
 [[ "$(cat "$REPO/ff.count")" == 1 ]] ||
     fail "coalesced red executed make ff"
 EPOCH2="$(sed -n 's/.*"epoch":\([0-9][0-9]*\).*/\1/p' <<<"$SECOND")"
@@ -175,9 +173,8 @@ EPOCH2="$(sed -n 's/.*"epoch":\([0-9][0-9]*\).*/\1/p' <<<"$SECOND")"
 # when source bytes and the normalized diagnostic are unchanged.
 printf '%064d\n' 5 >"$REPO/execution.id"
 touch "$REPO/fixture.c"
-TOOLCHAIN="$(wait_after "$EPOCH2")"
-[[ "$TOOLCHAIN" == *'"status":"rejected"'* &&
-   "$(cat "$REPO/ff.count")" == 2 ]] ||
+TOOLCHAIN="$(wait_after "$EPOCH2" compiler)"
+[[ "$(cat "$REPO/ff.count")" == 2 ]] ||
     fail "execution epoch change did not rerun make ff"
 EPOCH_TOOLCHAIN="$(sed -n 's/.*"epoch":\([0-9][0-9]*\).*/\1/p' \
     <<<"$TOOLCHAIN")"
@@ -186,9 +183,7 @@ EPOCH_TOOLCHAIN="$(sed -n 's/.*"epoch":\([0-9][0-9]*\).*/\1/p' \
 # ABA mutation change: same source digest/failure, different mutation token.
 printf '%064d 1 %064d\n' 0 3 >"$REPO/source.record"
 touch "$REPO/fixture.c"
-THIRD="$(wait_after "$EPOCH_TOOLCHAIN")"
-[[ "$THIRD" == *'"status":"rejected"'* ]] ||
-    fail "mutation change did not execute a new cycle"
+THIRD="$(wait_after "$EPOCH_TOOLCHAIN" compiler)"
 [[ "$(cat "$REPO/ff.count")" == 3 ]] ||
     fail "mutation change did not rerun make ff"
 EPOCH3="$(sed -n 's/.*"epoch":\([0-9][0-9]*\).*/\1/p' <<<"$THIRD")"
@@ -198,14 +193,13 @@ EPOCH3="$(sed -n 's/.*"epoch":\([0-9][0-9]*\).*/\1/p' <<<"$THIRD")"
 printf '%064d\n' 4 >"$REPO/execution.id"
 printf 'test\n' >"$REPO/failure.mode"
 touch "$REPO/fixture.c"
-FOURTH="$(wait_after "$EPOCH3")"
+FOURTH="$(wait_after "$EPOCH3" rejected)"
 EPOCH4="$(sed -n 's/.*"epoch":\([0-9][0-9]*\).*/\1/p' <<<"$FOURTH")"
 [[ "$(cat "$REPO/ff.count")" == 4 && -n "$EPOCH4" ]] ||
     fail "first non-compiler red did not execute"
 touch "$REPO/fixture.c"
-FIFTH="$(wait_after "$EPOCH4")"
-[[ "$FIFTH" != *'"coalesced":true'* &&
-   "$(cat "$REPO/ff.count")" == 5 ]] ||
+FIFTH="$(wait_after "$EPOCH4" rejected)"
+[[ "$(cat "$REPO/ff.count")" == 5 ]] ||
     fail "non-compiler red was coalesced"
 
 # dev.ff is the explicit unchanged retry and always executes the ladder.
