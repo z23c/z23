@@ -58,7 +58,7 @@ static void node_button_states(void)
     view.node_stopping = true;
     assert(!strcmp(zapp_home_node_label(&view), ""));
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && strstr(card, "\"node_button\":\"\"") &&
-        strstr(card, "\"node_line\":\"Stopping…\""));
+        strstr(card, "\"node_line\":\"Stopping…\\nYou can use Z23\""));
     assert(zapp_home_phone_card(&view, true, card, sizeof(card)) && strstr(card, "\"node_button\":\"\""));
 }
 /* Whether the card's node line is exactly text, from the view as it stands. */
@@ -135,7 +135,7 @@ static void plain_node_line_verdicts(void)
     assert(node_line_is(&view, "Connected, checking the chain"));
     view.node_height = 1000;
     view.node_stopping = true;
-    assert(node_line_is(&view, "Stopping…"));
+    assert(node_line_is(&view, "Stopping…\\nYou can use Z23"));
 }
 /* The lines each node of the phone card takes for one card: the status line wrapped to status_lines, the other texts on one
  * line, and an empty text on none. */

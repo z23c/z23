@@ -514,6 +514,14 @@ static bool drawn_holds(JNIEnv *env, const struct wsu_view *v, int64_t scanned, 
     ui.drawn.elapsed_s = v->elapsed_s;
     return true;
 }
+static void setup_scroll_top(JNIEnv *env)
+{
+    jobject scroll = zj_object_property(env, ui.container, "getParent", "()Landroid/view/ViewParent;");
+    jmethodID to = scroll ? zj_method(env, scroll, "scrollTo", "(II)V") : NULL;
+    if (to) (*env)->CallVoidMethod(env, scroll, to, 0, 0);
+    (void)zj_clean(env);
+    if (scroll) (*env)->DeleteLocalRef(env, scroll);
+}
 void zapp_setup_ui_render(JNIEnv *env)
 {
     struct wsu_view v;
@@ -528,6 +536,7 @@ void zapp_setup_ui_render(JNIEnv *env)
         memory_cleanse(&v, sizeof(v));
         return;
     }
+    bool step_changed = !atomic_load(&ui.is_drawn) || ui.drawn.step != v.step;
     release_widgets(env);
     if (ui.launch_failed) (void)text_view(env, "Could not start that action. Please try again.", 15.0f, AMBER);
     if (!v.protected) {
@@ -536,6 +545,7 @@ void zapp_setup_ui_render(JNIEnv *env)
         (void)text_view(env, "Another window was drawing over this app, so a tap was ignored.", 15.0f, AMBER);
         draw_model(env, &v, known, scanned, tip);
     } else draw_model(env, &v, known, scanned, tip);
+    if (step_changed) setup_scroll_top(env);
     (void)zj_bool_property(env, ui.container, "setKeepScreenOn", v.step == WSU_WORKING || v.step == WSU_WORDS || v.step == WSU_CONFIRM);
     ui.drawn = v;
     ui.drawn_scanned = scanned;
