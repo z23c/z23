@@ -17,6 +17,7 @@
 #include "base/safe_alloc.h"
 #include "json/json.h"
 #include "platform/directory_compat.h"
+#include "platform/file_metadata.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -111,30 +112,33 @@ static bool count_file(const char *path, uint64_t *lines, uint64_t *bytes,
     return true;
 }
 
-static bool walk_dir(const char *root, const char *rel,
-                     struct science_corpus_report *out);
-
-static bool science_corpus_walk_subdirectories(
-    const char *root, const char *rel, const char *full,
-    struct science_corpus_report *out)
+static bool measure_source(const char *root, const char *rel, const char *name,
+                           struct science_corpus_report *out)
 {
-    struct platform_directory_list dirs = { 0 };
-    if (!platform_directory_list_real_sorted(full, &dirs))
-        return true; /* not a directory, or unreadable: nothing to add */
-    bool ok = true;
-    for (size_t i = 0; ok && i < dirs.count; i++) {
-        const char *name = dirs.entries[i].name;
-        if (!name || prune_dir(name))
-            continue;
-        char child[SCIENCE_CORPUS_PATH_MAX];
-        int m = snprintf(child, sizeof child, "%s/%s", rel, name);
-        ok = m > 0 && (size_t)m < sizeof child && walk_dir(root, child, out);
-    }
-    platform_directory_list_free(&dirs);
-    return ok;
+    char path[SCIENCE_CORPUS_PATH_MAX];
+    int n = snprintf(path, sizeof path, "%s/%s/%s", root, rel, name);
+    if (n <= 0 || (size_t)n >= sizeof path)
+        LOG_FAIL("science.corpus", "path too long under %s/%s", root, rel);
+    uint64_t lines = 0;
+    if (!count_file(path, &out->lines, &out->bytes, &lines))
+        LOG_FAIL("science.corpus", "could not read %s", path);
+    if (science_corpus_is_test_path(path + strlen(root) + 1))
+        out->test_lines += lines;
+    else
+        out->non_test_lines += lines;
+    out->files_walked++;
+    return true;
 }
 
-static bool walk_dir(const char *root, const char *rel,
+static bool optional_root_absent(const char *path)
+{
+    enum platform_file_shape shape = platform_file_shape_read(path);
+    return shape == PLATFORM_FILE_SHAPE_MISSING ||
+           shape == PLATFORM_FILE_SHAPE_REGULAR ||
+           shape == PLATFORM_FILE_SHAPE_SYMLINK;
+}
+
+static bool walk_dir(const char *root, const char *rel, bool optional_root,
                      struct science_corpus_report *out)
 {
     char full[SCIENCE_CORPUS_PATH_MAX];
@@ -142,40 +146,29 @@ static bool walk_dir(const char *root, const char *rel,
     if (n <= 0 || (size_t)n >= sizeof full)
         return false;
 
-    struct platform_directory_list files = { 0 };
-    if (platform_directory_list_regular_sorted(full, &files)) {
-        for (size_t i = 0; i < files.count; i++) {
-            const char *name = files.entries[i].name;
-            if (!name || !is_c23_source(name))
-                continue;
-            char path[SCIENCE_CORPUS_PATH_MAX];
-            int m = snprintf(path, sizeof path, "%s/%s", full, name);
-            if (m <= 0 || (size_t)m >= sizeof path) {
-                platform_directory_list_free(&files);
-                LOG_FAIL("science.corpus", "path too long under %s", full);
-            }
-            uint64_t file_lines = 0;
-            if (!count_file(path, &out->lines, &out->bytes, &file_lines)) {
-                platform_directory_list_free(&files);
-                LOG_FAIL("science.corpus", "could not read %s", path);
-            }
-            char source_path[SCIENCE_CORPUS_PATH_MAX];
-            int source_n = snprintf(source_path, sizeof(source_path),
-                                    "%s/%s", rel, name);
-            if (source_n <= 0 || (size_t)source_n >= sizeof(source_path)) {
-                platform_directory_list_free(&files);
-                LOG_FAIL("science.corpus", "source path too long under %s",
-                         rel);
-            }
-            const bool test_path = science_corpus_is_test_path(source_path);
-            if (test_path) out->test_lines += file_lines;
-            else out->non_test_lines += file_lines;
-            out->files_walked++;
-        }
+    if (optional_root && optional_root_absent(full))
+        return true;
+    struct platform_directory_list dirs = {0}, files = {0};
+    if (!platform_directory_list_children_sorted(full, &dirs, &files))
+        LOG_FAIL("science.corpus", "could not enumerate %s", full);
+
+    bool ok = true;
+    for (size_t i = 0; ok && i < files.count; i++) {
+        const char *name = files.entries[i].name;
+        if (is_c23_source(name))
+            ok = measure_source(root, rel, name, out);
+    }
+    for (size_t i = 0; ok && i < dirs.count; i++) {
+        const char *name = dirs.entries[i].name;
+        if (prune_dir(name))
+            continue;
+        char child[SCIENCE_CORPUS_PATH_MAX];
+        n = snprintf(child, sizeof child, "%s/%s", rel, name);
+        ok = n > 0 && (size_t)n < sizeof child && walk_dir(root, child, false, out);
     }
     platform_directory_list_free(&files);
-
-    return science_corpus_walk_subdirectories(root, rel, full, out);
+    platform_directory_list_free(&dirs);
+    return ok;
 }
 
 /* ── the generated inventory artifact ────────────────────────────────── */
@@ -296,7 +289,7 @@ bool science_corpus_measure(const char *root, const char *inventory_path,
         LOG_FAIL("science.corpus", "measure needs a source root");
 
     for (size_t i = 0; i < sizeof(k_roots) / sizeof(k_roots[0]); i++)
-        if (!walk_dir(root, k_roots[i], out))
+        if (!walk_dir(root, k_roots[i], true, out))
             LOG_FAIL("science.corpus", "walk of %s/%s failed", root,
                      k_roots[i]);
 

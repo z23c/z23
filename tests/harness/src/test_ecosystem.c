@@ -3,6 +3,7 @@
 
 #include "test/test_core.h"
 
+#include "base/safe_alloc.h"
 #include "codeindex/codeindex.h"
 #include "command/native_command.h"
 #include "json/json.h"
@@ -399,6 +400,11 @@ static int eco_check_other_trees(const struct science_ecosystem_snapshot *snap,
               mkdir_p(dir_one, "docs") &&
                   write_pkg(dir_one, "only", "only/only"));
     struct science_ecosystem_snapshot one;
+    struct science_corpus_report partial;
+    zcl_alloc_fault_fail_next("platform_directory_entries");
+    bool measured = science_corpus_measure(dir_one, NULL, &partial);
+    zcl_alloc_fault_clear();
+    ECO_CHECK("directory enumeration failure refuses an incomplete census", !measured);
     ECO_CHECK("a different tree produces a different package count",
               science_ecosystem_collect(dir_one, NULL, &one, error,
                                         sizeof(error)) &&
