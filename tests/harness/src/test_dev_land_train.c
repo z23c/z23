@@ -391,6 +391,7 @@ static int test_dev_land_train_red_falls_back_to_singles(void)
         char b[64], c[64], intent[200], before[64], after[64];
         int64_t attempt = 0;
         dlx_isolate("train_red");
+        setenv("ZCL_LAND_TRAIN_BISECT", "0", 1);
         ASSERT(dlx_tr_rig(&rig, "train_red_rig", "fail", "b.txt", b, c));
         ASSERT(dlx_origin_main(&rig, before));
         setenv("ZCL_LAND_TRAIN_WIDTH", "3", 1);
@@ -418,6 +419,7 @@ static int test_dev_land_train_red_falls_back_to_singles(void)
         PASS();
     }
 _test_next:;
+    unsetenv("ZCL_LAND_TRAIN_BISECT");
     dlx_restore();
     return failures;
 }
@@ -425,13 +427,12 @@ _test_next:;
 static int test_dev_land_train_red_bisects(void)
 {
     int failures = 0;
-    TEST("land: opt-in red train retries its first bounded half") {
+    TEST("land: red train retries its first bounded half") {
         struct dlx_rig rig;
         char b[64], c[64];
         dlx_isolate("train_bisect_red");
         ASSERT(dlx_tr_rig(&rig, "train_bisect_red_rig", "fail", "b.txt", b, c));
         setenv("ZCL_LAND_TRAIN_WIDTH", "3", 1);
-        setenv("ZCL_LAND_TRAIN_BISECT", "1", 1);
         ASSERT(dlx_tr_beat("started", 2, 1));
         ASSERT(dlx_tr_beat("rebased", 0, 1));
         ASSERT(dlx_tr_beat("started", 1, 1));
@@ -453,6 +454,7 @@ static int test_dev_land_train_red_then_singles_land(void)
         char b[64], c[64], states[256], before[64], after[64];
         int proofs = 0, landed = 0;
         dlx_isolate("train_red_green");
+        setenv("ZCL_LAND_TRAIN_BISECT", "0", 1);
         ASSERT(dlx_tr_rig(&rig, "train_red_green_rig", "fail", "b.txt", b, c));
         ASSERT(dlx_tr_watch_start(&w, &rig));
         ASSERT(dlx_origin_main(&rig, before));
@@ -473,6 +475,7 @@ static int test_dev_land_train_red_then_singles_land(void)
         PASS();
     }
 _test_next:;
+    unsetenv("ZCL_LAND_TRAIN_BISECT");
     dlx_restore();
     return failures;
 }
