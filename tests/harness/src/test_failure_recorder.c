@@ -5,6 +5,7 @@
  * prints none; the record is capped with its head and its tail kept. */
 
 #include "test/test_core.h"
+#include "test/host_tool_capture.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -48,6 +49,23 @@ static int fr_child_flood(void)
         for (int i = 0; i < 400; i++) test_note("filler line %04d", i);
         test_note("LAST-NOTE");
         ASSERT_EQ(3, 4);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int fr_child_capture(void)
+{
+    int failures = 0;
+    TEST("recorder: child output") {
+        const char *argv[] = {"/bin/sh", "-c",
+            "printf stdout-prefix; printf stderr-prefix >&2; "
+            "i=0; while [ $i -lt 300 ]; do printf x; printf y >&2; i=$((i+1)); done; "
+            "printf stdout-tail; printf stderr-tail >&2; exit 7", NULL};
+        char out[32];
+        int rc = test_host_tool_capture(argv, out, sizeof(out), 5000);
+        ASSERT(rc == 7 && strncmp(out, "stdout-prefix", 13) == 0);
+        ASSERT(1 == 2);
         PASS();
     } _test_next:;
     return failures;
@@ -143,6 +161,22 @@ static int fr_test_cap_keeps_head_and_tail(void)
     return failures;
 }
 
+static int fr_test_child_tails(void)
+{
+    int failures = 0;
+    TEST("failure recorder: child stdout and stderr tails survive prefix truncation") {
+        char out[FR_OUT_CAP];
+        int child = 0;
+        ASSERT(fr_run(fr_child_capture, out, sizeof(out), &child));
+        ASSERT(child == 1);
+        ASSERT(strstr(out, "exit=7") != NULL);
+        ASSERT(strstr(out, "stdout-tail") != NULL);
+        ASSERT(strstr(out, "stderr-tail") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int fr_test_bytes_escape_and_cut(void)
 {
     int failures = 0;
@@ -196,6 +230,7 @@ int test_failure_recorder(void)
     failures += fr_test_fail_prints_evidence();
     failures += fr_test_pass_prints_nothing();
     failures += fr_test_cap_keeps_head_and_tail();
+    failures += fr_test_child_tails();
     failures += fr_test_bytes_escape_and_cut();
     failures += fr_test_long_file();
     printf("Failure recorder: %d failures\n", failures);
