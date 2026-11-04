@@ -1084,6 +1084,20 @@ static bool ndt_holes_old_mark(struct node_db *ndb)
     return node_db_state_set(ndb, "nodedb_topup_clean", blob, n);
 }
 
+static bool ndt_tail_entry_equal(const struct block_index *a,
+                                 const struct block_index *b)
+{
+    if (!a || !b) return a == b;
+    if (!ndt_entries_equal(a, b) || a->nBits != b->nBits ||
+        a->nChainTx != b->nChainTx || (a->pskip == NULL) != (b->pskip == NULL))
+        return false;
+    if (a->pskip && memcmp(&a->pskip->hashBlock, &b->pskip->hashBlock,
+                           sizeof(a->hashBlock)))
+        return false;
+    return !a->pprev || !memcmp(&a->pprev->hashBlock, &b->pprev->hashBlock,
+                                sizeof(a->hashBlock));
+}
+
 /* A changed tip must not discard the previously verified sparse prefix. */
 static int ndt_tail_advance_cases(const char *dir, bool prefix_change)
 {
@@ -1153,14 +1167,7 @@ static int ndt_tail_advance_cases(const char *dir, bool prefix_change)
             ndt_hash_for(h, &hash);
             struct block_index *a = block_map_find(&actual.map_block_index, &hash);
             struct block_index *b = block_map_find(&oracle.map_block_index, &hash);
-            if ((a == NULL) != (b == NULL) ||
-                (a && (!ndt_entries_equal(a, b) || a->nBits != b->nBits ||
-                       a->nChainTx != b->nChainTx ||
-                       (a->pskip == NULL) != (b->pskip == NULL) ||
-                       (a->pskip && memcmp(&a->pskip->hashBlock,
-                                           &b->pskip->hashBlock, sizeof(hash))) ||
-                       (a->pprev && memcmp(&a->pprev->hashBlock,
-                                           &b->pprev->hashBlock, sizeof(hash))))))
+            if (!ndt_tail_entry_equal(a, b))
                 diffs++;
         }
         if (prefix_change)
