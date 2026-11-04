@@ -988,7 +988,6 @@ static int ndt_transaction_ownership(const char *dir)
 struct ndt_service_call {
     struct db_service *svc;
     struct main_state *ms;
-    sqlite3 *progress;
     const char *dir;
 };
 
@@ -996,43 +995,56 @@ static bool ndt_service_reentrant(struct node_db *ndb, void *arg)
 {
     struct ndt_service_call *call = arg;
     return db_service_is_worker_thread(call->svc) &&
-           block_index_node_db_topup_with(call->ms, ndb, call->progress, call->dir);
+           block_index_node_db_topup(call->ms, ndb, call->dir);
 }
 
 static int ndt_service_dispatch(const char *dir)
 {
     int failures = 0;
-    char ndb_path[320], prog_path[320];
+    char ndb_path[320], other_path[320];
     snprintf(ndb_path, sizeof(ndb_path), "%s/node_service.db", dir);
-    snprintf(prog_path, sizeof(prog_path), "%s/progress_service.db", dir);
+    snprintf(other_path, sizeof(other_path), "%s/node_service_other.db", dir);
     struct node_db ndb = {0};
-    sqlite3 *progress = NULL;
-    struct main_state ms;
+    struct node_db other = {0};
+    struct main_state ms, other_ms;
     struct db_service svc;
     struct app_runtime_context runtime = {0};
     main_state_init(&ms);
+    main_state_init(&other_ms);
     db_service_init(&svc);
     bool ready = node_db_open(&ndb, ndb_path) &&
-                 sqlite3_open(prog_path, &progress) == SQLITE_OK &&
+                 node_db_open(&other, other_path) && progress_store_open(dir) &&
                  ndt_clean_build(&ndb) &&
-                 ndt_set_coins_best(progress, NDT_CLEAN_BEST) &&
+                 ndt_clean_build(&other) &&
+                 ndt_set_coins_best(progress_store_db(), NDT_CLEAN_BEST) &&
                  ndt_insert_entry(&ms, NDT_CLEAN_SEED) &&
+                 ndt_insert_entry(&other_ms, NDT_CLEAN_SEED) &&
                  db_service_attach(&svc, &ndb) && db_service_start_test_worker(&svc);
     NDT_CHECK("service: fixture and writer started", ready);
     if (ready) {
         runtime.db_service = &svc;
         app_runtime_set_current(&runtime);
         NDT_CHECK("service: topup dispatched to matching writer",
-                  block_index_node_db_topup_with(&ms, &ndb, progress, dir) &&
+                  block_index_node_db_topup(&ms, &ndb, dir) &&
                   g_node_db_topup_last_rows_seen == NDT_CLEAN_BEST - NDT_CLEAN_SEED);
-        struct ndt_service_call call = { &svc, &ms, progress, dir };
+        struct ndt_service_call call = { &svc, &ms, dir };
         NDT_CHECK("service: worker reentrant topup succeeds",
                   db_service_run_write(&svc, ndt_service_reentrant, &call));
+        NDT_CHECK("service: unrelated database uses direct path",
+                  block_index_node_db_topup(&other_ms, &other, dir) &&
+                  g_node_db_topup_last_rows_seen == NDT_CLEAN_BEST - NDT_CLEAN_SEED);
+        zcl_mutex_lock(&ms.cs_main);
+        bool locked_ok = block_index_node_db_topup_with(
+            &ms, &ndb, progress_store_db(), dir);
+        zcl_mutex_unlock(&ms.cs_main);
+        NDT_CHECK("service: locked caller uses direct with path", locked_ok);
         app_runtime_set_current(NULL);
     }
     db_service_stop(&svc);
     main_state_free(&ms);
-    if (progress) sqlite3_close(progress);
+    main_state_free(&other_ms);
+    progress_store_close();
+    node_db_close(&other);
     node_db_close(&ndb);
     return failures;
 }
@@ -1193,6 +1205,15 @@ static bool ndt_tail_entry_equal(const struct block_index *a,
                                 sizeof(a->hashBlock));
 }
 
+static int ndt_deny_blocks_read(void *ctx, int action, const char *table,
+                                const char *column, const char *db,
+                                const char *source)
+{
+    (void)ctx; (void)column; (void)db; (void)source;
+    return action == SQLITE_READ && table && strcmp(table, "blocks") == 0
+               ? SQLITE_DENY : SQLITE_OK;
+}
+
 /* A changed tip must not discard the previously verified sparse prefix. */
 static int ndt_tail_advance_cases(const char *dir, bool prefix_change)
 {
@@ -1219,6 +1240,17 @@ static int ndt_tail_advance_cases(const char *dir, bool prefix_change)
         NDT_CHECK("tail advance: prefix initially resumed",
                   ndt_clean_topup(&actual, &ndb, progress, dir, false, &rows) &&
                   rows > 0 && rows <= NDT_CLEAN_MARGIN);
+        if (prefix_change) {
+            NDT_CHECK("tail safety: block reads denied in fixture",
+                      sqlite3_set_authorizer(ndb.db, ndt_deny_blocks_read, NULL) == SQLITE_OK);
+            NDT_CHECK("tail safety: failed prefix read refuses topup",
+                      !ndt_clean_topup(&actual, &ndb, progress, dir, false, &rows));
+            NDT_CHECK("tail safety: block reads restored",
+                      sqlite3_set_authorizer(ndb.db, NULL, NULL) == SQLITE_OK);
+            NDT_CHECK("tail safety: revalidated prefix resumes after read recovery",
+                      ndt_clean_topup(&actual, &ndb, progress, dir, false, &rows) &&
+                      rows > 0 && rows <= NDT_CLEAN_MARGIN);
+        }
         bool wrote = true;
         for (int h = NDT_CLEAN_BEST + 1; h <= NDT_CLEAN_BEST + 68; h++)
             wrote = ndt_range_row(&ndb, h, false) && wrote;

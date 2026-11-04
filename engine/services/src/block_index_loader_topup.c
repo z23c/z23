@@ -1508,18 +1508,19 @@ bool block_index_node_db_topup_with(struct main_state *ms, struct node_db *ndb,
     if (!ms) LOG_FAIL("block_index", "node.db topup: null main_state");
     if (!ndb || !ndb->open || !progress_db) return true;
     struct node_db_topup_call call = { ms, progress_db, datadir };
-    struct db_service *svc = app_runtime_db_service();
-    if (!svc) return node_db_topup_write(ndb, &call);
-    if (db_service_node_db(svc) != ndb)
-        LOG_FAIL("block_index", "node.db topup: database service mismatch");
-    if (!db_service_is_started(svc)) return node_db_topup_write(ndb, &call);
-    return db_service_run_write(svc, node_db_topup_write, &call);
+    return node_db_topup_write(ndb, &call);
 }
 
 bool block_index_node_db_topup(struct main_state *ms,
                                struct node_db *ndb,
                                const char *datadir)
 {
-    return block_index_node_db_topup_with(ms, ndb, progress_store_db(),
-                                          datadir);
+    if (!ms) LOG_FAIL("block_index", "node.db topup: null main_state");
+    sqlite3 *progress_db = progress_store_db();
+    if (!ndb || !ndb->open || !progress_db) return true;
+    struct node_db_topup_call call = { ms, progress_db, datadir };
+    struct db_service *svc = app_runtime_db_service();
+    if (!svc || db_service_node_db(svc) != ndb || !db_service_is_started(svc))
+        return node_db_topup_write(ndb, &call);
+    return db_service_run_write(svc, node_db_topup_write, &call);
 }
