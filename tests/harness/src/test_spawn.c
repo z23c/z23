@@ -665,6 +665,59 @@ static int test_spawn_evidence_timeout(void)
     return failures;
 }
 
+static int test_spawn_evidence_dual_flood(void)
+{
+    int failures = 0;
+    TEST("spawn: evidence drains both pipes beyond capacity") {
+        const char *argv[] = {"/bin/sh", "-c",
+            "i=0; while [ $i -lt 10000 ]; do printf abcdefghijklmnop; "
+            "printf ABCDEFGHIJKLMNOP >&2; i=$((i+1)); done; printf out-end; printf err-end >&2", NULL};
+        char out[16];
+        struct zcl_spawn_evidence e;
+        int rc = zcl_spawn_capture_evidence(argv, out, sizeof(out), 10000, &e);
+        ASSERT(rc == 0 && e.exit_observed && !e.timed_out);
+        ASSERT(e.stdout_total > 65536 && e.stderr_total > 65536);
+        ASSERT(e.stdout_len >= 7 && memcmp(e.stdout_tail + e.stdout_len - 7, "out-end", 7) == 0);
+        ASSERT(e.stderr_len >= 7 && memcmp(e.stderr_tail + e.stderr_len - 7, "err-end", 7) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_spawn_evidence_flood_timeout(void)
+{
+    int failures = 0;
+    TEST("spawn: continuous dual output cannot defeat timeout") {
+        const char *argv[] = {"/bin/sh", "-c", "while :; do printf 1234567890; printf abcdefghij >&2; done", NULL};
+        char out[16];
+        struct zcl_spawn_evidence e;
+        int rc = zcl_spawn_capture_evidence(argv, out, sizeof(out), 100, &e);
+        ASSERT(rc != 0 && e.timed_out && e.exit_observed);
+        ASSERT(e.stdout_total > 0 && e.stderr_total > 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_spawn_evidence_unknown_status(void)
+{
+    int failures = 0;
+    TEST("spawn: auto-reaped child status stays unobserved") {
+        struct sigaction old, sa = {.sa_handler = SIG_DFL, .sa_flags = SA_NOCLDWAIT};
+        ASSERT(sigaction(SIGCHLD, NULL, &old) == 0);
+        ASSERT(sigaction(SIGCHLD, &sa, NULL) == 0);
+        const char *argv[] = {"/bin/sh", "-c", "printf visible; exit 7", NULL};
+        char out[32]; struct zcl_spawn_evidence e;
+        (void)zcl_spawn_capture_evidence(argv, out, sizeof(out), 3000, &e);
+        int restored = sigaction(SIGCHLD, &old, NULL);
+        ASSERT(restored == 0);
+        ASSERT(!e.exit_observed && e.exit_code == -1);
+        ASSERT(strcmp(out, "visible") == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_spawn_platform_arm(void)
 {
     int failures = 0;
@@ -694,6 +747,9 @@ static int test_spawn_platform_arm(void)
     failures += test_spawn_binary_closed_stdio();
     failures += test_spawn_evidence_streams();
     failures += test_spawn_evidence_timeout();
+    failures += test_spawn_evidence_dual_flood();
+    failures += test_spawn_evidence_flood_timeout();
+    failures += test_spawn_evidence_unknown_status();
     failures += test_spawn_capture_in_dir();
     failures += test_spawn_capture_in_dir_fails_closed();
 
