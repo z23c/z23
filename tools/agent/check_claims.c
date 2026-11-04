@@ -146,6 +146,11 @@ static void ccl_note(struct ccl_str *notes, const char *fmt, ...)
 
 /* ---- numbers ------------------------------------------------------------ */
 
+static bool ccl_is_digits(const char *s)
+{
+    return s[0] != '\0' && s[strspn(s, "0123456789")] == '\0';
+}
+
 /* The integer accepted by `[ A -gt B ]`: optional surrounding blanks and sign,
  * digits only, within int64. */
 static bool ccl_test_int(const char *s, int64_t *out)
@@ -466,6 +471,11 @@ static void ccl_receipt_parse(struct ccl_receipt *r, char *buf, size_t len)
         ccl_receipt_line(r, p);
         p += n + (nl != nullptr);
     }
+    /* Only canonical nonnegative writer values may be emitted as JSON numbers. */
+    int64_t milliseconds;
+    if (!ccl_is_digits(r->wall) || (r->wall[0] == '0' && r->wall[1]) ||
+        !ccl_test_int(r->wall, &milliseconds))
+        r->wall = (char *)"";
 }
 
 static void ccl_receipt_free(struct ccl_receipt *r)
@@ -785,6 +795,11 @@ static bool ccl_judge_status(const struct ccl_receipt *r, struct ccl_str *notes)
 {
     bool ok = true;
 
+    if (r->wall[0] == '\0') {
+        ccl_note(notes, "INVALID_WALL_MS");
+        ok = false;
+    }
+
     if (strcmp(r->exit_status, "0") != 0) {
         ccl_note(notes, "EXIT_%s", r->exit_status);
         ok = false;
@@ -858,16 +873,11 @@ struct ccl_chain {
 
 /* chain_index as the script read it: digits only, else -1. Digits beyond
  * int64 saturate. */
-static bool ccl_idx_is_digits(const char *s)
-{
-    return s[0] != '\0' && s[strspn(s, "0123456789")] == '\0';
-}
-
 static int64_t ccl_parse_idx(const char *s)
 {
     int64_t v;
 
-    if (!ccl_idx_is_digits(s))
+    if (!ccl_is_digits(s))
         return -1;
     return ccl_test_int(s, &v) ? v : INT64_MAX;
 }
@@ -882,7 +892,7 @@ static const char *ccl_base_name(const char *path)
 static void ccl_chain_step(struct ccl_chain *ch, const struct ccl_receipt *r, const char *path, struct ccl_str *notes)
 {
     int64_t idx = ccl_parse_idx(r->idx);
-    const char *text = ccl_idx_is_digits(r->idx) ? r->idx : "-1";
+    const char *text = ccl_is_digits(r->idx) ? r->idx : "-1";
     char *msg;
 
     if (ch->expected == INT64_MAX || idx != ch->expected + 1) {
@@ -1215,7 +1225,7 @@ static void ccl_print_json(FILE *o, const struct ccl_ctx *c, const struct ccl_na
         fprintf(o,
                 "    {\"gate\":\"%s\",\"verdict\":\"%s\",\"runs\":%zu,\"failed_runs\":%zu,\"wall_ms\":%s,"
                 "\"receipt\":\"%s\",\"notes\":\"%s\",\"required\":%s}\n",
-                g->name, g->ok ? "OK" : "BAD", g->runs, g->failed, g->wall[0] != '\0' ? g->wall : "0",
+                g->name, g->ok ? "OK" : "BAD", g->runs, g->failed, g->wall[0] != '\0' ? g->wall : "null",
                 ccl_base_name(g->receipt), g->note, ccl_names_has(req, g->name) ? "true" : "false");
     }
     fputs("  ],\n  \"missing_required\": [", o);
@@ -1627,9 +1637,29 @@ static void ccl_selftest_log(void)
     ccl_receipt_free(&r);
 }
 
+static void ccl_selftest_elapsed(void)
+{
+    static const struct {
+        const char *value;
+        bool valid;
+    } cases[] = {
+        {"-1000", false}, {"unavailable", false}, {"", false}, {"01", false},
+        {"+1", false}, {"9223372036854775808", false}, {"0", true}, {"9223372036854775807", true}
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        char *text = ccl_fmt("wall_ms=%s\nexit_status=0\nverdict=PASS\n", cases[i].value);
+        struct ccl_receipt r;
+        struct ccl_str notes = {};
+        ccl_receipt_parse(&r, text, strlen(text));
+        ccl_check(ccl_judge_status(&r, &notes) == cases[i].valid, "elapsed time must be a canonical duration");
+        ccl_receipt_free(&r);
+        free(notes.s);
+    }
+}
+
 static void ccl_selftest_fields(void)
 {
-    static const char text[] = "receipt_schema=bad\nexit_status=2\nverdict=FAIL\nhead_sha=0123456789abcdef\n"
+    static const char text[] = "receipt_schema=bad\nwall_ms=0\nexit_status=2\nverdict=FAIL\nhead_sha=0123456789abcdef\n"
                                "worktree_path=/other\ntree_diff_sha3_after=x\nexpect_tokens=0\nforbid_tokens=0\n";
     struct ccl_ctx c = {.repo = "/r", .head = "fedcba", .diff = "y", .max_age = "0"};
     struct ccl_str notes = {};
@@ -1778,6 +1808,7 @@ static int ccl_selftest(void)
     ccl_selftest_scan();
     ccl_selftest_shape();
     ccl_selftest_log();
+    ccl_selftest_elapsed();
     ccl_selftest_fields();
     ccl_selftest_judges();
     ccl_selftest_chain_overflow();
