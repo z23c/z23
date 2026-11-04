@@ -1202,6 +1202,23 @@ static pid_t spawn_evidence_launch(const char *const argv[], int out[2], int err
     return pid;
 }
 
+static int spawn_evidence_finish(pid_t pid, struct spawn_evidence_capture *c,
+                                 struct spawn_capture_anchor *anchor,
+                                 int64_t deadline, bool ok)
+{
+    struct zcl_spawn_evidence *e = c->e;
+    if (!ok || e->timed_out) spawn_capture_kill_group(pid, anchor->enabled);
+    int status = 0; bool cancelled = false;
+    bool reaped = spawn_capture_reap(pid, &status, deadline, NULL, NULL,
+                                     &e->timed_out, &cancelled, anchor->enabled, NULL);
+    ok = spawn_evidence_drain_pending(c) && ok;
+    for (int i = 0; i < 2; i++) if (c->pipes[i].fd >= 0) close(c->pipes[i].fd);
+    if (anchor->enabled) close(anchor->hold[1]);
+    c->buf[c->used] = '\0'; e->exit_observed = reaped;
+    if (reaped) e->exit_code = spawn_capture_status(true, status);
+    return ok ? spawn_capture_status(reaped, status) : -1;
+}
+
 int zcl_spawn_capture_evidence(const char *const argv[], char *buf, size_t cap,
                                int timeout_ms, struct zcl_spawn_evidence *e)
 {
@@ -1218,16 +1235,7 @@ int zcl_spawn_capture_evidence(const char *const argv[], char *buf, size_t cap,
     };
     int64_t deadline = timeout_ms > 0 ? platform_time_monotonic_ms() + timeout_ms : 0;
     bool ok = spawn_evidence_drain(pid, &c, timeout_ms, deadline, anchor.enabled);
-    if (!ok || e->timed_out) spawn_capture_kill_group(pid, anchor.enabled);
-    int status = 0; bool cancelled = false;
-    bool reaped = spawn_capture_reap(pid, &status, deadline, NULL, NULL,
-                                     &e->timed_out, &cancelled, anchor.enabled, NULL);
-    ok = spawn_evidence_drain_pending(&c) && ok;
-    for (int i = 0; i < 2; i++) if (c.pipes[i].fd >= 0) close(c.pipes[i].fd);
-    if (anchor.enabled) close(anchor.hold[1]);
-    buf[c.used] = '\0'; e->exit_observed = reaped;
-    if (reaped) e->exit_code = spawn_capture_status(true, status);
-    return ok ? spawn_capture_status(reaped, status) : -1;
+    return spawn_evidence_finish(pid, &c, &anchor, deadline, ok);
 }
 #else
 int zcl_spawn_capture_evidence(const char *const argv[], char *buf, size_t cap,
