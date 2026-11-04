@@ -2462,6 +2462,14 @@ static void dl_first_actionable(const char *text, char *out, size_t cap)
     free(copy);
 }
 
+#if defined(ZCL_TESTING)
+void zcl_dev_land_test_first_actionable(const char *text, char *out, size_t cap);
+void zcl_dev_land_test_first_actionable(const char *text, char *out, size_t cap)
+{
+    dl_first_actionable(text, out, cap);
+}
+#endif
+
 /* ── the proof, through the existing dev.proof machinery ───────────────── */
 
 enum dl_proof {

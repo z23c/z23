@@ -12,6 +12,7 @@
 
 #if !defined(_WIN32)
 
+void zcl_dev_land_test_first_actionable(const char *text, char *out, size_t cap);
 
 /* CANONICAL_LIFECYCLE.md correctness scenarios, `lifecycle_candidate_race`
  * (two candidates, same base, exactly one accepted): the first candidate
@@ -863,6 +864,7 @@ struct dlx_evidence_case {
     const char *absent;         /* noise the evidence must not carry */
     const char *file;           /* repo-relative file the cause must name */
     const char *gate;           /* proof gate the cause must name */
+    bool frame;
 };
 
 static const char k_dlx_evidence_test_script[] =
@@ -872,6 +874,7 @@ static const char k_dlx_evidence_test_script[] =
     " '==================== test_golden_dev_cycle (FAIL, 3s) ====================' \\\n"
     " 'golden dev cycle: a hot swap lands under a second... ' \\\n"
     " 'FAIL at tests/harness/src/test_golden_dev_cycle.c:367 (hotswap_ms < 1000.0)' \\\n"
+    " '--- evidence test.c:1 ---' 'FRAME-HEAD' 'FRAME-TAIL' '--- end evidence ---' \\\n"
     " 'SOME TESTS FAILED - 1/2 groups failed' \\\n"
     " 'Failed groups:' \\\n"
     " '  - test_golden_dev_cycle: exit code=1 log=./test-tmp/test_parallel_1_822.log'\n"
@@ -1009,7 +1012,10 @@ static bool dlx_evidence_outcome_ok(const struct dlx_evidence_case *k,
     }
     text[len] = '\0';
     return dlx_has(text, k->token) &&
-           dlx_evidence_text_ok(k, text, real_wt);
+           dlx_evidence_text_ok(k, text, real_wt) &&
+           (!k->frame || (strstr(text, "--- evidence test.c:1 ---") &&
+                          strstr(text, "FRAME-HEAD") && strstr(text, "FRAME-TAIL") &&
+                          strstr(text, "--- end evidence ---")));
 }
 
 static bool dlx_evidence_case_run(const struct dlx_evidence_case *k)
@@ -1026,6 +1032,17 @@ static bool dlx_evidence_case_run(const struct dlx_evidence_case *k)
 int test_dev_land_proof_evidence_test(void)
 {
     int failures = 0;
+    TEST("land: compiler commands do not hide a later failing gate") {
+        char detail[256];
+        zcl_dev_land_test_first_actionable(
+            "zcc -c gate_no_wallclock_assertion.c -o gate_no_wallclock_assertion.o\n"
+            "FAIL check-kpi-floor\n", detail, sizeof(detail));
+        ASSERT_STR_EQ(detail, "FAIL check-kpi-floor");
+        zcl_dev_land_test_first_actionable("widget.c:12:5: error: bad type\n",
+                                          detail, sizeof(detail));
+        ASSERT_STR_EQ(detail, "widget.c:12:5: error: bad type");
+        PASS();
+    }
     TEST("land: a failed test group names its FAIL line in the outcome") {
         const struct dlx_evidence_case k = {
             .tag = "evidence_test",
@@ -1039,6 +1056,7 @@ int test_dev_land_proof_evidence_test(void)
             .absent = "assert macros",
             .file = "tests/harness/src/test_golden_dev_cycle.c",
             .gate = "test",
+            .frame = true,
         };
         ASSERT(dlx_evidence_case_run(&k));
         PASS();
