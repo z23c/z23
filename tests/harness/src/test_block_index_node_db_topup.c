@@ -311,7 +311,8 @@ static int64_t ndt_now_ms(void)
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-static bool ndt_range_row(struct node_db *ndb, int h, bool fork)
+static bool ndt_range_row_with_ntx(struct node_db *ndb, int h, bool fork,
+                                   int ntx_override)
 {
     static uint8_t sol[1] = {0};
     struct db_block b;
@@ -336,10 +337,15 @@ static bool ndt_range_row(struct node_db *ndb, int h, bool fork)
     b.file_num = h % 5;
     b.data_pos = 1000 + h;
     b.undo_pos = (h % 5) ? 2000 + h : 0;
-    b.num_tx = (h % 4 == 0) ? 0 : 2;
+    b.num_tx = ntx_override >= 0 ? ntx_override : (h % 4 == 0) ? 0 : 2;
     b.sapling_value = h % 9;
     b.sprout_value = (h % 6 == 0) ? 5 : 0;
     return db_block_save(ndb, &b);
+}
+
+static bool ndt_range_row(struct node_db *ndb, int h, bool fork)
+{
+    return ndt_range_row_with_ntx(ndb, h, fork, -1);
 }
 
 static bool ndt_range_build_db(struct node_db *ndb)
@@ -879,7 +885,7 @@ static int ndt_null_db_noop_checks(const char *dir, struct node_db *ndb,
 
 static int ndt_clean_prefix_cases(const char *dir);
 static int ndt_holes_cases(const char *dir);
-static int ndt_tail_advance_cases(const char *dir);
+static int ndt_tail_advance_cases(const char *dir, bool prefix_change);
 
 int test_block_index_node_db_topup(void)
 {
@@ -908,7 +914,8 @@ int test_block_index_node_db_topup(void)
            ndt_range_equivalence_cases(dir) +
            ndt_probe_scan_cases(dir) +
            ndt_clean_prefix_cases(dir) +
-           ndt_holes_cases(dir) + ndt_tail_advance_cases(dir);
+           ndt_holes_cases(dir) + ndt_tail_advance_cases(dir, false) +
+           ndt_tail_advance_cases(dir, true);
 }
 
 /* ── Proven-clean prefix: a warm re-fold reads only the tip region ─────────
@@ -1078,12 +1085,12 @@ static bool ndt_holes_old_mark(struct node_db *ndb)
 }
 
 /* A changed tip must not discard the previously verified sparse prefix. */
-static int ndt_tail_advance_cases(const char *dir)
+static int ndt_tail_advance_cases(const char *dir, bool prefix_change)
 {
     int failures = 0;
     char ndb_path[320], prog_path[320];
-    snprintf(ndb_path, sizeof(ndb_path), "%s/node_tail.db", dir);
-    snprintf(prog_path, sizeof(prog_path), "%s/progress_tail.db", dir);
+    snprintf(ndb_path, sizeof(ndb_path), "%s/node_tail_%d.db", dir, prefix_change);
+    snprintf(prog_path, sizeof(prog_path), "%s/progress_tail_%d.db", dir, prefix_change);
     struct node_db ndb = {0};
     sqlite3 *progress = NULL;
     struct main_state actual, oracle;
@@ -1114,11 +1121,29 @@ static int ndt_tail_advance_cases(const char *dir)
         ndt_hash_for(NDT_CLEAN_BEST + 68, &last_hash);
         NDT_CHECK("tail advance: new tail was inserted",
                   block_map_find(&actual.map_block_index, &last_hash) != NULL);
+        if (prefix_change) {
+            struct db_block row;
+            bool found = db_block_find_by_height(&ndb, NDT_HOLE_PROBE, &row);
+            NDT_CHECK("tail safety: connected prefix row initially has zero nTx",
+                      found && row.num_tx == 0);
+            NDT_CHECK("tail safety: same-count prefix change saved",
+                      found && ndt_range_row_with_ntx(&ndb, NDT_HOLE_PROBE,
+                                                      false, 7));
+        }
         NDT_CHECK("tail advance: next fold succeeds",
                   ndt_clean_topup(&actual, &ndb, progress, dir, false, &rows));
         printf("block_index_node_db_topup: tail advance next rows=%zu\n", rows);
-        NDT_CHECK("tail advance: verified prefix remains bounded",
-                  rows > 0 && rows <= NDT_CLEAN_MARGIN + 68);
+        if (prefix_change) {
+            struct uint256 hash;
+            ndt_hash_for(NDT_HOLE_PROBE, &hash);
+            struct block_index *entry = block_map_find(&actual.map_block_index, &hash);
+            NDT_CHECK("tail safety: full fold observes same-count prefix change",
+                      rows == NDT_CLEAN_BEST + 68 - NDT_CLEAN_SEED - 2 &&
+                      entry && entry->nTx == 7);
+        } else {
+            NDT_CHECK("tail advance: verified prefix remains bounded",
+                      rows > 0 && rows <= NDT_CLEAN_MARGIN + 68);
+        }
         size_t oracle_rows = 0;
         NDT_CHECK("tail advance: full oracle succeeds",
                   ndt_clean_topup(&oracle, &ndb, progress, dir, true, &oracle_rows));
@@ -1128,10 +1153,20 @@ static int ndt_tail_advance_cases(const char *dir)
             ndt_hash_for(h, &hash);
             struct block_index *a = block_map_find(&actual.map_block_index, &hash);
             struct block_index *b = block_map_find(&oracle.map_block_index, &hash);
-            if ((a == NULL) != (b == NULL) || (a && !ndt_entries_equal(a, b)))
+            if ((a == NULL) != (b == NULL) ||
+                (a && (!ndt_entries_equal(a, b) || a->nBits != b->nBits ||
+                       a->nChainTx != b->nChainTx ||
+                       (a->pskip == NULL) != (b->pskip == NULL) ||
+                       (a->pskip && memcmp(&a->pskip->hashBlock,
+                                           &b->pskip->hashBlock, sizeof(hash))) ||
+                       (a->pprev && memcmp(&a->pprev->hashBlock,
+                                           &b->pprev->hashBlock, sizeof(hash))))))
                 diffs++;
         }
-        NDT_CHECK("tail advance: map equals full oracle", diffs == 0);
+        if (prefix_change)
+            NDT_CHECK("tail safety: map equals full oracle", diffs == 0);
+        else
+            NDT_CHECK("tail advance: map equals full oracle", diffs == 0);
     }
     main_state_free(&actual);
     main_state_free(&oracle);
