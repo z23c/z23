@@ -988,6 +988,15 @@ static bool dlx_evidence_record_ok(const struct dlx_evidence_case *k,
     return dlx_evidence_text_ok(k, record + token_len, real_wt);
 }
 
+static bool dlx_evidence_frame_ok(const char *text)
+{
+    return strstr(text, "--- evidence test.c:1 ---") && strstr(text, "FRAME-HEAD") &&
+           strstr(text, "FRAME-TAIL") && strstr(text, "FRAME-LONG-END") &&
+           strstr(text, "utf8-\303\251") && strstr(text, "--- end evidence ---") &&
+           strstr(text, "RETRY-HEAD") && strstr(text, "RETRY-TAIL") &&
+           !strstr(text, "BAD-PREFIX-FRAME") && !strchr(text, '\033');
+}
+
 /* Consume the settled failure through the production status reader and
  * check the outcome row and the attempt's evidence file. */
 static bool dlx_evidence_outcome_ok(const struct dlx_evidence_case *k,
@@ -1023,13 +1032,7 @@ static bool dlx_evidence_outcome_ok(const struct dlx_evidence_case *k,
     text[len] = '\0';
     return dlx_has(text, k->token) && (!k->no_frame || !strstr(text, "FRAME-HEAD")) &&
            dlx_evidence_text_ok(k, text, real_wt) &&
-           (!k->frame || (strstr(text, "--- evidence test.c:1 ---") &&
-                          strstr(text, "FRAME-HEAD") && strstr(text, "FRAME-TAIL") &&
-                          strstr(text, "FRAME-LONG-END") &&
-                          strstr(text, "utf8-\303\251") &&
-                          strstr(text, "--- end evidence ---") &&
-                          strstr(text, "RETRY-HEAD") && strstr(text, "RETRY-TAIL") &&
-                          !strstr(text, "BAD-PREFIX-FRAME") && !strchr(text, '\033')));
+           (!k->frame || dlx_evidence_frame_ok(text));
 }
 
 static bool dlx_evidence_case_run(const struct dlx_evidence_case *k)

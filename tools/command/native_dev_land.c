@@ -2424,6 +2424,20 @@ static void dl_sanitize_copy(const char *line, char *out, size_t cap)
     out[used] = '\0';
 }
 
+static bool dl_actionable_strong(const char *s)
+{
+    return strncmp(s, "FAIL", 4) == 0 || strstr(s, ": FAIL") ||
+           strstr(s, ": error:") || strstr(s, "fatal error:") ||
+           strstr(s, "undefined reference");
+}
+
+static bool dl_actionable_compile(const char *s)
+{
+    return strstr(s, " -c ") &&
+           (strstr(s, "zcc ") || strstr(s, "clang ") || strstr(s, "gcc ") ||
+            strncmp(s, "cc ", 3) == 0);
+}
+
 /* The first line a person can act on: the earliest line naming an error, a
  * failure, or a refusal. A tail is not an answer; this is. */
 static void dl_first_actionable(const char *text, char *out, size_t cap)
@@ -2451,17 +2465,12 @@ static void dl_first_actionable(const char *text, char *out, size_t cap)
         if (strncmp(result, "PASS", 4) == 0 &&
             (result[4] == '\0' || strchr(" \t\r", result[4])))
             continue;
-        if (strncmp(result, "FAIL", 4) == 0 || strstr(result, ": FAIL") ||
-            strstr(result, ": error:") || strstr(result, "fatal error:") ||
-            strstr(result, "undefined reference")) {
+        if (dl_actionable_strong(result)) {
             dl_sanitize_copy(line, out, cap);
             free(copy);
             return;
         }
-        if (strstr(result, " -c ") &&
-            (strstr(result, "zcc ") || strstr(result, "clang ") ||
-             strstr(result, "gcc ") || strncmp(result, "cc ", 3) == 0))
-            continue;
+        if (dl_actionable_compile(result)) continue;
         for (size_t i = 0; !out[0] && i < sizeof(needles) / sizeof(needles[0]); i++) {
             if (strstr(line, needles[i])) {
                 dl_sanitize_copy(line, out, cap);
@@ -7243,14 +7252,19 @@ static const char *dl_frame_text(const char *line, bool *prefixed, unsigned long
     return end + 2;
 }
 
+static bool dl_frame_c1(const char *line, size_t i, size_t n)
+{
+    return (unsigned char)line[i] == 0xc2 && i + 1 < n &&
+           (unsigned char)line[i + 1] >= 0x80 && (unsigned char)line[i + 1] <= 0x9f;
+}
+
 static bool dl_frame_safe_append(char *out, size_t cap, size_t *used, const char *line)
 {
     size_t n = strlen(line);
     if (!zutf8_validate_n(line, n)) return false;
     for (size_t i = 0; i < n; i++) {
         unsigned char c = (unsigned char)line[i];
-        bool c1 = c == 0xc2 && i + 1 < n &&
-                  (unsigned char)line[i + 1] >= 0x80 && (unsigned char)line[i + 1] <= 0x9f;
+        bool c1 = dl_frame_c1(line, i, n);
         if ((c < 0x20 && c != '\n' && c != '\t') || c == 0x7f || c1) {
             unsigned char next = c1 ? (unsigned char)line[++i] : 0;
             int wrote = c1 ? snprintf(out + *used, cap - *used, "\\x%02X\\x%02X", c, next)
@@ -7265,6 +7279,80 @@ static bool dl_frame_safe_append(char *out, size_t cap, size_t *used, const char
     return true;
 }
 
+#if !defined(_WIN32)
+static int dl_frame_open(const struct zcl_dev_proof_failure_identity *identity,
+                         const char *local, const char *base)
+{
+    int fd = open(identity->canonical_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    const char *parts[] = {".cache", "zcl-dev-proof", "attempts", identity->attempt, "logs"};
+    for (size_t i = 0; fd >= 0 && i < sizeof(parts) / sizeof(parts[0]); i++) {
+        int next = openat(fd, parts[i], O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        close(fd);
+        fd = next;
+    }
+    if (fd < 0) return -1;
+    char name[160];
+    int n = snprintf(name, sizeof(name), "%s-%s.test.log", local, base);
+    int logfd = n > 0 && (size_t)n < sizeof(name)
+                    ? openat(fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    if (logfd < 0 && errno == ENOENT)
+        logfd = openat(fd, "test.log", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    close(fd);
+    return logfd;
+}
+
+struct dl_frame_scan {
+    char frame[65537];
+    size_t used, frame_used, raw_used;
+    unsigned count;
+    bool inside, overflow, prefixed;
+    unsigned long previous;
+};
+
+static void dl_frame_begin(struct dl_frame_scan *s, const char *text,
+                           bool prefixed, unsigned long number)
+{
+    if (!s->inside && strncmp(text, "--- evidence ", 13) == 0) {
+        s->inside = true; s->overflow = false; s->frame_used = 0; s->raw_used = 0;
+        s->prefixed = prefixed; s->previous = number;
+    } else if (s->inside && (prefixed != s->prefixed ||
+               (prefixed && (s->previous == ULONG_MAX || number != s->previous + 1)))) {
+        s->overflow = true;
+    }
+}
+
+static void dl_frame_scan_line(struct dl_frame_scan *s, const char *line,
+                               char *out, size_t cap)
+{
+    bool prefixed = false;
+    unsigned long number = 0;
+    const char *text = dl_frame_text(line, &prefixed, &number);
+    if (!text) { if (s->inside) s->overflow = true; return; }
+    dl_frame_begin(s, text, prefixed, number);
+    if (!s->inside) return;
+    if (prefixed) s->previous = number;
+    size_t len = strlen(text);
+    s->raw_used += len;
+    if (!len || text[len - 1] != '\n' || s->raw_used > 16384) s->overflow = true;
+    if (!s->overflow && !dl_frame_safe_append(s->frame, sizeof(s->frame), &s->frame_used, text))
+        s->overflow = true;
+    if (strncmp(text, "--- end evidence ---", 20) != 0) return;
+    if (!s->overflow && s->used + s->frame_used < cap) {
+        memcpy(out + s->used, s->frame, s->frame_used);
+        s->used += s->frame_used; out[s->used] = '\0'; s->count++;
+    }
+    s->inside = false;
+}
+
+static void dl_frame_scan_file(FILE *f, char *out, size_t cap)
+{
+    char line[16385];
+    struct dl_frame_scan scan = {0};
+    while (scan.count < 4 && fgets(line, sizeof(line), f))
+        dl_frame_scan_line(&scan, line, out, cap);
+}
+#endif
+
 /* The retained log is an observation associated with the validated failure
  * attempt; its bytes are not covered by the failure-record binding. */
 static void dl_retained_frames(const char *wt, const char *local, const char *base,
@@ -7274,21 +7362,7 @@ static void dl_retained_frames(const char *wt, const char *local, const char *ba
     out[0] = '\0';
 #if !defined(_WIN32)
     if (!identity->valid) return;
-    int fd = open(identity->canonical_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    const char *parts[] = {".cache", "zcl-dev-proof", "attempts", identity->attempt, "logs"};
-    for (size_t i = 0; fd >= 0 && i < sizeof(parts) / sizeof(parts[0]); i++) {
-        int next = openat(fd, parts[i], O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-        close(fd);
-        fd = next;
-    }
-    if (fd < 0) return;
-    char name[160];
-    int n = snprintf(name, sizeof(name), "%s-%s.test.log", local, base);
-    int logfd = n > 0 && (size_t)n < sizeof(name)
-                    ? openat(fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
-    if (logfd < 0 && errno == ENOENT)
-        logfd = openat(fd, "test.log", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    close(fd);
+    int logfd = dl_frame_open(identity, local, base);
     if (logfd < 0) return;
     struct stat before, after;
     if (fstat(logfd, &before) != 0 || !S_ISREG(before.st_mode) ||
@@ -7298,39 +7372,7 @@ static void dl_retained_frames(const char *wt, const char *local, const char *ba
     }
     FILE *f = fdopen(logfd, "r");
     if (!f) { close(logfd); return; }
-    char line[16385], frame[65537];
-    size_t used = 0, frame_used = 0, raw_used = 0;
-    unsigned count = 0;
-    bool inside = false, overflow = false, frame_prefixed = false;
-    unsigned long previous = 0;
-    while (count < 4 && fgets(line, sizeof(line), f)) {
-        bool prefixed = false;
-        unsigned long number = 0;
-        const char *text = dl_frame_text(line, &prefixed, &number);
-        if (!text) { if (inside) overflow = true; continue; }
-        if (!inside && strncmp(text, "--- evidence ", 13) == 0) {
-            inside = true; overflow = false; frame_used = 0; raw_used = 0;
-            frame_prefixed = prefixed;
-            previous = number;
-        } else if (inside && (prefixed != frame_prefixed ||
-                   (prefixed && (previous == ULONG_MAX || number != previous + 1)))) {
-            overflow = true;
-        }
-        if (!inside) continue;
-        if (prefixed) previous = number;
-        size_t len = strlen(text);
-        raw_used += len;
-        if (!len || text[len - 1] != '\n' || raw_used > 16384)
-            overflow = true;
-        if (!overflow && !dl_frame_safe_append(frame, sizeof(frame), &frame_used, text))
-            overflow = true;
-        if (strncmp(text, "--- end evidence ---", 20) != 0) continue;
-        if (!overflow && used + frame_used < cap) {
-            memcpy(out + used, frame, frame_used); used += frame_used; out[used] = '\0';
-            count++;
-        }
-        inside = false;
-    }
+    dl_frame_scan_file(f, out, cap);
     bool stable = fstat(fileno(f), &after) == 0 && dl_same_file_snapshot(&before, &after);
     fclose(f);
     struct zcl_dev_proof_status now = {0};

@@ -3012,6 +3012,51 @@ static bool tc_excerpt_evidence(const char *line, bool *inside, size_t *budget)
     return keep;
 }
 
+static bool tc_excerpt_evidence_overflow(FILE *out, const char *prefix,
+                                         size_t n, const char *line, size_t *bytes)
+{
+    size_t prior = *bytes;
+    *bytes += strlen(line) + 1;
+    if (*bytes <= 16384) return false;
+    if (prior <= 16384)
+        fprintf(out, "%sL%zu: [evidence frame exceeds bound]\n", prefix, n);
+    if (strncmp(line, "--- end evidence ---", 20) == 0)
+        fprintf(out, "%sL%zu: %s\n", prefix, n, line);
+    return true;
+}
+
+struct tc_excerpt_state {
+    size_t printed, marks, shown, budget, bytes, tail_start, max_marks;
+    bool inside;
+    char ring[TESTCACHE_EXCERPT_CONTEXT][TC_EXCERPT_BUF];
+};
+
+static void tc_excerpt_emit(FILE *out, const char *prefix, size_t n,
+                            const char *line, struct tc_excerpt_state *s)
+{
+    bool in_tail = n >= s->tail_start;
+    bool was_inside = s->inside;
+    bool starts = !was_inside && strncmp(line, "--- evidence ", 13) == 0;
+    bool evidence = tc_excerpt_evidence(line, &s->inside, &s->budget);
+    if (starts) s->bytes = 0;
+    if ((was_inside || starts) && !evidence) { s->shown = n; return; }
+    if (evidence && tc_excerpt_evidence_overflow(out, prefix, n, line, &s->bytes)) {
+        s->shown = n; return;
+    }
+    if (!in_tail && !evidence &&
+        (s->marks >= s->max_marks || !tc_excerpt_is_mark(line))) {
+        tc_excerpt_keep(s->ring, n, line); return;
+    }
+    if (!in_tail && !evidence) {
+        s->marks++;
+        s->printed += tc_excerpt_print_before(out, prefix, n, s->shown, s->ring);
+    }
+    if (evidence) fprintf(out, "%sL%zu: %s\n", prefix, n, line);
+    else tc_excerpt_print(out, prefix, n, line);
+    s->printed++; s->shown = n;
+    tc_excerpt_keep(s->ring, n, line);
+}
+
 size_t testcache_print_log_excerpt(FILE *out, const char *path,
                                    const char *prefix, size_t max_marks,
                                    size_t max_tail)
@@ -3021,56 +3066,15 @@ size_t testcache_print_log_excerpt(FILE *out, const char *path,
     FILE *fp = fopen(path, "r");
     if (!fp) return 0;
     char line[TC_EXCERPT_BUF];
-    char ring[TESTCACHE_EXCERPT_CONTEXT][TC_EXCERPT_BUF];
     size_t total = 0;
     while (tc_excerpt_next_line(fp, line, sizeof(line))) total++;
-    size_t tail_start = total > max_tail ? total - max_tail + 1 : 1;
+    struct tc_excerpt_state state = {
+        .budget = TESTCACHE_EXCERPT_EVIDENCE_BLOCKS, .max_marks = max_marks,
+        .tail_start = total > max_tail ? total - max_tail + 1 : 1,
+    };
     rewind(fp);
-    size_t printed = 0, marks = 0, shown_upto = 0;
-    size_t evidence_budget = TESTCACHE_EXCERPT_EVIDENCE_BLOCKS;
-    bool in_evidence = false;
-    size_t evidence_bytes = 0;
-    for (size_t n = 1; tc_excerpt_next_line(fp, line, sizeof(line)); n++) {
-        bool in_tail = n >= tail_start;
-        bool was_inside = in_evidence;
-        bool starts = !was_inside && strncmp(line, "--- evidence ", 13) == 0;
-        bool evidence = tc_excerpt_evidence(line, &in_evidence,
-                                            &evidence_budget);
-        if (starts) evidence_bytes = 0;
-        if ((was_inside || starts) && !evidence) {
-            shown_upto = n;
-            continue;
-        }
-        if (evidence) {
-            size_t prior_bytes = evidence_bytes;
-            evidence_bytes += strlen(line) + 1;
-            if (evidence_bytes > 16384) {
-                if (prior_bytes <= 16384)
-                    fprintf(out, "%sL%zu: [evidence frame exceeds bound]\n", prefix, n);
-                if (strncmp(line, "--- end evidence ---", 20) == 0)
-                    fprintf(out, "%sL%zu: %s\n", prefix, n, line);
-                shown_upto = n;
-                continue;
-            }
-        }
-        if (!in_tail && !evidence &&
-            (marks >= max_marks || !tc_excerpt_is_mark(line))) {
-            tc_excerpt_keep(ring, n, line);
-            continue;
-        }
-        if (!in_tail && !evidence) {
-            marks++;
-            printed += tc_excerpt_print_before(out, prefix, n, shown_upto,
-                                               ring);
-        }
-        if (evidence)
-            fprintf(out, "%sL%zu: %s\n", prefix, n, line);
-        else
-            tc_excerpt_print(out, prefix, n, line);
-        printed++;
-        shown_upto = n;
-        tc_excerpt_keep(ring, n, line);
-    }
+    for (size_t n = 1; tc_excerpt_next_line(fp, line, sizeof(line)); n++)
+        tc_excerpt_emit(out, prefix, n, line, &state);
     fclose(fp);
-    return printed;
+    return state.printed;
 }
