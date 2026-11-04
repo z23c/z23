@@ -9566,6 +9566,19 @@ $(RETRIEVAL_EVAL_BIN): tools/retrieval_eval.c \
 	    platform/modules/base/src/safe_alloc.c platform/modules/base/src/log_level.c \
 	    platform/modules/sha3/src/sha3.c
 
+RETRIEVAL_TRANSPORT_BIN = $(BIN_DIR)/retrieval-transport-check$(ZCL_HOST_EXEEXT)
+.PHONY: retrieval-transport-check retrieval-transport-check-selftest
+retrieval-transport-check: $(RETRIEVAL_TRANSPORT_BIN)
+$(RETRIEVAL_TRANSPORT_BIN): tools/retrieval_transport_check.c
+	@mkdir -p $(dir $@)
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    $(ZCL_PLATFORM_CPPFLAGS) -o $@ $<
+
+retrieval-transport-check-selftest: retrieval-transport-check
+	@$(RETRIEVAL_TRANSPORT_BIN) --selftest
+
+retrieval-gold-benchmark-scope-selftest: retrieval-transport-check-selftest
+
 .PHONY: retrieval-eval-selftest retrieval-gold-corpus-check \
     retrieval-gold-benchmark-scope-selftest \
     retrieval-gold-benchmark retrieval-gold-benchmark-publishable \

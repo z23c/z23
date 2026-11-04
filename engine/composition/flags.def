@@ -2051,6 +2051,8 @@ Z23_FLAG("ZCL_RETRIEVAL_GOLD_CHECK", "env_build", "-", "-",
           "undocumented; first use tools/dev/retrieval-gold-benchmark.sh:auto")
 Z23_FLAG("ZCL_RETRIEVAL_GOLD_CORPUS", "env_build", "-", "-",
           "undocumented; first use tools/dev/retrieval-gold-benchmark.sh:auto")
+Z23_FLAG("ZCL_RETRIEVAL_TRANSPORT_CHECK", "env_build", "-", "-",
+          "Override the raw-byte transport guard; first use tools/dev/retrieval-gold-benchmark.sh:auto")
 Z23_FLAG("ZCL_ROM_FETCH_ORPHAN_HORIZON_SEC", "env_runtime", "21600", "-",
           "How many seconds an abandoned ROM download's .part + .journal pair must sit untouched before the boot sweep may reclaim it; first use engine/composition/src/rom_fetch_orphan_sweep.c:auto")
 Z23_FLAG("ZCL_ROOT_STRAY_EXTRA_FOR_TEST", "env_runtime", "-", "-",

@@ -28,6 +28,7 @@ evaluator=${ZCL_RETRIEVAL_EVAL:-$repo_root/build/bin/retrieval-eval}
 sha3=${ZCL_AGENT_SHA3:-$repo_root/build/bin/agent_sha3}
 command_timeout=${ZCL_RETRIEVAL_BENCH_TIMEOUT_SECONDS:-300}
 keep=${ZCL_RETRIEVAL_BENCH_KEEP:-0}
+transport_check=${ZCL_RETRIEVAL_TRANSPORT_CHECK:-$repo_root/build/bin/retrieval-transport-check}
 mode=${1:---run-local}
 publishable=false
 scope_selftest=false
@@ -59,6 +60,7 @@ else
     required_executables=("$jsonq" "$rank_bin" "$capture_bin" "$evaluator" \
         "$sha3" "$corpus_check")
 fi
+required_executables+=("$transport_check")
 for executable in "${required_executables[@]}"; do
     [[ -x $executable ]] || fail "required executable is unavailable: $executable"
 done
@@ -128,7 +130,7 @@ root_field() {
 
 hash_file() {
     local path=$1 output root
-    output=$("$sha3" "$path") || fail "could not hash file: $path"
+    output=$(checked_document "$sha3" "$path") || fail "could not hash file: $path"
     root=${output%% *}
     zcl_is_sha256 "$root" || fail "malformed file SHA3: $path"
     printf '%s' "$root"
@@ -136,7 +138,7 @@ hash_file() {
 
 hash_text() {
     local value=$1 root
-    root=$(printf '%s' "$value" | "$sha3") || fail "could not hash text"
+    root=$(printf '%s' "$value" | checked_document "$sha3") || fail "could not hash text"
     zcl_is_sha256 "$root" || fail "malformed text SHA3"
     printf '%s' "$root"
 }
@@ -345,10 +347,19 @@ prepare_checkout() {
     verify_checkout "$parent"
 }
 
+checked_document() {
+    local document_file
+    document_file=$(mktemp "$run_root/document.XXXXXX") || fail "cannot create output capture"
+    "$@" >"$document_file" || fail "document producer failed: $1"
+    "$transport_check" <"$document_file" || fail "document contains unrepresentable raw bytes"
+    cat -- "$document_file" || fail "cannot read checked document"
+    rm -- "$document_file" || fail "cannot retire checked document"
+}
+
 capture_root() {
     local input output root
     input=$(printf '{"workspace":"%s"}' "$(json_escape "$workspace")")
-    output=$(printf '%s' "$input" | timeout "$command_timeout" \
+    output=$(printf '%s' "$input" | checked_document timeout "$command_timeout" \
         "$capture_bin" zcode workspace source capture --input=-) ||
         fail "ZVCS scratch capture failed"
     validate_envelope "$output" zcode.workspace.source.capture \
@@ -419,7 +430,7 @@ check_rank_file() {
     [[ $observed_bytes -eq $expected_bytes ]] ||
         fail "$arm top-five context bytes do not rederive"
     [[ $complete = true ]] && complete_bit=1 || complete_bit=0
-    observed_root=$("$evaluator" --rank-root "$complete_bit" <"$file") ||
+    observed_root=$(checked_document "$evaluator" --rank-root "$complete_bit" <"$file") ||
         fail "$arm ranking-root verifier refused reconstructed ranks"
     [[ $observed_root = "$expected_root" ]] ||
         fail "$arm ranking root does not independently rederive"
@@ -469,10 +480,10 @@ membership_check() {
     for ((i = 0; i < count; i++)); do
         path=$(field "$row" "relevant_paths[$i]")
         input=$(printf '{"path":"%s"}' "$(json_escape "$path")")
-        room=$(printf '%s' "$input" | env ZCL_DEV_SOURCE_ROOT="$workspace" \
+        room=$(printf '%s' "$input" | checked_document env ZCL_DEV_SOURCE_ROOT="$workspace" \
             timeout "$command_timeout" "$rank_bin" code room --input=-) ||
             fail "code.room failed for $path"
-        merkle=$(printf '%s' "$input" | env ZCL_DEV_SOURCE_ROOT="$workspace" \
+        merkle=$(printf '%s' "$input" | checked_document env ZCL_DEV_SOURCE_ROOT="$workspace" \
             timeout "$command_timeout" "$rank_bin" code provenance merkle \
             --input=-) || fail "code.provenance.merkle failed for $path"
         validate_envelope "$room" code.room zcl.code_room.v1 250
@@ -506,7 +517,7 @@ membership_check() {
 code_room_document() {
     local path=$1 input output
     input=$(printf '{"path":"%s"}' "$(json_escape "$path")")
-    output=$(printf '%s' "$input" | env ZCL_DEV_SOURCE_ROOT="$workspace" \
+    output=$(printf '%s' "$input" | checked_document env ZCL_DEV_SOURCE_ROOT="$workspace" \
         timeout "$command_timeout" "$rank_bin" code room --input=-) ||
         fail "code.room failed for path: $path"
     printf '%s' "$output"
@@ -547,7 +558,12 @@ run_scope_selftest() {
     local graph_body="$run_root/scope-selftest.graph-body"
     local fixture="$run_root/scope-selftest.batch"
     local graph_fixture="$run_root/scope-selftest.graph-batch"
-    local row room group output graph_output bad arm
+    local row room group output graph_output bad arm rank_root
+    [[ $(checked_document printf '%s' '{}') = '{}' ]] ||
+        fail "transport selftest changed valid bytes"
+    if (checked_document printf '%s\0' '{}' >/dev/null 2>&1); then
+        fail "transport selftest accepted raw NUL"
+    fi
     workspace=$repo_root
     row=$(printf '{"query":"exact directory group union","relevant_paths":["%s","%s"]}' \
         "$net_path" "$test_path")
@@ -563,6 +579,21 @@ run_scope_selftest() {
         fail "scope selftest outside directory group changed"
     printf '1\t1\t%s\n2\t1\t%s\n' "$test_path" "$outside_path" >"$literal_file"
     cp -- "$literal_file" "$bm25_file"
+    rank_root=$(checked_document "$evaluator" --rank-root 1 <"$literal_file") ||
+        fail "transport selftest cannot derive a real ranking root"
+    check_rank_file transport "$literal_file" 2 2 true "$rank_root"
+    raw_root_fixture() { printf '%s\0' "$rank_root"; }
+    if (evaluator=raw_root_fixture
+        check_rank_file transport "$literal_file" 2 2 true "$rank_root" >/dev/null 2>&1); then
+        fail "transport selftest accepted raw NUL in an independent ranking root"
+    fi
+    if (sha3=raw_root_fixture; hash_file "$literal_file" >/dev/null 2>&1); then
+        fail "transport selftest accepted raw NUL in a file hash"
+    fi
+    if (sha3=raw_root_fixture; hash_text fixture >/dev/null 2>&1); then
+        fail "transport selftest accepted raw NUL in a text hash"
+    fi
+    printf 'retrieval-gold-benchmark: TRANSPORT SELFTEST PASS scalar_mutations=3\n'
     batch=$body; graph_batch=$graph_body; : >"$batch"; : >"$graph_batch"
     emit_batch_task "$row" scope_union "$literal_file" 2 true \
         "$bm25_file" 2 true "$bm25_file" 2 true "$groups_file"
@@ -576,8 +607,8 @@ run_scope_selftest() {
         cat "$graph_body"
         printf '%s\n' end
     } >"$graph_fixture"
-    output=$("$evaluator" <"$fixture") || fail "scope selftest evaluator refused fixture"
-    graph_output=$("$evaluator" <"$graph_fixture") ||
+    output=$(checked_document "$evaluator" <"$fixture") || fail "scope selftest evaluator refused fixture"
+    graph_output=$(checked_document "$evaluator" <"$graph_fixture") ||
         fail "scope selftest evaluator refused identifier-graph fixture"
     validate_eval_result_envelope "$output" 1 2 scope-baseline
     validate_eval_result_envelope "$graph_output" 1 2 scope-identifier-graph
@@ -717,6 +748,7 @@ run_eligible_task() {
     fi
     ended=$(date +%s%N); process_wall_us=$(((ended - started) / 1000))
     [[ -s $stream_file ]] || fail "ranking stream emitted no pages for $id"
+    "$transport_check" <"$stream_file" || fail "ranking stream contains unrepresentable raw bytes for $id"
     while IFS= read -r output || [[ -n $output ]]; do
         [[ $terminal = false ]] ||
             fail "ranking stream emitted a record after its terminal page for $id"
@@ -1004,8 +1036,8 @@ expected_graph_base64_chars=$((4 * ((graph_batch_bytes + 2) / 3)))
 [[ ${#graph_batch_base64} -eq $expected_graph_base64_chars &&
    $graph_batch_base64 =~ ^[A-Za-z0-9+/]*={0,2}$ ]] ||
     fail "identifier-graph evaluator batch base64 encoding is malformed"
-metrics=$("$evaluator" <"$batch") || fail "maintained evaluator adapter failed"
-graph_metrics=$("$evaluator" <"$graph_batch") ||
+metrics=$(checked_document "$evaluator" <"$batch") || fail "maintained evaluator adapter failed"
+graph_metrics=$(checked_document "$evaluator" <"$graph_batch") ||
     fail "maintained evaluator adapter refused identifier-graph batch"
 keys_exact "$metrics" . "$eval_base_result_keys"
 keys_exact "$graph_metrics" . "$eval_base_result_keys"
