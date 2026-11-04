@@ -114,12 +114,44 @@ static int ejt_case_sw_passes(void)
             "3100000,\"artifact_dir\":\"/a/1\"}\n", "wb"));
         ASSERT(ejt_sw(led, slo, NULL) && ejt_is("PASS", 0));
         ASSERT(ejt_has("ledger_available=true"));
+        ASSERT(ejt_write(slo,
+            "{\"meta\":{\"oracle_height\":3100000},\"ts\":2000000000,\"oracle_height\":3200000}\n",
+            "wb"));
+        ASSERT(ejt_sw(led, slo, NULL) && ejt_is("LAGGING_FIXTURE", 1));
+        ASSERT(ejt_write(slo,
+            "{\"ts\":2000000000,\"oracle_height\":3100000,\"oracle_\\u0068eight\":3200000}\n",
+            "wb"));
+        ASSERT(ejt_sw(led, slo, NULL) && ejt_is("INCOMPLETE", 1));
         ejt_path(slo, sizeof(slo), "slo_stale.jsonl");
         ejt_row(row, sizeof(row), "{\"ts\":%lld,\"oracle_height\":%d}\n",
                 (long long)(EJT_NOW - 7200), 3200000);
         ASSERT(ejt_write(slo, row, "wb"));
         ASSERT(ejt_sw(led, slo, NULL) && ejt_is("PASS", 0));
         ASSERT(ejt_has("ledger_available=false"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool ejt_write_oracle_tail(const char *slo)
+{
+    FILE *fp = fopen(slo, "wb");
+    if (!fp) return false;
+    bool ok = fseek(fp, (long)64 * 1024 * 1024 + 1, SEEK_SET) == 0 &&
+              fputs("\n{\"ts\":2000000000,\"oracle_height\":3200000}\n", fp) >= 0;
+    return fclose(fp) == 0 && ok;
+}
+
+static int ejt_case_sw_oracle_tail(void)
+{
+    int failures = 0;
+    char led[600], slo[600];
+    ejt_path(led, sizeof led, "sw_large_oracle.jsonl");
+    ejt_path(slo, sizeof slo, "slo_large.jsonl");
+    TEST("stopwatch: grade a fresh oracle record at the tail of a large ledger") {
+        ASSERT(ejt_write(led, "{\"ts\":2000000000,\"verdict\":\"pass\",\"final_network_tip\":3100000}\n", "wb"));
+        ASSERT(ejt_write_oracle_tail(slo));
+        ASSERT(ejt_sw(led, slo, NULL) && ejt_is("LAGGING_FIXTURE", 1));
         PASS();
     } _test_next:;
     return failures;
@@ -837,6 +869,7 @@ int test_evidence_judge(void)
     test_make_tmpdir(g_root, sizeof(g_root), "evidence_judge", "root");
     failures += ejt_case_sw_passes();
     failures += ejt_case_sw_fixture_gates();
+    failures += ejt_case_sw_oracle_tail();
     failures += ejt_case_sw_qualify();
     failures += ejt_case_sw_history_fields();
     failures += ejt_case_sw_missing_artifact();

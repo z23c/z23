@@ -16,6 +16,7 @@
 #include "zutf8/zutf8.h"
 #include "services/stopwatch_skip_watch.h"
 
+#include <errno.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -101,49 +102,110 @@ static bool sw_unambiguous(const struct json_value *row)
 
 /* The oracle height of the newest SLO row that carries one, if that row is
  * within `max_age` of now. The first row with a height decides. */
-static bool sw_oracle(const struct zcl_stopwatch_judge_opts *o, int64_t now,
-                      int64_t *height)
+enum sw_oracle_state { SW_NO_HEIGHT, SW_OLD_HEIGHT, SW_FRESH_HEIGHT, SW_BAD_HEIGHT, SW_NEED_PREFIX };
+
+static size_t sw_key_count(const struct json_value *row, const char *name)
 {
-    size_t len = 0;
-    char *buf = o->slo_ledger ? ej_slurp(o->slo_ledger, SW_SLO_MAX, &len) : NULL;
-    char *end;
-    bool found = false;
-    if (!buf)
-        return false;
-    end = buf + len;
-    if (end > buf && end[-1] == '\n')
-        end--;
-    for (int i = 0; i < SW_SLO_TAIL_LINES && end >= buf; i++) {
-        char *start = end;
-        struct ej_num oh, ts;
-        while (start > buf && start[-1] != '\n')
-            start--;
-        *end = '\0';
-        oh = ej_field_num(start, "oracle_height", false);
-        ts = ej_field_num(start, "ts", false);
-        if (oh.kind == EJ_NUM && ts.kind == EJ_NUM) {
-            uint64_t age = sw_timestamp_distance(now, ts.n);
-            found = o->oracle_max_age_secs > 0 &&
-                    age < (uint64_t)o->oracle_max_age_secs;
-            *height = oh.n;
-            break;
-        }
-        if (start == buf)
-            break;
+    size_t count = 0;
+    for (size_t i = 0; i < row->num_children; ++i)
+        if (strcmp(row->keys[i], name) == 0) ++count;
+    return count;
+}
+
+static enum sw_oracle_state sw_oracle_value(const struct json_value *row, int64_t now,
+                                             int64_t max_age, int64_t *height)
+{
+    if (row->type != JSON_OBJ || sw_key_count(row, "oracle_height") > 1)
+        return SW_BAD_HEIGHT;
+    const struct json_value *oh = json_get(row, "oracle_height");
+    if (json_is_null(oh)) return SW_NO_HEIGHT;
+    if (oh->type != JSON_INT || oh->val.i < 0 || sw_key_count(row, "ts") != 1)
+        return SW_BAD_HEIGHT;
+    const struct json_value *ts = json_get(row, "ts");
+    if (ts->type != JSON_INT) return SW_BAD_HEIGHT;
+    if (max_age <= 0 || sw_timestamp_distance(now, ts->val.i) >= (uint64_t)max_age)
+        return SW_OLD_HEIGHT;
+    *height = oh->val.i;
+    return SW_FRESH_HEIGHT;
+}
+
+static enum sw_oracle_state sw_oracle_record(const char *line, size_t len, int64_t now,
+                                              int64_t max_age, int64_t *height)
+{
+    if (len == 0) return SW_NO_HEIGHT;
+    if (len > SW_SLO_MAX || !zutf8_validate_n(line, len)) return SW_BAD_HEIGHT;
+    struct json_value row = {0};
+    enum sw_oracle_state state = json_read(&row, line, len)
+        ? sw_oracle_value(&row, now, max_age, height) : SW_BAD_HEIGHT;
+    json_free(&row);
+    return state;
+}
+
+/* A partial first record can be judged only after its delimiter or file start is known. */
+static enum sw_oracle_state sw_oracle_scan(const char *buf, size_t len, bool partial,
+                                           int64_t now, int64_t max_age, int64_t *height)
+{
+    const char *end = buf + len;
+    if (end > buf && end[-1] == '\n') end--;
+    for (int i = 0; i < SW_SLO_TAIL_LINES; i++) {
+        const char *start = end;
+        while (start > buf && start[-1] != '\n') start--;
+        if (start == buf && partial) return SW_NEED_PREFIX;
+        enum sw_oracle_state state = sw_oracle_record(start, (size_t)(end - start),
+                                                       now, max_age, height);
+        if (state != SW_NO_HEIGHT || start == buf) return state;
         end = start - 1;
     }
-    free(buf);
-    return found;
+    return SW_NO_HEIGHT;
 }
+
+static enum sw_oracle_state sw_oracle_tail(FILE *fp, long size, int64_t now,
+                                           int64_t max_age, int64_t *height)
+{
+    const size_t limit = SW_SLO_MAX + 2; /* record plus both delimiting LFs */
+    size_t take = (size_t)size < 4096 ? (size_t)size : 4096;
+    char *buf = NULL;
+    enum sw_oracle_state state = SW_BAD_HEIGHT;
+    size_t have = 0;
+    while (take > have) {
+        char *larger = zcl_realloc(buf, take, "stopwatch oracle tail");
+        if (!larger) break;
+        buf = larger;
+        size_t extra = take - have;
+        if (have) memmove(buf + extra, buf, have);
+        if (fseek(fp, size - (long)take, SEEK_SET) != 0 || fread(buf, 1, extra, fp) != extra)
+            break;
+        state = sw_oracle_scan(buf, take, take < (size_t)size, now, max_age, height);
+        if (state != SW_NEED_PREFIX) break;
+        state = SW_BAD_HEIGHT;
+        have = take;
+        take = take > limit / 2 ? limit : take * 2;
+        if (take > (size_t)size) take = (size_t)size;
+    }
+    free(buf);
+    return state;
+}
+
+static enum sw_oracle_state sw_oracle(const struct zcl_stopwatch_judge_opts *o, int64_t now,
+                                      int64_t *height)
+{
+    if (!o->slo_ledger) return SW_NO_HEIGHT;
+    FILE *fp = fopen(o->slo_ledger, "rb");
+    if (!fp) return errno == ENOENT ? SW_NO_HEIGHT : SW_BAD_HEIGHT;
+    enum sw_oracle_state state = SW_BAD_HEIGHT;
+    long size;
+    if (fseek(fp, 0, SEEK_END) == 0 && (size = ftell(fp)) >= 0)
+        state = size ? sw_oracle_tail(fp, size, now, o->oracle_max_age_secs, height) : SW_NO_HEIGHT;
+    return fclose(fp) == 0 ? state : SW_BAD_HEIGHT;
+}
+
+
 
 static bool sw_proof_root_pass(const struct json_value *proof)
 {
     if (proof->type != JSON_OBJ) return false;
-    size_t verdicts = 0;
-    for (size_t i = 0; i < proof->num_children; i++)
-        if (strcmp(proof->keys[i], "verdict") == 0) verdicts++;
     const struct json_value *verdict = json_get(proof, "verdict");
-    return verdicts == 1 && verdict && verdict->type == JSON_STR &&
+    return sw_key_count(proof, "verdict") == 1 && verdict && verdict->type == JSON_STR &&
            strcmp(json_get_str(verdict), "pass") == 0;
 }
 
@@ -206,7 +268,12 @@ static bool sw_gate_fixture(const struct zcl_stopwatch_judge_opts *o, int64_t no
         sw_emit(out, 1, "THIN_FIXTURE", reason, "", artifact);
         return false;
     }
-    *ledger = sw_oracle(o, now, &oracle);
+    enum sw_oracle_state observed = sw_oracle(o, now, &oracle);
+    if (observed == SW_BAD_HEIGHT) {
+        sw_emit(out, 1, "INCOMPLETE", "invalid_oracle_evidence", " ledger_available=false", artifact);
+        return false;
+    }
+    *ledger = observed == SW_FRESH_HEIGHT;
     if (*ledger && tip && tip->type == JSON_INT && oracle - tip->val.i > o->oracle_lag_budget) {
         (void)snprintf(reason, sizeof(reason),
                        "final_network_tip_%lld_lags_oracle_%lld_by_%lld_gt_budget_%lld",
