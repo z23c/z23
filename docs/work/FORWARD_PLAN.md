@@ -77,15 +77,33 @@ each of these once and reuses the result by content address:
    each other's verdict logs.
 
 The number that steers the lab is the median time from a commit being
-written to it landing on main. Git records both times (`%at` and `%ct`).
-Then comes the time to a running public node.
+written to it landing on main: the tip's author time (`%at`) to its
+`landed_at` in the land outcomes. Rebase rewrites the commit time, so `%ct`
+does not measure it. Then comes the time to a running public node.
 
 ## Now
 
 At most seven items, ranked. Take the first one nobody has claimed in the
 native `dev.agent` registry, keep it to one lane with one writer, and land it
 through `dev land submit`. A dev-tooling item names the number it moves, with
-before and after values.
+before and after values. Before starting, check that the work has not
+already landed: match `git log origin/main` by subject and `git cherry` by
+patch id, never by commit id, because the land queue rebases. On 2026-11-04
+four units redid work that was already on main.
+
+Where the time went, 2026-10-28 to 2026-11-04, over 459 landings:
+
+| Stage | Median | p90 |
+|---|---|---|
+| Commit written to submit | 71 min | 313 min |
+| Pre-submit stack gate (371 runs) | 57 min | 120 min |
+| Submit to landed | 31 min | 85 min |
+| Land proof | 12 min | 28 min |
+
+Stack gates ran for 409 elapsed hours and land proofs for 96, and the land
+proof repeats the stack gate's full lint and tests. 60 rows failed or
+conflicted, costing 11.2 hours of proof. Items 2 to 4 remove these costs in
+order of size.
 
 1. **The node restarts in seconds.** `fleet objectives` names
    `node_warm_restart_s` as the biggest gap; read the live card, not this
@@ -93,125 +111,119 @@ before and after values.
    coins read view, the prologue. Fix the largest step, read the next boot
    beacon, repeat. Resident memory (`node_rss_mb`) comes next. A boot that
    refuses to start names its stage and cause; an untyped refusal is a bug.
-2. **Z23 knows every line of its own code.** Git trees already form a
-   Merkle tree. The inventory is an overlay on them in
-   `cognition/modules/codeindex`, keyed by tree and blob hash. It answers
-   for any commit without a checkout. It grows the
-   [Palace](../dev/palace-design.md) one-line `purpose` and `code room`
-   into full pages.
-   - **Exact counts in one lookup.** Each tree hash caches its totals:
-     files, lines, symbols, tests, pages and stale pages. A count for main
-     or any subtree is one read. A new commit recomputes only the trees it
-     changed. Before (2026-11-04), three tools gave three counts of main's
-     C: `git grep` 3,403,932 lines in 8,326 files outside `vendor/`, while
-     `code corpus` read an older working tree with its own roots and gave
-     3,163,816.
-   - **Every line indexed.** Each line maps to its blob and to the symbol,
-     file, group and area around it. A line search returns `file:line`
-     together with the page around it.
-   - **Pages around every line.** Pages nest: symbol, then file, then
-     group, then area, then root. A page holds:
-     - its purpose and contract;
-     - its callers and callees;
-     - the tests that cover it;
-     - its design documents;
-     - the commits that explain why;
-     - lessons and receipts;
-     - its health: complexity and flaky groups.
-
-     Facts are derived, so they are always fresh. An agent writes the
-     prose the first time the page is read, and again after the subject's
-     hash changes. The prose is cached by that hash and signed, so no agent
-     writes the same summary twice, and other labs fetch it instead of
-     regenerating it. A background pass within the agent quota fills in
-     pages nobody has read yet. Prose coverage is a tracked number.
-   - **Self-managing.** A landing marks dirty only the pages on the path
-     from the changed lines up to the root. A lesson anchors to a symbol
-     and to the hash of its span. When that code changes, the lesson is
-     flagged for re-confirmation, never dropped.
-   - **One ranker.**
-     - `code have` answers "do we already have X?" over all of the
-       inventory, and `code guide` carries its top answers for the task
-       text.
-     - `z23_search`, `discover wiki`, `general` and `fleet wiki find` use
-       the same ranker.
-     - A known-answer set of real questions scores it. For example:
-       - test result cache → `tests/harness/src/testcache.c`;
-       - separate verifier → `docs/work/separate-verifier.md`;
-       - Merkle mountain range → `core/modules/chain/src/mmr.c` and
-         `contexts/commons/modules/vcs/src/zcode_observation_mmr.c`.
-
-   Numbers:
-   - exact inventory queries at main in under 100 ms;
-   - known-answer questions answered in the top five: before (2026-11-04)
-     0 of 2 at any rank plus 1 partial, target 90%;
-   - the share of symbols with a fresh page: before 0.
-3. **The land queue runs the newest landed driver.** `dev land drive` has
-   no self-upgrade step, so a landed fix to the driver's own rebase, train
-   or push logic waits for a manual upgrade.
-   - After a landing that touches the land path, the queue builds the
-     driver from the new main and runs it in shadow on the next row, beside
-     the current driver.
-   - It switches when their decisions match, and switches back after a
-     failed row.
-   - Number: the landings between a driver fix landing and the driver
-     running it. Before: unbounded, because only a manual step closes the gap.
-4. **One full proof per change.** The land proof is the only full lint and
+2. **One full proof per change.** The land proof is the only full lint and
    test run.
-   - Pre-submit gates keep the fast checks and the focused groups of the
-     changed files.
+   - A lane submits after its focused groups, `lint-fast` and the cheap
+     gates that fail land proofs. The pre-submit stack gate is not required.
+     `check-kpi-floor` refused 4 rows in the week, 3 of them on 2026-11-04,
+     and `lint-fast` does not run it.
+   - The top cause of failed rows is the land worktree's own compiler step
+     (`build/bin/zcc cc -s`, 7 rows), not a code defect. Fix it at the root.
+   - A failed row's outcome carries the failing gate's own output lines, so
+     the failure returns to its author without a search. Today the outcome
+     keeps only the `FAIL` line, and the gate log sits under the land
+     worktree's `.cache/lint-timing/gates/`.
+   - A failing assertion prints what its test observed: child output, exit
+     status, response body. On 2026-11-04 two of four agents could not
+     root-cause the most frequently failing groups, because the logs held
+     only the assertion line.
    - Lint gates that read one file at a time run only on changed files.
-     The land queue chooses them from the diff, and every verdict is fresh.
-   - Test groups run in order of their past failures on the changed paths,
-     so a red proof stops early.
-   - A group that fails only under load gets a root-cause fix, never a
-     rerun or a weaker assertion.
+     Test groups run in order of their past failures on the changed paths.
+     A group that fails only under load gets a root-cause fix, never a rerun
+     or a weaker assertion.
+   - Every gate earns its cost. Lint gates went from 168 to 215 in the week
+     starting 2026-10-28, and each one runs in every land proof. The proof
+     records each gate's and each group's runtime and catches, and a gate
+     with no catch in four weeks moves to a scheduled sweep.
 
-   Numbers: the median minutes from commit to main, measured on 2026-10-28
-   to 2026-11-04 at 226 against a target of 60, and the land-queue failure
-   rate, which must stay under 15%.
-5. **Signed verdict reuse.** Follow [`separate-verifier.md`](separate-verifier.md)
-   and [`verifier-install-packet.md`](verifier-install-packet.md).
-   - First, read the hit and divergence rates of the shadow verdict store
-     in [`tools/dev/dev_proof.c`](../../tools/dev/dev_proof.c). They cap
-     what reuse can save.
-   - Then clear the packet's blockers and run its one install script.
-   - Reuse admits only verdicts signed by the pinned verifier key and
-     appended to its Merkle mountain range log.
+   Numbers: commit to landed median 102 min, target 45; p90 398 min, target
+   90; failed or conflicted rows 60 against 459 landed, target under 5%.
+3. **The lead is not on the path.** On 2026-11-04 every lane waited for the
+   lead to rebase it, submit it and read its failure.
+   - A recorded non-author LAND lets the author submit.
+   - A failed row returns to its author with its evidence, and the author
+     repairs and resubmits.
+   - Add `dev land intake`, which takes READY posts from other agents and
+     labs: signature, author allowlist, scope, merge-tree, then the queue.
 
-   Number: the shadow hit rate at zero divergences. Before: not measured.
-6. **A stranger's lab lands a change over Z23.**
-   [`tools/lab_peer.c`](../../tools/lab_peer.c) `verify` reads offers only
-   from allowlisted keys, and `collect` never queues.
-   - Re-verify any key's offer with `--check=verify` in an isolated tree.
-     Admission stays a maintainer decision.
-   - Add one native intake step: fetch, signature, scope, merge-tree,
-     queue, reply.
-   - Add one test group that runs offer, verify and collect across two
-     nodes ([`LAB.md`](../dev/LAB.md#peer-verification-over-the-swarm)).
-   - The change may be a one-file plugin built with `plugin dev`
-     ([`PLUGINS.md`](../dev/PLUGINS.md)). Agents then call it through the
-     MCP adapter.
-   - When two labs agree on nearly every change, a second-lab receipt
-     becomes required before landing.
+   Number: lanes the lead handles by hand per landing. Before: all of them.
+4. **The land queue proves in parallel.** One proof runs at a time, and a red
+   train re-proves each member alone.
+   - Bisect a red train.
+   - Prove the next rows speculatively on an idle host, then confirm them on
+     the current main.
 
-   Number: stranger changes landed over Z23. Before: 0.
-7. **Every gate earns its cost; less shell.**
-   - Lint gates went from 168 to 215 in the week starting 2026-10-28, and
-     each one runs in every land proof. The proof records each gate's and
-     each group's runtime and catches. A gate with no catch in four weeks
-     moves to a scheduled sweep.
-   - Port the shell scripts the land path runs on every change to C23
-     first. Each port proves the same output and exit status as the script
-     it replaces, deletes that script, and lowers
-     `tools/lint/bash_line_budget.txt` in the same commit.
-   - The cyclomatic cap stays 15 and its baseline stays empty.
+   Number: submit to landed p90, before 85 min, target 30.
+5. **Z23 knows every line of its own code.** The inventory is an overlay on
+   git trees in `cognition/modules/codeindex`, keyed by tree and blob hash,
+   so it answers for any commit without a checkout. It grows the
+   [Palace](../dev/palace-design.md) `purpose` line and `code room` into
+   pages.
+   - **Exact counts.** `code count --at=REV` reads git objects with a
+     per-blob cache. At f0e2092992 it gave 3,404,079 lines in 8,326 C files
+     outside `vendor/`, equal to `git grep`, warm in 125 ms. Target: every
+     inventory query at main under 100 ms.
+   - **Every line indexed.** Symbols carry their end line, files their line
+     count and hash, and design documents get a table, so `path:line` maps to
+     its function and documents are searchable.
+   - **Pages around every line.** Pages nest from symbol to file, group,
+     area and root. Each page holds purpose, contract, callers, callees,
+     covering tests, design documents, the commits that explain why,
+     lessons, receipts and health. Facts are derived. Prose is written when
+     a page is first read and when its subject's hash changes, cached by
+     that hash and signed, so no agent writes the same summary twice. A
+     landing dirties only the path from the changed lines to the root. A
+     lesson anchors to a span hash and is flagged, never dropped, when the
+     span changes. 123 module cards written on 2026-11-04 scored 1.95 of 2
+     on a 20-card spot check and wait for the pages table.
+   - **One ranker.** `code have`, `code guide`, `z23_search`, `discover
+     wiki`, `general` and `fleet wiki find` share it. The known-answer set
+     `tests/fixtures/code_have/cases.jsonl` holds 63 real questions, for
+     example test result cache → `tests/harness/src/testcache.c`, separate
+     verifier → `docs/work/separate-verifier.md`, Merkle mountain range →
+     `core/modules/chain/src/mmr.c` and
+     `contexts/commons/modules/vcs/src/zcode_observation_mmr.c`. Top five:
+     16 of 63 before 2026-11-04, 21 after; target 90%.
+
+   Number: the share of symbols with a fresh page. Before: 0.
+6. **The land queue runs the newest landed driver.** The self-upgrade module
+   (default off) keeps a content-addressed driver slot, compares the
+   candidate's decisions with the current driver's, switches after matching
+   rows and switches back after a failed row. Next come a read-only decision
+   verb and the post-landing hook. Number: the landings between a driver fix
+   landing and the driver running it. Before: unbounded.
+7. **Labs trade proofs, not trust.**
+   - Signed verdict reuse follows [`separate-verifier.md`](separate-verifier.md)
+     and [`verifier-install-packet.md`](verifier-install-packet.md). Read
+     the shadow verdict store's hit and divergence rates in
+     [`tools/dev/dev_proof.c`](../../tools/dev/dev_proof.c) first, then
+     clear the packet's blockers and run its one install script. Reuse
+     admits only verdicts signed by the pinned verifier key and appended to
+     its Merkle mountain range log. Number: shadow hit rate at zero
+     divergences. Before: not measured.
+   - A stranger's lab lands a change over Z23.
+     [`tools/lab_peer.c`](../../tools/lab_peer.c) `verify` reads offers only
+     from allowlisted keys, and `collect` never queues. Re-verify any key's
+     offer with `--check=verify` in an isolated tree; admission stays a
+     maintainer decision. One test group runs offer, verify and collect
+     across two nodes
+     ([`LAB.md`](../dev/LAB.md#peer-verification-over-the-swarm)). The
+     change may be a one-file plugin built with `plugin dev`
+     ([`PLUGINS.md`](../dev/PLUGINS.md)), which agents then call through the
+     MCP adapter. When two labs agree on nearly every change, a second-lab
+     receipt becomes required before landing. Number: stranger changes
+     landed. Before: 0.
+   - Port the shell scripts the land path runs on every change to C23. Each
+     port proves the same output and exit status, deletes the script and
+     lowers `tools/lint/bash_line_budget.txt` in the same commit. The
+     cyclomatic cap stays 15 and its baseline stays empty.
 
 **Not now.**
 - No new search or brief command outside the one ranker.
 - No new lint gate without the class of defect it catches.
 - No land-path binary run from a development tree.
 - No new plan document: this list is the work order.
+- No pre-submit stack gate as a landing requirement.
 
 ## Invariants and authority
 
