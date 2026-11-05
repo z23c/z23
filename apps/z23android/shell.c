@@ -11,6 +11,7 @@
 #include "surface.h"
 #include "pay_stash.h"
 #include "setup_state.h"
+#include "setup_field.h"
 #include "wallet_setup_ui.h"
 #include "wallet_send_ui.h"
 #include "wallet_ui.h"
@@ -23,7 +24,7 @@
 
 #define MATCH (-1)
 #define WRAP (-2)
-#define NAV_MAX 24u
+#define NAV_MAX 28u
 #define PATH_CAP 640
 #define DARK 0xff111111u
 #define BUTTON_COLOR 0xff2b2b2bu
@@ -31,7 +32,7 @@
 #define GRAVITY_CENTER_HORIZONTAL 1
 
 enum screen { SCREEN_HOME, SCREEN_ASSISTANT, SCREEN_APPS, SCREEN_SETTINGS, SCREEN_SCAN, SCREEN_FLEET_REVIEW, SCREEN_WALLET, SCREEN_SEND, SCREEN_SETUP, SCREEN_COUNT };
-enum command { CMD_HOME, CMD_APPS, CMD_SETTINGS, CMD_HOME_SETTINGS, CMD_LAYOUT, CMD_SCAN_CANCEL, CMD_CAMERA_SETTINGS, CMD_CAMERA_PASTE, CMD_OUTCOME_DISMISS, CMD_FLEET_JOIN, CMD_FLEET_BACK, CMD_FLEET_COPY };
+enum command { CMD_HOME, CMD_APPS, CMD_SETTINGS, CMD_HOME_SETTINGS, CMD_LAYOUT, CMD_SCAN_CANCEL, CMD_CAMERA_SETTINGS, CMD_CAMERA_PASTE, CMD_PASTE_REVIEW, CMD_OUTCOME_DISMISS, CMD_FLEET_JOIN, CMD_FLEET_BACK, CMD_FLEET_COPY };
 enum target_kind { TARGET_NONE, TARGET_NAV, TARGET_ROW, TARGET_TILE, TARGET_WALLET, TARGET_SEND, TARGET_SETUP };
 
 struct nav { jobject view; enum command command; size_t arg; };
@@ -42,11 +43,12 @@ static struct {
     zapp_native_action send;
     jobject notice_views[SCREEN_COUNT], outcome_view, outcome_panel, status_view, scan_view, scan_hint_view, scan_camera, scan_panel, apps_list;
     jobject fleet_review_text, fleet_review_result, fleet_review_qr, fleet_join_button, fleet_copy_button, fleet_back_button;
+    jobject paste_panel, paste_field, paste_review, paste_error;
     char fleet_receipt[8192];
     bool fleet_review_started, fleet_qr_shown;
     enum screen current, before_scan;
     bool send_from_wallet;
-    bool preview, pair_seen, scan_dismissed, user_layout, rendered, camera_waiting;
+    bool preview, pair_seen, scan_dismissed, user_layout, rendered, camera_waiting, paste_mode, paste_submitted;
     bool setup_offered;   /* the first launch without a wallet opened the setup screens once */
     unsigned scans_seen;
     struct zapp_layout *layout;
@@ -293,7 +295,7 @@ static bool build_scan_camera(JNIEnv *env, jobject root)
     jobject camera = column(env, 0xff000000u, 0, false);
     jobject image = zj_widget(env, "android/widget/ImageView", shell.activity);
     bool ok = camera && image && zj_margins(env, image, MATCH, 0, 1.0f, 0, 0, 0, 0) && zj_append(env, camera, image) &&
-        zj_keep(env, &shell.scan_view, image) && scan_hint(env, camera) && button(env, camera, "Cancel", CMD_SCAN_CANCEL, 0, 0) &&
+        zj_keep(env, &shell.scan_view, image) && scan_hint(env, camera) && button(env, camera, "Paste instead", CMD_CAMERA_PASTE, 0, 0) && button(env, camera, "Cancel", CMD_SCAN_CANCEL, 0, 0) &&
         zj_margins(env, camera, MATCH, 0, 1.0f, 0, 0, 0, 0) && zj_append(env, root, camera) && zj_keep(env, &shell.scan_camera, camera);
     if (image) (*env)->DeleteLocalRef(env, image);
     if (camera) (*env)->DeleteLocalRef(env, camera);
@@ -311,9 +313,44 @@ static bool build_scan_panel(JNIEnv *env, jobject root)
     if (panel) (*env)->DeleteLocalRef(env, panel);
     return ok;
 }
+static bool paste_input(JNIEnv *env, jobject panel, jobject field)
+{
+    return label(env, panel, "Paste a payment or fleet code", 20.0f, WHITE) &&
+        zj_typography(env, field, 17.0f, (jint)WHITE) &&
+        zj_char_sequence(env, field, "setHint", "Paste code here") &&
+        zj_int_property(env, field, "setInputType", 0xA0001) &&
+        zj_int_property(env, field, "setImeOptions", ZAPP_FIELD_IME_NO_LEARNING) &&
+        zj_int_property(env, field, "setImportantForAutofill", ZAPP_FIELD_AUTOFILL_NO) &&
+        zj_bool_property(env, field, "setFilterTouchesWhenObscured", true) &&
+        zj_margins(env, field, MATCH, WRAP, 0.0f, 0, 0, 0, 0) && zj_append(env, panel, field) &&
+        zj_keep(env, &shell.paste_field, field);
+}
+static bool paste_controls(JNIEnv *env, jobject panel, jobject error)
+{
+    bool ok = zj_typography(env, error, 16.0f, (jint)WHITE) &&
+        zj_append(env, panel, error) && zj_keep(env, &shell.paste_error, error) &&
+        button(env, panel, "Review", CMD_PASTE_REVIEW, 0, 0);
+    if (ok) shell.paste_review = shell.navs[shell.nav_count - 1].view;
+    return ok && button(env, panel, "Cancel", CMD_SCAN_CANCEL, 0, 0);
+}
+static bool build_paste(JNIEnv *env, jobject root)
+{
+    jobject panel = column(env, DARK, 16, false);
+    jobject field = zj_widget(env, "android/widget/EditText", shell.activity);
+    jobject error = zj_widget(env, "android/widget/TextView", shell.activity);
+    bool ok = panel && field && error &&
+        zj_bool_property(env, root, "setFitsSystemWindows", true) &&
+        paste_input(env, panel, field) && paste_controls(env, panel, error) &&
+        zj_margins(env, panel, MATCH, MATCH, 0.0f, 0, 0, 0, 0) && zj_append(env, root, panel) &&
+        zj_keep(env, &shell.paste_panel, panel) && zj_visible(env, panel, false);
+    if (field) (*env)->DeleteLocalRef(env, field);
+    if (error) (*env)->DeleteLocalRef(env, error);
+    if (panel) (*env)->DeleteLocalRef(env, panel);
+    return ok;
+}
 static bool build_scan(JNIEnv *env, jobject root)
 {
-    return build_scan_camera(env, root) && build_scan_panel(env, root);
+    return build_scan_camera(env, root) && build_scan_panel(env, root) && build_paste(env, root);
 }
 /* The scan screen shows the camera, or, when camera access is off, the words and the buttons that lead on. */
 static void show_scan_screen(JNIEnv *env, enum zapp_camera_access access)
@@ -321,6 +358,7 @@ static void show_scan_screen(JNIEnv *env, enum zapp_camera_access access)
     bool preview = zapp_camera_screen(access).preview;
     (void)zj_visible(env, shell.scan_camera, preview);
     (void)zj_visible(env, shell.scan_panel, !preview);
+    (void)zj_visible(env, shell.paste_panel, false);
 }
 /* A screen with a text field takes the keyboard's height as padding at its bottom (the system window insets include the
  * keyboard under adjustResize), so its scroll view ends above the keyboard and the focused field scrolls into view. The
@@ -562,9 +600,9 @@ static void assistant_refused(char *out, size_t cap)
 /* The touch gate and the Assistant's window protection for the screen about to be shown. */
 static void set_protection(JNIEnv *env, enum screen next)
 {
-    if (wallet_screen(next) || next == SCREEN_ASSISTANT || next == SCREEN_FLEET_REVIEW) shell.gate.protect = true;
+    if (wallet_screen(next) || next == SCREEN_ASSISTANT || next == SCREEN_FLEET_REVIEW || (next == SCREEN_SCAN && shell.paste_mode)) shell.gate.protect = true;
     else zapp_touch_gate_release(&shell.gate);
-    if ((shell.current == SCREEN_ASSISTANT || shell.current == SCREEN_FLEET_REVIEW) && next != SCREEN_ASSISTANT && next != SCREEN_FLEET_REVIEW && !wallet_screen(next)) (void)protect_window(env, false);
+    if ((shell.current == SCREEN_ASSISTANT || shell.current == SCREEN_FLEET_REVIEW || (shell.current == SCREEN_SCAN && shell.paste_mode)) && next != SCREEN_ASSISTANT && next != SCREEN_FLEET_REVIEW && !wallet_screen(next) && next != SCREEN_SCAN) (void)protect_window(env, false);
 }
 /* What a screen does as it comes into view. */
 static void enter_screen(JNIEnv *env, enum screen next)
@@ -638,6 +676,7 @@ static void back(JNIEnv *env)
         zapp_controller_cancel_scan(); shell.scan_dismissed = true;
         zapp_pay_stash_clear();   /* a code still being decoded is dropped when it finishes */
         go(env, shell.before_scan);
+        if (shell.paste_mode) { (void)zj_text(env, shell.paste_field, ""); shell.paste_mode = false; shell.paste_submitted = false; }
     } else if (shell.current == SCREEN_FLEET_REVIEW) {
         if (!shell.fleet_review_started) zapp_controller_cancel_scan();
         go(env, shell.before_scan);
@@ -671,6 +710,40 @@ static void open_camera_settings(JNIEnv *env)
     snprintf(shell.action_notice, sizeof(shell.action_notice), "Could not open Android settings.");
     show_notice(env);
 }
+/* Enter the protected form without reading the clipboard. */
+static void open_paste(JNIEnv *env)
+{
+    if (!protect_window(env, true)) {
+        back(env);
+        snprintf(shell.action_notice, sizeof(shell.action_notice), "Could not protect the code screen. Try again.");
+        show_notice(env);
+        return;
+    }
+    zapp_controller_cancel_scan(); shell.scan_dismissed = true; shell.camera_waiting = false;
+    shell.paste_mode = true; shell.paste_submitted = false; shell.gate.protect = true;
+    (void)zj_visible(env, shell.scan_camera, false); (void)zj_visible(env, shell.scan_panel, false);
+    (void)zj_text(env, shell.paste_field, ""); (void)zj_text(env, shell.paste_error, "");
+    (void)zj_visible(env, shell.paste_panel, true);
+    struct zapp_view view; zapp_controller_snapshot(&view);
+    (void)zj_bool_property(env, shell.paste_review, "setEnabled", !view.busy);
+}
+static void review_paste(JNIEnv *env)
+{
+    struct zapp_view view; zapp_controller_snapshot(&view);
+    if (view.busy || shell.paste_submitted) return;
+    if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)zj_clean(env); return; }
+    jobject editable = zj_object_property(env, shell.paste_field, "getText", "()Landroid/text/Editable;");
+    jstring string = editable ? (jstring)zj_object_property(env, editable, "toString", "()Ljava/lang/String;") : NULL;
+    char *text = calloc(1, 24000); char why[160] = "";
+    bool valid = text && string && zj_copy_utf(env, string, text, 24000) && text[0];
+    bool locked = valid && zj_bool_property(env, shell.paste_field, "setEnabled", false);
+    shell.paste_submitted = locked;
+    bool sent = locked && zapp_controller_action("scan_paste", text, why, sizeof(why));
+    if (sent) { shell.scan_dismissed = false; (void)zj_text(env, shell.paste_error, "Checking…"); }
+    else { shell.paste_submitted = false; (void)zj_bool_property(env, shell.paste_field, "setEnabled", true); (void)zj_text(env, shell.paste_error, !valid ? "Enter a code to review." : !locked ? "Could not review this code. Try again." : why); }
+    if (text) { memory_cleanse(text, 24000); free(text); }
+    (*env)->PopLocalFrame(env, NULL);
+}
 /* Starts a camera scan. With camera access off, the scan screen opens with its words and buttons instead: nothing is
  * requested and no scan runs until the owner returns with access given. */
 static void begin_scan(JNIEnv *env)
@@ -700,7 +773,8 @@ static void run_nav(JNIEnv *env, const struct nav *nav)
     case CMD_LAYOUT: choose_layout(env, nav->arg); break;
     case CMD_SCAN_CANCEL: back(env); break;
     case CMD_CAMERA_SETTINGS: open_camera_settings(env); break;
-    case CMD_CAMERA_PASTE: open_send(env, NULL, "", false); break;
+    case CMD_CAMERA_PASTE: open_paste(env); break;
+    case CMD_PASTE_REVIEW: review_paste(env); break;
     case CMD_OUTCOME_DISMISS: set_outcome(env, ""); break;
     case CMD_FLEET_JOIN: shell.fleet_review_started = true; shell.send("fleet_join", ""); break;
     case CMD_FLEET_BACK: back(env); break;
@@ -907,8 +981,20 @@ static void finish_scan(JNIEnv *env, const struct zapp_view *view)
 
 /* The camera screen opens while a scan runs and closes when it ends; a payment code goes from the camera screen
  * straight to Send and does not pass through the screen it came from. */
+static void render_paste(JNIEnv *env, const struct zapp_view *view, bool finished, bool dismissed)
+{
+    bool idle = !view->busy && !shell.paste_submitted;
+    (void)zj_bool_property(env, shell.paste_field, "setEnabled", idle);
+    (void)zj_bool_property(env, shell.paste_review, "setEnabled", idle);
+    if (shell.paste_submitted && finished && !view->scanning) {
+        if (!dismissed) finish_scan(env, view);
+        else zapp_pay_stash_clear();
+        (void)zj_text(env, shell.paste_field, ""); shell.paste_mode = false; shell.paste_submitted = false;
+    }
+}
 static void render_scan(JNIEnv *env, const struct zapp_view *view, bool finished, bool dismissed)
 {
+    if (shell.paste_mode) { render_paste(env, view, finished, dismissed); return; }
     if (view->scanning) {
         (void)zj_text(env, shell.scan_hint_view, view->scan_checking ? "Code scanned. Checking…" : zapp_camera_screen(ZAPP_CAMERA_GRANTED).hint);
         if (shell.current != SCREEN_SCAN && !dismissed) { shell.before_scan = shell.current; go(env, SCREEN_SCAN); }
@@ -952,6 +1038,7 @@ void zapp_shell_render(JNIEnv *env, const struct zapp_view *view)
     if (zapp_send_ui_take_reshow()) go(env, SCREEN_SEND);
     if (!shell.rendered) {
         shell.rendered = true; shell.scans_seen = view->scans_done; shell.scan_dismissed = view->scanning;
+        if (view->scanning && view->scan_paste) zapp_controller_cancel_scan();
     }
     /* The first launch without a wallet opens the setup screens once; the Wallet tile opens them after that. */
     if (!shell.setup_offered && !shell.preview && zapp_setup_state(shell.files) == ZAPP_SETUP_NEEDED) { shell.setup_offered = true; go(env, SCREEN_SETUP); }
@@ -1026,7 +1113,13 @@ void zapp_shell_resume(JNIEnv *env)
     refresh_apps(env, false);
     load_layout();
     if (shell.current == SCREEN_SETUP) zapp_setup_ui_render(env);
-    else if (shell.current == SCREEN_SCAN) resume_scan(env);
+    else if (shell.current == SCREEN_SCAN) {
+        if (shell.paste_mode && !protect_window(env, true)) {
+            back(env);
+            snprintf(shell.action_notice, sizeof(shell.action_notice), "Could not protect the code screen. Try again.");
+            show_notice(env);
+        } else resume_scan(env);
+    }
     else if (shell.current == SCREEN_APPS || shell.current == SCREEN_SETTINGS || shell.current == SCREEN_WALLET) go(env, SCREEN_HOME);
     else if ((shell.current == SCREEN_ASSISTANT || shell.current == SCREEN_FLEET_REVIEW) && !protect_window(env, true)) go(env, SCREEN_HOME);
     else show_home(env);
@@ -1034,6 +1127,7 @@ void zapp_shell_resume(JNIEnv *env)
 void zapp_shell_destroy(JNIEnv *env)
 {
     if (!shell.activity) return;
+    if (shell.paste_mode) zapp_controller_cancel_scan();
     leave_wallet(env);
     wallet_screens_close();
     zapp_wallet_ui_destroy(env);
@@ -1044,7 +1138,7 @@ void zapp_shell_destroy(JNIEnv *env)
     for (size_t i = 0; i < shell.nav_count; ++i) (*env)->DeleteGlobalRef(env, shell.navs[i].view);
     for (size_t i = 0; i < shell.row_count; ++i) (*env)->DeleteGlobalRef(env, shell.rows[i]);
     for (int i = 0; i < SCREEN_COUNT; ++i) if (shell.roots[i]) (*env)->DeleteGlobalRef(env, shell.roots[i]);
-    jobject *views[] = {&shell.notice_views[SCREEN_HOME], &shell.notice_views[SCREEN_APPS], &shell.notice_views[SCREEN_SETTINGS], &shell.notice_views[SCREEN_SEND], &shell.notice_views[SCREEN_SETUP], &shell.notice_views[SCREEN_FLEET_REVIEW], &shell.outcome_view, &shell.outcome_panel, &shell.status_view, &shell.scan_view, &shell.scan_hint_view, &shell.scan_camera, &shell.scan_panel, &shell.fleet_review_text, &shell.fleet_review_result, &shell.fleet_review_qr, &shell.apps_list};
+    jobject *views[] = {&shell.notice_views[SCREEN_HOME], &shell.notice_views[SCREEN_APPS], &shell.notice_views[SCREEN_SETTINGS], &shell.notice_views[SCREEN_SEND], &shell.notice_views[SCREEN_SETUP], &shell.notice_views[SCREEN_FLEET_REVIEW], &shell.outcome_view, &shell.outcome_panel, &shell.status_view, &shell.scan_view, &shell.scan_hint_view, &shell.scan_camera, &shell.scan_panel, &shell.paste_panel, &shell.paste_field, &shell.paste_error, &shell.fleet_review_text, &shell.fleet_review_result, &shell.fleet_review_qr, &shell.apps_list};
     for (size_t i = 0; i < sizeof(views) / sizeof(views[0]); ++i) if (*views[i]) (*env)->DeleteGlobalRef(env, *views[i]);
     release_cards();
     zapp_launcher_release(env, shell.apps, ZAPP_LAUNCHER_MAX);

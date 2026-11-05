@@ -74,7 +74,7 @@ static void plain_node_line_states(void)
     assert(node_line_is(&view, "Node stopped"));
     view.node_process_running = true;
     view.node_wanted = true;
-    assert(node_line_is(&view, "Starting your node… usually about a minute"));
+    assert(node_line_is(&view, "Starting node…\\nYou can use Z23"));
     view.node_seen_height = true;
     assert(node_line_is(&view, "Your node is running but has not replied yet"));
     view.node_seen_height = false;

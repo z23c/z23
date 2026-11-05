@@ -164,3 +164,9 @@ stash and pairing functions; it does not exercise camera hardware or a device.
 The focused scan tests, complexity check and ARM64 native application build
 passed. The first native configure attempt could not find the cross archive;
 the successful build used the separately provenance-verified Android archive.
+
+The protected Scan paste form sends submitted text through the same classifier
+and fleet preview as camera input. Focused scan and host tests, the complexity
+check, and an ARM64 native app build passed. The host fixture uses mocked scan
+side effects and does not establish camera, keyboard or activity behavior.
+Simulator and physical-device qualification remain pending.

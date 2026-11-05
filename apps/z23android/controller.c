@@ -684,11 +684,12 @@ static bool scan_commit(struct controller *c, uint64_t ticket, const char *paylo
 }
 /* Reads one code and shows what it is. Only a fleet invitation or a laptop pairing reaches a review,
  * and its text stays out of scan_text. Nothing scanned is opened, fetched or paid. */
-static bool scan_payload(struct controller *c, uint64_t ticket, char *out)
+static bool scan_payload(struct controller *c, uint64_t ticket, const char *text, char *out)
 {
     char error[256] = "";
     char *value = calloc(1, ZAPP_TEXT_CAP);
-    bool ok = zapp_camera_scan(ticket, out, ZAPP_TEXT_CAP, error, sizeof(error));
+    bool ok = text ? (copy_text(out, ZAPP_TEXT_CAP, text), true) :
+        zapp_camera_scan(ticket, out, ZAPP_TEXT_CAP, error, sizeof(error));
     if (!ok || !value) {
         copy_text(out, ZAPP_TEXT_CAP, ok ? "Not enough memory to read that code." : error);
         free(value);
@@ -805,7 +806,8 @@ static bool execute_action(struct controller *c, const char *action, const char 
     if (!strcmp(action, "chat")) return conversation_chat(c, arg, out);
     if (!strcmp(action, "voice_start")) return voice_conversation(c, out);
     if (!strcmp(action, "voice_pair")) return pair_voice_host(c, arg, out);
-    if (!strcmp(action, "scan")) return scan_payload(c, ticket, out);
+    if (!strcmp(action, "scan")) return scan_payload(c, ticket, NULL, out);
+    if (!strcmp(action, "scan_paste")) return scan_payload(c, ticket, arg, out);
     return false;
 }
 
@@ -866,9 +868,10 @@ static bool node_choice_saved(struct controller *c, const char *action)
     return zapp_node_wanted(&c->runtime) == !strcmp(action, "node_start");
 }
 /* Actions under More report beside their controls and the rest on the main screen. */
+static bool scan_action(const char *action) { return !strcmp(action, "scan") || !strcmp(action, "scan_paste"); }
 static bool reports_beside(const char *action)
 {
-    return !strncmp(action, "fleet_", 6) || !strncmp(action, "ops_", 4) || !strcmp(action, "voice_pair") || !strcmp(action, "scan");
+    return !strncmp(action, "fleet_", 6) || !strncmp(action, "ops_", 4) || !strcmp(action, "voice_pair") || scan_action(action);
 }
 static bool node_action(const char *action)
 {
@@ -897,11 +900,11 @@ static void execute_result(struct controller *c, const char *action, const char 
     if (!strcmp(action, "fleet_join") && ok && !c->view.fleet_machine) ok = join_result(c, out);
     if (chat) chat_outcome(c, arg, ok, out);
     zapp_plain_text(out, ZAPP_TEXT_CAP);
-    if (!strcmp(action, "scan") && c->scan_cancelled) c->view.result[0] = 0;
+    if (scan_action(action) && c->scan_cancelled) c->view.result[0] = 0;
     else report(c, action, ok, out);
     c->view.scanning = false;
     c->view.scan_checking = false;
-    if (!strcmp(action, "scan")) ++c->view.scans_done;
+    if (scan_action(action)) ++c->view.scans_done;
     pthread_mutex_unlock(&c->lock);
 }
 
@@ -1097,7 +1100,7 @@ void zapp_controller_snapshot(struct zapp_view *view)
 }
 static bool action_allowed(const char *action)
 {
-    static const char *const allowed[] = {"node_start", "node_stop", "fleet_join", "fleet_preview", "scan", "chat", "voice_start", "voice_confirm", "fleet_hosts", "pair_accept", "ops_errors", "ops_restart", "ops_confirm"};
+    static const char *const allowed[] = {"node_start", "node_stop", "fleet_join", "fleet_preview", "scan", "scan_paste", "chat", "voice_start", "voice_confirm", "fleet_hosts", "pair_accept", "ops_errors", "ops_restart", "ops_confirm"};
     for (size_t i = 0; i < sizeof(allowed) / sizeof(allowed[0]); ++i)
         if (!strcmp(action, allowed[i])) return true;
     return false;
@@ -1192,7 +1195,7 @@ static void queue_action(struct controller *c, const char *action, const char *a
     }
     copy_text(c->action, sizeof(c->action), action); copy_text(c->argument, sizeof(c->argument), arg);
     c->camera_ticket = zapp_camera_ticket(); c->pending = true; c->view.busy = true;
-    c->view.scanning = !strcmp(action, "scan"); c->view.scan_checking = false; c->scan_cancelled = false; c->scan_fleet_owned = false; c->scan_pair_owned = false; c->view.notice[0] = 0; c->view.result[0] = 0;
+    c->view.scanning = scan_action(action); c->view.scan_paste = !strcmp(action, "scan_paste"); c->view.scan_checking = false; c->scan_cancelled = false; c->scan_fleet_owned = false; c->scan_pair_owned = false; c->view.notice[0] = 0; c->view.result[0] = 0;
     /* The tap shows at once what it does, unless its own screen already shows that. */
     const char *doing = zapp_action_shows_itself(action) ? NULL : zapp_action_doing(action);
     if (doing) copy_text(reports_beside(action) ? c->view.result : c->view.notice, ZAPP_NOTICE_CAP, doing);
@@ -1254,7 +1257,7 @@ void zapp_controller_cancel_scan(void)
     struct controller *c = current;
     if (c) {
         pthread_mutex_lock(&c->lock);
-        if (!strcmp(c->action, "scan") && (c->view.scanning || c->scan_fleet_owned || c->scan_pair_owned)) {
+        if (scan_action(c->action) && (c->view.scanning || c->scan_fleet_owned || c->scan_pair_owned)) {
             c->scan_cancelled = true;
             zapp_pay_stash_clear();
             if (c->scan_pair_owned) { c->view.pair_offer[0] = 0; c->view.pair_code[0] = 0; c->scan_pair_owned = false; }

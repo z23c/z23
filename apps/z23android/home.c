@@ -94,7 +94,7 @@ static const char *plain_node_line(const struct zapp_view *view, char *out, size
     else if (view->node_stopping) snprintf(out, cap, "Stopping…\nYou can use Z23");
     else if (view->pace == ZAPP_PACE_PAUSE) snprintf(out, cap, "%s", ZAPP_PAUSED_LINE);
     else if (!view->node_running) snprintf(out, cap, "%s", view->node_seen_height ?
-        "Your node is running but has not replied yet" : "Starting your node… usually about a minute");
+        "Your node is running but has not replied yet" : "Starting node…\nYou can use Z23");
     else if (view->node_height < 0) snprintf(out, cap, "Checking the chain");
     else if (view->node_reference < 0) {
         char height[32];

@@ -41,6 +41,7 @@ int main(void)
     pthread_mutex_lock(&gate); release_worker = true; pthread_cond_signal(&changed); pthread_mutex_unlock(&gate);
     assert(!pthread_join(worker, NULL)); assert(!committed && offers == 0 && clears == 1);
     c.scan_cancelled = false; c.view.scanning = true;
+    memcpy(c.action, "scan_paste", sizeof("scan_paste")); assert(scan_action(c.action));
     enum zapp_scan_kind payment = ZAPP_SCAN_PAY; char payment_value[32] = "payment"; const char *payment_notice = NULL;
     assert(scan_commit(&c, 7, "payment", &payment, payment_value, &payment_notice) && held);
     zapp_controller_cancel_scan(); assert(!held);
