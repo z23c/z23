@@ -1314,6 +1314,58 @@ static int cas_test_daemon_timeout_evidence(void)
     } _test_next:;
     return failures;
 }
+
+static int cas_test_daemon_read_error_classification(void)
+{
+    int failures = 0;
+    TEST("CLI daemon capture: successful partial reads ignore stale errno") {
+        int fds[2]; ASSERT(pipe(fds) == 0);
+        ASSERT(write(fds[1], "part", 4) == 4);
+        char out[32] = {0}; size_t pos = 0;
+        const char *const needles[] = {"absent", NULL};
+        struct test_child_merged capture = {0}; bool error = false;
+        errno = EIO;
+        int result = cas_daemon_read_chunk(fds[0], out, sizeof(out), &pos,
+                                           needles, &capture, &error);
+        close(fds[0]); close(fds[1]);
+        ASSERT(result == -1 && strcmp(out, "part") == 0);
+        ASSERT(!error);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int cas_test_daemon_invalid_poll(void)
+{
+    int failures = 0;
+    TEST("CLI daemon capture: invalid descriptor is a poll error") {
+        int fds[2]; ASSERT(pipe(fds) == 0);
+        int fd = fds[0]; close(fds[0]); close(fds[1]);
+        bool poll_error = false;
+        int result = cas_daemon_poll_readable(fd, 1, &poll_error);
+        ASSERT(result == -1 && poll_error);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int cas_test_daemon_natural_exit(void)
+{
+    int failures = 0;
+    TEST("CLI daemon capture: natural nonzero exit is named") {
+        char *argv[] = {"/bin/sh", "-c", "printf partial; exit 7", NULL};
+        const char *const needles[] = {"not-produced", NULL};
+        char out[32], evidence[TEST_EVIDENCE_CAP + 512];
+        test_evidence_reset(); cas_exec_path = "/bin/sh";
+        bool found = cas_run_daemon_wait_for(argv, "/tmp", needles, 3000, out, sizeof(out));
+        cas_exec_path = NULL;
+        (void)test_evidence_render(evidence, sizeof(evidence), __FILE__, __LINE__);
+        ASSERT(!found && strcmp(out, "partial") == 0);
+        ASSERT(strstr(evidence, "observed=1") && strstr(evidence, "exit=7"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
 #endif
 
 int test_cli_argv_strict(void)
@@ -1326,6 +1378,9 @@ int test_cli_argv_strict(void)
     failures += cas_test_daemon_evidence();
     failures += cas_test_signal_evidence();
     failures += cas_test_daemon_timeout_evidence();
+    failures += cas_test_daemon_read_error_classification();
+    failures += cas_test_daemon_invalid_poll();
+    failures += cas_test_daemon_natural_exit();
 #endif
 
     if (cas_dev_bin_fresh())
