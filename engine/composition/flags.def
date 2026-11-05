@@ -2451,6 +2451,8 @@ Z23_FLAG("ZCL_TELEMETRY_SCAN_EXTRA_MANIFEST", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_telemetry_ontology.c:auto")
 Z23_FLAG("ZCL_TELEMETRY_SCAN_MANIFEST", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_telemetry_ontology.c:auto")
+Z23_FLAG("ZCL_TEST_AUDIT_MARKER", "env_test", "-", "-",
+          "isolated loader-audit fixture marker; first use tests/harness/src/test_dev_proof_remote_placement.c:auto")
 Z23_FLAG("ZCL_TEST_CANONICAL_DATADIR", "env_runtime", "-", "-",
           "the operator's real default datadir, exported by the test runners before they swap HOME; the request writers in storage/boot_auto_reindex.c refuse any write at or under it while ZCL_TEST_HARNESS is set; first use engine/modules/storage/src/boot_auto_reindex.c:auto")
 Z23_FLAG("ZCL_TEST_HARNESS", "env_runtime", "-", "-",

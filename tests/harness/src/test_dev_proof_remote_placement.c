@@ -355,6 +355,19 @@ struct rpp_snapshot {
 
 static bool rpp_snapshot_node(const char *path, struct rpp_snapshot *snapshot, unsigned depth);
 
+static bool rpp_snapshot_entry(const struct dirent *entry,
+    struct rpp_snapshot *snapshot, unsigned depth, char storage[128][256],
+    char *names[128], size_t *count)
+{
+    if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) return true;
+    if (snapshot->exclude_cache && depth == 0 && !strcmp(entry->d_name, ".cache")) return true;
+    if (*count == 128 || strlen(entry->d_name) >= sizeof(storage[0])) return false;
+    names[*count] = storage[*count];
+    memcpy(names[*count], entry->d_name, strlen(entry->d_name) + 1u);
+    ++*count;
+    return true;
+}
+
 static bool rpp_snapshot_children(const char *path, struct rpp_snapshot *snapshot, unsigned depth)
 {
     char storage[128][256], *names[128];
@@ -366,11 +379,10 @@ static bool rpp_snapshot_children(const char *path, struct rpp_snapshot *snapsho
         errno = 0;
         struct dirent *entry = readdir(dir);
         if (!entry) { if (errno) ok = false; break; }
-        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
-        if (snapshot->exclude_cache && depth == 0 && !strcmp(entry->d_name, ".cache")) continue;
-        if (count == 128 || strlen(entry->d_name) >= sizeof(storage[0])) { ok = false; break; }
-        names[count] = storage[count];
-        memcpy(names[count++], entry->d_name, strlen(entry->d_name) + 1u);
+        if (!rpp_snapshot_entry(entry, snapshot, depth, storage, names, &count)) {
+            ok = false;
+            break;
+        }
     }
     if (closedir(dir) != 0) ok = false;
     qsort(names, count, sizeof(names[0]), zcl_cmp_cstr);
@@ -548,6 +560,14 @@ static bool rpp_audit_no_invocation(struct rpp_fixture *f, const char *marker)
     return rpp_immutable_refusal(f, "remote_git_environment_redirected") &&
         lstat(marker, &st) != 0 && errno == ENOENT;
 }
+
+static bool rpp_audit_restore(char *saved)
+{
+    bool restored = unsetenv("LD_AUDIT") == 0;
+    int rc = saved ? setenv("ZCL_TEST_AUDIT_MARKER", saved, 1) : unsetenv("ZCL_TEST_AUDIT_MARKER");
+    free(saved);
+    return restored && rc == 0;
+}
 #endif
 
 static bool rpp_audit_refused(struct rpp_fixture *f)
@@ -563,11 +583,9 @@ static bool rpp_audit_refused(struct rpp_fixture *f)
     bool ok = setenv("ZCL_TEST_AUDIT_MARKER", marker, 1) == 0 && setenv("LD_AUDIT", library, 1) == 0;
     if (ok) ok = rpp_audit_observed(f, marker);
     if (ok) ok = rpp_audit_no_invocation(f, marker);
-    bool restored = unsetenv("LD_AUDIT") == 0;
-    int rc = saved ? setenv("ZCL_TEST_AUDIT_MARKER", saved, 1) : unsetenv("ZCL_TEST_AUDIT_MARKER");
-    free(saved);
+    bool restored = rpp_audit_restore(saved);
     printf("LD_AUDIT loader marker/control: %s\n", ok ? "OBSERVED/REFUSED" : "FAIL");
-    return ok && restored && rc == 0;
+    return ok && restored;
 #else
     bool installed = setenv("LD_AUDIT", "fixture-runtime-marker-unavailable", 1) == 0;
     bool refused = installed && rpp_immutable_refusal(f, "remote_git_environment_redirected");
