@@ -286,6 +286,9 @@ static bool fx_setup(struct rba_fx *fx, const char *prefix, const char *name,
 static void fx_teardown(struct rba_fx *fx)
 {
     char p[1100];
+    /* A setup skipped after an earlier failure left nothing to remove. */
+    if (fx->dir[0] == '\0')
+        return;
     chmod(fx->dir, 0700);
     snprintf(p, sizeof(p), "%s/%s", fx->dir, fx->name);
     if (unlink(p) != 0)
@@ -424,7 +427,7 @@ static int test_path_overflow_bound(void)
  * stage, leaving the catalog empty and *out untouched. */
 static bool unhashable_and_unregisterable(void)
 {
-    struct rba_fx dirfx, magic, small;
+    struct rba_fx dirfx = {0}, magic = {0}, small = {0};
     bool ok = fx_setup(&dirfx, "zcl_rba_isdir", RBA_BUNDLE, 8192, true, true, 0);
     char p[1100];
     snprintf(p, sizeof(p), "%s/%s", dirfx.dir, RBA_BUNDLE);
