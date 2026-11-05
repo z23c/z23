@@ -244,6 +244,14 @@ bool coins_kv_seed_from_node_db(sqlite3 *progress_db,
         return true;
     }
 
+    /* ATTACH creates a missing file, so refuse an absent source before it. */
+    FILE *probe = fopen(node_db_path, "rb");
+    if (!probe) {
+        LOG_WARN("coins_kv", "[coins_kv] import seed source not readable");
+        return false;
+    }
+    fclose(probe);
+
     sqlite3_stmt *att = NULL;
     if (sqlite3_prepare_v2(progress_db, "ATTACH DATABASE ? AS coinssrc",
                            -1, &att, NULL) != SQLITE_OK) {
