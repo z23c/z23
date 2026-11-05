@@ -5,6 +5,7 @@
 #include "script/htlc.h"
 #include "crypto/sha256.h"
 #include "crypto/sha3.h"
+#include "core/hash.h"
 #include "models/database.h"
 #include "models/swap_contract.h"
 
@@ -637,6 +638,413 @@ static int htlc_test_full_swap(void)
     return failures;
 }
 
+/* ── Mutation-gap tests (script builder, address, secret, scriptSig, id) ── */
+
+#define HX_CHECK(name, expr) do {                       \
+    printf("htlc: %s... ", (name));                      \
+    if (expr) printf("OK\n");                            \
+    else { printf("FAIL\n"); failures++; }               \
+} while (0)
+
+struct hx_buf {
+    uint8_t b[700];
+    size_t  n;
+};
+
+static void hx_init(struct hx_buf *x)
+{
+    memset(x->b, 0xEE, sizeof(x->b));
+    x->n = 0;
+}
+
+static void hx_direct(struct hx_buf *x, size_t len, uint8_t fill)
+{
+    x->b[x->n++] = (uint8_t)len;
+    memset(x->b + x->n, fill, len);
+    x->n += len;
+}
+
+static void hx_pushdata1(struct hx_buf *x, size_t len, uint8_t fill)
+{
+    x->b[x->n++] = 0x4c;
+    x->b[x->n++] = (uint8_t)len;
+    memset(x->b + x->n, fill, len);
+    x->n += len;
+}
+
+static void hx_pushdata2(struct hx_buf *x, size_t len, uint8_t fill)
+{
+    x->b[x->n++] = 0x4d;
+    x->b[x->n++] = (uint8_t)(len & 0xff);
+    x->b[x->n++] = (uint8_t)(len >> 8);
+    memset(x->b + x->n, fill, len);
+    x->n += len;
+}
+
+static void hx_op(struct hx_buf *x, uint8_t op) { x->b[x->n++] = op; }
+
+static void hx_secret_value(uint8_t s[32])
+{
+    for (int i = 0; i < 32; i++) s[i] = (uint8_t)(0x80 + i);
+}
+
+static void hx_push_secret(struct hx_buf *x)
+{
+    uint8_t s[32];
+    hx_secret_value(s);
+    x->b[x->n++] = 0x20;
+    memcpy(x->b + x->n, s, 32);
+    x->n += 32;
+}
+
+/* Extract into a zeroed 33-byte buffer; byte 32 is a guard that must
+ * stay zero. Returns the call's verdict. */
+static bool hx_extract(const struct hx_buf *x, uint8_t sec[33])
+{
+    memset(sec, 0, 33);
+    return htlc_extract_secret(x->b, x->n, sec);
+}
+
+static bool hx_extracts_secret(const struct hx_buf *x)
+{
+    uint8_t sec[33], want[32];
+    hx_secret_value(want);
+    bool ok = hx_extract(x, sec);
+    return ok && memcmp(sec, want, 32) == 0 && sec[32] == 0;
+}
+
+static bool hx_extract_refused(const struct hx_buf *x)
+{
+    uint8_t sec[33];
+    return !hx_extract(x, sec);
+}
+
+/* Secret found at push index 2 for every push encoding and size. */
+static int htlc_test_extract_encodings(void)
+{
+    int failures = 0;
+    struct hx_buf x;
+
+    hx_init(&x); hx_direct(&x, 5, 0); hx_direct(&x, 33, 0); hx_push_secret(&x);
+    HX_CHECK("extract: secret as the last push, exact fit",
+             hx_extracts_secret(&x));
+    hx_init(&x); hx_direct(&x, 5, 0); hx_direct(&x, 1, 0); hx_push_secret(&x);
+    HX_CHECK("extract: one-byte push (opcode 0x01) counts as a push",
+             hx_extracts_secret(&x));
+    hx_init(&x); hx_direct(&x, 75, 0); hx_direct(&x, 33, 0); hx_push_secret(&x);
+    HX_CHECK("extract: 75-byte direct push (opcode 0x4b)",
+             hx_extracts_secret(&x));
+    hx_init(&x); hx_pushdata1(&x, 100, 0); hx_direct(&x, 33, 0);
+    hx_push_secret(&x);
+    HX_CHECK("extract: OP_PUSHDATA1 push", hx_extracts_secret(&x));
+    hx_init(&x); hx_pushdata2(&x, 258, 0); hx_direct(&x, 33, 0x02);
+    hx_push_secret(&x);
+    HX_CHECK("extract: OP_PUSHDATA2 push with distinct length bytes",
+             hx_extracts_secret(&x));
+    hx_init(&x); hx_op(&x, 0x00); hx_direct(&x, 1, 0); hx_push_secret(&x);
+    HX_CHECK("extract: OP_0 counts as a push", hx_extracts_secret(&x));
+    return failures;
+}
+
+/* Only the push at index 2, and only when it is 32 bytes. */
+static int htlc_test_extract_index_rules(void)
+{
+    int failures = 0;
+    struct hx_buf x;
+
+    hx_init(&x); hx_direct(&x, 32, 0x33); hx_direct(&x, 1, 0);
+    hx_push_secret(&x);
+    HX_CHECK("extract: a 32-byte push at index 0 is not the secret",
+             hx_extracts_secret(&x));
+    hx_init(&x); hx_direct(&x, 1, 0); hx_direct(&x, 1, 0); hx_direct(&x, 31, 0x44);
+    HX_CHECK("extract: index 2 with 31 bytes is refused",
+             hx_extract_refused(&x));
+    hx_init(&x); hx_direct(&x, 1, 0); hx_direct(&x, 1, 0); hx_direct(&x, 1, 0);
+    hx_push_secret(&x);
+    HX_CHECK("extract: a 32-byte push at index 3 is refused",
+             hx_extract_refused(&x));
+    hx_init(&x); hx_direct(&x, 1, 0); hx_direct(&x, 1, 0);
+    HX_CHECK("extract: fewer than three pushes is refused",
+             hx_extract_refused(&x));
+    return failures;
+}
+
+/* Truncated pushes are refused, never reported as found. */
+static int htlc_test_extract_truncated(void)
+{
+    int failures = 0;
+    struct hx_buf x;
+    uint8_t sec[33];
+
+    hx_init(&x); hx_op(&x, 0x4c);
+    HX_CHECK("extract: PUSHDATA1 without a length byte", hx_extract_refused(&x));
+    hx_init(&x); hx_op(&x, 0x4d);
+    HX_CHECK("extract: PUSHDATA2 without length bytes", hx_extract_refused(&x));
+    hx_init(&x); hx_op(&x, 0x4d); hx_op(&x, 0x01);
+    HX_CHECK("extract: PUSHDATA2 with one length byte", hx_extract_refused(&x));
+    hx_init(&x); hx_op(&x, 0x05); hx_op(&x, 0x01);
+    HX_CHECK("extract: direct push longer than the script",
+             hx_extract_refused(&x));
+    hx_init(&x); hx_direct(&x, 5, 0); hx_direct(&x, 5, 0);
+    hx_op(&x, 0x20); memset(x.b + x.n, 0x55, 10); x.n += 10;
+    HX_CHECK("extract: secret push cut short", hx_extract_refused(&x));
+    hx_init(&x); hx_direct(&x, 1, 0);
+    HX_CHECK("extract: NULL script", !htlc_extract_secret(NULL, 10, sec));
+    HX_CHECK("extract: empty script", !htlc_extract_secret(x.b, 0, sec));
+    return failures;
+}
+
+static void hx_fill_params(struct htlc_params *p)
+{
+    for (int i = 0; i < 32; i++) p->secret_hash[i] = (uint8_t)(0x10 + i);
+    for (int i = 0; i < 20; i++) p->recipient_pkh[i] = (uint8_t)(0x40 + i);
+    for (int i = 0; i < 20; i++) p->refunder_pkh[i] = (uint8_t)(0x70 + i);
+    p->locktime = 0x04030201u;
+}
+
+/* 97-byte contract: full vector, exact-size buffer, one byte short. */
+static int htlc_test_build_script_vector(void)
+{
+    int failures = 0;
+    struct htlc_params p;
+    hx_fill_params(&p);
+
+    uint8_t want[97];
+    size_t w = 0;
+    static const uint8_t head[] = { 0x63, 0x82, 0x01, 0x20, 0x88, 0xa8, 0x20 };
+    memcpy(want + w, head, sizeof head); w += sizeof head;
+    memcpy(want + w, p.secret_hash, 32); w += 32;
+    static const uint8_t mid1[] = { 0x88, 0x76, 0xa9, 0x14 };
+    memcpy(want + w, mid1, sizeof mid1); w += sizeof mid1;
+    memcpy(want + w, p.recipient_pkh, 20); w += 20;
+    static const uint8_t mid2[] = { 0x67, 0x04, 0x01, 0x02, 0x03, 0x04,
+                                    0xb1, 0x75, 0x76, 0xa9, 0x14 };
+    memcpy(want + w, mid2, sizeof mid2); w += sizeof mid2;
+    memcpy(want + w, p.refunder_pkh, 20); w += 20;
+    static const uint8_t tail[] = { 0x68, 0x88, 0xac };
+    memcpy(want + w, tail, sizeof tail); w += sizeof tail;
+
+    uint8_t out[100];
+    memset(out, 0xEE, sizeof out);
+    size_t n = htlc_build_script(&p, out, 97);
+    HX_CHECK("build_script: exact-size buffer yields the full vector",
+             w == 97 && n == 97 && memcmp(out, want, 97) == 0);
+    HX_CHECK("build_script: writes nothing past 97 bytes",
+             out[97] == 0xEE && out[98] == 0xEE);
+    memset(out, 0xEE, sizeof out);
+    HX_CHECK("build_script: 96-byte buffer is refused, untouched",
+             htlc_build_script(&p, out, 96) == 0 && out[0] == 0xEE);
+    return failures;
+}
+
+/* P2SH address commits to hash160(script): decode it back. */
+static int htlc_test_p2sh_commits_to_script(void)
+{
+    int failures = 0;
+    struct htlc_params p;
+    uint8_t script[97], want[20];
+    char addr[64];
+    hx_fill_params(&p);
+    size_t n = htlc_build_script(&p, script, sizeof script);
+    hash160(script, n, want);
+    for (int c = SWAP_CHAIN_ZCL; c <= SWAP_CHAIN_DOGE; c++) {
+        uint8_t got[21];
+        memset(got, 0xFF, sizeof got); got[20] = 0xAA;
+        bool built = htlc_p2sh_address(script, n, (enum swap_chain)c,
+                                       addr, sizeof addr);
+        bool back = built && htlc_address_to_pkh(addr, (enum swap_chain)c, got);
+        HX_CHECK("p2sh address decodes to hash160 of the script",
+                 back && memcmp(got, want, 20) == 0 && got[20] == 0xAA);
+    }
+    return failures;
+}
+
+/* Address decode refusals. */
+static int htlc_test_address_to_pkh_refusals(void)
+{
+    int failures = 0;
+    struct htlc_params p;
+    uint8_t script[97], pkh[20];
+    char zaddr[64], baddr[64], bad[64];
+    hx_fill_params(&p);
+    size_t n = htlc_build_script(&p, script, sizeof script);
+    bool z = htlc_p2sh_address(script, n, SWAP_CHAIN_ZCL, zaddr, sizeof zaddr);
+    bool b = htlc_p2sh_address(script, n, SWAP_CHAIN_BTC, baddr, sizeof baddr);
+    HX_CHECK("setup: ZCL and BTC addresses built", z && b);
+    HX_CHECK("address_to_pkh: NULL address", !htlc_address_to_pkh(NULL, SWAP_CHAIN_ZCL, pkh));
+    HX_CHECK("address_to_pkh: empty address", !htlc_address_to_pkh("", SWAP_CHAIN_ZCL, pkh));
+    HX_CHECK("address_to_pkh: unknown chain",
+             !htlc_address_to_pkh(zaddr, (enum swap_chain)99, pkh));
+    HX_CHECK("address_to_pkh: not base58",
+             !htlc_address_to_pkh("0OIl-not-base58", SWAP_CHAIN_ZCL, pkh));
+    snprintf(bad, sizeof bad, "%s", zaddr);
+    size_t last = strlen(bad) - 1;
+    bad[last] = (bad[last] == '2') ? '3' : '2';
+    HX_CHECK("address_to_pkh: bad checksum", !htlc_address_to_pkh(bad, SWAP_CHAIN_ZCL, pkh));
+    HX_CHECK("address_to_pkh: 1-byte-prefix address on the ZCL chain",
+             !htlc_address_to_pkh(baddr, SWAP_CHAIN_ZCL, pkh));
+    HX_CHECK("address_to_pkh: 2-byte-prefix address on the BTC chain",
+             !htlc_address_to_pkh(zaddr, SWAP_CHAIN_BTC, pkh));
+    return failures;
+}
+
+/* Fresh randomness, full 32 bytes, hash matches, nothing past the end. */
+static int htlc_test_generate_secret_fresh(void)
+{
+    int failures = 0;
+    struct { uint8_t secret[32]; uint8_t guard; uint8_t hash[32]; } g;
+    uint8_t first[32], seen_or[32] = {0};
+    bool differs = false, guard_ok = true, hash_ok = true;
+    memset(&g, 0, sizeof g);
+    for (int round = 0; round < 16; round++) {
+        memset(&g, 0, sizeof g);
+        htlc_generate_secret(g.secret, g.hash);
+        guard_ok = guard_ok && g.guard == 0;
+        struct sha256_ctx ctx;
+        uint8_t h[32];
+        sha256_init(&ctx); sha256_write(&ctx, g.secret, 32);
+        sha256_finalize(&ctx, h);
+        hash_ok = hash_ok && memcmp(h, g.hash, 32) == 0;
+        for (int i = 0; i < 32; i++) seen_or[i] |= g.secret[i];
+        if (round == 0) memcpy(first, g.secret, 32);
+        else if (memcmp(first, g.secret, 32) != 0) differs = true;
+    }
+    HX_CHECK("generate_secret: successive secrets differ", differs);
+    HX_CHECK("generate_secret: hash is SHA-256 of the secret", hash_ok);
+    HX_CHECK("generate_secret: writes only 32 bytes", guard_ok);
+    bool all_bytes = true;
+    for (int i = 0; i < 32; i++) all_bytes = all_bytes && seen_or[i] != 0;
+    HX_CHECK("generate_secret: every byte position is randomised", all_bytes);
+    return failures;
+}
+
+/* scriptSig layout and push-encoding boundaries. */
+static int htlc_test_scriptsig_layout(void)
+{
+    int failures = 0;
+    uint8_t sig[3] = {0xA1, 0xA1, 0xA1}, pk[2] = {0xB2, 0xB2};
+    uint8_t con[4] = {0xC3, 0xC3, 0xC3, 0xC3}, sec[32], out[64];
+    hx_secret_value(sec);
+
+    static const uint8_t refund_want[] = {
+        3, 0xA1, 0xA1, 0xA1, 2, 0xB2, 0xB2, 0x00, 4, 0xC3, 0xC3, 0xC3, 0xC3 };
+    size_t n = htlc_build_refund_scriptsig(out, sizeof out, sig, 3, pk, 2, con, 4);
+    HX_CHECK("refund scriptSig: exact layout and length",
+             n == sizeof refund_want && memcmp(out, refund_want, n) == 0);
+
+    uint8_t redeem_want[64];
+    size_t w = 0;
+    redeem_want[w++] = 3; memset(redeem_want + w, 0xA1, 3); w += 3;
+    redeem_want[w++] = 2; memset(redeem_want + w, 0xB2, 2); w += 2;
+    redeem_want[w++] = 32; memcpy(redeem_want + w, sec, 32); w += 32;
+    redeem_want[w++] = 0x51;
+    redeem_want[w++] = 4; memset(redeem_want + w, 0xC3, 4); w += 4;
+    n = htlc_build_redeem_scriptsig(out, sizeof out, sig, 3, pk, 2, sec, con, 4);
+    HX_CHECK("redeem scriptSig: exact layout and length",
+             n == w && memcmp(out, redeem_want, n) == 0);
+    return failures;
+}
+
+/* Required output size: sum + 10 (+32 for the secret). Exact fits;
+ * one byte less is refused. */
+static int htlc_test_scriptsig_size_boundary(void)
+{
+    int failures = 0;
+    uint8_t sig[72] = {0}, pk[33] = {0}, con[97] = {0}, sec[32] = {0};
+    uint8_t out[512];
+    size_t refund_need = 72 + 33 + 97 + 10;
+    size_t redeem_need = refund_need + 32;
+    HX_CHECK("refund scriptSig: exact required size is accepted",
+             htlc_build_refund_scriptsig(out, refund_need, sig, 72, pk, 33,
+                                         con, 97) > 0);
+    HX_CHECK("refund scriptSig: one byte short is refused",
+             htlc_build_refund_scriptsig(out, refund_need - 1, sig, 72, pk, 33,
+                                         con, 97) == 0);
+    HX_CHECK("redeem scriptSig: exact required size is accepted",
+             htlc_build_redeem_scriptsig(out, redeem_need, sig, 72, pk, 33,
+                                         sec, con, 97) > 0);
+    HX_CHECK("redeem scriptSig: one byte short is refused",
+             htlc_build_redeem_scriptsig(out, redeem_need - 1, sig, 72, pk, 33,
+                                         sec, con, 97) == 0);
+    return failures;
+}
+
+static bool hx_sig_prefix_is(size_t sig_len, const uint8_t *want, size_t wn)
+{
+    static uint8_t sig[300], con[1];
+    uint8_t pk[1] = {0}, out[700];
+    memset(sig, 0x11, sizeof sig);
+    size_t n = htlc_build_refund_scriptsig(out, sizeof out, sig, sig_len,
+                                           pk, 1, con, 1);
+    return n == wn + sig_len + 1 + 1 + 1 + 1 + 1 && memcmp(out, want, wn) == 0;
+}
+
+/* Push opcode choice at the 75/76, 255/256 and 258 boundaries. */
+static int htlc_test_push_encoding_boundaries(void)
+{
+    int failures = 0;
+    static const uint8_t d75[] = { 0x4b };
+    static const uint8_t d76[] = { 0x4c, 0x4c };
+    static const uint8_t d255[] = { 0x4c, 0xff };
+    static const uint8_t d256[] = { 0x4d, 0x00, 0x01 };
+    static const uint8_t d258[] = { 0x4d, 0x02, 0x01 };
+    HX_CHECK("push: 75 bytes is a direct push", hx_sig_prefix_is(75, d75, 1));
+    HX_CHECK("push: 76 bytes is PUSHDATA1", hx_sig_prefix_is(76, d76, 2));
+    HX_CHECK("push: 255 bytes is PUSHDATA1", hx_sig_prefix_is(255, d255, 2));
+    HX_CHECK("push: 256 bytes is PUSHDATA2", hx_sig_prefix_is(256, d256, 3));
+    HX_CHECK("push: 258 bytes is PUSHDATA2, high byte 1",
+             hx_sig_prefix_is(258, d258, 3));
+    return failures;
+}
+
+static void hx_hex(const uint8_t h[32], char out[65])
+{
+    for (int i = 0; i < 32; i++) snprintf(out + i * 2, 3, "%02x", h[i]);
+}
+
+/* swap id is SHA3-256(my || counter || secret_hash) in lowercase hex. */
+static int htlc_test_swap_id_value(void)
+{
+    int failures = 0;
+    uint8_t sh[32], sh2[32], d[32];
+    for (int i = 0; i < 32; i++) sh[i] = (uint8_t)(i * 7 + 1);
+    memcpy(sh2, sh, 32);
+    sh2[31] ^= 0x01;
+    struct sha3_256_ctx c;
+    sha3_256_init(&c);
+    sha3_256_write(&c, (const unsigned char *)"alice", 5);
+    sha3_256_write(&c, (const unsigned char *)"bob", 3);
+    sha3_256_write(&c, sh, 32);
+    sha3_256_finalize(&c, d);
+    char want[65], got[65], got2[65];
+    hx_hex(d, want);
+    memset(got, 'x', sizeof got);
+    swap_compute_id("alice", "bob", sh, got);
+    HX_CHECK("swap_compute_id: equals hex SHA3-256 of the concatenation",
+             strcmp(got, want) == 0);
+    swap_compute_id("alice", "bob", sh2, got2);
+    HX_CHECK("swap_compute_id: last secret-hash byte matters",
+             strcmp(got, got2) != 0);
+    return failures;
+}
+
+static int htlc_test_mutation_gaps(void)
+{
+    int failures = 0;
+    failures += htlc_test_extract_encodings();
+    failures += htlc_test_extract_index_rules();
+    failures += htlc_test_extract_truncated();
+    failures += htlc_test_build_script_vector();
+    failures += htlc_test_p2sh_commits_to_script();
+    failures += htlc_test_address_to_pkh_refusals();
+    failures += htlc_test_generate_secret_fresh();
+    failures += htlc_test_scriptsig_layout();
+    failures += htlc_test_scriptsig_size_boundary();
+    failures += htlc_test_push_encoding_boundaries();
+    failures += htlc_test_swap_id_value();
+    return failures;
+}
+
 int test_htlc(void)
 {
     int failures = 0;
@@ -675,6 +1083,8 @@ int test_htlc(void)
 
     /* ── Full swap simulation: initiate → participate → redeem → extract ── */
     failures += htlc_test_full_swap();
+
+    failures += htlc_test_mutation_gaps();
 
     printf("\n%d HTLC test(s) failed\n", failures);
     return failures;
