@@ -331,19 +331,67 @@ static bool debug_bundle_name_is_bundle(const char *name)
            strcmp(name + n - (sizeof(suffix) - 1), suffix) == 0;
 }
 
-/* Order by the name without ".json", so "<utc>" sorts before "<utc>-1". */
+/* Split "debug-bundle-<utc>[-<n>].json" into the stem length (through the
+ * timestamp) and the numeric collision suffix (0 when absent). */
+static size_t debug_bundle_name_split(const char *name, unsigned long *seq)
+{
+    size_t total = strlen(name) - 5;   /* without ".json" */
+    size_t stem = sizeof("debug-bundle-") - 1;
+    while (stem < total && name[stem] != '-')
+        stem++;
+    *seq = stem < total ? strtoul(name + stem + 1, NULL, 10) : 0;
+    return stem;
+}
+
+/* Order by timestamp, then by the collision suffix compared numerically, so
+ * "<utc>" < "<utc>-2" < "<utc>-10". */
 static int debug_bundle_name_cmp(const void *a, const void *b)
 {
     const char *x = *(const char *const *)a;
     const char *y = *(const char *const *)b;
-    size_t lx = strlen(x) - 5, ly = strlen(y) - 5;
+    unsigned long sx, sy;
+    size_t lx = debug_bundle_name_split(x, &sx);
+    size_t ly = debug_bundle_name_split(y, &sy);
     int c = strncmp(x, y, lx < ly ? lx : ly);
     if (c != 0) return c;
-    return lx < ly ? -1 : (lx > ly ? 1 : 0);
+    if (lx != ly) return lx < ly ? -1 : 1;
+    return sx < sy ? -1 : (sx > sy ? 1 : 0);
 }
 
 void debug_bundle_prune(const char *datadir, size_t keep)
 {
+    debug_bundle_prune_keeping(datadir, keep, NULL);
+}
+
+static const char *debug_bundle_basename(const char *path)
+{
+    const char *slash = path ? strrchr(path, '/') : NULL;
+    return slash ? slash + 1 : path;
+}
+
+/* Delete the oldest `count` sorted names, never the one named `protect`. */
+static void debug_bundle_unlink_oldest(const char *datadir,
+                                       const char *const *names, size_t n,
+                                       size_t count, const char *protect)
+{
+    for (size_t i = 0; i < n && count > 0; i++) {
+        if (protect && strcmp(names[i], protect) == 0)
+            continue;
+        count--;
+        char path[1100];
+        int len = snprintf(path, sizeof(path), "%s/%s", datadir, names[i]);
+        if (len > 0 && (size_t)len < sizeof(path) &&
+            !platform_private_file_unlink_missing_ok(path))
+            LOG_WARN(DBB_SUBSYS, "could not remove old bundle %s", names[i]);
+    }
+}
+
+void debug_bundle_prune_keeping(const char *datadir, size_t keep,
+                                const char *protect_path)
+{
+    /* Wall-clock steps make name order disagree with write order, so the
+     * bundle just written is excluded by name, never ranked for deletion. */
+    const char *protect = debug_bundle_basename(protect_path);
     struct platform_directory_list list;
     if (!platform_directory_list_regular_sorted(datadir, &list))
         return;
@@ -355,13 +403,8 @@ void debug_bundle_prune(const char *datadir, size_t keep)
             names[n++] = list.entries[i].name;
     if (n > 1)
         qsort(names, n, sizeof(*names), debug_bundle_name_cmp);
-    for (size_t i = 0; i + keep < n; i++) {
-        char path[1100];
-        int len = snprintf(path, sizeof(path), "%s/%s", datadir, names[i]);
-        if (len > 0 && (size_t)len < sizeof(path) &&
-            !platform_private_file_unlink_missing_ok(path))
-            LOG_WARN(DBB_SUBSYS, "could not remove old bundle %s", names[i]);
-    }
+    debug_bundle_unlink_oldest(datadir, names, n, n > keep ? n - keep : 0,
+                               protect);
     free(names);
     platform_directory_list_free(&list);
 }
@@ -453,7 +496,7 @@ static bool debug_bundle_write_leased(const char *trigger,
         LOG_FAIL(DBB_SUBSYS, "debug bundle parent durability check failed");
     }
 
-    debug_bundle_prune(datadir, DEBUG_BUNDLE_KEEP);
+    debug_bundle_prune_keeping(datadir, DEBUG_BUNDLE_KEEP, res->path);
     res->bytes = (int64_t)wrote;
     return true;
 }

@@ -209,6 +209,12 @@ bool debug_bundle_write(const char *trigger, const char *trigger_child,
  * debug_bundle_write calls it after each successful write. */
 void debug_bundle_prune(const char *datadir, size_t keep);
 
+/* As debug_bundle_prune, but never deletes the file named by `protect_path`
+ * (NULL for none): the bundle just written must survive even when a
+ * backward wall-clock step makes its name sort oldest. */
+void debug_bundle_prune_keeping(const char *datadir, size_t keep,
+                                const char *protect_path);
+
 /* supervisor_stall_observer_fn implementation: rate-limited auto-capture.
  * Never blocks the detecting (supervisor) thread — at most one capture per
  * DEBUG_BUNDLE_AUTO_MIN_INTERVAL_SECS and one in flight at a time; the

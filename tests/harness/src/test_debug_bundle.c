@@ -241,6 +241,83 @@ static int debug_bundle_check_rpc_capture(char (*bundle_path)[1200])
     return failures;
 }
 
+/* After a backward wall-clock step the bundle just written sorts oldest by
+ * name; it must survive, and collision suffixes rank numerically. */
+static int debug_bundle_check_prune_protect(void)
+{
+    int failures = 0;
+    char pdir[256];
+    test_fmt_tmpdir(pdir, sizeof(pdir), "debug_bundle", "prune_protect");
+    mkdir("./test-tmp", 0755);
+    mkdir(pdir, 0755);
+    static const char *const names[] = {
+        "debug-bundle-20260101T000000Z.json",      /* just written */
+        "debug-bundle-20260102T000000Z.json",
+        "debug-bundle-20260102T000100Z.json",
+        "debug-bundle-20260102T000200Z.json",
+        "debug-bundle-20260102T000300Z.json",
+    };
+    for (size_t i = 0; i < 5; i++) {
+        char p[320];
+        snprintf(p, sizeof(p), "%s/%s", pdir, names[i]);
+        FILE *fp = fopen(p, "wb");
+        if (fp) { fputs("{}", fp); fclose(fp); }
+    }
+    char protect[320];
+    snprintf(protect, sizeof(protect), "%s/%s", pdir, names[0]);
+    debug_bundle_prune_keeping(pdir, 3, protect);
+    struct stat sb;
+    bool present[5];
+    for (size_t i = 0; i < 5; i++) {
+        char p[320];
+        snprintf(p, sizeof(p), "%s/%s", pdir, names[i]);
+        present[i] = stat(p, &sb) == 0;
+    }
+    DBB_CHECK("prune protect: the just-written bundle survives", present[0]);
+    DBB_CHECK("prune protect: exactly 3 bundles remain",
+              present[0] + present[1] + present[2] + present[3] +
+              present[4] == 3);
+    DBB_CHECK("prune protect: oldest unprotected bundles go first",
+              !present[1] && !present[2]);
+    DBB_CHECK("prune protect: the newest bundles are kept",
+              present[3] && present[4]);
+    test_rm_rf(pdir);
+    return failures;
+}
+
+/* Collision suffixes rank numerically: -2 is older than -10. */
+static int debug_bundle_check_prune_suffix_order(void)
+{
+    int failures = 0;
+    char pdir[256];
+    test_fmt_tmpdir(pdir, sizeof(pdir), "debug_bundle", "prune_suffix");
+    mkdir("./test-tmp", 0755);
+    mkdir(pdir, 0755);
+    static const char *const names[] = {
+        "debug-bundle-20260102T000100Z-2.json",
+        "debug-bundle-20260102T000100Z-10.json",
+    };
+    for (size_t i = 0; i < 2; i++) {
+        char p[320];
+        snprintf(p, sizeof(p), "%s/%s", pdir, names[i]);
+        FILE *fp = fopen(p, "wb");
+        if (fp) { fputs("{}", fp); fclose(fp); }
+    }
+    debug_bundle_prune_keeping(pdir, 1, NULL);
+    struct stat sb;
+    bool present[2];
+    for (size_t i = 0; i < 2; i++) {
+        char p[320];
+        snprintf(p, sizeof(p), "%s/%s", pdir, names[i]);
+        present[i] = stat(p, &sb) == 0;
+    }
+    DBB_CHECK("prune suffix: -2 is older than -10 and goes first",
+              !present[0]);
+    DBB_CHECK("prune suffix: -10 is kept as the newer bundle", present[1]);
+    test_rm_rf(pdir);
+    return failures;
+}
+
 /* Retention: only the newest 3 bundles survive. */
 static int debug_bundle_check_prune(void)
 {
@@ -285,6 +362,8 @@ static int debug_bundle_check_prune(void)
         DBB_CHECK("prune: other files are untouched", stat(other, &sb) == 0);
         test_rm_rf(pdir);
     }
+    failures += debug_bundle_check_prune_protect();
+    failures += debug_bundle_check_prune_suffix_order();
     return failures;
 }
 
