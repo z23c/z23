@@ -370,7 +370,15 @@ static bool cis_native_call(const char *root, const char *command, const char *c
     if (ok && state) {
         const char *actual = json_get_str(json_get(&reply.data, "state"));
         const char *overlay = json_get_str(json_get(&reply.data, "live_overlay"));
-        ok = actual && !strcmp(actual, state) && overlay && !strcmp(overlay, "unknown");
+        ok = actual && !strcmp(actual, state) && overlay && !strcmp(overlay, "unknown") &&
+             json_get_int(json_get(&reply.data, "matches")) == accepted;
+        if (ok && !strcmp(state, "committed_match")) {
+            const char *source = json_get_str(json_get(&reply.data, "source_commit"));
+            const char *artifact = json_get_str(json_get(&reply.data, "artifact_root"));
+            ok = source && !strcmp(source, commit) && artifact && strlen(artifact) == 64;
+        }
+        if (ok && !strcmp(state, "ambiguous"))
+            ok = json_get(&reply.data, "body") == NULL;
     } else if (ok) {
         ok = json_get_int(json_get(&reply.data, "accepted")) == accepted &&
              json_get_int(json_get(&reply.data, "stale")) == stale;
@@ -407,7 +415,20 @@ static bool cis_native_artifact(const char *root, const char *tree, char *artifa
         "{\"dir\":\"module2\",\"tree\":\"0000000000000000000000000000000000000000\",\"topic\":\"module2\",\"summary\":\"stale\",\"lessons\":[],\"applies_to\":[],\"updated\":\"2026-11-04T00:00:00Z\"}\n", tree);
     if (n <= 0 || (size_t)n >= sizeof(lines) || !cis_put(root, "cards.jsonl", lines)) return false;
     n = snprintf(artifact, cap, "%s/cards.jsonl", root);
-    return n > 0 && (size_t)n < cap && chmod(artifact, 0600) == 0;
+    return n > 0 && (size_t)n < cap && chmod(artifact, 0644) == 0;
+}
+
+static bool cis_native_second(const char *root, const char *commit, const char *tree,
+                              const char *artifact, const char *summary,
+                              const char *state, int matches)
+{
+    char line[1024];
+    int n = snprintf(line, sizeof(line),
+        "{\"dir\":\"module\",\"tree\":\"%s\",\"topic\":\"module\",\"summary\":\"%s\",\"lessons\":[],\"applies_to\":[],\"updated\":\"2026-11-04T00:00:00Z\"}\n", tree, summary);
+    return n > 0 && (size_t)n < sizeof(line) && cis_put(root, "cards.jsonl", line) &&
+           chmod(artifact, 0644) == 0 &&
+           cis_native_call(root, "code.pages.import", commit, "artifact", artifact, NULL, 1, 0) &&
+           cis_native_call(root, "code.pages.get", commit, "path", "module", state, matches, 0);
 }
 
 static bool cis_native_pages(void)
@@ -417,10 +438,12 @@ static bool cis_native_pages(void)
         !cis_native_git_setup(root, commit, tree) ||
         !cis_native_artifact(root, tree, artifact, sizeof(artifact))) return false;
     return cis_native_call(root, "code.pages.import", commit, "artifact", artifact, NULL, 1, 1) &&
-           cis_native_call(root, "code.pages.get", commit, "path", "module", "committed_match", 0, 0) &&
+           cis_native_call(root, "code.pages.get", commit, "path", "module", "committed_match", 1, 0) &&
            cis_native_call(root, "code.pages.get", commit, "path", "module2", "missing", 0, 0) &&
+           cis_native_second(root, commit, tree, artifact, "first", "committed_match", 2) &&
            cis_put(root, "module/file.c", "int uncommitted;\n") &&
-           cis_native_call(root, "code.pages.get", commit, "path", "module", "committed_match", 0, 0);
+           cis_native_call(root, "code.pages.get", commit, "path", "module", "committed_match", 2, 0) &&
+           cis_native_second(root, commit, tree, artifact, "conflict", "ambiguous", 3);
 }
 
 static bool cis_page_roundtrip(const char *root)

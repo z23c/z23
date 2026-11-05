@@ -116,7 +116,6 @@ static bool pages_file_measure(struct platform_positioned_file *file, const char
                                struct platform_positioned_file_snapshot *before, uint64_t *size)
 {
     return platform_positioned_file_open(file, path) &&
-           platform_positioned_file_is_current_user_only(file) &&
            platform_positioned_file_snapshot(file, before) &&
            platform_positioned_file_size(file, size) && *size > 0 && *size <= PAGE_INPUT_MAX;
 }
@@ -243,20 +242,48 @@ void zcl_native_handle_code_pages_import(const struct zcl_command_request *reque
                           "invalid, unavailable or unverified page input; no page generation accepted");
 }
 
+static int pages_find_match(const struct ci_page *pages, int n, const char *tree,
+                            int *selected, bool *conflict)
+{
+    int matches = 0;
+    *selected = -1;
+    *conflict = false;
+    for (int i = 0; i < n; i++) {
+        if (strcmp(tree, pages[i].tree_oid)) continue;
+        if (*selected < 0) *selected = i;
+        else if (strcmp(pages[*selected].body, pages[i].body)) *conflict = true;
+        matches++;
+    }
+    return matches;
+}
+
+static const char *pages_match_state(int count, int matches, bool conflict)
+{
+    if (conflict) return "ambiguous";
+    if (matches) return "committed_match";
+    return count ? "stale" : "missing";
+}
+
 static bool pages_get_render(struct zcl_command_reply *reply, const char *commit, const char *path,
                              const char *actual, const struct ci_page *pages, int n, bool prior_untrusted)
 {
-    int matches = 0, selected = -1;
-    for (int i = 0; i < n; i++)
-        if (!strcmp(actual, pages[i].tree_oid)) { selected = i; matches++; }
+    int selected = -1;
+    bool conflict = false;
+    int matches = pages_find_match(pages, n, actual, &selected, &conflict);
     bool ok = n >= 0 && json_push_kv_str(&reply->data, "commit", commit) &&
         json_push_kv_str(&reply->data, "path", path) && json_push_kv_str(&reply->data, "tree", actual) &&
-        json_push_kv_str(&reply->data, "state", matches > 1 ? "ambiguous" : matches == 1 ? "committed_match" : n ? "stale" : "missing") &&
+        json_push_kv_str(&reply->data, "state", pages_match_state(n, matches, conflict)) &&
         json_push_kv_int(&reply->data, "matches", matches) &&
         json_push_kv_bool(&reply->data, "prior_untrusted", prior_untrusted) &&
         json_push_kv_str(&reply->data, "provenance", "unsigned_model_hint") &&
         json_push_kv_str(&reply->data, "live_overlay", "unknown");
-    if (ok && matches == 1) ok = json_push_kv_str(&reply->data, "body", pages[selected].body);
+    if (ok && matches && !conflict) {
+        char hex[65];
+        zcl_hex_encode(pages[selected].artifact_root, 32, hex);
+        ok = json_push_kv_str(&reply->data, "body", pages[selected].body) &&
+             json_push_kv_str(&reply->data, "source_commit", pages[selected].source_commit) &&
+             json_push_kv_str(&reply->data, "artifact_root", hex);
+    }
     return ok;
 }
 
