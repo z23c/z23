@@ -252,10 +252,15 @@ static void require_canonical_or_name_only(const struct file_offer *o,
         memcmp(wire + FUZZ_OFFER_NAME_END, canonical + FUZZ_OFFER_NAME_END,
                wire_len - FUZZ_OFFER_NAME_END) != 0)
         abort();
+    /* Bytes after an embedded NUL stay in the struct's filename buffer on the
+     * first decode and not on the second; the string is the same. */
+    struct file_offer same = *o;
+    size_t shown = strnlen(same.filename, sizeof(same.filename));
+    memset(same.filename + shown, 0, sizeof(same.filename) - shown);
     struct file_offer again;
     if (file_offer_auth_decode(canonical, wire_len, &again) !=
             FILE_OFFER_AUTH_OK ||
-        memcmp(&again, o, sizeof(again)) != 0)
+        memcmp(&again, &same, sizeof(again)) != 0)
         abort();
 }
 
