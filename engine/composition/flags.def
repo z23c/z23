@@ -1382,6 +1382,8 @@ Z23_FLAG("ZCL_LAND_TEST_PRECHECK_TOOL_FAIL", "env_test", "-", "-",
           "test-only failure of the queued-row precheck merge step; first use tools/command/native_dev_land.c:auto")
 Z23_FLAG("ZCL_LAND_TEST_REFUSE_OUTCOME_APPEND", "env_test", "-", "-",
           "test-only terminal append refusal; first use tools/command/native_dev_land.c:auto")
+Z23_FLAG("ZCL_LAND_TEST_STACK_LINT_RED_PATH", "env_test", "-", "-",
+          "test-only path whose presence in a stacked train tree stands for a red lint-land; first use tools/command/native_dev_land_train.c:auto")
 Z23_FLAG("ZCL_LAND_TRAIN_BISECT", "env_runtime", "1", "-",
           "0 releases a failed train to solo proofs; default bisects the failed cohort; first use tools/command/native_dev_land_train.c:auto")
 Z23_FLAG("ZCL_LAND_TRAIN_WIDTH", "env_runtime", "-", "-",

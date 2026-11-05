@@ -626,6 +626,29 @@ static bool dl_train_stack(const struct dl_dirs *d, const struct dl_row *head,
     return touched;
 }
 
+#if defined(ZCL_TESTING)
+/* The proof stub skips lint-land; a test names a path whose presence in the
+ * stacked tree stands for a lint gate that refuses it. */
+static bool dl_train_test_lint_red(const struct dl_dirs *d, const char *tip)
+{
+    const char *path = getenv("ZCL_LAND_TEST_STACK_LINT_RED_PATH");
+    char spec[256];
+    if (!path || snprintf(spec, sizeof(spec), "%s:%s", tip, path) >= (int)sizeof(spec))
+        return false;
+    const char *args[] = { "cat-file", "-e", spec, NULL };
+    return dl_git(d->wt, args, NULL, 0, DL_GIT_TIMEOUT_MS) == 0;
+}
+#endif
+
+static bool dl_train_lint_green(const struct dl_dirs *d, struct dl_row *probe)
+{
+#if defined(ZCL_TESTING)
+    if (dl_train_test_lint_red(d, probe->local))
+        return false;
+#endif
+    return dl_stubbed() || dl_lint_candidate(d, probe) == 0;
+}
+
 /* Lint-land and the proof dependencies again, on the stacked tip. A scratch
  * row keeps the head's own detail and dimension untouched. Nothing here
  * rewrites a commit: the stacked tip is exactly the members as submitted. */
@@ -635,7 +658,7 @@ static bool dl_train_prepare(const struct dl_dirs *d, const struct dl_row *head,
     char why[512] = { 0 };
     struct dl_row probe = *head;
     (void)snprintf(probe.local, sizeof(probe.local), "%s", t->tip);
-    if (!dl_stubbed() && dl_lint_candidate(d, &probe) != 0) {
+    if (!dl_train_lint_green(d, &probe)) {
         dl_log(head, "train: lint-land failed on the stacked tip\n");
         return false;
     }

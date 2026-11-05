@@ -56,6 +56,7 @@ void dlx_isolate(const char *tag)
     unsetenv("ZCL_LAND_WINDOW_HOST");
     unsetenv("ZCL_LAND_TRAIN_WIDTH");
     unsetenv("ZCL_LAND_TEST_DIE_AFTER_TRAIN_BIND");
+    unsetenv("ZCL_LAND_TEST_STACK_LINT_RED_PATH");
     /* The vendor/tor submodule fixtures below add a real gitlink pointing
      * at a same-host bare repo; modern git's default transport allowlist
      * otherwise refuses a local `file://`-style remote reached through
@@ -108,6 +109,7 @@ void dlx_restore(void)
     unsetenv("ZCL_LAND_WINDOW_HOST");
     unsetenv("ZCL_LAND_TRAIN_WIDTH");
     unsetenv("ZCL_LAND_TEST_DIE_AFTER_TRAIN_BIND");
+    unsetenv("ZCL_LAND_TEST_STACK_LINT_RED_PATH");
     unsetenv("GIT_CONFIG_GLOBAL");
     unsetenv("GIT_ALLOW_PROTOCOL");
 }

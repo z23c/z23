@@ -1265,9 +1265,139 @@ _test_next:;
     return failures;
 }
 
+/* Five rows: A, B, C from dlx_tr_rig, then D (d.txt) and E (e.txt). */
+static bool dlx_tr_rig_five(struct dlx_rig *rig, const char *tag,
+                            const char *stub)
+{
+    char b[64], c[64], d[64], e[64];
+    return dlx_tr_rig(rig, tag, stub, "b.txt", b, c) &&
+           dlx_qp_branch(rig, "tr-d", "d.txt", "d\n", NULL, NULL, d) &&
+           dlx_qp_branch(rig, "tr-e", "e.txt", "e\n", NULL, NULL, e) &&
+           dlx_qp_submit(rig, d, 4) && dlx_qp_submit(rig, e, 5);
+}
+
+/* Rows `from`..`to` are queued at attempt 1 and carry train_intent `intent`. */
+static bool dlx_tr_queued_range(long long from, long long to,
+                                const char *intent)
+{
+    for (long long seq = from; seq <= to; seq++) {
+        char got[200];
+        int64_t attempt = 0;
+        if (!dlx_tr_queued(seq, &attempt, got, sizeof(got)) || attempt != 1 ||
+            strcmp(got, intent) != 0) {
+            printf("[seq=%lld attempt=%lld intent=%s] ", seq,
+                   (long long)attempt, got);
+            return false;
+        }
+    }
+    return true;
+}
+
+/* One lint-red row must not take the rows ahead of it out of the train:
+ * they still share one proof, and the red row and everything behind it stay
+ * queued, unbound and unmarked until their own turn. */
+static int test_dev_land_train_lint_red_keeps_prefix(void)
+{
+    int failures = 0;
+    TEST("land: a lint-red member keeps the rows ahead of it in the train") {
+        struct dlx_rig rig;
+        struct dlx_tr_watch w;
+        char head[200], intent[200], states[256];
+        int proofs = 0, landed = 0;
+        dlx_isolate("train_lint_prefix");
+        ASSERT(dlx_tr_rig_five(&rig, "train_lint_prefix_rig", "running"));
+        ASSERT(dlx_tr_watch_start(&w, &rig));
+        setenv("ZCL_LAND_TRAIN_WIDTH", "5", 1);
+        setenv("ZCL_LAND_TEST_STACK_LINT_RED_PATH", "d.txt", 1);
+        ASSERT(dlx_tr_beat("started", 2, 1));
+        dlx_tr_watch_beat(&w);
+        ASSERT(dlx_tr_inflight_intent(head, sizeof(head)));
+        ASSERT(dlx_tr_queued_range(2, 3, head));
+        ASSERT(dlx_tr_queued_range(4, 5, ""));
+        ASSERT(!dlx_tr_has_solo_mark());
+        /* The verdict was on the stack, not on D: alone it is judged anew,
+         * and it heads the next train with E. */
+        unsetenv("ZCL_LAND_TEST_STACK_LINT_RED_PATH");
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        ASSERT(dlx_tr_drain(12, &w, &proofs, &landed, states, sizeof(states)));
+        ASSERT_EQ(proofs, 1);
+        ASSERT_EQ(landed, 5);
+        ASSERT_EQ(w.unproven, 0);
+        /* The first proof covered exactly A, B and C. */
+        for (long long seq = 1; seq <= 5; seq++) {
+            ASSERT(dlx_tr_outcome_field(seq, "proof_intent", intent,
+                                        sizeof(intent)));
+            ASSERT(seq <= 3 ? strcmp(intent, head) == 0
+                            : strcmp(intent, head) != 0);
+        }
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+/* The member right behind the head is red: no prefix survives, the head
+ * proves alone, and neither released row is marked or bound. */
+static int test_dev_land_train_lint_red_first_member(void)
+{
+    int failures = 0;
+    TEST("land: a lint-red first member leaves the head alone, nobody marked") {
+        struct dlx_rig rig;
+        struct dlx_tr_watch w;
+        char b[64], c[64], states[256];
+        int proofs = 0, landed = 0;
+        dlx_isolate("train_lint_first");
+        ASSERT(dlx_tr_rig(&rig, "train_lint_first_rig", "running", "b.txt", b, c));
+        ASSERT(dlx_tr_watch_start(&w, &rig));
+        setenv("ZCL_LAND_TRAIN_WIDTH", "3", 1);
+        setenv("ZCL_LAND_TEST_STACK_LINT_RED_PATH", "b.txt", 1);
+        ASSERT(dlx_tr_beat("started", 0, 1));
+        dlx_tr_watch_beat(&w);
+        ASSERT(dlx_tr_queued_range(2, 3, ""));
+        ASSERT(!dlx_tr_has_solo_mark());
+        unsetenv("ZCL_LAND_TEST_STACK_LINT_RED_PATH");
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        ASSERT(dlx_tr_drain(10, &w, &proofs, &landed, states, sizeof(states)));
+        ASSERT_EQ(proofs, 1);
+        ASSERT_EQ(landed, 3);
+        ASSERT_EQ(w.unproven, 0);
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+/* A split cohort is an exact replicated list: a prefix of it would make the
+ * next split refuse. A red stacked lint proves its head alone, as it always
+ * has, instead of proving part of the cohort. */
+static int test_dev_land_train_lint_red_cohort_exact(void)
+{
+    int failures = 0;
+    TEST("land: a lint-red split cohort is never cut to a prefix") {
+        struct dlx_rig rig;
+        dlx_isolate("train_lint_cohort");
+        ASSERT(dlx_tr_rig_five(&rig, "train_lint_cohort_rig", "fail"));
+        setenv("ZCL_LAND_TRAIN_WIDTH", "5", 1);
+        ASSERT(dlx_tr_beat("started", 4, 1));
+        ASSERT(dlx_tr_beat("rebased", 0, 1));
+        setenv("ZCL_LAND_TEST_STACK_LINT_RED_PATH", "c.txt", 1);
+        ASSERT(dlx_tr_beat("started", 0, 1));
+        ASSERT(dlx_tr_queued_range(2, 3, ""));
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
 int test_dev_land_train_cases(void)
 {
     int failures = 0;
+    failures += test_dev_land_train_lint_red_keeps_prefix();
+    failures += test_dev_land_train_lint_red_first_member();
+    failures += test_dev_land_train_lint_red_cohort_exact();
     failures += test_dev_land_train_three_rows_one_proof();
     failures += test_dev_land_train_never_amended();
     failures += test_dev_land_train_default_off();
