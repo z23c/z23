@@ -1104,7 +1104,9 @@ int test_lab_peer(void)
                LPT_FAKE);
         return 1;
     }
-    /* first: the offer/verify cases put a stub git first on PATH for good */
+    /* first: the offer/verify cases put a stub git first on PATH for good, and
+     * the live two-node case needs the real git */
+    { extern int lab_peer_live_cases(void); failures += lab_peer_live_cases(); }
     { extern int lab_peer_shadow_cases(void); failures += lab_peer_shadow_cases(); }
     failures += case_usage();
     failures += case_offer_posts_and_records();

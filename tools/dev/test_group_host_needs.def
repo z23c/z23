@@ -280,6 +280,7 @@ ZCL_TEST_GROUP_BUILD_NEED("test_contrib_inbox", "build/bin/z23-engine-unit",
                          "engine-unit")
 ZCL_TEST_GROUP_BUILD_NEED("test_contrib_inbox", "build/bin/z23-contrib-inbox", "contrib-inbox")
 ZCL_TEST_GROUP_BUILD_NEED("test_lab_peer", "build/bin/z23-lab-peer", "lab-peer")
+ZCL_TEST_GROUP_BUILD_NEED("test_lab_peer", "build/bin/z23-dev", "dev-bin")
 ZCL_TEST_GROUP_BUILD_NEED("test_engine", "build/bin/z23-engine-unit",
                          "engine-unit")
 ZCL_TEST_GROUP_BUILD_NEED("test_engine_gate_capture", "build/bin/z23-engine-unit",
