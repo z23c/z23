@@ -133,6 +133,12 @@ bool ci_pages_validate_hints(const void *manifest, size_t size,
     return true;
 }
 
+bool codeindex_pages_validate_hints(const void *manifest, size_t size,
+                                    const struct ci_page *pages, size_t count)
+{
+    return ci_pages_validate_hints(manifest, size, pages, count);
+}
+
 static bool page_insert_one(sqlite3_stmt *s, const struct ci_page *p, const uint8_t root[32])
 {
     bool ok = sqlite3_bind_text(s, 1, p->directory, -1, SQLITE_TRANSIENT) == SQLITE_OK &&

@@ -13,6 +13,10 @@
 #include "command/native_code_pages.h"
 #include "util/spawn.h"
 #include "base/hex.h"
+#include "command/native_command.h"
+#include "config/command_catalog.h"
+#include "kernel/command_registry.h"
+#include "json/json.h"
 
 #include <sqlite3.h>
 
@@ -345,6 +349,69 @@ static bool cis_corrupt_page_artifact(const char *root, const uint8_t artifact[3
     return codeindex_pages_list(ci, "lib/net", &out, 1, &prior_untrusted) == -2;
 }
 
+static bool cis_native_call(const char *root, const char *command, const char *commit,
+                            const char *key, const char *value, const char *state,
+                            int64_t accepted, int64_t stale)
+{
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "commit", commit) && json_push_kv_str(&input, key, value);
+    struct zcl_command_context context = {.source_root = root};
+    struct zcl_command_request request = {.input = &input, .context = &context};
+    request.spec = zcl_command_registry_find(zcl_command_catalog(), command, NULL);
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.pages.v1");
+    char why[192];
+    ok = ok && request.spec && zcl_command_registry_input_validate(request.spec, &input, why, sizeof(why));
+    if (ok && !strcmp(command, "code.pages.import")) zcl_native_handle_code_pages_import(&request, &reply);
+    else if (ok) zcl_native_handle_code_pages_get(&request, &reply);
+    ok = ok && reply.status == ZCL_COMMAND_STATUS_PASSED;
+    if (ok && state) {
+        const char *actual = json_get_str(json_get(&reply.data, "state"));
+        const char *overlay = json_get_str(json_get(&reply.data, "live_overlay"));
+        ok = actual && !strcmp(actual, state) && overlay && !strcmp(overlay, "unknown");
+    } else if (ok) {
+        ok = json_get_int(json_get(&reply.data, "accepted")) == accepted &&
+             json_get_int(json_get(&reply.data, "stale")) == stale;
+    }
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return ok;
+}
+
+static bool cis_native_pages(void)
+{
+    char root[PLATFORM_TEMP_PATH_MAX] = {0}, output[256], commit[65], tree[65], artifact[PLATFORM_TEMP_PATH_MAX + 32];
+    if (!platform_temp_directory_create("z23-native-pages-", root, sizeof(root)) ||
+        !cis_put(root, "module/file.c", "int one;\n") || !cis_put(root, "module2/file.c", "int two;\n")) return false;
+    const char *init[] = {"git", "-C", root, "init", "-q", NULL};
+    const char *add[] = {"git", "-C", root, "add", "--", "module", "module2", NULL};
+    const char *save[] = {"git", "-C", root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                          "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "-qm", "fixture", NULL};
+    const char *head[] = {"git", "-C", root, "rev-parse", "HEAD", NULL};
+    if (zcl_spawn_capture(init, output, sizeof(output), 10000) != 0 ||
+        zcl_spawn_capture(add, output, sizeof(output), 10000) != 0 ||
+        zcl_spawn_capture(save, output, sizeof(output), 10000) != 0 ||
+        zcl_spawn_capture(head, output, sizeof(output), 10000) != 0) return false;
+    output[strcspn(output, "\r\n")] = '\0';
+    if (strlen(output) != 40) return false;
+    memcpy(commit, output, 41);
+    if (!zcl_code_pages_subject(root, commit, "module", tree)) return false;
+    char lines[2048];
+    int n = snprintf(lines, sizeof(lines),
+        "{\"dir\":\"module\",\"tree\":\"%s\",\"topic\":\"module\",\"summary\":\"first\",\"lessons\":[],\"applies_to\":[],\"updated\":\"2026-11-04T00:00:00Z\"}\n"
+        "{\"dir\":\"module2\",\"tree\":\"0000000000000000000000000000000000000000\",\"topic\":\"module2\",\"summary\":\"stale\",\"lessons\":[],\"applies_to\":[],\"updated\":\"2026-11-04T00:00:00Z\"}\n", tree);
+    if (n <= 0 || (size_t)n >= sizeof(lines) || !cis_put(root, "cards.jsonl", lines)) return false;
+    n = snprintf(artifact, sizeof(artifact), "%s/cards.jsonl", root);
+    if (n <= 0 || (size_t)n >= sizeof(artifact) || chmod(artifact, 0600) != 0) return false;
+    return cis_native_call(root, "code.pages.import", commit, "artifact", artifact, NULL, 1, 1) &&
+           cis_native_call(root, "code.pages.get", commit, "path", "module", "committed_match", 0, 0) &&
+           cis_native_call(root, "code.pages.get", commit, "path", "module2", "missing", 0, 0) &&
+           cis_put(root, "module/file.c", "int uncommitted;\n") &&
+           cis_native_call(root, "code.pages.get", commit, "path", "module", "committed_match", 0, 0);
+}
+
 static bool cis_page_roundtrip(const char *root)
 {
     static const char body[] = "{\"dir\":\"lib/net\",\"tree\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
@@ -385,6 +452,7 @@ int test_codeindex_inventory_schema(void)
                  cis_fixture(root);
     CIS_CHECK("fixture tree is written", ready);
     CIS_CHECK("page subject resolves exact commit tree and refuses invalid input", cis_page_subject());
+    CIS_CHECK("native import excludes stale cards and never claims live overlay freshness", cis_native_pages());
 
     struct codeindex *ix = ready ? codeindex_open_retrieval_view(root) : NULL;
     CIS_CHECK("fixture index opens", ix != NULL);

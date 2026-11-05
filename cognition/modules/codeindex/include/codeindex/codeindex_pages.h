@@ -16,6 +16,10 @@ struct ci_page {
     uint8_t artifact_root[32];
 };
 
+/* Structural validation only; never establishes source freshness. */
+bool codeindex_pages_validate_hints(const void *manifest, size_t size,
+                                    const struct ci_page *pages, size_t count);
+
 /* -2 if an artifact is untrusted/unavailable, -1 for a read error, otherwise
  * number returned. prior_untrusted explicitly reports an untrusted prior
  * generation even when a later import supplied some independently bound hints. */

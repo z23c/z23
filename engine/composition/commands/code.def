@@ -649,6 +649,36 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_count)
 
+ZCL_COMMAND_BRANCH("code.pages", "code.firsthour", "Committed module page hints", ZCL_COMMAND_LAYER_CODE)
+
+ZCL_COMMAND_READY_COMMAND(
+    "code.pages.import", "code.pages", "", "Import source-bound module hints",
+    "Read a bounded JSONL artifact, verify each claimed directory tree against an exact commit "
+    "with Git replacements disabled, and publish matching unsigned hints in one sealed "
+    "codeindex generation. Stale rows are counted, never labelled current. The original "
+    "artifact is retained in the existing content-addressed object store.", 0,
+    "code,pages,import,module,tree,model,hint", "zcl.code_pages_import_input.v1",
+    "zcl.code_pages_import.v1", "artifact,commit", "artifact,commit",
+    "z23 code pages import --artifact=/path/to/cards.jsonl --commit=<exact-oid>",
+    ZCL_COMMAND_LAYER_CODE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_BACKGROUND, ZCL_COMMAND_COST_MODERATE, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_code_pages_import)
+
+ZCL_COMMAND_READY_READ(
+    "code.pages.get", "code.pages", "", "Read one committed module hint",
+    "Resolve the directory at an exact commit, then compare it with sealed unsigned "
+    "page hints. The live worktree overlay remains unknown. Missing, stale, ambiguous "
+    "or unavailable evidence is named explicitly.", 0,
+    "code,pages,get,module,tree,model,hint", "zcl.code_pages_get_input.v1",
+    "zcl.code_pages_get.v1", "path,commit", "path,commit",
+    "z23 code pages get --path=engine/services --commit=<exact-oid>",
+    ZCL_COMMAND_LAYER_CODE, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_BACKGROUND, ZCL_COMMAND_COST_MODERATE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT, ZCL_COMMAND_TRANSPORT_NATIVE,
+    zcl_native_handle_code_pages_get)
+
 /* `code.general` carries the bare `general` alias, so `z23 general core/modules/net`
  * works without a fourth word. It is a code.* child and NOT a new root: the
  * registry has exactly twelve roots and the root menu has a byte budget, both
