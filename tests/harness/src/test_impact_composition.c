@@ -12980,6 +12980,83 @@ static int test_ic_worker_plan_generation(void)
     return failures;
 }
 
+static int test_ic_source_plan_roots(void)
+{
+    int failures = 0;
+    TEST("proof source roots: isolated exact pair matches the worker plan") {
+#if !defined(_WIN32)
+        char root[4096], cmd[8192], base[65], local[65], path[4352], why[512] = {0};
+        char scratch[4352], changed_path[4352], raw[256];
+        static char plan[ZCL_DEVLOOP_PLAN_WIRE_MAX];
+        size_t n = 0;
+        ASSERT(ic_docs_fresh_fixture(root, sizeof(root), "source-plan-roots"));
+        ASSERT(ic_write_call_pair(root));
+        ASSERT(ic_write(root, "cognition/controllers/include/controllers/agent_impact_rules.def", "fixture policy\n"));
+        ASSERT(snprintf(cmd, sizeof(cmd), "git -C '%s' init -q && git -C '%s' -c user.name=fixture -c user.email=fixture@example.invalid -c commit.gpgsign=false add -A && git -C '%s' -c user.name=fixture -c user.email=fixture@example.invalid -c commit.gpgsign=false commit -qm base && git -C '%s' rev-parse HEAD > '%s/base.sha'", root, root, root, root, root) < (int)sizeof(cmd));
+        ASSERT(system(cmd) == 0);
+        ASSERT(ic_write(root, "core/modules/net/src/tor_integration.c", "int tor_leaf(int x) { return x + 2; }\n"));
+        ASSERT(snprintf(cmd, sizeof(cmd), "git -C '%s' add core/modules/net/src/tor_integration.c && git -C '%s' -c user.name=fixture -c user.email=fixture@example.invalid -c commit.gpgsign=false commit -qm next && git -C '%s' rev-parse HEAD > '%s/local.sha'", root, root, root, root) < (int)sizeof(cmd));
+        ASSERT(system(cmd) == 0);
+        ASSERT(snprintf(path, sizeof(path), "%s/base.sha", root) < (int)sizeof(path));
+        ASSERT(ic_failure_record_read(path, raw, sizeof(raw), &n) && n > 1 && n < sizeof(base));
+        memcpy(base, raw, n - 1); base[n - 1] = 0;
+        ASSERT(snprintf(path, sizeof(path), "%s/local.sha", root) < (int)sizeof(path));
+        ASSERT(ic_failure_record_read(path, raw, sizeof(raw), &n) && n > 1 && n < sizeof(local));
+        memcpy(local, raw, n - 1); local[n - 1] = 0;
+        ASSERT(ic_write_depfiles(root));
+        ASSERT(snprintf(scratch, sizeof(scratch), "%s/capture", root) < (int)sizeof(scratch));
+        ASSERT(snprintf(changed_path, sizeof(changed_path), "%s/changed", root) < (int)sizeof(changed_path));
+        const char *files[] = {"core/modules/net/src/tor_integration.c"};
+        ASSERT(setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+        ASSERT(zcl_dev_proof_test_worker_plan(root, root, files, 1, false, plan, sizeof(plan), why, sizeof(why)));
+        uint8_t source[32], changed[32], impact[32], expected[32], policy[32];
+        ASSERT(zcl_dev_proof_source_plan_roots(root, base, local, scratch, changed_path,
+                                               source, changed, impact, why, sizeof(why)));
+        struct sha3_256_ctx sha;
+        static const char source_domain[] = "zcl.dev_proof_git_source.v1";
+        sha3_256_init(&sha); sha3_256_write(&sha, (const uint8_t *)source_domain, sizeof(source_domain));
+        sha3_256_write(&sha, (const uint8_t *)local, strlen(local)); sha3_256_finalize(&sha, expected);
+        ASSERT(!memcmp(source, expected, 32));
+        static const char changed_domain[] = "zcl.dev_proof_changed_set.v1";
+        static const char changed_row[] = "core/modules/net/src/tor_integration.c\n";
+        sha3_256_init(&sha); sha3_256_write(&sha, (const uint8_t *)changed_domain, sizeof(changed_domain));
+        sha3_256_write(&sha, (const uint8_t *)changed_row, sizeof(changed_row) - 1);
+        sha3_256_finalize(&sha, expected); ASSERT(!memcmp(changed, expected, 32));
+        static const char policy_domain[] = "zcl.dev_proof_impact_policy.v1";
+        sha3_256_init(&sha); sha3_256_write(&sha, (const uint8_t *)policy_domain, sizeof(policy_domain));
+        sha3_256_write(&sha, (const uint8_t *)"fixture policy\n", sizeof("fixture policy\n") - 1); sha3_256_finalize(&sha, policy);
+        static const char impact_domain[] = "zcl.dev_proof_impact_plan.v1";
+        sha3_256_init(&sha); sha3_256_write(&sha, (const uint8_t *)impact_domain, sizeof(impact_domain));
+        sha3_256_write(&sha, policy, 32); sha3_256_write(&sha, (const uint8_t *)plan, strlen(plan));
+        sha3_256_finalize(&sha, expected); ASSERT(!memcmp(impact, expected, 32));
+        memcpy(expected, impact, sizeof(expected));
+        ASSERT(ic_write(root, "cognition/controllers/include/controllers/agent_impact_rules.def", "other policy\n"));
+        ASSERT(zcl_dev_proof_source_plan_roots(root, base, local, scratch, changed_path,
+                                               source, changed, impact, why, sizeof(why)));
+        ASSERT(memcmp(impact, expected, 32) != 0);
+        ASSERT(ic_write(root, "cognition/controllers/include/controllers/agent_impact_rules.def", "fixture policy\n"));
+        ASSERT(!zcl_dev_proof_source_plan_roots(root, local, base, scratch, changed_path,
+                                                source, changed, impact, why, sizeof(why)));
+        ASSERT(snprintf(path, sizeof(path), "%s/build/obj/tor_integration.d", root) < (int)sizeof(path));
+        ASSERT_EQ(unlink(path), 0);
+        ASSERT(snprintf(path, sizeof(path), "%s/build/obj/download.d", root) < (int)sizeof(path));
+        ASSERT_EQ(unlink(path), 0);
+        ASSERT(ic_write(root, "core/modules/net/include/net/clp.h", "int tor_leaf(int);\n"));
+        ASSERT(snprintf(cmd, sizeof(cmd), "git -C '%s' add core/modules/net/include/net/clp.h && git -C '%s' -c user.name=fixture -c user.email=fixture@example.invalid -c commit.gpgsign=false commit -qm header && git -C '%s' rev-parse HEAD > '%s/header.sha'", root, root, root, root) < (int)sizeof(cmd));
+        ASSERT(system(cmd) == 0);
+        ASSERT(snprintf(path, sizeof(path), "%s/header.sha", root) < (int)sizeof(path));
+        ASSERT(ic_failure_record_read(path, raw, sizeof(raw), &n) && n > 1 && n < sizeof(base));
+        memcpy(base, raw, n - 1); base[n - 1] = 0;
+        why[0] = 0;
+        ASSERT(!zcl_dev_proof_source_plan_roots(root, local, base, scratch, changed_path,
+                                                source, changed, impact, why, sizeof(why)));
+        (void)unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
+#endif
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_worker_plan_docs_before_refresh(void)
 {
     int failures = 0;
@@ -16181,6 +16258,7 @@ int test_impact_composition(void)
     failures += test_ic_generation_docs_fresh_overlapped();
     int64_t closure_fixture_started_us = platform_time_monotonic_us();
     failures += test_ic_worker_plan_generation();
+    failures += test_ic_source_plan_roots();
     failures += test_ic_worker_plan_docs_before_refresh();
     failures += test_ic_worker_plan_graph_refresh_refuses();
     failures += test_ic_worker_bundle_make_once();
