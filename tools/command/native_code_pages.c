@@ -189,12 +189,63 @@ static bool pages_select(const char *root, const char *commit, struct ci_page *p
 void zcl_native_handle_code_pages_import(const struct zcl_command_request *request,
                                         struct zcl_command_reply *reply)
 {
-    (void)request;
-    pages_refuse(reply, "CODE_PAGES_UNAVAILABLE", "import not implemented");
+    const char *root = zcl_native_source_root(request), *path = pages_arg(request, "artifact");
+    const char *commit = pages_arg(request, "commit");
+    size_t size = 0, count = 0, accepted = 0;
+    uint8_t *bytes = pages_read_artifact(path, &size);
+    struct ci_page *pages = zcl_calloc(PAGE_COUNT_MAX, sizeof(*pages), "code pages batch");
+    bool ok = bytes && pages && pages_parse(bytes, size, commit, pages, &count) &&
+              pages_select(root, commit, pages, count, &accepted) && accepted > 0;
+    struct codeindex *ci = ok ? codeindex_open_retrieval_view(root) : NULL;
+    uint8_t artifact[32];
+    bool attempted = ok && ci;
+    if (ok) ok = attempted && codeindex_pages_import_hints(ci, bytes, size, pages, accepted, artifact);
+    bool published = ok;
+    if (ok) {
+        char hex[65];
+        zcl_hex_encode(artifact, sizeof(artifact), hex);
+        ok = json_push_kv_int(&reply->data, "accepted", (int64_t)accepted) &&
+             json_push_kv_int(&reply->data, "stale", (int64_t)(count - accepted)) &&
+             json_push_kv_int(&reply->data, "refused", 0) &&
+             json_push_kv_str(&reply->data, "commit", commit) &&
+             json_push_kv_str(&reply->data, "artifact_root", hex) &&
+             json_push_kv_str(&reply->data, "provenance", "unsigned_model_hint") &&
+             json_push_kv_str(&reply->data, "live_overlay", "unknown");
+    }
+    codeindex_close(ci);
+    free(pages);
+    free(bytes);
+    if (!ok) pages_refuse(reply, published || attempted ? "CODE_PAGES_RESULT" : "CODE_PAGES_IMPORT",
+                          published || attempted ? "publication may have occurred; reconcile before retrying" :
+                          "invalid, unavailable or unverified page input; no page generation accepted");
 }
+
 void zcl_native_handle_code_pages_get(const struct zcl_command_request *request,
                                      struct zcl_command_reply *reply)
 {
-    (void)request;
-    pages_refuse(reply, "CODE_PAGES_UNAVAILABLE", "query not implemented");
+    const char *root = zcl_native_source_root(request), *path = pages_arg(request, "path");
+    const char *commit = pages_arg(request, "commit");
+    char actual[65];
+    if (!zcl_code_pages_subject(root, commit, path, actual)) {
+        pages_refuse(reply, "CODE_PAGES_SUBJECT", "exact committed directory could not be verified");
+        return;
+    }
+    struct codeindex *ci = codeindex_open_retrieval_view(root);
+    struct ci_page *pages = zcl_calloc(PAGE_QUERY_MAX, sizeof(*pages), "code page query");
+    bool prior_untrusted = false;
+    int n = ci && pages ? codeindex_pages_list(ci, path, pages, PAGE_QUERY_MAX, &prior_untrusted) : -1;
+    int matches = 0, selected = -1;
+    for (int i = 0; i < n; i++)
+        if (!strcmp(actual, pages[i].tree_oid)) { selected = i; matches++; }
+    bool ok = n >= 0 && json_push_kv_str(&reply->data, "commit", commit) &&
+        json_push_kv_str(&reply->data, "path", path) && json_push_kv_str(&reply->data, "tree", actual) &&
+        json_push_kv_str(&reply->data, "state", matches > 1 ? "ambiguous" : matches == 1 ? "committed_match" : n ? "stale" : "missing") &&
+        json_push_kv_int(&reply->data, "matches", matches) &&
+        json_push_kv_bool(&reply->data, "prior_untrusted", prior_untrusted) &&
+        json_push_kv_str(&reply->data, "provenance", "unsigned_model_hint") &&
+        json_push_kv_str(&reply->data, "live_overlay", "unknown");
+    if (ok && matches == 1) ok = json_push_kv_str(&reply->data, "body", pages[selected].body);
+    free(pages);
+    codeindex_close(ci);
+    if (!ok) pages_refuse(reply, "CODE_PAGES_UNAVAILABLE", "page evidence is missing, corrupt, incomplete or unreadable");
 }
