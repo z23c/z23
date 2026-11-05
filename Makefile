@@ -642,7 +642,7 @@ else ifeq ($(ZCL_EPOCH_SINGLE_GOAL),zcode-package-asan)
 # The sanitizer umbrella also requires the production package verifier, whose
 # objects and lease use the existing node-c23 epoch.
 ZCL_EPOCH_PROFILES := test-asan node-c23
-else ifneq ($(filter t-asan t-asan-locked test-asan asan-ci,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter t-asan t-asan-locked test-asan asan-ci asan-ci-locked,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := test-asan
 else ifneq ($(filter dev-asan z23-dev-asan zclassic23-dev-asan,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev-asan
@@ -2180,7 +2180,7 @@ else ifneq ($(filter t-fast t-fast-exact t-hotswap hotswap-test-so test_parallel
 ZCL_DEPFILE_PROFILES := $(strip $(if $(filter test-parallel-fast-active-locked ff-test-lint,$(ZCL_DEPFILE_SINGLE_GOAL)),dev) test-fast)
 else ifneq ($(filter t test test_parallel test-parallel test-parallel-active test-parallel-active-locked test-parallel-locked t-locked test-locked secure-release-regressions secure-release-regressions-locked,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := test-strict
-else ifneq ($(filter t-asan t-asan-locked test-asan asan-ci,$(ZCL_DEPFILE_SINGLE_GOAL)),)
+else ifneq ($(filter t-asan t-asan-locked test-asan asan-ci asan-ci-locked,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := test-asan
 else ifneq ($(filter dev-asan z23-dev-asan zclassic23-dev-asan,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := dev-asan
