@@ -39,6 +39,7 @@ bool block_swarm_init(struct block_swarm *bs,
                       const char *datadir)
 {
     GUARD(bs && manifest && manifest->num_pieces > 0, "sync", "block_swarm_init: invalid args (bs=%p manifest=%p)", (void *)bs, (void *)manifest);
+    GUARD(manifest->num_pieces <= BLOCK_SWARM_MAX_PIECES, "sync", "block_swarm_init: %u pieces exceeds the cap of %u", manifest->num_pieces, BLOCK_SWARM_MAX_PIECES);
     memset(bs, 0, sizeof(*bs));
 
     uint32_t n = manifest->num_pieces;

@@ -943,3 +943,7 @@ later lane flips it HARD.
 - 2026-11-05T18:03:16Z — REASON: Snapshot offers: read the offered block's hash and chain work from its validated blocks row, since nothing writes node_state tip_hash, and refuse an offer or chunk manifest without one; correct the stand-down contract comment; sync strategy only, no consensus predicate change; owner instruction 2026-11-05 you have authority to unseal core to fix everything, as relayed by the lane brief
   old ROOT: 457b60267e7e7e89e3126d595fa30be43110c7c3c2c0d3942f57716e9d4665ae
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-05T19:39:04Z — REASON: Block manifest: arm the swarm only on a manifest that itself validated and anchored; cap block_swarm_init pieces. No consensus predicate change.
+  old ROOT: 61a72f1a81b5e3241adb55a10f21dc74a7f8a06e112d7294c3d811fc814d3e41
+  by: owner unseal ritual (make core-unseal)

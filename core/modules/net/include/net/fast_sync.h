@@ -385,6 +385,11 @@ void swarm_sync_handle_timeouts(struct swarm_sync *ss, int timeout_secs);
  * The sender still enforces MAX_PROTOCOL_MESSAGE_LENGTH for every response. */
 #define BLOCKS_PER_PIECE 64
 
+/* Most pieces one block manifest or swarm may hold, 6.4 million blocks. The
+ * wire validator refuses more, and block_swarm_init refuses more on its own
+ * because its allocations run under g_block_swarm_mutex on the message thread. */
+#define BLOCK_SWARM_MAX_PIECES 100000u
+
 /* Max inflight block pieces per peer. Each piece is independently hashed
  * against the manifest before payload blocks are submitted, so this only
  * controls bandwidth-delay utilization, not trust. */

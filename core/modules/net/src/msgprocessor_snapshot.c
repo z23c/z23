@@ -940,8 +940,11 @@ static mp_zs_hash32 *mp_zs_blkman_read_piece_hashes(struct byte_stream *s,
  * Refuse and score otherwise: a range rooted
  * beyond anything we can bind offers bodies
  * that can never attach, so serving them is
- * pure resource burn. */
-static void mp_zs_blkman_anchor(struct msg_processor *mp,
+ * pure resource burn. Returns whether this manifest anchored. The verdict
+ * is per manifest: an earlier anchored manifest from this peer buys the next
+ * one nothing. Honest publishers all start at height 1, so a republish passes
+ * here by itself once any header is admitted. */
+static bool mp_zs_blkman_anchor(struct msg_processor *mp,
                                 struct p2p_node *node,
                                 const struct mp_zs_blkman *m)
 {
@@ -973,11 +976,13 @@ static void mp_zs_blkman_anchor(struct msg_processor *mp,
             PEER_OFFENCE_INVALID_MESSAGE,
             "block manifest not header-anchored");
     }
+    return anchored;
 }
 
 /* Validate a decoded block manifest. Returns the piece-hash list when the
- * manifest passed the checks (it may still be unanchored, as before), or NULL
- * when it was rejected (already scored). */
+ * manifest passed the checks and anchored, or NULL when it was refused
+ * (already scored). A refused manifest changes nothing the peer anchored
+ * before. */
 static mp_zs_hash32 *mp_zs_blkman_validate(struct msg_processor *mp,
                                            struct p2p_node *node,
                                            struct byte_stream *s,
@@ -985,7 +990,7 @@ static mp_zs_hash32 *mp_zs_blkman_validate(struct msg_processor *mp,
 {
     /* Sanity: heights must be positive and consistent */
     if (m->start_h < 0 || m->end_h < m->start_h || m->num_pieces == 0 ||
-        m->num_pieces > 100000) {
+        m->num_pieces > BLOCK_SWARM_MAX_PIECES) {
         printf("Peer %s: invalid block manifest "
                "(start=%d end=%d pieces=%u)\n",
                node->addr_name, m->start_h, m->end_h, m->num_pieces);
@@ -1022,7 +1027,10 @@ static mp_zs_hash32 *mp_zs_blkman_validate(struct msg_processor *mp,
         free(piece_hashes);
         return NULL;
     }
-    mp_zs_blkman_anchor(mp, node, m);
+    if (!mp_zs_blkman_anchor(mp, node, m)) {
+        free(piece_hashes);
+        return NULL;
+    }
     return piece_hashes;
 }
 
@@ -1076,6 +1084,8 @@ static void mp_zs_on_block_manifest(struct msg_processor *mp,
         stream_read_bytes(s, m.merkle_root, 32)) {
 
         piece_hashes = mp_zs_blkman_validate(mp, node, s, &m);
+        if (!piece_hashes)
+            return;
         int our_h = active_chain_height(&mp->main_state->chain_active);
         /* Seed-floor raise: on a bundle/snapshot-seeded node the
          * install advances the reducer frontier (H*) past the
@@ -1096,12 +1106,10 @@ static void mp_zs_on_block_manifest(struct msg_processor *mp,
             if (hstar > our_h)
                 our_h = hstar;
         }
-        if (node->blk_manifest_received)
-            printf("Peer %s: block manifest h=%d..%d (%u pieces)\n",
-                   node->addr_name, m.start_h, m.end_h, m.num_pieces);
-        if (node->blk_manifest_received &&
-            m.end_h > our_h + BLOCKS_PER_PIECE &&
-            !g_block_swarm_active && m.num_pieces > 0 &&
+        printf("Peer %s: block manifest h=%d..%d (%u pieces)\n",
+               node->addr_name, m.start_h, m.end_h, m.num_pieces);
+        if (m.end_h > our_h + BLOCKS_PER_PIECE &&
+            !g_block_swarm_active &&
             (int64_t)platform_time_wall_time_t() -
                 atomic_load(&g_block_swarm_reaped_unix) >=
                     BLOCK_SWARM_RESTART_COOLDOWN_SECS) {
