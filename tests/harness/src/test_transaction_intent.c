@@ -3,6 +3,7 @@
 
 #include "test/test_core.h"
 #include "test/test_block_map.h"
+#include "test/vault_intent_private_cases.h"
 
 #include "controllers/wallet_helpers.h"
 #include "controllers/sync_controller.h"
@@ -1062,6 +1063,8 @@ int test_transaction_intent(void)
     int failures = 0;
     struct node_db ndb; memset(&ndb, 0, sizeof(ndb));
     failures += ti_private_decode_bounds();
+    if (failures) goto _test_next;
+    failures += vault_intent_private_cases();
     if (failures) goto _test_next;
     failures += ti_wallet_identity_lane_admission();
     if (failures) goto _test_next;
