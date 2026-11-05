@@ -635,6 +635,19 @@ int test_dev_job(void)
         PASS();
     }
 
+    TEST("dev.job: linked worktree check excludes primary and foreign paths") {
+        char linked[1100], canonical[PATH_MAX], primary[PATH_MAX], foreign[600];
+        test_make_tmpdir(foreign, sizeof(foreign), "dev_job", "foreign");
+        ASSERT(snprintf(linked, sizeof(linked), "%s-linked", g_repo) > 0);
+        dj_git(g_repo, "worktree", "add", "--detach", linked, "HEAD");
+        ASSERT(realpath(linked, canonical) != NULL);
+        ASSERT(realpath(g_repo, primary) != NULL);
+        ASSERT(zcl_dev_job_linked_worktree_registered(canonical));
+        ASSERT(!zcl_dev_job_linked_worktree_registered(primary));
+        ASSERT(!zcl_dev_job_linked_worktree_registered(foreign));
+        PASS();
+    }
+
     TEST("dev.job: a scratch git repo that lists itself is refused as cwd") {
         char scratch[1024];
         test_make_tmpdir(scratch, sizeof(scratch), "dev_job", "scratch");
