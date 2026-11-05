@@ -20,6 +20,7 @@
 
 #include "jobs/catchup_cadence.h"
 #include "jobs/job.h"
+#include "jobs/tip_finalize_stage.h"   /* tip_finalize_stage_cursor */
 #include "platform/clock.h"
 #include "storage/progress_store.h"
 #include "util/stage.h"
@@ -483,6 +484,235 @@ static int case_elapsed_budget(void)
     return failures;
 }
 
+/* ── Mutation-gap cases (survivor sweep 1105) ───────────────────────── */
+
+/* Cadence gate at (peer height, log head) under one threshold string. */
+static bool cc_cadence_at(struct connman *cm, struct p2p_node *peer, int height,
+                          int64_t head, const char *threshold)
+{
+    cc_add_peer(cm, peer, height);
+    catchup_cadence_test_set_log_head_override(head);
+    if (threshold) setenv("ZCL_CATCHUP_GAP_THRESHOLD", threshold, 1);
+    else unsetenv("ZCL_CATCHUP_GAP_THRESHOLD");
+    return catchup_cadence_active();
+}
+
+static bool cc_defer_at(struct connman *cm, struct p2p_node *peer, int height,
+                        int64_t head, const char *threshold)
+{
+    cc_add_peer(cm, peer, height);
+    catchup_cadence_test_set_log_head_override(head);
+    if (threshold) setenv("ZCL_CATCHUP_DEFER_GAP_THRESHOLD", threshold, 1);
+    else unsetenv("ZCL_CATCHUP_DEFER_GAP_THRESHOLD");
+    return catchup_cadence_deferred_sync_active();
+}
+
+/* An env value with no digits is "unset", not zero. */
+static int case_env_without_digits_is_default(void)
+{
+    int failures = 0;
+    struct connman cm;
+    struct p2p_node peer;
+    cc_reset(&cm);
+    cc_add_peer(&cm, &peer, 1000);
+    catchup_cadence_test_set_log_head_override(0);
+    setenv("ZCL_CATCHUP_TICK_MS", "abc", 1);
+    CC_CHECK("tick-ms 'abc' -> default tick",
+             catchup_cadence_tick_period_us() ==
+                 (int64_t)CATCHUP_CADENCE_DEFAULT_TICK_MS * 1000);
+    setenv("ZCL_CATCHUP_DRAIN_BATCH", "abc", 1);
+    CC_CHECK("drain-batch 'abc' -> default batch",
+             catchup_cadence_drain_batch(100) ==
+                 CATCHUP_CADENCE_DEFAULT_DRAIN_BATCH);
+    cc_cleanup();
+    return failures;
+}
+
+/* Both thresholds clamp to [1, 100000000]: gaps just either side of each end. */
+static int case_threshold_clamp_edges(void)
+{
+    int failures = 0;
+    struct connman cm;
+    struct p2p_node peer;
+    cc_reset(&cm);
+
+    CC_CHECK("cadence threshold '0' clamps to 1: gap 1 active",
+             cc_cadence_at(&cm, &peer, 1000, 999, "0"));
+    CC_CHECK("cadence threshold '0' clamps to 1: gap 0 inactive",
+             !cc_cadence_at(&cm, &peer, 1000, 1000, "0"));
+    CC_CHECK("cadence threshold huge clamps to 1e8: gap 1e8 active",
+             cc_cadence_at(&cm, &peer, 100000000, 0, "99999999999"));
+    CC_CHECK("cadence threshold huge clamps to 1e8: gap 1e8-1 inactive",
+             !cc_cadence_at(&cm, &peer, 100000000, 1, "99999999999"));
+    CC_CHECK("cadence threshold 1, peer height 1, head 0: active",
+             cc_cadence_at(&cm, &peer, 1, 0, "1"));
+    cc_clear_env();
+
+    CC_CHECK("defer threshold '0' clamps to 1: gap 1 open",
+             cc_defer_at(&cm, &peer, 1000, 999, "0"));
+    CC_CHECK("defer threshold '0' clamps to 1: gap 0 closed",
+             !cc_defer_at(&cm, &peer, 1000, 1000, "0"));
+    CC_CHECK("defer threshold huge clamps to 1e8: gap 1e8 open",
+             cc_defer_at(&cm, &peer, 100000000, 0, "99999999999"));
+    CC_CHECK("defer threshold huge clamps to 1e8: gap 1e8-1 closed",
+             !cc_defer_at(&cm, &peer, 100000000, 1, "99999999999"));
+    CC_CHECK("defer threshold 1, peer height 1, head 0: open",
+             cc_defer_at(&cm, &peer, 1, 0, "1"));
+    cc_cleanup();
+    return failures;
+}
+
+/* No connman registered at all: both gates closed. */
+static int case_no_connman_closed(void)
+{
+    int failures = 0;
+    struct connman cm;
+    cc_reset(&cm);
+    sync_monitor_set_context(NULL, NULL, NULL);
+    catchup_cadence_test_set_log_head_override(0);
+    CC_CHECK("no connman: cadence closed", !catchup_cadence_active());
+    CC_CHECK("no connman: deferred-sync gate closed",
+             !catchup_cadence_deferred_sync_active());
+    cc_cleanup();
+    return failures;
+}
+
+/* The cached verdict follows catchup_cadence_active() only, and the test
+ * reset clears both the cache and the log-head override. */
+static int case_cached_verdict_and_reset(void)
+{
+    int failures = 0;
+    struct connman cm;
+    struct p2p_node peer;
+    cc_reset(&cm);
+    cc_add_peer(&cm, &peer, 1000);
+    CC_CHECK("cached: false after reset", !catchup_cadence_active_cached());
+    catchup_cadence_test_set_log_head_override(0);
+    CC_CHECK("cached: active", catchup_cadence_active());
+    CC_CHECK("cached: true after an active verdict",
+             catchup_cadence_active_cached());
+    catchup_cadence_test_reset();
+    CC_CHECK("cached: reset drops the cached verdict",
+             !catchup_cadence_active_cached());
+
+    catchup_cadence_test_set_log_head_override(0);
+    (void)catchup_cadence_active();
+    catchup_cadence_test_set_log_head_override(1000);
+    CC_CHECK("cached: deferred gate closed at gap 0",
+             !catchup_cadence_deferred_sync_active());
+    CC_CHECK("cached: deferred gate does not publish",
+             catchup_cadence_active_cached());
+    CC_CHECK("cached: inactive verdict is published", !catchup_cadence_active());
+    CC_CHECK("cached: false after an inactive verdict",
+             !catchup_cadence_active_cached());
+
+    /* reset also clears the override: with no stage the log head reads 0, so
+     * the gap is the whole peer height again. */
+    catchup_cadence_test_set_log_head_override(995);
+    CC_CHECK("override 995: gap 5 inactive", !catchup_cadence_active());
+    catchup_cadence_test_reset();
+    CC_CHECK("reset clears the override: the log head is the real cursor",
+             catchup_cadence_active() ==
+                 ((int64_t)1000 - (int64_t)tip_finalize_stage_cursor() >= 500));
+    cc_cleanup();
+    return failures;
+}
+
+/* Install the fake monotonic clock for the budget cases. */
+static struct platform_clock_source cc_budget_source = {cc_now, cc_wall, NULL};
+
+static struct catchup_drain_budget cc_budget_with(const char *ms)
+{
+    if (ms) setenv("ZCL_CATCHUP_DRAIN_BUDGET_MS", ms, 1);
+    else unsetenv("ZCL_CATCHUP_DRAIN_BUDGET_MS");
+    return catchup_drain_budget_begin();
+}
+
+static bool cc_budget_is(struct catchup_drain_budget b, int64_t start,
+                         int64_t limit)
+{
+    return b.start_us == start && b.limit_us == limit;
+}
+
+/* The budget knob: 1..60000 ms, a single digit counts, base ten. */
+static int case_budget_begin_bounds(void)
+{
+    int failures = 0;
+    struct connman cm;
+    struct p2p_node peer;
+    cc_reset(&cm);
+    cc_add_peer(&cm, &peer, 1000);
+    catchup_cadence_test_set_log_head_override(0);
+    (void)catchup_cadence_active();
+    platform_clock_set_source(&cc_budget_source);
+    cc_fake_time = 5000;
+
+    CC_CHECK("budget '5': 5000us from the clock",
+             cc_budget_is(cc_budget_with("5"), 5000, 5000));
+    CC_CHECK("budget '10' is ten, not nine or eleven",
+             cc_budget_is(cc_budget_with("10"), 5000, 10000));
+    CC_CHECK("budget '1' is the smallest accepted",
+             cc_budget_is(cc_budget_with("1"), 5000, 1000));
+    CC_CHECK("budget '60000' is the largest accepted",
+             cc_budget_is(cc_budget_with("60000"), 5000, 60000000));
+    CC_CHECK("budget '0' is refused",
+             cc_budget_is(cc_budget_with("0"), 0, 0));
+    CC_CHECK("budget '-5' is refused",
+             cc_budget_is(cc_budget_with("-5"), 0, 0));
+    CC_CHECK("budget '60001' is refused",
+             cc_budget_is(cc_budget_with("60001"), 0, 0));
+    CC_CHECK("budget '9' is nine (base ten)",
+             cc_budget_is(cc_budget_with("9"), 5000, 9000));
+
+    platform_clock_clear_source();
+    cc_cleanup();
+    return failures;
+}
+
+static bool cc_due_at(int64_t start, int64_t limit, int64_t now)
+{
+    struct catchup_drain_budget b = {start, limit};
+    cc_fake_time = now;
+    return catchup_drain_budget_due(&b);
+}
+
+/* Every comparison in the due test, at the value where it flips. */
+static int case_budget_due_boundaries(void)
+{
+    int failures = 0;
+    const int64_t big = INT64_MAX / 2;
+    platform_clock_set_source(&cc_budget_source);
+
+    CC_CHECK("due: NULL budget never due", !catchup_drain_budget_due(NULL));
+    CC_CHECK("due: unset start (0) is due at once", cc_due_at(0, big, 5000));
+    CC_CHECK("due: start 1 is a real start, not due",
+             !cc_due_at(1, big, 5000));
+    CC_CHECK("due: clock reading 1 is a real reading, not due",
+             !cc_due_at(1, 100, 1));
+    CC_CHECK("due: clock reading 0 is a failed clock, due",
+             cc_due_at(1000, 100, 0));
+    CC_CHECK("due: clock before start is due", cc_due_at(1000, 100, 500));
+    CC_CHECK("due: clock == start, nothing elapsed, not due",
+             !cc_due_at(5000, 100, 5000));
+    CC_CHECK("due: limit-1 elapsed, not due", !cc_due_at(1000, 100, 1099));
+    CC_CHECK("due: exactly limit elapsed, due", cc_due_at(1000, 100, 1100));
+
+    platform_clock_clear_source();
+    return failures;
+}
+
+static int catchup_cadence_gap_cases(void)
+{
+    int failures = 0;
+    failures += case_env_without_digits_is_default();
+    failures += case_threshold_clamp_edges();
+    failures += case_no_connman_closed();
+    failures += case_cached_verdict_and_reset();
+    failures += case_budget_begin_bounds();
+    failures += case_budget_due_boundaries();
+    return failures;
+}
+
 int test_catchup_cadence(void)
 {
     int failures = 0;
@@ -494,6 +724,7 @@ int test_catchup_cadence(void)
     failures += case_active_then_restore();
     failures += case_fanout_capped_under_catchup();
     failures += case_small_backlog_defer_sync_gate();
+    failures += catchup_cadence_gap_cases();
     if (failures == 0)
         printf("test_catchup_cadence: ALL PASSED\n");
     else
