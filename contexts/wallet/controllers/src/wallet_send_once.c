@@ -10,6 +10,8 @@
  *   BUILT, whether or not the wallet holds it -> outcome_unknown with the txid
  *   BUILT under the zero txid                 -> outcome_unknown, no txid
  *   STARTED, nobody running it                -> the row is freed, the send runs
+ *   other digest, an earlier build's for this -> outcome_unknown, no txid
+ *   other digest                              -> key_conflict
  * The wallet persists a transaction before it relays it, but holding a
  * transaction does not prove it was relayed, so BUILT never answers committed.
  *
@@ -256,6 +258,27 @@ static bool wso_digest(const char *key, const struct json_value *params,
     return true;
 }
 
+/* The digest an earlier build stored for this request: each value written into
+ * the fixed buffer that build used, so a longer one is cut where it was cut. */
+static void wso_legacy_digest(const char *key, const struct json_value *params,
+                              uint8_t out[32])
+{
+    const struct json_value *f = json_at(params, WALLET_SEND_ONCE_FEE_PARAM);
+    char from[1024] = "", recips[16384] = "", fee[64] = "";
+    (void)json_write(json_at(params, 0), from, sizeof(from));
+    (void)json_write(json_at(params, 1), recips, sizeof(recips));
+    if (f && !json_is_null(f))
+        (void)json_write(f, fee, sizeof(fee));
+    struct sha3_256_ctx c;
+    sha3_256_init(&c);
+    wso_absorb(&c, "z23/wallet-send-once/request/v1");
+    wso_absorb(&c, key);
+    wso_absorb(&c, from);
+    wso_absorb(&c, recips);
+    wso_absorb(&c, fee);
+    sha3_256_finalize(&c, out);
+}
+
 static bool wso_is_active(const uint8_t kh[32])
 {
     for (size_t i = 0; i < g_active_n; i++)
@@ -325,17 +348,42 @@ static bool wso_fee_ok(const struct json_value *params,
 
 enum wso_begin { WSO_RUN, WSO_ANSWERED, WSO_ERROR, WSO_RERUN };
 
+struct wso_request {
+    const char *key;
+    const struct json_value *params;
+    uint8_t digest[32];
+};
+
+/* A row whose digest is not this request's. A row an earlier build wrote for
+ * this request holds its legacy digest, and that send may have gone out: a
+ * conflict would tell the client to pay again under a new key, and a txid would
+ * claim this exact request was the one sent. So it answers outcome_unknown with
+ * neither, whatever the row's state. */
+static void wso_answer_mismatch(const struct wallet_send_once_row *row,
+                                const struct wso_request *req,
+                                struct json_value *result)
+{
+    uint8_t legacy[32];
+    wso_legacy_digest(req->key, req->params, legacy);
+    if (memcmp(row->digest, legacy, 32) == 0) {
+        LOG_WARN(WSO_TAG, "repeat of a key recorded by an earlier build");
+        wso_answer(result, "outcome_unknown", NULL, true);
+        return;
+    }
+    LOG_WARN(WSO_TAG, "key reused with different parameters");
+    wso_answer(result, "key_conflict", NULL, true);
+}
+
 /* Answer a key that already has a row. A committed row replays only while the
  * wallet still holds its transaction; a built row never replays, because the
  * wallet holding a transaction does not prove it was relayed. */
 static enum wso_begin wso_known(struct wallet_rpc_context *ctx,
                                 const struct wallet_send_once_row *row,
-                                const uint8_t digest[32],
+                                const struct wso_request *req,
                                 struct json_value *result)
 {
-    if (memcmp(row->digest, digest, 32) != 0) {
-        LOG_WARN(WSO_TAG, "key reused with different parameters");
-        wso_answer(result, "key_conflict", NULL, true);
+    if (memcmp(row->digest, req->digest, 32) != 0) {
+        wso_answer_mismatch(row, req, result);
         return WSO_ANSWERED;
     }
     if (row->state == WALLET_SEND_ONCE_STARTED)
@@ -360,13 +408,13 @@ static enum wso_begin wso_error(struct json_value *result, const char *msg)
 
 static enum wso_begin wso_insert_new(struct wallet_rpc_context *ctx,
                                      const uint8_t kh[32],
-                                     const uint8_t digest[32], int64_t now,
+                                     const struct wso_request *req, int64_t now,
                                      struct json_value *result)
 {
     struct wallet_send_once_row row;
     memset(&row, 0, sizeof(row));
     memcpy(row.key_hash, kh, 32);
-    memcpy(row.digest, digest, 32);
+    memcpy(row.digest, req->digest, 32);
     row.state = WALLET_SEND_ONCE_STARTED;
     row.created_at = row.updated_at = now;
     if (wso_insert(ctx->node_db, &row))
@@ -374,7 +422,7 @@ static enum wso_begin wso_insert_new(struct wallet_rpc_context *ctx,
     /* A failed insert may mean the row exists: read it. If it still cannot be
      * read, say so plainly; never claim the key is free. */
     if (db_wallet_send_once_find(ctx->node_db, kh, &row))
-        return wso_known(ctx, &row, digest, result);
+        return wso_known(ctx, &row, req, result);
     return wso_error(result, "Send record unreadable; nothing was changed "
                              "but the outcome of an earlier send is unknown");
 }
@@ -382,8 +430,7 @@ static enum wso_begin wso_insert_new(struct wallet_rpc_context *ctx,
 /* The row is read first. Only a key with no row is checked against the fee. */
 static enum wso_begin wso_begin_send(struct wallet_rpc_context *ctx,
                                      const uint8_t kh[32],
-                                     const uint8_t digest[32], int64_t now,
-                                     const struct json_value *params,
+                                     const struct wso_request *req, int64_t now,
                                      struct json_value *result)
 {
     if (wso_is_active(kh)) {
@@ -397,7 +444,7 @@ static enum wso_begin wso_begin_send(struct wallet_rpc_context *ctx,
     struct wallet_send_once_row row;
     enum wso_begin b;
     if (db_wallet_send_once_find(ctx->node_db, kh, &row)) {
-        b = wso_known(ctx, &row, digest, result);
+        b = wso_known(ctx, &row, req, result);
         if (b != WSO_RERUN)
             return b;
         if (!wso_release(ctx->node_db, kh))
@@ -406,11 +453,11 @@ static enum wso_begin wso_begin_send(struct wallet_rpc_context *ctx,
     if (g_active_n >= WSO_ACTIVE_MAX ||
         db_wallet_send_once_count(ctx->node_db) >= WALLET_SEND_ONCE_MAX_ROWS)
         return wso_error(result, "Too many keyed sends on record; send refused");
-    b = wso_insert_new(ctx, kh, digest, now, result);
+    b = wso_insert_new(ctx, kh, req, now, result);
     if (b != WSO_RUN)
         return b == WSO_RERUN ? wso_error(result, "Send record is inconsistent")
                               : b;
-    if (!wso_fee_ok(params, ctx)) {
+    if (!wso_fee_ok(req->params, ctx)) {
         if (!wso_release(ctx->node_db, kh))
             return wso_error(result, "Send record cannot be released");
         wso_released(result, WALLET_SEND_ONCE_STATE_FEE_CHANGED,
@@ -484,7 +531,8 @@ bool wallet_send_once_dispatch(const struct json_value *params, bool help,
         return plain(params, help, result);
     const char *key = json_get_str(kv);
     struct wallet_rpc_context *ctx = wallet_rpc_context_current();
-    uint8_t kh[32], digest[32];
+    struct wso_request req = { .key = key, .params = params };
+    uint8_t kh[32];
     if (!wallet_send_once_key_valid(key)) {
         json_set_str(result, "Invalid idempotency key");
         return false;
@@ -493,7 +541,7 @@ bool wallet_send_once_dispatch(const struct json_value *params, bool help,
         json_set_str(result, "Send record unavailable; send refused");
         return false;
     }
-    if (!wso_digest(key, params, digest)) {
+    if (!wso_digest(key, params, req.digest)) {
         json_set_str(result,
                      "Not enough memory to read the send request; send refused");
         return false;
@@ -502,8 +550,7 @@ bool wallet_send_once_dispatch(const struct json_value *params, bool help,
 
     (void)zcl_once_call(&g_once, wso_init);
     zcl_mutex_lock(&g_lock);
-    enum wso_begin b = wso_begin_send(ctx, kh, digest, GetTime(), params,
-                                      result);
+    enum wso_begin b = wso_begin_send(ctx, kh, &req, GetTime(), result);
     zcl_mutex_unlock(&g_lock);
     if (b != WSO_RUN)
         return b == WSO_ANSWERED;
