@@ -9,6 +9,7 @@
 #endif
 
 #include "test/test_dev_land_common.h"
+#include "command/native_devagent.h"
 
 
 /* ── isolated state root ───────────────────────────────────────────────── */
@@ -1082,6 +1083,18 @@ static bool dlx_submit_refused_no_checkout(const char *tip)
     return refused;
 }
 
+/* A directory inside no checkout. The fixture's own subdirectory is one only
+ * while TMPDIR lies outside every worktree; when discovery finds a checkout
+ * above it (a TMPDIR inside a worktree), the filesystem root stands in. */
+static bool dlx_no_checkout_dir(char *dir, size_t cap)
+{
+    char found[4096];
+    if (zcl_devagent_checkout_root(dir, found, sizeof(found)) &&
+        (size_t)snprintf(dir, cap, "/") >= cap)
+        return false;
+    return !zcl_devagent_checkout_root(dir, found, sizeof(found));
+}
+
 /* Run only in a child. Submitted without a worktree from a directory below the
  * checkout root, the leaf walks up from the real working directory and queues
  * the absolute root; from a directory inside no checkout it refuses by name. */
@@ -1098,7 +1111,8 @@ bool dlx_discovery_nested(const char *base)
         (size_t)snprintf(needle, sizeof(needle), "\"worktree\":\"%s\"", canon) >=
             sizeof(needle) ||
         (size_t)snprintf(nowhere, sizeof(nowhere), "%s/nowhere", base) >= sizeof(nowhere) ||
-        !dlx_mkdir_p(nowhere))
+        !dlx_mkdir_p(nowhere) ||
+        !dlx_no_checkout_dir(nowhere, sizeof(nowhere)))
         return false;
     setenv("ZCL_LAND_PROOF_STUB", "running", 1);
     setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
