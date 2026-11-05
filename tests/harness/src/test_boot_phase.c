@@ -161,6 +161,22 @@ static int bp_test_params_ready_boundary(void)
 {
     return bp_params_barrier_case(true, true, false, false, true, true);
 }
+
+/* glibc and macOS refuse pthread_join on the calling thread with EDEADLK, so
+ * a self-join is a real, defined join failure without a seam. The loader must
+ * stay owned: started remains true and the join reports false. The handle is
+ * never joined, so ownership is dropped by hand afterwards. */
+static int bp_test_params_join_failure_retains_ownership(void)
+{
+    struct boot_svc_ctx svc = {0};
+    svc.params_thread = pthread_self();
+    svc.params_thread_started = true;
+    int failures = 0;
+    if (boot_params_join_owned(&svc)) failures++;
+    if (!svc.params_thread_started) failures++;
+    svc.params_thread_started = false;
+    return failures;
+}
 #endif
 #if defined(__linux__)
 #include <sys/vfs.h>
@@ -1175,6 +1191,8 @@ int test_boot_phase(void)
              bp_params_barrier_case(true, true, true, false, false, true) == 0);
     BP_CHECK("strict confinement retains worker join",
              bp_params_barrier_case(true, true, false, true, false, true) == 0);
+    BP_CHECK("failed params join retains loader ownership and reports false",
+             bp_test_params_join_failure_retains_ownership() == 0);
 #endif
 
     /* ── export mode must not park on a permanent blocker ─────────
