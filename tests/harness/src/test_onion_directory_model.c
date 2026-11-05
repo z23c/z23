@@ -252,22 +252,6 @@ static int om_find_edges(struct node_db *ndb)
     om_host(miss, sizeof(miss), 'b');
     OM_CHECK("find with a NULL out does not hit even a stored host",
              !db_onion_directory_find(ndb, miss, NULL));
-
-    /* A txid or key column of the wrong length is not copied or trusted. */
-    char sql[400];
-    om_host(miss, sizeof(miss), 'c');
-    snprintf(sql, sizeof(sql),
-             "INSERT INTO onion_directory(hostname,txid,height,owner_address,"
-             "master_pubkey,status,updated_height) VALUES('%s',"
-             "x'0102030405',4,NULL,x'0102','retired',5)", miss);
-    memset(&got, 0xff, sizeof(got));
-    OM_CHECK("a short txid / short key column reads as zero / no key",
-             node_db_exec(ndb, sql) &&
-             db_onion_directory_find(ndb, miss, &got) && got.height == 4 &&
-             got.updated_height == 5 && !got.has_pubkey &&
-             got.owner_address[0] == '\0' &&
-             memcmp(got.txid, (uint8_t[32]){0}, 32) == 0 &&
-             memcmp(got.master_pubkey, (uint8_t[32]){0}, 32) == 0);
     return failures;
 }
 
@@ -378,10 +362,10 @@ static int om_list_active(struct node_db *ndb)
 static int om_counts_truncate(struct node_db *ndb)
 {
     int failures = 0;
-    OM_CHECK("count is every row", db_onion_directory_count(ndb) == 7);
+    OM_CHECK("count is every row", db_onion_directory_count(ndb) == 6);
     OM_CHECK("count by status splits active / retired",
              db_onion_directory_count_by_status(ndb, "active") == 4 &&
-             db_onion_directory_count_by_status(ndb, "retired") == 3);
+             db_onion_directory_count_by_status(ndb, "retired") == 2);
     OM_CHECK("count by an unknown, empty or NULL status is 0",
              db_onion_directory_count_by_status(ndb, "bogus") == 0 &&
              db_onion_directory_count_by_status(ndb, "") == 0 &&

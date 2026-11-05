@@ -1031,6 +1031,10 @@ static int test_binary_ab_fallback_posix_arm(void)
                                                     lastgood);
     failures += ab_posix_cloexec_and_overlong(dir, streak, cur);
     failures += ab_posix_nodectl_adapter_cases(dir, streak);
+    /* Sub-test in test_binary_ab_fallback_edges.c: copy boundaries, the
+     * 1024-byte path limit, the env wrappers and the streak increment. */
+    { extern int ab_edges_contract(const char *dir);
+      failures += ab_edges_contract(dir); }
 
     /* ── 13. cleanup temp dir ────────────────────────────────────────── */
     unlink(streak); unlink(lastgood); unlink(cur);
