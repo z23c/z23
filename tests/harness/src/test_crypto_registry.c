@@ -507,6 +507,177 @@ static int registry_case_diagnostics(void)
     return failures;
 }
 
+/* ---- mutation-sweep closers: registration edges and diagnostics -------------
+ * These register fixture schemes into the process-wide table, so they run last
+ * in this group (the earlier cases pin the constructor-registered count of 5). */
+
+static int fixture_hash(const void *data, size_t len, uint8_t out[32])
+{
+    (void)data; (void)len;
+    memset(out, 0, 32);
+    return 0;
+}
+
+static struct crypto_scheme fixture_scheme(int id, enum crypto_scheme_kind kind,
+                                           enum crypto_scheme_status status,
+                                           const char *name, const char *impl)
+{
+    struct crypto_scheme s = { .id = (enum crypto_scheme_id)id, .kind = kind,
+                               .status = status, .name = name, .impl = impl };
+    s.fn.hash = fixture_hash;
+    return s;
+}
+
+/* One-defect schemes are refused, leave the slot empty and the counts alone. */
+static int registry_case_register_refusals(void)
+{
+    int failures = 0;
+    printf("register refuses each malformed scheme... ");
+    {
+        const size_t before = crypto_registry_count();
+        struct crypto_scheme bad[] = {
+            fixture_scheme(0, CRYPTO_KIND_HASH, CRYPTO_STATUS_ACTIVE, "n", "i"),
+            fixture_scheme(-5, CRYPTO_KIND_HASH, CRYPTO_STATUS_ACTIVE, "n", "i"),
+            fixture_scheme(CRYPTO_SCHEME_MAX, CRYPTO_KIND_HASH, CRYPTO_STATUS_ACTIVE, "n", "i"),
+            fixture_scheme(CRYPTO_SCHEME_MAX + 1, CRYPTO_KIND_HASH, CRYPTO_STATUS_ACTIVE, "n", "i"),
+            fixture_scheme(771, (enum crypto_scheme_kind)0, CRYPTO_STATUS_ACTIVE, "n", "i"),
+            fixture_scheme(771, (enum crypto_scheme_kind)9, CRYPTO_STATUS_ACTIVE, "n", "i"),
+            fixture_scheme(771, CRYPTO_KIND_HASH, CRYPTO_STATUS_UNREGISTERED, "n", "i"),
+            fixture_scheme(771, CRYPTO_KIND_HASH, (enum crypto_scheme_status)4, "n", "i"),
+            fixture_scheme(771, CRYPTO_KIND_HASH, CRYPTO_STATUS_ACTIVE, NULL, "i"),
+            fixture_scheme(771, CRYPTO_KIND_HASH, CRYPTO_STATUS_ACTIVE, "", "i"),
+            fixture_scheme(771, CRYPTO_KIND_HASH, CRYPTO_STATUS_ACTIVE, "n", NULL),
+            fixture_scheme(771, CRYPTO_KIND_HASH, CRYPTO_STATUS_ACTIVE, "n", ""),
+            fixture_scheme(771, CRYPTO_KIND_HASH, CRYPTO_STATUS_ACTIVE, "n", "i"),
+        };
+        bad[sizeof(bad) / sizeof(bad[0]) - 1].fn.hash = NULL;   /* null function pointer */
+        bool all_refused = !crypto_registry_register(NULL);
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+            all_refused = all_refused && !crypto_registry_register(&bad[i]);
+        bool clean = crypto_registry_count() == before &&
+                     crypto_registry_lookup((enum crypto_scheme_id)0) == NULL &&
+                     crypto_registry_lookup((enum crypto_scheme_id)-1) == NULL &&
+                     crypto_registry_lookup(CRYPTO_SCHEME_MAX) == NULL &&
+                     crypto_registry_lookup((enum crypto_scheme_id)(CRYPTO_SCHEME_MAX + 1)) == NULL &&
+                     crypto_registry_lookup((enum crypto_scheme_id)771) == NULL &&
+                     crypto_registry_count_by_kind((enum crypto_scheme_kind)0) == 0 &&
+                     crypto_registry_count_by_kind((enum crypto_scheme_kind)9) == 0;
+        if (all_refused && clean)
+            printf("OK\n");
+        else {
+            printf("FAIL (refused=%d clean=%d)\n", all_refused, clean);
+            failures++;
+        }
+    }
+    return failures;
+}
+
+/* Accepted registrations: every valid status, one-character tags, usability. */
+static int registry_case_register_accepts(void)
+{
+    int failures = 0;
+    printf("register accepts valid statuses and one-character tags... ");
+    {
+        const size_t tot = crypto_registry_count();
+        const size_t h = crypto_registry_count_by_kind(CRYPTO_KIND_HASH);
+        const size_t g = crypto_registry_count_by_kind(CRYPTO_KIND_SIG);
+        const size_t z = crypto_registry_count_by_kind(CRYPTO_KIND_ZK);
+        static struct crypto_scheme a, d, r, top;   /* the table keeps these pointers */
+        a = fixture_scheme(771, CRYPTO_KIND_HASH, CRYPTO_STATUS_ACTIVE, "a", "b");
+        d = fixture_scheme(772, CRYPTO_KIND_SIG, CRYPTO_STATUS_DEPRECATED, "dep", "impl-d");
+        r = fixture_scheme(773, CRYPTO_KIND_ZK, CRYPTO_STATUS_RETIRED, "ret", "impl-r");
+        top = fixture_scheme(CRYPTO_SCHEME_MAX - 1, CRYPTO_KIND_HASH, CRYPTO_STATUS_ACTIVE, "top", "impl-t");
+        bool ok = crypto_registry_register(&a) && crypto_registry_register(&d) &&
+                  crypto_registry_register(&r) && crypto_registry_register(&top);
+        ok = ok && crypto_registry_count() == tot + 4 &&
+             crypto_registry_count_by_kind(CRYPTO_KIND_HASH) == h + 2 &&
+             crypto_registry_count_by_kind(CRYPTO_KIND_SIG) == g + 1 &&
+             crypto_registry_count_by_kind(CRYPTO_KIND_ZK) == z + 1;
+        ok = ok && crypto_registry_lookup((enum crypto_scheme_id)771) == &a &&
+             crypto_registry_lookup((enum crypto_scheme_id)(CRYPTO_SCHEME_MAX - 1)) == &top;
+        /* retired is registered but not usable; deprecated still is */
+        ok = ok && crypto_registry_is_usable((enum crypto_scheme_id)771) &&
+             crypto_registry_is_usable((enum crypto_scheme_id)772) &&
+             !crypto_registry_is_usable((enum crypto_scheme_id)773);
+        /* a second claim on a taken slot fails and changes nothing */
+        struct crypto_scheme dup = fixture_scheme(771, CRYPTO_KIND_HASH, CRYPTO_STATUS_ACTIVE, "z", "z");
+        ok = ok && !crypto_registry_register(&dup) &&
+             crypto_registry_lookup((enum crypto_scheme_id)771) == &a &&
+             crypto_registry_count() == tot + 4;
+        if (ok)
+            printf("OK\n");
+        else {
+            printf("FAIL\n");
+            failures++;
+        }
+    }
+    return failures;
+}
+
+static const char *expect_kind_str(enum crypto_scheme_kind k)
+{
+    return k == CRYPTO_KIND_HASH ? "hash" : k == CRYPTO_KIND_SIG ? "sig" : "zk";
+}
+
+static const char *expect_status_str(enum crypto_scheme_status s)
+{
+    return s == CRYPTO_STATUS_ACTIVE ? "active" :
+           s == CRYPTO_STATUS_DEPRECATED ? "deprecated" : "retired";
+}
+
+/* True when one dump entry equals what the live table holds for its id. */
+static bool dump_entry_matches(const struct json_value *e)
+{
+    const struct json_value *id = json_get(e, "id");
+    if (!id) return false;
+    const struct crypto_scheme *s =
+        crypto_registry_lookup((enum crypto_scheme_id)json_get_int(id));
+    if (!s) return false;
+    const char *name = json_get_str(json_get(e, "name"));
+    const char *impl = json_get_str(json_get(e, "impl"));
+    const char *kind = json_get_str(json_get(e, "kind"));
+    const char *status = json_get_str(json_get(e, "status"));
+    return name && impl && kind && status &&
+           strcmp(name, s->name) == 0 && strcmp(impl, s->impl) == 0 &&
+           strcmp(kind, expect_kind_str(s->kind)) == 0 &&
+           strcmp(status, expect_status_str(s->status)) == 0;
+}
+
+static int registry_case_dump_fields(void)
+{
+    int failures = 0;
+    printf("diagnostics dump names every scheme field and kind count... ");
+    {
+        struct json_value dump;
+        json_init(&dump);
+        bool ok = crypto_registry_dump_state_json(&dump, NULL);
+        const struct json_value *by_kind = json_get(&dump, "by_kind");
+        const struct json_value *schemes = json_get(&dump, "schemes");
+        ok = ok && by_kind && schemes &&
+             json_size(schemes) == crypto_registry_count() &&
+             json_get_int(json_get(&dump, "total_registered")) ==
+                 (int64_t)crypto_registry_count() &&
+             json_get_int(json_get(by_kind, "hash")) ==
+                 (int64_t)crypto_registry_count_by_kind(CRYPTO_KIND_HASH) &&
+             json_get_int(json_get(by_kind, "sig")) ==
+                 (int64_t)crypto_registry_count_by_kind(CRYPTO_KIND_SIG) &&
+             json_get_int(json_get(by_kind, "zk")) ==
+                 (int64_t)crypto_registry_count_by_kind(CRYPTO_KIND_ZK);
+        for (size_t i = 0; ok && i < json_size(schemes); i++)
+            ok = dump_entry_matches(json_at(schemes, i));
+        json_free(&dump);
+        /* a NULL output is refused, not dereferenced */
+        ok = ok && !crypto_registry_dump_state_json(NULL, NULL);
+        if (ok)
+            printf("OK\n");
+        else {
+            printf("FAIL\n");
+            failures++;
+        }
+    }
+    return failures;
+}
+
 int test_crypto_registry(void)
 {
     int failures = 0;
@@ -525,6 +696,9 @@ int test_crypto_registry(void)
     failures += registry_case_equihash_cost(&s);
     failures += registry_case_ecdsa_cost();
     failures += registry_case_diagnostics();
+    failures += registry_case_register_refusals();
+    failures += registry_case_register_accepts();
+    failures += registry_case_dump_fields();
 
     return failures;
 }
