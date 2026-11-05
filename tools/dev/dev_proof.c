@@ -12191,6 +12191,14 @@ static void dp_worker_failure_priority(struct dp_worker *w)
 {
     char scratch[PATH_MAX], groups[PROOF_GROUPS_MAX], report[192] = "unavailable";
     w->failure_priority[0] = '\0';
+    /* The check seam builds a worker with no attempt directory and no changed
+     * set. Without a changed set there is nothing to rank, and an empty
+     * attempt directory would put the scratch diff at the filesystem root. */
+    if (!w->changed || !w->paths->attempt[0]) {
+        (void)zcl_dev_proof_phase_note(w->paths->phases, "failure_priority",
+                                       "unavailable no_changed_set");
+        return;
+    }
     if (snprintf(scratch, sizeof(scratch), "%s/priority-diff.%ld", w->paths->attempt,
                  (long)getpid()) >= (int)sizeof(scratch)) return;
     bool ok = dp_failure_priority(w->paths->root, scratch, w->groups,
