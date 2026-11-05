@@ -247,20 +247,27 @@ static enum merkle_verify_result verify_merkle_root(const struct block *blk)
  * retries. While cleared, the HAVE_DATA gate above idles without re-reading,
  * so the counter advances once per requeue, not per step. Only
  * upstream_failed (a deterministic header-consensus verdict re-fetch cannot
- * change) remains a permanent row. */
+ * change) remains a permanent row.
+ *
+ * try_repair is false when the body was read from the indexed position and
+ * its header hash matched: the position is then proven current, and the
+ * repair (which matches on the header hash alone) would only adopt the same
+ * record again. */
 static job_result_t requeue_body_for_refetch(struct block_index *bi,
                                              int height, const char *what,
-                                             _Atomic uint64_t *counter)
+                                             _Atomic uint64_t *counter,
+                                             bool try_repair)
 {
-    /* Local self-heal first: the stored (nFile,nDataPos) can be stale rather
-     * than bodiless — a foreign writer on a hardlinked blk file (e.g. a live
+    /* With try_repair, local self-heal first: the stored (nFile,nDataPos) can be
+     * stale rather than bodiless — a foreign writer on a hardlinked blk file (e.g. a live
      * zclassicd sharing the inode, whose append pointer lags physical EOF)
      * overwrites indexed records while a DUPLICATE copy of the block still
      * exists on disk (repairable locally). A hash-targeted rescan re-stores through
      * block_index_set_have_data_verified() and the stage retries the same
-     * height next step — no clear, no re-fetch. Only a genuine
-     * no-copy-anywhere falls through to clear-and-hold below. */
-    if (block_index_repair_pos_from_disk(bi, g_datadir, true)) {
+     * height next step — no clear, no re-fetch. Without try_repair, or when
+     * no copy exists anywhere, it goes to clear-and-hold below. */
+    if (try_repair &&
+        block_index_repair_pos_from_disk(bi, g_datadir, true)) {
         LOG_WARN(STAGE_NAME,
                  "[body_persist] %s height=%d: repaired (nFile,nDataPos) from "
                  "a local blk-file copy — retrying, HAVE_DATA kept",
@@ -499,7 +506,7 @@ static job_result_t step_persist(struct stage_step_ctx *c)
     if (!step_read_body(next_h, bi, &owned, &handle, &blk, &borrowed)) {
         block_free(&owned);
         return requeue_body_for_refetch(bi, next_h, "read_failed",
-                                        &g_read_failed_total);
+                                        &g_read_failed_total, true);
     }
     reducer_stage_profile_observe_us(
         REDUCER_PROFILE_BODY_PERSIST, RPF_UPSTREAM_US,
@@ -519,7 +526,7 @@ static job_result_t step_persist(struct stage_step_ctx *c)
          * served to the next refetch attempt — see block_parse_cache.h. */
         block_parse_cache_evict(next_h, bi->phashBlock->data);
         return requeue_body_for_refetch(bi, next_h, "header_mismatch",
-                                        &g_header_mismatch_total);
+                                        &g_header_mismatch_total, true);
     }
 
     phase_started = platform_time_monotonic_us();
@@ -535,8 +542,11 @@ static job_result_t step_persist(struct stage_step_ctx *c)
     }
     if (merkle_result != MERKLE_VERIFY_OK) {
         release_stage_block(&handle, &owned, borrowed);
+        /* The header hash matched at the indexed position, so the position
+         * is current: skip the position repair and drop the cached parse. */
+        block_parse_cache_evict(next_h, bi->phashBlock->data);
         return requeue_body_for_refetch(bi, next_h, "merkle_mismatch",
-                                        &g_merkle_mismatch_total);
+                                        &g_merkle_mismatch_total, false);
     }
 
     return step_commit_verified(db, bi, blk, next_h, c, &handle, &owned,

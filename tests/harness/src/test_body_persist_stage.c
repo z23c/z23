@@ -797,7 +797,7 @@ static int bp_shape_persists(const char *name, size_t ntx)
 }
 
 /* A stored body whose final transaction is repeated under the header's
- * correct root never belongs to its header: same repair as a root mismatch. */
+ * correct root never belongs to its header: same path as a root mismatch. */
 static int bp_repeated_tail_case(size_t ntx, bool same_hash, bool repeat)
 {
     int failures = 0;
