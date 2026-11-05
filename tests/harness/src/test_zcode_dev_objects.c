@@ -3212,6 +3212,105 @@ static int test_zd_work_node_refused_attachment_cancel(void)
     return failures;
 }
 
+/* An attached subscriber that the receiver has not admitted yet still holds
+ * the physical lease: cancelling the admitted request must neither queue a
+ * cancellation of the run nor free the slot under it. */
+static int test_zd_work_node_unadmitted_attachment_holds_slot(void)
+{
+    int failures = 0;
+    TEST("zcode_dev: cancelling one request keeps the lease of a pending attachment") {
+        struct vcs_zcode_work_node *worker = vcs_zcode_work_node_create();
+        ASSERT(worker);
+        ASSERT(vcs_zcode_work_node_peer_add(worker, 21));
+        ASSERT(vcs_zcode_work_node_peer_add(worker, 22));
+        uint8_t worker_seed[32], worker_secret[32], worker_key[32];
+        uint8_t requester_seed[32], requester_secret[32], requester_key[32];
+        zd_root(worker_seed, 190);
+        zd_root(requester_seed, 191);
+        ed25519_keypair(worker_key, worker_secret, worker_seed);
+        ed25519_keypair(requester_key, requester_secret, requester_seed);
+        struct vcs_zcode_work_capability_v1 cap = {0};
+        zd_root(cap.toolchain_capsule_root, 192);
+        cap.work_kinds = UINT32_C(1) << VCS_ZCODE_WORK_BUILD;
+        cap.target = VCS_ZCODE_WORK_TARGET_LINUX_X86_64_V3;
+        cap.confinement = VCS_ZCODE_WORK_CONFINEMENT_V1_MASK;
+        cap.max_cpu_seconds = 60;
+        cap.max_memory_bytes = UINT64_C(512) * 1024 * 1024;
+        cap.max_output_bytes = UINT64_C(64) * 1024 * 1024;
+        cap.max_lease_seconds = 120;
+        cap.slots = cap.queue_headroom = 2;
+        cap.expires_unix = 2000;
+        ASSERT(vcs_zcode_work_capability_seal(
+            &cap, worker_secret, worker_key));
+        ASSERT(vcs_zcode_work_node_set_local_signer(
+            worker, worker_secret, worker_key));
+        ASSERT(vcs_zcode_work_node_set_local_capability(worker, &cap));
+        struct vcs_zcode_work_request_v1 first = {0};
+        first.request_id = 970;
+        zd_root(first.task_root, 193);
+        zd_root(first.candidate_root, 194);
+        zd_root(first.action_root, 195);
+        zd_root(first.input_root, 196);
+        zd_root(first.context_root, 197);
+        zd_root(first.proof_policy_root, 198);
+        memcpy(first.toolchain_capsule_root, cap.toolchain_capsule_root, 32);
+        first.work_kind = VCS_ZCODE_WORK_BUILD;
+        first.target = cap.target;
+        first.max_cpu_seconds = cap.max_cpu_seconds;
+        first.max_memory_bytes = cap.max_memory_bytes;
+        first.max_output_bytes = cap.max_output_bytes;
+        first.deadline_unix = 1100;
+        ASSERT(vcs_zcode_work_request_seal(
+            &first, requester_secret, requester_key));
+        uint8_t frame[VCS_ZCODE_WORK_SWARM_MAX_WIRE_BYTES];
+        size_t frame_len = 0;
+        struct vcs_zcode_work_swarm_message message = {
+            .type = VCS_ZCODE_WORK_SWARM_REQUEST,
+            .body.request = first,
+        };
+        ASSERT(vcs_zcode_work_swarm_serialize(
+            &message, frame, sizeof(frame), &frame_len));
+        ASSERT_EQ(vcs_zcode_work_node_handle_frame(
+            worker, 21, frame, frame_len, 1000), VCS_ZCODE_WORK_NODE_OK);
+        uint64_t peer = 0;
+        struct vcs_zcode_work_request_v1 physical;
+        ASSERT(vcs_zcode_work_node_next_request(worker, &peer, &physical));
+        ASSERT(vcs_zcode_work_node_mark_action_ready(
+            worker, 21, first.request_id, 1000, 4096));
+        struct vcs_zcode_work_request_v1 second = first;
+        second.request_id++;
+        ASSERT(vcs_zcode_work_request_seal(
+            &second, requester_secret, requester_key));
+        message.body.request = second;
+        ASSERT(vcs_zcode_work_swarm_serialize(
+            &message, frame, sizeof(frame), &frame_len));
+        ASSERT_EQ(vcs_zcode_work_node_handle_frame(
+            worker, 22, frame, frame_len, 1000), VCS_ZCODE_WORK_NODE_OK);
+        ASSERT(vcs_zcode_work_node_next_request(worker, &peer, &physical));
+        ASSERT_EQ(physical.request_id, second.request_id);
+        struct vcs_zcode_work_cancel_v1 cancel = {
+            .request_id = first.request_id,
+        };
+        memcpy(cancel.task_root, first.task_root, 32);
+        ASSERT(vcs_zcode_work_cancel_seal(
+            &cancel, requester_secret, requester_key));
+        message.type = VCS_ZCODE_WORK_SWARM_CANCEL;
+        message.body.cancel = cancel;
+        ASSERT(vcs_zcode_work_swarm_serialize(
+            &message, frame, sizeof(frame), &frame_len));
+        ASSERT_EQ(vcs_zcode_work_node_handle_frame(
+            worker, 21, frame, frame_len, 1001), VCS_ZCODE_WORK_NODE_OK);
+        struct vcs_zcode_work_cancel_v1 queued_cancel;
+        ASSERT(!vcs_zcode_work_node_next_cancel(
+            worker, &peer, &queued_cancel));
+        ASSERT(vcs_zcode_work_node_mark_action_ready(
+            worker, 22, second.request_id, 1001, 4096));
+        vcs_zcode_work_node_free(worker);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_zd_work_node(void)
 {
     int failures = 0;
@@ -11178,6 +11277,7 @@ int test_zcode_dev_objects(void)
     failures += test_zd_work_node_pinned_worker_signer();
     failures += test_zd_work_node_independent_domains();
     failures += test_zd_work_node_refused_attachment_cancel();
+    failures += test_zd_work_node_unadmitted_attachment_holds_slot();
     failures += test_zd_work_node();
     failures += test_zd_work_node_projection();
     failures += test_zd_work_node_three();
