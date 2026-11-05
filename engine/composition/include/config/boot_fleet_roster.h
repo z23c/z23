@@ -214,10 +214,11 @@ bool boot_fleet_roster_carriage_open(struct node_db *ndb);
 void boot_fleet_roster_invalidate(void);
 
 /* The manager's half: publish every sealed line of this box's own machine
- * roster onto the board as a roster row, if the board does not already hold
+ * roster onto the board as a roster row, if this box has not already written
  * that exact line, and the head this box holds as a head row on the same terms:
- * a young live copy is left alone and an old one is written again, so a late
- * joiner finds it. One head row per new sequence plus one per
+ * a young live copy of its own is left alone and an old one is written again, so
+ * a late joiner finds it. A copy another key wrote does not count: it may be held
+ * nowhere but here. One head row per new sequence plus one per
  * BOOT_FLEET_ROSTER_REPUBLISH_S, each living FLEET_BOARD_TTL_MAX under the
  * per-key quota. A head too long for one row is refused by name and still moves
  * by paste. Only the box whose own key IS the fleet root publishes.

@@ -1189,18 +1189,25 @@ static void walk_line(const char *line, void *user)
     memset(signer, 0, sizeof signer);
 }
 
-/* The distinct stored lines a walk of the roster notes found. */
+/* The distinct stored lines the scan has proven. */
 struct walk_lines {
+    struct line_memo proven;
     char (*line)[ZCL_FLEET_ROSTER_LINE_MAX];
     size_t n;
 };
 
+/* Only a proven line counts toward the bound, so rows that do not verify cannot
+ * use it up, and the memo holds no more lines than the bound. */
 static bool walk_collect(const uint8_t id[32], const char *text, size_t len,
                          void *ctx)
 {
     struct walk_lines *w = ctx;
+    uint8_t digest[SHA256_OUTPUT_SIZE];
     (void)id;
     if (len == 0 || len >= ZCL_FLEET_ROSTER_LINE_MAX)
+        return true;
+    scan_digest(text, len, digest);
+    if (!memo_find(&w->proven, digest))
         return true;
     for (size_t i = 0; i < w->n; i++)
         if (strcmp(w->line[i], text) == 0)
@@ -1209,22 +1216,40 @@ static bool walk_collect(const uint8_t id[32], const char *text, size_t len,
     return w->n < BOOT_FLEET_ROSTER_SCAN_ROWS;
 }
 
+/* What the scan has proven under this root and state, brought up to date first:
+ * asking about no key runs a rebuild if one is due. */
+static bool walk_proven(struct node_db *ndb, int64_t now,
+                        const struct root_view *rv, struct line_memo *out)
+{
+    static const uint8_t none[32];
+    (void)boot_fleet_roster_check(ndb, none, now);
+    build_lock();
+    bool ok = memo_matches(&g_memo, rv);
+    if (ok)
+        *out = g_memo;
+    build_unlock();
+    return ok;
+}
+
 /* The same lines enforcement folds, read from the board store: the roster notes
  * the manager published, so a box that never imported a line still sees them.
- * Each is verified once, after the store is let go, whoever wrote it. */
+ * A line the scan has not reached yet is dialled once it has. Each is verified
+ * here too, after the store is let go: its endpoint comes from the same check. */
 static void walk_board_rows(struct node_db *ndb, int64_t now,
                             struct walk_acc *a)
 {
-    struct walk_lines w = { NULL, 0 };
-    w.line = zcl_calloc(BOOT_FLEET_ROSTER_SCAN_ROWS, sizeof *w.line,
-                        "fleet_roster_dial_lines");
-    if (!w.line)
-        return;
-    if (db_fleet_board_fleet_lines(ndb, now, BOOT_FLEET_ROSTER_AGENT,
-                                   walk_collect, &w))
-        for (size_t i = 0; i < w.n; i++)
-            walk_line(w.line[i], a);
-    free(w.line);
+    struct walk_lines *w = zcl_calloc(1, sizeof *w, "fleet_roster_dial_walk");
+    if (w)
+        w->line = zcl_calloc(BOOT_FLEET_ROSTER_SCAN_ROWS, sizeof *w->line,
+                             "fleet_roster_dial_lines");
+    if (w && w->line && walk_proven(ndb, now, a->rv, &w->proven) &&
+        db_fleet_board_fleet_lines(ndb, now, BOOT_FLEET_ROSTER_AGENT,
+                                   walk_collect, w))
+        for (size_t i = 0; i < w->n; i++)
+            walk_line(w->line[i], a);
+    if (w)
+        free(w->line);
+    free(w);
 }
 
 size_t boot_fleet_roster_each_machine(
