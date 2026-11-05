@@ -700,7 +700,7 @@ ZCL_COMMAND_DEV_COMMAND(
 
 ZCL_COMMAND_DEV_COMMAND(
     "dev.proof.remote", "dev.proof", "",
-    "Place and prove one owner-supplied remote source in this linked lane",
+    "Expect, execute or verify one independently pinned remote proof",
     "The local owner supplies an exact source assignment and expected proof "
     "identity. The registered invocation checkout is the only destination. "
     "Returns PASS only after independent signed receipt verification; "
@@ -709,10 +709,18 @@ ZCL_COMMAND_DEV_COMMAND(
     "the exact clean registered invocation generation under host admission. "
     "It returns EXPECTATION_READY with proof_executed=false, never places "
     "source or runs proof. Missing planner closure refuses without a refresh build. "
-    "Absent operation keeps execution behavior; operation=execute is explicit.", 0,
+    "Absent operation keeps execution behavior; operation=execute is explicit. "
+    "operation=verify admits an owner-private receipt_path beneath this "
+    "linked invocation root against independent pair/source/CAS/changed/impact "
+    "and signer pins and this requester's available captured host identity. "
+    "It requires admission before cold toolchain queries and refuses missing "
+    "or corrupt build/dev-loop/restart.env without regenerating a plan. "
+    "VERIFIED neither places source, runs proof, imports proof state nor "
+    "establishes current checkout/build, coverage or reuse authority. "
+    "Trust remains the existing native signer policy, never the signer pin.", 0,
     "dev,proof,remote,foreground,receipt",
     "zcl.dev_proof_remote_input.v1", "zcl.dev_proof_remote_result.v1",
-    "operation,repository,destination,bundle,offer,local_commit,remote_base,bundle_sha256,git_tree,source_id,signer_pubkey,source_root,source_cas_root,changed_set_root,impact_policy_root", "",
+    "operation,receipt_path,repository,destination,bundle,offer,local_commit,remote_base,bundle_sha256,git_tree,source_id,signer_pubkey,source_root,source_cas_root,changed_set_root,impact_policy_root", "",
     "z23-dev dev proof remote --input=<assignment>",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER,

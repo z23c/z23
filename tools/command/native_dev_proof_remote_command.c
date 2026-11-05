@@ -1,5 +1,5 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
- * Purpose: owner-invoked placement and proof of one pinned remote source. */
+ * Purpose: owner-invoked source proof and admission of pinned returned receipts. */
 #include "command/native_command.h"
 #include "json/json.h"
 #ifdef ZCL_DEV_BUILD
@@ -57,6 +57,19 @@ static bool remote_oid(const char *s)
     return true;
 }
 
+static bool remote_expected(const struct json_value *input,
+                            struct zcl_dev_proof_remote_expectation *expected)
+{
+    expected->local_commit = remote_text(input, "local_commit");
+    expected->remote_base = remote_text(input, "remote_base");
+    return remote_oid(expected->local_commit) && remote_oid(expected->remote_base) &&
+        remote_hex(input, "signer_pubkey", expected->signer_pubkey) &&
+        remote_hex(input, "source_root", expected->source_root) &&
+        remote_hex(input, "source_cas_root", expected->source_cas_root) &&
+        remote_hex(input, "changed_set_root", expected->changed_set_root) &&
+        remote_hex(input, "impact_policy_root", expected->impact_policy_root);
+}
+
 static bool remote_assignment(const struct json_value *input,
                               struct zcl_dev_proof_remote_assignment *a)
 {
@@ -64,19 +77,12 @@ static bool remote_assignment(const struct json_value *input,
     a->destination = remote_text(input, "destination");
     a->bundle = remote_text(input, "bundle");
     a->offer = remote_text(input, "offer");
-    a->expected.local_commit = remote_text(input, "local_commit");
-    a->expected.remote_base = remote_text(input, "remote_base");
     return a->repository && a->destination && a->bundle && a->offer &&
-        remote_oid(a->expected.local_commit) && remote_oid(a->expected.remote_base) &&
+        remote_expected(input, &a->expected) &&
         remote_copy_hex(input, "bundle_sha256", a->bundle_sha256) &&
         remote_oid(remote_text(input, "git_tree")) &&
         snprintf(a->git_tree, sizeof(a->git_tree), "%s", remote_text(input, "git_tree")) > 0 &&
-        remote_copy_hex(input, "source_id", a->source_id) &&
-        remote_hex(input, "signer_pubkey", a->expected.signer_pubkey) &&
-        remote_hex(input, "source_root", a->expected.source_root) &&
-        remote_hex(input, "source_cas_root", a->expected.source_cas_root) &&
-        remote_hex(input, "changed_set_root", a->expected.changed_set_root) &&
-        remote_hex(input, "impact_policy_root", a->expected.impact_policy_root);
+        remote_copy_hex(input, "source_id", a->source_id);
 }
 
 static bool remote_owner(void *ctx, const char *root, char *why, size_t cap)
@@ -90,6 +96,8 @@ static bool remote_owner(void *ctx, const char *root, char *why, size_t cap)
 
 static void remote_fail(struct zcl_command_reply *reply, const char *phase,
                         const char *why, bool mutated, bool busy);
+static void remote_verify_fail(struct zcl_command_reply *reply,
+                              const char *why, bool busy);
 
 #if !defined(_WIN32)
 struct remote_expectation {
@@ -101,7 +109,7 @@ struct remote_expectation {
 
 /* Existing helpers inherit the environment. Refuse redirection before they
  * inspect Git or execute the pinned source's bounded capture helper. */
-static bool remote_expect_environment(char *why, size_t cap)
+static bool remote_read_environment(char *why, size_t cap)
 {
     const char *admission = getenv("DEVBUILD_ACTIVE");
     if (!admission || strcmp(admission, "z23")) {
@@ -124,12 +132,12 @@ static bool remote_expect_environment(char *why, size_t cap)
 
 /* Only this child gets a fixed Git/helper search path. Preserve the admitted
  * caller's environment and avoid setenv() races in an embedding process. */
-static const char **remote_expect_child_env(const char *root, char source[4200])
+static const char **remote_read_child_env(const char *root, char source[4200])
 {
     extern char **environ;
     size_t count = 0;
     while (environ && environ[count]) count++;
-    const char **env = zcl_calloc(count + 3u, sizeof(*env), "expect child environment");
+    const char **env = zcl_calloc(count + 3u, sizeof(*env), "remote read environment");
     if (!env) return NULL;
     int n = snprintf(source, 4200, "ZCL_DEV_SOURCE_ROOT=%s", root);
     if (n <= 0 || n >= 4200) { free(env); return NULL; }
@@ -152,42 +160,63 @@ static bool remote_expect_child_payload(const struct json_value *body)
         capsule && capsule->type == JSON_OBJ;
 }
 
-static bool remote_expect_child_result(struct zcl_command_reply *reply,
-    const struct zcl_devloop_process_result *process)
+static bool remote_verify_child_payload(const struct json_value *body)
+{
+    const struct json_value *verified = json_get(body, "receipt_verified");
+    const struct json_value *executed = json_get(body, "proof_executed");
+    const struct json_value *placed = json_get(body, "source_placed");
+    return !strcmp(json_get_str(json_get(body, "operation")), "verify") &&
+        !strcmp(json_get_str(json_get(body, "status")), "VERIFIED") &&
+        verified && verified->type == JSON_BOOL && json_get_bool(verified) &&
+        executed && executed->type == JSON_BOOL && !json_get_bool(executed) &&
+        placed && placed->type == JSON_BOOL && !json_get_bool(placed);
+}
+
+static void remote_read_child_failure(struct zcl_command_reply *reply,
+    const struct json_value *envelope, const struct json_value *body, bool verify)
+{
+    const struct json_value *error = json_get(envelope, "error");
+    const char *why = json_get_str(json_get(error, "evidence"));
+    bool busy = !strcmp(json_get_str(json_get(error, "code")), "REMOTE_PROOF_BUSY");
+    if (verify)
+        remote_verify_fail(reply, why[0] ? why : "remote_verify_child_failed", busy);
+    else
+        remote_fail(reply, "expect", why[0] ? why : "remote_expect_child_failed", true, busy);
+    const struct json_value *retained = json_get(body, "retained_input_observation");
+    if (!verify && retained && retained->type == JSON_STR)
+        (void)json_push_kv_str(&reply->data, "retained_input_observation", json_get_str(retained));
+}
+
+static bool remote_read_child_result(struct zcl_command_reply *reply,
+    const struct zcl_devloop_process_result *process, bool verify)
 {
     struct json_value envelope = {0}, data = {0};
     bool parsed = !process->timed_out && !process->cancelled && !process->term_signal &&
         !process->output_truncated && json_read(&envelope, process->output, process->output_len);
     const struct json_value *body = json_get(&envelope, "data");
     bool ok = parsed && process->exit_code == 0 && json_get_bool(json_get(&envelope, "ok")) &&
-        remote_expect_child_payload(body) && json_copy_checked(&data, body);
+        (verify ? remote_verify_child_payload(body) : remote_expect_child_payload(body)) &&
+        json_copy_checked(&data, body);
     if (ok) { json_free(&reply->data); reply->data = data; json_init(&data); }
-    else {
-        const struct json_value *error = json_get(&envelope, "error");
-        const char *why = json_get_str(json_get(error, "evidence"));
-        bool busy = !strcmp(json_get_str(json_get(error, "code")), "REMOTE_PROOF_BUSY");
-        remote_fail(reply, "expect", why[0] ? why : "remote_expect_child_failed", true, busy);
-        const struct json_value *retained = json_get(body, "retained_input_observation");
-        if (retained && retained->type == JSON_STR)
-            (void)json_push_kv_str(&reply->data, "retained_input_observation", json_get_str(retained));
-    }
+    else remote_read_child_failure(reply, &envelope, body, verify);
     json_free(&envelope); json_free(&data);
     return ok;
 }
 
-static void remote_expect_qualified_child(const struct zcl_command_request *request,
-    struct zcl_command_reply *reply, const char *root)
+static void remote_read_qualified_child(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, const char *root, bool verify)
 {
     char input[16384] = "--input=", executable[4096], source[4200];
     size_t n = json_write(request->input, input + 8u, sizeof(input) - 8u);
-    const char **env = n ? remote_expect_child_env(root, source) : NULL;
-    struct zcl_devloop_process_result *process = zcl_calloc(1, sizeof(*process), "expect child result");
+    const char **env = n ? remote_read_child_env(root, source) : NULL;
+    struct zcl_devloop_process_result *process = zcl_calloc(1, sizeof(*process), "remote read result");
     bool ready = n && n < sizeof(input) - 8u && env && process &&
         os_proc_self_exe_open_path(executable, sizeof(executable));
     const char *argv[] = {executable, "dev", "proof", "remote", input, NULL};
-    if (!ready || !zcl_devloop_process_run_env(root, argv, env, 600000, process))
-        remote_fail(reply, "expect", "remote_expect_child_unavailable", false, false);
-    else (void)remote_expect_child_result(reply, process);
+    if (!ready || !zcl_devloop_process_run_env(root, argv, env, 600000, process)) {
+        if (verify) remote_verify_fail(reply, "remote_verify_child_unavailable", false);
+        else remote_fail(reply, "expect", "remote_expect_child_unavailable", false, false);
+    } else (void)remote_read_child_result(reply, process, verify);
     free(process); free(env);
 }
 
@@ -364,10 +393,10 @@ static void remote_expect_command(const struct zcl_command_request *request,
     char why[256] = "remote_expect_invalid_input";
     if (!e) { remote_fail(reply, "expect", "remote_expect_allocation_failed", false, false); return; }
     int guard = -1, acquired = -1;
-    bool ok = remote_expect_inputs(request->input, e) && remote_expect_environment(why, sizeof(why));
+    bool ok = remote_expect_inputs(request->input, e) && remote_read_environment(why, sizeof(why));
     const char *path = getenv("PATH");
     if (ok && (!path || strcmp(path, "/usr/bin:/bin"))) {
-        free(e); remote_expect_qualified_child(request, reply, root); return;
+        free(e); remote_read_qualified_child(request, reply, root, false); return;
     }
     if (ok) acquired = zcl_dev_proof_execution_acquire(root, &guard, why, sizeof(why));
     if (ok && acquired == 1) { why[0] = '\0'; ok = remote_expect_locked(root, e, why, sizeof(why)); }
@@ -423,6 +452,96 @@ static void remote_fail(struct zcl_command_reply *reply, const char *phase,
         busy ? "REMOTE_PROOF_BUSY" : "REMOTE_PROOF_REFUSED", phase, busy,
         mutated, !strcmp(phase, "expect") ? "remote expectation was not completed" :
         "remote proof did not produce an independently verified PASS", why);
+}
+
+static void remote_verify_fail(struct zcl_command_reply *reply,
+                              const char *why, bool busy)
+{
+    zcl_command_reply_fail(reply, busy ? ZCL_COMMAND_STATUS_BLOCKED : ZCL_COMMAND_STATUS_FAILED,
+        busy ? ZCL_COMMAND_EXIT_BLOCKED : ZCL_COMMAND_EXIT_FAILED,
+        busy ? "REMOTE_PROOF_BUSY" : "REMOTE_PROOF_REFUSED", "verify", busy,
+        false, "returned proof receipt was not verified", why);
+}
+
+#if !defined(_WIN32)
+static bool remote_verify_inputs(const struct json_value *input,
+    struct zcl_dev_proof_remote_expectation *expected, const char **path)
+{
+    static const char *const allowed[] = {
+        "operation", "receipt_path", "local_commit", "remote_base",
+        "signer_pubkey", "source_root", "source_cas_root",
+        "changed_set_root", "impact_policy_root"
+    };
+    if (!input || input->type != JSON_OBJ) return false;
+    for (size_t i = 0; i < json_size(input); i++) {
+        bool known = false;
+        for (size_t k = 0; k < sizeof(allowed) / sizeof(allowed[0]); k++)
+            if (!strcmp(input->keys[i], allowed[k])) { known = true; break; }
+        if (!known) return false;
+    }
+    *path = remote_text(input, "receipt_path");
+    return *path && remote_expected(input, expected);
+}
+
+static bool remote_verify_emit(struct zcl_command_reply *reply)
+{
+    struct json_value result = {0};
+    json_set_object(&result);
+    bool ok = json_push_kv_str(&result, "operation", "verify") &&
+        json_push_kv_str(&result, "status", "VERIFIED") &&
+        json_push_kv_bool(&result, "receipt_verified", true) &&
+        json_push_kv_bool(&result, "proof_executed", false) &&
+        json_push_kv_bool(&result, "source_placed", false);
+    if (ok) { json_free(&reply->data); reply->data = result; json_init(&result); }
+    json_free(&result);
+    return ok;
+}
+#endif
+
+/* Admit wire against independent pins and available requester identity only.
+ * This neither imports local proof state nor establishes current source,
+ * build, coverage or reuse authority. Host capture can execute queries, so
+ * admission and the qualified environment precede every capture callback. */
+static void remote_verify_command(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, const char *root)
+{
+#if defined(_WIN32)
+    (void)request; (void)root;
+    remote_verify_fail(reply, "remote_verify_platform_unavailable", false);
+#else
+    struct zcl_dev_proof_remote_expectation expected = {0};
+    struct zcl_dev_acceptance_receipt_v1 receipt;
+    const char *path = NULL;
+    char why[256] = "remote_verify_invalid_input";
+    if (!remote_verify_inputs(request->input, &expected, &path) ||
+        !remote_read_environment(why, sizeof(why))) {
+        remote_verify_fail(reply, why, false);
+        return;
+    }
+    const char *search = getenv("PATH");
+    if (!search || strcmp(search, "/usr/bin:/bin")) {
+        remote_read_qualified_child(request, reply, root, true);
+        return;
+    }
+    if (!remote_owner((void *)root, root, why, sizeof(why)) ||
+        !zcl_dev_proof_remote_git_policy_check(root, why, sizeof(why))) {
+        remote_verify_fail(reply, why, false);
+        return;
+    }
+    uint8_t wire[ZCL_DEV_PROOF_WIRE_BYTES];
+    if (!remote_receipt(root, path, wire)) {
+        remote_verify_fail(reply, "remote_receipt_missing_or_unsafe", false);
+        return;
+    }
+    why[0] = '\0';
+    if (!zcl_dev_proof_remote_verify(wire, sizeof(wire), &expected,
+            zcl_dev_proof_host_toolchain_capture, (void *)root, &receipt, why, sizeof(why))) {
+        remote_verify_fail(reply, why[0] ? why : "remote_receipt_verification_failed", false);
+        return;
+    }
+    if (!remote_verify_emit(reply))
+        remote_verify_fail(reply, "remote_verify_output_failed", false);
+#endif
 }
 
 static bool remote_status_facts(struct json_value *facts,
@@ -568,6 +687,14 @@ static void remote_execute_command(const struct zcl_command_request *request,
 }
 #endif
 
+#ifdef ZCL_DEV_BUILD
+static bool remote_operation_valid(const char *operation)
+{
+    return operation && (!strcmp(operation, "expect") ||
+        !strcmp(operation, "execute") || !strcmp(operation, "verify"));
+}
+#endif
+
 void zcl_native_handle_dev_proof_remote(const struct zcl_command_request *request,
                                         struct zcl_command_reply *reply)
 {
@@ -586,8 +713,16 @@ void zcl_native_handle_dev_proof_remote(const struct zcl_command_request *reques
     }
     const struct json_value *operation_value = json_get(request->input, "operation");
     const char *operation = remote_text(request->input, "operation");
-    if (operation_value && (!operation || (strcmp(operation, "expect") && strcmp(operation, "execute")))) {
+    if (operation_value && !remote_operation_valid(operation)) {
         remote_fail(reply, "input", operation ? "remote_unknown_operation" : "remote_invalid_operation", false, false);
+        return;
+    }
+    if (operation && !strcmp(operation, "verify")) {
+        remote_verify_command(request, reply, root);
+        return;
+    }
+    if (json_get(request->input, "receipt_path")) {
+        remote_fail(reply, "input", "remote_verify_only_input", false, false);
         return;
     }
     if (operation && !strcmp(operation, "expect")) {

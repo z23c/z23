@@ -3,6 +3,9 @@
 #include "test/test_core.h"
 #include "test/host_tool_capture.h"
 #include "dev_proof.h"
+#include "dev_proof_remote.h"
+#include "dev_proof_signer.h"
+#include "vcs/build_action.h"
 #include "base/safe_alloc.h"
 #include "json/json.h"
 #include <stdio.h>
@@ -606,6 +609,366 @@ static bool rcmd_expect_full_source(const char *current, const char *binary)
     return ok;
 }
 
+/* Signed claims below are synthetic; host roots are actual cold native
+ * captures. Verification never establishes that these claims were executed. */
+struct rcv_fixture {
+    char root[4096], primary[4096], linked[4096], binary[4096];
+    char states[4][4096], receipt[4096], key[4096], allow[4096];
+    char refs[8192];
+    uint8_t identity[4][32], keys[4][32];
+    struct zcl_dev_proof_remote_expectation expected;
+    uint8_t wire[ZCL_DEV_PROOF_WIRE_BYTES];
+};
+
+static bool rcv_plan(struct rcv_fixture *f, const char *extra)
+{
+    char plan[8192];
+    int n = snprintf(plan, sizeof(plan),
+        "CC=%s/build/bin/zcc cc\nCOMPILER_ID=public-fixture\nBASE_GENERATION=%s\n"
+        "DEV_CFLAGS=-std=c23 -O2 -ffile-prefix-map=%s=/zclassic23\n"
+        "DEV_LDFLAGS=-pthread -pie\nDEV_LIBS=vendor/lib/libsecp256k1.a -lm\n"
+        "DEV_OBJ_DIR=build/dev-obj/epochs/%s\n"
+        "DEV_LINK_RSP=build/dev-obj/epochs/%s/link-inputs.rsp\n"
+        "DEV_BASE_RELOC=build/dev-obj/epochs/%s/restart-base.o\n"
+        "TEST_CFLAGS=-std=c23 -g -ffile-prefix-map=%s=/zclassic23\n"
+        "TEST_LDFLAGS=-pthread -pie\nTEST_LIBS=vendor/lib/libsecp256k1.a -lm\n"
+        "TEST_OBJ_DIR=build/test-obj/epochs/%s\n"
+        "TEST_LINK_RSP=build/test-obj/epochs/%s/link-inputs.rsp\n"
+        "TEST_BASE_RELOC=build/test-obj/epochs/%s/restart-base.o\n%s",
+        f->linked, rcmd_hex, f->linked, rcmd_hex, rcmd_hex, rcmd_hex,
+        f->linked, rcmd_hex, rcmd_hex, rcmd_hex, extra);
+    return n > 0 && (size_t)n < sizeof(plan) &&
+        rpp_text(f->linked, "build/dev-loop/restart.env", plan);
+}
+
+static struct zcl_dev_acceptance_receipt_v1 rcv_claim(const struct rcv_fixture *f)
+{
+    struct zcl_dev_acceptance_receipt_v1 r = {0};
+    (void)zcl_dev_proof_oid_decode(f->expected.local_commit, r.local_commit, &r.local_commit_len);
+    (void)zcl_dev_proof_oid_decode(f->expected.remote_base, r.remote_base, &r.remote_base_len);
+    memcpy(r.source_root, f->expected.source_root, 32);
+    memcpy(r.source_cas_root, f->expected.source_cas_root, 32);
+    memcpy(r.changed_set_root, f->expected.changed_set_root, 32);
+    memcpy(r.impact_policy_root, f->expected.impact_policy_root, 32);
+    memset(r.mutation_root, 0x45, 32);
+    memcpy(r.compiler_root, f->identity[0], 32);
+    memcpy(r.flags_root, f->identity[1], 32);
+    memcpy(r.environment_root, f->identity[2], 32);
+    memcpy(r.build_graph_root, f->identity[3], 32);
+    for (size_t i = 0; i < ZCL_DEV_PROOF_DIMENSIONS; i++) {
+        memset(r.dimensions[i].receipt_root, (int)(0x61u + i), 32);
+        r.dimensions[i].selected = r.dimensions[i].ran = 1;
+    }
+    r.policy_version = ZCL_DEV_PROOF_POLICY_VERSION;
+    r.complete = 1;
+    r.created_unix = 1757030400u;
+    r.elapsed_ms = 1234;
+    return r;
+}
+
+static bool rcv_sign(struct rcv_fixture *f,
+    struct zcl_dev_acceptance_receipt_v1 *r, unsigned signer)
+{
+    if (signer >= 4 || setenv("XDG_STATE_HOME", f->states[signer], 1)) return false;
+    bool present = false;
+    const char *why = NULL;
+    bool ok = zcl_dev_proof_receipt_child_set_root(r, r->child_set_root) &&
+        zcl_dev_proof_receipt_seal(r) && zcl_dev_proof_receipt_serialize(r, f->wire) &&
+        zcl_dev_proof_signer_public(f->keys[signer], &present, &why) && present;
+    return setenv("XDG_STATE_HOME", f->states[0], 1) == 0 && ok;
+}
+
+static bool rcv_capture(struct rcv_fixture *f)
+{
+    static const char *const names[] = {"CC", "CXX", "CFLAGS", "CPPFLAGS", "LDFLAGS",
+        "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "COMPILER_PATH", "LIBRARY_PATH",
+        "GCC_EXEC_PREFIX", "SDKROOT", "SOURCE_DATE_EPOCH"};
+    for (size_t i = 0; i < sizeof(names)/sizeof(names[0]); i++)
+        if (unsetenv(names[i])) return false;
+    if (setenv("PATH", "/usr/bin:/bin", 1) || setenv("LC_ALL", "C", 1) ||
+        !rcv_plan(f, "")) return false;
+    char why[512] = {0};
+    vcs_toolchain_capsule_v1_cache_reset_for_test();
+    if (!zcl_dev_proof_host_toolchain_capture(f->linked, f->identity, why, sizeof(why))) {
+        printf("verify CLI real capture failed: %s\n", why);
+        return false;
+    }
+    uint64_t fresh = 0, hits = 0;
+    vcs_toolchain_capsule_v1_cache_stats_for_test(&fresh, &hits);
+    return fresh > 0 && hits == 0;
+}
+
+static bool rcv_setup(struct rcv_fixture *f)
+{
+    test_make_tmpdir(f->root, sizeof(f->root), "remote_verify_cli", "native");
+    if (!rcmd_repository(f->root, f->primary, sizeof(f->primary), f->linked,
+        sizeof(f->linked), f->binary, sizeof(f->binary)) || !rcv_capture(f)) return false;
+    f->expected.local_commit = "1111111111111111111111111111111111111111";
+    f->expected.remote_base = "2222222222222222222222222222222222222222";
+    memset(f->expected.source_root, 0x11, 32);
+    memset(f->expected.source_cas_root, 0x22, 32);
+    memset(f->expected.changed_set_root, 0x33, 32);
+    memset(f->expected.impact_policy_root, 0x44, 32);
+    for (unsigned i = 0; i < 4; i++) {
+        char leaf[32];
+        int n = snprintf(leaf, sizeof(leaf), "state-%u", i);
+        if (n < 0 || (size_t)n >= sizeof(leaf) ||
+            !rpp_path(f->states[i], sizeof(f->states[i]), f->root, leaf)) return false;
+        struct zcl_dev_acceptance_receipt_v1 r = rcv_claim(f);
+        if (!rcv_sign(f, &r, i)) return false;
+    }
+    memcpy(f->expected.signer_pubkey, f->keys[1], 32);
+    if (!zcl_dev_proof_signer_paths(f->key, sizeof(f->key), f->allow, sizeof(f->allow))) return false;
+    char trust[132];
+    zcl_hex_encode(f->keys[1], 32, trust); trust[64] = '\n';
+    zcl_hex_encode(f->keys[2], 32, trust + 65); trust[129] = '\n';
+    if (!rpp_write(f->root, f->allow + strlen(f->root) + 1, trust, 130, 0600) ||
+        !rpp_path(f->receipt, sizeof(f->receipt), f->linked, "returned.receipt")) return false;
+    return RPP_GIT(f->primary, f->refs, sizeof(f->refs), "show-ref", "--head");
+}
+
+static bool rcv_input(struct rcv_fixture *f, char *out, size_t cap, const char *path)
+{
+    char signer[65], source[65], cas[65], changed[65], impact[65];
+    zcl_hex_encode(f->expected.signer_pubkey, 32, signer);
+    zcl_hex_encode(f->expected.source_root, 32, source);
+    zcl_hex_encode(f->expected.source_cas_root, 32, cas);
+    zcl_hex_encode(f->expected.changed_set_root, 32, changed);
+    zcl_hex_encode(f->expected.impact_policy_root, 32, impact);
+    int n = snprintf(out, cap,
+        "--input={\"operation\":\"verify\",\"receipt_path\":\"%s\","
+        "\"local_commit\":\"%s\",\"remote_base\":\"%s\",\"signer_pubkey\":\"%s\","
+        "\"source_root\":\"%s\",\"source_cas_root\":\"%s\","
+        "\"changed_set_root\":\"%s\",\"impact_policy_root\":\"%s\"}",
+        path, f->expected.local_commit, f->expected.remote_base, signer, source, cas, changed, impact);
+    return n > 0 && (size_t)n < cap;
+}
+
+/* Hash only isolated fixture state; no private key bytes leave this helper. */
+static bool rcv_state(struct rcv_fixture *f, uint8_t digest[32])
+{
+    struct sha3_256_ctx hash;
+    sha3_256_init(&hash);
+    const char *paths[] = {f->key, f->allow};
+    for (size_t i = 0; i < 2; i++) {
+        uint8_t *bytes = NULL;
+        size_t len = 0;
+        struct stat st;
+        if (stat(paths[i], &st) || !zcl_read_whole_file(paths[i], 8192, &bytes, &len, "verify fixture"))
+            return false;
+        sha3_256_write(&hash, (const uint8_t *)&st.st_mode, sizeof(st.st_mode));
+        sha3_256_write(&hash, bytes, len);
+        free(bytes);
+    }
+    sha3_256_finalize(&hash, digest);
+    char refs[8192], cache[4096];
+    struct stat st;
+    return RPP_GIT(f->primary, refs, sizeof(refs), "show-ref", "--head") &&
+        !strcmp(refs, f->refs) && rpp_path(cache, sizeof(cache), f->linked, ".cache/zcl-dev-proof") &&
+        lstat(cache, &st) != 0 && errno == ENOENT;
+}
+
+static int rcv_run(struct rcv_fixture *f, const char *input, const char *extra,
+    bool admitted, char *out, size_t cap)
+{
+    char root[4200], state[4200], home[4200];
+    int a = snprintf(root, sizeof(root), "ZCL_DEV_SOURCE_ROOT=%s", f->linked);
+    int b = snprintf(state, sizeof(state), "XDG_STATE_HOME=%s", f->states[0]);
+    int c = snprintf(home, sizeof(home), "HOME=%s", f->linked);
+    if (a < 0 || (size_t)a >= sizeof(root) || b < 0 || (size_t)b >= sizeof(state) ||
+        c < 0 || (size_t)c >= sizeof(home)) return -1;
+    const char *argv[] = {"/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "LC_ALL=C", root, state,
+        home, admitted ? "DEVBUILD_ACTIVE=z23" : "LC_ALL=C", extra ? extra : "LC_ALL=C",
+        f->binary, "dev", "proof", "remote", input, NULL};
+    return test_host_tool_capture(argv, out, cap, 60000);
+}
+
+static bool rcv_bool(const struct json_value *object, const char *key, bool expected)
+{
+    const struct json_value *v = json_get(object, key);
+    return v && v->type == JSON_BOOL && json_get_bool(v) == expected;
+}
+
+static bool rcv_reply(const struct json_value *envelope, int rc, const char *reason)
+{
+    const struct json_value *data = json_get(envelope, "data");
+    if (!reason) return rc == 0 && rcv_bool(envelope, "ok", true) &&
+        rcmd_expect_field(data, "status", "VERIFIED") && rcv_bool(data, "receipt_verified", true) &&
+        rcv_bool(data, "proof_executed", false) && rcv_bool(data, "source_placed", false);
+    const struct json_value *error = json_get(envelope, "error");
+    return rc > 0 && rcv_bool(envelope, "ok", false) &&
+        rcmd_expect_field(error, "code", "REMOTE_PROOF_REFUSED") &&
+        rcmd_expect_field(error, "phase", "verify") && rcmd_expect_field(error, "evidence", reason) &&
+        rcv_bool(error, "mutated", false) && !json_get(data, "receipt_verified");
+}
+
+static bool rcv_case(struct rcv_fixture *f, const char *label, const char *path,
+    const char *reason, const char *extra, bool admitted)
+{
+    uint8_t before[32], after[32];
+    char input[8192], out[16384];
+    if (!rcv_input(f, input, sizeof(input), path) || !rcv_state(f, before)) return false;
+    int rc = rcv_run(f, input, extra, admitted, out, sizeof(out));
+    struct json_value envelope = {0};
+    bool ok = json_read(&envelope, out, strlen(out)) && rcv_reply(&envelope, rc, reason);
+    json_free(&envelope);
+    ok = rcv_state(f, after) && !memcmp(before, after, 32) && ok;
+    printf("verify CLI %s: %s rc=%d\n", label, ok ? "PASS" : "FAIL", rc);
+    if (!ok) printf("verify CLI reply: %s\n", out);
+    return ok;
+}
+
+static bool rcv_wire(struct rcv_fixture *f, struct zcl_dev_acceptance_receipt_v1 *r, unsigned signer)
+{
+    return rcv_sign(f, r, signer) &&
+        rpp_write(f->linked, "returned.receipt", f->wire, sizeof(f->wire), 0600);
+}
+
+static bool rcv_bindings(struct rcv_fixture *f)
+{
+    uint8_t *roots[] = {f->expected.signer_pubkey, f->expected.source_root,
+        f->expected.source_cas_root, f->expected.changed_set_root, f->expected.impact_policy_root};
+    const char *reasons[] = {"remote_signer_mismatch", "remote_source_root_mismatch",
+        "remote_source_cas_root_mismatch", "remote_changed_set_root_mismatch", "remote_impact_policy_root_mismatch"};
+    for (size_t i = 0; i < 5; i++) {
+        roots[i][0] ^= 1;
+        bool ok = rcv_case(f, reasons[i], f->receipt, reasons[i], NULL, true);
+        roots[i][0] ^= 1;
+        if (!ok) return false;
+    }
+    const char *prior = f->expected.local_commit;
+    f->expected.local_commit = "3333333333333333333333333333333333333333";
+    bool ok = rcv_case(f, "pair mismatch", f->receipt, "receipt_commit_or_base_mismatch", NULL, true);
+    f->expected.local_commit = prior;
+    return ok;
+}
+
+static bool rcv_plan_refusals(struct rcv_fixture *f, unsigned signer)
+{
+    char plan[4096];
+    if (!rpp_path(plan, sizeof(plan), f->linked, "build/dev-loop/restart.env") || unlink(plan)) return false;
+    /* Detail contains the fixture path, so build the exact native evidence. */
+    char missing[4608];
+    char cause[4608];
+    int n = snprintf(cause, sizeof(cause), "restart_env_missing:%s (make dev-bin)", plan);
+    if (n < 0 || (size_t)n >= sizeof(cause)) return false;
+    n = snprintf(missing, sizeof(missing), "remote_toolchain_unverifiable:%.95s", cause);
+    if (n < 0 || (size_t)n >= sizeof(missing) ||
+        !rcv_case(f, "missing plan refuses", f->receipt, missing, NULL, true) || access(plan, F_OK) == 0 ||
+        !rpp_text(f->linked, "build/dev-loop/restart.env", "broken\n") ||
+        !rcv_case(f, "corrupt plan refuses", f->receipt, signer == 0 ?
+            "remote_toolchain_unverifiable:" : "remote_toolchain_unverifiable:capture_failed", NULL, true)) return false;
+    return rcv_plan(f, "");
+}
+
+static bool rcv_identity_controls(struct rcv_fixture *f, unsigned signer)
+{
+    memcpy(f->expected.signer_pubkey, f->keys[signer], 32);
+    const char *reasons[] = {"remote_toolchain_mismatch:compiler_root", "remote_toolchain_mismatch:flags_root",
+        "remote_toolchain_mismatch:environment_root", "remote_toolchain_mismatch:build_graph_root"};
+    for (size_t i = 0; i < 4; i++) {
+        struct zcl_dev_acceptance_receipt_v1 r = rcv_claim(f);
+        uint8_t *roots[] = {r.compiler_root, r.flags_root, r.environment_root, r.build_graph_root};
+        roots[i][0] ^= 1;
+        if (!rcv_wire(f, &r, signer) || !rcv_case(f, reasons[i], f->receipt, reasons[i], NULL, true)) return false;
+    }
+    struct zcl_dev_acceptance_receipt_v1 r = rcv_claim(f);
+    return rcv_wire(f, &r, signer) &&
+        rcv_case(f, "native cold identity positive", f->receipt, NULL, NULL, true) &&
+        rcv_plan_refusals(f, signer);
+}
+
+static bool rcv_path_controls(struct rcv_fixture *f)
+{
+    if (chmod(f->receipt, 0644) || !rcv_case(f, "unsafe mode", f->receipt, "remote_receipt_missing_or_unsafe", NULL, true) ||
+        chmod(f->receipt, 0600)) return false;
+    if (unlink(f->receipt) || mkfifo(f->receipt, 0600) ||
+        !rcv_case(f, "FIFO refuses", f->receipt, "remote_receipt_missing_or_unsafe", NULL, true) || unlink(f->receipt)) return false;
+    if (!rpp_write(f->linked, "returned.receipt", f->wire, sizeof(f->wire)-1, 0600) ||
+        !rcv_case(f, "truncated wire", f->receipt, "remote_receipt_missing_or_unsafe", NULL, true)) return false;
+    return true;
+}
+
+static bool rcv_more_paths(struct rcv_fixture *f)
+{
+    uint8_t trailing[ZCL_DEV_PROOF_WIRE_BYTES+1];
+    memcpy(trailing, f->wire, sizeof(f->wire)); trailing[sizeof(f->wire)] = 0;
+    if (!rpp_write(f->linked, "returned.receipt", trailing, sizeof(trailing), 0600) ||
+        !rcv_case(f, "trailing wire", f->receipt, "remote_receipt_missing_or_unsafe", NULL, true)) return false;
+    if (unlink(f->receipt) || symlink(f->key, f->receipt) ||
+        !rcv_case(f, "symlink refuses", f->receipt, "remote_receipt_missing_or_unsafe", NULL, true) || unlink(f->receipt)) return false;
+    return rcv_case(f, "outside receipt", f->key, "remote_receipt_missing_or_unsafe", NULL, true);
+}
+
+static bool rcv_transport_controls(struct rcv_fixture *f)
+{
+    struct zcl_dev_acceptance_receipt_v1 r = rcv_claim(f);
+    if (!rcv_wire(f, &r, 3) || !rcv_case(f, "untrusted signer", f->receipt, "signer_unknown", NULL, true)) return false;
+    r = rcv_claim(f);
+    if (!rcv_wire(f, &r, 1)) return false;
+    f->wire[sizeof(f->wire)-1] ^= 1;
+    if (!rpp_write(f->linked, "returned.receipt", f->wire, sizeof(f->wire), 0600) ||
+        !rcv_case(f, "modified signature", f->receipt, "signature_invalid", NULL, true)) return false;
+    if (!rcv_wire(f, &r, 1)) return false;
+    if (!rcv_path_controls(f) || !rcv_more_paths(f)) return false;
+    r.policy_version--;
+    if (!rcv_wire(f, &r, 1) || !rcv_case(f, "old policy", f->receipt, "receipt_schema_old", NULL, true)) return false;
+    return rpp_write(f->linked, "returned.receipt", f->wire, ZCL_DEV_PROOF_UNSIGNED_WIRE_BYTES, 0600) &&
+        rcv_case(f, "unsigned wire", f->receipt, "remote_receipt_missing_or_unsafe", NULL, true);
+}
+
+static bool rcv_path_sentinel(struct rcv_fixture *f)
+{
+    char dir[4096], git[4096], marker[4096], env[8192];
+    if (!rpp_path(dir, sizeof(dir), f->root, "caller-bin") || mkdir(dir, 0700) ||
+        !rpp_path(git, sizeof(git), dir, "git") ||
+        !rpp_path(marker, sizeof(marker), f->root, "unexpected-git")) return false;
+    int n = snprintf(env, sizeof(env), "PATH=%s:/usr/bin:/bin", dir);
+    if (n <= 0 || (size_t)n >= sizeof(env) || !rcmd_expect_sentinel_file(git, marker)) return false;
+    return rcv_case(f, "qualified PATH excludes sentinel", f->receipt, NULL, env, true) &&
+        access(marker, F_OK) != 0 && errno == ENOENT;
+}
+
+static bool rcv_controls(struct rcv_fixture *f)
+{
+    struct zcl_dev_acceptance_receipt_v1 r = rcv_claim(f);
+    if (!rcv_wire(f, &r, 1) || !rcv_case(f, "trusted distinct signer", f->receipt, NULL, NULL, true) ||
+        !rcv_bindings(f) || !rcv_case(f, "admission required", f->receipt, "remote_host_admission_required", NULL, false) ||
+        !rcv_case(f, "redirect environment", f->receipt, "remote_git_environment_redirected", "GIT_PAGER=cat", true) ||
+        !rcv_path_sentinel(f)) return false;
+    return rcv_transport_controls(f) && rcv_identity_controls(f, 1) && rcv_identity_controls(f, 0);
+}
+
+static bool rcv_fixture_run(void)
+{
+    struct rcv_fixture *f = calloc(1, sizeof(*f));
+    if (!f) return false;
+    bool ok = rcv_setup(f);
+    if (!ok) printf("verify CLI setup failed\n");
+    if (ok) ok = rcv_controls(f);
+    if (ok) ok = test_rm_rf_recursive(f->root) == 0;
+    else printf("verify CLI fixture retained: %s\n", f->root);
+    free(f);
+    return ok;
+}
+
+static int rcmd_test_verify(void)
+{
+    int failures = 0;
+    TEST("dev.proof.remote: requester CLI admits pinned receipts with real cold identity and no state writes") {
+        fflush(NULL);
+        pid_t child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) { bool ok = rcv_fixture_run(); fflush(NULL); _exit(ok ? 0 : 1); }
+        int status = 0;
+        ASSERT_EQ(waitpid(child, &status, 0), child);
+        ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 static int rcmd_test_expect_full_source(const char *current, const char *binary)
 {
     int failures = 0;
@@ -725,6 +1088,7 @@ int test_dev_proof_remote_command(void)
         PASS();
     }
     failures += rcmd_test_expect_full_source(current, binary);
+    failures += rcmd_test_verify();
 _test_next:;
     return failures;
 }
