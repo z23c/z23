@@ -120,6 +120,19 @@ static void rd_id(struct rd *r, uint8_t dst[32])
     dst[0] |= 1u;
 }
 
+/* The signing paths cost milliseconds under the sanitizers, and coverage
+ * guidance piles the corpus onto whichever path reaches deepest, so a gate
+ * on one input byte would make every run pay for them. Gating on a hash of
+ * the whole input keeps a run reproducible from its file while letting only
+ * about one mutant in (mask + 1) take the expensive path. */
+static bool input_gate(const uint8_t *w, size_t n, uint32_t mask)
+{
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < n; i++)
+        h = (h ^ w[i]) * 16777619u;
+    return (h & mask) == 0;
+}
+
 /* A fixed Ed25519 identity for the paths that must carry a real signature. */
 static uint8_t g_seed[32];
 static uint8_t g_pk[32];
@@ -521,7 +534,7 @@ static void fuzz_capability(const uint8_t *w, size_t n)
 {
     if (!n)
         return;
-    if ((w[0] & 31u) == 0)
+    if (input_gate(w, n, 63u))
         cap_signed(w + 1, n - 1);
     else
         cap_raw(w + 1, n - 1, (w[0] & 0xE0u) == 0);
@@ -856,7 +869,7 @@ static void fuzz_board_post(const uint8_t *w, size_t n)
 {
     if (!n)
         return;
-    if ((w[0] & 31u) == 0)
+    if (input_gate(w, n, 63u))
         board_signed(w + 1, n - 1);
     else
         (void)board_decode_check(w + 1, n - 1);
