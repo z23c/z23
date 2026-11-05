@@ -1410,6 +1410,7 @@ static int supervised_retirement_draining(int image)
     return failures;
 }
 
+int supervised_image_policy_tests(void);
 int test_supervised_process(void);
 int test_supervised_process(void)
 {
@@ -1445,6 +1446,7 @@ int test_supervised_process(void)
         failures += supervised_image_capture();
         failures += supervised_image_refusals();
         failures += supervised_image_geometry();
+        failures += supervised_image_policy_tests();
         failures += supervised_retirement_refusal(image);
         for (unsigned scenario = 0; scenario < 3; ++scenario)
             failures += supervised_retirement(image, directory, scenario);
