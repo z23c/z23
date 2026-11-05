@@ -109,14 +109,14 @@ static int vb_check_key_cap(void)
         vrx_close(&f);
         return 1;
     }
-    VRX_CHECK("512 wallet keys seeded", vrx_bulk_keys(&f.ndb, 0, VB_KEY_CAP));
-    VRX_CHECK("512-key snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
+    VRX_REQUIRE("512 wallet keys seeded", vrx_bulk_keys(&f.ndb, 0, VB_KEY_CAP));
+    VRX_REQUIRE("512-key snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
     VRX_CHECK("exactly 512 keys fit and are not flagged truncated",
               !snap.identities.truncated &&
               snap.identities.transparent_keys == VB_KEY_CAP &&
               snap.identities.watch_only == 0);
-    VRX_CHECK("a 513th key seeded", vrx_bulk_keys(&f.ndb, VB_KEY_CAP, 1));
-    VRX_CHECK("513-key snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
+    VRX_REQUIRE("a 513th key seeded", vrx_bulk_keys(&f.ndb, VB_KEY_CAP, 1));
+    VRX_REQUIRE("513-key snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
     VRX_CHECK("the 513th key marks the identity set truncated",
               snap.identities.truncated &&
               snap.identities.transparent_keys == VB_KEY_CAP + 1);
@@ -134,18 +134,18 @@ static int vb_check_watch_cap(void)
         vrx_close(&f);
         return 1;
     }
-    VRX_CHECK("512 watch-only rows seeded",
+    VRX_REQUIRE("512 watch-only rows seeded",
               vrx_bulk_watch(&f.ndb, 0, VB_KEY_CAP));
-    VRX_CHECK("512-row snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
+    VRX_REQUIRE("512-row snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
     VRX_CHECK("exactly 512 watch-only rows fit and are not truncated",
               !snap.identities.truncated &&
               snap.identities.watch_only == VB_KEY_CAP);
     VRX_CHECK("watch-only addresses alone are renderable: names determined",
               snap.rows[VAULT_CLASS_NAME].determined &&
               snap.rows[VAULT_CLASS_NAME].spendable == 0);
-    VRX_CHECK("a 513th watch-only row seeded",
+    VRX_REQUIRE("a 513th watch-only row seeded",
               vrx_bulk_watch(&f.ndb, VB_KEY_CAP, 1));
-    VRX_CHECK("513-row snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
+    VRX_REQUIRE("513-row snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
     VRX_CHECK("the 513th row is dropped and the set is flagged truncated",
               snap.identities.truncated &&
               snap.identities.watch_only == VB_KEY_CAP);
@@ -163,14 +163,14 @@ static int vb_check_sapling_cap(void)
         vrx_close(&f);
         return 1;
     }
-    VRX_CHECK("256 sapling keys seeded", vrx_bulk_sapling(&f.ndb, 0, VB_Z_CAP));
-    VRX_CHECK("256-key snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
+    VRX_REQUIRE("256 sapling keys seeded", vrx_bulk_sapling(&f.ndb, 0, VB_Z_CAP));
+    VRX_REQUIRE("256-key snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
     VRX_CHECK("exactly 256 sapling keys fit and are not truncated",
               !snap.identities.truncated &&
               snap.identities.sapling_keys == VB_Z_CAP);
-    VRX_CHECK("a 257th sapling key seeded",
+    VRX_REQUIRE("a 257th sapling key seeded",
               vrx_bulk_sapling(&f.ndb, VB_Z_CAP, 1));
-    VRX_CHECK("257-key snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
+    VRX_REQUIRE("257-key snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
     VRX_CHECK("the 257th key is dropped and the set is flagged truncated",
               snap.identities.truncated &&
               snap.identities.sapling_keys == VB_Z_CAP);
@@ -192,20 +192,20 @@ static int vb_check_unreadable_identity_tables(void)
               vault_read_snapshot(&f.ndb, &snap).ok &&
               !snap.identities.truncated);
 
-    VRX_CHECK("watch-only address column renamed",
+    VRX_REQUIRE("watch-only address column renamed",
               vrx_exec(&f.ndb, "ALTER TABLE wallet_watch_only RENAME COLUMN "
                                "address TO addr_x"));
     VRX_CHECK("an unreadable watch-only table flags the set truncated",
               vault_read_snapshot(&f.ndb, &snap).ok &&
               snap.identities.truncated);
-    VRX_CHECK("watch-only address column restored",
+    VRX_REQUIRE("watch-only address column restored",
               vrx_exec(&f.ndb, "ALTER TABLE wallet_watch_only RENAME COLUMN "
                                "addr_x TO address"));
     VRX_CHECK("a restored table is complete again",
               vault_read_snapshot(&f.ndb, &snap).ok &&
               !snap.identities.truncated);
 
-    VRX_CHECK("sapling pk_d column renamed",
+    VRX_REQUIRE("sapling pk_d column renamed",
               vrx_exec(&f.ndb, "ALTER TABLE wallet_sapling_keys RENAME "
                                "COLUMN pk_d TO pkd_x"));
     VRX_CHECK("an unreadable sapling table flags the set truncated",
@@ -253,16 +253,16 @@ static int vb_check_swap_cap(void)
         vrx_close(&f);
         return 1;
     }
-    VRX_CHECK("511 swap contracts seeded",
+    VRX_REQUIRE("511 swap contracts seeded",
               vb_seed_swaps(&f.ndb, 0, VB_SWAP_CAP - 1));
-    VRX_CHECK("511-swap snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
+    VRX_REQUIRE("511-swap snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
     VRX_CHECK("511 contracts still produce a determined total",
               r->determined && r->item_count == VB_SWAP_CAP - 1 &&
               r->encumbered == (VB_SWAP_CAP - 1) * 1000 &&
               strstr(r->reason, "511 live ZCL HTLC(s) of 511 rows") &&
               snap.undetermined_classes == 2);
-    VRX_CHECK("a 512th contract seeded", vb_seed_swaps(&f.ndb, VB_SWAP_CAP - 1, 1));
-    VRX_CHECK("512-swap snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
+    VRX_REQUIRE("a 512th contract seeded", vb_seed_swaps(&f.ndb, VB_SWAP_CAP - 1, 1));
+    VRX_REQUIRE("512-swap snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
     failures += vb_check_swap_refused(&snap);
     vrx_close(&f);
     return failures;
@@ -282,20 +282,20 @@ static int vb_check_name_cap(void)
         return 1;
     }
     vrx_key_hash(hash, 9001);
-    VRX_CHECK("owner key and address derived",
+    VRX_REQUIRE("owner key and address derived",
               vrx_add_key(&f.ndb, hash) &&
               vrx_key_addr(hash, addr, sizeof(addr)));
     for (unsigned i = 0; i < VB_NAME_CAP - 1; i++)
         if (!vrx_save_name(&f.ndb, i, addr))
             failures++;
-    VRX_CHECK("255 names saved under the owner (no save failed)", failures == 0);
-    VRX_CHECK("255-name snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
+    VRX_REQUIRE("255 names saved under the owner (no save failed)", failures == 0);
+    VRX_REQUIRE("255-name snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
     VRX_CHECK("255 names are counted exactly",
               r->determined && r->spendable == VB_NAME_CAP - 1 &&
               r->item_count == VB_NAME_CAP - 1 &&
               strstr(r->reason, "matched against 1 identities"));
-    VRX_CHECK("a 256th name saved", vrx_save_name(&f.ndb, VB_NAME_CAP - 1, addr));
-    VRX_CHECK("256-name snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
+    VRX_REQUIRE("a 256th name saved", vrx_save_name(&f.ndb, VB_NAME_CAP - 1, addr));
+    VRX_REQUIRE("256-name snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
     VRX_CHECK("256 names under one address are refused as partial",
               !r->determined && r->populated &&
               strstr(r->reason, "one address owns 256 or more names") &&
@@ -324,21 +324,21 @@ static int vb_check_offer_cap(void)
     }
     vb_fill_z(z);
     memset(zero, 0, sizeof(zero));
-    VRX_CHECK("one sapling key seeded",
+    VRX_REQUIRE("one sapling key seeded",
               vrx_add_sapling(&f.ndb, 0, z, 11, z + 11, 32));
-    VRX_CHECK("the matching offer saved", vrx_save_offer(&f.ndb, 0, z, 9000));
+    VRX_REQUIRE("the matching offer saved", vrx_save_offer(&f.ndb, 0, z, 9000));
     for (unsigned i = 1; i < VB_OFFER_CAP - 1; i++)
         if (!vrx_save_offer(&f.ndb, i, zero, 100 + i))
             failures++;
-    VRX_CHECK("255 offers saved in total (no save failed)", failures == 0);
-    VRX_CHECK("255-offer snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
+    VRX_REQUIRE("255 offers saved in total (no save failed)", failures == 0);
+    VRX_REQUIRE("255-offer snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
     VRX_CHECK("255 offers are counted, one of them ours",
               r->determined && r->spendable == 1 && r->item_count == 1 &&
               strstr(r->reason, "1 of 255 gossiped offers name one of our 1 "
                                 "z-addresses"));
-    VRX_CHECK("a 256th offer saved",
+    VRX_REQUIRE("a 256th offer saved",
               vrx_save_offer(&f.ndb, VB_OFFER_CAP - 1, zero, 50));
-    VRX_CHECK("256-offer snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
+    VRX_REQUIRE("256-offer snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
     VRX_CHECK("a full offer cache is refused as a partial count",
               !r->determined && r->populated &&
               strstr(r->reason, "offer cache saturated at 256 rows") &&
@@ -362,11 +362,11 @@ static int vb_check_zero_identity_offer(void)
     }
     vb_fill_z(z);
     memset(zero, 0, sizeof(zero));
-    VRX_CHECK("an all-zero sapling key seeded",
+    VRX_REQUIRE("an all-zero sapling key seeded",
               vrx_add_sapling(&f.ndb, 0, zero, 11, zero + 11, 32));
-    VRX_CHECK("one offer naming another address saved",
+    VRX_REQUIRE("one offer naming another address saved",
               vrx_save_offer(&f.ndb, 0, z, 100));
-    VRX_CHECK("snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
+    VRX_REQUIRE("snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
     VRX_CHECK("no offer is ours, and nothing past the list is read",
               snap.rows[VAULT_CLASS_MARKET].determined &&
               snap.rows[VAULT_CLASS_MARKET].item_count == 0 &&
@@ -391,7 +391,7 @@ static int vb_check_allocation_failures(void)
     }
     vb_fill_z(z);
     vrx_key_hash(hash, 9002);
-    VRX_CHECK("a key and a sapling key seeded",
+    VRX_REQUIRE("a key and a sapling key seeded",
               vrx_add_key(&f.ndb, hash) &&
               vrx_add_sapling(&f.ndb, 0, z, 11, z + 11, 32));
 
@@ -439,8 +439,8 @@ static int vb_check_token_defined_phases(struct node_db *ndb)
     const struct vault_row *r = &snap.rows[VAULT_CLASS_TOKEN];
     int failures = 0;
 
-    VRX_CHECK("the definition is saved", vrx_token_meta(ndb, 1));
-    VRX_CHECK("snapshot builds with the definition",
+    VRX_STOP("the definition is saved", vrx_token_meta(ndb, 1));
+    VRX_STOP("snapshot builds with the definition",
               vault_read_snapshot(ndb, &snap).ok);
     VRX_CHECK("cursor 0 is a folded height: the row is determined",
               r->determined && r->item_count == 1 &&
@@ -451,10 +451,10 @@ static int vb_check_token_defined_phases(struct node_db *ndb)
               strcmp(snap.token_items[0].name, "Vault Token 1") == 0 &&
               snap.token_items[0].decimals == 2);
 
-    VRX_CHECK("definition table made unreadable",
+    VRX_STOP("definition table made unreadable",
               vrx_exec(ndb, "ALTER TABLE zslp_tokens RENAME COLUMN "
                             "ticker TO tk_x"));
-    VRX_CHECK("snapshot builds with unreadable definitions",
+    VRX_STOP("snapshot builds with unreadable definitions",
               vault_read_snapshot(ndb, &snap).ok);
     VRX_CHECK("a failed definition lookup is counted as a failure",
               !r->determined &&
@@ -476,19 +476,19 @@ static int vb_check_token_states(void)
         return 1;
     }
     vrx_key_hash(hash, 9003);
-    VRX_CHECK("owner key and one held token seeded",
+    VRX_REQUIRE("owner key and one held token seeded",
               vrx_add_key(&f.ndb, hash) &&
               vrx_ledger_row(&f.ndb, 1, 1, 77, hash));
 
-    VRX_CHECK("snapshot builds with no cursor",
+    VRX_REQUIRE("snapshot builds with no cursor",
               vault_read_snapshot(&f.ndb, &snap).ok);
     VRX_CHECK("an unbuilt projection is undetermined, never a zero",
               !r->determined && strstr(r->reason, "cursor=-1") &&
               r->item_count == 0 && snap.token_item_count == 0);
 
-    VRX_CHECK("cursor moved to height 0",
+    VRX_REQUIRE("cursor moved to height 0",
               node_db_state_set_int(&f.ndb, "zslp_ledger_cursor_height", 0));
-    VRX_CHECK("snapshot builds at cursor 0",
+    VRX_REQUIRE("snapshot builds at cursor 0",
               vault_read_snapshot(&f.ndb, &snap).ok);
     VRX_CHECK("a held token with no definition makes the row undetermined",
               !r->determined && r->item_count == 1 &&
@@ -525,23 +525,141 @@ static int vb_check_token_cap(void)
         return 1;
     }
     vrx_key_hash(hash, 9004);
-    VRX_CHECK("owner key, cursor and 64 defined tokens seeded",
+    VRX_REQUIRE("owner key, cursor and 64 defined tokens seeded",
               vrx_add_key(&f.ndb, hash) &&
               node_db_state_set_int(&f.ndb, "zslp_ledger_cursor_height", 1) &&
               vb_seed_tokens(&f.ndb, hash, 1, VB_TOKEN_CAP));
-    VRX_CHECK("64-token snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
+    VRX_REQUIRE("64-token snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
     VRX_CHECK("exactly 64 tokens fit without truncation",
               r->determined && !snap.token_items_truncated &&
               snap.token_item_count == VB_TOKEN_CAP &&
               r->item_count == VB_TOKEN_CAP);
-    VRX_CHECK("a 65th token seeded",
+    VRX_REQUIRE("a 65th token seeded",
               vb_seed_tokens(&f.ndb, hash, VB_TOKEN_CAP + 1, 1));
-    VRX_CHECK("65-token snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
+    VRX_REQUIRE("65-token snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
     VRX_CHECK("a 65th token truncates the list and the row says so",
               !r->determined && snap.token_items_truncated &&
               snap.token_item_count == VB_TOKEN_CAP &&
               r->item_count == VB_TOKEN_CAP &&
               strstr(r->reason, "more than 64 distinct tokens"));
+    vrx_close(&f);
+    return failures;
+}
+
+/* ── identity-set honesty ─────────────────────────────────────────── */
+
+/* 513 keys overflow the 512-slot identity set. The watch-only count must
+ * not go negative, and every class that joins against the set must say
+ * the set is incomplete instead of reporting a determined count. */
+static int vb_check_identity_overflow(void)
+{
+    struct vrx_fix f;
+    struct vault_snapshot snap;
+    int failures = 0;
+
+    if (!vrx_open(&f, "vault_bounds_overflow")) {
+        vrx_close(&f);
+        return 1;
+    }
+    VRX_REQUIRE("513 wallet keys seeded",
+                vrx_bulk_keys(&f.ndb, 0, VB_KEY_CAP + 1));
+    VRX_REQUIRE("one watch-only row seeded",
+                vrx_add_watch(&f.ndb, 9100, "t1VaultOverflowWatch"));
+    VRX_REQUIRE("overflow snapshot builds",
+                vault_read_snapshot(&f.ndb, &snap).ok);
+    VRX_CHECK("the watch-only count is never negative",
+              snap.identities.truncated && snap.identities.watch_only >= 0);
+    VRX_CHECK("an incomplete identity set makes the names row undetermined",
+              !snap.rows[VAULT_CLASS_NAME].determined &&
+              strstr(snap.rows[VAULT_CLASS_NAME].reason,
+                     "identity set is incomplete") &&
+              snap.rows[VAULT_CLASS_NAME].spendable == 0);
+    vrx_close(&f);
+    return failures;
+}
+
+static int vb_check_unreadable_watch_names(void)
+{
+    struct vrx_fix f;
+    struct vault_snapshot snap;
+    uint8_t hash[20];
+    char addr[64];
+    int failures = 0;
+
+    if (!vrx_open(&f, "vault_bounds_watchnames")) {
+        vrx_close(&f);
+        return 1;
+    }
+    vrx_key_hash(hash, 9101);
+    VRX_REQUIRE("owner key, address and one name seeded",
+                vrx_add_key(&f.ndb, hash) &&
+                vrx_key_addr(hash, addr, sizeof(addr)) &&
+                vrx_save_name(&f.ndb, 0, addr));
+    VRX_REQUIRE("watch-only address column renamed",
+                vrx_exec(&f.ndb, "ALTER TABLE wallet_watch_only RENAME "
+                                 "COLUMN address TO addr_x"));
+    VRX_REQUIRE("snapshot builds with an unreadable watch-only table",
+                vault_read_snapshot(&f.ndb, &snap).ok);
+    VRX_CHECK("an unreadable watch-only table leaves names undetermined",
+              !snap.rows[VAULT_CLASS_NAME].determined &&
+              strstr(snap.rows[VAULT_CLASS_NAME].reason,
+                     "identity set is incomplete"));
+    vrx_close(&f);
+    return failures;
+}
+
+static int vb_check_sapling_overflow_market(void)
+{
+    struct vrx_fix f;
+    struct vault_snapshot snap;
+    int failures = 0;
+
+    if (!vrx_open(&f, "vault_bounds_zover")) {
+        vrx_close(&f);
+        return 1;
+    }
+    VRX_REQUIRE("257 sapling keys seeded",
+                vrx_bulk_sapling(&f.ndb, 0, VB_Z_CAP + 1));
+    VRX_REQUIRE("sapling overflow snapshot builds",
+                vault_read_snapshot(&f.ndb, &snap).ok);
+    VRX_CHECK("an incomplete sapling set makes the market row undetermined",
+              snap.identities.truncated &&
+              !snap.rows[VAULT_CLASS_MARKET].determined &&
+              strstr(snap.rows[VAULT_CLASS_MARKET].reason,
+                     "identity set is incomplete"));
+    vrx_close(&f);
+    return failures;
+}
+
+/* A watch-only row that repeats a wallet key's address is one identity:
+ * the names it owns are counted once. */
+static int vb_check_watch_duplicates_key(void)
+{
+    struct vrx_fix f;
+    struct vault_snapshot snap;
+    uint8_t hash[20];
+    char addr[64];
+    int failures = 0;
+
+    if (!vrx_open(&f, "vault_bounds_dupwatch")) {
+        vrx_close(&f);
+        return 1;
+    }
+    vrx_key_hash(hash, 9102);
+    VRX_REQUIRE("owner key, address, watch copy and two names seeded",
+                vrx_add_key(&f.ndb, hash) &&
+                vrx_key_addr(hash, addr, sizeof(addr)) &&
+                vrx_add_watch(&f.ndb, 9102, addr) &&
+                vrx_save_name(&f.ndb, 0, addr) &&
+                vrx_save_name(&f.ndb, 1, addr));
+    VRX_REQUIRE("duplicate-identity snapshot builds",
+                vault_read_snapshot(&f.ndb, &snap).ok);
+    VRX_CHECK("two names under one address count as two, not four",
+              snap.rows[VAULT_CLASS_NAME].determined &&
+              snap.rows[VAULT_CLASS_NAME].spendable == 2 &&
+              snap.rows[VAULT_CLASS_NAME].item_count == 2 &&
+              snap.identities.transparent_keys == 1 &&
+              snap.identities.watch_only == 1);
     vrx_close(&f);
     return failures;
 }
@@ -600,5 +718,9 @@ int vault_read_bounds_tests(void)
     failures += vb_check_allocation_failures();
     failures += vb_check_token_states();
     failures += vb_check_token_cap();
+    failures += vb_check_identity_overflow();
+    failures += vb_check_unreadable_watch_names();
+    failures += vb_check_sapling_overflow_market();
+    failures += vb_check_watch_duplicates_key();
     return failures;
 }

@@ -443,9 +443,9 @@ static int vf_check_rich_snapshot(void)
         return 1;
     }
     vf_ctx_init(&c);
-    VRX_CHECK("the owner's address text derived", c.e1[0] != '\0');
-    VRX_CHECK("the populated fixture is seeded", vf_seed_all(&f.ndb, &c));
-    VRX_CHECK("populated snapshot builds", vault_read_snapshot(&f.ndb, &s).ok);
+    VRX_REQUIRE("the owner's address text derived", c.e1[0] != '\0');
+    VRX_REQUIRE("the populated fixture is seeded", vf_seed_all(&f.ndb, &c));
+    VRX_REQUIRE("populated snapshot builds", vault_read_snapshot(&f.ndb, &s).ok);
     failures += vf_check_rich_identities(&s);
     failures += vf_check_rich_money_rows(&s);
     failures += vf_check_rich_swap_row(&s);
@@ -468,7 +468,7 @@ static int vf_check_bare_snapshot(void)
         vrx_close(&f);
         return 1;
     }
-    VRX_CHECK("bare snapshot builds", vault_read_snapshot(&f.ndb, &s).ok);
+    VRX_REQUIRE("bare snapshot builds", vault_read_snapshot(&f.ndb, &s).ok);
     VRX_CHECK("a node with no identity holds no names, and says why",
               n->determined && n->spendable == 0 && n->item_count == 0 &&
               n->evidence == VAULT_EVIDENCE_EXACT_OWNER_ADDRESS_MATCH &&

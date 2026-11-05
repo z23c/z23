@@ -31,6 +31,28 @@
     else { printf("FAIL\n"); failures++; }              \
 } while (0)
 
+/* A seed or setup step the later assertions depend on. On failure it prints
+ * FAIL, counts it, closes the fixture `f` in scope and returns `failures`
+ * from the calling function, so nothing runs on a half-built fixture. */
+#define VRX_REQUIRE(name, expr) do {                    \
+    printf("vault_read: %s... ", (name));               \
+    if ((expr)) { printf("OK\n"); }                     \
+    else {                                              \
+        printf("FAIL\n");                               \
+        failures++;                                     \
+        vrx_close(&f);                                  \
+        return failures;                                \
+    }                                                   \
+} while (0)
+
+/* The same stop for a helper that does not own the fixture: the caller
+ * closes it after the helper returns. */
+#define VRX_STOP(name, expr) do {                       \
+    printf("vault_read: %s... ", (name));               \
+    if ((expr)) { printf("OK\n"); }                     \
+    else { printf("FAIL\n"); failures++; return failures; } \
+} while (0)
+
 /* A zero-initialised fixture, so a teardown after an early return never
  * touches an unset path. */
 struct vrx_fix {
