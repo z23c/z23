@@ -185,8 +185,8 @@ enum zcl_failure_priority_match {
 };
 /* Order-only hint. `failure` must come from the native history reader, and
  * historical_paths must be a complete validated diff of its exact base/local
- * Git objects. The caller owns history completeness and must discard every
- * hint if any archive or diff is unavailable or invalid. The returned exact
+ * Git objects. The caller owns archive verification and must discard an
+ * individual hint if its archive or diff is unavailable or invalid. The returned exact
  * registered group must already belong to selected_groups; no verdict or
  * causal claim is made about a path. */
 enum zcl_failure_priority_match zcl_dev_proof_failure_priority_match(
@@ -237,6 +237,15 @@ enum zcl_dev_proof_history_result zcl_dev_proof_history_failures(
     const char *canonical_root,
     bool (*visit)(const struct zcl_dev_proof_history_failure *, void *),
     void *context);
+/* Advisory-only order hints: validates each native attempt using the same
+ * reader, skips invalid individual records, and visits valid records in
+ * deterministic attempt-name order. `ignored` counts invalid records. A
+ * non-COMPLETE result means no reliable snapshot and all hints are discarded.
+ * This does not alter the strict failure-history authority above. */
+enum zcl_dev_proof_history_result zcl_dev_proof_history_advisory(
+    const char *canonical_root,
+    bool (*visit)(const struct zcl_dev_proof_history_failure *, void *),
+    void *context, size_t *ignored);
 /* Same read-only validation for one exact native attempt leaf, no directory
  * scan and no arbitrary pathname. false means no valid attributable failure. */
 bool zcl_dev_proof_history_failure_read(const char *canonical_root,

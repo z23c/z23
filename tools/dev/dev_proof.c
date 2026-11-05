@@ -12058,7 +12058,7 @@ struct dp_priority_scan {
     const char *const *changed;
     size_t changed_count;
     const char **selected;
-    size_t selected_count, diffs;
+    size_t selected_count, diffs, seen, ignored, limited, hints;
     bool *matched;
 };
 
@@ -12066,7 +12066,7 @@ static bool dp_priority_read_diff(struct dp_priority_scan *s,
                                   const struct zcl_dev_proof_history_failure *failure,
                                   const char *group)
 {
-    if (++s->diffs > DP_PRIORITY_DIFF_LIMIT) return false;
+    s->diffs++;
     size_t len = 0; char why[128];
     char *bytes = dp_changed_set_fetch(s->root, failure->base, failure->local,
                                        s->scratch, &len, why, sizeof(why));
@@ -12085,7 +12085,9 @@ static bool dp_priority_read_diff(struct dp_priority_scan *s,
               selected_group, sizeof(selected_group)) : ZCL_FAILURE_PRIORITY_INVALID;
     if (match == ZCL_FAILURE_PRIORITY_MATCH)
         for (size_t i = 0; i < s->selected_count; i++)
-            if (strcmp(s->selected[i], group) == 0) s->matched[i] = true;
+            if (strcmp(s->selected[i], group) == 0 && !s->matched[i]) {
+                s->matched[i] = true; s->hints++;
+            }
     free(files); free(bytes);
     return match != ZCL_FAILURE_PRIORITY_INVALID;
 }
@@ -12093,11 +12095,15 @@ static bool dp_priority_read_diff(struct dp_priority_scan *s,
 static bool dp_priority_visit(const struct zcl_dev_proof_history_failure *failure, void *ctx)
 {
     struct dp_priority_scan *s = ctx;
+    s->seen++;
     char group[ZCL_TEST_GROUP_FULL_MAX];
     enum zcl_failure_priority_match m = zcl_dev_proof_failure_priority_group(
         failure, s->selected, s->selected_count, group, sizeof(group));
-    if (m == ZCL_FAILURE_PRIORITY_INVALID) return false;
-    return m != ZCL_FAILURE_PRIORITY_MATCH || dp_priority_read_diff(s, failure, group);
+    if (m == ZCL_FAILURE_PRIORITY_INVALID) { s->ignored++; return true; }
+    if (m != ZCL_FAILURE_PRIORITY_MATCH) return true;
+    if (s->diffs >= DP_PRIORITY_DIFF_LIMIT) { s->limited++; return true; }
+    if (!dp_priority_read_diff(s, failure, group)) s->ignored++;
+    return true;
 }
 
 static bool dp_priority_selected(struct dp_priority_scan *s, char *groups)
@@ -12116,7 +12122,8 @@ static bool dp_priority_selected(struct dp_priority_scan *s, char *groups)
 
 static bool dp_failure_priority(const char *root, const char *scratch,
                                 const char *groups, const char *const *changed,
-                                size_t changed_count, char *out, size_t cap)
+                                size_t changed_count, char *out, size_t cap,
+                                char *report, size_t report_cap)
 {
     if (!root || !scratch || !groups || !out || !cap) return false;
     out[0] = '\0';
@@ -12129,9 +12136,11 @@ static bool dp_failure_priority(const char *root, const char *scratch,
         .changed = changed, .changed_count = changed_count,
         .selected = selected, .matched = matched};
     char canonical[PATH_MAX];
+    size_t invalid_archives = 0;
     bool ok = copy && selected && matched && realpath(root, canonical) &&
               strcmp(root, canonical) == 0 && dp_priority_selected(&s, copy) &&
-              zcl_dev_proof_history_failures(root, dp_priority_visit, &s) == ZCL_PROOF_HISTORY_COMPLETE;
+              zcl_dev_proof_history_advisory(root, dp_priority_visit, &s,
+                                              &invalid_archives) == ZCL_PROOF_HISTORY_COMPLETE;
     size_t used = 0;
     for (size_t i = 0; ok && i < s.selected_count; i++) {
         if (!matched[i]) continue;
@@ -12140,6 +12149,11 @@ static bool dp_failure_priority(const char *root, const char *scratch,
         else used += (size_t)n;
     }
     if (!ok) out[0] = '\0';
+    if (report && report_cap)
+        (void)snprintf(report, report_cap, "%s seen=%zu diffs=%zu hints=%zu ignored=%zu limited=%zu",
+                       !ok ? "unavailable" : (s.ignored || invalid_archives || s.limited) ? "partial" : "complete",
+                       s.seen, s.diffs, s.hints,
+                       s.ignored + invalid_archives, s.limited);
     free(matched); free(selected); free(copy);
     return ok;
 }
@@ -12149,23 +12163,23 @@ bool zcl_dev_proof_test_failure_priority(const char *root, const char *scratch,
     const char *groups, const char *const *changed, size_t changed_count,
     char *out, size_t cap)
 {
-    return dp_failure_priority(root, scratch, groups, changed, changed_count, out, cap);
+    return dp_failure_priority(root, scratch, groups, changed, changed_count, out, cap, NULL, 0);
 }
 #endif
 
 static void dp_worker_failure_priority(struct dp_worker *w)
 {
-    char scratch[PATH_MAX], groups[PROOF_GROUPS_MAX];
+    char scratch[PATH_MAX], groups[PROOF_GROUPS_MAX], report[192] = "unavailable";
     w->failure_priority[0] = '\0';
     if (snprintf(scratch, sizeof(scratch), "%s/priority-diff.%ld", w->paths->attempt,
                  (long)getpid()) >= (int)sizeof(scratch)) return;
     bool ok = dp_failure_priority(w->paths->root, scratch, w->groups,
-                                  w->changed->files, w->changed->count, groups, sizeof(groups));
+                                  w->changed->files, w->changed->count, groups, sizeof(groups),
+                                  report, sizeof(report));
     if (ok && groups[0])
         (void)snprintf(w->failure_priority, sizeof(w->failure_priority),
                        "--failure-priority=%s", groups);
-    (void)zcl_dev_proof_phase_note(w->paths->phases, "failure_priority",
-                                   ok ? (groups[0] ? "applied" : "none") : "unavailable");
+    (void)zcl_dev_proof_phase_note(w->paths->phases, "failure_priority", report);
 }
 
 static bool dp_worker_test_argv(const struct dp_worker *w, const char **argv,

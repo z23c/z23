@@ -9,6 +9,7 @@
 #include "dev_proof.h"
 #include "platform/directory_compat.h"
 #include "base/hex.h"
+#include "base/safe_alloc.h"
 #include "sha3/sha3.h"
 #include "test_group_catalog.h"
 #include <errno.h>
@@ -50,7 +51,6 @@ enum zcl_failure_priority_match zcl_dev_proof_failure_priority_group(
     if (failure->classification != ZCL_PROOF_HISTORY_FAILURE ||
         strncmp(failure->digest, "test ", 5) != 0)
         return ZCL_FAILURE_PRIORITY_NO_MATCH;
-    if (!failure->attempt_binding_valid) return ZCL_FAILURE_PRIORITY_INVALID;
     const char *name = failure->digest + 5;
     size_t n = strcspn(name, ":\r\n ");
     if (!n || n >= ZCL_TEST_GROUP_FULL_MAX || name[n] != ':' || n >= cap)
@@ -60,6 +60,7 @@ enum zcl_failure_priority_match zcl_dev_proof_failure_priority_group(
     if (!zcl_test_group_catalog_contains(id)) return ZCL_FAILURE_PRIORITY_INVALID;
     for (size_t i = 0; i < selected_count; i++)
         if (selected[i] && strcmp(selected[i], id) == 0) {
+            if (!failure->attempt_binding_valid) return ZCL_FAILURE_PRIORITY_INVALID;
             memcpy(group_out, id, n + 1);
             return ZCL_FAILURE_PRIORITY_MATCH;
         }
@@ -408,6 +409,49 @@ static enum zcl_dev_proof_history_result history_store(const char *canonical_roo
     *store = fd;
     return ZCL_PROOF_HISTORY_COMPLETE;
 }
+
+static int history_advisory_compare(const void *a, const void *b)
+{
+    return strcmp(a, b);
+}
+
+static enum zcl_dev_proof_history_result history_advisory_list(
+    DIR *dir, char (*leaves)[144], size_t *count)
+{
+    size_t scanned = 0;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(dir);
+        if (!entry) return errno ? ZCL_PROOF_HISTORY_UNAVAILABLE : ZCL_PROOF_HISTORY_COMPLETE;
+        if (++scanned > HISTORY_ENTRIES_MAX) return ZCL_PROOF_HISTORY_LIMIT;
+        struct zcl_dev_proof_history_failure item = {0};
+        if (!history_pair_leaf(entry->d_name, &item)) continue;
+        memcpy(leaves[(*count)++], item.attempt, sizeof(item.attempt));
+    }
+}
+
+static enum zcl_dev_proof_history_result history_advisory_walk(
+    int fd, bool (*visit)(const struct zcl_dev_proof_history_failure *, void *),
+    void *context, size_t *ignored)
+{
+    DIR *dir = fdopendir(fd);
+    if (!dir) { close(fd); return ZCL_PROOF_HISTORY_UNAVAILABLE; }
+    char (*leaves)[144] = zcl_calloc(HISTORY_ENTRIES_MAX, sizeof(*leaves), "priority history");
+    if (!leaves) { closedir(dir); return ZCL_PROOF_HISTORY_UNAVAILABLE; }
+    size_t count = 0;
+    enum zcl_dev_proof_history_result result = history_advisory_list(dir, leaves, &count);
+    if (result == ZCL_PROOF_HISTORY_COMPLETE) {
+        qsort(leaves, count, sizeof(*leaves), history_advisory_compare);
+        for (size_t i = 0; i < count; i++) {
+            struct zcl_dev_proof_history_failure record = {0};
+            int r = history_attempt(dirfd(dir), leaves[i], &record);
+            if (r < 0) { (*ignored)++; continue; }
+            if (r == 1 && !visit(&record, context)) { result = ZCL_PROOF_HISTORY_LIMIT; break; }
+        }
+    }
+    free(leaves); closedir(dir);
+    return result;
+}
 #endif
 
 enum zcl_dev_proof_history_result zcl_dev_proof_history_failures(
@@ -423,6 +467,24 @@ enum zcl_dev_proof_history_result zcl_dev_proof_history_failures(
     enum zcl_dev_proof_history_result result = history_store(canonical_root, &fd);
     return result == ZCL_PROOF_HISTORY_COMPLETE && fd >= 0
         ? history_walk(fd, visit, context) : result;
+#endif
+}
+
+enum zcl_dev_proof_history_result zcl_dev_proof_history_advisory(
+    const char *canonical_root,
+    bool (*visit)(const struct zcl_dev_proof_history_failure *, void *),
+    void *context, size_t *ignored)
+{
+    if (ignored) *ignored = 0;
+#if defined(_WIN32)
+    (void)canonical_root; (void)visit; (void)context;
+    return ZCL_PROOF_HISTORY_UNAVAILABLE;
+#else
+    if (!visit || !ignored) return ZCL_PROOF_HISTORY_INVALID;
+    int fd;
+    enum zcl_dev_proof_history_result result = history_store(canonical_root, &fd);
+    return result == ZCL_PROOF_HISTORY_COMPLETE && fd >= 0
+        ? history_advisory_walk(fd, visit, context, ignored) : result;
 #endif
 }
 
