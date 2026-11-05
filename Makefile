@@ -5691,10 +5691,22 @@ t-asan-locked: $(TEST_ASAN_CANDIDATE) dev-package-verifier-ensure \
 	    $(if $(LEAK_CHECK),ZCL_TEST_LEAK_CHECK=$(LEAK_CHECK) )$(TEST_ASAN_ACTIVE) --only=$$g; \
 	  done'
 
-asan-ci: $(TEST_ASAN_CANDIDATE) dev-package-verifier-ensure
+# Like t-asan, asan-ci builds what each group reads (--list-build-needs)
+# before running it: ASAN_CI_GROUPS entries select by substring, so test_json
+# also runs test_jsonq, which stopped a fresh tree at "required
+# build/bin/jsonq missing" (and then needs build/bin/z23) before the later
+# groups ran.
+asan-ci:
 	@mkdir -p "$(BUILD_DIR)"
 	@$(CHECKOUT_LOCK_TOOL) foreground "$(CHECKOUT_LOCK)" -- \
-	  sh -c 'set -e; $(ZCL_SANITIZER_STACK); \
+	  $(MAKE) --no-print-directory $(ZCL_DEFAULT_JOBS) asan-ci-locked \
+	    BUILD_SOURCE_RECORD='$(BUILD_SOURCE_RECORD)' \
+	    $(ZCL_FROZEN_TOOLCHAIN_ARGS)
+
+.PHONY: asan-ci-locked
+asan-ci-locked: $(TEST_ASAN_CANDIDATE) dev-package-verifier-ensure
+	+@$(ZCL_SANITIZER_STACK) && $(foreach g,$(ASAN_CI_GROUPS),( $(call ZCL_TEST_BUILD_NEEDS,$(TEST_ASAN_ACTIVE),--only=$(g)) ) &&) :
+	@sh -c 'set -e; $(ZCL_SANITIZER_STACK); \
 	  export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1; \
 	  for g in $(ASAN_CI_GROUPS); do \
 	    echo "asan-ci: --- $$g ---"; \
