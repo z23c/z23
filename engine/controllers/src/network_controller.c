@@ -1107,6 +1107,23 @@ static bool network_ban_is_loopback(const struct net_addr *a)
     return memcmp(a->ip, lo_prefix, sizeof lo_prefix) == 0;
 }
 
+/* ban_addr() may only mark the table dirty for a debounced write, and
+ * unban_addr() ignores a failed write, so neither says whether banlist.dat
+ * holds the change. Force one write here and report a failure: the change is
+ * live in memory but would be lost on restart. A manager with no datadir
+ * keeps bans in memory by design and has nothing to save. */
+static bool network_ban_saved(struct net_manager *nm, const char *what,
+                              const char *reply,
+                              struct json_value *result)
+{
+    if (!nm->datadir || ban_db_write(nm, nm->datadir))
+        return true;
+    LOG_WARN("net", "setban: %s applied in memory but banlist.dat was not saved",
+             what);
+    json_set_str(result, reply);
+    return false;
+}
+
 static bool network_ban_add(struct net_manager *nm, const struct net_addr *addr,
                             int64_t bantime, struct json_value *result)
 {
@@ -1119,7 +1136,9 @@ static bool network_ban_add(struct net_manager *nm, const struct net_addr *addr,
     /* ban_addr() returns nothing; a refused insert (table full of manual
      * entries, or a failed grow) leaves the address unbanned, so check. */
     if (is_banned(nm, addr))
-        return true;
+        return network_ban_saved(nm, "ban",
+            "setban: the ban is active but not saved (banlist.dat could not be "
+            "written), so it will not survive a restart", result);
     LOG_WARN("net", "setban: ban table is full of manual entries, add refused");
     json_set_str(result, "setban refused: the ban table is full of manual entries");
     return false;
@@ -1129,7 +1148,9 @@ static bool network_ban_remove(struct net_manager *nm, const struct net_addr *ad
                                struct json_value *result)
 {
     if (unban_addr(nm, addr))
-        return true;
+        return network_ban_saved(nm, "unban",
+            "setban: the ban is lifted but not saved (banlist.dat could not be "
+            "written), so it will return after a restart", result);
     LOG_WARN("net", "setban: remove found no ban entry for the address");
     json_set_str(result, "setban entry not found");
     return false;
