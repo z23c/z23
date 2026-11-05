@@ -1479,6 +1479,7 @@ int test_zswap_ceremony(void)
     failures += t_assembly_negatives();
     failures += t_wire_negatives();
     failures += t_ceremony();
+    { extern int zswap_ceremony_script_bound_tests(void); failures += zswap_ceremony_script_bound_tests(); }
     failures += t_error_strings();
     failures += t_accept_validate();
     failures += t_accept_encode_edges();
