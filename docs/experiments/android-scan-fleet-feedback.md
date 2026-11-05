@@ -214,3 +214,13 @@ their validated durations, plus the flat-save mode and byte count. Focused
 nodelog tests cover producer-shaped lines and reject malformed or extra fields;
 the complexity and hardening checks passed. Device measurements of these
 substeps remain pending.
+
+A later warm Stop took between 126 and 127 seconds. The preceding stage timings
+completed, but the fast-restart completion line was not observed. Its 120-second
+watchdog can exit after the durability point, so elapsed time alone cannot
+identify the exit path. Android now emits fixed, reconstructed messages for the
+fast-restart deadline and the watchdog forced-after-durable decision separately.
+The focused nodelog tests and complexity and hardening checks passed; a device
+observation of these messages remains pending.
+A missing watchdog message does not rule out the watchdog path: process exit
+may occur before the app drains the node console pipe.

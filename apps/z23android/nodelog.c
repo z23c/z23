@@ -333,6 +333,18 @@ static bool shutdown_substep(const char *line, char *out, size_t cap)
                        snprintf(out, cap, "shutdown substep=%s elapsed_ms=%.*s", name, (int)nd, digits);
     return wrote >= 0 && (size_t)wrote < cap;
 }
+/* Watchdog messages are separate observations; neither supplies a raw field. */
+static bool shutdown_watchdog(const char *line, char *out, size_t cap)
+{
+    const char *message = NULL;
+    if (!strcmp(line, "[shutdown] watchdog: stage 'fast-restart-persist' exceeded its deadline"))
+        message = "shutdown watchdog=deadline stage=fast-restart-persist";
+    else if (!strcmp(line, "[shutdown] watchdog: durability secured; forcing truthful clean exit (0)"))
+        message = "shutdown watchdog=forced_after_durable";
+    if (!message) return false;
+    int wrote = snprintf(out, cap, "%s", message);
+    return wrote >= 0 && (size_t)wrote < cap;
+}
 static bool take_slot(struct zapp_nodelog *l, int64_t now_ms)
 {
     if (l->window_count == 0 || now_ms - l->window_start >= 1000 || now_ms < l->window_start) {
@@ -353,7 +365,8 @@ void zapp_nodelog_line(struct zapp_nodelog *l, const char *line, int64_t now_ms)
     bool has_header = read_header(text, &header), warning = warning_level(text, has_header, &header);
     char timing[128];
     bool stage = (has_header && shutdown_timing(text, &header, timing, sizeof(timing))) ||
-                 shutdown_substep(text, timing, sizeof(timing));
+                 shutdown_substep(text, timing, sizeof(timing)) ||
+                 shutdown_watchdog(text, timing, sizeof(timing));
     bool progress = !warning && (stage || explains_progress(text, has_header, &header));
     if (!warning && !progress) return;
     if (!take_slot(l, now_ms)) return;

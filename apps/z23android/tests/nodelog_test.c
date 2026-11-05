@@ -355,12 +355,27 @@ static void shutdown_substep_cases(void)
         zapp_nodelog_line(&l, bad[i], 10000 + (int64_t)i * 1000);
     assert(count == (int)(sizeof(input) / sizeof(input[0])));
 }
+static void shutdown_watchdog_cases(void)
+{
+    struct zapp_nodelog l; count = 0; zapp_nodelog_init(&l, sink, NULL);
+    zapp_nodelog_line(&l, "[shutdown] watchdog: stage 'fast-restart-persist' exceeded its deadline", 0);
+    zapp_nodelog_line(&l, "[shutdown] watchdog: durability secured; forcing truthful clean exit (0)", 1000);
+    assert(count == 2 && !strcmp(seen[0], "shutdown watchdog=deadline stage=fast-restart-persist"));
+    assert(!strcmp(seen[1], "shutdown watchdog=forced_after_durable"));
+    zapp_nodelog_line(&l, "[shutdown] watchdog: stage 'runtime-persist' exceeded its deadline", 2000);
+    zapp_nodelog_line(&l, "[shutdown] watchdog: durability secured; forcing truthful clean exit (0) secret", 3000);
+    zapp_nodelog_line(&l, "[shutdown] watchdog: durability NOT reached; forcing unclean exit (1)", 4000);
+    zapp_nodelog_line(&l, "[shutdown] watchdog: durability secured; forcing truthful clean exit (0) extra", 5000);
+    zapp_nodelog_line(&l, "[shutdown] watchdog: durability secured; forcing truthful clean exit (0)\t", 6000);
+    assert(count == 2);
+}
 int main(int argc, char **argv)
 {
     assert(argc == 2);
     filter_cases();
     shutdown_timing_cases();
     shutdown_substep_cases();
+    shutdown_watchdog_cases();
     level_lines_hide_their_text();
     progress_words_do_not_leak();
     peer_names_are_redacted();
