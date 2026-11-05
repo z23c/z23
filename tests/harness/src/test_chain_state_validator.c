@@ -350,7 +350,9 @@ static bool csv_add_extra(struct main_state *ms, const struct csv_case *c)
         ms, c->add_h, c->add_fork ? 0xAF : 0xBB, c->add_nheight);
     if (!x) return false;
     if (!c->add_parent) return true;
-    struct block_index *par = csv_add_block(ms, c->add_h + 100, 0xCC, 0);
+    /* pprev_walk_depth requires strictly decreasing heights, so a parent of
+     * an nHeight-0 block must sit below zero for the walk to resolve. */
+    struct block_index *par = csv_add_block(ms, c->add_h + 100, 0xCC, -1);
     if (par) x->pprev = par;
     return par != NULL;
 }
