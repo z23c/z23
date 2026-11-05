@@ -136,6 +136,23 @@ installed `devbuild` admits with; `DEVBUILD_RESERVE_GIB=0` disables it),
 `DEVBUILD_PRIORITY=land`, `DEVBUILD_KEEP_SCRATCH=1`. Not yet native: the checkout fingerprint and
 repeat-run note, and peak-memory accounting in `devbuild.jobs.jsonl`.
 
+### Where a gate runs
+
+`devbuild --wait make lint` and `devbuild --wait make agent-verify`, run from a
+clean worktree root with only `-j` and `ONLY=` added, go to `zgate`. It picks
+the less loaded build host and tests the committed tree only, so commit first;
+tracked edits are refused. `r2gate` runs the gate on the second host. Its own
+queue check can hand the job back to `zgate`, which sets `R2GATE_FORCE=1` to
+skip that check.
+
+`devbuild` keeps the gate local for a dirty tree, a subdirectory, `ZCL_` or
+`Z23_` environment variables, other targets, flags or variables, a nested
+slice, or `--plan`. The off switch is `DEVBUILD_NO_OFFLOAD=1` or the file
+`~/.config/dev-workers/no-offload`. Each decision is appended to
+`~/.local/state/development/placement.tsv`. Lane gates export
+`ZCC_PORTABLE_ENV=1`, so the compile cache is shared across lanes. The land
+queue still proves on the primary host; an offloaded gate is feedback only.
+
 ### Priority order and evidence
 
 Owner-adopted reset of 2026-10-16, recorded on board ref
