@@ -500,14 +500,31 @@ static void cap_signed(const uint8_t *w, size_t n)
     free(wire);
 }
 
+/* A decoded frame costs one Ed25519 verification, which dwarfs everything
+ * else the harness does. Most raw runs zero the signature in a copy: the
+ * decoder refuses at its shape check, before any curve work, and every parse
+ * path ahead of it still runs. One run in eight keeps the bytes as given. */
+static void cap_raw(const uint8_t *w, size_t n, bool keep_signature)
+{
+    if (keep_signature || n < 64u) {
+        (void)cap_decode_check(w, n);
+        return;
+    }
+    uint8_t *copy = exact_alloc(n);
+    memcpy(copy, w, n);
+    memset(copy + n - 64u, 0, 64u);
+    (void)cap_decode_check(copy, n);
+    free(copy);
+}
+
 static void fuzz_capability(const uint8_t *w, size_t n)
 {
     if (!n)
         return;
-    if ((w[0] & 15u) == 0)
+    if ((w[0] & 31u) == 0)
         cap_signed(w + 1, n - 1);
     else
-        (void)cap_decode_check(w + 1, n - 1);
+        cap_raw(w + 1, n - 1, (w[0] & 0xE0u) == 0);
 }
 
 /* ── mesh_private_object_frame ───────────────────────────────────────── */
@@ -839,7 +856,7 @@ static void fuzz_board_post(const uint8_t *w, size_t n)
 {
     if (!n)
         return;
-    if ((w[0] & 15u) == 0)
+    if ((w[0] & 31u) == 0)
         board_signed(w + 1, n - 1);
     else
         (void)board_decode_check(w + 1, n - 1);
