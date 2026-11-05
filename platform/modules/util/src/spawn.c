@@ -1227,10 +1227,12 @@ static int spawn_evidence_finish(pid_t pid, struct spawn_evidence_capture *c,
     if (reaped) e->exit_code = spawn_capture_status(true, status);
     return ok ? spawn_capture_status(reaped, status) : -1;
 }
+#endif
 
 int zcl_spawn_capture_evidence(const char *const argv[], char *buf, size_t cap,
                                int timeout_ms, struct zcl_spawn_evidence *e)
 {
+#ifndef _WIN32
     if (e) memset(e, 0, sizeof(*e));
     if (!argv || !argv[0] || !buf || !cap || !e) return -1;
     buf[0] = '\0'; e->exit_code = -1;
@@ -1245,17 +1247,13 @@ int zcl_spawn_capture_evidence(const char *const argv[], char *buf, size_t cap,
     int64_t deadline = timeout_ms > 0 ? platform_time_monotonic_ms() + timeout_ms : 0;
     bool ok = spawn_evidence_drain(pid, &c, timeout_ms, deadline, anchor.enabled);
     return spawn_evidence_finish(pid, &c, &anchor, deadline, ok);
-}
 #else
-int zcl_spawn_capture_evidence(const char *const argv[], char *buf, size_t cap,
-                               int timeout_ms, struct zcl_spawn_evidence *e)
-{
     (void)argv; (void)timeout_ms;
     if (buf && cap) buf[0] = '\0';
     if (e) { memset(e, 0, sizeof(*e)); e->exit_code = -1; }
     return -1;
-}
 #endif
+}
 
 int zcl_spawn_capture_cancelable_fd(
     int executable_fd, const char *const argv[], char *buf, size_t cap,
