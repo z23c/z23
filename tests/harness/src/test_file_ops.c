@@ -903,19 +903,20 @@ static int test_block_files_clean_exact_names(void)
         char dir[PATH_MAX] = "";
         bool ok = fo_root(dir, "zcl_block_clean_exact");
         static const char *const gone[] = {"blk00000.dat", "rev00000.dat",
+                                           "blk_sync.dat", "rev_sync.dat",
                                            "blk123456.dat"};
         static const char *const kept[] = {
             "blk00000.dat.bak", "rev00000.dat.bak", "blkfoo.dat.old",
             "blkfoo.dat", "blk.dat", "blk1.dat", "blk00000.dat~",
             "blk00000dat", "xblk00000.dat", "blk0000a.dat"};
-        for (size_t i = 0; ok && i < 3; i++)
+        for (size_t i = 0; ok && i < 5; i++)
             ok = fo_series_file(dir, gone[i], 4);
         for (size_t i = 0; ok && i < 10; i++)
             ok = fo_series_file(dir, kept[i], 4);
         if (ok)
             block_files_clean(dir);
         bool removed = ok, retained = ok;
-        for (size_t i = 0; ok && i < 3; i++) {
+        for (size_t i = 0; ok && i < 5; i++) {
             char path[PATH_MAX];
             fo_path(path, sizeof(path), dir, gone[i]);
             removed = removed && !fo_exists(path);
