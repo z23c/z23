@@ -415,7 +415,7 @@ void zapp_runtime_destroy(struct zapp_runtime *r)
 
 #define COMMAND_TIMEOUT_MS 15000
 struct pump { int input, output; pid_t pid; const char *body; size_t sent, length, used; bool truncated; unsigned timeout_ms;
-              const char *const *args; };
+              const char *const *args; const atomic_bool *cancel; bool cancelled; };
 
 static void pump_output(struct pump *p, char *out, size_t cap)
 {
@@ -462,14 +462,14 @@ static void pump_stop(struct pump *p, int *status)
     (void)kill(p->pid, SIGKILL);
     (void)kill(-p->pid, SIGKILL);
     while (waitpid(p->pid, status, 0) < 0 && errno == EINTR) {}
-    command_note(p);
+    if (!p->cancelled) command_note(p);
 }
 static void pump_finish(struct pump *p, char *out, size_t cap, bool ended, int *status)
 {
     if (p->input >= 0) close(p->input);
     if (p->output >= 0) close(p->output);
     if (!ended) pump_stop(p, status);
-    if (!ended) snprintf(out + p->used, cap - p->used, "\nThe command timed out.");
+    if (!ended && !p->cancelled) snprintf(out + p->used, cap - p->used, "\nThe command timed out.");
     if (p->truncated && cap > 32) {
         const char marker[] = "\n[Output limit reached]\n";
         memcpy(out + cap - sizeof(marker), marker, sizeof(marker));
@@ -481,53 +481,90 @@ static bool pump_success(const struct pump *p, bool ended, int status)
     return ended && WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
            p->sent == p->length && !p->truncated;
 }
+static bool pump_step(struct pump *p, char *out, size_t cap, bool *ended, int *status)
+{
+    struct pollfd fds[2] = {{p->output, POLLIN, 0}, {p->input, POLLOUT, 0}};
+    if (poll(fds, 2, 50) < 0 && errno != EINTR) return false;
+    if (p->output >= 0 && fds[0].revents) pump_output(p, out, cap);
+    if (p->input >= 0 && fds[1].revents) pump_input(p);
+    /* Do not reap while a descendant holds the pipe: the group id remains owned. */
+    if (!*ended && p->output < 0) *ended = waitpid(p->pid, status, WNOHANG) == p->pid;
+    return true;
+}
 static bool pump_command(struct pump *p, char *out, size_t cap)
 {
     int status = 0; bool ended = false; int64_t start = milliseconds();
     int64_t now = start, end = start < 0 ? -1 : start + (int64_t)p->timeout_ms;
     while ((!ended || p->output >= 0) && now >= 0 && now < end) {
-        struct pollfd fds[2] = {{p->output, POLLIN, 0}, {p->input, POLLOUT, 0}};
-        if (poll(fds, 2, 50) < 0 && errno != EINTR) break;
-        if (p->output >= 0 && fds[0].revents) pump_output(p, out, cap);
-        if (p->input >= 0 && fds[1].revents) pump_input(p);
-        /* Keep the leader unreaped until its pipe closes, so a timeout can
-         * never signal a recycled process-group identifier. */
-        if (!ended && p->output < 0) ended = waitpid(p->pid, &status, WNOHANG) == p->pid;
+        if (p->cancel && atomic_load(p->cancel)) { p->cancelled = true; break; }
+        if (!pump_step(p, out, cap, &ended, &status)) break;
         now = milliseconds();
     }
+    if (p->cancel && atomic_load(p->cancel)) p->cancelled = true;
     pump_finish(p, out, cap, ended, &status);
-    return pump_success(p, ended, status);
+    if (p->cancelled) memory_cleanse(out, cap);
+    return !p->cancelled && pump_success(p, ended, status);
 }
 
-/* started is set when the process was spawned: a false return with started false means the command never ran. */
-static bool command_run(struct zapp_runtime *r, const char *const *args, const char *input,
-                        unsigned timeout_ms, char *out, size_t cap, bool *started)
+static bool command_pipes(int pipes[2], int stdin_pipe[2])
 {
-    if (started) *started = false;
-    if (!out || cap < 64) return false;
-    out[0] = 0;
-    int pipes[2], stdin_pipe[2];
     if (pipe2(pipes, O_CLOEXEC | O_NONBLOCK) != 0) return false;
-    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, stdin_pipe) != 0) { close(pipes[0]); close(pipes[1]); return false; }
-    /* Child stdio is blocking; only the parent ends use nonblocking I/O. */
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, stdin_pipe) != 0) {
+        close(pipes[0]); close(pipes[1]); return false;
+    }
     (void)fcntl(pipes[1], F_SETFL, 0); (void)fcntl(stdin_pipe[0], F_SETFL, 0);
-    char data[1100]; snprintf(data, sizeof(data), "-datadir=%s", r->directory);
-    char *argv[12]; size_t n = 0; argv[n++] = r->executable;
+    return true;
+}
+static void command_argv(struct zapp_runtime *r, const char *const *args, const char *input,
+                         char *argv[12], char data[1100])
+{
+    snprintf(data, 1100, "-datadir=%s", r->directory);
+    size_t n = 0; argv[n++] = r->executable;
     for (size_t i = 0; args[i] && n < 9; ++i) argv[n++] = (char *)args[i];
     argv[n++] = data;
     if (input) argv[n++] = "--input=-";
     argv[n] = NULL;
-    struct pump pump = {.input = stdin_pipe[1], .output = pipes[0], .body = input ? input : "", .length = input ? strlen(input) : 0, .timeout_ms = timeout_ms, .args = args};
+}
+static bool command_spawn_error(int rc, const atomic_bool *cancel, bool *cancelled, char *out, size_t cap)
+{
+    if (cancel && atomic_load(cancel)) { if (cancelled) *cancelled = true; }
+    else snprintf(out, cap, "Unable to run native Z23: %s", strerror(rc));
+    return false;
+}
+static bool command_pump_result(struct pump *pump, char *out, size_t cap, bool *started, bool *cancelled)
+{
+    if (started) *started = true;
+    if (!pump->length) { close(pump->input); pump->input = -1; }
+    bool ok = pump_command(pump, out, cap);
+    if (cancelled) *cancelled = pump->cancelled;
+    return ok;
+}
+
+/* started is set when the process was spawned: a false return with started false means the command never ran. */
+static bool command_run_cancel(struct zapp_runtime *r, const char *const *args, const char *input,
+                               unsigned timeout_ms, char *out, size_t cap, bool *started,
+                               const atomic_bool *cancel, bool *cancelled)
+{
+    if (cancelled) *cancelled = false;
+    if (started) *started = false;
+    if (!out || cap < 64) return false;
+    out[0] = 0;
+    if (cancel && atomic_load(cancel)) { if (cancelled) *cancelled = true; return false; }
+    int pipes[2], stdin_pipe[2];
+    if (!command_pipes(pipes, stdin_pipe)) return false;
+    char data[1100]; char *argv[12]; command_argv(r, args, input, argv, data);
+    struct pump pump = {.input = stdin_pipe[1], .output = pipes[0], .body = input ? input : "", .length = input ? strlen(input) : 0, .timeout_ms = timeout_ms, .args = args, .cancel = cancel};
     pthread_mutex_lock(&r->mutex);
-    int rc = r->stopping ? ECANCELED :
+    int rc = (cancel && atomic_load(cancel)) || r->stopping ? ECANCELED :
              spawn_redirect(r, argv, stdin_pipe[0], pipes[1], &pump.pid);
     pthread_mutex_unlock(&r->mutex);
     close(stdin_pipe[0]); close(pipes[1]);
-    if (rc) { close(stdin_pipe[1]); close(pipes[0]); snprintf(out, cap, "Unable to run native Z23: %s", strerror(rc)); return false; }
-    if (started) *started = true;
-    if (!pump.length) { close(pump.input); pump.input = -1; }
-    return pump_command(&pump, out, cap);
+    if (rc) { close(stdin_pipe[1]); close(pipes[0]); return command_spawn_error(rc, cancel, cancelled, out, cap); }
+    return command_pump_result(&pump, out, cap, started, cancelled);
 }
+static bool command_run(struct zapp_runtime *r, const char *const *args, const char *input,
+                        unsigned timeout_ms, char *out, size_t cap, bool *started)
+{ return command_run_cancel(r, args, input, timeout_ms, out, cap, started, NULL, NULL); }
 static bool command_timed(struct zapp_runtime *r, const char *const *args, const char *input,
                           unsigned timeout_ms, char *out, size_t cap)
 {
@@ -781,23 +818,50 @@ bool zapp_wallet_setup_run(struct zapp_runtime *r, const char *op, const char *i
     return setup_not_run(out, cap, "This wallet command is not available in the phone's permission set.");
 }
 
-static bool fleet_token_run(struct zapp_runtime *r, const char *token, bool preview, char *out, size_t cap)
+static bool fleet_token_run(struct zapp_runtime *r, const char *token, char *out, size_t cap)
 {
     if (!r || !token || !out || cap < 64) return false;
     struct json_value input = {0}; json_set_object(&input);
     bool ok = json_push_kv_str(&input, "token", token);
     char wire[16384]; size_t n = ok ? json_write(&input, wire, sizeof(wire)) : sizeof(wire);
     json_free(&input);
-    const char *args[] = {"fleet", preview ? "preview" : "join", NULL};
-    ok = n < sizeof(wire) && command_timed(r, args, wire, preview ? 5000u : COMMAND_TIMEOUT_MS, out, cap);
+    const char *args[] = {"fleet", "join", NULL};
+    ok = n < sizeof(wire) && command_timed(r, args, wire, COMMAND_TIMEOUT_MS, out, cap);
     memory_cleanse(wire, sizeof(wire));
     return ok;
 }
 
 bool zapp_fleet_join_run(struct zapp_runtime *r, const char *token, char *out, size_t cap)
-{ return fleet_token_run(r, token, false, out, cap); }
+{ return fleet_token_run(r, token, out, cap); }
 bool zapp_fleet_preview_run(struct zapp_runtime *r, const char *token, char *out, size_t cap)
-{ return fleet_token_run(r, token, true, out, cap); }
+{ return zapp_fleet_preview_cancelable(r, token, out, cap, NULL) == ZAPP_PREVIEW_OK; }
+
+/* Cancellation is observed before spawn and while pumping; posix_spawn itself is synchronous. */
+static enum zapp_preview_result preview_cancelable(struct zapp_runtime *r, const char *field,
+                                                    const char *value, char *out, size_t cap,
+                                                    const atomic_bool *cancel)
+{
+    if (!r || !value || !out || cap < 64) return ZAPP_PREVIEW_FAILED;
+    out[0] = 0;
+    if (cancel && atomic_load(cancel)) { out[0] = 0; return ZAPP_PREVIEW_CANCELLED; }
+    struct json_value input = {0}; json_set_object(&input);
+    bool ok = json_push_kv_str(&input, field, value);
+    char wire[16384]; size_t n = ok ? json_write(&input, wire, sizeof(wire)) : sizeof(wire);
+    json_free(&input);
+    const char *args[] = {"fleet", "preview", NULL};
+    bool cancelled = false;
+    ok = n < sizeof(wire) && command_run_cancel(r, args, wire, 5000u, out, cap, NULL, cancel, &cancelled);
+    memory_cleanse(wire, sizeof(wire));
+    if (cancel && atomic_load(cancel)) cancelled = true;
+    if (cancelled) { memory_cleanse(out, cap); return ZAPP_PREVIEW_CANCELLED; }
+    return ok ? ZAPP_PREVIEW_OK : ZAPP_PREVIEW_FAILED;
+}
+enum zapp_preview_result zapp_fleet_preview_cancelable(struct zapp_runtime *r, const char *token,
+                                                        char *out, size_t cap, const atomic_bool *cancel)
+{ return preview_cancelable(r, "token", token, out, cap, cancel); }
+enum zapp_preview_result zapp_fleet_machine_preview_cancelable(struct zapp_runtime *r, const char *line,
+                                                                char *out, size_t cap, const atomic_bool *cancel)
+{ return preview_cancelable(r, "line", line, out, cap, cancel); }
 
 /* The node writes tor_data/onion_service/hostname once Tor has published its hidden service. */
 static void onion_error(const char *step, const char *file)
@@ -895,20 +959,19 @@ bool zapp_fleet_preview_text(const char *text, char *out, size_t cap)
     return ok;
 }
 
-static bool fleet_line_command(struct zapp_runtime *r, const char *op, const char *field,
-                               const char *value, char *out, size_t cap)
+static bool fleet_line_command(struct zapp_runtime *r, const char *value, char *out, size_t cap)
 {
     struct json_value input = {0}; json_set_object(&input);
-    bool ok = json_push_kv_str(&input, field, value);
+    bool ok = json_push_kv_str(&input, "line", value);
     char wire[16384]; size_t n = ok ? json_write(&input, wire, sizeof(wire)) : sizeof(wire);
     json_free(&input);
-    const char *args[] = {"fleet", op, NULL};
-    ok = n < sizeof(wire) && command_timed(r, args, wire, !strcmp(op, "preview") ? 5000u : COMMAND_TIMEOUT_MS, out, cap);
+    const char *args[] = {"fleet", "import", NULL};
+    ok = n < sizeof(wire) && command_timed(r, args, wire, COMMAND_TIMEOUT_MS, out, cap);
     memory_cleanse(wire, sizeof(wire));
     return ok;
 }
 bool zapp_fleet_machine_preview_run(struct zapp_runtime *r, const char *line, char *out, size_t cap)
-{ return r && line && out && cap >= 64 && fleet_line_command(r, "preview", "line", line, out, cap); }
+{ return zapp_fleet_machine_preview_cancelable(r, line, out, cap, NULL) == ZAPP_PREVIEW_OK; }
 
 static bool fleet_onion_valid(const char *host)
 {
@@ -981,7 +1044,7 @@ static bool fleet_import_partial(const char *text)
 bool zapp_fleet_connect_run(struct zapp_runtime *r, const char *line, const char *onion, char *out, size_t cap)
 {
     if (!r || !line || !onion || !fleet_onion_valid(onion) || !out || cap < 64) return false;
-    if (!fleet_line_command(r, "import", "line", line, out, cap) || !fleet_reply_ok(out, "zcl.fleet.import.v1")) {
+    if (!fleet_line_command(r, line, out, cap) || !fleet_reply_ok(out, "zcl.fleet.import.v1")) {
         bool partial = fleet_import_partial(out);
         snprintf(out, cap, "%s", partial ? "Import changed some fleet state before failing. Ask your manager to check it before retrying." :
                  "Could not confirm the import. Fleet state may have changed; ask your manager to check it before retrying.");
@@ -994,7 +1057,7 @@ bool zapp_fleet_connect_run(struct zapp_runtime *r, const char *line, const char
     const char *args[] = {"core", "network", "peers", "add", NULL};
     ok = n < sizeof(wire) && command_timed(r, args, wire, COMMAND_TIMEOUT_MS, out, cap) && fleet_reply_ok(out, "zcl.peer_add.v1");
     memory_cleanse(wire, sizeof(wire));
-    snprintf(out, cap, "%s", ok ? "Connecting to the fleet computer. Admission is still pending." :
+    snprintf(out, cap, "%s", ok ? "Fleet computer saved. Connecting…" :
              "The computer was imported, but connection could not be scheduled. Try Connect again.");
     return ok;
 }

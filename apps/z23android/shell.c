@@ -43,6 +43,7 @@ static struct {
     zapp_native_action send;
     jobject notice_views[SCREEN_COUNT], outcome_view, outcome_panel, status_view, scan_view, scan_hint_view, scan_camera, scan_panel, apps_list;
     jobject fleet_review_text, fleet_review_result, fleet_review_qr, fleet_join_button, fleet_copy_button, fleet_back_button;
+    jobject fleet_review_scroll, fleet_review_hint;
     jobject paste_panel, paste_field, paste_review, paste_error;
     char fleet_receipt[8192];
     bool fleet_review_started, fleet_qr_shown;
@@ -319,32 +320,42 @@ static bool paste_input(JNIEnv *env, jobject panel, jobject field)
         zj_typography(env, field, 17.0f, (jint)WHITE) &&
         zj_char_sequence(env, field, "setHint", "Paste code here") &&
         zj_int_property(env, field, "setInputType", 0xA0001) &&
-        zj_int_property(env, field, "setImeOptions", ZAPP_FIELD_IME_NO_LEARNING) &&
+        zj_int_property(env, field, "setImeOptions", ZAPP_FIELD_IME_NO_LEARNING | 0x02000000) && /* IME_FLAG_NO_FULLSCREEN */
         zj_int_property(env, field, "setImportantForAutofill", ZAPP_FIELD_AUTOFILL_NO) &&
+        zj_int_property(env, field, "setMaxLines", 3) &&
         zj_bool_property(env, field, "setFilterTouchesWhenObscured", true) &&
         zj_margins(env, field, MATCH, WRAP, 0.0f, 0, 0, 0, 0) && zj_append(env, panel, field) &&
         zj_keep(env, &shell.paste_field, field);
 }
-static bool paste_controls(JNIEnv *env, jobject panel, jobject error)
+static bool paste_controls(JNIEnv *env, jobject content, jobject footer, jobject error)
 {
     bool ok = zj_typography(env, error, 16.0f, (jint)WHITE) &&
-        zj_append(env, panel, error) && zj_keep(env, &shell.paste_error, error) &&
-        button(env, panel, "Review", CMD_PASTE_REVIEW, 0, 0);
+        zj_append(env, content, error) && zj_keep(env, &shell.paste_error, error) &&
+        button(env, footer, "Review", CMD_PASTE_REVIEW, 0, 1);
     if (ok) shell.paste_review = shell.navs[shell.nav_count - 1].view;
-    return ok && button(env, panel, "Cancel", CMD_SCAN_CANCEL, 0, 0);
+    return ok && button(env, footer, "Cancel", CMD_SCAN_CANCEL, 0, 1);
+}
+static bool paste_attach(JNIEnv *env, jobject root, jobject panel, jobject footer)
+{
+    return zj_bool_property(env, root, "setFitsSystemWindows", true) &&
+        zj_append(env, panel, footer) &&
+        zj_margins(env, panel, MATCH, MATCH, 0.0f, 0, 0, 0, 0) && zj_append(env, root, panel) &&
+        zj_keep(env, &shell.paste_panel, panel) && zj_visible(env, panel, false);
 }
 static bool build_paste(JNIEnv *env, jobject root)
 {
     jobject panel = column(env, DARK, 16, false);
+    jobject content = panel ? scroll_column(env, panel, 0) : NULL;
+    jobject footer = column(env, DARK, 0, true);
     jobject field = zj_widget(env, "android/widget/EditText", shell.activity);
     jobject error = zj_widget(env, "android/widget/TextView", shell.activity);
-    bool ok = panel && field && error &&
-        zj_bool_property(env, root, "setFitsSystemWindows", true) &&
-        paste_input(env, panel, field) && paste_controls(env, panel, error) &&
-        zj_margins(env, panel, MATCH, MATCH, 0.0f, 0, 0, 0, 0) && zj_append(env, root, panel) &&
-        zj_keep(env, &shell.paste_panel, panel) && zj_visible(env, panel, false);
+    bool ok = panel && content && footer && field && error &&
+        paste_input(env, content, field) && paste_controls(env, content, footer, error) &&
+        paste_attach(env, root, panel, footer);
     if (field) (*env)->DeleteLocalRef(env, field);
     if (error) (*env)->DeleteLocalRef(env, error);
+    if (content) (*env)->DeleteLocalRef(env, content);
+    if (footer) (*env)->DeleteLocalRef(env, footer);
     if (panel) (*env)->DeleteLocalRef(env, panel);
     return ok;
 }
@@ -385,27 +396,44 @@ static bool fleet_review_result_widgets(JNIEnv *env, jobject content, jobject re
 
 static bool fleet_review_footer(JNIEnv *env, jobject root, jobject footer)
 {
-    bool ok = zj_padding4(env, footer, 16, 0, 16, 8) && zj_append(env, root, footer) &&
+    jobject hint = bar(env, DARK);
+    bool ok = hint && zj_typography(env, hint, 14.0f, (jint)WHITE) &&
+        zj_text(env, hint, "Scroll down to continue") && zj_append(env, footer, hint) &&
+        zj_keep(env, &shell.fleet_review_hint, hint) && zj_visible(env, hint, false) &&
+        zj_padding4(env, footer, 16, 0, 16, 8) && zj_append(env, root, footer) &&
         button(env, footer, "Cancel", CMD_FLEET_BACK, 0, 0);
+    if (hint) (*env)->DeleteLocalRef(env, hint);
     if (ok) shell.fleet_back_button = shell.navs[shell.nav_count - 1].view;
     return ok;
+}
+
+static bool fleet_review_widgets(JNIEnv *env, jobject root, jobject content, jobject footer, jobject summary, jobject result, jobject qr)
+{
+    return fleet_review_heading(env, content, summary) &&
+        fleet_review_result_widgets(env, content, result, qr) && fleet_review_footer(env, root, footer);
+}
+
+static void fleet_review_release(JNIEnv *env, jobject content, jobject footer, jobject scroll, jobject summary, jobject result, jobject qr)
+{
+    if (content) (*env)->DeleteLocalRef(env, content);
+    if (footer) (*env)->DeleteLocalRef(env, footer);
+    if (scroll) (*env)->DeleteLocalRef(env, scroll);
+    if (summary) (*env)->DeleteLocalRef(env, summary);
+    if (result) (*env)->DeleteLocalRef(env, result);
+    if (qr) (*env)->DeleteLocalRef(env, qr);
 }
 
 static bool build_fleet_review(JNIEnv *env, jobject root)
 {
     jobject content = add_notice(env, root, SCREEN_FLEET_REVIEW) ? scroll_column(env, root, 16) : NULL;
     jobject footer = content ? column(env, DARK, 0, false) : NULL;
+    jobject scroll = content ? zj_object_property(env, content, "getParent", "()Landroid/view/ViewParent;") : NULL;
     jobject summary = bar(env, DARK), result = bar(env, DARK);
     jobject qr = zj_widget(env, "android/widget/ImageView", shell.activity);
-    bool ok = content && footer && summary && result && qr &&
-        fleet_review_heading(env, content, summary) &&
-        fleet_review_result_widgets(env, content, result, qr) &&
-        fleet_review_footer(env, root, footer);
-    if (content) (*env)->DeleteLocalRef(env, content);
-    if (footer) (*env)->DeleteLocalRef(env, footer);
-    if (summary) (*env)->DeleteLocalRef(env, summary);
-    if (result) (*env)->DeleteLocalRef(env, result);
-    if (qr) (*env)->DeleteLocalRef(env, qr);
+    bool ok = content && footer && scroll && summary && result && qr &&
+        zj_keep(env, &shell.fleet_review_scroll, scroll) &&
+        fleet_review_widgets(env, root, content, footer, summary, result, qr);
+    fleet_review_release(env, content, footer, scroll, summary, result, qr);
     return ok;
 }
 
@@ -739,7 +767,7 @@ static void review_paste(JNIEnv *env)
     bool locked = valid && zj_bool_property(env, shell.paste_field, "setEnabled", false);
     shell.paste_submitted = locked;
     bool sent = locked && zapp_controller_action("scan_paste", text, why, sizeof(why));
-    if (sent) { shell.scan_dismissed = false; (void)zj_text(env, shell.paste_error, "Checking…"); }
+    if (sent) { shell.scan_dismissed = false; (void)zj_keyboard(env, shell.activity, shell.paste_field, false); (void)zj_text(env, shell.paste_error, "Checking…"); }
     else { shell.paste_submitted = false; (void)zj_bool_property(env, shell.paste_field, "setEnabled", true); (void)zj_text(env, shell.paste_error, !valid ? "Enter a code to review." : !locked ? "Could not review this code. Try again." : why); }
     if (text) { memory_cleanse(text, 24000); free(text); }
     (*env)->PopLocalFrame(env, NULL);
@@ -1006,6 +1034,13 @@ static void render_scan(JNIEnv *env, const struct zapp_view *view, bool finished
     if (shell.current == SCREEN_SCAN && !(finished && !dismissed && scan_goes_to_send(view))) go(env, shell.before_scan);
     if (finished && !dismissed) finish_scan(env, view);
 }
+static void fleet_scroll_hint(JNIEnv *env)
+{
+    jmethodID can_scroll = zj_method(env, shell.fleet_review_scroll, "canScrollVertically", "(I)Z");
+    jboolean below = can_scroll ? (*env)->CallBooleanMethod(env, shell.fleet_review_scroll, can_scroll, 1) : JNI_FALSE;
+    if (zj_clean(env)) (void)zj_visible(env, shell.fleet_review_hint, below == JNI_TRUE);
+}
+
 static void render_fleet_review(JNIEnv *env, const struct zapp_view *view)
 {
     if (shell.current != SCREEN_FLEET_REVIEW) return;
@@ -1084,6 +1119,7 @@ void zapp_shell_dropped(JNIEnv *env)
 void zapp_shell_tick(JNIEnv *env)
 {
     if (!shell.activity) return;
+    if (shell.current == SCREEN_FLEET_REVIEW) fleet_scroll_hint(env);
     /* Ticks are what ask again for a lock that is owed, on this screen or off it. */
     zapp_send_ui_tick(env);
     if (shell.current == SCREEN_SEND) {
@@ -1138,7 +1174,7 @@ void zapp_shell_destroy(JNIEnv *env)
     for (size_t i = 0; i < shell.nav_count; ++i) (*env)->DeleteGlobalRef(env, shell.navs[i].view);
     for (size_t i = 0; i < shell.row_count; ++i) (*env)->DeleteGlobalRef(env, shell.rows[i]);
     for (int i = 0; i < SCREEN_COUNT; ++i) if (shell.roots[i]) (*env)->DeleteGlobalRef(env, shell.roots[i]);
-    jobject *views[] = {&shell.notice_views[SCREEN_HOME], &shell.notice_views[SCREEN_APPS], &shell.notice_views[SCREEN_SETTINGS], &shell.notice_views[SCREEN_SEND], &shell.notice_views[SCREEN_SETUP], &shell.notice_views[SCREEN_FLEET_REVIEW], &shell.outcome_view, &shell.outcome_panel, &shell.status_view, &shell.scan_view, &shell.scan_hint_view, &shell.scan_camera, &shell.scan_panel, &shell.paste_panel, &shell.paste_field, &shell.paste_error, &shell.fleet_review_text, &shell.fleet_review_result, &shell.fleet_review_qr, &shell.apps_list};
+    jobject *views[] = {&shell.notice_views[SCREEN_HOME], &shell.notice_views[SCREEN_APPS], &shell.notice_views[SCREEN_SETTINGS], &shell.notice_views[SCREEN_SEND], &shell.notice_views[SCREEN_SETUP], &shell.notice_views[SCREEN_FLEET_REVIEW], &shell.outcome_view, &shell.outcome_panel, &shell.status_view, &shell.scan_view, &shell.scan_hint_view, &shell.scan_camera, &shell.scan_panel, &shell.paste_panel, &shell.paste_field, &shell.paste_error, &shell.fleet_review_text, &shell.fleet_review_result, &shell.fleet_review_qr, &shell.fleet_review_scroll, &shell.fleet_review_hint, &shell.apps_list};
     for (size_t i = 0; i < sizeof(views) / sizeof(views[0]); ++i) if (*views[i]) (*env)->DeleteGlobalRef(env, *views[i]);
     release_cards();
     zapp_launcher_release(env, shell.apps, ZAPP_LAUNCHER_MAX);

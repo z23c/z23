@@ -169,4 +169,23 @@ The protected Scan paste form sends submitted text through the same classifier
 and fleet preview as camera input. Focused scan and host tests, the complexity
 check, and an ARM64 native app build passed. The host fixture uses mocked scan
 side effects and does not establish camera, keyboard or activity behavior.
-Simulator and physical-device qualification remain pending.
+Physical-device qualification remains pending.
+
+An isolated API 36 simulator using ARM translation exercised the protected
+paste form with synthetic codes and a read-only preview child. The cancellation,
+payment and recreation checks used fixture APK SHA-256
+`fa0563cf786d312c84db807bd69b8e220cd6dde9572d3ba2636731f51ae91d85`. The marked child
+was gone 41 ms after Cancel; a sampled Scan to Paste retry showed Review enabled
+within 3.9 seconds. A synthetic payment address matched the 35-character Send
+prefill; no node validation or payment was performed. Rotation retained the
+pasted code, and a process stop and relaunch during preview did not show a stale
+fleet review. This is not an Activity-only destruction or hardware-device test.
+
+At 1080 by 2160, density 540 and font scale 1.5, the isolated simulator showed
+the complete manager key, Join and Cancel in portrait. In landscape, a scroll
+cue appeared while content remained below; scrolling exposed the full Join button
+and removed the cue, which returned on scrolling up. Cancel returned Home without
+joining. Protected-screen pixel capture was unavailable; these observations use
+UI hierarchy and taps. The fixture APK SHA-256 was
+`f25f4058c4876c23e3b5927d0d475a038d59cf7e132624ec38d4ba6b533f89b7`.
+Physical-device qualification remains pending.

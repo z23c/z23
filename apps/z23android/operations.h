@@ -90,6 +90,9 @@ bool zapp_wallet_send_run(struct zapp_runtime *r, const char *op, const char *in
 #define ZAPP_WALLET_SETUP_TIMEOUT_MAX_MS 900000u
 bool zapp_wallet_setup_run(struct zapp_runtime *r, const char *op, const char *input, unsigned timeout_ms, char *out, size_t cap);
 bool zapp_fleet_join_run(struct zapp_runtime *r, const char *token, char *out, size_t cap);
+enum zapp_preview_result { ZAPP_PREVIEW_OK, ZAPP_PREVIEW_FAILED, ZAPP_PREVIEW_CANCELLED };
+enum zapp_preview_result zapp_fleet_preview_cancelable(struct zapp_runtime *, const char *, char *, size_t, const atomic_bool *);
+enum zapp_preview_result zapp_fleet_machine_preview_cancelable(struct zapp_runtime *, const char *, char *, size_t, const atomic_bool *);
 /* Verify an invitation without enrolling this phone or creating a key. */
 bool zapp_fleet_preview_run(struct zapp_runtime *r, const char *token, char *out, size_t cap);
 bool zapp_fleet_preview_text(const char *text, char *out, size_t cap);

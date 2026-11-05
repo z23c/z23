@@ -59,6 +59,7 @@ struct controller {
     int64_t peers_at;                             /* Monotonic seconds of the last getpeerinfo reading, or 0. */
     char asked[96];                               /* Question last answered by the model. */
     atomic_bool reply_cancel;
+    atomic_bool scan_cancel;
     atomic_bool voice_cancel, voice_stop;
     bool pace_seen;            /* A thermal status or the startup default has set the pace file. */
     pthread_mutex_t pace_lock; /* Serializes thermal callbacks: previous pace, file write, view. */
@@ -94,17 +95,35 @@ static void notify_view(struct controller *c)
     pthread_mutex_unlock(&c->lock);
     if (notify) notify();
 }
-static bool fleet_review_run(struct controller *c, const char *token, bool explicit_join, bool explicit_machine,
-                             char *reply, char preview[2048], char onion[128], char machine_error[256], bool *machine)
+static enum zapp_preview_result preview_run(struct controller *c, const char *token, char *reply,
+                                             bool machine, bool typed)
 {
-    *machine = reply && !explicit_join && zapp_fleet_machine_preview_run(&c->runtime, token, reply, ZAPP_TEXT_CAP) &&
-        zapp_fleet_machine_preview_text(reply, preview, 2048, onion, 128);
+    if (!typed) return machine ? zapp_fleet_machine_preview_cancelable(&c->runtime, token, reply, ZAPP_TEXT_CAP, &c->scan_cancel) :
+        zapp_fleet_preview_cancelable(&c->runtime, token, reply, ZAPP_TEXT_CAP, &c->scan_cancel);
+    bool ok = machine ? zapp_fleet_machine_preview_run(&c->runtime, token, reply, ZAPP_TEXT_CAP) :
+        zapp_fleet_preview_run(&c->runtime, token, reply, ZAPP_TEXT_CAP);
+    return ok ? ZAPP_PREVIEW_OK : ZAPP_PREVIEW_FAILED;
+}
+static bool fleet_review_run(struct controller *c, const char *token, bool explicit_join, bool explicit_machine,
+                             char *reply, char preview[2048], char onion[128], char machine_error[256], bool *machine,
+                             bool typed, bool *cancelled)
+{
+    *machine = false; *cancelled = false;
+    if (reply && !explicit_join) {
+        enum zapp_preview_result result = preview_run(c, token, reply, true, typed);
+        if (result == ZAPP_PREVIEW_CANCELLED) { *cancelled = true; return false; }
+        *machine = result == ZAPP_PREVIEW_OK && zapp_fleet_machine_preview_text(reply, preview, 2048, onion, 128);
+    }
     if (reply && !*machine && !explicit_join && zapp_json_object(reply)) {
         zapp_plain_text(reply, ZAPP_TEXT_CAP);
         copy_text(machine_error, 256, reply);
     }
-    bool invite = reply && !explicit_machine && !*machine && zapp_fleet_preview_run(&c->runtime, token, reply, ZAPP_TEXT_CAP) &&
-        zapp_fleet_preview_text(reply, preview, 2048);
+    bool invite = false;
+    if (reply && !explicit_machine && !*machine) {
+        enum zapp_preview_result result = preview_run(c, token, reply, false, typed);
+        if (result == ZAPP_PREVIEW_CANCELLED) { *cancelled = true; return false; }
+        invite = result == ZAPP_PREVIEW_OK && zapp_fleet_preview_text(reply, preview, 2048);
+    }
     return *machine || invite;
 }
 static const char *invitation_message(bool cancelled, bool ok, bool valid, bool explicit_join,
@@ -135,11 +154,12 @@ static bool invitation(struct controller *c, const char *text, bool typed)
     pthread_mutex_unlock(&c->lock);
     notify_view(c);
     char *reply = ok ? calloc(1, ZAPP_TEXT_CAP) : NULL;
-    bool machine = false;
+    bool machine = false, cancelled = false;
     char machine_error[256] = "Could not verify the fleet machine record.";
-    ok = fleet_review_run(c, token, explicit_join, explicit_machine, reply, preview, onion, machine_error, &machine);
+    ok = fleet_review_run(c, token, explicit_join, explicit_machine, reply, preview, onion, machine_error, &machine, typed, &cancelled);
     pthread_mutex_lock(&c->lock);
-    if (!typed && c->scan_cancelled) ok = false;
+    bool aborted = !typed && (c->scan_cancelled || cancelled);
+    if (aborted) ok = false;
     if (ok) {
         copy_text(c->view.fleet_token, sizeof(c->view.fleet_token), token);
         c->view.fleet_machine = machine;
@@ -148,7 +168,7 @@ static bool invitation(struct controller *c, const char *text, bool typed)
         if (machine) copy_text(c->view.fleet_onion, sizeof(c->view.fleet_onion), onion);
     }
     copy_text(c->view.fleet_preview, sizeof(c->view.fleet_preview),
-              invitation_message(!typed && c->scan_cancelled, ok, valid_input, explicit_join, preview, machine_error));
+              invitation_message(aborted, ok, valid_input, explicit_join, preview, machine_error));
     pthread_mutex_unlock(&c->lock);
     if (reply) { memory_cleanse(reply, ZAPP_TEXT_CAP); free(reply); }
     memory_cleanse(token, sizeof(token)); return ok;
@@ -1064,6 +1084,7 @@ bool zapp_controller_start(const char *files, const char *libs, bool preview, vo
     if (!c) { pthread_mutex_unlock(&startup_lock); return false; }
     c->fleet_height = -1;
     atomic_init(&c->reply_cancel, false);
+    atomic_init(&c->scan_cancel, false);
     atomic_init(&c->voice_cancel, false);
     atomic_init(&c->voice_stop, false);
     c->pace_lock = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
@@ -1196,6 +1217,7 @@ static void queue_action(struct controller *c, const char *action, const char *a
     copy_text(c->action, sizeof(c->action), action); copy_text(c->argument, sizeof(c->argument), arg);
     c->camera_ticket = zapp_camera_ticket(); c->pending = true; c->view.busy = true;
     c->view.scanning = scan_action(action); c->view.scan_paste = !strcmp(action, "scan_paste"); c->view.scan_checking = false; c->scan_cancelled = false; c->scan_fleet_owned = false; c->scan_pair_owned = false; c->view.notice[0] = 0; c->view.result[0] = 0;
+    if (c->view.scanning) atomic_store(&c->scan_cancel, false);
     /* The tap shows at once what it does, unless its own screen already shows that. */
     const char *doing = zapp_action_shows_itself(action) ? NULL : zapp_action_doing(action);
     if (doing) copy_text(reports_beside(action) ? c->view.result : c->view.notice, ZAPP_NOTICE_CAP, doing);
@@ -1259,6 +1281,7 @@ void zapp_controller_cancel_scan(void)
         pthread_mutex_lock(&c->lock);
         if (scan_action(c->action) && (c->view.scanning || c->scan_fleet_owned || c->scan_pair_owned)) {
             c->scan_cancelled = true;
+            atomic_store(&c->scan_cancel, true);
             zapp_pay_stash_clear();
             if (c->scan_pair_owned) { c->view.pair_offer[0] = 0; c->view.pair_code[0] = 0; c->scan_pair_owned = false; }
             c->view.result[0] = 0;

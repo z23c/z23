@@ -127,8 +127,29 @@ static int node_arguments(int argc, char **argv)
     return private_tail(argc, argv, first, getenv("ZAPP_TEST_ADDNODE"));
 }
 
+static int preview_child(int argc, char **argv)
+{
+    if (argc > 2 && !strcmp(argv[1], "fleet") && !strcmp(argv[2], "preview")) {
+        char body[16384]; size_t n = fread(body, 1, sizeof(body) - 1, stdin); body[n] = 0;
+        if (strstr(body, "quick")) { puts("{\"ok\":true}"); return 0; }
+        const char *dir = NULL;
+        for (int i = 3; i < argc; ++i) if (!strncmp(argv[i], "-datadir=", 9)) dir = argv[i] + 9;
+        if (!dir) return 1;
+        char started[1200], marker[1200];
+        snprintf(started, sizeof(started), "%s/started", dir);
+        snprintf(marker, sizeof(marker), "%s/descendant", dir);
+        pid_t descendant = fork();
+        if (descendant < 0) return 1;
+        if (!descendant) { sleep(2); FILE *f = fopen(marker, "w"); if (f) fclose(f); _exit(0); }
+        FILE *f = fopen(started, "w"); if (!f || fclose(f)) return 1;
+        sleep(10); return 0;
+    }
+    return -1;
+}
 static int fleet_child(int argc, char **argv)
 {
+    int preview = preview_child(argc, argv);
+    if (preview >= 0) return preview;
     if (argc > 2 && !strcmp(argv[1], "fleet") && !strcmp(argv[2], "import")) {
         char body[16384]; size_t n = fread(body, 1, sizeof(body) - 1, stdin); body[n] = 0;
         if (strstr(body, "refused")) { puts("{\"ok\":false}"); return 0; }
@@ -143,6 +164,38 @@ static int fleet_child(int argc, char **argv)
         puts("{\"ok\":true,\"data\":{\"schema\":\"zcl.peer_add.v1\"}}"); return 0;
     }
     return -1;
+}
+struct preview_test { struct zapp_runtime *r; atomic_bool cancel; enum zapp_preview_result result; char out[256]; };
+static void *preview_thread(void *arg)
+{
+    struct preview_test *t = arg;
+    t->result = zapp_fleet_preview_cancelable(t->r, "invitation", t->out, sizeof(t->out), &t->cancel);
+    return NULL;
+}
+static void preview_cancel_tests(struct zapp_runtime *r)
+{
+    char directory[] = "/tmp/zapp-preview-XXXXXX", started[256], descendant[256], saved[sizeof(r->directory)];
+    assert(mkdtemp(directory));
+    snprintf(started, sizeof(started), "%s/started", directory);
+    snprintf(descendant, sizeof(descendant), "%s/descendant", directory);
+    memcpy(saved, r->directory, sizeof(saved)); snprintf(r->directory, sizeof(r->directory), "%s", directory);
+    struct preview_test t = {.r = r}; atomic_init(&t.cancel, true);
+    assert(zapp_fleet_preview_cancelable(r, "invitation", t.out, sizeof(t.out), &t.cancel) == ZAPP_PREVIEW_CANCELLED);
+    assert(zapp_fleet_machine_preview_cancelable(r, "line", t.out, sizeof(t.out), &t.cancel) == ZAPP_PREVIEW_CANCELLED);
+    assert(access(started, F_OK) != 0);
+    atomic_store(&t.cancel, false);
+    pthread_t worker; assert(pthread_create(&worker, NULL, preview_thread, &t) == 0);
+    for (int i = 0; i < 200 && access(started, F_OK) != 0; ++i) { struct timespec d = {.tv_nsec = 10000000}; nanosleep(&d, NULL); }
+    assert(access(started, F_OK) == 0);
+    struct timespec a, b; assert(clock_gettime(CLOCK_MONOTONIC, &a) == 0);
+    atomic_store(&t.cancel, true); assert(pthread_join(worker, NULL) == 0);
+    assert(clock_gettime(CLOCK_MONOTONIC, &b) == 0);
+    assert((b.tv_sec - a.tv_sec) * 1000 + (b.tv_nsec - a.tv_nsec) / 1000000 < 1000);
+    assert(t.result == ZAPP_PREVIEW_CANCELLED && !t.out[0]);
+    atomic_store(&t.cancel, false);
+    assert(zapp_fleet_machine_preview_cancelable(r, "quick", t.out, sizeof(t.out), &t.cancel) == ZAPP_PREVIEW_OK);
+    sleep(3); assert(access(descendant, F_OK) != 0); assert(unlink(started) == 0);
+    assert(rmdir(directory) == 0); memcpy(r->directory, saved, sizeof(saved));
 }
 static int child(int argc, char **argv)
 {
@@ -371,7 +424,7 @@ static void command_cases(struct zapp_runtime *r)
     char dial[1200]; snprintf(dial, sizeof(dial), "%s/dial-called", r->directory); (void)unlink(dial);
     assert(!zapp_fleet_connect_run(r, "refused", onion, out, sizeof(out)) && access(dial, F_OK) != 0);
     assert(!zapp_fleet_connect_run(r, "partial", onion, out, sizeof(out)) && strstr(out, "changed some fleet state") && access(dial, F_OK) != 0);
-    assert(zapp_fleet_connect_run(r, "valid", onion, out, sizeof(out)) && strstr(out, "Admission is still pending") && access(dial, F_OK) == 0);
+    assert(zapp_fleet_connect_run(r, "valid", onion, out, sizeof(out)) && strstr(out, "Fleet computer saved. Connecting…") && access(dial, F_OK) == 0);
     assert(unlink(dial) == 0);
     assert(strcmp(getenv("XDG_STATE_HOME"), "/tmp/parent-state") == 0);
     assert(strcmp(getenv("ZCL_CATCHUP_DRAIN_BUDGET_MS"), "77") == 0);
@@ -704,6 +757,7 @@ int main(int argc, char **argv)
     assert(setenv("HOME", "/tmp/parent-home", 1) == 0);
     assert(setenv("ZAPP_TEST_HOME", "/tmp/parent-home", 1) == 0);
     command_cases(&r);
+    preview_cancel_tests(&r);
     assert(unsetenv("HOME") == 0 && unsetenv("ZAPP_TEST_HOME") == 0);
     char directory[] = "/tmp/zapp-ops-test-XXXXXX", log[256], out[128];
     assert(mkdtemp(directory));

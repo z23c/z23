@@ -15,6 +15,21 @@ bool zapp_speech_client_paired(const char *files, const char *json)
 { (void)files; (void)json; return false; }
 bool zapp_pair_code(const char *descriptor, char code[7])
 { (void)descriptor; memcpy(code, "123456", 7); return true; }
+static int machine_calls, invite_calls;
+enum zapp_preview_result zapp_fleet_machine_preview_cancelable(struct zapp_runtime *r, const char *s, char *o, size_t n, const atomic_bool *cancel)
+{ (void)r; (void)s; (void)o; (void)n; ++machine_calls; return atomic_load(cancel) ? ZAPP_PREVIEW_CANCELLED : ZAPP_PREVIEW_FAILED; }
+enum zapp_preview_result zapp_fleet_preview_cancelable(struct zapp_runtime *r, const char *s, char *o, size_t n, const atomic_bool *cancel)
+{ (void)r; (void)s; (void)o; (void)n; (void)cancel; ++invite_calls; return ZAPP_PREVIEW_OK; }
+bool zapp_fleet_machine_preview_run(struct zapp_runtime *r, const char *s, char *o, size_t n)
+{ (void)r; (void)s; (void)o; (void)n; ++machine_calls; return false; }
+bool zapp_fleet_preview_run(struct zapp_runtime *r, const char *s, char *o, size_t n)
+{ (void)r; (void)s; (void)o; (void)n; ++invite_calls; return true; }
+bool zapp_fleet_machine_preview_text(const char *s, char *p, size_t n, char *o, size_t m)
+{ (void)s; (void)p; (void)n; (void)o; (void)m; return false; }
+bool zapp_fleet_preview_text(const char *s, char *p, size_t n)
+{ (void)s; (void)p; (void)n; return true; }
+const char *zapp_json_object(const char *s) { (void)s; return NULL; }
+void zapp_plain_text(char *s, size_t n) { (void)s; (void)n; }
 
 static struct controller c;
 static pthread_mutex_t gate = PTHREAD_MUTEX_INITIALIZER;
@@ -38,6 +53,7 @@ int main(void)
     pthread_t worker; assert(!pthread_create(&worker, NULL, blocked_commit, NULL));
     pthread_mutex_lock(&gate); while (!waiting) pthread_cond_wait(&changed, &gate); pthread_mutex_unlock(&gate);
     zapp_controller_cancel_scan();
+    assert(atomic_load(&c.scan_cancel));
     pthread_mutex_lock(&gate); release_worker = true; pthread_cond_signal(&changed); pthread_mutex_unlock(&gate);
     assert(!pthread_join(worker, NULL)); assert(!committed && offers == 0 && clears == 1);
     c.scan_cancelled = false; c.view.scanning = true;
@@ -59,6 +75,13 @@ int main(void)
     c.scan_cancelled = false; c.view.scanning = true;
     kind = ZAPP_SCAN_PAY; assert(!scan_commit(&c, 6, "payment", &kind, value, &notice));
     assert(offers == 3);
+    static char reply[ZAPP_TEXT_CAP]; char preview[2048] = "", onion[128] = "", error[256] = "";
+    bool machine = false, cancelled = false;
+    atomic_store(&c.scan_cancel, true);
+    assert(!fleet_review_run(&c, "code", false, false, reply, preview, onion, error, &machine, false, &cancelled));
+    assert(cancelled && machine_calls == 1 && invite_calls == 0);
+    assert(fleet_review_run(&c, "code", false, false, reply, preview, onion, error, &machine, true, &cancelled));
+    assert(!cancelled && machine_calls == 2 && invite_calls == 1);
     current = NULL; pthread_mutex_destroy(&c.lock);
     return 0;
 }
