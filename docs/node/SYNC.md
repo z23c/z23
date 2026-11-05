@@ -86,7 +86,11 @@ What happens:
    cannot pass; it records no offence, returns to idle and keeps syncing headers.
    A sample that contradicts a hash-committed field is an offence. This does
    **not** bind the peer's UTXO payload to ZClassic consensus; headers commit no
-   UTXO or MMB root, so `utxo_root` stays peer-asserted.
+   UTXO or MMB root, so `utxo_root` stays peer-asserted. `zfcproofs` carries each
+   sample's `utxo_root` in a trailing section, because the leaf hash covers it;
+   only the peer's own MMB commits to that value. A peer whose proof shows no
+   fault still has its next offers ignored for 60 seconds, so it cannot loop
+   offer, proofs and stand-down.
 5. Verify the imported UTXO bytes exactly match the peer manifest's SHA3. This
    is integrity under assisted verification, not a consensus proof.
 6. Keep the verified payload in staging. Runtime activation is Phase-0

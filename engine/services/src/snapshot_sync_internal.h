@@ -66,6 +66,15 @@ void snapsync_service_unlock_internal(void);
 
 /* ── Misc shared helpers (defined in snapshot_sync_service.c) ──── */
 int64_t snapsync_now_us_internal(void);
+
+/* Seconds a peer's offers are ignored after its proof stood the service down.
+ * It records no offence; it only stops offer, proofs, stand-down looping past
+ * the negotiation stall blacklist, each round running snapsync_reset's writes.
+ * Caller holds the service lock. */
+#define SNAPSYNC_STAND_DOWN_COOLDOWN_SECS 60
+void snapsync_cool_down_peer_internal(struct snapshot_sync_service *svc,
+                                      uint32_t peer_id);
+
 bool snapsync_run_write_internal(struct snapshot_sync_service *svc,
                                  db_service_write_fn fn,
                                  void *ctx);

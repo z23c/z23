@@ -11,7 +11,8 @@
  *
  *   snapshot_manifest_parse       (zsnapoffer v2 manifest header)
  *   snapsync_parse_offer_params   (offer-params wrapper over the above)
- *   snapsync_parse_fc_response    (zfcproofs: sample/sibling/peak arrays)
+ *   snapsync_parse_fc_response    (zfcproofs: sample/sibling/peak arrays,
+ *                                  then the trailing utxo_root section)
  *
  * All three are pure wire parsers over a byte_stream — no sockets, no
  * disk, no globals — so each iteration is deterministic and self-
@@ -75,7 +76,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     /* zfcproofs: num_samples (capped at FC_MAX_SAMPLES) then, per
      * sample, a leaf + MMB proof whose num_siblings / num_peaks are
      * capped at MMB_MAX_MOUNTAINS before their fixed-size arrays are
-     * filled. This is the densest count-bounded path in the snapshot
+     * filled, then root_count (which must equal num_samples) and its
+     * roots. This is the densest count-bounded path in the snapshot
      * family. fc_response is large (~256 KB) so heap-allocate it. */
     {
         struct byte_stream s;

@@ -197,19 +197,19 @@ bool snapsync_is_peer_blacklisted(const struct snapshot_sync_service *svc,
     return false;
 }
 
-void snapsync_blacklist_peer(struct snapshot_sync_service *svc,
-                             uint32_t peer_id)
+/* Enter peer_id with this start time; an entry that already runs longer keeps
+ * its time, so no caller can shorten a blacklist. */
+static void snapsync_blacklist_from(struct snapshot_sync_service *svc,
+                                    uint32_t peer_id, int64_t now,
+                                    int64_t started_at_us)
 {
-    if (!svc || peer_id == 0)
-        return;
-
-    int64_t now = snapsync_now_us_internal();
     int64_t expiry_us = SNAPSYNC_BLACKLIST_SECS * 1000000LL;
 
     /* Check if already blacklisted — refresh timestamp */
     for (int i = 0; i < svc->blacklist_count; i++) {
         if (svc->blacklist[i].peer_id == peer_id) {
-            svc->blacklist[i].blacklisted_at_us = now;
+            if (svc->blacklist[i].blacklisted_at_us < started_at_us)
+                svc->blacklist[i].blacklisted_at_us = started_at_us;
             return;
         }
     }
@@ -226,9 +226,35 @@ void snapsync_blacklist_peer(struct snapshot_sync_service *svc,
     /* Add new entry */
     if (svc->blacklist_count < SNAPSYNC_MAX_BLACKLIST) {
         svc->blacklist[svc->blacklist_count].peer_id = peer_id;
-        svc->blacklist[svc->blacklist_count].blacklisted_at_us = now;
+        svc->blacklist[svc->blacklist_count].blacklisted_at_us = started_at_us;
         svc->blacklist_count++;
     }
+}
+
+void snapsync_blacklist_peer(struct snapshot_sync_service *svc,
+                             uint32_t peer_id)
+{
+    if (!svc || peer_id == 0)
+        return;
+
+    int64_t now = snapsync_now_us_internal();
+
+    snapsync_blacklist_from(svc, peer_id, now, now);
+}
+
+/* The same list, with the start time set back so the entry lapses after the
+ * cooldown instead of after SNAPSYNC_BLACKLIST_SECS. */
+void snapsync_cool_down_peer_internal(struct snapshot_sync_service *svc,
+                                      uint32_t peer_id)
+{
+    if (!svc || peer_id == 0)
+        return;
+
+    int64_t now = snapsync_now_us_internal();
+    int64_t set_back_us =
+        (SNAPSYNC_BLACKLIST_SECS - SNAPSYNC_STAND_DOWN_COOLDOWN_SECS) * 1000000LL;
+
+    snapsync_blacklist_from(svc, peer_id, now, now - set_back_us);
 }
 
 /* ── Init / Reset ────────────────────────────────────────── */

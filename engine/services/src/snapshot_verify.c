@@ -408,6 +408,41 @@ static bool snapsync_fc_read_hash_run(struct byte_stream *s, uint8_t (*out)[32],
     return true;
 }
 
+/* Read the optional section after the last sample: u32 root_count, then
+ * root_count 32-byte utxo_roots in sample order. mmb_hash_leaf covers the root,
+ * so without it the receiver cannot reproduce the prover's leaf hash at a
+ * boundary height.
+ *
+ * What a root proves here: only that the peer's own leaf hash and MMB commit to
+ * it. A root changed afterwards fails that leaf hash, but a peer can commit a
+ * fabricated root in its own MMB and pass. No header commits a UTXO root and
+ * local leaves can lack one, so the binding never compares it, and it says
+ * nothing about the real UTXO set (see utxo_root in chain/mmb.h).
+ *
+ * Nothing left means an older prover: every root stays zero, which fails at a
+ * boundary height exactly as it did before this section existed. Older
+ * receivers stop reading after the last sample, so they ignore the section, and
+ * this reader likewise ignores anything after it. */
+static struct zcl_result snapsync_fc_read_utxo_roots(struct fc_response *resp,
+                                                     struct byte_stream *s)
+{
+    uint32_t root_count = 0;
+
+    if (stream_remaining(s) == 0)
+        return ZCL_OK;
+    if (!stream_read_u32_le(s, &root_count))
+        return ZCL_ERR(-8, "parse_fc_response: truncated root_count");
+    if (root_count != resp->num_samples)
+        return ZCL_ERR(-9, "parse_fc_response: root_count=%u for %u samples",
+                       root_count, resp->num_samples);
+    for (uint32_t i = 0; i < root_count; i++) {
+        if (!stream_read_bytes(s, resp->samples[i].leaf.utxo_root, 32))
+            return ZCL_ERR(-10, "parse_fc_response: truncated root %u/%u",
+                           i, root_count);
+    }
+    return ZCL_OK;
+}
+
 struct zcl_result snapsync_parse_fc_response(struct fc_response *resp,
                                 struct byte_stream *s)
 {
@@ -452,7 +487,7 @@ struct zcl_result snapsync_parse_fc_response(struct fc_response *resp,
             return ZCL_ERR(-7, "parse_fc_response: truncated mmb_size in sample %u", i);
     }
 
-    return ZCL_OK;
+    return snapsync_fc_read_utxo_roots(resp, s);
 }
 
 struct zcl_result snapsync_write_fc_challenge(const struct snapshot_sync_service *svc,
@@ -647,6 +682,11 @@ struct zcl_result snapsync_write_fc_response(struct byte_stream *s,
         stream_write_u64_le(s, sample->proof.mmb_size);
     }
 
+    /* The section snapsync_fc_read_utxo_roots reads. */
+    stream_write_u32_le(s, resp->num_samples);
+    for (uint32_t i = 0; i < resp->num_samples; i++)
+        stream_write_bytes(s, resp->samples[i].leaf.utxo_root, 32);
+
     return ZCL_OK;
 }
 
@@ -802,7 +842,12 @@ static void snapsync_fc_bind_to_headers(struct main_state *ms,
 /* The proof shows no fault but cannot be checked here: return to idle so a
  * later offer is heard, and let header sync carry on. snapsync_reset clears the
  * anchor slot, but that locator hint belongs to boot or chain restore, not to
- * this attempt, so it is put back. */
+ * this attempt, so it is put back. No offence is recorded, and the peer goes on
+ * a short cooldown so it cannot loop offer, proofs and stand-down.
+ *
+ * A reset that could not finish leaves the service FAILED, not idle, until the
+ * failed-reset condition recovers it. That is our fault, not the peer's, so the
+ * code stays the no-offence one. */
 static struct zcl_result snapsync_fc_stand_down(struct snapshot_sync_service *svc,
                                                 uint32_t serving_peer_id,
                                                 const char *reason)
@@ -816,6 +861,7 @@ static struct zcl_result snapsync_fc_stand_down(struct snapshot_sync_service *sv
     snapsync_set_anchor(anchor_hint);
     snapsync_service_lock_internal();
     idle = svc->state == SNAPSYNC_IDLE;
+    snapsync_cool_down_peer_internal(svc, serving_peer_id);
     snapsync_service_unlock_internal();
     if (idle && sync_get_state() == SYNC_SNAPSHOT_RECEIVE)
         sync_set_state(SYNC_HEADERS_DOWNLOAD, "snapshot offer not checkable");
