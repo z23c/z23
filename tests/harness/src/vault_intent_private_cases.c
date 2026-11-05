@@ -47,7 +47,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define VP_BUF 8192
+#define VP_BUF 20000
 #define VR_FEE 10000
 
 /* ---- oracle 1: framed plaintext through vault_intent_private_build_prepared */
@@ -570,6 +570,10 @@ static bool vr_effects_render_ok(const struct json_value *r,
     return true;
 }
 
+/* The seeded row's digest is 32 bytes of 0x42; the plan reply must show it. */
+#define VR_SEED_DIGEST_HEX \
+    "4242424242424242424242424242424242424242424242424242424242424242"
+
 static bool vr_render_ok(const struct json_value *r, const struct vr_case *c)
 {
     const char *privacy = vp_str(r, "privacy");
@@ -578,6 +582,7 @@ static bool vr_render_ok(const struct json_value *r, const struct vr_case *c)
                               is_private ? 8 : 12) == 0;
     return json_get_bool(json_get(r, "ok")) &&
         json_get_bool(json_get(r, "idempotent_plan")) &&
+        strcmp(vp_str(r, "digest"), VR_SEED_DIGEST_HEX) == 0 &&
         strcmp(vp_str(r, "route"), vr_route_name(c->actual)) == 0 &&
         strcmp(vp_str(r, "from"), c->from) == 0 &&
         strcmp(vp_str(r, "fee"), "0.00010000") == 0 &&
@@ -591,7 +596,7 @@ static bool vr_accept(const struct vr_case *c)
     snprintf(key, sizeof(key), "vp-acc-%u", g_fx.seq + 1);
     uint8_t plain[VP_BUF];
     size_t n = vr_plain(plain, c->from, c->actual, c->eff, c->n);
-    char json[16384];
+    char json[32768];
     vr_json(json, sizeof(json), key, c->from, c->route, c->eff, c->n);
     struct json_value r;
     json_init(&r);
@@ -611,7 +616,7 @@ static bool vr_conflict(const struct vr_case *c)
     uint8_t plain[VP_BUF];
     size_t n = vr_plain(plain, c->from, c->actual, c->eff, c->n);
     plain[n - 1] ^= 1;
-    char json[16384];
+    char json[32768];
     vr_json(json, sizeof(json), key, c->from, c->route, c->eff, c->n);
     struct json_value r;
     json_init(&r);
@@ -627,7 +632,7 @@ static bool vr_conflict(const struct vr_case *c)
 static bool vr_refused(const char *label, const char *from, const char *route,
                        const struct vr_eff *e, size_t n, const char *want)
 {
-    char json[16384];
+    char json[32768];
     vr_json(json, sizeof(json), "vp-ref", from, route, e, n);
     struct json_value r;
     json_init(&r);
@@ -749,6 +754,29 @@ static const struct vp_ref k_refs[] = {
     { "effects not an array", VSHIELD "\"effects\":\"abc\"}",
       "INVALID_EFFECTS" },
     { "effects empty", VSHIELD VEFF(), "INVALID_EFFECTS" },
+    { "from is a number",
+      VPRE "\"from\":5," VROUTE("shield") VEFF(VE("@Z@", "1")),
+      "FROM_REQUIRED" },
+    { "route missing", VPRE VFROM("@T@") VEFF(VE("@Z@", "1")),
+      "UNSUPPORTED_ROUTE" },
+    { "route in the wrong case",
+      VPRE VFROM("@T@") VROUTE("Shield") VEFF(VE("@Z@", "1")),
+      "UNSUPPORTED_ROUTE" },
+    { "bad from is reported before a bad route and bad effects",
+      VPRE VFROM("") VROUTE("bogus") "\"x\":1}", "FROM_REQUIRED" },
+    { "bad route is reported before bad effects",
+      VPRE VFROM("@T@") VROUTE("bogus") "\"x\":1}", "UNSUPPORTED_ROUTE" },
+    { "bad scope is reported before a bad key",
+      "{\"wallet_scope\":\"live\",\"idempotency_key\":\"\"," VFROM("@T@")
+      VROUTE("shield") VEFF(VE("@Z@", "1")), "WALLET_SCOPE_REQUIRED" },
+    { "scope missing",
+      "{\"idempotency_key\":\"k1\"," VFROM("@T@") VROUTE("shield")
+      VEFF(VE("@Z@", "1")), "WALLET_SCOPE_REQUIRED" },
+    { "idempotency key missing",
+      "{\"wallet_scope\":\"test\"," VFROM("@T@") VROUTE("shield")
+      VEFF(VE("@Z@", "1")), "IDEMPOTENCY_KEY_REQUIRED" },
+    { "asset in the wrong case", VSHIELD VEFF("{\"asset\":\"zcl\","
+      "\"to\":\"@Z@\",\"amount\":\"1\"}"), "INVALID_EFFECT" },
     { "scope not dev prod test",
       "{\"wallet_scope\":\"live\",\"idempotency_key\":\"k1\"," VFROM("@T@")
       VROUTE("shield") VEFF(VE("@Z@", "1")), "WALLET_SCOPE_REQUIRED" },
@@ -978,6 +1006,218 @@ _test_next:
     return failures;
 }
 
+/* ---- fresh requests: refused before any reservation is written --------- */
+
+static const char *const k_money_codes[] = {
+    "MONEY_STATE_NOT_CURRENT", "INSUFFICIENT_CONFIRMED_FUNDS",
+    "DEVELOPMENT_RESERVE_OR_LAB_CAP",
+};
+
+static bool vp_is_money_code(const char *code)
+{
+    for (size_t i = 0; i < sizeof(k_money_codes) / sizeof(k_money_codes[0]); i++)
+        if (strcmp(code, k_money_codes[i]) == 0) return true;
+    return false;
+}
+
+static bool vp_row_absent(const char *scope, const char *key)
+{
+    struct vault_intent_row row;
+    memset(&row, 0, sizeof(row));
+    return !vault_intent_find_application_idempotency(
+        &g_fx.db, scope, "vault_multi", key, &row);
+}
+
+/* One fresh shield request (no seeded row). Returns true when the plan call
+ * ran; *accepted is whether the reply claimed success. */
+static bool vp_fresh(const char *scope, const char *key, const char *session,
+                     const char *amount, char *code, size_t cap,
+                     bool *accepted)
+{
+    char json[1024], sess[160] = "";
+    if (session)
+        snprintf(sess, sizeof(sess), "\"_agent_session\":\"%s\",", session);
+    snprintf(json, sizeof(json),
+        "{\"wallet_scope\":\"%s\",\"idempotency_key\":\"%s\",%s"
+        "\"from\":\"%s\",\"route\":\"shield\",\"effects\":[{\"asset\":\"ZCL\","
+        "\"to\":\"%s\",\"amount\":\"%s\"}]}",
+        scope, key, sess, g_t, g_z, amount);
+    struct json_value r;
+    json_init(&r);
+    bool ran = vp_plan_json(json, &r);
+    snprintf(code, cap, "%s", vp_code(&r));
+    *accepted = json_get_bool(json_get(&r, "ok"));
+    json_free(&r);
+    return ran;
+}
+
+/* An unfunded wallet must never get a plan: every scope refuses on money and
+ * leaves no row behind. An "ok" here would be a custody finding. */
+static bool vp_fresh_refused_in(const char *scope, const char *key)
+{
+    char code[64] = "";
+    bool accepted = true;
+    bool ran = vp_fresh(scope, key, NULL, "1", code, sizeof(code), &accepted);
+    bool ok = ran && !accepted && vp_is_money_code(code) &&
+        vp_row_absent(scope, key);
+    if (!ok) printf("(fresh plan in '%s' gave '%s') ", scope, code);
+    return ok;
+}
+
+static bool vp_fresh_bogus_session(void)
+{
+    char code[64] = "";
+    bool accepted = true;
+    bool ran = vp_fresh("test", "vp-sess", "no-such-session", "1", code,
+                        sizeof(code), &accepted);
+    bool refused = ran && !accepted && code[0] != '\0' &&
+        !vp_is_money_code(code);
+    if (!refused)
+        printf("(bogus session gave '%s') ", code);
+    return refused && vp_row_absent("test", "vp-sess");
+}
+
+static int vp_fresh_cases(void)
+{
+    int failures = 0;
+    TEST("private intent plan on an unfunded wallet reserves nothing") {
+        ASSERT(vp_fresh_refused_in("test", "vp-fresh-test"));
+        ASSERT(vp_fresh_refused_in("prod", "vp-fresh-prod"));
+        ASSERT(vp_fresh_refused_in("dev", "vp-fresh-dev"));
+        ASSERT(vp_fresh_bogus_session());
+        PASS();
+    }
+_test_next:
+    return failures;
+}
+
+/* ---- fee and size limits ------------------------------------------------ */
+
+static bool vp_fee_refused(const char *label, int64_t fee, const char *amount)
+{
+    const struct vr_eff e = { g_z, amount, 100000000, 0, NULL };
+    g_fx.wallet->default_fee = fee;
+    bool ok = vr_refused(label, g_t, "shield", &e, 1, "FEE_INVALID");
+    g_fx.wallet->default_fee = VR_FEE;
+    return ok;
+}
+
+/* A request whose value plus the fee is exactly the supply is not a fee
+ * error; it falls through to the money check. */
+static bool vp_fee_edge_passes(void)
+{
+    char code[64] = "";
+    bool accepted = true;
+    bool ran = vp_fresh("test", "vp-edge", NULL, "20999999.9999", code,
+                        sizeof(code), &accepted);
+    if (!vp_is_money_code(code)) printf("(supply-edge request gave '%s') ", code);
+    return ran && !accepted && vp_is_money_code(code);
+}
+
+static int vp_fee_cases(void)
+{
+    int failures = 0;
+    TEST("private intent plan refuses a fee or total outside the money range") {
+        ASSERT(vp_fee_refused("fee negative", -1, "1"));
+        ASSERT(vp_fee_refused("fee above supply", MAX_MONEY + 1, "1"));
+        ASSERT(vp_fee_refused("total above supply", VR_FEE, "21000000"));
+        ASSERT(vp_fee_edge_passes());
+        PASS();
+    }
+_test_next:
+    g_fx.wallet->default_fee = VR_FEE;
+    return failures;
+}
+
+/* A seeded row is replayed only when its request digest matches this
+ * request under this fee. */
+static bool vp_replay_is(const struct vr_case *c, const char *key,
+                         const char *want)
+{
+    uint8_t plain[VP_BUF];
+    size_t n = vr_plain(plain, c->from, c->actual, c->eff, c->n);
+    char json[32768];
+    vr_json(json, sizeof(json), key, c->from, c->route, c->eff, c->n);
+    struct json_value r;
+    json_init(&r);
+    bool ok = vr_seed(key, plain, n, vr_target(c), c->actual) &&
+        vp_plan_json(json, &r) && strcmp(vp_code(&r), want) == 0;
+    if (!ok)
+        printf("(replay '%s' gave '%s', wanted '%s') ", key, vp_code(&r), want);
+    json_free(&r);
+    return ok;
+}
+
+static int vp_replay_guard_cases(void)
+{
+    int failures = 0;
+    const struct vr_eff e = { g_z, "1", 100000000, 0, NULL };
+    const struct vr_case c = { "replay guard", g_t, "shield",
+        VAULT_INTENT_ROUTE_SHIELD, &e, 1 };
+    TEST("private intent replay is refused when the wallet fee has changed") {
+        ASSERT(vp_replay_is(&c, "vp-rp-ok", ""));
+        g_fx.wallet->default_fee = 2 * VR_FEE;
+        bool drift = vp_replay_is(&c, "vp-rp-fee", "IDEMPOTENCY_CONFLICT");
+        g_fx.wallet->default_fee = VR_FEE;
+        ASSERT(drift);
+        PASS();
+    }
+_test_next:
+    g_fx.wallet->default_fee = VR_FEE;
+    return failures;
+}
+
+/* The encrypted plan holds at most WALLET_METADATA_PLAINTEXT_MAX bytes: the
+ * frame that fills it exactly is planned, one byte more is refused. */
+static bool vp_size_edge(void)
+{
+    static char full[1025], last[1026];
+    static struct vr_eff effs[16];
+    size_t fixed = 4 + 1 + 1 + strlen(g_t) + 1 + 8;
+    size_t per = 1 + strlen(g_z) + 8 + 1 + 2;
+    size_t room = WALLET_METADATA_PLAINTEXT_MAX - fixed - 16 * per;
+    if (room < 15 * 1024 + 1 || room > 16 * 1024) return false;
+    size_t tail = room - 15 * 1024;
+    vp_fill(full, 1024, "", 'm');
+    vp_fill(last, tail, "", 'm');
+    for (size_t i = 0; i < 16; i++)
+        effs[i] = (struct vr_eff){ g_z, "1", 100000000, 1,
+                                   i < 15 ? full : last };
+    const struct vr_case fits = { "plan filling the budget", g_t, "shield",
+        VAULT_INTENT_ROUTE_SHIELD, effs, 16 };
+    if (!vr_accept(&fits)) return false;
+    vp_fill(last, tail + 1, "", 'm');
+    return vr_refused("plan one byte over the budget", g_t, "shield", effs, 16,
+                      "PLAN_TOO_LARGE");
+}
+
+static bool vp_mismatch_message(void)
+{
+    char json[1024];
+    vp_expand(VPRE VFROM("@Z@") VROUTE("shield") VEFF(VE("@Y@", "1")), json,
+              sizeof(json));
+    struct json_value r;
+    json_init(&r);
+    bool ok = vp_plan_json(json, &r) &&
+        strcmp(vp_code(&r), "ROUTE_MISMATCH") == 0 &&
+        strstr(vp_str(&r, "message"), "does not match") != NULL &&
+        strstr(vp_str(&r, "message"), "no route here") == NULL;
+    json_free(&r);
+    return ok;
+}
+
+static int vp_size_cases(void)
+{
+    int failures = 0;
+    TEST("private intent plan holds the plaintext budget and words a mismatch") {
+        ASSERT(vp_size_edge());
+        ASSERT(vp_mismatch_message());
+        PASS();
+    }
+_test_next:
+    return failures;
+}
+
 static int vp_plan_cases(void)
 {
     int failures = 0;
@@ -999,6 +1239,10 @@ static int vp_plan_cases(void)
     failures += vp_refusal_cases();
     failures += vp_accept_cases();
     failures += vp_boundary_cases();
+    failures += vp_fresh_cases();
+    failures += vp_fee_cases();
+    failures += vp_replay_guard_cases();
+    failures += vp_size_cases();
 _test_next:
     vp_fx_teardown();
     return failures;
