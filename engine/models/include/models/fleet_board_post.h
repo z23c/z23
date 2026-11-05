@@ -418,6 +418,27 @@ bool db_fleet_board_fleet_newest_of_agent(struct node_db *ndb, int64_t now,
                                           const char *agent,
                                           struct db_fleet_board_post *out);
 
+/* Every still-discoverable fleet-scoped note by `agent`, the row this store took
+ * last first, by its own arrival number and not the author's date. `visit` gets
+ * the bare id and text with no signature work and no other read, so a store full
+ * of copies costs a hash each: a caller that will act on a row reads it by id
+ * afterwards, which verifies it. `text` lasts for the call and `visit` must not
+ * use the store. Returning false stops the walk. False when the store could not
+ * be read to the end, which is not "nothing there". */
+typedef bool (*db_fleet_board_line_visit)(const uint8_t id[32],
+                                          const char *text, size_t text_len,
+                                          void *ctx);
+bool db_fleet_board_fleet_lines(struct node_db *ndb, int64_t now,
+                                const char *agent,
+                                db_fleet_board_line_visit visit, void *ctx);
+
+/* Does this store hold a row with `post`'s author, agent, scope, kind and exact
+ * text, dated less than `gap` seconds either side of it? Expired rows on disk
+ * count, as they do for the key's quota. False when the store cannot say. */
+bool db_fleet_board_copy_near(struct node_db *ndb,
+                              const struct fleet_board_post *post, int64_t gap,
+                              bool *near_out);
+
 /* Every distinct key that signed a post this node is storing, newest post
  * first, capped at FLEET_BOARD_HOST_LIST_MAX. A key appears only when at
  * least one of its stored posts still verifies here, so a tampered row

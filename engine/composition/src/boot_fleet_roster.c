@@ -5,16 +5,22 @@
  * The roster is derived, never stored on its own: it is the set of signing
  * keys named by the root-sealed lines held in FLEET-scope roster notes of
  * this node's board store, which db_fleet_board_post_ingest already saves
- * through the ActiveRecord lifecycle. Only a row whose seal verified is ever
- * stored (boot_fleet_roster_screen_post), so the store holds the roster and
- * nothing that merely looks like one. A cached copy lives in memory for a few
- * seconds and is dropped the moment a roster row arrives.
+ * through the ActiveRecord lifecycle. On a box with a root, only a row whose
+ * seal verified is stored (boot_fleet_roster_screen_post); a box with no root
+ * stores what it is given, and a store can outlive a change of root, so the
+ * scan never assumes a stored row verifies. A cached copy lives in memory for a
+ * few seconds and is dropped the moment a roster row arrives.
+ *
+ * Anyone who may post can copy a sealed line, and a copy verifies. So no bound
+ * here counts rows: the scan walks every row, the line it has proven costs a
+ * hash, and a line it has not is checked in turn. Copies and junk can cost time;
+ * they cannot take a genuine line's place.
  *
  * COST. A fleet post from an already-listed peer costs a memcmp over at most
  * BOOT_FLEET_ROSTER_MAX keys: zero signature verifies on the cached path. A
- * roster row costs one Ed25519 verify at ingest. A rebuild reads at most
- * BOOT_FLEET_ROSTER_SCAN_ROWS notes and verifies each DISTINCT line once
- * (republished copies share a digest), one rebuild at a time. */
+ * roster row costs one Ed25519 verify at ingest, a refused copy none. A rebuild
+ * hashes every stored roster note and verifies each DISTINCT line it has not
+ * proven, at most BOOT_FLEET_ROSTER_SCAN_ROWS of them, one rebuild at a time. */
 
 #include "config/boot_fleet_roster.h"
 
@@ -267,6 +273,9 @@ struct line_memo {
 };
 
 static struct line_memo g_memo;
+/* Unproven lines the next rebuild passes over, so rebuilds take turns when more
+ * of them are held than one may check. Guarded by the build lock. */
+static size_t g_scan_skip;
 
 static bool memo_matches(const struct line_memo *m, const struct root_view *rv)
 {
@@ -295,7 +304,14 @@ static void memo_add(struct line_memo *m,
     m->n++;
 }
 
+/* A line this scan will check once the walk is over and the store is let go. */
+struct scan_pending {
+    uint8_t id[32];
+    uint8_t digest[SHA256_OUTPUT_SIZE];
+};
+
 struct scan_acc {
+    struct node_db *ndb;
     struct roster_snap *snap;
     const struct root_view *rv;
     unsigned sealed;        /* rows whose seal verified */
@@ -303,9 +319,16 @@ struct scan_acc {
     unsigned bad;           /* roster-shaped rows that are not sealed */
     unsigned dropped;       /* member keys past the roster bound */
     unsigned copies;        /* republished copies skipped by digest */
+    unsigned deferred;      /* unproven rows left for a later rebuild */
     bool memo_ok;           /* g_memo was made under this root and state */
+    bool unreadable;        /* a row to check no longer reads back */
+    size_t unknown;         /* unproven rows met by the walk */
+    size_t skip;            /* of those, how many are left to the turn before */
+    size_t n_pending;
+    struct scan_pending pending[BOOT_FLEET_ROSTER_SCAN_ROWS];
     size_t n_seen;
-    uint8_t seen[BOOT_FLEET_ROSTER_SCAN_ROWS][SHA256_OUTPUT_SIZE];
+    /* Room for every line the memo can prove and every line pending. */
+    uint8_t seen[2 * BOOT_FLEET_ROSTER_SCAN_ROWS][SHA256_OUTPUT_SIZE];
     unsigned revoked;       /* verified, but the head revokes the box */
     struct zcl_fleet_head head; /* loaded once for this rebuild */
     struct line_memo next;  /* what this scan proved, kept for the next */
@@ -329,17 +352,23 @@ static void snap_add_key(struct scan_acc *acc, const uint8_t key[32])
 
 /* Has a row with this exact text already been judged in this scan? A line
  * is republished every 10 days and the old copy lives 30, so a roster holds
- * up to three copies of each; the digest makes each distinct line cost one
- * verify, not one per copy. */
-static bool scan_seen(struct scan_acc *acc,
+ * up to three copies of each, and any key may write more; the digest makes each
+ * distinct line cost one verify, not one per copy. A line left for a later
+ * rebuild takes no slot here. */
+static bool scan_seen(const struct scan_acc *acc,
                       const uint8_t digest[SHA256_OUTPUT_SIZE])
 {
     for (size_t i = 0; i < acc->n_seen; i++)
         if (memcmp(acc->seen[i], digest, SHA256_OUTPUT_SIZE) == 0)
             return true;
-    if (acc->n_seen < BOOT_FLEET_ROSTER_SCAN_ROWS)
-        memcpy(acc->seen[acc->n_seen++], digest, SHA256_OUTPUT_SIZE);
     return false;
+}
+
+static void scan_remember(struct scan_acc *acc,
+                          const uint8_t digest[SHA256_OUTPUT_SIZE])
+{
+    if (acc->n_seen < sizeof acc->seen / sizeof acc->seen[0])
+        memcpy(acc->seen[acc->n_seen++], digest, SHA256_OUTPUT_SIZE);
 }
 
 static void scan_digest(const char *text, size_t len,
@@ -374,26 +403,59 @@ static void scan_member(struct scan_acc *acc, const uint8_t digest[],
     snap_add_key(acc, signer);
 }
 
-/* Judge one distinct line: from the memo when the same line already
- * verified under this root and state, else by verifying it. */
-static void scan_judge(const struct fleet_board_post *p,
-                       const uint8_t digest[SHA256_OUTPUT_SIZE],
-                       struct scan_acc *acc)
+/* One stored row, from the walk. A line this root and state already proved is a
+ * member here and now; any other waits its turn. The walk holds the store's read
+ * open, so nothing is verified under it. */
+static bool scan_line(const uint8_t id[32], const char *text, size_t len,
+                      void *ctx)
 {
-    uint8_t signer[32], box[32];
-    bool sealed = false;
+    struct scan_acc *acc = ctx;
+    uint8_t digest[SHA256_OUTPUT_SIZE];
+    if (len == 0 || len >= ZCL_FLEET_ROSTER_LINE_MAX) {
+        acc->bad++;
+        return true;
+    }
+    scan_digest(text, len, digest);
+    if (scan_seen(acc, digest)) {
+        acc->copies++;
+        return true;
+    }
     const struct memo_entry *known =
         acc->memo_ok ? memo_find(&g_memo, digest) : NULL;
     if (known) {
+        scan_remember(acc, digest);
         acc->sealed++;
         scan_member(acc, digest, known->signer, known->box);
+        return true;
+    }
+    size_t nth = acc->unknown++;
+    if (nth < acc->skip || acc->n_pending >= BOOT_FLEET_ROSTER_SCAN_ROWS) {
+        acc->deferred++;
+        return true;
+    }
+    scan_remember(acc, digest);
+    memcpy(acc->pending[acc->n_pending].id, id, 32);
+    memcpy(acc->pending[acc->n_pending].digest, digest, SHA256_OUTPUT_SIZE);
+    acc->n_pending++;
+    return true;
+}
+
+/* Verify one pending line. Read by id first, which checks the row itself: a row
+ * that no longer reads back may be the very row that names a member. */
+static void scan_judge(const struct scan_pending *line, struct scan_acc *acc,
+                       struct db_fleet_board_post *row)
+{
+    uint8_t signer[32], box[32];
+    bool sealed = false;
+    if (!db_fleet_board_post_find(acc->ndb, line->id, row)) {
+        acc->unreadable = true;
         return;
     }
-    bool ok = roster_verify(p->text, acc->rv, signer, box, &sealed);
+    bool ok = roster_verify(row->post.text, acc->rv, signer, box, &sealed);
     if (sealed)
         acc->sealed++;
     if (ok)
-        scan_member(acc, digest, signer, box);
+        scan_member(acc, line->digest, signer, box);
     else if (sealed)
         acc->refused++;
     else
@@ -401,24 +463,7 @@ static void scan_judge(const struct fleet_board_post *p,
     memset(signer, 0, sizeof signer);
 }
 
-static void scan_row(const struct fleet_board_post *p, struct scan_acc *acc)
-{
-    uint8_t digest[SHA256_OUTPUT_SIZE];
-    if (!boot_fleet_roster_is_row(p))
-        return;
-    if (p->text_len == 0 || p->text_len >= ZCL_FLEET_ROSTER_LINE_MAX) {
-        acc->bad++;
-        return;
-    }
-    scan_digest(p->text, p->text_len, digest);
-    if (scan_seen(acc, digest)) {
-        acc->copies++;
-        return;
-    }
-    scan_judge(p, digest, acc);
-}
-
-static void scan_report(const struct scan_acc *acc, bool page_full)
+static void scan_report(const struct scan_acc *acc)
 {
     if (acc->bad) {
         atomic_fetch_add_explicit(&g_bad_rows, acc->bad,
@@ -439,26 +484,20 @@ static void scan_report(const struct scan_acc *acc, bool page_full)
         LOG_WARN(ROSTER_LOG, "the roster has %u sealed row(s) but the fleet "
                  "root's chain state refuses them: no fleet-scope relay",
                  acc->refused);
-    if (page_full)
-        LOG_WARN(ROSTER_LOG, "the roster scan filled its page; members past "
-                 "it are not seen");
+    if (acc->deferred)
+        LOG_WARN(ROSTER_LOG, "the roster holds more unproven lines than one "
+                 "rebuild checks: %u row(s) wait for a later one, and a member "
+                 "among them is not seen until then", acc->deferred);
 }
 
-/* Fold every stored roster row into the snapshot. The memo of proven lines
+/* Fold the walked and verified rows into the snapshot. The memo of proven lines
  * is replaced by what this scan proved, so it never outlives its rows. */
-static enum snap_state scan_fold(const struct db_fleet_board_post *rows, int n,
-                                 const struct root_view *rv,
-                                 struct roster_snap *snap,
+static enum snap_state scan_fold(const struct root_view *rv,
                                  struct scan_acc *acc)
 {
-    acc->snap = snap;
-    acc->rv = rv;
-    acc->memo_ok = memo_matches(&g_memo, rv);
-    snap->head = acc->head;
-    for (int i = 0; i < n; i++)
-        scan_row(&rows[i].post, acc);
-    bool full = n >= BOOT_FLEET_ROSTER_SCAN_ROWS;
-    scan_report(acc, full);
+    scan_report(acc);
+    size_t turn = acc->skip + acc->n_pending;
+    g_scan_skip = acc->deferred && turn < acc->unknown ? turn : 0;
     acc->next.valid = true;
     memcpy(acc->next.root, rv->root, 32);
     acc->next.state = rv->state;
@@ -477,24 +516,28 @@ static enum snap_state scan_fold(const struct db_fleet_board_post *rows, int n,
     if (acc->refused)
         return SNAP_UNVERIFIABLE;
     if (acc->sealed == 0)
-        return full ? SNAP_UNVERIFIABLE : SNAP_UNARMED;
+        return acc->deferred ? SNAP_UNVERIFIABLE : SNAP_UNARMED;
     return SNAP_READY;
 }
 
-/* Every stored roster note: the fleet-scope notes the roster agent wrote.
- * `*complete` is false when the store could not be read in full. */
-static int roster_rows_read(struct node_db *ndb, int64_t now,
-                            struct db_fleet_board_post *rows, bool *complete)
+/* Walk every stored roster note, then verify what the walk left pending. False
+ * when the store could not be read in full. */
+static bool scan_walk(struct node_db *ndb, int64_t now,
+                      const struct root_view *rv, struct roster_snap *snap,
+                      struct scan_acc *acc, struct db_fleet_board_post *row)
 {
-    struct fleet_board_filter filter;
-    memset(&filter, 0, sizeof filter);
-    filter.kind = FLEET_BOARD_KIND_NOTE;
-    (void)snprintf(filter.agent, sizeof filter.agent, "%s",
-                   BOOT_FLEET_ROSTER_AGENT);
-    filter.scope_set = true;
-    filter.scope = FLEET_BOARD_SCOPE_FLEET;
-    return db_fleet_board_list_checked(ndb, &filter, now, rows,
-                                       BOOT_FLEET_ROSTER_SCAN_ROWS, complete);
+    acc->ndb = ndb;
+    acc->snap = snap;
+    acc->rv = rv;
+    acc->memo_ok = memo_matches(&g_memo, rv);
+    acc->skip = acc->memo_ok ? g_scan_skip : 0;
+    snap->head = acc->head;
+    if (!db_fleet_board_fleet_lines(ndb, now, BOOT_FLEET_ROSTER_AGENT,
+                                    scan_line, acc))
+        return false;
+    for (size_t i = 0; i < acc->n_pending; i++)
+        scan_judge(&acc->pending[i], acc, row);
+    return !acc->unreadable;
 }
 
 /* Read every stored roster note and fold the roster rows. A read that fails
@@ -504,11 +547,11 @@ static enum snap_state roster_scan(struct node_db *ndb, int64_t now,
                                    const struct root_view *rv,
                                    struct roster_snap *snap)
 {
-    struct db_fleet_board_post *rows = zcl_calloc(
-        BOOT_FLEET_ROSTER_SCAN_ROWS, sizeof *rows, "fleet_roster_scan");
+    struct db_fleet_board_post *row = zcl_calloc(1, sizeof *row,
+                                                 "fleet_roster_scan");
     struct scan_acc *acc = zcl_calloc(1, sizeof *acc, "fleet_roster_acc");
-    if (!rows || !acc) {
-        free(rows);
+    if (!row || !acc) {
+        free(row);
         free(acc);
         return SNAP_UNVERIFIABLE;
     }
@@ -520,20 +563,18 @@ static enum snap_state roster_scan(struct node_db *ndb, int64_t now,
         LOG_WARN(ROSTER_LOG, "fleet_head_unreadable: the roster head cannot "
                  "be trusted (unreadable, corrupt, or not sealed by the "
                  "fleet root): no fleet-scope relay until it is repaired");
-        free(rows);
+        free(row);
         free(acc);
         return SNAP_UNVERIFIABLE;
     }
-    bool complete = false;
-    int n = roster_rows_read(ndb, now, rows, &complete);
     enum snap_state out = SNAP_UNVERIFIABLE;
-    if (!complete) {
+    if (!scan_walk(ndb, now, rv, snap, acc, row)) {
         LOG_WARN(ROSTER_LOG, "the roster notes could not be read from the "
                  "board store: no fleet-scope relay until they can");
     } else {
-        out = scan_fold(rows, n, rv, snap, acc);
+        out = scan_fold(rv, acc);
     }
-    free(rows);
+    free(row);
     free(acc);
     return out;
 }
@@ -730,6 +771,21 @@ bool boot_fleet_roster_carriage_open(struct node_db *ndb)
     return open;
 }
 
+/* One key gets a few rows per line per note lifetime, root or no root, whichever
+ * way its dates run. Asked before the seal, so a refused copy costs no verify
+ * and, being a final refusal, is not offered again. Stale and not wrong, like an
+ * older head. A roster row is stored whoever carries it (the manager's board key
+ * cannot be told from the root), so this is by author, not an author rule. */
+static enum fleet_board_result roster_copy_screen(
+    struct node_db *ndb, const struct fleet_board_post *post)
+{
+    bool near = false;
+    if (!db_fleet_board_copy_near(ndb, post, BOOT_FLEET_ROSTER_COPY_GAP_S,
+                                  &near))
+        return FLEET_BOARD_ERR_STORAGE;
+    return near ? FLEET_BOARD_ERR_EXPIRED : FLEET_BOARD_OK;
+}
+
 /* A roster row may be stored only if its seal verifies under the root this
  * box trusts. This is the one place a roster row is judged on its way in:
  * the same screen runs for the mesh stream, a P2P POST and a local publish. */
@@ -747,11 +803,15 @@ static enum fleet_board_result roster_row_screen(
         atomic_fetch_add_explicit(&g_bad_rows, 1, memory_order_relaxed);
         return FLEET_BOARD_ERR_SIGNATURE;
     }
+    enum fleet_board_result copy = roster_copy_screen(ndb, post);
+    if (copy != FLEET_BOARD_OK)
+        return copy;
     enum snap_state have_root = roster_root_read(ndb, &rv);
     if (have_root == SNAP_UNARMED)
         return FLEET_BOARD_OK; /* no root: this box gates nothing, so the row
                                 * is an ordinary note, as before this step;
-                                * the scan verifies it if a root appears */
+                                * the scan judges it if a root appears, and
+                                * takes turns past any that do not verify */
     if (have_root != SNAP_READY) {
         /* A root is recorded and cannot be read: not stored now, offered
          * again when this box can tell. */
@@ -900,10 +960,11 @@ static void pub_collect(const char *line, void *user)
     p->n++;
 }
 
-/* Is `line` already carried by a live roster note written less than one
- * republish period ago? A note lives FLEET_BOARD_TTL_MAX and is written again
- * once its newest copy is older than BOOT_FLEET_ROSTER_REPUBLISH_S, so one
- * copy is always live while the manager's node runs. */
+/* Is `line` already carried by a live note of this box's own written less than
+ * one republish period ago? A note lives FLEET_BOARD_TTL_MAX and is written again
+ * once its newest copy is older than BOOT_FLEET_ROSTER_REPUBLISH_S, so one copy
+ * is always live while the manager's node runs. `notes` are this box's own (see
+ * pub_held): a copy someone else wrote may be held nowhere but here. */
 static bool pub_already_carried(const struct db_fleet_board_post *notes, int n,
                                 const char *line, size_t len, int64_t now)
 {
@@ -951,17 +1012,25 @@ static bool pub_one(const struct db_fleet_board_post *notes,
     return r == FLEET_BOARD_OK;
 }
 
-/* The notes under `agent` this store already holds, newest first. */
+/* The notes under `agent` this box itself wrote that this store still holds,
+ * newest first. Nothing another key writes takes a place on this page. No
+ * identity to sign with is no copy held: the write then fails and says why. */
 static int pub_held(struct node_db *ndb, const char *agent, int64_t now,
                     struct db_fleet_board_post *rows, size_t cap)
 {
     struct fleet_board_filter filter;
+    uint8_t seed[32];
+    char why[256];
     memset(&filter, 0, sizeof filter);
     filter.kind = FLEET_BOARD_KIND_NOTE;
     filter.scope_set = true;
     filter.scope = FLEET_BOARD_SCOPE_FLEET;
     (void)snprintf(filter.agent, sizeof filter.agent, "%s", agent);
-    return db_fleet_board_list(ndb, &filter, now, rows, cap);
+    filter.host_set = boot_fleet_board_identity(seed, filter.host_pubkey, why,
+                                                sizeof why);
+    memset(seed, 0, sizeof seed);
+    return filter.host_set ? db_fleet_board_list(ndb, &filter, now, rows, cap)
+                           : 0;
 }
 
 bool boot_fleet_roster_newest_head_row(struct node_db *ndb, int64_t now,
@@ -1106,25 +1175,42 @@ static void walk_line(const char *line, void *user)
     memset(signer, 0, sizeof signer);
 }
 
-/* The same verified rows enforcement folds, read from the board store: the
- * roster notes the manager published, so a box that never imported a line
- * still sees them. */
+/* The distinct stored lines a walk of the roster notes found. */
+struct walk_lines {
+    char (*line)[ZCL_FLEET_ROSTER_LINE_MAX];
+    size_t n;
+};
+
+static bool walk_collect(const uint8_t id[32], const char *text, size_t len,
+                         void *ctx)
+{
+    struct walk_lines *w = ctx;
+    (void)id;
+    if (len == 0 || len >= ZCL_FLEET_ROSTER_LINE_MAX)
+        return true;
+    for (size_t i = 0; i < w->n; i++)
+        if (strcmp(w->line[i], text) == 0)
+            return true;
+    memcpy(w->line[w->n++], text, len + 1u);
+    return w->n < BOOT_FLEET_ROSTER_SCAN_ROWS;
+}
+
+/* The same lines enforcement folds, read from the board store: the roster notes
+ * the manager published, so a box that never imported a line still sees them.
+ * Each is verified once, after the store is let go, whoever wrote it. */
 static void walk_board_rows(struct node_db *ndb, int64_t now,
                             struct walk_acc *a)
 {
-    struct db_fleet_board_post *rows = zcl_calloc(
-        BOOT_FLEET_ROSTER_SCAN_ROWS, sizeof *rows, "fleet_roster_dial_rows");
-    bool complete = false;
-    if (!rows)
+    struct walk_lines w = { NULL, 0 };
+    w.line = zcl_calloc(BOOT_FLEET_ROSTER_SCAN_ROWS, sizeof *w.line,
+                        "fleet_roster_dial_lines");
+    if (!w.line)
         return;
-    int n = roster_rows_read(ndb, now, rows, &complete);
-    for (int i = 0; complete && i < n; i++) {
-        const struct fleet_board_post *p = &rows[i].post;
-        if (boot_fleet_roster_is_row(p) && p->text_len > 0 &&
-            p->text_len < ZCL_FLEET_ROSTER_LINE_MAX)
-            walk_line(p->text, a);
-    }
-    free(rows);
+    if (db_fleet_board_fleet_lines(ndb, now, BOOT_FLEET_ROSTER_AGENT,
+                                   walk_collect, &w))
+        for (size_t i = 0; i < w.n; i++)
+            walk_line(w.line[i], a);
+    free(w.line);
 }
 
 size_t boot_fleet_roster_each_machine(
@@ -1206,6 +1292,7 @@ void boot_fleet_roster_test_reset(void)
     roster_lock();
     memset(&g_snap, 0, sizeof g_snap);
     memset(&g_memo, 0, sizeof g_memo);
+    g_scan_skip = 0;
     g_logged = SNAP_UNARMED;
     g_disabled_logged = false;
     roster_unlock();

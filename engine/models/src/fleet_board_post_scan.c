@@ -1,10 +1,11 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * Fleet board store: the two whole-table scans that page or enumerate rows
- * rather than find one — the FLEET-scope page the paired pull serves, and
- * the list of keys this node is storing posts from. See
- * models/fleet_board_post.h. Rows are read through the shared row reader in
- * fleet_board_post.c, so every row handed on here verified again first.
+ * Fleet board store: the whole-table scans that page or enumerate rows rather
+ * than find one — the FLEET-scope page the paired pull serves, the bare lines
+ * under one fleet agent, and the list of keys this node is storing posts from.
+ * See models/fleet_board_post.h. Rows are read through the shared row reader in
+ * fleet_board_post.c, so every row handed on here verified again first; the bare
+ * lines are the one exception, and their caller reads a row by id to act on it.
  *
  * ar-validate-skip:read-only-scans — this file never writes a row; every
  * write, and its validation, is in fleet_board_post.c. */
@@ -106,6 +107,71 @@ bool db_fleet_board_fleet_newest_of_agent(struct node_db *ndb, int64_t now,
     bool found = AR_STEP_ROW(s) && fleet_board_row_read(s, out);
     sqlite3_finalize(s);
     return found;
+}
+
+bool db_fleet_board_fleet_lines(struct node_db *ndb, int64_t now,
+                                const char *agent,
+                                db_fleet_board_line_visit visit, void *ctx)
+{
+    if (!ndb || !ndb->open || !agent || !visit)
+        return false;
+    struct qb q;
+    qb_select(&q, QB_T_fleet_board_posts);
+    qb_select_column(&q, QB_C_fleet_board_posts_id);
+    qb_select_column(&q, QB_C_fleet_board_posts_text);
+    qb_where_text(&q, QB_C_fleet_board_posts_agent, QB_EQ, agent);
+    qb_where_int(&q, QB_C_fleet_board_posts_kind, QB_EQ, FLEET_BOARD_KIND_NOTE);
+    qb_where_int(&q, QB_C_fleet_board_posts_scope, QB_EQ,
+                 FLEET_BOARD_SCOPE_FLEET);
+    fleet_board_where_discoverable(&q, now);
+    qb_order_by(&q, QB_C_fleet_board_posts_arrival, QB_DESC);
+    sqlite3_stmt *s = NULL;
+    if (!QB_PREPARE(ndb, &q, s)) {
+        LOG_WARN("fleet.board", "fleet lines prepare failed: %s", qb_error(&q));
+        return false;
+    }
+    bool whole = true;
+    while (AR_STEP_ROW(s)) {
+        const void *id = sqlite3_column_blob(s, 0);
+        const unsigned char *text = sqlite3_column_text(s, 1);
+        if (!id || sqlite3_column_bytes(s, 0) != 32 || !text) {
+            whole = false; /* a row this read cannot tell apart */
+            continue;
+        }
+        if (!visit(id, (const char *)text, (size_t)sqlite3_column_bytes(s, 1),
+                   ctx))
+            break;
+    }
+    return sqlite3_finalize(s) == SQLITE_OK && whole;
+}
+
+bool db_fleet_board_copy_near(struct node_db *ndb,
+                              const struct fleet_board_post *post, int64_t gap,
+                              bool *near_out)
+{
+    if (near_out)
+        *near_out = false;
+    if (!ndb || !ndb->open || !post || !near_out || gap <= 0)
+        return false;
+    if (post->created_at > (uint64_t)(INT64_MAX - gap))
+        return true; /* no row is dated out there; the time check refuses it */
+    const int64_t created = (int64_t)post->created_at;
+    struct qb q;
+    qb_select(&q, QB_T_fleet_board_posts);
+    qb_select_count_star(&q);
+    qb_where_blob(&q, QB_C_fleet_board_posts_host_pubkey, QB_EQ,
+                  post->host_pubkey, 32);
+    qb_where_text(&q, QB_C_fleet_board_posts_agent, QB_EQ, post->agent);
+    qb_where_int(&q, QB_C_fleet_board_posts_scope, QB_EQ, post->scope);
+    qb_where_int(&q, QB_C_fleet_board_posts_kind, QB_EQ, post->kind);
+    qb_where_text(&q, QB_C_fleet_board_posts_text, QB_EQ, post->text);
+    qb_where_int(&q, QB_C_fleet_board_posts_created_at, QB_GT, created - gap);
+    qb_where_int(&q, QB_C_fleet_board_posts_created_at, QB_LT, created + gap);
+    int64_t held = 0;
+    if (!fleet_board_aggregate_checked(ndb, &q, &held))
+        return false;
+    *near_out = held > 0;
+    return true;
 }
 
 /* ── who this node has been storing posts from ───────────────────────── */

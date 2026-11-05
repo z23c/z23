@@ -121,13 +121,26 @@ A roster row is stored only if its seal verifies under the root this box
 trusts, on every way in: the paired stream, ordinary P2P POST and the local
 post path. One Ed25519 verify, for roster rows only, at ingest; a junk or
 foreign-sealed row is refused, never stored, and never touches the cached
-roster, so nobody can fill the roster page or force rebuilds with look-alike
-notes. The cached roster costs a member lookup and no signature check per
-fleet post. A rebuild reads at most 256 stored roster notes, checks each
-distinct line once (republished copies share a digest, and a line already
-proven under the same root and chain state is not checked again), and only
-one thread rebuilds at a time. A read of the store that fails is
-**unverifiable**, never "no roster".
+roster. A box with no root yet cannot judge a seal, so it stores what it is
+given as an ordinary note, and the scan judges it if a root appears.
+
+A seal says nothing about who posted, so any key that may post can copy a
+genuine line, and the row is stored whoever carries it: the manager's board key
+cannot be told from the root. So one key's copies of one line must be at least
+9 days apart by their own dates, four at most in a note's 30-day life, and a
+copy inside that is refused for good with no signature check and no rebuild. A
+republish every 10 days passes. That bounds the cost; what keeps the roster
+whole is that no bound counts rows. A rebuild walks every stored roster note
+in arrival order and hashes it, so copies and foreign rows cannot push a line
+out however many there are. It checks each distinct line once (a line already
+proven under the same root and chain state is not checked again), at most 256
+unproven lines per rebuild, and later rebuilds take turns over any more than
+that. While a store of junk is being worked through, a member not reached yet
+is not admitted, and with nothing proven yet the roster is **unverifiable**,
+never "no roster". Only one thread rebuilds at a time. A read of the store that
+fails is **unverifiable** too. The manager decides whether to write a line again
+from its own copies alone. The cached roster costs a member lookup and no
+signature check per fleet post.
 
 The gate has three states. With no fleet root, or no sealed row yet while the
 root is ACTIVE or never anchored, it is **unarmed** and fleet carriage is

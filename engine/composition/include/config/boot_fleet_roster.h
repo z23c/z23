@@ -85,7 +85,9 @@ enum {
     /* Members one roster holds: the relay-port range the enrolment
      * assigns from, so a fleet cannot enrol more machines than this. */
     BOOT_FLEET_ROSTER_MAX = 64,
-    /* Stored roster notes one scan reads. */
+    /* Lines not yet proven that one rebuild checks. Rebuilds take turns over
+     * the rest, so a store of junk costs each one this many checks at most and
+     * hides no line for good. */
     BOOT_FLEET_ROSTER_SCAN_ROWS = 256,
     /* A built roster is reused this long (seconds) unless a roster row
      * arrives; it must stay under one pull interval so a revocation does
@@ -98,6 +100,10 @@ enum {
      * once its newest copy is this old, so a live copy always exists while
      * the manager's node runs, and for 20 more days after it stops. */
     BOOT_FLEET_ROSTER_REPUBLISH_S = 10 * 24 * 3600,
+    /* One key's copies of one line must be at least this far apart by their
+     * own dates: a day under the republish period, so a manager whose clock
+     * stepped still lands, and a note lifetime holds at most four. */
+    BOOT_FLEET_ROSTER_COPY_GAP_S = BOOT_FLEET_ROSTER_REPUBLISH_S - 24 * 3600,
     /* One refusal log line per kind per this many seconds; the rest are
      * counted and reported on the next line. */
     BOOT_FLEET_ROSTER_LOG_WINDOW_S = 60,
