@@ -409,7 +409,7 @@ static void msg_block_intake_process_one(struct msg_block_intake *in,
         char hex[65];
         uint256_get_hex(&item->hash, hex);
         atomic_fetch_add_explicit(&in->rejected, 1, memory_order_relaxed);
-        block_mark_seen(&item->hash);
+        msg_block_mark_seen_if_body_matches(&item->block, &item->hash);
         event_emitf(EV_BLOCK_REJECTED, item->peer_id,
                     "hash=%s async_reason=%s", hex,
                     state.reject_reason[0] ? state.reject_reason : "unknown");

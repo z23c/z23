@@ -14,6 +14,7 @@
 #include "validation/check_block.h"
 #include "consensus/validation.h"
 #include "core/arith_uint256.h"
+#include "domain/consensus/check_block.h"
 #include "jobs/reducer_frontier.h"  // lib-layer-ok:provable-tip-for-self-suspicion-ban-gate
 #include "net/download.h"
 #include "net/https_server.h"
@@ -573,8 +574,10 @@ static void msg_block_requeue_after_intake_backpressure(
  * work chain at/above our provable tip H* (i.e. the network disagrees with
  * us about the best chain), so it changes nothing for old forks or lower-
  * work side chains. When armed:
- *   - body INVALID  -> the block itself is condemned: ban normally (DoS
- *                      protection + consensus parity fully preserved).
+ *   - body INVALID  -> the sender is banned normally (DoS protection +
+ *                      consensus parity fully preserved). A body that fails
+ *                      only the header's merkle commitment condemns its sender,
+ *                      never the block; see msg_block_body_matches_header.
  *   - body VALID    -> the fault is local: SUPPRESS the ban and leave the
  *                      block retryable so it reprocesses once our state
  *                      heals (never a silent dedup'd wedge).
@@ -872,10 +875,62 @@ static void msg_block_penalize_invalid(struct msg_processor *mp,
     }
 }
 
+/* The merkle verdict on the body in hand, with the reason and grade check_block
+ * would give for it. */
+struct msg_block_body_verdict {
+    bool matches;
+    int dos;
+    char reason[DOMAIN_CHECK_BLOCK_REASON_MAX];
+};
+
+static void msg_block_check_body(const struct block *blk,
+                                 struct msg_block_body_verdict *body)
+{
+    memset(body, 0, sizeof(*body));
+    struct zcl_result r = domain_consensus_check_block_merkle_root(
+        blk, body->reason, sizeof(body->reason), &body->dos);
+    body->matches = r.ok;
+}
+
+bool msg_block_body_matches_header(const struct block *blk)
+{
+    struct msg_block_body_verdict body;
+    msg_block_check_body(blk, &body);
+    return body.matches;
+}
+
+void msg_block_mark_seen_if_body_matches(const struct block *blk,
+                                         const struct uint256 *hash)
+{
+    if (msg_block_body_matches_header(blk))
+        block_mark_seen(hash);
+}
+
+/* A body that does not match its header answers no request for that block. The
+ * peer we asked for it is handled as if it said notfound: the hash is requeued
+ * for other peers, with no received-pending hold in the way. A request made of
+ * another peer stays live. */
+static void msg_block_track_wrong_body(struct msg_processor *mp,
+                                       struct p2p_node *node,
+                                       const struct uint256 *hash)
+{
+    struct download_manager *dm = get_download_mgr();
+    if (dl_mark_notfound(dm, (uint32_t)node->id, hash) == 0 &&
+        !dl_is_in_flight(dm, hash))
+        msg_block_note_unrequested(mp, node, dm);
+}
+
 static void msg_block_track_received(struct msg_processor *mp,
                                      struct p2p_node *node,
-                                     const struct uint256 *hash, size_t bytes)
+                                     const struct uint256 *hash, size_t bytes,
+                                     bool body_matches)
 {
+    if (!body_matches) {
+        msg_block_track_wrong_body(mp, node, hash);
+        dl_add_bytes_received(get_download_mgr(), bytes);
+        return;
+    }
+
     /* Mark received in download manager (removes from in-flight) and
      * capture who (if anyone) we asked for it. A plain "block" message
      * is ONLY ever a getdata response in this protocol — the compact-
@@ -924,10 +979,20 @@ static bool msg_block_defer_or_seen(struct msg_processor *mp,
 static bool msg_block_run_intake(struct msg_processor *mp,
                                  struct p2p_node *node, struct block *blk,
                                  struct uint256 *hash,
-                                 struct validation_state *state)
+                                 struct validation_state *state,
+                                 const struct msg_block_body_verdict *body)
 {
     if (!mp || !mp->block_submit)
         return false;
+    /* Catch-up intake stages a body on disk and leaves the merkle check for
+     * later, and the first body stored for a hash stays. A body that does not
+     * match its header must not take that place, so it gets here the verdict
+     * at-tip intake would give it. */
+    if (!body->matches && sync_get_state() != SYNC_AT_TIP) {
+        validation_state_dos(state, body->dos, false, REJECT_INVALID,
+                             body->reason, true, NULL);
+        return true;
+    }
     if (!msg_processor_enqueue_p2p_block(mp, blk, hash,
                                          (uint32_t)node->id, state)) {
         (void)mp->block_submit(blk, state, mp->block_submit_ctx);
@@ -940,13 +1005,14 @@ static bool msg_block_classify_reject(struct msg_processor *mp,
                                       struct block *blk,
                                       struct uint256 *hash,
                                       struct validation_state *state,
+                                      bool body_matches,
                                       bool *self_suspect)
 {
     *self_suspect = false;
     const bool reject_nonretryable =
         !validation_state_is_valid(state) &&
         !msg_block_validation_is_retryable(state);
-    if (reject_nonretryable)
+    if (reject_nonretryable && body_matches)
         *self_suspect = msg_block_reject_self_suspected(mp, node, blk, hash,
                                                         state);
     return reject_nonretryable;
@@ -1066,7 +1132,8 @@ static bool msg_block_dos_positive(const struct validation_state *state,
 }
 
 /* Post-intake verdict bookkeeping: on a non-retryable reject, emit the
- * reject event and mark the block seen unless the reject is self-suspected;
+ * reject event and mark the block seen unless the reject is self-suspected or
+ * the body does not match its header, which says nothing about the block;
  * every other verdict goes to msg_block_note_retryable. Returns true, with
  * hex filled, when a self-suspected reject is held out of the dedup ring so
  * the caller logs the hold. */
@@ -1076,6 +1143,7 @@ static bool msg_block_note_reject_or_retry(struct msg_processor *mp,
                                            const struct validation_state *state,
                                            bool reject_nonretryable,
                                            bool self_suspect,
+                                           bool body_matches,
                                            char hex[65])
 {
     uint256_get_hex(hash, hex);
@@ -1086,7 +1154,7 @@ static bool msg_block_note_reject_or_retry(struct msg_processor *mp,
     event_emitf(EV_BLOCK_REJECTED, (uint32_t)node->id,
                 "hash=%s reason=%s", hex,
                 state->reject_reason[0] ? state->reject_reason : "unknown");
-    if (!self_suspect) {
+    if (!self_suspect && body_matches) {
         /* rejected blocks: mark seen so the dedup ring
          * short-circuits subsequent deliveries of the same bad block
          * from other peers. Only the "received but skipped connect"
@@ -1183,7 +1251,10 @@ bool process_block_msg(struct msg_processor *mp, struct p2p_node *node,
     struct uint256 hash;
     block_get_hash(&blk, &hash);
 
-    msg_block_track_received(mp, node, &hash, s->size);
+    struct msg_block_body_verdict body;
+    msg_block_check_body(&blk, &body);
+
+    msg_block_track_received(mp, node, &hash, s->size, body.matches);
 
     if (msg_block_defer_or_seen(mp, &hash)) {
         block_free(&blk);
@@ -1200,7 +1271,7 @@ bool process_block_msg(struct msg_processor *mp, struct p2p_node *node,
     /* Block intake is owned by the app reducer/stage path injected at boot.
      * The verdict in `state` preserves the mark-seen + DoS/getheaders
      * contract below while keeping core/modules/net protocol handling app-agnostic. */
-    if (!msg_block_run_intake(mp, node, &blk, &hash, &state)) {
+    if (!msg_block_run_intake(mp, node, &blk, &hash, &state, &body)) {
         block_free(&blk);
         LOG_FAIL("net", "block submit callback not configured");
     }
@@ -1214,14 +1285,14 @@ bool process_block_msg(struct msg_processor *mp, struct p2p_node *node,
      * body re-check for a strictly-more-work block at/above H*. */
     bool self_suspect = false;
     const bool reject_nonretryable =
-        msg_block_classify_reject(mp, node, &blk, &hash, &state,
+        msg_block_classify_reject(mp, node, &blk, &hash, &state, body.matches,
                                   &self_suspect);
 
     char hex[65];
     const bool held_retryable =
         msg_block_note_reject_or_retry(mp, node, &hash, &state,
                                        reject_nonretryable, self_suspect,
-                                       hex);
+                                       body.matches, hex);
     if (held_retryable) {
         /* Body-valid more-work block we reject on LOCAL state: do NOT
          * dedup it. Marking it seen would short-circuit every future

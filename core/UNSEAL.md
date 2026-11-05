@@ -979,3 +979,7 @@ later lane flips it HARD.
 - 2026-11-05T22:32:51Z — REASON: Ignore a FlyClient reply from anyone but the peer asked
   old ROOT: 29284f6958c0e5aa01f5164997225fb17f243112fd1fbece191d6723bfa9108c
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-05T23:52:36Z — REASON: A body that does not match its header no longer marks the block seen
+  old ROOT: 64cf473ef400951a39584c1beb5a16ef8f4f5241e856d712bc7006db488f64cd
+  by: owner unseal ritual (make core-unseal)

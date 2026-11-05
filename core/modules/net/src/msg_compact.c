@@ -39,6 +39,60 @@ static void compact_pending_clear(struct p2p_node *node)
     memset(&node->compact_pending_hash, 0, sizeof(node->compact_pending_hash));
 }
 
+/* ── Helper: ask this peer for the full block ──────────────────── */
+
+/* The request goes through the download manager, so the reply is not an
+ * unrequested push and a stalled peer's slot is reassigned. A request already
+ * in flight stands. If this peer cannot take the slot, any peer may. */
+static void compact_request_full_block(struct msg_processor *mp,
+                                       struct p2p_node *node,
+                                       const struct uint256 *hash)
+{
+    struct block_index *bi = mp->main_state
+        ? block_map_find(&mp->main_state->map_block_index, hash) : NULL;
+    if (bi && (bi->nStatus & BLOCK_HAVE_DATA))
+        return;
+
+    struct download_manager *dm = get_download_mgr();
+    int32_t height = bi ? (int32_t)bi->nHeight : -1;
+    if (!dl_mark_requested(dm, hash, height, (uint32_t)node->id)) {
+        dl_queue_priority(dm, hash, height);
+        return;
+    }
+
+    struct inv_item inv;
+    inv_item_init_typed(&inv, MSG_BLOCK, hash);
+    struct byte_stream gd;
+    stream_init(&gd, 64);
+    if (stream_write_compact_size(&gd, 1) && inv_item_serialize(&inv, &gd)) {
+        p2p_node_begin_message(node, "getdata", mp->params->pchMessageStart);
+        p2p_node_write_message_data(node, gd.data, gd.size);
+        p2p_node_end_message(node);
+    }
+    stream_free(&gd);
+}
+
+/* Short ids can resolve to the wrong transactions, so a reconstruction that
+ * does not match its header says nothing about the block or about the peer
+ * (BIP152). Ask for the full block; true when that is what happened. The caller
+ * runs this before it settles the download slot, since the received-pending hold
+ * that leaves behind would refuse the request. */
+static bool compact_body_needs_full_block(struct msg_processor *mp,
+                                          struct p2p_node *node,
+                                          const struct block *blk,
+                                          const struct uint256 *hash)
+{
+    if (block_already_seen(hash) || msg_block_body_matches_header(blk))
+        return false;
+    char hex[65];
+    uint256_get_hex(hash, hex);
+    LOG_INFO("compact",
+             "peer %s: compact block %s does not match its header; "
+             "asking for the full block", node->addr_name, hex);
+    compact_request_full_block(mp, node, hash);
+    return true;
+}
+
 /* ── Helper: feed a completed block into normal validation ─────── */
 
 static void compact_submit_block(struct msg_processor *mp,
@@ -47,6 +101,9 @@ static void compact_submit_block(struct msg_processor *mp,
 {
     struct uint256 hash;
     block_header_get_hash(&blk->header, &hash);
+
+    if (compact_body_needs_full_block(mp, node, blk, &hash))
+        return;
 
     /* Clear any download-manager in-flight slot created when this block was
      * first announced via inv at tip (msg_tx.c at-tip getdata path), so a
