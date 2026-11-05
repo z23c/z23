@@ -693,6 +693,12 @@ int test_spawn_capture_env_public(const char *const argv[], const char *const en
     return test_spawn_capture_env_impl(argv, envp, out, cap, true);
 }
 
+static const char *test_child_stop_reason(bool found, bool timeout)
+{
+    if (found) return "needle";
+    return timeout ? "timeout" : "hangup";
+}
+
 bool test_spawn_capture_kill(const char *const argv[],
                              const char *const envp[],
                              const char *const *needles, int max_ms,
@@ -776,7 +782,7 @@ bool test_spawn_capture_kill(const char *const argv[],
     bool exit_known = observed && GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);
     test_note("cli daemon stop=%s eof=%d observed=%d killed=%d exit=%lu read_error=%d truncated=%d",
-              found ? "needle" : timeout ? "timeout" : "hangup", eof, exit_known,
+              test_child_stop_reason(found, timeout), eof, exit_known,
               killed != 0, (unsigned long)code, read_error, capture.observed >= cap);
     test_child_merged_note(&capture, false);
 

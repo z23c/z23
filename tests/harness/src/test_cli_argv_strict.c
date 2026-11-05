@@ -288,6 +288,7 @@ static int cas_daemon_poll_readable(int fd, int wait_ms, bool *poll_error)
     struct pollfd pfd = { .fd = fd, .events = POLLIN };
     int pr = poll(&pfd, 1, wait_ms);
     if (pr > 0) {
+        if (pfd.revents & POLLNVAL) *poll_error = true;
         if (pfd.revents & POLLIN) return 1;
         if (pfd.revents & POLLERR) *poll_error = true;
         if (pfd.revents & (POLLHUP | POLLERR)) return 0;
@@ -396,9 +397,11 @@ static bool cas_run_daemon_wait_for(char *const argv[], const char *home,
     int status = 0;
     bool observed = waitpid(pid, &status, 0) == pid;
     close(pipefd[0]);
-    test_note("cli daemon stop=%s eof=%d observed=%d killed=%d signal=%d read_error=%d poll_error=%d truncated=%d",
+    bool exit_known = observed && WIFEXITED(status);
+    int exit_code = exit_known ? WEXITSTATUS(status) : -1;
+    test_note("cli daemon stop=%s eof=%d observed=%d killed=%d exit=%d exit_known=%d signal=%d read_error=%d poll_error=%d truncated=%d",
               stop, eof, observed, killed == 0,
-              observed && WIFSIGNALED(status) ? WTERMSIG(status) : 0, read_error, poll_error,
+              exit_code, exit_known, observed && WIFSIGNALED(status) ? WTERMSIG(status) : 0, read_error, poll_error,
               capture.observed > pos);
     test_child_merged_note(&capture, cas_capture_safe_note);
     if (found) return true;
