@@ -869,7 +869,7 @@ static const struct ze_row ze_rows[] = {
      .needle = ZE_N_OUNCL},
     {"onion: unflagged port only", 2, NULL, 5, .v4_0 = 1, .v4port = 80,
      .needle = ZE_N_OUNCL},
-    {"onion: port 1 is fine", 1, ZE_ONION, 1},
+    {"onion: port 1 is fine", 1, ZE_ONION, 1, .needle = NULL},
     {"v4: all zero", 2, .v4port = 80, .needle = ZE_N_V4Z},
     {"v4: first byte alone is an address", 2, .v4_0 = 1, .v4port = 80},
     {"v4: last byte alone is an address", 2, .v4_3 = 1, .v4port = 80},
