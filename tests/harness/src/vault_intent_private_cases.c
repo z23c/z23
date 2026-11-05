@@ -28,6 +28,7 @@
 #include "models/vault_intent.h"
 #include "models/wallet_metadata_crypto.h"
 #include "platform/time_compat.h"
+#include "primitives/transaction.h"
 #include "services/wallet_backup_service.h"
 #include "storage/coins_kv.h"
 #include "storage/progress_store.h"
@@ -990,9 +991,50 @@ _test_next:
     return failures;
 }
 
+/* ---- requirements preflight: missing context and the passing verdict ---- */
+
+static bool vp_requirements_unavailable(struct wallet_rpc_context *ctx,
+                                        const struct transaction *tx)
+{
+    struct json_value out;
+    json_init(&out);
+    bool refused = !vault_intent_private_requirements_current(ctx, tx, &out) &&
+        strcmp(vp_code(&out), "SHIELDED_AUTHORITY_UNAVAILABLE") == 0;
+    json_free(&out);
+    return refused;
+}
+
+static int vp_requirements_cases(void)
+{
+    int failures = 0;
+    struct transaction tx;
+    transaction_init(&tx);
+    TEST("private intent requirement preflight needs a full context") {
+        static struct coins_view_cache cache;
+        struct wallet_rpc_context ctx;
+        memset(&ctx, 0, sizeof(ctx));
+        ASSERT(vp_requirements_unavailable(NULL, &tx));
+        ASSERT(vp_requirements_unavailable(&ctx, &tx));
+        ctx.coins_tip = &cache;
+        ASSERT(vp_requirements_unavailable(&ctx, NULL));
+        struct json_value out;
+        json_init(&out);
+        /* A transaction with no shielded spends has no anchor to check. */
+        bool ok = vault_intent_private_requirements_current(&ctx, &tx, &out);
+        json_free(&out);
+        ASSERT(ok);
+        PASS();
+    }
+_test_next:
+    transaction_free(&tx);
+    return failures;
+}
+
 int vault_intent_private_cases(void)
 {
-    int failures = vp_decode_cases();
+    int failures = vp_requirements_cases();
+    if (failures) return failures;
+    failures = vp_decode_cases();
     if (failures) return failures;
     return vp_plan_cases();
 }
