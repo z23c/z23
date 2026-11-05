@@ -230,6 +230,35 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
 
 /* ── file offer (file_market_offer.c) ──────────────────────────────── */
 
+/* The v1 body is 471 bytes: u8 name_len at 215, then the 255-byte name field
+ * that ends the v1 body. The decoder checks neither that the field's padding
+ * is zero nor that name_len equals the length up to the first NUL, so the one
+ * signed meaning has several wire encodings (reported as a finding, see the
+ * lane notes). The signature covers the canonical re-encode, so the harness
+ * holds every byte outside this field to the strict round trip and holds a
+ * non-canonical name field to idempotence: the canonical wire must decode to
+ * the very same offer, offer_id included. */
+#define FUZZ_OFFER_NAME_LEN_OFF 215u
+#define FUZZ_OFFER_NAME_END (FUZZ_OFFER_NAME_LEN_OFF + 1u + 255u)
+
+static void require_canonical_or_name_only(const struct file_offer *o,
+                                           const uint8_t *wire,
+                                           const uint8_t *canonical,
+                                           size_t wire_len)
+{
+    if (memcmp(wire, canonical, wire_len) == 0)
+        return;
+    if (memcmp(wire, canonical, FUZZ_OFFER_NAME_LEN_OFF) != 0 ||
+        memcmp(wire + FUZZ_OFFER_NAME_END, canonical + FUZZ_OFFER_NAME_END,
+               wire_len - FUZZ_OFFER_NAME_END) != 0)
+        abort();
+    struct file_offer again;
+    if (file_offer_auth_decode(canonical, wire_len, &again) !=
+            FILE_OFFER_AUTH_OK ||
+        memcmp(&again, o, sizeof(again)) != 0)
+        abort();
+}
+
 static void check_file_offer_ok(const struct file_offer *o,
                                 const uint8_t *wire, size_t wire_len)
 {
@@ -242,8 +271,9 @@ static void check_file_offer_ok(const struct file_offer *o,
     size_t canonical_len = 0;
     if (file_offer_auth_encode_into(o, canonical, sizeof(canonical),
                                     &canonical_len) != FILE_OFFER_AUTH_OK ||
-        canonical_len != wire_len || memcmp(canonical, wire, wire_len) != 0)
+        canonical_len != wire_len)
         abort();
+    require_canonical_or_name_only(o, wire, canonical, wire_len);
     (void)file_offer_auth_verify_signature(o);
     uint8_t genesis[32];
     memset(genesis, FUZZ_FILE_GENESIS_BYTE, sizeof(genesis));
