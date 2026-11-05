@@ -7285,8 +7285,7 @@ static bool ic_fresh_edit_android_res(void)
 static bool ic_fresh_edit_android_leaf(void)
 {
     return ic_split_w("apps/z23android/home.c",
-                      "int main(void)\n{\n    return 0;\n}\n") &&
-           ic_split_w("apps/z23android/bridge/rpc.c", "int x;\n");
+                      "int main(void)\n{\n    return 0;\n}\n");
 }
 
 /* A file outside the tree spells the path of this one. */
