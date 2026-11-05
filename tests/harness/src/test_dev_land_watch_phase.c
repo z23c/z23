@@ -1097,9 +1097,37 @@ _test_next:;
     return failures;
 }
 
-int test_dev_land_proof_evidence_compile(void)
+static int dlx_evidence_lint_body(void)
 {
     int failures = 0;
+    TEST("land: bound failed lint proof names its gate body") {
+        const struct dlx_evidence_case k = {
+            .tag = "evidence_lint_body", .dimension = ZCL_DEV_PROOF_LINT,
+            .script = "printf '%s\\n' 'PASS check-pass' 'FAIL check-red'\n"
+                      "printf '%s\\n' '──── FAIL log: check-red ────────────────────────────' 'lint diagnostic body' >&2\nexit 1\n",
+            .token = "child_proof_failed_exit_1",
+        };
+        char wt[PATH_MAX], local[64], base[64];
+        dlx_isolate(k.tag);
+        ASSERT(dlx_evidence_settle(&k, wt, local, base));
+        setenv("ZCL_LAND_PROOF_STUB", "status", 1);
+        struct dlx_call c;
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "failed");
+        ASSERT_STR_EQ(dlx_str(&c, "dimension"), "lint");
+        ASSERT(strstr(dlx_str(&c, "detail"), "lint diagnostic body") != NULL);
+        ASSERT(strstr(dlx_str(&c, "detail"), "PASS check-pass") == NULL);
+        dlx_end(&c);
+        dlx_restore();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+int test_dev_land_proof_evidence_compile(void)
+{
+    int failures = dlx_evidence_lint_body();
     TEST("land: compiler commands do not hide a later failing gate") {
         char detail[256];
         zcl_dev_land_test_first_actionable(

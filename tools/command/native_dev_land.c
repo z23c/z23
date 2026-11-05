@@ -178,6 +178,7 @@
 #include "command/native_dev_loop_command.h"
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 #include "dev_proof.h"
+#include "dev_proof_budget.h"
 #include "dev_proof_signer.h"
 #endif
 
@@ -5654,6 +5655,89 @@ int dl_lint_candidate(const struct dl_dirs *d, struct dl_row *row)
     return rc != 0 ? rc : dl_lint_new_source(d, row);
 }
 
+#if !defined(_WIN32) && (defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING))
+/* Only lint's own failed-gate frame can supply the body; PASS output and
+ * the verdict summary precede it and are not the gate's diagnosis. */
+static bool dl_lint_body(FILE *f, char *detail, size_t cap)
+{
+    char line[4096], gate[256] = "";
+    while (fgets(line, sizeof(line), f)) {
+        char *frame = strstr(line, " FAIL log: ");
+        if (!frame) continue;
+        frame += strlen(" FAIL log: ");
+        size_t n = strcspn(frame, " \t\r\n");
+        if (!n || n >= sizeof(gate)) continue;
+        (void)snprintf(gate, sizeof(gate), "%.*s", (int)n, frame);
+        while (fgets(line, sizeof(line), f)) {
+            if (line[strspn(line, " \t\r\n")] == '\0') continue;
+            char clean[768];
+            dl_sanitize_copy(line, clean, sizeof(clean));
+            char rendered[1100];
+            int written = snprintf(rendered, sizeof(rendered), "FAIL %s: %.700s", gate, clean);
+            bool clipped = !strchr(line, '\n') || strlen(line) >= sizeof(clean) ||
+                           written < 0 || (size_t)written >= cap;
+            if (clipped && cap > 20)
+                (void)snprintf(detail, cap, "%.*s [detail truncated]", (int)(cap - 20), rendered);
+            else (void)snprintf(detail, cap, "%s", rendered);
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool dl_lint_copy_log(const char *source, const char *dest)
+{
+    FILE *in = fopen(source, "rb"), *out = NULL;
+    if (in) out = fopen(dest, "ab");
+    if (!in || !out) { if (in) fclose(in); return false; }
+    char buf[16384]; size_t n; bool ok = true;
+    while ((n = fread(buf, 1, sizeof(buf), in)) != 0)
+        if (fwrite(buf, 1, n, out) != n) { ok = false; break; }
+    if (ferror(in)) ok = false;
+    if (fclose(in) != 0) ok = false;
+    if (fclose(out) != 0) ok = false;
+    return ok;
+}
+
+static bool dl_lint_host_load(FILE *f)
+{
+    char line[4096];
+    rewind(f);
+    while (fgets(line, sizeof(line), f))
+        if (dl_host_load_failure(line)) return true;
+    return false;
+}
+
+static int dl_lint_run(struct dl_row *row, const char *const argv[])
+{
+    char path[sizeof(row->log_path) + 32];
+    int n = snprintf(path, sizeof(path), "%s.lint.XXXXXX", row->log_path);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return -1;
+    int fd = mkstemp(path);
+    if (fd < 0) return -1;
+    close(fd);
+    const struct zcl_dev_proof_budget budget = {
+        .budget_ms = DL_LINT_TIMEOUT_MS, .ceiling_ms = DL_LINT_TIMEOUT_MS,
+        .no_progress_ms = DL_LINT_TIMEOUT_MS,
+    };
+    int rc = zcl_dev_proof_run_watched(".", path, argv, &budget, NULL);
+    FILE *f = fopen(path, "r");
+    if (rc != 0 && f && !dl_lint_body(f, row->detail, sizeof(row->detail))) {
+        rewind(f);
+        char line[4096];
+        while (fgets(line, sizeof(line), f) && !row->detail[0])
+            dl_first_actionable(line, row->detail, sizeof(row->detail));
+    }
+    bool host_load = f && rc != 0 && dl_lint_host_load(f);
+    if (f) fclose(f);
+    if (!dl_lint_copy_log(path, row->log_path)) rc = -1;
+    else (void)unlink(path);
+    if (rc != 0)
+        (void)snprintf(row->dimension, sizeof(row->dimension), "%s",
+                       host_load ? "host_load" : "lint");
+    return rc;
+}
+#else
 static int dl_lint_run(struct dl_row *row, const char *const argv[])
 {
     char *buf;
@@ -5674,6 +5758,7 @@ static int dl_lint_run(struct dl_row *row, const char *const argv[])
     free(buf);
     return rc;
 }
+#endif
 
 #if defined(ZCL_TESTING) && !defined(_WIN32)
 int zcl_dev_land_lint_test(const char *const argv[], const char *log,
@@ -7296,7 +7381,7 @@ static bool dl_frame_safe_append(char *out, size_t cap, size_t *used, const char
 }
 
 static int dl_frame_open(const struct zcl_dev_proof_failure_identity *identity,
-                         const char *local, const char *base)
+                         const char *local, const char *base, const char *step)
 {
     int fd = open(identity->canonical_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     const char *parts[] = {".cache", "zcl-dev-proof", "attempts", identity->attempt, "logs"};
@@ -7307,11 +7392,13 @@ static int dl_frame_open(const struct zcl_dev_proof_failure_identity *identity,
     }
     if (fd < 0) return -1;
     char name[160];
-    int n = snprintf(name, sizeof(name), "%s-%s.test.log", local, base);
+    int n = snprintf(name, sizeof(name), "%s-%s.%s.log", local, base, step);
     int logfd = n > 0 && (size_t)n < sizeof(name)
                     ? openat(fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
     if (logfd < 0 && errno == ENOENT)
-        logfd = openat(fd, "test.log", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        { n = snprintf(name, sizeof(name), "%s.log", step);
+          if (n > 0 && (size_t)n < sizeof(name))
+              logfd = openat(fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW); }
     close(fd);
     return logfd;
 }
@@ -7377,7 +7464,7 @@ static void dl_retained_frames(const char *wt, const char *local, const char *ba
     out[0] = '\0';
 #if !defined(_WIN32)
     if (!identity->valid) return;
-    int logfd = dl_frame_open(identity, local, base);
+    int logfd = dl_frame_open(identity, local, base, "test");
     if (logfd < 0) return;
     struct stat before, after;
     if (fstat(logfd, &before) != 0 || !S_ISREG(before.st_mode) ||
@@ -7394,6 +7481,34 @@ static void dl_retained_frames(const char *wt, const char *local, const char *ba
     if (!stable || !zcl_dev_proof_status_read(wt, local, base, &now) ||
         !now.failure_identity.valid ||
         strcmp(identity->attempt, now.failure_identity.attempt) ||
+        strcmp(identity->archive_sha3, now.failure_identity.archive_sha3)) out[0] = '\0';
+#else
+    (void)wt; (void)local; (void)base; (void)identity; (void)cap;
+#endif
+}
+
+/* Like retained test frames, this is an observation from the exact bound
+ * attempt, not an attestation of the mutable log bytes. */
+static void dl_retained_lint(const char *wt, const char *local, const char *base,
+                             const struct zcl_dev_proof_failure_identity *identity,
+                             char *out, size_t cap)
+{
+    out[0] = '\0';
+#if !defined(_WIN32)
+    if (!identity->valid) return;
+    int fd = dl_frame_open(identity, local, base, "lint");
+    if (fd < 0) return;
+    struct stat before, after;
+    if (fstat(fd, &before) != 0 || !S_ISREG(before.st_mode) ||
+        before.st_size < 0 || before.st_size > 32 * 1024 * 1024) { close(fd); return; }
+    FILE *f = fdopen(fd, "r");
+    if (!f) { close(fd); return; }
+    (void)dl_lint_body(f, out, cap);
+    bool stable = fstat(fileno(f), &after) == 0 && dl_same_file_snapshot(&before, &after);
+    fclose(f);
+    struct zcl_dev_proof_status now = {0};
+    if (!stable || !zcl_dev_proof_status_read(wt, local, base, &now) ||
+        !now.failure_identity.valid || strcmp(identity->attempt, now.failure_identity.attempt) ||
         strcmp(identity->archive_sha3, now.failure_identity.archive_sha3)) out[0] = '\0';
 #else
     (void)wt; (void)local; (void)base; (void)identity; (void)cap;
@@ -7455,6 +7570,11 @@ static void dl_failed_proof_evidence(const struct dl_dirs *d,
     if (word > 0 && word < sizeof(row->dimension))
         (void)snprintf(row->dimension, sizeof(row->dimension), "%.*s",
                        (int)word, first);
+    if (strcmp(row->dimension, "lint") == 0) {
+        char lint[sizeof(first) - 6] = "";
+        dl_retained_lint(d->wt, row->local, row->base, &identity, lint, sizeof(lint));
+        if (lint[0]) (void)snprintf(first, sizeof(first), "lint %s", lint);
+    }
     size_t tlen = strlen(token) < 96 ? strlen(token) : 96;
     char where[1100] = "";
     char logrel[1024];
