@@ -1561,6 +1561,7 @@ struct ndc_tip_auth {
     int denied;
     int index_drops;
     int sync_off;
+    int index_creates;
 };
 
 static int ndc_tip_authorizer(void *arg, int action, const char *table,
@@ -1572,6 +1573,8 @@ static int ndc_tip_authorizer(void *arg, int action, const char *table,
     (void)trigger;
     if (action == SQLITE_DROP_INDEX)
         auth->index_drops++;
+    if (action == SQLITE_CREATE_INDEX)
+        auth->index_creates++;
     if (action == SQLITE_PRAGMA && table && column &&
         strcasecmp(table, "synchronous") == 0 && strcasecmp(column, "OFF") == 0)
         auth->sync_off++;
@@ -1864,6 +1867,61 @@ static int ndc_check_foreign_txn_yields(struct ndc_fix_ctx *fx)
               res == NDC_FIX_N &&
               node_db_sync_get_tip_height(&ndb) == NDC_FIX_N &&
               node_db_catchup_lock_guard_test_open_yields() == 0);
+    node_db_catchup_lock_guard_test_reset();
+    if (up) node_db_close(&ndb);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* Another writer's BEGIN lands between the pass's turbo entry and its own
+ * BEGIN IMMEDIATE: the pass then yields with turbo mode entered. */
+static void ndc_race_foreign_begin(struct node_db *ndb)
+{
+    sqlite3_exec(ndb->db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
+}
+
+/* ── A yield after turbo entry must not restore inside the foreign txn ──
+ * The restore (node_db_normal_mode) would run PRAGMA synchronous (refused
+ * inside a transaction, so synchronous stays OFF) and CREATE INDEX inside the
+ * other writer's transaction. The restore is owed instead, and runs at the
+ * start of the next pass that finds the connection idle. */
+static int ndc_check_yield_after_turbo_defers_restore(struct ndc_fix_ctx *fx)
+{
+    int failures = 0;
+    struct node_db ndb;
+    char dir[256], path[512], log[16384];
+    test_make_tmpdir(dir, sizeof(dir), "node_db_catchup", "owed");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    bool up = fx->built && node_db_open(&ndb, path);
+    node_db_catchup_lock_guard_test_reset();
+    node_db_catchup_lock_guard_test_set_bulk_threshold(2);
+    node_db_catchup_test_set_after_turbo_hook(ndc_race_foreign_begin);
+    struct ndc_tip_auth auth = {0};
+    int res = up ? ndc_tip_auth_run(&ndb, fx, &auth, log, sizeof(log)) : -99;
+    bool held = up && !sqlite3_get_autocommit(ndb.db);
+    int sync_in_txn = up ? node_db_synchronous_level(&ndb) : -1;
+    printf("yield after turbo: result=%d held=%d index_drops=%d "
+           "index_creates=%d sync=%d\n", res, held, auth.index_drops,
+           auth.index_creates, sync_in_txn);
+    NDC_CHECK("the pass yields with the foreign transaction still open",
+              res == 0 && held && auth.index_drops > 0);
+    NDC_CHECK("no index is created inside the foreign transaction",
+              auth.index_creates == 0);
+
+    bool released = held &&
+        sqlite3_exec(ndb.db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK;
+    struct ndc_tip_auth next = {0};
+    res = released ? ndc_tip_auth_run(&ndb, fx, &next, log, sizeof(log)) : -99;
+    printf("owed restore: result=%d sync=%d indexes=%d creates=%d\n", res,
+           up ? node_db_synchronous_level(&ndb) : -1,
+           up ? ndc_secondary_index_count(&ndb) : -1, next.index_creates);
+    NDC_CHECK("the next idle pass walks and finishes",
+              released && res == NDC_FIX_N);
+    NDC_CHECK("synchronous is back to NORMAL once the restore ran",
+              up && node_db_synchronous_level(&ndb) == 1);
+    NDC_CHECK("every secondary index is back after the owed restore",
+              up && ndc_secondary_index_count(&ndb) == NDC_SECONDARY_INDEXES);
+    node_db_catchup_test_set_after_turbo_hook(NULL);
     node_db_catchup_lock_guard_test_reset();
     if (up) node_db_close(&ndb);
     test_cleanup_tmpdir(dir);
@@ -3026,6 +3084,7 @@ int test_node_db_catchup_service(void)
     failures += ndc_check_tip_read_failure(&fx);
     failures += ndc_check_serving_tip_keeps_indexes(&fx);
     failures += ndc_check_foreign_txn_yields(&fx);
+    failures += ndc_check_yield_after_turbo_defers_restore(&fx);
     failures += ndc_check_durable_reopen(&fx);
     failures += ndc_check_maintenance_defers_while_active(&fx);
     failures += ndc_check_abort_storm_parks_worker();

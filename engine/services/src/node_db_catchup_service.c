@@ -163,6 +163,24 @@ int node_db_catchup_test_active_depth(void)
     return atomic_load(&g_catchup_active_depth);
 }
 
+/* Runs once, right after a pass enters turbo mode and before its first
+ * BEGIN IMMEDIATE: the window in which another writer can open a transaction
+ * on the shared connection. */
+static void (*g_test_after_turbo_hook)(struct node_db *ndb);
+
+void node_db_catchup_test_set_after_turbo_hook(void (*hook)(struct node_db *))
+{
+    g_test_after_turbo_hook = hook;
+}
+
+static void catchup_test_after_turbo(struct node_db *ndb)
+{
+    void (*hook)(struct node_db *) = g_test_after_turbo_hook;
+    g_test_after_turbo_hook = NULL;
+    if (hook)
+        hook(ndb);
+}
+
 void node_db_catchup_test_reset_reopen(void)
 {
     atomic_store(&g_test_reopen_busy_armed, 0);
@@ -924,6 +942,9 @@ static enum catchup_open catchup_open_pass(struct catchup_pass *ps)
         catchup_active_finish();
         return CATCHUP_OPEN_FAILED;
     }
+#ifdef ZCL_TESTING
+    catchup_test_after_turbo(ps->ndb);
+#endif
 
     /* Verify connection works before starting. BEGIN IMMEDIATE (all three
      * transaction opens in this run): the writer reservation is taken at
