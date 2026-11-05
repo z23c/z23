@@ -1189,6 +1189,28 @@ static int test_forged_record_errors(void)
     return failures;
 }
 
+#define REC_NOT_BEFORE 180u
+#define REC_DELEG 196u
+
+static int test_forged_record_delegation_errors(void)
+{
+    int failures = 0;
+    TEST("zcode dht msgs forged: every embedded delegation failure is a delegation error") {
+        struct fx f; ASSERT(fx_init(&f)); ASSERT(build_all(&f));
+        const size_t rec = g_fl[4] - SIG - RW;
+        /* the record starts before the delegation window opens */
+        const uint8_t early[8] = {0x84, 0x03}; /* 900, little endian */
+        ASSERT_EQ(forge(&f, g_fw[4], g_fl[4], rec + REC_NOT_BEFORE, early, 8),
+                  E_(DELEGATION));
+        /* the embedded delegation no longer decodes */
+        uint8_t bad = (uint8_t)(g_fw[4][rec + REC_DELEG] ^ 0xFF);
+        ASSERT_EQ(forge(&f, g_fw[4], g_fl[4], rec + REC_DELEG, &bad, 1),
+                  E_(DELEGATION));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_forged_store_result(void)
 {
     int failures = 0;
@@ -1237,6 +1259,7 @@ int zcode_dht_msgs_forged_tests(void)
     failures += test_forged_find_record_selector();
     failures += test_forged_records_pages();
     failures += test_forged_record_errors();
+    failures += test_forged_record_delegation_errors();
     failures += test_forged_store_result();
     return failures;
 }
