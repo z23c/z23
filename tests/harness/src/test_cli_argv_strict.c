@@ -322,6 +322,17 @@ static int cas_daemon_read_chunk(int fd, char *out, size_t cap, size_t *pos,
     if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) *read_error = true;
     return -1;
 }
+
+static void cas_daemon_note(const char *stop, bool eof, bool observed, int killed,
+                            int status, bool read_error, bool poll_error, bool truncated)
+{
+    bool exit_known = observed && WIFEXITED(status);
+    int exit_code = exit_known ? WEXITSTATUS(status) : -1;
+    int sig = observed && WIFSIGNALED(status) ? WTERMSIG(status) : 0;
+    test_note("cli daemon stop=%s eof=%d observed=%d killed=%d exit=%d exit_known=%d signal=%d read_error=%d poll_error=%d truncated=%d",
+              stop, eof, observed, killed == 0, exit_code, exit_known, sig,
+              read_error, poll_error, truncated);
+}
 #endif
 
 /* Fork/exec a DAEMON-mode invocation (never exits on its own), accumulate its
@@ -397,12 +408,8 @@ static bool cas_run_daemon_wait_for(char *const argv[], const char *home,
     int status = 0;
     bool observed = waitpid(pid, &status, 0) == pid;
     close(pipefd[0]);
-    bool exit_known = observed && WIFEXITED(status);
-    int exit_code = exit_known ? WEXITSTATUS(status) : -1;
-    test_note("cli daemon stop=%s eof=%d observed=%d killed=%d exit=%d exit_known=%d signal=%d read_error=%d poll_error=%d truncated=%d",
-              stop, eof, observed, killed == 0,
-              exit_code, exit_known, observed && WIFSIGNALED(status) ? WTERMSIG(status) : 0, read_error, poll_error,
-              capture.observed > pos);
+    cas_daemon_note(stop, eof, observed, killed, status, read_error, poll_error,
+                    capture.observed > pos);
     test_child_merged_note(&capture, cas_capture_safe_note);
     if (found) return true;
     return test_out_has_all_needles(out, needles);
