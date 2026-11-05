@@ -353,11 +353,24 @@ enum block_files_pair_outcome {
     BLOCK_FILES_PAIR_FAILED,
 };
 
+/* The node's file numbers run 0..9999 (disk_block_io.c) and it spells file
+ * 255 "<prefix>_sync.dat" instead of "<prefix>00255.dat". */
+enum { BLOCK_FILES_LAST_INDEX = 9999, BLOCK_FILES_SYNC_INDEX = 255 };
+
+static void block_files_series_name(char *name, size_t size,
+                                    const char *prefix, int index)
+{
+    if (index == BLOCK_FILES_SYNC_INDEX)
+        snprintf(name, size, "%s_sync.dat", prefix);
+    else
+        snprintf(name, size, "%s%05d.dat", prefix, index);
+}
+
 static enum block_files_pair_outcome block_files_copy_pair(
     const char *src_dir, const char *dst_dir, int index)
 {
     char src[1024], dst[1024], name[32];
-    snprintf(name, sizeof(name), "blk%05d.dat", index);
+    block_files_series_name(name, sizeof(name), "blk", index);
     if (!zcl_path_join(src, sizeof(src), src_dir, name))
         return BLOCK_FILES_PAIR_FAILED;
     enum block_files_probe blk = block_files_probe_coordinate(src);
@@ -369,7 +382,7 @@ static enum block_files_pair_outcome block_files_copy_pair(
         return BLOCK_FILES_PAIR_FAILED;
     if (!file_copy(src, dst))
         return BLOCK_FILES_PAIR_FAILED;
-    snprintf(name, sizeof(name), "rev%05d.dat", index);
+    block_files_series_name(name, sizeof(name), "rev", index);
     if (!zcl_path_join(src, sizeof(src), src_dir, name))
         return BLOCK_FILES_PAIR_FAILED;
     enum block_files_probe rev = block_files_probe_coordinate(src);
@@ -392,7 +405,7 @@ int block_files_copy(const char *src_dir, const char *dst_dir)
         return -1;
 #endif
     int count = 0;
-    for (int i = 0; i < 9999; i++) {
+    for (int i = 0; i <= BLOCK_FILES_LAST_INDEX; i++) {
         enum block_files_pair_outcome outcome =
             block_files_copy_pair(src_dir, dst_dir, i);
         if (outcome == BLOCK_FILES_PAIR_FAILED)

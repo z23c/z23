@@ -270,14 +270,20 @@ bool boot_prepare_mmb_leaf_store(struct boot_svc_ctx *svc,
         LOG_FAIL("boot", "MMB leaf store prepare missing svc=%p datadir=%p",
                  (void *)svc, (const void *)datadir);
 
+    /* The store keeps its own copy of the path and refuses one that does not
+     * fit; check against that limit so a refusal is named here, before the
+     * global store is touched. */
     char leaf_path[512];
     int n = snprintf(leaf_path, sizeof(leaf_path), "%s/mmb_leaves.bin",
                      datadir);
-    if (n <= 0 || (size_t)n >= sizeof(leaf_path))
-        LOG_FAIL("boot", "MMB leaf store path too long for datadir '%s'",
-                 datadir);
+    if (n <= 0 || (size_t)n >= sizeof(leaf_path) ||
+        (size_t)n >= sizeof(g_mmb_leaf_store.path))
+        LOG_FAIL("boot", "MMB leaf store path too long (%d bytes, store "
+                 "holds %zu) for datadir '%s'", n,
+                 sizeof(g_mmb_leaf_store.path) - 1, datadir);
 
-    mmb_leaf_store_open(&g_mmb_leaf_store, leaf_path);
+    if (!mmb_leaf_store_open(&g_mmb_leaf_store, leaf_path))
+        LOG_FAIL("boot", "MMB leaf store open failed at '%s'", leaf_path);
     uint64_t mmb_leaves = 0;
     rpc_blockchain_mmb_snapshot(NULL, &mmb_leaves, NULL);
     (void)boot_reconcile_mmb_leaf_store(&g_mmb_leaf_store,
