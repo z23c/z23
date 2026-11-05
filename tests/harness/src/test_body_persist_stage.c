@@ -44,6 +44,7 @@ struct synth_chain_bp {
     int                 fail_read_height;
     int                 header_mismatch_height;
     int                 merkle_mismatch_height;
+    int                 repeat_tail_height;
 };
 
 static int mkdir_p_bp(const char *p)
@@ -76,7 +77,8 @@ static bool synth_chain_bp_build(struct synth_chain_bp *sc, int n)
     sc->fail_read_height = -1;
     sc->header_mismatch_height = -1;
     sc->merkle_mismatch_height = -1;
-    sc->blocks = zcl_calloc((size_t)n, sizeof(struct block_index),
+    sc->repeat_tail_height = -1;
+    sc->blocks =zcl_calloc((size_t)n, sizeof(struct block_index),
                             "bp_blocks");
     sc->hashes = zcl_calloc((size_t)n, sizeof(struct uint256),
                             "bp_hashes");
@@ -127,6 +129,17 @@ static bool fake_reader(struct block *out, const struct block_index *bi,
         out->header.nTime++;
     if (bi->nHeight == sc->merkle_mismatch_height)
         out->vtx[0].hash.data[31] ^= 0x5a;
+    if (bi->nHeight == sc->repeat_tail_height && out->num_vtx > 0) {
+        /* Serve the stored body with its final transaction repeated. */
+        size_t n = out->num_vtx;
+        struct transaction *nv = zcl_realloc(
+            out->vtx, (n + 1) * sizeof(*nv), "bp_tx_repeat");
+        if (!nv) return false;
+        out->vtx = nv;
+        transaction_init(&out->vtx[n]);
+        out->vtx[n].hash = out->vtx[n - 1].hash;
+        out->num_vtx = n + 1;
+    }
     return true;
 }
 
@@ -723,9 +736,110 @@ static int bp_mut_dump_null(void)
     return failures;
 }
 
+/* Replace the stored body at height h with ntx transactions (all distinct,
+ * or all identical when same_hash) and bind the header and index to the root
+ * of that transaction list. */
+static bool bp_reshape(struct synth_chain_bp *sc, int h, size_t ntx,
+                       bool same_hash)
+{
+    struct block *b = &sc->bodies[h];
+    struct transaction *nv = zcl_calloc(ntx, sizeof(*nv), "bp_tx_shape");
+    struct uint256 *ids = zcl_calloc(ntx, sizeof(*ids), "bp_ids_shape");
+    if (!nv || !ids) { free(nv); free(ids); return false; }
+    for (size_t i = 0; i < ntx; i++) {
+        transaction_init(&nv[i]);
+        nv[i].hash.data[0] = (uint8_t)h;
+        nv[i].hash.data[1] = 0x5c;
+        nv[i].hash.data[2] = same_hash ? 1 : (uint8_t)(i + 1);
+        ids[i] = nv[i].hash;
+    }
+    free(b->vtx);
+    b->vtx = nv;
+    b->num_vtx = ntx;
+    b->header.hashMerkleRoot = compute_merkle_root(ids, ntx);
+    free(ids);
+    block_header_get_hash(&b->header, &sc->hashes[h]);
+    tbi_ext(&sc->blocks[h])->hashMerkleRoot = b->header.hashMerkleRoot;
+    return true;
+}
+
+static bool bp_row_absent(int h)
+{
+    int ok = -1; char src[32];
+    return !log_row_at(progress_store_db(), h, &ok, src, sizeof(src));
+}
+
+static bool bp_row_verified(int h)
+{
+    int ok = -1; char src[32];
+    return log_row_at(progress_store_db(), h, &ok, src, sizeof(src)) &&
+           ok == 1 && strcmp(src, "verified") == 0;
+}
+
+/* Persist-as-ok row for a body whose transaction list is honest. */
+static int bp_shape_persists(const char *name, size_t ntx)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_bp sc;
+    bool ready = bp_setup("shape_ok", 2, -1, -1, dir, sizeof(dir), &ms,
+                          &sc) == 0 && bp_reshape(&sc, 1, ntx, false);
+    BP_CHECK(name, ready);
+    if (!ready) { bp_teardown(dir, &ms, &sc); return failures; }
+    BP_CHECK(name, body_persist_stage_drain(100) == 2);
+    BP_CHECK(name, bp_row_verified(1));
+    BP_CHECK(name, (sc.blocks[1].nStatus & BLOCK_HAVE_DATA) != 0);
+    BP_CHECK(name, body_persist_stage_merkle_mismatch_total() == 0);
+    bp_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+/* A stored body whose final transaction is repeated under the header's
+ * correct root never belongs to its header: same repair as a root mismatch. */
+static int bp_repeated_tail_case(size_t ntx, bool same_hash, bool repeat)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_bp sc;
+    bool ready = bp_setup("repeat", 3, -1, -1, dir, sizeof(dir), &ms,
+                          &sc) == 0 && bp_reshape(&sc, 1, ntx, same_hash);
+    BP_CHECK("repeat: setup", ready);
+    if (!ready) { bp_teardown(dir, &ms, &sc); return failures; }
+    if (repeat) sc.repeat_tail_height = 1;
+    BP_CHECK("repeat: drains only the clean prefix",
+             body_persist_stage_drain(100) == 1);
+    BP_CHECK("repeat: counted as a merkle mismatch",
+             body_persist_stage_merkle_mismatch_total() == 1);
+    BP_CHECK("repeat: cursor holds",
+             body_persist_stage_cursor() == 1);
+    BP_CHECK("repeat: HAVE_DATA cleared",
+             (sc.blocks[1].nStatus & BLOCK_HAVE_DATA) == 0);
+    BP_CHECK("repeat: block not marked failed",
+             (sc.blocks[1].nStatus & BLOCK_FAILED_MASK) == 0);
+    BP_CHECK("repeat: no permanent row", bp_row_absent(1));
+    if (repeat) {
+        sc.repeat_tail_height = -1;
+        sc.blocks[1].nStatus |= BLOCK_HAVE_DATA;
+        BP_CHECK("repeat: real body persists after re-fetch",
+                 body_persist_stage_drain(100) == 2 && bp_row_verified(1));
+    }
+    bp_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+static int bp_merkle_shape_tests(void)
+{
+    int failures = 0;
+    failures += bp_shape_persists("odd_count: 3 txs persist", 3);
+    failures += bp_shape_persists("odd_count: 5 txs persist", 5);
+    failures += bp_shape_persists("coinbase_only persists", 1);
+    failures += bp_repeated_tail_case(3, false, true);
+    failures += bp_repeated_tail_case(2, true, false);
+    return failures;
+}
+
 static int bp_mutation_gap_tests(void)
 {
     int failures = 0;
+    failures += bp_merkle_shape_tests();
     failures += bp_mut_counters();
     failures += bp_mut_drain_gate();
     failures += bp_mut_idle_stamp();
