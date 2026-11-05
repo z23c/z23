@@ -210,7 +210,7 @@ void wsu_words_intro(const struct wsu_view *v, char *out, size_t cap)
 /* ---- the words of the screens that are not a view ---- */
 
 static const struct { enum wsu_failure failure; const char *text; } failure_texts[] = {
-    {WSU_DECLINED, "The screen lock was not confirmed, so nothing was changed. Try again."},
+    {WSU_DECLINED, "The screen lock was not confirmed. Wallet setup was not completed."},
     {WSU_NO_SCREEN_LOCK, "This phone has no screen lock, and the wallet is protected by it. Set one in the phone's settings, then try again."},
     {WSU_KEY, "This phone could not make a protected key, so no wallet was made. Try again."},
     {WSU_NO_HARDWARE_KEY, "This phone cannot protect a wallet key in hardware, so the app will not make a wallet here."},
@@ -442,6 +442,14 @@ static bool begin_job(struct wsu *w, enum wsu_step from)
     return start;
 }
 
+/* Return a canceled key prompt only if this create still owns the working step. */
+static void create_declined(struct wsu *w)
+{
+    pthread_mutex_lock(&w->lock);
+    if (w->step == WSU_WORKING) { w->step = WSU_CHOICE; w->failure = WSU_NO_FAILURE; w->refusal = WSU_NO_FAILURE; }
+    pthread_mutex_unlock(&w->lock);
+}
+
 /* ---- create: the words first, the wallet written behind them ---- */
 
 /* A new phrase from the node, which needs no datadir and no stopped node. Nothing is written anywhere. */
@@ -493,6 +501,7 @@ void wsu_create_job(struct wsu *w)
     if (!begin_job(w, WSU_CHOICE)) return;
     phase(w, WSU_PHASE_KEY);
     enum wsu_failure failure = new_passphrase(w, secret, hex);
+    if (failure == WSU_DECLINED) { create_declined(w); goto out; }
     if (failure != WSU_NO_FAILURE) { set_step(w, WSU_FAILED, failure); goto out; }
     failure = phrase_failure(w, &phrase);
     if (failure == WSU_NO_FAILURE && !words_shown(w, &phrase, hex)) failure = WSU_NOT_RUN;

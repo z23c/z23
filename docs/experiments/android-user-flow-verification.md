@@ -148,3 +148,10 @@ height 286 and reconnected. The emulator ran low on space during address-index
 work. Remaining-time estimates swung during sync, motivating their removal.
 This does not establish full sync, fleet enrollment or wallet onboarding.
 Report SHA-256: 6e023d837306855602801ad47e8b4fa5504079f7b43b790b68384776234bd670.
+
+A canceled Create authentication now returns to the setup choices. The focused
+setup fixture covers the canceled, superseded and closed paths and confirms no
+wrapped wallet blob, phrase request or node operation in the canceled case.
+The hardware key may already have been prepared before authentication; a
+canceled prompt is not evidence that no Keystore key exists. Physical replay
+of the updated flow remains pending.

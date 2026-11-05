@@ -421,7 +421,7 @@ static void node_hash_tests(void)
 
 struct fake {
     struct script script;
-    bool running, stops_when_asked;
+    bool running, stops_when_asked, supersede_on_wrap, close_on_wrap;
     enum zapp_devkey_status wrap_status;
     int pauses, wraps, discards, key_deletes, starts, stops, restore_while_running, create_while_running, kind_at_create, kind_at_restore;
     bool protect_ok;
@@ -481,6 +481,8 @@ static enum zapp_devkey_status f_wrap(void *ctx, uint8_t secret[ZAPP_DEVKEY_SECR
 {
     struct fake *f = ctx;
     ++f->wraps;
+    if (f->close_on_wrap) wsu_close(model_of);
+    if (f->supersede_on_wrap) { pthread_mutex_lock(&model_of->lock); model_of->step = WSU_BLOCKED; pthread_mutex_unlock(&model_of->lock); }
     if (f->watch) { struct wsu_view v; wsu_view_read(model_of, &v); f->phase_key = v.phase; }
     if (f->wrap_status != ZAPP_DEVKEY_OK) return f->wrap_status;
     memset(secret, 0xab, ZAPP_DEVKEY_SECRET);
@@ -692,16 +694,25 @@ static void create_failure_decline_tests(void)
 {
     struct fake f;
     struct wsu w;
-    /* The owner declines: no node call, no key to discard, back to a failed state. */
+    /* A canceled prompt returns to the choice without making a wallet. */
     fresh(&f, &w, true);
     f.wrap_status = ZAPP_DEVKEY_DECLINED;
     create_all(&w);
-    assert(w.step == WSU_FAILED && w.failure == WSU_DECLINED && f.script.calls == 0 && f.stops == 0);
-    wsu_back(&w);
-    assert(w.step == WSU_CHOICE);
+    assert(w.step == WSU_CHOICE && w.failure == WSU_NO_FAILURE && f.script.calls == 0 && f.stops == 0);
+    assert(f.script.phrase_calls == 0 && !exists_in(dir, "wallet_key.blob"));
     f.wrap_status = ZAPP_DEVKEY_NO_SCREEN_LOCK;
     create_all(&w);
     assert(w.failure == WSU_NO_SCREEN_LOCK);
+    wsu_destroy(&w);
+    fresh(&f, &w, true);
+    f.wrap_status = ZAPP_DEVKEY_DECLINED; f.supersede_on_wrap = true;
+    wsu_create_job(&w);
+    assert(w.step == WSU_BLOCKED && f.script.calls == 0 && !exists_in(dir, "wallet_key.blob"));
+    wsu_destroy(&w);
+    fresh(&f, &w, true);
+    f.wrap_status = ZAPP_DEVKEY_DECLINED; f.close_on_wrap = true;
+    wsu_create_job(&w);
+    assert(w.step == WSU_CHOICE && !w.protected && f.script.calls == 0 && !exists_in(dir, "wallet_key.blob"));
     wsu_destroy(&w);
 }
 /* A phone that keeps keys only in software, from Create: no wallet and no node call, one plain reason and no Try again. */
@@ -954,7 +965,7 @@ static void create_declined_stops_node_test(void)
     fresh(&f, &w, false);
     f.wrap_status = ZAPP_DEVKEY_DECLINED;
     create_all(&w);
-    assert(w.step == WSU_FAILED && w.failure == WSU_DECLINED && f.starts == 0 && f.stops == 0 && !f.running && f.script.phrase_calls == 0);
+    assert(w.step == WSU_CHOICE && w.failure == WSU_NO_FAILURE && f.starts == 0 && f.stops == 0 && !f.running && f.script.phrase_calls == 0);
     wsu_destroy(&w);
 }
 /* A wallet that recorded no start height shows its words, and setup stays unfinished. */
@@ -2175,7 +2186,7 @@ static void failed_jobs_other_tests(void)
     fresh(&f, &w, false);
     f.wrap_status = ZAPP_DEVKEY_DECLINED;
     create_all(&w);
-    assert(w.failure == WSU_DECLINED && f.starts == 0 && f.stops == 0 && !f.running);
+    assert(w.step == WSU_CHOICE && w.failure == WSU_NO_FAILURE && f.starts == 0 && f.stops == 0 && !f.running);
     wsu_destroy(&w);
 }
 
@@ -2247,7 +2258,7 @@ static void failure_text_tests(void)
         for (int b = a + 1; b <= WSU_WALLET_THERE; ++b) assert(strcmp(text, wsu_failure_text((enum wsu_failure)b)));
     }
     assert(!strcmp(wsu_failure_text(WSU_NODE_BUSY), "Your node is still stopping. Try again in a minute."));
-    assert(strstr(wsu_failure_text(WSU_DECLINED), "nothing was changed") && strstr(wsu_failure_text(WSU_PRESENT), "Nothing was changed"));
+    assert(strstr(wsu_failure_text(WSU_DECLINED), "Wallet setup was not completed") && strstr(wsu_failure_text(WSU_PRESENT), "Nothing was changed"));
     assert(strstr(wsu_failure_text(WSU_UNKNOWN), "a wallet may have been started"));
     assert(strstr(wsu_failure_text(WSU_NO_BIRTHDAY), "nothing is deleted") && strstr(wsu_failure_text(WSU_ASIDE_STUCK), "Do not create a new wallet"));
     assert(!wsu_failure_text(WSU_NO_FAILURE)[0]);
