@@ -11018,6 +11018,17 @@ static void fbc_revoke(uint8_t id)
     boot_fleet_roster_invalidate();
 }
 
+/* What `fleet roster revoke` writes: the line's box key, not its signing key. */
+static void fbc_revoke_box(uint8_t id)
+{
+    uint8_t seed[32];
+    g_fbr.head.state = ZCL_FLEET_HEAD_OK;
+    g_fbr.head.count = 1;
+    fbr_root_pub((uint8_t)(0x80 + id), seed, g_fbr.head.revoked[0]);
+    memset(seed, 0, sizeof seed);
+    boot_fleet_roster_invalidate();
+}
+
 static void fbc_unrevoke(void)
 {
     memset(&g_fbr.head, 0, sizeof g_fbr.head);
@@ -11183,6 +11194,8 @@ static int test_fleet_board_roster_carriage(void)
         fbc_boxes(FBR_PEER, FBR_MEMBER);
         fbc_revoke(FBR_PEER);
         ASSERT(fbc_refused(&w, &dest));
+        fbc_revoke_box(FBR_PEER);
+        ASSERT(fbc_refused(&w, &dest));
         fbc_unrevoke();
 
         fbc_forge(FLEET_BOARD_ROSTER_SIDE_ASK, FBR_PEER, FBR_STRANGER);
@@ -11265,7 +11278,7 @@ static int test_fleet_board_roster_carriage(void)
         ASSERT_EQ(fbc_pull(&w, &w.b, &frames), (size_t)1);
         ASSERT(db_fleet_board_have(&w.b, note.id));
 
-        fbc_revoke(FBC_REVOKED);
+        fbc_revoke_box(FBC_REVOKED);
         ASSERT(fbw_post(&w.a, FBC_REVOKED, FLEET_BOARD_SCOPE_FLEET,
                         "after revocation", 2400, FBC_TTL, 2400, &late));
         boot_fleet_board_fleet_counts(&cb);
