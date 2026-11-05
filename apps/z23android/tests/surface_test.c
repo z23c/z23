@@ -157,7 +157,7 @@ static void secret_screens_are_protected(void)
     assert(go && end);
     char *body = strndup(go, (size_t)(end - go));
     assert(body);
-    require(body, "next == SCREEN_ASSISTANT && !protect_window(env, true)", "the Assistant is not shown unprotected");
+    require(body, "(next == SCREEN_ASSISTANT || next == SCREEN_FLEET_REVIEW) && !protect_window(env, true)", "the Assistant and fleet review are not shown unprotected");
     require(body, "set_protection(env, next);", "every screen change sets the protection");
     free(body);
     const char *set = strstr(src, "static void set_protection(JNIEnv *env, enum screen next)\n{");
@@ -165,9 +165,9 @@ static void secret_screens_are_protected(void)
     assert(set && set_end);
     body = strndup(set, (size_t)(set_end - set));
     assert(body);
-    require(body, "wallet_screen(next) || next == SCREEN_ASSISTANT) shell.gate.protect = true", "obscured touches are dropped on the Assistant");
+    require(body, "wallet_screen(next) || next == SCREEN_ASSISTANT || next == SCREEN_FLEET_REVIEW) shell.gate.protect = true", "obscured touches are dropped on the Assistant and fleet review");
     require(body, "protect_window(env, false)", "leaving the Assistant lifts the protection");
-    require(src, "shell.current == SCREEN_ASSISTANT && !protect_window(env, true)", "the Assistant is protected again on resume");
+    require(src, "(shell.current == SCREEN_ASSISTANT || shell.current == SCREEN_FLEET_REVIEW) && !protect_window(env, true)", "the Assistant and fleet review are protected again on resume");
     free(body);
     free(src);
 }

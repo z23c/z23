@@ -406,6 +406,21 @@ static int finish_matched_container(zjsonp *p, const char *text,
     }
 }
 
+static int scalar_equals(const char *text, const zjsonp_event *ev, const char *eq)
+{
+    if (!eq) return 2;
+    if (ev->kind == ZJRP_STR) {
+        size_t n = zjsonp_str_decode(text, ev, g_decode, sizeof g_decode);
+        if (n == SIZE_MAX || n >= sizeof g_decode) return 2;
+        g_decode[n] = 0;
+        return decoded_text_equals(g_decode, n, eq) ? 0 : 1;
+    }
+    if (ev->len >= DECODE_CAP) return 2;
+    memcpy(g_decode, text + ev->off, ev->len);
+    g_decode[ev->len] = 0;
+    return strcmp(g_decode, eq) == 0 ? 0 : 1;
+}
+
 static int handle_matched_scalar(const char *text, const zjsonp_event *ev,
                                  cmd_kind cmd, const char *eq)
 {
@@ -421,20 +436,7 @@ static int handle_matched_scalar(const char *text, const zjsonp_event *ev,
         return emit_scalar(text, ev, false);
     if (cmd == CMD_RAW)
         return emit_scalar(text, ev, true);
-    if (cmd == CMD_EQ) {
-        if (ev->kind == ZJRP_STR) {
-            size_t n = zjsonp_str_decode(text, ev, g_decode, sizeof g_decode);
-            if (n == SIZE_MAX || n >= sizeof g_decode)
-                return 2;
-            g_decode[n] = '\0';
-            return decoded_text_equals(g_decode, n, eq) ? 0 : 1;
-        }
-        if (ev->len >= DECODE_CAP)
-            return 2;
-        memcpy(g_decode, text + ev->off, ev->len);
-        g_decode[ev->len] = '\0';
-        return strcmp(g_decode, eq) == 0 ? 0 : 1;
-    }
+    if (cmd == CMD_EQ) return scalar_equals(text, ev, eq);
     return 2;
 }
 

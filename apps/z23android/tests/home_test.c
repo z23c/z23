@@ -83,16 +83,6 @@ static void plain_node_line_states(void)
     view.node_reference = 1800;
     view.chain_state = ZAPP_CHAIN_BEHIND;
     assert(node_line_is(&view, "Catching up: 800 blocks to go"));
-    view.node_base_height = 900;
-    view.node_base_at = 40;
-    view.node_sample_height = 1000;
-    view.node_sample_at = 100;
-    assert(node_line_is(&view, "Catching up: 800 blocks to go, about 8 min left"));
-    view.node_sample_at = 60;
-    assert(node_line_is(&view, "Catching up: 800 blocks to go"));
-    view.node_sample_at = 100;
-    view.node_base_height = 1000;
-    assert(node_line_is(&view, "Catching up: 800 blocks to go"));
 }
 static void plain_node_line_verdicts(void)
 {
@@ -121,18 +111,18 @@ static void plain_node_line_verdicts(void)
     view.node_reference = -1;
     view.chain_state = ZAPP_CHAIN_NONE;
     snprintf(view.node_line, sizeof(view.node_line), "Node running");
-    assert(node_line_is(&view, "Connected, checking the chain"));
+    assert(node_line_is(&view, "Checking the chain"));
     view.node_height = 1000;
-    assert(node_line_is(&view, "Looking for other computers to connect to"));
-    /* Once the boot status says the node serves, the line says so at its height while no other computer has given one. */
+    assert(node_line_is(&view, "Block 1,000, waiting for other computers"));
+    /* A local serving flag does not imply a peer reference. */
     view.node_serving = true;
-    assert(node_line_is(&view, "Serving at block 1,000, waiting for other computers"));
+    assert(node_line_is(&view, "Block 1,000, waiting for other computers"));
     view.node_reference = 1000;
     view.chain_state = ZAPP_CHAIN_CURRENT;
     assert(node_line_is(&view, "Up to date"));
     view.node_reference = -1;
     view.node_height = -1;
-    assert(node_line_is(&view, "Connected, checking the chain"));
+    assert(node_line_is(&view, "Checking the chain"));
     view.node_height = 1000;
     view.node_stopping = true;
     assert(node_line_is(&view, "Stopping…\\nYou can use Z23"));
@@ -529,14 +519,10 @@ static void paced_home_lines(void)
     view.node_running = true;
     view.node_height = 1000;
     view.node_reference = 2000;
-    view.node_base_height = 900;
-    view.node_base_at = 40;
-    view.node_sample_height = 1000;
-    view.node_sample_at = 100;
     view.chain_state = ZAPP_CHAIN_BEHIND;
-    /* The rate is known here, so a normal pace would give the minutes: the pace cases below show none. */
+    /* A normal pace shows blocks remaining. */
     view.pace = ZAPP_PACE_NORMAL;
-    assert(node_line_is(&view, "Catching up: 1,000 blocks to go, about 10 min left"));
+    assert(node_line_is(&view, "Catching up: 1,000 blocks to go"));
     /* Paused while behind: the pause line, never the blocks left and never up to date. */
     view.pace = ZAPP_PACE_PAUSE;
     assert(node_line_is(&view, ZAPP_PAUSED_LINE));

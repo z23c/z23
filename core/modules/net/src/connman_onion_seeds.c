@@ -242,6 +242,28 @@ static bool onion_seed_hint_to_addrman(struct connman *cm, const char *source,
     return addrman_add(&cm->manager.addrman, &addr, &src, 0);
 }
 
+/* Configured seed endpoints are untrusted candidates, never successful contacts. */
+static int onion_seed_offer_configured(struct connman *cm, const char *self)
+{
+    if (!cm || !cm->params || !netbase_onlynet_onion()) return 0;
+    int added = 0;
+    for (size_t i = 0; i < cm->params->nOnionSeeds && i < MAX_FIXED_SEEDS; ++i) {
+        const char *host = cm->params->onionSeeds[i];
+        if (!onion_hostname_valid(host) || (self && self[0] && strcmp(host, self) == 0)) continue;
+        struct onion_relay_hint hint = {0};
+        snprintf(hint.hostname, sizeof(hint.hostname), "%s", host);
+        hint.port = cm->params->onionSeedPorts[i];
+        if (onion_seed_hint_to_addrman(cm, host, &hint)) ++added;
+    }
+    return added;
+}
+#ifdef ZCL_TESTING
+int connman_offer_configured_onions_for_test(struct connman *cm, const char *self)
+{
+    return onion_seed_offer_configured(cm, self);
+}
+#endif
+
 /* Fallback when a directory response omits/malforms clearnet_port —
  * the advertising node's OWN configured P2P port, not a literal that
  * silently assumes mainnet. */
@@ -629,6 +651,7 @@ void connman_run_onion_seed_pass(struct connman *cm)
                  n, n == 1 ? "" : "s", claimed);
 
     /* Tier 3 — hardcoded chainparams onion seeds. */
+    (void)onion_seed_offer_configured(cm, tor_integration_get_onion_address());
     for (size_t i = 0; i < cm->params->nOnionSeeds && !g_stop; i++)
         (void)onion_pass_claim(&seen, cm->params->onionSeeds[i]);
 

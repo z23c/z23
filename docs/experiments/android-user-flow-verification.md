@@ -128,3 +128,23 @@ The `6ee42ac6` simulator replay showed the first question on entry to the
 confirmation step; an in-step selection preserved scroll position, and
 background/reopen returned to the start. Report SHA-256:
 `3460f0fd103dea8dd6e9ae16e7455619765c45bf67ac2ef577670e423433413f`.
+
+On a fresh phone, the node remained at block zero with no peer reference for
+6.3 minutes. Two checks of the existing compiled directory seed
+returned unreachable. Two other project-controlled onion directories answered,
+and their P2P endpoints were observed completing connections. These observations
+alone do not establish the cause of the phone delay.
+
+A focused test_app_context run passed after the configured-seed change. It
+covers onion-only admission, valid and refused ports, duplicate offers, dial
+backoff, and the known-local-onion guard. The earlier fixture expected a port
+outside the existing allowlist and failed; the corrected fixture preserves that
+policy. Actual picker continuation and an updated phone run remain unverified.
+
+A keyless simulator using the candidate node reached a real onion handshake.
+The tool transcript observed heights 0, 256 and 286; retained raw samples
+show height 286. Normal Stop completed within 13 seconds, and restart retained
+height 286 and reconnected. The emulator ran low on space during address-index
+work. Remaining-time estimates swung during sync, motivating their removal.
+This does not establish full sync, fleet enrollment or wallet onboarding.
+Report SHA-256: 6e023d837306855602801ad47e8b4fa5504079f7b43b790b68384776234bd670.

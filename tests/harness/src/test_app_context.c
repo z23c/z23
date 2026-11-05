@@ -13,6 +13,7 @@
 #include "net/file_service.h"
 #include "config/boot_bundle_fetch.h"
 #include "net/onion_service.h"
+#include "net/onion_v3_address.h"
 #include "rpc/legacy_rpc_client.h"
 #include "services/mesh_observation.h"
 
@@ -1225,6 +1226,118 @@ static int test_seed_directory_apply_records(void)
     return failures;
 }
 
+/* A configured onion endpoint is a NEW candidate, never a proven peer. */
+static bool configured_onion_info(struct connman *cm, const char *host, uint16_t port,
+                                  struct addr_info *info)
+{
+    struct net_service service;
+    memset(&service, 0, sizeof(service));
+    if (!net_addr_from_onion(host, &service.addr)) return false;
+    service.port = port;
+    return addrman_find_info(&cm->manager.addrman, &service, info);
+}
+static int test_configured_onion_backoff(struct connman *cm, const char *first,
+                                        const char *second, struct addr_info *b)
+{
+    int failures = 0;
+    addrman_attempt(&cm->manager.addrman, &b->addr.svc, 100000, false);
+    struct addr_info before = {0}, after = {0};
+    bool found_before = configured_onion_info(cm, second, 8033, &before);
+    (void)connman_offer_configured_onions_for_test(cm, first);
+    bool found_after = configured_onion_info(cm, second, 8033, &after);
+    APPCTX_CHECK("configured onions: repeat preserves dial backoff",
+                 found_before && found_after && before.attempts > 0 &&
+                 before.attempts == after.attempts && before.last_try == after.last_try &&
+                 before.last_success == after.last_success &&
+                 connman_addrman_retry_cooldown_for_test(before.attempts) ==
+                 connman_addrman_retry_cooldown_for_test(after.attempts));
+    return failures;
+}
+
+static int test_configured_onion_known(const struct chain_params *params,
+                                       const char *first, const char *second,
+                                       const char *third, const char *fourth)
+{
+    int failures = 0;
+    struct connman cm;
+    struct addr_info b = {0}, c = {0};
+    bool ok = seed_dir_init(&cm, params);
+    APPCTX_CHECK("configured onions: known-self fixture initialized", ok);
+    if (!ok) { netbase_set_onlynet_onion(false); return failures + 1; }
+    (void)connman_offer_configured_onions_for_test(&cm, first);
+    APPCTX_CHECK("configured onions: two distinct endpoints admitted",
+                 onlynet_addrman_count(&cm) == 2 && configured_onion_info(&cm, second, 8033, &b) &&
+                 configured_onion_info(&cm, third, 18033, &c));
+    APPCTX_CHECK("configured onions: local, bad host, disallowed and zero ports excluded",
+                 !configured_onion_info(&cm, first, 8033, &b) &&
+                 !configured_onion_info(&cm, fourth, 8055, &b) &&
+                 !configured_onion_info(&cm, third, 0, &b));
+    APPCTX_CHECK("configured onions: endpoints remain unproven NEW",
+                 configured_onion_info(&cm, second, 8033, &b) && !b.in_tried && !b.last_success &&
+                 configured_onion_info(&cm, third, 18033, &c) && !c.in_tried && !c.last_success);
+    failures += test_configured_onion_backoff(&cm, first, second, &b);
+    APPCTX_CHECK("configured onions: repeat does not add duplicates", onlynet_addrman_count(&cm) == 2);
+    connman_free(&cm);
+    return failures;
+}
+
+static int test_configured_onion_seeds(void)
+{
+    int failures = 0;
+    static const char first[] = "kfs4ogq3dtwseahgzz2grizug2wiwey2jhxmmnjeuqh64rs7fkl666qd.onion";
+    static const char second[] = "motlbjlm5gwxnvjn52d2kz4xijsuli5qm2h263zbqqxhcvtnrejqqead.onion";
+    char third[ONION_V3_ADDRESS_LEN + 1], fourth[ONION_V3_ADDRESS_LEN + 1];
+    uint8_t pub[32];
+    memset(pub, 3, sizeof(pub));
+    APPCTX_CHECK("configured onions: third valid", onion_v3_address_from_pubkey(pub, third));
+    memset(pub, 4, sizeof(pub));
+    APPCTX_CHECK("configured onions: fourth valid", onion_v3_address_from_pubkey(pub, fourth));
+    chain_params_select(CHAIN_MAIN);
+    struct chain_params params = *chain_params_get();
+    memset(params.onionSeeds, 0, sizeof(params.onionSeeds));
+    memset(params.onionSeedPorts, 0, sizeof(params.onionSeedPorts));
+    struct connman cm;
+    snprintf(params.onionSeeds[0], sizeof(params.onionSeeds[0]), "%s", first);
+    snprintf(params.onionSeeds[1], sizeof(params.onionSeeds[1]), "%s", second);
+    snprintf(params.onionSeeds[2], sizeof(params.onionSeeds[2]), "%s", third);
+    snprintf(params.onionSeeds[3], sizeof(params.onionSeeds[3]), "%s", second);
+    snprintf(params.onionSeeds[4], sizeof(params.onionSeeds[4]), "%s", fourth);
+    snprintf(params.onionSeeds[5], sizeof(params.onionSeeds[5]), "%s", "invalid.onion");
+    snprintf(params.onionSeeds[6], sizeof(params.onionSeeds[6]), "%s", third);
+    params.onionSeedPorts[0] = 8033; params.onionSeedPorts[1] = 8033;
+    params.onionSeedPorts[2] = 18033; params.onionSeedPorts[3] = 8033;
+    params.onionSeedPorts[4] = 8055; params.onionSeedPorts[5] = 8033;
+    params.onionSeedPorts[6] = 0;
+    params.nOnionSeeds = 7;
+    bool ok = seed_dir_init(&cm, &params);
+    APPCTX_CHECK("configured onions: fixture initialized", ok);
+    if (!ok) return failures + 1;
+    netbase_set_onlynet_onion(false);
+    APPCTX_CHECK("configured onions: non-onion mode unchanged",
+                 connman_offer_configured_onions_for_test(&cm, first) == 0 && onlynet_addrman_count(&cm) == 0);
+    netbase_set_onlynet_onion(true);
+    params.nOnionSeeds = 0;
+    APPCTX_CHECK("configured onions: empty list adds nothing",
+                 connman_offer_configured_onions_for_test(&cm, NULL) == 0 && onlynet_addrman_count(&cm) == 0);
+    params.nOnionSeeds = 7;
+    APPCTX_CHECK("configured onions: unknown local identity admits endpoints",
+                 connman_offer_configured_onions_for_test(&cm, NULL) > 0 && onlynet_addrman_count(&cm) == 3);
+    struct net_addr local, other;
+    bool parsed = net_addr_from_onion(first, &local) &&
+                  net_addr_from_onion(third, &other);
+    APPCTX_CHECK("configured onions: candidate hosts parse", parsed);
+    APPCTX_CHECK("configured onions: unknown self does not block outbound",
+                 parsed && !connman_addr_is_current_onion_for_test(&local, NULL));
+    APPCTX_CHECK("configured onions: later known self is blocked",
+                 parsed && connman_addr_is_current_onion_for_test(&local, first));
+    APPCTX_CHECK("configured onions: another candidate remains eligible",
+                 parsed && !connman_addr_is_current_onion_for_test(&other, first));
+    connman_free(&cm);
+    failures += test_configured_onion_known(&params, first, second, third, fourth);
+    netbase_set_onlynet_onion(false);
+    return failures;
+}
+
 int test_app_context(void)
 {
     int failures = 0;
@@ -1246,6 +1359,7 @@ int test_app_context(void)
     failures += test_onlynet_clearnet_leaks_closed();
     failures += test_observation_small_buffer();
     failures += test_onlynet_legacy_rpc();
+    failures += test_configured_onion_seeds();
     failures += test_seed_directory_apply_guards();
     failures += test_seed_directory_apply_ip_rules();
     failures += test_seed_directory_apply_port_rules();

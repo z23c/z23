@@ -821,6 +821,22 @@ static bool connman_addr_is_advertised_external(
     return port == 0 || addr->svc.port == port;
 }
 
+static bool connman_addr_is_current_onion(const struct net_addr *addr,
+                                          const char *self)
+{
+    struct net_addr local;
+    return self && net_addr_is_tor(addr) && net_addr_from_onion(self, &local) &&
+           memcmp(addr->torv3, local.torv3, sizeof(addr->torv3)) == 0;
+}
+
+#ifdef ZCL_TESTING
+bool connman_addr_is_current_onion_for_test(const struct net_addr *addr,
+                                             const char *self)
+{
+    return addr && connman_addr_is_current_onion(addr, self);
+}
+#endif
+
 bool connman_addrman_candidate_usable(struct connman *cm,
                                       const struct addr_info *info,
                                       bool starving)
@@ -832,6 +848,9 @@ bool connman_addrman_candidate_usable(struct connman *cm,
         return false;
 
     if (connman_addr_is_advertised_external(&info->addr))
+        return false;
+    if (connman_addr_is_current_onion(&info->addr.svc.addr,
+                                      tor_integration_get_onion_address()))
         return false;
     if (net_addr_is_tor(&info->addr.svc.addr) &&
         !connman_onion_row_offered(starving))

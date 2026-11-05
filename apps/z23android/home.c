@@ -76,35 +76,18 @@ static const char *pace_name(enum zapp_pace pace)
 {
     return pace == ZAPP_PACE_GENTLE ? "gentle" : pace == ZAPP_PACE_PAUSE ? "pause" : "normal";
 }
-/* Minutes left at the rate of the two samples, rounded up. False unless they are ZAPP_RATE_SPAN_SECS apart,
- * the height moved between them and the node is behind. */
-static bool minutes_left(const struct zapp_view *view, int64_t *minutes)
-{
-    const int64_t span = view->node_sample_at - view->node_base_at;
-    const int64_t moved = view->node_sample_height - view->node_base_height;
-    const int64_t remaining = view->node_reference - view->node_height;
-    if (view->node_base_at <= 0 || span < ZAPP_RATE_SPAN_SECS || moved <= 0 || remaining <= 0) return false;
-    *minutes = (remaining * span / moved + 59) / 60;
-    return true;
-}
-/* A node behind its reference: at a gentle pace it catches up slowly to keep the phone cool, so no minutes are given;
- * otherwise the blocks left, with the minutes only when a rate is known. */
+/* A node behind its reference: gentle pace catches up slowly to keep the phone cool. */
 static void behind_line(const struct zapp_view *view, char *out, size_t cap)
 {
-    char blocks[32], minutes_text[48] = "";
+    char blocks[32];
     const int64_t behind = view->node_reference - view->node_height;
-    int64_t minutes = 0;
     if (view->pace == ZAPP_PACE_GENTLE) {
         snprintf(out, cap, "Catching up slowly to keep the phone cool: %s blocks to go", zapp_grouped(behind, blocks));
         return;
     }
-    if (minutes_left(view, &minutes)) snprintf(minutes_text, sizeof(minutes_text), ", about %lld min left", (long long)minutes);
-    snprintf(out, cap, "Catching up: %s blocks to go%s", zapp_grouped(behind, blocks), minutes_text);
+    snprintf(out, cap, "Catching up: %s blocks to go", zapp_grouped(behind, blocks));
 }
-/* The one plain status line for the phone node: stopped, stopping, paused while the phone cools (before any catching-up
- * or up-to-date text), starting (no height seen since the process started), running without a reply yet, connected with
- * no height yet, serving at its height while no other computer has given one, looking for other computers, catching up,
- * can't confirm it is up to date (with the reason), or up to date. Up to date shows only for the CURRENT verdict. */
+/* Plain node status; up to date is shown only for the CURRENT verdict. */
 static const char *plain_node_line(const struct zapp_view *view, char *out, size_t cap)
 {
     if (!view->node_process_running) snprintf(out, cap, "Node stopped");
@@ -112,11 +95,11 @@ static const char *plain_node_line(const struct zapp_view *view, char *out, size
     else if (view->pace == ZAPP_PACE_PAUSE) snprintf(out, cap, "%s", ZAPP_PAUSED_LINE);
     else if (!view->node_running) snprintf(out, cap, "%s", view->node_seen_height ?
         "Your node is running but has not replied yet" : "Starting your node… usually about a minute");
-    else if (view->node_height < 0) snprintf(out, cap, "Connected, checking the chain");
-    else if (view->node_reference < 0 && view->node_serving) {
+    else if (view->node_height < 0) snprintf(out, cap, "Checking the chain");
+    else if (view->node_reference < 0) {
         char height[32];
-        snprintf(out, cap, "Serving at block %s, waiting for other computers", zapp_grouped(view->node_height, height));
-    } else if (view->node_reference < 0) snprintf(out, cap, "Looking for other computers to connect to");
+        snprintf(out, cap, "Block %s, waiting for other computers", zapp_grouped(view->node_height, height));
+    }
     else if (view->chain_state == ZAPP_CHAIN_BEHIND) behind_line(view, out, cap);
     else if (view->chain_state == ZAPP_CHAIN_UNCONFIRMED) snprintf(out, cap, "Can't confirm it's up to date: %s", view->chain_doubt);
     else if (view->chain_state == ZAPP_CHAIN_WAITING) snprintf(out, cap, "%s", view->chain_doubt);

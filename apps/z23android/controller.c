@@ -216,24 +216,11 @@ static void startup_default(void *ctx)
     pthread_mutex_unlock(&c->pace_lock);
 }
 #endif
-/* Keeps the newest height sample and, once it is ZAPP_RATE_SPAN_SECS old, the one it replaces as the older sample, for the
- * Home rate. A node that does not answer or gives no height clears the samples. */
-static void record_height(struct zapp_view *view, const struct node_reading *n, int64_t now, bool running)
+/* Tracks whether this running node has reported a height. */
+static void record_height(struct zapp_view *view, const struct node_reading *n, bool running)
 {
     view->node_seen_height = running && (view->node_seen_height || n->height >= 0);
-    if (!n->responding || n->height < 0) {
-        view->node_height = -1;
-        view->node_sample_at = view->node_base_at = 0;
-        return;
-    }
-    view->node_height = n->height;
-    if (view->node_sample_at && now - view->node_sample_at < ZAPP_RATE_SPAN_SECS) return;
-    if (view->node_sample_at) {
-        view->node_base_height = view->node_sample_height;
-        view->node_base_at = view->node_sample_at;
-    }
-    view->node_sample_height = n->height;
-    view->node_sample_at = now;
+    view->node_height = n->responding && n->height >= 0 ? n->height : -1;
 }
 /* The pace the node reports through getnodepace. Read only when the node answered status; a node that does not
  * answer within this time keeps the NORMAL fallback. */
@@ -327,7 +314,7 @@ static void observe_node(struct controller *c)
     c->view.chain_state = chain.state;
     c->view.node_reference = chain.reference;
     snprintf(c->view.chain_doubt, sizeof(c->view.chain_doubt), "%s", chain.reason);
-    record_height(&c->view, &n, now, process_running);
+    record_height(&c->view, &n, process_running);
     const char *restart = zapp_restart_notice(&c->restart);
     copy_text(c->view.sync_status, sizeof(c->view.sync_status), restart ? restart : status);
     copy_text(c->view.node_line, sizeof(c->view.node_line), line);

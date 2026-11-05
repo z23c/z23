@@ -629,10 +629,12 @@ frontend service refused and how long each one took.
 both unreachable (churn, firewall, ISP blackhole), the node's remaining
 bootstrap path is Tor: fetch `/directory.json` (its own .onion + advertised
 clearnet IP/height) from one or more onion-directory seed nodes. Today the
-binary ships exactly **one** hardcoded first-party onion seed
-(`core/chainparams/src/chainparams.c` — search `kOnionSeeds`), a known single point
-of failure: no second first-party address is currently available in this
-repo/docs/deploy — do not add a fabricated one;
+binary configures three onion directory seeds
+(`core/chainparams/src/chainparams.c` — search `kOnionSeeds`). In onion-only
+mode, configured endpoints with allowed P2P ports are also offered as untrusted NEW
+peer candidates;
+repeated offers can refresh their timestamp but preserve dial backoff;
+do not add a fabricated one;
 adding a dead hostname wastes a recovering node's bootstrap budget on a dead
 lookup instead of helping.
 

@@ -594,12 +594,13 @@ size_t connman_gather_dial_candidates(struct connman *cm,
                                       size_t max);
 
 #ifdef ZCL_TESTING
-/* Regression seam for the owned discovery-thread shutdown wait. A nominally
- * long cadence must observe connman_signal_stop() within one 100ms slice. */
+int connman_offer_configured_onions_for_test(struct connman *cm, const char *self);
+bool connman_addr_is_current_onion_for_test(const struct net_addr *addr, const char *self);
 int connman_apply_onion_seed_directory_for_test(struct connman *cm,
                                                 const char *onion,
                                                 const uint8_t *body,
                                                 size_t body_len);
+/* Regression seam for the owned discovery-thread shutdown wait. */
 bool connman_wait_for_stop_for_test(int seconds);
 void connman_set_stop_for_test(bool stop);
 /* Pure form of the -connect idle gate. A pending chain-bound DHT hint must

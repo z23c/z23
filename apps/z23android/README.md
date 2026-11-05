@@ -113,7 +113,7 @@ open, so the focused field scrolls into view. A tap reaches a button only where
 that button is on screen (`view_hit.c`, tested by `tests/view_hit_test.c`): a
 button scrolled out of its page never takes a tap meant for the fixed bar over it.
 
-The Home screen shows the phone card (one plain status line: Node stopped, Stopping…, Starting your node… until a height has been seen, then Your node is running but has not replied yet, Catching up with the blocks to go and, when a rate is known, the minutes left, Can't confirm it's up to date with the reason (only 1 peer, no peers, peer count unknown, no new block for N min), No peer has reported a block height yet, Serving at block N, waiting for other computers once the node's `boot_status.json` says it serves (`zapp_node_serving`) and no other computer has given a height, in place of Looking for other computers to connect to, or Up to date; and a Start node or Stop node button, hidden while the node stops). The status line always takes two lines and the button keeps its place while hidden (the layout field `"lines"`), so the tiles below never move when the status wraps or the node stops. The Wallet, Scan and Assistant tiles come next, followed by installed Z23 apps. The Wallet tile shows no amount: Home does not read the balance, and the balance appears only on the wallet screens, which the Wallet tile opens. A fixed bar with **Apps** and
+The Home screen shows the phone card (one plain status line: Node stopped, Stopping…, Starting your node… until a height has been seen, then Your node is running but has not replied yet, Catching up with the blocks to go, Can't confirm it's up to date with the reason (only 1 peer, no peers, peer count unknown, no new block for N min), No peer has reported a block height yet, Block N, waiting for other computers when the node has a height but no peer reference, or Checking the chain when its height is unknown, or Up to date; and a Start node or Stop node button, hidden while the node stops). The status line always takes two lines and the button keeps its place while hidden (the layout field `"lines"`), so the tiles below never move when the status wraps or the node stops. The Wallet, Scan and Assistant tiles come next, followed by installed Z23 apps. The Wallet tile shows no amount: Home does not read the balance, and the balance appears only on the wallet screens, which the Wallet tile opens. A fixed bar with **Apps** and
 **Settings** sits under the layout on every layout. The Z23
 apps section is built from the launcher list: every installed launchable
 package whose name starts with `org.z23.`, except the base app
@@ -220,8 +220,8 @@ seconds old (its `observed_at`).
 
 The phone node always runs in private mode: it starts with `-onlynet=onion
 -bind=127.0.0.1`, so it dials only Tor onion peers, resolves no DNS seed, and
-never falls back to clearnet. Its dial targets are the built-in onion seed of
-the chain parameters (one today), the onion directory those seeds publish, and
+never falls back to clearnet. Its dial targets are the built-in onion seeds of
+the chain parameters, the onion directory those seeds publish, and
 the fleet onion peers (`-addnode=<56 characters>.onion:<port>`) that the paired
 laptop host names in an `onion` field of its fleet report. The app keeps those
 in `fleet-onion-peers` beside the node data and passes only entries that pass

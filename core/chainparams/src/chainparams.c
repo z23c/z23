@@ -237,17 +237,8 @@ static void init_main_params(void)
      *       First-party, onion-persisted (-onion-persist), and its address
      *       has never rotated.
      *
-     * PORT: onionSeedPorts[] is a genuine per-entry array, but NOTHING
-     * READS IT — grep the tree: chainparams.c writes it and no other
-     * translation unit ever loads it. The seed path reaches a seed by
-     * hostname alone over the onion service's HTTP virtual port 80
-     * (tor_integration.c pins application_virtual_port = 80), and
-     * tor_integration_fetch_onion_blocking() takes no port argument at
-     * all. So the value here is documentation, not behaviour: it records
-     * the seed's P2P virtual port for whoever wires a direct onion P2P
-     * dial later. It is set PER ENTRY and must stay that way — the two
-     * seeds below do NOT share a port, so any future consumer that
-     * assumes one shared port would dial the wrong one.
+     * Each seed retains its own P2P port for untrusted NEW peer candidates.
+     * Directory fetches use onion HTTP virtual port 80 independently.
      *
      * ZERO-REBUILD PATH — THE PRIMARY, NOT A FALLBACK. This array is a
      * compiled-in constant that ages the moment it is written; the two
@@ -267,11 +258,9 @@ static void init_main_params(void)
              * P2P virtual port is 8055, NOT the mainnet default. */
             { "5wvfod4ikluv4w3lqe3whn2k7xdsympxxu2qkqw452thtjxbar5hrcqd.onion",
               8055 },
-            /* Additional first-party onion-directory seeds are appended
-             * here as they come online, each with its own P2P port and its
-             * own reachability evidence in the block above. Until a second
-             * one lands, a Tor-only stranger with an empty onion-seeds file
-             * and an empty directory depends on this single box. */
+            /* Project-operated directories observed over Tor on 2026-11-04. */
+            { "kfs4ogq3dtwseahgzz2grizug2wiwey2jhxmmnjeuqh64rs7fkl666qd.onion", 8033 },
+            { "motlbjlm5gwxnvjn52d2kz4xijsuli5qm2h263zbqqxhcvtnrejqqead.onion", 8033 },
         };
         size_t n = 0;
         for (size_t i = 0;

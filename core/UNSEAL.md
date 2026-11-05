@@ -919,3 +919,7 @@ later lane flips it HARD.
 - 2026-11-03T09:08:55Z — REASON: add core batch: no NULL-base pointer arithmetic in sha256/sha512/htlc/siphash and close the status db handle on open failure (Mac UBSan; reviewed lane core-batch-1103 f859bfd44a); owner-authorized 2026-10-19 hardening program
   old ROOT: 60f05baecb7a8fb3ad8545bac9c2cb68802674e4f8560416a5f7efb02c11aede
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-04T23:20:34Z — REASON: Owner authorized 2026-11-04 onion-only peer bootstrap using configured P2P endpoints and known-self guard; no consensus predicate change
+  old ROOT: 36e585df84361875e16bd06cd8ade2f77dc89b7c88816404aa3c40eb9f0dfdaf
+  by: owner unseal ritual (make core-unseal)
