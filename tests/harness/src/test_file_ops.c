@@ -363,45 +363,57 @@ static int test_file_copy_chunk_boundaries(void)
     return failures;
 }
 
+struct fo_refusal_paths {
+    char src[PATH_MAX], empty[PATH_MAX], gone[PATH_MAX], target[PATH_MAX];
+    char nodir[PATH_MAX], out[PATH_MAX], rel[PATH_MAX];
+};
+
+static bool fo_refusal_fixture(const char *dir, struct fo_refusal_paths *p)
+{
+    fo_path(p->src, sizeof(p->src), dir, "src.txt");
+    fo_path(p->empty, sizeof(p->empty), dir, "empty.txt");
+    fo_path(p->gone, sizeof(p->gone), dir, "gone.txt");
+    fo_path(p->target, sizeof(p->target), dir, "target");
+    fo_path(p->out, sizeof(p->out), dir, "out.txt");
+    fo_path(p->rel, sizeof(p->rel), dir, "relative-out.txt");
+    snprintf(p->nodir, sizeof(p->nodir), "%s/nodir/out", dir);
+    return fo_write_pattern(p->src, 100) && fo_write_pattern(p->empty, 0) &&
+           mkdir(p->target, 0700) == 0;
+}
+
+/* Every refusal. The relative destination resolves against the process
+ * cwd, so it runs from inside the fixture (nothing can land in the repo)
+ * and the cwd is restored, which *restored reports. */
+static bool fo_refusals_run(const char *dir, const struct fo_refusal_paths *p,
+                            bool *restored)
+{
+    char cwd[PATH_MAX] = "";
+    bool in_fixture = getcwd(cwd, sizeof(cwd)) != NULL && chdir(dir) == 0;
+    bool refused = in_fixture && !file_copy(p->src, "relative-out.txt");
+    *restored = !in_fixture || chdir(cwd) == 0;
+    return refused && !file_copy(p->gone, p->out) &&
+           !file_copy(p->src, p->nodir) && !file_copy(p->empty, p->nodir) &&
+           !file_copy(p->src, p->target) && !file_copy(p->empty, p->target);
+}
+
 static int test_file_copy_refusals(void)
 {
     int failures = 0;
 
     TEST("file_ops file_copy refuses bad sources and destinations with no residue") {
         char dir[PATH_MAX] = "";
-        char src[PATH_MAX] = "", empty[PATH_MAX] = "", gone[PATH_MAX] = "";
-        char target[PATH_MAX] = "", nodir[PATH_MAX] = "", out[PATH_MAX] = "";
-        char rel[PATH_MAX] = "", cwd[PATH_MAX] = "";
+        struct fo_refusal_paths paths = {{0}};
         int staging = 0;
+        bool restored = true;
         bool ok = fo_root(dir, "zcl_file_copy_refuse");
-        if (ok) {
-            fo_path(src, sizeof(src), dir, "src.txt");
-            fo_path(empty, sizeof(empty), dir, "empty.txt");
-            fo_path(gone, sizeof(gone), dir, "gone.txt");
-            fo_path(target, sizeof(target), dir, "target");
-            fo_path(out, sizeof(out), dir, "out.txt");
-            fo_path(rel, sizeof(rel), dir, "relative-out.txt");
-            snprintf(nodir, sizeof(nodir), "%s/nodir/out", dir);
-        }
-        ok = ok && fo_write_pattern(src, 100) && fo_write_pattern(empty, 0);
-        ok = ok && mkdir(target, 0700) == 0;
-        /* The relative destination resolves against the process cwd, so run
-         * it from inside the fixture: nothing can land in the repo. */
-        bool in_fixture = ok && getcwd(cwd, sizeof(cwd)) != NULL &&
-                          chdir(dir) == 0;
+        ok = ok && fo_refusal_fixture(dir, &paths);
         int before = ok ? fo_fd_count() : -1;
-        bool refused = ok && in_fixture;
-        refused = refused && !file_copy(src, "relative-out.txt");
-        bool restored = !in_fixture || chdir(cwd) == 0;
-        refused = refused && !file_copy(gone, out) &&
-                  !file_copy(src, nodir) && !file_copy(empty, nodir) &&
-                  !file_copy(src, target) && !file_copy(empty, target);
+        bool refused = ok && fo_refusals_run(dir, &paths, &restored);
         int after = ok ? fo_fd_count() : -2;
         bool clean = ok && fo_entries(dir, &staging) == 3 && staging == 0 &&
-                     !fo_exists(out) && !fo_exists(rel);
+                     !fo_exists(paths.out) && !fo_exists(paths.rel);
         fo_cleanup(dir);
         ASSERT(ok);
-        ASSERT(in_fixture);
         ASSERT(restored);
         ASSERT(refused);
         ASSERT(clean);
@@ -502,31 +514,43 @@ static bool fo_series_has(const char *dir, const char *name, size_t size)
     return fo_check_pattern(path, size);
 }
 
+static bool fo_series_fixture(const char *src, const char *dst, const char *bad)
+{
+    return mkdir(src, 0700) == 0 && mkdir(dst, 0700) == 0 &&
+           mkdir(bad, 0700) == 0 && fo_series_file(src, "blk00000.dat", 5) &&
+           fo_series_file(src, "rev00000.dat", 6) &&
+           fo_series_file(src, "blk00001.dat", 7) &&
+           fo_series_file(src, "blk00003.dat", 8);
+}
+
+static bool fo_series_landed(const char *dst)
+{
+    char absent[PATH_MAX], gap[PATH_MAX];
+    fo_path(absent, sizeof(absent), dst, "rev00001.dat");
+    fo_path(gap, sizeof(gap), dst, "blk00003.dat");
+    return fo_series_has(dst, "blk00000.dat", 5) &&
+           fo_series_has(dst, "rev00000.dat", 6) &&
+           fo_series_has(dst, "blk00001.dat", 7) && !fo_exists(absent) &&
+           !fo_exists(gap);
+}
+
 static int test_block_files_copy_series(void)
 {
     int failures = 0;
 
     TEST("file_ops block_files_copy copies every pair, treats a gap as the end, refuses a planted directory") {
-        char dir[PATH_MAX] = "", src[PATH_MAX], dst[PATH_MAX], bad[PATH_MAX];
-        char bad_blk[PATH_MAX];
+        char dir[PATH_MAX] = "", src[PATH_MAX] = "", dst[PATH_MAX] = "";
+        char bad[PATH_MAX] = "", bad_blk[PATH_MAX] = "";
         bool ok = fo_root(dir, "zcl_block_series");
-        fo_path(src, sizeof(src), dir, "src");
-        fo_path(dst, sizeof(dst), dir, "dst");
-        fo_path(bad, sizeof(bad), dir, "bad");
-        fo_path(bad_blk, sizeof(bad_blk), bad, "blk00000.dat");
-        ok = ok && mkdir(src, 0700) == 0 && mkdir(dst, 0700) == 0 && mkdir(bad, 0700) == 0;
-        ok = ok && fo_series_file(src, "blk00000.dat", 5) &&
-             fo_series_file(src, "rev00000.dat", 6) &&
-             fo_series_file(src, "blk00001.dat", 7) &&
-             fo_series_file(src, "blk00003.dat", 8);
+        if (ok) {
+            fo_path(src, sizeof(src), dir, "src");
+            fo_path(dst, sizeof(dst), dir, "dst");
+            fo_path(bad, sizeof(bad), dir, "bad");
+            fo_path(bad_blk, sizeof(bad_blk), bad, "blk00000.dat");
+        }
+        ok = ok && fo_series_fixture(src, dst, bad);
         int copied = ok ? block_files_copy(src, dst) : -9;
-        bool landed = ok && fo_series_has(dst, "blk00000.dat", 5) &&
-                      fo_series_has(dst, "rev00000.dat", 6) &&
-                      fo_series_has(dst, "blk00001.dat", 7);
-        char absent[PATH_MAX], gap[PATH_MAX];
-        fo_path(absent, sizeof(absent), dst, "rev00001.dat");
-        fo_path(gap, sizeof(gap), dst, "blk00003.dat");
-        bool stopped = ok && !fo_exists(absent) && !fo_exists(gap);
+        bool landed = ok && fo_series_landed(dst);
         int none = ok ? block_files_copy(dir, dst) : -9;
         ok = ok && mkdir(bad_blk, 0700) == 0;
         int planted = ok ? block_files_copy(bad, dst) : -9;
@@ -534,7 +558,6 @@ static int test_block_files_copy_series(void)
         ASSERT(ok);
         ASSERT_EQ(copied, 2);
         ASSERT(landed);
-        ASSERT(stopped);
         ASSERT_EQ(none, 0);
         ASSERT_EQ(planted, -1);
         PASS();
@@ -543,32 +566,48 @@ static int test_block_files_copy_series(void)
     return failures;
 }
 
+/* True when every name in the list is present with size pattern bytes
+ * (present) or absent (!present). */
+static bool fo_names_state(const char *dir, const char *const *names,
+                           size_t count, size_t size, bool present)
+{
+    bool good = true;
+    for (size_t i = 0; good && i < count; i++) {
+        char path[PATH_MAX];
+        fo_path(path, sizeof(path), dir, names[i]);
+        good = present ? fo_check_pattern(path, size) : !fo_exists(path);
+    }
+    return good;
+}
+
+static bool fo_names_write(const char *dir, const char *const *names,
+                           size_t count)
+{
+    bool good = true;
+    for (size_t i = 0; good && i < count; i++)
+        good = fo_series_file(dir, names[i], 4);
+    return good;
+}
+
 static int test_block_files_clean_selection(void)
 {
     int failures = 0;
 
     TEST("file_ops block_files_clean removes only blk*.dat and rev*.dat regular files") {
-        char dir[PATH_MAX] = "", sub[PATH_MAX];
+        char dir[PATH_MAX] = "", sub[PATH_MAX] = "";
         bool ok = fo_root(dir, "zcl_block_clean");
         static const char *const gone[] = {"blk00000.dat", "rev00001.dat"};
         static const char *const kept[] = {"blkx", "blz00.dat", "notes.txt",
                                            "other.dat", "rez00.dat", "revx"};
-        for (size_t i = 0; ok && i < 2; i++)
-            ok = fo_series_file(dir, gone[i], 4);
-        for (size_t i = 0; ok && i < 6; i++)
-            ok = fo_series_file(dir, kept[i], 4);
-        fo_path(sub, sizeof(sub), dir, "blk99.dat");
+        ok = ok && fo_names_write(dir, gone, 2) && fo_names_write(dir, kept, 6);
+        if (ok)
+            fo_path(sub, sizeof(sub), dir, "blk99.dat");
         ok = ok && mkdir(sub, 0700) == 0;
         if (ok)
             block_files_clean(dir);
-        bool removed = ok, retained = ok && fo_exists(sub);
-        for (size_t i = 0; i < 2; i++) {
-            char path[PATH_MAX];
-            fo_path(path, sizeof(path), dir, gone[i]);
-            removed = removed && !fo_exists(path);
-        }
-        for (size_t i = 0; i < 6; i++)
-            retained = retained && fo_series_has(dir, kept[i], 4);
+        bool removed = ok && fo_names_state(dir, gone, 2, 0, false);
+        bool retained = ok && fo_exists(sub) &&
+                        fo_names_state(dir, kept, 6, 4, true);
         int before = ok ? fo_fd_count() : -1;
         if (ok)
             block_files_clean(dir);
