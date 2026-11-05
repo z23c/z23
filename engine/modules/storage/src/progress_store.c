@@ -156,12 +156,7 @@ static void progress_store_folding_sizing(int64_t *cache_kib,
         ram, PROGRESS_STORE_MMAP_FLOOR_BYTES, PROGRESS_STORE_MMAP_CEIL_BYTES);
 }
 
-/* Switch the open consensus.db handle between the folding sizing and the
- * steady (tip-following) one.  PRAGMA-only: cache_size and mmap_size change
- * how SQLite holds and reads pages, never which bytes are read or written,
- * transaction boundaries or durability.  Issued under progress_store_tx_lock,
- * the lock that owns this connection.  Returns 1 applied, 0 store not open,
- * -1 a PRAGMA failed. */
+/* Measure while the connection's transaction lock protects its lifetime. */
 int progress_store_cache_used(int64_t *bytes_out)
 {
     if (!bytes_out) return -1;
@@ -174,6 +169,12 @@ int progress_store_cache_used(int64_t *bytes_out)
     return !db ? 0 : rc == SQLITE_OK ? 1 : -1;
 }
 
+/* Switch the open consensus.db handle between the folding sizing and the
+ * steady (tip-following) one.  PRAGMA-only: cache_size and mmap_size change
+ * how SQLite holds and reads pages, never which bytes are read or written,
+ * transaction boundaries or durability.  Issued under progress_store_tx_lock,
+ * the lock that owns this connection.  Returns 1 applied, 0 store not open,
+ * -1 a PRAGMA failed. */
 int progress_store_apply_memory_profile(bool steady, int64_t *mmap_bytes_out,
                                         int64_t *cache_kib_out)
 {

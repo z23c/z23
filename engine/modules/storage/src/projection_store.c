@@ -571,11 +571,7 @@ void projection_store_integrity_scan_result(bool ok)
 #define PROJECTION_STORE_CACHE_KIB   (64 * 1024)             /* 64 MiB */
 #define PROJECTION_STORE_MMAP_BYTES  (256LL * 1024 * 1024)   /* 256 MiB */
 
-/* Folding <-> steady switch for the open projection handle. PRAGMA-only:
- * cache_size and mmap_size change how SQLite holds and reads pages, never
- * which bytes are read or written, transaction boundaries or durability.
- * Issued under projection_store_tx_lock, the lock that owns this connection.
- * The steady profile never raises a value above the folding one. */
+/* Measure while the connection's transaction lock protects its lifetime. */
 int projection_store_cache_used(int64_t *bytes_out)
 {
     if (!bytes_out) return -1;
@@ -588,6 +584,11 @@ int projection_store_cache_used(int64_t *bytes_out)
     return !db ? 0 : rc == SQLITE_OK ? 1 : -1;
 }
 
+/* Folding <-> steady switch for the open projection handle. PRAGMA-only:
+ * cache_size and mmap_size change how SQLite holds and reads pages, never
+ * which bytes are read or written, transaction boundaries or durability.
+ * Issued under projection_store_tx_lock, the lock that owns this connection.
+ * The steady profile never raises a value above the folding one. */
 int projection_store_apply_memory_profile(bool steady, int64_t *mmap_bytes_out,
                                           int64_t *cache_kib_out)
 {
