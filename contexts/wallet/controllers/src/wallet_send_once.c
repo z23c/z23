@@ -8,6 +8,7 @@
  *   COMMITTED and the wallet holds the txid   -> committed, the earlier txid
  *   COMMITTED and the wallet lost the txid    -> outcome_unknown with the txid
  *   BUILT, whether or not the wallet holds it -> outcome_unknown with the txid
+ *   BUILT under the zero txid                 -> outcome_unknown, no txid
  *   STARTED, nobody running it                -> the row is freed, the send runs
  * The wallet persists a transaction before it relays it, but holding a
  * transaction does not prove it was relayed, so BUILT never answers committed.
@@ -346,7 +347,8 @@ static enum wso_begin wso_known(struct wallet_rpc_context *ctx,
         return WSO_ANSWERED;
     }
     LOG_WARN(WSO_TAG, "repeat of a key with no confirmed send");
-    wso_answer(result, "outcome_unknown", row->txid, true);
+    wso_answer(result, "outcome_unknown", uint256_is_null(&id) ? NULL : row->txid,
+               true);
     return WSO_ANSWERED;
 }
 
@@ -419,6 +421,18 @@ static enum wso_begin wso_begin_send(struct wallet_rpc_context *ctx,
     return WSO_RUN;
 }
 
+/* A send reported success and no txid is known, so a started row would run it
+ * again on a retry. Hold the key as built under the zero txid, which no
+ * transaction has. The table allows only the three states, and a built row is
+ * never freed, so every repeat answers outcome_unknown. */
+static void wso_hold_unknown(struct node_db *ndb, const uint8_t kh[32])
+{
+    static const uint8_t unknown_txid[32];
+    if (!wso_advance(ndb, kh, WALLET_SEND_ONCE_BUILT, unknown_txid, GetTime(),
+                     true))
+        LOG_ERROR(WSO_TAG, "cannot hold the key of a send with no txid");
+}
+
 /* Settle the row after the send ran. Success commits it. A failure before
  * admission frees the key. A failure after admission keeps the row and answers
  * outcome_unknown: the transaction may be in the mempool or relayed whatever
@@ -435,6 +449,7 @@ static bool wso_finish(struct wallet_rpc_context *ctx, struct wso_scope *sc,
         }
         if (!sc->built) {
             LOG_ERROR(WSO_TAG, "send succeeded without a recorded txid");
+            wso_hold_unknown(ctx->node_db, sc->key_hash);
             wso_answer(result, "outcome_unknown", NULL, false);
             return true;
         }

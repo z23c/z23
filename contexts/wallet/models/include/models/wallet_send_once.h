@@ -27,7 +27,9 @@
 
 enum wallet_send_once_state {
     WALLET_SEND_ONCE_STARTED = 1,   /* recorded; nothing built yet */
-    WALLET_SEND_ONCE_BUILT = 2,     /* txid known, about to be admitted */
+    WALLET_SEND_ONCE_BUILT = 2,     /* txid known, about to be admitted; a zero
+                                     * txid: the send reported success with no
+                                     * txid, so the key stays held */
     WALLET_SEND_ONCE_COMMITTED = 3  /* admitted and durable in the wallet */
 };
 
