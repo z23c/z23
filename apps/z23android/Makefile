@@ -170,10 +170,22 @@ test-qr-fuzz: prepare-quirc
 	  tests/qr_fuzz_test.c $(QR_FUZZ_SOURCES) $(QUIRC_SOURCES) $(SPEECH_JSON) -lm -o '$(BUILD_DIR)/qr-fuzz-test'
 	QR_FUZZ_ITERATIONS='$(QR_FUZZ_ITERATIONS)' '$(BUILD_DIR)/qr-fuzz-test'
 
-test-scan:
+test-scan: test-scan-cancel
 	@mkdir -p '$(BUILD_DIR)'
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) -I../../vendor/qrcodegen tests/scan_test.c scan.c payment_code.c fleet.c speech_client.c bridge_client.c bridge_auth.c ../../platform/modules/sha3/src/sha3.c voice.c ../../contexts/commons/packages/zutf8/src/zutf8.c ../../vendor/qrcodegen/qrcodegen.c $(SPEECH_JSON) -o '$(BUILD_DIR)/scan-test'
 	'$(BUILD_DIR)/scan-test'
+
+.PHONY: test-scan-cancel
+ifeq ($(shell uname -s),Darwin)
+SCAN_CANCEL_GC := -Wl,-dead_strip
+else
+SCAN_CANCEL_GC := -Wl,--gc-sections
+endif
+test-scan-cancel:
+	@mkdir -p '$(BUILD_DIR)'
+	$(HOST_CC) $(HOST_WARNINGS) -pthread -ffunction-sections -fdata-sections $(SPEECH_INCLUDES) \
+	  tests/scan_cancel_test.c $(SCAN_CANCEL_GC) -o '$(BUILD_DIR)/scan-cancel-test'
+	'$(BUILD_DIR)/scan-cancel-test'
 .PHONY: test-camera-access
 test-camera-access:
 	@mkdir -p '$(BUILD_DIR)'

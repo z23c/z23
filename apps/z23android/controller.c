@@ -48,7 +48,7 @@ struct controller {
     uint64_t camera_ticket;
     void (*notify)(void);
     bool pending, autostart_checked, hidden, shown;
-    bool scan_cancelled, scan_fleet_owned;
+    bool scan_cancelled, scan_fleet_owned, scan_pair_owned;
     time_t fleet_at;
     bool seen_responding;
     int64_t seen_height, seen_target, seen_peers; /* Latest node reading, for the suggestion. */
@@ -645,13 +645,6 @@ static bool voice_conversation(struct controller *c, char *out)
 }
 
 static bool pair_control(struct controller *c, const char *action, const char *arg);
-static void set_scan(struct controller *c, enum zapp_scan_kind kind, const char *shown)
-{
-    pthread_mutex_lock(&c->lock);
-    c->view.scan_kind = kind;
-    copy_text(c->view.scan_text, sizeof(c->view.scan_text), shown);
-    pthread_mutex_unlock(&c->lock);
-}
 static const char *scan_notice(enum zapp_scan_kind kind)
 {
     switch (kind) {
@@ -668,38 +661,45 @@ static const char *scan_notice(enum zapp_scan_kind kind)
     }
     return "Found text, not a Z23 code. Nothing was done.";
 }
-/* Puts a scanned laptop descriptor through the same review as an offer over USB. */
-static bool offer_pairing(struct controller *c, const char *descriptor)
+/* Commits scan-owned state while cancellation holds the same lock. */
+static bool scan_commit(struct controller *c, uint64_t ticket, const char *payload,
+                        enum zapp_scan_kind *kind, char *value, const char **notice)
 {
     pthread_mutex_lock(&c->lock);
-    bool ok = pair_control(c, "pair_offer", descriptor);
+    bool live = !c->scan_cancelled && c->view.scanning && c->camera_ticket == ticket;
+    if (live) {
+        (void)zapp_pay_stash_offer(payload, *kind);
+        if (*kind == ZAPP_SCAN_PAIR && zapp_speech_client_paired(c->files, value)) {
+            *kind = ZAPP_SCAN_TEXT; value[0] = 0; *notice = "That laptop is already paired.";
+        } else if (*kind == ZAPP_SCAN_PAIR) {
+            if (pair_control(c, "pair_offer", value)) c->scan_pair_owned = true;
+            else { *kind = ZAPP_SCAN_UNREADABLE; value[0] = 0; }
+        }
+        bool secret = *kind == ZAPP_SCAN_FLEET || *kind == ZAPP_SCAN_FLEET_MACHINE || *kind == ZAPP_SCAN_PAIR;
+        c->view.scan_kind = *kind;
+        copy_text(c->view.scan_text, sizeof(c->view.scan_text), secret ? "" : value);
+    }
     pthread_mutex_unlock(&c->lock);
-    return ok;
+    return live;
 }
 /* Reads one code and shows what it is. Only a fleet invitation or a laptop pairing reaches a review,
  * and its text stays out of scan_text. Nothing scanned is opened, fetched or paid. */
 static bool scan_payload(struct controller *c, uint64_t ticket, char *out)
 {
     char error[256] = "";
-    zapp_pay_stash_clear();
     char *value = calloc(1, ZAPP_TEXT_CAP);
     bool ok = zapp_camera_scan(ticket, out, ZAPP_TEXT_CAP, error, sizeof(error));
     if (!ok || !value) {
-        set_scan(c, ZAPP_SCAN_TEXT, "");
         copy_text(out, ZAPP_TEXT_CAP, ok ? "Not enough memory to read that code." : error);
         free(value);
         return false;
     }
     enum zapp_scan_kind kind = zapp_scan_classify(out, value, ZAPP_TEXT_CAP);
     if (kind == ZAPP_SCAN_FLEET_MACHINE) kind = ZAPP_SCAN_FLEET;
-    /* The payment is handed to the send screen before out is replaced by the notice; the view never carries it. */
-    (void)zapp_pay_stash_offer(out, kind);
     const char *notice = NULL;
-    if (kind == ZAPP_SCAN_PAIR && zapp_speech_client_paired(c->files, value)) {
-        kind = ZAPP_SCAN_TEXT; value[0] = 0; notice = "That laptop is already paired.";
-    } else if (kind == ZAPP_SCAN_PAIR && !offer_pairing(c, value)) { kind = ZAPP_SCAN_UNREADABLE; value[0] = 0; }
-    bool secret = kind == ZAPP_SCAN_FLEET || kind == ZAPP_SCAN_FLEET_MACHINE || kind == ZAPP_SCAN_PAIR;
-    set_scan(c, kind, secret ? "" : value);
+    if (!scan_commit(c, ticket, out, &kind, value, &notice)) {
+        memory_cleanse(value, ZAPP_TEXT_CAP); free(value); return false;
+    }
     if (kind == ZAPP_SCAN_FLEET || kind == ZAPP_SCAN_FLEET_MACHINE) {
         pthread_mutex_lock(&c->lock);
         c->view.scan_checking = !c->scan_cancelled;
@@ -1149,6 +1149,7 @@ static bool is_pair_control(const char *action)
 /* Caller holds c->lock. Returns whether the request was accepted. */
 static bool pair_control(struct controller *c, const char *action, const char *arg)
 {
+    c->scan_pair_owned = false;
     bool known = !strcmp(action, "pair_offer") && zapp_speech_client_paired(c->files, arg);
     if (known) {
         copy_text(c->view.connection, sizeof(c->view.connection), "Laptop host connected.");
@@ -1191,12 +1192,12 @@ static void queue_action(struct controller *c, const char *action, const char *a
     }
     copy_text(c->action, sizeof(c->action), action); copy_text(c->argument, sizeof(c->argument), arg);
     c->camera_ticket = zapp_camera_ticket(); c->pending = true; c->view.busy = true;
-    c->view.scanning = !strcmp(action, "scan"); c->view.scan_checking = false; c->scan_cancelled = false; c->scan_fleet_owned = false; c->view.notice[0] = 0; c->view.result[0] = 0;
+    c->view.scanning = !strcmp(action, "scan"); c->view.scan_checking = false; c->scan_cancelled = false; c->scan_fleet_owned = false; c->scan_pair_owned = false; c->view.notice[0] = 0; c->view.result[0] = 0;
     /* The tap shows at once what it does, unless its own screen already shows that. */
     const char *doing = zapp_action_shows_itself(action) ? NULL : zapp_action_doing(action);
     if (doing) copy_text(reports_beside(action) ? c->view.result : c->view.notice, ZAPP_NOTICE_CAP, doing);
     copy_text(c->view.node_action_notice, sizeof(c->view.node_action_notice), doing && node_action(action) ? doing : "");
-    if (c->view.scanning) { c->view.scan_kind = ZAPP_SCAN_TEXT; c->view.scan_text[0] = 0; }
+    if (c->view.scanning) { zapp_pay_stash_clear(); c->view.scan_kind = ZAPP_SCAN_TEXT; c->view.scan_text[0] = 0; }
     if (!strcmp(action, "chat")) {
         atomic_store(&c->reply_cancel, false);
         c->view.reply_state = ZAPP_REPLY_WAITING;
@@ -1253,8 +1254,10 @@ void zapp_controller_cancel_scan(void)
     struct controller *c = current;
     if (c) {
         pthread_mutex_lock(&c->lock);
-        if (!strcmp(c->action, "scan") && (c->view.scanning || c->scan_fleet_owned)) {
+        if (!strcmp(c->action, "scan") && (c->view.scanning || c->scan_fleet_owned || c->scan_pair_owned)) {
             c->scan_cancelled = true;
+            zapp_pay_stash_clear();
+            if (c->scan_pair_owned) { c->view.pair_offer[0] = 0; c->view.pair_code[0] = 0; c->scan_pair_owned = false; }
             c->view.result[0] = 0;
             c->view.scan_checking = false;
             if (c->scan_fleet_owned) {

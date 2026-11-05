@@ -155,3 +155,12 @@ wrapped wallet blob, phrase request or node operation in the canceled case.
 The hardware key may already have been prepared before authentication; a
 canceled prompt is not evidence that no Keystore key exists. Physical replay
 of the updated flow remains pending.
+
+The scan cancellation fixture holds a worker before the controller commit,
+then cancels and verifies that a stale ticket cannot commit. It also checks
+that dismissal clears a committed payment or scan-owned pairing while preserving
+a later independent pairing. The fixture uses real controller locks with mocked
+stash and pairing functions; it does not exercise camera hardware or a device.
+The focused scan tests, complexity check and ARM64 native application build
+passed. The first native configure attempt could not find the cross archive;
+the successful build used the separately provenance-verified Android archive.
