@@ -971,3 +971,7 @@ later lane flips it HARD.
 - 2026-11-05T22:32:17Z — REASON: Stop a legacy getheaders reply at a gap instead of skipping it
   old ROOT: b31e6304f44d494664620227bfc3a6f17817ba9d37c62755ad71a0fbef13dc9b
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-05T22:32:39Z — REASON: Finish a getdata request past the send budget from the send tick
+  old ROOT: 2388ff94fed28ab3e4f67d435f891acc5de210ecc34fc3f0e72b3c3370f18557
+  by: owner unseal ritual (make core-unseal)

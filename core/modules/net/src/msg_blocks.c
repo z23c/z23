@@ -264,6 +264,102 @@ static bool msg_getdata_serve_tx(struct msg_processor *mp,
     return sent;
 }
 
+/* One block request; true when the body went on the wire. Never sends bytes
+ * that do not hash to what was asked: that would get us banned. */
+static bool msg_getdata_serve_block(struct msg_processor *mp,
+                                    struct p2p_node *node,
+                                    const struct inv_item *inv)
+{
+    struct block_index *bi = block_map_find(
+        &mp->main_state->map_block_index, &inv->hash);
+    if (!bi || !(bi->nStatus & BLOCK_HAVE_DATA))
+        return false; // raw-return-ok:block-not-held-here
+
+    bool sent = false;
+    struct block blk;
+    block_init(&blk);
+    if (read_block_from_disk_index(&blk, bi, mp->datadir)) {
+        struct uint256 disk_hash;
+        block_get_hash(&blk, &disk_hash);
+        if (uint256_cmp(&disk_hash, &inv->hash) != 0) {
+            char exp[65], got[65];
+            uint256_get_hex(&inv->hash, exp);
+            uint256_get_hex(&disk_hash, got);
+            LOG_WARN("net", "SAFETY: refusing to serve block h=%d "
+                     "— hash mismatch (requested=%s disk=%s)",
+                     bi->nHeight, exp, got);
+        } else {
+            struct byte_stream blk_data;
+            stream_init(&blk_data, 1024 * 1024);
+            if (block_serialize(&blk, &blk_data)) {
+                p2p_node_begin_message(node, "block",
+                                       mp->params->pchMessageStart);
+                p2p_node_write_message_data(node, blk_data.data,
+                                            blk_data.size);
+                p2p_node_end_message(node);
+                sent = true;
+                msg_blocks_continue_after_hash_continue(mp, node, bi);
+            }
+            stream_free(&blk_data);
+        }
+    }
+    block_free(&blk);
+    return sent;
+}
+
+/* See net/msg_internal.h. */
+bool getdata_replay_kept(struct msg_processor *mp, struct p2p_node *node)
+{
+    if (!mp || !node || node->getdata_kept_count == 0)
+        return false; // raw-return-ok:nothing-kept-for-this-peer
+    if (atomic_load(&node->disconnect))
+        return false; // raw-return-ok:peer-is-going-away
+
+    struct inv_item not_found[GETDATA_KEPT_BLOCKS_MAX];
+    size_t not_found_count = 0;
+    size_t taken = 0;
+    while (taken < node->getdata_kept_count && !net_send_over_budget(node)) {
+        struct inv_item inv;
+        inv_item_init_typed(&inv, MSG_BLOCK, &node->getdata_kept[taken]);
+        taken++;
+        if (!msg_getdata_serve_block(mp, node, &inv))
+            not_found[not_found_count++] = inv;
+    }
+    size_t left = node->getdata_kept_count - taken;
+    if (taken > 0 && left > 0)
+        memmove(node->getdata_kept, &node->getdata_kept[taken],
+                left * sizeof(node->getdata_kept[0]));
+    node->getdata_kept_count = (uint8_t)left;
+    send_notfound_batch(mp, node, not_found, not_found_count);
+    return taken > 0;
+}
+
+/* See net/msg_internal.h. */
+void msg_send_replay_held(struct msg_processor *mp, struct p2p_node *node)
+{
+    (void)getheaders_replay_deferred(mp, node);
+    (void)getdata_replay_kept(mp, node);
+}
+
+/* A request item that reached the send budget. A block goes in the peer's slot
+ * and is served from the send tick. Past the slot it gets notfound, and a peer
+ * that ignores notfound leaves it in flight until its own timeout: an honest
+ * legacy peer never gets here, it has at most 16 blocks in flight. Other items
+ * get no reply; the peer's own retry deals with those. */
+static void msg_getdata_hold_item(struct msg_processor *mp,
+                                  struct p2p_node *node,
+                                  struct inv_item *not_found,
+                                  size_t *not_found_count,
+                                  const struct inv_item *inv)
+{
+    if (inv->type != MSG_BLOCK)
+        return; // raw-return-ok:only-blocks-are-kept-past-the-budget
+    if (node->getdata_kept_count < GETDATA_KEPT_BLOCKS_MAX)
+        node->getdata_kept[node->getdata_kept_count++] = inv->hash;
+    else
+        msg_getdata_add_notfound(mp, node, not_found, not_found_count, inv);
+}
+
 bool process_getdata(struct msg_processor *mp, struct p2p_node *node,
                      struct byte_stream *s)
 {
@@ -297,66 +393,33 @@ bool process_getdata(struct msg_processor *mp, struct p2p_node *node,
     struct inv_item not_found[64];
     size_t not_found_count = 0;
 
-    for (uint64_t i = 0; i < count; i++) {
-        /* Bound the send queue: a single getdata can request up to
-         * MAX_INV_SZ (50000) blocks, and a slow-reader peer may never
-         * drain its socket, so serving the whole batch could buffer
-         * tens of GB of send_segments -> OOM. Once this peer (or the
-         * process as a whole) is over the send budget, stop serving and
-         * return — the peer is within protocol and will re-request the
-         * remaining items later (Core's fPauseSend behaviour). Do NOT
-         * disconnect. Whitelisted/trusted peers are exempt (checked
-         * inside net_send_over_budget). Any not-found items already
-         * accumulated are still flushed below. */
-        if (net_send_over_budget(node))
-            break;
+    /* What this peer asked for first goes first. */
+    (void)getdata_replay_kept(mp, node);
 
+    for (uint64_t i = 0; i < count; i++) {
         struct inv_item inv;
         if (!inv_item_deserialize(&inv, s))
             LOG_FAIL("net", "failed to deserialize getdata inv[%llu] from %s",
                      (unsigned long long)i, node->addr_name);
 
+        /* Bound the send queue: a single getdata can request up to
+         * MAX_INV_SZ (50000) blocks, and a slow-reader peer may never
+         * drain its socket, so serving the whole batch could buffer
+         * tens of GB of send_segments -> OOM. Once this peer (or the
+         * process as a whole) is over the send budget, stop serving. A
+         * legacy peer does not ask again and ignores notfound, so the
+         * request has to be finished from this side: blocks go in the
+         * peer's fixed slot for the send tick (msg_getdata_hold_item). Do
+         * NOT disconnect. Whitelisted/trusted peers are exempt (checked
+         * inside net_send_over_budget). */
+        if (node->getdata_kept_count > 0 || net_send_over_budget(node)) {
+            msg_getdata_hold_item(mp, node, not_found, &not_found_count, &inv);
+            continue;
+        }
+
         bool sent = false;
         if (inv.type == MSG_BLOCK) {
-            struct block_index *bi = block_map_find(
-                &mp->main_state->map_block_index, &inv.hash);
-            if (bi && (bi->nStatus & BLOCK_HAVE_DATA)) {
-                struct block blk;
-                block_init(&blk);
-
-                if (read_block_from_disk_index(&blk, bi, mp->datadir)) {
-                    /* Verify block hash before serving — never send
-                     * corrupted data that would get us banned */
-                    struct uint256 disk_hash;
-                    block_get_hash(&blk, &disk_hash);
-                    if (uint256_cmp(&disk_hash, &inv.hash) != 0) {
-                        char exp[65], got[65];
-                        uint256_get_hex(&inv.hash, exp);
-                        uint256_get_hex(&disk_hash, got);
-                        LOG_WARN("net", "SAFETY: refusing to serve block h=%d "
-                                 "— hash mismatch (requested=%s disk=%s)",
-                                 bi->nHeight, exp, got);
-                        block_free(&blk);
-                        goto skip_block_serve;
-                    }
-
-                    struct byte_stream blk_data;
-                    stream_init(&blk_data, 1024 * 1024);
-                    if (block_serialize(&blk, &blk_data)) {
-                        p2p_node_begin_message(node, "block",
-                                               mp->params->pchMessageStart);
-                        p2p_node_write_message_data(node, blk_data.data,
-                                                    blk_data.size);
-                        p2p_node_end_message(node);
-                        sent = true;
-                        msg_blocks_continue_after_hash_continue(mp, node, bi);
-                    }
-                    stream_free(&blk_data);
-                }
-                block_free(&blk);
-            }
-            skip_block_serve:
-            (void)0;
+            sent = msg_getdata_serve_block(mp, node, &inv);
         } else if (inv.type == MSG_TX) {
             sent = msg_getdata_serve_tx(mp, node, &inv);
         }

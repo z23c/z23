@@ -202,7 +202,7 @@ struct connman;
  * is true when this peer's buffered send bytes exceed the per-peer cap OR
  * the process-wide total is at/over the cap; whitelisted peers are exempt.
  * Serving loops (e.g. process_getdata) consult it to pause serving — they
- * must NOT disconnect, the peer is within protocol and re-requests later. */
+ * must NOT disconnect, the peer is within protocol and they finish the work later. */
 size_t net_send_total_bytes(void);
 size_t net_send_total_bytes_cap(void);
 size_t net_send_peer_bytes_cap(void);
@@ -271,6 +271,12 @@ struct ban_entry {
  * 125-peer default this is ~272 KB of node state that the hostile path cannot
  * grow. An oversized payload is simply not parked. */
 #define GETHEADERS_DEFERRED_REQ_MAX_BYTES 2176
+
+/* Block requests held per peer when the send budget stops a getdata (see
+ * getdata_kept in struct p2p_node below). zclassicd keeps at most
+ * MAX_BLOCKS_IN_TRANSIT_PER_PEER = 16 blocks in flight from one peer, so an
+ * honest legacy peer always fits. Past this a request gets notfound. */
+#define GETDATA_KEPT_BLOCKS_MAX 16
 
 struct askfor_entry {
     int64_t request_time;
@@ -440,6 +446,16 @@ struct p2p_node {
     uint8_t getheaders_deferred_req[GETHEADERS_DEFERRED_REQ_MAX_BYTES];
     uint16_t getheaders_deferred_len;
     int64_t getheaders_deferred_replay_after;
+
+    /* Blocks this peer asked for that the send budget stopped, oldest first,
+     * served from the send tick once the peer is under budget (msg_blocks.c::
+     * getdata_replay_kept). zclassicd does not ask again and ignores notfound,
+     * so nobody else would finish them. Fixed bytes, so the hostile path
+     * allocates nothing; zero-initialised by p2p_node_create (calloc), where a
+     * count of 0 means nothing is kept, and gone with the connection. Written
+     * and read only on the single message-handler thread, so no lock. */
+    struct uint256 getdata_kept[GETDATA_KEPT_BLOCKS_MAX];
+    uint8_t getdata_kept_count;
 
     struct inv_item *inventory_to_send;
     size_t inventory_to_send_count;

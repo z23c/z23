@@ -262,6 +262,17 @@ bool getheaders_replay_deferred(struct msg_processor *mp,
  * regression tests and operator diagnostics; nothing branches on it. */
 uint64_t getheaders_replayed_deferred(void);
 
+/* getdata_replay_kept() — serve the blocks the send budget stopped for this peer
+ * (struct p2p_node::getdata_kept), oldest first, until none are left or the
+ * peer is over budget again. A kept block this node can no longer serve gets
+ * notfound. Returns true when any were taken from the slot. Single
+ * message-handler thread only. */
+bool getdata_replay_kept(struct msg_processor *mp, struct p2p_node *node);
+
+/* msg_send_replay_held() — the send tick's one call for requests held back:
+ * getheaders_replay_deferred, then getdata_replay_kept. */
+void msg_send_replay_held(struct msg_processor *mp, struct p2p_node *node);
+
 /* getheaders_park_deferred() — hold the request the serve window just deferred
  * in that peer's one parking slot so the send tick can replay it once the
  * window rolls. `s` must still be positioned at the START of the unread

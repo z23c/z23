@@ -101,7 +101,7 @@ size_t net_recv_total_bytes_cap(void)
  * live send_segment->size across all peers. process_getdata consults
  * it (and the per-peer node->send_size) to stop serving once over
  * budget (Core's fPauseSend behaviour) — it does NOT disconnect the
- * peer, which is within protocol and will simply re-request later.
+ * peer, which is within protocol, and finishes the request from the send tick.
  *
  * Charged in send_segment_create, released in send_segment_free, so
  * every path that frees a segment — socket drain, p2p_node_free, and
@@ -194,8 +194,8 @@ size_t net_send_peer_bytes_cap(void)
  * advisory cap rather than equal to it, for two reasons:
  *
  *  - the advisory cap must still be the first thing that trips, so the
- *    paths that do consult it keep pausing politely (in protocol, peer
- *    re-requests later) instead of being cut off; and
+ *    paths that do consult it keep pausing politely (in protocol, the rest
+ *    is served when the peer reads again) instead of being cut off; and
  *  - the headroom is what separates "serving a peer that reads slowly" from
  *    "holding memory for a peer that is not reading at all". A peer on a
  *    7200rpm box, or on a long Tor circuit, is slow — it is not a peer with
