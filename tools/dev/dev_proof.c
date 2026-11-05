@@ -10622,7 +10622,8 @@ bool zcl_dev_proof_test_changed_set_close(const char *root,
 
 /* The impact plan, closed and rendered once after any needed graph refresh. */
 static bool dp_worker_plan(struct dp_worker *w, const char *const *files,
-                           size_t file_count, char *why, size_t why_len)
+                           size_t file_count, bool allow_refresh,
+                           char *why, size_t why_len)
 {
     const struct zcl_dev_proof_changed_set legacy = {
         .files = (const char **)files, .count = file_count
@@ -10636,7 +10637,7 @@ static bool dp_worker_plan(struct dp_worker *w, const char *const *files,
     const char *admission_reason = "";
     bool admitted = dp_changed_set_close(w->generation, changed,
                                          &w->plan, &admission_reason);
-    if (!admitted && admission_reason &&
+    if (allow_refresh && !admitted && admission_reason &&
         (strcmp(admission_reason, "closure-truncated") == 0 ||
          strcmp(admission_reason, "no-include-graph") == 0)) {
         if (!dp_worker_refresh_include_graph(w, why, why_len)) return false;
@@ -10697,7 +10698,7 @@ bool zcl_dev_proof_test_worker_plan(const char *submit, const char *generation,
     w->docs = &docs;
     bool ok = !check_docs || dp_docs_fresh_start(&docs, generation, generation,
         DP_DOCS_FRESH_TIMEOUT_MS, why, why_len);
-    if (ok) ok = dp_worker_plan(w, files, count, why, why_len);
+    if (ok) ok = dp_worker_plan(w, files, count, true, why, why_len);
     ok = dp_worker_docs_verdict(&docs, &paths, ok, why, why_len);
     if (ok && w->plan_len < json_cap)
         memcpy(json, w->plan_json, w->plan_len + 1);
@@ -10736,6 +10737,50 @@ static bool dp_worker_seal_source(struct dp_worker *w, char *why,
     return true;
 }
 
+static bool dp_source_plan_roots(const char *generation, const char *local,
+    const char *changed_path, const char *plan, size_t plan_len,
+    uint8_t source[32], uint8_t changed[32], uint8_t impact_out[32])
+{
+    char policy_path[PATH_MAX];
+    uint8_t policy[32];
+    if (snprintf(policy_path, sizeof(policy_path),
+                 "%s/cognition/controllers/include/controllers/agent_impact_rules.def",
+                 generation) >= (int)sizeof(policy_path) ||
+        !hash_file("zcl.dev_proof_changed_set.v1", changed_path, changed) ||
+        !hash_file("zcl.dev_proof_impact_policy.v1", policy_path, policy))
+        return false;
+    hash_text("zcl.dev_proof_git_source.v1", local, strlen(local), source);
+    struct sha3_256_ctx impact;
+    hash_begin(&impact, "zcl.dev_proof_impact_plan.v1");
+    sha3_256_write(&impact, policy, sizeof(policy));
+    sha3_256_write(&impact, (const uint8_t *)plan, plan_len);
+    sha3_256_finalize(&impact, impact_out);
+    return true;
+}
+
+bool zcl_dev_proof_source_plan_roots(const char *generation, const char *base,
+    const char *local, const char *scratch, const char *changed_path,
+    uint8_t source[32], uint8_t changed[32], uint8_t impact[32],
+    char *why, size_t why_len)
+{
+    if (!generation || !base || !local || !scratch || !changed_path ||
+        !source || !changed || !impact) return false;
+    struct zcl_dev_proof_changed_set set = {0};
+    struct dp_worker *w = zcl_calloc(1, sizeof(*w), "proof source roots");
+    struct proof_paths paths = {0};
+    if (!w) return false;
+    w->paths = &paths; w->generation = generation; w->changed = &set;
+    bool ok = zcl_dev_proof_changed_set_capture(generation, base, local, scratch,
+        changed_path, &set, why, why_len);
+    if (ok) ok = dp_worker_plan(w, set.files, set.count, false, why, why_len);
+    if (ok) ok = dp_source_plan_roots(generation, local, changed_path,
+        w->plan_json, w->plan_len, source, changed, impact);
+    if (!ok && why && !why[0]) proof_why(why, why_len, "proof_source_plan_roots_failed");
+    zcl_dev_proof_changed_set_release(&set);
+    free(w);
+    return ok;
+}
+
 /* The commit pair, the source roots and the changed set, into the receipt. */
 static bool dp_worker_receipt_identity(struct dp_worker *w, char *why,
                                        size_t why_len)
@@ -10752,10 +10797,9 @@ static bool dp_worker_receipt_identity(struct dp_worker *w, char *why,
         proof_why(why, why_len, "proof_identity_decode_failed");
         return false;
     }
-    hash_text("zcl.dev_proof_git_source.v1", w->local, strlen(w->local),
-              receipt->source_root);
-    if (!hash_file("zcl.dev_proof_changed_set.v1", w->paths->changed,
-                   receipt->changed_set_root)) {
+    if (!dp_source_plan_roots(w->generation, w->local, w->paths->changed,
+                              w->plan_json, w->plan_len, receipt->source_root,
+                              receipt->changed_set_root, receipt->impact_policy_root)) {
         proof_why(why, why_len, "changed_set_hash_failed");
         return false;
     }
@@ -10767,16 +10811,7 @@ static bool dp_worker_receipt_identity(struct dp_worker *w, char *why,
 static bool dp_worker_build_identity(struct dp_worker *w, char *why,
                                      size_t why_len)
 {
-    char policy_path[PATH_MAX];
     struct dev_source_record original_plan_source = {0};
-    if (snprintf(policy_path, sizeof(policy_path),
-                 "%s/cognition/controllers/include/controllers/agent_impact_rules.def",
-                 w->generation) >= (int)sizeof(policy_path) ||
-        !hash_file("zcl.dev_proof_impact_policy.v1", policy_path,
-                   w->receipt.impact_policy_root)) {
-        proof_why(why, why_len, "proof_toolchain_or_policy_unavailable");
-        return false;
-    }
     if (!proof_build_identity_capture(w->paths->root, &w->identity,
                                        original_plan_source.mutation_id,
                                        why, why_len)) {
@@ -10801,11 +10836,6 @@ static bool dp_worker_build_identity(struct dp_worker *w, char *why,
     memcpy(w->receipt.flags_root, w->identity.flags, 32);
     memcpy(w->receipt.environment_root, w->identity.environment, 32);
     memcpy(w->receipt.build_graph_root, w->identity.build_graph, 32);
-    struct sha3_256_ctx impact;
-    hash_begin(&impact, "zcl.dev_proof_impact_plan.v1");
-    sha3_256_write(&impact, w->receipt.impact_policy_root, 32);
-    sha3_256_write(&impact, (const uint8_t *)w->plan_json, w->plan_len);
-    sha3_256_finalize(&impact, w->receipt.impact_policy_root);
     return true;
 }
 
@@ -11155,7 +11185,7 @@ bool zcl_dev_proof_test_worker_bundle(const char *submit,
     w->docs = &docs;
     if (why && why_len > 0) why[0] = 0;
     *bundle_ms = 0;
-    bool ok = dp_worker_plan(w, files, count, why, why_len) &&
+    bool ok = dp_worker_plan(w, files, count, true, why, why_len) &&
               dp_worker_bundle_build(w, bundle_ms, why, why_len);
     free(w);
     return ok;
@@ -13024,7 +13054,7 @@ static bool proof_worker_body(const struct proof_paths *paths,
      * candidate test runner alone cannot qualify that compiled metadata. */
     if (!zcl_dev_proof_producer_source_qualified(w.source_before.source_id,
             zcl_build_source_id_sha256(), why, why_len)) return false;
-    if (!dp_worker_plan(&w, changed->files, changed->count, why, why_len))
+    if (!dp_worker_plan(&w, changed->files, changed->count, true, why, why_len))
         return false;
     if (!dp_worker_receipt_identity(&w, why, why_len)) return false;
     if (!dp_worker_build_identity(&w, why, why_len)) return false;

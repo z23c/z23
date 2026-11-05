@@ -457,6 +457,18 @@ bool zcl_dev_proof_select_range(const char *root, const char *base,
                                 struct zcl_dev_proof_range_selection *out,
                                 char *why, size_t why_len);
 
+/* Independently derive the worker's source, changed-set and impact roots.
+ * The caller must first establish the exact generation and commit pair and
+ * provide distinct private scratch paths in an isolated owned generation.
+ * Keep its source unchanged and verify the exact source before and after the
+ * call. Derived indexes may regenerate; this is not a read-only hook.
+ * Missing planner closure refuses; no refresh build is started. These roots
+ * alone do not admit a receipt. */
+bool zcl_dev_proof_source_plan_roots(const char *generation, const char *base,
+    const char *local, const char *scratch, const char *changed_path,
+    uint8_t source[32], uint8_t changed[32], uint8_t impact[32],
+    char *why, size_t why_len);
+
 const char *zcl_dev_proof_state_name(enum zcl_dev_proof_state state);
 /* Admit a completed cycle only when its schema, canonical action inputs, and
  * one independently derived fixed-width root per selected proof dimension
