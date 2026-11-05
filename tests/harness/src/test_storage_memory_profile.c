@@ -91,6 +91,20 @@ int test_storage_memory_profile(void)
     MP_CHECK("starts folding", !storage_memory_profile_is_steady());
     MP_CHECK("round trip at open", mp_roundtrip(pdb, jdb, 0));
 
+    int p_used = -1, j_used = -1, high = 0;
+    progress_store_tx_lock();
+    int p_rc = sqlite3_db_status(pdb, SQLITE_DBSTATUS_CACHE_USED, &p_used, &high, 0);
+    progress_store_tx_unlock();
+    projection_store_tx_lock();
+    int j_rc = sqlite3_db_status(jdb, SQLITE_DBSTATUS_CACHE_USED, &j_used, &high, 0);
+    projection_store_tx_unlock();
+    struct storage_cache_usage usage;
+    storage_memory_profile_read_cache(&usage);
+    MP_CHECK("actual progress cache equals SQLite measurement", p_rc == SQLITE_OK && p_used > 0 &&
+             usage.progress.state == STORAGE_CACHE_READY && usage.progress.bytes == p_used);
+    MP_CHECK("actual projection cache equals SQLite measurement", j_rc == SQLITE_OK && j_used > 0 &&
+             usage.projection.state == STORAGE_CACHE_READY && usage.projection.bytes == j_used);
+
     MP_CHECK("switch to steady", storage_memory_profile_set(true));
     MP_CHECK("is steady", storage_memory_profile_is_steady());
     MP_CHECK("kernel steady mmap == 64 MiB",
@@ -118,6 +132,9 @@ int test_storage_memory_profile(void)
 
     projection_store_close();
     progress_store_close();
+    storage_memory_profile_read_cache(&usage);
+    MP_CHECK("closed stores are distinct from zero cache", usage.progress.state == STORAGE_CACHE_CLOSED &&
+             usage.projection.state == STORAGE_CACHE_CLOSED);
     MP_CHECK("set with stores closed is a no-op success",
              storage_memory_profile_set(true));
     storage_memory_profile_set(false);

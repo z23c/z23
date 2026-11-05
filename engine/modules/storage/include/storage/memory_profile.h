@@ -27,6 +27,12 @@
 int64_t storage_memory_profile_steady_mmap(int64_t folding_mmap_bytes);
 int64_t storage_memory_profile_steady_cache_kib(int64_t folding_cache_kib);
 
+enum storage_cache_state { STORAGE_CACHE_CLOSED, STORAGE_CACHE_READY, STORAGE_CACHE_ERROR };
+struct storage_cache_sample { enum storage_cache_state state; int64_t bytes; };
+struct storage_cache_usage { struct storage_cache_sample progress, projection; };
+/* Measurements are independent snapshots, not RSS or mmap residency. */
+void storage_memory_profile_read_cache(struct storage_cache_usage *out);
+
 /* Switch every open store connection to the steady (true) or folding (false)
  * profile.  Each PRAGMA is issued under the lock that owns that connection.
  * Logs one line per call.  Returns false if an open connection refused the

@@ -11,6 +11,15 @@
 
 static _Atomic bool g_steady;
 
+void storage_memory_profile_read_cache(struct storage_cache_usage *out)
+{
+    if (!out) return;
+    *out = (struct storage_cache_usage) {
+        .progress = { STORAGE_CACHE_ERROR, 0 },
+        .projection = { STORAGE_CACHE_ERROR, 0 },
+    };
+}
+
 int64_t storage_memory_profile_steady_mmap(int64_t folding_mmap_bytes)
 {
     return folding_mmap_bytes < STORAGE_STEADY_MMAP_BYTES
