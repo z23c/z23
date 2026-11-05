@@ -897,6 +897,14 @@ static bool rcs_seed_shielded(sqlite3 *db, int64_t spr, int64_t sap,
         if (sqlite3_exec(db, sql, NULL, NULL, NULL) != SQLITE_OK)
             return false;
     }
+    if (nf == -2) {
+        /* Tables exist but the activation marker is absent. */
+        return nullifier_kv_initialize_history(db, 0) &&
+               sqlite3_exec(db,
+                            "DELETE FROM progress_meta WHERE key="
+                            "'nullifier_kv.activation_cursor'",
+                            NULL, NULL, NULL) == SQLITE_OK;
+    }
     return nf < 0 || nullifier_kv_initialize_history(db, nf);
 }
 
@@ -950,7 +958,7 @@ static int test_rom_compile_dump_gap_matrix(void)
             /* sapling row absent: cursor unknown, so a gap even at 0. */
             { 0, -1, 0, false, true, false, "gap_anchor_backfill_pending" },
             /* nullifier marker absent: unknown cursor is a gap. */
-            { 0, 0, -1, true, false, true, "gap_nullifier_backfill_pending" },
+            { 0, 0, -2, true, false, true, "gap_nullifier_backfill_pending" },
         };
         for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
             printf("[case %zu] ", i);
