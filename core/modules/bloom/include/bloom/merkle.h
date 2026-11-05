@@ -42,4 +42,9 @@ struct uint256 compute_merkle_root(const struct uint256 *txids, size_t count);
 struct uint256 compute_merkle_root_mutated(const struct uint256 *txids,
                                            size_t count, bool *mutated);
 
+/* The same root and mutation flag as compute_merkle_root_mutated, computed over
+ * the caller's array. It allocates nothing and overwrites `level`. */
+struct uint256 merkle_root_mutated_in_place(struct uint256 *level, size_t count,
+                                            bool *mutated);
+
 #endif

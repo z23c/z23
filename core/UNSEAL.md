@@ -995,3 +995,7 @@ later lane flips it HARD.
 - 2026-11-05T23:54:28Z — REASON: A manifest no longer starts a swarm; a peer's chunks stay out of the live table
   old ROOT: 0a72eb43d6c4ea2926d86a7b048aebc2bda2d4bd1a343242c23b2a7ffa9c5cd9
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T00:50:59Z — REASON: Check the block merkle root without a second allocation
+  old ROOT: 4d075f52fbf6c4785daf538c5a84b800dafa668584b11ec6a168d15cdc368137
+  by: owner unseal ritual (make core-unseal)

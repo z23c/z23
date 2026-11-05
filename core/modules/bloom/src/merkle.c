@@ -235,11 +235,24 @@ struct uint256 compute_merkle_root_mutated(const struct uint256 *txids,
     if (count == 0) return zero;
     if (count == 1) return txids[0];
 
-    size_t level_size = count;
-    struct uint256 *level = zcl_malloc(level_size * sizeof(struct uint256), "merkle_level");
+    struct uint256 *level = zcl_malloc(count * sizeof(struct uint256), "merkle_level");
     if (!level) return zero;
     memcpy(level, txids, count * sizeof(struct uint256));
 
+    struct uint256 root = merkle_root_mutated_in_place(level, count, mutated);
+    free(level);
+    return root;
+}
+
+struct uint256 merkle_root_mutated_in_place(struct uint256 *level, size_t count,
+                                            bool *mutated)
+{
+    *mutated = false;
+    struct uint256 zero;
+    uint256_set_null(&zero);
+    if (count == 0) return zero;
+
+    size_t level_size = count;
     while (level_size > 1) {
         size_t next_size = (level_size + 1) / 2;
         for (size_t i = 0; i < level_size; i += 2) {
@@ -252,8 +265,5 @@ struct uint256 compute_merkle_root_mutated(const struct uint256 *txids,
         }
         level_size = next_size;
     }
-
-    struct uint256 root = level[0];
-    free(level);
-    return root;
+    return level[0];
 }

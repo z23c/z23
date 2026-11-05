@@ -854,6 +854,7 @@ AGENT_IMPACT_RULE("tests/harness/src/test_accept_to_mempool.c", "accept_to_mempo
 AGENT_IMPACT_RULE("core/consensus/src/locktime.c|core/consensus/include/domain/consensus/locktime.h|core/modules/validation/include/validation/contextual_check_tx.h|core/modules/validation/src/contextual_check_tx.c|core/modules/validation/src/accept_to_mempool.c|core/modules/validation/src/check_block.c|tests/harness/src/test_tx_expiry_locktime_adversarial.c", "tx_expiry_locktime_adversarial domain_consensus_locktime locktime_edge bip113_bip65 accept_to_mempool check_block_edge")
 AGENT_IMPACT_RULE("tests/harness/src/test_mempool.c", "mempool")
 AGENT_IMPACT_RULE("tests/harness/src/test_merkle_tree.c", "merkle_tree")
+AGENT_IMPACT_RULE("core/consensus/src/check_block.c|core/modules/bloom/src/merkle.c|tests/harness/src/test_check_block_edge.c", "check_block_edge merkle_tree merkle_malleability consensus_parity")
 AGENT_IMPACT_RULE("core/modules/bloom/src/merkle.c|core/modules/bloom/include/bloom/merkle.h|tests/harness/src/test_merkle_malleability.c", "merkle_malleability bloom")
 AGENT_IMPACT_RULE("tests/harness/src/test_parity_lockin_anchor_membership.c", "parity_lockin_anchor_membership")
 AGENT_IMPACT_RULE("engine/jobs/src/utxo_apply_turnstile.c|engine/jobs/include/jobs/utxo_apply_turnstile.h|tests/harness/src/test_parity_lockin_turnstile.c|tests/harness/src/parity_lockin_turnstile_stage.c|tests/harness/src/shielded_pool_reset_pairing.c|engine/modules/storage/src/shielded_pool_kv.c|engine/modules/storage/include/storage/shielded_pool_kv.h", "parity_lockin_turnstile")

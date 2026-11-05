@@ -88,9 +88,12 @@ struct zcl_result domain_consensus_check_block_merkle_root(
             txids[i] = block->vtx[i].hash;
     }
 
+    /* In place over the array above, which nothing else reads: a second
+     * allocation that failed would give a zero root, and this function would
+     * read that as bad-txnmrklroot with dos 100 against an honest sender. */
     bool mutated = false;
     struct uint256 merkle_root =
-            compute_merkle_root_mutated(txids, block->num_vtx, &mutated);
+            merkle_root_mutated_in_place(txids, block->num_vtx, &mutated);
     free(txids);
 
     if (!uint256_eq(&block->header.hashMerkleRoot, &merkle_root)) {

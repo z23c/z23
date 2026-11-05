@@ -345,6 +345,42 @@ static int cbe_check_merkle_no_scratch_alloc(void)
     return failures;
 }
 
+/* The in-place root agrees with the copying root on every tree shape up to
+ * nine leaves, in the root and in the mutation flag, with and without a
+ * duplicated last leaf, and on the empty and single-leaf cases. */
+static int cbe_check_in_place_matches_copying(void)
+{
+    int failures = 0;
+    for (size_t n = 0; n <= 9; n++) {
+        struct uint256 ids[9];
+        struct uint256 scratch[9];
+        for (int dup = 0; dup < 2; dup++) {
+            memset(ids, 0, sizeof(ids));
+            for (size_t i = 0; i < n; i++) {
+                ids[i].data[0] = (uint8_t)(0x80 + i);
+                ids[i].data[31] = 0x3c;
+            }
+            if (dup && n >= 2)
+                ids[n - 1] = ids[n - 2];
+            memcpy(scratch, ids, sizeof(ids));
+            bool copy_mut = true, place_mut = true;
+            struct uint256 copy_root =
+                compute_merkle_root_mutated(ids, n, &copy_mut);
+            struct uint256 place_root =
+                merkle_root_mutated_in_place(scratch, n, &place_mut);
+            if (!uint256_eq(&copy_root, &place_root) ||
+                copy_mut != place_mut) {
+                printf("check_block_edge: in-place differs n=%zu dup=%d "
+                       "mut=%d/%d\n", n, dup, copy_mut, place_mut);
+                failures++;
+            }
+        }
+    }
+    CBE_CHECK("in-place merkle root matches the copying root, 0..9 leaves",
+              failures == 0);
+    return failures;
+}
+
 /* Check the aggregate-sigops verdict for a 1-tx coinbase block carrying
  * exactly `total` legacy sigops. Returns the number of failed checks. */
 static int cbe_check_sigops_total(unsigned int total, uint8_t marker,
@@ -428,6 +464,7 @@ int test_check_block_edge(void)
 
     /* A local memory failure is not a verdict on the block. */
     failures += cbe_check_merkle_no_scratch_alloc();
+    failures += cbe_check_in_place_matches_copying();
 
     /* ================================================================
      * 4. Aggregate sigops boundary: MAX_BLOCK_SIGOPS == 20000.
