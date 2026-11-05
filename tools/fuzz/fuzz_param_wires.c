@@ -19,7 +19,6 @@
 #include "services/beta6_bootstrap.h"
 #include "util/sync.h"
 
-#include <ftw.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -140,19 +139,24 @@ static bool build_snapshot_tree(void)
     return fclose(f) == 0;
 }
 
-static int remove_entry(const char *path, const struct stat *st, int type,
-                        struct FTW *walk)
-{
-    (void)st;
-    (void)type;
-    (void)walk;
-    return remove(path);
-}
+/* Every entry of the fixture, children before parents. */
+static const char *const k_fixture_entries[] = {
+    "rf/f.bin", "rf/link.bin", "rf", "params/sapling-output.params",
+    "params/sprout-verifying.key", "params", "src/blocks/blk00000.dat",
+    "src/blocks/index/000005.ldb", "src/blocks/index", "src/blocks",
+    "src/chainstate/000007.ldb", "src/chainstate", "src", "src.anchor",
+};
 
 static void cleanup_fixture(void)
 {
-    if (g_base[0] != '\0')
-        (void)nftw(g_base, remove_entry, 8, FTW_DEPTH | FTW_PHYS);
+    char path[256];
+    if (g_base[0] == '\0')
+        return;
+    for (size_t i = 0; i < sizeof(k_fixture_entries) / sizeof(k_fixture_entries[0]); i++) {
+        snprintf(path, sizeof(path), "%s/%s", g_base, k_fixture_entries[i]);
+        (void)remove(path);
+    }
+    (void)remove(g_base);
 }
 
 static bool build_fixture(void)
