@@ -629,6 +629,56 @@ static int smt_t_empty_sections_finish(void)
     return failures;
 }
 
+/* fuzz_semantic_manifest trapped on this after 1.3M executions: a record cap
+ * cut the main file out of FILES, and the validator accepts that because
+ * TRUNCATED names the section. Replaying the surviving records asks finish()
+ * for a complete manifest with no main file, which it must refuse. The fuzz
+ * target exempts exactly that refusal, so pin both halves here. */
+static int smt_t_cap_cuts_main_file(void)
+{
+    int failures = 0;
+    TEST_CASE("semantic_manifest: a cap may cut the main file; a complete manifest may not lack it") {
+        struct vcs_semantic_facts_v1 f = {.max_records = 1,
+                                          .max_section_bytes = 65536};
+        struct vcs_semantic_builder_v1 *cut = vcs_semantic_builder_v1_new();
+        struct vcs_semantic_builder_v1 *again = vcs_semantic_builder_v1_new();
+        struct vcs_semantic_record_v1 r = {0};
+        struct vcs_semantic_facts_info_v1 info = {0};
+        uint8_t *out = NULL, *refused = NULL;
+        size_t out_len = 0, refused_len = 0;
+        uint32_t files = 0;
+        char why[256] = {0};
+        ASSERT(cut != NULL && again != NULL);
+        ASSERT(vcs_semantic_builder_v1_enable_facts(cut, &f));
+        ASSERT(smt_golden_identity(cut, &r));
+        ASSERT(smt_golden_file(cut, &r, "inc/a.h", "#define A_MAX 16\n",
+                               VCS_SEMANTIC_ORIGIN_V1_REPO));
+        ASSERT(smt_golden_file(cut, &r, "src/a.c", "int f(void) { return 0; }\n",
+                               VCS_SEMANTIC_ORIGIN_V1_MAIN));
+        ASSERT(vcs_semantic_builder_v1_finish(cut, &out, &out_len, why, sizeof(why)));
+        ASSERT(vcs_semantic_manifest_v1_validate(out, out_len, why, sizeof(why)));
+        ASSERT(vcs_semantic_facts_v1_info(out, out_len, &info));
+        ASSERT(info.present && !info.complete);
+        ASSERT(vcs_semantic_section_count_v1(out, out_len,
+                                             VCS_SEMANTIC_SECTION_V1_FILES, &files));
+        ASSERT_EQ(files, 1u);
+
+        ASSERT(vcs_semantic_builder_v1_enable_facts(again, &f));
+        ASSERT(smt_golden_identity(again, &r));
+        ASSERT(smt_golden_file(again, &r, "inc/a.h", "#define A_MAX 16\n",
+                               VCS_SEMANTIC_ORIGIN_V1_REPO));
+        ASSERT(!vcs_semantic_builder_v1_finish(again, &refused, &refused_len, why,
+                                               sizeof(why)));
+        ASSERT(strstr(why, "identity main file is not the one main file") != NULL);
+        vcs_semantic_record_v1_free(&r);
+        vcs_semantic_builder_v1_free(cut);
+        vcs_semantic_builder_v1_free(again);
+        free(out);
+        free(refused);
+    } TEST_END
+    return failures;
+}
+
 /* ── the text dump of composite list elements ─────────────────────────────── */
 
 /* The golden vector plus the facts extension and one PROBES record with two
@@ -1047,6 +1097,7 @@ int test_semantic_manifest(void)
     failures += smt_t_golden();
     failures += smt_t_golden_fold();
     failures += smt_t_empty_sections_finish();
+    failures += smt_t_cap_cuts_main_file();
     failures += smt_t_dump_composites();
     failures += smt_t_facts_revision();
     failures += smt_t_refusals();

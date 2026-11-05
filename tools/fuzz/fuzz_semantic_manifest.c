@@ -216,6 +216,38 @@ static bool sm_each_noop_cb(void *ctx, const struct vcs_semantic_fields_v1 *f)
     return true;
 }
 
+/* Read the accepted manifest's facts header and arm the builder with it. */
+static void sm_rearm_facts(struct vcs_semantic_builder_v1 *b,
+                           const uint8_t *bytes, size_t len,
+                           struct vcs_semantic_facts_info_v1 *info)
+{
+    memset(info, 0, sizeof(*info));
+    if (!vcs_semantic_facts_v1_info(bytes, len, info) || !info->present)
+        return;
+    struct vcs_semantic_facts_v1 caps = {0};
+    memcpy(caps.namespace_root, info->namespace_root, 32);
+    memcpy(caps.producer, info->producer, 32);
+    caps.max_records = info->max_records;
+    caps.max_section_bytes = info->max_section_bytes;
+    caps.revision = info->revision;
+    if (vcs_semantic_builder_v1_enable_facts(b, &caps))
+        return;
+    /* The decoder accepted a facts header this exact builder API
+     * cannot re-arm (out-of-range caps it nonetheless read back
+     * from an accepted manifest). That is a real finding: the
+     * builder and the decoder disagree about what caps are valid,
+     * so an accepted manifest cannot always be reproduced. */
+    fprintf(stderr,
+            "fuzz_semantic_manifest: FINDING: accepted facts header "
+            "(max_records=%u max_section_bytes=%llu revision=%u) "
+            "cannot be re-armed by vcs_semantic_builder_v1_enable_"
+            "facts\n",
+            info->max_records,
+            (unsigned long long)info->max_section_bytes,
+            (unsigned)info->revision);
+    __builtin_trap();
+}
+
 /* Property 2: rebuild an accepted manifest from its decoded records and
  * demand byte-identical output and an equal root. Aborts on mismatch. */
 static void sm_check_rebuild(const uint8_t *bytes, size_t len,
@@ -231,31 +263,7 @@ static void sm_check_rebuild(const uint8_t *bytes, size_t len,
     if (b == NULL)
         return;
 
-    memset(&info, 0, sizeof(info));
-    if (vcs_semantic_facts_v1_info(bytes, len, &info) && info.present) {
-        struct vcs_semantic_facts_v1 caps = {0};
-        memcpy(caps.namespace_root, info.namespace_root, 32);
-        memcpy(caps.producer, info.producer, 32);
-        caps.max_records = info.max_records;
-        caps.max_section_bytes = info.max_section_bytes;
-        caps.revision = info.revision;
-        if (!vcs_semantic_builder_v1_enable_facts(b, &caps)) {
-            /* The decoder accepted a facts header this exact builder API
-             * cannot re-arm (out-of-range caps it nonetheless read back
-             * from an accepted manifest). That is a real finding: the
-             * builder and the decoder disagree about what caps are valid,
-             * so an accepted manifest cannot always be reproduced. */
-            fprintf(stderr,
-                    "fuzz_semantic_manifest: FINDING: accepted facts header "
-                    "(max_records=%u max_section_bytes=%llu revision=%u) "
-                    "cannot be re-armed by vcs_semantic_builder_v1_enable_"
-                    "facts\n",
-                    info.max_records,
-                    (unsigned long long)info.max_section_bytes,
-                    (unsigned)info.revision);
-            __builtin_trap();
-        }
-    }
+    sm_rearm_facts(b, bytes, len, &info);
 
     if (!vcs_semantic_manifest_v1_each(bytes, len, sm_rebuild_cb, &ctx)) {
         if (ctx.add_failed) {
@@ -272,6 +280,17 @@ static void sm_check_rebuild(const uint8_t *bytes, size_t len,
     }
 
     if (!vcs_semantic_builder_v1_finish(b, &out, &out_len, why, sizeof(why))) {
+        /* A record cap can cut the main file out of FILES: the validator
+         * accepts that because TRUNCATED names the section (files_cut). The
+         * replay below has no TRUNCATED record to hand finish(), so it asks
+         * for a complete manifest with no main file, and refusing that is
+         * correct. Only that refusal of an incomplete manifest is exempt;
+         * any other one is still a finding. */
+        if (info.present && !info.complete &&
+            strstr(why, "identity main file is not the one main file") != NULL) {
+            vcs_semantic_builder_v1_free(b);
+            return;
+        }
         fprintf(stderr,
                 "fuzz_semantic_manifest: FINDING: builder refused to finish "
                 "an all-accepted-record rebuild: %s\n",
