@@ -13,7 +13,9 @@
 #include "primitives/transaction.h"
 #include "script/script.h"
 #include "jobs/created_outputs_index.h"
+#include "jobs/mint_skip_crypto.h"
 #include "jobs/reducer_frontier.h"
+#include "platform/clock.h"
 #include "jobs/script_validate_stage.h"
 #include "storage/coins_kv.h"
 #include "storage/progress_store.h"
@@ -25,6 +27,8 @@
 #include "validation/main_state.h"
 
 #include <errno.h>
+#include <stdatomic.h>
+#include <stdint.h>
 #include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,6 +56,17 @@ bool find_lowest_prevout_unresolved_hole_unlocked(
  * real-wall-clock 10-minute budget (SV_UNRESOLVED_BUDGET_SECONDS) that a
  * fast test must not wait out. */
 const char *sv_find_body_availability_cause(struct blocker_snapshot *snap_out);
+
+/* Telemetry getters declared in engine/jobs/src/script_validate_stage_internal.h
+ * (sibling-private; not in a public header). Forward-declared here, as above,
+ * so the tests can read the stamps and counters the dump state publishes. */
+stage_t *script_validate_stage_handle(void);
+uint64_t script_validate_stage_inputs_failed_total(void);
+uint64_t script_validate_stage_header_event_emit_total(void);
+uint64_t script_validate_stage_header_event_emit_fail_total(void);
+int64_t script_validate_stage_last_step_unix(void);
+int64_t script_validate_stage_last_blocked_unix(void);
+int64_t script_validate_stage_last_advance_height(void);
 
 #define SV_CHECK(name, expr) do { \
     printf("script_validate: %s... ", (name)); \
@@ -1010,6 +1025,423 @@ static int sv_case_root_cause(void)
     return failures;
 }
 
+/* ---- measured-gap cases: telemetry reset values, held-prevout timing and
+ * named blocker, advance side effects, init idempotence, shutdown reset,
+ * checkpoint-fold rows and dry-run argument checks ---- */
+
+/* Like `ok = ok && expr`, but names the first failing line. */
+#define SV_AND(ok, expr) do { \
+    if ((ok) && !(expr)) { \
+        printf("[sv line %d failed] ", __LINE__); \
+        (ok) = false; \
+    } \
+} while (0)
+
+#define SV_PREVOUT_BLOCKER "script_validate.prevout_unresolved"
+
+struct sv_fake_clock {
+    _Atomic int64_t wall_ms;
+};
+
+static int64_t sv_fake_now_mono(void *self)
+{
+    (void)self;
+    return 1;
+}
+
+static int64_t sv_fake_now_wall(void *self)
+{
+    struct sv_fake_clock *c = (struct sv_fake_clock *)self;
+    return atomic_load(&c->wall_ms);
+}
+
+static void sv_clock_set(struct sv_fake_clock *c, int64_t unix_s)
+{
+    atomic_store(&c->wall_ms, unix_s * 1000);
+}
+
+static void sv_clock_install(struct sv_fake_clock *c, int64_t unix_s)
+{
+    sv_clock_set(c, unix_s);
+    static clock_iface_t iface;
+    iface.now_monotonic_ns = sv_fake_now_mono;
+    iface.now_wall_ms = sv_fake_now_wall;
+    iface.self = c;
+    clock_set_default(&iface);
+}
+
+/* Every telemetry getter at its reset value (a fresh process, or after
+ * script_validate_stage_shutdown). */
+static bool sv_telemetry_is_reset(void)
+{
+    bool ok = true;
+    SV_AND(ok, script_validate_stage_verified_total() == 0);
+    SV_AND(ok, script_validate_stage_script_invalid_total() == 0);
+    SV_AND(ok, script_validate_stage_internal_error_total() == 0);
+    SV_AND(ok, script_validate_stage_upstream_failed_total() == 0);
+    SV_AND(ok, script_validate_stage_inputs_verified_total() == 0);
+    SV_AND(ok, script_validate_stage_inputs_failed_total() == 0);
+    SV_AND(ok, script_validate_stage_header_event_emit_total() == 0);
+    SV_AND(ok, script_validate_stage_header_event_emit_fail_total() == 0);
+    SV_AND(ok, script_validate_stage_last_step_unix() == 0);
+    SV_AND(ok, script_validate_stage_last_blocked_unix() == 0);
+    SV_AND(ok, script_validate_stage_last_advance_height() == -1);
+    SV_AND(ok, script_validate_stage_cursor() == 0);
+    SV_AND(ok, script_validate_stage_step_us_ewma() == 0);
+    SV_AND(ok, script_validate_stage_handle() == NULL);
+    return ok;
+}
+
+static bool sv_row_counts(sqlite3 *db, int height, int tx, int inputs)
+{
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db,
+        "SELECT tx_count, input_count FROM script_validate_log "
+        "WHERE height = ?", -1, &st, NULL) != SQLITE_OK)
+        return false;
+    sqlite3_bind_int(st, 1, height);
+    bool ok = sqlite3_step(st) == SQLITE_ROW &&
+              sqlite3_column_int(st, 0) == tx &&
+              sqlite3_column_int(st, 1) == inputs;
+    sqlite3_finalize(st);
+    return ok;
+}
+
+static bool sv_find_blocker(const char *id, struct blocker_snapshot *out)
+{
+    struct blocker_snapshot snaps[16];
+    int n = blocker_snapshot_all(snaps, 16);
+    for (int i = 0; i < n; i++) {
+        if (strcmp(snaps[i].id, id) == 0) {
+            *out = snaps[i];
+            return true;
+        }
+    }
+    return false;
+}
+
+/* The held-prevout budget defaults to 600s: a hold is IDLE with no blocker
+ * through elapsed 599s and becomes the PERMANENT named blocker at 600s, with
+ * the exact reason text and no root cause. The fake wall clock starts at 1s
+ * so a baseline of 1 is a real instant. Then a body_persist failure at the
+ * held height advances past it and releases the blocker. */
+static int sv_case_hold_clock(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_sv sc;
+    struct sv_fake_clock fc;
+    SV_CHECK("hold_clock: setup",
+             sv_setup("hold_clock", 3, -1, dir, sizeof(dir), &ms, &sc) == 0);
+    sc.missing_prevout_height = 1;
+    blocker_reset_for_testing();
+    reducer_frontier_body_read_note_reset_for_testing();
+    script_validate_stage_unresolved_budget_set_for_test(-1);
+    sv_clock_install(&fc, 1);
+
+    bool ok = script_validate_stage_step_once() == JOB_ADVANCED;
+    SV_AND(ok, script_validate_stage_last_advance_height() == 0);
+    SV_AND(ok, script_validate_stage_last_step_unix() == 1);
+    SV_AND(ok, script_validate_stage_step_once() == JOB_IDLE);
+    SV_AND(ok, script_validate_stage_last_blocked_unix() == 1);
+    SV_AND(ok, script_validate_stage_internal_error_total() == 1);
+    SV_AND(ok, !blocker_exists(SV_PREVOUT_BLOCKER));
+    sv_clock_set(&fc, 600);
+    SV_AND(ok, script_validate_stage_step_once() == JOB_IDLE);
+    SV_AND(ok, !blocker_exists(SV_PREVOUT_BLOCKER));
+    SV_AND(ok, script_validate_stage_internal_error_total() == 1);
+    sv_clock_set(&fc, 601);
+    SV_AND(ok, script_validate_stage_step_once() == JOB_BLOCKED);
+    struct blocker_snapshot snap;
+    SV_AND(ok, sv_find_blocker(SV_PREVOUT_BLOCKER, &snap));
+    const char *held_tail = strstr(snap.reason, " held=600s; prevout not "
+                                                "derivable from body");
+    SV_AND(ok, strncmp(snap.reason, "script_validate height=1 "
+                       "reason=prevout_unresolved tx=", 54) == 0);
+    SV_AND(ok, held_tail && held_tail[strlen(" held=600s; prevout not "
+                                              "derivable from body")] == 0);
+    SV_AND(ok, snap.class == BLOCKER_PERMANENT && snap.retry_budget == -1);
+    SV_AND(ok, snap.caused_by[0] == '\0' && snap.cause_detail[0] == '\0');
+    SV_AND(ok, script_validate_stage_cursor() == 1);
+
+    SV_AND(ok, exec_sql(progress_store_db(),
+                        "UPDATE body_persist_log SET ok=0,"
+                        "source='upstream_failed' WHERE height=1"));
+    SV_AND(ok, script_validate_stage_step_once() == JOB_ADVANCED);
+    SV_AND(ok, !blocker_exists(SV_PREVOUT_BLOCKER));
+    SV_AND(ok, script_validate_stage_cursor() == 2);
+    SV_AND(ok, script_validate_stage_last_advance_height() == 1);
+    SV_AND(ok, script_validate_stage_upstream_failed_total() == 1);
+    int row_ok = -1, vin = -2; char status[32];
+    SV_AND(ok, log_row_at(progress_store_db(), 1, &row_ok, status,
+                          sizeof(status), &vin));
+    SV_AND(ok, row_ok == 0 && vin == -1);
+    SV_AND(ok, strcmp(status, "upstream_failed") == 0);
+    SV_AND(ok, sv_row_counts(progress_store_db(), 1, 0, 0));
+    SV_CHECK("hold_clock: 600s budget, exact blocker, advance side effects",
+             ok);
+
+    clock_reset_default();
+    blocker_reset_for_testing();
+    sv_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+/* One held prevout at height 1 with the budget at 0, an optional torn-body
+ * note, an optional body-availability blocker; returns the named blocker's
+ * typed cause fields and whether its reason names a torn body. */
+static bool sv_hold_cause_case(int note_height, bool body_blocker,
+                               const char *want_caused_by,
+                               const char *want_detail)
+{
+    char dir[256]; struct main_state ms; struct synth_chain_sv sc;
+    if (sv_setup("hold_cause", 3, -1, dir, sizeof(dir), &ms, &sc) != 0) {
+        sv_teardown(dir, &ms, &sc);
+        return false;
+    }
+    sc.missing_prevout_height = 1;
+    blocker_reset_for_testing();
+    reducer_frontier_body_read_note_reset_for_testing();
+    if (note_height >= 0)
+        reducer_frontier_body_read_note_record(
+            note_height, 12, 34, REDUCER_FRONTIER_BODY_READ_DISK,
+            &sc.hashes[0]);
+    if (body_blocker) {
+        struct blocker_record r;
+        if (blocker_init(&r, "utxo_apply.body_read_failed", "utxo_apply",
+                         BLOCKER_TRANSIENT, "height=1: body vanished"))
+            (void)blocker_set(&r);
+    }
+    script_validate_stage_unresolved_budget_set_for_test(0);
+    script_validate_stage_drain(100);
+
+    struct blocker_snapshot snap;
+    bool ok = sv_find_blocker(SV_PREVOUT_BLOCKER, &snap);
+    SV_AND(ok, script_validate_stage_cursor() == 1);
+    SV_AND(ok, strcmp(snap.caused_by, want_caused_by) == 0);
+    SV_AND(ok, strcmp(snap.cause_detail, want_detail) == 0);
+    SV_AND(ok, (strstr(snap.reason, "torn body") != NULL) ==
+                   (note_height == 0));
+
+    script_validate_stage_unresolved_budget_set_for_test(-1);
+    reducer_frontier_body_read_note_reset_for_testing();
+    blocker_reset_for_testing();
+    sv_teardown(dir, &ms, &sc);
+    return ok;
+}
+
+static int sv_case_hold_causes(void)
+{
+    int failures = 0;
+    SV_CHECK("hold_cause: no note, no upstream blocker -> no cause",
+             sv_hold_cause_case(-1, false, "", ""));
+    SV_CHECK("hold_cause: torn note at the held height is not an ancestor",
+             sv_hold_cause_case(1, false, "", ""));
+    SV_CHECK("hold_cause: torn note above the held height is not an ancestor",
+             sv_hold_cause_case(5, false, "", ""));
+    SV_CHECK("hold_cause: torn ancestor body is named",
+             sv_hold_cause_case(0, false, "reducer_frontier.body_read_torn",
+                                "torn body height=0"));
+    SV_CHECK("hold_cause: upstream body-read blocker is the root cause",
+             sv_hold_cause_case(-1, true, "utxo_apply.body_read_failed",
+                                "prevout height=1"));
+    return failures;
+}
+
+static bool sv_block_status_valid_level(const struct synth_chain_sv *sc, int h)
+{
+    return (block_index_status_load(&sc->blocks[h]) & BLOCK_VALID_MASK) ==
+           BLOCK_VALID_SCRIPTS;
+}
+
+/* Verified, script-invalid and idle steps: terminal rows carry the tx and
+ * input counts, the validity level rises only for verified blocks, header
+ * status events are emitted for them, and the wait paths stamp last_blocked. */
+static int sv_case_step_details(void)
+{
+    int failures = 0;
+    {
+        char dir[256]; struct main_state ms; struct synth_chain_sv sc;
+        struct sv_fake_clock fc;
+        SV_CHECK("step_details: setup",
+                 sv_setup("step_details", 3, -1, dir, sizeof(dir), &ms, &sc)
+                     == 0);
+        sv_clock_install(&fc, 7);
+        bool ok = script_validate_stage_drain(100) == 3;
+        SV_AND(ok, script_validate_stage_last_advance_height() == 2);
+        SV_AND(ok, script_validate_stage_last_step_unix() == 7);
+        for (int h = 0; ok && h < 3; h++) {
+            SV_AND(ok, sv_row_counts(progress_store_db(), h, 2, 1));
+            SV_AND(ok, sv_block_status_valid_level(&sc, h));
+        }
+        SV_AND(ok, script_validate_stage_script_invalid_total() == 0);
+        SV_AND(ok, script_validate_stage_internal_error_total() == 0);
+        SV_AND(ok, script_validate_stage_upstream_failed_total() == 0);
+        SV_AND(ok, script_validate_stage_inputs_failed_total() == 0);
+        SV_AND(ok, script_validate_stage_step_us_ewma() > 0);
+        sv_clock_set(&fc, 9);
+        SV_AND(ok, script_validate_stage_step_once() == JOB_IDLE);
+        SV_AND(ok, script_validate_stage_last_blocked_unix() == 9);
+        SV_CHECK("step_details: verified rows, levels, events, idle stamp",
+                 ok);
+        clock_reset_default();
+        sv_teardown(dir, &ms, &sc);
+    }
+    {
+        char dir[256]; struct main_state ms; struct synth_chain_sv sc;
+        SV_CHECK("step_details_invalid: setup",
+                 sv_setup("step_invalid", 3, -1, dir, sizeof(dir), &ms, &sc)
+                     == 0);
+        sc.invalid_height = 1;
+        bool ok = script_validate_stage_drain(100) == 3;
+        SV_AND(ok, sv_row_counts(progress_store_db(), 1, 2, 1));
+        SV_AND(ok, sv_block_status_valid_level(&sc, 0));
+        SV_AND(ok, !sv_block_status_valid_level(&sc, 1));
+        SV_AND(ok, sv_block_status_valid_level(&sc, 2));
+        SV_AND(ok, script_validate_stage_verified_total() == 2);
+        SV_AND(ok, script_validate_stage_script_invalid_total() == 1);
+        SV_AND(ok, script_validate_stage_inputs_failed_total() == 1);
+        SV_CHECK("step_details_invalid: counts, no level raise, failed inputs",
+                 ok);
+        sv_teardown(dir, &ms, &sc);
+    }
+    {
+        char dir[256]; struct main_state ms; struct synth_chain_sv sc;
+        struct sv_fake_clock fc;
+        SV_CHECK("step_unindexed: setup",
+                 sv_setup("step_unindexed", 3, -1, dir, sizeof(dir), &ms, &sc)
+                     == 0);
+        sc.blocks[1].nStatus = 0;   /* no BLOCK_HAVE_DATA at height 1 */
+        sv_clock_install(&fc, 11);
+        bool ok = script_validate_stage_step_once() == JOB_ADVANCED;
+        sv_clock_set(&fc, 12);
+        SV_AND(ok, script_validate_stage_step_once() == JOB_IDLE);
+        SV_AND(ok, script_validate_stage_last_blocked_unix() == 12);
+        SV_AND(ok, script_validate_stage_cursor() == 1);
+        SV_CHECK("step_unindexed: IDLE and stamped, cursor held", ok);
+        clock_reset_default();
+        sv_teardown(dir, &ms, &sc);
+    }
+    return failures;
+}
+
+/* A second init with the same main_state is a no-op success; a different
+ * main_state or NULL is refused and leaves the stage bound and working. */
+static int sv_case_init_idempotent(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_sv sc;
+    SV_CHECK("init: setup",
+             sv_setup("init_twice", 3, -1, dir, sizeof(dir), &ms, &sc) == 0);
+    stage_t *handle = script_validate_stage_handle();
+    bool ok = handle != NULL;
+    SV_AND(ok, script_validate_stage_init(&ms));
+    SV_AND(ok, script_validate_stage_handle() == handle);
+    struct main_state other;
+    main_state_init(&other);
+    SV_AND(ok, !script_validate_stage_init(&other));
+    SV_AND(ok, !script_validate_stage_init(NULL));
+    main_state_free(&other);
+    SV_AND(ok, script_validate_stage_handle() == handle);
+    SV_AND(ok, script_validate_stage_drain(100) == 3);
+    SV_AND(ok, script_validate_stage_verified_total() == 3);
+    SV_CHECK("init: same state ok, other state refused, stage still works",
+             ok);
+    sv_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+/* Shutdown returns every counter, stamp and the hold tracking to its reset
+ * value; a re-init at height 0 then starts a fresh hold episode. */
+static int sv_case_shutdown_resets(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_sv sc;
+    SV_CHECK("shutdown: setup",
+             sv_setup("shutdown_reset", 4, 2, dir, sizeof(dir), &ms, &sc) == 0);
+    sc.invalid_height = 1;
+    sc.missing_prevout_height = 3;
+    blocker_reset_for_testing();
+    bool ok = script_validate_stage_drain(100) == 3;
+    SV_AND(ok, script_validate_stage_verified_total() == 1);
+    SV_AND(ok, script_validate_stage_script_invalid_total() == 1);
+    SV_AND(ok, script_validate_stage_upstream_failed_total() == 1);
+    SV_AND(ok, script_validate_stage_internal_error_total() == 1);
+    SV_AND(ok, script_validate_stage_inputs_verified_total() > 0);
+    SV_AND(ok, script_validate_stage_inputs_failed_total() == 1);
+    SV_AND(ok, script_validate_stage_last_step_unix() > 0);
+    SV_AND(ok, script_validate_stage_last_blocked_unix() > 0);
+    SV_AND(ok, script_validate_stage_last_advance_height() == 2);
+    SV_AND(ok, script_validate_stage_cursor() == 3);
+    SV_AND(ok, script_validate_stage_step_us_ewma() > 0);
+    script_validate_stage_shutdown();
+    SV_AND(ok, sv_telemetry_is_reset());
+    SV_CHECK("shutdown: counters, stamps, cursor and handle reset", ok);
+
+    ok = exec_sql(progress_store_db(), "DELETE FROM script_validate_log");
+    SV_AND(ok, exec_sql(progress_store_db(),
+                        "UPDATE stage_cursor SET cursor=0 "
+                        "WHERE name='script_validate'"));
+    sc.invalid_height = -1;
+    sc.missing_prevout_height = 0;
+    SV_AND(ok, script_validate_stage_init(&ms));
+    script_validate_stage_set_reader(fake_reader, &sc);
+    script_validate_stage_set_prevout_resolver(fake_prevout, &sc);
+    SV_AND(ok, script_validate_stage_step_once() == JOB_IDLE);
+    SV_AND(ok, script_validate_stage_internal_error_total() == 1);
+    SV_CHECK("shutdown: hold tracking restarted from nothing", ok);
+    blocker_reset_for_testing();
+    sv_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+/* Offline fast-mint rows are explicitly checkpoint_fold, count every tx and
+ * the non-coinbase inputs, and never count as verified or raise the level. */
+static int sv_case_checkpoint_fold_rows(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_sv sc;
+    SV_CHECK("checkpoint_fold: setup",
+             sv_setup("fold_rows", 3, -1, dir, sizeof(dir), &ms, &sc) == 0);
+    mint_skip_crypto_set(true);
+    bool ok = script_validate_stage_drain(100) == 3;
+    mint_skip_crypto_set(false);
+    for (int h = 0; ok && h < 3; h++) {
+        int row_ok = -1, vin = -2; char status[32];
+        SV_AND(ok, log_row_at(progress_store_db(), h, &row_ok, status,
+                              sizeof(status), &vin));
+        SV_AND(ok, row_ok == 1 && strcmp(status, "checkpoint_fold") == 0);
+        SV_AND(ok, sv_row_counts(progress_store_db(), h, 2, 1));
+        SV_AND(ok, !sv_block_status_valid_level(&sc, h));
+    }
+    SV_AND(ok, script_validate_stage_verified_total() == 0);
+    SV_CHECK("checkpoint_fold: rows, counts, no verified credit", ok);
+    sv_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+/* The dry run refuses a missing block or report, and reports a good block
+ * as verified with its tx and input counts. */
+static int sv_case_dry_run_arguments(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_sv sc;
+    SV_CHECK("dry_run_args: setup",
+             sv_setup("dry_args", 3, -1, dir, sizeof(dir), &ms, &sc) == 0);
+    struct script_validate_dry_run_report dry;
+    memset(&dry, 0xAA, sizeof(dry));
+    bool ok = !script_validate_stage_dry_run_block(NULL, 1, &dry);
+    SV_AND(ok, !script_validate_stage_dry_run_block(&sc.bodies[1], 1, NULL));
+    SV_AND(ok, script_validate_stage_dry_run_block(&sc.bodies[1], 1, &dry));
+    SV_AND(ok, dry.ok && !dry.internal_error);
+    SV_AND(ok, strcmp(dry.status, "verified") == 0);
+    SV_AND(ok, dry.tx_count == 2 && dry.input_count == 1);
+    SV_AND(ok, dry.first_failure_vin == -1);
+    SV_AND(ok, script_validate_stage_inputs_verified_total() == 0);
+    SV_CHECK("dry_run_args: NULL refused, good block reported", ok);
+    sv_teardown(dir, &ms, &sc);
+    return failures;
+}
+
 int test_script_validate_stage(void);
 int test_script_validate_stage(void)
 {
@@ -1017,6 +1449,9 @@ int test_script_validate_stage(void)
     int failures = 0;
 
     blocker_module_init();
+
+    SV_CHECK("fresh process: every telemetry getter at its reset value",
+             sv_telemetry_is_reset());
 
     failures += sv_case_happy();
     failures += sv_case_script_invalid();
@@ -1035,6 +1470,13 @@ int test_script_validate_stage(void)
     failures += sv_case_body_read_failed();
     failures += sv_case_torn_cause();
     failures += sv_case_root_cause();
+    failures += sv_case_hold_clock();
+    failures += sv_case_hold_causes();
+    failures += sv_case_step_details();
+    failures += sv_case_init_idempotent();
+    failures += sv_case_shutdown_resets();
+    failures += sv_case_checkpoint_fold_rows();
+    failures += sv_case_dry_run_arguments();
 
     printf("script_validate_stage tests: %s\n",
            failures ? "FAILED" : "PASSED");
