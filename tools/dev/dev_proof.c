@@ -10459,6 +10459,7 @@ struct dp_worker {
     char make_jobs[16];
     char groups[PROOF_GROUPS_MAX];
     char only[PROOF_GROUPS_MAX + 8];
+    char failure_priority[PROOF_GROUPS_MAX + 32];
     /* Warm-start sidecar inputs, held here so the bundle step can rewrite
      * the sidecar with both build phases timed. */
     const char *warm_compile_mode;
@@ -12049,14 +12050,137 @@ static bool dp_check_finish(struct dp_worker *w,
 /* The test child's argv: the cold --no-cache dimension, or (only when the
  * verdict MMR is armed for this proof) the cold audit that also emits the
  * pair's signed PASS leaves. Both run every selected group. */
+/* The history is a bounded scheduling hint, never proof authority. */
+#define DP_PRIORITY_DIFF_LIMIT 16u
+#define DP_PRIORITY_COMPARE_LIMIT 200000u
+struct dp_priority_scan {
+    const char *root, *scratch;
+    const char *const *changed;
+    size_t changed_count;
+    const char **selected;
+    size_t selected_count, diffs;
+    bool *matched;
+};
+
+static bool dp_priority_read_diff(struct dp_priority_scan *s,
+                                  const struct zcl_dev_proof_history_failure *failure,
+                                  const char *group)
+{
+    if (++s->diffs > DP_PRIORITY_DIFF_LIMIT) return false;
+    size_t len = 0; char why[128];
+    char *bytes = dp_changed_set_fetch(s->root, failure->base, failure->local,
+                                       s->scratch, &len, why, sizeof(why));
+    if (!bytes) return false;
+    size_t count = dp_changed_set_count(bytes, len), stored = 0;
+    bool ok = count && count <= ZCL_DEVLOOP_MAX_FILES &&
+              (!s->changed_count || count <= DP_PRIORITY_COMPARE_LIMIT / s->changed_count);
+    const char **files = ok ? zcl_calloc(count, sizeof(*files), "priority paths") : NULL;
+    struct zcl_dev_proof_changed_set mark = {0};
+    ok = files && dp_changed_set_rows(bytes, len, count, files, NULL, &stored,
+                                      &mark, why, sizeof(why));
+    char selected_group[ZCL_TEST_GROUP_FULL_MAX];
+    enum zcl_failure_priority_match match = ok
+        ? zcl_dev_proof_failure_priority_match(failure, files, count,
+              s->changed, s->changed_count, s->selected, s->selected_count,
+              selected_group, sizeof(selected_group)) : ZCL_FAILURE_PRIORITY_INVALID;
+    if (match == ZCL_FAILURE_PRIORITY_MATCH)
+        for (size_t i = 0; i < s->selected_count; i++)
+            if (strcmp(s->selected[i], group) == 0) s->matched[i] = true;
+    free(files); free(bytes);
+    return match != ZCL_FAILURE_PRIORITY_INVALID;
+}
+
+static bool dp_priority_visit(const struct zcl_dev_proof_history_failure *failure, void *ctx)
+{
+    struct dp_priority_scan *s = ctx;
+    char group[ZCL_TEST_GROUP_FULL_MAX];
+    enum zcl_failure_priority_match m = zcl_dev_proof_failure_priority_group(
+        failure, s->selected, s->selected_count, group, sizeof(group));
+    if (m == ZCL_FAILURE_PRIORITY_INVALID) return false;
+    return m != ZCL_FAILURE_PRIORITY_MATCH || dp_priority_read_diff(s, failure, group);
+}
+
+static bool dp_priority_selected(struct dp_priority_scan *s, char *groups)
+{
+    size_t len = strlen(groups);
+    if (!len || groups[0] == ',' || groups[len - 1] == ',' || strstr(groups, ",,"))
+        return false;
+    char *save = NULL;
+    for (char *p = strtok_r(groups, ",", &save); p; p = strtok_r(NULL, ",", &save)) {
+        if (s->selected_count >= zcl_test_group_catalog_count() ||
+            !zcl_test_group_catalog_contains(p)) return false;
+        s->selected[s->selected_count++] = p;
+    }
+    return s->selected_count != 0;
+}
+
+static bool dp_failure_priority(const char *root, const char *scratch,
+                                const char *groups, const char *const *changed,
+                                size_t changed_count, char *out, size_t cap)
+{
+    if (!root || !scratch || !groups || !out || !cap) return false;
+    out[0] = '\0';
+    if (strnlen(groups, PROOF_GROUPS_MAX) == PROOF_GROUPS_MAX) return false;
+    size_t max = zcl_test_group_catalog_count();
+    char *copy = strdup(groups);
+    const char **selected = zcl_calloc(max, sizeof(*selected), "priority groups");
+    bool *matched = zcl_calloc(max, sizeof(*matched), "priority matches");
+    struct dp_priority_scan s = {.root = root, .scratch = scratch,
+        .changed = changed, .changed_count = changed_count,
+        .selected = selected, .matched = matched};
+    char canonical[PATH_MAX];
+    bool ok = copy && selected && matched && realpath(root, canonical) &&
+              strcmp(root, canonical) == 0 && dp_priority_selected(&s, copy) &&
+              zcl_dev_proof_history_failures(root, dp_priority_visit, &s) == ZCL_PROOF_HISTORY_COMPLETE;
+    size_t used = 0;
+    for (size_t i = 0; ok && i < s.selected_count; i++) {
+        if (!matched[i]) continue;
+        int n = snprintf(out + used, cap - used, "%s%s", used ? "," : "", selected[i]);
+        if (n < 0 || (size_t)n >= cap - used) ok = false;
+        else used += (size_t)n;
+    }
+    if (!ok) out[0] = '\0';
+    free(matched); free(selected); free(copy);
+    return ok;
+}
+
+#if defined(ZCL_TESTING)
+bool zcl_dev_proof_test_failure_priority(const char *root, const char *scratch,
+    const char *groups, const char *const *changed, size_t changed_count,
+    char *out, size_t cap)
+{
+    return dp_failure_priority(root, scratch, groups, changed, changed_count, out, cap);
+}
+#endif
+
+static void dp_worker_failure_priority(struct dp_worker *w)
+{
+    char scratch[PATH_MAX], groups[PROOF_GROUPS_MAX];
+    w->failure_priority[0] = '\0';
+    if (snprintf(scratch, sizeof(scratch), "%s/priority-diff.%ld", w->paths->attempt,
+                 (long)getpid()) >= (int)sizeof(scratch)) return;
+    bool ok = dp_failure_priority(w->paths->root, scratch, w->groups,
+                                  w->changed->files, w->changed->count, groups, sizeof(groups));
+    if (ok && groups[0])
+        (void)snprintf(w->failure_priority, sizeof(w->failure_priority),
+                       "--failure-priority=%s", groups);
+    (void)zcl_dev_proof_phase_note(w->paths->phases, "failure_priority",
+                                   ok ? (groups[0] ? "applied" : "none") : "unavailable");
+}
+
 static bool dp_worker_test_argv(const struct dp_worker *w, const char **argv,
                                 size_t cap)
 {
-    if (w->vmmr_armed)
-        return zcl_dev_vmmr_test_argv(w->generation_binary, w->only, argv,
-                                      cap) == ZCL_DEV_VMMR_TEST_ARGC;
-    return dp_test_dimension_argv(w->generation_binary, w->only, argv, cap) ==
-           DP_TEST_DIMENSION_ARGC;
+    size_t n = w->vmmr_armed
+        ? zcl_dev_vmmr_test_argv(w->generation_binary, w->only, argv, cap)
+        : dp_test_dimension_argv(w->generation_binary, w->only, argv, cap);
+    if (n != (w->vmmr_armed ? ZCL_DEV_VMMR_TEST_ARGC : DP_TEST_DIMENSION_ARGC)) return false;
+    if (w->failure_priority[0]) {
+        if (n + 1 >= cap) return false;
+        argv[n++] = w->failure_priority;
+        argv[n] = NULL;
+    }
+    return true;
 }
 
 static bool dp_worker_dimensions_run_clean(struct dp_worker *w,
@@ -12069,10 +12193,11 @@ static bool dp_worker_dimensions_run_clean(struct dp_worker *w,
     struct dp_check_hold admitted = {0};
     /* The preflight probe is not consumed. Admission below is the only
      * path that can hold this test child back. */
-    const char *test_argv[ZCL_DEV_VMMR_TEST_ARGC + 1] = {0};
+    const char *test_argv[ZCL_DEV_VMMR_TEST_ARGC + 2] = {0};
     bool launched;
     bool dimensions_ok = true;
     if (!dp_check_prepare(w, test, &admitted, why, why_len)) return false;
+    if (test->selected) dp_worker_failure_priority(w);
     if (test->selected &&
         !dp_worker_test_argv(w, test_argv,
                              sizeof(test_argv) / sizeof(test_argv[0]))) {

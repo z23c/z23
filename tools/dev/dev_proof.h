@@ -195,6 +195,17 @@ enum zcl_failure_priority_match zcl_dev_proof_failure_priority_match(
     const char *const *changed_paths, size_t changed_count,
     const char *const *selected_groups, size_t selected_count,
     char *group_out, size_t group_cap);
+/* Same bound-record and exact-group validation, before obtaining that
+ * record's historical path set. A MATCH here alone is not a path match. */
+enum zcl_failure_priority_match zcl_dev_proof_failure_priority_group(
+    const struct zcl_dev_proof_history_failure *failure,
+    const char *const *selected_groups, size_t selected_count,
+    char *group_out, size_t group_cap);
+#if defined(ZCL_TESTING)
+bool zcl_dev_proof_test_failure_priority(const char *root, const char *scratch,
+    const char *groups, const char *const *changed, size_t changed_count,
+    char *out, size_t cap);
+#endif
 /* Syntax only, NOT authority. 0 absent, -1 reserved/malformed/ambiguous,
  * 1 exact additive trailer. Payload is unchanged reason/evidence bytes.
  * Caller validates attempt/request and exact immutable archive separately. */

@@ -2384,6 +2384,68 @@ static int tgs_run_weighted(const char *root, const char *weights, const char *p
     return capture_command(command, out, cap);
 }
 
+#if !defined(_WIN32)
+static bool tgs_priority_git(const char *root, const char *args, char *out, size_t cap)
+{
+    char command[2 * PATH_MAX];
+    int n = snprintf(command, sizeof(command), "git -C '%s' %s 2>&1", root, args);
+    if (n <= 0 || (size_t)n >= sizeof(command) || capture_command(command, out, cap) != 0)
+        return false;
+    out[strcspn(out, "\r\n")] = '\0';
+    return true;
+}
+
+static int test_priority_bound_history_dispatch(void)
+{
+    int failures = 0;
+    TEST("failure priority: actual bound archive and changed Git paths drive real dispatch") {
+        char root[PATH_MAX], canonical[PATH_MAX], path[PATH_MAX + 128], scratch[PATH_MAX + 64];
+        static char out[1024 * 1024];
+        char base[128], local[128], attempt[PATH_MAX], priority[256], flag[300];
+        test_make_tmpdir(root, sizeof(root), "tgs_priority", "history");
+        ASSERT(realpath(root, canonical) != NULL);
+        ASSERT(tgs_priority_git(canonical, "init -q", out, sizeof(out)));
+        snprintf(path, sizeof(path), "%s/changed.c", canonical);
+        ASSERT(tgs_write_file(path, "old\n"));
+        ASSERT(tgs_priority_git(canonical, "add changed.c", out, sizeof(out)));
+        ASSERT(tgs_priority_git(canonical, "-c user.name=fixture -c user.email=fixture@invalid commit -qm base --no-gpg-sign", out, sizeof(out)));
+        ASSERT(tgs_priority_git(canonical, "rev-parse HEAD", base, sizeof(base)));
+        ASSERT(tgs_write_file(path, "new\n"));
+        ASSERT(tgs_priority_git(canonical, "add changed.c", out, sizeof(out)));
+        ASSERT(tgs_priority_git(canonical, "-c user.name=fixture -c user.email=fixture@invalid commit -qm local --no-gpg-sign", out, sizeof(out)));
+        ASSERT(tgs_priority_git(canonical, "rev-parse HEAD", local, sizeof(local)));
+        ASSERT(zcl_dev_proof_test_failure_attempt_prepare(canonical, local, base,
+                                                          attempt, sizeof(attempt)));
+        ASSERT(zcl_dev_proof_test_failure_attempt_settle(canonical, local, base, attempt,
+               "child_proof_failed_exit_1\ntest test_hex_codec: FAIL at changed.c:1"));
+        snprintf(scratch, sizeof(scratch), "%s/priority-diff", canonical);
+        const char *changed[] = {"changed.c"}, *other[] = {"other.c"};
+        ASSERT(zcl_dev_proof_test_failure_priority(canonical, scratch,
+               "test_hex_codec,test_codec_cursor", changed, 1, priority, sizeof(priority)));
+        ASSERT_STR_EQ(priority, "test_hex_codec");
+        snprintf(flag, sizeof(flag), "--failure-priority=%s", priority);
+        ASSERT(tgs_run_weighted(canonical, "test_codec_cursor\t9\n",
+               flag, out, sizeof(out)) == 0);
+        ASSERT(tgs_dispatch_pos(out, "test_hex_codec") < tgs_dispatch_pos(out, "test_codec_cursor"));
+        ASSERT(zcl_dev_proof_test_failure_priority(canonical, scratch,
+               "test_hex_codec,test_codec_cursor", other, 1, priority, sizeof(priority)));
+        ASSERT_STR_EQ(priority, "");
+        struct zcl_dev_proof_status status = {0};
+        ASSERT(zcl_dev_proof_status_read(canonical, local, base, &status));
+        ASSERT(status.failure_identity.valid);
+        snprintf(path, sizeof(path), "%s/.cache/zcl-dev-proof/attempts/%s/logs/failure.txt",
+                 canonical, status.failure_identity.attempt);
+        ASSERT(unlink(path) == 0 && symlink("../request", path) == 0);
+        ASSERT(!zcl_dev_proof_test_failure_priority(canonical, scratch,
+               "test_hex_codec,test_codec_cursor", changed, 1, priority, sizeof(priority)));
+        ASSERT_STR_EQ(priority, "");
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
 static int test_runner_dispatches_longest_first(void)
 {
     int failures = 0;
@@ -3715,6 +3777,9 @@ int test_test_group_selector(void)
     failures += test_runner_no_cache_outranks_env();
     failures += test_dispatch_order_pure();
     failures += test_failure_priority_history();
+#if !defined(_WIN32)
+    failures += test_priority_bound_history_dispatch();
+#endif
     failures += test_dispatch_weights_read();
     failures += test_dispatch_weights_framing();
     failures += test_runner_dispatches_longest_first();
