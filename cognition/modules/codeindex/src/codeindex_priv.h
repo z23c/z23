@@ -56,7 +56,8 @@
  * and the docs table (prose of docs tree .md, AGENTS.md and README.md) join the
  * sealed rows, so a ret6 store lacks the lines and the prose a reader now
  * expects and must be recomputed, not read as if they were zero or absent. */
-#define CI_SCHEMA_VERSION "ret7"
+/* ret8 seals the unsigned, source-bound page-hint projection. */
+#define CI_SCHEMA_VERSION "ret8"
 #define CI_STORE_FORMAT "zcl.codeindex.store.v5"
 #define CI_RETRIEVAL_PROJECTION_META "retrieval_projection_root_sha3"
 

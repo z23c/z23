@@ -9,6 +9,7 @@ struct codeindex;
 struct ci_page {
     char directory[256];
     char tree_oid[65];
+    char source_commit[65];
     char body[8193];
     uint8_t artifact_root[32];
 };

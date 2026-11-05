@@ -198,6 +198,15 @@ static int cis_rebuild_checks(bool ready, const char *root)
               rebuilt && cis_spans_ok(rebuilt) &&
               codeindex_docs_match(rebuilt, "rules", d, 2) == 1);
     codeindex_close(rebuilt);
+    bool page_poisoned = ready && cis_exec(root,
+        "INSERT INTO pages(directory,tree_oid,source_commit,body,artifact_root) "
+        "VALUES('lib/net','0000000000000000000000000000000000000000',"
+        "'0000000000000000000000000000000000000000','poison',zeroblob(32))");
+    struct codeindex *page_healed = page_poisoned ? codeindex_open_retrieval_view(root) : NULL;
+    struct ci_page page;
+    CIS_CHECK("unsealed page insertion is rejected and rebuilt",
+              page_healed && codeindex_pages_list(page_healed, "lib/net", &page, 1) == 0);
+    codeindex_close(page_healed);
     return failures;
 }
 
