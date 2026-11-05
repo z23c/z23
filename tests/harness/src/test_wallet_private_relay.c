@@ -2815,7 +2815,8 @@ static bool wprt_u_null_void_calls(struct wprt_u *u, const struct uint256 *id)
     wpr_mark_expired(NULL, id);
     wpr_forget(r, NULL);
     wpr_forget(NULL, id);
-    return wprt_u_used(r) == 1 && wprt_u_entry(r, id)->state == WPR_PREPARED;
+    struct wpr_entry *e = wprt_u_entry(r, id);
+    return wprt_u_used(r) == 1 && e && e->state == WPR_PREPARED;
 }
 
 static bool wprt_u_null_results(struct wprt_u *u, const struct uint256 *id)
@@ -2841,7 +2842,10 @@ static int wprt_u_case_null_arguments(void)
     struct uint256 id = wprt_u_id(0x31, 0);
     struct uint256 other = wprt_u_id(0x32, 0);
     bool prepared = wpr_prepare(u.r, &id).ok;
-    wprt_u_entry(u.r, &id)->disk_retry = true;
+    struct wpr_entry *e = wprt_u_entry(u.r, &id);
+    if (!prepared || !e)
+        return wprt_u_open_failed(&u, failures);
+    e->disk_retry = true;
     wprt_report("a missing relay or id is refused with code -1 by prepare and "
                 "enqueue", prepared && wprt_u_null_results(&u, &id),
                 &failures);
@@ -2996,6 +3000,8 @@ static bool wprt_u_expire_steps(struct wprt_u *u, const struct wprt_ids *i)
     struct wpr *r = u->r;
     const struct wprt_line two[] = { { 0, &i->a }, { 'x', &i->b } };
     struct wpr_entry *eb = wprt_u_entry(r, &i->b);
+    if (!eb)
+        return false;
     eb->held = true;
     eb->disk_retry = true;
     eb->expired = true;
@@ -3011,6 +3017,8 @@ static bool wprt_u_flag_steps(struct wprt_u *u, const struct wprt_ids *i)
 {
     struct wpr *r = u->r;
     struct wpr_entry *ea = wprt_u_entry(r, &i->a);
+    if (!ea)
+        return false;
     wpr_mark_held(r, &i->a, true);
     bool held = ea->held && wprt_lock_free(r);
     wpr_set_disk_retry(r, &i->a, true);
@@ -3028,10 +3036,15 @@ static bool wprt_u_seen_steps(struct wprt_u *u, const struct wprt_ids *i)
     const struct wprt_line three[] = { { 'a', &i->a }, { 'x', &i->b },
                                        { 0, &i->c } };
     const struct wprt_line after_seen[] = { { 'a', &i->a }, { 'x', &i->b } };
-    wprt_u_entry(r, &i->a)->handed = true;
+    struct wpr_entry *ea = wprt_u_entry(r, &i->a);
+    if (!ea)
+        return false;
+    ea->handed = true;
     bool third = wpr_prepare(r, &i->c).ok;
     bool ok = third && wprt_u_file_is(u, three, 3);
     struct wpr_entry *ec = wprt_u_entry(r, &i->c);
+    if (!ec)
+        return false;
     ec->in_pool = true;
     ec->mined = true;
     wpr_note_seen(r, &i->c);
@@ -3321,6 +3334,8 @@ static int wprt_u_case_hand_written(void)
     struct uint256 d = wprt_u_hex_id('d');
     bool prepared = wpr_prepare(u.r, &d).ok;
     struct wpr_entry *ed = wprt_u_entry(u.r, &d);
+    if (!prepared || !ed)
+        return wprt_u_open_failed(&u, failures);
     ed->held = true;
     ed->disk_retry = true;
     ed->handed = true;
