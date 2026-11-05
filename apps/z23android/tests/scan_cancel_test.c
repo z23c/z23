@@ -3,6 +3,7 @@
 #define ZAPP_WALLET_SEND_UI_H
 bool zapp_send_busy(void);
 #include "../controller.c"
+#include "../fleet_review_state.h"
 #include <assert.h>
 
 static int offers, clears;
@@ -15,6 +16,15 @@ bool zapp_speech_client_paired(const char *files, const char *json)
 { (void)files; (void)json; return false; }
 bool zapp_pair_code(const char *descriptor, char code[7])
 { (void)descriptor; memcpy(code, "123456", 7); return true; }
+static int join_calls;
+enum zapp_onion zapp_onion_wait(struct zapp_runtime *r, unsigned seconds, void (*waiting)(void *), void *arg)
+{ (void)r; (void)seconds; (void)waiting; (void)arg; return ZAPP_ONION_NODE_STOPPED; }
+bool zapp_fleet_join_run(struct zapp_runtime *r, const char *token, char *out, size_t cap)
+{ (void)r; (void)token; (void)out; (void)cap; ++join_calls; return false; }
+bool zapp_fleet_join_receipt(const char *text, char *receipt, size_t cap)
+{ (void)text; (void)receipt; (void)cap; return false; }
+bool zapp_fleet_receipt_save(const char *directory, const char *token)
+{ (void)directory; (void)token; return false; }
 static int machine_calls, invite_calls;
 enum zapp_preview_result zapp_fleet_machine_preview_cancelable(struct zapp_runtime *r, const char *s, char *o, size_t n, const atomic_bool *cancel)
 { (void)r; (void)s; (void)o; (void)n; ++machine_calls; return atomic_load(cancel) ? ZAPP_PREVIEW_CANCELLED : ZAPP_PREVIEW_FAILED; }
@@ -48,7 +58,23 @@ static void *blocked_commit(void *arg)
 }
 int main(void)
 {
+    assert(zapp_fleet_node_state(false, false, false, false) == ZAPP_FLEET_NODE_START);
+    assert(zapp_fleet_node_state(false, false, false, true) == ZAPP_FLEET_NODE_WAIT);
+    assert(zapp_fleet_node_state(false, true, true, false) == ZAPP_FLEET_NODE_WAIT);
+    assert(zapp_fleet_node_state(false, true, false, false) == ZAPP_FLEET_NODE_READY);
+    assert(zapp_fleet_node_state(true, false, false, false) == ZAPP_FLEET_NODE_READY);
+    bool joined = false, started = false;
+    zapp_fleet_review_select(&joined, &started, true);
+    assert(!strcmp(zapp_fleet_review_message(joined, started, "join failed", "old start"), "join failed"));
+    zapp_fleet_review_select(&joined, &started, false);
+    assert(!strcmp(zapp_fleet_review_message(joined, started, "old join", "start failed"), "start failed"));
+    zapp_fleet_review_select(&joined, &started, true);
+    assert(!strcmp(zapp_fleet_review_message(joined, started, "join failed", "old start"), "join failed"));
+    assert(!strcmp(zapp_fleet_review_message(false, false, "old join", "old start"), ""));
     assert(!pthread_mutex_init(&c.lock, NULL));
+    char join_output[ZAPP_TEXT_CAP] = "";
+    assert(!join_fleet(&c, "synthetic", join_output));
+    assert(join_calls == 0 && strstr(join_output, "Start the node first"));
     current = &c; memcpy(c.action, "scan", sizeof("scan")); c.camera_ticket = 7; c.view.scanning = true;
     pthread_t worker; assert(!pthread_create(&worker, NULL, blocked_commit, NULL));
     pthread_mutex_lock(&gate); while (!waiting) pthread_cond_wait(&changed, &gate); pthread_mutex_unlock(&gate);

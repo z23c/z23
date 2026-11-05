@@ -410,11 +410,12 @@ test-setup:
 	@grep -q 'wsu_view_can_recheck(v)' wallet_setup_ui.c || { echo 'the interrupted screen must offer Check again by the model' >&2; exit 1; }
 	@grep -q 'wsu_words_intro(v, line' wallet_setup_ui.c || { echo 'the words screen must write its intro by the model, which omits an unrecorded start height' >&2; exit 1; }
 	@grep -q 'ZAPP_SETUP_READY ? SCREEN_WALLET : SCREEN_SETUP' shell.c || { echo 'the Wallet tile must open setup until setup is finished' >&2; exit 1; }
-	@grep -q 'if (wallet_screen(next) || next == SCREEN_ASSISTANT || next == SCREEN_FLEET_REVIEW) shell.gate.protect = true' shell.c && grep -q 'static bool wallet_screen(enum screen s) { return s == SCREEN_WALLET || s == SCREEN_SEND || s == SCREEN_SETUP; }' shell.c || { echo 'the shell must drop obscured touches on the wallet, send, setup, assistant and fleet review screens' >&2; exit 1; }
+	@grep -Fq 'if (wallet_screen(next) || next == SCREEN_ASSISTANT || next == SCREEN_FLEET_REVIEW || (next == SCREEN_SCAN && shell.paste_mode)) shell.gate.protect = true' shell.c && grep -q 'static bool wallet_screen(enum screen s) { return s == SCREEN_WALLET || s == SCREEN_SEND || s == SCREEN_SETUP; }' shell.c || { echo 'the shell must drop obscured touches on wallet, assistant, fleet review and paste screens' >&2; exit 1; }
 	@grep -q 'setTextIsSelectable", false' wallet_setup_ui.c || { echo 'the recovery words must not be selectable' >&2; exit 1; }
 	@grep -q 'next = screen_for(next);' shell.c || { echo 'the shell must send the wallet and payment screens through setup until it is confirmed' >&2; exit 1; }
 	@test "$$(grep -c 'go(env, SCREEN_SEND)' shell.c)" = 2 && grep -q 'take_reshow()) go(env, SCREEN_SEND);' shell.c || { echo 'Send must be entered through open_send, except to show a kept flow' >&2; exit 1; }
-	@grep -q 'case CMD_CAMERA_PASTE: open_send(env, NULL, "", false);' shell.c || { echo 'Paste instead must open the Send flow' >&2; exit 1; }
+	@grep -Fq 'if (!strcmp(action, "scan_paste")) return scan_payload(c, ticket, arg, out);' controller.c || { echo 'Paste must use the shared scan classifier' >&2; exit 1; }
+	@grep -Fq 'case CMD_CAMERA_PASTE: open_paste(env); break;' shell.c && grep -Fq 'zapp_controller_action("scan_paste", text' shell.c && sed -n '/^static void open_paste/,/^}/p' shell.c | grep -Fq 'protect_window(env, true)' || { echo 'Paste must open a protected classifier flow' >&2; exit 1; }
 	@grep -q 'memory_cleanse(buffer, sizeof(buffer))' operations.c || { echo 'the command reader must wipe its read buffer' >&2; exit 1; }
 	@grep -q 'zapp_setup_state(r->files) != ZAPP_SETUP_READY' operations.c || { echo 'the receive command must be refused until setup is confirmed' >&2; exit 1; }
 

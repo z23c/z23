@@ -2695,8 +2695,21 @@ static void interrupted_note_tests(void)
     assert(strstr(wsu_failure_text(WSU_NODE_BUSY), "Try again in a minute.") && strstr(wsu_failure_text(WSU_COULD_NOT_CHECK), "Try again."));
 }
 
+static void resume_needed_tests(void)
+{
+    struct wsu w = {.lock = PTHREAD_MUTEX_INITIALIZER};
+    const enum wsu_step active[] = {WSU_WORKING, WSU_WORDS, WSU_CONFIRM, WSU_CHECKING};
+    const enum wsu_step idle[] = {WSU_CHOICE, WSU_RESTORE_FORM, WSU_READING, WSU_DONE, WSU_FAILED, WSU_BLOCKED, WSU_NO_WALLET, WSU_START_OVER};
+    for (size_t i = 0; i < sizeof(active) / sizeof(active[0]); ++i) { w.step = active[i]; assert(wsu_resume_needed(&w)); }
+    for (size_t i = 0; i < sizeof(idle) / sizeof(idle[0]); ++i) { w.step = idle[i]; assert(!wsu_resume_needed(&w)); }
+    w.write = WSU_WRITE_RUNNING; assert(wsu_resume_needed(&w));
+    w.write = WSU_WRITE_DONE; assert(!wsu_resume_needed(&w));
+    pthread_mutex_destroy(&w.lock);
+}
+
 int main(int argc, char **argv)
 {
+    resume_needed_tests();
     launch_failure_tests();
     height_parse_tests();
     assert(argc == 2);

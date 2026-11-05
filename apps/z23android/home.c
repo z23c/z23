@@ -20,7 +20,7 @@
 static const char default_layout[] =
     "{\"schema\":\"zcl.layout_recipe.v1\",\"id\":\"default\","
     "\"theme\":{\"background\":\"#000000\",\"text\":\"#ffffff\",\"muted\":\"#9a9a9a\",\"accent\":\"#3ddc97\"},"
-    "\"screens\":{\"home\":{\"container\":\"column\",\"children\":["
+    "\"screens\":{\"home\":{\"container\":\"list\",\"children\":["
     "{\"type\":\"column\",\"card\":\"phone\",\"children\":[" HOME_PHONE_TEXT "]},"
     "{\"type\":\"grid\",\"columns\":2,\"children\":[" HOME_TILES "]},"
     HOME_Z23_APPS("2") "]}}}";
@@ -82,7 +82,7 @@ static void behind_line(const struct zapp_view *view, char *out, size_t cap)
     char blocks[32];
     const int64_t behind = view->node_reference - view->node_height;
     if (view->pace == ZAPP_PACE_GENTLE) {
-        snprintf(out, cap, "Catching up slowly to keep the phone cool: %s blocks to go", zapp_grouped(behind, blocks));
+        snprintf(out, cap, "%s blocks left\nKeeping phone cool", zapp_grouped(behind, blocks));
         return;
     }
     snprintf(out, cap, "Catching up: %s blocks to go", zapp_grouped(behind, blocks));

@@ -190,7 +190,7 @@ static void phone_card_golden(void)
         "\"sync\":\"\",\"pace\":\"normal\",\"node_button\":\"Stop node\"}"));
     view.pace = ZAPP_PACE_GENTLE;
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)));
-    assert(strstr(card, "\"node_line\":\"Catching up slowly to keep the phone cool: 800 blocks to go\"") && strstr(card, "\"pace\":\"gentle\""));
+    assert(strstr(card, "\"node_line\":\"800 blocks left\\nKeeping phone cool\"") && strstr(card, "\"pace\":\"gentle\""));
     view.pace = ZAPP_PACE_PAUSE;
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && strstr(card, "\"pace\":\"pause\""));
 }
@@ -340,6 +340,16 @@ static void worst_case_card_fits(void)
     assert(json_read(&parsed, card, length));
     json_free(&parsed);
 }
+static void scrollable_home_grid(const struct zapp_node *home)
+{
+    /* Primary and app grids must retain their row heights inside a scrollable Home. */
+    assert(home->kind == ZAPP_NODE_LIST && home->child_count >= 3);
+    assert(home->children[1].kind == ZAPP_NODE_GRID && home->children[1].child_count == 3);
+    assert(!strcmp(home->children[1].children[0].id, "wallet") &&
+           !strcmp(home->children[1].children[1].id, "scan") &&
+           !strcmp(home->children[1].children[2].id, "assistant"));
+    assert(home->children[2].kind == ZAPP_NODE_GRID && !strcmp(home->children[2].card, "z23_app"));
+}
 static void built_in_layouts(void)
 {
     static const char *const tiles[] = {"scan", "assistant"};
@@ -352,6 +362,7 @@ static void built_in_layouts(void)
         assert(layout);
         const struct zapp_node *home = zapp_layout_screen(layout, "home");
         assert(home && !strcmp(layout->id, zapp_home_layout_name(i)));
+        scrollable_home_grid(home);
         for (size_t t = 0; t < sizeof(tiles) / sizeof(tiles[0]); ++t) {
             assert(strstr(document, tiles[t]));
             assert(zapp_home_action_label(tiles[t]));
@@ -536,7 +547,9 @@ static void paced_home_lines(void)
     view.pace = ZAPP_PACE_GENTLE;
     view.node_reference = 2000;
     view.chain_state = ZAPP_CHAIN_BEHIND;
-    assert(node_line_is(&view, "Catching up slowly to keep the phone cool: 1,000 blocks to go"));
+    assert(node_line_is(&view, "1,000 blocks left\\nKeeping phone cool"));
+    view.node_reference = view.node_height + 3276435;
+    assert(node_line_is(&view, "3,276,435 blocks left\\nKeeping phone cool"));
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && !strstr(card, "min left") && !strstr(card, "Catching up:"));
 }
 
@@ -617,7 +630,8 @@ static void check_agreement(const struct agreement_sample *s, struct zapp_view *
     zapp_home_node_line(view, home, sizeof(home));
     zapp_paced_sync_line(pace, s->process, stopping, sync, paced, sizeof(paced));
     const bool home_paused = !strcmp(home, ZAPP_PAUSED_LINE), home_current = !strcmp(home, "Up to date");
-    const bool home_behind = !strncmp(home, "Catching up", 11);
+    const bool home_behind = !strncmp(home, "Catching up", 11) ||
+        (pace == ZAPP_PACE_GENTLE && strstr(home, " blocks left\nKeeping phone cool") != NULL);
     const bool sync_paused = !strcmp(paced, ZAPP_PAUSED_LINE), sync_current = !strcmp(paced, up_to_date);
     const bool sync_behind = strstr(paced, " to go.") != NULL;
     assert(home_paused == sync_paused);

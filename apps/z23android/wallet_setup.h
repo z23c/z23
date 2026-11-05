@@ -236,6 +236,7 @@ void wsu_back(struct wsu *w);           /* RESTORE_FORM or FAILED to CHOICE */
 void wsu_words_seen(struct wsu *w);     /* WORDS to CONFIRM */
 void wsu_show_again(struct wsu *w);     /* CONFIRM to WORDS */
 bool wsu_busy(struct wsu *w);           /* A job runs, or words are held: leaving would lose them. */
+bool wsu_resume_needed(struct wsu *w);  /* Restore an active setup after activity recreation. */
 /* Setup has finished a create whose words the owner confirmed in this run of the app. False for a restore, and for a setup
  * that was finished before the app started. */
 bool wsu_created(struct wsu *w);

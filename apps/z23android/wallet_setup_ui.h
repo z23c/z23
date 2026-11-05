@@ -27,6 +27,7 @@ void zapp_setup_ui_destroy(JNIEnv *env);
 /* Starts the model from the files on disk on first use and applies the window protection. False when this phone cannot
  * protect the window: no wallet content is shown then. */
 bool zapp_setup_ui_open(JNIEnv *env);
+bool zapp_setup_ui_resume_needed(void);
 void zapp_setup_ui_render(JNIEnv *env);
 /* Removes every widget and wipes the copy of the screen. */
 void zapp_setup_ui_clear(JNIEnv *env);

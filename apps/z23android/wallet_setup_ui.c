@@ -45,7 +45,7 @@ static struct {
     enum button button_id[BUTTONS_MAX];
     size_t button_count;
     struct wsu model;
-    bool model_ready;
+    bool model_ready, open_intent;
     char blob[512];
     bool dropped, launch_failed, height_bad, height_locked;
     char height_text[24];
@@ -578,10 +578,15 @@ bool zapp_setup_ui_open(JNIEnv *env)
         sun_init(&node, &(struct sun_runner){NULL, setup_runner}, datadir);
         ui.model_ready = wsu_init(&ui.model, &host, &node, ui.activity->internalDataPath);
     }
+    ui.open_intent = true;
     bool protected = ui.model_ready && wsu_open(&ui.model);
     ui.dropped = false;
     ui.version++;
     return protected;
+}
+bool zapp_setup_ui_resume_needed(void)
+{
+    return ui.open_intent && ui.model_ready && wsu_resume_needed(&ui.model);
 }
 void zapp_setup_ui_pause(JNIEnv *env)
 {
@@ -590,6 +595,7 @@ void zapp_setup_ui_pause(JNIEnv *env)
 bool zapp_setup_ui_leave(JNIEnv *env)
 {
     if (ui.model_ready && wsu_busy(&ui.model)) return false;
+    ui.open_intent = false;
     if (ui.model_ready) wsu_finish_reading(&ui.model);
     ui.dropped = false;
     ui.version++;

@@ -189,3 +189,45 @@ joining. Protected-screen pixel capture was unavailable; these observations use
 UI hierarchy and taps. The fixture APK SHA-256 was
 `f25f4058c4876c23e3b5927d0d475a038d59cf7e132624ec38d4ba6b533f89b7`.
 Physical-device qualification remains pending.
+
+Invitation review now offers an explicit Start node action while the node is
+stopped and keeps the onion readiness check authoritative. A focused fixture
+checks the stopped-node refusal before the join command. In an isolated API 36
+simulator, synthetic stopped, start-failure, stop-race, long-refusal and receipt
+states kept the relevant actions visible; no real node or fleet admission was
+used. A separate numeric scroll probe showed a long result remain at y=150 across
+redraws and return to y=0 after leaving and reopening the review. These results
+do not establish a pre-change failure or JNI failure-injection result. Physical
+qualification remains pending.
+
+Cold launch now opens Home; Wallet opens setup until setup is complete. An
+isolated API 36 ARM-translation simulator verified Home, Wallet and Back, then
+replaced the Activity in the same process while synthetic setup was WORKING and
+while synthetic words were held. Both resumed setup with one retained model. A
+synthetic CHECKING state deliberately left with Back stayed on Home after
+Activity replacement. The fixture refused real wallet and node operations; it
+does not qualify physical-device custody or process-death recovery. The test
+APK SHA-256 was `c8467aa93bdadb0bdd20c5fcf998469783a7e7b83b3a695a9312264a665e6a44`.
+
+The gentle-pace Home line now puts the remaining blocks before its cooling
+explanation. The focused Home test covers the observed 3,276,435-block gap.
+An isolated API 36 ARM-translation simulator at 1080 by 2160, density 540 and
+font scale 1.5 showed both lines in portrait and landscape for that synthetic
+gap. At a synthetic 2,147,483,647-block gap, portrait still ellipsized the
+cooling line; landscape showed it. This is not a universal height or complete
+Home layout qualification. The simulator used synthetic node state and did not
+establish real thermal or chain status.
+
+An isolated API 36 simulator at 1080 by 2160, density 540 and font scale 1.5
+used the existing scrollable Home layout with zero and 16 synthetic app cards.
+In portrait and landscape, the fixed Apps and Settings footer remained visible
+and scrolling reached the last named app. A named row retained its position
+across samples four seconds apart. Wallet opened setup and Back returned Home.
+In the zero-card landscape case, 172 pixels of the primary Wallet and Scan
+row were initially visible; scrolling exposed both in full. In the 16-card
+landscape case, Assistant opened and returned Home, and Scan opened the camera
+permission prompt; denying it and pressing Back returned Home. The fixture
+used synthetic launcher and node state and did not exercise actual
+app launches, network, wallet operations or phone thermal state. Test APK
+SHA-256 values were `7e9e2ce544886f3ca042ee7eb7b823ead613fbf31612559336e305212c56a50f`
+and `436405db2b46810824a2e24fd29d57f39214ffeb7f2cf826bc959808a51bd4fd`.

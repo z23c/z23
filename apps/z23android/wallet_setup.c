@@ -336,6 +336,13 @@ bool wsu_busy(struct wsu *w)
     pthread_mutex_unlock(&w->lock);
     return busy;
 }
+bool wsu_resume_needed(struct wsu *w)
+{
+    pthread_mutex_lock(&w->lock);
+    bool needed = waiting_locked(w) || w->step == WSU_WORDS || w->step == WSU_CONFIRM;
+    pthread_mutex_unlock(&w->lock);
+    return needed;
+}
 bool wsu_created(struct wsu *w)
 {
     pthread_mutex_lock(&w->lock);

@@ -3,6 +3,7 @@
 #include "camera.h"
 #include "controller.h"
 #include "fleet.h"
+#include "fleet_review_state.h"
 #include "home.h"
 #include "jni_util.h"
 #include "launcher.h"
@@ -32,7 +33,7 @@
 #define GRAVITY_CENTER_HORIZONTAL 1
 
 enum screen { SCREEN_HOME, SCREEN_ASSISTANT, SCREEN_APPS, SCREEN_SETTINGS, SCREEN_SCAN, SCREEN_FLEET_REVIEW, SCREEN_WALLET, SCREEN_SEND, SCREEN_SETUP, SCREEN_COUNT };
-enum command { CMD_HOME, CMD_APPS, CMD_SETTINGS, CMD_HOME_SETTINGS, CMD_LAYOUT, CMD_SCAN_CANCEL, CMD_CAMERA_SETTINGS, CMD_CAMERA_PASTE, CMD_PASTE_REVIEW, CMD_OUTCOME_DISMISS, CMD_FLEET_JOIN, CMD_FLEET_BACK, CMD_FLEET_COPY };
+enum command { CMD_HOME, CMD_APPS, CMD_SETTINGS, CMD_HOME_SETTINGS, CMD_LAYOUT, CMD_SCAN_CANCEL, CMD_CAMERA_SETTINGS, CMD_CAMERA_PASTE, CMD_PASTE_REVIEW, CMD_OUTCOME_DISMISS, CMD_FLEET_JOIN, CMD_FLEET_START, CMD_FLEET_BACK, CMD_FLEET_COPY };
 enum target_kind { TARGET_NONE, TARGET_NAV, TARGET_ROW, TARGET_TILE, TARGET_WALLET, TARGET_SEND, TARGET_SETUP };
 
 struct nav { jobject view; enum command command; size_t arg; };
@@ -43,14 +44,14 @@ static struct {
     zapp_native_action send;
     jobject notice_views[SCREEN_COUNT], outcome_view, outcome_panel, status_view, scan_view, scan_hint_view, scan_camera, scan_panel, apps_list;
     jobject fleet_review_text, fleet_review_result, fleet_review_qr, fleet_join_button, fleet_copy_button, fleet_back_button;
-    jobject fleet_review_scroll, fleet_review_hint;
+    jobject fleet_review_scroll, fleet_review_hint, fleet_review_status, fleet_start_button, fleet_result_scroll;
     jobject paste_panel, paste_field, paste_review, paste_error;
     char fleet_receipt[8192];
-    bool fleet_review_started, fleet_qr_shown;
+    char fleet_result_shown[ZAPP_NOTICE_CAP];
+    bool fleet_review_started, fleet_qr_shown, fleet_start_requested, fleet_result_valid;
     enum screen current, before_scan;
     bool send_from_wallet;
     bool preview, pair_seen, scan_dismissed, user_layout, rendered, camera_waiting, paste_mode, paste_submitted;
-    bool setup_offered;   /* the first launch without a wallet opened the setup screens once */
     unsigned scans_seen;
     struct zapp_layout *layout;
     char builtin[ZAPP_NAME_CAP], layout_notice[320], action_notice[160];
@@ -384,42 +385,60 @@ static bool fleet_review_heading(JNIEnv *env, jobject content, jobject summary)
     return ok;
 }
 
-static bool fleet_review_result_widgets(JNIEnv *env, jobject content, jobject result, jobject qr)
+static bool fleet_review_result_widgets(JNIEnv *env, jobject content, jobject qr)
 {
-    bool ok = zj_append(env, content, result) && zj_keep(env, &shell.fleet_review_result, result) &&
-        zj_margins(env, qr, zj_dp(260), zj_dp(260), 0.0f, 0, 8, 0, 8) &&
+    bool ok = zj_margins(env, qr, zj_dp(260), zj_dp(260), 0.0f, 0, 8, 0, 8) &&
         zj_append(env, content, qr) && zj_keep(env, &shell.fleet_review_qr, qr) &&
         button(env, content, "Copy code", CMD_FLEET_COPY, 0, 0);
     if (ok) shell.fleet_copy_button = shell.navs[shell.nav_count - 1].view;
     return ok;
 }
 
+static bool fleet_footer_messages(JNIEnv *env, jobject footer, jobject hint, jobject status, jobject result, jobject result_scroll)
+{
+    return zj_typography(env, status, 16.0f, (jint)WHITE) && zj_append(env, footer, status) && zj_keep(env, &shell.fleet_review_status, status) &&
+        zj_margins(env, result_scroll, MATCH, zj_dp(96), 0.0f, 0, 0, 0, 0) &&
+        zj_append(env, result_scroll, result) && zj_append(env, footer, result_scroll) &&
+        zj_keep(env, &shell.fleet_result_scroll, result_scroll) && zj_keep(env, &shell.fleet_review_result, result) && zj_typography(env, hint, 14.0f, (jint)WHITE) &&
+        zj_text(env, hint, "Scroll down to continue") && zj_append(env, footer, hint) &&
+        zj_keep(env, &shell.fleet_review_hint, hint) && zj_visible(env, hint, false);
+}
+static void fleet_footer_release(JNIEnv *env, jobject row, jobject scroll, jobject status, jobject result, jobject hint)
+{
+    if (row) (*env)->DeleteLocalRef(env, row);
+    if (scroll) (*env)->DeleteLocalRef(env, scroll);
+    if (status) (*env)->DeleteLocalRef(env, status);
+    if (result) (*env)->DeleteLocalRef(env, result);
+    if (hint) (*env)->DeleteLocalRef(env, hint);
+}
 static bool fleet_review_footer(JNIEnv *env, jobject root, jobject footer)
 {
-    jobject hint = bar(env, DARK);
-    bool ok = hint && zj_typography(env, hint, 14.0f, (jint)WHITE) &&
-        zj_text(env, hint, "Scroll down to continue") && zj_append(env, footer, hint) &&
-        zj_keep(env, &shell.fleet_review_hint, hint) && zj_visible(env, hint, false) &&
-        zj_padding4(env, footer, 16, 0, 16, 8) && zj_append(env, root, footer) &&
-        button(env, footer, "Cancel", CMD_FLEET_BACK, 0, 0);
-    if (hint) (*env)->DeleteLocalRef(env, hint);
+    jobject hint = bar(env, DARK), status = bar(env, DARK), result = bar(env, DARK);
+    jobject result_scroll = zj_widget(env, "android/widget/ScrollView", shell.activity);
+    jobject row = column(env, DARK, 0, true);
+    bool ok = hint && status && result && result_scroll && row &&
+        fleet_footer_messages(env, footer, hint, status, result, result_scroll) &&
+        zj_padding4(env, footer, 16, 0, 16, 8) && zj_append(env, footer, row) && zj_append(env, root, footer) &&
+        button(env, row, "Start node", CMD_FLEET_START, 0, 1);
+    if (ok) shell.fleet_start_button = shell.navs[shell.nav_count - 1].view;
+    ok = ok && button(env, row, "Cancel", CMD_FLEET_BACK, 0, 1);
+    fleet_footer_release(env, row, result_scroll, status, result, hint);
     if (ok) shell.fleet_back_button = shell.navs[shell.nav_count - 1].view;
     return ok;
 }
 
-static bool fleet_review_widgets(JNIEnv *env, jobject root, jobject content, jobject footer, jobject summary, jobject result, jobject qr)
+static bool fleet_review_widgets(JNIEnv *env, jobject root, jobject content, jobject footer, jobject summary, jobject qr)
 {
     return fleet_review_heading(env, content, summary) &&
-        fleet_review_result_widgets(env, content, result, qr) && fleet_review_footer(env, root, footer);
+        fleet_review_result_widgets(env, content, qr) && fleet_review_footer(env, root, footer);
 }
 
-static void fleet_review_release(JNIEnv *env, jobject content, jobject footer, jobject scroll, jobject summary, jobject result, jobject qr)
+static void fleet_review_release(JNIEnv *env, jobject content, jobject footer, jobject scroll, jobject summary, jobject qr)
 {
     if (content) (*env)->DeleteLocalRef(env, content);
     if (footer) (*env)->DeleteLocalRef(env, footer);
     if (scroll) (*env)->DeleteLocalRef(env, scroll);
     if (summary) (*env)->DeleteLocalRef(env, summary);
-    if (result) (*env)->DeleteLocalRef(env, result);
     if (qr) (*env)->DeleteLocalRef(env, qr);
 }
 
@@ -428,12 +447,12 @@ static bool build_fleet_review(JNIEnv *env, jobject root)
     jobject content = add_notice(env, root, SCREEN_FLEET_REVIEW) ? scroll_column(env, root, 16) : NULL;
     jobject footer = content ? column(env, DARK, 0, false) : NULL;
     jobject scroll = content ? zj_object_property(env, content, "getParent", "()Landroid/view/ViewParent;") : NULL;
-    jobject summary = bar(env, DARK), result = bar(env, DARK);
+    jobject summary = bar(env, DARK);
     jobject qr = zj_widget(env, "android/widget/ImageView", shell.activity);
-    bool ok = content && footer && scroll && summary && result && qr &&
+    bool ok = content && footer && scroll && summary && qr &&
         zj_keep(env, &shell.fleet_review_scroll, scroll) &&
-        fleet_review_widgets(env, root, content, footer, summary, result, qr);
-    fleet_review_release(env, content, footer, scroll, summary, result, qr);
+        fleet_review_widgets(env, root, content, footer, summary, qr);
+    fleet_review_release(env, content, footer, scroll, summary, qr);
     return ok;
 }
 
@@ -664,6 +683,7 @@ static void go(JNIEnv *env, enum screen next)
     if (shell.current == SCREEN_ASSISTANT && next != SCREEN_ASSISTANT && next != SCREEN_SCAN) zapp_controller_clear_result();
     if (shell.current == SCREEN_FLEET_REVIEW && next != SCREEN_FLEET_REVIEW) {
         memory_cleanse(shell.fleet_receipt, sizeof(shell.fleet_receipt));
+        memory_cleanse(shell.fleet_result_shown, sizeof(shell.fleet_result_shown));
         (void)zj_bitmap(env, shell.fleet_review_qr, NULL, 0);
         shell.fleet_qr_shown = false;
     }
@@ -791,8 +811,19 @@ static void resume_scan(JNIEnv *env)
     show_scan_screen(env, ZAPP_CAMERA_GRANTED);
     shell.send("scan", "");
 }
+static bool run_fleet_nav(JNIEnv *env, const struct nav *nav)
+{
+    switch (nav->command) {
+    case CMD_FLEET_JOIN: zapp_fleet_review_select(&shell.fleet_review_started, &shell.fleet_start_requested, true); shell.send("fleet_join", ""); return true;
+    case CMD_FLEET_START: zapp_fleet_review_select(&shell.fleet_review_started, &shell.fleet_start_requested, false); shell.send("node_start", ""); return true;
+    case CMD_FLEET_BACK: back(env); return true;
+    case CMD_FLEET_COPY: if (shell.fleet_receipt[0]) shell.send("fleet_copy", shell.fleet_receipt); return true;
+    default: return false;
+    }
+}
 static void run_nav(JNIEnv *env, const struct nav *nav)
 {
+    if (run_fleet_nav(env, nav)) return;
     switch (nav->command) {
     case CMD_HOME: go(env, SCREEN_HOME); break;
     case CMD_APPS: go(env, SCREEN_APPS); break;
@@ -804,9 +835,7 @@ static void run_nav(JNIEnv *env, const struct nav *nav)
     case CMD_CAMERA_PASTE: open_paste(env); break;
     case CMD_PASTE_REVIEW: review_paste(env); break;
     case CMD_OUTCOME_DISMISS: set_outcome(env, ""); break;
-    case CMD_FLEET_JOIN: shell.fleet_review_started = true; shell.send("fleet_join", ""); break;
-    case CMD_FLEET_BACK: back(env); break;
-    case CMD_FLEET_COPY: if (shell.fleet_receipt[0]) shell.send("fleet_copy", shell.fleet_receipt); break;
+    default: break;
     }
 }
 static void launch(JNIEnv *env, const char *package, const char *activity, const char *name)
@@ -997,7 +1026,7 @@ static void finish_scan(JNIEnv *env, const struct zapp_view *view)
     }
     bool home = target == ZAPP_SCAN_TO_HOME;
     if (target == ZAPP_SCAN_TO_FLEET_REVIEW) {
-        shell.fleet_review_started = false;
+        shell.fleet_review_started = false; shell.fleet_start_requested = false; shell.fleet_result_valid = false;
         go(env, SCREEN_FLEET_REVIEW);
     } else if (!home) go(env, SCREEN_ASSISTANT);
     if (!home) return;
@@ -1041,11 +1070,36 @@ static void fleet_scroll_hint(JNIEnv *env)
     if (zj_clean(env)) (void)zj_visible(env, shell.fleet_review_hint, below == JNI_TRUE);
 }
 
+static enum zapp_fleet_node_state render_fleet_node(JNIEnv *env, const struct zapp_view *view)
+{
+    enum zapp_fleet_node_state node = zapp_fleet_node_state(view->fleet_machine, view->node_process_running, view->node_stopping, view->busy);
+    set_text(env, shell.fleet_review_status, !view->fleet_token[0] ? "" : node == ZAPP_FLEET_NODE_START ? "Start the node to join this fleet." :
+             node == ZAPP_FLEET_NODE_WAIT ? "Waiting for the node." : "");
+    (void)zj_visible(env, shell.fleet_start_button, node == ZAPP_FLEET_NODE_START && view->fleet_token[0]);
+    return node;
+}
+static void update_fleet_message(JNIEnv *env, const char *message)
+{
+    if (shell.fleet_result_valid && !strcmp(shell.fleet_result_shown, message)) return;
+    shell.fleet_result_valid = false;
+    bool ok = zj_text(env, shell.fleet_review_result, message) &&
+        zj_visible(env, shell.fleet_review_result, message[0] != 0) &&
+        zj_visible(env, shell.fleet_result_scroll, message[0] != 0);
+    jmethodID top = ok ? zj_method(env, shell.fleet_result_scroll, "scrollTo", "(II)V") : NULL;
+    if (top) (*env)->CallVoidMethod(env, shell.fleet_result_scroll, top, 0, 0);
+    if (top && zj_clean(env)) {
+        snprintf(shell.fleet_result_shown, sizeof(shell.fleet_result_shown), "%s", message);
+        shell.fleet_result_valid = true;
+    }
+}
 static void render_fleet_review(JNIEnv *env, const struct zapp_view *view)
 {
     if (shell.current != SCREEN_FLEET_REVIEW) return;
     set_text(env, shell.fleet_review_text, view->fleet_preview);
-    set_text(env, shell.fleet_review_result, shell.fleet_review_started ? view->result : "");
+    const char *message = zapp_fleet_review_message(shell.fleet_review_started, shell.fleet_start_requested,
+                                                    view->result, view->node_action_notice);
+    update_fleet_message(env, message);
+    enum zapp_fleet_node_state node = render_fleet_node(env, view);
     bool receipt = shell.fleet_review_started && !view->busy && !view->fleet_token[0] && view->fleet_receipt[0];
     if (receipt && strcmp(shell.fleet_receipt, view->fleet_receipt)) {
         size_t size = 0;
@@ -1056,7 +1110,7 @@ static void render_fleet_review(JNIEnv *env, const struct zapp_view *view)
     }
     (void)zj_visible(env, shell.fleet_review_qr, receipt && shell.fleet_qr_shown);
     (void)zj_visible(env, shell.fleet_copy_button, receipt);
-    (void)zj_visible(env, shell.fleet_join_button, view->fleet_token[0] && !view->busy);
+    (void)zj_visible(env, shell.fleet_join_button, view->fleet_token[0] && !view->busy && node == ZAPP_FLEET_NODE_READY);
     (void)zj_text(env, shell.fleet_join_button, view->fleet_machine ? "Connect" : "Join fleet");
     (void)zj_text(env, shell.fleet_back_button, shell.fleet_review_started ? "Back" : "Cancel");
 }
@@ -1074,9 +1128,8 @@ void zapp_shell_render(JNIEnv *env, const struct zapp_view *view)
     if (!shell.rendered) {
         shell.rendered = true; shell.scans_seen = view->scans_done; shell.scan_dismissed = view->scanning;
         if (view->scanning && view->scan_paste) zapp_controller_cancel_scan();
+        if (!shell.preview && zapp_setup_ui_resume_needed()) go(env, SCREEN_SETUP);
     }
-    /* The first launch without a wallet opens the setup screens once; the Wallet tile opens them after that. */
-    if (!shell.setup_offered && !shell.preview && zapp_setup_state(shell.files) == ZAPP_SETUP_NEEDED) { shell.setup_offered = true; go(env, SCREEN_SETUP); }
     bool finished = view->scans_done != shell.scans_seen, dismissed = shell.scan_dismissed;
     shell.scans_seen = view->scans_done;
     render_scan(env, view, finished, dismissed);
@@ -1174,7 +1227,7 @@ void zapp_shell_destroy(JNIEnv *env)
     for (size_t i = 0; i < shell.nav_count; ++i) (*env)->DeleteGlobalRef(env, shell.navs[i].view);
     for (size_t i = 0; i < shell.row_count; ++i) (*env)->DeleteGlobalRef(env, shell.rows[i]);
     for (int i = 0; i < SCREEN_COUNT; ++i) if (shell.roots[i]) (*env)->DeleteGlobalRef(env, shell.roots[i]);
-    jobject *views[] = {&shell.notice_views[SCREEN_HOME], &shell.notice_views[SCREEN_APPS], &shell.notice_views[SCREEN_SETTINGS], &shell.notice_views[SCREEN_SEND], &shell.notice_views[SCREEN_SETUP], &shell.notice_views[SCREEN_FLEET_REVIEW], &shell.outcome_view, &shell.outcome_panel, &shell.status_view, &shell.scan_view, &shell.scan_hint_view, &shell.scan_camera, &shell.scan_panel, &shell.paste_panel, &shell.paste_field, &shell.paste_error, &shell.fleet_review_text, &shell.fleet_review_result, &shell.fleet_review_qr, &shell.fleet_review_scroll, &shell.fleet_review_hint, &shell.apps_list};
+    jobject *views[] = {&shell.notice_views[SCREEN_HOME], &shell.notice_views[SCREEN_APPS], &shell.notice_views[SCREEN_SETTINGS], &shell.notice_views[SCREEN_SEND], &shell.notice_views[SCREEN_SETUP], &shell.notice_views[SCREEN_FLEET_REVIEW], &shell.outcome_view, &shell.outcome_panel, &shell.status_view, &shell.scan_view, &shell.scan_hint_view, &shell.scan_camera, &shell.scan_panel, &shell.paste_panel, &shell.paste_field, &shell.paste_error, &shell.fleet_review_text, &shell.fleet_review_result, &shell.fleet_review_qr, &shell.fleet_review_scroll, &shell.fleet_review_hint, &shell.fleet_review_status, &shell.fleet_result_scroll, &shell.apps_list};
     for (size_t i = 0; i < sizeof(views) / sizeof(views[0]); ++i) if (*views[i]) (*env)->DeleteGlobalRef(env, *views[i]);
     release_cards();
     zapp_launcher_release(env, shell.apps, ZAPP_LAUNCHER_MAX);
