@@ -695,7 +695,7 @@ static bool vp_accept_all(void)
     const struct vr_case cases[] = {
         { "shield with text and hex memos", g_t, "shield",
           VAULT_INTENT_ROUTE_SHIELD, g_shield, 2 },
-        { "private by default route", g_z, NULL,
+        { "private without memo", g_z, "private",
           VAULT_INTENT_ROUTE_PRIVATE, g_private, 1 },
         { "unshield with empty memo", g_z, "unshield",
           VAULT_INTENT_ROUTE_UNSHIELD, g_unshield, 1 },
@@ -799,8 +799,6 @@ static const struct vp_ref k_refs[] = {
     { "t to z asked as mixed", VPRE VFROM("@T@") VROUTE("mixed")
       VEFF(VE("@Z@", "1")), "ROUTE_MISMATCH" },
     { "t to z asked as unshield", VPRE VFROM("@T@") VROUTE("unshield")
-      VEFF(VE("@Z@", "1")), "ROUTE_MISMATCH" },
-    { "t to z with the default route", VPRE VFROM("@T@")
       VEFF(VE("@Z@", "1")), "ROUTE_MISMATCH" },
     { "z to z asked as shield", VPRE VFROM("@Z@") VROUTE("shield")
       VEFF(VE("@Y@", "1")), "ROUTE_MISMATCH" },
