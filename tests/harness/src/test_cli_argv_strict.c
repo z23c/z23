@@ -168,10 +168,8 @@ static char *cas_envp[5];
 /* Per-fixture overrides: binary to exec (default CAS_BIN) and one extra
  * NAME=value environment entry. Reset by each fixture that sets them. */
 static const char *cas_exec_path = NULL;
-#if !defined(_WIN32)
 /* Opt in only for explicitly reviewed public synthetic output. */
 static bool cas_capture_safe_note;
-#endif
 static char cas_extra_env[PATH_MAX + 32];
 /* When set, the child PATH is only the fixture bin directory and the
  * systemctl-disable variable is absent, so a lookup really execs. */
@@ -210,17 +208,23 @@ static int cas_run(char *const argv[], const char *home, char *out,
 #if defined(_WIN32)
     /* No fork on this lane: the CreateProcess+pipe analogue returns the
      * child's exit code directly. */
+    if (cas_capture_safe_note)
+        return test_spawn_capture_env_public((const char *const *)argv,
+                                             (const char *const *)cas_build_envp(home), out, cap);
     return test_spawn_capture_env((const char *const *)argv,
-                                  (const char *const *)cas_build_envp(home),
-                                  out, cap);
+                                  (const char *const *)cas_build_envp(home), out, cap);
 #else
     int pipefd[2];
-    if (pipe(pipefd) != 0) return -1;
+    if (pipe(pipefd) != 0) {
+        test_note("cli child rc=-1 launched=0 observed=0 reason=pipe");
+        return -1;
+    }
 
     pid_t pid = fork();
     if (pid < 0) {
         close(pipefd[0]);
         close(pipefd[1]);
+        test_note("cli child rc=-1 launched=0 observed=0 reason=fork");
         return -1;
     }
     if (pid == 0) {
@@ -234,9 +238,11 @@ static int cas_run(char *const argv[], const char *home, char *out,
     }
     close(pipefd[1]);
     size_t pos = 0;
+    struct test_child_merged capture = {0};
     char buf[4096];
     ssize_t r;
     while ((r = read(pipefd[0], buf, sizeof(buf))) > 0) {
+        test_child_merged_add(&capture, buf, (size_t)r);
         size_t take = (size_t)r;
         size_t room = (pos + 1 < cap) ? (cap - 1 - pos) : 0;
         if (take > room) take = room;
@@ -246,10 +252,14 @@ static int cas_run(char *const argv[], const char *home, char *out,
     close(pipefd[0]);
 
     int status = 0;
-    if (waitpid(pid, &status, 0) != pid) return -1;
-    if (WIFEXITED(status)) return WEXITSTATUS(status);
-    if (WIFSIGNALED(status)) return -100 - WTERMSIG(status);
-    return -1;
+    bool observed = waitpid(pid, &status, 0) == pid;
+    int rc = !observed ? -1 : WIFEXITED(status) ? WEXITSTATUS(status) :
+             WIFSIGNALED(status) ? -100 - WTERMSIG(status) : -1;
+    test_note("cli child rc=%d observed=%d eof=%d read_error=%d signal=%d truncated=%d",
+              rc, observed, r == 0, r < 0, observed && WIFSIGNALED(status) ? WTERMSIG(status) : 0,
+              capture.observed > pos);
+    test_child_merged_note(&capture, cas_capture_safe_note);
+    return rc;
 #endif
 }
 
@@ -273,25 +283,29 @@ static int cas_daemon_wait_ms(long deadline)
 }
 
 /* Poll fd for up to wait_ms: 1 = readable, 0 = hang-up/error, -1 = timeout. */
-static int cas_daemon_poll_readable(int fd, int wait_ms)
+static int cas_daemon_poll_readable(int fd, int wait_ms, bool *poll_error)
 {
     struct pollfd pfd = { .fd = fd, .events = POLLIN };
     int pr = poll(&pfd, 1, wait_ms);
     if (pr > 0) {
         if (pfd.revents & POLLIN) return 1;
+        if (pfd.revents & POLLERR) *poll_error = true;
         if (pfd.revents & (POLLHUP | POLLERR)) return 0;
     }
+    if (pr < 0 && errno != EINTR) *poll_error = true;
     return -1;
 }
 
 /* Read one chunk from fd into out; 1 = all needles now present, 0 = EOF,
  * -1 = keep waiting. */
 static int cas_daemon_read_chunk(int fd, char *out, size_t cap, size_t *pos,
-                                 const char *const *needles)
+                                 const char *const *needles, struct test_child_merged *capture,
+                                 bool *read_error)
 {
     char buf[4096];
     ssize_t r = read(fd, buf, sizeof(buf));
     if (r > 0) {
+        test_child_merged_add(capture, buf, (size_t)r);
         size_t take = (size_t)r;
         size_t room = (*pos + 1 < cap) ? (cap - 1 - *pos) : 0;
         if (take > room) take = room;
@@ -304,6 +318,7 @@ static int cas_daemon_read_chunk(int fd, char *out, size_t cap, size_t *pos,
     } else if (r == 0) {
         return 0; /* child exited before printing everything */
     }
+    if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) *read_error = true;
     return -1;
 }
 #endif
@@ -329,12 +344,16 @@ static bool cas_run_daemon_wait_for(char *const argv[], const char *home,
                                    needles, max_ms, out, cap);
 #else
     int pipefd[2];
-    if (pipe(pipefd) != 0) return false;
+    if (pipe(pipefd) != 0) {
+        test_note("cli daemon launched=0 observed=0 reason=pipe");
+        return false;
+    }
 
     pid_t pid = fork();
     if (pid < 0) {
         close(pipefd[0]);
         close(pipefd[1]);
+        test_note("cli daemon launched=0 observed=0 reason=fork");
         return false;
     }
     if (pid == 0) {
@@ -352,28 +371,36 @@ static bool cas_run_daemon_wait_for(char *const argv[], const char *home,
     fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
 
     size_t pos = 0;
+    struct test_child_merged capture = {0};
     out[0] = 0;
     bool found = false;
+    const char *stop = "hangup";
+    bool eof = false, read_error = false, poll_error = false;
     const long deadline = cas_now_ms() + max_ms;
     for (;;) {
         int wait = cas_daemon_wait_ms(deadline);
-        if (wait == 0) break;
-        int ev = cas_daemon_poll_readable(pipefd[0], wait);
+        if (wait == 0) { stop = "timeout"; break; }
+        int ev = cas_daemon_poll_readable(pipefd[0], wait, &poll_error);
         if (ev == 1) {
             int st = cas_daemon_read_chunk(pipefd[0], out, cap, &pos,
-                                           needles);
-            if (st == 1) { found = true; break; }
-            if (st == 0) break;
+                                           needles, &capture, &read_error);
+            if (st == 1) { found = true; stop = "needle"; break; }
+            if (st == 0) { eof = true; break; }
         } else if (ev == 0) {
             break;
         }
     }
     out[pos < cap ? pos : cap - 1] = 0;
 
-    kill(pid, SIGKILL);
+    int killed = kill(pid, SIGKILL);
     int status = 0;
-    waitpid(pid, &status, 0);
+    bool observed = waitpid(pid, &status, 0) == pid;
     close(pipefd[0]);
+    test_note("cli daemon stop=%s eof=%d observed=%d killed=%d signal=%d read_error=%d poll_error=%d truncated=%d",
+              stop, eof, observed, killed == 0,
+              observed && WIFSIGNALED(status) ? WTERMSIG(status) : 0, read_error, poll_error,
+              capture.observed > pos);
+    test_child_merged_note(&capture, cas_capture_safe_note);
     if (found) return true;
     return test_out_has_all_needles(out, needles);
 #endif
@@ -503,7 +530,9 @@ static int cas_test_observed_incident_refuses(void)
             NULL,
         };
         char out[8192] = {0};
+        cas_capture_safe_note = true; /* fixed public typo, refused before routing */
         int rc = cas_run(argv, home, out, sizeof(out));
+        cas_capture_safe_note = false;
 
         ASSERT_EQ(rc, ZCL_COMMAND_EXIT_INVALID);
         ASSERT(cas_contains(out, "error=UNRECOGNIZED_FLAG"));
@@ -1250,6 +1279,41 @@ static int cas_test_daemon_evidence(void)
     } _test_next:;
     return failures;
 }
+
+static int cas_test_signal_evidence(void)
+{
+    int failures = 0;
+    TEST("CLI capture: signaled child retains its observed status") {
+        char *argv[] = {"/bin/sh", "-c", "kill -TERM $$", NULL};
+        char out[32], evidence[TEST_EVIDENCE_CAP + 512];
+        test_evidence_reset(); cas_exec_path = "/bin/sh";
+        int rc = cas_run(argv, "/tmp", out, sizeof(out));
+        cas_exec_path = NULL;
+        (void)test_evidence_render(evidence, sizeof(evidence), __FILE__, __LINE__);
+        ASSERT(rc == -100 - SIGTERM);
+        ASSERT(strstr(evidence, "observed=1") && strstr(evidence, "signal=15"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int cas_test_daemon_timeout_evidence(void)
+{
+    int failures = 0;
+    TEST("CLI daemon capture: timeout is distinct from needle stop") {
+        char *argv[] = {"/bin/sh", "-c", "exec sleep 30", NULL};
+        const char *const needles[] = {"not-produced", NULL};
+        char out[32], evidence[TEST_EVIDENCE_CAP + 512];
+        test_evidence_reset(); cas_exec_path = "/bin/sh";
+        bool found = cas_run_daemon_wait_for(argv, "/tmp", needles, 100, out, sizeof(out));
+        cas_exec_path = NULL;
+        (void)test_evidence_render(evidence, sizeof(evidence), __FILE__, __LINE__);
+        ASSERT(!found);
+        ASSERT(strstr(evidence, "stop=timeout") && strstr(evidence, "observed=1"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
 #endif
 
 int test_cli_argv_strict(void)
@@ -1260,6 +1324,8 @@ int test_cli_argv_strict(void)
     failures += cas_test_capture_evidence();
     failures += cas_test_capture_withheld();
     failures += cas_test_daemon_evidence();
+    failures += cas_test_signal_evidence();
+    failures += cas_test_daemon_timeout_evidence();
 #endif
 
     if (cas_dev_bin_fresh())

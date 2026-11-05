@@ -417,6 +417,17 @@ void test_evidence_reset(void);
 void test_note(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void test_note_bytes(const char *label, const void *buf, size_t len);
 void test_note_child(const char *label, int rc, const char *out);
+
+/* Last observed bytes of a merged child stream; not necessarily the final
+ * child output unless the caller independently observed EOF. */
+#define TEST_CHILD_MERGED_TAIL 512u
+struct test_child_merged {
+    unsigned char tail[TEST_CHILD_MERGED_TAIL];
+    size_t len;
+    uint64_t observed;
+};
+void test_child_merged_add(struct test_child_merged *capture, const void *bytes, size_t len);
+void test_child_merged_note(const struct test_child_merged *capture, bool safe_bytes);
 void test_evidence_dump(const char *file, int line);
 size_t test_evidence_render(char *out, size_t cap, const char *file, int line);
 
@@ -477,6 +488,9 @@ int test_spawn_argv_wait(const char *const argv[]);
 int test_spawn_capture_env(const char *const argv[],
                            const char *const envp[],
                            char *out, size_t cap);
+/* Byte evidence is opt-in only for caller-verified public fixture output. */
+int test_spawn_capture_env_public(const char *const argv[],
+                                  const char *const envp[], char *out, size_t cap);
 /* Daemon-mode analogue of test_spawn_capture_env for a child that never
  * exits on its own: accumulates combined stdout+stderr until EVERY string
  * in needles is present or max_ms elapses, then TerminateProcess()es the

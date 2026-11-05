@@ -421,28 +421,37 @@ static size_t test_append_clamped(char *out, size_t pos, size_t cap,
  * position. */
 static size_t test_read_queued_bytes(HANDLE rd, char *out, size_t pos,
                                      size_t cap, DWORD avail,
-                                     const char *const *needles, bool *found)
+                                     const char *const *needles, bool *found,
+                                     struct test_child_merged *capture, bool *read_error)
 {
     char buf[4096];
     DWORD want = avail > sizeof(buf) ? (DWORD)sizeof(buf) : avail;
     DWORD got = 0;
-    if (ReadFile(rd, buf, want, &got, NULL) && got > 0) {
+    BOOL read_ok = ReadFile(rd, buf, want, &got, NULL);
+    if (read_ok && got > 0) {
+        test_child_merged_add(capture, buf, got);
         pos = test_append_clamped(out, pos, cap, buf, got);
         out[pos] = '\0';
         *found = test_out_has_all_needles(out, needles);
-    }
+    } else if (!read_ok && GetLastError() != ERROR_BROKEN_PIPE) *read_error = true;
     return pos;
 }
 
 /* Read `rd` to EOF into `out`, clamped to cap-1 bytes, and NUL-terminate. */
-static void test_drain_pipe_to_buf(HANDLE rd, char *out, size_t cap)
+static void test_drain_pipe_to_buf(HANDLE rd, char *out, size_t cap,
+                                   struct test_child_merged *capture, bool *eof, bool *read_error)
 {
     size_t pos = 0;
     for (;;) {
         char buf[4096];
         DWORD got = 0;
-        if (!ReadFile(rd, buf, sizeof(buf), &got, NULL) || got == 0)
+        if (!ReadFile(rd, buf, sizeof(buf), &got, NULL)) {
+            if (GetLastError() == ERROR_BROKEN_PIPE) *eof = true;
+            else *read_error = true;
             break;
+        }
+        if (got == 0) { *eof = true; break; }
+        test_child_merged_add(capture, buf, got);
         pos = test_append_clamped(out, pos, cap, buf, got);
     }
     out[pos < cap ? pos : cap - 1] = '\0';
@@ -451,15 +460,28 @@ static void test_drain_pipe_to_buf(HANDLE rd, char *out, size_t cap)
 /* Drain the bytes still queued on `rd` into `out`, clamped, and
  * NUL-terminate; returns the advanced position. */
 static size_t test_drain_pipe_leftovers(HANDLE rd, char *out, size_t pos,
-                                        size_t cap)
+                                        size_t cap, struct test_child_merged *capture,
+                                        bool *eof, bool *read_error)
 {
     DWORD avail = 0;
     DWORD got = 0;
     char buf[4096];
-    while (PeekNamedPipe(rd, NULL, 0, NULL, &avail, NULL) &&
-           avail > 0 &&
-           ReadFile(rd, buf, sizeof(buf), &got, NULL) && got > 0)
+    for (;;) {
+        if (!PeekNamedPipe(rd, NULL, 0, NULL, &avail, NULL)) {
+            if (GetLastError() == ERROR_BROKEN_PIPE) *eof = true;
+            else *read_error = true;
+            break;
+        }
+        if (avail == 0) break;
+        if (!ReadFile(rd, buf, sizeof(buf), &got, NULL)) {
+            if (GetLastError() == ERROR_BROKEN_PIPE) *eof = true;
+            else *read_error = true;
+            break;
+        }
+        if (got == 0) { *eof = true; break; }
+        test_child_merged_add(capture, buf, got);
         pos = test_append_clamped(out, pos, cap, buf, got);
+    }
     out[pos < cap ? pos : cap - 1] = '\0';
     return pos;
 }
@@ -469,26 +491,32 @@ static size_t test_drain_pipe_leftovers(HANDLE rd, char *out, size_t pos,
  * poll()+O_NONBLOCK shape, minus the socket-only WSAPoll. */
 static bool test_poll_pipe_for_needles(HANDLE rd, HANDLE proc,
                                        const char *const *needles, int max_ms,
-                                       char *out, size_t cap)
+                                      char *out, size_t cap, struct test_child_merged *capture,
+                                      bool *eof, bool *read_error, bool *timeout)
 {
     size_t pos = 0;
     bool found = false;
     ULONGLONG deadline = GetTickCount64() + (ULONGLONG)(max_ms > 0 ? max_ms : 0);
     for (;;) {
         DWORD avail = 0;
-        if (!PeekNamedPipe(rd, NULL, 0, NULL, &avail, NULL))
+        if (!PeekNamedPipe(rd, NULL, 0, NULL, &avail, NULL)) {
+            if (GetLastError() == ERROR_BROKEN_PIPE) *eof = true;
+            else *read_error = true;
             break; /* child hung up */
+        }
         if (avail > 0) {
             pos = test_read_queued_bytes(rd, out, pos, cap, avail, needles,
-                                         &found);
+                                         &found, capture, read_error);
             if (found)
                 return true;
         } else {
-            if (GetTickCount64() >= deadline)
+            if (GetTickCount64() >= deadline) {
+                *timeout = true;
                 break;
+            }
             if (WaitForSingleObject(proc, 0) == WAIT_OBJECT_0) {
                 /* Child exited: one last drain so its final bytes count. */
-                pos = test_drain_pipe_leftovers(rd, out, pos, cap);
+                pos = test_drain_pipe_leftovers(rd, out, pos, cap, capture, eof, read_error);
                 break;
             }
             Sleep(10);
@@ -552,9 +580,9 @@ int test_spawn_argv_wait(const char *const argv[])
     return (int)code;
 }
 
-int test_spawn_capture_env(const char *const argv[],
-                           const char *const envp[],
-                           char *out, size_t cap)
+static int test_spawn_capture_env_impl(const char *const argv[],
+                                       const char *const envp[],
+                                       char *out, size_t cap, bool safe_bytes)
 {
     if (!test_argv_nonempty(argv) || !out || cap == 0) {
         fprintf(stderr, "test_spawn_capture_env: bad args\n");
@@ -592,8 +620,10 @@ int test_spawn_capture_env(const char *const argv[],
     sa.bInheritHandle = TRUE;
     HANDLE rd = NULL, wr = NULL;
     if (!CreatePipe(&rd, &wr, &sa, 0)) {
+        DWORD error = GetLastError();
+        test_note("cli child rc=-1 launched=0 observed=0 reason=pipe");
         fprintf(stderr, "test_spawn_capture_env: CreatePipe failed (%lu)\n",
-                (unsigned long)GetLastError());
+                (unsigned long)error);
         return -1;
     }
     /* The parent must not inherit the read end into the child. */
@@ -612,8 +642,10 @@ int test_spawn_capture_env(const char *const argv[],
     if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW,
                         env_arg, NULL,
                         &si, &pi)) {
+        DWORD error = GetLastError();
+        test_note("cli child rc=-1 launched=0 observed=0 reason=create-process");
         fprintf(stderr, "test_spawn_capture_env: CreateProcess(%s) failed "
-                "(%lu)\n", argv[0], (unsigned long)GetLastError());
+                "(%lu)\n", argv[0], (unsigned long)error);
         CloseHandle(rd);
         CloseHandle(wr);
         return -1;
@@ -621,22 +653,44 @@ int test_spawn_capture_env(const char *const argv[],
     CloseHandle(pi.hThread);
     CloseHandle(wr); /* child's copy is inherited; ours must close to see EOF */
 
-    test_drain_pipe_to_buf(rd, out, cap);
+    struct test_child_merged capture = {0};
+    bool eof = false, read_error = false;
+    test_drain_pipe_to_buf(rd, out, cap, &capture, &eof, &read_error);
     CloseHandle(rd);
 
     if (WaitForSingleObject(pi.hProcess, INFINITE) != WAIT_OBJECT_0) {
+        DWORD error = GetLastError();
+        test_note("cli child rc=-1 observed=0 eof=%d read_error=%d", eof, read_error);
+        test_child_merged_note(&capture, safe_bytes);
         fprintf(stderr, "test_spawn_capture_env: wait failed (%lu)\n",
-                (unsigned long)GetLastError());
+                (unsigned long)error);
         CloseHandle(pi.hProcess);
         return -1;
     }
     DWORD code = 0;
     if (!GetExitCodeProcess(pi.hProcess, &code)) {
+        test_note("cli child rc=-1 observed=0 eof=%d read_error=%d", eof, read_error);
+        test_child_merged_note(&capture, safe_bytes);
         CloseHandle(pi.hProcess);
         return -1;
     }
     CloseHandle(pi.hProcess);
+    test_note("cli child rc=%lu observed=1 eof=%d read_error=%d truncated=%d",
+              (unsigned long)code, eof, read_error, capture.observed >= cap);
+    test_child_merged_note(&capture, safe_bytes);
     return (int)code;
+}
+
+int test_spawn_capture_env(const char *const argv[], const char *const envp[],
+                           char *out, size_t cap)
+{
+    return test_spawn_capture_env_impl(argv, envp, out, cap, false);
+}
+
+int test_spawn_capture_env_public(const char *const argv[], const char *const envp[],
+                                  char *out, size_t cap)
+{
+    return test_spawn_capture_env_impl(argv, envp, out, cap, true);
 }
 
 bool test_spawn_capture_kill(const char *const argv[],
@@ -677,8 +731,10 @@ bool test_spawn_capture_kill(const char *const argv[],
     sa.bInheritHandle = TRUE;
     HANDLE rd = NULL, wr = NULL;
     if (!CreatePipe(&rd, &wr, &sa, 0)) {
+        DWORD error = GetLastError();
+        test_note("cli daemon launched=0 observed=0 reason=pipe");
         fprintf(stderr, "test_spawn_capture_kill: CreatePipe failed (%lu)\n",
-                (unsigned long)GetLastError());
+                (unsigned long)error);
         return false;
     }
     SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
@@ -696,8 +752,10 @@ bool test_spawn_capture_kill(const char *const argv[],
     if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW,
                         env_arg, NULL,
                         &si, &pi)) {
+        DWORD error = GetLastError();
+        test_note("cli daemon launched=0 observed=0 reason=create-process");
         fprintf(stderr, "test_spawn_capture_kill: CreateProcess(%s) failed "
-                "(%lu)\n", argv[0], (unsigned long)GetLastError());
+                "(%lu)\n", argv[0], (unsigned long)error);
         CloseHandle(rd);
         CloseHandle(wr);
         return false;
@@ -705,14 +763,22 @@ bool test_spawn_capture_kill(const char *const argv[],
     CloseHandle(pi.hThread);
     CloseHandle(wr); /* child's copy is inherited; ours must close to see EOF */
 
+    struct test_child_merged capture = {0};
+    bool eof = false, read_error = false, timeout = false;
     bool found = test_poll_pipe_for_needles(rd, pi.hProcess, needles, max_ms,
-                                            out, cap);
+                                            out, cap, &capture, &eof, &read_error, &timeout);
     CloseHandle(rd);
 
     /* SIGKILL analogue, then reap. */
-    TerminateProcess(pi.hProcess, 137);
-    WaitForSingleObject(pi.hProcess, INFINITE);
+    BOOL killed = TerminateProcess(pi.hProcess, 137);
+    bool observed = WaitForSingleObject(pi.hProcess, INFINITE) == WAIT_OBJECT_0;
+    DWORD code = 0;
+    bool exit_known = observed && GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);
+    test_note("cli daemon stop=%s eof=%d observed=%d killed=%d exit=%lu read_error=%d truncated=%d",
+              found ? "needle" : timeout ? "timeout" : "hangup", eof, exit_known,
+              killed != 0, (unsigned long)code, read_error, capture.observed >= cap);
+    test_child_merged_note(&capture, false);
 
     if (found)
         return true;
@@ -740,6 +806,29 @@ long long test_forked_exec_data_mb(long long budget_mb)
     if (f)
         (void)fclose(f);
     return budget_mb + (data_kb > 0 ? (data_kb + 1023) / 1024 : 0);
+}
+
+void test_child_merged_add(struct test_child_merged *capture, const void *bytes, size_t len)
+{
+    if (!capture || (!bytes && len)) return;
+    const unsigned char *input = bytes;
+    capture->observed = UINT64_MAX - capture->observed < len ? UINT64_MAX : capture->observed + len;
+    if (len >= TEST_CHILD_MERGED_TAIL) {
+        memcpy(capture->tail, input + len - TEST_CHILD_MERGED_TAIL, TEST_CHILD_MERGED_TAIL);
+        capture->len = TEST_CHILD_MERGED_TAIL; return;
+    }
+    size_t drop = capture->len + len > TEST_CHILD_MERGED_TAIL
+                      ? capture->len + len - TEST_CHILD_MERGED_TAIL : 0;
+    if (drop) { memmove(capture->tail, capture->tail + drop, capture->len - drop); capture->len -= drop; }
+    if (len) memcpy(capture->tail + capture->len, input, len);
+    capture->len += len;
+}
+
+void test_child_merged_note(const struct test_child_merged *capture, bool safe_bytes)
+{
+    if (!capture) return;
+    test_note("child merged_observed=%llu", (unsigned long long)capture->observed);
+    if (safe_bytes) test_note_bytes("child merged observed tail", capture->tail, capture->len);
 }
 
 /* ── Failure flight recorder ──────────────────────────────────────────
