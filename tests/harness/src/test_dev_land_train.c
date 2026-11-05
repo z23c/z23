@@ -730,6 +730,50 @@ _test_next:;
     return failures;
 }
 
+static bool dlx_tr_mark_uncertain_push(void)
+{
+    static char text[262144];
+    char land[1200], path[1400];
+    size_t len = 0;
+    dlx_landdir(land, sizeof(land));
+    (void)snprintf(path, sizeof(path), "%s/queue.jsonl", land);
+    if (!dlx_slurp(path, text, sizeof(text) - 1, &len)) return false;
+    text[len] = '\0';
+    char *head = strstr(text, "{\"seq\":1,");
+    if (!head) return false;
+    char *end = strchr(head, '\n');
+    char *field = strstr(head, "\"push_diagnostic_pending\":0");
+    if (!end || !field || field >= end) return false;
+    field[strlen("\"push_diagnostic_pending\":")] = '1';
+    return dlx_write(path, text);
+}
+
+static int test_dev_land_train_split_uncertain_push(void)
+{
+    int failures = 0;
+    TEST("land: uncertain push refuses splitting and retains the pair") {
+        struct dlx_rig rig;
+        struct dlx_call call;
+        char b[64], c[64], before[200], after[200];
+        dlx_isolate("train_split_uncertain");
+        ASSERT(dlx_tr_rig(&rig, "train_split_uncertain_rig", "fail", "b.txt", b, c));
+        setenv("ZCL_LAND_TRAIN_WIDTH", "3", 1);
+        ASSERT(dlx_tr_beat("started", 2, 1));
+        ASSERT(dlx_tr_inflight_intent(before, sizeof(before)));
+        ASSERT(dlx_tr_mark_uncertain_push());
+        dlx_begin(&call, "step");
+        ASSERT(dlx_run(&call) && !dlx_ok(&call));
+        ASSERT_STR_EQ(dlx_err_code(&call), "TRAIN_SPLIT_FAILED");
+        dlx_end(&call);
+        ASSERT(dlx_tr_inflight_intent(after, sizeof(after)));
+        ASSERT_STR_EQ(before, after);
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
 static int test_dev_land_train_red_then_singles_land(void)
 {
     int failures = 0;
@@ -1241,6 +1285,7 @@ int test_dev_land_train_cases(void)
     failures += test_dev_land_train_unknown_proof();
     failures += test_dev_land_train_unavailable_proof();
     failures += test_dev_land_train_split_changed_tip();
+    failures += test_dev_land_train_split_uncertain_push();
     failures += test_dev_land_train_red_then_singles_land();
     failures += test_dev_land_train_held_row_skipped();
     failures += test_dev_land_train_cancelled_row_skipped();
