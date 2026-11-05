@@ -199,9 +199,19 @@ static bool fe_operator_read_mode(uint8_t pubkey[FLEET_ENROL_PUBKEY_BYTES],
         fe_why(why, FLEET_ENROL_WHY_STATE_ROOT);
         return false;
     }
+    /* Only a path that is truly absent means this box never joined a fleet.
+     * A refused open (a symlink, a permission, a descriptor limit) is a pin
+     * that exists and cannot be read, and the gate must close on it. */
+    if (platform_private_path_absent(path))
+        return true;
     platform_positioned_file_init(&file);
-    if (!platform_positioned_file_open(&file, path))
-        return true; /* this box has never joined a fleet */
+    if (!platform_positioned_file_open(&file, path)) {
+        fe_why(why, FLEET_ENROL_WHY_STATE_ROOT);
+        LOG_WARN(FLEET_DOMAIN,
+                 "the recorded fleet operator key cannot be opened: path=%s",
+                 path);
+        return false;
+    }
     bool ok = platform_positioned_file_size(&file, &size) &&
               size == (uint64_t)(FLEET_ENROL_PUBKEY_HEX - 1) &&
               platform_positioned_file_read(&file, text,

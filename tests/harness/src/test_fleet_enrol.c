@@ -3971,6 +3971,79 @@ static int test_fe_revoke_refusals(void)
     return failures;
 }
 
+/* Damage the recorded operator key (operator.pub) in one named way; false
+ * when the damage could not be made (a privileged runner reads through mode
+ * 000). The link case points at a file holding a VALID 64-hex pin, so the
+ * only thing wrong is the symlink itself. */
+static bool fe_break_pin(bool as_link, const uint8_t pub[32])
+{
+    char path[PATH_MAX], target[PATH_MAX], hex[FLEET_ENROL_PUBKEY_HEX];
+    FILE *f;
+    if (!fleet_enrol_state_path("operator.pub", path, sizeof(path)))
+        return false;
+    (void)unlink(path);
+    if (as_link) {
+        zcl_hex_encode(pub, 32, hex);
+        (void)snprintf(target, sizeof(target), "%s.real", path);
+        f = fopen(target, "wb");
+        if (!f || fputs(hex, f) < 0 || fclose(f) != 0)
+            return false;
+        return symlink(target, path) == 0;
+    }
+    f = fopen(path, "wb");
+    if (!f || fclose(f) != 0 || chmod(path, 0) != 0)
+        return false;
+    return fopen(path, "rb") == NULL;
+}
+
+/* One way of damaging the pin, run on its own so each way has its own red. */
+static int fe_operator_closed_case(bool as_link)
+{
+    int failures = 0;
+    char dd[PATH_MAX], path[PATH_MAX];
+    struct node_db db;
+    uint8_t seed[32], pub[32], pin[32], root[32];
+    const char *why = NULL;
+    bool present = true, manager = true, opened = false;
+    const int64_t now = (int64_t)time(NULL);
+    TEST(as_link ? "fleet gate: an operator pin that is a symlink to a valid "
+                   "pin closes the gate and the peer is refused"
+                 : "fleet gate: an operator pin with no read permission closes "
+                   "the gate and the peer is refused") {
+        fe_isolate(as_link ? "operator-link" : "operator-mode");
+        ASSERT(fe_datadir(dd, sizeof(dd), "operator-closed-dd"));
+        ASSERT(fe_manager_key(seed, pub));
+        ASSERT(fe_revoke_db_open(&db, dd));
+        opened = true;
+        zcl_fleet_roster_provider_install(zcl_fleet_roster_gate_provider());
+        boot_fleet_roster_test_reset();
+        /* Never joined, no head: the gate is unarmed and admits. */
+        ASSERT(fleet_enrol_operator_read(pin, &present, &why) && !present);
+        ASSERT(boot_fleet_roster_admits_peer(&db, pub, now));
+        ASSERT(fe_break_pin(as_link, pub));
+        ASSERT(!fleet_enrol_operator_read(pin, &present, &why));
+        ASSERT(!present);
+        ASSERT(!zcl_fleet_roster_root(root, &present, &manager));
+        boot_fleet_roster_test_reset();
+        ASSERT(!boot_fleet_roster_admits_peer(&db, pub, now));
+        PASS();
+    } _test_next:;
+    if (fleet_enrol_state_path("operator.pub", path, sizeof(path))) {
+        (void)chmod(path, 0600);
+        (void)unlink(path);
+    }
+    zcl_fleet_roster_provider_install(NULL);
+    boot_fleet_roster_test_reset();
+    if (opened)
+        node_db_close(&db);
+    return failures;
+}
+
+static int test_fe_operator_unreadable_closes(void)
+{
+    return fe_operator_closed_case(false) + fe_operator_closed_case(true);
+}
+
 static int test_fe_revoke_gate(void)
 {
     int failures = 0;
@@ -4337,6 +4410,7 @@ int test_fleet_enrol(void)
     failures += test_fe_operator_pin();
     failures += test_fe_head_leaves();
     failures += test_fe_revoke_refusals();
+    failures += test_fe_operator_unreadable_closes();
     failures += test_fe_revoke_gate();
     failures += test_fe_revoke_admit();
     failures += test_fd_roster_gate_row();
