@@ -1189,8 +1189,8 @@ static int test_forged_record_errors(void)
     return failures;
 }
 
-#define REC_NOT_BEFORE 180u
-#define REC_DELEG 196u
+#define REC_NOT_BEFORE 212u
+#define REC_DELEG 228u
 
 static int test_forged_record_delegation_errors(void)
 {
