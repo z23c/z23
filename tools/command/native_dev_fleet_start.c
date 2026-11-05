@@ -252,9 +252,21 @@ static bool fs_git(struct fs_ctx *ctx, const char *dir,
     return rc == 0 && !truncated;
 }
 
+static int64_t fs_real_clock_ms(void)
+{
+    return platform_time_monotonic_ms();
+}
+
+static int64_t (*fs_clock_ms)(void) = fs_real_clock_ms;
+
+void zcl_dev_fleet_start_set_clock_for_testing(int64_t (*now_ms)(void))
+{
+    fs_clock_ms = now_ms ? now_ms : fs_real_clock_ms;
+}
+
 static int64_t fs_elapsed(const struct fs_ctx *ctx)
 {
-    return platform_time_monotonic_ms() - ctx->started_ms;
+    return fs_clock_ms() - ctx->started_ms;
 }
 
 /* ── JSON size accounting ────────────────────────────────────────────────
@@ -864,7 +876,7 @@ struct fs_start {
 static void fs_start_init(struct fs_start *st, struct zcl_command_reply *reply)
 {
     memset(st, 0, sizeof(*st));
-    st->ctx.started_ms = platform_time_monotonic_ms();
+    st->ctx.started_ms = fs_clock_ms();
     st->ctx.now_wall = (int64_t)platform_time_wall_time_t();
     st->ctx.budget = FS_BUDGET_DEFAULT;
     st->data = &reply->data;

@@ -22,6 +22,10 @@ bool zcl_dev_fleet_gate_owner_only(const char *gate);
 /* The orchestrator-facing sibling: one bounded opening packet for the whole
  * fleet. Registered as dev.fleet.start; dev.fleet.truth keeps the per-lane
  * Git/receipt inventory above. */
+/* Test seam: the monotonic clock the start packet times itself with. NULL
+ * restores the real clock. Only a unit test calls this. */
+void zcl_dev_fleet_start_set_clock_for_testing(int64_t (*now_ms)(void));
+
 void zcl_native_handle_dev_fleet_start(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
