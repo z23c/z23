@@ -33,7 +33,9 @@
 #include "command/native_dev_batch.h"
 #include "command/native_dev_land_remote_shared.h"
 
+#include "base/cleanse.h"
 #include "base/hex.h"
+#include "base/log_macros.h"
 #include "base/safe_alloc.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
@@ -42,6 +44,7 @@
 #include "util/spawn.h"
 #include "session/fleet_board_proto.h"
 #include "sha3/sha3.h"
+#include "fleet_enrol.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -281,6 +284,84 @@ static void in_bundle_form(const char *text, struct in_post *p)
     (void)in_token(text, "peer", p->peer, sizeof(p->peer));
 }
 
+/* The reader's fleet root: the operator it joined, else its own fleet key.
+ * No root at all is "no fleet head exists" (present false); an unreadable
+ * pin or key is a failure, never absence. */
+static bool in_fleet_root(uint8_t root[32], bool *present)
+{
+    uint8_t seed[FLEET_ENROL_SEED_BYTES], own_pub[FLEET_ENROL_PUBKEY_BYTES];
+    bool joined = false, own = false;
+    const char *why = NULL;
+    *present = false;
+    if (!fleet_enrol_operator_read(root, &joined, &why))
+        return false;
+    if (!fleet_enrol_key_load(seed, own_pub, false, &own, &why) && !joined) {
+        memory_cleanse(seed, sizeof seed);
+        return false;
+    }
+    memory_cleanse(seed, sizeof seed);
+    if (!joined)
+        memcpy(root, own_pub, 32);
+    *present = joined || own;
+    return true;
+}
+
+enum in_rev { IN_REV_NO, IN_REV_YES, IN_REV_UNREADABLE };
+
+/* Does the reader's fleet head revoke this author key (fleet_head_revokes
+ * is the one authority)? No fleet root or no head file: not revoked. A head
+ * or root that exists but cannot be read: IN_REV_UNREADABLE (fail closed).
+ * A host that is not a 64-hex key cannot name a revoked key. */
+static enum in_rev in_author_revoked(const char *host)
+{
+    uint8_t root[32], key[32];
+    bool present = false, revoked;
+    struct fleet_head *head;
+    enum fleet_head_state state;
+    if (strlen(host) != 64 || !zcl_hex_decode(host, key, 32))
+        return IN_REV_NO;
+    if (!in_fleet_root(root, &present)) {
+        LOG_WARN("intake", "fleet root unreadable; refusing the author");
+        return IN_REV_UNREADABLE;
+    }
+    if (!present)
+        return IN_REV_NO;
+    head = zcl_malloc(sizeof *head, "intake-fleet-head");
+    if (!head) {
+        LOG_WARN("intake", "no memory for the fleet head; refusing the author");
+        return IN_REV_UNREADABLE;
+    }
+    state = fleet_head_load(root, head, NULL);
+    revoked = state == FLEET_HEAD_OK && fleet_head_revokes(head, key);
+    free(head);
+    if (state == FLEET_HEAD_BAD) {
+        LOG_WARN("intake", "fleet head unreadable; refusing the author");
+        return IN_REV_UNREADABLE;
+    }
+    return revoked ? IN_REV_YES : IN_REV_NO;
+}
+
+/* Refuse an author the fleet head revokes; false when the post may go on. */
+static bool in_refuse_revoked(struct in_post *p)
+{
+    enum in_rev r = in_author_revoked(p->host);
+    if (r == IN_REV_NO)
+        return false;
+    if (r == IN_REV_UNREADABLE) {
+        in_refuse(p, "fleet_head_unreadable");
+        return true;
+    }
+    char shortid[13];
+    memcpy(shortid, p->host, 12); /* host is 64 hex here */
+    shortid[12] = '\0';
+    in_refuse(p, "author_revoked");
+    (void)snprintf(p->step, sizeof(p->step),
+                   "author key %s is revoked by the fleet head; its "
+                   "bundle is not taken",
+                   shortid);
+    return true;
+}
+
 /* One listed post. Unsigned/foreign/bundle-less posts get their verdict here. */
 static void in_ingest(struct in_ctx *x, const struct json_value *j)
 {
@@ -315,7 +396,7 @@ static void in_ingest(struct in_ctx *x, const struct json_value *j)
         in_refuse(p, "post_expired_or_invalid_time");
     else if (!in_allowed(&x->allow, p->host))
         in_refuse(p, "author_not_allowed");
-    else
+    else if (!in_refuse_revoked(p))
         in_bundle_form(json_get_str(json_get(src, "text")), p);
     json_free(&shown);
 }

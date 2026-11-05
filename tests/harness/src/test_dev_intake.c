@@ -14,7 +14,11 @@
 #include "platform/time_compat.h"
 #include "crypto/ed25519.h"
 #include "session/fleet_board_proto.h"
+#include "fleet_enrol.h"
+
 #include "command/native_dev_land_remote_shared.h"
+
+#include <unistd.h>
 
 struct di {
     struct dbf f;
@@ -109,22 +113,60 @@ static bool di_write_posts(struct di *d, const struct json_value *arr)
     return ok;
 }
 
+/* The reader's fleet state lives under the lab, never the developer's own:
+ * HOME and XDG_STATE_HOME point into the lab while a case runs. */
+static char g_di_xdg[4096], g_di_home[4096];
+
+static void di_env_on(const struct di *d)
+{
+    const char *x = getenv("XDG_STATE_HOME"), *h = getenv("HOME");
+    char st[1000];
+    (void)snprintf(g_di_xdg, sizeof(g_di_xdg), "%s", x ? x : "");
+    (void)snprintf(g_di_home, sizeof(g_di_home), "%s", h ? h : "");
+    (void)snprintf(st, sizeof(st), "%s/state", d->f.root);
+    (void)setenv("XDG_STATE_HOME", st, 1);
+    (void)setenv("HOME", d->f.home, 1);
+}
+
+static void di_env_off(void)
+{
+    if (g_di_xdg[0])
+        (void)setenv("XDG_STATE_HOME", g_di_xdg, 1);
+    else
+        (void)unsetenv("XDG_STATE_HOME");
+    if (g_di_home[0])
+        (void)setenv("HOME", g_di_home, 1);
+    else
+        (void)unsetenv("HOME");
+}
+
+/* Seal a head by operator 0x5a that revokes `revoked` (or nothing when NULL)
+ * and make that operator this reader's trusted root. */
+static bool di_head_import(uint64_t seq, const uint8_t *revoked)
+{
+    uint8_t seed[32], sk[32], pub[32];
+    char line[FLEET_ENROL_HEAD_TEXT_MAX];
+    struct fleet_head out;
+    bool replaced = false;
+    const char *why = NULL;
+    memset(seed, 0x5a, 32);
+    ed25519_keypair(pub, sk, seed);
+    return fleet_enrol_operator_write(pub, &why) &&
+           fleet_head_mint(seq, platform_time_wall_unix(), revoked, revoked ? 1 : 0,
+                           seed, pub, line, sizeof(line), &why) &&
+           fleet_head_import(line, pub, false, &out, &replaced, &why);
+}
+
 static void di_run(struct di *d, bool commit, struct zcl_command_reply *reply,
                    char *dump, size_t cap)
 {
     const char *pairs[] = {"posts_file", d->posts, "repo", d->f.mainco,
                            "bundle_dir", d->bdir, "allow", d->allow, NULL};
     const char *flags[] = {"commit", NULL};
-    const char *old = getenv("HOME");
-    char saved[4096];
-    (void)snprintf(saved, sizeof(saved), "%s", old ? old : "");
-    (void)setenv("HOME", d->f.home, 1);
+    di_env_on(d);
     dbf_call(zcl_native_handle_dev_intake, &d->f, pairs, commit ? flags : NULL,
              reply, dump, cap);
-    if (old)
-        (void)setenv("HOME", saved, 1);
-    else
-        (void)unsetenv("HOME");
+    di_env_off();
 }
 
 static bool di_refs(const struct di *d, char *out, size_t cap)
@@ -220,6 +262,57 @@ int test_dev_intake(void)
         zcl_command_reply_free(&reply);
         (void)snprintf(dump, sizeof(dump), "%s\n", d.pkhex);
         ASSERT(dbf_put(d.allow, dump));
+        PASS();
+    }
+
+    TEST("intake: an author the fleet head revokes is REFUSE(author_revoked); "
+         "an unreadable head fails closed; no head changes nothing") {
+        uint8_t other[32];
+        char hp[1100];
+        json_init(&arr);
+        json_set_array(&arr);
+        di_post(&d, &arr, 5, (uint64_t)platform_time_wall_unix() + 5, shaA, false);
+        ASSERT(di_write_posts(&d, &arr));
+        json_free(&arr);
+
+        memset(other, 0x11, sizeof(other));
+        /* no fleet root and no head: behaviour unchanged */
+        di_run(&d, false, &reply, dump, sizeof(dump));
+        ASSERT(strstr(dump, "\"verdict\":\"ACCEPT_FOR_QUEUE\"") != NULL);
+        zcl_command_reply_free(&reply);
+
+        /* a head that revokes someone else does not touch this author */
+        di_env_on(&d);
+        ASSERT(di_head_import(1, other));
+        di_env_off();
+        di_run(&d, false, &reply, dump, sizeof(dump));
+        ASSERT(strstr(dump, "\"verdict\":\"ACCEPT_FOR_QUEUE\"") != NULL);
+        zcl_command_reply_free(&reply);
+
+        di_env_on(&d);
+        ASSERT(di_head_import(2, d.pk));
+        ASSERT(fleet_enrol_state_path("roster.head", hp, sizeof(hp)));
+        di_env_off();
+        di_run(&d, false, &reply, dump, sizeof(dump));
+        ASSERT(strstr(dump, "REFUSE(author_revoked)") != NULL);
+        ASSERT(strstr(dump, "ACCEPT_FOR_QUEUE") == NULL);
+        ASSERT(strstr(dump, "author key ") != NULL);
+        ASSERT(strstr(dump, d.pkhex) == NULL); /* the short id, never the key */
+        zcl_command_reply_free(&reply);
+
+        ASSERT(dbf_put(hp, "not a sealed head\n"));
+        di_run(&d, false, &reply, dump, sizeof(dump));
+        ASSERT(strstr(dump, "REFUSE(fleet_head_unreadable)") != NULL);
+        ASSERT(strstr(dump, "ACCEPT_FOR_QUEUE") == NULL);
+        zcl_command_reply_free(&reply);
+
+        /* later cases start from a box with no fleet state again */
+        {
+            char st[1000], gone[1010];
+            (void)snprintf(st, sizeof(st), "%s/state", d.f.root);
+            (void)snprintf(gone, sizeof(gone), "%s.used", st);
+            ASSERT(rename(st, gone) == 0);
+        }
         PASS();
     }
 
