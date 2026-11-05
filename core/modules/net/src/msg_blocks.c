@@ -986,9 +986,10 @@ static bool msg_block_run_intake(struct msg_processor *mp,
         return false;
     /* Catch-up intake stages a body on disk and leaves the merkle check for
      * later, and the first body stored for a hash stays. A body that does not
-     * match its header must not take that place, so it gets here the verdict
-     * at-tip intake would give it. */
-    if (!body->matches && sync_get_state() != SYNC_AT_TIP) {
+     * match its header must not take that place. The sync state is read again
+     * further down, so this holds in every state rather than depend on it; the
+     * body gets here the verdict at-tip intake gives it. */
+    if (!body->matches) {
         validation_state_dos(state, body->dos, false, REJECT_INVALID,
                              body->reason, true, NULL);
         return true;

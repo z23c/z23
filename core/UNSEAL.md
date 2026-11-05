@@ -983,3 +983,7 @@ later lane flips it HARD.
 - 2026-11-05T23:52:36Z — REASON: A body that does not match its header no longer marks the block seen
   old ROOT: 64cf473ef400951a39584c1beb5a16ef8f4f5241e856d712bc7006db488f64cd
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-05T23:53:13Z — REASON: Hold no download slot for a compact body on an unknown header
+  old ROOT: 810d35adf2b84a252558d61925d7ac01141b386a3beabbbd7610faa69b6f9df7
+  by: owner unseal ritual (make core-unseal)

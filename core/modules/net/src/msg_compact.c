@@ -12,6 +12,7 @@
 #include "net/download.h"
 #include "net/compact_blocks.h"
 #include "net/peer_scoring.h"
+#include "sync/sync_planner.h"
 #include "storage/disk_block_io.h"
 #include "validation/process_block.h"
 #include "consensus/validation.h"
@@ -41,21 +42,47 @@ static void compact_pending_clear(struct p2p_node *node)
 
 /* ── Helper: ask this peer for the full block ──────────────────── */
 
+/* The header of a cmpctblock has only passed a cheap check against a target the
+ * peer chose, so an unknown one earns no download slot. Ask this peer for headers
+ * under the per-peer limit the reject probe uses: a real block then comes through
+ * the normal header and body path, and a repeating peer drives no more requests. */
+static void compact_probe_unknown_header(struct msg_processor *mp,
+                                         struct p2p_node *node)
+{
+    int64_t now_s = (int64_t)platform_time_wall_time_t();
+    int64_t last_probe = atomic_load_explicit(&node->last_reject_probe_time,
+                                              memory_order_relaxed);
+    if (!syncsvc_should_probe_after_reject(now_s, last_probe))
+        return;
+    atomic_store_explicit(&node->last_reject_probe_time, now_s,
+                          memory_order_relaxed);
+    push_getheaders_from(mp, node, mp->main_state->pindex_best_header);
+}
+
 /* The request goes through the download manager, so the reply is not an
  * unrequested push and a stalled peer's slot is reassigned. A request already
- * in flight stands. If this peer cannot take the slot, any peer may. */
+ * in flight stands. A peer at its window, or a full table, leaves the hash queued
+ * for any peer. */
 static void compact_request_full_block(struct msg_processor *mp,
                                        struct p2p_node *node,
                                        const struct uint256 *hash)
 {
-    struct block_index *bi = mp->main_state
-        ? block_map_find(&mp->main_state->map_block_index, hash) : NULL;
-    if (bi && (bi->nStatus & BLOCK_HAVE_DATA))
+    if (!mp->main_state)
+        return;
+    struct block_index *bi =
+        block_map_find(&mp->main_state->map_block_index, hash);
+    if (!bi) {
+        compact_probe_unknown_header(mp, node);
+        return;
+    }
+    if (bi->nStatus & (BLOCK_HAVE_DATA | BLOCK_FAILED_MASK))
         return;
 
     struct download_manager *dm = get_download_mgr();
-    int32_t height = bi ? (int32_t)bi->nHeight : -1;
-    if (!dl_mark_requested(dm, hash, height, (uint32_t)node->id)) {
+    int32_t height = (int32_t)bi->nHeight;
+    uint32_t peer_id = (uint32_t)node->id;
+    if (dl_peer_in_flight(dm, peer_id) >= dl_peer_adaptive_window(dm, peer_id) ||
+        !dl_mark_requested(dm, hash, height, peer_id)) {
         dl_queue_priority(dm, hash, height);
         return;
     }

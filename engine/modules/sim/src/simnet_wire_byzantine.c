@@ -516,6 +516,28 @@ bool simnet_wire_byzantine_submit_block(struct block *block,
     return false;
 }
 
+/* True when the event is this tier's reject and names the expected reason. */
+static bool byz_event_names_expected_reason(const struct simnet_wire *wire,
+                                            enum event_type type,
+                                            const char *text,
+                                            enum event_type reject_type,
+                                            enum simnet_byzantine_tier tier)
+{
+    return type == reject_type && wire->byz_obs.tier == tier &&
+           strstr(text, simnet_byzantine_expected_reason(wire->byz_obs.kind));
+}
+
+/* The first observed reject raises the blocker; later ones change nothing. */
+static void byz_note_observed_reject(struct simnet_wire *wire,
+                                     const char *reason, bool expected)
+{
+    if (wire->byz_obs.rejected)
+        return;
+    wire->byz_obs.rejected = true;
+    (void)byz_raise_blocker(wire, reason, expected);
+    (void)byz_record_unchanged(wire);
+}
+
 void simnet_wire_byzantine_observe_event(struct simnet_wire *wire,
                                          enum event_type type,
                                          const void *payload,
@@ -530,39 +552,35 @@ void simnet_wire_byzantine_observe_event(struct simnet_wire *wire,
     memcpy(buf, payload, n);
     buf[n] = '\0';
 
-    if (type == EV_HEADERS_REJECTED &&
-        wire->byz_obs.tier == SIMNET_BYZ_TIER_HEADER_ADMISSION &&
-        strstr(buf, simnet_byzantine_expected_reason(wire->byz_obs.kind))) {
-        if (!wire->byz_obs.rejected) {
-            wire->byz_obs.rejected = true;
-            (void)byz_raise_blocker(
-                wire, simnet_byzantine_expected_reason(wire->byz_obs.kind),
-                true);
-            (void)byz_record_unchanged(wire);
-            /* NOTE: no manual peer_scoring_record here. Production
-             * process_headers() (core/modules/net/src/msg_headers.c)
-             * scores an objectively-forged header page itself
-             * (PEER_OFFENCE_INVALID_HEADER, dos>0), mirroring how
-             * msg_blocks.c has always scored invalid blocks. This harness
-             * observer only WATCHES the reject; it must not also score, or
-             * the offence is double-counted (50+50=100) and the single
-             * forged-header injection crosses the 100-point ban threshold —
-             * a peer/ban state that leaks across test groups (event
-             * observers + the score are global), which is why the group
-             * passed standalone (one path counted) but failed in isolation
-             * (both counted → banned). A single invalid header page is
-             * weight 50: the peer is scored/misbehaved but NOT yet banned,
-             * which is exactly what test_simnet_wire_peer_invalid_header
-             * asserts (peer_misbehaved && !peer_banned). */
-        }
+    const char *expected = simnet_byzantine_expected_reason(wire->byz_obs.kind);
+    if (byz_event_names_expected_reason(wire, type, buf, EV_HEADERS_REJECTED,
+                                        SIMNET_BYZ_TIER_HEADER_ADMISSION)) {
+        /* NOTE: no manual peer_scoring_record here. Production
+         * process_headers() (core/modules/net/src/msg_headers.c)
+         * scores an objectively-forged header page itself
+         * (PEER_OFFENCE_INVALID_HEADER, dos>0), mirroring how
+         * msg_blocks.c has always scored invalid blocks. This harness
+         * observer only WATCHES the reject; it must not also score, or
+         * the offence is double-counted (50+50=100) and the single
+         * forged-header injection crosses the 100-point ban threshold —
+         * a peer/ban state that leaks across test groups (event
+         * observers + the score are global), which is why the group
+         * passed standalone (one path counted) but failed in isolation
+         * (both counted → banned). A single invalid header page is
+         * weight 50: the peer is scored/misbehaved but NOT yet banned,
+         * which is exactly what test_simnet_wire_peer_invalid_header
+         * asserts (peer_misbehaved && !peer_banned). */
+        byz_note_observed_reject(wire, expected, true);
     } else if (type == EV_PEER_MISBEHAVE &&
                wire->byz_obs.kind == SIMNET_BYZ_OVERSIZE_VTX &&
                strstr(buf, "oversized block msg")) {
-        if (!wire->byz_obs.rejected) {
-            wire->byz_obs.rejected = true;
-            (void)byz_raise_blocker(wire, "oversized block msg", false);
-            (void)byz_record_unchanged(wire);
-        }
+        byz_note_observed_reject(wire, "oversized block msg", false);
+    } else if (byz_event_names_expected_reason(wire, type, buf,
+                                               EV_BLOCK_REJECTED,
+                                               SIMNET_BYZ_TIER_CONNECT_BLOCK)) {
+        /* A body that does not match its header is refused before submit, so
+         * the wire's own reject event is where this case is observed. */
+        byz_note_observed_reject(wire, expected, true);
     }
 }
 

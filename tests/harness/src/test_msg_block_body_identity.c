@@ -45,6 +45,9 @@
 } while (0)
 
 #define BBI_GETDATA_PAYLOAD_SIZE 37 /* compact count(1) + type(4) + hash(32) */
+#define BBI_DRAIN_POLLS 300000      /* at least five minutes of 1 ms sleeps */
+#define BBI_FABRICATED_HEADERS 300
+#define BBI_OTHER_PEER_ID 9901u     /* no bbi_peer has this id */
 
 struct bbi_submit {
     _Atomic int calls;
@@ -155,13 +158,17 @@ static int bbi_count_drain(void *ctx)
     return 0;
 }
 
-/* Wait on the worker's post-verdict drain; no deadline to lose to a busy host. */
-static void bbi_wait_for_drain(struct bbi_submit *c)
+/* Wait on the worker's post-verdict drain. False only when no verdict came at
+ * all, so a lost item fails the test instead of hanging it. */
+static bool bbi_wait_for_drain(struct bbi_submit *c)
 {
-    while (atomic_load(&c->drains) == 0) {
+    for (long i = 0; i < BBI_DRAIN_POLLS; i++) {
+        if (atomic_load(&c->drains) != 0)
+            return true;
         struct timespec ts = { .tv_sec = 0, .tv_nsec = 1000000L };
-        nanosleep(&ts, NULL);
+        nanosleep(&ts, NULL); /* real-clock: hang guard of at least five minutes, not a timing assertion */
     }
+    return false;
 }
 
 static void bbi_sync_to(enum sync_state target)
@@ -224,6 +231,37 @@ static void bbi_env_free(struct bbi_env *e)
     tx_mempool_free(&e->pool);
     net_manager_free(&e->nm);
     main_state_free(&e->ms);
+}
+
+/* The header of `real` is on the index, with its body not yet held. */
+static struct block_index *bbi_known_header(struct bbi_env *e,
+                                            const struct block *real,
+                                            uint32_t status)
+{
+    struct uint256 hash;
+    block_get_hash(real, &hash);
+    struct block_index *bi =
+        chainstate_insert_block_index((struct chainstate *)&e->ms, &hash);
+    if (bi) {
+        bi->nHeight = 1;
+        bi->nStatus = status;
+    }
+    return bi;
+}
+
+/* A chain tip to build a header locator from. */
+static bool bbi_genesis_tip(struct bbi_env *e)
+{
+    struct uint256 gh = chain_params_get()->consensus.hashGenesisBlock;
+    struct block_index *gen =
+        chainstate_insert_block_index((struct chainstate *)&e->ms, &gh);
+    if (!gen)
+        return false;
+    gen->nHeight = 0;
+    gen->nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
+    active_chain_move_window_tip(&e->ms.chain_active, gen);
+    e->ms.pindex_best_header = gen;
+    return true;
 }
 
 static bool bbi_deliver_block(struct bbi_env *e, struct p2p_node *from,
@@ -291,6 +329,19 @@ static void bbi_drop_sends(struct p2p_node *node)
     node->send_size = 0;
 }
 
+/* Messages named `name` in node's send queue. */
+static size_t bbi_count_sent(const struct p2p_node *node, const char *name)
+{
+    size_t count = 0;
+    for (const struct send_segment *seg = node->send_head; seg;
+         seg = seg->next) {
+        if (seg->size >= MSG_HEADER_SIZE &&
+            strcmp((const char *)seg->data + MESSAGE_START_SIZE, name) == 0)
+            count++;
+    }
+    return count;
+}
+
 /* True when node's queue holds a getdata naming `hash` as a full block. */
 static bool bbi_sent_getdata(const struct p2p_node *node,
                              const struct uint256 *hash)
@@ -313,9 +364,9 @@ static bool bbi_sent_getdata(const struct p2p_node *node,
     return false;
 }
 
-/* At the tip: the wrong body is rejected and its sender scored, the block
- * index is untouched, the hash stays out of the dedup ring, a fresh request can
- * be made at once, and the real block is then accepted from another peer. */
+/* At the tip: the wrong body is refused before submit and its sender scored, the
+ * block index is untouched, the hash stays out of the dedup ring, a fresh request
+ * can be made at once, and the real block is then accepted from another peer. */
 static int bbi_run_tip_full_block(bool mutated, const char *name)
 {
     int failures = 0;
@@ -348,8 +399,7 @@ static int bbi_run_tip_full_block(bool mutated, const char *name)
     struct download_manager *dm = get_download_mgr();
     BBI_CHECK(dl_mark_requested(dm, &hash, 1, (uint32_t)e.sender->id));
     BBI_CHECK(bbi_deliver_block(&e, e.sender, &bad));
-    BBI_CHECK(atomic_load(&e.submit.calls) == 1);
-    BBI_CHECK(atomic_load(&e.submit.accepted) == 0);
+    BBI_CHECK(atomic_load(&e.submit.calls) == 0);
     BBI_CHECK(!block_already_seen(&hash));
     BBI_CHECK(bbi_score(e.sender) ==
               peer_offence_weight(PEER_OFFENCE_INVALID_BLOCK));
@@ -358,7 +408,7 @@ static int bbi_run_tip_full_block(bool mutated, const char *name)
     /* Another peer can be asked straight away. */
     BBI_CHECK(dl_mark_requested(dm, &hash, 1, (uint32_t)e.honest->id));
     BBI_CHECK(bbi_deliver_block(&e, e.honest, &real));
-    BBI_CHECK(atomic_load(&e.submit.calls) == 2);
+    BBI_CHECK(atomic_load(&e.submit.calls) == 1);
     BBI_CHECK(atomic_load(&e.submit.accepted) == 1);
     BBI_CHECK(bbi_score(e.honest) == 0);
     BBI_CHECK((bi->nStatus & BLOCK_FAILED_MASK) == 0);
@@ -372,7 +422,9 @@ out:
 }
 
 /* A wrong body from a peer we did not ask cannot cancel the request we made of
- * another peer, and that peer's real block is not treated as unrequested. */
+ * another peer, and that peer's real block is not treated as unrequested. Its
+ * sender is scored for the body only: a request for that hash is live, so the
+ * body is not an unrequested push. */
 static int bbi_test_wrong_body_keeps_other_request(void)
 {
     int failures = 0;
@@ -395,9 +447,44 @@ static int bbi_test_wrong_body_keeps_other_request(void)
     BBI_CHECK(dl_mark_requested(dm, &hash, 1, (uint32_t)e.honest->id));
     BBI_CHECK(bbi_deliver_block(&e, e.sender, &bad));
     BBI_CHECK(dl_is_in_flight(dm, &hash));
+    BBI_CHECK(bbi_score(e.sender) ==
+              peer_offence_weight(PEER_OFFENCE_INVALID_BLOCK));
     BBI_CHECK(bbi_deliver_block(&e, e.honest, &real));
     BBI_CHECK(atomic_load(&e.submit.accepted) == 1);
     BBI_CHECK(bbi_score(e.honest) == 0);
+    if (!failures)
+        printf("OK\n");
+    block_free(&real);
+    block_free(&bad);
+    bbi_env_free(&e);
+    return failures;
+}
+
+/* With no request for that hash anywhere, the wrong body is also an unrequested
+ * push, as a matching body from that peer would be. */
+static int bbi_test_wrong_body_with_no_request_is_unrequested(void)
+{
+    int failures = 0;
+    printf("block body identity: a wrong body nobody asked for is also scored "
+           "as unrequested... ");
+
+    struct bbi_env e;
+    if (!bbi_env_init(&e, SYNC_AT_TIP)) {
+        printf("FAIL (setup)\n");
+        bbi_env_free(&e);
+        return 1;
+    }
+    struct block real, bad;
+    bbi_real_block(&real, 3, 61);
+    bbi_wrong_body(&bad, &real);
+    struct uint256 hash;
+    block_get_hash(&real, &hash);
+
+    BBI_CHECK(bbi_deliver_block(&e, e.sender, &bad));
+    BBI_CHECK(!block_already_seen(&hash));
+    BBI_CHECK(bbi_score(e.sender) ==
+              peer_offence_weight(PEER_OFFENCE_INVALID_BLOCK) +
+              peer_offence_weight(PEER_OFFENCE_UNREQUESTED));
     if (!failures)
         printf("OK\n");
     block_free(&real);
@@ -464,11 +551,14 @@ static int bbi_run_worker_reject(bool wrong, const char *name)
 
     struct validation_state state;
     validation_state_init(&state);
-    BBI_CHECK(msg_processor_enqueue_p2p_block(&e.mp, wrong ? &bad : &real,
-                                              &hash, 11, &state));
-    bbi_wait_for_drain(&e.submit);
-    BBI_CHECK(atomic_load(&e.submit.calls) == 1);
-    BBI_CHECK(block_already_seen(&hash) == !wrong);
+    bool queued = msg_processor_enqueue_p2p_block(&e.mp, wrong ? &bad : &real,
+                                                  &hash, 11, &state);
+    BBI_CHECK(queued);
+    if (queued) {
+        BBI_CHECK(bbi_wait_for_drain(&e.submit));
+        BBI_CHECK(atomic_load(&e.submit.calls) == 1);
+        BBI_CHECK(block_already_seen(&hash) == !wrong);
+    }
     if (!failures)
         printf("OK\n");
     block_free(&real);
@@ -516,8 +606,10 @@ static int bbi_run_catchup_full_block(bool mutated, const char *name)
         msg_processor_get_block_intake_stats(&e.mp, &stats);
         BBI_CHECK(stats.enqueued == 1);
         BBI_CHECK(bbi_score(e.honest) == 0);
-        bbi_wait_for_drain(&e.submit);
-        BBI_CHECK(atomic_load(&e.submit.accepted) == 1);
+        if (!failures) {
+            BBI_CHECK(bbi_wait_for_drain(&e.submit));
+            BBI_CHECK(atomic_load(&e.submit.accepted) == 1);
+        }
     }
     if (!failures)
         printf("OK\n");
@@ -564,11 +656,17 @@ static int bbi_test_compact_collision_asks_for_full_block(void)
     struct block real, bad;
     bbi_real_block(&real, 1, 48);
     bbi_wrong_body(&bad, &real);
+    if (!bbi_known_header(&e, &real, 0)) {
+        printf("FAIL (setup index)\n");
+        failures = 1;
+        goto out;
+    }
 
     BBI_CHECK(bbi_deliver_compact(&e, e.sender, &bad));
     failures += bbi_expect_compact_fallback(&e, &real);
     if (!failures)
         printf("OK\n");
+out:
     block_free(&real);
     block_free(&bad);
     bbi_env_free(&e);
@@ -591,6 +689,11 @@ static int bbi_test_blocktxn_mutation_asks_for_full_block(void)
     struct block real, bad;
     bbi_real_block(&real, 3, 49);
     bbi_mutated_body(&bad, &real);
+    if (!bbi_known_header(&e, &real, 0)) {
+        printf("FAIL (setup index)\n");
+        failures = 1;
+        goto out;
+    }
 
     BBI_CHECK(bbi_deliver_compact(&e, e.sender, &bad));
     BBI_CHECK(e.sender->compact_pending_block != NULL);
@@ -599,6 +702,7 @@ static int bbi_test_blocktxn_mutation_asks_for_full_block(void)
     failures += bbi_expect_compact_fallback(&e, &real);
     if (!failures)
         printf("OK\n");
+out:
     block_free(&real);
     block_free(&bad);
     bbi_env_free(&e);
@@ -623,15 +727,11 @@ static int bbi_test_compact_wrong_body_have_data_no_request(void)
     bbi_wrong_body(&bad, &real);
     struct uint256 hash;
     block_get_hash(&real, &hash);
-    struct block_index *bi =
-        chainstate_insert_block_index((struct chainstate *)&e.ms, &hash);
-    if (!bi) {
+    if (!bbi_known_header(&e, &real, BLOCK_HAVE_DATA)) {
         printf("FAIL (setup index)\n");
         failures = 1;
         goto out;
     }
-    bi->nHeight = 1;
-    bi->nStatus = BLOCK_HAVE_DATA;
 
     BBI_CHECK(bbi_deliver_compact(&e, e.sender, &bad));
     BBI_CHECK(atomic_load(&e.submit.calls) == 0);
@@ -679,6 +779,364 @@ static int bbi_test_compact_matching_unchanged(void)
     return failures;
 }
 
+/* Fabricated headers cost little to make, so one peer sending many of them
+ * holds no download slots, queues no work, leaves intake room as it was, and
+ * gets one rate-limited header request rather than one for each. */
+static int bbi_test_unknown_headers_hold_nothing(void)
+{
+    int failures = 0;
+    printf("block body identity: fabricated headers hold no slots and no intake "
+           "room... ");
+
+    struct bbi_env e;
+    if (!bbi_env_init(&e, SYNC_BLOCKS_DOWNLOAD) || !bbi_genesis_tip(&e)) {
+        printf("FAIL (setup)\n");
+        bbi_env_free(&e);
+        return 1;
+    }
+    struct msg_block_intake_stats before, after;
+    msg_processor_get_block_intake_stats(&e.mp, &before);
+
+    for (unsigned i = 0; i < BBI_FABRICATED_HEADERS; i++) {
+        struct block real, bad;
+        bbi_real_block(&real, 1, 52);
+        real.header.nNonce.data[1] = (uint8_t)(i & 0xff);
+        real.header.nNonce.data[2] = (uint8_t)(i >> 8);
+        bbi_wrong_body(&bad, &real);
+        BBI_CHECK(bbi_deliver_compact(&e, e.sender, &bad));
+        if (i == 0) {
+            BBI_CHECK(bbi_count_sent(e.sender, "getheaders") == 1);
+            BBI_CHECK(atomic_load(&e.sender->last_reject_probe_time) != 0);
+            /* The limit is on a wall clock: hold it shut so a slow host cannot
+             * open it during the loop. */
+            atomic_store(&e.sender->last_reject_probe_time, INT64_MAX / 2);
+        }
+        block_free(&real);
+        block_free(&bad);
+    }
+
+    uint64_t in_flight = 1, queued = 1;
+    dl_get_stats(get_download_mgr(), NULL, NULL, NULL, &in_flight, &queued);
+    msg_processor_get_block_intake_stats(&e.mp, &after);
+    BBI_CHECK(in_flight == 0);
+    BBI_CHECK(queued == 0);
+    BBI_CHECK(dl_peer_in_flight(get_download_mgr(),
+                                (uint32_t)e.sender->id) == 0);
+    BBI_CHECK(after.enqueued == before.enqueued);
+    BBI_CHECK(after.current_depth == before.current_depth);
+    BBI_CHECK(bbi_count_sent(e.sender, "getheaders") == 1);
+    BBI_CHECK(bbi_count_sent(e.sender, "getdata") == 0);
+    BBI_CHECK(atomic_load(&e.submit.calls) == 0);
+    BBI_CHECK(bbi_score(e.sender) == 0);
+    if (!failures)
+        printf("OK\n");
+    bbi_env_free(&e);
+    return failures;
+}
+
+/* A hash for filling the request table, distinct from any real block's. */
+static struct uint256 bbi_filler_hash(size_t i)
+{
+    struct uint256 h;
+    memset(&h, 0xee, sizeof(h));
+    memcpy(h.data, &i, sizeof(i));
+    return h;
+}
+
+/* Hold `count` request slots for `peer_id`. */
+static bool bbi_fill_slots(uint32_t peer_id, size_t count)
+{
+    struct download_manager *dm = get_download_mgr();
+    for (size_t i = 0; i < count; i++) {
+        struct uint256 h = bbi_filler_hash(i);
+        if (!dl_mark_requested(dm, &h, (int32_t)(i + 2), peer_id))
+            return false;
+    }
+    return true;
+}
+
+/* Checks shared by the two ways this peer cannot take the request: the hash is
+ * left queued for any peer, nothing is asked of this one, and the peer gains no
+ * slot. */
+static int bbi_expect_compact_queued(struct bbi_env *e, const struct block *real,
+                                     size_t sender_slots)
+{
+    int failures = 0;
+    struct uint256 hash;
+    block_get_hash(real, &hash);
+    struct download_manager *dm = get_download_mgr();
+    uint64_t in_flight = 0, queued = 0;
+    dl_get_stats(dm, NULL, NULL, NULL, &in_flight, &queued);
+    BBI_CHECK(queued == 1);
+    BBI_CHECK(!dl_is_in_flight(dm, &hash));
+    BBI_CHECK(dl_peer_in_flight(dm, (uint32_t)e->sender->id) == sender_slots);
+    BBI_CHECK(!bbi_sent_getdata(e->sender, &hash));
+    BBI_CHECK(atomic_load(&e->submit.calls) == 0);
+    BBI_CHECK(!block_already_seen(&hash));
+    BBI_CHECK(bbi_score(e->sender) == 0);
+    return failures;
+}
+
+/* A peer at its window does not claim the request: `full_table` false.
+ * A full request table refuses a peer under its window: `full_table` true. */
+static int bbi_run_compact_cannot_take_slot(bool full_table, const char *name)
+{
+    int failures = 0;
+    printf("block body identity: a compact block that does not match, %s... ",
+           name);
+
+    struct bbi_env e;
+    if (!bbi_env_init(&e, SYNC_AT_TIP)) {
+        printf("FAIL (setup)\n");
+        bbi_env_free(&e);
+        return 1;
+    }
+    struct block real, bad;
+    bbi_real_block(&real, 1, full_table ? 54 : 53);
+    bbi_wrong_body(&bad, &real);
+
+    struct download_manager *dm = get_download_mgr();
+    uint32_t sender_id = (uint32_t)e.sender->id;
+    size_t window = dl_peer_adaptive_window(dm, sender_id);
+    uint32_t holder = full_table ? BBI_OTHER_PEER_ID : sender_id;
+    size_t count = full_table ? dl_get_max_in_flight_total() : window;
+    if (!bbi_known_header(&e, &real, 0) || !bbi_fill_slots(holder, count) ||
+        dl_peer_in_flight(dm, holder) != count) {
+        printf("FAIL (setup slots)\n");
+        failures = 1;
+        goto out;
+    }
+
+    BBI_CHECK(bbi_deliver_compact(&e, e.sender, &bad));
+    failures += bbi_expect_compact_queued(&e, &real, full_table ? 0 : window);
+    if (!failures)
+        printf("OK\n");
+out:
+    block_free(&real);
+    block_free(&bad);
+    bbi_env_free(&e);
+    return failures;
+}
+
+/* A request already made of another peer stands. */
+static int bbi_test_compact_keeps_request_in_flight(void)
+{
+    int failures = 0;
+    printf("block body identity: a compact block that does not match leaves a "
+           "request in flight alone... ");
+
+    struct bbi_env e;
+    if (!bbi_env_init(&e, SYNC_AT_TIP)) {
+        printf("FAIL (setup)\n");
+        bbi_env_free(&e);
+        return 1;
+    }
+    struct block real, bad;
+    bbi_real_block(&real, 1, 55);
+    bbi_wrong_body(&bad, &real);
+    struct uint256 hash;
+    block_get_hash(&real, &hash);
+
+    struct download_manager *dm = get_download_mgr();
+    if (!bbi_known_header(&e, &real, 0) ||
+        !dl_mark_requested(dm, &hash, 1, (uint32_t)e.honest->id)) {
+        printf("FAIL (setup request)\n");
+        failures = 1;
+        goto out;
+    }
+    BBI_CHECK(bbi_deliver_compact(&e, e.sender, &bad));
+    BBI_CHECK(!bbi_sent_getdata(e.sender, &hash));
+    BBI_CHECK(dl_peer_in_flight(dm, (uint32_t)e.sender->id) == 0);
+    BBI_CHECK(dl_peer_in_flight(dm, (uint32_t)e.honest->id) == 1);
+    BBI_CHECK(bbi_deliver_block(&e, e.honest, &real));
+    BBI_CHECK(atomic_load(&e.submit.accepted) == 1);
+    BBI_CHECK(bbi_score(e.honest) == 0);
+    if (!failures)
+        printf("OK\n");
+out:
+    block_free(&real);
+    block_free(&bad);
+    bbi_env_free(&e);
+    return failures;
+}
+
+/* Nothing is asked for a block already known to be invalid. */
+static int bbi_test_compact_failed_header_no_request(void)
+{
+    int failures = 0;
+    printf("block body identity: no full-block request for a block known to be "
+           "invalid... ");
+
+    struct bbi_env e;
+    if (!bbi_env_init(&e, SYNC_AT_TIP)) {
+        printf("FAIL (setup)\n");
+        bbi_env_free(&e);
+        return 1;
+    }
+    struct block real, bad;
+    bbi_real_block(&real, 1, 56);
+    bbi_wrong_body(&bad, &real);
+    struct uint256 hash;
+    block_get_hash(&real, &hash);
+    if (!bbi_known_header(&e, &real, BLOCK_FAILED_VALID)) {
+        printf("FAIL (setup index)\n");
+        failures = 1;
+        goto out;
+    }
+    BBI_CHECK(bbi_deliver_compact(&e, e.sender, &bad));
+    uint64_t in_flight = 1, queued = 1;
+    dl_get_stats(get_download_mgr(), NULL, NULL, NULL, &in_flight, &queued);
+    BBI_CHECK(in_flight == 0);
+    BBI_CHECK(queued == 0);
+    BBI_CHECK(!bbi_sent_getdata(e.sender, &hash));
+    BBI_CHECK(atomic_load(&e.submit.calls) == 0);
+    if (!failures)
+        printf("OK\n");
+out:
+    block_free(&real);
+    block_free(&bad);
+    bbi_env_free(&e);
+    return failures;
+}
+
+/* A blocktxn reply that rebuilds the real block is submitted and nothing more
+ * is asked for. */
+static int bbi_test_blocktxn_matching_is_accepted(void)
+{
+    int failures = 0;
+    printf("block body identity: a blocktxn reply that rebuilds the real block "
+           "is accepted... ");
+
+    struct bbi_env e;
+    if (!bbi_env_init(&e, SYNC_AT_TIP)) {
+        printf("FAIL (setup)\n");
+        bbi_env_free(&e);
+        return 1;
+    }
+    struct block real;
+    bbi_real_block(&real, 3, 57);
+    struct uint256 hash;
+    block_get_hash(&real, &hash);
+    if (!bbi_known_header(&e, &real, 0)) {
+        printf("FAIL (setup index)\n");
+        failures = 1;
+        goto out;
+    }
+    BBI_CHECK(bbi_deliver_compact(&e, e.sender, &real));
+    BBI_CHECK(e.sender->compact_pending_block != NULL);
+    bbi_drop_sends(e.sender);
+    BBI_CHECK(bbi_deliver_blocktxn(&e, e.sender, &real));
+    BBI_CHECK(e.sender->compact_pending_block == NULL);
+    BBI_CHECK(atomic_load(&e.submit.calls) == 1);
+    BBI_CHECK(atomic_load(&e.submit.accepted) == 1);
+    BBI_CHECK(bbi_count_sent(e.sender, "getdata") == 0);
+    BBI_CHECK(bbi_score(e.sender) == 0);
+    if (!failures)
+        printf("OK\n");
+out:
+    block_free(&real);
+    bbi_env_free(&e);
+    return failures;
+}
+
+/* Once the hash is seen, a wrong reconstruction asks for nothing: that hash has
+ * already had its verdict, and the wrong body changes nothing about it. */
+static int bbi_test_blocktxn_wrong_body_after_seen_no_request(void)
+{
+    int failures = 0;
+    printf("block body identity: no full-block request for a hash already "
+           "seen... ");
+
+    struct bbi_env e;
+    if (!bbi_env_init(&e, SYNC_AT_TIP)) {
+        printf("FAIL (setup)\n");
+        bbi_env_free(&e);
+        return 1;
+    }
+    struct block real, bad;
+    bbi_real_block(&real, 3, 58);
+    bbi_mutated_body(&bad, &real);
+    struct uint256 hash;
+    block_get_hash(&real, &hash);
+    if (!bbi_known_header(&e, &real, 0)) {
+        printf("FAIL (setup index)\n");
+        failures = 1;
+        goto out;
+    }
+    BBI_CHECK(bbi_deliver_compact(&e, e.sender, &bad));
+    BBI_CHECK(e.sender->compact_pending_block != NULL);
+    bbi_drop_sends(e.sender);
+    block_mark_seen(&hash);
+    BBI_CHECK(bbi_deliver_blocktxn(&e, e.sender, &bad));
+    BBI_CHECK(!bbi_sent_getdata(e.sender, &hash));
+    BBI_CHECK(!dl_is_in_flight(get_download_mgr(), &hash));
+    BBI_CHECK(atomic_load(&e.submit.calls) == 0);
+    if (!failures)
+        printf("OK\n");
+out:
+    block_free(&real);
+    block_free(&bad);
+    bbi_env_free(&e);
+    return failures;
+}
+
+/* A wrong body delivered again, and from another peer, still leaves the hash
+ * unmarked and the index clean, and the real block still goes through. */
+static int bbi_run_repeat_wrong_body(enum sync_state sync, const char *name)
+{
+    int failures = 0;
+    printf("block body identity: a wrong body delivered repeatedly, %s... ",
+           name);
+
+    struct bbi_env e;
+    if (!bbi_env_init(&e, sync)) {
+        printf("FAIL (setup)\n");
+        bbi_env_free(&e);
+        return 1;
+    }
+    struct block real, bad;
+    bbi_real_block(&real, 3, sync == SYNC_AT_TIP ? 59 : 60);
+    bbi_wrong_body(&bad, &real);
+    struct uint256 hash;
+    block_get_hash(&real, &hash);
+    struct block_index *bi = bbi_known_header(&e, &real, 0);
+    struct p2p_node *third = bbi_peer(&e.nm, 13);
+    if (!bi || !third) {
+        printf("FAIL (setup)\n");
+        failures = 1;
+        goto out;
+    }
+
+    struct download_manager *dm = get_download_mgr();
+    BBI_CHECK(dl_mark_requested(dm, &hash, 1, (uint32_t)e.sender->id));
+    for (int i = 0; i < 2; i++)
+        BBI_CHECK(bbi_deliver_block(&e, e.sender, &bad));
+    BBI_CHECK(bbi_deliver_block(&e, third, &bad));
+    BBI_CHECK(!block_already_seen(&hash));
+    BBI_CHECK((bi->nStatus & BLOCK_FAILED_MASK) == 0);
+    BBI_CHECK(atomic_load(&e.submit.calls) == 0);
+    BBI_CHECK(bbi_score(e.sender) >=
+              peer_offence_weight(PEER_OFFENCE_INVALID_BLOCK));
+    BBI_CHECK(bbi_score(third) >=
+              peer_offence_weight(PEER_OFFENCE_INVALID_BLOCK));
+
+    BBI_CHECK(dl_mark_requested(dm, &hash, 1, (uint32_t)e.honest->id));
+    BBI_CHECK(bbi_deliver_block(&e, e.honest, &real));
+    BBI_CHECK(bbi_score(e.honest) == 0);
+    if (sync != SYNC_AT_TIP)
+        BBI_CHECK(bbi_wait_for_drain(&e.submit));
+    BBI_CHECK(atomic_load(&e.submit.accepted) == 1);
+    if (!failures)
+        printf("OK\n");
+out:
+    if (third)
+        p2p_node_free(third);
+    block_free(&real);
+    block_free(&bad);
+    bbi_env_free(&e);
+    return failures;
+}
+
 int msg_block_body_identity_tests(void)
 {
     int failures = 0;
@@ -698,5 +1156,17 @@ int msg_block_body_identity_tests(void)
     failures += bbi_test_blocktxn_mutation_asks_for_full_block();
     failures += bbi_test_compact_wrong_body_have_data_no_request();
     failures += bbi_test_compact_matching_unchanged();
+    failures += bbi_test_wrong_body_with_no_request_is_unrequested();
+    failures += bbi_test_unknown_headers_hold_nothing();
+    failures += bbi_run_compact_cannot_take_slot(false, "a peer at its window "
+                                                        "takes no slot");
+    failures += bbi_run_compact_cannot_take_slot(true, "a full request table "
+                                                       "leaves it queued");
+    failures += bbi_test_compact_keeps_request_in_flight();
+    failures += bbi_test_compact_failed_header_no_request();
+    failures += bbi_test_blocktxn_matching_is_accepted();
+    failures += bbi_test_blocktxn_wrong_body_after_seen_no_request();
+    failures += bbi_run_repeat_wrong_body(SYNC_AT_TIP, "at the tip");
+    failures += bbi_run_repeat_wrong_body(SYNC_BLOCKS_DOWNLOAD, "in catch-up");
     return failures;
 }
