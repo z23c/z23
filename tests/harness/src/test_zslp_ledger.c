@@ -772,6 +772,8 @@ static int test_strict_validity_rejections(void)
 
 /* ── Entry point ──────────────────────────────────────────────────── */
 
+int zslp_validity_walk_tests(void);
+
 int test_zslp_ledger(void)
 {
     int failures = 0;
@@ -781,5 +783,6 @@ int test_zslp_ledger(void)
     failures += test_live_hook();
     failures += test_wallet_wide_sweep();
     failures += test_strict_validity_rejections();
+    failures += zslp_validity_walk_tests();
     return failures;
 }
