@@ -20,8 +20,11 @@
  * identity the push would refuse, is skipped: it stays queued, untouched,
  * and the train continues with the rest. Any other failure stops the
  * stacking. Lint-land and the proof dependencies run again on the
- * stacked tip; if that fails the head's own commit is checked out again and
- * proved alone. The STACKED TIP is then bound as the head's proof pair and
+ * stacked tip. A red lint-land halves the stack, keeping its leading members
+ * (one bad row must not cost the rows ahead of it their shared proof, on this
+ * head and every head until it reaches the front); a cohort from a red train
+ * is never cut. If no prefix passes the head's own commit is checked out again
+ * and proved alone. The STACKED TIP is then bound as the head's proof pair and
  * every member's local, base, tree and proof_intent become that pair in one
  * queue rewrite, before the head persists it. Each member keeps its own
  * stacked commit in train_commit, which its outcome row then names.
@@ -64,6 +67,7 @@
 
 #include "base/safe_alloc.h"
 #include "base/hex.h"
+#include "platform/time_compat.h"
 #include "sha3/sha3.h"
 #include "json/json.h"
 
@@ -76,6 +80,7 @@
 #endif
 
 #define DL_TRAIN_MAX 8
+#define DL_TRAIN_LINT_RETRY_MS (15 * 60 * 1000)
 struct dl_train_group {
     size_t n;
     long long seq[DL_TRAIN_MAX];
@@ -640,34 +645,75 @@ static bool dl_train_test_lint_red(const struct dl_dirs *d, const char *tip)
 }
 #endif
 
-static bool dl_train_lint_green(const struct dl_dirs *d, struct dl_row *probe)
+enum dl_train_prep { DL_TRAIN_PREP_OK, DL_TRAIN_PREP_LINT_RED, DL_TRAIN_PREP_STOP };
+
+/* LINT_RED only for a verdict on the tree: a loaded host or a lint run that
+ * never reported is no reason to try a smaller stack. */
+static enum dl_train_prep dl_train_lint(const struct dl_dirs *d,
+                                        struct dl_row *probe)
 {
+    probe->dimension[0] = '\0';
 #if defined(ZCL_TESTING)
     if (dl_train_test_lint_red(d, probe->local))
-        return false;
+        return DL_TRAIN_PREP_LINT_RED;
 #endif
-    return dl_stubbed() || dl_lint_candidate(d, probe) == 0;
+    if (dl_stubbed() || dl_lint_candidate(d, probe) == 0)
+        return DL_TRAIN_PREP_OK;
+    return strcmp(probe->dimension, "lint") == 0 ? DL_TRAIN_PREP_LINT_RED
+                                                 : DL_TRAIN_PREP_STOP;
 }
 
 /* Lint-land and the proof dependencies again, on the stacked tip. A scratch
  * row keeps the head's own detail and dimension untouched. Nothing here
  * rewrites a commit: the stacked tip is exactly the members as submitted. */
-static bool dl_train_prepare(const struct dl_dirs *d, const struct dl_row *head,
-                             struct dl_train *t)
+static enum dl_train_prep dl_train_prepare(const struct dl_dirs *d,
+                                           const struct dl_row *head,
+                                           struct dl_train *t)
 {
     char why[512] = { 0 };
     struct dl_row probe = *head;
     (void)snprintf(probe.local, sizeof(probe.local), "%s", t->tip);
-    if (!dl_train_lint_green(d, &probe)) {
+    enum dl_train_prep lint = dl_train_lint(d, &probe);
+    if (lint != DL_TRAIN_PREP_OK) {
         dl_log(head, "train: lint-land failed on the stacked tip\n");
-        return false;
+        return lint;
     }
     if (!dl_wt_proof_deps_ensure(d, &probe, dl_stubbed(), why,
                                  sizeof(why))) {
         dl_log(head, "train: proof dependencies failed on the stacked tip\n");
-        return false;
+        return DL_TRAIN_PREP_STOP;
     }
-    return true;
+    return DL_TRAIN_PREP_OK;
+}
+
+/* Prepare the stack, keeping the leading half of its members after each red
+ * lint-land (7 members: at most 7, 3, 1). The kept prefix's tip is linted and
+ * proved in full, so no check is skipped; a member left out was never written
+ * and stays queued, unbound and unmarked. A split cohort names its exact rows,
+ * so it is prepared whole or not at all. A lint-land killed by its budget reads
+ * like a red tree, and the service gives a whole tick 90 minutes, so no retry
+ * starts once DL_TRAIN_LINT_RETRY_MS have gone. True when t holds a prepared
+ * stack. */
+static bool dl_train_prepare_stack(const struct dl_dirs *d,
+                                   const struct dl_row *head,
+                                   struct dl_train *t)
+{
+    int64_t stop_at = platform_time_monotonic_ms() + DL_TRAIN_LINT_RETRY_MS;
+    while (t->n > 0 && dl_train_checkout(d, t->tip)) {
+        char line[128];
+        enum dl_train_prep prep = dl_train_prepare(d, head, t);
+        if (prep != DL_TRAIN_PREP_LINT_RED || head->train_group[0] ||
+            platform_time_monotonic_ms() >= stop_at)
+            return prep == DL_TRAIN_PREP_OK;
+        t->n /= 2;
+        if (t->n == 0)
+            return false;
+        (void)snprintf(t->tip, sizeof(t->tip), "%s", t->commit[t->n - 1]);
+        (void)snprintf(line, sizeof(line),
+                       "train: trying again with the first %zu members\n", t->n);
+        dl_log(head, line);
+    }
+    return false;
 }
 
 struct dl_train_bind {
@@ -731,8 +777,7 @@ static bool dl_train_form(const struct dl_dirs *d, struct dl_row *row,
                           struct dl_train *t, bool *touched)
 {
     *touched = dl_train_stack(d, row, t);
-    if (t->n == 0 || !dl_train_checkout(d, t->tip) ||
-        !dl_train_prepare(d, row, t))
+    if (!dl_train_prepare_stack(d, row, t))
         return false;
     struct dl_train_bind b = { row, t };
     (void)snprintf(row->local, sizeof(row->local), "%s", t->tip);

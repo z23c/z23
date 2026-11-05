@@ -1533,8 +1533,10 @@ or establish general code safety.
 Put the ready commits on one lane branch, or submit several lanes. The land
 queue (`z23-dev dev land submit --worktree=$PWD`, then `dev land status`)
 rebases each row onto current `origin/main` and proves the tip it assembled;
-with `ZCL_LAND_TRAIN_WIDTH` set (the lander service sets 4) it stacks up to
-that many queued rows behind one exact proof. The steps below and the native
+with `ZCL_LAND_TRAIN_WIDTH` set (the lander service sets 8) it stacks up to
+that many queued rows behind one exact proof. A red lint-land on the stacked
+tip halves the stack, keeping its leading rows; the rows left out stay queued.
+The steps below and the native
 queue notes after them give the details. No manual stack or refresh script
 exists. The capability inventory and API reference are build output under
 `build/gen` and are never committed. Registry projections and dependency pins
