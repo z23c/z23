@@ -674,6 +674,8 @@ static void game_parse_check(const uint8_t *w, size_t n)
     require(got == n && memcmp(out, w, n) == 0);
     free(out);
 }
+
+static void game_fill_roster(struct mesh_game_roster *x, struct rd *r)
 {
     rd_bytes(r, x->zid, 32);
     x->asset_count = rd8(r) % 6u;
