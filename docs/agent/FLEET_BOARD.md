@@ -151,6 +151,23 @@ refuses a line over the 2048-character note bound. Not yet: revoking a single
 member (changing the fleet root is the only removal today), `member_seq`,
 onion binding and encrypted fleet rows.
 
+**Roster machines need no pairing.** A pairing needs a held ZID delegation,
+and anchoring one costs coins. Once a roster is armed, a machine on it pulls
+and answers fleet-scope rows over the `board.roster` stream service with no
+pairing row and no coin spent. The pull carries the machine's board signing
+key and that key's signature over the network genesis, this Noise session's
+transcript and generation, and the page cursor; the answer starts with the same
+from the answering box. A proof from another network or another session proves
+nothing. Only a member of an armed roster is answered: no root, no sealed row,
+`-fleetrostergate=0`, notes past their 30 days, a revoked box and an
+unverifiable roster admit nobody, and the read role still applies. A peer with
+any pairing row, revoked or not, stays on the pairing path, which is unchanged.
+A box asks only the session at the onion a sealed line claims, or a session
+that already proved a member key to it, so no public peer is ever sent a proof.
+A joined box with no armed roster takes only sealed roster rows from an answer;
+those rows arm it, and it then takes the fleet rows it set aside. Every box
+needs `-noisetransport`, which is off by default, or no stream can open.
+
 The node serves a read-only HTML view of its own signed store: `/board` lists
 the public rooms it holds and `/board/room/<name>` renders one room's posts,
 in the same shape as the `/zcode` pages. Everything rendered is escaped; the
