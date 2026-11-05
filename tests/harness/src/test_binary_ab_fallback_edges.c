@@ -154,7 +154,6 @@ static void ae_rm_nested(const char *base, char *path)
 
 static char g_ae_log[65536];
 static const char *g_ae_cap_dir;
-static void (*g_ae_cap_fn)(void);
 
 static bool ae_capture(void (*fn)(void))
 {
@@ -621,11 +620,25 @@ static int ae_env_fallback_ready(const char *mut, const char *lastgood,
     return failures;
 }
 
+/* Where the platform exposes the running image, compare byte for byte;
+ * elsewhere the size and mode checks stand alone. */
+static bool ae_is_self_image(const char *slot)
+{
+#if defined(__linux__)
+    struct stat a, b;
+    return stat(slot, &a) == 0 && stat("/proc/self/exe", &b) == 0 &&
+           a.st_size == b.st_size && ae_files_equal(slot, "/proc/self/exe");
+#else
+    (void)slot;
+    return true;
+#endif
+}
+
 static int ae_env_promote_running(const char *mut, const char *lastgood,
                                   const char *streak, const char *fb)
 {
     int failures = 0;
-    struct stat st, self;
+    struct stat st;
     AE_CHECK("seed sentinel last-good and streak 8",
              ae_write_str(lastgood, "SENTINEL", 0755) &&
              ae_write_str(streak, "8\n", 0600));
@@ -637,14 +650,7 @@ static int ae_env_promote_running(const char *mut, const char *lastgood,
              !ae_logged("ready streak reset after promotion failed"));
     AE_CHECK("the slot is an executable, byte-exact copy of the image",
              stat(lastgood, &st) == 0 && st.st_size > 1024 &&
-             (st.st_mode & S_IXUSR) &&
-#if defined(__linux__)
-             stat("/proc/self/exe", &self) == 0 &&
-             st.st_size == self.st_size &&
-             ae_files_equal(lastgood, "/proc/self/exe") &&
-#endif
-             true);
-    (void)self;
+             (st.st_mode & S_IXUSR) && ae_is_self_image(lastgood));
     AE_CHECK("and the streak is reset after the promotion",
              ae_text_is(streak, "0\n"));
     return failures;
