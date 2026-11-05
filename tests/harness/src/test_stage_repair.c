@@ -11,6 +11,7 @@
 
 #include <sqlite3.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -1053,6 +1054,262 @@ static int case_tip_finalize_rewind_churn_dryrun(void)
 }
 #endif /* ZCL_TESTING */
 
+/* ---- stage_reconcile_clamp_tip_finalize_to_floor: the boot-time clamp ----
+ * The clamp runs on public nodes at every restart, so each refusal must leave
+ * the cursor alone, report failure, and give the progress-store lock back.
+ * Another thread's trylock is the observation: a recursive lock the clamp
+ * forgot to release stays held against it, with no waiting involved. */
+static void *clamp_trylock_probe(void *arg)
+{
+    bool *got = arg;
+    *got = progress_store_tx_trylock();
+    if (*got)
+        progress_store_tx_unlock();
+    return NULL;
+}
+
+static bool tx_lock_is_free(void)
+{
+    pthread_t t;
+    bool got = false;
+    if (pthread_create(&t, NULL, clamp_trylock_probe, &got) != 0)
+        return false;
+    pthread_join(t, NULL);
+    return got;
+}
+
+static bool clamp_fixture(const char *tag, char *dir, size_t dir_n,
+                          sqlite3 **db, int cursor)
+{
+    return setup_case(tag, dir, dir_n, db) &&
+           seed_cursors(*db, 1, cursor);
+}
+
+static bool table_exists(sqlite3 *db, const char *name)
+{
+    sqlite3_stmt *st = NULL;
+    bool found = false;
+    if (sqlite3_prepare_v2(db,
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            -1, &st, NULL) != SQLITE_OK)
+        return false;
+    sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
+    found = sqlite3_step(st) == SQLITE_ROW;
+    sqlite3_finalize(st);
+    return found;
+}
+
+/* Result block pre-filled with values the call must overwrite. */
+static struct stage_reconcile_result dirty_result(void)
+{
+    struct stage_reconcile_result rr = { .clamped = true, .floor = 99 };
+    return rr;
+}
+
+static int case_clamp_early_returns(void)
+{
+    int failures = 0;
+    char dir[256];
+    sqlite3 *db = NULL;
+    if (!clamp_fixture("clamp_early", dir, sizeof(dir), &db, 25)) {
+        STR_CHECK("clamp early-return fixture", false);
+        teardown_case(dir);
+        return failures;
+    }
+    struct stage_reconcile_result rr = dirty_result();
+    bool null_db = stage_reconcile_clamp_tip_finalize_to_floor(NULL, 20, &rr);
+    STR_CHECK("clamp: NULL db is refused and the result block is zeroed",
+              !null_db && !rr.clamped && rr.floor == 0);
+
+    rr = dirty_result();
+    bool no_anchor = stage_reconcile_clamp_tip_finalize_to_floor(db, -1, &rr);
+    STR_CHECK("clamp: no applied anchor leaves the chain alone",
+              no_anchor && !rr.clamped && rr.floor == 0 &&
+              cursor_for(db, "tip_finalize") == 25 && tx_lock_is_free());
+
+    teardown_case(dir);
+    return failures;
+}
+
+/* coins_best 0 is a real anchor (the genesis block applied), not "none". */
+static int case_clamp_floor_zero(void)
+{
+    int failures = 0;
+    char dir[256];
+    sqlite3 *db = NULL;
+    bool ok = clamp_fixture("clamp_zero", dir, sizeof(dir), &db, 25);
+    struct stage_reconcile_result rr = dirty_result();
+    bool at_zero = ok && stage_reconcile_clamp_tip_finalize_to_floor(db, 0, &rr);
+    STR_CHECK("clamp: coins_best 0 is a real floor and clamps to it",
+              at_zero && rr.clamped && rr.floor == 0 &&
+              cursor_for(db, "tip_finalize") == 0 && tx_lock_is_free());
+    teardown_case(dir);
+    return failures;
+}
+
+static int case_clamp_moves_then_noops(void)
+{
+    int failures = 0;
+    char dir[256];
+    sqlite3 *db = NULL;
+    bool ok = clamp_fixture("clamp_moves", dir, sizeof(dir), &db, 25) &&
+              exec_sql(db, "INSERT INTO tip_finalize_log(height,status,ok) "
+                           "VALUES(30,'finalized',1);");
+    struct stage_reconcile_result rr = dirty_result();
+    bool rv = ok && stage_reconcile_clamp_tip_finalize_to_floor(db, 20, &rr);
+    STR_CHECK("clamp: a cursor above the floor moves to it, logs kept",
+              rv && rr.clamped && rr.floor == 20 &&
+              cursor_for(db, "tip_finalize") == 20 &&
+              table_exists(db, "tip_finalize_log") && tx_lock_is_free());
+
+    rr = dirty_result();
+    rv = stage_reconcile_clamp_tip_finalize_to_floor(db, 20, &rr);
+    STR_CHECK("clamp: a cursor already at the floor is a no-op success",
+              rv && !rr.clamped && rr.floor == 20 &&
+              cursor_for(db, "tip_finalize") == 20 && tx_lock_is_free());
+    teardown_case(dir);
+    return failures;
+}
+
+static int case_clamp_log_table_shapes(void)
+{
+    int failures = 0;
+    char dir[256];
+    sqlite3 *db = NULL;
+    bool ok = clamp_fixture("clamp_logtbl", dir, sizeof(dir), &db, 25) &&
+              exec_sql(db, "DROP TABLE tip_finalize_log;");
+    /* No log table yet (fresh store): the served floor is simply unknown. */
+    struct stage_reconcile_result rr = dirty_result();
+    bool rv = ok && stage_reconcile_clamp_tip_finalize_to_floor(db, 20, &rr);
+    STR_CHECK("clamp: a missing tip_finalize_log does not block the clamp",
+              rv && rr.clamped && cursor_for(db, "tip_finalize") == 20 &&
+              !table_exists(db, "tip_finalize_log") && tx_lock_is_free());
+
+    /* A log table of the wrong shape is damage, not "no table yet". */
+    bool bad = exec_sql(db, "UPDATE stage_cursor SET cursor=25 "
+                            "WHERE name='tip_finalize';"
+                            "CREATE TABLE tip_finalize_log(height INTEGER);");
+    rr = dirty_result();
+    rv = stage_reconcile_clamp_tip_finalize_to_floor(db, 20, &rr);
+    STR_CHECK("clamp: a damaged tip_finalize_log refuses and moves nothing",
+              bad && !rv && !rr.clamped && tx_lock_is_free() &&
+              cursor_for(db, "tip_finalize") == 25);
+    teardown_case(dir);
+    return failures;
+}
+
+static int case_clamp_unreadable_cursor(void)
+{
+    int failures = 0;
+    char dir[256];
+    sqlite3 *db = NULL;
+    bool ok = clamp_fixture("clamp_badcur", dir, sizeof(dir), &db, 25) &&
+              exec_sql(db, "UPDATE stage_cursor SET cursor='broken' "
+                           "WHERE name='tip_finalize';");
+    struct stage_reconcile_result rr = dirty_result();
+    bool rv = ok && stage_reconcile_clamp_tip_finalize_to_floor(db, 20, &rr);
+    STR_CHECK("clamp: a malformed cursor refuses and releases the lock",
+              ok && !rv && !rr.clamped && tx_lock_is_free());
+    teardown_case(dir);
+    return failures;
+}
+
+static int case_clamp_write_failures(void)
+{
+    int failures = 0;
+    char dir[256];
+    sqlite3 *db = NULL;
+    bool ok = clamp_fixture("clamp_txn", dir, sizeof(dir), &db, 25);
+    struct stage_reconcile_result rr = dirty_result();
+
+    /* BEGIN IMMEDIATE cannot nest inside the caller's transaction. */
+    bool nested = ok && exec_sql(db, "BEGIN;");
+    bool rv = nested && stage_reconcile_clamp_tip_finalize_to_floor(db, 20, &rr);
+    bool none = exec_sql(db, "ROLLBACK;");
+    STR_CHECK("clamp: a failed BEGIN refuses and moves nothing",
+              nested && !rv && !rr.clamped && none && tx_lock_is_free() &&
+              cursor_for(db, "tip_finalize") == 25);
+
+    /* The cursor write itself is vetoed: the transaction must be rolled back. */
+    bool veto = ok && exec_sql(db,
+        "CREATE TRIGGER clamp_veto BEFORE UPDATE ON stage_cursor "
+        "BEGIN SELECT RAISE(ABORT,'veto'); END;");
+    rr = dirty_result();
+    rv = veto && stage_reconcile_clamp_tip_finalize_to_floor(db, 20, &rr);
+    STR_CHECK("clamp: a failed cursor write rolls back and refuses",
+              veto && !rv && !rr.clamped &&
+              sqlite3_get_autocommit(db) != 0 && tx_lock_is_free() &&
+              cursor_for(db, "tip_finalize") == 25);
+    teardown_case(dir);
+    return failures;
+}
+
+static int case_clamp_commit_failure(void)
+{
+    int failures = 0;
+    char dir[256];
+    sqlite3 *db = NULL;
+    /* A deferred foreign key violated by the cursor write only fails at
+     * COMMIT, after the write itself succeeded. */
+    bool ok = clamp_fixture("clamp_commit", dir, sizeof(dir), &db, 25) &&
+              exec_sql(db,
+        "PRAGMA foreign_keys=ON;"
+        "CREATE TABLE clamp_parent(id INTEGER PRIMARY KEY);"
+        "CREATE TABLE clamp_child(pid INTEGER REFERENCES clamp_parent(id) "
+        "DEFERRABLE INITIALLY DEFERRED);"
+        "CREATE TRIGGER clamp_orphan AFTER UPDATE ON stage_cursor "
+        "BEGIN INSERT INTO clamp_child VALUES(99); END;");
+    struct stage_reconcile_result rr = dirty_result();
+    bool rv = ok && stage_reconcile_clamp_tip_finalize_to_floor(db, 20, &rr);
+    STR_CHECK("clamp: a failed COMMIT rolls back, moves nothing, refuses",
+              ok && !rv && !rr.clamped && sqlite3_get_autocommit(db) != 0 &&
+              tx_lock_is_free() && cursor_for(db, "tip_finalize") == 25);
+    (void)exec_sql(db, "PRAGMA foreign_keys=OFF;");
+    teardown_case(dir);
+    return failures;
+}
+
+/* The preserved-transition return must also give the lock back. */
+static int case_clamp_preserved_releases_lock(void)
+{
+    int failures = 0;
+    char dir[256];
+    sqlite3 *db = NULL;
+    bool ok = clamp_fixture("clamp_preserved", dir, sizeof(dir), &db, 19) &&
+         exec_sql(db, "ALTER TABLE tip_finalize_log ADD COLUMN tip_hash BLOB;") &&
+         exec_sql(db,
+            "INSERT OR REPLACE INTO tip_finalize_log"
+            "(height,status,ok,tip_hash) VALUES"
+            "(18,'finalized',1,"
+            "X'0100000000000000000000000000000000000000000000000000000000000000');"
+            "INSERT OR REPLACE INTO progress_meta(key,value) VALUES"
+            "('reducer_trusted_base_height',X'1200000000000000');"
+            "INSERT OR REPLACE INTO progress_meta(key,value) VALUES"
+            "('reducer_trusted_base_hash',zeroblob(32));");
+    struct stage_reconcile_result rr = dirty_result();
+    bool rv = ok && stage_reconcile_clamp_tip_finalize_to_floor(db, 18, &rr);
+    STR_CHECK("clamp: a preserved trusted-base transition releases the lock",
+              rv && !rr.clamped && rr.floor == 18 &&
+              cursor_for(db, "tip_finalize") == 19 && tx_lock_is_free());
+    teardown_case(dir);
+    return failures;
+}
+
+static int case_clamp_boot_reconcile(void)
+{
+    int failures = 0;
+    failures += case_clamp_early_returns();
+    failures += case_clamp_floor_zero();
+    failures += case_clamp_moves_then_noops();
+    failures += case_clamp_log_table_shapes();
+    failures += case_clamp_unreadable_cursor();
+    failures += case_clamp_write_failures();
+    failures += case_clamp_commit_failure();
+    failures += case_clamp_preserved_releases_lock();
+    return failures;
+}
+
+
 int test_stage_repair(void)
 {
     printf("\n=== stage_repair poison-rewind safety guard tests ===\n");
@@ -1070,6 +1327,7 @@ int test_stage_repair(void)
     failures += case_save_refuses_oversized_solution();
     failures += case_save_refuses_zero_solution();
     failures += case_load_rejects_expected_hash_mismatch();
+    failures += case_clamp_boot_reconcile();
 #ifdef ZCL_TESTING
     failures += case_proof_internal_error_re_derived();
     failures += case_proof_invalid_stays_terminal();
