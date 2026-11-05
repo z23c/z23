@@ -15,6 +15,7 @@
 #include "command/native_dev_fleet_job.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
+#include "platform/directory_compat.h"
 #include "platform/time_compat.h"
 #include "util/spawn.h"
 
@@ -640,8 +641,8 @@ int test_dev_job(void)
         test_make_tmpdir(foreign, sizeof(foreign), "dev_job", "foreign");
         ASSERT(snprintf(linked, sizeof(linked), "%s-linked", g_repo) > 0);
         dj_git(g_repo, "worktree", "add", "--detach", linked, "HEAD");
-        ASSERT(realpath(linked, canonical) != NULL);
-        ASSERT(realpath(g_repo, primary) != NULL);
+        ASSERT(platform_directory_canonical_real(linked, canonical, sizeof(canonical)));
+        ASSERT(platform_directory_canonical_real(g_repo, primary, sizeof(primary)));
         ASSERT(zcl_dev_job_linked_worktree_registered(canonical));
         ASSERT(!zcl_dev_job_linked_worktree_registered(primary));
         ASSERT(!zcl_dev_job_linked_worktree_registered(foreign));
