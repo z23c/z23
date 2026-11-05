@@ -435,7 +435,8 @@ change hosts or spend funds.
   its `[domain]` and its function name only (`ERROR [native.wallet] wnh_send()`),
   never its text, which can carry an address, a transaction id or an amount.
   `adb logcat -s z23node` shows them. Lines naming keys, seeds or mnemonics are
-  never forwarded.
+  never forwarded. Completed shutdown stages also emit an allowlisted stage name
+  and decimal duration, without the source message or other fields.
 - The host defaults to `--app org.z23.nativeapp`. Pass
   `--app org.z23.voicepreview` when testing the preview package, or the pairing
   offer reopens the production app.
