@@ -2282,6 +2282,7 @@ int test_msg_handlers(void)
     failures += test_pin_reject_equal_work_marks_seen();
     failures += test_pin_reject_more_work_marks_seen();
     failures += test_msg_build_identity_prefix_branches();
+    { extern int msg_block_body_identity_tests(void); failures += msg_block_body_identity_tests(); }
 
     dl_free(get_download_mgr());
     return failures;
