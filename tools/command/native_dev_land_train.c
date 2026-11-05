@@ -105,7 +105,7 @@ static bool dl_train_group_parse(const char *s, struct dl_train_group *g)
         g->tip[g->n++][40] = '\0';
         s = end + 40;
         if (!*s) break;
-        if (*s++ != ',') return false;
+        if (*s++ != ',' || !*s) return false;
     }
     return !*s && g->n >= 2;
 }
@@ -187,6 +187,8 @@ static bool dl_train_bound_live(const struct dl_dirs *d,
 {
     char path[4096 + 32];
     struct dl_train_landed_scan scan = { member, false };
+    if (member->train_group[0] && strcmp(member->state, "inflight") == 0 &&
+        dl_train_formed(member)) return true;
     if (strcmp(member->state, "queued") != 0 || !member->proof_intent[0])
         return false;
     for (size_t i = 0; i < n; i++)
@@ -340,7 +342,8 @@ static bool dl_split_descriptor(char *out, size_t cap, const char *intent,
     char hex[65];
     sha3_256_init(&ctx);
     sha3_256_write(&ctx, (const unsigned char *)intent, strlen(intent));
-    sha3_256_write(&ctx, (const unsigned char *)&half, sizeof(half));
+    unsigned char tag = (unsigned char)half;
+    sha3_256_write(&ctx, &tag, 1);
     sha3_256_finalize(&ctx, digest);
     zcl_hex_encode(digest, sizeof(digest), hex);
     int k = snprintf(out, cap, "1:%s:", hex);

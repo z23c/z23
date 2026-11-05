@@ -532,7 +532,7 @@ _test_next:;
 }
 
 /* Model an older queue writer dropping the unknown subgroup field. */
-static bool dlx_tr_legacy_rewrite(long long seq)
+static bool dlx_tr_rewrite_group(long long seq, bool comma)
 {
     static char text[262144];
     char land[1200], path[1400], anchor[48];
@@ -551,7 +551,13 @@ static bool dlx_tr_legacy_rewrite(long long seq)
     char *value = field + strlen("\"train_group\":\"");
     char *close = strchr(value, '"');
     if (!close || close >= end || close == value) return false;
-    memmove(value, close, strlen(close) + 1);
+    if (comma) {
+        if (len + 1 >= sizeof(text)) return false;
+        memmove(close + 1, close, strlen(close) + 1);
+        *close = ',';
+    } else {
+        memmove(value, close, strlen(close) + 1);
+    }
     return dlx_write(path, text);
 }
 
@@ -566,7 +572,7 @@ static int test_dev_land_train_split_old_writer(void)
         setenv("ZCL_LAND_TRAIN_WIDTH", "3", 1);
         ASSERT(dlx_tr_beat("started", 2, 1));
         ASSERT(dlx_tr_beat("rebased", 0, 1));
-        ASSERT(dlx_tr_legacy_rewrite(2));
+        ASSERT(dlx_tr_rewrite_group(2, false));
         ASSERT(dlx_tr_beat("started", 0, 1));
         PASS();
     }
@@ -744,6 +750,51 @@ static bool dlx_tr_refused(const char *action, long long seq)
         printf("[%s seq=%lld code=%s] ", action, seq, dlx_err_code(&c));
     dlx_end(&c);
     return ok;
+}
+
+static int test_dev_land_train_split_bound_head(void)
+{
+    int failures = 0;
+    TEST("land: a bound subgroup head cannot be held or cancelled") {
+        struct dlx_rig rig;
+        char b[64], c[64];
+        dlx_isolate("train_split_bound_head");
+        ASSERT(dlx_tr_rig(&rig, "train_split_bound_head_rig", "fail", "b.txt", b, c));
+        setenv("ZCL_LAND_TRAIN_WIDTH", "3", 1);
+        ASSERT(dlx_tr_beat("started", 2, 1));
+        ASSERT(dlx_tr_beat("rebased", 0, 1));
+        ASSERT(dlx_tr_beat("started", 1, 1));
+        ASSERT(dlx_tr_refused("hold", 1));
+        ASSERT(dlx_tr_refused("cancel", 1));
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+static int test_dev_land_train_split_malformed(void)
+{
+    int failures = 0;
+    TEST("land: malformed split descriptor refuses the queue") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char b[64], tip_c[64];
+        dlx_isolate("train_split_malformed");
+        ASSERT(dlx_tr_rig(&rig, "train_split_malformed_rig", "fail", "b.txt", b, tip_c));
+        setenv("ZCL_LAND_TRAIN_WIDTH", "3", 1);
+        ASSERT(dlx_tr_beat("started", 2, 1));
+        ASSERT(dlx_tr_beat("rebased", 0, 1));
+        ASSERT(dlx_tr_rewrite_group(2, true));
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && !dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "QUEUE_READ_FAILED");
+        dlx_end(&c);
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
 }
 
 static int test_dev_land_train_member_bound(void)
@@ -1089,6 +1140,8 @@ int test_dev_land_train_cases(void)
     failures += test_dev_land_train_split_old_writer();
     failures += test_dev_land_train_split_then_land();
     failures += test_dev_land_train_split_excludes_unrelated();
+    failures += test_dev_land_train_split_bound_head();
+    failures += test_dev_land_train_split_malformed();
     failures += test_dev_land_train_red_then_singles_land();
     failures += test_dev_land_train_held_row_skipped();
     failures += test_dev_land_train_cancelled_row_skipped();
