@@ -201,9 +201,14 @@ except reaching an honest box:
 
 A box with no fleet root or a switched-off gate never took the row, so after it
 joins it reads the head first on the roster lane, or at the next republish on the
-pairing lane. Running a new answering box against a node from before head rows
-voids that answer on the older asker (arrival number 0 is out of its numbering), so
-upgrade members before revoking when you can; nothing is taken wrongly either way.
+pairing lane.
+
+*Mixed versions.* A node from before head rows treats arrival number 0 as a
+malformed answer. Once an upgraded box holds a head row, a member still on the older
+build gets nothing from it over `board.roster` until that member upgrades, because
+each answer leads with the head and moves no cursor. Nothing is taken wrongly, but
+that member stops hearing from that box. Upgrade the members before the first
+revoke.
 
 **Roster machines need no pairing.** A pairing needs a held ZID delegation,
 and anchoring one costs coins. Once a roster is armed, a machine on it pulls

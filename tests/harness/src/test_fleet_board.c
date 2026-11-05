@@ -11585,10 +11585,21 @@ static int64_t fbh_seq(int box)
     return state == FLEET_HEAD_OK ? (int64_t)head.seq : -1;
 }
 
+/* Which store answers. The lane's tick finds the head row to lead with; here
+ * each pull stands in for that tick. */
+static struct node_db *g_fbh_serving;
+
+static void fbh_serve(struct node_db *db)
+{
+    g_fbh_serving = db;
+    boot_fleet_board_fleet_test_bind(db);
+}
+
 /* One whole roster pull with each half on its own box's state. */
 static size_t fbh_pull(struct fbw *w, struct node_db *into, int answering,
                        int asking)
 {
+    fleet_board_roster_pin_refresh(g_fbh_serving, FBW_NOW);
     fbc_ask_begin(w);
     if (!boot_fleet_board_fleet_test_pull_roster(&w->svc, w->f.resp_noise_pub))
         return SIZE_MAX;
@@ -11608,7 +11619,7 @@ static size_t fbh_pull(struct fbw *w, struct node_db *into, int answering,
 static void fbh_answer_from(struct node_db *db)
 {
     boot_fleet_board_fleet_test_new_epoch();
-    boot_fleet_board_fleet_test_bind(db);
+    fbh_serve(db);
     fbc_boxes(FBR_PEER, FBR_MEMBER);
 }
 
@@ -11638,7 +11649,7 @@ static int test_fleet_board_head_row_carriage(void)
         ASSERT(opened);
         boot_fleet_board_fleet_test_bind_authority(&w.f.term_peer.delegation,
                                                    w.f.genesis, now);
-        boot_fleet_board_fleet_test_bind(&w.a);
+        fbh_serve(&w.a);
         fbh_install();
         ASSERT(fbc_plant(&w.a, &w.b, "answerbox", FBR_MEMBER, now));
         ASSERT(fbc_plant(&w.a, &w.b, "askbox", FBR_PEER, now));
@@ -11675,7 +11686,7 @@ static int test_fleet_board_head_row_carriage(void)
                   BOOT_FLEET_ROSTER_MEMBER);
 
         /* B now refuses C, and still answers a member. */
-        boot_fleet_board_fleet_test_bind(&w.b);
+        fbh_serve(&w.b);
         fbc_boxes(FBC_REVOKED, FBR_PEER);
         ASSERT(fbc_refused(&w, &dest));
         fbc_boxes(FBR_MEMBER, FBR_PEER);
@@ -11847,7 +11858,7 @@ static int test_fleet_board_head_row_bootstrap(void)
         boot_fleet_board_fleet_test_bind_authority(&w.f.term_peer.delegation,
                                                    w.f.genesis, now);
         fbh_install();
-        boot_fleet_board_fleet_test_bind(&w.a);
+        fbh_serve(&w.a);
         fbc_boxes(FBR_PEER, FBR_MEMBER);
         ASSERT(fbh_plant_roster(&w.a, NULL, now));
         ASSERT(fbh_owner_revokes(1, revoked, 1));
@@ -11866,7 +11877,7 @@ static int test_fleet_board_head_row_bootstrap(void)
          "within one pull") {
         ASSERT(fbh_plant_roster(&thin, NULL, now));
         boot_fleet_board_fleet_test_new_epoch();
-        boot_fleet_board_fleet_test_bind(&thin);
+        fbh_serve(&thin);
         fbc_boxes(FBR_PEER, FBC_REVOKED);
         /* The answering box holds no head of its own here. */
         ASSERT_EQ(fbh_pull(&w, &withheld, FBH_WITHHELD, FBH_WITHHELD), (size_t)3);
@@ -11881,7 +11892,7 @@ static int test_fleet_board_head_row_bootstrap(void)
                   BOOT_FLEET_ROSTER_NOT_MEMBER);
         /* And that revoked box's next answer is dropped whole. */
         boot_fleet_board_fleet_test_new_epoch();
-        boot_fleet_board_fleet_test_bind(&thin);
+        fbh_serve(&thin);
         fbc_boxes(FBR_PEER, FBC_REVOKED);
         struct boot_fleet_board_fleet_counts cb, ca;
         boot_fleet_board_fleet_counts(&cb);

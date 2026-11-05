@@ -394,12 +394,11 @@ static bool board_answer_visit(const struct db_fleet_board_post *row,
  * from the start, whose first page arms it, must not arm before the head that
  * sits many pages later. A pull past it pays nothing. */
 static void board_answer_pin_head(struct board_answer *a, struct node_db *ndb,
-                                  int64_t after, int64_t now)
+                                  int64_t after)
 {
     struct db_fleet_board_post *row =
         zcl_calloc(1, sizeof *row, "fleet_board_pinned_head");
-    if (row && boot_fleet_roster_newest_head_row(ndb, now, row) &&
-        row->arrival > after) {
+    if (row && fleet_board_roster_pinned_head(ndb, after, row)) {
         row->arrival = FLEET_BOARD_ROSTER_PINNED_ARRIVAL;
         (void)board_answer_visit(row, a);
     }
@@ -429,7 +428,7 @@ static enum mesh_stream_refusal board_serve_compose(struct mesh_stream *st,
     struct board_answer a = { s->rows + head, sizeof s->rows - head, 0, 0 };
     int64_t scanned = after;
     if (proof)
-        board_answer_pin_head(&a, ndb, after, board_now());
+        board_answer_pin_head(&a, ndb, after);
     if (db_fleet_board_fleet_after(ndb, board_now(), after,
                                    FLEET_BOARD_FLEET_ANSWER_POSTS_MAX,
                                    board_answer_visit, &a, &scanned) < 0) {

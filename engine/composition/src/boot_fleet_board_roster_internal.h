@@ -75,6 +75,15 @@ void fleet_board_roster_learn(const uint8_t peer_noise[32],
                               const uint8_t key[32]);
 void fleet_board_roster_forget(void);
 
+/* The head row a roster answer leads with. The lane tick finds it, at most once
+ * per ONIONS_REUSE_S from fleet_board_roster_targets; _pinned_head then costs an
+ * answer one read by id, and only for a pull that has not reached that row. A
+ * row that came in since the last refresh travels by its own number until then. */
+void fleet_board_roster_pin_refresh(struct node_db *store, int64_t now);
+struct db_fleet_board_post;
+bool fleet_board_roster_pinned_head(struct node_db *store, int64_t after,
+                                    struct db_fleet_board_post *out);
+
 /* The Noise statics this lane may send a roster pull to right now: the
  * established session whose address is a sealed roster line's onion, or one
  * that already proved a member key here. Never any other peer, and none at

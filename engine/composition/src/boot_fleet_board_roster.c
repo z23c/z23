@@ -23,6 +23,7 @@
 #include "config/boot_internal.h"
 #include "config/boot_zcode_dht.h"
 #include "crypto/ed25519.h"
+#include "models/fleet_board_post.h"
 #include "models/mesh_pairing.h"
 #include "net/msgprocessor.h"
 #include "net/net.h"
@@ -66,6 +67,15 @@ static zcl_once_t g_lock_once = ZCL_ONCE_INIT;
 static struct learned_peer g_learned[FLEET_BOARD_FLEET_PEERS_MAX];
 static size_t g_learned_next;
 static struct onion_set g_onions;
+/* The head row to lead an answer with, found on the lane tick. No index leads
+ * with the agent, so looking for it costs a walk of the store, which the frame
+ * loop must not pay on every OPEN. Guarded by g_lock. */
+static struct {
+    bool have;
+    int64_t built_at;
+    int64_t arrival;
+    uint8_t id[32];
+} g_pin;
 static _Atomic uint64_t g_refused;
 
 #ifdef ZCL_TESTING
@@ -281,8 +291,47 @@ void fleet_board_roster_forget(void)
     roster_lock();
     memset(g_learned, 0, sizeof g_learned);
     memset(&g_onions, 0, sizeof g_onions);
+    memset(&g_pin, 0, sizeof g_pin);
     g_learned_next = 0;
     roster_unlock();
+}
+
+void fleet_board_roster_pin_refresh(struct node_db *store, int64_t now)
+{
+    struct db_fleet_board_post *row =
+        zcl_calloc(1, sizeof *row, "fleet_board_pin");
+    if (!row)
+        return;
+    bool have = boot_fleet_roster_newest_head_row(store, now, row);
+    roster_lock();
+    g_pin.have = have;
+    g_pin.built_at = now;
+    g_pin.arrival = have ? row->arrival : 0;
+    memcpy(g_pin.id, row->post.id, 32);
+    roster_unlock();
+    free(row);
+}
+
+bool fleet_board_roster_pinned_head(struct node_db *store, int64_t after,
+                                    struct db_fleet_board_post *out)
+{
+    uint8_t id[32];
+    roster_lock();
+    bool due = g_pin.have && g_pin.arrival > after;
+    memcpy(id, g_pin.id, 32);
+    roster_unlock();
+    return due && db_fleet_board_post_find(store, id, out) &&
+           boot_fleet_roster_is_head_row(&out->post);
+}
+
+static void pin_refresh_due(struct node_db *store, int64_t now)
+{
+    roster_lock();
+    bool fresh = g_pin.built_at != 0 && now >= g_pin.built_at &&
+                 now - g_pin.built_at < ONIONS_REUSE_S;
+    roster_unlock();
+    if (!fresh)
+        fleet_board_roster_pin_refresh(store, now);
 }
 
 /* A peer that proved a member key here, and whose key still is one. */
@@ -385,6 +434,7 @@ size_t fleet_board_roster_targets(struct boot_svc_ctx *svc,
         !boot_fleet_roster_carriage_open(store))
         return 0;
     onions_refresh(store, now);
+    pin_refresh_due(store, now);
     struct net_manager *nm = svc->msg_processor->net_mgr;
     zcl_mutex_lock(&nm->cs_nodes);
     for (size_t i = 0; i < nm->num_nodes && count < FLEET_BOARD_FLEET_PEERS_MAX;
