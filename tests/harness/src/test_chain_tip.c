@@ -96,6 +96,37 @@ static int check_null_ms_refusal(void)
     return failures;
 }
 
+/* Continuation of check_event_payloads: the clear event and a tip without a
+ * hash, on the state the set case (height 5) left behind. */
+static int check_event_clear_and_hashless(struct main_state *ms,
+                                          struct block_index *bi,
+                                          struct tip_capture *cap)
+{
+    int failures = 0;
+    char want_com[160];
+    int from1 = active_chain_height(&ms->chain_active);
+    cap->com_peer = 0xdeadu;
+    bool ok2 = chain_set_active_tip(ms, NULL, TIP_FROM_TEST, NULL).ok;
+    snprintf(want_com, sizeof(want_com), "from=%d to=-1 reason=", from1);
+    printf("chain_set_active_tip: clear payload and peer id... ");
+    if (ok2 && from1 == 5 && cap->com_n == 2 && cap->upd_n == 1 &&
+        strcmp(cap->com, want_com) == 0 && cap->com_peer == 0)
+        printf("OK\n");
+    else {
+        printf("FAIL (ok=%d from=%d com='%s')\n", ok2, from1, cap->com);
+        failures++;
+    }
+
+    bi->phashBlock = NULL;
+    bool ok3 = chain_set_active_tip(ms, bi, TIP_FROM_SNAPSHOT, "nohash").ok;
+    printf("chain_set_active_tip: hashless tip payload... ");
+    if (ok3 && cap->upd_n == 2 &&
+        strcmp(cap->upd, "h=5 hash=(no-hash) src=snapshot") == 0)
+        printf("OK\n");
+    else { printf("FAIL (ok=%d upd='%s')\n", ok3, cap->upd); failures++; }
+    return failures;
+}
+
 /* The exact event text and peer id for a set, a clear and a hashless tip.
  * The 32-character hash prefix is compared against uint256_get_hex of a hash
  * with a distinct byte in every position. */
@@ -134,27 +165,7 @@ static int check_event_payloads(void)
         failures++;
     }
 
-    int from1 = active_chain_height(&ms.chain_active);
-    cap.com_peer = 0xdeadu;
-    bool ok2 = chain_set_active_tip(&ms, NULL, TIP_FROM_TEST, NULL).ok;
-    snprintf(want_com, sizeof(want_com), "from=%d to=-1 reason=", from1);
-    printf("chain_set_active_tip: clear payload and peer id... ");
-    if (ok2 && from1 == 5 && cap.com_n == 2 && cap.upd_n == 1 &&
-        strcmp(cap.com, want_com) == 0 && cap.com_peer == 0)
-        printf("OK\n");
-    else {
-        printf("FAIL (ok=%d from=%d com='%s')\n", ok2, from1, cap.com);
-        failures++;
-    }
-
-    bi.phashBlock = NULL;
-    bool ok3 = chain_set_active_tip(&ms, &bi, TIP_FROM_SNAPSHOT, "nohash").ok;
-    printf("chain_set_active_tip: hashless tip payload... ");
-    if (ok3 && cap.upd_n == 2 &&
-        strcmp(cap.upd, "h=5 hash=(no-hash) src=snapshot") == 0)
-        printf("OK\n");
-    else { printf("FAIL (ok=%d upd='%s')\n", ok3, cap.upd); failures++; }
-
+    failures += check_event_clear_and_hashless(&ms, &bi, &cap);
     main_state_free(&ms);
     return failures;
 }
