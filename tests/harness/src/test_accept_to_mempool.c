@@ -13,6 +13,8 @@
 #include "validation/main_state.h"
 #include "validation/txmempool.h"
 #include "validation/sighash.h"
+#include "validation/chainstate.h"
+#include "validation/contextual_check_tx.h"
 #include "chain/chainparams.h"
 #include "coins/coins_view.h"
 #include "coins/coins.h"
@@ -26,6 +28,7 @@
 #include "util/safe_alloc.h"
 #include "storage/progress_store.h"
 #include <pthread.h>
+#include <unistd.h>
 
 #ifdef ZCL_TESTING
 bool boot_install_mempool_backend_guard(void);
@@ -520,6 +523,193 @@ static bool atm_case_zero_cap_and_null_detail(const struct atm_ctx *c)
     return ok;
 }
 
+/* ── Mutation-gap cases: exact boundaries of the value, fee and detail rules ── */
+
+static bool atm_run_fee_case(const struct atm_ctx *c, int64_t min_fee, int tag,
+                             int64_t out_value,
+                             enum mempool_accept_result want)
+{
+    struct atm_fix f;
+    bool seeded = atm_fix_init(&f, c, min_fee, tag, atm_det_utxo, out_value,
+                               false);
+    char detail[64] = "stale";
+    enum mempool_accept_result r = accept_to_mempool_detailed(
+        &f.pool, &f.coins, c->state, c->params, &f.tx, detail, sizeof(detail));
+    bool ok = seeded && r == want;
+    atm_fix_free(&f);
+    return ok;
+}
+
+/* Fee exactly at the relay floor is accepted; a zero fee under a floor of 1 is not. */
+static bool atm_case_fee_floor_boundaries(const struct atm_ctx *c)
+{
+    return atm_run_fee_case(c, 1000, 0xF1, atm_det_utxo - 1000,
+                            MEMPOOL_ACCEPT_OK) &&
+           atm_run_fee_case(c, 1, 0xF2, atm_det_utxo, MEMPOOL_ACCEPT_BELOW_FEE) &&
+           atm_run_fee_case(c, 1000, 0xF3, atm_det_utxo - 5000,
+                            MEMPOOL_ACCEPT_OK) &&
+           atm_run_fee_case(c, 1000, 0xF4, atm_det_utxo - 999,
+                            MEMPOOL_ACCEPT_BELOW_FEE);
+}
+
+/* Inputs equal to outputs (zero fee) is balanced, and a zero-value spend is valid. */
+static bool atm_case_zero_fee_and_zero_value(const struct atm_ctx *c)
+{
+    struct atm_fix f;
+    bool seeded = atm_fix_init(&f, c, 0, 0xF5, atm_det_utxo, atm_det_utxo, false);
+    enum mempool_accept_result r1 = accept_to_mempool_detailed(
+        &f.pool, &f.coins, c->state, c->params, &f.tx, NULL, 0);
+    atm_fix_free(&f);
+    struct atm_fix z;
+    seeded = atm_fix_init(&z, c, 0, 0xF6, 0, 0, false) && seeded;
+    enum mempool_accept_result r2 = accept_to_mempool_detailed(
+        &z.pool, &z.coins, c->state, c->params, &z.tx, NULL, 0);
+    atm_fix_free(&z);
+    return seeded && r1 == MEMPOOL_ACCEPT_OK && r2 == MEMPOOL_ACCEPT_OK;
+}
+
+/* The hash is recomputed on entry, and the staged entry records next height, not coinbase. */
+static bool atm_case_entry_fields(const struct atm_ctx *c)
+{
+    struct atm_fix f;
+    bool seeded = atm_fix_init(&f, c, 0, 0xF7, atm_det_utxo, 50 * COIN_VALUE,
+                               false);
+    struct uint256 want = f.tx.hash;
+    uint256_set_null(&f.tx.hash);
+    enum mempool_accept_result r = accept_to_mempool_detailed(
+        &f.pool, &f.coins, c->state, c->params, &f.tx, NULL, 0);
+    unsigned int next = (unsigned int)(active_chain_height(&c->state->chain_active) + 1);
+    bool ok = seeded && r == MEMPOOL_ACCEPT_OK &&
+              memcmp(f.tx.hash.data, want.data, 32) == 0 &&
+              tx_mempool_exists(&f.pool, &want) && f.pool.num_entries == 1 &&
+              f.pool.entries[0].height == next &&
+              !f.pool.entries[0].spends_coinbase;
+    atm_fix_free(&f);
+    return ok;
+}
+
+/* cap 1 with a rejected-early tx still clears the buffer; a NULL buffer with cap > 0 is safe. */
+static bool atm_case_tiny_cap_and_null_buffer(const struct atm_ctx *c)
+{
+    struct atm_fix f;
+    bool seeded = atm_fix_init(&f, c, 0, 0xF8, atm_det_utxo, 50 * COIN_VALUE,
+                               true);
+    char one[1] = { 'X' };
+    enum mempool_accept_result r1 = accept_to_mempool_detailed(
+        NULL, &f.coins, c->state, c->params, &f.tx, one, sizeof(one));
+    enum mempool_accept_result r2 = accept_to_mempool_detailed(
+        &f.pool, &f.coins, c->state, c->params, &f.tx, NULL, 64);
+    bool ok = seeded && r1 == MEMPOOL_ACCEPT_INTERNAL_ERROR && one[0] == '\0' &&
+              r2 == MEMPOOL_ACCEPT_INVALID;
+    atm_fix_free(&f);
+    return ok;
+}
+
+/* A shielded tx we cannot (or will not) verify is refused with a named reason, never added. */
+static bool atm_case_shielded_unverifiable(const struct atm_ctx *c)
+{
+    struct atm_fix f;
+    bool seeded = atm_fix_init(&f, c, 0, 0xF9, atm_det_utxo, 50 * COIN_VALUE,
+                               false);
+    f.tx.version = 2;
+    f.tx.v_joinsplit = zcl_calloc(1, sizeof(struct js_description), "atm_js");
+    if (!f.tx.v_joinsplit) { atm_fix_free(&f); return false; }
+    f.tx.num_joinsplit = 1;
+    memset(f.tx.v_joinsplit[0].nullifiers[0].data, 0x4E, 32);
+    memset(f.tx.v_joinsplit[0].nullifiers[1].data, 0x4F, 32);
+    memset(f.tx.v_joinsplit[0].commitments[0].data, 0xC0, 32);
+    memset(f.tx.v_joinsplit[0].commitments[1].data, 0xC1, 32);
+    int next = active_chain_height(&c->state->chain_active) + 1;
+    bool unverifiable = contextual_check_tx_proofs_unverifiable(&f.tx, next);
+    char detail[64] = "";
+    enum mempool_accept_result r = accept_to_mempool_detailed(
+        &f.pool, &f.coins, c->state, c->params, &f.tx, detail, sizeof(detail));
+    enum mempool_accept_result want =
+        unverifiable ? MEMPOOL_ACCEPT_UNVERIFIABLE : MEMPOOL_ACCEPT_INVALID;
+    bool ok = seeded && r == want && detail[0] != '\0' &&
+              (!unverifiable || strcmp(detail, "shielded-verify-unavailable") == 0) &&
+              tx_mempool_size(&f.pool) == 0;
+    atm_fix_free(&f);
+    return ok;
+}
+
+static struct uint256 atm_hook_target;
+static void atm_evict_hook(struct tx_mempool *pool)
+{
+    tx_mempool_remove(pool, &atm_hook_target);
+}
+
+/* A policy hook that evicts the new tx synchronously makes acceptance fail, not report OK. */
+static bool atm_case_evicted_after_add(const struct atm_ctx *c)
+{
+    struct atm_fix f;
+    bool seeded = atm_fix_init(&f, c, 0, 0xFA, atm_det_utxo, 50 * COIN_VALUE,
+                               false);
+    atm_hook_target = f.tx.hash;
+    tx_mempool_set_post_add_hook(atm_evict_hook);
+    enum mempool_accept_result r = accept_to_mempool_detailed(
+        &f.pool, &f.coins, c->state, c->params, &f.tx, NULL, 0);
+    tx_mempool_set_post_add_hook(NULL);
+    bool ok = seeded && r == MEMPOOL_ACCEPT_INTERNAL_ERROR &&
+              tx_mempool_size(&f.pool) == 0;
+    atm_fix_free(&f);
+    return ok;
+}
+
+static void atm_guard_noop(void) {}
+
+/* The one-shot backend guard refuses a missing guard or a missing acquire/release. */
+static bool atm_case_guard_install_refuses_incomplete(const struct atm_ctx *c)
+{
+    (void)c;
+    struct mempool_backend_guard no_release = { .acquire = atm_guard_noop };
+    struct mempool_backend_guard no_acquire = { .release = atm_guard_noop };
+    return !mempool_install_backend_guard(NULL) &&
+           !mempool_install_backend_guard(&no_release) &&
+           !mempool_install_backend_guard(&no_acquire);
+}
+
+#ifdef ZCL_TESTING
+/* While another thread holds cs_main, a retrying acceptance must release the backend
+ * guard between attempts, so the backend lock is free again afterwards. */
+static bool atm_case_guard_released_between_retries(const struct atm_ctx *c)
+{
+    struct atm_fix f;
+    bool ok = atm_fix_init(&f, c, 0, 0xFB, atm_det_utxo, 50 * COIN_VALUE, false);
+    ok = ok && boot_install_mempool_backend_guard();
+    struct atm_guard_job job = {
+        .pool = &f.pool, .coins = &f.coins, .state = c->state,
+        .params = c->params, .tx = &f.tx, .result = MEMPOOL_ACCEPT_INTERNAL_ERROR,
+    };
+    pthread_mutex_lock(&atm_guard_lock);
+    atm_guard_target = 1000000;
+    atm_guard_attempted = atm_guard_continue = atm_guard_probed = atm_guard_busy = false;
+    atm_guard_calls = 0;
+    pthread_mutex_unlock(&atm_guard_lock);
+    boot_test_set_mempool_guard_attempt(atm_note_guard_attempt);
+    zcl_mutex_lock(&c->state->cs_main);
+    pthread_t th;
+    bool started = ok && pthread_create(&th, NULL, atm_guard_worker, &job) == 0;
+    bool retried = false;
+    for (int i = 0; started && i < 500 && !retried; i++) {
+        pthread_mutex_lock(&atm_guard_lock);
+        retried = atm_guard_calls >= 3;
+        pthread_mutex_unlock(&atm_guard_lock);
+        if (!retried) usleep(10000);
+    }
+    zcl_mutex_unlock(&c->state->cs_main);
+    if (!started) { boot_test_set_mempool_guard_attempt(NULL); atm_fix_free(&f); return false; }
+    if (!retried) { pthread_detach(th); return false; } /* worker is stuck: leave its fixture */
+    pthread_join(th, NULL);
+    boot_test_set_mempool_guard_attempt(NULL);
+    bool lock_free = progress_store_tx_trylock();
+    if (lock_free) progress_store_tx_unlock();
+    ok = job.result == MEMPOOL_ACCEPT_OK && lock_free;
+    atm_fix_free(&f);
+    return ok;
+}
+#endif
+
 struct atm_det_case {
     const char *name;
     bool (*run)(const struct atm_ctx *c);
@@ -544,6 +734,24 @@ static const struct atm_det_case atm_det_cases[] = {
     { "accepted tx clears detail -> OK", atm_case_success_clears_detail },
     { "zero detail cap writes nothing; NULL detail ok",
       atm_case_zero_cap_and_null_detail },
+    { "fee equal to relay floor accepted; below it refused",
+      atm_case_fee_floor_boundaries },
+    { "zero fee and zero value spends are accepted",
+      atm_case_zero_fee_and_zero_value },
+    { "hash recomputed; entry records next height and no coinbase",
+      atm_case_entry_fields },
+    { "cap 1 clears; NULL buffer with cap is safe",
+      atm_case_tiny_cap_and_null_buffer },
+    { "unverifiable shielded tx refused with a named reason",
+      atm_case_shielded_unverifiable },
+    { "tx evicted by the post-add hook -> INTERNAL_ERROR",
+      atm_case_evicted_after_add },
+    { "backend guard install refuses incomplete guards",
+      atm_case_guard_install_refuses_incomplete },
+#ifdef ZCL_TESTING
+    { "backend guard released between cs_main retries",
+      atm_case_guard_released_between_retries },
+#endif
 };
 
 static int atm_detail_branches(const struct atm_ctx *c)
