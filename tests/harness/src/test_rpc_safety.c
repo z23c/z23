@@ -2224,6 +2224,7 @@ static int rs_case_p2sh_2of2(void)
     return failures;
 }
 
+int scs_run_tests(void);
 int test_rpc_safety(void);
 int test_rpc_safety(void)
 {
@@ -2257,6 +2258,7 @@ int test_rpc_safety(void)
 
     failures += rs_case_rawsign_supplemental();
     failures += rs_case_p2sh_2of2();
+    failures += scs_run_tests();
 
     /* parse_amount arithmetic guards: see rs_check_parse_amount_guards. */
     failures += rs_check_parse_amount_guards();
