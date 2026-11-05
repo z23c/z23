@@ -345,6 +345,12 @@ enum mesh_terminal_receipt_status boot_mesh_terminal_decide(
     if (verdict != MESH_TERMINAL_RECEIPT_OK)
         return verdict;
 
+    /* The terminal tick re-derives authority from the open's requester
+     * master, so the open must name the master that authorizes it here. */
+    if (memcmp(open->requester_master_pubkey, live->doc.master_pubkey, 32) !=
+        0)
+        return MESH_TERMINAL_RECEIPT_SESSION_MISMATCH;
+
     char pairing_id[MESH_PAIRING_ID_HEX + 1];
     verdict = terminal_authorize_live(ndb, network_genesis, live, session,
                                       now_unix, pairing_id);
