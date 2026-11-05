@@ -38,6 +38,11 @@ size_t zcl_test_group_weights_read(const char *path, unsigned *out, size_t n);
  * give the identity -- plain catalog order. */
 void zcl_test_group_order_longest_first(const unsigned *weights, size_t n,
                                         size_t *order);
+/* Order-only historical hint: priority first, then the existing longest-first
+ * stable order. NULL priority exactly preserves the original ordering. */
+void zcl_test_group_order_failure_first(const unsigned *weights,
+                                        const bool *priority, size_t n,
+                                        size_t *order);
 
 /* Regenerate the weights file from a zcl.test_timing.v1 artifact
  * (.cache/test-timing/last-run.json). Refuses, writing nothing, unless the

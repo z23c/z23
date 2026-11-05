@@ -14,6 +14,7 @@
 #include "platform/state_root.h"
 #include "test_group_catalog.h"
 #include "test_group_weights.h"
+#include "dev_proof.h"
 #include "util/clientversion.h"
 #include "util/util.h"
 #include "util/spawn.h"
@@ -2232,6 +2233,48 @@ static int test_dispatch_order_pure(void)
         zcl_test_group_order_longest_first(NULL, 4, order);
         for (size_t i = 0; i < 4; i++)
             ASSERT_EQ(order[i], i);
+        const bool priority[] = {true, false, true, false, false, false};
+        const size_t expected[] = {0, 2, 3, 5, 1, 4};
+        zcl_test_group_order_failure_first(w, priority, 6, order);
+        for (size_t i = 0; i < 6; i++) ASSERT_EQ(order[i], expected[i]);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_failure_priority_history(void)
+{
+    int failures = 0;
+    TEST("failure priority: bound exact selected group and changed path") {
+        struct zcl_dev_proof_history_failure f = {0};
+        f.classification = ZCL_PROOF_HISTORY_FAILURE;
+        f.attempt_binding_valid = true;
+        snprintf(f.digest, sizeof(f.digest), "test test_hex_codec: FAIL at x.c:7");
+        const char *prior[] = {"engine/x.c", "tests/x.c"};
+        const char *changed[] = {"engine/x.c"};
+        const char *selected[] = {"test_hex_codec", "test_codec_cursor"};
+        char group[96];
+        ASSERT_EQ(zcl_dev_proof_failure_priority_match(&f, prior, 2, changed, 1,
+                  selected, 2, group, sizeof(group)), ZCL_FAILURE_PRIORITY_MATCH);
+        ASSERT_STR_EQ(group, "test_hex_codec");
+        const char *other[] = {"engine/y.c"};
+        ASSERT_EQ(zcl_dev_proof_failure_priority_match(&f, prior, 2, other, 1,
+                  selected, 2, group, sizeof(group)), ZCL_FAILURE_PRIORITY_NO_MATCH);
+        ASSERT_EQ(zcl_dev_proof_failure_priority_match(&f, prior, 2, changed, 1,
+                  selected + 1, 1, group, sizeof(group)), ZCL_FAILURE_PRIORITY_NO_MATCH);
+        f.attempt_binding_valid = false;
+        ASSERT_EQ(zcl_dev_proof_failure_priority_match(&f, prior, 2, changed, 1,
+                  selected, 2, group, sizeof(group)), ZCL_FAILURE_PRIORITY_INVALID);
+        f.attempt_binding_valid = true;
+        snprintf(f.digest, sizeof(f.digest), "test test_hex_codec_spoof: FAIL");
+        ASSERT_EQ(zcl_dev_proof_failure_priority_match(&f, prior, 2, changed, 1,
+                  selected, 2, group, sizeof(group)), ZCL_FAILURE_PRIORITY_INVALID);
+        const char *unsafe[] = {"../engine/x.c"};
+        ASSERT_EQ(zcl_dev_proof_failure_priority_match(&f, unsafe, 1, changed, 1,
+                  selected, 2, group, sizeof(group)), ZCL_FAILURE_PRIORITY_INVALID);
+        memset(f.digest, 'x', sizeof(f.digest));
+        ASSERT_EQ(zcl_dev_proof_failure_priority_match(&f, prior, 2, changed, 1,
+                  selected, 2, group, sizeof(group)), ZCL_FAILURE_PRIORITY_INVALID);
         PASS();
     } _test_next:;
     return failures;
@@ -3658,6 +3701,7 @@ int test_test_group_selector(void)
     failures += test_runner_exact_selection();
     failures += test_runner_no_cache_outranks_env();
     failures += test_dispatch_order_pure();
+    failures += test_failure_priority_history();
     failures += test_dispatch_weights_read();
     failures += test_dispatch_weights_framing();
     failures += test_runner_dispatches_longest_first();

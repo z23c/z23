@@ -177,6 +177,24 @@ struct zcl_dev_proof_history_failure {
     /* Same native content domains as failure_identity, full archive bytes. */
     char request_sha3[65], archive_sha3[65];
 };
+
+enum zcl_failure_priority_match {
+    ZCL_FAILURE_PRIORITY_INVALID = -1,
+    ZCL_FAILURE_PRIORITY_NO_MATCH = 0,
+    ZCL_FAILURE_PRIORITY_MATCH = 1,
+};
+/* Order-only hint. `failure` must come from the native history reader, and
+ * historical_paths must be a complete validated diff of its exact base/local
+ * Git objects. The caller owns history completeness and must discard every
+ * hint if any archive or diff is unavailable or invalid. The returned exact
+ * registered group must already belong to selected_groups; no verdict or
+ * causal claim is made about a path. */
+enum zcl_failure_priority_match zcl_dev_proof_failure_priority_match(
+    const struct zcl_dev_proof_history_failure *failure,
+    const char *const *historical_paths, size_t historical_count,
+    const char *const *changed_paths, size_t changed_count,
+    const char *const *selected_groups, size_t selected_count,
+    char *group_out, size_t group_cap);
 /* Syntax only, NOT authority. 0 absent, -1 reserved/malformed/ambiguous,
  * 1 exact additive trailer. Payload is unchanged reason/evidence bytes.
  * Caller validates attempt/request and exact immutable archive separately. */

@@ -10,8 +10,73 @@
 #include "platform/directory_compat.h"
 #include "base/hex.h"
 #include "sha3/sha3.h"
+#include "test_group_catalog.h"
 #include <errno.h>
 #include <stdlib.h>
+#include <string.h>
+
+static bool history_priority_path_valid(const char *path)
+{
+    if (!path || !*path || *path == '/' || strlen(path) >= 4096) return false;
+    const char *p = path;
+    while (*p) {
+        size_t n = strcspn(p, "/");
+        if (!n || (n == 1 && p[0] == '.') ||
+            (n == 2 && p[0] == '.' && p[1] == '.')) return false;
+        for (size_t i = 0; i < n; i++)
+            if ((unsigned char)p[i] < 0x20 || (unsigned char)p[i] == 0x7f) return false;
+        p += n;
+        if (*p && !*++p) return false;
+    }
+    return true;
+}
+
+static bool history_priority_paths_valid(const char *const *paths, size_t n)
+{
+    if (n > 4096 || (n && !paths)) return false;
+    for (size_t i = 0; i < n; i++)
+        if (!history_priority_path_valid(paths[i])) return false;
+    return true;
+}
+
+enum zcl_failure_priority_match zcl_dev_proof_failure_priority_match(
+    const struct zcl_dev_proof_history_failure *failure,
+    const char *const *historical_paths, size_t historical_count,
+    const char *const *changed_paths, size_t changed_count,
+    const char *const *selected_groups, size_t selected_count,
+    char *group_out, size_t group_cap)
+{
+    if (group_out && group_cap) group_out[0] = '\0';
+    if (!failure || !group_out || !group_cap || selected_count > 4096 ||
+        (selected_count && !selected_groups) ||
+        !history_priority_paths_valid(historical_paths, historical_count) ||
+        !history_priority_paths_valid(changed_paths, changed_count))
+        return ZCL_FAILURE_PRIORITY_INVALID;
+    if (!memchr(failure->digest, '\0', sizeof(failure->digest)))
+        return ZCL_FAILURE_PRIORITY_INVALID;
+    if (failure->classification != ZCL_PROOF_HISTORY_FAILURE)
+        return ZCL_FAILURE_PRIORITY_NO_MATCH;
+    if (strncmp(failure->digest, "test ", 5) != 0) return ZCL_FAILURE_PRIORITY_NO_MATCH;
+    if (!failure->attempt_binding_valid) return ZCL_FAILURE_PRIORITY_INVALID;
+    const char *name = failure->digest + 5;
+    size_t n = strcspn(name, ":\r\n ");
+    if (!n || n >= ZCL_TEST_GROUP_FULL_MAX || name[n] != ':' || n >= group_cap)
+        return ZCL_FAILURE_PRIORITY_INVALID;
+    char id[ZCL_TEST_GROUP_FULL_MAX];
+    memcpy(id, name, n); id[n] = '\0';
+    if (!zcl_test_group_catalog_contains(id)) return ZCL_FAILURE_PRIORITY_INVALID;
+    bool selected = false;
+    for (size_t i = 0; i < selected_count; i++)
+        if (selected_groups[i] && strcmp(selected_groups[i], id) == 0) selected = true;
+    if (!selected) return ZCL_FAILURE_PRIORITY_NO_MATCH;
+    for (size_t i = 0; i < historical_count; i++)
+        for (size_t j = 0; j < changed_count; j++)
+            if (strcmp(historical_paths[i], changed_paths[j]) == 0) {
+                memcpy(group_out, id, n + 1);
+                return ZCL_FAILURE_PRIORITY_MATCH;
+            }
+    return ZCL_FAILURE_PRIORITY_NO_MATCH;
+}
 #if !defined(_WIN32)
 #include <dirent.h>
 #include <fcntl.h>

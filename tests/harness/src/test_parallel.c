@@ -256,15 +256,41 @@ static const size_t g_num_groups =
  * so local runs order exactly as proofs do. */
 static unsigned g_expected_seconds[sizeof(g_groups) / sizeof(g_groups[0])];
 static size_t g_dispatch_order[sizeof(g_groups) / sizeof(g_groups[0])];
+static bool g_failure_priority[sizeof(g_groups) / sizeof(g_groups[0])];
 
-static void dispatch_order_prepare(void)
+static bool dispatch_priority_parse(const char *csv)
 {
+    if (!csv || !*csv) return false;
+    bool candidate[sizeof(g_groups) / sizeof(g_groups[0])] = {0};
+    size_t count = 0;
+    for (const char *p = csv; *p;) {
+        size_t n = strcspn(p, ",");
+        if (!n || n >= ZCL_TEST_GROUP_FULL_MAX || ++count > g_num_groups)
+            return false;
+        size_t i;
+        for (i = 0; i < g_num_groups; i++)
+            if (strlen(g_groups[i].name) == n && !memcmp(g_groups[i].name, p, n)) break;
+        if (i == g_num_groups || candidate[i]) return false;
+        candidate[i] = true;
+        p += n;
+        if (*p && !*++p) return false;
+    }
+    memcpy(g_failure_priority, candidate, sizeof(candidate));
+    return true;
+}
+
+static void dispatch_order_prepare(const char *priority)
+{
+    memset(g_failure_priority, 0, sizeof(g_failure_priority));
+    bool qualified = dispatch_priority_parse(priority);
     size_t weighted = zcl_test_group_weights_read(
         ZCL_TEST_GROUP_WEIGHTS_PATH, g_expected_seconds, g_num_groups);
-    zcl_test_group_order_longest_first(g_expected_seconds, g_num_groups,
-                                       g_dispatch_order);
+    zcl_test_group_order_failure_first(g_expected_seconds, g_failure_priority,
+                                      g_num_groups, g_dispatch_order);
     printf("test_parallel: dispatch longest-expected-first, %zu weighted "
            "groups from %s\n", weighted, ZCL_TEST_GROUP_WEIGHTS_PATH);
+    if (priority && *priority)
+        printf("test_parallel: failure priority %s\n", qualified ? "applied" : "unavailable; using weights");
 }
 
 /* ── Parent-side worker pool ───────────────────────────────────────*/
@@ -3391,6 +3417,7 @@ struct run_opts {
     bool selection_only;
     bool list_build_needs;
     const char *only; /* --only=SUBSTR or --exact=FULL_ID[,FULL...] */
+    const char *failure_priority; /* order only; malformed falls back to weights */
     bool only_exact;
     /* Content-addressed test cache. Default OFF so the canonical push gate
      * stays COLD (a cached SKIP never gates a push). --cache / ZCL_TEST_CACHE=1
@@ -3625,6 +3652,10 @@ static bool cli_parse_cache_flag(const char *a, struct run_opts *o)
 static int cli_parse_arg(const char *a, struct run_opts *o)
 {
     if (cli_parse_numeric(a, o) || cli_parse_mode(a, o)) return 1;
+    if (strncmp(a, "--failure-priority=", 19) == 0) {
+        o->failure_priority = o->failure_priority ? "," : a + 19;
+        return 1;
+    }
     int r = cli_parse_selector(a, o);
     if (r != 0) return r;
     r = cli_parse_changed_source(a, o);
@@ -3982,11 +4013,12 @@ static int run_prepare(int argc, char **argv, struct run_ctx *c)
     return run_cache_probe(c);
 }
 
-static size_t run_exclusive_groups(struct run_ctx *c)
+static size_t run_exclusive_pass(struct run_ctx *c, bool priority)
 {
     size_t exclusive_ran = 0;
     for (size_t i = 0; i < g_num_groups; i++) {
-        if (c->results[i].skipped || c->results[i].cached)
+        if (c->results[i].skipped || c->results[i].cached ||
+            g_failure_priority[i] != priority)
             continue;
         if (!group_requires_exclusive_run(g_groups[i].name))
             continue;
@@ -3999,6 +4031,12 @@ static size_t run_exclusive_groups(struct run_ctx *c)
         exclusive_ran++;
     }
     return exclusive_ran;
+}
+
+static size_t run_exclusive_groups(struct run_ctx *c)
+{
+    size_t priority = run_exclusive_pass(c, true);
+    return priority + run_exclusive_pass(c, false);
 }
 
 /* A shard invokes its own compiler/lint subprocesses, so eight shards per
@@ -4057,11 +4095,11 @@ static int run_execute(struct run_ctx *c)
     c->parent_pid = getpid();
     /* pre_skipped (‑‑only / params) plus cache HITS are already accounted done. */
     c->reaped = c->pre_skipped + c->cached_count;
+    dispatch_order_prepare(c->o.failure_priority);
     size_t exclusive_ran = run_exclusive_groups(c);
     /* stdout is unbuffered, so this line reaches a proof's log whole the
      * moment the last run-alone group has been reaped. */
     printf("%s groups=%zu\n", ZCL_TEST_EXCLUSIVE_PASS_DONE, exclusive_ran);
-    dispatch_order_prepare();
 
     if (!run_phases_ok(c)) return run_phases_abort(c);
 

@@ -120,6 +120,24 @@ void zcl_test_group_order_longest_first(const unsigned *weights, size_t n,
     }
 }
 
+void zcl_test_group_order_failure_first(const unsigned *weights,
+                                        const bool *priority, size_t n,
+                                        size_t *order)
+{
+    zcl_test_group_order_longest_first(weights, n, order);
+    if (!priority || !order) return;
+    /* Stable partition retains the old weight/catalog order in both tiers. */
+    for (size_t i = 1; i < n; i++) {
+        size_t key = order[i], j = i;
+        if (!priority[key]) continue;
+        while (j && !priority[order[j - 1]]) {
+            order[j] = order[j - 1];
+            j--;
+        }
+        order[j] = key;
+    }
+}
+
 /* ── Regeneration from a timing artifact ───────────────────────────────── */
 
 enum { WEIGHTS_TIMING_MAX_BYTES = 16 * 1024 * 1024 };
