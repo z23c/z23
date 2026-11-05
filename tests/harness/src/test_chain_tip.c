@@ -15,7 +15,6 @@
 #include <sqlite3.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 /* What the last EV_TIP_UPDATED / EV_CHAIN_TIP_COMMIT carried: the peer id and
@@ -209,16 +208,15 @@ static int check_stdout_lines(void)
 static int check_stdout_lines(void) { return 0; }
 #endif
 
-/* Bytes the node.db file and its WAL occupy on disk right now. */
-static long db_bytes(const char *path)
+/* Pages this connection has written out of its cache so far. Only a cache
+ * flush (the barrier) moves it while the probe transaction stays open. */
+static int pages_written(sqlite3 *db)
 {
-    char wal[400];
-    struct stat st;
-    long total = 0;
-    snprintf(wal, sizeof(wal), "%s-wal", path);
-    if (stat(path, &st) == 0) total += (long)st.st_size;
-    if (stat(wal, &st) == 0) total += (long)st.st_size;
-    return total;
+    int cur = 0, hi = 0;
+    if (sqlite3_db_status(db, SQLITE_DBSTATUS_CACHE_WRITE, &cur, &hi, 0) !=
+        SQLITE_OK)
+        return -1;
+    return cur;
 }
 
 struct barrier_fx {
@@ -265,14 +263,14 @@ static void barrier_fx_close(struct barrier_fx *f)
 static bool barrier_step(struct barrier_fx *f, struct main_state *ms,
                          struct block_index *tip)
 {
-    long before;
+    int before;
     if (sqlite3_exec(f->ndb.db,
                      "INSERT INTO tip_probe VALUES(zeroblob(3000));", NULL,
                      NULL, NULL) != SQLITE_OK)
         return false;
-    before = db_bytes(f->path);
+    before = pages_written(f->ndb.db);
     bool ok = chain_set_active_tip(ms, tip, TIP_FROM_TEST, "barrier").ok;
-    long after = db_bytes(f->path);
+    int after = pages_written(f->ndb.db);
     (void)chain_set_active_tip(ms, NULL, TIP_FROM_TEST, "barrier_clear");
     return ok && after > before;
 }
