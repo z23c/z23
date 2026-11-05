@@ -46,6 +46,7 @@ struct zapp_view {
     bool node_serving;  /* The node's boot status says it serves (zapp_node_serving), read while it answers. */
     bool scanning;
     bool scan_paste; /* The current scan reads submitted text, not the camera. */
+    bool scan_permission_denied; /* The live camera request was refused. */
     bool scan_checking; /* A decoded fleet code is being verified. */
     unsigned scans_done;           /* Scan actions that have finished, with or without a code. */
     enum zapp_scan_kind scan_kind; /* Kind of the last code scanned by the scan action. */

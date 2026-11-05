@@ -206,6 +206,7 @@ static void close_capture(struct camera_scan *r)
 static void refusal(enum zapp_camera_access access, bool cancelled, char *error, size_t error_cap)
 {
     if (cancelled) snprintf(error, error_cap, "Camera scan cancelled.");
+    else if (access == ZAPP_CAMERA_UNKNOWN) snprintf(error, error_cap, "Could not check camera access. Try again.");
     else if (access == ZAPP_CAMERA_SETTINGS) snprintf(error, error_cap, "%s", zapp_camera_screen(access).text);
     else snprintf(error, error_cap, "Camera permission was not given. Tap Scan again to allow it.");
 }
@@ -225,21 +226,35 @@ static bool scan_result(uint64_t ticket, bool ok, char *result, char *error, siz
     return ok;
 }
 
-bool zapp_camera_scan(uint64_t ticket, char *result, size_t cap, char *error, size_t error_cap)
+static bool scan_begin(uint64_t ticket, uintptr_t *sequence, char *error, size_t error_cap)
 {
-    if (!result || cap < 2 || !error || !error_cap) return false;
-    result[0] = 0; snprintf(error, error_cap, "Camera scan unavailable.");
     pthread_mutex_lock(&lock);
     if (!ticket || ticket != generation) { pthread_mutex_unlock(&lock); snprintf(error, error_cap, "Camera scan cancelled."); return false; }
     if (scanning) { pthread_mutex_unlock(&lock); snprintf(error, error_cap, "Camera is already scanning."); return false; }
     scanning = true; preview_ready = false; atomic_store(&stopped, false); atomic_store(&device_failed, false);
     if (++scan_sequence == 0) ++scan_sequence;
-    uintptr_t sequence = scan_sequence;
+    *sequence = scan_sequence;
     pthread_mutex_unlock(&lock);
+    return true;
+}
+
+static bool access_denied(enum zapp_camera_access access)
+{
+    return access == ZAPP_CAMERA_ASK || access == ZAPP_CAMERA_ASK_AGAIN || access == ZAPP_CAMERA_SETTINGS;
+}
+
+enum zapp_camera_result zapp_camera_scan(uint64_t ticket, char *result, size_t cap, char *error, size_t error_cap)
+{
+    if (!result || cap < 2 || !error || !error_cap) return false;
+    result[0] = 0; snprintf(error, error_cap, "Camera scan unavailable.");
+    uintptr_t sequence;
+    if (!scan_begin(ticket, &sequence, error, error_cap)) return ZAPP_CAMERA_RESULT_ERROR;
     bool ok = false;
+    bool denied = false;
     struct camera_scan state = {0};
     enum zapp_camera_access access = zapp_camera_permission(ticket);
     if (access != ZAPP_CAMERA_GRANTED || atomic_load(&stopped)) {
+        denied = access_denied(access) && !atomic_load(&stopped);
         refusal(access, atomic_load(&stopped), error, error_cap);
         goto out;
     }
@@ -248,5 +263,7 @@ bool zapp_camera_scan(uint64_t ticket, char *result, size_t cap, char *error, si
     ok = scan_frames(&state, result, cap);
 out:
     close_capture(&state);
-    return scan_result(ticket, ok, result, error, error_cap);
+    ok = scan_result(ticket, ok, result, error, error_cap);
+    if (atomic_load(&stopped)) denied = false;
+    return ok ? ZAPP_CAMERA_RESULT_OK : denied ? ZAPP_CAMERA_RESULT_DENIED : ZAPP_CAMERA_RESULT_ERROR;
 }

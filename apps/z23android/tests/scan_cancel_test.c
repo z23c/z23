@@ -12,6 +12,13 @@ bool zapp_pay_stash_offer(const char *payload, enum zapp_scan_kind kind)
 { (void)payload; ++offers; held = kind == ZAPP_SCAN_PAY; return held; }
 void zapp_pay_stash_clear(void) { ++clears; held = false; }
 void zapp_camera_stop(void) {}
+uint64_t zapp_camera_ticket(void) { return 7; }
+bool zapp_action_shows_itself(const char *action) { (void)action; return true; }
+const char *zapp_action_doing(const char *action) { (void)action; return NULL; }
+void zapp_action_refusal(enum zapp_refusal why, const char *running, const char *asked, char *out, size_t cap)
+{ (void)why; (void)running; (void)asked; (void)out; (void)cap; }
+bool zapp_hosts_label(const char *report, size_t index, char label[16])
+{ (void)report; (void)index; (void)label; return false; }
 bool zapp_speech_client_paired(const char *files, const char *json)
 { (void)files; (void)json; return false; }
 bool zapp_pair_code(const char *descriptor, char code[7])
@@ -72,9 +79,21 @@ int main(void)
     assert(!strcmp(zapp_fleet_review_message(joined, started, "join failed", "old start"), "join failed"));
     assert(!strcmp(zapp_fleet_review_message(false, false, "old join", "old start"), ""));
     assert(!pthread_mutex_init(&c.lock, NULL));
+    assert(!pthread_cond_init(&c.changed, NULL));
     char join_output[ZAPP_TEXT_CAP] = "";
     assert(!join_fleet(&c, "synthetic", join_output));
     assert(join_calls == 0 && strstr(join_output, "Start the node first"));
+    c.camera_ticket = 7; c.view.scanning = true;
+    scan_denied(&c, 8); assert(!c.view.scan_permission_denied);
+    c.scan_cancelled = true; scan_denied(&c, 7); assert(!c.view.scan_permission_denied);
+    c.scan_cancelled = false; scan_denied(&c, 7); assert(c.view.scan_permission_denied);
+    c.view.scan_permission_denied = false;
+    current = &c; c.view.busy = true;
+    assert(!zapp_controller_action("scan", "", NULL, 0));
+    c.view.busy = false; assert(zapp_controller_action("scan", "", NULL, 0));
+    assert(c.view.scanning && c.camera_ticket == 7);
+    c.pending = false; c.view.busy = false; c.view.scanning = false;
+    clears = 0;
     current = &c; memcpy(c.action, "scan", sizeof("scan")); c.camera_ticket = 7; c.view.scanning = true;
     pthread_t worker; assert(!pthread_create(&worker, NULL, blocked_commit, NULL));
     pthread_mutex_lock(&gate); while (!waiting) pthread_cond_wait(&changed, &gate); pthread_mutex_unlock(&gate);

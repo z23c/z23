@@ -33,11 +33,15 @@
 #define GRAVITY_CENTER_HORIZONTAL 1
 
 enum screen { SCREEN_HOME, SCREEN_ASSISTANT, SCREEN_APPS, SCREEN_SETTINGS, SCREEN_SCAN, SCREEN_FLEET_REVIEW, SCREEN_WALLET, SCREEN_SEND, SCREEN_SETUP, SCREEN_COUNT };
-enum command { CMD_HOME, CMD_APPS, CMD_SETTINGS, CMD_HOME_SETTINGS, CMD_LAYOUT, CMD_SCAN_CANCEL, CMD_CAMERA_SETTINGS, CMD_CAMERA_PASTE, CMD_PASTE_REVIEW, CMD_OUTCOME_DISMISS, CMD_FLEET_JOIN, CMD_FLEET_START, CMD_FLEET_BACK, CMD_FLEET_COPY };
+enum command { CMD_HOME, CMD_APPS, CMD_SETTINGS, CMD_HOME_SETTINGS, CMD_LAYOUT, CMD_SCAN_CANCEL, CMD_CAMERA_SETTINGS, CMD_CAMERA_RETRY, CMD_CAMERA_PASTE, CMD_PASTE_REVIEW, CMD_OUTCOME_DISMISS, CMD_FLEET_JOIN, CMD_FLEET_START, CMD_FLEET_BACK, CMD_FLEET_COPY };
 enum target_kind { TARGET_NONE, TARGET_NAV, TARGET_ROW, TARGET_TILE, TARGET_WALLET, TARGET_SEND, TARGET_SETUP };
 
 struct nav { jobject view; enum command command; size_t arg; };
 struct target { enum target_kind kind; size_t index; char id[ZAPP_NAME_CAP]; size_t card; unsigned button; };
+
+/* The explicit Settings visit may replace the activity without ending the scan. */
+static bool camera_settings_pending;
+static enum screen camera_settings_origin;
 
 static struct {
     jobject activity, roots[SCREEN_COUNT];
@@ -45,6 +49,7 @@ static struct {
     jobject notice_views[SCREEN_COUNT], outcome_view, outcome_panel, status_view, scan_view, scan_hint_view, scan_camera, scan_panel, apps_list;
     jobject fleet_review_text, fleet_review_result, fleet_review_qr, fleet_join_button, fleet_copy_button, fleet_back_button;
     jobject fleet_review_scroll, fleet_review_hint, fleet_review_status, fleet_start_button, fleet_result_scroll;
+    jobject camera_retry, camera_settings;
     jobject paste_panel, paste_field, paste_review, paste_error;
     char fleet_receipt[8192];
     char fleet_result_shown[ZAPP_NOTICE_CAP];
@@ -309,8 +314,12 @@ static bool build_scan_panel(JNIEnv *env, jobject root)
     struct zapp_camera_screen words = zapp_camera_screen(ZAPP_CAMERA_SETTINGS);
     jobject panel = column(env, DARK, 16, false);
     bool ok = panel && zj_margins(env, panel, MATCH, WRAP, 0.0f, 0, 0, 0, 0) && zj_append(env, root, panel) &&
-        zj_keep(env, &shell.scan_panel, panel) && label(env, panel, words.text, 17.0f, WHITE) &&
-        button(env, panel, words.open, CMD_CAMERA_SETTINGS, 0, 0) && button(env, panel, words.paste, CMD_CAMERA_PASTE, 0, 0) &&
+        zj_keep(env, &shell.scan_panel, panel) && label(env, panel, "Camera is unavailable. Choose an option below.", 17.0f, WHITE) &&
+        button(env, panel, words.open, CMD_CAMERA_SETTINGS, 0, 0) &&
+        ((shell.camera_settings = shell.navs[shell.nav_count - 1].view), true) &&
+        button(env, panel, "Try camera again", CMD_CAMERA_RETRY, 0, 0) &&
+        ((shell.camera_retry = shell.navs[shell.nav_count - 1].view), true) &&
+        button(env, panel, "Paste a code", CMD_CAMERA_PASTE, 0, 0) && button(env, panel, "Back", CMD_SCAN_CANCEL, 0, 0) &&
         zj_visible(env, panel, false);
     if (panel) (*env)->DeleteLocalRef(env, panel);
     return ok;
@@ -367,9 +376,11 @@ static bool build_scan(JNIEnv *env, jobject root)
 /* The scan screen shows the camera, or, when camera access is off, the words and the buttons that lead on. */
 static void show_scan_screen(JNIEnv *env, enum zapp_camera_access access)
 {
-    bool preview = zapp_camera_screen(access).preview;
+    bool preview = access == ZAPP_CAMERA_GRANTED;
     (void)zj_visible(env, shell.scan_camera, preview);
     (void)zj_visible(env, shell.scan_panel, !preview);
+    (void)zj_visible(env, shell.camera_settings, !preview && access == ZAPP_CAMERA_SETTINGS);
+    (void)zj_visible(env, shell.camera_retry, !preview && (access == ZAPP_CAMERA_ASK || access == ZAPP_CAMERA_ASK_AGAIN));
     (void)zj_visible(env, shell.paste_panel, false);
 }
 /* A screen with a text field takes the keyboard's height as padding at its bottom (the system window insets include the
@@ -678,7 +689,7 @@ static void go(JNIEnv *env, enum screen next)
         next = SCREEN_HOME;
     }
     set_protection(env, next);
-    if (next != SCREEN_SCAN) shell.camera_waiting = false;
+    if (next != SCREEN_SCAN) { shell.camera_waiting = false; camera_settings_pending = false; }
     /* An outcome line under More belongs to the visit that showed it; the camera screen is part of that visit. */
     if (shell.current == SCREEN_ASSISTANT && next != SCREEN_ASSISTANT && next != SCREEN_SCAN) zapp_controller_clear_result();
     if (shell.current == SCREEN_FLEET_REVIEW && next != SCREEN_FLEET_REVIEW) {
@@ -754,7 +765,9 @@ static void open_home_settings(JNIEnv *env)
 /* Opens the system settings page for this app, where the camera permission is allowed. */
 static void open_camera_settings(JNIEnv *env)
 {
+    camera_settings_origin = shell.before_scan; camera_settings_pending = true;
     if (zapp_camera_open_settings()) { set_outcome(env, ""); return; }
+    camera_settings_pending = false;
     snprintf(shell.action_notice, sizeof(shell.action_notice), "Could not open Android settings.");
     show_notice(env);
 }
@@ -768,6 +781,7 @@ static void open_paste(JNIEnv *env)
         return;
     }
     zapp_controller_cancel_scan(); shell.scan_dismissed = true; shell.camera_waiting = false;
+    camera_settings_pending = false;
     shell.paste_mode = true; shell.paste_submitted = false; shell.gate.protect = true;
     (void)zj_visible(env, shell.scan_camera, false); (void)zj_visible(env, shell.scan_panel, false);
     (void)zj_text(env, shell.paste_field, ""); (void)zj_text(env, shell.paste_error, "");
@@ -803,13 +817,22 @@ static void begin_scan(JNIEnv *env)
     shell.camera_waiting = true;
     show_scan_screen(env, access);
 }
+static void retry_camera(JNIEnv *env)
+{
+    if (zapp_controller_action("scan", "", NULL, 0)) {
+        camera_settings_pending = false;
+        shell.camera_waiting = false;
+        show_scan_screen(env, ZAPP_CAMERA_GRANTED);
+    } else {
+        enum zapp_camera_access access = zapp_camera_access_now();
+        show_scan_screen(env, access == ZAPP_CAMERA_GRANTED ? ZAPP_CAMERA_ASK_AGAIN : access);
+    }
+}
 /* Shown again with camera access given, the scan that the screen was waiting for starts by itself. */
 static void resume_scan(JNIEnv *env)
 {
     if (!shell.camera_waiting || zapp_camera_access_now() != ZAPP_CAMERA_GRANTED) return;
-    shell.camera_waiting = false;
-    show_scan_screen(env, ZAPP_CAMERA_GRANTED);
-    shell.send("scan", "");
+    retry_camera(env);
 }
 static bool run_fleet_nav(JNIEnv *env, const struct nav *nav)
 {
@@ -832,6 +855,7 @@ static void run_nav(JNIEnv *env, const struct nav *nav)
     case CMD_LAYOUT: choose_layout(env, nav->arg); break;
     case CMD_SCAN_CANCEL: back(env); break;
     case CMD_CAMERA_SETTINGS: open_camera_settings(env); break;
+    case CMD_CAMERA_RETRY: retry_camera(env); break;
     case CMD_CAMERA_PASTE: open_paste(env); break;
     case CMD_PASTE_REVIEW: review_paste(env); break;
     case CMD_OUTCOME_DISMISS: set_outcome(env, ""); break;
@@ -1049,19 +1073,38 @@ static void render_paste(JNIEnv *env, const struct zapp_view *view, bool finishe
         (void)zj_text(env, shell.paste_field, ""); shell.paste_mode = false; shell.paste_submitted = false;
     }
 }
-static void render_scan(JNIEnv *env, const struct zapp_view *view, bool finished, bool dismissed)
+static void render_scan_running(JNIEnv *env, const struct zapp_view *view, bool dismissed)
 {
-    if (shell.paste_mode) { render_paste(env, view, finished, dismissed); return; }
-    if (view->scanning) {
-        (void)zj_text(env, shell.scan_hint_view, view->scan_checking ? "Code scanned. Checking…" : zapp_camera_screen(ZAPP_CAMERA_GRANTED).hint);
-        if (shell.current != SCREEN_SCAN && !dismissed) { shell.before_scan = shell.current; go(env, SCREEN_SCAN); }
-        return;
-    }
-    shell.scan_dismissed = false;
-    if (shell.camera_waiting) return;
+    shell.camera_waiting = false;
+    show_scan_screen(env, ZAPP_CAMERA_GRANTED);
+    (void)zj_text(env, shell.scan_hint_view, view->scan_checking ? "Code scanned. Checking…" : zapp_camera_screen(ZAPP_CAMERA_GRANTED).hint);
+    if (shell.current != SCREEN_SCAN && !dismissed) { shell.before_scan = shell.current; go(env, SCREEN_SCAN); }
+}
+static void render_scan_denied(JNIEnv *env)
+{
+    shell.camera_waiting = true;
+    if (shell.current != SCREEN_SCAN) { shell.before_scan = shell.current; go(env, SCREEN_SCAN); }
+    enum zapp_camera_access access = zapp_camera_access_now();
+    show_scan_screen(env, access == ZAPP_CAMERA_GRANTED ? ZAPP_CAMERA_ASK_AGAIN : access);
+    zapp_controller_clear_result();
+}
+
+static void render_scan_finished(JNIEnv *env, const struct zapp_view *view, bool finished, bool dismissed)
+{
     if (finished && dismissed) zapp_pay_stash_clear();
     if (shell.current == SCREEN_SCAN && !(finished && !dismissed && scan_goes_to_send(view))) go(env, shell.before_scan);
     if (finished && !dismissed) finish_scan(env, view);
+}
+
+static void render_scan(JNIEnv *env, const struct zapp_view *view, bool finished, bool dismissed)
+{
+    if (shell.paste_mode) { render_paste(env, view, finished, dismissed); return; }
+    if (view->scanning) { render_scan_running(env, view, dismissed); return; }
+    shell.scan_dismissed = false;
+    if (finished && !dismissed && view->scan_permission_denied) { render_scan_denied(env); return; }
+    if (shell.current == SCREEN_SCAN) (void)zj_bool_property(env, shell.camera_retry, "setEnabled", !view->busy);
+    if (shell.camera_waiting) return;
+    render_scan_finished(env, view, finished, dismissed);
 }
 static void fleet_scroll_hint(JNIEnv *env)
 {
@@ -1120,6 +1163,16 @@ static void to_wallet_when_building(JNIEnv *env)
 {
     if (shell.current == SCREEN_SEND && zapp_send_ui_take_background()) go(env, SCREEN_WALLET);
 }
+static void restore_camera_settings(JNIEnv *env)
+{
+    shell.before_scan = camera_settings_origin;
+    go(env, SCREEN_SCAN);
+    shell.camera_waiting = true;
+    enum zapp_camera_access access = zapp_camera_access_now();
+    show_scan_screen(env, access == ZAPP_CAMERA_GRANTED ? ZAPP_CAMERA_ASK_AGAIN : access);
+    resume_scan(env);
+}
+
 void zapp_shell_render(JNIEnv *env, const struct zapp_view *view)
 {
     if (!shell.activity || !view) return;
@@ -1129,6 +1182,7 @@ void zapp_shell_render(JNIEnv *env, const struct zapp_view *view)
         shell.rendered = true; shell.scans_seen = view->scans_done; shell.scan_dismissed = view->scanning;
         if (view->scanning && view->scan_paste) zapp_controller_cancel_scan();
         if (!shell.preview && zapp_setup_ui_resume_needed()) go(env, SCREEN_SETUP);
+        else if (camera_settings_pending) restore_camera_settings(env);
     }
     bool finished = view->scans_done != shell.scans_seen, dismissed = shell.scan_dismissed;
     shell.scans_seen = view->scans_done;

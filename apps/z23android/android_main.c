@@ -170,20 +170,19 @@ static void camera_remember_asked(void)
 /* The camera access state of the activity, read without requesting anything. */
 static enum zapp_camera_access activity_camera_access(JNIEnv *env, jobject activity)
 {
-    if ((*env)->PushLocalFrame(env, 4) != JNI_OK) { (void)clean(env); return ZAPP_CAMERA_ASK_AGAIN; }
+    if ((*env)->PushLocalFrame(env, 4) != JNI_OK) { (void)clean(env); return ZAPP_CAMERA_UNKNOWN; }
     jclass cls = (*env)->GetObjectClass(env, activity);
     jmethodID check = cls ? (*env)->GetMethodID(env, cls, "checkSelfPermission", "(Ljava/lang/String;)I") : NULL;
     jmethodID rationale_of = clean(env) && cls ? (*env)->GetMethodID(env, cls, "shouldShowRequestPermissionRationale", "(Ljava/lang/String;)Z") : NULL;
     jstring permission = clean(env) && check && rationale_of ? (*env)->NewStringUTF(env, "android.permission.CAMERA") : NULL;
-    bool granted = false, rationale = false;
-    if (permission && clean(env)) {
-        jint status = (*env)->CallIntMethod(env, activity, check, permission);
-        granted = clean(env) && status == 0;
-    }
-    if (permission && clean(env)) rationale = (*env)->CallBooleanMethod(env, activity, rationale_of, permission) && clean(env);
+    bool valid = permission && clean(env);
+    jint status = valid ? (*env)->CallIntMethod(env, activity, check, permission) : -1;
+    valid = valid && clean(env);
+    jboolean rationale = valid ? (*env)->CallBooleanMethod(env, activity, rationale_of, permission) : JNI_FALSE;
+    valid = valid && clean(env);
     (void)clean(env);
     (*env)->PopLocalFrame(env, NULL);
-    return zapp_camera_access_state(granted, rationale, camera_asked());
+    return valid ? zapp_camera_access_state(status == 0, rationale == JNI_TRUE, camera_asked()) : ZAPP_CAMERA_UNKNOWN;
 }
 /* While the node process runs and the app is visible, run the foreground service that keeps the
  * process out of the hidden-app kill class; stop it once the node has exited. */
@@ -365,7 +364,7 @@ static bool permission_attach(JavaVM *current_vm, JNIEnv **env, bool *attached)
 enum zapp_camera_access zapp_camera_permission(uint64_t ticket)
 {
     JavaVM *current_vm = atomic_load(&vm); JNIEnv *env = NULL; bool attached = false;
-    enum zapp_camera_access access = ZAPP_CAMERA_ASK_AGAIN;
+    enum zapp_camera_access access = ZAPP_CAMERA_UNKNOWN;
     if (!permission_attach(current_vm, &env, &attached)) return access;
     atomic_store(&camera_denied, false);
     atomic_store(&camera_dialog, false);
@@ -389,7 +388,7 @@ out:
 enum zapp_camera_access zapp_camera_access_now(void)
 {
     JavaVM *current_vm = atomic_load(&vm); JNIEnv *env = NULL; bool attached = false;
-    enum zapp_camera_access access = ZAPP_CAMERA_ASK_AGAIN;
+    enum zapp_camera_access access = ZAPP_CAMERA_UNKNOWN;
     if (!permission_attach(current_vm, &env, &attached)) return access;
     pthread_mutex_lock(&lock);
     jobject activity = active ? (*env)->NewLocalRef(env, active) : NULL;

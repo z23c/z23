@@ -5,6 +5,7 @@
 
 /* What the camera scan may do, from the state of the camera permission. */
 enum zapp_camera_access {
+    ZAPP_CAMERA_UNKNOWN,   /* the permission state could not be read */
     ZAPP_CAMERA_GRANTED,   /* the permission is held: the camera may open */
     ZAPP_CAMERA_ASK,       /* never requested: the system dialog is shown */
     ZAPP_CAMERA_ASK_AGAIN, /* denied once: the system dialog is shown again */

@@ -6,7 +6,8 @@
 #include <stddef.h>
 #include <stdint.h>
 uint64_t zapp_camera_ticket(void);
-bool zapp_camera_scan(uint64_t ticket, char *result, size_t cap, char *error, size_t error_cap);
+enum zapp_camera_result { ZAPP_CAMERA_RESULT_ERROR, ZAPP_CAMERA_RESULT_OK, ZAPP_CAMERA_RESULT_DENIED };
+enum zapp_camera_result zapp_camera_scan(uint64_t ticket, char *result, size_t cap, char *error, size_t error_cap);
 bool zapp_camera_preview(unsigned char **bmp, size_t *len);
 void zapp_camera_stop(void);
 void zapp_camera_set_frame_notify(void (*notify)(void));

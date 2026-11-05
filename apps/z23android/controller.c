@@ -704,12 +704,20 @@ static bool scan_commit(struct controller *c, uint64_t ticket, const char *paylo
 }
 /* Reads one code and shows what it is. Only a fleet invitation or a laptop pairing reaches a review,
  * and its text stays out of scan_text. Nothing scanned is opened, fetched or paid. */
+static void scan_denied(struct controller *c, uint64_t ticket)
+{
+    pthread_mutex_lock(&c->lock);
+    if (!c->scan_cancelled && c->view.scanning && c->camera_ticket == ticket) c->view.scan_permission_denied = true;
+    pthread_mutex_unlock(&c->lock);
+}
 static bool scan_payload(struct controller *c, uint64_t ticket, const char *text, char *out)
 {
     char error[256] = "";
     char *value = calloc(1, ZAPP_TEXT_CAP);
-    bool ok = text ? (copy_text(out, ZAPP_TEXT_CAP, text), true) :
-        zapp_camera_scan(ticket, out, ZAPP_TEXT_CAP, error, sizeof(error));
+    enum zapp_camera_result camera = text ? ZAPP_CAMERA_RESULT_OK : zapp_camera_scan(ticket, out, ZAPP_TEXT_CAP, error, sizeof(error));
+    bool ok = camera == ZAPP_CAMERA_RESULT_OK;
+    if (text) copy_text(out, ZAPP_TEXT_CAP, text);
+    if (camera == ZAPP_CAMERA_RESULT_DENIED) scan_denied(c, ticket);
     if (!ok || !value) {
         copy_text(out, ZAPP_TEXT_CAP, ok ? "Not enough memory to read that code." : error);
         free(value);
@@ -1217,6 +1225,7 @@ static void queue_action(struct controller *c, const char *action, const char *a
     copy_text(c->action, sizeof(c->action), action); copy_text(c->argument, sizeof(c->argument), arg);
     c->camera_ticket = zapp_camera_ticket(); c->pending = true; c->view.busy = true;
     c->view.scanning = scan_action(action); c->view.scan_paste = !strcmp(action, "scan_paste"); c->view.scan_checking = false; c->scan_cancelled = false; c->scan_fleet_owned = false; c->scan_pair_owned = false; c->view.notice[0] = 0; c->view.result[0] = 0;
+    c->view.scan_permission_denied = false;
     if (c->view.scanning) atomic_store(&c->scan_cancel, false);
     /* The tap shows at once what it does, unless its own screen already shows that. */
     const char *doing = zapp_action_shows_itself(action) ? NULL : zapp_action_doing(action);
