@@ -53,6 +53,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "services/node_db_catchup_owed.h"
 #include <stdatomic.h>
 #include <pthread.h>
 #include <signal.h>
@@ -72,15 +73,8 @@ extern volatile sig_atomic_t g_shutdown_requested;
  * services include path). The catchup body calls them but does not own
  * them; their declarations are mirrored here verbatim so the contract is
  * a single source of truth. */
-struct sync_db_turbo_scope {
-    struct node_db *ndb;
-    bool entered;
-};
-
-bool sync_db_turbo_scope_begin(struct sync_db_turbo_scope *scope,
-                               struct node_db *ndb,
-                               bool enabled);
-bool sync_db_turbo_scope_end(struct sync_db_turbo_scope *scope);
+/* struct sync_db_turbo_scope and its begin/end live in
+ * services/node_db_catchup_owed.h. */
 
 void sync_job_catchup_begin(int start_height, int target_height);
 void sync_job_catchup_progress(int height);
@@ -161,24 +155,6 @@ void node_db_catchup_test_set_active(bool active)
 int node_db_catchup_test_active_depth(void)
 {
     return atomic_load(&g_catchup_active_depth);
-}
-
-/* Runs once, right after a pass enters turbo mode and before its first
- * BEGIN IMMEDIATE: the window in which another writer can open a transaction
- * on the shared connection. */
-static void (*g_test_after_turbo_hook)(struct node_db *ndb);
-
-void node_db_catchup_test_set_after_turbo_hook(void (*hook)(struct node_db *))
-{
-    g_test_after_turbo_hook = hook;
-}
-
-static void catchup_test_after_turbo(struct node_db *ndb)
-{
-    void (*hook)(struct node_db *) = g_test_after_turbo_hook;
-    g_test_after_turbo_hook = NULL;
-    if (hook)
-        hook(ndb);
 }
 
 void node_db_catchup_test_reset_reopen(void)
@@ -921,44 +897,13 @@ static void catchup_unwind_open(struct catchup_pass *ps, const char *restore_msg
 
 enum catchup_open { CATCHUP_OPEN_READY, CATCHUP_OPEN_YIELD, CATCHUP_OPEN_FAILED };
 
-/* A turbo scope whose restore was owed when a pass yielded. The restore
- * (synchronous, cache, index rebuild) cannot run inside the other writer's
- * transaction: PRAGMA synchronous is refused there, so synchronous would stay
- * OFF, and the CREATE INDEX statements would join that transaction. It runs
- * from catchup_restore_owed once the connection is idle. Catchup passes are
- * serialized by the catchup trigger, and shutdown runs after they stop. */
-static struct sync_db_turbo_scope g_owed_scope;
-
-/* Restore a scope a yielded pass left owed. False: still owed (the
- * connection is inside a transaction, or the restore failed and is retried). */
-bool node_db_catchup_service_restore_owed(struct node_db *ndb)
-{
-    if (!g_owed_scope.entered)
-        return true;
-    if (node_db_catchup_lock_guard_foreign_txn(ndb))
-        return false;
-    if (!sync_db_turbo_scope_end(&g_owed_scope)) {
-        LOG_WARN_IN("node_db_catchup_service_run", "catchup",
-                    "catchup: owed restore of normal mode failed; retrying next pass");
-        return false;
-    }
-    return true;
-}
-
 /* Another thread's transaction is open on the shared connection: leave the
  * walk to the next trigger. A turbo scope this pass entered is not restored
- * here (that would run inside the foreign transaction); it is owed. */
+ * here (that would run inside the foreign transaction); it is owed, and the
+ * next idle pass restores it (node_db_catchup_owed.c). */
 static enum catchup_open catchup_yield_open(struct catchup_pass *ps)
 {
-    if (ps->turbo_mode.entered) {
-        if (g_owed_scope.entered)
-            LOG_WARN_IN("node_db_catchup_service_run", "catchup",
-                        "catchup: a second turbo scope is owed a restore; "
-                        "the earlier one is superseded");
-        g_owed_scope = ps->turbo_mode;
-        ps->turbo_mode.entered = false;
-        ps->turbo_mode.ndb = NULL;
-    }
+    node_db_catchup_owed_defer(&ps->turbo_mode);
     node_db_catchup_lock_guard_note_open_yield(ps->start);
     catchup_active_finish();
     return CATCHUP_OPEN_YIELD;
@@ -975,7 +920,7 @@ static enum catchup_open catchup_open_pass(struct catchup_pass *ps)
         return CATCHUP_OPEN_FAILED;
     }
 #ifdef ZCL_TESTING
-    catchup_test_after_turbo(ps->ndb);
+    node_db_catchup_test_after_turbo(ps->ndb);
 #endif
 
     /* Verify connection works before starting. BEGIN IMMEDIATE (all three

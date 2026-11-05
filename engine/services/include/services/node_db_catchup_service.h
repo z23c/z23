@@ -195,6 +195,7 @@ void node_db_catchup_test_reset_reopen(void);
 
 /* One-shot hook run after a pass enters turbo mode, before its first BEGIN. */
 void node_db_catchup_test_set_after_turbo_hook(void (*hook)(struct node_db *));
+void node_db_catchup_test_after_turbo(struct node_db *ndb);
 #endif
 
 /* Indexes blocks from (sqlite_tip+1) to chain_tip into SQLite. Also scans
