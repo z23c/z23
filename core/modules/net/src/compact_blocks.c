@@ -312,21 +312,20 @@ enum cb_status {
     CB_ST_TX,       /* transaction deserialize failed */
 };
 
-/* Place prefilled transactions at their absolute positions.
- * BIP152 uses differential encoding, so we convert to absolute.
+/* Place prefilled transactions at their absolute positions. prefilled[].index
+ * is already absolute: only the wire is differential (BIP152), and the decoder
+ * undid that. A position past the block, or one already taken, is refused.
  * On failure frees filled and out_block; *i and *abs_idx locate it. */
 static enum cb_status cb_place_prefilled(const struct compact_block_msg *cb,
                                          struct block *out_block, bool *filled,
                                          size_t total, size_t *i_out,
                                          uint64_t *abs_idx_out)
 {
-    uint64_t abs_idx = 0;
     for (size_t i = 0; i < cb->num_prefilled; i++) {
         *i_out = i;
-        abs_idx += cb->prefilled[i].index;
-        if (i > 0) abs_idx++;  /* BIP152 differential: add 1 for non-first */
+        uint64_t abs_idx = cb->prefilled[i].index;
         *abs_idx_out = abs_idx;
-        if (abs_idx >= total) {
+        if (abs_idx >= total || filled[abs_idx]) {
             free(filled);
             block_free(out_block);
             return CB_ST_RANGE;
@@ -499,8 +498,7 @@ bool compact_block_reconstruct(const struct compact_block_msg *cb,
         transaction_init(&out_block->vtx[i]);
 
 
-    /* Place prefilled transactions at their absolute positions.
-     * BIP152 uses differential encoding, so we convert to absolute. */
+    /* Place prefilled transactions at their absolute positions. */
     bool *filled = zcl_calloc(total, sizeof(bool), "compact_filled_map");
     if (!filled) {
         block_free(out_block);
@@ -509,7 +507,7 @@ bool compact_block_reconstruct(const struct compact_block_msg *cb,
 
     st = cb_place_prefilled(cb, out_block, filled, total, &i, &abs_idx);
     if (st == CB_ST_RANGE)
-        LOG_FAIL("compact", "prefilled index %lu out of range (total=%zu)",
+        LOG_FAIL("compact", "prefilled index %lu out of range or repeated (total=%zu)",
                  (unsigned long)abs_idx, total);
     if (st == CB_ST_COPY)
         LOG_FAIL("compact", "failed to copy prefilled tx %zu", i);
@@ -640,8 +638,16 @@ static enum cb_status cb_read_prefilled(struct compact_block_msg *cb,
                 compact_block_msg_free(cb);
                 return CB_ST_READ;
             }
+            if (diff > UINT16_MAX) {
+                compact_block_msg_free(cb);
+                return CB_ST_RANGE;
+            }
             abs_idx += diff;
             if (i > 0) abs_idx++;
+            if (abs_idx > UINT16_MAX) {
+                compact_block_msg_free(cb);
+                return CB_ST_RANGE;
+            }
             cb->prefilled[i].index = (uint16_t)abs_idx;
             transaction_init(&cb->prefilled[i].tx);
             if (!transaction_deserialize(&cb->prefilled[i].tx, s)) {
@@ -700,6 +706,8 @@ bool compact_block_msg_deserialize(struct compact_block_msg *cb,
                  (unsigned long)num_prefilled);
     if (st == CB_ST_READ)
         LOG_FAIL("compact", "failed to read prefilled diff index %zu", i);
+    if (st == CB_ST_RANGE)
+        LOG_FAIL("compact", "prefilled tx %zu position does not fit 16 bits", i);
     if (st == CB_ST_TX)
         LOG_FAIL("compact", "failed to deserialize prefilled tx %zu", i);
     return true;

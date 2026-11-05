@@ -951,3 +951,7 @@ later lane flips it HARD.
 - 2026-11-05T19:39:17Z — REASON: Block manifest: compute the expected piece count in 64 bits so the widest height range is defined. No consensus predicate change.
   old ROOT: 4f8bbe45e7fbb3a930066025dcc9c8f7c303291bb13c665df139958fb84bc679
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-05T19:39:30Z — REASON: Compact block: place prefilled transactions at the absolute positions the decoder stores, refuse a position past 16 bits. Wire bytes unchanged. No consensus predicate change.
+  old ROOT: 25bb121bccf955b07e221b606cd391257e6c44e880bec9529cf24747265b7412
+  by: owner unseal ritual (make core-unseal)

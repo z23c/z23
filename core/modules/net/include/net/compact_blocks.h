@@ -47,7 +47,7 @@ uint64_t siphash_2_4(const uint8_t key[16],
 
 /* A prefilled transaction: index + full tx (BIP152 §2.1) */
 struct prefilled_tx {
-    uint16_t index;            /* differential index in the block */
+    uint16_t index;            /* absolute position in the block; differential only on the wire */
     struct transaction tx;
 };
 
