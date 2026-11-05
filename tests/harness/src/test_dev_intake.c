@@ -169,6 +169,26 @@ static void di_run(struct di *d, bool commit, struct zcl_command_reply *reply,
     di_env_off();
 }
 
+/* The same run on a box that resolves no state root at all: neither
+ * XDG_STATE_HOME nor HOME is set while the leaf runs. */
+static void di_run_bare(struct di *d, struct zcl_command_reply *reply,
+                        char *dump, size_t cap)
+{
+    const char *pairs[] = {"posts_file", d->posts, "repo", d->f.mainco,
+                           "bundle_dir", d->bdir, "allow", d->allow, NULL};
+    di_env_on(d);
+    (void)unsetenv("XDG_STATE_HOME");
+    (void)unsetenv("HOME");
+    dbf_call(zcl_native_handle_dev_intake, &d->f, pairs, NULL, reply, dump, cap);
+    di_env_off();
+}
+
+/* The lab's fleet state directory, which an unarmed read must never make. */
+static void di_fleet_dir(const struct di *d, char *out, size_t cap)
+{
+    (void)snprintf(out, cap, "%s/state/z23/dev/fleet", d->f.root);
+}
+
 static bool di_refs(const struct di *d, char *out, size_t cap)
 {
     const char *argv[] = {"git", "-C", d->f.mainco, "for-each-ref", NULL};
@@ -280,6 +300,15 @@ int test_dev_intake(void)
         di_run(&d, false, &reply, dump, sizeof(dump));
         ASSERT(strstr(dump, "\"verdict\":\"ACCEPT_FOR_QUEUE\"") != NULL);
         zcl_command_reply_free(&reply);
+        /* ... and a read-only intake makes no fleet state */
+        di_fleet_dir(&d, hp, sizeof(hp));
+        ASSERT(access(hp, F_OK) != 0);
+
+        /* a box that resolves no state root is the unarmed case too */
+        di_run_bare(&d, &reply, dump, sizeof(dump));
+        ASSERT(strstr(dump, "\"verdict\":\"ACCEPT_FOR_QUEUE\"") != NULL);
+        ASSERT(strstr(dump, "fleet_head_unreadable") == NULL);
+        zcl_command_reply_free(&reply);
 
         /* a head that revokes someone else does not touch this author */
         di_env_on(&d);
@@ -301,6 +330,14 @@ int test_dev_intake(void)
         zcl_command_reply_free(&reply);
 
         ASSERT(dbf_put(hp, "not a sealed head\n"));
+        di_run(&d, false, &reply, dump, sizeof(dump));
+        ASSERT(strstr(dump, "REFUSE(fleet_head_unreadable)") != NULL);
+        ASSERT(strstr(dump, "ACCEPT_FOR_QUEUE") == NULL);
+        zcl_command_reply_free(&reply);
+
+        /* a head file deleted while its sequence record remains is not
+         * "no head": it is unreadable and fails closed */
+        ASSERT(unlink(hp) == 0);
         di_run(&d, false, &reply, dump, sizeof(dump));
         ASSERT(strstr(dump, "REFUSE(fleet_head_unreadable)") != NULL);
         ASSERT(strstr(dump, "ACCEPT_FOR_QUEUE") == NULL);

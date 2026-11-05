@@ -40,6 +40,8 @@
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
+#include "platform/private_file.h"
+#include "platform/state_root.h"
 #include "platform/time_compat.h"
 #include "util/spawn.h"
 #include "session/fleet_board_proto.h"
@@ -284,18 +286,33 @@ static void in_bundle_form(const char *text, struct in_post *p)
     (void)in_token(text, "peer", p->peer, sizeof(p->peer));
 }
 
+/* Is there fleet state on this box to read? A box with no resolvable state
+ * root, or no fleet directory under it, is unarmed: nothing is created and
+ * nothing is revoked. A fleet directory that exists is armed. */
+static bool in_fleet_dir_exists(void)
+{
+    char root[FLEET_ENROL_PATH_MAX], dir[FLEET_ENROL_PATH_MAX + 8];
+    if (!platform_state_root_existing(root, sizeof(root)))
+        return false;
+    int n = snprintf(dir, sizeof(dir), "%s/fleet", root);
+    return n > 0 && (size_t)n < sizeof(dir) && !platform_private_path_absent(dir);
+}
+
 /* The reader's fleet root: the operator it joined, else its own fleet key.
- * No root at all is "no fleet head exists" (present false); an unreadable
- * pin or key is a failure, never absence. */
+ * Read-only: an unarmed box is left untouched (present false). Once the
+ * fleet directory exists, an unreadable pin or key is a failure, never
+ * absence. */
 static bool in_fleet_root(uint8_t root[32], bool *present)
 {
     uint8_t seed[FLEET_ENROL_SEED_BYTES], own_pub[FLEET_ENROL_PUBKEY_BYTES];
     bool joined = false, own = false;
     const char *why = NULL;
     *present = false;
-    if (!fleet_enrol_operator_read(root, &joined, &why))
+    if (!in_fleet_dir_exists())
+        return true;
+    if (!fleet_enrol_operator_read_existing(root, &joined, &why))
         return false;
-    if (!fleet_enrol_key_load(seed, own_pub, false, &own, &why) && !joined) {
+    if (!fleet_enrol_key_read_existing(seed, own_pub, &own, &why) && !joined) {
         memory_cleanse(seed, sizeof seed);
         return false;
     }
@@ -311,7 +328,12 @@ enum in_rev { IN_REV_NO, IN_REV_YES, IN_REV_UNREADABLE };
 /* Does the reader's fleet head revoke this author key (fleet_head_revokes
  * is the one authority)? No fleet root or no head file: not revoked. A head
  * or root that exists but cannot be read: IN_REV_UNREADABLE (fail closed).
- * A host that is not a 64-hex key cannot name a revoked key. */
+ * A host that is not a 64-hex key cannot name a revoked key. A post's host
+ * is the node's signing key (the DHT online key), the "signer" class of a
+ * roster row, not the box key; head minting (fleet_head_mint via the enrol command) adds every signer bound
+ * to a revoked box to the head's set, so matching the host against that set
+ * is the right test. A head sequence record whose head file is gone is torn
+ * (BAD), so it is unreadable here, never "no head". */
 static enum in_rev in_author_revoked(const char *host)
 {
     uint8_t root[32], key[32];
@@ -331,7 +353,7 @@ static enum in_rev in_author_revoked(const char *host)
         LOG_WARN("intake", "no memory for the fleet head; refusing the author");
         return IN_REV_UNREADABLE;
     }
-    state = fleet_head_load(root, head, NULL);
+    state = fleet_head_load_existing(root, head, NULL);
     revoked = state == FLEET_HEAD_OK && fleet_head_revokes(head, key);
     free(head);
     if (state == FLEET_HEAD_BAD) {

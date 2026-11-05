@@ -509,6 +509,13 @@ bool fleet_roster_import_pinned(const char *line,
 enum fleet_head_state fleet_head_load(
     const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES],
     struct fleet_head *out, const char **why);
+/* The same load for a reader that must not arm an unarmed box: it never
+ * creates the state root or the fleet directory. Call it only after the fleet
+ * directory is known to exist (fleet_enrol_state_path_existing); a missing
+ * directory reads as BAD here. */
+enum fleet_head_state fleet_head_load_existing(
+    const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES],
+    struct fleet_head *out, const char **why);
 
 /* Import one head line sealed by `operator_pubkey`, the key this box trusts.
  * Refusals, by name: roster_line_not_operator_sealed (not a valid seal),

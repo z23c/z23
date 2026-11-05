@@ -975,6 +975,11 @@ enum fleet_head_state fleet_head_load(
     struct fleet_head *out, const char **why)
 { return fe_head_load_mode(operator_pubkey, out, why, false); }
 
+enum fleet_head_state fleet_head_load_existing(
+    const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES],
+    struct fleet_head *out, const char **why)
+{ return fe_head_load_mode(operator_pubkey, out, why, true); }
+
 static bool fe_row_head_gate(
     const struct fleet_machine *row,
     const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES], const char **why,
