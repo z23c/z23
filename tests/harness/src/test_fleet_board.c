@@ -11589,7 +11589,6 @@ static int64_t fbh_seq(int box)
 static size_t fbh_pull(struct fbw *w, struct node_db *into, int answering,
                        int asking)
 {
-    size_t frames = 0;
     fbc_ask_begin(w);
     if (!boot_fleet_board_fleet_test_pull_roster(&w->svc, w->f.resp_noise_pub))
         return SIZE_MAX;
