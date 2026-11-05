@@ -411,9 +411,106 @@ static int check_wallet_hd_from_mnemonic(void)
     return fail;
 }
 
+/* Every bip44_* wrapper must return false (not true) when the domain
+ * refuses: account past the hardened bit, change other than 0/1, index past
+ * the hardened bit, and null output pointers on the keypair helper. */
+static int check_bip44_refusals(void)
+{
+    printf("bip44 refuses out-of-range account/change/index and null outs... ");
+    if (!ensure_master()) {
+        printf("FAIL (no master)\n");
+        return 1;
+    }
+    struct ext_key out;
+    struct privkey priv;
+    struct pubkey pub;
+    privkey_init(&priv);
+    int accepted = 0;
+    accepted += bip44_derive_account(&master, &out, 0x80000000u) ? 1 : 0;
+    accepted += bip44_derive_chain(&master, &out, 0, 2) ? 2 : 0;
+    accepted += bip44_derive_chain(&master, &out, 0x80000000u, 0) ? 4 : 0;
+    accepted += bip44_derive_key(&master, &out, 0x80000000u, 0, 0) ? 8 : 0;
+    accepted += bip44_derive_key(&master, &out, 0, 0, 0x80000000u) ? 16 : 0;
+    accepted += bip44_derive_keypair(&master, NULL, &pub, 0, 0, 0) ? 32 : 0;
+    accepted += bip44_derive_keypair(&master, &priv, NULL, 0, 0, 0) ? 64 : 0;
+    accepted += bip44_derive_keypair(&master, &priv, &pub, 0, 2, 0) ? 128 : 0;
+    accepted += bip44_derive_keypair(&master, &priv, &pub, 0x80000000u, 0, 0)
+                        ? 256 : 0;
+    accepted += bip44_derive_keypair(NULL, &priv, &pub, 0, 0, 0) ? 512 : 0;
+    if (accepted == 0) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL (accepted mask=0x%x)\n", (unsigned)accepted);
+    return 1;
+}
+
+/* The largest valid account and index (the hardened bit is added inside)
+ * must still derive, and the keypair helper must agree with bip44_derive_key
+ * and with the public key computed from the private key. */
+static int check_bip44_keypair_matches_key(void)
+{
+    printf("bip44 keypair equals derive_key and its pubkey... ");
+    if (!ensure_master()) {
+        printf("FAIL (no master)\n");
+        return 1;
+    }
+    struct ext_key key;
+    struct privkey priv;
+    struct pubkey pub, expect_pub;
+    privkey_init(&priv);
+    bool ok = bip44_derive_key(&master, &key, 3, 1, 9) &&
+              bip44_derive_keypair(&master, &priv, &pub, 3, 1, 9) &&
+              privkey_get_pubkey(&key.key, &expect_pub);
+    int fail = 0;
+    if (!ok || memcmp(priv.vch, key.key.vch, 32) != 0 ||
+        pub.size != expect_pub.size ||
+        memcmp(pub.vch, expect_pub.vch, pub.size) != 0)
+        fail = 1;
+    struct ext_key edge;
+    if (!bip44_derive_key(&master, &edge, 0x7FFFFFFFu, 1, 0x7FFFFFFFu))
+        fail = 1;
+    memory_cleanse(&key, sizeof(key));
+    memory_cleanse(&edge, sizeof(edge));
+    memory_cleanse(priv.vch, 32);
+    printf(fail ? "FAIL\n" : "OK\n");
+    return fail;
+}
+
+/* bip44_format_path returns the character count, and -1 (never the count or
+ * zero) when the buffer cannot hold the path plus its terminator. */
+static int check_bip44_format_path_bounds(void)
+{
+    printf("bip44_format_path returns length and refuses small buffers... ");
+    static const char want[] = "m/44'/147'/0'/0/5";
+    const int len = (int)sizeof(want) - 1;
+    char buf[64];
+    int fail = 0;
+    if (bip44_format_path(buf, sizeof(buf), 0, 0, 5) != len)
+        fail = 1;
+    memset(buf, 0, sizeof(buf));
+    if (bip44_format_path(buf, (size_t)len + 1, 0, 0, 5) != len ||
+        strcmp(buf, want) != 0)
+        fail = 1;
+    if (bip44_format_path(buf, (size_t)len, 0, 0, 5) != -1)
+        fail = 1;
+    if (bip44_format_path(buf, 1, 0, 0, 5) != -1)
+        fail = 1;
+    if (bip44_format_path(buf, 0, 0, 0, 5) != -1)
+        fail = 1;
+    if (bip44_format_path(NULL, sizeof(buf), 0, 0, 5) != -1)
+        fail = 1;
+    printf(fail ? "FAIL\n" : "OK\n");
+    return fail;
+}
+
 int test_bip44(void)
 {
     int failures = 0;
+
+    failures += check_bip44_refusals();
+    failures += check_bip44_keypair_matches_key();
+    failures += check_bip44_format_path_bounds();
 
     /* ── Test 1: account derivation ────────────────────────────────── */
     failures += check_bip44_derived_depth("bip44_derive_account(0)... ",
