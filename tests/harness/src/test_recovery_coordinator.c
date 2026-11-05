@@ -19,6 +19,9 @@
 #include "framework/condition.h"
 #include "event/event.h"
 #include "util/blocker.h"
+#include "util/supervisor.h"
+#include "validation/main_state.h"
+#include "json/json.h"
 
 #include <stdatomic.h>
 #include <stdint.h>
@@ -56,6 +59,300 @@ static void rc_reset(void)
     blocker_module_init();
     blocker_reset_for_testing();
     recovery_coordinator_test_reset();
+}
+
+
+/* ── mutation-sweep follow-ups: set comparison, format caps, state dump ── */
+
+static bool cf_quiet(void) { return false; }
+
+static void rc_make(struct condition *c, const char *name,
+                    enum condition_severity sev, bool (*detect)(void))
+{
+    *c = (struct condition){
+        .name = name, .severity = sev, .poll_secs = 1, .backoff_secs = 0,
+        .max_attempts = 2, .detect = detect, .remedy = cf_remedy,
+        .witness = cf_witness, .witness_window_secs = 60,
+    };
+}
+
+static void rc_make_crit(struct condition *c, const char *name)
+{
+    rc_make(c, name, COND_CRITICAL, cf_detect);
+    drive_to_unresolved_critical(c);
+}
+
+/* A same-size set that differs only at its first sorted name is a change;
+ * a set that cleared and came back is a change from the empty set. rc_now
+ * stays under the 600 s keepalive so only a change can emit. */
+static int rc_set_change_cases(void)
+{
+    int failures = 0;
+    static struct condition ca, cb, cz;
+    rc_reset();
+    rc_now = 100;
+    recovery_coordinator_test_set_clock(rc_clock);
+    rc_make_crit(&ca, "rc_sa_a");
+    rc_make_crit(&cz, "rc_sa_z");
+    recovery_coordinator_test_drive();
+    RC_CHECK("set: first set logs", recovery_coordinator_test_log_emits() == 1);
+
+    condition_engine_reset_for_testing();
+    rc_make_crit(&cb, "rc_sa_b");
+    rc_make_crit(&cz, "rc_sa_z");
+    recovery_coordinator_test_drive();
+    RC_CHECK("set: same size, first name differs -> logs again",
+             recovery_coordinator_test_log_emits() == 2);
+
+    condition_engine_reset_for_testing();
+    recovery_coordinator_test_drive();
+    rc_make_crit(&cb, "rc_sa_b");
+    rc_make_crit(&cz, "rc_sa_z");
+    recovery_coordinator_test_drive();
+    RC_CHECK("set: cleared then back -> logs again at once",
+             recovery_coordinator_test_log_emits() == 3);
+
+    /* test_reset must also forget the logged set and the throttle. */
+    recovery_coordinator_test_reset();
+    recovery_coordinator_test_set_clock(rc_clock);
+    recovery_coordinator_test_drive();
+    RC_CHECK("set: after test_reset the same set logs afresh",
+             recovery_coordinator_test_log_emits() == 1);
+
+    recovery_coordinator_test_set_clock(NULL);
+    rc_reset();
+    return failures;
+}
+
+static void rc_names_fixture(struct condition *c, const char *const *names,
+                             int n)
+{
+    rc_reset();
+    for (int i = 0; i < n; i++)
+        rc_make_crit(&c[i], names[i]);
+    recovery_coordinator_test_drive();
+}
+
+static int rc_format_cap_cases(void)
+{
+    int failures = 0;
+    static struct condition c[3];
+    static const char *const names[3] = {"alpha", "beta", "gamma"};
+    char buf[64];
+
+    rc_reset();
+    memset(buf, 'X', sizeof(buf));
+    recovery_coordinator_test_format_logged(buf, sizeof(buf));
+    RC_CHECK("format: empty set is the empty string", buf[0] == '\0');
+
+    rc_names_fixture(c, names, 3);
+    memset(buf, 'X', sizeof(buf));
+    recovery_coordinator_test_format_logged(buf, sizeof(buf));
+    RC_CHECK("format: three names fit with no +N marker",
+             strcmp(buf, "alpha, beta, gamma") == 0);
+    memset(buf, 'X', sizeof(buf));
+    recovery_coordinator_test_format_logged(buf, 16);
+    RC_CHECK("format: cap 16 cuts after beta with ...",
+             strcmp(buf, "alpha, beta...") == 0);
+    memset(buf, 'X', sizeof(buf));
+    recovery_coordinator_test_format_logged(buf, 5);
+    RC_CHECK("format: cap 5 holds only the marker", strcmp(buf, "...") == 0);
+    memset(buf, 'X', sizeof(buf));
+    recovery_coordinator_test_format_logged(buf, 4);
+    RC_CHECK("format: cap 4 is too small, empty string", buf[0] == '\0');
+    rc_reset();
+    return failures;
+}
+
+static int rc_format_more_cases(void)
+{
+    int failures = 0;
+    static struct condition c[9];
+    static const char *const names[9] = {"n0", "n1", "n2", "n3", "n4",
+                                         "n5", "n6", "n7", "n8"};
+    char buf[64];
+    rc_names_fixture(c, names, 9);
+    memset(buf, 'X', sizeof(buf));
+    recovery_coordinator_test_format_logged(buf, 40);
+    RC_CHECK("format: cap 40 holds the whole +1 more text",
+             strcmp(buf, "n0, n1, n2, n3, n4, n5, n6, n7, +1 more") == 0);
+    memset(buf, 'X', sizeof(buf));
+    recovery_coordinator_test_format_logged(buf, 39);
+    RC_CHECK("format: cap 39 cuts the +1 more tail with ...",
+             strcmp(buf, "n0, n1, n2, n3, n4, n5, n6, n7...") == 0);
+    rc_reset();
+    return failures;
+}
+
+/* A registered but inactive owning condition does not suppress; an active
+ * segment_corruption does. */
+static int rc_owner_cases(void)
+{
+    int failures = 0;
+    static struct condition owner, other;
+    rc_reset();
+    rc_make(&owner, "reducer_frontier_reconcile_light", COND_WARN, cf_quiet);
+    (void)condition_register(&owner);
+    rc_make_crit(&other, "rc_owner_other");
+    condition_engine_tick();
+    recovery_coordinator_test_drive();
+    RC_CHECK("owner: registered-but-inactive owner does not suppress",
+             recovery_coordinator_test_runs() == 1);
+
+    rc_reset();
+    rc_make(&owner, "segment_corruption", COND_CRITICAL, cf_detect);
+    drive_to_unresolved_critical(&owner);
+    recovery_coordinator_test_drive();
+    RC_CHECK("owner: active segment_corruption suppresses",
+             recovery_coordinator_test_runs() == 0 &&
+             blocker_fire_count_for_testing(
+                 "recovery_coordinator.no_applicable_rung") == 0);
+    rc_reset();
+    return failures;
+}
+
+static int64_t dump_int(const struct json_value *o, const char *key)
+{
+    const struct json_value *v = json_get(o, key);
+    return v ? json_get_int(v) : -1;
+}
+
+static bool dump_owner_is(const struct json_value *o, size_t i,
+                          const char *want)
+{
+    const struct json_value *arr = json_get(o, "owning_conditions");
+    const struct json_value *e = arr ? json_at(arr, i) : NULL;
+    return e && json_get_str(e) && strcmp(json_get_str(e), want) == 0;
+}
+
+static int rc_dump_cases(void)
+{
+    int failures = 0;
+    static struct condition other;
+    struct json_value o;
+    char events[8192];
+    struct blocker_snapshot snaps[16];
+    bool reason_ok = false;
+
+    rc_reset();
+    RC_CHECK("dump: NULL out is refused",
+             !recovery_coordinator_dump_state_json(NULL, "x"));
+    json_init(&o);
+    json_set_object(&o);
+    RC_CHECK("dump: returns true", recovery_coordinator_dump_state_json(&o, "x"));
+    RC_CHECK("dump: fresh counters are zero",
+             dump_int(&o, "runs") == 0 && dump_int(&o, "blocker_fires") == 0 &&
+             dump_int(&o, "last_run_unix") == 0);
+    RC_CHECK("dump: role text", json_get(&o, "role") &&
+             strcmp(json_get_str(json_get(&o, "role")),
+                    "no-applicable-rung naming fallback") == 0);
+    RC_CHECK("dump: both owning conditions in order",
+             json_size(json_get(&o, "owning_conditions")) == 2 &&
+             dump_owner_is(&o, 0, "reducer_frontier_reconcile_light") &&
+             dump_owner_is(&o, 1, "segment_corruption"));
+    RC_CHECK("dump: registered flag present", json_get(&o, "registered"));
+    json_free(&o);
+
+    rc_make_crit(&other, "rc_dump_other");
+    recovery_coordinator_test_drive();
+    json_init(&o);
+    json_set_object(&o);
+    (void)recovery_coordinator_dump_state_json(&o, "x");
+    RC_CHECK("dump: a fire shows runs, fires and a wall time",
+             dump_int(&o, "runs") == 1 && dump_int(&o, "blocker_fires") == 1 &&
+             dump_int(&o, "last_run_unix") > 1000000000);
+    json_free(&o);
+
+    int n = blocker_snapshot_all(snaps, 16);
+    for (int i = 0; i < n; i++)
+        if (strcmp(snaps[i].id, "recovery_coordinator.no_applicable_rung") == 0)
+            reason_ok = strstr(snaps[i].reason, "deeper recovery") != NULL;
+    RC_CHECK("fire: blocker carries its reason text", reason_ok);
+    event_dump_json(events, sizeof(events), 8);
+    RC_CHECK("fire: recovery action event emitted with peer 0",
+             strstr(events, "\"peer\":0,\"data\":\"action=recovery-no-"
+                            "applicable-rung blocker=named\"") != NULL);
+
+    recovery_coordinator_test_reset();
+    json_init(&o);
+    json_set_object(&o);
+    (void)recovery_coordinator_dump_state_json(&o, "x");
+    RC_CHECK("reset: wall time, runs and fires return to zero",
+             dump_int(&o, "last_run_unix") == 0 && dump_int(&o, "runs") == 0 &&
+             dump_int(&o, "blocker_fires") == 0 &&
+             recovery_coordinator_test_log_emits() == 0);
+    json_free(&o);
+    rc_reset();
+    return failures;
+}
+
+/* test_reset puts the default clock back: a held test clock must not keep
+ * driving the keepalive afterwards. */
+static int rc_reset_clock_cases(void)
+{
+    int failures = 0;
+    static struct condition c;
+    rc_reset();
+    rc_now = 1000;
+    recovery_coordinator_test_set_clock(rc_clock);
+    recovery_coordinator_test_reset();
+    rc_make_crit(&c, "rc_clock_a");
+    recovery_coordinator_test_drive();
+    rc_now = 1000 + 700;
+    recovery_coordinator_test_drive();
+    RC_CHECK("reset: test clock is dropped, no 600 s keepalive from it",
+             recovery_coordinator_test_log_emits() == 1);
+    rc_reset();
+    return failures;
+}
+
+static int rc_name_blocker_cases(void)
+{
+    int failures = 0;
+    struct json_value o;
+    rc_reset();
+    RC_CHECK("name: no fires before naming",
+             recovery_coordinator_test_blocker_fires() == 0);
+    recovery_coordinator_test_name_blocker();
+    json_init(&o);
+    json_set_object(&o);
+    (void)recovery_coordinator_dump_state_json(&o, "x");
+    RC_CHECK("name: one blocker, one run, a wall time",
+             recovery_coordinator_test_blocker_fires() == 1 &&
+             recovery_coordinator_test_runs() == 1 &&
+             dump_int(&o, "last_run_unix") > 1000000000);
+    json_free(&o);
+    rc_reset();
+    return failures;
+}
+
+static int rc_register_cases(void)
+{
+    int failures = 0;
+    static struct main_state ms;
+    struct json_value o;
+    int count_before;
+    recovery_coordinator_register(NULL);
+    recovery_coordinator_register(&ms);
+    json_init(&o);
+    json_set_object(&o);
+    (void)recovery_coordinator_dump_state_json(&o, "x");
+    RC_CHECK("register: a real main_state registers the child",
+             json_get(&o, "registered") && json_get_bool(json_get(&o, "registered")));
+    json_free(&o);
+    count_before = supervisor_child_count_total();
+    recovery_coordinator_register(&ms);
+    RC_CHECK("register: a second call is a no-op",
+             supervisor_child_count_total() == count_before);
+    return failures;
+}
+
+static int rc_extra_cases(void)
+{
+    return rc_set_change_cases() + rc_format_cap_cases() +
+           rc_format_more_cases() + rc_owner_cases() + rc_dump_cases() +
+           rc_reset_clock_cases() + rc_name_blocker_cases() +
+           rc_register_cases();
 }
 
 int test_recovery_coordinator(void);
@@ -253,6 +550,7 @@ int test_recovery_coordinator(void)
         rc_reset();
     }
 
+    failures += rc_extra_cases();
     printf("recovery_coordinator: %d failures\n", failures);
     return failures;
 }
