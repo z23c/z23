@@ -7,6 +7,7 @@
 #include "codeindex/codeindex.h"
 #include "codeindex/codeindex_build.h"
 #include "codeindex/codeindex_docs.h"
+#include "codeindex/codeindex_pages.h"
 #include "platform/directory_compat.h"
 #include "platform/temp_directory.h"
 #include "command/native_code_pages.h"
@@ -216,6 +217,9 @@ static int cis_index_checks(struct codeindex *ix, const char *root)
               cis_docs_scope(ix));
     CIS_CHECK("an edited doc is flagged stale, not misread",
               cis_stale_flag(ix, root));
+    struct ci_page page;
+    CIS_CHECK("fresh index reports no imported page instead of a store error",
+              codeindex_pages_list(ix, "lib/net", &page, 1) == 0);
     return failures;
 }
 
