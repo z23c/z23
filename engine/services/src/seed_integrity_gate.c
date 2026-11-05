@@ -40,6 +40,9 @@ static int     g_memo_height = -1;
 static uint8_t g_memo_hash[32];
 static bool    g_memo_pass = false;
 static bool    g_memo_valid = false;
+/* Bumped by every stamp: a check that began before a stamp must not store
+ * its answer afterwards, since it may have read the old stamp. */
+static uint64_t g_memo_gen = 0;
 static bool    g_memo_trusted = false; /* memo was evaluated with the commitment check */
 
 static struct node_db *gate_ndb(void)
@@ -212,7 +215,15 @@ bool seed_integrity_stamp_utxo_sha3(struct node_db *ndb, int height,
                  (const void *)root);
         return false;
     }
-    if (!utxo_commitment_sha3_save(ndb->db, root, height, count)) {
+    bool saved = utxo_commitment_sha3_save(ndb->db, root, height, count);
+    /* The stamp is what the gate's commitment check reads, so any stored
+     * answer is stale once a save was attempted (also after a failed one). */
+    pthread_mutex_lock(&g_memo_lock);
+    g_memo_valid = false;
+    g_memo_height = -1;
+    g_memo_gen++;
+    pthread_mutex_unlock(&g_memo_lock);
+    if (!saved) {
         LOG_WARN("validation_pack",
                  "[validation_pack] utxo_sha3 stamp save FAILED at h=%d — "
                  "seed-gate commitment check stays unarmed", height);
@@ -251,6 +262,7 @@ bool seed_integrity_gate_check(int height, const uint8_t hash[32],
         pthread_mutex_unlock(&g_memo_lock);
         return pass;
     }
+    uint64_t gen = g_memo_gen;
     pthread_mutex_unlock(&g_memo_lock);
 
     bool pass = gate_linkage_walk(ndb->db, height, hash);
@@ -262,11 +274,13 @@ bool seed_integrity_gate_check(int height, const uint8_t hash[32],
     invariant_sentinel_note_seed_gate(!pass);
 
     pthread_mutex_lock(&g_memo_lock);
-    g_memo_height = height;
-    memcpy(g_memo_hash, hash, 32);
-    g_memo_pass = pass;
-    g_memo_trusted = trusted_seed;
-    g_memo_valid = true;
+    if (gen == g_memo_gen) {
+        g_memo_height = height;
+        memcpy(g_memo_hash, hash, 32);
+        g_memo_pass = pass;
+        g_memo_trusted = trusted_seed;
+        g_memo_valid = true;
+    }
     pthread_mutex_unlock(&g_memo_lock);
     return pass;
 }
