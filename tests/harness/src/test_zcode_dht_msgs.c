@@ -406,6 +406,8 @@ static int test_trust_roles_split(void)
     return failures;
 }
 
+int zcode_dht_msgs_forged_tests(void); /* test_zcode_dht_msgs_forged.c */
+
 int test_zcode_dht_msgs(void)
 {
     int failures = 0;
@@ -414,6 +416,7 @@ int test_zcode_dht_msgs(void)
     failures += test_rejections();
     failures += test_record_frames();
     failures += test_trust_roles_split();
+    failures += zcode_dht_msgs_forged_tests();
     printf("=== zcode_dht_msgs: %d failures ===\n", failures);
     return failures;
 }
