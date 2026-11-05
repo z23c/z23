@@ -2196,6 +2196,7 @@ static void run_full_suite_crypto_and_wallet(int *failures)
     *failures += test_msg_handlers();
     *failures += test_process_headers_adversarial();
     *failures += test_getheaders_serve_fallback();
+    { extern int test_legacy_serve_gaps(void); *failures += test_legacy_serve_gaps(); }
     *failures += test_net_handshake_adversarial();
     *failures += test_net_frame_hardening();
     *failures += test_net_ban_persistence();
