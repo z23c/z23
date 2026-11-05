@@ -10,7 +10,8 @@
  *   BUILT, whether or not the wallet holds it -> outcome_unknown with the txid
  *   BUILT under the zero txid                 -> outcome_unknown, no txid
  *   STARTED, nobody running it                -> the row is freed, the send runs
- *   only this request's legacy digest matches -> outcome_unknown, no txid
+ *   only this request's legacy digest matches, or that digest cannot be
+ *   recomputed                                -> outcome_unknown, no txid
  *   no digest matches                         -> key_conflict
  * The wallet persists a transaction before it relays it, but holding a
  * transaction does not prove it was relayed, so BUILT never answers committed.
@@ -301,16 +302,27 @@ static bool wso_digest(const char *key, const struct json_value *params,
     return true;
 }
 
+/* One value written as an earlier build wrote it, into a zeroed buffer. False
+ * when that build's bytes cannot be reproduced: a number or literal that does not
+ * fit is skipped whole, and that build then hashed whatever its stack held from
+ * there to the buffer's last byte. */
+static bool wso_legacy_write(const struct json_value *v, char *buf, size_t cap)
+{
+    size_t n = json_write(v, buf, cap);
+    return n < cap || strlen(buf) == cap - 1;
+}
+
 /* The digest an earlier build stored for this request: each value written into
  * the fixed buffer that build used, so a longer one is cut where it was cut, and
- * nothing added for a real the text loses. */
-static void wso_legacy_digest(const char *key, const struct json_value *params,
+ * nothing added for a real the text loses. False when the digest is not exact.
+ * The fee buffer was always zero-filled, so a skipped fee number stays exact. */
+static bool wso_legacy_digest(const char *key, const struct json_value *params,
                               uint8_t out[32])
 {
     const struct json_value *f = json_at(params, WALLET_SEND_ONCE_FEE_PARAM);
     char from[1024] = "", recips[16384] = "", fee[64] = "";
-    (void)json_write(json_at(params, 0), from, sizeof(from));
-    (void)json_write(json_at(params, 1), recips, sizeof(recips));
+    bool exact = wso_legacy_write(json_at(params, 0), from, sizeof(from));
+    exact = wso_legacy_write(json_at(params, 1), recips, sizeof(recips)) && exact;
     if (f && !json_is_null(f))
         (void)json_write(f, fee, sizeof(fee));
     struct sha3_256_ctx c;
@@ -321,6 +333,7 @@ static void wso_legacy_digest(const char *key, const struct json_value *params,
     wso_absorb(&c, recips);
     wso_absorb(&c, fee);
     sha3_256_finalize(&c, out);
+    return exact;
 }
 
 static bool wso_is_active(const uint8_t kh[32])
@@ -402,16 +415,18 @@ struct wso_request {
  * this request holds its legacy digest, and that send may have gone out: a
  * conflict would tell the client to pay again under a new key, and a txid would
  * claim this exact request was the one sent. So a match answers outcome_unknown
- * with neither, whatever the row's state. A row this build wrote for a whole
- * amount can match a lossy request the same way; nothing tells the two apart. */
+ * with neither, whatever the row's state, and so does a request whose legacy
+ * digest cannot be recomputed, since no comparison can rule the row out. A row
+ * this build wrote for a whole amount can match a lossy request the same way;
+ * nothing tells the two apart. */
 static void wso_answer_mismatch(const struct wallet_send_once_row *row,
                                 const struct wso_request *req,
                                 struct json_value *result)
 {
     uint8_t legacy[32];
-    wso_legacy_digest(req->key, req->params, legacy);
-    if (memcmp(row->digest, legacy, 32) == 0) {
-        LOG_WARN(WSO_TAG, "repeat matches the key's row only by legacy digest");
+    bool exact = wso_legacy_digest(req->key, req->params, legacy);
+    if (!exact || memcmp(row->digest, legacy, 32) == 0) {
+        LOG_WARN(WSO_TAG, "repeat may match the key's row by legacy digest");
         wso_answer(result, "outcome_unknown", NULL, true);
         return;
     }

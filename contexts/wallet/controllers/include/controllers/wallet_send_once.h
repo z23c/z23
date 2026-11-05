@@ -50,7 +50,8 @@ typedef bool (*wallet_send_once_fn)(const struct json_value *params, bool help,
  *                    may have fetched it, so it can still confirm). Also a row
  *                    whose digest matches only this request's legacy digest,
  *                    the form an earlier build stored, in any state and with no
- *                    txid: that digest cannot say this exact request was sent
+ *                    txid: that digest cannot say this exact request was sent.
+ *                    Likewise a request whose legacy digest cannot be recomputed
  *   key_conflict     same key, different parameters
  *   released         nothing was admitted; the key is free (state released)
  *   fee_changed      the planned fee differs from the wallet fee; key free
