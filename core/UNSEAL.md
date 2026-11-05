@@ -931,3 +931,7 @@ later lane flips it HARD.
 - 2026-11-05T06:12:20Z — REASON: Factor shutdown cancellation cleanup without changing behavior
   old ROOT: 5793aa3ac1d0a80396c25f36546865403f3a27ad226e5ec34491e6c0846c5082
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-05T16:14:01Z — REASON: FlyClient gate: bind a peer proof to headers this node validated, with a distinct no-offence refusal code for a proof we cannot check; sync strategy only, no consensus predicate change; owner instruction 2026-11-05 you have authority to unseal core to fix everything, as relayed by the lane brief
+  old ROOT: a61c915fbc9da7096874695da51b2bf58e1086c1a662047f1420776121eae718
+  by: owner unseal ritual (make core-unseal)

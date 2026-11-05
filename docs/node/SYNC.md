@@ -76,10 +76,17 @@ What happens:
    or PoW), UTXO SHA3, byte length,
    UTXO count, chunk size/count, and per-chunk hashes).
 3. Download chunks in parallel, verify each chunk hash before import.
-4. Verify the FlyClient Merkle Mountain Range (MMR)/Merkle Mountain Belt
-   (MMB) proof for the advertised header history and reject missing or
-   non-competitive chainwork. This does **not** bind the peer's UTXO payload to
-   ZClassic consensus; headers commit no UTXO root.
+4. Verify the FlyClient Merkle Mountain Belt (MMB) proof, then bind it to
+   headers this node already validated: the offered anchor hash and chainwork,
+   and every sampled leaf (hash, time, nBits, Sapling root, chainwork), must
+   equal the local header at that height, and each proof's leaf count must equal
+   the challenge length. The chainwork floor runs on the local anchor. This
+   proves the offer names a point on our own header chain and that the peer can
+   reproduce those headers. A node whose headers have not reached the anchor
+   cannot pass; it records no offence, returns to idle and keeps syncing headers.
+   A sample that contradicts a hash-committed field is an offence. This does
+   **not** bind the peer's UTXO payload to ZClassic consensus; headers commit no
+   UTXO or MMB root, so `utxo_root` stays peer-asserted.
 5. Verify the imported UTXO bytes exactly match the peer manifest's SHA3. This
    is integrity under assisted verification, not a consensus proof.
 6. Keep the verified payload in staging. Runtime activation is Phase-0

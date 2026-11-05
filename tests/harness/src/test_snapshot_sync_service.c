@@ -241,6 +241,27 @@ static bool build_fc_chain(struct mmb *mmb,
     return true;
 }
 
+/* Local headers carrying exactly the fields build_fc_chain put in its leaves. */
+static void build_fc_local_headers(struct block_index *local,
+                                   const struct mmb_leaf *leaves,
+                                   uint32_t count)
+{
+    for (uint32_t i = 0; i < count; i++) {
+        struct block_index *bi = &local[i];
+
+        memset(bi, 0, sizeof(*bi));
+        memcpy(bi->hashBlock.data, leaves[i].block_hash, 32);
+        bi->phashBlock = &bi->hashBlock;
+        bi->nHeight = (int)leaves[i].height;
+        bi->nTime = leaves[i].timestamp;
+        bi->nBits = leaves[i].nBits;
+        memcpy(bi->hashFinalSaplingRoot.data, leaves[i].sapling_root, 32);
+        memcpy(bi->nChainWork.pn, leaves[i].chain_work, 32);
+        bi->pprev = i > 0 ? &local[i - 1] : NULL;
+        block_index_build_skip(bi);
+    }
+}
+
 static int test_snapshot_sync_service_followups(void)
 {
     int failures = 0;
@@ -311,6 +332,8 @@ static int test_snapshot_sync_service_verify_flyclient_begin_failure(void)
         uint8_t expected_root[32];
         struct fc_challenge challenge;
         struct fc_response resp;
+        struct main_state ms;
+        struct block_index local[16];
 
         memset(&svc, 0, sizeof(svc));
         memset(&m, 0, sizeof(m));
@@ -318,6 +341,12 @@ static int test_snapshot_sync_service_verify_flyclient_begin_failure(void)
         memset(&resp, 0, sizeof(resp));
 
         ASSERT(build_fc_chain(&m, leaves, leaf_hashes, 16, 0x1d00ffff));
+
+        /* The proof passes only over headers this node holds, so the local
+         * chain is the one the leaves were built from. */
+        main_state_init(&ms);
+        build_fc_local_headers(local, leaves, 16);
+        ms.pindex_best_header = &local[15];
 
         mmb_root(&m, expected_root);
         memset(&svc.fc_challenge, 0, sizeof(svc.fc_challenge));
@@ -328,13 +357,20 @@ static int test_snapshot_sync_service_verify_flyclient_begin_failure(void)
         svc.state = SNAPSYNC_NEGOTIATING;
         svc.ndb = NULL;
         svc.fc_challenge = challenge;
-        memset(svc.offered_chain_work, 0xFF, sizeof(svc.offered_chain_work));
+        svc.offered_height = 15;
+        memcpy(svc.offered_block_hash, leaves[15].block_hash, 32);
+        memcpy(svc.offered_chain_work, leaves[15].chain_work, 32);
 
         ASSERT(fc_build_response(&challenge, &m, leaves,
                                 (const uint8_t (*)[32])leaf_hashes,
                                 &resp));
         ASSERT(resp.num_samples > 0);
-        ASSERT(!snapsync_verify_flyclient(&svc, &resp).ok);
+        struct zcl_result verified = snapsync_verify_flyclient(&svc, &ms, &resp);
+        ms.pindex_best_header = NULL;
+        main_state_free(&ms);
+        ASSERT(!verified.ok);
+        /* Past the proof and the binding, stopped only by the missing db. */
+        ASSERT(verified.code == -8);
         ASSERT(!svc.fc_verified);
         ASSERT(svc.state == SNAPSYNC_NEGOTIATING);
         PASS();

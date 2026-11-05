@@ -17,7 +17,6 @@
 #include "chain/checkpoints.h"          /* g_sha3_checkpoint anchor-root bind */
 #include "storage/coins_kv.h"           /* boundary utxo_root read */
 #include "storage/progress_store.h"     /* progress_store_db() handle */
-#include "chain/pow.h"
 #include "chain/chainparams.h"
 #include "chain/chain.h"
 #include "core/arith_uint256.h"
@@ -653,17 +652,44 @@ struct zcl_result snapsync_write_fc_response(struct byte_stream *s,
 
 /* -- FlyClient proof verification --------------------------------------- */
 
+/* Low bits of mmb_proof.mmb_size hold the leaf count, in both forms mmb_prove
+ * writes (the high bits are its left/right path, the only part mmb_verify
+ * reads). */
+#define SNAPSYNC_FC_MMB_LEAF_COUNT_MASK 0xFFFFFFFFFFULL
+
+/* How a peer's proof stands against the headers this node validated. */
+enum snapsync_fc_binding_verdict {
+    SNAPSYNC_FC_BOUND,        /* every compared field equals our header */
+    SNAPSYNC_FC_UNCHECKABLE,  /* no fault shown: we cannot compare, or only
+                               * the uncommitted chain_work differs */
+    SNAPSYNC_FC_FORGED,       /* contradicts a field the block hash commits */
+};
+
+struct snapsync_fc_binding {
+    enum snapsync_fc_binding_verdict verdict;
+    const char *reason;
+    uint32_t forged_sample;
+    uint8_t anchor_work[32];
+};
+
+/* The offer fields the binding compares, copied out of the service so the
+ * service lock and cs_main are never held together. */
+struct snapsync_fc_offer {
+    int32_t height;
+    uint8_t block_hash[32];
+    uint8_t chain_work[32];
+};
+
 static struct zcl_result snapsync_fc_check_chainwork_floor(
     const struct consensus_params *consensus,
-    const uint8_t offered_chain_work[32], uint32_t serving_peer_id)
+    const uint8_t anchor_work[32], uint32_t serving_peer_id)
 {
     /* Minimum-chainwork FLOOR: serialize the consensus nMinimumChainWork to the
      * canonical little-endian byte layout (byte 0 = least significant), which is
-     * exactly the layout of offered_chain_work / mmb_leaf.chain_work, and reject
-     * any offered anchor whose accumulated work is below it. The floor sits far
-     * below any genuine ~3M-height snapshot, so it never false-rejects a real
-     * anchor, but it blocks a forged minimum-difficulty chain whose tiny work
-     * could otherwise pass the relative leaf<=offered checks below. */
+     * exactly the layout of nChainWork.pn / mmb_leaf.chain_work, and reject an
+     * anchor whose accumulated work is below it. anchor_work is OUR header's
+     * value, never the peer's claim. The floor sits far below any genuine
+     * ~3M-height snapshot, so it never false-rejects a real anchor. */
     uint8_t min_chainwork_le[32];
     {
         struct arith_uint256 floor_arith;
@@ -672,61 +698,194 @@ static struct zcl_result snapsync_fc_check_chainwork_floor(
         arith_to_uint256(&floor_le, &floor_arith);
         memcpy(min_chainwork_le, floor_le.data, 32);
     }
-    if (zcl_chainwork_below_floor(offered_chain_work, min_chainwork_le)) {
+    if (zcl_chainwork_below_floor(anchor_work, min_chainwork_le)) {
         char got[65], floor_hex[65];
-        HexStr(offered_chain_work, 32, false, got, sizeof(got));
+        HexStr(anchor_work, 32, false, got, sizeof(got));
         HexStr(min_chainwork_le, 32, false, floor_hex, sizeof(floor_hex));
-        printf("[snapsync] FlyClient: offered chainwork below floor "
+        printf("[snapsync] FlyClient: anchor chainwork below floor "
                "(work=%s floor=%s)\n", got, floor_hex);
         event_emitf(EV_FC_CHAIN_VERIFIED, serving_peer_id,
                     "flyclient=FAILED chainwork=below_floor");
-        return ZCL_ERR(-9, "verify_flyclient: offered chainwork %s below "
+        return ZCL_ERR(-9, "verify_flyclient: anchor chainwork %s below "
                        "minimum floor %s", got, floor_hex);
     }
     return ZCL_OK;
 }
 
-static void snapsync_fc_count_sample_failures(
-    const struct fc_response *resp, const struct consensus_params *consensus,
-    const uint8_t offered_chain_work[32],
-    uint32_t *pow_failures, uint32_t *work_failures)
+/* Index of the first sample whose claimed leaf count is not chain_length, or
+ * num_samples when all match. Nothing else ties a proof to the length: the
+ * count is not hashed into the root. */
+static uint32_t snapsync_fc_first_size_mismatch(const struct fc_response *resp,
+                                                uint64_t chain_length)
+{
+    for (uint32_t i = 0; i < resp->num_samples; i++) {
+        if ((resp->samples[i].proof.mmb_size &
+             SNAPSYNC_FC_MMB_LEAF_COUNT_MASK) != chain_length)
+            return i;
+    }
+    return resp->num_samples;
+}
+
+/* True when the leaf disagrees with our header on a field the block hash
+ * commits. The leaf layout is snapsync_fc_leaf_from_block_index's. utxo_root
+ * stays peer-asserted (chain/mmb.h), so it is not compared. */
+static bool snapsync_fc_leaf_contradicts_header(const struct mmb_leaf *leaf,
+                                                const struct block_index *local)
+{
+    return memcmp(leaf->block_hash, local->phashBlock->data, 32) != 0 ||
+           leaf->timestamp != local->nTime ||
+           leaf->nBits != local->nBits ||
+           memcmp(leaf->sapling_root, local->hashFinalSaplingRoot.data, 32) != 0;
+}
+
+/* Compare every sample with our header at its height. A forgery anywhere wins
+ * over a difference that shows no fault, so the scan does not stop early for
+ * one of those. Caller holds cs_main. */
+static void snapsync_fc_bind_samples_locked(struct block_index *anchor,
+                                            const struct fc_response *resp,
+                                            struct snapsync_fc_binding *out)
 {
     for (uint32_t i = 0; i < resp->num_samples; i++) {
         const struct mmb_leaf *leaf = &resp->samples[i].leaf;
-        struct uint256 hash;
-        if (zcl_chainwork_is_zero(leaf->chain_work) ||
-            zcl_chainwork_compare_le(leaf->chain_work,
-                                     offered_chain_work) > 0) {
-            printf("[snapsync] FlyClient: chainwork check FAILED for "
-                   "sample %u (h=%u)\n", i, leaf->height);
-            (*work_failures)++;
-        }
-        memcpy(hash.data, leaf->block_hash, 32);
-        if (!CheckProofOfWork(hash, leaf->nBits, consensus)) {
-            printf("[snapsync] FlyClient: PoW check FAILED for sample %u "
-                   "(h=%u)\n", i, leaf->height);
-            (*pow_failures)++;
+        const struct block_index *local =
+            block_index_get_ancestor(anchor, (int)leaf->height);
+
+        if (!local || !local->phashBlock) {
+            /* A snapshot-seeded anchor has no parents to compare with. */
+            out->verdict = SNAPSYNC_FC_UNCHECKABLE;
+            out->reason = "sample_header_missing";
+        } else if (snapsync_fc_leaf_contradicts_header(leaf, local)) {
+            out->verdict = SNAPSYNC_FC_FORGED;
+            out->reason = "sample_contradicts_header";
+            out->forged_sample = i;
+            return;
+        } else if (memcmp(leaf->chain_work, local->nChainWork.pn, 32) != 0) {
+            /* Not committed by the hash, and an import can leave our own
+             * value wrong: this fails the check but shows no fault. */
+            out->verdict = SNAPSYNC_FC_UNCHECKABLE;
+            out->reason = "sample_chain_work_differs";
         }
     }
 }
 
-/* Action: verify FlyClient proofs before accepting snapshot UTXO staging.
- * Checks 20 random block samples with MMB inclusion proofs
- * and PoW target verification (block_hash < target(nBits)). */
+/* Bind the offer and the samples to our best-header chain, whose headers
+ * passed check_block_header (PoW and Equihash) when they were accepted.
+ * Takes cs_main, the lock pindex_best_header and the block index are written
+ * under, as hsr_target_authoritative does for the same walk. */
+static void snapsync_fc_bind_to_headers(struct main_state *ms,
+                                        const struct snapsync_fc_offer *offer,
+                                        const struct fc_response *resp,
+                                        struct snapsync_fc_binding *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->verdict = SNAPSYNC_FC_UNCHECKABLE;
+    zcl_mutex_lock(&ms->cs_main);
+    struct block_index *best = ms->pindex_best_header;
+    struct block_index *anchor =
+        best ? block_index_get_ancestor(best, offer->height) : NULL;
+    if (!anchor || !anchor->phashBlock) {
+        out->reason = "best_header_behind_offer";
+    } else if (memcmp(anchor->phashBlock->data, offer->block_hash, 32) != 0) {
+        out->reason = "anchor_hash_differs";
+    } else {
+        out->verdict = SNAPSYNC_FC_BOUND;
+        memcpy(out->anchor_work, anchor->nChainWork.pn, 32);
+        if (memcmp(out->anchor_work, offer->chain_work, 32) != 0) {
+            out->verdict = SNAPSYNC_FC_UNCHECKABLE;
+            out->reason = "anchor_chain_work_differs";
+        }
+        snapsync_fc_bind_samples_locked(anchor, resp, out);
+    }
+    zcl_mutex_unlock(&ms->cs_main);
+}
+
+/* The proof shows no fault but cannot be checked here: return to idle so a
+ * later offer is heard, and let header sync carry on. snapsync_reset clears the
+ * anchor slot, but that locator hint belongs to boot or chain restore, not to
+ * this attempt, so it is put back. */
+static struct zcl_result snapsync_fc_stand_down(struct snapshot_sync_service *svc,
+                                                uint32_t serving_peer_id,
+                                                const char *reason)
+{
+    struct block_index *anchor_hint = snapsync_get_anchor();
+    bool idle;
+
+    event_emitf(EV_FC_CHAIN_VERIFIED, serving_peer_id,
+                "flyclient=UNCHECKABLE reason=%s", reason);
+    snapsync_reset(svc);
+    snapsync_set_anchor(anchor_hint);
+    snapsync_service_lock_internal();
+    idle = svc->state == SNAPSYNC_IDLE;
+    snapsync_service_unlock_internal();
+    if (idle && sync_get_state() == SYNC_SNAPSHOT_RECEIVE)
+        sync_set_state(SYNC_HEADERS_DOWNLOAD, "snapshot offer not checkable");
+    return ZCL_ERR(SNAPSYNC_FLYCLIENT_UNVERIFIABLE_ERROR_CODE,
+                   "verify_flyclient: cannot check offer against local "
+                   "headers: %s", reason);
+}
+
+/* The checks that need no local header: the proofs must hold together under
+ * the offered root and length, and an offer must name its work. */
+static struct zcl_result snapsync_fc_check_self_consistent(
+    const struct fc_response *resp, const struct fc_challenge *challenge,
+    const uint8_t offered_chain_work[32], uint32_t serving_peer_id)
+{
+    if (!fc_verify_response(resp, challenge)) {
+        printf("[snapsync] FlyClient: MMB proof verification FAILED\n");
+        event_emitf(EV_FC_CHAIN_VERIFIED, serving_peer_id,
+                    "flyclient=FAILED samples=%u", resp->num_samples);
+        return ZCL_ERR(-3, "verify_flyclient: MMB proof verification failed samples=%u",
+                       resp->num_samples);
+    }
+    uint32_t bad = snapsync_fc_first_size_mismatch(resp, challenge->chain_length);
+    if (bad < resp->num_samples) {
+        event_emitf(EV_FC_CHAIN_VERIFIED, serving_peer_id,
+                    "flyclient=FAILED mmb_size_mismatch sample=%u", bad);
+        return ZCL_ERR(-6, "verify_flyclient: sample %u mmb_size does not "
+                       "match chain_length %llu", bad,
+                       (unsigned long long)challenge->chain_length);
+    }
+    if (zcl_chainwork_is_zero(offered_chain_work)) {
+        printf("[snapsync] FlyClient: missing offered chainwork\n");
+        event_emitf(EV_FC_CHAIN_VERIFIED, serving_peer_id,
+                    "flyclient=FAILED chainwork=missing");
+        return ZCL_ERR(-4, "verify_flyclient: missing offered chainwork");
+    }
+    return ZCL_OK;
+}
+
+/* Action: verify a peer's FlyClient proof before staging its UTXO snapshot.
+ *
+ * What this proves: the offered anchor and every sampled leaf (FC_NUM_SAMPLES,
+ * drawn from our seed) equal headers this node already validated, so the
+ * length and the work come from our own chain, not the offer.
+ * What it does not prove: anything about the UTXO payload. Headers commit no
+ * UTXO or MMB root, so utxo_root and the rest of the belt stay peer-asserted.
+ *
+ * Failures that show no fault of the peer stand the service down and return
+ * SNAPSYNC_FLYCLIENT_UNVERIFIABLE_ERROR_CODE; every other failure is an
+ * offence for the route to score, and leaves the service negotiating. */
 struct zcl_result snapsync_verify_flyclient(struct snapshot_sync_service *svc,
+                               struct main_state *ms,
                                const struct fc_response *resp)
 {
     enum snapshot_sync_state state = SNAPSYNC_IDLE;
     uint32_t serving_peer_id = 0;
     struct fc_challenge challenge;
+    struct snapsync_fc_offer offer;
+    struct snapsync_fc_binding binding;
 
-    if (!svc || !resp)
-        return ZCL_ERR(-1, "verify_flyclient: svc=%p resp=%p", (void*)svc, (void*)resp);
+    if (!svc || !ms || !resp)
+        return ZCL_ERR(-1, "verify_flyclient: svc=%p ms=%p resp=%p",
+                       (void*)svc, (void*)ms, (const void*)resp);
 
     snapsync_service_lock_internal();
     state = svc->state;
     serving_peer_id = svc->serving_peer_id;
     memcpy(&challenge, &svc->fc_challenge, sizeof(challenge));
+    offer.height = svc->offered_height;
+    memcpy(offer.block_hash, svc->offered_block_hash, 32);
+    memcpy(offer.chain_work, svc->offered_chain_work, 32);
     snapsync_service_unlock_internal();
     if (state != SNAPSYNC_NEGOTIATING) {
         printf("[snapsync] FlyClient: wrong state %s\n",
@@ -735,64 +894,35 @@ struct zcl_result snapsync_verify_flyclient(struct snapshot_sync_service *svc,
                        snapsync_state_name(state));
     }
 
-    /* Verify all samples against the challenge */
-    if (!fc_verify_response(resp, &challenge)) {
-        printf("[snapsync] FlyClient: MMB proof verification FAILED\n");
-        event_emitf(EV_FC_CHAIN_VERIFIED, serving_peer_id,
-                    "flyclient=FAILED samples=%u", resp->num_samples);
-        return ZCL_ERR(-3, "verify_flyclient: MMB proof verification failed samples=%u",
-                       resp->num_samples);
-    }
+    struct zcl_result consistent = snapsync_fc_check_self_consistent(
+        resp, &challenge, offer.chain_work, serving_peer_id);
+    if (!consistent.ok)
+        return consistent;
 
-    uint8_t offered_chain_work[32];
-    snapsync_service_lock_internal();
-    memcpy(offered_chain_work, svc->offered_chain_work, 32);
-    snapsync_service_unlock_internal();
-    if (zcl_chainwork_is_zero(offered_chain_work)) {
-        printf("[snapsync] FlyClient: missing offered chainwork\n");
-        event_emitf(EV_FC_CHAIN_VERIFIED, serving_peer_id,
-                    "flyclient=FAILED chainwork=missing");
-        return ZCL_ERR(-4, "verify_flyclient: missing offered chainwork");
-    }
-
-    /* Additional check: verify PoW targets for each sample.
-     * The MMB leaf contains block_hash and nBits — verify that
-     * block_hash actually meets the difficulty target. */
     const struct chain_params *cp = chain_params_get();
     const struct consensus_params *consensus = cp ? &cp->consensus : NULL;
     if (!consensus) {
-        printf("[snapsync] FlyClient: no chain params for PoW check\n");
-        return ZCL_ERR(-5, "verify_flyclient: no chain params for PoW check");
+        printf("[snapsync] FlyClient: no chain params for work floor\n");
+        return ZCL_ERR(-5, "verify_flyclient: no chain params for work floor");
     }
+
+    snapsync_fc_bind_to_headers(ms, &offer, resp, &binding);
+    if (binding.verdict == SNAPSYNC_FC_FORGED) {
+        event_emitf(EV_FC_CHAIN_VERIFIED, serving_peer_id,
+                    "flyclient=FAILED forged_sample=%u h=%u",
+                    binding.forged_sample,
+                    resp->samples[binding.forged_sample].leaf.height);
+        return ZCL_ERR(-7, "verify_flyclient: sample %u contradicts our header "
+                       "at height %u", binding.forged_sample,
+                       resp->samples[binding.forged_sample].leaf.height);
+    }
+    if (binding.verdict == SNAPSYNC_FC_UNCHECKABLE)
+        return snapsync_fc_stand_down(svc, serving_peer_id, binding.reason);
 
     struct zcl_result floor_res = snapsync_fc_check_chainwork_floor(
-        consensus, offered_chain_work, serving_peer_id);
+        consensus, binding.anchor_work, serving_peer_id);
     if (!floor_res.ok)
         return floor_res;
-
-    uint32_t pow_failures = 0;
-    uint32_t work_failures = 0;
-    snapsync_fc_count_sample_failures(resp, consensus, offered_chain_work,
-                                      &pow_failures, &work_failures);
-
-    if (pow_failures > 0) {
-        printf("[snapsync] FlyClient: %u/%u PoW checks FAILED\n",
-               pow_failures, resp->num_samples);
-        event_emitf(EV_FC_CHAIN_VERIFIED, serving_peer_id,
-                    "flyclient=FAILED pow_failures=%u/%u",
-                    pow_failures, resp->num_samples);
-        return ZCL_ERR(-6, "verify_flyclient: %u/%u PoW checks failed",
-                       pow_failures, resp->num_samples);
-    }
-    if (work_failures > 0) {
-        printf("[snapsync] FlyClient: %u/%u chainwork checks FAILED\n",
-               work_failures, resp->num_samples);
-        event_emitf(EV_FC_CHAIN_VERIFIED, serving_peer_id,
-                    "flyclient=FAILED work_failures=%u/%u",
-                    work_failures, resp->num_samples);
-        return ZCL_ERR(-7, "verify_flyclient: %u/%u chainwork checks failed",
-                       work_failures, resp->num_samples);
-    }
 
     snapsync_service_lock_internal();
     svc->fc_verified = false;
@@ -807,7 +937,7 @@ struct zcl_result snapsync_verify_flyclient(struct snapshot_sync_service *svc,
     snapsync_service_lock_internal();
     svc->fc_verified = true;
     snapsync_service_unlock_internal();
-    printf("*** FlyClient PASSED: %u samples, all PoW targets valid, "
+    printf("*** FlyClient PASSED: %u samples match local headers, "
            "MMB proofs verified ***\n", resp->num_samples);
     event_emitf(EV_FC_CHAIN_VERIFIED, serving_peer_id,
                 "flyclient=PASSED samples=%u chain_length=%llu",

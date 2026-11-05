@@ -2,10 +2,10 @@
  *
  * Regression test for the fast-sync minimum-chainwork FLOOR.
  *
- * snapshot_verify.c rejects any offered anchor whose accumulated chainwork
- * is below the consensus nMinimumChainWork; the relative leaf<=offered
- * checks alone do not catch a forged minimum-difficulty chain. The floor is
- * far below any genuine snapshot and is not pinned to the checkpoint table. */
+ * snapshot_verify.c rejects a local anchor whose accumulated chainwork is
+ * below the consensus nMinimumChainWork. The floor is far below any genuine
+ * snapshot and is not pinned to the checkpoint table. These cases pin the
+ * predicate; test_snapshot_fc_binding.c drives the gate that uses it. */
 
 #include "test/test_core.h"
 

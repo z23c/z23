@@ -1,8 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * FlyClient probabilistic chain verification.
- * Enables a fresh node to verify 3M+ blocks of PoW by sampling
- * O(log n) random headers with MMB inclusion proofs. */
+ * FlyClient sample selection and MMB inclusion proof checks. On their own these
+ * prove the samples hang together under the offered root, nothing about work;
+ * see snapsync_verify_flyclient for the binding to validated headers. */
 
 #include "net/flyclient.h"
 #include "core/uint256.h"
@@ -14,10 +14,9 @@
 #include <stdio.h>
 #include <math.h>
 
-/* Lightweight PoW check: block_hash < target(nBits).
- * Unlike CheckProofOfWork(), does NOT check against powLimit — that's
- * a consensus rule for miners, not relevant for FlyClient verification.
- * FlyClient only needs: "this hash was hard to produce." */
+/* Self-consistency filter: block_hash <= target(nBits). This is not a proof of
+ * work. Both values are the prover's claims and no header is hashed here, so a
+ * prover can simply pick a value under the target. */
 static bool fc_check_pow(const uint8_t block_hash[32], uint32_t nBits)
 {
     bool fNegative = false, fOverflow = false;
@@ -253,11 +252,11 @@ bool fc_verify_response(const struct fc_response *resp,
             continue;
         }
 
-        /* PoW verification: block_hash must meet the nBits difficulty
-         * target.  Full Equihash solution verification requires the
-         * complete header (with nonce + 1344-byte solution), which is
-         * too large for every sample.  But checking block_hash < target
-         * is sufficient: forging such a hash IS the proof of work. */
+        /* Self-consistency only: block_hash must meet the nBits target.
+         * Both come from the prover and no header is hashed here, so a
+         * prover can pick such a hash; this proves no work. The work comes
+         * from snapsync_verify_flyclient, which requires each sample to equal
+         * a header this node validated (Equihash included). */
         {
             if (!fc_check_pow(s->leaf.block_hash, s->leaf.nBits)) {
                 event_emitf(EV_FC_SAMPLE_VERIFIED, 0,

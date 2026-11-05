@@ -1,8 +1,10 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * FlyClient — probabilistic chain verification for fast sync.
- * A fresh ZCL23 node can verify 3M+ blocks of PoW by sampling
- * O(log n) random headers and checking their MMB inclusion proofs.
+ * FlyClient — sampled proofs of a peer's advertised header history.
+ * A leaf's hash and nBits are the prover's claims and ZClassic headers commit
+ * no MMB root, so by themselves these proofs show only that the samples hang
+ * together under the offered root. snapsync_verify_flyclient gets its assurance
+ * by comparing each sample with a header this node already validated.
  *
  * This is a ZCL23 overlay protocol — no consensus changes needed.
  * Legacy zclassicd nodes never see FlyClient messages.
@@ -12,7 +14,7 @@
  *        ← zsnapshot (height, utxo_root, mmb_root)
  *        → zfcchallenge (random_seed)
  *        ← zfcproofs (N headers + MMB proofs)
- *        [verify each: PoW valid? proof valid?]
+ *        [verify each: proof valid? equals our header at that height?]
  *        → zsnapreq — if all verified
  */
 
@@ -25,14 +27,11 @@
 #include <stdbool.h>
 #include <string.h>
 
-/* Security parameter: number of random samples.
- * Under the FlyClient weighted distribution, an adversary with <50%
- * hashpower must forge PoW for each sampled block independently.
- * With k samples and difficulty d, forgery probability ≤ (1/d)^k.
- * ZClassic minimum difficulty ≈ 2^-13; 50 samples gives security:
- *   50 * 13 = 650 bits against full-difficulty chain
- *   50 * 3  = 150 bits against adversary with 1/8 hashpower
- * This exceeds the 150-bit target for all realistic adversaries. */
+/* Number of random samples, weighted toward recent blocks. A lying prover must
+ * have every sampled height land on a leaf equal to the local header there;
+ * a peer with no hashpower cannot supply an alternative header, because the
+ * comparison is with headers validated here, not with a target it can satisfy
+ * by choosing a hash. */
 #define FC_NUM_SAMPLES  50
 #define FC_MAX_SAMPLES  64
 

@@ -3,8 +3,8 @@
  * Snapshot Sync Service — high-performance UTXO snapshot sync.
  *
  * Two-step cryptographic verification:
- *   FlyClient — 50 random block samples with MMB proofs
- *               + PoW target checks (≥150-bit forgery security)
+ *   FlyClient — FC_NUM_SAMPLES samples with MMB proofs, each bound to a
+ *               header this node validated
  *   SHA3-256 over all UTXOs in canonical order
  *
  * Uses ActiveRecord models, shared node_db connection with turbo

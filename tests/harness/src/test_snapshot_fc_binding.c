@@ -37,10 +37,6 @@
 #include <stdint.h>
 #include <string.h>
 
-#ifndef SNAPSYNC_FLYCLIENT_UNVERIFIABLE_ERROR_CODE
-#define SNAPSYNC_FLYCLIENT_UNVERIFIABLE_ERROR_CODE (-13)
-#endif
-
 void mp_zs_on_fc_proofs(struct msg_processor *mp, struct p2p_node *node,
                         struct byte_stream *s);
 
@@ -200,7 +196,7 @@ static void fcb_teardown(void)
 
 static struct zcl_result fcb_verify(void)
 {
-    return snapsync_verify_flyclient(&g.svc, &g.resp);
+    return snapsync_verify_flyclient(&g.svc, &g.ms, &g.resp);
 }
 
 /* A height the challenge samples other than the anchor; nth counts them. */
@@ -423,6 +419,20 @@ static int fcb_case_local_ancestor_missing(void)
     return failures;
 }
 
+static int fcb_case_no_main_state(void)
+{
+    int failures = 0;
+
+    TEST("fc binding: no main state fails closed and starts nothing") {
+        ASSERT(fcb_setup(FCB_WORK_ABOVE_FLOOR));
+        ASSERT(!snapsync_verify_flyclient(&g.svc, NULL, &g.resp).ok);
+        ASSERT(g.svc.state == SNAPSYNC_NEGOTIATING);
+        PASS();
+    } _test_next:;
+    fcb_teardown();
+    return failures;
+}
+
 static int fcb_case_local_anchor_below_floor(void)
 {
     int failures = 0;
@@ -548,6 +558,7 @@ int test_snapshot_fc_binding(void)
     failures += fcb_case_forgery_outranks_work_difference();
     failures += fcb_case_local_ancestor_missing();
     failures += fcb_case_local_anchor_below_floor();
+    failures += fcb_case_no_main_state();
     failures += fcb_case_route_scores_forgery();
     failures += fcb_case_route_spares_honest_peer();
 

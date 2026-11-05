@@ -142,7 +142,7 @@ flowchart TD
         direction TB
         SYNC[getheaders] --> HEADERS[Download headers<br/>EV_HEADERS_RECEIVED]
         HEADERS --> FLYCLIENT{FlyClient<br/>available?}
-        FLYCLIENT -->|yes| FC_VERIFY[50 random samples<br/>MMB inclusion proofs<br/>PoW verify]
+        FLYCLIENT -->|yes| FC_VERIFY[50 random samples<br/>MMB inclusion proofs<br/>match local headers]
         FLYCLIENT -->|no| FULL_HEADERS[Full header chain]
         FC_VERIFY --> SNAPSHOT{Strict v2 snapshot peer<br/>available?}
         FULL_HEADERS --> GETBLOCKS

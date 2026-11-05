@@ -515,6 +515,21 @@ void mp_zs_on_fc_challenge(struct msg_processor *mp,
     }
 }
 
+/* The proof shows no fault of the peer but could not be checked against our
+ * headers, and the service is back at idle. Release the peer too:
+ * msg_should_ignore_snapshot_offer drops every offer from one still marked as
+ * receiving. */
+static void mp_zs_fc_stand_down(struct p2p_node *node,
+                                const struct zcl_result *verified)
+{
+    LOG_INFO("net", "Peer %s: FlyClient offer not checkable yet (%s) - not a "
+             "peer fault, continuing normal P2P sync",
+             node->addr_name, verified->message);
+    if (node->state == PEER_SNAPSHOT_RECEIVING)
+        peer_set_state_checked((uint32_t)node->id, &node->state, PEER_ACTIVE,
+                               "snapshot offer not checkable");
+}
+
 /* Route: zfcproofs → snapsync_verify_flyclient */
 void mp_zs_on_fc_proofs(struct msg_processor *mp,
                                struct p2p_node *node,
@@ -526,11 +541,11 @@ void mp_zs_on_fc_proofs(struct msg_processor *mp,
             "truncated FlyClient proofs");
     } else {
         struct snapsync_verify_result verify_result = {0};
+        struct zcl_result verified = ZCL_ERR(-1, "no snapshot sync service");
         struct snapshot_sync_service *svc = msg_snapshot_sync(mp);
         if (svc) {
-            snapsync_build_verify_result(
-                &verify_result,
-                snapsync_verify_flyclient(svc, &resp).ok);
+            verified = snapsync_verify_flyclient(svc, mp->main_state, &resp);
+            snapsync_build_verify_result(&verify_result, verified.ok);
         }
         if (verify_result.should_send &&
             verify_result.action == SNAPSYNC_FOLLOWUP_SEND_SNAPSHOT_REQ) {
@@ -538,6 +553,8 @@ void mp_zs_on_fc_proofs(struct msg_processor *mp,
             int our_h = active_chain_height(
                 &mp->main_state->chain_active);
             mp_zs_push_snapshot_request(mp, node, our_h);
+        } else if (verified.code == SNAPSYNC_FLYCLIENT_UNVERIFIABLE_ERROR_CODE) {
+            mp_zs_fc_stand_down(node, &verified);
         } else {
             peer_scoring_record(mp->net_mgr, node, PEER_OFFENCE_INVALID_PROOF,
                 "FlyClient chain verification failed");

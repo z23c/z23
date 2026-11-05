@@ -4,15 +4,17 @@
  *
  * Service actions for P2P snapshot protocol:
  *   handle_offer     — validate + accept incoming snapshot offer
- *   handle_fc_proofs — verify FlyClient MMB proofs (PoW chain)
+ *   handle_fc_proofs — verify FlyClient MMB proofs against local headers
  *   handle_data      — apply UTXO chunk (batch commit every 100K)
  *   handle_end       — finalize + SHA3 verify; runtime activation contained
  *   validate_serve_request — check PoW + rate limit for serving
  *
  * Security: Two-phase verification
- *   Phase 1 (pre-download): FlyClient — 50 random block samples
- *     with MMB inclusion proofs + PoW target checks. Proves the
- *     peer's chain has valid cumulative work (≥150-bit security).
+ *   Phase 1 (pre-download): FlyClient — FC_NUM_SAMPLES samples from
+ *     our seed, with MMB inclusion proofs, each matching a header this
+ *     node already validated. Proves the offered anchor, its work and
+ *     the length lie on our own header chain; the UTXO payload stays
+ *     unbound, because headers commit no UTXO or MMB root.
  *   Phase 2 (post-download): SHA3-256 over all UTXOs in canonical
  *     order. Proves data integrity (hash matches offered root).
  *
@@ -48,6 +50,12 @@ struct block_index;
 #define SNAPSYNC_ACTIVATION_CONTAINED_ERROR_CODE (-12)
 #define SNAPSYNC_ACTIVATION_CONTAINED_BLOCKER_ID \
     "snapshot_sync.activation_unified_installer_required"
+
+/* A FlyClient proof that shows no fault of the peer but cannot be checked here:
+ * our best header has not reached the offered anchor, the anchor is on a chain
+ * we have not seen, or only the uncommitted chain_work differs. The service has
+ * returned to idle; the route records no offence. */
+#define SNAPSYNC_FLYCLIENT_UNVERIFIABLE_ERROR_CODE (-13)
 
 enum snapsync_followup_action {
     SNAPSYNC_FOLLOWUP_NONE = 0,
@@ -295,10 +303,16 @@ struct zcl_result snapsync_prepare_serve_step(struct snapsync_serve_step *step,
                                               int64_t buf_size);
 
 /* Action: verify FlyClient proofs from peer.
- * Checks 20 random block samples with MMB inclusion proofs
- * and PoW target verification. If ALL pass, sets fc_verified=true.
+ * Checks every sample's MMB inclusion proof, then binds the offered anchor and
+ * every sampled leaf to the headers under ms->pindex_best_header, which this
+ * node validated. If ALL pass, sets fc_verified=true. ms is not const: the walk
+ * takes ms->cs_main.
+ * Returns SNAPSYNC_FLYCLIENT_UNVERIFIABLE_ERROR_CODE, with the service back at
+ * idle, when the proof shows no fault but cannot be checked; any other failure
+ * is an offence and leaves the service negotiating.
  * Router should only send zsnapreq after this returns ok. */
 struct zcl_result snapsync_verify_flyclient(struct snapshot_sync_service *svc,
+                               struct main_state *ms,
                                const struct fc_response *resp);
 
 /* Action: apply a chunk of UTXO data from wire.

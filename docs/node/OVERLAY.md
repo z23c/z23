@@ -79,8 +79,13 @@ locally validated; see [`SYNC.md`](SYNC.md).
    `engine/composition/src/boot_snapshot_offer.c`, `core/modules/net/src/fast_sync.c`.
 2. **FlyClient proofs.** Peers challenge header history (`zsnapshot` →
    `zfcchallenge` → `zfcproofs` → `zsnapreq`). Sample selection and MMB
-   nodes are SHA3-256. This proves advertised header chainwork, not a UTXO
-   root. Source: `core/modules/net/src/flyclient.c`, `core/modules/chain/src/mmb.c`.
+   nodes are SHA3-256. The receiver requires the anchor and every sample to
+   equal headers it already validated, so this proves the offer sits on the
+   receiver's own header chain, not a UTXO root; headers commit no MMB or UTXO
+   root. A receiver whose headers are behind the anchor cannot check the offer
+   and returns to idle without blaming the peer. Source:
+   `core/modules/net/src/flyclient.c`, `engine/services/src/snapshot_verify.c`,
+   `core/modules/chain/src/mmb.c`.
 3. **UTXO snapshot (opt-in).** Export takes DB read locks, so it stays
    behind `ZCL_PUBLISH_FASTSYNC_ON_BOOT`. Chunk hashes are SHA3-256.
    Activation remains contained until the unified installer can bind
