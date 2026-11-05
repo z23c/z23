@@ -11270,7 +11270,7 @@ FUZZ_CFLAGS = -std=c23 -O1 -g -Wall -Wextra \
 	$(MIND_INCLUDES) \
 	-Itests/harness/include -Ivendor/x11/include \
 	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -D_DEFAULT_SOURCE \
-	-DZCL_FUZZ_QUIET_LOG_MACROS -Ivendor/include \
+	-DZCL_FUZZ_QUIET_LOG_MACROS -DZCL_FUZZ_SEAMS -Ivendor/include \
 	-fsanitize=fuzzer,address,undefined \
 	-fno-sanitize=alignment $(ZCL_FUZZ_EXTRA_CFLAGS)
 FUZZ_LIBS = $(TOR_LIBS) $(LIBS)
@@ -11283,7 +11283,8 @@ FUZZ_TARGETS = $(BIN_DIR)/fuzz_block $(BIN_DIR)/fuzz_script $(BIN_DIR)/fuzz_p2p 
 # day its rule lands" scrapes; a `$(patsubst ...)` spelling blinds them.
 FUZZ_TARGET_NAMES = $(notdir $(FUZZ_TARGETS))
 FUZZ_CI_TIME ?= 60
-FUZZ_CI_WALL_TIME ?= 120
+# "auto" lets run_fuzz_ci.sh set the wall limit to the slot plus a margin.
+FUZZ_CI_WALL_TIME ?= auto
 
 # Per-TU object tree with -MD -MP depfiles — the same header-invalidation
 # mechanism every other profile in this Makefile uses (see the -include block

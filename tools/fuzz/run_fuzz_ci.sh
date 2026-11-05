@@ -44,6 +44,12 @@
 set -u
 
 SLOT="$1"; WALL="$2"; FLOOR="$3"; PRINT_FUNCS="$4"; LEAKS="$5"; shift 5
+# An unset wall limit is the slot plus a margin, so a healthy run that uses its
+# whole slot is not killed at the end of it (exit 124). An explicit number is
+# used as given, and a real hang still hits the same timeout.
+if [ -z "$WALL" ] || [ "$WALL" = "auto" ]; then
+    WALL=$((SLOT + 60))
+fi
 TARGETS=("$@")
 if [ "${#TARGETS[@]}" -eq 0 ]; then
     echo "fuzz-ci: FAIL: no targets supplied" >&2
