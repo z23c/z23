@@ -116,6 +116,47 @@ static void gate_head(const uint8_t root[32], struct zcl_fleet_head *out,
     free(head);
 }
 
+/* A carried head takes the path a pasted one takes, so the seal, the root, the
+ * pin and the sequence rule are the store's and there is one head on this box.
+ * Only a refusal the store names as final is final; anything else is this box's
+ * own state, which can clear. */
+static enum zcl_fleet_head_offer gate_head_offer(const char *line,
+                                                 const uint8_t root[32],
+                                                 void *ctx)
+{
+    struct fleet_head *head = zcl_malloc(sizeof *head, "fleet-gate-offer");
+    const char *why = NULL;
+    bool replaced = false;
+    (void)ctx;
+    if (!head)
+        return ZCL_FLEET_HEAD_OFFER_RETRY;
+    bool ok = fleet_head_import(line, root, false, head, &replaced, &why);
+    free(head);
+    if (ok)
+        return replaced ? ZCL_FLEET_HEAD_OFFER_INSTALLED
+                        : ZCL_FLEET_HEAD_OFFER_HELD;
+    if (why && strcmp(why, FLEET_ENROL_WHY_HEAD_STALE) == 0)
+        return ZCL_FLEET_HEAD_OFFER_STALE;
+    if (why && (strcmp(why, FLEET_ENROL_WHY_ARGUMENTS) == 0 ||
+                strcmp(why, FLEET_ENROL_WHY_ROSTER_LINE_UNSEALED) == 0 ||
+                strcmp(why, FLEET_ENROL_WHY_ROOT_CHANGED) == 0 ||
+                strcmp(why, FLEET_ENROL_WHY_HEAD_CONFLICT) == 0))
+        return ZCL_FLEET_HEAD_OFFER_REFUSED;
+    return ZCL_FLEET_HEAD_OFFER_RETRY;
+}
+
+static enum zcl_fleet_head_line gate_head_line(const uint8_t root[32],
+                                               char *out, size_t cap, void *ctx)
+{
+    (void)ctx;
+    switch (fleet_head_line_load(root, out, cap)) {
+    case FLEET_HEAD_LINE_LOADED: return ZCL_FLEET_HEAD_LINE_OK;
+    case FLEET_HEAD_LINE_TOO_LONG: return ZCL_FLEET_HEAD_LINE_TOO_LONG;
+    case FLEET_HEAD_LINE_NONE: break;
+    }
+    return ZCL_FLEET_HEAD_LINE_NONE;
+}
+
 static bool gate_each_line(void (*visit)(const char *line, void *user),
                            void *user, void *ctx)
 {
@@ -185,6 +226,8 @@ static const struct zcl_fleet_roster_provider g_provider = {
     .root = gate_root,
     .verify = gate_verify,
     .head = gate_head,
+    .head_offer = gate_head_offer,
+    .head_line = gate_head_line,
     .each_line = gate_each_line,
     .endpoint = gate_endpoint,
     .machine_name = gate_machine_name,

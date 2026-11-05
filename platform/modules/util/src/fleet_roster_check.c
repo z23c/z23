@@ -89,6 +89,27 @@ void zcl_fleet_roster_head(const uint8_t root[32], struct zcl_fleet_head *out)
     g_provider.head(root, out, g_provider.ctx);
 }
 
+enum zcl_fleet_head_offer zcl_fleet_roster_head_offer(const char *line,
+                                                      const uint8_t root[32])
+{
+    if (!line || !root || !atomic_load_explicit(&g_ready, memory_order_acquire) ||
+        !g_provider.head_offer)
+        return ZCL_FLEET_HEAD_OFFER_REFUSED;
+    return g_provider.head_offer(line, root, g_provider.ctx);
+}
+
+enum zcl_fleet_head_line zcl_fleet_roster_head_line(const uint8_t root[32],
+                                                    char *out, size_t cap)
+{
+    if (out && cap)
+        out[0] = '\0';
+    if (!root || !out || !cap ||
+        !atomic_load_explicit(&g_ready, memory_order_acquire) ||
+        !g_provider.head_line)
+        return ZCL_FLEET_HEAD_LINE_NONE;
+    return g_provider.head_line(root, out, cap, g_provider.ctx);
+}
+
 bool zcl_fleet_roster_each_line(void (*visit)(const char *line, void *user),
                                 void *user)
 {

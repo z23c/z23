@@ -80,6 +80,8 @@ static _Atomic uint64_t g_verifies;
 static _Atomic uint64_t g_rebuilds;
 static _Atomic uint64_t g_armed_events;
 static _Atomic uint64_t g_lapse_events;
+static _Atomic uint64_t g_heads_installed;
+static _Atomic uint64_t g_heads_refused;
 #ifdef ZCL_TESTING
 static _Atomic int g_test_build_delay_ms;
 #endif
@@ -141,6 +143,13 @@ bool boot_fleet_roster_is_row(const struct fleet_board_post *post)
     return post && post->scope == FLEET_BOARD_SCOPE_FLEET &&
            post->kind == FLEET_BOARD_KIND_NOTE &&
            strcmp(post->agent, BOOT_FLEET_ROSTER_AGENT) == 0;
+}
+
+bool boot_fleet_roster_is_head_row(const struct fleet_board_post *post)
+{
+    return post && post->scope == FLEET_BOARD_SCOPE_FLEET &&
+           post->kind == FLEET_BOARD_KIND_NOTE &&
+           strcmp(post->agent, BOOT_FLEET_ROSTER_HEAD_AGENT) == 0;
 }
 
 void boot_fleet_roster_invalidate(void)
@@ -764,6 +773,72 @@ static enum fleet_board_result roster_row_screen(
     return FLEET_BOARD_ERR_SIGNATURE;
 }
 
+/* What this box's head store said, as the board's refusal. */
+static enum fleet_board_result head_offer_result(enum zcl_fleet_head_offer offer)
+{
+    switch (offer) {
+    case ZCL_FLEET_HEAD_OFFER_INSTALLED:
+        atomic_fetch_add_explicit(&g_heads_installed, 1, memory_order_relaxed);
+        boot_fleet_roster_invalidate();
+        LOG_INFO(ROSTER_LOG, "a newer roster head arrived on the board and is "
+                 "now this box's head");
+        return FLEET_BOARD_OK;
+    case ZCL_FLEET_HEAD_OFFER_HELD:
+        return FLEET_BOARD_OK;
+    case ZCL_FLEET_HEAD_OFFER_STALE:
+        return FLEET_BOARD_ERR_EXPIRED; /* an older head is stale, not wrong */
+    case ZCL_FLEET_HEAD_OFFER_RETRY:
+        return FLEET_BOARD_ERR_BUSY;
+    case ZCL_FLEET_HEAD_OFFER_REFUSED:
+        break;
+    }
+    return FLEET_BOARD_ERR_SIGNATURE;
+}
+
+/* A root this box can use, as far as a head row goes. SCOPE when there is none
+ * or the gate is off: such a box is outside the fleet, and a refusal it could
+ * retry would keep a sweep walking the peer's whole store for a row it will
+ * never take; a later join finds the head at the next republish, or first on
+ * the roster lane. A root the chain refuses can clear, as for a roster row. */
+static enum fleet_board_result head_root_read(struct node_db *ndb,
+                                              struct root_view *rv)
+{
+    bool disabled = false;
+    enum snap_state have_root = roster_root_view(ndb, rv, &disabled);
+    if (have_root == SNAP_UNARMED)
+        return FLEET_BOARD_ERR_SCOPE;
+    if (have_root != SNAP_READY || rv->state == ZCL_FLEET_ROOT_ROTATED ||
+        rv->state == ZCL_FLEET_ROOT_REVOKED ||
+        rv->state == ZCL_FLEET_ROOT_UNREADABLE) {
+        atomic_fetch_add_explicit(&g_unverifiable, 1, memory_order_relaxed);
+        return FLEET_BOARD_ERR_ROLE;
+    }
+    return FLEET_BOARD_OK;
+}
+
+/* Judged before the board's id check, on purpose: a row held from before this
+ * box could apply it (an upgrade) is applied the next time it is offered, and
+ * offering the head already held changes nothing. */
+static enum fleet_board_result head_row_screen(
+    struct node_db *ndb, const struct fleet_board_post *post)
+{
+    struct root_view rv;
+    if (!ndb || !ndb->open)
+        return FLEET_BOARD_ERR_ARGS;
+    enum fleet_board_result r = FLEET_BOARD_ERR_SIGNATURE;
+    if (post->text_len > 0 && post->text_len < ZCL_FLEET_HEAD_LINE_MAX &&
+        strlen(post->text) == post->text_len) {
+        r = head_root_read(ndb, &rv);
+        if (r == FLEET_BOARD_OK)
+            r = head_offer_result(
+                zcl_fleet_roster_head_offer(post->text, rv.root));
+        memset(rv.root, 0, sizeof rv.root);
+    }
+    if (r != FLEET_BOARD_OK)
+        atomic_fetch_add_explicit(&g_heads_refused, 1, memory_order_relaxed);
+    return r;
+}
+
 enum fleet_board_result boot_fleet_roster_screen_post(
     struct node_db *ndb, const struct fleet_board_post *post, int64_t now)
 {
@@ -773,6 +848,8 @@ enum fleet_board_result boot_fleet_roster_screen_post(
         return FLEET_BOARD_OK;
     if (boot_fleet_roster_is_row(post))
         return roster_row_screen(ndb, post, now);
+    if (boot_fleet_roster_is_head_row(post))
+        return head_row_screen(ndb, post);
     return boot_fleet_roster_admits_peer(ndb, post->host_pubkey, now)
                ? FLEET_BOARD_OK : FLEET_BOARD_ERR_ROLE;
 }
@@ -799,6 +876,10 @@ void boot_fleet_roster_counts(struct boot_fleet_roster_counts *out)
                                              memory_order_relaxed);
     out->lapse_events = atomic_load_explicit(&g_lapse_events,
                                              memory_order_relaxed);
+    out->heads_installed = atomic_load_explicit(&g_heads_installed,
+                                                memory_order_relaxed);
+    out->heads_refused = atomic_load_explicit(&g_heads_refused,
+                                              memory_order_relaxed);
 }
 
 /* ── the manager's half: publish the local roster onto the board ─────── */
@@ -835,10 +916,11 @@ static bool pub_already_carried(const struct db_fleet_board_post *notes, int n,
     return false;
 }
 
-/* Write one roster note unless a young live copy of this exact line is
+/* Write one note under `agent` unless a young live copy of this exact line is
  * already on the board. True when a row was written. */
 static bool pub_one(const struct db_fleet_board_post *notes,
-                    int n_notes, const char *line, int64_t now)
+                    int n_notes, const char *agent, const char *line,
+                    int64_t now)
 {
     size_t len = strlen(line);
     if (len == 0 || len >= FLEET_BOARD_TEXT_MAX) {
@@ -857,8 +939,7 @@ static bool pub_one(const struct db_fleet_board_post *notes,
     post->scope = FLEET_BOARD_SCOPE_FLEET;
     post->created_at = (uint64_t)now;
     post->ttl = FLEET_BOARD_TTL_MAX;
-    (void)snprintf(post->agent, sizeof post->agent, "%s",
-                   BOOT_FLEET_ROSTER_AGENT);
+    (void)snprintf(post->agent, sizeof post->agent, "%s", agent);
     post->text_len = (uint32_t)len;
     memcpy(post->text, line, len + 1u);
     enum fleet_board_result r = boot_fleet_board_publish(post, now);
@@ -870,19 +951,24 @@ static bool pub_one(const struct db_fleet_board_post *notes,
     return r == FLEET_BOARD_OK;
 }
 
-/* The roster notes this store already holds, newest first. */
-static int pub_held(struct node_db *ndb, int64_t now,
-                    struct db_fleet_board_post *rows)
+/* The notes under `agent` this store already holds, newest first. */
+static int pub_held(struct node_db *ndb, const char *agent, int64_t now,
+                    struct db_fleet_board_post *rows, size_t cap)
 {
     struct fleet_board_filter filter;
     memset(&filter, 0, sizeof filter);
     filter.kind = FLEET_BOARD_KIND_NOTE;
     filter.scope_set = true;
     filter.scope = FLEET_BOARD_SCOPE_FLEET;
-    (void)snprintf(filter.agent, sizeof filter.agent, "%s",
-                   BOOT_FLEET_ROSTER_AGENT);
-    return db_fleet_board_list(ndb, &filter, now, rows,
-                               BOOT_FLEET_ROSTER_SCAN_ROWS);
+    (void)snprintf(filter.agent, sizeof filter.agent, "%s", agent);
+    return db_fleet_board_list(ndb, &filter, now, rows, cap);
+}
+
+bool boot_fleet_roster_newest_head_row(struct node_db *ndb, int64_t now,
+                                       struct db_fleet_board_post *out)
+{
+    return ndb && out &&
+           pub_held(ndb, BOOT_FLEET_ROSTER_HEAD_AGENT, now, out, 1) == 1;
 }
 
 
@@ -907,14 +993,58 @@ static size_t pub_pass(struct node_db *ndb, const struct root_view *rv,
     size_t wrote = 0;
     if (!held)
         return 0;
-    int n = pub_held(ndb, now, held);
+    int n = pub_held(ndb, BOOT_FLEET_ROSTER_AGENT, now, held,
+                     BOOT_FLEET_ROSTER_SCAN_ROWS);
     for (size_t i = 0; i < p->n && wrote < BOOT_FLEET_ROSTER_PUBLISH_PER_PASS;
          i++) {
         if (pub_line_ok(p->lines[i], rv) &&
-            pub_one(held, n, p->lines[i], now))
+            pub_one(held, n, BOOT_FLEET_ROSTER_AGENT, p->lines[i], now))
             wrote++;
     }
     free(held);
+    return wrote;
+}
+
+/* Write `line` unless one of the newest head rows is a young copy of it. Heads
+ * come rarely, so the newest few are enough; missing an older copy costs one
+ * extra row. */
+static bool pub_head_row(struct node_db *ndb, const char *line, int64_t now)
+{
+    enum { HEAD_HELD_ROWS = 16 };
+    struct db_fleet_board_post *held =
+        zcl_calloc(HEAD_HELD_ROWS, sizeof *held, "fleet_head_held");
+    if (!held)
+        return false;
+    int n = pub_held(ndb, BOOT_FLEET_ROSTER_HEAD_AGENT, now, held,
+                     HEAD_HELD_ROWS);
+    bool wrote = pub_one(held, n, BOOT_FLEET_ROSTER_HEAD_AGENT, line, now);
+    free(held);
+    return wrote;
+}
+
+/* The head this box holds, as one row. Copies under older sequences stay until
+ * their TTL; they are refused everywhere a newer head is held. */
+static size_t pub_head(struct node_db *ndb, const struct root_view *rv,
+                       int64_t now)
+{
+    char *line = zcl_malloc(ZCL_FLEET_HEAD_LINE_MAX, "fleet_head_line");
+    uint64_t skipped = 0;
+    size_t wrote = 0;
+    if (!line)
+        return 0;
+    enum zcl_fleet_head_line state =
+        zcl_fleet_roster_head_line(rv->root, line, ZCL_FLEET_HEAD_LINE_MAX);
+    if (state == ZCL_FLEET_HEAD_LINE_OK && pub_head_row(ndb, line, now))
+        wrote = 1;
+    if (state == ZCL_FLEET_HEAD_LINE_TOO_LONG &&
+        boot_fleet_roster_log_due(BOOT_FLEET_ROSTER_LOG_HEAD_UNCARRIED, now,
+                                  &skipped))
+        LOG_WARN(ROSTER_LOG, "fleet_head_too_large: the roster head is too long "
+                 "for one board row (%u characters), so it does not reach other "
+                 "boxes by carriage: paste it into `fleet import` on each (%llu "
+                 "more since the last line)", (unsigned)ZCL_FLEET_HEAD_LINE_MAX,
+                 (unsigned long long)skipped);
+    free(line);
     return wrote;
 }
 
@@ -931,12 +1061,12 @@ size_t boot_fleet_roster_publish(struct node_db *ndb, int64_t now)
         return 0;
     if (roster_root_read(ndb, &rv) != SNAP_READY || !rv.manager)
         return 0;
+    /* The head first, so a box reading this pass in order has it first. */
+    wrote = pub_head(ndb, &rv, now);
     p.lines = zcl_calloc(BOOT_FLEET_ROSTER_MAX, ZCL_FLEET_ROSTER_LINE_MAX,
                          "fleet_roster_lines");
-    if (!p.lines)
-        return 0;
-    if (zcl_fleet_roster_each_line(pub_collect, &p))
-        wrote = pub_pass(ndb, &rv, &p, now);
+    if (p.lines && zcl_fleet_roster_each_line(pub_collect, &p))
+        wrote += pub_pass(ndb, &rv, &p, now);
     free(p.lines);
     memset(rv.root, 0, sizeof rv.root);
     if (wrote)
@@ -1090,6 +1220,8 @@ void boot_fleet_roster_test_reset(void)
     atomic_store_explicit(&g_armed_events, 0, memory_order_relaxed);
     atomic_store_explicit(&g_test_build_delay_ms, 0, memory_order_relaxed);
     atomic_store_explicit(&g_lapse_events, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_heads_installed, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_heads_refused, 0, memory_order_relaxed);
     for (int i = 0; i < (int)BOOT_FLEET_ROSTER_LOG_KINDS; i++) {
         atomic_store_explicit(&g_log_last[i], 0, memory_order_relaxed);
         atomic_store_explicit(&g_log_skipped[i], 0, memory_order_relaxed);

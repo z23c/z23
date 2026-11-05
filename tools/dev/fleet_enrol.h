@@ -517,6 +517,18 @@ enum fleet_head_state fleet_head_load_existing(
     const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES],
     struct fleet_head *out, const char **why);
 
+/* The exact text of the head fleet_head_load would trust, for the box that
+ * publishes it. NONE covers an absent head and one that cannot be trusted:
+ * a box never publishes what it would not admit under. */
+enum fleet_head_line_state {
+    FLEET_HEAD_LINE_NONE = 0,
+    FLEET_HEAD_LINE_LOADED,
+    FLEET_HEAD_LINE_TOO_LONG,
+};
+enum fleet_head_line_state fleet_head_line_load(
+    const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES], char *out,
+    size_t cap);
+
 /* Import one head line sealed by `operator_pubkey`, the key this box trusts.
  * Refusals, by name: roster_line_not_operator_sealed (not a valid seal),
  * fleet_root_changed (sealed by a key this box does not trust, or the

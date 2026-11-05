@@ -72,6 +72,14 @@
 struct node_db;
 
 #define BOOT_FLEET_ROSTER_AGENT "fleet-roster"
+/* A HEAD ROW is the operator-sealed `fleet-head1:` line `fleet roster revoke`
+ * writes, carried unchanged as a fleet-scope note under this agent: the same
+ * shape as a roster row, under its own agent so it never takes a slot on the
+ * roster page and an older node stores it as an ordinary note. It adds no trust
+ * root and no second copy: on the way in it goes through the one path a pasted
+ * head takes (fleet_head_import), which holds the seal, the root, the pin and
+ * the sequence rule. The row is only how the bytes travel. */
+#define BOOT_FLEET_ROSTER_HEAD_AGENT "fleet-head"
 
 enum {
     /* Members one roster holds: the relay-port range the enrolment
@@ -125,6 +133,15 @@ enum boot_fleet_roster_verdict boot_fleet_roster_check(
  * is the roster agent. Shape only; the seal decides. */
 bool boot_fleet_roster_is_row(const struct fleet_board_post *post);
 
+/* True when `post` is a head row by shape. Shape only; the seal decides. */
+bool boot_fleet_roster_is_head_row(const struct fleet_board_post *post);
+
+/* The newest live head row this store holds, which is the highest sequence it
+ * took: an older one is refused on the way in. False when it holds none. */
+struct db_fleet_board_post;
+bool boot_fleet_roster_newest_head_row(struct node_db *ndb, int64_t now,
+                                       struct db_fleet_board_post *out);
+
 /* May this node accept `post` into its store? The one question every ingest
  * path asks (mesh stream, P2P POST, local publish), answered with the
  * refusal to use.
@@ -143,6 +160,19 @@ bool boot_fleet_roster_is_row(const struct fleet_board_post *post);
  *                           ordinary note, as before this step (it gates
  *                           nothing, and a scan verifies the row if a root
  *                           appears later).
+ *   a head row              Offered to this box's head store, so a row this
+ *                           returns OK for is already in force whether or not
+ *                           the store then keeps the row. OK: a higher sequence
+ *                           (installed) or the head already held. Lower
+ *                           sequence: FLEET_BOARD_ERR_EXPIRED, stale and final.
+ *                           Unsealed, another root's or two heads at one
+ *                           sequence: FLEET_BOARD_ERR_SIGNATURE, final. No root
+ *                           or a gate switched off: FLEET_BOARD_ERR_SCOPE,
+ *                           final, nothing installed and nothing stored. A root
+ *                           the chain refuses or that cannot be read:
+ *                           FLEET_BOARD_ERR_ROLE, and this box's own head state
+ *                           unreadable: FLEET_BOARD_ERR_BUSY; both can clear.
+ *                           No refusal changes a head this box holds.
  *   any other fleet post    FLEET_BOARD_OK from a roster member or while
  *                           UNARMED; FLEET_BOARD_ERR_ROLE otherwise, and
  *                           never while the roster is UNVERIFIABLE. */
@@ -179,7 +209,12 @@ void boot_fleet_roster_invalidate(void);
 
 /* The manager's half: publish every sealed line of this box's own machine
  * roster onto the board as a roster row, if the board does not already hold
- * that exact line. Only the box whose own key IS the fleet root publishes.
+ * that exact line, and the head this box holds as a head row on the same terms:
+ * a young live copy is left alone and an old one is written again, so a late
+ * joiner finds it. One head row per new sequence plus one per
+ * BOOT_FLEET_ROSTER_REPUBLISH_S, each living FLEET_BOARD_TTL_MAX under the
+ * per-key quota. A head too long for one row is refused by name and still moves
+ * by paste. Only the box whose own key IS the fleet root publishes.
  * Returns how many rows were written (at most one pass's worth). */
 size_t boot_fleet_roster_publish(struct node_db *ndb, int64_t now);
 
@@ -229,6 +264,7 @@ enum boot_fleet_roster_log_kind {
     BOOT_FLEET_ROSTER_LOG_POST_DROPPED = 0,
     BOOT_FLEET_ROSTER_LOG_PEER_REFUSED,
     BOOT_FLEET_ROSTER_LOG_DEFERRED,
+    BOOT_FLEET_ROSTER_LOG_HEAD_UNCARRIED,
     BOOT_FLEET_ROSTER_LOG_KINDS
 };
 bool boot_fleet_roster_log_due(enum boot_fleet_roster_log_kind kind,
@@ -243,6 +279,8 @@ struct boot_fleet_roster_counts {
     uint64_t rebuilds;         /* cached rosters rebuilt from the store */
     uint64_t armed_events;     /* UNARMED to armed transitions logged */
     uint64_t lapse_events;     /* armed to UNARMED transitions logged */
+    uint64_t heads_installed;  /* head rows that became this box's head */
+    uint64_t heads_refused;    /* head rows refused, any reason */
 };
 void boot_fleet_roster_counts(struct boot_fleet_roster_counts *out);
 

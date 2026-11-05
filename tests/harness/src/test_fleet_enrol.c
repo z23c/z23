@@ -4032,6 +4032,8 @@ static int test_fe_revoke_gate(void)
         ASSERT(fleet_head_revokes(&head, signer.pubkey));
         /* It says what it did not take away. */
         ASSERT(strstr(fd_cstr(&reply.data, "left_standing"), "ssh") != NULL);
+        /* And that one row carries this head to the other machines. */
+        ASSERT(json_get_bool(json_get(&reply.data, "board_carries")));
         zcl_command_reply_free(&reply);
 
         /* The gate on this node: posts and the peer refused, the other kept. */

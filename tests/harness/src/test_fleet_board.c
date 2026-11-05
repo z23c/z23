@@ -11462,6 +11462,594 @@ static int test_fleet_board_roster_carriage_lane(void)
     return failures;
 }
 
+/* ── revocation carried as a sealed head row ────────────────────────────── */
+
+/* Each box holds its head where a real box does: the fleet state files under
+ * its own XDG_STATE_HOME, switched before that box acts. The head callbacks
+ * are the real provider's, so the row goes through the one store path. */
+enum { FBH_OWNER = 0, FBH_MEMBER, FBH_JOINER, FBH_WITHHELD, FBH_LONG, FBH_LATE,
+       FBH_PAIRED, FBH_BOXES };
+static char g_fbh_base[256];
+static char g_fbh_saved_xdg[512];
+static bool g_fbh_had_xdg;
+static char g_fbh_text[FLEET_ENROL_HEAD_TEXT_MAX];
+
+static void fbh_box(int box)
+{
+    char path[320];
+    (void)snprintf(path, sizeof path, "%s/box%d", g_fbh_base, box);
+    (void)setenv("XDG_STATE_HOME", path, 1);
+    boot_fleet_roster_invalidate();
+}
+
+static void fbh_open(void)
+{
+    const char *xdg = getenv("XDG_STATE_HOME");
+    g_fbh_had_xdg = xdg != NULL;
+    (void)snprintf(g_fbh_saved_xdg, sizeof g_fbh_saved_xdg, "%s",
+                   xdg ? xdg : "");
+    test_make_tmpdir(g_fbh_base, sizeof g_fbh_base, "fleet_board", "head");
+    fbh_box(FBH_OWNER);
+}
+
+static void fbh_close(void)
+{
+    if (g_fbh_had_xdg)
+        (void)setenv("XDG_STATE_HOME", g_fbh_saved_xdg, 1);
+    else
+        (void)unsetenv("XDG_STATE_HOME");
+    if (g_fbh_base[0])
+        (void)test_rm_rf_recursive(g_fbh_base);
+    g_fbh_base[0] = '\0';
+}
+
+static void fbh_install(void)
+{
+    static struct zcl_fleet_roster_provider provider;
+    provider = *zcl_fleet_roster_gate_provider();
+    provider.root = fbr_root_cb;
+    provider.verify = fbr_verify_cb;
+    provider.each_line = fbr_each_cb;
+    provider.endpoint = NULL;
+    provider.name = "fleet-board-head-test";
+    fbr_install(FBR_ROOT, false);
+    zcl_fleet_roster_provider_install(&provider);
+}
+
+/* A head sealed by `root_id` at `seq`, revoking each id's box and signing key,
+ * which is what `fleet roster revoke` writes. Left in g_fbh_text. */
+static bool fbh_mint(uint8_t root_id, uint64_t seq, const uint8_t *ids,
+                     size_t n)
+{
+    uint8_t keys[64][32], seed[32], pub[32];
+    const char *why = NULL;
+    if (n * 2 > 64)
+        return false;
+    for (size_t i = 0; i < n; i++) {
+        fbr_root_pub((uint8_t)(0x80 + ids[i]), seed, keys[i * 2]);
+        fbr_key(ids[i], keys[i * 2 + 1]);
+    }
+    fbr_root_pub(root_id, seed, pub);
+    bool ok = fleet_head_mint(seq, FBW_NOW, &keys[0][0], n * 2, seed, pub,
+                              g_fbh_text, sizeof g_fbh_text, &why);
+    memset(seed, 0, sizeof seed);
+    return ok;
+}
+
+/* What `fleet roster revoke` leaves on the owner's box. */
+static bool fbh_owner_revokes(uint64_t seq, const uint8_t *ids, size_t n)
+{
+    static struct fleet_head head;
+    uint8_t seed[32], pub[32];
+    const char *why = NULL;
+    bool replaced = false;
+    fbr_root_pub(FBR_ROOT, seed, pub);
+    memset(seed, 0, sizeof seed);
+    fbh_box(FBH_OWNER);
+    return fbh_mint(FBR_ROOT, seq, ids, n) &&
+           fleet_head_import(g_fbh_text, pub, false, &head, &replaced, &why) &&
+           replaced;
+}
+
+static void fbh_compose(struct fleet_board_post *p, uint8_t who,
+                        const char *text, int64_t created_at)
+{
+    uint8_t seed[32], pk[32];
+    fb_test_identity(who, seed, pk);
+    fb_test_compose(p, FLEET_BOARD_KIND_NOTE, BOOT_FLEET_ROSTER_HEAD_AGENT, text,
+                    (uint64_t)created_at, FBC_TTL);
+    fb_test_scope(p, FLEET_BOARD_SCOPE_FLEET, "");
+    (void)fleet_board_post_sign(p, seed, pk);
+}
+
+/* A head row planted straight in a store, as a carrier would hold it. */
+static bool fbh_plant(struct node_db *db, const char *text, int64_t created_at,
+                      struct fleet_board_post *p)
+{
+    fbh_compose(p, 1, text, created_at);
+    return db_fleet_board_post_ingest(db, p, created_at, NULL) == FLEET_BOARD_OK;
+}
+
+/* The sequence of the head `box` holds: 0 for none, -1 for a head it cannot
+ * trust. */
+static int64_t fbh_seq(int box)
+{
+    static struct fleet_head head;
+    uint8_t seed[32], pub[32];
+    fbr_root_pub(FBR_ROOT, seed, pub);
+    memset(seed, 0, sizeof seed);
+    fbh_box(box);
+    enum fleet_head_state state = fleet_head_load(pub, &head, NULL);
+    if (state == FLEET_HEAD_ABSENT)
+        return 0;
+    return state == FLEET_HEAD_OK ? (int64_t)head.seq : -1;
+}
+
+/* One whole roster pull with each half on its own box's state. */
+static size_t fbh_pull(struct fbw *w, struct node_db *into, int answering,
+                       int asking)
+{
+    size_t frames = 0;
+    fbc_ask_begin(w);
+    if (!boot_fleet_board_fleet_test_pull_roster(&w->svc, w->f.resp_noise_pub))
+        return SIZE_MAX;
+    fbh_box(answering);
+    if (mesh_loop_pump(w->asker, w->ask_q, w->f.res_term, &w->mp,
+                       w->answerer) != 1)
+        return SIZE_MAX;
+    boot_fleet_board_fleet_test_serve();
+    boot_fleet_board_fleet_test_serve();
+    (void)mesh_loop_pump(w->answerer, w->answer_q, w->f.term_peer.ini, &w->mp,
+                         w->asker);
+    fbh_box(asking);
+    return boot_fleet_board_fleet_test_drain_into(into);
+}
+
+/* The answering store changes: a new answering process, read from the start. */
+static void fbh_answer_from(struct node_db *db)
+{
+    boot_fleet_board_fleet_test_new_epoch();
+    boot_fleet_board_fleet_test_bind(db);
+    fbc_boxes(FBR_PEER, FBR_MEMBER);
+}
+
+static int test_fleet_board_head_row_carriage(void)
+{
+    int failures = 0;
+    static struct fbw w;
+    static struct node_db dest;
+    struct fleet_board_post post, late;
+    struct zcl_fleet_role_checker checker = {
+        .allow = fbw_role_check, .name = "fleet-board-head-test" };
+    struct boot_fleet_roster_counts rb, ra;
+    struct boot_fleet_board_fleet_counts cb, ca;
+    uint8_t goner[32], peer[32];
+    const uint8_t revoked[] = { FBC_REVOKED };
+    const int64_t now = FBW_NOW;
+    char dir[256] = {0};
+    g_fbw_deny_read = false;
+    zcl_fleet_role_checker_install(&checker);
+    fbh_open();
+    bool opened = fbw_open(&w) && node_db_open(&dest, ":memory:");
+    fbr_key(FBC_REVOKED, goner);
+    fbr_key(FBR_PEER, peer);
+    TEST("fleet head row: the owner revokes member C once, and the head reaches "
+         "member B with no file import; C gets no fleet row from B, and rows C "
+         "writes afterward are refused at B") {
+        ASSERT(opened);
+        boot_fleet_board_fleet_test_bind_authority(&w.f.term_peer.delegation,
+                                                   w.f.genesis, now);
+        boot_fleet_board_fleet_test_bind(&w.a);
+        fbh_install();
+        ASSERT(fbc_plant(&w.a, &w.b, "answerbox", FBR_MEMBER, now));
+        ASSERT(fbc_plant(&w.a, &w.b, "askbox", FBR_PEER, now));
+        ASSERT(fbc_plant(&w.a, &w.b, "goner", FBC_REVOKED, now));
+        fbh_box(FBH_MEMBER);
+        ASSERT_EQ(boot_fleet_roster_check(&w.b, goner, now),
+                  BOOT_FLEET_ROSTER_MEMBER);
+        ASSERT_EQ(fbh_seq(FBH_MEMBER), 0);
+
+        /* The owner's box: revoke, then its node's publish pass writes the row
+         * through the real local publish. */
+        ASSERT(fbh_owner_revokes(1, revoked, 1));
+        test_make_tmpdir(dir, sizeof dir, "fleet_board", "headowner");
+        w.svc.node_db = &w.a;
+        w.svc.datadir = dir;
+        boot_fleet_board_shutdown();
+        boot_fleet_board_wire(&w.svc);
+        g_fbr.manager = true;
+        boot_fleet_roster_set_gate(BOOT_FLEET_ROSTER_GATE_ON);
+        ASSERT_EQ(boot_fleet_roster_publish(&w.a, now), (size_t)1);
+        ASSERT_EQ(boot_fleet_roster_publish(&w.a, now + 60), (size_t)0);
+        boot_fleet_roster_set_gate(BOOT_FLEET_ROSTER_GATE_DEFAULT);
+        g_fbr.manager = false;
+
+        fbc_boxes(FBR_PEER, FBR_MEMBER);
+        boot_fleet_roster_counts(&rb);
+        ASSERT_EQ(fbh_pull(&w, &w.b, FBH_OWNER, FBH_MEMBER), (size_t)1);
+        boot_fleet_roster_counts(&ra);
+        ASSERT_EQ(ra.heads_installed, rb.heads_installed + 1);
+        ASSERT_EQ(fbh_seq(FBH_MEMBER), 1);
+        ASSERT_EQ(boot_fleet_roster_check(&w.b, goner, now),
+                  BOOT_FLEET_ROSTER_NOT_MEMBER);
+        ASSERT_EQ(boot_fleet_roster_check(&w.b, peer, now),
+                  BOOT_FLEET_ROSTER_MEMBER);
+
+        /* B now refuses C, and still answers a member. */
+        boot_fleet_board_fleet_test_bind(&w.b);
+        fbc_boxes(FBC_REVOKED, FBR_PEER);
+        ASSERT(fbc_refused(&w, &dest));
+        fbc_boxes(FBR_MEMBER, FBR_PEER);
+        ASSERT(!fbc_refused(&w, &dest));
+
+        /* A row C writes now, carried by an honest box, stops at B. */
+        fbh_answer_from(&w.a);
+        ASSERT(fbw_post(&w.a, FBC_REVOKED, FLEET_BOARD_SCOPE_FLEET,
+                        "after revocation", 2400, FBC_TTL, 2400, &late));
+        boot_fleet_board_fleet_counts(&cb);
+        ASSERT_EQ(fbh_pull(&w, &w.b, FBH_OWNER, FBH_MEMBER), (size_t)0);
+        boot_fleet_board_fleet_counts(&ca);
+        ASSERT(ca.deferred > cb.deferred);
+        ASSERT(!db_fleet_board_have(&w.b, late.id));
+        PASS();
+    }
+    TEST("fleet head row: a replayed older head and a second head at the same "
+         "sequence are refused, the row is not kept, and the newer head stays") {
+        char older[FLEET_ENROL_HEAD_TEXT_MAX];
+        const uint8_t two[] = { FBC_REVOKED, FBR_STRANGER };
+        ASSERT(fbh_mint(FBR_ROOT, 1, revoked, 1));
+        (void)snprintf(older, sizeof older, "%s", g_fbh_text);
+        ASSERT(fbh_owner_revokes(2, two, 2));
+        ASSERT(fbh_plant(&w.a, g_fbh_text, 2410, &post));
+        ASSERT_EQ(fbh_pull(&w, &w.b, FBH_OWNER, FBH_MEMBER), (size_t)1);
+        ASSERT(db_fleet_board_have(&w.b, post.id));
+        ASSERT_EQ(fbh_seq(FBH_MEMBER), 2);
+
+        ASSERT(fbh_plant(&w.a, older, 2411, &post));
+        boot_fleet_roster_counts(&rb);
+        ASSERT_EQ(fbh_pull(&w, &w.b, FBH_OWNER, FBH_MEMBER), (size_t)0);
+        boot_fleet_roster_counts(&ra);
+        ASSERT(ra.heads_refused > rb.heads_refused);
+        ASSERT_EQ(ra.heads_installed, rb.heads_installed);
+        ASSERT(!db_fleet_board_have(&w.b, post.id));
+        ASSERT_EQ(fbh_seq(FBH_MEMBER), 2);
+
+        ASSERT(fbh_mint(FBR_ROOT, 2, revoked, 1));
+        ASSERT(fbh_plant(&w.a, g_fbh_text, 2412, &post));
+        ASSERT_EQ(fbh_pull(&w, &w.b, FBH_OWNER, FBH_MEMBER), (size_t)0);
+        ASSERT(!db_fleet_board_have(&w.b, post.id));
+        ASSERT_EQ(fbh_seq(FBH_MEMBER), 2);
+        PASS();
+    }
+    TEST("fleet head row: a head under another root and a corrupt head are "
+         "refused, the row is not kept, and the held head is intact") {
+        ASSERT(fbh_mint(FBR_OTHER_ROOT, 9, revoked, 1));
+        ASSERT(fbh_plant(&w.a, g_fbh_text, 2420, &post));
+        boot_fleet_roster_counts(&rb);
+        ASSERT_EQ(fbh_pull(&w, &w.b, FBH_OWNER, FBH_MEMBER), (size_t)0);
+        boot_fleet_roster_counts(&ra);
+        ASSERT(ra.heads_refused > rb.heads_refused);
+        ASSERT(!db_fleet_board_have(&w.b, post.id));
+        ASSERT_EQ(fbh_seq(FBH_MEMBER), 2);
+
+        /* Flipped bytes at the highest sequence yet, and plain junk. */
+        ASSERT(fbh_mint(FBR_ROOT, 40, revoked, 1));
+        g_fbh_text[sizeof(FLEET_HEAD_PREFIX) + 10] ^= 1;
+        const char *corrupt[] = { g_fbh_text, FLEET_HEAD_PREFIX, "not a head" };
+        for (size_t i = 0; i < sizeof corrupt / sizeof corrupt[0]; i++) {
+            ASSERT(fbh_plant(&w.a, corrupt[i], 2421 + (int64_t)i, &post));
+            ASSERT_EQ(fbh_pull(&w, &w.b, FBH_OWNER, FBH_MEMBER), (size_t)0);
+            ASSERT(!db_fleet_board_have(&w.b, post.id));
+            ASSERT_EQ(fbh_seq(FBH_MEMBER), 2);
+            /* The gate still reads a good head, not a failed one. */
+            ASSERT_EQ(boot_fleet_roster_check(&w.b, goner, now),
+                      BOOT_FLEET_ROSTER_NOT_MEMBER);
+            ASSERT_EQ(boot_fleet_roster_check(&w.b, peer, now),
+                      BOOT_FLEET_ROSTER_MEMBER);
+        }
+        PASS();
+    }
+    TEST("fleet head row: a box with no root, or with its gate off, takes "
+         "nothing and keeps no row; a root it cannot read defers; and the P2P "
+         "frame path takes no head row at all") {
+        struct fbr_p2p x;
+        uint8_t frame[FLEET_BOARD_FRAME_MAX];
+        size_t len = 0;
+        ASSERT(fbh_mint(FBR_ROOT, 3, revoked, 1));
+        fbh_compose(&post, 1, g_fbh_text, 2430);
+        fbh_box(FBH_MEMBER);
+        g_fbr.present = false;
+        ASSERT_EQ(boot_fleet_roster_screen_post(&w.b, &post, now),
+                  FLEET_BOARD_ERR_SCOPE);
+        g_fbr.present = true;
+        boot_fleet_roster_set_gate(BOOT_FLEET_ROSTER_GATE_OFF);
+        ASSERT_EQ(boot_fleet_roster_screen_post(&w.b, &post, now),
+                  FLEET_BOARD_ERR_SCOPE);
+        boot_fleet_roster_set_gate(BOOT_FLEET_ROSTER_GATE_DEFAULT);
+        g_fbr.root_fail = true;
+        ASSERT_EQ(boot_fleet_roster_screen_post(&w.b, &post, now),
+                  FLEET_BOARD_ERR_ROLE);
+        g_fbr.root_fail = false;
+        ASSERT_EQ(fbh_seq(FBH_MEMBER), 2);
+
+        /* A good head at the next sequence, off the flood: not taken. */
+        fbr_p2p_init(&x, &w.b, 54);
+        boot_fleet_board_shutdown();
+        boot_fleet_board_wire(&x.svc);
+        ASSERT_EQ(fleet_board_frame_encode_post(&post, frame, sizeof frame, &len),
+                  FLEET_BOARD_OK);
+        ASSERT(boot_fleet_board_frame(&x.mp, &x.node, frame, len, NULL));
+        ASSERT(!db_fleet_board_have(&w.b, post.id));
+        ASSERT_EQ(fbh_seq(FBH_MEMBER), 2);
+        boot_fleet_board_shutdown();
+
+        /* The same row over carriage is taken, so only the path refused it. */
+        ASSERT(db_fleet_board_post_ingest(&w.a, &post, 2430, NULL) ==
+               FLEET_BOARD_OK);
+        ASSERT_EQ(fbh_pull(&w, &w.b, FBH_OWNER, FBH_MEMBER), (size_t)1);
+        ASSERT_EQ(fbh_seq(FBH_MEMBER), 3);
+        PASS();
+    }
+    _test_next:;
+    g_fbw_deny_read = false;
+    boot_fleet_board_shutdown();
+    boot_fleet_board_fleet_test_roster_identity(1, NULL, NULL);
+    boot_fleet_board_fleet_test_roster_identity(2, NULL, NULL);
+    fbr_uninstall();
+    fbw_close(&w);
+    if (dest.open)
+        node_db_close(&dest);
+    if (dir[0])
+        (void)test_rm_rf_recursive(dir);
+    fbh_close();
+    zcl_fleet_role_checker_install_permissive_for_testing();
+    return failures;
+}
+
+/* Sealed lines for the owner, a member and the machine that gets revoked. */
+static bool fbh_plant_roster(struct node_db *a, struct node_db *b, int64_t now)
+{
+    return fbc_plant(a, b, "answerbox", FBR_MEMBER, now) &&
+           fbc_plant(a, b, "askbox", FBR_PEER, now) &&
+           fbc_plant(a, b, "goner", FBC_REVOKED, now);
+}
+
+static int test_fleet_board_head_row_bootstrap(void)
+{
+    int failures = 0;
+    static struct fbw w;
+    static struct node_db joined, withheld, thin, longb, paged, late, late_src,
+        paired_src, paired_dest;
+    struct fleet_board_post post, note;
+    struct zcl_fleet_role_checker checker = {
+        .allow = fbw_role_check, .name = "fleet-board-head-boot-test" };
+    uint8_t goner[32], peer[32];
+    const uint8_t revoked[] = { FBC_REVOKED };
+    const int64_t now = FBW_NOW;
+    size_t frames = 0;
+    g_fbw_deny_read = false;
+    zcl_fleet_role_checker_install(&checker);
+    fbh_open();
+    bool opened = fbw_open(&w) && node_db_open(&joined, ":memory:") &&
+                  node_db_open(&withheld, ":memory:") &&
+                  node_db_open(&thin, ":memory:") &&
+                  node_db_open(&longb, ":memory:") &&
+                  node_db_open(&paged, ":memory:") &&
+                  node_db_open(&late, ":memory:") &&
+                  node_db_open(&late_src, ":memory:") &&
+                  node_db_open(&paired_src, ":memory:") &&
+                  node_db_open(&paired_dest, ":memory:");
+    fbr_key(FBC_REVOKED, goner);
+    fbr_key(FBR_PEER, peer);
+    TEST("fleet head row: a box bootstrapping from an answer holding an old "
+         "roster row and the head never lists the revoked key") {
+        ASSERT(opened);
+        boot_fleet_board_fleet_test_bind_authority(&w.f.term_peer.delegation,
+                                                   w.f.genesis, now);
+        fbh_install();
+        boot_fleet_board_fleet_test_bind(&w.a);
+        fbc_boxes(FBR_PEER, FBR_MEMBER);
+        ASSERT(fbh_plant_roster(&w.a, NULL, now));
+        ASSERT(fbh_owner_revokes(1, revoked, 1));
+        ASSERT(fbh_plant(&w.a, g_fbh_text, 2401, &post));
+        ASSERT_EQ(fbh_seq(FBH_JOINER), 0);
+        ASSERT_EQ(fbh_pull(&w, &joined, FBH_OWNER, FBH_JOINER), (size_t)4);
+        ASSERT_EQ(fbh_seq(FBH_JOINER), 1);
+        ASSERT_EQ(boot_fleet_roster_check(&joined, goner, now),
+                  BOOT_FLEET_ROSTER_NOT_MEMBER);
+        ASSERT_EQ(boot_fleet_roster_check(&joined, peer, now),
+                  BOOT_FLEET_ROSTER_MEMBER);
+        PASS();
+    }
+    TEST("fleet head row: a hostile answer that withholds the head arms a fresh "
+         "box with the revoked key, and the next honest answer overrides it "
+         "within one pull") {
+        ASSERT(fbh_plant_roster(&thin, NULL, now));
+        boot_fleet_board_fleet_test_new_epoch();
+        boot_fleet_board_fleet_test_bind(&thin);
+        fbc_boxes(FBR_PEER, FBC_REVOKED);
+        /* The answering box holds no head of its own here. */
+        ASSERT_EQ(fbh_pull(&w, &withheld, FBH_WITHHELD, FBH_WITHHELD), (size_t)3);
+        ASSERT_EQ(fbh_seq(FBH_WITHHELD), 0);
+        ASSERT_EQ(boot_fleet_roster_check(&withheld, goner, now),
+                  BOOT_FLEET_ROSTER_MEMBER);
+
+        fbh_answer_from(&w.a);
+        ASSERT(fbh_pull(&w, &withheld, FBH_OWNER, FBH_WITHHELD) != SIZE_MAX);
+        ASSERT_EQ(fbh_seq(FBH_WITHHELD), 1);
+        ASSERT_EQ(boot_fleet_roster_check(&withheld, goner, now),
+                  BOOT_FLEET_ROSTER_NOT_MEMBER);
+        /* And that revoked box's next answer is dropped whole. */
+        boot_fleet_board_fleet_test_new_epoch();
+        boot_fleet_board_fleet_test_bind(&thin);
+        fbc_boxes(FBR_PEER, FBC_REVOKED);
+        struct boot_fleet_board_fleet_counts cb, ca;
+        boot_fleet_board_fleet_counts(&cb);
+        ASSERT_EQ(fbh_pull(&w, &withheld, FBH_WITHHELD, FBH_WITHHELD), (size_t)0);
+        boot_fleet_board_fleet_counts(&ca);
+        ASSERT_EQ(ca.answer_refused, cb.answer_refused + 1);
+        PASS();
+    }
+    TEST("fleet head row: on a board longer than one page the head still comes "
+         "first, ahead of the rows that arm the box") {
+        char text[64];
+        ASSERT(fbh_plant_roster(&longb, NULL, now));
+        for (int i = 0; i < (int)FLEET_BOARD_FLEET_ANSWER_POSTS_MAX + 4; i++) {
+            (void)snprintf(text, sizeof text, "filler %d", i);
+            ASSERT(fbw_post(&longb, FBR_MEMBER, FLEET_BOARD_SCOPE_FLEET, text,
+                            2000 + i, FBC_TTL, 2000 + i, &note));
+        }
+        ASSERT(fbh_mint(FBR_ROOT, 1, revoked, 1));
+        ASSERT(fbh_plant(&longb, g_fbh_text, 2401, &post));
+        fbh_answer_from(&longb);
+        ASSERT(fbh_pull(&w, &paged, FBH_OWNER, FBH_LONG) != SIZE_MAX);
+        ASSERT_EQ(fbh_seq(FBH_LONG), 1);
+        ASSERT_EQ(boot_fleet_roster_check(&paged, goner, now),
+                  BOOT_FLEET_ROSTER_NOT_MEMBER);
+        ASSERT_EQ(boot_fleet_roster_check(&paged, peer, now),
+                  BOOT_FLEET_ROSTER_MEMBER);
+        PASS();
+    }
+    TEST("fleet head row: a member that never received the head still works, "
+         "and picks it up on the next pull") {
+        ASSERT(fbh_plant_roster(&late_src, &late, now));
+        ASSERT(fbw_post(&late_src, FBR_MEMBER, FLEET_BOARD_SCOPE_FLEET,
+                        "before the head", 2300, FBC_TTL, 2300, &note));
+        fbh_answer_from(&late_src);
+        ASSERT_EQ(fbh_pull(&w, &late, FBH_OWNER, FBH_LATE), (size_t)1);
+        ASSERT(db_fleet_board_have(&late, note.id));
+        ASSERT_EQ(fbh_seq(FBH_LATE), 0);
+        ASSERT_EQ(boot_fleet_roster_check(&late, goner, now),
+                  BOOT_FLEET_ROSTER_MEMBER);
+        ASSERT(fbh_plant(&late_src, g_fbh_text, 2401, &post));
+        ASSERT_EQ(fbh_pull(&w, &late, FBH_OWNER, FBH_LATE), (size_t)1);
+        ASSERT(db_fleet_board_have(&late, post.id));
+        ASSERT_EQ(fbh_seq(FBH_LATE), 1);
+        ASSERT_EQ(boot_fleet_roster_check(&late, goner, now),
+                  BOOT_FLEET_ROSTER_NOT_MEMBER);
+        PASS();
+    }
+    TEST("fleet head row: on the pairing lane, where nothing leads the answer, a "
+         "post by the revoked key numbered ahead of the head is judged under it") {
+        /* One state for both halves: the answering box holds no head file. */
+        ASSERT(mesh_term_pair_row(&w.f, &w.f.term_peer,
+                                  MESH_PAIRING_CAP_STATUS_READ, FBW_PAIRED_AT,
+                                  FBW_PAIRING_EXPIRES));
+        g_fbr.remap = true;
+        fbr_key(FBR_PEER, g_fbr.remap_from);
+        memcpy(g_fbr.remap_to, w.f.term_peer.delegation.online_pubkey, 32);
+        ASSERT(fbh_plant_roster(&paired_src, &paired_dest, now));
+        ASSERT(fbw_post(&paired_src, FBC_REVOKED, FLEET_BOARD_SCOPE_FLEET,
+                        "numbered first", 2390, FBC_TTL, 2390, &note));
+        ASSERT(fbh_plant(&paired_src, g_fbh_text, 2401, &post));
+        fbh_box(FBH_PAIRED);
+        boot_fleet_board_fleet_test_new_epoch();
+        boot_fleet_board_fleet_test_bind(&paired_src);
+        ASSERT_EQ(fbw_pull(&w, w.box_a, &paired_dest, &frames), (size_t)1);
+        ASSERT(db_fleet_board_have(&paired_dest, post.id));
+        ASSERT_EQ(fbh_seq(FBH_PAIRED), 1);
+        ASSERT(!db_fleet_board_have(&paired_dest, note.id));
+        PASS();
+    }
+    _test_next:;
+    g_fbw_deny_read = false;
+    boot_fleet_board_fleet_test_roster_identity(1, NULL, NULL);
+    boot_fleet_board_fleet_test_roster_identity(2, NULL, NULL);
+    fbr_uninstall();
+    fbw_close(&w);
+    struct node_db *dbs[] = { &joined, &withheld, &thin, &longb, &paged, &late,
+                              &late_src, &paired_src, &paired_dest };
+    for (size_t i = 0; i < sizeof dbs / sizeof dbs[0]; i++)
+        if (dbs[i]->open)
+            node_db_close(dbs[i]);
+    fbh_close();
+    zcl_fleet_role_checker_install_permissive_for_testing();
+    return failures;
+}
+
+/* The owner's publish pass: once per new head and once per republish period; a
+ * box that is not the owner's, or a head over one row, writes nothing. */
+static int test_fleet_board_head_row_publish(void)
+{
+    int failures = 0;
+    struct fb_rpc_env env;
+    bool open = false;
+    char dir[256] = {0};
+    const uint8_t one[] = { FBC_REVOKED };
+    uint8_t many[24]; /* 48 keys: past the 44 one row holds */
+    fbh_open();
+    TEST("fleet head row: the manager publishes its head once, again only for a "
+         "new head or a republish, not over one row, and never a bad line") {
+        const int64_t now = (int64_t)platform_time_wall_time_t();
+        struct fleet_board_post junk;
+        struct db_fleet_board_post newest;
+        open = fb_rpc_env_open(&env);
+        ASSERT(open);
+        test_make_tmpdir(dir, sizeof dir, "fleet_board", "headpub");
+        env.svc.datadir = dir;
+        fbh_install();
+
+        /* No head: nothing to publish, and no opt-in: nothing at all. */
+        g_fbr.manager = true;
+        boot_fleet_roster_set_gate(BOOT_FLEET_ROSTER_GATE_ON);
+        ASSERT_EQ(boot_fleet_roster_publish(&env.db, now), (size_t)0);
+        ASSERT(fbh_owner_revokes(1, one, 1));
+        boot_fleet_roster_set_gate(BOOT_FLEET_ROSTER_GATE_DEFAULT);
+        ASSERT_EQ(boot_fleet_roster_publish(&env.db, now), (size_t)0);
+        boot_fleet_roster_set_gate(BOOT_FLEET_ROSTER_GATE_ON);
+
+        ASSERT_EQ(boot_fleet_roster_publish(&env.db, now), (size_t)1);
+        ASSERT(boot_fleet_roster_newest_head_row(&env.db, now, &newest));
+        ASSERT_STR_EQ(newest.post.text, g_fbh_text);
+        ASSERT_EQ(boot_fleet_roster_publish(&env.db, now + 60), (size_t)0);
+
+        /* A member box publishes nothing. */
+        g_fbr.manager = false;
+        ASSERT_EQ(boot_fleet_roster_publish(
+                      &env.db, now + BOOT_FLEET_ROSTER_REPUBLISH_S + 100),
+                  (size_t)0);
+        g_fbr.manager = true;
+        ASSERT_EQ(boot_fleet_roster_publish(
+                      &env.db, now + BOOT_FLEET_ROSTER_REPUBLISH_S + 100),
+                  (size_t)1);
+
+        /* A new head does not wait for the republish. */
+        const uint8_t two[] = { FBC_REVOKED, FBR_STRANGER };
+        ASSERT(fbh_owner_revokes(2, two, 2));
+        ASSERT_EQ(boot_fleet_roster_publish(
+                      &env.db, now + BOOT_FLEET_ROSTER_REPUBLISH_S + 160),
+                  (size_t)1);
+
+        /* Over the note bound: still a good head here, and not on the board. */
+        for (size_t i = 0; i < sizeof many; i++)
+            many[i] = (uint8_t)(0x20 + i);
+        ASSERT(fbh_owner_revokes(3, many, sizeof many));
+        ASSERT(strlen(g_fbh_text) >= ZCL_FLEET_HEAD_LINE_MAX);
+        ASSERT_EQ(fbh_seq(FBH_OWNER), 3);
+        ASSERT_EQ(boot_fleet_roster_publish(
+                      &env.db, now + BOOT_FLEET_ROSTER_REPUBLISH_S + 220),
+                  (size_t)0);
+
+        /* The local RPC is an ingest path too. */
+        fb_test_compose(&junk, FLEET_BOARD_KIND_NOTE,
+                        BOOT_FLEET_ROSTER_HEAD_AGENT, "not a head",
+                        (uint64_t)now, 3600);
+        fb_test_scope(&junk, FLEET_BOARD_SCOPE_FLEET, "");
+        ASSERT_EQ(boot_fleet_board_publish(&junk, now),
+                  FLEET_BOARD_ERR_SIGNATURE);
+        ASSERT(!db_fleet_board_have(&env.db, junk.id));
+        PASS();
+    } _test_next:;
+    boot_fleet_roster_set_gate(BOOT_FLEET_ROSTER_GATE_DEFAULT);
+    fbr_uninstall();
+    if (open)
+        fb_rpc_env_close(&env);
+    if (dir[0])
+        test_rm_rf_recursive(dir);
+    fbh_close();
+    return failures;
+}
+
 int test_fleet_board(void)
 {
     int failures = 0;
@@ -11533,6 +12121,9 @@ int test_fleet_board(void)
     failures += test_fleet_board_roster_carriage_proof();
     failures += test_fleet_board_roster_carriage();
     failures += test_fleet_board_roster_carriage_lane();
+    failures += test_fleet_board_head_row_carriage();
+    failures += test_fleet_board_head_row_bootstrap();
+    failures += test_fleet_board_head_row_publish();
     failures += test_fleet_status();
     failures += test_fleet_board_public_no_grant_needed();
     /* Leave the process as this group found it: the next group in the same

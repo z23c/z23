@@ -13,7 +13,9 @@
  * up on its next roster rebuild (at most BOOT_FLEET_ROSTER_TTL_S later), and
  * nothing is rewritten: roster rows and stored board posts stay readable. Only
  * the box holding the operator key can seal a head, so a member box is refused
- * and pointed at `fleet import`. Nothing here sends the head anywhere. */
+ * and pointed at `fleet import`. This leaf only stores the head; this box's node
+ * then carries it to the other roster machines as a head row, when it runs with
+ * -fleetrostergate (config/boot_fleet_roster.h). */
 
 #include "command/native_command.h"
 #include "command/native_fleet.h"
@@ -25,6 +27,7 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/clock.h"
+#include "util/fleet_roster_check.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -35,7 +38,8 @@
 #define FRR_SIGNERS_MAX 16u
 #define FRR_LEFT_STANDING                                                     \
     "the machine's ssh bridge line, mesh pairing and role rows are untouched; " \
-    "other boxes keep admitting it until they import this head"
+    "other boxes keep admitting it until this head reaches them by board "      \
+    "carriage or fleet.import"
 
 struct frr_plan {
     uint8_t seed[FLEET_ENROL_SEED_BYTES];
@@ -268,10 +272,16 @@ static void frr_render(struct zcl_command_reply *reply,
     if (already)
         return;
     (void)json_push_kv_str(&reply->data, "head", plan->text);
+    bool carried = strlen(plan->text) < ZCL_FLEET_HEAD_LINE_MAX;
+    (void)json_push_kv_bool(&reply->data, "board_carries", carried);
     (void)zcl_command_reply_add_next(
         reply, "fleet.import", "{\"line\":\"<head>\"}",
-        "paste this head into fleet.import on any other box that should "
-        "stop admitting this machine");
+        carried ? "this box's node (-fleetrostergate) carries this head to the "
+                  "roster machines as a board row; paste it into fleet.import "
+                  "on a box that must not wait for a pull or that has no honest "
+                  "peer to pull from"
+                : "this head is too long for one board row, so it does not "
+                  "travel: paste it into fleet.import on every other box");
 }
 
 static void frr_run(const struct zcl_command_request *request,

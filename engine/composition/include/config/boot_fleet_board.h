@@ -191,12 +191,23 @@ void boot_fleet_board_register_rpc(struct rpc_table *table);
  * off, notes past their TTL, a revoked key and an unverifiable roster all
  * admit nothing; a peer with any pairing row stays on the pairing path; the
  * read role still applies. A box holding no armed roster of its own takes only
- * sealed roster rows from an answer until those rows arm it. This lane asks
- * only a session whose address a sealed line claims as its onion, or a session
- * that already proved a member key here. It spends nothing. */
+ * sealed roster and head rows from an answer until those rows arm it. This lane
+ * asks only a session whose address a sealed line claims as its onion, or a
+ * session that already proved a member key here. It spends nothing.
+ *
+ * Revocation rides the same lane as a sealed head row (config/boot_fleet_roster.h).
+ * Every answer's head rows are offered before anything else in it. A roster
+ * answer also leads with the answering box's newest head row whenever the pull
+ * has not reached it yet, so a box that arms from its first page has the head
+ * first. That record carries FLEET_BOARD_ROSTER_PINNED_ARRIVAL, outside the
+ * cursor's numbering, so it moves no cursor; a pull already past that row pays
+ * nothing. A hostile answerer can still leave it out; only the next honest
+ * answer, or `fleet import`, then supplies it. */
 
 #define FLEET_BOARD_FLEET_SERVICE_NAME "board"
 #define FLEET_BOARD_ROSTER_SERVICE_NAME "board.roster"
+/* No real arrival number is 0, so this can only be the pinned head row. */
+#define FLEET_BOARD_ROSTER_PINNED_ARRIVAL 0
 /* The board signing key, then its signature. */
 #define FLEET_BOARD_ROSTER_PROOF_BYTES 96u
 /* A plain pull, then the proof. */

@@ -67,6 +67,32 @@ struct zcl_fleet_head {
     uint8_t revoked[ZCL_FLEET_REVOKED_MAX][32];
 };
 
+/* Longest head line the board carries as one row, terminator included: the
+ * board's own note bound (FLEET_BOARD_TEXT_MAX), so about 44 revoked keys. A
+ * longer head still moves by paste. */
+#define ZCL_FLEET_HEAD_LINE_MAX 2048u
+
+/* What this box did with a head line it was offered. The bytes stay the
+ * operator's own; the store's sequence rule decides, so nothing here can lower
+ * or clear a head. */
+enum zcl_fleet_head_offer {
+    ZCL_FLEET_HEAD_OFFER_INSTALLED = 0, /* a higher sequence, now the head */
+    ZCL_FLEET_HEAD_OFFER_HELD,          /* the head this box already holds */
+    ZCL_FLEET_HEAD_OFFER_STALE,         /* a lower sequence: final */
+    ZCL_FLEET_HEAD_OFFER_REFUSED,       /* not sealed by the root, another
+                                         * root, or two heads at one sequence:
+                                         * final, and nothing changed */
+    ZCL_FLEET_HEAD_OFFER_RETRY,         /* this box's own state could not say:
+                                         * nothing changed, offer it again */
+};
+
+/* The head line this box holds, for the box that publishes it. */
+enum zcl_fleet_head_line {
+    ZCL_FLEET_HEAD_LINE_NONE = 0,  /* no head, or none this box can trust */
+    ZCL_FLEET_HEAD_LINE_OK,
+    ZCL_FLEET_HEAD_LINE_TOO_LONG,  /* trusted, and over ZCL_FLEET_HEAD_LINE_MAX */
+};
+
 struct zcl_fleet_roster_provider {
     /* The operator root this node trusts. `present` false means this box
      * has no fleet root, which is a state and not an error; the function
@@ -91,6 +117,14 @@ struct zcl_fleet_roster_provider {
      * provider without it revokes nothing. */
     void (*head)(const uint8_t root[32], struct zcl_fleet_head *out,
                  void *ctx);
+    /* Offer one head line carried by the board, under `root`, through the one
+     * path a pasted head takes. Optional; a provider without it refuses. */
+    enum zcl_fleet_head_offer (*head_offer)(const char *line,
+                                            const uint8_t root[32], void *ctx);
+    /* The exact bytes of the head this box holds under `root`, for publishing.
+     * Optional; a provider without it holds none. */
+    enum zcl_fleet_head_line (*head_line)(const uint8_t root[32], char *out,
+                                          size_t cap, void *ctx);
     /* Visit every line of this box's own machine roster, in file order.
      * The manager publishes these onto the board. False when unreadable. */
     bool (*each_line)(void (*visit)(const char *line, void *user),
@@ -134,6 +168,13 @@ bool zcl_fleet_roster_verify(const char *line, const uint8_t root[32],
  * the state is NONE: nothing revoked. */
 void zcl_fleet_roster_head(const uint8_t root[32],
                            struct zcl_fleet_head *out);
+/* Offer a carried head line. With no provider, or one without the callback,
+ * REFUSED: nothing is installed. */
+enum zcl_fleet_head_offer zcl_fleet_roster_head_offer(const char *line,
+                                                      const uint8_t root[32]);
+/* The held head's line. With no provider, or one without the callback, NONE. */
+enum zcl_fleet_head_line zcl_fleet_roster_head_line(const uint8_t root[32],
+                                                    char *out, size_t cap);
 bool zcl_fleet_roster_each_line(void (*visit)(const char *line, void *user),
                                 void *user);
 /* The endpoint of one line. With no provider, or one without an endpoint

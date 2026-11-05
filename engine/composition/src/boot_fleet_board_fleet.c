@@ -389,6 +389,23 @@ static bool board_answer_visit(const struct db_fleet_board_post *row,
     return true;
 }
 
+/* A roster pull that has not reached this store's newest head row gets it first
+ * as well, under FLEET_BOARD_ROSTER_PINNED_ARRIVAL: a box walking a long board
+ * from the start, whose first page arms it, must not arm before the head that
+ * sits many pages later. A pull past it pays nothing. */
+static void board_answer_pin_head(struct board_answer *a, struct node_db *ndb,
+                                  int64_t after, int64_t now)
+{
+    struct db_fleet_board_post *row =
+        zcl_calloc(1, sizeof *row, "fleet_board_pinned_head");
+    if (row && boot_fleet_roster_newest_head_row(ndb, now, row) &&
+        row->arrival > after) {
+        row->arrival = FLEET_BOARD_ROSTER_PINNED_ARRIVAL;
+        (void)board_answer_visit(row, a);
+    }
+    free(row);
+}
+
 /* ── the service callbacks ───────────────────────────────────────────── */
 
 /* Read one bounded page into a new serve state: once, at open. `proof` (a
@@ -411,6 +428,8 @@ static enum mesh_stream_refusal board_serve_compose(struct mesh_stream *st,
     const size_t head = skip + FLEET_BOARD_FLEET_ANSWER_HEAD;
     struct board_answer a = { s->rows + head, sizeof s->rows - head, 0, 0 };
     int64_t scanned = after;
+    if (proof)
+        board_answer_pin_head(&a, ndb, after, board_now());
     if (db_fleet_board_fleet_after(ndb, board_now(), after,
                                    FLEET_BOARD_FLEET_ANSWER_POSTS_MAX,
                                    board_answer_visit, &a, &scanned) < 0) {
@@ -836,18 +855,24 @@ static bool board_record_next(const uint8_t *buf, size_t len, size_t *off,
 
 /* The whole answer adds up before any of it is used: every record framed,
  * arrivals strictly rising from where the pull asked, none past the point
- * the page says it reached. One bad frame voids the answer; nothing in it
- * is guessed at and no cursor moves. */
+ * the page says it reached. A roster answer may lead with one pinned record,
+ * which stands outside the numbering. One bad frame voids the answer; nothing
+ * in it is guessed at and no cursor moves. */
 static bool board_answer_valid(const uint8_t *buf, size_t len,
                                const struct board_answer_head *h,
-                               int64_t asked_after)
+                               int64_t asked_after, bool roster)
 {
     if (h->scanned < asked_after)
         return false;
     size_t off = FLEET_BOARD_FLEET_ANSWER_HEAD;
     int64_t prev = asked_after;
+    bool may_pin = roster;
     struct board_record rec;
     while (board_record_next(buf, len, &off, &rec)) {
+        bool pinned = may_pin && rec.arrival == FLEET_BOARD_ROSTER_PINNED_ARRIVAL;
+        may_pin = false;
+        if (pinned)
+            continue;
         if (rec.arrival <= prev || rec.arrival > h->scanned)
             return false;
         prev = rec.arrival;
@@ -891,9 +916,12 @@ static enum fleet_board_result board_record_ingest(
         return FLEET_BOARD_ERR_ID;
     if (post->scope != FLEET_BOARD_SCOPE_FLEET)
         return FLEET_BOARD_ERR_SCOPE;
-    /* From a roster answer, a box not armed yet takes sealed roster rows and
-     * offers the rest again once those rows have armed it. */
-    if (rec->roster_only && !boot_fleet_roster_is_row(post))
+    bool head = boot_fleet_roster_is_head_row(post);
+    if (rec->arrival == FLEET_BOARD_ROSTER_PINNED_ARRIVAL && !head)
+        return FLEET_BOARD_ERR_KIND; /* only a head row may stand outside */
+    /* From a roster answer, a box not armed yet takes sealed roster and head
+     * rows and offers the rest again once those rows have armed it. */
+    if (rec->roster_only && !boot_fleet_roster_is_row(post) && !head)
         return FLEET_BOARD_ERR_ROLE;
     /* ZRC 0012 step 2: an armed roster takes fleet posts from its members
      * only, and a roster row only when its seal verifies. A non-member
@@ -920,14 +948,21 @@ static bool board_offer(struct node_db *ndb, const struct board_record *rec,
     enum fleet_board_result r = board_record_ingest(ndb, rec, post, now,
                                                     &stored);
     if (board_refusal_retryable(r)) {
-        if (c && (c->carry_min == 0 || rec->arrival < c->carry_min))
+        /* A pinned record has no number to return to: it leads the next answer
+         * while the asker is still behind it. */
+        if (c && rec->arrival != FLEET_BOARD_ROSTER_PINNED_ARRIVAL &&
+            (c->carry_min == 0 || rec->arrival < c->carry_min))
             c->carry_min = rec->arrival;
         atomic_fetch_add_explicit(&g_deferred, 1, memory_order_relaxed);
         uint64_t skipped = 0;
         if (boot_fleet_roster_log_due(BOOT_FLEET_ROSTER_LOG_DEFERRED, now,
                                       &skipped))
             LOG_WARN("fleet.board", "fleet post deferred: %s (%llu more "
-                     "since the last line)", fleet_board_result_string(r),
+                     "since the last line)",
+                     rec->roster_only && r == FLEET_BOARD_ERR_ROLE
+                         ? "this box takes only sealed rows until they arm "
+                           "its roster"
+                         : fleet_board_result_string(r),
                      (unsigned long long)skipped);
     } else if (r != FLEET_BOARD_OK && r != FLEET_BOARD_ERR_EXPIRED) {
         /* An expired post is stale, not wrong. */
@@ -937,26 +972,51 @@ static bool board_offer(struct node_db *ndb, const struct board_record *rec,
     return stored;
 }
 
-/* Offer every record of a valid answer that this box does not already
- * hold (a held row is settled). A sweep offers only rows inside its range:
- * rows above it belong to forward pulls. */
-static size_t board_offer_all(struct node_db *ndb,
-                              const struct board_inbox_slot *slot,
-                              struct fleet_board_post *post, int64_t now,
-                              struct board_cursor *c)
+static bool board_record_is_head(const struct board_record *rec,
+                                 struct fleet_board_post *post)
+{
+    return fleet_board_post_decode(rec->wire, rec->wire_len, post) ==
+               FLEET_BOARD_OK &&
+           boot_fleet_roster_is_head_row(post);
+}
+
+/* One walk over a valid answer: its head rows, or the rest. A held row is
+ * settled, except that a pinned head is offered even when held: the row may
+ * date from before this box could apply it. A sweep offers only rows inside its
+ * range: rows above it belong to forward pulls. */
+static size_t board_offer_pass(struct node_db *ndb,
+                               const struct board_inbox_slot *slot,
+                               struct fleet_board_post *post, int64_t now,
+                               struct board_cursor *c, bool heads)
 {
     size_t off = FLEET_BOARD_FLEET_ANSWER_HEAD;
     size_t stored = 0;
     struct board_record rec;
     while (board_record_next(slot->rows, slot->len, &off, &rec)) {
+        if (board_record_is_head(&rec, post) != heads)
+            continue;
+        bool pinned = rec.arrival == FLEET_BOARD_ROSTER_PINNED_ARRIVAL;
         if ((slot->ask.sweep && rec.arrival > c->sweep_end) ||
-            db_fleet_board_have(ndb, rec.id))
+            (!pinned && db_fleet_board_have(ndb, rec.id)))
             continue;
         rec.roster_only = slot->roster_only;
         if (board_offer(ndb, &rec, post, now, c))
             stored++;
     }
     return stored;
+}
+
+/* The heads go first: whatever order the answer holds them in, a roster row or
+ * a post in the same answer is judged under the newest head it carries, so a
+ * row that would arm this box or a post by a revoked key cannot slip in ahead
+ * of the revocation. */
+static size_t board_offer_all(struct node_db *ndb,
+                              const struct board_inbox_slot *slot,
+                              struct fleet_board_post *post, int64_t now,
+                              struct board_cursor *c)
+{
+    size_t stored = board_offer_pass(ndb, slot, post, now, c, true);
+    return stored + board_offer_pass(ndb, slot, post, now, c, false);
 }
 
 /* Where the cursor stands once a whole answer has been offered. A forward
@@ -982,7 +1042,8 @@ static size_t board_drain_slot(struct node_db *ndb,
 {
     struct board_answer_head h;
     if (!answer_head_decode(slot->rows, slot->len, &h) ||
-        !board_answer_valid(slot->rows, slot->len, &h, slot->ask.after)) {
+        !board_answer_valid(slot->rows, slot->len, &h, slot->ask.after,
+                            slot->ask.roster)) {
         atomic_fetch_add_explicit(&g_answer_refused, 1, memory_order_relaxed);
         LOG_WARN("fleet.board", "fleet answer refused: malformed");
         return 0;

@@ -59,7 +59,10 @@ bool fleet_board_roster_admit(struct node_db *pairings, struct node_db *store,
 /* The asking half, on this lane's tick: judge the answering proof at the head
  * of `rows`, and strip it so what remains is a plain answer. `*roster_only`
  * is true while this box holds no armed roster of its own: only sealed roster
- * rows are then taken from the answer, which is how a member first arms. */
+ * and head rows are then taken from the answer, which is how a member first
+ * arms. No key is known to check the proof against yet, so a revoked machine
+ * can answer here until a head reaches this box: see the residual risk in
+ * docs/agent/FLEET_BOARD.md. */
 bool fleet_board_roster_answer_open(struct node_db *ndb,
                                     const struct fleet_board_roster_bind *bind,
                                     uint8_t *rows, size_t *len, int64_t now,

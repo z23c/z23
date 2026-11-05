@@ -533,8 +533,13 @@ static void fleet_board_handle_post(struct msg_processor *mp,
      * its seal verifies. Public scope never reaches the roster. The refusal
      * is this box's own policy about the author or the row, so the post is
      * dropped without scoring the relaying peer; the log line is rate
-     * limited so a peer that keeps sending cannot fill the log. */
-    r = boot_fleet_roster_screen_post(ndb, &post, now);
+     * limited so a peer that keeps sending cannot fill the log. A head row
+     * moves only over authenticated carriage: off this frame path it would
+     * cost this thread the head store's lock per replay, for a row the
+     * carriage lane brings anyway. */
+    r = boot_fleet_roster_is_head_row(&post)
+            ? FLEET_BOARD_ERR_SCOPE
+            : boot_fleet_roster_screen_post(ndb, &post, now);
     if (r != FLEET_BOARD_OK) {
         uint64_t skipped = 0;
         if (boot_fleet_roster_log_due(BOOT_FLEET_ROSTER_LOG_POST_DROPPED,
@@ -714,9 +719,10 @@ enum fleet_board_result boot_fleet_board_publish(
     r = fleet_board_sign_local(post);
     if (r != FLEET_BOARD_OK)
         return r;
-    /* A roster row is stored here only if its seal verifies, exactly as it
-     * would be off the wire: the local RPC is an ingest path too. */
-    if (boot_fleet_roster_is_row(post)) {
+    /* A roster or head row is stored here only if its seal verifies, exactly
+     * as it would be off the wire: the local RPC is an ingest path too. */
+    if (boot_fleet_roster_is_row(post) ||
+        boot_fleet_roster_is_head_row(post)) {
         r = boot_fleet_roster_screen_post(ndb, post, now);
         if (r != FLEET_BOARD_OK)
             return r;

@@ -686,11 +686,11 @@ static const char *fe_head_vouched(
     return NULL;
 }
 
-static enum fleet_head_state fe_head_load_mode(
+/* `text` holds FLEET_ENROL_HEAD_TEXT_MAX + 4 bytes and, on OK, the head's line. */
+static enum fleet_head_state fe_head_load_text(
     const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES],
-    struct fleet_head *out, const char **why, bool readonly)
+    struct fleet_head *out, char *text, const char **why, bool readonly)
 {
-    char *text = zcl_malloc(FLEET_ENROL_HEAD_TEXT_MAX + 4u, "fleet-head");
     const char *bad;
     struct fe_hwm m;
     size_t len = 0;
@@ -698,22 +698,15 @@ static enum fleet_head_state fe_head_load_mode(
     enum fe_hwm_state hs;
     fe_why(why, NULL);
     memset(out, 0, sizeof(*out));
-    if (!text) {
-        fe_why(why, FLEET_ENROL_WHY_HEAD_UNREADABLE);
-        return FLEET_HEAD_BAD;
-    }
     r = fe_read_strict_mode(FLEET_HEAD_LEAF, text, FLEET_ENROL_HEAD_TEXT_MAX + 4u,
                             &len, readonly);
     hs = fe_hwm_read_mode(&m, readonly);
-    if (r == FE_READ_ABSENT && hs == FE_HWM_ABSENT) {
-        free(text);
+    if (r == FE_READ_ABSENT && hs == FE_HWM_ABSENT)
         return FLEET_HEAD_ABSENT;
-    }
     while (r == FE_READ_OK && len > 0 &&
            (text[len - 1] == '\n' || text[len - 1] == '\r'))
         text[--len] = '\0';
     bad = fe_head_vouched(operator_pubkey, text, r, hs, &m, out);
-    free(text);
     if (bad) {
         memset(out, 0, sizeof(*out));
         fe_why(why, bad);
@@ -724,6 +717,43 @@ static enum fleet_head_state fe_head_load_mode(
         return FLEET_HEAD_BAD;
     }
     return FLEET_HEAD_OK;
+}
+
+static enum fleet_head_state fe_head_load_mode(
+    const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES],
+    struct fleet_head *out, const char **why, bool readonly)
+{
+    char *text = zcl_malloc(FLEET_ENROL_HEAD_TEXT_MAX + 4u, "fleet-head");
+    if (!text) {
+        memset(out, 0, sizeof(*out));
+        fe_why(why, FLEET_ENROL_WHY_HEAD_UNREADABLE);
+        return FLEET_HEAD_BAD;
+    }
+    enum fleet_head_state state =
+        fe_head_load_text(operator_pubkey, out, text, why, readonly);
+    free(text);
+    return state;
+}
+
+enum fleet_head_line_state fleet_head_line_load(
+    const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES], char *out,
+    size_t cap)
+{
+    char *text = zcl_malloc(FLEET_ENROL_HEAD_TEXT_MAX + 4u, "fleet-head-line");
+    struct fleet_head *head = zcl_malloc(sizeof(*head), "fleet-head-line");
+    enum fleet_head_line_state state = FLEET_HEAD_LINE_NONE;
+    if (text && head &&
+        fe_head_load_text(operator_pubkey, head, text, NULL, false) ==
+            FLEET_HEAD_OK) {
+        state = FLEET_HEAD_LINE_TOO_LONG;
+        if (strlen(text) < cap) {
+            memcpy(out, text, strlen(text) + 1u);
+            state = FLEET_HEAD_LINE_LOADED;
+        }
+    }
+    free(text);
+    free(head);
+    return state;
 }
 
 static bool fe_head_same(const struct fleet_head *a, const struct fleet_head *b)

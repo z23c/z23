@@ -194,9 +194,12 @@ ZCL_COMMAND_READY_COMMAND(
     "(FLEET_REVOKE_NOT_OPERATOR) and a held head this box cannot trust "
     "(FLEET_HEAD_UNREADABLE). `fleet admit` refuses a revoked machine; to let "
     "one back, mint a higher head without it (`fleet roster head`) and import "
-    "it. This is this box's policy: the head is printed for `fleet import` "
-    "elsewhere and sent nowhere. A box running -fleetrostergate=0 enforces no "
-    "head, and `fleet doctor` warns about that. The machine's ssh bridge line, "
+    "it. This box's node, run with -fleetrostergate, carries the head to the "
+    "other roster machines as a sealed board row at no coin cost, and "
+    "board_carries says whether it fits one row (about 44 revoked keys). The "
+    "head is also printed for `fleet import`, which needs no carriage. A box "
+    "running -fleetrostergate=0 takes and enforces no head, and `fleet doctor` "
+    "warns about that. The machine's ssh bridge line, "
     "mesh pairing and role rows are not touched.", 0,
     "fleet,roster,revoke,revocation,remove,machine,head,operator",
     "zcl.fleet_roster_revoke_input.v1", "zcl.fleet.roster.revoke.v1",
