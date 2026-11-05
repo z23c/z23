@@ -927,3 +927,7 @@ later lane flips it HARD.
 - 2026-11-05T05:54:56Z — REASON: Cancel in-flight onion dialing during orderly node shutdown without changing consensus
   old ROOT: 67502a564613cb4c7be8dd3acdac85d4c460de5717f923e07538dee1de54e6c6
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-05T06:12:20Z — REASON: Factor shutdown cancellation cleanup without changing behavior
+  old ROOT: 5793aa3ac1d0a80396c25f36546865403f3a27ad226e5ec34491e6c0846c5082
+  by: owner unseal ritual (make core-unseal)

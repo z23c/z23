@@ -539,6 +539,22 @@ static int onion_bridge_wait_circuit(struct onion_bridge *b,
     return waited_ms;
 }
 
+static bool onion_bridge_circuit_failed(struct onion_bridge *b,
+                                         struct onion_stream_dial_record *record,
+                                         zcl_socket_t *app_fd, int waited_ms)
+{
+    if (atomic_load(&b->phase) == BRIDGE_CONNECTED &&
+        !atomic_load(&b->terminal_seen)) return false;
+    bool was_terminal = atomic_load(&b->terminal_seen);
+    onion_stream_dial_bump(record, was_terminal ? ONION_DIAL_CIRCUIT_TORN_DOWN :
+                           ONION_DIAL_CIRCUIT_TIMEOUT, 1);
+    LOG_WARN("onion", "onion dial to %s %s (stage=%s waited_ms=%d)", b->desc,
+             was_terminal ? "was refused/torn down by Tor" : "timed out waiting for a circuit",
+             was_terminal ? "circuit_torn_down" : "circuit_timeout", waited_ms);
+    onion_bridge_teardown(b, app_fd);
+    return true;
+}
+
 static bool onion_stream_connect_once(const struct net_service *svc,
                                       zcl_socket_t *sock_out,
                                       int connect_timeout_ms,
@@ -627,22 +643,8 @@ static bool onion_stream_connect_once(const struct net_service *svc,
      * the peer died before its version frame could be written — with no
      * line naming why. Score it as the torn-down circuit it is and spend
      * the retry budget on a fresh one. */
-    if (atomic_load(&b->phase) != BRIDGE_CONNECTED ||
-        atomic_load(&b->terminal_seen)) {
-        bool was_terminal = atomic_load(&b->terminal_seen);
-        if (was_terminal)
-            onion_stream_dial_bump(record, ONION_DIAL_CIRCUIT_TORN_DOWN, 1);
-        else
-            onion_stream_dial_bump(record, ONION_DIAL_CIRCUIT_TIMEOUT, 1);
-        LOG_WARN("onion", "onion dial to %s %s (stage=%s waited_ms=%d)",
-                 b->desc,
-                 was_terminal ? "was refused/torn down by Tor"
-                              : "timed out waiting for a circuit",
-                 was_terminal ? "circuit_torn_down" : "circuit_timeout",
-                 waited_ms);
-        onion_bridge_teardown(b, &app_fd);
+    if (onion_bridge_circuit_failed(b, record, &app_fd, waited_ms))
         return false;
-    }
 
     onion_stream_dial_bump(record, ONION_DIAL_CIRCUIT_READY, 1);
     LOG_INFO("onion", "onion stage=circuit_ready target=%s build_ms=%lld",

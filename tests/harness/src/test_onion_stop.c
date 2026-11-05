@@ -77,25 +77,55 @@ static void *dial(void *unused)
     if (sock != ZCL_INVALID_SOCKET) close(sock);
     atomic_store(&done, true); return NULL;
 }
-static int child_case(const char *which)
+static bool child_setup(const char *which)
 {
     mode = which;
     uint8_t key[32]; memset(key, 0x41, sizeof(key));
     char host[ONION_V3_ADDRESS_LEN + 1]; net_service_init(&service);
     if (!onion_v3_address_from_pubkey(key, host) ||
-        !net_addr_from_onion(host, &service.addr)) return 2;
+        !net_addr_from_onion(host, &service.addr)) return false;
     service.port = 8033;
     budget = !strcmp(mode, "long") || !strcmp(mode, "retry") ? 120000 : 2000;
     if (!strcmp(mode, "pre")) thread_registry_request_shutdown();
-    pthread_t worker;
-    if (pthread_create(&worker, NULL, dial, NULL)) return 2;
+    return true;
+}
+static bool child_wait_open(pthread_t worker)
+{
     int waited = 0;
     if (strcmp(mode, "pre"))
         while (!atomic_load(&opens) && waited < 3000) { platform_sleep_ms(10); waited += 10; }
-    if (strcmp(mode, "pre") && !atomic_load(&opens)) { pthread_join(worker, NULL); return 2; }
+    if (strcmp(mode, "pre") && !atomic_load(&opens)) { pthread_join(worker, NULL); return false; }
+    return true;
+}
+static bool child_should_cancel(void)
+{
+    return !strcmp(mode, "short") || !strcmp(mode, "long") ||
+           !strcmp(mode, "delayed") || !strcmp(mode, "late");
+}
+static int child_validate_delayed(const struct onion_stream_stages *st)
+{
+    return !(terminal_started && atomic_load(&terminal_delivered) &&
+             !connected && atomic_load(&opens) == 1 &&
+             atomic_load(&closes) == 1 && st->circuit_timeout == 0);
+}
+static int child_validate(int64_t elapsed, const struct onion_stream_stages *st)
+{
+    if (!strcmp(mode, "delayed") || !strcmp(mode, "late"))
+        return child_validate_delayed(st);
+    if (!strcmp(mode, "retry")) return !(connected && atomic_load(&opens) == 2 &&
+        atomic_load(&closes) == 2 && st->circuit_timeout == 0);
+    if (!strcmp(mode, "pre")) return !(elapsed < 500 && !connected && !atomic_load(&opens));
+    return !(elapsed < 500 && !connected && atomic_load(&opens) == 1 &&
+             atomic_load(&closes) == 1 && st->circuit_timeout == 0);
+}
+static int child_case(const char *which)
+{
+    if (!child_setup(which)) return 2;
+    pthread_t worker;
+    if (pthread_create(&worker, NULL, dial, NULL)) return 2;
+    if (!child_wait_open(worker)) return 2;
     int64_t start = platform_time_monotonic_ms();
-    if (!strcmp(mode, "short") || !strcmp(mode, "long") ||
-        !strcmp(mode, "delayed") || !strcmp(mode, "late")) {
+    if (child_should_cancel()) {
         thread_registry_request_shutdown(); connman_signal_stop(NULL);
     }
     while (!atomic_load(&done) && platform_time_monotonic_ms() - start < 3000)
@@ -109,15 +139,7 @@ static int child_case(const char *which)
     printf("case=%s elapsed_ms=%lld opens=%d closes=%d connected=%d timeout=%llu\n",
         mode, (long long)elapsed, atomic_load(&opens), atomic_load(&closes), connected,
         (unsigned long long)st.circuit_timeout);
-    if (!strcmp(mode, "delayed") || !strcmp(mode, "late"))
-        return !(terminal_started && atomic_load(&terminal_delivered) &&
-                 !connected && atomic_load(&opens) == 1 &&
-                 atomic_load(&closes) == 1 && st.circuit_timeout == 0);
-    if (!strcmp(mode, "retry")) return !(connected && atomic_load(&opens) == 2 &&
-        atomic_load(&closes) == 2 && st.circuit_timeout == 0);
-    if (!strcmp(mode, "pre")) return !(elapsed < 500 && !connected && !atomic_load(&opens));
-    return !(elapsed < 500 && !connected && atomic_load(&opens) == 1 &&
-             atomic_load(&closes) == 1 && st.circuit_timeout == 0);
+    return child_validate(elapsed, &st);
 }
 void onion_stop_child_exit_if_requested(int argc, char **argv)
 {
