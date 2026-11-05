@@ -5,6 +5,8 @@
 #include "zswap/zswap_ceremony.h"
 #include "zswap/zswap_quote.h"
 
+#include "fuzz_checks.h"
+
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -19,14 +21,6 @@ volatile sig_atomic_t g_shutdown_requested = 0;
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 
 /* A decode error must leave the output zeroed (the header's contract). */
-static void require_zeroed(const void *out, size_t len)
-{
-    const uint8_t *p = out;
-    for (size_t i = 0; i < len; i++)
-        if (p[i] != 0)
-            abort();
-}
-
 static void fuzz_accept(const uint8_t *wire, size_t wire_len)
 {
     struct zswap_accept_v1 decoded;

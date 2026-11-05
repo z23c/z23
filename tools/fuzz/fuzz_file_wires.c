@@ -30,6 +30,8 @@
 #include "sapling/fr.h"
 #include "util/safe_alloc.h"
 
+#include "fuzz_checks.h"
+
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -85,14 +87,6 @@ static void require_filled(const uint8_t *p, size_t len)
 {
     for (size_t i = 0; i < len; i++)
         if (p[i] != FUZZ_FILE_CANARY)
-            abort();
-}
-
-static void require_zeroed(const void *out, size_t len)
-{
-    const uint8_t *p = out;
-    for (size_t i = 0; i < len; i++)
-        if (p[i] != 0)
             abort();
 }
 

@@ -17,6 +17,8 @@
 #include "vcs/zcode_dht_msgs.h"
 #include "vcs/zcode_work_swarm.h"
 
+#include "fuzz_checks.h"
+
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -56,14 +58,6 @@ static void guard_check(const uint8_t *band)
 
 #define GUARD_ARM(g) guard_arm((g).pre, &(g).v, sizeof((g).v), (g).post)
 #define GUARD_CHECK(g) do { guard_check((g).pre); guard_check((g).post); } while (0)
-
-static void require_zeroed(const void *out, size_t len)
-{
-    const uint8_t *p = out;
-    for (size_t i = 0; i < len; i++)
-        if (p[i] != 0)
-            abort();
-}
 
 static void require_same(const uint8_t *a, size_t a_len, const uint8_t *b,
                          size_t b_len)
