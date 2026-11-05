@@ -11872,6 +11872,19 @@ static int test_fleet_board_head_row_bootstrap(void)
                   BOOT_FLEET_ROSTER_MEMBER);
         PASS();
     }
+    TEST("fleet head row: the real lane's tick finds the row an answer leads "
+         "with, and a pull past that row pays nothing") {
+        static struct db_fleet_board_post row;
+        fbh_box(FBH_OWNER);
+        fbh_serve(&w.a);
+        ASSERT(!fleet_board_roster_pinned_head(&w.a, 0, &row));
+        ASSERT_EQ(boot_fleet_board_fleet_test_pull_roster_lane(&w.svc, &w.a, now),
+                  (size_t)0);
+        ASSERT(fleet_board_roster_pinned_head(&w.a, 0, &row));
+        ASSERT(boot_fleet_roster_is_head_row(&row.post));
+        ASSERT(!fleet_board_roster_pinned_head(&w.a, row.arrival, &row));
+        PASS();
+    }
     TEST("fleet head row: a hostile answer that withholds the head arms a fresh "
          "box with the revoked key, and the next honest answer overrides it "
          "within one pull") {
