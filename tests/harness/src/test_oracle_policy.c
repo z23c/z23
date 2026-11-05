@@ -330,6 +330,12 @@ static int t_default_config(void)
                   (int64_t)op_expected_default_prefix());
         ASSERT_EQ(op_dump_int("ring_count"), (int64_t)0);
     } TEST_END
+    return failures;
+}
+
+static int t_default_config_2(void)
+{
+    int failures = 0;
     TEST_CASE("oracle_policy: a zero config falls back to the same defaults")
     {
         oracle_policy_reset_for_test();
@@ -340,6 +346,12 @@ static int t_default_config(void)
         ASSERT_EQ(op_dump_int("evidence_prefix_end_height"),
                   (int64_t)op_expected_default_prefix());
     } TEST_END
+    return failures;
+}
+
+static int t_default_config_3(void)
+{
+    int failures = 0;
     TEST_CASE("oracle_policy: the smallest positive config values are honoured")
     {
         op_arm_cfg(1, 1, 1);
@@ -370,6 +382,12 @@ static int t_default_window_boundary(void)
         ASSERT_EQ(op_dump_int("distinct_heights_in_window"), (int64_t)0);
         ASSERT_EQ(op_dump_int("ring_count"), (int64_t)1);   /* aged, not freed */
     } TEST_END
+    return failures;
+}
+
+static int t_default_window_boundary_2(void)
+{
+    int failures = 0;
     TEST_CASE("oracle_policy: default halt threshold is 3 distinct heights")
     {
         oracle_policy_reset_for_test();
@@ -401,6 +419,12 @@ static int t_default_prefix_boundary(void)
             ASSERT(oracle_policy_get_state() == OP_PANIC);
         }
     } TEST_END
+    return failures;
+}
+
+static int t_default_prefix_boundary_2(void)
+{
+    int failures = 0;
     TEST_CASE("oracle_policy: configured prefix end 100 PANICs at 100, not at 101")
     {
         op_arm_cfg(86400, 50, 100);
@@ -433,6 +457,12 @@ static int t_ring_capacity(void)
         ASSERT_EQ(op_dump_int("distinct_heights_in_window"), (int64_t)32);
         ASSERT_EQ(op_dump_int("total_disagree"), (int64_t)40);
     } TEST_END
+    return failures;
+}
+
+static int t_ring_capacity_2(void)
+{
+    int failures = 0;
     TEST_CASE("oracle_policy: a repeated height is one distinct height, even the first")
     {
         op_arm_cfg(86400, 5, 1);
@@ -465,6 +495,12 @@ static int t_halt_window_and_events(void)
         ASSERT(op_ev_is(2, 1, "reason=fork_suspected distinct_heights=3"));
         ASSERT(op_ev_is(0, 0, ""));
     } TEST_END
+    return failures;
+}
+
+static int t_halt_window_and_events_2(void)
+{
+    int failures = 0;
     TEST_CASE("oracle_policy: HALT with a wide window and a clock near zero")
     {
         op_arm_cfg(86400, 3, 1);
@@ -482,6 +518,12 @@ static int t_halt_window_and_events(void)
                               "first_h=7100001 last_h=7100003"));
         ASSERT(op_ev_is(2, 1, "reason=fork_suspected distinct_heights=3"));
     } TEST_END
+    return failures;
+}
+
+static int t_halt_window_and_events_3(void)
+{
+    int failures = 0;
     TEST_CASE("oracle_policy: a record one second past the window does not count")
     {
         op_arm_cfg(10, 2, 1);
@@ -514,6 +556,12 @@ static int t_panic_events_and_upgrade(void)
         ASSERT(op_ev_is(0, 2, "h=60 our= their="));
         ASSERT_EQ(op_dump_int("total_panics"), (int64_t)2);
     } TEST_END
+    return failures;
+}
+
+static int t_panic_events_and_upgrade_2(void)
+{
+    int failures = 0;
     TEST_CASE("oracle_policy: HALTED escalates to PANIC on a prefix disagreement")
     {
         op_arm_cfg(86400, 3, 100);
@@ -542,6 +590,12 @@ static int t_last_fields_and_reset(void)
         ASSERT_EQ(op_dump_int("last_unix"), (int64_t)1234567);
         ASSERT_EQ(op_dump_int("total_disagree"), (int64_t)1);
     } TEST_END
+    return failures;
+}
+
+static int t_last_fields_and_reset_2(void)
+{
+    int failures = 0;
     TEST_CASE("oracle_policy: reset_for_test zeroes state, counters and last fields")
     {
         op_arm_cfg(86400, 3, 100);
@@ -561,6 +615,12 @@ static int t_last_fields_and_reset(void)
         ASSERT_EQ(op_dump_int("last_unix"), (int64_t)0);
         ASSERT_EQ(op_dump_int("ring_count"), (int64_t)0);
     } TEST_END
+    return failures;
+}
+
+static int t_last_fields_and_reset_3(void)
+{
+    int failures = 0;
     TEST_CASE("oracle_policy: clear() restarts the ring at slot 0")
     {
         op_arm_cfg(86400, 5, 1);
@@ -592,6 +652,12 @@ static int t_names_dump_and_init_once(void)
         json_free(&v);
         ASSERT(ok == true);
     } TEST_END
+    return failures;
+}
+
+static int t_names_dump_and_init_once_2(void)
+{
+    int failures = 0;
     TEST_CASE("oracle_policy: a second init is ignored and leaves the lock usable")
     {
         op_arm_cfg(86400, 3, 1);
@@ -614,13 +680,24 @@ static int oracle_policy_sweep_tests(void)
 {
     int failures = 0;
     failures += t_default_config();
+    failures += t_default_config_2();
+    failures += t_default_config_3();
     failures += t_default_window_boundary();
+    failures += t_default_window_boundary_2();
     failures += t_default_prefix_boundary();
+    failures += t_default_prefix_boundary_2();
     failures += t_ring_capacity();
+    failures += t_ring_capacity_2();
     failures += t_halt_window_and_events();
+    failures += t_halt_window_and_events_2();
+    failures += t_halt_window_and_events_3();
     failures += t_panic_events_and_upgrade();
+    failures += t_panic_events_and_upgrade_2();
     failures += t_last_fields_and_reset();
+    failures += t_last_fields_and_reset_2();
+    failures += t_last_fields_and_reset_3();
     failures += t_names_dump_and_init_once();
+    failures += t_names_dump_and_init_once_2();
     return failures;
 }
 
