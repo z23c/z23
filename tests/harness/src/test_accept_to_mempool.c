@@ -42,6 +42,7 @@ static void atm_note_guard_attempt(void)
 {
     pthread_mutex_lock(&atm_guard_lock);
     if (++atm_guard_calls != atm_guard_target) {
+        pthread_cond_broadcast(&atm_guard_changed);
         pthread_mutex_unlock(&atm_guard_lock);
         return;
     }
@@ -690,21 +691,21 @@ static bool atm_case_guard_released_between_retries(const struct atm_ctx *c)
     zcl_mutex_lock(&c->state->cs_main);
     pthread_t th;
     bool started = ok && pthread_create(&th, NULL, atm_guard_worker, &job) == 0;
+    /* No deadline: the group watchdog catches a worker that truly wedges, and a
+     * busy box cannot flip this wait into a failure. */
     bool retried = false;
-    for (int i = 0; started && i < 500 && !retried; i++) {
-        pthread_mutex_lock(&atm_guard_lock);
-        retried = atm_guard_calls >= 3;
-        pthread_mutex_unlock(&atm_guard_lock);
-        if (!retried) platform_sleep_ms(10);
-    }
+    pthread_mutex_lock(&atm_guard_lock);
+    while (started && atm_guard_calls < 3 && !job.done)
+        pthread_cond_wait(&atm_guard_changed, &atm_guard_lock);
+    retried = atm_guard_calls >= 3;
+    pthread_mutex_unlock(&atm_guard_lock);
     zcl_mutex_unlock(&c->state->cs_main);
     if (!started) { boot_test_set_mempool_guard_attempt(NULL); atm_fix_free(&f); return false; }
-    if (!retried) { pthread_detach(th); return false; } /* worker is stuck: leave its fixture */
     pthread_join(th, NULL);
     boot_test_set_mempool_guard_attempt(NULL);
     bool lock_free = progress_store_tx_trylock();
     if (lock_free) progress_store_tx_unlock();
-    ok = job.result == MEMPOOL_ACCEPT_OK && lock_free;
+    ok = retried && job.result == MEMPOOL_ACCEPT_OK && lock_free;
     atm_fix_free(&f);
     return ok;
 }
