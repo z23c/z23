@@ -343,8 +343,22 @@ static inline char *test_mksockdir(char *buf, size_t n, const char *prefix,
         if (!test_ensure_tmproot()) return NULL;
         return mkdtemp(buf);
     }
-    if (!test_sockdir_format(buf, n, "/dev/shm", prefix, leaf_len)) return NULL;
-    return mkdtemp(buf);
+    if (test_sockdir_format(buf, n, "/dev/shm", prefix, leaf_len) &&
+        mkdtemp(buf))
+        return buf;
+#if defined(__APPLE__)
+    /* macOS has no /dev/shm. Its per-user temp directory (a short
+     * /var/folders path) is the equivalent short scratch root; the
+     * lint-visible bare /tmp literal is not used. */
+    char user_tmp[PATH_MAX];
+    size_t len = confstr(_CS_DARWIN_USER_TEMP_DIR, user_tmp, sizeof(user_tmp));
+    if (len == 0 || len > sizeof(user_tmp)) return NULL;
+    while (len > 1 && user_tmp[len - 2] == '/') user_tmp[--len - 1] = '\0';
+    if (user_tmp[0] != '/') return NULL;
+    if (test_sockdir_format(buf, n, user_tmp, prefix, leaf_len))
+        return mkdtemp(buf);
+#endif
+    return NULL;
 }
 
 /* Shared helper functions */

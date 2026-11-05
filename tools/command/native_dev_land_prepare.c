@@ -21,6 +21,9 @@
 #include "util/spawn.h"
 
 #include <dirent.h>
+#if defined(__APPLE__)
+#include <libproc.h> /* proc_listpgrppids, proc_pidinfo: group CPU progress */
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -101,8 +104,8 @@ static void dlp_report_ok(zcl_land_prepare_sink sink, void *context,
 /* Cumulative CPU ticks (user+system, own and reaped children) of every live
  * process in process group `pgrp`. It moves whenever a compiler, linker or
  * test binary of the build is running or has just finished; a wedged group
- * holds it still. Linux only: elsewhere it is constant, so progress there is
- * output alone. */
+ * holds it still. Linux reads /proc and macOS reads libproc; elsewhere it is
+ * constant, so progress there is output alone. */
 static unsigned long long dlp_group_ticks(int pgrp)
 {
     unsigned long long sum = 0;
@@ -130,6 +133,20 @@ static unsigned long long dlp_group_ticks(int pgrp)
             sum += ut + st + cut + cst;
     }
     (void)closedir(dir);
+#elif defined(__APPLE__)
+    /* Live members of the group, each one's cumulative user+system CPU time.
+     * A reaped child's time leaves the sum, which is also a change, so a
+     * build that is compiling moves this and a wedged group holds it still. */
+    pid_t members[512];
+    int bytes = proc_listpgrppids((pid_t)pgrp, members, (int)sizeof(members));
+    int count = bytes > 0 ? bytes / (int)sizeof(members[0]) : 0;
+    for (int i = 0; i < count; i++) {
+        struct proc_taskinfo task;
+        if (members[i] <= 0) continue;
+        if (proc_pidinfo(members[i], PROC_PIDTASKINFO, 0, &task,
+                         (int)sizeof(task)) != (int)sizeof(task)) continue;
+        sum += task.pti_total_user + task.pti_total_system;
+    }
 #else
     (void)pgrp;
 #endif

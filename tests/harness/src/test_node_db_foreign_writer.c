@@ -271,8 +271,27 @@ static int node_db_foreign_writer_checks(void)
         printf("node_db_foreign_writer: fixture setup FAIL\n");
         return 1;
     }
-    failures += writer_scan_checks(&fx);
-    failures += writer_bound_checks(&fx);
+    /* The scan reads /proc, so off Linux it answers UNSUPPORTED by design
+     * rather than guess. That answer is the assertion there; the holder
+     * scenarios cannot be observed, and say so instead of failing. */
+    struct os_proc_foreign_writer probe;
+    memset(&probe, 0, sizeof probe);
+    enum os_proc_writer_result probed =
+        os_proc_foreign_writer_find(fx.path, &probe);
+#if defined(__linux__)
+    FWRITER_CHECK("the scan is supported on Linux",
+                  probed != OS_PROC_WRITER_UNSUPPORTED);
+#else
+    FWRITER_CHECK("off Linux the scan says UNSUPPORTED and reports no pid",
+                  probed == OS_PROC_WRITER_UNSUPPORTED && probe.pid == 0);
+#endif
+    if (probed == OS_PROC_WRITER_UNSUPPORTED) {
+        printf("UNOBSERVED (node_db_foreign_writer: the holder scan needs "
+               "/proc, a Linux host)\n");
+    } else {
+        failures += writer_scan_checks(&fx);
+        failures += writer_bound_checks(&fx);
+    }
     failures += writer_report_checks();
     writer_fixture_remove(&fx);
     return failures;

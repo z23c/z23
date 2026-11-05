@@ -854,6 +854,25 @@ static void tunnel_beat_until_readable(struct tunnel_test_wire *wire,
     }
 }
 
+/* Beat until the entrance's newest stream has ended, or the rounds run out.
+ * A hang-up reaches the tunnel's socket when the kernel delivers it, which
+ * is not inside a fixed number of beats on every host; the outcome waited
+ * on is the row naming the end, and between beats the served socket (shut
+ * when the far side ends) gets a short readable wait so a slow delivery
+ * has real time to land. */
+static void tunnel_beat_until_ended(struct tunnel_test_wire *wire,
+                                    uint64_t id, platform_socket_t served)
+{
+    struct mesh_tunnel_row row;
+    for (int i = 0; i < TUNNEL_TEST_SETTLE_ROUNDS; i++) {
+        tunnel_beat(wire, 1);
+        if (tunnel_row_of(id, &row) && row.streams_open == 0 &&
+            row.last_stream_end_unix != 0)
+            return;
+        (void)platform_socket_wait_readable(served, 10);
+    }
+}
+
 /* Close one finished entrance and take its allow row away. */
 static bool tunnel_live_finish(struct tunnel_test_wire *wire,
                                struct tunnel_live_conn *c, const char *paired)
@@ -905,6 +924,7 @@ static int tunnel_health_flow_case(struct tunnel_test_wire *wire,
         mesh_tunnel_test_set_now(TUNNEL_TEST_STAMP_END);
         tunnel_drop(&c.client);
         tunnel_beat(wire, 4);
+        tunnel_beat_until_ended(wire, c.id, c.served);
         bool c_clean =
             tunnel_row_of(c.id, &row) && row.streams_open == 0 &&
             row.streams_failed_total == 0 &&

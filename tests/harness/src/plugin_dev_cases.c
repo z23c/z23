@@ -172,6 +172,17 @@ static int pdc_case_cases(struct pdc_env *e)
         ASSERT(pdc_state(e, &count, before));
         ASSERT_EQ(count, 2u);
         ASSERT(pdc_dev_cases(e, "\"not an array\"", &r));
+#if !defined(__linux__)
+        /* Off Linux the lab is unsupported, so the cases cannot run at all
+         * and plugin dev refuses before any step; the case verdicts are
+         * unobserved here. The refusal and the untouched state are checked. */
+        ASSERT_STR_EQ(r.error.code, "PLUGIN_DEV_CASES_UNAVAILABLE");
+        zcl_command_reply_free(&r);
+        ASSERT(pdc_state(e, &count, after));
+        ASSERT_EQ(count, 2u);
+        ASSERT_STR_EQ(after, before);
+        printf("UNOBSERVED (plugin_dev_cases: running cases needs the Linux lab)... ");
+#else
         ASSERT_STR_EQ(r.error.code, "PLUGIN_DEV_BAD_CASES");
         zcl_command_reply_free(&r);
         ASSERT(pdc_dev_cases(e, "[{\"name\":\"upcase\",\"stdin\":\"abc\\n\",\"expect_stdout\":\"ABC\\n\"}]", &r));
@@ -184,6 +195,7 @@ static int pdc_case_cases(struct pdc_env *e)
         ASSERT(pdc_state(e, &count, after));
         ASSERT_EQ(count, 2u);
         ASSERT_STR_EQ(after, before);
+#endif
     } TEST_END
     return failures;
 }
@@ -196,6 +208,18 @@ static int pdc_case_cases_pass(struct pdc_env *e)
     size_t count = 0;
     TEST_CASE("plugin dev with passing cases makes a new current generation") {
         ASSERT(pdc_dev_cases(e, "[{\"name\":\"echo\",\"stdin\":\"abc\\n\",\"expect_stdout\":\"abc\\n\",\"expect_exit\":0}]", &r));
+#if !defined(__linux__)
+        /* Off Linux the cases cannot run (the lab is unsupported), so no
+         * generation is made: the refusal is the assertion, the pass is
+         * unobserved. */
+        ASSERT(r.exit_code != ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(r.error.code, "PLUGIN_DEV_CASES_UNAVAILABLE");
+        zcl_command_reply_free(&r);
+        ASSERT(pdc_state(e, &count, after));
+        ASSERT_EQ(count, 2u);
+        (void)before;
+        printf("UNOBSERVED (plugin_dev_cases: running cases needs the Linux lab)... ");
+#else
         ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_OK);
         ASSERT_EQ(json_get_int(json_get(&r.data, "sequence")), 3);
         snprintf(before, sizeof(before), "%s", json_get_str(json_get(&r.data, "generation")));
@@ -203,6 +227,7 @@ static int pdc_case_cases_pass(struct pdc_env *e)
         ASSERT(pdc_state(e, &count, after));
         ASSERT_EQ(count, 3u);
         ASSERT_STR_EQ(after, before);
+#endif
     } TEST_END
     return failures;
 }
