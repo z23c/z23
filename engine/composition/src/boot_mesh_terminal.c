@@ -855,9 +855,10 @@ static bool terminal_workdir(const char *datadir,
         return false;
     if (!platform_private_directory_ensure(parent))
         return false;
-    if (!platform_private_directory_ensure(out))
-        return false;
-    return true;
+    /* The directory must be new: an id that already has one is a live
+     * session's (or a leftover), and ending either session removes the
+     * whole tree, so two sessions never share it. */
+    return platform_private_directory_create(out);
 }
 
 #ifdef ZCL_TESTING
