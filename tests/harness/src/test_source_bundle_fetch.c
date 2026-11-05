@@ -182,7 +182,7 @@ struct sbft_directory_peer {
     pthread_t tid;
     _Atomic bool stop;
     _Atomic int listings;
-    char body[8192];
+    char body[9000]; /* over the fetcher's 8192-byte directory cap, on purpose */
 };
 
 static void *sbft_directory_thread(void *arg)
@@ -1388,9 +1388,531 @@ static int test_one_seeder_fills_the_candidate_set(void)
     return failures;
 }
 
+/* ── Mutation-measured gaps: bounds, grouping, caps, staging, scoring ───
+ *
+ * Each helper below returns false on the first unmet requirement (printing the
+ * line) so the TEST wrapper can always run its teardown. */
+
+#define SBFT_REQ(cond) do { \
+    if (!(cond)) { \
+        printf("\n    sbft requirement failed at line %d: %s\n", __LINE__, \
+               #cond); \
+        return false; \
+    } \
+} while (0)
+
+/* One honest seeder, one bundle, one client staging directory. Zero-initialised
+ * so a close after a failed open touches only what was actually created. */
+struct sbft_fx {
+    char troot[PATH_MAX];
+    char sroot[PATH_MAX];
+    char croot[PATH_MAX];
+    char *tdir;
+    char *sdir;
+    char *cdir;
+    uint8_t root[32];
+    uint8_t *wire;
+    size_t wire_len;
+    struct rom_artifact art;
+    uint16_t port;
+};
+
+static bool sbft_fx_open(struct sbft_fx *fx, const char *tag)
+{
+    memset(fx, 0, sizeof(*fx));
+    sbft_open_caps();
+    char prefix[64];
+    snprintf(prefix, sizeof(prefix), "zcl_sbfx_%s_t", tag);
+    fx->tdir = test_mkdtemp(fx->troot, sizeof(fx->troot), prefix);
+    snprintf(prefix, sizeof(prefix), "zcl_sbfx_%s_s", tag);
+    fx->sdir = test_mkdtemp(fx->sroot, sizeof(fx->sroot), prefix);
+    snprintf(prefix, sizeof(prefix), "zcl_sbfx_%s_c", tag);
+    fx->cdir = test_mkdtemp(fx->croot, sizeof(fx->croot), prefix);
+    if (!fx->tdir || !fx->sdir || !fx->cdir || !sbft_make_tree(fx->tdir, 'A') ||
+        !sbft_bundle(fx->tdir, fx->root, &fx->wire, &fx->wire_len) ||
+        !sbft_write(fx->sdir, "tree.zvsb", fx->wire, fx->wire_len) ||
+        rom_seed_register(fx->sdir, "tree.zvsb", NULL, &fx->art) != ROM_REG_OK)
+        return false;
+    fx->port = sbft_serve(fx->sdir);
+    return fx->port != 0;
+}
+
+static void sbft_fx_close(struct sbft_fx *fx)
+{
+    fs_server_stop();
+    free(fx->wire);
+    if (fx->cdir) test_cleanup_tmpdir(fx->cdir);
+    if (fx->sdir) test_cleanup_tmpdir(fx->sdir);
+    if (fx->tdir) test_cleanup_tmpdir(fx->tdir);
+    memset(fx, 0, sizeof(*fx));
+    sbft_open_caps();
+}
+
+/* One advertised artifact, every field a lying directory can vary. pad_to, when
+ * non-zero, pads the JSON with blanks to exactly that many bytes. */
+struct sbft_offer {
+    uint8_t chunk_root[32];
+    uint8_t whole[32];
+    uint8_t source_root[32];
+    uint64_t size;
+    uint32_t chunks;
+    size_t pad_to;
+};
+
+static void sbft_offer_true(const struct sbft_fx *fx, struct sbft_offer *o)
+{
+    memcpy(o->chunk_root, fx->art.chunk_root, 32);
+    memcpy(o->whole, fx->art.whole_sha3, 32);
+    memcpy(o->source_root, fx->root, 32);
+    o->size = fx->art.size_bytes;
+    o->chunks = fx->art.num_chunks;
+    o->pad_to = 0;
+}
+
+static bool sbft_offer_body(const struct sbft_offer *o, char *body, size_t cap)
+{
+    int n = snprintf(body, cap, "{\"artifacts\":[");
+    if (n <= 0)
+        return false;
+    size_t off = (size_t)n;
+    if (!sbft_append_offer(body, cap, &off, false, o->chunk_root, o->whole,
+                           o->source_root, o->size, o->chunks))
+        return false;
+    while (o->pad_to != 0 && off + 2u < o->pad_to) {
+        if (off + 1u >= cap)
+            return false;
+        body[off++] = ' ';
+    }
+    return sbft_finish_directory(body, cap, &off) &&
+           (o->pad_to == 0 || off == o->pad_to);
+}
+
+struct sbft_run {
+    enum source_bundle_fetch_result rc;
+    struct source_bundle_fetch_metrics m;
+    bool same_bytes;
+    bool dir_empty;
+};
+
+/* Ask [a peer that can only list `o`, the honest seeder]. The first peer can
+ * never deliver, so the call succeeds only if the honest peer ends up in a
+ * candidate that can reach it. */
+static bool sbft_liar_first(const struct sbft_fx *fx, const struct sbft_offer *o,
+                            struct sbft_run *out)
+{
+    memset(out, 0, sizeof(*out));
+    char body[9000];
+    SBFT_REQ(sbft_offer_body(o, body, sizeof(body)));
+    struct sbft_directory_peer liar;
+    SBFT_REQ(sbft_directory_start(&liar, body));
+    struct rom_fetch_peer peers[2];
+    sbft_peer(&peers[0], liar.port);
+    sbft_peer(&peers[1], fx->port);
+    uint8_t *got = NULL;
+    size_t got_len = 0;
+    out->rc = source_bundle_fetch(peers, 2, fx->root, fx->cdir, &got, &got_len,
+                                  &out->m);
+    out->same_bytes = got && got_len == fx->wire_len &&
+                      memcmp(got, fx->wire, got_len) == 0;
+    free(got);
+    sbft_directory_stop(&liar);
+    out->dir_empty = sbft_dir_empty(fx->cdir);
+    return true;
+}
+
+static bool sbft_run_ok(const struct sbft_run *r, uint32_t offering)
+{
+    return r->rc == SOURCE_BUNDLE_FETCH_OK && r->same_bytes && r->dir_empty &&
+           r->m.peers_asked == 2 && r->m.peers_offering == offering &&
+           r->m.candidates_tried == 1;
+}
+
+static int test_fetch_result_strings(void)
+{
+    int failures = 0;
+    TEST("source_bundle_fetch: every result has its own stable name and an "
+         "unknown value is named unknown") {
+        ASSERT(strcmp(source_bundle_fetch_result_string(
+                   SOURCE_BUNDLE_FETCH_OK), "ok") == 0);
+        ASSERT(strcmp(source_bundle_fetch_result_string(
+                   SOURCE_BUNDLE_FETCH_ERR_ARGS), "bad-arguments") == 0);
+        ASSERT(strcmp(source_bundle_fetch_result_string(
+                   SOURCE_BUNDLE_FETCH_ERR_NO_PEER),
+                   "no-peer-offers-this-root") == 0);
+        ASSERT(strcmp(source_bundle_fetch_result_string(
+                   SOURCE_BUNDLE_FETCH_ERR_TRANSPORT),
+                   "no-candidate-delivered") == 0);
+        ASSERT(strcmp(source_bundle_fetch_result_string(
+                   SOURCE_BUNDLE_FETCH_ERR_ROOT), "tree-root-mismatch") == 0);
+        ASSERT(strcmp(source_bundle_fetch_result_string(
+                   SOURCE_BUNDLE_FETCH_ERR_STAGING),
+                   "staging-unreadable") == 0);
+        ASSERT(strcmp(source_bundle_fetch_result_string(
+                   SOURCE_BUNDLE_FETCH_ERR_ALLOC), "allocation") == 0);
+        ASSERT(strcmp(source_bundle_fetch_result_string(
+                   SOURCE_BUNDLE_FETCH_ERR_BUDGET),
+                   "time-budget-spent") == 0);
+        ASSERT(strcmp(source_bundle_fetch_result_string(
+                   (enum source_bundle_fetch_result)99), "unknown") == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Peers that are never dialled (port 0), so only the argument contract and the
+ * skip rules are exercised. */
+static bool sbft_args_staging_length(void)
+{
+    struct rom_fetch_peer dead[SOURCE_BUNDLE_FETCH_MAX_PEERS];
+    for (size_t i = 0; i < SOURCE_BUNDLE_FETCH_MAX_PEERS; i++)
+        sbft_peer(&dead[i], 0);
+    uint8_t root[32];
+    memset(root, 0x5C, sizeof(root));
+    char dir[1100];
+    uint8_t *got = NULL;
+    size_t got_len = 0;
+    struct source_bundle_fetch_metrics m;
+
+    /* The staging directory must be strictly shorter than 1024 bytes. */
+    memset(dir, 'd', sizeof(dir));
+    dir[1023] = '\0';
+    SBFT_REQ(source_bundle_fetch(dead, 1, root, dir, &got, &got_len, &m) ==
+             SOURCE_BUNDLE_FETCH_ERR_NO_PEER);
+    dir[1023] = 'd';
+    dir[1024] = '\0';
+    SBFT_REQ(source_bundle_fetch(dead, 1, root, dir, &got, &got_len, &m) ==
+             SOURCE_BUNDLE_FETCH_ERR_ARGS);
+    dir[1024] = 'd';
+    dir[1025] = '\0';
+    SBFT_REQ(source_bundle_fetch(dead, 1, root, dir, &got, &got_len, &m) ==
+             SOURCE_BUNDLE_FETCH_ERR_ARGS);
+
+    /* A one-character directory is a directory; an empty one is not. */
+    SBFT_REQ(source_bundle_fetch(dead, 1, root, "x", &got, &got_len, &m) ==
+             SOURCE_BUNDLE_FETCH_ERR_NO_PEER);
+    SBFT_REQ(source_bundle_fetch(dead, 1, root, "", &got, &got_len, &m) ==
+             SOURCE_BUNDLE_FETCH_ERR_ARGS);
+
+    /* The peer cap is inclusive. */
+    SBFT_REQ(source_bundle_fetch(dead, SOURCE_BUNDLE_FETCH_MAX_PEERS, root, "x",
+                                 &got, &got_len, &m) ==
+             SOURCE_BUNDLE_FETCH_ERR_NO_PEER);
+    SBFT_REQ(m.peers_asked == 0 && m.peers_offering == 0);
+    return true;
+}
+
+static bool sbft_args_null_and_zeroed(void)
+{
+    struct rom_fetch_peer peer;
+    sbft_peer(&peer, 1);
+    uint8_t root[32] = {0};
+    uint8_t sentinel = 0;
+    uint8_t *got = &sentinel;
+    size_t got_len = 77;
+    struct source_bundle_fetch_metrics m;
+    memset(&m, 0xAA, sizeof(m));
+
+    /* A refused call still leaves every output defined. */
+    SBFT_REQ(source_bundle_fetch(&peer, 1, root, "", &got, &got_len, &m) ==
+             SOURCE_BUNDLE_FETCH_ERR_ARGS);
+    SBFT_REQ(got == NULL && got_len == 0);
+    SBFT_REQ(m.peers_asked == 0 && m.peers_offering == 0 &&
+             m.candidates_tried == 0 && m.wire_bytes == 0);
+    SBFT_REQ(source_bundle_fetch(NULL, 1, root, "x", &got, &got_len, &m) ==
+             SOURCE_BUNDLE_FETCH_ERR_ARGS);
+    SBFT_REQ(source_bundle_fetch(&peer, 1, NULL, "x", &got, &got_len, &m) ==
+             SOURCE_BUNDLE_FETCH_ERR_ARGS);
+    SBFT_REQ(source_bundle_fetch(&peer, 1, root, "x", NULL, &got_len, &m) ==
+             SOURCE_BUNDLE_FETCH_ERR_ARGS);
+    SBFT_REQ(source_bundle_fetch(&peer, 1, root, "x", &got, NULL, &m) ==
+             SOURCE_BUNDLE_FETCH_ERR_ARGS);
+    return true;
+}
+
+/* Which peers count as "asked": an unusable entry (no address, or port 0) is
+ * skipped without being counted; a usable one is counted even when it fails. */
+static bool sbft_args_peer_skipping(void)
+{
+    uint8_t root[32];
+    memset(root, 0x5C, sizeof(root));
+    uint8_t *got = NULL;
+    size_t got_len = 0;
+    struct source_bundle_fetch_metrics m;
+    struct rom_fetch_peer p;
+
+    sbft_peer(&p, 1234);
+    p.addr[0] = '\0';
+    SBFT_REQ(source_bundle_fetch(&p, 1, root, "x", &got, &got_len, &m) ==
+             SOURCE_BUNDLE_FETCH_ERR_NO_PEER);
+    SBFT_REQ(m.peers_asked == 0);
+    sbft_peer(&p, 0);
+    SBFT_REQ(source_bundle_fetch(&p, 1, root, "x", &got, &got_len, &m) ==
+             SOURCE_BUNDLE_FETCH_ERR_NO_PEER);
+    SBFT_REQ(m.peers_asked == 0);
+    sbft_peer(&p, 1);
+    SBFT_REQ(source_bundle_fetch(&p, 1, root, "x", &got, &got_len, &m) ==
+             SOURCE_BUNDLE_FETCH_ERR_NO_PEER);
+    SBFT_REQ(m.peers_asked == 1 && m.peers_offering == 0);
+    snprintf(p.addr, sizeof(p.addr), "%s", "0");
+    SBFT_REQ(source_bundle_fetch(&p, 1, root, "x", &got, &got_len, &m) ==
+             SOURCE_BUNDLE_FETCH_ERR_NO_PEER);
+    SBFT_REQ(m.peers_asked == 1);
+    return true;
+}
+
+static int test_fetch_argument_bounds(void)
+{
+    int failures = 0;
+    TEST("source_bundle_fetch: the staging-length, peer-cap, one-character and "
+         "unusable-peer boundaries of the argument contract") {
+        sbft_open_caps();
+        ASSERT(sbft_args_staging_length());
+        ASSERT(sbft_args_null_and_zeroed());
+        ASSERT(sbft_args_peer_skipping());
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* The three names the fetcher stages under are derived from the advertised
+ * chunk_root, so a planter can name them. A candidate whose peers cannot even
+ * serve a plan must still leave the directory as it found it. */
+static bool sbft_plan_failure_clears_staging(const struct sbft_fx *fx)
+{
+    char stem[65], name[128];
+    sbft_hex32(fx->art.chunk_root, stem);
+    snprintf(name, sizeof(name), "zvsb-stage-%s.stage", stem);
+    char part[160], jrnl[200];
+    snprintf(part, sizeof(part), "%s%s", name, ROM_FETCH_PART_SUFFIX);
+    snprintf(jrnl, sizeof(jrnl), "%s.journal", part);
+    SBFT_REQ(sbft_write(fx->cdir, name, "planted", 7));
+    SBFT_REQ(sbft_write(fx->cdir, part, "planted", 7));
+    SBFT_REQ(sbft_write(fx->cdir, jrnl, "planted", 7));
+
+    struct sbft_offer o;
+    sbft_offer_true(fx, &o);
+    char body[9000];
+    SBFT_REQ(sbft_offer_body(&o, body, sizeof(body)));
+    struct sbft_directory_peer liar;
+    SBFT_REQ(sbft_directory_start(&liar, body));
+    struct rom_fetch_peer peer;
+    sbft_peer(&peer, liar.port);
+    uint8_t *got = NULL;
+    size_t got_len = 0;
+    struct source_bundle_fetch_metrics m;
+    enum source_bundle_fetch_result rc =
+        source_bundle_fetch(&peer, 1, fx->root, fx->cdir, &got, &got_len, &m);
+    sbft_directory_stop(&liar);
+    SBFT_REQ(rc == SOURCE_BUNDLE_FETCH_ERR_TRANSPORT);
+    SBFT_REQ(got == NULL && got_len == 0);
+    SBFT_REQ(m.peers_offering == 1 && m.candidates_tried == 0);
+    SBFT_REQ(sbft_dir_empty(fx->cdir));
+    return true;
+}
+
+static int test_fetch_plan_failure_clears_staging(void)
+{
+    int failures = 0;
+    TEST("source_bundle_fetch: a candidate nobody can serve a plan for still "
+         "clears the staged file, .part and journal planted under its name") {
+        struct sbft_fx fx;
+        bool ok = sbft_fx_open(&fx, "plan");
+        ok = ok && sbft_plan_failure_clears_staging(&fx);
+        sbft_fx_close(&fx);
+        ASSERT(ok);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* A liar ahead of the honest peer whose advert differs from the real artifact
+ * in exactly one field must stay a SEPARATE candidate: merged, the honest peer
+ * would be asked for the liar's chunk_root / size and the call would fail. The
+ * differing bytes sit at index 31 and in size, which a shortened comparison
+ * cannot see. */
+static bool sbft_divergent_adverts(const struct sbft_fx *fx)
+{
+    for (int variant = 0; variant < 3; variant++) {
+        struct sbft_offer o;
+        sbft_offer_true(fx, &o);
+        if (variant == 0)
+            o.chunk_root[31] ^= 0x01u;
+        else if (variant == 1)
+            o.whole[31] ^= 0x01u;
+        else
+            o.size += 1u;
+        struct sbft_run r;
+        SBFT_REQ(sbft_liar_first(fx, &o, &r));
+        SBFT_REQ(sbft_run_ok(&r, 2));
+    }
+    return true;
+}
+
+/* Honest replicas of one artifact are failover for each other even when they
+ * share an address and differ only in port, and one peer listed twice is
+ * still counted as offering both times. */
+static bool sbft_replicas_and_repeats(const struct sbft_fx *fx)
+{
+    struct sbft_offer o;
+    sbft_offer_true(fx, &o);
+    struct sbft_run r;
+    SBFT_REQ(sbft_liar_first(fx, &o, &r));
+    SBFT_REQ(sbft_run_ok(&r, 2));
+
+    struct rom_fetch_peer twice[2];
+    sbft_peer(&twice[0], fx->port);
+    sbft_peer(&twice[1], fx->port);
+    uint8_t *got = NULL;
+    size_t got_len = 0;
+    struct source_bundle_fetch_metrics m;
+    SBFT_REQ(source_bundle_fetch(twice, 2, fx->root, fx->cdir, &got, &got_len,
+                                 &m) == SOURCE_BUNDLE_FETCH_OK);
+    SBFT_REQ(got && got_len == fx->wire_len &&
+             memcmp(got, fx->wire, got_len) == 0);
+    free(got);
+    SBFT_REQ(m.peers_asked == 2 && m.peers_offering == 2 &&
+             m.candidates_tried == 1);
+    return sbft_dir_empty(fx->cdir);
+}
+
+static int test_fetch_candidate_grouping(void)
+{
+    int failures = 0;
+    TEST("source_bundle_fetch: an advert differing in one late byte or in size "
+         "is its own candidate, and same-address replicas stay failover") {
+        struct sbft_fx fx;
+        bool ok = sbft_fx_open(&fx, "group");
+        ok = ok && sbft_divergent_adverts(&fx);
+        ok = ok && sbft_replicas_and_repeats(&fx);
+        sbft_fx_close(&fx);
+        ASSERT(ok);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* What an offer must satisfy to be worth a connection: the wire cap and chunk
+ * cap are inclusive (a 64 MiB, 8 chunk offer counts, 64 MiB + 1 does not), and
+ * every one of the 32 source_root bytes must match. */
+static bool sbft_offer_filters(const struct sbft_fx *fx)
+{
+    const uint64_t cap = VCS_SOURCE_BUNDLE_MAX_WIRE_BYTES;
+    struct sbft_offer o;
+    struct sbft_run r;
+
+    sbft_offer_true(fx, &o);
+    o.chunk_root[0] ^= 0x40u;
+    o.size = cap;
+    o.chunks = SOURCE_BUNDLE_FETCH_MAX_CHUNKS;
+    SBFT_REQ(sbft_liar_first(fx, &o, &r));
+    SBFT_REQ(sbft_run_ok(&r, 2));
+
+    o.size = cap + 1u;
+    o.chunks = SOURCE_BUNDLE_FETCH_MAX_CHUNKS + 1u;
+    SBFT_REQ(sbft_liar_first(fx, &o, &r));
+    SBFT_REQ(sbft_run_ok(&r, 1));
+
+    sbft_offer_true(fx, &o);
+    o.source_root[31] ^= 0x01u;
+    SBFT_REQ(sbft_liar_first(fx, &o, &r));
+    SBFT_REQ(sbft_run_ok(&r, 1));
+    return true;
+}
+
+/* The directory reply is read into an 8192-byte buffer and refused at or over
+ * that size: 8191 bytes is a listing, 8192 is not. */
+static bool sbft_directory_cap_edge(const struct sbft_fx *fx)
+{
+    struct sbft_offer o;
+    struct sbft_run r;
+    sbft_offer_true(fx, &o);
+    o.pad_to = 8191u;
+    SBFT_REQ(sbft_liar_first(fx, &o, &r));
+    SBFT_REQ(sbft_run_ok(&r, 2));
+    o.pad_to = 8192u;
+    SBFT_REQ(sbft_liar_first(fx, &o, &r));
+    SBFT_REQ(sbft_run_ok(&r, 1));
+    return true;
+}
+
+static int test_fetch_offer_filters_and_directory_cap(void)
+{
+    int failures = 0;
+    TEST("source_bundle_fetch: wire-cap, chunk-cap, source-root and "
+         "directory-size boundaries decide whether a peer counts as offering") {
+        struct sbft_fx fx;
+        bool ok = sbft_fx_open(&fx, "filter");
+        ok = ok && sbft_offer_filters(&fx);
+        ok = ok && sbft_directory_cap_edge(&fx);
+        sbft_fx_close(&fx);
+        ASSERT(ok);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Serve ONLY a well-formed impostor under the honest root. */
+static bool sbft_serve_impostor(struct sbft_fx *fx)
+{
+    SBFT_REQ(sbft_make_tree(fx->tdir, 'B'));
+    uint8_t evil_root[32], *evil = NULL;
+    size_t evil_len = 0;
+    SBFT_REQ(sbft_bundle(fx->tdir, evil_root, &evil, &evil_len));
+    memcpy(evil + ROM_SEED_SOURCE_BUNDLE_ROOT_OFFSET, fx->root, 32);
+    bool wrote = sbft_write(fx->sdir, "impostor.zvsb", evil, evil_len);
+    free(evil);
+    SBFT_REQ(wrote);
+    sbft_open_caps();
+    SBFT_REQ(rom_seed_register(fx->sdir, "impostor.zvsb", NULL, NULL) ==
+             ROM_REG_OK);
+    return true;
+}
+
+/* A refused substitution is recorded against the peers that stood behind it
+ * and against nothing else (no phantom entry for an empty address). */
+static bool sbft_substitution_scoring(struct sbft_fx *fx)
+{
+    SBFT_REQ(sbft_serve_impostor(fx));
+    struct rom_fetch_peer peer;
+    sbft_peer(&peer, fx->port);
+    uint8_t *got = NULL;
+    size_t got_len = 0;
+    struct source_bundle_fetch_metrics m;
+    SBFT_REQ(!rom_peer_is_deprioritized("127.0.0.1", fx->port));
+    SBFT_REQ(source_bundle_fetch(&peer, 1, fx->root, fx->cdir, &got, &got_len,
+                                 &m) == SOURCE_BUNDLE_FETCH_ERR_ROOT);
+    SBFT_REQ(got == NULL && got_len == 0);
+    SBFT_REQ(m.candidates_tried == 1 && m.candidates_refused == 1);
+    SBFT_REQ(m.last_refusal != VCS_SOURCE_BUNDLE_OK);
+    SBFT_REQ(rom_peer_is_deprioritized("127.0.0.1", fx->port));
+    SBFT_REQ(!rom_peer_is_deprioritized("", 0));
+    return sbft_dir_empty(fx->cdir);
+}
+
+static int test_fetch_substitution_scores_only_its_peers(void)
+{
+    int failures = 0;
+    TEST("source_bundle_fetch: a refused substitution deprioritizes exactly "
+         "the peer that served it") {
+        struct sbft_fx fx;
+        bool ok = sbft_fx_open(&fx, "score");
+        ok = ok && sbft_substitution_scoring(&fx);
+        sbft_fx_close(&fx);
+        ASSERT(ok);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_source_bundle_fetch_platform_arm(void)
 {
     int failures = 0;
+    failures += test_fetch_result_strings();
+    failures += test_fetch_argument_bounds();
+    failures += test_fetch_plan_failure_clears_staging();
+    failures += test_fetch_candidate_grouping();
+    failures += test_fetch_offer_filters_and_directory_cap();
+    failures += test_fetch_substitution_scores_only_its_peers();
     failures += test_header_shape_pinned();
     failures += test_fetch_by_root();
     failures += test_substitution_refused();
