@@ -16055,6 +16055,7 @@ TOR_PROVENANCE_SRCS = tools/tor_provenance.c \
     contexts/commons/packages/zsha256/src/zsha256.c \
     platform/modules/platform/src/path_replace.c
 TOR_PROVENANCE_HEADERS = tools/tor_compiler_id.h \
+    tools/tor_build_path_policy.h \
     contexts/commons/packages/zsha256/include/zsha256/zsha256.h \
     platform/modules/base/include/base/hex.h \
     platform/modules/platform/include/platform/file_sync.h \
@@ -16081,6 +16082,7 @@ z23-tor-provenance: $(TOR_PROVENANCE_BIN)
 check-tor-provenance: tor-provenance-ready $(TOR_PROVENANCE_BIN) $(LINTC_TOOL)
 	@echo "══ LINT: bundled Tor archives are bound to their commit + bytes ══"
 	@./tools/scripts/tor_archives_ready.sh --selftest
+	@./build/bin/z23-lint check-tor-provenance --selftest
 	@./build/bin/z23-lint check-tor-provenance
 
 # Adding a lint gate is a THREE-FILE operation and nothing enforced the

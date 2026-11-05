@@ -341,9 +341,14 @@ case "${1:-ready}" in
         fake_primary="$fixture/primary"
         fake_wt="$fixture/worktree"
         mkdir -p "$fake_primary" "$fake_wt"
+        zcl_tor_provenance_ensure_bin "$SCRIPT_ROOT" || exit 1
+        mkdir -p "$fake_primary/$TOR_TREE"
+        printf 'CFLAGS = -g -O2\nfixture-object:\n\t$(CC) $(CFLAGS) -x c -c -o "$(OBJECT)" -\n' >"$fake_primary/$TOR_TREE/Makefile"
+        "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" map-build-path "$fake_primary/$TOR_TREE" "$fake_primary" || exit 1
         for a in "${ARCHIVES[@]}"; do
             mkdir -p "$fake_primary/${a%/*}"
-            printf 'void dynhost_stream_init(void) {}\n' | cc -x c -c -o "$fixture/patch.o" - || exit 1
+            printf 'void dynhost_stream_init(void) {}\n' |
+                make -s -C "$fake_primary/$TOR_TREE" fixture-object OBJECT="$fixture/patch.o" || exit 1
             ar rcs "$fake_primary/$a" "$fixture/patch.o" || exit 1
         done
         # Fixture and have_all derive the same compiler identity from the
@@ -364,6 +369,8 @@ case "${1:-ready}" in
             echo "tor_archives_ready: selftest FAILED — could not write fixture provenance manifest" >&2
             exit 1
         }
+        # Consumer fallback (and Mac's subsequent donor probe) has no Makefile.
+        rm -f -- "$fake_primary/$TOR_TREE/Makefile"
         # Exercise have_all's real non-building freshness query and the
         # provenance verifier against private copies, never the live helper.
         (
@@ -488,7 +495,7 @@ PROBE_MAKE
         # carried manifest, so delete only the manifest.
         # A manifest from before the source patch existed is an older
         # producer's complete record: rebuild-eligible, never ready.
-        sed '/^source_patch=/d' "$fake_primary/$TOR_TREE/.provenance" > \
+        sed '/^source_patch=/d; /^build_path_policy=/d' "$fake_primary/$TOR_TREE/.provenance" > \
             "$fake_wt/$TOR_TREE/.provenance"
         "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" check-legacy-policy-rebuild \
             "$fake_wt/$TOR_TREE" "$(printf '%040x' 1)" "$selftest_cid" >/dev/null || {
@@ -499,7 +506,7 @@ PROBE_MAKE
             echo 'tor_archives_ready: selftest FAILED — pre-patch manifest passed readiness' >&2
             exit 1
         fi
-        sed '/^fatal_handler_policy=/d; /^source_patch=/d' "$fake_primary/$TOR_TREE/.provenance" > \
+        sed '/^fatal_handler_policy=/d; /^source_patch=/d; /^build_path_policy=/d' "$fake_primary/$TOR_TREE/.provenance" > \
             "$fake_wt/$TOR_TREE/.provenance"
         "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" check-legacy-policy-rebuild \
             "$fake_wt/$TOR_TREE" "$(printf '%040x' 1)" "$selftest_cid" >/dev/null || {
@@ -583,9 +590,13 @@ PROBE_MAKE
            tor_same_compiler_file "$gcc_path" "$cc_path"; then
             fake_wt3="$fixture/worktree3"
             mkdir -p "$fake_wt3"
+            mkdir -p "$fake_wt3/$TOR_TREE"
+            printf 'CFLAGS = -g -O2\nfixture-object:\n\t$(CC) $(CFLAGS) -x c -c -o "$(OBJECT)" -\n' >"$fake_wt3/$TOR_TREE/Makefile"
+            "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" map-build-path "$fake_wt3/$TOR_TREE" "$fake_wt3" || exit 1
             for a in "${ARCHIVES[@]}"; do
                 mkdir -p "$fake_wt3/${a%/*}"
-                printf 'void dynhost_stream_init(void) {}\n' | cc -x c -c -o "$fixture/patch.o" - || exit 1
+                printf 'void dynhost_stream_init(void) {}\n' |
+                    make -s -C "$fake_wt3/$TOR_TREE" fixture-object OBJECT="$fixture/patch.o" || exit 1
                 ar rcs "$fake_wt3/$a" "$fixture/patch.o" || exit 1
             done
             alias_cid="$(zcl_tor_compiler_identity_for_cc "$SCRIPT_ROOT" gcc 2>/dev/null)" || {
@@ -599,6 +610,7 @@ PROBE_MAKE
                 echo "tor_archives_ready: selftest FAILED — could not write the alias fixture manifest" >&2
                 exit 1
             }
+            rm -f -- "$fake_wt3/$TOR_TREE/Makefile"
             if ! (ROOT="$fake_wt3"; cd "$fake_wt3" && unset CC VENDOR_CC; have_all) >/dev/null 2>&1; then
                 echo "tor_archives_ready: selftest FAILED — have_all() rejected a manifest recorded under a same-binary compiler alias" >&2
                 exit 1

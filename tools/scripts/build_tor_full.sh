@@ -210,7 +210,10 @@ if [ "$HOST_OS" = "Darwin" ]; then
     # Keep this in config.status's argument record. A checkout configured
     # before the floor existed is then reconfigured and its objects rebuild,
     # rather than an old host-default libtor.a being silently reused.
-    configure_opts+=("CFLAGS=-mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET")
+    configure_opts+=("CFLAGS=${CFLAGS-} -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET")
+elif [ "${CFLAGS+x}" = x ]; then
+    # Explicitly empty is intentional; unset leaves configure's defaults.
+    configure_opts+=("CFLAGS=$CFLAGS")
 fi
 
 # configure.ac's own TOR_SEARCH_LIBRARY(libevent, ...) probe already links
@@ -323,6 +326,8 @@ if $needs_vendored_deps; then
 fi
 
 mkdir -p "$TOR_BUILD_DIR"
+zcl_tor_provenance_ensure_bin "$ROOT" || exit 1
+provenance_bin="$(zcl_tor_provenance_bin "$ROOT")"
 
 configure_args=""
 # Migration may inherit a donor-bound config.status; never execute it.
@@ -333,13 +338,38 @@ configured=false
 if [ "$clean_rebuild" != true ] && zcl_tor_configure_args_match "$configure_args" "${configure_opts[@]}"; then
     configured=true
 fi
+if [ "$configured" = true ] && [ "$HOST_OS" != Darwin ] && [ "${CFLAGS+x}" != x ]; then
+    # Unset means configure chooses its defaults, not a previous caller's
+    # recorded empty/custom CFLAGS. Decode exactly as the existing matcher.
+    if ! printf '%s\n' "$configure_args" | xargs printf '%s\0' |
+        "$provenance_bin" check-configure-cflags-absent; then
+        configured=false
+    fi
+fi
 
 if [ "$configured" != true ]; then
+    rm -f -- "$TOR_BUILD_DIR/.provenance"
     (cd "$TOR_BUILD_DIR" && \
         ac_cv_lib_cap_cap_init=no ac_cv_func_cap_set_proc=no \
         env ${tor_cross_env[@]+"${tor_cross_env[@]}"} \
         "$TOR_SRC_DIR/configure" "${configure_opts[@]}")
 fi
+
+# Native policy edits only its terminal generated-Makefile block: configure's
+# CFLAGS, including defaults/hardening and a caller's empty value, stay intact.
+# A missing policy, changed recipe/root/compiler, or reconfigure invalidates
+# old objects. Reconfigure alone does NOT make Automake recompile them.
+effective_cc="$(zcl_tor_effective_cc "$TOR_BUILD_DIR" "$VENDOR_TARGET")"
+compiler_id="$(zcl_tor_compiler_identity_for_cc "$ROOT" "$effective_cc")" || exit 1
+if [ "$configured" != true ] ||
+   ! "$provenance_bin" check-build-path "$TOR_BUILD_DIR" "$ROOT" ||
+   ! "$provenance_bin" check "$TOR_BUILD_DIR" --tor-commit "$actual" --compiler-id "$compiler_id"; then
+    clean_rebuild=true
+fi
+if [ "$clean_rebuild" = true ]; then
+    rm -f -- "$TOR_BUILD_DIR/.provenance"
+fi
+"$provenance_bin" map-build-path "$TOR_BUILD_DIR" "$ROOT" || exit 1
 
 jobs="${ZCL_TOR_JOBS:-$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
 case "$jobs" in
@@ -408,15 +438,6 @@ done
 # zcl_tor_effective_cc so tor_archives_ready.sh's have_all() re-derives the
 # identical string when it checks this manifest afterward -- see that
 # function's comment for why the two must never drift apart again.
-effective_cc="$(zcl_tor_effective_cc "$TOR_BUILD_DIR" "$VENDOR_TARGET")"
-zcl_tor_provenance_ensure_bin "$ROOT" || {
-    echo "tor-full: could not build the Tor provenance verifier" >&2
-    exit 1
-}
-compiler_id="$(zcl_tor_compiler_identity_for_cc "$ROOT" "$effective_cc")" || {
-    echo "tor-full: could not derive a compiler identity for $effective_cc" >&2
-    exit 1
-}
 configure_args_sha256="$(printf '%s\0' "${configure_opts[@]}" | sha256sum | awk '{print $1}')"
 "$(zcl_tor_provenance_bin "$ROOT")" write "$TOR_BUILD_DIR" \
     "$actual" "$compiler_id" "$configure_args_sha256" || {

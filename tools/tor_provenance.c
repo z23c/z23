@@ -4,12 +4,8 @@
  * produced them, instead of every readiness check asking only "do four
  * files exist and are they non-empty".
  *
- * Every existing gate (Makefile's TOR_FULL wildcard, tor_archives_ready.sh,
- * ship.sh's preflight) treats vendor/tor/{libtor.a, the three ext archives}
- * as ready the instant they are present and non-empty. None of them notice
- * a stale libtor.a built by a different compiler, a copy from an unrelated
- * vendor/tor commit, or a byte-flipped archive. This tool closes that gap
- * with one small manifest, `<tor tree>/.provenance`:
+ * Readiness consumers verify the exact archive bytes and producer policies
+ * through the native `<tor tree>/.provenance` manifest:
  *
  *     fatal_handler_policy=<FATAL_HANDLER_POLICY; producer attests orconfig.h>
  *     source_patch=<SOURCE_PATCH_POLICY; producer attests libtor.a defines
@@ -80,6 +76,7 @@
  * with fgets into caller-owned buffers, never getline.
  */
 #define _POSIX_C_SOURCE 200809L
+#include "tor_build_path_policy.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -133,6 +130,7 @@ typedef struct {
     char archive_sha256[ARCHIVE_COUNT][ZSHA256_HEX_LEN];
     int fatal_handler_policy_ok;
     int source_patch_ok;
+    int build_path_policy_ok;
     int has_tor_commit;
     int has_compiler_id;
     int has_configure_args_sha256;
@@ -141,6 +139,7 @@ typedef struct {
 
 static void die_usage(const char *prog)
 {
+    fputs("build-path modes: map-build-path|check-build-path <tor-dir> <absolute-source-root>\n", stderr);
     fprintf(stderr,
         "usage: %s write <tor-dir> <tor_commit> <compiler_id> <configure_args_sha256>\n"
         "       %s check <tor-dir> [--tor-commit <hex>] [--compiler-id <id>]\n"
@@ -404,6 +403,16 @@ static int validate_manifest_build(const char *tor_dir, const char *tor_commit,
                                    const char *configure_args_sha256,
                                    int attest_configuration)
 {
+    if (attest_configuration && !tor_build_path_configured(tor_dir)) {
+        fprintf(stderr, "tor-provenance: write: terminal mapped build recipe required; clean rebuild with make tor-full\n");
+        return 1;
+    }
+    for (int i = 0; attest_configuration && i < ARCHIVE_COUNT; i++) {
+        if (!tor_build_path_archive_after_recipe(tor_dir, ARCHIVE_RELPATHS[i])) {
+            fprintf(stderr, "tor-provenance: write: archive %s/%s missing, nonregular or older than mapped Makefile; clean rebuild required\n", tor_dir, ARCHIVE_RELPATHS[i]);
+            return 1;
+        }
+    }
     if (attest_configuration && !embedded_config_without_backtrace(tor_dir)) {
         fprintf(stderr, "tor-provenance: write: generated orconfig.h must disable HAVE_BACKTRACE; rebuild with make tor-full\n");
         return 1;
@@ -437,6 +446,7 @@ static int write_manifest(const char *tor_dir, const char *tor_commit,
     int n = snprintf(content, sizeof content,
         "fatal_handler_policy=" FATAL_HANDLER_POLICY "\n"
         "source_patch=" SOURCE_PATCH_POLICY "\n"
+        "build_path_policy=" TOR_BUILD_PATH_POLICY "\n"
         "tor_commit=%s\n"
         "compiler_id=%s\n"
         "configure_args_sha256=%s\n"
@@ -541,6 +551,8 @@ static void parse_manifest_field(provenance_t *pv, const char *key,
         parse_fatal_policy(pv, val);
     } else if (strcmp(key, "source_patch") == 0) {
         parse_source_patch(pv, val);
+    } else if (strcmp(key, "build_path_policy") == 0) {
+        tor_build_path_policy_parse(&pv->build_path_policy_ok, val);
     } else if (strcmp(key, "tor_commit") == 0) {
         if (strlen(val) < sizeof pv->tor_commit) {
             snprintf(pv->tor_commit, sizeof pv->tor_commit, "%s", val);
@@ -694,6 +706,7 @@ static int cmd_check(const char *tor_dir, const char *want_tor_commit, const cha
     }
 
     int all_ok = 1;
+    if (!tor_build_path_policy_check(pv.build_path_policy_ok)) all_ok = 0;
     if (pv.fatal_handler_policy_ok != 1) {
         printf("tor-provenance: fatal_handler_policy MISMATCH missing or unsupported; rebuild with make tor-full\n");
         all_ok = 0;
@@ -716,11 +729,12 @@ static int cmd_check(const char *tor_dir, const char *want_tor_commit, const cha
 
 static unsigned legacy_manifest_field(const char *key)
 {
-    if (strcmp(key, "tor_commit") == 0) return 1;
-    if (strcmp(key, "compiler_id") == 0) return 2;
-    if (strcmp(key, "configure_args_sha256") == 0) return 4;
-    if (strcmp(key, "archive_sha256") == 0) return 8;
-    if (strcmp(key, "fatal_handler_policy") == 0) return 16;
+    static const char *const keys[] = {
+        "tor_commit", "compiler_id", "configure_args_sha256",
+        "archive_sha256", "fatal_handler_policy", "source_patch"
+    };
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
+        if (strcmp(key, keys[i]) == 0) return 1u << i;
     return 0;
 }
 
@@ -760,6 +774,16 @@ static int legacy_manifest_line(FILE *f, char *line, size_t cap)
     return used != 0;
 }
 
+static int legacy_manifest_value_valid(unsigned field, const char *value)
+{
+    switch (field) {
+        case 8: return legacy_archive_text(value);
+        case 16: return strcmp(value, FATAL_HANDLER_POLICY) == 0;
+        case 32: return strcmp(value, SOURCE_PATCH_POLICY) == 0;
+        default: return 1;
+    }
+}
+
 static int legacy_manifest_shape(const char *path)
 {
     FILE *f = fopen(path, "rb");
@@ -773,14 +797,10 @@ static int legacy_manifest_shape(const char *path)
         *eq = '\0';
         unsigned field = legacy_manifest_field(line);
         if (!field || (seen & field)) { valid = 0; break; }
-        if (field == 8 && !legacy_archive_text(eq + 1)) { valid = 0; break; }
-        if (field == 16 && strcmp(eq + 1, FATAL_HANDLER_POLICY) != 0) {
-            valid = 0;
-            break;
-        }
+        if (!legacy_manifest_value_valid(field, eq + 1)) { valid = 0; break; }
         seen |= field;
     }
-    valid = valid && status == 0 && (seen == 15 || seen == 31);
+    valid = valid && status == 0 && (seen == 15 || seen == 31 || seen == 63);
     fclose(f);
     return valid;
 }
@@ -837,6 +857,7 @@ static int cmd_rewrite_compiler_id(const char *tor_dir, const char *new_compiler
         fprintf(stderr, "tor-provenance: rewrite-compiler-id: missing or unsupported source patch; rebuild with make tor-full\n");
         return 1;
     }
+    if (pv.build_path_policy_ok != 1) return 1; /* Never relabel unmapped archives. */
     if (!pv.has_tor_commit || !pv.has_configure_args_sha256 || !pv.has_archive_sha256) {
 
         fprintf(stderr, "tor-provenance: rewrite-compiler-id: manifest is incomplete; run 'make tor-full' to write a fresh one\n");
@@ -1066,7 +1087,7 @@ static int selftest_create_archives(const char *base)
 
 static int selftest_prepare(const char *base)
 {
-    return selftest_create_directories(base) || selftest_create_archives(base) ||
+    return tor_build_path_cflags_fixture() || selftest_create_directories(base) || tor_build_path_fixture(base) || selftest_create_archives(base) ||
            selftest_compiler_results(base);
 }
 
@@ -1077,15 +1098,18 @@ static int selftest_legacy_mutations(const char *base, const char *path,
 {
     static const char *const additions[] = {
         "unknown=value\n", "tor_commit=duplicate\n",
-        "fatal_handler_policy=wrong\n", "source_patch=" SOURCE_PATCH_POLICY "\n"
+        "fatal_handler_policy=wrong\n", "source_patch=wrong\n"
     };
     char changed[LINE_BUF_MAX];
     for (size_t i = 0; i < sizeof(additions) / sizeof(additions[0]); i++) {
         int n = snprintf(changed, sizeof(changed), "%s%s", legacy, additions[i]);
         if (n <= 0 || (size_t)n >= sizeof(changed) ||
-            write_fixture_archive(path, changed) != 0 ||
-            cmd_check_legacy_rebuild(base, pv->tor_commit, pv->compiler_id) == 0)
+            write_fixture_archive(path, changed) != 0) return 1;
+        int actual = cmd_check_legacy_rebuild(base, pv->tor_commit, pv->compiler_id);
+        if (actual == 0) {
+            fprintf(stderr, "legacy negative mutation[%zu] unexpectedly rebuild-eligible: appended=%s", i, additions[i]);
             return 1;
+        }
     }
     return write_fixture_archive(path, legacy) != 0;
 }
@@ -1172,16 +1196,18 @@ static int selftest_drop_line(char *text, const char *prefix)
     return 1;
 }
 
-/* Mutants of a current manifest: 0 drops both policy lines (a pre-policy
+/* Mutants of a current manifest: 0 drops old policy lines (a pre-policy
  * producer), 1 corrupts the fatal-handler policy, 2 drops source_patch (a
- * pre-patch producer), 3 corrupts source_patch. Only 0 and 2 are intact
- * older records eligible for a rebuild; none passes check or relabeling. */
+ * pre-patch producer), 3 corrupts source_patch, 4 drops build_path_policy.
+ * Intact older records 0, 2 and 4 allow rebuild only, never readiness/relabel. */
 static int selftest_policy_mutant(char *mutant, size_t cap,
                                   const char *original, int kind)
 {
     static const char fatal[] = "fatal_handler_policy=";
     static const char patch[] = "source_patch=";
     snprintf(mutant, cap, "%s", original);
+    if (kind == 4) return selftest_drop_line(mutant, "build_path_policy=");
+    if ((kind == 0 || kind == 2) && selftest_drop_line(mutant, "build_path_policy=")) return 1;
     if (kind == 0 && selftest_drop_line(mutant, fatal) != 0) return 1;
     if (kind == 0 || kind == 2) return selftest_drop_line(mutant, patch);
     const char *key = kind == 1 ? fatal : patch;
@@ -1203,7 +1229,7 @@ static int selftest_policies(const char *base)
         return 1;
     provenance_t pv;
     if (parse_manifest(path, &pv) != 0) return 1;
-    for (int kind = 0; kind < 4; kind++) {
+    for (int kind = 0; kind < 5; kind++) {
         char mutant[LINE_BUF_MAX];
         char before[ZSHA256_HEX_LEN], after[ZSHA256_HEX_LEN];
         if (selftest_policy_mutant(mutant, sizeof(mutant), original, kind) != 0 ||
@@ -1214,7 +1240,9 @@ static int selftest_policies(const char *base)
             sha256_hex_of_file(path, after) != 0 || strcmp(before, after) != 0)
             return 1;
         int wrong = kind == 1 || kind == 3;
-        if (selftest_legacy_case(base, path, mutant, &pv, wrong) != 0) return 1;
+        if (selftest_legacy_case(base, path, mutant, &pv, wrong) != 0) {
+            fprintf(stderr, "policy selftest failed kind=%d\n", kind); return 1;
+        }
     }
     return write_fixture_archive(path, original) != 0;
 }
@@ -1407,7 +1435,8 @@ static int run_selftest(void)
     printf("tor-provenance: selftest PASS\n");
     rc = 0;
 out:
-    selftest_rmdir_tree(base);
+    if (rc == 0) selftest_rmdir_tree(base);
+    else fprintf(stderr, "tor-provenance: failed selftest fixture retained: %s\n", base);
     return rc;
 }
 
@@ -1435,6 +1464,8 @@ static int run_check_command(const char *prog, int argc, char **argv)
 int main(int argc, char **argv)
 {
     if (argc < 2) die_usage(argv[0]);
+    int path_result = tor_build_path_dispatch(argc, argv);
+    if (path_result >= 0) return path_result;
 
     if (strcmp(argv[1], "--selftest") == 0) {
         return run_selftest();

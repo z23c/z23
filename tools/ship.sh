@@ -785,7 +785,17 @@ if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--selftest-dev-guard" ]; then
              "$test_tmp/tor-missing-one/vendor/tor/src/ext/keccak-tiny"
     # An empty file is not an archive to the verifier, so these fixtures need
     # real bytes, not just existence.
-    printf 'void dynhost_stream_init(void) {}\n' | cc -x c -c -o "$test_tmp/patch.o" - || exit 1
+    zcl_tor_provenance_ensure_bin "$REPO_ROOT" ||
+        { echo "ship: selftest FAILED — could not build z23-tor-provenance for the fixture" >&2; exit 1; }
+    provenance_bin="$(zcl_tor_provenance_bin "$REPO_ROOT")"
+    # Produce fixture bytes through the same mapped recipe required by write.
+    for fixture_root in "$test_tmp/tor-present" "$test_tmp/tor-bad-provenance"; do
+        mkdir -p "$fixture_root/vendor/tor"
+        printf 'CFLAGS = -g -O2\nfixture-object:\n\t$(CC) $(CFLAGS) -x c -c -o "$(OBJECT)" -\n' >"$fixture_root/vendor/tor/Makefile"
+        "$provenance_bin" map-build-path "$fixture_root/vendor/tor" "$fixture_root" || exit 1
+    done
+    printf 'void dynhost_stream_init(void) {}\n' |
+        make -s -C "$test_tmp/tor-present/vendor/tor" fixture-object OBJECT="$test_tmp/patch.o" || exit 1
     ar rcs "$test_tmp/tor-present/vendor/tor/libtor.a" "$test_tmp/patch.o" || exit 1
     printf 'real bytes\n' >"$test_tmp/tor-present/vendor/tor/src/ext/ed25519/donna/libed25519_donna.a"
     printf 'real bytes\n' >"$test_tmp/tor-present/vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a"
@@ -799,14 +809,12 @@ if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--selftest-dev-guard" ]; then
     mkdir -p "$test_tmp/tor-bad-provenance/vendor/tor/src/ext/ed25519/donna" \
              "$test_tmp/tor-bad-provenance/vendor/tor/src/ext/ed25519/ref10" \
              "$test_tmp/tor-bad-provenance/vendor/tor/src/ext/keccak-tiny"
-    printf 'void dynhost_stream_init(void) {}\n' | cc -x c -c -o "$test_tmp/patch.o" - || exit 1
+    printf 'void dynhost_stream_init(void) {}\n' |
+        make -s -C "$test_tmp/tor-bad-provenance/vendor/tor" fixture-object OBJECT="$test_tmp/patch.o" || exit 1
     ar rcs "$test_tmp/tor-bad-provenance/vendor/tor/libtor.a" "$test_tmp/patch.o" || exit 1
     printf 'real bytes\n' >"$test_tmp/tor-bad-provenance/vendor/tor/src/ext/ed25519/donna/libed25519_donna.a"
     printf 'real bytes\n' >"$test_tmp/tor-bad-provenance/vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a"
     printf 'real bytes\n' >"$test_tmp/tor-bad-provenance/vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a"
-    zcl_tor_provenance_ensure_bin "$REPO_ROOT" ||
-        { echo "ship: selftest FAILED — could not build z23-tor-provenance for the fixture" >&2; exit 1; }
-    provenance_bin="$(zcl_tor_provenance_bin "$REPO_ROOT")"
     printf '/* #undef HAVE_BACKTRACE */\n' >"$test_tmp/tor-present/vendor/tor/orconfig.h"
     printf '/* #undef HAVE_BACKTRACE */\n' >"$test_tmp/tor-bad-provenance/vendor/tor/orconfig.h"
     "$provenance_bin" write "$test_tmp/tor-present/vendor/tor" \
