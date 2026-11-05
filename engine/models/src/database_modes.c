@@ -17,6 +17,7 @@
 #include "models/database.h"
 #include "models/database_lifetime.h"
 #include "models/database_internal.h"
+#include "models/database_progress.h"
 #include "models/utxo_count_cache.h"
 #include "platform/time_compat.h"
 #include "support/log_throttle.h"
@@ -284,19 +285,19 @@ static int index_rebuild_progress(void *arg)
            index_rebuild_interrupt_is_local(arg);
 }
 
-/* Creates one index with the progress handler installed. The handler is
- * installed for each statement, so one that another caller of the shared
- * connection set and cleared in between does not leave the rest of the
- * rebuild without it. Whether an interrupt is safe is decided inside the
- * handler, not before the statement: another thread can begin a transaction
- * between such a check and the statement. */
+/* Creates one index with the progress handler registered. It joins the other
+ * handlers on the shared connection (a dbquery time budget) instead of
+ * replacing and then clearing them. Whether an interrupt is safe is decided
+ * inside the handler, not before the statement: another thread can begin a
+ * transaction between such a check and the statement. */
 static int index_rebuild_one(struct node_db *ndb, const char *sql)
 {
     t_index_rebuild_running = true;
-    sqlite3_progress_handler(ndb->db, INDEX_REBUILD_PROGRESS_OPS,
-                             index_rebuild_progress, ndb->db);
+    bool hooked = db_progress_add(ndb->db, INDEX_REBUILD_PROGRESS_OPS,
+                                  index_rebuild_progress, ndb->db);
     int rc = db_exec_checked(ndb->db, sql, "rebuild_indexes");
-    sqlite3_progress_handler(ndb->db, 0, NULL, NULL);
+    if (hooked)
+        db_progress_remove(ndb->db, index_rebuild_progress, ndb->db);
     t_index_rebuild_running = false;
     return rc;
 }
