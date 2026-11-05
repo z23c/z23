@@ -1083,42 +1083,117 @@ static void case_oversize_fee(void)
     big_case("fee over 63 bytes", "edge-big-fee", 0xC3, &one, &other);
 }
 
-/* A row written before the digest covered the whole value holds the digest of
- * a prefix. Its identical retry cannot match any more: it must conflict, with
- * no second send and no claim that this request was the one sent. */
+/* The answer to a repeat that sends nothing and names no transaction. */
+static bool no_send_answer(bool rc, const struct json_value *r,
+                           const char *state, int runs)
+{
+    return rc && state_is(r, state) && no_txid(r) && replayed_is(r, true) &&
+           atomic_load(&g_runs) == runs;
+}
+
+static void big_expect(const char *field, const char *what,
+                       const struct big_spec *spec, const char *key,
+                       const char *state)
+{
+    struct big_req b;
+    struct json_value res;
+    if (!big_make(&b, spec))
+        return;
+    bool rc = go_big(&b, key, plain_hook_ok, &res);
+    big_chk(field, what, no_send_answer(rc, &res, state, 0));
+    json_free(&res);
+    big_free(&b);
+}
+
+/* A row as an earlier build wrote it for this request: a prefix digest, and a
+ * transaction the wallet still holds. */
+static bool big_seed_old(const struct big_spec *spec, const char *key,
+                         enum wallet_send_once_state state, uint8_t fill)
+{
+    struct big_req b;
+    struct json_value p;
+    struct wallet_send_once_row row;
+    struct uint256 id;
+    memset(&row, 0, sizeof(row));
+    if (!big_make(&b, spec))
+        return false;
+    bool ok = big_params(&p, &b, key);
+    if (ok)
+        kat_ids(&p, key, row.key_hash, row.digest);
+    json_free(&p);
+    big_free(&b);
+    row.state = state;
+    row.has_txid = state != WALLET_SEND_ONCE_STARTED;
+    if (row.has_txid) {
+        memset(row.txid, fill, 32);
+        txid_fill(&id, fill);
+        admit(&id);
+    }
+    row.created_at = row.updated_at = GetTime();
+    return ok && db_wallet_send_once_insert(&g_fx.ndb, &row);
+}
+
+/* An earlier build's row holds the digest of a prefix, and the send it records
+ * may have gone out. A key_conflict would tell the client to pay again under a
+ * new key, and a txid would claim this exact request was the one sent, so the
+ * identical retry answers outcome_unknown. A request that differs only past the
+ * prefix cannot be told from it and gets the same answer. A request that differs
+ * inside the prefix is a different request and still conflicts. */
+static void old_row_case(const char *field, const char *key,
+                         const struct big_spec *spec,
+                         const struct big_spec *tail)
+{
+    struct big_spec other = big_small();
+    reset_runs();
+    edge_chk("a row with a prefix digest is seeded",
+        big_seed_old(spec, key, WALLET_SEND_ONCE_COMMITTED, 0xC4));
+    big_expect(field, "the old row's identical retry is outcome_unknown", spec,
+               key, "outcome_unknown");
+    big_expect(field, "a retry differing past the prefix is outcome_unknown",
+               tail, key, "outcome_unknown");
+    big_expect(field, "a retry differing inside the prefix still conflicts",
+               &other, key, "key_conflict");
+    big_expect(field, "the conflict leaves the old row's answer in place", spec,
+               key, "outcome_unknown");
+}
+
 static void case_oversize_old_row(void)
 {
     struct big_spec spec = big_small();
-    struct big_req b;
-    struct json_value p;
-    struct json_value res;
-    struct wallet_send_once_row row;
+    struct big_spec tail;
+    spec.recips_len = 17000;
+    tail = spec;
+    tail.recips_tail = "Z";
+    old_row_case("old recipients", "edge-old-recips", &spec, &tail);
+    spec = big_small();
+    spec.from_len = 1100;
+    spec.from_tail = "X";
+    tail = spec;
+    tail.from_tail = "Y";
+    old_row_case("old from", "edge-old-from", &spec, &tail);
+    spec = big_small();
+    spec.fee_len = 100;
+    spec.fee_tail = "1";
+    tail = spec;
+    tail.fee_tail = "2";
+    old_row_case("old fee", "edge-old-fee", &spec, &tail);
+}
+
+/* Every state of an old row, the unfinished ones too: nothing tells which
+ * request it was, so no state may send or name a transaction. */
+static void case_old_row_states(void)
+{
+    struct big_spec spec = big_small();
     spec.recips_len = 17000;
     reset_runs();
-    if (!big_make(&b, &spec))
-        return;
-    memset(&row, 0, sizeof(row));
-    bool parsed = big_params(&p, &b, "edge-big-old");
-    edge_chk("the old-format request parses", parsed);
-    if (!parsed) {
-        json_free(&p);
-        big_free(&b);
-        return;
-    }
-    kat_ids(&p, "edge-big-old", row.key_hash, row.digest);
-    json_free(&p);
-    row.state = WALLET_SEND_ONCE_COMMITTED;
-    row.has_txid = true;
-    memset(row.txid, 0xC4, 32);
-    row.created_at = row.updated_at = GetTime();
-    edge_chk("a row with a prefix digest is seeded",
-        db_wallet_send_once_insert(&g_fx.ndb, &row));
-    bool rc = go_big(&b, "edge-big-old", plain_hook_ok, &res);
-    edge_chk("its retry conflicts and sends nothing",
-        rc && state_is(&res, "key_conflict") && no_txid(&res) &&
-        atomic_load(&g_runs) == 0);
-    json_free(&res);
-    big_free(&b);
+    edge_chk("an old started row is seeded",
+        big_seed_old(&spec, "edge-old-st", WALLET_SEND_ONCE_STARTED, 0));
+    edge_chk("an old built row is seeded",
+        big_seed_old(&spec, "edge-old-bt", WALLET_SEND_ONCE_BUILT, 0xC5));
+    big_expect("old started row", "its retry is outcome_unknown, no send", &spec,
+               "edge-old-st", "outcome_unknown");
+    big_expect("old built row", "its retry is outcome_unknown, no txid", &spec,
+               "edge-old-bt", "outcome_unknown");
 }
 
 /* ── The digest of any request that always fit, pinned to the byte ────── */
@@ -1206,6 +1281,176 @@ static void case_digest_pin_largest(void)
     big_free(&b);
 }
 
+/* ── A real amount the digest's text cannot hold ──────────────────────── */
+
+/* %.8g writes each of these amounts as 1000, while the send reads %.8f. */
+#define E_AMT(x) "{\"address\":\"zs1EdgeTo\",\"amount\":" x "}"
+#define E_LOSSY_1 "[" E_AMT("1000.00000001") "]"
+#define E_LOSSY_2 "[" E_AMT("1000.00000002") "]"
+#define E_WHOLE "[" E_AMT("1000.0") "]"
+
+static void expect_answer(const char *name, const char *recips, const char *fee,
+                          const char *key, const char *state, int runs)
+{
+    struct json_value res;
+    bool rc = go(E_FROM, recips, fee, key, plain_hook_ok, &res);
+    edge_chk(name, no_send_answer(rc, &res, state, runs));
+    json_free(&res);
+}
+
+static void expect_replay(const char *name, const char *recips, const char *fee,
+                          const char *key, uint8_t fill, int runs)
+{
+    struct json_value res;
+    bool rc = go(E_FROM, recips, fee, key, plain_hook_ok, &res);
+    edge_chk(name, rc && state_is(&res, "committed") && txid_is(&res, fill) &&
+                   replayed_is(&res, true) && atomic_load(&g_runs) == runs);
+    json_free(&res);
+}
+
+static void expect_first(const char *name, const char *recips, const char *fee,
+                         const char *key, uint8_t fill)
+{
+    struct json_value res;
+    int before = atomic_load(&g_runs);
+    bool rc = go(E_FROM, recips, fee, key, plain_hook_ok, &res);
+    edge_chk(name, is_fresh_commit(rc, &res, fill) &&
+                   atomic_load(&g_runs) == before + 1);
+    json_free(&res);
+}
+
+/* This build's row holds the first amount's extension, and the second request's
+ * legacy digest has no extension, so nothing matches: a conflict. */
+static void case_lossy_amounts(void)
+{
+    const char *key = "edge-lossy";
+    reset_runs();
+    expect_first("a lossy amount sends", E_LOSSY_1, "null", key, 0xB1);
+    expect_replay("its identical retry replays", E_LOSSY_1, "null", key, 0xB1, 1);
+    expect_answer("another lossy amount conflicts and does not send", E_LOSSY_2,
+                  "null", key, "key_conflict", 1);
+    expect_answer("the whole amount the text shows conflicts too", E_WHOLE,
+                  "null", key, "key_conflict", 1);
+    expect_replay("the conflicts leave the replay in place", E_LOSSY_1, "null",
+                  key, 0xB1, 1);
+}
+
+/* The same amount on another recipient is another payment. */
+static void case_lossy_position(void)
+{
+    const char *key = "edge-lossy-pos";
+    const char *first = "[" E_AMT("1000.00000001") "," E_AMT("1000.0") "]";
+    const char *second = "[" E_AMT("1000.0") "," E_AMT("1000.00000001") "]";
+    reset_runs();
+    expect_first("a lossy first recipient sends", first, "null", key, 0xB1);
+    expect_answer("the amount moved to the next recipient conflicts", second,
+                  "null", key, "key_conflict", 1);
+}
+
+/* The whole amount's digest is what an earlier build stored for the lossy
+ * request, so the row cannot say which it was: outcome_unknown, never a replay. */
+static void case_lossy_after_whole(void)
+{
+    const char *key = "edge-lossy-whole";
+    reset_runs();
+    expect_first("a whole real amount sends", E_WHOLE, "null", key, 0xB1);
+    expect_replay("its identical retry replays", E_WHOLE, "null", key, 0xB1, 1);
+    expect_answer("a lossy amount with its text is outcome_unknown, no send",
+                  E_LOSSY_1, "null", key, "outcome_unknown", 1);
+}
+
+static bool seed_recips(const char *key, const char *recips, const char *fee,
+                        uint8_t fill)
+{
+    struct json_value p;
+    struct wallet_send_once_row row;
+    struct uint256 id;
+    memset(&row, 0, sizeof(row));
+    mk_params(&p, E_FROM, recips, fee, key);
+    kat_ids(&p, key, row.key_hash, row.digest);
+    json_free(&p);
+    row.state = WALLET_SEND_ONCE_COMMITTED;
+    row.has_txid = true;
+    memset(row.txid, fill, 32);
+    row.created_at = row.updated_at = GetTime();
+    txid_fill(&id, fill);
+    admit(&id);
+    return db_wallet_send_once_insert(&g_fx.ndb, &row);
+}
+
+/* An earlier build stored these with no extension. Its identical retry and the
+ * other lossy amount cannot be told apart: both outcome_unknown. */
+static void case_lossy_old_row(void)
+{
+    const char *key = "edge-lossy-old";
+    reset_runs();
+    edge_chk("an old lossy row is seeded",
+        seed_recips(key, E_LOSSY_1, "null", 0xE1));
+    expect_answer("its identical retry is outcome_unknown, no txid", E_LOSSY_1,
+                  "null", key, "outcome_unknown", 0);
+    expect_answer("the other lossy amount is outcome_unknown, no txid",
+                  E_LOSSY_2, "null", key, "outcome_unknown", 0);
+    expect_answer("an amount with other text conflicts",
+                  "[" E_AMT("1001.00000001") "]", "null", key, "key_conflict", 0);
+}
+
+/* A number fee at zatoshi precision, which %.8g writes as 1. */
+static void case_lossy_fee(void)
+{
+    const char *key = "edge-lossy-fee";
+    reset_runs();
+    g_fx.wallet->default_fee = 100000001;
+    expect_first("a lossy number fee sends", E_RECIPS, "1.00000001", key, 0xB1);
+    expect_replay("its identical retry replays", E_RECIPS, "1.00000001", key,
+                  0xB1, 1);
+    expect_answer("another lossy fee conflicts and does not send", E_RECIPS,
+                  "1.00000002", key, "key_conflict", 1);
+    edge_chk("an old row with a lossy fee is seeded",
+        seed_recips("edge-lossy-fee-old", E_RECIPS, "1.00000001", 0xE2));
+    expect_answer("its identical retry is outcome_unknown, no txid", E_RECIPS,
+                  "1.00000001", "edge-lossy-fee-old", "outcome_unknown", 1);
+}
+
+/* Known answers computed with an outside SHA3-256 tool. A real the text holds
+ * absorbs nothing more, so an earlier build's row still replays. A lossy real
+ * adds length-prefixed "amount/<index>/<%.8f>" or "fee/<%.8f>" after the fee. */
+static void case_digest_pin_reals(void)
+{
+    static const struct {
+        const char *key, *recips, *fee, *hex, *name;
+    } pins[] = {
+        { "pin-amt", "[" E_AMT("1.5") "]", "null",
+          "101bea8309c1dc703f20f88769aa53143e8025ae293a2557ea95e5b534dbc583",
+          "a real amount the text holds keeps its digest" },
+        { "pin-wide", "[" E_AMT("12.345678") "]", "0.0000025",
+          "97ebbc453e1a472548084e28201a9b3be330b6e50ee8f9063dfe9d06aca3fe28",
+          "eight digits and a number fee keep their digest" },
+        { "pin-subzat", "[" E_AMT("1000.000000001") "]", "null",
+          "cc5c584c6e06d663752afa6bf5bdaa69bbfbd017cb062f1e4919b459bfa7d505",
+          "digits below a zatoshi change no amount and keep their digest" },
+        { "pin-lossy", E_LOSSY_1, "null",
+          "a125ca66a5d1efdb7e0b736c647f5577e3d4f3ec7eac33958b898ba79b45878a",
+          "a lossy amount's extension is pinned" },
+        { "pin-lossy-two",
+          "[" E_AMT("5.0") "," E_AMT("1000.00000002") "]", "null",
+          "5ae47e49f9c77bbad3687b316a720e0323aa4bf475cbbf8a31f05bb18f42b944",
+          "a lossy amount's position is pinned" },
+        { "pin-lossy-fee", E_RECIPS, "1.00000001",
+          "0aa8b9287b7be97f100028be2cd8bea3492fddf2b4faad7e1c4831e225d5d1ce",
+          "a lossy fee's extension is pinned" },
+    };
+    struct json_value res;
+    reset_runs();
+    for (size_t i = 0; i < sizeof(pins) / sizeof(pins[0]); i++) {
+        edge_chk("a pinned row is seeded",
+            pin_seed(pins[i].key, pins[i].hex, 0xD3));
+        bool rc = go(E_FROM, pins[i].recips, pins[i].fee, pins[i].key,
+                     plain_hook_ok, &res);
+        pin_chk(pins[i].name, rc, &res, 0xD3);
+        json_free(&res);
+    }
+}
+
 /* ── Only a failed allocation refuses for the digest ──────────────────── */
 
 static void digest_nomem_at(unsigned nth, const char *name)
@@ -1279,8 +1524,10 @@ int wallet_send_once_edge_tests(void)
         case_built_write_fails, case_sync_off, case_finish_hex,
         case_finish_recorded_txid, case_one_transaction,
         case_oversize_recipients, case_oversize_from, case_oversize_fee,
-        case_oversize_old_row, case_digest_pins, case_digest_pin_largest,
-        case_digest_no_memory, case_no_txid_holds_key,
+        case_oversize_old_row, case_old_row_states, case_digest_pins,
+        case_digest_pin_largest, case_lossy_amounts, case_lossy_position,
+        case_lossy_after_whole, case_lossy_old_row, case_lossy_fee,
+        case_digest_pin_reals, case_digest_no_memory, case_no_txid_holds_key,
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         if (!fx_up("case")) {
