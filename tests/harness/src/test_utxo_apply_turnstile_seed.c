@@ -340,11 +340,316 @@ static int test_seed_genesis_without_body(void)
     return failures;
 }
 
+/* ---- mutation-gap cases: exact stats, one-row slices, hold names, the
+ * commit-phase re-checks and the reset hook. ---- */
+
+static bool sd_stats_are(int64_t through, uint64_t rows, uint64_t slices,
+                         const char *hold)
+{
+    struct utxo_apply_turnstile_seed_stats st;
+    utxo_apply_turnstile_seed_stats_get(&st);
+    return st.seeded_through == through && st.rows_written == rows &&
+           st.slices == slices && !strcmp(st.hold, hold);
+}
+
+static int test_seed_stats_exact(void)
+{
+    int failures = 0;
+    struct sd_fx fx;
+    struct utxo_apply_turnstile_seed_stats st;
+    SD_CHECK("fixture", sd_open(&fx, 2600, 2600));
+    SD_CHECK("first slice reports its rows, slice and height",
+             sd_run(&fx) && sd_stats_are(1023, 1024, 1, "none"));
+    utxo_apply_turnstile_seed_stats_get(&st);
+    SD_CHECK("reading 1024 bodies is accounted in read_us_total",
+             st.read_us_total > 0);
+    SD_CHECK("second slice accumulates the counters",
+             sd_run(&fx) && sd_stats_are(2047, 2048, 2, "none"));
+    sd_close(&fx);
+    return failures;
+}
+
+static void sd_rewind_all_hook(void *user)
+{
+    sd_set_cursor(user, 0);
+}
+
+static int test_seed_single_row_slice(void)
+{
+    int failures = 0;
+    struct sd_fx fx;
+    SD_CHECK("fixture", sd_open(&fx, 10, 1));   /* only genesis is below 1 */
+    SD_CHECK("a one-row slice (genesis) is written",
+             sd_run(&fx) && sd_max(&fx) == 0 &&
+             sd_stats_are(0, 1, 1, "none"));
+    sd_close(&fx);
+
+    SD_CHECK("fixture", sd_open(&fx, 10, 5));
+    while (sd_run(&fx)) {}
+    sd_set_cursor(&fx, 6);
+    SD_CHECK("a one-row slice above row K is written",
+             sd_run(&fx) && sd_max(&fx) == 5 && sd_stats_are(5, 6, 2, "none"));
+    sd_close(&fx);
+
+    SD_CHECK("fixture", sd_open(&fx, 10, 1));
+    utxo_apply_turnstile_seed_set_gap_hook_for_test(sd_rewind_all_hook, &fx);
+    SD_CHECK("a one-row slice at or above the rewound cursor is dropped",
+             !sd_run(&fx) && sd_max(&fx) == -1 &&
+             sd_stats_are(-1, 0, 0, "none"));
+    sd_close(&fx);
+    return failures;
+}
+
+static bool sd_blocker_says(const char *id, const char *reason_part,
+                            const char *escape)
+{
+    struct blocker_snapshot snap;
+    return blocker_find_by_id_prefix(id, &snap) &&
+           (!reason_part || strstr(snap.reason, reason_part)) &&
+           !strcmp(snap.escape_action, escape);
+}
+
+static int sd_negative_case(const char *label, int h, int64_t sprout,
+                            int64_t sapling, bool zero_sprout,
+                            const char *pool)
+{
+    int failures = 0;
+    struct sd_fx fx;
+    char want[32];
+    snprintf(want, sizeof(want), "pool=%s ", pool);
+    SD_CHECK("fixture", sd_open(&fx, 10, 10));
+    for (int i = 0; zero_sprout && i < 10; i++)
+        fx.sprout[i] = 0;
+    fx.sprout[h] += sprout;
+    fx.sapling[h] += sapling;
+    SD_CHECK(label, sd_run(&fx) && sd_max(&fx) == h - 1 &&
+             sd_stats_are(h - 1, (uint64_t)h, 1, "negative_total") &&
+             sd_blocker_says("utxo_apply.turnstile_seed_negative", want,
+                             "inspect the chain's shielded history"));
+    sd_close(&fx);
+    return failures;
+}
+
+static int test_seed_negative_names_and_halt(void)
+{
+    int failures = 0;
+    failures += sd_negative_case("sapling going negative names sapling", 3, 0,
+                                 -1000, false, "sapling");
+    failures += sd_negative_case("sprout going negative names sprout", 3,
+                                 -1000, 0, false, "sprout");
+    /* Sprout stays at exactly zero: zero is not negative. */
+    failures += sd_negative_case("a zero sprout total is not the negative pool",
+                                 2, 0, -1000, true, "sapling");
+
+    struct sd_fx fx;
+    SD_CHECK("fixture", sd_open(&fx, 10, 10));
+    fx.sapling[3] = -1000;
+    SD_CHECK("first run stops at the negative total", sd_run(&fx) &&
+             sd_max(&fx) == 2);
+    fx.sapling[3] = 4;
+    SD_CHECK("the halt holds even once the body reads fine",
+             !sd_run(&fx) && sd_max(&fx) == 2 &&
+             sd_stats_are(2, 3, 1, "negative_total"));
+    sd_close(&fx);
+    return failures;
+}
+
+static int test_seed_body_hold_and_genesis_present(void)
+{
+    int failures = 0;
+    struct sd_fx fx;
+    SD_CHECK("fixture", sd_open(&fx, 10, 10));
+    fx.fail_h = 1;
+    SD_CHECK("genesis row written, then the body blocker names its repair",
+             sd_run(&fx) && sd_max(&fx) == 0 &&
+             sd_stats_are(0, 1, 1, "body") &&
+             sd_blocker_says("utxo_apply.turnstile_seed_body",
+                             "body read failed",
+                             "repair blk files or reindex"));
+    /* Empty the table: the next slice is genesis alone, which unreadable still
+     * seeds as zero totals and must release the body hold. */
+    SD_CHECK("table emptied",
+             sqlite3_exec(fx.db, "DELETE FROM shielded_pool_totals", NULL,
+                          NULL, NULL) == SQLITE_OK);
+    sd_set_cursor(&fx, 1);
+    fx.fail_h = 0;
+    SD_CHECK("a genesis-only slice releases the body hold",
+             sd_run(&fx) && sd_row_is(&fx, 0, 0, 0) &&
+             sd_stats_are(0, 2, 2, "none") &&
+             !blocker_exists("utxo_apply.turnstile_seed_body"));
+    sd_close(&fx);
+
+    /* Genesis legitimately sits at file offset 0; any later block there is
+     * not a body. */
+    SD_CHECK("fixture", sd_open(&fx, 10, 10));
+    fx.bi[0].nDataPos = 0;
+    fx.bi[1].nDataPos = 0;
+    SD_CHECK("genesis at offset 0 is read, a later block at 0 is not",
+             sd_run(&fx) && sd_max(&fx) == 0 &&
+             sd_row_is(&fx, 0, sd_sprout_of(0), sd_sapling_of(0)) &&
+             sd_stats_are(0, 1, 1, "body"));
+    sd_close(&fx);
+    return failures;
+}
+
+static void sd_rehash_first_hook(void *user)
+{
+    struct sd_fx *fx = user;
+    static struct uint256 other;
+    other.data[0] = 0xdd;
+    fx->bi[0].phashBlock = &other;
+}
+
+static void sd_insert_above_hook(void *user)
+{
+    struct sd_fx *fx = user;
+    shielded_pool_kv_put(fx->db, 12, 1, 1);   /* above the slice and K */
+}
+
+static bool sd_has_row(struct sd_fx *fx, int64_t h)
+{
+    int64_t a = 0, b = 0;
+    bool found = false;
+    return shielded_pool_kv_get(fx->db, h, &a, &b, &found) && found;
+}
+
+static bool g_sd_nested_ran;
+
+static void sd_nested_run_hook(void *user)
+{
+    struct sd_fx *fx = user;
+    g_sd_nested_ran = sd_run(fx);
+}
+
+static void sd_drop_table_hook(void *user)
+{
+    struct sd_fx *fx = user;
+    sqlite3_exec(fx->db, "DROP TABLE shielded_pool_totals", NULL, NULL, NULL);
+}
+
+static int test_seed_commit_rechecks(void)
+{
+    int failures = 0;
+    struct sd_fx fx;
+    SD_CHECK("fixture", sd_open(&fx, 10, 10));
+    utxo_apply_turnstile_seed_set_gap_hook_for_test(sd_rehash_first_hook, &fx);
+    SD_CHECK("a changed hash on the slice's first row discards it",
+             !sd_run(&fx) && sd_max(&fx) == -1);
+    sd_close(&fx);
+
+    SD_CHECK("fixture", sd_open(&fx, 10, 5));
+    while (sd_run(&fx)) {}
+    sd_set_cursor(&fx, 10);
+    utxo_apply_turnstile_seed_set_gap_hook_for_test(sd_insert_above_hook, &fx);
+    SD_CHECK("a row added above K between the phases discards the slice",
+             !sd_run(&fx) && sd_max(&fx) == 12 && !sd_has_row(&fx, 5) &&
+             sd_stats_are(4, 5, 1, "none"));
+    sd_close(&fx);
+
+    SD_CHECK("fixture", sd_open(&fx, 10, 10));
+    g_sd_nested_ran = true;
+    utxo_apply_turnstile_seed_set_gap_hook_for_test(sd_nested_run_hook, &fx);
+    SD_CHECK("a run entered while one is running is refused",
+             sd_run(&fx) && !g_sd_nested_ran && sd_max(&fx) == 9);
+    sd_close(&fx);
+    return failures;
+}
+
+static int test_seed_store_failures(void)
+{
+    int failures = 0;
+    struct sd_fx fx;
+    SD_CHECK("fixture", sd_open(&fx, 10, 10));
+    sqlite3_exec(fx.db, "DROP TABLE shielded_pool_totals", NULL, NULL, NULL);
+    SD_CHECK("an unreadable MAX(height) is a refusal, not a run",
+             !sd_run(&fx) && sd_stats_are(-1, 0, 0, "none"));
+    sd_close(&fx);
+
+    SD_CHECK("fixture", sd_open(&fx, 10, 10));
+    utxo_apply_turnstile_seed_set_gap_hook_for_test(sd_drop_table_hook, &fx);
+    SD_CHECK("a store that fails in the commit phase writes nothing",
+             !sd_run(&fx) && sd_stats_are(-1, 0, 0, "none"));
+    sd_close(&fx);
+
+    SD_CHECK("fixture", sd_open(&fx, 10, 10));
+    SD_CHECK("failing insert armed",
+             sqlite3_exec(fx.db,
+                 "CREATE TRIGGER sd_fail BEFORE INSERT ON shielded_pool_totals "
+                 "WHEN NEW.height = 6 BEGIN SELECT RAISE(ABORT,'sd'); END",
+                 NULL, NULL, NULL) == SQLITE_OK);
+    SD_CHECK("a failed put rolls the whole slice back",
+             !sd_run(&fx) && sd_max(&fx) == -1 &&
+             sd_stats_are(-1, 0, 0, "none"));
+    sd_close(&fx);
+
+    SD_CHECK("fixture", sd_open(&fx, 10, 10));
+    sqlite3_exec(fx.db, "BEGIN", NULL, NULL, NULL);
+    SD_CHECK("a db already inside a transaction cannot start the commit",
+             !sd_run(&fx) && sd_stats_are(-1, 0, 0, "none"));
+    sqlite3_exec(fx.db, "ROLLBACK", NULL, NULL, NULL);
+    SD_CHECK("the seeder runs once the outer transaction is gone",
+             sd_run(&fx) && sd_max(&fx) == 9);
+    sd_close(&fx);
+    return failures;
+}
+
+static int g_sd_hook_calls;
+
+static void sd_count_hook(void *user)
+{
+    (void)user;
+    g_sd_hook_calls++;
+}
+
+static int test_seed_reset_clears_everything(void)
+{
+    int failures = 0;
+    struct sd_fx fx;
+    SD_CHECK("fixture", sd_open(&fx, 300, 300));
+    fx.sapling[250] = -100000;
+    SD_CHECK("dirty run ends in a negative total",
+             sd_run(&fx) && sd_stats_are(249, 250, 1, "negative_total") &&
+             blocker_exists("utxo_apply.turnstile_seed_negative"));
+    utxo_apply_turnstile_seed_set_gap_hook_for_test(sd_count_hook, NULL);
+    utxo_apply_turnstile_seed_reset_for_test();
+    struct utxo_apply_turnstile_seed_stats st;
+    utxo_apply_turnstile_seed_stats_get(&st);
+    SD_CHECK("reset zeroes every counter and releases the hold",
+             sd_stats_are(-1, 0, 0, "none") && st.last_slice_us == 0 &&
+             st.read_us_total == 0 &&
+             !blocker_exists("utxo_apply.turnstile_seed_negative"));
+    fx.sapling[250] = 5;
+    g_sd_hook_calls = 0;
+    SD_CHECK("reset lifts the halt and forgets the gap hook",
+             sd_run(&fx) && g_sd_hook_calls == 0 && sd_max(&fx) == 299);
+    sd_close(&fx);
+
+    SD_CHECK("fixture", sd_open(&fx, 10, 10));
+    fx.fail_h = 3;
+    SD_CHECK("body hold raised",
+             sd_run(&fx) && blocker_exists("utxo_apply.turnstile_seed_body"));
+    utxo_apply_turnstile_seed_reset_for_test();
+    SD_CHECK("reset releases the body blocker",
+             !blocker_exists("utxo_apply.turnstile_seed_body") &&
+             sd_stats_are(-1, 0, 0, "none"));
+    sd_close(&fx);
+    return failures;
+}
+
+static int test_seed_mutant_gaps(void)
+{
+    return test_seed_stats_exact() + test_seed_single_row_slice() +
+           test_seed_negative_names_and_halt() +
+           test_seed_body_hold_and_genesis_present() +
+           test_seed_commit_rechecks() + test_seed_store_failures() +
+           test_seed_reset_clears_everything();
+}
+
 int test_utxo_apply_turnstile_seed(void)
 {
     return test_seed_genesis_without_body() +
            test_seed_empty_table() + test_seed_bounded_slice() +
            test_seed_missing_body() + test_seed_ignores_cached_values() +
            test_seed_discards_stale_slice() + test_seed_handoff() +
-           test_seed_negative_total();
+           test_seed_negative_total() + test_seed_mutant_gaps();
 }
