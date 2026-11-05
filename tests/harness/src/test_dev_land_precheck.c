@@ -579,6 +579,19 @@ _test_next:;
     return failures;
 }
 
+static bool dlx_pc_need_verdict(const struct dlx_call *c,
+                                const struct dlx_rig *rig, const char *gate,
+                                const char *want, bool present)
+{
+    if (present)
+        return !dlx_ok(c) && dlx_queue_empty() &&
+               strcmp(dlx_err_code(c), "PRECHECK_FAILED") == 0;
+    return dlx_ok(c) && dlx_queue_has_one() &&
+           dlx_pc_has(dlx_arr(c, "precheck_skipped"), gate) &&
+           strstr(dlx_str(c, "precheck_unproven"), want) != NULL &&
+           !dlx_pc_ran(rig, gate);
+}
+
 /* A gate whose lane file is absent would fail falsely: with `want` absent it
  * is unproven and submit queues; with the file present it runs and its red
  * still refuses. `gate` is marked failing in the fake lint either way. */
@@ -602,15 +615,7 @@ static bool dlx_pc_need_case(const char *tag, const char *gate, const char *want
             return false;
     }
     dlx_pc_submit(&c, &rig, NULL, "n");
-    bool ok = dlx_run(&c);
-    if (present)
-        ok = ok && !dlx_ok(&c) && dlx_queue_empty() &&
-             strcmp(dlx_err_code(&c), "PRECHECK_FAILED") == 0;
-    else
-        ok = ok && dlx_ok(&c) && dlx_queue_has_one() &&
-             dlx_pc_has(dlx_arr(&c, "precheck_skipped"), gate) &&
-             strstr(dlx_str(&c, "precheck_unproven"), want) != NULL &&
-             !dlx_pc_ran(&rig, gate);
+    bool ok = dlx_run(&c) && dlx_pc_need_verdict(&c, &rig, gate, want, present);
     dlx_end(&c);
     dlx_restore();
     return ok;
