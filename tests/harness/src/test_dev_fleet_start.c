@@ -424,11 +424,26 @@ _test_next:;
     return failures;
 }
 
+/* Injected monotonic clocks: one frozen, one that moves a full second on
+ * every read. Neither reads the host, so the verdict cannot follow its load. */
+static int64_t fsx_clock_frozen(void)
+{
+    return 1000;
+}
+
+static int64_t fsx_clock_slow(void)
+{
+    static int64_t t;
+    t += 1000;
+    return t;
+}
+
 static int fsx_case_latency_budget(const char *board)
 {
     int failures = 0;
     TEST("start: the declared latency budget holds on the fixture") {
         struct fsx_call c;
+        zcl_dev_fleet_start_set_clock_for_testing(fsx_clock_frozen);
         fsx_begin(&c);
         (void)json_push_kv_str(&c.input, "board_dir", board);
         (void)json_push_kv_bool(&c.input, "include_units", false);
@@ -445,7 +460,22 @@ static int fsx_case_latency_budget(const char *board)
         fsx_end(&c);
         PASS();
     }
+    TEST("start: a slow answer on the injected clock reports the budget exceeded") {
+        struct fsx_call c;
+        zcl_dev_fleet_start_set_clock_for_testing(fsx_clock_slow);
+        fsx_begin(&c);
+        (void)json_push_kv_str(&c.input, "board_dir", board);
+        (void)json_push_kv_bool(&c.input, "include_units", false);
+        ASSERT(fsx_run(&c));
+        ASSERT(fsx_ok(&c));
+        const struct json_value *v =
+            json_get(&c.reply.data, "budget_exceeded");
+        ASSERT(v && v->type == JSON_BOOL && json_get_bool(v));
+        fsx_end(&c);
+        PASS();
+    }
 _test_next:;
+    zcl_dev_fleet_start_set_clock_for_testing(NULL);
     return failures;
 }
 
