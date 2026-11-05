@@ -87,6 +87,10 @@ struct p2p_node;
 #define MESH_STREAM_PER_PEER_MAX 8u
 #define MESH_STREAM_TABLE_MAX 32u
 #define MESH_STREAM_OPEN_RATE_PER_SECOND 8u
+/* When both OPEN cadence tables are full, OPENs for a pairing-gated
+ * service share this many pairing reads per second, so a paired peer with
+ * no cadence slot is still served while the reads stay bounded. */
+#define MESH_STREAM_OPEN_OVERFLOW_PER_SECOND 4u
 
 /* A stream with no traffic either way is reaped at this mark. Services
  * with a shorter idle policy of their own enforce it in on_tick. */
