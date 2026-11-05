@@ -544,6 +544,8 @@ static bool fcb_route_setup(void)
         return false;
     g.node->send_head = g.sentinel;
     g.node->send_tail = g.sentinel;
+    /* The route answers only the peer the offer came from. */
+    g.svc.serving_peer_id = (uint32_t)g.node->id;
     return true;
 }
 
@@ -591,6 +593,78 @@ static int fcb_case_route_spares_honest_peer(void)
         /* msg_should_ignore_snapshot_offer drops offers from a peer still
          * marked as receiving. */
         ASSERT(g.node->state == PEER_ACTIVE);
+        PASS();
+    } _test_next:;
+    fcb_teardown();
+    return failures;
+}
+
+/* A proof from a peer we did not ask changes nothing and costs it nothing. */
+static bool fcb_route_ignored_stranger(void)
+{
+    return g.svc.state == SNAPSYNC_NEGOTIATING && !g.svc.fc_verified &&
+           atomic_load(&g.node->misbehavior) == 0 && g.sentinel->next == NULL;
+}
+
+static void fcb_route_deliver_truncated(void)
+{
+    static const uint8_t cut[3] = {1, 2, 3};
+    struct byte_stream s;
+
+    stream_init(&s, 16);
+    stream_write_bytes(&s, cut, sizeof(cut));
+    mp_zs_on_fc_proofs(&g.mp, g.node, &s);
+    stream_free(&s);
+}
+
+static int fcb_case_route_ignores_stranger(void)
+{
+    int failures = 0;
+
+    TEST("fc binding route: a peer we did not ask is ignored, whatever it "
+         "sends") {
+        ASSERT(fcb_route_setup());
+        g.svc.serving_peer_id = (uint32_t)g.node->id + 1;
+        uint32_t asked = g.svc.serving_peer_id;
+        ASSERT(fcb_route_deliver());
+        ASSERT(fcb_route_ignored_stranger());
+        /* Our best header behind the anchor would stand the service down. */
+        g.ms.pindex_best_header = &g.idx[FCB_ANCHOR_HEIGHT - 1];
+        ASSERT(fcb_route_deliver());
+        ASSERT(fcb_route_ignored_stranger());
+        ASSERT(g.svc.serving_peer_id == asked);
+        g.ms.pindex_best_header = &g.idx[FCB_ANCHOR_HEIGHT];
+        fcb_tamper(fcb_sampled_height(0), FCB_FIELD_BLOCK_HASH);
+        ASSERT(fcb_prove());
+        ASSERT(fcb_route_deliver());
+        ASSERT(fcb_route_ignored_stranger());
+        fcb_route_deliver_truncated();
+        ASSERT(fcb_route_ignored_stranger());
+        PASS();
+    } _test_next:;
+    fcb_teardown();
+    return failures;
+}
+
+static int fcb_case_route_late_reply_not_scored(void)
+{
+    int failures = 0;
+
+    TEST("fc binding route: a late reply from the peer asked is not scored") {
+        ASSERT(fcb_route_setup());
+        ASSERT(fcb_route_deliver());
+        ASSERT(g.svc.state == SNAPSYNC_RECEIVING);
+        ASSERT(g.svc.fc_verified);
+        ASSERT(fcb_route_deliver());
+        fcb_route_deliver_truncated();
+        ASSERT(g.svc.state == SNAPSYNC_RECEIVING);
+        ASSERT(g.svc.fc_verified);
+        ASSERT(atomic_load(&g.node->misbehavior) == 0);
+        snapsync_reset(&g.svc);
+        ASSERT(g.svc.state == SNAPSYNC_IDLE);
+        ASSERT(fcb_route_deliver());
+        ASSERT(g.svc.state == SNAPSYNC_IDLE);
+        ASSERT(atomic_load(&g.node->misbehavior) == 0);
         PASS();
     } _test_next:;
     fcb_teardown();
@@ -1132,6 +1206,8 @@ int test_snapshot_fc_binding(void)
     failures += fcb_case_no_main_state();
     failures += fcb_case_route_scores_forgery();
     failures += fcb_case_route_spares_honest_peer();
+    failures += fcb_case_route_ignores_stranger();
+    failures += fcb_case_route_late_reply_not_scored();
     failures += fcb_case_root_round_trip();
     failures += fcb_case_root_section_absent();
     failures += fcb_case_root_section_truncated();
