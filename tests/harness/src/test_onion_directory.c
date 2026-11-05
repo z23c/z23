@@ -1851,6 +1851,12 @@ int test_onion_directory(void)
     failures += od_test_served_pages(datadir);
     failures += od_test_response_bounds(datadir);
 
+    /* Sub-test in test_onion_directory_model.c: the on-chain projection
+     * model (engine/models/src/onion_directory.c). Private in-memory
+     * databases; touches no datadir. */
+    { extern int od_model_contract(void);
+      failures += od_model_contract(); }
+
     /* Sub-test in test_onion_directory_stale_hearsay.c: the freshness
      * boundary from both sides and the bound on log cost from a flood of
      * expired relayed stamps. Runs last: it re-points the onion context. */
