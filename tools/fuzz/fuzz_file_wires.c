@@ -22,11 +22,13 @@
 #include "crypto/ed25519.h"
 #include "crypto/sha3.h"
 #include "base/log_level.h"
+#include "base/serialize_le.h"
 #include "net/file_market.h"
 #include "net/file_service.h"
 #include "net/state_offer.h"
 #include "sapling/sapling.h"
 #include "sapling/fr.h"
+#include "util/safe_alloc.h"
 
 #include <signal.h>
 #include <stddef.h>
@@ -96,7 +98,7 @@ static void require_zeroed(const void *out, size_t len)
 
 static uint8_t *exact_copy(const uint8_t *src, size_t len)
 {
-    uint8_t *copy = malloc(len ? len : 1);
+    uint8_t *copy = zcl_malloc(len ? len : 1, "fuzz_file_wires_copy");
     if (!copy)
         abort();
     if (len)
@@ -111,7 +113,7 @@ static void apply_patches(uint8_t *wire, size_t wire_len,
     if (wire_len == 0)
         return;
     for (size_t i = 0; i + 3 <= patch_len; i += 3) {
-        size_t pos = ((size_t)patch[i] | ((size_t)patch[i + 1] << 8)) %
+        size_t pos = (size_t)zcl_read_u16_le(patch + i) %
                      wire_len;
         wire[pos] ^= patch[i + 2];
     }
@@ -401,8 +403,7 @@ static void fuzz_rom_requests(const uint8_t *wire, size_t wire_len)
     if (ok) {
         if (wire_len != FS_ROM_REQUEST_SIZE || memcmp(p, "ROM", 3) != 0 ||
             memcmp(root, p + 3, 32) != 0 ||
-            idx != ((uint32_t)p[35] | ((uint32_t)p[36] << 8) |
-                    ((uint32_t)p[37] << 16) | ((uint32_t)p[38] << 24)))
+            idx != zcl_read_u32_le(p + 35))
             abort();
     } else if (idx != 0xdeadbeefu) {
         abort();
@@ -420,6 +421,15 @@ static void fuzz_rom_requests(const uint8_t *wire, size_t wire_len)
     free(p);
 }
 
+static void check_serve_rng(const uint8_t *body, uint32_t blen,
+                            uint16_t start, uint16_t end)
+{
+    if (blen < 8 || memcmp(body, "RNG", 3) != 0 ||
+        start != zcl_read_u16_le(body + 3) ||
+        end != zcl_read_u16_le(body + 5))
+        abort();
+}
+
 static void check_serve_ok(const uint8_t *p, uint32_t plen, bool all,
                            bool rng, const uint8_t *puzzle, uint16_t start,
                            uint16_t end)
@@ -432,10 +442,8 @@ static void check_serve_ok(const uint8_t *p, uint32_t plen, bool all,
     uint32_t blen = puzzle ? plen - FS_POW_SOLUTION_SIZE : plen;
     if (all && (blen != 3 || memcmp(body, "ALL", 3) != 0 || start || end))
         abort();
-    if (rng && (blen < 8 || memcmp(body, "RNG", 3) != 0 ||
-                start != ((uint16_t)body[3] | ((uint16_t)body[4] << 8)) ||
-                end != ((uint16_t)body[5] | ((uint16_t)body[6] << 8))))
-        abort();
+    if (rng)
+        check_serve_rng(body, blen, start, end);
 }
 
 static void fuzz_serve_request(const uint8_t *wire, size_t wire_len)
@@ -493,14 +501,10 @@ static int feed_receiver(const uint8_t *bytes, size_t len)
  * ceiling is folded under the cap; zero and over-ceiling stay as sent. */
 static void cap_claim(uint8_t *header)
 {
-    uint32_t claim = (uint32_t)header[0] | ((uint32_t)header[1] << 8) |
-                     ((uint32_t)header[2] << 16) | ((uint32_t)header[3] << 24);
+    uint32_t claim = zcl_read_u32_le(header);
     if (claim > FUZZ_FILE_CLAIM_CAP && claim <= FUZZ_FILE_PEER_CHUNK_MAX) {
         claim = (claim & (FUZZ_FILE_CLAIM_CAP - 1u)) | 1u;
-        header[0] = (uint8_t)claim;
-        header[1] = (uint8_t)(claim >> 8);
-        header[2] = (uint8_t)(claim >> 16);
-        header[3] = (uint8_t)(claim >> 24);
+        zcl_write_u32_le(header, claim);
     }
 }
 
@@ -539,7 +543,7 @@ static void fuzz_private_raw(const uint8_t *in, size_t len)
 {
     if (len < 34)
         return;
-    uint32_t expected = ((uint32_t)in[0] | ((uint32_t)in[1] << 8)) + 1u;
+    uint32_t expected = (uint32_t)zcl_read_u16_le(in) + 1u;
     uint8_t digest[32];
     memcpy(digest, in + 2, 32);
     uint8_t *stream = exact_copy(in + 34, len - 34);
@@ -591,7 +595,7 @@ static void patch_frame(uint8_t *frame, size_t frame_len,
                         const uint8_t *patch, size_t patch_len)
 {
     for (size_t i = 0; i + 3 <= patch_len; i += 3) {
-        size_t slot = ((size_t)patch[i] | ((size_t)patch[i + 1] << 8)) %
+        size_t slot = (size_t)zcl_read_u16_le(patch + i) %
                       (frame_len - 2u);
         frame[slot < 2 ? slot : slot + 2u] ^= patch[i + 2];
     }
