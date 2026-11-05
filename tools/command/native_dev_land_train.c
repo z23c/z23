@@ -277,6 +277,7 @@ static int dl_train_unbind_edit(struct dl_row *rows, size_t n, void *context)
         rows[i].proof_intent[0] = '\0';
         rows[i].train_commit[0] = '\0';
         rows[i].train_solo = u->solo ? 1 : rows[i].train_solo;
+        if (u->solo) rows[i].train_group[0] = '\0';
         dl_publication_clear(&rows[i]);
         u->count++;
     }
@@ -376,6 +377,19 @@ static void dl_split_clear(struct dl_row *r, const char *group)
     (void)snprintf(r->phase, sizeof(r->phase), "rebase");
 }
 
+/* Recheck subgroup identity before replacing its binding. */
+/* A repeated split must contain precisely the earlier replicated cohort. */
+static bool dl_split_matches_group(const struct dl_row *head,
+                                   struct dl_row **members, size_t count)
+{
+    if (!head->train_group[0]) return true;
+    struct dl_train_group group;
+    if (!dl_train_group_parse(head->train_group, &group) || group.n != count) return false;
+    for (size_t i = 0; i < count; i++)
+        if (members[i]->seq != group.seq[i] || strcmp(members[i]->tip, group.tip[i]) ||
+            strcmp(members[i]->train_group, head->train_group)) return false;
+    return true;
+}
 static int dl_split_edit_rows(struct dl_row *rows, size_t n, void *context)
 {
     struct dl_split_edit *e = context;
@@ -392,11 +406,15 @@ static int dl_split_edit_rows(struct dl_row *rows, size_t n, void *context)
             if (dl_queued_precedes(members[j], members[i])) {
                 struct dl_row *tmp = members[i]; members[i] = members[j]; members[j] = tmp;
             }
-    if (members[0]->seq != e->head->seq || strcmp(members[0]->tip, e->head->tip)) return -1;
+    if (members[0]->seq != e->head->seq || strcmp(members[0]->tip, e->head->tip) ||
+        !dl_split_matches_group(e->head, members, count)) return -1;
     size_t first = (count + 1) / 2;
     char group[2][768] = {{0}};
     if ((first > 1 && !dl_split_descriptor(group[0], sizeof(group[0]), e->head->proof_intent, members, first, 0)) ||
         (count - first > 1 && !dl_split_descriptor(group[1], sizeof(group[1]), e->head->proof_intent, members + first, count - first, 1))) return -1;
+#if defined(ZCL_TESTING)
+    if (getenv("ZCL_LAND_TEST_DIE_BEFORE_TRAIN_SPLIT")) _exit(85);
+#endif
     for (size_t i = 0; i < count; i++) dl_split_clear(members[i], group[i >= first]);
     e->result = *members[0];
     e->updated = true;
@@ -411,6 +429,9 @@ static bool dl_train_split(const struct dl_dirs *d, struct dl_row *row,
         dl_fail(reply, "TRAIN_SPLIT_FAILED", "proof", "cannot atomically split the exact train", "queue changed or is unreadable");
         return false;
     }
+#if defined(ZCL_TESTING)
+    if (getenv("ZCL_LAND_TEST_DIE_AFTER_TRAIN_SPLIT")) _exit(84);
+#endif
     *row = edit.result;
     dl_step_reply(reply, row, "rebased");
     return true;
@@ -428,6 +449,7 @@ static void dl_train_requeue(const struct dl_dirs *d, struct dl_row *row,
     dl_log(row, why);
     dl_log(row, "; every member proves alone next\n");
     row->train_solo = 1;
+    row->train_group[0] = '\0';
     row->train_commit[0] = '\0';
     (void)snprintf(row->state, sizeof(row->state), "queued");
     (void)snprintf(row->phase, sizeof(row->phase), "rebase");

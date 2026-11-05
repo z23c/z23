@@ -468,6 +468,113 @@ _test_next:;
     return failures;
 }
 
+static int test_dev_land_train_split_eight(void)
+{
+    int failures = 0;
+    TEST("land: eight red rows split into four then two") {
+        struct dlx_rig rig;
+        char path[32], branch[32], tip[64];
+        dlx_isolate("train_split_eight");
+        ASSERT(dlx_rig_make(&rig, "train_split_eight_rig"));
+        setenv("ZCL_LAND_PROOF_STUB", "fail", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        ASSERT(dlx_qp_submit(&rig, rig.tip, 1));
+        for (int i = 2; i <= 8; i++) {
+            (void)snprintf(path, sizeof(path), "row%d.txt", i);
+            (void)snprintf(branch, sizeof(branch), "split-%d", i);
+            ASSERT(dlx_qp_branch(&rig, branch, path, "row\n", NULL, NULL, tip));
+            ASSERT(dlx_qp_submit(&rig, tip, i));
+        }
+        setenv("ZCL_LAND_TRAIN_WIDTH", "8", 1);
+        ASSERT(dlx_tr_beat("started", 7, 1));
+        ASSERT(dlx_tr_beat("rebased", 0, 1));
+        ASSERT(dlx_tr_beat("started", 3, 1));
+        ASSERT(dlx_tr_beat("rebased", 0, 1));
+        ASSERT(dlx_tr_beat("started", 1, 1));
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+static int test_dev_land_train_split_crash(void)
+{
+    int failures = 0;
+    TEST("land: a crash before or after split rewrite preserves exact retry") {
+        struct dlx_rig rig;
+        char b[64], c[64];
+        int status = 0;
+        dlx_isolate("train_split_crash");
+        ASSERT(dlx_tr_rig(&rig, "train_split_crash_rig", "fail", "b.txt", b, c));
+        setenv("ZCL_LAND_TRAIN_WIDTH", "3", 1);
+        ASSERT(dlx_tr_beat("started", 2, 1));
+        for (int i = 0; i < 2; i++) {
+            pid_t child = fork();
+            ASSERT(child >= 0);
+            if (child == 0) {
+                struct dlx_call cc;
+                setenv(i ? "ZCL_LAND_TEST_DIE_AFTER_TRAIN_SPLIT" :
+                           "ZCL_LAND_TEST_DIE_BEFORE_TRAIN_SPLIT", "1", 1);
+                dlx_begin(&cc, "step");
+                (void)dlx_run(&cc);
+                _exit(90);
+            }
+            ASSERT(waitpid(child, &status, 0) == child);
+            ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == (i ? 84 : 85));
+        }
+        ASSERT(dlx_tr_beat("started", 1, 1));
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+/* Model an older queue writer dropping the unknown subgroup field. */
+static bool dlx_tr_legacy_rewrite(long long seq)
+{
+    static char text[262144];
+    char land[1200], path[1400], anchor[48];
+    size_t len = 0;
+    dlx_landdir(land, sizeof(land));
+    (void)snprintf(path, sizeof(path), "%s/queue.jsonl", land);
+    if (!dlx_slurp(path, text, sizeof(text) - 1, &len)) return false;
+    text[len] = '\0';
+    (void)snprintf(anchor, sizeof(anchor), "{\"seq\":%lld,", seq);
+    char *line = strstr(text, anchor);
+    if (!line) return false;
+    char *end = strchr(line, '\n');
+    char *solo = strstr(line, "\"train_solo\":1");
+    char *field = strstr(line, "\"train_group\":\"");
+    if (!end || !solo || solo >= end || !field || field >= end) return false;
+    char *value = field + strlen("\"train_group\":\"");
+    char *close = strchr(value, '"');
+    if (!close || close >= end || close == value) return false;
+    memmove(value, close, strlen(close) + 1);
+    return dlx_write(path, text);
+}
+
+static int test_dev_land_train_split_old_writer(void)
+{
+    int failures = 0;
+    TEST("land: old writer drops cohort but solo marker prevents mixing") {
+        struct dlx_rig rig;
+        char b[64], c[64];
+        dlx_isolate("train_split_old");
+        ASSERT(dlx_tr_rig(&rig, "train_split_old_rig", "fail", "b.txt", b, c));
+        setenv("ZCL_LAND_TRAIN_WIDTH", "3", 1);
+        ASSERT(dlx_tr_beat("started", 2, 1));
+        ASSERT(dlx_tr_beat("rebased", 0, 1));
+        ASSERT(dlx_tr_legacy_rewrite(2));
+        ASSERT(dlx_tr_beat("started", 0, 1));
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
 static int test_dev_land_train_red_then_singles_land(void)
 {
     int failures = 0;
@@ -924,6 +1031,9 @@ int test_dev_land_train_cases(void)
     failures += test_dev_land_train_red_falls_back_to_singles();
     failures += test_dev_land_train_red_bisects();
     failures += test_dev_land_train_split_cancel();
+    failures += test_dev_land_train_split_eight();
+    failures += test_dev_land_train_split_crash();
+    failures += test_dev_land_train_split_old_writer();
     failures += test_dev_land_train_red_then_singles_land();
     failures += test_dev_land_train_held_row_skipped();
     failures += test_dev_land_train_cancelled_row_skipped();
