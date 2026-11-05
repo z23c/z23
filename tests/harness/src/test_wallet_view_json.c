@@ -82,6 +82,16 @@ static int wvj_key_entry(void)
     return failures;
 }
 
+static bool wvj_trace_with_spender_ok(const struct json_value *o)
+{
+    return o->type == JSON_OBJ && json_size(o) == 8 &&
+           wvj_str(o, "txid", "ab12") && wvj_int(o, "vout", 7) &&
+           wvj_str(o, "status", "unspent") && wvj_real(o, "value", 0.25) &&
+           wvj_int(o, "height", 321) && wvj_str(o, "spent_by", "cd34") &&
+           wvj_bool(o, "in_wallet", true) &&
+           wvj_bool(o, "in_chainstate", false);
+}
+
 static int wvj_utxo_trace(void)
 {
     int failures = 0;
@@ -89,13 +99,7 @@ static int wvj_utxo_trace(void)
     memset(&out, 0, sizeof(out));
     wallet_view_utxo_trace(&out, "ab12", 7, "unspent", 25000000, 321,
                            "cd34", true, false);
-    if (out.type != JSON_OBJ || json_size(&out) != 8 ||
-        !wvj_str(&out, "txid", "ab12") || !wvj_int(&out, "vout", 7) ||
-        !wvj_str(&out, "status", "unspent") ||
-        !wvj_real(&out, "value", 0.25) || !wvj_int(&out, "height", 321) ||
-        !wvj_str(&out, "spent_by", "cd34") ||
-        !wvj_bool(&out, "in_wallet", true) ||
-        !wvj_bool(&out, "in_chainstate", false))
+    if (!wvj_trace_with_spender_ok(&out))
         failures += wvj_fail("utxo trace with spender");
     json_free(&out);
 
@@ -139,50 +143,71 @@ static int wvj_flow_entry(void)
     return failures;
 }
 
+static bool wvj_reconcile_ok(void)
+{
+    struct json_value o;
+    memset(&o, 0, sizeof(o));
+    wallet_view_reconcile_summary(&o, 1, 2, 3, 4, 5, 100000000, 250000000);
+    bool ok = o.type == JSON_OBJ && json_size(&o) == 7 &&
+              wvj_int(&o, "verified", 1) && wvj_int(&o, "phantom", 2) &&
+              wvj_int(&o, "spent_on_chain", 3) &&
+              wvj_int(&o, "value_mismatch", 4) && wvj_int(&o, "fixed", 5) &&
+              wvj_real(&o, "balance_before", 1.0) &&
+              wvj_real(&o, "balance_after", 2.5);
+    json_free(&o);
+    return ok;
+}
+
+static bool wvj_purge_ok(void)
+{
+    struct json_value o;
+    memset(&o, 0, sizeof(o));
+    wallet_view_purge_summary(&o, 6, 7, 300000000, 400000000, 25000000);
+    bool ok = o.type == JSON_OBJ && json_size(&o) == 5 &&
+              wvj_int(&o, "utxos_deleted", 6) &&
+              wvj_int(&o, "txs_deleted", 7) &&
+              wvj_real(&o, "amount_purged", 3.0) &&
+              wvj_real(&o, "balance_before", 4.0) &&
+              wvj_real(&o, "balance_after", 0.25);
+    json_free(&o);
+    return ok;
+}
+
+static bool wvj_replay_ok(void)
+{
+    struct json_value o;
+    memset(&o, 0, sizeof(o));
+    wallet_view_replay_summary(&o, 8, 9, 500000000, 50000000);
+    bool ok = o.type == JSON_OBJ && json_size(&o) == 4 &&
+              wvj_int(&o, "utxos_found", 8) && wvj_int(&o, "txs_found", 9) &&
+              wvj_real(&o, "new_balance", 5.0) &&
+              wvj_real(&o, "old_balance", 0.5);
+    json_free(&o);
+    return ok;
+}
+
+static bool wvj_sync_ok(void)
+{
+    struct json_value o;
+    memset(&o, 0, sizeof(o));
+    wallet_view_sync_summary(&o, 10, 11, 12, 600000000, 75000000);
+    bool ok = o.type == JSON_OBJ && json_size(&o) == 5 &&
+              wvj_int(&o, "utxos_unmarked_spent", 10) &&
+              wvj_int(&o, "already_correct", 11) &&
+              wvj_int(&o, "marked_spent", 12) &&
+              wvj_real(&o, "balance_before", 6.0) &&
+              wvj_real(&o, "balance_after", 0.75);
+    json_free(&o);
+    return ok;
+}
+
 static int wvj_summaries(void)
 {
     int failures = 0;
-    struct json_value out;
-    memset(&out, 0, sizeof(out));
-    wallet_view_reconcile_summary(&out, 1, 2, 3, 4, 5, 100000000, 250000000);
-    if (out.type != JSON_OBJ || json_size(&out) != 7 ||
-        !wvj_int(&out, "verified", 1) || !wvj_int(&out, "phantom", 2) ||
-        !wvj_int(&out, "spent_on_chain", 3) ||
-        !wvj_int(&out, "value_mismatch", 4) || !wvj_int(&out, "fixed", 5) ||
-        !wvj_real(&out, "balance_before", 1.0) ||
-        !wvj_real(&out, "balance_after", 2.5))
-        failures += wvj_fail("reconcile summary");
-    json_free(&out);
-
-    memset(&out, 0, sizeof(out));
-    wallet_view_purge_summary(&out, 6, 7, 300000000, 400000000, 25000000);
-    if (out.type != JSON_OBJ || json_size(&out) != 5 ||
-        !wvj_int(&out, "utxos_deleted", 6) || !wvj_int(&out, "txs_deleted", 7) ||
-        !wvj_real(&out, "amount_purged", 3.0) ||
-        !wvj_real(&out, "balance_before", 4.0) ||
-        !wvj_real(&out, "balance_after", 0.25))
-        failures += wvj_fail("purge summary");
-    json_free(&out);
-
-    memset(&out, 0, sizeof(out));
-    wallet_view_replay_summary(&out, 8, 9, 500000000, 50000000);
-    if (out.type != JSON_OBJ || json_size(&out) != 4 ||
-        !wvj_int(&out, "utxos_found", 8) || !wvj_int(&out, "txs_found", 9) ||
-        !wvj_real(&out, "new_balance", 5.0) ||
-        !wvj_real(&out, "old_balance", 0.5))
-        failures += wvj_fail("replay summary");
-    json_free(&out);
-
-    memset(&out, 0, sizeof(out));
-    wallet_view_sync_summary(&out, 10, 11, 12, 600000000, 75000000);
-    if (out.type != JSON_OBJ || json_size(&out) != 5 ||
-        !wvj_int(&out, "utxos_unmarked_spent", 10) ||
-        !wvj_int(&out, "already_correct", 11) ||
-        !wvj_int(&out, "marked_spent", 12) ||
-        !wvj_real(&out, "balance_before", 6.0) ||
-        !wvj_real(&out, "balance_after", 0.75))
-        failures += wvj_fail("sync summary");
-    json_free(&out);
+    if (!wvj_reconcile_ok()) failures += wvj_fail("reconcile summary");
+    if (!wvj_purge_ok()) failures += wvj_fail("purge summary");
+    if (!wvj_replay_ok()) failures += wvj_fail("replay summary");
+    if (!wvj_sync_ok()) failures += wvj_fail("sync summary");
     if (!failures)
         printf("wallet_view json: summaries... OK\n");
     return failures;
