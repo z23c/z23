@@ -195,8 +195,8 @@ bool dl_train_intent_bind(const struct dl_dirs *d, struct dl_row *row,
 void dl_train_forget_group(struct dl_row *rows, size_t n, const struct dl_row *hit);
 bool dl_train_group_valid(const struct dl_row *row);
 bool dl_train_formed(const struct dl_row *row);
-/* A failed train proof is no verdict on the head alone: requeue the head
- * and release its members, all marked to prove alone. False: not a train. */
+/* A failed train proof is no verdict on any member: requeue the cohort as
+ * bounded subgroups or conservative solos. False: not a bound train. */
 bool dl_train_fallback(const struct dl_dirs *d, struct dl_row *row,
                        const char *detail, struct zcl_command_reply *reply, bool confirmed);
 /* A superseded pair can never publish: release the rows bound to it. */

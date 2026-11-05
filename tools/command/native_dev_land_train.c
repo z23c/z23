@@ -45,10 +45,11 @@
  * alone; a pair that may already have been sent stays put, fail closed.
  *
  * RED TRAIN. A failed stacked proof says nothing about any one member, so
- * nobody fails with it. The head is requeued in place and the members are
- * released, all marked train_solo: a marked row never forms or joins a
- * train again, so each proves alone, in its original queue order, exactly
- * as without trains. No bisection.
+ * nobody fails with it. An atomic queue rewrite splits the exact cohort into
+ * bounded subgroups, each of which must prepare and prove its own pair.
+ * Every released row retains train_solo for older drivers; a valid complete
+ * subgroup permits this driver to form its next train. A singleton proves
+ * alone. ZCL_LAND_TRAIN_BISECT=0 retains the legacy all-solo fallback.
  *
  * FENCES, HOLDS, CANCELS. A bound member cannot be cancelled or held until
  * its head's pair has landed and it records its own landing
@@ -496,8 +497,8 @@ static void dl_train_requeue(const struct dl_dirs *d, struct dl_row *row,
     dl_train_unbind(d, intent, row->seq, true);
 }
 
-/* A failed train proof is no verdict on the head alone: it proves alone
- * next, as do the members it carried. */
+/* A failed train proof is no verdict on any member: split the cohort or
+ * use the legacy all-solo fallback when bisection is disabled. */
 bool dl_train_fallback(const struct dl_dirs *d, struct dl_row *row,
                        const char *detail, struct zcl_command_reply *reply, bool confirmed)
 {
