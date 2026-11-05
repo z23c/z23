@@ -13,6 +13,7 @@
 #include <elf.h>
 #include <stdlib.h>
 #include <sys/resource.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #if defined(__x86_64__)
@@ -509,16 +510,28 @@ static int img_capture_descriptor_limit(void)
 {
     int failures = 0;
     TEST_CASE("supervised_process: image capture reports a descriptor-limit failure") {
+        /* The limit is per process and the harness may run other groups in
+         * this process, so lower it only in a forked child that exits at
+         * once; the parent's limit is never touched. */
         struct img m;
-        struct rlimit old, low;
         img_begin(&m, img_buffer, sizeof(img_buffer));
-        ASSERT_EQ(getrlimit(RLIMIT_NOFILE, &old), 0);
-        low = old;
-        low.rlim_cur = 0;
-        ASSERT_EQ(setrlimit(RLIMIT_NOFILE, &low), 0);
-        enum platform_supervised_image_result result = img_capture(&m);
-        ASSERT_EQ(setrlimit(RLIMIT_NOFILE, &old), 0);
-        ASSERT_EQ(result, PLATFORM_SUPERVISED_IMAGE_IO_ERROR);
+        fflush(NULL);
+        pid_t pid = fork();
+        ASSERT(pid >= 0);
+        if (pid == 0) {
+            struct rlimit low;
+            if (getrlimit(RLIMIT_NOFILE, &low) != 0)
+                _exit(2);
+            low.rlim_cur = 0;
+            if (setrlimit(RLIMIT_NOFILE, &low) != 0)
+                _exit(3);
+            _exit(img_capture(&m) == PLATFORM_SUPERVISED_IMAGE_IO_ERROR ? 0
+                                                                        : 4);
+        }
+        int status = 0;
+        ASSERT_EQ(waitpid(pid, &status, 0), pid);
+        ASSERT(WIFEXITED(status));
+        ASSERT_EQ(WEXITSTATUS(status), 0);
     } TEST_END
     return failures;
 }
