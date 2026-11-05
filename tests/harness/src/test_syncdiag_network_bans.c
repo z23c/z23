@@ -23,6 +23,7 @@ struct sd_bans_ctx {
     struct json_value result;
     char dir_template[PATH_MAX];
     char *dir;
+    char blocker[PATH_MAX];
 };
 
 static bool sd_bans_setup(struct sd_bans_ctx *ctx)
@@ -324,13 +325,18 @@ bool sd_bans_loopback_add_scenario(void)
     return sd_bans_teardown(&ctx, ok);
 }
 
-/* Makes the scenario datadir unwritable. Returns false when a write still
- * lands (a privileged runner), so the caller skips instead of failing. */
-static bool sd_bans_lock_datadir(struct sd_bans_ctx *ctx)
+/* Points the manager's datadir at a regular file, so banlist.dat cannot be
+ * created under it (ENOTDIR, which holds even for a privileged runner).
+ * Returns false when a write still lands, so the caller skips. */
+static bool sd_bans_block_datadir(struct sd_bans_ctx *ctx)
 {
-    if (chmod(ctx->dir, 0500) != 0)
+    snprintf(ctx->blocker, sizeof(ctx->blocker), "%s/not-a-dir", ctx->dir);
+    FILE *f = fopen(ctx->blocker, "wb");
+    if (!f)
         return false;
-    return !ban_db_write(&ctx->cm.manager, ctx->dir);
+    fclose(f);
+    ctx->cm.manager.datadir = ctx->blocker;
+    return !ban_db_write(&ctx->cm.manager, ctx->blocker);
 }
 
 static bool sd_bans_unsaved_remove_check(struct sd_bans_ctx *ctx,
@@ -343,23 +349,19 @@ static bool sd_bans_unsaved_remove_check(struct sd_bans_ctx *ctx,
 
 /* case: setban add when banlist.dat cannot be written must not answer plain
  * success. The ban is live in memory, so the error says it is not saved; a
- * remove that cannot be saved is reported the same way. */
+ * remove that cannot be saved is reported the same way. Skips cleanly when
+ * the write unexpectedly succeeds. */
 bool sd_bans_unsaved_write_scenario(void)
 {
     struct sd_bans_ctx ctx;
     bool ok = sd_bans_setup(&ctx);
     struct net_addr addr;
     ok = ok && sd_bans_addr(&ctx, BANS_PEER_B, &addr);
-    bool locked = ok && sd_bans_lock_datadir(&ctx);
-    if (ok && !locked) {
-        (void)chmod(ctx.dir, 0700);
-        return sd_bans_teardown(&ctx, true); /* skip: write still works */
-    }
+    if (ok && !sd_bans_block_datadir(&ctx))
+        return sd_bans_teardown(&ctx, true);
     ok = ok && !sd_bans_call(&ctx, "setban", BANS_PEER_B, "add", NULL);
     ok = ok && sd_bans_error_has(&ctx.result, "not saved");
     ok = ok && is_banned(&ctx.cm.manager, &addr);
     ok = ok && sd_bans_unsaved_remove_check(&ctx, &addr);
-    if (ctx.dir)
-        (void)chmod(ctx.dir, 0700);
     return sd_bans_teardown(&ctx, ok);
 }
