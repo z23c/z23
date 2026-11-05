@@ -5660,15 +5660,16 @@ int dl_lint_candidate(const struct dl_dirs *d, struct dl_row *row)
  * child output can put an incomplete UTF-8 sequence in a JSON detail. */
 static bool dl_lint_append_body(char *body, size_t cap, size_t *used, const char *line)
 {
-    static const char hex[] = "0123456789ABCDEF";
     for (const unsigned char *p = (const unsigned char *)line; *p; p++) {
         unsigned char c = *p;
         size_t n = c >= 0x7f ? 4u : 1u;
         if (n > cap - 1 - *used) { body[*used] = '\0'; return false; }
         if (n == 1) body[(*used)++] = c < 0x20 ? ' ' : (char)c;
         else {
+            char encoded[3];
+            zcl_hex_encode(&c, 1, encoded);
             body[(*used)++] = '\\'; body[(*used)++] = 'x';
-            body[(*used)++] = hex[c >> 4]; body[(*used)++] = hex[c & 15];
+            body[(*used)++] = encoded[0]; body[(*used)++] = encoded[1];
         }
     }
     body[*used] = '\0';
@@ -5712,6 +5713,20 @@ static bool dl_lint_frame(const char *line, char *gate, size_t cap)
     return true;
 }
 
+static void dl_lint_render(char *detail, size_t cap, const char *gate,
+                           const char *body, bool clipped)
+{
+    char rendered[1100];
+    int written = snprintf(rendered, sizeof(rendered), "FAIL %s: %s", gate, body);
+    clipped |= written < 0 || (size_t)written >= cap;
+    if (clipped && cap > 20) {
+        size_t take = cap - 20;
+        if (take > strlen(rendered)) take = strlen(rendered);
+        while (take && ((unsigned char)rendered[take] & 0xc0) == 0x80) take--;
+        (void)snprintf(detail, cap, "%.*s [detail truncated]", (int)take, rendered);
+    } else (void)snprintf(detail, cap, "%s", rendered);
+}
+
 static bool dl_lint_body(FILE *f, char *detail, size_t cap)
 {
     char line[4096], gate[256], next[256], body[701] = "";
@@ -5729,15 +5744,7 @@ static bool dl_lint_body(FILE *f, char *detail, size_t cap)
         if (clipped || used == sizeof(body) - 1) { clipped = true; break; }
     }
     if (!found || !used) return false;
-    char rendered[1100];
-    int written = snprintf(rendered, sizeof(rendered), "FAIL %s: %s", gate, body);
-    clipped |= written < 0 || (size_t)written >= cap;
-    if (clipped && cap > 20) {
-        size_t take = cap - 20;
-        if (take > strlen(rendered)) take = strlen(rendered);
-        while (take && ((unsigned char)rendered[take] & 0xc0) == 0x80) take--;
-        (void)snprintf(detail, cap, "%.*s [detail truncated]", (int)take, rendered);
-    } else (void)snprintf(detail, cap, "%s", rendered);
+    dl_lint_render(detail, cap, gate, body, clipped);
     return true;
 }
 
@@ -7618,6 +7625,22 @@ static bool dl_evidence_log_pointer(const struct dl_dirs *d,
     return false;
 }
 
+static void dl_lint_proof_detail(const struct dl_dirs *d, const struct dl_row *row,
+                                 const struct zcl_dev_proof_failure_identity *identity,
+                                 char first[256])
+{
+    if (strcmp(row->dimension, "lint") != 0) return;
+    char lint[250] = "";
+    dl_retained_lint(d->wt, row->local, row->base, identity, lint, sizeof(lint));
+    if (strncmp(lint, "lint log unavailable", 20) == 0) {
+        char original[160] = "";
+        size_t used = 0;
+        bool complete = dl_lint_append_body(original, sizeof(original), &used, first);
+        (void)snprintf(first, 256, "%s%s; %.60s", original,
+                       complete ? "" : " [detail truncated]", lint);
+    } else if (lint[0]) (void)snprintf(first, 256, "lint %s", lint);
+}
+
 /* Name what failed on the settled row. The digest's first line leads the
  * detail with the settled token kept after it, its first word becomes the
  * dimension, and the whole digest is written beside the attempt's land log
@@ -7640,17 +7663,7 @@ static void dl_failed_proof_evidence(const struct dl_dirs *d,
     if (word > 0 && word < sizeof(row->dimension))
         (void)snprintf(row->dimension, sizeof(row->dimension), "%.*s",
                        (int)word, first);
-    if (strcmp(row->dimension, "lint") == 0) {
-        char lint[sizeof(first) - 6] = "";
-        dl_retained_lint(d->wt, row->local, row->base, &identity, lint, sizeof(lint));
-        if (strncmp(lint, "lint log unavailable", 20) == 0) {
-            char original[160] = "";
-            size_t used = 0;
-            bool complete = dl_lint_append_body(original, sizeof(original), &used, first);
-            (void)snprintf(first, sizeof(first), "%s%s; %.60s", original,
-                           complete ? "" : " [detail truncated]", lint);
-        } else if (lint[0]) (void)snprintf(first, sizeof(first), "lint %s", lint);
-    }
+    dl_lint_proof_detail(d, row, &identity, first);
     size_t tlen = strlen(token) < 96 ? strlen(token) : 96;
     char where[1100] = "";
     char logrel[1024];

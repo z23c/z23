@@ -1098,6 +1098,15 @@ _test_next:;
     return failures;
 }
 
+static bool dlx_lint_refusal_detail(const char *detail)
+{
+    return strstr(detail, "wrong attempt body") == NULL &&
+           strstr(detail, "check-red") != NULL &&
+           strstr(detail, "unavailable") != NULL &&
+           strstr(detail, "[detail truncated]") != NULL &&
+           zutf8_validate(detail);
+}
+
 static bool dlx_lint_bad_file(bool fifo)
 {
     const struct dlx_evidence_case k = {
@@ -1121,11 +1130,7 @@ static bool dlx_lint_bad_file(bool fifo)
     dlx_begin(&c, "step");
     ok = ok && dlx_run(&c) && dlx_ok(&c) &&
          strcmp(dlx_str(&c, "state"), "failed") == 0 &&
-         strstr(dlx_str(&c, "detail"), "wrong attempt body") == NULL &&
-         strstr(dlx_str(&c, "detail"), "check-red") != NULL &&
-         strstr(dlx_str(&c, "detail"), "unavailable") != NULL &&
-         strstr(dlx_str(&c, "detail"), "[detail truncated]") != NULL &&
-         zutf8_validate(dlx_str(&c, "detail"));
+         dlx_lint_refusal_detail(dlx_str(&c, "detail"));
     dlx_end(&c);
     dlx_restore();
     return ok;
