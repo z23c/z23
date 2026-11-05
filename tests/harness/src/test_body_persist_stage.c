@@ -12,6 +12,8 @@
 #include "primitives/block.h"
 #include "primitives/transaction.h"
 #include "jobs/body_persist_stage.h"
+#include "storage/block_parse_cache.h"
+#include "storage/disk_block_io.h"
 #include "storage/event_log.h"
 #include "storage/event_log_singleton.h"
 #include "storage/progress_store.h"
@@ -19,6 +21,7 @@
 #include "util/reducer_stage_profile.h"
 #include "util/safe_alloc.h"
 #include "util/stage.h"
+#include "util/util.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
 
@@ -78,7 +81,7 @@ static bool synth_chain_bp_build(struct synth_chain_bp *sc, int n)
     sc->header_mismatch_height = -1;
     sc->merkle_mismatch_height = -1;
     sc->repeat_tail_height = -1;
-    sc->blocks =zcl_calloc((size_t)n, sizeof(struct block_index),
+    sc->blocks = zcl_calloc((size_t)n, sizeof(struct block_index),
                             "bp_blocks");
     sc->hashes = zcl_calloc((size_t)n, sizeof(struct uint256),
                             "bp_hashes");
@@ -836,10 +839,134 @@ static int bp_merkle_shape_tests(void)
     return failures;
 }
 
+/* ---- Bodies on real blk files in an isolated datadir ---- */
+
+enum bp_disk_mode {
+    BP_DISK_HONEST,      /* transactions match the header root */
+    BP_DISK_REPEAT_TAIL, /* final transaction repeated under the right root */
+    BP_DISK_BAD_ROOT,    /* header root does not match the transactions */
+};
+
+static const unsigned char BP_MSG_START[4] = {0x24, 0xe9, 0x27, 0x64};
+
+static void bp_disk_tx(struct transaction *tx, int h, size_t i)
+{
+    transaction_init(tx);
+    transaction_alloc(tx, 1, 1);
+    tx->vin[0].sequence = 0xffffffff;
+    tx->vout[0].value = (int64_t)(h * 16 + (int)i + 1) * COIN;
+    transaction_compute_hash(tx);
+}
+
+/* Write the body for height h into the datadir's blk files and point the
+ * block index at it, so the stage reads it through the real disk reader. */
+static bool bp_put_disk_block(struct synth_chain_bp *sc, int h,
+                              const char *datadir, size_t ntx,
+                              enum bp_disk_mode mode)
+{
+    size_t count = ntx + (mode == BP_DISK_REPEAT_TAIL ? 1 : 0);
+    struct block b;
+    block_init(&b);
+    b.vtx = zcl_calloc(count, sizeof(*b.vtx), "bp_disk_tx");
+    struct uint256 *ids = zcl_calloc(ntx, sizeof(*ids), "bp_disk_ids");
+    if (!b.vtx || !ids) { free(ids); block_free(&b); return false; }
+    b.num_vtx = count;
+    for (size_t i = 0; i < count; i++) {
+        bp_disk_tx(&b.vtx[i], h, i < ntx ? i : ntx - 1);
+        if (i < ntx) ids[i] = b.vtx[i].hash;
+    }
+    b.header.nVersion = 4;
+    b.header.nTime = (uint32_t)(1700000000u + (uint32_t)h);
+    b.header.nBits = 0x1f07ffff;
+    b.header.hashMerkleRoot = compute_merkle_root(ids, ntx);
+    if (mode == BP_DISK_BAD_ROOT)
+        b.header.hashMerkleRoot.data[0] ^= 0xa5;
+    free(ids);
+    block_get_hash(&b, &sc->hashes[h]);
+    tbi_ext(&sc->blocks[h])->hashMerkleRoot = b.header.hashMerkleRoot;
+    struct disk_block_pos pos;
+    disk_block_pos_init(&pos);
+    bool ok = write_block_to_disk(&b, &pos, datadir, BP_MSG_START);
+    block_free(&b);
+    if (ok)
+        block_index_disk_pos_store(&sc->blocks[h], pos.nFile, pos.nPos);
+    return ok;
+}
+
+/* A stored body that does not belong to its header goes straight to
+ * clear-and-hold: the indexed position is current, so it is not repaired. */
+static int bp_disk_case(const char *tag, size_t ntx, enum bp_disk_mode mode)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_bp sc;
+    char dd[2048];
+    bp_fmt_tmpdir(dir, sizeof(dir), tag);
+    mkdir_p_bp("./test-tmp");
+    mkdir_p_bp(dir);
+    bool ready = SetDataDir(dir) &&
+                 bp_setup(tag, 2, -1, -1, dir, sizeof(dir), &ms, &sc) == 0;
+    if (ready) {
+        body_persist_stage_set_reader(NULL, NULL);
+        GetDataDir(true, dd, sizeof(dd));
+        ready = bp_put_disk_block(&sc, 0, dd, 1, BP_DISK_HONEST) &&
+                bp_put_disk_block(&sc, 1, dd, ntx, mode);
+    }
+    BP_CHECK(tag, ready);
+    if (!ready) { bp_teardown(dir, &ms, &sc); ClearDataDirCache(); return failures; }
+
+    BP_CHECK("disk: only the honest prefix advances",
+             body_persist_stage_drain(100) == 1);
+    BP_CHECK("disk: counted as a merkle mismatch",
+             body_persist_stage_merkle_mismatch_total() == 1);
+    BP_CHECK("disk: HAVE_DATA cleared",
+             (sc.blocks[1].nStatus & BLOCK_HAVE_DATA) == 0);
+    BP_CHECK("disk: block not marked failed",
+             (sc.blocks[1].nStatus & BLOCK_FAILED_MASK) == 0);
+    BP_CHECK("disk: cursor holds", body_persist_stage_cursor() == 1);
+    BP_CHECK("disk: no permanent row", bp_row_absent(1));
+
+    /* The cached parse of the rejected body must be gone: with the bit
+     * restored, the next acquire has to be a real read, not a hit. */
+    sc.blocks[1].nStatus |= BLOCK_HAVE_DATA;
+    struct block_parse_handle hd;
+    memset(&hd, 0, sizeof(hd));
+    bool got = block_parse_cache_acquire(1, sc.hashes[1].data, &sc.blocks[1],
+                                         dd, &hd);
+    BP_CHECK("disk: parse cache entry evicted", got && !hd.cache_hit);
+    if (got) block_parse_cache_release(&hd);
+    sc.blocks[1].nStatus &= ~(unsigned)BLOCK_HAVE_DATA;
+
+    bool idle = true;
+    for (int i = 0; i < 3; i++)
+        idle = idle && body_persist_stage_step_once() == JOB_IDLE;
+    BP_CHECK("disk: repeated steps idle without re-adopting", idle &&
+             (sc.blocks[1].nStatus & BLOCK_HAVE_DATA) == 0 &&
+             body_persist_stage_merkle_mismatch_total() == 1);
+
+    /* At or below the tip a refetch cannot be requested: the hold is named. */
+    char why[BLOCKER_REASON_MAX];
+    body_persist_stage_set_unfetchable_hold_secs_for_testing(0);
+    (void)body_persist_stage_step_once();
+    BP_CHECK("disk: hold is named", bp_unfetchable_reason(why, sizeof(why)));
+    body_persist_stage_set_unfetchable_hold_secs_for_testing(-1);
+    bp_teardown(dir, &ms, &sc);
+    ClearDataDirCache();
+    return failures;
+}
+
+static int bp_disk_tests(void)
+{
+    int failures = 0;
+    failures += bp_disk_case("disk_repeat", 3, BP_DISK_REPEAT_TAIL);
+    failures += bp_disk_case("disk_badroot", 3, BP_DISK_BAD_ROOT);
+    return failures;
+}
+
 static int bp_mutation_gap_tests(void)
 {
     int failures = 0;
     failures += bp_merkle_shape_tests();
+    failures += bp_disk_tests();
     failures += bp_mut_counters();
     failures += bp_mut_drain_gate();
     failures += bp_mut_idle_stamp();
