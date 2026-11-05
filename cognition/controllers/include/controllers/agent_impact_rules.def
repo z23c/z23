@@ -1870,7 +1870,7 @@ AGENT_IMPACT_RULE("core/modules/net/src/addrman.c|core/modules/net/src/addrman_c
  * pinned root, and changing params_service.c can widen what an unverified
  * peer is allowed to make this node do; neither may land without the group
  * that recomputes the pins from the real files and replays the refusals. */
-AGENT_IMPACT_RULE("core/modules/sapling/src/params_fetch.c|core/modules/sapling/src/params_fetch_session.c|core/modules/sapling/src/params_fetch_internal.h|core/modules/sapling/include/sapling/params_fetch.h|core/modules/net/src/params_service.c|core/modules/net/include/net/params_service.h|core/modules/net/src/msgprocessor.c|tests/harness/src/test_params_fetch.c", "params_fetch")
+AGENT_IMPACT_RULE("core/modules/sapling/src/params_fetch.c|core/modules/sapling/src/params_fetch_session.c|core/modules/sapling/src/params_fetch_internal.h|core/modules/sapling/include/sapling/params_fetch.h|core/modules/net/src/params_service.c|core/modules/net/include/net/params_service.h|core/modules/net/src/msgprocessor.c|tests/harness/src/test_params_fetch.c|tools/fuzz/fuzz_param_wires.c|tests/harness/fuzz_seeds/param_wires/*", "params_fetch")
 
 /* LANE source-identity-q1q2: the ratchet that stops a working-tree
  * (directory-derived) source_id_sha256 reading from being published under
