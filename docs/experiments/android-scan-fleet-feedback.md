@@ -224,3 +224,13 @@ The focused nodelog tests and complexity and hardening checks passed; a device
 observation of these messages remains pending.
 A missing watchdog message does not rule out the watchdog path: process exit
 may occur before the app drains the node console pipe.
+
+On the landed ef115 Android build, one Stop reported projection catch-up at
+16,585 ms, incremental flat save at 1,863 ms with 981,183 bytes rewritten,
+flat bind at 29,787 ms and passive checkpoint at 1 ms. The completed
+fast-restart-persist stage took 48,236 ms. The flat-save path alone does not
+identify which coverage proof the bind used. The Android filter now also
+reconstructs the producer’s validated bind row, checked-row, throughput and
+thread counters. Focused nodelog tests cover the largest accepted counters and
+malformed or overflowing inputs; complexity and hardening checks passed.
+Device measurements of these counters remain pending.

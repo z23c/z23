@@ -284,14 +284,19 @@ static bool shutdown_number(const char **p, size_t limit)
     *p = end;
     return true;
 }
-static bool shutdown_field(const char **p, const char *label)
+static bool shutdown_field(const char **p, const char *label, unsigned long long *value)
 {
     size_t n = strlen(label);
     if (strncmp(*p, label, n)) return false;
     *p += n;
-    return shutdown_number(p, 20);
+    const char *start = *p;
+    if (!shutdown_number(p, 20)) return false;
+    *value = strtoull(start, NULL, 10);
+    return true;
 }
-static bool shutdown_substep_suffix(const char *name, const char *p, const char **mode, unsigned long long *bytes)
+struct shutdown_bind_stats { unsigned long long rows, checked, rate, threads; bool present; };
+static bool shutdown_substep_suffix(const char *name, const char *p, const char **mode, unsigned long long *bytes,
+                                    struct shutdown_bind_stats *bind)
 {
     if (!strcmp(name, "flat_save")) {
         if (!*p) return true;
@@ -306,9 +311,11 @@ static bool shutdown_substep_suffix(const char *name, const char *p, const char 
         *bytes = strtoull(start, NULL, 10);
         return true;
     }
-    if (!strcmp(name, "flat_bind"))
-        return shutdown_field(&p, " rows=") && shutdown_field(&p, " checked=") &&
-               shutdown_field(&p, " rows/s=") && shutdown_field(&p, " threads=") && !*p;
+    if (!strcmp(name, "flat_bind")) {
+        bind->present = shutdown_field(&p, " rows=", &bind->rows) && shutdown_field(&p, " checked=", &bind->checked) &&
+                        shutdown_field(&p, " rows/s=", &bind->rate) && shutdown_field(&p, " threads=", &bind->threads) && !*p;
+        return bind->present;
+    }
     return !*p;
 }
 static bool shutdown_substep(const char *line, char *out, size_t cap)
@@ -327,8 +334,11 @@ static bool shutdown_substep(const char *line, char *out, size_t cap)
     if (!shutdown_number(&p, 9) || strncmp(p, "ms", 2)) return false;
     size_t nd = (size_t)(p - digits); p += 2;
     const char *mode = NULL; unsigned long long bytes = 0;
-    if (!shutdown_substep_suffix(name, p, &mode, &bytes)) return false;
-    int wrote = mode ? snprintf(out, cap, "shutdown substep=%s elapsed_ms=%.*s mode=%s rewritten_bytes=%llu",
+    struct shutdown_bind_stats bind = {0};
+    if (!shutdown_substep_suffix(name, p, &mode, &bytes, &bind)) return false;
+    int wrote = bind.present ? snprintf(out, cap, "shutdown substep=%s elapsed_ms=%.*s rows=%llu checked=%llu rows_per_second=%llu threads=%llu",
+                                        name, (int)nd, digits, bind.rows, bind.checked, bind.rate, bind.threads) :
+                mode ? snprintf(out, cap, "shutdown substep=%s elapsed_ms=%.*s mode=%s rewritten_bytes=%llu",
                                 name, (int)nd, digits, mode, bytes) :
                        snprintf(out, cap, "shutdown substep=%s elapsed_ms=%.*s", name, (int)nd, digits);
     return wrote >= 0 && (size_t)wrote < cap;
@@ -363,7 +373,7 @@ void zapp_nodelog_line(struct zapp_nodelog *l, const char *line, int64_t now_ms)
     if (!text[0] || HAS_ANY(text, secret)) return;
     struct header header;
     bool has_header = read_header(text, &header), warning = warning_level(text, has_header, &header);
-    char timing[128];
+    char timing[256];
     bool stage = (has_header && shutdown_timing(text, &header, timing, sizeof(timing))) ||
                  shutdown_substep(text, timing, sizeof(timing)) ||
                  shutdown_watchdog(text, timing, sizeof(timing));

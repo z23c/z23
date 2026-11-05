@@ -328,15 +328,17 @@ static void shutdown_substep_cases(void)
         "[shutdown]   shutdown.flat_bind           44ms rows=10 checked=9 rows/s=2 threads=1",
         "[shutdown]   shutdown.wal_passive         0ms",
         "[shutdown]   shutdown.flat_save           1ms path=full rewritten_bytes=18446744073709551615",
-        "[shutdown]   shutdown.flat_save           2ms"
+        "[shutdown]   shutdown.flat_save           2ms",
+        "[shutdown]   shutdown.flat_bind 999999999ms rows=18446744073709551615 checked=18446744073709551615 rows/s=18446744073709551615 threads=18446744073709551615"
     };
     static const char *const expected[] = {
         "shutdown substep=projection_catch_up elapsed_ms=12",
         "shutdown substep=flat_save elapsed_ms=33 mode=incremental rewritten_bytes=123",
-        "shutdown substep=flat_bind elapsed_ms=44",
+        "shutdown substep=flat_bind elapsed_ms=44 rows=10 checked=9 rows_per_second=2 threads=1",
         "shutdown substep=wal_passive elapsed_ms=0",
         "shutdown substep=flat_save elapsed_ms=1 mode=full rewritten_bytes=18446744073709551615",
-        "shutdown substep=flat_save elapsed_ms=2"
+        "shutdown substep=flat_save elapsed_ms=2",
+        "shutdown substep=flat_bind elapsed_ms=999999999 rows=18446744073709551615 checked=18446744073709551615 rows_per_second=18446744073709551615 threads=18446744073709551615"
     };
     static const char *const bad[] = {
         "[shutdown]   shutdown.secret 1ms", "[shutdown]   shutdown.wal_passive -1ms",
@@ -344,7 +346,11 @@ static void shutdown_substep_cases(void)
         "[shutdown]   shutdown.flat_save 1ms path=other rewritten_bytes=1",
         "[shutdown]   shutdown.flat_save 1ms path=full rewritten_bytes=18446744073709551616",
         "[shutdown]   shutdown.flat_bind 1ms rows=1 checked=2 rows/s=3 threads=4 extra=x",
-        "[shutdown]   shutdown.flat_bind 1ms rows=1 checked=2 rows/s=3 threads=-1"
+        "[shutdown]   shutdown.flat_bind 1ms rows=1 checked=2 rows/s=3 threads=-1",
+        "[shutdown]   shutdown.flat_bind 1ms rows=18446744073709551616 checked=2 rows/s=3 threads=4",
+        "[shutdown]   shutdown.flat_bind 1ms rows=1 checked=18446744073709551616 rows/s=3 threads=4",
+        "[shutdown]   shutdown.flat_bind 1ms rows=1 checked=2 rows/s=18446744073709551616 threads=4",
+        "[shutdown]   shutdown.flat_bind 1ms rows=1 checked=2 rows/s=3 threads=18446744073709551616"
     };
     struct zapp_nodelog l; count = 0; zapp_nodelog_init(&l, sink, NULL);
     for (size_t i = 0; i < sizeof(input) / sizeof(input[0]); ++i) {
