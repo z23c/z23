@@ -6,9 +6,10 @@
  *
  * The rows come from the same fleet_board_posts store the `fleet wiki *`
  * commands read, through the same model calls, so the site shows what the
- * CLI shows: db_fleet_board_wiki_query for the index (bounded to
+ * CLI shows: db_fleet_board_wiki_query_in for the index (bounded to
  * FLEET_BOARD_LIST_MAX pages and as many revision verifications) and
- * db_fleet_board_wiki_read for one page. Both re-verify id and signature
+ * db_fleet_board_wiki_read_checked_in for one page, both in the public
+ * view. Both re-verify id and signature
  * before a row is handed back. Every byte of page text passes through
  * html_escape before it reaches HTML, and JSON goes through the json
  * module's own string escaping. */
@@ -265,7 +266,7 @@ static void ws_first_line(char *dst, size_t cap, const char *text)
 
 static bool ws_in_scope(const struct db_fleet_board_post *row)
 {
-    return row->post.scope != FLEET_BOARD_SCOPE_FLEET;
+    return fleet_wiki_view_has(FLEET_WIKI_VIEW_PUBLIC, row->post.scope);
 }
 
 static const char *ws_str(const struct json_value *entry, const char *key)
@@ -352,15 +353,17 @@ static bool ws_load_index(struct node_db *ndb, struct ws_collect *c,
                           bool *truncated)
 {
     struct fleet_wiki_query_progress progress;
-    if (!db_fleet_board_wiki_query(ndb, "", ws_visit, c, &progress))
+    if (!db_fleet_board_wiki_query_in(ndb, FLEET_WIKI_VIEW_PUBLIC, "", ws_visit,
+                                      c, &progress))
         LOG_FAIL(WS_LOG, "wiki index query failed status=%d",
                  (int)progress.status);
     *truncated = progress.status == FLEET_WIKI_QUERY_VERIFY_BUDGET;
     if (progress.status == FLEET_WIKI_QUERY_PAGE) {
         bool more = false;
         struct fleet_wiki_query_progress rest;
-        if (!db_fleet_board_wiki_query(ndb, progress.after_slug, ws_probe,
-                                       &more, &rest))
+        if (!db_fleet_board_wiki_query_in(ndb, FLEET_WIKI_VIEW_PUBLIC,
+                                          progress.after_slug, ws_probe,
+                                          &more, &rest))
             LOG_FAIL(WS_LOG, "wiki index probe failed status=%d",
                      (int)rest.status);
         *truncated = more || rest.status == FLEET_WIKI_QUERY_VERIFY_BUDGET;
@@ -780,10 +783,12 @@ static size_t ws_serve_page(struct node_db *ndb, const struct ws_request *rq,
     if (!row)
         return ws_page_error(rq, "503 Service Unavailable",
                              "wiki_unavailable", head_only, resp, max);
-    /* An unknown slug, or one whose revisions all fail verification or sit
-     * in the fleet-private scope, is the same 404: nothing is shown. */
-    if (!db_fleet_board_wiki_read_checked(ndb, rq->slug, row,
-                                          &pg.newer_unverified) ||
+    /* The public view filters fleet-private rows before the newest-revision
+     * ordering. An unknown slug, or one with no verifying public revision,
+     * is a 404; ws_in_scope stays as a second refusal of a fleet row. */
+    if (!db_fleet_board_wiki_read_checked_in(ndb, FLEET_WIKI_VIEW_PUBLIC,
+                                             rq->slug, row,
+                                             &pg.newer_unverified) ||
         !ws_in_scope(row)) {
         free(row);
         return ws_page_error(rq, "404 Not Found", "not_found", head_only,

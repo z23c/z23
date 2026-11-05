@@ -265,7 +265,7 @@ bool db_fleet_board_wiki_read(struct node_db *ndb, const char *slug,
  * scope and a page never mixes scopes: PUBLIC is every row that is not
  * fleet-private (signed public and pre-scope legacy rows), FLEET is only
  * fleet-private rows, and ANY is the unfiltered legacy view that callers
- * which do their own scope test (the site renderer) keep. The filter is in
+ * which do their own scope test keep. The site renderer reads PUBLIC. The filter is in
  * the query, before the newest-revision ordering, so a newer revision in the
  * other scope can never hide, replace or spend the budget of a visible page. */
 enum fleet_wiki_view {
@@ -294,6 +294,14 @@ bool db_fleet_board_wiki_read_in(struct node_db *ndb, enum fleet_wiki_view view,
 bool db_fleet_board_wiki_read_checked(struct node_db *ndb, const char *slug,
                                       struct db_fleet_board_post *out,
                                       bool *newer_unverified);
+
+/* db_fleet_board_wiki_read_checked within one view: the scope filter runs
+ * before the newest-revision ordering and the verification budget. */
+bool db_fleet_board_wiki_read_checked_in(struct node_db *ndb,
+                                         enum fleet_wiki_view view,
+                                         const char *slug,
+                                         struct db_fleet_board_post *out,
+                                         bool *newer_unverified);
 
 enum fleet_wiki_query_status {
     FLEET_WIKI_QUERY_DONE, FLEET_WIKI_QUERY_PAGE,

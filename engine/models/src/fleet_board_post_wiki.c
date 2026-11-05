@@ -476,6 +476,14 @@ bool db_fleet_board_wiki_query_in(struct node_db *ndb,
 bool db_fleet_board_wiki_read_checked(struct node_db *ndb, const char *slug,
     struct db_fleet_board_post *out, bool *newer_unverified)
 {
+    return db_fleet_board_wiki_read_checked_in(ndb, FLEET_WIKI_VIEW_ANY, slug,
+                                               out, newer_unverified);
+}
+
+bool db_fleet_board_wiki_read_checked_in(struct node_db *ndb,
+    enum fleet_wiki_view view, const char *slug,
+    struct db_fleet_board_post *out, bool *newer_unverified)
+{
     /* raw-return-ok:absent-page-is-not-an-error — same contract as
      * db_fleet_board_wiki_read: an illegal or unknown slug has no page. */
     if (!ndb || !ndb->open || !out || !newer_unverified ||
@@ -485,7 +493,7 @@ bool db_fleet_board_wiki_read_checked(struct node_db *ndb, const char *slug,
     bool found = false;
     *newer_unverified = false;
     enum fleet_wiki_query_status status =
-        board_wiki_query_latest(ndb, FLEET_WIKI_VIEW_ANY, slug, &verified, out, &found);
+        board_wiki_query_latest(ndb, view, slug, &verified, out, &found);
     if (status != FLEET_WIKI_QUERY_DONE || !found)
         return false; // raw-return-ok:absent-page-is-not-an-error
     /* Every attempt before the winner was a newer revision that failed. */
