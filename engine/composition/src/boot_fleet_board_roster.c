@@ -134,6 +134,7 @@ static bool proof_identity(enum fleet_board_roster_side side, uint8_t seed[32],
                            uint8_t pub[32])
 {
     char why[160];
+    (void)side; /* only the test seam tells the two sides apart */
 #ifdef ZCL_TESTING
     if (g_test_identity_set[side]) {
         memcpy(seed, g_test_seed[side], 32);
