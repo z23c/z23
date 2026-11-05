@@ -87,8 +87,8 @@ static void add_block(sqlite3 *db, int height) {
     char sql[256];
     snprintf(sql, sizeof(sql),
         "INSERT OR REPLACE INTO blocks(hash,height,time,prev_hash,version,"
-        "merkle_root,bits,status,num_tx) VALUES(?,?,%d,?,4,?,0x1d00ffff,3,5)",
-        1700000000 + height * 150);
+        "merkle_root,bits,status,num_tx) VALUES(?,?,%lld,?,4,?,0x1d00ffff,3,5)",
+        1700000000LL + (long long)height * 150);
     TEST_DB_RUN(db, s, sql, {
         sqlite3_bind_blob(s, 1, h, 32, SQLITE_STATIC);
         sqlite3_bind_int(s, 2, height);
