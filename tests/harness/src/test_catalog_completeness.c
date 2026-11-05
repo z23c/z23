@@ -321,6 +321,16 @@ static int cc_scenario_positive_activation_gap(void)
     CC_CHECK("scenario B: nullifier_history cursor==0 (gap surfaced)",
              nf_row && nf_row->cursor == 0 && nf_row->lag == 1000);
 
+    /* cursor==0 here says "nothing from genesis is proven complete", so the
+     * coverage is NONE, not PARTIAL. */
+    CC_CHECK("scenario B: sprout_anchor gap covers NONE",
+             sprout_row && sprout_row->coverage == (int)CATALOG_COVERAGE_NONE);
+    CC_CHECK("scenario B: sapling_anchor gap covers NONE",
+             sapling_row &&
+             sapling_row->coverage == (int)CATALOG_COVERAGE_NONE);
+    CC_CHECK("scenario B: nullifier_history gap covers NONE",
+             nf_row && nf_row->coverage == (int)CATALOG_COVERAGE_NONE);
+
     CC_CHECK("scenario B: worst_lag == 1000 (the wedge dominates)",
              catalog_completeness_worst_lag(rows, n) == 1000);
 
