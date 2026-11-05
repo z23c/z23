@@ -161,6 +161,37 @@ static bool pdc_dev_cases(struct pdc_env *e, const char *cases, struct zcl_comma
     return n > 0 && (size_t)n < sizeof(e->input) && pdc_dev(e, r);
 }
 
+#if !defined(__linux__)
+/* Off Linux the lab is unsupported (lab_build_stub.c), so cases cannot run:
+ * any cases input, well formed or not, is refused PLUGIN_DEV_CASES_UNAVAILABLE
+ * before a step runs and the current generation is unchanged. The malformed,
+ * failing and passing outcomes are unobserved on this host. */
+static int pdc_case_cases_unavailable(struct pdc_env *e)
+{
+    int failures = 0;
+    struct zcl_command_reply r;
+    char before[PLUGIN_HEX_SHA3_512 + 1], after[PLUGIN_HEX_SHA3_512 + 1];
+    size_t count = 0;
+    TEST_CASE("plugin dev with cases off Linux refuses UNAVAILABLE and changes nothing") {
+        ASSERT(pdc_copy_cat(e->exe));
+        ASSERT(pdc_state(e, &count, before));
+        ASSERT_EQ(count, 2u);
+        ASSERT(pdc_dev_cases(e, "\"not an array\"", &r));
+        ASSERT(r.exit_code != ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(r.error.code, "PLUGIN_DEV_CASES_UNAVAILABLE");
+        zcl_command_reply_free(&r);
+        ASSERT(pdc_dev_cases(e, "[{\"name\":\"echo\",\"stdin\":\"abc\\n\",\"expect_stdout\":\"abc\\n\",\"expect_exit\":0}]", &r));
+        ASSERT(r.exit_code != ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(r.error.code, "PLUGIN_DEV_CASES_UNAVAILABLE");
+        zcl_command_reply_free(&r);
+        ASSERT(pdc_state(e, &count, after));
+        ASSERT_EQ(count, 2u);
+        ASSERT_STR_EQ(after, before);
+        printf("UNOBSERVED (plugin_dev_cases: running cases needs a Linux host)\n");
+    } TEST_END
+    return failures;
+}
+#else
 static int pdc_case_cases(struct pdc_env *e)
 {
     int failures = 0;
@@ -232,6 +263,8 @@ static int pdc_case_cases_pass(struct pdc_env *e)
     return failures;
 }
 
+#endif /* __linux__ */
+
 /* An argument refusal runs no step, so its message must not name one. */
 static int pdc_case_refusals(struct pdc_env *e)
 {
@@ -284,8 +317,12 @@ int plugin_dev_cases(void)
         failures += pdc_case_fresh(&e, first);
         failures += pdc_case_second(&e, first);
         failures += pdc_case_broken_pack(&e);
+#if defined(__linux__)
         failures += pdc_case_cases(&e);
         failures += pdc_case_cases_pass(&e);
+#else
+        failures += pdc_case_cases_unavailable(&e);
+#endif
         failures += pdc_case_refusals(&e);
         failures += pdc_case_key_step(&e);
     }
