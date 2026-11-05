@@ -83,6 +83,31 @@ int db_fleet_board_fleet_after(struct node_db *ndb, int64_t now,
     return visited;
 }
 
+bool db_fleet_board_fleet_newest_of_agent(struct node_db *ndb, int64_t now,
+                                          const char *agent,
+                                          struct db_fleet_board_post *out)
+{
+    if (!ndb || !ndb->open || !agent || !out)
+        return false;
+    struct qb q;
+    fleet_board_select_row(&q);
+    qb_where_text(&q, QB_C_fleet_board_posts_agent, QB_EQ, agent);
+    qb_where_int(&q, QB_C_fleet_board_posts_scope, QB_EQ,
+                 FLEET_BOARD_SCOPE_FLEET);
+    fleet_board_where_discoverable(&q, now);
+    qb_order_by(&q, QB_C_fleet_board_posts_arrival, QB_DESC);
+    qb_limit(&q, 1);
+    sqlite3_stmt *s = NULL;
+    if (!QB_PREPARE(ndb, &q, s)) {
+        LOG_WARN("fleet.board", "fleet newest row prepare failed: %s",
+                 qb_error(&q));
+        return false;
+    }
+    bool found = AR_STEP_ROW(s) && fleet_board_row_read(s, out);
+    sqlite3_finalize(s);
+    return found;
+}
+
 /* ── who this node has been storing posts from ───────────────────────── */
 
 /* Only rows that passed the role gate at ingest count here: fleet and

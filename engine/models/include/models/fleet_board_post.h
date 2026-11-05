@@ -411,6 +411,13 @@ int db_fleet_board_fleet_after(struct node_db *ndb, int64_t now,
                                db_fleet_board_row_visit visit, void *ctx,
                                int64_t *scanned_out);
 
+/* The still-discoverable fleet-scoped row by `agent` this store took last, by
+ * its own arrival number and not the author's date. False when it holds none,
+ * or that row no longer verifies. */
+bool db_fleet_board_fleet_newest_of_agent(struct node_db *ndb, int64_t now,
+                                          const char *agent,
+                                          struct db_fleet_board_post *out);
+
 /* Every distinct key that signed a post this node is storing, newest post
  * first, capped at FLEET_BOARD_HOST_LIST_MAX. A key appears only when at
  * least one of its stored posts still verifies here, so a tampered row

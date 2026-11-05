@@ -136,8 +136,8 @@ bool boot_fleet_roster_is_row(const struct fleet_board_post *post);
 /* True when `post` is a head row by shape. Shape only; the seal decides. */
 bool boot_fleet_roster_is_head_row(const struct fleet_board_post *post);
 
-/* The newest live head row this store holds, which is the highest sequence it
- * took: an older one is refused on the way in. False when it holds none. */
+/* The live head row this store took last, which is the highest sequence it
+ * holds: an older one is refused on the way in. False when it holds none. */
 struct db_fleet_board_post;
 bool boot_fleet_roster_newest_head_row(struct node_db *ndb, int64_t now,
                                        struct db_fleet_board_post *out);

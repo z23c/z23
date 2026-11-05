@@ -967,8 +967,8 @@ static int pub_held(struct node_db *ndb, const char *agent, int64_t now,
 bool boot_fleet_roster_newest_head_row(struct node_db *ndb, int64_t now,
                                        struct db_fleet_board_post *out)
 {
-    return ndb && out &&
-           pub_held(ndb, BOOT_FLEET_ROSTER_HEAD_AGENT, now, out, 1) == 1;
+    return db_fleet_board_fleet_newest_of_agent(
+        ndb, now, BOOT_FLEET_ROSTER_HEAD_AGENT, out);
 }
 
 
