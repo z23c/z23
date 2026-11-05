@@ -364,7 +364,7 @@ static int ae_promote_after_injected_failure(const char *mut, const char *cur,
     return failures;
 }
 
-/* A one-character relative current path and slots dir: the empty-string
+/* A one-character relative current path (cwd is the slots dir): the empty-string
  * guard must test the first byte, not the second. */
 static int ae_promote_short_relative(const char *mut)
 {
@@ -375,16 +375,16 @@ static int ae_promote_short_relative(const char *mut)
     if (moved) {
         AE_CHECK("seed one-character candidate x",
                  ae_write_str("x", "ONE-CHAR", 0755));
-        AE_CHECK("promote(\".\", \"x\") accepts one-character paths",
-                 binary_ab_promote(".", "x") &&
-                 ae_text_is("./last-good", "ONE-CHAR"));
-        AE_CHECK("on_ready(\".\", \"x\") accepts a one-character current",
-                 ae_write_str("./streak", "3\n", 0600) &&
-                 binary_ab_on_ready(".", "x", false) &&
-                 ae_text_is("./streak", "0\n"));
+        AE_CHECK("promote(slots, \"x\") accepts a one-character current",
+                 binary_ab_promote(mut, "x") &&
+                 ae_text_is(BINARY_AB_LASTGOOD_BASENAME, "ONE-CHAR"));
+        AE_CHECK("on_ready(slots, \"x\") accepts a one-character current",
+                 ae_write_str(BINARY_AB_STREAK_BASENAME, "3\n", 0600) &&
+                 binary_ab_on_ready(mut, "x", false) &&
+                 ae_text_is(BINARY_AB_STREAK_BASENAME, "0\n"));
         unlink("x");
-        unlink("last-good");
-        unlink("streak");
+        unlink(BINARY_AB_LASTGOOD_BASENAME);
+        unlink(BINARY_AB_STREAK_BASENAME);
     }
     if (cwd >= 0) {
         if (fchdir(cwd) != 0) failures++;
