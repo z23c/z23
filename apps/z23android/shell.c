@@ -56,7 +56,7 @@ static struct {
     bool fleet_review_started, fleet_qr_shown, fleet_start_requested, fleet_result_valid;
     enum screen current, before_scan;
     bool send_from_wallet;
-    bool preview, pair_seen, scan_dismissed, user_layout, rendered, camera_waiting, paste_mode, paste_submitted;
+    bool preview, pair_seen, scan_dismissed, user_layout, rendered, camera_waiting, paste_mode, paste_submitted, paste_result_ready;
     unsigned scans_seen;
     struct zapp_layout *layout;
     char builtin[ZAPP_NAME_CAP], layout_notice[320], action_notice[160];
@@ -735,7 +735,7 @@ static void back(JNIEnv *env)
         zapp_controller_cancel_scan(); shell.scan_dismissed = true;
         zapp_pay_stash_clear();   /* a code still being decoded is dropped when it finishes */
         go(env, shell.before_scan);
-        if (shell.paste_mode) { (void)zj_text(env, shell.paste_field, ""); shell.paste_mode = false; shell.paste_submitted = false; }
+        if (shell.paste_mode) { (void)zj_text(env, shell.paste_field, ""); shell.paste_mode = false; shell.paste_submitted = false; shell.paste_result_ready = false; }
     } else if (shell.current == SCREEN_FLEET_REVIEW) {
         if (!shell.fleet_review_started) zapp_controller_cancel_scan();
         go(env, shell.before_scan);
@@ -782,11 +782,12 @@ static void open_paste(JNIEnv *env)
     }
     zapp_controller_cancel_scan(); shell.scan_dismissed = true; shell.camera_waiting = false;
     camera_settings_pending = false;
-    shell.paste_mode = true; shell.paste_submitted = false; shell.gate.protect = true;
+    shell.paste_mode = true; shell.paste_submitted = false; shell.paste_result_ready = false; shell.gate.protect = true;
     (void)zj_visible(env, shell.scan_camera, false); (void)zj_visible(env, shell.scan_panel, false);
     (void)zj_text(env, shell.paste_field, ""); (void)zj_text(env, shell.paste_error, "");
     (void)zj_visible(env, shell.paste_panel, true);
     struct zapp_view view; zapp_controller_snapshot(&view);
+    (void)zj_bool_property(env, shell.paste_field, "setEnabled", !view.busy);
     (void)zj_bool_property(env, shell.paste_review, "setEnabled", !view.busy);
 }
 static void review_paste(JNIEnv *env)
@@ -1062,16 +1063,27 @@ static void finish_scan(JNIEnv *env, const struct zapp_view *view)
 
 /* The camera screen opens while a scan runs and closes when it ends; a payment code goes from the camera screen
  * straight to Send and does not pass through the screen it came from. */
+static void paste_complete(JNIEnv *env, const struct zapp_view *view, bool dismissed)
+{
+    if (!dismissed && (view->scan_kind == ZAPP_SCAN_TEXT || view->scan_kind == ZAPP_SCAN_UNREADABLE)) {
+        if (!zj_text(env, shell.paste_error, view->result[0] ? view->result : "Could not read that code. Try again.")) return;
+        zapp_controller_clear_result();
+    } else {
+        if (!dismissed) finish_scan(env, view);
+        else zapp_pay_stash_clear();
+        (void)zj_text(env, shell.paste_field, ""); shell.paste_mode = false;
+    }
+    shell.paste_result_ready = false; shell.paste_submitted = false;
+}
+
 static void render_paste(JNIEnv *env, const struct zapp_view *view, bool finished, bool dismissed)
 {
+    if (shell.paste_submitted && finished) shell.paste_result_ready = true;
+    if (shell.paste_submitted && shell.paste_result_ready && !view->busy && !view->scanning)
+        paste_complete(env, view, dismissed);
     bool idle = !view->busy && !shell.paste_submitted;
     (void)zj_bool_property(env, shell.paste_field, "setEnabled", idle);
     (void)zj_bool_property(env, shell.paste_review, "setEnabled", idle);
-    if (shell.paste_submitted && finished && !view->scanning) {
-        if (!dismissed) finish_scan(env, view);
-        else zapp_pay_stash_clear();
-        (void)zj_text(env, shell.paste_field, ""); shell.paste_mode = false; shell.paste_submitted = false;
-    }
 }
 static void render_scan_running(JNIEnv *env, const struct zapp_view *view, bool dismissed)
 {
@@ -1227,6 +1239,10 @@ void zapp_shell_tick(JNIEnv *env)
 {
     if (!shell.activity) return;
     if (shell.current == SCREEN_FLEET_REVIEW) fleet_scroll_hint(env);
+    if (shell.current == SCREEN_SCAN && shell.paste_mode && shell.paste_result_ready) {
+        struct zapp_view view; zapp_controller_snapshot(&view);
+        render_paste(env, &view, false, shell.scan_dismissed);
+    }
     /* Ticks are what ask again for a lock that is owed, on this screen or off it. */
     zapp_send_ui_tick(env);
     if (shell.current == SCREEN_SEND) {

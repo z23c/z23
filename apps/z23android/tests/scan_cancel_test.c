@@ -7,6 +7,7 @@ bool zapp_send_busy(void);
 #include <assert.h>
 
 static int offers, clears;
+static bool fixture_paired;
 static bool held;
 bool zapp_pay_stash_offer(const char *payload, enum zapp_scan_kind kind)
 { (void)payload; ++offers; held = kind == ZAPP_SCAN_PAY; return held; }
@@ -20,7 +21,7 @@ void zapp_action_refusal(enum zapp_refusal why, const char *running, const char 
 bool zapp_hosts_label(const char *report, size_t index, char label[16])
 { (void)report; (void)index; (void)label; return false; }
 bool zapp_speech_client_paired(const char *files, const char *json)
-{ (void)files; (void)json; return false; }
+{ (void)files; (void)json; return fixture_paired; }
 bool zapp_pair_code(const char *descriptor, char code[7])
 { (void)descriptor; memcpy(code, "123456", 7); return true; }
 static int join_calls;
@@ -63,6 +64,15 @@ static void *blocked_commit(void *arg)
     committed = scan_commit(&c, 7, "payment", &kind, value, &notice);
     return NULL;
 }
+static void paired_notice(void)
+{
+    fixture_paired = true; c.scan_cancelled = false; c.view.scanning = true;
+    enum zapp_scan_kind kind = ZAPP_SCAN_PAIR; char value[32] = "descriptor"; const char *notice = NULL;
+    assert(scan_commit(&c, 7, "descriptor", &kind, value, &notice));
+    assert(kind == ZAPP_SCAN_TEXT && !value[0] && !c.view.scan_text[0]);
+    assert(notice && !strcmp(notice, "That laptop is already paired."));
+}
+
 int main(void)
 {
     assert(zapp_fleet_node_state(false, false, false, false) == ZAPP_FLEET_NODE_START);
@@ -127,6 +137,7 @@ int main(void)
     assert(cancelled && machine_calls == 1 && invite_calls == 0);
     assert(fleet_review_run(&c, "code", false, false, reply, preview, onion, error, &machine, true, &cancelled));
     assert(!cancelled && machine_calls == 2 && invite_calls == 1);
+    paired_notice();
     current = NULL; pthread_mutex_destroy(&c.lock);
     return 0;
 }
