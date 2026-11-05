@@ -45,5 +45,6 @@ bool sd_bans_clearbanned_scenario(void);
 bool sd_bans_overflow_bantime_scenario(void);
 bool sd_bans_nonnumeric_bantime_scenario(void);
 bool sd_bans_loopback_add_scenario(void);
+bool sd_bans_unsaved_write_scenario(void);
 
 #endif

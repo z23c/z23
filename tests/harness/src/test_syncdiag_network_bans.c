@@ -323,3 +323,43 @@ bool sd_bans_loopback_add_scenario(void)
     ok = ok && sd_bans_disk_count(ctx.dir) != 1;
     return sd_bans_teardown(&ctx, ok);
 }
+
+/* Makes the scenario datadir unwritable. Returns false when a write still
+ * lands (a privileged runner), so the caller skips instead of failing. */
+static bool sd_bans_lock_datadir(struct sd_bans_ctx *ctx)
+{
+    if (chmod(ctx->dir, 0500) != 0)
+        return false;
+    return !ban_db_write(&ctx->cm.manager, ctx->dir);
+}
+
+static bool sd_bans_unsaved_remove_check(struct sd_bans_ctx *ctx,
+                                         const struct net_addr *addr)
+{
+    bool refused = !sd_bans_call(ctx, "setban", BANS_PEER_B, "remove", NULL);
+    return refused && sd_bans_error_has(&ctx->result, "not saved") &&
+           !is_banned(&ctx->cm.manager, addr);
+}
+
+/* case: setban add when banlist.dat cannot be written must not answer plain
+ * success. The ban is live in memory, so the error says it is not saved; a
+ * remove that cannot be saved is reported the same way. */
+bool sd_bans_unsaved_write_scenario(void)
+{
+    struct sd_bans_ctx ctx;
+    bool ok = sd_bans_setup(&ctx);
+    struct net_addr addr;
+    ok = ok && sd_bans_addr(&ctx, BANS_PEER_B, &addr);
+    bool locked = ok && sd_bans_lock_datadir(&ctx);
+    if (ok && !locked) {
+        (void)chmod(ctx.dir, 0700);
+        return sd_bans_teardown(&ctx, true); /* skip: write still works */
+    }
+    ok = ok && !sd_bans_call(&ctx, "setban", BANS_PEER_B, "add", NULL);
+    ok = ok && sd_bans_error_has(&ctx.result, "not saved");
+    ok = ok && is_banned(&ctx.cm.manager, &addr);
+    ok = ok && sd_bans_unsaved_remove_check(&ctx, &addr);
+    if (ctx.dir)
+        (void)chmod(ctx.dir, 0700);
+    return sd_bans_teardown(&ctx, ok);
+}

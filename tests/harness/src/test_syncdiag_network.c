@@ -83,6 +83,8 @@ int syncdiag_cases_network(void)
     sd_report("setban add: refuses a loopback address instead of a silent "
               "no-op... ",
               sd_bans_loopback_add_scenario(), &failures);
+    sd_report("setban: reports an error when banlist.dat cannot be saved... ",
+              sd_bans_unsaved_write_scenario(), &failures);
 
     return failures;
 }
