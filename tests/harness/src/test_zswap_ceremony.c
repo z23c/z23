@@ -1481,6 +1481,7 @@ int test_zswap_ceremony(void)
     failures += t_ceremony();
     { extern int zswap_ceremony_script_bound_tests(void); failures += zswap_ceremony_script_bound_tests(); }
     { extern int zswap_ceremony_wire_bounds_tests(void); failures += zswap_ceremony_wire_bounds_tests(); }
+    { extern int zswap_ceremony_verify_tests(void); failures += zswap_ceremony_verify_tests(); }
     failures += t_error_strings();
     failures += t_accept_validate();
     failures += t_accept_encode_edges();
