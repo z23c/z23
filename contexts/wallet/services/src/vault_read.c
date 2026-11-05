@@ -158,8 +158,10 @@ static void ident_add_transparent(const struct db_wallet_key *key, void *ctx)
                                      ids->t_addr[ids->n_t],
                                      sizeof(ids->t_addr[0])))
         ids->codec_ok = true;
-    else
+    else {
         ids->t_addr[ids->n_t][0] = '\0';
+        ids->truncated = ids->t_truncated = true;   /* key cannot be matched by text */
+    }
 
     ids->n_t++;
 }
@@ -392,6 +394,13 @@ static void collect_names(struct node_db *ndb, const struct vault_ident *ids,
     bool saturated = false;
 
     (void)snap;
+    if (ids->t_truncated) {
+        row_undetermined(row, "the identity set is incomplete (a key cap, "
+                              "an unreadable table or an address that could "
+                              "not be encoded), so an owned-name count "
+                              "would be partial");
+        return;
+    }
     if (ids->n_t == 0) {
         row_determined(row, VAULT_EVIDENCE_EXACT_OWNER_ADDRESS_MATCH,
                        "db_znam_list_by_owner");
@@ -402,13 +411,6 @@ static void collect_names(struct node_db *ndb, const struct vault_ident *ids,
         row_undetermined(row, "could not render this node's own addresses as "
                               "text, so znam_names.owner_address cannot be "
                               "matched");
-        return;
-    }
-
-    if (ids->t_truncated) {
-        row_undetermined(row, "the identity set is incomplete (a key cap or "
-                              "an unreadable table), so an owned-name count "
-                              "would be partial");
         return;
     }
 
