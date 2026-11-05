@@ -172,18 +172,28 @@ static bool rcmd_recovery_facts(const char *output, const struct rpp_fixture *f,
     return ok;
 }
 
+static bool rcmd_repository_paths(const char *base, char *primary, size_t primary_cap,
+    char *linked, size_t linked_cap, char *binary, size_t binary_cap,
+    char source[4200], char build[1200], char bindir[1200], char ignore[1200])
+{
+    char current[4096];
+    if (!getcwd(current, sizeof(current))) return false;
+    if (snprintf(source, 4200, "%s/build/bin/z23-dev", current) >= 4200 ||
+        snprintf(primary, primary_cap, "%s/primary", base) >= (int)primary_cap ||
+        snprintf(linked, linked_cap, "%s/linked", base) >= (int)linked_cap ||
+        snprintf(build, 1200, "%s/build", primary) >= 1200 ||
+        snprintf(bindir, 1200, "%s/bin", build) >= 1200 ||
+        snprintf(binary, binary_cap, "%s/z23-dev", bindir) >= (int)binary_cap ||
+        snprintf(ignore, 1200, "%s/.gitignore", primary) >= 1200) return false;
+    return true;
+}
+
 static bool rcmd_repository(const char *base, char *primary, size_t primary_cap,
                             char *linked, size_t linked_cap, char *binary, size_t binary_cap)
 {
-    char current[4096], source[4200], build[1200], bindir[1200], ignore[1200];
-    if (!getcwd(current, sizeof(current))) return false;
-    if (snprintf(source, sizeof(source), "%s/build/bin/z23-dev", current) >= (int)sizeof(source) ||
-        snprintf(primary, primary_cap, "%s/primary", base) >= (int)primary_cap ||
-        snprintf(linked, linked_cap, "%s/linked", base) >= (int)linked_cap ||
-        snprintf(build, sizeof(build), "%s/build", primary) >= (int)sizeof(build) ||
-        snprintf(bindir, sizeof(bindir), "%s/bin", build) >= (int)sizeof(bindir) ||
-        snprintf(binary, binary_cap, "%s/z23-dev", bindir) >= (int)binary_cap ||
-        snprintf(ignore, sizeof(ignore), "%s/.gitignore", primary) >= (int)sizeof(ignore)) return false;
+    char source[4200], build[1200], bindir[1200], ignore[1200];
+    if (!rcmd_repository_paths(base, primary, primary_cap, linked, linked_cap,
+                               binary, binary_cap, source, build, bindir, ignore)) return false;
     if (mkdir(primary, 0700) != 0 ||
         !rcmd_git(primary, (const char *const[]){"init", "-q", NULL})) return false;
     FILE *f = fopen(ignore, "w");
@@ -196,24 +206,30 @@ static bool rcmd_repository(const char *base, char *primary, size_t primary_cap,
         mkdir(build, 0700) == 0 && mkdir(bindir, 0700) == 0 && rcmd_copy(source, binary);
 }
 
+static bool rcmd_recovery_prepare(const char *current, const char *binary,
+    struct rpp_fixture *fixture, char linked[1024], char fixture_binary[1100],
+    char input[8192])
+{
+    char build[1024], bindir[1024];
+    return setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0 &&
+        rpp_setup(fixture, current) &&
+        snprintf(linked, 1024, "%s/linked", fixture->root) > 0 &&
+        RPP_GIT(fixture->receiver, NULL, 0, "worktree", "add", "-q", "--detach", linked, "HEAD") &&
+        snprintf(build, sizeof(build), "%s/build", fixture->receiver) > 0 &&
+        snprintf(bindir, sizeof(bindir), "%s/bin", build) > 0 &&
+        snprintf(fixture_binary, 1100, "%s/z23-dev", bindir) > 0 &&
+        mkdir(build, 0700) == 0 && mkdir(bindir, 0700) == 0 &&
+        rcmd_copy(binary, fixture_binary) &&
+        rcmd_real_input(input, 8192, fixture, linked);
+}
+
 static bool rcmd_recovery(const char *current, const char *binary)
 {
     struct rpp_fixture fixture;
-    char linked[1024], build[1024], bindir[1024], fixture_binary[1100];
-    char input[8192], out[16384];
-    bool ok = setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0 &&
-        rpp_setup(&fixture, current) &&
-        snprintf(linked, sizeof(linked), "%s/linked", fixture.root) > 0 &&
-        RPP_GIT(fixture.receiver, NULL, 0, "worktree", "add", "-q", "--detach", linked, "HEAD") &&
-        snprintf(build, sizeof(build), "%s/build", fixture.receiver) > 0 &&
-        snprintf(bindir, sizeof(bindir), "%s/bin", build) > 0 &&
-        snprintf(fixture_binary, sizeof(fixture_binary), "%s/z23-dev", bindir) > 0 &&
-        mkdir(build, 0700) == 0 && mkdir(bindir, 0700) == 0 &&
-        rcmd_copy(binary, fixture_binary) &&
-        rcmd_real_input(input, sizeof(input), &fixture, linked);
-    if (!ok) return false;
+    char linked[1024], fixture_binary[1100], input[8192], out[16384];
+    if (!rcmd_recovery_prepare(current, binary, &fixture, linked, fixture_binary, input)) return false;
     int rc = rcmd_run(fixture_binary, linked, input, out, sizeof(out));
-    ok = rc > 0 &&
+    bool ok = rc > 0 &&
         (strstr(out, "proof_producer_source_mismatch") != NULL ||
          strstr(out, "proof_producer_source_id_unavailable") != NULL) &&
         rcmd_recovery_facts(out, &fixture, linked) &&
