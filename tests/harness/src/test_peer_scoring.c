@@ -920,7 +920,8 @@ static int test_now_ms_is_wall_clock(void)
         int64_t after_s = (int64_t)time(NULL);
         ASSERT(now_ms > 0);
         ASSERT(now_ms / 1000 >= before_s);
-        ASSERT(now_ms / 1000 <= after_s);
+        /* time() reads a coarse clock that can lag the fine one by a tick. */
+        ASSERT(now_ms / 1000 <= after_s + 1);
         PASS();
     } _test_next:;
     return failures;
@@ -1092,7 +1093,8 @@ static int test_reset_anchors_clock(void)
         int64_t anchor = (int64_t)atomic_load(&node.peer_score_last_good_ms);
         ASSERT_EQ(atomic_load(&node.misbehavior), 0);
         ASSERT(anchor / 1000 >= before_s);
-        ASSERT(anchor / 1000 <= after_s);
+        /* time() reads a coarse clock that can lag the fine one by a tick. */
+        ASSERT(anchor / 1000 <= after_s + 1);
         PASS();
     } _test_next:;
     return failures;
