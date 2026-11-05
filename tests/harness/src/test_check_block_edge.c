@@ -53,6 +53,7 @@
 #include "primitives/block.h"
 #include "primitives/transaction.h"
 #include "script/script.h"
+#include "util/safe_alloc.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -297,6 +298,53 @@ static int cbe_check_distinct_6_leaf(void)
     return failures;
 }
 
+/* A valid multi-tx block stays valid when memory is short. The merkle check
+ * works in the txid array it already owns, so it needs no scratch array, and a
+ * scratch allocation that would fail cannot read as a bad merkle root with
+ * dos=100 against the peer that sent the block. Stops short of a verdict when
+ * the fault hook cannot be armed. */
+static int cbe_check_merkle_no_scratch_alloc(void)
+{
+    int failures = 0;
+    char reason[DOMAIN_CHECK_BLOCK_REASON_MAX];
+    int  dos;
+    struct transaction txs[3];
+    cbe_fill_merkle_leaves(txs, 3, 0x70);
+    struct block b;
+    cbe_build_block(&b, txs, 3);
+
+    zcl_alloc_fault_fail_next("merkle_level");
+    bool armed = zcl_alloc_fault_armed_label() != NULL;
+    CBE_CHECK("scratch allocation fault armed", armed);
+    if (armed) {
+        reason[0] = '\xff'; dos = -1;
+        struct zcl_result r =
+            domain_consensus_check_block_merkle_root(
+                &b, reason, sizeof(reason), &dos);
+        CBE_CHECK("valid 3-leaf block, no scratch memory -> merkle OK",
+                  r.ok && reason[0] == '\0' && dos == 0);
+        CBE_CHECK("merkle check asked for no scratch allocation",
+                  zcl_alloc_fault_armed_label() != NULL);
+    }
+    zcl_alloc_fault_clear();
+
+    /* The array the check itself owns still reports a local failure, never a
+     * verdict on the block: out-of-memory, dos=0. */
+    zcl_alloc_fault_fail_next("domain_check_block_txids");
+    reason[0] = '\xff'; dos = -1;
+    struct zcl_result oom =
+        domain_consensus_check_block_merkle_root(
+            &b, reason, sizeof(reason), &dos);
+    zcl_alloc_fault_clear();
+    CBE_CHECK("txid array allocation fails -> out-of-memory dos=0",
+              !oom.ok &&
+              oom.code == DOMAIN_CONSENSUS_CHECK_BLOCK_ERR_OUT_OF_MEMORY &&
+              strcmp(reason, "out-of-memory") == 0 && dos == 0);
+
+    for (size_t i = 0; i < 3; i++) transaction_free(&txs[i]);
+    return failures;
+}
+
 /* Check the aggregate-sigops verdict for a 1-tx coinbase block carrying
  * exactly `total` legacy sigops. Returns the number of failed checks. */
 static int cbe_check_sigops_total(unsigned int total, uint8_t marker,
@@ -377,6 +425,9 @@ int test_check_block_edge(void)
     failures += cbe_check_distinct_3_leaf();
     failures += cbe_check_distinct_5_leaf();
     failures += cbe_check_distinct_6_leaf();
+
+    /* A local memory failure is not a verdict on the block. */
+    failures += cbe_check_merkle_no_scratch_alloc();
 
     /* ================================================================
      * 4. Aggregate sigops boundary: MAX_BLOCK_SIGOPS == 20000.
