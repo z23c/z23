@@ -25,6 +25,7 @@
  */
 
 #include "test/test_core.h"
+#include "test/seed_gap_tests.h"
 
 #include "chain/chain.h"
 #include "chain/utxo_snapshot_loader.h"
@@ -823,6 +824,7 @@ int test_snapshot_shielded(void)
     stream_free(&spr_bs);
 
     failures += sv_collect_bad_row_releases_cursor();
+    failures += snapshot_shielded_gap_tests();
 
     printf("=== snapshot_shielded: %d failure(s) ===\n", failures);
     return failures;
