@@ -21,16 +21,18 @@
 #include "config/boot_zcode_dht.h"
 #include "config/mesh_stream.h"
 #include "config/runtime.h"
+#include "boot_fleet_board_cursor_internal.h"
+#include "boot_fleet_board_roster_internal.h"
 #include "boot_mesh_status_internal.h"
 
+#include "net/msgprocessor.h"
+#include "net/noise_transport.h"
 #include "util/fleet_role_check.h"
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"
 #include "crypto/random_secret.h"
 #include "models/fleet_board_post.h"
 #include "models/mesh_pairing.h"
-#include "platform/positioned_file.h"
-#include "platform/private_file.h"
 #include "platform/time_compat.h"
 #include "services/mesh_pairing_service.h"
 #include "supervisors/domains.h"
@@ -50,6 +52,10 @@ struct board_ask {
     uint8_t peer_box_id[32];
     int64_t after;
     bool sweep;
+    /* A roster pull: the answer starts with a proof bound to this session. */
+    bool roster;
+    uint8_t transcript[32];
+    uint64_t generation;
 };
 
 /* The asking half's per-stream state: what we asked, and what came back. */
@@ -64,43 +70,18 @@ struct board_pull_state {
 struct board_serve_state {
     size_t len;
     size_t sent;
+    bool roster;            /* admitted by the roster, not by a pairing row */
+    uint8_t roster_key[32]; /* the board key that proved itself at open */
     uint8_t rows[FLEET_BOARD_FLEET_ANSWER_MAX];
 };
 
 /* An answer waiting for the tick to verify and store it. */
 struct board_inbox_slot {
     bool used;
+    bool roster_only; /* set at drain: take only sealed roster rows from it */
     struct board_ask ask;
     size_t len;
     uint8_t *rows;
-};
-
-/* Everything this box knows about one peer's board, in that peer's own
- * arrival numbers, which mean something only inside the answering process
- * named by `epoch`.
- *
- * `next`: every row the peer could serve at or below it is settled here —
- * stored, refused for good, or at or above `carry_min`.
- * `carry_min`: the lowest arrival refused for a reason that can clear (a
- * role not granted yet, a clock ahead of ours, a quota or a busy store);
- * 0 when there is none. `next` never waits on such a row, so one post
- * this box may never accept cannot hold back the rest of the board.
- * A sweep re-reads (`sweep_pos`, `sweep_end`] page by page, offering every
- * row this box still does not hold; whatever is refused again lands in
- * `carry_min` for the next sweep. So a refused row is offered again until
- * it is stored, refused for good, or no longer served, and no row is ever
- * passed over. */
-struct board_cursor {
-    bool used;
-    bool epoch_known;
-    bool sweep_active;
-    bool sweep_turn;
-    uint8_t peer_box_id[32];
-    uint8_t epoch[FLEET_BOARD_FLEET_EPOCH_BYTES];
-    int64_t next;
-    int64_t carry_min;
-    int64_t sweep_pos;
-    int64_t sweep_end;
 };
 
 static zcl_mutex_t g_lock;
@@ -410,6 +391,43 @@ static bool board_answer_visit(const struct db_fleet_board_post *row,
 
 /* ── the service callbacks ───────────────────────────────────────────── */
 
+/* Read one bounded page into a new serve state: once, at open. `proof` (a
+ * roster stream's answering proof, with the key that was admitted) goes first
+ * on the wire. */
+static enum mesh_stream_refusal board_serve_compose(struct mesh_stream *st,
+                                                    struct node_db *ndb,
+                                                    int64_t after,
+                                                    const uint8_t *proof,
+                                                    const uint8_t *key)
+{
+    uint8_t epoch[FLEET_BOARD_FLEET_EPOCH_BYTES];
+    if (!ndb || !board_epoch(epoch))
+        return MESH_STREAM_REFUSED_UNAVAILABLE;
+    struct board_serve_state *s =
+        zcl_calloc(1, sizeof *s, "fleet_board_serve");
+    if (!s)
+        return MESH_STREAM_REFUSED_UNAVAILABLE;
+    const size_t skip = proof ? FLEET_BOARD_ROSTER_PROOF_BYTES : 0;
+    const size_t head = skip + FLEET_BOARD_FLEET_ANSWER_HEAD;
+    struct board_answer a = { s->rows + head, sizeof s->rows - head, 0, 0 };
+    int64_t scanned = after;
+    if (db_fleet_board_fleet_after(ndb, board_now(), after,
+                                   FLEET_BOARD_FLEET_ANSWER_POSTS_MAX,
+                                   board_answer_visit, &a, &scanned) < 0) {
+        free(s);
+        return MESH_STREAM_REFUSED_UNAVAILABLE;
+    }
+    if (proof) {
+        memcpy(s->rows, proof, skip);
+        memcpy(s->roster_key, key, 32);
+        s->roster = true;
+    }
+    answer_head_encode(epoch, scanned, s->rows + skip);
+    s->len = head + a.len;
+    st->service_state = s;
+    return MESH_STREAM_OK;
+}
+
 /* An inbound OPEN. The primitive has proven the Noise session and a
  * pairing row granting the capability; this lane proves the delegation is
  * current and the peer holds the read role, and only then reads the page
@@ -431,27 +449,71 @@ static enum mesh_stream_refusal board_service_open(struct mesh_stream *st,
         return MESH_STREAM_REFUSED_MALFORMED;
     if (!board_accept_authorized(st->peer_static))
         return MESH_STREAM_REFUSED_PEER_UNPAIRED;
-    struct node_db *ndb = board_db();
-    uint8_t epoch[FLEET_BOARD_FLEET_EPOCH_BYTES];
-    if (!ndb || !board_epoch(epoch))
+    return board_serve_compose(st, board_db(), after, NULL, NULL);
+}
+
+/* What one roster proof is bound to on this network. */
+static bool board_roster_bind(const uint8_t transcript[32], uint64_t generation,
+                              int64_t after,
+                              struct fleet_board_roster_bind *out)
+{
+    memcpy(out->transcript_hash, transcript, 32);
+    out->connection_generation = generation;
+    out->after = after;
+    return board_network_genesis(out->network_genesis);
+}
+
+/* An inbound roster OPEN. The primitive demands only the Noise session here
+ * (capability 0): this is the whole decision, and every refusal is the one an
+ * unpaired peer already gets. */
+static enum mesh_stream_refusal board_roster_open(struct mesh_stream *st,
+                                                  const uint8_t *payload,
+                                                  size_t len, uint8_t *reply,
+                                                  size_t reply_cap,
+                                                  size_t *reply_len, void *ctx)
+{
+    (void)ctx;
+    (void)reply;
+    (void)reply_cap;
+    if (reply_len)
+        *reply_len = 0;
+    int64_t after = 0;
+    if (len != FLEET_BOARD_ROSTER_PULL_BYTES ||
+        !pull_decode(payload, FLEET_BOARD_FLEET_PULL_BYTES, &after))
+        return MESH_STREAM_REFUSED_MALFORMED;
+    const uint8_t *proof = payload + FLEET_BOARD_FLEET_PULL_BYTES;
+    struct node_db *pairings = app_runtime_node_db();
+    struct node_db *store = board_db();
+    struct fleet_board_roster_bind bind;
+    if (!pairings || !app_runtime_node_db_handle_open(pairings) || !store ||
+        !board_roster_bind(st->transcript_hash, st->connection_generation,
+                           after, &bind))
         return MESH_STREAM_REFUSED_UNAVAILABLE;
-    struct board_serve_state *s =
-        zcl_calloc(1, sizeof *s, "fleet_board_serve");
-    if (!s)
+    if (!fleet_board_roster_admit(pairings, store, &bind, st->peer_static,
+                                  proof, board_now()) ||
+        !board_peer_may_read(proof))
+        return MESH_STREAM_REFUSED_PEER_UNPAIRED;
+    uint8_t answer_proof[FLEET_BOARD_ROSTER_PROOF_BYTES];
+    if (!fleet_board_roster_proof_make(FLEET_BOARD_ROSTER_SIDE_ANSWER, &bind,
+                                       answer_proof))
         return MESH_STREAM_REFUSED_UNAVAILABLE;
-    const size_t head = FLEET_BOARD_FLEET_ANSWER_HEAD;
-    struct board_answer a = { s->rows + head, sizeof s->rows - head, 0, 0 };
-    int64_t scanned = after;
-    if (db_fleet_board_fleet_after(ndb, board_now(), after,
-                                   FLEET_BOARD_FLEET_ANSWER_POSTS_MAX,
-                                   board_answer_visit, &a, &scanned) < 0) {
-        free(s);
-        return MESH_STREAM_REFUSED_UNAVAILABLE;
-    }
-    answer_head_encode(epoch, scanned, s->rows);
-    s->len = head + a.len;
-    st->service_state = s;
-    return MESH_STREAM_OK;
+    fleet_board_roster_learn(st->peer_static, proof);
+    return board_serve_compose(st, store, after, answer_proof, proof);
+}
+
+/* The tick's recheck before the cached page leaves. The signature bound the
+ * key to this session at open and the stream cannot leave that session, so
+ * only the key's standing is asked again. */
+static bool board_serve_authorized(const struct mesh_stream *st,
+                                   const struct board_serve_state *s)
+{
+    if (!s->roster)
+        return board_accept_authorized(st->peer_static);
+    struct node_db *pairings = app_runtime_node_db();
+    return pairings && app_runtime_node_db_handle_open(pairings) &&
+           fleet_board_roster_standing(pairings, board_db(), st->peer_static,
+                                       s->roster_key, board_now()) &&
+           board_peer_may_read(s->roster_key);
 }
 
 /* The asking half receives the answer: bytes are copied and credit is
@@ -492,7 +554,7 @@ static void board_service_tick(struct mesh_stream *st, int64_t now, void *ctx)
     }
     if (st->send_credit < remaining)
         return; /* wait for the window; never split an answer */
-    if (!board_accept_authorized(st->peer_static)) {
+    if (!board_serve_authorized(st, s)) {
         mesh_stream_close(st, MESH_STREAM_REFUSED_PEER_UNPAIRED, NULL, 0);
         return;
     }
@@ -566,6 +628,14 @@ bool boot_fleet_board_fleet_register_service(void)
     service.on_close = board_service_close;
     service.on_tick = board_service_tick;
     service.on_release = board_service_release;
+    if (!mesh_stream_service_register(&service))
+        return false;
+    /* The same lane for a machine on the fleet roster, with no pairing row.
+     * Capability 0: board_roster_open owns the decision. */
+    mesh_stream_service_unregister(FLEET_BOARD_ROSTER_SERVICE_NAME);
+    service.name = FLEET_BOARD_ROSTER_SERVICE_NAME;
+    service.required_pairing_capability = 0;
+    service.on_open = board_roster_open;
     return mesh_stream_service_register(&service);
 }
 
@@ -592,12 +662,6 @@ static struct board_cursor *board_cursor_slot(const uint8_t box_id[32],
     return free_slot;
 }
 
-/* One durable cursor record. Fixed width so a short or long file is
- * refused whole and the pull starts again from the beginning, which
- * dedupe by post id keeps correct. */
-#define BOARD_CURSOR_REC (4u + 32u + FLEET_BOARD_FLEET_EPOCH_BYTES + 32u)
-#define BOARD_CURSOR_MAGIC "FBc1"
-
 static bool board_cursor_file(char *out, size_t cap)
 {
 #ifdef ZCL_TESTING
@@ -614,117 +678,6 @@ static bool board_cursor_file(char *out, size_t cap)
     int n = snprintf(out, cap, "%.*s/fleet-board-cursors",
                      (int)(slash - ndb->path), ndb->path);
     return n > 0 && (size_t)n < cap;
-}
-
-static void board_cursor_pack(const struct board_cursor *c, uint8_t *out)
-{
-    out[0] = c->epoch_known ? 1u : 0u;
-    out[1] = c->sweep_active ? 1u : 0u;
-    out[2] = c->sweep_turn ? 1u : 0u;
-    out[3] = 0;
-    memcpy(out + 4, c->peer_box_id, 32);
-    memcpy(out + 36, c->epoch, FLEET_BOARD_FLEET_EPOCH_BYTES);
-    zcl_write_u64_be(out + 36 + FLEET_BOARD_FLEET_EPOCH_BYTES,
-                     (uint64_t)c->next);
-    zcl_write_u64_be(out + 44 + FLEET_BOARD_FLEET_EPOCH_BYTES,
-                     (uint64_t)c->carry_min);
-    zcl_write_u64_be(out + 52 + FLEET_BOARD_FLEET_EPOCH_BYTES,
-                     (uint64_t)c->sweep_pos);
-    zcl_write_u64_be(out + 60 + FLEET_BOARD_FLEET_EPOCH_BYTES,
-                     (uint64_t)c->sweep_end);
-}
-
-static bool board_cursor_unpack(const uint8_t *in, struct board_cursor *out)
-{
-    uint64_t next = zcl_read_u64_be(in + 36 + FLEET_BOARD_FLEET_EPOCH_BYTES);
-    uint64_t carry = zcl_read_u64_be(in + 44 + FLEET_BOARD_FLEET_EPOCH_BYTES);
-    uint64_t spos = zcl_read_u64_be(in + 52 + FLEET_BOARD_FLEET_EPOCH_BYTES);
-    uint64_t send = zcl_read_u64_be(in + 60 + FLEET_BOARD_FLEET_EPOCH_BYTES);
-    if (next > (uint64_t)INT64_MAX || carry > (uint64_t)INT64_MAX ||
-        spos > (uint64_t)INT64_MAX || send > (uint64_t)INT64_MAX)
-        return false;
-    memset(out, 0, sizeof *out);
-    out->used = true;
-    out->epoch_known = in[0] != 0;
-    out->sweep_active = in[1] != 0;
-    out->sweep_turn = in[2] != 0;
-    memcpy(out->peer_box_id, in + 4, 32);
-    memcpy(out->epoch, in + 36, FLEET_BOARD_FLEET_EPOCH_BYTES);
-    out->next = (int64_t)next;
-    out->carry_min = (int64_t)carry;
-    out->sweep_pos = (int64_t)spos;
-    out->sweep_end = (int64_t)send;
-    return true;
-}
-
-static void board_cursor_write(const struct board_cursor *rows, size_t n)
-{
-    char path[1200];
-    uint8_t *buf = NULL;
-    struct platform_private_file file;
-    size_t bytes = 8u + n * BOARD_CURSOR_REC;
-    if (!board_cursor_file(path, sizeof path))
-        return;
-    buf = zcl_malloc(bytes, "fleet-board-cursors");
-    if (!buf)
-        return;
-    memcpy(buf, BOARD_CURSOR_MAGIC, 4);
-    zcl_write_u32_be(buf + 4, (uint32_t)n);
-    for (size_t i = 0; i < n; i++)
-        board_cursor_pack(&rows[i], buf + 8u + i * BOARD_CURSOR_REC);
-    platform_private_file_init(&file);
-    if (platform_private_file_open_locked_create(path, &file)) {
-        bool ok = platform_private_file_truncate(&file, 0) &&
-                  platform_private_file_write_at(&file, buf, bytes, 0) &&
-                  platform_private_file_authority_flush(&file);
-        platform_private_file_close(&file);
-        if (!ok)
-            LOG_WARN("fleet.board",
-                     "fleet pull cursor was not saved: path=%s", path);
-    }
-    free(buf);
-}
-
-static size_t board_cursor_read(const char *path, struct board_cursor *out,
-                                size_t cap)
-{
-    struct platform_positioned_file file;
-    uint8_t head[8];
-    uint8_t *buf = NULL;
-    uint64_t size = 0;
-    uint32_t count = 0;
-    size_t n = 0;
-    bool ok = false;
-    platform_positioned_file_init(&file);
-    if (!platform_positioned_file_open(&file, path))
-        return 0;
-    ok = platform_positioned_file_size(&file, &size) && size >= 8 &&
-         platform_positioned_file_read(&file, head, 8, 0) == 8;
-    if (ok) {
-        count = zcl_read_u32_be(head + 4);
-        ok = memcmp(head, BOARD_CURSOR_MAGIC, 4) == 0 && count <= cap &&
-             size == 8u + (uint64_t)count * BOARD_CURSOR_REC;
-    }
-    if (ok && count > 0) {
-        buf = zcl_malloc((size_t)count * BOARD_CURSOR_REC,
-                         "fleet-board-cursors");
-        ok = buf && platform_positioned_file_read(
-                        &file, buf, (size_t)count * BOARD_CURSOR_REC, 8) ==
-                        (int64_t)((size_t)count * BOARD_CURSOR_REC);
-    }
-    platform_positioned_file_close(&file);
-    if (!ok) {
-        free(buf);
-        LOG_WARN("fleet.board",
-                 "fleet pull cursor file was unreadable; pulls start again");
-        return 0;
-    }
-    for (uint32_t i = 0; i < count; i++) {
-        if (board_cursor_unpack(buf + (size_t)i * BOARD_CURSOR_REC, &out[n]))
-            n++;
-    }
-    free(buf);
-    return n;
 }
 
 /* Fill an empty in-memory table from the cursor file once per process.
@@ -811,7 +764,9 @@ static void board_cursor_store(const struct board_cursor *in)
     }
     g_cursors_loaded = true;
     board_unlock();
-    board_cursor_write(snap, n);
+    char path[1200];
+    if (board_cursor_file(path, sizeof path))
+        board_cursor_write(path, snap, n);
 }
 
 /* Is this answer's numbering the one the cursor holds? A different epoch
@@ -854,6 +809,7 @@ struct board_record {
     uint8_t id[32];
     const uint8_t *wire;
     size_t wire_len;
+    bool roster_only; /* the answer's: this box is not armed yet */
 };
 
 /* The next framed record, or false at the end or at a frame that does not
@@ -935,6 +891,10 @@ static enum fleet_board_result board_record_ingest(
         return FLEET_BOARD_ERR_ID;
     if (post->scope != FLEET_BOARD_SCOPE_FLEET)
         return FLEET_BOARD_ERR_SCOPE;
+    /* From a roster answer, a box not armed yet takes sealed roster rows and
+     * offers the rest again once those rows have armed it. */
+    if (rec->roster_only && !boot_fleet_roster_is_row(post))
+        return FLEET_BOARD_ERR_ROLE;
     /* ZRC 0012 step 2: an armed roster takes fleet posts from its members
      * only, and a roster row only when its seal verifies. A non-member
      * author is this box's own decision, not the peer's fault, so it is the
@@ -992,6 +952,7 @@ static size_t board_offer_all(struct node_db *ndb,
         if ((slot->ask.sweep && rec.arrival > c->sweep_end) ||
             db_fleet_board_have(ndb, rec.id))
             continue;
+        rec.roster_only = slot->roster_only;
         if (board_offer(ndb, &rec, post, now, c))
             stored++;
     }
@@ -1043,6 +1004,24 @@ static size_t board_drain_slot(struct node_db *ndb,
     return stored;
 }
 
+/* A roster answer proves who answered before any row of it is looked at, and
+ * leaves a plain answer behind. A refused one is dropped whole and moves no
+ * cursor. */
+static bool board_answer_open(struct node_db *ndb,
+                              struct board_inbox_slot *slot, int64_t now)
+{
+    struct fleet_board_roster_bind bind;
+    if (!slot->ask.roster)
+        return true;
+    if (board_roster_bind(slot->ask.transcript, slot->ask.generation,
+                          slot->ask.after, &bind) &&
+        fleet_board_roster_answer_open(ndb, &bind, slot->rows, &slot->len, now,
+                                       &slot->roster_only))
+        return true;
+    atomic_fetch_add_explicit(&g_answer_refused, 1, memory_order_relaxed);
+    return false;
+}
+
 static size_t board_drain_inbox(struct node_db *ndb, int64_t now)
 {
     struct fleet_board_post *post =
@@ -1057,7 +1036,7 @@ static size_t board_drain_inbox(struct node_db *ndb, int64_t now)
         board_unlock();
         if (!slot.used)
             continue;
-        if (ndb)
+        if (ndb && board_answer_open(ndb, &slot, now))
             stored += board_drain_slot(ndb, &slot, post, now);
         free(slot.rows);
     }
@@ -1084,6 +1063,24 @@ static bool board_live_visitor(struct mesh_stream *st, void *ctx)
     return true;
 }
 
+/* Open one pull stream, which owns `p` from here on when it opens. */
+static bool board_stream_open(const char *service,
+                              const uint8_t peer_noise[32],
+                              const uint8_t *frame, size_t frame_len,
+                              struct board_pull_state *p)
+{
+    uint64_t stream_id = 0;
+    enum mesh_stream_refusal refusal = mesh_stream_open(
+        service, peer_noise, 0, frame, frame_len, p, &stream_id);
+    if (refusal == MESH_STREAM_OK)
+        return true;
+    if (refusal != MESH_STREAM_REFUSED_PEER_NOT_CONNECTED)
+        LOG_WARN("fleet.board", "fleet pull not opened: %s",
+                 mesh_stream_refusal_string(refusal));
+    free(p);
+    return false;
+}
+
 /* The one PULL this protocol has, toward a peer the caller has already
  * verified. The lane and the loopback test both enter here. */
 static bool board_open_pull(const uint8_t peer_noise[32],
@@ -1097,17 +1094,47 @@ static bool board_open_pull(const uint8_t peer_noise[32],
     board_plan_pull(&p->ask);
     uint8_t frame[FLEET_BOARD_FLEET_PULL_BYTES];
     size_t frame_len = pull_encode(p->ask.after, frame);
-    uint64_t stream_id = 0;
-    enum mesh_stream_refusal refusal =
-        mesh_stream_open(FLEET_BOARD_FLEET_SERVICE_NAME, peer_noise, 0, frame,
-                         frame_len, p, &stream_id);
-    if (refusal == MESH_STREAM_OK)
-        return true;
-    if (refusal != MESH_STREAM_REFUSED_PEER_NOT_CONNECTED)
-        LOG_WARN("fleet.board", "fleet pull not opened: %s",
-                 mesh_stream_refusal_string(refusal));
-    free(p);
-    return false;
+    return board_stream_open(FLEET_BOARD_FLEET_SERVICE_NAME, peer_noise, frame,
+                             frame_len, p);
+}
+
+/* The roster pull: the same page question, plus this box's board key proving
+ * itself on the session it is asked over. The peer's Noise static is its
+ * cursor key, because its board key is not known until it answers. */
+static bool board_open_roster_pull(struct boot_svc_ctx *svc,
+                                   const uint8_t peer_noise[32])
+{
+    struct noise_transport_snapshot snap;
+    memset(&snap, 0, sizeof snap);
+    if (!svc || !svc->msg_processor || !svc->msg_processor->net_mgr)
+        return false;
+    struct p2p_node *node = boot_mesh_find_session_peer(
+        svc->msg_processor->net_mgr, peer_noise, &snap);
+    if (!node)
+        return false;
+    p2p_node_release(node);
+    struct board_pull_state *p =
+        zcl_calloc(1, sizeof *p, "fleet_board_roster_pull");
+    if (!p)
+        return false;
+    memcpy(p->ask.peer_box_id, peer_noise, 32);
+    board_plan_pull(&p->ask);
+    p->ask.roster = true;
+    memcpy(p->ask.transcript, snap.transcript_hash, 32);
+    p->ask.generation = snap.connection_generation;
+    uint8_t frame[FLEET_BOARD_ROSTER_PULL_BYTES];
+    size_t frame_len = pull_encode(p->ask.after, frame);
+    struct fleet_board_roster_bind bind;
+    if (!board_roster_bind(snap.transcript_hash, snap.connection_generation,
+                           p->ask.after, &bind) ||
+        !fleet_board_roster_proof_make(FLEET_BOARD_ROSTER_SIDE_ASK, &bind,
+                                       frame + frame_len)) {
+        free(p);
+        return false;
+    }
+    frame_len += FLEET_BOARD_ROSTER_PROOF_BYTES;
+    return board_stream_open(FLEET_BOARD_ROSTER_SERVICE_NAME, peer_noise, frame,
+                             frame_len, p);
 }
 
 /* Is this paired row a peer due a pull right now? The same questions the
@@ -1149,6 +1176,34 @@ static void board_pull_paired_peers(int64_t now)
     free(rows);
 }
 
+/* The roster half of the lane: the sessions the roster names, with no pairing
+ * row and no pull already under way. Returns how many pulls opened. */
+static size_t board_pull_roster_peers(struct boot_svc_ctx *svc,
+                                      struct node_db *store, int64_t now)
+{
+    struct node_db *pairings = app_runtime_node_db();
+    if (!pairings || !app_runtime_node_db_handle_open(pairings))
+        return 0;
+    uint8_t (*targets)[32] = zcl_calloc(FLEET_BOARD_FLEET_PEERS_MAX,
+                                        sizeof *targets, "fleet_board_targets");
+    if (!targets)
+        return 0;
+    size_t n = fleet_board_roster_targets(svc, pairings, store, now, targets,
+                                          FLEET_BOARD_FLEET_PEERS_MAX);
+    size_t opened = 0;
+    for (size_t i = 0; i < n; i++) {
+        struct board_live_probe probe;
+        memset(&probe, 0, sizeof probe);
+        memcpy(probe.peer_static, targets[i], 32);
+        mesh_stream_visit(FLEET_BOARD_ROSTER_SERVICE_NAME, board_live_visitor,
+                          &probe);
+        if (!probe.found && board_open_roster_pull(svc, targets[i]))
+            opened++;
+    }
+    free(targets);
+    return opened;
+}
+
 /* The manager's half of ZRC 0012 step 2: once per period, put this box's own
  * sealed machine roster onto the board as roster rows. A box that is not the
  * fleet root's own box writes nothing. */
@@ -1168,7 +1223,8 @@ static void board_tick(struct liveness_contract *contract)
 {
     (void)contract;
     board_lock();
-    bool wired = g_svc != NULL;
+    struct boot_svc_ctx *svc = g_svc;
+    bool wired = svc != NULL;
     int64_t last = g_last_pull;
     board_unlock();
     struct node_db *ndb = board_db();
@@ -1188,6 +1244,7 @@ static void board_tick(struct liveness_contract *contract)
     board_unlock();
     board_publish_roster_due(ndb, now);
     board_pull_paired_peers(now);
+    (void)board_pull_roster_peers(svc, ndb, now);
 }
 
 void boot_fleet_board_fleet_counts(struct boot_fleet_board_fleet_counts *out)
@@ -1204,6 +1261,7 @@ void boot_fleet_board_fleet_counts(struct boot_fleet_board_fleet_counts *out)
     out->deferred = atomic_load_explicit(&g_deferred, memory_order_relaxed);
     out->answer_refused =
         atomic_load_explicit(&g_answer_refused, memory_order_relaxed);
+    out->roster_refused = fleet_board_roster_refused_count();
 }
 
 /* ── lifecycle ───────────────────────────────────────────────────────── */
@@ -1218,6 +1276,7 @@ static void board_forget_locked(void)
     g_cursors_loaded = false;
     g_last_pull = 0;
     g_last_roster_publish = 0;
+    fleet_board_roster_forget();
 }
 
 void boot_fleet_board_fleet_wire(struct boot_svc_ctx *svc)
@@ -1259,6 +1318,7 @@ void boot_fleet_board_fleet_wire(struct boot_svc_ctx *svc)
 void boot_fleet_board_fleet_shutdown(void)
 {
     mesh_stream_service_unregister(FLEET_BOARD_FLEET_SERVICE_NAME);
+    mesh_stream_service_unregister(FLEET_BOARD_ROSTER_SERVICE_NAME);
     board_lock();
     supervisor_child_id child = g_child;
     g_child = SUPERVISOR_INVALID_ID;
@@ -1290,6 +1350,19 @@ void boot_fleet_board_fleet_test_pull_paired(int64_t now)
         board_pull_paired_peers(now);
 }
 
+bool boot_fleet_board_fleet_test_pull_roster(struct boot_svc_ctx *svc,
+                                             const uint8_t peer_noise[32])
+{
+    return board_open_roster_pull(svc, peer_noise);
+}
+
+size_t boot_fleet_board_fleet_test_pull_roster_lane(struct boot_svc_ctx *svc,
+                                                    struct node_db *store,
+                                                    int64_t now)
+{
+    return board_pull_roster_peers(svc, store, now);
+}
+
 /* The answering drain, run once from inside the lane lock — which is
  * exactly where and how the shared stream pump runs it. */
 static bool board_serve_visitor(struct mesh_stream *st, void *ctx)
@@ -1303,6 +1376,8 @@ static bool board_serve_visitor(struct mesh_stream *st, void *ctx)
 void boot_fleet_board_fleet_test_serve(void)
 {
     mesh_stream_visit(FLEET_BOARD_FLEET_SERVICE_NAME, board_serve_visitor,
+                      NULL);
+    mesh_stream_visit(FLEET_BOARD_ROSTER_SERVICE_NAME, board_serve_visitor,
                       NULL);
 }
 

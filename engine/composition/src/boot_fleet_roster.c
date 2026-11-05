@@ -698,6 +698,29 @@ bool boot_fleet_roster_admits_peer(struct node_db *ndb, const uint8_t key[32],
     return roster_admits(boot_fleet_roster_check(ndb, key, now));
 }
 
+bool boot_fleet_roster_carries_peer(struct node_db *ndb, const uint8_t key[32],
+                                    int64_t now)
+{
+    enum boot_fleet_roster_verdict v = boot_fleet_roster_check(ndb, key, now);
+    if (v == BOOT_FLEET_ROSTER_UNARMED)
+        return false; /* no roster in force: nothing new is admitted */
+    return roster_admits(v);
+}
+
+bool boot_fleet_roster_carriage_open(struct node_db *ndb)
+{
+    struct root_view rv;
+    bool disabled = false;
+    if (!ndb || !ndb->open || !zcl_fleet_roster_provider_installed())
+        return false;
+    bool open = roster_root_view(ndb, &rv, &disabled) == SNAP_READY &&
+                rv.state != ZCL_FLEET_ROOT_ROTATED &&
+                rv.state != ZCL_FLEET_ROOT_REVOKED &&
+                rv.state != ZCL_FLEET_ROOT_UNREADABLE;
+    memset(rv.root, 0, sizeof rv.root);
+    return open;
+}
+
 /* A roster row may be stored only if its seal verifies under the root this
  * box trusts. This is the one place a roster row is judged on its way in:
  * the same screen runs for the mesh stream, a P2P POST and a local publish. */

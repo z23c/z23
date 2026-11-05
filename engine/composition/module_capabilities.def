@@ -606,6 +606,8 @@ ZCL_MODULE_CAPABILITY("engine/composition/src/boot_first_run_banner.c", CAP_FS_R
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_fleet_board_rpc.c", CAP_FS_WRITE, "bounded allocation failure diagnostics write to stderr")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_fleet_ledger.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_fleet_board_fleet.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/composition/src/boot_fleet_board_roster.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/composition/src/boot_fleet_board_cursor.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_fleet_roster.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_flight_recorder.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_frontend_async.c", CAP_CLOCK, "bounded wait for the frontend start thread reads the monotonic clock")

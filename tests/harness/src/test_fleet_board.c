@@ -51,6 +51,8 @@
 #include "test/mesh_term_fixture.h"
 #include "models/mesh_pairing.h"
 #include "net/noise_transport.h"
+#include "net/onion_v3_address.h"
+#include "../../../engine/composition/src/boot_fleet_board_roster_internal.h"
 
 #include <fcntl.h>
 #include <pthread.h>
@@ -6650,6 +6652,7 @@ static void fbw_close(struct fbw *w)
     mesh_stream_test_reset();
     boot_fleet_board_fleet_test_bind(NULL);
     mesh_stream_service_unregister(FLEET_BOARD_FLEET_SERVICE_NAME);
+    mesh_stream_service_unregister(FLEET_BOARD_ROSTER_SERVICE_NAME);
     mesh_stream_test_bind(NULL);
     app_runtime_set_current(NULL);
     mesh_loop_free_queue(w->asker, w->ask_q);
@@ -10904,6 +10907,550 @@ static int test_fleet_status(void)
     return failures;
 }
 
+/* ── carriage between roster machines, with no pairing row ──────────────── */
+
+#define FBC_REVOKED 11 /* a member whose box the head comes to revoke */
+#define FBC_TTL 3600u
+
+static char g_fbc_onion[80];
+
+static void fbc_sign_as(enum fleet_board_roster_side side, uint8_t id)
+{
+    uint8_t seed[32], pk[32];
+    fb_test_identity(id, seed, pk);
+    boot_fleet_board_fleet_test_roster_identity((int)side, seed, pk);
+    memset(seed, 0, sizeof seed);
+}
+
+/* Each side signs as the box it stands in for. */
+static void fbc_boxes(uint8_t asking, uint8_t answering)
+{
+    fbc_sign_as(FLEET_BOARD_ROSTER_SIDE_ASK, asking);
+    fbc_sign_as(FLEET_BOARD_ROSTER_SIDE_ANSWER, answering);
+}
+
+/* A key that claims one identity and signs with another's seed. */
+static void fbc_forge(enum fleet_board_roster_side side, uint8_t claims,
+                      uint8_t signs)
+{
+    uint8_t seed[32], pk[32], claimed[32];
+    fb_test_identity(signs, seed, pk);
+    fbr_key(claims, claimed);
+    boot_fleet_board_fleet_test_roster_identity((int)side, seed, claimed);
+    memset(seed, 0, sizeof seed);
+}
+
+static void fbc_ask_begin(struct fbw *w)
+{
+    mesh_loop_discard(w->asker, w->ask_q, w->f.res_term);
+    mesh_loop_discard(w->answerer, w->answer_q, w->f.term_peer.ini);
+    mesh_stream_test_reset();
+}
+
+/* The OPEN reaches the answering box, it answers, and the answer is committed
+ * into `into`. */
+static size_t fbc_finish(struct fbw *w, struct node_db *into, size_t *frames)
+{
+    *frames = 0;
+    if (mesh_loop_pump(w->asker, w->ask_q, w->f.res_term, &w->mp,
+                       w->answerer) != 1)
+        return SIZE_MAX;
+    boot_fleet_board_fleet_test_serve(); /* the answer, when there is one */
+    boot_fleet_board_fleet_test_serve(); /* nothing left: close */
+    *frames = mesh_loop_pump(w->answerer, w->answer_q, w->f.term_peer.ini,
+                             &w->mp, w->asker);
+    return boot_fleet_board_fleet_test_drain_into(into);
+}
+
+/* One whole roster pull over the real encrypted stream path. */
+static size_t fbc_pull(struct fbw *w, struct node_db *into, size_t *frames)
+{
+    fbc_ask_begin(w);
+    if (!boot_fleet_board_fleet_test_pull_roster(&w->svc, w->f.resp_noise_pub))
+        return SIZE_MAX;
+    return fbc_finish(w, into, frames);
+}
+
+/* Refused before a row was read: the CLOSE alone came back, nothing stored. */
+static bool fbc_refused(struct fbw *w, struct node_db *into)
+{
+    size_t frames = 0;
+    return fbc_pull(w, into, &frames) == 0 && frames == 1;
+}
+
+/* The verdict a raw OPEN on `service` gets, read off the wire. */
+static uint8_t fbc_raw_open(struct fbw *w, const char *service,
+                            const uint8_t *payload, size_t len)
+{
+    uint8_t frame[MESH_LOOP_WIRE_MAX], answer[MESH_LOOP_WIRE_MAX];
+    uint8_t kind = 0;
+    bool more = false;
+    fbc_ask_begin(w);
+    size_t frame_len = mesh_stream_test_open_frame(1, 4096u, service, payload,
+                                                   len, frame, sizeof frame);
+    if (frame_len == 0 ||
+        !mesh_stream_frame(&w->mp, w->answerer, frame, frame_len, NULL))
+        return 0xFFu;
+    size_t answer_len = mesh_loop_take(w->answerer, w->answer_q,
+                                       w->f.term_peer.ini, answer,
+                                       sizeof answer, &more);
+    if (!mesh_stream_test_read_header(answer, answer_len, &kind, NULL) ||
+        kind != MESH_STREAM_KIND_CLOSE)
+        return 0xFEu;
+    return answer[MESH_STREAM_FRAME_PREFIX_LEN + 1u + 8u];
+}
+
+/* One sealed line, byte-identical in `a` and (when named) in `b`. */
+static bool fbc_plant(struct node_db *a, struct node_db *b, const char *name,
+                      uint8_t signer, int64_t now)
+{
+    char line[FLEET_ENROL_MACHINE_TEXT_MAX];
+    return fbr_line(FBR_ROOT, name, signer, line, sizeof line) &&
+           fbr_store_row(a, 1, line, now, FBC_TTL) &&
+           (!b || fbr_store_row(b, 1, line, now, FBC_TTL));
+}
+
+static void fbc_revoke(uint8_t id)
+{
+    g_fbr.head.state = ZCL_FLEET_HEAD_OK;
+    g_fbr.head.count = 1;
+    fbr_key(id, g_fbr.head.revoked[0]);
+    boot_fleet_roster_invalidate();
+}
+
+static void fbc_unrevoke(void)
+{
+    memset(&g_fbr.head, 0, sizeof g_fbr.head);
+    boot_fleet_roster_invalidate();
+}
+
+static int test_fleet_board_roster_carriage_proof(void)
+{
+    int failures = 0;
+    TEST("fleet roster carriage: a proof holds only for its side, network, "
+         "session and cursor") {
+        struct fleet_board_roster_bind bind, other;
+        uint8_t proof[FLEET_BOARD_ROSTER_PROOF_BYTES];
+        memset(&bind, 0, sizeof bind);
+        memset(bind.network_genesis, 0x11, 32);
+        memset(bind.transcript_hash, 0x22, 32);
+        bind.connection_generation = 7;
+        bind.after = 9;
+        fbc_sign_as(FLEET_BOARD_ROSTER_SIDE_ASK, FBR_PEER);
+        ASSERT(fleet_board_roster_proof_make(FLEET_BOARD_ROSTER_SIDE_ASK, &bind,
+                                             proof));
+        ASSERT(fleet_board_roster_proof_check(FLEET_BOARD_ROSTER_SIDE_ASK,
+                                              &bind, proof));
+        ASSERT(!fleet_board_roster_proof_check(FLEET_BOARD_ROSTER_SIDE_ANSWER,
+                                               &bind, proof));
+        other = bind;
+        memset(other.network_genesis, 0x12, 32);
+        ASSERT(!fleet_board_roster_proof_check(FLEET_BOARD_ROSTER_SIDE_ASK,
+                                               &other, proof));
+        other = bind;
+        memset(other.transcript_hash, 0x23, 32);
+        ASSERT(!fleet_board_roster_proof_check(FLEET_BOARD_ROSTER_SIDE_ASK,
+                                               &other, proof));
+        other = bind;
+        other.connection_generation = 8;
+        ASSERT(!fleet_board_roster_proof_check(FLEET_BOARD_ROSTER_SIDE_ASK,
+                                               &other, proof));
+        other = bind;
+        other.after = 10;
+        ASSERT(!fleet_board_roster_proof_check(FLEET_BOARD_ROSTER_SIDE_ASK,
+                                               &other, proof));
+        /* Another key cannot claim the signature. */
+        fbr_key(FBR_MEMBER, proof);
+        ASSERT(!fleet_board_roster_proof_check(FLEET_BOARD_ROSTER_SIDE_ASK,
+                                               &bind, proof));
+        PASS();
+    }
+    _test_next:;
+    boot_fleet_board_fleet_test_roster_identity(1, NULL, NULL);
+    return failures;
+}
+
+static int test_fleet_board_roster_carriage(void)
+{
+    int failures = 0;
+    static struct fbw w;
+    static struct node_db dest, empty, junk, joined;
+    struct fleet_board_post from_a, from_b, pub, late, note;
+    struct zcl_fleet_role_checker checker = {
+        .allow = fbw_role_check, .name = "fleet-board-carriage-test" };
+    struct boot_fleet_board_fleet_counts cb, ca;
+    struct boot_fleet_roster_counts rb, ra;
+    size_t frames = 0;
+    const int64_t now = FBW_NOW;
+    g_fbw_deny_read = false;
+    zcl_fleet_role_checker_install(&checker);
+    bool opened = fbw_open(&w) && node_db_open(&dest, ":memory:") &&
+                  node_db_open(&empty, ":memory:") &&
+                  node_db_open(&junk, ":memory:") &&
+                  node_db_open(&joined, ":memory:");
+    TEST("fleet roster carriage: two isolated boxes on the owner's roster "
+         "exchange a fleet row both ways with no pairing row, and no public "
+         "row rides along") {
+        ASSERT(opened);
+        boot_fleet_board_fleet_test_bind_authority(&w.f.term_peer.delegation,
+                                                   w.f.genesis, now);
+        boot_fleet_board_fleet_test_bind(&w.a);
+        fbr_install(FBR_ROOT, false);
+        ASSERT(fbc_plant(&w.a, &w.b, "answerbox", FBR_MEMBER, now));
+        ASSERT(fbc_plant(&w.a, &w.b, "askbox", FBR_PEER, now));
+        ASSERT(fbw_post(&w.a, FBR_MEMBER, FLEET_BOARD_SCOPE_FLEET,
+                        "over the roster", 2000, FBC_TTL, 2000, &from_a));
+        ASSERT(fbw_post(&w.a, FBR_MEMBER, FLEET_BOARD_SCOPE_PUBLIC, "public",
+                        2000, FBC_TTL, 2000, &pub));
+        fbc_boxes(FBR_PEER, FBR_MEMBER);
+        ASSERT_EQ(fbc_pull(&w, &w.b, &frames), (size_t)1);
+        ASSERT(db_fleet_board_have(&w.b, from_a.id));
+        ASSERT(!db_fleet_board_have(&w.b, pub.id));
+
+        boot_fleet_board_fleet_test_new_epoch();
+        boot_fleet_board_fleet_test_bind(&w.b);
+        ASSERT(fbw_post(&w.b, FBR_PEER, FLEET_BOARD_SCOPE_FLEET,
+                        "and back again", 2100, FBC_TTL, 2100, &from_b));
+        fbc_boxes(FBR_MEMBER, FBR_PEER);
+        ASSERT_EQ(fbc_pull(&w, &w.a, &frames), (size_t)1);
+        ASSERT(db_fleet_board_have(&w.a, from_b.id));
+        PASS();
+    }
+    TEST("fleet roster carriage: a joined box holding no row yet arms from "
+         "sealed rows alone, then takes the fleet row it set aside") {
+        boot_fleet_board_fleet_test_new_epoch();
+        boot_fleet_board_fleet_test_bind(&w.a);
+        fbc_boxes(FBR_PEER, FBR_MEMBER);
+        boot_fleet_board_fleet_counts(&cb);
+        ASSERT_EQ(fbc_pull(&w, &joined, &frames), (size_t)2);
+        boot_fleet_board_fleet_counts(&ca);
+        ASSERT(!db_fleet_board_have(&joined, from_a.id));
+        ASSERT(ca.deferred > cb.deferred);
+        for (int i = 0; i < 6 && !db_fleet_board_have(&joined, from_a.id); i++)
+            ASSERT(fbc_pull(&w, &joined, &frames) != SIZE_MAX);
+        ASSERT(db_fleet_board_have(&joined, from_a.id));
+        ASSERT(db_fleet_board_have(&joined, from_b.id));
+        PASS();
+    }
+    TEST("fleet roster carriage: no root, no sealed row, a row nobody sealed, "
+         "a gate switched off and an expired roster all admit nothing") {
+        boot_fleet_board_fleet_test_bind(&w.a);
+        fbc_boxes(FBR_PEER, FBR_MEMBER);
+        /* The positive control: this store does admit this peer. */
+        ASSERT_EQ(fbc_pull(&w, &dest, &frames), (size_t)2);
+        ASSERT(!fbc_refused(&w, &dest));
+
+        g_fbr.present = false;
+        boot_fleet_roster_invalidate();
+        ASSERT(fbc_refused(&w, &dest));
+        g_fbr.present = true;
+        boot_fleet_roster_invalidate();
+
+        boot_fleet_board_fleet_test_bind(&empty);
+        ASSERT(fbw_post(&empty, FBR_MEMBER, FLEET_BOARD_SCOPE_FLEET,
+                        "no roster here", 2000, FBC_TTL, 2000, &note));
+        ASSERT(fbc_refused(&w, &dest));
+
+        boot_fleet_board_fleet_test_bind(&junk);
+        ASSERT(fbr_store_row(&junk, 1, "not a sealed line", now, FBC_TTL));
+        ASSERT(fbr_member_row(&junk, FBR_OTHER_ROOT, "foreign", FBR_PEER, now));
+        ASSERT(fbc_refused(&w, &dest));
+
+        boot_fleet_board_fleet_test_bind(&w.a);
+        boot_fleet_roster_set_gate(BOOT_FLEET_ROSTER_GATE_OFF);
+        ASSERT(fbc_refused(&w, &dest));
+        boot_fleet_roster_set_gate(BOOT_FLEET_ROSTER_GATE_DEFAULT);
+
+        boot_fleet_board_fleet_test_bind_authority(
+            &w.f.term_peer.delegation, w.f.genesis, now + FBC_TTL + 1);
+        ASSERT(fbc_refused(&w, &dest));
+        boot_fleet_board_fleet_test_bind_authority(&w.f.term_peer.delegation,
+                                                   w.f.genesis, now);
+        PASS();
+    }
+    TEST("fleet roster carriage: a peer off the roster, a revoked member, a "
+         "forged proof, another network's proof and a peer without the read "
+         "role get no fleet row") {
+        uint8_t other_genesis[32];
+        boot_fleet_board_fleet_test_bind(&w.a);
+
+        fbc_boxes(FBR_STRANGER, FBR_MEMBER);
+        boot_fleet_roster_counts(&rb);
+        ASSERT(fbc_refused(&w, &dest));
+        boot_fleet_roster_counts(&ra);
+        ASSERT_EQ(ra.non_member, rb.non_member + 1);
+
+        fbc_boxes(FBR_PEER, FBR_MEMBER);
+        fbc_revoke(FBR_PEER);
+        ASSERT(fbc_refused(&w, &dest));
+        fbc_unrevoke();
+
+        fbc_forge(FLEET_BOARD_ROSTER_SIDE_ASK, FBR_PEER, FBR_STRANGER);
+        boot_fleet_board_fleet_counts(&cb);
+        ASSERT(fbc_refused(&w, &dest));
+        boot_fleet_board_fleet_counts(&ca);
+        ASSERT_EQ(ca.roster_refused, cb.roster_refused + 1);
+
+        /* Signed under another network's genesis, judged under this one. */
+        fbc_boxes(FBR_PEER, FBR_MEMBER);
+        memset(other_genesis, 0x77, 32);
+        boot_fleet_board_fleet_test_bind_authority(&w.f.term_peer.delegation,
+                                                   other_genesis, now);
+        fbc_ask_begin(&w);
+        ASSERT(boot_fleet_board_fleet_test_pull_roster(&w.svc,
+                                                       w.f.resp_noise_pub));
+        boot_fleet_board_fleet_test_bind_authority(&w.f.term_peer.delegation,
+                                                   w.f.genesis, now);
+        boot_fleet_board_fleet_counts(&cb);
+        ASSERT_EQ(fbc_finish(&w, &dest, &frames), (size_t)0);
+        ASSERT_EQ(frames, (size_t)1);
+        boot_fleet_board_fleet_counts(&ca);
+        ASSERT_EQ(ca.roster_refused, cb.roster_refused + 1);
+
+        g_fbw_deny_read = true;
+        boot_fleet_board_fleet_counts(&cb);
+        ASSERT(fbc_refused(&w, &dest));
+        boot_fleet_board_fleet_counts(&ca);
+        ASSERT_EQ(ca.role_refused, cb.role_refused + 1);
+        g_fbw_deny_read = false;
+        PASS();
+    }
+    TEST("fleet roster carriage: the plain board service still refuses an "
+         "unpaired peer, and the roster service refuses a pull with no proof") {
+        uint8_t pull[FLEET_BOARD_FLEET_PULL_BYTES];
+        memset(pull, 0, sizeof pull);
+        pull[0] = (uint8_t)FLEET_BOARD_FLEET_MSG_PULL;
+        pull[1] = (uint8_t)FLEET_BOARD_FLEET_VERSION;
+        boot_fleet_board_fleet_test_bind(&w.a);
+        ASSERT_EQ(fbc_raw_open(&w, FLEET_BOARD_FLEET_SERVICE_NAME, pull,
+                               sizeof pull),
+                  MESH_STREAM_REFUSED_PEER_UNPAIRED);
+        ASSERT_EQ(fbc_raw_open(&w, FLEET_BOARD_ROSTER_SERVICE_NAME, pull,
+                               sizeof pull),
+                  MESH_STREAM_REFUSED_MALFORMED);
+        PASS();
+    }
+    TEST("fleet roster carriage: an armed asking box drops a whole answer from "
+         "a box off its roster or with a forged proof, and moves no cursor") {
+        boot_fleet_board_fleet_test_bind(&w.a);
+        ASSERT(fbw_post(&w.a, FBR_MEMBER, FLEET_BOARD_SCOPE_FLEET,
+                        "for members", 2200, FBC_TTL, 2200, &late));
+        fbc_boxes(FBR_PEER, FBR_STRANGER);
+        boot_fleet_board_fleet_counts(&cb);
+        ASSERT_EQ(fbc_pull(&w, &w.b, &frames), (size_t)0);
+        boot_fleet_board_fleet_counts(&ca);
+        ASSERT_EQ(ca.answer_refused, cb.answer_refused + 1);
+        ASSERT(!db_fleet_board_have(&w.b, late.id));
+
+        fbc_boxes(FBR_PEER, FBR_MEMBER);
+        fbc_forge(FLEET_BOARD_ROSTER_SIDE_ANSWER, FBR_MEMBER, FBR_STRANGER);
+        boot_fleet_board_fleet_counts(&cb);
+        ASSERT_EQ(fbc_pull(&w, &w.b, &frames), (size_t)0);
+        boot_fleet_board_fleet_counts(&ca);
+        ASSERT_EQ(ca.answer_refused, cb.answer_refused + 1);
+        ASSERT(!db_fleet_board_have(&w.b, late.id));
+
+        fbc_boxes(FBR_PEER, FBR_MEMBER);
+        ASSERT_EQ(fbc_pull(&w, &w.b, &frames), (size_t)1);
+        ASSERT(db_fleet_board_have(&w.b, late.id));
+        PASS();
+    }
+    TEST("fleet roster carriage: a row a member wrote before revocation "
+         "arrives, a row it writes after is refused from any carrier") {
+        boot_fleet_board_fleet_test_bind(&w.a);
+        fbc_boxes(FBR_PEER, FBR_MEMBER);
+        ASSERT(fbc_plant(&w.a, &w.b, "goner", FBC_REVOKED, now));
+        ASSERT(fbw_post(&w.a, FBC_REVOKED, FLEET_BOARD_SCOPE_FLEET,
+                        "before revocation", 2300, FBC_TTL, 2300, &note));
+        ASSERT_EQ(fbc_pull(&w, &w.b, &frames), (size_t)1);
+        ASSERT(db_fleet_board_have(&w.b, note.id));
+
+        fbc_revoke(FBC_REVOKED);
+        ASSERT(fbw_post(&w.a, FBC_REVOKED, FLEET_BOARD_SCOPE_FLEET,
+                        "after revocation", 2400, FBC_TTL, 2400, &late));
+        boot_fleet_board_fleet_counts(&cb);
+        ASSERT_EQ(fbc_pull(&w, &w.b, &frames), (size_t)0);
+        boot_fleet_board_fleet_counts(&ca);
+        ASSERT(ca.deferred > cb.deferred);
+        ASSERT(!db_fleet_board_have(&w.b, late.id));
+        fbc_unrevoke();
+        PASS();
+    }
+    _test_next:;
+    g_fbw_deny_read = false;
+    boot_fleet_board_fleet_test_roster_identity(1, NULL, NULL);
+    boot_fleet_board_fleet_test_roster_identity(2, NULL, NULL);
+    fbr_uninstall();
+    fbw_close(&w);
+    if (dest.open)
+        node_db_close(&dest);
+    if (empty.open)
+        node_db_close(&empty);
+    if (junk.open)
+        node_db_close(&junk);
+    if (joined.open)
+        node_db_close(&joined);
+    zcl_fleet_role_checker_install_permissive_for_testing();
+    return failures;
+}
+
+/* The onion every stub line claims. A box is never its own peer here. */
+static bool fbc_endpoint_cb(const char *line, const uint8_t root[32],
+                            char *onion, size_t cap, bool *self, void *ctx)
+{
+    (void)line;
+    (void)root;
+    (void)ctx;
+    (void)snprintf(onion, cap, "%s", g_fbc_onion);
+    *self = false;
+    return true;
+}
+
+static const struct zcl_fleet_roster_provider g_fbc_provider = {
+    .root = fbr_root_cb, .verify = fbr_verify_cb, .head = fbr_head_cb,
+    .each_line = fbr_each_cb, .endpoint = fbc_endpoint_cb, .ctx = NULL,
+    .name = "fleet-board-carriage-test" };
+
+static int test_fleet_board_roster_carriage_lane(void)
+{
+    int failures = 0;
+    static struct fbw w;
+    static struct node_db dest, joined;
+    struct fleet_board_post note, paired;
+    struct zcl_fleet_role_checker checker = {
+        .allow = fbw_role_check, .name = "fleet-board-carriage-lane-test" };
+    struct boot_fleet_board_fleet_counts cb, ca;
+    uint8_t onion_pub[32];
+    size_t frames = 0;
+    const int64_t now = FBW_NOW;
+    g_fbw_deny_read = false;
+    zcl_fleet_role_checker_install(&checker);
+    bool opened = fbw_open(&w) && node_db_open(&dest, ":memory:") &&
+                  node_db_open(&joined, ":memory:");
+    TEST("fleet roster carriage lane: the real lane asks the session at a "
+         "sealed line's onion, and nobody when the address, the gate or the "
+         "root says otherwise") {
+        ASSERT(opened);
+        boot_fleet_board_fleet_test_bind_authority(&w.f.term_peer.delegation,
+                                                   w.f.genesis, now);
+        boot_fleet_board_fleet_test_bind(&w.a);
+        fbr_install(FBR_ROOT, false);
+        zcl_fleet_roster_provider_install(&g_fbc_provider);
+        fbc_boxes(FBR_PEER, FBR_MEMBER);
+        fbr_key(FBR_MEMBER, onion_pub);
+        ASSERT(onion_v3_address_from_pubkey(onion_pub, g_fbc_onion));
+        ASSERT(fbc_plant(&w.a, NULL, "answerbox", FBR_MEMBER, now));
+        ASSERT(fbc_plant(&w.a, NULL, "askbox", FBR_PEER, now));
+        ASSERT(fbw_post(&w.a, FBR_MEMBER, FLEET_BOARD_SCOPE_FLEET, "by the lane",
+                        2000, FBC_TTL, 2000, &note));
+        /* The joined box holds the answering machine's line, as `fleet import`
+         * leaves it, and no roster row. */
+        ASSERT(fbr_line(FBR_ROOT, "answerbox", FBR_MEMBER, g_fbr.lines[0],
+                        sizeof g_fbr.lines[0]));
+        g_fbr.n_lines = 1;
+
+        /* No session is at that onion: nothing is sent to anybody. */
+        fbc_ask_begin(&w);
+        ASSERT_EQ(boot_fleet_board_fleet_test_pull_roster_lane(&w.svc, &joined,
+                                                               now),
+                  (size_t)0);
+        ASSERT_EQ(mesh_stream_test_live_count(FLEET_BOARD_ROSTER_SERVICE_NAME),
+                  (size_t)0);
+
+        /* The asking node's peer is at that onion. The lane's onions are read
+         * again once the bind forgets them. */
+        ASSERT(net_addr_from_onion(g_fbc_onion, &w.asker->addr.svc.addr));
+        boot_fleet_board_fleet_test_bind(&w.a);
+        boot_fleet_roster_set_gate(BOOT_FLEET_ROSTER_GATE_OFF);
+        ASSERT_EQ(boot_fleet_board_fleet_test_pull_roster_lane(&w.svc, &joined,
+                                                               now),
+                  (size_t)0);
+        boot_fleet_roster_set_gate(BOOT_FLEET_ROSTER_GATE_DEFAULT);
+        g_fbr.present = false;
+        boot_fleet_roster_invalidate();
+        ASSERT_EQ(boot_fleet_board_fleet_test_pull_roster_lane(&w.svc, &joined,
+                                                               now),
+                  (size_t)0);
+        g_fbr.present = true;
+        boot_fleet_roster_invalidate();
+
+        fbc_ask_begin(&w);
+        ASSERT_EQ(boot_fleet_board_fleet_test_pull_roster_lane(&w.svc, &joined,
+                                                               now),
+                  (size_t)1);
+        /* A pull under way is not asked twice. */
+        ASSERT_EQ(boot_fleet_board_fleet_test_pull_roster_lane(&w.svc, &joined,
+                                                               now),
+                  (size_t)0);
+        ASSERT_EQ(fbc_finish(&w, &joined, &frames), (size_t)2);
+        for (int i = 0; i < 6 && !db_fleet_board_have(&joined, note.id); i++) {
+            fbc_ask_begin(&w);
+            ASSERT_EQ(boot_fleet_board_fleet_test_pull_roster_lane(
+                          &w.svc, &joined, now), (size_t)1);
+            ASSERT(fbc_finish(&w, &joined, &frames) != SIZE_MAX);
+        }
+        ASSERT(db_fleet_board_have(&joined, note.id));
+        PASS();
+    }
+    TEST("fleet roster carriage lane: a session that proved a member key is "
+         "asked back, until the key is revoked") {
+        memset(&w.asker->addr.svc.addr, 0, sizeof w.asker->addr.svc.addr);
+        boot_fleet_board_fleet_test_bind(&w.a);
+        fbc_ask_begin(&w);
+        ASSERT_EQ(boot_fleet_board_fleet_test_pull_roster_lane(&w.svc, &w.a,
+                                                               now),
+                  (size_t)0);
+        ASSERT(fbc_pull(&w, &dest, &frames) != SIZE_MAX);
+        fbc_ask_begin(&w);
+        ASSERT_EQ(boot_fleet_board_fleet_test_pull_roster_lane(&w.svc, &w.a,
+                                                               now),
+                  (size_t)1);
+        fbc_ask_begin(&w);
+        fbc_revoke(FBR_PEER);
+        ASSERT_EQ(boot_fleet_board_fleet_test_pull_roster_lane(&w.svc, &w.a,
+                                                               now),
+                  (size_t)0);
+        fbc_unrevoke();
+        PASS();
+    }
+    TEST("fleet roster carriage lane: a pairing row keeps a peer on the "
+         "pairing path, which goes on working exactly as before") {
+        ASSERT(mesh_term_pair_row(&w.f, &w.f.term_peer,
+                                  MESH_PAIRING_CAP_STATUS_READ, FBW_PAIRED_AT,
+                                  FBW_PAIRING_EXPIRES));
+        fbc_ask_begin(&w);
+        ASSERT_EQ(boot_fleet_board_fleet_test_pull_roster_lane(&w.svc, &w.a,
+                                                               now),
+                  (size_t)0);
+        boot_fleet_board_fleet_counts(&cb);
+        ASSERT(fbc_refused(&w, &dest));
+        boot_fleet_board_fleet_counts(&ca);
+        ASSERT_EQ(ca.roster_refused, cb.roster_refused + 1);
+
+        /* The same peer over the plain service, roster gate unarmed. */
+        ASSERT(fbw_post(&w.a, FBR_MEMBER, FLEET_BOARD_SCOPE_FLEET, "as paired",
+                        2100, FBC_TTL, 2100, &paired));
+        g_fbr.present = false;
+        boot_fleet_roster_invalidate();
+        boot_fleet_board_fleet_test_new_epoch();
+        boot_fleet_board_fleet_test_bind(&w.a);
+        ASSERT(fbw_pull(&w, w.box_a, &dest, &frames) >= (size_t)1);
+        ASSERT(db_fleet_board_have(&dest, paired.id));
+        PASS();
+    }
+    _test_next:;
+    boot_fleet_board_fleet_test_roster_identity(1, NULL, NULL);
+    boot_fleet_board_fleet_test_roster_identity(2, NULL, NULL);
+    fbr_uninstall();
+    fbw_close(&w);
+    if (dest.open)
+        node_db_close(&dest);
+    if (joined.open)
+        node_db_close(&joined);
+    zcl_fleet_role_checker_install_permissive_for_testing();
+    return failures;
+}
+
 int test_fleet_board(void)
 {
     int failures = 0;
@@ -10972,6 +11519,9 @@ int test_fleet_board(void)
     failures += test_fleet_board_roster_dial_board();
     failures += test_fleet_board_roster_dial_guards();
     failures += test_fleet_board_roster_dial_own_key();
+    failures += test_fleet_board_roster_carriage_proof();
+    failures += test_fleet_board_roster_carriage();
+    failures += test_fleet_board_roster_carriage_lane();
     failures += test_fleet_status();
     failures += test_fleet_board_public_no_grant_needed();
     /* Leave the process as this group found it: the next group in the same

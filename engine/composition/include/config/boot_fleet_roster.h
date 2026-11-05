@@ -161,6 +161,18 @@ bool boot_fleet_roster_admits_post(struct node_db *ndb,
 bool boot_fleet_roster_admits_peer(struct node_db *ndb, const uint8_t key[32],
                                    int64_t now);
 
+/* The stricter question carriage WITHOUT a pairing row asks: is `key` a member
+ * of a roster in force here? MEMBER only. UNARMED is false, so no root, no
+ * sealed row, -fleetrostergate=0 and notes past their TTL admit nothing new;
+ * a head that revokes the key, and an UNVERIFIABLE roster, refuse and count. */
+bool boot_fleet_roster_carries_peer(struct node_db *ndb, const uint8_t key[32],
+                                    int64_t now);
+
+/* May this box ask for roster rows at all? True when it trusts a fleet root,
+ * its gate is not switched off, and the chain does not refuse the root. This
+ * is what lets a joined box that holds no row yet ask for its first. */
+bool boot_fleet_roster_carriage_open(struct node_db *ndb);
+
 /* A roster row was stored: drop the cached roster so the next question
  * re-reads it. */
 void boot_fleet_roster_invalidate(void);

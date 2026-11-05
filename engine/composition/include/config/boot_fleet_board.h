@@ -176,9 +176,31 @@ void boot_fleet_board_register_rpc(struct rpc_table *table);
  * this box refuses for a reason that can clear (a role not granted yet, a
  * clock behind the author's, a quota or a full store) is offered again by
  * a sweep that alternates with forward pulls, so it is neither lost nor
- * able to hold back the rest of the board. */
+ * able to hold back the rest of the board.
+ *
+ * Carriage with no pairing row: the "board.roster" service. A pairing needs a
+ * held ZID delegation, whose anchoring costs coins; the fleet roster is sealed
+ * by the owner and costs nothing. A machine on the roster reaches the same
+ * pull lane through a service of its own, so "board" and every pairing stay
+ * byte for byte what they were, and an older node answers
+ * stream_service_unknown. The pull carries the asker's board signing key and
+ * that key's signature over the network genesis, this Noise session's
+ * transcript and generation, and the cursor; the answer starts with the same
+ * from the answering box. It is answered only under a MEMBER verdict
+ * (boot_fleet_roster_carries_peer), so no root, no sealed row, a gate switched
+ * off, notes past their TTL, a revoked key and an unverifiable roster all
+ * admit nothing; a peer with any pairing row stays on the pairing path; the
+ * read role still applies. A box holding no armed roster of its own takes only
+ * sealed roster rows from an answer until those rows arm it. This lane asks
+ * only a session whose address a sealed line claims as its onion, or a session
+ * that already proved a member key here. It spends nothing. */
 
 #define FLEET_BOARD_FLEET_SERVICE_NAME "board"
+#define FLEET_BOARD_ROSTER_SERVICE_NAME "board.roster"
+/* The board signing key, then its signature. */
+#define FLEET_BOARD_ROSTER_PROOF_BYTES 96u
+/* A plain pull, then the proof. */
+#define FLEET_BOARD_ROSTER_PULL_BYTES (FLEET_BOARD_FLEET_PULL_BYTES + 96u)
 /* The command leaf whose grant lets a peer read this box's fleet posts:
  * the worker and observer roles already carry it (roles.def). */
 #define FLEET_BOARD_FLEET_READ_LEAF "fleet.board.list"
@@ -210,7 +232,8 @@ bool boot_fleet_board_fleet_register_service(void);
  * with no free commit slot (asked for again next pull). stored: fleet posts
  * a pull added to this box's store. deferred: pulled posts refused for a
  * reason that can clear, each offered again by a later sweep.
- * answer_refused: answers dropped whole because they did not add up. */
+ * answer_refused: answers dropped whole because they did not add up.
+ * roster_refused: carriage with no pairing row refused, on either half. */
 struct boot_fleet_board_fleet_counts {
     uint64_t delegation_refused;
     uint64_t role_refused;
@@ -218,6 +241,7 @@ struct boot_fleet_board_fleet_counts {
     uint64_t stored;
     uint64_t deferred;
     uint64_t answer_refused;
+    uint64_t roster_refused;
 };
 void boot_fleet_board_fleet_counts(struct boot_fleet_board_fleet_counts *out);
 
@@ -249,6 +273,17 @@ void boot_fleet_board_fleet_test_new_epoch(void);
 void boot_fleet_board_fleet_test_cursor_dir(const char *dir);
 void boot_fleet_board_fleet_test_restart_cursors(void);
 int64_t boot_fleet_board_fleet_test_last_after(void);
+/* The roster path. pull_roster opens one roster pull toward a connected peer;
+ * pull_roster_lane runs the real lane, target walk included, and returns how
+ * many it opened. roster_identity makes one side (1 asks, 2 answers) sign as
+ * the box it stands in for; a NULL seed goes back to the node's own key. */
+bool boot_fleet_board_fleet_test_pull_roster(struct boot_svc_ctx *svc,
+                                             const uint8_t peer_noise[32]);
+size_t boot_fleet_board_fleet_test_pull_roster_lane(struct boot_svc_ctx *svc,
+                                                    struct node_db *store,
+                                                    int64_t now);
+void boot_fleet_board_fleet_test_roster_identity(int side, const uint8_t *seed,
+                                                 const uint8_t *pub);
 #endif
 
 /* The refusal phrase for `r` and, where one exists, the limit hit and the
