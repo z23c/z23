@@ -19,6 +19,7 @@
 #include "controllers/vault_intent_private.h"
 #include "controllers/wallet_helpers.h"
 #include "controllers/wallet_shielded_controller.h"
+#include "coins/coins_view.h"
 #include "core/amount.h"
 #include "crypto/sha3.h"
 #include "jobs/reducer_frontier.h"
@@ -46,7 +47,7 @@
 #include <string.h>
 
 #define VP_BUF 8192
-#define VP_FEE 10000
+#define VR_FEE 10000
 
 /* ---- oracle 1: framed plaintext through vault_intent_private_build_prepared */
 
@@ -345,7 +346,7 @@ static bool vp_fx_wallet(void)
     g_fx.wallet = zcl_calloc(1, sizeof(*g_fx.wallet), "vip_cases.fixture");
     if (!g_fx.wallet) return false;
     wallet_init(g_fx.wallet);
-    g_fx.wallet->default_fee = VP_FEE;
+    g_fx.wallet->default_fee = VR_FEE;
     return true;
 }
 
@@ -447,7 +448,7 @@ static size_t vr_plain(uint8_t *o, const char *from, unsigned route,
     o[k++] = (uint8_t)len;
     memcpy(o + k, from, len); k += len;
     o[k++] = (uint8_t)n;
-    zcl_write_i64_le(o + k, VP_FEE); k += 8;
+    zcl_write_i64_le(o + k, VR_FEE); k += 8;
     for (size_t i = 0; i < n; i++) {
         size_t tl = strlen(e[i].to);
         size_t ml = e[i].mkind ? strlen(e[i].memo) : 0;
@@ -504,8 +505,8 @@ static bool vr_seed(const char *key, const uint8_t *plain, size_t n,
     row.has_snapshot_root = true;
     memset(row.snapshot_root, 0x45, 32);
     row.recipient_value_zat = target;
-    row.max_fee_zat = VP_FEE;
-    row.reserved_zat = target + VP_FEE;
+    row.max_fee_zat = VR_FEE;
+    row.reserved_zat = target + VR_FEE;
     snprintf(row.application_kind, sizeof(row.application_kind), "vault_multi");
     snprintf(row.idempotency_key, sizeof(row.idempotency_key), "%s", key);
     vr_req_digest(plain, n, row.request_digest);
