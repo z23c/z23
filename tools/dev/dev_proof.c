@@ -2676,7 +2676,7 @@ static bool dp_fresh_names_unreserved(const struct dp_split_funcs *f)
 static int dp_fresh_catalog_row(const struct dp_split_ctx *c, const char *rev,
                                 const char *row)
 {
-    const char *argv[] = {"git", "grep", "-q", "-a", "-F", "-x", "-e", row,
+    const char *argv[] = {"git", "grep", "-q", "-a", "-E", "-e", row,
                           rev, "--", DP_FRESH_REGISTRY_PATH, NULL};
     return dp_split_git(c->root, argv, NULL, 0);
 }
@@ -2694,7 +2694,7 @@ static bool dp_fresh_test_entry(const struct dp_split_ctx *c, const char *name,
     stem[n - dir - 2] = '\0';
     if (!dp_split_name_safe(stem) || strpbrk(stem, "./-") ||
         strncmp(name, "test_", 5) != 0 || strcmp(name + 5, stem) != 0 ||
-        snprintf(row, sizeof(row), "ZCL_TEST_GROUP(%s)", stem) >=
+        snprintf(row, sizeof(row), "^ZCL_TEST_GROUP\\(%s\\)$", stem) >=
             (int)sizeof(row))
         return false;
     return dp_fresh_catalog_row(c, c->local, row) == 0 &&
