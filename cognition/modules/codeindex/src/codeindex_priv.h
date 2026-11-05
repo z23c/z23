@@ -65,6 +65,14 @@
 typedef struct sqlite3 sqlite3;
 typedef struct sqlite3_stmt sqlite3_stmt;
 struct ci_store;
+struct ci_page;
+bool ci_pages_validate_hints(const void *manifest, size_t size,
+                             const struct ci_page *pages, size_t count);
+bool ci_pages_stage_insert(struct ci_store *store, const struct ci_page *pages,
+                           size_t count, const uint8_t artifact_root[32]);
+bool ci_pages_copy(struct ci_store *from, struct ci_store *to);
+bool ci_pages_set_state(struct ci_store *store, int state);
+bool ci_pages_note_import(struct ci_store *store);
 struct ci_merkle;
 struct ci_merkle_leaf;
 struct codeindex {

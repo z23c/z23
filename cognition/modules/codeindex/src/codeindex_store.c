@@ -647,7 +647,7 @@ bool ci_store_clear(struct ci_store *s)
     if (sqlite3_exec(s->db,
         "DELETE FROM files; DELETE FROM symbols; DELETE FROM includes;"
         " DELETE FROM refs; DELETE FROM groups; DELETE FROM scan_shards;"
-        " DELETE FROM docs;"
+        " DELETE FROM docs; DELETE FROM pages; UPDATE pages_state SET state=0 WHERE id=1;"
         " DELETE FROM meta;",
         NULL, NULL, &err) != SQLITE_OK) {
         if (err) sqlite3_free(err);

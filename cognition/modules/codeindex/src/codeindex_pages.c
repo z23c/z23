@@ -3,10 +3,15 @@
 #include "codeindex/codeindex_pages.h"
 #include "codeindex_priv.h"
 #include "base/safe_alloc.h"
+#include "vcs/vcs_object.h"
+#include "json/json.h"
 #include <sqlite3.h>
 #include <stdlib.h>
 #include <string.h>
 
+enum { CI_PAGE_MANIFEST_MAX = 1024 * 1024, CI_PAGE_BATCH_MAX = 256 };
+
+#if defined(_WIN32)
 bool codeindex_pages_import_hints(struct codeindex *ci, const void *manifest,
     size_t manifest_size, const struct ci_page *pages, size_t count,
     uint8_t artifact_root[32])
@@ -14,6 +19,119 @@ bool codeindex_pages_import_hints(struct codeindex *ci, const void *manifest,
     (void)ci; (void)manifest; (void)manifest_size; (void)pages; (void)count;
     (void)artifact_root;
     return false;
+}
+#endif
+
+static bool page_manifest_line(const uint8_t *manifest, size_t size, const char *body)
+{
+    size_t body_len = strlen(body);
+    for (size_t start = 0; start < size;) {
+        const uint8_t *end = memchr(manifest + start, '\n', size - start);
+        size_t len = end ? (size_t)(end - (manifest + start)) : size - start;
+        if (len == body_len && !memcmp(manifest + start, body, len)) return true;
+        start += len + (end != NULL);
+    }
+    return false;
+}
+
+static bool page_hex(const char *s, size_t cap)
+{
+    size_t n = strnlen(s, cap);
+    if (n != 40 && n != 64) return false;
+    for (size_t i = 0; i < n; i++)
+        if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f')))
+            return false;
+    return true;
+}
+
+static bool page_hint_valid(const uint8_t *manifest, size_t size, const struct ci_page *page)
+{
+    size_t body_len = strnlen(page->body, sizeof(page->body));
+    size_t dir_len = strnlen(page->directory, sizeof(page->directory));
+    if (!dir_len || dir_len >= sizeof(page->directory) || !body_len || body_len >= sizeof(page->body) ||
+        !page_hex(page->tree_oid, sizeof(page->tree_oid)) ||
+        !page_hex(page->source_commit, sizeof(page->source_commit)) ||
+        !page_manifest_line(manifest, size, page->body) || !json_valid(page->body, body_len))
+        return false;
+    struct json_value value;
+    json_init(&value);
+    bool ok = json_read(&value, page->body, body_len) && value.type == JSON_OBJ;
+    const char *dir = ok ? json_get_str(json_get(&value, "dir")) : NULL;
+    const char *tree = ok ? json_get_str(json_get(&value, "tree")) : NULL;
+    ok = dir && tree && !strcmp(dir, page->directory) && !strcmp(tree, page->tree_oid);
+    json_free(&value);
+    return ok;
+}
+
+bool ci_pages_validate_hints(const void *manifest, size_t size,
+                             const struct ci_page *pages, size_t count)
+{
+    if (!manifest || !size || size > CI_PAGE_MANIFEST_MAX || !pages || !count || count > CI_PAGE_BATCH_MAX ||
+        memchr(manifest, 0, size)) return false;
+    for (size_t i = 0; i < count; i++) {
+        if (!page_hint_valid(manifest, size, &pages[i])) return false;
+        for (size_t j = 0; j < i; j++)
+            if (!strcmp(pages[i].directory, pages[j].directory) &&
+                !strcmp(pages[i].tree_oid, pages[j].tree_oid)) return false;
+    }
+    return true;
+}
+
+static bool page_insert_one(sqlite3_stmt *s, const struct ci_page *p, const uint8_t root[32])
+{
+    bool ok = sqlite3_bind_text(s, 1, p->directory, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_text(s, 2, p->tree_oid, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_text(s, 3, p->source_commit, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_text(s, 4, p->body, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_blob(s, 5, root, 32, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_step(s) == SQLITE_DONE; // raw-sql-ok:codeindex-derived
+    return sqlite3_reset(s) == SQLITE_OK && sqlite3_clear_bindings(s) == SQLITE_OK && ok;
+}
+
+bool ci_pages_stage_insert(struct ci_store *store, const struct ci_page *pages,
+                           size_t count, const uint8_t artifact_root[32])
+{
+    sqlite3_stmt *s = NULL;
+    sqlite3 *db = ci_store_db(store);
+    if (!db || sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO pages(directory,tree_oid,source_commit,body,artifact_root) "
+        "VALUES(?1,?2,?3,?4,?5)", -1, &s, NULL) != SQLITE_OK) return false;
+    bool ok = true;
+    for (size_t i = 0; ok && i < count; i++) ok = page_insert_one(s, &pages[i], artifact_root);
+    if (sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+bool ci_pages_set_state(struct ci_store *store, int state)
+{
+    sqlite3_stmt *s = NULL;
+    sqlite3 *db = ci_store_db(store);
+    if (!db || state < 0 || state > 2 ||
+        sqlite3_prepare_v2(db, "UPDATE pages_state SET state=?1 WHERE id=1", -1, &s, NULL) != SQLITE_OK)
+        return false;
+    bool ok = sqlite3_bind_int(s, 1, state) == SQLITE_OK &&
+              sqlite3_step(s) == SQLITE_DONE && sqlite3_changes(db) == 1; // raw-sql-ok:codeindex-derived
+    if (sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static int page_state(sqlite3 *db)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT state FROM pages_state WHERE id=1", -1, &s, NULL) != SQLITE_OK)
+        return -1;
+    int state = -1;
+    if (sqlite3_step(s) == SQLITE_ROW && sqlite3_column_type(s, 0) == SQLITE_INTEGER) { // raw-sql-ok:codeindex-derived
+        int value = sqlite3_column_int(s, 0);
+        if (value >= 0 && value <= 2 && sqlite3_step(s) == SQLITE_DONE) state = value; // raw-sql-ok:codeindex-derived
+    }
+    if (sqlite3_finalize(s) != SQLITE_OK) state = -1;
+    return state;
+}
+
+bool ci_pages_note_import(struct ci_store *store)
+{
+    int state = page_state(ci_store_db(store));
+    return state >= 0 && ci_pages_set_state(store, state == 2 ? 2 : 1);
 }
 
 static bool page_text(sqlite3_stmt *s, int col, char *out, size_t cap)
@@ -41,16 +159,76 @@ static bool page_row(sqlite3_stmt *s, struct ci_page *row)
     return true;
 }
 
-int codeindex_pages_list(struct codeindex *ci, const char *directory,
-                         struct ci_page *out, int cap)
+static bool page_artifact_ok(const char *root, const struct ci_page *row)
 {
-    if (!ci || !ci->store || !directory || !directory[0] || !out || cap < 1 || cap > 256)
-        return -1;
+    uint8_t *data = NULL, digest[32];
+    size_t size = 0;
+    if (vcs_object_load_raw_bounded(root, row->artifact_root, CI_PAGE_MANIFEST_MAX,
+                                    &data, &size) != 0) return false;
+    struct sha3_256_ctx hash;
+    uint8_t tag = VCS_TAG_BLOB;
+    sha3_256_init(&hash);
+    sha3_256_write(&hash, &tag, 1);
+    sha3_256_write(&hash, data, size);
+    sha3_256_finalize(&hash, digest);
+    bool ok = !memcmp(digest, row->artifact_root, sizeof(digest)) &&
+              page_manifest_line(data, size, row->body);
+    free(data);
+    return ok;
+}
+
+bool ci_pages_copy(struct ci_store *from, struct ci_store *to)
+{
+    if (!from || !to) return false;
+    ci_store_lock(from);
     bool valid = false;
-    if (!ci_store_retrieval_projection_is_valid(ci->store, &valid) || !valid) return -1;
+    bool ok = ci_store_retrieval_projection_is_valid(from, &valid) && valid;
+    int state = ok ? page_state(ci_store_db(from)) : -1;
+    if (state < 0) ok = false;
+    sqlite3_stmt *read = NULL, *write = NULL;
+    if (ok) ok = sqlite3_prepare_v2(ci_store_db(from),
+        "SELECT directory,tree_oid,source_commit,body,artifact_root FROM pages "
+        "ORDER BY directory,tree_oid,source_commit,artifact_root", -1, &read, NULL) == SQLITE_OK &&
+        sqlite3_prepare_v2(ci_store_db(to),
+        "INSERT INTO pages(directory,tree_oid,source_commit,body,artifact_root) VALUES(?1,?2,?3,?4,?5)",
+        -1, &write, NULL) == SQLITE_OK;
+    int rc = SQLITE_ERROR;
+    size_t count = 0;
+    struct ci_page row;
+    while (ok && (rc = sqlite3_step(read)) == SQLITE_ROW) { // raw-sql-ok:codeindex-derived
+        if (++count > 65536 || !page_row(read, &row) ||
+            !page_insert_one(write, &row, row.artifact_root)) ok = false;
+    }
+    if (ok && rc != SQLITE_DONE) ok = false;
+    if (read && sqlite3_finalize(read) != SQLITE_OK) ok = false;
+    if (write && sqlite3_finalize(write) != SQLITE_OK) ok = false;
+    if (ok) ok = ci_pages_set_state(to, state);
+    ci_store_unlock(from);
+    return ok;
+}
+
+int codeindex_pages_list(struct codeindex *ci, const char *directory,
+                         struct ci_page *out, int cap, bool *prior_untrusted)
+{
+    if (prior_untrusted) *prior_untrusted = false;
+    if (!ci || !ci->store || !directory || !directory[0] || !out || !prior_untrusted || cap < 1 || cap > 256)
+        return -1;
     struct ci_page *rows = zcl_calloc((size_t)cap, sizeof(*rows), "codeindex page results");
     if (!rows) return -1;
     ci_store_lock(ci->store);
+    bool valid = false;
+    if (!ci_store_retrieval_projection_is_valid(ci->store, &valid) || !valid) {
+        ci_store_unlock(ci->store);
+        free(rows);
+        return -1;
+    }
+    int state = page_state(ci_store_db(ci->store));
+    if (state < 0) {
+        ci_store_unlock(ci->store);
+        free(rows);
+        return -1;
+    }
+    *prior_untrusted = state == 2;
     sqlite3_stmt *s = NULL;
     sqlite3 *db = ci_store_db(ci->store);
     bool ok = sqlite3_prepare_v2(db, "SELECT directory,tree_oid,source_commit,body,artifact_root "
@@ -65,7 +243,11 @@ int codeindex_pages_list(struct codeindex *ci, const char *directory,
     if (ok && rc != SQLITE_DONE) ok = false;
     if (s && sqlite3_finalize(s) != SQLITE_OK) ok = false;
     ci_store_unlock(ci->store);
+    bool artifact_missing = false;
+    for (int i = 0; ok && i < count; i++) {
+        if (!page_artifact_ok(ci->root, &rows[i])) { ok = false; artifact_missing = true; }
+    }
     if (ok) memcpy(out, rows, (size_t)count * sizeof(*out));
     free(rows);
-    return ok ? count : -1;
+    return ok ? count : artifact_missing ? -2 : -1;
 }

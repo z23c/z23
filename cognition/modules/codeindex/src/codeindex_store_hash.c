@@ -270,6 +270,9 @@ static bool projection_root_locked(struct ci_store *store, uint8_t out[32])
         {CI_PROJECTION_TEXT, 65}, {CI_PROJECTION_TEXT, 8193},
         {CI_PROJECTION_BLOB32, 0},
     };
+    static const struct ci_projection_column page_state_columns[] = {
+        {CI_PROJECTION_I32, 0}, {CI_PROJECTION_I32, 0},
+    };
     static const struct ci_projection_table tables[] = {
         {0x10,
          "SELECT path,kind,parent,purpose FROM groups ORDER BY "
@@ -292,6 +295,8 @@ static bool projection_root_locked(struct ci_store *store, uint8_t out[32])
          "source_commit COLLATE BINARY,artifact_root",
          page_columns, sizeof(page_columns) / sizeof(page_columns[0]),
          UINT64_C(65536)},
+        {0x41, "SELECT id,state FROM pages_state ORDER BY id",
+         page_state_columns, sizeof(page_state_columns) / sizeof(page_state_columns[0]), UINT64_C(1)},
     };
 
     struct ci_projection_hash hash = {0};

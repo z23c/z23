@@ -16,9 +16,11 @@ struct ci_page {
     uint8_t artifact_root[32];
 };
 
-/* -1 for unavailable or corrupt storage, otherwise number returned. */
+/* -2 if an artifact is untrusted/unavailable, -1 for a read error, otherwise
+ * number returned. prior_untrusted explicitly reports an untrusted prior
+ * generation even when a later import supplied some independently bound hints. */
 int codeindex_pages_list(struct codeindex *ci, const char *directory,
-                         struct ci_page *out, int cap);
+                         struct ci_page *out, int cap, bool *prior_untrusted);
 /* Store bounded unsigned hints from exact manifest lines as one sealed
  * generation. This does not verify a commit or establish freshness. */
 bool codeindex_pages_import_hints(struct codeindex *ci, const void *manifest,

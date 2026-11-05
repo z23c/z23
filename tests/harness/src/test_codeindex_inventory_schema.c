@@ -204,8 +204,10 @@ static int cis_rebuild_checks(bool ready, const char *root)
         "'0000000000000000000000000000000000000000','poison',zeroblob(32))");
     struct codeindex *page_healed = page_poisoned ? codeindex_open_retrieval_view(root) : NULL;
     struct ci_page page;
-    CIS_CHECK("unsealed page insertion is rejected and rebuilt",
-              page_healed && codeindex_pages_list(page_healed, "lib/net", &page, 1) == 0);
+    bool prior_untrusted = false;
+    CIS_CHECK("unsealed page insertion is rejected and its availability is unknown",
+              page_healed && codeindex_pages_list(page_healed, "lib/net", &page, 1, &prior_untrusted) == 0 &&
+              prior_untrusted);
     codeindex_close(page_healed);
     return failures;
 }
@@ -227,8 +229,9 @@ static int cis_index_checks(struct codeindex *ix, const char *root)
     CIS_CHECK("an edited doc is flagged stale, not misread",
               cis_stale_flag(ix, root));
     struct ci_page page;
+    bool prior_untrusted = true;
     CIS_CHECK("fresh index reports no imported page instead of a store error",
-              codeindex_pages_list(ix, "lib/net", &page, 1) == 0);
+              codeindex_pages_list(ix, "lib/net", &page, 1, &prior_untrusted) == 0 && !prior_untrusted);
     return failures;
 }
 
@@ -320,11 +323,12 @@ static bool cis_page_roundtrip(const char *root)
     snprintf(in.body, sizeof(in.body), "%s", body);
     struct codeindex *ci = codeindex_open_retrieval_view(root);
     uint8_t artifact[32] = {0};
+    bool prior_untrusted = false;
     bool ok = ci && codeindex_pages_import_hints(ci, body, strlen(body), &in, 1, artifact) &&
-              codeindex_pages_list(ci, "lib/net", &out, 1) == 1 &&
+              codeindex_pages_list(ci, "lib/net", &out, 1, &prior_untrusted) == 1 &&
               strcmp(out.body, body) == 0 && memcmp(out.artifact_root, artifact, 32) == 0 &&
               codeindex_rebuild(ci) &&
-              codeindex_pages_list(ci, "lib/net", &out, 1) == 1 &&
+              codeindex_pages_list(ci, "lib/net", &out, 1, &prior_untrusted) == 1 &&
               strcmp(out.body, body) == 0 && memcmp(out.artifact_root, artifact, 32) == 0;
     codeindex_close(ci);
     return ok;

@@ -12,6 +12,8 @@
 #include "codeindex_priv.h"
 #include "codeindex/codeindex_build.h"
 #include "codeindex/codeindex_merkle.h"
+#include "codeindex/codeindex_pages.h"
+#include "vcs/vcs_object.h"
 
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
@@ -955,6 +957,25 @@ static bool ci_rebuild_reserve_stage(struct ci_rebuild_job *job, int dirfd)
     return true;
 }
 
+static bool ci_rebuild_carry_pages(struct ci_rebuild_job *job)
+{
+    if (!job->ci->store) return true;
+    bool valid = false;
+    if (!ci_store_retrieval_projection_is_valid(job->ci->store, &valid)) valid = false;
+    if (!ci_store_begin(job->st)) return false;
+    bool copied = valid && ci_pages_copy(job->ci->store, job->st);
+    if (!copied) {
+        if (!ci_store_rollback(job->st) || !ci_store_begin(job->st) ||
+            !ci_pages_set_state(job->st, 2)) return false;
+    }
+    uint8_t root[32];
+    bool ok = ci_store_retrieval_projection_root(job->st, root) &&
+              ci_store_meta_set(job->st, CI_RETRIEVAL_PROJECTION_META, root, sizeof(root)) &&
+              ci_store_commit(job->st);
+    if (!ok) (void)ci_store_rollback(job->st);
+    return ok;
+}
+
 static bool ci_rebuild_fill_stage(struct ci_rebuild_job *job)
 {
     if (job->incremental) {
@@ -991,6 +1012,10 @@ static bool ci_rebuild_fill_stage(struct ci_rebuild_job *job)
                                    job->built_source_stat_root,
                                    job->built_dep_stat_root)) {
             job->failure = "source scan or staging write failed";
+            return false;
+        }
+        if (!ci_rebuild_carry_pages(job)) {
+            job->failure = "page hint carry-forward failed";
             return false;
         }
         if (!ci_store_meta_set(job->st, "source_merkle_root_sha3",
@@ -1140,6 +1165,60 @@ static void ci_rebuild_release(struct ci_rebuild_job *job, int dirfd, int lockfd
         (void)unlinkat(dirfd, job->stage_name, 0);
     }
     ci_rebuild_lock_close(dirfd, lockfd);
+}
+
+static bool ci_pages_import_stage(struct ci_rebuild_job *job, int dirfd,
+                                  struct ci_store *fresh, const struct ci_page *pages,
+                                  size_t count, const uint8_t artifact[32])
+{
+    ci_spare_discard(dirfd);
+    if (!ci_create_unique_stage(dirfd, job->stage_name, &job->stage_identity, &job->stagefd) ||
+        !ci_store_copy_image_fd(fresh, job->stagefd)) return false;
+    job->st = ci_store_open_rw_fd(job->stagefd);
+    if (!job->st || !ci_store_begin(job->st)) return false;
+    uint8_t root[32];
+    bool ok = ci_pages_stage_insert(job->st, pages, count, artifact) &&
+              ci_pages_note_import(job->st) &&
+              ci_store_retrieval_projection_root(job->st, root) &&
+              ci_store_meta_set(job->st, CI_RETRIEVAL_PROJECTION_META, root, sizeof(root)) &&
+              ci_store_commit(job->st);
+    if (!ok) (void)ci_store_rollback(job->st);
+    ci_store_close(job->st);
+    job->st = NULL;
+    return ok;
+}
+
+bool codeindex_pages_import_hints(struct codeindex *ci, const void *manifest,
+    size_t manifest_size, const struct ci_page *pages, size_t count,
+    uint8_t artifact_root[32])
+{
+    if (artifact_root) memset(artifact_root, 0, 32);
+    if (!ci || !artifact_root || !ci_pages_validate_hints(manifest, manifest_size, pages, count))
+        return false;
+    uint8_t artifact[32];
+    if (!vcs_object_store_init(ci->root) ||
+        !vcs_object_put(ci->root, manifest, manifest_size, VCS_TAG_BLOB, artifact)) return false;
+    char dir[CI_PATH_MAX];
+    int dirfd = -1, lockfd = -1;
+    if (!ci_rebuild_lock_open(ci->root, dir, &dirfd, &lockfd)) return false;
+    struct ci_rebuild_job job = {.ci = ci, .stagefd = -1,
+        .build_start_ms = platform_time_monotonic_ms(), .failure = "page hint import failed"};
+    struct ci_store *fresh = ci_store_open(ci->root);
+    struct codeindex view = {.store = fresh};
+    (void)snprintf(view.root, sizeof(view.root), "%s", ci->root);
+    bool valid = false, stale = true;
+    bool ok = fresh && ci_store_retrieval_projection_is_valid(fresh, &valid) && valid &&
+        ci_codeindex_source_view_is_stale(&view, &stale) && !stale;
+    ci_merkle_free(view.pending_merkle);
+    if (ok) ok = ci_rebuild_refresh_inventory(&job);
+    if (ok) memcpy(job.built_dep_stat_root, job.current_dep_stat, 32);
+    if (ok) ok = ci_pages_import_stage(&job, dirfd, fresh, pages, count, artifact);
+    if (fresh) ci_store_close(fresh);
+    if (ok) ok = ci_rebuild_recheck_fresh(&job) && ci_rebuild_publish(&job, dirfd) &&
+                 ci_rebuild_reopen(&job, dirfd);
+    ci_rebuild_release(&job, dirfd, lockfd);
+    if (ok) memcpy(artifact_root, artifact, sizeof(artifact));
+    return ok;
 }
 
 static bool codeindex_rebuild_internal(struct codeindex *ci,
