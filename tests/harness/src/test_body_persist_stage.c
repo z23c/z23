@@ -12,6 +12,8 @@
 #include "primitives/block.h"
 #include "primitives/transaction.h"
 #include "jobs/body_persist_stage.h"
+#include "storage/event_log.h"
+#include "storage/event_log_singleton.h"
 #include "storage/progress_store.h"
 #include "util/blocker.h"
 #include "util/reducer_stage_profile.h"
@@ -286,6 +288,458 @@ static void bp_teardown(const char *dir, struct main_state *ms,
     test_cleanup_tmpdir(dir);
 }
 
+/* ---- Mutation-sweep gap closers (dump, reset, hold, fatal, drain, init) ---- */
+
+static bool bp_dump_text(char *buf, size_t size)
+{
+    struct json_value v;
+    json_init(&v);
+    bool ok = body_persist_dump_state_json(&v, NULL);
+    size_t n = ok ? json_write(&v, buf, size) : 0;
+    json_free(&v);
+    return ok && n > 0 && n < size;
+}
+
+static bool bp_dump_has(const char *needle)
+{
+    char buf[4096];
+    return bp_dump_text(buf, sizeof(buf)) && strstr(buf, needle) != NULL;
+}
+
+static bool bp_unfetchable_reason(char *out, size_t size)
+{
+    struct blocker_snapshot snap;
+    memset(&snap, 0, sizeof(snap));
+    if (!blocker_find_by_id_prefix("body_persist.body_unfetchable", &snap))
+        return false;
+    snprintf(out, size, "%s", snap.reason);
+    return true;
+}
+
+static void bp_restore_have_data(struct synth_chain_bp *sc, int h)
+{
+    sc->blocks[h].nStatus |= BLOCK_HAVE_DATA;
+}
+
+/* Counters, the status-event emits, nTx and the last_* gauges across a run
+ * that exercises every verdict; then the shutdown reset of all of them. */
+static int bp_mut_counters_run(struct synth_chain_bp *sc)
+{
+    int failures = 0;
+    sc->fail_read_height = 3;
+    BP_CHECK("counters: read failure holds after 3 advances",
+             body_persist_stage_drain(100) == 3);
+    BP_CHECK("counters: read_failed_total == 1",
+             body_persist_stage_read_failed_total() == 1);
+    BP_CHECK("counters: requeue stamps last_blocked_unix",
+             !bp_dump_has("\"last_blocked_unix\":0"));
+    sc->fail_read_height = -1;
+    sc->header_mismatch_height = 3;
+    bp_restore_have_data(sc, 3);
+    BP_CHECK("counters: header mismatch holds", body_persist_stage_drain(100) == 0);
+    sc->header_mismatch_height = -1;
+    sc->merkle_mismatch_height = 3;
+    bp_restore_have_data(sc, 3);
+    BP_CHECK("counters: merkle mismatch holds", body_persist_stage_drain(100) == 0);
+    sc->merkle_mismatch_height = -1;
+    bp_restore_have_data(sc, 3);
+    BP_CHECK("counters: heals 3..7", body_persist_stage_drain(100) == 5);
+    return failures;
+}
+
+static int bp_mut_counters_check(struct synth_chain_bp *sc)
+{
+    int failures = 0;
+    BP_CHECK("counters: verified 7", body_persist_stage_verified_total() == 7);
+    BP_CHECK("counters: upstream_failed 1",
+             body_persist_stage_upstream_failed_total() == 1);
+    BP_CHECK("counters: read_failed 1",
+             body_persist_stage_read_failed_total() == 1);
+    BP_CHECK("counters: header_mismatch 1",
+             body_persist_stage_header_mismatch_total() == 1);
+    BP_CHECK("counters: merkle_mismatch 1",
+             body_persist_stage_merkle_mismatch_total() == 1);
+    BP_CHECK("counters: cursor 8", body_persist_stage_cursor() == 8);
+    BP_CHECK("counters: step ewma is measured",
+             body_persist_stage_step_us_ewma() > 0);
+    BP_CHECK("counters: preset nTx is kept", sc->blocks[2].nTx == 7);
+    BP_CHECK("counters: zero nTx takes num_vtx",
+             sc->blocks[0].nTx == 1 && sc->blocks[4].nTx == 1);
+    BP_CHECK("counters: upstream-failed height keeps nTx 0",
+             sc->blocks[7].nTx == 0);
+    BP_CHECK("dump: verified_total", bp_dump_has("\"verified_total\":7"));
+    BP_CHECK("dump: upstream_failed_total",
+             bp_dump_has("\"upstream_failed_total\":1"));
+    BP_CHECK("dump: read_failed_total", bp_dump_has("\"read_failed_total\":1"));
+    BP_CHECK("dump: header_mismatch_total",
+             bp_dump_has("\"header_mismatch_total\":1"));
+    BP_CHECK("dump: merkle_mismatch_total",
+             bp_dump_has("\"merkle_mismatch_total\":1"));
+    BP_CHECK("dump: header_event_emit_total counts 7 verified + 3 requeues",
+             bp_dump_has("\"header_event_emit_total\":10"));
+    BP_CHECK("dump: header_event_emit_fail_total",
+             bp_dump_has("\"header_event_emit_fail_total\":0"));
+    BP_CHECK("dump: last_advance_height is the upstream-failed height",
+             bp_dump_has("\"last_advance_height\":7"));
+    BP_CHECK("dump: last_step_unix stamped",
+             !bp_dump_has("\"last_step_unix\":0"));
+    BP_CHECK("dump: last_step_age computed",
+             !bp_dump_has("\"last_step_age_seconds\":-1"));
+    BP_CHECK("dump: last_blocked_unix stamped",
+             !bp_dump_has("\"last_blocked_unix\":0"));
+    BP_CHECK("dump: no blocked or error results",
+             bp_dump_has("\"blocked_count\":0") &&
+             bp_dump_has("\"error_count\":0"));
+    return failures;
+}
+
+static int bp_mut_shutdown_reset(void)
+{
+    int failures = 0;
+    body_persist_stage_shutdown();
+    BP_CHECK("shutdown: verified reset", body_persist_stage_verified_total() == 0);
+    BP_CHECK("shutdown: upstream reset",
+             body_persist_stage_upstream_failed_total() == 0);
+    BP_CHECK("shutdown: read reset", body_persist_stage_read_failed_total() == 0);
+    BP_CHECK("shutdown: header reset",
+             body_persist_stage_header_mismatch_total() == 0);
+    BP_CHECK("shutdown: merkle reset",
+             body_persist_stage_merkle_mismatch_total() == 0);
+    BP_CHECK("shutdown: no stage -> cursor 0", body_persist_stage_cursor() == 0);
+    BP_CHECK("shutdown: no stage -> ewma 0",
+             body_persist_stage_step_us_ewma() == 0);
+    BP_CHECK("shutdown dump: emit total reset",
+             bp_dump_has("\"header_event_emit_total\":0"));
+    BP_CHECK("shutdown dump: emit fail reset",
+             bp_dump_has("\"header_event_emit_fail_total\":0"));
+    BP_CHECK("shutdown dump: last_advance_height back to -1",
+             bp_dump_has("\"last_advance_height\":-1"));
+    BP_CHECK("shutdown dump: last_step_unix reset",
+             bp_dump_has("\"last_step_unix\":0"));
+    BP_CHECK("shutdown dump: last_step_age is -1 when never stepped",
+             bp_dump_has("\"last_step_age_seconds\":-1"));
+    BP_CHECK("shutdown dump: last_blocked_unix reset",
+             bp_dump_has("\"last_blocked_unix\":0"));
+    BP_CHECK("shutdown dump: uninitialised", bp_dump_has("\"initialised\":false"));
+    return failures;
+}
+
+static int bp_mut_counters(void)
+{
+    int failures = 0;
+    char dir[256] = {0}, logp[320] = {0};
+    struct main_state ms; struct synth_chain_bp sc;
+    memset(&sc, 0, sizeof(sc));
+    event_log_t *log = NULL;
+    int rc = bp_setup("mut_ctr", 8, 7, -1, dir, sizeof(dir), &ms, &sc);
+    BP_CHECK("counters: setup", rc == 0);
+    if (rc == 0) {
+        snprintf(logp, sizeof(logp), "%s/mut_ev.log", dir);
+        log = event_log_open(logp);
+        BP_CHECK("counters: event log opens", log != NULL);
+    }
+    if (rc != 0 || !log) {
+        bp_teardown(dir, &ms, &sc);
+        return failures + 1;
+    }
+    event_log_set_singleton(log);
+    sc.blocks[2].nTx = 7;
+    failures += bp_mut_counters_run(&sc);
+    failures += bp_mut_counters_check(&sc);
+    failures += bp_mut_shutdown_reset();
+    event_log_set_singleton(NULL);
+    event_log_close(log);
+    bp_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+/* Frontier gate (== is idle), drain bounds, and the idle-gate stamp. */
+static int bp_mut_drain_gate(void)
+{
+    int failures = 0;
+    char dir[256] = {0}; struct main_state ms; struct synth_chain_bp sc;
+    memset(&sc, 0, sizeof(sc));
+    int rc = bp_setup("mut_gate", 6, -1, -1, dir, sizeof(dir), &ms, &sc);
+    BP_CHECK("gate: setup", rc == 0);
+    if (rc != 0) { bp_teardown(dir, &ms, &sc); return failures; }
+    BP_CHECK("gate: drain(0) is 0", body_persist_stage_drain(0) == 0);
+    BP_CHECK("gate: drain(-1) is 0", body_persist_stage_drain(-1) == 0);
+    BP_CHECK("gate: drain(1) advances exactly 1",
+             body_persist_stage_drain(1) == 1);
+    BP_CHECK("gate: drain(2) advances exactly 2",
+             body_persist_stage_drain(2) == 2);
+    BP_CHECK("gate: cursor 3", body_persist_stage_cursor() == 3);
+    BP_CHECK("gate: lower the upstream frontier to 4",
+             exec_sql(progress_store_db(),
+                      "UPDATE stage_cursor SET cursor = 4 "
+                      "WHERE name = 'body_fetch'"));
+    BP_CHECK("gate: drain stops at the frontier",
+             body_persist_stage_drain(100) == 1);
+    BP_CHECK("gate: cursor at frontier 4", body_persist_stage_cursor() == 4);
+    BP_CHECK("gate: nothing past the frontier is persisted",
+             log_row_count(progress_store_db()) == 4);
+    BP_CHECK("gate: idle at the frontier",
+             body_persist_stage_step_once() == JOB_IDLE);
+    BP_CHECK("gate: frontier idle stamps last_blocked_unix",
+             !bp_dump_has("\"last_blocked_unix\":0"));
+    bp_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+static int bp_mut_idle_stamp(void)
+{
+    int failures = 0;
+    char dir[256] = {0}; struct main_state ms; struct synth_chain_bp sc;
+    memset(&sc, 0, sizeof(sc));
+    int rc = bp_setup("mut_idle", 5, -1, -1, dir, sizeof(dir), &ms, &sc);
+    BP_CHECK("idle stamp: setup", rc == 0);
+    if (rc != 0) { bp_teardown(dir, &ms, &sc); return failures; }
+    sc.blocks[3].nStatus &= ~BLOCK_HAVE_DATA;
+    BP_CHECK("idle stamp: drains 3", body_persist_stage_drain(100) == 3);
+    BP_CHECK("idle stamp: HAVE_DATA gate stamps last_blocked_unix",
+             !bp_dump_has("\"last_blocked_unix\":0"));
+    BP_CHECK("idle stamp: gate idle is counted idle, not blocked",
+             bp_dump_has("\"blocked_count\":0"));
+    bp_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+/* A failed write must surface as FATAL and hold the cursor. */
+static int bp_mut_fatal_one(const char *tag, int upstream_fail,
+                            const char *sql, unsigned want_ntx)
+{
+    int failures = 0;
+    char dir[256] = {0}; struct main_state ms; struct synth_chain_bp sc;
+    memset(&sc, 0, sizeof(sc));
+    int rc = bp_setup(tag, 3, upstream_fail, -1, dir, sizeof(dir), &ms, &sc);
+    BP_CHECK(tag, rc == 0);
+    if (rc != 0) { bp_teardown(dir, &ms, &sc); return failures; }
+    BP_CHECK("fatal: break the table", exec_sql(progress_store_db(), sql));
+    job_result_t r = body_persist_stage_step_once();
+    BP_CHECK("fatal: step reports FATAL", r == JOB_FATAL);
+    BP_CHECK("fatal: cursor does not move", body_persist_stage_cursor() == 0);
+    BP_CHECK("fatal: nTx as the failing phase leaves it",
+             sc.blocks[0].nTx == want_ntx);
+    BP_CHECK("fatal: no verified counter bump",
+             body_persist_stage_verified_total() == 0);
+    BP_CHECK("fatal: no upstream_failed counter bump",
+             body_persist_stage_upstream_failed_total() == 0);
+    bp_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+static int bp_mut_fatal(void)
+{
+    int failures = 0;
+    failures += bp_mut_fatal_one("fatal: verified-row insert fails", -1,
+        "ALTER TABLE body_persist_log RENAME TO bpl_gone", 1);
+    failures += bp_mut_fatal_one("fatal: upstream_failed-row insert fails", 0,
+        "ALTER TABLE body_persist_log RENAME TO bpl_gone", 0);
+    failures += bp_mut_fatal_one("fatal: created_outputs write fails", -1,
+        "ALTER TABLE created_outputs RENAME TO co_gone", 0);
+    failures += bp_mut_fatal_one("fatal: body_fetch_log read fails", -1,
+        "ALTER TABLE body_fetch_log RENAME TO bfl_gone", 0);
+    return failures;
+}
+
+/* With the progress store closed the drain must not open a batch. */
+static int bp_mut_closed_store(void)
+{
+    int failures = 0;
+    char dir[256] = {0}; struct main_state ms; struct synth_chain_bp sc;
+    memset(&sc, 0, sizeof(sc));
+    int rc = bp_setup("mut_closed", 3, -1, -1, dir, sizeof(dir), &ms, &sc);
+    BP_CHECK("closed: setup", rc == 0);
+    if (rc != 0) { bp_teardown(dir, &ms, &sc); return failures; }
+    progress_store_close();
+    BP_CHECK("closed: drain advances nothing", body_persist_stage_drain(10) == 0);
+    BP_CHECK("closed: step idles", body_persist_stage_step_once() == JOB_IDLE);
+    body_persist_stage_shutdown();
+    main_state_free(&ms);
+    synth_chain_bp_free(&sc);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* Unfetchable-body hold: the genesis wording, disarm at height 0, the
+ * above-genesis wording with the tip, and the upstream-failed disarm. */
+static int bp_mut_hold_genesis(void)
+{
+    int failures = 0;
+    char dir[256] = {0}, why[512] = {0};
+    struct main_state ms; struct synth_chain_bp sc;
+    memset(&sc, 0, sizeof(sc));
+    int rc = bp_setup("mut_hold0", 2, -1, -1, dir, sizeof(dir), &ms, &sc);
+    BP_CHECK("hold0: setup", rc == 0);
+    if (rc != 0) { bp_teardown(dir, &ms, &sc); return failures; }
+    body_persist_stage_set_unfetchable_hold_secs_for_testing(0);
+    sc.fail_read_height = 0;
+    BP_CHECK("hold0: read failure at genesis idles",
+             body_persist_stage_step_once() == JOB_IDLE);
+    BP_CHECK("hold0: requeue stamps last_blocked_unix",
+             !bp_dump_has("\"last_blocked_unix\":0"));
+    BP_CHECK("hold0: idle names the hold",
+             body_persist_stage_step_once() == JOB_IDLE &&
+             bp_unfetchable_reason(why, sizeof(why)));
+    BP_CHECK("hold0: genesis wording",
+             strstr(why, "height=0 genesis body absent") != NULL);
+    sc.fail_read_height = -1;
+    bp_restore_have_data(&sc, 0);
+    BP_CHECK("hold0: heals", body_persist_stage_drain(100) == 2);
+    BP_CHECK("hold0: advance at height 0 disarms and clears the blocker",
+             !blocker_exists("body_persist.body_unfetchable"));
+    body_persist_stage_set_unfetchable_hold_secs_for_testing(-1);
+    bp_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+static int bp_mut_hold_above_genesis(void)
+{
+    int failures = 0;
+    char dir[256] = {0}, why[512] = {0};
+    struct main_state ms; struct synth_chain_bp sc;
+    memset(&sc, 0, sizeof(sc));
+    int rc = bp_setup("mut_hold1", 3, -1, -1, dir, sizeof(dir), &ms, &sc);
+    BP_CHECK("hold1: setup", rc == 0);
+    if (rc != 0) { bp_teardown(dir, &ms, &sc); return failures; }
+    body_persist_stage_set_unfetchable_hold_secs_for_testing(0);
+    sc.fail_read_height = 1;
+    BP_CHECK("hold1: holds at 1", body_persist_stage_drain(100) == 1);
+    BP_CHECK("hold1: idle names the hold",
+             body_persist_stage_step_once() == JOB_IDLE &&
+             bp_unfetchable_reason(why, sizeof(why)));
+    BP_CHECK("hold1: above-genesis wording carries height and tip",
+             strstr(why, "height=1 body refetch pending") != NULL &&
+             strstr(why, "tip=2") != NULL &&
+             strstr(why, "genesis") == NULL);
+    BP_CHECK("hold1: upstream verdict flips to failed",
+             exec_sql(progress_store_db(),
+                      "UPDATE body_fetch_log SET ok = 0 WHERE height = 1"));
+    BP_CHECK("hold1: upstream-failed advance passes 1 and 2",
+             body_persist_stage_drain(100) == 2);
+    BP_CHECK("hold1: upstream-failed advance disarms the hold",
+             !blocker_exists("body_persist.body_unfetchable"));
+    body_persist_stage_set_unfetchable_hold_secs_for_testing(-1);
+    bp_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+/* Upstream-log hole: named on a missing row, cleared when it is found, and
+ * cleared by shutdown. */
+static int bp_mut_hole(void)
+{
+    int failures = 0;
+    char dir[256] = {0}; struct main_state ms; struct synth_chain_bp sc;
+    memset(&sc, 0, sizeof(sc));
+    int rc = bp_setup("mut_hole", 5, -1, 2, dir, sizeof(dir), &ms, &sc);
+    BP_CHECK("hole: setup", rc == 0);
+    if (rc != 0) { bp_teardown(dir, &ms, &sc); return failures; }
+    BP_CHECK("hole: drain stops at the hole", body_persist_stage_drain(100) == 2);
+    BP_CHECK("hole: the hole is named",
+             blocker_exists("body_persist.upstream_log_hole"));
+    BP_CHECK("hole: hole stamps last_blocked_unix",
+             !bp_dump_has("\"last_blocked_unix\":0"));
+    BP_CHECK("hole: refill the row",
+             exec_sql(progress_store_db(),
+                      "INSERT INTO body_fetch_log (height, hash, source, "
+                      "bytes, fetched_at, ok, fail_reason) VALUES "
+                      "(2, zeroblob(32), 'disk', 0, 1, 1, NULL)"));
+    BP_CHECK("hole: drain resumes", body_persist_stage_drain(100) == 3);
+    BP_CHECK("hole: found row clears the hole",
+             !blocker_exists("body_persist.upstream_log_hole"));
+    bp_teardown(dir, &ms, &sc);
+
+    memset(&sc, 0, sizeof(sc));
+    rc = bp_setup("mut_hole2", 3, -1, 0, dir, sizeof(dir), &ms, &sc);
+    BP_CHECK("hole2: setup", rc == 0);
+    if (rc != 0) { bp_teardown(dir, &ms, &sc); return failures; }
+    BP_CHECK("hole2: idle on the hole",
+             body_persist_stage_step_once() == JOB_IDLE &&
+             blocker_exists("body_persist.upstream_log_hole"));
+    body_persist_stage_shutdown();
+    BP_CHECK("hole2: shutdown clears the hole",
+             !blocker_exists("body_persist.upstream_log_hole"));
+    bp_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+/* init: idempotent for the same main_state, refuses another, releases its
+ * lock on every refusal, and fails closed when the schema cannot be made. */
+static int bp_mut_init_rebind(void)
+{
+    int failures = 0;
+    char dir[256] = {0}; struct main_state ms; struct synth_chain_bp sc;
+    struct main_state other;
+    memset(&sc, 0, sizeof(sc));
+    main_state_init(&other);
+    int rc = bp_setup("mut_init", 2, -1, -1, dir, sizeof(dir), &ms, &sc);
+    BP_CHECK("init: setup", rc == 0);
+    if (rc == 0) {
+        BP_CHECK("init: same main_state is accepted again",
+                 body_persist_stage_init(&ms));
+        BP_CHECK("init: a different main_state is refused",
+                 !body_persist_stage_init(&other));
+        BP_CHECK("init: the lock was released (same again)",
+                 body_persist_stage_init(&ms));
+        BP_CHECK("init: stage still runs", body_persist_stage_drain(100) == 2);
+    }
+    bp_teardown(dir, &ms, &sc);
+    main_state_free(&other);
+    return failures;
+}
+
+static int bp_mut_init_schema(void)
+{
+    int failures = 0;
+    char dir[256] = {0};
+    struct main_state ms;
+    main_state_init(&ms);
+    bp_fmt_tmpdir(dir, sizeof(dir), "mut_schema");
+    mkdir_p_bp("./test-tmp");
+    mkdir_p_bp(dir);
+    bool opened = progress_store_open(dir);
+    BP_CHECK("schema: store opens", opened);
+    if (opened) {
+        sqlite3 *db = progress_store_db();
+        BP_CHECK("schema: read-only on", exec_sql(db, "PRAGMA query_only = 1"));
+        BP_CHECK("schema: log table cannot be made -> init false",
+                 !body_persist_stage_init(&ms));
+        BP_CHECK("schema: read-only off", exec_sql(db, "PRAGMA query_only = 0"));
+        BP_CHECK("schema: init succeeds once writable (lock was released)",
+                 body_persist_stage_init(&ms));
+        body_persist_stage_shutdown();
+    }
+    main_state_free(&ms);
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static int bp_mut_dump_null(void)
+{
+    int failures = 0;
+    BP_CHECK("dump: NULL out is refused",
+             !body_persist_dump_state_json(NULL, NULL));
+    return failures;
+}
+
+static int bp_mutation_gap_tests(void)
+{
+    int failures = 0;
+    failures += bp_mut_counters();
+    failures += bp_mut_drain_gate();
+    failures += bp_mut_idle_stamp();
+    failures += bp_mut_fatal();
+    failures += bp_mut_closed_store();
+    failures += bp_mut_hold_genesis();
+    failures += bp_mut_hold_above_genesis();
+    failures += bp_mut_hole();
+    failures += bp_mut_init_rebind();
+    failures += bp_mut_init_schema();
+    failures += bp_mut_dump_null();
+    return failures;
+}
+
 int test_body_persist_stage(void);
 int test_body_persist_stage(void)
 {
@@ -518,6 +972,8 @@ int test_body_persist_stage(void)
         json_free(&v);
         bp_teardown(dir, &ms, &sc);
     }
+
+    failures += bp_mutation_gap_tests();
 
     printf("body_persist_stage tests: %s\n",
            failures ? "FAILED" : "PASSED");
