@@ -608,6 +608,30 @@ static int vb_check_unreadable_watch_names(void)
     return failures;
 }
 
+static int vb_check_unreadable_watch_names_no_keys(void)
+{
+    struct vrx_fix f;
+    struct vault_snapshot snap;
+    int failures = 0;
+
+    if (!vrx_open(&f, "vault_bounds_watchnone")) {
+        vrx_close(&f);
+        return 1;
+    }
+    VRX_REQUIRE("watch-only address column renamed",
+                vrx_exec(&f.ndb, "ALTER TABLE wallet_watch_only RENAME "
+                                 "COLUMN address TO addr_x"));
+    VRX_REQUIRE("snapshot builds with no keys and an unreadable table",
+                vault_read_snapshot(&f.ndb, &snap).ok);
+    VRX_CHECK("no keys and an unreadable watch-only table leave names "
+              "undetermined",
+              !snap.rows[VAULT_CLASS_NAME].determined &&
+              strstr(snap.rows[VAULT_CLASS_NAME].reason,
+                     "identity set is incomplete"));
+    vrx_close(&f);
+    return failures;
+}
+
 static int vb_check_sapling_overflow_market(void)
 {
     struct vrx_fix f;
@@ -720,6 +744,7 @@ int vault_read_bounds_tests(void)
     failures += vb_check_token_cap();
     failures += vb_check_identity_overflow();
     failures += vb_check_unreadable_watch_names();
+    failures += vb_check_unreadable_watch_names_no_keys();
     failures += vb_check_sapling_overflow_market();
     failures += vb_check_watch_duplicates_key();
     return failures;
