@@ -33,7 +33,9 @@
 #include "test/test_core.h"
 #include "util/stage.h"
 
+#include <pthread.h>
 #include <sqlite3.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -335,6 +337,466 @@ static int sa_check_coins_cap_caps_dependent_cursors(sqlite3 *db)
     return failures;
 }
 
+
+/* ------------------------------------------------------------------------
+ * Mutation-gap cases: the log-frontier cap itself (so this group runs it, not
+ * only the frontier_cap group), and the refusals of the anchor entry point.
+ * ------------------------------------------------------------------------ */
+
+static bool sa_exec(sqlite3 *db, const char *sql)
+{
+    int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);  // raw-sql-ok:test-seed
+    if (rc != SQLITE_OK)
+        printf("stage_anchor: seed SQL failed rc=%d: %s\n", rc,
+               sqlite3_errmsg(db));
+    return rc == SQLITE_OK;
+}
+
+static bool sa_make_log(sqlite3 *db, const char *table)
+{
+    char sql[512];
+    snprintf(sql, sizeof(sql),
+             "CREATE TABLE IF NOT EXISTS %s(height INTEGER PRIMARY KEY)",
+             table);
+    return sa_exec(db, sql);
+}
+
+/* Rows lo..hi inclusive, skipping `skip` (pass -1 for none). */
+static bool sa_put_rows(sqlite3 *db, const char *table, int lo, int hi,
+                        int skip)
+{
+    char sql[512];
+    for (int h = lo; h <= hi; h++) {
+        if (h == skip)
+            continue;
+        snprintf(sql, sizeof(sql), "INSERT INTO %s(height) VALUES(%d)",
+                 table, h);
+        if (!sa_exec(db, sql))
+            return false;
+    }
+    return true;
+}
+
+static bool sa_cap(sqlite3 *db, const char *table, uint64_t cursor,
+                   uint64_t requested, bool exempt, uint64_t *out)
+{
+    return stage_anchor_cap_target_at_log_frontier(db, table, cursor,
+                                                   requested, exempt, out);
+}
+
+static bool sa_no_open_statements(sqlite3 *db)
+{
+    return sqlite3_next_stmt(db, NULL) == NULL;
+}
+
+static sqlite3 *sa_fresh(const char *fixture_dir, const char *name)
+{
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s", fixture_dir, name);
+    return sa_open(path);
+}
+
+/* A table that exists but whose `height` column raises at read time, so the
+ * cap's probe prepares fine and then fails in sqlite3_step. */
+static bool g_sa_boom;
+
+static void sa_boom_fn(sqlite3_context *ctx, int argc, sqlite3_value **argv)
+{
+    (void)argc;
+    if (g_sa_boom)
+        sqlite3_result_error(ctx, "sa_boom: injected read failure", -1);
+    else
+        sqlite3_result_value(ctx, argv[0]);
+}
+
+static bool sa_make_broken_log(sqlite3 *db, const char *table)
+{
+    char sql[512];
+    g_sa_boom = false;
+    if (sqlite3_create_function(db, "sa_boom", 1,
+                                SQLITE_UTF8 | SQLITE_DETERMINISTIC |
+                                    SQLITE_INNOCUOUS,
+                                NULL, sa_boom_fn, NULL, NULL) != SQLITE_OK)
+        return false;
+    snprintf(sql, sizeof(sql),
+             "CREATE TABLE %s(x INTEGER, height INTEGER GENERATED ALWAYS "
+             "AS (sa_boom(x)) VIRTUAL)", table);
+    if (!sa_exec(db, sql))
+        return false;
+    snprintf(sql, sizeof(sql), "INSERT INTO %s(x) VALUES(1)", table);
+    if (!sa_exec(db, sql))
+        return false;
+    g_sa_boom = true;  /* every later read of `height` now fails */
+    return true;
+}
+
+/* The cap on a log with a hole inside the jump, a rowless cursor, a fresh
+ * log, and the pass-through and exemption prongs. */
+static int sa_case_cap_hole(const char *fixture_dir)
+{
+    int failures = 0;
+    sqlite3 *db = sa_fresh(fixture_dir, "sa_cap_hole.db");
+    SA_CHECK("cap hole: db open", db != NULL);
+    if (!db)
+        return failures;
+    bool seeded = sa_make_log(db, "sa_hole_log") &&
+                  sa_put_rows(db, "sa_hole_log", 100, 120, 110);
+    SA_CHECK("cap hole: seeded", seeded);
+    uint64_t capped = 0;
+    SA_CHECK("cap hole: hole inside the jump caps at the hole",
+             sa_cap(db, "sa_hole_log", 100, 121, false, &capped) &&
+             capped == 110);
+    SA_CHECK("cap hole: rowless cursor caps at the cursor",
+             sa_cap(db, "sa_hole_log", 99, 121, false, &capped) &&
+             capped == 99);
+    SA_CHECK("cap hole: seed-exempt jumps over the hole",
+             sa_cap(db, "sa_hole_log", 100, 121, true, &capped) &&
+             capped == 121);
+    SA_CHECK("cap hole: request at the cursor passes through",
+             sa_cap(db, "sa_hole_log", 105, 105, false, &capped) &&
+             capped == 105);
+    SA_CHECK("cap hole: no statement left open", sa_no_open_statements(db));
+    sqlite3_close(db);
+    return failures;
+}
+
+/* A log with rows only at or above the request has nothing below to tear. */
+static int sa_case_cap_fresh_and_flat(const char *fixture_dir)
+{
+    int failures = 0;
+    sqlite3 *db = sa_fresh(fixture_dir, "sa_cap_flat.db");
+    SA_CHECK("cap flat: db open", db != NULL);
+    if (!db)
+        return failures;
+    bool seeded = sa_make_log(db, "sa_high_log") &&
+                  sa_put_rows(db, "sa_high_log", 200, 201, -1) &&
+                  sa_make_log(db, "sa_flat_log") &&
+                  sa_put_rows(db, "sa_flat_log", 100, 120, -1) &&
+                  sa_make_log(db, "t") && sa_put_rows(db, "t", 1, 4, 3);
+    SA_CHECK("cap flat: seeded", seeded);
+    uint64_t capped = 0;
+    SA_CHECK("cap flat: no row below the request, full jump",
+             sa_cap(db, "sa_high_log", 10, 50, false, &capped) &&
+             capped == 50);
+    SA_CHECK("cap flat: contiguous log caps at its first rowless height",
+             sa_cap(db, "sa_flat_log", 100, 500, false, &capped) &&
+             capped == 121);
+    SA_CHECK("cap flat: INT64_MAX is an accepted request",
+             sa_cap(db, "sa_flat_log", 100, (uint64_t)INT64_MAX, false,
+                    &capped) && capped == 121);
+    SA_CHECK("cap flat: a request past INT64_MAX is refused, untouched",
+             !sa_cap(db, "sa_flat_log", 100, (uint64_t)INT64_MAX + 1, false,
+                     &capped) && capped == (uint64_t)INT64_MAX + 1);
+    SA_CHECK("cap flat: one-character table name is honoured",
+             sa_cap(db, "t", 1, 10, false, &capped) && capped == 3);
+    SA_CHECK("cap flat: no statement left open", sa_no_open_statements(db));
+    sqlite3_close(db);
+    return failures;
+}
+
+/* Invalid arguments are refused and leave the output at the request. */
+static int sa_case_cap_bad_args(const char *fixture_dir)
+{
+    int failures = 0;
+    sqlite3 *db = sa_fresh(fixture_dir, "sa_cap_args.db");
+    SA_CHECK("cap args: db open", db != NULL);
+    if (!db)
+        return failures;
+    uint64_t capped = 0;
+    SA_CHECK("cap args: NULL out refused",
+             !sa_cap(db, "sa_hole_log", 1, 9, false, NULL));
+    capped = 0;
+    SA_CHECK("cap args: NULL db refused, out set to the request",
+             !sa_cap(NULL, "sa_hole_log", 1, 77, false, &capped) &&
+             capped == 77);
+    capped = 0;
+    SA_CHECK("cap args: NULL table refused, out set to the request",
+             !sa_cap(db, NULL, 1, 78, false, &capped) && capped == 78);
+    capped = 0;
+    SA_CHECK("cap args: empty table refused, out set to the request",
+             !sa_cap(db, "", 1, 79, false, &capped) && capped == 79);
+    sqlite3_close(db);
+    return failures;
+}
+
+/* A probe that fails mid-step is an error, never a quiet full jump. */
+static int sa_case_cap_probe_failure(const char *fixture_dir)
+{
+    int failures = 0;
+    sqlite3 *db = sa_fresh(fixture_dir, "sa_cap_broken.db");
+    SA_CHECK("cap broken: db open", db != NULL);
+    if (!db)
+        return failures;
+    SA_CHECK("cap broken: broken table made",
+             sa_make_broken_log(db, "sa_broken_log"));
+    uint64_t capped = 0;
+    SA_CHECK("cap broken: failing probe is refused, out at the request",
+             !sa_cap(db, "sa_broken_log", 5, 50, false, &capped) &&
+             capped == 50);
+    SA_CHECK("cap broken: request at the cursor never scans",
+             sa_cap(db, "sa_broken_log", 50, 50, false, &capped) &&
+             capped == 50);
+    SA_CHECK("cap broken: no statement left open", sa_no_open_statements(db));
+    g_sa_boom = false;
+    sqlite3_close(db);
+    return failures;
+}
+
+/* The table-existence probe failing in step (database locked by another
+ * connection) is an error, not "no table". */
+static int sa_case_cap_locked_database(const char *fixture_dir)
+{
+    int failures = 0;
+    char path[256];
+    snprintf(path, sizeof(path), "%s/sa_cap_locked.db", fixture_dir);
+    sqlite3 *db = sa_open(path);
+    sqlite3 *other = NULL;
+    SA_CHECK("cap locked: db open", db != NULL);
+    if (!db)
+        return failures;
+    bool ready = sa_exec(db, "PRAGMA journal_mode=DELETE") &&
+                 sa_make_log(db, "sa_locked_log") &&
+                 sa_put_rows(db, "sa_locked_log", 1, 5, -1) &&
+                 sa_exec(db, "SELECT count(*) FROM sqlite_master");
+    SA_CHECK("cap locked: seeded", ready);
+    bool locked = sqlite3_open(path, &other) == SQLITE_OK &&
+                  sa_exec(other, "BEGIN EXCLUSIVE");
+    SA_CHECK("cap locked: other connection holds the exclusive lock", locked);
+    uint64_t capped = 0;
+    SA_CHECK("cap locked: probe failure is refused, out at the request",
+             !sa_cap(db, "sa_locked_log", 1, 9, false, &capped) &&
+             capped == 9);
+    if (other) {
+        sa_exec(other, "ROLLBACK");
+        sqlite3_close(other);
+    }
+    SA_CHECK("cap locked: no statement left open", sa_no_open_statements(db));
+    sqlite3_close(db);
+    return failures;
+}
+
+/* A table name too long for the probe SQL is refused, not scanned empty. */
+static int sa_case_cap_long_name(const char *fixture_dir)
+{
+    int failures = 0;
+    sqlite3 *db = sa_fresh(fixture_dir, "sa_cap_long.db");
+    SA_CHECK("cap long: db open", db != NULL);
+    if (!db)
+        return failures;
+    char name[300];
+    memset(name, 'a', 260);
+    name[260] = '\0';
+    SA_CHECK("cap long: long-named log seeded",
+             sa_make_log(db, name) && sa_put_rows(db, name, 1, 5, -1));
+    uint64_t capped = 0;
+    SA_CHECK("cap long: overlong probe SQL is refused",
+             !sa_cap(db, name, 1, 9, false, &capped) && capped == 9);
+    sqlite3_close(db);
+    return failures;
+}
+
+static void *sa_trylock_thread(void *arg)
+{
+    bool *got = arg;
+    *got = progress_store_tx_trylock();
+    if (*got)
+        progress_store_tx_unlock();
+    return NULL;
+}
+
+/* After the cap returns, the progress-store lock is free for other threads. */
+static int sa_case_cap_releases_lock(const char *fixture_dir)
+{
+    int failures = 0;
+    sqlite3 *db = sa_fresh(fixture_dir, "sa_cap_lock.db");
+    SA_CHECK("cap lock: db open", db != NULL);
+    if (!db)
+        return failures;
+    SA_CHECK("cap lock: log seeded",
+             sa_make_log(db, "sa_lock_log") &&
+             sa_put_rows(db, "sa_lock_log", 1, 5, -1));
+    uint64_t capped = 0;
+    SA_CHECK("cap lock: cap runs",
+             sa_cap(db, "sa_lock_log", 1, 9, false, &capped));
+    bool got = false;
+    pthread_t th;
+    bool started = pthread_create(&th, NULL, sa_trylock_thread, &got) == 0;
+    SA_CHECK("cap lock: thread started", started);
+    if (started)
+        pthread_join(th, NULL);
+    SA_CHECK("cap lock: another thread can take the lock", got);
+    sqlite3_close(db);
+    return failures;
+}
+
+static bool sa_all_at(sqlite3 *db, size_t from, size_t to, uint64_t want)
+{
+    for (size_t i = from; i < to; i++)
+        if (sa_read(db, SA_UPSTREAM[i]) != want)
+            return false;
+    return true;
+}
+
+/* A NULL owner is accepted: the log tag falls back to a default. */
+static int sa_case_upstream_null_owner(const char *fixture_dir)
+{
+    int failures = 0;
+    sqlite3 *db = sa_fresh(fixture_dir, "sa_up_owner.db");
+    SA_CHECK("owner: db open", db != NULL);
+    if (!db)
+        return failures;
+    SA_CHECK("owner: NULL owner and NULL reason anchor",
+             stage_anchor_upstream_cursors_to(db, 100, NULL, NULL, false));
+    SA_CHECK("owner: every cursor reached the target",
+             sa_all_at(db, 0, SA_N, 100));
+    sqlite3_close(db);
+    return failures;
+}
+
+/* coins_applied_height = 0 is a real frontier: dependent stages are held at
+ * 0 and the call still succeeds. */
+static int sa_case_upstream_zero_frontier(const char *fixture_dir)
+{
+    int failures = 0;
+    sqlite3 *db = sa_fresh(fixture_dir, "sa_up_zero.db");
+    SA_CHECK("zero frontier: db open", db != NULL);
+    if (!db)
+        return failures;
+    SA_CHECK("zero frontier: stamped", sa_set_coins_applied(db, 0));
+    SA_CHECK("zero frontier: anchor succeeds",
+             stage_anchor_upstream_cursors_to(db, 500, "test", "zero", false));
+    SA_CHECK("zero frontier: independent stages reach the target",
+             sa_all_at(db, 0, 3, 500));
+    SA_CHECK("zero frontier: dependent stages stay at 0",
+             sa_all_at(db, 3, SA_N, 0));
+    sqlite3_close(db);
+    return failures;
+}
+
+/* A negative frontier is malformed: refused, and the stages from the first
+ * coins-dependent one onward are not moved. */
+static int sa_case_upstream_negative_frontier(const char *fixture_dir)
+{
+    int failures = 0;
+    sqlite3 *db = sa_fresh(fixture_dir, "sa_up_neg.db");
+    SA_CHECK("negative frontier: db open", db != NULL);
+    if (!db)
+        return failures;
+    bool seeded = progress_meta_table_ensure(db) &&
+                  sa_exec(db, "INSERT OR REPLACE INTO progress_meta(key, value)"
+                              " VALUES('coins_applied_height',"
+                              " x'ffffffffffffffff')");
+    SA_CHECK("negative frontier: seeded", seeded);
+    SA_CHECK("negative frontier: anchor refused",
+             !stage_anchor_upstream_cursors_to(db, 500, "test", "neg", false));
+    SA_CHECK("negative frontier: dependent stages not moved",
+             sa_all_at(db, 3, SA_N, 0));
+    sqlite3_close(db);
+    return failures;
+}
+
+/* An unreadable coins frontier is refused rather than treated as absent. */
+static int sa_case_upstream_unreadable_frontier(const char *fixture_dir)
+{
+    int failures = 0;
+    sqlite3 *db = sa_fresh(fixture_dir, "sa_up_badmeta.db");
+    SA_CHECK("bad meta: db open", db != NULL);
+    if (!db)
+        return failures;
+    SA_CHECK("bad meta: wrong-schema progress_meta",
+             sa_exec(db, "CREATE TABLE progress_meta(foo INTEGER)"));
+    SA_CHECK("bad meta: anchor refused",
+             !stage_anchor_upstream_cursors_to(db, 500, "test", "bad", false));
+    SA_CHECK("bad meta: dependent stages not moved",
+             sa_all_at(db, 3, SA_N, 0));
+    sqlite3_close(db);
+    return failures;
+}
+
+/* The frontier table cannot be ensured (an index owns its name): refused. */
+static int sa_case_upstream_frontier_schema_blocked(const char *fixture_dir)
+{
+    int failures = 0;
+    sqlite3 *db = sa_fresh(fixture_dir, "sa_up_blocked.db");
+    SA_CHECK("blocked meta: db open", db != NULL);
+    if (!db)
+        return failures;
+    SA_CHECK("blocked meta: index squats on the table name",
+             sa_exec(db, "CREATE INDEX progress_meta ON stage_cursor(name)"));
+    SA_CHECK("blocked meta: anchor refused",
+             !stage_anchor_upstream_cursors_to(db, 500, "test", "blk", false));
+    SA_CHECK("blocked meta: dependent stages not moved",
+             sa_all_at(db, 3, SA_N, 0));
+    sqlite3_close(db);
+    return failures;
+}
+
+/* A cap probe failing on one stage's log refuses the whole call and does not
+ * advance that stage's cursor. */
+static int sa_case_upstream_frontier_cap_error(const char *fixture_dir)
+{
+    int failures = 0;
+    sqlite3 *db = sa_fresh(fixture_dir, "sa_up_capfail.db");
+    SA_CHECK("cap error: db open", db != NULL);
+    if (!db)
+        return failures;
+    SA_CHECK("cap error: header_admit_log is broken",
+             sa_make_broken_log(db, "header_admit_log"));
+    SA_CHECK("cap error: anchor refused",
+             !stage_anchor_upstream_cursors_to(db, 100, "test", "cap", false));
+    SA_CHECK("cap error: the failing stage did not move",
+             sa_read(db, "header_admit") == 0);
+    g_sa_boom = false;
+    sqlite3_close(db);
+    return failures;
+}
+
+/* A cursor that cannot be written (read-only store) refuses the call. */
+static int sa_case_upstream_cursor_write_failure(const char *fixture_dir)
+{
+    int failures = 0;
+    char path[256];
+    snprintf(path, sizeof(path), "%s/sa_up_ro.db", fixture_dir);
+    sqlite3 *db = sa_open(path);
+    SA_CHECK("read-only: db open", db != NULL);
+    if (!db)
+        return failures;
+    sqlite3_close(db);
+    sqlite3 *ro = NULL;
+    SA_CHECK("read-only: reopen read-only",
+             sqlite3_open_v2(path, &ro, SQLITE_OPEN_READONLY, NULL) ==
+                 SQLITE_OK);
+    if (ro) {
+        SA_CHECK("read-only: anchor refused when a cursor cannot advance",
+                 !stage_anchor_upstream_cursors_to(ro, 100, "test", "ro",
+                                                   false));
+        SA_CHECK("read-only: cursor unchanged", sa_read(ro, "header_admit") == 0);
+        sqlite3_close(ro);
+    }
+    unlink(path);
+    return failures;
+}
+
+static int sa_gap_cases(const char *fixture_dir)
+{
+    int failures = 0;
+    failures += sa_case_cap_hole(fixture_dir);
+    failures += sa_case_cap_fresh_and_flat(fixture_dir);
+    failures += sa_case_cap_bad_args(fixture_dir);
+    failures += sa_case_cap_probe_failure(fixture_dir);
+    failures += sa_case_cap_locked_database(fixture_dir);
+    failures += sa_case_cap_long_name(fixture_dir);
+    failures += sa_case_cap_releases_lock(fixture_dir);
+    failures += sa_case_upstream_null_owner(fixture_dir);
+    failures += sa_case_upstream_zero_frontier(fixture_dir);
+    failures += sa_case_upstream_negative_frontier(fixture_dir);
+    failures += sa_case_upstream_unreadable_frontier(fixture_dir);
+    failures += sa_case_upstream_frontier_schema_blocked(fixture_dir);
+    failures += sa_case_upstream_frontier_cap_error(fixture_dir);
+    failures += sa_case_upstream_cursor_write_failure(fixture_dir);
+    return failures;
+}
+
 int test_stage_anchor(void)
 {
     printf("\n=== stage_anchor tests ===\n");
@@ -408,6 +870,8 @@ int test_stage_anchor(void)
         SA_CHECK("NULL db returns false",
                  !stage_anchor_upstream_cursors_to(NULL, 1, "test", "null", false));
     }
+
+    failures += sa_gap_cases(fixture_dir);
 
     test_cleanup_tmpdir(fixture_dir);
     if (failures == 0) {
