@@ -19,7 +19,8 @@ bool dir_copy(const char *src_dir, const char *dst_dir);
  * Returns count of blk*.dat files copied, or -1 on any copy failure. */
 int block_files_copy(const char *src_dir, const char *dst_dir);
 
-/* Remove all blk*.dat and rev*.dat from a directory. */
+/* Remove the node's block and undo files from a directory: blk and rev, then
+ * five or more digits or "_sync", then ".dat". Other names are kept. */
 void block_files_clean(const char *dir);
 
 /* Remove a directory tree recursively. */

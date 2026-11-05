@@ -411,6 +411,8 @@ static bool block_files_is_series_name(const char *name)
 {
     if (strncmp(name, "blk", 3) != 0 && strncmp(name, "rev", 3) != 0)
         return false;
+    if (strcmp(name + 3, "_sync.dat") == 0)
+        return true;   /* the node's spelling of file 255: disk_block_io.c */
     size_t digits = 0;
     while (name[3 + digits] >= '0' && name[3 + digits] <= '9')
         digits++;
