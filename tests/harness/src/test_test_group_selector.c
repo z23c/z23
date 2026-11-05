@@ -1100,7 +1100,8 @@ static int test_umbrella_groups(void)
     /* Legacy plan tokens also retain their historical substring matches:
      * every registered group whose id contains "dev_land". */
     static const char *const dev_land_extras[] = {
-        "test_dev_land_window", "test_dev_land_remote", NULL};
+        "test_dev_land_selfupgrade", "test_dev_land_window",
+        "test_dev_land_remote", NULL};
     failures += umbrella_contract("test_dev_land", "dev_land",
                                   dev_land_extras);
     return failures;
@@ -3457,7 +3458,8 @@ static int test_proof_resolver_umbrellas(void)
             "test_api 2>/dev/null", out, sizeof(out)), 0);
         ASSERT_STR_EQ(out, "test_api\ntest_dev_land_shard_01\n"
             "test_dev_land_shard_02\ntest_dev_land_shard_03\n"
-            "test_dev_land_shard_04\ntest_dev_land_window\n"
+            "test_dev_land_shard_04\ntest_dev_land_selfupgrade\n"
+            "test_dev_land_window\n"
             "test_dev_land_remote\n");
         ASSERT_EQ(capture_command(
             "" TGS_LIST " --resolve-proof dev_land "
