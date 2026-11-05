@@ -205,6 +205,9 @@ enum zcl_failure_priority_match zcl_dev_proof_failure_priority_group(
 bool zcl_dev_proof_test_failure_priority(const char *root, const char *scratch,
     const char *groups, const char *const *changed, size_t changed_count,
     char *out, size_t cap);
+bool zcl_dev_proof_test_failure_priority_report(const char *root, const char *scratch,
+    const char *groups, const char *const *changed, size_t changed_count,
+    char *out, size_t cap, char *report, size_t report_cap);
 #endif
 /* Syntax only, NOT authority. 0 absent, -1 reserved/malformed/ambiguous,
  * 1 exact additive trailer. Payload is unchanged reason/evidence bytes.

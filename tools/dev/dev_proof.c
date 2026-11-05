@@ -12177,6 +12177,14 @@ bool zcl_dev_proof_test_failure_priority(const char *root, const char *scratch,
 {
     return dp_failure_priority(root, scratch, groups, changed, changed_count, out, cap, NULL, 0);
 }
+
+bool zcl_dev_proof_test_failure_priority_report(const char *root, const char *scratch,
+    const char *groups, const char *const *changed, size_t changed_count,
+    char *out, size_t cap, char *report, size_t report_cap)
+{
+    return dp_failure_priority(root, scratch, groups, changed, changed_count,
+                               out, cap, report, report_cap);
+}
 #endif
 
 static void dp_worker_failure_priority(struct dp_worker *w)

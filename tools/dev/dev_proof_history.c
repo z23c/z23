@@ -47,13 +47,19 @@ static bool history_priority_name(const char *digest, char id[ZCL_TEST_GROUP_FUL
     return zcl_test_group_catalog_contains(id);
 }
 
+static bool history_priority_group_args(const struct zcl_dev_proof_history_failure *failure,
+    const char *const *selected, size_t count, const char *out, size_t cap)
+{
+    return failure && out && cap && count <= 4096 && (!count || selected);
+}
+
 enum zcl_failure_priority_match zcl_dev_proof_failure_priority_group(
     const struct zcl_dev_proof_history_failure *failure,
     const char *const *selected, size_t selected_count,
     char *group_out, size_t cap)
 {
-    if (!failure || !group_out || !cap || selected_count > 4096 ||
-        (selected_count && !selected)) return ZCL_FAILURE_PRIORITY_INVALID;
+    if (!history_priority_group_args(failure, selected, selected_count, group_out, cap))
+        return ZCL_FAILURE_PRIORITY_INVALID;
     group_out[0] = '\0';
     if (!memchr(failure->digest, '\0', sizeof(failure->digest)))
         return ZCL_FAILURE_PRIORITY_INVALID;
