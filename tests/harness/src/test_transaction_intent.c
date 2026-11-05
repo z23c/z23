@@ -981,10 +981,88 @@ _test_next:
     return failures;
 }
 
+/* Build a VIP2 private payload with one effect; the two length bytes are
+ * caller-chosen so a hostile length can be driven through the decoder. */
+static size_t ti_vip_payload(uint8_t *out, uint8_t from_len, uint8_t to_len)
+{
+    size_t n = 0;
+    memcpy(out, "VIP2", 4); n = 4;
+    out[n++] = VAULT_INTENT_ROUTE_PRIVATE;
+    out[n++] = from_len;
+    memset(out + n, 'f', from_len); n += from_len;
+    out[n++] = 1;
+    memset(out + n, 0, 8); n += 8;          /* fee 0 */
+    out[n++] = to_len;
+    memset(out + n, 't', to_len); n += to_len;
+    memset(out + n, 0, 8); out[n] = 1; n += 8;   /* amount 1 */
+    out[n++] = 0;                           /* memo kind none */
+    out[n++] = 0; out[n++] = 0;             /* memo length */
+    return n;
+}
+
+/* Run the authenticated build path on a crafted payload. True when it is
+ * refused PLAN_TAMPERED; *decoded says any other code came back. */
+static bool ti_vip_tampered(struct node_db *ndb, uint8_t from_len,
+                            uint8_t to_len, bool *decoded)
+{
+    uint8_t plain[1024];
+    size_t plain_len = ti_vip_payload(plain, from_len, to_len);
+    struct vault_intent_row row;
+    memset(&row, 0, sizeof(row));
+    memset(row.plan_id, 0x61, 32);
+    row.route = VAULT_INTENT_ROUTE_PRIVATE;
+    if (!wallet_metadata_encrypt(ndb, row.plan_id, 32, plain, plain_len,
+            row.encrypted_payload, sizeof(row.encrypted_payload),
+            &row.encrypted_payload_len))
+        return false;
+    vault_intent_digest_payload(plain, plain_len, &row, row.digest);
+    struct wallet_rpc_context ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.node_db = ndb;
+    struct wallet_tx wtx;
+    memset(&wtx, 0, sizeof(wtx));
+    struct json_value result;
+    json_init(&result);
+    (void)vault_intent_private_build_prepared(&ctx, &row, &wtx, &result);
+    const char *code = json_get_str(json_get(&result, "code"));
+    bool tampered = code && strcmp(code, "PLAN_TAMPERED") == 0;
+    *decoded = code && !tampered;
+    json_free(&result);
+    return tampered;
+}
+
+static int ti_private_decode_bounds(void)
+{
+    int failures = 0;
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    TEST("private intent decoder refuses address lengths above the buffer") {
+        ASSERT(node_db_open(&ndb, ":memory:"));
+        wallet_lock_reset_for_test();
+        wallet_lock_note_encrypted_at_rest();
+        ASSERT(wallet_lock_unlock(NULL, NULL, "vip-bounds-pass").ok);
+        bool decoded = false;
+        ASSERT(ti_vip_tampered(&ndb, 128, 5, &decoded));
+        ASSERT(ti_vip_tampered(&ndb, 255, 5, &decoded));
+        ASSERT(ti_vip_tampered(&ndb, 5, 128, &decoded));
+        ASSERT(ti_vip_tampered(&ndb, 5, 255, &decoded));
+        decoded = false;
+        ASSERT(!ti_vip_tampered(&ndb, 127, 127, &decoded));
+        ASSERT(decoded);
+        PASS();
+    }
+_test_next:
+    wallet_lock_reset_for_test();
+    if (ndb.open) node_db_close(&ndb);
+    return failures;
+}
+
 int test_transaction_intent(void)
 {
     int failures = 0;
     struct node_db ndb; memset(&ndb, 0, sizeof(ndb));
+    failures += ti_private_decode_bounds();
+    if (failures) goto _test_next;
     failures += ti_wallet_identity_lane_admission();
     if (failures) goto _test_next;
     failures += ti_validation_cases();
