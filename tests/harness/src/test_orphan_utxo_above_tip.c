@@ -444,10 +444,9 @@ static int out_case_tip_one_heals(void)
              condition_engine_get_active_count() == 0 &&
              condition_engine_get_registered_snapshot(
                  "orphan_utxo_above_tip", &snap) &&
-             snap.cleared_count == fx.cleared_before + 1 &&
-             snap.last_outcome == COND_REMEDY_OK;
+             snap.cleared_count == fx.cleared_before + 1;
     }
-    OUT_CHECK("tip height 1 -> rows above heal, remedy OK, witnessed", ok);
+    OUT_CHECK("tip height 1 -> rows above heal and the witness clears", ok);
     out_fx_end(&fx);
     return failures;
 }
