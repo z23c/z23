@@ -497,16 +497,20 @@ static int map_alternate_temp_root(const char *dir, sqlite3 *db)
 
 /* tmpfile() follows TMPDIR on macOS (glibc ignores it), and several cases
  * point TMPDIR at a file or a missing root on purpose, so the capture file is
- * made with TMPDIR pinned to /tmp and the case's value is put back. */
+ * made with TMPDIR pinned to a private test-tmp directory and the case's value
+ * is put back. tmpfile() unlinks the file at once, so the directory empties. */
 static FILE *map_capture_file(void)
 {
+    char root[600];
+    if (!test_mkdtemp(root, sizeof(root), "z23-preflight-capture"))
+        return NULL;
     const char *old = getenv("TMPDIR");
     char *saved = old ? strdup(old) : NULL;
-    if (old && !saved)
-        return NULL;
-    FILE *capture = setenv("TMPDIR", "/tmp", 1) == 0 ? tmpfile() : NULL;
+    FILE *capture = (!old || saved) && setenv("TMPDIR", root, 1) == 0 ? tmpfile() : NULL;
     bool restored = saved ? setenv("TMPDIR", saved, 1) == 0 : unsetenv("TMPDIR") == 0;
     free(saved);
+    if (rmdir(root) != 0)
+        fprintf(stderr, "map_capture_file: could not remove %s: errno=%d\n", root, errno);
     if (!restored && capture) {
         fclose(capture);
         return NULL;
