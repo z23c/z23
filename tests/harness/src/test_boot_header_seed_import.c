@@ -41,6 +41,7 @@
 #include "validation/chainstate.h"
 #include "chain/chain.h"
 #include "chain/chainparams.h"
+#include "chain/checkpoints.h"
 #include "chain/pow.h"
 #include "core/arith_uint256.h"
 #include "mining/miner.h"
@@ -475,6 +476,491 @@ static int case_sync_benchmark_headers_phase(void)
     return failures;
 }
 
+
+/* ── Seeding-mutant tests: hostile input, refusals, clamp, checkpoint bind ──
+ * Each fixture builds a real flat artifact (regtest PoW rows, mined tip) in a
+ * scratch dir and stages it at <cdir>/bundles/block_index.bin, then drives
+ * boot_header_seed_import_maybe against a local main_state. Nothing here
+ * touches a real datadir. */
+
+enum hsi_variant { HSI_COPY_FULL, HSI_COPY_HALF, HSI_COPY_EMPTY, HSI_COPY_FLIP };
+
+struct hsi_fx {
+    char sdir[PATH_MAX];
+    char cdir[PATH_MAX];
+    char bundle[PATH_MAX + 64];
+    char root[PATH_MAX + 64];
+    struct uint256 tip;
+};
+
+static bool hsi_copy_variant(const char *from, const char *to,
+                             enum hsi_variant v)
+{
+    FILE *rf = fopen(from, "rb");
+    if (!rf)
+        return false;
+    fseek(rf, 0, SEEK_END);
+    long sz = ftell(rf);
+    fseek(rf, 0, SEEK_SET);
+    uint8_t *buf = sz > 0 ? zcl_malloc((size_t)sz, "hsi variant") : NULL;
+    bool ok = buf && fread(buf, 1, (size_t)sz, rf) == (size_t)sz;
+    fclose(rf);
+    if (!ok) {
+        free(buf);
+        return false;
+    }
+    size_t keep = (size_t)sz;
+    if (v == HSI_COPY_HALF)
+        keep = (size_t)sz / 2;
+    else if (v == HSI_COPY_EMPTY)
+        keep = 0;
+    else if (v == HSI_COPY_FLIP)
+        buf[(size_t)sz / 2] ^= 0x5A;
+    FILE *wf = fopen(to, "wb");
+    ok = wf && (keep == 0 || fwrite(buf, 1, keep, wf) == keep);
+    if (wf)
+        fclose(wf);
+    free(buf);
+    return ok;
+}
+
+static bool hsi_find_tip_hash(struct main_state *ms, int tip_h,
+                              struct uint256 *out)
+{
+    struct block_index *p = NULL;
+    size_t it = 0;
+    while (block_map_next(&ms->map_block_index, &it, NULL, &p))
+        if (p && p->nHeight == tip_h && p->phashBlock) {
+            *out = *p->phashBlock;
+            return true;
+        }
+    return false;
+}
+
+static bool hsi_fx_make(struct hsi_fx *fx, int n, enum hsi_variant v)
+{
+    memset(fx, 0, sizeof(*fx));
+    chain_params_select(CHAIN_REGTEST);
+    if (!test_mkdtemp(fx->sdir, sizeof(fx->sdir), "hsi_x_src") ||
+        !test_mkdtemp(fx->cdir, sizeof(fx->cdir), "hsi_x_dst"))
+        return false;
+    struct main_state ms;
+    main_state_init(&ms);
+    hsi_build_chain(&ms, n, -1, true);
+    bool ok = block_index_flat_anchor_prepare(&ms).ok &&
+              hsi_find_tip_hash(&ms, n - 1, &fx->tip);
+    if (ok)
+        save_block_index_flat(fx->sdir, &ms);
+    main_state_free(&ms);
+    if (!ok)
+        return false;
+    char bdir[PATH_MAX + 32];
+    char from[PATH_MAX + 32];
+    snprintf(bdir, sizeof(bdir), "%s/bundles", fx->cdir);
+    snprintf(from, sizeof(from), "%s/block_index.bin", fx->sdir);
+    snprintf(fx->bundle, sizeof(fx->bundle), "%s/block_index.bin", bdir);
+    snprintf(fx->root, sizeof(fx->root), "%s/block_index.bin", fx->cdir);
+    return mkdir(bdir, 0700) == 0 && hsi_copy_variant(from, fx->bundle, v);
+}
+
+static void hsi_fx_free(struct hsi_fx *fx)
+{
+    if (fx->cdir[0]) {
+        (void)chmod(fx->cdir, 0700);
+        test_rm_rf_recursive(fx->cdir);
+    }
+    if (fx->sdir[0])
+        test_rm_rf_recursive(fx->sdir);
+}
+
+static bool hsi_exists(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0;
+}
+
+static bool hsi_blocker_named(const char *id)
+{
+    struct blocker_snapshot snap;
+    return blocker_find_by_id_prefix(id, &snap);
+}
+
+static void hsi_clear_blockers(void)
+{
+    blocker_clear("header_seed.stage_failed");
+    blocker_clear("header_seed.load_failed");
+    blocker_clear("header_seed.checkpoint_unbound");
+}
+
+/* 1 when the headers phase carries a stamped elapsed_ms, 0 when null, -1 on
+ * a dump error. */
+static int hsi_headers_phase_state(void)
+{
+    struct json_value dump;
+    json_init(&dump);
+    if (!sync_benchmark_dump_state_json(&dump, NULL)) {
+        json_free(&dump);
+        return -1;
+    }
+    const struct json_value *timings = json_get(&dump, "timings_ms");
+    int state = timings && !json_is_null(json_get(timings, "headers")) ? 1 : 0;
+    json_free(&dump);
+    return state;
+}
+
+/* Count non-genesis rows still carrying data bits, a disk position, or a
+ * valid level other than TREE; *rows gets the total row count. */
+static int hsi_count_unclamped(struct main_state *ms, size_t *rows)
+{
+    int bad = 0;
+    size_t it = 0;
+    struct block_index *p = NULL;
+    *rows = 0;
+    while (block_map_next(&ms->map_block_index, &it, NULL, &p)) {
+        (*rows)++;
+        if (!p || p->nHeight <= 0)
+            continue;
+        unsigned int st = block_index_status_load(p);
+        bool data = (st & (unsigned int)(BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO)) != 0;
+        bool pos = block_index_file_load(p) != -1 ||
+                   block_index_data_pos_load(p) != 0;
+        bool lvl = (st & (unsigned int)BLOCK_VALID_MASK) !=
+                   (unsigned int)BLOCK_VALID_TREE;
+        if (data || pos || lvl)
+            bad++;
+    }
+    return bad;
+}
+
+static int hsi_genesis_intact(struct main_state *ms)
+{
+    struct uint256 gh = hsi_make_hash(0);
+    struct block_index *g = block_map_find(&ms->map_block_index, &gh);
+    return g && (block_index_status_load(g) & (unsigned int)BLOCK_HAVE_DATA) != 0;
+}
+
+static int case_args_and_env_refused(void)
+{
+    int failures = 0;
+    TEST("boot_header_seed: unusable args and ZCL_NO_BUNDLE_FETCH refuse, artifact untouched") {
+        struct hsi_fx fx;
+        ASSERT(hsi_fx_make(&fx, 8, HSI_COPY_FULL));
+        struct main_state ms;
+        main_state_init(&ms);
+        bool r_null = boot_header_seed_import_maybe(NULL, &ms);
+        bool r_empty = boot_header_seed_import_maybe("", &ms);
+        bool r_noms = boot_header_seed_import_maybe(fx.cdir, NULL);
+        setenv("ZCL_NO_BUNDLE_FETCH", "1", 1);
+        bool r_env = boot_header_seed_import_maybe(fx.cdir, &ms);
+        unsetenv("ZCL_NO_BUNDLE_FETCH");
+        size_t n_after = block_map_count(&ms.map_block_index);
+        main_state_free(&ms);
+        ASSERT(!r_null);
+        ASSERT(!r_empty);
+        ASSERT(!r_noms);
+        ASSERT(!r_env);
+        ASSERT(n_after == 0);
+        ASSERT(hsi_exists(fx.bundle));
+        ASSERT(!hsi_exists(fx.root));
+        hsi_fx_free(&fx);
+    } _test_next:;
+    return failures;
+}
+
+static void hsi_populate(struct main_state *ms, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        struct uint256 h;
+        memset(&h, 0, sizeof(h));
+        h.data[0] = (uint8_t)(i & 0xFF);
+        h.data[1] = (uint8_t)((i >> 8) & 0xFF);
+        h.data[3] = 0xBB;
+        (void)chainstate_insert_block_index((struct chainstate *)ms, &h);
+    }
+}
+
+/* Runs one import over `existing` pre-populated rows with a truncated (so
+ * harmlessly unloadable) artifact; reports whether the artifact left
+ * bundles/ (the rename ran) and whether the root copy exists. */
+static bool hsi_population_run(size_t existing, bool *bundle_left,
+                               bool *root_made, size_t *entries)
+{
+    struct hsi_fx fx;
+    if (!hsi_fx_make(&fx, 8, HSI_COPY_HALF)) {
+        hsi_fx_free(&fx);
+        return false;
+    }
+    struct main_state ms;
+    main_state_init(&ms);
+    hsi_populate(&ms, existing);
+    *entries = block_map_count(&ms.map_block_index);
+    bool r = boot_header_seed_import_maybe(fx.cdir, &ms);
+    *bundle_left = hsi_exists(fx.bundle);
+    *root_made = hsi_exists(fx.root);
+    main_state_free(&ms);
+    hsi_fx_free(&fx);
+    return r;
+}
+
+static int case_population_cap_boundary(void)
+{
+    int failures = 0;
+    TEST("boot_header_seed: a header index above 1024 entries is never seeded, 1024 still is") {
+        bool over_left = false, over_root = true, at_left = true, at_root = false;
+        size_t over_n = 0, at_n = 0;
+        bool r_over = hsi_population_run(1025, &over_left, &over_root, &over_n);
+        bool r_at = hsi_population_run(1024, &at_left, &at_root, &at_n);
+        ASSERT(over_n == 1025);
+        ASSERT(at_n == 1024);
+        ASSERT(!r_over);
+        ASSERT(over_left);   /* skipped before any move */
+        ASSERT(!over_root);
+        ASSERT(!r_at);       /* the half artifact cannot load ... */
+        ASSERT(at_root);     /* ... but the cap let it get as far as staging */
+        ASSERT(!at_left);
+    } _test_next:;
+    return failures;
+}
+
+struct hsi_hostile_out {
+    bool result;
+    size_t entries;
+    bool load_failed;
+    bool stage_failed;
+    int phase;
+};
+
+static bool hsi_hostile_run(enum hsi_variant v, struct hsi_hostile_out *o)
+{
+    struct hsi_fx fx;
+    memset(o, 0, sizeof(*o));
+    if (!hsi_fx_make(&fx, 8, v)) {
+        hsi_fx_free(&fx);
+        return false;
+    }
+    hsi_clear_blockers();
+    sync_benchmark_reset_for_test();
+    sync_benchmark_init(fx.cdir);
+    struct main_state ms;
+    main_state_init(&ms);
+    o->result = boot_header_seed_import_maybe(fx.cdir, &ms);
+    o->entries = block_map_count(&ms.map_block_index);
+    o->load_failed = hsi_blocker_named("header_seed.load_failed");
+    o->stage_failed = hsi_blocker_named("header_seed.stage_failed");
+    o->phase = hsi_headers_phase_state();
+    main_state_free(&ms);
+    sync_benchmark_reset_for_test();
+    hsi_fx_free(&fx);
+    return true;
+}
+
+static int case_hostile_artifact_rejected(void)
+{
+    int failures = 0;
+    TEST("boot_header_seed: truncated, empty and bit-flipped artifacts import nothing") {
+        static const enum hsi_variant vs[] = {HSI_COPY_HALF, HSI_COPY_EMPTY,
+                                              HSI_COPY_FLIP};
+        for (size_t i = 0; i < sizeof(vs) / sizeof(vs[0]); i++) {
+            struct hsi_hostile_out o;
+            ASSERT(hsi_hostile_run(vs[i], &o));
+            ASSERT(!o.result);
+            ASSERT(o.entries == 0);
+            ASSERT(o.load_failed);
+            ASSERT(!o.stage_failed);
+            ASSERT(o.phase == 1); /* a begun phase is ended on rejection */
+        }
+    } _test_next:;
+    return failures;
+}
+
+static int case_root_copy_present_is_left_alone(void)
+{
+    int failures = 0;
+    TEST("boot_header_seed: a ladder-owned root copy blocks the import, nothing moves") {
+        struct hsi_fx fx;
+        char from[PATH_MAX + 32];
+        ASSERT(hsi_fx_make(&fx, 8, HSI_COPY_FULL));
+        snprintf(from, sizeof(from), "%s/block_index.bin", fx.sdir);
+        ASSERT(hsi_copy_variant(from, fx.root, HSI_COPY_FULL));
+        hsi_clear_blockers();
+        struct main_state ms;
+        main_state_init(&ms);
+        bool r = boot_header_seed_import_maybe(fx.cdir, &ms);
+        size_t n = block_map_count(&ms.map_block_index);
+        main_state_free(&ms);
+        ASSERT(!r);
+        ASSERT(n == 0);
+        ASSERT(hsi_exists(fx.bundle));
+        ASSERT(!hsi_blocker_named("header_seed.stage_failed"));
+        ASSERT(!hsi_blocker_named("header_seed.load_failed"));
+        hsi_fx_free(&fx);
+    } _test_next:;
+    return failures;
+}
+
+static int case_rename_failure_named(void)
+{
+    int failures = 0;
+    TEST("boot_header_seed: a failed move to the datadir root names stage_failed and imports nothing") {
+        if (geteuid() == 0) {
+            printf("skipped (root ignores directory modes)... ");
+        } else {
+            struct hsi_fx fx;
+            ASSERT(hsi_fx_make(&fx, 8, HSI_COPY_FULL));
+            hsi_clear_blockers();
+            ASSERT(chmod(fx.cdir, 0500) == 0);
+            struct main_state ms;
+            main_state_init(&ms);
+            bool r = boot_header_seed_import_maybe(fx.cdir, &ms);
+            size_t n = block_map_count(&ms.map_block_index);
+            main_state_free(&ms);
+            (void)chmod(fx.cdir, 0700);
+            ASSERT(!r);
+            ASSERT(n == 0);
+            ASSERT(hsi_blocker_named("header_seed.stage_failed"));
+            ASSERT(!hsi_blocker_named("header_seed.load_failed"));
+            ASSERT(hsi_exists(fx.bundle));
+            ASSERT(!hsi_exists(fx.root));
+            hsi_fx_free(&fx);
+        }
+    } _test_next:;
+    return failures;
+}
+
+static int case_no_artifact_and_long_path_are_silent(void)
+{
+    int failures = 0;
+    TEST("boot_header_seed: no artifact or an over-long datadir is a silent no-op") {
+        chain_params_select(CHAIN_REGTEST);
+        char dir[PATH_MAX];
+        ASSERT(test_mkdtemp(dir, sizeof(dir), "hsi_x_silent") != NULL);
+        /* "/bundles/block_index.bin" is 24 bytes: this datadir makes the
+         * artifact path exactly PATH_MAX long, which does not fit. */
+        char longdir[PATH_MAX];
+        memset(longdir, 'a', sizeof(longdir));
+        longdir[0] = '/';
+        longdir[PATH_MAX - 24] = '\0';
+        hsi_clear_blockers();
+        sync_benchmark_reset_for_test();
+        sync_benchmark_init(dir);
+        struct main_state ms;
+        main_state_init(&ms);
+        bool r_absent = boot_header_seed_import_maybe(dir, &ms);
+        bool b_absent = hsi_blocker_named("header_seed.stage_failed") ||
+                        hsi_blocker_named("header_seed.load_failed");
+        bool r_long = boot_header_seed_import_maybe(longdir, &ms);
+        bool b_long = hsi_blocker_named("header_seed.stage_failed") ||
+                      hsi_blocker_named("header_seed.load_failed");
+        int phase = hsi_headers_phase_state();
+        main_state_free(&ms);
+        sync_benchmark_reset_for_test();
+        test_rm_rf_recursive(dir);
+        ASSERT(!r_absent);
+        ASSERT(!b_absent);
+        ASSERT(!r_long);
+        ASSERT(!b_long);
+        ASSERT(phase == 0);
+    } _test_next:;
+    return failures;
+}
+
+/* Import a 40-row artifact into a fresh map; verify the in-memory clamp on
+ * every row and the durable clamp by reloading the persisted root copy. */
+static int case_clamp_every_row_and_persist(void)
+{
+    int failures = 0;
+    TEST("boot_header_seed: every non-genesis row is clamped in memory and on disk") {
+        struct hsi_fx fx;
+        ASSERT(hsi_fx_make(&fx, 40, HSI_COPY_FULL));
+        struct main_state ms;
+        main_state_init(&ms);
+        bool r = boot_header_seed_import_maybe(fx.cdir, &ms);
+        size_t rows = 0;
+        int bad = hsi_count_unclamped(&ms, &rows);
+        bool genesis = hsi_genesis_intact(&ms);
+        main_state_free(&ms);
+        ASSERT(r);
+        ASSERT(rows == 40);
+        ASSERT(bad == 0);
+        ASSERT(genesis);
+
+        struct main_state again;
+        main_state_init(&again);
+        bool loaded = load_block_index_flat(fx.cdir, &again).ok;
+        size_t rows2 = 0;
+        int bad2 = hsi_count_unclamped(&again, &rows2);
+        main_state_free(&again);
+        ASSERT(loaded);
+        ASSERT(rows2 == 40);
+        ASSERT(bad2 == 0);
+        hsi_fx_free(&fx);
+    } _test_next:;
+    return failures;
+}
+
+/* Imports an 8-row artifact while the baked checkpoint is overridden to
+ * (cp_height, hash); returns 1 when the import reports it owns the
+ * checkpoint, 0 when it names checkpoint_unbound, -1 when import failed. */
+static int hsi_checkpoint_run(int32_t cp_height, int hash_row, int flip_byte)
+{
+    struct hsi_fx fx;
+    if (!hsi_fx_make(&fx, 8, HSI_COPY_FULL)) {
+        hsi_fx_free(&fx);
+        return -1;
+    }
+    static struct sha3_utxo_checkpoint cp;
+    memset(&cp, 0, sizeof(cp));
+    cp.height = cp_height;
+    struct uint256 want = hash_row < 0 ? fx.tip : hsi_make_hash(hash_row);
+    memcpy(cp.block_hash, want.data, sizeof(cp.block_hash));
+    if (flip_byte >= 0)
+        cp.block_hash[flip_byte] ^= 0x01;
+    hsi_clear_blockers();
+    checkpoints_set_sha3_override_for_test(&cp);
+    struct main_state ms;
+    main_state_init(&ms);
+    bool r = boot_header_seed_import_maybe(fx.cdir, &ms);
+    checkpoints_reset_sha3_override_for_test();
+    main_state_free(&ms);
+    int owned = r ? !hsi_blocker_named("header_seed.checkpoint_unbound") : -1;
+    hsi_fx_free(&fx);
+    return owned;
+}
+
+static int case_checkpoint_binding(void)
+{
+    int failures = 0;
+    TEST("boot_header_seed: checkpoint ownership needs the exact hash at a reachable height") {
+        int at_tip = hsi_checkpoint_run(7, -1, -1);
+        int at_genesis = hsi_checkpoint_run(0, 0, -1);
+        int last_byte = hsi_checkpoint_run(7, -1, 31);
+        int first_byte = hsi_checkpoint_run(7, -1, 0);
+        int past_tip = hsi_checkpoint_run(8, -1, -1);
+        int negative = hsi_checkpoint_run(-1, -1, -1);
+        ASSERT(at_tip == 1);
+        ASSERT(at_genesis == 1);
+        ASSERT(last_byte == 0);
+        ASSERT(first_byte == 0);
+        ASSERT(past_tip == 0);
+        ASSERT(negative == 0);
+    } _test_next:;
+    return failures;
+}
+
+static int hsi_mutant_tests(void)
+{
+    int failures = 0;
+    failures += case_args_and_env_refused();
+    failures += case_population_cap_boundary();
+    failures += case_hostile_artifact_rejected();
+    failures += case_root_copy_present_is_left_alone();
+    failures += case_rename_failure_named();
+    failures += case_no_artifact_and_long_path_are_silent();
+    failures += case_clamp_every_row_and_persist();
+    failures += case_checkpoint_binding();
+    return failures;
+}
+
 int test_boot_header_seed_import(void)
 {
     printf("\n=== boot_header_seed_import ===\n");
@@ -482,6 +968,7 @@ int test_boot_header_seed_import(void)
     failures += case_import_roundtrip();
     failures += case_bad_row();
     failures += case_sync_benchmark_headers_phase();
+    failures += hsi_mutant_tests();
     printf("=== boot_header_seed_import: %d failure(s) ===\n", failures);
     return failures;
 }
