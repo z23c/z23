@@ -14,6 +14,7 @@
 #include "test/test_core.h"
 #include "storage/ldb_snapshot.h"
 
+#include <dirent.h>
 #include <leveldb/c.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -542,8 +543,8 @@ static bool ls_stage_with_dir(const char *src, const char *dirname)
 }
 
 /* A directory standing where a file belongs makes link() or read() fail.
- * The make must fail with the matching message. Whether it also removes its
- * partial dst is deliberately not asserted here (see the report). */
+ * The make must fail with the matching message. The partial dst removal is
+ * asserted in ls_check_failure_cleanup. */
 static int ls_check_entry_failures(const char *src, const char *dst)
 {
     int failures = 0;
@@ -559,6 +560,74 @@ static int ls_check_entry_failures(const char *src, const char *dst)
         LS_CHECK("unreadable metadata entry fails with the copy message",
                  ls_fails_with(src, dst, "copy(LOG.old): read("));
     }
+    return failures;
+}
+
+static int ls_fd_count(void)
+{
+    DIR *d = opendir("/proc/self/fd");
+    if (!d)
+        return -1;
+    int n = 0;
+    while (readdir(d) != NULL)
+        n++;
+    closedir(d);
+    return n;
+}
+
+static bool ls_dst_gone(const char *dst)
+{
+    struct stat st;
+    return stat(dst, &st) != 0;
+}
+
+/* A failed make must remove the dst it created and close its DIR handle.
+ * `what` names the case; fd counts are compared only when /proc is there. */
+static int ls_check_failed_cleanup(const char *what, const char *src,
+                                   const char *dst)
+{
+    int failures = 0;
+    char err[256] = {0};
+    int fds_before = ls_fd_count();
+    bool ok = ldb_snapshot_make(src, dst, err, sizeof(err));
+    int fds_after = ls_fd_count();
+    LS_CHECK(what, !ok);
+    LS_CHECK("failed make leaves no dst behind", ls_dst_gone(dst));
+    if (fds_before >= 0 && fds_after >= 0)
+        LS_CHECK("failed make leaks no descriptor", fds_after == fds_before);
+    ldb_snapshot_destroy(dst);
+    return failures;
+}
+
+static int ls_check_failure_cleanup(const char *src, const char *dst)
+{
+    int failures = 0;
+    ldb_snapshot_destroy(dst);
+    bool staged = ls_stage_with_dir(src, "bad.ldb");
+    LS_CHECK("cleanup link fixture staged", staged);
+    if (!staged)
+        return failures;
+    failures += ls_check_failed_cleanup("link failure refuses", src, dst);
+    staged = ls_stage_with_dir(src, "LOG.old");
+    LS_CHECK("cleanup copy fixture staged", staged);
+    if (!staged)
+        return failures;
+    failures += ls_check_failed_cleanup("copy failure refuses", src, dst);
+    test_rm_rf(src);
+    staged = mkdir(src, 0700) == 0;
+    LS_CHECK("cleanup no-CURRENT fixture staged", staged);
+    if (!staged)
+        return failures;
+    failures += ls_check_failed_cleanup("missing CURRENT refuses", src, dst);
+    if (geteuid() == 0) {
+        printf("ldb_snapshot: opendir cleanup case skipped (root)\n");
+        return failures;
+    }
+    staged = ls_write_file(src, "CURRENT", 16, 1) && chmod(src, 0300) == 0;
+    LS_CHECK("cleanup unlistable src staged", staged);
+    if (staged)
+        failures += ls_check_failed_cleanup("unlistable src refuses", src, dst);
+    chmod(src, 0700);
     return failures;
 }
 
@@ -644,6 +713,7 @@ static int ldb_snapshot_edge_tests(const char *scratch)
     failures += ls_check_arg_errors(src, dst);
     failures += ls_check_current_errors(src, dst);
     failures += ls_check_entry_failures(src, dst);
+    failures += ls_check_failure_cleanup(src, dst);
     failures += ls_check_existing_dst(src, dst);
     failures += ls_check_permission_failures(src, dst);
     failures += ls_check_dst_unwritable(src, dst);
