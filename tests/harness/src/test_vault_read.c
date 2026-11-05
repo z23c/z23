@@ -473,6 +473,10 @@ static int vr_check_swap_amount_conversions(void)
     return failures;
 }
 
+/* Mutation-closing cases live in their own files to keep this one small. */
+int vault_read_bounds_tests(void);
+int vault_read_fields_tests(void);
+
 int test_vault_read(void)
 {
     int failures = 0;
@@ -528,6 +532,10 @@ int test_vault_read(void)
      * infinities, and magnitudes that overflow int64_t once scaled. */
     failures += vr_check_swap_amount_refusal_shapes();
     failures += vr_check_swap_amount_conversions();
+
+    /* ── Mutation-closing cases: refusals, caps, field values ─────── */
+    failures += vault_read_bounds_tests();
+    failures += vault_read_fields_tests();
 
     return failures;
 }
