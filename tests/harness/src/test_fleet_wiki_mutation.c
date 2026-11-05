@@ -668,6 +668,32 @@ static int fwm_review_quota(void)
 }
 
 
+/* A fleet page of a slug is another scope's page: it is neither the head a
+ * public write must name nor a conflict for the first public write. */
+static int fwm_scope_head(void)
+{
+    int failures = 0;
+    struct node_db db = {0};
+    TEST("wiki mutation: the head of a slug is the head within the writer's scope") {
+        ASSERT(node_db_open(&db, ":memory:"));
+        zcl_fleet_role_checker_install_permissive_for_testing();
+        struct fleet_board_post fleet, first, second;
+        struct db_fleet_board_post out;
+        ASSERT(fwm_post(&fleet, 21, "scope-fleet", "fleet body", FWM_NOW + 5, NULL));
+        fleet.scope = FLEET_BOARD_SCOPE_FLEET;
+        fleet.room[0] = 0;
+        ASSERT(fwm_review_resign(&fleet, 21));
+        ASSERT_EQ(fwm_write(&db, &fleet, NULL, &out), FLEET_WIKI_WRITE_OK);
+        ASSERT(fwm_post(&first, 22, "scope-first", "public body", FWM_NOW, NULL));
+        ASSERT_EQ(fwm_write(&db, &first, NULL, &out), FLEET_WIKI_WRITE_OK);
+        ASSERT(fwm_post(&second, 22, "scope-second", "public v2", FWM_NOW + 1, first.id));
+        ASSERT_EQ(fwm_write(&db, &second, first.id, &out), FLEET_WIKI_WRITE_OK);
+        PASS();
+    } _test_next:;
+    if (db.open) node_db_close(&db);
+    return failures;
+}
+
 static bool fwm_rpc_call(struct rpc_table *table, const struct json_value *input,
     struct json_value *result)
 {
@@ -1099,6 +1125,6 @@ static int fwm_atfile_cli(void)
 
 int test_fleet_wiki_mutation(void)
 {
-    return fwm_plan_confirm() + fwm_atfile_cli() +fwm_review_native_faults() + fwm_review_rpc() + fwm_review_parser() + fwm_review_queries() + fwm_review_quota() + fwm_review_boundaries() + fwm_review_peer_order() + fwm_review_admission() + fwm_review_missing() + fwm_replay_cas() + fwm_race_case() + fwm_storage_cases() +
+    return fwm_scope_head() + fwm_plan_confirm() + fwm_atfile_cli() +fwm_review_native_faults() + fwm_review_rpc() + fwm_review_parser() + fwm_review_queries() + fwm_review_quota() + fwm_review_boundaries() + fwm_review_peer_order() + fwm_review_admission() + fwm_review_missing() + fwm_replay_cas() + fwm_race_case() + fwm_storage_cases() +
         fwm_sequence_overflow() + fwm_eviction_case() + fwm_head_step_case();
 }

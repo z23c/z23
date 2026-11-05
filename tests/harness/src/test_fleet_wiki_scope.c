@@ -298,6 +298,49 @@ static int fws_cross_cases(void)
     return failures;
 }
 
+/* The wiki_write op signs public only: one call of it, expected NULL for absent. */
+static char *fws_op_write(const char *slug, const char *expected, char marker)
+{
+    char params[640];
+    (void)snprintf(params, sizeof(params),
+        "[{\"op\":\"wiki_write\",\"expected\":\"%s\",\"text\":\"op body\","
+        "\"slug\":\"%s\",\"title\":\"Op page\","
+        "\"binding\":\"00000000000000000000000000000001\","
+        "\"marker\":\"000000000000000000000000000000000000000000000000000000000000000%c\"}]",
+        expected ? expected : "absent", slug, marker);
+    return fws_rpc("fleet_board", params);
+}
+
+static int fws_write_op_cases(struct node_db *db)
+{
+    int failures = 0;
+    struct zcl_command_reply fleet;
+    struct fleet_board_status before, after;
+    char *refused = NULL, *absent = NULL;
+    TEST("wiki scope: the wiki_write op refuses a fleet parent and sees only its own scope") {
+        ASSERT(fws_write("wo-fleet", "fleet", "fleet page", NULL, NULL, &fleet));
+        const char *fleet_id = json_get_str(json_get(&fleet.data, "id"));
+        ASSERT(db_fleet_board_status(db, 0, &before));
+        refused = fws_op_write("wo-fleet", fleet_id, '1');
+        ASSERT(refused && strstr(refused, "CROSS_SCOPE_REVISION") != NULL);
+        ASSERT(db_fleet_board_status(db, 0, &after));
+        ASSERT_EQ(after.posts, before.posts);
+        ASSERT(!fws_list_has(NULL, "wo-fleet"));
+        ASSERT(!fws_history_has(NULL, "wo-fleet"));
+        /* No head in the public scope: a fleet page of the slug is no conflict. */
+        absent = fws_op_write("wo-fleet", NULL, '2');
+        ASSERT(absent && strstr(absent, "WIKI_CONFLICT") == NULL);
+        ASSERT(fws_history_has(NULL, "wo-fleet"));
+        ASSERT(db_fleet_board_status(db, 0, &after));
+        ASSERT_EQ(after.posts, before.posts + 1);
+        PASS();
+    } _test_next:;
+    free(refused);
+    free(absent);
+    zcl_command_reply_free(&fleet);
+    return failures;
+}
+
 static int fws_plan_cases(void)
 {
     int failures = 0;
@@ -357,7 +400,7 @@ int test_fleet_wiki_scope(void)
         fws_table = &table;
         node_rpc_client_set_test_hook(fws_rpc);
         failures += fws_scope_cases(&db) + fws_hidden_cases(&db) +
-                    fws_cross_cases() + fws_plan_cases();
+                    fws_cross_cases() + fws_write_op_cases(&db) + fws_plan_cases();
     } else {
         TEST("wiki scope: the in-memory store opens") { ASSERT(opened); PASS(); }
         _test_next:;
