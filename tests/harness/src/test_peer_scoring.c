@@ -15,6 +15,7 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ── Fixture helpers ─────────────────────────────────────── */
 
@@ -823,6 +824,280 @@ static int test_unregistered_node_keeps_full_ban(void)
     return failures;
 }
 
+/* ── Mutation-gap tests: env range edges, clock, decay anchors ── */
+
+/* Set `env` to `val`, run peer_scoring_init(), read the knob through
+ * `getter`, then restore the defaults. */
+static int knob_after_init(const char *env, const char *val, int (*getter)(void))
+{
+    setenv(env, val, 1);
+    peer_scoring_init();
+    int got = getter();
+    unsetenv(env);
+    peer_scoring_init();
+    return got;
+}
+
+static int test_env_range_edges_ban(void)
+{
+    int failures = 0;
+    TEST("peer_scoring: ban threshold/hours/decay accept their exact range edges only") {
+        /* threshold [1, 1000000], fallback 100 */
+        ASSERT_EQ(knob_after_init("ZCL_PEER_BAN_THRESHOLD", "1",
+                                  peer_scoring_ban_threshold), 1);
+        ASSERT_EQ(knob_after_init("ZCL_PEER_BAN_THRESHOLD", "1000000",
+                                  peer_scoring_ban_threshold), 1000000);
+        ASSERT_EQ(knob_after_init("ZCL_PEER_BAN_THRESHOLD", "1000001",
+                                  peer_scoring_ban_threshold), 100);
+        /* hours [1, 24*365], fallback 24 */
+        ASSERT_EQ(knob_after_init("ZCL_PEER_BAN_HOURS", "1",
+                                  peer_scoring_ban_hours), 1);
+        ASSERT_EQ(knob_after_init("ZCL_PEER_BAN_HOURS", "8760",
+                                  peer_scoring_ban_hours), 8760);
+        ASSERT_EQ(knob_after_init("ZCL_PEER_BAN_HOURS", "8761",
+                                  peer_scoring_ban_hours), 24);
+        /* decay [0, 10000], fallback 1 */
+        ASSERT_EQ(knob_after_init("ZCL_PEER_SCORE_DECAY_PER_MIN", "10000",
+                                  peer_scoring_decay_rate), 10000);
+        ASSERT_EQ(knob_after_init("ZCL_PEER_SCORE_DECAY_PER_MIN", "10001",
+                                  peer_scoring_decay_rate), 1);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_env_range_edges_admission(void)
+{
+    int failures = 0;
+    TEST("peer_scoring: inbound cap and last-peer ban accept their exact range edges only") {
+        /* per-IP cap [1, 4096], fallback 3 */
+        ASSERT_EQ(knob_after_init("ZCL_PEER_MAX_INBOUND_PER_IP", "1",
+                                  peer_scoring_max_inbound_per_ip), 1);
+        ASSERT_EQ(knob_after_init("ZCL_PEER_MAX_INBOUND_PER_IP", "4096",
+                                  peer_scoring_max_inbound_per_ip), 4096);
+        ASSERT_EQ(knob_after_init("ZCL_PEER_MAX_INBOUND_PER_IP", "4097",
+                                  peer_scoring_max_inbound_per_ip), 3);
+        /* last-peer ban [60, 86400], fallback 600 */
+        ASSERT_EQ(knob_after_init("ZCL_PEER_LAST_PEER_BAN_SECS", "60",
+                                  peer_scoring_last_peer_ban_secs), 60);
+        ASSERT_EQ(knob_after_init("ZCL_PEER_LAST_PEER_BAN_SECS", "59",
+                                  peer_scoring_last_peer_ban_secs), 600);
+        ASSERT_EQ(knob_after_init("ZCL_PEER_LAST_PEER_BAN_SECS", "86400",
+                                  peer_scoring_last_peer_ban_secs), 86400);
+        ASSERT_EQ(knob_after_init("ZCL_PEER_LAST_PEER_BAN_SECS", "86401",
+                                  peer_scoring_last_peer_ban_secs), 600);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_loopback_inbound_edges(void)
+{
+    int failures = 0;
+    TEST("peer_scoring: loopback ceiling at one slot and at the 4096 env edge") {
+        unsetenv("ZCL_NET_LOOPBACK_INBOUND_MAX");
+        /* One inbound slot: ceiling is 1 - (3*1)/4 = 1, below the default 24. */
+        ASSERT_EQ(peer_scoring_max_inbound_loopback(1), 1);
+
+        /* Env max is 4096 inclusive; 4097 is refused and falls back to 24.
+         * max_inbound 20000 leaves a ceiling of 5000, above both. */
+        setenv("ZCL_NET_LOOPBACK_INBOUND_MAX", "4096", 1);
+        ASSERT_EQ(peer_scoring_max_inbound_loopback(20000), 4096);
+        setenv("ZCL_NET_LOOPBACK_INBOUND_MAX", "4097", 1);
+        ASSERT_EQ(peer_scoring_max_inbound_loopback(20000), 24);
+        unsetenv("ZCL_NET_LOOPBACK_INBOUND_MAX");
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_now_ms_is_wall_clock(void)
+{
+    int failures = 0;
+    TEST("peer_scoring: now_ms is the realtime clock in milliseconds") {
+        int64_t before_s = (int64_t)time(NULL);
+        int64_t now_ms = peer_scoring_now_ms();
+        int64_t after_s = (int64_t)time(NULL);
+        ASSERT(now_ms > 0);
+        ASSERT(now_ms / 1000 >= before_s);
+        ASSERT(now_ms / 1000 <= after_s);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_offence_out_of_range(void)
+{
+    int failures = 0;
+    TEST("peer_scoring: out-of-range offence has weight 0 and name unknown") {
+        const enum peer_offence bad[] = {
+            (enum peer_offence)-1, PEER_OFFENCE_COUNT_,
+            (enum peer_offence)(PEER_OFFENCE_COUNT_ + 3),
+        };
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            ASSERT_EQ(peer_offence_weight(bad[i]), 0);
+            ASSERT_STR_EQ(peer_offence_name(bad[i]), "unknown");
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Ban `INVALID_BLOCK` with the given context and copy the stored ban reason. */
+static bool banned_reason_for(const char *context, char *out, size_t out_sz)
+{
+    struct net_manager nm;
+    struct p2p_node node;
+    setup_manager(&nm);
+    setup_node(&node, "test_peer_reason", false);
+    peer_scoring_record(&nm, &node, PEER_OFFENCE_INVALID_BLOCK, context);
+    bool ok = nm.num_banned == 1;
+    if (ok)
+        snprintf(out, out_sz, "%s", nm.banned[0].reason);
+    free(nm.banned);
+    return ok;
+}
+
+static int test_record_reason_text(void)
+{
+    int failures = 0;
+    TEST("peer_scoring: ban reason is the name, plus context when given") {
+        char reason[BAN_ENTRY_REASON_MAX];
+        ASSERT(banned_reason_for("bad", reason, sizeof(reason)));
+        ASSERT_STR_EQ(reason, "invalid_block: bad");
+        /* NULL and empty context both leave the bare name. */
+        ASSERT(banned_reason_for(NULL, reason, sizeof(reason)));
+        ASSERT_STR_EQ(reason, "invalid_block");
+        ASSERT(banned_reason_for("", reason, sizeof(reason)));
+        ASSERT_STR_EQ(reason, "invalid_block");
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_decay_null_and_zero_score(void)
+{
+    int failures = 0;
+    TEST("peer_scoring: null node and zero score return 0 and keep the anchor current") {
+        struct p2p_node node;
+        setup_node(&node, "test_peer_zero", false);
+        unsetenv("ZCL_PEER_SCORE_DECAY_PER_MIN");
+        peer_scoring_init();
+
+        ASSERT_EQ(peer_scoring_decay(NULL, 5000), 0);
+        ASSERT(!peer_scoring_should_ban(NULL));
+        peer_scoring_on_good_interaction(NULL, 5000);
+
+        /* Score 0: anchor follows now even when under a minute away. */
+        atomic_store(&node.peer_score_last_good_ms, 1000);
+        ASSERT_EQ(peer_scoring_decay(&node, 31000), 0);
+        ASSERT_EQ(atomic_load(&node.peer_score_last_good_ms), 31000);
+
+        /* Score 1 is a live score: a sub-minute call returns it untouched. */
+        atomic_store(&node.misbehavior, 1);
+        ASSERT_EQ(peer_scoring_decay(&node, 61000), 1);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_decay_anchor_paths(void)
+{
+    int failures = 0;
+    TEST("peer_scoring: decay returns the score and moves the anchor only where specified") {
+        const int64_t t = 1700000000LL * 1000;
+        struct p2p_node node;
+        setup_node(&node, "test_peer_anchor", false);
+        unsetenv("ZCL_PEER_SCORE_DECAY_PER_MIN");
+        peer_scoring_init();
+        atomic_store(&node.misbehavior, 7);
+
+        /* First call: anchors, returns the score. */
+        ASSERT_EQ(peer_scoring_decay(&node, t), 7);
+        ASSERT_EQ(atomic_load(&node.peer_score_last_good_ms), t);
+
+        /* Clock skew: no decay, anchor follows the earlier observation. */
+        ASSERT_EQ(peer_scoring_decay(&node, t - 5000), 7);
+        ASSERT_EQ(atomic_load(&node.peer_score_last_good_ms), t - 5000);
+
+        /* 1 ms, 30 s and 59.999 s after the anchor: no decay, anchor stays. */
+        const int64_t gaps[] = { 1, 30000, 59999 };
+        for (size_t i = 0; i < sizeof(gaps) / sizeof(gaps[0]); i++) {
+            atomic_store(&node.peer_score_last_good_ms, t);
+            ASSERT_EQ(peer_scoring_decay(&node, t + gaps[i]), 7);
+            ASSERT_EQ(atomic_load(&node.misbehavior), 7);
+            ASSERT_EQ(atomic_load(&node.peer_score_last_good_ms), t);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_decay_applied_moves_anchor(void)
+{
+    int failures = 0;
+    TEST("peer_scoring: an applied decay moves the anchor; good interaction decays") {
+        const int64_t t = 1700000000LL * 1000;
+        struct p2p_node node;
+        setup_node(&node, "test_peer_applied", false);
+        unsetenv("ZCL_PEER_SCORE_DECAY_PER_MIN");
+        peer_scoring_init();
+        atomic_store(&node.misbehavior, 70);
+        atomic_store(&node.peer_score_last_good_ms, t);
+
+        ASSERT_EQ(peer_scoring_decay(&node, t + 10 * 60000), 60);
+        ASSERT_EQ(atomic_load(&node.peer_score_last_good_ms), t + 10 * 60000);
+
+        peer_scoring_on_good_interaction(&node, t + 15 * 60000);
+        ASSERT_EQ(atomic_load(&node.misbehavior), 55);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_decay_disabled_anchor(void)
+{
+    int failures = 0;
+    TEST("peer_scoring: decay disabled returns the score and keeps the anchor current") {
+        const int64_t t = 1700000000LL * 1000;
+        struct p2p_node node;
+        setup_node(&node, "test_peer_off", false);
+        setenv("ZCL_PEER_SCORE_DECAY_PER_MIN", "0", 1);
+        peer_scoring_init();
+        atomic_store(&node.misbehavior, 7);
+        atomic_store(&node.peer_score_last_good_ms, t);
+
+        ASSERT_EQ(peer_scoring_decay(&node, t + 30000), 7);
+        ASSERT_EQ(atomic_load(&node.peer_score_last_good_ms), t + 30000);
+
+        unsetenv("ZCL_PEER_SCORE_DECAY_PER_MIN");
+        peer_scoring_init();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_reset_anchors_clock(void)
+{
+    int failures = 0;
+    TEST("peer_scoring: reset stamps the good-interaction anchor with now") {
+        struct p2p_node node;
+        setup_node(&node, "test_peer_reset_clock", false);
+        atomic_store(&node.misbehavior, 30);
+        atomic_store(&node.peer_score_last_good_ms, 5);
+
+        int64_t before_s = (int64_t)time(NULL);
+        peer_scoring_reset(&node);
+        int64_t after_s = (int64_t)time(NULL);
+        int64_t anchor = (int64_t)atomic_load(&node.peer_score_last_good_ms);
+        ASSERT_EQ(atomic_load(&node.misbehavior), 0);
+        ASSERT(anchor / 1000 >= before_s);
+        ASSERT(anchor / 1000 <= after_s);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── Entry point ───────────────────────────────────────── */
 
 int test_peer_scoring(void);
@@ -870,6 +1145,17 @@ int test_peer_scoring(void)
     failures += test_last_peer_ban_is_bounded();
     failures += test_second_peer_keeps_full_ban();
     failures += test_unregistered_node_keeps_full_ban();
+    failures += test_env_range_edges_ban();
+    failures += test_env_range_edges_admission();
+    failures += test_loopback_inbound_edges();
+    failures += test_now_ms_is_wall_clock();
+    failures += test_offence_out_of_range();
+    failures += test_record_reason_text();
+    failures += test_decay_null_and_zero_score();
+    failures += test_decay_anchor_paths();
+    failures += test_decay_applied_moves_anchor();
+    failures += test_decay_disabled_anchor();
+    failures += test_reset_anchors_clock();
 
     /* Restore env so other suites see the same state they started with. */
     if (saved_threshold) {
