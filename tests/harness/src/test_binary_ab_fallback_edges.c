@@ -345,6 +345,23 @@ static int ae_promote_refusals(const char *mut, const char *cur,
     return failures;
 }
 
+/* A zero-length executable must not replace a good last-good. */
+static int ae_promote_empty_source(const char *mut, const char *cur,
+                                   const char *lastgood)
+{
+    int failures = 0;
+    AE_CHECK("seed last-good and an empty executable",
+             ae_write_str(lastgood, "KEEP-ME", 0755) &&
+             ae_write(cur, (const uint8_t *)"", 0, 0755));
+    AE_CHECK("an empty current is refused", !binary_ab_promote(mut, cur));
+    AE_CHECK("the refusal left last-good byte-identical",
+             ae_text_is(lastgood, "KEEP-ME"));
+    int entries, staging;
+    ae_scan(mut, &entries, &staging);
+    AE_CHECK("an empty-source refusal leaves no staging file", staging == 0);
+    return failures;
+}
+
 static int ae_promote_after_injected_failure(const char *mut, const char *cur,
                                              const char *lastgood)
 {
@@ -690,6 +707,7 @@ static int ae_run_cases(const char *mut, const char *cur,
     failures += ae_streak_reset_failures(mut);
     failures += ae_promote_boundaries(mut, cur, lastgood);
     failures += ae_promote_refusals(mut, cur, lastgood);
+    failures += ae_promote_empty_source(mut, cur, lastgood);
     failures += ae_promote_after_injected_failure(mut, cur, lastgood);
     failures += ae_promote_short_relative(mut);
     failures += ae_long_lastgood(mut, cur);
