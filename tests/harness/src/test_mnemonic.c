@@ -370,6 +370,98 @@ static int test_from_entropy_rejects_bad_length(void)
     return failures;
 }
 
+/* Refusals of the module wrappers: each must return false rather than true
+ * when its guard or the domain call refuses. */
+static int test_mnemonic_wrapper_refusals(void)
+{
+    printf("mnemonic wrappers refuse null args and bad input... ");
+    uint8_t seed[MNEMONIC_SEED_SIZE];
+    uint8_t wseed[MNEMONIC_WALLET_SEED_SIZE];
+    char phrase[MNEMONIC_MAX_PHRASE_SIZE];
+    char long_pass[300];
+    memset(long_pass, 'p', sizeof(long_pass) - 1);
+    long_pass[sizeof(long_pass) - 1] = '\0';
+    static const char bad_checksum[] =
+        "abandon abandon abandon abandon abandon abandon "
+        "abandon abandon abandon abandon abandon abandon";
+    unsigned accepted = 0;
+    accepted += mnemonic_generate(12, NULL, 0) ? 1u << 0 : 0;
+    accepted += mnemonic_generate(12, phrase, 10) ? 1u << 1 : 0;
+    accepted += mnemonic_from_entropy(NULL, 16, phrase, sizeof(phrase))
+                        ? 1u << 2 : 0;
+    accepted += mnemonic_from_entropy(tv_entropy_128, 16, NULL, 0)
+                        ? 1u << 3 : 0;
+    accepted += mnemonic_from_entropy(tv_entropy_128, 16, phrase, 10)
+                        ? 1u << 4 : 0;
+    accepted += mnemonic_validate(NULL) ? 1u << 5 : 0;
+    accepted += mnemonic_validate(bad_checksum) ? 1u << 6 : 0;
+    accepted += mnemonic_to_seed(NULL, "", seed) ? 1u << 7 : 0;
+    accepted += mnemonic_to_seed(tv_mnemonic_128, "", NULL) ? 1u << 8 : 0;
+    accepted += mnemonic_to_seed(tv_mnemonic_128, long_pass, seed)
+                        ? 1u << 9 : 0;
+    accepted += mnemonic_to_wallet_seed(NULL, "", wseed) ? 1u << 10 : 0;
+    accepted += mnemonic_to_wallet_seed(tv_mnemonic_128, "", NULL)
+                        ? 1u << 11 : 0;
+    accepted += mnemonic_to_wallet_seed(tv_mnemonic_128, long_pass, wseed)
+                        ? 1u << 12 : 0;
+    if (accepted == 0) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL (accepted mask=0x%x)\n", accepted);
+    return 1;
+}
+
+/* Published BIP-39 vector 1 with the passphrase "TREZOR": the full seed,
+ * and mnemonic_to_wallet_seed must be exactly its first 32 bytes. */
+static int test_mnemonic_wallet_seed_vector(void)
+{
+    printf("BIP39 TREZOR vector: seed and 32-byte wallet seed... ");
+    static const uint8_t want[MNEMONIC_SEED_SIZE] = {
+        0xc5, 0x52, 0x57, 0xc3, 0x60, 0xc0, 0x7c, 0x72,
+        0x02, 0x9a, 0xeb, 0xc1, 0xb5, 0x3c, 0x05, 0xed,
+        0x03, 0x62, 0xad, 0xa3, 0x8e, 0xad, 0x3e, 0x3e,
+        0x9e, 0xfa, 0x37, 0x08, 0xe5, 0x34, 0x95, 0x53,
+        0x1f, 0x09, 0xa6, 0x98, 0x75, 0x99, 0xd1, 0x82,
+        0x64, 0xc1, 0xe1, 0xc9, 0x2f, 0x2c, 0xf1, 0x41,
+        0x63, 0x0c, 0x7a, 0x3c, 0x4a, 0xb7, 0xc8, 0x1b,
+        0x2f, 0x00, 0x16, 0x98, 0xe7, 0x46, 0x3b, 0x04,
+    };
+    uint8_t seed[MNEMONIC_SEED_SIZE];
+    uint8_t wseed[MNEMONIC_WALLET_SEED_SIZE];
+    memset(wseed, 0xEE, sizeof(wseed));
+    int fail = 0;
+    if (!mnemonic_to_seed(tv_mnemonic_128, "TREZOR", seed) ||
+        memcmp(seed, want, sizeof(want)) != 0)
+        fail = 1;
+    if (!mnemonic_to_wallet_seed(tv_mnemonic_128, "TREZOR", wseed) ||
+        memcmp(wseed, want, sizeof(wseed)) != 0)
+        fail = 1;
+    memory_cleanse(seed, sizeof(seed));
+    memory_cleanse(wseed, sizeof(wseed));
+    printf(fail ? "FAIL\n" : "OK\n");
+    return fail;
+}
+
+/* Generate must not hand back the same phrase twice: the entropy
+ * has to come from the RNG, not from whatever the stack held. */
+static int test_mnemonic_generate_is_random(void)
+{
+    printf("mnemonic generate draws fresh entropy each call... ");
+    char phrases[4][MNEMONIC_MAX_PHRASE_SIZE];
+    int fail = 0;
+    for (int i = 0; i < 4; i++) {
+        if (!mnemonic_generate(24, phrases[i], sizeof(phrases[i])))
+            fail = 1;
+    }
+    for (int i = 0; i < 4 && !fail; i++)
+        for (int j = i + 1; j < 4; j++)
+            if (strcmp(phrases[i], phrases[j]) == 0)
+                fail = 1;
+    printf(fail ? "FAIL\n" : "OK\n");
+    return fail;
+}
+
 int test_mnemonic(void)
 {
     int failures = 0;
@@ -383,6 +475,9 @@ int test_mnemonic(void)
     failures += test_from_entropy_roundtrip();
     failures += test_seed_to_master_pipeline();
     failures += test_from_entropy_rejects_bad_length();
+    failures += test_mnemonic_wrapper_refusals();
+    failures += test_mnemonic_wallet_seed_vector();
+    failures += test_mnemonic_generate_is_random();
 
     (void)print_hex; /* suppress unused warning if test 13 passes */
 
