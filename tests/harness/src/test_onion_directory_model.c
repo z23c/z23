@@ -182,31 +182,55 @@ static int om_validate_key_and_all(void)
 
 /* ── 2. save / find ───────────────────────────────────────────────── */
 
+static void om_full_row(struct db_onion_directory *r)
+{
+    om_row(r, 'b', 2147483640, ONION_DIRECTORY_STATUS_RETIRED);
+    r->updated_height = 2147483647;
+    memset(r->owner_address, 'o', ONION_DIRECTORY_ADDRESS_MAX - 1);
+    for (int i = 0; i < 32; i++)
+        r->master_pubkey[i] = (uint8_t)(0xa0 + i);
+    r->has_pubkey = true;
+}
+
+static bool om_full_row_matches(const struct db_onion_directory *got,
+                                const struct db_onion_directory *r)
+{
+    return strcmp(got->hostname, r->hostname) == 0 &&
+           memcmp(got->txid, r->txid, 32) == 0 &&
+           got->height == 2147483640 && got->updated_height == 2147483647 &&
+           strcmp(got->owner_address, r->owner_address) == 0 &&
+           strlen(got->owner_address) == ONION_DIRECTORY_ADDRESS_MAX - 1 &&
+           got->has_pubkey &&
+           memcmp(got->master_pubkey, r->master_pubkey, 32) == 0 &&
+           strcmp(got->status, "retired") == 0;
+}
+
+static int om_replace_and_null(struct node_db *ndb,
+                               const struct db_onion_directory *r);
+
 static int om_roundtrip(struct node_db *ndb)
 {
     int failures = 0;
     struct db_onion_directory r, got;
-    om_row(&r, 'b', 2147483640, ONION_DIRECTORY_STATUS_RETIRED);
-    r.updated_height = 2147483647;
-    memset(r.owner_address, 'o', ONION_DIRECTORY_ADDRESS_MAX - 1);
-    for (int i = 0; i < 32; i++)
-        r.master_pubkey[i] = (uint8_t)(0xa0 + i);
-    r.has_pubkey = true;
+    om_full_row(&r);
 
     memset(&got, 0xff, sizeof(got));
     bool ok = db_onion_directory_save(ndb, &r) &&
               db_onion_directory_find(ndb, r.hostname, &got);
     OM_CHECK("save then find returns the 7 columns",
-             ok && strcmp(got.hostname, r.hostname) == 0 &&
-             memcmp(got.txid, r.txid, 32) == 0 &&
-             got.height == 2147483640 && got.updated_height == 2147483647 &&
-             strcmp(got.owner_address, r.owner_address) == 0 &&
-             strlen(got.owner_address) == ONION_DIRECTORY_ADDRESS_MAX - 1 &&
-             got.has_pubkey &&
-             memcmp(got.master_pubkey, r.master_pubkey, 32) == 0 &&
-             strcmp(got.status, "retired") == 0);
+             ok && om_full_row_matches(&got, &r));
+    failures += om_replace_and_null(ndb, &r);
+    return failures;
+}
 
-    struct db_onion_directory again = r;
+static int om_replace_and_null(struct node_db *ndb,
+                               const struct db_onion_directory *r)
+{
+    int failures = 0;
+    struct db_onion_directory got;
+    bool ok;
+
+    struct db_onion_directory again = *r;
     again.height = 11;
     again.updated_height = 12;
     again.owner_address[0] = '\0';
@@ -216,7 +240,7 @@ static int om_roundtrip(struct node_db *ndb)
     memset(&got, 0xff, sizeof(got));
     ok = db_onion_directory_save(ndb, &again) &&
          db_onion_directory_count(ndb) == 1 &&
-         db_onion_directory_find(ndb, r.hostname, &got);
+         db_onion_directory_find(ndb, r->hostname, &got);
     OM_CHECK("a second save REPLACEs the row on its hostname key",
              ok && got.height == 11 && got.updated_height == 12 &&
              got.owner_address[0] == '\0' && !got.has_pubkey &&
@@ -226,7 +250,7 @@ static int om_roundtrip(struct node_db *ndb)
                                "owner_address IS NULL AND "
                                "master_pubkey IS NULL") == 1);
     OM_CHECK("a present owner and key are stored non-NULL",
-             db_onion_directory_save(ndb, &r) &&
+             db_onion_directory_save(ndb, r) &&
              om_count_sql(ndb, "SELECT COUNT(*) FROM onion_directory WHERE "
                                "owner_address IS NOT NULL AND "
                                "master_pubkey IS NOT NULL AND "
@@ -306,6 +330,8 @@ static int om_list_fixture(struct node_db *ndb)
     return 1;
 }
 
+static int om_list_bounds(struct node_db *ndb);
+
 static int om_list_active(struct node_db *ndb)
 {
     int failures = 0;
@@ -340,7 +366,14 @@ static int om_list_active(struct node_db *ndb)
              n == 1 && strcmp(page[0].hostname, g9) == 0);
     OM_CHECK("offset past the end is an empty page",
              db_onion_directory_list_active(ndb, page, 8, 4) == 0);
+    return failures + om_list_bounds(ndb);
+}
 
+static int om_list_bounds(struct node_db *ndb)
+{
+    int failures = 0;
+    struct db_onion_directory page[8];
+    int n;
     memset(page, 0xee, sizeof(page));
     n = db_onion_directory_list_active(ndb, page, 3, 0);
     OM_CHECK("max bounds the page and nothing is written past it",
@@ -448,6 +481,22 @@ static void om_live_close(struct om_live *x)
     if (x->db_up) node_db_close(&x->ndb);
 }
 
+static bool om_dump_row_matches(const struct json_value *v,
+                                const struct db_onion_directory *a,
+                                const char *txhex, const char *pkhex)
+{
+    return json_get_bool(json_get(v, "found")) &&
+           strcmp(json_get_str(json_get(v, "hostname")), a->hostname) == 0 &&
+           strcmp(json_get_str(json_get(v, "txid")), txhex) == 0 &&
+           json_get_int(json_get(v, "height")) == 40 &&
+           strcmp(json_get_str(json_get(v, "owner_address")), "t1owner") == 0 &&
+           strcmp(json_get_str(json_get(v, "master_pubkey")), pkhex) == 0 &&
+           strcmp(json_get_str(json_get(v, "status")), "active") == 0 &&
+           json_get_int(json_get(v, "updated_height")) == 47 &&
+           json_get(v, "total_rows") == NULL;
+}
+
+
 static int om_dump_live(struct om_live *x)
 {
     int failures = 0;
@@ -478,16 +527,7 @@ static int om_dump_live(struct om_live *x)
     memset(&v, 0, sizeof(v));
     ok = onion_directory_dump_state_json(&v, a.hostname);
     OM_CHECK("keyed dump of a keyed row: every field, key as lowercase hex",
-             ok && json_get_bool(json_get(&v, "found")) &&
-             strcmp(json_get_str(json_get(&v, "hostname")), a.hostname) == 0 &&
-             strcmp(json_get_str(json_get(&v, "txid")), txhex) == 0 &&
-             json_get_int(json_get(&v, "height")) == 40 &&
-             strcmp(json_get_str(json_get(&v, "owner_address")),
-                    "t1owner") == 0 &&
-             strcmp(json_get_str(json_get(&v, "master_pubkey")), pkhex) == 0 &&
-             strcmp(json_get_str(json_get(&v, "status")), "active") == 0 &&
-             json_get_int(json_get(&v, "updated_height")) == 47 &&
-             json_get(&v, "total_rows") == NULL);
+             ok && om_dump_row_matches(&v, &a, txhex, pkhex));
     json_free(&v);
     return failures;
 }
