@@ -334,6 +334,12 @@ bool mvap_request_decode(const uint8_t *in, size_t in_len,
         LOG_FAIL(MVAP_TAG, "param length %u inconsistent with record %zu",
                  plen, in_len);
 
+    /* The encoder writes strnlen(param) bytes, so a NUL inside the declared
+     * length is a second wire form, and the bytes after it would reach the
+     * safe-token rule unseen. */
+    if (plen && memchr(in + MVAP_REQ_FIXED, 0, plen) != NULL)
+        LOG_FAIL(MVAP_TAG, "param carries an embedded NUL (length %u)", plen);
+
     struct mvap_request r = { 0 };
     r.verb       = verb;
     r.version    = version;
@@ -401,6 +407,10 @@ bool mvap_response_decode(const uint8_t *in, size_t in_len,
     if (blen > MVAP_BODY_MAX || (size_t)MVAP_RESP_FIXED + blen != in_len)
         LOG_FAIL(MVAP_TAG, "body length %u inconsistent with record %zu",
                  blen, in_len);
+
+    /* The encoder writes strnlen(body) bytes; see the request decoder. */
+    if (blen && memchr(in + MVAP_RESP_FIXED, 0, blen) != NULL)
+        LOG_FAIL(MVAP_TAG, "body carries an embedded NUL (length %u)", blen);
 
     struct mvap_response r = { 0 };
     r.verb       = zcl_read_u16_le(in + 6);
