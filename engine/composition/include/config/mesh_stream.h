@@ -254,7 +254,7 @@ typedef bool (*mesh_stream_visitor)(struct mesh_stream *st, void *ctx);
 void mesh_stream_visit(const char *service_name, mesh_stream_visitor visit,
                        void *ctx);
 
-#ifdef ZCL_TESTING
+#if defined(ZCL_TESTING) || defined(ZCL_FUZZ_QUIET_LOG_MACROS)
 /* Test seams: drive the exact production frame path and table without a
  * live composition context. reset clears the table and the OPEN cadence;
  * the registry survives so a test service stays registered. inject

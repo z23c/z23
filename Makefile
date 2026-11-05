@@ -11275,7 +11275,7 @@ FUZZ_CFLAGS = -std=c23 -O1 -g -Wall -Wextra \
 	-fno-sanitize=alignment $(ZCL_FUZZ_EXTRA_CFLAGS)
 FUZZ_LIBS = $(TOR_LIBS) $(LIBS)
 
-FUZZ_TARGETS = $(BIN_DIR)/fuzz_block $(BIN_DIR)/fuzz_script $(BIN_DIR)/fuzz_p2p $(BIN_DIR)/fuzz_http $(BIN_DIR)/fuzz_compactblock $(BIN_DIR)/fuzz_snapshot $(BIN_DIR)/fuzz_tx_bundle $(BIN_DIR)/fuzz_rom_manifest $(BIN_DIR)/fuzz_overlay $(BIN_DIR)/fuzz_ecdsa $(BIN_DIR)/fuzz_zcode_commons $(BIN_DIR)/fuzz_zcode_dht $(BIN_DIR)/fuzz_zcode_science $(BIN_DIR)/fuzz_mesh_status_proto $(BIN_DIR)/fuzz_semantic_manifest $(BIN_DIR)/fuzz_zswap_wires $(BIN_DIR)/fuzz_param_wires $(BIN_DIR)/fuzz_file_wires $(BIN_DIR)/fuzz_package_wires
+FUZZ_TARGETS = $(BIN_DIR)/fuzz_block $(BIN_DIR)/fuzz_script $(BIN_DIR)/fuzz_p2p $(BIN_DIR)/fuzz_http $(BIN_DIR)/fuzz_compactblock $(BIN_DIR)/fuzz_snapshot $(BIN_DIR)/fuzz_tx_bundle $(BIN_DIR)/fuzz_rom_manifest $(BIN_DIR)/fuzz_overlay $(BIN_DIR)/fuzz_ecdsa $(BIN_DIR)/fuzz_zcode_commons $(BIN_DIR)/fuzz_zcode_dht $(BIN_DIR)/fuzz_zcode_science $(BIN_DIR)/fuzz_mesh_status_proto $(BIN_DIR)/fuzz_semantic_manifest $(BIN_DIR)/fuzz_zswap_wires $(BIN_DIR)/fuzz_param_wires $(BIN_DIR)/fuzz_file_wires $(BIN_DIR)/fuzz_package_wires $(BIN_DIR)/fuzz_mesh_frames
 # Keep the line above literal and keep one `$(BIN_DIR)/fuzz_<kind>:` rule per
 # harness below: the fuzz-artifact-ledger gate (gate_fuzz_artifact_replay.c) derives the corpus<->binary map
 # from those rule lines, and background_quality_lane.sh derives its kind list
@@ -11349,7 +11349,7 @@ check-fuzz-ci-tools: check-fuzz-toolchain
 
 fuzz: check-fuzz-toolchain $(FUZZ_TARGETS)
 
-.PHONY: fuzz_block fuzz_script fuzz_p2p fuzz_http fuzz_compactblock fuzz_snapshot fuzz_tx_bundle fuzz_rom_manifest fuzz_overlay fuzz_ecdsa fuzz_zcode_commons fuzz_zcode_dht fuzz_zcode_science fuzz_mesh_status_proto fuzz_semantic_manifest fuzz_zswap_wires fuzz_param_wires fuzz_file_wires fuzz_package_wires
+.PHONY: fuzz_block fuzz_script fuzz_p2p fuzz_http fuzz_compactblock fuzz_snapshot fuzz_tx_bundle fuzz_rom_manifest fuzz_overlay fuzz_ecdsa fuzz_zcode_commons fuzz_zcode_dht fuzz_zcode_science fuzz_mesh_status_proto fuzz_semantic_manifest fuzz_zswap_wires fuzz_param_wires fuzz_file_wires fuzz_package_wires fuzz_mesh_frames
 fuzz_package_wires: $(BIN_DIR)/fuzz_package_wires
 fuzz_semantic_manifest: $(BIN_DIR)/fuzz_semantic_manifest
 fuzz_zswap_wires: $(BIN_DIR)/fuzz_zswap_wires
@@ -11360,6 +11360,7 @@ fuzz_zcode_commons: $(BIN_DIR)/fuzz_zcode_commons
 fuzz_zcode_dht: $(BIN_DIR)/fuzz_zcode_dht
 fuzz_zcode_science: $(BIN_DIR)/fuzz_zcode_science
 fuzz_mesh_status_proto: $(BIN_DIR)/fuzz_mesh_status_proto
+fuzz_mesh_frames: $(BIN_DIR)/fuzz_mesh_frames
 fuzz_block: $(BIN_DIR)/fuzz_block
 fuzz_script: $(BIN_DIR)/fuzz_script
 fuzz_p2p: $(BIN_DIR)/fuzz_p2p
@@ -11439,6 +11440,9 @@ $(BIN_DIR)/fuzz_file_wires: $(FUZZ_OBJ_DIR)/tools/fuzz/fuzz_file_wires.o $(FUZZ_
 	$(FUZZ_LINK)
 
 $(BIN_DIR)/fuzz_package_wires: $(FUZZ_OBJ_DIR)/tools/fuzz/fuzz_package_wires.o $(FUZZ_OBJS) | check-fuzz-toolchain
+	$(FUZZ_LINK)
+
+$(BIN_DIR)/fuzz_mesh_frames: $(FUZZ_OBJ_DIR)/tools/fuzz/fuzz_mesh_frames.o $(FUZZ_OBJS) | check-fuzz-toolchain
 	$(FUZZ_LINK)
 
 fuzz-ci: check-fuzz-ci-tools $(FUZZ_TARGETS)

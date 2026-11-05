@@ -1136,7 +1136,7 @@ void mesh_stream_shutdown(void)
     zcl_mutex_unlock(&g_stream_lock);
 }
 
-#ifdef ZCL_TESTING
+#if defined(ZCL_TESTING) || defined(ZCL_FUZZ_QUIET_LOG_MACROS)
 void mesh_stream_test_reset(void)
 {
     stream_lock();
