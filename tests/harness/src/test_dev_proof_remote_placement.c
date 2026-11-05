@@ -9,12 +9,14 @@
 
 #if !defined(_WIN32)
 #include "base/hex.h"
+#include "base/safe_alloc.h"
 #include "command/native_dev_land_remote_shared.h"
 #include "crypto/sha3.h"
 #include "util/file_io.h"
 #include "util/compare.h"
 #include "util/spawn.h"
 #include <errno.h>
+#include <fcntl.h>
 #include <sys/wait.h>
 
 extern char **environ;
@@ -566,6 +568,7 @@ struct rpp_lazy_fixture {
 struct rpp_snapshot {
     struct sha3_256_ctx hash;
     size_t entries, bytes;
+    bool exclude_cache;
 };
 
 static bool rpp_snapshot_node(const char *path, struct rpp_snapshot *snapshot, unsigned depth);
@@ -582,6 +585,7 @@ static bool rpp_snapshot_children(const char *path, struct rpp_snapshot *snapsho
         struct dirent *entry = readdir(dir);
         if (!entry) { if (errno) ok = false; break; }
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        if (snapshot->exclude_cache && depth == 0 && !strcmp(entry->d_name, ".cache")) continue;
         if (count == 128 || strlen(entry->d_name) >= sizeof(storage[0])) { ok = false; break; }
         names[count] = storage[count];
         memcpy(names[count++], entry->d_name, strlen(entry->d_name) + 1u);
@@ -620,13 +624,19 @@ static bool rpp_snapshot_node(const char *path, struct rpp_snapshot *snapshot, u
     return ok;
 }
 
-static bool rpp_snapshot_root(const char *root, uint8_t out[32])
+static bool rpp_snapshot_scope(const char *root, bool exclude_cache, uint8_t out[32])
 {
     struct rpp_snapshot snapshot = {0};
+    snapshot.exclude_cache = exclude_cache;
     sha3_256_init(&snapshot.hash);
     if (!rpp_snapshot_node(root, &snapshot, 0)) return false;
     sha3_256_finalize(&snapshot.hash, out);
     return true;
+}
+
+static bool rpp_snapshot_root(const char *root, uint8_t out[32])
+{
+    return rpp_snapshot_scope(root, false, out);
 }
 
 static bool rpp_sentinel(const struct rpp_lazy_fixture *lazy, bool present)
@@ -690,21 +700,158 @@ static bool rpp_lazy_setup(struct rpp_lazy_fixture *lazy, const struct rpp_fixtu
         RPP_GIT(f->receiver, NULL, 0, "config", "remote.sentinel.url", url) && rpp_lazy_object(lazy);
 }
 
-static bool rpp_lazy_prepare_refused(struct rpp_lazy_fixture *lazy)
+static bool rpp_immutable_refusal(struct rpp_fixture *f, const char *reason)
 {
-    struct rpp_fixture *f = &lazy->fixture;
     uint8_t before[32], after[32];
-    if (!rpp_sentinel(lazy, false) || !rpp_snapshot_root(f->receiver, before)) return false;
+    if (!rpp_snapshot_root(f->receiver, before)) return false;
     struct zcl_dev_proof_remote_placement observed = {0};
     char why[256] = {0};
     bool accepted = zcl_dev_proof_remote_prepare(&f->assignment, rpp_owner, f->receiver,
         &observed, why, sizeof(why));
-    bool ok = !accepted && !strcmp(why, "remote_git_lazy_fetch_config") &&
+    bool ok = !accepted && !strcmp(why, reason) &&
         !observed.objects_imported && !observed.placed && !observed.evidence_dir[0];
-    ok = ok && rpp_sentinel(lazy, false) && rpp_snapshot_root(f->receiver, after) &&
+    ok = ok && rpp_snapshot_root(f->receiver, after) &&
         memcmp(before, after, sizeof(before)) == 0;
-    if (!ok) printf("missing-object prepare: accepted=%d reason=%s\n", accepted, why);
+    if (!ok) printf("immutable prepare refusal: expected=%s accepted=%d reason=%s\n", reason, accepted, why);
     return ok;
+}
+
+static bool rpp_lazy_prepare_refused(struct rpp_lazy_fixture *lazy)
+{
+    return rpp_sentinel(lazy, false) &&
+        rpp_immutable_refusal(&lazy->fixture, "remote_git_lazy_fetch_config") && rpp_sentinel(lazy, false);
+}
+
+#if defined(__linux__) && defined(__GLIBC__)
+static bool rpp_audit_command(struct rpp_fixture *f, const char *const *argv)
+{
+    struct zcl_devloop_process_result result = {0};
+    bool ok = zcl_devloop_process_run(f->receiver, argv, 60000, &result) &&
+        !result.timed_out && !result.cancelled && !result.term_signal &&
+        result.exit_code == 0 && !result.output_truncated;
+    if (!ok) printf("audit control %s failed: exit=%d output=%.1024s\n", argv[0], result.exit_code, result.output);
+    return ok;
+}
+
+static bool rpp_audit_build(struct rpp_fixture *f, char library[1024])
+{
+    static const char source[] =
+        "/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */\n"
+        "#define _GNU_SOURCE\n#include <link.h>\n#include <stdlib.h>\n"
+        "#include <fcntl.h>\n#include <unistd.h>\n"
+        "unsigned int la_version(unsigned int v) {\n"
+        " const char *p = getenv(\"ZCL_TEST_AUDIT_MARKER\");\n"
+        " if (p) { int fd = open(p, O_WRONLY|O_CREAT|O_EXCL, 0600); if (fd >= 0) close(fd); }\n"
+        " return v < LAV_CURRENT ? v : LAV_CURRENT;\n}\n";
+    char path[1024];
+    if (!rpp_write(f->root, "audit.c", source, sizeof(source) - 1u, 0600) ||
+        !rpp_path(path, sizeof(path), f->root, "audit.c") ||
+        !rpp_path(library, 1024, f->root, "audit.so")) return false;
+    const char *argv[] = {"/usr/bin/cc", "-std=c23", "-Wall", "-Wextra", "-Werror",
+        "-fPIC", "-shared", "-o", library, path, NULL};
+    return rpp_audit_command(f, argv);
+}
+
+static bool rpp_audit_observed(struct rpp_fixture *f, const char *marker)
+{
+    const char *probe[] = {"/usr/bin/git", "--version", NULL};
+    struct stat st;
+    return rpp_audit_command(f, probe) && lstat(marker, &st) == 0 &&
+        S_ISREG(st.st_mode) && st.st_size == 0 && unlink(marker) == 0;
+}
+
+static bool rpp_audit_no_invocation(struct rpp_fixture *f, const char *marker)
+{
+    struct stat st;
+    return rpp_immutable_refusal(f, "remote_git_environment_redirected") &&
+        lstat(marker, &st) != 0 && errno == ENOENT;
+}
+#endif
+
+static bool rpp_audit_refused(struct rpp_fixture *f)
+{
+    if (getenv("LD_AUDIT")) return false;
+#if defined(__linux__) && defined(__GLIBC__)
+    char library[1024], marker[1024];
+    if (!rpp_audit_build(f, library) ||
+        !rpp_path(marker, sizeof(marker), f->root, "audit-loader-contacted")) return false;
+    const char *old = getenv("ZCL_TEST_AUDIT_MARKER");
+    char *saved = old ? zcl_strdup(old, "placement-audit-env") : NULL;
+    if (old && !saved) return false;
+    bool ok = setenv("ZCL_TEST_AUDIT_MARKER", marker, 1) == 0 && setenv("LD_AUDIT", library, 1) == 0;
+    if (ok) ok = rpp_audit_observed(f, marker);
+    if (ok) ok = rpp_audit_no_invocation(f, marker);
+    bool restored = unsetenv("LD_AUDIT") == 0;
+    int rc = saved ? setenv("ZCL_TEST_AUDIT_MARKER", saved, 1) : unsetenv("ZCL_TEST_AUDIT_MARKER");
+    free(saved);
+    printf("LD_AUDIT loader marker/control: %s\n", ok ? "OBSERVED/REFUSED" : "FAIL");
+    return ok && restored && rc == 0;
+#else
+    bool installed = setenv("LD_AUDIT", "fixture-runtime-marker-unavailable", 1) == 0;
+    bool refused = installed && rpp_immutable_refusal(f, "remote_git_environment_redirected");
+    bool restored = unsetenv("LD_AUDIT") == 0;
+    printf("LD_AUDIT loader observation UNSUPPORTED on this platform; portable environment refusal %s\n",
+        refused ? "PASS" : "FAIL");
+    return refused && restored;
+#endif
+}
+
+static bool rpp_sparse_input(struct rpp_fixture *f, const char *leaf, uint64_t limit, char out[1024])
+{
+    if (!rpp_path(out, 1024, f->root, leaf)) return false;
+    off_t size = (off_t)(limit + 1u);
+    if (size <= 0 || (uint64_t)size != limit + 1u) return false;
+    int fd = open(out, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0) return false;
+    bool ok = ftruncate(fd, size) == 0;
+    if (close(fd) != 0) ok = false;
+    struct stat st;
+    return ok && lstat(out, &st) == 0 && S_ISREG(st.st_mode) && st.st_size == size && st.st_blocks == 0;
+}
+
+static bool rpp_bounded_outputs(struct rpp_fixture *f,
+    const struct zcl_dev_proof_remote_placement *observed, bool offer_oversized)
+{
+    char prefix[1024], bundle[1600], offer[1600], original[65], retained[65];
+    struct stat st;
+    if (!rpp_path(prefix, sizeof(prefix), f->receiver, ".cache/zcl-dev-proof/remote-proof-inputs-") ||
+        strncmp(observed->evidence_dir, prefix, strlen(prefix)) ||
+        lstat(observed->evidence_dir, &st) != 0 || !rpp_transport_only(observed->evidence_dir, &st)) return false;
+    if (offer_oversized) return rpp_directory_empty(observed->evidence_dir);
+    return rpp_path(bundle, sizeof(bundle), observed->evidence_dir, "source.bundle") &&
+        lstat(bundle, &st) != 0 && errno == ENOENT &&
+        rpp_path(offer, sizeof(offer), observed->evidence_dir, "source.offer.json") &&
+        lstat(offer, &st) == 0 && st.st_size <= ZCL_DEV_PROOF_REMOTE_OFFER_MAX_BYTES &&
+        zcl_dlr_file_sha256(f->offer, original) && zcl_dlr_file_sha256(offer, retained) && !strcmp(original, retained);
+}
+
+static bool rpp_bound_state_unchanged(struct rpp_fixture *f, const uint8_t before[32])
+{
+    uint8_t after[32];
+    return rpp_snapshot_scope(f->receiver, true, after) && !memcmp(before, after, sizeof(after)) &&
+        rpp_refs_unchanged(f, f->base) && rpp_guard_available(f);
+}
+
+static bool rpp_oversized_refused(struct rpp_fixture *f, bool offer_oversized,
+    const char *leaf, uint64_t limit)
+{
+    char input[1024], status[256], why[256] = {0};
+    if (!rpp_sparse_input(f, leaf, limit, input) ||
+        !RPP_GIT(f->receiver, status, sizeof(status), "status", "--porcelain=v1", "--untracked-files=all") || status[0])
+        return false;
+    struct zcl_dev_proof_remote_assignment changed = f->assignment;
+    if (offer_oversized) changed.offer = input;
+    else changed.bundle = input;
+    uint8_t before[32];
+    if (!rpp_snapshot_scope(f->receiver, true, before)) return false;
+    struct zcl_dev_proof_remote_placement observed = {0};
+    bool accepted = zcl_dev_proof_remote_prepare(&changed, rpp_owner, f->receiver, &observed, why, sizeof(why));
+    bool ok = !accepted && !strcmp(why, "remote_transport_bytes_mismatch") &&
+        !observed.objects_imported && !observed.placed && rpp_bounded_outputs(f, &observed, offer_oversized);
+    ok = ok && rpp_bound_state_unchanged(f, before);
+    printf("sparse oversized %s: %s (%s)\n", offer_oversized ? "offer" : "bundle", ok ? "REFUSED" : "FAIL", why);
+    if (!ok) { printf("bounded input evidence retained: %s\n", observed.evidence_dir); return false; }
+    return rpp_retire(&observed);
 }
 
 static bool rpp_lazy_case(struct rpp_lazy_fixture *lazy, const char *key, const char *value)
@@ -790,7 +937,10 @@ static int rpp_child(const char *source)
     /* Only this fork-isolated fixture may execute the real source helper. */
     bool ok = rpp_environment(home) &&
         setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0 && rpp_setup(&fixture, source);
-    if (ok) ok = rpp_missing_object_controls(&fixture) &&
+    if (ok) ok = rpp_audit_refused(&fixture) &&
+        rpp_oversized_refused(&fixture, true, "oversized.offer", ZCL_DEV_PROOF_REMOTE_OFFER_MAX_BYTES) &&
+        rpp_oversized_refused(&fixture, false, "oversized.bundle", ZCL_DEV_PROOF_REMOTE_BUNDLE_MAX_BYTES) &&
+        rpp_missing_object_controls(&fixture) &&
         rpp_negative_prepare(&fixture) && rpp_positive(&fixture);
     if (!ok) printf("real placement fixture retained: %s\n", fixture.root);
     else ok = test_rm_rf_recursive(fixture.root) == 0;
