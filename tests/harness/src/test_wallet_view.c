@@ -554,6 +554,7 @@ int test_wallet_view(void)
     failures += check_wallet_token_row_bounds();
 
     failures += wv_check_read_stream_cloexec();
+    failures += check_wallet_view_json_builders();
 
     /* Initialize with no datadir — tests DB-unavailable paths.
      * This is intentional: we want to verify graceful degradation. */

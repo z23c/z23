@@ -104,4 +104,7 @@ int check_wallet_view_command_center_has_peer_table(void);
 int check_wallet_view_template_render_handles_name_syntax(void);
 int check_wallet_view_dashboard_renders_in_50ms(void);
 
+/* test_wallet_view_json.c — direct tests of the wallet_view JSON builders. */
+int check_wallet_view_json_builders(void);
+
 #endif
