@@ -1353,6 +1353,8 @@ static void run_full_suite_foundation(int *failures)
     *failures += test_flyclient();
     { extern int test_flyclient_chainwork_floor(void);
       *failures += test_flyclient_chainwork_floor(); }
+    { extern int test_snapshot_fc_binding(void);
+      *failures += test_snapshot_fc_binding(); }
     { extern int test_test_zmsg_memo_codec(void);
       *failures += test_test_zmsg_memo_codec(); }
     { extern int test_zpay(void);
