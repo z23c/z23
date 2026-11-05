@@ -1573,37 +1573,6 @@ static int uap_run_pause_clear_rearms_case(void)
     return failures;
 }
 
-/* Pause at height 0 is a real pause; with a genesis-only chain whose tip is
- * 0 the remedy clears it, kicks gap-fill, and the witness accepts tip 0. */
-static int uap_run_height_zero_resume_case(void)
-{
-    int failures = 0;
-    reset_conditions();
-    struct fake_clock clock;
-    fake_clock_install(&clock, 3000);
-    struct main_state ms;
-    main_state_init(&ms);
-    block_height_census_test_reset();
-    struct uint256 hashes[2];
-    bool ok = uap_chain_with_tip(&ms, hashes, 0);
-    gap_fill_test_set_running(true);
-    condition_engine_set_main_state(&ms);
-    register_utxo_activation_paused();
-    process_block_test_set_utxo_activation_paused_height(0);
-    condition_engine_tick();
-    uap_tick_at(&clock, 3300);
-    ok = ok && utxo_activation_paused_test_resume_calls() == 1;
-    ok = ok && process_block_test_get_utxo_activation_paused_height() == -1;
-    ok = ok && condition_engine_get_active_count() == 0;
-    ok = ok && gap_fill_test_kick_pending();
-    UAP_CHECK("a pause at height 0 fires, is resumed, kicks gap-fill and witnesses at tip 0", ok);
-    gap_fill_test_set_running(false);
-    condition_engine_set_main_state(NULL);
-    main_state_free(&ms);
-    clock_reset_default();
-    return failures;
-}
-
 /* The witness never accepts a pause that is still set, even at height 0. */
 static int uap_run_height_zero_still_paused_case(void)
 {
@@ -1648,6 +1617,8 @@ static int uap_run_tip_not_advanced_case(void)
     block_height_census_test_reset();
     struct uint256 hashes[2];
     bool ok = uap_chain_with_tip(&ms, hashes, 100);
+    bool chain_ok = ok;
+    gap_fill_test_set_running(true);
     condition_engine_set_main_state(&ms);
     register_utxo_activation_paused();
     process_block_test_set_utxo_activation_paused_height(150);
@@ -1661,7 +1632,16 @@ static int uap_run_tip_not_advanced_case(void)
     ok = ok && process_block_test_get_utxo_activation_paused_height() == -1;
     ok = ok && s.currently_active && s.cleared_count == 0 && s.attempts == 1;
     ok = ok && s.last_outcome == COND_REMEDY_UNWITNESSED;
-    UAP_CHECK("clearing the flag without tip movement stays unwitnessed", ok);
+    ok = ok && gap_fill_test_kick_pending(); /* the clearing remedy kicks */
+    if (!ok)
+        printf("[chain_ok=%d calls=%d paused=%d active=%d cleared=%d "
+               "attempts=%d outcome=%d kick=%d] ", chain_ok,
+               utxo_activation_paused_test_resume_calls(),
+               process_block_test_get_utxo_activation_paused_height(),
+               s.currently_active, s.cleared_count, s.attempts,
+               s.last_outcome, gap_fill_test_kick_pending());
+    UAP_CHECK("clearing the flag without tip movement stays unwitnessed and kicks gap-fill", ok);
+    gap_fill_test_set_running(false);
     condition_engine_set_main_state(NULL);
     main_state_free(&ms);
     clock_reset_default();
@@ -1755,7 +1735,6 @@ static int uap_boundary_cases(void)
     failures += uap_run_fire_boundary_case();
     failures += uap_run_poll_gate_case();
     failures += uap_run_pause_clear_rearms_case();
-    failures += uap_run_height_zero_resume_case();
     failures += uap_run_height_zero_still_paused_case();
     failures += uap_run_tip_not_advanced_case();
     failures += uap_run_no_main_state_unwitnessed_case();

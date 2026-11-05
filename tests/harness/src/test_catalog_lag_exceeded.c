@@ -19,6 +19,7 @@
 #include "conditions/catalog_lag_exceeded.h"
 #include "controllers/diagnostics_internal.h"
 #include "framework/condition.h"
+#include "jobs/reducer_frontier.h"
 #include "storage/catalog_completeness.h"
 #include "storage/progress_store.h"
 #include "json/json.h"
@@ -146,6 +147,309 @@ static int cl_test_progress_contention(const struct catalog_index_status *rows,
         pthread_mutex_destroy(&h.mutex);
     }
 
+    return failures;
+}
+
+/* ── Seeding-mutant tests: threshold, latch, witness and dump contracts ──
+ * "no_such_idx" is a name the live catalog never reports, so the live
+ * witness reads cursor_now == -1 for it: the advance test is then decided
+ * purely by the cursor recorded at detect. */
+
+static bool cl_fire(const char *name, int64_t cursor)
+{
+    struct catalog_index_status r[1];
+    r[0] = cl_row(name, cursor, cursor + 5000, 5000, true);
+    return !catalog_lag_exceeded_test_feed(r, 1) &&
+           catalog_lag_exceeded_test_feed(r, 1);
+}
+
+/* Fresh latch, fire for no_such_idx at `cursor`, raise its blocker. */
+static bool cl_fire_and_raise(int64_t cursor)
+{
+    blocker_reset_for_testing();
+    catalog_lag_exceeded_test_reset();
+    return cl_fire("no_such_idx", cursor) &&
+           catalog_lag_exceeded_test_remedy() == (int)COND_REMEDY_OK;
+}
+
+static int cl_registered_budget_case(void)
+{
+    int failures = 0;
+    condition_engine_reset_for_testing();
+    register_catalog_lag_exceeded();
+    struct condition_runtime_snapshot s;
+    memset(&s, 0, sizeof(s));
+    bool got = condition_engine_get_registered_snapshot("catalog_lag_exceeded",
+                                                        &s);
+    CL_CHECK("registered snapshot retrievable", got);
+    CL_CHECK("poll interval is 5s", s.poll_secs == 5);
+    CL_CHECK("remedy backoff is 60s", s.backoff_secs == 60);
+    CL_CHECK("witness window is 60s", s.witness_window_secs == 60);
+    return failures;
+}
+
+static int cl_threshold_boundary_case(void)
+{
+    int failures = 0;
+    catalog_lag_exceeded_test_reset();
+    struct catalog_index_status at[1];
+    at[0] = cl_row("thr_idx", 10, 1010, 1000, true);
+    bool a1 = catalog_lag_exceeded_test_feed(at, 1);
+    bool a2 = catalog_lag_exceeded_test_feed(at, 1);
+    bool a3 = catalog_lag_exceeded_test_feed(at, 1);
+    CL_CHECK("lag exactly 1000 never fires", !a1 && !a2 && !a3);
+    struct catalog_index_status over[1];
+    over[0] = cl_row("thr_idx", 10, 1011, 1001, true);
+    CL_CHECK("lag 1001 arms on the first pass",
+             !catalog_lag_exceeded_test_feed(over, 1));
+    CL_CHECK("lag 1001 fires on the second frozen pass",
+             catalog_lag_exceeded_test_feed(over, 1));
+    return failures;
+}
+
+static int cl_reset_clears_latch_case(void)
+{
+    int failures = 0;
+    catalog_lag_exceeded_test_reset();
+    blocker_reset_for_testing();
+    bool fired = cl_fire("no_such_idx", 7);
+    int r1 = catalog_lag_exceeded_test_remedy();
+    int r2 = catalog_lag_exceeded_test_remedy();
+    CL_CHECK("fired and remedied twice",
+             fired && r1 == (int)COND_REMEDY_OK && r2 == (int)COND_REMEDY_OK);
+    CL_CHECK("remedy calls are counted exactly",
+             catalog_lag_exceeded_test_remedy_calls() == 2);
+    catalog_lag_exceeded_test_reset();
+    CL_CHECK("reset forgets the latched index",
+             catalog_lag_exceeded_test_lagging_name() == NULL);
+    CL_CHECK("reset zeroes the remedy count",
+             catalog_lag_exceeded_test_remedy_calls() == 0);
+    CL_CHECK("remedy with nothing latched skips",
+             catalog_lag_exceeded_test_remedy() == (int)COND_REMEDY_SKIP);
+    CL_CHECK("a skipped remedy is not counted",
+             catalog_lag_exceeded_test_remedy_calls() == 0);
+    CL_CHECK("witness with nothing latched is satisfied",
+             catalog_lag_exceeded_test_witness_live());
+    return failures;
+}
+
+static int cl_remedy_blocker_text_case(void)
+{
+    int failures = 0;
+    bool raised = cl_fire_and_raise(-2);
+    struct blocker_snapshot b;
+    memset(&b, 0, sizeof(b));
+    bool found = blocker_find_by_id_prefix("catalog.no_such_idx.lag_exceeded",
+                                           &b);
+    CL_CHECK("remedy raised the named blocker", raised && found);
+    CL_CHECK("reason names the index and the 1000-block threshold",
+             strstr(b.reason, "index no_such_idx is > 1000 blocks behind H*")
+                 != NULL);
+    CL_CHECK("reason names the frozen cursor",
+             strstr(b.reason, "frozen at -2 across the poll interval") != NULL);
+    CL_CHECK("the blocker never auto-escapes", b.escape_deadline_us == 0);
+    return failures;
+}
+
+static int cl_witness_cursor_boundary_case(void)
+{
+    int failures = 0;
+    /* cursor_now is -1 for an unknown name. Detected at -1: no advance. */
+    bool eq = cl_fire_and_raise(-1);
+    bool w_eq = catalog_lag_exceeded_test_witness_live();
+    CL_CHECK("cursor equal to the detect cursor is not an advance",
+             eq && !w_eq && blocker_exists("catalog.no_such_idx.lag_exceeded"));
+    /* Detected at -2: cursor_now -1 advanced by one and clears the blocker. */
+    bool lo = cl_fire_and_raise(-2);
+    bool w_lo = catalog_lag_exceeded_test_witness_live();
+    CL_CHECK("a one-step advance witnesses and clears the blocker",
+             lo && w_lo && !blocker_exists("catalog.no_such_idx.lag_exceeded"));
+    /* Detected far ahead of anything live: stays unwitnessed, blocker kept. */
+    bool hi = cl_fire_and_raise(5000000000LL);
+    bool w_hi = catalog_lag_exceeded_test_witness_live();
+    CL_CHECK("a cursor behind the detect cursor is unwitnessed and keeps the blocker",
+             hi && !w_hi && blocker_exists("catalog.no_such_idx.lag_exceeded"));
+    return failures;
+}
+
+static int cl_witness_seed_floor_case(void)
+{
+    int failures = 0;
+    bool raised = cl_fire_and_raise(5000000000LL);
+    struct blocker_record sr;
+    bool seeded = blocker_init(&sr, "no_such_idx.below_snapshot_seed",
+                               "no_such_idx", BLOCKER_DEPENDENCY,
+                               "test: structural seed floor") &&
+                  blocker_set(&sr) == 0;
+    CL_CHECK("lag blocker and seed-floor blocker both raised",
+             raised && seeded &&
+                 blocker_exists("catalog.no_such_idx.lag_exceeded"));
+    CL_CHECK("a named seed floor satisfies the witness",
+             catalog_lag_exceeded_test_witness_live());
+    CL_CHECK("and supersedes the lag blocker",
+             !blocker_exists("catalog.no_such_idx.lag_exceeded"));
+    return failures;
+}
+
+static int cl_suppression_rearms_case(void)
+{
+    int failures = 0;
+    blocker_reset_for_testing();
+    catalog_lag_exceeded_test_reset();
+    struct blocker_record sr;
+    bool seeded = blocker_init(&sr, "sup_idx.below_snapshot_seed", "sup_idx",
+                               BLOCKER_DEPENDENCY, "test: structural seed floor") &&
+                  blocker_set(&sr) == 0;
+    struct catalog_index_status frz[1];
+    frz[0] = cl_row("sup_idx", -1, 5000, 5001, true);
+    bool p1 = catalog_lag_exceeded_test_feed(frz, 1);
+    bool p2 = catalog_lag_exceeded_test_feed(frz, 1);
+    CL_CHECK("seed floor suppresses a frozen index", seeded && !p1 && !p2);
+    blocker_clear("sup_idx.below_snapshot_seed");
+    CL_CHECK("after the floor clears, the first pass re-arms only",
+             !catalog_lag_exceeded_test_feed(frz, 1));
+    CL_CHECK("and the next frozen pass fires",
+             catalog_lag_exceeded_test_feed(frz, 1));
+    return failures;
+}
+
+static int cl_busy_observation_case(void)
+{
+    int failures = 0;
+    bool raised = cl_fire_and_raise(-5);
+    struct cl_lock_holder h = {
+        PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0
+    };
+    pthread_t thread;
+    int rc = pthread_create(&thread, NULL, cl_hold_progress_lock, &h);
+    CL_CHECK("contention helper starts", raised && rc == 0);
+    if (rc != 0)
+        return failures;
+    pthread_mutex_lock(&h.mutex);
+    while (h.state == 0)
+        pthread_cond_wait(&h.cond, &h.mutex);
+    pthread_mutex_unlock(&h.mutex);
+    bool w = catalog_lag_exceeded_test_witness_live();
+    bool kept = blocker_exists("catalog.no_such_idx.lag_exceeded");
+    struct json_value out;
+    json_init(&out);
+    bool dumped = catalog_coverage_dump_state_json(&out, NULL);
+    const struct json_value *sc = json_get(&out, "snapshot_complete");
+    const struct json_value *rt = json_get(&out, "retryable");
+    bool incomplete = sc && !json_get_bool(sc);
+    bool retry = rt && json_get_bool(rt);
+    json_free(&out);
+    pthread_mutex_lock(&h.mutex);
+    h.state = 2;
+    pthread_cond_signal(&h.cond);
+    pthread_mutex_unlock(&h.mutex);
+    pthread_join(thread, NULL);
+    pthread_cond_destroy(&h.cond);
+    pthread_mutex_destroy(&h.mutex);
+    CL_CHECK("a busy witness never clears on a would-be advance", !w && kept);
+    CL_CHECK("busy dump says incomplete and retryable",
+             dumped && incomplete && retry);
+    return failures;
+}
+
+static bool cl_dump_row_matches(const struct json_value *row,
+                                const struct catalog_index_status *s)
+{
+    const char *name = json_get_str(json_get(row, "name"));
+    const char *cov = json_get_str(json_get(row, "coverage"));
+    bool ok = name && s->name && strcmp(name, s->name) == 0;
+    ok = ok && json_get_bool(json_get(row, "enabled")) == s->enabled;
+    ok = ok && json_get_bool(json_get(row, "always_on")) == s->always_on;
+    ok = ok && json_get_int(json_get(row, "cursor")) == s->cursor;
+    ok = ok && json_get_int(json_get(row, "floor")) == s->floor;
+    ok = ok && json_get_int(json_get(row, "target")) == s->target;
+    ok = ok && json_get_int(json_get(row, "lag")) == s->lag;
+    ok = ok && cov && strcmp(cov, catalog_coverage_name(
+                         (enum catalog_coverage)s->coverage)) == 0;
+    ok = ok && json_get_bool(json_get(row, "emptiness_is_meaningful")) ==
+               catalog_index_emptiness_is_meaningful(s);
+    return ok;
+}
+
+static int cl_dump_rows_mismatched(const struct json_value *arr,
+                                   const struct catalog_index_status *rows,
+                                   size_t n)
+{
+    int bad = 0;
+    for (size_t i = 0; i < n; i++)
+        if (!cl_dump_row_matches(json_at(arr, i), &rows[i]))
+            bad++;
+    return bad;
+}
+
+static int cl_dump_matches_snapshot_case(void)
+{
+    int failures = 0;
+    struct json_value none;
+    json_init(&none);
+    CL_CHECK("dump without an output object refuses",
+             !catalog_coverage_dump_state_json(NULL, NULL));
+    json_free(&none);
+
+    int64_t hstar = (int64_t)reducer_frontier_provable_tip_cached();
+    struct catalog_index_status rows[CATALOG_COMPLETENESS_MAX_INDEXES];
+    size_t n = catalog_completeness_snapshot(
+        rows, CATALOG_COMPLETENESS_MAX_INDEXES, hstar);
+    struct json_value out;
+    json_init(&out);
+    bool dumped = catalog_coverage_dump_state_json(&out, NULL);
+    const struct json_value *st = json_get(&out, "snapshot_status");
+    const struct json_value *sc = json_get(&out, "snapshot_complete");
+    CL_CHECK("a live dump reports a complete available snapshot",
+             dumped && n > 0 && sc && json_get_bool(sc) && st &&
+                 strcmp(json_get_str(st), "available") == 0);
+    CL_CHECK("target height and index count come from the snapshot",
+             json_get_int(json_get(&out, "target_height")) == hstar &&
+                 json_get_int(json_get(&out, "index_count")) == (int64_t)n);
+    int64_t enabled = 0, meaningful = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (!rows[i].enabled)
+            continue;
+        enabled++;
+        if (catalog_index_emptiness_is_meaningful(&rows[i]))
+            meaningful++;
+    }
+    CL_CHECK("enabled and complete-coverage headlines are exact",
+             json_get_int(json_get(&out, "enabled_count")) == enabled &&
+                 json_get_int(json_get(&out, "complete_coverage_count")) ==
+                     meaningful);
+    const struct json_value *arr = json_get(&out, "indexes");
+    CL_CHECK("one array row per index",
+             arr && json_size(arr) == n);
+    CL_CHECK("every row carries the snapshot's exact fields",
+             arr && json_size(arr) == n &&
+                 cl_dump_rows_mismatched(arr, rows, n) == 0);
+    json_free(&out);
+    return failures;
+}
+
+static int cl_live_detect_quiet_case(void)
+{
+    int failures = 0;
+    catalog_lag_exceeded_test_reset();
+    CL_CHECK("a quiet live catalog does not fire on its first pass",
+             !catalog_lag_exceeded_test_detect_live());
+    return failures;
+}
+
+static int cl_mutant_tests(void)
+{
+    int failures = 0;
+    failures += cl_registered_budget_case();
+    failures += cl_threshold_boundary_case();
+    failures += cl_reset_clears_latch_case();
+    failures += cl_remedy_blocker_text_case();
+    failures += cl_witness_cursor_boundary_case();
+    failures += cl_witness_seed_floor_case();
+    failures += cl_suppression_rearms_case();
+    failures += cl_busy_observation_case();
+    failures += cl_dump_matches_snapshot_case();
+    failures += cl_live_detect_quiet_case();
     return failures;
 }
 
@@ -285,9 +589,10 @@ int test_catalog_lag_exceeded(void)
             CL_CHECK("registered snapshot retrievable", false);
         }
     }
+    failures += cl_mutant_tests();
 
     blocker_reset_for_testing();
-    catalog_lag_exceeded_test_reset();
+    failures += cl_mutant_tests();
     printf("catalog_lag_exceeded: %d failures\n", failures);
     return failures;
 }
