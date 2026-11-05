@@ -23,6 +23,7 @@
 
 #include "test/test_core.h"
 
+#include "base/text_fit.h"
 #include "conditions/sync_rate_below_floor.h"
 #include "framework/condition.h"
 #include "json/json.h"
@@ -36,6 +37,7 @@
 #include "validation/main_state.h"
 
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,12 +50,13 @@
 
 struct srbf_fake_clock {
     _Atomic int64_t wall_ms;
+    _Atomic int64_t mono_ns;
 };
 
 static int64_t srbf_fake_now_mono(void *self)
 {
-    (void)self;
-    return 1;
+    struct srbf_fake_clock *c = (struct srbf_fake_clock *)self;
+    return atomic_load(&c->mono_ns);
 }
 
 static int64_t srbf_fake_now_wall(void *self)
@@ -65,6 +68,7 @@ static int64_t srbf_fake_now_wall(void *self)
 static void srbf_fake_clock_install(struct srbf_fake_clock *c, int64_t unix_s)
 {
     atomic_store(&c->wall_ms, unix_s * 1000);
+    atomic_store(&c->mono_ns, 1);
     static clock_iface_t iface;
     iface.now_monotonic_ns = srbf_fake_now_mono;
     iface.now_wall_ms = srbf_fake_now_wall;
@@ -314,6 +318,581 @@ static int srbf_check_throttle_dominated_window(
 #undef t0
 #undef fc
 
+/* ---- measured-gap cases: window arithmetic, streak, floor env, gate
+ * resets, dominant blocker capture, detail/dump keys, real-clock path and
+ * test_reset ---- */
+
+/* Like `ok = ok && expr`, but names the first failing line. */
+#define SRBF_AND(ok, expr) do { \
+    if ((ok) && !(expr)) { \
+        printf("[srbf line %d failed] ", __LINE__); \
+        (ok) = false; \
+    } \
+} while (0)
+
+#define SRBF_COND "sync_rate_below_floor"
+
+/* cleared_count is cumulative across resets, so each case counts from here. */
+static int srbf_cleared_base;
+
+struct srbf_fx {
+    struct connman cm;
+    struct download_manager dm;
+    struct main_state ms;
+    struct p2p_node peer;
+    struct p2p_node *peers[1];
+    struct srbf_fake_clock fc;
+    int64_t wall;
+    int64_t mono;   /* microseconds */
+    int64_t cursor;
+};
+
+static struct srbf_fx *srbf_fx_new(int64_t wall, int peer_height,
+                                   int64_t log_head)
+{
+    struct srbf_fx *x = calloc(1, sizeof(*x));
+    if (!x)
+        return NULL;
+    srbf_reset(&x->cm, &x->dm, &x->ms);
+    srbf_fake_clock_install(&x->fc, wall);
+    sync_rate_below_floor_test_set_log_head_override(log_head);
+    x->peer.id = 1;
+    x->peer.starting_height = peer_height;
+    x->peer.state = PEER_ACTIVE;
+    x->peer.services = NODE_NETWORK;
+    x->peers[0] = &x->peer;
+    x->cm.manager.nodes = x->peers;
+    x->cm.manager.num_nodes = 1;
+    x->wall = wall;
+    x->mono = 1000000000;
+    x->cursor = 1000;
+    struct condition_runtime_snapshot s;
+    srbf_cleared_base = condition_engine_get_registered_snapshot(SRBF_COND, &s)
+                            ? s.cleared_count : -1;
+    return x;
+}
+
+static void srbf_fx_free(struct srbf_fx *x)
+{
+    srbf_cleanup();
+    main_state_free(&x->ms);
+    free(x);
+}
+
+/* One engine tick 30s later; the injected clock moves dmono_us and the apply
+ * cursor moves dcursor, with the throttle total pinned at `throttle`. */
+static void srbf_step(struct srbf_fx *x, int64_t dmono_us, int64_t dcursor,
+                      int64_t throttle)
+{
+    x->mono += dmono_us;
+    x->cursor += dcursor;
+    x->wall += 30;
+    srbf_tick(&x->fc, x->wall, x->mono, x->cursor, throttle);
+}
+
+/* The same tick with no override at all: now, cursor, log_head and throttle
+ * all come from the real readers, and the fake monotonic clock supplies
+ * time. */
+static void srbf_step_real(struct srbf_fx *x, int64_t dmono_us)
+{
+    x->mono += dmono_us;
+    x->wall += 30;
+    atomic_store(&x->fc.mono_ns, x->mono * 1000);
+    srbf_fake_clock_set(&x->fc, x->wall);
+    condition_engine_tick();
+}
+
+static int64_t srbf_geti(const struct json_value *o, const char *k)
+{
+    const struct json_value *v = o ? json_get(o, k) : NULL;
+    return v ? json_get_int(v) : INT64_MIN;
+}
+
+static bool srbf_getb(const struct json_value *o, const char *k, bool want)
+{
+    const struct json_value *v = o ? json_get(o, k) : NULL;
+    return v && json_get_bool(v) == want;
+}
+
+static bool srbf_gets(const struct json_value *o, const char *k,
+                      const char *want)
+{
+    const struct json_value *v = o ? json_get(o, k) : NULL;
+    const char *s = v ? json_get_str(v) : NULL;
+    return s && strcmp(s, want) == 0;
+}
+
+/* Expected values for every key of the dump and detail JSON. */
+struct srbf_expect {
+    bool active;
+    bool pending;
+    int64_t cur_bps;
+    int64_t cur_floor;
+    int64_t streak;
+    int64_t at_bps;
+    int64_t at_floor;
+    int64_t tip;
+    int64_t head;
+    int64_t last_fire;
+    const char *id;
+    const char *reason;
+};
+
+static bool srbf_dump_matches(const struct srbf_expect *e)
+{
+    struct json_value o;
+    json_init(&o);
+    bool ok = sync_rate_below_floor_dump_state_json(&o, "x");
+    SRBF_AND(ok, srbf_getb(&o, "active", e->active));
+    SRBF_AND(ok, srbf_getb(&o, "pending_work", e->pending));
+    SRBF_AND(ok, srbf_geti(&o, "current_bps_x1000") == e->cur_bps);
+    SRBF_AND(ok, srbf_geti(&o, "current_floor_bps_x1000") == e->cur_floor);
+    SRBF_AND(ok, srbf_geti(&o, "below_floor_streak") == e->streak);
+    SRBF_AND(ok, srbf_geti(&o, "consecutive_ticks_required") == 5);
+    SRBF_AND(ok, srbf_geti(&o, "observed_bps_x1000_at_detect") == e->at_bps);
+    SRBF_AND(ok, srbf_geti(&o, "floor_bps_x1000_at_detect") == e->at_floor);
+    SRBF_AND(ok, srbf_geti(&o, "network_tip_at_detect") == e->tip);
+    SRBF_AND(ok, srbf_geti(&o, "log_head_at_detect") == e->head);
+    SRBF_AND(ok, srbf_gets(&o, "dominant_blocker_id_at_detect", e->id));
+    SRBF_AND(ok, srbf_geti(&o, "last_fire_unix") == e->last_fire);
+    json_free(&o);
+    return ok;
+}
+
+static bool srbf_detail_matches(const struct srbf_expect *e)
+{
+    struct json_value dump;
+    json_init(&dump);
+    json_set_object(&dump);
+    bool ok = condition_engine_dump_state_json(&dump, NULL);
+    const struct json_value *conds = json_get(&dump, "conditions");
+    const struct json_value *d = NULL;
+    for (size_t i = 0; ok && conds && i < json_size(conds); i++) {
+        const struct json_value *c = json_at(conds, i);
+        const struct json_value *nm = c ? json_get(c, "name") : NULL;
+        if (nm && strcmp(json_get_str(nm), SRBF_COND) == 0)
+            d = json_get(c, "detail");
+    }
+    SRBF_AND(ok, d != NULL);
+    SRBF_AND(ok, srbf_geti(d, "observed_bps_x1000") == e->at_bps);
+    SRBF_AND(ok, srbf_geti(d, "floor_bps_x1000") == e->at_floor);
+    SRBF_AND(ok, srbf_geti(d, "network_tip_at_detect") == e->tip);
+    SRBF_AND(ok, srbf_geti(d, "log_head_at_detect") == e->head);
+    SRBF_AND(ok, srbf_gets(d, "dominant_blocker_id", e->id));
+    SRBF_AND(ok, srbf_gets(d, "dominant_blocker_reason", e->reason));
+    SRBF_AND(ok, srbf_geti(d, "last_fire_unix") == e->last_fire);
+    SRBF_AND(ok, srbf_geti(d, "current_bps_x1000") == e->cur_bps);
+    SRBF_AND(ok, srbf_geti(d, "current_floor_bps_x1000") == e->cur_floor);
+    SRBF_AND(ok, srbf_geti(d, "below_floor_streak") == e->streak);
+    SRBF_AND(ok, srbf_getb(d, "pending_work", e->pending));
+    json_free(&dump);
+    return ok;
+}
+
+static int64_t srbf_cur_bps(void)
+{
+    struct json_value o;
+    json_init(&o);
+    int64_t v = sync_rate_below_floor_dump_state_json(&o, "x")
+                    ? srbf_geti(&o, "current_bps_x1000") : INT64_MIN;
+    json_free(&o);
+    return v;
+}
+
+static int64_t srbf_streak(void)
+{
+    struct json_value o;
+    json_init(&o);
+    int64_t v = sync_rate_below_floor_dump_state_json(&o, "x")
+                    ? srbf_geti(&o, "below_floor_streak") : INT64_MIN;
+    json_free(&o);
+    return v;
+}
+
+/* No episode ever began (a spurious detect() is cleared by witness() inside
+ * the same tick, so only cleared_count shows it). */
+static bool srbf_no_episode(void)
+{
+    struct condition_runtime_snapshot s;
+    bool ok = condition_engine_get_registered_snapshot(SRBF_COND, &s);
+    SRBF_AND(ok, s.cleared_count == srbf_cleared_base && !s.currently_active);
+    SRBF_AND(ok, sync_rate_below_floor_test_remedy_calls() == 0);
+    return ok && condition_engine_get_active_count() == 0;
+}
+
+/* Skipped windows, exact boundaries, duplicate clocks, rewinds and a
+ * throttle that moved backwards, each read back through current_bps. */
+static bool srbf_window_arithmetic(struct srbf_fx *x)
+{
+    srbf_step(x, 0, 0, 0);
+    srbf_step(x, 1999999, 2000000, 0);
+    bool ok = srbf_cur_bps() == -1;
+    srbf_step(x, 2000000, 2000000, 0);
+    SRBF_AND(ok, srbf_cur_bps() == 1000000000);
+    SRBF_AND(ok, srbf_streak() == 0);
+    srbf_step(x, 0, 100, 0);
+    SRBF_AND(ok, srbf_cur_bps() == 1000000000);
+    srbf_step(x, 10000000, 1, 0);
+    SRBF_AND(ok, srbf_cur_bps() == 10100);
+    srbf_step(x, 1, 100, 0);
+    srbf_step(x, 10000000, 1, 0);
+    SRBF_AND(ok, srbf_cur_bps() == 100);
+    srbf_step(x, 10000000, -50, 0);
+    SRBF_AND(ok, srbf_cur_bps() == 0);
+    srbf_step(x, 10000000, 0, 1000000);
+    SRBF_AND(ok, srbf_cur_bps() == 0);
+    SRBF_AND(ok, srbf_streak() == 3);
+    srbf_step(x, 2000000, 2, 0);
+    SRBF_AND(ok, srbf_cur_bps() == 1000);
+    SRBF_AND(ok, srbf_streak() == 0);
+    return ok && srbf_no_episode();
+}
+
+/* 3 below, 1 above, 4 below stays quiet; the 5th below trips; 4 is not 5. */
+static bool srbf_streak_needs_five(struct srbf_fx *x)
+{
+    srbf_step(x, 0, 0, 0);
+    for (int i = 0; i < 3; i++)
+        srbf_step(x, 10000000, 1, 0);
+    srbf_step(x, 10000000, 1000, 0);
+    for (int i = 0; i < 4; i++)
+        srbf_step(x, 10000000, 1, 0);
+    bool ok = condition_engine_get_active_count() == 0;
+    SRBF_AND(ok, srbf_streak() == 4);
+    SRBF_AND(ok, sync_rate_below_floor_test_remedy_calls() == 0);
+    srbf_step(x, 10000000, 1, 0);
+    SRBF_AND(ok, condition_engine_get_active_count() == 1);
+    return ok && sync_rate_below_floor_test_remedy_calls() == 1;
+}
+
+struct srbf_env_save {
+    char *old;
+    bool had;
+    bool armed;
+};
+
+static bool srbf_env_put(const char *val, struct srbf_env_save *s)
+{
+    const char *o = getenv("ZCL_SYNC_RATE_FLOOR_BPS");
+    s->old = o ? strdup(o) : NULL;
+    if (o && !s->old)
+        return false;
+    s->had = o != NULL;
+    s->armed = true;
+    return setenv("ZCL_SYNC_RATE_FLOOR_BPS", val, 1) == 0;
+}
+
+static bool srbf_env_restore(struct srbf_env_save *s)
+{
+    if (!s->armed)
+        return true;
+    int rc = s->had ? setenv("ZCL_SYNC_RATE_FLOOR_BPS", s->old, 1)
+                    : unsetenv("ZCL_SYNC_RATE_FLOOR_BPS");
+    free(s->old);
+    s->old = NULL;
+    s->armed = false;
+    return rc == 0;
+}
+
+static int64_t srbf_floor_for_env(const char *val, bool *ok)
+{
+    struct srbf_env_save s = {0};
+    int64_t floor = INT64_MIN;
+    if (srbf_env_put(val, &s)) {
+        struct json_value o;
+        json_init(&o);
+        if (sync_rate_below_floor_dump_state_json(&o, "x"))
+            floor = srbf_geti(&o, "current_floor_bps_x1000");
+        json_free(&o);
+    } else {
+        *ok = false;
+    }
+    if (!srbf_env_restore(&s))
+        *ok = false;
+    return floor;
+}
+
+/* Only a clean positive decimal that fits is a floor; one digit ("5", "9"),
+ * a hex-looking digit ("a"), zero, negative and trailing junk are covered. */
+static bool srbf_floor_env_parsing(void)
+{
+    bool ok = true;
+    SRBF_AND(ok, srbf_floor_for_env("5", &ok) == 5000);
+    SRBF_AND(ok, srbf_floor_for_env("9", &ok) == 9000);
+    SRBF_AND(ok, srbf_floor_for_env("a", &ok) == 1000);
+    SRBF_AND(ok, srbf_floor_for_env("0", &ok) == 1000);
+    SRBF_AND(ok, srbf_floor_for_env("-3", &ok) == 1000);
+    SRBF_AND(ok, srbf_floor_for_env("12x", &ok) == 1000);
+    SRBF_AND(ok, srbf_floor_for_env("", &ok) == 1000);
+    SRBF_AND(ok, srbf_floor_for_env("9223372036854775", &ok) ==
+                     9223372036854775000);
+    return ok;
+}
+
+/* A queue-stuck blocker "Q" (one character) is captured as the dominant
+ * blocker when the episode starts, and named in the blocker reason. */
+static bool srbf_trip_with_blocker(struct srbf_fx *x)
+{
+    struct blocker_record r;
+    bool ok = blocker_init(&r, "Q", "test_owner", BLOCKER_TRANSIENT,
+                           "queue stuck here");
+    if (ok)
+        (void)blocker_set(&r);
+    srbf_step(x, 0, 0, 0);
+    for (int i = 0; i < 5; i++)
+        srbf_step(x, 10000000, 1, 0);
+    return ok;
+}
+
+static bool srbf_reason_matches_trip(void)
+{
+    struct blocker_snapshot snaps[BLOCKER_CAP];
+    int n = blocker_snapshot_all(snaps, BLOCKER_CAP);
+    bool found = false;
+    for (int i = 0; i < n; i++) {
+        if (strcmp(snaps[i].id, SRBF_COND) != 0)
+            continue;
+        found = strstr(snaps[i].reason, "fold rate 0.100 bps below floor "
+                                        "1.000 bps for >= 5") != NULL;
+        found = found && strstr(snaps[i].reason, "blocker=Q") != NULL;
+        found = found && strstr(snaps[i].reason, ZCL_TEXT_FIT_MARKER_TAG);
+    }
+    return found;
+}
+
+static bool srbf_episode_details(void)
+{
+    struct condition_runtime_snapshot s;
+    bool ok = condition_engine_get_registered_snapshot(SRBF_COND, &s);
+    SRBF_AND(ok, s.currently_active && s.cleared_count == srbf_cleared_base);
+    SRBF_AND(ok, s.last_outcome == COND_REMEDY_UNWITNESSED);
+    SRBF_AND(ok, sticky_escalator_test_armed());
+    SRBF_AND(ok, srbf_reason_matches_trip());
+    return ok;
+}
+
+static struct srbf_expect srbf_trip_expect(const struct srbf_fx *x)
+{
+    struct srbf_expect e = {
+        .active = true, .pending = true, .cur_bps = 100, .cur_floor = 1000,
+        .streak = 5, .at_bps = 100, .at_floor = 1000, .tip = 10000,
+        .head = 5, .last_fire = x->wall, .id = "Q",
+        .reason = "queue stuck here",
+    };
+    return e;
+}
+
+/* test_reset() after a dirty episode leaves nothing behind; the next run
+ * uses only the real readers (no override at all) and still trips. */
+static bool srbf_reset_then_real_path(struct srbf_fx *x)
+{
+    sync_rate_below_floor_test_set_cursor_override(50);
+    sync_rate_below_floor_test_set_log_head_override(99999999999);
+    sync_rate_below_floor_test_set_throttle_wait_us_override(7);
+    sync_rate_below_floor_test_set_now_us_override(12345);
+    sync_rate_below_floor_test_reset();
+    struct srbf_expect e = {
+        .cur_bps = -1, .cur_floor = 1000, .at_bps = -1, .at_floor = -1,
+        .tip = -1, .head = -1, .id = "", .reason = "",
+    };
+    bool ok = srbf_dump_matches(&e);
+    SRBF_AND(ok, srbf_detail_matches(&e));
+    SRBF_AND(ok, !blocker_exists(SRBF_COND));
+    SRBF_AND(ok, sync_rate_below_floor_test_remedy_calls() == 0);
+    SRBF_AND(ok, condition_engine_get_active_count() == 0);
+    for (int i = 0; i < 6; i++)
+        srbf_step_real(x, 10000000);
+    SRBF_AND(ok, sync_rate_below_floor_test_remedy_calls() == 1);
+    return ok && condition_engine_get_active_count() == 1;
+}
+
+static bool srbf_blocker_episode_and_reset(int64_t t0)
+{
+    struct srbf_fx *x = srbf_fx_new(t0, 10000, 5);
+    if (!x)
+        return false;
+    bool ok = srbf_trip_with_blocker(x);
+    struct srbf_expect e = srbf_trip_expect(x);
+    SRBF_AND(ok, srbf_episode_details());
+    SRBF_AND(ok, srbf_dump_matches(&e));
+    SRBF_AND(ok, srbf_detail_matches(&e));
+    SRBF_AND(ok, srbf_reset_then_real_path(x));
+    srbf_fx_free(x);
+    return ok;
+}
+
+/* A second episode, with the blocker gone, must not keep the first one's
+ * dominant blocker id or reason. */
+static bool srbf_second_episode_forgets_blocker(int64_t t0)
+{
+    struct srbf_fx *x = srbf_fx_new(t0, 10000, 5);
+    if (!x)
+        return false;
+    bool ok = srbf_trip_with_blocker(x);
+    srbf_step(x, 10000000, 1000, 0);
+    SRBF_AND(ok, condition_engine_get_active_count() == 0);
+    blocker_clear("Q");
+    for (int i = 0; i < 5; i++)
+        srbf_step(x, 10000000, 1, 0);
+    struct srbf_expect e = srbf_trip_expect(x);
+    e.id = "";
+    e.reason = "";
+    SRBF_AND(ok, condition_engine_get_active_count() == 1);
+    SRBF_AND(ok, srbf_dump_matches(&e));
+    SRBF_AND(ok, srbf_detail_matches(&e));
+    srbf_fx_free(x);
+    return ok;
+}
+
+/* While an episode is active: an exactly-at-floor window clears it, and a
+ * vanished peer set clears it and its blocker too. */
+static bool srbf_witness_clears(int64_t t0)
+{
+    struct srbf_fx *x = srbf_fx_new(t0, 10000, 5);
+    if (!x)
+        return false;
+    srbf_step(x, 0, 0, 0);
+    for (int i = 0; i < 5; i++)
+        srbf_step(x, 10000000, 1, 0);
+    bool ok = condition_engine_get_active_count() == 1;
+    srbf_step(x, 10000000, 10, 0);
+    SRBF_AND(ok, srbf_cur_bps() == 1000);
+    SRBF_AND(ok, condition_engine_get_active_count() == 0);
+    SRBF_AND(ok, !blocker_exists(SRBF_COND));
+    for (int i = 0; i < 5; i++)
+        srbf_step(x, 10000000, 1, 0);
+    SRBF_AND(ok, condition_engine_get_active_count() == 1);
+    x->cm.manager.num_nodes = 0;
+    srbf_step(x, 10000000, 1, 0);
+    SRBF_AND(ok, condition_engine_get_active_count() == 0);
+    SRBF_AND(ok, !blocker_exists(SRBF_COND));
+    srbf_fx_free(x);
+    return ok;
+}
+
+/* The peers+work gate resets the sampling state on every exit, and a restart
+ * needs a fresh baseline before any window counts. */
+static bool srbf_gate_resets_sampling(int64_t t0)
+{
+    struct srbf_fx *x = srbf_fx_new(t0, 10000, 5);
+    if (!x)
+        return false;
+    srbf_step(x, 0, 0, 0);
+    for (int i = 0; i < 3; i++)
+        srbf_step(x, 10000000, 1, 0);
+    bool ok = srbf_streak() == 3;
+    x->cm.manager.num_nodes = 0;
+    srbf_step(x, 10000000, 1, 0);
+    SRBF_AND(ok, srbf_streak() == 0);
+    x->cm.manager.num_nodes = 1;
+    srbf_step(x, 10000000, 1, 0);
+    SRBF_AND(ok, srbf_streak() == 0);
+    srbf_step(x, 10000000, 1, 0);
+    srbf_step(x, 10000000, 1, 0);
+    SRBF_AND(ok, srbf_streak() == 2);
+    sync_rate_below_floor_test_set_log_head_override(10000);
+    srbf_step(x, 10000000, 1, 0);
+    SRBF_AND(ok, srbf_streak() == 0);
+    sync_rate_below_floor_test_set_log_head_override(5);
+    srbf_step(x, 10000000, 1, 0);
+    for (int i = 0; i < 4; i++)
+        srbf_step(x, 10000000, 1, 0);
+    SRBF_AND(ok, srbf_no_episode());
+    sync_monitor_set_context(NULL, NULL, NULL);
+    srbf_step(x, 10000000, 1, 0);
+    SRBF_AND(ok, srbf_streak() == 0);
+    SRBF_AND(ok, srbf_no_episode());
+    srbf_fx_free(x);
+    return ok;
+}
+
+/* A peer at height 1 with log_head 0 is pending work. */
+static bool srbf_height_one_is_work(int64_t t0)
+{
+    struct srbf_fx *x = srbf_fx_new(t0, 1, 0);
+    if (!x)
+        return false;
+    srbf_step(x, 0, 0, 0);
+    for (int i = 0; i < 5; i++)
+        srbf_step(x, 10000000, 1, 0);
+    bool ok = condition_engine_get_active_count() == 1;
+    srbf_fx_free(x);
+    return ok;
+}
+
+/* The real readers: a fake monotonic clock and no override trip it; a mixed
+ * first sample (real cursor/throttle, then injected) is measured exactly;
+ * an injected now of 0 is a real instant, not "unset". */
+static bool srbf_real_readers(int64_t t0)
+{
+    /* Nothing injected: the fake monotonic clock and the real (zero) cursor
+     * make every window a zero rate, and five of them trip it. */
+    struct srbf_fx *x = srbf_fx_new(t0, 10000, -1);
+    if (!x)
+        return false;
+    for (int i = 0; i < 6; i++)
+        srbf_step_real(x, 10000000);
+    bool ok = sync_rate_below_floor_test_remedy_calls() == 1;
+    srbf_fx_free(x);
+
+    /* Real first sample (cursor 0, throttle 0), injected second sample:
+     * 5 blocks over the 10s window minus 5s of throttle is exactly 1 bps. */
+    x = srbf_fx_new(t0, 10000, -1);
+    if (!x)
+        return false;
+    srbf_step_real(x, 0);
+    x->cursor = 0;
+    srbf_step(x, 10000000, 5, 5000000);
+    SRBF_AND(ok, srbf_cur_bps() == 1000);
+    srbf_fx_free(x);
+
+    /* An injected now of 0 is an instant, not "unset": the window below is
+     * 10s long, not 5s (the fake monotonic clock reads 5s). */
+    x = srbf_fx_new(t0, 10000, 0);
+    if (!x)
+        return false;
+    atomic_store(&x->fc.mono_ns, 5000000000);
+    x->mono = 0;
+    x->cursor = 0;
+    srbf_step(x, 0, 0, 0);
+    srbf_step(x, 10000000, 5, 0);
+    SRBF_AND(ok, srbf_cur_bps() == 500);
+    srbf_fx_free(x);
+    return ok;
+}
+
+static int srbf_check_measured_gaps(int64_t t0)
+{
+    int failures = 0;
+    struct srbf_fx *x = srbf_fx_new(t0, 10000, 0);
+    bool ok = x != NULL;
+    if (x)
+        ok = srbf_window_arithmetic(x);
+    if (x)
+        srbf_fx_free(x);
+    SRBF_CHECK("window arithmetic: skips, exact boundaries, rewinds", ok);
+    x = srbf_fx_new(t0, 10000, 0);
+    ok = x != NULL && srbf_streak_needs_five(x);
+    if (x)
+        srbf_fx_free(x);
+    SRBF_CHECK("five consecutive below-floor windows, not four", ok);
+    SRBF_CHECK("floor env: clean positive decimals only",
+               srbf_floor_env_parsing());
+    SRBF_CHECK("dominant blocker, detail and dump keys, reset, real path",
+               srbf_blocker_episode_and_reset(t0));
+    SRBF_CHECK("a second episode forgets the first dominant blocker",
+               srbf_second_episode_forgets_blocker(t0));
+    SRBF_CHECK("witness clears at the floor and when peers vanish",
+               srbf_witness_clears(t0));
+    SRBF_CHECK("the gate resets sampling and a restart needs a baseline",
+               srbf_gate_resets_sampling(t0));
+    SRBF_CHECK("peer height 1 over log_head 0 is pending work",
+               srbf_height_one_is_work(t0));
+    SRBF_CHECK("real readers drive the rate when nothing is injected",
+               srbf_real_readers(t0));
+    return failures;
+}
+
 int test_sync_rate_below_floor(void);
 int test_sync_rate_below_floor(void)
 {
@@ -436,6 +1015,8 @@ int test_sync_rate_below_floor(void)
         srbf_cleanup();
         main_state_free(&ms);
     }
+
+    failures += srbf_check_measured_gaps(t0 + 100000);
 
     printf("=== test_sync_rate_below_floor complete: %d failure(s) ===\n",
            failures);
