@@ -279,7 +279,6 @@ static void check_file_offer_ok(const struct file_offer *o,
         canonical_len != wire_len)
         abort();
     require_canonical_or_name_only(o, wire, canonical, wire_len);
-    (void)file_offer_auth_verify_signature(o);
     uint8_t genesis[32];
     memset(genesis, FUZZ_FILE_GENESIS_BYTE, sizeof(genesis));
     (void)file_offer_auth_verify_at(o, genesis, FUZZ_FILE_NOW);
