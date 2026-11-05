@@ -452,9 +452,137 @@ _test_next:;
     return failures;
 }
 
+/* The cheap candidate-content ratchets are in the core gate set, so a lane
+ * that already knows it is red is refused at submit, and the refusal body
+ * names the gate and what to do. */
+static bool dlx_pc_ratchet_refused(const char *gate, const char *want_hint)
+{
+    static const char *const known =
+        "check-file-size-ceiling\ncheck-cyclomatic-complexity\n"
+        "check-core-seal\ncheck-arm-symbol-single\ncheck-kpi-floor\n"
+        "check-describe-budget\ncheck-hardening-ratchet\n";
+    struct dlx_rig rig;
+    struct dlx_call c;
+    bool ok;
+    if (!dlx_pc_rig(&rig, gate, true, known) ||
+        !dlx_pc_file(&rig, "precheck-fail", gate))
+        return false;
+    dlx_pc_submit(&c, &rig, NULL, "r");
+    ok = dlx_run(&c) && !dlx_ok(&c) &&
+         strcmp(dlx_err_code(&c), "PRECHECK_FAILED") == 0 &&
+         strstr(c.reply.error.message, gate) != NULL &&
+         strstr(c.reply.error.message, want_hint) != NULL &&
+         strcmp(dlx_str(&c, "gate"), gate) == 0 &&
+         strstr(dlx_str(&c, "hint"), want_hint) != NULL;
+    dlx_end(&c);
+    ok = ok && dlx_queue_empty();
+    dlx_restore();
+    return ok;
+}
+
+/* check-file-size-ceiling is not a z23-lint gate: it runs the lane's
+ * build/bin/file_size_policy. `script` is that binary (NULL: missing). */
+#define DLX_PC_SIZE_GATE "check-file-size-ceiling"
+
+static bool dlx_pc_size_rig(struct dlx_rig *rig, const char *tag,
+                            const char *script)
+{
+    char path[1400];
+    if (!dlx_pc_rig(rig, tag, true, "check-core-seal\n"))
+        return false;
+    if (!script)
+        return true;
+    (void)snprintf(path, sizeof(path), "%s/build/bin/file_size_policy",
+                   rig->clone);
+    return dlx_pc_file(rig, "size-marker", "x") && dlx_write(path, script) &&
+           chmod(path, 0755) == 0;
+}
+
+/* The binary is missing: the gate is unproven and submit still queues. */
+static bool dlx_pc_size_missing(void)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    bool ok;
+    if (!dlx_pc_size_rig(&rig, "size_missing", NULL))
+        return false;
+    dlx_pc_submit(&c, &rig, NULL, "s");
+    ok = dlx_run(&c) && dlx_ok(&c) &&
+         dlx_pc_has(dlx_arr(&c, "precheck_skipped"), DLX_PC_SIZE_GATE) &&
+         strstr(dlx_str(&c, "precheck_unproven"),
+                "build/bin/file_size_policy") != NULL;
+    dlx_end(&c);
+    ok = ok && dlx_queue_has_one();
+    dlx_restore();
+    return ok;
+}
+
+/* The binary reports a violation: refused, naming the gate and what to do. */
+static bool dlx_pc_size_red(void)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    bool ok;
+    if (!dlx_pc_size_rig(&rig, "size_fail",
+                         "#!/bin/sh\necho 'widget.c is now 1501 lines'\nexit 1\n"))
+        return false;
+    dlx_pc_submit(&c, &rig, NULL, "s");
+    ok = dlx_run(&c) && !dlx_ok(&c) &&
+         strcmp(dlx_err_code(&c), "PRECHECK_FAILED") == 0 &&
+         strcmp(dlx_str(&c, "gate"), DLX_PC_SIZE_GATE) == 0 &&
+         strstr(c.reply.error.message, "split it along a seam") != NULL &&
+         strstr(c.reply.error.evidence, "1501 lines") != NULL;
+    dlx_end(&c);
+    ok = ok && dlx_queue_empty();
+    dlx_restore();
+    return ok;
+}
+
+/* The binary is clean: it ran in the lane, and the submit queues. */
+static bool dlx_pc_size_clean(void)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    bool ok;
+    if (!dlx_pc_size_rig(&rig, "size_clean",
+                         "#!/bin/sh\necho check-file-size-ceiling >> build/precheck-ran\n"
+                         "exit 0\n"))
+        return false;
+    dlx_pc_submit(&c, &rig, NULL, "s");
+    ok = dlx_run(&c) && dlx_ok(&c) &&
+         dlx_pc_has(dlx_arr(&c, "precheck_ran"), DLX_PC_SIZE_GATE) &&
+         dlx_pc_ran(&rig, DLX_PC_SIZE_GATE);
+    dlx_end(&c);
+    ok = ok && dlx_queue_has_one();
+    dlx_restore();
+    return ok;
+}
+
+static int dlx_pc_ratchet_cases(void)
+{
+    int failures = 0;
+    TEST("land: submit refuses a red kpi floor, describe budget or hardening ratchet") {
+        ASSERT(dlx_pc_ratchet_refused("check-kpi-floor", "never lower the floor"));
+        ASSERT(dlx_pc_ratchet_refused("check-describe-budget",
+                                      "never raise the budget"));
+        ASSERT(dlx_pc_ratchet_refused("check-hardening-ratchet",
+                                      "never raise the baseline"));
+        PASS();
+    }
+    TEST("land: submit runs the file-size binary, and continues when it is missing") {
+        ASSERT(dlx_pc_size_missing());
+        ASSERT(dlx_pc_size_red());
+        ASSERT(dlx_pc_size_clean());
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int dlx_case_precheck(void)
 {
-    int failures = dlx_case_history_precheck() + dlx_pc_mode_cases();
+    int failures = dlx_case_history_precheck() + dlx_pc_mode_cases() +
+                   dlx_pc_ratchet_cases();
     TEST("land: submit refuses a lane whose precheck gate fails and queues nothing") {
         ASSERT(dlx_pc_failing_gate_refused());
         PASS();

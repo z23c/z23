@@ -37,7 +37,30 @@
 static const char *const k_pc_core[] = {
     "check-file-size-ceiling", "check-cyclomatic-complexity",
     "check-core-seal", "check-arm-symbol-single",
+    /* Candidate-content ratchets that failed seven landings in a week; each
+     * measured under 5 s (under 20 s together) on a loaded host. */
+    "check-kpi-floor", "check-describe-budget", "check-hardening-ratchet",
 };
+
+/* What to do about a refused gate, named in the refusal body. */
+static const struct {
+    const char *gate, *hint;
+} k_pc_hints[] = {
+    {"check-kpi-floor", "a tracked KPI fell below its recorded floor; "
+                        "restore the metric, never lower the floor"},
+    {"check-describe-budget", "a describe leaf exceeds its byte budget; "
+                              "shorten the leaf text, never raise the budget"},
+    {"check-hardening-ratchet", "a hardening finding count rose; remove the "
+                                "finding, never raise the baseline"},
+    {"check-file-size-ceiling", "a production C file passed the 1500-line "
+                                "ceiling or grew past its baseline; split it "
+                                "along a seam, never raise the baseline"},
+};
+
+/* The file-size gate is a make target over its own binary, not a z23-lint
+ * gate, so `z23-lint --list` never names it and it used to be skipped. */
+#define PC_SIZE_GATE "check-file-size-ceiling"
+#define PC_SIZE_BIN "build/bin/file_size_policy"
 
 #if defined(ZCL_TESTING)
 static bool g_pc_force;
@@ -529,7 +552,11 @@ static void pc_push_unproven(const struct pc_run *r,
 static void pc_gate_failed(struct pc_run *r, const char *gate, int rc,
                            struct zcl_command_reply *reply)
 {
-    char ev[PC_EVIDENCE_CAP], msg[256];
+    char ev[PC_EVIDENCE_CAP], msg[512];
+    const char *hint = "fix and resubmit";
+    for (size_t i = 0; i < sizeof(k_pc_hints) / sizeof(k_pc_hints[0]); i++)
+        if (strcmp(k_pc_hints[i].gate, gate) == 0)
+            hint = k_pc_hints[i].hint;
     if (rc < 0) {
         (void)snprintf(msg, sizeof(msg),
                        "the precheck ran past its %d s budget at %s; fix the "
@@ -540,10 +567,10 @@ static void pc_gate_failed(struct pc_run *r, const char *gate, int rc,
     }
     pc_head_lines(r->out, ev, sizeof(ev));
     (void)snprintf(msg, sizeof(msg),
-                   "precheck gate %s failed (exit %d); fix and resubmit",
-                   gate, rc);
+                   "precheck gate %s failed (exit %d); fix and resubmit: %s",
+                   gate, rc, hint);
     (void)json_push_kv_str(&reply->data, "gate", gate);
-    (void)json_push_kv_str(&reply->data, "hint", "fix and resubmit");
+    (void)json_push_kv_str(&reply->data, "hint", hint);
     pc_push_names(reply, "precheck_skipped", r->skipped, r->nskipped);
     pc_push_unproven(r, reply);
     pc_fail(reply, r->leaf, "PRECHECK_FAILED", msg, ev[0] ? ev : gate);
@@ -608,6 +635,77 @@ static int pc_file_purpose_run(struct pc_run *r)
     return pc_canonical_capture(r, run, r->out, PC_OUT_CAP);
 }
 
+/* The size gate's own binary, run in the lane. A missing binary cannot decide:
+ * PC_EXIT_UNPROVEN, so the gate is named unproven and submit continues. */
+static int pc_size_run(struct pc_run *r)
+{
+#if defined(_WIN32)
+    (void)snprintf(r->out, PC_OUT_CAP, "size gate unavailable on Windows");
+    return PC_EXIT_UNPROVEN;
+#else
+    char path[4096 + 40];
+    if (snprintf(path, sizeof(path), "%s/%s", r->wt, PC_SIZE_BIN) >=
+            (int)sizeof(path) || !pc_ship_file(path, X_OK)) {
+        (void)snprintf(r->out, PC_OUT_CAP,
+                       "prerequisite unavailable: %s (run: make file_size_policy)",
+                       PC_SIZE_BIN);
+        return PC_EXIT_UNPROVEN;
+    }
+    return pc_run(r->wt, "./" PC_SIZE_BIN, NULL, r->deadline, r->out, PC_OUT_CAP);
+#endif
+}
+
+/* How a gate runs: the ship adapter, the canonical file-purpose command, the
+ * size binary, or `z23-lint GATE`. */
+static int pc_gate_exec(struct pc_run *r, const char *gate, bool ship,
+                        bool size)
+{
+    if (strcmp(gate, "check-file-purpose") == 0)
+        return pc_file_purpose_run(r);
+    if (ship)
+        return pc_ship_run(r);
+    if (size)
+        return pc_size_run(r);
+    return pc_run(r->wt, r->bin, gate, r->deadline, r->out, PC_OUT_CAP);
+}
+
+enum pc_gate_state { PC_GATE_RAN, PC_GATE_SKIPPED, PC_GATE_REFUSED };
+
+/* One gate: skipped (unknown or unproven), refused, or ran clean. */
+static enum pc_gate_state pc_gate_one(struct pc_run *r, const char *gate,
+                                      const char *list,
+                                      struct zcl_command_reply *reply)
+{
+    bool ship = strcmp(gate, PC_SHIP_GATE) == 0;
+    bool size = strcmp(gate, PC_SIZE_GATE) == 0 && !pc_known(list, gate);
+    int rc;
+    if (ship && !pc_ship_ready(r)) {
+        pc_note_unproven(r, gate);
+        return PC_GATE_SKIPPED;
+    }
+    if (!ship && !size && !pc_known(list, gate)) {
+        r->skipped[r->nskipped++] = gate;
+        return PC_GATE_SKIPPED;
+    }
+    rc = pc_gate_exec(r, gate, ship, size);
+    if (rc == -2 && strcmp(gate, "check-file-purpose") == 0) {
+        pc_fail(reply, r->leaf, "PRECHECK_UNAVAILABLE",
+                "canonical file-purpose command could not be resolved safely",
+                r->out);
+        return PC_GATE_REFUSED;
+    }
+    if (!ship && rc == PC_EXIT_UNPROVEN) {
+        pc_note_unproven(r, gate);
+        return PC_GATE_SKIPPED;
+    }
+    if (rc != 0) {
+        pc_gate_failed(r, gate, rc, reply);
+        return PC_GATE_REFUSED;
+    }
+    r->ran[r->nran++] = gate;
+    return PC_GATE_RAN;
+}
+
 static bool pc_gates_run(struct pc_run *r,
                          const struct zcl_land_precheck_gates *g,
                          struct zcl_command_reply *reply)
@@ -624,33 +722,8 @@ static bool pc_gates_run(struct pc_run *r,
     }
     (void)snprintf(list, sizeof(list), "%s", r->out);
     for (size_t i = 0; i < g->count; i++) {
-        bool ship = strcmp(g->name[i], PC_SHIP_GATE) == 0;
-        if (ship && !pc_ship_ready(r)) {
-            pc_note_unproven(r, g->name[i]);
-            continue;
-        }
-        if (!ship && !pc_known(list, g->name[i])) {
-            r->skipped[r->nskipped++] = g->name[i];
-            continue;
-        }
-        bool canonical = strcmp(g->name[i], "check-file-purpose") == 0;
-        rc = canonical ? pc_file_purpose_run(r) : ship ? pc_ship_run(r)
-                  : pc_run(r->wt, r->bin, g->name[i], r->deadline, r->out, PC_OUT_CAP);
-        if (canonical && rc == -2) {
-            pc_fail(reply, r->leaf, "PRECHECK_UNAVAILABLE",
-                    "canonical file-purpose command could not be resolved safely",
-                    r->out);
+        if (pc_gate_one(r, g->name[i], list, reply) == PC_GATE_REFUSED)
             return false;
-        }
-        if (!ship && rc == PC_EXIT_UNPROVEN) {
-            pc_note_unproven(r, g->name[i]);
-            continue;
-        }
-        if (rc != 0) {
-            pc_gate_failed(r, g->name[i], rc, reply);
-            return false;
-        }
-        r->ran[r->nran++] = g->name[i];
     }
     return true;
 }

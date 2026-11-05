@@ -1295,17 +1295,17 @@ bool dlx_pc_gate_set_learns(void)
         return false;
     (void)snprintf(path, sizeof(path), "%s/land/outcomes.jsonl", root);
     zcl_land_precheck_gate_set(path, DLX_PC_NOW, &g);
-    ok = g.count == 5;
+    ok = g.count == 8;
     for (size_t i = 0; i < g.count; i++) {
         ok = ok && strcmp(g.name[i], "check-too-old") != 0 &&
              strcmp(g.name[i], "check-superseded") != 0 &&
              strcmp(g.name[i], "check-wrong-dimension") != 0;
     }
-    ok = ok && g.count == 5 && strcmp(g.name[0], "check-file-size-ceiling") == 0 &&
-         strcmp(g.name[4], "check-learned-one") == 0;
+    ok = ok && g.count == 8 && strcmp(g.name[0], "check-file-size-ceiling") == 0 &&
+         strcmp(g.name[7], "check-learned-one") == 0;
     zcl_land_precheck_gate_set("/nonexistent/outcomes.jsonl",
                                DLX_PC_NOW, &g);
-    ok = ok && g.count == 4;
+    ok = ok && g.count == 7;
     dlx_restore();
     return ok;
 }
@@ -1374,7 +1374,9 @@ bool dlx_pc_clean_lane_queued(void)
     bool ok;
     if (!dlx_pc_rig(&rig, "precheck_clean", true,
                     "check-file-size-ceiling\ncheck-cyclomatic-complexity\n"
-                    "check-core-seal\ncheck-arm-symbol-single\n"))
+                    "check-core-seal\ncheck-arm-symbol-single\n"
+                    "check-kpi-floor\ncheck-describe-budget\n"
+                    "check-hardening-ratchet\n"))
         return false;
     dlx_pc_submit(&c, &rig, NULL, NULL);
     ok = dlx_run(&c) && dlx_ok(&c) && dlx_int(&c, "seq") == 1 &&

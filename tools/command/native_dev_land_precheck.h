@@ -13,6 +13,10 @@
  * days (and not in the future) establish definitely recent failures. Older
  * request starts cannot date settlement. Uncertain/incomplete history is
  * explicitly unproven; incomplete reads contribute no historical gates.
+ * The core list also holds the cheap candidate-content ratchets (kpi floor,
+ * describe budget, hardening ratchet). check-file-size-ceiling, which is a
+ * make target and not a z23-lint gate, runs the lane's build/bin/file_size_policy
+ * when `z23-lint --list` does not name it; a missing binary is unproven.
  * Learned check-ship-remote-transaction uses its fixed three-command adapter,
  * even without a native lint entry. Missing prerequisites are unproven;
  * any nonzero executed script verdict, including exit 2, refuses submission.
