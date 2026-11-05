@@ -392,6 +392,8 @@ static int test_partition_rejects_malformed_window(void)
     return failures;
 }
 
+int network_monitor_fold_tests(void);
+
 int test_network_monitor(void)
 {
     printf("\n=== network_monitor tests ===\n");
@@ -403,6 +405,7 @@ int test_network_monitor(void)
     failures += test_fork_condition();
     failures += test_partition_condition();
     failures += test_partition_rejects_malformed_window();
+    failures += network_monitor_fold_tests();
     if (failures == 0)
         printf("=== network_monitor: all passed ===\n");
     else
