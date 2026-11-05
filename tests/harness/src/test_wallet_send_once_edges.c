@@ -1196,6 +1196,107 @@ static void case_old_row_states(void)
                "edge-old-bt", "outcome_unknown");
 }
 
+/* A number or literal that does not fit the old buffer was skipped whole, so an
+ * earlier build hashed whatever its stack held from there to the buffer's last
+ * byte. No retry can recompute that digest, and a conflict would tell the client
+ * to pay again under a new key, so any mismatch has to answer outcome_unknown. A
+ * number starting at the last byte leaves no such gap and stays exact. */
+#define E_GAP_AMOUNT "123456789"
+
+static bool gap_req(struct big_req *b, size_t cursor, char fill)
+{
+    struct big_spec small = big_small();
+    if (!big_make(b, &small))
+        return false;
+    free(b->recips);
+    b->recips = big_text("[{\"address\":\"", fill,
+                         cursor + strlen(E_GAP_AMOUNT "}]"), "",
+                         "\",\"amount\":" E_GAP_AMOUNT "}]");
+    if (b->recips)
+        return true;
+    big_free(b);
+    edge_chk("a request with a skipped number can be built", false);
+    return false;
+}
+
+static void gap_digest(const char *key, const char *from, const char *recips,
+                       const char *fee, uint8_t kh[32], uint8_t dg[32])
+{
+    struct sha3_256_ctx c;
+    sha3_256_init(&c);
+    kat_absorb(&c, "z23/wallet-send-once/key/v1");
+    kat_absorb(&c, key);
+    sha3_256_finalize(&c, kh);
+    sha3_256_init(&c);
+    kat_absorb(&c, "z23/wallet-send-once/request/v1");
+    kat_absorb(&c, key);
+    kat_absorb(&c, from);
+    kat_absorb(&c, recips);
+    kat_absorb(&c, fee);
+    sha3_256_finalize(&c, dg);
+}
+
+/* The row an earlier build wrote, with stack bytes standing in the gap. */
+static bool gap_seed_old(const struct big_req *b, const char *key, uint8_t fill)
+{
+    struct json_value p;
+    struct wallet_send_once_row row;
+    struct uint256 id;
+    char from[1024] = "", recips[16384] = "", fee[64] = "";
+    memset(&row, 0, sizeof(row));
+    bool parsed = big_params(&p, b, key);
+    if (parsed) {
+        (void)json_write(json_at(&p, 0), from, sizeof(from));
+        (void)json_write(json_at(&p, 1), recips, sizeof(recips));
+        (void)json_write(json_at(&p, WALLET_SEND_ONCE_FEE_PARAM), fee,
+                         sizeof(fee));
+    }
+    json_free(&p);
+    if (!parsed)
+        return false; // raw-return-ok:test helper, caller checks
+    size_t cut = strlen(recips);
+    memset(recips + cut, 'Q', sizeof(recips) - 1 - cut);
+    gap_digest(key, from, recips, fee, row.key_hash, row.digest);
+    row.state = WALLET_SEND_ONCE_COMMITTED;
+    row.has_txid = true;
+    memset(row.txid, fill, 32);
+    row.created_at = row.updated_at = GetTime();
+    txid_fill(&id, fill);
+    admit(&id);
+    return db_wallet_send_once_insert(&g_fx.ndb, &row);
+}
+
+static void gap_expect(const char *what, size_t cursor, char fill,
+                       const char *key, const char *state)
+{
+    struct big_req b;
+    struct json_value res;
+    if (!gap_req(&b, cursor, fill))
+        return;
+    bool rc = go_big(&b, key, plain_hook_ok, &res);
+    big_chk("skipped number", what, no_send_answer(rc, &res, state, 0));
+    json_free(&res);
+    big_free(&b);
+}
+
+static void case_old_row_skipped_number(void)
+{
+    const char *key = "edge-old-gap";
+    struct big_req b;
+    reset_runs();
+    if (!gap_req(&b, 16380, 'a'))
+        return;
+    edge_chk("an old row with stack bytes in its digest is seeded",
+        gap_seed_old(&b, key, 0xC6));
+    big_free(&b);
+    gap_expect("the identical retry is outcome_unknown, no txid", 16380, 'a',
+               key, "outcome_unknown");
+    gap_expect("another request that also skips one cannot be ruled out", 16380,
+               'b', key, "outcome_unknown");
+    gap_expect("a number at the last byte leaves no gap and conflicts", 16383,
+               'c', key, "key_conflict");
+}
+
 /* ── The digest of any request that always fit, pinned to the byte ────── */
 
 static uint8_t pin_nibble(char c)
@@ -1524,7 +1625,8 @@ int wallet_send_once_edge_tests(void)
         case_built_write_fails, case_sync_off, case_finish_hex,
         case_finish_recorded_txid, case_one_transaction,
         case_oversize_recipients, case_oversize_from, case_oversize_fee,
-        case_oversize_old_row, case_old_row_states, case_digest_pins,
+        case_oversize_old_row, case_old_row_states,
+        case_old_row_skipped_number, case_digest_pins,
         case_digest_pin_largest, case_lossy_amounts, case_lossy_position,
         case_lossy_after_whole, case_lossy_old_row, case_lossy_fee,
         case_digest_pin_reals, case_digest_no_memory, case_no_txid_holds_key,
