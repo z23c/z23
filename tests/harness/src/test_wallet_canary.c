@@ -238,6 +238,170 @@ static int t_health_snapshot(void)
     return failures;
 }
 
+/* ---- Fault injection on a bare in-memory handle -------------------
+ * Each fault is a trigger or authorizer on a throwaway table, so each
+ * canary failure code is reached for real and pinned exactly. After
+ * every run the handle must close cleanly: sqlite3_close returns BUSY
+ * if the canary leaked a prepared statement. */
+
+static const char WC_DDL[] =
+    "CREATE TABLE wallet_canary(id INTEGER PRIMARY KEY, probe BLOB, "
+    "ts INTEGER);";
+
+static sqlite3 *wc_mem_db(const char *extra_sql)
+{
+    sqlite3 *db = NULL;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK)
+        return NULL;
+    if (sqlite3_exec(db, WC_DDL, NULL, NULL, NULL) != SQLITE_OK ||
+        (extra_sql && sqlite3_exec(db, extra_sql, NULL, NULL, NULL)
+                          != SQLITE_OK)) {
+        sqlite3_close(db);
+        return NULL;
+    }
+    return db;
+}
+
+static int wc_deny_action;
+
+static int wc_authorizer(void *ud, int action, const char *a, const char *b,
+                         const char *c, const char *d)
+{
+    (void)ud; (void)a; (void)b; (void)c; (void)d;
+    return action == wc_deny_action ? SQLITE_DENY : SQLITE_OK;
+}
+
+/* Run the canary against a handle built with `extra_sql`; check the exact
+ * code, the status code, a non-empty error, and a clean close. */
+static bool wc_expect_code(const char *extra_sql, int deny_action, int want)
+{
+    sqlite3 *db = wc_mem_db(extra_sql);
+    if (!db) return false;
+    wc_deny_action = deny_action;
+    if (deny_action)
+        sqlite3_set_authorizer(db, wc_authorizer, NULL);
+    struct wallet_canary_status st = {0};
+    int rc = wallet_canary_run(db, &st);
+    bool ok = rc == want && !st.ok && st.code == want &&
+              st.error[0] != '\0' && st.last_attempt_ts > 0;
+    sqlite3_set_authorizer(db, NULL, NULL);
+    return (sqlite3_close(db) == SQLITE_OK) && ok;
+}
+
+static bool wc_schema_missing_exact(void)
+{
+    sqlite3 *db = NULL;
+    bool ok = false;
+    if (sqlite3_open(":memory:", &db) == SQLITE_OK)
+        ok = wallet_canary_run(db, NULL) == WALLET_CANARY_ERR_SCHEMA;
+    sqlite3_close(db);
+    return ok;
+}
+
+static int t_fault_codes(void)
+{
+    int failures = 0;
+    WC_RUN("canary: missing table is exactly ERR_SCHEMA",
+           wc_schema_missing_exact());
+    WC_RUN("canary: non-schema prepare refusal is ERR_PREPARE",
+           wc_expect_code(NULL, SQLITE_INSERT, WALLET_CANARY_ERR_PREPARE));
+    WC_RUN("canary: SELECT prepare refusal is ERR_PREPARE",
+           wc_expect_code(NULL, SQLITE_SELECT, WALLET_CANARY_ERR_PREPARE));
+    WC_RUN("canary: refused INSERT step is ERR_WRITE, statement finalized",
+           wc_expect_code("CREATE TRIGGER t BEFORE INSERT ON wallet_canary "
+                          "BEGIN SELECT RAISE(ABORT,'no'); END;", 0,
+                          WALLET_CANARY_ERR_WRITE));
+    WC_RUN("canary: swallowed INSERT leaves no row: ERR_READ, finalized",
+           wc_expect_code("CREATE TRIGGER t BEFORE INSERT ON wallet_canary "
+                          "BEGIN SELECT RAISE(IGNORE); END;", 0,
+                          WALLET_CANARY_ERR_READ));
+    WC_RUN("canary: short blob read back is ERR_READ, finalized",
+           wc_expect_code("CREATE TRIGGER t AFTER INSERT ON wallet_canary "
+                          "BEGIN UPDATE wallet_canary SET probe=x'00' "
+                          "WHERE id=new.id; END;", 0,
+                          WALLET_CANARY_ERR_READ));
+    WC_RUN("canary: different 32-byte blob read back is ERR_MISMATCH",
+           wc_expect_code("CREATE TRIGGER t AFTER INSERT ON wallet_canary "
+                          "BEGIN UPDATE wallet_canary SET "
+                          "probe=zeroblob(32) WHERE id=new.id; END;", 0,
+                          WALLET_CANARY_ERR_MISMATCH));
+    return failures;
+}
+
+/* The stored probe is exactly 32 bytes, success clears a previous error,
+ * and a success leaves no statement open. */
+static int t_probe_shape(void)
+{
+    int failures = 0;
+    sqlite3 *db = wc_mem_db(NULL);
+    if (!db) { printf("wc: memory db failed\n"); return 1; }
+
+    struct wallet_canary_status st = {0};
+    (void)wallet_canary_run(NULL, &st);
+    WC_RUN("canary: failure leaves an error message",
+           !st.ok && st.error[0] != '\0');
+    int rc = wallet_canary_run(db, &st);
+    WC_RUN("canary: success after failure is OK with empty error",
+           rc == WALLET_CANARY_OK && st.ok && st.error[0] == '\0');
+    WC_RUN("canary: success after failure clears the stored error too",
+           wallet_canary_get_status().error[0] == '\0');
+
+    sqlite3_stmt *q = NULL;
+    int len = -1;
+    if (sqlite3_prepare_v2(db, "SELECT length(probe) FROM wallet_canary "
+                               "WHERE id=1", -1, &q, NULL) == SQLITE_OK) {
+        if (sqlite3_step(q) == SQLITE_ROW)
+            len = sqlite3_column_int(q, 0);
+        sqlite3_finalize(q);
+    }
+    WC_RUN("canary: stored probe is exactly 32 bytes", len == 32);
+    WC_RUN("canary: successful run leaves no open statement",
+           sqlite3_close(db) == SQLITE_OK);
+    return failures;
+}
+
+static int wc_stop_cb(void *ud) { (void)ud; return 1; }
+
+/* last_error provenance in the health snapshot. */
+static int t_health_errors(void)
+{
+    int failures = 0;
+    sqlite3 *db = wc_mem_db("CREATE TABLE wallet_keys(x);");
+    if (!db) { printf("wc: memory db failed\n"); return 1; }
+    wallet_lock_reset_for_test();
+
+    struct wallet_canary_status st = {0};
+    (void)wallet_canary_run(NULL, &st);
+    struct wallet_persistence_health h = wallet_persistence_get_health(db, 0);
+    WC_RUN("health: failed canary is reported with its own message",
+           !h.canary_ok && h.last_error[0] != '\0' &&
+           strcmp(h.last_error, st.error) == 0 && !h.mismatch &&
+           h.row_count == 0);
+    h = wallet_persistence_get_health(NULL, 0);
+    WC_RUN("health: closed handle keeps the canary message",
+           !h.open && strcmp(h.last_error, st.error) == 0);
+
+    (void)wallet_canary_run(db, &st);
+    h = wallet_persistence_get_health(db, 0);
+    WC_RUN("health: passing canary leaves last_error empty",
+           h.canary_ok && h.last_error[0] == '\0' &&
+           h.canary_last_ok_ts == st.last_ok_ts && h.canary_last_ok_ts > 0);
+    h = wallet_persistence_get_health(NULL, 0);
+    WC_RUN("health: closed handle names itself when canary was fine",
+           strcmp(h.last_error, "sqlite handle closed") == 0 &&
+           h.row_count == -1);
+
+    sqlite3_progress_handler(db, 1, wc_stop_cb, NULL);
+    h = wallet_persistence_get_health(db, 0);
+    sqlite3_progress_handler(db, 0, NULL, NULL);
+    WC_RUN("health: failed count step is a mismatch with a step error",
+           h.mismatch && h.row_count == -1 &&
+           strncmp(h.last_error, "step count: rc=", 15) == 0);
+    WC_RUN("health: handle closes cleanly after the count",
+           sqlite3_close(db) == SQLITE_OK);
+    return failures;
+}
+
 int test_wallet_canary(void)
 {
     printf("\n=== wallet_canary tests ===\n");
@@ -246,5 +410,8 @@ int test_wallet_canary(void)
     failures += t_null_db();
     failures += t_schema_missing();
     failures += t_health_snapshot();
+    failures += t_fault_codes();
+    failures += t_probe_shape();
+    failures += t_health_errors();
     return failures;
 }
