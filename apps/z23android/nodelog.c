@@ -243,6 +243,34 @@ void zapp_nodelog_redact(const char *line, char *out, size_t cap)
     }
     out[used] = 0;
 }
+static bool shutdown_stage_name(const char *name, size_t n)
+{
+    static const char *const names[] = {"emergency-coins-flush", "diagnostics-drain",
+        "frontend-stop", "network-quiesce", "worker-drain", "runtime-persist",
+        "fast-restart-persist", "release-resources", "offline-worker-drain", "offline-persist"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+        if (strlen(names[i]) == n && !strncmp(name, names[i], n)) return true;
+    return false;
+}
+static bool shutdown_timing(const char *line, const struct header *h, char *out, size_t cap)
+{
+    if (strcmp(h->domain, "shutdown") || strcmp(h->function, "close_current_stage") ||
+        strcmp(levels[h->level], "INFO")) return false;
+    const char *p = strstr(line, "close_current_stage(): stage \x27");
+    if (!p) return false;
+    p += strlen("close_current_stage(): stage \x27");
+    size_t n = strcspn(p, "\x27");
+    if (!shutdown_stage_name(p, n) || strncmp(p + n, "\x27 took ", 7)) return false;
+    const char *digits = p + n + 7;
+    size_t nd = strspn(digits, "0123456789");
+    if (!nd || nd > 9 || strncmp(digits + nd, "ms", 2)) return false;
+    const char *end = digits + nd + 2;
+    if (strcmp(end, "") && strcmp(end, " (durability-critical)") &&
+        strcmp(end, " OVER-BUDGET") && strcmp(end, " (durability-critical) OVER-BUDGET")) return false;
+    int wrote = snprintf(out, cap, "shutdown stage=%.*s elapsed_ms=%.*s",
+                         (int)n, p, (int)nd, digits);
+    return wrote >= 0 && (size_t)wrote < cap;
+}
 static bool take_slot(struct zapp_nodelog *l, int64_t now_ms)
 {
     if (l->window_count == 0 || now_ms - l->window_start >= 1000 || now_ms < l->window_start) {
@@ -261,13 +289,15 @@ void zapp_nodelog_line(struct zapp_nodelog *l, const char *line, int64_t now_ms)
     if (!text[0] || HAS_ANY(text, secret)) return;
     struct header header;
     bool has_header = read_header(text, &header), warning = warning_level(text, has_header, &header);
-    bool progress = !warning && explains_progress(text, has_header, &header);
+    char timing[128];
+    bool stage = has_header && shutdown_timing(text, &header, timing, sizeof(timing));
+    bool progress = !warning && (stage || explains_progress(text, has_header, &header));
     if (!warning && !progress) return;
     if (!take_slot(l, now_ms)) return;
     char summary[ZAPP_NODELOG_LINE_MAX + 1];
     if (warning) level_summary(&header, summary, sizeof(summary));
     char shown[ZAPP_NODELOG_LINE_MAX + 1];
-    zapp_nodelog_redact(warning ? summary : text, shown, sizeof(shown));
+    zapp_nodelog_redact(warning ? summary : stage ? timing : text, shown, sizeof(shown));
     l->sink(l->sink_arg, warning ? 1 : 0, shown);
 }
 

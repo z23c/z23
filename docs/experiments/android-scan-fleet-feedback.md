@@ -195,3 +195,12 @@ messages. The controller change keeps one error message; that change has not
 been measured on the device. A Stop tap at 06:22:18 UTC showed Stopping at
 06:22:37, and polling observed the node process gone at 06:22:50, about
 32 seconds after the tap, without forced termination.
+
+A warm phone node stopped between 128 and 129 seconds after the recorded Stop
+request; a later restart stopped between 20 and 21 seconds. The runs had
+different durations and conditions, and do not establish the cause. Android
+logcat now reports only allowlisted completed shutdown stage names and decimal
+durations, without forwarding the source line or its suffix. This does not
+identify a stage that has not yet completed. The focused nodelog privacy and
+filter tests and the complexity gate passed; no device result for the new
+telemetry is claimed here.

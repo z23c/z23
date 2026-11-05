@@ -293,10 +293,38 @@ static void sink_lines_carry_no_peer(void)
     assert(!strcmp(seen[before + 1], "2026-10-29T10:00:05Z INFO  [net] handshake complete peer=<peer> version=1"));
 }
 
+static void shutdown_timing_cases(void)
+{
+    static const char *const names[] = {"emergency-coins-flush", "diagnostics-drain",
+        "frontend-stop", "network-quiesce", "worker-drain", "runtime-persist",
+        "fast-restart-persist", "release-resources", "offline-worker-drain", "offline-persist"};
+    struct zapp_nodelog l; char line[512], expected[128];
+    count = 0; zapp_nodelog_init(&l, sink, NULL);
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        snprintf(line, sizeof(line), "2026-11-05T07:00:00Z INFO [shutdown] stage.c:1 close_current_stage(): stage '%s' took 123ms (durability-critical)", names[i]);
+        snprintf(expected, sizeof(expected), "shutdown stage=%s elapsed_ms=123", names[i]);
+        zapp_nodelog_line(&l, line, (int64_t)i * 1000);
+        assert(count == (int)i + 1 && !strcmp(seen[i], expected));
+    }
+    static const char *const bad[] = {
+        "INFO [shutdown] s.c:1 close_current_stage(): stage 'wallet-secret' took 4ms",
+        "INFO [shutdown] s.c:1 close_current_stage(): stage 'worker-drain' took -1ms",
+        "INFO [shutdown] s.c:1 close_current_stage(): stage 'worker-drain' took 1234567890ms",
+        "INFO [shutdown] s.c:1 close_current_stage(): stage 'worker-drain' took 1ms address=zs1secret",
+        "INFO [wallet] s.c:1 close_current_stage(): stage 'worker-drain' took 1ms",
+        "INFO [shutdown] s.c:1 other(): stage 'worker-drain' took 1ms",
+        "INFO [shutdown] s.c:1 close_current_stage(): stage 'worker-drain' took 1ms mnemonic",
+        "INFO [shutdown] s.c:1 close_current_stage(): stage 'worker-drain' took ms",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+        zapp_nodelog_line(&l, bad[i], 20000 + (int64_t)i * 1000);
+    assert(count == (int)(sizeof(names) / sizeof(names[0])));
+}
 int main(int argc, char **argv)
 {
     assert(argc == 2);
     filter_cases();
+    shutdown_timing_cases();
     level_lines_hide_their_text();
     progress_words_do_not_leak();
     peer_names_are_redacted();
