@@ -146,6 +146,11 @@ static enum zswap_ceremony_error take_input(const uint8_t *wire,
         return ZSWAP_CEREMONY_ERR_ACCEPT;
     in->value_sats = (int64_t)value;
     in->script_len = script_len;
+    /* The length is a byte the sender chooses, up to 255, and the field holds
+     * ZSWAP_MAX_INPUT_SCRIPT_BYTES: refuse before the copy. */
+    if (script_len > ZSWAP_MAX_INPUT_SCRIPT_BYTES)
+        return wire_len - *off < script_len ? ZSWAP_CEREMONY_ERR_WIRE_SIZE
+                                            : ZSWAP_CEREMONY_ERR_ACCEPT;
     if (!take_bytes(wire, wire_len, off, in->script_pub_key, script_len))
         return ZSWAP_CEREMONY_ERR_WIRE_SIZE;
     return ZSWAP_CEREMONY_OK;
@@ -224,7 +229,7 @@ static enum zswap_ceremony_error zswap_accept_decode_header(
     return ZSWAP_CEREMONY_OK;
 }
 
-/* Decode the accept's input list; a failure inside the loop wipes out. */
+/* Decode the accept's input list. */
 static enum zswap_ceremony_error zswap_accept_decode_inputs(
     const uint8_t *wire, size_t wire_len, size_t *off,
     struct zswap_accept_v1 *out)
@@ -236,34 +241,27 @@ static enum zswap_ceremony_error zswap_accept_decode_inputs(
     if (num_inputs == 0 || num_inputs > ZSWAP_MAX_BUYER_INPUTS)
         return ZSWAP_CEREMONY_ERR_ACCEPT;
     b->num_inputs = num_inputs;
-    enum zswap_ceremony_error err = ZSWAP_CEREMONY_OK;
-    for (size_t i = 0; i < b->num_inputs; i++) {
-        err = take_input(wire, wire_len, off, &b->inputs[i]);
-        if (err != ZSWAP_CEREMONY_OK) goto fail;
+    for (size_t i = 0; i < num_inputs; i++) {
+        enum zswap_ceremony_error err =
+            take_input(wire, wire_len, off, &b->inputs[i]);
+        if (err != ZSWAP_CEREMONY_OK) return err;
         /* The canonical wire is sorted: anything else is a hand-rolled or
          * corrupted message, not an accept we act on. */
         if (i > 0 && outpoint_cmp_fields(b->inputs[i - 1].txid,
                                          b->inputs[i - 1].vout,
                                          b->inputs[i].txid,
-                                         b->inputs[i].vout) >= 0) {
-            err = ZSWAP_CEREMONY_ERR_INPUT_ORDER;
-            goto fail;
-        }
+                                         b->inputs[i].vout) >= 0)
+            return ZSWAP_CEREMONY_ERR_INPUT_ORDER;
     }
     return ZSWAP_CEREMONY_OK;
-fail:
-    memset(out, 0, sizeof(*out));
-    return err;
 }
 
-/* Decode the accept's addresses, fee and deadline, then validate it; a
- * failed range check or validation wipes out. */
+/* Decode the accept's addresses, fee and deadline, then validate it. */
 static enum zswap_ceremony_error zswap_accept_decode_terms_and_validate(
     const uint8_t *wire, size_t wire_len, size_t *off,
     struct zswap_accept_v1 *out)
 {
     struct zswap_buyer_accept *b = &out->buyer;
-    enum zswap_ceremony_error err = ZSWAP_CEREMONY_OK;
     uint64_t fee, deadline;
     if (!take_bytes(wire, wire_len, off, b->token_recv_address,
                     ZSWAP_ADDRESS_FIELD_BYTES) ||
@@ -272,20 +270,13 @@ static enum zswap_ceremony_error zswap_accept_decode_terms_and_validate(
         !take_u64(wire, wire_len, off, &fee) ||
         !take_u64(wire, wire_len, off, &deadline))
         return ZSWAP_CEREMONY_ERR_WIRE_SIZE;
-    if (fee > (uint64_t)INT64_MAX || deadline > (uint64_t)INT64_MAX) {
-        err = ZSWAP_CEREMONY_ERR_ACCEPT;
-        goto fail;
-    }
+    if (fee > (uint64_t)INT64_MAX || deadline > (uint64_t)INT64_MAX)
+        return ZSWAP_CEREMONY_ERR_ACCEPT;
     b->fee_sats = fee;
     b->deadline_unix = (int64_t)deadline;
     if (*off != wire_len)
         return ZSWAP_CEREMONY_ERR_WIRE_SIZE;
-    err = zswap_accept_validate(out);
-    if (err != ZSWAP_CEREMONY_OK) goto fail;
-    return ZSWAP_CEREMONY_OK;
-fail:
-    memset(out, 0, sizeof(*out));
-    return err;
+    return zswap_accept_validate(out);
 }
 
 enum zswap_ceremony_error zswap_accept_decode(
@@ -296,10 +287,13 @@ enum zswap_ceremony_error zswap_accept_decode(
     size_t off = 0;
     enum zswap_ceremony_error err =
         zswap_accept_decode_header(wire, wire_len, &off, out);
-    if (err != ZSWAP_CEREMONY_OK) return err;
-    err = zswap_accept_decode_inputs(wire, wire_len, &off, out);
-    if (err != ZSWAP_CEREMONY_OK) return err;
-    return zswap_accept_decode_terms_and_validate(wire, wire_len, &off, out);
+    if (err == ZSWAP_CEREMONY_OK)
+        err = zswap_accept_decode_inputs(wire, wire_len, &off, out);
+    if (err == ZSWAP_CEREMONY_OK)
+        err = zswap_accept_decode_terms_and_validate(wire, wire_len, &off, out);
+    if (err != ZSWAP_CEREMONY_OK)
+        memset(out, 0, sizeof(*out));
+    return err;
 }
 
 /* ── msg2 zswap_partial.v1 ─────────────────────────────────────────── */
@@ -387,8 +381,7 @@ static enum zswap_ceremony_error zswap_partial_decode_header(
     return ZSWAP_CEREMONY_OK;
 }
 
-/* Decode the seller terms, pubkey and signature, then validate the partial;
- * a failed input, range check or validation wipes out. */
+/* Decode the seller terms, pubkey and signature, then validate the partial. */
 static enum zswap_ceremony_error zswap_partial_decode_seller_and_signature(
     const uint8_t *wire, size_t wire_len, size_t *off,
     struct zswap_partial_v1 *out)
@@ -396,7 +389,7 @@ static enum zswap_ceremony_error zswap_partial_decode_seller_and_signature(
     struct zswap_seller_accept *s = &out->seller;
     enum zswap_ceremony_error err =
         take_input(wire, wire_len, off, &s->token_input);
-    if (err != ZSWAP_CEREMONY_OK) goto fail;
+    if (err != ZSWAP_CEREMONY_OK) return err;
     uint64_t deadline;
     if (!take_bytes(wire, wire_len, off, s->zcl_recv_address,
                     ZSWAP_ADDRESS_FIELD_BYTES) ||
@@ -404,10 +397,8 @@ static enum zswap_ceremony_error zswap_partial_decode_seller_and_signature(
                     ZSWAP_ADDRESS_FIELD_BYTES) ||
         !take_u64(wire, wire_len, off, &deadline))
         return ZSWAP_CEREMONY_ERR_WIRE_SIZE;
-    if (deadline > (uint64_t)INT64_MAX) {
-        err = ZSWAP_CEREMONY_ERR_ACCEPT;
-        goto fail;
-    }
+    if (deadline > (uint64_t)INT64_MAX)
+        return ZSWAP_CEREMONY_ERR_ACCEPT;
     s->deadline_unix = (int64_t)deadline;
     if (!take_bytes(wire, wire_len, off, out->seller_pubkey, 33) ||
         !take_u8(wire, wire_len, off, &out->sig_len) ||
@@ -416,12 +407,7 @@ static enum zswap_ceremony_error zswap_partial_decode_seller_and_signature(
         return ZSWAP_CEREMONY_ERR_WIRE_SIZE;
     if (*off != wire_len)
         return ZSWAP_CEREMONY_ERR_WIRE_SIZE;
-    err = zswap_partial_validate(out);
-    if (err != ZSWAP_CEREMONY_OK) goto fail;
-    return ZSWAP_CEREMONY_OK;
-fail:
-    memset(out, 0, sizeof(*out));
-    return err;
+    return zswap_partial_validate(out);
 }
 
 enum zswap_ceremony_error zswap_partial_decode(
@@ -432,9 +418,12 @@ enum zswap_ceremony_error zswap_partial_decode(
     size_t off = 0;
     enum zswap_ceremony_error err =
         zswap_partial_decode_header(wire, wire_len, &off, out);
-    if (err != ZSWAP_CEREMONY_OK) return err;
-    return zswap_partial_decode_seller_and_signature(wire, wire_len, &off,
-                                                     out);
+    if (err == ZSWAP_CEREMONY_OK)
+        err = zswap_partial_decode_seller_and_signature(wire, wire_len, &off,
+                                                        out);
+    if (err != ZSWAP_CEREMONY_OK)
+        memset(out, 0, sizeof(*out));
+    return err;
 }
 
 /* ── shared checks ─────────────────────────────────────────────────── */
