@@ -118,6 +118,7 @@ static int fixture_dispatch_pair(const char *mode)
         return !environ || !environ[0] ? 0 : 66;
     }
     if (!strcmp(mode, "--supervised-fixture-tree")) return fixture_tree(false);
+    if (!strcmp(mode, "--supervised-fixture-session-tree")) return setsid() < 0 ? 37 : fixture_tree(false);
     if (!strcmp(mode, "--supervised-fixture-locked-tree")) return fixture_tree(true);
     if (!strcmp(mode, "--supervised-fixture-hold")) for (;;) pause();
     if (!strcmp(mode, "--supervised-fixture-exit-one")) return 1;
@@ -486,7 +487,7 @@ static int supervised_complete_vectors(int image)
     return failures;
 }
 
-static int supervised_tree(int image, bool owner_eof)
+static int supervised_tree(int image, bool owner_eof, bool session)
 {
     int failures = 0;
     int pipes[2] = {-1, -1}, null_fd = -1, leaf_fd = -1;
@@ -498,6 +499,7 @@ static int supervised_tree(int image, bool owner_eof)
         ASSERT(null_fd >= 0);
         struct platform_supervised_fd_map maps[3];
         struct platform_supervised_spec spec = tree_spec(image, null_fd, pipes[1], maps);
+        const char *sargv[] = {"fixture", "--supervised-fixture-session-tree", NULL}; if (session) spec.argv = sargv;
         ASSERT_EQ(platform_supervised_start(&process, &spec), PLATFORM_SUPERVISED_RUNNING);
         close(pipes[1]); pipes[1] = -1;
         pid_t leaf = -1;
@@ -1437,8 +1439,9 @@ int test_supervised_process(void)
         failures += supervised_stack_limits(image);
         failures += supervised_complete_e2big(image);
         failures += supervised_stack_refusal(image, directory);
-        failures += supervised_tree(image, false);
-        failures += supervised_tree(image, true);
+        failures += supervised_tree(image, false, false);
+        failures += supervised_tree(image, false, true);
+        failures += supervised_tree(image, true, false);
         failures += supervised_failures(image);
         failures += supervised_fast_exit(image);
         failures += supervised_wait_custody(image);
