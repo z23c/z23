@@ -12,6 +12,7 @@
 #include "validation/chainstate.h"
 #include "test/mmb_chain_fixture.h"
 #include "crypto/sha3.h"
+#include "net/snapshot_sync_contract.h"
 
 #include <fcntl.h>
 #include <stdlib.h>
@@ -353,6 +354,397 @@ static int mmb_reconcile_checks(void)
     return failures;
 }
 
+/* ---- mutation-gap cases ------------------------------------------------ */
+
+static int gap_serialize_sentinel(void)
+{
+    int failures = 0;
+    uint8_t buf[33];
+    memset(buf, 0xa5, sizeof(buf));
+    BFC_CHECK("serializer refusal clears exactly the 32 output bytes",
+              boot_serialize_utxo_snapshot(NULL, NULL, 500, buf) == -1 &&
+              buf[0] == 0 && buf[31] == 0 && buf[32] == 0xa5);
+    return failures;
+}
+
+static bool gap_utxo_sha3_matches(struct boot_svc_ctx *svc)
+{
+    /* Same commitment preimage as snapshot_matches_fixture. */
+    uint8_t input[54] = {0}, want[32], got[32] = {0};
+    uint64_t count = 0;
+    memset(input, 0x42, 32);
+    input[36] = 1;
+    input[44] = 1;
+    input[48] = 0x51;
+    input[49] = 1;
+    struct sha3_256_ctx ctx;
+    sha3_256_init(&ctx);
+    sha3_256_write(&ctx, input, sizeof(input));
+    sha3_256_finalize(&ctx, want);
+    return boot_compute_utxo_sha3(got, &count, svc) && count == 1 &&
+           memcmp(got, want, 32) == 0;
+}
+
+static int gap_utxo_sha3(void)
+{
+    int failures = 0;
+    struct node_db ndb, closed;
+    struct db_utxo utxo = {0};
+    uint8_t script[] = {0x51}, out[32];
+    uint64_t count = 0;
+    memset(&closed, 0, sizeof(closed));
+    bool opened = node_db_open(&ndb, ":memory:");
+    memset(utxo.txid, 0x42, sizeof(utxo.txid));
+    utxo.value = 1;
+    utxo.script = script;
+    utxo.script_len = sizeof(script);
+    utxo.script_type = SCRIPT_OTHER;
+    utxo.height = 1;
+    struct boot_svc_ctx svc = {0};
+    svc.node_db = &ndb;
+    BFC_CHECK("utxo sha3 provider commits the stored set",
+              opened && db_utxo_save(&ndb, &utxo) && gap_utxo_sha3_matches(&svc));
+    BFC_CHECK("utxo sha3 provider rejects a missing output",
+              opened && !boot_compute_utxo_sha3(NULL, &count, &svc));
+    BFC_CHECK("utxo sha3 provider rejects a missing count",
+              opened && !boot_compute_utxo_sha3(out, NULL, &svc));
+    struct boot_svc_ctx nodb = {0};
+    BFC_CHECK("utxo sha3 provider rejects a missing node db",
+              !boot_compute_utxo_sha3(out, &count, &nodb));
+    nodb.node_db = &closed;
+    BFC_CHECK("utxo sha3 provider rejects a node db with no handle",
+              !boot_compute_utxo_sha3(out, &count, &nodb));
+    if (opened)
+        node_db_close(&ndb);
+    return failures;
+}
+
+struct gap_range {
+    struct mmb_chain_fixture fx;
+    struct main_state *ms;
+    struct node_db ndb;
+    struct boot_svc_ctx svc;
+    bool ok;
+};
+
+static void gap_range_open(struct gap_range *g)
+{
+    memset(g, 0, sizeof(*g));
+    g->ms = calloc(1, sizeof(*g->ms));
+    g->ok = g->ms && mmb_chain_fixture_init(&g->fx, 20) &&
+            node_db_open(&g->ndb, ":memory:");
+    if (!g->ok)
+        return;
+    for (int i = 0; i < g->fx.n; i++)
+        g->fx.bi[i].nStatus |= BLOCK_HAVE_DATA;
+    active_chain_init(&g->ms->chain_active);
+    active_chain_move_window_tip(&g->ms->chain_active,
+                                 &g->fx.bi[g->fx.n - 1]);
+    g->svc.state = g->ms;
+    g->svc.node_db = &g->ndb;
+}
+
+static void gap_range_close(struct gap_range *g)
+{
+    if (g->ms)
+        active_chain_free(&g->ms->chain_active);
+    free(g->ms);
+    if (g->fx.bi)
+        mmb_chain_fixture_free(&g->fx);
+    node_db_close(&g->ndb);
+}
+
+static bool gap_hashes_are(const uint8_t (*out)[32],
+                           const struct gap_range *g, int first, int n)
+{
+    for (int i = 0; i < n; i++)
+        if (memcmp(out[i], g->fx.hashes[first + i].data, 32) != 0)
+            return false;
+    return true;
+}
+
+static int gap_range_from_chain(struct gap_range *g)
+{
+    int failures = 0;
+    uint8_t out[6][32];
+    memset(out, 0xee, sizeof(out));
+    BFC_CHECK("range load copies the active-chain hashes",
+              boot_load_block_hashes_range(10, 14, out, 5, &g->svc) == 5 &&
+              gap_hashes_are(out, g, 10, 5));
+    BFC_CHECK("range load writes no row past the count",
+              out[5][0] == 0xee && out[5][31] == 0xee);
+    memset(out, 0xee, sizeof(out));
+    BFC_CHECK("range load of one height from the chain",
+              boot_load_block_hashes_range(7, 7, out, 1, &g->svc) == 1 &&
+              gap_hashes_are(out, g, 7, 1));
+    BFC_CHECK("range load with a too-small buffer does not take the chain",
+              boot_load_block_hashes_range(10, 14, out, 4, &g->svc) <= 0);
+    BFC_CHECK("range load refuses a zero-size buffer",
+              boot_load_block_hashes_range(10, 14, out, 0, &g->svc) == 0);
+    return failures;
+}
+
+static int gap_range_fallbacks(struct gap_range *g)
+{
+    int failures = 0;
+    uint8_t out[6][32];
+    g->fx.bi[7].nStatus = 0;
+    BFC_CHECK("range load of one height without a body falls to the db",
+              boot_load_block_hashes_range(7, 7, out, 1, &g->svc) <= 0);
+    BFC_CHECK("range load across a missing body falls to the db",
+              boot_load_block_hashes_range(5, 9, out, 5, &g->svc) <= 0);
+    g->fx.bi[7].nStatus = BLOCK_HAVE_DATA;
+    struct boot_svc_ctx no_state = g->svc;
+    no_state.state = NULL;
+    BFC_CHECK("range load without chain state uses the db only",
+              boot_load_block_hashes_range(10, 14, out, 5, &no_state) <= 0);
+    struct boot_svc_ctx no_db = g->svc;
+    no_db.node_db = NULL;
+    BFC_CHECK("range load without a node db is refused even with a chain",
+              boot_load_block_hashes_range(10, 14, out, 5, &no_db) == 0);
+    return failures;
+}
+
+static int gap_range_checks(void)
+{
+    int failures = 0;
+    struct gap_range g;
+    gap_range_open(&g);
+    BFC_CHECK("range fixture ready", g.ok);
+    if (g.ok) {
+        failures += gap_range_from_chain(&g);
+        failures += gap_range_fallbacks(&g);
+    }
+    gap_range_close(&g);
+    return failures;
+}
+
+static int gap_reconcile_guards(const char *dir)
+{
+    int failures = 0;
+    struct mmb_chain_fixture fx;
+    struct mmb_leaf_store s, closed;
+    struct active_chain empty;
+    memset(&closed, 0, sizeof(closed));
+    bool ready = mmb_chain_fixture_init(&fx, 120);
+    BFC_CHECK("reconcile guard fixture", ready);
+    if (!ready)
+        return failures;
+    BFC_CHECK("reconcile refuses a NULL store",
+              !boot_reconcile_mmb_leaf_store(NULL, &fx.chain, 120));
+    BFC_CHECK("reconcile refuses a closed store",
+              !boot_reconcile_mmb_leaf_store(&closed, &fx.chain, 120));
+    active_chain_init(&empty);
+    BFC_CHECK("reconcile refuses a chain with no tip",
+              mmb_seed_prefix(&s, dir, "g_empty_chain.bin", &fx.chain, 3) &&
+              !boot_reconcile_mmb_leaf_store(&s, &empty, 3));
+    mmb_leaf_store_close(&s);
+    active_chain_free(&empty);
+    BFC_CHECK("a store already at the MMB state is left alone",
+              mmb_seed_prefix(&s, dir, "g_at_state.bin", &fx.chain, 100) &&
+              boot_reconcile_mmb_leaf_store(&s, &fx.chain, 100) &&
+              s.num_leaves == 100);
+    mmb_leaf_store_close(&s);
+    mmb_chain_fixture_free(&fx);
+    return failures;
+}
+
+static int gap_reconcile_one_block(const char *dir)
+{
+    int failures = 0;
+    struct mmb_chain_fixture fx;
+    struct mmb_leaf_store s;
+    bool ready = mmb_chain_fixture_init(&fx, 1);
+    BFC_CHECK("one-block chain fixture", ready);
+    if (!ready)
+        return failures;
+    BFC_CHECK("reconcile accepts a chain whose tip is height 0",
+              mmb_seed_prefix(&s, dir, "g_one.bin", &fx.chain, 0) &&
+              boot_reconcile_mmb_leaf_store(&s, &fx.chain, 1) &&
+              s.num_leaves == 1);
+    mmb_leaf_store_close(&s);
+    mmb_chain_fixture_free(&fx);
+    return failures;
+}
+
+static bool gap_proof_challenge(struct fc_challenge *ch,
+                                const struct mmb_leaf_store *store)
+{
+    struct mmb *m = calloc(1, sizeof(*m));
+    if (!m)
+        return false;
+    mmb_init(m);
+    for (uint64_t i = 0; i < store->num_leaves; i++)
+        mmb_append_hash(m, mmb_leaf_store_get(store, i));
+    memset(ch, 0, sizeof(*ch));
+    memset(ch->seed, 0x37, sizeof(ch->seed));
+    ch->chain_length = store->num_leaves;
+    mmb_root(m, ch->mmb_root);
+    free(m);
+    return true;
+}
+
+static int gap_proof_checks(const char *dir)
+{
+    int failures = 0;
+    struct mmb_chain_fixture fx;
+    struct fc_challenge ch;
+    struct fc_response *resp = calloc(1, sizeof(*resp));
+    struct mmb_leaf leaf = {0};
+    rpc_blockchain_mmb_append(&leaf);   /* the proof builder needs MMB state */
+    bool ready = resp && mmb_chain_fixture_init(&fx, 40) &&
+                 mmb_seed_prefix(&g_mmb_leaf_store, dir, "g_proof.bin",
+                                 &fx.chain, 40) &&
+                 gap_proof_challenge(&ch, &g_mmb_leaf_store);
+    BFC_CHECK("proof fixture ready", ready);
+    if (ready) {
+        BFC_CHECK("proof builder answers an honest challenge",
+                  boot_build_flyclient_proof(resp, &ch, &fx.chain, NULL) &&
+                  resp->num_samples > 0);
+        ch.mmb_root[0] ^= 1;
+        BFC_CHECK("proof builder refuses a challenge for another root",
+                  !boot_build_flyclient_proof(resp, &ch, &fx.chain, NULL));
+        ch.mmb_root[0] ^= 1;
+        mmb_leaf_store_close(&g_mmb_leaf_store);
+        BFC_CHECK("proof builder refuses without an open leaf store",
+                  !boot_build_flyclient_proof(resp, &ch, &fx.chain, NULL));
+        mmb_chain_fixture_free(&fx);
+    }
+    free(resp);
+    return failures;
+}
+
+static int g_gap_fail_at = -1;
+
+static bool gap_legacy_loader(int height, struct mmb_leaf *leaf)
+{
+    if (height == g_gap_fail_at)
+        return false;
+    memset(leaf, 0, sizeof(*leaf));
+    leaf->height = (uint32_t)height;
+    leaf->timestamp = 7;
+    leaf->block_hash[0] = (uint8_t)height;
+    leaf->block_hash[1] = (uint8_t)(height >> 8);
+    return true;
+}
+
+static bool gap_leaf_is_legacy(const struct mmb_leaf_store *s, uint64_t i)
+{
+    struct mmb_leaf leaf;
+    uint8_t want[32];
+    gap_legacy_loader((int)i, &leaf);
+    mmb_hash_leaf(&leaf, want);
+    return memcmp(mmb_leaf_store_get(s, i), want, 32) == 0;
+}
+
+static bool gap_leaf_is_chain(const struct mmb_leaf_store *s,
+                              const struct mmb_leaf_store *ref, uint64_t i)
+{
+    return memcmp(mmb_leaf_store_get(s, i), mmb_leaf_store_get(ref, i), 32) == 0;
+}
+
+/* Run boot_prepare over a clean `have`-leaf store on a chain of `chain_n`
+ * blocks, with the process MMB state clamped at `have` leaves. */
+static bool gap_prepare(const char *dir, struct mmb_chain_fixture *fx,
+                        struct mmb_leaf_store *ref, int have, int chain_n,
+                        boot_mmb_leaf_loader_fn loader)
+{
+    struct main_state *ms = calloc(1, sizeof(*ms));
+    struct mmb_leaf_store seed;
+    if (!ms || !mmb_chain_fixture_init(fx, chain_n))
+        return false;
+    active_chain_init(&ms->chain_active);
+    active_chain_move_window_tip(&ms->chain_active, &fx->bi[chain_n - 1]);
+    struct boot_svc_ctx svc = {0};
+    svc.state = ms;
+    bool ok = mmb_seed_prefix(ref, dir, "gref.bin", &fx->chain, chain_n) &&
+              mmb_seed_prefix(&seed, dir, "mmb_leaves.bin", &fx->chain, have);
+    mmb_leaf_store_close(&seed);
+    ok = ok && boot_prepare_mmb_leaf_store(&svc, dir, loader);
+    active_chain_free(&ms->chain_active);
+    free(ms);
+    return ok;
+}
+
+static uint64_t gap_mmb_leaves(void)
+{
+    uint64_t have = 0;
+    struct mmb_leaf leaf = {0};
+    (void)rpc_blockchain_mmb_snapshot(NULL, &have, NULL);
+    while (have < 2100) {
+        rpc_blockchain_mmb_append(&leaf);
+        have++;
+    }
+    (void)rpc_blockchain_mmb_snapshot(NULL, &have, NULL);
+    return have;
+}
+
+static int gap_legacy_catchup(const char *dir)
+{
+    int failures = 0;
+    struct mmb_chain_fixture fx;
+    struct mmb_leaf_store ref;
+    int have = (int)gap_mmb_leaves();
+    g_gap_fail_at = -1;
+    bool ok = gap_prepare(dir, &fx, &ref, have, have + 1, gap_legacy_loader);
+    BFC_CHECK("legacy catchup: one leaf behind the chain is appended",
+              ok && g_mmb_leaf_store.num_leaves == (uint64_t)have + 1 &&
+              gap_leaf_is_legacy(&g_mmb_leaf_store, (uint64_t)have));
+    BFC_CHECK("legacy repair rewrites the first 2048 leaves only",
+              ok && gap_leaf_is_legacy(&g_mmb_leaf_store, 0) &&
+              gap_leaf_is_legacy(&g_mmb_leaf_store, 2047) &&
+              gap_leaf_is_chain(&g_mmb_leaf_store, &ref, 2048) &&
+              gap_leaf_is_chain(&g_mmb_leaf_store, &ref, (uint64_t)have - 1));
+    mmb_leaf_store_close(&g_mmb_leaf_store);
+    mmb_leaf_store_close(&ref);
+    mmb_chain_fixture_free(&fx);
+    return failures;
+}
+
+static int gap_legacy_stops(const char *dir)
+{
+    int failures = 0;
+    struct mmb_chain_fixture fx;
+    struct mmb_leaf_store ref;
+    int have = (int)gap_mmb_leaves();
+    g_gap_fail_at = have + 1;
+    bool ok = gap_prepare(dir, &fx, &ref, have, have + 3, gap_legacy_loader);
+    BFC_CHECK("legacy catchup stops where the loader fails",
+              ok && g_mmb_leaf_store.num_leaves == (uint64_t)have + 1);
+    mmb_leaf_store_close(&g_mmb_leaf_store);
+    mmb_leaf_store_close(&ref);
+    mmb_chain_fixture_free(&fx);
+    g_gap_fail_at = -1;
+
+    have = (int)gap_mmb_leaves();
+    ok = gap_prepare(dir, &fx, &ref, have, have, gap_legacy_loader);
+    BFC_CHECK("a store already at the chain tip is not repaired from legacy",
+              ok && g_mmb_leaf_store.num_leaves == (uint64_t)have &&
+              gap_leaf_is_chain(&g_mmb_leaf_store, &ref, 0) &&
+              gap_leaf_is_chain(&g_mmb_leaf_store, &ref, (uint64_t)have - 1));
+    mmb_leaf_store_close(&g_mmb_leaf_store);
+    mmb_leaf_store_close(&ref);
+    mmb_chain_fixture_free(&fx);
+    return failures;
+}
+
+static int boot_flyclient_gap_checks(void)
+{
+    int failures = 0;
+    char dir[PATH_MAX];
+    test_make_tmpdir(dir, sizeof(dir), "boot_flyclient_gap", "dir");
+    failures += gap_serialize_sentinel();
+    failures += gap_utxo_sha3();
+    failures += gap_range_checks();
+    failures += gap_reconcile_guards(dir);
+    failures += gap_reconcile_one_block(dir);
+    failures += gap_proof_checks(dir);
+    failures += gap_legacy_catchup(dir);
+    failures += gap_legacy_stops(dir);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 int test_boot_flyclient(void)
 {
     int failures = 0;
@@ -376,6 +768,7 @@ int test_boot_flyclient(void)
     failures += snapshot_output_failure_checks();
     failures += snapshot_refusal_checks();
     failures += mmb_reconcile_checks();
+    failures += boot_flyclient_gap_checks();
 
     BFC_CHECK("mmb leaf store prepare rejects missing service",
               !boot_prepare_mmb_leaf_store(NULL, NULL, NULL));
