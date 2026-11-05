@@ -6811,6 +6811,11 @@ static bool ic_split_edit_wordlist(void)
                       "EXTRA = $(D)/other.c $(D)/xbig.c $(D)/big_part.c\n");
 }
 
+/* The fixture's registry at base: the second row is a group a new test file
+ * would already have registered. */
+#define IC_FRESH_CATALOG \
+    "ZCL_TEST_GROUP(hex_codec)\nZCL_TEST_GROUP(devagent_situation)\n"
+
 static bool ic_split_base_build(void)
 {
     if (system("rm -rf " IC_FIX_SPLIT " && mkdir -p " IC_SPLIT_REPO
@@ -6827,6 +6832,11 @@ static bool ic_split_base_build(void)
            ic_split_w("Makefile", ic_split_make_base) &&
            ic_split_w("mk/extra.mk", "EXTRA = $(D)/other.c\n") &&
            ic_split_w("docs/NOTES.txt", "pending: native_devagent_rules\n") &&
+           /* a generic leaf name used as a word, and a path into the app */
+           ic_split_w("docs/APP_NOTES.txt",
+                      "home.c and rpc.c are generic names\n"
+                      "see apps/z23android/spelled.c\n") &&
+           ic_split_w("tools/dev/test_group_catalog.def", IC_FRESH_CATALOG) &&
            ic_split_git("git add -A && git commit -qm base && git checkout -q "
                         "-B base");
 }
@@ -7270,6 +7280,58 @@ static bool ic_fresh_edit_android_res(void)
     return ic_split_w("apps/z23android/res/xml/fresh_rules.xml", "<a/>\n");
 }
 
+/* A generic leaf name that is also a word outside the tree stays exact: only
+ * a path into the app reaches it. */
+static bool ic_fresh_edit_android_leaf(void)
+{
+    return ic_split_w("apps/z23android/home.c",
+                      "int main(void)\n{\n    return 0;\n}\n") &&
+           ic_split_w("apps/z23android/bridge/rpc.c", "int x;\n");
+}
+
+/* A file outside the tree spells the path of this one. */
+static bool ic_fresh_edit_android_spelled(void)
+{
+    return ic_split_w("apps/z23android/spelled.c",
+                      "int main(void)\n{\n    return 0;\n}\n");
+}
+
+/* A new test file whose registry row this change adds: the runner reaches
+ * test_<stem> through ZCL_TEST_GROUP, so no source line names it. */
+static bool ic_fresh_edit_test_row(void)
+{
+    return ic_split_w("tests/harness/src/test_devagent_start.c",
+                      "int test_devagent_start(void)\n{\n    return 0;\n}\n") &&
+           ic_split_w("tools/dev/test_group_catalog.def",
+                      IC_FRESH_CATALOG "ZCL_TEST_GROUP(devagent_start)\n");
+}
+
+/* The same file with no registry row: nothing calls it. */
+static bool ic_fresh_edit_test_norow(void)
+{
+    return ic_split_w("tests/harness/src/test_devagent_start.c",
+                      "int test_devagent_start(void)\n{\n    return 0;\n}\n");
+}
+
+/* The row exists at base, so it does not show this file is the one called. */
+static bool ic_fresh_edit_test_oldrow(void)
+{
+    return ic_split_w("tests/harness/src/test_devagent_situation.c",
+                      "int test_devagent_situation(void)\n{\n"
+                      "    return 0;\n}\n") &&
+           ic_split_w("tools/dev/test_group_catalog.def",
+                      IC_FRESH_CATALOG "ZCL_TEST_GROUP(devagent_other)\n");
+}
+
+/* The row names another group than the file's own function. */
+static bool ic_fresh_edit_test_otherrow(void)
+{
+    return ic_split_w("tests/harness/src/test_devagent_start.c",
+                      "int test_devagent_start(void)\n{\n    return 0;\n}\n") &&
+           ic_split_w("tools/dev/test_group_catalog.def",
+                      IC_FRESH_CATALOG "ZCL_TEST_GROUP(devagent_other)\n");
+}
+
 /* The same file in an app the harness and engine can reach stays structural. */
 static bool ic_fresh_edit_other_app(void)
 {
@@ -7321,6 +7383,12 @@ static bool ic_fresh_fixture_build(void)
         {"freshandroid", ic_fresh_edit_android},
         {"freshandroidres", ic_fresh_edit_android_res},
         {"freshotherapp", ic_fresh_edit_other_app},
+        {"freshandroidleaf", ic_fresh_edit_android_leaf},
+        {"freshandroidspelled", ic_fresh_edit_android_spelled},
+        {"freshtestrow", ic_fresh_edit_test_row},
+        {"freshtestnorow", ic_fresh_edit_test_norow},
+        {"freshtestoldrow", ic_fresh_edit_test_oldrow},
+        {"freshtestotherrow", ic_fresh_edit_test_otherrow},
     };
     if (!ic_split_base_build()) return false;
     for (size_t i = 0; i < sizeof branches / sizeof branches[0]; i++)
@@ -7349,6 +7417,12 @@ static const struct ic_fresh_case ic_fresh_cases[] = {
     {"freshlintfixture", 0, "make_lint_gates", NULL}, /* a new lint fixture */
     {"freshandroid", 0, "code_inventory", NULL},     /* the app's own build */
     {"freshandroidres", 0, "code_inventory", NULL},  /* any file type there */
+    {"freshandroidleaf", 0, "code_inventory", NULL}, /* generic leaf names */
+    {"freshtestrow", 0, "devagent_start", NULL},     /* a new row registers it */
+    {"freshandroidspelled", 'A', NULL, NULL}, /* a doc spells the app path */
+    {"freshtestnorow", 'A', NULL, NULL},     /* no registry row: uncalled */
+    {"freshtestoldrow", 'A', NULL, NULL},    /* the row is already at base */
+    {"freshtestotherrow", 'A', NULL, NULL},  /* a row for another group */
     {"freshlintmention", 'A', NULL, NULL},   /* an unchanged outside file names it */
     {"freshotherapp", 'A', NULL, NULL},      /* an app others can reach */
     {"freshheaderprobe", 'A', NULL, NULL},   /* an unchanged __has_include */
