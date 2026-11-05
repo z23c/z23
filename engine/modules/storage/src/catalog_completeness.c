@@ -415,6 +415,12 @@ static size_t cc_snapshot_rows(struct catalog_index_status *out, size_t max,
         row->lag = lag > 0 ? lag : 0;
         row->floor = e->body_folded ? seed_floor : 0;
         row->coverage = (int)cc_coverage(cursor, row->floor, target_height);
+        /* Activation-cursor rows report cursor=0 for "nothing from genesis
+         * is proven complete" (see the file header); with no floor of their
+         * own that reads as PARTIAL, which claims progress they disclaim. */
+        if (!e->body_folded && cursor == 0 &&
+            row->coverage == (int)CATALOG_COVERAGE_PARTIAL)
+            row->coverage = (int)CATALOG_COVERAGE_NONE;
     }
     return n;
 }
