@@ -120,6 +120,11 @@ bool node_db_catchup_seed_prefix_expected(void);
  * housekeeping tick on this rather than racing it for the lock. */
 bool node_db_catchup_service_active(void);
 
+/* Run the turbo-scope restore a yielded pass left owed. False while the
+ * connection is inside a transaction or the restore failed; true when
+ * nothing is owed. Shutdown calls it before the durability barrier. */
+bool node_db_catchup_service_restore_owed(struct node_db *ndb);
+
 /* A verified body-less snapshot may publish its derived projection cursor up
  * to the last resolvable active-chain slot. When the very next slot the
  * projection needs (projection_tip + 1) is a missing active-chain index —

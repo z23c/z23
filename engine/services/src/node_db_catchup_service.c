@@ -921,12 +921,44 @@ static void catchup_unwind_open(struct catchup_pass *ps, const char *restore_msg
 
 enum catchup_open { CATCHUP_OPEN_READY, CATCHUP_OPEN_YIELD, CATCHUP_OPEN_FAILED };
 
-/* Another thread's transaction is open on the shared connection: leave any
- * mode this pass entered and let the next trigger walk from the cursor. */
+/* A turbo scope whose restore was owed when a pass yielded. The restore
+ * (synchronous, cache, index rebuild) cannot run inside the other writer's
+ * transaction: PRAGMA synchronous is refused there, so synchronous would stay
+ * OFF, and the CREATE INDEX statements would join that transaction. It runs
+ * from catchup_restore_owed once the connection is idle. Catchup passes are
+ * serialized by the catchup trigger, and shutdown runs after they stop. */
+static struct sync_db_turbo_scope g_owed_scope;
+
+/* Restore a scope a yielded pass left owed. False: still owed (the
+ * connection is inside a transaction, or the restore failed and is retried). */
+bool node_db_catchup_service_restore_owed(struct node_db *ndb)
+{
+    if (!g_owed_scope.entered)
+        return true;
+    if (node_db_catchup_lock_guard_foreign_txn(ndb))
+        return false;
+    if (!sync_db_turbo_scope_end(&g_owed_scope)) {
+        LOG_WARN_IN("node_db_catchup_service_run", "catchup",
+                    "catchup: owed restore of normal mode failed; retrying next pass");
+        return false;
+    }
+    return true;
+}
+
+/* Another thread's transaction is open on the shared connection: leave the
+ * walk to the next trigger. A turbo scope this pass entered is not restored
+ * here (that would run inside the foreign transaction); it is owed. */
 static enum catchup_open catchup_yield_open(struct catchup_pass *ps)
 {
-    if (!sync_db_turbo_scope_end(&ps->turbo_mode))
-        fprintf(stderr, "catchup: failed to restore normal mode after yielding\n");
+    if (ps->turbo_mode.entered) {
+        if (g_owed_scope.entered)
+            LOG_WARN_IN("node_db_catchup_service_run", "catchup",
+                        "catchup: a second turbo scope is owed a restore; "
+                        "the earlier one is superseded");
+        g_owed_scope = ps->turbo_mode;
+        ps->turbo_mode.entered = false;
+        ps->turbo_mode.ndb = NULL;
+    }
     node_db_catchup_lock_guard_note_open_yield(ps->start);
     catchup_active_finish();
     return CATCHUP_OPEN_YIELD;
@@ -1416,6 +1448,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
 
     if (catchup_args_invalid(ndb, chain))
         LOG_ERR("sync", "catchup: invalid args (ndb=%p, chain=%p)", (void *)ndb, (void *)chain);
+    (void)node_db_catchup_service_restore_owed(ndb);
 
     int db_tip = 0;
     int chain_tip = 0;

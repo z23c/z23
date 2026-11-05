@@ -21,6 +21,7 @@
 #include "health/heartbeat.h"
 #include "controllers/wallet_private_broadcast.h"
 #include "supervisors/self_heal.h"
+#include "services/node_db_catchup_service.h"
 #include "services/sync_monitor.h"
 #include "supervisors/staged_sync_supervisor.h"
 #include "services/block_index_loader.h"
@@ -385,6 +386,10 @@ static void shutdown_persist_node_db(struct boot_svc_ctx *svc,
                                      bool diagnostics_drained, bool *ok)
 {
     if (svc->node_db->open) {
+        /* A catchup pass that yielded inside another writer's transaction
+         * owes the turbo-mode restore (synchronous, index rebuild). */
+        if (!node_db_catchup_service_restore_owed(svc->node_db))
+            LOG_WARN("shutdown", "catchup turbo restore still owed at shutdown");
         if (!db_service_flush_write(svc->db_service))
             *ok = false;
         node_db_sync_mempool_save(svc->node_db, svc->mempool);
