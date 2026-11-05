@@ -320,11 +320,47 @@ static void shutdown_timing_cases(void)
         zapp_nodelog_line(&l, bad[i], 20000 + (int64_t)i * 1000);
     assert(count == (int)(sizeof(names) / sizeof(names[0])));
 }
+static void shutdown_substep_cases(void)
+{
+    static const char *const input[] = {
+        "[shutdown]   shutdown.projection_catch_up 12ms",
+        "[shutdown]   shutdown.flat_save           33ms path=incremental rewritten_bytes=123",
+        "[shutdown]   shutdown.flat_bind           44ms rows=10 checked=9 rows/s=2 threads=1",
+        "[shutdown]   shutdown.wal_passive         0ms",
+        "[shutdown]   shutdown.flat_save           1ms path=full rewritten_bytes=18446744073709551615",
+        "[shutdown]   shutdown.flat_save           2ms"
+    };
+    static const char *const expected[] = {
+        "shutdown substep=projection_catch_up elapsed_ms=12",
+        "shutdown substep=flat_save elapsed_ms=33 mode=incremental rewritten_bytes=123",
+        "shutdown substep=flat_bind elapsed_ms=44",
+        "shutdown substep=wal_passive elapsed_ms=0",
+        "shutdown substep=flat_save elapsed_ms=1 mode=full rewritten_bytes=18446744073709551615",
+        "shutdown substep=flat_save elapsed_ms=2"
+    };
+    static const char *const bad[] = {
+        "[shutdown]   shutdown.secret 1ms", "[shutdown]   shutdown.wal_passive -1ms",
+        "[shutdown]   shutdown.wal_passive 1234567890ms", "[shutdown]   shutdown.wal_passive 1ms address=secret",
+        "[shutdown]   shutdown.flat_save 1ms path=other rewritten_bytes=1",
+        "[shutdown]   shutdown.flat_save 1ms path=full rewritten_bytes=18446744073709551616",
+        "[shutdown]   shutdown.flat_bind 1ms rows=1 checked=2 rows/s=3 threads=4 extra=x",
+        "[shutdown]   shutdown.flat_bind 1ms rows=1 checked=2 rows/s=3 threads=-1"
+    };
+    struct zapp_nodelog l; count = 0; zapp_nodelog_init(&l, sink, NULL);
+    for (size_t i = 0; i < sizeof(input) / sizeof(input[0]); ++i) {
+        zapp_nodelog_line(&l, input[i], (int64_t)i * 1000);
+        assert(count == (int)i + 1 && !strcmp(seen[i], expected[i]));
+    }
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i)
+        zapp_nodelog_line(&l, bad[i], 10000 + (int64_t)i * 1000);
+    assert(count == (int)(sizeof(input) / sizeof(input[0])));
+}
 int main(int argc, char **argv)
 {
     assert(argc == 2);
     filter_cases();
     shutdown_timing_cases();
+    shutdown_substep_cases();
     level_lines_hide_their_text();
     progress_words_do_not_leak();
     peer_names_are_redacted();

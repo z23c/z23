@@ -1,9 +1,11 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #define _GNU_SOURCE
 #include "nodelog.h"
+#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
@@ -271,6 +273,66 @@ static bool shutdown_timing(const char *line, const struct header *h, char *out,
                          (int)n, p, (int)nd, digits);
     return wrote >= 0 && (size_t)wrote < cap;
 }
+/* Parse only unsigned decimal fields the shutdown producer actually emits. */
+static bool shutdown_number(const char **p, size_t limit)
+{
+    size_t n = strspn(*p, "0123456789");
+    if (!n || n > limit) return false;
+    errno = 0; char *end;
+    (void)strtoull(*p, &end, 10);
+    if (errno || end != *p + n) return false;
+    *p = end;
+    return true;
+}
+static bool shutdown_field(const char **p, const char *label)
+{
+    size_t n = strlen(label);
+    if (strncmp(*p, label, n)) return false;
+    *p += n;
+    return shutdown_number(p, 20);
+}
+static bool shutdown_substep_suffix(const char *name, const char *p, const char **mode, unsigned long long *bytes)
+{
+    if (!strcmp(name, "flat_save")) {
+        if (!*p) return true;
+        if (!strncmp(p, " path=incremental", 17)) { p += 17; *mode = "incremental"; }
+        else if (!strncmp(p, " path=full", 10)) { p += 10; *mode = "full"; }
+        else if (!strncmp(p, " path=none", 10)) { p += 10; *mode = "none"; }
+        else return false;
+        const char label[] = " rewritten_bytes=";
+        if (strncmp(p, label, sizeof(label) - 1)) return false;
+        p += sizeof(label) - 1; const char *start = p;
+        if (!shutdown_number(&p, 20) || *p) return false;
+        *bytes = strtoull(start, NULL, 10);
+        return true;
+    }
+    if (!strcmp(name, "flat_bind"))
+        return shutdown_field(&p, " rows=") && shutdown_field(&p, " checked=") &&
+               shutdown_field(&p, " rows/s=") && shutdown_field(&p, " threads=") && !*p;
+    return !*p;
+}
+static bool shutdown_substep(const char *line, char *out, size_t cap)
+{
+    static const char *const names[] = {"projection_catch_up", "flat_save", "flat_bind", "wal_passive"};
+    const char prefix[] = "[shutdown]   shutdown.";
+    if (strncmp(line, prefix, sizeof(prefix) - 1)) return false;
+    const char *p = line + sizeof(prefix) - 1, *name = NULL;
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+        size_t n = strlen(names[i]);
+        if (!strncmp(p, names[i], n) && p[n] == ' ') { name = names[i]; p += n; break; }
+    }
+    if (!name) return false;
+    while (*p == ' ') ++p;
+    const char *digits = p;
+    if (!shutdown_number(&p, 9) || strncmp(p, "ms", 2)) return false;
+    size_t nd = (size_t)(p - digits); p += 2;
+    const char *mode = NULL; unsigned long long bytes = 0;
+    if (!shutdown_substep_suffix(name, p, &mode, &bytes)) return false;
+    int wrote = mode ? snprintf(out, cap, "shutdown substep=%s elapsed_ms=%.*s mode=%s rewritten_bytes=%llu",
+                                name, (int)nd, digits, mode, bytes) :
+                       snprintf(out, cap, "shutdown substep=%s elapsed_ms=%.*s", name, (int)nd, digits);
+    return wrote >= 0 && (size_t)wrote < cap;
+}
 static bool take_slot(struct zapp_nodelog *l, int64_t now_ms)
 {
     if (l->window_count == 0 || now_ms - l->window_start >= 1000 || now_ms < l->window_start) {
@@ -290,7 +352,8 @@ void zapp_nodelog_line(struct zapp_nodelog *l, const char *line, int64_t now_ms)
     struct header header;
     bool has_header = read_header(text, &header), warning = warning_level(text, has_header, &header);
     char timing[128];
-    bool stage = has_header && shutdown_timing(text, &header, timing, sizeof(timing));
+    bool stage = (has_header && shutdown_timing(text, &header, timing, sizeof(timing))) ||
+                 shutdown_substep(text, timing, sizeof(timing));
     bool progress = !warning && (stage || explains_progress(text, has_header, &header));
     if (!warning && !progress) return;
     if (!take_slot(l, now_ms)) return;

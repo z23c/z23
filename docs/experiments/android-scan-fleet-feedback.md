@@ -204,3 +204,13 @@ durations, without forwarding the source line or its suffix. This does not
 identify a stage that has not yet completed. The focused nodelog privacy and
 filter tests and the complexity gate passed; no device result for the new
 telemetry is claimed here.
+
+On the landed Android build, a short-run Stop took between 40 and 41 seconds;
+the completed fast-restart-persist stage accounted for 33,085 ms. The stage
+contains projection catch-up, flat-file save, coverage binding and a passive
+checkpoint, so the stage measurement alone does not identify the slow substep.
+The Android log filter now reconstructs only those four fixed substep names and
+their validated durations, plus the flat-save mode and byte count. Focused
+nodelog tests cover producer-shaped lines and reject malformed or extra fields;
+the complexity and hardening checks passed. Device measurements of these
+substeps remain pending.
