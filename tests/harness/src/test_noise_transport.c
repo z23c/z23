@@ -15,6 +15,7 @@
 #include "crypto/curve25519.h"
 #include "noise/noise_handshake.h"
 #include "noise/session_transport.h"
+#include "crypto/chacha20poly1305.h"
 
 /* Deterministic 32-byte scalar from a seed byte (test key material). */
 static void mk_scalar(uint8_t out[32], uint8_t seed)
@@ -195,6 +196,11 @@ static bool build_pair(struct session_transport *ts_i, struct session_transport 
     return true;
 }
 
+static int st_frame_known_answer(void);
+static int st_length_edges(void);
+static int st_rekey_known_answer(void);
+static int st_init_and_cleanse(void);
+
 int test_session_transport(void)
 {
     int failures = 0;
@@ -269,5 +275,197 @@ int test_session_transport(void)
                                           frame, &flen));
     } TEST_END
 
+    failures += st_frame_known_answer();
+    failures += st_length_edges();
+    failures += st_rekey_known_answer();
+    failures += st_init_and_cleanse();
+    return failures;
+}
+
+/* ---- mutation-sweep closers: spec-built reference frames --------------------
+ * These build the expected record independently of session_transport.c, from
+ * the documented wire layout: nonce = 4x00 || LE64(n); AAD = LE32(epoch) ||
+ * LE24(wire_len); frame = LE24(wire_len) || ChaCha20-Poly1305(inner). */
+
+/* Seal `inner` under (key, epoch, n) the way the transport spec says. */
+static bool ref_frame(const uint8_t key[32], uint32_t epoch, uint64_t n,
+                      const uint8_t *inner, size_t inner_len,
+                      uint8_t *frame, size_t *frame_len)
+{
+    uint8_t nonce[12] = {0};
+    for (int i = 0; i < 8; i++) nonce[4 + i] = (uint8_t)(n >> (8 * i));
+    uint32_t wl = (uint32_t)inner_len + 16;
+    uint8_t aad[7] = { (uint8_t)epoch, (uint8_t)(epoch >> 8), (uint8_t)(epoch >> 16),
+                       (uint8_t)(epoch >> 24), (uint8_t)wl, (uint8_t)(wl >> 8),
+                       (uint8_t)(wl >> 16) };
+    frame[0] = (uint8_t)wl;
+    frame[1] = (uint8_t)(wl >> 8);
+    frame[2] = (uint8_t)(wl >> 16);
+    *frame_len = 3 + wl;
+    return chacha20poly1305_encrypt(inner, inner_len, aad, sizeof(aad), nonce, key,
+                                    frame + 3);
+}
+
+/* Spec rekey: first 32 bytes of AEAD(k, nonce 4x00||FF*8, no aad, 32x00). */
+static bool ref_rekey(const uint8_t key[32], uint8_t next[32])
+{
+    uint8_t nonce[12] = {0};
+    memset(nonce + 4, 0xFF, 8);
+    uint8_t zero[32] = {0}, ct[48];
+    if (!chacha20poly1305_encrypt(zero, 32, NULL, 0, nonce, key, ct)) return false;
+    memcpy(next, ct, 32);
+    return true;
+}
+
+static void kat_keys(uint8_t a[32], uint8_t b[32])
+{
+    for (int i = 0; i < 32; i++) { a[i] = (uint8_t)(0x11 + i); b[i] = (uint8_t)(0xE0 - 3 * i); }
+}
+
+/* A sender and a receiver over fixed keys (no handshake): s.send == r.recv. */
+static void kat_pair(struct session_transport *s, struct session_transport *r)
+{
+    uint8_t ka[32], kb[32];
+    kat_keys(ka, kb);
+    session_transport_init(s, ka, kb);
+    session_transport_init(r, kb, ka);
+}
+
+/* Wire bytes, nonce counter bytes and AAD epoch bytes against the spec frame. */
+static int st_frame_known_answer(void)
+{
+    int failures = 0;
+    TEST_CASE("session_transport: frame bytes equal the spec-built reference") {
+        static uint8_t pay[300], inner[301], want[SESSION_FRAME_MAX_WIRE];
+        static uint8_t got[SESSION_FRAME_MAX_WIRE], back[SESSION_MAX_PAYLOAD];
+        for (size_t i = 0; i < sizeof(pay); i++) pay[i] = (uint8_t)(i * 7 + 1);
+        inner[0] = SESSION_CH_CTRL;
+        memcpy(inner + 1, pay, sizeof(pay));
+        struct session_transport s, r;
+        kat_pair(&s, &r);
+        s.send_epoch = r.recv_epoch = 0x04030201u;   /* four distinct AAD bytes */
+        s.send_n = r.recv_n = 0x0A0B0Cu;             /* distinct nonce bytes, < rekey limit */
+        size_t wl = 0, gl = 0, bl = 0;
+        enum session_channel ch = SESSION_CH_DATA;
+        ASSERT(ref_frame(s.send_key, 0x04030201u, 0x0A0B0Cu, inner, sizeof(inner), want, &wl));
+        ASSERT(session_transport_encrypt(&s, SESSION_CH_CTRL, pay, sizeof(pay), got, &gl));
+        /* wire_len 317 = 0x013D: header 3D 01 00 pins both length bytes */
+        ASSERT(gl == 3 + 317 && got[0] == 0x3D && got[1] == 0x01 && got[2] == 0x00);
+        ASSERT(gl == wl && memcmp(got, want, wl) == 0);
+        ASSERT(s.send_n == 0x0A0B0Dull && s.send_bytes_epoch == 301);
+        ASSERT(session_transport_decrypt(&r, &ch, got, gl, back, &bl));
+        ASSERT(ch == SESSION_CH_CTRL && bl == sizeof(pay) && memcmp(back, pay, bl) == 0);
+        ASSERT(r.recv_n == 0x0A0B0Dull && r.recv_bytes_epoch == 301);
+    } TEST_END
+    return failures;
+}
+
+/* Length edges: empty payload, largest payload, truncated frame, authentic
+ * frames whose inner length is out of range. */
+static int st_length_edges(void)
+{
+    int failures = 0;
+    TEST_CASE("session_transport: length edges and authentic out-of-range frames") {
+        static uint8_t pay[SESSION_MAX_PAYLOAD], back[SESSION_MAX_PAYLOAD];
+        static uint8_t fr[SESSION_FRAME_MAX_WIRE + 64], inner[SESSION_FRAME_MAX_PLAINTEXT + 1];
+        memset(pay, 0x5A, sizeof(pay));
+        struct session_transport s, r;
+        kat_pair(&s, &r);
+        size_t fl = 0, bl = 99;
+        enum session_channel ch = SESSION_CH_DATA;
+        /* empty payload: inner length 1 is legal */
+        ASSERT(session_transport_encrypt(&s, SESSION_CH_AUTH, pay, 0, fr, &fl));
+        ASSERT(fl == 3 + 1 + 16);
+        ASSERT(session_transport_decrypt(&r, &ch, fr, fl, back, &bl));
+        ASSERT(ch == SESSION_CH_AUTH && bl == 0);
+        /* the largest legal payload round-trips (the cap is inclusive) */
+        ASSERT(session_transport_encrypt(&s, SESSION_CH_DATA, pay, SESSION_MAX_PAYLOAD,
+                                         fr, &fl));
+        ASSERT(fl == SESSION_FRAME_MAX_WIRE);
+        /* a frame cut one byte short is refused even when the bytes follow in memory */
+        ASSERT(!session_transport_decrypt(&r, &ch, fr, fl - 1, back, &bl));
+        ASSERT(session_transport_decrypt(&r, &ch, fr, fl, back, &bl));
+        ASSERT(bl == SESSION_MAX_PAYLOAD && memcmp(back, pay, bl) == 0);
+        /* authentic frame with inner length 1537 (one over the cap) is refused */
+        struct session_transport s2, r2;
+        kat_pair(&s2, &r2);
+        memset(inner, 0x33, sizeof(inner));
+        ASSERT(ref_frame(s2.send_key, 0, 0, inner, SESSION_FRAME_MAX_PLAINTEXT + 1, fr, &fl));
+        ASSERT(!session_transport_decrypt(&r2, &ch, fr, fl, back, &bl));
+        /* authentic frame with inner length 0 (no channel tag) is refused */
+        ASSERT(ref_frame(s2.send_key, 0, 0, inner, 0, fr, &fl));
+        ASSERT(fl == 19 && !session_transport_decrypt(&r2, &ch, fr, fl, back, &bl));
+        ASSERT(r2.recv_n == 0);                      /* refusals never advance the counter */
+        /* the same sealed record at the cap itself is accepted */
+        ASSERT(ref_frame(s2.send_key, 0, 0, inner, SESSION_FRAME_MAX_PLAINTEXT, fr, &fl));
+        ASSERT(session_transport_decrypt(&r2, &ch, fr, fl, back, &bl));
+        ASSERT(bl == SESSION_MAX_PAYLOAD && r2.recv_n == 1);
+    } TEST_END
+    return failures;
+}
+
+/* Rekey: spec key derivation, counter/byte reset, and both thresholds inclusive. */
+static int st_rekey_known_answer(void)
+{
+    int failures = 0;
+    TEST_CASE("session_transport: rekey key, resets and inclusive thresholds") {
+        uint8_t pay[40], inner[41], want[SESSION_FRAME_MAX_WIRE], got[SESSION_FRAME_MAX_WIRE];
+        uint8_t back[SESSION_MAX_PAYLOAD], nk[32];
+        memset(pay, 0x42, sizeof(pay));
+        inner[0] = SESSION_CH_DATA;
+        memcpy(inner + 1, pay, sizeof(pay));
+        size_t wl = 0, gl = 0, bl = 0;
+        enum session_channel ch;
+        struct session_transport s, r;
+        kat_pair(&s, &r);
+        s.send_epoch = r.recv_epoch = 7;
+        s.send_n = r.recv_n = SESSION_REKEY_FRAME_LIMIT;
+        ASSERT(ref_rekey(s.send_key, nk));
+        ASSERT(ref_frame(nk, 8, 0, inner, sizeof(inner), want, &wl));
+        ASSERT(session_transport_encrypt(&s, SESSION_CH_DATA, pay, sizeof(pay), got, &gl));
+        ASSERT(memcmp(s.send_key, nk, 32) == 0 && s.send_epoch == 8);
+        ASSERT(gl == wl && memcmp(got, want, wl) == 0);      /* sealed at nonce 0, epoch 8 */
+        ASSERT(s.send_n == 1 && s.send_bytes_epoch == sizeof(inner));
+        ASSERT(session_transport_decrypt(&r, &ch, got, gl, back, &bl));
+        ASSERT(memcmp(r.recv_key, nk, 32) == 0 && r.recv_epoch == 8);
+        ASSERT(r.recv_n == 1 && r.recv_bytes_epoch == sizeof(inner));
+        ASSERT(bl == sizeof(pay) && memcmp(back, pay, bl) == 0);
+
+        /* byte threshold is inclusive on both sides; one byte short does not rekey */
+        struct session_transport s2, r2, s3, r3;
+        kat_pair(&s2, &r2);
+        kat_pair(&s3, &r3);
+        s2.send_bytes_epoch = r2.recv_bytes_epoch = SESSION_REKEY_BYTE_LIMIT;
+        s3.send_bytes_epoch = r3.recv_bytes_epoch = SESSION_REKEY_BYTE_LIMIT - 1;
+        ASSERT(session_transport_encrypt(&s2, SESSION_CH_DATA, pay, sizeof(pay), got, &gl));
+        ASSERT(s2.send_epoch == 1 && s2.send_bytes_epoch == sizeof(inner));
+        ASSERT(session_transport_decrypt(&r2, &ch, got, gl, back, &bl));
+        ASSERT(r2.recv_epoch == 1 && r2.recv_bytes_epoch == sizeof(inner));
+        ASSERT(session_transport_encrypt(&s3, SESSION_CH_DATA, pay, sizeof(pay), got, &gl));
+        ASSERT(s3.send_epoch == 0);
+        ASSERT(session_transport_decrypt(&r3, &ch, got, gl, back, &bl));
+        ASSERT(r3.recv_epoch == 0);
+    } TEST_END
+    return failures;
+}
+
+/* Init clears stale state; cleanse zeroes both keys and tolerates NULL. */
+static int st_init_and_cleanse(void)
+{
+    int failures = 0;
+    TEST_CASE("session_transport: init clears state, cleanse zeroes keys") {
+        uint8_t ka[32], kb[32], zero[32] = {0};
+        kat_keys(ka, kb);
+        struct session_transport t;
+        memset(&t, 0xA5, sizeof(t));
+        session_transport_init(&t, ka, kb);
+        ASSERT(t.send_n == 0 && t.recv_n == 0 && t.send_epoch == 0 && t.recv_epoch == 0);
+        ASSERT(t.send_bytes_epoch == 0 && t.recv_bytes_epoch == 0);
+        ASSERT(memcmp(t.send_key, ka, 32) == 0 && memcmp(t.recv_key, kb, 32) == 0);
+        session_transport_cleanse(&t);
+        ASSERT(memcmp(t.send_key, zero, 32) == 0);
+        ASSERT(memcmp(t.recv_key, zero, 32) == 0);
+        session_transport_cleanse(NULL);
+    } TEST_END
     return failures;
 }
