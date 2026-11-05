@@ -415,6 +415,9 @@ ZCL_TEST_GROUP_BUILD_NEED("test_p2_invariant_check",
  * The multicall case runs build/bin/z23 by argv0 link and as `z23 jsonq`. */
 ZCL_TEST_GROUP_BUILD_NEED("test_jsonq", "build/bin/jsonq", "jsonq")
 ZCL_TEST_GROUP_BUILD_NEED("test_jsonq", "build/bin/z23", "z23")
+
+/* Exercises the actual development command, not its release-only refusal. */
+ZCL_TEST_GROUP_BUILD_NEED("test_dev_proof_remote_command", "build/bin/z23-dev", "dev-bin")
 ZCL_TEST_GROUP_BUILD_NEED("test_agent_guard", "build/bin/z23-agent-guard", "z23-agent-guard")
 ZCL_TEST_GROUP_BUILD_NEED("test_replay_canary_verdict", "build/bin/jsonq", "jsonq")
 /* Sentinel durability executes the development CLI, independently of the candidate node. */
