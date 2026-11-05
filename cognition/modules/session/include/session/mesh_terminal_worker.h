@@ -280,6 +280,14 @@ struct zcl_result mesh_terminal_worker_resize(struct mesh_terminal_worker *w,
 bool mesh_terminal_worker_budget_exceeded(struct mesh_terminal_worker *w,
                                           int64_t now_unix);
 
+#if !defined(_WIN32)
+/* POSIX elapsed-time entry: durations from monotonic spawn and actual I/O
+ * activity, in milliseconds. Same reap, kill and process-census enforcement
+ * as budget_exceeded; wall-clock audit timestamps do not set deadlines. */
+bool mesh_terminal_worker_budget_elapsed(struct mesh_terminal_worker *w,
+                                        uint64_t lifetime_ms, uint64_t idle_ms);
+#endif
+
 /* True while the shell process is still live (waitpid-verified, so a
  * reaped shell reads false immediately). */
 bool mesh_terminal_worker_alive(struct mesh_terminal_worker *w);

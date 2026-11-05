@@ -32,6 +32,7 @@
 #define mesh_terminal_worker_budget_wait_handle tw_fixture_budget_wait_handle
 #define mesh_terminal_worker_resize tw_fixture_resize
 #define mesh_terminal_worker_budget_exceeded tw_fixture_budget_exceeded
+#define mesh_terminal_worker_budget_elapsed tw_fixture_budget_elapsed
 #define mesh_terminal_worker_alive tw_fixture_alive
 #define mesh_terminal_worker_kill tw_fixture_kill
 #define mesh_terminal_worker_testing_order tw_fixture_order
@@ -1550,6 +1551,33 @@ static int live_lifetime_and_idle_budgets(void)
     return failures;
 }
 
+static int live_elapsed_budgets(void)
+{
+    int failures = 0;
+    for (unsigned idle = 0; idle < 2; ++idle) {
+        struct mesh_terminal_worker_config cfg;
+        struct mesh_terminal_worker w;
+        live_config(&cfg);
+        cfg.lifetime_seconds = idle ? 60 : 1;
+        cfg.idle_seconds = idle ? 1 : 0;
+        struct zcl_result r = mesh_terminal_worker_spawn(&cfg, 2000000000, &w);
+        failures = check(failures, r.ok, "spawn for elapsed budget boundary");
+        if (r.ok) {
+            failures = check(failures,
+                !mesh_terminal_worker_budget_elapsed(&w, 999, 999),
+                "999ms is inside a one-second budget");
+            bool over = mesh_terminal_worker_budget_elapsed(&w, 1000, 1000);
+            failures = check(failures, over && w.close_reason == (idle
+                ? MESH_TERMINAL_CLOSE_IDLE_TIMEOUT : MESH_TERMINAL_CLOSE_LIFETIME_LIMIT),
+                "1000ms ends the session with the exact budget reason");
+            failures = census_check(failures, w.pgid,
+                "elapsed budget kill emptied the group");
+        }
+        mesh_terminal_worker_kill(&w);
+    }
+    return failures;
+}
+
 /* Live: resize geometry bounds, then a confinement attack through the
  * terminal. */
 static int live_resize_and_confinement(void)
@@ -1669,6 +1697,7 @@ static int test_mesh_terminal_worker_platform_arm(void)
 
     failures += live_byte_budgets();
     failures += live_lifetime_and_idle_budgets();
+    failures += live_elapsed_budgets();
     failures += live_resize_and_confinement();
 
     printf("mesh_terminal_worker: %d failures\n", failures);

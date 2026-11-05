@@ -113,9 +113,9 @@ static struct zcl_result mesh_terminal_worker_resize_platform_arm(struct mesh_te
 }
 
 static bool mesh_terminal_worker_budget_exceeded_platform_arm(struct mesh_terminal_worker *w,
-                                          int64_t now_unix)
+                                          uint64_t lifetime_s, uint64_t idle_s)
 {
-    (void)w; (void)now_unix;
+    (void)w; (void)lifetime_s; (void)idle_s;
     return true; /* no session could ever be started */
 }
 
@@ -593,20 +593,20 @@ static struct zcl_result mesh_terminal_worker_resize_platform_arm(struct mesh_te
 }
 
 static bool mesh_terminal_worker_budget_exceeded_platform_arm(struct mesh_terminal_worker *w,
-                                          int64_t now_unix)
+                                          uint64_t lifetime_s, uint64_t idle_s)
 {
     if (!w)
         return true;
     if (tw_reap(w))
         return true;
     if (w->lifetime_seconds != 0 &&
-        now_unix - w->started_unix >= (int64_t)w->lifetime_seconds) {
+        lifetime_s >= w->lifetime_seconds) {
         w->close_reason = MESH_TERMINAL_CLOSE_LIFETIME_LIMIT;
         mesh_terminal_worker_kill(w);
         return true;
     }
     if (w->idle_seconds != 0 &&
-        now_unix - w->last_activity_unix >= (int64_t)w->idle_seconds) {
+        idle_s >= w->idle_seconds) {
         w->close_reason = MESH_TERMINAL_CLOSE_IDLE_TIMEOUT;
         mesh_terminal_worker_kill(w);
         return true;
@@ -775,8 +775,26 @@ uintptr_t mesh_terminal_worker_budget_wait_handle(struct mesh_terminal_worker *w
 bool mesh_terminal_worker_budget_exceeded(struct mesh_terminal_worker *w,
                                           int64_t now_unix)
 {
+#if defined(_WIN32)
     return mesh_terminal_worker_budget_exceeded_platform_arm(w, now_unix);
+#else
+    if (!w) return true;
+    uint64_t lifetime_s = now_unix >= w->started_unix
+        ? (uint64_t)now_unix - (uint64_t)w->started_unix : 0;
+    uint64_t idle_s = now_unix >= w->last_activity_unix
+        ? (uint64_t)now_unix - (uint64_t)w->last_activity_unix : 0;
+    return mesh_terminal_worker_budget_exceeded_platform_arm(w, lifetime_s, idle_s);
+#endif
 }
+
+#if !defined(_WIN32)
+bool mesh_terminal_worker_budget_elapsed(struct mesh_terminal_worker *w,
+                                        uint64_t lifetime_ms, uint64_t idle_ms)
+{
+    return mesh_terminal_worker_budget_exceeded_platform_arm(
+        w, lifetime_ms / 1000, idle_ms / 1000);
+}
+#endif
 
 bool mesh_terminal_worker_alive(struct mesh_terminal_worker *w)
 {

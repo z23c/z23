@@ -97,6 +97,8 @@ struct hub_sess {
     int pidfd;                   /* -1 when the kernel has none */
     bool pty_eof;
     int64_t last_check;
+    int64_t started_ms;
+    int64_t activity_ms;
     bool forced;                /* ended by us, not by the shell */
     enum mesh_terminal_close_reason forced_reason;
     struct mesh_terminal_worker w;
@@ -216,22 +218,22 @@ static int hub_start_worker(struct hub_sess *s,
         return exec && (r.code == MESH_TERMINAL_WORKER_ERR_EXEC || r.code == MESH_TERMINAL_WORKER_ERR_CONFIG)
                    ? MESH_TERMINAL_HUB_REFUSE_EXEC : MESH_TERMINAL_HUB_REFUSE_CONFINEMENT;
     s->pidfd = hub_pidfd_open(s->w.pid);
+    s->started_ms = s->activity_ms = platform_time_monotonic_ms();
     if (hello->flags & MESH_TERMINAL_HUB_HELLO_QUIET)
         hub_echo_off(s);
     return 0;
 }
 
-/* poll() timeout: the nearest lifetime/idle deadline, never earlier than a
- * real one (worker clocks are whole seconds, now_unix truncates down). */
+/* poll() and enforcement share precise monotonic lifetime/idle deadlines. */
 static int hub_timeout_ms(const struct hub_sess *s)
 {
     const struct mesh_terminal_worker *w = &s->w;
-    int64_t now = hub_now(), next = INT64_MAX;
+    int64_t now = platform_time_monotonic_ms(), next = INT64_MAX;
     if (w->lifetime_seconds)
-        next = w->started_unix + (int64_t)w->lifetime_seconds;
-    if (w->idle_seconds && w->last_activity_unix + (int64_t)w->idle_seconds < next)
-        next = w->last_activity_unix + (int64_t)w->idle_seconds;
-    int64_t ms = next == INT64_MAX ? -1 : (next - now) * 1000;
+        next = s->started_ms + (int64_t)w->lifetime_seconds * 1000;
+    if (w->idle_seconds && s->activity_ms + (int64_t)w->idle_seconds * 1000 < next)
+        next = s->activity_ms + (int64_t)w->idle_seconds * 1000;
+    int64_t ms = next == INT64_MAX ? -1 : next - now;
     if (ms < 0 && next != INT64_MAX)
         ms = 0;
     if (s->pidfd < 0 && (ms < 0 || ms > HUB_FALLBACK_POLL_MS))
@@ -244,7 +246,10 @@ static bool hub_frame_in(struct hub_sess *s, uint8_t type, const uint8_t *p, siz
 {
     switch (type) {
     case MESH_TERMINAL_HUB_DATA: {
+        uint64_t before = s->w.bytes_in;
         struct zcl_result r = mesh_terminal_worker_input(&s->w, p, len, hub_now());
+        if (s->w.bytes_in != before)
+            s->activity_ms = platform_time_monotonic_ms();
         return r.ok || r.code != MESH_TERMINAL_WORKER_ERR_BYTE_LIMIT;
     }
     case MESH_TERMINAL_HUB_RESIZE:
@@ -301,6 +306,7 @@ static bool hub_pty_ready(struct hub_sess *s, bool hung_up)
             &s->w, s->out + MESH_TERMINAL_HUB_HEADER_BYTES,
             MESH_TERMINAL_HUB_PAYLOAD_MAX, &n, hub_now());
         if (n) {
+            s->activity_ms = platform_time_monotonic_ms();
             size_t total = mesh_terminal_hub_frame_seal(s->out, MESH_TERMINAL_HUB_DATA, n);
             if (!hub_io_send(s->fd, s->out, total)) {
                 hub_force(s, MESH_TERMINAL_CLOSE_SESSION_LOST);
@@ -322,11 +328,12 @@ static bool hub_pty_ready(struct hub_sess *s, bool hung_up)
  * most once per second while the session is busy. */
 static bool hub_budget_due(struct hub_sess *s, bool must)
 {
-    int64_t now = hub_now();
-    if (!must && now == s->last_check)
+    int64_t now = platform_time_monotonic_ms();
+    if (!must && now - s->last_check < 1000 && hub_timeout_ms(s) != 0)
         return false;
     s->last_check = now;
-    return mesh_terminal_worker_budget_exceeded(&s->w, now);
+    return mesh_terminal_worker_budget_elapsed(&s->w,
+        (uint64_t)(now - s->started_ms), (uint64_t)(now - s->activity_ms));
 }
 
 static void hub_run(struct hub_sess *s, int stop_fd)
