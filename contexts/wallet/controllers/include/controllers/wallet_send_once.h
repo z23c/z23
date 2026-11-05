@@ -47,7 +47,10 @@ typedef bool (*wallet_send_once_fn)(const struct json_value *params, bool help,
  *                    confirmed as relayed, a committed one the wallet no
  *                    longer holds, and any failure after the wallet admitted
  *                    the transaction (the pool may have held it and a peer
- *                    may have fetched it, so it can still confirm)
+ *                    may have fetched it, so it can still confirm). Also a row
+ *                    an earlier build wrote whose digest matches this request's
+ *                    legacy digest, in any state, with no txid: that digest
+ *                    cannot say the row was this exact request
  *   key_conflict     same key, different parameters
  *   released         nothing was admitted; the key is free (state released)
  *   fee_changed      the planned fee differs from the wallet fee; key free

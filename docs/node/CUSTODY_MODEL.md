@@ -421,6 +421,7 @@ builds or broadcasts:
 | built (wallet holds the txid or not) | `SEND_OUTCOME_UNKNOWN` with the txid |
 | started only (no txid was ever durable, so nothing was admitted) | the row is freed and the send runs once |
 | a run of this key is executing | `SEND_IN_PROGRESS` (transient) |
+| a digest an earlier build would have stored for this request (values cut at its fixed buffers, reals as %.8g text) | `SEND_OUTCOME_UNKNOWN` with no txid, in any row state |
 | different request under the same key | `IDEMPOTENCY_KEY_REUSED` |
 
 A built row is never answered as committed: the wallet holding a transaction
