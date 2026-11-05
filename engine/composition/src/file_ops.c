@@ -7,6 +7,10 @@
  * platform/modules/util/src/file_tree_ops.c — this file holds no recursive copy/remove
  * logic of its own (os-substrate-plan §1: exactly one walker in the tree). */
 
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE /* realpath */
+#endif
+
 #include "config/file_ops.h"
 #include "platform/directory_compat.h"
 #include "platform/file_metadata.h"
@@ -16,9 +20,12 @@
 #include "util/file_tree_ops.h"
 #include "util/path_util.h"
 
+#include <errno.h>
+#include <limits.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static _Atomic uint64_t g_file_copy_nonce;
@@ -132,6 +139,125 @@ bool file_copy(const char *src, const char *dst)
     return ok;
 }
 
+#ifndef _WIN32
+enum dir_copy_canon {
+    DIR_COPY_CANON_RESOLVED = 0,
+    DIR_COPY_CANON_ABSENT, /* nothing there and no real parent either */
+    DIR_COPY_CANON_REFUSED,
+};
+
+/* Split path at its last component: the parent (or "." with none) into
+ * parent, and the leaf's offset and length into the path. False when the
+ * parent does not fit or there is no leaf. */
+static bool dir_copy_split(const char *path, char *parent, size_t cap,
+                           size_t *leaf_at, size_t *leaf_length)
+{
+    size_t length = strlen(path);
+    while (length > 1 && path[length - 1] == '/')
+        length--;
+    size_t cut = length;
+    while (cut > 0 && path[cut - 1] != '/')
+        cut--;
+    *leaf_at = cut;
+    *leaf_length = length - cut;
+    size_t parent_length = cut;
+    while (parent_length > 1 && path[parent_length - 1] == '/')
+        parent_length--;
+    if (*leaf_length == 0 || parent_length >= cap)
+        return false;
+    if (cut == 0) {
+        memcpy(parent, ".", 2);
+        return true;
+    }
+    memcpy(parent, path, parent_length);
+    parent[parent_length] = '\0';
+    return true;
+}
+
+/* The real spelling of a copy path: realpath() when the path exists, else
+ * the real parent plus the leaf for a path about to be created. A path
+ * whose parent is missing or is not a directory cannot exist, so it is
+ * ABSENT and the single-level directory creation that follows refuses it. */
+static enum dir_copy_canon dir_copy_canonical(const char *path, char *out,
+                                              size_t cap)
+{
+    char real[PATH_MAX], parent[PATH_MAX];
+    size_t leaf_at = 0, leaf_length = 0;
+    if (realpath(path, real)) {
+        int n = snprintf(out, cap, "%s", real);
+        return n > 0 && (size_t)n < cap ? DIR_COPY_CANON_RESOLVED
+                                        : DIR_COPY_CANON_REFUSED;
+    }
+    if (errno != ENOENT && errno != ENOTDIR)
+        return DIR_COPY_CANON_REFUSED;
+    if (!dir_copy_split(path, parent, sizeof(parent), &leaf_at, &leaf_length))
+        return DIR_COPY_CANON_REFUSED;
+    if (!realpath(parent, real))
+        return DIR_COPY_CANON_ABSENT;
+    int n = snprintf(out, cap, "%s%s%.*s", real,
+                     strcmp(real, "/") == 0 ? "" : "/", (int)leaf_length,
+                     path + leaf_at);
+    return n > 0 && (size_t)n < cap ? DIR_COPY_CANON_RESOLVED
+                                    : DIR_COPY_CANON_REFUSED;
+}
+
+/* True when inner is outer or lies inside it (both canonical). */
+static bool dir_copy_within(const char *inner, const char *outer)
+{
+    size_t length = strlen(outer);
+    if (strncmp(inner, outer, length) != 0)
+        return false;
+    return length == 1 || inner[length] == '\0' || inner[length] == '/';
+}
+
+/* True when src and dst are the same directory or one lies inside the
+ * other, so emptying dst would delete or corrupt the source. An
+ * unresolvable dst does not exist, so there is nothing to collide with. */
+static bool dir_copy_overlaps(const char *src_dir, const char *dst_dir)
+{
+    char src[PATH_MAX], dst[PATH_MAX];
+    if (dir_copy_canonical(src_dir, src, sizeof(src)) !=
+        DIR_COPY_CANON_RESOLVED)
+        return true;
+    switch (dir_copy_canonical(dst_dir, dst, sizeof(dst))) {
+    case DIR_COPY_CANON_ABSENT:
+        return false;
+    case DIR_COPY_CANON_REFUSED:
+        return true;
+    default:
+        return dir_copy_within(src, dst) || dir_copy_within(dst, src);
+    }
+}
+
+/* Validate the source before anything is removed: list it, refuse a source
+ * that cannot be listed or holds a subdirectory, and refuse overlap with
+ * dst. On true the lists are filled and the caller frees them; on false
+ * both are already freed. */
+static bool dir_copy_prepare(const char *src_dir, const char *dst_dir,
+                             struct platform_directory_list *entries,
+                             struct platform_directory_list *directories)
+{
+    bool listed = platform_directory_list_regular_sorted(src_dir, entries) &&
+                  platform_directory_list_real_sorted(src_dir, directories);
+    if (listed && directories->count > 0) {
+        fprintf(stderr,
+                "\nWarning: %zu subdirectories in %s; refusing to copy\n",
+                directories->count, src_dir);
+        listed = false;
+    }
+    if (listed && dir_copy_overlaps(src_dir, dst_dir)) {
+        fprintf(stderr, "\nWarning: %s and %s overlap; refusing to copy\n",
+                src_dir, dst_dir);
+        listed = false;
+    }
+    if (!listed) {
+        platform_directory_list_free(entries);
+        platform_directory_list_free(directories);
+    }
+    return listed;
+}
+#endif
+
 bool dir_copy(const char *src_dir, const char *dst_dir)
 {
 #ifdef _WIN32
@@ -146,23 +272,21 @@ bool dir_copy(const char *src_dir, const char *dst_dir)
      * nested subdirectory as a failure (fails closed), whereas a tree copy
      * would descend it. Empty the destination via the shared rm -rf
      * primitive, then copy each regular file through file_copy (itself a
-     * walker wrapper). */
+     * walker wrapper). The source is validated first: nothing is removed
+     * for a source that cannot be listed, that holds a subdirectory, or that
+     * is the destination or nested with it. */
+    struct platform_directory_list entries = {0};
+    struct platform_directory_list directories = {0};
+    if (!dir_copy_prepare(src_dir, dst_dir, &entries, &directories))
+        return false;
     (void)zcl_tree_remove(dst_dir);
     if (!platform_private_directory_ensure(dst_dir)) {
         fprintf(stderr, "Warning: private directory refused: %s\n", dst_dir);
-        return false;
-    }
-    struct platform_directory_list entries = {0};
-    struct platform_directory_list directories = {0};
-    if (!platform_directory_list_regular_sorted(src_dir, &entries) ||
-        !platform_directory_list_real_sorted(src_dir, &directories)) {
         platform_directory_list_free(&entries);
         platform_directory_list_free(&directories);
         return false;
     }
     int copied = 0, failed = 0;
-    if (directories.count > 0)
-        failed += (int)directories.count;
     for (size_t i = 0; i < entries.count; i++) {
         const char *name = entries.entries[i].name;
         if (name[0] == '.' || strcmp(name, "LOCK") == 0) continue;
@@ -280,6 +404,20 @@ int block_files_copy(const char *src_dir, const char *dst_dir)
     return count;
 }
 
+#ifndef _WIN32
+/* True for exactly what the node writes: "blk" or "rev", at least five
+ * digits (%05d), then ".dat" and nothing after it. */
+static bool block_files_is_series_name(const char *name)
+{
+    if (strncmp(name, "blk", 3) != 0 && strncmp(name, "rev", 3) != 0)
+        return false;
+    size_t digits = 0;
+    while (name[3 + digits] >= '0' && name[3 + digits] <= '9')
+        digits++;
+    return digits >= 5 && strcmp(name + 3 + digits, ".dat") == 0;
+}
+#endif
+
 void block_files_clean(const char *dir)
 {
 #ifdef _WIN32
@@ -290,8 +428,7 @@ void block_files_clean(const char *dir)
     if (!platform_directory_list_regular_sorted(dir, &entries)) return;
     for (size_t i = 0; i < entries.count; i++) {
         const char *name = entries.entries[i].name;
-        if ((strncmp(name, "blk", 3) == 0 ||
-             strncmp(name, "rev", 3) == 0) && strstr(name, ".dat")) {
+        if (block_files_is_series_name(name)) {
             char path[1024];
             struct platform_private_file file;
             struct platform_private_file_identity identity;

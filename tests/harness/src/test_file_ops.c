@@ -472,7 +472,9 @@ static int test_dir_copy_refusal_reports(void)
         fo_path(one, sizeof(one), src, "ok.txt");
         ok = ok && fo_write_pattern(one, 4) && mkdir(sub, 0700) == 0;
         int partial = ok ? fo_dir_copy_captured(dir, src, dst, out, err) : -1;
-        bool counted = ok && strcmp(out, " 1 files") == 0 && strstr(err, "1 files failed") != NULL;
+        /* A subdirectory is refused before anything is copied or removed. */
+        bool counted = ok && out[0] == '\0' &&
+                       strstr(err, "1 subdirectories") != NULL;
         fo_cleanup(dir);
         ASSERT(ok);
         ASSERT_EQ(missing, 0);
