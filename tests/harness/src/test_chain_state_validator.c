@@ -19,6 +19,7 @@
 #include "models/database.h"
 #include "chain/chainparams.h"
 #include "event/event.h"
+#include "util/pprev_walk.h"
 #include <sqlite3.h>
 #include <stdio.h>
 #include <string.h>
@@ -265,7 +266,8 @@ struct csv_case {
     int add_h;
     int add_nheight;
     bool add_fork;     /* extra block uses a marker distinct from the chain */
-    bool add_parent;   /* extra block gets a pprev parent of height 0 */
+    bool add_parent;   /* extra block gets a pprev parent */
+    int add_parent_nheight; /* the parent's stored nHeight */
     bool null_phash;   /* NULL the active tip's phashBlock during the call */
     int dir;           /* CSV_DIR_* */
 };
@@ -350,9 +352,8 @@ static bool csv_add_extra(struct main_state *ms, const struct csv_case *c)
         ms, c->add_h, c->add_fork ? 0xAF : 0xBB, c->add_nheight);
     if (!x) return false;
     if (!c->add_parent) return true;
-    /* pprev_walk_depth requires strictly decreasing heights, so a parent of
-     * an nHeight-0 block must sit below zero for the walk to resolve. */
-    struct block_index *par = csv_add_block(ms, c->add_h + 100, 0xCC, -1);
+    struct block_index *par = csv_add_block(ms, c->add_h + 100, 0xCC,
+                                            c->add_parent_nheight);
     if (par) x->pprev = par;
     return par != NULL;
 }
@@ -726,16 +727,24 @@ static int csv_empty_chain_indexed_cases(void)
     CSV_CHECK("csv: coins indexed at h=0, no pprev -> BOOT_OK, no event",
               csv_v(ok, &r, BOOT_OK, 0, -1) && csv_quiet());
 
-    /* Indexed at nHeight 0 with one parent: the pprev walk resolves h=1. */
+    /* Indexed at nHeight 0 with a parent also at 0, the only shape the index
+     * writers can leave: same outcome, and no pprev walk that can only fail. */
+    uint64_t walk_v0 = pprev_walk_violations();
     ok = csv_run_case(&(struct csv_case){ .legacy = CSV_LEG_H, .legacy_h = 7,
              .add = true, .add_h = 7, .add_nheight = 0,
-             .add_parent = true }, &r);
-    CSV_CHECK("csv: coins at nHeight 0 with one parent -> RESET_CHAIN to h=1",
-              csv_v(ok, &r, BOOT_RECOVER_RESET_CHAIN, 0, 1) &&
-              csv_hash_is(&r, 7, 0xBB));
-    CSV_CHECK("csv: pprev-walk event",
-              csv_ev_is(&g_csv_rec, 1, "action=reset_chain_pprev_walk "
-                        "reason=post_import coins_h=1"));
+             .add_parent = true, .add_parent_nheight = 0 }, &r);
+    CSV_CHECK("csv: coins and parent at nHeight 0 -> BOOT_OK, no event",
+              csv_v(ok, &r, BOOT_OK, 0, -1) && csv_quiet());
+    CSV_CHECK("csv: coins and parent at nHeight 0 -> no pprev-walk violation",
+              pprev_walk_violations() == walk_v0);
+
+    /* A step count from a pprev walk is not a height: a parent below zero
+     * must not turn into a chain reset at a made-up height. */
+    ok = csv_run_case(&(struct csv_case){ .legacy = CSV_LEG_H, .legacy_h = 7,
+             .add = true, .add_h = 7, .add_nheight = 0,
+             .add_parent = true, .add_parent_nheight = -1 }, &r);
+    CSV_CHECK("csv: coins at nHeight 0, parent at -1 -> BOOT_OK, no event",
+              csv_v(ok, &r, BOOT_OK, 0, -1) && csv_quiet());
     return failures;
 }
 
