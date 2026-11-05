@@ -2276,14 +2276,14 @@ static void image_role_output(const char *output)
     }
 }
 
-/* The child hashes the 300 MB test image several times. The TSan build runs
- * that hashing instrumented, which outlasts the 120 s bound sized for the
- * plain build (measured: the child was killed, rc=137, with no output past
- * its dispatch line). */
-#if defined(__SANITIZE_THREAD__)
+/* The child hashes the 300 MB test image several times. The TSan and ASan
+ * builds run that hashing instrumented, which outlasts the 120 s bound sized
+ * for the plain build (measured: the child was killed, rc=137, with no output
+ * past its dispatch line). */
+#if defined(__SANITIZE_THREAD__) || defined(__SANITIZE_ADDRESS__)
 #define IMAGE_CHILD_TIMEOUT_MS 240000
 #elif defined(__has_feature)
-#if __has_feature(thread_sanitizer)
+#if __has_feature(thread_sanitizer) || __has_feature(address_sanitizer)
 #define IMAGE_CHILD_TIMEOUT_MS 240000
 #endif
 #endif
