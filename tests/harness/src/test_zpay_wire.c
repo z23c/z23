@@ -547,7 +547,7 @@ static int zw_no_secret_in_output(void)
     return failures;
 }
 
-int test_zpay_wire(void)
+int zpay_wire_tests(void)
 {
     int failures = 0;
     failures += zw_wire_format();

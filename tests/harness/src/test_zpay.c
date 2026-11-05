@@ -58,7 +58,7 @@ static void zp_nul_terminate_output(char *output, size_t cap, size_t n)
     output[n < cap ? n : cap - 1] = 0;
 }
 
-int test_zpay_wire(void);
+int zpay_wire_tests(void);
 
 int test_zpay(void)
 {
@@ -259,7 +259,7 @@ int test_zpay(void)
     }
 
 _test_next:;
-    failures += test_zpay_wire();
+    failures += zpay_wire_tests();
     if (failures == 0)
         printf("test_zpay: all passed\n");
     else

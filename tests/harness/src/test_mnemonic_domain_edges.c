@@ -503,7 +503,7 @@ static int mde_to_seed_passphrase_bounds(void)
     return failures;
 }
 
-int test_mnemonic_domain_edges(void)
+int mnemonic_domain_edge_tests(void)
 {
     int failures = 0;
     failures += mde_wordlist_ends();
