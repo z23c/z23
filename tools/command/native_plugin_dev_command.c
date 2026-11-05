@@ -18,16 +18,30 @@
 #include <stdio.h>
 #include <string.h>
 
+/* An argument refusal ran no step, so it names none; a step failure names its step. */
+static void pdv_describe(const struct plugin_dev_result *res, enum plugin_status st,
+                         char *message, size_t message_cap,
+                         char *evidence, size_t evidence_cap)
+{
+    if (res->failed >= PLUGIN_DEV_STEP_COUNT) {
+        (void)snprintf(message, message_cap, "plugin dev refused: %s", plugin_status_code(st));
+        (void)snprintf(evidence, evidence_cap,
+                       "refused before any step ran; nothing was written and the current generation is unchanged");
+        return;
+    }
+    (void)snprintf(message, message_cap, "plugin dev failed at step %s: %s",
+                   plugin_dev_step_name(res->failed), plugin_status_code(st));
+    (void)snprintf(evidence, evidence_cap,
+                   "step %s failed after %u of %d steps; the current generation is unchanged",
+                   plugin_dev_step_name(res->failed), res->steps_done,
+                   PLUGIN_DEV_STEP_COUNT);
+}
+
 static void pdv_refuse(struct zcl_command_reply *reply, enum plugin_status st,
                        const struct plugin_dev_result *res)
 {
     char message[192], evidence[256];
-    (void)snprintf(message, sizeof(message), "plugin dev failed at step %s: %s",
-                   plugin_dev_step_name(res->failed), plugin_status_code(st));
-    (void)snprintf(evidence, sizeof(evidence),
-                   "step %s failed after %u of %d steps; the current generation is unchanged",
-                   plugin_dev_step_name(res->failed), res->steps_done,
-                   PLUGIN_DEV_STEP_COUNT);
+    pdv_describe(res, st, message, sizeof(message), evidence, sizeof(evidence));
     zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                            st == PLUGIN_ERR_IO ? ZCL_COMMAND_EXIT_FAILED
                                                : ZCL_COMMAND_EXIT_INVALID,
@@ -171,6 +185,7 @@ void zcl_native_handle_plugin_dev(const struct zcl_command_request *request,
     if (!request || !reply)
         return;
     memset(&res, 0, sizeof(res));
+    res.failed = PLUGIN_DEV_STEP_COUNT; /* refused before any step ran */
     if (!zcl_native_plugin_root(root, sizeof(root)) || !plg_str(request, "dir") ||
         !plg_interface(request, &dev.interface_version) ||
         !plg_capabilities(request, &dev.capabilities)) {

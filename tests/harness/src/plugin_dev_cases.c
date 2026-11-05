@@ -207,6 +207,42 @@ static int pdc_case_cases_pass(struct pdc_env *e)
     return failures;
 }
 
+/* An argument refusal runs no step, so its message must not name one. */
+static int pdc_case_refusals(struct pdc_env *e)
+{
+    int failures = 0;
+    struct zcl_command_reply r;
+    TEST_CASE("plugin dev refuses a missing dir without naming a step") {
+        snprintf(e->input, sizeof(e->input), "{\"name\":\"hello\"}");
+        ASSERT(pdc_dev(e, &r));
+        ASSERT(r.exit_code != ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(r.error.message, "plugin dev refused: ") != NULL);
+        ASSERT(strstr(r.error.message, "step") == NULL);
+        ASSERT(strstr(r.error.evidence, "step key") == NULL);
+        ASSERT(strstr(r.error.evidence, "0 of 5") == NULL);
+        zcl_command_reply_free(&r);
+    } TEST_END
+    return failures;
+}
+
+static int pdc_case_key_step(struct pdc_env *e)
+{
+    int failures = 0;
+    struct zcl_command_reply r;
+    TEST_CASE("plugin dev still names the key step when the key cannot be written") {
+        int n = snprintf(e->input, sizeof(e->input),
+                         "{\"dir\":\"%s\",\"key\":\"%s/no-such-dir/plugin_dev.key\"}",
+                         e->dir, e->base);
+        ASSERT(n > 0 && (size_t)n < sizeof(e->input));
+        ASSERT(pdc_dev(e, &r));
+        ASSERT(r.exit_code != ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(r.error.message, "failed at step key") != NULL);
+        ASSERT(strstr(r.error.evidence, "step key failed after 0 of 5 steps") != NULL);
+        zcl_command_reply_free(&r);
+    } TEST_END
+    return failures;
+}
+
 int plugin_dev_cases(void)
 {
     int failures = 0;
@@ -225,6 +261,8 @@ int plugin_dev_cases(void)
         failures += pdc_case_broken_pack(&e);
         failures += pdc_case_cases(&e);
         failures += pdc_case_cases_pass(&e);
+        failures += pdc_case_refusals(&e);
+        failures += pdc_case_key_step(&e);
     }
     if (old_home)
         (void)setenv("HOME", saved, 1);

@@ -48,7 +48,7 @@ struct plugin_dev_result {
     bool publisher_added;
     bool already_present;
     unsigned steps_done;      /* steps finished, in enum order */
-    enum plugin_dev_step failed; /* valid when the call did not return PLUGIN_OK */
+    enum plugin_dev_step failed; /* valid when the call did not return PLUGIN_OK; PLUGIN_DEV_STEP_COUNT when refused before any step */
 };
 
 enum plugin_status plugin_dev(const struct plugin_dev_request *request,

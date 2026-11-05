@@ -152,10 +152,11 @@ enum plugin_status plugin_dev(const struct plugin_dev_request *rq,
     if (!res)
         return PLUGIN_ERR_ARGUMENT;
     memset(res, 0, sizeof(*res));
+    res->failed = PLUGIN_DEV_STEP_COUNT; /* refused before any step ran */
     if (!pd_args(rq, res, &version))
         return PLUGIN_ERR_ARGUMENT;
-    enum plugin_status st = pd_key(res, rq->key_path == NULL);
     res->failed = PLUGIN_DEV_STEP_KEY;
+    enum plugin_status st = pd_key(res, rq->key_path == NULL);
     if (st != PLUGIN_OK)
         return st;
     res->steps_done = 1;
