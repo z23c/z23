@@ -495,10 +495,29 @@ static int map_alternate_temp_root(const char *dir, sqlite3 *db)
     return failures;
 }
 
+/* tmpfile() follows TMPDIR on macOS (glibc ignores it), and several cases
+ * point TMPDIR at a file or a missing root on purpose, so the capture file is
+ * made with TMPDIR pinned to /tmp and the case's value is put back. */
+static FILE *map_capture_file(void)
+{
+    const char *old = getenv("TMPDIR");
+    char *saved = old ? strdup(old) : NULL;
+    if (old && !saved)
+        return NULL;
+    FILE *capture = setenv("TMPDIR", "/tmp", 1) == 0 ? tmpfile() : NULL;
+    bool restored = saved ? setenv("TMPDIR", saved, 1) == 0 : unsetenv("TMPDIR") == 0;
+    free(saved);
+    if (!restored && capture) {
+        fclose(capture);
+        return NULL;
+    }
+    return capture;
+}
+
 /* Run the preflight with stderr captured so the refusal text can be asserted. */
 static bool map_capture_refusal(const char *dir, bool *verdict, char *text, size_t cap)
 {
-    FILE *capture = tmpfile();
+    FILE *capture = map_capture_file();
     if (!capture) return false;
     int saved = dup(STDERR_FILENO);
     if (saved < 0) { fclose(capture); return false; }

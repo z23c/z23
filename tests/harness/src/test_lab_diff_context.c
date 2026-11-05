@@ -56,8 +56,21 @@ static bool diff_call(const struct json_value *input, struct json_value *envelop
 
 static bool diff_unconfined(const struct json_value *envelope)
 {
+    /* A Linux host that cannot confine refuses LAB_UNCONFINED; any other host
+     * refuses LAB_UNSUPPORTED before it gets that far (lab_build_stub.c), and
+     * cannot observe the run, which is reported rather than passed. */
+#if defined(__linux__)
+    const char *want = "LAB_UNCONFINED";
+#else
+    const char *want = "LAB_UNSUPPORTED";
+    static bool noted;
+    if (!noted) {
+        noted = true;
+        printf("UNOBSERVED (lab_diff_context: the confined run needs a Linux host)\n");
+    }
+#endif
     const struct json_value *code = json_get(json_get(envelope, "error"), "code");
-    return code && code->type == JSON_STR && strcmp(json_get_str(code), "LAB_UNCONFINED") == 0;
+    return code && code->type == JSON_STR && strcmp(json_get_str(code), want) == 0;
 }
 
 static const char *diff_first(const struct json_value *envelope)

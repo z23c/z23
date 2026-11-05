@@ -55,6 +55,19 @@
 
 static const char LT_BIN[] = "build/bin/z23-loop-tick";
 
+/* The tick tells a dead gate from a live one by scanning /proc/<pid>/fd
+ * (tools/loop_tick_gate.c), and by design never calls a run dead where there
+ * is no /proc. A host without it (macOS) cannot observe the dead-gate paths,
+ * so those scenarios report UNOBSERVED instead of failing or passing. */
+static bool lt_dead_gate_observable(const char *scenario)
+{
+    if (access("/proc/self/fd", R_OK) == 0)
+        return true;
+    printf("UNOBSERVED (loop_tick: %s needs /proc to tell a dead gate from a live one)\n",
+           scenario);
+    return false;
+}
+
 struct lt_cfg {
     const char *edit;    /* file the fake engine appends to, or NULL */
     const char *lint;    /* "shrink" or "grow" */
@@ -715,6 +728,8 @@ static int case_gate_dies_twice(void)
 {
     int failures = 0;
     struct lt_env e;
+    if (!lt_dead_gate_observable("a gate dying twice"))
+        return 0;
     const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL, "always" };
     const bool ready = lt_setup(&e, "gatedead", &c, "run", "claude-haiku");
     LT_CHECK("the dead-gate scenario fixtures are written", ready);
@@ -738,6 +753,8 @@ static int case_gate_dies_once(void)
 {
     int failures = 0;
     struct lt_env e;
+    if (!lt_dead_gate_observable("a gate dying once"))
+        return 0;
     const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL, "once" };
     const bool ready = lt_setup(&e, "gateonce", &c, "run", "claude-haiku");
     LT_CHECK("the died-once scenario fixtures are written", ready);

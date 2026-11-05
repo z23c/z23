@@ -148,7 +148,14 @@ static int member_controls(void)
         ASSERT(member_input(&input, "[{\"name\":\"case\",\"expect_exit\":0}]", 0));
         ASSERT(member_call("lab.test", &input, &canonical));
         if (!lab_confinement_available()) {
+            /* Off Linux the lab refuses LAB_UNSUPPORTED before it reaches the
+             * confinement check (lab_build_stub.c); the run is unobserved. */
+#if defined(__linux__)
             ASSERT(member_refused(&canonical, "LAB_UNCONFINED"));
+#else
+            ASSERT(member_refused(&canonical, "LAB_UNSUPPORTED"));
+            printf("UNOBSERVED (lab_case_members: the confined run needs a Linux host)\n");
+#endif
         } else {
             const struct json_value *data = json_get(&canonical, "data");
             ASSERT(json_get_bool(json_get(&canonical, "ok")));
