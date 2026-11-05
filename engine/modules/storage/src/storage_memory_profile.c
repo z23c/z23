@@ -6,22 +6,35 @@
 #include "storage/progress_store.h"
 #include "storage/projection_store.h"
 
+#include <sqlite3.h>
 #include <stdatomic.h>
 #include <stdio.h>
 
 static _Atomic bool g_steady;
 
-static enum storage_cache_state cache_state(int result)
+static struct storage_cache_sample cache_sample(void (*lock)(void), void (*unlock)(void),
+                                                sqlite3 *(*get_db)(void))
 {
-    return result > 0 ? STORAGE_CACHE_READY : result == 0 ? STORAGE_CACHE_CLOSED : STORAGE_CACHE_ERROR;
+    struct storage_cache_sample result = { STORAGE_CACHE_CLOSED, 0 };
+    lock();
+    sqlite3 *db = get_db();
+    if (db) {
+        int current = 0, high = 0;
+        int rc = sqlite3_db_status(db, SQLITE_DBSTATUS_CACHE_USED, &current, &high, 0);
+        result.state = rc == SQLITE_OK ? STORAGE_CACHE_READY : STORAGE_CACHE_ERROR;
+        if (rc == SQLITE_OK) result.bytes = current;
+    }
+    unlock();
+    return result;
 }
 
-void storage_memory_profile_read_cache(struct storage_cache_usage *out)
+bool storage_memory_profile_read_cache(struct storage_cache_usage *out)
 {
-    if (!out) return;
+    if (!out) return false;
     *out = (struct storage_cache_usage){0};
-    out->progress.state = cache_state(progress_store_cache_used(&out->progress.bytes));
-    out->projection.state = cache_state(projection_store_cache_used(&out->projection.bytes));
+    out->progress = cache_sample(progress_store_tx_lock, progress_store_tx_unlock, progress_store_db);
+    out->projection = cache_sample(projection_store_tx_lock, projection_store_tx_unlock, projection_store_db);
+    return true;
 }
 
 static const char *cache_state_name(enum storage_cache_state state)
@@ -32,7 +45,7 @@ static const char *cache_state_name(enum storage_cache_state state)
 void storage_memory_profile_log_cache(void)
 {
     struct storage_cache_usage usage;
-    storage_memory_profile_read_cache(&usage);
+    (void)storage_memory_profile_read_cache(&usage);
     fprintf(stderr,  // obs-ok:storage-memory-profile
             "[storage] sqlite cache used: progress_state=%s progress_bytes=%lld projection_state=%s projection_bytes=%lld\n",
             cache_state_name(usage.progress.state), (long long)usage.progress.bytes,

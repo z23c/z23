@@ -30,8 +30,9 @@ int64_t storage_memory_profile_steady_cache_kib(int64_t folding_cache_kib);
 enum storage_cache_state { STORAGE_CACHE_CLOSED, STORAGE_CACHE_READY, STORAGE_CACHE_ERROR };
 struct storage_cache_sample { enum storage_cache_state state; int64_t bytes; };
 struct storage_cache_usage { struct storage_cache_sample progress, projection; };
-/* Measurements are independent snapshots, not RSS or mmap residency. */
-void storage_memory_profile_read_cache(struct storage_cache_usage *out);
+/* Independent snapshots, not RSS or mmap residency. Returns false for a NULL
+ * output; each sample separately names a closed store or SQLite error. */
+bool storage_memory_profile_read_cache(struct storage_cache_usage *out);
 void storage_memory_profile_log_cache(void);
 
 /* Switch every open store connection to the steady (true) or folding (false)

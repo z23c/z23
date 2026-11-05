@@ -131,8 +131,6 @@ void projection_store_tx_unlock(void);
  * (nullable) outputs. */
 int projection_store_apply_memory_profile(bool steady, int64_t *mmap_bytes_out,
                                           int64_t *cache_kib_out);
-/* 1 measured, 0 closed, -1 unavailable/error. No handle escapes the lock. */
-int projection_store_cache_used(int64_t *bytes_out);
 
 /* Graceful close: checkpoint+close of this projection handle and its own WAL.
  * Safe to call repeatedly and from shutdown paths. The kernel store has a

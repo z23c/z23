@@ -571,19 +571,6 @@ void projection_store_integrity_scan_result(bool ok)
 #define PROJECTION_STORE_CACHE_KIB   (64 * 1024)             /* 64 MiB */
 #define PROJECTION_STORE_MMAP_BYTES  (256LL * 1024 * 1024)   /* 256 MiB */
 
-/* Measure while the connection's transaction lock protects its lifetime. */
-int projection_store_cache_used(int64_t *bytes_out)
-{
-    if (!bytes_out) return -1;
-    projection_store_tx_lock();
-    sqlite3 *db = projection_store_db();
-    int current = 0, high = 0;
-    int rc = db ? sqlite3_db_status(db, SQLITE_DBSTATUS_CACHE_USED, &current, &high, 0) : SQLITE_OK;
-    if (db && rc == SQLITE_OK) *bytes_out = current;
-    projection_store_tx_unlock();
-    return !db ? 0 : rc == SQLITE_OK ? 1 : -1;
-}
-
 /* Folding <-> steady switch for the open projection handle. PRAGMA-only:
  * cache_size and mmap_size change how SQLite holds and reads pages, never
  * which bytes are read or written, transaction boundaries or durability.

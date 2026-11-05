@@ -156,19 +156,6 @@ static void progress_store_folding_sizing(int64_t *cache_kib,
         ram, PROGRESS_STORE_MMAP_FLOOR_BYTES, PROGRESS_STORE_MMAP_CEIL_BYTES);
 }
 
-/* Measure while the connection's transaction lock protects its lifetime. */
-int progress_store_cache_used(int64_t *bytes_out)
-{
-    if (!bytes_out) return -1;
-    progress_store_tx_lock();
-    sqlite3 *db = progress_store_db();
-    int current = 0, high = 0;
-    int rc = db ? sqlite3_db_status(db, SQLITE_DBSTATUS_CACHE_USED, &current, &high, 0) : SQLITE_OK;
-    if (db && rc == SQLITE_OK) *bytes_out = current;
-    progress_store_tx_unlock();
-    return !db ? 0 : rc == SQLITE_OK ? 1 : -1;
-}
-
 /* Switch the open consensus.db handle between the folding sizing and the
  * steady (tip-following) one.  PRAGMA-only: cache_size and mmap_size change
  * how SQLite holds and reads pages, never which bytes are read or written,

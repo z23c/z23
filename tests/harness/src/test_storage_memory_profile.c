@@ -68,13 +68,12 @@ static int mp_check_cache(sqlite3 *pdb, sqlite3 *jdb)
     int j_rc = sqlite3_db_status(jdb, SQLITE_DBSTATUS_CACHE_USED, &j_used, &high, 0);
     projection_store_tx_unlock();
     struct storage_cache_usage usage;
-    storage_memory_profile_read_cache(&usage);
+    MP_CHECK("cache snapshots accept valid output", storage_memory_profile_read_cache(&usage));
     MP_CHECK("actual progress cache equals SQLite measurement", p_rc == SQLITE_OK && p_used > 0 &&
              usage.progress.state == STORAGE_CACHE_READY && usage.progress.bytes == p_used);
     MP_CHECK("actual projection cache equals SQLite measurement", j_rc == SQLITE_OK && j_used > 0 &&
              usage.projection.state == STORAGE_CACHE_READY && usage.projection.bytes == j_used);
-    MP_CHECK("invalid output is an error", progress_store_cache_used(NULL) == -1 &&
-             projection_store_cache_used(NULL) == -1);
+    MP_CHECK("invalid output is an error", !storage_memory_profile_read_cache(NULL));
     return failures;
 }
 
