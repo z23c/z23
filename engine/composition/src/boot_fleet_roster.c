@@ -273,8 +273,10 @@ struct line_memo {
 };
 
 static struct line_memo g_memo;
-/* Unproven lines the next rebuild passes over, so rebuilds take turns when more
- * of them are held than one may check. Guarded by the build lock. */
+/* Unproven lines, behind the newest SCAN_NEWEST, that the next rebuild passes
+ * over, so rebuilds take turns when more of them are held than one may check.
+ * Guarded by the build lock. */
+enum { SCAN_NEWEST = BOOT_FLEET_ROSTER_SCAN_ROWS / 2 };
 static size_t g_scan_skip;
 
 static bool memo_matches(const struct line_memo *m, const struct root_view *rv)
@@ -323,7 +325,7 @@ struct scan_acc {
     bool memo_ok;           /* g_memo was made under this root and state */
     bool unreadable;        /* a row to check no longer reads back */
     size_t unknown;         /* unproven rows met by the walk */
-    size_t skip;            /* of those, how many are left to the turn before */
+    size_t skip;            /* g_scan_skip as this scan began */
     size_t n_pending;
     struct scan_pending pending[BOOT_FLEET_ROSTER_SCAN_ROWS];
     size_t n_seen;
@@ -403,6 +405,18 @@ static void scan_member(struct scan_acc *acc, const uint8_t digest[],
     snap_add_key(acc, signer);
 }
 
+/* Does this rebuild check the next unproven line? The newest arrivals always:
+ * with a root only sealed rows arrive, so a new line is proven at once whatever
+ * older junk is held. Behind them, rebuilds take turns. */
+static bool scan_turn(struct scan_acc *acc)
+{
+    size_t nth = acc->unknown++;
+    if (nth < SCAN_NEWEST)
+        return true;
+    return nth - SCAN_NEWEST >= acc->skip &&
+           acc->n_pending < BOOT_FLEET_ROSTER_SCAN_ROWS;
+}
+
 /* One stored row, from the walk. A line this root and state already proved is a
  * member here and now; any other waits its turn. The walk holds the store's read
  * open, so nothing is verified under it. */
@@ -428,8 +442,7 @@ static bool scan_line(const uint8_t id[32], const char *text, size_t len,
         scan_member(acc, digest, known->signer, known->box);
         return true;
     }
-    size_t nth = acc->unknown++;
-    if (nth < acc->skip || acc->n_pending >= BOOT_FLEET_ROSTER_SCAN_ROWS) {
+    if (!scan_turn(acc)) {
         acc->deferred++;
         return true;
     }
@@ -496,8 +509,9 @@ static enum snap_state scan_fold(const struct root_view *rv,
                                  struct scan_acc *acc)
 {
     scan_report(acc);
-    size_t turn = acc->skip + acc->n_pending;
-    g_scan_skip = acc->deferred && turn < acc->unknown ? turn : 0;
+    size_t turn = acc->skip + (acc->n_pending > SCAN_NEWEST
+                                   ? acc->n_pending - SCAN_NEWEST : 0);
+    g_scan_skip = acc->deferred && turn + SCAN_NEWEST < acc->unknown ? turn : 0;
     acc->next.valid = true;
     memcpy(acc->next.root, rv->root, 32);
     acc->next.state = rv->state;

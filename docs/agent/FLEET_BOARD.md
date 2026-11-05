@@ -134,13 +134,14 @@ whole is that no bound counts rows. A rebuild walks every stored roster note
 in arrival order and hashes it, so copies and foreign rows cannot push a line
 out however many there are. It checks each distinct line once (a line already
 proven under the same root and chain state is not checked again), at most 256
-unproven lines per rebuild, and later rebuilds take turns over any more than
-that. While a store of junk is being worked through, a member not reached yet
-is not admitted, and with nothing proven yet the roster is **unverifiable**,
-never "no roster". Only one thread rebuilds at a time. A read of the store that
-fails is **unverifiable** too. The manager decides whether to write a line again
-from its own copies alone. The cached roster costs a member lookup and no
-signature check per fleet post.
+unproven lines per rebuild: always the newest 128, and later rebuilds take turns
+over the rest, so a line arriving now is proven at once. While a store of junk
+is being worked through, a member not reached yet is not admitted, and with
+nothing proven yet the roster is **unverifiable**, never "no roster". Only one
+thread rebuilds at a time. A read of the store that fails is **unverifiable**
+too. The manager decides whether to write a line again from its own copies
+alone. The cached roster costs a member lookup and no signature check per fleet
+post.
 
 The gate has three states. With no fleet root, or no sealed row yet while the
 root is ACTIVE or never anchored, it is **unarmed** and fleet carriage is
