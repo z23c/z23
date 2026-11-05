@@ -266,11 +266,23 @@ static bool cis_page_subject(void)
     output[strcspn(output, "\r\n")] = '\0';
     if (strlen(output) != 40) return false;
     memcpy(expected, output, 41);
-    return zcl_code_pages_subject(root, commit, "module", actual) &&
+    bool valid = zcl_code_pages_subject(root, commit, "module", actual) &&
            strcmp(actual, expected) == 0 &&
            !zcl_code_pages_subject(root, commit, "../module", actual) &&
            !zcl_code_pages_subject(root, "HEAD", "module", actual) &&
            !zcl_code_pages_subject(root, commit, "missing", actual);
+    if (!valid || !cis_put(root, "module/file.c", "int other_value;\n") ||
+        zcl_spawn_capture(add, output, sizeof(output), 10000) != 0 ||
+        zcl_spawn_capture(save, output, sizeof(output), 10000) != 0 ||
+        zcl_spawn_capture(head, output, sizeof(output), 10000) != 0) return false;
+    output[strcspn(output, "\r\n")] = '\0';
+    char replacement[65];
+    if (strlen(output) != 40) return false;
+    memcpy(replacement, output, 41);
+    const char *replace[] = {"git", "-C", root, "replace", commit, replacement, NULL};
+    return zcl_spawn_capture(replace, output, sizeof(output), 10000) == 0 &&
+           zcl_code_pages_subject(root, commit, "module", actual) &&
+           strcmp(actual, expected) == 0;
 }
 
 int test_codeindex_inventory_schema(void)
