@@ -42,6 +42,7 @@
 #include "controllers/rpc_client.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
+#include "net/file_market.h"
 #include "net/file_service.h"
 #include "net/rom_peer_scoring.h"
 #include "net/rom_seed.h"
@@ -1049,9 +1050,442 @@ static int test_rm_tree_trailing_separator_keeps_target(void)
 }
 #endif
 
+/* ── Mutation-measured gaps: names, arguments, refusals, announce, caps ──
+ *
+ * Helpers return false on the first unmet requirement (printing the line) so
+ * the TEST wrapper can always run its teardown. */
+
+#define SBP_REQ(cond) do { \
+    if (!(cond)) { \
+        printf("\n    sbp requirement failed at line %d: %s\n", __LINE__, \
+               #cond); \
+        return false; \
+    } \
+} while (0)
+
+/* readdir() reports "." and ".."; the service's bounded walk counts them. */
+#define SBP_DOT_ENTRIES 2u
+
+/* A datadir with a running file service and one workspace. Zero-initialised
+ * so a close after a failed open removes only what exists. */
+struct sbp_fx {
+    char aroot[PATH_MAX];
+    char wroot[PATH_MAX];
+    char *adir;
+    char *wdir;
+};
+
+static bool sbp_fx_open(struct sbp_fx *fx, const char *tag, char flavor)
+{
+    memset(fx, 0, sizeof(*fx));
+    sbp_open_caps();
+    char prefix[64];
+    snprintf(prefix, sizeof(prefix), "zcl_sbpx_%s_d", tag);
+    fx->adir = test_mkdtemp(fx->aroot, sizeof(fx->aroot), prefix);
+    snprintf(prefix, sizeof(prefix), "zcl_sbpx_%s_w", tag);
+    fx->wdir = test_mkdtemp(fx->wroot, sizeof(fx->wroot), prefix);
+    return fx->adir && fx->wdir && sbp_make_tree(fx->wdir, flavor) &&
+           sbp_serve(fx->adir) != 0;
+}
+
+static void sbp_fx_close(struct sbp_fx *fx)
+{
+    fs_server_stop();
+    if (fx->wdir) sbp_rm_tree(fx->wdir, 6);
+    if (fx->adir) sbp_rm_tree(fx->adir, 6);
+    memset(fx, 0, sizeof(*fx));
+    sbp_open_caps();
+}
+
+/* The content address of the workspace: seeded directory (created), leaf name
+ * and the captured root. */
+static bool sbp_address(const struct sbp_fx *fx, uint8_t root[32],
+                        char seed_dir[1200], char leaf[96])
+{
+    char root_hex[65];
+    if (vcs_tree_capture_path(fx->wdir, root) != VCS_OK)
+        return false;
+    sbp_hex32(root, root_hex);
+    snprintf(seed_dir, 1200, "%s/%s", fx->adir, ROM_SEED_BUNDLES_SUBDIR);
+    snprintf(leaf, 96, "%s%s", root_hex, ROM_SEED_SOURCE_BUNDLE_SUFFIX);
+    return mkdir(seed_dir, 0700) == 0 || errno == EEXIST;
+}
+
+static int test_publish_result_strings(void)
+{
+    int failures = 0;
+    TEST("source_bundle_publish: every result has its own stable name and an "
+         "unknown value is named unknown") {
+        ASSERT(strcmp(source_bundle_publish_result_string(
+                   SOURCE_BUNDLE_PUBLISH_OK), "ok") == 0);
+        ASSERT(strcmp(source_bundle_publish_result_string(
+                   SOURCE_BUNDLE_PUBLISH_ERR_ARGS), "arguments") == 0);
+        ASSERT(strcmp(source_bundle_publish_result_string(
+                   SOURCE_BUNDLE_PUBLISH_ERR_WORKSPACE),
+                   "workspace-capture") == 0);
+        ASSERT(strcmp(source_bundle_publish_result_string(
+                   SOURCE_BUNDLE_PUBLISH_ERR_ROOT_PIN),
+                   "source-root-pin") == 0);
+        ASSERT(strcmp(source_bundle_publish_result_string(
+                   SOURCE_BUNDLE_PUBLISH_ERR_BUNDLE), "bundle-create") == 0);
+        ASSERT(strcmp(source_bundle_publish_result_string(
+                   SOURCE_BUNDLE_PUBLISH_ERR_STORE),
+                   "seed-directory-write") == 0);
+        ASSERT(strcmp(source_bundle_publish_result_string(
+                   SOURCE_BUNDLE_PUBLISH_ERR_SEEDING_OFF),
+                   "seeding-disabled") == 0);
+        ASSERT(strcmp(source_bundle_publish_result_string(
+                   SOURCE_BUNDLE_PUBLISH_ERR_NO_SERVICE),
+                   "no-file-service") == 0);
+        ASSERT(strcmp(source_bundle_publish_result_string(
+                   SOURCE_BUNDLE_PUBLISH_ERR_REGISTRY_FULL),
+                   "registry-full") == 0);
+        ASSERT(strcmp(source_bundle_publish_result_string(
+                   SOURCE_BUNDLE_PUBLISH_ERR_REGISTER),
+                   "registration-refused") == 0);
+        ASSERT(strcmp(source_bundle_publish_result_string(
+                   SOURCE_BUNDLE_PUBLISH_ERR_NOT_OFFERED),
+                   "not-offered") == 0);
+        ASSERT(strcmp(source_bundle_publish_result_string(
+                   (enum source_bundle_publish_result)99), "unknown") == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool sbp_report_is_zero(const struct source_bundle_publish_report *r)
+{
+    static const uint8_t zero[32] = {0};
+    return memcmp(r->source_root, zero, 32) == 0 &&
+           memcmp(r->artifact_root, zero, 32) == 0 && r->filename[0] == '\0' &&
+           r->path[0] == '\0' && r->wire_bytes == 0 && r->num_chunks == 0 &&
+           r->file_service_port == 0 && !r->republished &&
+           r->seed_directory_entries == 0 && r->entries_beyond_cap == 0 &&
+           !r->rescan_guaranteed;
+}
+
+/* Argument checks come first, whatever the node's posture; a refusal never
+ * leaves stale report bytes behind; a one-character name is a name. */
+static bool sbp_args_contract(void)
+{
+    struct source_bundle_publish_report r;
+    SBP_REQ(!fs_server_is_running());
+    SBP_REQ(source_bundle_publish("w", "d", NULL, NULL) ==
+            SOURCE_BUNDLE_PUBLISH_ERR_ARGS);
+
+    memset(&r, 0xFF, sizeof(r));
+    SBP_REQ(source_bundle_publish("", "d", NULL, &r) ==
+            SOURCE_BUNDLE_PUBLISH_ERR_ARGS);
+    SBP_REQ(sbp_report_is_zero(&r));
+    memset(&r, 0xFF, sizeof(r));
+    SBP_REQ(source_bundle_publish("w", "", NULL, &r) ==
+            SOURCE_BUNDLE_PUBLISH_ERR_ARGS);
+    SBP_REQ(sbp_report_is_zero(&r));
+    SBP_REQ(source_bundle_publish(NULL, "d", NULL, &r) ==
+            SOURCE_BUNDLE_PUBLISH_ERR_ARGS);
+    SBP_REQ(source_bundle_publish("w", NULL, NULL, &r) ==
+            SOURCE_BUNDLE_PUBLISH_ERR_ARGS);
+
+    memset(&r, 0xFF, sizeof(r));
+    SBP_REQ(source_bundle_publish("w", "d", NULL, &r) ==
+            SOURCE_BUNDLE_PUBLISH_ERR_NO_SERVICE);
+    SBP_REQ(sbp_report_is_zero(&r));
+    rom_seed_set_enabled(false);
+    SBP_REQ(source_bundle_publish("w", "d", NULL, &r) ==
+            SOURCE_BUNDLE_PUBLISH_ERR_SEEDING_OFF);
+    rom_seed_set_enabled(true);
+    return true;
+}
+
+static int test_publish_argument_contract(void)
+{
+    int failures = 0;
+    TEST("source_bundle_publish: null report, empty and one-character "
+         "arguments, and a refusal that leaves the report zeroed") {
+        sbp_open_caps();
+        bool ok = sbp_args_contract();
+        sbp_open_caps();
+        ASSERT(ok);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool sbp_refuse_missing_workspace(const struct sbp_fx *fx)
+{
+    char gone[PATH_MAX + 16];
+    snprintf(gone, sizeof(gone), "%s/absent", fx->wdir);
+    struct source_bundle_publish_report r;
+    SBP_REQ(source_bundle_publish(gone, fx->adir, NULL, &r) ==
+            SOURCE_BUNDLE_PUBLISH_ERR_WORKSPACE);
+    SBP_REQ(rom_seed_count() == 0);
+    return true;
+}
+
+/* A pin that differs from the captured root only in its LAST byte is still a
+ * different root. */
+static bool sbp_refuse_pin_last_byte(const struct sbp_fx *fx)
+{
+    uint8_t root[32], pin[32];
+    SBP_REQ(vcs_tree_capture_path(fx->wdir, root) == VCS_OK);
+    memcpy(pin, root, 32);
+    pin[31] ^= 0x01u;
+    struct source_bundle_publish_report r;
+    SBP_REQ(source_bundle_publish(fx->wdir, fx->adir, pin, &r) ==
+            SOURCE_BUNDLE_PUBLISH_ERR_ROOT_PIN);
+    SBP_REQ(rom_seed_count() == 0);
+    SBP_REQ(source_bundle_publish(fx->wdir, fx->adir, root, &r) ==
+            SOURCE_BUNDLE_PUBLISH_OK);
+    return true;
+}
+
+/* Different, non-empty bytes already sitting at the content address are
+ * preserved, not replaced. */
+static bool sbp_refuse_foreign_bytes(const struct sbp_fx *fx)
+{
+    uint8_t root[32];
+    char seed_dir[1200], leaf[96], path[1400];
+    SBP_REQ(sbp_address(fx, root, seed_dir, leaf));
+    snprintf(path, sizeof(path), "%s/%s", seed_dir, leaf);
+    SBP_REQ(sbp_write(seed_dir, leaf, "garbage", 7));
+    struct source_bundle_publish_report r;
+    SBP_REQ(source_bundle_publish(fx->wdir, fx->adir, NULL, &r) ==
+            SOURCE_BUNDLE_PUBLISH_ERR_STORE);
+    size_t len = 0;
+    uint8_t *kept = sbp_slurp(path, &len);
+    bool same = kept && len == 7 && memcmp(kept, "garbage", 7) == 0;
+    free(kept);
+    SBP_REQ(same);
+    SBP_REQ(rom_seed_count() == 0);
+    return true;
+}
+
+/* A datadir that cannot hold a bundles/ directory (it is a file) is a store
+ * failure. */
+static bool sbp_refuse_datadir_is_file(const struct sbp_fx *fx)
+{
+    char file[PATH_MAX + 16];
+    snprintf(file, sizeof(file), "%s/not-a-dir", fx->adir);
+    SBP_REQ(sbp_write(fx->adir, "not-a-dir", "x", 1));
+    struct source_bundle_publish_report r;
+    SBP_REQ(source_bundle_publish(fx->wdir, file, NULL, &r) ==
+            SOURCE_BUNDLE_PUBLISH_ERR_STORE);
+    SBP_REQ(rom_seed_count() == 0);
+    return true;
+}
+
+/* A staging path that cannot be opened is a store failure that leaves nothing
+ * under the final name, and the same publish works once it is cleared. */
+static bool sbp_refuse_staging_blocked(const struct sbp_fx *fx)
+{
+    uint8_t root[32];
+    char seed_dir[1200], leaf[96], path[1400], block[1500];
+    SBP_REQ(sbp_address(fx, root, seed_dir, leaf));
+    snprintf(path, sizeof(path), "%s/%s", seed_dir, leaf);
+    snprintf(block, sizeof(block), "%s/%s.part", seed_dir, leaf);
+    SBP_REQ(mkdir(block, 0700) == 0);
+    struct source_bundle_publish_report r;
+    SBP_REQ(source_bundle_publish(fx->wdir, fx->adir, NULL, &r) ==
+            SOURCE_BUNDLE_PUBLISH_ERR_STORE);
+    SBP_REQ(access(path, F_OK) != 0);
+    SBP_REQ(rom_seed_count() == 0);
+    sbp_rm_tree(block, 2);
+    SBP_REQ(source_bundle_publish(fx->wdir, fx->adir, NULL, &r) ==
+            SOURCE_BUNDLE_PUBLISH_OK);
+    return true;
+}
+
+static int test_publish_refusal_paths(void)
+{
+    int failures = 0;
+    TEST("source_bundle_publish: missing workspace, last-byte pin, foreign "
+         "bytes, file-as-datadir and blocked staging are each refused with "
+         "their own code and offer nothing") {
+        struct sbp_fx fx;
+        bool ok = sbp_fx_open(&fx, "refuse", 'A');
+        ok = ok && sbp_refuse_missing_workspace(&fx);
+        ok = ok && sbp_refuse_pin_last_byte(&fx);
+        sbp_fx_close(&fx);
+        ok = ok && sbp_fx_open(&fx, "refuse2", 'A');
+        ok = ok && sbp_refuse_foreign_bytes(&fx);
+        ok = ok && sbp_refuse_datadir_is_file(&fx);
+        sbp_fx_close(&fx);
+        ok = ok && sbp_fx_open(&fx, "refuse3", 'A');
+        ok = ok && sbp_refuse_staging_blocked(&fx);
+        sbp_fx_close(&fx);
+        ASSERT(ok);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* A full registry is its own refusal, not a generic registration failure. */
+static bool sbp_registry_full(const struct sbp_fx *fx)
+{
+    struct source_bundle_publish_report r;
+    for (unsigned i = 0; i < ROM_SEED_MAX_ARTIFACTS; i++) {
+        SBP_REQ(sbp_make_tree(fx->wdir, (char)('B' + (int)i)));
+        SBP_REQ(source_bundle_publish(fx->wdir, fx->adir, NULL, &r) ==
+                SOURCE_BUNDLE_PUBLISH_OK);
+    }
+    SBP_REQ(rom_seed_count() == (int)ROM_SEED_MAX_ARTIFACTS);
+    SBP_REQ(sbp_make_tree(fx->wdir, 'Z'));
+    SBP_REQ(source_bundle_publish(fx->wdir, fx->adir, NULL, &r) ==
+            SOURCE_BUNDLE_PUBLISH_ERR_REGISTRY_FULL);
+    SBP_REQ(rom_seed_count() == (int)ROM_SEED_MAX_ARTIFACTS);
+    return true;
+}
+
+static int test_publish_registry_full(void)
+{
+    int failures = 0;
+    TEST("source_bundle_publish: the ninth bundle is refused as registry-full") {
+        struct sbp_fx fx;
+        bool ok = sbp_fx_open(&fx, "full", 'A');
+        ok = ok && sbp_registry_full(&fx);
+        sbp_fx_close(&fx);
+        ASSERT(ok);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* The price-0 offer reaches the market with the dialable port, and the report
+ * names the file it wrote. */
+static bool sbp_announces_to_market(const struct sbp_fx *fx)
+{
+    SBP_REQ(sbp_make_tree(fx->wdir, 'Q'));
+    struct source_bundle_publish_report r;
+    struct file_offer offer;
+    uint8_t root[32];
+    char seed_dir[1200], leaf[96], want[160];
+    SBP_REQ(sbp_address(fx, root, seed_dir, leaf));
+    SBP_REQ(source_bundle_publish(fx->wdir, fx->adir, NULL, &r) ==
+            SOURCE_BUNDLE_PUBLISH_OK);
+    SBP_REQ(file_market_find_offer(r.artifact_root, &offer));
+    SBP_REQ(offer.peer_port == r.file_service_port && offer.price_per_mb == 0 &&
+            offer.num_chunks == r.num_chunks && offer.size_bytes == r.wire_bytes);
+    snprintf(want, sizeof(want), "%s/%s", ROM_SEED_BUNDLES_SUBDIR, leaf);
+    SBP_REQ(strcmp(r.filename, want) == 0);
+    SBP_REQ(memcmp(r.source_root, root, 32) == 0);
+    /* The bounded walk counts "." and ".." like the seeder's own sweep. */
+    SBP_REQ(r.seed_directory_entries ==
+            (unsigned)sbp_count_entries(seed_dir) + SBP_DOT_ENTRIES);
+    SBP_REQ(r.entries_beyond_cap == 0 && r.rescan_guaranteed);
+    return true;
+}
+
+static int test_publish_announces_to_market(void)
+{
+    int failures = 0;
+    TEST("source_bundle_publish: a published bundle is announced to the "
+         "market and counted exactly in the report") {
+        struct sbp_fx fx;
+        bool ok = sbp_fx_open(&fx, "market", 'A');
+        ok = ok && sbp_announces_to_market(&fx);
+        sbp_fx_close(&fx);
+        ASSERT(ok);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Add non-artifact files to `dir` until it holds exactly `target` entries. */
+static bool sbp_pad_to(const char *dir, int target, const char *prefix)
+{
+    int count = sbp_count_entries(dir);
+    while (count >= 0 && count < target) {
+        char name[64];
+        snprintf(name, sizeof(name), "%s-%06d.bin", prefix, count);
+        if (!sbp_write(dir, name, "x", 1))
+            return false;
+        count++;
+    }
+    return count == target;
+}
+
+/* One directory holding exactly ROM_SEED_SCAN_ENTRY_CAP entries is still
+ * fully walked; one more is not. `seed_side` picks bundles/ or the root. */
+static bool sbp_entry_cap_edge(const struct sbp_fx *fx, bool seed_side)
+{
+    struct source_bundle_publish_report r;
+    char seed_dir[1200];
+    SBP_REQ(source_bundle_publish(fx->wdir, fx->adir, NULL, &r) ==
+            SOURCE_BUNDLE_PUBLISH_OK);
+    snprintf(seed_dir, sizeof(seed_dir), "%s/%s", fx->adir,
+             ROM_SEED_BUNDLES_SUBDIR);
+    const char *dir = seed_side ? seed_dir : fx->adir;
+    /* The walk counts "." and ".." too, so a directory the walk sees as
+     * exactly ROM_SEED_SCAN_ENTRY_CAP entries holds two fewer real ones. */
+    const int cap = (int)ROM_SEED_SCAN_ENTRY_CAP - (int)SBP_DOT_ENTRIES;
+
+    SBP_REQ(sbp_pad_to(dir, cap, "edge"));
+    SBP_REQ(source_bundle_publish(fx->wdir, fx->adir, NULL, &r) ==
+            SOURCE_BUNDLE_PUBLISH_OK);
+    SBP_REQ(r.republished && r.rescan_guaranteed);
+    SBP_REQ(r.entries_beyond_cap == 0);
+    if (seed_side)
+        SBP_REQ(r.seed_directory_entries == ROM_SEED_SCAN_ENTRY_CAP);
+
+    SBP_REQ(sbp_pad_to(dir, cap + 1, "edge"));
+    SBP_REQ(source_bundle_publish(fx->wdir, fx->adir, NULL, &r) ==
+            SOURCE_BUNDLE_PUBLISH_OK);
+    SBP_REQ(!r.rescan_guaranteed);
+    SBP_REQ(r.entries_beyond_cap == 0);
+    return true;
+}
+
+/* A header seed plus seven bundles fill the eight registry slots exactly, so
+ * the promise is still keepable; only non-artifact padding adds nothing. */
+static bool sbp_artifact_cap_edge(const struct sbp_fx *fx)
+{
+    uint8_t seed_bytes[ROM_SEED_MIN_ARTIFACT_BYTES];
+    memset(seed_bytes, 0, sizeof(seed_bytes));
+    SBP_REQ(sbp_write(fx->adir, "block_index.bin", seed_bytes,
+                      sizeof(seed_bytes)));
+    struct source_bundle_publish_report r;
+    memset(&r, 0, sizeof(r));
+    for (unsigned i = 0; i + 1u < ROM_SEED_MAX_ARTIFACTS; i++) {
+        SBP_REQ(sbp_make_tree(fx->wdir, (char)('B' + (int)i)));
+        SBP_REQ(source_bundle_publish(fx->wdir, fx->adir, NULL, &r) ==
+                SOURCE_BUNDLE_PUBLISH_OK);
+    }
+    SBP_REQ(r.rescan_guaranteed);
+    SBP_REQ(r.entries_beyond_cap == 0);
+    return true;
+}
+
+static int test_publish_sweep_boundaries(void)
+{
+    int failures = 0;
+    TEST("source_bundle_publish: the rescan promise holds at exactly the "
+         "entry cap in either directory and at exactly eight artifacts, and "
+         "breaks one past") {
+        struct sbp_fx fx;
+        bool ok = sbp_fx_open(&fx, "edge_seed", 'A');
+        ok = ok && sbp_entry_cap_edge(&fx, true);
+        sbp_fx_close(&fx);
+        ok = ok && sbp_fx_open(&fx, "edge_root", 'A');
+        ok = ok && sbp_entry_cap_edge(&fx, false);
+        sbp_fx_close(&fx);
+        ok = ok && sbp_fx_open(&fx, "edge_art", 'A');
+        ok = ok && sbp_artifact_cap_edge(&fx);
+        sbp_fx_close(&fx);
+        ASSERT(ok);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_source_bundle_publish(void)
 {
     int failures = 0;
+    failures += test_publish_result_strings();
+    failures += test_publish_argument_contract();
+    failures += test_publish_refusal_paths();
+    failures += test_publish_registry_full();
+    failures += test_publish_announces_to_market();
+    failures += test_publish_sweep_boundaries();
 #if !defined(_WIN32)
     failures += test_rm_tree_does_not_follow_symlink();
     failures += test_rm_tree_trailing_separator_keeps_target();
