@@ -576,12 +576,9 @@ static enum vcs_package_attest_error attest_parse_tail(
     return VCS_PACKAGE_ATTEST_OK;
 }
 
-enum vcs_package_attest_error vcs_package_attest_parse(
+static enum vcs_package_attest_error attest_parse_fields(
     const uint8_t *wire, size_t wire_len, struct vcs_package_attest *out)
 {
-    if (!out)
-        LOG_RETURN(VCS_PACKAGE_ATTEST_ERR_NULL, ATTEST_LOG, "null parse out");
-    memset(out, 0, sizeof(*out));
     if (!wire)
         LOG_RETURN(VCS_PACKAGE_ATTEST_ERR_NULL, ATTEST_LOG, "null wire");
     if (wire_len > VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES)
@@ -599,6 +596,20 @@ enum vcs_package_attest_error vcs_package_attest_parse(
     if (err != VCS_PACKAGE_ATTEST_OK) return err;
     /* Field grammars + consistency (the signature is verify()'s step). */
     return vcs_package_attest_validate(out);
+}
+
+enum vcs_package_attest_error vcs_package_attest_parse(
+    const uint8_t *wire, size_t wire_len, struct vcs_package_attest *out)
+{
+    if (!out)
+        LOG_RETURN(VCS_PACKAGE_ATTEST_ERR_NULL, ATTEST_LOG, "null parse out");
+    memset(out, 0, sizeof(*out));
+    enum vcs_package_attest_error err =
+        attest_parse_fields(wire, wire_len, out);
+    /* One exit for every rejection: no half-parsed field is left behind. */
+    if (err != VCS_PACKAGE_ATTEST_OK)
+        memset(out, 0, sizeof(*out));
+    return err;
 }
 
 /* ── signature ──────────────────────────────────────────────────────── */
