@@ -5,6 +5,8 @@
 #include "net/flyclient.h"
 #include "chain/mmb.h"
 #include "crypto/sha3.h"
+#include "event/event.h"
+#include <math.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -366,6 +368,432 @@ static int test_fc_indices_unique_seed_sweep(void)
     return failures;
 }
 
+/* ── Mutation-gap tests: reference index model, events, PoW edges ─────── */
+
+/* Independent re-statement of the FlyClient sampling rule.  A production
+ * change to any hashed byte, shift, exponent or retry counter diverges. */
+static uint64_t ref_weighted(const uint8_t h[32], double exponent, uint64_t n)
+{
+    uint64_t raw = 0;
+    for (int j = 0; j < 8; j++)
+        raw = (raw << 8) | h[j];
+    double x = (double)raw / (double)UINT64_MAX;
+    uint64_t idx = (uint64_t)((double)(n - 1) * pow(x, exponent));
+    return idx >= n ? n - 1 : idx;
+}
+
+static bool ref_taken(const uint64_t *a, uint32_t n, uint64_t v)
+{
+    for (uint32_t j = 0; j < n; j++)
+        if (a[j] == v) return true;
+    return false;
+}
+
+static uint64_t ref_retry(const uint8_t in36[36], uint64_t idx, const uint64_t *a,
+                          uint32_t i, uint64_t n, double e, int *probed)
+{
+    uint8_t in37[37], h[32];
+    memcpy(in37, in36, 36);
+    for (unsigned r = 1; r <= 255; r++) {
+        in37[36] = (uint8_t)r;
+        sha3_256(in37, 37, h);
+        idx = ref_weighted(h, e, n);
+        if (!ref_taken(a, i, idx)) return idx;
+    }
+    (*probed)++;
+    while (ref_taken(a, i, idx))
+        idx = (idx + 1 >= n) ? 0 : idx + 1;
+    return idx;
+}
+
+static uint32_t ref_indices(const uint8_t seed[32], uint64_t n, uint64_t *out,
+                            int *probed)
+{
+    uint32_t count = n < FC_NUM_SAMPLES ? (uint32_t)n : FC_NUM_SAMPLES;
+    double ln = log2((double)n);
+    double e = 1.0 / (ln < 1.0 ? 1.0 : ln);
+    for (uint32_t i = 0; i < count; i++) {
+        uint8_t in[36], h[32];
+        memcpy(in, seed, 32);
+        for (int b = 0; b < 4; b++)
+            in[32 + b] = (uint8_t)(i >> (8 * b));
+        sha3_256(in, 36, h);
+        uint64_t idx = ref_weighted(h, e, n);
+        if (ref_taken(out, i, idx) && n > count)
+            idx = ref_retry(in, idx, out, i, n, e, probed);
+        out[i] = idx;
+    }
+    return count;
+}
+
+/* One seed/length/prefill comparison.  The prefill makes a one-past-the-end
+ * read of the output array visible (a taken-looking or overwritten slot). */
+static bool indices_match_ref(const uint8_t seed[32], uint64_t n, uint64_t prefill,
+                              int *probed)
+{
+    uint64_t got[FC_MAX_SAMPLES], want[FC_MAX_SAMPLES];
+    uint32_t gc = 0;
+    for (int i = 0; i < FC_MAX_SAMPLES; i++) got[i] = prefill;
+    fc_generate_indices(seed, n, got, &gc);
+    uint32_t wc = ref_indices(seed, n, want, probed);
+    if (gc != wc || got[gc] != prefill) return false;
+    return memcmp(got, want, wc * sizeof(uint64_t)) == 0;
+}
+
+static int test_fc_indices_match_reference(void)
+{
+    int failures = 0;
+    TEST("fc: generate_indices equals the reference sampling model") {
+        const uint64_t lens[] = {51, 60, 100, 1000, 3000000};
+        int probed51 = 0, probed_other = 0;
+        for (size_t l = 0; l < sizeof(lens) / sizeof(lens[0]); l++) {
+            const uint64_t pre[] = {UINT64_MAX, 0, lens[l] - 1};
+            for (uint32_t s = 0; s < 150; s++) {
+                uint8_t seed[32];
+                sha3_256((const uint8_t *)&s, sizeof(s), seed);
+                for (size_t p = 0; p < 3; p++)
+                    ASSERT(indices_match_ref(seed, lens[l], pre[p],
+                                             l == 0 ? &probed51 : &probed_other));
+            }
+        }
+        /* 50 samples from 51 slots: the probe fallback must have run. */
+        ASSERT(probed51 > 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fc_indices_degenerate(void)
+{
+    int failures = 0;
+    TEST("fc: generate_indices zero length and null outputs report zero") {
+        uint8_t seed[32];
+        memset(seed, 0x17, 32);
+        uint64_t idx[FC_MAX_SAMPLES];
+        uint32_t cnt = 77;
+        fc_generate_indices(seed, 0, idx, &cnt);
+        ASSERT(cnt == 0);
+        cnt = 77;
+        fc_generate_indices(seed, 100, NULL, &cnt);
+        ASSERT(cnt == 0);
+        fc_generate_indices(seed, 100, idx, NULL); /* must not crash */
+        /* chain_length 2: log2 == 1.0 exactly, exponent 1 */
+        uint32_t c2 = 0;
+        fc_generate_indices(seed, 2, idx, &c2);
+        ASSERT(c2 == 2);
+        ASSERT(idx[0] < 2 && idx[1] < 2);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Event capture: verification results are published as events, so a deleted
+ * or mis-addressed emit is observable. */
+struct fc_cap {
+    int bad_peer, sample_ev, valid_true, idx_mm, h_mm, proof_f, pow_f;
+    int mmb_ev, chain_ev;
+    char chain[200], mmb_first[64], pow_first[160];
+};
+static struct fc_cap g_cap;
+
+static void fc_cap_sample(const char *b)
+{
+    g_cap.sample_ev++;
+    if (strstr(b, "valid=true")) g_cap.valid_true++;
+    if (strstr(b, "expected_idx=")) g_cap.idx_mm++;
+    if (strstr(b, "height_mismatch")) g_cap.h_mm++;
+    if (strstr(b, "proof_failed")) g_cap.proof_f++;
+    if (strstr(b, "pow_failed")) {
+        if (g_cap.pow_f++ == 0) snprintf(g_cap.pow_first, sizeof(g_cap.pow_first), "%s", b);
+    }
+}
+
+static void fc_cap_obs(enum event_type t, uint32_t peer, const void *p, uint32_t len,
+                       void *ctx)
+{
+    (void)ctx;
+    char b[256];
+    uint32_t n = (p && len < 255) ? len : 0;
+    if (n) memcpy(b, p, n);
+    b[n] = '\0';
+    if (peer != 0) g_cap.bad_peer++;
+    if (t == EV_FC_SAMPLE_VERIFIED) fc_cap_sample(b);
+    if (t == EV_MMB_PROOF_VERIFIED && g_cap.mmb_ev++ == 0)
+        snprintf(g_cap.mmb_first, sizeof(g_cap.mmb_first), "%s", b);
+    if (t == EV_FC_CHAIN_VERIFIED) {
+        g_cap.chain_ev++;
+        snprintf(g_cap.chain, sizeof(g_cap.chain), "%s", b);
+    }
+}
+
+static void fc_cap_begin(void)
+{
+    event_log_init();
+    memset(&g_cap, 0, sizeof(g_cap));
+    event_observe(EV_FC_SAMPLE_VERIFIED, fc_cap_obs, NULL);
+    event_observe(EV_MMB_PROOF_VERIFIED, fc_cap_obs, NULL);
+    event_observe(EV_FC_CHAIN_VERIFIED, fc_cap_obs, NULL);
+}
+
+struct fc_fx {
+    struct mmb m;
+    struct mmb_leaf leaves[100];
+    uint8_t hashes[100][32];
+    struct fc_challenge ch;
+    struct fc_response resp;
+    int n;
+};
+static struct fc_fx g_fx;
+
+static void fx_init(int n)
+{
+    memset(&g_fx, 0, sizeof(g_fx));
+    g_fx.n = n;
+    for (int i = 0; i < n; i++) {
+        struct mmb_leaf *l = &g_fx.leaves[i];
+        uint32_t h = (uint32_t)i, h2 = h + 1000000, h3 = h + 2000000;
+        memcpy(l->block_hash, &h, 4);
+        l->height = h;
+        l->timestamp = 1600000000 + h * 75;
+        l->nBits = 0x2007ffff;
+        sha3_256((const uint8_t *)&h2, 4, l->sapling_root);
+        sha3_256((const uint8_t *)&h3, 4, l->chain_work);
+    }
+}
+
+static bool fx_seal(uint8_t seed_byte)
+{
+    mmb_init(&g_fx.m);
+    for (int i = 0; i < g_fx.n; i++) {
+        mmb_hash_leaf(&g_fx.leaves[i], g_fx.hashes[i]);
+        mmb_append(&g_fx.m, &g_fx.leaves[i]);
+    }
+    mmb_root(&g_fx.m, g_fx.ch.mmb_root);
+    memset(g_fx.ch.seed, seed_byte, 32);
+    g_fx.ch.chain_length = (uint64_t)g_fx.n;
+    return fc_build_response(&g_fx.ch, &g_fx.m, g_fx.leaves,
+                             (const uint8_t (*)[32])g_fx.hashes, &g_fx.resp);
+}
+
+static bool fx_verify(void)
+{
+    fc_cap_begin();
+    return fc_verify_response(&g_fx.resp, &g_fx.ch);
+}
+
+static int test_fc_verify_response_events(void)
+{
+    int failures = 0;
+    TEST("fc: valid response publishes one verified event per sample") {
+        fx_init(100);
+        ASSERT(fx_seal(0x31));
+        ASSERT(fx_verify());
+        ASSERT(g_cap.bad_peer == 0);
+        ASSERT(g_cap.sample_ev == 50);   /* not 51: loop stops at num_samples */
+        ASSERT(g_cap.valid_true == 50);
+        ASSERT(g_cap.mmb_ev == 50);
+        ASSERT(g_cap.chain_ev == 1);
+        ASSERT(strcmp(g_cap.chain, "samples=50 valid=50 all_valid=true") == 0);
+        ASSERT(strncmp(g_cap.mmb_first, "leaf=", 5) == 0);
+        ASSERT(strstr(g_cap.mmb_first, " valid=true") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fc_verify_response_count_rules(void)
+{
+    int failures = 0;
+    TEST("fc: response with the wrong sample count is rejected before sampling") {
+        fx_init(100);
+        ASSERT(fx_seal(0x32));
+        g_fx.resp.num_samples = 10; /* 10 valid samples, 50 expected */
+        ASSERT(!fx_verify());
+        ASSERT(g_cap.bad_peer == 0);
+        ASSERT(g_cap.sample_ev == 0);
+        ASSERT(strcmp(g_cap.chain,
+               "samples=10 expected=50 all_valid=false reason=count_mismatch") == 0);
+        g_fx.resp.num_samples = 0;
+        ASSERT(!fx_verify());
+        /* a one-block chain has exactly one sample and it verifies */
+        fx_init(1);
+        ASSERT(fx_seal(0x33));
+        ASSERT(g_fx.resp.num_samples == 1);
+        ASSERT(fx_verify());
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fc_null_arguments(void)
+{
+    int failures = 0;
+    TEST("fc: null arguments are refused by verify and build") {
+        fx_init(10);
+        ASSERT(fx_seal(0x34));
+        const uint8_t (*lh)[32] = (const uint8_t (*)[32])g_fx.hashes;
+        ASSERT(!fc_verify_response(NULL, &g_fx.ch));
+        ASSERT(!fc_verify_response(&g_fx.resp, NULL));
+        ASSERT(!fc_verify_sample(NULL, g_fx.ch.mmb_root));
+        ASSERT(!fc_verify_sample(&g_fx.resp.samples[0], NULL));
+        struct fc_response out;
+        ASSERT(!fc_build_response(NULL, &g_fx.m, g_fx.leaves, lh, &out));
+        ASSERT(!fc_build_response(&g_fx.ch, NULL, g_fx.leaves, lh, &out));
+        ASSERT(!fc_build_response(&g_fx.ch, &g_fx.m, NULL, lh, &out));
+        ASSERT(!fc_build_response(&g_fx.ch, &g_fx.m, g_fx.leaves, NULL, &out));
+        ASSERT(!fc_build_response(&g_fx.ch, &g_fx.m, g_fx.leaves, lh, NULL));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fc_build_response_edges(void)
+{
+    int failures = 0;
+    TEST("fc: build_response clears the response and bounds its loop") {
+        fx_init(5);
+        ASSERT(fx_seal(0x35));
+        struct fc_response out;
+        memset(&out, 0xAA, sizeof(out));
+        ASSERT(fc_build_response(&g_fx.ch, &g_fx.m, g_fx.leaves,
+                                 (const uint8_t (*)[32])g_fx.hashes, &out));
+        ASSERT(out.num_samples == 5);
+        static const struct fc_sample zero_sample;
+        ASSERT(memcmp(&out.samples[5], &zero_sample, sizeof(zero_sample)) == 0);
+        ASSERT(memcmp(&out.samples[FC_MAX_SAMPLES - 1], &zero_sample,
+                      sizeof(zero_sample)) == 0);
+        /* a claimed chain longer than the committed tree cannot be proven */
+        g_fx.ch.chain_length = 6;
+        ASSERT(!fc_build_response(&g_fx.ch, &g_fx.m, g_fx.leaves,
+                                  (const uint8_t (*)[32])g_fx.hashes, &out));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* A sample whose proof is for a different leaf, but whose height field and
+ * every later check are consistent, must still be refused on index alone. */
+static int test_fc_verify_response_wrong_index(void)
+{
+    int failures = 0;
+    TEST("fc: verify_response refuses a valid sample for the wrong index") {
+        uint64_t exp[FC_MAX_SAMPLES];
+        uint32_t ec = 0;
+        uint8_t seed[32];
+        memset(seed, 0x36, 32);
+        fc_generate_indices(seed, 100, exp, &ec);
+        uint64_t j = 0;
+        while (ref_taken(exp, ec, j)) j++;
+        fx_init(100);
+        g_fx.leaves[j].height = (uint32_t)exp[0];
+        ASSERT(fx_seal(0x36));
+        g_fx.resp.samples[0].leaf = g_fx.leaves[j];
+        ASSERT(mmb_prove((const uint8_t (*)[32])g_fx.hashes, 100, j,
+                         &g_fx.resp.samples[0].proof));
+        ASSERT(!fx_verify());
+        ASSERT(g_cap.idx_mm == 1);
+        ASSERT(g_cap.valid_true == 49);
+        ASSERT(strcmp(g_cap.chain, "samples=50 valid=49 all_valid=false") == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fc_verify_response_wrong_height(void)
+{
+    int failures = 0;
+    TEST("fc: verify_response refuses a sample whose height is not its index") {
+        uint64_t exp[FC_MAX_SAMPLES];
+        uint32_t ec = 0;
+        uint8_t seed[32];
+        memset(seed, 0x37, 32);
+        fc_generate_indices(seed, 100, exp, &ec);
+        fx_init(100);
+        g_fx.leaves[exp[3]].height = (uint32_t)exp[3] + 1000;
+        ASSERT(fx_seal(0x37));
+        ASSERT(!fx_verify());
+        ASSERT(g_cap.h_mm == 1);
+        ASSERT(g_cap.valid_true == 49);
+        ASSERT(g_cap.bad_peer == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fc_verify_response_bad_proof(void)
+{
+    int failures = 0;
+    TEST("fc: verify_response refuses samples whose inclusion proof breaks") {
+        fx_init(100);
+        ASSERT(fx_seal(0x38));
+        g_fx.resp.samples[2].proof.peaks[0][0] ^= 0x01;
+        ASSERT(!fx_verify());
+        ASSERT(g_cap.proof_f == 1);
+        ASSERT(g_cap.valid_true == 49);
+        ASSERT(strcmp(g_cap.chain, "samples=50 valid=49 all_valid=false") == 0);
+        /* leaf hash no longer matches the leaf data */
+        ASSERT(fx_seal(0x38));
+        g_fx.resp.samples[4].proof.leaf_hash[31] ^= 0x01;
+        ASSERT(!fx_verify());
+        ASSERT(g_cap.proof_f == 1);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Every leaf gets the same block_hash and nBits; the proofs are rebuilt so
+ * only the PoW check can decide the outcome. */
+static bool fx_pow_verdict(const uint8_t hash[32], uint32_t nBits)
+{
+    fx_init(100);
+    for (int i = 0; i < 100; i++) {
+        memcpy(g_fx.leaves[i].block_hash, hash, 32);
+        g_fx.leaves[i].nBits = nBits;
+    }
+    if (!fx_seal(0x39)) return false;
+    return fx_verify();
+}
+
+static int test_fc_pow_target_edges(void)
+{
+    int failures = 0;
+    TEST("fc: PoW check accepts hash == target and refuses anything above") {
+        uint8_t h[32] = {0};
+        h[29] = 0xff; h[30] = 0xff; h[31] = 0x07;    /* == target(0x2007ffff) */
+        ASSERT(fx_pow_verdict(h, 0x2007ffff));
+        ASSERT(g_cap.pow_f == 0);
+        h[0] = 0x01;                                  /* target + 1 */
+        ASSERT(!fx_pow_verdict(h, 0x2007ffff));
+        ASSERT(g_cap.pow_f == 50 && g_cap.valid_true == 0);
+        ASSERT(strstr(g_cap.pow_first, "pow_failed nBits=2007ffff") != NULL);
+        ASSERT(strcmp(g_cap.chain, "samples=50 valid=0 all_valid=false") == 0);
+        memset(h, 0, 32);
+        h[31] = 0x08;                                 /* top byte above target */
+        ASSERT(!fx_pow_verdict(h, 0x2007ffff));
+        memset(h, 0xff, 32);
+        h[31] = 0x06;                                 /* top byte below target */
+        ASSERT(fx_pow_verdict(h, 0x2007ffff));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fc_pow_rejects_malformed_nbits(void)
+{
+    int failures = 0;
+    TEST("fc: PoW check refuses zero, negative and overflowing targets") {
+        const uint8_t zero_hash[32] = {0};
+        /* hash 0 is <= any target a broken decode could leave behind */
+        ASSERT(!fx_pow_verdict(zero_hash, 0x00000000));       /* zero target */
+        ASSERT(!fx_pow_verdict(zero_hash, 0x04800001));       /* negative */
+        ASSERT(!fx_pow_verdict(zero_hash, 0x210100ff));       /* overflow */
+        ASSERT(g_cap.pow_f == 50);
+        ASSERT(fx_pow_verdict(zero_hash, 0x2007ffff));        /* control */
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── Entry point ──────────────────────────────────────────── */
 
 int test_flyclient(void)
@@ -388,6 +816,20 @@ int test_flyclient(void)
     failures += test_fc_verify_chain_valid();
     failures += test_fc_verify_chain_rejects_tampered();
     failures += test_fc_verify_chain_rejects_bad_pow();
+
+    /* Mutation-gap tests */
+    failures += test_fc_indices_match_reference();
+    failures += test_fc_indices_degenerate();
+    failures += test_fc_verify_response_events();
+    failures += test_fc_verify_response_count_rules();
+    failures += test_fc_null_arguments();
+    failures += test_fc_build_response_edges();
+    failures += test_fc_verify_response_wrong_index();
+    failures += test_fc_verify_response_wrong_height();
+    failures += test_fc_verify_response_bad_proof();
+    failures += test_fc_pow_target_edges();
+    failures += test_fc_pow_rejects_malformed_nbits();
+    event_clear_all_observers();
 
     return failures;
 }
