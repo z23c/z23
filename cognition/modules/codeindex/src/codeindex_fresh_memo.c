@@ -33,6 +33,11 @@
 
 #ifdef ZCL_TESTING
 static _Atomic uint64_t g_fw_walks;
+static _Atomic uint64_t g_fw_enrollments;
+uint64_t codeindex_test_watch_enrollments(void)
+{
+    return atomic_load_explicit(&g_fw_enrollments, memory_order_relaxed);
+}
 static _Atomic bool g_fw_force_fail;
 static _Atomic uint64_t g_fw_seals;
 static void (*g_fw_hit_hook)(const char *);
@@ -226,10 +231,8 @@ static bool fw_selector(struct ci_fresh_watch *w, const char *dir)
     return fw_add(w, path) >= 0;
 }
 
-/* Watch `path` and every real subdirectory. `source` applies the source
- * walk's prune rules; the build tree also watches selector inodes because a
- * write through an outside hardlink produces no event in this directory. */
-static bool fw_tree(struct ci_fresh_watch *w, const char *path, bool source)
+/* Source directories follow the source inventory's own prune rules. */
+static bool fw_tree(struct ci_fresh_watch *w, const char *path)
 {
     if (fw_add(w, path) < 0) return false;
     DIR *d = opendir(path);
@@ -239,23 +242,18 @@ static bool fw_tree(struct ci_fresh_watch *w, const char *path, bool source)
     while (ok && (e = readdir(d)) != NULL) {
         if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
             continue;
-        if (source && fw_prune_source(e->d_name)) continue;
-        if (!source && strcmp(e->d_name, ".current-epoch") == 0) {
-            ok = fw_selector(w, path);
-            continue;
-        }
+        if (fw_prune_source(e->d_name)) continue;
         if (e->d_type != DT_DIR && e->d_type != DT_UNKNOWN) continue;
         char child[PATH_MAX];
         if (fw_child_is_dir(path, e, child, sizeof(child)))
-            ok = fw_tree(w, child, source);
+            ok = fw_tree(w, child);
     }
     closedir(d);
     return ok;
 }
 
 /* A top-level root follows a symlink exactly as the walks' opendir does. */
-static bool fw_top(struct ci_fresh_watch *w, const char *root, const char *name,
-                   bool source)
+static bool fw_top(struct ci_fresh_watch *w, const char *root, const char *name)
 {
     char path[PATH_MAX];
     int n = snprintf(path, sizeof(path), "%s/%s", root, name);
@@ -263,7 +261,7 @@ static bool fw_top(struct ci_fresh_watch *w, const char *root, const char *name,
     struct stat st;
     if (stat(path, &st) != 0) return errno == ENOENT && fw_entry_absent(path);
     if (!S_ISDIR(st.st_mode)) return false;
-    return fw_tree(w, path, source);
+    return fw_tree(w, path);
 }
 
 static bool fw_arm_all(struct ci_fresh_watch *w, const char *root)
@@ -276,8 +274,8 @@ static bool fw_arm_all(struct ci_fresh_watch *w, const char *root)
 #undef SOURCE_ROOT
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
-        if (!fw_top(w, root, roots[i], true)) return false;
-    return fw_top(w, root, "build", false);
+        if (!fw_top(w, root, roots[i])) return false;
+    return true;
 }
 
 static bool fw_root_name_matters(const char *name)
@@ -291,6 +289,23 @@ static bool fw_root_name_matters(const char *name)
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
         if (strcmp(name, roots[i]) == 0) return true;
     return false;
+}
+
+/* The dependency collector selects the active epoch and its required parents.
+ * Watch selectors by inode too: an outside hardlink write is not a directory
+ * event. Active source/depfile stat keys still protect every memo hit and seal. */
+static bool fw_dep_directory(const char *relative_path, void *user)
+{
+    struct ci_fresh_watch *w = user;
+    char path[PATH_MAX], selector[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/%s", w->key, relative_path);
+    if (n <= 0 || (size_t)n >= sizeof(path) || fw_add(w, path) < 0)
+        return false;
+    n = snprintf(selector, sizeof(selector), "%s/.current-epoch", path);
+    if (n <= 0 || (size_t)n >= sizeof(selector)) return false;
+    struct stat st;
+    if (lstat(selector, &st) == 0) return fw_selector(w, path);
+    return errno == ENOENT;
 }
 
 /* ── draining ──────────────────────────────────────────────────────────── */
@@ -672,6 +687,17 @@ static bool fw_may_arm(const char *key)
     return ok;
 }
 
+/* Keep platform-specific key enrollment outside the common success block. */
+static bool fw_arm_dep_keys(struct ci_fresh_watch *w, const char *root)
+{
+#if defined(__APPLE__)
+    return ci_deps_stat_keys(root, &w->deps, fw_dep_cap());
+#else
+    return ci_deps_stat_keys_watched(root, &w->deps, fw_dep_cap(),
+                                      fw_dep_directory, w);
+#endif
+}
+
 struct ci_fresh_watch *ci_fresh_arm(const char *root)
 {
     char key[PATH_MAX];
@@ -689,8 +715,13 @@ struct ci_fresh_watch *ci_fresh_arm(const char *root)
         w->fd >= 0 &&
 #endif
         fw_arm_all(w, root) &&
-        ci_deps_stat_keys(root, &w->deps, fw_dep_cap()))
+        fw_arm_dep_keys(w, root)) {
+#ifdef ZCL_TESTING
+        atomic_store_explicit(&g_fw_enrollments, (uint64_t)w->dirs,
+                              memory_order_relaxed);
+#endif
         return w;
+    }
     LOG_WARN("codeindex", "freshness watch unavailable (%s): walking every open",
              strerror(errno));
     fw_free(w);

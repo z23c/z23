@@ -700,6 +700,89 @@ static int test_cis_memo_new_depfile_in_new_build_dir(void)
 #define CIS_EPOCH_A "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 #define CIS_EPOCH_B "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
+#if defined(__linux__)
+static int test_cis_memo_inactive_epoch_enrollment(void)
+{
+    int failures = 0;
+    char dir[256] = {0};
+    struct codeindex *ci = NULL;
+    TEST("codeindex stale: inactive epoch directories add no watch enrollments") {
+        test_make_tmpdir(dir, sizeof(dir), "cistale", "watchcount");
+        ASSERT(cis_seed(dir));
+        ASSERT(cis_write(dir, "build/epochs/" CIS_EPOCH_A "/foo.d", CIS_DEP_TEXT));
+        ASSERT(cis_write(dir, "build/.current-epoch", CIS_EPOCH_A "\n"));
+        ci = codeindex_open(dir);
+        ASSERT(ci != NULL && cis_verdict(ci, false));
+        uint64_t active = codeindex_test_watch_enrollments();
+        ASSERT(active > 0);
+        uint64_t walks = codeindex_test_freshness_walks();
+        ASSERT(cis_verdict(ci, false));
+        ASSERT(codeindex_test_freshness_walks() == walks);
+        for (unsigned i = 0; i < 32; i++) {
+            char path[256];
+            snprintf(path, sizeof(path), "build/epochs/" CIS_EPOCH_B "/old%02u/unused.d", i);
+            ASSERT(cis_write(dir, path, CIS_DEP_TEXT));
+        }
+        ASSERT(cis_verdict(ci, false));
+        uint64_t with_inactive = codeindex_test_watch_enrollments();
+        walks = codeindex_test_freshness_walks();
+        ASSERT(cis_verdict(ci, false));
+        ASSERT(codeindex_test_freshness_walks() == walks);
+        printf("watch enrollments: active=%llu with_inactive=%llu\n",
+               (unsigned long long)active, (unsigned long long)with_inactive);
+        ASSERT(with_inactive == active);
+        ASSERT(cis_write(dir, "build/epochs/" CIS_EPOCH_A "/new/deeper/new.d", CIS_DEP_TEXT));
+        ASSERT(cis_verdict(ci, true));
+        PASS();
+    } _test_next:;
+    codeindex_close(ci);
+    if (dir[0]) test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int test_cis_memo_active_epoch_aliases(void)
+{
+    int failures = 0;
+    char parent[] = "test-tmp/cistale-epoch-alias-XXXXXX";
+    char root[512], path[512], aliases[2][512];
+    bool owned = false;
+    struct codeindex *ci = NULL;
+    TEST("codeindex stale: inactive and outside aliases to an active epoch invalidate") {
+        ASSERT(mkdtemp(parent) != NULL);
+        owned = true;
+        ASSERT((size_t)snprintf(root, sizeof(root), "%s/tree", parent) < sizeof(root));
+        ASSERT(cis_seed(root));
+        ASSERT(cis_write(root, "build/epochs/" CIS_EPOCH_A "/foo.d", CIS_DEP_TEXT));
+        ASSERT(cis_write(root, "build/epochs/" CIS_EPOCH_B "/old/placeholder", "ignored\n"));
+        ASSERT(cis_write(root, "build/.current-epoch", CIS_EPOCH_A "\n"));
+        ASSERT((size_t)snprintf(path, sizeof(path), "%s/build/epochs/" CIS_EPOCH_A "/foo.d", root) < sizeof(path));
+        ASSERT((size_t)snprintf(aliases[0], sizeof(aliases[0]), "%s/build/epochs/" CIS_EPOCH_B "/old/alias.d", root) < sizeof(aliases[0]));
+        ASSERT((size_t)snprintf(aliases[1], sizeof(aliases[1]), "%s/outside.d", parent) < sizeof(aliases[1]));
+        ASSERT(link(path, aliases[0]) == 0 && link(path, aliases[1]) == 0);
+        ci = codeindex_open(root);
+        ASSERT(ci != NULL);
+        for (size_t i = 0; i < 2; i++) {
+            ASSERT(cis_verdict(ci, false));
+            uint64_t walks = codeindex_test_freshness_walks();
+            ASSERT(cis_verdict(ci, false));
+            ASSERT(codeindex_test_freshness_walks() == walks);
+            int fd = open(aliases[i], O_WRONLY | O_APPEND | O_CLOEXEC);
+            ASSERT(fd >= 0);
+            ssize_t wrote = write(fd, "\n", 1);
+            int closed = close(fd);
+            ASSERT(wrote == 1 && closed == 0);
+            ASSERT(cis_verdict(ci, true));
+            ASSERT(codeindex_test_freshness_walks() == walks + 1);
+            ASSERT(codeindex_rebuild(ci));
+        }
+        PASS();
+    } _test_next:;
+    codeindex_close(ci);
+    if (owned) test_rm_rf_recursive(parent);
+    return failures;
+}
+#endif
+
 static int test_cis_memo_epoch_retarget_walks(void)
 {
     int failures = 0;
@@ -961,6 +1044,10 @@ int test_codeindex_stale(void)
     failures += test_cis_memo_fork_rearms();
     failures += test_cis_memo_new_depfile_in_new_build_dir();
     failures += test_cis_memo_epoch_retarget_walks();
+#if defined(__linux__)
+    failures += test_cis_memo_inactive_epoch_enrollment();
+    failures += test_cis_memo_active_epoch_aliases();
+#endif
     failures += test_cis_memo_epoch_alias_and_replacement();
     failures += test_cis_memo_depfile_cap_overflow_walks();
     failures += test_cis_memo_parallel_depfile_slices();

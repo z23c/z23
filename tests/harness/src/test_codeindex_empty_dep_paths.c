@@ -45,6 +45,7 @@ static void empty_dep_sort(void *base, size_t count, size_t width,
 #define codeindex_depfile_graph empty_dep_graph
 #define ci_deps_stat_root_sha3 empty_dep_stat_root
 #define ci_deps_stat_keys empty_dep_stat_keys
+#define ci_deps_stat_keys_watched empty_dep_stat_keys_watched
 #define ci_deps_keys_free empty_dep_keys_free
 #define qsort empty_dep_sort
 #define platform_directory_list_children_sorted vanish_list_children_sorted
@@ -53,6 +54,7 @@ static void empty_dep_sort(void *base, size_t count, size_t width,
 #undef qsort
 #undef ci_deps_stat_root_sha3
 #undef ci_deps_stat_keys
+#undef ci_deps_stat_keys_watched
 #undef ci_deps_keys_free
 #undef codeindex_depfile_graph
 #undef ci_deps_scan_roots

@@ -298,6 +298,8 @@ struct dep_paths {
     size_t count;
     size_t capacity;
     size_t limit; /* 0: unbounded; else collection stops past it */
+    ci_dep_directory_cb visit;
+    void *visit_user;
 };
 
 static void dep_paths_free(struct dep_paths *paths)
@@ -511,11 +513,45 @@ static bool collect_dep_files(const char *reldir,
     return true;
 }
 
+/* A disappeared child may be skipped by inventory collection, but a watch
+ * failure must never be mistaken for that benign disappearance. */
+static bool dep_visit_directory(struct dep_paths *paths, const char *relative_path)
+{
+    if (!paths->visit) return true;
+    errno = 0;
+    if (paths->visit(relative_path, paths->visit_user)) return true;
+    if (!errno || dep_child_vanished()) errno = EIO;
+    return false;
+}
+
+/* Keep watch enrollment and epoch selection ordered as one operation. */
+static bool dep_select_watched_epoch(const char *root, const char *reldir,
+                                     struct dep_paths *paths,
+                                     char current[CI_PATH_MAX],
+                                     enum epoch_state *epoch)
+{
+    if (!dep_visit_directory(paths, reldir)) return false;
+    *epoch = epoch_current_dir(root, reldir, current);
+    if (paths->visit && *epoch != EPOCH_NONE) {
+        char epochs[CI_PATH_MAX];
+        int n = snprintf(epochs, sizeof(epochs), "%s/epochs", reldir);
+        if (n <= 0 || (size_t)n >= sizeof(epochs)) {
+            errno = ENAMETOOLONG;
+            return false;
+        }
+        if (!dep_visit_directory(paths, epochs)) return false;
+    }
+    return true;
+}
+
 static bool collect_dep_paths(const char *root, const char *reldir,
                               struct dep_paths *paths)
 {
     char current[CI_PATH_MAX];
-    switch (epoch_current_dir(root, reldir, current)) {
+    enum epoch_state epoch;
+    if (!dep_select_watched_epoch(root, reldir, paths, current, &epoch))
+        return false;
+    switch (epoch) {
     case EPOCH_CURRENT:
         /* The live generation is the whole of this root's contribution. */
         return collect_dep_paths(root, current, paths);
@@ -1388,7 +1424,8 @@ static bool dep_keys_fill(const char *root, const struct dep_paths *paths,
     return true;
 }
 
-bool ci_deps_stat_keys(const char *root, struct ci_deps_keys *out, size_t cap)
+bool ci_deps_stat_keys_watched(const char *root, struct ci_deps_keys *out,
+                              size_t cap, ci_dep_directory_cb visit, void *user)
 {
     if (!root || !out)
         LOG_FAIL("codeindex", "null arg to deps_stat_keys");
@@ -1403,10 +1440,15 @@ bool ci_deps_stat_keys(const char *root, struct ci_deps_keys *out, size_t cap)
     if (probe != PLATFORM_DIRECTORY_PROBE_OK)
         LOG_FAIL("codeindex", "inspect build directory failed: %s",
                  strerror(errno));
-    struct dep_paths paths = {.limit = cap};
+    struct dep_paths paths = {.limit = cap, .visit = visit, .visit_user = user};
     bool ok = collect_dep_paths(root, "build", &paths) &&
               dep_keys_fill(root, &paths, out);
     dep_paths_free(&paths);
     if (!ok) ci_deps_keys_free(out);
     return ok;
+}
+
+bool ci_deps_stat_keys(const char *root, struct ci_deps_keys *out, size_t cap)
+{
+    return ci_deps_stat_keys_watched(root, out, cap, NULL, NULL);
 }

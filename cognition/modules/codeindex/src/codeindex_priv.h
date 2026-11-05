@@ -466,6 +466,12 @@ struct ci_deps_keys {
     struct ci_deps_key_ent *ent;
     size_t count;
 };
+typedef bool (*ci_dep_directory_cb)(const char *relative_path, void *user);
+/* Enroll each selected directory before reading its inventory. Epoch selector
+ * parents are included even when no current epoch can be resolved. Failure
+ * refuses the key set, so an incomplete watch always falls back to a walk. */
+bool ci_deps_stat_keys_watched(const char *root, struct ci_deps_keys *out,
+                              size_t cap, ci_dep_directory_cb visit, void *user);
 bool ci_deps_stat_keys(const char *root, struct ci_deps_keys *out, size_t cap);
 void ci_deps_keys_free(struct ci_deps_keys *keys);
 
