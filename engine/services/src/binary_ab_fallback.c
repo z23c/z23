@@ -132,7 +132,9 @@ static bool binary_ab_copy_stream_to_file(FILE *input,
         }
         offset += n;
     }
-    return copy_ok;
+    if (copy_ok && offset == 0)
+        LOG_WARN("binary_ab", "promote: refusing an empty source stream");
+    return copy_ok && offset != 0;
 }
 
 static void binary_ab_retire_or_close_output(
@@ -208,6 +210,11 @@ bool binary_ab_promote(const char *slots_dir, const char *current_path)
                  current_path);
     uint64_t size = 0;
     bool ok = platform_positioned_file_size(&input, &size);
+    if (ok && size == 0) {
+        LOG_WARN("binary_ab", "promote: refusing empty executable %s",
+                 current_path);
+        ok = false;
+    }
     char requested[1024], dst[1024], parent[1024], tmp[1088];
     int requested_len = snprintf(requested, sizeof(requested), "%s/%s",
                                  slots_dir, BINARY_AB_LASTGOOD_BASENAME);
