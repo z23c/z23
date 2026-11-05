@@ -423,8 +423,8 @@ static enum wso_begin wso_begin_send(struct wallet_rpc_context *ctx,
 
 /* A send reported success and no txid is known, so a started row would run it
  * again on a retry. Hold the key as built under the zero txid, which no
- * transaction has. The table allows only the three states, and a built row is
- * never freed, so every repeat answers outcome_unknown. */
+ * transaction has. The table allows only the three states, and a repeat never
+ * frees a built row, so every repeat answers outcome_unknown. */
 static void wso_hold_unknown(struct node_db *ndb, const uint8_t kh[32])
 {
     static const uint8_t unknown_txid[32];
