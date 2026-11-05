@@ -4433,7 +4433,9 @@ receipt_invocation(int64_t ordinal, const char *phase, const char *result,
         .ordinal = ordinal,
         .phase = phase,
         .result = result,
-        .elapsed_ms = ordinal * 10,
+        /* The worst-case receipt passes INT64_MAX: saturate, since the product
+         * would overflow and wrap to a shorter value than the case means. */
+        .elapsed_ms = ordinal > INT64_MAX / 10 ? INT64_MAX : ordinal * 10,
         .http_status = strcmp(result, "ok") == 0 ? 200 : 503,
         .prompt_tokens = prompt,
         .completion_tokens = completion,
