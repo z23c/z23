@@ -9641,6 +9641,26 @@ static void fbd_guard_close(struct node_db *db)
     node_db_close(db);
 }
 
+static int test_fleet_board_roster_dial_flood(void)
+{
+    int failures = 0;
+    TEST("fleet roster dial: a page of newer copies of one line hides no other "
+         "machine from the dialler") {
+        struct node_db db;
+        const char *const rows[] = { "A" };
+        ASSERT(fbd_guard_open(&db, rows, 1, 0, 0));
+        ASSERT(fbr_flood(&db, "C", 2401, BOOT_FLEET_ROSTER_SCAN_ROWS + 44));
+        ASSERT_EQ(boot_fleet_roster_dial(&db, FBD_NOW, fbd_dial), 2);
+        ASSERT(fbd_has(FBD_ONION_A));
+        ASSERT(fbd_has(FBD_ONION_C));
+        fbd_guard_close(&db);
+        PASS();
+    }
+    _test_next:;
+    fbr_uninstall();
+    return failures;
+}
+
 static int test_fleet_board_roster_dial_guards(void)
 {
     int failures = 0;
@@ -12421,6 +12441,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_roster_relay();
     failures += test_fleet_board_roster_dial();
     failures += test_fleet_board_roster_dial_board();
+    failures += test_fleet_board_roster_dial_flood();
     failures += test_fleet_board_roster_dial_guards();
     failures += test_fleet_board_roster_dial_own_key();
     failures += test_fleet_board_roster_carriage_proof();
