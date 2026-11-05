@@ -8936,7 +8936,6 @@ static void fbr_fix_clock(int64_t unix_s)
     iface.self = &wall_ms;
     clock_set_default(&iface);
 }
-#define FBR_FLOOD_NOW INT64_C(1800000000)
 
 
 static int test_fleet_board_roster_flood_ingest(void)
@@ -8949,7 +8948,7 @@ static int test_fleet_board_roster_flood_ingest(void)
     TEST("fleet roster flood: a further copy from the same key is refused "
          "at no cost, a republish after the interval and another carrier are "
          "not") {
-        const int64_t now = FBR_FLOOD_NOW;
+        const int64_t now = 1800000000;
         fbr_fix_clock(now);
         uint8_t frame[FLEET_BOARD_FRAME_MAGIC_BYTES + 1 +
                       FLEET_BOARD_BODY_MAX + FLEET_BOARD_SIG_BYTES];
