@@ -81,6 +81,21 @@ static int check_source_names(void)
     return failures;
 }
 
+/* A NULL main_state is refused with code -1 and a message naming the source
+ * and the reason (a NULL reason prints as empty). */
+static int check_null_ms_refusal(void)
+{
+    int failures = 0;
+    struct zcl_result r = chain_set_active_tip(NULL, NULL, TIP_FROM_SNAPSHOT,
+                                               "why");
+    printf("chain_set_active_tip: NULL ms code and message... ");
+    if (!r.ok && r.code == -1 &&
+        strstr(r.message, "NULL main_state src=snapshot reason=why") != NULL)
+        printf("OK\n");
+    else { printf("FAIL (code=%d msg='%s')\n", r.code, r.message); failures++; }
+    return failures;
+}
+
 /* The exact event text and peer id for a set, a clear and a hashless tip.
  * The 32-character hash prefix is compared against uint256_get_hex of a hash
  * with a distinct byte in every position. */
@@ -398,6 +413,7 @@ int test_chain_tip(void)
     event_clear_observers(EV_TIP_UPDATED);
     event_clear_observers(EV_CHAIN_TIP_COMMIT);
     failures += check_source_names();
+    failures += check_null_ms_refusal();
     failures += check_event_payloads();
     /* check_event_payloads captures into a stack frame; drop its observers. */
     event_clear_observers(EV_TIP_UPDATED);
