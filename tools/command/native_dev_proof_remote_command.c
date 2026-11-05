@@ -13,8 +13,15 @@
 
 static const char *remote_text(const struct json_value *input, const char *key)
 {
-    const struct json_value *v = input ? json_get(input, key) : NULL;
-    return v && v->type == JSON_STR && json_get_str(v)[0] ? json_get_str(v) : NULL;
+    if (!input || input->type != JSON_OBJ) return NULL;
+    const struct json_value *found = NULL;
+    for (size_t i = 0; i < json_size(input); i++) {
+        if (strcmp(input->keys[i], key) != 0) continue;
+        if (found) return NULL;
+        found = json_at(input, i);
+    }
+    return found && found->type == JSON_STR && json_get_str(found)[0]
+        ? json_get_str(found) : NULL;
 }
 
 static bool remote_hex(const struct json_value *input, const char *key, uint8_t out[32])
