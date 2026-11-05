@@ -709,6 +709,230 @@ static int zid_sen_production_draw_no_global_answer(const int32_t TIP)
     return 0;
 }
 
+/* ── Boundary cases the arithmetic tests above do not reach ────────── */
+
+#define ZSEN_BASE_H(TIP) ((TIP) - 1000000)
+
+static const struct zid_seniority_weight *
+zsen_by_id(const struct zid_seniority_weight *t, size_t n,
+           const struct zid_relay_registration *r)
+{
+    return zid_seniority_find(t, n, r->relay_id);
+}
+
+/* Height 0 is a real anchor (genesis-era), not "never anchored". */
+static int zid_sen_height_zero_is_anchored(const int32_t TIP)
+{
+    printf("zid seniority: registration height 0 is anchored, not absent... ");
+    double eff = (double)((int64_t)TIP - ZID_SENIORITY_MIN_AGE_BLOCKS);
+    double want = eff / (eff + (double)ZID_SENIORITY_HALF_LIFE_BLOCKS);
+    bool ok = zid_seniority_score(0, TIP) == want && want > 0.9 &&
+              zid_seniority_score(-1, TIP) == 0.0;
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); return 1; }
+    return 0;
+}
+
+/* An owner key that is non-zero in only its first or only its last byte is
+ * still a known owner: its relays pool, so the second one ranks 1. */
+static int zid_sen_owner_edge_bytes_pool(const int32_t TIP)
+{
+    printf("zid seniority: owner ids set only in byte 0 or 31 still pool... ");
+    bool ok = true;
+    for (int which = 0; which < 2; which++) {
+        struct zid_relay_registration regs[2];
+        struct zid_seniority_weight out[2];
+        mk_relay(&regs[0], 1, 0, ZSEN_BASE_H(TIP));
+        mk_relay(&regs[1], 2, 0, ZSEN_BASE_H(TIP));
+        regs[0].owner_id[which ? 31 : 0] = 7;
+        regs[1].owner_id[which ? 31 : 0] = 7;
+        struct fake_client c = { .seed = 5 };
+        ok = ok && zid_seniority_rank(regs, 2, TIP, fake_draw, &c, out, 2) == 2 &&
+             zsen_by_id(out, 2, &regs[0])->owner_rank == 0 &&
+             zsen_by_id(out, 2, &regs[1])->owner_rank == 1;
+    }
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); return 1; }
+    return 0;
+}
+
+/* Within one owner: older outranks younger whatever the input order, and a
+ * seniority tie breaks on the relay id, down to its last byte. */
+static int zid_sen_owner_rank_order(const int32_t TIP)
+{
+    printf("zid seniority: owner rank follows age, then id to the last byte... ");
+    bool ok = true;
+    for (int flip = 0; flip < 2; flip++) {
+        struct zid_relay_registration regs[2];
+        struct zid_seniority_weight out[2];
+        mk_relay(&regs[flip], 1, 9, ZSEN_BASE_H(TIP));          /* older */
+        mk_relay(&regs[!flip], 2, 9, ZSEN_BASE_H(TIP) + 500000); /* younger */
+        struct fake_client c = { .seed = 6 };
+        ok = ok && zid_seniority_rank(regs, 2, TIP, fake_draw, &c, out, 2) == 2 &&
+             zsen_by_id(out, 2, &regs[flip])->owner_rank == 0 &&
+             zsen_by_id(out, 2, &regs[!flip])->owner_rank == 1;
+    }
+    {
+        struct zid_relay_registration regs[2];
+        struct zid_seniority_weight out[2];
+        mk_relay(&regs[0], 0x11, 9, ZSEN_BASE_H(TIP));
+        mk_relay(&regs[1], 0x11, 9, ZSEN_BASE_H(TIP));
+        regs[0].relay_id[31] = 2;       /* input order: larger id first */
+        regs[1].relay_id[31] = 1;
+        struct fake_client c = { .seed = 6 };
+        ok = ok && zid_seniority_rank(regs, 2, TIP, fake_draw, &c, out, 2) == 2 &&
+             out[0].relay_id[31] == 1 && out[1].relay_id[31] == 2 &&
+             out[0].owner_rank == 0 && out[1].owner_rank == 1 &&
+             zsen_by_id(out, 2, &regs[1]) == &out[0] &&
+             zsen_by_id(out, 2, &regs[0]) == &out[1];
+    }
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); return 1; }
+    return 0;
+}
+
+/* Owner identity is exactly 32 bytes: differing only in the last byte is a
+ * different owner; equal owner ids with different registration heights (the
+ * bytes after owner_id in the struct) are the same owner. */
+static int zid_sen_owner_identity_is_32_bytes(const int32_t TIP)
+{
+    printf("zid seniority: owner identity is exactly its 32 bytes... ");
+    struct zid_relay_registration regs[2];
+    struct zid_seniority_weight out[2];
+    struct fake_client c = { .seed = 7 };
+    mk_relay(&regs[0], 1, 9, ZSEN_BASE_H(TIP));
+    mk_relay(&regs[1], 2, 9, ZSEN_BASE_H(TIP));
+    regs[1].owner_id[31] = 10;
+    bool ok = zid_seniority_rank(regs, 2, TIP, fake_draw, &c, out, 2) == 2 &&
+              zsen_by_id(out, 2, &regs[0])->owner_rank == 0 &&
+              zsen_by_id(out, 2, &regs[1])->owner_rank == 0;
+    mk_relay(&regs[0], 1, 9, ZSEN_BASE_H(TIP) - 1);
+    mk_relay(&regs[1], 2, 9, ZSEN_BASE_H(TIP));
+    ok = ok && zid_seniority_rank(regs, 2, TIP, fake_draw, &c, out, 2) == 2 &&
+         zsen_by_id(out, 2, &regs[0])->owner_rank == 0 &&
+         zsen_by_id(out, 2, &regs[1])->owner_rank == 1;
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); return 1; }
+    return 0;
+}
+
+/* The quota stops the count exactly at the quota: six relays of one owner
+ * rank 0,1,2,3 and then 4,4 — never 5. */
+static int zid_sen_owner_rank_saturates_at_quota(const int32_t TIP)
+{
+    printf("zid seniority: owner rank saturates exactly at the quota... ");
+    struct zid_relay_registration regs[6];
+    struct zid_seniority_weight out[6];
+    for (int i = 0; i < 6; i++)
+        mk_relay(&regs[i], (uint8_t)(i + 1), 9, ZSEN_BASE_H(TIP) + i * 1000);
+    struct fake_client c = { .seed = 8 };
+    bool ok = zid_seniority_rank(regs, 6, TIP, fake_draw, &c, out, 6) == 6;
+    const int want_rank[6] = { 0, 1, 2, 3, 4, 4 };
+    for (int i = 0; ok && i < 6; i++) {
+        const struct zid_seniority_weight *w = zsen_by_id(out, 6, &regs[i]);
+        ok = w && w->owner_rank == want_rank[i] &&
+             w->over_owner_quota == (want_rank[i] >= 4) &&
+             (want_rank[i] < 4 || w->mass == 0.0);
+    }
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); return 1; }
+    return 0;
+}
+
+/* rank() touches exactly out[0..n): a sentinel slot just past the table and
+ * a registration just past the input must change nothing. */
+static int zid_sen_rank_stays_inside_n(const int32_t TIP)
+{
+    printf("zid seniority: rank reads and writes only n entries... ");
+    struct zid_relay_registration regs[3];
+    struct zid_seniority_weight out[3], sentinel;
+    mk_relay(&regs[0], 1, 9, ZSEN_BASE_H(TIP));
+    mk_relay(&regs[1], 2, 8, ZSEN_BASE_H(TIP));
+    mk_relay(&regs[2], 3, 9, 0);            /* same owner as [0], very old */
+    memset(&out[2], 0xEE, sizeof(out[2]));
+    out[2].seniority = 1.0;
+    out[2].mass = 1.0;
+    sentinel = out[2];
+    struct fake_client c = { .seed = 9 };
+    bool ok = zid_seniority_rank(regs, 2, TIP, fake_draw, &c, out, 3) == 2 &&
+              zsen_by_id(out, 2, &regs[0])->owner_rank == 0 &&
+              zsen_by_id(out, 2, &regs[1])->owner_rank == 0 &&
+              memcmp(&out[2], &sentinel, sizeof(sentinel)) == 0 &&
+              c.calls == 2;
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); return 1; }
+    return 0;
+}
+
+/* One relay is a table of one; the draw is asked only for relays that hold
+ * mass (fresh and over-quota relays are never drawn for). */
+static int zid_sen_single_and_draw_budget(const int32_t TIP)
+{
+    printf("zid seniority: n=1 ranks, and only mass-holders are drawn for... ");
+    struct zid_relay_registration one[1], mix[3];
+    struct zid_seniority_weight o1[1], o3[3];
+    struct fake_client c = { .seed = 10 };
+    mk_relay(&one[0], 1, 0, ZSEN_BASE_H(TIP));
+    bool ok = zid_seniority_rank(one, 1, TIP, fake_draw, &c, o1, 1) == 1 &&
+              c.calls == 1 && o1[0].seniority > 0.0 &&
+              zid_seniority_find(o1, 1, one[0].relay_id) == &o1[0];
+    c.calls = 0;
+    mk_relay(&mix[0], 1, 0, ZSEN_BASE_H(TIP));
+    mk_relay(&mix[1], 2, 0, ZSEN_BASE_H(TIP));
+    mk_relay(&mix[2], 3, 0, TIP - 100);     /* fresh: zero mass */
+    ok = ok && zid_seniority_rank(mix, 3, TIP, fake_draw, &c, o3, 3) == 3 &&
+         c.calls == 2 && zsen_by_id(o3, 3, &mix[2])->multiplier == 1.0;
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); return 1; }
+    return 0;
+}
+
+/* find(): exact pointer for every present id, NULL for absent ones above,
+ * below and between, never reading past n, and a 32-byte compare. */
+static int zid_sen_find_exact(const int32_t TIP)
+{
+    printf("zid seniority: find returns the exact slot or NULL... ");
+    struct zid_relay_registration regs[4];
+    struct zid_seniority_weight out[4];
+    for (int i = 0; i < 3; i++)
+        mk_relay(&regs[i], 0x20, 0, ZSEN_BASE_H(TIP));
+    regs[0].relay_id[31] = 1;
+    regs[1].relay_id[31] = 3;
+    regs[2].relay_id[31] = 5;
+    struct fake_client c = { .seed = 11 };
+    bool ok = zid_seniority_rank(regs, 3, TIP, fake_draw, &c, out, 4) == 3;
+    for (int i = 0; ok && i < 3; i++)
+        ok = zid_seniority_find(out, 3, regs[i].relay_id) == &out[i];
+
+    uint8_t absent[32];
+    memset(absent, 0x20, sizeof(absent));
+    absent[31] = 4;                          /* between */
+    ok = ok && zid_seniority_find(out, 3, absent) == NULL;
+    absent[31] = 9;                          /* above everything */
+    memcpy(out[3].relay_id, absent, 32);     /* sentinel past the table */
+    ok = ok && zid_seniority_find(out, 3, absent) == NULL;
+    absent[31] = 0;                          /* below everything */
+    ok = ok && zid_seniority_find(out, 3, absent) == NULL &&
+         zid_seniority_find(out, 0, absent) == NULL &&
+         zid_seniority_find(out, 3, NULL) == NULL;
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); return 1; }
+    return 0;
+}
+
+static int zid_sen_boundary_cases(const int32_t TIP)
+{
+    int failures = zid_sen_height_zero_is_anchored(TIP);
+    failures += zid_sen_owner_edge_bytes_pool(TIP);
+    failures += zid_sen_owner_rank_order(TIP);
+    failures += zid_sen_owner_identity_is_32_bytes(TIP);
+    failures += zid_sen_owner_rank_saturates_at_quota(TIP);
+    failures += zid_sen_rank_stays_inside_n(TIP);
+    failures += zid_sen_single_and_draw_budget(TIP);
+    failures += zid_sen_find_exact(TIP);
+    return failures;
+}
+
 int test_zid_seniority(void)
 {
     int failures = 0;
@@ -730,6 +954,7 @@ int test_zid_seniority(void)
     failures += zid_sen_epoch_limits_reshuffle();
     failures += zid_sen_rank_refuses_bad_input(TIP);
     failures += zid_sen_production_draw_no_global_answer(TIP);
+    failures += zid_sen_boundary_cases(TIP);
 
     printf("=== ZID seniority: %d failure(s) ===\n", failures);
     return failures;
