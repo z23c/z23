@@ -5675,6 +5675,18 @@ static int dl_lint_run(struct dl_row *row, const char *const argv[])
     return rc;
 }
 
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+int zcl_dev_land_lint_test(const char *const argv[], const char *log,
+                           char *detail, size_t detail_cap)
+{
+    struct dl_row row = {0};
+    (void)snprintf(row.log_path, sizeof(row.log_path), "%s", log);
+    int rc = dl_lint_run(&row, argv);
+    (void)snprintf(detail, detail_cap, "%s", row.detail);
+    return rc;
+}
+#endif
+
 /* ── proof-generation dependencies the landing worktree must hold ───────
  *
  * dev_proof.c's prepare_generation() only ever COPIES the entries in its

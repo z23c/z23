@@ -158,6 +158,10 @@ bool dl_proof_intent_bind(const struct dl_dirs *d, struct dl_row *row);
 bool dl_wt_proof_deps_ensure(const struct dl_dirs *d, const struct dl_row *r,
                              bool stubbed, char *why, size_t why_cap);
 int dl_lint_candidate(const struct dl_dirs *d, struct dl_row *row);
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+int zcl_dev_land_lint_test(const char *const argv[], const char *log,
+                           char *detail, size_t detail_cap);
+#endif
 bool dl_queued_precedes(const struct dl_row *row, const struct dl_row *best);
 int dl_rows_lock(const char *landdir);
 void dl_unlock(int fd);

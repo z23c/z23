@@ -9,6 +9,7 @@
 #endif
 
 #include "test/test_dev_land_common.h"
+#include "command/native_dev_land_internal.h"
 
 #if !defined(_WIN32)
 
@@ -240,9 +241,34 @@ static int dlx_prepare_bounded_output(void)
 }
 
 /* Exercise the actual preparation adapter with an existing stale plan. */
+static int dlx_lint_failure_detail(void)
+{
+    int failures = 0;
+    TEST("land: lint failure detail retains the failed gate stderr body") {
+        char root[1024], log[1200], detail[1024], line[512];
+        test_make_tmpdir(root, sizeof(root), "dev_land", "lint_failure_body");
+        (void)snprintf(log, sizeof(log), "%s/attempt.log", root);
+        const char *argv[] = {"/bin/sh", "-c",
+            "head -c 2100000 /dev/zero | tr '\\000' x; printf '\\nPASS check-pass\\nFAIL check-red\\n'; "
+            "printf '%s\\n' '---- FAIL log: check-red ----' 'actual diagnostic body' >&2; exit 7", NULL};
+        ASSERT(zcl_dev_land_lint_test(argv, log, detail, sizeof(detail)) == 7);
+        ASSERT(strstr(detail, "actual diagnostic body") != NULL);
+        FILE *f = fopen(log, "r");
+        ASSERT(f != NULL);
+        bool found = false;
+        while (fgets(line, sizeof(line), f))
+            if (strstr(line, "actual diagnostic body")) found = true;
+        ASSERT(fclose(f) == 0);
+        ASSERT(found);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_dev_land_final_plan_preparation(void)
 {
     int failures = 0;
+    failures += dlx_lint_failure_detail();
     failures += dlx_prepare_failed_output();
     failures += dlx_prepare_bounded_output();
     failures += dlx_prepare_budget();
