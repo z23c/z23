@@ -76,6 +76,9 @@ bool platform_process_capture_evidence(
     const struct platform_process_options *options, char *out, size_t out_size,
     uint32_t timeout_ms, struct platform_process_capture_result *result,
     struct platform_process_evidence *evidence);
+#if defined(_WIN32) && defined(ZCL_TESTING)
+void platform_process_capture_test_final_error(uint32_t error);
+#endif
 
 /* Trusted Windows host-test capture with a private file as stdin. This is not
  * package/agent execution qualification. stdin_path must be a drive-absolute

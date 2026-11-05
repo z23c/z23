@@ -351,6 +351,7 @@ struct child_mode_session {
     bool detached_tree_reaped;
     bool captured_ok;
     bool evidence_ok;
+    bool evidence_error_ok;
     bool empty_ok;
     bool boundary_ok;
     bool large_ok;
@@ -497,6 +498,25 @@ static bool child_mode_capture_evidence(struct child_mode_session *s)
            memcmp(evidence.stderr_tail + evidence.stderr_len - 11, "stderr-tail", 11) == 0;
 }
 
+#if defined(ZCL_TESTING)
+static bool child_mode_capture_evidence_errors(struct child_mode_session *s)
+{
+    const char *const argv[] = {s->image, "--capture-child", "body", "error", NULL};
+    struct platform_process_options options = child_mode_capture_options(s, argv);
+    struct platform_process_capture_result result = {0};
+    struct platform_process_evidence evidence = {0};
+    char out[32];
+    platform_process_capture_test_final_error(ERROR_ACCESS_DENIED);
+    bool refused = !platform_process_capture_evidence(&options, out, sizeof(out), 10000u,
+                                                       &result, &evidence) &&
+                   !evidence.stdout_complete && !evidence.stderr_complete;
+    platform_process_capture_test_final_error(ERROR_BROKEN_PIPE);
+    bool eof = platform_process_capture_evidence(&options, out, sizeof(out), 10000u,
+                                                  &result, &evidence);
+    return refused && eof && result.exit_code == 7u;
+}
+#endif
+
 static bool child_mode_capture_empty(struct child_mode_session *s)
 {
     const char *const empty_argv[] = {
@@ -592,6 +612,11 @@ static void child_mode_capture_checks(struct child_mode_session *s)
 {
     s->captured_ok = child_mode_capture_stdout(s);
     s->evidence_ok = child_mode_capture_evidence(s);
+#if defined(ZCL_TESTING)
+    s->evidence_error_ok = child_mode_capture_evidence_errors(s);
+#else
+    s->evidence_error_ok = false;
+#endif
     s->empty_ok = child_mode_capture_empty(s);
     s->boundary_ok = child_mode_capture_boundary(s);
     s->large_ok = child_mode_capture_large(s);
@@ -601,7 +626,7 @@ static void child_mode_capture_checks(struct child_mode_session *s)
 
 static bool child_mode_capture_ok(const struct child_mode_session *s)
 {
-    return s->captured_ok && s->evidence_ok && s->empty_ok && s->boundary_ok && s->large_ok &&
+    return s->captured_ok && s->evidence_ok && s->evidence_error_ok && s->empty_ok && s->boundary_ok && s->large_ok &&
            s->timed_tree_reaped && s->relative_refused &&
            s->relative_cwd_refused;
 }

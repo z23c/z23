@@ -694,15 +694,40 @@ static void process_capture_reap(struct platform_process *process,
     platform_process_close(process);
 }
 
+#if defined(ZCL_TESTING)
+static _Thread_local uint32_t process_capture_final_error;
+void platform_process_capture_test_final_error(uint32_t error)
+{
+    process_capture_final_error = error;
+}
+#endif
+
+static bool process_capture_final_peek(HANDLE handle, DWORD *available, bool strict)
+{
+#if defined(ZCL_TESTING)
+    if (strict && process_capture_final_error) {
+        DWORD error = process_capture_final_error;
+        process_capture_final_error = 0;
+        SetLastError(error);
+        return false;
+    }
+#else
+    (void)strict;
+#endif
+    return PeekNamedPipe(handle, NULL, 0, NULL, available, NULL) != 0;
+}
+
 static bool process_capture_drain(HANDLE read_handle, char *out,
                                   size_t out_size, size_t *used,
                                   struct platform_process_capture_result *result,
-                                  unsigned char *tail, size_t *tail_used, uint64_t *total)
+                                  unsigned char *tail, size_t *tail_used, uint64_t *total,
+                                  bool strict)
 {
     for (;;) {
         DWORD available = 0;
-        if (!PeekNamedPipe(read_handle, NULL, 0, NULL, &available, NULL) ||
-            available == 0) return true;
+        if (!process_capture_final_peek(read_handle, &available, strict))
+            return !strict || GetLastError() == ERROR_BROKEN_PIPE;
+        if (available == 0) return true;
         DWORD received = 0;
         if (!process_pipe_read(read_handle, out, out_size, used, available,
                                &received, result, tail, tail_used, total)) return false;
@@ -785,16 +810,17 @@ static bool process_capture_finish(struct process_capture_context *c, bool ok)
     process_capture_reap(&c->process, c->exited);
     ok = process_capture_drain(c->read_handle, c->out, c->out_size, &c->used, c->result,
                                e ? e->stdout_tail : NULL, e ? &e->stdout_len : NULL,
-                               e ? &e->stdout_observed : NULL) && ok;
+                               e ? &e->stdout_observed : NULL, e != NULL) && ok;
     if (e) {
         ok = process_capture_drain(c->error_read, c->ignored, sizeof(c->ignored), &c->ignored_used,
                                    &c->ignored_result, e->stderr_tail, &e->stderr_len,
-                                   &e->stderr_observed) && ok;
+                                   &e->stderr_observed, true) && ok;
         DWORD remaining = 0;
-        if (process_capture_peek(c->read_handle, &c->pipe_closed, &remaining))
-            e->stdout_complete = c->pipe_closed && remaining == 0;
-        if (process_capture_peek(c->error_read, &c->error_closed, &remaining))
-            e->stderr_complete = c->error_closed && remaining == 0;
+        bool stdout_ok = process_capture_peek(c->read_handle, &c->pipe_closed, &remaining);
+        e->stdout_complete = stdout_ok && c->pipe_closed && remaining == 0;
+        bool stderr_ok = process_capture_peek(c->error_read, &c->error_closed, &remaining);
+        e->stderr_complete = stderr_ok && c->error_closed && remaining == 0;
+        ok = stdout_ok && stderr_ok && ok;
         if (!ok) { e->stdout_complete = false; e->stderr_complete = false; }
     }
     c->out[c->used] = 0;

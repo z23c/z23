@@ -695,6 +695,7 @@ ZCL_WINDOWS_ACCEPTANCE_process_lifecycle_SOURCES := \
 	platform/modules/platform/src/os_proc.c \
 	platform/modules/base/src/safe_alloc.c
 ZCL_WINDOWS_ACCEPTANCE_process_lifecycle_LIBS := -lpsapi -lshell32
+ZCL_WINDOWS_ACCEPTANCE_process_lifecycle_FLAGS := -DZCL_TESTING
 ZCL_WINDOWS_ACCEPTANCE_progress_store_refusal_SOURCES := \
 	tests/harness/src/progress_store_windows_refusal_acceptance.c \
 	engine/modules/storage/src/progress_store.c \
