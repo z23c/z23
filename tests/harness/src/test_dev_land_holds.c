@@ -779,6 +779,10 @@ int dlx_case_checkout_location(void)
         ASSERT(dlx_run_in_child(dlx_discovery_nested));
         PASS();
     }
+    TEST("land: the nested-directory case holds with the temp directory inside a checkout") {
+        ASSERT(dlx_run_in_child(dlx_discovery_nested_in_tree));
+        PASS();
+    }
 _test_next:;
     dlx_restore();
     return failures;

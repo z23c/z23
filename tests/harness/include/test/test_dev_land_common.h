@@ -197,6 +197,7 @@ bool dlx_queue_outside_home(const char *base);
 bool dlx_run_in_child(bool (*body)(const char *base));
 bool dlx_discovery_checkout(const char *base);
 bool dlx_discovery_nested(const char *base);
+bool dlx_discovery_nested_in_tree(const char *base);
 bool dlx_step_beside_checkout(const char *base);
 bool dlx_origin_main(const struct dlx_rig *rig, char out[64]);
 bool dlx_commit_tree(const char *dir, const char *msg, char out[64]);

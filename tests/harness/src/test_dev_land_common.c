@@ -1108,6 +1108,14 @@ bool dlx_discovery_nested(const char *base)
         dlx_submit_discovered(rig.tip) && dlx_queue_count(needle) == 1;
 }
 
+/* Run only in a child. The same case with the temporary directory itself
+ * inside a checkout, as when TMPDIR names a directory in a worktree: the
+ * "inside no checkout" directory must not depend on where TMPDIR points. */
+bool dlx_discovery_nested_in_tree(const char *base)
+{
+    return dlx_plant_checkout_markers(base) && dlx_discovery_nested(base);
+}
+
 /* Run only in a child. A proof tree outside HOME but beside the checkout is
  * steppable: the step policy admits a worktree under the checkout's parent. */
 bool dlx_step_beside_checkout(const char *base)
