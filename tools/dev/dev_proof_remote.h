@@ -7,6 +7,12 @@
 #include "dev_proof.h"
 #include "devloop.h"
 
+/* Per-prepare retained-input bounds; host storage admission still applies.
+ * Retries may retain multiple snapshots; compressed bundle size does not bound
+ * imported-object storage. Larger inputs are refused, never truncated. */
+#define ZCL_DEV_PROOF_REMOTE_BUNDLE_MAX_BYTES (256u * 1024u * 1024u)
+#define ZCL_DEV_PROOF_REMOTE_OFFER_MAX_BYTES 16384u
+
 /* Supplied by an authenticated caller, never copied from the returned receipt.
  * source_root is the receipt's Git-commit-derived root, NOT a Git tree,
  * captured source_id or ZVCS CAS root. Those identities must stay distinct.

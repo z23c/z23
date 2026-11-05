@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/dev/dev_proof_remote.c", CAP_FS_READ|CAP_PROCESS, "checks owned workspace paths and qualifies process environment before bounded native Git and proof execution; host admission and LOCAL ownership remain required")

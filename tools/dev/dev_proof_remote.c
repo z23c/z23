@@ -80,8 +80,7 @@ static bool remote_git_environment(char *why, size_t size)
         return remote_refuse(why, size, "remote_git_path_unqualified");
     for (char **at = environ; at && *at; at++) {
         if (strncmp(*at, "GIT_", 4) == 0 ||
-            strncmp(*at, "LD_PRELOAD=", 11) == 0 ||
-            strncmp(*at, "LD_LIBRARY_PATH=", 16) == 0 ||
+            strncmp(*at, "LD_", 3) == 0 ||
             strncmp(*at, "DYLD_", 5) == 0 ||
             strncmp(*at, "BASH_ENV=", 9) == 0 ||
             strncmp(*at, "ENV=", 4) == 0 ||
@@ -206,13 +205,13 @@ static bool remote_workspace(const struct zcl_dev_proof_remote_assignment *a,
 /* Pin transport bytes before any Git import. Stable handle snapshots close
  * pathname replacement/truncation races. Keep the private copies as evidence,
  * including on failure; no recursive cleanup of caller paths is attempted. */
-static bool remote_copy_input(const char *input, const char *output)
+static bool remote_copy_input(const char *input, const char *output, uint64_t limit)
 {
     struct platform_positioned_file file;
     struct platform_positioned_file_snapshot before, after;
     platform_positioned_file_init(&file);
     if (!input || !platform_positioned_file_open(&file, input)) return false;
-    bool ok = platform_positioned_file_snapshot(&file, &before);
+    bool ok = platform_positioned_file_snapshot(&file, &before) && before.size <= limit;
     int fd = ok ? open(output, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0400) : -1;
     ok = fd >= 0;
     uint64_t offset = 0;
@@ -236,7 +235,8 @@ static bool remote_offer_pin(const char *path, const char *key, const char *pin)
     uint8_t *wire = NULL;
     size_t len = 0, matches = 0;
     struct json_value doc = {0};
-    bool ok = zcl_read_whole_file(path, 16384, &wire, &len, "remote-proof-offer") &&
+    bool ok = zcl_read_whole_file(path, ZCL_DEV_PROOF_REMOTE_OFFER_MAX_BYTES,
+        &wire, &len, "remote-proof-offer") &&
         json_read(&doc, (const char *)wire, len) && doc.type == JSON_OBJ;
     for (size_t i = 0; ok && i < json_size(&doc); i++) {
         if (strcmp(doc.keys[i], key) != 0) continue;
@@ -264,7 +264,8 @@ static bool remote_transport_snapshot(const struct zcl_dev_proof_remote_assignme
     int bn = snprintf(bundle, 4096, "%s/source.bundle", out->evidence_dir);
     int on = snprintf(offer, 4096, "%s/source.offer.json", out->evidence_dir);
     if (bn < 0 || bn >= 4096 || on < 0 || on >= 4096 ||
-        !remote_copy_input(a->bundle, bundle) || !remote_copy_input(a->offer, offer) ||
+        !remote_copy_input(a->offer, offer, ZCL_DEV_PROOF_REMOTE_OFFER_MAX_BYTES) ||
+        !remote_copy_input(a->bundle, bundle, ZCL_DEV_PROOF_REMOTE_BUNDLE_MAX_BYTES) ||
         !zcl_dlr_file_sha256(bundle, sha) || strcmp(sha, a->bundle_sha256) != 0)
         return remote_refuse(why, size, "remote_transport_bytes_mismatch");
     return true;
