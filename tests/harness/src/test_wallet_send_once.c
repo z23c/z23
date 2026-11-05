@@ -1701,6 +1701,7 @@ static int case_txid_not_logged(void)
     return failures;
 }
 
+int wallet_send_once_edge_tests(void);
 int test_wallet_send_once(void);
 int test_wallet_send_once(void)
 {
@@ -1734,6 +1735,7 @@ int test_wallet_send_once(void)
     failures += case_real_zsendmany();
     failures += case_txid_not_logged();
     failures += case_retention();
+    failures += wallet_send_once_edge_tests();
     if (failures == 0)
         printf("wallet_send_once: OK\n");
     else
