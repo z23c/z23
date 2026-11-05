@@ -22,18 +22,24 @@
 #include "conditions/checkpoint_header_solution_repair.h"
 
 #include "chain/chain.h"
+#include "chain/checkpoints.h"
 #include "core/uint256.h"
+#include "event/event.h"
+#include "framework/condition.h"
 #include "jobs/stage_repair.h"
 #include "jobs/validate_headers_stage.h"
 #include "net/checkpoint_header_fetch.h"
 #include "primitives/block.h"
 #include "storage/progress_store.h"
+#include "util/blocker.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
 
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #define CHSR_CHECK(desc, cond)                                               \
     do {                                                                     \
@@ -103,6 +109,331 @@ static struct block_index *seed_index(struct main_state *ms, int height,
     bi->pprev = NULL;
     ms->pindex_best_header = bi;
     return bi;
+}
+
+/* ── Lifecycle cases: the registered condition's detect / remedy / witness /
+ * urgent hooks on an isolated fixture datadir. The compiled SHA3 checkpoint is
+ * replaced by an override at CHSR_FX_H whose hash is the real hash of a
+ * deterministic header, so the hash-pin and the staged-bundle target agree. ── */
+
+#define CHSR_FX_H 5000
+#define CHSR_NO_PEER_ID "checkpoint_header_solution_no_peer"
+
+static struct sha3_utxo_checkpoint g_chsr_cp; /* borrowed by the override seam */
+
+static bool chsr_reject_validator(const struct block_index *bi,
+                                  const char *datadir, char *reason,
+                                  size_t reason_size, void *user)
+{
+    (void)bi; (void)datadir; (void)user;
+    if (reason && reason_size)
+        snprintf(reason, reason_size, "fixture rejects");
+    return false;
+}
+
+struct chsr_fx {
+    struct main_state ms;
+    struct block_header hdr;
+    struct uint256 hash;
+    char dir[256];
+    bool ok;
+};
+
+static void chsr_fx_open(struct chsr_fx *fx, const char *tag)
+{
+    memset(fx, 0, sizeof(*fx));
+    event_log_init();
+    (void)blocker_module_init();
+    blocker_reset_for_testing();
+    condition_engine_reset_for_testing();
+    checkpoint_header_solution_repair_test_reset();
+    checkpoint_header_fetch_test_reset();
+
+    build_header(&fx->hdr, CHSR_FX_H, &fx->hash);
+    memset(&g_chsr_cp, 0, sizeof(g_chsr_cp));
+    g_chsr_cp.height = CHSR_FX_H;
+    memcpy(g_chsr_cp.block_hash, fx->hash.data, 32);
+    checkpoints_set_sha3_override_for_test(&g_chsr_cp);
+
+    test_make_tmpdir(fx->dir, sizeof(fx->dir), "chsr", tag);
+    main_state_init(&fx->ms);
+    char bundles[320];
+    snprintf(bundles, sizeof(bundles), "%s/bundles", fx->dir);
+    bool staged = mkdir(bundles, 0700) == 0;
+    snprintf(bundles, sizeof(bundles),
+             "%s/bundles/consensus-state-bundle-%d.sqlite", fx->dir,
+             CHSR_FX_H);
+    FILE *f = fopen(bundles, "w");
+    if (f) fclose(f);
+    fx->ok = staged && f && progress_store_open(fx->dir) &&
+             seed_index(&fx->ms, CHSR_FX_H, &fx->hash) != NULL;
+
+    checkpoint_header_solution_repair_test_set_main_state(&fx->ms);
+    checkpoint_header_solution_repair_test_set_datadir(fx->dir);
+    checkpoint_header_solution_repair_test_set_peer_count(1);
+    validate_headers_ensure_set_validator_for_test(chsr_pass_validator, NULL);
+    checkpoint_header_solution_set_frozen_verifier_for_test(frozen_ok);
+}
+
+static void chsr_fx_close(struct chsr_fx *fx)
+{
+    validate_headers_ensure_set_validator_for_test(NULL, NULL);
+    checkpoint_header_solution_repair_test_reset();
+    checkpoint_header_fetch_test_reset();
+    checkpoints_reset_sha3_override_for_test();
+    condition_engine_reset_for_testing();
+    blocker_clear(CHSR_NO_PEER_ID);
+    main_state_free(&fx->ms);
+    progress_store_close();
+    test_rm_rf_recursive(fx->dir);
+}
+
+static bool chsr_durable(const struct chsr_fx *fx)
+{
+    return stage_repair_header_solution_available(progress_store_db(),
+                                                  CHSR_FX_H, &fx->hash);
+}
+
+static int chsr_case_registration(void)
+{
+    int failures = 0;
+    struct condition_runtime_snapshot snap;
+    condition_engine_reset_for_testing();
+    register_checkpoint_header_solution_repair();
+    memset(&snap, 0, sizeof(snap));
+    CHSR_CHECK("registered",
+               condition_engine_get_registered_snapshot(
+                   "checkpoint_header_solution_repair", &snap) &&
+                   snap.registered);
+    CHSR_CHECK("cadence 5s poll / 30s backoff / 5 attempts / 30s witness",
+               snap.poll_secs == 5 && snap.backoff_secs == 30 &&
+                   snap.max_attempts == 5 && snap.witness_window_secs == 30);
+    CHSR_CHECK("WARN, cooldown 300s re-armed forever (0 max rearms)",
+               snap.severity == COND_WARN && snap.cooldown_secs == 300 &&
+                   snap.cooldown_max_rearms == 0);
+    condition_engine_reset_for_testing();
+    return failures;
+}
+
+/* detect() fires only when every precondition holds; each case below removes
+ * exactly one from the firing baseline. */
+static int chsr_case_detect(void)
+{
+    int failures = 0;
+    struct chsr_fx fx;
+    chsr_fx_open(&fx, "detect");
+    CHSR_CHECK("detect: fixture ready", fx.ok);
+    CHSR_CHECK("detect: fires with header chain + staged bundle + no solution",
+               checkpoint_header_solution_repair_test_detect());
+
+    struct main_state below;
+    main_state_init(&below);
+    struct uint256 other = fx.hash;
+    other.data[9] ^= 0xFF;
+    seed_index(&below, CHSR_FX_H - 1, &other);
+    checkpoint_header_solution_repair_test_set_main_state(&below);
+    CHSR_CHECK("detect: quiet while the header chain is below the checkpoint",
+               !checkpoint_header_solution_repair_test_detect());
+    main_state_free(&below);
+
+    main_state_init(&below);
+    seed_index(&below, CHSR_FX_H, &other);
+    checkpoint_header_solution_repair_test_set_main_state(&below);
+    CHSR_CHECK("detect: quiet when the checkpoint height carries another hash",
+               !checkpoint_header_solution_repair_test_detect());
+    main_state_free(&below);
+
+    checkpoint_header_solution_repair_test_set_main_state(NULL);
+    CHSR_CHECK("detect: quiet with no main state wired",
+               !checkpoint_header_solution_repair_test_detect());
+    CHSR_CHECK("remedy: skips with no main state wired",
+               checkpoint_header_solution_repair_test_remedy() ==
+                       (int)COND_REMEDY_SKIP &&
+                   !checkpoint_header_fetch_is_armed());
+    checkpoint_header_solution_repair_test_set_main_state(&fx.ms);
+
+    char bundle[320];
+    snprintf(bundle, sizeof(bundle),
+             "%s/bundles/consensus-state-bundle-%d.sqlite", fx.dir,
+             CHSR_FX_H);
+    CHSR_CHECK("detect: remove staged bundle", unlink(bundle) == 0);
+    CHSR_CHECK("detect: quiet with no staged bundle",
+               !checkpoint_header_solution_repair_test_detect());
+    FILE *f = fopen(bundle, "w");
+    if (f) fclose(f);
+    CHSR_CHECK("detect: fires again once the bundle is back",
+               checkpoint_header_solution_repair_test_detect());
+
+    CHSR_CHECK("detect: persist the solution",
+               checkpoint_header_solution_verify_and_persist(
+                   &fx.ms, CHSR_FX_H, &fx.hash, &fx.hdr));
+    CHSR_CHECK("detect: quiet once the solution is durable",
+               !checkpoint_header_solution_repair_test_detect());
+    chsr_fx_close(&fx);
+    return failures;
+}
+
+/* remedy(): arms the bounded fetch and names the no-peer blocker, refuses a
+ * capture that does not verify, and persists one that does. */
+static int chsr_case_remedy_arm(void)
+{
+    int failures = 0;
+    struct chsr_fx fx;
+    chsr_fx_open(&fx, "arm");
+
+    checkpoint_header_solution_repair_test_set_peer_count(0);
+    CHSR_CHECK("remedy: nothing captured, no peer -> skip",
+               checkpoint_header_solution_repair_test_remedy() ==
+                   (int)COND_REMEDY_SKIP);
+    CHSR_CHECK("remedy: fetch armed and no-peer blocker named",
+               checkpoint_header_fetch_is_armed() &&
+                   blocker_exists(CHSR_NO_PEER_ID));
+    checkpoint_header_solution_repair_test_set_peer_count(2);
+    CHSR_CHECK("remedy: nothing captured, peers -> skip",
+               checkpoint_header_solution_repair_test_remedy() ==
+                   (int)COND_REMEDY_SKIP);
+    CHSR_CHECK("remedy: with peers the blocker is cleared, still armed",
+               checkpoint_header_fetch_is_armed() &&
+                   !blocker_exists(CHSR_NO_PEER_ID));
+
+    /* A capture armed for another height is refused and the fetch re-armed. */
+    checkpoint_header_fetch_arm(CHSR_FX_H + 7, &fx.hash);
+    checkpoint_header_fetch_offer(&fx.hdr, &fx.hash);
+    CHSR_CHECK("remedy: wrong-height capture present",
+               checkpoint_header_fetch_has_capture());
+    CHSR_CHECK("remedy: wrong-height capture refused (skip)",
+               checkpoint_header_solution_repair_test_remedy() ==
+                   (int)COND_REMEDY_SKIP);
+    CHSR_CHECK("remedy: wrong-height capture persisted nothing, re-armed",
+               !chsr_durable(&fx) && checkpoint_header_fetch_is_armed() &&
+                   !checkpoint_header_fetch_has_capture());
+
+    /* A capture whose solution fails the frozen verifier is refused. */
+    checkpoint_header_solution_set_frozen_verifier_for_test(frozen_reject);
+    checkpoint_header_fetch_arm(CHSR_FX_H, &fx.hash);
+    checkpoint_header_fetch_offer(&fx.hdr, &fx.hash);
+    CHSR_CHECK("remedy: bad-solution capture refused (skip)",
+               checkpoint_header_solution_repair_test_remedy() ==
+                   (int)COND_REMEDY_SKIP);
+    CHSR_CHECK("remedy: bad-solution capture persisted nothing, re-armed",
+               !chsr_durable(&fx) && checkpoint_header_fetch_is_armed());
+
+    /* A verifying capture is persisted; the fetch disarms and the blocker
+     * (re-raised below) clears. */
+    checkpoint_header_solution_set_frozen_verifier_for_test(frozen_ok);
+    checkpoint_header_solution_repair_test_set_peer_count(0);
+    (void)checkpoint_header_solution_repair_test_remedy();
+    CHSR_CHECK("remedy: blocker raised before the good capture",
+               blocker_exists(CHSR_NO_PEER_ID));
+    checkpoint_header_fetch_offer(&fx.hdr, &fx.hash);
+    CHSR_CHECK("remedy: good capture persisted (ok)",
+               checkpoint_header_solution_repair_test_remedy() ==
+                   (int)COND_REMEDY_OK);
+    CHSR_CHECK("remedy: durable, disarmed, blocker cleared",
+               chsr_durable(&fx) && !checkpoint_header_fetch_is_armed() &&
+                   !blocker_exists(CHSR_NO_PEER_ID));
+    CHSR_CHECK("remedy: pass record minted",
+               validate_headers_stage_has_pass_record(CHSR_FX_H, &fx.hash));
+    chsr_fx_close(&fx);
+    return failures;
+}
+
+/* Through the engine: a capture that lands inside the 30s backoff is consumed
+ * on the next tick because urgent() reports it, and the witness then clears. */
+static int chsr_case_engine(void)
+{
+    int failures = 0;
+    struct chsr_fx fx;
+    struct condition_runtime_snapshot s0, s1, s2;
+    chsr_fx_open(&fx, "engine");
+
+    register_checkpoint_header_solution_repair();
+    memset(&s0, 0, sizeof(s0));
+    (void)condition_engine_get_registered_snapshot(
+        "checkpoint_header_solution_repair", &s0);
+    condition_engine_tick();
+    memset(&s1, 0, sizeof(s1));
+    (void)condition_engine_get_registered_snapshot(
+        "checkpoint_header_solution_repair", &s1);
+    CHSR_CHECK("engine: detect fired, first remedy armed the fetch",
+               s1.currently_active && s1.attempts == 1 &&
+                   checkpoint_header_fetch_is_armed() && !chsr_durable(&fx));
+
+    checkpoint_header_fetch_offer(&fx.hdr, &fx.hash);
+    CHSR_CHECK("engine: capture landed", checkpoint_header_fetch_has_capture());
+    condition_engine_tick(); /* well inside backoff: only urgent() makes it due */
+    memset(&s2, 0, sizeof(s2));
+    (void)condition_engine_get_registered_snapshot(
+        "checkpoint_header_solution_repair", &s2);
+    CHSR_CHECK("engine: urgent capture consumed, witnessed clear",
+               s2.cleared_count == s0.cleared_count + 1 &&
+                   !s2.currently_active && chsr_durable(&fx));
+    CHSR_CHECK("engine: fetch disarmed after the clear",
+               !checkpoint_header_fetch_is_armed());
+    chsr_fx_close(&fx);
+    return failures;
+}
+
+static int chsr_case_persist_edges(void)
+{
+    int failures = 0;
+    struct chsr_fx fx;
+    chsr_fx_open(&fx, "edges");
+    struct main_state *ms = &fx.ms;
+
+    CHSR_CHECK("persist: NULL main state refused",
+               !checkpoint_header_solution_verify_and_persist(
+                   NULL, CHSR_FX_H, &fx.hash, &fx.hdr));
+    CHSR_CHECK("persist: negative height refused",
+               !checkpoint_header_solution_verify_and_persist(
+                   ms, -1, &fx.hash, &fx.hdr));
+    CHSR_CHECK("persist: NULL hash refused",
+               !checkpoint_header_solution_verify_and_persist(
+                   ms, CHSR_FX_H, NULL, &fx.hdr));
+    CHSR_CHECK("persist: NULL header refused",
+               !checkpoint_header_solution_verify_and_persist(
+                   ms, CHSR_FX_H, &fx.hash, NULL));
+    CHSR_CHECK("available: negative height false",
+               !checkpoint_header_solution_available(-1, &fx.hash));
+    CHSR_CHECK("available: NULL hash false",
+               !checkpoint_header_solution_available(CHSR_FX_H, NULL));
+    CHSR_CHECK("available: nothing durable yet",
+               !checkpoint_header_solution_available(CHSR_FX_H, &fx.hash));
+
+    /* Fail-open pass record: the durable repair row alone is enough. */
+    validate_headers_ensure_set_validator_for_test(chsr_reject_validator,
+                                                   NULL);
+    CHSR_CHECK("persist: ok even when the pass record cannot be minted",
+               checkpoint_header_solution_verify_and_persist(
+                   ms, CHSR_FX_H, &fx.hash, &fx.hdr));
+    CHSR_CHECK("persist: repair row durable, no pass record",
+               chsr_durable(&fx) &&
+                   !validate_headers_stage_has_pass_record(CHSR_FX_H,
+                                                           &fx.hash));
+    CHSR_CHECK("available: true from the repair row alone",
+               checkpoint_header_solution_available(CHSR_FX_H, &fx.hash));
+
+    /* A closed progress store can neither persist nor report availability. */
+    progress_store_close();
+    CHSR_CHECK("persist: closed store refused",
+               !checkpoint_header_solution_verify_and_persist(
+                   ms, CHSR_FX_H, &fx.hash, &fx.hdr));
+    CHSR_CHECK("available: closed store false",
+               !checkpoint_header_solution_available(CHSR_FX_H, &fx.hash));
+    (void)progress_store_open(fx.dir);
+    chsr_fx_close(&fx);
+    return failures;
+}
+
+static int chsr_lifecycle_cases(void)
+{
+    int failures = 0;
+    failures += chsr_case_registration();
+    failures += chsr_case_detect();
+    failures += chsr_case_remedy_arm();
+    failures += chsr_case_engine();
+    failures += chsr_case_persist_edges();
+    return failures;
 }
 
 int test_checkpoint_header_solution_repair(void)
@@ -215,6 +546,8 @@ int test_checkpoint_header_solution_repair(void)
     main_state_free(&ms);
     progress_store_close();
     test_rm_rf_recursive(dir);
+
+    failures += chsr_lifecycle_cases();
 
     printf("checkpoint_header_solution_repair: %d failures\n", failures);
     return failures;
