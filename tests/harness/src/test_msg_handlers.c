@@ -1832,6 +1832,39 @@ static int test_swarm_manifest_bad_root_not_recorded(void)
     return failures;
 }
 
+/* The manifest goes out at the handshake and says what this node can offer. A
+ * peer that got one and is not pulling a snapshot still gets its answers. */
+static int test_pin_getdata_after_manifest_answers(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: getdata from a peer that was sent a manifest is answered") {
+        struct net_manager nm;
+        net_manager_init(&nm);
+        struct msg_processor mp;
+        pin_mp_init(&mp, NULL, &nm);
+        struct p2p_node *node = pin_peer_node(&nm, 618);
+        ASSERT(node != NULL);
+        node->swarm_manifest_sent = true;
+
+        struct uint256 h;
+        memset(h.data, 0x64, sizeof(h.data));
+        struct byte_stream s;
+        stream_init(&s, 64);
+        stream_write_compact_size(&s, 1);
+        pin_inv_stream(&s, MSG_FILTERED_BLOCK, &h);
+
+        ASSERT(process_getdata(&mp, node, &s) == true);
+        ASSERT(pin_segment_count(node) == 1);
+        ASSERT(pin_is_single_notfound(node, &h));
+        ASSERT(!node->disconnect);
+        stream_free(&s);
+        p2p_node_free(node);
+        net_manager_free(&nm);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_pin_getdata_count_unreadable(void)
 {
     int failures = 0;
@@ -2552,6 +2585,7 @@ int test_msg_handlers(void)
     failures += test_swarm_manifest_repeats_cost_nothing_lasting();
     failures += test_swarm_manifest_near_tip_as_before();
     failures += test_swarm_manifest_bad_root_not_recorded();
+    failures += test_pin_getdata_after_manifest_answers();
     failures += test_pin_getdata_count_unreadable();
     failures += test_pin_getdata_oversized_count();
     failures += test_pin_getdata_empty_count();

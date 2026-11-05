@@ -384,6 +384,24 @@ static bool pd_snapshot_defer_parks_nothing(struct msg_processor *mp,
     return unarmed;
 }
 
+/* D4d: a peer that was sent a manifest and is not pulling a snapshot still hears
+ * headers. The manifest goes out at the handshake and holds nothing up. */
+static bool pd_manifest_sent_peer_is_served(struct msg_processor *mp,
+                                            struct byte_stream *req,
+                                            node_id_t node_id)
+{
+    struct p2p_node peer;
+    pd_setup_node(&peer);
+    peer.id = node_id;
+    peer.swarm_manifest_sent = true;
+    req->read_pos = 0;
+    bool handled = process_getheaders(mp, &peer, req);
+    int64_t wire = pd_queued_headers_count(&peer);
+    pd_drain_send_queue(&peer);
+    pd_clear_fixture_disconnect(&peer);
+    return handled && wire == 1;
+}
+
 /* D4c: a request served after the window rolls supersedes the parked one, so
  * the older locator does not replay behind it. */
 static bool pd_served_ask_supersedes_parked(struct msg_processor *mp,
@@ -493,7 +511,8 @@ static bool pd_deferred_request_replays_once(struct msg_processor *mp,
            pd_snapshot_defer_parks_nothing(mp, req, node_id + 1) &&
            pd_served_ask_supersedes_parked(mp, req, node_id + 2) &&
            pd_unparkable_ask_keeps_park(mp, req, node_id + 3) &&
-           pd_malformed_ask_after_roll_keeps_park(mp, req, node_id + 4);
+           pd_malformed_ask_after_roll_keeps_park(mp, req, node_id + 4) &&
+           pd_manifest_sent_peer_is_served(mp, req, node_id + 5);
 }
 
 static bool pd_build_getheaders(struct byte_stream *buf,
