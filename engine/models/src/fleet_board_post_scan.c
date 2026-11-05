@@ -168,8 +168,10 @@ bool db_fleet_board_copy_near(struct node_db *ndb,
     qb_where_int(&q, QB_C_fleet_board_posts_created_at, QB_GT, created - gap);
     qb_where_int(&q, QB_C_fleet_board_posts_created_at, QB_LT, created + gap);
     int64_t held = 0;
-    if (!fleet_board_aggregate_checked(ndb, &q, &held))
+    if (!fleet_board_aggregate_checked(ndb, &q, &held)) {
+        LOG_WARN("fleet.board", "copy count failed");
         return false;
+    }
     *near_out = held > 0;
     return true;
 }
