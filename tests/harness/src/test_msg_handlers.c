@@ -15,6 +15,7 @@
 #include "chain/chain.h"
 #include "chain/chainparams.h"
 #include "core/hash.h"
+#include "net/fast_sync.h"
 #include "net/msgprocessor.h"
 #include "net/msg_internal.h"
 #include "net/version.h"
@@ -1555,6 +1556,282 @@ static int test_pin_getdata_manifest_defers(void)
     return failures;
 }
 
+/* ── a peer's snapshot chunks stay out of the live utxos table ─────────
+ *
+ * Driven through the real zmanifest and zchunkdata handlers against a fixture
+ * node.db. Chunks can only be trusted once they can go to staging, so a manifest
+ * starts no swarm and a chunk changes nothing. swarm_manifest_received still says
+ * only that a manifest with a good root arrived. */
+bool mp_handle_zcl23_sync(struct msg_processor *mp, struct p2p_node *node,
+                          struct byte_stream *s, const char *cmd);
+
+#define SWARM_REFUSE_ROWS_MAX 1024
+#define SWARM_REFUSE_REPEATS 64
+
+struct swarm_refuse_fx {
+    char dir[512];
+    char path[600];
+    struct net_manager nm;
+    struct main_state ms;
+    struct msg_processor mp;
+    struct p2p_node *node;
+    struct utxo_chunk *chunk;
+    uint8_t hash[32];
+    uint8_t root[32];
+};
+
+/* Every row, every column, as text, so a comparison sees any changed byte. */
+static bool swarm_refuse_read_rows(const char *path,
+                                   char out[SWARM_REFUSE_ROWS_MAX])
+{
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    bool ok = false;
+    out[0] = '\0';
+    if (sqlite3_open(path, &db) == SQLITE_OK &&
+        sqlite3_prepare_v2(db,
+            "SELECT count(*) || ':' || group_concat(hex(txid) || '/' || vout "
+            "|| '/' || value || '/' || hex(script) || '/' || script_type || "
+            "'/' || hex(address_hash) || '/' || height || '/' || is_coinbase, "
+            "';') FROM utxos", -1, &st, NULL) == SQLITE_OK &&
+        sqlite3_step(st) == SQLITE_ROW && sqlite3_column_text(st, 0)) {
+        snprintf(out, SWARM_REFUSE_ROWS_MAX, "%s",
+                 (const char *)sqlite3_column_text(st, 0));
+        ok = true;
+    }
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    return ok;
+}
+
+/* One honest row, on the outpoint the chunk below also carries. */
+static bool swarm_refuse_seed_db(const char *path, const uint8_t txid[32])
+{
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    bool ok = sqlite3_open(path, &db) == SQLITE_OK &&
+        sqlite3_exec(db,
+            "CREATE TABLE utxos (txid BLOB NOT NULL, vout INTEGER NOT NULL, "
+            "value INTEGER NOT NULL, script BLOB NOT NULL, "
+            "script_type INTEGER NOT NULL DEFAULT 0, address_hash BLOB, "
+            "height INTEGER NOT NULL, is_coinbase INTEGER NOT NULL DEFAULT 0, "
+            "PRIMARY KEY (txid, vout))", NULL, NULL, NULL) == SQLITE_OK &&
+        sqlite3_prepare_v2(db,
+            "INSERT INTO utxos VALUES (?,0,7000,x'76a9',2,x'0102',50,1)",
+            -1, &st, NULL) == SQLITE_OK;
+    if (ok) {
+        sqlite3_bind_blob(st, 1, txid, 32, SQLITE_STATIC);
+        ok = sqlite3_step(st) == SQLITE_DONE;
+    }
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    return ok;
+}
+
+static bool swarm_refuse_fx_init(struct swarm_refuse_fx *fx, uint32_t peer)
+{
+    memset(fx, 0, sizeof(*fx));
+    test_make_tmpdir(fx->dir, sizeof(fx->dir), "msg_handlers", "swarm_refuse");
+    snprintf(fx->path, sizeof(fx->path), "%s/node.db", fx->dir);
+    net_manager_init(&fx->nm);
+    main_state_init(&fx->ms);
+    pin_mp_init(&fx->mp, &fx->ms, &fx->nm);
+    fx->mp.datadir = fx->dir;
+    fx->node = pin_peer_node(&fx->nm, peer);
+    fx->chunk = zcl_calloc(1, sizeof(*fx->chunk), "swarm_refuse_chunk");
+    if (!fx->node || !fx->chunk)
+        return false;
+    fx->node->services = NODE_ZCL23;
+    fx->chunk->num_entries = 1;
+    memset(fx->chunk->entries[0].txid, 0xB1, 32);
+    fx->chunk->entries[0].value = 9000;
+    fx->chunk->entries[0].height = 60;
+    fx->chunk->entries[0].script[0] = 0x51;
+    fx->chunk->entries[0].script_len = 1;
+    fast_sync_chunk_hash(fx->chunk, fx->hash);
+    fast_sync_merkle_root((const uint8_t (*)[32])&fx->hash, 1, fx->root);
+    msgprocessor_test_swarm_release();
+    return swarm_refuse_seed_db(fx->path, fx->chunk->entries[0].txid);
+}
+
+static void swarm_refuse_fx_free(struct swarm_refuse_fx *fx)
+{
+    msgprocessor_test_swarm_release();
+    free(fx->chunk);
+    if (fx->node)
+        p2p_node_free(fx->node);
+    main_state_free(&fx->ms);
+    net_manager_free(&fx->nm);
+    test_cleanup_tmpdir(fx->dir);
+}
+
+static bool swarm_refuse_send_manifest(struct swarm_refuse_fx *fx,
+                                       int32_t height, const uint8_t root[32])
+{
+    uint8_t zero[32] = {0};
+    struct byte_stream s;
+    stream_init(&s, 256);
+    stream_write_i32_le(&s, height);
+    stream_write_bytes(&s, zero, 32);
+    stream_write_u64_le(&s, 1);
+    stream_write_u32_le(&s, 1);
+    stream_write_u32_le(&s, SYNC_CHUNK_SIZE);
+    stream_write_bytes(&s, root, 32);
+    stream_write_bytes(&s, zero, 32);
+    stream_write_bytes(&s, fx->hash, 32);
+    bool ok = mp_handle_zcl23_sync(&fx->mp, fx->node, &s, MSG_MANIFEST);
+    stream_free(&s);
+    return ok;
+}
+
+static bool swarm_refuse_send_chunk(struct swarm_refuse_fx *fx)
+{
+    const struct utxo_chunk *c = fx->chunk;
+    struct byte_stream s;
+    stream_init(&s, 256);
+    stream_write_u32_le(&s, c->chunk_index);
+    stream_write_u32_le(&s, c->num_entries);
+    stream_write_bytes(&s, c->entries[0].txid, 32);
+    stream_write_i32_le(&s, (int32_t)c->entries[0].vout);
+    stream_write_i64_le(&s, c->entries[0].value);
+    stream_write_i32_le(&s, c->entries[0].height);
+    stream_write_u8(&s, 0);
+    stream_write_u16_le(&s, (uint16_t)c->entries[0].script_len);
+    stream_write_bytes(&s, c->entries[0].script, c->entries[0].script_len);
+    bool ok = mp_handle_zcl23_sync(&fx->mp, fx->node, &s, MSG_CHUNK_DATA);
+    stream_free(&s);
+    return ok;
+}
+
+/* What one manifest-then-chunk exchange left behind. Asserted after teardown,
+ * so a failure leaves no swarm claimed for the cases that follow. */
+struct swarm_refuse_seen {
+    bool setup_ok;
+    bool handlers_ok;
+    bool started;
+    bool received;
+    size_t segments;
+    int misbehavior;
+    int32_t inflight;
+    bool rows_read;
+    char before[SWARM_REFUSE_ROWS_MAX];
+    char after[SWARM_REFUSE_ROWS_MAX];
+};
+
+/* `above` is how far the manifest's height sits past our own tip. */
+static void swarm_refuse_exchange(struct swarm_refuse_seen *seen, uint32_t peer,
+                                  int32_t above, int repeats)
+{
+    struct swarm_refuse_fx fx;
+    memset(seen, 0, sizeof(*seen));
+    seen->setup_ok = swarm_refuse_fx_init(&fx, peer);
+    if (seen->setup_ok) {
+        int32_t height = active_chain_height(&fx.ms.chain_active) + above;
+        fx.node->swarm_inflight_chunk = -1;
+        seen->rows_read = swarm_refuse_read_rows(fx.path, seen->before);
+        seen->handlers_ok = true;
+        for (int i = 0; i < repeats; i++) {
+            seen->handlers_ok &=
+                swarm_refuse_send_manifest(&fx, height, fx.root);
+            seen->started |= msgprocessor_test_swarm_is_active();
+            seen->handlers_ok &= swarm_refuse_send_chunk(&fx);
+        }
+        seen->rows_read &= swarm_refuse_read_rows(fx.path, seen->after);
+        seen->received = fx.node->swarm_manifest_received;
+        seen->segments = pin_segment_count(fx.node);
+        seen->misbehavior = atomic_load(&fx.node->misbehavior);
+        seen->inflight = fx.node->swarm_inflight_chunk;
+        printf("swarm refuse: above=%d started=%d segments=%zu\n  before %s\n"
+               "  after  %s\n", above, seen->started, seen->segments,
+               seen->before, seen->after);
+    }
+    swarm_refuse_fx_free(&fx);
+}
+
+static bool swarm_refuse_left_nothing(const struct swarm_refuse_seen *seen)
+{
+    return seen->setup_ok && seen->handlers_ok && seen->rows_read &&
+           seen->received && !seen->started && seen->segments == 0 &&
+           seen->inflight == -1 && seen->misbehavior == 0;
+}
+
+static int test_swarm_manifest_above_tip_starts_nothing(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: a manifest above our tip starts no swarm, a chunk changes no row") {
+        struct swarm_refuse_seen *seen = zcl_calloc(1, sizeof(*seen), "swarm_seen");
+        ASSERT(seen != NULL);
+        swarm_refuse_exchange(seen, 619, 100000, 1);
+        bool same = seen->rows_read && strcmp(seen->before, seen->after) == 0;
+        bool nothing = swarm_refuse_left_nothing(seen);
+        free(seen);
+        ASSERT(same);
+        ASSERT(nothing);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_swarm_manifest_repeats_cost_nothing_lasting(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: repeated manifests and chunks queue nothing and score nothing") {
+        struct swarm_refuse_seen *seen = zcl_calloc(1, sizeof(*seen), "swarm_seen");
+        ASSERT(seen != NULL);
+        swarm_refuse_exchange(seen, 620, 100000, SWARM_REFUSE_REPEATS);
+        bool same = seen->rows_read && strcmp(seen->before, seen->after) == 0;
+        bool nothing = swarm_refuse_left_nothing(seen);
+        free(seen);
+        ASSERT(same);
+        ASSERT(nothing);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_swarm_manifest_near_tip_as_before(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: a manifest at or below our tip + 100 only records it") {
+        struct swarm_refuse_seen *seen = zcl_calloc(1, sizeof(*seen), "swarm_seen");
+        ASSERT(seen != NULL);
+        swarm_refuse_exchange(seen, 621, 100, 1);
+        bool same = seen->rows_read && strcmp(seen->before, seen->after) == 0;
+        bool nothing = swarm_refuse_left_nothing(seen);
+        free(seen);
+        ASSERT(same);
+        ASSERT(nothing);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* A manifest whose hashes do not rebuild its root is not recorded as received
+ * and starts nothing, whatever its height. */
+static int test_swarm_manifest_bad_root_not_recorded(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: a manifest with a bad root is not recorded as received") {
+        struct swarm_refuse_fx fx;
+        bool setup = swarm_refuse_fx_init(&fx, 622);
+        bool received = true;
+        bool started = true;
+        if (setup) {
+            uint8_t wrong[32];
+            memset(wrong, 0x5c, sizeof(wrong));
+            (void)swarm_refuse_send_manifest(&fx, 100000, wrong);
+            received = fx.node->swarm_manifest_received;
+            started = msgprocessor_test_swarm_is_active();
+        }
+        swarm_refuse_fx_free(&fx);
+        ASSERT(setup);
+        ASSERT(!received);
+        ASSERT(!started);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_pin_getdata_count_unreadable(void)
 {
     int failures = 0;
@@ -2271,6 +2548,10 @@ int test_msg_handlers(void)
     failures += test_intake_worker_submit_unavailable_rejects();
     failures += test_intake_worker_accept_without_landing_not_marked_seen();
     failures += test_pin_getdata_manifest_defers();
+    failures += test_swarm_manifest_above_tip_starts_nothing();
+    failures += test_swarm_manifest_repeats_cost_nothing_lasting();
+    failures += test_swarm_manifest_near_tip_as_before();
+    failures += test_swarm_manifest_bad_root_not_recorded();
     failures += test_pin_getdata_count_unreadable();
     failures += test_pin_getdata_oversized_count();
     failures += test_pin_getdata_empty_count();
