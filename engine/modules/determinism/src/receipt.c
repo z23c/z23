@@ -53,6 +53,7 @@ static bool write_fixed_text(struct zcl_codec_writer *w, const char *s,
     uint8_t field[ZCL_DET_GROUP_MAX];
     if (width > sizeof(field)) return false;
     size_t n = strnlen(s, width);
+    if (n == 0) return false;     /* decode refuses an empty id: write none */
     if (n == width) return false; /* no room for the terminator: refuse */
     memset(field, 0, width);
     memcpy(field, s, n);
