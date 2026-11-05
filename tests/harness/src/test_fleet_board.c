@@ -7603,6 +7603,107 @@ static int test_fleet_board_fleet_cursor_resumes(void)
     return failures;
 }
 
+/* Post FBW_POSTS signed notes into the answering box's store. */
+static bool fbw_seed_answerer(struct fbw *w, struct fleet_board_post *posts,
+                              const char *tag)
+{
+    for (int i = 0; i < FBW_POSTS; i++) {
+        char text[48];
+        (void)snprintf(text, sizeof(text), "%s note %d", tag, i);
+        if (!fbw_post(&w->a, 11, FLEET_BOARD_SCOPE_FLEET, text, 2000 + i,
+                      3600, 2100, &posts[i]))
+            return false;
+    }
+    return true;
+}
+
+/* A power cut keeps the fsynced cursor file but can roll back rows the WAL
+ * store had committed. The next process must pull the lost rows again. */
+static int test_fleet_board_fleet_cursor_heals_lost_rows(void)
+{
+    int failures = 0;
+    static struct fbw w;
+    static struct fleet_board_post posts[FBW_POSTS];
+    struct zcl_fleet_role_checker checker = {
+        .allow = fbw_role_check, .name = "fleet-board-heal-test" };
+    char dir[512];
+    size_t frames = 0;
+    g_fbw_deny_read = false;
+    zcl_fleet_role_checker_install(&checker);
+    test_make_tmpdir(dir, sizeof(dir), "fleet_board", "heal");
+    boot_fleet_board_fleet_test_cursor_dir(dir);
+    bool opened = fbw_open(&w);
+
+    TEST("fleet board carriage: rows lost behind a kept cursor are pulled "
+         "again after a restart") {
+        ASSERT(opened);
+        ASSERT(mesh_term_pair_row(&w.f, &w.f.term_peer,
+                                  MESH_PAIRING_CAP_STATUS_READ, FBW_PAIRED_AT,
+                                  FBW_PAIRING_EXPIRES));
+        boot_fleet_board_fleet_test_bind_authority(&w.f.term_peer.delegation,
+                                                   w.f.genesis, FBW_NOW);
+        boot_fleet_board_fleet_test_bind(&w.a);
+        ASSERT(fbw_seed_answerer(&w, posts, "heal"));
+        ASSERT_EQ(fbw_pull(&w, w.box_a, &w.b, &frames),
+                  (size_t)FLEET_BOARD_FLEET_ANSWER_POSTS_MAX);
+        /* The rollback: some stored rows vanish, the cursor file stays. */
+        ASSERT(node_db_exec(&w.b, "DELETE FROM fleet_board_posts WHERE rowid "
+                                  "IN (SELECT rowid FROM fleet_board_posts "
+                                  "ORDER BY rowid LIMIT 5)"));
+        ASSERT(!fbw_holds_all(&w.b, posts, FBW_POSTS));
+        boot_fleet_board_fleet_test_restart_cursors();
+        ASSERT(fbw_pull_n(&w, w.box_a, &w.b, 3) != SIZE_MAX);
+        ASSERT(fbw_holds_all(&w.b, posts, FBW_POSTS));
+        PASS();
+    }
+    _test_next:
+    boot_fleet_board_fleet_test_cursor_dir(NULL);
+    fbw_close(&w);
+    zcl_fleet_role_checker_install_permissive_for_testing();
+    return failures;
+}
+
+/* Once every cursor slot is taken, a peer never seen before must still make
+ * progress past its first page. */
+static int test_fleet_board_fleet_cursor_table_full(void)
+{
+    int failures = 0;
+    static struct fbw w;
+    static struct fleet_board_post posts[FBW_POSTS];
+    struct zcl_fleet_role_checker checker = {
+        .allow = fbw_role_check, .name = "fleet-board-full-test" };
+    uint8_t newcomer[32];
+    size_t frames = 0;
+    g_fbw_deny_read = false;
+    zcl_fleet_role_checker_install(&checker);
+    bool opened = fbw_open(&w);
+
+    TEST("fleet board carriage: a new peer makes progress when all cursor "
+         "slots are taken") {
+        ASSERT(opened);
+        ASSERT(mesh_term_pair_row(&w.f, &w.f.term_peer,
+                                  MESH_PAIRING_CAP_STATUS_READ, FBW_PAIRED_AT,
+                                  FBW_PAIRING_EXPIRES));
+        boot_fleet_board_fleet_test_bind_authority(&w.f.term_peer.delegation,
+                                                   w.f.genesis, FBW_NOW);
+        boot_fleet_board_fleet_test_bind(&w.a);
+        for (unsigned i = 0; i < FLEET_BOARD_FLEET_PEERS_MAX; i++) {
+            uint8_t other[32];
+            memset(other, (int)(i + 1u), sizeof other);
+            ASSERT_EQ(fbw_pull(&w, other, &w.b, &frames), (size_t)0);
+        }
+        ASSERT(fbw_seed_answerer(&w, posts, "full"));
+        memset(newcomer, 0xC3, sizeof newcomer);
+        ASSERT(fbw_pull_n(&w, newcomer, &w.b, 2) != SIZE_MAX);
+        ASSERT(fbw_holds_all(&w.b, posts, FBW_POSTS));
+        PASS();
+    }
+    _test_next:
+    fbw_close(&w);
+    zcl_fleet_role_checker_install_permissive_for_testing();
+    return failures;
+}
+
 /* ── ZRC 0012 step 2: the fleet roster and its relay gate ────────────────
  *
  * The roster rows here are REAL operator-sealed machine lines (the codec
@@ -12442,6 +12543,8 @@ int test_fleet_board(void)
     for (unsigned change = 0; change < 4; change++)
         failures += test_fleet_board_delayed_authority(change);
     failures += test_fleet_board_fleet_cursor_resumes();
+    failures += test_fleet_board_fleet_cursor_heals_lost_rows();
+    failures += test_fleet_board_fleet_cursor_table_full();
     failures += test_fleet_board_fleet_carriage_gap_free();
     failures += test_fleet_board_fleet_wiki_full_is_final();
     failures += test_fleet_board_fleet_wiki_carriage();
