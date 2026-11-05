@@ -161,7 +161,7 @@ static bool vip_effect_memo_fields_ok(const struct json_value *value)
     const struct json_value *hex = json_get(value, "memo_hex");
     const struct json_value *text = json_get(value, "memo");
     if ((hex && hex->type != JSON_STR) || (text && text->type != JSON_STR))
-        return false;
+        return false; // raw-return-ok:caller refuses with INVALID_EFFECT
     return !(vip_memo_nonempty(json_get_str(hex)) &&
              vip_memo_nonempty(json_get_str(text)));
 }
