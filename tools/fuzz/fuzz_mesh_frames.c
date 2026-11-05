@@ -63,7 +63,7 @@ static void require_zeroed(const void *p, size_t len)
  * the capacity the callee was told about. */
 static uint8_t *exact_alloc(size_t len)
 {
-    uint8_t *p = malloc(len);
+    uint8_t *p = malloc(len); // raw-alloc-ok:fuzz-harness-bare-heap-so-asan-redzones-catch-oob
     require(p != NULL || len == 0);
     return p;
 }
@@ -1068,7 +1068,7 @@ static void stream_setup(void)
 {
     if (g_stream_ready)
         return;
-    struct noise_transport *t = calloc(1, sizeof(*t));
+    struct noise_transport *t = calloc(1, sizeof(*t)); // raw-alloc-ok:fuzz-harness-one-time-fixture
     require(t != NULL);
     zcl_mutex_init(&t->lock);
     t->state = NOISE_ESTABLISHED;
@@ -1079,8 +1079,8 @@ static void stream_setup(void)
     t->have_transcript_hash = true;
     t->connection_generation = STREAM_GENERATION;
     t->connection_serial = 1;
-    g_node = calloc(1, sizeof(*g_node));
-    g_mp = calloc(1, sizeof(*g_mp));
+    g_node = calloc(1, sizeof(*g_node)); // raw-alloc-ok:fuzz-harness-one-time-fixture
+    g_mp = calloc(1, sizeof(*g_mp)); // raw-alloc-ok:fuzz-harness-one-time-fixture
     require(g_node != NULL && g_mp != NULL);
     zcl_mutex_init(&g_node->cs_recv);
     g_node->transport = t;
@@ -1278,7 +1278,7 @@ static void noise_setup(void)
 
 static struct noise_transport *noise_clone(const struct noise_transport *src)
 {
-    struct noise_transport *t = malloc(sizeof(*t));
+    struct noise_transport *t = malloc(sizeof(*t)); // raw-alloc-ok:fuzz-harness-per-run-clone
     require(t != NULL);
     memcpy(t, src, sizeof(*t));
     zcl_mutex_init(&t->lock);
