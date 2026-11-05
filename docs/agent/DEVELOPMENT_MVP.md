@@ -18,7 +18,7 @@ weakens it. Durable priorities and authority live in
 ## Unit of account
 
 One **landed change**: a unique, useful C23 change that passed its own test,
-its mutation check, two independent reviews and the landing proof, and is on
+its mutation check, one non-author review and the landing proof, and is on
 `main`. Every unsuccessful attempt, review, repair and shared validation run is
 charged to the change it served. A duplicate of a landed change counts as zero.
 
@@ -26,14 +26,19 @@ Cost is reported as a vector, never one number: provider requests, input
 tokens, cached input tokens, output tokens, test-host minutes and landing-host
 minutes. A missing counter is reported as unknown, never as zero.
 
+The current review requirement follows the owner's 2026-10-20 direction in
+[`AGENTS.md`](../../AGENTS.md). Historical measurements below retain their
+original review counts; they are not reclassified as measurements of the current
+workflow. Charge any additional reviews to the change they serve.
+
 ## Milestones
 
 | # | Milestone | Measurement | Threshold | Status |
 |---|---|---|---|---|
 | D1 | **Every run is accounted** | Share of finished worker runs with provider-reported requests, input, cached input and output recorded | 100% on every host, with unknowns listed | ◐ |
-| D2 | **Few requests per change** | Provider requests per accepted change, writer plus both reviews, on closed-contract changes of at most 120 lines | median at most 18 | ☐ |
+| D2 | **Few requests per change** | Provider requests per accepted change, writer plus all reviews performed, on closed-contract changes of at most 120 lines | median at most 18 | ☐ |
 | D3 | **Reviews agree with the truth** | Known-answer review set: share of sound changes rejected, and share of seeded code defects accepted | at most 10% and at most 5%, on at least 59 distinct seeded defects | ☐ |
-| D4 | **Changes are accepted first time** | Share of delivered changes that both reviews accept without a repair round | at least 60% over 100 consecutive deliveries | ☐ |
+| D4 | **Changes are accepted first time** | Share of delivered changes accepted by the required non-author review without a repair round | at least 60% over 100 consecutive deliveries | ☐ |
 | D5 | **Cost per landed change is known and halved** | Uncached input plus output tokens per landed change, all attempts charged | at most half the D5 baseline below, with first-test pass rate not lower | ☐ |
 | D6 | **Fast feedback** | Time from delivery to the focused test and mutation verdict on a warm test lane | p95 within 180 seconds; a build-rule edit does not rebuild unaffected objects | ☐ |
 | D7 | **Landing keeps pace** | Landing groups that fail without a named cause; spacing between consecutive landed groups under backlog | zero unnamed failures in 20 consecutive groups; median spacing at most 20 minutes | ☐ |
@@ -123,5 +128,6 @@ reviewer saw only the uncommitted change on its parent commit. Scores come from
    *Baseline* table or a row beneath it.
 3. Change the status only when the threshold is met as written. A threshold is
    changed only by an owner decision recorded in this file with its date.
-4. No gate is relaxed to move a number: tests, the mutation check, both
-   reviews and the landing proof stay as they are.
+4. No gate is relaxed to move a number: tests, the mutation check, the required
+   non-author review and the landing proof remain required. Follow the current
+   owner contract for review count; record workflow changes with new measurements.
