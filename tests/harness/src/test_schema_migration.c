@@ -422,6 +422,9 @@ static int sm_gap_order_and_rerun(void)
     snprintf(want, sizeof(want), "applying v%d: first", SM_TEST_V1);
     SM_CHECK("sm gap: progress line names the first migration",
              sm_has(out, want));
+    snprintf(want, sizeof(want), "v%d: first \xe2\x80\x94 OK", SM_TEST_V1);
+    SM_CHECK("sm gap: completion line names the first migration",
+             sm_has(out, want));
     snprintf(want, sizeof(want), "applied 2 migration(s), now at version %d",
              SM_TEST_V2);
     SM_CHECK("sm gap: summary line gives count and final version",
