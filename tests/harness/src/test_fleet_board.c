@@ -11383,12 +11383,10 @@ static int test_fleet_board_roster_carriage_lane(void)
                                                                now),
                   (size_t)0);
         ASSERT_EQ(fbc_finish(&w, &joined, &frames), (size_t)2);
-        for (int i = 0; i < 6 && !db_fleet_board_have(&joined, note.id); i++) {
-            fbc_ask_begin(&w);
-            ASSERT_EQ(boot_fleet_board_fleet_test_pull_roster_lane(
-                          &w.svc, &joined, now), (size_t)1);
-            ASSERT(fbc_finish(&w, &joined, &frames) != SIZE_MAX);
-        }
+        /* Both boxes share this process, so the answering half's learned peer
+         * would now answer the lane too: the rest goes straight at the peer. */
+        for (int i = 0; i < 6 && !db_fleet_board_have(&joined, note.id); i++)
+            ASSERT(fbc_pull(&w, &joined, &frames) != SIZE_MAX);
         ASSERT(db_fleet_board_have(&joined, note.id));
         PASS();
     }
