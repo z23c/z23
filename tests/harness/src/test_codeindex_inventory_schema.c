@@ -308,6 +308,28 @@ static bool cis_page_subject(void)
     return valid && cis_page_replacement(root, commit, expected);
 }
 
+static bool cis_page_roundtrip(const char *root)
+{
+    static const char body[] = "{\"dir\":\"lib/net\",\"tree\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+        "\"topic\":\"net\",\"summary\":\"Network model hint\",\"lessons\":[],\"applies_to\":[],"
+        "\"updated\":\"2026-11-04T00:00:00Z\"}";
+    struct ci_page in = {0}, out = {0};
+    snprintf(in.directory, sizeof(in.directory), "%s", "lib/net");
+    snprintf(in.tree_oid, sizeof(in.tree_oid), "%s", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    snprintf(in.source_commit, sizeof(in.source_commit), "%s", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    snprintf(in.body, sizeof(in.body), "%s", body);
+    struct codeindex *ci = codeindex_open_retrieval_view(root);
+    uint8_t artifact[32] = {0};
+    bool ok = ci && codeindex_pages_import_hints(ci, body, strlen(body), &in, 1, artifact) &&
+              codeindex_pages_list(ci, "lib/net", &out, 1) == 1 &&
+              strcmp(out.body, body) == 0 && memcmp(out.artifact_root, artifact, 32) == 0 &&
+              codeindex_rebuild(ci) &&
+              codeindex_pages_list(ci, "lib/net", &out, 1) == 1 &&
+              strcmp(out.body, body) == 0 && memcmp(out.artifact_root, artifact, 32) == 0;
+    codeindex_close(ci);
+    return ok;
+}
+
 int test_codeindex_inventory_schema(void)
 {
     int failures = 0;
@@ -326,6 +348,7 @@ int test_codeindex_inventory_schema(void)
     codeindex_close(ix);
 
     failures += cis_rebuild_checks(ready, root);
+    CIS_CHECK("imported hint survives a sealed rebuild", ready && cis_page_roundtrip(root));
     CIS_CHECK("more than 16384 prose files refuses the generation",
               cis_doc_limit());
     return failures;

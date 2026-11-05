@@ -7,6 +7,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+bool codeindex_pages_import_hints(struct codeindex *ci, const void *manifest,
+    size_t manifest_size, const struct ci_page *pages, size_t count,
+    uint8_t artifact_root[32])
+{
+    (void)ci; (void)manifest; (void)manifest_size; (void)pages; (void)count;
+    (void)artifact_root;
+    return false;
+}
+
 static bool page_text(sqlite3_stmt *s, int col, char *out, size_t cap)
 {
     if (sqlite3_column_type(s, col) != SQLITE_TEXT) return false;

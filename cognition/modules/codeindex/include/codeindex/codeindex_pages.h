@@ -3,6 +3,8 @@
 #define ZCL_CODEINDEX_PAGES_H
 
 #include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
 struct codeindex;
 /* Stored prose is an unsigned model hint; the tree is a claim until a native
  * resolver independently binds it to a committed subject. */
@@ -17,4 +19,9 @@ struct ci_page {
 /* -1 for unavailable or corrupt storage, otherwise number returned. */
 int codeindex_pages_list(struct codeindex *ci, const char *directory,
                          struct ci_page *out, int cap);
+/* Store bounded unsigned hints from exact manifest lines as one sealed
+ * generation. This does not verify a commit or establish freshness. */
+bool codeindex_pages_import_hints(struct codeindex *ci, const void *manifest,
+    size_t manifest_size, const struct ci_page *pages, size_t count,
+    uint8_t artifact_root[32]);
 #endif
