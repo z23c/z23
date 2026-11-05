@@ -1240,12 +1240,15 @@ static int cas_test_capture_evidence(void)
     TEST("CLI capture: bounded merged tail and outcome retain the actual child") {
         char *argv[] = {"/bin/sh", "-c",
             "printf stdout-prefix; printf '%0800d' 0; printf CLI_TAIL >&2; exit 7", NULL};
-        char out[32], evidence[TEST_EVIDENCE_CAP + 512];
+        char home[PATH_MAX], out[32], evidence[TEST_EVIDENCE_CAP + 512];
+        ASSERT(test_mkdtemp(home, sizeof(home), "cas_capture") != NULL);
         test_evidence_reset(); cas_exec_path = "/bin/sh"; cas_capture_safe_note = true;
-        int rc = cas_run(argv, "/tmp", out, sizeof(out));
+        int rc = cas_run(argv, home, out, sizeof(out));
         cas_exec_path = NULL; cas_capture_safe_note = false;
+        bool cleaned = rmdir(home) == 0;
         (void)test_evidence_render(evidence, sizeof(evidence), __FILE__, __LINE__);
         ASSERT(rc == 7 && strncmp(out, "stdout-prefix", 13) == 0);
+        ASSERT(cleaned);
         ASSERT(strstr(evidence, "CLI_TAIL") != NULL);
         ASSERT(strstr(evidence, "observed=1") && strstr(evidence, "eof=1"));
         PASS();
@@ -1258,12 +1261,15 @@ static int cas_test_capture_withheld(void)
     int failures = 0;
     TEST("CLI capture: metadata-only path withholds child and argv secrets") {
         char *argv[] = {"/bin/sh", "-c", "printf CHILD_SECRET; exit 3", "ARGV_SECRET", NULL};
-        char out[32], evidence[TEST_EVIDENCE_CAP + 512];
+        char home[PATH_MAX], out[32], evidence[TEST_EVIDENCE_CAP + 512];
+        ASSERT(test_mkdtemp(home, sizeof(home), "cas_capture") != NULL);
         test_evidence_reset(); cas_exec_path = "/bin/sh"; cas_capture_safe_note = false;
-        int rc = cas_run(argv, "/tmp", out, sizeof(out));
+        int rc = cas_run(argv, home, out, sizeof(out));
         cas_exec_path = NULL;
+        bool cleaned = rmdir(home) == 0;
         (void)test_evidence_render(evidence, sizeof(evidence), __FILE__, __LINE__);
         ASSERT(rc == 3 && strcmp(out, "CHILD_SECRET") == 0);
+        ASSERT(cleaned);
         ASSERT(strstr(evidence, "CHILD_SECRET") == NULL && strstr(evidence, "ARGV_SECRET") == NULL);
         ASSERT(strstr(evidence, "observed=1") != NULL);
         PASS();
@@ -1277,12 +1283,15 @@ static int cas_test_daemon_evidence(void)
     TEST("CLI daemon capture: needle stop preserves observed merged tail") {
         char *argv[] = {"/bin/sh", "-c", "printf 'READY-%0800d-DAEMON_END' 0 >&2; exec sleep 30", NULL};
         const char *const needles[] = {"READY", NULL};
-        char out[32], evidence[TEST_EVIDENCE_CAP + 512];
+        char home[PATH_MAX], out[32], evidence[TEST_EVIDENCE_CAP + 512];
+        ASSERT(test_mkdtemp(home, sizeof(home), "cas_daemon") != NULL);
         test_evidence_reset(); cas_exec_path = "/bin/sh"; cas_capture_safe_note = true;
-        bool found = cas_run_daemon_wait_for(argv, "/tmp", needles, 3000, out, sizeof(out));
+        bool found = cas_run_daemon_wait_for(argv, home, needles, 3000, out, sizeof(out));
         cas_exec_path = NULL; cas_capture_safe_note = false;
+        bool cleaned = rmdir(home) == 0;
         (void)test_evidence_render(evidence, sizeof(evidence), __FILE__, __LINE__);
         ASSERT(found && strstr(out, "READY") != NULL);
+        ASSERT(cleaned);
         ASSERT(strstr(evidence, "DAEMON_END") != NULL);
         ASSERT(strstr(evidence, "stop=needle") && strstr(evidence, "eof=0"));
         PASS();
@@ -1295,12 +1304,15 @@ static int cas_test_signal_evidence(void)
     int failures = 0;
     TEST("CLI capture: signaled child retains its observed status") {
         char *argv[] = {"/bin/sh", "-c", "kill -TERM $$", NULL};
-        char out[32], evidence[TEST_EVIDENCE_CAP + 512];
+        char home[PATH_MAX], out[32], evidence[TEST_EVIDENCE_CAP + 512];
+        ASSERT(test_mkdtemp(home, sizeof(home), "cas_signal") != NULL);
         test_evidence_reset(); cas_exec_path = "/bin/sh";
-        int rc = cas_run(argv, "/tmp", out, sizeof(out));
+        int rc = cas_run(argv, home, out, sizeof(out));
         cas_exec_path = NULL;
+        bool cleaned = rmdir(home) == 0;
         (void)test_evidence_render(evidence, sizeof(evidence), __FILE__, __LINE__);
         ASSERT(rc == -100 - SIGTERM);
+        ASSERT(cleaned);
         ASSERT(strstr(evidence, "observed=1") && strstr(evidence, "signal=15"));
         PASS();
     } _test_next:;
@@ -1313,12 +1325,15 @@ static int cas_test_daemon_timeout_evidence(void)
     TEST("CLI daemon capture: timeout is distinct from needle stop") {
         char *argv[] = {"/bin/sh", "-c", "exec sleep 30", NULL};
         const char *const needles[] = {"not-produced", NULL};
-        char out[32], evidence[TEST_EVIDENCE_CAP + 512];
+        char home[PATH_MAX], out[32], evidence[TEST_EVIDENCE_CAP + 512];
+        ASSERT(test_mkdtemp(home, sizeof(home), "cas_timeout") != NULL);
         test_evidence_reset(); cas_exec_path = "/bin/sh";
-        bool found = cas_run_daemon_wait_for(argv, "/tmp", needles, 100, out, sizeof(out));
+        bool found = cas_run_daemon_wait_for(argv, home, needles, 100, out, sizeof(out));
         cas_exec_path = NULL;
+        bool cleaned = rmdir(home) == 0;
         (void)test_evidence_render(evidence, sizeof(evidence), __FILE__, __LINE__);
         ASSERT(!found);
+        ASSERT(cleaned);
         ASSERT(strstr(evidence, "stop=timeout") && strstr(evidence, "observed=1"));
         PASS();
     } _test_next:;
@@ -1365,12 +1380,15 @@ static int cas_test_daemon_natural_exit(void)
     TEST("CLI daemon capture: natural nonzero exit is named") {
         char *argv[] = {"/bin/sh", "-c", "printf partial; exit 7", NULL};
         const char *const needles[] = {"not-produced", NULL};
-        char out[32], evidence[TEST_EVIDENCE_CAP + 512];
+        char home[PATH_MAX], out[32], evidence[TEST_EVIDENCE_CAP + 512];
+        ASSERT(test_mkdtemp(home, sizeof(home), "cas_exit") != NULL);
         test_evidence_reset(); cas_exec_path = "/bin/sh";
-        bool found = cas_run_daemon_wait_for(argv, "/tmp", needles, 3000, out, sizeof(out));
+        bool found = cas_run_daemon_wait_for(argv, home, needles, 3000, out, sizeof(out));
         cas_exec_path = NULL;
+        bool cleaned = rmdir(home) == 0;
         (void)test_evidence_render(evidence, sizeof(evidence), __FILE__, __LINE__);
         ASSERT(!found && strcmp(out, "partial") == 0);
+        ASSERT(cleaned);
         ASSERT(strstr(evidence, "observed=1") && strstr(evidence, "exit=7"));
         PASS();
     } _test_next:;
