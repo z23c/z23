@@ -472,7 +472,8 @@ static enum vcs_zcode_dht_error record_parse_error(
         error == VCS_ZCODE_DHT_RECORD_SIGNER)
         return VCS_ZCODE_DHT_ERR_IDENTITY;
     if (error == VCS_ZCODE_DHT_RECORD_NOT_YET_VALID ||
-        error == VCS_ZCODE_DHT_RECORD_WINDOW)
+        error == VCS_ZCODE_DHT_RECORD_WINDOW ||
+        error == VCS_ZCODE_DHT_RECORD_CHAIN)
         return VCS_ZCODE_DHT_ERR_DELEGATION;
     return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
 }
