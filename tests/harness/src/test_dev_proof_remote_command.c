@@ -19,6 +19,7 @@ int test_dev_proof_remote_command(void)
         ASSERT(strstr(out, "REMOTE_PROOF_REFUSED") != NULL || strstr(out, "INVALID_INPUT") != NULL);
         PASS();
     }
+_test_next:;
     return failures;
 }
 #else
@@ -165,6 +166,7 @@ int test_dev_proof_remote_command(void)
         ASSERT(strstr(out, "REMOTE_PROOF_BUSY") != NULL);
         PASS();
     }
+_test_next:;
     return failures;
 }
 #endif
