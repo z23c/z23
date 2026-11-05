@@ -24,6 +24,7 @@ _test_next:;
     return failures;
 }
 #else
+#include "test/dev_proof_remote_fixture.h"
 #include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -118,8 +119,54 @@ static bool rcmd_snapshot(const char *output, const char *leaf, long expected_si
     int n = dir ? snprintf(path, sizeof(path), "%s/%s", dir, leaf) : -1;
     struct stat st;
     bool ok = n > 0 && (size_t)n < sizeof(path) &&
-        (expected_size < 0 ? lstat(path, &st) != 0 && errno == ENOENT :
-         lstat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_size == expected_size);
+        (expected_size == -1 ? lstat(path, &st) != 0 && errno == ENOENT :
+         lstat(path, &st) == 0 && S_ISREG(st.st_mode) &&
+         (expected_size == -2 ? st.st_size > 0 : st.st_size == expected_size));
+    json_free(&envelope);
+    return ok;
+}
+
+static bool rcmd_real_input(char *out, size_t cap, const struct rpp_fixture *f,
+                            const char *destination)
+{
+    const struct zcl_dev_proof_remote_assignment *a = &f->assignment;
+    char signer[65], source[65], cas[65], changed[65], impact[65];
+    zcl_hex_encode(a->expected.signer_pubkey, 32, signer);
+    zcl_hex_encode(a->expected.source_root, 32, source);
+    zcl_hex_encode(a->expected.source_cas_root, 32, cas);
+    zcl_hex_encode(a->expected.changed_set_root, 32, changed);
+    zcl_hex_encode(a->expected.impact_policy_root, 32, impact);
+    int n = snprintf(out, cap,
+        "--input={\"repository\":\"%s\",\"destination\":\"%s\","
+        "\"bundle\":\"%s\",\"offer\":\"%s\","
+        "\"local_commit\":\"%s\",\"remote_base\":\"%s\","
+        "\"bundle_sha256\":\"%s\",\"git_tree\":\"%s\","
+        "\"source_id\":\"%s\",\"signer_pubkey\":\"%s\","
+        "\"source_root\":\"%s\",\"source_cas_root\":\"%s\","
+        "\"changed_set_root\":\"%s\",\"impact_policy_root\":\"%s\"}",
+        f->receiver, destination, f->bundle, f->offer, f->tip, f->base,
+        a->bundle_sha256, a->git_tree, a->source_id, signer, source, cas,
+        changed, impact);
+    return n > 0 && (size_t)n < cap;
+}
+
+static bool rcmd_recovery_facts(const char *output, const struct rpp_fixture *f,
+                                const char *linked)
+{
+    struct json_value envelope = {0};
+    if (!json_read(&envelope, output, strlen(output))) return false;
+    const struct json_value *error = json_get(&envelope, "error");
+    const struct json_value *facts = json_get(error, "facts");
+    const char *local = json_get_str(json_get(facts, "local_commit"));
+    const char *base = json_get_str(json_get(facts, "remote_base"));
+    const char *observation = json_get_str(json_get(facts, "retained_input_observation"));
+    const char *producer = json_get_str(json_get(facts, "producer_executable"));
+    const char *next = json_get_str(json_get(error, "next_action"));
+    char expected[4096];
+    int n = snprintf(expected, sizeof(expected), "%s/build/bin/z23-dev", linked);
+    bool ok = n > 0 && (size_t)n < sizeof(expected) && strcmp(local, f->tip) == 0 &&
+        strcmp(base, f->base) == 0 && observation[0] && strcmp(producer, expected) == 0 &&
+        strstr(next, "dev.proof.retry") && strstr(next, "dev.proof.remote");
     json_free(&envelope);
     return ok;
 }
@@ -229,6 +276,27 @@ int test_dev_proof_remote_command(void)
         ASSERT(strstr(out, "remote_transport_bytes_mismatch") != NULL);
         ASSERT(rcmd_snapshot(out, "source.offer.json", 16384));
         ASSERT(rcmd_snapshot(out, "source.bundle", 6));
+        PASS();
+    }
+    TEST("dev.proof.remote: producer mismatch retains actionable recovery evidence") {
+        struct rpp_fixture fixture;
+        char linked[1024], build[1024], bindir[1024], fixture_binary[1100];
+        ASSERT(rpp_setup(&fixture, current));
+        ASSERT(snprintf(linked, sizeof(linked), "%s/linked", fixture.root) > 0);
+        ASSERT(RPP_GIT(fixture.receiver, NULL, 0, "worktree", "add", "-q", "--detach", linked, "HEAD"));
+        ASSERT(snprintf(build, sizeof(build), "%s/build", fixture.receiver) > 0);
+        ASSERT(snprintf(bindir, sizeof(bindir), "%s/bin", build) > 0);
+        ASSERT(snprintf(fixture_binary, sizeof(fixture_binary), "%s/z23-dev", bindir) > 0);
+        ASSERT(mkdir(build, 0700) == 0 && mkdir(bindir, 0700) == 0);
+        ASSERT(rcmd_copy(binary, fixture_binary));
+        ASSERT(rcmd_real_input(input, sizeof(input), &fixture, linked));
+        int rc = rcmd_run(fixture_binary, linked, input, out, sizeof(out));
+        ASSERT(rc > 0);
+        ASSERT(strstr(out, "proof_producer_source_mismatch") != NULL ||
+               strstr(out, "proof_producer_source_id_unavailable") != NULL);
+        ASSERT(rcmd_recovery_facts(out, &fixture, linked));
+        ASSERT(rcmd_snapshot(out, "source.bundle", -2));
+        ASSERT(rcmd_snapshot(out, "source.offer.json", -2));
         PASS();
     }
 _test_next:;
