@@ -28,7 +28,7 @@
 #include "util/safe_alloc.h"
 #include "storage/progress_store.h"
 #include <pthread.h>
-#include <unistd.h>
+#include "platform/time_compat.h"
 
 #ifdef ZCL_TESTING
 bool boot_install_mempool_backend_guard(void);
@@ -695,7 +695,7 @@ static bool atm_case_guard_released_between_retries(const struct atm_ctx *c)
         pthread_mutex_lock(&atm_guard_lock);
         retried = atm_guard_calls >= 3;
         pthread_mutex_unlock(&atm_guard_lock);
-        if (!retried) usleep(10000);
+        if (!retried) platform_sleep_ms(10);
     }
     zcl_mutex_unlock(&c->state->cs_main);
     if (!started) { boot_test_set_mempool_guard_attempt(NULL); atm_fix_free(&f); return false; }
