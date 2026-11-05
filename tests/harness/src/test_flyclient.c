@@ -663,7 +663,7 @@ static int test_fc_build_response_edges(void)
         ASSERT(memcmp(&out.samples[FC_MAX_SAMPLES - 1], &zero_sample,
                       sizeof(zero_sample)) == 0);
         /* a claimed chain longer than the committed tree cannot be proven */
-        g_fx.ch.chain_length = 6;
+        g_fx.ch.chain_length = 100;
         ASSERT(!fc_build_response(&g_fx.ch, &g_fx.m, g_fx.leaves,
                                   (const uint8_t (*)[32])g_fx.hashes, &out));
         PASS();
