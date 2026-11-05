@@ -55,6 +55,8 @@ struct mesh_stream_open_rate {
     uint32_t opens;
 };
 static struct mesh_stream_open_rate g_open_rate[MESH_STREAM_PER_PEER_MAX];
+static struct mesh_stream_open_rate
+    g_open_rate_paired[MESH_STREAM_PER_PEER_MAX];
 
 /* Quiet-drop counters: in-namespace garbage and unauthenticated probes are
  * local policy events, never offences against the peer. */
@@ -235,12 +237,41 @@ static struct mesh_stream *stream_find_locked(
     return NULL;
 }
 
+/* The ended slot that has lingered longest, or NULL. An ended slot is a
+ * verdict, not a channel: no frame reaches it and it carries no credit. */
+static struct mesh_stream *stream_oldest_ended_locked(void)
+{
+    struct mesh_stream *best = NULL;
+    for (size_t i = 0; i < MESH_STREAM_TABLE_MAX; i++) {
+        struct mesh_stream *st = &g_streams[i];
+        if (st->used && st->ended &&
+            (!best || st->last_activity_unix < best->last_activity_unix))
+            best = st;
+    }
+    return best;
+}
+
+/* Whether a slot could be handed out right now, without handing it out. */
+static bool stream_slot_available_locked(void)
+{
+    for (size_t i = 0; i < MESH_STREAM_TABLE_MAX; i++)
+        if (!g_streams[i].used || g_streams[i].ended)
+            return true;
+    return false;
+}
+
+/* A free slot. When none is free the oldest lingering verdict gives up its
+ * slot early, so one peer's ended streams can never keep every other OPEN
+ * out of the table for the linger period. Live streams are never taken. */
 static struct mesh_stream *stream_free_slot_locked(void)
 {
     for (size_t i = 0; i < MESH_STREAM_TABLE_MAX; i++)
         if (!g_streams[i].used)
             return &g_streams[i];
-    return NULL;
+    struct mesh_stream *victim = stream_oldest_ended_locked();
+    if (victim)
+        mesh_stream_release(victim);
+    return victim;
 }
 
 /* Streams that still carry frames. A half-closed slot is a verdict, not a
@@ -261,40 +292,98 @@ static bool stream_has_room_locked(const uint8_t peer_static[32])
 {
     return stream_peer_count_locked(peer_static) <
                MESH_STREAM_PER_PEER_MAX &&
-           stream_free_slot_locked() != NULL;
+           stream_slot_available_locked();
 }
 
 /* Bounded per-peer OPEN cadence, evaluated before any service admission
- * work. A peer with no slot left evicts the oldest expired window. */
+ * work. Two tables, each one slot per peer: a peer whose OPEN has passed a
+ * pairing-gated service's admission holds a slot in the paired table, every
+ * other peer in the unpaired table. An unpaired peer can only ever fill the
+ * unpaired table, so a flood of strangers can neither take a paired peer's
+ * slot nor evict it, and the pairing reads the cadence protects stay
+ * bounded by both tables' slots times the per-second allowance. */
+static struct mesh_stream_open_rate *stream_rate_find(
+    struct mesh_stream_open_rate *table, const uint8_t peer_static[32])
+{
+    for (size_t i = 0; i < MESH_STREAM_PER_PEER_MAX; i++)
+        if (table[i].used &&
+            memcmp(table[i].peer_static, peer_static, 32) == 0)
+            return &table[i];
+    return NULL;
+}
+
+/* A slot no live window needs: unused, else the one whose window ended
+ * longest ago. NULL when every slot belongs to this second. */
+static struct mesh_stream_open_rate *stream_rate_reusable(
+    struct mesh_stream_open_rate *table, int64_t now_unix)
+{
+    struct mesh_stream_open_rate *best = NULL;
+    for (size_t i = 0; i < MESH_STREAM_PER_PEER_MAX; i++) {
+        struct mesh_stream_open_rate *r = &table[i];
+        if (!r->used)
+            return r;
+        if (r->window_unix != now_unix &&
+            (!best || r->window_unix < best->window_unix))
+            best = r;
+    }
+    return best;
+}
+
+static bool stream_rate_charge(struct mesh_stream_open_rate *r,
+                               int64_t now_unix)
+{
+    if (now_unix != r->window_unix) {
+        r->window_unix = now_unix;
+        r->opens = 0;
+    }
+    if (r->opens >= MESH_STREAM_OPEN_RATE_PER_SECOND)
+        return false;
+    r->opens++;
+    return true;
+}
+
 static bool stream_open_admit_locked(const uint8_t peer_static[32],
                                      int64_t now_unix)
 {
-    struct mesh_stream_open_rate *slot = NULL;
-    for (size_t i = 0; i < MESH_STREAM_PER_PEER_MAX; i++) {
-        struct mesh_stream_open_rate *r = &g_open_rate[i];
-        if (r->used && memcmp(r->peer_static, peer_static, 32) == 0) {
-            if (now_unix != r->window_unix) {
-                r->window_unix = now_unix;
-                r->opens = 0;
-            }
-            if (r->opens >= MESH_STREAM_OPEN_RATE_PER_SECOND)
-                return false;
-            r->opens++;
-            return true;
-        }
-        if (!r->used && !slot)
-            slot = r;
-        else if (r->used && r->window_unix != now_unix && !slot)
-            slot = r;
-    }
-    if (!slot)
+    struct mesh_stream_open_rate *r =
+        stream_rate_find(g_open_rate_paired, peer_static);
+    if (!r)
+        r = stream_rate_find(g_open_rate, peer_static);
+    if (r)
+        return stream_rate_charge(r, now_unix);
+    r = stream_rate_reusable(g_open_rate, now_unix);
+    if (!r)
         return false;
-    memset(slot, 0, sizeof(*slot));
-    slot->used = true;
-    memcpy(slot->peer_static, peer_static, 32);
-    slot->window_unix = now_unix;
-    slot->opens = 1;
+    memset(r, 0, sizeof(*r));
+    r->used = true;
+    memcpy(r->peer_static, peer_static, 32);
+    r->window_unix = now_unix;
+    r->opens = 1;
     return true;
+}
+
+/* The peer's OPEN passed a pairing-gated service's admission: move its
+ * cadence slot, count and all, to the paired table. When every paired slot
+ * belongs to this second the peer simply stays where it is. */
+static void stream_open_promote_locked(const uint8_t peer_static[32],
+                                       int64_t now_unix)
+{
+    if (stream_rate_find(g_open_rate_paired, peer_static))
+        return;
+    struct mesh_stream_open_rate *from =
+        stream_rate_find(g_open_rate, peer_static);
+    struct mesh_stream_open_rate *to =
+        stream_rate_reusable(g_open_rate_paired, now_unix);
+    if (!from || !to)
+        return;
+    *to = *from;
+    memset(from, 0, sizeof(*from));
+}
+
+static void stream_open_rate_clear_locked(void)
+{
+    memset(g_open_rate, 0, sizeof(g_open_rate));
+    memset(g_open_rate_paired, 0, sizeof(g_open_rate_paired));
 }
 
 /* Initiator parity. The peer that dialed the connection mints even ids,
@@ -796,6 +885,9 @@ static void stream_receive_open(struct msg_processor *mp,
         node, id, snap, now, open_body.initial_window);
     if (refusal == MESH_STREAM_OK)
         refusal = stream_open_service_locked(&open_body, snap, now, &index);
+    if (refusal == MESH_STREAM_OK && index >= 0 &&
+        g_services[index].required_pairing_capability != 0)
+        stream_open_promote_locked(snap->remote_static, now);
     if (refusal != MESH_STREAM_OK || index < 0) {
         zcl_mutex_unlock(&g_stream_lock);
         atomic_fetch_add(&g_opens_refused, 1);
@@ -1104,7 +1196,7 @@ void mesh_stream_wire(struct boot_svc_ctx *svc)
     g_stream_svc = svc;
     for (size_t i = 0; i < MESH_STREAM_TABLE_MAX; i++)
         mesh_stream_release(&g_streams[i]);
-    memset(g_open_rate, 0, sizeof(g_open_rate));
+    stream_open_rate_clear_locked();
     zcl_mutex_unlock(&g_stream_lock);
 
     liveness_contract_init(&g_stream_contract, "net.mesh_stream_pump");
@@ -1138,7 +1230,7 @@ void mesh_stream_shutdown(void)
     g_stream_svc = NULL;
     for (size_t i = 0; i < MESH_STREAM_TABLE_MAX; i++)
         mesh_stream_release(&g_streams[i]);
-    memset(g_open_rate, 0, sizeof(g_open_rate));
+    stream_open_rate_clear_locked();
     zcl_mutex_unlock(&g_stream_lock);
     if (child != SUPERVISOR_INVALID_ID)
         supervisor_unregister(child);
@@ -1153,7 +1245,7 @@ void mesh_stream_test_reset(void)
     stream_lock();
     for (size_t i = 0; i < MESH_STREAM_TABLE_MAX; i++)
         mesh_stream_release(&g_streams[i]);
-    memset(g_open_rate, 0, sizeof(g_open_rate));
+    stream_open_rate_clear_locked();
     zcl_mutex_unlock(&g_stream_lock);
 }
 
