@@ -1165,6 +1165,132 @@ static int ts_script_get_sig_op_count_accurate(void)
     return failures;
 }
 
+/* ---- sigop counting and opcode names (mutation-sweep gap closure) ----- */
+
+static uint32_t ts_sigops(const unsigned char *b, size_t n, uint32_t flags,
+                          bool accurate)
+{
+    struct script s;
+    script_set(&s, b, n);
+    return script_get_sig_op_count(&s, flags, accurate);
+}
+
+static uint32_t ts_sigops_p2sh(const unsigned char *spk, size_t spk_n,
+                               const unsigned char *sig, size_t sig_n,
+                               uint32_t flags)
+{
+    struct script pub, ssig;
+    script_set(&pub, spk, spk_n);
+    script_set(&ssig, sig != NULL ? sig : (const unsigned char *)"", sig_n);
+    return script_get_sig_op_count_p2sh(&pub, &ssig, flags);
+}
+
+static bool ts_op_names_edges(void)
+{
+    return strcmp(script_get_op_name(OP_0), "0") == 0 &&
+           strcmp(script_get_op_name(OP_INVALIDOPCODE),
+                  "OP_INVALIDOPCODE") == 0 &&
+           strcmp(script_get_op_name((enum opcodetype)0xf0),
+                  "OP_UNKNOWN") == 0;
+}
+
+static bool ts_sigops_checkdatasig_flag_bit(void)
+{
+    const unsigned char cds[] = { OP_CHECKDATASIG };
+    const unsigned char cdsv[] = { OP_CHECKDATASIGVERIFY };
+    /* Only bit 11 counts: bits 10 and 12 must not. */
+    return ts_sigops(cds, 1, 1U << 11, false) == 1 &&
+           ts_sigops(cdsv, 1, 1U << 11, false) == 1 &&
+           ts_sigops(cds, 1, 1U << 10, false) == 0 &&
+           ts_sigops(cds, 1, 1U << 12, false) == 0 &&
+           ts_sigops(cdsv, 1, 1U << 10, false) == 0 &&
+           ts_sigops(cdsv, 1, 1U << 12, false) == 0 &&
+           ts_sigops(cds, 1, 0, false) == 0;
+}
+
+static bool ts_sigops_multisig_accurate_range(void)
+{
+    const unsigned char m1[] = { OP_1, OP_CHECKMULTISIG };
+    const unsigned char m16[] = { OP_16, OP_CHECKMULTISIGVERIFY };
+    const unsigned char m3[] = { OP_3, OP_CHECKMULTISIG };
+    const unsigned char r0[] = { 0x50, OP_CHECKMULTISIG };   /* OP_RESERVED */
+    const unsigned char n17[] = { 0x61, OP_CHECKMULTISIG };  /* OP_NOP */
+    return ts_sigops(m1, 2, 0, true) == 1 &&
+           ts_sigops(m16, 2, 0, true) == 16 &&
+           ts_sigops(m3, 2, 0, true) == 3 &&
+           ts_sigops(m3, 2, 0, false) == 20 &&
+           ts_sigops(r0, 2, 0, true) == 20 &&
+           ts_sigops(n17, 2, 0, true) == 20;
+}
+
+static bool ts_sigops_p2sh_gate(void)
+{
+    unsigned char p2sh[23] = { 0xa9, 0x14 };
+    memset(p2sh + 2, 0xaa, 20);
+    p2sh[22] = 0x87;
+    const unsigned char cs_ss[] = { 0x01, OP_CHECKSIG };
+    const unsigned char ms_spk[] = { OP_2, OP_CHECKMULTISIG };
+    /* P2SH disabled: the P2SH script itself counts (zero) and the scriptSig
+     * is never walked, whatever else is set. */
+    if (ts_sigops_p2sh(p2sh, 23, cs_ss, 2, 0) != 0 ||
+        ts_sigops_p2sh(p2sh, 23, cs_ss, 2, 1U << 1) != 0)
+        return false;
+    /* P2SH enabled, P2SH script: the redeem script counts. */
+    if (ts_sigops_p2sh(p2sh, 23, cs_ss, 2, SCRIPT_VERIFY_P2SH) != 1)
+        return false;
+    /* Non-P2SH script counts itself, accurately, with or without the flag
+     * and with an empty scriptSig that would count zero if walked. */
+    return ts_sigops_p2sh(ms_spk, 2, NULL, 0, 0) == 2 &&
+           ts_sigops_p2sh(ms_spk, 2, NULL, 0, SCRIPT_VERIFY_P2SH) == 2 &&
+           ts_sigops_p2sh(ms_spk, 2, cs_ss, 2, SCRIPT_VERIFY_P2SH) == 2;
+}
+
+static bool ts_sigops_p2sh_scriptsig_walk(void)
+{
+    unsigned char p2sh[23] = { 0xa9, 0x14 };
+    memset(p2sh + 2, 0xaa, 20);
+    p2sh[22] = 0x87;
+    const uint32_t f = SCRIPT_VERIFY_P2SH;
+    const unsigned char two_pushes[] = { 0x01, OP_CHECKSIG, 0x02, OP_CHECKSIG,
+                                         OP_CHECKSIG };
+    const unsigned char op16_first[] = { OP_16, 0x01, OP_CHECKSIG };
+    const unsigned char op16_last[] = { 0x01, OP_CHECKSIG, OP_16 };
+    const unsigned char then_nonpush[] = { 0x01, OP_CHECKSIG, OP_DUP };
+    const unsigned char raw_op[] = { OP_CHECKSIG };
+    const unsigned char truncated[] = { 0x05, OP_CHECKSIG };
+    const unsigned char small_int[] = { 0x01, OP_CHECKSIG, OP_1 };
+    const unsigned char multisig[] = { 0x02, OP_2, OP_CHECKMULTISIG };
+    unsigned char big[3 + 520];
+    big[0] = OP_PUSHDATA2; big[1] = 520 & 0xff; big[2] = 520 >> 8;
+    memset(big + 3, OP_CHECKSIG, 520);
+    return ts_sigops_p2sh(p2sh, 23, two_pushes, 5, f) == 2 &&
+           ts_sigops_p2sh(p2sh, 23, op16_first, 3, f) == 1 &&
+           ts_sigops_p2sh(p2sh, 23, op16_last, 3, f) == 0 &&
+           ts_sigops_p2sh(p2sh, 23, then_nonpush, 3, f) == 0 &&
+           ts_sigops_p2sh(p2sh, 23, raw_op, 1, f) == 0 &&
+           ts_sigops_p2sh(p2sh, 23, truncated, 2, f) == 0 &&
+           ts_sigops_p2sh(p2sh, 23, small_int, 3, f) == 0 &&
+           ts_sigops_p2sh(p2sh, 23, NULL, 0, f) == 0 &&
+           ts_sigops_p2sh(p2sh, 23, multisig, 3, f) == 2 &&
+           ts_sigops_p2sh(p2sh, 23, big, sizeof(big), f) == 520;
+}
+
+static int ts_script_sigop_mutant_gaps(void)
+{
+    int failures = 0;
+
+    printf("script op names and sigop counting edges... ");
+    bool ok = ts_op_names_edges();
+    ok = ok && ts_sigops_checkdatasig_flag_bit();
+    ok = ok && ts_sigops_multisig_accurate_range();
+    ok = ok && ts_sigops_p2sh_gate();
+    ok = ok && ts_sigops_p2sh_scriptsig_walk();
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+
+    return failures;
+}
+
 static int ts_get_legacy_sig_op_count(void)
 {
     int failures = 0;
@@ -1728,6 +1854,7 @@ static int (*const ts_script_cases[])(void) = {
     ts_lock_object_unlock_object,
     ts_script_get_sig_op_count,
     ts_script_get_sig_op_count_accurate,
+    ts_script_sigop_mutant_gaps,
     ts_get_legacy_sig_op_count,
     ts_script_is_pay_to_script_hash,
     ts_script_solver_p2sh_case,
