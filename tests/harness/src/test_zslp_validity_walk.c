@@ -556,23 +556,6 @@ static int wk_case_pinned(void)
 
 /* ── Thread sizes: the backfill finishes every chain on each ───── */
 
-#if !defined(_WIN32)
-/* A long chain of unsettled ancestors, one height each. */
-static void wk_seed_unknown_chain(struct node_db *ndb, int levels)
-{
-    uint8_t huge[32], prev[32], tx[32];
-    wk_txid(huge, WK_GENESIS_HUGE, 0);
-    wk_seed_genesis(ndb, huge, 1, WK_UNREPRESENTABLE, 0);
-    memcpy(prev, huge, 32);
-    uint64_t one[1] = {1};
-    for (int level = 1; level <= levels; level++) {
-        wk_txid(tx, WK_UNKNOWN_SEND, (uint32_t)level);
-        wk_seed_send(ndb, tx, level + 1, huge, one, 1);
-        wk_spend(ndb, tx, 0, prev, 1, level + 1);
-        memcpy(prev, tx, 32);
-    }
-}
-
 /* Runs the backfill the way its tick does, to the tip. */
 static void *wk_backfill_main(void *arg)
 {
@@ -596,6 +579,23 @@ static bool wk_backfill_to_tip(struct node_db *ndb, size_t thread_bytes, int tip
     g_zslp_ledger_backfill_test_ndb = NULL;
     reducer_frontier_provable_tip_reset();
     return done;
+}
+
+#if !defined(_WIN32)
+/* A long chain of unsettled ancestors, one height each. */
+static void wk_seed_unknown_chain(struct node_db *ndb, int levels)
+{
+    uint8_t huge[32], prev[32], tx[32];
+    wk_txid(huge, WK_GENESIS_HUGE, 0);
+    wk_seed_genesis(ndb, huge, 1, WK_UNREPRESENTABLE, 0);
+    memcpy(prev, huge, 32);
+    uint64_t one[1] = {1};
+    for (int level = 1; level <= levels; level++) {
+        wk_txid(tx, WK_UNKNOWN_SEND, (uint32_t)level);
+        wk_seed_send(ndb, tx, level + 1, huge, one, 1);
+        wk_spend(ndb, tx, 0, prev, 1, level + 1);
+        memcpy(prev, tx, 32);
+    }
 }
 
 static bool wk_child_unknown_chain(void)
@@ -825,34 +825,95 @@ static int wk_case_deep_resolves_later(void)
 
 /* ── Interruption: applying a height again changes nothing ─────────── */
 
-static bool wk_fold_interrupted_or_not(int replays, char print[65],
-                                       char running[65])
+#define WK_INTERRUPT_TIP 4
+
+struct wk_ledger_state {
+    bool ok;
+    char print[65];
+    char running[65];
+};
+
+/* Stops the fold at one walk's failed allocation, part way through a height's
+ * scan, and retries that height the way the next tick does. */
+static bool wk_fold_stopped_at_walk(struct node_db *ndb, unsigned nth_walk,
+                                    uint8_t digest[32])
 {
+    uint8_t next[32];
+    bool ok = true;
+    zcl_alloc_fault_fail_nth("zslp_validity_walk", nth_walk);
+    for (int h = 0; h <= WK_INTERRUPT_TIP && ok; h++) {
+        ok = zslp_ledger_apply_height(ndb, h, digest, next) ||
+             zslp_ledger_apply_height(ndb, h, digest, next);
+        if (ok)
+            memcpy(digest, next, sizeof(next));
+    }
+    bool stopped = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    return ok && stopped;
+}
+
+static bool wk_fold_by_ticks(struct node_db *ndb, uint8_t digest[32])
+{
+    bool ok = true;
+    for (int tip = 0; tip <= WK_INTERRUPT_TIP && ok; tip++)
+        ok = wk_backfill_to_tip(ndb, WK_THREAD_LARGE, tip);
+    return ok && zslp_ledger_get_cursor(ndb, NULL, digest);
+}
+
+/* mode: -1 one fold, -2 every height applied twice, -3 one height per tick,
+ * otherwise the walk number to stop at. */
+static struct wk_ledger_state wk_fold_interruptible(int mode)
+{
+    struct wk_ledger_state state;
     struct node_db ndb;
+    uint8_t digest[32] = {0};
+    memset(&state, 0, sizeof(state));
     memset(&ndb, 0, sizeof(ndb));
     if (!node_db_open(&ndb, ":memory:"))
-        return false;
+        return state;
     wk_seed_chain(&ndb, 1, WK_GENESIS_DEEP, WK_DEEP_CHAIN, WK_DEEP_LEVELS);
     wk_seed_deep_child(&ndb, 2);
     wk_seed_wide(&ndb, 3);
-    uint8_t digest[32] = {0};
-    bool ok = wk_fold(&ndb, WK_THREAD_LARGE, 0, 4, replays, digest);
-    wk_fingerprint(&ndb, print);
-    wk_hex(digest, running);
+    if (mode == -3)
+        state.ok = wk_fold_by_ticks(&ndb, digest);
+    else if (mode < 0)
+        state.ok = wk_fold(&ndb, WK_THREAD_LARGE, 0, WK_INTERRUPT_TIP,
+                           mode == -2 ? 1 : 0, digest);
+    else
+        state.ok = wk_fold_stopped_at_walk(&ndb, (unsigned)mode, digest);
+    wk_fingerprint(&ndb, state.print);
+    wk_hex(digest, state.running);
     node_db_close(&ndb);
-    return ok;
+    return state;
+}
+
+static int wk_check_same_ledger(const char *what, int mode,
+                                const struct wk_ledger_state *whole)
+{
+    struct wk_ledger_state state = wk_fold_interruptible(mode);
+    return wk_check(what, whole->ok && state.ok &&
+                          strcmp(whole->print, state.print) == 0 &&
+                          strcmp(whole->running, state.running) == 0);
 }
 
 static int wk_case_interrupted(void)
 {
-    char print_once[65], digest_once[65], print_twice[65], digest_twice[65];
-    bool ok = wk_fold_interrupted_or_not(0, print_once, digest_once);
-    ok = wk_fold_interrupted_or_not(1, print_twice, digest_twice) && ok;
-    int failures = wk_check("interruption fixture folds", ok);
-    failures += wk_check("applying each height twice keeps the same rows",
-                         ok && strcmp(print_once, print_twice) == 0);
-    failures += wk_check("applying each height twice keeps the same digest",
-                         ok && strcmp(digest_once, digest_twice) == 0);
+    struct wk_ledger_state whole = wk_fold_interruptible(-1);
+    int failures = wk_check("interruption fixture folds", whole.ok);
+    failures += wk_check_same_ledger(
+        "applying each height twice keeps the rows and digest", -2, &whole);
+    failures += wk_check_same_ledger(
+        "folding one height per tick keeps the rows and digest", -3, &whole);
+    /* Walks 1-44 are refused, 45 settles the chain within the cap, 46 settles
+     * the refused levels from a later height, and 600 is inside the wide
+     * height's scan. */
+    static const int stops[] = {1, 20, 44, 45, 46, 600};
+    bool same = true;
+    for (size_t i = 0; i < sizeof(stops) / sizeof(stops[0]); i++)
+        same = wk_check_same_ledger("stopping a height part way and retrying "
+                                    "keeps the rows and digest",
+                                    stops[i], &whole) == 0 && same;
+    failures += same ? 0 : 1;
     return failures;
 }
 

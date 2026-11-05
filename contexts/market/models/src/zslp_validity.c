@@ -1,9 +1,17 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Recursive, fail-closed ZSLP Type-1 validity projection. Consensus-neutral:
- * this decides application token balances, never block/transaction validity. */
+ * Fail-closed ZSLP Type-1 validity projection over a transaction's ancestry.
+ * Consensus-neutral: this decides application token balances, never
+ * block/transaction validity.
+ *
+ * Every ancestor without a verdict is judged, once, before its children. Each
+ * judgement is a function of the transaction and its parents' rows alone, so a
+ * verdict does not depend on when it was reached. A walk that would pass the
+ * bounds below is refused before it writes anything: the transaction stays
+ * UNKNOWN and settles when a later walk fits, never as a guess. */
 
 #include "models/zslp_validity.h"
 
+#include "base/safe_alloc.h"
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
 #include "models/activerecord.h"
@@ -17,11 +25,22 @@
 #include <limits.h>
 #include <sqlite3.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define ZSLP_VALIDITY_MAX_DEPTH 256
 #define ZSLP_VALIDITY_MAX_INPUTS 4096
 #define ZSLP_VALIDITY_SCRIPT_MAX 2048
+
+/* What one transaction may cost: this many ancestors without a verdict, and
+ * this many inputs read across them. Ancestors settle at their own heights, so
+ * only an unsettled token reaches these. */
+#define ZSLP_VALIDITY_WALK_MAX_TXS 1024
+#define ZSLP_VALIDITY_WALK_MAX_INPUTS 16384
+#define ZSLP_VALIDITY_WALK_SLOTS 2048 /* a power of two above MAX_TXS */
+#define ZSLP_VALIDITY_WALK_MAX_PATH (ZSLP_VALIDITY_MAX_DEPTH + 1)
+#define ZSLP_VALIDITY_REASON_TOO_DEEP "ancestry_depth_exceeded"
+#define ZSLP_VALIDITY_REASON_TOO_WIDE "ancestry_work_exceeded"
 
 DEFINE_MODEL_CALLBACKS(zslp_validity)
 
@@ -225,9 +244,6 @@ static bool validity_output_exists(const struct transaction *live_tx,
         : output_read_db(ndb, txid, vout, address, has_address);
 }
 
-static bool recursively_validate_tx(struct node_db *ndb,
-                                    const uint8_t txid[32], int depth);
-
 static size_t validity_inputs_fetch_prevouts(sqlite3_stmt *s,
                                              struct zslp_input_row *rows,
                                              size_t cap, bool *truncated)
@@ -284,10 +300,9 @@ static void validity_inputs_enrich_row(struct node_db *ndb,
     }
 }
 
-static size_t inputs_read_db(struct node_db *ndb, const uint8_t txid[32],
-                             const uint8_t target[32],
-                             struct zslp_input_row *rows, size_t cap,
-                             bool recurse, int depth, bool *truncated)
+static size_t inputs_select_db(struct node_db *ndb, const uint8_t txid[32],
+                               struct zslp_input_row *rows, size_t cap,
+                               bool *truncated)
 {
     *truncated = false;
     sqlite3_stmt *s = NULL;
@@ -298,12 +313,17 @@ static size_t inputs_read_db(struct node_db *ndb, const uint8_t txid[32],
     AR_BIND_BLOB(s, 1, txid, 32);
     size_t count = validity_inputs_fetch_prevouts(s, rows, cap, truncated);
     AR_FINALIZE(s);
+    return count;
+}
 
-    for (size_t i = 0; i < count; i++) {
-        if (recurse)
-            (void)recursively_validate_tx(ndb, rows[i].prev_txid, depth + 1);
+static size_t inputs_read_db(struct node_db *ndb, const uint8_t txid[32],
+                             const uint8_t target[32],
+                             struct zslp_input_row *rows, size_t cap,
+                             bool *truncated)
+{
+    size_t count = inputs_select_db(ndb, txid, rows, cap, truncated);
+    for (size_t i = 0; i < count; i++)
         validity_inputs_enrich_row(ndb, &rows[i], target);
-    }
     return count;
 }
 
@@ -576,31 +596,38 @@ static void validity_validate_send(struct node_db *ndb,
     }
 }
 
+static void validity_row_start(struct zslp_validity_row *row,
+                               const uint8_t txid[32],
+                               const struct slp_message *msg, int32_t height)
+{
+    memset(row, 0, sizeof(*row));
+    memcpy(row->txid, txid, 32);
+    row->tx_type = msg->type;
+    row->block_height = height;
+    row->baton_vout = msg->mint_baton_vout;
+    row->has_token_id = true;
+    if (msg->type == SLP_TX_GENESIS)
+        memcpy(row->token_id, txid, 32);
+    else
+        token_id_internal(msg->token_id.data, row->token_id);
+}
+
+/* `inputs` is caller storage for this transaction's inputs: the live path sizes
+ * it to the transaction, a stored transaction uses ZSLP_VALIDITY_MAX_INPUTS. */
 static bool validate_message(struct node_db *ndb, const uint8_t txid[32],
                              const struct transaction *live_tx,
                              const struct slp_message *msg, int32_t height,
-                             bool recurse, int depth)
+                             struct zslp_input_row *inputs)
 {
     struct zslp_validity_row row;
-    memset(&row, 0, sizeof(row));
-    memcpy(row.txid, txid, 32);
-    row.tx_type = msg->type;
-    row.block_height = height;
-    row.baton_vout = msg->mint_baton_vout;
-    row.has_token_id = true;
-    if (msg->type == SLP_TX_GENESIS)
-        memcpy(row.token_id, txid, 32);
-    else
-        token_id_internal(msg->token_id.data, row.token_id);
+    validity_row_start(&row, txid, msg, height);
 
-    struct zslp_input_row inputs[ZSLP_VALIDITY_MAX_INPUTS];
     bool inputs_truncated = false;
     size_t input_count = live_tx
         ? inputs_read_live(ndb, live_tx, row.token_id, inputs,
                            ZSLP_VALIDITY_MAX_INPUTS, &inputs_truncated)
         : inputs_read_db(ndb, txid, row.token_id, inputs,
-                         ZSLP_VALIDITY_MAX_INPUTS, recurse, depth,
-                         &inputs_truncated);
+                         ZSLP_VALIDITY_MAX_INPUTS, &inputs_truncated);
     if (inputs_truncated) {
         row_set(&row, ZSLP_VALIDITY_UNKNOWN, "input_limit_exceeded");
         return validity_save(ndb, &row);
@@ -634,21 +661,182 @@ static bool validate_message(struct node_db *ndb, const uint8_t txid[32],
     return validity_save(ndb, &row);
 }
 
-static bool recursively_validate_tx(struct node_db *ndb,
-                                    const uint8_t txid[32], int depth)
+/* ── Bounded ancestry walk ─────────────────────────────────────────── */
+
+struct zslp_walk_node {
+    uint8_t txid[32];
+    uint32_t edge_start;
+    uint32_t edge_count;
+    uint32_t edge_next;
+    uint32_t longest; /* transactions on the longest unsettled path from here */
+    bool on_path;
+};
+
+enum zslp_walk_result {
+    ZSLP_WALK_OK,
+    ZSLP_WALK_TOO_DEEP,
+    ZSLP_WALK_TOO_WIDE,
+};
+
+/* All of a walk's state lives here, on the heap. `rows` holds one transaction's
+ * inputs at a time. */
+struct zslp_walk {
+    struct node_db *ndb;
+    uint32_t node_count;
+    uint32_t edge_count;
+    uint32_t order_count;
+    uint32_t path_len;
+    uint16_t slots[ZSLP_VALIDITY_WALK_SLOTS]; /* node index + 1; 0 is empty */
+    uint32_t path[ZSLP_VALIDITY_WALK_MAX_PATH];
+    uint32_t order[ZSLP_VALIDITY_WALK_MAX_TXS]; /* parents before children */
+    struct zslp_walk_node nodes[ZSLP_VALIDITY_WALK_MAX_TXS];
+    uint8_t edges[ZSLP_VALIDITY_WALK_MAX_INPUTS][32];
+    struct zslp_input_row rows[ZSLP_VALIDITY_MAX_INPUTS];
+};
+
+/* The node for txid, or -1 with *slot_out at the free slot it would take. */
+static int32_t walk_find(const struct zslp_walk *w, const uint8_t txid[32],
+                         uint32_t *slot_out)
 {
-    char old_reason[64];
+    uint32_t hash = 2166136261u;
+    for (int i = 0; i < 32; i++)
+        hash = (hash ^ txid[i]) * 16777619u;
+    uint32_t slot = hash & (ZSLP_VALIDITY_WALK_SLOTS - 1);
+    while (w->slots[slot]) {
+        int32_t index = (int32_t)w->slots[slot] - 1;
+        if (memcmp(w->nodes[index].txid, txid, 32) == 0)
+            return index;
+        slot = (slot + 1) & (ZSLP_VALIDITY_WALK_SLOTS - 1);
+    }
+    *slot_out = slot;
+    return -1;
+}
+
+/* Reads the inputs a stored transaction would walk; false past the bound. A
+ * transaction with no readable declaration has none, as it is judged alone. */
+static bool walk_read_edges(struct zslp_walk *w, struct zslp_walk_node *node)
+{
+    uint8_t script[ZSLP_VALIDITY_SCRIPT_MAX];
+    size_t script_len = 0;
+    int32_t height = 0;
+    struct slp_message msg;
+    if (!read_slp_script(w->ndb, node->txid, script, &script_len, &height) ||
+        !slp_parse(script, script_len, &msg))
+        return true;
+    bool truncated = false;
+    size_t count = inputs_select_db(w->ndb, node->txid, w->rows,
+                                    ZSLP_VALIDITY_MAX_INPUTS, &truncated);
+    if (count > ZSLP_VALIDITY_WALK_MAX_INPUTS - w->edge_count)
+        return false;
+    for (size_t i = 0; i < count; i++)
+        memcpy(w->edges[w->edge_count + i], w->rows[i].prev_txid, 32);
+    node->edge_start = w->edge_count;
+    node->edge_count = (uint32_t)count;
+    w->edge_count += (uint32_t)count;
+    return true;
+}
+
+static enum zslp_walk_result walk_push(struct zslp_walk *w,
+                                       const uint8_t txid[32])
+{
+    if (w->path_len == ZSLP_VALIDITY_WALK_MAX_PATH)
+        return ZSLP_WALK_TOO_DEEP;
+    if (w->node_count == ZSLP_VALIDITY_WALK_MAX_TXS)
+        return ZSLP_WALK_TOO_WIDE;
+    uint32_t slot = 0;
+    (void)walk_find(w, txid, &slot);
+    uint32_t index = w->node_count;
+    struct zslp_walk_node *node = &w->nodes[index];
+    memset(node, 0, sizeof(*node));
+    memcpy(node->txid, txid, 32);
+    node->longest = 1;
+    node->on_path = true;
+    if (!walk_read_edges(w, node))
+        return ZSLP_WALK_TOO_WIDE;
+    w->slots[slot] = (uint16_t)(index + 1);
+    w->node_count++;
+    w->path[w->path_len++] = index;
+    return ZSLP_WALK_OK;
+}
+
+/* A parent needs judging unless it holds a verdict or declares no token. */
+static bool walk_parent_unsettled(struct node_db *ndb, const uint8_t txid[32])
+{
+    enum zslp_validity_status status =
+        validity_existing(ndb, txid, NULL, NULL, NULL, 0);
+    if (status == ZSLP_VALIDITY_VALID || status == ZSLP_VALIDITY_INVALID)
+        return false;
+    uint8_t script[ZSLP_VALIDITY_SCRIPT_MAX];
+    size_t script_len = 0;
+    int32_t height = 0;
+    return read_slp_script(ndb, txid, script, &script_len, &height);
+}
+
+static enum zslp_walk_result walk_follow_edge(struct zslp_walk *w,
+                                              struct zslp_walk_node *node)
+{
+    const uint8_t *parent = w->edges[node->edge_start + node->edge_next];
+    node->edge_next++;
+    uint32_t slot = 0;
+    int32_t seen = walk_find(w, parent, &slot);
+    if (seen < 0)
+        return walk_parent_unsettled(w->ndb, parent) ? walk_push(w, parent)
+                                                     : ZSLP_WALK_OK;
+    /* On the path means the damaged inputs form a loop; no real chain can,
+     * and the depth cap is what has always ended one. */
+    const struct zslp_walk_node *known = &w->nodes[seen];
+    if (known->on_path ||
+        w->path_len + known->longest > ZSLP_VALIDITY_WALK_MAX_PATH)
+        return ZSLP_WALK_TOO_DEEP;
+    if (known->longest >= node->longest)
+        node->longest = known->longest + 1;
+    return ZSLP_WALK_OK;
+}
+
+static void walk_finish_node(struct zslp_walk *w, uint32_t index)
+{
+    struct zslp_walk_node *node = &w->nodes[index];
+    node->on_path = false;
+    w->order[w->order_count++] = index;
+    w->path_len--;
+    if (w->path_len > 0) {
+        struct zslp_walk_node *child = &w->nodes[w->path[w->path_len - 1]];
+        if (node->longest >= child->longest)
+            child->longest = node->longest + 1;
+    }
+}
+
+/* Lists every unsettled ancestor once, parents first, reading but never
+ * writing. Whether a walk fits therefore depends only on the settled rows it
+ * starts from, and a walk that does not fit leaves no partial trace. */
+static enum zslp_walk_result walk_plan(struct zslp_walk *w,
+                                       const uint8_t root[32])
+{
+    w->node_count = 0;
+    w->edge_count = 0;
+    w->order_count = 0;
+    w->path_len = 0;
+    memset(w->slots, 0, sizeof(w->slots));
+    enum zslp_walk_result result = walk_push(w, root);
+    while (result == ZSLP_WALK_OK && w->path_len > 0) {
+        uint32_t index = w->path[w->path_len - 1];
+        struct zslp_walk_node *node = &w->nodes[index];
+        if (node->edge_next < node->edge_count)
+            result = walk_follow_edge(w, node);
+        else
+            walk_finish_node(w, index);
+    }
+    return result;
+}
+
+/* Judges one stored transaction from the rows of its inputs as they stand. */
+static bool validity_judge_stored(struct node_db *ndb, const uint8_t txid[32],
+                                  struct zslp_input_row *rows)
+{
     enum zslp_validity_status old =
-        validity_existing(ndb, txid, NULL, NULL, old_reason, sizeof(old_reason));
+        validity_existing(ndb, txid, NULL, NULL, NULL, 0);
     if (old == ZSLP_VALIDITY_VALID || old == ZSLP_VALIDITY_INVALID)
         return true;
-    if (depth > ZSLP_VALIDITY_MAX_DEPTH) {
-        struct zslp_validity_row row;
-        memset(&row, 0, sizeof(row));
-        memcpy(row.txid, txid, 32);
-        row_set(&row, ZSLP_VALIDITY_UNKNOWN, "ancestry_depth_exceeded");
-        return validity_save(ndb, &row);
-    }
     uint8_t script[ZSLP_VALIDITY_SCRIPT_MAX];
     size_t script_len = 0;
     int32_t height = 0;
@@ -663,7 +851,76 @@ static bool recursively_validate_tx(struct node_db *ndb,
         row_set(&row, ZSLP_VALIDITY_INVALID, "malformed_slp");
         return validity_save(ndb, &row);
     }
-    return validate_message(ndb, txid, NULL, &msg, height, true, depth);
+    return validate_message(ndb, txid, NULL, &msg, height, rows);
+}
+
+/* Records a walk the bound refused. Only this transaction's row moves, to
+ * UNKNOWN with its token so a child sees an unsettled parent of that token,
+ * and it settles when a later walk fits. A GENESIS is judged at once: its
+ * verdict reads nothing from its ancestry. */
+static bool validity_refuse_walk(struct node_db *ndb, const uint8_t txid[32],
+                                 enum zslp_walk_result result,
+                                 struct zslp_input_row *rows)
+{
+    uint8_t script[ZSLP_VALIDITY_SCRIPT_MAX];
+    size_t script_len = 0;
+    int32_t height = 0;
+    struct slp_message msg;
+    if (!read_slp_script(ndb, txid, script, &script_len, &height) ||
+        !slp_parse(script, script_len, &msg))
+        return false; // raw-return-ok:only a parsed transaction has a walk
+    if (msg.type == SLP_TX_GENESIS)
+        return validate_message(ndb, txid, NULL, &msg, height, rows);
+    struct zslp_validity_row row;
+    validity_row_start(&row, txid, &msg, height);
+    row_set(&row, ZSLP_VALIDITY_UNKNOWN,
+            result == ZSLP_WALK_TOO_DEEP ? ZSLP_VALIDITY_REASON_TOO_DEEP
+                                         : ZSLP_VALIDITY_REASON_TOO_WIDE);
+    return validity_save(ndb, &row);
+}
+
+/* True when an earlier attempt at this height refused this transaction. That
+ * refusal stands for the height: a later transaction in the same scan may have
+ * settled ancestors since, and walking again would then give an interrupted
+ * height a verdict the uninterrupted one did not have at this point. */
+static bool validity_refused_at_height(struct node_db *ndb,
+                                       const uint8_t txid[32], int32_t height)
+{
+    sqlite3_stmt *s = NULL;
+    AR_QUERY_EXISTS(ndb, s,
+        "SELECT 1 FROM zslp_validity WHERE txid=? AND block_height=? "
+        "AND status=0 AND reason IN(?,?)",
+        AR_BIND_BLOB(s, 1, txid, 32);
+        AR_BIND_INT(s, 2, height);
+        AR_BIND_TEXT(s, 3, ZSLP_VALIDITY_REASON_TOO_DEEP);
+        AR_BIND_TEXT(s, 4, ZSLP_VALIDITY_REASON_TOO_WIDE));
+}
+
+/* Settles one transaction of the height being applied. False only when the
+ * walk's memory is unavailable: nothing was stored, so the height can retry. */
+static bool validity_apply_tx(struct node_db *ndb, const uint8_t txid[32],
+                              int32_t height)
+{
+    enum zslp_validity_status old =
+        validity_existing(ndb, txid, NULL, NULL, NULL, 0);
+    if (old == ZSLP_VALIDITY_VALID || old == ZSLP_VALIDITY_INVALID ||
+        validity_refused_at_height(ndb, txid, height))
+        return true;
+    struct zslp_walk *w = zcl_malloc(sizeof(*w), "zslp_validity_walk");
+    if (!w)
+        LOG_FAIL("zslp_validity", "apply_tx: no memory for a walk at h=%d",
+                 height);
+    w->ndb = ndb;
+    enum zslp_walk_result result = walk_plan(w, txid);
+    if (result == ZSLP_WALK_OK) {
+        for (uint32_t i = 0; i < w->order_count; i++)
+            (void)validity_judge_stored(ndb, w->nodes[w->order[i]].txid,
+                                        w->rows);
+    } else {
+        (void)validity_refuse_walk(ndb, txid, result, w->rows);
+    }
+    free(w);
+    return true;
 }
 
 bool zslp_validity_apply_live(struct node_db *ndb,
@@ -673,7 +930,17 @@ bool zslp_validity_apply_live(struct node_db *ndb,
     if (!ndb || !ndb->open || !tx || !msg || height < 0)
         LOG_FAIL("zslp_validity", "apply_live: invalid argument");
     zslp_validity_mark_live_spends(ndb, tx, height);
-    return validate_message(ndb, tx->hash.data, tx, msg, height, false, 0);
+    /* inputs_read_live stores at most this many before it reports truncation. */
+    size_t rows = tx->num_vin < ZSLP_VALIDITY_MAX_INPUTS
+        ? tx->num_vin : ZSLP_VALIDITY_MAX_INPUTS;
+    struct zslp_input_row *inputs =
+        zcl_malloc((rows ? rows : 1) * sizeof(*inputs), "zslp_validity_inputs");
+    if (!inputs)
+        LOG_FAIL("zslp_validity", "apply_live: no memory for %zu inputs at h=%d",
+                 rows, height);
+    bool saved = validate_message(ndb, tx->hash.data, tx, msg, height, inputs);
+    free(inputs);
+    return saved;
 }
 
 void zslp_validity_mark_live_spends(struct node_db *ndb,
@@ -706,14 +973,17 @@ static bool validity_scan_prepare(sqlite3 *db, const char *sql,
            *stmt != NULL;
 }
 
-static void validity_apply_height_txids(struct node_db *ndb, sqlite3_stmt *s)
+static bool validity_apply_height_txids(struct node_db *ndb, sqlite3_stmt *s,
+                                        int32_t height)
 {
     while (AR_STEP_ROW(s)) {
         uint8_t txid[32];
         if (AR_COL_BYTES(s, 0) != 32) continue;
         AR_READ_BLOB(s, 0, txid, 32);
-        (void)recursively_validate_tx(ndb, txid, 0);
+        if (!validity_apply_tx(ndb, txid, height))
+            return false; // raw-return-ok:apply_tx logged and the height retries
     }
+    return true;
 }
 
 static void validity_apply_height_spends(struct node_db *ndb, sqlite3_stmt *s,
@@ -757,8 +1027,10 @@ bool zslp_validity_apply_height(struct node_db *ndb, int32_t height,
         LOG_FAIL("zslp_validity", "apply_height: tx scan prepare failed h=%d",
                  height);
     AR_BIND_INT(s, 1, height);
-    validity_apply_height_txids(ndb, s);
+    bool applied = validity_apply_height_txids(ndb, s, height);
     AR_FINALIZE(s);
+    if (!applied)
+        return false; // raw-return-ok:apply_tx logged and the height retries
 
     /* Every transparent spend consumes a token/baton outpoint even when the
      * spender carries no valid ZSLP declaration (that is an explicit burn). */
