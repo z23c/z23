@@ -110,6 +110,45 @@ static void remote_fail(struct zcl_command_reply *reply, const char *phase,
         busy ? "REMOTE_PROOF_BUSY" : "REMOTE_PROOF_REFUSED", phase, busy,
         mutated, "remote proof did not produce an independently verified PASS", why);
 }
+
+static bool remote_failure_facts(struct zcl_command_reply *reply,
+    const struct zcl_dev_proof_remote_assignment *a,
+    const struct zcl_dev_proof_remote_placement *placement,
+    const struct zcl_dev_proof_status *status, const char *root)
+{
+    struct json_value facts = {0};
+    json_set_object(&facts);
+    bool ok = json_push_kv_str(&facts, "local_commit", a->expected.local_commit) &&
+        json_push_kv_str(&facts, "remote_base", a->expected.remote_base);
+    if (ok && placement->evidence_dir[0])
+        ok = json_push_kv_str(&facts, "retained_input_observation", placement->evidence_dir);
+    if (ok && status && status->receipt_path[0])
+        ok = json_push_kv_str(&facts, "receipt_path", status->receipt_path);
+    if (ok && status && status->log_dir[0])
+        ok = json_push_kv_str(&facts, "log_dir", status->log_dir);
+    if (ok && status && (strcmp(status->detail, "proof_producer_source_mismatch") == 0 ||
+                         strcmp(status->detail, "proof_producer_source_id_unavailable") == 0)) {
+        char executable[4096];
+        int n = snprintf(executable, sizeof(executable), "%s/build/bin/z23-dev", root);
+        ok = n > 0 && (size_t)n < sizeof(executable) &&
+             json_push_kv_str(&facts, "producer_executable", executable);
+    }
+    if (ok) ok = json_push_kv(&reply->data, "failure_facts", &facts);
+    json_free(&facts);
+    return ok;
+}
+
+static bool remote_failure_details(struct zcl_command_reply *reply,
+    const struct zcl_dev_proof_remote_assignment *a,
+    const struct zcl_dev_proof_remote_placement *placement,
+    const struct zcl_dev_proof_status *status, const char *root)
+{
+    bool ok = remote_failure_facts(reply, a, placement, status, root);
+    if (!ok)
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+                       "Failure facts could not be serialized; preserve native proof artifacts before retry.");
+    return ok;
+}
 #endif
 
 void zcl_native_handle_dev_proof_remote(const struct zcl_command_request *request,
@@ -140,11 +179,13 @@ void zcl_native_handle_dev_proof_remote(const struct zcl_command_request *reques
         !json_push_kv_str(&reply->data, "retained_input_observation", placement.evidence_dir)) {
         remote_fail(reply, "output", "remote_evidence_output_failed",
                     placement.objects_imported || placement.placed, false);
+        (void)remote_failure_details(reply, &a, &placement, NULL, root);
         return;
     }
     if (!prepared) {
         remote_fail(reply, "prepare", why, placement.objects_imported || placement.placed,
                     strstr(why, "busy") != NULL);
+        remote_failure_details(reply, &a, &placement, NULL, root);
         return;
     }
     int rc = zcl_dev_proof_remote_execute(&a, &placement, remote_owner, root, &status);
@@ -153,19 +194,14 @@ void zcl_native_handle_dev_proof_remote(const struct zcl_command_request *reques
         !json_push_kv_str(&reply->data, "local_commit", a.expected.local_commit) ||
         !json_push_kv_str(&reply->data, "remote_base", a.expected.remote_base)) {
         remote_fail(reply, "output", "remote_evidence_output_failed", true, false);
+        (void)remote_failure_details(reply, &a, &placement, &status, root);
         return;
     }
     if (rc != 1 || status.state != ZCL_DEV_PROOF_STATE_PASSED) {
         remote_fail(reply, "execute", status.detail, true, rc == 0);
-        if (strcmp(status.detail, "proof_producer_source_mismatch") == 0 ||
-            strcmp(status.detail, "proof_producer_source_id_unavailable") == 0) {
-            char executable[4096];
-            int n = snprintf(executable, sizeof(executable), "%s/build/bin/z23-dev", root);
-            if (n <= 0 || (size_t)n >= sizeof(executable) ||
-                !json_push_kv_str(&reply->data, "producer_executable", executable)) {
-                remote_fail(reply, "output", "remote_evidence_output_failed", true, false);
-                return;
-            }
+        bool have_facts = remote_failure_details(reply, &a, &placement, &status, root);
+        if (have_facts && (strcmp(status.detail, "proof_producer_source_mismatch") == 0 ||
+            strcmp(status.detail, "proof_producer_source_id_unavailable") == 0)) {
             (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
                 "Build the candidate dev binary under admission, use it for "
                 "dev.proof.retry on this exact pair when required, then repeat "
@@ -177,14 +213,18 @@ void zcl_native_handle_dev_proof_remote(const struct zcl_command_request *reques
     struct zcl_dev_acceptance_receipt_v1 receipt;
     if (!remote_receipt(root, status.receipt_path, wire)) {
         remote_fail(reply, "verify", "remote_receipt_missing_or_unsafe", true, false);
+        remote_failure_details(reply, &a, &placement, &status, root);
         return;
     }
     if (!zcl_dev_proof_remote_verify(wire, sizeof(wire), &a.expected,
             zcl_dev_proof_host_toolchain_capture, root, &receipt, why, sizeof(why))) {
         remote_fail(reply, "verify", why, true, false);
+        remote_failure_details(reply, &a, &placement, &status, root);
         return;
     }
-    if (!json_push_kv_str(&reply->data, "status", "PASS"))
+    if (!json_push_kv_str(&reply->data, "status", "PASS")) {
         remote_fail(reply, "output", "remote_evidence_output_failed", true, false);
+        (void)remote_failure_details(reply, &a, &placement, &status, root);
+    }
 #endif
 }

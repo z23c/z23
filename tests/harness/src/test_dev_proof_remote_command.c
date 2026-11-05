@@ -3,6 +3,7 @@
 #include "test/test_core.h"
 #include "test/host_tool_capture.h"
 #include "dev_proof.h"
+#include "json/json.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +24,7 @@ _test_next:;
     return failures;
 }
 #else
+#include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -104,6 +106,24 @@ static bool rcmd_copy(const char *source, const char *destination)
     return ok && chmod(destination, 0700) == 0;
 }
 
+static bool rcmd_snapshot(const char *output, const char *leaf, long expected_size)
+{
+    struct json_value envelope = {0};
+    if (!json_read(&envelope, output, strlen(output))) return false;
+    const struct json_value *error = json_get(&envelope, "error");
+    const struct json_value *facts = json_get(error, "facts");
+    const struct json_value *location = json_get(facts, "retained_input_observation");
+    const char *dir = location && location->type == JSON_STR ? json_get_str(location) : NULL;
+    char path[4096];
+    int n = dir ? snprintf(path, sizeof(path), "%s/%s", dir, leaf) : -1;
+    struct stat st;
+    bool ok = n > 0 && (size_t)n < sizeof(path) &&
+        (expected_size < 0 ? lstat(path, &st) != 0 && errno == ENOENT :
+         lstat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_size == expected_size);
+    json_free(&envelope);
+    return ok;
+}
+
 static bool rcmd_repository(const char *base, char *primary, size_t primary_cap,
                             char *linked, size_t linked_cap, char *binary, size_t binary_cap)
 {
@@ -180,18 +200,35 @@ int test_dev_proof_remote_command(void)
                             "LD_AUDIT=/nonexistent-z23-fixture.so", out, sizeof(out));
         ASSERT(rc > 0);
         ASSERT(strstr(out, "remote_git_environment_redirected") != NULL);
-        char offer[1200];
+        char offer[1200], bundle[1200];
         ASSERT(snprintf(offer, sizeof(offer), "%s/large.offer", base) > 0);
+        ASSERT(snprintf(bundle, sizeof(bundle), "%s/readable.bundle", base) > 0);
+        FILE *readable = fopen(bundle, "wb");
+        ASSERT(readable != NULL);
+        bool bundle_written = fwrite("bundle", 1, 6, readable) == 6;
+        bool bundle_closed = fclose(readable) == 0;
+        ASSERT(bundle_written && bundle_closed);
         FILE *large = fopen(offer, "wb");
         ASSERT(large != NULL);
         bool written = fseek(large, 16384, SEEK_SET) == 0 && fputc('x', large) != EOF;
         bool closed = fclose(large) == 0;
         ASSERT(written && closed);
-        ASSERT(rcmd_input_paths(input, sizeof(input), linked, "missing.bundle", offer, false));
+        ASSERT(rcmd_input_paths(input, sizeof(input), linked, bundle, offer, false));
         rc = rcmd_run(fixture_binary, linked, input, out, sizeof(out));
         ASSERT(rc > 0);
         ASSERT(strstr(out, "remote_transport_bytes_mismatch") != NULL);
-        ASSERT(strstr(out, "retained_input_observation") != NULL);
+        ASSERT(rcmd_snapshot(out, "source.offer.json", -1));
+        ASSERT(rcmd_snapshot(out, "source.bundle", -1));
+        large = fopen(offer, "wb");
+        ASSERT(large != NULL);
+        written = fseek(large, 16383, SEEK_SET) == 0 && fputc('x', large) != EOF;
+        closed = fclose(large) == 0;
+        ASSERT(written && closed);
+        rc = rcmd_run(fixture_binary, linked, input, out, sizeof(out));
+        ASSERT(rc > 0);
+        ASSERT(strstr(out, "remote_transport_bytes_mismatch") != NULL);
+        ASSERT(rcmd_snapshot(out, "source.offer.json", 16384));
+        ASSERT(rcmd_snapshot(out, "source.bundle", 6));
         PASS();
     }
 _test_next:;
