@@ -193,11 +193,6 @@ static void bs_make_block(int32_t h, const struct uint256 *prev, uint32_t salt,
     out->header.nTime = 1500000000u + (uint32_t)h + salt * 7u;
     out->header.nBits = 0x2000ffff;
     out->header.hashPrevBlock = *prev;
-    memset(&out->header.hashMerkleRoot, 0, sizeof(out->header.hashMerkleRoot));
-    out->header.hashMerkleRoot.data[0] = (uint8_t)(h & 0xFF);
-    out->header.hashMerkleRoot.data[1] = (uint8_t)((h >> 8) & 0xFF);
-    out->header.hashMerkleRoot.data[2] = (uint8_t)(salt & 0xFF);
-    out->header.hashMerkleRoot.data[3] = 0x5A;
     memset(&out->header.hashFinalSaplingRoot, 0,
            sizeof(out->header.hashFinalSaplingRoot));
     memset(&out->header.nNonce, 0, sizeof(out->header.nNonce));
@@ -211,6 +206,8 @@ static void bs_make_block(int32_t h, const struct uint256 *prev, uint32_t salt,
     transaction_alloc(&out->vtx[0], 1, 1);
     out->vtx[0].vin[0].sequence = 0xffffffff;
     out->vtx[0].vout[0].value = 10 * COIN;
+    transaction_compute_hash(&out->vtx[0]);
+    out->header.hashMerkleRoot = out->vtx[0].hash; /* one tx: its txid is the root */
 }
 
 /* Build the seeder: N blocks (1..end) written to real blk*.dat, an active chain

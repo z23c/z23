@@ -45,24 +45,32 @@ static void compact_pending_clear(struct p2p_node *node)
 /* The header of a cmpctblock has only passed a cheap check against a target the
  * peer chose, so an unknown one earns no download slot. Ask this peer for headers
  * under the per-peer limit the reject probe uses: a real block then comes through
- * the normal header and body path, and a repeating peer drives no more requests. */
+ * the normal header and body path, and a repeating peer drives no more requests.
+ * With the limit closed, or headers paused for a snapshot, the probe is left armed
+ * for the send tick, which retries under the same limit. */
 static void compact_probe_unknown_header(struct msg_processor *mp,
                                          struct p2p_node *node)
 {
     int64_t now_s = (int64_t)platform_time_wall_time_t();
     int64_t last_probe = atomic_load_explicit(&node->last_reject_probe_time,
                                               memory_order_relaxed);
-    if (!syncsvc_should_probe_after_reject(now_s, last_probe))
+    if (msg_processor_snapshot_active(mp) ||
+        !syncsvc_should_probe_after_reject(now_s, last_probe)) {
+        atomic_store_explicit(&node->reject_probe_pending, true,
+                              memory_order_relaxed);
         return;
+    }
+    push_getheaders_from(mp, node, mp->main_state->pindex_best_header);
     atomic_store_explicit(&node->last_reject_probe_time, now_s,
                           memory_order_relaxed);
-    push_getheaders_from(mp, node, mp->main_state->pindex_best_header);
 }
 
 /* The request goes through the download manager, so the reply is not an
  * unrequested push and a stalled peer's slot is reassigned. A request already
  * in flight stands. A peer at its window, or a full table, leaves the hash queued
- * for any peer. */
+ * for any peer. A block at or below our tip asks for nothing: a collision on a
+ * new block is above it, and a request here would count as forward work, ahead
+ * of what the frontier needs and outside the history budget. */
 static void compact_request_full_block(struct msg_processor *mp,
                                        struct p2p_node *node,
                                        const struct uint256 *hash)
@@ -75,7 +83,8 @@ static void compact_request_full_block(struct msg_processor *mp,
         compact_probe_unknown_header(mp, node);
         return;
     }
-    if (bi->nStatus & (BLOCK_HAVE_DATA | BLOCK_FAILED_MASK))
+    if ((bi->nStatus & (BLOCK_HAVE_DATA | BLOCK_FAILED_MASK)) ||
+        bi->nHeight <= active_chain_height(&mp->main_state->chain_active))
         return;
 
     struct download_manager *dm = get_download_mgr();
@@ -101,9 +110,11 @@ static void compact_request_full_block(struct msg_processor *mp,
 
 /* Short ids can resolve to the wrong transactions, so a reconstruction that
  * does not match its header says nothing about the block or about the peer
- * (BIP152). Ask for the full block; true when that is what happened. The caller
- * runs this before it settles the download slot, since the received-pending hold
- * that leaves behind would refuse the request. */
+ * (BIP152). It is dropped unsubmitted and unscored; true when that is what
+ * happened. Recovery depends on the header, see compact_request_full_block: a full
+ * block request, a header request, or nothing. The caller runs this before it
+ * settles the download slot, since the received-pending hold that leaves behind
+ * would refuse the request. */
 static bool compact_body_needs_full_block(struct msg_processor *mp,
                                           struct p2p_node *node,
                                           const struct block *blk,
@@ -114,8 +125,8 @@ static bool compact_body_needs_full_block(struct msg_processor *mp,
     char hex[65];
     uint256_get_hex(hash, hex);
     LOG_INFO("compact",
-             "peer %s: compact block %s does not match its header; "
-             "asking for the full block", node->addr_name, hex);
+             "peer %s: compact block %s does not match its header; dropped",
+             node->addr_name, hex);
     compact_request_full_block(mp, node, hash);
     return true;
 }

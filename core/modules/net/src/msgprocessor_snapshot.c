@@ -257,6 +257,28 @@ static void push_block_piece_request(struct msg_processor *mp,
     stream_free(&s);
 }
 
+/* The manifest binds only block hashes, which cover headers, and catch-up stages
+ * a body before it looks at the merkle root, so a payload must be the named block
+ * and its body must match that block's header. */
+static bool block_piece_payload_is_block(const unsigned char *data, size_t len,
+                                         const uint8_t expected_hash[32])
+{
+    struct byte_stream bs;
+    stream_init_from_data(&bs, data, len);
+    struct block blk;
+    block_init(&blk);
+    bool ok = block_deserialize(&blk, &bs) && stream_remaining(&bs) == 0;
+    if (ok) {
+        struct uint256 hash;
+        block_get_hash(&blk, &hash);
+        ok = memcmp(hash.data, expected_hash, 32) == 0 &&
+             msg_block_body_matches_header(&blk);
+    }
+    block_free(&blk);
+    stream_free(&bs);
+    return ok;
+}
+
 static bool parse_block_piece_payload_refs(
     struct byte_stream *s,
     const uint8_t (*hashes)[32],
@@ -287,20 +309,7 @@ static bool parse_block_piece_payload_refs(
         refs[i].data = s->data + s->read_pos;
         refs[i].len = (size_t)len64;
 
-        struct byte_stream bs;
-        stream_init_from_data(&bs, refs[i].data, refs[i].len);
-        struct block blk;
-        block_init(&blk);
-        bool parsed = block_deserialize(&blk, &bs) &&
-                      stream_remaining(&bs) == 0;
-        if (parsed) {
-            struct uint256 hash;
-            block_get_hash(&blk, &hash);
-            parsed = memcmp(hash.data, hashes[i], 32) == 0;
-        }
-        block_free(&blk);
-        stream_free(&bs);
-        if (!parsed) {
+        if (!block_piece_payload_is_block(refs[i].data, refs[i].len, hashes[i])) {
             free(refs);
             return false;
         }

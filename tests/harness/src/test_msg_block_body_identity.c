@@ -24,6 +24,7 @@
 #include "platform/socket_compat.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
+#include "sync/sync_planner.h"
 #include "sync/sync_state.h"
 #include "validation/chainstate.h"
 #include "validation/check_block.h"
@@ -47,6 +48,7 @@
 #define BBI_GETDATA_PAYLOAD_SIZE 37 /* compact count(1) + type(4) + hash(32) */
 #define BBI_DRAIN_POLLS 300000      /* at least five minutes of 1 ms sleeps */
 #define BBI_FABRICATED_HEADERS 300
+#define BBI_TIP_HEIGHT 100
 #define BBI_OTHER_PEER_ID 9901u     /* no bbi_peer has this id */
 
 struct bbi_submit {
@@ -262,6 +264,22 @@ static bool bbi_genesis_tip(struct bbi_env *e)
     active_chain_move_window_tip(&e->ms.chain_active, gen);
     e->ms.pindex_best_header = gen;
     return true;
+}
+
+/* An active chain whose tip is at `height`. */
+static bool bbi_tip_at(struct bbi_env *e, int height)
+{
+    struct uint256 h;
+    memset(&h, 0xdd, sizeof(h));
+    struct block_index *tip =
+        chainstate_insert_block_index((struct chainstate *)&e->ms, &h);
+    if (!tip)
+        return false;
+    tip->nHeight = height;
+    tip->nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
+    active_chain_move_window_tip(&e->ms.chain_active, tip);
+    e->ms.pindex_best_header = tip;
+    return active_chain_height(&e->ms.chain_active) == height;
 }
 
 static bool bbi_deliver_block(struct bbi_env *e, struct p2p_node *from,
@@ -807,6 +825,7 @@ static int bbi_test_unknown_headers_hold_nothing(void)
         if (i == 0) {
             BBI_CHECK(bbi_count_sent(e.sender, "getheaders") == 1);
             BBI_CHECK(atomic_load(&e.sender->last_reject_probe_time) != 0);
+            BBI_CHECK(!atomic_load(&e.sender->reject_probe_pending));
             /* The limit is on a wall clock: hold it shut so a slow host cannot
              * open it during the loop. */
             atomic_store(&e.sender->last_reject_probe_time, INT64_MAX / 2);
@@ -828,6 +847,8 @@ static int bbi_test_unknown_headers_hold_nothing(void)
     BBI_CHECK(bbi_count_sent(e.sender, "getdata") == 0);
     BBI_CHECK(atomic_load(&e.submit.calls) == 0);
     BBI_CHECK(bbi_score(e.sender) == 0);
+    /* The closed limit left the probe armed for the send tick to retry. */
+    BBI_CHECK(atomic_load(&e.sender->reject_probe_pending));
     if (!failures)
         printf("OK\n");
     bbi_env_free(&e);
@@ -1137,6 +1158,94 @@ out:
     return failures;
 }
 
+/* A mismatched compact block for a header at or below our tip asks for nothing:
+ * a request would count as forward work and go ahead of what the frontier needs.
+ * Just above the tip, where a collision on a new block lands, the fallback stands. */
+static int bbi_run_compact_relative_to_tip(int offset, const char *name)
+{
+    int failures = 0;
+    printf("block body identity: a compact block that does not match, %s... ",
+           name);
+
+    struct bbi_env e;
+    if (!bbi_env_init(&e, SYNC_BLOCKS_DOWNLOAD) ||
+        !bbi_tip_at(&e, BBI_TIP_HEIGHT)) {
+        printf("FAIL (setup)\n");
+        bbi_env_free(&e);
+        return 1;
+    }
+    struct block real, bad;
+    bbi_real_block(&real, 1, (uint8_t)(70 + offset));
+    bbi_wrong_body(&bad, &real);
+    struct uint256 hash;
+    block_get_hash(&real, &hash);
+    struct block_index *bi = bbi_known_header(&e, &real, 0);
+    if (!bi) {
+        printf("FAIL (setup index)\n");
+        failures = 1;
+        goto out;
+    }
+    bi->nHeight = BBI_TIP_HEIGHT + offset;
+
+    BBI_CHECK(bbi_deliver_compact(&e, e.sender, &bad));
+    uint64_t in_flight = 2, queued = 2;
+    dl_get_stats(get_download_mgr(), NULL, NULL, NULL, &in_flight, &queued);
+    bool above = offset > 0;
+    BBI_CHECK(in_flight == (above ? 1u : 0u));
+    BBI_CHECK(queued == 0);
+    BBI_CHECK(bbi_sent_getdata(e.sender, &hash) == above);
+    BBI_CHECK(bbi_count_sent(e.sender, "getheaders") == 0);
+    BBI_CHECK(atomic_load(&e.submit.calls) == 0);
+    BBI_CHECK(!block_already_seen(&hash));
+    BBI_CHECK(bbi_score(e.sender) == 0);
+    if (!failures)
+        printf("OK\n");
+out:
+    block_free(&real);
+    block_free(&bad);
+    bbi_env_free(&e);
+    return failures;
+}
+
+/* Headers are paused during a snapshot, so the budget is not spent and the probe
+ * stays armed for the send tick once the snapshot ends. */
+static bool bbi_snapshot_is_active(void *ctx)
+{
+    (void)ctx;
+    return true;
+}
+
+static int bbi_test_unknown_header_during_snapshot(void)
+{
+    int failures = 0;
+    printf("block body identity: during a snapshot an unknown header arms the "
+           "probe without spending its budget... ");
+
+    struct bbi_env e;
+    if (!bbi_env_init(&e, SYNC_BLOCKS_DOWNLOAD) || !bbi_genesis_tip(&e)) {
+        printf("FAIL (setup)\n");
+        bbi_env_free(&e);
+        return 1;
+    }
+    e.mp.snapshot_active = bbi_snapshot_is_active;
+    struct block real, bad;
+    bbi_real_block(&real, 1, 62);
+    bbi_wrong_body(&bad, &real);
+
+    BBI_CHECK(bbi_deliver_compact(&e, e.sender, &bad));
+    BBI_CHECK(bbi_count_sent(e.sender, "getheaders") == 0);
+    BBI_CHECK(atomic_load(&e.sender->last_reject_probe_time) == 0);
+    BBI_CHECK(atomic_load(&e.sender->reject_probe_pending));
+    /* The tick's rule: armed, budget never spent, so it fires. */
+    BBI_CHECK(syncsvc_should_fire_reject_probe(e.sender, 42));
+    if (!failures)
+        printf("OK\n");
+    block_free(&real);
+    block_free(&bad);
+    bbi_env_free(&e);
+    return failures;
+}
+
 int msg_block_body_identity_tests(void)
 {
     int failures = 0;
@@ -1168,5 +1277,12 @@ int msg_block_body_identity_tests(void)
     failures += bbi_test_blocktxn_wrong_body_after_seen_no_request();
     failures += bbi_run_repeat_wrong_body(SYNC_AT_TIP, "at the tip");
     failures += bbi_run_repeat_wrong_body(SYNC_BLOCKS_DOWNLOAD, "in catch-up");
+    failures += bbi_run_compact_relative_to_tip(-5, "a header below the tip "
+                                                    "asks for nothing");
+    failures += bbi_run_compact_relative_to_tip(0, "a header at the tip asks "
+                                                   "for nothing");
+    failures += bbi_run_compact_relative_to_tip(1, "a header just above the "
+                                                   "tip still falls back");
+    failures += bbi_test_unknown_header_during_snapshot();
     return failures;
 }

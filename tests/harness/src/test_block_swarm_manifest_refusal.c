@@ -6,21 +6,27 @@
  * manifest and then sends a manifest that must be refused: the swarm stays off
  * (legacy getdata pauses only while mp_block_swarm_is_active() reads true,
  * msg_send_block_download) and the height the peer anchored stays as it was.
- * The same peer's honest manifest then still starts a swarm. Wires are built
- * by hand because the encoder never produces these. Called from
+ * The same peer's honest manifest then still starts a swarm. A piece whose body
+ * does not match its header is refused the same way a malformed piece is. Wires
+ * are built by hand because the encoder never produces these. Called from
  * test_block_swarm_loopback. */
 
 #define _GNU_SOURCE
 #include "test/test_core.h"
 
+#include "bloom/merkle.h"
 #include "chain/chainparams.h"
 #include "coins/coins_view.h"
+#include "consensus/validation.h"
 #include "core/serialize.h"
 #include "net/fast_sync.h"
 #include "net/msg_internal.h"
 #include "net/msgprocessor.h"
 #include "net/net.h"
+#include "net/peer_scoring.h"
 #include "net/protocol.h"
+#include "primitives/block.h"
+#include "primitives/transaction.h"
 #include "util/safe_alloc.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
@@ -121,8 +127,10 @@ struct mr_manifest {
     enum mr_tail tail;
 };
 
-/* Fill s with the zblkmanfst payload for m. */
-static bool mr_encode(const struct mr_manifest *m, struct byte_stream *s)
+/* Fill s with the zblkmanfst payload for m. first_piece_hash, when given, replaces
+ * the filler hash of piece 0. */
+static bool mr_encode(const struct mr_manifest *m,
+                      const uint8_t *first_piece_hash, struct byte_stream *s)
 {
     uint8_t (*hashes)[32] = NULL;
     uint8_t root[32];
@@ -133,6 +141,8 @@ static bool mr_encode(const struct mr_manifest *m, struct byte_stream *s)
             return false;
         for (uint32_t i = 0; i < m->num_pieces; i++)
             memset(hashes[i], (int)(i % 251) + 1, 32);
+        if (first_piece_hash)
+            memcpy(hashes[0], first_piece_hash, 32);
         fast_sync_merkle_root((const uint8_t (*)[32])hashes, m->num_pieces,
                               root);
         if (m->tail == MR_ROOT_WRONG)
@@ -152,22 +162,17 @@ static bool mr_encode(const struct mr_manifest *m, struct byte_stream *s)
     return ok;
 }
 
-/* Frame m on a sender and feed the bytes through the real parser and the real
- * dispatcher, the way bs_pump does for the loopback tests. */
-static bool mr_deliver(struct mr_rig *r, struct p2p_node *to,
-                       const struct mr_manifest *m)
+/* Frame a payload on a sender and feed the bytes through the real parser and
+ * the real dispatcher, the way bs_pump does for the loopback tests. */
+static bool mr_deliver_wire(struct mr_rig *r, struct p2p_node *to,
+                            const char *command, const struct byte_stream *body)
 {
     const struct chain_params *params = chain_params_get();
-    struct byte_stream body;
-    stream_init(&body, 256);
-    bool ok = mr_encode(m, &body);
-
     struct p2p_node *from = mr_make_peer(&r->nm, 200);
-    ok = ok && from;
+    bool ok = from != NULL;
     if (ok) {
-        p2p_node_begin_message(from, MSG_BLOCK_MANIFEST,
-                               params->pchMessageStart);
-        p2p_node_write_message_data(from, body.data, body.size);
+        p2p_node_begin_message(from, command, params->pchMessageStart);
+        p2p_node_write_message_data(from, body->data, body->size);
         p2p_node_end_message(from);
         for (struct send_segment *seg = from->send_head; ok && seg;
              seg = seg->next)
@@ -179,8 +184,25 @@ static bool mr_deliver(struct mr_rig *r, struct p2p_node *to,
         ok = msg_process_messages(&r->mp, to);
     if (from)
         p2p_node_free(from);
+    return ok;
+}
+
+static bool mr_deliver_manifest(struct mr_rig *r, struct p2p_node *to,
+                                const struct mr_manifest *m,
+                                const uint8_t *first_piece_hash)
+{
+    struct byte_stream body;
+    stream_init(&body, 256);
+    bool ok = mr_encode(m, first_piece_hash, &body) &&
+              mr_deliver_wire(r, to, MSG_BLOCK_MANIFEST, &body);
     stream_free(&body);
     return ok;
+}
+
+static bool mr_deliver(struct mr_rig *r, struct p2p_node *to,
+                       const struct mr_manifest *m)
+{
+    return mr_deliver_manifest(r, to, m, NULL);
 }
 
 static const struct mr_manifest k_first = {
@@ -264,6 +286,121 @@ static int test_refused_manifest_never_arms(void)
     return failures;
 }
 
+static bool mr_count_submit(struct block *blk, struct validation_state *out,
+                            void *ctx)
+{
+    (void)blk;
+    (*(int *)ctx)++;
+    if (out)
+        validation_state_init(out);
+    return true;
+}
+
+static void mr_make_tx(struct transaction *tx, uint32_t lock_time)
+{
+    transaction_init(tx);
+    transaction_alloc(tx, 1, 1);
+    tx->lock_time = lock_time;
+    transaction_compute_hash(tx);
+}
+
+/* A header over `n` txs numbered from `first_lock`, committing to `root`, or to
+ * those txs when root is NULL. */
+static void mr_make_block(struct block *blk, size_t n, uint32_t first_lock,
+                          const struct uint256 *root)
+{
+    block_init(blk);
+    blk->header.nVersion = 4;
+    blk->header.nTime = 1500000000u;
+    blk->num_vtx = n;
+    blk->vtx = zcl_calloc(n, sizeof(struct transaction), "mr_vtx");
+    struct uint256 txids[4];
+    for (size_t i = 0; i < n; i++) {
+        mr_make_tx(&blk->vtx[i], first_lock + (uint32_t)i);
+        txids[i] = blk->vtx[i].hash;
+    }
+    blk->header.hashMerkleRoot = root ? *root : compute_merkle_root(txids, n);
+}
+
+/* Deliver blk as the only block of piece 0, its hash taken from `hash`. */
+static bool mr_deliver_piece(struct mr_rig *r, struct p2p_node *to,
+                             const struct uint256 *hash, const struct block *blk)
+{
+    struct byte_stream one, body;
+    stream_init(&one, 512);
+    stream_init(&body, 512);
+    bool ok = block_serialize(blk, &one) &&
+              stream_write_u32_le(&body, 0) &&
+              stream_write_u32_le(&body, 1) &&
+              stream_write_bytes(&body, hash->data, 32) &&
+              stream_write_compact_size(&body, one.size) &&
+              stream_write_bytes(&body, one.data, one.size) &&
+              mr_deliver_wire(r, to, MSG_BLOCK_DATA, &body);
+    stream_free(&one);
+    stream_free(&body);
+    return ok;
+}
+
+/* The manifest binds only block hashes, so a piece can carry the right hash with
+ * the wrong body, or with a transaction repeated under the right root. Neither
+ * reaches submit and the sender is scored; the real body then goes through. */
+static int test_wrong_body_piece_refused(void)
+{
+    int failures = 0;
+
+    TEST("block swarm piece: a body that does not match its header is refused "
+         "and scored, and the real body is still accepted") {
+        struct mr_rig rig;
+        ASSERT(mr_rig_init(&rig));
+        mp_block_swarm_test_seed_stall(0, 0, 0);
+        int submits = 0;
+        msg_processor_set_block_submit(&rig.mp, mr_count_submit, &submits);
+
+        struct block real, wrong, repeated;
+        mr_make_block(&real, 3, 100, NULL);
+        mr_make_block(&wrong, 3, 900, &real.header.hashMerkleRoot);
+        mr_make_block(&repeated, 4, 100, &real.header.hashMerkleRoot);
+        transaction_free(&repeated.vtx[3]);
+        mr_make_tx(&repeated.vtx[3], 102);
+        struct uint256 hash;
+        block_get_hash(&real, &hash);
+
+        uint8_t piece_hash[32];
+        block_piece_hash((const uint8_t (*)[32])hash.data, 1, 0, piece_hash);
+        const struct mr_manifest honest = {
+            "honest", 1, MR_HONEST_PIECES * BLOCKS_PER_PIECE, MR_HONEST_PIECES,
+            MR_ROOT_MATCHES,
+        };
+        struct p2p_node *peer = mr_make_peer(&rig.nm, 101);
+        ASSERT(peer);
+        ASSERT(mr_deliver(&rig, peer, &k_first));
+        ASSERT(mr_deliver_manifest(&rig, peer, &honest, piece_hash));
+        ASSERT(mp_block_swarm_is_active());
+
+        const int weight = peer_offence_weight(PEER_OFFENCE_INVALID_PAYLOAD);
+        ASSERT(mr_deliver_piece(&rig, peer, &hash, &wrong));
+        ASSERT(submits == 0);
+        ASSERT(atomic_load(&peer->misbehavior) == weight);
+        ASSERT(mr_deliver_piece(&rig, peer, &hash, &repeated));
+        ASSERT(submits == 0);
+        ASSERT(atomic_load(&peer->misbehavior) == 2 * weight);
+        ASSERT(mr_deliver_piece(&rig, peer, &hash, &real));
+        ASSERT(submits == 1);
+        ASSERT(atomic_load(&peer->misbehavior) == 2 * weight);
+
+        mp_block_swarm_test_seed_stall(0, 0, 0);
+        ASSERT(!mp_block_swarm_is_active());
+        block_free(&real);
+        block_free(&wrong);
+        block_free(&repeated);
+        p2p_node_free(peer);
+        mr_rig_free(&rig);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
 static int test_swarm_init_piece_cap(void)
 {
     int failures = 0;
@@ -299,5 +436,6 @@ int block_swarm_manifest_refusal_tests(void)
     int failures = 0;
     failures += test_refused_manifest_never_arms();
     failures += test_swarm_init_piece_cap();
+    failures += test_wrong_body_piece_refused();
     return failures;
 }
