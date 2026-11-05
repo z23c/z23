@@ -31,8 +31,14 @@
 #include "storage/progress_store.h"
 #include "util/blocker.h"
 
+#include "chain/checkpoints.h"
+#include "jobs/reducer_frontier.h"
+#include "jobs/utxo_apply_stage.h"
+
 #include <sqlite3.h>
+#include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 static int test_rom_compile_dump_idle_shape(void)
 {
@@ -622,6 +628,376 @@ static int test_rom_compile_render_shielded_import_gap(void)
     return failures;
 }
 
+/* ── mutation-gap tests: the live dumper's exact field values ──────────────
+ * Each helper returns true only when every field it covers is present and
+ * equals what an independent recomputation from the same live accessors
+ * says it must be. */
+
+static bool rcs_has_keys(const struct json_value *obj,
+                         const char *const *keys, size_t n)
+{
+    if (!obj || obj->type != JSON_OBJ)
+        return false;
+    for (size_t i = 0; i < n; i++)
+        if (!json_get(obj, keys[i]))
+            return false;
+    return true;
+}
+
+static bool rcs_str_is(const struct json_value *v, const char *want)
+{
+    const char *s = v ? json_get_str(v) : NULL;
+    return s && strcmp(s, want) == 0;
+}
+
+static double rcs_absd(double v) { return v < 0.0 ? -v : v; }
+
+static bool rcs_fold_matches(const struct json_value *fold, int64_t target)
+{
+    static const char *const keys[] = {
+        "active", "mode", "height", "target", "percent", "remaining_blocks",
+        "rate_blk_s", "eta_seconds", "eta_human" };
+    if (!rcs_has_keys(fold, keys, 9))
+        return false;
+    uint64_t cur = utxo_apply_stage_cursor();
+    int64_t h = cur > 0 ? (int64_t)cur - 1 : 0;
+    int64_t rem = target > h ? target - h : 0;
+    double pct = 100.0 * (double)h / (double)target;
+    if (pct > 100.0)
+        pct = 100.0;
+    return json_get_int(json_get(fold, "height")) == h &&
+           json_get_int(json_get(fold, "target")) == target &&
+           json_get_int(json_get(fold, "remaining_blocks")) == rem &&
+           rcs_absd(json_get_real(json_get(fold, "percent")) - pct) < 1e-6;
+}
+
+static bool rcs_stage_row_ok(const struct json_value *s, size_t i)
+{
+    static const char *const keys[] = {
+        "abbrev", "stage", "cursor", "step_us_ewma", "steps_per_sec" };
+    static const char *const names[8] = {
+        "header_admit", "validate_headers", "body_fetch", "body_persist",
+        "script_validate", "proof_validate", "utxo_apply", "tip_finalize" };
+    if (!rcs_has_keys(s, keys, 5) || !rcs_str_is(json_get(s, "stage"), names[i]))
+        return false;
+    int64_t ewma = json_get_int(json_get(s, "step_us_ewma"));
+    int64_t sps = json_get_int(json_get(s, "steps_per_sec"));
+    int64_t want = ewma > 0 ? (int64_t)(1000000.0 / (double)ewma + 0.5) : 0;
+    return sps == want;
+}
+
+/* bottleneck_stage must be the FIRST stage holding the maximum ewma. */
+static bool rcs_bottleneck_ok(const struct json_value *out)
+{
+    const struct json_value *stages = json_get(out, "stages");
+    if (!stages || stages->num_children != 8)
+        return false;
+    int64_t best = -1;
+    const char *abbrev = "";
+    for (size_t i = 0; i < 8; i++) {
+        const struct json_value *s = json_at(stages, i);
+        if (!rcs_stage_row_ok(s, i))
+            return false;
+        int64_t e = json_get_int(json_get(s, "step_us_ewma"));
+        if (e > best) {
+            best = e;
+            abbrev = json_get_str(json_get(s, "abbrev"));
+        }
+    }
+    return rcs_str_is(json_get(out, "bottleneck_stage"), abbrev) &&
+           json_get(out, "commit_us_ewma") != NULL;
+}
+
+static bool rcs_rom_layer_ok(const struct json_value *layers)
+{
+    static const char *const keys[] = { "present", "height", "sha3_prefix" };
+    const struct json_value *l = json_get(layers, "rom_checkpoint");
+    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+    if (!cp || !rcs_has_keys(l, keys, 3))
+        return false;
+    char want[9];
+    snprintf(want, sizeof(want), "%02x%02x%02x%02x", cp->sha3_hash[0],
+             cp->sha3_hash[1], cp->sha3_hash[2], cp->sha3_hash[3]);
+    return json_get_int(json_get(l, "height")) == (int64_t)cp->height &&
+           rcs_str_is(json_get(l, "sha3_prefix"), want);
+}
+
+static bool rcs_sealed_layers_ok(const struct json_value *layers)
+{
+    static const char *const hk[] = {
+        "present", "segment_count", "present_count", "verified_count",
+        "min_height", "max_height" };
+    static const char *const sk[] = { "present", "ratified_height" };
+    const struct json_value *h = json_get(layers, "sealed_history");
+    const struct json_value *s = json_get(layers, "sealed_base_receipt");
+    if (!rcs_has_keys(h, hk, 6) || !rcs_has_keys(s, sk, 2))
+        return false;
+    int64_t segs = json_get_int(json_get(h, "segment_count"));
+    int64_t have = json_get_int(json_get(h, "present_count"));
+    int64_t ratified = json_get_int(json_get(s, "ratified_height"));
+    return json_get_bool(json_get(h, "present")) == (segs > 0) &&
+           json_get_int(json_get(h, "verified_count")) == have &&
+           json_get_bool(json_get(s, "present")) == (ratified >= 0);
+}
+
+static bool rcs_tip_bundle_layers_ok(const struct json_value *layers)
+{
+    static const char *const dk[] = { "present", "coins_best_height" };
+    static const char *const tk[] = { "present", "hstar",
+                                      "external_tip_height" };
+    static const char *const bk[] = { "present", "last_height",
+                                      "generations" };
+    const struct json_value *d = json_get(layers, "delta");
+    const struct json_value *t = json_get(layers, "tip_ring");
+    const struct json_value *b = json_get(layers, "bundle_export");
+    if (!rcs_has_keys(d, dk, 2) || !rcs_has_keys(t, tk, 3) ||
+        !rcs_has_keys(b, bk, 3))
+        return false;
+    int64_t hstar = json_get_int(json_get(t, "hstar"));
+    int64_t last = json_get_int(json_get(b, "last_height"));
+    return json_get_bool(json_get(d, "present")) ==
+               (json_get_int(json_get(d, "coins_best_height")) >= 0) &&
+           hstar == (int64_t)reducer_frontier_provable_tip_cached() &&
+           json_get_bool(json_get(t, "present")) == (hstar > 0) &&
+           json_get_int(json_get(t, "external_tip_height")) ==
+               (int64_t)reducer_frontier_external_tip_height() &&
+           json_get_bool(json_get(b, "present")) == (last > 0) &&
+           json_get_int(json_get(b, "generations")) >= 0;
+}
+
+/* Closed progress store: the shielded_import defaults the dumper reports
+ * when no snapshot could be read. */
+static bool rcs_si_closed_ok(const struct json_value *si)
+{
+    const struct json_value *a = json_get(si, "anchor");
+    const struct json_value *n = json_get(si, "nullifier");
+    if (!si || !a || !n)
+        return false;
+    return !json_get_bool(json_get(si, "progress_store_open")) &&
+           !json_get_bool(json_get(si, "snapshot_complete")) &&
+           rcs_str_is(json_get(si, "snapshot_status"),
+                      "progress_store_closed") &&
+           rcs_str_is(json_get(si, "status"),
+                      "unknown_snapshot_unavailable") &&
+           !json_get_bool(json_get(a, "cursor_known")) &&
+           json_get_int(json_get(a, "sprout_activation_cursor")) == -1 &&
+           json_get_int(json_get(a, "sapling_activation_cursor")) == -1 &&
+           json_get_int(json_get(a, "sprout_anchors_imported")) == 0 &&
+           json_get_int(json_get(a, "sapling_anchors_imported")) == 0 &&
+           json_get_bool(json_get(a, "gap")) &&
+           !json_get_bool(json_get(n, "cursor_known")) &&
+           json_get_int(json_get(n, "activation_cursor")) == -1 &&
+           json_get_int(json_get(n, "sprout_nullifiers_imported")) == 0 &&
+           json_get_int(json_get(n, "sapling_nullifiers_imported")) == 0 &&
+           json_get_bool(json_get(n, "gap"));
+}
+
+static int test_rom_compile_dump_closed_store_values(void)
+{
+    int failures = 0;
+
+    TEST("rom_compile dump: closed store reports exact defaults for every "
+         "fold/stage/layer/shielded field") {
+        progress_store_close();
+        blocker_reset_for_testing();
+        refold_progress_test_set_cached(false);
+        rom_compile_status_test_reset_rate_sample();
+
+        time_t before = time(NULL);
+        struct json_value out;
+        json_init(&out);
+        ASSERT(rom_compile_status_dump_state_json(&out, "ignored"));
+        time_t after = time(NULL);
+        int64_t at = json_get_int(json_get(&out, "captured_at"));
+        ASSERT(at >= (int64_t)before - 2 && at <= (int64_t)after + 2);
+
+        const struct json_value *fold = json_get(&out, "fold");
+        ASSERT(rcs_fold_matches(fold, 3056758));
+        ASSERT(rcs_str_is(json_get(fold, "mode"), "idle"));
+        ASSERT(rcs_bottleneck_ok(&out));
+
+        const struct json_value *layers = json_get(&out, "layers");
+        ASSERT(rcs_rom_layer_ok(layers));
+        ASSERT(rcs_sealed_layers_ok(layers));
+        ASSERT(rcs_tip_bundle_layers_ok(layers));
+        ASSERT(rcs_si_closed_ok(json_get(&out, "shielded_import")));
+        ASSERT(json_get_int(json_get(json_get(&out, "shielded_import"),
+                                     "utxo_apply_next_height")) ==
+               (int64_t)utxo_apply_stage_cursor());
+        json_free(&out);
+
+        /* A NULL out is refused, not dereferenced. */
+        ASSERT(!rom_compile_status_dump_state_json(NULL, NULL));
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
+/* from-anchor refold with a real progress store: mode, target, remaining. */
+static int test_rom_compile_dump_from_anchor_target(void)
+{
+    int failures = 0;
+
+    TEST("rom_compile dump: a from-anchor refold reports mode from_anchor "
+         "and the cached resume target (boundary target 1)") {
+        char dir[256] = {0};
+        progress_store_close();
+        test_make_tmpdir(dir, sizeof(dir), "rom_compile", "from_anchor");
+        ASSERT(progress_store_open(dir));
+        sqlite3 *db = progress_store_db();
+        ASSERT(db != NULL);
+        ASSERT(refold_progress_mark_started_from_anchor(db, 1));
+
+        struct json_value out;
+        json_init(&out);
+        ASSERT(rom_compile_status_dump_state_json(&out, NULL));
+        const struct json_value *fold = json_get(&out, "fold");
+        ASSERT(json_get_bool(json_get(fold, "active")));
+        ASSERT(rcs_str_is(json_get(fold, "mode"), "from_anchor"));
+        ASSERT(rcs_fold_matches(fold, 1));
+        json_free(&out);
+
+        ASSERT(refold_progress_clear_if_reached(db, 1, 1));
+        ASSERT(refold_progress_refresh(db));
+        ASSERT(!refold_from_anchor_active());
+        progress_store_close();
+        test_cleanup_tmpdir(dir);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
+/* Seed a fresh store: anchor rows (sprout, sapling) and the nullifier
+ * cursor; -1 leaves that row/marker absent. No blocker refresh, so the gap
+ * flags come from the cursors alone. */
+static bool rcs_seed_shielded(sqlite3 *db, int64_t spr, int64_t sap,
+                              int64_t nf)
+{
+    char sql[128];
+    if (spr >= 0 && sap >= 0) {
+        if (!anchor_kv_initialize_history(db, 0))
+            return false;
+        snprintf(sql, sizeof(sql),
+                 "UPDATE anchor_state SET activation_cursor=%lld WHERE pool=%d",
+                 (long long)spr, ANCHOR_POOL_SPROUT);
+        if (sqlite3_exec(db, sql, NULL, NULL, NULL) != SQLITE_OK)
+            return false;
+        snprintf(sql, sizeof(sql),
+                 "UPDATE anchor_state SET activation_cursor=%lld WHERE pool=%d",
+                 (long long)sap, ANCHOR_POOL_SAPLING);
+        if (sqlite3_exec(db, sql, NULL, NULL, NULL) != SQLITE_OK)
+            return false;
+    } else if (spr >= 0) {
+        if (!anchor_kv_initialize_history(db, 0))
+            return false;
+        snprintf(sql, sizeof(sql), "DELETE FROM anchor_state WHERE pool=%d",
+                 ANCHOR_POOL_SAPLING);
+        if (sqlite3_exec(db, sql, NULL, NULL, NULL) != SQLITE_OK)
+            return false;
+    }
+    return nf < 0 || nullifier_kv_initialize_history(db, nf);
+}
+
+struct rcs_gap_case {
+    int64_t spr, sap, nf;
+    bool anchor_known;
+    bool anchor_gap;
+    bool nf_gap;
+    const char *status;
+};
+
+static bool rcs_gap_case_ok(const struct rcs_gap_case *c)
+{
+    char dir[256] = {0};
+    progress_store_close();
+    blocker_reset_for_testing();
+    test_make_tmpdir(dir, sizeof(dir), "rom_compile", "gap_case");
+    bool ok = progress_store_open(dir) &&
+              rcs_seed_shielded(progress_store_db(), c->spr, c->sap, c->nf);
+    struct json_value out;
+    json_init(&out);
+    ok = ok && rom_compile_status_dump_state_json(&out, NULL);
+    const struct json_value *si = json_get(&out, "shielded_import");
+    const struct json_value *a = si ? json_get(si, "anchor") : NULL;
+    const struct json_value *n = si ? json_get(si, "nullifier") : NULL;
+    ok = ok && a && n && json_get_bool(json_get(si, "snapshot_complete")) &&
+         rcs_str_is(json_get(si, "snapshot_status"), "available") &&
+         json_get_bool(json_get(a, "cursor_known")) == c->anchor_known &&
+         json_get_bool(json_get(a, "gap")) == c->anchor_gap &&
+         json_get_bool(json_get(n, "gap")) == c->nf_gap &&
+         !json_get_bool(json_get(a, "gap_blocker_active")) &&
+         !json_get_bool(json_get(n, "gap_blocker_active")) &&
+         rcs_str_is(json_get(si, "status"), c->status);
+    json_free(&out);
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return ok;
+}
+
+static int test_rom_compile_dump_gap_matrix(void)
+{
+    int failures = 0;
+
+    TEST("rom_compile dump: each cursor boundary decides its own gap flag "
+         "and the status ladder") {
+        static const struct rcs_gap_case cases[] = {
+            { 0, 0, 0, true, false, false, "complete" },
+            { 1, 0, 0, true, true, false, "gap_anchor_backfill_pending" },
+            { 0, 1, 0, true, true, false, "gap_anchor_backfill_pending" },
+            { 0, 0, 1, true, false, true, "gap_nullifier_backfill_pending" },
+            /* sapling row absent: cursor unknown, so a gap even at 0. */
+            { 0, -1, 0, false, true, false, "gap_anchor_backfill_pending" },
+            /* nullifier marker absent: unknown cursor is a gap. */
+            { 0, 0, -1, true, false, true, "gap_nullifier_backfill_pending" },
+        };
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            printf("[case %zu] ", i);
+            ASSERT(rcs_gap_case_ok(&cases[i]));
+        }
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
+/* A standing gap blocker alone (cursors already 0) still reports the gap. */
+static int test_rom_compile_dump_anchor_blocker_alone(void)
+{
+    int failures = 0;
+
+    TEST("rom_compile dump: a latched anchor gap blocker forces gap=true "
+         "even with both cursors at zero") {
+        char dir[256] = {0};
+        progress_store_close();
+        blocker_reset_for_testing();
+        test_make_tmpdir(dir, sizeof(dir), "rom_compile", "blocker_alone");
+        ASSERT(progress_store_open(dir));
+        sqlite3 *db = progress_store_db();
+        ASSERT(rcs_seed_shielded(db, 1, 1, 0));
+        utxo_apply_anchor_gap_blocker_refresh(db);
+        ASSERT(blocker_exists(UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID));
+        ASSERT(sqlite3_exec(db, "UPDATE anchor_state SET activation_cursor=0",
+                            NULL, NULL, NULL) == SQLITE_OK);
+
+        struct json_value out;
+        json_init(&out);
+        ASSERT(rom_compile_status_dump_state_json(&out, NULL));
+        const struct json_value *a =
+            json_get(json_get(&out, "shielded_import"), "anchor");
+        ASSERT(json_get_bool(json_get(a, "gap_blocker_active")));
+        ASSERT(json_get_bool(json_get(a, "gap")));
+        json_free(&out);
+        blocker_reset_for_testing();
+        progress_store_close();
+        test_cleanup_tmpdir(dir);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
 int test_rom_compile_status(void)
 {
     int failures = 0;
@@ -635,5 +1011,9 @@ int test_rom_compile_status(void)
     failures += test_rom_compile_render_null_state();
     failures += test_rom_compile_render_shielded_import_healthy();
     failures += test_rom_compile_render_shielded_import_gap();
+    failures += test_rom_compile_dump_closed_store_values();
+    failures += test_rom_compile_dump_from_anchor_target();
+    failures += test_rom_compile_dump_gap_matrix();
+    failures += test_rom_compile_dump_anchor_blocker_alone();
     return failures;
 }
