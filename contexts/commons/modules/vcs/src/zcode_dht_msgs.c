@@ -445,6 +445,10 @@ static enum vcs_zcode_dht_error read_selector(
         kind > VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK || !length ||
         length > VCS_ZCODE_DHT_RECORD_NAMESPACE_MAX)
         return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
+    /* The writer emits strlen(name) as the length, so a NUL inside the
+     * declared length is a second wire form of the same selector. */
+    if (memchr(wire + 2, 0, length) != NULL)
+        return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
     selector->kind = (enum vcs_zcode_dht_record_kind)kind;
     memcpy(selector->namespace_name, wire + 2, length);
     for (size_t i = length; i < VCS_ZCODE_DHT_RECORD_NAMESPACE_BYTES; i++)
