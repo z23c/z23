@@ -2317,8 +2317,8 @@ static int test_dispatch_weights_read(void)
 /* Run the real runner from a scratch cwd whose tools/dev/ holds `weights`
  * (NULL = no weights file) over two cheap groups on one worker, so dispatch
  * order is observable in its verbose transcript. */
-static int tgs_run_weighted(const char *root, const char *weights, char *out,
-                            size_t cap)
+static int tgs_run_weighted(const char *root, const char *weights, const char *priority,
+                            char *out, size_t cap)
 {
     char dir[PATH_MAX + 32], path[PATH_MAX + 64], exe[PATH_MAX];
     char command[3 * PATH_MAX];
@@ -2334,8 +2334,8 @@ static int tgs_run_weighted(const char *root, const char *weights, char *out,
         return -1;
     int n = snprintf(command, sizeof(command),
                      "cd \"%s\" && \"%s\" --jobs=1 --verbose --no-cache "
-                     "--exact=test_hex_codec,test_codec_cursor 2>&1",
-                     root, exe);
+                     "--exact=test_hex_codec,test_codec_cursor %s 2>&1",
+                     root, exe, priority ? priority : "");
     if (n <= 0 || (size_t)n >= sizeof(command))
         return -1;
     return capture_command(command, out, cap);
@@ -2349,7 +2349,7 @@ static int test_runner_dispatches_longest_first(void)
         char root[PATH_MAX];
         test_make_tmpdir(root, sizeof(root), "tgs_weights", "runner");
         /* Control: no weights file, catalog order (hex_codec is row 0). */
-        int rc = tgs_run_weighted(root, NULL, out, sizeof(out));
+        int rc = tgs_run_weighted(root, NULL, NULL, out, sizeof(out));
         dump_bad_rc("unweighted runner", rc, 0, out);
         ASSERT(rc == 0);
         size_t hex = tgs_dispatch_pos(out, "test_hex_codec");
@@ -2360,7 +2360,7 @@ static int test_runner_dispatches_longest_first(void)
          * it weigh 0 and never fail the run. */
         rc = tgs_run_weighted(root,
                               "# weights\nnot a row\ntest_hex_codec\t-1\n"
-                              "test_unknown_zz\t99\ntest_codec_cursor\t9\n",
+                              "test_unknown_zz\t99\ntest_codec_cursor\t9\n", NULL,
                               out, sizeof(out));
         dump_bad_rc("weighted runner", rc, 0, out);
         ASSERT(rc == 0);
@@ -2369,8 +2369,21 @@ static int test_runner_dispatches_longest_first(void)
         cursor = tgs_dispatch_pos(out, "test_codec_cursor");
         ASSERT(hex != SIZE_MAX && cursor != SIZE_MAX);
         ASSERT(cursor < hex);
+        rc = tgs_run_weighted(root, "test_codec_cursor\t9\n",
+                              "--failure-priority=test_hex_codec", out, sizeof(out));
+        ASSERT(rc == 0);
+        hex = tgs_dispatch_pos(out, "test_hex_codec");
+        cursor = tgs_dispatch_pos(out, "test_codec_cursor");
+        ASSERT(hex != SIZE_MAX && cursor != SIZE_MAX && hex < cursor);
+        ASSERT(selector_output_contains(out, "groups_failed=0"));
+        rc = tgs_run_weighted(root, "test_codec_cursor\t9\n",
+                              "--failure-priority=test_unknown_zz", out, sizeof(out));
+        ASSERT(rc == 0);
+        hex = tgs_dispatch_pos(out, "test_hex_codec");
+        cursor = tgs_dispatch_pos(out, "test_codec_cursor");
+        ASSERT(hex != SIZE_MAX && cursor != SIZE_MAX && cursor < hex);
         /* Only malformed rows: catalog order again. */
-        rc = tgs_run_weighted(root, "test_codec_cursor 9\n\x01\t\t\n",
+        rc = tgs_run_weighted(root, "test_codec_cursor 9\n\x01\t\t\n", NULL,
                               out, sizeof(out));
         dump_bad_rc("malformed-weights runner", rc, 0, out);
         ASSERT(rc == 0);
