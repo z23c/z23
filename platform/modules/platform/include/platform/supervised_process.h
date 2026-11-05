@@ -103,6 +103,11 @@ bool platform_supervised_signal(struct platform_supervised_process *process,
  * accepts a numeric PID or exposes these operations. Caller owns returned FD. */
 int platform_supervised_fixture_pidfd_open(int64_t owned_pid);
 bool platform_supervised_fixture_pidfd_kill(int owned_fd);
+void platform_supervised_fixture_observation_error_once(void);
+/* Deterministic isolated owner-exit fixture only: gate first supervisor cleanup
+ * on one byte/EOF; the engine never inherits this unmapped descriptor. */
+void platform_supervised_fixture_cleanup_gate(int fd);
+bool platform_supervised_fixture_subreaper(void);
 #endif
 /* Release only the owner lifeline: used for owner-exit handoff/testing. The
  * handle remains owned and must still be polled until its supervisor is reaped. */

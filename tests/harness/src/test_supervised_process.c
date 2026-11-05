@@ -5,8 +5,10 @@
 #endif
 #include "test/test_core.h"
 #include "platform/supervised_process.h"
+#include "util/supervised_retirement.h"
+#include "util/thread_registry.h"
 /* Exact resource sentinels, not elapsed-time subtraction. */
-enum { FIXTURE_NO_PID = -1, FIXTURE_NO_FD = -1 };
+enum { FIXTURE_NO_PID = -1, FIXTURE_NO_FD = -1, FIXTURE_ERROR = -1 };
 #include "platform/clock.h"
 #if defined(__linux__)
 #include <fcntl.h>
@@ -14,6 +16,7 @@ enum { FIXTURE_NO_PID = -1, FIXTURE_NO_FD = -1 };
 #include <signal.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/file.h>
 #include <sys/wait.h>
 #include <elf.h>
 #include "sha3/sha3.h"
@@ -44,7 +47,7 @@ static int fixture_echo(int argc, char **argv)
     return n == 0 ? 0 : 35;
 }
 
-static int fixture_tree(void)
+static int fixture_tree(bool locked)
 {
     pid_t intermediate = fork();
     if (intermediate < 0) return 36;
@@ -53,10 +56,12 @@ static int fixture_tree(void)
         pid_t leaf = fork();
         if (leaf < 0) _exit(38);
         if (leaf) _exit(0);
+        if (locked && flock(3, LOCK_EX | LOCK_NB) < 0) _exit(42);
         pid_t self = getpid();
         if (write(STDOUT_FILENO, &self, sizeof(self)) != (ssize_t)sizeof(self)) _exit(39);
         for (;;) pause();
     }
+    if (locked) close(3);
     for (;;) pause();
 }
 
@@ -68,15 +73,38 @@ static int fixture_cwd(void)
     return write(STDOUT_FILENO, path, length) == (ssize_t)length ? 0 : 41;
 }
 
+static int fixture_retirement_owner(char **argv);
+static int fixture_retirement_idle(void)
+{
+    int live = thread_registry_live_count(), owned = thread_registry_unreaped_count();
+    if (!zcl_supervised_retirement_begin()) return 50;
+    if (thread_registry_live_count() != live + 1 ||
+        thread_registry_unreaped_count() != owned + 1) return 51;
+    /* No wake notification: the worker must observe the atomic-only setter. */
+    thread_registry_request_shutdown();
+    if (thread_registry_join_all(5) != 0) return 52;
+    if (zcl_supervised_retirement_phase() != ZCL_RETIREMENT_STOPPED ||
+        thread_registry_live_count() != live || thread_registry_unreaped_count() != owned) return 53;
+    return zcl_supervised_retirement_begin() ? 54 : 0;
+}
+
+static int fixture_dispatch_pair(const char *mode)
+{
+    if (!strcmp(mode, "--supervised-fixture-tree")) return fixture_tree(false);
+    if (!strcmp(mode, "--supervised-fixture-locked-tree")) return fixture_tree(true);
+    if (!strcmp(mode, "--supervised-fixture-hold")) for (;;) pause();
+    if (!strcmp(mode, "--supervised-fixture-exit-one")) return 1;
+    if (!strcmp(mode, "--supervised-fixture-cwd")) return fixture_cwd();
+    if (!strcmp(mode, "--supervised-fixture-retire-idle")) return fixture_retirement_idle();
+    return -1;
+}
 int supervised_fixture_dispatch(int argc, char **argv);
 int supervised_fixture_dispatch(int argc, char **argv)
 {
     if (argc == 5 && !strcmp(argv[1], "--supervised-fixture-echo")) return fixture_echo(argc, argv);
-    if (argc == 2 && !strcmp(argv[1], "--supervised-fixture-tree")) return fixture_tree();
-    if (argc == 2 && !strcmp(argv[1], "--supervised-fixture-hold"))
-        for (;;) pause();
-    if (argc == 2 && !strcmp(argv[1], "--supervised-fixture-exit-one")) return 1;
-    if (argc == 2 && !strcmp(argv[1], "--supervised-fixture-cwd")) return fixture_cwd();
+    if (argc == 2) return fixture_dispatch_pair(argv[1]);
+    if (argc == 7 && !strcmp(argv[1], "--supervised-fixture-retire-owner"))
+        return fixture_retirement_owner(argv);
     return -1;
 }
 
@@ -153,19 +181,50 @@ static struct platform_supervised_spec tree_spec(int image, int null_fd, int out
  * These are test-local ownership slots, not a runtime queue or authority. */
 static struct platform_supervised_process retained_custody[8];
 static size_t retained_count;
+/* Token-bearing handles need stable addresses even if fixture cleanup refuses.
+ * Allocate these slots before launch and release only after CLEAN or transfer. */
+static struct platform_supervised_process retirement_handles[ZCL_SUPERVISED_RETIREMENT_SLOTS + 8];
+static bool retirement_handle_used[ZCL_SUPERVISED_RETIREMENT_SLOTS + 8];
 
-static bool fixture_cleanup(struct platform_supervised_process *process)
+static struct platform_supervised_process *fixture_retirement_handle(void)
+{
+    for (size_t i = 0; i < sizeof(retirement_handles) / sizeof(retirement_handles[0]); ++i) {
+        if (retirement_handle_used[i]) continue;
+        retirement_handle_used[i] = true;
+        platform_supervised_init(&retirement_handles[i]);
+        return &retirement_handles[i];
+    }
+    return NULL;
+}
+
+static void fixture_retirement_release(struct platform_supervised_process *process)
+{
+    if (!process || process->supervisor_pid >= 0 || zcl_supervised_retirement_fixture_token(process)) return;
+    for (size_t i = 0; i < sizeof(retirement_handles) / sizeof(retirement_handles[0]); ++i)
+        if (process == &retirement_handles[i]) retirement_handle_used[i] = false;
+}
+
+static bool fixture_cleanup_until(struct platform_supervised_process *process, int64_t deadline)
 {
     if (process->supervisor_pid < 0) return true;
-    enum platform_supervised_state state = platform_supervised_stop(process, fixture_deadline());
+    enum platform_supervised_state state = zcl_supervised_retirement_stop(process, deadline);
     if (state == PLATFORM_SUPERVISED_CLEAN) return true;
     fprintf(stderr, "supervised fixture cleanup incomplete: supervisor=%lld state=%d errno=%d\n",
         (long long)process->supervisor_pid, (int)state, process->observation.error_number);
+    if (zcl_supervised_retirement_fixture_token(process)) {
+        (void)zcl_supervised_retirement_transfer(process);
+        return false; /* Refusal retains the original stable slot; never copy/reset. */
+    }
     if (retained_count < sizeof(retained_custody) / sizeof(retained_custody[0])) {
         retained_custody[retained_count++] = *process;
         platform_supervised_init(process);
     }
     return false;
+}
+
+static bool fixture_cleanup(struct platform_supervised_process *process)
+{
+    return fixture_cleanup_until(process, fixture_deadline());
 }
 
 static bool tree_cleanup(struct platform_supervised_process *process, int leaf_fd)
@@ -202,7 +261,7 @@ static int supervised_tree(int image, bool owner_eof)
         if (owner_eof) {
             platform_supervised_owner_eof(&process);
             ASSERT_EQ(await_clean(&process), PLATFORM_SUPERVISED_CLEAN);
-        } else ASSERT_EQ(platform_supervised_stop(&process, fixture_deadline()), PLATFORM_SUPERVISED_CLEAN);
+        } else ASSERT_EQ(zcl_supervised_retirement_stop(&process, fixture_deadline()), PLATFORM_SUPERVISED_CLEAN);
         ASSERT(process.observation.no_children);
         ASSERT(process.observation.engine_exit_observed);
         ASSERT_EQ(process.supervisor_pid, FIXTURE_NO_PID);
@@ -220,7 +279,7 @@ static enum platform_supervised_state await_clean(struct platform_supervised_pro
 {
     int64_t deadline = fixture_deadline();
     while (clock_now_monotonic_ns() < deadline) {
-        enum platform_supervised_state state = platform_supervised_poll(process);
+        enum platform_supervised_state state = zcl_supervised_retirement_poll(process);
         if (process->supervisor_pid < 0) return state;
         struct pollfd delay = {.fd = -1};
         (void)poll(&delay, 0, 20);
@@ -316,7 +375,7 @@ static int supervised_mapping(int image)
         ASSERT(WIFEXITED(process.observation.engine_wait_status));
         ASSERT_EQ(WEXITSTATUS(process.observation.engine_wait_status), 0);
         ASSERT(exact_eof(sockets[0]));
-        ASSERT_EQ(platform_supervised_stop(&process, fixture_deadline()), PLATFORM_SUPERVISED_CLEAN);
+        ASSERT_EQ(zcl_supervised_retirement_stop(&process, fixture_deadline()), PLATFORM_SUPERVISED_CLEAN);
     } TEST_END
     if (!fixture_cleanup(&process)) failures++;
     for (size_t i = 0; i < 2; ++i) if (sockets[i] >= 0) close(sockets[i]);
@@ -358,9 +417,9 @@ static int supervised_failures(int image)
         spec.argv = hold;
         spec.launch_deadline_ns = fixture_deadline();
         ASSERT_EQ(platform_supervised_start(&process, &spec), PLATFORM_SUPERVISED_RUNNING);
-        ASSERT_EQ(platform_supervised_stop(&process, 0), PLATFORM_SUPERVISED_INCOMPLETE);
+        ASSERT_EQ(zcl_supervised_retirement_stop(&process, 0), PLATFORM_SUPERVISED_INCOMPLETE);
         ASSERT(process.supervisor_pid > 0);
-        ASSERT_EQ(platform_supervised_stop(&process, fixture_deadline()), PLATFORM_SUPERVISED_CLEAN);
+        ASSERT_EQ(zcl_supervised_retirement_stop(&process, fixture_deadline()), PLATFORM_SUPERVISED_CLEAN);
         ASSERT(process.observation.no_children);
     } TEST_END
     if (!fixture_cleanup(&process)) failures++;
@@ -388,7 +447,7 @@ static int supervised_fast_exit(int image)
         ASSERT(WIFEXITED(process.observation.engine_wait_status));
         ASSERT_EQ(WEXITSTATUS(process.observation.engine_wait_status), 1);
         ASSERT(process.observation.no_children);
-        ASSERT_EQ(platform_supervised_poll(&process), PLATFORM_SUPERVISED_CLEAN);
+        ASSERT_EQ(zcl_supervised_retirement_poll(&process), PLATFORM_SUPERVISED_CLEAN);
     } TEST_END
     if (!fixture_cleanup(&process)) failures++;
     if (null_fd >= 0) close(null_fd);
@@ -436,7 +495,7 @@ static int retry_retained_custody(void)
     int failures = 0;
     for (size_t i = 0; i < retained_count; ++i) {
         struct platform_supervised_process *process = &retained_custody[i];
-        enum platform_supervised_state state = platform_supervised_stop(process, fixture_deadline());
+        enum platform_supervised_state state = zcl_supervised_retirement_stop(process, fixture_deadline());
         if (state != PLATFORM_SUPERVISED_CLEAN) {
             fprintf(stderr, "supervised fixture retains incomplete custody: supervisor=%lld fd=%d state=%d\n",
                 (long long)process->supervisor_pid, process->control_fd, (int)state);
@@ -590,10 +649,525 @@ static int supervised_cwd(int image, const char *directory)
     return failures;
 }
 
+static bool retirement_settled(void)
+{
+    int64_t deadline = fixture_deadline();
+    while (zcl_supervised_retirement_fixture_pending() && clock_now_monotonic_ns() < deadline) {
+        struct pollfd delay = {.fd = -1};
+        (void)poll(&delay, 0, 20);
+    }
+    return zcl_supervised_retirement_fixture_pending() == 0;
+}
+
+static int supervised_retirement(int image, const char *directory, unsigned scenario)
+{
+    int failures = 0, null_fd = -1, lock_fd = -1, probe = -1, leaf_fd = -1;
+    int pipes[2] = {-1, -1};
+    struct platform_supervised_process *process = fixture_retirement_handle(), empty;
+    platform_supervised_init(&empty);
+    static const char *const labels[] = {
+        "supervised_process: pending retirement owns cleanup and reaps supervisor",
+        "supervised_process: live observation error transfers the same custody",
+        "supervised_process: interrupted wake refuses without losing caller ownership"};
+    char path[1200];
+    TEST_CASE(labels[scenario]) {
+        ASSERT(process != NULL);
+        ASSERT(snprintf(path, sizeof(path), "%s/retirement-lock-%u", directory, scenario) > 0);
+        lock_fd = open(path, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        probe = open(path, O_RDWR | O_CLOEXEC);
+        null_fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+        ASSERT(lock_fd >= 0 && probe >= 0 && null_fd >= 0);
+        ASSERT(pipe2(pipes, O_CLOEXEC) == 0);
+        struct platform_supervised_fd_map maps[4];
+        struct platform_supervised_spec spec = tree_spec(image, null_fd, pipes[1], maps);
+        static const char *const argv[] = {"supervised-fixture", "--supervised-fixture-locked-tree", NULL};
+        spec.argv = argv;
+        maps[3] = (struct platform_supervised_fd_map){lock_fd, 3}; spec.map_count = 4;
+        unsigned reaps = zcl_supervised_retirement_fixture_reaps();
+        struct sigaction before, after;
+        ASSERT(sigaction(SIGCHLD, NULL, &before) == 0);
+        ASSERT_EQ(zcl_supervised_retirement_start(process, &spec), PLATFORM_SUPERVISED_RUNNING);
+        close(lock_fd); lock_fd = -1;
+        close(pipes[1]); pipes[1] = -1;
+        pid_t leaf = FIXTURE_NO_PID;
+        ASSERT(wait_bytes(pipes[0], &leaf, sizeof(leaf)));
+        leaf_fd = platform_supervised_fixture_pidfd_open(leaf);
+        ASSERT(leaf_fd >= 0);
+        ASSERT_EQ(flock(probe, LOCK_EX | LOCK_NB), FIXTURE_ERROR);
+        ASSERT_EQ(errno, EWOULDBLOCK);
+        int64_t supervisor = process->supervisor_pid;
+        if (scenario == 1) {
+            platform_supervised_fixture_observation_error_once();
+            ASSERT_EQ(zcl_supervised_retirement_poll(process), PLATFORM_SUPERVISED_OBSERVATION_FAILED);
+        } else if (scenario == 0)
+            ASSERT_EQ(zcl_supervised_retirement_stop(process, 0), PLATFORM_SUPERVISED_INCOMPLETE);
+        ASSERT_EQ(process->supervisor_pid, supervisor);
+        if (scenario == 2) {
+            int control = process->control_fd;
+            uint64_t token = zcl_supervised_retirement_fixture_token(process);
+            size_t old_retained = retained_count;
+            struct platform_supervised_process *original = process;
+            zcl_supervised_retirement_fixture_wake_error_once();
+            ASSERT(!fixture_cleanup_until(process, 0));
+            ASSERT(process == original);
+            ASSERT_EQ(process->supervisor_pid, supervisor);
+            ASSERT_EQ(process->control_fd, control);
+            ASSERT_EQ(zcl_supervised_retirement_fixture_token(process), token);
+            ASSERT_EQ(retained_count, old_retained);
+            ASSERT_EQ(zcl_supervised_retirement_fixture_pending(), 1);
+        }
+        ASSERT_EQ(zcl_supervised_retirement_transfer(process), ZCL_RETIREMENT_TRANSFERRED);
+        ASSERT_EQ(process->supervisor_pid, empty.supervisor_pid);
+        ASSERT_EQ(process->control_fd, empty.control_fd);
+        ASSERT_EQ(zcl_supervised_retirement_fixture_token(process), zcl_supervised_retirement_fixture_token(&empty));
+        ASSERT(process->observation.state != PLATFORM_SUPERVISED_CLEAN);
+        ASSERT_EQ(zcl_supervised_retirement_transfer(process), ZCL_RETIREMENT_REFUSED);
+        ASSERT(retirement_settled());
+        ASSERT_EQ(zcl_supervised_retirement_fixture_reaps(), reaps + 1);
+        ASSERT_EQ(waitpid((pid_t)supervisor, NULL, WNOHANG), FIXTURE_ERROR);
+        ASSERT_EQ(errno, ECHILD);
+        struct pollfd ended = {.fd = leaf_fd, .events = POLLIN};
+        ASSERT(poll(&ended, 1, 0) > 0);
+        ASSERT_EQ(flock(probe, LOCK_EX | LOCK_NB), 0);
+        ASSERT(exact_eof(pipes[0]));
+        ASSERT(sigaction(SIGCHLD, NULL, &after) == 0);
+        ASSERT(before.sa_handler == after.sa_handler);
+        ASSERT_EQ(before.sa_flags, after.sa_flags);
+    } TEST_END
+    if (process && !tree_cleanup(process, leaf_fd)) failures++;
+    fixture_retirement_release(process);
+    if (lock_fd >= 0) close(lock_fd);
+    if (probe >= 0) close(probe);
+    if (null_fd >= 0) close(null_fd);
+    for (size_t i = 0; i < 2; ++i) if (pipes[i] >= 0) close(pipes[i]);
+    return failures;
+}
+
+static int supervised_retirement_refusal(int image)
+{
+    int failures = 0, null_fd = -1;
+    struct platform_supervised_process *process = fixture_retirement_handle();
+    TEST_CASE("supervised_process: reservation refusal and old handles never transfer") {
+        ASSERT(process != NULL);
+        null_fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+        ASSERT(null_fd >= 0);
+        struct platform_supervised_fd_map maps[3];
+        struct platform_supervised_spec spec = tree_spec(image, null_fd, null_fd, maps);
+        static const char *const argv[] = {"supervised-fixture", "--supervised-fixture-hold", NULL};
+        spec.argv = argv;
+        zcl_supervised_retirement_fixture_refuse(true);
+        enum platform_supervised_state refused = zcl_supervised_retirement_start(process, &spec);
+        zcl_supervised_retirement_fixture_refuse(false);
+        ASSERT_EQ(refused, PLATFORM_SUPERVISED_LAUNCH_FAILED);
+        ASSERT_EQ(process->supervisor_pid, FIXTURE_NO_PID);
+        ASSERT_EQ(process->control_fd, FIXTURE_NO_FD);
+        ASSERT_EQ(zcl_supervised_retirement_fixture_token(process), 0);
+        ASSERT_EQ(zcl_supervised_retirement_fixture_pending(), 0);
+        ASSERT_EQ(platform_supervised_start(process, &spec), PLATFORM_SUPERVISED_RUNNING);
+        int64_t supervisor = process->supervisor_pid;
+        int control = process->control_fd;
+        ASSERT_EQ(zcl_supervised_retirement_transfer(process), ZCL_RETIREMENT_REFUSED);
+        ASSERT_EQ(process->supervisor_pid, supervisor);
+        ASSERT_EQ(process->control_fd, control);
+        ASSERT_EQ(zcl_supervised_retirement_stop(process, fixture_deadline()), PLATFORM_SUPERVISED_CLEAN);
+        spec.executable_fd = null_fd;
+        ASSERT_EQ(zcl_supervised_retirement_start(process, &spec), PLATFORM_SUPERVISED_INVALID);
+        ASSERT_EQ(zcl_supervised_retirement_fixture_pending(), 0);
+        ASSERT_EQ(zcl_supervised_retirement_fixture_token(process), 0);
+    } TEST_END
+    zcl_supervised_retirement_fixture_refuse(false);
+    if (process && !fixture_cleanup(process)) failures++;
+    fixture_retirement_release(process);
+    if (null_fd >= 0) close(null_fd);
+    return failures;
+}
+
+static int supervised_retirement_fork(int image)
+{
+    int failures = 0, null_fd = -1;
+    struct platform_supervised_process *process = fixture_retirement_handle();
+    TEST_CASE("supervised_process: fork child refuses inherited cleanup ownership before locks") {
+        ASSERT(process != NULL);
+        null_fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+        ASSERT(null_fd >= 0);
+        struct platform_supervised_fd_map maps[3];
+        struct platform_supervised_spec spec = tree_spec(image, null_fd, null_fd, maps);
+        static const char *const argv[] = {"supervised-fixture", "--supervised-fixture-hold", NULL};
+        spec.argv = argv;
+        ASSERT_EQ(zcl_supervised_retirement_start(process, &spec), PLATFORM_SUPERVISED_RUNNING);
+        uint64_t token = zcl_supervised_retirement_fixture_token(process);
+        pid_t child = fork();
+        ASSERT(child >= 0);
+        if (!child) {
+            struct platform_supervised_process fresh;
+            platform_supervised_init(&fresh);
+            bool refused = zcl_supervised_retirement_start(&fresh, &spec) == PLATFORM_SUPERVISED_UNSUPPORTED;
+            refused = refused && zcl_supervised_retirement_transfer(process) == ZCL_RETIREMENT_REFUSED;
+            _exit(refused ? 0 : 1);
+        }
+        int status = 0;
+        ASSERT_EQ(waitpid(child, &status, 0), child);
+        ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        ASSERT_EQ(zcl_supervised_retirement_fixture_token(process), token);
+        ASSERT_EQ(zcl_supervised_retirement_fixture_pending(), 1);
+        ASSERT_EQ(zcl_supervised_retirement_stop(process, fixture_deadline()), PLATFORM_SUPERVISED_CLEAN);
+        ASSERT_EQ(zcl_supervised_retirement_fixture_pending(), 0);
+    } TEST_END
+    if (process && !fixture_cleanup(process)) failures++;
+    fixture_retirement_release(process);
+    if (null_fd >= 0) close(null_fd);
+    return failures;
+}
+
+static int supervised_retirement_capacity(int image)
+{
+    int failures = 0, null_fd = -1;
+    struct platform_supervised_process *handles[ZCL_SUPERVISED_RETIREMENT_SLOTS + 1];
+    for (size_t i = 0; i < sizeof(handles) / sizeof(handles[0]); ++i)
+        handles[i] = fixture_retirement_handle();
+    TEST_CASE("supervised_process: all fixed reservations saturate before fork and are reusable") {
+        for (size_t i = 0; i < sizeof(handles) / sizeof(handles[0]); ++i) ASSERT(handles[i] != NULL);
+        null_fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+        ASSERT(null_fd >= 0);
+        struct platform_supervised_fd_map maps[3];
+        static const char *const argv[] = {"supervised-fixture", "--supervised-fixture-hold", NULL};
+        for (size_t i = 0; i < ZCL_SUPERVISED_RETIREMENT_SLOTS; ++i) {
+            struct platform_supervised_spec spec = tree_spec(image, null_fd, null_fd, maps);
+            spec.argv = argv;
+            ASSERT_EQ(zcl_supervised_retirement_start(handles[i], &spec), PLATFORM_SUPERVISED_RUNNING);
+        }
+        ASSERT_EQ(zcl_supervised_retirement_fixture_pending(), ZCL_SUPERVISED_RETIREMENT_SLOTS);
+        struct platform_supervised_process *overflow = handles[ZCL_SUPERVISED_RETIREMENT_SLOTS];
+        struct platform_supervised_spec spec = tree_spec(image, null_fd, null_fd, maps);
+        spec.argv = argv;
+        ASSERT_EQ(zcl_supervised_retirement_start(overflow, &spec), PLATFORM_SUPERVISED_LAUNCH_FAILED);
+        ASSERT_EQ(overflow->supervisor_pid, FIXTURE_NO_PID);
+        ASSERT_EQ(overflow->control_fd, FIXTURE_NO_FD);
+        ASSERT_EQ(zcl_supervised_retirement_fixture_token(overflow), 0);
+        for (size_t i = 0; i < ZCL_SUPERVISED_RETIREMENT_SLOTS; ++i)
+            ASSERT_EQ(zcl_supervised_retirement_stop(handles[i], fixture_deadline()), PLATFORM_SUPERVISED_CLEAN);
+        ASSERT_EQ(zcl_supervised_retirement_fixture_pending(), 0);
+        spec.launch_deadline_ns = fixture_deadline();
+        ASSERT_EQ(zcl_supervised_retirement_start(overflow, &spec), PLATFORM_SUPERVISED_RUNNING);
+        ASSERT_EQ(zcl_supervised_retirement_transfer(overflow), ZCL_RETIREMENT_TRANSFERRED);
+        ASSERT(retirement_settled());
+    } TEST_END
+    for (size_t i = 0; i < sizeof(handles) / sizeof(handles[0]); ++i) {
+        if (handles[i] && !fixture_cleanup(handles[i])) failures++;
+        fixture_retirement_release(handles[i]);
+    }
+    if (null_fd >= 0) close(null_fd);
+    return failures;
+}
+
+struct retirement_exit_ack {
+    int64_t supervisor, empty_supervisor;
+    uint64_t token;
+    unsigned transferred, state, pending;
+};
+
+/* Fresh exec is required: the outer fixture deliberately inherited a parent
+ * whose retirement thread exists, and that fork branch must keep refusing. */
+static int fixture_retirement_owner(char **argv)
+{
+    if (!zcl_supervised_retirement_begin()) return 49;
+    int image = atoi(argv[2]), gate = atoi(argv[3]);
+    int output = atoi(argv[4]), ack = atoi(argv[5]);
+    int null_fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+    int lock_fd = open(argv[6], O_RDWR | O_CLOEXEC);
+    if (null_fd < 0 || lock_fd < 0) return 43;
+    struct platform_supervised_process *process = fixture_retirement_handle();
+    if (!process) return 48;
+    struct platform_supervised_fd_map maps[4];
+    struct platform_supervised_spec spec = tree_spec(image, null_fd, output, maps);
+    static const char *const child_argv[] = {"supervised-fixture", "--supervised-fixture-locked-tree", NULL};
+    spec.argv = child_argv;
+    maps[3] = (struct platform_supervised_fd_map){lock_fd, 3}; spec.map_count = 4;
+    platform_supervised_fixture_cleanup_gate(gate);
+    enum platform_supervised_state started = zcl_supervised_retirement_start(process, &spec);
+    platform_supervised_fixture_cleanup_gate(FIXTURE_NO_FD);
+    close(gate); close(lock_fd); close(null_fd); close(output);
+    int64_t supervisor = process->supervisor_pid;
+    enum zcl_supervised_retirement_result transferred = zcl_supervised_retirement_transfer(process);
+    struct retirement_exit_ack reply = {.supervisor = supervisor,
+        .empty_supervisor = process->supervisor_pid, .token = zcl_supervised_retirement_fixture_token(process),
+        .transferred = (unsigned)transferred, .state = (unsigned)process->observation.state,
+        .pending = zcl_supervised_retirement_fixture_pending()};
+    ssize_t written = write(ack, &reply, sizeof(reply));
+    close(ack);
+    if (started != PLATFORM_SUPERVISED_RUNNING || transferred != ZCL_RETIREMENT_TRANSFERRED) {
+        (void)fixture_cleanup(process);
+        return 44;
+    }
+    return written == (ssize_t)sizeof(reply) ? 0 : 45;
+}
+
+static bool retirement_wait_child(pid_t child, int *status)
+{
+    int64_t deadline = fixture_deadline();
+    while (clock_now_monotonic_ns() < deadline) {
+        pid_t got = waitpid(child, status, WNOHANG);
+        if (got == child) return true;
+        if (got < 0 && errno != EINTR) return false;
+        struct pollfd delay = {.fd = -1};
+        (void)poll(&delay, 0, 20);
+    }
+    return false;
+}
+
+static void retirement_exec_owner(int image, int gate, int output, int ack, const char *lock)
+{
+    int fds[] = {image, gate, output, ack};
+    char values[4][32];
+    for (size_t i = 0; i < 4; ++i) {
+        if (fcntl(fds[i], F_SETFD, 0) < 0) _exit(46);
+        snprintf(values[i], sizeof(values[i]), "%d", fds[i]);
+    }
+    char *const argv[] = {"supervised-fixture", "--supervised-fixture-retire-owner",
+        values[0], values[1], values[2], values[3], (char *)lock, NULL};
+    execv("/proc/self/exe", argv);
+    _exit(47);
+}
+
+struct retirement_exit_resources {
+    int probe, owner_fd, leaf_fd, supervisor_fd;
+    int gate[2], output[2], ack[2];
+    pid_t owner, supervisor;
+    bool owner_reaped, supervisor_reaped;
+};
+
+static void retirement_exit_emergency(struct retirement_exit_resources *state)
+{
+    if (state->leaf_fd >= 0) (void)platform_supervised_fixture_pidfd_kill(state->leaf_fd);
+    if (state->gate[1] >= 0) { close(state->gate[1]); state->gate[1] = FIXTURE_NO_FD; }
+    int status;
+    if (!state->owner_reaped && state->owner_fd >= 0) {
+        (void)platform_supervised_fixture_pidfd_kill(state->owner_fd);
+        (void)retirement_wait_child(state->owner, &status);
+    }
+    if (!state->supervisor_reaped && state->supervisor_fd >= 0 &&
+        !retirement_wait_child(state->supervisor, &status)) {
+        (void)platform_supervised_fixture_pidfd_kill(state->supervisor_fd);
+        (void)retirement_wait_child(state->supervisor, &status);
+    }
+}
+
+static void retirement_exit_close(struct retirement_exit_resources *state, bool failed)
+{
+    /* Emergency signals ONLY on failure, never mask success-path cleanup. */
+    if (failed) retirement_exit_emergency(state);
+    int descriptors[] = {state->probe, state->owner_fd, state->leaf_fd, state->supervisor_fd,
+        state->gate[0], state->gate[1], state->output[0], state->output[1], state->ack[0], state->ack[1]};
+    for (size_t i = 0; i < sizeof(descriptors) / sizeof(descriptors[0]); ++i)
+        if (descriptors[i] >= 0) close(descriptors[i]);
+}
+
+/* Runs only in an isolated outer process. Its subreaper role models the host
+ * adopter; it never changes the main test process's signal or wait policy. */
+static int retirement_exit_model(int image, const char *directory)
+{
+    int failures = 0, probe = -1, owner_fd = -1, leaf_fd = -1, supervisor_fd = -1;
+    int gate[2] = {-1, -1}, output[2] = {-1, -1}, ack[2] = {-1, -1};
+    pid_t owner = FIXTURE_NO_PID, supervisor = FIXTURE_NO_PID;
+    bool owner_reaped = false, supervisor_reaped = false;
+    TEST_CASE("supervised_process: transfer ACK then owner exit precedes descendant cleanup") {
+        ASSERT(platform_supervised_fixture_subreaper());
+        ASSERT(pipe2(gate, O_CLOEXEC) == 0 && pipe2(output, O_CLOEXEC) == 0 && pipe2(ack, O_CLOEXEC) == 0);
+        char lock[1200];
+        ASSERT(snprintf(lock, sizeof(lock), "%s/owner-exit-lock", directory) > 0);
+        probe = open(lock, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        ASSERT(probe >= 0);
+        owner = fork();
+        ASSERT(owner >= 0);
+        if (!owner) retirement_exec_owner(image, gate[0], output[1], ack[1], lock);
+        owner_fd = platform_supervised_fixture_pidfd_open(owner);
+        ASSERT(owner_fd >= 0);
+        close(gate[0]); gate[0] = -1;
+        close(output[1]); output[1] = -1;
+        close(ack[1]); ack[1] = -1;
+        struct retirement_exit_ack reply;
+        ASSERT(wait_bytes(ack[0], &reply, sizeof(reply)));
+        ASSERT_EQ(reply.transferred, ZCL_RETIREMENT_TRANSFERRED);
+        ASSERT_EQ(reply.empty_supervisor, FIXTURE_NO_PID);
+        ASSERT_EQ(reply.token, 0);
+        ASSERT_EQ(reply.state, PLATFORM_SUPERVISED_INVALID);
+        ASSERT_EQ(reply.pending, 1);
+        ASSERT(reply.supervisor > 1 && reply.supervisor <= INT32_MAX);
+        supervisor = (pid_t)reply.supervisor;
+        supervisor_fd = platform_supervised_fixture_pidfd_open(supervisor);
+        ASSERT(supervisor_fd >= 0);
+        pid_t leaf = FIXTURE_NO_PID;
+        ASSERT(wait_bytes(output[0], &leaf, sizeof(leaf)));
+        leaf_fd = platform_supervised_fixture_pidfd_open(leaf);
+        ASSERT(leaf_fd >= 0);
+        int status = 0;
+        owner_reaped = retirement_wait_child(owner, &status);
+        ASSERT(owner_reaped && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        /* Owner is gone but cleanup is still gated: prove real adoption and
+         * held lock before allowing the existing supervisor to finish. */
+        ASSERT_EQ(waitpid(supervisor, &status, WNOHANG), 0);
+        ASSERT_EQ(flock(probe, LOCK_EX | LOCK_NB), FIXTURE_ERROR);
+        ASSERT_EQ(errno, EWOULDBLOCK);
+        puts("retirement exit fixture: owner reaped, supervisor adopted, leaf still holds lock");
+        fflush(stdout);
+        uint8_t release = 1;
+        ASSERT_EQ(write(gate[1], &release, sizeof(release)), (ssize_t)sizeof(release));
+        close(gate[1]); gate[1] = -1;
+        supervisor_reaped = retirement_wait_child(supervisor, &status);
+        ASSERT(supervisor_reaped && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        ASSERT_EQ(waitpid(supervisor, &status, WNOHANG), FIXTURE_ERROR);
+        ASSERT_EQ(errno, ECHILD);
+        struct pollfd dead = {.fd = leaf_fd, .events = POLLIN};
+        ASSERT(poll(&dead, 1, 0) > 0);
+        ASSERT_EQ(flock(probe, LOCK_EX | LOCK_NB), 0);
+        ASSERT(exact_eof(output[0]));
+        puts("retirement exit fixture: supervisor reaped exactly once, leaf lock released, pipe EOF");
+    } TEST_END
+    struct retirement_exit_resources resources = {.probe = probe, .owner_fd = owner_fd,
+        .leaf_fd = leaf_fd, .supervisor_fd = supervisor_fd, .gate = {gate[0], gate[1]},
+        .output = {output[0], output[1]}, .ack = {ack[0], ack[1]}, .owner = owner,
+        .supervisor = supervisor, .owner_reaped = owner_reaped, .supervisor_reaped = supervisor_reaped};
+    retirement_exit_close(&resources, failures != 0);
+    return failures;
+}
+
+static int supervised_retirement_owner_exit(int image, const char *directory)
+{
+    int failures = 0;
+    TEST_CASE("supervised_process: isolated host reaps retired supervisor after embedding owner exits") {
+        fflush(NULL);
+        pid_t outer = fork();
+        ASSERT(outer >= 0);
+        if (!outer) {
+            int failed = retirement_exit_model(image, directory);
+            fflush(NULL);
+            _exit(failed ? 1 : 0);
+        }
+        int status = 0; pid_t got;
+        do { got = waitpid(outer, &status, 0); } while (got < 0 && errno == EINTR);
+        ASSERT_EQ(got, outer);
+        ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    } TEST_END
+    return failures;
+}
+
+static int retry_stable_retirement_custody(void)
+{
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(retirement_handles) / sizeof(retirement_handles[0]); ++i) {
+        if (!retirement_handle_used[i]) continue;
+        struct platform_supervised_process *process = &retirement_handles[i];
+        if (!fixture_cleanup(process)) failures++;
+        fixture_retirement_release(process);
+    }
+    if (!retirement_settled()) failures++;
+    return failures;
+}
+
+
+struct retirement_launch_context {
+    struct platform_supervised_process *process;
+    struct platform_supervised_spec spec;
+    int notify, resume;
+    enum platform_supervised_state result;
+};
+static struct retirement_launch_context retirement_launch;
+
+static void *retirement_launch_entry(void *arg)
+{
+    struct retirement_launch_context *context = arg;
+    zcl_supervised_retirement_fixture_reservation_gate(context->notify, context->resume);
+    context->result = zcl_supervised_retirement_start(context->process, &context->spec);
+    zcl_supervised_retirement_fixture_reservation_gate(FIXTURE_NO_FD, FIXTURE_NO_FD);
+    return NULL;
+}
+
+static int supervised_retirement_idle(void)
+{
+    int failures = 0;
+    TEST_CASE("supervised_process: idle registry shutdown joins retirement worker") {
+        pid_t owner = fork();
+        ASSERT(owner >= 0);
+        if (!owner) {
+            execl("/proc/self/exe", "supervised-fixture", "--supervised-fixture-retire-idle", (char *)NULL);
+            _exit(55);
+        }
+        int status = 0;
+        ASSERT(retirement_wait_child(owner, &status));
+        ASSERT(WIFEXITED(status));
+        ASSERT_EQ(WEXITSTATUS(status), 0);
+    } TEST_END
+    return failures;
+}
+
+/* Last service test: shutdown is terminal, not a hidden per-operation restart.
+ * Reservation is paused before fork; main requests stop while launch is live. */
+static int supervised_retirement_draining(int image)
+{
+    int failures = 0;
+    int notified[2] = {-1, -1}, resume[2] = {-1, -1};
+    int null_fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+    struct platform_supervised_process *process = fixture_retirement_handle();
+    struct platform_supervised_fd_map maps[3];
+    pthread_t launcher;
+    bool spawned = false, released = false;
+    TEST_CASE("supervised_process: stop preserves in-flight reservation and late transfer") {
+        ASSERT(process && null_fd >= 0);
+        ASSERT(pipe2(notified, O_CLOEXEC) == 0);
+        ASSERT(pipe2(resume, O_CLOEXEC) == 0);
+        retirement_launch = (struct retirement_launch_context){
+            .process = process, .spec = tree_spec(image, null_fd, null_fd, maps),
+            .notify = notified[1], .resume = resume[0], .result = PLATFORM_SUPERVISED_INVALID};
+        ASSERT_EQ(thread_registry_spawn("retirement-launch", retirement_launch_entry,
+            &retirement_launch, &launcher), 0);
+        spawned = true;
+        uint8_t byte = 0;
+        ASSERT_EQ(read(notified[0], &byte, 1), 1);
+        ASSERT_EQ(zcl_supervised_retirement_fixture_pending(), 1);
+        zcl_supervised_retirement_request_stop();
+        ASSERT_EQ(zcl_supervised_retirement_phase(), ZCL_RETIREMENT_DRAINING);
+        ASSERT(!zcl_supervised_retirement_drain(clock_now_monotonic_ns()));
+        struct platform_supervised_process rejected;
+        platform_supervised_init(&rejected);
+        ASSERT_EQ(zcl_supervised_retirement_start(&rejected, &retirement_launch.spec),
+            PLATFORM_SUPERVISED_LAUNCH_FAILED);
+        ASSERT_EQ(rejected.supervisor_pid, FIXTURE_NO_PID);
+        ASSERT_EQ(write(resume[1], &byte, 1), 1);
+        released = true;
+        ASSERT_EQ(pthread_join(launcher, NULL), 0);
+        spawned = false;
+        ASSERT_EQ(retirement_launch.result, PLATFORM_SUPERVISED_RUNNING);
+        ASSERT_EQ(zcl_supervised_retirement_transfer(process), ZCL_RETIREMENT_TRANSFERRED);
+        ASSERT_EQ(process->supervisor_pid, FIXTURE_NO_PID);
+        ASSERT(zcl_supervised_retirement_drain(fixture_deadline()));
+        ASSERT_EQ(zcl_supervised_retirement_phase(), ZCL_RETIREMENT_STOPPED);
+        ASSERT_EQ(thread_registry_join_all(5), 0);
+        ASSERT(!zcl_supervised_retirement_begin());
+    } TEST_END
+    if (spawned) {
+        if (!released && resume[1] >= 0) {
+            close(resume[1]); /* EOF refuses the paused launch and releases its reservation. */
+            resume[1] = FIXTURE_NO_FD;
+        }
+        (void)pthread_join(launcher, NULL);
+    }
+    if (process) {
+        if (!fixture_cleanup(process)) failures++;
+        fixture_retirement_release(process);
+    }
+    for (size_t i = 0; i < 2; ++i) {
+        if (notified[i] >= 0) close(notified[i]);
+        if (resume[i] >= 0) close(resume[i]);
+    }
+    if (null_fd >= 0) close(null_fd);
+    return failures;
+}
+
 int test_supervised_process(void);
 int test_supervised_process(void)
 {
     int failures = 0;
+    if (!zcl_supervised_retirement_begin()) return 1;
     int image = -1;
     char directory[1024] = {0}, path[1200];
     TEST_CASE("supervised_process: sealed registered fixture image") {
@@ -620,8 +1194,17 @@ int test_supervised_process(void)
         failures += supervised_image_capture();
         failures += supervised_image_refusals();
         failures += supervised_image_geometry();
+        failures += supervised_retirement_refusal(image);
+        for (unsigned scenario = 0; scenario < 3; ++scenario)
+            failures += supervised_retirement(image, directory, scenario);
+        failures += supervised_retirement_fork(image);
+        failures += supervised_retirement_capacity(image);
+        failures += supervised_retirement_owner_exit(image, directory);
+        failures += supervised_retirement_idle();
+        failures += supervised_retirement_draining(image);
     } TEST_END
     if (image >= 0) close(image);
+    failures += retry_stable_retirement_custody();
     if (directory[0]) test_rm_rf(directory);
     failures += retry_retained_custody();
     return failures;

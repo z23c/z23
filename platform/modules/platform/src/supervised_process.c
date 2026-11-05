@@ -5,6 +5,7 @@
 #endif
 #include "platform/supervised_process.h"
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 
 void platform_supervised_init(struct platform_supervised_process *process)
@@ -28,6 +29,11 @@ void platform_supervised_init(struct platform_supervised_process *process)
 #include <elf.h>
 #include <sys/mman.h>
 #include "sha3/sha3.h"
+
+#ifdef ZCL_TESTING
+static _Thread_local bool observation_error_once;
+static _Thread_local int retirement_cleanup_gate = -1;
+#endif
 
 struct image_layout {
     const uint8_t *bytes;
@@ -293,6 +299,9 @@ struct supervisor {
     pid_t engine;
     int engine_pidfd;
     uint32_t cleanup_ms;
+#ifdef ZCL_TESTING
+    int fixture_cleanup_gate;
+#endif
     struct platform_supervised_observation observation;
 };
 enum { PACKET_VERSION = 2, PACKET_STOP = 1, PACKET_REPORT = 2, PACKET_SIGNAL = 3 };
@@ -581,6 +590,23 @@ static void forward_engine_signal(const struct supervisor *state, unsigned signa
     (void)syscall(SYS_pidfd_send_signal, state->engine_pidfd, number, NULL, 0);
 }
 
+static void supervise_request(struct supervisor *state, bool *stopping,
+    bool *owner_eof, int64_t *deadline)
+{
+    struct packet request;
+    int received = receive_packet(state->control, &request);
+    if (received > 0 && request.operation == PACKET_STOP) {
+        *stopping = true;
+        *deadline = request.deadline;
+    } else if (received > 0 && request.operation == PACKET_SIGNAL) {
+        if (!*stopping) forward_engine_signal(state, request.signal);
+    } else if (received < 0) {
+        *stopping = true;
+        *deadline = cleanup_deadline(state);
+        *owner_eof = true;
+    }
+}
+
 static void supervise(struct supervisor *state)
 {
     bool stopping = false;
@@ -589,25 +615,21 @@ static void supervise(struct supervisor *state)
     for (;;) {
         struct pollfd event = {.fd = owner_eof ? -1 : state->control, .events = POLLIN};
         (void)poll(&event, 1, 20);
-        if (event.revents) {
-            struct packet request;
-            int received = receive_packet(state->control, &request);
-            if (received > 0 && request.operation == PACKET_STOP) {
-                stopping = true;
-                deadline = request.deadline;
-            } else if (received > 0 && request.operation == PACKET_SIGNAL) {
-                if (!stopping) forward_engine_signal(state, request.signal);
-            } else if (received < 0) {
-                stopping = true;
-                deadline = cleanup_deadline(state);
-                owner_eof = true;
-            }
-        }
+        if (event.revents) supervise_request(state, &stopping, &owner_eof, &deadline);
         if (!stopping && engine_exited(state)) {
             stopping = true;
             deadline = cleanup_deadline(state);
         }
         if (!stopping) continue;
+#ifdef ZCL_TESTING
+        if (state->fixture_cleanup_gate >= 0) {
+            uint8_t byte;
+            ssize_t received = read(state->fixture_cleanup_gate, &byte, sizeof(byte));
+            (void)received;
+            close(state->fixture_cleanup_gate);
+            state->fixture_cleanup_gate = -1;
+        }
+#endif
         bool clean = cleanup(state, deadline);
         report(state, clean ? PLATFORM_SUPERVISED_CLEAN : PLATFORM_SUPERVISED_INCOMPLETE);
         if (clean) _exit(0);
@@ -630,14 +652,23 @@ static int arm_subreaper(void)
     return 0;
 }
 
-static bool launch_engine(struct supervisor *state, const struct platform_supervised_spec *spec)
+static int launch_descriptors(struct supervisor *state, const struct platform_supervised_spec *spec)
 {
     int error = arm_subreaper();
-    int keep[PLATFORM_SUPERVISED_MAX_MAPS + 3] = {state->control, spec->executable_fd};
+    int keep[PLATFORM_SUPERVISED_MAX_MAPS + 4] = {state->control, spec->executable_fd};
     for (size_t i = 0; i < spec->map_count; ++i) keep[i + 2] = spec->maps[i].source;
     size_t kept = spec->map_count + 2;
     if (spec->use_cwd_fd) keep[kept++] = spec->cwd_fd;
+#ifdef ZCL_TESTING
+    if (state->fixture_cleanup_gate >= 0) keep[kept++] = state->fixture_cleanup_gate;
+#endif
     if (!error && !close_except(keep, kept)) error = errno;
+    return error;
+}
+
+static bool launch_engine(struct supervisor *state, const struct platform_supervised_spec *spec)
+{
+    int error = launch_descriptors(state, spec);
     int errors[2] = {-1, -1};
     if (!error && pipe2(errors, O_CLOEXEC) < 0) error = errno;
     if (!error) {
@@ -656,12 +687,18 @@ static bool launch_engine(struct supervisor *state, const struct platform_superv
     return executed;
 }
 
-static void supervisor_main(int control, int other, const struct platform_supervised_spec *spec)
+static void supervisor_main(int control, int other, const struct platform_supervised_spec *spec,
+    int fixture_gate)
 {
     close(other);
     struct supervisor state = {.control = control, .engine = -1,
         .engine_pidfd = -1,
         .cleanup_ms = spec->cleanup_timeout_ms};
+#ifdef ZCL_TESTING
+    state.fixture_cleanup_gate = fixture_gate;
+#else
+    (void)fixture_gate;
+#endif
     bool executed = launch_engine(&state, spec);
     for (size_t i = 0; i < spec->map_count; ++i) close(spec->maps[i].source);
     close(spec->executable_fd);
@@ -681,17 +718,27 @@ static void supervisor_main(int control, int other, const struct platform_superv
 
 static pid_t fork_supervisor(int control, int other, const struct platform_supervised_spec *spec)
 {
+    int fixture_gate = -1;
+#ifdef ZCL_TESTING
+    fixture_gate = retirement_cleanup_gate; /* Snapshot TLS before the raw fork. */
+#endif
     sigset_t blocked, previous;
     sigfillset(&blocked);
     if (sigprocmask(SIG_SETMASK, &blocked, &previous) < 0) return -1;
     pid_t pid = raw_fork();
-    if (pid == 0) supervisor_main(control, other, spec);
+    if (pid == 0) supervisor_main(control, other, spec, fixture_gate);
     (void)sigprocmask(SIG_SETMASK, &previous, NULL);
     return pid;
 }
 
 static enum platform_supervised_state consume(struct platform_supervised_process *process)
 {
+#ifdef ZCL_TESTING
+    if (observation_error_once) {
+        observation_error_once = false;
+        return PLATFORM_SUPERVISED_OBSERVATION_FAILED;
+    }
+#endif
     struct packet packet;
     int received = receive_packet(process->control_fd, &packet);
     if (!received) return process->observation.state;
@@ -839,6 +886,33 @@ void platform_supervised_owner_eof(struct platform_supervised_process *process)
     (void)process;
 #endif
 }
+
+#ifdef ZCL_TESTING
+void platform_supervised_fixture_observation_error_once(void)
+{
+#if defined(__linux__)
+    observation_error_once = true;
+#endif
+}
+
+void platform_supervised_fixture_cleanup_gate(int fd)
+{
+#if defined(__linux__)
+    retirement_cleanup_gate = fd;
+#else
+    (void)fd;
+#endif
+}
+
+bool platform_supervised_fixture_subreaper(void)
+{
+#if defined(__linux__)
+    return prctl(PR_SET_CHILD_SUBREAPER, 1) == 0;
+#else
+    return false;
+#endif
+}
+#endif
 
 bool platform_supervised_signal(struct platform_supervised_process *process,
     enum platform_supervised_signal signal)

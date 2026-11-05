@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
+ * Source-owned capability declaration for supervised retirement custody. */
+ZCL_MODULE_CAPABILITY("platform/modules/util/src/supervised_retirement.c", CAP_FS_READ|CAP_FS_WRITE|CAP_NETWORK, "reads and writes its local wake pipe, closes retained descriptors, and shuts down the supervised local AF_UNIX control socket; no external network access")
