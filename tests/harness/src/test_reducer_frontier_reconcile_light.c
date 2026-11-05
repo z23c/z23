@@ -2936,10 +2936,26 @@ static int rfrl_check_progressing_hwm(void)
 {
     int failures = 0;
     struct rfrl_fixture fx;
-    RFRL_CHECK("progressing: setup fixture",
-               setup_fixture(&fx, "progressing_hwm"));
+    if (!setup_fixture(&fx, "progressing_hwm")) {
+        printf("reducer_frontier_reconcile_light: progressing: "
+               "setup fixture... FAIL\n");
+        /* A partial fixture may not have run main_state_init, so do not call
+         * teardown_fixture (main_state_free); release the rest by hand. */
+        progress_store_close();
+        SetDataDir("");
+        ClearDataDirCache();
+        reducer_frontier_test_set_compiled_anchor(-1);
+        chain_params_select(CHAIN_MAIN);
+        test_rm_rf_recursive(fx.dir);
+        return failures + 1;
+    }
     sqlite3 *db = progress_store_db();
-    RFRL_CHECK("progressing: marker table", repair_marker_table_ensure(db));
+    if (!repair_marker_table_ensure(db)) {
+        printf("reducer_frontier_reconcile_light: progressing: "
+               "marker table... FAIL\n");
+        teardown_fixture(&fx);
+        return failures + 1;
+    }
     condition_engine_reset_for_testing();
     reducer_frontier_reconcile_light_test_reset();
 
@@ -3098,10 +3114,10 @@ int test_reducer_frontier_reconcile_light(void)
      * refusal alone would fail the remedy. */
     failures += rfrl_check_conflation_control();
 
-    /* ABBA regression: the reconcile must not own progress_store_tx_lock
-     * while it waits for cs_main (see rfrl_order_probe above). */
     failures += rfrl_check_progressing_hwm();
 
+    /* ABBA regression: the reconcile must not own progress_store_tx_lock
+     * while it waits for cs_main (see rfrl_order_probe above). */
     failures += rfrl_check_lock_order_flags();
 
     /* ABBA regression, other direction: a reducer drain owns the progress

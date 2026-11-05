@@ -239,10 +239,18 @@ int network_monitor_fold_sampler_tests(void)
     unsetenv("ZCL_NETMON_INTERVAL_SECS");
     unsetenv("ZCL_NETMON_RETAIN_ROWS");
     struct network_monitor_config cfg = { 30, 100 };
-    NMS_CHECK(network_monitor_start(&cfg, &ndb).ok);
+    bool started = network_monitor_start(&cfg, &ndb).ok;
+    NMS_CHECK(started);
+    if (!started)
+        return failures;
     struct network_consensus_view v;
-    while (!network_monitor_get_view(&v))
-        platform_sleep_ms(5);
+    /* Hang guard only, not a timing assertion. */
+    int polls = 0;
+    while (!network_monitor_get_view(&v) && polls < 20000) {
+        platform_sleep_ms(5); /* real-clock: monitor thread has no fake clock */
+        polls++;
+    }
+    NMS_CHECK(polls < 20000 || network_monitor_get_view(&v));
     network_monitor_stop();
 
     failures += nms_check_rows(&ndb, our_hex);

@@ -286,10 +286,22 @@ static int nmf_start_dump(const char *iv, const char *rr,
         setenv("ZCL_NETMON_RETAIN_ROWS", rr, 1);
     else
         unsetenv("ZCL_NETMON_RETAIN_ROWS");
-    NMF_CHECK(network_monitor_start(cfg, NULL).ok);
+    if (!network_monitor_start(cfg, NULL).ok) {
+        printf("  FAIL: network_monitor_start\n");
+        return failures + 1;
+    }
     struct network_consensus_view v;
-    while (!network_monitor_get_view(&v))
-        platform_sleep_ms(5);
+    /* Hang guard only, not a timing assertion. */
+    int polls = 0;
+    while (!network_monitor_get_view(&v) && polls < 20000) {
+        platform_sleep_ms(5); /* real-clock: monitor thread has no fake clock */
+        polls++;
+    }
+    if (polls >= 20000 && !network_monitor_get_view(&v)) {
+        printf("  FAIL: monitor view never became ready\n");
+        network_monitor_stop();
+        return failures + 1;
+    }
     struct json_value d;
     json_init(&d);
     NMF_CHECK(network_monitor_dump_state_json(&d, NULL));
