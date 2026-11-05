@@ -27,6 +27,7 @@
 
 #include "test/test_core.h"
 
+#include "config/boot_snapshot_install.h"
 #include "services/anchor_selfmint.h"
 #include "storage/progress_store.h"
 #include "storage/coins_kv.h"
@@ -193,6 +194,34 @@ static int sm_check_second_hook_call_is_idempotent(
     return failures;
 }
 
+/* Write the seeded coins plus a shielded section. One nullifier record forces
+ * the v3 on-disk format (nf_count > 0). */
+static bool sm_write_v3_sha3(sqlite3 *pdb, const char *path,
+                             const struct sha3_utxo_checkpoint *cp,
+                             uint8_t got_sha3[32])
+{
+    uint8_t nf[32];
+    for (int j = 0; j < 32; j++) nf[j] = (uint8_t)(0xA0 + j);
+    uint8_t nf_rec[SNAPSHOT_NF_RECORD_BYTES];
+    snapshot_shielded_pack_nf(nf_rec, /*pool=*/0, nf, /*height=*/1);
+    struct snapshot_shielded sh;
+    memset(&sh, 0, sizeof(sh));
+    sh.nf_records = nf_rec;
+    sh.nf_count = 1;
+
+    uint64_t got_count = 0;
+    int64_t got_supply = 0;
+    return coins_kv_snapshot_write(pdb, path, cp->height, cp->block_hash, &sh,
+                                   got_sha3, &got_count, &got_supply);
+}
+
+static bool sm_write_v3(sqlite3 *pdb, const char *path,
+                        const struct sha3_utxo_checkpoint *cp)
+{
+    uint8_t got_sha3[32] = {0};
+    return sm_write_v3_sha3(pdb, path, cp, got_sha3);
+}
+
 /* (5) v3 ACCEPTANCE: a valid v3 artifact carries the same coins set as
  * the checkpoint plus a shielded section, so its full-body header SHA3
  * (coins+shielded) never equals the coins-only checkpoint hash. Admission
@@ -208,22 +237,8 @@ static int sm_check_v3_artifact_written(sqlite3 *pdb, const char *dir,
     unlink(v3_path);
 
     const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
-    /* One nullifier record forces the v3 on-disk format (nf_count > 0). */
-    uint8_t nf[32];
-    for (int j = 0; j < 32; j++) nf[j] = (uint8_t)(0xA0 + j);
-    uint8_t nf_rec[SNAPSHOT_NF_RECORD_BYTES];
-    snapshot_shielded_pack_nf(nf_rec, /*pool=*/0, nf, /*height=*/1);
-    struct snapshot_shielded sh;
-    memset(&sh, 0, sizeof(sh));
-    sh.nf_records = nf_rec;
-    sh.nf_count = 1;
-
     uint8_t got_sha3[32] = {0};
-    uint64_t got_count = 0;
-    int64_t got_supply = 0;
-    bool wrote = coins_kv_snapshot_write(pdb, v3_path, cp->height,
-                                         cp->block_hash, &sh, got_sha3,
-                                         &got_count, &got_supply);
+    bool wrote = sm_write_v3_sha3(pdb, v3_path, cp, got_sha3);
     SM_CHECK("(5) v3 artifact written", wrote && sm_file_present(v3_path));
     SM_CHECK("(5) v3 body sha3 != coins-only checkpoint",
              memcmp(got_sha3, cp->sha3_hash, 32) != 0);
@@ -523,6 +538,37 @@ static void sm_mint(struct sm_fix *f)
     anchor_selfmint_hook_in_tx(f->pdb, f->dir, f->cp.height);
 }
 
+/* The predicate every boot path applies before it loads an anchor artifact. */
+static bool sm_boot_gate_accepts(const struct sm_fix *f)
+{
+    char err[128] = {0};
+    struct uss_header hdr;
+    struct uss_handle *h = uss_open(f->path, /*verify_full_sha3=*/true,
+                                    /*expected_sha3=*/NULL, &hdr, err,
+                                    sizeof(err));
+    if (!h)
+        return false;
+    bool ok = boot_legacy_uss_matches_checkpoint(h, &hdr, &f->cp, err,
+                                                 sizeof(err));
+    uss_close(h);
+    return ok;
+}
+
+/* A refusal names its cause and tells the operator to replace the file. It must
+ * not point at -refold-from-anchor. */
+static bool sm_refused_as(const struct anchor_snapshot_status *st,
+                          const struct sm_fix *f, const char *verification,
+                          const char *error)
+{
+    char want[300];
+    snprintf(want, sizeof(want),
+             "replace %.170s with a snapshot minted at checkpoint height %d",
+             f->path, f->cp.height);
+    return !st->verified && strcmp(st->verification, verification) == 0 &&
+           strcmp(st->error, error) == 0 &&
+           strcmp(st->next_action, want) == 0;
+}
+
 static bool sm_header_fields_match(const struct anchor_snapshot_status *st,
                                    const struct sha3_utxo_checkpoint *cp)
 {
@@ -555,6 +601,8 @@ static int sm_case_status_minted_fields(struct sm_fix *f)
     SM_CHECK("minted: every binding matches and the file is verified",
              sm_all_bound(&st) && st.stat_present &&
              st.stat_size == (int64_t)sb.st_size);
+    SM_CHECK("minted: the boot gate accepts what the status verified",
+             sm_boot_gate_accepts(f));
     return failures;
 }
 
@@ -572,6 +620,11 @@ static int sm_case_variant_block_hash(struct sm_fix *f)
              sm_hex_is(st.checkpoint_block_hash_hex, f->cp.block_hash) &&
              strcmp(st.checkpoint_block_hash_hex,
                     st.snapshot_block_hash_hex) != 0);
+    SM_CHECK("variant block hash: refused, not ready for a refold",
+             sm_refused_as(&st, f, "block_hash_mismatch",
+                           "snapshot block hash does not match checkpoint"));
+    SM_CHECK("variant block hash: the boot gate refuses it too",
+             !sm_boot_gate_accepts(f));
     f->cp.block_hash[31] ^= 0x01;
     return failures;
 }
@@ -589,6 +642,11 @@ static int sm_case_variant_height(struct sm_fix *f)
     SM_CHECK("variant height: both heights are reported",
              st.checkpoint_height == TEST_ANCHOR + 1 &&
              st.snapshot_height == (uint32_t)TEST_ANCHOR);
+    SM_CHECK("variant height: refused, not ready for a refold",
+             sm_refused_as(&st, f, "height_mismatch",
+                           "snapshot height does not match checkpoint"));
+    SM_CHECK("variant height: the boot gate refuses it too",
+             !sm_boot_gate_accepts(f));
     f->cp.height -= 1;
     return failures;
 }
@@ -647,6 +705,10 @@ static int sm_case_status_corrupt_body(struct sm_fix *f)
     SM_CHECK("corrupt: header read but the artifact is not verified",
              ok && st.header_read && !st.verified &&
              strcmp(st.verification, "sha3_or_format_mismatch") == 0);
+    SM_CHECK("corrupt: an unverified body claims no count or sha3 match",
+             !st.count_match && !st.sha3_match);
+    SM_CHECK("corrupt: the header-only flags still report the header",
+             st.height_match && st.block_hash_match);
     SM_CHECK("corrupt: error names a cause",
              st.error[0] != '\0');
     SM_CHECK("corrupt: next action",
@@ -713,6 +775,74 @@ static int sm_case_hook_replaces_corrupt(struct sm_fix *f)
     return failures;
 }
 
+/* The right coins under another block hash: no boot path will load this file,
+ * so the hook must not leave it in place as "already verified". */
+static int sm_case_hook_remints_wrong_block_hash(struct sm_fix *f)
+{
+    int failures = 0;
+    struct anchor_snapshot_status st;
+    sm_mint(f);
+    SM_CHECK("re-mint hash: valid snapshot minted", sm_file_present(f->path));
+    if (!sm_file_present(f->path))
+        return failures;
+    f->cp.block_hash[31] ^= 0x01;
+    anchor_selfmint_hook_in_tx(f->pdb, f->dir, f->cp.height);
+    bool ok = anchor_selfmint_snapshot_status(f->dir, &st);
+    SM_CHECK("re-mint hash: the file now carries the checkpoint hash",
+             ok && st.verified &&
+             sm_hex_is(st.snapshot_block_hash_hex, f->cp.block_hash));
+    SM_CHECK("re-mint hash: the boot gate accepts the replacement",
+             sm_boot_gate_accepts(f));
+    f->cp.block_hash[31] ^= 0x01;
+    unlink(f->path);
+    return failures;
+}
+
+/* The right coins under another height: same reasoning as the block hash. */
+static int sm_case_hook_remints_wrong_height(struct sm_fix *f)
+{
+    int failures = 0;
+    struct anchor_snapshot_status st;
+    sm_mint(f);
+    SM_CHECK("re-mint height: valid snapshot minted", sm_file_present(f->path));
+    if (!sm_file_present(f->path))
+        return failures;
+    f->cp.height += 1;
+    anchor_selfmint_hook_in_tx(f->pdb, f->dir, f->cp.height);
+    bool ok = anchor_selfmint_snapshot_status(f->dir, &st);
+    SM_CHECK("re-mint height: the file now carries the checkpoint height",
+             ok && st.verified && st.snapshot_height == (uint32_t)f->cp.height);
+    SM_CHECK("re-mint height: the boot gate accepts the replacement",
+             sm_boot_gate_accepts(f));
+    f->cp.height -= 1;
+    unlink(f->path);
+    return failures;
+}
+
+/* A valid v3 artifact from -mint-anchor carries a shielded section the hook's
+ * coins-only rewrite cannot reproduce. Its full-body hash never equals the
+ * coins-only checkpoint, and that must not read as "absent". */
+static int sm_case_hook_keeps_valid_v3(struct sm_fix *f)
+{
+    int failures = 0;
+    setenv(SM_ENV, f->path, 1);
+    unlink(f->path);
+    bool wrote = sm_write_v3(f->pdb, f->path, &f->cp);
+    SM_CHECK("keep v3: artifact written", wrote);
+    if (!wrote)
+        return failures;
+    SM_CHECK("keep v3: the boot gate accepts it", sm_boot_gate_accepts(f));
+    struct stat before, after;
+    bool sb = stat(f->path, &before) == 0;
+    anchor_selfmint_hook_in_tx(f->pdb, f->dir, f->cp.height);
+    bool sa = stat(f->path, &after) == 0;
+    SM_CHECK("keep v3: the hook left the file in place",
+             sb && sa && before.st_ino == after.st_ino &&
+             before.st_size == after.st_size);
+    unlink(f->path);
+    return failures;
+}
+
 static int sm_status_variant_cases(struct sm_fix *f)
 {
     int failures = 0;
@@ -748,6 +878,9 @@ static int sm_gap_cases(sqlite3 *pdb, const char *dir, const char *snap_path,
     failures += sm_case_hook_refusals(f);
     failures += sm_case_hook_removes_stale_valid(f);
     failures += sm_case_hook_replaces_corrupt(f);
+    failures += sm_case_hook_remints_wrong_block_hash(f);
+    failures += sm_case_hook_remints_wrong_height(f);
+    failures += sm_case_hook_keeps_valid_v3(f);
     setenv(SM_ENV, snap_path, 1);
     return failures;
 }

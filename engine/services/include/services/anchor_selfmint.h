@@ -24,8 +24,8 @@
  *     next_cursor == get_sha3_utxo_checkpoint()->height (the apply that lands the
  *     anchor; next_cursor == cursor_in + 1). At that instant coins_kv holds the
  *     applied-through-anchor set inside the caller's stage txn.
- *   - Idempotent: if a valid SHA3-verified snapshot already exists at the path,
- *     it is left untouched (no rewrite).
+ *   - Idempotent: if a snapshot the status probe reports verified already exists
+ *     at the path, it is left untouched (no rewrite).
  *   - HARD-VERIFY before trust: the writer streams atomically (tmp + rename);
  *     after the write the body SHA3 + count are checked against the compiled
  *     checkpoint, and a MISMATCH unlinks the file (never leaves an unverified
@@ -71,6 +71,10 @@ struct anchor_snapshot_status {
     char snapshot_sha3_hex[65];
     char snapshot_block_hash_hex[65];
 
+    /* height_match and block_hash_match compare the header, so they stay
+     * meaningful on a file whose body failed verification. count_match and
+     * sha3_match come from the recomputed coins, and are false when the body
+     * could not be verified. verified requires all four. */
     bool height_match;
     bool count_match;
     bool sha3_match;
@@ -97,15 +101,15 @@ void anchor_selfmint_hook_in_tx(struct sqlite3 *db, const char *datadir,
  * -> "."). Returns true and fills buf on success. */
 bool anchor_selfmint_resolve_path(const char *datadir, char *buf, size_t cap);
 
-/* Read-only readiness probe for the self-verified UTXO anchor rebuild. This is
- * the same predicate used before trusting a snapshot (and the same one
- * boot_legacy_uss_matches_checkpoint applies on the cold path): stat the
- * resolved candidate, inspect its header, uss_open(verify_full_sha3=true,
- * expected_sha3=NULL) to bind the whole artifact to its own header hash, then
- * uss_utxo_component_compute() to bind the COINS-ONLY commitment to the compiled
- * checkpoint. This accepts a v1 (coins-only) OR v3 (coins+shielded) artifact —
- * the checkpoint pins the coins commitment, never the v3 full-body hash. No
- * coins_kv mutation. */
+/* Read-only readiness probe for the self-verified UTXO anchor rebuild. It reports
+ * verified only for a file boot_legacy_uss_matches_checkpoint would accept on the
+ * cold path: stat the resolved candidate, inspect its header,
+ * uss_open(verify_full_sha3=true, expected_sha3=NULL) to bind the whole artifact
+ * to its own header hash, uss_utxo_component_compute() to bind the COINS-ONLY
+ * commitment and count to the compiled checkpoint, then bind the header height
+ * and anchor block hash to it too. This accepts a v1 (coins-only) OR v3
+ * (coins+shielded) artifact — the checkpoint pins the coins commitment, never the
+ * v3 full-body hash. No coins_kv mutation. */
 bool anchor_selfmint_snapshot_status(const char *datadir,
                                      struct anchor_snapshot_status *out);
 

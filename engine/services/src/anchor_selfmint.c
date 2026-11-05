@@ -49,22 +49,70 @@ bool anchor_selfmint_resolve_path(const char *datadir, char *buf, size_t cap)
     return n > 0 && (size_t)n < cap;
 }
 
+/* A readable snapshot refused for one named reason. */
+static void anchor_status_refuse(struct anchor_snapshot_status *out,
+                                 const struct sha3_utxo_checkpoint *cp,
+                                 const char *verification, const char *error)
+{
+    snprintf(out->verification, sizeof(out->verification), "%s", verification);
+    snprintf(out->error, sizeof(out->error), "%s", error);
+    snprintf(out->next_action, sizeof(out->next_action),
+             "replace %.170s with a snapshot minted at checkpoint height %d",
+             out->path, cp->height);
+}
+
+static void anchor_status_classify(struct anchor_snapshot_status *out,
+                                   const struct sha3_utxo_checkpoint *cp,
+                                   bool comp_ok, const char *cerr)
+{
+    if (out->verified) {
+        snprintf(out->verification, sizeof(out->verification), "verified");
+        snprintf(out->next_action, sizeof(out->next_action),
+                 "run repro-on-copy with -refold-from-anchor and "
+                 "CLIMB_PAST=%d", cp->height);
+    } else if (!comp_ok) {
+        snprintf(out->verification, sizeof(out->verification),
+                 "component_unreadable");
+        snprintf(out->error, sizeof(out->error), "%s",
+                 cerr[0] ? cerr : "coins-only component recompute failed");
+        snprintf(out->next_action, sizeof(out->next_action),
+                 "replace %.180s with a checkpoint-matching minted snapshot",
+                 out->path);
+    } else if (!out->sha3_match) {
+        anchor_status_refuse(out, cp, "sha3_mismatch",
+                             "coins-only commitment does not match checkpoint");
+    } else if (!out->count_match) {
+        anchor_status_refuse(out, cp, "count_mismatch",
+                             "snapshot count does not match checkpoint");
+    } else if (!out->height_match) {
+        anchor_status_refuse(out, cp, "height_mismatch",
+                             "snapshot height does not match checkpoint");
+    } else {
+        anchor_status_refuse(out, cp, "block_hash_mismatch",
+                             "snapshot block hash does not match checkpoint");
+    }
+}
+
 static void anchor_status_verify_and_classify_snapshot(
     struct anchor_snapshot_status *out, const struct sha3_utxo_checkpoint *cp)
 {
-    /* Admission is the SAME two-step predicate the cold-start gate uses
+    /* Admission mirrors the cold-start gate
      * (boot_legacy_uss_matches_checkpoint via anchor_snapshot_verified_reachable):
      *   1. uss_open(verify_full_sha3=true, expected_sha3=NULL) — bind the WHOLE
      *      artifact (coins + any v3 shielded section) to its OWN header hash;
      *      NULL so we do NOT compare that full-body hash to the checkpoint.
      *   2. uss_utxo_component_compute() — recompute the COINS-ONLY commitment and
      *      bind THAT to cp->sha3_hash, the value the compiled checkpoint pins.
+     *   3. Bind the header height and anchor block hash to the checkpoint. The
+     *      body hash does not cover the header, and the refold seeds its anchor
+     *      from these two fields, so boot refuses a file where they differ.
      * Passing cp->sha3_hash as expected_sha3 in step 1 was the bug: for a v3
      * artifact the header carries the coins+shielded hash, so it could NEVER
      * equal the coins-only checkpoint and every valid v3 snapshot was rejected
      * as "sha3_or_format_mismatch". Verification is NOT weakened — the coins
      * commitment still must equal the checkpoint exactly; only WHICH hash is
-     * compared is corrected. */
+     * compared is corrected. Boot also compares total_supply; a matching
+     * coins-only SHA3 already fixes that value. */
     char err[256] = {0};
     struct uss_header verified_hdr;
     memset(&verified_hdr, 0, sizeof(verified_hdr));
@@ -77,42 +125,16 @@ static void anchor_status_verify_and_classify_snapshot(
         bool comp_ok =
             uss_utxo_component_compute(h, &comp, cerr, sizeof(cerr));
         uss_close(h);
-        bool sha3_ok = comp_ok && memcmp(comp.sha3_hash, cp->sha3_hash, 32) == 0;
-        bool count_ok = comp_ok && comp.count == cp->utxo_count;
-        out->sha3_match = sha3_ok;
-        out->count_match = count_ok;
-        out->verified = sha3_ok && count_ok;
-        if (out->verified) {
-            snprintf(out->verification, sizeof(out->verification),
-                     "verified");
-            snprintf(out->next_action, sizeof(out->next_action),
-                     "run repro-on-copy with -refold-from-anchor and "
-                     "CLIMB_PAST=%d", cp->height);
-        } else if (!comp_ok) {
-            snprintf(out->verification, sizeof(out->verification),
-                     "component_unreadable");
-            snprintf(out->error, sizeof(out->error), "%s",
-                     cerr[0] ? cerr : "coins-only component recompute failed");
-            snprintf(out->next_action, sizeof(out->next_action),
-                     "replace %.180s with a checkpoint-matching minted snapshot",
-                     out->path);
-        } else if (!sha3_ok) {
-            snprintf(out->verification, sizeof(out->verification),
-                     "sha3_mismatch");
-            snprintf(out->error, sizeof(out->error),
-                     "coins-only commitment does not match checkpoint");
-            snprintf(out->next_action, sizeof(out->next_action),
-                     "replace %.170s with a snapshot minted at checkpoint height %d",
-                     out->path, cp->height);
-        } else {
-            snprintf(out->verification, sizeof(out->verification),
-                     "count_mismatch");
-            snprintf(out->error, sizeof(out->error),
-                     "snapshot count does not match checkpoint");
-            snprintf(out->next_action, sizeof(out->next_action),
-                     "replace %.170s with a snapshot minted at checkpoint height %d",
-                     out->path, cp->height);
-        }
+        out->sha3_match = comp_ok &&
+                          memcmp(comp.sha3_hash, cp->sha3_hash, 32) == 0;
+        out->count_match = comp_ok && comp.count == cp->utxo_count;
+        /* Judge the file that just passed full verification, not the peek. */
+        out->height_match = (int32_t)verified_hdr.height == cp->height;
+        out->block_hash_match =
+            memcmp(verified_hdr.anchor_block_hash, cp->block_hash, 32) == 0;
+        out->verified = out->sha3_match && out->count_match &&
+                        out->height_match && out->block_hash_match;
+        anchor_status_classify(out, cp, comp_ok, cerr);
         return;
     }
 
@@ -198,14 +220,13 @@ bool anchor_selfmint_snapshot_status(const char *datadir,
         anchor_hex32(hdr.sha3_hash, out->snapshot_sha3_hex);
         anchor_hex32(hdr.anchor_block_hash, out->snapshot_block_hash_hex);
         out->height_match = (int32_t)hdr.height == cp->height;
-        out->count_match = hdr.count == cp->utxo_count;
-        /* sha3_match is NOT a header-hash compare: the compiled checkpoint pins
-         * the COINS-ONLY commitment, while hdr.sha3_hash is the artifact's OWN
-         * full-body hash (coins-only for a v1 artifact, coins+shielded for a v3
-         * one). A direct compare here false-rejects every valid v3 snapshot. It
-         * is set below from the recomputed coins-only component vs cp->sha3_hash
-         * (the value the checkpoint actually pins), mirroring
-         * boot_legacy_uss_matches_checkpoint. Left at its zeroed default here. */
+        /* sha3_match and count_match are NOT header compares: the compiled
+         * checkpoint pins the COINS-ONLY commitment, while hdr.sha3_hash is the
+         * artifact's OWN full-body hash (coins-only for a v1 artifact,
+         * coins+shielded for a v3 one). A direct compare here false-rejects
+         * every valid v3 snapshot. Both are set below from the recomputed
+         * coins-only component, mirroring boot_legacy_uss_matches_checkpoint,
+         * and stay at their zeroed default for a body that fails verification. */
         out->block_hash_match =
             memcmp(hdr.anchor_block_hash, cp->block_hash, 32) == 0;
         uss_close(peek);
@@ -224,23 +245,15 @@ bool anchor_selfmint_snapshot_status(const char *datadir,
     return true;
 }
 
-/* True iff a SHA3-verified snapshot bound to `cp` already exists at `path`.
- * Reuses the existing loader's verification (full-body SHA3 + expected_sha3 ==
- * cp->sha3_hash + count match) — never reimplemented. Read-only mmap, closed
- * immediately. A NULL handle means absent / wrong-magic / wrong-version /
- * SHA3-mismatch — every "no usable verified snapshot" case. */
-static bool verified_snapshot_present(const char *path,
-                                      const struct sha3_utxo_checkpoint *cp)
+/* True iff a snapshot bound to the checkpoint already exists at the resolved
+ * path. One predicate with the status probe, so what the status calls verified
+ * is what the hook keeps: a valid v3 artifact stays, and a file with the right
+ * coins under the wrong header height or block hash, which no boot path will
+ * load, is minted again. Read-only. */
+static bool verified_snapshot_present(const char *datadir)
 {
-    char err[256] = {0};
-    struct uss_header hdr;
-    struct uss_handle *h = uss_open(path, /*verify_full_sha3=*/true,
-                                    cp->sha3_hash, &hdr, err, sizeof(err));
-    if (!h)
-        return false;
-    bool ok = (hdr.count == cp->utxo_count);
-    uss_close(h);
-    return ok;
+    struct anchor_snapshot_status st;
+    return anchor_selfmint_snapshot_status(datadir, &st) && st.verified;
 }
 
 void anchor_selfmint_hook_in_tx(struct sqlite3 *db, const char *datadir,
@@ -274,9 +287,10 @@ void anchor_selfmint_hook_in_tx(struct sqlite3 *db, const char *datadir,
 
     /* Idempotency: a valid SHA3-verified snapshot already at the path is left
      * untouched — never rewrite a good artifact (and never pay the scan twice).
-     * A stale/corrupt/wrong-height file is treated as absent: the write below
-     * atomically replaces it (tmp + rename), then HARD-VERIFY gates trust. */
-    if (verified_snapshot_present(path, cp)) {
+     * A stale/corrupt/wrong-height/wrong-hash file is treated as absent: the
+     * write below atomically replaces it (tmp + rename), then HARD-VERIFY gates
+     * trust. */
+    if (verified_snapshot_present(datadir)) {
         LOG_INFO("selfmint", "[selfmint] verified anchor snapshot already "
                  "present at %s — not re-minting", path);
         return;
