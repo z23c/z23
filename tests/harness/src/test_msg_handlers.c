@@ -1856,7 +1856,7 @@ static int test_pin_getdata_after_manifest_answers(void)
         ASSERT(process_getdata(&mp, node, &s) == true);
         ASSERT(pin_segment_count(node) == 1);
         ASSERT(pin_is_single_notfound(node, &h));
-        ASSERT(!node->disconnect);
+        ASSERT(atomic_load(&node->misbehavior) == 0);
         stream_free(&s);
         p2p_node_free(node);
         net_manager_free(&nm);
