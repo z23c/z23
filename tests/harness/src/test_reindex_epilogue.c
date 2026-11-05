@@ -20,6 +20,7 @@
 #include "chain/chain.h"
 #include "coins/utxo_commitment.h"
 #include "core/uint256.h"
+#include "event/event.h"
 #include "jobs/reducer_frontier.h"
 #include "jobs/reducer_frontier_schema.h"
 #include "jobs/tip_finalize_stage.h"
@@ -404,6 +405,728 @@ static int re_check_imported_snapshot_authority(
 
 #undef TIP
 
+/* ── Mutation-gap tests ────────────────────────────────────────────────
+ * What the epilogue refuses, which typed reason it pages with, and what
+ * state a refusal leaves behind. Every fixture is a throwaway datadir. */
+
+struct re_ev {
+    int pages;
+    uint32_t peer;
+    char last[256];
+    int syncs;
+    char sync[256];
+};
+static struct re_ev g_re_ev;
+
+static void re_ev_obs(enum event_type type, uint32_t peer,
+                      const void *payload, uint32_t len, void *ctx)
+{
+    (void)ctx;
+    char *dst = g_re_ev.sync;
+    if (type == EV_OPERATOR_NEEDED) {
+        g_re_ev.pages++;
+        g_re_ev.peer = peer;
+        dst = g_re_ev.last;
+    } else {
+        g_re_ev.syncs++;
+    }
+    uint32_t n = !payload ? 0 : (len < 255 ? len : 255);
+    if (n)
+        memcpy(dst, payload, n);
+    dst[n] = '\0';
+}
+
+static void re_ev_reset(void)
+{
+    memset(&g_re_ev, 0, sizeof(g_re_ev));
+    event_log_init();
+    event_clear_observers(EV_OPERATOR_NEEDED);
+    event_clear_observers(EV_SYNC_STATE_CHANGE);
+    event_observe(EV_OPERATOR_NEEDED, re_ev_obs, NULL);
+    event_observe(EV_SYNC_STATE_CHANGE, re_ev_obs, NULL);
+}
+
+/* Exactly one page, to peer 0, with this typed reason at this height. */
+static bool re_paged(const char *reason, int tip_h)
+{
+    char want[256];
+    snprintf(want, sizeof(want),
+             "check=reindex_epilogue tip_h=%d reason=%s", tip_h, reason);
+    return g_re_ev.pages == 1 && g_re_ev.peer == 0 &&
+           strcmp(g_re_ev.last, want) == 0;
+}
+
+/* Capture stdout+stderr through a pipe (output here is tiny). Where capture
+ * is unavailable the text checks pass vacuously. */
+static bool g_re_cap_live;
+
+#ifndef _WIN32
+#include <fcntl.h>
+
+struct re_cap { int saved_out, saved_err, rd; };
+
+static bool re_cap_begin(struct re_cap *c)
+{
+    int p[2];
+    fflush(stdout);
+    fflush(stderr);
+    g_re_cap_live = pipe(p) == 0;
+    if (!g_re_cap_live)
+        return false;
+    (void)fcntl(p[0], F_SETFL, O_NONBLOCK);
+    c->saved_out = dup(1);
+    c->saved_err = dup(2);
+    (void)dup2(p[1], 1);
+    (void)dup2(p[1], 2);
+    close(p[1]);
+    c->rd = p[0];
+    return true;
+}
+
+static void re_cap_end(struct re_cap *c, char *buf, size_t cap)
+{
+    fflush(stdout);
+    fflush(stderr);
+    (void)dup2(c->saved_out, 1);
+    (void)dup2(c->saved_err, 2);
+    close(c->saved_out);
+    close(c->saved_err);
+    size_t n = 0;
+    ssize_t r;
+    while (n + 1 < cap && (r = read(c->rd, buf + n, cap - 1 - n)) > 0)
+        n += (size_t)r;
+    buf[n] = '\0';
+    close(c->rd);
+}
+#else
+struct re_cap { int unused; };
+static bool re_cap_begin(struct re_cap *c)
+{
+    (void)c;
+    g_re_cap_live = false;
+    return false;
+}
+static void re_cap_end(struct re_cap *c, char *buf, size_t cap)
+{
+    (void)c; (void)cap;
+    buf[0] = '\0';
+}
+#endif
+
+enum { RE_OUT_CAP = 8192 };
+
+static bool re_has(const char *out, const char *token)
+{
+    return !g_re_cap_live || strstr(out, token) != NULL;
+}
+
+static bool re_lacks(const char *out, const char *token)
+{
+    return !g_re_cap_live || strstr(out, token) == NULL;
+}
+
+/* The progress-store lock must be free once the epilogue returns. */
+static bool re_lock_free(void)
+{
+    long tid = 0;
+    int64_t held_us = 0;
+    return !progress_store_tx_holder(&tid, &held_us);
+}
+
+static bool re_sql(sqlite3 *db, const char *sql)
+{
+    return sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK;
+}
+
+static int re_scalar(sqlite3 *db, const char *sql)
+{
+    sqlite3_stmt *st = NULL;
+    int v = -1;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
+        return -1;
+    if (sqlite3_step(st) == SQLITE_ROW)  // raw-sql-ok:test-fixture-verify
+        v = sqlite3_column_int(st, 0);
+    sqlite3_finalize(st);
+    return v;
+}
+
+static bool re_set_applied(sqlite3 *pdb, int32_t v)
+{
+    char *err = NULL;
+    bool ok = sqlite3_exec(pdb, "BEGIN IMMEDIATE", NULL, NULL, &err) == SQLITE_OK &&
+              coins_kv_set_applied_height_in_tx(pdb, v) &&
+              sqlite3_exec(pdb, "COMMIT", NULL, NULL, &err) == SQLITE_OK;
+    if (err) sqlite3_free(err);
+    return ok;
+}
+
+static int32_t re_applied(sqlite3 *pdb)
+{
+    int32_t v = -1;
+    bool found = false;
+    if (!coins_kv_get_applied_height(pdb, &v, &found) || !found)
+        return -1;
+    return v;
+}
+
+static uint64_t re_generation(sqlite3 *pdb)
+{
+    uint64_t v = UINT64_MAX;
+    if (!coins_kv_get_authority_generation(pdb, &v))
+        return UINT64_MAX;
+    return v;
+}
+
+/* A throwaway datadir: node.db with a three-row utxos mirror, an optional
+ * progress store, and a synthetic active chain to `tip`. */
+struct re_gap {
+    char dir[256];
+    char path[600];
+    struct node_db ndb;
+    sqlite3 *pdb;
+    struct main_state ms;
+    struct re_chain sc;
+    int tip;
+};
+
+static bool re_gap_seed_mirror(struct re_gap *g)
+{
+    return re_insert_utxo(&g->ndb, 0x44, 0, 11000, 11, 1) &&
+           re_insert_utxo(&g->ndb, 0x55, 0, 12000, 12, 0) &&
+           re_insert_utxo(&g->ndb, 0x66, 0, 13000, 13, 0);
+}
+
+static bool re_gap_open(struct re_gap *g, const char *tag, int tip,
+                        bool store, bool full_logs)
+{
+    memset(g, 0, sizeof(*g));
+    g->tip = tip;
+    test_reset_shared_globals();
+    blocker_module_init();
+    blocker_reset_for_testing();
+    seed_integrity_gate_reset_for_testing();
+    test_fmt_tmpdir(g->dir, sizeof(g->dir), "reindex_epi", tag);
+    mkdir_p_re("./test-tmp");
+    mkdir_p_re(g->dir);
+    snprintf(g->path, sizeof(g->path), "%s/node.db", g->dir);
+    if (!node_db_open(&g->ndb, g->path))
+        return false;
+    seed_integrity_gate_set_node_db_for_testing(&g->ndb);
+    main_state_init(&g->ms);
+    bool ok = re_gap_seed_mirror(g) && re_build_chain(&g->sc, &g->ms, tip);
+    if (store) {
+        ok = ok && progress_store_open(g->dir);
+        g->pdb = progress_store_db();
+        ok = ok && g->pdb && tip_finalize_stage_init(&g->ms);
+        ok = ok && (!full_logs || reducer_frontier_ensure_schema(g->pdb));
+    }
+    re_ev_reset();
+    return ok;
+}
+
+static void re_gap_close(struct re_gap *g)
+{
+    if (g->pdb)
+        tip_finalize_stage_shutdown();
+    main_state_free(&g->ms);
+    re_free_chain(&g->sc);
+    if (g->pdb)
+        progress_store_close();
+    seed_integrity_gate_reset_for_testing();
+    node_db_close(&g->ndb);
+    test_cleanup_tmpdir(g->dir);
+}
+
+static bool re_snap(struct re_gap *g)
+{
+    return reindex_epilogue_derive_imported_snapshot(
+        &g->ndb, g->path, g->tip, g->sc.hash.data);
+}
+
+static bool re_resume(struct re_gap *g, uint64_t gen, bool reset)
+{
+    return reindex_epilogue_resume_imported_snapshot(
+        &g->ndb, g->path, g->tip, g->sc.hash.data, gen, reset);
+}
+
+#define RE_GAP_TIP ((int)REDUCER_FRONTIER_TRUSTED_ANCHOR + 5)
+
+/* ── argument refusals ── */
+
+struct re_arg_case {
+    const char *label;
+    struct node_db *ndb;
+    const char *path;
+    int height;
+    const uint8_t *hash;
+};
+
+static int re_gap_arg_refusals(void)
+{
+    int failures = 0;
+    struct re_gap g;
+    uint8_t hash[32] = {1};
+    struct node_db closed, nohandle;
+    memset(&closed, 0, sizeof(closed));
+    memset(&nohandle, 0, sizeof(nohandle));
+    nohandle.open = true;
+    RE_CHECK("gap/args: fixture", re_gap_open(&g, "args", 100, true, false));
+    const struct re_arg_case cases[] = {
+        { "NULL ndb", NULL, g.path, 100, hash },
+        { "closed ndb", &closed, g.path, 100, hash },
+        { "open ndb without a handle", &nohandle, g.path, 100, hash },
+        { "NULL path", &g.ndb, NULL, 100, hash },
+        { "empty path", &g.ndb, "", 100, hash },
+        { "negative height", &g.ndb, g.path, -1, hash },
+        { "NULL hash", &g.ndb, g.path, 100, NULL },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char label[96];
+        re_ev_reset();
+        bool r = reindex_epilogue_derive_imported_snapshot(
+            cases[i].ndb, cases[i].path, cases[i].height, cases[i].hash);
+        snprintf(label, sizeof(label), "gap/args: %s refused, paged at -1",
+                 cases[i].label);
+        RE_CHECK(label, !r && re_paged("null_or_closed_arg", -1));
+    }
+    /* A one-character path and height 0 are valid arguments: the refusal
+     * comes later, at the reseed, not at the argument gate. */
+    re_ev_reset();
+    bool r = reindex_epilogue_derive_imported_snapshot(&g.ndb, "/", 0, hash);
+    RE_CHECK("gap/args: one-char path at height 0 passes the arg gate",
+             !r && re_paged("coins_kv_reseed_failed", 0));
+    RE_CHECK("gap/args: lock released after the refusals", re_lock_free());
+    re_gap_close(&g);
+
+    RE_CHECK("gap/args: closed store fixture",
+             re_gap_open(&g, "nostore", RE_GAP_TIP, false, false));
+    r = re_snap(&g);
+    RE_CHECK("gap/args: closed progress store refused and paged",
+             !r && re_paged("progress_store_not_open", RE_GAP_TIP));
+    re_gap_close(&g);
+    return failures;
+}
+
+/* ── authority generation ── */
+
+static bool re_gap_gen_triggers(sqlite3 *pdb, const char *action)
+{
+    char sql[512];
+    snprintf(sql, sizeof(sql),
+             "CREATE TRIGGER re_gen_ins BEFORE INSERT ON progress_meta "
+             "WHEN NEW.key='%s' BEGIN SELECT RAISE(%s); END;"
+             "CREATE TRIGGER re_gen_upd BEFORE UPDATE ON progress_meta "
+             "WHEN NEW.key='%s' BEGIN SELECT RAISE(%s); END",
+             COINS_KV_AUTHORITY_GENERATION_KEY, action,
+             COINS_KV_AUTHORITY_GENERATION_KEY, action);
+    return re_sql(pdb, sql);
+}
+
+static bool re_gap_drop_gen_triggers(sqlite3 *pdb)
+{
+    return re_sql(pdb, "DROP TRIGGER re_gen_ins;DROP TRIGGER re_gen_upd");
+}
+
+static int re_gap_generation_refusals(struct re_gap *g, uint64_t g0)
+{
+    int failures = 0;
+    re_ev_reset();
+    bool r = re_resume(g, g0 + 7, true);
+    RE_CHECK("gap/gen: a changed generation is refused and paged",
+             !r && re_paged("snapshot_generation_changed", g->tip));
+    RE_CHECK("gap/gen: the refusal reset nothing",
+             re_generation(g->pdb) == g0);
+
+    RE_CHECK("gap/gen: reset-blocking trigger installs",
+             re_gap_gen_triggers(g->pdb, "ABORT,'re'"));
+    re_ev_reset();
+    r = re_resume(g, g0, true);
+    RE_CHECK("gap/gen: a failed reset is refused and paged",
+             !r && re_paged("coins_kv_reset_failed", g->tip));
+    RE_CHECK("gap/gen: the failed reset left the generation",
+             re_generation(g->pdb) == g0);
+    RE_CHECK("gap/gen: trigger drops", re_gap_drop_gen_triggers(g->pdb));
+
+    RE_CHECK("gap/gen: bump-swallowing trigger installs",
+             re_gap_gen_triggers(g->pdb, "IGNORE"));
+    re_ev_reset();
+    r = re_resume(g, g0, true);
+    RE_CHECK("gap/gen: a reset that does not advance one generation is refused",
+             !r && re_paged("snapshot_reset_generation_mismatch", g->tip));
+    RE_CHECK("gap/gen: trigger drops again", re_gap_drop_gen_triggers(g->pdb));
+    return failures;
+}
+
+static int re_gap_generation_resume(struct re_gap *g, uint64_t g0)
+{
+    int failures = 0;
+    re_ev_reset();
+    bool r = re_resume(g, g0, true);
+    RE_CHECK("gap/gen: a matching generation with reset succeeds", r);
+    RE_CHECK("gap/gen: the reset advanced exactly one generation",
+             re_generation(g->pdb) == g0 + 1);
+    RE_CHECK("gap/gen: reseed copied the mirror", coins_kv_count(g->pdb) == 3);
+    RE_CHECK("gap/gen: success pages nothing", g_re_ev.pages == 0);
+
+    uint64_t g1 = g0 + 1;
+    re_ev_reset();
+    r = re_resume(g, g1, false);
+    RE_CHECK("gap/gen: resume without reset at the same generation succeeds", r);
+    RE_CHECK("gap/gen: no reset, so the generation is unchanged",
+             re_generation(g->pdb) == g1);
+    RE_CHECK("gap/gen: lock released", re_lock_free());
+    return failures;
+}
+
+static int re_gap_applied_clamp_directions(struct re_gap *g, uint64_t g1)
+{
+    int failures = 0;
+    const int32_t t = g->tip;
+    RE_CHECK("gap/clamp: precondition applied above tip+1",
+             re_set_applied(g->pdb, t + 50));
+    bool r = re_resume(g, g1, false);
+    RE_CHECK("gap/clamp: an applied height above tip+1 is accepted", r);
+    RE_CHECK("gap/clamp: and never lowered", re_applied(g->pdb) == t + 50);
+
+    RE_CHECK("gap/clamp: precondition applied one below tip+1",
+             re_set_applied(g->pdb, t));
+    r = re_resume(g, g1, false);
+    RE_CHECK("gap/clamp: an applied height below tip+1 is accepted", r);
+    RE_CHECK("gap/clamp: and raised to tip+1", re_applied(g->pdb) == t + 1);
+
+    r = re_resume(g, g1, false);
+    RE_CHECK("gap/clamp: an applied height at tip+1 is accepted", r);
+    RE_CHECK("gap/clamp: and left at tip+1", re_applied(g->pdb) == t + 1);
+    return failures;
+}
+
+static int re_gap_generation(void)
+{
+    int failures = 0;
+    struct re_gap g;
+    RE_CHECK("gap/gen: fixture",
+             re_gap_open(&g, "gen", RE_GAP_TIP, true, false));
+    RE_CHECK("gap/gen: generation key exists after a bootstrap reset",
+             coins_kv_reset_for_reseed(g.pdb));
+    uint64_t g0 = re_generation(g.pdb);
+    RE_CHECK("gap/gen: generation readable", g0 != UINT64_MAX);
+    failures += re_gap_generation_refusals(&g, g0);
+    failures += re_gap_generation_resume(&g, g0);
+    failures += re_gap_applied_clamp_directions(&g, g0 + 1);
+    re_gap_close(&g);
+    return failures;
+}
+
+/* ── clamp failure leaves no open transaction ── */
+
+#define RE_APPLIED_TRIGGERS(when_sql) \
+    "CREATE TRIGGER re_ap_ins " when_sql " INSERT ON progress_meta " \
+    "WHEN NEW.key='" COINS_APPLIED_HEIGHT_KEY "' BEGIN %s END;" \
+    "CREATE TRIGGER re_ap_upd " when_sql " UPDATE ON progress_meta " \
+    "WHEN NEW.key='" COINS_APPLIED_HEIGHT_KEY "' BEGIN %s END"
+
+static bool re_gap_applied_trigger(sqlite3 *pdb, bool before, const char *body)
+{
+    char sql[768];
+    snprintf(sql, sizeof(sql),
+             before ? RE_APPLIED_TRIGGERS("BEFORE")
+                    : RE_APPLIED_TRIGGERS("AFTER"), body, body);
+    return re_sql(pdb, sql);
+}
+
+static int re_gap_check_clamp_refusal(struct re_gap *g, const char *label,
+                                      bool r, const char *out)
+{
+    int failures = 0;
+    char want[64];
+    RE_CHECK(label, !r && re_paged("coins_applied_clamp_failed", g->tip));
+    RE_CHECK("gap/clamp: no transaction left open on the progress store",
+             sqlite3_get_autocommit(g->pdb) != 0);
+    RE_CHECK("gap/clamp: progress-store lock released", re_lock_free());
+    snprintf(want, sizeof(want), "clamp to %d failed", g->tip + 1);
+    RE_CHECK("gap/clamp: log names the tip+1 target", re_has(out, want));
+    RE_CHECK("gap/clamp: no tip_finalize anchor stamped on a refusal",
+             re_cursor(g->pdb, "tip_finalize") != g->tip);
+    RE_CHECK("gap/clamp: applied height not written",
+             re_applied(g->pdb) == -1);
+    return failures;
+}
+
+static int re_gap_clamp_write_fails(void)
+{
+    int failures = 0;
+    struct re_gap g;
+    char out[RE_OUT_CAP];
+    struct re_cap c;
+    RE_CHECK("gap/clamp: fixture",
+             re_gap_open(&g, "clampw", RE_GAP_TIP, true, false));
+    RE_CHECK("gap/clamp: write-blocking trigger installs",
+             re_gap_applied_trigger(g.pdb, true,
+                                    "SELECT RAISE(ABORT,'re');"));
+    re_cap_begin(&c);
+    bool r = re_snap(&g);
+    if (g_re_cap_live) re_cap_end(&c, out, sizeof(out)); else out[0] = '\0';
+    failures += re_gap_check_clamp_refusal(
+        &g, "gap/clamp: a failed applied-height write is refused and paged",
+        r, out);
+    RE_CHECK("gap/clamp: trigger drops",
+             re_sql(g.pdb, "DROP TRIGGER re_ap_ins;DROP TRIGGER re_ap_upd"));
+    r = re_snap(&g);
+    RE_CHECK("gap/clamp: a rerun after the refusal derives", r);
+    RE_CHECK("gap/clamp: and lands the applied height at tip+1",
+             re_applied(g.pdb) == g.tip + 1);
+    re_gap_close(&g);
+    return failures;
+}
+
+static int re_gap_clamp_commit_fails(void)
+{
+    int failures = 0;
+    struct re_gap g;
+    char out[RE_OUT_CAP];
+    struct re_cap c;
+    RE_CHECK("gap/clamp: fixture",
+             re_gap_open(&g, "clampc", RE_GAP_TIP, true, false));
+    RE_CHECK("gap/clamp: deferred-FK schema installs",
+             re_sql(g.pdb,
+                    "PRAGMA foreign_keys=ON;"
+                    "CREATE TABLE re_fk_parent(id INTEGER PRIMARY KEY);"
+                    "CREATE TABLE re_fk_child(pid INTEGER REFERENCES "
+                    "re_fk_parent(id) DEFERRABLE INITIALLY DEFERRED)"));
+    RE_CHECK("gap/clamp: orphan-inserting trigger installs",
+             re_gap_applied_trigger(g.pdb, false,
+                                    "INSERT INTO re_fk_child VALUES(9);"));
+    re_cap_begin(&c);
+    bool r = re_snap(&g);
+    if (g_re_cap_live) re_cap_end(&c, out, sizeof(out)); else out[0] = '\0';
+    failures += re_gap_check_clamp_refusal(
+        &g, "gap/clamp: a failed COMMIT is refused and paged", r, out);
+    RE_CHECK("gap/clamp: the failed transaction's rows were rolled back",
+             re_scalar(g.pdb, "SELECT COUNT(*) FROM re_fk_child") == 0);
+    re_gap_close(&g);
+    return failures;
+}
+
+/* ── what a good run derives, and the non-fatal cache write ── */
+
+static int re_gap_success_effects(void)
+{
+    int failures = 0;
+    struct re_gap g;
+    char out[RE_OUT_CAP], want[256];
+    struct re_cap c;
+    struct utxo_commitment stale, fresh, got;
+    RE_CHECK("gap/ok: fixture",
+             re_gap_open(&g, "ok", RE_GAP_TIP, true, false));
+    memset(&stale, 0xee, sizeof(stale));
+    stale.count = 99;
+    RE_CHECK("gap/ok: stale XOR checkpoint planted",
+             utxo_commitment_save_checkpoint(g.ndb.db, &stale));
+    re_cap_begin(&c);
+    bool r = re_snap(&g);
+    if (g_re_cap_live) re_cap_end(&c, out, sizeof(out)); else out[0] = '\0';
+    RE_CHECK("gap/ok: derives", r);
+    utxo_commitment_compute_db(g.ndb.db, &fresh);
+    RE_CHECK("gap/ok: XOR checkpoint recomputed over the mirror",
+             utxo_commitment_load_checkpoint(g.ndb.db, &got) &&
+             got.count == 3 && fresh.count == 3 &&
+             memcmp(got.accumulator, fresh.accumulator, 32) == 0);
+    uint8_t best[40] = {0};
+    size_t blen = 0;
+    RE_CHECK("gap/ok: coins_best_block cache holds the 32-byte tip hash",
+             node_db_state_get(&g.ndb, "coins_best_block", best, sizeof(best),
+                               &blen) &&
+             blen == 32 && memcmp(best, g.sc.hash.data, 32) == 0);
+    RE_CHECK("gap/ok: no cache-write warning on success",
+             re_lacks(out, "cache write failed"));
+    snprintf(want, sizeof(want),
+             "UTXO authority epilogue derived: source=snapshot_import "
+             "tip=%d coins_applied=%d utxo_count=3 H*=%d",
+             g.tip, g.tip + 1, g.tip);
+    RE_CHECK("gap/ok: summary log names source, tip, tip+1, count and H*",
+             re_has(out, want));
+    snprintf(want, sizeof(want),
+             "utxo_authority_epilogue source=snapshot_import tip=%d count=3",
+             g.tip);
+    RE_CHECK("gap/ok: exactly one sync-state event with source, tip, count",
+             g_re_ev.syncs == 1 && strcmp(g_re_ev.sync, want) == 0);
+    RE_CHECK("gap/ok: success pages nothing", g_re_ev.pages == 0);
+    RE_CHECK("gap/ok: lock released", re_lock_free());
+    re_gap_close(&g);
+    return failures;
+}
+
+static int re_gap_best_block_nonfatal(void)
+{
+    int failures = 0;
+    struct re_gap g;
+    char out[RE_OUT_CAP];
+    struct re_cap c;
+    uint8_t best[40];
+    size_t blen = 0;
+    RE_CHECK("gap/cache: fixture",
+             re_gap_open(&g, "cache", RE_GAP_TIP, true, false));
+    RE_CHECK("gap/cache: cache-blocking trigger installs",
+             re_sql(g.ndb.db,
+                    "CREATE TRIGGER re_bb BEFORE INSERT ON node_state "
+                    "WHEN NEW.key='coins_best_block' "
+                    "BEGIN SELECT RAISE(ABORT,'re'); END"));
+    re_cap_begin(&c);
+    bool r = re_snap(&g);
+    if (g_re_cap_live) re_cap_end(&c, out, sizeof(out)); else out[0] = '\0';
+    RE_CHECK("gap/cache: a failed cache write does not fail the epilogue", r);
+    RE_CHECK("gap/cache: the failure is logged as a warning",
+             re_has(out, "coins_best_block cache write failed"));
+    RE_CHECK("gap/cache: no cache row was written",
+             !node_db_state_get(&g.ndb, "coins_best_block", best,
+                                sizeof(best), &blen));
+    re_gap_close(&g);
+    return failures;
+}
+
+/* ── ensure-schema and seed-anchor refusals ── */
+
+static int re_deny_validate_headers_log(void *u, int act, const char *a,
+                                        const char *b, const char *c,
+                                        const char *d)
+{
+    (void)u; (void)b; (void)c; (void)d;
+    bool hit = act == SQLITE_CREATE_TABLE && a &&
+               strcmp(a, "validate_headers_log") == 0;
+    return hit ? SQLITE_DENY : SQLITE_OK;
+}
+
+static int re_gap_schema_ensure_refused(void)
+{
+    int failures = 0;
+    struct re_gap g;
+    RE_CHECK("gap/schema: fixture",
+             re_gap_open(&g, "schema", RE_GAP_TIP, true, false));
+    RE_CHECK("gap/schema: the reducer log is absent",
+             re_sql(g.pdb, "DROP TABLE IF EXISTS validate_headers_log"));
+    sqlite3_set_authorizer(g.pdb, re_deny_validate_headers_log, NULL);
+    bool r = re_snap(&g);
+    RE_CHECK("gap/schema: an unavailable reducer log schema is refused, paged",
+             !r && re_paged("reducer_log_schema_ensure_failed", g.tip));
+    RE_CHECK("gap/schema: lock released", re_lock_free());
+    sqlite3_set_authorizer(g.pdb, NULL, NULL);
+    r = re_snap(&g);
+    RE_CHECK("gap/schema: a rerun once the schema can be made derives", r);
+    re_gap_close(&g);
+    return failures;
+}
+
+static int re_gap_seed_anchor_refused(void)
+{
+    int failures = 0;
+    struct re_gap g;
+    RE_CHECK("gap/anchor: fixture",
+             re_gap_open(&g, "anchor", RE_GAP_TIP, true, true));
+    RE_CHECK("gap/anchor: anchor-blocking trigger installs",
+             re_sql(g.pdb,
+                    "CREATE TRIGGER re_tf BEFORE INSERT ON tip_finalize_log "
+                    "BEGIN SELECT RAISE(ABORT,'re'); END"));
+    bool r = re_snap(&g);
+    RE_CHECK("gap/anchor: a failed seed anchor is refused and paged",
+             !r && re_paged("seed_anchor_failed", g.tip));
+    RE_CHECK("gap/anchor: lock released", re_lock_free());
+    RE_CHECK("gap/anchor: no transaction left open on the progress store",
+             sqlite3_get_autocommit(g.pdb) != 0);
+    RE_CHECK("gap/anchor: trigger drops", re_sql(g.pdb, "DROP TRIGGER re_tf"));
+    r = re_snap(&g);
+    RE_CHECK("gap/anchor: a rerun after the refusal derives", r);
+    re_gap_close(&g);
+    return failures;
+}
+
+/* ── reindex_epilogue_derive: refusals ── */
+
+static void re_gap_fill_dir(char *dst, size_t cap, size_t len)
+{
+    memset(dst, 'a', len);
+    dst[0] = '/';
+    dst[len < cap ? len : cap - 1] = '\0';
+}
+
+static int re_gap_derive_refusals(void)
+{
+    int failures = 0;
+    struct re_gap g;
+    char dd[700];
+    RE_CHECK("gap/derive: fixture",
+             re_gap_open(&g, "derive", RE_GAP_TIP, true, false));
+    re_ev_reset();
+    RE_CHECK("gap/derive: NULL datadir refused, paged at -1",
+             !reindex_epilogue_derive(&g.ms, &g.ndb, NULL) &&
+             re_paged("null_or_closed_arg", -1));
+    re_ev_reset();
+    RE_CHECK("gap/derive: NULL ms refused, paged at -1",
+             !reindex_epilogue_derive(NULL, &g.ndb, g.dir) &&
+             re_paged("null_or_closed_arg", -1));
+
+    /* "<dir>/node.db" is 8 bytes longer than <dir>: 599 fits a 600-byte
+     * buffer, 600 does not. */
+    re_gap_fill_dir(dd, sizeof(dd), 591);
+    re_ev_reset();
+    (void)reindex_epilogue_derive(&g.ms, &g.ndb, dd);
+    RE_CHECK("gap/derive: a 599-byte node.db path is not an overflow",
+             strstr(g_re_ev.last, "node_db_path_overflow") == NULL);
+    re_gap_fill_dir(dd, sizeof(dd), 592);
+    re_ev_reset();
+    RE_CHECK("gap/derive: a 600-byte node.db path overflows, refused and paged",
+             !reindex_epilogue_derive(&g.ms, &g.ndb, dd) &&
+             re_paged("node_db_path_overflow", g.tip));
+    RE_CHECK("gap/derive: lock released", re_lock_free());
+    re_gap_close(&g);
+    return failures;
+}
+
+static int re_gap_derive_tip_cases(void)
+{
+    int failures = 0;
+    struct re_gap g;
+    char want[64];
+    RE_CHECK("gap/tip: fixture",
+             re_gap_open(&g, "notip", RE_GAP_TIP, true, false));
+    struct main_state empty;
+    memset(&empty, 0, sizeof(empty));
+    main_state_init(&empty);
+    re_ev_reset();
+    bool r = reindex_epilogue_derive(&empty, &g.ndb, g.dir);
+    snprintf(want, sizeof(want), "no_active_tip_after_replay");
+    RE_CHECK("gap/tip: no active tip refused, paged with the typed reason",
+             !r && g_re_ev.pages == 1 && g_re_ev.peer == 0 &&
+             strstr(g_re_ev.last, want) != NULL);
+    main_state_free(&empty);
+    re_gap_close(&g);
+
+    /* A chain at height 0 (genesis only) is a tip, not "no tip". */
+    RE_CHECK("gap/tip: genesis fixture",
+             re_gap_open(&g, "genesis", 0, true, false));
+    re_ev_reset();
+    (void)reindex_epilogue_derive(&g.ms, &g.ndb, g.dir);
+    RE_CHECK("gap/tip: a height-0 tip is not refused as missing",
+             strstr(g_re_ev.last, "no_active_tip_after_replay") == NULL);
+    re_gap_close(&g);
+    return failures;
+}
+
+static int re_mutation_gap_tests(void)
+{
+    int failures = 0;
+    failures += re_gap_arg_refusals();
+    failures += re_gap_generation();
+    failures += re_gap_clamp_write_fails();
+    failures += re_gap_clamp_commit_fails();
+    failures += re_gap_success_effects();
+    failures += re_gap_best_block_nonfatal();
+    failures += re_gap_schema_ensure_refused();
+    failures += re_gap_seed_anchor_refused();
+    failures += re_gap_derive_refusals();
+    failures += re_gap_derive_tip_cases();
+    return failures;
+}
+
 int test_reindex_epilogue(void);
 int test_reindex_epilogue(void)
 {
@@ -513,16 +1236,30 @@ int test_reindex_epilogue(void)
                  "progress_meta WHEN NEW.key='nullifier_kv.activation_cursor' "
                  "BEGIN SELECT RAISE(ABORT,'completion interrupted'); END",
                  NULL, NULL, NULL) == SQLITE_OK);
+    re_ev_reset();
     bool interrupted = reindex_epilogue_derive(&ms, &ndb, dir);
     RE_CHECK("interrupted epilogue refuses",
              !interrupted);
+    RE_CHECK("interrupted epilogue pages the typed completion reason",
+             re_paged("shielded_completion_publish_failed", TIP));
+    RE_CHECK("interrupted epilogue releases the progress-store lock",
+             re_lock_free());
     RE_CHECK("interrupted epilogue keeps all shielded history incomplete",
              re_shielded_markers_are(pdb, (int64_t)TIP + 1));
     RE_CHECK("fixture: completion interruption trigger drops",
              sqlite3_exec(pdb, "DROP TRIGGER fail_reindex_completion",
                           NULL, NULL, NULL) == SQLITE_OK);
+    re_ev_reset();
     bool derived = reindex_epilogue_derive(&ms, &ndb, dir);
     RE_CHECK("epilogue_derive returns true", derived);
+    {
+        char want[128];
+        snprintf(want, sizeof(want),
+                 "utxo_authority_epilogue source=reindex tip=%d count=4", TIP);
+        RE_CHECK("reindex success emits one sync-state event, pages nothing",
+                 g_re_ev.syncs == 1 && g_re_ev.pages == 0 &&
+                 strcmp(g_re_ev.sync, want) == 0);
+    }
 
     failures = re_check_full_replay_post_state(
         failures, pdb, &TIP, &ndb, replay_nf, expect_root, &expect_count);
@@ -536,6 +1273,7 @@ int test_reindex_epilogue(void)
     test_cleanup_tmpdir(dir);
 
     failures = re_check_imported_snapshot_authority(failures, &TIP);
+    failures += re_mutation_gap_tests();
 
     /* ── NEGATIVE: empty/unreadable mirror + bad args -> false, no crash. */
     {
