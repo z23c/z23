@@ -44,7 +44,8 @@
 #include <time.h>
 
 /* Global swarm coordinator — manages parallel UTXO chunk download.
- * Only active when we are syncing from multiple ZCL23 peers.
+ * Nothing starts it in production: mp_zs_manifest_accept keeps a peer's chunks
+ * out of the live table until they can go to staging.
  * All access to g_swarm fields protected by g_swarm_mutex, which is
  * statically initialized like g_block_swarm_mutex below. The lazy
  * pthread_once it replaces had an abort() on its failure path, in a
@@ -205,10 +206,9 @@ static _Atomic int64_t g_block_swarm_reaped_unix = 0;
  * split. */
 
 /* ── test hooks: g_swarm_active CAS drive ─────────────────
- * Expose the exact atomic primitive used by the zmanifest handler
+ * Expose the atomic claim a swarm start would use
  * so test_net.c can exercise the no-race / concurrent / reset-cycle
- * paths without a full peer-handshake setup. Body-for-body identical
- * to the production call sites around lines 2218 and 2398. */
+ * paths without a full peer-handshake setup. */
 bool msgprocessor_test_swarm_try_claim(void)
 {
     bool expected = false;
@@ -603,83 +603,16 @@ static mp_zs_hash32 *mp_zs_manifest_read_hashes(struct msg_processor *mp,
     return hashes;
 }
 
-/* Claim the swarm slot and start the swarm from a verified manifest.
- * Returns false (hashes already freed) when the swarm mutex is unavailable. */
-static bool mp_zs_manifest_start_swarm(struct msg_processor *mp,
-                                       struct p2p_node *node,
-                                       const struct mp_zs_manifest *m,
-                                       uint8_t (*hashes)[32])
-{
-    /* atomic compare-exchange on g_swarm_active
-     * (false → true) closes the TOCTOU window between
-     * the "is a swarm already running?" check and the
-     * "claim the slot" write. Without it, two peers
-     * racing on near-simultaneous manifests could both
-     * observe false and both call swarm_sync_init, the
-     * loser overwriting the winner's chunk index. The
-     * CAS lets only one peer win the init; the loser
-     * drops its message. */
-    bool expected = false;
-    if (!atomic_compare_exchange_strong(
-            &g_swarm_active, &expected, true)) {
-        /* Another peer raced us — drop silently
-         * rather than risk state leak. */
-        printf("Peer %s: swarm already active "
-               "(peer raced), dropping manifest\n",
-               node->addr_name);
-    } else {
-        struct sync_manifest peer_manifest = {
-            .height = m->height,
-            .num_utxos = m->num_utxos,
-            .num_chunks = m->num_chunks,
-            .chunk_size = m->chunk_size,
-            .chunk_hashes = hashes
-        };
-        memcpy(peer_manifest.block_hash, m->block_hash, 32);
-        memcpy(peer_manifest.merkle_root, m->merkle_root, 32);
-        memcpy(peer_manifest.utxo_sha3, m->utxo_sha3, 32);
-
-        int32_t first_chunk = -1;
-        if (!swarm_mutex_lock()) {
-            atomic_store(&g_swarm_active, false);
-            free(hashes);
-            LOG_FAIL("net", "rejecting snapshot manifest: "
-                     "swarm mutex unavailable");
-        }
-        if (swarm_sync_init(&g_swarm, &peer_manifest,
-                            mp->datadir)) {
-            g_swarm_last_progress_time =
-                (int64_t)platform_time_wall_time_t();
-            printf("Swarm sync started: %u chunks "
-                   "from h=%d\n", m->num_chunks, m->height);
-            first_chunk = swarm_sync_assign_chunk(
-                &g_swarm, node->id);
-            if (first_chunk >= 0) {
-                node->swarm_inflight_chunk =
-                    first_chunk;
-                node->swarm_chunk_req_time =
-                    (int64_t)platform_time_wall_time_t();
-            }
-        } else {
-            /* Init failed — release the claim so
-             * another peer's manifest can retry. */
-            atomic_store(&g_swarm_active, false);
-        }
-        swarm_mutex_unlock();
-        if (first_chunk >= 0)
-            push_chunk_request(mp, node,
-                               (uint32_t)first_chunk);
-    }
-    return true;
-}
-
-/* Merkle-verified manifest: remember it and maybe start the swarm.
- * Takes ownership of `hashes`; false only when the swarm mutex failed. */
-static bool mp_zs_manifest_accept(struct msg_processor *mp,
+/* Merkle-verified manifest: remember that it arrived. It starts no swarm: the
+ * swarm writes chunks straight to the live utxos table, and a peer's chunks stay
+ * out of that table until they can go to staging and be checked there. The log
+ * line is once per peer, on its first manifest; the peer is not scored, because
+ * an honest Z23 node sends one at every handshake. */
+static void mp_zs_manifest_accept(struct msg_processor *mp,
                                   struct p2p_node *node,
-                                  const struct mp_zs_manifest *m,
-                                  uint8_t (*hashes)[32])
+                                  const struct mp_zs_manifest *m)
 {
+    bool first_manifest = !node->swarm_manifest_received;
     node->swarm_manifest_received = true;
     int our_h = active_chain_height(
         &mp->main_state->chain_active);
@@ -688,17 +621,12 @@ static bool mp_zs_manifest_accept(struct msg_processor *mp,
            node->addr_name, m->height, m->num_chunks,
            (unsigned long long)m->num_utxos);
 
-    /* If peer is significantly ahead and we have no
-     * active swarm, initialize the swarm coordinator
-     * from their (now-verified) manifest. */
-    if (m->height > our_h + 100) {
-        if (!mp_zs_manifest_start_swarm(mp, node, m, hashes))
-            return false;
-    }
-    /* swarm_sync_init deep-copies the hash array, so
-     * our peer copy is ours to free regardless. */
-    free(hashes);
-    return true;
+    if (first_manifest && m->height > our_h + 100)
+        LOG_INFO("net",
+                 "Peer %s: swarm chunk sync contained: peer-supplied chunks "
+                 "are refused until they can go to staging "
+                 "(manifest h=%d local h=%d)",
+                 node->addr_name, m->height, our_h);
 }
 
 /* Peer sends their manifest — describes available chunks. */
@@ -731,13 +659,12 @@ static bool mp_zs_on_manifest(struct msg_processor *mp,
             fast_sync_merkle_root(
                 (const uint8_t (*)[32])hashes, m.num_chunks,
                 computed_root);
-            if (memcmp(computed_root, m.merkle_root, 32) != 0) {
-                free(hashes);
+            free(hashes);
+            if (memcmp(computed_root, m.merkle_root, 32) != 0)
                 peer_scoring_record(mp->net_mgr, node, PEER_OFFENCE_INVALID_PROOF,
                                     "manifest merkle root mismatch");
-            } else if (!mp_zs_manifest_accept(mp, node, &m, hashes)) {
-                return false;
-            }
+            else
+                mp_zs_manifest_accept(mp, node, &m);
         }
     }
     return true;

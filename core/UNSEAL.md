@@ -991,3 +991,7 @@ later lane flips it HARD.
 - 2026-11-05T23:53:50Z — REASON: Ask nothing for a compact body at or below the tip; bind swarm pieces to bodies
   old ROOT: 1af14aac67dce1140d753c00a3b69911fd667aa8179eadfbd22d25be9baf6a26
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-05T23:54:28Z — REASON: A manifest no longer starts a swarm; a peer's chunks stay out of the live table
+  old ROOT: 0a72eb43d6c4ea2926d86a7b048aebc2bda2d4bd1a343242c23b2a7ffa9c5cd9
+  by: owner unseal ritual (make core-unseal)
