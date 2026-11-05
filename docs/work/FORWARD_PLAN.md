@@ -205,8 +205,9 @@ order of size.
      [`tools/lab_peer.c`](../../tools/lab_peer.c) `verify` reads offers only
      from allowlisted keys, and `collect` never queues. Re-verify any key's
      offer with `--check=verify` in an isolated tree; admission stays a
-     maintainer decision. One test group runs offer, verify and collect
-     across two nodes
+     maintainer decision. One test group runs offer, receipt signing and a
+     tampered-bundle refusal between two isolated nodes with the real
+     binaries; the swarm, the board, verify and collect stay stubbed there
      ([`LAB.md`](../dev/LAB.md#peer-verification-over-the-swarm)). The
      change may be a one-file plugin built with `plugin dev`
      ([`PLUGINS.md`](../dev/PLUGINS.md)), which agents then call through the

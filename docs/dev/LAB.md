@@ -289,6 +289,16 @@ the two programs. `offer` is idempotent: a rerun after a partial run reuses the
 earlier send and any matching board post. Board listings follow the list cursor
 up to a fixed page cap and report `"truncated":true` if it was hit.
 
+What the `lab_peer` test group proves with the real binaries, between two
+isolated nodes (separate home, signer key, checkout and state directory):
+`offer` bundles a commit and writes its manifest, the second node re-checks
+and signs a receipt that verifies on it, a bundle with one flipped byte is
+refused `OFFER_SHA_MISMATCH` with no receipt, and the first node refuses the
+second node's receipt as an unknown signer. The swarm and the board are fakes
+there (`fleet bundle` accepts only an onion peer), and `verify` and `collect`
+run only against fakes: a counting receipt needs `reverify_offer` and a signer
+on the dev binary's `signers.allow`, so that loop is not yet shown end to end.
+
 ```
 z23-lab-peer offer   --lane=DIR --commit=SHA --state=DIR [--room=lab] [--agent=NAME]
 z23-lab-peer verify  --state=DIR --repo=DIR --authors=FILE [--room=lab] [--max=N]
