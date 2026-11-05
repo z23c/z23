@@ -11753,7 +11753,8 @@ static int test_fleet_board_head_row_carriage(void)
          "nothing and keeps no row; a root it cannot read defers; and the P2P "
          "frame path takes no head row at all") {
         struct fbr_p2p x;
-        uint8_t frame[FLEET_BOARD_FRAME_MAX];
+        static uint8_t frame[FLEET_BOARD_FRAME_MAGIC_BYTES + 1 +
+                             FLEET_BOARD_BODY_MAX + FLEET_BOARD_SIG_BYTES];
         size_t len = 0;
         ASSERT(fbh_mint(FBR_ROOT, 3, revoked, 1));
         fbh_compose(&post, 1, g_fbh_text, 2430);
