@@ -462,6 +462,8 @@ static int test_mnemonic_generate_is_random(void)
     return fail;
 }
 
+int test_mnemonic_domain_edges(void);
+
 int test_mnemonic(void)
 {
     int failures = 0;
@@ -478,6 +480,7 @@ int test_mnemonic(void)
     failures += test_mnemonic_wrapper_refusals();
     failures += test_mnemonic_wallet_seed_vector();
     failures += test_mnemonic_generate_is_random();
+    failures += test_mnemonic_domain_edges();
 
     (void)print_hex; /* suppress unused warning if test 13 passes */
 
