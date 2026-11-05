@@ -23,12 +23,17 @@
 
 #include "mutation_harness.h"
 #include "platform/directory_compat.h"
+#include "platform/clock.h"
+#include "util/supervised_retirement.h"
+#include "util/thread_registry.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+static struct zcl_mut_owner tmh_owner = ZCL_MUT_OWNER_INIT;
 
 #include "platform/file_sync.h"
 static unsigned tmh_sync_count, tmh_sync_fail;
@@ -140,13 +145,36 @@ static const char *const k_subject =
  * when a check fails, so classification is exercised through the same
  * parser the real runner feeds. */
 static const char *const k_runner =
+    "#define _POSIX_C_SOURCE 200809L\n"
     "#include <stdbool.h>\n"
     "#include <stdio.h>\n"
+    "#include <stdlib.h>\n"
+    "#include <string.h>\n"
+    "#include <unistd.h>\n"
+    "#include <time.h>\n"
     "\n"
     "bool tmh_in_range(int v);\n"
+    "static unsigned deep(unsigned n) { volatile unsigned char bytes[131072];\n"
+    "    for (unsigned i=0; i<sizeof(bytes); i+=4096) bytes[i]=1;\n"
+    "    unsigned child=n?deep(n-1):0; return child+bytes[0]; }\n"
     "\n"
-    "int main(void)\n"
+    "int main(int argc, char **argv)\n"
     "{\n"
+    "    if (argc > 1 && !strcmp(argv[1], \"--complete-env\")) {\n"
+    "        for(int i=0;i<65;i++){ char key[40],value[80];\n"
+    "            snprintf(key,sizeof(key),\"Z23_MUT_ENV_%d\",i);\n"
+    "            snprintf(value,sizeof(value),\"%d a b utf8-\\xc3\\xa9\",i);\n"
+    "            const char *actual=getenv(key); if(!actual||strcmp(actual,value)) return 44; } return 0;\n"
+    "    }\n"
+    "    if (argc > 1 && !strcmp(argv[1], \"--deep-stack\")) return deep(128)==129?0:41;\n"
+    "    if (argc > 1 && !strcmp(argv[1], \"--complete-argv\")) {\n"
+    "        const char *parts[]={\"\",\"a b\",\"quote\\\"\",\"slash\\\\\",\"utf8-\\xc3\\xa9\"};\n"
+    "        if(argc!=512) return 42;\n"
+    "        for(int i=2;i<argc;i++) if(strcmp(argv[i],parts[i%5])) return 43; return 0;\n"
+    "    }\n"
+    "    if (argc > 1 && !strcmp(argv[1], \"--early-eof\")) {\n"
+    "        close(1); close(2); struct timespec t = {1, 0}; nanosleep(&t, 0); return 0;\n"
+    "    }\n"
     "    int bad = 0;\n"
     "    if (tmh_in_range(-1)) bad++;\n"
     "    if (!tmh_in_range(0)) bad++;\n"
@@ -229,7 +257,7 @@ static bool tmh_prepare(const char *dir)
     argv[n] = NULL;
     /* Name the compiler and directory on failure so a spawn error is
      * distinguishable from a rejected fixture. */
-    if (zcl_mut_spawn(dir, argv, 120000, NULL, NULL) != 0) {
+    if (zcl_mut_spawn_owned(&tmh_owner, dir, argv, 120000, NULL, NULL) != 0) {
         fprintf(stderr, "tmh_prepare: fixture compile failed in %s using "
                         "CC=\"%s\" (argv[0]=\"%s\")\n",
                 dir, tmh_cc(), argv[0]);
@@ -269,6 +297,87 @@ static const struct zcl_mut_result *tmh_find(const struct zcl_mut_report *r,
             return &r->results[i];
     }
     return NULL;
+}
+
+static bool tmh_plan_budget_exact(const struct zcl_mut_plan *plan, size_t compiler)
+{
+    return plan->compile.count == compiler &&
+        strcmp(plan->object, "object -- name.o") == 0 &&
+        strcmp(plan->compile.argv[compiler - 1], "-DVALUE_507=a b") == 0;
+}
+
+static int tmh_plan_token_budget(size_t prefix, size_t compiler, bool delimiter)
+{
+    char text[32768];
+    size_t used = (size_t)snprintf(text, sizeof(text),
+        "zcc --epoch-object 'object -- name.o' subject.c");
+    for (size_t i = 4; i < prefix; ++i) {
+        int n = snprintf(text + used, sizeof(text) - used, " 'prefix -- quoted'");
+        if (n < 0 || (size_t)n >= sizeof(text) - used) return false;
+        used += (size_t)n;
+    }
+    int n = snprintf(text + used, sizeof(text) - used, "%scc", delimiter ? " -- " : " ' -- ' ");
+    if (n < 0 || (size_t)n >= sizeof(text) - used) return false;
+    used += (size_t)n;
+    for (size_t i = 1; i < compiler; ++i) {
+        n = snprintf(text + used, sizeof(text) - used, " '-DVALUE_%zu=a b'", i);
+        if (n < 0 || (size_t)n >= sizeof(text) - used) return false;
+        used += (size_t)n;
+    }
+    n = snprintf(text + used, sizeof(text) - used, "\ncc -o out @subject.rsp\n");
+    if (n < 0 || (size_t)n >= sizeof(text) - used) return false;
+    struct zcl_mut_plan plan = {0};
+    char error[256];
+    bool parsed = zcl_mut_plan_from_dryrun(text, "subject.c", &plan, error, sizeof(error));
+    bool exact = parsed && tmh_plan_budget_exact(&plan, compiler);
+    zcl_mut_plan_free(&plan);
+    return parsed ? (exact ? 1 : 2) : 0;
+}
+
+static int tmh_parser_budget_tests(void)
+{
+    int failures = 0;
+    TEST("wrapper and executable token budgets are separate and never truncated") {
+        ASSERT_EQ(tmh_plan_token_budget(6, ZCL_MUT_ARGV_MAX - 4, true), 1);
+        ASSERT_EQ(tmh_plan_token_budget(ZCL_MUT_ARGV_MAX, ZCL_MUT_ARGV_MAX - 4, true), 1);
+        ASSERT_EQ(tmh_plan_token_budget(ZCL_MUT_ARGV_MAX + 1, ZCL_MUT_ARGV_MAX - 4, true), 0);
+        ASSERT_EQ(tmh_plan_token_budget(6, ZCL_MUT_ARGV_MAX - 3, true), 0);
+        ASSERT_EQ(tmh_plan_token_budget(6, ZCL_MUT_ARGV_MAX - 4, false), 0);
+        PASS();
+    }
+    TEST("oversized plain quoted and escaped words refuse rather than truncate") {
+        char text[16385];
+        struct zcl_mut_argv words = {0};
+        memset(text, 'x', 8191); text[8191] = 0;
+        ASSERT(zcl_mut_shell_split(text, &words));
+        ASSERT_EQ(strlen(words.argv[0]), (size_t)8191); zcl_mut_argv_free(&words);
+        text[8191] = 'x'; text[8192] = 0;
+        ASSERT(!zcl_mut_shell_split(text, &words)); ASSERT_EQ(words.count, (size_t)0);
+        text[0] = '"'; memset(text + 1, 'x', 8192); text[8193] = '"'; text[8194] = 0;
+        ASSERT(!zcl_mut_shell_split(text, &words)); ASSERT_EQ(words.count, (size_t)0);
+        text[0] = '\''; text[8193] = '\'';
+        ASSERT(!zcl_mut_shell_split(text, &words)); ASSERT_EQ(words.count, (size_t)0);
+        for (size_t i = 0; i < 8192; ++i) { text[i * 2] = '\\'; text[i * 2 + 1] = 'x'; }
+        text[16384] = 0;
+        ASSERT(!zcl_mut_shell_split(text, &words)); ASSERT_EQ(words.count, (size_t)0);
+        ASSERT(!zcl_mut_shell_split("'unterminated", &words));
+        PASS();
+    }
+    TEST("public shell splitting still accepts512 words and refuses513") {
+        char text[ZCL_MUT_ARGV_MAX * 2 + 3];
+        struct zcl_mut_argv words = {0};
+        for (size_t i = 0; i < ZCL_MUT_ARGV_MAX; ++i) { text[i * 2] = 'x'; text[i * 2 + 1] = ' '; }
+        text[ZCL_MUT_ARGV_MAX * 2] = 0;
+        ASSERT(zcl_mut_shell_split(text, &words));
+        ASSERT_EQ(words.count, (size_t)ZCL_MUT_ARGV_MAX); zcl_mut_argv_free(&words);
+        text[ZCL_MUT_ARGV_MAX * 2] = 'x'; text[ZCL_MUT_ARGV_MAX * 2 + 1] = 0;
+        ASSERT(!zcl_mut_shell_split(text, &words)); ASSERT_EQ(words.count, (size_t)0);
+        PASS();
+    }
+
+
+_test_next:;
+    return failures;
 }
 
 /* Seed an exact key through the campaign, then replace its record bytes. */
@@ -437,28 +546,227 @@ _test_next:;
     return failures;
 }
 
-int test_mutation_harness(void);
-int test_mutation_harness(void)
+#if defined(__linux__)
+/* A real compiler wrapper disappears after its successful baseline invocation.
+ * The next compile therefore reaches the actual exec-failure boundary. */
+static bool tmh_missing_compiler_report(const struct zcl_mut_report *report,
+    const struct zcl_mut_owner *borrower, const char *path)
 {
-    int failures = tmh_pending_tests();
+    return borrower->failed && report->source_unchanged && report->result_count == 0 &&
+        report->counts[ZCL_MUT_OUTCOME_STILLBORN] == 0 &&
+        report->counts[ZCL_MUT_OUTCOME_KILLED] == 0 &&
+        strstr(report->error, "plan/compiler/link") != NULL && access(path, F_OK) != 0;
+}
 
-    /* Everything the cleanup at the bottom touches is declared and zeroed
-     * here: an ASSERT jumps straight to that label, so nothing below may be
-     * read or freed unless it is already in a safe state. */
-    struct zcl_mut_report report;
-    struct zcl_mut_report cut;
-    struct zcl_mut_plan plan;
-    memset(&report, 0, sizeof report);
-    memset(&cut, 0, sizeof cut);
-    memset(&plan, 0, sizeof plan);
-    char reldir[512] = { 0 };
-    char dir[700] = { 0 };
-    char work[900] = { 0 };
-    char subject_path[900] = { 0 };
-    bool ran = false, cut_ran = false;
+static bool tmh_missing_compiler(const char *root, const char *dir,
+    const struct zcl_mut_config *cfg, const struct zcl_mut_plan *plan)
+{
+    static const char code[] =
+        "#define _POSIX_C_SOURCE 200809L\n#include <unistd.h>\nint main(int n,char **v) {\n"
+        "if(n<2 || unlink(v[0])) return 126; execvp(v[1],v+1); return 127; }\n";
+    char path[1024], source[1024], work[1024], ccbuf[512];
+    if (snprintf(path, sizeof(path), "%s/compile-once", dir) >= (int)sizeof(path) ||
+        snprintf(source, sizeof(source), "%s/compile-once.c", dir) >= (int)sizeof(source) ||
+        snprintf(work, sizeof(work), "%s/exec-failure", dir) >= (int)sizeof(work) ||
+        !tmh_write(dir, "compile-once.c", code)) return false;
+    char *compile[16];
+    int count = tmh_cc_split(ccbuf, sizeof(ccbuf), compile, 8);
+    if (!count) return false;
+    compile[count++] = "-std=c23"; compile[count++] = "-O0";
+    compile[count++] = "-o"; compile[count++] = path; compile[count++] = source;
+    compile[count] = NULL;
+    if (zcl_mut_spawn_owned(&tmh_owner, dir, compile, 120000, NULL, NULL) != 0) return false;
+    struct zcl_mut_owner borrower = ZCL_MUT_OWNER_INIT;
+    if (!zcl_mut_owner_open(&borrower, root)) return false;
+    struct zcl_mut_plan variant = *plan; /* Borrow original words; never free this copy. */
+    if (variant.compile.count >= ZCL_MUT_ARGV_MAX) {
+        (void)zcl_mut_owner_close(&borrower);
+        return false;
+    }
+    for (size_t i = variant.compile.count; i > 0; --i)
+        variant.compile.argv[i] = variant.compile.argv[i - 1];
+    variant.compile.argv[0] = path;
+    variant.compile.argv[++variant.compile.count] = NULL;
+    struct zcl_mut_config broken = *cfg;
+    broken.owner = &borrower; broken.work_dir = work; broken.use_cache = true;
+    struct zcl_mut_report report = {0};
+    bool completed = zcl_mut_campaign_run(&broken, &variant, &report);
+    bool correct = !completed && tmh_missing_compiler_report(&report, &borrower, path);
+    zcl_mut_report_free(&report);
+    bool closed = zcl_mut_owner_close(&borrower);
+    return correct && closed;
+}
 
-    /* ────────────────── operators, with no build at all ───────────────── */
+/* Hold the actual supervisor's cleanup at the existing platform fixture gate.
+ * Failed transactional wakes must retain the exact borrower until late ACK. */
+static bool tmh_pending_retirement(const char *root, const char *dir, const char *work)
+{
+    char binary[1024];
+    if (snprintf(binary, sizeof(binary), "%s/subject.bin", work) >= (int)sizeof(binary)) return false;
+    struct zcl_mut_owner borrower = ZCL_MUT_OWNER_INIT;
+    if (!zcl_mut_owner_open(&borrower, root)) return false;
+    int gate[2];
+    if (pipe(gate) != 0) { (void)zcl_mut_owner_close(&borrower); return false; }
+    platform_supervised_fixture_cleanup_gate(gate[0]);
+    zcl_mut_fixture_retirement_refuse(true);
+    char *arguments[] = {binary, "--early-eof", NULL};
+    int status = zcl_mut_spawn_owned(&borrower, dir, arguments, 60, NULL, NULL);
+    void *retained = borrower.pending;
+    bool refused = !zcl_mut_owner_close(&borrower);
+    bool stable = retained && borrower.pending == retained;
+    /* No more launches in this fixture: preauthorized transfer must remain
+     * possible after admission is stopped. All release actions precede asserts. */
+    zcl_supervised_retirement_request_stop();
+    zcl_mut_fixture_retirement_refuse(false);
+    platform_supervised_fixture_cleanup_gate(-1);
+    bool released = write(gate[1], "x", 1) == 1;
+    (void)close(gate[1]); (void)close(gate[0]);
+    bool closed = zcl_mut_owner_close(&borrower);
+    bool drained = zcl_supervised_retirement_drain(clock_now_monotonic_ns() + 1000000000);
+    return status == -1 && borrower.failed && refused && stable && released && closed && drained;
+}
+#endif
 
+#if defined(__linux__)
+static int tmh_execution_deadline_tests(const char *source, const char *dir, const char *work,
+    const struct zcl_mut_config *cfg, const struct zcl_mut_plan *plan)
+{
+    int failures = 0;
+    TEST("a compiler missing after baseline aborts without STILLBORN cache credit") {
+        ASSERT(tmh_missing_compiler(source, dir, cfg, plan));
+        ASSERT_EQ(zcl_supervised_retirement_phase(), ZCL_RETIREMENT_RUNNING);
+        PASS();
+    }
+    TEST("early pipe EOF does not discharge a live engine or its deadline") {
+        char binary[1024];
+        ASSERT(snprintf(binary, sizeof(binary), "%s/subject.bin", work) < (int)sizeof(binary));
+        char *arguments[] = {binary, "--early-eof", NULL};
+        ASSERT_EQ(zcl_mut_spawn_owned(&tmh_owner, dir, arguments, 80, NULL, NULL), -2);
+        ASSERT_EQ(zcl_supervised_retirement_fixture_pending(), 0u);
+        ASSERT(tmh_owner.pending == NULL);
+        ASSERT(!tmh_owner.failed);
+        ASSERT_EQ(zcl_supervised_retirement_phase(), ZCL_RETIREMENT_RUNNING);
+        PASS();
+    }
+
+_test_next:;
+    return failures;
+}
+
+static int tmh_vector_tests(const char *source, const char *dir, const char *work)
+{
+    int failures = 0;
+    TEST("complete target argv512 and deep child stack preserve native execution") {
+        char binary[1024];
+        ASSERT(snprintf(binary, sizeof(binary), "%s/subject.bin", work) < (int)sizeof(binary));
+        char *arguments[ZCL_MUT_ARGV_MAX + 2];
+        static char *const parts[] = {"", "a b", "quote\"", "slash\\", "utf8-\xc3\xa9"};
+        arguments[0] = binary; arguments[1] = "--complete-argv";
+        for (size_t i = 2; i < ZCL_MUT_ARGV_MAX; ++i) arguments[i] = parts[i % 5];
+        arguments[ZCL_MUT_ARGV_MAX] = NULL;
+        ASSERT_EQ(zcl_mut_spawn_owned(&tmh_owner, dir, arguments, 5000, NULL, NULL), 0);
+        arguments[1] = "--deep-stack"; arguments[2] = NULL;
+        ASSERT_EQ(zcl_mut_spawn_owned(&tmh_owner, dir, arguments, 5000, NULL, NULL), 0);
+        ASSERT(!tmh_owner.failed && tmh_owner.pending == NULL);
+        PASS();
+    }
+    TEST("target argv513 refuses before engine custody without truncation") {
+        struct zcl_mut_owner borrower = ZCL_MUT_OWNER_INIT;
+        ASSERT(zcl_mut_owner_open(&borrower, source));
+        char *arguments[ZCL_MUT_ARGV_MAX + 2];
+        arguments[0] = "unexecuted-fixture";
+        for (size_t i = 1; i <= ZCL_MUT_ARGV_MAX; ++i) arguments[i] = "argument";
+        arguments[ZCL_MUT_ARGV_MAX + 1] = NULL;
+        int status = zcl_mut_spawn_owned(&borrower, dir, arguments, 5000, NULL, NULL);
+        bool rejected = status == -1 && borrower.failed && borrower.pending == NULL;
+        bool closed = zcl_mut_owner_close(&borrower);
+        ASSERT(rejected && closed);
+        ASSERT_EQ(zcl_supervised_retirement_phase(), ZCL_RETIREMENT_RUNNING);
+        PASS();
+    }
+    TEST("complete inherited environment65 preserves bytes and explicit empty environments") {
+        extern char **environ;
+        char **saved = environ;
+        char values[65][128];
+        char *complete[66];
+        for (size_t i = 0; i < 65; ++i) {
+            (void)snprintf(values[i], sizeof(values[i]), "Z23_MUT_ENV_%zu=%zu a b utf8-\xc3\xa9", i, i);
+            complete[i] = values[i];
+        }
+        complete[65] = NULL;
+        char binary[1024];
+        ASSERT(snprintf(binary, sizeof(binary), "%s/subject.bin", work) < (int)sizeof(binary));
+        char *arguments[] = {binary, "--complete-env", NULL};
+        environ = complete;
+        int populated = zcl_mut_spawn_owned(&tmh_owner, dir, arguments, 5000, NULL, NULL);
+        environ = NULL; arguments[1] = "--deep-stack";
+        int null_empty = zcl_mut_spawn_owned(&tmh_owner, dir, arguments, 5000, NULL, NULL);
+        char *empty[] = {NULL}; environ = empty;
+        int explicit_empty = zcl_mut_spawn_owned(&tmh_owner, dir, arguments, 5000, NULL, NULL);
+        environ = saved; /* Restore before every assertion, including failure. */
+        ASSERT_EQ(populated, 0); ASSERT_EQ(null_empty, 0); ASSERT_EQ(explicit_empty, 0);
+        ASSERT(environ == saved);
+        ASSERT(!tmh_owner.failed && tmh_owner.pending == NULL);
+        PASS();
+    }
+
+_test_next:;
+    return failures;
+}
+
+static int tmh_failure_custody_tests(const char *source, const char *dir, const char *work,
+    const struct zcl_mut_config *cfg, const struct zcl_mut_plan *plan)
+{
+    int failures = 0;
+    TEST("observation failure aborts campaign without mutant or cache credit") {
+        struct zcl_mut_config broken = *cfg;
+        struct zcl_mut_report unavailable = {0};
+        broken.use_cache = true;
+        platform_supervised_fixture_observation_error_once();
+        bool completed = zcl_mut_campaign_run(&broken, plan, &unavailable);
+        bool no_credit = unavailable.result_count == 0 &&
+            unavailable.counts[ZCL_MUT_OUTCOME_STILLBORN] == 0 &&
+            unavailable.counts[ZCL_MUT_OUTCOME_KILLED] == 0;
+        zcl_mut_report_free(&unavailable);
+        ASSERT(!completed && no_credit);
+        ASSERT(tmh_owner.failed);
+        PASS();
+    }
+    TEST("repeated retirement refusal retains custody until late transfer after stop") {
+        ASSERT(tmh_pending_retirement(source, dir, work));
+        ASSERT_EQ(zcl_supervised_retirement_phase(), ZCL_RETIREMENT_STOPPED);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static bool tmh_owner_begin(const char **source, char *root, size_t capacity)
+{
+    *source = getenv("ZCL_DEV_SOURCE_ROOT");
+    if (!*source) *source = getcwd(root, capacity);
+    if (!*source || !zcl_supervised_retirement_begin() || !zcl_mut_owner_open(&tmh_owner, *source)) {
+        printf("mutation_harness: qualified lifecycle setup failed: %s\n", tmh_owner.error);
+        return false;
+    }
+    return true;
+}
+
+static int tmh_owner_finish(void)
+{
+    int failures = 0;
+    if (!zcl_mut_owner_close(&tmh_owner)) failures++;
+    zcl_supervised_retirement_request_stop();
+    bool drained = zcl_supervised_retirement_drain(clock_now_monotonic_ns() + 1000000000);
+    if (!drained || thread_registry_join_all(1) != 0) failures++;
+    return failures;
+}
+
+#endif
+
+static int tmh_operator_tests(void)
+{
+    int failures = 0;
     TEST("a mutation inside a string, a comment or an #include never fires") {
         const char *src =
             "#include <stdio.h>\n"
@@ -531,6 +839,42 @@ int test_mutation_harness(void)
         PASS();
     }
 
+
+_test_next:;
+    return failures;
+}
+
+int test_mutation_harness(void);
+int test_mutation_harness(void)
+{
+    int failures = tmh_pending_tests();
+
+    /* Everything the cleanup at the bottom touches is declared and zeroed
+     * here: an ASSERT jumps straight to that label, so nothing below may be
+     * read or freed unless it is already in a safe state. */
+    struct zcl_mut_report report;
+    struct zcl_mut_report cut;
+    struct zcl_mut_plan plan;
+    memset(&report, 0, sizeof report);
+    memset(&cut, 0, sizeof cut);
+    memset(&plan, 0, sizeof plan);
+    char reldir[512] = { 0 };
+    char dir[700] = { 0 };
+    char work[900] = { 0 };
+    char subject_path[900] = { 0 };
+    bool ran = false, cut_ran = false;
+#if defined(__linux__)
+    char root[PATH_MAX];
+    const char *source;
+    if (!tmh_owner_begin(&source, root, sizeof(root))) return failures + 1;
+#endif
+
+    /* ────────────────── operators, with no build at all ───────────────── */
+
+    int operator_failures = tmh_operator_tests();
+    failures += operator_failures;
+    if (operator_failures) goto _test_next;
+
     TEST("the plan parser recovers a compile and a link from make -n") {
         const char *dry =
             "gen_templates: nothing to do\n"
@@ -561,6 +905,9 @@ int test_mutation_harness(void)
         zcl_mut_plan_free(&p);
         PASS();
     }
+    int parser_failures = tmh_parser_budget_tests();
+    failures += parser_failures;
+    if (parser_failures) goto _test_next;
 
     /* The build's own spelling, with the blank line and the bare `test -s`
      * of the response file a real transcript carries before the link. */
@@ -645,6 +992,7 @@ int test_mutation_harness(void)
     }
 
     struct zcl_mut_config cfg = {
+        .owner = &tmh_owner,
         .root = dir,
         .src_rel = "subject.c",
         .group = "fixture",
@@ -761,12 +1109,25 @@ int test_mutation_harness(void)
         PASS();
     }
 
+#if defined(__linux__)
+    int runtime_failures = tmh_execution_deadline_tests(source, dir, work, &cfg, &plan);
+    failures += runtime_failures;
+    if (runtime_failures) goto _test_next;
+    runtime_failures = tmh_vector_tests(source, dir, work);
+    failures += runtime_failures;
+    if (runtime_failures) goto _test_next;
+    failures += tmh_failure_custody_tests(source, dir, work, &cfg, &plan);
+#endif
+
 _test_next:;
     if (subject_path[0])
         (void)chmod(subject_path, 0644);
     zcl_mut_report_free(&report);
     zcl_mut_report_free(&cut);
     zcl_mut_plan_free(&plan);
+#if defined(__linux__)
+    failures += tmh_owner_finish();
+#endif
     if (failures == 0)
         printf("test_mutation_harness: all passed\n");
     else

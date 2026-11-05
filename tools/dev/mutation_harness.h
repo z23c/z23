@@ -199,7 +199,30 @@ struct zcl_mut_result {
     bool cached;
 };
 
+/* Borrow the explicitly begun util retirement service. No library call starts
+ * or stops that service. Noncopyable: retain through close, including refusal.
+ * pending owns an exact stable platform handle, never a numeric PID ticket. */
+struct zcl_mut_owner {
+    void *pending;
+    int launcher_fd;
+    bool failed;
+    char error[160];
+};
+#define ZCL_MUT_OWNER_INIT {NULL, -1, false, {0}}
+enum { ZCL_MUT_EXIT_CLEANUP_PENDING = 3 };
+bool zcl_mut_owner_open(struct zcl_mut_owner *owner, const char *root);
+/* False retains pending custody; caller must keep owner/service alive. */
+bool zcl_mut_owner_close(struct zcl_mut_owner *owner);
+#if defined(ZCL_TESTING) && defined(__linux__)
+void zcl_mut_fixture_retirement_refuse(bool refuse);
+unsigned zcl_mut_fixture_retirement_refusals(void);
+int64_t zcl_mut_fixture_supervisor(const struct zcl_mut_owner *owner);
+#endif
+int zcl_mut_spawn_owned(struct zcl_mut_owner *owner, const char *dir,
+    char *const argv[], int timeout_ms, char **out, size_t *out_len);
+
 struct zcl_mut_config {
+    struct zcl_mut_owner *owner; /* Required qualified Linux lifecycle borrower. */
     const char *root;      /* checkout root; all relative paths hang off it */
     const char *src_rel;   /* the file being mutated, relative to root */
     const char *group;     /* registered test group, e.g. test_node_character */
@@ -237,7 +260,8 @@ int zcl_mut_score_tenths(const struct zcl_mut_report *r);
 /* Run the whole campaign. `plan` is used verbatim except for the three
  * substitutions the campaign owns: the compiled object, the linked binary
  * and the link response file. Returns false only when the campaign could
- * not start (unreadable source, baseline not green, bad plan); a green run
+ * not start or cannot retain qualified process evidence (including mid-run
+ * infrastructure/retirement failure); a green run
  * that killed nothing is a true return with a 0% score. */
 bool zcl_mut_campaign_run(const struct zcl_mut_config *cfg,
                           const struct zcl_mut_plan *plan,
@@ -248,7 +272,9 @@ bool zcl_mut_campaign_run(const struct zcl_mut_config *cfg,
 
 /* Run argv[] with cwd `dir`, capturing stdout+stderr into a fresh buffer.
  * Returns the exit status, 128+signal when killed, or -1 on a launch
- * failure. A run that exceeds `timeout_ms` is killed and reported as -2. */
+ * failure. Linux requires zcl_mut_spawn_owned and an explicit borrower; this
+ * compatibility entry refuses before launching on Linux. A qualified timeout
+ * returns -2 only after observed engine exit and complete descendant cleanup. */
 int zcl_mut_spawn(const char *dir, char *const argv[], int timeout_ms,
                   char **out, size_t *out_len);
 

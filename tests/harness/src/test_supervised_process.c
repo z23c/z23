@@ -18,6 +18,7 @@ enum { FIXTURE_NO_PID = -1, FIXTURE_NO_FD = -1, FIXTURE_ERROR = -1 };
 #include <sys/socket.h>
 #include <sys/file.h>
 #include <sys/wait.h>
+#include <sys/resource.h>
 #include <elf.h>
 #include "sha3/sha3.h"
 
@@ -73,7 +74,29 @@ static int fixture_cwd(void)
     return write(STDOUT_FILENO, path, length) == (ssize_t)length ? 0 : 41;
 }
 
+static int fixture_stack(void)
+{
+    struct rlimit limit;
+    if (getrlimit(RLIMIT_STACK, &limit) != 0) return 64;
+    return write(1, &limit, sizeof(limit)) == (ssize_t)sizeof(limit) ? 0 : 65;
+}
+
 static int fixture_retirement_owner(char **argv);
+static int fixture_vectors(int argc, char **argv)
+{
+    extern char **environ;
+    for (int vector = 0; vector < 2; ++vector) {
+        char **entries = vector ? environ : argv;
+        size_t start = vector ? 0 : 2;
+        for (size_t i = start; entries[i]; ++i) {
+            size_t n = strlen(entries[i]);
+            if (n > UINT8_MAX) return 61;
+            uint8_t length = (uint8_t)n;
+            if (write(1, &length, 1) != 1 || write(1, entries[i], n) != (ssize_t)n) return 62;
+        }
+    }
+    return argc > 1 ? 0 : 63;
+}
 static int fixture_retirement_idle(void)
 {
     int live = thread_registry_live_count(), owned = thread_registry_unreaped_count();
@@ -90,17 +113,29 @@ static int fixture_retirement_idle(void)
 
 static int fixture_dispatch_pair(const char *mode)
 {
+    if (!strcmp(mode, "--supervised-fixture-empty-env")) {
+        extern char **environ;
+        return !environ || !environ[0] ? 0 : 66;
+    }
     if (!strcmp(mode, "--supervised-fixture-tree")) return fixture_tree(false);
     if (!strcmp(mode, "--supervised-fixture-locked-tree")) return fixture_tree(true);
     if (!strcmp(mode, "--supervised-fixture-hold")) for (;;) pause();
     if (!strcmp(mode, "--supervised-fixture-exit-one")) return 1;
     if (!strcmp(mode, "--supervised-fixture-cwd")) return fixture_cwd();
+    if (!strcmp(mode, "--supervised-fixture-stack")) return fixture_stack();
     if (!strcmp(mode, "--supervised-fixture-retire-idle")) return fixture_retirement_idle();
     return -1;
 }
 int supervised_fixture_dispatch(int argc, char **argv);
 int supervised_fixture_dispatch(int argc, char **argv)
 {
+    if (argc == 3 && !strcmp(argv[1], "--supervised-fixture-marker")) {
+        int fd = open(argv[2], O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (fd < 0) return 70;
+        return close(fd) == 0 ? 0 : 71;
+    }
+    if (argc > 1 && !strcmp(argv[1], "--supervised-fixture-vectors"))
+        return fixture_vectors(argc, argv);
     if (argc == 5 && !strcmp(argv[1], "--supervised-fixture-echo")) return fixture_echo(argc, argv);
     if (argc == 2) return fixture_dispatch_pair(argv[1]);
     if (argc == 7 && !strcmp(argv[1], "--supervised-fixture-retire-owner"))
@@ -238,6 +273,218 @@ static bool tree_cleanup(struct platform_supervised_process *process, int leaf_f
 }
 
 static enum platform_supervised_state await_clean(struct platform_supervised_process *process);
+
+static int supervised_stack_limits(int image)
+{
+    int failures = 0;
+    struct platform_supervised_process process;
+    platform_supervised_init(&process);
+    int pipes[2] = {-1, -1}, null_fd = -1;
+    TEST_CASE("supervised_process: unlimited stack changes only the engine") {
+        struct rlimit before, after, child;
+        ASSERT_EQ(getrlimit(RLIMIT_STACK, &before), 0);
+        ASSERT(pipe2(pipes, O_CLOEXEC) == 0);
+        null_fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+        ASSERT(null_fd >= 0);
+        struct platform_supervised_fd_map maps[3];
+        struct platform_supervised_spec spec = tree_spec(image, null_fd, pipes[1], maps);
+        const char *argv[] = {"fixture", "--supervised-fixture-stack", NULL}; spec.argv = argv;
+        ASSERT_EQ(platform_supervised_start(&process, &spec), PLATFORM_SUPERVISED_RUNNING);
+        ASSERT(wait_bytes(pipes[0], &child, sizeof(child)));
+        ASSERT_EQ(await_clean(&process), PLATFORM_SUPERVISED_CLEAN);
+        ASSERT(child.rlim_cur == before.rlim_cur && child.rlim_max == before.rlim_max);
+        spec.stack_policy = PLATFORM_SUPERVISED_STACK_UNLIMITED;
+        spec.launch_deadline_ns = fixture_deadline();
+        ASSERT_EQ(platform_supervised_start(&process, &spec), PLATFORM_SUPERVISED_RUNNING);
+        close(pipes[1]); pipes[1] = -1;
+        ASSERT(wait_bytes(pipes[0], &child, sizeof(child)));
+        ASSERT_EQ(await_clean(&process), PLATFORM_SUPERVISED_CLEAN);
+        ASSERT(child.rlim_cur == RLIM_INFINITY && child.rlim_max == RLIM_INFINITY);
+        ASSERT_EQ(getrlimit(RLIMIT_STACK, &after), 0);
+        ASSERT(before.rlim_cur == after.rlim_cur && before.rlim_max == after.rlim_max);
+    } TEST_END
+    if (!fixture_cleanup(&process)) failures++;
+    if (pipes[0] >= 0) close(pipes[0]);
+    if (pipes[1] >= 0) close(pipes[1]);
+    if (null_fd >= 0) close(null_fd);
+    return failures;
+}
+
+static int supervised_complete_e2big(int image)
+{
+    int failures = 0, null_fd = -1;
+    char *large = NULL;
+    struct platform_supervised_process process;
+    platform_supervised_init(&process);
+    TEST_CASE("supervised_process: complete environment E2BIG is a launch failure") {
+        long page = sysconf(_SC_PAGESIZE);
+        ASSERT(page > 0 && (size_t)page <= SIZE_MAX / 33);
+        size_t bytes = (size_t)page * 33;
+        large = malloc(bytes);
+        ASSERT(large != NULL);
+        memset(large, 'x', bytes - 1); large[bytes - 1] = 0;
+        large[0] = 'X'; large[1] = '=';
+        const char *env[] = {large, NULL};
+        null_fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+        ASSERT(null_fd >= 0);
+        struct platform_supervised_fd_map maps[3];
+        struct platform_supervised_spec spec = tree_spec(image, null_fd, null_fd, maps);
+        spec.env = env; spec.env_policy = PLATFORM_SUPERVISED_ENV_COMPLETE; spec.env_count = 1;
+        ASSERT_EQ(platform_supervised_start(&process, &spec), PLATFORM_SUPERVISED_LAUNCH_FAILED);
+        ASSERT_EQ(process.observation.error_number, E2BIG);
+        ASSERT_EQ(await_clean(&process), PLATFORM_SUPERVISED_CLEAN);
+        ASSERT(process.observation.no_children);
+    } TEST_END
+    if (!fixture_cleanup(&process)) failures++;
+    if (null_fd >= 0) close(null_fd);
+    free(large);
+    return failures;
+}
+
+static int fixture_stack_refusal(int image, const char *marker)
+{
+    const struct rlimit finite = {1024 * 1024, 1024 * 1024};
+    if (setrlimit(RLIMIT_STACK, &finite) != 0) return 67;
+    int fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+    if (fd < 0) return 68;
+    struct platform_supervised_fd_map maps[3];
+    struct platform_supervised_spec spec = tree_spec(image, fd, fd, maps);
+    const char *argv[] = {"fixture", "--supervised-fixture-marker", marker, NULL};
+    spec.argv = argv;
+    spec.stack_policy = PLATFORM_SUPERVISED_STACK_UNLIMITED;
+    struct platform_supervised_process process;
+    platform_supervised_init(&process);
+    enum platform_supervised_state state = platform_supervised_start(&process, &spec);
+    bool refused = state == PLATFORM_SUPERVISED_LAUNCH_FAILED &&
+        process.observation.error_number == EPERM;
+    state = platform_supervised_stop(&process, fixture_deadline());
+    close(fd);
+    return refused && state == PLATFORM_SUPERVISED_CLEAN && process.observation.no_children ? 0 : 69;
+}
+
+static int supervised_stack_refusal(int image, const char *directory)
+{
+    int failures = 0;
+    TEST_CASE("supervised_process: isolated finite hard stack refuses unlimited before exec") {
+        struct rlimit before, after;
+        char marker[1200];
+        ASSERT(snprintf(marker, sizeof(marker), "%s/stack-must-not-exec", directory) > 0);
+        ASSERT(access(marker, F_OK) != 0 && errno == ENOENT);
+        ASSERT_EQ(getrlimit(RLIMIT_STACK, &before), 0);
+        pid_t child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) _exit(fixture_stack_refusal(image, marker));
+        int status = 0;
+        pid_t observed = 0;
+        int64_t deadline = fixture_deadline();
+        while (clock_now_monotonic_ns() < deadline && observed == 0) {
+            observed = waitpid(child, &status, WNOHANG);
+            if (observed < 0 && errno == EINTR) observed = 0;
+            if (observed == 0) (void)poll(NULL, 0, 10);
+        }
+        if (observed != child) {
+            (void)kill(child, SIGKILL);
+            (void)waitpid(child, &status, 0);
+        }
+        ASSERT_EQ(observed, child);
+        ASSERT(WIFEXITED(status)); ASSERT_EQ(WEXITSTATUS(status), 0);
+        ASSERT(access(marker, F_OK) != 0 && errno == ENOENT);
+        ASSERT_EQ(getrlimit(RLIMIT_STACK, &after), 0);
+        ASSERT(before.rlim_cur == after.rlim_cur && before.rlim_max == after.rlim_max);
+    } TEST_END
+    return failures;
+}
+
+static int supervised_complete_vectors(int image)
+{
+    int failures = 0;
+    int pipes[2] = {-1, -1}, null_fd = -1;
+    struct platform_supervised_process process;
+    platform_supervised_init(&process);
+    TEST_CASE("supervised_process: complete environment and extended argv preserve exact bytes") {
+        ASSERT(pipe2(pipes, O_CLOEXEC) == 0);
+        null_fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+        ASSERT(null_fd >= 0);
+        const char *argv[PLATFORM_SUPERVISED_ARGV_EXTENDED_MAX + 2];
+        const char *env[66];
+        char values[65][32];
+        uint8_t expected[8192], observed[8192];
+        size_t length = 0;
+        argv[0] = "fixture"; argv[1] = "--supervised-fixture-vectors";
+        static const char *const tokens[] = {"", "a b", "quote\"", "back\\slash", "utf8-\xc3\xa9"};
+        for (size_t i = 2; i < PLATFORM_SUPERVISED_ARGV_EXTENDED_MAX; ++i) {
+            argv[i] = tokens[i % 5];
+            size_t n = strlen(argv[i]); expected[length++] = (uint8_t)n;
+            memcpy(expected + length, argv[i], n); length += n;
+        }
+        argv[PLATFORM_SUPERVISED_ARGV_EXTENDED_MAX] = NULL;
+        for (size_t i = 0; i < 65; ++i) {
+            (void)snprintf(values[i], sizeof(values[i]), "COMPLETE_%zu=%s", i, tokens[i % 5]);
+            env[i] = values[i]; size_t n = strlen(env[i]);
+            expected[length++] = (uint8_t)n; memcpy(expected + length, env[i], n); length += n;
+        }
+        env[65] = NULL;
+        struct platform_supervised_fd_map maps[3];
+        struct platform_supervised_spec spec = tree_spec(image, null_fd, pipes[1], maps);
+        spec.argv = argv; spec.env = env;
+        spec.argv_policy = PLATFORM_SUPERVISED_ARGV_EXTENDED;
+        spec.env_policy = PLATFORM_SUPERVISED_ENV_COMPLETE; spec.env_count = 65;
+        ASSERT_EQ(platform_supervised_start(&process, &spec), PLATFORM_SUPERVISED_RUNNING);
+        close(pipes[1]); pipes[1] = -1;
+        ASSERT(wait_bytes(pipes[0], observed, length));
+        ASSERT(memcmp(expected, observed, length) == 0);
+        ASSERT_EQ(await_clean(&process), PLATFORM_SUPERVISED_CLEAN);
+        ASSERT(process.observation.no_children && process.observation.engine_exit_observed);
+        ASSERT_EQ(process.observation.engine_wait_status, 0);
+        ASSERT(exact_eof(pipes[0]));
+        spec.maps = maps; maps[1].source = null_fd; maps[2].source = null_fd;
+        spec.launch_deadline_ns = fixture_deadline();
+        ASSERT_EQ(platform_supervised_start(&process, &spec), PLATFORM_SUPERVISED_RUNNING);
+        ASSERT_EQ(await_clean(&process), PLATFORM_SUPERVISED_CLEAN);
+        spec.env_policy = PLATFORM_SUPERVISED_ENV_DEFAULT;
+        ASSERT_EQ(platform_supervised_start(&process, &spec), PLATFORM_SUPERVISED_INVALID);
+        spec.env_policy = PLATFORM_SUPERVISED_ENV_COMPLETE;
+        spec.env_count = 64;
+        ASSERT_EQ(platform_supervised_start(&process, &spec), PLATFORM_SUPERVISED_INVALID);
+        spec.env_count = 66;
+        ASSERT_EQ(platform_supervised_start(&process, &spec), PLATFORM_SUPERVISED_INVALID);
+        spec.env_count = SIZE_MAX;
+        ASSERT_EQ(platform_supervised_start(&process, &spec), PLATFORM_SUPERVISED_INVALID);
+        spec.env_count = 65; spec.env_policy = (enum platform_supervised_env_policy)99;
+        ASSERT_EQ(platform_supervised_start(&process, &spec), PLATFORM_SUPERVISED_INVALID);
+        spec.env_policy = PLATFORM_SUPERVISED_ENV_COMPLETE;
+        spec.argv_policy = (enum platform_supervised_argv_policy)99;
+        ASSERT_EQ(platform_supervised_start(&process, &spec), PLATFORM_SUPERVISED_INVALID);
+        spec.argv_policy = PLATFORM_SUPERVISED_ARGV_EXTENDED;
+        spec.stack_policy = (enum platform_supervised_stack_policy)99;
+        ASSERT_EQ(platform_supervised_start(&process, &spec), PLATFORM_SUPERVISED_INVALID);
+        spec.stack_policy = PLATFORM_SUPERVISED_STACK_INHERIT;
+        argv[PLATFORM_SUPERVISED_ARGV_EXTENDED_MAX] = "overflow";
+        argv[PLATFORM_SUPERVISED_ARGV_EXTENDED_MAX + 1] = NULL;
+        ASSERT_EQ(platform_supervised_start(&process, &spec), PLATFORM_SUPERVISED_INVALID);
+        ASSERT_EQ(process.supervisor_pid, FIXTURE_NO_PID);
+        argv[PLATFORM_SUPERVISED_ARGV_EXTENDED_MAX] = NULL;
+        spec.argv_policy = PLATFORM_SUPERVISED_ARGV_DEFAULT;
+        const char *at64 = argv[64]; argv[64] = NULL;
+        ASSERT_EQ(platform_supervised_start(&process, &spec), PLATFORM_SUPERVISED_RUNNING);
+        ASSERT_EQ(await_clean(&process), PLATFORM_SUPERVISED_CLEAN);
+        argv[64] = at64; const char *at65 = argv[65]; argv[65] = NULL;
+        ASSERT_EQ(platform_supervised_start(&process, &spec), PLATFORM_SUPERVISED_INVALID);
+        ASSERT_EQ(process.supervisor_pid, FIXTURE_NO_PID);
+        argv[65] = at65; spec.argv_policy = PLATFORM_SUPERVISED_ARGV_EXTENDED;
+        const char *empty[] = {NULL}; spec.env = empty; spec.env_count = 0;
+        const char *empty_argv[] = {"fixture", "--supervised-fixture-empty-env", NULL};
+        spec.argv = empty_argv;
+        ASSERT_EQ(platform_supervised_start(&process, &spec), PLATFORM_SUPERVISED_RUNNING);
+        ASSERT_EQ(await_clean(&process), PLATFORM_SUPERVISED_CLEAN);
+        ASSERT_EQ(process.observation.engine_wait_status, 0);
+    } TEST_END
+    if (!fixture_cleanup(&process)) failures++;
+    if (pipes[0] >= 0) close(pipes[0]);
+    if (pipes[1] >= 0) close(pipes[1]);
+    if (null_fd >= 0) close(null_fd);
+    return failures;
+}
 
 static int supervised_tree(int image, bool owner_eof)
 {
@@ -1185,6 +1432,10 @@ int test_supervised_process(void)
         ASSERT_EQ(pwrite(image, "x", 1, 0), -1);
         ASSERT_EQ(errno, EPERM);
         failures += supervised_mapping(image);
+        failures += supervised_complete_vectors(image);
+        failures += supervised_stack_limits(image);
+        failures += supervised_complete_e2big(image);
+        failures += supervised_stack_refusal(image, directory);
         failures += supervised_tree(image, false);
         failures += supervised_tree(image, true);
         failures += supervised_failures(image);

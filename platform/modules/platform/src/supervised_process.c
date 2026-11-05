@@ -20,6 +20,7 @@ void platform_supervised_init(struct platform_supervised_process *process)
 #include <poll.h>
 #include <signal.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -334,10 +335,10 @@ static int remaining_ms(int64_t deadline)
     return ms > 20 ? 20 : (int)ms;
 }
 
-static bool vector_valid(const char *const *values, bool nonempty)
+static bool vector_valid(const char *const *values, bool nonempty, size_t maximum)
 {
     if (!values) return false;
-    for (size_t i = 0; i <= 64; ++i) {
+    for (size_t i = 0; i <= maximum; ++i) {
         if (!values[i]) return !nonempty || i != 0;
     }
     return false;
@@ -378,9 +379,28 @@ static bool cwd_valid(const struct platform_supervised_spec *spec)
         fstat(spec->cwd_fd, &status) == 0 && S_ISDIR(status.st_mode));
 }
 
+static bool environment_valid(const struct platform_supervised_spec *spec)
+{
+    if (spec->env_policy == PLATFORM_SUPERVISED_ENV_DEFAULT)
+        return vector_valid(spec->env, false, PLATFORM_SUPERVISED_ENV_MAX);
+    if (spec->env_policy != PLATFORM_SUPERVISED_ENV_COMPLETE || !spec->env ||
+        spec->env_count > SIZE_MAX / sizeof(*spec->env) - 1) return false;
+    for (size_t i = 0; i < spec->env_count; ++i)
+        if (!spec->env[i]) return false;
+    return spec->env[spec->env_count] == NULL;
+}
+
 static bool spec_valid(const struct platform_supervised_spec *spec)
 {
-    return spec && vector_valid(spec->argv, true) && vector_valid(spec->env, false) &&
+    if (!spec ||
+        (spec->argv_policy != PLATFORM_SUPERVISED_ARGV_DEFAULT &&
+         spec->argv_policy != PLATFORM_SUPERVISED_ARGV_EXTENDED) ||
+        (spec->stack_policy != PLATFORM_SUPERVISED_STACK_INHERIT &&
+         spec->stack_policy != PLATFORM_SUPERVISED_STACK_UNLIMITED)) return false;
+    size_t maximum = spec->argv_policy == PLATFORM_SUPERVISED_ARGV_EXTENDED ?
+        PLATFORM_SUPERVISED_ARGV_EXTENDED_MAX : PLATFORM_SUPERVISED_ARGV_DEFAULT_MAX;
+    return vector_valid(spec->argv, true, maximum) &&
+        environment_valid(spec) &&
         cwd_valid(spec) && mappings_valid(spec) && executable_valid(spec->executable_fd) &&
         remaining_ms(spec->launch_deadline_ns) && spec->cleanup_timeout_ms &&
         spec->cleanup_timeout_ms <= 10000;
@@ -419,6 +439,10 @@ static bool close_except(const int *keep, size_t count)
 static bool prepare_engine(const struct platform_supervised_spec *spec, int *image,
     int *error_fd, int keep[PLATFORM_SUPERVISED_MAX_MAPS + 2])
 {
+    if (spec->stack_policy == PLATFORM_SUPERVISED_STACK_UNLIMITED) {
+        const struct rlimit limit = {RLIM_INFINITY, RLIM_INFINITY};
+        if (syscall(SYS_prlimit64, 0, RLIMIT_STACK, &limit, NULL) < 0) return false;
+    }
     if (spec->use_cwd_fd && fchdir(spec->cwd_fd) < 0) return false;
     int copies[PLATFORM_SUPERVISED_MAX_MAPS];
     *image = fcntl(spec->executable_fd, F_DUPFD_CLOEXEC, 64);

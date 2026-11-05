@@ -7,6 +7,24 @@
 #include <stdbool.h>
 
 #define PLATFORM_SUPERVISED_MAX_MAPS 16u
+#define PLATFORM_SUPERVISED_ARGV_DEFAULT_MAX 64u
+#define PLATFORM_SUPERVISED_TARGET_ARGV_MAX 512u
+#define PLATFORM_SUPERVISED_LAUNCHER_ARGV_MAX 2u
+#define PLATFORM_SUPERVISED_ARGV_EXTENDED_MAX \
+    (PLATFORM_SUPERVISED_TARGET_ARGV_MAX + PLATFORM_SUPERVISED_LAUNCHER_ARGV_MAX)
+#define PLATFORM_SUPERVISED_ENV_MAX 64u
+enum platform_supervised_argv_policy {
+    PLATFORM_SUPERVISED_ARGV_DEFAULT = 0,
+    PLATFORM_SUPERVISED_ARGV_EXTENDED
+};
+enum platform_supervised_stack_policy {
+    PLATFORM_SUPERVISED_STACK_INHERIT = 0,
+    PLATFORM_SUPERVISED_STACK_UNLIMITED
+};
+enum platform_supervised_env_policy {
+    PLATFORM_SUPERVISED_ENV_DEFAULT = 0,
+    PLATFORM_SUPERVISED_ENV_COMPLETE
+};
 #define PLATFORM_SUPERVISED_IMAGE_MAX (64u * 1024u * 1024u)
 enum platform_supervised_image_result {
     PLATFORM_SUPERVISED_IMAGE_OK,
@@ -31,7 +49,7 @@ enum platform_supervised_image_result platform_supervised_image_capture(
 struct platform_supervised_fd_map { int source, target; };
 struct platform_supervised_spec {
     int executable_fd; /* Sealed immutable ELF snapshot; caller retains ownership. */
-    const char *const *argv; /* Explicit argv[0], at most 64 entries plus NULL. */
+    const char *const *argv; /* Explicit argv[0]; default 64 entries plus NULL. */
     const char *const *env; /* Explicit environment, at most 64 entries plus NULL. */
     const struct platform_supervised_fd_map *maps;
     size_t map_count; /* Unique targets 0..63; all three stdio targets required. */
@@ -39,6 +57,17 @@ struct platform_supervised_spec {
     uint32_t cleanup_timeout_ms; /* 1..10000, used on owner EOF/natural exit. */
     bool use_cwd_fd; /* Opt-in trusted directory; default retains existing CWD. */
     int cwd_fd; /* Exclusive stable borrowed FD until start returns; child uses no path. */
+    enum platform_supervised_argv_policy argv_policy; /* Extended: 514 non-NULL, 515 slots. */
+    /* Unlimited requests BOTH soft/hard RLIMIT_STACK infinity in engine only.
+     * Failure uses the exec error pipe; no exec or normal verdict is permitted.
+     * Owner/supervisor limits unchanged. No privilege elevation is implied. */
+    enum platform_supervised_stack_policy stack_policy;
+    /* COMPLETE borrows exactly env_count non-NULL entries followed by NULL.
+     * Zero means explicit empty environment, never ambient inheritance.
+     * Caller keeps the complete accessible vector stable until start returns.
+     * No entry/byte cap is imposed; kernel E2BIG remains a launch failure. */
+    enum platform_supervised_env_policy env_policy;
+    size_t env_count;
 };
 enum platform_supervised_state {
     PLATFORM_SUPERVISED_RUNNING,

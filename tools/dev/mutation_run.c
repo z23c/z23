@@ -44,6 +44,9 @@
 #include "platform/path_compat.h"
 #include "util/path_util.h"
 #include "sha3/sha3.h"
+#if defined(__linux__)
+#include "util/supervised_retirement.h"
+#endif
 
 #include <errno.h>
 #include <fcntl.h>
@@ -153,6 +156,7 @@ static long long mut_spawn_deadline(int timeout_ms)
 }
 
 /* 0 grew or no growth was needed; 1 means the buffer stays as it was. */
+#if !defined(__linux__)
 static int mut_spawn_grow(char **buf, size_t *cap, size_t len)
 {
     if (len + 8192 <= *cap)
@@ -165,6 +169,7 @@ static int mut_spawn_grow(char **buf, size_t *cap, size_t len)
     *cap = ncap;
     return 0;
 }
+#endif
 
 static void mut_spawn_store(char **out, size_t *out_len, char *buf, size_t len)
 {
@@ -283,7 +288,7 @@ static int mut_spawn_win_finish(HANDLE proc, HANDLE rd, int timeout_ms,
     mut_spawn_store(out, out_len, buf, len);
     return rc;
 }
-#else
+#elif !defined(__linux__)
 static void mut_spawn_posix_child(const char *dir, int fds[2],
                                   char *const argv[])
 {
@@ -398,6 +403,279 @@ static int mut_spawn_posix_finish(pid_t pid, int fd, int timeout_ms,
 }
 #endif
 
+#if defined(__linux__)
+enum { MUT_CLEANUP_MS = 500 };
+struct mut_live {
+    struct platform_supervised_process process;
+    char *bytes;
+    size_t length, capacity;
+    int read_fd;
+    bool eof, expired;
+    int64_t cleanup_deadline;
+};
+
+#ifdef ZCL_TESTING
+static _Thread_local bool mut_retirement_refused;
+static _Thread_local unsigned mut_retirement_refusals;
+void zcl_mut_fixture_retirement_refuse(bool refuse)
+{
+    mut_retirement_refused = refuse;
+    if (refuse) mut_retirement_refusals = 0;
+}
+unsigned zcl_mut_fixture_retirement_refusals(void) { return mut_retirement_refusals; }
+int64_t zcl_mut_fixture_supervisor(const struct zcl_mut_owner *owner)
+{
+    const struct mut_live *live = owner ? owner->pending : NULL;
+    return live ? live->process.supervisor_pid : -1;
+}
+#endif
+
+static enum zcl_supervised_retirement_result mut_linux_transfer(struct platform_supervised_process *process)
+{
+#ifdef ZCL_TESTING
+    if (mut_retirement_refused) zcl_supervised_retirement_fixture_wake_error_once();
+#endif
+    enum zcl_supervised_retirement_result result = zcl_supervised_retirement_transfer(process);
+#ifdef ZCL_TESTING
+    if (result == ZCL_RETIREMENT_REFUSED) ++mut_retirement_refusals;
+#endif
+    return result;
+}
+
+static int mut_infrastructure(struct zcl_mut_owner *owner, const char *why)
+{
+    if (owner) {
+        owner->failed = true;
+        (void)snprintf(owner->error, sizeof(owner->error), "%s", why);
+    }
+    return -1;
+}
+
+static bool mut_linux_owner_open(struct zcl_mut_owner *owner, const char *root)
+{
+    if (!owner || owner->pending || owner->launcher_fd != -1 || !root)
+        return false;
+    if (zcl_supervised_retirement_phase() != ZCL_RETIREMENT_RUNNING) {
+        (void)mut_infrastructure(owner, "mutation retirement owner is not running");
+        return false;
+    }
+    char path[PATH_MAX];
+    if (!zcl_path_join(path, sizeof(path), root, "build/bin/process-group-exec"))
+        return false;
+    size_t length = 0;
+    char *bytes = zcl_mut_read_file(path, &length);
+    uint8_t digest[32];
+    bool ok = bytes && length <= PLATFORM_SUPERVISED_IMAGE_MAX;
+    if (ok) {
+        zcl_sha3_256((const uint8_t *)bytes, length, digest);
+        ok = platform_supervised_image_capture(bytes, length, digest,
+            &owner->launcher_fd) == PLATFORM_SUPERVISED_IMAGE_OK;
+    }
+    free(bytes);
+    if (!ok) (void)mut_infrastructure(owner, "qualified mutation launcher unavailable");
+    return ok;
+}
+
+/* A refused transfer retains the exact heap handle in the explicit borrower.
+ * No library-global queue, waiter or implicit service is introduced here. */
+static bool mut_linux_owner_close(struct zcl_mut_owner *owner)
+{
+    if (!owner) return false;
+    struct mut_live *live = owner->pending;
+    if (live) {
+        if (live->process.supervisor_pid >= 0) {
+            if (!live->cleanup_deadline)
+                live->cleanup_deadline = clock_now_monotonic_ns() + (int64_t)MUT_CLEANUP_MS * 1000000;
+            (void)zcl_supervised_retirement_stop(&live->process, live->cleanup_deadline);
+            if (live->process.supervisor_pid >= 0 &&
+                mut_linux_transfer(&live->process) != ZCL_RETIREMENT_TRANSFERRED)
+                return false;
+        }
+        if (live->read_fd >= 0) (void)close(live->read_fd);
+        free(live->bytes);
+        free(live);
+        owner->pending = NULL;
+    }
+    if (owner->launcher_fd >= 0) (void)close(owner->launcher_fd);
+    owner->launcher_fd = -1;
+    return true;
+}
+
+static bool mut_linux_vectors(char *const argv[], const char **wrapped,
+    char *const environment[], size_t *env_count)
+{
+    if (!argv || !argv[0]) return false;
+    size_t count = 0;
+    wrapped[count++] = "process-group-exec";
+    for (size_t i = 0; argv[i]; ++i) {
+        if (i == ZCL_MUT_ARGV_MAX) return false;
+        wrapped[count++] = argv[i];
+    }
+    wrapped[count] = NULL;
+    if (count > PLATFORM_SUPERVISED_ARGV_EXTENDED_MAX) return false;
+    *env_count = 0;
+    while (environment[*env_count]) {
+        if (*env_count == SIZE_MAX / sizeof(*environment) - 1) return false;
+        ++*env_count;
+    }
+    return true;
+}
+
+static bool mut_linux_start(struct zcl_mut_owner *owner, struct mut_live *live,
+    const char *dir, char *const argv[], int64_t deadline)
+{
+    extern char **environ;
+    static char *const empty_environment[] = {NULL};
+    char *const *environment = environ ? environ : empty_environment;
+    const char *wrapped[ZCL_MUT_ARGV_MAX + 2];
+    size_t env_count;
+    if (!mut_linux_vectors(argv, wrapped, environment, &env_count)) return false;
+    int fds[2];
+    if (pipe(fds) != 0) return false;
+    int input = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    int cwd = open(dir ? dir : ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    struct platform_supervised_fd_map maps[] = {
+        {input, STDIN_FILENO}, {fds[1], STDOUT_FILENO}, {fds[1], STDERR_FILENO}
+    };
+    struct platform_supervised_spec spec = {
+        .executable_fd = owner->launcher_fd, .argv = wrapped,
+        .env = (const char *const *)environment, .maps = maps, .map_count = 3,
+        .launch_deadline_ns = deadline, .cleanup_timeout_ms = MUT_CLEANUP_MS,
+        .argv_policy = PLATFORM_SUPERVISED_ARGV_EXTENDED,
+        .stack_policy = PLATFORM_SUPERVISED_STACK_UNLIMITED,
+        .env_policy = PLATFORM_SUPERVISED_ENV_COMPLETE, .env_count = env_count,
+        .use_cwd_fd = true, .cwd_fd = cwd
+    };
+    bool ok = input >= 0 && cwd >= 0 &&
+        fcntl(fds[0], F_SETFD, FD_CLOEXEC) == 0 &&
+        fcntl(fds[1], F_SETFD, FD_CLOEXEC) == 0 &&
+        fcntl(fds[0], F_SETFL, O_NONBLOCK) == 0;
+    if (ok) ok = zcl_supervised_retirement_start(&live->process, &spec) == PLATFORM_SUPERVISED_RUNNING;
+    if (input >= 0) (void)close(input);
+    if (cwd >= 0) (void)close(cwd);
+    (void)close(fds[1]);
+    if (ok) live->read_fd = fds[0];
+    else (void)close(fds[0]);
+    return ok;
+}
+
+static bool mut_linux_read(struct mut_live *live)
+{
+    if (live->eof) return true;
+    if (live->length + 8192 >= live->capacity) {
+        if (live->capacity >= MUT_READ_MAX) return false;
+        size_t capacity = live->capacity ? live->capacity * 2 : 65536;
+        char *bytes = zcl_realloc(live->bytes, capacity, "mutation.qualified.capture");
+        if (!bytes) return false;
+        live->bytes = bytes;
+        live->capacity = capacity;
+    }
+    ssize_t count = read(live->read_fd, live->bytes + live->length,
+        live->capacity - live->length - 1);
+    if (count < 0) return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
+    if (count == 0) live->eof = true;
+    else live->length += (size_t)count;
+    return true;
+}
+
+static bool mut_linux_capture(struct mut_live *live, int64_t deadline)
+{
+    for (;;) {
+        if (clock_now_monotonic_ns() >= deadline) {
+            (void)zcl_supervised_retirement_poll(&live->process);
+            if (live->process.observation.engine_exit_observed) return false;
+            live->expired = true;
+            return true;
+        }
+        if (!mut_linux_read(live)) return false;
+        enum platform_supervised_state state = zcl_supervised_retirement_poll(&live->process);
+        if (state == PLATFORM_SUPERVISED_CLEAN && live->eof) return true;
+        if (state != PLATFORM_SUPERVISED_RUNNING && state != PLATFORM_SUPERVISED_CLEAN)
+            return false;
+        struct pollfd ready = {.fd = live->eof ? -1 : live->read_fd, .events = POLLIN};
+        int result = poll(&ready, 1, 10);
+        if (result < 0 && errno != EINTR) return false;
+    }
+}
+
+static int mut_linux_finish(struct zcl_mut_owner *owner, struct mut_live *live,
+    bool captured, char **out, size_t *out_len)
+{
+    live->cleanup_deadline = clock_now_monotonic_ns() + (int64_t)MUT_CLEANUP_MS * 1000000;
+    enum platform_supervised_state state = zcl_supervised_retirement_stop(&live->process,
+        live->cleanup_deadline);
+    bool qualified = state == PLATFORM_SUPERVISED_CLEAN &&
+        live->process.observation.no_children && live->process.observation.engine_exit_observed;
+    int rc = -1;
+    if (captured && qualified) {
+        int status = live->process.observation.engine_wait_status;
+        if (live->expired) rc = -2;
+        else if (WIFEXITED(status)) rc = WEXITSTATUS(status);
+        else if (WIFSIGNALED(status)) rc = 128 + WTERMSIG(status);
+    }
+    if (rc == -1) (void)mut_infrastructure(owner,
+        qualified ? "mutation capture/observation failed" : "mutation cleanup pending or unobserved");
+    if (live->process.supervisor_pid >= 0 &&
+        mut_linux_transfer(&live->process) != ZCL_RETIREMENT_TRANSFERRED)
+        return mut_infrastructure(owner, "mutation retirement refused; borrower retains custody");
+    (void)close(live->read_fd);
+    live->read_fd = -1;
+    if (rc != -1 && live->bytes) {
+        live->bytes[live->length] = '\0';
+        mut_spawn_store(out, out_len, live->bytes, live->length);
+        live->bytes = NULL;
+    }
+    free(live->bytes);
+    free(live);
+    owner->pending = NULL;
+    return rc;
+}
+#endif
+
+bool zcl_mut_owner_open(struct zcl_mut_owner *owner, const char *root)
+{
+#if defined(__linux__)
+    return mut_linux_owner_open(owner, root);
+#else
+    (void)owner; (void)root; return false;
+#endif
+}
+
+bool zcl_mut_owner_close(struct zcl_mut_owner *owner)
+{
+#if defined(__linux__)
+    return mut_linux_owner_close(owner);
+#else
+    (void)owner; return true;
+#endif
+}
+
+int zcl_mut_spawn_owned(struct zcl_mut_owner *owner, const char *dir,
+    char *const argv[], int timeout_ms, char **out, size_t *out_len)
+{
+#if defined(__linux__)
+    if (out) *out = NULL;
+    if (out_len) *out_len = 0;
+    if (!owner || owner->failed || owner->pending || owner->launcher_fd < 0)
+        return -1;
+    struct mut_live *live = zcl_calloc(1, sizeof(*live), "mutation.qualified.process");
+    if (!live) return mut_infrastructure(owner, "mutation process allocation failed");
+    platform_supervised_init(&live->process);
+    live->read_fd = -1;
+    owner->pending = live;
+    int64_t deadline = mut_spawn_deadline(timeout_ms) * 1000000;
+    if (!mut_linux_start(owner, live, dir, argv, deadline)) {
+        (void)mut_infrastructure(owner, "qualified launch failed or argv/environment compatibility unavailable");
+        (void)zcl_mut_owner_close(owner);
+        return -1;
+    }
+    return mut_linux_finish(owner, live, mut_linux_capture(live, deadline), out, out_len);
+#else
+    (void)owner;
+    return zcl_mut_spawn(dir, argv, timeout_ms, out, out_len);
+#endif
+}
+
 int zcl_mut_spawn(const char *dir, char *const argv[], int timeout_ms,
                   char **out, size_t *out_len)
 {
@@ -405,7 +683,11 @@ int zcl_mut_spawn(const char *dir, char *const argv[], int timeout_ms,
         *out = NULL;
     if (out_len)
         *out_len = 0;
-#if defined(_WIN32)
+#if defined(__linux__)
+    (void)dir; (void)argv; (void)timeout_ms;
+    fprintf(stderr, "mutation: explicit qualified lifecycle borrower required\n");
+    return -1;
+#elif defined(_WIN32)
     /* CreateProcess + PeekNamedPipe capture: no fork/execvp on this lane.
      * lpCurrentDirectory plays the child-side chdir; TerminateProcess is
      * the SIGKILL analogue; rc stays -2 on timeout, else the exit code. */
@@ -502,7 +784,7 @@ static bool mut_shell_is_break(char c)
     return c == '\0' || ((c == ' ' || c == '\t' || c == '\n') && true);
 }
 
-/* 0 closed the quote; 1 is an unterminated quote. */
+/* 0 closed the quote; 1 refuses an unterminated or oversized word. */
 static int mut_shell_quoted(const char **pp, char *word, size_t *wn,
                             size_t cap, bool *in_word)
 {
@@ -514,8 +796,8 @@ static int mut_shell_quoted(const char **pp, char *word, size_t *wn,
          * characters so the caller can recognise the placeholder. */
         if (q == '"' && *p == '\\' && p[1])
             p++;
-        if (*wn + 1 < cap)
-            word[(*wn)++] = *p;
+        if (*wn + 1 >= cap) return 1;
+        word[(*wn)++] = *p;
     }
     *pp = p;
     if (*p != q)
@@ -523,7 +805,7 @@ static int mut_shell_quoted(const char **pp, char *word, size_t *wn,
     return 0;
 }
 
-static void mut_shell_push_char(char *word, size_t *wn, size_t cap,
+static bool mut_shell_push_char(char *word, size_t *wn, size_t cap,
                                 const char **pp, char c, bool *in_word)
 {
     const char *p = *pp;
@@ -533,8 +815,29 @@ static void mut_shell_push_char(char *word, size_t *wn, size_t cap,
         *pp = p;
     }
     *in_word = true;
-    if (*wn + 1 < cap)
-        word[(*wn)++] = c;
+    if (*wn + 1 >= cap) return false;
+    word[(*wn)++] = c;
+    return true;
+}
+
+/* One shared token reader, including empty quoted words. A caller may discard
+ * wrapper tokens without spending the executable argv's separate capacity. */
+static int mut_shell_next(const char **cursor, char *word, size_t cap, size_t *length)
+{
+    const char *p = *cursor;
+    while (*p && mut_shell_is_break(*p)) ++p;
+    if (!*p) return 0;
+    *length = 0;
+    bool in_word = false;
+    while (!mut_shell_is_break(*p)) {
+        if (*p == '\'' || *p == '"') {
+            if (mut_shell_quoted(&p, word, length, cap, &in_word) != 0) return -1;
+        } else if (!mut_shell_push_char(word, length, cap, &p, *p, &in_word)) return -1;
+        ++p;
+    }
+    word[*length] = '\0';
+    *cursor = p;
+    return 1;
 }
 
 bool zcl_mut_shell_split(const char *cmd, struct zcl_mut_argv *out)
@@ -543,32 +846,13 @@ bool zcl_mut_shell_split(const char *cmd, struct zcl_mut_argv *out)
         return false;
     memset(out, 0, sizeof *out);
     char word[8192];
-    size_t wn = 0;
-    bool in_word = false;
-    for (const char *p = cmd;; p++) {
-        char c = *p;
-        if (mut_shell_is_break(c)) {
-            if (in_word) {
-                if (!mut_argv_push(out, word, wn)) {
-                    zcl_mut_argv_free(out);
-                    return false;
-                }
-                wn = 0;
-                in_word = false;
-            }
-            if (c == '\0')
-                break;
-            continue;
-        }
-        if (c == '\'' || c == '"') {
-            if (mut_shell_quoted(&p, word, &wn, sizeof word, &in_word) != 0) {
-                zcl_mut_argv_free(out);
-                return false; /* unterminated quote: never guess */
-            }
-            continue;
-        }
-        mut_shell_push_char(word, &wn, sizeof word, &p, c, &in_word);
+    size_t wn;
+    const char *cursor = cmd;
+    int next;
+    while ((next = mut_shell_next(&cursor, word, sizeof(word), &wn)) > 0) {
+        if (!mut_argv_push(out, word, wn)) { zcl_mut_argv_free(out); return false; }
     }
+    if (next < 0) { zcl_mut_argv_free(out); return false; }
     return out->count > 0;
 }
 
@@ -638,46 +922,31 @@ static bool mut_seg_has(const char *seg, const char *needle)
 static bool mut_plan_compile(const char *seg, const char *src_rel,
                              struct zcl_mut_plan *out)
 {
-    struct zcl_mut_argv all;
-    if (!zcl_mut_shell_split(seg, &all))
-        return false;
-    size_t dash = 0;
+    const char *cursor = seg;
+    char word[8192];
+    size_t length, prefix = 0;
     bool found = false;
-    for (size_t i = 0; i < all.count; i++) {
-        if (strcmp(all.argv[i], "--") == 0) {
-            dash = i;
+    out->object[0] = '\0';
+    while (mut_shell_next(&cursor, word, sizeof(word), &length) > 0) {
+        if (strcmp(word, "--") == 0) {
             found = true;
             break;
         }
-    }
-    if (!found || dash + 1 >= all.count) {
-        zcl_mut_argv_free(&all);
-        return false;
-    }
-    /* The object is the first argument that ends in `.o`. */
-    out->object[0] = '\0';
-    for (size_t i = 0; i < dash; i++) {
-        size_t n = strlen(all.argv[i]);
-        if (n > 2 && strcmp(all.argv[i] + n - 2, ".o") == 0) {
-            (void)snprintf(out->object, sizeof out->object, "%s", all.argv[i]);
-            break;
+        if (++prefix > ZCL_MUT_ARGV_MAX) return false;
+        /* Preserve the first object token, never truncate its path. */
+        if (!out->object[0] && length > 2 && strcmp(word + length - 2, ".o") == 0) {
+            if (length >= sizeof(out->object)) return false;
+            memcpy(out->object, word, length + 1);
         }
     }
     (void)src_rel;
-    if (out->object[0] == '\0') {
-        zcl_mut_argv_free(&all);
+    if (!found || !out->object[0] || !zcl_mut_shell_split(cursor, &out->compile)) return false;
+    /* mut_compile appends -c -o OBJ SRC to this stored compiler tail. */
+    if (out->compile.count > ZCL_MUT_ARGV_MAX - 4) {
+        zcl_mut_argv_free(&out->compile);
         return false;
     }
-    memset(&out->compile, 0, sizeof out->compile);
-    for (size_t i = dash + 1; i < all.count; i++) {
-        if (!mut_argv_push(&out->compile, all.argv[i], strlen(all.argv[i]))) {
-            zcl_mut_argv_free(&all);
-            zcl_mut_argv_free(&out->compile);
-            return false;
-        }
-    }
-    zcl_mut_argv_free(&all);
-    return out->compile.count > 0;
+    return true;
 }
 
 /* The link recipe names the response file and writes through a mktemp
@@ -743,7 +1012,7 @@ static void mut_plan_scan_segments(const char *segs, const char *src_rel,
         if (!*have_compile &&
             (mut_seg_has(s, "--epoch-object") ||
              mut_seg_has(s, "compile-epoch-object.sh")) &&
-            mut_seg_has(s, src_rel) && mut_seg_has(s, " -- "))
+            mut_seg_has(s, src_rel))
             *have_compile = mut_plan_compile(s, src_rel, out);
         else if (!*have_link && mut_seg_has(s, ".rsp") &&
                  mut_seg_has(s, "-o "))
@@ -846,6 +1115,19 @@ static bool mut_write_subject(const struct mut_ctx *c, const char *bytes,
     return ok;
 }
 
+static int mut_build_result(struct zcl_mut_owner *owner, int rc)
+{
+    /* The trusted exec wrapper shares these statuses with requested tools.
+     * Ambiguity is infrastructure failure, never compiler rejection credit. */
+    if (rc == 126 || rc == 127) rc = -1;
+    if (rc < 0 && owner && !owner->failed) {
+        owner->failed = true;
+        (void)snprintf(owner->error, sizeof(owner->error),
+            "mutation plan/compiler/link execution unavailable or timed out");
+    }
+    return rc;
+}
+
 static int mut_compile(const struct mut_ctx *c)
 {
     struct zcl_mut_argv a;
@@ -861,7 +1143,7 @@ static int mut_compile(const struct mut_ctx *c)
     (void)unlink(c->object);
     char *diagnostic = NULL;
     size_t diagnostic_len = 0;
-    int rc = zcl_mut_spawn(c->cfg->root, a.argv, c->cfg->build_timeout_ms,
+    int rc = zcl_mut_spawn_owned(c->cfg->owner, c->cfg->root, a.argv, c->cfg->build_timeout_ms,
                            &diagnostic, &diagnostic_len);
     if (rc != 0) {
         int shown = diagnostic_len > 2000u ? 2000 : (int)diagnostic_len;
@@ -870,7 +1152,7 @@ static int mut_compile(const struct mut_ctx *c)
     }
     free(diagnostic);
     zcl_mut_argv_free(&a);
-    return rc;
+    return mut_build_result(c->cfg->owner, rc);
 fail:
     zcl_mut_argv_free(&a);
     return -1;
@@ -896,7 +1178,7 @@ static int mut_link(const struct mut_ctx *c)
     }
     char *diagnostic = NULL;
     size_t diagnostic_len = 0;
-    int rc = zcl_mut_spawn(c->cfg->root, a.argv, c->cfg->build_timeout_ms,
+    int rc = zcl_mut_spawn_owned(c->cfg->owner, c->cfg->root, a.argv, c->cfg->build_timeout_ms,
                            &diagnostic, &diagnostic_len);
     if (rc != 0) {
         int shown = diagnostic_len > 2000u ? 2000 : (int)diagnostic_len;
@@ -905,7 +1187,7 @@ static int mut_link(const struct mut_ctx *c)
     }
     free(diagnostic);
     zcl_mut_argv_free(&a);
-    return rc;
+    return mut_build_result(c->cfg->owner, rc);
 }
 
 /* Run the one affected group and classify. Anything that is not a clean,
@@ -928,8 +1210,9 @@ static enum zcl_mut_outcome mut_run_group(const struct mut_ctx *c,
 
     char *text = NULL;
     size_t len = 0;
-    int rc = zcl_mut_spawn(c->cfg->root, argv, c->cfg->test_timeout_ms, &text,
+    int rc = zcl_mut_spawn_owned(c->cfg->owner, c->cfg->root, argv, c->cfg->test_timeout_ms, &text,
                            &len);
+    if (rc == 126 || rc == 127) rc = mut_build_result(c->cfg->owner, rc);
     if (rc == -1) {
         free(text);
         return ZCL_MUT_OUTCOME_ERROR;
@@ -963,7 +1246,7 @@ static void mut_cache_key(const struct mut_ctx *c,
                           const struct zcl_mut_site *s, char *hex)
 {
     char blob[1024];
-    int n = snprintf(blob, sizeof blob, "%s|%s|%s|%s|%s|%zu|%zu|%s",
+    int n = snprintf(blob, sizeof blob, "qualified-cleanup-v1|%s|%s|%s|%s|%s|%zu|%zu|%s",
                      c->src_digest, c->tool_digest, c->base_digest,
                      c->cfg->group, s->rule, s->offset, s->span, s->after);
     if (n < 0)
@@ -1319,13 +1602,14 @@ static void mut_campaign_classify(struct mut_ctx *c, struct zcl_mut_result *r)
     free(obj);
     if (same)
         r->outcome = ZCL_MUT_OUTCOME_EQUIVALENT;
-    else if (mut_link(c) != 0)
-        r->outcome = ZCL_MUT_OUTCOME_STILLBORN;
-    else
-        r->outcome = mut_run_group(c, &r->killed_by);
+    else {
+        int rc = mut_link(c);
+        r->outcome = rc < 0 ? ZCL_MUT_OUTCOME_ERROR : rc > 0
+            ? ZCL_MUT_OUTCOME_STILLBORN : mut_run_group(c, &r->killed_by);
+    }
 }
 
-static void mut_campaign_evaluate_site(struct mut_ctx *c,
+static bool mut_campaign_evaluate_site(struct mut_ctx *c,
                                        const struct zcl_mut_config *cfg,
                                        const char *src, size_t src_len,
                                        const struct zcl_mut_site *site,
@@ -1348,16 +1632,20 @@ static void mut_campaign_evaluate_site(struct mut_ctx *c,
         free(image);
         if (!staged)
             r->outcome = ZCL_MUT_OUTCOME_ERROR;
-        else if (mut_compile(c) != 0)
-            r->outcome = ZCL_MUT_OUTCOME_STILLBORN;
-        else
-            mut_campaign_classify(c, r);
+        else {
+            int rc = mut_compile(c);
+            if (rc < 0) r->outcome = ZCL_MUT_OUTCOME_ERROR;
+            else if (rc > 0) r->outcome = ZCL_MUT_OUTCOME_STILLBORN;
+            else mut_campaign_classify(c, r);
+        }
         if (cfg->use_cache && r->outcome != ZCL_MUT_OUTCOME_ERROR)
             mut_cache_put(c, key, r->outcome, r->killed_by);
     }
+    if (r->outcome == ZCL_MUT_OUTCOME_ERROR) return false;
     r->ms = mut_now_ms() - t0;
     out->counts[r->outcome]++;
     out->result_count++;
+    return true;
 }
 
 static void mut_campaign_verbose_labels(const struct zcl_mut_result *r,
@@ -1396,6 +1684,17 @@ static void mut_campaign_release(struct mut_ctx *c, struct zcl_mut_site *sites,
     free(src);
 }
 
+static bool mut_campaign_owner_ready(const struct zcl_mut_config *cfg)
+{
+#if defined(__linux__)
+    return cfg->owner && !cfg->owner->failed && !cfg->owner->pending &&
+        cfg->owner->launcher_fd >= 0 &&
+        zcl_supervised_retirement_phase() == ZCL_RETIREMENT_RUNNING;
+#else
+    (void)cfg; return true;
+#endif
+}
+
 bool zcl_mut_campaign_run(const struct zcl_mut_config *cfg,
                           const struct zcl_mut_plan *plan,
                           struct zcl_mut_report *out)
@@ -1403,6 +1702,10 @@ bool zcl_mut_campaign_run(const struct zcl_mut_config *cfg,
     if (!cfg || !plan || !out)
         return false;
     memset(out, 0, sizeof *out);
+    if (!mut_campaign_owner_ready(cfg)) {
+        (void)snprintf(out->error, sizeof(out->error), "qualified mutation owner unavailable; scratch untouched");
+        return false;
+    }
     long long started = mut_now_ms();
 
     char src_abs[PATH_MAX];
@@ -1428,7 +1731,15 @@ bool zcl_mut_campaign_run(const struct zcl_mut_config *cfg,
 
     for (size_t i = 0; i < total; i++) {
         struct zcl_mut_result *r = &out->results[out->result_count];
-        mut_campaign_evaluate_site(&c, cfg, src, src_len, &sites[i], r, out);
+        if (!mut_campaign_evaluate_site(&c, cfg, src, src_len, &sites[i], r, out)) {
+            (void)snprintf(out->error, sizeof(out->error), "%s",
+                cfg->owner && cfg->owner->error[0] ? cfg->owner->error :
+                "mutation infrastructure failed; campaign aborted without credit");
+            mut_campaign_confirm_source(src_abs, src, src_len, out);
+            out->wall_ms = mut_now_ms() - started;
+            mut_campaign_release(&c, sites, src);
+            return false;
+        }
         const char *shown = NULL;
         const char *tag = NULL;
         mut_campaign_verbose_labels(r, &shown, &tag);

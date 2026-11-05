@@ -13742,13 +13742,18 @@ $(DEP_AUDIT_BIN): $(DEP_AUDIT_SRCS)
 #   build/bin/mutation-campaign --file=<any .c> --list   # builds nothing
 MUTATION_CAMPAIGN_BIN = $(BIN_DIR)/mutation-campaign
 MUTATION_CAMPAIGN_SRCS = tools/dev/mutation_campaign.c $(MUTATION_LIB_SRCS) \
+	platform/modules/platform/src/supervised_process.c \
+	platform/modules/util/src/supervised_retirement.c \
+	$(if $(filter Linux,$(ZCL_HOST_OS)),platform/modules/util/src/thread_registry.c) \
     tools/command/native_devagent.c platform/modules/sha3/src/sha3.c \
     core/modules/crypto/src/keccak_x4.c core/modules/crypto/src/simd_dispatch.c \
     platform/modules/platform/src/clock.c platform/modules/platform/src/directory_compat.c \
     platform/modules/base/src/safe_alloc.c platform/modules/util/src/path_util.c
 .PHONY: mutation-campaign
 mutation-campaign: $(MUTATION_CAMPAIGN_BIN)
-$(MUTATION_CAMPAIGN_BIN): $(MUTATION_CAMPAIGN_SRCS)
+$(MUTATION_CAMPAIGN_BIN): $(MUTATION_CAMPAIGN_SRCS) tools/dev/mutation_harness.h \
+		platform/modules/util/include/util/supervised_retirement.h \
+		platform/modules/platform/include/platform/supervised_process.h $(PROCESS_GROUP_EXEC_BIN)
 	@mkdir -p $(dir $@)
 	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
