@@ -2733,6 +2733,143 @@ static int test_chain_block_index_disk_pos(void)
     return failures;
 }
 
+/* ---- skip-list ancestor lookup (mutation-sweep gap closure) ----------- */
+
+#define TC_SKIP_N 520
+
+/* Independent reference of Bitcoin Core GetSkipHeight (chain.cpp). */
+static int tc_ref_lowest_inv(int n) { return n & (n - 1); }
+
+static int tc_ref_skip_height(int h)
+{
+    if (h < 2)
+        return 0;
+    return (h & 1) ? tc_ref_lowest_inv(tc_ref_lowest_inv(h - 1)) + 1
+                   : tc_ref_lowest_inv(h);
+}
+
+/* Independent reference of Bitcoin Core CBlockIndex::GetAncestor. */
+static struct block_index *tc_ref_ancestor(struct block_index *bi, int height)
+{
+    if (height > bi->nHeight || height < 0)
+        return NULL;
+    struct block_index *walk = bi;
+    int h = bi->nHeight;
+    while (h > height) {
+        int hs = tc_ref_skip_height(h);
+        int hp = tc_ref_skip_height(h - 1);
+        if (walk->pskip != NULL &&
+            (hs == height ||
+             (hs > height && !(hp < hs - 2 && hp >= height)))) {
+            walk = walk->pskip;
+            h = hs;
+        } else {
+            walk = walk->pprev;
+            h--;
+        }
+    }
+    return walk;
+}
+
+static void tc_skip_chain(struct block_index *a, int n)
+{
+    for (int i = 0; i < n; i++) {
+        block_index_init(&a[i]);
+        a[i].nHeight = i;
+        a[i].pprev = i > 0 ? &a[i - 1] : NULL;
+    }
+}
+
+static bool tc_skip_heights_match_reference(struct block_index *a, int n)
+{
+    for (int i = 0; i < n; i++)
+        block_index_build_skip(&a[i]);
+    if (a[0].pskip != NULL)
+        return false;
+    for (int i = 1; i < n; i++) {
+        if (a[i].pskip == NULL ||
+            a[i].pskip->nHeight != tc_ref_skip_height(i))
+            return false;
+    }
+    return true;
+}
+
+static bool tc_ancestor_all_pairs(struct block_index *a, int n)
+{
+    for (int h = 0; h < n; h++) {
+        for (int t = 0; t <= h; t++) {
+            if (block_index_get_ancestor(&a[h], t) != &a[t])
+                return false;
+        }
+        if (block_index_get_ancestor(&a[h], h + 1) != NULL ||
+            block_index_get_ancestor(&a[h], -1) != NULL)
+            return false;
+    }
+    return true;
+}
+
+/* b's skip pointers aim at the twin chain a, so which hops the walk took
+ * (skip pointer or parent) is visible in which chain the result lives in. */
+static bool tc_ancestor_route_matches_reference(struct block_index *a,
+                                                struct block_index *b, int n)
+{
+    tc_skip_chain(b, n);
+    for (int i = 1; i < n; i++)
+        b[i].pskip = &a[tc_ref_skip_height(i)];
+    for (int h = 0; h < n; h++) {
+        for (int t = 0; t <= h; t++) {
+            if (block_index_get_ancestor(&b[h], t) !=
+                tc_ref_ancestor(&b[h], t))
+                return false;
+        }
+    }
+    return true;
+}
+
+static bool tc_ancestor_without_skips_and_truncated(void)
+{
+    struct block_index c[11];
+    tc_skip_chain(c, 11);
+    /* pskip never built: pure parent walk still finds every ancestor. */
+    for (int t = 0; t <= 10; t++) {
+        if (block_index_get_ancestor(&c[10], t) != &c[t])
+            return false;
+    }
+    /* A chain whose parent link ends at height 8 (heights 9 and 10 sit on
+     * top of a missing parent): targets below the break are unreachable. */
+    c[8].pprev = NULL;
+    if (block_index_get_ancestor(&c[10], 8) != &c[8] ||
+        block_index_get_ancestor(&c[10], 7) != NULL ||
+        block_index_get_ancestor(&c[10], 0) != NULL)
+        return false;
+    /* build_skip on a parentless entry leaves its skip pointer alone. */
+    struct block_index lone;
+    block_index_init(&lone);
+    lone.nHeight = 5;
+    lone.pskip = &c[1];
+    block_index_build_skip(&lone);
+    return lone.pskip == &c[1];
+}
+
+static int test_chain_block_index_skip_list(void)
+{
+    int failures = 0;
+
+    printf("block_index skip list and ancestor walk... ");
+    static struct block_index a[TC_SKIP_N];
+    static struct block_index b[TC_SKIP_N];
+    tc_skip_chain(a, TC_SKIP_N);
+    bool ok = tc_skip_heights_match_reference(a, TC_SKIP_N);
+    ok = ok && tc_ancestor_all_pairs(a, TC_SKIP_N);
+    ok = ok && tc_ancestor_route_matches_reference(a, b, TC_SKIP_N);
+    ok = ok && tc_ancestor_without_skips_and_truncated();
+
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+
+    return failures;
+}
+
 int test_chain(void)
 {
     int failures = 0;
@@ -2821,6 +2958,7 @@ int test_chain(void)
     failures += test_chain_block_failed_classification();
     failures += test_chain_block_index_status_helpers();
     failures += test_chain_block_index_disk_pos();
+    failures += test_chain_block_index_skip_list();
 
     return failures;
 }
