@@ -8733,6 +8733,282 @@ static int test_fleet_board_roster_ingress_seal(void)
     return failures;
 }
 
+/* `n` rows holding `text`, each newer than the last, stored straight as colluding
+ * keys or a store from before the ingest rule would hold them. Several authors,
+ * so the per-key window is not what limits the page. */
+static bool fbr_flood(struct node_db *db, const char *text, int64_t from, int n)
+{
+    for (int i = 0; i < n; i++)
+        if (!fbr_store_row(db, (uint8_t)(40 + i / 50), text, from + i,
+                           FLEET_BOARD_TTL_MAX))
+            return false;
+    return true;
+}
+
+/* One roster row on the way in: the screen every path runs, then the store. */
+static enum fleet_board_result fbr_offer(struct node_db *db, uint8_t author,
+                                         const char *text, int64_t at,
+                                         struct fleet_board_post *p)
+{
+    uint8_t seed[32], pk[32];
+    fb_test_identity(author, seed, pk);
+    fb_test_compose(p, FLEET_BOARD_KIND_NOTE, BOOT_FLEET_ROSTER_AGENT, text,
+                    (uint64_t)at, FLEET_BOARD_TTL_MAX);
+    fb_test_scope(p, FLEET_BOARD_SCOPE_FLEET, "");
+    enum fleet_board_result r = fleet_board_post_sign(p, seed, pk);
+    if (r == FLEET_BOARD_OK)
+        r = boot_fleet_roster_screen_post(db, p, at);
+    if (r == FLEET_BOARD_OK)
+        r = db_fleet_board_post_ingest(db, p, at, NULL);
+    return r;
+}
+
+/* Copies of a genuine line, however many there are, leave every older line in
+ * the scan: this is the page the flood used to fill. */
+static int test_fleet_board_roster_flood_scan(void)
+{
+    int failures = 0;
+    TEST("fleet roster flood: a page of newer sealed copies displaces no "
+         "member, and the copies cost one verify") {
+        struct node_db db;
+        uint8_t member[32], peer[32], flooder[32];
+        char line[FLEET_ENROL_MACHINE_TEXT_MAX];
+        struct boot_fleet_roster_counts c0, c1;
+        const int64_t now = 1300000;
+        memset(&db, 0, sizeof db);
+        ASSERT(node_db_open(&db, ":memory:"));
+        fbr_install(FBR_ROOT, false);
+        fbr_key(FBR_MEMBER, member);
+        fbr_key(FBR_PEER, peer);
+        fbr_key(FBR_STRANGER, flooder);
+        ASSERT(fbr_member_row(&db, FBR_ROOT, "m5", FBR_MEMBER, now));
+        ASSERT(fbr_member_row(&db, FBR_ROOT, "m9", FBR_PEER, now));
+        ASSERT(fbr_line(FBR_ROOT, "m7", FBR_STRANGER, line, sizeof line));
+        ASSERT(fbr_flood(&db, line, now + 100, BOOT_FLEET_ROSTER_SCAN_ROWS + 44));
+        boot_fleet_roster_counts(&c0);
+        ASSERT_EQ(boot_fleet_roster_check(&db, member, now + 1000),
+                  BOOT_FLEET_ROSTER_MEMBER);
+        ASSERT_EQ(boot_fleet_roster_check(&db, peer, now + 1000),
+                  BOOT_FLEET_ROSTER_MEMBER);
+        ASSERT_EQ(boot_fleet_roster_check(&db, flooder, now + 1000),
+                  BOOT_FLEET_ROSTER_MEMBER);
+        boot_fleet_roster_counts(&c1);
+        ASSERT_EQ(c1.verifies, c0.verifies + 3);
+        fbr_uninstall();
+        node_db_close(&db);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* The way in: one key gets a small fixed number of rows per line, a refused
+ * copy costs no verify and drops no cache, and a republish after the interval
+ * still lands, off the real P2P frame path. */
+static int test_fleet_board_roster_flood_ingest(void)
+{
+    int failures = 0;
+    bool db_open = false;
+    struct node_db db;
+    static struct fbr_p2p x;
+    memset(&db, 0, sizeof db);
+    TEST("fleet roster flood: a further copy from the same key is refused "
+         "at no cost, a republish after the interval and another carrier are "
+         "not") {
+        const int64_t now = (int64_t)platform_time_wall_time_t();
+        uint8_t frame[FLEET_BOARD_FRAME_MAGIC_BYTES + 1 +
+                      FLEET_BOARD_BODY_MAX + FLEET_BOARD_SIG_BYTES];
+        size_t len = 0;
+        struct fleet_board_post p;
+        char line[FLEET_ENROL_MACHINE_TEXT_MAX];
+        uint8_t member[32];
+        struct boot_fleet_roster_counts c0, c1;
+        ASSERT(node_db_open(&db, ":memory:"));
+        db_open = true;
+        fbr_p2p_init(&x, &db, 54);
+        boot_fleet_board_wire(&x.svc);
+        fbr_install(FBR_ROOT, false);
+        fbr_key(FBR_MEMBER, member);
+        ASSERT(fbr_line(FBR_ROOT, "m5", FBR_MEMBER, line, sizeof line));
+        ASSERT(fbr_store_row(&db, FBR_STRANGER, line,
+                             now - BOOT_FLEET_ROSTER_REPUBLISH_S - 100,
+                             FLEET_BOARD_TTL_MAX));
+
+        /* A copy past the interval is a republish, and lands. */
+        ASSERT(fbr_row_frame(&p, FBR_STRANGER, line, now, frame, sizeof frame,
+                             &len));
+        ASSERT(boot_fleet_board_frame(&x.mp, &x.node, frame, len, NULL));
+        ASSERT(db_fleet_board_have(&db, p.id));
+        ASSERT_EQ(boot_fleet_roster_check(&db, member, now),
+                  BOOT_FLEET_ROSTER_MEMBER);
+
+        /* Newer or back-dated, inside the interval: refused, not stored, no
+         * Ed25519 check, and the cached roster stands. */
+        boot_fleet_roster_counts(&c0);
+        const int64_t dated[] = { now + 1, now - 1000 };
+        for (size_t i = 0; i < 2; i++) {
+            ASSERT(fbr_row_frame(&p, FBR_STRANGER, line, dated[i], frame,
+                                 sizeof frame, &len));
+            ASSERT(boot_fleet_board_frame(&x.mp, &x.node, frame, len, NULL));
+            ASSERT(!db_fleet_board_have(&db, p.id));
+        }
+        ASSERT_EQ(boot_fleet_roster_check(&db, member, now),
+                  BOOT_FLEET_ROSTER_MEMBER);
+        boot_fleet_roster_counts(&c1);
+        ASSERT_EQ(c1.rebuilds, c0.rebuilds);
+        ASSERT_EQ(c1.verifies, c0.verifies);
+
+        /* The same line from another key is that key's first copy: a roster
+         * row is stored whoever carries it. */
+        ASSERT(fbr_row_frame(&p, FBR_PEER, line, now + 2, frame, sizeof frame,
+                             &len));
+        ASSERT(boot_fleet_board_frame(&x.mp, &x.node, frame, len, NULL));
+        ASSERT(db_fleet_board_have(&db, p.id));
+        PASS();
+    } _test_next:;
+    fbr_uninstall();
+    boot_fleet_board_shutdown();
+    if (db_open)
+        node_db_close(&db);
+    return failures;
+}
+
+/* Every three hours for a whole note lifetime, one key offering one line. */
+static int test_fleet_board_roster_flood_bound(void)
+{
+    int failures = 0;
+    TEST("fleet roster flood: one key holds a small fixed number of copies of "
+         "one line over a whole note lifetime") {
+        struct node_db db;
+        struct fleet_board_post p;
+        struct fleet_board_filter filter;
+        struct db_fleet_board_post *rows = NULL;
+        char line[FLEET_ENROL_MACHINE_TEXT_MAX];
+        uint8_t seed[32];
+        const int64_t base = 1400000;
+        memset(&db, 0, sizeof db);
+        ASSERT(node_db_open(&db, ":memory:"));
+        fbr_install(FBR_ROOT, false);
+        ASSERT(fbr_line(FBR_ROOT, "m5", FBR_MEMBER, line, sizeof line));
+        for (int i = 0; i < 240; i++) {
+            enum fleet_board_result r = fbr_offer(&db, FBR_STRANGER, line,
+                                                  base + i * INT64_C(10800), &p);
+            ASSERT(r == FLEET_BOARD_OK || r == FLEET_BOARD_ERR_EXPIRED);
+        }
+        memset(&filter, 0, sizeof filter);
+        filter.host_set = true;
+        fb_test_identity(FBR_STRANGER, seed, filter.host_pubkey);
+        rows = zcl_calloc(16, sizeof *rows, "fbr_flood_bound");
+        ASSERT(rows);
+        int held = db_fleet_board_list(&db, &filter, base + 1, rows, 16);
+        free(rows);
+        ASSERT(held >= 3 && held <= 4);
+        fbr_uninstall();
+        node_db_close(&db);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Junk a box took before it had a root cannot crowd the scan once it has one. */
+static int test_fleet_board_roster_flood_no_root(void)
+{
+    int failures = 0;
+    TEST("fleet roster flood: junk stored with no root hides no genuine line "
+         "once a root appears, and a page of it never reads as unarmed") {
+        struct node_db db;
+        struct fleet_board_post p;
+        uint8_t member[32], peer[32];
+        char line[FLEET_ENROL_MACHINE_TEXT_MAX];
+        struct boot_fleet_roster_counts c0, c1;
+        enum boot_fleet_roster_verdict v;
+        const int64_t now = 1500000;
+        memset(&db, 0, sizeof db);
+        ASSERT(node_db_open(&db, ":memory:"));
+        fbr_install(FBR_ROOT, false);
+        g_fbr.present = false;
+        fbr_key(FBR_MEMBER, member);
+        fbr_key(FBR_PEER, peer);
+        ASSERT(fbr_line(FBR_ROOT, "m5", FBR_MEMBER, line, sizeof line));
+        ASSERT_EQ(fbr_offer(&db, 1, line, now, &p), FLEET_BOARD_OK);
+        for (int i = 0; i < BOOT_FLEET_ROSTER_SCAN_ROWS + 44; i++) {
+            char junk[32];
+            (void)snprintf(junk, sizeof junk, "junk-%d", i);
+            ASSERT_EQ(fbr_offer(&db, (uint8_t)(40 + i / 50), junk, now + 100 + i,
+                                &p), FLEET_BOARD_OK);
+        }
+        g_fbr.present = true;
+        boot_fleet_roster_invalidate();
+        boot_fleet_roster_counts(&c0);
+        v = boot_fleet_roster_check(&db, member, now + 1000);
+        boot_fleet_roster_counts(&c1);
+        ASSERT(v != BOOT_FLEET_ROSTER_UNARMED);
+        ASSERT(c1.verifies - c0.verifies <= BOOT_FLEET_ROSTER_SCAN_ROWS);
+        for (int i = 0; i < 3 && v != BOOT_FLEET_ROSTER_MEMBER; i++) {
+            boot_fleet_roster_invalidate();
+            v = boot_fleet_roster_check(&db, member, now + 1000);
+        }
+        ASSERT_EQ(v, BOOT_FLEET_ROSTER_MEMBER);
+        /* Proven once, it stays proven while the junk is still there. */
+        boot_fleet_roster_invalidate();
+        ASSERT_EQ(boot_fleet_roster_check(&db, member, now + 1000),
+                  BOOT_FLEET_ROSTER_MEMBER);
+        /* A line that arrives now is judged ahead of all of it. */
+        ASSERT(fbr_line(FBR_ROOT, "m9", FBR_PEER, line, sizeof line));
+        ASSERT_EQ(fbr_offer(&db, 1, line, now + 1000, &p), FLEET_BOARD_OK);
+        boot_fleet_roster_invalidate();
+        ASSERT_EQ(boot_fleet_roster_check(&db, peer, now + 1000),
+                  BOOT_FLEET_ROSTER_MEMBER);
+        fbr_uninstall();
+        node_db_close(&db);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* The manager writes a line again by its OWN copies alone: another key's copy
+ * must not stand in for it (only the manager's copy reaches every member) and
+ * other keys' rows must not hide its own from it. */
+static int test_fleet_board_roster_flood_publish(void)
+{
+    int failures = 0;
+    struct fb_rpc_env env;
+    bool open = false;
+    char dir[256] = {0};
+    TEST("fleet roster flood: another key's copies neither stop the manager "
+         "republishing a line nor make it write one it holds") {
+        const int64_t now = (int64_t)platform_time_wall_time_t();
+        const int64_t later = now + BOOT_FLEET_ROSTER_REPUBLISH_S;
+        char other[FLEET_ENROL_MACHINE_TEXT_MAX];
+        open = fb_rpc_env_open(&env);
+        ASSERT(open);
+        test_make_tmpdir(dir, sizeof dir, "fleet_board", "roster_flood");
+        env.svc.datadir = dir;
+        fbr_install(FBR_ROOT, true);
+        boot_fleet_roster_set_gate(BOOT_FLEET_ROSTER_GATE_ON);
+        ASSERT(fbr_line(FBR_ROOT, "m5", FBR_MEMBER, g_fbr.lines[0],
+                        sizeof g_fbr.lines[0]));
+        g_fbr.n_lines = 1;
+        ASSERT_EQ(boot_fleet_roster_publish(&env.db, now), (size_t)1);
+        /* Young, another key's, and carried nowhere the manager's is. */
+        ASSERT(fbr_store_row(&env.db, FBR_STRANGER, g_fbr.lines[0], later,
+                             FLEET_BOARD_TTL_MAX));
+        ASSERT_EQ(boot_fleet_roster_publish(&env.db, later + 100), (size_t)1);
+        /* A page of copies of some other line leaves its own young copy in
+         * view: nothing to write. */
+        ASSERT(fbr_line(FBR_ROOT, "m7", FBR_STRANGER, other, sizeof other));
+        ASSERT(fbr_flood(&env.db, other, later + 200,
+                         BOOT_FLEET_ROSTER_SCAN_ROWS + 44));
+        ASSERT_EQ(boot_fleet_roster_publish(&env.db, later + 1000), (size_t)0);
+        PASS();
+    } _test_next:;
+    fbr_uninstall();
+    if (open)
+        fb_rpc_env_close(&env);
+    if (dir[0])
+        test_rm_rf_recursive(dir);
+    return failures;
+}
+
 /* The opt-in, the announcement of each change of state, the local switch-off
  * and the manager that publishes nothing by default. */
 static int test_fleet_board_roster_arming(void)
@@ -12132,6 +12408,11 @@ int test_fleet_board(void)
     failures += test_fleet_board_roster_row_is_an_old_row();
     failures += test_fleet_board_roster_p2p_ingress();
     failures += test_fleet_board_roster_ingress_seal();
+    failures += test_fleet_board_roster_flood_scan();
+    failures += test_fleet_board_roster_flood_ingest();
+    failures += test_fleet_board_roster_flood_bound();
+    failures += test_fleet_board_roster_flood_no_root();
+    failures += test_fleet_board_roster_flood_publish();
     failures += test_fleet_board_roster_arming();
     failures += test_fleet_board_roster_gate_flag();
     failures += test_fleet_board_roster_read_failure();
