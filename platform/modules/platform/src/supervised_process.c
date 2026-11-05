@@ -414,6 +414,9 @@ static bool send_packet(int fd, const struct packet *packet)
 static int receive_packet(int fd, struct packet *packet)
 {
     ssize_t n = recv(fd, packet, sizeof(*packet), MSG_DONTWAIT | MSG_TRUNC);
+    /* A peer that exits with a packet of ours unread posts ECONNRESET ahead of
+     * what it queued for us. That read consumes the error; the queue decides. */
+    if (n < 0 && errno == ECONNRESET) n = recv(fd, packet, sizeof(*packet), MSG_DONTWAIT | MSG_TRUNC);
     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) return 0;
     if (n != (ssize_t)sizeof(*packet) || packet->version != PACKET_VERSION) return -1;
     return 1;
