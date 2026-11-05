@@ -179,7 +179,7 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_COMMAND(
     "fleet.roster.revoke", "fleet", "",
-    "Revoke one machine on this box",
+    "Revoke one machine here",
     "One step on the box holding the operator key: reads the roster head this "
     "box holds, adds the named box public key and every signer key its roster "
     "rows name, seals the result at the next sequence and stores it here. The "
@@ -255,7 +255,7 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_READ(
     "fleet.machines", "fleet", "",
-    "List the computers this owner has admitted to the fleet",
+    "List the computers admitted to this fleet",
     "Verified roster rows, oldest first, each split into `verified` (what "
     "the operator signature attests: name, box public key, relay port, "
     "enrolment time) and `self_reported` (what the box said about its own "
@@ -290,7 +290,7 @@ ZCL_COMMAND_READY_READ(
 
 ZCL_COMMAND_READY_READ(
     "fleet.doctor", "fleet", "",
-    "Where this node is in fleet setup, and what to run next",
+    "Fleet setup state and what to run next",
     "One read-only checklist, in this order: node, identity, membership, "
     "roster_gate, delegation, transport, pairing, mail, wiki. Each check is ok, "
     "missing, blocked or unknown, with one plain sentence and an existing "

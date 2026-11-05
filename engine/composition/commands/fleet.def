@@ -62,7 +62,7 @@ ZCL_COMMAND_READY_READ(
 
 ZCL_COMMAND_READY_READ(
     "fleet.usage", "fleet", "",
-    "What every box spent, per provider, over the last days",
+    "What every box spent, per provider",
     "Sums the usage rows every chain here holds over a window of whole UTC "
     "days, grouped by box and provider, with cached tokens counted apart "
     "from the rest. Absent measurements are reported absent, never as zero. "
@@ -109,7 +109,7 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_READ(
     "fleet.objectives", "fleet", "",
-    "Every objective z23 optimizes, its current value, target, and status",
+    "Every objective z23 optimizes, with value and target",
     "Prints one row per id in the closed catalog "
     "(engine/composition/objectives.def): the objective id, the one file or "
     "command its value is read from, whether lower or higher is better, "
@@ -294,7 +294,7 @@ ZCL_COMMAND_READY_READ(
 
 ZCL_COMMAND_READY_READ(
     "fleet.goals", "fleet", "",
-    "The live fleet report card: goals G1-G13, criteria C1-C8, milestones D1-D8",
+    "The live fleet report card: goals, criteria, milestones",
     "Prints one row per id in the closed catalog "
     "(engine/composition/goals.def): the id, title, a grade of pass, "
     "partial, fail or unmeasured, the A+ bar, one evidence string from a "
