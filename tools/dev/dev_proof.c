@@ -2630,13 +2630,26 @@ static const char *dp_fresh_sealed(const char *path)
     return NULL;
 }
 
+/* What a file outside the tree must spell to reach `added`. The lint tree is
+ * reached by its bare file name (the harness takes -I to lintc). The Android
+ * tree is reached only by a path into it: its generic leaf names (home.c,
+ * rpc.c) are common words elsewhere, so the tail below `apps/` is searched,
+ * as a substring so a longer spelling is a hit too. Outside that tree only
+ * .gitignore, docs claims and a fixture spell such a path; each refuses only
+ * for the exact file it names. */
+#define DP_FRESH_ANDROID_ROOT "apps/z23android/"
+#define DP_FRESH_APPS_ROOT "apps/"
+
 static bool dp_fresh_sealed_admit(const struct dp_split_ctx *c,
                                   const char **refs, size_t count,
                                   const char *added)
 {
     const char *leaf = dp_split_leaf(added);
-    const char *argv[] = {"git", "grep", "-l", "-a", "-w", "-F", "-e", leaf,
-                          c->local, "--", NULL};
+    bool android = strncmp(added, DP_FRESH_ANDROID_ROOT,
+                           strlen(DP_FRESH_ANDROID_ROOT)) == 0;
+    const char *needle = android ? added + strlen(DP_FRESH_APPS_ROOT) : leaf;
+    const char *argv[] = {"git", "grep", "-l", "-a", android ? "-i" : "-w",
+                          "-F", "-e", needle, c->local, "--", NULL};
     return dp_split_name_safe(added) && strlen(leaf) <= DP_SPLIT_LEAF_MAX &&
            dp_fresh_listing_within(c, argv, dp_fresh_sealed(added), refs, count);
 }
@@ -2651,11 +2664,49 @@ static bool dp_fresh_names_unreserved(const struct dp_split_funcs *f)
     return true;
 }
 
+/* The runner reaches `test_<stem>` of tests/harness/src/test_<stem>.c through
+ * the registry macro, so no source line names it. It counts as called when
+ * this diff adds the exact row ZCL_TEST_GROUP(<stem>) to the registry: the row
+ * is absent at `base` and present at `local`, and the macro expands to the
+ * extern and table entry of that very function (test_parallel.c). */
+#define DP_FRESH_TEST_DIR "tests/harness/src/test_"
+
+/* Exit status of `git grep` for the exact registry row at `rev`: 0 present,
+ * 1 absent, anything else is a git failure. */
+static int dp_fresh_catalog_row(const struct dp_split_ctx *c, const char *rev,
+                                const char *row)
+{
+    const char *argv[] = {"git", "grep", "-q", "-a", "-F", "-x", "-e", row,
+                          rev, "--", DP_FRESH_REGISTRY_PATH, NULL};
+    return dp_split_git(c->root, argv, NULL, 0);
+}
+
+static bool dp_fresh_test_entry(const struct dp_split_ctx *c, const char *name,
+                                const char *added)
+{
+    size_t dir = strlen(DP_FRESH_TEST_DIR), n = strlen(added);
+    char stem[DP_SPLIT_NAME_MAX], row[DP_SPLIT_NAME_MAX + 24];
+    if (strncmp(added, DP_FRESH_TEST_DIR, dir) != 0 || n < dir + 3 ||
+        strcmp(added + n - 2, ".c") != 0 || strchr(added + dir, '/') ||
+        n - dir - 2 >= sizeof(stem))
+        return false;
+    memcpy(stem, added + dir, n - dir - 2);
+    stem[n - dir - 2] = '\0';
+    if (!dp_split_name_safe(stem) || strpbrk(stem, "./-") ||
+        strncmp(name, "test_", 5) != 0 || strcmp(name + 5, stem) != 0 ||
+        snprintf(row, sizeof(row), "ZCL_TEST_GROUP(%s)", stem) >=
+            (int)sizeof(row))
+        return false;
+    return dp_fresh_catalog_row(c, c->local, row) == 0 &&
+           dp_fresh_catalog_row(c, c->base, row) == 1;
+}
+
 /* A changed row other than `added` names `name` at `local`. */
 static bool dp_fresh_name_called(const struct dp_split_ctx *c, const char *name,
                                  const char *added, const char **refs,
                                  size_t count)
 {
+    if (dp_fresh_test_entry(c, name, added)) return true;
     char *listing = zcl_malloc(ZCL_DEVLOOP_OUTPUT_MAX, "proof fresh callers");
     if (!listing) return false;
     const char *argv[] = {"git", "grep", "-l", "-a", "-w", "-F", "-e", name,
