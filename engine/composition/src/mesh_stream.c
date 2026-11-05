@@ -260,18 +260,25 @@ static bool stream_slot_available_locked(void)
     return false;
 }
 
-/* A free slot. When none is free the oldest lingering verdict gives up its
- * slot early, so one peer's ended streams can never keep every other OPEN
- * out of the table for the linger period. Live streams are never taken. */
-static struct mesh_stream *stream_free_slot_locked(void)
+/* The slot the next stream will take: a free one, else the lingering
+ * verdict that is oldest, so one peer's ended streams can never keep every
+ * other OPEN out of the table for the linger period. Live streams are never
+ * picked. Picking changes nothing: the caller runs every refusal first and
+ * only then calls stream_claim_slot_locked, so an OPEN that fails leaves
+ * the ended slot and its verdict as they were. */
+static struct mesh_stream *stream_pick_slot_locked(void)
 {
     for (size_t i = 0; i < MESH_STREAM_TABLE_MAX; i++)
         if (!g_streams[i].used)
             return &g_streams[i];
-    struct mesh_stream *victim = stream_oldest_ended_locked();
-    if (victim)
-        mesh_stream_release(victim);
-    return victim;
+    return stream_oldest_ended_locked();
+}
+
+/* The commit point of a pick: an ended verdict gives up its slot now. */
+static void stream_claim_slot_locked(struct mesh_stream *slot)
+{
+    if (slot->used)
+        mesh_stream_release(slot);
 }
 
 /* Streams that still carry frames. A half-closed slot is a verdict, not a
@@ -342,9 +349,35 @@ static bool stream_rate_charge(struct mesh_stream_open_rate *r,
     return true;
 }
 
-static bool stream_open_admit_locked(const uint8_t peer_static[32],
-                                     int64_t now_unix)
+/* Pairing reads shared by every peer that holds no cadence slot, per
+ * second. Only OPENs that reach a pairing read spend it. */
+static struct {
+    int64_t window_unix;
+    uint32_t reads;
+} g_open_overflow;
+
+static bool stream_open_overflow_charge_locked(int64_t now_unix)
 {
+    if (now_unix != g_open_overflow.window_unix) {
+        g_open_overflow.window_unix = now_unix;
+        g_open_overflow.reads = 0;
+    }
+    if (g_open_overflow.reads >= MESH_STREAM_OPEN_OVERFLOW_PER_SECOND)
+        return false;
+    g_open_overflow.reads++;
+    return true;
+}
+
+/* Cadence for one inbound OPEN. A peer with a slot is charged there. A
+ * peer with none takes a free or expired unpaired slot. When the unpaired
+ * table has none either, the OPEN is not refused here: `*overflow` is set,
+ * and the service stage lets it through a pairing read charged to the
+ * shared overflow budget, so strangers filling the table cannot lock out
+ * a paired peer. No state is kept for an overflow peer. */
+static bool stream_open_admit_locked(const uint8_t peer_static[32],
+                                     int64_t now_unix, bool *overflow)
+{
+    *overflow = false;
     struct mesh_stream_open_rate *r =
         stream_rate_find(g_open_rate_paired, peer_static);
     if (!r)
@@ -352,8 +385,10 @@ static bool stream_open_admit_locked(const uint8_t peer_static[32],
     if (r)
         return stream_rate_charge(r, now_unix);
     r = stream_rate_reusable(g_open_rate, now_unix);
-    if (!r)
-        return false;
+    if (!r) {
+        *overflow = true;
+        return true;
+    }
     memset(r, 0, sizeof(*r));
     r->used = true;
     memcpy(r->peer_static, peer_static, 32);
@@ -374,14 +409,25 @@ static void stream_open_promote_locked(const uint8_t peer_static[32],
         stream_rate_find(g_open_rate, peer_static);
     struct mesh_stream_open_rate *to =
         stream_rate_reusable(g_open_rate_paired, now_unix);
-    if (!from || !to)
+    if (!to)
         return;
-    *to = *from;
-    memset(from, 0, sizeof(*from));
+    if (from) {
+        *to = *from;
+        memset(from, 0, sizeof(*from));
+        return;
+    }
+    /* An overflow OPEN proved the pairing: it takes a paired slot, its
+     * cadence count starting at this OPEN. */
+    memset(to, 0, sizeof(*to));
+    to->used = true;
+    memcpy(to->peer_static, peer_static, 32);
+    to->window_unix = now_unix;
+    to->opens = 1;
 }
 
 static void stream_open_rate_clear_locked(void)
 {
+    memset(&g_open_overflow, 0, sizeof(g_open_overflow));
     memset(g_open_rate, 0, sizeof(g_open_rate));
     memset(g_open_rate_paired, 0, sizeof(g_open_rate_paired));
 }
@@ -458,7 +504,7 @@ static bool stream_open_body_decode(const uint8_t *body, size_t body_len,
 static enum mesh_stream_refusal stream_open_gate_locked(
     const struct p2p_node *node, uint64_t id,
     const struct noise_transport_snapshot *snap, int64_t now,
-    uint32_t initial_window)
+    uint32_t initial_window, bool *overflow)
 {
     /* An inbound OPEN must carry the PEER's parity, never ours. */
     uint64_t peer_parity = 1u - stream_local_parity(node);
@@ -466,7 +512,7 @@ static enum mesh_stream_refusal stream_open_gate_locked(
         return MESH_STREAM_REFUSED_ID_PARITY;
     if (stream_find_locked(id, snap) != NULL)
         return MESH_STREAM_REFUSED_ID_IN_USE;
-    if (!stream_open_admit_locked(snap->remote_static, now))
+    if (!stream_open_admit_locked(snap->remote_static, now, overflow))
         return MESH_STREAM_REFUSED_RATE;
     if (!stream_has_room_locked(snap->remote_static))
         return MESH_STREAM_REFUSED_CAP;
@@ -479,13 +525,21 @@ static enum mesh_stream_refusal stream_open_gate_locked(
  * the peer meets. `*index_out` stays -1 unless the service is admitted. */
 static enum mesh_stream_refusal stream_open_service_locked(
     const struct stream_open_body *open_body,
-    const struct noise_transport_snapshot *snap, int64_t now, int *index_out)
+    const struct noise_transport_snapshot *snap, int64_t now, bool overflow,
+    int *index_out)
 {
     *index_out = -1;
     int index = stream_service_index_locked(open_body->name,
                                             open_body->name_len);
     if (index < 0)
         return MESH_STREAM_REFUSED_SERVICE_UNKNOWN;
+    /* A peer with no cadence slot may only prove a pairing, and only while
+     * the shared budget lasts; a service with no pairing gate has nothing
+     * to prove, so such a peer waits for a slot as before. */
+    if (overflow &&
+        (g_services[index].required_pairing_capability == 0 ||
+         !stream_open_overflow_charge_locked(now)))
+        return MESH_STREAM_REFUSED_RATE;
     if (!stream_peer_pairing_allows(
             g_services[index].required_pairing_capability, now,
             snap->remote_static))
@@ -793,7 +847,7 @@ enum mesh_stream_refusal mesh_stream_open(
         zcl_mutex_unlock(&g_stream_lock);
         return MESH_STREAM_REFUSED_CAP;
     }
-    struct mesh_stream *slot = stream_free_slot_locked();
+    struct mesh_stream *slot = stream_pick_slot_locked();
     if (!slot) {
         p2p_node_release(peer);
         zcl_mutex_unlock(&g_stream_lock);
@@ -808,6 +862,19 @@ enum mesh_stream_refusal mesh_stream_open(
         return MESH_STREAM_REFUSED_ID_IN_USE;
     }
 
+    /* The lane lock is held across the send, so no answer can be handled
+     * before the slot below exists. The slot is claimed only once the OPEN
+     * is on the wire: a refusal above, or a failed send, never costs an
+     * ended stream its verdict. */
+    bool sent = stream_send_open(svc->msg_processor, peer, id,
+                                 g_service_names[index], initial_window,
+                                 payload, payload_len);
+    p2p_node_release(peer);
+    if (!sent) {
+        zcl_mutex_unlock(&g_stream_lock);
+        return MESH_STREAM_REFUSED_UNAVAILABLE;
+    }
+    stream_claim_slot_locked(slot);
     memset(slot, 0, sizeof(*slot));
     slot->used = true;
     slot->local_initiator = true;
@@ -821,16 +888,6 @@ enum mesh_stream_refusal mesh_stream_open(
     slot->opened_unix = now;
     slot->last_activity_unix = now;
     slot->service_state = service_state;
-
-    bool sent = stream_send_open(svc->msg_processor, peer, id,
-                                 g_service_names[index], initial_window,
-                                 payload, payload_len);
-    p2p_node_release(peer);
-    if (!sent) {
-        memset(slot, 0, sizeof(*slot));
-        zcl_mutex_unlock(&g_stream_lock);
-        return MESH_STREAM_REFUSED_UNAVAILABLE;
-    }
     atomic_fetch_add(&g_streams_opened, 1);
     if (stream_id_out)
         *stream_id_out = id;
@@ -883,10 +940,12 @@ static void stream_receive_open(struct msg_processor *mp,
 
     stream_lock();
     int index = -1;
+    bool overflow = false;
     enum mesh_stream_refusal refusal = stream_open_gate_locked(
-        node, id, snap, now, open_body.initial_window);
+        node, id, snap, now, open_body.initial_window, &overflow);
     if (refusal == MESH_STREAM_OK)
-        refusal = stream_open_service_locked(&open_body, snap, now, &index);
+        refusal = stream_open_service_locked(&open_body, snap, now,
+                                             overflow, &index);
     if (refusal != MESH_STREAM_OK || index < 0) {
         zcl_mutex_unlock(&g_stream_lock);
         atomic_fetch_add(&g_opens_refused, 1);
@@ -896,7 +955,7 @@ static void stream_receive_open(struct msg_processor *mp,
 
     /* Reserve the slot before the service decides, so the service may
      * send on its own stream from inside on_open. */
-    struct mesh_stream *slot = stream_free_slot_locked();
+    struct mesh_stream *slot = stream_pick_slot_locked();
     if (!slot) {
         zcl_mutex_unlock(&g_stream_lock);
         atomic_fetch_add(&g_opens_refused, 1);
@@ -904,6 +963,7 @@ static void stream_receive_open(struct msg_processor *mp,
                                 0);
         return;
     }
+    stream_claim_slot_locked(slot);
     memset(slot, 0, sizeof(*slot));
     slot->used = true;
     slot->local_initiator = false;
@@ -1303,11 +1363,12 @@ bool mesh_stream_test_inject(const char *service_name,
     stream_lock();
     int index = stream_service_index_locked(service_name,
                                             strlen(service_name));
-    struct mesh_stream *slot = index >= 0 ? stream_free_slot_locked() : NULL;
+    struct mesh_stream *slot = index >= 0 ? stream_pick_slot_locked() : NULL;
     if (!slot) {
         zcl_mutex_unlock(&g_stream_lock);
         return false;
     }
+    stream_claim_slot_locked(slot);
     memset(slot, 0, sizeof(*slot));
     slot->used = true;
     slot->local_initiator = local_initiator;
