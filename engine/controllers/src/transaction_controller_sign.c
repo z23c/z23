@@ -323,29 +323,6 @@ static const struct script *rawtx_sign_find_known_prevout(
     return NULL;
 }
 
-static void rawtx_sign_load_utxo_index_prevout(
-    struct rawtx_sign_prevout *prevouts, size_t *num_prevouts,
-    const struct tx_in *vin, const struct script **prev_script,
-    int64_t *prev_amount)
-{
-    struct db_utxo u;
-    if (db_utxo_find(rawtx_node_db(), vin->prevout.hash.data,
-                     vin->prevout.n, &u) && *num_prevouts < 256) {
-        prevouts[*num_prevouts].txid = vin->prevout.hash;
-        prevouts[*num_prevouts].vout = vin->prevout.n;
-        prevouts[*num_prevouts].script_pub_key.size = u.script_len;
-        if (u.script_len <= MAX_SCRIPT_SIZE)
-            memcpy(prevouts[*num_prevouts].script_pub_key.data,
-                   u.script, u.script_len);
-        prevouts[*num_prevouts].amount = u.value;
-        prevouts[*num_prevouts].valid = true;
-        *prev_script = &prevouts[*num_prevouts].script_pub_key;
-        *prev_amount = prevouts[*num_prevouts].amount;
-        (*num_prevouts)++;
-        db_utxo_free(&u);
-    }
-}
-
 static void rawtx_sign_load_coins_prevout(
     struct coins_view_cache *coins_tip, struct rawtx_sign_prevout *prevouts,
     size_t *num_prevouts, const struct tx_in *vin,
@@ -511,14 +488,10 @@ bool rpc_signrawtransaction(const struct json_value *params, bool help,
         prev_script = rawtx_sign_find_known_prevout(prevouts, num_prevouts,
                                                     &tx.vin[i], &prev_amount);
 
-        /* Try SQLite UTXO index first (instant) */
-        if (!prev_script && rawtx_node_db() && rawtx_node_db()->open) {
-            rawtx_sign_load_utxo_index_prevout(prevouts, &num_prevouts,
-                                               &tx.vin[i], &prev_script,
-                                               &prev_amount);
-        }
-
-        /* Fall back to coins DB (LevelDB) */
+        /* The coins database is the authority for the script and amount a
+         * signature commits to. The SQLite utxos table is a projection of it
+         * and is not consulted here: a row that disagrees with the coin, or
+         * outlives it, must not decide what is signed. */
         if (!prev_script && ctx->coins_tip) {
             if (!rpc_require_chainstate_lookup_ready(ctx->main_state, result,
                     "signrawtransaction", "Chainstate lookup")) {
