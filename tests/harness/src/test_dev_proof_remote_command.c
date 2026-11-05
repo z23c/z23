@@ -27,6 +27,7 @@ _test_next:;
 #include "test/dev_proof_remote_fixture.h"
 #include <errno.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static const char rcmd_hex[] =
@@ -195,6 +196,33 @@ static bool rcmd_repository(const char *base, char *primary, size_t primary_cap,
         mkdir(build, 0700) == 0 && mkdir(bindir, 0700) == 0 && rcmd_copy(source, binary);
 }
 
+static bool rcmd_recovery(const char *current, const char *binary)
+{
+    struct rpp_fixture fixture;
+    char linked[1024], build[1024], bindir[1024], fixture_binary[1100];
+    char input[8192], out[16384];
+    bool ok = setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0 &&
+        rpp_setup(&fixture, current) &&
+        snprintf(linked, sizeof(linked), "%s/linked", fixture.root) > 0 &&
+        RPP_GIT(fixture.receiver, NULL, 0, "worktree", "add", "-q", "--detach", linked, "HEAD") &&
+        snprintf(build, sizeof(build), "%s/build", fixture.receiver) > 0 &&
+        snprintf(bindir, sizeof(bindir), "%s/bin", build) > 0 &&
+        snprintf(fixture_binary, sizeof(fixture_binary), "%s/z23-dev", bindir) > 0 &&
+        mkdir(build, 0700) == 0 && mkdir(bindir, 0700) == 0 &&
+        rcmd_copy(binary, fixture_binary) &&
+        rcmd_real_input(input, sizeof(input), &fixture, linked);
+    if (!ok) return false;
+    int rc = rcmd_run(fixture_binary, linked, input, out, sizeof(out));
+    ok = rc > 0 &&
+        (strstr(out, "proof_producer_source_mismatch") != NULL ||
+         strstr(out, "proof_producer_source_id_unavailable") != NULL) &&
+        rcmd_recovery_facts(out, &fixture, linked) &&
+        rcmd_snapshot(out, "source.bundle", -2) &&
+        rcmd_snapshot(out, "source.offer.json", -2);
+    if (!ok) printf("remote recovery fixture rc=%d output=%s\n", rc, out);
+    return ok;
+}
+
 int test_dev_proof_remote_command(void)
 {
     int failures = 0;
@@ -279,24 +307,17 @@ int test_dev_proof_remote_command(void)
         PASS();
     }
     TEST("dev.proof.remote: producer mismatch retains actionable recovery evidence") {
-        struct rpp_fixture fixture;
-        char linked[1024], build[1024], bindir[1024], fixture_binary[1100];
-        ASSERT(rpp_setup(&fixture, current));
-        ASSERT(snprintf(linked, sizeof(linked), "%s/linked", fixture.root) > 0);
-        ASSERT(RPP_GIT(fixture.receiver, NULL, 0, "worktree", "add", "-q", "--detach", linked, "HEAD"));
-        ASSERT(snprintf(build, sizeof(build), "%s/build", fixture.receiver) > 0);
-        ASSERT(snprintf(bindir, sizeof(bindir), "%s/bin", build) > 0);
-        ASSERT(snprintf(fixture_binary, sizeof(fixture_binary), "%s/z23-dev", bindir) > 0);
-        ASSERT(mkdir(build, 0700) == 0 && mkdir(bindir, 0700) == 0);
-        ASSERT(rcmd_copy(binary, fixture_binary));
-        ASSERT(rcmd_real_input(input, sizeof(input), &fixture, linked));
-        int rc = rcmd_run(fixture_binary, linked, input, out, sizeof(out));
-        ASSERT(rc > 0);
-        ASSERT(strstr(out, "proof_producer_source_mismatch") != NULL ||
-               strstr(out, "proof_producer_source_id_unavailable") != NULL);
-        ASSERT(rcmd_recovery_facts(out, &fixture, linked));
-        ASSERT(rcmd_snapshot(out, "source.bundle", -2));
-        ASSERT(rcmd_snapshot(out, "source.offer.json", -2));
+        fflush(NULL);
+        pid_t child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) {
+            bool ok = rcmd_recovery(current, binary);
+            fflush(NULL);
+            _exit(ok ? 0 : 1);
+        }
+        int status = 0;
+        ASSERT_EQ(waitpid(child, &status, 0), child);
+        ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
         PASS();
     }
 _test_next:;
