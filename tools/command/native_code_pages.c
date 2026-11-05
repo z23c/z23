@@ -33,8 +33,8 @@ static bool page_component(const char *s, size_t n)
 
 static bool page_path_char(char c)
 {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-           (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+    static const char allowed[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-";
+    return c != '\0' && strchr(allowed, c) != NULL;
 }
 
 static bool page_directory(const char *s)
