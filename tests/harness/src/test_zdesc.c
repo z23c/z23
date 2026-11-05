@@ -44,7 +44,9 @@
 #include "zid/zdesc.h"
 #include "zid/zid.h"
 
+#include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define ZD_CHECK(name, expr) do {                                    \
@@ -707,6 +709,248 @@ static int zd_case_discovery_projection(void)
     return failures;
 }
 
+/* ── 11: mutation-sweep gap closers (onion rule, codec, sign/verify) ── */
+
+/* One substitution at host[pos]; true when zdesc_onion_valid accepts. */
+static bool zd_onion_with(size_t pos, char c)
+{
+    char h[ZDESC_ONION_LEN + 1];
+    snprintf(h, sizeof(h), "%s", ZD_SERVICE_ONION);
+    h[pos] = c;
+    return zdesc_onion_valid(h);
+}
+
+static int zd_case_onion_edges(void)
+{
+    int failures = 0;
+    /* The alphabet's four edges are valid; the byte just outside each
+     * edge is not. 'a' and 'z' kill the >= / <= to >, < flips. */
+    ZD_CHECK("onion edges: a z 2 7 are inside the alphabet",
+             zd_onion_with(3, 'a') && zd_onion_with(3, 'z') &&
+             zd_onion_with(3, '2') && zd_onion_with(3, '7'));
+    ZD_CHECK("onion edges: ` { 1 8 are just outside it",
+             !zd_onion_with(3, '`') && !zd_onion_with(3, '{') &&
+             !zd_onion_with(3, '1') && !zd_onion_with(3, '8'));
+    /* The scan covers every one of the 56 label chars, first and last. */
+    ZD_CHECK("onion edges: a bad first char is refused",
+             !zd_onion_with(0, '9'));
+    ZD_CHECK("onion edges: a bad LAST label char (index 55) is refused",
+             !zd_onion_with(55, '9') && !zd_onion_with(55, 'A'));
+    return failures;
+}
+
+static int zd_case_encode_edges(void)
+{
+    int failures = 0;
+    struct zdesc d;
+    zd_make_desc(&d, 3, ZD_GOLDEN_NOT_BEFORE);
+    const size_t total = (size_t)ZDESC_BODY_MIN + 3u * ZDESC_INTRO_WIRE;
+    uint8_t buf[ZDESC_BODY_MAX + 1];
+
+    enum zcl_log_level saved = zcl_log_level_get();
+    zcl_log_level_set(ZCL_LOG_OFF);
+    ZD_CHECK("encode edges: out_len one short of the body is refused",
+             zdesc_encode_body(buf, total - 1, &d) == 0);
+    zcl_log_level_set(saved);
+
+    /* Exactly-sized buffer, sentinel one byte past it: the write must
+     * stop at total (kills the auth_key 32 -> 33 over-copy, which would
+     * spill one byte past the last intro point). */
+    memset(buf, 0xA5, sizeof(buf));
+    ZD_CHECK("encode edges: out_len == body size is accepted",
+             zdesc_encode_body(buf, total, &d) == total);
+    ZD_CHECK("encode edges: nothing is written past the body",
+             buf[total] == 0xA5);
+    struct zdesc back;
+    ZD_CHECK("encode edges: the exact-fit body decodes to the input",
+             zdesc_decode_body(&back, buf, (uint16_t)total) &&
+             zd_desc_eq(&d, &back));
+    return failures;
+}
+
+/* intro_count 9 with a VALID ninth intro laid out right behind the
+ * struct's array, so only the count check (not the hostname loop) can
+ * refuse it; out_len is generous so the size check cannot either. */
+static int zd_case_encode_count_over_max(void)
+{
+    int failures = 0;
+    const size_t off = offsetof(struct zdesc, intro);
+    const size_t sz = off + (size_t)(ZDESC_INTRO_MAX + 1) *
+                      sizeof(struct zdesc_intro);
+    uint8_t *raw = calloc(1, sz > sizeof(struct zdesc) ? sz :
+                          sizeof(struct zdesc));
+    uint8_t *out = calloc(1, 4096);
+    ZD_CHECK("encode over-max: allocations", raw && out);
+    if (!raw || !out) {
+        free(raw);
+        free(out);
+        return failures;
+    }
+    struct zdesc d;
+    zd_make_desc(&d, ZDESC_INTRO_MAX, ZD_GOLDEN_NOT_BEFORE);
+    memcpy(raw, &d, sizeof(d));
+    struct zdesc_intro ninth;
+    zd_make_intro(&ninth, 8);
+    memcpy(raw + off + (size_t)ZDESC_INTRO_MAX * sizeof(ninth), &ninth,
+           sizeof(ninth));
+    raw[offsetof(struct zdesc, intro_count)] = ZDESC_INTRO_MAX + 1;
+
+    enum zcl_log_level saved = zcl_log_level_get();
+    zcl_log_level_set(ZCL_LOG_OFF);
+    ZD_CHECK("encode over-max: intro_count 9 is refused with ample room",
+             zdesc_encode_body(out, 4096, (const struct zdesc *)raw) == 0);
+    zcl_log_level_set(saved);
+    free(raw);
+    free(out);
+    return failures;
+}
+
+/* A body of `count` intros followed by 0xEE filler in the same buffer. */
+static size_t zd_body_with_filler(uint8_t *buf, size_t cap, uint8_t count)
+{
+    struct zdesc d;
+    zd_make_desc(&d, count, ZD_GOLDEN_NOT_BEFORE);
+    memset(buf, 0xEE, cap);
+    return zdesc_encode_body(buf, cap, &d);
+}
+
+static bool zd_intro_is_zero(const struct zdesc_intro *in)
+{
+    static const struct zdesc_intro zero;
+    return memcmp(in, &zero, sizeof(zero)) == 0;
+}
+
+static int zd_case_decode_edges(void)
+{
+    int failures = 0;
+    uint8_t buf[ZDESC_BODY_MAX + 4 * ZDESC_INTRO_WIRE];
+    static const uint8_t counts[] = {0, 3, 7};
+    bool slots_zero = true;
+    bool bytes_match = true;
+    for (size_t k = 0; k < sizeof(counts); k++) {
+        uint8_t c = counts[k];
+        size_t n = zd_body_with_filler(buf, sizeof(buf), c);
+        struct zdesc got;
+        memset(&got, 0x5C, sizeof(got));
+        if (n == 0 || !zdesc_decode_body(&got, buf, (uint16_t)n)) {
+            bytes_match = false;
+            continue;
+        }
+        for (unsigned i = c; i < ZDESC_INTRO_MAX; i++)
+            if (!zd_intro_is_zero(&got.intro[i]))
+                slots_zero = false;
+    }
+    ZD_CHECK("decode edges: every body decodes with filler after it",
+             bytes_match);
+    ZD_CHECK("decode edges: intro slots past intro_count stay zero",
+             slots_zero);
+
+    /* Each of the four tag bytes is compared, not just the first three. */
+    size_t n = zd_body_with_filler(buf, sizeof(buf), 1);
+    bool all_refused = n != 0;
+    enum zcl_log_level saved = zcl_log_level_get();
+    zcl_log_level_set(ZCL_LOG_OFF);
+    for (size_t t = 0; t < 4; t++) {
+        struct zdesc got;
+        buf[t] ^= 0x01;
+        if (zdesc_decode_body(&got, buf, (uint16_t)n))
+            all_refused = false;
+        buf[t] ^= 0x01;
+    }
+    zcl_log_level_set(saved);
+    ZD_CHECK("decode edges: a flip in ANY tag byte is refused", all_refused);
+    return failures;
+}
+
+/* Sign a hand-built body straight through zid_doc_sign (no zdesc
+ * validation), then ask zdesc_verify about it. */
+static bool zd_verify_raw_body(const uint8_t *body, size_t len,
+                               const uint8_t seed[32], struct zdesc *out)
+{
+    struct zid_doc doc;
+    if (!zid_doc_sign(&doc, body, (uint16_t)len, 1, 5000, seed))
+        return true; /* test setup failure counts as "accepted" = FAIL */
+    return zdesc_verify(&doc, out, 100);
+}
+
+static int zd_case_sign_verify_refusals(void)
+{
+    int failures = 0;
+    uint8_t seed[32];
+    memset(seed, 0x31, sizeof(seed));
+    struct zdesc d;
+    zd_make_desc(&d, 1, 0);
+    struct zid_doc doc;
+
+    enum zcl_log_level saved = zcl_log_level_get();
+    zcl_log_level_set(ZCL_LOG_OFF);
+    ZD_CHECK("refusals: sign refuses NULL doc, desc and seed",
+             !zdesc_sign(NULL, &d, 1, 1000, seed) &&
+             !zdesc_sign(&doc, NULL, 1, 1000, seed) &&
+             !zdesc_sign(&doc, &d, 1, 1000, NULL));
+    ZD_CHECK("refusals: verify refuses a NULL doc",
+             !zdesc_verify(NULL, &d, 100));
+
+    /* Encode failure must stop the sign: a bad service hostname makes
+     * the body encoder return 0, and an empty body is a signable doc. */
+    struct zdesc bad = d;
+    bad.onion[0] = '9';
+    ZD_CHECK("refusals: sign refuses a descriptor whose body cannot encode",
+             !zdesc_sign(&doc, &bad, 1, 1000, seed));
+
+    /* A validly signed, unexpired doc whose body is not a descriptor. */
+    ZD_CHECK("refusals: verify refuses a signed non-descriptor body",
+             !zd_verify_raw_body((const uint8_t *)"junk", 4, seed, NULL));
+
+    /* Layout-valid body, bad hostname: decode fails only at its last
+     * check, after not_before (0) is already in the output struct, so a
+     * verify that ignored the decode failure would accept and copy. */
+    uint8_t body[ZDESC_BODY_MAX];
+    size_t n = zdesc_encode_body(body, sizeof(body), &d);
+    ZD_CHECK("refusals: setup encodes", n != 0);
+    body[4] = '9';
+    struct zdesc out;
+    memset(&out, 0x5A, sizeof(out));
+    ZD_CHECK("refusals: verify refuses a signed body with a bad hostname",
+             !zd_verify_raw_body(body, n, seed, &out));
+    ZD_CHECK("refusals: ... and leaves the caller's output untouched",
+             ((const uint8_t *)&out)[0] == 0x5A &&
+             out.intro_count == 0x5A);
+    zcl_log_level_set(saved);
+    return failures;
+}
+
+static bool zd_contains(const uint8_t *hay, size_t hn, const uint8_t *needle,
+                        size_t nn)
+{
+    for (size_t i = 0; i + nn <= hn; i++)
+        if (memcmp(hay + i, needle, nn) == 0)
+            return true;
+    return false;
+}
+
+/* The 32-byte seed is the signing secret: neither the signed doc (every
+ * byte of the struct, padding included) nor the encoded body may carry
+ * it, whole or by its first half. */
+static int zd_case_no_secret_in_output(void)
+{
+    int failures = 0;
+    uint8_t seed[32];
+    for (size_t i = 0; i < sizeof(seed); i++)
+        seed[i] = (uint8_t)(0xC0u + i * 7u);
+    struct zdesc d;
+    zd_make_desc(&d, 2, 0);
+    struct zid_doc doc;
+    memset(&doc, 0, sizeof(doc));
+    ZD_CHECK("secret: sign succeeds", zdesc_sign(&doc, &d, 1, 1000, seed));
+    ZD_CHECK("secret: the signed doc holds neither seed nor its half",
+             !zd_contains((const uint8_t *)&doc, sizeof(doc), seed, 32) &&
+             !zd_contains((const uint8_t *)&doc, sizeof(doc), seed, 16));
+    ZD_CHECK("secret: the doc's public key is not the seed",
+             memcmp(doc.master_pubkey, seed, 32) != 0);
+    return failures;
+}
+
 int test_zdesc(void)
 {
     int failures = 0;
@@ -718,6 +962,12 @@ int test_zdesc(void)
     failures += zd_case_publish_fetch();
     failures += zd_case_period_boundary();
     failures += zd_case_discovery_projection();
+    failures += zd_case_onion_edges();
+    failures += zd_case_encode_edges();
+    failures += zd_case_encode_count_over_max();
+    failures += zd_case_decode_edges();
+    failures += zd_case_sign_verify_refusals();
+    failures += zd_case_no_secret_in_output();
     printf("=== ZDESC: %d failure(s) ===\n", failures);
     return failures;
 }
