@@ -499,8 +499,10 @@ static void cap_signed(const uint8_t *w, size_t n)
     struct rd r = {w, n, 0};
     cap_view f;
     cap_build(&f, &r);
-    if (mesh_capability_frame_v1_sign(&f, g_seed) != MESH_CAPABILITY_PROTO_OK)
-        return;
+    /* A builder failure on the fixed keys is a harness bug; returning here
+     * would leave the signed path dead with no failure. */
+    require(mesh_capability_frame_v1_sign(&f, g_seed) ==
+            MESH_CAPABILITY_PROTO_OK);
     size_t size = cap_wire_size(f.kind);
     uint8_t *wire = exact_alloc(size);
     size_t wire_len = 0;
@@ -835,15 +837,13 @@ static void board_signed(const uint8_t *w, size_t n)
     struct rd r = {w, n, 0};
     struct fleet_board_post p;
     board_build(&p, &r);
-    if (fleet_board_post_sign(&p, g_seed, g_pk) != FLEET_BOARD_OK)
-        return;
+    /* As in cap_signed: a builder failure on fixed keys aborts. */
+    require(fleet_board_post_sign(&p, g_seed, g_pk) == FLEET_BOARD_OK);
     size_t cap = FLEET_BOARD_BODY_MAX + 512u;
     uint8_t *wire = exact_alloc(cap);
     size_t wire_len = 0;
-    if (fleet_board_post_encode(&p, wire, cap, &wire_len) != FLEET_BOARD_OK) {
-        free(wire);
-        return;
-    }
+    require(fleet_board_post_encode(&p, wire, cap, &wire_len) ==
+            FLEET_BOARD_OK);
     require(board_decode_check(wire, wire_len));
     size_t frame_cap = wire_len + 8u;
     uint8_t *frame = exact_alloc(frame_cap);
