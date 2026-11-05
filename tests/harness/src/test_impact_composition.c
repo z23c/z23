@@ -6305,7 +6305,8 @@ static bool ic_changed_fixture_build(void)
         "git config user.name fixture; git config commit.gpgsign false; "
         "i=0; while [ $i -lt 1000 ]; do echo x > f$i.c; i=$((i+1)); done; "
         "while [ $i -lt 4097 ]; do echo x > f$i.c; i=$((i+1)); done; "
-        "echo base > base.txt; git add -A; git commit -qm base; "
+        "echo '#if __has_include(\"optional.h\")' > base.txt; "
+        "git add -A; git commit -qm base; "
         "git rev-parse HEAD > ../base.sha; "
         "i=0; while [ $i -lt 1000 ]; do echo y > f$i.c; i=$((i+1)); done; "
         "git add -A; git commit -qm batch; git rev-parse HEAD > ../one.sha; "
@@ -6818,7 +6819,9 @@ static bool ic_split_base_build(void)
                "git config commit.gpgsign false >/dev/null 2>&1") != 0)
         return false;
     return ic_split_w("core/a/big.c", ic_split_big_base) &&
-           ic_split_w("core/a/a.h", "/* a */\n") &&
+           ic_split_w("core/a/a.h",
+                      "/* a, see gate_fresh_named.c */\n#if __has_include(\"fresh_probe_cfg.h\")\n"
+                      "#endif\n") &&
            ic_split_w("core/a/other.c",
                       "int other(void)\n{\n    return 0;\n}\n") &&
            ic_split_w("Makefile", ic_split_make_base) &&
@@ -6955,12 +6958,14 @@ static int test_ic_changed_set_split_sibling_closure(void)
     return failures;
 }
 
-/* ── an added fresh `.c` keeps the plan's own groups ───────────────────────
+/* ── an added fresh `.c`, `.h` or `.md` keeps the plan's own groups ────────
  *
  * New code nothing in the base tree can name or call, named only by changed
  * rows, with no registration hook, takes the groups the planner already maps
- * for that path (fresh-source-closure). Every other added row, and every
- * deleted, renamed or type-changed one, stays the full catalog. */
+ * for that path (fresh-source-closure). So does an added header or document
+ * only changed rows name: an unchanged file that probes or names it leaves
+ * the row structural. Every other added row, and every deleted, renamed or
+ * type-changed one, stays the full catalog. */
 static const char ic_fresh_caller[] =
     "int fresh_probe_run(int x);\nint other(void)\n{\n"
     "    return fresh_probe_run(1);\n}\n";
@@ -7159,6 +7164,44 @@ static bool ic_fresh_edit_header(void)
            ic_split_w("tools/command/native_devagent_situation.h", "/* h */\n");
 }
 
+static bool ic_fresh_edit_header_only(void)
+{
+    return ic_split_w("tools/command/native_devagent_situation.h", "/* h */\n");
+}
+
+/* The base tree's core/a/a.h probes this name with __has_include, so adding
+ * it changes what that unchanged header compiles to. */
+static bool ic_fresh_edit_header_probe(void)
+{
+    return ic_split_w("tools/command/fresh_probe_cfg.h", "/* h */\n");
+}
+
+/* The base tree's docs/NOTES.txt names this stem. */
+static bool ic_fresh_edit_header_mention(void)
+{
+    return ic_split_w("tools/command/native_devagent_rules.h", "/* h */\n");
+}
+
+static bool ic_fresh_edit_header_core(void)
+{
+    return ic_split_w("core/b/fresh_core_api.h", "/* h */\n");
+}
+
+static bool ic_fresh_edit_doc(void)
+{
+    return ic_split_w("docs/fresh_lab_notes.md", "# notes\n");
+}
+
+static bool ic_fresh_edit_doc_mention(void)
+{
+    return ic_split_w("docs/native_devagent_rules.md", "# notes\n");
+}
+
+static bool ic_fresh_edit_doc_core(void)
+{
+    return ic_split_w("core/b/fresh_core_notes.md", "# notes\n");
+}
+
 static bool ic_fresh_edit_deleted(void)
 {
     return ic_fresh_edit_fresh() && ic_split_git("git rm -q mk/extra.mk");
@@ -7181,6 +7224,57 @@ static bool ic_fresh_edit_typechange(void)
 static bool ic_fresh_edit_text(void)
 {
     return ic_split_w("docs/new.txt", "text\n");
+}
+
+/* A static name the base tree also holds binds only inside the new file. */
+static bool ic_fresh_edit_static_base(void)
+{
+    return ic_fresh_add("tools/command/native_devagent_situation.c",
+                        "/* situation - a private helper */\n#include \"a.h\"\n\n"
+                        "static int other(int x)\n{\n    return x + 40;\n}\n\n"
+                        "int fresh_probe_run(int x)\n{\n"
+                        "    return other(x) + 1;\n}\n");
+}
+
+/* A new lint gate: everything a fresh file may not do elsewhere, it may do
+ * here, because only the lint tool links it. */
+static bool ic_fresh_edit_lint(void)
+{
+    return ic_split_w("tools/lint/lintc/gate_fresh_probe.c",
+                      "/* a new gate */\n"
+                      "const char *fresh_gate_name = \"section\";\n"
+                      "__attribute__((constructor)) static void reg(void) {}\n"
+                      "int other(int x)\n{\n    return x;\n}\n");
+}
+
+static bool ic_fresh_edit_lint_fixture(void)
+{
+    return ic_split_w("tools/lint/fixtures/fresh_probe.c.fixture", "int x;\n");
+}
+
+/* An unchanged file outside the sealed tree names the new file. */
+static bool ic_fresh_edit_lint_mention(void)
+{
+    return ic_split_w("tools/lint/lintc/gate_fresh_named.c", "int gate_x;\n");
+}
+
+/* The Android app has its own build: a program entry and a resource are fine. */
+static bool ic_fresh_edit_android(void)
+{
+    return ic_split_w("apps/z23android/fresh_probe.c",
+                      "int main(void)\n{\n    return 0;\n}\n");
+}
+
+static bool ic_fresh_edit_android_res(void)
+{
+    return ic_split_w("apps/z23android/res/xml/fresh_rules.xml", "<a/>\n");
+}
+
+/* The same file in an app the harness and engine can reach stays structural. */
+static bool ic_fresh_edit_other_app(void)
+{
+    return ic_split_w("apps/skycombat/src/fresh_probe.c",
+                      "int main(void)\n{\n    return 0;\n}\n");
 }
 
 static bool ic_fresh_fixture_build(void)
@@ -7209,10 +7303,24 @@ static bool ic_fresh_fixture_build(void)
         {"freshprotocomma", ic_fresh_edit_proto_comma},
         {"freshobject", ic_fresh_edit_object},
         {"freshheader", ic_fresh_edit_header},
+        {"freshheaderonly", ic_fresh_edit_header_only},
+        {"freshheaderprobe", ic_fresh_edit_header_probe},
+        {"freshheadermention", ic_fresh_edit_header_mention},
+        {"freshheadercore", ic_fresh_edit_header_core},
+        {"freshdoc", ic_fresh_edit_doc},
+        {"freshdocmention", ic_fresh_edit_doc_mention},
+        {"freshdoccore", ic_fresh_edit_doc_core},
         {"freshdeleted", ic_fresh_edit_deleted},
         {"freshrename", ic_fresh_edit_rename},
         {"freshtype", ic_fresh_edit_typechange},
         {"freshtext", ic_fresh_edit_text},
+        {"freshstaticbase", ic_fresh_edit_static_base},
+        {"freshlint", ic_fresh_edit_lint},
+        {"freshlintfixture", ic_fresh_edit_lint_fixture},
+        {"freshlintmention", ic_fresh_edit_lint_mention},
+        {"freshandroid", ic_fresh_edit_android},
+        {"freshandroidres", ic_fresh_edit_android_res},
+        {"freshotherapp", ic_fresh_edit_other_app},
     };
     if (!ic_split_base_build()) return false;
     for (size_t i = 0; i < sizeof branches / sizeof branches[0]; i++)
@@ -7233,6 +7341,21 @@ static const struct ic_fresh_case ic_fresh_cases[] = {
     {"freshsidecar", 0, "devagent_situation", "package_capability_claim"},
     {"freshstatic", 0, "devagent_situation", NULL}, /* a private helper */
     {"freshproto", 0, "devagent_situation", NULL},  /* its own prototype */
+    {"freshheader", 0, "devagent_situation", NULL}, /* its header beside it */
+    {"freshheaderonly", 0, "code_inventory", NULL}, /* a header only it names */
+    {"freshdoc", 0, "code_inventory", "code_have"}, /* a document nothing else names */
+    {"freshstaticbase", 0, "devagent_situation", NULL}, /* a shared static name */
+    {"freshlint", 0, "make_lint_gates", "code_inventory"}, /* a new lint gate */
+    {"freshlintfixture", 0, "make_lint_gates", NULL}, /* a new lint fixture */
+    {"freshandroid", 0, "code_inventory", NULL},     /* the app's own build */
+    {"freshandroidres", 0, "code_inventory", NULL},  /* any file type there */
+    {"freshlintmention", 'A', NULL, NULL},   /* an unchanged outside file names it */
+    {"freshotherapp", 'A', NULL, NULL},      /* an app others can reach */
+    {"freshheaderprobe", 'A', NULL, NULL},   /* an unchanged __has_include */
+    {"freshheadermention", 'A', NULL, NULL}, /* an unchanged file names it */
+    {"freshheadercore", 'A', NULL, NULL},    /* a header under core/ */
+    {"freshdocmention", 'A', NULL, NULL},    /* an unchanged file names it */
+    {"freshdoccore", 'A', NULL, NULL},       /* a document under core/ */
     {"freshmention", 'A', NULL, NULL},   /* an unchanged file names the stem */
     {"freshbasename", 'A', NULL, NULL},  /* defines a name the base tree holds */
     {"freshhook", 'A', NULL, NULL},      /* a constructor registers it unseen */
@@ -7247,7 +7370,6 @@ static const struct ic_fresh_case ic_fresh_cases[] = {
     {"freshprotoext", 'A', NULL, NULL},  /* a prototype it does not define */
     {"freshprotocomma", 'A', NULL, NULL}, /* int x, f(void); declares x */
     {"freshobject", 'A', NULL, NULL},    /* a public file-scope object */
-    {"freshheader", 'A', NULL, NULL},    /* an added header beside it */
     {"freshdeleted", 'D', NULL, NULL},   /* a deletion beside it */
     {"freshrename", 'D', NULL, NULL},    /* a rename: delete plus add */
     {"freshtype", 'T', NULL, NULL},      /* a type change */
@@ -7311,7 +7433,10 @@ static int test_ic_changed_set_fresh_source_closure(void)
             }
             if (c->kind == 0) {
                 ASSERT(set.structural_path == NULL && set.split_count == 0);
-                ASSERT(set.fresh_count == 1 && set.fresh_path);
+                /* The header case holds two fresh rows: the `.c` and its `.h`. */
+                ASSERT(set.fresh_path &&
+                       set.fresh_count ==
+                           (strcmp(c->name, "freshheader") == 0 ? 2u : 1u));
                 ASSERT(strcmp(reason, "fresh-source-closure") == 0);
                 ASSERT((size_t)selected < zcl_test_group_catalog_count());
                 ASSERT(c->group && strstr(selector, c->group));

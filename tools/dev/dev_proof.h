@@ -332,7 +332,9 @@ struct zcl_dev_proof_changed_set {
      * not structural either: no unchanged file can observe it and no base
      * code can call it, so its impact is what the planner already maps for a
      * modified file at that path. It stays in the closure input and the
-     * selection is exact, under the reason fresh-source-closure.
+     * selection is exact, under the reason fresh-source-closure. An added
+     * `.h` or `.md` only changed files name counts the same way, and so does
+     * an added file of any type in a sealed tree (see dp_fresh_sealed).
      * `fresh_path` is the first such row, `fresh_count` how many. */
     const char *fresh_path;
     size_t fresh_count;

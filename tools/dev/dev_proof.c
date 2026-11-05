@@ -2538,6 +2538,8 @@ static bool dp_split_admit(const struct dp_split_ctx *c, const char **refs,
 #define DP_FRESH_UNIVERSE_PATH \
     "cognition/modules/codeindex/include/codeindex/source_roots.def"
 #define DP_FRESH_REGISTRY_PATH "tools/dev/test_group_catalog.def"
+/* The known-answer ranking test reads the live tree, new files included. */
+#define DP_FRESH_RANK_PATH "tests/harness/src/test_code_have.c"
 
 static bool dp_fresh_path_allowed(const char *path)
 {
@@ -2574,23 +2576,69 @@ static bool dp_fresh_hit_changed(const struct dp_split_ctx *c,
     return false;
 }
 
+/* Every file the `git grep -l` of `argv` lists is a changed row, or lies inside
+ * `root` when one is given. */
+static bool dp_fresh_listing_within(const struct dp_split_ctx *c,
+                                    const char *const argv[], const char *root,
+                                    const char **refs, size_t count)
+{
+    char *listing = zcl_malloc(ZCL_DEVLOOP_OUTPUT_MAX, "proof fresh listing");
+    if (!listing) return false;
+    int rc = dp_split_git(c->root, argv, listing, ZCL_DEVLOOP_OUTPUT_MAX);
+    bool ok = rc == 1 || rc == 0;
+    size_t lead = strlen(c->local);
+    char *save = NULL;
+    for (char *line = rc == 0 ? strtok_r(listing, "\n", &save) : NULL;
+         ok && line; line = strtok_r(NULL, "\n", &save))
+        ok = dp_fresh_hit_changed(c, line, refs, count) ||
+             (root && strlen(line) > lead + 1 &&
+              strncmp(line + lead + 1, root, strlen(root)) == 0);
+    free(listing);
+    return ok;
+}
+
 /* Every file at `local` naming `stem` is a changed row. */
 static bool dp_fresh_named_only_by_changed(const struct dp_split_ctx *c,
                                            const char *stem, const char **refs,
                                            size_t count)
 {
-    char *listing = zcl_malloc(ZCL_DEVLOOP_OUTPUT_MAX, "proof fresh listing");
-    if (!listing) return false;
     const char *argv[] = {"git", "grep", "-l", "-a", "-F", "-e", stem,
                           c->local, "--", NULL};
-    int rc = dp_split_git(c->root, argv, listing, ZCL_DEVLOOP_OUTPUT_MAX);
-    bool ok = rc == 1 || rc == 0;
-    char *save = NULL;
-    for (char *line = rc == 0 ? strtok_r(listing, "\n", &save) : NULL;
-         ok && line; line = strtok_r(NULL, "\n", &save))
-        ok = dp_fresh_hit_changed(c, line, refs, count);
-    free(listing);
-    return ok;
+    return dp_fresh_listing_within(c, argv, NULL, refs, count);
+}
+
+/* ---- Added file in a sealed tree ----
+ *
+ * A sealed tree's new files reach one program only, so nothing such a file
+ * defines, hooks or interposes can reach another, and the text rules for a
+ * fresh `.c` have nothing to protect. tools/lint/ is the lint tool: only its
+ * build globs the files there (the test harness links a fixed list of them by
+ * name), every proof runs lint in full, and its own group is planned
+ * (dp_changed_set_widen). apps/z23android/ has its own build, which the root
+ * build and the test groups never enter. A row of any file type there is
+ * admitted when every file at `local` naming its file name is a changed row or
+ * inside the same tree. Other apps are not sealed: the test harness and the
+ * engine reach apps/skycombat. A deleted row never comes here. */
+#define DP_FRESH_LINT_ROOT "tools/lint/"
+#define DP_FRESH_LINT_PATH "tools/lint/lintc/gate_lint_gate_wiring.c"
+
+static const char *dp_fresh_sealed(const char *path)
+{
+    static const char *const roots[] = {DP_FRESH_LINT_ROOT, "apps/z23android/"};
+    for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
+        if (strncmp(path, roots[i], strlen(roots[i])) == 0) return roots[i];
+    return NULL;
+}
+
+static bool dp_fresh_sealed_admit(const struct dp_split_ctx *c,
+                                  const char **refs, size_t count,
+                                  const char *added)
+{
+    const char *leaf = dp_split_leaf(added);
+    const char *argv[] = {"git", "grep", "-l", "-a", "-w", "-F", "-e", leaf,
+                          c->local, "--", NULL};
+    return dp_split_name_safe(added) && strlen(leaf) <= DP_SPLIT_LEAF_MAX &&
+           dp_fresh_listing_within(c, argv, dp_fresh_sealed(added), refs, count);
 }
 
 /* A name the C implementation reserves (a leading underscore) can be a
@@ -2638,12 +2686,14 @@ static bool dp_fresh_public_called(const struct dp_split_ctx *c,
     return true;
 }
 
-/* No tracked file at `base` mentions any of the names `f` holds. */
+/* No tracked file at `base` mentions a public name `f` holds. A static name
+ * binds only inside the new file, so sharing one with base code moves nothing
+ * and changes nothing the base can reach. */
 static bool dp_fresh_names_absent_at_base(const struct dp_split_ctx *c,
                                           const struct dp_split_funcs *f)
 {
     const char *argv[DP_FRESH_NAMES_ARGV_MAX];
-    size_t n = 0;
+    size_t n = 0, names = 0;
     argv[n++] = "git";
     argv[n++] = "grep";
     argv[n++] = "-q";
@@ -2652,9 +2702,12 @@ static bool dp_fresh_names_absent_at_base(const struct dp_split_ctx *c,
     argv[n++] = "-F";
     if (f->count == 0 || f->count > DP_SPLIT_FUNCS_MAX) return false;
     for (size_t i = 0; i < f->count; i++) {
+        if (!f->pub[i]) continue;
         argv[n++] = "-e";
         argv[n++] = f->name[i];
+        names++;
     }
+    if (names == 0) return true;
     argv[n++] = c->base;
     argv[n++] = "--";
     argv[n] = NULL;
@@ -2664,10 +2717,11 @@ static bool dp_fresh_names_absent_at_base(const struct dp_split_ctx *c,
 static bool dp_fresh_stem(const char *added, char *stem, size_t size)
 {
     const char *leaf = dp_split_leaf(added);
-    size_t n = strlen(leaf);
-    if (n < 3 || n - 2 >= size || n - 2 < 4) return false;
-    memcpy(stem, leaf, n - 2);
-    stem[n - 2] = '\0';
+    const char *dot = strrchr(leaf, '.');
+    size_t n = dot ? (size_t)(dot - leaf) : 0;
+    if (n < 4 || n >= size) return false;
+    memcpy(stem, leaf, n);
+    stem[n] = '\0';
     return true;
 }
 
@@ -2700,6 +2754,8 @@ static bool dp_fresh_admit(const struct dp_split_ctx *c, const char **refs,
 {
     const char *added = refs[i];
     char stem[DP_SPLIT_LEAF_MAX + 1];
+    if (dp_fresh_sealed(added))
+        return dp_fresh_sealed_admit(c, refs, count, added);
     if (!dp_split_is_c(added) || !dp_split_name_safe(added) ||
         strlen(dp_split_leaf(added)) > DP_SPLIT_LEAF_MAX ||
         !dp_fresh_path_allowed(added) ||
@@ -2782,6 +2838,40 @@ static bool dp_fresh_sidecar_admit(const struct dp_split_ctx *c,
     return ok;
 }
 
+/* ---- Added header or document ----
+ *
+ * `#include`, `__has_include`, `#embed` and every build list spell the name of
+ * what they read, so an added `.h` or `.md` whose stem only changed rows spell
+ * cannot change what an unchanged file reads, and cannot shadow an older file
+ * of the same name. A header compiles only where it is included, and those
+ * files are planned through the changed rows, so its text needs no reading.
+ * It is admitted under the fresh `.c` rules for path and naming, stays in the
+ * closure input and takes the same walker groups (dp_changed_set_widen).
+ * Any other file type in a sealed tree comes through here too, under the
+ * sealed rule. Anything else stays structural. */
+static bool dp_fresh_is_leaf(const char *path)
+{
+    size_t n = strlen(path);
+    return (n > 2 && strcmp(path + n - 2, ".h") == 0) ||
+           (n > 3 && strcmp(path + n - 3, ".md") == 0) ||
+           (dp_fresh_sealed(path) && !dp_split_is_c(path) &&
+            !dp_fresh_is_sidecar(path));
+}
+
+static bool dp_fresh_leaf_admit(const struct dp_split_ctx *c, const char **refs,
+                                size_t count, size_t i)
+{
+    const char *added = refs[i];
+    char stem[DP_SPLIT_LEAF_MAX + 1];
+    if (dp_fresh_sealed(added))
+        return dp_fresh_sealed_admit(c, refs, count, added);
+    return dp_split_name_safe(added) &&
+           strlen(dp_split_leaf(added)) <= DP_SPLIT_LEAF_MAX &&
+           dp_fresh_path_allowed(added) &&
+           dp_fresh_stem(added, stem, sizeof(stem)) &&
+           dp_fresh_named_only_by_changed(c, stem, refs, count);
+}
+
 static void dp_set_drop_current(struct zcl_dev_proof_changed_set *set,
                                 const char *ref)
 {
@@ -2821,10 +2911,27 @@ static void dp_changed_set_sidecar_classify(
     }
 }
 
+/* Settle every added header and document: an admitted one counts as fresh and
+ * stays in the closure input; the rest become structural. */
+static void dp_changed_set_leaf_classify(
+    const struct dp_split_ctx *c, const char **refs, const char *status,
+    struct zcl_dev_proof_changed_set *set)
+{
+    size_t candidates = 0;
+    for (size_t i = 0; i < set->count; i++) {
+        if (status[i] != 'A' || !dp_fresh_is_leaf(refs[i])) continue;
+        if (candidates++ < DP_SPLIT_CANDIDATES_MAX &&
+            dp_fresh_leaf_admit(c, refs, set->count, i)) {
+            if (!set->fresh_path) set->fresh_path = refs[i];
+            set->fresh_count++;
+        } else dp_set_add_structural(set, refs[i]);
+    }
+}
+
 /* Settle every deferred added `.c` row: admitted ones are counted as splits
  * and leave the closure input (the sibling carries their impact); a fresh one
  * is counted and stays in it; the rest become structural exactly as an added
- * path always was. Then settle the capability sidecars. */
+ * path always was. Then settle the capability sidecars, headers and documents. */
 static void dp_changed_set_split_classify(
     const struct dp_split_ctx *c, const char **refs, char *status,
     struct zcl_dev_proof_changed_set *set)
@@ -2845,6 +2952,7 @@ static void dp_changed_set_split_classify(
         } else dp_set_add_structural(set, refs[i]);
     }
     dp_changed_set_sidecar_classify(c, refs, status, set);
+    dp_changed_set_leaf_classify(c, refs, status, set);
 }
 
 /* ---- Deleted shell script ----
@@ -2907,15 +3015,17 @@ static void dp_changed_set_deleted_classify(
     }
 }
 
-/* Mark a structural row. With `kinds` the caller settles an added `.c` or a
- * deleted `.sh` itself (it may be a split out of a modified sibling, or a
- * script nothing names); without it every add and delete is structural. */
+/* Mark a structural row. With `kinds` the caller settles an added `.c`, `.h`
+ * or `.md` or a deleted `.sh` itself (it may be a split out of a modified
+ * sibling, or a file nothing unchanged names); without it every add and delete
+ * is structural. */
 static void dp_changed_set_mark_row(struct zcl_dev_proof_changed_set *mark,
                                     const char *path, char status, bool kinds)
 {
     bool deferred = kinds &&
                     ((status == 'A' &&
-                      (dp_split_is_c(path) || dp_fresh_is_sidecar(path))) ||
+                      (dp_split_is_c(path) || dp_fresh_is_sidecar(path) ||
+                       dp_fresh_is_leaf(path))) ||
                      (status == 'D' && dp_deleted_is_sh(path)));
     if (!dp_changed_set_structural_change(status) || deferred) return;
     if (!mark->structural_path) {
@@ -8669,11 +8779,21 @@ static bool dp_changed_set_widen(const struct zcl_dev_proof_changed_set *set,
         /* A fresh source file enters the source universe the inventory,
          * ontology, catalog and platform enumerators walk, and the test
          * registry's own checks see its group: route both subjects, which
-         * are not changed rows, through the shared rules. */
+         * are not changed rows, through the shared rules. The walkers read a
+         * fresh document too, so an added file is never docs-only. */
+        plan->docs_only = false;
         zcl_devloop_plan_take_rule_path(plan, DP_FRESH_UNIVERSE_PATH);
         zcl_devloop_plan_take_rule_path(plan, DP_FRESH_REGISTRY_PATH);
+        zcl_devloop_plan_take_rule_path(plan, DP_FRESH_RANK_PATH);
         if (set->fresh_sidecars > 0)
             zcl_devloop_plan_take_rule_path(plan, DP_FRESH_CAPS_PATH);
+        /* A new lint file is reached through the gate wiring's own rule. */
+        for (size_t i = 0; i < set->count; i++)
+            if (strncmp(set->files[i], DP_FRESH_LINT_ROOT,
+                        strlen(DP_FRESH_LINT_ROOT)) == 0) {
+                zcl_devloop_plan_take_rule_path(plan, DP_FRESH_LINT_PATH);
+                break;
+            }
     }
     /* An unreferenced deleted script keeps its path in the plan so its rule
      * groups run; a deletion is never a docs-only change. */
