@@ -12,12 +12,14 @@
 #include "platform/temp_directory.h"
 #include "command/native_code_pages.h"
 #include "util/spawn.h"
+#include "base/hex.h"
 
 #include <sqlite3.h>
 
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define CIS_CHECK(name, expression)                                    \
     do {                                                               \
@@ -311,6 +313,38 @@ static bool cis_page_subject(void)
     return valid && cis_page_replacement(root, commit, expected);
 }
 
+static bool cis_bad_page_import(struct codeindex *ci, const struct ci_page *good)
+{
+    struct ci_page bad = *good;
+    static const char duplicate[] = "{\"dir\":\"lib/net\",\"dir\":\"lib/net\","
+        "\"tree\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"topic\":\"net\","
+        "\"summary\":\"bad\",\"lessons\":[],\"applies_to\":[],\"updated\":\"2026-11-04T00:00:00Z\"}";
+    static const char nul[] = "{\"dir\":\"lib/net\",\"tree\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+        "\"topic\":\"net\",\"summary\":\"bad\\u0000hidden\",\"lessons\":[],\"applies_to\":[],"
+        "\"updated\":\"2026-11-04T00:00:00Z\"}";
+    uint8_t root[32];
+    snprintf(bad.body, sizeof(bad.body), "%s", duplicate);
+    if (codeindex_pages_import_hints(ci, duplicate, strlen(duplicate), &bad, 1, root)) return false;
+    snprintf(bad.body, sizeof(bad.body), "%s", nul);
+    return !codeindex_pages_import_hints(ci, nul, strlen(nul), &bad, 1, root);
+}
+
+static bool cis_corrupt_page_artifact(const char *root, const uint8_t artifact[32],
+                                      struct codeindex *ci)
+{
+    char hex[65], path[PLATFORM_TEMP_PATH_MAX + 96];
+    zcl_hex_encode(artifact, 32, hex);
+    int n = snprintf(path, sizeof(path), "%s/.zvcs/objects/%.2s/%s", root, hex, hex + 2);
+    if (n <= 0 || (size_t)n >= sizeof(path) || chmod(path, 0600) != 0) return false;
+    FILE *file = fopen(path, "wb");
+    if (!file) return false;
+    bool written = fwrite("corrupt", 1, 7, file) == 7;
+    if (fclose(file) != 0 || !written) return false;
+    struct ci_page out;
+    bool prior_untrusted = false;
+    return codeindex_pages_list(ci, "lib/net", &out, 1, &prior_untrusted) == -2;
+}
+
 static bool cis_page_roundtrip(const char *root)
 {
     static const char body[] = "{\"dir\":\"lib/net\",\"tree\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
@@ -321,15 +355,21 @@ static bool cis_page_roundtrip(const char *root)
     snprintf(in.tree_oid, sizeof(in.tree_oid), "%s", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     snprintf(in.source_commit, sizeof(in.source_commit), "%s", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
     snprintf(in.body, sizeof(in.body), "%s", body);
+    struct codeindex *older = codeindex_open_retrieval_view(root);
     struct codeindex *ci = codeindex_open_retrieval_view(root);
     uint8_t artifact[32] = {0};
     bool prior_untrusted = false;
-    bool ok = ci && codeindex_pages_import_hints(ci, body, strlen(body), &in, 1, artifact) &&
+    bool ok = older && ci && cis_bad_page_import(ci, &in) &&
+              codeindex_pages_import_hints(ci, body, strlen(body), &in, 1, artifact) &&
               codeindex_pages_list(ci, "lib/net", &out, 1, &prior_untrusted) == 1 &&
               strcmp(out.body, body) == 0 && memcmp(out.artifact_root, artifact, 32) == 0 &&
-              codeindex_rebuild(ci) &&
-              codeindex_pages_list(ci, "lib/net", &out, 1, &prior_untrusted) == 1 &&
-              strcmp(out.body, body) == 0 && memcmp(out.artifact_root, artifact, 32) == 0;
+              codeindex_rebuild(older);
+    struct codeindex *fresh = ok ? codeindex_open_retrieval_view(root) : NULL;
+    ok = ok && fresh && codeindex_pages_list(fresh, "lib/net", &out, 1, &prior_untrusted) == 1 &&
+              strcmp(out.body, body) == 0 && memcmp(out.artifact_root, artifact, 32) == 0 &&
+              cis_corrupt_page_artifact(root, artifact, fresh);
+    codeindex_close(fresh);
+    codeindex_close(older);
     codeindex_close(ci);
     return ok;
 }

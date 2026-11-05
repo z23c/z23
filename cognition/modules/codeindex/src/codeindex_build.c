@@ -747,7 +747,9 @@ static bool rebuild_can_patch_in_place(struct codeindex *ci,
                                        const struct ci_merkle_cost *cost,
                                        const uint8_t current_dep_stat[32])
 {
-    return ci->store && cost->snapshot_used && !cost->full_rescan &&
+    bool valid = false;
+    return ci->store && ci_store_retrieval_projection_is_valid(ci->store, &valid) && valid &&
+           cost->snapshot_used && !cost->full_rescan &&
            !cost->inventory_changed &&
            rebuild_generation_current(ci->store) &&
            rebuild_deps_unchanged(ci->store, ci->root, current_dep_stat) &&
@@ -817,6 +819,7 @@ struct ci_rebuild_job {
     bool adopted_spare;
     bool patchable;
     bool seedable;
+    bool prior_unavailable;
     struct ci_seed_outcome seed;
     uint8_t current_dep_stat[32];
     uint8_t built_source_stat_root[32];
@@ -915,7 +918,7 @@ static bool ci_rebuild_note_changes(struct ci_rebuild_job *job)
     job->patchable = job->coalesce_if_fresh &&
         rebuild_can_patch_in_place(job->ci, &job->merkle_cost,
                                    job->current_dep_stat);
-    job->seedable = job->coalesce_if_fresh && !job->ci->store;
+    job->seedable = job->coalesce_if_fresh && !job->ci->store && !job->prior_unavailable;
     if (!ci_rebuild_load_leaves(job))
         return false;
     if (job->patchable && job->current_leaves) {
@@ -959,15 +962,12 @@ static bool ci_rebuild_reserve_stage(struct ci_rebuild_job *job, int dirfd)
 
 static bool ci_rebuild_carry_pages(struct ci_rebuild_job *job)
 {
-    if (!job->ci->store) return true;
+    if (!job->ci->store && !job->prior_unavailable) return true;
     bool valid = false;
-    if (!ci_store_retrieval_projection_is_valid(job->ci->store, &valid)) valid = false;
+    if (job->ci->store && !ci_store_retrieval_projection_is_valid(job->ci->store, &valid)) valid = false;
     if (!ci_store_begin(job->st)) return false;
-    bool copied = valid && ci_pages_copy(job->ci->store, job->st);
-    if (!copied) {
-        if (!ci_store_rollback(job->st) || !ci_store_begin(job->st) ||
-            !ci_pages_set_state(job->st, 2)) return false;
-    }
+    bool copied = valid ? ci_pages_copy(job->ci->store, job->st) : ci_pages_set_state(job->st, 2);
+    if (!copied) { (void)ci_store_rollback(job->st); return false; }
     uint8_t root[32];
     bool ok = ci_store_retrieval_projection_root(job->st, root) &&
               ci_store_meta_set(job->st, CI_RETRIEVAL_PROJECTION_META, root, sizeof(root)) &&
@@ -1138,6 +1138,21 @@ static void ci_rebuild_run(struct ci_rebuild_job *job, int dirfd)
 {
     if (!ci_rebuild_coalesce_fresh(job, dirfd))
         return;
+    /* A reader may hold an older inode after another importer publishes.
+     * Adopt the latest generation while the publication lock is held. */
+    struct ci_store *latest = ci_store_open(job->ci->root);
+    if (!latest) {
+        struct stat st;
+        job->prior_unavailable = fstatat(dirfd, "index.kv", &st, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT;
+    }
+    struct ci_store *old = job->ci->store;
+    job->ci->store = latest;
+    if (old) ci_store_close(old);
+    ci_merkle_free(job->ci->pending_merkle);
+    job->ci->pending_merkle = NULL;
+    job->ci->pending_merkle_snapshot_used = false;
+    job->ci->pending_merkle_full_rescan = false;
+    job->ci->pending_merkle_inventory_changed = false;
     if (!ci_rebuild_refresh_inventory(job))
         return;
     if (!ci_rebuild_note_changes(job))

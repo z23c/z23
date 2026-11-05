@@ -5,6 +5,7 @@
 #include "base/safe_alloc.h"
 #include "vcs/vcs_object.h"
 #include "json/json.h"
+#include "zutf8/zutf8.h"
 #include <sqlite3.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,6 +45,63 @@ static bool page_hex(const char *s, size_t cap)
     return true;
 }
 
+static bool page_json_text(const struct json_value *value, size_t min, size_t max)
+{
+    const char *text = json_get_str(value);
+    if (!text) return false;
+    size_t n = strnlen(text, max + 1);
+    if (n < min || n > max || !zutf8_validate_n(text, n)) return false;
+    for (size_t i = 0; i < n; i++)
+        if ((unsigned char)text[i] < 32 || (unsigned char)text[i] == 127) return false;
+    return true;
+}
+
+static bool page_json_keys(const struct json_value *obj, const char *const *keys, size_t n)
+{
+    if (!obj || obj->type != JSON_OBJ) return false;
+    size_t present = 0;
+    for (size_t i = 0; i < n; i++) if (json_get(obj, keys[i])) present++;
+    return present == obj->num_children;
+}
+
+static bool page_json_lessons(const struct json_value *array)
+{
+    static const char *const keys[] = {"rule", "why", "evidence"};
+    if (!array || array->type != JSON_ARR || json_size(array) > 32) return false;
+    for (size_t i = 0; i < json_size(array); i++) {
+        const struct json_value *row = json_at(array, i);
+        if (!page_json_keys(row, keys, 3) || !page_json_text(json_get(row, "rule"), 1, 1024) ||
+            !page_json_text(json_get(row, "why"), 0, 1024)) return false;
+        const struct json_value *evidence = json_get(row, "evidence");
+        if (evidence && !page_json_text(evidence, 0, 1024)) return false;
+    }
+    return true;
+}
+
+static bool page_json_applies(const struct json_value *array)
+{
+    if (!array || array->type != JSON_ARR || json_size(array) > 32) return false;
+    for (size_t i = 0; i < json_size(array); i++)
+        if (!page_json_text(json_at(array, i), 1, 512)) return false;
+    return true;
+}
+
+static bool page_json_shape(const struct json_value *value, const struct ci_page *page)
+{
+    static const char *const keys[] = {"dir", "tree", "topic", "summary", "lessons", "applies_to", "updated"};
+    if (!page_json_keys(value, keys, 7) || value->num_children != 7 ||
+        !page_json_text(json_get(value, "dir"), 1, 255) ||
+        !page_json_text(json_get(value, "tree"), 40, 64) ||
+        !page_json_text(json_get(value, "topic"), 1, 128) ||
+        !page_json_text(json_get(value, "summary"), 1, 1024) ||
+        !page_json_text(json_get(value, "updated"), 20, 20) ||
+        !page_json_lessons(json_get(value, "lessons")) ||
+        !page_json_applies(json_get(value, "applies_to"))) return false;
+    const char *dir = json_get_str(json_get(value, "dir"));
+    const char *tree = json_get_str(json_get(value, "tree"));
+    return !strcmp(dir, page->directory) && !strcmp(tree, page->tree_oid);
+}
+
 static bool page_hint_valid(const uint8_t *manifest, size_t size, const struct ci_page *page)
 {
     size_t body_len = strnlen(page->body, sizeof(page->body));
@@ -55,10 +113,8 @@ static bool page_hint_valid(const uint8_t *manifest, size_t size, const struct c
         return false;
     struct json_value value;
     json_init(&value);
-    bool ok = json_read(&value, page->body, body_len) && value.type == JSON_OBJ;
-    const char *dir = ok ? json_get_str(json_get(&value, "dir")) : NULL;
-    const char *tree = ok ? json_get_str(json_get(&value, "tree")) : NULL;
-    ok = dir && tree && !strcmp(dir, page->directory) && !strcmp(tree, page->tree_oid);
+    bool ok = !strstr(page->body, "\\u0000") && !strstr(page->body, "\\U0000") &&
+              json_read(&value, page->body, body_len) && page_json_shape(&value, page);
     json_free(&value);
     return ok;
 }
