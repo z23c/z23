@@ -878,8 +878,8 @@ int test_mesh_stream(void)
                                     MESH_PAIRING_CAP_TERMINAL_EXEC));
         struct stream_test_link lk = {&mp, b, b_queue, f.term_peer.ini};
         uint8_t paired[32];
-        stream_test_peer_key(paired, 0);
-        ASSERT(stream_test_pair_stand_in(&f, paired, 0));
+        stream_test_peer_key(paired, 50);
+        ASSERT(stream_test_pair_stand_in(&f, paired, 50));
         g_stream_test_wall_s = INT64_C(2000000);
         clock_set_default(&g_stream_test_clock);
 
@@ -932,14 +932,14 @@ int test_mesh_stream(void)
         clock_set_default(&g_stream_test_clock);
         for (uint8_t n = 0; n <= MESH_STREAM_PER_PEER_MAX; n++) {
             uint8_t peer[32];
-            stream_test_peer_key(peer, n);
-            ASSERT(stream_test_pair_stand_in(&f, peer, n));
+            stream_test_peer_key(peer, (uint8_t)(60u + n));
+            ASSERT(stream_test_pair_stand_in(&f, peer, (uint8_t)(60u + n)));
         }
 
         /* Eight paired peers take every paired slot of this second. */
         for (uint8_t n = 0; n < MESH_STREAM_PER_PEER_MAX; n++) {
             uint8_t peer[32];
-            stream_test_peer_key(peer, n);
+            stream_test_peer_key(peer, (uint8_t)(60u + n));
             ASSERT_EQ(stream_test_open_as(&lk, peer, 0, STREAM_TEST_GUARD),
                       -1);
         }
@@ -954,7 +954,7 @@ int test_mesh_stream(void)
         /* The ninth paired peer has no slot in either table and is
          * still served. */
         uint8_t ninth[32];
-        stream_test_peer_key(ninth, MESH_STREAM_PER_PEER_MAX);
+        stream_test_peer_key(ninth, (uint8_t)(60u + MESH_STREAM_PER_PEER_MAX));
         ASSERT_EQ(stream_test_open_as(&lk, ninth, 0, STREAM_TEST_GUARD), -1);
         ASSERT_EQ(mesh_stream_test_live_count(STREAM_TEST_GUARD),
                   (size_t)(MESH_STREAM_PER_PEER_MAX + 1u));
