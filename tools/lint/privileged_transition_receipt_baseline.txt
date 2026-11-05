@@ -44,6 +44,7 @@ dev.app.scaffold           exempt: dev-lane, publication already contained
 dev.app.publish            exempt: dev-lane, publication already contained
 dev.change.apply           exempt: dev-lane, publication already contained
 dev.publication.advance    exempt: appends local scheduler evidence only; installs and publishes no artifact
+dev.proof.remote           exempt: owned linked development-source checkout and bounded proof/expectation only; no privileged datadir or running-generation artifact install
 dev.vcs.revert             exempt: ZVCS source epoch, seal ritual owns authority
 dev.vcs.seal.grant         exempt: ZVCS source epoch, seal ritual owns authority
 dev.hotswap.apply          exempt: verify-only dev loop, no live generation swap
