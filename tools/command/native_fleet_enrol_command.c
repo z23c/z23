@@ -23,6 +23,7 @@
 #include "base/cleanse.h"
 #include "base/hex.h"
 #include "base/safe_alloc.h"
+#include "command/native_fleet.h"
 #include "fleet_enrol.h"
 #include "fleet_roles.h"
 #include "json/json.h"
@@ -545,8 +546,10 @@ static bool fe_admit_not_revoked(struct zcl_command_reply *reply,
     if (revoked)
         fe_fail(reply, "FLEET_BOX_REVOKED", "authorize",
                 "the roster head on this box revokes this machine. To let it "
-                "back, mint a higher head without it with `fleet roster head`, "
-                "import that here with `fleet import`, then admit again.",
+                "back, mint a higher head with `fleet roster head "
+                "--drop_revoked=<box_pubkey>` (a head keeps every revocation "
+                "this box holds unless named there), import that here with "
+                "`fleet import`, then admit again.",
                 FLEET_ENROL_WHY_BOX_REVOKED);
     return !revoked;
 }
@@ -1004,6 +1007,8 @@ static void fe_import(const struct zcl_command_request *request,
 struct fe_head_mint {
     uint8_t keys[FLEET_ENROL_HEAD_REVOKED_MAX][FLEET_ENROL_PUBKEY_BYTES];
     size_t count;
+    uint8_t dropped[FLEET_ENROL_HEAD_REVOKED_MAX][FLEET_ENROL_PUBKEY_BYTES];
+    size_t n_dropped;
     char text[FLEET_ENROL_HEAD_TEXT_MAX];
 };
 
@@ -1100,6 +1105,26 @@ static bool fe_head_add_signers(struct zcl_command_reply *reply,
     return true;
 }
 
+/* A head is a whole set, and `fleet import` takes any higher sequence, so a
+ * head that forgot an earlier revocation would let that box back in
+ * fleet-wide. The held head's keys therefore ride along unless drop_revoked
+ * names their box (tools/command/native_fleet_roster_head_merge.c). */
+static bool fe_head_merge(const struct zcl_command_request *request,
+                          struct zcl_command_reply *reply,
+                          const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES],
+                          struct fe_head_mint *m)
+{
+    const char *drop = request ? json_get_str(json_get(request->input,
+                                                       "drop_revoked")) : NULL;
+    const char *why = NULL;
+    enum fleet_head_merge_status st = fleet_roster_head_merge_held(
+        operator_pubkey, drop, m->keys, &m->count, m->dropped, &m->n_dropped,
+        &why);
+    if (st != FLEET_HEAD_MERGE_OK)
+        fleet_roster_head_merge_fail(reply, st, why);
+    return st == FLEET_HEAD_MERGE_OK;
+}
+
 static void fe_roster_head(const struct zcl_command_request *request,
                            struct zcl_command_reply *reply)
 {
@@ -1126,7 +1151,8 @@ static void fe_roster_head(const struct zcl_command_request *request,
                 FLEET_ENROL_WHY_OPERATOR_UNKNOWN);
         ok = false;
     }
-    ok = ok && fe_head_add_signers(reply, pubkey, m);
+    ok = ok && fe_head_add_signers(reply, pubkey, m) &&
+         fe_head_merge(request, reply, pubkey, m);
     if (ok && !fleet_head_mint(seq, fe_now(), &m->keys[0][0], m->count, seed,
                                pubkey, m->text, sizeof(m->text), &why)) {
         fe_fail(reply, "FLEET_HEAD_INVALID", "execute",
@@ -1149,6 +1175,7 @@ static void fe_roster_head(const struct zcl_command_request *request,
         (void)json_push_kv_int(&reply->data, "seq", (int64_t)seq);
         (void)json_push_kv_int(&reply->data, "revoked_count",
                                (int64_t)m->count);
+        fleet_roster_head_render_dropped(reply, m->dropped, m->n_dropped);
         (void)json_push_kv_str(&reply->data, "head", m->text);
         (void)zcl_command_reply_add_next(
             reply, "fleet.import", "{\"line\":\"<head>\"}",

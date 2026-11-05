@@ -255,6 +255,35 @@ void zcl_native_handle_fleet_doctor(const struct zcl_command_request *request,
 void zcl_native_handle_fleet_roster_revoke(
     const struct zcl_command_request *request, struct zcl_command_reply *reply);
 
+/* fleet.roster.head's carry of held revocations
+ * (tools/command/native_fleet_roster_head_merge.c). Appends every key the held
+ * head revokes to keys[0..*count) unless it is already there or drop_csv (a
+ * comma-separated list of 64-hex box keys, may be NULL) names its box; a
+ * dropped box takes the signer keys its roster rows name with it. The held keys
+ * that were removed come back in dropped[0..*n_dropped). */
+enum fleet_head_merge_status {
+    FLEET_HEAD_MERGE_OK = 0,
+    FLEET_HEAD_MERGE_HEAD_BAD,     /* the held head cannot be trusted */
+    FLEET_HEAD_MERGE_DROP_INVALID, /* a drop entry is not 64 lowercase hex */
+    FLEET_HEAD_MERGE_TOO_LARGE,    /* more than 256 keys */
+    FLEET_HEAD_MERGE_ROSTER        /* the roster could not be read */
+};
+enum fleet_head_merge_status fleet_roster_head_merge_held(
+    const uint8_t op[32], const char *drop_csv, uint8_t (*keys)[32],
+    size_t *count, uint8_t (*dropped)[32], size_t *n_dropped,
+    const char **why);
+
+/* Fail reply for a non-OK merge status, with the stage and message that name
+ * the way out; the same file renders the reply's `dropped` csv from the keys
+ * the merge removed. */
+struct zcl_command_reply;
+void fleet_roster_head_merge_fail(struct zcl_command_reply *reply,
+                                  enum fleet_head_merge_status status,
+                                  const char *why);
+void fleet_roster_head_render_dropped(struct zcl_command_reply *reply,
+                                      const uint8_t (*dropped)[32],
+                                      size_t n_dropped);
+
 /* Host facts shared by fleet.vitals.sample and fleet.vitals.read: one
  * measurement, so both leaves report the same numbers. Index order is the
  * sample catalog order (load1 centi, cores, cores free, ram used MiB, ram

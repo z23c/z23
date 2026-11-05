@@ -157,17 +157,23 @@ ZCL_COMMAND_READY_COMMAND(
     "included. A head carries a sequence number (--seq, at least 1, and "
     "higher than the last head you minted: boxes refuse a lower one) and "
     "the set of box public keys (--revoke, comma-separated 64-hex "
-    "box_pubkey values from `fleet machines`; omit it to revoke nobody) "
-    "that this fleet no longer admits. The set is sorted and de-duplicated "
+    "box_pubkey values from `fleet machines`) that this fleet no longer "
+    "admits. The head also carries every revocation the head this box "
+    "already holds names, so a higher sequence never lets an earlier box "
+    "back; --drop_revoked (comma-separated box_pubkey values) is the one "
+    "way to remove a box, with the signer keys its roster rows name, and "
+    "the reply's `dropped` lists every key the new head no longer revokes. "
+    "The set is sorted and de-duplicated "
     "before it is sealed, so two heads with the same content are the same "
     "bytes. A revoked box's roster row is refused at import and its signing "
     "key is dropped from the roster the relay gate reads. Writes nothing on "
     "this box; importing the printed line is a separate act. Refuses by "
     "name: fleet_head_invalid, fleet_head_too_large (a head longer than "
-    "`fleet import` accepts in one line), fleet_operator_unknown.", 0,
+    "`fleet import` accepts in one line), fleet_head_unreadable (the held "
+    "head cannot be trusted), fleet_operator_unknown.", 0,
     "fleet,roster,head,revoke,revocation,operator,sequence",
     "zcl.fleet_roster_head_input.v1", "zcl.fleet.roster.head.v1",
-    "revoke,seq", "seq",
+    "revoke,drop_revoked,seq", "seq",
     "z23 fleet roster head --seq=1 --revoke=<box_pubkey>",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
@@ -193,8 +199,8 @@ ZCL_COMMAND_READY_COMMAND(
     "(FLEET_REVOKE_BOX_UNKNOWN); so is a box without the operator key "
     "(FLEET_REVOKE_NOT_OPERATOR) and a held head this box cannot trust "
     "(FLEET_HEAD_UNREADABLE). `fleet admit` refuses a revoked machine; to let "
-    "one back, mint a higher head without it (`fleet roster head`) and import "
-    "it. This box's node, run with -fleetrostergate, carries the head to the "
+    "one back, mint a higher head with `fleet roster head --drop_revoked=<box_"
+    "pubkey>` and import it. This box's node, run with -fleetrostergate, carries the head to the "
     "other roster machines as a sealed board row at no coin cost, and "
     "board_carries says whether it fits one row (about 44 revoked keys). The "
     "head is also printed for `fleet import`, which needs no carriage. A box "

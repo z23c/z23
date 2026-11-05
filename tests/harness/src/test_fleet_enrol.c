@@ -3971,6 +3971,156 @@ static int test_fe_revoke_refusals(void)
     return failures;
 }
 
+static bool fe_head_mint_call(uint64_t seq, const uint8_t *revoke,
+                              const uint8_t *drop, struct zcl_command_reply *r)
+{
+    char body[FLEET_ENROL_HEAD_TEXT_MAX + 256], hex[FLEET_ENROL_PUBKEY_HEX];
+    int n = snprintf(body, sizeof(body), "{\"seq\":%llu",
+                     (unsigned long long)seq);
+    if (revoke) {
+        zcl_hex_encode(revoke, 32, hex);
+        n += snprintf(body + n, sizeof(body) - (size_t)n, ",\"revoke\":\"%s\"",
+                      hex);
+    }
+    if (drop) {
+        zcl_hex_encode(drop, 32, hex);
+        n += snprintf(body + n, sizeof(body) - (size_t)n,
+                      ",\"drop_revoked\":\"%s\"", hex);
+    }
+    (void)snprintf(body + n, sizeof(body) - (size_t)n, "}");
+    return fe_leaf_call("fleet.roster.head", "zcl.fleet.roster.head.v1", body,
+                        r);
+}
+
+static int test_fe_head_keeps_held_revocations(void)
+{
+    int failures = 0;
+    TEST("fleet roster head: a higher head naming only B keeps A revoked; "
+         "only the named drop_revoked switch lets A back, and the reply "
+         "names the key it dropped") {
+        char row_a[FLEET_ENROL_MACHINE_TEXT_MAX], row_b[FLEET_ENROL_MACHINE_TEXT_MAX];
+        char a_hex[FLEET_ENROL_PUBKEY_HEX];
+        static struct fleet_head head;
+        struct fleet_machine machine;
+        struct zcl_command_reply reply;
+        uint8_t seed[32], pub[32], a_seed[32], a_pub[32], b_seed[32], b_pub[32];
+        const char *why = NULL, *line;
+        bool appended = false;
+        fe_isolate("head-keeps");
+        ASSERT(fe_manager_key(seed, pub));
+        fe_key(0x72, a_seed, a_pub);
+        fe_key(0x76, b_seed, b_pub);
+        zcl_hex_encode(a_pub, 32, a_hex);
+        ASSERT(fe_manager_row("studio", 0x72, seed, pub,
+                              FLEET_ENROL_PORT_FIRST, row_a, sizeof(row_a)));
+        ASSERT(fe_manager_row("depot", 0x76, seed, pub,
+                              FLEET_ENROL_PORT_FIRST + 1, row_b, sizeof(row_b)));
+        ASSERT(fleet_roster_import(row_a, pub, &machine, &appended, &why));
+        ASSERT(fleet_roster_import(row_b, pub, &machine, &appended, &why));
+
+        /* Revoke A the shipped way: the held head is seq 1 and names A. */
+        ASSERT(fe_revoke_call(a_pub, FE_REVOKE_YES, &reply));
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        zcl_command_reply_free(&reply);
+
+        /* A higher head that names only B must not let A back. */
+        ASSERT(fe_head_mint_call(2, b_pub, NULL, &reply));
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        line = json_get_str(json_get(&reply.data, "head"));
+        ASSERT(line && fleet_head_parse(line, &head, NULL));
+        ASSERT(fleet_head_revokes(&head, a_pub));
+        ASSERT(fleet_head_revokes(&head, b_pub));
+        ASSERT_STR_EQ(fe_s(fd_cstr(&reply.data, "dropped")), "");
+        zcl_command_reply_free(&reply);
+
+        /* The explicit switch drops A (and its signer), and says so. */
+        ASSERT(fe_head_mint_call(2, b_pub, a_pub, &reply));
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        line = json_get_str(json_get(&reply.data, "head"));
+        ASSERT(line && fleet_head_parse(line, &head, NULL));
+        ASSERT(!fleet_head_revokes(&head, a_pub));
+        ASSERT(fleet_head_revokes(&head, b_pub));
+        ASSERT(strstr(fe_s(fd_cstr(&reply.data, "dropped")), a_hex) != NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fe_head_drop_keeps_shared_signer(void)
+{
+    int failures = 0;
+    TEST("fleet roster head: boxes A and C name the same signer key S; "
+         "dropping A leaves S revoked because C still is, and dropping both "
+         "lets S go") {
+        char row_a[FLEET_ENROL_MACHINE_TEXT_MAX], row_c[FLEET_ENROL_MACHINE_TEXT_MAX];
+        static struct fleet_head head;
+        struct fleet_signing_key signer;
+        struct fleet_machine machine;
+        struct zcl_command_reply reply;
+        uint8_t seed[32], pub[32], a_seed[32], a_pub[32], c_seed[32], c_pub[32];
+        uint8_t both[64];
+        char both_hex[2 * FLEET_ENROL_PUBKEY_HEX];
+        const char *why = NULL, *line;
+        bool appended = false;
+        fe_isolate("head-shared-signer");
+        ASSERT(fe_manager_key(seed, pub));
+        fe_key(0x72, a_seed, a_pub);
+        fe_key(0x76, c_seed, c_pub);
+        fe_key(0x73, signer.seed, signer.pubkey);
+        g_fe_signer = &signer;
+        ASSERT(fe_manager_row("studio", 0x72, seed, pub,
+                              FLEET_ENROL_PORT_FIRST, row_a, sizeof(row_a)));
+        ASSERT(fe_manager_row("depot", 0x76, seed, pub,
+                              FLEET_ENROL_PORT_FIRST + 1, row_c, sizeof(row_c)));
+        g_fe_signer = NULL;
+        ASSERT(fleet_roster_import(row_a, pub, &machine, &appended, &why));
+        ASSERT(fleet_roster_import(row_c, pub, &machine, &appended, &why));
+
+        /* Revoke A, then C: the held head names A, C and S. */
+        ASSERT(fe_revoke_call(a_pub, FE_REVOKE_YES, &reply));
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        zcl_command_reply_free(&reply);
+        ASSERT(fe_revoke_call(c_pub, FE_REVOKE_YES, &reply));
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        zcl_command_reply_free(&reply);
+
+        /* Drop A alone: S is still C's signer, so it stays revoked. */
+        ASSERT(fe_head_mint_call(3, NULL, a_pub, &reply));
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        line = json_get_str(json_get(&reply.data, "head"));
+        ASSERT(line && fleet_head_parse(line, &head, NULL));
+        ASSERT(!fleet_head_revokes(&head, a_pub));
+        ASSERT(fleet_head_revokes(&head, c_pub));
+        ASSERT(fleet_head_revokes(&head, signer.pubkey));
+        zcl_command_reply_free(&reply);
+
+        /* Drop both: nothing names S any more, so it goes too. */
+        memcpy(both, a_pub, 32);
+        memcpy(both + 32, c_pub, 32);
+        zcl_hex_encode(both, 32, both_hex);
+        both_hex[FLEET_ENROL_PUBKEY_HEX - 1] = ',';
+        zcl_hex_encode(both + 32, 32, both_hex + FLEET_ENROL_PUBKEY_HEX);
+        {
+            char body[512];
+            (void)snprintf(body, sizeof(body),
+                           "{\"seq\":3,\"drop_revoked\":\"%s\"}", both_hex);
+            ASSERT(fe_leaf_call("fleet.roster.head", "zcl.fleet.roster.head.v1",
+                                body, &reply));
+        }
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        line = json_get_str(json_get(&reply.data, "head"));
+        ASSERT(line && fleet_head_parse(line, &head, NULL));
+        ASSERT(!fleet_head_revokes(&head, a_pub));
+        ASSERT(!fleet_head_revokes(&head, c_pub));
+        ASSERT(!fleet_head_revokes(&head, signer.pubkey));
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    g_fe_signer = NULL;
+    return failures;
+}
+
 /* Damage the recorded operator key (operator.pub) in one named way; false
  * when the damage could not be made (a privileged runner reads through mode
  * 000). The link case points at a file holding a VALID 64-hex pin, so the
@@ -4411,6 +4561,8 @@ int test_fleet_enrol(void)
     failures += test_fe_head_leaves();
     failures += test_fe_revoke_refusals();
     failures += test_fe_operator_unreadable_closes();
+    failures += test_fe_head_keeps_held_revocations();
+    failures += test_fe_head_drop_keeps_shared_signer();
     failures += test_fe_revoke_gate();
     failures += test_fe_revoke_admit();
     failures += test_fd_roster_gate_row();
