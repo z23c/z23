@@ -277,6 +277,37 @@ static void wso_absorb_lost_reals(struct sha3_256_ctx *c,
     wso_absorb_lost_real(c, json_at(params, WALLET_SEND_ONCE_FEE_PARAM), "fee");
 }
 
+/* Parameters past the fee that change what the send does: the depth floor of a
+ * z_sendmany at 2, and the input count and total a z_shieldaddress plan binds
+ * at 5 and 6. A request whose params 5 and 6 are absent and whose floor is the
+ * whole number 1 absorbs nothing here and keeps its digest bytes; any other
+ * value absorbs its position and text, so a request that differs only there
+ * cannot share a digest with the send on record. A row an earlier build wrote
+ * lacks these bytes, and wso_answer_mismatch answers it outcome_unknown. */
+static bool wso_extra_is_baseline(size_t at, const struct json_value *v)
+{
+    if (at != 2)
+        return !v || json_is_null(v);
+    return v && v->type == JSON_INT && json_get_int(v) == 1;
+}
+
+static bool wso_absorb_extras(struct sha3_256_ctx *c,
+                              const struct json_value *params)
+{
+    static const size_t at[] = { 2, 5, 6 };
+    for (size_t i = 0; i < sizeof(at) / sizeof(at[0]); i++) {
+        const struct json_value *v = json_at(params, at[i]);
+        if (wso_extra_is_baseline(at[i], v))
+            continue;
+        char tag[24];
+        (void)snprintf(tag, sizeof(tag), "param/%zu", at[i]);
+        wso_absorb(c, tag);
+        if (v && !wso_absorb_json(c, v))
+            return false; // raw-return-ok:callee-logged
+    }
+    return true;
+}
+
 /* Bound to the key, so the digest of a low-entropy request cannot be tested
  * against a copy of node.db without the key. Absent and null fees absorb the
  * empty string. */
@@ -298,6 +329,8 @@ static bool wso_digest(const char *key, const struct json_value *params,
         wso_absorb(&c, "");
     }
     wso_absorb_lost_reals(&c, params);
+    if (!wso_absorb_extras(&c, params))
+        return false; // raw-return-ok:callee-logged
     sha3_256_finalize(&c, out);
     return true;
 }
