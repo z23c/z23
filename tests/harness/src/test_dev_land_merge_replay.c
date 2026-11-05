@@ -249,8 +249,9 @@ static int dlx_lint_failure_detail(void)
         test_make_tmpdir(root, sizeof(root), "dev_land", "lint_failure_body");
         (void)snprintf(log, sizeof(log), "%s/attempt.log", root);
         const char *argv[] = {"/bin/sh", "-c",
-            "head -c 2100000 /dev/zero | tr '\\000' x; printf '\\nPASS check-pass ignored passing diagnostic\\nFAIL check-red\\n'; "
-            "printf '%s\\n' '──── FAIL log: check-red ────────────────────────────' 'actual diagnostic body' >&2; exit 7", NULL};
+            "head -c 2100000 /dev/zero | tr '\\000' x; printf '──── FAIL log: check-continuation ────────────────────────────\\n'; "
+            "printf 'PASS check-pass ──── FAIL log: check-fake ────────────────────────────\\nignored passing diagnostic\\nFAIL check-red\\n'; "
+            "printf '%s\\n' '──── FAIL log: check-red ────────────────────────────' 'gate heading' 'actual diagnostic body' >&2; exit 7", NULL};
         ASSERT(zcl_dev_land_lint_test(argv, log, detail, sizeof(detail)) == 7);
         ASSERT(strstr(detail, "actual diagnostic body") != NULL);
         ASSERT(strstr(detail, "ignored passing diagnostic") == NULL);
@@ -261,11 +262,11 @@ static int dlx_lint_failure_detail(void)
             if (strstr(line, "actual diagnostic body")) found = true;
         ASSERT(fclose(f) == 0);
         ASSERT(found);
-        const char *empty[] = {"/bin/sh", "-c", "printf '%s\\n' 'FAIL check-empty' >&2; exit 3", NULL};
+        const char *empty[] = {"/bin/sh", "-c", "printf '%s\\n' 'error: earlier generic' 'FAIL check-empty' >&2; exit 3", NULL};
         ASSERT(zcl_dev_land_lint_test(empty, log, detail, sizeof(detail)) == 3);
         ASSERT(strstr(detail, "FAIL check-empty") != NULL);
         const char *long_body[] = {"/bin/sh", "-c",
-            "printf '%s\\n' '──── FAIL log: check-long ────'; head -c 2000 /dev/zero | tr '\\000' x; exit 4", NULL};
+            "printf '%s\\n' '──── FAIL log: check-long ────────────────────────────'; head -c 705 /dev/zero | tr '\\000' x; printf '\\n'; exit 4", NULL};
         ASSERT(zcl_dev_land_lint_test(long_body, log, detail, sizeof(detail)) == 4);
         ASSERT(strstr(detail, "[detail truncated]") != NULL);
         PASS();

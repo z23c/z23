@@ -5658,31 +5658,61 @@ int dl_lint_candidate(const struct dl_dirs *d, struct dl_row *row)
 #if !defined(_WIN32) && (defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING))
 /* Only lint's own failed-gate frame can supply the body; PASS output and
  * the verdict summary precede it and are not the gate's diagnosis. */
+static bool dl_lint_line(FILE *f, char *line, size_t cap, bool *clipped)
+{
+    if (!fgets(line, (int)cap, f)) return false;
+    *clipped = strchr(line, '\n') == NULL && !feof(f);
+    if (*clipped) { int c; while ((c = fgetc(f)) != '\n' && c != EOF) {} }
+    return true;
+}
+
+static bool dl_lint_frame(const char *line, char *gate, size_t cap)
+{
+    static const char prefix[] = "──── FAIL log: ";
+    static const char rule[] = "─";
+    if (strncmp(line, prefix, sizeof(prefix) - 1) != 0) return false;
+    const char *name = line + sizeof(prefix) - 1;
+    size_t n = strspn(name, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_./");
+    if (!n || n >= cap || name[n] != ' ') return false;
+    const char *p = name + n + 1;
+    for (int i = 0; i < 28; i++, p += sizeof(rule) - 1)
+        if (strncmp(p, rule, sizeof(rule) - 1) != 0) return false;
+    if (*p != '\n' && *p != '\r' && *p != '\0') return false;
+    (void)snprintf(gate, cap, "%.*s", (int)n, name);
+    return true;
+}
+
 static bool dl_lint_body(FILE *f, char *detail, size_t cap)
 {
-    char line[4096], gate[256] = "";
-    while (fgets(line, sizeof(line), f)) {
-        char *frame = strstr(line, " FAIL log: ");
-        if (!frame) continue;
-        frame += strlen(" FAIL log: ");
-        size_t n = strcspn(frame, " \t\r\n");
-        if (!n || n >= sizeof(gate)) continue;
-        (void)snprintf(gate, sizeof(gate), "%.*s", (int)n, frame);
-        while (fgets(line, sizeof(line), f)) {
-            if (line[strspn(line, " \t\r\n")] == '\0') continue;
-            char clean[768];
-            dl_sanitize_copy(line, clean, sizeof(clean));
-            char rendered[1100];
-            int written = snprintf(rendered, sizeof(rendered), "FAIL %s: %.700s", gate, clean);
-            bool clipped = !strchr(line, '\n') || strlen(line) >= sizeof(clean) ||
-                           written < 0 || (size_t)written >= cap;
-            if (clipped && cap > 20)
-                (void)snprintf(detail, cap, "%.*s [detail truncated]", (int)(cap - 20), rendered);
-            else (void)snprintf(detail, cap, "%s", rendered);
-            return true;
+    char line[4096], gate[256], next[256], body[701] = "";
+    bool line_clipped = false, found = false, clipped = false;
+    size_t used = 0;
+    while (dl_lint_line(f, line, sizeof(line), &line_clipped)) {
+        if (!found) {
+            found = !line_clipped && dl_lint_frame(line, gate, sizeof(gate));
+            continue;
         }
+        if (!line_clipped && dl_lint_frame(line, next, sizeof(next))) break;
+        if (line[strspn(line, " \t\r\n")] == '\0') continue;
+        char clean[768];
+        dl_sanitize_copy(line, clean, sizeof(clean));
+        size_t n = strlen(clean);
+        clipped |= line_clipped || strlen(line) >= sizeof(clean);
+        if (n > sizeof(body) - 1 - used) { n = sizeof(body) - 1 - used; clipped = true; }
+        memcpy(body + used, clean, n); used += n; body[used] = '\0';
+        if (clipped || used == sizeof(body) - 1) { clipped = true; break; }
     }
-    return false;
+    if (!found || !used) return false;
+    char rendered[1100];
+    int written = snprintf(rendered, sizeof(rendered), "FAIL %s: %s", gate, body);
+    clipped |= written < 0 || (size_t)written >= cap;
+    if (clipped && cap > 20) {
+        size_t take = cap - 20;
+        if (take > strlen(rendered)) take = strlen(rendered);
+        while (take && ((unsigned char)rendered[take] & 0xc0) == 0x80) take--;
+        (void)snprintf(detail, cap, "%.*s [detail truncated]", (int)take, rendered);
+    } else (void)snprintf(detail, cap, "%s", rendered);
+    return true;
 }
 
 static bool dl_lint_copy_log(const char *source, const char *dest)
@@ -5708,6 +5738,22 @@ static bool dl_lint_host_load(FILE *f)
     return false;
 }
 
+static void dl_lint_fallback(FILE *f, char *out, size_t cap)
+{
+    char line[4096], fallback[1024] = "";
+    bool clipped;
+    rewind(f);
+    while (dl_lint_line(f, line, sizeof(line), &clipped)) {
+        const char *p = line + strspn(line, " \t");
+        if (!clipped && strncmp(p, "FAIL ", 5) == 0) {
+            dl_sanitize_copy(p, out, cap);
+            return;
+        }
+        if (!fallback[0]) dl_first_actionable(line, fallback, sizeof(fallback));
+    }
+    (void)snprintf(out, cap, "%s", fallback);
+}
+
 static int dl_lint_run(struct dl_row *row, const char *const argv[])
 {
     char path[sizeof(row->log_path) + 32];
@@ -5722,12 +5768,8 @@ static int dl_lint_run(struct dl_row *row, const char *const argv[])
     };
     int rc = zcl_dev_proof_run_watched(".", path, argv, &budget, NULL);
     FILE *f = fopen(path, "r");
-    if (rc != 0 && f && !dl_lint_body(f, row->detail, sizeof(row->detail))) {
-        rewind(f);
-        char line[4096];
-        while (fgets(line, sizeof(line), f) && !row->detail[0])
-            dl_first_actionable(line, row->detail, sizeof(row->detail));
-    }
+    if (rc != 0 && f && !dl_lint_body(f, row->detail, sizeof(row->detail)))
+        dl_lint_fallback(f, row->detail, sizeof(row->detail));
     bool host_load = f && rc != 0 && dl_lint_host_load(f);
     if (f) fclose(f);
     if (!dl_lint_copy_log(path, row->log_path)) rc = -1;
@@ -7394,11 +7436,11 @@ static int dl_frame_open(const struct zcl_dev_proof_failure_identity *identity,
     char name[160];
     int n = snprintf(name, sizeof(name), "%s-%s.%s.log", local, base, step);
     int logfd = n > 0 && (size_t)n < sizeof(name)
-                    ? openat(fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+                    ? openat(fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) : -1;
     if (logfd < 0 && errno == ENOENT)
         { n = snprintf(name, sizeof(name), "%s.log", step);
           if (n > 0 && (size_t)n < sizeof(name))
-              logfd = openat(fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW); }
+              logfd = openat(fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK); }
     close(fd);
     return logfd;
 }
@@ -7497,10 +7539,12 @@ static void dl_retained_lint(const char *wt, const char *local, const char *base
 #if !defined(_WIN32)
     if (!identity->valid) return;
     int fd = dl_frame_open(identity, local, base, "lint");
-    if (fd < 0) return;
+    if (fd < 0) { (void)snprintf(out, cap, "lint log unavailable"); return; }
     struct stat before, after;
     if (fstat(fd, &before) != 0 || !S_ISREG(before.st_mode) ||
-        before.st_size < 0 || before.st_size > 32 * 1024 * 1024) { close(fd); return; }
+        before.st_size < 0 || before.st_size > 32 * 1024 * 1024) {
+        close(fd); (void)snprintf(out, cap, "lint log unavailable or exceeds 32 MiB"); return;
+    }
     FILE *f = fdopen(fd, "r");
     if (!f) { close(fd); return; }
     (void)dl_lint_body(f, out, cap);

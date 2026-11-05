@@ -1097,6 +1097,36 @@ _test_next:;
     return failures;
 }
 
+static bool dlx_lint_bad_file(bool fifo)
+{
+    const struct dlx_evidence_case k = {
+        .tag = fifo ? "evidence_lint_fifo" : "evidence_lint_link",
+        .dimension = ZCL_DEV_PROOF_LINT,
+        .script = "printf '%s\\n' 'FAIL check-red'; exit 1\n",
+        .token = "child_proof_failed_exit_1",
+    };
+    char wt[PATH_MAX], local[64], base[64], path[PATH_MAX + 512], decoy[PATH_MAX + 64];
+    dlx_isolate(k.tag);
+    bool ok = dlx_evidence_settle(&k, wt, local, base);
+    struct zcl_dev_proof_status status = {0};
+    ok = ok && zcl_dev_proof_status_read(wt, local, base, &status) && status.failure_identity.valid;
+    (void)snprintf(path, sizeof(path), "%s/.cache/zcl-dev-proof/attempts/%s/logs/%s-%s.lint.log",
+                   wt, status.failure_identity.attempt, local, base);
+    (void)snprintf(decoy, sizeof(decoy), "%s/wrong-attempt.log", wt);
+    ok = ok && dlx_write(decoy, "──── FAIL log: check-fake ────────────────────────────\nwrong attempt body\n") &&
+         unlink(path) == 0 && (fifo ? mkfifo(path, 0600) == 0 : symlink(decoy, path) == 0);
+    setenv("ZCL_LAND_PROOF_STUB", "status", 1);
+    struct dlx_call c;
+    dlx_begin(&c, "step");
+    ok = ok && dlx_run(&c) && dlx_ok(&c) &&
+         strcmp(dlx_str(&c, "state"), "failed") == 0 &&
+         strstr(dlx_str(&c, "detail"), "wrong attempt body") == NULL &&
+         strstr(dlx_str(&c, "detail"), "unavailable") != NULL;
+    dlx_end(&c);
+    dlx_restore();
+    return ok;
+}
+
 static int dlx_evidence_lint_body(void)
 {
     int failures = 0;
@@ -1120,6 +1150,8 @@ static int dlx_evidence_lint_body(void)
         ASSERT(strstr(dlx_str(&c, "detail"), "PASS check-pass") == NULL);
         dlx_end(&c);
         dlx_restore();
+        ASSERT(dlx_lint_bad_file(false));
+        ASSERT(dlx_lint_bad_file(true));
         PASS();
     } _test_next:;
     return failures;
