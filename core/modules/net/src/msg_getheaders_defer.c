@@ -1,17 +1,22 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * The getheaders SERVE BUDGET and the DEFERRED-REQUEST park/replay it implies.
+ * The getheaders SERVE BUDGET, the DEFERRED-REQUEST park/replay it implies, and
+ * which entries a reply carries for each kind of peer.
  * Declared in net/msg_internal.h; split out of msg_headers.c, which is pinned
  * shrink-only by tools/lint/file_size_policy_baseline.txt. process_getheaders
  * itself stays in msg_headers.c and calls straight into this file. */
 
 #include "net/msg_internal.h"
 
+#include "chain/chain.h"
 #include "core/serialize.h"
+#include "core/uint256.h"
 #include "net/fast_sync.h"
+#include "net/msgprocessor.h"
 #include "net/net.h"
 #include "net/p2p_message.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
+#include "validation/main_state.h"
 
 #include <stdatomic.h>
 #include <string.h>
@@ -71,6 +76,83 @@ uint32_t getheaders_serve_request_allowance(uint64_t services)
     if (page <= 0)
         page = GETHEADERS_SERVE_PAGE_LEGACY;
     return GETHEADERS_SERVE_HEADERS_PER_WINDOW / (uint32_t)page;
+}
+
+/* A legacy peer hears only what zclassicd's own getheaders would serve, the
+ * active chain, and here only what process_getdata would then send. zclassicd
+ * reads a header as "this peer has the block", asks for the body once, ignores
+ * notfound and leaves the request open until its download timeout, parking every
+ * block above the gap. A NODE_ZCL23 peer re-queues on notfound, so it keeps
+ * hearing headers above the validated tip while bodies download.
+ *
+ * Both tests go by hash: after a restart chain[] and the block map can own
+ * different objects for one block, and the body bit lands on the map's. */
+static bool getheaders_peer_may_hear(const struct msg_processor *mp,
+                                     const struct p2p_node *node,
+                                     const struct block_index *bi)
+{
+    if (peer_supports_fast_sync(node->services))
+        return true;
+    struct main_state *ms = mp->main_state;
+    const struct block_index *active =
+        active_chain_at(&ms->chain_active, bi->nHeight);
+    return active && active->phashBlock && bi->phashBlock &&
+           uint256_eq(active->phashBlock, bi->phashBlock) &&
+           msg_blocks_should_announce_getblocks(
+               block_map_find(&ms->map_block_index, bi->phashBlock));
+}
+
+/* The entry after `it` for this peer. zclassicd scores a headers message whose
+ * entries do not link, so a legacy peer gets the real successor or nothing, and
+ * its reply ends there. A NODE_ZCL23 peer gets the walk past unservable entries:
+ * it rejects an unconnected header with no score and probes for what is missing. */
+static struct block_index *getheaders_next_for_peer(struct msg_processor *mp,
+                                                    const struct p2p_node *node,
+                                                    struct block_index *it,
+                                                    struct block_header *hdr)
+{
+    if (peer_supports_fast_sync(node->services))
+        return getheaders_next_servable_successor(mp, it, hdr);
+    struct block_index *next =
+        main_state_best_known_successor(mp->main_state, it);
+    return next && getheaders_index_header_servable(mp, next, hdr) ? next : NULL;
+}
+
+/* See net/msg_internal.h. */
+struct block_index *getheaders_first_served_entry(struct msg_processor *mp,
+                                                  const struct p2p_node *node,
+                                                  struct block_index *first,
+                                                  struct block_header *hdr)
+{
+    if (!first || getheaders_index_header_servable(mp, first, hdr))
+        return first;
+    if (!first->pprev || !peer_supports_fast_sync(node->services))
+        return NULL;
+    return getheaders_next_servable_successor(mp, first->pprev, hdr);
+}
+
+/* See net/msg_internal.h. */
+int getheaders_append_served_run(struct msg_processor *mp,
+                                 const struct p2p_node *node,
+                                 struct block_index *it,
+                                 struct block_header *hdr,
+                                 struct byte_stream *body,
+                                 const struct uint256 *hash_stop,
+                                 int max_headers)
+{
+    int count = 0;
+
+    while (it && count < max_headers &&
+           getheaders_peer_may_hear(mp, node, it)) {
+        if (!getheaders_try_append_header(body, hdr))
+            break;  /* next header would overflow the wire cap */
+        count++;
+        if (!uint256_is_null(hash_stop) && it->phashBlock &&
+            uint256_eq(it->phashBlock, hash_stop))
+            break;
+        it = getheaders_next_for_peer(mp, node, it, hdr);
+    }
+    return count;
 }
 
 /* Park the request the serve window just deferred so the send tick can answer

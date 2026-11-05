@@ -967,3 +967,7 @@ later lane flips it HARD.
 - 2026-11-05T21:24:20Z — REASON: Move two header-sending functions out of msg_headers.c, no behaviour change, so the file stays under its size limit
   old ROOT: 6387a59315fff6349d41a0be80d787ee34b162af14745203e476094957bc9c9f
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-05T22:32:17Z — REASON: Stop a legacy getheaders reply at a gap instead of skipping it
+  old ROOT: b31e6304f44d494664620227bfc3a6f17817ba9d37c62755ad71a0fbef13dc9b
+  by: owner unseal ritual (make core-unseal)

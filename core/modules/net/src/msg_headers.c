@@ -1099,53 +1099,6 @@ static void getheaders_roll_serve_window(struct p2p_node *node, int64_t now_unix
     }
 }
 
-/* A legacy peer hears only what zclassicd's own getheaders would serve, the
- * active chain, and here only what process_getdata would then send. zclassicd
- * reads a header as "this peer has the block", asks for the body once, ignores
- * notfound and leaves the request open until its download timeout, parking every
- * block above the gap. A NODE_ZCL23 peer re-queues on notfound, so it keeps
- * hearing headers above the validated tip while bodies download.
- *
- * Both tests go by hash: after a restart chain[] and the block map can own
- * different objects for one block, and the body bit lands on the map's. */
-static bool getheaders_peer_may_hear(const struct msg_processor *mp,
-                                     const struct p2p_node *node,
-                                     const struct block_index *bi)
-{
-    if (peer_supports_fast_sync(node->services))
-        return true;
-    struct main_state *ms = mp->main_state;
-    const struct block_index *active =
-        active_chain_at(&ms->chain_active, bi->nHeight);
-    return active && active->phashBlock && bi->phashBlock &&
-           uint256_eq(active->phashBlock, bi->phashBlock) &&
-           msg_blocks_should_announce_getblocks(
-               block_map_find(&ms->map_block_index, bi->phashBlock));
-}
-
-static int getheaders_append_served_run(struct msg_processor *mp,
-                                        const struct p2p_node *node,
-                                        struct block_index *it,
-                                        struct block_header *hdr,
-                                        struct byte_stream *body,
-                                        struct uint256 *hash_stop,
-                                        int max_headers)
-{
-    int count = 0;
-
-    while (it && count < max_headers &&
-           getheaders_peer_may_hear(mp, node, it)) {
-        if (!getheaders_try_append_header(body, hdr))
-            break;  /* next header would overflow the wire cap */
-        count++;
-        if (!uint256_is_null(hash_stop) && it->phashBlock &&
-            uint256_eq(it->phashBlock, hash_stop))
-            break;
-        it = getheaders_next_servable_successor(mp, it, hdr);
-    }
-    return count;
-}
-
 bool process_getheaders(struct msg_processor *mp, struct p2p_node *node,
                         struct byte_stream *s)
 {
@@ -1246,12 +1199,7 @@ bool process_getheaders(struct msg_processor *mp, struct p2p_node *node,
      * re-check on every iteration. */
     struct block_header hdr;
     block_header_init(&hdr);
-    struct block_index *it = iter;
-    if (it && !getheaders_index_header_servable(mp, it, &hdr)) {
-        struct block_index *parent = it->pprev;
-        it = parent ? getheaders_next_servable_successor(mp, parent, &hdr)
-                    : NULL;
-    }
+    struct block_index *it = getheaders_first_served_entry(mp, node, iter, &hdr);
 
     count = getheaders_append_served_run(mp, node, it, &hdr, &body, &hash_stop,
                                          max_headers);

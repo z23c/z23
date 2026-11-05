@@ -102,6 +102,27 @@ struct block_index *getheaders_next_servable_successor(
     struct block_index *parent,
     struct block_header *hdr_out);
 
+/* The two steps of one reply, for this kind of peer (msg_getheaders_defer.c).
+ *
+ * getheaders_first_served_entry returns the entry the reply starts at and proves
+ * it into `hdr`, given the entry the locator selected. A legacy peer gets that
+ * entry or NULL. A NODE_ZCL23 peer gets the first servable entry after it too.
+ *
+ * getheaders_append_served_run serializes the run from there into `body` and
+ * returns its count. For a legacy peer the run ends at the first entry this node
+ * cannot serve, so its headers always link. */
+struct block_index *getheaders_first_served_entry(struct msg_processor *mp,
+                                                  const struct p2p_node *node,
+                                                  struct block_index *first,
+                                                  struct block_header *hdr);
+int getheaders_append_served_run(struct msg_processor *mp,
+                                 const struct p2p_node *node,
+                                 struct block_index *it,
+                                 struct block_header *hdr,
+                                 struct byte_stream *body,
+                                 const struct uint256 *hash_stop,
+                                 int max_headers);
+
 /* Bytes of Equihash solution the serve path is currently keeping pinned on
  * in-memory block_index entries. The serve path re-reads a missing solution
  * from the flat block file or the node.db row and memoises it so the next
