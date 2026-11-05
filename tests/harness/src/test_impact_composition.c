@@ -9504,8 +9504,8 @@ static bool ic_original_plan_fixture(const char *root, char local[65])
     static const char digest[] =
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     static const char makefile[] =
-        ".PHONY: dev-bin\ndev-bin:\n"
-        "\t@set -e; test ! -f build/fail; "
+        ".PHONY: dev-bin docs-proof-tools\ndev-bin:\n"
+        "\t@set -e; printf '%s\\n' make > build/make-ran; test ! -f build/fail; "
         "if test -f build/no-op; then exit 0; fi; "
         "if test -f build/change-source; then echo changed >> sample.c; fi; "
         "set -- $$(tools/dev/source-identity.sh capture-record); "
@@ -9516,10 +9516,14 @@ static bool ic_original_plan_fixture(const char *root, char local[65])
         "build/fixtures/rlc_child_%:\n"
         "\t@mkdir -p build/fixtures; printf '%s\\n' '$*' > $@\n"
         "build/fixtures/otlp_startup_probe:\n"
-        "\t@mkdir -p build/fixtures; printf '%s\\n' probe > $@\n";
+        "\t@mkdir -p build/fixtures; printf '%s\\n' probe > $@\n"
+        "docs-proof-tools: build/bin/z23-lint build/bin/z23-fleet-observe build/bin/gen_capability_inventory\n"
+        "build/bin/%:\n"
+        "\t@mkdir -p build/bin; printf '%s\\n' '$@' > $@; chmod 700 $@\n";
     if (!ic_write(root, ".gitignore", "build/\n.cache/\n") ||
         !ic_write(root, "sample.c", "int value = 1;\n") ||
         !ic_write(root, "Makefile", makefile) ||
+        !ic_write(root, "build/githooks/pre-push", "installed fixture hook\n") ||
         !ic_write(root, "tools/dev/source-identity.sh", "placeholder\n") ||
         !ic_write_build_plan(root, digest, digest, "-O1", NULL))
         return false;
@@ -9530,7 +9534,7 @@ static bool ic_original_plan_fixture(const char *root, char local[65])
         "cd '%s' && chmod 700 tools/dev/source-identity.sh && git init -q && "
         "git config user.name fixture && git config user.email fixture@invalid && "
         "git config commit.gpgsign false && git add -A && git commit -qm first && "
-        "make --no-print-directory dev-bin && "
+        "make --no-print-directory dev-bin docs-proof-tools && "
         "printf 'int value = 2;\\n' > sample.c && git add sample.c && "
         "git commit -qm second", root, root, root);
     if (n <= 0 || (size_t)n >= sizeof(cmd) || system(cmd) != 0) return false;
@@ -9633,6 +9637,36 @@ static int ic_preflight_cases(const char *root, char local[65], const char *log)
     return failures;
 }
 
+static int ic_preflight_missing_hooks(const char *root, const char *local, const char *log)
+{
+    int failures = 0;
+    char hooks[4096], saved[4096], marker[4096], why[512] = {0};
+    bool moved = false;
+    TEST("proof preflight: missing installed hooks refuse before original Make") {
+        ASSERT(snprintf(hooks, sizeof(hooks), "%s/build/githooks", root) < (int)sizeof(hooks));
+        ASSERT(snprintf(saved, sizeof(saved), "%s/build/saved-githooks", root) < (int)sizeof(saved));
+        ASSERT(snprintf(marker, sizeof(marker), "%s/build/make-ran", root) < (int)sizeof(marker));
+        ASSERT(unlink(marker) == 0);
+        ASSERT(rename(hooks, saved) == 0); moved = true;
+        struct dev_source_record source = {0};
+        bool captured = zcl_dev_source_identity_capture(root, &source, why, sizeof(why));
+        bool accepted = captured && ic_preflight_timed(root, local, source.source_id, log, why, sizeof(why));
+        bool make_absent = access(marker, F_OK) != 0 && errno == ENOENT;
+        bool log_absent = access(log, F_OK) != 0 && errno == ENOENT;
+        bool restored = rename(saved, hooks) == 0;
+        moved = !restored;
+        fprintf(stderr, "[missing-hooks-fixture] captured=%d accepted=%d make_absent=%d log_absent=%d reason=%s\n",
+            captured, accepted, make_absent, log_absent, why);
+        ASSERT(captured && restored);
+        ASSERT(!accepted);
+        ASSERT_STR_EQ(why, "proof_generation_dependency_unavailable:build/githooks (make install-hooks)");
+        ASSERT(make_absent && log_absent);
+        PASS();
+    } _test_next:;
+    if (moved && rename(saved, hooks) != 0) failures++;
+    return failures;
+}
+
 #if defined(__linux__)
 static bool ic_original_plan_recovers_fixtures(
     const char *root, const char *local, const char *log)
@@ -9643,6 +9677,9 @@ static bool ic_original_plan_recovers_fixtures(
         "build/fixtures/rlc_child_v1",
         "build/fixtures/rlc_child_broken",
         "build/fixtures/otlp_startup_probe",
+        "build/bin/z23-lint",
+        "build/bin/z23-fleet-observe",
+        "build/bin/gen_capability_inventory",
     };
     const size_t fixture_count = sizeof(fixtures) / sizeof(fixtures[0]);
     char path[4096], generation[4096], why[512];
@@ -9661,8 +9698,10 @@ static bool ic_original_plan_recovers_fixtures(
             root, local, log, why, sizeof(why))) return false;
     for (size_t i = 0; i < fixture_count; i++) {
         if (!zcl_dev_proof_test_generation_dependency(
-                root, generation, fixtures[i], why, sizeof(why)))
+                root, generation, fixtures[i], why, sizeof(why))) {
+            fprintf(stderr, "[cold-proof-input] dependency=%s refused=%s\n", fixtures[i], why);
             return false;
+        }
     }
     return true;
 }
@@ -9780,6 +9819,7 @@ static int test_pw_original_plan_refreshes_before_sealing(void)
         ASSERT(snprintf(log, sizeof(log), "%s/build/prepare.log", root) <
                (int)sizeof(log));
         ASSERT(ic_preflight_cases(root, local, log) == 0);
+        failures += ic_preflight_missing_hooks(root, local, log);
         ASSERT(ic_worktree_root_diagnostics(root, local) == 0);
         ASSERT(ic_worktree_status_saturation(root, local) == 0);
         /* A successful no-op cannot claim that the old commit's plan is

@@ -7032,16 +7032,50 @@ static bool dp_generation_optional_absent(const char *target,
     return false;
 }
 
+static bool dp_generation_dependency_missing(const char *dependency,
+                                             char *why, size_t why_len)
+{
+    /* Checker binaries for the sealed generated-docs gate come from
+     * the submitting checkout's own build, named as the exact make
+     * target that produces them. */
+    char make_target[512] = {0};
+    bool make_target_ok =
+        snprintf(make_target, sizeof(make_target), "make %s",
+                 dependency) < (int)sizeof(make_target);
+    /* vendor/ entries come from the vendored-archive build; the
+     * installed hooks come from arming the clone; the hotswap
+     * fixture images come from any test-binary build. Naming the
+     * target turns a class into one command the reader can run. */
+    const char *fix = strncmp(dependency, "vendor/", 7) == 0
+                          ? "make vendor"
+                          : strncmp(dependency, "build/hotswap/", 14) == 0
+                                ? "make build/hotswap/zcl_rollback_fixture_a.so "
+                                  "build/hotswap/zcl_rollback_fixture_b.so"
+                                : strncmp(dependency, "build/fixtures/", 15) == 0
+                                    ? "make build/fixtures/rlc_child_v1 "
+                                      "build/fixtures/rlc_child_broken "
+                                      "build/fixtures/otlp_startup_probe"
+                                    : strncmp(dependency, "build/bin/", 10) == 0 &&
+                                          make_target_ok
+                                        ? make_target
+                                        : "make install-hooks";
+    proof_whyf(why, why_len,
+               "proof_generation_dependency_unavailable:%s (%s)",
+               dependency, fix);
+    return false;
+}
+
 /* One generation dependency, copied in with its own inode. */
 static bool dp_generation_dependency(const char *root, const char *generation,
                                      const char *dependency, char *why,
                                      size_t why_len)
 {
+    /* A NULL generation checks source availability without copying or arming it. */
     char source[PATH_MAX], target[PATH_MAX];
     if (snprintf(source, sizeof(source), "%s/%s", root,
                  dependency) >= (int)sizeof(source) ||
-        snprintf(target, sizeof(target), "%s/%s", generation,
-                 dependency) >= (int)sizeof(target)) {
+        (generation && snprintf(target, sizeof(target), "%s/%s", generation,
+                 dependency) >= (int)sizeof(target))) {
         proof_whyf(why, why_len,
                    "proof_generation_dependency_path_too_long:%s",
                    dependency);
@@ -7056,40 +7090,11 @@ static bool dp_generation_dependency(const char *root, const char *generation,
             return false;
         }
         if (dp_generation_dependency_optional(dependency))
-            return dp_generation_optional_absent(target, dependency, why,
-                                                  why_len);
-        /* Checker binaries for the sealed generated-docs gate come from
-         * the submitting checkout's own build, named as the exact make
-         * target that produces them. */
-        char make_target[512] = {0};
-        bool make_target_ok =
-            snprintf(make_target, sizeof(make_target), "make %s",
-                     dependency) < (int)sizeof(make_target);
-        /* vendor/ entries come from the vendored-archive build; the
-         * installed hooks come from arming the clone; the hotswap
-         * fixture images come from any test-binary build. Naming the
-         * target turns a class into one command the reader can run. */
-        const char *fix = strncmp(dependency, "vendor/", 7) == 0
-                              ? "make vendor"
-                              : strncmp(dependency, "build/hotswap/",
-                                        14) == 0
-                                    ? "make build/hotswap/zcl_rollback_fixture_a.so "
-                                      "build/hotswap/zcl_rollback_fixture_b.so"
-                                    : strncmp(dependency, "build/fixtures/",
-                                              15) == 0
-                                        ? "make build/fixtures/rlc_child_v1 "
-                                          "build/fixtures/rlc_child_broken "
-                                          "build/fixtures/otlp_startup_probe"
-                                        : strncmp(dependency, "build/bin/",
-                                                  10) == 0 &&
-                                              make_target_ok
-                                            ? make_target
-                                            : "make install-hooks";
-        proof_whyf(why, why_len,
-                   "proof_generation_dependency_unavailable:%s (%s)",
-                   dependency, fix);
-        return false;
+            return !generation || dp_generation_optional_absent(
+                target, dependency, why, why_len);
+        return dp_generation_dependency_missing(dependency, why, why_len);
     }
+    if (!generation) return true;
     /* The source is right there. Telling the reader to rebuild it sent
      * ten proof attempts hunting a vendored archive that was present all
      * along; say what actually failed and why. */
@@ -13090,7 +13095,7 @@ static bool proof_original_plan_prepare(const struct proof_paths *paths,
         return false;
     }
     const char *argv[] = {
-        "make", "--no-print-directory", jobs, "dev-bin",
+        "make", "--no-print-directory", jobs, "dev-bin", "docs-proof-tools",
 #if defined(__linux__)
         "build/hotswap/zcl_rollback_fixture_a.so",
         "build/hotswap/zcl_rollback_fixture_b.so",
@@ -13157,6 +13162,8 @@ static bool proof_preflight_prepare(const struct proof_paths *paths,
                                                 producer_source, why, why_len))
         return false;
     dp_stage_timing_note(paths, "original_source_preflight_ms", started);
+    if (!dp_generation_dependency(root, NULL, "build/githooks", why, why_len))
+        return false;
     return proof_original_plan_prepare(paths, root, local, log_path, why, why_len);
 }
 
