@@ -629,7 +629,7 @@ static int admit_limit_case(const char *path,uint8_t pin[32],const double *field
 
 static int admit_file_cases(void)
 {
- char path[512];int fd=test_mkstemp(path,sizeof path,"expr_admit");
+ char path[PATH_MAX];int fd=test_mkstemp(path,sizeof path,"expr_admit");
  if(fd<0){perror("admit fixture create");return 1;}
  if(close(fd)){perror("admit fixture close");unlink(path);return 1;}
  uint8_t b[EXPR_MAX_BYTES+1]={0},pin[32];double fields[XF_COUNT]={0};fields[XF_SHIELD]=1;
@@ -723,7 +723,7 @@ static int use_option_cases(void)
 }
 static int use_file_cases(void)
 {
- char path[512];int fd=test_mkstemp(path,sizeof path,"use_hud");if(fd<0)return 1;
+ char path[PATH_MAX];int fd=test_mkstemp(path,sizeof path,"use_hud");if(fd<0)return 1;
  if(close(fd)){unlink(path);return 1;}
  uint8_t b[2048]={0},pin[32];size_t n=draw_fixture(b,3,1);
  if(!admit_fixture_write(path,b,n,pin)){unlink(path);return 1;}
@@ -743,7 +743,7 @@ static int use_file_cases(void)
 
 static int use_box_case(void)
 {
- char path[512];int fd=test_mkstemp(path,sizeof path,"use_box");if(fd<0)return 1;
+ char path[PATH_MAX];int fd=test_mkstemp(path,sizeof path,"use_box");if(fd<0)return 1;
  if(close(fd)){unlink(path);return 1;}
  uint8_t b[2048]={0},pin[32];size_t n=draw_fixture(b,4,1);
  zcl_write_u32_le(b+32+16*6+8,0x11223344);
@@ -758,7 +758,7 @@ static int use_box_case(void)
 
 static int use_refusal_cases(void)
 {
- char path[512];int fd=test_mkstemp(path,sizeof path,"use_refusal");if(fd<0)return 1;
+ char path[PATH_MAX];int fd=test_mkstemp(path,sizeof path,"use_refusal");if(fd<0)return 1;
  if(close(fd)){unlink(path);return 1;}
  int failures=0;uint8_t b[2048]={0},pin[32];
  for(unsigned mode=0;mode<5;mode++) {
@@ -946,7 +946,7 @@ static int reload_fresh_fields(const struct sky_expr_option *option,struct sky_e
 
 static int reload_cases(void)
 {
- char path[512],pin_path[512];int fd=test_mkstemp(path,sizeof path,"reload_part");if(fd<0)return 1;
+ char path[PATH_MAX],pin_path[PATH_MAX];int fd=test_mkstemp(path,sizeof path,"reload_part");if(fd<0)return 1;
  if(close(fd)){unlink(path);return 1;}fd=test_mkstemp(pin_path,sizeof pin_path,"reload_pin");
  if(fd<0){unlink(path);return 1;}if(close(fd)){unlink(path);unlink(pin_path);return 1;}
  uint8_t bytes[2048]={0},pin[32];double fields[XF_COUNT]={0};fields[XF_SHIELD]=1;
@@ -1000,7 +1000,7 @@ static int toggle_recipe_cases(void)
 }
 static int toggle_file_cases(void)
 {
- char path[512],pin_path[512];int fd=test_mkstemp(path,sizeof path,"toggle_part");if(fd<0)return 1;
+ char path[PATH_MAX],pin_path[PATH_MAX];int fd=test_mkstemp(path,sizeof path,"toggle_part");if(fd<0)return 1;
  if(close(fd)){unlink(path);return 1;}fd=test_mkstemp(pin_path,sizeof pin_path,"toggle_pin");
  if(fd<0){unlink(path);return 1;}if(close(fd)){unlink(path);unlink(pin_path);return 1;}
  uint8_t bytes[2048]={0},pin[32];double fields[XF_COUNT]={0};fields[XF_SHIELD]=1;

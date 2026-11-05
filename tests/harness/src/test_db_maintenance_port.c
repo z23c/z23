@@ -91,7 +91,7 @@ static int64_t wal_file_size(const char *db_path)
 static int t_wal_size_commits(void)
 {
     int failures = 0;
-    char path[256];
+    char path[PATH_MAX];
     sqlite3 *db = NULL;
     bool ready = make_file_db(&db, path, sizeof path);
     DBMP_CHECK("file db builds (walsize)", ready);
@@ -294,7 +294,7 @@ cleanup:
 static int dbmp_refusal_fixture(const char *vfs_name)
 {
     int failures = 0;
-    char path[1024];
+    char path[PATH_MAX];
     int fd = test_mkstemp(path, sizeof path, "zcl_dbmp_refusal");
     DBMP_CHECK("checkpoint fixture path created", fd >= 0);
     if (fd < 0) return failures;
@@ -498,7 +498,7 @@ int test_db_maintenance_port(void)
 
     /* ---- each op succeeds on a real WAL-mode file DB ---- */
     {
-        char path[256];
+        char path[PATH_MAX];
         sqlite3 *db = NULL;
         DBMP_CHECK("file db builds", make_file_db(&db, path, sizeof path));
 

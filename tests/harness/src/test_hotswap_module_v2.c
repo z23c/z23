@@ -370,7 +370,7 @@ static int t_macho_probe_fat_slice_fixups(void)
     TEST("Mach-O probe on a fat file resolves fixups inside the arm64 slice") {
         static uint8_t file[MT_FAT_SLICE_OFF + MT_FAT_SLICE_LEN];
         static struct hotswap_macho_facts f;
-        char err_bad[256] = "", err_good[256] = "", path[64] = "";
+        char err_bad[256] = "", err_good[256] = "", path[PATH_MAX] = "";
         const char *const bad[] = { "_memcpy", "_zcl_forbidden_runtime_import" };
         const char *const good[] = { "_memcpy", "_json_push_kv_str" };
         mt_fat_file(file, bad, 2);
@@ -1127,9 +1127,9 @@ static void elf_fixture(unsigned char image[4096], bool with_init,
     }
 }
 
-static int fixture_fd(const unsigned char image[4096], char path[64])
+static int fixture_fd(const unsigned char image[4096], char path[PATH_MAX])
 {
-    snprintf(path, 64, "/tmp/z23-hotswap-elf-XXXXXX");
+    snprintf(path, PATH_MAX, "/tmp/z23-hotswap-elf-XXXXXX");
     int fd = mkstemp(path);
     if (fd < 0)
         return -1;
@@ -1199,7 +1199,7 @@ static int t_elf_probe_rejects_deception(void)
     int failures = 0;
     TEST("ELF probe rejects pointer deception and duplicate identity") {
         unsigned char image[4096];
-        char path[64], err[256];
+        char path[PATH_MAX], err[256];
         struct hotswap_elf_facts facts;
         elf_fixture(image, false, false);
         int fd = fixture_fd(image, path);
@@ -1297,7 +1297,7 @@ static int t_elf_probe_refusal_order_and_bounds(void)
     TEST("ELF probe preserves first refusal and bounds") {
         for (size_t row = 0; row < sizeof(expected) / sizeof(expected[0]); row++) {
             unsigned char image[4096];
-            char path[64], err[256];
+            char path[PATH_MAX], err[256];
             struct hotswap_elf_facts facts, zero;
             memset(&zero, 0, sizeof(zero));
             elf_fixture(image, false, false);
@@ -1330,7 +1330,7 @@ static int t_sealed_image_is_bounded(void)
 {
     int failures = 0;
     TEST("sealed image rejects oversize before copying") {
-        char path[256];
+        char path[PATH_MAX];
         char err[256];
         int fd = test_mkstemp(path, sizeof(path), "z23-hotswap-seal");
         ASSERT(fd >= 0);
@@ -1657,7 +1657,7 @@ static int t_pure_hotfork_refuses_generic_module(void)
         char err[256];
 #if defined(__linux__)
         unsigned char image[4096];
-        char path[64];
+        char path[PATH_MAX];
         elf_fixture(image, false, false);
         int fd = fixture_fd(image, path);
         ASSERT(fd >= 0);

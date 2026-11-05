@@ -789,12 +789,12 @@ static int seed_close(FILE *f)
     const int rc = fclose(f);
     return seed_fault == 4 ? (errno = EIO, EOF) : rc;
 }
-static bool fetch_seed(const void *bytes, size_t len, char path[512])
+static bool fetch_seed(const void *bytes, size_t len, char path[PATH_MAX])
 {
     path[0] = '\0';
     seed_message[0] = '\0';
     const int fd = seed_fault == 1 ? (errno = ENOSPC, -1)
-                                 : test_mkstemp(path, 512, "front_door_fetch");
+                                 : test_mkstemp(path, PATH_MAX, "front_door_fetch");
     seed_fd = fd;
     if (fd < 0) {
         seed_report("create", "front_door_fetch temporary-file template", errno,
@@ -830,7 +830,7 @@ static int case_seed_failure(int fault)
     const char *repairs[] = {"", "free fixture storage", "close excess descriptors",
                             "free fixture storage", "check writable temporary directory"};
     const int errors[] = {0, ENOSPC, EMFILE, ENOSPC, EIO};
-    char path[512];
+    char path[PATH_MAX];
     seed_fault = fault;
     seed_capture = true;
     const bool seeded = fetch_seed("pin", 3, path);
@@ -850,7 +850,7 @@ static int case_seed_failure(int fault)
 static int case_seed_success(void)
 {
     int failures = 0;
-    char path[512], bytes[4] = {0};
+    char path[PATH_MAX], bytes[4] = {0};
     const bool seeded = fetch_seed("pin", 3, path);
     FD_CHECK("successful seed has no diagnostic", seeded && seed_message[0] == '\0');
     if (!seeded) return failures;
@@ -885,7 +885,7 @@ static int case_repo_bytes(bool embedded_nul)
     memcpy(bytes, k_pin_a, sizeof k_pin_a);
     memcpy(bytes + sizeof k_pin_a, "broken", 6);
     const size_t len = embedded_nul ? sizeof bytes : sizeof k_pin_a - 1;
-    char path[512], url[520];
+    char path[PATH_MAX], url[PATH_MAX + 8];
     const bool seeded = fetch_seed(bytes, len, path);
     FD_CHECK("repository byte fixture created", seeded);
     if (!seeded) return failures;
@@ -914,7 +914,7 @@ static int case_fetch_errors(void)
     (void)fetch_fixture_main;
     for (int fault = 1; fault <= 4; ++fault) failures += case_seed_failure(fault);
     failures += case_seed_success();
-    char path[512], url[520];
+    char path[PATH_MAX], url[PATH_MAX + 8];
     const bool seeded = fetch_seed("pin", 3, path);
     FD_CHECK("local read/close fixture created", seeded);
     if (!seeded) return failures;

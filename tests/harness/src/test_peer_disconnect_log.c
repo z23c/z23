@@ -41,7 +41,7 @@ static bool capture_close_line(const struct p2p_node *node, const char *event,
     if (!out || cap == 0) return false;
     out[0] = '\0';
 
-    char path[512];
+    char path[PATH_MAX];
     int tmp_fd = test_mkstemp(path, sizeof(path), "zcl_peer_close");
     if (tmp_fd < 0) return false;
 

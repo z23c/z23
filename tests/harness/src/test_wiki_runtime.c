@@ -341,7 +341,7 @@ static int wrt_regular_files(void)
     int failures = 0;
     TEST_CASE("wiki runtime bounded opened-file refuses FIFO device symlink")
 #ifndef _WIN32
-    char path[768], bytes[8]; size_t n = 0;
+    char path[PATH_MAX], bytes[8]; size_t n = 0;
     int fd = test_mkstemp(path, sizeof(path), "wiki-runtime");
     ASSERT(fd >= 0);
     ASSERT(write(fd, "test", 4) == 4); ASSERT(close(fd) == 0);

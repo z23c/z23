@@ -110,7 +110,7 @@ int test_zslp_store_port(void)
 
         /* A datadir that is actually a regular file makes "<dir>/node.db"
          * unopenable. */
-        char f[256];
+        char f[PATH_MAX];
         int fd = test_mkstemp(f, sizeof f, "zcl_zss_file");
         if (fd >= 0) close(fd);
 

@@ -170,7 +170,7 @@ static bool check_receipt_content(void)
 
 static bool check_terminal_receipt_writer(void)
 {
-    char path[512];
+    char path[PATH_MAX];
     int fd = test_mkstemp(path, sizeof(path), "zcl_swrcpt");
     bool ok = fd >= 0;
     if (ok) {

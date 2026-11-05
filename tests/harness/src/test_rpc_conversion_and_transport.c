@@ -911,8 +911,8 @@ int check_rpc_tls_start_self_signed(void)
     printf("rpc TLS start with self-signed cert... ");
     {
         /* Generate a self-signed cert+key in temp files */
-        char cert_path[512];
-        char key_path[512];
+        char cert_path[PATH_MAX];
+        char key_path[PATH_MAX];
         int cfd = test_mkstemp(cert_path, sizeof(cert_path), "zcl_test_cert");
         int kfd = test_mkstemp(key_path, sizeof(key_path), "zcl_test_key");
         bool ok = false;

@@ -133,7 +133,7 @@ int test_node_health_store_port(void)
 
     /* ---- wal_size_bytes: file-backed DB in WAL mode -> true ---- */
     {
-        char tmpl[512];
+        char tmpl[PATH_MAX];
         int fd = test_mkstemp(tmpl, sizeof(tmpl), "zcl_nhs_test");
         if (fd >= 0) close(fd);
         unlink(tmpl);   /* let sqlite create it fresh */
