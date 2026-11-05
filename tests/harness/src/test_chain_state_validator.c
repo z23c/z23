@@ -652,7 +652,7 @@ static enum boot_recovery_action csv_tall_tip(int tip_h, struct csv_ev *ev,
         arith_uint256_set_u64(&tip->nChainWork, (uint64_t)tip_h + 1);
         active_chain_move_window_tip(&ms.chain_active, tip);
         memset(&g_csv_fail, 0, sizeof(g_csv_fail));
-        *r = validate_coins_chain_agreement(&ms, &cache, "/tmp");
+        *r = validate_coins_chain_agreement(&ms, &cache, "/nonexistent");
         a = r->action;
         *ev = g_csv_fail;
     }
