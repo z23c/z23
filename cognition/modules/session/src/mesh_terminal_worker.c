@@ -516,7 +516,12 @@ static struct zcl_result mesh_terminal_worker_input_platform_arm(struct mesh_ter
         if (wr < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             /* The shell is not draining: bounded wait, then hand the
              * decision back to the caller — a stalled shell is the
-             * lifetime/idle enforcement's kill, not a write error. */
+             * lifetime/idle enforcement's kill, not a write error. A
+             * caller that holds a shared lock asked for no wait at all. */
+            if (w->input_nowait)
+                return ZCL_ERR(MESH_TERMINAL_WORKER_ERR_IO,
+                               "pty input stalled (wrote %zu/%zu)",
+                               total, n);
             struct pollfd pfd = { .fd = w->master_fd, .events = POLLOUT };
             int pr = poll(&pfd, 1, 1000);
             if (pr > 0)

@@ -132,6 +132,22 @@ static bool terminal_open_seen_recent(const struct mesh_terminal_seen_open *seen
            now_mono_ms - seen->seen_mono_ms < UINT64_C(1000);
 }
 
+static bool terminal_open_seen_same_peer(
+    const struct mesh_terminal_seen_open *seen,
+    const struct noise_transport_snapshot *session)
+{
+    return memcmp(seen->remote_static, session->remote_static, 32) == 0;
+}
+
+static bool terminal_open_seen_same_session(
+    const struct mesh_terminal_seen_open *seen,
+    const struct noise_transport_snapshot *session)
+{
+    return seen->connection_generation == session->connection_generation &&
+           terminal_open_seen_same_peer(seen, session) &&
+           memcmp(seen->transcript_hash, session->transcript_hash, 32) == 0;
+}
+
 /* Application replay/rate gate for OPEN frames. Noise record counters stop
  * ciphertext replay, but an authenticated requester can still resend a
  * decoded open in a new record, and every OPEN that survives to the spawn
@@ -149,6 +165,7 @@ static bool terminal_open_admit(const struct mesh_terminal_open_v1 *open,
     }
     struct mesh_terminal_seen_open *slot = NULL;
     size_t recent = 0;
+    size_t peer_held = 0;
     for (size_t i = 0; i < MESH_TERMINAL_OPEN_ADMIT_MAX; i++) {
         struct mesh_terminal_seen_open *seen = &g_seen_opens[i];
         if (terminal_open_seen_stale(seen, now_mono_ms))
@@ -158,11 +175,9 @@ static bool terminal_open_admit(const struct mesh_terminal_open_v1 *open,
                 slot = seen;
             continue;
         }
-        bool same_session =
-            seen->connection_generation == session->connection_generation &&
-            memcmp(seen->remote_static, session->remote_static, 32) == 0 &&
-            memcmp(seen->transcript_hash, session->transcript_hash, 32) == 0;
-        if (!same_session)
+        if (terminal_open_seen_same_peer(seen, session))
+            peer_held++;
+        if (!terminal_open_seen_same_session(seen, session))
             continue;
         if (memcmp(seen->terminal_id, open->terminal_id, 32) == 0) {
             atomic_fetch_add(&g_term_opens_replayed, 1);
@@ -171,7 +186,11 @@ static bool terminal_open_admit(const struct mesh_terminal_open_v1 *open,
         if (terminal_open_seen_recent(seen, now_mono_ms))
             recent++;
     }
-    if (!slot || recent >= MESH_TERMINAL_OPEN_RATE_PER_SECOND) {
+    /* A slot is held for the whole admit window whether or not the open
+     * is later refused, so one peer's share is bounded: the others keep
+     * theirs. Replays were refused above and are unaffected. */
+    if (!slot || recent >= MESH_TERMINAL_OPEN_RATE_PER_SECOND ||
+        peer_held >= MESH_TERMINAL_OPEN_ADMIT_PER_PEER) {
         atomic_fetch_add(&g_term_opens_rate_limited, 1);
         return false;
     }
@@ -937,6 +956,9 @@ static enum mesh_terminal_receipt_status terminal_spawn_worker(
     cfg.max_bytes_out = boot_mesh_terminal_max_bytes_out();
     cfg.lifetime_seconds = MESH_TERMINAL_SERVICE_LIFETIME_SECONDS;
     cfg.idle_seconds = MESH_TERMINAL_SERVICE_IDLE_SECONDS;
+    /* Keyboard bytes are written under the stream lane lock: never wait
+     * there for a shell that is not reading. */
+    cfg.input_nowait = true;
     struct zcl_result r = mesh_terminal_worker_spawn(&cfg, (int64_t)now, worker);
     if (!r.ok) {
         LOG_ERROR("net.mesh_terminal",
@@ -1072,9 +1094,16 @@ static void terminal_receive_data(struct mesh_stream *st,
     else if (r.code == MESH_TERMINAL_WORKER_ERR_BYTE_LIMIT)
         LOG_WARN("net.mesh_terminal",
                  "keyboard budget overrun ended a terminal session");
-    /* Other failures (NOT_RUNNING, IO) are handled by the drain's
-     * enforcement pass; the frame is dropped by not advancing seq_in. */
-    (void)st;
+    else if (r.code == MESH_TERMINAL_WORKER_ERR_IO) {
+        /* The shell is not taking input and the write never waits, so the
+         * session ends rather than silently losing keystrokes. */
+        LOG_WARN("net.mesh_terminal",
+                 "terminal input stalled: ending the session");
+        s->worker.close_reason = MESH_TERMINAL_CLOSE_SESSION_LOST;
+        terminal_end_session(st, s, (uint64_t)platform_time_wall_time_t());
+    }
+    /* NOT_RUNNING is handled by the drain's enforcement pass; the frame is
+     * dropped by not advancing seq_in. */
 }
 
 static void terminal_receive_resize(struct mesh_terminal_session *s,

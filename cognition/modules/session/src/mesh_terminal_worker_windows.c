@@ -808,12 +808,13 @@ enum tw_win_write_outcome {
     TW_WIN_WRITE_FAILED
 };
 
-/* One overlapped write bounded by MESH_TERMINAL_WIN_WRITE_WAIT_MS. A write
+/* One overlapped write bounded by wait_ms (zero: no wait). A write
  * still pending at the deadline is cancelled and reports STALLED together
  * with however many bytes the pipe did take; the caller decides, and the
  * session's lifetime/idle enforcement owns any kill. */
 static enum tw_win_write_outcome tw_win_write_bounded(
-    HANDLE pipe, const uint8_t *bytes, size_t n, DWORD *wrote, DWORD *error)
+    HANDLE pipe, const uint8_t *bytes, size_t n, DWORD wait_ms, DWORD *wrote,
+    DWORD *error)
 {
     *wrote = 0;
     *error = 0;
@@ -830,8 +831,7 @@ static enum tw_win_write_outcome tw_win_write_bounded(
         *error = GetLastError();
         outcome = TW_WIN_WRITE_FAILED;
     } else {
-        if (WaitForSingleObject(op.hEvent, MESH_TERMINAL_WIN_WRITE_WAIT_MS) !=
-            WAIT_OBJECT_0) {
+        if (WaitForSingleObject(op.hEvent, wait_ms) != WAIT_OBJECT_0) {
             (void)CancelIoEx(pipe, &op);
             outcome = TW_WIN_WRITE_STALLED;
         }
@@ -875,7 +875,8 @@ struct zcl_result mesh_terminal_worker_input_platform_arm(struct mesh_terminal_w
     while (total < n) {
         DWORD wrote = 0, error = 0;
         enum tw_win_write_outcome outcome = tw_win_write_bounded(
-            (HANDLE)w->win_input_write, bytes + total, n - total, &wrote,
+            (HANDLE)w->win_input_write, bytes + total, n - total,
+            w->input_nowait ? 0u : MESH_TERMINAL_WIN_WRITE_WAIT_MS, &wrote,
             &error);
         total += wrote;
         w->bytes_in += wrote;
