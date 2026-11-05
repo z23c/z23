@@ -389,6 +389,7 @@ static struct zcl_result mesh_terminal_worker_spawn_platform_arm(
     out->max_bytes_out = cfg->max_bytes_out;
     out->lifetime_seconds = cfg->lifetime_seconds;
     out->idle_seconds = cfg->idle_seconds;
+    out->input_nowait = cfg->input_nowait;
     out->close_reason = MESH_TERMINAL_CLOSE_REQUESTED;
 
     char slave_path[128];

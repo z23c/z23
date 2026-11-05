@@ -27,6 +27,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define TERM_WIRE_NOW 2500
 
@@ -599,6 +600,85 @@ int test_boot_mesh_terminal(void)
                    MESH_TERMINAL_WORKER_IO_CHUNK <= 65536u);
         ASSERT_EQ(MESH_TERMINAL_CLIENT_OUTPUT_MAX, (size_t)65536);
         ASSERT_EQ(MESH_TERMINAL_SESSIONS_MAX, 4u);
+        PASS();
+    }
+
+    TEST("boot mesh terminal: an open whose requester master is not the "
+         "delegation's master is refused before any spawn") {
+        uint8_t pairing_id[32];
+        ASSERT(zcl_hex_decode_lower(f.term_peer.pairing.pairing_id,
+                                    pairing_id, 32));
+        struct mesh_terminal_open_v1 open;
+        mesh_term_compose_open(&f, &f.term_peer, pairing_id,
+                               TERM_WIRE_NOW - 10, TERM_WIRE_NOW + 20,
+                               MESH_TERMINAL_CAP_TERMINAL_EXEC, &open);
+        uint64_t rg = 0;
+        ASSERT_EQ(boot_mesh_terminal_decide(&f.ndb, &open,
+                                            &f.term_peer.res_snap,
+                                            &f.term_peer.delegation, 1,
+                                            f.genesis, TERM_WIRE_NOW, &rg),
+                  MESH_TERMINAL_RECEIPT_OK);
+        /* The authority that later ticks re-check is keyed by the open's
+         * master, so it must be the master that authorized the open. */
+        mesh_term_fill32(open.requester_master_pubkey, 0xAB);
+        ASSERT_EQ(boot_mesh_terminal_decide(&f.ndb, &open,
+                                            &f.term_peer.res_snap,
+                                            &f.term_peer.delegation, 1,
+                                            f.genesis, TERM_WIRE_NOW, &rg),
+                  MESH_TERMINAL_RECEIPT_SESSION_MISMATCH);
+        ASSERT_EQ(rg, UINT64_C(0));
+        PASS();
+    }
+
+    TEST("boot mesh terminal: a terminal id already holding a working "
+         "directory cannot open a second one") {
+        const char *datadir = dir;
+        struct mesh_terminal_open_v1 open;
+        memset(&open, 0, sizeof(open));
+        mesh_term_fill32(open.terminal_id, 0x31);
+        char first[600], second[600];
+        ASSERT(boot_mesh_terminal_test_workdir(datadir, &open, first,
+                                               sizeof(first)));
+        ASSERT(!boot_mesh_terminal_test_workdir(datadir, &open, second,
+                                                sizeof(second)));
+        /* The refused attempt left the first session's directory alone. */
+        struct stat sb;
+        ASSERT(stat(first, &sb) == 0 && S_ISDIR(sb.st_mode));
+        ASSERT(test_rm_rf_recursive(first) == 0);
+        ASSERT(boot_mesh_terminal_test_workdir(datadir, &open, second,
+                                               sizeof(second)));
+        PASS();
+    }
+
+    TEST("boot mesh terminal: one peer cannot use up every replay slot") {
+        struct mesh_terminal_open_v1 open;
+        uint8_t pairing_id[32];
+        ASSERT(zcl_hex_decode_lower(f.term_peer.pairing.pairing_id,
+                                    pairing_id, 32));
+        mesh_term_compose_open(&f, &f.term_peer, pairing_id,
+                               TERM_WIRE_NOW - 10, TERM_WIRE_NOW + 20,
+                               MESH_TERMINAL_CAP_TERMINAL_EXEC, &open);
+        struct noise_transport_snapshot greedy = f.term_peer.res_snap;
+        greedy.connection_generation += 100;
+        greedy.transcript_hash[1] ^= 0x7E;
+        greedy.remote_static[3] ^= 0x7E;
+        unsigned held = 0;
+        for (unsigned i = 0; i < MESH_TERMINAL_OPEN_ADMIT_MAX; i++) {
+            mesh_term_fill32(open.terminal_id, (uint8_t)(0x80 + i));
+            if (boot_mesh_terminal_test_open_admit(&open, &greedy,
+                                                   500000 + 900u * i))
+                held++;
+        }
+        ASSERT_EQ(held, MESH_TERMINAL_OPEN_ADMIT_PER_PEER);
+        /* Another peer is still served inside the same admit window. */
+        mesh_term_fill32(open.terminal_id, 0x7F);
+        ASSERT(boot_mesh_terminal_test_open_admit(
+            &open, &f.term_peer.res_snap,
+            500000 + 900u * MESH_TERMINAL_OPEN_ADMIT_MAX));
+        /* Replays stay refused for the slots the greedy peer holds. */
+        mesh_term_fill32(open.terminal_id, 0x80);
+        ASSERT(!boot_mesh_terminal_test_open_admit(
+            &open, &greedy, 500000 + 900u * MESH_TERMINAL_OPEN_ADMIT_MAX));
         PASS();
     }
 

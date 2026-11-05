@@ -854,6 +854,15 @@ static bool terminal_workdir(const char *datadir,
     return true;
 }
 
+#ifdef ZCL_TESTING
+bool boot_mesh_terminal_test_workdir(const char *datadir,
+                                     const struct mesh_terminal_open_v1 *open,
+                                     char *out, size_t out_cap)
+{
+    return terminal_workdir(datadir, open, out, out_cap);
+}
+#endif
+
 /* Compose one signed receipt into the reply buffer the primitive gave us.
  * An OK reply becomes the stream's first DATA; a refusal reply rides the
  * CLOSE, so a refused open still carries this node's named, signed

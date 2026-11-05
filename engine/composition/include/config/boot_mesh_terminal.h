@@ -107,6 +107,9 @@ struct vcs_zcode_dht_delegation;
 #define MESH_TERMINAL_RECEIPT_VALIDITY_SECONDS 30u
 #define MESH_TERMINAL_OPEN_ADMIT_MAX 32u
 #define MESH_TERMINAL_OPEN_ADMIT_MS UINT64_C(30000)
+/* Replay slots one peer identity may hold at once, so one peer cannot use
+ * up the shared table and starve every other peer's OPEN. */
+#define MESH_TERMINAL_OPEN_ADMIT_PER_PEER 8u
 #define MESH_TERMINAL_OPEN_RATE_PER_SECOND 4u
 
 /* DATA messages the stream drain moves per live session per tick;
@@ -343,6 +346,10 @@ bool boot_mesh_terminal_client_resize(const uint8_t terminal_id[32],
 bool boot_mesh_terminal_client_close(const uint8_t terminal_id[32]);
 
 #ifdef ZCL_TESTING
+bool boot_mesh_terminal_test_workdir(const char *datadir,
+                                     const struct mesh_terminal_open_v1 *open,
+                                     char *out, size_t out_cap);
+
 bool boot_mesh_terminal_test_open_admit(
     const struct mesh_terminal_open_v1 *open,
     const struct noise_transport_snapshot *session, uint64_t now_mono_ms);

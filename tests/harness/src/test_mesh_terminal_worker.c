@@ -253,6 +253,31 @@ static int partial_input_effects(void)
     return failures;
 }
 
+/* A worker built for a caller that holds a shared lock never waits for a
+ * shell that is not reading: a full pty is an immediate IO refusal, with
+ * no poll at all. */
+static int nowait_input_effects(void)
+{
+    int failures = 0, fds[2];
+    if (pipe2(fds, O_NONBLOCK | O_CLOEXEC) != 0)
+        return check(failures, false, "nowait input pipe setup");
+    struct mesh_terminal_worker w = { .pid = 1, .pgid = 1,
+        .master_fd = fds[1], .running = true, .max_bytes_in = 64,
+        .last_activity_unix = 10, .input_nowait = true };
+    const uint8_t bytes[] = "abcdefgh";
+    partial_active = true;
+    partial_writes = partial_polls = 0;
+    struct zcl_result r = mesh_terminal_worker_input(&w, bytes, 8, 20);
+    failures = check(failures, !r.ok && r.code == MESH_TERMINAL_WORKER_ERR_IO,
+                     "nowait input reports the stall as IO");
+    failures = check(failures, partial_polls == 0 && w.bytes_in == 3,
+                     "nowait input never waits and charges the prefix");
+    mesh_terminal_worker_kill(&w);
+    partial_active = false;
+    close(fds[0]);
+    return failures;
+}
+
 /* Drain worker output into a rolling buffer until `needle` appears or the
  * deadline passes. Returns true when found. `err` (optional) captures a
  * terminal worker error (BYTE_LIMIT ends the output-budget case with the
@@ -1735,6 +1760,7 @@ int test_mesh_terminal_worker(void)
     failures += test_mesh_terminal_shell_path_table();
 #if defined(__linux__)
     failures += partial_input_effects();
+    failures += nowait_input_effects();
     failures += test_mesh_terminal_pidns_refusal_text();
     failures += test_interrupted_reaping();
     failures += test_interrupted_startup_reaping();

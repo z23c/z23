@@ -157,6 +157,11 @@ struct mesh_terminal_worker_config {
      * killed and before its leader is reaped, so non-zero always names a group
      * whose leader still holds the id. */
     volatile pid_t *pgid_slot;
+    /* When true, mesh_terminal_worker_input never waits for a shell that
+     * is not reading: bytes the pty cannot take right now are refused at
+     * once as an IO error (the accepted prefix stays charged). For callers
+     * that run under a shared lock. False keeps the bounded wait. */
+    bool input_nowait;
 };
 
 struct mesh_terminal_worker {
@@ -188,6 +193,7 @@ struct mesh_terminal_worker {
     uint64_t max_bytes_out;
     uint64_t lifetime_seconds;
     uint64_t idle_seconds;
+    bool input_nowait;  /* copied from the config; see there */
 #if defined(_WIN32)
     /* ConPTY handles. Opaque void* so this header stays free of
      * <windows.h>: HANDLE and HPCON are both pointer-sized opaque handles
