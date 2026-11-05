@@ -2747,6 +2747,7 @@ static enum dl_proof dl_proof_request_stub(const char *stub, const char *wt,
                                            size_t cap)
 {
 #if defined(ZCL_TESTING)
+    if (strcmp(stub, "unavailable") == 0) return DL_PROOF_UNAVAILABLE;
     /* "status" reads the settled state through the production reader, so it
      * also takes the production fresh-submission retry. */
     char note[256] = "";
@@ -3038,6 +3039,9 @@ static enum dl_proof dl_proof_stub_read(const char *stub, const char *wt,
         (void)snprintf(detail, cap, "proof stub: fail");
         return DL_PROOF_FAILED;
     }
+    #if defined(ZCL_TESTING)
+    if (strcmp(stub, "unavailable") == 0) return DL_PROOF_UNAVAILABLE;
+#endif
     if (strcmp(stub, "missing") == 0) {
         (void)snprintf(detail, cap, "%s", "proof worker lost its request");
         return DL_PROOF_MISSING;
@@ -9417,7 +9421,7 @@ static void dl_resume_failed_proof(const struct dl_dirs *d,
                                     struct dl_row *row,
                                     const char dimension[48],
                                     const char detail[512],
-                                    struct zcl_command_reply *reply)
+                                    struct zcl_command_reply *reply, bool confirmed)
 {
     char base_now[80];
     dl_log(row, "failed exact proof: ");
@@ -9436,7 +9440,7 @@ static void dl_resume_failed_proof(const struct dl_dirs *d,
         dl_resume_interrupted_proof(d, row, detail, reply))
         return;
 #endif
-    if (dl_train_fallback(d, row, detail, reply, true))
+    if (dl_train_fallback(d, row, detail, reply, confirmed))
         return;
     bool host_load = dl_host_load_failure(detail);
     dl_log(row, detail);
@@ -9574,7 +9578,7 @@ static void dl_step_proof_unclaimed(const char *detail, struct zcl_command_reply
         return;
     }
     if (p != DL_PROOF_PASSED) {
-        dl_resume_failed_proof(d, row, dimension, detail, reply);
+        dl_resume_failed_proof(d, row, dimension, detail, reply, p == DL_PROOF_FAILED);
         return;
     }
 #if defined(ZCL_TESTING)

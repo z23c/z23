@@ -634,6 +634,102 @@ _test_next:;
     return failures;
 }
 
+static int test_dev_land_train_unknown_proof(void)
+{
+    int failures = 0;
+    TEST("land: missing proof requeues its existing pair without splitting") {
+        struct dlx_rig rig;
+        char b[64], c[64], before[200], after[200], member[200];
+        int64_t attempt = 0;
+        dlx_isolate("train_unknown_proof");
+        ASSERT(dlx_tr_rig(&rig, "train_unknown_proof_rig", "missing", "b.txt", b, c));
+        setenv("ZCL_LAND_TRAIN_WIDTH", "3", 1);
+        ASSERT(dlx_tr_beat("started", 2, 1));
+        ASSERT(dlx_tr_inflight_intent(before, sizeof(before)));
+        ASSERT(dlx_tr_beat("proving", 0, 1));
+        ASSERT(dlx_tr_inflight_intent(after, sizeof(after)));
+        ASSERT_STR_EQ(before, after);
+        ASSERT(dlx_tr_queued(2, &attempt, member, sizeof(member)));
+        ASSERT_STR_EQ(member, before);
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+static bool dlx_tr_change_tip(long long seq, const char *tip)
+{
+    static char text[262144];
+    char land[1200], path[1400], anchor[48];
+    size_t len = 0;
+    dlx_landdir(land, sizeof(land));
+    (void)snprintf(path, sizeof(path), "%s/queue.jsonl", land);
+    if (strlen(tip) != 40 || !dlx_slurp(path, text, sizeof(text) - 1, &len)) return false;
+    text[len] = '\0';
+    (void)snprintf(anchor, sizeof(anchor), "{\"seq\":%lld,", seq);
+    char *line = strstr(text, anchor);
+    if (!line) return false;
+    char *end = strchr(line, '\n'), *field = strstr(line, "\"tip\":\"");
+    if (!end || !field || field >= end) return false;
+    field += strlen("\"tip\":\"");
+    if (field + 40 >= end || field[40] != '"') return false;
+    memcpy(field, tip, 40);
+    return dlx_write(path, text);
+}
+
+static int test_dev_land_train_split_changed_tip(void)
+{
+    int failures = 0;
+    TEST("land: a changed split member tip refuses subgroup reuse") {
+        struct dlx_rig rig;
+        struct dlx_call call;
+        char b[64], c[64];
+        dlx_isolate("train_split_changed_tip");
+        ASSERT(dlx_tr_rig(&rig, "train_split_changed_tip_rig", "fail", "b.txt", b, c));
+        setenv("ZCL_LAND_TRAIN_WIDTH", "3", 1);
+        ASSERT(dlx_tr_beat("started", 2, 1));
+        ASSERT(dlx_tr_beat("rebased", 0, 1));
+        ASSERT(dlx_tr_change_tip(2, c));
+        dlx_begin(&call, "step");
+        ASSERT(dlx_run(&call) && !dlx_ok(&call));
+        ASSERT_STR_EQ(dlx_err_code(&call), "QUEUE_READ_FAILED");
+        dlx_end(&call);
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+static int test_dev_land_train_unavailable_proof(void)
+{
+    int failures = 0;
+    TEST("land: unavailable proof requests and reads fall back without splitting") {
+        struct dlx_rig rig;
+        char b[64], c[64];
+        dlx_isolate("train_unavailable_request");
+        ASSERT(dlx_tr_rig(&rig, "train_unavailable_request_rig", "unavailable", "b.txt", b, c));
+        setenv("ZCL_LAND_TRAIN_WIDTH", "3", 1);
+        ASSERT(dlx_tr_beat("rebased", 0, 1));
+        setenv("ZCL_LAND_PROOF_STUB", "fail", 1);
+        ASSERT(dlx_tr_beat("started", 0, 1));
+        dlx_restore();
+        dlx_isolate("train_unavailable_read");
+        ASSERT(dlx_tr_rig(&rig, "train_unavailable_read_rig", "running", "b.txt", b, c));
+        setenv("ZCL_LAND_TRAIN_WIDTH", "3", 1);
+        ASSERT(dlx_tr_beat("started", 2, 1));
+        setenv("ZCL_LAND_PROOF_STUB", "unavailable", 1);
+        ASSERT(dlx_tr_beat("rebased", 0, 1));
+        setenv("ZCL_LAND_PROOF_STUB", "fail", 1);
+        ASSERT(dlx_tr_beat("started", 0, 1));
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
 static int test_dev_land_train_red_then_singles_land(void)
 {
     int failures = 0;
@@ -1142,6 +1238,9 @@ int test_dev_land_train_cases(void)
     failures += test_dev_land_train_split_excludes_unrelated();
     failures += test_dev_land_train_split_bound_head();
     failures += test_dev_land_train_split_malformed();
+    failures += test_dev_land_train_unknown_proof();
+    failures += test_dev_land_train_unavailable_proof();
+    failures += test_dev_land_train_split_changed_tip();
     failures += test_dev_land_train_red_then_singles_land();
     failures += test_dev_land_train_held_row_skipped();
     failures += test_dev_land_train_cancelled_row_skipped();
