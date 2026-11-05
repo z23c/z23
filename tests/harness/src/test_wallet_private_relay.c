@@ -3075,7 +3075,7 @@ static int wprt_u_case_pending_file(void)
 
 /* ── a record that cannot be made durable ───────────────────────────── */
 
-static bool wprt_u_refusals(struct wprt_u *u, const struct uint256 *p)
+static bool wprt_u_refused_new(struct wprt_u *u)
 {
     struct uint256 q = wprt_u_id(0x62, 0);
     struct uint256 t = wprt_u_id(0x63, 0);
@@ -3086,14 +3086,27 @@ static bool wprt_u_refusals(struct wprt_u *u, const struct uint256 *p)
     transaction_init(&tx);
     tx.hash = t;
     struct zcl_result enq = wpr_enqueue(u->r, &tx);
+    transaction_free(&tx);
+    return ok && !enq.ok && enq.code == -4 && !wprt_u_entry(u->r, &t) &&
+           wprt_u_used(u->r) == 1;
+}
+
+static bool wprt_u_refused_over(struct wprt_u *u, const struct uint256 *p)
+{
+    struct transaction tx;
+    transaction_init(&tx);
     tx.hash = *p;
     struct zcl_result over = wpr_enqueue(u->r, &tx);
     transaction_free(&tx);
     struct wpr_entry *ep = wprt_u_entry(u->r, p);
-    return ok && !enq.ok && enq.code == -4 && !wprt_u_entry(u->r, &t) &&
-           wprt_u_used(u->r) == 1 && !over.ok && over.code == -4 && ep &&
-           ep->state == WPR_PREPARED && !ep->in_pool && ep->due_ms == 0 &&
+    return !over.ok && over.code == -4 && ep && ep->state == WPR_PREPARED &&
+           !ep->in_pool && ep->due_ms == 0 &&
            ep->seen_ms == atomic_load(&wprt_now) && wprt_lock_free(u->r);
+}
+
+static bool wprt_u_refusals(struct wprt_u *u, const struct uint256 *p)
+{
+    return wprt_u_refused_new(u) && wprt_u_refused_over(u, p);
 }
 
 static int wprt_u_case_record_refused(void)
