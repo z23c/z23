@@ -466,12 +466,20 @@ static bool cis_native_pages(void)
            cis_native_second(root, commit, tree, artifact, "conflict", "ambiguous", 3);
 }
 
+static bool cis_page_matches(struct codeindex *ci, const char *body, const uint8_t artifact[32])
+{
+    struct ci_page out;
+    bool prior_untrusted = false;
+    return codeindex_pages_list(ci, "lib/net", &out, 1, &prior_untrusted) == 1 &&
+           strcmp(out.body, body) == 0 && memcmp(out.artifact_root, artifact, 32) == 0;
+}
+
 static bool cis_page_roundtrip(const char *root)
 {
     static const char body[] = "{\"dir\":\"lib/net\",\"tree\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
         "\"topic\":\"net\",\"summary\":\"Network model hint\",\"lessons\":[],\"applies_to\":[],"
         "\"updated\":\"2026-11-04T00:00:00Z\"}";
-    struct ci_page in = {0}, out = {0};
+    struct ci_page in = {0};
     snprintf(in.directory, sizeof(in.directory), "%s", "lib/net");
     snprintf(in.tree_oid, sizeof(in.tree_oid), "%s", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     snprintf(in.source_commit, sizeof(in.source_commit), "%s", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
@@ -479,15 +487,12 @@ static bool cis_page_roundtrip(const char *root)
     struct codeindex *older = codeindex_open_retrieval_view(root);
     struct codeindex *ci = codeindex_open_retrieval_view(root);
     uint8_t artifact[32] = {0};
-    bool prior_untrusted = false;
     bool ok = older && ci && cis_bad_page_import(ci, &in) &&
               codeindex_pages_import_hints(ci, body, strlen(body), &in, 1, artifact) &&
-              codeindex_pages_list(ci, "lib/net", &out, 1, &prior_untrusted) == 1 &&
-              strcmp(out.body, body) == 0 && memcmp(out.artifact_root, artifact, 32) == 0 &&
+              cis_page_matches(ci, body, artifact) &&
               codeindex_rebuild(older);
     struct codeindex *fresh = ok ? codeindex_open_retrieval_view(root) : NULL;
-    ok = ok && fresh && codeindex_pages_list(fresh, "lib/net", &out, 1, &prior_untrusted) == 1 &&
-              strcmp(out.body, body) == 0 && memcmp(out.artifact_root, artifact, 32) == 0;
+    ok = ok && fresh && cis_page_matches(fresh, body, artifact);
     codeindex_close(fresh);
     codeindex_close(older);
     codeindex_close(ci);
