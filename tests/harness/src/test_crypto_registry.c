@@ -572,6 +572,19 @@ static int registry_case_register_refusals(void)
     return failures;
 }
 
+/* Retired is registered but not usable, deprecated still is; a second claim on
+ * a taken slot fails and changes nothing. */
+static bool registry_accepts_followups(size_t tot, const struct crypto_scheme *a)
+{
+    struct crypto_scheme dup = fixture_scheme(771, CRYPTO_KIND_HASH, CRYPTO_STATUS_ACTIVE, "z", "z");
+    return crypto_registry_is_usable((enum crypto_scheme_id)771) &&
+           crypto_registry_is_usable((enum crypto_scheme_id)772) &&
+           !crypto_registry_is_usable((enum crypto_scheme_id)773) &&
+           !crypto_registry_register(&dup) &&
+           crypto_registry_lookup((enum crypto_scheme_id)771) == a &&
+           crypto_registry_count() == tot + 4;
+}
+
 /* Accepted registrations: every valid status, one-character tags, usability. */
 static int registry_case_register_accepts(void)
 {
@@ -595,15 +608,7 @@ static int registry_case_register_accepts(void)
              crypto_registry_count_by_kind(CRYPTO_KIND_ZK) == z + 1;
         ok = ok && crypto_registry_lookup((enum crypto_scheme_id)771) == &a &&
              crypto_registry_lookup((enum crypto_scheme_id)(CRYPTO_SCHEME_MAX - 1)) == &top;
-        /* retired is registered but not usable; deprecated still is */
-        ok = ok && crypto_registry_is_usable((enum crypto_scheme_id)771) &&
-             crypto_registry_is_usable((enum crypto_scheme_id)772) &&
-             !crypto_registry_is_usable((enum crypto_scheme_id)773);
-        /* a second claim on a taken slot fails and changes nothing */
-        struct crypto_scheme dup = fixture_scheme(771, CRYPTO_KIND_HASH, CRYPTO_STATUS_ACTIVE, "z", "z");
-        ok = ok && !crypto_registry_register(&dup) &&
-             crypto_registry_lookup((enum crypto_scheme_id)771) == &a &&
-             crypto_registry_count() == tot + 4;
+        ok = ok && registry_accepts_followups(tot, &a);
         if (ok)
             printf("OK\n");
         else {

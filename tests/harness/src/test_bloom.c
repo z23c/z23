@@ -683,6 +683,25 @@ static int bloom_test_mut_bit_model(void)
     return failures;
 }
 
+static bool bloom_data_all_zero(const struct bloom_filter *f)
+{
+    for (size_t i = 0; i < f->data_size; i++)
+        if (f->data[i] != 0) return false;
+    return true;
+}
+
+/* Clear wipes every byte and both flags; reset does the same and sets the tweak. */
+static bool bloom_clear_reset_state(struct bloom_filter *f, const unsigned char *d)
+{
+    f->is_full = true;                           /* a full filter matches everything */
+    bool ok = bloom_filter_contains(f, kat_miss, 20);
+    bloom_filter_clear(f);
+    ok = ok && bloom_data_all_zero(f) && f->is_empty && !f->is_full;
+    bloom_filter_insert(f, d, 5);
+    bloom_filter_reset(f, 9);
+    return ok && bloom_data_all_zero(f) && f->is_empty && f->tweak == 9;
+}
+
 static int bloom_test_mut_state_flags(void)
 {
     int failures = 0;
@@ -693,18 +712,7 @@ static int bloom_test_mut_state_flags(void)
         bool ok = bloom_filter_init(&f, 10, 0.0001, 3, BLOOM_UPDATE_NONE);
         ok = ok && f.is_empty && !f.is_full && !bloom_filter_contains(&f, d, 5);
         bloom_filter_insert(&f, d, 5);
-        ok = ok && !f.is_empty;
-        f.is_full = true;                           /* a full filter matches everything */
-        ok = ok && bloom_filter_contains(&f, kat_miss, 20);
-        bloom_filter_clear(&f);
-        bool zero = true;
-        for (size_t i = 0; i < f.data_size; i++) zero = zero && f.data[i] == 0;
-        ok = ok && zero && f.is_empty && !f.is_full;
-        bloom_filter_insert(&f, d, 5);
-        bloom_filter_reset(&f, 9);
-        zero = true;
-        for (size_t i = 0; i < f.data_size; i++) zero = zero && f.data[i] == 0;
-        ok = ok && zero && f.is_empty && f.tweak == 9;
+        ok = ok && !f.is_empty && bloom_clear_reset_state(&f, d);
         bloom_filter_free(&f);
         ok = ok && f.data == NULL && f.data_size == 0;
         if (ok)
