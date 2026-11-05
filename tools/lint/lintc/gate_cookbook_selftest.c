@@ -62,6 +62,7 @@ static const char k_cks_dev[] =
     "orphan) ( trap '' INT TERM HUP; echo \"$$\" >&\"$CKS_READY_FD\"; while :; do sleep 1; done ) &\n"
     "  wait;;\n"
     "cold) if [ ! -f cold.marker ]; then : > cold.marker; sleep 3; fi;;\n"
+    "timeout) exec sleep 3;;\n"
     "esac\n"
     "echo \"answer: $*\"\n";
 
@@ -309,6 +310,27 @@ static int cks_warm(const struct cks_fx *fx)
 #define CKS_RUN(tool, args, token) "RECIPE_RUN(\"r\", \"q\", " tool ", \"" args "\", \"" token "\")\n"
 #define CKS_READ(id, file, sym) "RECIPE_READ(\"" id "\", \"q\", \"" file "\", \"" sym "\")\n"
 
+static int cks_timeout_status(const struct cks_fx *fx)
+{
+    char out[CKS_BUF];
+    int st = 0;
+    struct ck_cfg cfg = cks_cfg(fx, 1, "1", CKS_GRACE_MS);
+    cfg.timeout = "1";
+    cfg.warm_timeout = "1";
+    if (cks_put(fx, "engine/composition/cookbook.def",
+                CKS_RUN("Z23_DEV", "code have", "answer"), 0600) != 0)
+        return cks_fail("cannot write timeout fixture");
+    pid_t pid = cks_fork(fx, &cfg, "timeout", NULL);
+    if (pid < 0 || waitpid(pid, &st, 0) != pid ||
+        cks_slurp(fx->out, out, sizeof out) != 0)
+        return cks_fail("timeout fixture did not finish");
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 1 ||
+        !strstr(out, "no longer prints 'answer'") ||
+        !strstr(out, "child exit status: 124 (timeout convention)"))
+        return cks_fail("timeout status was not reported on missing output");
+    return 0;
+}
+
 static int cks_failures(const struct cks_fx *fx)
 {
     const struct cks_case cases[] = {
@@ -444,6 +466,12 @@ static int cks_unknown_arg(void)
     return rc == 2 ? 0 : cks_fail("an unknown argument must exit 2");
 }
 
+static int cks_runtime_cases(const struct cks_fx *fx)
+{
+    return cks_cases(fx) || cks_warm(fx) || cks_timeout_status(fx) || cks_failures(fx)
+        || cks_long_args(fx) || cks_signals(fx);
+}
+
 int check_cookbook_selftest(void)
 {
     struct cks_fx fx = { { 0 }, { 0 }, { 0 } };
@@ -451,8 +479,7 @@ int check_cookbook_selftest(void)
     if (rc == 0 && cks_build(&fx) != 0)
         rc = cks_fail("cannot build the fixture root");
     if (rc == 0)
-        rc = cks_cases(&fx) || cks_warm(&fx) || cks_failures(&fx) || cks_long_args(&fx)
-             || cks_signals(&fx);
+        rc = cks_runtime_cases(&fx);
     if (fx.base[0] && access(fx.base, F_OK) == 0)
         rap_rm_rf(fx.base);
     if (rc == 0)

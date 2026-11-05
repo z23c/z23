@@ -89,11 +89,13 @@ static int ck_status(const struct ck_cfg *cfg, char *const argv[])
 
 /* Output of argv, stderr merged, or NULL. *lost is nonzero when the output
  * could not be kept whole (LCP_LOST_*) and must not be judged. */
-static char *ck_capture(const struct ck_cfg *cfg, char *const argv[], int *lost)
+static char *ck_capture(const struct ck_cfg *cfg, char *const argv[], int *lost,
+                        int *status)
 {
     struct lcp_buf out = { 0 };
     struct lcp_spec s = { argv, NULL, NULL, LCP_BOTH, cfg->grace_ms, NULL };
     int code = 0, rc = lcp_run(&s, &out, &code);
+    *status = rc == 0 ? code : -1;
     char *copy = NULL;
     if (rc == 0) {
         lcp_buf_subst(&out);
@@ -159,8 +161,8 @@ static void ck_lost(struct ck_run *g, const char *id, int lost)
  * Returns early after a termination signal. */
 static void ck_judge(struct ck_run *g, char *const *f, char *const *argv)
 {
-    int lost = 0;
-    char *out = ck_capture(g->cfg, argv, &lost);
+    int lost = 0, status = -1;
+    char *out = ck_capture(g->cfg, argv, &lost, &status);
     if (lsc_pending()) {
         free(out);
         return;
@@ -174,6 +176,11 @@ static void ck_judge(struct ck_run *g, char *const *f, char *const *argv)
         } else {
             ck_bad(g, "recipe '%s': command '%s' is no longer '%s'", f[1], f[3], f[4]);
         }
+        if (status < 0)
+            printf("  child status unavailable (capture failed)\n");
+        else if (status != 0)
+            printf("  child exit status: %d%s\n", status,
+                   status == 124 ? " (timeout convention)" : "");
     }
     free(out);
 }
