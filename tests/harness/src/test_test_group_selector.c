@@ -2465,6 +2465,71 @@ static int test_priority_bound_history_dispatch(void)
     } _test_next:;
     return failures;
 }
+
+/* Explicit read-only host diagnostic, never armed by normal test runs.
+ * The caller supplies an immutable commit's newline-separated changed set;
+ * use the full catalog as a clearly labelled universal-selection scenario. */
+static bool tgs_priority_audit_paths(char *text, const char **paths, size_t *count)
+{
+    char *save = NULL;
+    for (char *p = strtok_r(text, "\n", &save); p; p = strtok_r(NULL, "\n", &save)) {
+        if (*count == 64) return false;
+        paths[(*count)++] = p;
+    }
+    return *count != 0;
+}
+
+static bool tgs_priority_audit_groups(char *groups, size_t cap)
+{
+    size_t used = 0;
+    for (size_t i = 0; i < zcl_test_group_catalog_count(); i++) {
+        int n = snprintf(groups + used, cap - used, "%s%s", used ? "," : "",
+                         zcl_test_group_catalog_at(i));
+        if (n < 0 || (size_t)n >= cap - used) return false;
+        used += (size_t)n;
+    }
+    return used != 0;
+}
+
+static bool tgs_priority_audit_call(const char *root, const char *scratch,
+    const char *groups, const char *const *changed, size_t count,
+    char *out, size_t out_cap, char *report, size_t report_cap)
+{
+    char saved[256] = "";
+    const char *prior = getenv("ZCL_DEVLOOP_TEST_PROCESS");
+    bool had = prior != NULL;
+    if (had && strlen(prior) >= sizeof(saved)) return false;
+    if (had) snprintf(saved, sizeof(saved), "%s", prior);
+    if (setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) != 0) return false;
+    bool ok = zcl_dev_proof_test_failure_priority_report(root, scratch, groups,
+        changed, count, out, out_cap, report, report_cap);
+    int restored = had ? setenv("ZCL_DEVLOOP_TEST_PROCESS", saved, 1)
+                       : unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
+    return ok && restored == 0;
+}
+
+static int tgs_priority_host_audit(void)
+{
+    const char *root = getenv("ZCL_TEST_PRIORITY_AUDIT_ROOT");
+    const char *paths = getenv("ZCL_TEST_PRIORITY_AUDIT_CHANGED");
+    if (!root || !*root || !paths || !*paths) return 0;
+    char changed_copy[8192], root_real[PATH_MAX], temp[PATH_MAX], scratch[PATH_MAX + 32];
+    static char groups[150000], out[150000];
+    char report[256] = "unavailable";
+    const char *changed[64]; size_t count = 0;
+    if (!realpath(root, root_real) || strlen(paths) >= sizeof(changed_copy)) return 1;
+    snprintf(changed_copy, sizeof(changed_copy), "%s", paths);
+    if (!tgs_priority_audit_paths(changed_copy, changed, &count) ||
+        !tgs_priority_audit_groups(groups, sizeof(groups))) return 1;
+    test_make_tmpdir(temp, sizeof(temp), "tgs_priority", "host_audit");
+    snprintf(scratch, sizeof(scratch), "%s/diff", temp);
+    bool ok = tgs_priority_audit_call(root_real, scratch, groups, changed, count,
+                                       out, sizeof(out), report, sizeof(report));
+    printf("priority host audit (universal selection, %zu changed paths): %s hints=%s\n",
+           count, report, out);
+    (void)test_rm_rf_recursive(temp);
+    return ok ? 0 : 1;
+}
 #endif
 
 static int test_runner_dispatches_longest_first(void)
@@ -2530,6 +2595,32 @@ static int test_runner_dispatches_longest_first(void)
         cursor = tgs_dispatch_pos(out, "test_codec_cursor");
         ASSERT(hex != SIZE_MAX && cursor != SIZE_MAX);
         ASSERT(hex < cursor);
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_failure_priority_phase_barrier(void)
+{
+    int failures = 0;
+    TEST("runner: pool priority cannot cross the exclusive pre-pass") {
+        static char out[1024 * 1024];
+        char root[PATH_MAX], exe[PATH_MAX], command[3 * PATH_MAX];
+        test_make_tmpdir(root, sizeof(root), "tgs_priority", "phase");
+        ASSERT(os_proc_exe_path(exe, sizeof(exe)));
+        int n = snprintf(command, sizeof(command),
+            "cd '%s' && '%s' --jobs=1 --verbose --no-cache "
+            "--exact=test_hex_codec,test_command_registry_latency "
+            "--failure-priority=test_hex_codec 2>&1", root, exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        ASSERT(capture_command(command, out, sizeof(out)) == 0);
+        const char *exclusive = strstr(out, "[exclusive]");
+        const char *done = strstr(out, "test_parallel: exclusive pass done groups=1");
+        const char *dispatch = strstr(out, "[dispatch]");
+        ASSERT(exclusive && done && dispatch && exclusive < done && done < dispatch);
+        ASSERT(strstr(exclusive, "test_command_registry_latency") != NULL);
+        ASSERT(tgs_dispatch_pos(out, "test_hex_codec") != SIZE_MAX);
         ASSERT(test_rm_rf_recursive(root) == 0);
         PASS();
     } _test_next:;
@@ -3800,10 +3891,12 @@ int test_test_group_selector(void)
     failures += test_failure_priority_history();
 #if !defined(_WIN32)
     failures += test_priority_bound_history_dispatch();
+    failures += tgs_priority_host_audit();
 #endif
     failures += test_dispatch_weights_read();
     failures += test_dispatch_weights_framing();
     failures += test_runner_dispatches_longest_first();
+    failures += test_failure_priority_phase_barrier();
     failures += test_assert_macros_report_where_and_what();
     failures += test_assert_messages_name_file_line_and_values();
     failures += test_verdict_json_zero_failures();
