@@ -29,6 +29,7 @@ struct dpr_fixture {
     uint8_t keys[3][32], host[4][32];
     unsigned captures;
     bool capture_available;
+    bool capture_missing;
 };
 
 #define DPR_CHECK(label, condition) do { \
@@ -78,17 +79,23 @@ static struct zcl_dev_acceptance_receipt_v1 dpr_claim(const struct dpr_fixture *
     return r;
 }
 
-static bool dpr_signed(struct dpr_fixture *f,
-    struct zcl_dev_acceptance_receipt_v1 *r, unsigned worker,
+static bool dpr_signed_in(struct dpr_fixture *f,
+    struct zcl_dev_acceptance_receipt_v1 *r, const char *state,
     uint8_t wire[ZCL_DEV_PROOF_WIRE_BYTES])
 {
-    if (worker >= 3u || setenv("XDG_STATE_HOME", f->workers[worker], 1) != 0)
-        return false;
+    if (setenv("XDG_STATE_HOME", state, 1) != 0) return false;
     bool ok = zcl_dev_proof_receipt_child_set_root(r, r->child_set_root) &&
               zcl_dev_proof_receipt_seal(r) &&
               zcl_dev_proof_receipt_serialize(r, wire);
     if (setenv("XDG_STATE_HOME", f->requester, 1) != 0) ok = false;
     return ok;
+}
+
+static bool dpr_signed(struct dpr_fixture *f,
+    struct zcl_dev_acceptance_receipt_v1 *r, unsigned worker,
+    uint8_t wire[ZCL_DEV_PROOF_WIRE_BYTES])
+{
+    return worker < 3u && dpr_signed_in(f, r, f->workers[worker], wire);
 }
 
 static bool dpr_allow(struct dpr_fixture *f)
@@ -169,7 +176,7 @@ static bool dpr_refused(struct dpr_fixture *f, const uint8_t *wire, size_t len,
     memcpy(before, &out, sizeof(out));
     char why[160] = "not set";
     bool accepted = zcl_dev_proof_remote_verify(wire, len, expected,
-        dpr_capture, f, &out, why, sizeof(why));
+        f->capture_missing ? NULL : dpr_capture, f, &out, why, sizeof(why));
     bool ok = !accepted && strcmp(why, reason) == 0 &&
               memcmp(before, &out, sizeof(out)) == 0;
     if (!ok) printf("    accepted=%d why=%s expected=%s output_unchanged=%d\n",
@@ -254,7 +261,8 @@ static int dpr_pairs_and_signers(struct dpr_fixture *f)
     return failures;
 }
 
-static int dpr_toolchains(struct dpr_fixture *f)
+static int dpr_toolchains(struct dpr_fixture *f,
+    const struct zcl_dev_proof_remote_expectation *expected, const char *state)
 {
     int failures = 0;
     const struct { size_t offset; const char *name; } fields[] = {
@@ -269,17 +277,51 @@ static int dpr_toolchains(struct dpr_fixture *f)
         uint8_t wire[ZCL_DEV_PROOF_WIRE_BYTES];
         char why[160];
         snprintf(why, sizeof(why), "remote_toolchain_mismatch:%s", fields[i].name);
-        bool made = dpr_signed(f, &r, 0, wire);
-        DPR_CHECK(why, made && dpr_refused(f, wire, sizeof(wire), &f->expected, why));
+        bool made = dpr_signed_in(f, &r, state, wire);
+        unsigned before = f->captures;
+        bool refused = made && dpr_refused(f, wire, sizeof(wire), expected, why);
+        DPR_CHECK(why, refused && f->captures == before + 1u);
     }
     struct zcl_dev_acceptance_receipt_v1 r = dpr_claim(f);
     uint8_t wire[ZCL_DEV_PROOF_WIRE_BYTES];
-    bool made = dpr_signed(f, &r, 0, wire);
+    bool made = dpr_signed_in(f, &r, state, wire);
     f->capture_available = false;
-    bool refused = made && dpr_refused(f, wire, sizeof(wire), &f->expected,
+    unsigned before = f->captures;
+    bool refused = made && dpr_refused(f, wire, sizeof(wire), expected,
                                       "remote_toolchain_unverifiable:fixture_capture_failed");
     f->capture_available = true;
-    DPR_CHECK("unavailable native host capture fails closed", refused);
+    DPR_CHECK("unavailable native host capture fails closed", refused && f->captures == before + 1u);
+    return failures;
+}
+
+static int dpr_local_signer(struct dpr_fixture *f)
+{
+    int failures = 0;
+    struct zcl_dev_proof_remote_expectation expected = f->expected;
+    struct zcl_dev_acceptance_receipt_v1 r = dpr_claim(f), out = {0};
+    uint8_t wire[ZCL_DEV_PROOF_WIRE_BYTES];
+    bool made = dpr_signed_in(f, &r, f->requester, wire);
+    /* Pin the actual requester's identity from its native key store, not from
+     * returned receipt bytes. This key is trusted locally without allowlisting. */
+    bool present = false;
+    const char *key_why = NULL;
+    bool pinned = zcl_dev_proof_signer_public(expected.signer_pubkey, &present, &key_why);
+    char why[160] = "not cleared";
+    unsigned before = f->captures;
+    bool accepted = made && pinned && present && zcl_dev_proof_remote_verify(
+        wire, sizeof(wire), &expected, dpr_capture, f, &out, why, sizeof(why));
+    DPR_CHECK("requester-local signer still requires strict host identity capture",
+        accepted && why[0] == '\0' && zcl_dev_proof_receipt_signer_is_local(&out) &&
+        f->captures == before + 1u);
+    if (!made || !pinned || !present) return failures + 1;
+    failures += dpr_toolchains(f, &expected, f->requester);
+    r = dpr_claim(f);
+    made = dpr_signed_in(f, &r, f->requester, wire);
+    before = f->captures;
+    f->capture_missing = true;
+    bool refused = made && dpr_refused(f, wire, sizeof(wire), &expected, "remote_arguments_invalid");
+    f->capture_missing = false;
+    DPR_CHECK("requester-local signer cannot omit host capture", refused && f->captures == before);
     return failures;
 }
 
@@ -355,7 +397,8 @@ static int dpr_cases(void)
         failures += dpr_positive(f);
         failures += dpr_pinned_roots(f);
         failures += dpr_pairs_and_signers(f);
-        failures += dpr_toolchains(f);
+        failures += dpr_toolchains(f, &f->expected, f->workers[0]);
+        failures += dpr_local_signer(f);
         failures += dpr_incomplete_and_frames(f);
         failures += dpr_missing_pins(f);
     }

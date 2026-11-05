@@ -659,7 +659,7 @@ AGENT_IMPACT_RULE("tools/dev/dev_proof.c|tools/dev/dev_proof.h|tools/dev/dev_pro
  * carries them. Changing any of these changes whether a push is admitted at
  * all, so the signer group runs alongside the receipt group above. */
 AGENT_IMPACT_RULE("tools/dev/dev_proof_signer.c|tools/dev/dev_proof_signer.h|tests/harness/src/test_dev_proof_signer.c", "dev_proof_signer impact_composition dev_platform native_api_contract command_registry_catalog make_lint_gates")
-AGENT_IMPACT_RULE("tools/dev/dev_proof_remote.c|tools/dev/dev_proof_remote.h|tests/harness/src/test_dev_proof_remote.c", "dev_proof_remote dev_proof_signer")
+AGENT_IMPACT_RULE("tools/dev/dev_proof_remote.c|tools/dev/dev_proof_remote.h|tests/harness/src/test_dev_proof_remote.c|tests/harness/src/test_dev_proof_remote_placement.c", "dev_proof_remote dev_proof_remote_placement dev_proof_signer")
 /* Separate-account compile attestations and the root-pinned verifier key. */
 AGENT_IMPACT_RULE("tools/dev/verify_attest.c|tools/dev/verify_attest.h|tests/harness/src/test_verify_attest.c", "verify_attest verify_store verify_contract make_lint_gates")
 /* The z23verify.fixed_result.v2 byte contract, key v2, the observation

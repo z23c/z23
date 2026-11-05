@@ -391,6 +391,7 @@ ZCL_TEST_GROUP(impact_composition)
 ZCL_TEST_GROUP(dev_proof_signer)
 /* Returned proof receipts must match independently pinned signer and roots. */
 ZCL_TEST_GROUP(dev_proof_remote)
+ZCL_TEST_GROUP(dev_proof_remote_placement)
 /* dev.vcs.ports: a contributor branch classified commit by commit against a
  * private temporary index, and its typed refusals. */
 ZCL_TEST_GROUP(dev_port_table)
