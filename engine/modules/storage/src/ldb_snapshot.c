@@ -256,6 +256,7 @@ bool ldb_snapshot_make(const char *src_dir,
                     sizeof(current_before)) <= 0) {
         set_err(err_msg, err_sz,
                 "read CURRENT: %s", strerror(errno));
+        ldb_snapshot_destroy(dst_dir);
         LOG_FAIL("ldb_snapshot", "read CURRENT");
         return false;
     }
@@ -264,21 +265,22 @@ bool ldb_snapshot_make(const char *src_dir,
     if (!d) {
         set_err(err_msg, err_sz,
                 "opendir(%s): %s", src_dir, strerror(errno));
+        ldb_snapshot_destroy(dst_dir);
         LOG_FAIL("ldb_snapshot", "opendir");
         return false;
     }
 
     int cpy = copy_dir_entries(d, src_dir, dst_dir, err_msg, err_sz);
     if (cpy == 1) {
-        LOG_FAIL("ldb_snapshot", "link_or_copy");
         closedir(d);
         ldb_snapshot_destroy(dst_dir);
+        LOG_FAIL("ldb_snapshot", "link_or_copy");
         return false;
     }
     if (cpy == 2) {
-        LOG_FAIL("ldb_snapshot", "copy");
         closedir(d);
         ldb_snapshot_destroy(dst_dir);
+        LOG_FAIL("ldb_snapshot", "copy");
         return false;
     }
     closedir(d);
@@ -289,8 +291,8 @@ bool ldb_snapshot_make(const char *src_dir,
     if (slurp_small(src_current_path, current_after,
                     sizeof(current_after)) <= 0) {
         set_err(err_msg, err_sz, "race recheck failed");
-        LOG_FAIL("ldb_snapshot", "race recheck");
         ldb_snapshot_destroy(dst_dir);
+        LOG_FAIL("ldb_snapshot", "race recheck");
         return false;
     }
     if (strcmp(current_before, current_after) != 0) {
