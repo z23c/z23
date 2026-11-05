@@ -269,6 +269,12 @@ bool mesh_stream_test_inject(const char *service_name,
                              uint64_t connection_generation,
                              bool local_initiator, uint64_t id,
                              uint32_t initial_window, void *service_state);
+/* Delivers one already-framed ZSTRM frame as though it arrived from the
+ * Noise peer `peer_static` over an established session, so a test can
+ * stand in for many distinct peers on one loopback link. */
+bool mesh_stream_test_frame_as(struct msg_processor *mp, struct p2p_node *node,
+                               const uint8_t peer_static[32],
+                               const uint8_t *payload, size_t payload_len);
 /* Binds the composition context a loopback test supplies (one message
  * processor over a net manager holding both peers) WITHOUT registering a
  * supervised drain, so a test can put real frames on the wire. Pass NULL

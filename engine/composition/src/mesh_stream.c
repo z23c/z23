@@ -964,6 +964,37 @@ static void stream_receive_close(const struct noise_transport_snapshot *snap,
     zcl_mutex_unlock(&g_stream_lock);
 }
 
+/* One checked frame, already known to be ours and to arrive over an
+ * established session described by `snap`. */
+static bool stream_frame_dispatch(struct msg_processor *mp,
+                                  struct p2p_node *node,
+                                  const struct noise_transport_snapshot *snap,
+                                  const uint8_t *payload, size_t payload_len)
+{
+    size_t head = MESH_STREAM_FRAME_PREFIX_LEN + 1u + 8u;
+    uint8_t kind = payload[MESH_STREAM_FRAME_PREFIX_LEN];
+    uint64_t id = zcl_read_u64_le(payload + MESH_STREAM_FRAME_PREFIX_LEN + 1u);
+    const uint8_t *body = payload + head;
+    size_t body_len = payload_len - head;
+    switch (kind) {
+    case MESH_STREAM_KIND_OPEN:
+        stream_receive_open(mp, node, snap, id, body, body_len);
+        return true;
+    case MESH_STREAM_KIND_DATA:
+        stream_receive_data(snap, id, body, body_len);
+        return true;
+    case MESH_STREAM_KIND_WINDOW:
+        stream_receive_window(snap, id, body, body_len);
+        return true;
+    case MESH_STREAM_KIND_CLOSE:
+        stream_receive_close(snap, id, body, body_len);
+        return true;
+    default:
+        atomic_fetch_add(&g_dropped_unknown_kind, 1);
+        return true;
+    }
+}
+
 bool mesh_stream_frame(struct msg_processor *mp, struct p2p_node *node,
                        const uint8_t *payload, size_t payload_len,
                        struct boot_svc_ctx *svc)
@@ -988,27 +1019,7 @@ bool mesh_stream_frame(struct msg_processor *mp, struct p2p_node *node,
         atomic_fetch_add(&g_dropped_unauthenticated, 1);
         return true;
     }
-    uint8_t kind = payload[MESH_STREAM_FRAME_PREFIX_LEN];
-    uint64_t id = zcl_read_u64_le(payload + MESH_STREAM_FRAME_PREFIX_LEN + 1u);
-    const uint8_t *body = payload + head;
-    size_t body_len = payload_len - head;
-    switch (kind) {
-    case MESH_STREAM_KIND_OPEN:
-        stream_receive_open(mp, node, &snap, id, body, body_len);
-        return true;
-    case MESH_STREAM_KIND_DATA:
-        stream_receive_data(&snap, id, body, body_len);
-        return true;
-    case MESH_STREAM_KIND_WINDOW:
-        stream_receive_window(&snap, id, body, body_len);
-        return true;
-    case MESH_STREAM_KIND_CLOSE:
-        stream_receive_close(&snap, id, body, body_len);
-        return true;
-    default:
-        atomic_fetch_add(&g_dropped_unknown_kind, 1);
-        return true;
-    }
+    return stream_frame_dispatch(mp, node, &snap, payload, payload_len);
 }
 
 /* ── The one supervised drain ────────────────────────────────────────── */
@@ -1151,6 +1162,22 @@ void mesh_stream_test_bind(struct boot_svc_ctx *svc)
     stream_lock();
     g_stream_svc = svc;
     zcl_mutex_unlock(&g_stream_lock);
+}
+
+bool mesh_stream_test_frame_as(struct msg_processor *mp, struct p2p_node *node,
+                               const uint8_t peer_static[32],
+                               const uint8_t *payload, size_t payload_len)
+{
+    size_t head = MESH_STREAM_FRAME_PREFIX_LEN + 1u + 8u;
+    if (!peer_static || !payload || payload_len < head ||
+        payload_len > MESH_STREAM_FRAME_MAX)
+        return false;
+    struct noise_transport_snapshot snap;
+    memset(&snap, 0, sizeof(snap));
+    snap.established = true;
+    memcpy(snap.remote_static, peer_static, 32);
+    snap.connection_generation = 1;
+    return stream_frame_dispatch(mp, node, &snap, payload, payload_len);
 }
 
 size_t mesh_stream_test_live_count(const char *service_name)

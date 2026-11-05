@@ -27,6 +27,7 @@
 #include "net/net.h"
 #include "net/noise_transport.h"
 #include "net/protocol.h"
+#include "platform/clock.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -236,6 +237,98 @@ static bool stream_test_grant(uint64_t id, bool initiator, uint32_t credit)
     v.credit = credit;
     mesh_stream_visit(STREAM_TEST_ECHO, stream_test_grant_visit, &v);
     return v.found && v.ok;
+}
+
+/* ── Many peers on one loopback link ─────────────────────────────────── */
+
+/* A hand-set wall clock, so the OPEN cadence window a test lands in is a
+ * choice and never the second the box happens to be in. */
+static int64_t g_stream_test_wall_s;
+
+static int64_t stream_test_now_wall_ms(void *self)
+{
+    (void)self;
+    return g_stream_test_wall_s * 1000;
+}
+
+static int64_t stream_test_now_monotonic_ns(void *self)
+{
+    (void)self;
+    return clock_default()->now_monotonic_ns(clock_default()->self);
+}
+
+static const clock_iface_t g_stream_test_clock = {
+    .now_monotonic_ns = stream_test_now_monotonic_ns,
+    .now_wall_ms = stream_test_now_wall_ms,
+    .self = NULL,
+};
+
+static void stream_test_peer_key(uint8_t out[32], uint8_t n)
+{
+    memset(out, (int)(0x40u + n), 32);
+}
+
+/* The responder end of the loopback link, for answers a test reads back. */
+struct stream_test_link {
+    struct msg_processor *mp;
+    struct p2p_node *node;
+    struct send_segment *queue;
+    struct noise_transport *peer_transport;
+};
+
+/* One OPEN of `service` from the stand-in peer `peer`, delivered to the
+ * responder. Returns the reason byte of the CLOSE the responder answered
+ * with, or -1 when it answered nothing (the stream was admitted). */
+static int stream_test_open_as(const struct stream_test_link *lk,
+                               const uint8_t peer[32], uint64_t id,
+                               const char *service)
+{
+    uint8_t frame[MESH_LOOP_WIRE_MAX];
+    size_t frame_len = mesh_stream_test_open_frame(
+        id, STREAM_TEST_WINDOW, service, NULL, 0, frame, sizeof(frame));
+    if (frame_len == 0)
+        return -2;
+    if (!mesh_stream_test_frame_as(lk->mp, lk->node, peer, frame, frame_len))
+        return -2;
+    uint8_t answer[MESH_LOOP_WIRE_MAX];
+    bool more = false;
+    size_t answer_len = mesh_loop_take(lk->node, lk->queue,
+                                       lk->peer_transport, answer,
+                                       sizeof(answer), &more);
+    if (!more)
+        return -1;
+    uint8_t kind = 0;
+    if (!mesh_stream_test_read_header(answer, answer_len, &kind, NULL) ||
+        kind != MESH_STREAM_KIND_CLOSE)
+        return -2;
+    return answer[MESH_STREAM_FRAME_PREFIX_LEN + 1u + 8u];
+}
+
+/* A live pairing row for a stand-in peer, valid over any clock the test
+ * installs. */
+static bool stream_test_pair_stand_in(struct mesh_term_fixture *f,
+                                      const uint8_t peer[32], uint8_t n)
+{
+    struct db_mesh_pairing row;
+    memset(&row, 0, sizeof(row));
+    memcpy(row.network_genesis, f->genesis, 32);
+    memset(row.peer_master_pubkey, (int)(0x80u + n), 32);
+    memcpy(row.peer_noise_pubkey, peer, 32);
+    row.capability_mask = MESH_PAIRING_CAP_TERMINAL_EXEC;
+    row.delegation_sequence = 1;
+    row.paired_at = STREAM_TEST_PAIRED_AT;
+    row.expires_at = STREAM_TEST_PAIRING_EXPIRES;
+    if (!mesh_pairing_id_derive(row.network_genesis, row.peer_master_pubkey,
+                                row.peer_noise_pubkey, row.pairing_id))
+        return false;
+    return db_mesh_pairing_insert(&f->ndb, &row);
+}
+
+static bool stream_test_end_all_visit(struct mesh_stream *st, void *ctx)
+{
+    (void)ctx;
+    mesh_stream_close(st, MESH_STREAM_CLOSED_BY_SERVICE, NULL, 0);
+    return true;
 }
 
 int test_mesh_stream(void)
@@ -669,6 +762,102 @@ int test_mesh_stream(void)
         ASSERT_EQ(g_data_frames, (size_t)1);
         ASSERT_EQ(g_last_data_len, (size_t)5);
         ASSERT(memcmp(g_last_data, "re:up", 5) == 0);
+        PASS();
+    }
+
+    TEST("mesh stream: ended slots in a full table are reused, live slots "
+         "never are") {
+        mesh_loop_discard(a, a_queue, f.res_term);
+        mesh_loop_discard(b, b_queue, f.term_peer.ini);
+        mesh_stream_test_reset();
+        stream_test_counters_reset();
+        struct stream_test_link lk = {&mp, b, b_queue, f.term_peer.ini};
+        uint8_t transcript[32];
+        memset(transcript, 7, sizeof(transcript));
+        for (uint8_t n = 0; n < MESH_STREAM_TABLE_MAX; n++) {
+            uint8_t other[32];
+            stream_test_peer_key(other, (uint8_t)(100u + n));
+            ASSERT(mesh_stream_test_inject(STREAM_TEST_ECHO, other,
+                                           transcript, 1, false,
+                                           (uint64_t)(2u * n), 4096u, NULL));
+        }
+
+        /* Every slot live: the responder and a local open both refuse. */
+        uint8_t fixture_peer[32];
+        memcpy(fixture_peer, f.term_peer.noise_pub, 32);
+        uint64_t local_id = UINT64_MAX;
+        ASSERT_EQ(mesh_stream_open(STREAM_TEST_ECHO, f.resp_noise_pub,
+                                   STREAM_TEST_WINDOW, NULL, 0, NULL,
+                                   &local_id),
+                  MESH_STREAM_REFUSED_CAP);
+        ASSERT_EQ(stream_test_open_as(&lk, fixture_peer, 0,
+                                      STREAM_TEST_ECHO),
+                  MESH_STREAM_REFUSED_CAP);
+        ASSERT_EQ(g_releases, (size_t)0);
+
+        /* Every slot ended and lingering: a verdict is not a channel, so
+         * one authorized peer's ended slots cannot keep the others out. */
+        mesh_stream_visit(STREAM_TEST_ECHO, stream_test_end_all_visit, NULL);
+        ASSERT_EQ(mesh_stream_test_live_count(STREAM_TEST_ECHO), (size_t)0);
+        ASSERT_EQ(stream_test_open_as(&lk, fixture_peer, 2,
+                                      STREAM_TEST_ECHO),
+                  -1);
+        ASSERT_EQ(mesh_stream_test_live_count(STREAM_TEST_ECHO), (size_t)1);
+        ASSERT_EQ(g_releases, (size_t)1);
+        ASSERT_EQ(mesh_stream_open(STREAM_TEST_ECHO, f.resp_noise_pub,
+                                   STREAM_TEST_WINDOW, NULL, 0, NULL,
+                                   &local_id),
+                  MESH_STREAM_OK);
+        ASSERT_EQ(g_releases, (size_t)2);
+        PASS();
+    }
+
+    TEST("mesh stream: unpaired peers that fill the OPEN cadence table "
+         "cannot cost a paired peer its next OPEN") {
+        mesh_loop_discard(a, a_queue, f.res_term);
+        mesh_loop_discard(b, b_queue, f.term_peer.ini);
+        mesh_stream_test_reset();
+        stream_test_counters_reset();
+        ASSERT(stream_test_register(STREAM_TEST_GUARD,
+                                    MESH_PAIRING_CAP_TERMINAL_EXEC));
+        struct stream_test_link lk = {&mp, b, b_queue, f.term_peer.ini};
+        uint8_t paired[32];
+        stream_test_peer_key(paired, 0);
+        ASSERT(stream_test_pair_stand_in(&f, paired, 0));
+        g_stream_test_wall_s = INT64_C(1000000);
+        clock_set_default(&g_stream_test_clock);
+
+        /* The paired peer opens once and is admitted. */
+        ASSERT_EQ(stream_test_open_as(&lk, paired, 0, STREAM_TEST_GUARD),
+                  -1);
+        ASSERT_EQ(mesh_stream_test_live_count(STREAM_TEST_GUARD), (size_t)1);
+
+        /* The next second, as many unpaired peers as the cadence table has
+         * slots each send one OPEN of the same service; every one is
+         * refused as unpaired. */
+        g_stream_test_wall_s++;
+        for (uint8_t n = 1; n <= MESH_STREAM_PER_PEER_MAX; n++) {
+            uint8_t stranger[32];
+            stream_test_peer_key(stranger, n);
+            ASSERT_EQ(stream_test_open_as(&lk, stranger, 0,
+                                          STREAM_TEST_GUARD),
+                      MESH_STREAM_REFUSED_PEER_UNPAIRED);
+        }
+
+        /* The paired peer's next OPEN in that second is still admitted. */
+        ASSERT_EQ(stream_test_open_as(&lk, paired, 2, STREAM_TEST_GUARD),
+                  -1);
+        ASSERT_EQ(mesh_stream_test_live_count(STREAM_TEST_GUARD), (size_t)2);
+
+        /* The unpaired flood is still bounded: one more stranger finds no
+         * cadence slot left and is refused by name before any pairing
+         * read. */
+        uint8_t late[32];
+        stream_test_peer_key(late, 20);
+        ASSERT_EQ(stream_test_open_as(&lk, late, 0, STREAM_TEST_GUARD),
+                  MESH_STREAM_REFUSED_RATE);
+        clock_reset_default();
+        mesh_stream_service_unregister(STREAM_TEST_GUARD);
         PASS();
     }
 
