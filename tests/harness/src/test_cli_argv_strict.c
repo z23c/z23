@@ -168,6 +168,10 @@ static char *cas_envp[5];
 /* Per-fixture overrides: binary to exec (default CAS_BIN) and one extra
  * NAME=value environment entry. Reset by each fixture that sets them. */
 static const char *cas_exec_path = NULL;
+#if !defined(_WIN32)
+/* Opt in only for explicitly reviewed public synthetic output. */
+static bool cas_capture_safe_note;
+#endif
 static char cas_extra_env[PATH_MAX + 32];
 /* When set, the child PATH is only the fixture bin directory and the
  * systemctl-disable variable is absent, so a lookup really execs. */
@@ -1190,9 +1194,73 @@ static int cas_test_zcl_rpc_overlong_datadir_refuses(void)
     if (base[0]) (void)test_rm_rf_recursive(base);
     return failures;
 }
+#if !defined(_WIN32)
+static int cas_test_capture_evidence(void)
+{
+    int failures = 0;
+    TEST("CLI capture: bounded merged tail and outcome retain the actual child") {
+        char *argv[] = {"/bin/sh", "-c",
+            "printf stdout-prefix; printf '%0800d' 0; printf CLI_TAIL >&2; exit 7", NULL};
+        char out[32], evidence[TEST_EVIDENCE_CAP + 512];
+        test_evidence_reset(); cas_exec_path = "/bin/sh"; cas_capture_safe_note = true;
+        int rc = cas_run(argv, "/tmp", out, sizeof(out));
+        cas_exec_path = NULL; cas_capture_safe_note = false;
+        (void)test_evidence_render(evidence, sizeof(evidence), __FILE__, __LINE__);
+        ASSERT(rc == 7 && strncmp(out, "stdout-prefix", 13) == 0);
+        ASSERT(strstr(evidence, "CLI_TAIL") != NULL);
+        ASSERT(strstr(evidence, "observed=1") && strstr(evidence, "eof=1"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int cas_test_capture_withheld(void)
+{
+    int failures = 0;
+    TEST("CLI capture: metadata-only path withholds child and argv secrets") {
+        char *argv[] = {"/bin/sh", "-c", "printf CHILD_SECRET; exit 3", "ARGV_SECRET", NULL};
+        char out[32], evidence[TEST_EVIDENCE_CAP + 512];
+        test_evidence_reset(); cas_exec_path = "/bin/sh"; cas_capture_safe_note = false;
+        int rc = cas_run(argv, "/tmp", out, sizeof(out));
+        cas_exec_path = NULL;
+        (void)test_evidence_render(evidence, sizeof(evidence), __FILE__, __LINE__);
+        ASSERT(rc == 3 && strcmp(out, "CHILD_SECRET") == 0);
+        ASSERT(strstr(evidence, "CHILD_SECRET") == NULL && strstr(evidence, "ARGV_SECRET") == NULL);
+        ASSERT(strstr(evidence, "observed=1") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int cas_test_daemon_evidence(void)
+{
+    int failures = 0;
+    TEST("CLI daemon capture: needle stop preserves observed merged tail") {
+        char *argv[] = {"/bin/sh", "-c", "printf 'READY-%0800d-DAEMON_END' 0 >&2; exec sleep 30", NULL};
+        const char *const needles[] = {"READY", NULL};
+        char out[32], evidence[TEST_EVIDENCE_CAP + 512];
+        test_evidence_reset(); cas_exec_path = "/bin/sh"; cas_capture_safe_note = true;
+        bool found = cas_run_daemon_wait_for(argv, "/tmp", needles, 3000, out, sizeof(out));
+        cas_exec_path = NULL; cas_capture_safe_note = false;
+        (void)test_evidence_render(evidence, sizeof(evidence), __FILE__, __LINE__);
+        ASSERT(found && strstr(out, "READY") != NULL);
+        ASSERT(strstr(evidence, "DAEMON_END") != NULL);
+        ASSERT(strstr(evidence, "stop=needle") && strstr(evidence, "eof=0"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
 int test_cli_argv_strict(void)
 {
     int failures = 0;
+
+#if !defined(_WIN32)
+    failures += cas_test_capture_evidence();
+    failures += cas_test_capture_withheld();
+    failures += cas_test_daemon_evidence();
+#endif
 
     if (cas_dev_bin_fresh())
         failures += cas_test_machine_boot_skips_service();
