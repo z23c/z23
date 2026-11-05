@@ -146,12 +146,15 @@ void dandelion_maybe_rotate_epoch(struct dandelion_state *ds,
     /* Fisher-Yates shuffle backed by the cryptographic RNG. On RNG
      * failure: leave num_stem_peers=0 so dandelion_should_stem returns
      * false and txs fluff via normal relay (safer than picking with a
-     * compromised RNG). */
+     * compromised RNG), and back-date the epoch so it expires after one
+     * retry interval rather than a full epoch. */
     bool rng_ok = dandelion_shuffle_stem_candidates(candidates, num_candidates);
 
     if (!rng_ok) {
         fprintf(stderr, "[dandelion] stem-peer RNG failed; deferring "  // obs-ok:helper-context-logged
-                        "selection (txs will fluff this epoch)\n");
+                        "selection (txs will fluff, retry in %d s)\n",
+                DANDELION_RNG_RETRY_SECS);
+        ds->epoch_start = now - DANDELION_EPOCH_SECS + DANDELION_RNG_RETRY_SECS;
         ds->num_stem_peers = 0;
         ds->stem_rr_index = 0;
         dandelion_clear_stem_slots(ds);

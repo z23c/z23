@@ -935,3 +935,7 @@ later lane flips it HARD.
 - 2026-11-05T16:14:01Z — REASON: FlyClient gate: bind a peer proof to headers this node validated, with a distinct no-offence refusal code for a proof we cannot check; sync strategy only, no consensus predicate change; owner instruction 2026-11-05 you have authority to unseal core to fix everything, as relayed by the lane brief
   old ROOT: a61c915fbc9da7096874695da51b2bf58e1086c1a662047f1420776121eae718
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-05T16:20:03Z — REASON: Dandelion: retry a refused stem-peer RNG draw after 60 seconds instead of fluffing for the whole 600 second epoch; relay policy only, no consensus predicate change; owner instruction 2026-11-05 you have authority to unseal core to fix everything, as relayed by the lane brief
+  old ROOT: cd033043e85ff2c7030cad8d85442a9e3f4b87b3f28823b90edd8de8bb41a165
+  by: owner unseal ritual (make core-unseal)

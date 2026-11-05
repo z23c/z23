@@ -39,6 +39,9 @@
 /* Epoch duration: stem relay peers rotate every ~10 minutes */
 #define DANDELION_EPOCH_SECS      600
 
+/* After the RNG refuses stem-peer selection, txs fluff until this retry. */
+#define DANDELION_RNG_RETRY_SECS  60
+
 /* Embargo timeout: if a stemmed tx isn't seen back as fluff within
  * this many seconds, the node fluffs it (fail-safe). */
 #define DANDELION_EMBARGO_SECS    30
