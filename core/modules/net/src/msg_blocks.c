@@ -364,7 +364,7 @@ static void msg_getdata_hold_item(struct msg_processor *mp,
 bool process_getdata(struct msg_processor *mp, struct p2p_node *node,
                      struct byte_stream *s)
 {
-    if (node->swarm_manifest_sent) {
+    if (node->state == PEER_SNAPSHOT_SERVING) {
         printf("Peer %s: deferring getdata while serving snapshot\n",
                node->addr_name);
         return true;

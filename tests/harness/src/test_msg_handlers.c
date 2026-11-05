@@ -1525,17 +1525,17 @@ static void pin_inv_stream(struct byte_stream *s, uint32_t type,
     inv_item_serialize(&inv, s);
 }
 
-static int test_pin_getdata_manifest_defers(void)
+static int test_pin_getdata_serving_defers(void)
 {
     int failures = 0;
-    TEST("msg_handlers: getdata while a snapshot manifest is sent is deferred") {
+    TEST("msg_handlers: getdata while a snapshot is served to the peer is deferred") {
         struct net_manager nm;
         net_manager_init(&nm);
         struct msg_processor mp;
         pin_mp_init(&mp, NULL, &nm);
         struct p2p_node *node = pin_peer_node(&nm, 611);
         ASSERT(node != NULL);
-        node->swarm_manifest_sent = true;
+        node->state = PEER_SNAPSHOT_SERVING;
 
         struct uint256 h;
         memset(h.data, 0x61, sizeof(h.data));
@@ -2580,7 +2580,7 @@ int test_msg_handlers(void)
     failures += test_intake_worker_rejects_nonretryable_body();
     failures += test_intake_worker_submit_unavailable_rejects();
     failures += test_intake_worker_accept_without_landing_not_marked_seen();
-    failures += test_pin_getdata_manifest_defers();
+    failures += test_pin_getdata_serving_defers();
     failures += test_swarm_manifest_above_tip_starts_nothing();
     failures += test_swarm_manifest_repeats_cost_nothing_lasting();
     failures += test_swarm_manifest_near_tip_as_before();

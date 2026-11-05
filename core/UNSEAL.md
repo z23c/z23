@@ -999,3 +999,7 @@ later lane flips it HARD.
 - 2026-11-06T00:50:59Z — REASON: Check the block merkle root without a second allocation
   old ROOT: 4d075f52fbf6c4785daf538c5a84b800dafa668584b11ec6a168d15cdc368137
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T00:52:17Z — REASON: Hold getdata and getheaders only while a snapshot is being served
+  old ROOT: 18a5c995eaa1426aed57056b5d522136cfbb0e4370467e3715593d73de01e8a1
+  by: owner unseal ritual (make core-unseal)

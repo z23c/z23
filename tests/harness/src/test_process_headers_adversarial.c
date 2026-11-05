@@ -510,13 +510,13 @@ static int ph_case_sibling_drops(const struct chain_params *cp, char *dir,
     {
         struct msg_headers_stats a, b;
         msg_headers_get_stats(&a);
-        bool saved = node->swarm_manifest_sent;
-        node->swarm_manifest_sent = true;
+        enum peer_state saved = node->state;
+        node->state = PEER_SNAPSHOT_SERVING;
         struct byte_stream s;
         stream_init(&s, 8);
         bool ret = process_getheaders(&mp3, node, &s);
         stream_free(&s);
-        node->swarm_manifest_sent = saved;
+        node->state = saved;
         msg_headers_get_stats(&b);
         PH_CHECK("process_getheaders: snapshot-serving defer counted",
                  ret == true &&

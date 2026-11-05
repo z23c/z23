@@ -374,7 +374,7 @@ static bool pd_snapshot_defer_parks_nothing(struct msg_processor *mp,
     struct p2p_node snap;
     pd_setup_node(&snap);
     snap.id = node_id;
-    snap.swarm_manifest_sent = true;
+    snap.state = PEER_SNAPSHOT_SERVING;
     req->read_pos = 0;
     bool handled = process_getheaders(mp, &snap, req);
     bool unarmed = handled && snap.getheaders_deferred_len == 0 &&

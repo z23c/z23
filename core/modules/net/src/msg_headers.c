@@ -1102,7 +1102,7 @@ static void getheaders_roll_serve_window(struct p2p_node *node, int64_t now_unix
 bool process_getheaders(struct msg_processor *mp, struct p2p_node *node,
                         struct byte_stream *s)
 {
-    if (node->state == PEER_SNAPSHOT_SERVING || node->swarm_manifest_sent) {
+    if (node->state == PEER_SNAPSHOT_SERVING) {
         uint64_t n =
             atomic_fetch_add(&g_getheaders_deferred_snapshot_serving, 1) + 1;
         if (getheaders_suppress_rising_edge(&g_getheaders_deferred_streak))
