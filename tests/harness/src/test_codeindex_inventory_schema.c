@@ -349,6 +349,25 @@ static bool cis_corrupt_page_artifact(const char *root, const uint8_t artifact[3
     return codeindex_pages_list(ci, "lib/net", &out, 1, &prior_untrusted) == -2;
 }
 
+static bool cis_native_output(const struct zcl_command_reply *reply, const char *commit,
+                              const char *state, int64_t accepted, int64_t stale)
+{
+    if (!state)
+        return json_get_int(json_get(&reply->data, "accepted")) == accepted &&
+               json_get_int(json_get(&reply->data, "stale")) == stale;
+    const char *actual = json_get_str(json_get(&reply->data, "state"));
+    const char *overlay = json_get_str(json_get(&reply->data, "live_overlay"));
+    bool ok = actual && !strcmp(actual, state) && overlay && !strcmp(overlay, "unknown") &&
+              json_get_int(json_get(&reply->data, "matches")) == accepted;
+    if (ok && !strcmp(state, "committed_match")) {
+        const char *source = json_get_str(json_get(&reply->data, "source_commit"));
+        const char *artifact = json_get_str(json_get(&reply->data, "artifact_root"));
+        ok = source && !strcmp(source, commit) && artifact && strlen(artifact) == 64;
+    }
+    if (ok && !strcmp(state, "ambiguous")) ok = json_get(&reply->data, "body") == NULL;
+    return ok;
+}
+
 static bool cis_native_call(const char *root, const char *command, const char *commit,
                             const char *key, const char *value, const char *state,
                             int64_t accepted, int64_t stale)
@@ -367,22 +386,7 @@ static bool cis_native_call(const char *root, const char *command, const char *c
     if (ok && !strcmp(command, "code.pages.import")) zcl_native_handle_code_pages_import(&request, &reply);
     else if (ok) zcl_native_handle_code_pages_get(&request, &reply);
     ok = ok && reply.status == ZCL_COMMAND_STATUS_PASSED;
-    if (ok && state) {
-        const char *actual = json_get_str(json_get(&reply.data, "state"));
-        const char *overlay = json_get_str(json_get(&reply.data, "live_overlay"));
-        ok = actual && !strcmp(actual, state) && overlay && !strcmp(overlay, "unknown") &&
-             json_get_int(json_get(&reply.data, "matches")) == accepted;
-        if (ok && !strcmp(state, "committed_match")) {
-            const char *source = json_get_str(json_get(&reply.data, "source_commit"));
-            const char *artifact = json_get_str(json_get(&reply.data, "artifact_root"));
-            ok = source && !strcmp(source, commit) && artifact && strlen(artifact) == 64;
-        }
-        if (ok && !strcmp(state, "ambiguous"))
-            ok = json_get(&reply.data, "body") == NULL;
-    } else if (ok) {
-        ok = json_get_int(json_get(&reply.data, "accepted")) == accepted &&
-             json_get_int(json_get(&reply.data, "stale")) == stale;
-    }
+    if (ok) ok = cis_native_output(&reply, commit, state, accepted, stale);
     zcl_command_reply_free(&reply);
     json_free(&input);
     return ok;
