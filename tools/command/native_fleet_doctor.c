@@ -5,9 +5,9 @@
  * It composes reads that already exist and nothing else: the running node's
  * peer list and machine-identity capsule over the one-shot JSON-RPC client,
  * and fleet status, the fleet.machines roster, the fleet.nodes.table pairing
- * store and the fleet board wiki list. It never writes, never opens a key file itself,
- * and prints public fingerprints only: an unknown field of any source is
- * dropped, never copied. Every source is bounded: the node calls share one
+ * store and the fleet board wiki list. It never writes, never opens a key file
+ * itself, and prints public fingerprints only: an unknown field of any source
+ * is dropped, never copied. Every source is bounded: the node calls share one
  * six-second deadline, rosters and pairings are capped at 64 rows, the wiki
  * count at the board's own 256.
  *
@@ -19,7 +19,8 @@
  *   wiki_pages, noise_fingerprint_sha3.
  *
  * state is ok | missing | blocked | unknown. A check that needs the running
- * node is "blocked" while no node answers, never guessed. */
+ * node is "blocked" while no node answers, never guessed. The mail and
+ * roster_gate rows only inform: neither moves the top-level state or next. */
 
 #include "command/native_command.h"
 #include "command/native_fleet.h"

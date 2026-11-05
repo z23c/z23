@@ -4030,7 +4030,8 @@ static int test_fe_revoke_gate(void)
         ASSERT(line && fleet_head_parse(line, &head, NULL));
         ASSERT(fleet_head_revokes(&head, box_pub));
         ASSERT(fleet_head_revokes(&head, signer.pubkey));
-        ASSERT(!strstr(fd_cstr(&reply.data, "left_standing"), "seed"));
+        /* It says what it did not take away. */
+        ASSERT(strstr(fd_cstr(&reply.data, "left_standing"), "ssh") != NULL);
         zcl_command_reply_free(&reply);
 
         /* The gate on this node: posts and the peer refused, the other kept. */
