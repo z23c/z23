@@ -380,11 +380,10 @@ static bool cis_native_call(const char *root, const char *command, const char *c
     return ok;
 }
 
-static bool cis_native_pages(void)
+static bool cis_native_git_setup(const char *root, char commit[65], char tree[65])
 {
-    char root[PLATFORM_TEMP_PATH_MAX] = {0}, output[256], commit[65], tree[65], artifact[PLATFORM_TEMP_PATH_MAX + 32];
-    if (!platform_temp_directory_create("z23-native-pages-", root, sizeof(root)) ||
-        !cis_put(root, "module/file.c", "int one;\n") || !cis_put(root, "module2/file.c", "int two;\n")) return false;
+    char output[256];
+    if (!cis_put(root, "module/file.c", "int one;\n") || !cis_put(root, "module2/file.c", "int two;\n")) return false;
     const char *init[] = {"git", "-C", root, "init", "-q", NULL};
     const char *add[] = {"git", "-C", root, "add", "--", "module", "module2", NULL};
     const char *save[] = {"git", "-C", root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
@@ -397,14 +396,26 @@ static bool cis_native_pages(void)
     output[strcspn(output, "\r\n")] = '\0';
     if (strlen(output) != 40) return false;
     memcpy(commit, output, 41);
-    if (!zcl_code_pages_subject(root, commit, "module", tree)) return false;
+    return zcl_code_pages_subject(root, commit, "module", tree);
+}
+
+static bool cis_native_artifact(const char *root, const char *tree, char *artifact, size_t cap)
+{
     char lines[2048];
     int n = snprintf(lines, sizeof(lines),
         "{\"dir\":\"module\",\"tree\":\"%s\",\"topic\":\"module\",\"summary\":\"first\",\"lessons\":[],\"applies_to\":[],\"updated\":\"2026-11-04T00:00:00Z\"}\n"
         "{\"dir\":\"module2\",\"tree\":\"0000000000000000000000000000000000000000\",\"topic\":\"module2\",\"summary\":\"stale\",\"lessons\":[],\"applies_to\":[],\"updated\":\"2026-11-04T00:00:00Z\"}\n", tree);
     if (n <= 0 || (size_t)n >= sizeof(lines) || !cis_put(root, "cards.jsonl", lines)) return false;
-    n = snprintf(artifact, sizeof(artifact), "%s/cards.jsonl", root);
-    if (n <= 0 || (size_t)n >= sizeof(artifact) || chmod(artifact, 0600) != 0) return false;
+    n = snprintf(artifact, cap, "%s/cards.jsonl", root);
+    return n > 0 && (size_t)n < cap && chmod(artifact, 0600) == 0;
+}
+
+static bool cis_native_pages(void)
+{
+    char root[PLATFORM_TEMP_PATH_MAX] = {0}, commit[65], tree[65], artifact[PLATFORM_TEMP_PATH_MAX + 32];
+    if (!platform_temp_directory_create("z23-native-pages-", root, sizeof(root)) ||
+        !cis_native_git_setup(root, commit, tree) ||
+        !cis_native_artifact(root, tree, artifact, sizeof(artifact))) return false;
     return cis_native_call(root, "code.pages.import", commit, "artifact", artifact, NULL, 1, 1) &&
            cis_native_call(root, "code.pages.get", commit, "path", "module", "committed_match", 0, 0) &&
            cis_native_call(root, "code.pages.get", commit, "path", "module2", "missing", 0, 0) &&
