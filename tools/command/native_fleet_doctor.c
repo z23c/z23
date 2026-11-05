@@ -4,8 +4,8 @@
  *
  * It composes reads that already exist and nothing else: the running node's
  * peer list and machine-identity capsule over the one-shot JSON-RPC client,
- * the fleet.machines roster, the fleet.nodes.table pairing store and the
- * fleet board wiki list. It never writes, never opens a key file itself,
+ * and fleet status, the fleet.machines roster, the fleet.nodes.table pairing
+ * store and the fleet board wiki list. It never writes, never opens a key file itself,
  * and prints public fingerprints only: an unknown field of any source is
  * dropped, never copied. Every source is bounded: the node calls share one
  * six-second deadline, rosters and pairings are capped at 64 rows, the wiki
@@ -72,6 +72,9 @@ struct fd_ctx {
     bool dht_enabled;
     char dht_reason[96];
     char fingerprint[65];
+    char gate_mode[16];     /* "" while the node did not report its gate */
+    bool gate_scope;
+    bool gate_enforcing;
     struct fd_sub machines;
     struct fd_sub pairs;
     int64_t wiki_pages;
@@ -178,6 +181,19 @@ static void fd_gather_identity(struct fd_ctx *ctx)
     json_free(&body);
 }
 
+/* -fleetrostergate is a flag of the running node, so only it can say. */
+static void fd_gather_gate(struct fd_ctx *ctx)
+{
+    struct json_value body;
+    if (!ctx->node_up || !fd_rpc(ctx, "fleetstatus", "[]", &body))
+        return;
+    (void)snprintf(ctx->gate_mode, sizeof(ctx->gate_mode), "%s",
+                   fd_str(&body, "roster_gate"));
+    ctx->gate_scope = fd_bool(&body, "member");
+    ctx->gate_enforcing = fd_bool(&body, "roster_enforcing");
+    json_free(&body);
+}
+
 static void fd_gather_wiki(struct fd_ctx *ctx)
 {
     struct json_value body;
@@ -245,8 +261,9 @@ static void fd_check(struct fd_ctx *ctx, struct json_value *checks,
                      const char *name, const char *state, const char *detail,
                      const char *next, const char *warning)
 {
-    /* Mail is a developer tool: shown, never rolled into state or next. */
-    bool info = strcmp(name, "mail") == 0;
+    /* Mail is a developer tool and the roster gate only ever warns: shown,
+     * never rolled into state or next. */
+    bool info = strcmp(name, "mail") == 0 || strcmp(name, "roster_gate") == 0;
     struct json_value row;
     json_init(&row);
     json_set_object(&row);
@@ -329,6 +346,39 @@ static void fd_check_membership(struct fd_ctx *ctx, struct json_value *checks)
     fd_check(ctx, checks, "membership", "missing",
              "This box is not in a fleet and has admitted no machine.",
              FD_NEXT_ENROL, NULL);
+}
+
+/* Fleet scope with a gate that decides nothing is the case worth a warning: an
+ * operator otherwise learns it only from one log line at start. */
+static void fd_check_roster_gate(struct fd_ctx *ctx, struct json_value *checks)
+{
+    if (fd_needs_node(ctx, checks, "roster_gate"))
+        return;
+    if (!ctx->gate_mode[0]) {
+        fd_check(ctx, checks, "roster_gate", "unknown",
+                 "The node did not report its fleet roster gate.", "", NULL);
+    } else if (!ctx->gate_scope) {
+        fd_check(ctx, checks, "roster_gate", "ok",
+                 "This node trusts no fleet root, so it has no fleet scope to "
+                 "gate.", "", NULL);
+    } else if (ctx->gate_enforcing) {
+        fd_check(ctx, checks, "roster_gate", "ok",
+                 "Fleet scope is on and the roster gate is enforcing.", "",
+                 NULL);
+    } else if (strcmp(ctx->gate_mode, "off") == 0) {
+        fd_check(ctx, checks, "roster_gate", "ok",
+                 "Fleet scope is on and -fleetrostergate=0 turned the roster "
+                 "gate off.", "",
+                 "fleet posts follow pairing and role only, and roster "
+                 "revocations are not enforced; restart without "
+                 "-fleetrostergate=0 to enforce them");
+    } else {
+        fd_check(ctx, checks, "roster_gate", "ok",
+                 "Fleet scope is on and no sealed roster row is held, so the "
+                 "roster gate admits every paired peer with a role.", "",
+                 "fleet posts follow pairing and role only; run the manager "
+                 "with -fleetrostergate to publish the roster");
+    }
 }
 
 /* Count of active recorded pairings and the soonest of their expiries (0
@@ -575,6 +625,7 @@ void zcl_native_handle_fleet_doctor(const struct zcl_command_request *request,
     ctx.deadline = platform_time_monotonic_ms() + FD_NODE_BUDGET_MS;
     fd_gather_peers(&ctx);
     fd_gather_identity(&ctx);
+    fd_gather_gate(&ctx);
     fd_gather_wiki(&ctx);
     fd_sub_run(&ctx.machines, request, "fleet.machines", "zcl.fleet.machines.v1",
                FD_ROWS_MAX);
@@ -598,6 +649,7 @@ void zcl_native_handle_fleet_doctor(const struct zcl_command_request *request,
     fd_check_node(&ctx, &checks);
     fd_check_identity(&ctx, &checks);
     fd_check_membership(&ctx, &checks);
+    fd_check_roster_gate(&ctx, &checks);
     fd_check_delegation(&ctx, &checks);
     fd_check_transport(&ctx, &checks);
     fd_check_pairing(&ctx, &checks);

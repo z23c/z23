@@ -861,6 +861,8 @@ ZCL_COMMAND_READY_READ(
     "named a different block at a height this node holds, however old that "
     "check is, until a later check lands on this node's chain. A clearnet or "
     "inbound connection never counts, and a retired onion names nobody. "
+    "roster_gate is the -fleetrostergate mode (on, default or off); "
+    "roster_enforcing is false while fleet posts follow pairing and role only. "
     "Contains no wallet data.", 0,
     "wallet,fleet,status,roster,onion,agree",
     "zcl.command.empty_input.v1", "zcl.fleet_status.v1", "", "",

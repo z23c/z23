@@ -509,7 +509,7 @@ record before the next lane starts.
 
 ## Landing
 
-Lane 1 (`fleetenrol`, unified with ZID) and the roster and relay gate of lane 2 (`fleetroster`, step 2) have landed; the rest of lane 2 (revocation rows, `member_seq`, delegates) and lanes 3 to 7 are not yet landed. The Status stays `draft` until the later lanes land.
+Lane 1 (`fleetenrol`, unified with ZID) and the roster and relay gate of lane 2 (`fleetroster`, step 2) have landed; the rest of lane 2 (revocation rows, `member_seq`, delegates) and lanes 3 to 7 are not yet landed. One box's local revocation exists: `fleet roster revoke` seals and stores the next roster head on the box holding the operator key, the gate on that box refuses the machine within 10 seconds and across restarts, `fleet admit` refuses it, and `fleet doctor` warns when fleet scope runs with the gate not enforcing; carrying a head between boxes is still a paste. The Status stays `draft` until the later lanes land.
 
 ## Discussion
 

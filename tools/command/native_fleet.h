@@ -250,6 +250,11 @@ void zcl_fmc_cand_emit(const struct zcl_fmc_cand_reg *reg,
 void zcl_native_handle_fleet_doctor(const struct zcl_command_request *request,
                                     struct zcl_command_reply *reply);
 
+/* fleet.roster.revoke (tools/command/native_fleet_roster_revoke.c): revoke
+ * one machine on this box by sealing and storing the next roster head. */
+void zcl_native_handle_fleet_roster_revoke(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply);
+
 /* Host facts shared by fleet.vitals.sample and fleet.vitals.read: one
  * measurement, so both leaves report the same numbers. Index order is the
  * sample catalog order (load1 centi, cores, cores free, ram used MiB, ram

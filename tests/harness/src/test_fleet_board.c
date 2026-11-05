@@ -7870,7 +7870,9 @@ static int test_fleet_board_roster_revoked_box(void)
          "box it does not revoke still is, and an untrusted head admits "
          "nobody") {
         struct node_db db;
-        uint8_t revoked_signer[32], kept_signer[32], seed[32];
+        static struct fleet_status status;
+        static struct fleet_board_post note;
+        uint8_t revoked_signer[32], kept_signer[32], seed[32], held_id[32];
         const int64_t now = 900000;
         memset(&db, 0, sizeof db);
         ASSERT(node_db_open(&db, ":memory:"));
@@ -7883,6 +7885,19 @@ static int test_fleet_board_roster_revoked_box(void)
          * behaviour), and the verified lines are now memoised. */
         ASSERT(boot_fleet_roster_admits_peer(&db, revoked_signer, now));
         ASSERT(boot_fleet_roster_admits_peer(&db, kept_signer, now));
+        /* Armed: fleet status says the gate is deciding, and the flag that
+         * turns it off says so too. */
+        fleet_status_collect(&db, now, &status);
+        ASSERT(status.roster_enforcing);
+        ASSERT_EQ(status.roster_gate, BOOT_FLEET_ROSTER_GATE_DEFAULT);
+        boot_fleet_roster_set_gate(BOOT_FLEET_ROSTER_GATE_OFF);
+        fleet_status_collect(&db, now, &status);
+        ASSERT(!status.roster_enforcing);
+        ASSERT_EQ(status.roster_gate, BOOT_FLEET_ROSTER_GATE_OFF);
+        boot_fleet_roster_set_gate(BOOT_FLEET_ROSTER_GATE_DEFAULT);
+        /* Something m5 wrote before it is revoked. */
+        ASSERT(fbr_store_row_id(&db, FBR_MEMBER, "before the revocation", now,
+                                3600, held_id));
 
         /* The head revokes m5's BOX key (fbr_line derives it from the
          * signer id). The memo must not carry m5 past it. */
@@ -7895,6 +7910,14 @@ static int test_fleet_board_roster_revoked_box(void)
                   BOOT_FLEET_ROSTER_NOT_MEMBER);
         ASSERT(!boot_fleet_roster_admits_peer(&db, revoked_signer, now));
         ASSERT(boot_fleet_roster_admits_peer(&db, kept_signer, now));
+        /* What m5 wrote stays; what it writes next does not get in. */
+        ASSERT(db_fleet_board_have(&db, held_id));
+        memset(&note, 0, sizeof note);
+        note.kind = FLEET_BOARD_KIND_NOTE;
+        note.scope = FLEET_BOARD_SCOPE_FLEET;
+        memcpy(note.host_pubkey, revoked_signer, 32);
+        ASSERT_EQ(boot_fleet_roster_screen_post(&db, &note, now),
+                  FLEET_BOARD_ERR_ROLE);
 
         /* A head that exists and cannot be trusted is not "nothing
          * revoked": nobody is admitted. */
@@ -10828,8 +10851,8 @@ static int test_fleet_status_reply(void)
     int failures = 0;
     struct node_db db;
     TEST("fleet status: the reply names only membership, counts, the "
-         "verdict, the send refusal, and per machine a name, connection and "
-         "agreement") {
+         "verdict, the send refusal, the roster gate, and per machine a name, "
+         "connection and agreement") {
         struct fleet_status_peer peers[1];
         struct json_value out;
         ASSERT(fst_open(&db, false, FST_ONCE));
@@ -10844,7 +10867,9 @@ static int test_fleet_status_reply(void)
         ASSERT_EQ(json_get_int(json_get(&out, "machines_total")), 3);
         ASSERT_EQ(json_get_int(json_get(&out, "machines_connected")), 1);
         ASSERT_EQ(json_get_int(json_get(&out, "local_tip")), FST_LOCAL);
-        ASSERT_EQ(out.num_children, (size_t)8);
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "roster_gate")), "default");
+        ASSERT(json_get(&out, "roster_enforcing") != NULL);
+        ASSERT_EQ(out.num_children, (size_t)10);
         const struct json_value *rows = json_get(&out, "machines");
         ASSERT_EQ(json_size(rows), (size_t)3);
         for (size_t i = 0; i < json_size(rows); i++)

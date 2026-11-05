@@ -1,7 +1,8 @@
 /* One-paste fleet enrolment: how an owner adds a computer to the fleet.
  *
  * WHAT THIS BRANCH IS. Five leaves and one ceremony, plus `fleet roster head`,
- * which signs the revocation list `fleet import` also accepts. `fleet invite` on the
+ * which signs the revocation list `fleet import` also accepts, and `fleet roster
+ * revoke`, which does both for one machine on this box. `fleet invite` on the
  * manager prints a single signed line. The owner pastes it into the AI agent
  * on the new computer, which clones, builds and runs `fleet join`. That
  * prints a second single line — the box's signed enrolment receipt — which
@@ -175,6 +176,39 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_fleet_enrol_dispatch)
 
 ZCL_COMMAND_READY_COMMAND(
+    "fleet.roster.revoke", "fleet", "",
+    "Revoke one machine on this box",
+    "One step on the box holding the operator key: reads the roster head this "
+    "box holds, adds the named box public key and every signer key its roster "
+    "rows name, seals the result at the next sequence and stores it here. The "
+    "relay gate on this box then refuses that machine's fleet posts and "
+    "refuses to serve or pull from it, within 10 seconds on a running node, "
+    "and across restarts. Roster rows and stored board posts stay readable. "
+    "Refuses without confirm_revoke=yes and says what the word would do; only "
+    "the exact word yes counts (FLEET_REVOKE_UNCONFIRMED). Revoking a machine "
+    "already revoked changes nothing and needs no word (already_revoked true). "
+    "A key with no row on this operator's roster is refused "
+    "(FLEET_REVOKE_BOX_UNKNOWN); so is a box without the operator key "
+    "(FLEET_REVOKE_NOT_OPERATOR) and a held head this box cannot trust "
+    "(FLEET_HEAD_UNREADABLE). `fleet admit` refuses a revoked machine; to let "
+    "one back, mint a higher head without it (`fleet roster head`) and import "
+    "it. This is this box's policy: the head is printed for `fleet import` "
+    "elsewhere and sent nowhere. A box running -fleetrostergate=0 enforces no "
+    "head, and `fleet doctor` warns about that. The machine's ssh bridge line, "
+    "mesh pairing and role rows are not touched.", 0,
+    "fleet,roster,revoke,revocation,remove,machine,head,operator",
+    "zcl.fleet_roster_revoke_input.v1", "zcl.fleet.roster.revoke.v1",
+    "box_pubkey,confirm_revoke", "box_pubkey",
+    "z23 fleet roster revoke <box_pubkey> --confirm_revoke=yes",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_fleet_roster_revoke)
+
+ZCL_COMMAND_READY_COMMAND(
     "fleet.import", "fleet", "",
     "Import a sealed roster line",
     "How a box that is not the manager learns which machines its fleet "
@@ -256,16 +290,20 @@ ZCL_COMMAND_READY_READ(
     "fleet.doctor", "fleet", "",
     "Where this node is in fleet setup, and what to run next",
     "One read-only checklist, in this order: node, identity, membership, "
-    "delegation, transport, pairing, mail, wiki. Each check is ok, missing, "
-    "blocked or unknown, with one plain sentence and an existing command to "
-    "run next; the top-level state is the worst check and the top-level next "
-    "is the first command named. Composes reads that already exist (the "
-    "node's peer list and machine identity, fleet.machines, fleet.nodes.table "
-    "and the wiki list), so it writes nothing and prints public "
-    "fingerprints only. Node calls share a six second deadline; machine and "
-    "pairing lists stop at 64 rows. Checks that need the running node are "
-    "blocked while none answers. The agent mail store is a developer tool and "
-    "is reported unknown with its z23-dev command.",
+    "roster_gate, delegation, transport, pairing, mail, wiki. Each check is ok, "
+    "missing, blocked or unknown, with one plain sentence and an existing "
+    "command to run next; the top-level state is the worst check and the "
+    "top-level next is the first command named. Composes reads that already "
+    "exist (the node's peer list, machine identity and fleet status, "
+    "fleet.machines, fleet.nodes.table and the wiki list), so it writes nothing "
+    "and prints public fingerprints only. Node calls share a six second "
+    "deadline; machine and pairing lists stop at 64 rows. Checks that need the "
+    "running node are blocked while none answers. The agent mail store is a "
+    "developer tool and is reported unknown with its z23-dev command. "
+    "roster_gate carries a warning when this node has a fleet root and its "
+    "roster gate is not enforcing (-fleetrostergate=0, or no sealed roster row "
+    "held); like mail it is informational and never changes the top-level "
+    "state or next.",
     32768,
     "fleet,doctor,setup,status,checklist,next,onboarding",
     "zcl.fleet_doctor_input.v1", "zcl.fleet_doctor.v1", "datadir", "",

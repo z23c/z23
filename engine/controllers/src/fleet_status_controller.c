@@ -77,9 +77,15 @@ static void collect_visit(const struct boot_fleet_roster_machine *m,
 void fleet_status_collect(struct node_db *ndb, int64_t now,
                           struct fleet_status *out)
 {
+    static const uint8_t no_key[32];
     uint8_t root[32];
     bool present = false;
     memset(out, 0, sizeof *out);
+    out->roster_gate = boot_fleet_roster_gate();
+    /* The verdict for no key at all is the gate's own state: UNARMED admits
+     * by pairing and role, and every other verdict is the gate deciding. */
+    out->roster_enforcing = boot_fleet_roster_check(ndb, no_key, now) !=
+                            BOOT_FLEET_ROSTER_UNARMED;
     if (zcl_fleet_roster_root(root, &present, NULL)) {
         out->member = present;
     } else {
@@ -376,6 +382,16 @@ bool fleet_status_peer_on_roster(const struct fleet_status *s,
            machine_index_for_peer(s, addr_name, inbound) >= 0;
 }
 
+static const char *roster_gate_name(enum boot_fleet_roster_gate gate)
+{
+    switch (gate) {
+    case BOOT_FLEET_ROSTER_GATE_ON: return "on";
+    case BOOT_FLEET_ROSTER_GATE_OFF: return "off";
+    case BOOT_FLEET_ROSTER_GATE_DEFAULT: break;
+    }
+    return "default";
+}
+
 const char *fleet_status_verdict_name(enum fleet_status_verdict v)
 {
     switch (v) {
@@ -413,6 +429,8 @@ void fleet_status_render(const struct fleet_status *s, struct json_value *out)
     json_push_kv_int(out, "machines_total", (int64_t)s->machine_count);
     json_push_kv_int(out, "machines_connected", (int64_t)s->connected_count);
     json_push_kv_int(out, "local_tip", s->local_tip > 0 ? s->local_tip : 0);
+    json_push_kv_str(out, "roster_gate", roster_gate_name(s->roster_gate));
+    json_push_kv_bool(out, "roster_enforcing", s->roster_enforcing);
     json_init(&list);
     json_set_array(&list);
     for (size_t i = 0; i < s->machine_count; i++) {

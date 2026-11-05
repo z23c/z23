@@ -1279,15 +1279,18 @@ static int test_fe_render(void)
 #define FD_DECOY "deadc0dedeadc0dedeadc0dedeadc0dedeadc0dedeadc0dedeadc0dedeadc0de"
 
 static bool g_fd_node_up;
+static const char *g_fd_gate; /* the fleetstatus answer; NULL: an older node */
 
-/* A stand-in node: a stub error when "down", else the three reads the
- * doctor makes. Five peers, two of them on the hybrid transport; the
- * identity capsule carries a decoy private field the doctor must drop. */
+/* A stand-in node: a stub error when "down", else the reads the doctor
+ * makes. Five peers, two of them on the hybrid transport; the identity
+ * capsule carries a decoy private field the doctor must drop. */
 static char *fd_rpc_hook(const char *method, const char *params)
 {
     (void)params;
     if (!g_fd_node_up)
         return strdup("{\"code\":-32603,\"message\":\"connect failed\"}");
+    if (strcmp(method, "fleetstatus") == 0 && g_fd_gate)
+        return strdup(g_fd_gate);
     if (strcmp(method, "getpeerinfo") == 0)
         return strdup("[{\"transport\":\"noise_xxhfs\"},"
                       "{\"transport\":\"plaintext\"},"
@@ -1400,7 +1403,7 @@ static int test_fd_empty_datadir(void)
 {
     int failures = 0;
     static const char *const order[] = { "node", "identity", "membership",
-        "delegation", "transport", "pairing", "mail", "wiki" };
+        "roster_gate", "delegation", "transport", "pairing", "mail", "wiki" };
     TEST("fleet doctor: an empty datadir and no node is blocked at the node "
          "and names an existing command for every gap") {
         char dir[PATH_MAX];
@@ -1415,8 +1418,8 @@ static int test_fd_empty_datadir(void)
         ASSERT_STR_EQ(fd_cstr(&reply.data, "state"), "blocked");
         ASSERT_STR_EQ(fd_cstr(&reply.data, "next"), "z23 core status");
         checks = json_get(&reply.data, "checks");
-        ASSERT(checks && checks->num_children == 8);
-        for (size_t i = 0; i < 8; i++)
+        ASSERT(checks && checks->num_children == 9);
+        for (size_t i = 0; i < 9; i++)
             ASSERT_STR_EQ(fd_cstr(&checks->children[i], "name"), order[i]);
         ASSERT_STR_EQ(fd_cstr(fd_check_row(&reply, "node"), "state"),
                       "blocked");
@@ -1439,9 +1442,9 @@ static int test_fd_empty_datadir(void)
         ASSERT_STR_EQ(fd_cstr(fd_check_row(&reply, "wiki"), "state"),
                       "blocked");
         /* Every named command is a real catalog path (mail is z23-dev). */
-        for (size_t i = 0; i < 8; i++) {
+        for (size_t i = 0; i < 9; i++) {
             const char *next = fd_cstr(&checks->children[i], "next");
-            ASSERT(next[0] == '\0' || i == 6 || fd_next_resolves(next));
+            ASSERT(next[0] == '\0' || i == 7 || fd_next_resolves(next));
         }
         zcl_command_reply_free(&reply);
         PASS();
@@ -3856,6 +3859,412 @@ static int test_fe_preview_conflicts(void)
     return failures;
 }
 
+/* ── fleet.roster.revoke ────────────────────────────────────────────────── */
+
+#define FE_REVOKE_YES ",\"confirm_revoke\":\"yes\""
+
+static bool fe_revoke_call(const uint8_t box[32], const char *tail,
+                           struct zcl_command_reply *reply)
+{
+    char hex[FLEET_ENROL_PUBKEY_HEX], body[256];
+    zcl_hex_encode(box, 32, hex);
+    (void)snprintf(body, sizeof(body), "{\"box_pubkey\":\"%s\"%s}", hex, tail);
+    return fe_leaf_call("fleet.roster.revoke", "zcl.fleet.roster.revoke.v1",
+                        body, reply);
+}
+
+/* The gate's answer to one new fleet-scope note from `host`. */
+static enum fleet_board_result fe_screen_note(struct node_db *db,
+                                              const uint8_t host[32],
+                                              int64_t now)
+{
+    static struct fleet_board_post post;
+    memset(&post, 0, sizeof(post));
+    post.kind = FLEET_BOARD_KIND_NOTE;
+    post.scope = FLEET_BOARD_SCOPE_FLEET;
+    (void)snprintf(post.agent, sizeof(post.agent), "worker");
+    memcpy(post.host_pubkey, host, 32);
+    return boot_fleet_roster_screen_post(db, &post, now);
+}
+
+static enum fleet_head_state fe_head_state(const uint8_t op[32])
+{
+    static struct fleet_head held;
+    return fleet_head_load(op, &held, NULL);
+}
+
+static bool fe_revoke_db_open(struct node_db *db, const char *dd)
+{
+    char path[PATH_MAX + 16];
+    memset(db, 0, sizeof(*db));
+    return snprintf(path, sizeof(path), "%s/node.db", dd) > 0 &&
+           node_db_open(db, path);
+}
+
+static int test_fe_revoke_refusals(void)
+{
+    int failures = 0;
+    TEST("fleet roster revoke: an unknown key, a bad key, no confirm word, a "
+         "box without the operator key and an untrusted head each refuse by "
+         "name and change nothing") {
+        char row[FLEET_ENROL_MACHINE_TEXT_MAX];
+        struct fleet_machine machine;
+        struct zcl_command_reply reply;
+        uint8_t seed[32], pub[32], box_seed[32], box_pub[32];
+        uint8_t ghost_seed[32], ghost_pub[32];
+        const char *why = NULL;
+        bool appended = false;
+
+        fe_isolate("revoke-not-operator");
+        fe_key(0x72, box_seed, box_pub);
+        ASSERT(fe_revoke_call(box_pub, FE_REVOKE_YES, &reply));
+        ASSERT_STR_EQ(reply.error.code, "FLEET_REVOKE_NOT_OPERATOR");
+        ASSERT_STR_EQ(reply.error.evidence, FLEET_ENROL_WHY_OPERATOR_UNKNOWN);
+        zcl_command_reply_free(&reply);
+        /* A member holds a key of its own, which is not the operator's. */
+        ASSERT(fe_manager_key(seed, pub));
+        fe_key(0xb7, ghost_seed, ghost_pub);
+        ASSERT(fleet_enrol_operator_write(ghost_pub, &why));
+        ASSERT(fe_revoke_call(box_pub, FE_REVOKE_YES, &reply));
+        ASSERT_STR_EQ(reply.error.code, "FLEET_REVOKE_NOT_OPERATOR");
+        ASSERT(!reply.error.mutated);
+        zcl_command_reply_free(&reply);
+        ASSERT_EQ(fe_head_state(ghost_pub), FLEET_HEAD_ABSENT);
+
+        fe_isolate("revoke-refusals");
+        ASSERT(fe_manager_key(seed, pub));
+        ASSERT(fe_manager_row("studio", 0x72, seed, pub,
+                              FLEET_ENROL_PORT_FIRST, row, sizeof(row)));
+        ASSERT(fleet_roster_import(row, pub, &machine, &appended, &why));
+
+        ASSERT(fe_leaf_call("fleet.roster.revoke", "zcl.fleet.roster.revoke.v1",
+                            "{\"box_pubkey\":\"not-hex\"}", &reply));
+        ASSERT_STR_EQ(reply.error.code, "FLEET_HEAD_INVALID");
+        zcl_command_reply_free(&reply);
+
+        ASSERT(fe_revoke_call(ghost_pub, FE_REVOKE_YES, &reply));
+        ASSERT_STR_EQ(reply.error.code, "FLEET_REVOKE_BOX_UNKNOWN");
+        ASSERT_STR_EQ(reply.error.evidence, FLEET_ENROL_WHY_REVOKE_UNKNOWN);
+        ASSERT(strstr(reply.error.message, "fleet machines") != NULL);
+        ASSERT(!reply.error.mutated);
+        zcl_command_reply_free(&reply);
+
+        /* No word, and any word but the exact one: says what it would do. */
+        ASSERT(fe_revoke_call(box_pub, "", &reply));
+        ASSERT_STR_EQ(reply.error.code, "FLEET_REVOKE_UNCONFIRMED");
+        ASSERT(strstr(reply.error.message, "studio") != NULL);
+        ASSERT(strstr(reply.error.message, "sequence 1") != NULL);
+        ASSERT(!reply.error.mutated);
+        zcl_command_reply_free(&reply);
+        ASSERT(fe_revoke_call(box_pub, ",\"confirm_revoke\":\"Yes\"", &reply));
+        ASSERT_STR_EQ(reply.error.code, "FLEET_REVOKE_UNCONFIRMED");
+        zcl_command_reply_free(&reply);
+        ASSERT_EQ(fe_head_state(pub), FLEET_HEAD_ABSENT);
+
+        /* A head that cannot be trusted is never "nothing revoked yet". */
+        ASSERT(fe_put_leaf("roster.head", "not a head\n"));
+        ASSERT(fe_revoke_call(box_pub, FE_REVOKE_YES, &reply));
+        ASSERT_STR_EQ(reply.error.code, "FLEET_HEAD_UNREADABLE");
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fe_revoke_gate(void)
+{
+    int failures = 0;
+    TEST("fleet roster revoke: the gate refuses the machine's new posts and "
+         "peer, its row stays readable, a restart keeps it, running it twice "
+         "is one revocation, and a higher head without it lets it back") {
+        char row[FLEET_ENROL_MACHINE_TEXT_MAX];
+        char row2[FLEET_ENROL_MACHINE_TEXT_MAX];
+        char head_text[FLEET_ENROL_HEAD_TEXT_MAX];
+        char dd[PATH_MAX];
+        static struct fleet_head head;
+        struct fleet_signing_key signer, signer2;
+        struct fleet_machine machine;
+        struct zcl_command_reply reply;
+        struct node_db db;
+        uint8_t seed[32], pub[32], box_seed[32], box_pub[32];
+        uint8_t box2_seed[32], box2_pub[32];
+        const char *why = NULL;
+        const char *line;
+        bool appended = false, replaced = false;
+        /* Past the cached roster: the leaf runs in another process. */
+        const int64_t now = (int64_t)time(NULL);
+        const int64_t later = now + BOOT_FLEET_ROSTER_TTL_S + 1;
+
+        fe_isolate("revoke-gate");
+        ASSERT(fe_manager_key(seed, pub));
+        ASSERT(fe_datadir(dd, sizeof(dd), "revoke-gate-dd"));
+        fe_key(0x72, box_seed, box_pub);
+        fe_key(0x76, box2_seed, box2_pub);
+        fe_key(0x73, signer.seed, signer.pubkey);
+        fe_key(0x75, signer2.seed, signer2.pubkey);
+        g_fe_signer = &signer;
+        ASSERT(fe_manager_row("studio", 0x72, seed, pub,
+                              FLEET_ENROL_PORT_FIRST, row, sizeof(row)));
+        g_fe_signer = &signer2;
+        ASSERT(fe_manager_row("depot", 0x76, seed, pub,
+                              FLEET_ENROL_PORT_FIRST + 1, row2, sizeof(row2)));
+        g_fe_signer = NULL;
+        ASSERT(fleet_roster_import(row, pub, &machine, &appended, &why));
+        ASSERT(fleet_roster_import(row2, pub, &machine, &appended, &why));
+
+        ASSERT(fe_revoke_db_open(&db, dd));
+        zcl_fleet_roster_provider_install(zcl_fleet_roster_gate_provider());
+        boot_fleet_roster_test_reset();
+        ASSERT_EQ(boot_fleet_roster_check(&db, signer.pubkey, now),
+                  BOOT_FLEET_ROSTER_UNARMED);
+        ASSERT_EQ(fe_screen_note(&db, signer.pubkey, now), FLEET_BOARD_OK);
+
+        /* The leaf: the head it stores names the box AND its signer. */
+        ASSERT(fe_revoke_call(box_pub, FE_REVOKE_YES, &reply));
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(fd_cstr(&reply.data, "name"), "studio");
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "seq")), 1);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "revoked_count")), 2);
+        ASSERT(!json_get_bool(json_get(&reply.data, "already_revoked")));
+        line = fd_cstr(&reply.data, "head");
+        ASSERT(line && fleet_head_parse(line, &head, NULL));
+        ASSERT(fleet_head_revokes(&head, box_pub));
+        ASSERT(fleet_head_revokes(&head, signer.pubkey));
+        ASSERT(!strstr(fd_cstr(&reply.data, "left_standing"), "seed"));
+        zcl_command_reply_free(&reply);
+
+        /* The gate on this node: posts and the peer refused, the other kept. */
+        ASSERT_EQ(boot_fleet_roster_check(&db, signer.pubkey, later),
+                  BOOT_FLEET_ROSTER_NOT_MEMBER);
+        ASSERT_EQ(fe_screen_note(&db, signer.pubkey, later),
+                  FLEET_BOARD_ERR_ROLE);
+        ASSERT(!boot_fleet_roster_admits_peer(&db, signer.pubkey, later));
+        ASSERT_EQ(fe_screen_note(&db, signer2.pubkey, later), FLEET_BOARD_OK);
+
+        /* The escape hatch is what it says: the gate off enforces no head. */
+        boot_fleet_roster_set_gate(BOOT_FLEET_ROSTER_GATE_OFF);
+        ASSERT_EQ(boot_fleet_roster_check(&db, signer.pubkey, later),
+                  BOOT_FLEET_ROSTER_UNARMED);
+        boot_fleet_roster_set_gate(BOOT_FLEET_ROSTER_GATE_DEFAULT);
+
+        /* A restart: nothing in memory, a store opened again. */
+        node_db_close(&db);
+        boot_fleet_roster_test_reset();
+        ASSERT(fe_revoke_db_open(&db, dd));
+        ASSERT_EQ(boot_fleet_roster_check(&db, signer.pubkey, later),
+                  BOOT_FLEET_ROSTER_NOT_MEMBER);
+        ASSERT_EQ(fe_screen_note(&db, signer.pubkey, later),
+                  FLEET_BOARD_ERR_ROLE);
+
+        /* History is not rewritten. */
+        ASSERT(fe_leaf_call("fleet.machines", "zcl.fleet.machines.v1", "{}",
+                            &reply));
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "total")), 2);
+        zcl_command_reply_free(&reply);
+
+        /* Twice is once: no word needed, no new sequence. */
+        ASSERT(fe_revoke_call(box_pub, "", &reply));
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(json_get_bool(json_get(&reply.data, "already_revoked")));
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "seq")), 1);
+        ASSERT(json_get(&reply.data, "head") == NULL);
+        zcl_command_reply_free(&reply);
+
+        /* A second machine adds to the head and keeps the first. */
+        ASSERT(fe_revoke_call(box2_pub, FE_REVOKE_YES, &reply));
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "seq")), 2);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "revoked_count")), 4);
+        zcl_command_reply_free(&reply);
+        ASSERT_EQ(fleet_head_load(pub, &head, &why), FLEET_HEAD_OK);
+        ASSERT(fleet_head_revokes(&head, signer.pubkey));
+        ASSERT(fleet_head_revokes(&head, signer2.pubkey));
+
+        /* The way back is the sequence rule the head already has. */
+        ASSERT(fleet_head_mint(3, now, box_pub, 0, seed, pub, head_text,
+                               sizeof(head_text), &why));
+        ASSERT(fleet_head_import(head_text, pub, false, &head, &replaced, &why));
+        boot_fleet_roster_invalidate();
+        ASSERT_EQ(fe_screen_note(&db, signer.pubkey, later), FLEET_BOARD_OK);
+
+        node_db_close(&db);
+        zcl_fleet_roster_provider_install(NULL);
+        boot_fleet_roster_test_reset();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fe_revoke_admit(void)
+{
+    int failures = 0;
+    TEST("fleet admit: a machine this box revoked, or a new box under its "
+         "signer key, is refused by name and adds no row; an untrusted head "
+         "refuses every admit") {
+        char dd[PATH_MAX];
+        struct fleet_signing_key signer;
+        struct fe_lines lines = {0};
+        struct zcl_command_reply reply;
+        uint8_t seed[32], pub[32], box_seed[32], box_pub[32];
+        const char *why = NULL;
+
+        fe_isolate("revoke-admit");
+        ASSERT(fe_manager_key(seed, pub));
+        ASSERT(fe_datadir(dd, sizeof(dd), "revoke-admit-dd"));
+        fe_key(0x72, box_seed, box_pub);
+        fe_key(0x73, signer.seed, signer.pubkey);
+        g_fe_signer = &signer;
+        ASSERT(fe_admit_with("studio", 0x72, seed, pub, dd, NULL, &reply));
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        zcl_command_reply_free(&reply);
+        ASSERT(fe_revoke_call(box_pub, FE_REVOKE_YES, &reply));
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        zcl_command_reply_free(&reply);
+
+        ASSERT(fe_admit_with("studio", 0x72, seed, pub, dd, NULL, &reply));
+        ASSERT_STR_EQ(reply.error.code, "FLEET_BOX_REVOKED");
+        ASSERT_STR_EQ(reply.error.evidence, FLEET_ENROL_WHY_BOX_REVOKED);
+        ASSERT(strstr(reply.error.message, "fleet roster head") != NULL);
+        ASSERT(json_get(&reply.data, "machine_line") == NULL);
+        zcl_command_reply_free(&reply);
+        ASSERT(fe_admit_with("depot", 0x76, seed, pub, dd, NULL, &reply));
+        ASSERT_STR_EQ(reply.error.code, "FLEET_BOX_REVOKED");
+        zcl_command_reply_free(&reply);
+        g_fe_signer = NULL;
+        ASSERT(fleet_roster_each_line(fe_lines_visit, &lines, &why));
+        ASSERT_EQ(lines.n, (size_t)1);
+
+        /* A clean box is still admitted past a head that names others. */
+        ASSERT(fe_admit_with("depot", 0x76, seed, pub, dd, NULL, &reply));
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        zcl_command_reply_free(&reply);
+
+        ASSERT(fe_put_leaf("roster.head", "not a head\n"));
+        ASSERT(fe_admit_with("annex", 0x78, seed, pub, dd, NULL, &reply));
+        ASSERT_STR_EQ(reply.error.code, "FLEET_HEAD_UNREADABLE");
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    g_fe_signer = NULL;
+    return failures;
+}
+
+/* The doctor's answer for one fleetstatus reply, next to its roster_gate row. */
+static bool fe_gate_doctor(const char *dir, const char *status,
+                           struct zcl_command_reply *reply)
+{
+    g_fd_gate = status;
+    return fd_run(dir, reply);
+}
+
+static int test_fd_roster_gate_row(void)
+{
+    int failures = 0;
+    TEST("fleet doctor: fleet scope with the roster gate off warns, an "
+         "enforcing gate or no fleet scope does not, and the row never moves "
+         "the top-level state or next") {
+        char dir[PATH_MAX], state[32], next[256];
+        struct zcl_command_reply reply;
+        const struct json_value *row = NULL;
+        uint8_t op_seed[32], op_pub[32];
+        const char *why = NULL;
+        int64_t now = (int64_t)time(NULL);
+        fe_isolate("doctor-gate");
+        fe_key(0xc1, op_seed, op_pub);
+        ASSERT(fleet_enrol_operator_write(op_pub, &why));
+        ASSERT(fd_make_datadir("doctor-gate-dd", 1, now + 10 * 86400, dir,
+                               sizeof(dir)));
+        g_fd_node_up = true;
+        node_rpc_client_set_test_hook(fd_rpc_hook);
+
+        ASSERT(fe_gate_doctor(dir, "{\"member\":true,\"roster_gate\":\"on\","
+                                   "\"roster_enforcing\":true}", &reply));
+        row = fd_check_row(&reply, "roster_gate");
+        ASSERT_STR_EQ(fd_cstr(row, "state"), "ok");
+        ASSERT(json_get(row, "warning") == NULL);
+        ASSERT(strstr(fd_cstr(row, "detail"), "enforcing") != NULL);
+        ASSERT(json_get_bool(json_get(row, "informational")));
+        (void)snprintf(state, sizeof(state), "%s", fd_cstr(&reply.data, "state"));
+        (void)snprintf(next, sizeof(next), "%s", fd_cstr(&reply.data, "next"));
+        zcl_command_reply_free(&reply);
+
+        /* Off by the flag: a warning that names it, and nothing else moves. */
+        ASSERT(fe_gate_doctor(dir, "{\"member\":true,\"roster_gate\":\"off\","
+                                   "\"roster_enforcing\":false}", &reply));
+        row = fd_check_row(&reply, "roster_gate");
+        ASSERT_STR_EQ(fd_cstr(row, "state"), "ok");
+        ASSERT(strstr(fd_cstr(row, "warning"), "-fleetrostergate=0") != NULL);
+        ASSERT(strstr(fd_cstr(row, "warning"), "revocations") != NULL);
+        ASSERT_STR_EQ(fd_cstr(&reply.data, "state"), state);
+        ASSERT_STR_EQ(fd_cstr(&reply.data, "next"), next);
+        zcl_command_reply_free(&reply);
+
+        /* Not armed: the flag was never given, and the gate decides nothing. */
+        ASSERT(fe_gate_doctor(dir, "{\"member\":true,\"roster_gate\":\"default\","
+                                   "\"roster_enforcing\":false}", &reply));
+        row = fd_check_row(&reply, "roster_gate");
+        ASSERT(strstr(fd_cstr(row, "warning"), "-fleetrostergate") != NULL);
+        ASSERT_STR_EQ(fd_cstr(&reply.data, "state"), state);
+        zcl_command_reply_free(&reply);
+
+        /* No fleet scope: nothing to warn about, whatever the flag says. */
+        ASSERT(fe_gate_doctor(dir, "{\"member\":false,\"roster_gate\":\"off\","
+                                   "\"roster_enforcing\":false}", &reply));
+        row = fd_check_row(&reply, "roster_gate");
+        ASSERT_STR_EQ(fd_cstr(row, "state"), "ok");
+        ASSERT(json_get(row, "warning") == NULL);
+        zcl_command_reply_free(&reply);
+
+        /* A node that does not report it: unknown, never guessed. */
+        ASSERT(fe_gate_doctor(dir, NULL, &reply));
+        row = fd_check_row(&reply, "roster_gate");
+        ASSERT_STR_EQ(fd_cstr(row, "state"), "unknown");
+        ASSERT_STR_EQ(fd_cstr(&reply.data, "state"), state);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    g_fd_gate = NULL;
+    node_rpc_client_set_test_hook(NULL);
+    return failures;
+}
+
+/* The node half of that row, through the real provider and an empty store. */
+static int test_fst_roster_gate_fields(void)
+{
+    int failures = 0;
+    TEST("fleet status: a fleet root with no sealed row reports the gate not "
+         "enforcing, and -fleetrostergate=0 reports off") {
+        static struct fleet_status status;
+        char dd[PATH_MAX];
+        struct json_value out;
+        struct node_db db;
+        uint8_t seed[32], pub[32];
+        const int64_t now = (int64_t)time(NULL);
+        fe_isolate("status-gate");
+        ASSERT(fe_manager_key(seed, pub));
+        ASSERT(fe_datadir(dd, sizeof(dd), "status-gate-dd"));
+        ASSERT(fe_revoke_db_open(&db, dd));
+        zcl_fleet_roster_provider_install(zcl_fleet_roster_gate_provider());
+        boot_fleet_roster_test_reset();
+        fleet_status_collect(&db, now, &status);
+        ASSERT(status.member);
+        ASSERT(!status.roster_enforcing);
+        ASSERT_EQ(status.roster_gate, BOOT_FLEET_ROSTER_GATE_DEFAULT);
+        boot_fleet_roster_set_gate(BOOT_FLEET_ROSTER_GATE_OFF);
+        fleet_status_collect(&db, now, &status);
+        json_init(&out);
+        fleet_status_render(&status, &out);
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "roster_gate")), "off");
+        ASSERT(!json_get_bool(json_get(&out, "roster_enforcing")));
+        json_free(&out);
+        node_db_close(&db);
+        zcl_fleet_roster_provider_install(NULL);
+        boot_fleet_roster_test_reset();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_fleet_enrol(void)
 {
     int failures = 0;
@@ -3914,6 +4323,11 @@ int test_fleet_enrol(void)
     failures += test_fe_head_fails_closed();
     failures += test_fe_operator_pin();
     failures += test_fe_head_leaves();
+    failures += test_fe_revoke_refusals();
+    failures += test_fe_revoke_gate();
+    failures += test_fe_revoke_admit();
+    failures += test_fd_roster_gate_row();
+    failures += test_fst_roster_gate_fields();
     fe_restore();
     return failures;
 }

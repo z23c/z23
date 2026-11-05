@@ -112,6 +112,9 @@ struct fleet_status {
                                another block there and no later check has
                                landed on this chain */
     enum fleet_status_verdict verdict;
+    enum boot_fleet_roster_gate roster_gate; /* the -fleetrostergate mode */
+    bool roster_enforcing;  /* the gate decides who fleet posts move between;
+                               false is pairing plus role only */
     struct fleet_status_machine machines[BOOT_FLEET_ROSTER_MAX];
 };
 

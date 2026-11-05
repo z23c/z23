@@ -968,11 +968,6 @@ static void fe_import(const struct zcl_command_request *request,
 
 /* ── fleet roster head ──────────────────────────────────────────────────── */
 
-/* `fleet import` takes its line as an input string bounded at 4096
- * characters; a head longer than that could be minted but never pasted, so
- * it is refused here, by name, where the owner can still act on it. */
-#define FE_HEAD_PASTE_MAX 4096u
-
 struct fe_head_mint {
     uint8_t keys[FLEET_ENROL_HEAD_REVOKED_MAX][FLEET_ENROL_PUBKEY_BYTES];
     size_t count;
@@ -1106,7 +1101,7 @@ static void fe_roster_head(const struct zcl_command_request *request,
         ok = false;
     }
     memory_cleanse(seed, sizeof(seed));
-    if (ok && strlen(m->text) > FE_HEAD_PASTE_MAX) {
+    if (ok && strlen(m->text) > FLEET_ENROL_HEAD_PASTE_MAX) {
         fe_fail(reply, "FLEET_HEAD_TOO_LARGE", "execute",
                 "this head is longer than `fleet import` accepts in one "
                 "line. Revoke fewer boxes per head.",

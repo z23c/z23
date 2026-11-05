@@ -275,6 +275,10 @@ enum {
     FLEET_ENROL_HEAD_TEXT_MAX = (FLEET_ENROL_HEAD_WIRE_MAX * 4) / 3 + 24,
 };
 #define FLEET_HEAD_PREFIX "fleet-head1:"
+/* `fleet import` takes its line as an input string bounded at 4096 characters;
+ * a head longer than that could be minted but never pasted, so it is refused
+ * where it is minted, by name, while the owner can still act on it. */
+#define FLEET_ENROL_HEAD_PASTE_MAX 4096u
 
 struct fleet_head {
     uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES];
