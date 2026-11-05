@@ -711,6 +711,19 @@ static void sentinel_writer_scan_incomplete(int64_t now)
              (size_t)OS_PROC_WRITER_MAX_PIDS);
 }
 
+bool invariant_sentinel_node_db_writer_unsupported_note(void)
+{
+    static bool noted;
+    if (noted)
+        return false; // raw-return-ok:already-noted-is-reported-by-return-value
+    noted = true;
+    LOG_WARN("invariant_sentinel",
+             "node.db foreign-writer check is unavailable on this platform "
+             "(it needs Linux /proc); a second process holding node.db "
+             "open for writing will NOT be reported here");
+    return true;
+}
+
 static void sentinel_watch_node_db_writer(void)
 {
     struct node_db *ndb = sentinel_ndb();
@@ -726,6 +739,9 @@ static void sentinel_watch_node_db_writer(void)
         break;
     case OS_PROC_WRITER_INCOMPLETE:
         sentinel_writer_scan_incomplete(now);
+        break;
+    case OS_PROC_WRITER_UNSUPPORTED:
+        (void)invariant_sentinel_node_db_writer_unsupported_note();
         break;
     default:
         break;

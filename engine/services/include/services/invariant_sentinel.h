@@ -153,6 +153,12 @@ void invariant_sentinel_clear_commitment_blocker(void);
 bool invariant_sentinel_node_db_writer_report(uint64_t pid, const char *comm,
                                               const char *path, int64_t now);
 
+/* The foreign-writer scan cannot run on this platform (it reads Linux
+ * /proc). Say so once per process with a LOG_WARN instead of letting the
+ * silence read as "no foreign writer". Returns true on the call that
+ * logged, false on every later call. */
+bool invariant_sentinel_node_db_writer_unsupported_note(void);
+
 /* ── `z23 dumpstate validation_pack` ─────────────────────── */
 bool invariant_sentinel_dump_state_json(struct json_value *out,
                                         const char *key);

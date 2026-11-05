@@ -293,6 +293,12 @@ static int node_db_foreign_writer_checks(void)
         failures += writer_bound_checks(&fx);
     }
     failures += writer_report_checks();
+    /* Where the scan cannot run, the sentinel says so once instead of
+     * letting silence read as "no foreign writer". */
+    FWRITER_CHECK("unsupported: the first note says the check is unavailable",
+                  invariant_sentinel_node_db_writer_unsupported_note());
+    FWRITER_CHECK("unsupported: the note is made only once",
+                  !invariant_sentinel_node_db_writer_unsupported_note());
     writer_fixture_remove(&fx);
     return failures;
 }
