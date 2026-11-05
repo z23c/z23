@@ -29,25 +29,30 @@ _test_next:;
 static const char rcmd_hex[] =
     "1111111111111111111111111111111111111111111111111111111111111111";
 
-static bool rcmd_input(char *out, size_t cap, const char *destination,
-                       bool duplicate)
+static bool rcmd_input_paths(char *out, size_t cap, const char *destination,
+                             const char *bundle, const char *offer, bool duplicate)
 {
     int n = snprintf(out, cap,
         "--input={\"repository\":\"%s\",\"destination\":\"%s\","
-        "\"bundle\":\"missing.bundle\",\"offer\":\"missing.offer\","
+        "\"bundle\":\"%s\",\"offer\":\"%s\","
         "\"local_commit\":\"%s\",\"remote_base\":\"%s\","
         "\"bundle_sha256\":\"%s\",\"git_tree\":\"%s\","
         "\"source_id\":\"%s\",\"signer_pubkey\":\"%s\","
         "\"source_root\":\"%s\",\"source_cas_root\":\"%s\","
         "\"changed_set_root\":\"%s\",\"impact_policy_root\":\"%s\"%s}",
-        destination, destination, rcmd_hex, rcmd_hex, rcmd_hex, rcmd_hex,
+        destination, destination, bundle, offer, rcmd_hex, rcmd_hex, rcmd_hex, rcmd_hex,
         rcmd_hex, rcmd_hex, rcmd_hex, rcmd_hex, rcmd_hex, rcmd_hex,
         duplicate ? ",\"source_id\":\"2222222222222222222222222222222222222222222222222222222222222222\"" : "");
     return n > 0 && (size_t)n < cap;
 }
 
-static int rcmd_run(const char *binary, const char *source, const char *input,
-                    char *out, size_t cap)
+static bool rcmd_input(char *out, size_t cap, const char *destination, bool duplicate)
+{
+    return rcmd_input_paths(out, cap, destination, "missing.bundle", "missing.offer", duplicate);
+}
+
+static int rcmd_run_extra(const char *binary, const char *source, const char *input,
+                          const char *extra, char *out, size_t cap)
 {
     char env[4200], home[4200];
     const char *admission = getenv("DEVBUILD_ACTIVE");
@@ -58,8 +63,15 @@ static int rcmd_run(const char *binary, const char *source, const char *input,
     n = snprintf(home, sizeof(home), "HOME=%s", source);
     if (n <= 0 || (size_t)n >= sizeof(home)) return -1;
     const char *argv[] = {"/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "LC_ALL=C",
-        "DEVBUILD_ACTIVE=z23", home, env, binary, "dev", "proof", "remote", input, NULL};
+        "DEVBUILD_ACTIVE=z23", home, env, extra ? extra : "LC_ALL=C",
+        binary, "dev", "proof", "remote", input, NULL};
     return test_host_tool_capture(argv, out, cap, 30000);
+}
+
+static int rcmd_run(const char *binary, const char *source, const char *input,
+                    char *out, size_t cap)
+{
+    return rcmd_run_extra(binary, source, input, NULL, out, cap);
 }
 
 static bool rcmd_git(const char *dir, const char *const args[])
@@ -164,6 +176,22 @@ int test_dev_proof_remote_command(void)
         ASSERT(input_ok);
         ASSERT(rc > 0);
         ASSERT(strstr(out, "REMOTE_PROOF_BUSY") != NULL);
+        rc = rcmd_run_extra(fixture_binary, linked, input,
+                            "LD_AUDIT=/nonexistent-z23-fixture.so", out, sizeof(out));
+        ASSERT(rc > 0);
+        ASSERT(strstr(out, "remote_git_environment_redirected") != NULL);
+        char offer[1200];
+        ASSERT(snprintf(offer, sizeof(offer), "%s/large.offer", base) > 0);
+        FILE *large = fopen(offer, "wb");
+        ASSERT(large != NULL);
+        bool written = fseek(large, 16384, SEEK_SET) == 0 && fputc('x', large) != EOF;
+        bool closed = fclose(large) == 0;
+        ASSERT(written && closed);
+        ASSERT(rcmd_input_paths(input, sizeof(input), linked, "missing.bundle", offer, false));
+        rc = rcmd_run(fixture_binary, linked, input, out, sizeof(out));
+        ASSERT(rc > 0);
+        ASSERT(strstr(out, "remote_transport_bytes_mismatch") != NULL);
+        ASSERT(strstr(out, "retained_input_observation") != NULL);
         PASS();
     }
 _test_next:;
