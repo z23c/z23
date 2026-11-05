@@ -245,10 +245,10 @@ static bool wso_digest(const char *key, const struct json_value *params,
     wso_absorb(&c, key);
     if (!wso_absorb_json(&c, json_at(params, 0)) ||
         !wso_absorb_json(&c, json_at(params, 1)))
-        return false;
+        return false; // raw-return-ok:callee-logged
     if (f && !json_is_null(f)) {
         if (!wso_absorb_json(&c, f))
-            return false;
+            return false; // raw-return-ok:callee-logged
     } else {
         wso_absorb(&c, "");
     }
