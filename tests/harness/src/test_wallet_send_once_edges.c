@@ -33,6 +33,8 @@
 #define E_CAP_MSG "Too many keyed sends on record; send refused"
 #define E_RELEASE_MSG "Send record cannot be released"
 #define E_ACTIVE_MAX 64
+#define E_DIGEST_LABEL "wso_digest_param"
+#define E_NOMEM_MSG "Not enough memory to read the send request; send refused"
 
 static int g_failures;
 
@@ -904,6 +906,364 @@ static void case_one_transaction(void)
     edge_chk("the refusal carries error code -1", g_uniq_code == -1);
 }
 
+/* ── Requests larger than the buffers the digest once wrote into ──────── */
+
+struct big_spec {
+    size_t from_len;
+    const char *from_tail;
+    size_t recips_len;
+    const char *recips_tail;
+    size_t fee_len;
+    const char *fee_tail;
+};
+
+struct big_req {
+    char *from;
+    char *recips;
+    char *fee;
+};
+
+/* Ordinary sizes in every field; a case raises the one it is about. */
+static struct big_spec big_small(void)
+{
+    return (struct big_spec){ .from_len = 40, .from_tail = "",
+                              .recips_len = 60, .recips_tail = "",
+                              .fee_len = 20, .fee_tail = "" };
+}
+
+/* head, then fill characters, then tail and end: exactly total bytes. */
+static char *big_text(const char *head, char fill, size_t total,
+                      const char *tail, const char *end)
+{
+    size_t t = strlen(tail);
+    size_t e = strlen(end);
+    char *s = zcl_malloc(total + 1, "wso_edge_big_text");
+    if (!s)
+        return NULL;
+    memset(s, fill, total);
+    memcpy(s, head, strlen(head));
+    memcpy(s + total - e - t, tail, t);
+    memcpy(s + total - e, end, e);
+    s[total] = '\0';
+    return s;
+}
+
+static void big_free(struct big_req *b)
+{
+    free(b->from);
+    free(b->recips);
+    free(b->fee);
+    memset(b, 0, sizeof(*b));
+}
+
+/* The fee stays a string that parses to the wallet's 250: parsing stops at
+ * eight decimals, so only the digest sees what follows. */
+static bool big_make(struct big_req *b, const struct big_spec *s)
+{
+    b->from = big_text("\"", 'a', s->from_len, s->from_tail, "\"");
+    b->recips = big_text("[{\"address\":\"", 'a', s->recips_len, s->recips_tail,
+                         "\",\"amount\":1}]");
+    b->fee = big_text("\"0.00000250", '0', s->fee_len, s->fee_tail, "\"");
+    if (b->from && b->recips && b->fee)
+        return true;
+    big_free(b);
+    edge_chk("a large request can be built", false);
+    return false;
+}
+
+static bool big_params(struct json_value *p, const struct big_req *b,
+                       const char *key)
+{
+    size_t n = strlen(b->from) + strlen(b->recips) + strlen(b->fee) +
+               strlen(key) + 16;
+    char *buf = zcl_malloc(n, "wso_edge_big_params");
+    json_init(p);
+    if (!buf)
+        return false;
+    (void)snprintf(buf, n, "[%s,%s,1,%s,\"%s\"]", b->from, b->recips, b->fee,
+                   key);
+    bool parsed = json_read(p, buf, strlen(buf));
+    free(buf);
+    return parsed;
+}
+
+static bool go_big(const struct big_req *b, const char *key,
+                   wallet_send_once_fn fn, struct json_value *res)
+{
+    struct json_value p;
+    json_init(res);
+    bool parsed = big_params(&p, b, key);
+    if (!parsed)
+        edge_chk("a large request parses", false);
+    bool rc = parsed && wallet_send_once_dispatch(&p, false, fn, res);
+    json_free(&p);
+    return rc;
+}
+
+static void big_chk(const char *field, const char *what, bool ok)
+{
+    char name[120];
+    (void)snprintf(name, sizeof(name), "%s: %s", field, what);
+    edge_chk(name, ok);
+}
+
+/* A row the wallet still holds answers its own request, and nothing else. */
+static void big_answers(const char *field, const char *key, uint8_t fill,
+                        const struct big_req *one, const struct big_req *other)
+{
+    struct json_value res;
+    bool rc = go_big(one, key, plain_hook_ok, &res);
+    big_chk(field, "the first send commits and runs once",
+        is_fresh_commit(rc, &res, fill) && atomic_load(&g_runs) == 1);
+    json_free(&res);
+    rc = go_big(one, key, plain_hook_ok, &res);
+    big_chk(field, "the identical request replays the earlier txid",
+        rc && state_is(&res, "committed") && txid_is(&res, fill) &&
+        replayed_is(&res, true) && atomic_load(&g_runs) == 1);
+    json_free(&res);
+    rc = go_big(other, key, plain_hook_ok, &res);
+    big_chk(field, "a different tail is a key conflict, not a replay",
+        rc && state_is(&res, "key_conflict") && no_txid(&res) &&
+        replayed_is(&res, true) && atomic_load(&g_runs) == 1);
+    json_free(&res);
+    rc = go_big(one, key, plain_hook_ok, &res);
+    big_chk(field, "the conflict leaves the first request's answer in place",
+        rc && state_is(&res, "committed") && txid_is(&res, fill) &&
+        atomic_load(&g_runs) == 1);
+    json_free(&res);
+}
+
+static void big_case(const char *field, const char *key, uint8_t fill,
+                     const struct big_spec *one_spec,
+                     const struct big_spec *other_spec)
+{
+    struct big_req one;
+    struct big_req other;
+    reset_runs();
+    g_fill = fill;
+    if (!big_make(&one, one_spec))
+        return;
+    if (big_make(&other, other_spec)) {
+        big_answers(field, key, fill, &one, &other);
+        big_free(&other);
+    }
+    big_free(&one);
+}
+
+static void case_oversize_recipients(void)
+{
+    struct big_spec one = big_small();
+    struct big_spec other = big_small();
+    one.recips_len = 17000;
+    other.recips_len = 17000;
+    other.recips_tail = "\",\"amount\":1},{\"address\":\"zs1Second";
+    big_case("recipients over 16383 bytes", "edge-big-recips", 0xC1, &one,
+             &other);
+}
+
+static void case_oversize_from(void)
+{
+    struct big_spec one = big_small();
+    struct big_spec other = big_small();
+    one.from_len = 1100;
+    one.from_tail = "X";
+    other.from_len = 1100;
+    other.from_tail = "Y";
+    big_case("from over 1023 bytes", "edge-big-from", 0xC2, &one, &other);
+}
+
+static void case_oversize_fee(void)
+{
+    struct big_spec one = big_small();
+    struct big_spec other = big_small();
+    one.fee_len = 100;
+    one.fee_tail = "1";
+    other.fee_len = 100;
+    other.fee_tail = "2";
+    big_case("fee over 63 bytes", "edge-big-fee", 0xC3, &one, &other);
+}
+
+/* A row written before the digest covered the whole value holds the digest of
+ * a prefix. Its identical retry cannot match any more: it must conflict, with
+ * no second send and no claim that this request was the one sent. */
+static void case_oversize_old_row(void)
+{
+    struct big_spec spec = big_small();
+    struct big_req b;
+    struct json_value p;
+    struct json_value res;
+    struct wallet_send_once_row row;
+    spec.recips_len = 17000;
+    reset_runs();
+    if (!big_make(&b, &spec))
+        return;
+    memset(&row, 0, sizeof(row));
+    bool parsed = big_params(&p, &b, "edge-big-old");
+    edge_chk("the old-format request parses", parsed);
+    if (!parsed) {
+        json_free(&p);
+        big_free(&b);
+        return;
+    }
+    kat_ids(&p, "edge-big-old", row.key_hash, row.digest);
+    json_free(&p);
+    row.state = WALLET_SEND_ONCE_COMMITTED;
+    row.has_txid = true;
+    memset(row.txid, 0xC4, 32);
+    row.created_at = row.updated_at = GetTime();
+    edge_chk("a row with a prefix digest is seeded",
+        db_wallet_send_once_insert(&g_fx.ndb, &row));
+    bool rc = go_big(&b, "edge-big-old", plain_hook_ok, &res);
+    edge_chk("its retry conflicts and sends nothing",
+        rc && state_is(&res, "key_conflict") && no_txid(&res) &&
+        atomic_load(&g_runs) == 0);
+    json_free(&res);
+    big_free(&b);
+}
+
+/* ── The digest of any request that always fit, pinned to the byte ────── */
+
+static uint8_t pin_nibble(char c)
+{
+    return (uint8_t)(c >= 'a' ? c - 'a' + 10 : c - '0');
+}
+
+/* A committed row as an earlier build wrote it: the digest is a known answer
+ * computed with an outside SHA3-256 tool over the length-prefixed fields. */
+static bool pin_seed(const char *key, const char *hex, uint8_t fill)
+{
+    struct wallet_send_once_row row;
+    struct sha3_256_ctx c;
+    struct uint256 id;
+    memset(&row, 0, sizeof(row));
+    sha3_256_init(&c);
+    kat_absorb(&c, "z23/wallet-send-once/key/v1");
+    kat_absorb(&c, key);
+    sha3_256_finalize(&c, row.key_hash);
+    for (size_t i = 0; i < 32; i++)
+        row.digest[i] = (uint8_t)(pin_nibble(hex[2 * i]) << 4 |
+                                  pin_nibble(hex[2 * i + 1]));
+    row.state = WALLET_SEND_ONCE_COMMITTED;
+    row.has_txid = true;
+    memset(row.txid, fill, 32);
+    row.created_at = row.updated_at = GetTime();
+    txid_fill(&id, fill);
+    admit(&id);
+    return db_wallet_send_once_insert(&g_fx.ndb, &row);
+}
+
+static void pin_chk(const char *name, bool rc, const struct json_value *r,
+                    uint8_t fill)
+{
+    edge_chk(name, rc && state_is(r, "committed") && txid_is(r, fill) &&
+                   replayed_is(r, true) && atomic_load(&g_runs) == 0);
+}
+
+static void case_digest_pins(void)
+{
+    static const struct { const char *key, *fee, *hex, *name; } pins[] = {
+        { "pin-small", "null",
+          "5959f55f484390cee8ddb2a4b9a8006564915c462c419dacac9fb9e2e7c6395a",
+          "the digest with no fee is unchanged across an upgrade" },
+        { "pin-fee", "\"0.0000025\"",
+          "7cc42dd8dd7041e9c6b35505970ded36290b20776e0f067cb66a0c33351ba808",
+          "the digest with a string fee is unchanged across an upgrade" },
+        { "pin-real", "0.0000025",
+          "fd74e5ae164469ba5bc67bd85ab52fabf808aa16f7dc76bbdd7dcceb3274a552",
+          "the digest with a number fee is unchanged across an upgrade" },
+    };
+    struct json_value res;
+    reset_runs();
+    for (size_t i = 0; i < sizeof(pins) / sizeof(pins[0]); i++) {
+        edge_chk("a pinned row is seeded",
+            pin_seed(pins[i].key, pins[i].hex, 0xD1));
+        bool rc = go(E_FROM, E_RECIPS, pins[i].fee, pins[i].key, plain_hook_ok,
+                     &res);
+        pin_chk(pins[i].name, rc, &res, 0xD1);
+        json_free(&res);
+    }
+}
+
+/* 1023, 16383 and 63 bytes: the largest request the old buffers held whole. */
+static void case_digest_pin_largest(void)
+{
+    struct big_spec spec = { .from_len = 1023, .from_tail = "",
+                             .recips_len = 16383, .recips_tail = "",
+                             .fee_len = 63, .fee_tail = "" };
+    struct big_req b;
+    struct json_value res;
+    reset_runs();
+    if (!big_make(&b, &spec))
+        return;
+    edge_chk("the largest pinned row is seeded",
+        pin_seed("pin-edge",
+                 "2836a02bf823dad730809a9f12428aaca8d99c59e01017a52bd820941dca9fbf",
+                 0xD2));
+    bool rc = go_big(&b, "pin-edge", plain_hook_ok, &res);
+    pin_chk("the digest of the largest whole request is unchanged", rc, &res,
+            0xD2);
+    json_free(&res);
+    big_free(&b);
+}
+
+/* ── Only a failed allocation refuses for the digest ──────────────────── */
+
+static void digest_nomem_at(unsigned nth, const char *name)
+{
+    struct json_value res;
+    reset_runs();
+    zcl_alloc_fault_fail_nth(E_DIGEST_LABEL, nth);
+    bool rc = go(E_FROM, E_RECIPS, "\"0.0000025\"", "edge-nomem", plain_hook_ok,
+                 &res);
+    zcl_alloc_fault_clear();
+    const char *msg = json_get_str(&res);
+    edge_chk(name, !rc && msg && strcmp(msg, E_NOMEM_MSG) == 0 &&
+                   atomic_load(&g_runs) == 0 &&
+                   db_wallet_send_once_count(&g_fx.ndb) == 0);
+    json_free(&res);
+}
+
+static void case_digest_no_memory(void)
+{
+    struct json_value res;
+    digest_nomem_at(1, "no memory for from refuses before any record or send");
+    digest_nomem_at(2, "no memory for recipients refuses likewise");
+    digest_nomem_at(3, "no memory for the fee refuses likewise");
+    reset_runs();
+    bool rc = go(E_FROM, E_RECIPS, "\"0.0000025\"", "edge-nomem", plain_hook_ok,
+                 &res);
+    edge_chk("the same key sends once memory is back",
+        is_fresh_commit(rc, &res, 0xB1) && atomic_load(&g_runs) == 1);
+    json_free(&res);
+}
+
+/* ── A send that reports success and no txid at all ───────────────────── */
+
+static void case_no_txid_holds_key(void)
+{
+    struct json_value res;
+    struct wallet_send_once_row row;
+    reset_runs();
+    g_raw = "not a transaction id";
+    bool rc = go(E_FROM, E_RECIPS, "null", "edge-held", plain_raw, &res);
+    edge_chk("success with no txid at all is outcome_unknown",
+        rc && state_is(&res, "outcome_unknown") && no_txid(&res) &&
+        replayed_is(&res, false) && atomic_load(&g_runs) == 1);
+    json_free(&res);
+    edge_chk("the key is held by a row past started",
+        row_find("null", "edge-held", &row) &&
+        row.state == WALLET_SEND_ONCE_BUILT);
+    rc = go(E_FROM, E_RECIPS, "null", "edge-held", plain_raw, &res);
+    edge_chk("a retry is outcome_unknown with no txid and never a second send",
+        rc && state_is(&res, "outcome_unknown") && no_txid(&res) &&
+        replayed_is(&res, true) && atomic_load(&g_runs) == 1);
+    json_free(&res);
+    rc = go(E_FROM, "[]", "null", "edge-held", plain_raw, &res);
+    edge_chk("other parameters on the held key still conflict",
+        rc && state_is(&res, "key_conflict") && atomic_load(&g_runs) == 1);
+    json_free(&res);
+}
+
 int wallet_send_once_edge_tests(void);
 int wallet_send_once_edge_tests(void)
 {
@@ -918,6 +1278,9 @@ int wallet_send_once_edge_tests(void)
         case_insert_blocked, case_batch_flush_failure,
         case_built_write_fails, case_sync_off, case_finish_hex,
         case_finish_recorded_txid, case_one_transaction,
+        case_oversize_recipients, case_oversize_from, case_oversize_fee,
+        case_oversize_old_row, case_digest_pins, case_digest_pin_largest,
+        case_digest_no_memory, case_no_txid_holds_key,
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         if (!fx_up("case")) {
