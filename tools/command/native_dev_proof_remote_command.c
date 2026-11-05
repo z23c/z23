@@ -130,18 +130,41 @@ void zcl_native_handle_dev_proof_remote(const struct zcl_command_request *reques
     }
     bool prepared = zcl_dev_proof_remote_prepare(&a, remote_owner, root,
                                                   &placement, why, sizeof(why));
-    if (placement.evidence_dir[0])
-        (void)json_push_kv_str(&reply->data, "retained_input_observation", placement.evidence_dir);
+    if (placement.evidence_dir[0] &&
+        !json_push_kv_str(&reply->data, "retained_input_observation", placement.evidence_dir)) {
+        remote_fail(reply, "output", "remote_evidence_output_failed",
+                    placement.objects_imported || placement.placed, false);
+        return;
+    }
     if (!prepared) {
         remote_fail(reply, "prepare", why, placement.objects_imported || placement.placed,
                     strstr(why, "busy") != NULL);
         return;
     }
     int rc = zcl_dev_proof_remote_execute(&a, &placement, remote_owner, root, &status);
-    if (status.receipt_path[0]) (void)json_push_kv_str(&reply->data, "receipt_path", status.receipt_path);
-    if (status.log_dir[0]) (void)json_push_kv_str(&reply->data, "log_dir", status.log_dir);
+    if ((status.receipt_path[0] && !json_push_kv_str(&reply->data, "receipt_path", status.receipt_path)) ||
+        (status.log_dir[0] && !json_push_kv_str(&reply->data, "log_dir", status.log_dir)) ||
+        !json_push_kv_str(&reply->data, "local_commit", a.expected.local_commit) ||
+        !json_push_kv_str(&reply->data, "remote_base", a.expected.remote_base)) {
+        remote_fail(reply, "output", "remote_evidence_output_failed", true, false);
+        return;
+    }
     if (rc != 1 || status.state != ZCL_DEV_PROOF_STATE_PASSED) {
         remote_fail(reply, "execute", status.detail, true, rc == 0);
+        if (strcmp(status.detail, "proof_producer_source_mismatch") == 0 ||
+            strcmp(status.detail, "proof_producer_source_id_unavailable") == 0) {
+            char executable[4096];
+            int n = snprintf(executable, sizeof(executable), "%s/build/bin/z23-dev", root);
+            if (n <= 0 || (size_t)n >= sizeof(executable) ||
+                !json_push_kv_str(&reply->data, "producer_executable", executable)) {
+                remote_fail(reply, "output", "remote_evidence_output_failed", true, false);
+                return;
+            }
+            (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+                "Build the candidate dev binary under admission, use it for "
+                "dev.proof.retry on this exact pair when required, then repeat "
+                "dev.proof.remote with the same assignment for receipt verification.");
+        }
         return;
     }
     uint8_t wire[ZCL_DEV_PROOF_WIRE_BYTES];
@@ -155,6 +178,7 @@ void zcl_native_handle_dev_proof_remote(const struct zcl_command_request *reques
         remote_fail(reply, "verify", why, true, false);
         return;
     }
-    (void)json_push_kv_str(&reply->data, "status", "PASS");
+    if (!json_push_kv_str(&reply->data, "status", "PASS"))
+        remote_fail(reply, "output", "remote_evidence_output_failed", true, false);
 #endif
 }
