@@ -17,6 +17,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -119,8 +120,28 @@ static bool rpc_cookie_write_secure(const char *path, const char *user,
          platform_private_file_replace(&file, tmp, path);
     platform_private_file_close(&file);
     memory_cleanse(body, sizeof(body));
-    if (!ok) (void)platform_private_file_unlink_missing_ok(tmp);
+    if (!ok) {
+        /* Keep the failure's errno for the caller across the cleanup. */
+        int failure = errno;
+        (void)platform_private_file_unlink_missing_ok(tmp);
+        errno = failure;
+    }
     return ok;
+}
+
+/* Startup failed to write the cookie, so an earlier run's cookie may still be
+ * on disk holding a secret this process no longer accepts. Name the failure
+ * and remove that cookie: a client then sees a missing cookie, not a 401. */
+static void rpc_cookie_startup_failed(const char *path)
+{
+    int write_errno = errno;
+    fprintf(stderr, "RPC cookie write failed: cannot write %s (errno %d); "
+                    "removing any stale cookie\n", path, write_errno);
+    if (!platform_private_file_unlink_missing_ok(path)) {
+        int unlink_errno = errno;
+        fprintf(stderr, "RPC cookie removal failed: cannot remove %s "
+                        "(errno %d)\n", path, unlink_errno);
+    }
 }
 
 void rpc_http_cookie_rotate(void)
@@ -215,6 +236,8 @@ void rpc_http_auth_configure(const char *rpc_user, const char *rpc_password,
         if (rpc_cookie_write_secure(g_cookie_file, g_rpc_user,
                                     g_rpc_password))
             printf("RPC cookie written to %s\n", g_cookie_file);
+        else
+            rpc_cookie_startup_failed(g_cookie_file);
 
         snprintf(g_rpc_port_file, sizeof(g_rpc_port_file), "%s/.rpcport",
                  datadir);

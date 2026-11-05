@@ -13,6 +13,7 @@
 #include "platform/socket_compat.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -476,6 +477,81 @@ static bool cookie_rotation_check_auth_not_blocked_by_write(
     return ok;
 }
 
+/* A startup cookie write that cannot stage must not leave the cookie from an
+ * earlier run on disk: its secret is no longer the one the server accepts. A
+ * directory at the staging name makes the write fail; the failure must reach
+ * stderr and the stale cookie must be gone. */
+static bool cookie_write_text(const char *path, const char *text)
+{
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+    bool wrote = fputs(text, f) >= 0;
+    return fclose(f) == 0 && wrote;
+}
+
+static bool cookie_startup_capture_start(const struct rpc_table *table,
+                                         uint16_t port, const char *dir,
+                                         const char *log)
+{
+    fflush(stderr);
+    int saved = dup(STDERR_FILENO);
+    int fd = open(log, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (saved >= 0 && fd >= 0) (void)dup2(fd, STDERR_FILENO);
+    bool started = rpc_http_start(table, port, NULL, NULL, dir);
+    fflush(stderr);
+    if (saved >= 0) {
+        (void)dup2(saved, STDERR_FILENO);
+        close(saved);
+    }
+    if (fd >= 0) close(fd);
+    return started && saved >= 0 && fd >= 0;
+}
+
+static bool cookie_startup_log_names_failure(const char *log,
+                                             const char *cookie)
+{
+    char text[4096] = {0};
+    FILE *f = fopen(log, "r");
+    if (!f) return false;
+    size_t n = fread(text, 1, sizeof(text) - 1, f);
+    fclose(f);
+    text[n] = '\0';
+    return strstr(text, "RPC cookie write failed") != NULL &&
+           strstr(text, cookie) != NULL && strstr(text, "errno") != NULL;
+}
+
+static bool cookie_startup_write_failure_check(const struct rpc_table *table)
+{
+    char dir[PATH_MAX];
+    if (!test_mkdtemp(dir, sizeof(dir), "zcl_cookie_stale")) return false;
+    char cookie[PATH_MAX + 16];
+    char stage[PATH_MAX + 16];
+    char log[PATH_MAX + 16];
+    char port_file[PATH_MAX + 16];
+    snprintf(cookie, sizeof(cookie), "%s/.cookie", dir);
+    snprintf(stage, sizeof(stage), "%s/.cookie.tmp", dir);
+    snprintf(log, sizeof(log), "%s/stderr.txt", dir);
+    snprintf(port_file, sizeof(port_file), "%s/.rpcport", dir);
+
+    bool ok = cookie_write_text(cookie, "__cookie__:stale_from_crash\n");
+    ok = ok && mkdir(stage, 0700) == 0;
+    uint16_t port = reserve_test_port();
+    ok = ok && port != 0;
+    ok = ok && cookie_startup_capture_start(table, port, dir, log);
+    rpc_http_stop();
+
+    /* No cookie may survive: a client must see a missing cookie, not 401. */
+    ok = ok && access(cookie, F_OK) != 0 && errno == ENOENT;
+    ok = ok && cookie_startup_log_names_failure(log, cookie);
+
+    unlink(log);
+    unlink(port_file);
+    unlink(cookie);
+    rmdir(stage);
+    rmdir(dir);
+    return ok;
+}
+
 int test_cookie_rotation(void)
 {
     int failures = 0;
@@ -575,6 +651,12 @@ int test_cookie_rotation(void)
     {
         bool ok = cookie_rotation_check_env_configures_interval(
             &empty_table, tmpdir);
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
+    printf("cookie_rotation: failed startup write leaves no stale cookie and logs... ");
+    {
+        bool ok = cookie_startup_write_failure_check(&empty_table);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
