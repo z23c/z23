@@ -963,3 +963,7 @@ later lane flips it HARD.
 - 2026-11-05T21:01:24Z — REASON: Legacy peers read a header as a promise to serve the body: serve them only the active chain where the body is held (net serve path, no consensus predicate)
   old ROOT: a49efa5cf444f542b5fc90b42ec05727da285df90b6dc9f7bc583a3aefb55791
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-05T21:24:20Z — REASON: Move two header-sending functions out of msg_headers.c, no behaviour change, so the file stays under its size limit
+  old ROOT: 6387a59315fff6349d41a0be80d787ee34b162af14745203e476094957bc9c9f
+  by: owner unseal ritual (make core-unseal)

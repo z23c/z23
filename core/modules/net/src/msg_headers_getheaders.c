@@ -5,9 +5,11 @@
  * file COPYING or http://www.opensource.org/licenses/mit-license.php. */
 
 /* msg_headers_getheaders.c — outbound getheaders requests: push_getheaders_from,
- * push_getheaders, push_getheaders_span and their locator helpers. Split out
- * of msg_headers.c as a behaviour-preserving move; the file-scope state these
- * functions share with msg_headers.c is declared in msg_headers_internal.h. */
+ * push_getheaders, push_getheaders_span and their locator helpers, plus the
+ * single-header announcement and the bounded header append it shares with the
+ * getheaders reply. Split out of msg_headers.c as a behaviour-preserving move;
+ * the file-scope state these functions share with msg_headers.c is declared in
+ * msg_headers_internal.h. */
 
 #include "net/msg_internal.h"
 #include "net/msg_bounds_guard.h"
@@ -308,4 +310,66 @@ void push_getheaders_span(struct msg_processor *mp, struct p2p_node *node,
     }
     stream_free(&s);
     block_locator_free(&loc);
+}
+
+/* See net/msg_internal.h. */
+bool getheaders_try_append_header(struct byte_stream *body,
+                                  const struct block_header *hdr)
+{
+    size_t before = body->size;
+    block_header_serialize(hdr, body);
+    stream_write_compact_size(body, 0);  /* per-header tx count = 0 */
+    /* Reserve headroom for the compact_size(count) prefix the caller writes
+     * ahead of `body` (≤3 bytes for count ≤ 2000; 16 is generous). */
+    if (body->error ||
+        body->size + 16 > (size_t)MAX_PROTOCOL_MESSAGE_LENGTH) {
+        body->size = before;
+        return false;
+    }
+    return true;
+}
+
+/* See net/msg_internal.h. The servability gate is deliberately the same one
+ * used by getheaders: a tip vote is useful only when the exact bytes this node
+ * accepted are available and independently hash/PoW verified. */
+bool push_verified_header_announcement(struct msg_processor *mp,
+                                       struct p2p_node *node,
+                                       struct block_index *index)
+{
+    if (!mp || !mp->params || !node || !index)
+        LOG_FAIL("headers", "tip announcement: invalid arguments");
+
+    struct block_header hdr;
+    block_header_init(&hdr);
+    if (!getheaders_index_header_servable(mp, index, &hdr)) {
+        LOG_WARN("headers",
+                 "tip announcement: refusing unservable header h=%d peer=%s",
+                 index->nHeight, node->addr_name);
+        return false;
+    }
+
+    struct byte_stream body;
+    stream_init(&body, 2048);
+    stream_write_compact_size(&body, 1);
+    if (!getheaders_try_append_header(&body, &hdr)) {
+        stream_free(&body);
+        LOG_FAIL("headers",
+                 "tip announcement: serialization failed h=%d peer=%s",
+                 index->nHeight, node->addr_name);
+    }
+
+    if (!p2p_node_begin_message(node, "headers",
+                                mp->params->pchMessageStart)) {
+        stream_free(&body);
+        LOG_FAIL("headers",
+                 "tip announcement: begin message failed h=%d peer=%s",
+                 index->nHeight, node->addr_name);
+    }
+    p2p_node_write_message_data(node, body.data, body.size);
+    bool sent = p2p_node_end_message(node);
+    stream_free(&body);
+    if (!sent)
+        LOG_FAIL("headers", "tip announcement: send failed h=%d peer=%s",
+                 index->nHeight, node->addr_name);
+    return true;
 }
