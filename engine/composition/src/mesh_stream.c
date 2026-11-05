@@ -490,6 +490,8 @@ static enum mesh_stream_refusal stream_open_service_locked(
             g_services[index].required_pairing_capability, now,
             snap->remote_static))
         return MESH_STREAM_REFUSED_PEER_UNPAIRED;
+    if (g_services[index].required_pairing_capability != 0)
+        stream_open_promote_locked(snap->remote_static, now);
     *index_out = index;
     return MESH_STREAM_OK;
 }
@@ -885,9 +887,6 @@ static void stream_receive_open(struct msg_processor *mp,
         node, id, snap, now, open_body.initial_window);
     if (refusal == MESH_STREAM_OK)
         refusal = stream_open_service_locked(&open_body, snap, now, &index);
-    if (refusal == MESH_STREAM_OK && index >= 0 &&
-        g_services[index].required_pairing_capability != 0)
-        stream_open_promote_locked(snap->remote_static, now);
     if (refusal != MESH_STREAM_OK || index < 0) {
         zcl_mutex_unlock(&g_stream_lock);
         atomic_fetch_add(&g_opens_refused, 1);
