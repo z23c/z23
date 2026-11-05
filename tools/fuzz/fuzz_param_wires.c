@@ -290,9 +290,27 @@ static void require_guards(const struct guarded *g)
 static void require_chunk(const struct guarded *g, uint64_t size, uint64_t offset,
                           uint32_t length)
 {
-    for (uint32_t i = 0; i < length; i++)
-        if (g->body[i] != expected_byte(size, offset + i))
+    /* The fixture is zero except at the marked positions, so: every byte of
+     * the range that is not a marker is zero (counted, not walked with a
+     * modulo), and each marker inside the range holds its value. */
+    uint64_t end = offset + length;
+    uint64_t markers = 0;
+    uint64_t first = (offset + BETA6_BS_CHUNK_SIZE - 1) / BETA6_BS_CHUNK_SIZE *
+                     BETA6_BS_CHUNK_SIZE;
+    for (uint64_t pos = first; pos < end && pos < size; pos += BETA6_BS_CHUNK_SIZE, markers++)
+        if (g->body[pos - offset] != expected_byte(size, pos))
             abort();
+    if (size > 0 && (size - 1) % BETA6_BS_CHUNK_SIZE != 0 && size - 1 >= offset &&
+        size - 1 < end) {
+        markers++;
+        if (g->body[size - 1 - offset] != 0xEE)
+            abort();
+    }
+    uint64_t nonzero = 0;
+    for (uint32_t i = 0; i < length; i++)
+        nonzero += g->body[i] != 0;
+    if (nonzero != markers)
+        abort();
     for (size_t i = length; i < g->cap; i++)
         if (g->body[i] != FUZZ_PW_BODY_FILL)
             abort();
