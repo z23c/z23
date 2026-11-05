@@ -383,7 +383,12 @@ static int sc_engine_cases(const char *base)
 
     event_log_init();
     (void)blocker_module_init();
-    SC_CHECK("pin fixture datadir", SetDataDir(base));
+    bool pinned = SetDataDir(base);
+    SC_CHECK("pin fixture datadir", pinned);
+    /* Unpinned, GetDataDir falls back to another datadir and these cases
+     * would clear its segments. */
+    if (!pinned)
+        return failures;
     GetDataDir(true, netdir, sizeof(netdir));
     snprintf(segdir, sizeof(segdir), "%s/segments", netdir);
 
