@@ -10,8 +10,8 @@
  *   BUILT, whether or not the wallet holds it -> outcome_unknown with the txid
  *   BUILT under the zero txid                 -> outcome_unknown, no txid
  *   STARTED, nobody running it                -> the row is freed, the send runs
- *   other digest, an earlier build's for this -> outcome_unknown, no txid
- *   other digest                              -> key_conflict
+ *   only this request's legacy digest matches -> outcome_unknown, no txid
+ *   no digest matches                         -> key_conflict
  * The wallet persists a transaction before it relays it, but holding a
  * transaction does not prove it was relayed, so BUILT never answers committed.
  *
@@ -401,8 +401,9 @@ struct wso_request {
 /* A row whose digest is not this request's. A row an earlier build wrote for
  * this request holds its legacy digest, and that send may have gone out: a
  * conflict would tell the client to pay again under a new key, and a txid would
- * claim this exact request was the one sent. So it answers outcome_unknown with
- * neither, whatever the row's state. */
+ * claim this exact request was the one sent. So a match answers outcome_unknown
+ * with neither, whatever the row's state. A row this build wrote for a whole
+ * amount can match a lossy request the same way; nothing tells the two apart. */
 static void wso_answer_mismatch(const struct wallet_send_once_row *row,
                                 const struct wso_request *req,
                                 struct json_value *result)
@@ -410,7 +411,7 @@ static void wso_answer_mismatch(const struct wallet_send_once_row *row,
     uint8_t legacy[32];
     wso_legacy_digest(req->key, req->params, legacy);
     if (memcmp(row->digest, legacy, 32) == 0) {
-        LOG_WARN(WSO_TAG, "repeat of a key recorded by an earlier build");
+        LOG_WARN(WSO_TAG, "repeat matches the key's row only by legacy digest");
         wso_answer(result, "outcome_unknown", NULL, true);
         return;
     }
