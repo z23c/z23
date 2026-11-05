@@ -257,8 +257,11 @@ static struct wpr_entry *wpr_find_locked(struct wpr *r,
     return NULL;
 }
 
-/* A free slot, reclaiming the oldest seen-back record when full, then the
- * oldest expired record. */
+/* A free slot, or when full the oldest seen-back record, then the oldest
+ * expired record. A reclaimed slot is returned untouched: the caller saves it
+ * and restores it if the new record cannot be written, so a refused insert
+ * loses nothing. A successful write drops the reclaimed row from the store,
+ * which is rewritten whole from the table. */
 static struct wpr_entry *wpr_alloc_locked(struct wpr *r)
 {
     struct wpr_entry *oldest_seen = NULL;
@@ -273,8 +276,6 @@ static struct wpr_entry *wpr_alloc_locked(struct wpr *r)
              e->seen_ms < oldest_seen->seen_ms)))
             oldest_seen = e;
     }
-    if (oldest_seen)
-        memset(oldest_seen, 0, sizeof(*oldest_seen));
     return oldest_seen;
 }
 
@@ -307,6 +308,7 @@ struct zcl_result wpr_prepare(struct wpr *r, const struct uint256 *txid)
         zcl_mutex_unlock(&r->lock);
         return ZCL_ERR(-2, "private relay: pending queue is full");
     }
+    const struct wpr_entry reclaimed = *e;
     memset(e, 0, sizeof(*e));
     e->used = true;
     e->txid = *txid;
@@ -314,7 +316,7 @@ struct zcl_result wpr_prepare(struct wpr *r, const struct uint256 *txid)
     e->last_attempt_ms = -1;
     e->seen_ms = r->now_ms();
     if (!wpr_persist_locked(r)) {
-        memset(e, 0, sizeof(*e));
+        *e = reclaimed;
         zcl_mutex_unlock(&r->lock);
         return ZCL_ERR(-4, "private relay: cannot record the pending set");
     }
@@ -367,17 +369,15 @@ struct zcl_result wpr_enqueue(struct wpr *r, const struct transaction *tx)
         zcl_mutex_unlock(&r->lock);
         return ZCL_OK;
     }
-    bool existed = e != NULL;
-    struct wpr_entry saved;
-    memset(&saved, 0, sizeof(saved));
-    if (existed)
-        saved = *e;
     if (!e)
         e = wpr_alloc_locked(r);
     if (!e) {
         zcl_mutex_unlock(&r->lock);
         return ZCL_ERR(-2, "private relay: pending queue is full");
     }
+    /* A recorded send, a reclaimed terminal record or a free slot: whatever
+     * the slot held comes back if the new record cannot be written. */
+    const struct wpr_entry saved = *e;
     if (!wpr_draw_delay_ms(r, &delay)) {
         zcl_mutex_unlock(&r->lock);
         return ZCL_ERR(-3, "private relay: random delay unavailable");
@@ -385,10 +385,7 @@ struct zcl_result wpr_enqueue(struct wpr *r, const struct transaction *tx)
     wpr_fill_entry(e, &tx->hash, tx, r->now_ms() + delay, true);
     if (!wpr_persist_locked(r)) {
         /* A recorded send stays recorded: the wallet may still hold it. */
-        if (existed)
-            *e = saved;
-        else
-            memset(e, 0, sizeof(*e));
+        *e = saved;
         zcl_mutex_unlock(&r->lock);
         return ZCL_ERR(-4, "private relay: cannot record the pending set");
     }
