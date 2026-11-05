@@ -730,6 +730,21 @@ static void anchor_key_hex(const uint8_t key[ANCHOR_FINALITY_KEY_LEN], char *out
     out[2 * ANCHOR_FINALITY_KEY_LEN] = '\0';
 }
 
+static bool anchor_dump_header_ok(const struct json_value *out)
+{
+    const struct json_value *dm = json_get(out, "depth_meaning");
+    return anchor_dump_int_is(out, "tip_height", 1000) &&
+           anchor_dump_int_is(out, "finality_depth", ZCL_FINALITY_DEPTH) &&
+           anchor_dump_int_is(out, "immutable_height", 1000 - ZCL_FINALITY_DEPTH) &&
+           anchor_dump_int_is(out, "record_count", 2) &&
+           anchor_dump_int_is(out, "capacity", ANCHOR_INFLUENCE_MAX_RECORDS) &&
+           anchor_dump_int_is(out, "influencing_count", 1) &&
+           anchor_dump_real_is(out, "mult_min", 1.0) &&
+           anchor_dump_real_is(out, "mult_max", 4.0) &&
+           dm && json_get_str(dm) &&
+           strcmp(json_get_str(dm), "anti-flapping, not a trust threshold") == 0;
+}
+
 /* Every dump header field and every per-record field carries its real value. */
 static int anchor_dump_every_field(void)
 {
@@ -745,18 +760,8 @@ static int anchor_dump_every_field(void)
 
     struct json_value out;
     json_init(&out);
-    bool ok = anchor_influence_set_dump_json(&set, &out);
-    const struct json_value *dm = json_get(&out, "depth_meaning");
-    ok = ok && anchor_dump_int_is(&out, "tip_height", 1000) &&
-         anchor_dump_int_is(&out, "finality_depth", ZCL_FINALITY_DEPTH) &&
-         anchor_dump_int_is(&out, "immutable_height", 1000 - ZCL_FINALITY_DEPTH) &&
-         anchor_dump_int_is(&out, "record_count", 2) &&
-         anchor_dump_int_is(&out, "capacity", ANCHOR_INFLUENCE_MAX_RECORDS) &&
-         anchor_dump_int_is(&out, "influencing_count", 1) &&
-         anchor_dump_real_is(&out, "mult_min", 1.0) &&
-         anchor_dump_real_is(&out, "mult_max", 4.0) &&
-         dm && json_get_str(dm) &&
-         strcmp(json_get_str(dm), "anti-flapping, not a trust threshold") == 0;
+    bool ok = anchor_influence_set_dump_json(&set, &out) &&
+              anchor_dump_header_ok(&out);
     const struct json_value *rows = json_get(&out, "records");
     ok = ok && rows && json_size(rows) == 2 &&
          anchor_dump_row_is(json_at(rows, 0), hp, 998, 2, ZCL_FINALITY_DEPTH - 2,
