@@ -17,6 +17,7 @@
 
 #include "core/arith_uint256.h"
 #include "core/uint256.h"
+#include "event/event.h"
 #include "util/blocker.h"
 #include "validation/chain_linkage_check.h"
 #include "validation/chainstate.h"
@@ -246,6 +247,389 @@ static int clc_offtip_fork_switch_counted(void)
     return failures;
 }
 
+/* ── Mutation-gap tests: hold-slot bookkeeping, snapshot, clear, reset ── */
+
+struct clc_ev_capture {
+    int      count;
+    uint32_t last_peer;
+};
+
+static void clc_ev_observer(enum event_type type, uint32_t peer_id,
+                            const void *payload, uint32_t payload_len,
+                            void *ctx)
+{
+    (void)type; (void)payload; (void)payload_len;
+    struct clc_ev_capture *cap = ctx;
+    cap->count++;
+    cap->last_peer = peer_id;
+}
+
+static bool clc_snapshot_ids_are(const char *want)
+{
+    char ids[64];
+    memset(ids, 'Z', sizeof(ids));
+    chain_linkage_hold_snapshot(NULL, NULL, ids, (int)sizeof(ids), NULL, 0);
+    return strcmp(ids, want) == 0;
+}
+
+static struct block_index clc_bare(int h, struct block_index *prev)
+{
+    struct block_index bi;
+    memset(&bi, 0, sizeof(bi));
+    bi.nHeight = h;
+    bi.pprev = prev;
+    return bi;
+}
+
+/* hold_set argument validation: a one-character id and height 0 are legal. */
+static int clc_hold_set_validation(void)
+{
+    int failures = 0;
+    chain_linkage_reset_for_testing();
+    chain_linkage_hold_set(NULL, 5, "r");
+    chain_linkage_hold_set("", 5, "r");
+    chain_linkage_hold_set("a", -1, "r");
+    CLC_CHECK("hold_set refuses NULL id, empty id, negative height",
+              !chain_linkage_hold_active());
+    CLC_CHECK("refuse_from is -1 while no hold is latched",
+              chain_linkage_hold_refuse_from() == -1);
+    chain_linkage_hold_set("a", 0, "r");
+    CLC_CHECK("one-character id at height 0 latches",
+              chain_linkage_hold_active() &&
+              chain_linkage_hold_refuse_from() == 0);
+    chain_linkage_hold_set("b", 5, "r");
+    CLC_CHECK("minimum stays 0 when a higher hold joins",
+              chain_linkage_hold_refuse_from() == 0);
+    chain_linkage_reset_for_testing();
+    return failures;
+}
+
+/* Lower-boundary rule and slot reuse. */
+static int clc_hold_lower_boundary(void)
+{
+    int failures = 0;
+    chain_linkage_reset_for_testing();
+    chain_linkage_hold_set("a", 9, "ra");
+    CLC_CHECK("single hold at 9 publishes 9",
+              chain_linkage_hold_refuse_from() == 9);
+    chain_linkage_hold_set("a", 5, "ra");
+    CLC_CHECK("re-set lowers the boundary",
+              chain_linkage_hold_refuse_from() == 5);
+    chain_linkage_hold_set("a", 20, "ra");
+    CLC_CHECK("re-set never loosens the boundary",
+              chain_linkage_hold_refuse_from() == 5);
+    CLC_CHECK("re-set reuses the same slot", clc_snapshot_ids_are("a"));
+    chain_linkage_reset_for_testing();
+    return failures;
+}
+
+/* Slot allocation for distinct ids, exhaustion, reuse after clear. */
+static int clc_hold_slot_exhaustion(void)
+{
+    int failures = 0;
+    chain_linkage_reset_for_testing();
+    chain_linkage_hold_set("a", 9, "ra");
+    chain_linkage_hold_set("b", 3, "rb");
+    chain_linkage_hold_set("c", 8, "rc");
+    CLC_CHECK("distinct ids keep distinct slots, minimum is 3",
+              clc_snapshot_ids_are("a,b,c") &&
+              chain_linkage_hold_refuse_from() == 3);
+    chain_linkage_hold_set("d", 7, "rd");
+    chain_linkage_hold_set("e", 1, "re");
+    CLC_CHECK("fifth id is not latched once all slots are held",
+              clc_snapshot_ids_are("a,b,c,d") &&
+              chain_linkage_hold_refuse_from() == 3);
+    chain_linkage_hold_clear("b");
+    chain_linkage_hold_set("e", 6, "re");
+    CLC_CHECK("a cleared slot is reused", clc_snapshot_ids_are("a,e,c,d"));
+    chain_linkage_reset_for_testing();
+    return failures;
+}
+
+static int clc_hold_clear_selective(void)
+{
+    int failures = 0;
+    chain_linkage_reset_for_testing();
+    chain_linkage_hold_set("a", 4, "ra");
+    chain_linkage_hold_set("b", 6, "rb");
+    chain_linkage_hold_clear(NULL);
+    chain_linkage_hold_clear("");
+    CLC_CHECK("clear(NULL) and clear(\"\") change nothing",
+              clc_snapshot_ids_are("a,b"));
+    chain_linkage_hold_clear("a");
+    CLC_CHECK("clear of a one-character id leaves the other hold",
+              clc_snapshot_ids_are("b") && chain_linkage_hold_active() &&
+              chain_linkage_hold_refuse_from() == 6);
+    chain_linkage_hold_clear("b");
+    CLC_CHECK("clearing the last hold deactivates",
+              !chain_linkage_hold_active());
+    chain_linkage_reset_for_testing();
+    return failures;
+}
+
+static int clc_hold_raise_blocker_ids(void)
+{
+    int failures = 0;
+    chain_linkage_reset_for_testing();
+    blocker_reset_for_testing();
+    chain_linkage_hold_raise("a", "q", 4, "why");
+    CLC_CHECK("one-character blocker id is registered",
+              blocker_exists("q"));
+    chain_linkage_hold_clear("a");
+    CLC_CHECK("clear releases a one-character blocker id",
+              !blocker_exists("q") && !chain_linkage_hold_active());
+    chain_linkage_hold_raise("a", NULL, 4, "why");
+    chain_linkage_hold_raise("b", "", 4, "why");
+    CLC_CHECK("raise without a blocker id latches only the hold",
+              clc_snapshot_ids_are("a,b"));
+    chain_linkage_reset_for_testing();
+    blocker_reset_for_testing();
+    return failures;
+}
+
+/* Exhausted slots: raise of a fifth id must not crash. */
+static int clc_hold_raise_exhausted(void)
+{
+    int failures = 0;
+    chain_linkage_reset_for_testing();
+    blocker_reset_for_testing();
+    chain_linkage_hold_set("a", 1, "r");
+    chain_linkage_hold_set("b", 2, "r");
+    chain_linkage_hold_set("c", 3, "r");
+    chain_linkage_hold_set("d", 4, "r");
+    chain_linkage_hold_raise("e", "qe", 5, "why");
+    CLC_CHECK("raise on exhausted slots leaves holds as they were",
+              clc_snapshot_ids_are("a,b,c,d"));
+    blocker_clear("qe");
+    chain_linkage_reset_for_testing();
+    blocker_reset_for_testing();
+    return failures;
+}
+
+/* Operator page: once per fresh blocker write, with peer id 0. */
+static int clc_hold_raise_pages_once(void)
+{
+    int failures = 0;
+    struct clc_ev_capture cap = { .count = 0, .last_peer = 99 };
+    chain_linkage_reset_for_testing();
+    blocker_reset_for_testing();
+    blocker_set_clock_for_testing(5000000); /* frozen: second set is a dup */
+    bool reg = event_observe(EV_OPERATOR_NEEDED, clc_ev_observer, &cap);
+    CLC_CHECK("operator observer registers", reg);
+    chain_linkage_hold_raise("a", "q", 7, "why");
+    CLC_CHECK("fresh blocker pages exactly once with peer 0",
+              cap.count == 1 && cap.last_peer == 0);
+    chain_linkage_hold_raise("a", "q", 7, "why");
+    CLC_CHECK("rate-limited duplicate does not page again", cap.count == 1);
+    event_clear_observers(EV_OPERATOR_NEEDED);
+    chain_linkage_reset_for_testing();
+    blocker_reset_for_testing();
+    return failures;
+}
+
+static int clc_snapshot_text(void)
+{
+    int failures = 0;
+    bool act = false;
+    int rf = -7;
+    char ids[64], rsn[64];
+    chain_linkage_reset_for_testing();
+    chain_linkage_hold_set("a", 9, "x");
+    chain_linkage_hold_set("b", 4, "yy");
+    memset(ids, 'Z', sizeof(ids)); ids[63] = '\0';
+    memset(rsn, 'Z', sizeof(rsn)); rsn[63] = '\0';
+    chain_linkage_hold_snapshot(&act, &rf, ids, 64, rsn, 64);
+    CLC_CHECK("snapshot reports active and minimum", act && rf == 4);
+    CLC_CHECK("snapshot lists ids in slot order", strcmp(ids, "a,b") == 0);
+    CLC_CHECK("snapshot reason is the first held slot's",
+              strcmp(rsn, "x") == 0);
+    chain_linkage_reset_for_testing();
+    chain_linkage_hold_snapshot(&act, &rf, ids, 64, rsn, 64);
+    CLC_CHECK("empty snapshot: inactive, -1, empty strings",
+              !act && rf == -1 && ids[0] == '\0' && rsn[0] == '\0');
+    return failures;
+}
+
+static int clc_snapshot_capacities(void)
+{
+    int failures = 0;
+    char ids[64], rsn[64];
+    chain_linkage_reset_for_testing();
+    chain_linkage_hold_set("a", 9, "x");
+    memset(ids, 'Z', sizeof(ids)); memset(rsn, 'Z', sizeof(rsn));
+    chain_linkage_hold_snapshot(NULL, NULL, ids, 1, rsn, 1);
+    CLC_CHECK("capacity 1 yields empty strings, writes nothing beyond",
+              ids[0] == '\0' && rsn[0] == '\0' &&
+              ids[1] == 'Z' && rsn[1] == 'Z');
+    memset(ids, 'Z', sizeof(ids)); ids[10] = '\0';
+    memset(rsn, 'Z', sizeof(rsn)); rsn[10] = '\0';
+    chain_linkage_hold_snapshot(NULL, NULL, ids, 0, rsn, 0);
+    CLC_CHECK("capacity 0 leaves both buffers untouched",
+              strlen(ids) == 10 && strlen(rsn) == 10);
+    chain_linkage_hold_snapshot(NULL, NULL, NULL, 5, NULL, 5);
+    chain_linkage_hold_snapshot(NULL, NULL, ids, 5, NULL, 5);
+    chain_linkage_hold_snapshot(NULL, NULL, NULL, 5, rsn, 5);
+    CLC_CHECK("NULL out buffers with a capacity do not crash", true);
+    chain_linkage_reset_for_testing();
+    return failures;
+}
+
+/* Violation reason text. */
+static int clc_violation_reason(void)
+{
+    int failures = 0;
+    struct main_state ms; main_state_init(&ms);
+    struct block_index p = clc_bare(4, NULL);
+    struct block_index spliced = clc_bare(11, &p);
+    char rsn[CHAIN_HOLD_REASON_MAX];
+    chain_linkage_reset_for_testing();
+    blocker_reset_for_testing();
+    bool refused = !chain_linkage_check_advance(&ms.chain_active, &spliced);
+    chain_linkage_hold_snapshot(NULL, NULL, NULL, 0, rsn, (int)sizeof(rsn));
+    CLC_CHECK("splice refused", refused);
+    CLC_CHECK("violation reason names heights and the expected one",
+              strcmp(rsn, "label splice at connect: h=11 pprev_h=4 "
+                          "(expected 10)") == 0);
+    chain_linkage_reset_for_testing();
+    blocker_reset_for_testing();
+    main_state_free(&ms);
+    return failures;
+}
+
+/* Exact-once refusal accounting around the hold boundary. */
+static int clc_hold_refusal_accounting(void)
+{
+    int failures = 0;
+    struct main_state ms; main_state_init(&ms);
+    struct block_index below = clc_bare(4, NULL);
+    struct block_index at = clc_bare(5, NULL);
+    struct block_index past = clc_bare(9, NULL);
+    struct block_index genesis = clc_bare(0, NULL);
+    chain_linkage_reset_for_testing();
+    chain_linkage_hold_set("a", 5, "r");
+    bool pass = chain_linkage_check_advance(&ms.chain_active, &below);
+    CLC_CHECK("move below the hold passes, uncounted",
+              pass && chain_linkage_hold_refusals_total() == 0);
+    bool r1 = !chain_linkage_check_advance(&ms.chain_active, &at);
+    CLC_CHECK("move at the hold refuses, counted once",
+              r1 && chain_linkage_hold_refusals_total() == 1);
+    bool r2 = !chain_linkage_check_advance(&ms.chain_active, &past);
+    CLC_CHECK("move past the hold refuses, counted once more",
+              r2 && chain_linkage_hold_refusals_total() == 2);
+    chain_linkage_reset_for_testing();
+    chain_linkage_hold_set("a", 0, "r");
+    CLC_CHECK("hold at height 0 refuses genesis",
+              !chain_linkage_check_advance(&ms.chain_active, &genesis));
+    chain_linkage_reset_for_testing();
+    main_state_free(&ms);
+    return failures;
+}
+
+/* Off-tip diagnostic: only for a strict +1 move of a window that holds
+ * at least the genesis block. */
+static int clc_offtip_diagnostic_scope(void)
+{
+    int failures = 0;
+    struct main_state ms; main_state_init(&ms);
+    static struct uint256 hh;
+    chain_linkage_reset_for_testing();
+    blocker_reset_for_testing();
+    struct block_index g0 = clc_bare(0, NULL);
+    CLC_CHECK("empty window: genesis install passes",
+              chain_linkage_check_advance(&ms.chain_active, &g0));
+    struct block_index *real = clc_insert(&ms, &hh, 0, NULL, 0x91);
+    bool seated = real && active_chain_move_window_tip(&ms.chain_active, real);
+    CLC_CHECK("window seated at height 0, nothing counted yet",
+              seated && chain_linkage_offtip_switches_total() == 0);
+    struct block_index h1ok = clc_bare(1, real);
+    bool on_tip = chain_linkage_check_advance(&ms.chain_active, &h1ok);
+    CLC_CHECK("+1 move on the window tip is not counted",
+              on_tip && chain_linkage_offtip_switches_total() == 0);
+    struct block_index h1 = clc_bare(1, &g0);
+    bool off_tip = chain_linkage_check_advance(&ms.chain_active, &h1);
+    CLC_CHECK("+1 move off the tip at window height 0 is counted",
+              off_tip && chain_linkage_offtip_switches_total() == 1);
+    struct block_index h2 = clc_bare(2, &h1ok);
+    bool jump = chain_linkage_check_advance(&ms.chain_active, &h2);
+    CLC_CHECK("a +2 jump off the tip is allowed and not counted",
+              jump && chain_linkage_offtip_switches_total() == 1);
+    chain_linkage_reset_for_testing();
+    main_state_free(&ms);
+    return failures;
+}
+
+static int clc_reset_clears_everything(void)
+{
+    int failures = 0;
+    struct main_state ms; main_state_init(&ms);
+    chain_linkage_reset_for_testing();
+    blocker_reset_for_testing();
+    struct block_index p = clc_bare(0, NULL);
+    struct block_index spliced = clc_bare(5, &p);
+    struct block_index past = clc_bare(6, &spliced);
+    bool a = !chain_linkage_check_advance(&ms.chain_active, &spliced);
+    bool b = !chain_linkage_check_advance(&ms.chain_active, &past);
+    chain_linkage_hold_raise("z", "q", 8, "why");
+    CLC_CHECK("setup: violation and refusal counted",
+              a && b && chain_linkage_violations_total() == 1 &&
+              chain_linkage_hold_refusals_total() == 1);
+    CLC_CHECK("setup: both blockers registered",
+              blocker_exists("chain.linkage_violation") &&
+              blocker_exists("q"));
+    chain_linkage_reset_for_testing();
+    CLC_CHECK("reset deactivates the hold and clears every slot",
+              !chain_linkage_hold_active() && clc_snapshot_ids_are(""));
+    CLC_CHECK("reset releases both blockers",
+              !blocker_exists("chain.linkage_violation") &&
+              !blocker_exists("q"));
+    CLC_CHECK("reset zeroes the violation and refusal counters",
+              chain_linkage_violations_total() == 0 &&
+              chain_linkage_hold_refusals_total() == 0);
+    blocker_reset_for_testing();
+    main_state_free(&ms);
+    return failures;
+}
+
+static int clc_reset_clears_offtip_counter(void)
+{
+    int failures = 0;
+    struct main_state ms; main_state_init(&ms);
+    static struct uint256 hh;
+    chain_linkage_reset_for_testing();
+    struct block_index g0 = clc_bare(0, NULL);
+    struct block_index *real = clc_insert(&ms, &hh, 0, NULL, 0x92);
+    bool seated = real && active_chain_move_window_tip(&ms.chain_active, real);
+    struct block_index h1 = clc_bare(1, &g0);
+    bool moved = chain_linkage_check_advance(&ms.chain_active, &h1);
+    CLC_CHECK("setup: off-tip switch counted",
+              seated && moved && chain_linkage_offtip_switches_total() == 1);
+    chain_linkage_reset_for_testing();
+    CLC_CHECK("reset zeroes the off-tip counter",
+              chain_linkage_offtip_switches_total() == 0);
+    main_state_free(&ms);
+    return failures;
+}
+
+static int clc_mutation_gap_tests(void)
+{
+    int failures = 0;
+    failures += clc_hold_set_validation();
+    failures += clc_hold_lower_boundary();
+    failures += clc_hold_slot_exhaustion();
+    failures += clc_hold_clear_selective();
+    failures += clc_hold_raise_blocker_ids();
+    failures += clc_hold_raise_exhausted();
+    failures += clc_hold_raise_pages_once();
+    failures += clc_snapshot_text();
+    failures += clc_snapshot_capacities();
+    failures += clc_violation_reason();
+    failures += clc_hold_refusal_accounting();
+    failures += clc_offtip_diagnostic_scope();
+    failures += clc_reset_clears_everything();
+    failures += clc_reset_clears_offtip_counter();
+    return failures;
+}
+
 int test_chain_linkage_check(void)
 {
     test_reset_shared_globals();   /* monolith isolation: see test_helpers.c */
@@ -261,5 +645,6 @@ int test_chain_linkage_check(void)
     failures += clc_depth10_reorg_reconnect();
     failures += clc_seed_jump_healthy_labels();
     failures += clc_offtip_fork_switch_counted();
+    failures += clc_mutation_gap_tests();
     return failures;
 }
