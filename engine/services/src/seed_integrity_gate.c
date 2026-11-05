@@ -240,14 +240,13 @@ bool seed_integrity_gate_check(int height, const uint8_t hash[32],
     }
 
     pthread_mutex_lock(&g_memo_lock);
-    /* A memo hit needs the stored evaluation to have run at least the checks
-     * this call asks for: an untrusted pass (linkage walk only) must not
-     * answer a trusted call, whose commitment check never ran. A trusted
-     * pass covers an untrusted call; a stored refusal answers only a call
-     * of the same trust, since a trusted refusal may be commitment-only. */
+    /* One stored verdict cannot answer: an untrusted pass (linkage walk only)
+     * for a trusted call, whose commitment check never ran. A trusted pass
+     * covers an untrusted call, and any refusal stays a refusal, so an
+     * untrusted repeat cannot overwrite a trusted refusal with a pass. */
     if (g_memo_valid && g_memo_height == height &&
         memcmp(g_memo_hash, hash, 32) == 0 &&
-        (g_memo_trusted == trusted_seed || (g_memo_trusted && g_memo_pass))) {
+        (g_memo_trusted || !trusted_seed || !g_memo_pass)) {
         bool pass = g_memo_pass;
         pthread_mutex_unlock(&g_memo_lock);
         return pass;
