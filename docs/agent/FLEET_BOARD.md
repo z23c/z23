@@ -589,6 +589,15 @@ maximum-size entries, one call takes about 250 ms in the test build (every
 stored row is re-verified as it is read), so the command is declared
 foreground, not fast.
 
+A wiki write names its predecessor only inside its own scope. Both write
+paths (the `post` op and the `wiki_write` op, so `fleet.wiki.write` too)
+refuse a revision whose `expected` or `supersedes` id is a page of the other
+scope with `CROSS_SCOPE_REVISION`, and the compare-and-append head of a slug
+is the newest page of the writer's scope only: a fleet page holding a slug is
+neither a conflict for the first public write of it nor the head a public
+write must name. Peer ingest does not decide this edge (the parent may arrive
+after the child), and it stores nothing the peer did not already sign.
+
 ## Public wiki
 
 A node serving the HTTPS explorer profile (`-httpsdomain`) also serves its

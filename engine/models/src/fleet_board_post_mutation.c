@@ -152,6 +152,11 @@ static enum fleet_board_wiki_write_status wiki_write_head(
         return FLEET_WIKI_WRITE_STORAGE;
     if (kind == FLEET_WIKI_REVIEW_VALID) return wiki_write_review_head(ndb, post, expected);
     qb_where_text(&q, QB_C_fleet_board_posts_slug, QB_EQ, post->slug);
+    /* One scope's page of a slug: the same split the reads make, so another
+     * scope's row is neither this write's head nor a conflict for it. */
+    qb_where_int(&q, QB_C_fleet_board_posts_scope,
+                 post->scope == FLEET_BOARD_SCOPE_FLEET ? QB_EQ : QB_NE,
+                 FLEET_BOARD_SCOPE_FLEET);
     qb_order_by(&q, QB_C_fleet_board_posts_created_at, QB_DESC);
     qb_order_by(&q, QB_C_fleet_board_posts_id, QB_DESC);
     struct db_fleet_board_post head;

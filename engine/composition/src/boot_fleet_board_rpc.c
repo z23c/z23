@@ -355,15 +355,9 @@ static void fb_op_post(struct node_db *ndb, const struct json_value *in,
                        struct json_value *result, int64_t now)
 {
     struct fleet_board_post post;
-    char why[320];
-    const char *code = NULL, *refusal;
-    if (!fb_compose(in, result, now, &post))
+    if (!fb_compose(in, result, now, &post) ||
+        boot_fleet_wiki_scope_reject(ndb, &post, result))
         return;
-    refusal = boot_fleet_wiki_scope_refusal(ndb, &post, &code, why, sizeof(why));
-    if (refusal) {
-        fb_error(result, code, refusal);
-        return;
-    }
     enum fleet_board_result r = boot_fleet_board_publish(&post, now);
     if (r != FLEET_BOARD_OK) {
         fb_refuse_write(result, r);
@@ -457,13 +451,14 @@ static bool fb_wiki_write_receipt(struct json_value *result,
     return ok;
 }
 
-static void fb_op_wiki_write(const struct json_value *in,
+static void fb_op_wiki_write(struct node_db *ndb, const struct json_value *in,
     struct json_value *result, int64_t now)
 {
     struct fleet_board_post post;
     uint8_t expected[32];
     bool absent;
-    if (!fb_wiki_write_compose(in, result, now, &post, expected, &absent)) return;
+    if (!fb_wiki_write_compose(in, result, now, &post, expected, &absent) ||
+        boot_fleet_wiki_scope_reject(ndb, &post, result)) return;
     struct db_fleet_board_post out;
     enum fleet_board_result refusal;
     enum fleet_board_wiki_write_status status = boot_fleet_board_wiki_write(
@@ -1478,7 +1473,7 @@ static bool rpc_fleet_board(const struct json_value *params, bool help,
     int64_t now = (int64_t)platform_time_wall_time_t();
 
     if (strcmp(op, "post") == 0)            fb_op_post(ndb, in, result, now);
-    else if (strcmp(op, "wiki_write") == 0) fb_op_wiki_write(in, result, now);
+    else if (strcmp(op, "wiki_write") == 0) fb_op_wiki_write(ndb, in, result, now);
     else if (strcmp(op, "list") == 0)       fb_op_list(ndb, in, result, now);
     else if (strcmp(op, "show") == 0)       fb_op_show(ndb, in, result);
     else if (strcmp(op, "fleet_page") == 0)

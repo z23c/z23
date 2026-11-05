@@ -27,6 +27,13 @@ const char *boot_fleet_wiki_scope_refusal(struct node_db *ndb,
     const struct fleet_board_post *post, const char **code, char *buf,
     size_t cap);
 
+/* boot_fleet_wiki_scope_refusal as an RPC error object in *result (ok false,
+ * code, message). True when the post was refused; every path that stores a
+ * wiki post from this node's caller runs it, the post op and the wiki_write
+ * op alike. */
+bool boot_fleet_wiki_scope_reject(struct node_db *ndb,
+    const struct fleet_board_post *post, struct json_value *result);
+
 /* Is a stored review one this view projects: its scope, and for the public
  * view the default room. */
 bool boot_fleet_wiki_review_in_view(enum fleet_wiki_view view,

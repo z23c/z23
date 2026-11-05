@@ -94,3 +94,19 @@ bool boot_fleet_wiki_review_in_view(enum fleet_wiki_view view,
     return view == FLEET_WIKI_VIEW_FLEET ||
            !strcmp(post->room, FLEET_BOARD_ROOM_DEFAULT);
 }
+
+bool boot_fleet_wiki_scope_reject(struct node_db *ndb,
+    const struct fleet_board_post *post, struct json_value *result)
+{
+    const char *code = NULL;
+    char why[320];
+    const char *refusal = boot_fleet_wiki_scope_refusal(ndb, post, &code, why,
+                                                         sizeof(why));
+    if (!refusal)
+        return false;
+    json_set_object(result);
+    json_push_kv_bool(result, "ok", false);
+    json_push_kv_str(result, "code", code);
+    json_push_kv_str(result, "message", refusal);
+    return true;
+}
