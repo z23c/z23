@@ -157,6 +157,7 @@ static void gsf_setup_outbound_peer(struct p2p_node *node, int32_t height)
 {
     memset(node, 0, sizeof(*node));
     node->socket = ZCL_INVALID_SOCKET;
+    node->services = NODE_NETWORK | NODE_ZCL23;
     node->starting_height = height;
     snprintf(node->addr_name, sizeof(node->addr_name),
              "203.0.113.23:8033");
@@ -1269,6 +1270,82 @@ static int gh_check_serve_hdr_out(const struct chain_params *cp,
     return failures;
 }
 
+/* What a peer hears when the best header leads the active tip. Tip is H3, best
+ * header H5. zclassicd reads a header as "this peer has the block", asks for
+ * the body once, ignores notfound and leaves the request open until its download
+ * timeout, parking every block above the gap. So a peer without NODE_ZCL23 hears
+ * only what zclassicd itself would serve: the active chain, where the body is
+ * held. A NODE_ZCL23 peer re-queues on notfound and still hears above the tip. */
+struct gh_held_case {
+    const char *name;
+    uint64_t services;
+    unsigned held; /* bit h: the body of H<h> is held */
+    int loc;
+    int want_count;
+    int want_first;
+    int twin; /* 1: chain[] holds a bodiless twin of H3; 2: only the twin has the bit */
+};
+
+#define GH_HELD_ALL 0x3fu
+#define GH_HELD_TO_TIP 0x0fu
+
+static const struct gh_held_case gh_held_cases[] = {
+    {"legacy: hears the active chain up to the tip", NODE_NETWORK, GH_HELD_ALL,
+     1, 2, 2, 0},
+    {"legacy: hears nothing above the tip while bodies are missing",
+     NODE_NETWORK, GH_HELD_TO_TIP, 3, 0, -1, 0},
+    {"legacy: a held body above the tip is not offered either", NODE_NETWORK,
+     GH_HELD_ALL, 3, 0, -1, 0},
+    {"legacy: an active block with no body is not offered", NODE_NETWORK,
+     GH_HELD_TO_TIP & ~(1u << 2), 1, 0, -1, 0},
+    {"legacy: serves the run before a missing body", NODE_NETWORK,
+     GH_HELD_TO_TIP & ~(1u << 3), 1, 1, 2, 0},
+    {"zcl23: hears headers above the tip with no bodies held",
+     NODE_NETWORK | NODE_ZCL23, 0, 3, 2, 4, 0},
+    {"legacy: hears a block whose body is on the map's same-hash entry",
+     NODE_NETWORK, GH_HELD_TO_TIP, 2, 1, 3, 1},
+    {"legacy: a body bit only on chain[]'s twin is not what getdata reads",
+     NODE_NETWORK, GH_HELD_TO_TIP & ~(1u << 3), 2, 0, -1, 2},
+};
+
+static int gh_run_held_case(const struct gh_held_case *tc,
+                            const struct chain_params *cp, const char *dir,
+                            struct gh_chain *c)
+{
+    int failures = 0;
+    struct main_state ms;
+    bool opened = gh_open_fixture(&ms, c, 3);
+    for (int h = 0; opened && h < GH_CHAIN_LEN; h++) {
+        if (tc->held & (1u << h))
+            c->bi[h]->nStatus |= BLOCK_HAVE_DATA;
+    }
+    struct block_index twin;
+    if (opened && tc->twin) {
+        twin = *c->bi[3];
+        twin.nStatus = tc->twin == 2 ? BLOCK_HAVE_DATA : 0;
+        opened = active_chain_install_tip_slot(&ms.chain_active, &twin);
+    }
+    struct msg_processor mp;
+    msg_processor_init(&mp, &ms, NULL, NULL, cp, dir, &g_gsf_nm, NULL);
+    struct p2p_node node;
+    gsf_setup_outbound_peer(&node, GH_CHAIN_LEN - 1);
+    node.services = tc->services;
+    struct uint256 loc = c->hash[tc->loc];
+    struct uint256 stop;
+    uint256_set_null(&stop);
+    gh_send_getheaders(&mp, &node, &loc, 1, &stop);
+
+    struct uint256 got[GH_CHAIN_LEN];
+    int count = gh_read_headers_reply(&node, got, GH_CHAIN_LEN);
+    bool first_ok = tc->want_first < 0 ||
+                    (count > 0 && uint256_eq(&got[0], &c->hash[tc->want_first]));
+    GSF_CHECK(tc->name, opened && count == tc->want_count && first_ok);
+
+    gsf_free_outbound_peer(&node);
+    main_state_free(&ms);
+    return failures;
+}
+
 static int gh_serve_locator_cases(const struct chain_params *cp,
                                   const char *dir)
 {
@@ -1280,6 +1357,8 @@ static int gh_serve_locator_cases(const struct chain_params *cp,
         return failures;
     for (size_t i = 0; i < sizeof(gh_loc_cases) / sizeof(gh_loc_cases[0]); i++)
         failures += gh_run_loc_case(&gh_loc_cases[i], cp, dir, &c);
+    for (size_t i = 0; i < sizeof(gh_held_cases) / sizeof(gh_held_cases[0]); i++)
+        failures += gh_run_held_case(&gh_held_cases[i], cp, dir, &c);
     for (size_t i = 0; i < sizeof(gh_exec_cases) / sizeof(gh_exec_cases[0]); i++)
         failures += gh_run_exec_case(&gh_exec_cases[i], cp, dir, &c);
     failures += gh_check_exec_no_send(cp, dir, &c);

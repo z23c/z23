@@ -172,6 +172,8 @@ static void rc_setup_node(struct p2p_node *node)
     memset(node, 0, sizeof(*node));
     snprintf(node->addr_name, sizeof(node->addr_name), "203.0.113.9:8033");
     node->id = 9;
+    /* These cases serve header-only entries, which only ZCL23 peers hear. */
+    node->services = NODE_ZCL23;
     node->socket = ZCL_INVALID_SOCKET;
     node->addr.svc.addr.ip[10] = 0xff;
     node->addr.svc.addr.ip[11] = 0xff;

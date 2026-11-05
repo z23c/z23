@@ -1016,10 +1016,24 @@ static int pd_d3_window_expiry(const struct pd_window_ctx *w)
     return failures;
 }
 
+/* D counts a legacy peer's window, and a legacy peer hears only the active chain
+ * where the body is held. B and C have measured the header-only zone above the
+ * tip by now, so connect the chain the window is measured on. */
+static bool pd_connect_chain(struct msg_processor *mp,
+                             const struct pd_chain4 *c)
+{
+    for (int i = 0; i < 4; i++)
+        c->bi[i]->nStatus |= BLOCK_HAVE_DATA;
+    return active_chain_move_window_tip(&mp->main_state->chain_active,
+                                        c->bi[3]);
+}
+
 /* D: the per-peer window scenarios D0 to D4 against the seeded chain. */
 static int pd_scenario_d(struct msg_processor *mp, const struct pd_chain4 *c)
 {
     int failures = 0;
+    PD_CHECK("D: the measured chain is connected with its bodies held",
+             pd_connect_chain(mp, c));
     failures += pd_d0_allowance_helpers();
     struct p2p_node flooder;
     pd_setup_node(&flooder);
@@ -1121,6 +1135,8 @@ static int pd_scenario_bcd(const struct chain_params *cp, const char *dir)
 
         struct p2p_node node;
         pd_setup_node(&node);
+        /* B and C measure the header-only zone, which only ZCL23 peers hear. */
+        node.services = NODE_ZCL23;
 
         failures += pd_b1_locator_at_tip(&mp, &node, &chain);
         failures += pd_b2_empty_reply(&mp, &node, &chain);

@@ -959,3 +959,7 @@ later lane flips it HARD.
 - 2026-11-05T19:47:07Z — REASON: Signed file offer: refuse a name field with a NUL inside its declared length or nonzero padding, so one signed offer has exactly one wire form. Honest encoders already write that form. Relay validity only, no consensus predicate change.
   old ROOT: 80c445ee158eeededd3a1bf4c2e6649d6f468f942b9f624381a25948074c5552
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-05T21:01:24Z — REASON: Legacy peers read a header as a promise to serve the body: serve them only the active chain where the body is held (net serve path, no consensus predicate)
+  old ROOT: a49efa5cf444f542b5fc90b42ec05727da285df90b6dc9f7bc583a3aefb55791
+  by: owner unseal ritual (make core-unseal)
