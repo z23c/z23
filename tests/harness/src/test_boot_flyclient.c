@@ -757,6 +757,42 @@ static int boot_flyclient_gap_checks(void)
     return failures;
 }
 
+/* A datadir whose leaf-store path fits the boot buffer (512) but not the
+ * store's own (256) must be refused: no store opened, and a store already
+ * open is left as it was. */
+static int boot_prepare_long_path_checks(const char *dir)
+{
+    int failures = 0;
+    struct main_state *ms = calloc(1, sizeof(*ms));
+    bool ready = ms != NULL;
+    BFC_CHECK("boot prepare long path fixture ready", ready);
+    if (!ready) return failures;
+    active_chain_init(&ms->chain_active);
+    struct boot_svc_ctx svc = {0};
+    svc.state = ms;
+
+    char keep_path[512];
+    snprintf(keep_path, sizeof(keep_path), "%s/keep_leaves.bin", dir);
+    mmb_leaf_store_close(&g_mmb_leaf_store);
+    bool kept = mmb_leaf_store_open(&g_mmb_leaf_store, keep_path);
+    BFC_CHECK("boot prepare long path: existing store opened", kept);
+    if (kept) {
+        char longdir[400];
+        memset(longdir, 'x', sizeof(longdir) - 1);
+        memcpy(longdir, "/nonexistent/", 13);
+        longdir[sizeof(longdir) - 1] = '\0';
+        BFC_CHECK("boot prepare refuses a path longer than the store holds",
+                  !boot_prepare_mmb_leaf_store(&svc, longdir, NULL));
+        BFC_CHECK("boot prepare refusal leaves the open store untouched",
+                  g_mmb_leaf_store.open &&
+                  strcmp(g_mmb_leaf_store.path, keep_path) == 0);
+        mmb_leaf_store_close(&g_mmb_leaf_store);
+    }
+    active_chain_free(&ms->chain_active);
+    free(ms);
+    return failures;
+}
+
 int test_boot_flyclient(void)
 {
     int failures = 0;
@@ -781,6 +817,10 @@ int test_boot_flyclient(void)
     failures += snapshot_refusal_checks();
     failures += mmb_reconcile_checks();
     failures += boot_flyclient_gap_checks();
+    char long_dir[PATH_MAX];
+    test_make_tmpdir(long_dir, sizeof(long_dir), "boot_flyclient_long", "dir");
+    failures += boot_prepare_long_path_checks(long_dir);
+    test_cleanup_tmpdir(long_dir);
 
     BFC_CHECK("mmb leaf store prepare rejects missing service",
               !boot_prepare_mmb_leaf_store(NULL, NULL, NULL));

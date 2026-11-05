@@ -567,6 +567,48 @@ static int test_block_files_copy_series(void)
     return failures;
 }
 
+/* The node spells file 255 blk_sync.dat / rev_sync.dat (disk_block_io.c) and
+ * carries on at 256: the copy must follow the series across that name. */
+static bool fo_sync_fixture(const char *src, const char *dst)
+{
+    bool ok = mkdir(src, 0700) == 0 && mkdir(dst, 0700) == 0;
+    for (int i = 0; ok && i < 255; i++) {
+        char name[32];
+        snprintf(name, sizeof(name), "blk%05d.dat", i);
+        ok = fo_series_file(src, name, 4);
+    }
+    return ok && fo_series_file(src, "blk_sync.dat", 5) &&
+           fo_series_file(src, "rev_sync.dat", 6) &&
+           fo_series_file(src, "blk00256.dat", 7);
+}
+
+static int test_block_files_copy_sync_spelling(void)
+{
+    int failures = 0;
+
+    TEST("file_ops block_files_copy carries the series across the file 255 spelling") {
+        char dir[PATH_MAX] = "", src[PATH_MAX] = "", dst[PATH_MAX] = "";
+        bool ok = fo_root(dir, "zcl_block_sync");
+        if (ok) {
+            fo_path(src, sizeof(src), dir, "src");
+            fo_path(dst, sizeof(dst), dir, "dst");
+        }
+        ok = ok && fo_sync_fixture(src, dst);
+        int copied = ok ? block_files_copy(src, dst) : -9;
+        bool landed = ok && fo_series_has(dst, "blk00254.dat", 4) &&
+                      fo_series_has(dst, "blk_sync.dat", 5) &&
+                      fo_series_has(dst, "rev_sync.dat", 6) &&
+                      fo_series_has(dst, "blk00256.dat", 7);
+        fo_cleanup(dir);
+        ASSERT(ok);
+        ASSERT_EQ(copied, 257);
+        ASSERT(landed);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
 /* True when every name in the list is present with size pattern bytes
  * (present) or absent (!present). */
 static bool fo_names_state(const char *dir, const char *const *names,
@@ -946,6 +988,7 @@ int test_file_ops(void)
     failures += test_dir_copy_semantics();
     failures += test_dir_copy_refusal_reports();
     failures += test_block_files_copy_series();
+    failures += test_block_files_copy_sync_spelling();
     failures += test_block_files_clean_selection();
     failures += test_block_files_copy_path_limits();
     failures += test_dir_copy_path_limits();
