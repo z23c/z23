@@ -173,7 +173,9 @@ in it, so a row in the same answer that would arm it, or a post by the revoked
 key, is judged under the new head. A roster answer also leads with the answering
 box's newest head row while the pull has not reached it (arrival number 0, which
 moves no cursor), so a box walking a long board from the start has the head before
-the page that arms it. The owner's box writes the row again every 10 days. A note
+the page that arms it. The answering box looks that row up on its lane tick, at
+most every 2 minutes, so a row newer than that travels only by its own number until
+the next look. The owner's box writes the row again every 10 days. A note
 lives 30 days, so a late joiner finds a live copy while that node runs and for 20
 days after. That is one row per new sequence plus one per 10 days, under the
 per-key quota of 60 rows per 10 minutes and 1000 stored. A head row holds about 44

@@ -201,8 +201,10 @@ void boot_fleet_board_register_rpc(struct rpc_table *table);
  * has not reached it yet, so a box that arms from its first page has the head
  * first. That record carries FLEET_BOARD_ROSTER_PINNED_ARRIVAL, outside the
  * cursor's numbering, so it moves no cursor; a pull already past that row pays
- * nothing. A hostile answerer can still leave it out; only the next honest
- * answer, or `fleet import`, then supplies it. */
+ * nothing. The lane tick finds that row, so a row newer than the last look
+ * travels only by its own number until the next one. A hostile answerer can
+ * still leave it out; only the next honest answer, or `fleet import`, then
+ * supplies it. */
 
 #define FLEET_BOARD_FLEET_SERVICE_NAME "board"
 #define FLEET_BOARD_ROSTER_SERVICE_NAME "board.roster"
