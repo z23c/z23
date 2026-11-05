@@ -2425,6 +2425,19 @@ static int test_runner_dispatches_longest_first(void)
         hex = tgs_dispatch_pos(out, "test_hex_codec");
         cursor = tgs_dispatch_pos(out, "test_codec_cursor");
         ASSERT(hex != SIZE_MAX && cursor != SIZE_MAX && cursor < hex);
+        const char *ignored[] = {
+            "--failure-priority=test_hex_codec,test_hex_codec",
+            "--failure-priority=test_hex_codec,",
+            "--failure-priority=test_byte_order_codec",
+        };
+        for (size_t i = 0; i < sizeof(ignored) / sizeof(ignored[0]); i++) {
+            rc = tgs_run_weighted(root, "test_codec_cursor\t9\n", ignored[i], out, sizeof(out));
+            ASSERT(rc == 0);
+            hex = tgs_dispatch_pos(out, "test_hex_codec");
+            cursor = tgs_dispatch_pos(out, "test_codec_cursor");
+            ASSERT(hex != SIZE_MAX && cursor != SIZE_MAX && cursor < hex);
+            ASSERT(tgs_dispatch_pos(out, "test_byte_order_codec") == SIZE_MAX);
+        }
         /* Only malformed rows: catalog order again. */
         rc = tgs_run_weighted(root, "test_codec_cursor 9\n\x01\t\t\n", NULL,
                               out, sizeof(out));
