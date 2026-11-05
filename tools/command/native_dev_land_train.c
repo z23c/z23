@@ -81,13 +81,6 @@ struct dl_train_group {
     char tip[DL_TRAIN_MAX][41];
 };
 
-static bool dl_group_hex(const char *s, size_t n)
-{
-    for (size_t i = 0; i < n; i++)
-        if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return false;
-    return true;
-}
-
 static const char *dl_group_entry(const char *s, struct dl_train_group *g)
 {
     if (*s < '1' || *s > '9') return NULL;
@@ -96,7 +89,7 @@ static const char *dl_group_entry(const char *s, struct dl_train_group *g)
     long long seq = strtoll(s, &end, 10);
     if (errno || seq < 1 || !end || *end++ != '=') return NULL;
     for (size_t i = 0; i < g->n; i++) if (g->seq[i] == seq) return NULL;
-    if (!dl_group_hex(end, 40)) return NULL;
+    if (strspn(end, "0123456789abcdef") != 40) return NULL;
     g->seq[g->n] = seq;
     memcpy(g->tip[g->n], end, 40);
     g->tip[g->n++][40] = '\0';
@@ -109,7 +102,7 @@ static bool dl_train_group_parse(const char *s, struct dl_train_group *g)
     memset(g, 0, sizeof(*g));
     if (strncmp(s, "1:", 2) != 0) return false;
     s += 2;
-    if (!dl_group_hex(s, 64)) return false;
+    if (strspn(s, "0123456789abcdef") != 64) return false;
     s += 64;
     if (*s++ != ':') return false;
     while (*s && g->n < DL_TRAIN_MAX) {
