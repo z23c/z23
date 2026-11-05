@@ -1059,6 +1059,152 @@ static int test_cb_deser_prefilled_differential(void)
     return failures;
 }
 
+/* Encoder and decoder agree: the struct holds each prefilled tx's absolute
+ * position and only the wire is differential. Prefill the txs of blk at
+ * positions[], short-id the rest. */
+static bool cbt_cb_prefilled_at(struct compact_block_msg *cb,
+                                const struct block *blk, uint64_t nonce,
+                                const uint16_t *positions, size_t npos)
+{
+    compact_block_msg_init(cb);
+    cb->header = blk->header;
+    cb->nonce = nonce;
+    compact_block_derive_key(&cb->header, nonce, cb->siphash_key);
+    cb->num_short_txids = blk->num_vtx - npos;
+    cb->short_txids = calloc(cb->num_short_txids + 1, SHORT_TXID_LEN);
+    cb->prefilled = calloc(npos, sizeof(struct prefilled_tx));
+    if (!cb->short_txids || !cb->prefilled)
+        return false;
+    cb->num_prefilled = npos;
+    size_t next_pos = 0, next_id = 0;
+    for (size_t i = 0; i < blk->num_vtx; i++) {
+        if (next_pos < npos && positions[next_pos] == i) {
+            cb->prefilled[next_pos].index = positions[next_pos];
+            if (!transaction_copy(&cb->prefilled[next_pos].tx, &blk->vtx[i]))
+                return false;
+            next_pos++;
+        } else {
+            compact_block_short_txid(cb->siphash_key, &blk->vtx[i].hash,
+                                     cb->short_txids +
+                                         next_id++ * SHORT_TXID_LEN);
+        }
+    }
+    return true;
+}
+
+/* Encode, decode, reconstruct with every tx of the block in the mempool, and
+ * require each tx in its original slot and the wire to re-encode the same. */
+static bool cbt_prefilled_round_trip(size_t ntx, const uint16_t *positions,
+                                     size_t npos)
+{
+    struct block blk;
+    cbt_block(&blk, ntx, 0x90);
+    struct compact_block_msg sent;
+    struct compact_block_msg got;
+    compact_block_msg_init(&got);
+    struct byte_stream wire, again;
+    stream_init(&wire, 1024);
+    stream_init(&again, 1024);
+
+    bool ok = cbt_cb_prefilled_at(&sent, &blk, 11, positions, npos) &&
+              compact_block_msg_serialize(&sent, &wire);
+    wire.read_pos = 0;
+    ok = ok && compact_block_msg_deserialize(&got, &wire) &&
+         compact_block_msg_serialize(&got, &again) &&
+         again.size == wire.size &&
+         memcmp(again.data, wire.data, wire.size) == 0;
+
+    struct block out;
+    block_init(&out);
+    uint64_t *missing = NULL;
+    size_t nmiss = 0;
+    ok = ok && compact_block_reconstruct(&got, blk.vtx, ntx, NULL, 0, &out,
+                                         &missing, &nmiss) &&
+         nmiss == 0 && out.num_vtx == ntx;
+    for (size_t i = 0; ok && i < ntx; i++)
+        ok = out.vtx[i].lock_time == blk.vtx[i].lock_time;
+
+    free(missing);
+    block_free(&out);
+    compact_block_msg_free(&got);
+    compact_block_msg_free(&sent);
+    stream_free(&wire);
+    stream_free(&again);
+    block_free(&blk);
+    return ok;
+}
+
+static int test_cb_prefilled_round_trip(void)
+{
+    int failures = 0;
+    printf("compact block with several prefilled txs round trips in place... ");
+
+    static const struct {
+        size_t ntx;
+        size_t npos;
+        uint16_t positions[3];
+    } cases[] = {
+        { 2, 2, { 0, 1 } },
+        { 4, 2, { 0, 1 } },
+        { 4, 2, { 0, 2 } },
+        { 5, 2, { 1, 3 } },
+        { 3, 3, { 0, 1, 2 } },
+        { 5, 3, { 0, 1, 2 } },
+        { 7, 3, { 0, 2, 5 } },
+        { 8, 3, { 2, 3, 7 } },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        if (!cbt_prefilled_round_trip(cases[i].ntx, cases[i].positions,
+                                      cases[i].npos)) {
+            printf("\n  case %zu (%zu txs, %zu prefilled) failed", i,
+                   cases[i].ntx, cases[i].npos);
+            failures++;
+        }
+    }
+
+    printf(failures ? "FAIL\n" : "OK\n");
+    return failures;
+}
+
+/* A position that does not fit the struct's 16 bits is refused on the wire
+ * rather than wrapped onto an earlier slot. */
+static int test_cb_deser_prefilled_index_overflow(void)
+{
+    int failures = 0;
+    printf("compact_block_msg_deserialize refuses a prefilled index past 16 bits... ");
+
+    static const struct {
+        size_t n;
+        uint64_t diffs[2];
+    } cases[] = {
+        { 1, { 65536, 0 } },
+        { 2, { 65535, 0 } },
+        { 2, { 0, 65535 } },
+    };
+    struct transaction tx;
+    cbt_make_tx(&tx, 0x7A, 5);
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        struct byte_stream s;
+        stream_init(&s, 1024);
+        cbt_prefix(&s, 12);
+        stream_write_compact_size(&s, 0);
+        stream_write_compact_size(&s, cases[c].n);
+        for (size_t i = 0; i < cases[c].n; i++) {
+            stream_write_compact_size(&s, cases[c].diffs[i]);
+            transaction_serialize(&tx, &s);
+        }
+        if (!cbt_deser_clean_fail(&s)) {
+            printf("\n  case %zu decoded", c);
+            failures++;
+        }
+        stream_free(&s);
+    }
+    transaction_free(&tx);
+
+    printf(failures ? "FAIL\n" : "OK\n");
+    return failures;
+}
+
 /* ── Characterization: compact_block_reconstruct ───────────────── */
 
 /* Runs reconstruct with an optional armed allocation fault (NULL label =
@@ -1097,6 +1243,17 @@ static int test_cb_recon_hard_fail_paths(void)
     if (!cbt_recon_hard_fail(&cb1, NULL, 0, NULL, 0)) failures++;
     compact_block_msg_free(&cb1);
     block_free(&blk1);
+
+    /* Two prefilled txs naming one slot: the second would overwrite the first. */
+    struct block blk_dup;
+    cbt_block(&blk_dup, 4, 0xA0);
+    struct compact_block_msg cb_dup;
+    const uint16_t dup_pos[2] = {1, 2};
+    if (!cbt_cb_prefilled_at(&cb_dup, &blk_dup, 13, dup_pos, 2)) failures++;
+    cb_dup.prefilled[1].index = 1;
+    if (!cbt_recon_hard_fail(&cb_dup, NULL, 0, NULL, 0)) failures++;
+    compact_block_msg_free(&cb_dup);
+    block_free(&blk_dup);
 
     /* Coinbase + one short id: each allocation on the way can fail. */
     struct block blk2;
@@ -1377,6 +1534,8 @@ int test_compact_blocks(void)
     failures += test_cb_deser_alloc_faults();
     failures += test_cb_deser_success_shapes();
     failures += test_cb_deser_prefilled_differential();
+    failures += test_cb_prefilled_round_trip();
+    failures += test_cb_deser_prefilled_index_overflow();
     failures += test_cb_recon_hard_fail_paths();
     failures += test_cb_recon_full_match_order();
     failures += test_cb_recon_extra_sources();

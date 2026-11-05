@@ -27,8 +27,6 @@
  * feeds those raw bytes through the REAL p2p_node_receive_bytes() parser and the
  * REAL msg_process_messages() dispatcher — only the socket syscalls are elided.
  *
- * The per-peer swarm scheduler mp_snapshot_send_tick() (private header, not on
- * the test include path) is forward-declared and called DIRECTLY: it is real
  * The per-peer swarm scheduler mp_snapshot_send_tick() (private header) is
  * forward-declared and called directly: it owns rarest-first assignment, the
  * contiguous window cap, the bounded piece pipeline, and zblkreq emission.
@@ -1494,6 +1492,7 @@ int test_block_swarm_loopback(void)
     failures += test_block_swarm_serve_refusal_branches();
     failures += test_block_swarm_manifest_republish();
     failures += test_block_swarm_past_peer_manifest();
+    { extern int block_swarm_manifest_refusal_tests(void); failures += block_swarm_manifest_refusal_tests(); }
     boot_snapshot_offer_test_set_trust_override(-1);
     return failures;
 }
