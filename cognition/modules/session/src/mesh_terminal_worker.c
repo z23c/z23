@@ -476,6 +476,13 @@ static struct zcl_result mesh_terminal_worker_spawn_platform_arm(
     return ZCL_OK;
 }
 
+static enum mesh_terminal_worker_error tw_input_stall_code(
+    const struct mesh_terminal_worker *w)
+{
+    return w->input_nowait ? MESH_TERMINAL_WORKER_ERR_STALLED
+                           : MESH_TERMINAL_WORKER_ERR_IO;
+}
+
 /* A pty that cannot take input right now: wait a bounded time for room,
  * unless the caller holds a shared lock and asked never to wait. */
 static bool tw_input_became_writable(const struct mesh_terminal_worker *w)
@@ -529,8 +536,7 @@ static struct zcl_result mesh_terminal_worker_input_platform_arm(struct mesh_ter
              * other caller waits a bounded time, then gets IO. */
             if (tw_input_became_writable(w))
                 continue;
-            return ZCL_ERR(w->input_nowait ? MESH_TERMINAL_WORKER_ERR_STALLED
-                                           : MESH_TERMINAL_WORKER_ERR_IO,
+            return ZCL_ERR(tw_input_stall_code(w),
                            "pty input stalled (wrote %zu/%zu)",
                            total, n);
         }
