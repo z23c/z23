@@ -7,7 +7,9 @@
  * judgement is a function of the transaction and its parents' rows alone, so a
  * verdict does not depend on when it was reached. A walk that would pass the
  * bounds below is refused before it writes anything: the transaction stays
- * UNKNOWN and settles when a later walk fits, never as a guess. */
+ * UNKNOWN, never a guess. Its height walks it again once the rest of the height
+ * has settled, and any later walk that fits settles it; while its unsettled
+ * ancestors stay past the bounds it stays UNKNOWN. */
 
 #include "models/zslp_validity.h"
 
@@ -41,6 +43,11 @@
 #define ZSLP_VALIDITY_WALK_MAX_PATH (ZSLP_VALIDITY_MAX_DEPTH + 1)
 #define ZSLP_VALIDITY_REASON_TOO_DEEP "ancestry_depth_exceeded"
 #define ZSLP_VALIDITY_REASON_TOO_WIDE "ancestry_work_exceeded"
+
+/* How many times a height walks its refused transactions again. One pass settles
+ * a depth cap's worth of a plain chain, and a block of minimal transactions
+ * holds a chain of about 16000, so that chain ends inside this limit. */
+#define ZSLP_VALIDITY_SWEEP_MAX_PASSES 64
 
 DEFINE_MODEL_CALLBACKS(zslp_validity)
 
@@ -855,9 +862,8 @@ static bool validity_judge_stored(struct node_db *ndb, const uint8_t txid[32],
 }
 
 /* Records a walk the bound refused. Only this transaction's row moves, to
- * UNKNOWN with its token so a child sees an unsettled parent of that token,
- * and it settles when a later walk fits. A GENESIS is judged at once: its
- * verdict reads nothing from its ancestry. */
+ * UNKNOWN with its token so a child sees an unsettled parent of that token. A
+ * GENESIS is judged at once: its verdict reads nothing from its ancestry. */
 static bool validity_refuse_walk(struct node_db *ndb, const uint8_t txid[32],
                                  enum zslp_walk_result result,
                                  struct zslp_input_row *rows)
@@ -879,10 +885,11 @@ static bool validity_refuse_walk(struct node_db *ndb, const uint8_t txid[32],
     return validity_save(ndb, &row);
 }
 
-/* True when an earlier attempt at this height refused this transaction. That
- * refusal stands for the height: a later transaction in the same scan may have
- * settled ancestors since, and walking again would then give an interrupted
- * height a verdict the uninterrupted one did not have at this point. */
+/* True when this height refused this transaction and no walk has fitted since.
+ * The scan leaves such a row alone: a later transaction may have settled
+ * ancestors since, and walking again would give a retried height a reason the
+ * uninterrupted scan did not have. Only the sweep walks it again, and that walk
+ * writes nothing unless it fits, so the reason stays the scan's. */
 static bool validity_refused_at_height(struct node_db *ndb,
                                        const uint8_t txid[32], int32_t height)
 {
@@ -896,8 +903,30 @@ static bool validity_refused_at_height(struct node_db *ndb,
         AR_BIND_TEXT(s, 4, ZSLP_VALIDITY_REASON_TOO_WIDE));
 }
 
-/* Settles one transaction of the height being applied. False only when the
- * walk's memory is unavailable: nothing was stored, so the height can retry. */
+/* Walks one transaction: judges its unsettled ancestry when the walk fits, and
+ * records a refusal only if asked. False only when the walk's memory is
+ * unavailable: nothing was stored, so the height can retry. */
+static bool validity_walk(struct node_db *ndb, const uint8_t txid[32],
+                          int32_t height, bool record_refusal, bool *fits)
+{
+    struct zslp_walk *w = zcl_malloc(sizeof(*w), "zslp_validity_walk");
+    if (!w)
+        LOG_FAIL("zslp_validity", "walk: no memory for a walk at h=%d", height);
+    w->ndb = ndb;
+    enum zslp_walk_result result = walk_plan(w, txid);
+    *fits = result == ZSLP_WALK_OK;
+    if (*fits) {
+        for (uint32_t i = 0; i < w->order_count; i++)
+            (void)validity_judge_stored(ndb, w->nodes[w->order[i]].txid,
+                                        w->rows);
+    } else if (record_refusal) {
+        (void)validity_refuse_walk(ndb, txid, result, w->rows);
+    }
+    free(w);
+    return true;
+}
+
+/* Settles one transaction in the height's scan. */
 static bool validity_apply_tx(struct node_db *ndb, const uint8_t txid[32],
                               int32_t height)
 {
@@ -906,21 +935,8 @@ static bool validity_apply_tx(struct node_db *ndb, const uint8_t txid[32],
     if (old == ZSLP_VALIDITY_VALID || old == ZSLP_VALIDITY_INVALID ||
         validity_refused_at_height(ndb, txid, height))
         return true;
-    struct zslp_walk *w = zcl_malloc(sizeof(*w), "zslp_validity_walk");
-    if (!w)
-        LOG_FAIL("zslp_validity", "apply_tx: no memory for a walk at h=%d",
-                 height);
-    w->ndb = ndb;
-    enum zslp_walk_result result = walk_plan(w, txid);
-    if (result == ZSLP_WALK_OK) {
-        for (uint32_t i = 0; i < w->order_count; i++)
-            (void)validity_judge_stored(ndb, w->nodes[w->order[i]].txid,
-                                        w->rows);
-    } else {
-        (void)validity_refuse_walk(ndb, txid, result, w->rows);
-    }
-    free(w);
-    return true;
+    bool fits = false;
+    return validity_walk(ndb, txid, height, true, &fits);
 }
 
 bool zslp_validity_apply_live(struct node_db *ndb,
@@ -986,6 +1002,45 @@ static bool validity_apply_height_txids(struct node_db *ndb, sqlite3_stmt *s,
     return true;
 }
 
+/* One pass over the height's transactions in txid order: every row still
+ * refused is walked again. *changed says whether any walk fitted. */
+static bool validity_sweep_pass(struct node_db *ndb, sqlite3_stmt *s,
+                                int32_t height, bool *changed)
+{
+    *changed = false;
+    while (AR_STEP_ROW(s)) {
+        uint8_t txid[32];
+        if (AR_COL_BYTES(s, 0) != 32) continue;
+        AR_READ_BLOB(s, 0, txid, 32);
+        if (!validity_refused_at_height(ndb, txid, height)) continue;
+        bool fits = false;
+        if (!validity_walk(ndb, txid, height, false, &fits))
+            return false; // raw-return-ok:validity_walk logged and the height retries
+        *changed = *changed || fits;
+    }
+    return true;
+}
+
+/* The scan has given every other transaction of the height its turn, so a
+ * refusal that only waited on them now fits and gets the verdict any walk would
+ * give. Settling only shrinks a walk, so the rows passes end on do not depend on
+ * the order or on where a retried height began. `s` is the height's scan. */
+static bool validity_sweep_refused(struct node_db *ndb, sqlite3_stmt *s,
+                                   int32_t height)
+{
+    bool changed = true;
+    for (int pass = 0; changed && pass < ZSLP_VALIDITY_SWEEP_MAX_PASSES; pass++) {
+        sqlite3_reset(s);
+        if (!validity_sweep_pass(ndb, s, height, &changed))
+            return false; // raw-return-ok:validity_walk logged and the height retries
+    }
+    if (changed)
+        LOG_WARN("zslp_validity", "sweep: stopped at %d passes at h=%d; "
+                 "refused rows there stay UNKNOWN until a later walk fits",
+                 ZSLP_VALIDITY_SWEEP_MAX_PASSES, height);
+    return true;
+}
+
 static void validity_apply_height_spends(struct node_db *ndb, sqlite3_stmt *s,
                                          int32_t height)
 {
@@ -1027,7 +1082,8 @@ bool zslp_validity_apply_height(struct node_db *ndb, int32_t height,
         LOG_FAIL("zslp_validity", "apply_height: tx scan prepare failed h=%d",
                  height);
     AR_BIND_INT(s, 1, height);
-    bool applied = validity_apply_height_txids(ndb, s, height);
+    bool applied = validity_apply_height_txids(ndb, s, height) &&
+                   validity_sweep_refused(ndb, s, height);
     AR_FINALIZE(s);
     if (!applied)
         return false; // raw-return-ok:apply_tx logged and the height retries
