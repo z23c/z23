@@ -166,7 +166,18 @@ static int bp_test_params_ready_boundary(void)
  * a self-join is a real, defined join failure without a seam. The loader must
  * stay owned: started remains true and the join reports false. The handle is
  * never joined, so ownership is dropped by hand afterwards. */
-static int bp_test_params_join_failure_retains_ownership(void)
+#if defined(__SANITIZE_THREAD__) || defined(__SANITIZE_ADDRESS__)
+#define BP_SANITIZED_BUILD 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer) || __has_feature(address_sanitizer)
+#define BP_SANITIZED_BUILD 1
+#endif
+#endif
+#ifndef BP_SANITIZED_BUILD
+#define BP_SANITIZED_BUILD 0
+#endif
+
+[[maybe_unused]] static int bp_test_params_join_failure_retains_ownership(void)
 {
     struct boot_svc_ctx svc = {0};
     svc.params_thread = pthread_self();
@@ -1191,8 +1202,17 @@ int test_boot_phase(void)
              bp_params_barrier_case(true, true, true, false, false, true) == 0);
     BP_CHECK("strict confinement retains worker join",
              bp_params_barrier_case(true, true, false, true, false, true) == 0);
+#if BP_SANITIZED_BUILD
+    /* A self-join is not representable under ASan or TSan: their pthread_join
+     * interceptors look the target up in a thread registry and abort on an
+     * internal CHECK (null thread) before the real EDEADLK is returned, for
+     * the initial thread and for a pthread_create thread alike. The plain
+     * build still runs and asserts the case. */
+    printf("boot_phase: failed params join retains loader ownership and reports false... SKIP (sanitizer pthread_join interceptor aborts on self-join)\n");
+#else
     BP_CHECK("failed params join retains loader ownership and reports false",
              bp_test_params_join_failure_retains_ownership() == 0);
+#endif
 #endif
 
     /* ── export mode must not park on a permanent blocker ─────────
