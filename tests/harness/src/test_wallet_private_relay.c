@@ -3560,10 +3560,12 @@ static int wprt_case_resume_confirmed_once(void)
     return failures;
 }
 
+int wprp_run_tests(void);
 int test_wallet_private_relay(void);
 int test_wallet_private_relay(void)
 {
     int failures = 0;
+    failures += wprp_run_tests();
     failures += wprt_units_run();
     failures += wprt_case_resume_refused_by_pool();
     failures += wprt_case_resume_confirmed_once();
