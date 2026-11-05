@@ -8913,6 +8913,32 @@ static int test_fleet_board_roster_flood_scan(void)
 /* The way in: one key gets a small fixed number of rows per line, a refused
  * copy costs no verify and drops no cache, and a republish after the interval
  * still lands, off the real P2P frame path. */
+/* A wall clock that stands still, so a date in these tests is exact and a busy
+ * host cannot move it. */
+static int64_t fbr_fixed_wall_ms(void *self)
+{
+    return *(const int64_t *)self;
+}
+
+static int64_t fbr_fixed_mono_ns(void *self)
+{
+    (void)self;
+    return 1;
+}
+
+static void fbr_fix_clock(int64_t unix_s)
+{
+    static int64_t wall_ms;
+    static clock_iface_t iface;
+    wall_ms = unix_s * 1000;
+    iface.now_monotonic_ns = fbr_fixed_mono_ns;
+    iface.now_wall_ms = fbr_fixed_wall_ms;
+    iface.self = &wall_ms;
+    clock_set_default(&iface);
+}
+#define FBR_FLOOD_NOW INT64_C(1800000000)
+
+
 static int test_fleet_board_roster_flood_ingest(void)
 {
     int failures = 0;
@@ -8923,7 +8949,8 @@ static int test_fleet_board_roster_flood_ingest(void)
     TEST("fleet roster flood: a further copy from the same key is refused "
          "at no cost, a republish after the interval and another carrier are "
          "not") {
-        const int64_t now = (int64_t)platform_time_wall_time_t();
+        const int64_t now = FBR_FLOOD_NOW;
+        fbr_fix_clock(now);
         uint8_t frame[FLEET_BOARD_FRAME_MAGIC_BYTES + 1 +
                       FLEET_BOARD_BODY_MAX + FLEET_BOARD_SIG_BYTES];
         size_t len = 0;
@@ -8974,6 +9001,7 @@ static int test_fleet_board_roster_flood_ingest(void)
         ASSERT(db_fleet_board_have(&db, p.id));
         PASS();
     } _test_next:;
+    clock_reset_default();
     fbr_uninstall();
     boot_fleet_board_shutdown();
     if (db_open)

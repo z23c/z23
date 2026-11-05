@@ -793,11 +793,11 @@ bool boot_fleet_roster_carriage_open(struct node_db *ndb)
 static enum fleet_board_result roster_copy_screen(
     struct node_db *ndb, const struct fleet_board_post *post)
 {
-    bool near = false;
+    bool held = false;
     if (!db_fleet_board_copy_near(ndb, post, BOOT_FLEET_ROSTER_COPY_GAP_S,
-                                  &near))
+                                  &held))
         return FLEET_BOARD_ERR_STORAGE;
-    return near ? FLEET_BOARD_ERR_EXPIRED : FLEET_BOARD_OK;
+    return held ? FLEET_BOARD_ERR_EXPIRED : FLEET_BOARD_OK;
 }
 
 /* A roster row may be stored only if its seal verifies under the root this
