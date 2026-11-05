@@ -38,6 +38,15 @@ static bool history_priority_path_valid(const char *path)
     return true;
 }
 
+static bool history_priority_name(const char *digest, char id[ZCL_TEST_GROUP_FULL_MAX])
+{
+    const char *name = digest + 5;
+    size_t n = strcspn(name, ":\r\n ");
+    if (!n || n >= ZCL_TEST_GROUP_FULL_MAX || name[n] != ':') return false;
+    memcpy(id, name, n); id[n] = '\0';
+    return zcl_test_group_catalog_contains(id);
+}
+
 enum zcl_failure_priority_match zcl_dev_proof_failure_priority_group(
     const struct zcl_dev_proof_history_failure *failure,
     const char *const *selected, size_t selected_count,
@@ -51,17 +60,13 @@ enum zcl_failure_priority_match zcl_dev_proof_failure_priority_group(
     if (failure->classification != ZCL_PROOF_HISTORY_FAILURE ||
         strncmp(failure->digest, "test ", 5) != 0)
         return ZCL_FAILURE_PRIORITY_NO_MATCH;
-    const char *name = failure->digest + 5;
-    size_t n = strcspn(name, ":\r\n ");
-    if (!n || n >= ZCL_TEST_GROUP_FULL_MAX || name[n] != ':' || n >= cap)
-        return ZCL_FAILURE_PRIORITY_INVALID;
     char id[ZCL_TEST_GROUP_FULL_MAX];
-    memcpy(id, name, n); id[n] = '\0';
-    if (!zcl_test_group_catalog_contains(id)) return ZCL_FAILURE_PRIORITY_INVALID;
+    if (!history_priority_name(failure->digest, id) || strlen(id) >= cap)
+        return ZCL_FAILURE_PRIORITY_INVALID;
     for (size_t i = 0; i < selected_count; i++)
         if (selected[i] && strcmp(selected[i], id) == 0) {
             if (!failure->attempt_binding_valid) return ZCL_FAILURE_PRIORITY_INVALID;
-            memcpy(group_out, id, n + 1);
+            memcpy(group_out, id, strlen(id) + 1);
             return ZCL_FAILURE_PRIORITY_MATCH;
         }
     return ZCL_FAILURE_PRIORITY_NO_MATCH;

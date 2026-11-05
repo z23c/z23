@@ -12120,6 +12120,28 @@ static bool dp_priority_selected(struct dp_priority_scan *s, char *groups)
     return s->selected_count != 0;
 }
 
+static bool dp_priority_render(const struct dp_priority_scan *s, char *out, size_t cap)
+{
+    size_t used = 0;
+    for (size_t i = 0; i < s->selected_count; i++) {
+        if (!s->matched[i]) continue;
+        int n = snprintf(out + used, cap - used, "%s%s", used ? "," : "", s->selected[i]);
+        if (n < 0 || (size_t)n >= cap - used) return false;
+        used += (size_t)n;
+    }
+    return true;
+}
+
+static void dp_priority_report(const struct dp_priority_scan *s, bool ok,
+                               size_t invalid, char *report, size_t cap)
+{
+    if (!report || !cap) return;
+    const char *status = !ok ? "unavailable" :
+        (s->ignored || invalid || s->limited) ? "partial" : "complete";
+    (void)snprintf(report, cap, "%s seen=%zu diffs=%zu hints=%zu ignored=%zu limited=%zu",
+                   status, s->seen, s->diffs, s->hints, s->ignored + invalid, s->limited);
+}
+
 static bool dp_failure_priority(const char *root, const char *scratch,
                                 const char *groups, const char *const *changed,
                                 size_t changed_count, char *out, size_t cap,
@@ -12141,19 +12163,9 @@ static bool dp_failure_priority(const char *root, const char *scratch,
               strcmp(root, canonical) == 0 && dp_priority_selected(&s, copy) &&
               zcl_dev_proof_history_advisory(root, dp_priority_visit, &s,
                                               &invalid_archives) == ZCL_PROOF_HISTORY_COMPLETE;
-    size_t used = 0;
-    for (size_t i = 0; ok && i < s.selected_count; i++) {
-        if (!matched[i]) continue;
-        int n = snprintf(out + used, cap - used, "%s%s", used ? "," : "", selected[i]);
-        if (n < 0 || (size_t)n >= cap - used) ok = false;
-        else used += (size_t)n;
-    }
+    if (ok) ok = dp_priority_render(&s, out, cap);
     if (!ok) out[0] = '\0';
-    if (report && report_cap)
-        (void)snprintf(report, report_cap, "%s seen=%zu diffs=%zu hints=%zu ignored=%zu limited=%zu",
-                       !ok ? "unavailable" : (s.ignored || invalid_archives || s.limited) ? "partial" : "complete",
-                       s.seen, s.diffs, s.hints,
-                       s.ignored + invalid_archives, s.limited);
+    dp_priority_report(&s, ok, invalid_archives, report, report_cap);
     free(matched); free(selected); free(copy);
     return ok;
 }
