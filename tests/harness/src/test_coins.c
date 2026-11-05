@@ -1320,6 +1320,95 @@ static int coins_case_sqlite_spend_after_flush(void)
     return failures;
 }
 
+/* ---- coins lifecycle edges (mutation-sweep gap closure) --------------- */
+
+static bool coins_stats_init_clears_everything(void)
+{
+    struct coins_stats s;
+    memset(&s, 0xAB, sizeof(s));
+    coins_stats_init(&s);
+    unsigned char zero[32] = { 0 };
+    return s.height == 0 && s.num_transactions == 0 &&
+           s.num_tx_outputs == 0 && s.serialized_size == 0 &&
+           s.total_amount == 0 &&
+           memcmp(s.hash_block.data, zero, 32) == 0 &&
+           memcmp(s.hash_serialized.data, zero, 32) == 0;
+}
+
+static bool coins_copy_empty_sources_reset_destination(void)
+{
+    struct tx_out dummy;
+    memset(&dummy, 0, sizeof(dummy));
+    struct coins src, dst;
+    coins_init(&src);
+
+    /* num_vout == 0 with a non-NULL vout pointer: nothing to copy. */
+    src.vout = &dummy;
+    src.num_vout = 0;
+    coins_init(&dst);
+    dst.num_vout = 7;
+    dst.vout = &dummy;
+    coins_copy(&dst, &src);
+    if (dst.vout != NULL || dst.num_vout != 0)
+        return false;
+
+    /* num_vout > 0 but no vout array: the destination is empty too. */
+    src.vout = NULL;
+    src.num_vout = 3;
+    dst.num_vout = 7;
+    dst.vout = &dummy;
+    coins_copy(&dst, &src);
+    return dst.vout == NULL && dst.num_vout == 0;
+}
+
+static bool coins_copy_oom_leaves_empty_destination(void)
+{
+    struct coins src, dst;
+    coins_init(&src);
+    coins_init(&dst);
+    if (!coins_alloc(&src, 2))
+        return false;
+    src.vout[0].value = 5;
+    zcl_alloc_fault_fail_next("coins_vout_copy");
+    coins_copy(&dst, &src);
+    zcl_alloc_fault_clear();
+    bool ok = dst.num_vout == 0 && dst.vout == NULL;
+    coins_free(&src);
+    return ok;
+}
+
+static bool coins_from_tx_over_cap_releases_previous_record(void)
+{
+    struct transaction tx;
+    transaction_init(&tx);
+    tx.num_vout = 65537;          /* refused before any element is read */
+    struct coins c;
+    coins_init(&c);
+    if (!coins_alloc(&c, 2))
+        return false;
+    bool refused = !coins_from_transaction(&c, &tx, 9);
+    bool ok = refused && c.vout == NULL && c.num_vout == 0;
+    coins_free(&c);
+    tx.num_vout = 0;
+    transaction_free(&tx);
+    return ok;
+}
+
+static int coins_case_lifecycle_mutant_gaps(void)
+{
+    int failures = 0;
+
+    printf("coins lifecycle edges... ");
+    bool ok = coins_stats_init_clears_everything();
+    ok = ok && coins_copy_empty_sources_reset_destination();
+    ok = ok && coins_copy_oom_leaves_empty_destination();
+    ok = ok && coins_from_tx_over_cap_releases_previous_record();
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+
+    return failures;
+}
+
 int test_coins(void)
 {
     int failures = 0;
@@ -1342,6 +1431,7 @@ int test_coins(void)
     failures += coins_case_sqlite_interleaved_flushes();
     failures += coins_case_sqlite_reset_statements();
     failures += coins_case_sqlite_spend_after_flush();
+    failures += coins_case_lifecycle_mutant_gaps();
 
     return failures;
 }
