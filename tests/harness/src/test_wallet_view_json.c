@@ -89,7 +89,7 @@ static int wvj_utxo_trace(void)
     memset(&out, 0, sizeof(out));
     wallet_view_utxo_trace(&out, "ab12", 7, "unspent", 25000000, 321,
                            "cd34", true, false);
-    if (out.type != JSON_OBJ || json_size(&out) != 7 ||
+    if (out.type != JSON_OBJ || json_size(&out) != 8 ||
         !wvj_str(&out, "txid", "ab12") || !wvj_int(&out, "vout", 7) ||
         !wvj_str(&out, "status", "unspent") ||
         !wvj_real(&out, "value", 0.25) || !wvj_int(&out, "height", 321) ||
@@ -102,7 +102,7 @@ static int wvj_utxo_trace(void)
     memset(&out, 0, sizeof(out));
     wallet_view_utxo_trace(&out, "ab12", 0, "spent", 100000000, 5, NULL,
                            false, true);
-    if (json_size(&out) != 6 || json_get(&out, "spent_by") ||
+    if (json_size(&out) != 7 || json_get(&out, "spent_by") ||
         !wvj_bool(&out, "in_wallet", false) ||
         !wvj_bool(&out, "in_chainstate", true))
         failures += wvj_fail("utxo trace without spender omits spent_by");
