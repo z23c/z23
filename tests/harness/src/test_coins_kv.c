@@ -347,6 +347,74 @@ static int ck_case_seed_checkpoint_gate(void)
     return failures;
 }
 
+static bool ck_file_exists(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    fclose(f);
+    return true;
+}
+
+/* Seed a fresh destination store at `dst` from `src`; returns the seed verdict
+ * (false when the destination cannot be opened). */
+static bool ck_seed_into_fresh_dest(const char *dst, const char *src)
+{
+    sqlite3 *db = NULL;
+    if (sqlite3_open(dst, &db) != SQLITE_OK) {
+        sqlite3_close(db);
+        return false;
+    }
+    bool r = coins_kv_seed_from_node_db(db, src);
+    sqlite3_close(db);
+    return r;
+}
+
+/* A refused seed must not create the source path, must leave an existing
+ * source byte-identical, and a good seed must still work. */
+static int ck_case_seed_refusal_no_create(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "coins_kv_seed_refuse", "main");
+    char missing[320], junk[320], good[320], dst[320];
+    snprintf(missing, sizeof(missing), "%s/missing_node.db", dir);
+    snprintf(junk, sizeof(junk), "%s/junk_node.db", dir);
+    snprintf(good, sizeof(good), "%s/good_node.db", dir);
+
+    snprintf(dst, sizeof(dst), "%s/dst_missing.db", dir);
+    CK_CHECK("seed of a missing source is refused",
+             !ck_seed_into_fresh_dest(dst, missing));
+    CK_CHECK("refused seed of a missing path leaves no file",
+             !ck_file_exists(missing));
+
+    static const char payload[] = "not a sqlite database, keep every byte\n";
+    FILE *f = fopen(junk, "wb");
+    CK_CHECK("junk source written",
+             f && fwrite(payload, 1, sizeof(payload), f) == sizeof(payload));
+    if (f) fclose(f);
+    snprintf(dst, sizeof(dst), "%s/dst_junk.db", dir);
+    CK_CHECK("seed of a non-database source is refused",
+             !ck_seed_into_fresh_dest(dst, junk));
+    char back[sizeof(payload) + 8] = {0};
+    f = fopen(junk, "rb");
+    size_t got = f ? fread(back, 1, sizeof(back), f) : 0;
+    if (f) fclose(f);
+    CK_CHECK("refused seed of an existing file keeps every byte",
+             got == sizeof(payload) && memcmp(back, payload, sizeof(payload)) == 0);
+
+    uint8_t root[32];
+    int64_t n = 0;
+    CK_CHECK("good source built", ck_write_utxos_source(good, 100, root, &n));
+    snprintf(dst, sizeof(dst), "%s/dst_good.db", dir);
+    sqlite3 *db = NULL;
+    CK_CHECK("good destination opens", sqlite3_open(dst, &db) == SQLITE_OK);
+    CK_CHECK("good seed still lands", ck_seed_lands_with_count_and_stamp(db, good, 3));
+    sqlite3_close(db);
+
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 /* Exact-field check on a get_coins read of the t1 fixture: at least two
  * outputs, coinbase, height 100, values 5000/6000 and both scripts equal to
  * sc0/sc1. */
@@ -486,6 +554,9 @@ int test_coins_kv(void)
 
     /* bootstrap-seed checkpoint-content gate (own store/tmpdir). */
     failures += ck_case_seed_checkpoint_gate();
+
+    /* refused seed creates no file; good seed still works. */
+    failures += ck_case_seed_refusal_no_create();
 
     return failures;
 }
