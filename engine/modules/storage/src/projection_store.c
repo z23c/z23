@@ -576,6 +576,18 @@ void projection_store_integrity_scan_result(bool ok)
  * which bytes are read or written, transaction boundaries or durability.
  * Issued under projection_store_tx_lock, the lock that owns this connection.
  * The steady profile never raises a value above the folding one. */
+int projection_store_cache_used(int64_t *bytes_out)
+{
+    if (!bytes_out) return -1;
+    projection_store_tx_lock();
+    sqlite3 *db = projection_store_db();
+    int current = 0, high = 0;
+    int rc = db ? sqlite3_db_status(db, SQLITE_DBSTATUS_CACHE_USED, &current, &high, 0) : SQLITE_OK;
+    if (db && rc == SQLITE_OK) *bytes_out = current;
+    projection_store_tx_unlock();
+    return !db ? 0 : rc == SQLITE_OK ? 1 : -1;
+}
+
 int projection_store_apply_memory_profile(bool steady, int64_t *mmap_bytes_out,
                                           int64_t *cache_kib_out)
 {

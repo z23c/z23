@@ -40,7 +40,8 @@ static enum rss_trim_release g_cache_result;
 static int64_t t_now(void) { return g_now; }
 static bool t_sync(void *c) { (void)c; return g_sync; }
 static int64_t t_res(void) { return 1000; }
-static void t_heap(void) { g_heap_calls++; }
+static bool t_heap(void) { g_heap_calls++; return true; }
+static bool t_heap_unsupported(void) { g_heap_calls++; return false; }
 static enum rss_trim_release t_cache(void *c, int64_t *bytes)
 {
     (void)c;
@@ -68,16 +69,16 @@ static int rt_policy_cases(void)
              g_cache_calls == 0 && g_heap_calls == 0);
 
     g_sync = false;
-    rss_trim_tick(&p, &ops);
+    bool ran = rss_trim_tick(&p, &ops);
     RT_CHECK("transition: cache released once and heap trimmed once",
-             g_cache_calls == 1 && g_heap_calls == 1);
+             g_cache_calls == 1 && g_heap_calls == 1 && ran);
     for (int i = 0; i < 2; i++) { g_now += MIN_US; rss_trim_tick(&p, &ops); }
     RT_CHECK("cadence: no second trim inside 150 s",
              g_heap_calls == 1 && g_cache_calls == 1);
     g_now += MIN_US;
-    rss_trim_tick(&p, &ops);
+    ran = rss_trim_tick(&p, &ops);
     RT_CHECK("cadence: second trim at 150 s, cache not repeated",
-             g_heap_calls == 2 && g_cache_calls == 1);
+             g_heap_calls == 2 && g_cache_calls == 1 && ran);
 
     g_sync = true; rss_trim_tick(&p, &ops);
     g_sync = false; g_now += 100 * MIN_US; rss_trim_tick(&p, &ops);
@@ -91,6 +92,12 @@ static int rt_policy_cases(void)
     rss_trim_tick(&p, &ops); rss_trim_tick(&p, &ops);
     RT_CHECK("busy connection retries next tick, then latches",
              g_cache_calls == 3 - 1 && g_heap_calls == 1);
+    rss_trim_policy_init(&p, RSS_TRIM_INTERVAL_US);
+    ops.trim_heap = t_heap_unsupported;
+    RT_CHECK("unsupported heap operation is not reported as a trim",
+             !rss_trim_tick(&p, &ops));
+    RT_CHECK("no trim before next interval is not reported as a trim",
+             !rss_trim_tick(&p, &ops));
     return failures;
 }
 

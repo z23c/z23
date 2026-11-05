@@ -162,6 +162,18 @@ static void progress_store_folding_sizing(int64_t *cache_kib,
  * transaction boundaries or durability.  Issued under progress_store_tx_lock,
  * the lock that owns this connection.  Returns 1 applied, 0 store not open,
  * -1 a PRAGMA failed. */
+int progress_store_cache_used(int64_t *bytes_out)
+{
+    if (!bytes_out) return -1;
+    progress_store_tx_lock();
+    sqlite3 *db = progress_store_db();
+    int current = 0, high = 0;
+    int rc = db ? sqlite3_db_status(db, SQLITE_DBSTATUS_CACHE_USED, &current, &high, 0) : SQLITE_OK;
+    if (db && rc == SQLITE_OK) *bytes_out = current;
+    progress_store_tx_unlock();
+    return !db ? 0 : rc == SQLITE_OK ? 1 : -1;
+}
+
 int progress_store_apply_memory_profile(bool steady, int64_t *mmap_bytes_out,
                                         int64_t *cache_kib_out)
 {

@@ -11,13 +11,32 @@
 
 static _Atomic bool g_steady;
 
+static enum storage_cache_state cache_state(int result)
+{
+    return result > 0 ? STORAGE_CACHE_READY : result == 0 ? STORAGE_CACHE_CLOSED : STORAGE_CACHE_ERROR;
+}
+
 void storage_memory_profile_read_cache(struct storage_cache_usage *out)
 {
     if (!out) return;
-    *out = (struct storage_cache_usage) {
-        .progress = { STORAGE_CACHE_ERROR, 0 },
-        .projection = { STORAGE_CACHE_ERROR, 0 },
-    };
+    *out = (struct storage_cache_usage){0};
+    out->progress.state = cache_state(progress_store_cache_used(&out->progress.bytes));
+    out->projection.state = cache_state(projection_store_cache_used(&out->projection.bytes));
+}
+
+static const char *cache_state_name(enum storage_cache_state state)
+{
+    return state == STORAGE_CACHE_READY ? "ready" : state == STORAGE_CACHE_CLOSED ? "closed" : "error";
+}
+
+void storage_memory_profile_log_cache(void)
+{
+    struct storage_cache_usage usage;
+    storage_memory_profile_read_cache(&usage);
+    fprintf(stderr,  // obs-ok:storage-memory-profile
+            "[storage] sqlite cache used: progress_state=%s progress_bytes=%lld projection_state=%s projection_bytes=%lld\n",
+            cache_state_name(usage.progress.state), (long long)usage.progress.bytes,
+            cache_state_name(usage.projection.state), (long long)usage.projection.bytes);
 }
 
 int64_t storage_memory_profile_steady_mmap(int64_t folding_mmap_bytes)

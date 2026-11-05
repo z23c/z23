@@ -46,7 +46,7 @@ struct rss_trim_ops {
     int64_t (*now_us)(void);                 /* monotonic clock */
     bool    (*in_initial_sync)(void *ctx);
     enum rss_trim_release (*release_cache)(void *ctx, int64_t *bytes);
-    void    (*trim_heap)(void);
+    bool    (*trim_heap)(void);              /* false if unsupported */
     int64_t (*resident_kib)(void);           /* -1 if unknown */
     void    *ctx;
 };
@@ -67,7 +67,8 @@ bool rss_trim_heap_due(struct rss_trim_policy *p, int64_t now_us,
 
 /* One policy step: cache release first (frees pages into the heap), then the
  * heap trim. Logs one INFO line per cache release and one per trim. */
-void rss_trim_tick(struct rss_trim_policy *p, const struct rss_trim_ops *ops);
+/* True only when the platform heap trim ran. */
+bool rss_trim_tick(struct rss_trim_policy *p, const struct rss_trim_ops *ops);
 
 /* Production ops: monotonic clock, malloc_trim, statm resident, and the
  * caller's IBD predicate and cache release. */

@@ -135,6 +135,8 @@ bool progress_store_set_sync_mode(bool ibd);
  * applied mmap bytes / cache KiB are written to the (nullable) outputs. */
 int progress_store_apply_memory_profile(bool steady, int64_t *mmap_bytes_out,
                                         int64_t *cache_kib_out);
+/* 1 measured, 0 closed, -1 unavailable/error. No handle escapes the lock. */
+int progress_store_cache_used(int64_t *bytes_out);
 
 /* The open-time integrity gate on a caller-owned connection (test seam): sizes
  * the connection's page cache / mmap window, then runs PRAGMA quick_check.

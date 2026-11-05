@@ -104,6 +104,8 @@ int test_storage_memory_profile(void)
              usage.progress.state == STORAGE_CACHE_READY && usage.progress.bytes == p_used);
     MP_CHECK("actual projection cache equals SQLite measurement", j_rc == SQLITE_OK && j_used > 0 &&
              usage.projection.state == STORAGE_CACHE_READY && usage.projection.bytes == j_used);
+    MP_CHECK("invalid output is an error", progress_store_cache_used(NULL) == -1 &&
+             projection_store_cache_used(NULL) == -1);
 
     MP_CHECK("switch to steady", storage_memory_profile_set(true));
     MP_CHECK("is steady", storage_memory_profile_is_steady());
@@ -131,6 +133,9 @@ int test_storage_memory_profile(void)
     MP_CHECK("round trip folding again", mp_roundtrip(pdb, jdb, 2));
 
     projection_store_close();
+    storage_memory_profile_read_cache(&usage);
+    MP_CHECK("one closed store does not hide the open store", usage.progress.state == STORAGE_CACHE_READY &&
+             usage.projection.state == STORAGE_CACHE_CLOSED);
     progress_store_close();
     storage_memory_profile_read_cache(&usage);
     MP_CHECK("closed stores are distinct from zero cache", usage.progress.state == STORAGE_CACHE_CLOSED &&

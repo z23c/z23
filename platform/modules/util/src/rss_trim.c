@@ -61,26 +61,32 @@ static void rss_trim_do_cache(struct rss_trim_policy *p,
                  "projection page cache released bytes=%" PRId64, bytes);
 }
 
-static void rss_trim_do_heap(const struct rss_trim_ops *ops)
+static bool rss_trim_do_heap(const struct rss_trim_ops *ops)
 {
     int64_t before = ops->resident_kib ? ops->resident_kib() : -1;
-    ops->trim_heap();
+    bool ran = ops->trim_heap();
+    if (!ran) {
+        LOG_INFO("rss_trim", "heap trim unavailable");
+        return false;
+    }
     int64_t after = ops->resident_kib ? ops->resident_kib() : -1;
     LOG_INFO("rss_trim",
              "heap trim resident_kib before=%" PRId64 " after=%" PRId64,
              before, after);
+    return ran;
 }
 
-void rss_trim_tick(struct rss_trim_policy *p, const struct rss_trim_ops *ops)
+bool rss_trim_tick(struct rss_trim_policy *p, const struct rss_trim_ops *ops)
 {
     if (!p || !ops || !ops->now_us || !ops->in_initial_sync ||
         !ops->trim_heap)
-        return;
+        return false;
     bool in_sync = ops->in_initial_sync(ops->ctx);
     if (ops->release_cache && rss_trim_cache_due(p, in_sync))
         rss_trim_do_cache(p, ops);
     if (rss_trim_heap_due(p, ops->now_us(), in_sync))
-        rss_trim_do_heap(ops);
+        return rss_trim_do_heap(ops);
+    return false;
 }
 
 static int64_t rss_trim_prod_resident(void)
@@ -88,9 +94,14 @@ static int64_t rss_trim_prod_resident(void)
     return os_proc_resident_kib();
 }
 
-static void rss_trim_prod_heap(void)
+static bool rss_trim_prod_heap(void)
 {
+#if defined(__GLIBC__)
     platform_allocator_release_free_pages();
+    return true;
+#else
+    return false;
+#endif
 }
 
 void rss_trim_production_ops(struct rss_trim_ops *out, void *ctx,

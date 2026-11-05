@@ -325,7 +325,8 @@ static void staged_sync_apply_rss_trim(struct main_state *ms)
     struct rss_trim_ops ops;
     rss_trim_production_ops(&ops, ms, staged_rss_in_sync,
                             staged_rss_release_cache);
-    rss_trim_tick(&g_rss_trim_policy, &ops);
+    if (rss_trim_tick(&g_rss_trim_policy, &ops))
+        storage_memory_profile_log_cache();
 }
 
 /* Strip the "staged." domain prefix off a stage's dotted supervisor name
