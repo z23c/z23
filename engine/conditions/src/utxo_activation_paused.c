@@ -42,10 +42,12 @@ static bool detect_utxo_activation_paused(void)
     int paused = process_block_get_utxo_activation_paused_height();
     int64_t now = platform_time_wall_unix();
     if (paused < 0) {
+        /* The age restarts at the next sighting. The height and tip stay:
+         * the remedy itself clears the flag, so this branch runs on every
+         * later tick of the episode, and the witness still needs them to
+         * demand real tip movement. The next firing overwrites them. */
         atomic_store(&g_paused_since_unix, 0);
-        atomic_store(&g_paused_height_at_detect, -1);
         atomic_store(&g_pause_age_at_detect, 0);
-        atomic_store(&g_tip_at_detect, -1);
         return false;
     }
 

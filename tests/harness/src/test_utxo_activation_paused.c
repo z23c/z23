@@ -1606,6 +1606,29 @@ static int uap_run_height_zero_still_paused_case(void)
     return failures;
 }
 
+/* After an unwitnessed remedy the flag stays clear, so detect() reads false on
+ * every later tick of the episode. The witness must still demand tip movement. */
+static int uap_later_ticks_need_tip_movement(struct fake_clock *clock,
+                                             struct main_state *ms,
+                                             struct uint256 *hashes,
+                                             int cleared0)
+{
+    int failures = 0;
+    struct condition_runtime_snapshot s;
+    uap_tick_at(clock, 6305);
+    bool ok = uap_snapshot(&s) && s.currently_active && s.cleared_count == cleared0;
+    UAP_CHECK("a later tick does not clear the episode while the tip stands still", ok);
+    struct block_index *moved = insert_test_block(
+        ms, hashes, 2, BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA);
+    if (moved)
+        moved->nHeight = 101;
+    ok = moved && active_chain_move_window_tip(&ms->chain_active, moved);
+    uap_tick_at(clock, 6310);
+    ok = ok && uap_snapshot(&s) && !s.currently_active && s.cleared_count == cleared0 + 1;
+    UAP_CHECK("the episode clears once the tip moves past where it stood at detection", ok);
+    return failures;
+}
+
 static int uap_run_tip_not_advanced_case(void)
 {
     int failures = 0;
@@ -1615,7 +1638,7 @@ static int uap_run_tip_not_advanced_case(void)
     struct main_state ms;
     main_state_init(&ms);
     block_height_census_test_reset();
-    struct uint256 hashes[2];
+    struct uint256 hashes[3];
     bool ok = uap_chain_with_tip(&ms, hashes, 100);
     gap_fill_test_set_running(true);
     condition_engine_set_main_state(&ms);
@@ -1635,6 +1658,7 @@ static int uap_run_tip_not_advanced_case(void)
     ok = ok && s.last_outcome == COND_REMEDY_UNWITNESSED;
     ok = ok && gap_fill_test_kick_pending(); /* the clearing remedy kicks */
     UAP_CHECK("clearing the flag without tip movement stays unwitnessed and kicks gap-fill", ok);
+    failures += uap_later_ticks_need_tip_movement(&clock, &ms, hashes, cleared0);
     gap_fill_test_set_running(false);
     condition_engine_set_main_state(NULL);
     main_state_free(&ms);
