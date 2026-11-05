@@ -254,8 +254,8 @@ static int partial_input_effects(void)
 }
 
 /* A worker built for a caller that holds a shared lock never waits for a
- * shell that is not reading: a full pty is an immediate IO refusal, with
- * no poll at all. */
+ * shell that is not reading: a full pty is an immediate STALLED refusal
+ * with the accepted prefix charged, and no poll at all. */
 static int nowait_input_effects(void)
 {
     int failures = 0, fds[2];
@@ -268,8 +268,9 @@ static int nowait_input_effects(void)
     partial_active = true;
     partial_writes = partial_polls = 0;
     struct zcl_result r = mesh_terminal_worker_input(&w, bytes, 8, 20);
-    failures = check(failures, !r.ok && r.code == MESH_TERMINAL_WORKER_ERR_IO,
-                     "nowait input reports the stall as IO");
+    failures = check(failures,
+                     !r.ok && r.code == MESH_TERMINAL_WORKER_ERR_STALLED,
+                     "nowait input reports the stall as STALLED, not IO");
     failures = check(failures, partial_polls == 0 && w.bytes_in == 3,
                      "nowait input never waits and charges the prefix");
     mesh_terminal_worker_kill(&w);

@@ -870,7 +870,9 @@ struct zcl_result mesh_terminal_worker_input_platform_arm(struct mesh_terminal_w
 
     /* The POSIX arm's bounded-wait shape: a shell that stops reading its
      * console is an IO refusal after MESH_TERMINAL_WIN_WRITE_WAIT_MS per
-     * write, never an unbounded block of the caller's tick. */
+     * write, never an unbounded block of the caller's tick. With
+     * input_nowait the wait is zero and a pipe that took nothing is
+     * STALLED, so the caller keeps the unwritten tail and retries. */
     size_t total = 0;
     while (total < n) {
         DWORD wrote = 0, error = 0;
@@ -887,7 +889,8 @@ struct zcl_result mesh_terminal_worker_input_platform_arm(struct mesh_terminal_w
                            "pty input failed error=%lu (wrote %zu/%zu)",
                            error, total, n);
         if (outcome == TW_WIN_WRITE_STALLED || wrote == 0)
-            return ZCL_ERR(MESH_TERMINAL_WORKER_ERR_IO,
+            return ZCL_ERR(w->input_nowait ? MESH_TERMINAL_WORKER_ERR_STALLED
+                                           : MESH_TERMINAL_WORKER_ERR_IO,
                            "pty input stalled (wrote %zu/%zu)", total, n);
     }
     return ZCL_OK;

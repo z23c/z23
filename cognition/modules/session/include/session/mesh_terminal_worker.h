@@ -53,7 +53,8 @@ enum mesh_terminal_worker_error {
     MESH_TERMINAL_WORKER_ERR_GEOMETRY = -11,   /* cols/rows out of proto bounds */
     MESH_TERMINAL_WORKER_ERR_UNSUPPORTED = -12, /* non-Linux: honest refusal */
     MESH_TERMINAL_WORKER_ERR_JOB_ASSIGN = -13,  /* Windows: shell could not join its job */
-    MESH_TERMINAL_WORKER_ERR_PIDNS_UNAVAILABLE = -14 /* Linux: no user+PID namespace; no unconfined fallback */
+    MESH_TERMINAL_WORKER_ERR_PIDNS_UNAVAILABLE = -14, /* Linux: no user+PID namespace; no unconfined fallback */
+    MESH_TERMINAL_WORKER_ERR_STALLED = -15     /* input_nowait: pty took no more now; prefix charged */
 };
 
 const char *mesh_terminal_worker_error_string(
@@ -159,8 +160,9 @@ struct mesh_terminal_worker_config {
     volatile pid_t *pgid_slot;
     /* When true, mesh_terminal_worker_input never waits for a shell that
      * is not reading: bytes the pty cannot take right now are refused at
-     * once as an IO error (the accepted prefix stays charged). For callers
-     * that run under a shared lock. False keeps the bounded wait. */
+     * once as MESH_TERMINAL_WORKER_ERR_STALLED (the accepted prefix stays
+     * charged in bytes_in; any other write failure is still ERR_IO). For
+     * callers that run under a shared lock. False keeps the bounded wait. */
     bool input_nowait;
 };
 

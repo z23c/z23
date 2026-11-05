@@ -44,7 +44,7 @@ const char *mesh_terminal_worker_error_string(
     static const char *const names[] = {
         "ok", "null", "config", "pty", "spawn", "confinement", "exec", "tty",
         "not-running", "byte-limit", "io", "geometry", "unsupported",
-        "job-assign", "pidns-unavailable",
+        "job-assign", "pidns-unavailable", "stalled",
     };
     if (error <= 0 && (size_t)-error < sizeof names / sizeof names[0])
         return names[-error];
@@ -524,12 +524,13 @@ static struct zcl_result mesh_terminal_worker_input_platform_arm(struct mesh_ter
         if (wr < 0 && errno == EINTR)
             continue;
         if (wr < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            /* The shell is not draining: bounded wait, then hand the
-             * decision back to the caller — a stalled shell is the
-             * lifetime/idle enforcement's kill, not a write error. */
+            /* The shell is not draining. A caller that never waits gets
+             * STALLED at once and keeps the unwritten tail itself; any
+             * other caller waits a bounded time, then gets IO. */
             if (tw_input_became_writable(w))
                 continue;
-            return ZCL_ERR(MESH_TERMINAL_WORKER_ERR_IO,
+            return ZCL_ERR(w->input_nowait ? MESH_TERMINAL_WORKER_ERR_STALLED
+                                           : MESH_TERMINAL_WORKER_ERR_IO,
                            "pty input stalled (wrote %zu/%zu)",
                            total, n);
         }

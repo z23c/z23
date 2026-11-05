@@ -83,6 +83,7 @@ struct mesh_terminal_session {
     char workdir[600];
     uint64_t seq_out; /* last outbound DATA seq */
     uint64_t seq_in;  /* last accepted inbound DATA seq */
+    struct mesh_terminal_input_tail tail; /* keyboard bytes the pty has not taken */
 };
 
 /* Live confined workers, so a fifth concurrent OPEN is refused by name
@@ -155,13 +156,13 @@ static bool terminal_open_seen_same_session(
  * generation, and each authenticated session receives a small bounded
  * cadence. Runs under the stream lane lock, like every other callback in
  * this file. */
-static bool terminal_open_admit(const struct mesh_terminal_open_v1 *open,
-                                const struct noise_transport_snapshot *session,
-                                uint64_t now_mono_ms)
+static enum mesh_stream_refusal terminal_open_admit(
+    const struct mesh_terminal_open_v1 *open,
+    const struct noise_transport_snapshot *session, uint64_t now_mono_ms)
 {
     if (!open || !session || !session->established) {
         LOG_ERROR("net.mesh_terminal", "open admit: invalid session input");
-        return false;
+        return MESH_STREAM_CLOSED_BY_SERVICE;
     }
     struct mesh_terminal_seen_open *slot = NULL;
     size_t recent = 0;
@@ -181,7 +182,7 @@ static bool terminal_open_admit(const struct mesh_terminal_open_v1 *open,
             continue;
         if (memcmp(seen->terminal_id, open->terminal_id, 32) == 0) {
             atomic_fetch_add(&g_term_opens_replayed, 1);
-            return false;
+            return MESH_STREAM_CLOSED_BY_SERVICE;
         }
         if (terminal_open_seen_recent(seen, now_mono_ms))
             recent++;
@@ -192,7 +193,7 @@ static bool terminal_open_admit(const struct mesh_terminal_open_v1 *open,
     if (!slot || recent >= MESH_TERMINAL_OPEN_RATE_PER_SECOND ||
         peer_held >= MESH_TERMINAL_OPEN_ADMIT_PER_PEER) {
         atomic_fetch_add(&g_term_opens_rate_limited, 1);
-        return false;
+        return MESH_STREAM_REFUSED_RATE; /* named, not a bare close */
     }
     slot->used = true;
     memcpy(slot->remote_static, session->remote_static, 32);
@@ -200,7 +201,7 @@ static bool terminal_open_admit(const struct mesh_terminal_open_v1 *open,
     memcpy(slot->terminal_id, open->terminal_id, 32);
     slot->connection_generation = session->connection_generation;
     slot->seen_mono_ms = now_mono_ms;
-    return true;
+    return MESH_STREAM_OK;
 }
 
 #ifdef ZCL_TESTING
@@ -208,7 +209,14 @@ bool boot_mesh_terminal_test_open_admit(
     const struct mesh_terminal_open_v1 *open,
     const struct noise_transport_snapshot *session, uint64_t now_mono_ms)
 {
-    return terminal_open_admit(open, session, now_mono_ms);
+    return terminal_open_admit(open, session, now_mono_ms) == MESH_STREAM_OK;
+}
+
+int boot_mesh_terminal_test_open_admit_verdict(
+    const struct mesh_terminal_open_v1 *open,
+    const struct noise_transport_snapshot *session, uint64_t now_mono_ms)
+{
+    return (int)terminal_open_admit(open, session, now_mono_ms);
 }
 #endif
 
@@ -956,9 +964,6 @@ static enum mesh_terminal_receipt_status terminal_spawn_worker(
     cfg.max_bytes_out = boot_mesh_terminal_max_bytes_out();
     cfg.lifetime_seconds = MESH_TERMINAL_SERVICE_LIFETIME_SECONDS;
     cfg.idle_seconds = MESH_TERMINAL_SERVICE_IDLE_SECONDS;
-    /* Keyboard bytes are written under the stream lane lock: never wait
-     * there for a shell that is not reading. */
-    cfg.input_nowait = true;
     struct zcl_result r = mesh_terminal_worker_spawn(&cfg, (int64_t)now, worker);
     if (!r.ok) {
         LOG_ERROR("net.mesh_terminal",
@@ -990,9 +995,10 @@ static enum mesh_stream_refusal terminal_service_open(
         atomic_fetch_add(&g_term_dropped_malformed, 1);
         return MESH_STREAM_REFUSED_MALFORMED;
     }
-    if (!terminal_open_admit(&open, &session,
-                             (uint64_t)platform_time_monotonic_ms()))
-        return MESH_STREAM_CLOSED_BY_SERVICE;
+    enum mesh_stream_refusal admit = terminal_open_admit(
+        &open, &session, (uint64_t)platform_time_monotonic_ms());
+    if (admit != MESH_STREAM_OK)
+        return admit;
     struct boot_svc_ctx *svc = g_term_svc;
     struct msg_processor *mp = terminal_ready_processor(svc);
     if (!mp) {
@@ -1070,40 +1076,54 @@ static enum mesh_stream_refusal terminal_service_open(
  * over the session this terminal was opened on and inside the credit this
  * node granted; the strictly increasing per-terminal sequence stays as
  * the lane's own replay guard, because a decoded frame can be replayed in
- * a new Noise record. */
+ * a new Noise record. Credit goes back only for bytes that reached the pty:
+ * what the shell has not taken stays queued in the session's tail, charged
+ * to the peer's window, and is retried from the tick. */
 static void terminal_receive_data(struct mesh_stream *st,
                                   struct mesh_terminal_session *s,
-                                  const uint8_t *wire, size_t wire_len)
+                                  const uint8_t *wire, size_t wire_len,
+                                  uint32_t credit, uint64_t now_mono_ms)
 {
+    size_t queued = s->tail.len;
+    enum mesh_terminal_input_flow flow = MESH_TERMINAL_INPUT_CLEAR;
     struct mesh_terminal_data_v1 data;
     if (mesh_terminal_data_v1_decode(&data, wire, wire_len) !=
         MESH_TERMINAL_PROTO_OK) {
         atomic_fetch_add(&g_term_dropped_malformed, 1);
-        return;
-    }
-    if (memcmp(data.terminal_id, s->open.terminal_id, 32) != 0 ||
-        data.seq <= s->seq_in) {
+    } else if (memcmp(data.terminal_id, s->open.terminal_id, 32) != 0 ||
+               data.seq <= s->seq_in) {
         atomic_fetch_add(&g_term_data_dropped, 1);
-        return;
-    }
-    struct zcl_result r = mesh_terminal_worker_input(
-        &s->worker, data.payload, data.payload_len,
-        (int64_t)platform_time_wall_time_t());
-    if (r.ok)
+    } else {
         s->seq_in = data.seq;
-    else if (r.code == MESH_TERMINAL_WORKER_ERR_BYTE_LIMIT)
-        LOG_WARN("net.mesh_terminal",
-                 "keyboard budget overrun ended a terminal session");
-    else if (r.code == MESH_TERMINAL_WORKER_ERR_IO) {
-        /* The shell is not taking input and the write never waits, so the
-         * session ends rather than silently losing keystrokes. */
+        flow = mesh_terminal_input_tail_push(
+            &s->tail, &s->worker, data.payload, data.payload_len,
+            (int64_t)platform_time_wall_time_t(), now_mono_ms);
+    }
+    (void)mesh_stream_grant(st, (uint32_t)(credit + queued - s->tail.len));
+    if (flow == MESH_TERMINAL_INPUT_END) {
         LOG_WARN("net.mesh_terminal",
                  "terminal input stalled: ending the session");
-        s->worker.close_reason = MESH_TERMINAL_CLOSE_SESSION_LOST;
         terminal_end_session(st, s, (uint64_t)platform_time_wall_time_t());
     }
-    /* NOT_RUNNING is handled by the drain's enforcement pass; the frame is
-     * dropped by not advancing seq_in. */
+}
+
+/* The tick's retry of a queued tail; credit follows the bytes that move. */
+static void terminal_retry_tail(struct mesh_stream *st,
+                                struct mesh_terminal_session *s,
+                                uint64_t now_mono_ms)
+{
+    size_t queued = s->tail.len;
+    if (queued == 0)
+        return;
+    enum mesh_terminal_input_flow flow = mesh_terminal_input_tail_push(
+        &s->tail, &s->worker, NULL, 0, (int64_t)platform_time_wall_time_t(),
+        now_mono_ms);
+    (void)mesh_stream_grant(st, (uint32_t)(queued - s->tail.len));
+    if (flow == MESH_TERMINAL_INPUT_END) {
+        LOG_WARN("net.mesh_terminal",
+                 "terminal input stalled: ending the session");
+        terminal_end_session(st, s, (uint64_t)platform_time_wall_time_t());
+    }
 }
 
 static void terminal_receive_resize(struct mesh_terminal_session *s,
@@ -1120,22 +1140,22 @@ static void terminal_receive_resize(struct mesh_terminal_session *s,
         atomic_fetch_add(&g_term_data_dropped, 1);
 }
 
-static void terminal_service_data(struct mesh_stream *st,
-                                  const uint8_t *payload, size_t payload_len,
-                                  void *ctx)
+/* Responder DATA ingress at an explicit monotonic time (the stall deadline
+ * runs on it). Keyboard DATA returns its own credit as bytes reach the
+ * pty; every other message returns its credit at once. */
+static void terminal_service_data_at(struct mesh_stream *st,
+                                     const uint8_t *payload,
+                                     size_t payload_len, uint64_t now_mono_ms)
 {
-    (void)ctx;
-    if (st->local_initiator) {
-        /* The requester grants for itself: what it keeps in its screen
-         * FIFO stays spent until a reader drains it. */
-        boot_mesh_terminal_client_message(st, payload, payload_len);
+    struct mesh_terminal_session *s = st->service_state;
+    bool keyboard = s && payload_len >= 1u &&
+                    payload[0] == MESH_TERMINAL_MSG_DATA;
+    if (keyboard) {
+        terminal_receive_data(st, s, payload + 1, payload_len - 1u,
+                              (uint32_t)payload_len, now_mono_ms);
         return;
     }
-    /* The responder queues nothing: every keyboard byte is handed to the
-     * confined worker or dropped here, so the credit goes straight back
-     * and the requester's window is only ever spent by bytes in flight. */
     (void)mesh_stream_grant(st, (uint32_t)payload_len);
-    struct mesh_terminal_session *s = st->service_state;
     if (!s || payload_len < 1u) {
         atomic_fetch_add(&g_term_dropped_malformed, 1);
         return;
@@ -1143,9 +1163,6 @@ static void terminal_service_data(struct mesh_stream *st,
     const uint8_t *wire = payload + 1;
     size_t wire_len = payload_len - 1u;
     switch (payload[0]) {
-    case MESH_TERMINAL_MSG_DATA:
-        terminal_receive_data(st, s, wire, wire_len);
-        return;
     case MESH_TERMINAL_MSG_RESIZE:
         terminal_receive_resize(s, wire, wire_len);
         return;
@@ -1168,6 +1185,68 @@ static void terminal_service_data(struct mesh_stream *st,
         return;
     }
 }
+
+static void terminal_service_data(struct mesh_stream *st,
+                                  const uint8_t *payload, size_t payload_len,
+                                  void *ctx)
+{
+    (void)ctx;
+    if (st->local_initiator) {
+        /* The requester grants for itself: what it keeps in its screen
+         * FIFO stays spent until a reader drains it. */
+        boot_mesh_terminal_client_message(st, payload, payload_len);
+        return;
+    }
+    terminal_service_data_at(st, payload, payload_len,
+                             (uint64_t)platform_time_monotonic_ms());
+}
+
+#ifdef ZCL_TESTING
+bool boot_mesh_terminal_test_attach(struct mesh_stream *st,
+                                    const struct mesh_terminal_worker *worker,
+                                    const uint8_t terminal_id[32])
+{
+    struct mesh_terminal_session *s =
+        zcl_calloc(1, sizeof(*s), "mesh_terminal_session");
+    if (!s)
+        return false;
+    s->worker = *worker;
+    memcpy(s->open.terminal_id, terminal_id, 32);
+    st->service_state = s;
+    return true;
+}
+
+void boot_mesh_terminal_test_on_data(struct mesh_stream *st,
+                                     const uint8_t *payload,
+                                     size_t payload_len, uint64_t now_mono_ms)
+{
+    terminal_service_data_at(st, payload, payload_len, now_mono_ms);
+}
+
+void boot_mesh_terminal_test_retry_tail(struct mesh_stream *st,
+                                        uint64_t now_mono_ms)
+{
+    terminal_retry_tail(st, st->service_state, now_mono_ms);
+}
+
+size_t boot_mesh_terminal_test_tail_len(const struct mesh_stream *st)
+{
+    const struct mesh_terminal_session *s = st->service_state;
+    return s ? s->tail.len : 0;
+}
+
+int boot_mesh_terminal_test_close_reason(const struct mesh_stream *st)
+{
+    const struct mesh_terminal_session *s = st->service_state;
+    return s ? (int)s->worker.close_reason : -1;
+}
+
+void boot_mesh_terminal_test_detach(struct mesh_stream *st)
+{
+    free(st->service_state);
+    st->service_state = NULL;
+}
+#endif
 
 /* ── The stream drain ────────────────────────────────────────────────── */
 
@@ -1201,6 +1280,9 @@ static void terminal_service_tick(struct mesh_stream *st, int64_t now,
         terminal_end_session(st, s, (uint64_t)now);
         return;
     }
+    terminal_retry_tail(st, s, (uint64_t)platform_time_monotonic_ms());
+    if (st->ended)
+        return;
     for (int chunk = 0; chunk < MESH_TERMINAL_PUMP_CHUNKS_PER_TICK; chunk++) {
         if (st->send_credit < 1u + MESH_TERMINAL_DATA_V1_HEADER_BYTES)
             break; /* credit exhausted: the requester must read first */

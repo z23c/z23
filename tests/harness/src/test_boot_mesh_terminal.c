@@ -28,8 +28,191 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 #define TERM_WIRE_NOW 2500
+
+#if !defined(_WIN32)
+/* ── Responder keyboard path: a shell that stops reading ───────────────
+ * The worker is a fixture: a nonblocking pipe stands in for the pty, so a
+ * full pipe is a shell that is not reading and /dev/full is a write that
+ * fails for any other reason. The stream is a bare slot with no peer. */
+
+#define KB_TERMINAL_FILL 0x44
+#define KB_PAYLOAD 100u
+
+static void kb_fill_pipe(int wfd)
+{
+    uint8_t chunk[4096];
+    memset(chunk, KB_TERMINAL_FILL, sizeof(chunk));
+    while (write(wfd, chunk, sizeof(chunk)) > 0) {}
+    while (write(wfd, chunk, 1) > 0) {}
+}
+
+static size_t kb_drain_pipe(int rfd, uint8_t *last, size_t last_cap)
+{
+    uint8_t buf[4096];
+    size_t total = 0;
+    ssize_t n;
+    while ((n = read(rfd, buf, sizeof(buf))) > 0) {
+        total += (size_t)n;
+        if (last_cap && (size_t)n >= last_cap)
+            memcpy(last, buf + n - last_cap, last_cap);
+    }
+    return total;
+}
+
+/* One keyboard DATA stream message with a recognisable payload. */
+static size_t kb_message(const uint8_t terminal_id[32], uint64_t seq,
+                         uint8_t fill, uint8_t *msg, size_t cap)
+{
+    struct mesh_terminal_data_v1 frame;
+    memset(&frame, 0, sizeof(frame));
+    memcpy(frame.terminal_id, terminal_id, 32);
+    frame.seq = seq;
+    frame.payload_len = KB_PAYLOAD;
+    memset(frame.payload, fill, KB_PAYLOAD);
+    size_t wire_len = 0;
+    if (cap < 1 + MESH_TERMINAL_DATA_V1_MAX_WIRE_BYTES ||
+        mesh_terminal_data_v1_encode(&frame, msg + 1, cap - 1, &wire_len) !=
+            MESH_TERMINAL_PROTO_OK)
+        return 0;
+    msg[0] = MESH_TERMINAL_MSG_DATA;
+    return 1 + wire_len;
+}
+
+static void kb_worker(struct mesh_terminal_worker *w, int wfd)
+{
+    memset(w, 0, sizeof(*w));
+    w->master_fd = wfd;
+    w->running = true;
+    w->max_bytes_in = UINT64_C(1) << 24;
+    w->last_activity_unix = 1;
+}
+
+static int kb_stall_cases(void)
+{
+    int failures = 0, fds[2] = { -1, -1 };
+    uint8_t tid[32], msg[MESH_TERMINAL_MSG_MAX], last[KB_PAYLOAD];
+    struct mesh_stream st;
+    struct mesh_terminal_worker w;
+    memset(&st, 0, sizeof(st));
+    memset(tid, 0x61, sizeof(tid));
+    TEST("boot mesh terminal: keyboard bytes a stalled shell has not taken "
+         "stay queued, their credit is withheld, and the tail drains later") {
+        ASSERT(pipe(fds) == 0);
+        ASSERT(fcntl(fds[0], F_SETFL, O_NONBLOCK) == 0);
+        ASSERT(fcntl(fds[1], F_SETFL, O_NONBLOCK) == 0);
+        kb_worker(&w, fds[1]);
+        st.used = true;
+        st.service = MESH_STREAM_SERVICES_MAX - 1u; /* no service hooks */
+        ASSERT(boot_mesh_terminal_test_attach(&st, &w, tid));
+        kb_fill_pipe(fds[1]);
+        size_t len = kb_message(tid, 1, 0x71, msg, sizeof(msg));
+        ASSERT(len > KB_PAYLOAD);
+        boot_mesh_terminal_test_on_data(&st, msg, len, 1000);
+        /* Nothing waited, the session lives, the unwritten bytes are held
+         * and only the framing overhead was returned. */
+        ASSERT(!st.ended);
+        ASSERT_EQ(boot_mesh_terminal_test_tail_len(&st), (size_t)KB_PAYLOAD);
+        ASSERT_EQ(st.recv_credit, (uint32_t)(len - KB_PAYLOAD));
+        /* The shell reads again: the next tick moves the tail in order and
+         * returns the rest of the credit. */
+        ASSERT(kb_drain_pipe(fds[0], NULL, 0) > 0);
+        boot_mesh_terminal_test_retry_tail(&st, 2000);
+        ASSERT_EQ(boot_mesh_terminal_test_tail_len(&st), (size_t)0);
+        ASSERT_EQ(st.recv_credit, (uint32_t)len);
+        ASSERT_EQ(kb_drain_pipe(fds[0], last, sizeof(last)),
+                  (size_t)KB_PAYLOAD);
+        uint8_t want[KB_PAYLOAD];
+        memset(want, 0x71, sizeof(want));
+        ASSERT(memcmp(last, want, sizeof(want)) == 0);
+        PASS();
+    }
+_test_next:
+    if (fds[0] >= 0)
+        close(fds[0]);
+    if (fds[1] >= 0)
+        close(fds[1]);
+    boot_mesh_terminal_test_detach(&st);
+    return failures;
+}
+
+static int kb_deadline_cases(void)
+{
+    int failures = 0, fds[2] = { -1, -1 };
+    uint8_t tid[32], msg[MESH_TERMINAL_MSG_MAX];
+    struct mesh_stream st;
+    struct mesh_terminal_worker w;
+    memset(&st, 0, sizeof(st));
+    memset(tid, 0x62, sizeof(tid));
+    TEST("boot mesh terminal: a tail stuck past the deadline ends the "
+         "session as session-lost") {
+        ASSERT(pipe(fds) == 0);
+        ASSERT(fcntl(fds[1], F_SETFL, O_NONBLOCK) == 0);
+        kb_worker(&w, fds[1]);
+        st.used = true;
+        st.service = MESH_STREAM_SERVICES_MAX - 1u;
+        ASSERT(boot_mesh_terminal_test_attach(&st, &w, tid));
+        kb_fill_pipe(fds[1]);
+        size_t len = kb_message(tid, 1, 0x72, msg, sizeof(msg));
+        ASSERT(len > 0);
+        boot_mesh_terminal_test_on_data(&st, msg, len, 10000);
+        boot_mesh_terminal_test_retry_tail(
+            &st, 10000 + MESH_TERMINAL_INPUT_STALL_MS - 1);
+        ASSERT(!st.ended);
+        boot_mesh_terminal_test_retry_tail(
+            &st, 10000 + MESH_TERMINAL_INPUT_STALL_MS);
+        ASSERT(st.ended);
+        ASSERT_EQ(boot_mesh_terminal_test_close_reason(&st),
+                  (int)MESH_TERMINAL_CLOSE_SESSION_LOST);
+        PASS();
+    }
+_test_next:
+    if (fds[0] >= 0)
+        close(fds[0]);
+    if (fds[1] >= 0)
+        close(fds[1]);
+    boot_mesh_terminal_test_detach(&st);
+    return failures;
+}
+
+static int kb_exited_cases(void)
+{
+    int failures = 0;
+    int fd = open("/dev/full", O_WRONLY | O_NONBLOCK);
+    uint8_t tid[32], msg[MESH_TERMINAL_MSG_MAX];
+    struct mesh_stream st;
+    struct mesh_terminal_worker w;
+    memset(&st, 0, sizeof(st));
+    memset(tid, 0x63, sizeof(tid));
+    TEST("boot mesh terminal: a write that fails for any reason but a stall "
+         "leaves the session to the tick, which names the shell's exit") {
+        ASSERT(fd >= 0);
+        kb_worker(&w, fd);
+        st.used = true;
+        st.service = MESH_STREAM_SERVICES_MAX - 1u;
+        ASSERT(boot_mesh_terminal_test_attach(&st, &w, tid));
+        int reason_before = boot_mesh_terminal_test_close_reason(&st);
+        size_t len = kb_message(tid, 1, 0x73, msg, sizeof(msg));
+        ASSERT(len > 0);
+        boot_mesh_terminal_test_on_data(&st, msg, len, 1000);
+        ASSERT(!st.ended);
+        ASSERT_EQ(boot_mesh_terminal_test_close_reason(&st), reason_before);
+        ASSERT_EQ(boot_mesh_terminal_test_tail_len(&st), (size_t)0);
+        ASSERT_EQ(st.recv_credit, (uint32_t)len);
+        PASS();
+    }
+_test_next:
+    if (fd >= 0)
+        close(fd);
+    boot_mesh_terminal_test_detach(&st);
+    return failures;
+}
+#endif
 
 int test_boot_mesh_terminal(void)
 {
@@ -38,6 +221,12 @@ int test_boot_mesh_terminal(void)
     test_make_tmpdir(dir, sizeof(dir), "boot_mesh_terminal", "wire");
     struct mesh_term_fixture f;
     bool fixture_open = false;
+
+#if !defined(_WIN32)
+    failures += kb_stall_cases();
+    failures += kb_deadline_cases();
+    failures += kb_exited_cases();
+#endif
 
     TEST("boot mesh terminal: the flag x shell x platform matrix decides the "
          "lane") {
@@ -663,22 +852,62 @@ int test_boot_mesh_terminal(void)
         greedy.transcript_hash[1] ^= 0x7E;
         greedy.remote_static[3] ^= 0x7E;
         unsigned held = 0;
-        for (unsigned i = 0; i < MESH_TERMINAL_OPEN_ADMIT_MAX; i++) {
+        unsigned attempts = MESH_TERMINAL_OPEN_ADMIT_PER_PEER + 4u;
+        for (unsigned i = 0; i < attempts; i++) {
             mesh_term_fill32(open.terminal_id, (uint8_t)(0x80 + i));
-            if (boot_mesh_terminal_test_open_admit(&open, &greedy,
-                                                   500000 + 900u * i))
+            int verdict = boot_mesh_terminal_test_open_admit_verdict(
+                &open, &greedy, 500000 + 900u * i);
+            if (verdict == MESH_STREAM_OK)
                 held++;
+            else
+                /* Over the per-peer bound the refusal is named. */
+                ASSERT_EQ(verdict, (int)MESH_STREAM_REFUSED_RATE);
         }
         ASSERT_EQ(held, MESH_TERMINAL_OPEN_ADMIT_PER_PEER);
         /* Another peer is still served inside the same admit window. */
+        uint64_t later = 500000 + 900u * attempts;
         mesh_term_fill32(open.terminal_id, 0x7F);
         ASSERT(boot_mesh_terminal_test_open_admit(
-            &open, &f.term_peer.res_snap,
-            500000 + 900u * MESH_TERMINAL_OPEN_ADMIT_MAX));
-        /* Replays stay refused for the slots the greedy peer holds. */
-        mesh_term_fill32(open.terminal_id, 0x80);
-        ASSERT(!boot_mesh_terminal_test_open_admit(
-            &open, &greedy, 500000 + 900u * MESH_TERMINAL_OPEN_ADMIT_MAX));
+            &open, &f.term_peer.res_snap, later));
+        /* A replay from a peer below its bound is refused as a replay
+         * (not as rate), so the replay check is what stops it. */
+        ASSERT_EQ(boot_mesh_terminal_test_open_admit_verdict(
+                      &open, &f.term_peer.res_snap, later + 1),
+                  (int)MESH_STREAM_CLOSED_BY_SERVICE);
+        PASS();
+    }
+
+    TEST("boot mesh terminal: paired peers each at their bound cannot fill "
+         "the replay table") {
+        struct mesh_terminal_open_v1 open;
+        memset(&open, 0, sizeof(open));
+        /* Far more identities than any node pairs, each holding its full
+         * share inside one admit window; the next identity is still served. */
+        enum { PEERS = 40 };
+        struct noise_transport_snapshot peer = f.term_peer.res_snap;
+        for (unsigned round = 0; round < MESH_TERMINAL_OPEN_ADMIT_PER_PEER;
+             round++) {
+            for (unsigned p = 0; p < PEERS; p++) {
+                peer.connection_generation = 1000 + p;
+                peer.remote_static[0] = (uint8_t)(0x10 + p);
+                peer.transcript_hash[0] = (uint8_t)(0x10 + p);
+                mesh_term_fill32(open.terminal_id, (uint8_t)round);
+                open.terminal_id[1] = (uint8_t)p;
+                ASSERT_EQ(boot_mesh_terminal_test_open_admit_verdict(
+                              &open, &peer, 800000 + 400u * round),
+                          (int)MESH_STREAM_OK);
+            }
+        }
+        _Static_assert(PEERS * MESH_TERMINAL_OPEN_ADMIT_PER_PEER <
+                           MESH_TERMINAL_OPEN_ADMIT_MAX,
+                       "the table outlasts the identities the test pairs");
+        peer.connection_generation = 5000;
+        peer.remote_static[0] = 0xEE;
+        peer.transcript_hash[0] = 0xEE;
+        mesh_term_fill32(open.terminal_id, 0xEE);
+        ASSERT_EQ(boot_mesh_terminal_test_open_admit_verdict(
+                      &open, &peer, 800000 + 400u * 8u),
+                  (int)MESH_STREAM_OK);
         PASS();
     }
 

@@ -1260,7 +1260,7 @@ AGENT_IMPACT_RULE("cognition/modules/session/src/mesh_terminal_hub.c|cognition/m
  * pairing-bound OPEN responder and bounded session table, the shared mesh
  * identity/session-peer helpers it reuses, and the receipt/decision
  * surface it exports. */
-AGENT_IMPACT_RULE("engine/composition/src/boot_mesh_terminal.c|engine/composition/include/config/boot_mesh_terminal.h|tests/harness/src/test_boot_mesh_terminal.c", "boot_mesh_terminal mesh_stream mesh_status_wire mesh_terminal_proto make_lint_gates")
+AGENT_IMPACT_RULE("engine/composition/src/boot_mesh_terminal.c|engine/composition/src/boot_mesh_terminal_input.c|engine/composition/include/config/boot_mesh_terminal.h|tests/harness/src/test_boot_mesh_terminal.c", "boot_mesh_terminal mesh_stream mesh_status_wire mesh_terminal_proto make_lint_gates")
 AGENT_IMPACT_RULE("engine/composition/src/boot_mesh_terminal_client.c|engine/composition/src/boot_mesh_terminal_rpc.c|engine/composition/src/boot_mesh_terminal_internal.h|engine/composition/src/boot_mesh_status.c|engine/composition/src/boot_mesh_status_internal.h|engine/composition/src/boot_mesh_status_requester.c|tests/harness/src/mesh_term_fixture.c|tests/harness/include/test/mesh_term_fixture.h|tests/harness/src/test_mesh_terminal_client.c", "mesh_terminal_client boot_mesh_terminal mesh_stream mesh_status_wire make_lint_gates")
 /* Multiplexed streams on zpkgswm: the frame codec, the one per-peer stream
  * table both sides use, the credit window and the service registry every

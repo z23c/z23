@@ -105,10 +105,13 @@ struct vcs_zcode_dht_delegation;
 /* Receipts are valid at most this long after observation; bounded well
  * under the protocol lifetime ceiling so matches_open accepts them. */
 #define MESH_TERMINAL_RECEIPT_VALIDITY_SECONDS 30u
-#define MESH_TERMINAL_OPEN_ADMIT_MAX 32u
+/* Replay slots across all peers. Far above the paired identities a node
+ * holds times the per-peer share below, so no set of paired peers can fill
+ * the table and starve another's OPEN. */
+#define MESH_TERMINAL_OPEN_ADMIT_MAX 512u
 #define MESH_TERMINAL_OPEN_ADMIT_MS UINT64_C(30000)
-/* Replay slots one peer identity may hold at once, so one peer cannot use
- * up the shared table and starve every other peer's OPEN. */
+/* Replay slots one peer identity may hold at once: the bound on one
+ * identity. Past it the OPEN is refused as a named RATE refusal. */
 #define MESH_TERMINAL_OPEN_ADMIT_PER_PEER 8u
 #define MESH_TERMINAL_OPEN_RATE_PER_SECOND 4u
 
@@ -345,6 +348,34 @@ bool boot_mesh_terminal_client_resize(const uint8_t terminal_id[32],
  * Idempotent; returns false only for an unknown id. */
 bool boot_mesh_terminal_client_close(const uint8_t terminal_id[32]);
 
+/* Keyboard bytes the pty has not yet taken. Bounded by the credit window
+ * the peer holds: stream credit is returned only for bytes that reached the
+ * pty, so the tail cannot outgrow it. */
+#define MESH_TERMINAL_INPUT_TAIL_MAX (256u * 1024u)
+/* A tail that makes no progress for this long ends the session. */
+#define MESH_TERMINAL_INPUT_STALL_MS UINT64_C(5000)
+
+struct mesh_terminal_input_tail {
+    uint8_t buf[MESH_TERMINAL_INPUT_TAIL_MAX];
+    size_t len;
+    uint64_t since_mono_ms; /* last time the tail was empty or made progress */
+};
+
+enum mesh_terminal_input_flow {
+    MESH_TERMINAL_INPUT_CLEAR,   /* nothing left queued */
+    MESH_TERMINAL_INPUT_PENDING, /* a tail waits for the next tick */
+    MESH_TERMINAL_INPUT_END      /* the session must end (reason set) */
+};
+
+/* Queue `n` bytes (may be 0) behind the tail, then write what the pty takes
+ * without waiting. A stall past MESH_TERMINAL_INPUT_STALL_MS names
+ * SESSION_LOST on the worker and returns END; every other write failure
+ * drops the tail and returns CLEAR, leaving the tick to name the shell's
+ * exit from the worker's own state. */
+enum mesh_terminal_input_flow mesh_terminal_input_tail_push(
+    struct mesh_terminal_input_tail *tail, struct mesh_terminal_worker *w,
+    const uint8_t *bytes, size_t n, int64_t now_unix, uint64_t now_mono_ms);
+
 #ifdef ZCL_TESTING
 bool boot_mesh_terminal_test_workdir(const char *datadir,
                                      const struct mesh_terminal_open_v1 *open,
@@ -353,6 +384,31 @@ bool boot_mesh_terminal_test_workdir(const char *datadir,
 bool boot_mesh_terminal_test_open_admit(
     const struct mesh_terminal_open_v1 *open,
     const struct noise_transport_snapshot *session, uint64_t now_mono_ms);
+
+/* The refusal the OPEN handler returns for the admit gate: MESH_STREAM_OK
+ * admitted, MESH_STREAM_REFUSED_RATE over the per-peer or cadence bound,
+ * MESH_STREAM_CLOSED_BY_SERVICE for a replayed open. */
+int boot_mesh_terminal_test_open_admit_verdict(
+    const struct mesh_terminal_open_v1 *open,
+    const struct noise_transport_snapshot *session, uint64_t now_mono_ms);
+
+/* Test seam for the responder's keyboard path: hang a session holding a
+ * copy of `worker` off `st`, run one DATA/RESIZE/CLOSE stream payload
+ * through the production on_data path at an injected monotonic time, run
+ * the tick's tail retry, read the session, and free it. */
+struct mesh_stream;
+bool boot_mesh_terminal_test_attach(struct mesh_stream *st,
+                                    const struct mesh_terminal_worker *worker,
+                                    const uint8_t terminal_id[32]);
+void boot_mesh_terminal_test_on_data(struct mesh_stream *st,
+                                     const uint8_t *payload,
+                                     size_t payload_len,
+                                     uint64_t now_mono_ms);
+void boot_mesh_terminal_test_retry_tail(struct mesh_stream *st,
+                                        uint64_t now_mono_ms);
+size_t boot_mesh_terminal_test_tail_len(const struct mesh_stream *st);
+int boot_mesh_terminal_test_close_reason(const struct mesh_stream *st);
+void boot_mesh_terminal_test_detach(struct mesh_stream *st);
 
 /* Test seam: reserve one requester stream and its session directly,
  * bypassing the send path (which needs a live composition context). The

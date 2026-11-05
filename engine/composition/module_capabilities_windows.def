@@ -48,6 +48,7 @@ ZCL_MODULE_CAPABILITY("engine/composition/src/boot_mint_anchor_preflight.c", CAP
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_mesh_status.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_mesh_status_requester.c", CAP_NONE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_mesh_terminal.c", CAP_NONE, "")
+ZCL_MODULE_CAPABILITY("engine/composition/src/boot_mesh_terminal_input.c", CAP_NONE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_mesh_terminal_rpc.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/bundle_exporter.c", CAP_NONE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/bundle_exporter_generations.c", CAP_NONE, "")
