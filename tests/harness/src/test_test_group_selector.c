@@ -2627,6 +2627,31 @@ static int test_failure_priority_phase_barrier(void)
     return failures;
 }
 
+static int test_failure_priority_cached_groups(void)
+{
+    int failures = 0;
+    TEST("runner: priority never dispatches an already cached group") {
+        static char out[1024 * 1024];
+        char root[PATH_MAX], source[PATH_MAX], exe[PATH_MAX], command[4 * PATH_MAX];
+        test_make_tmpdir(root, sizeof(root), "tgs_priority", "cache");
+        ASSERT(getcwd(source, sizeof(source)) != NULL);
+        ASSERT(os_proc_exe_path(exe, sizeof(exe)));
+        int n = snprintf(command, sizeof(command),
+            "env ZCL_TESTCACHE_STORE_ROOT='%s' ZCL_DEV_SOURCE_ROOT='%s' "
+            "'%s' --jobs=1 --verbose --cache --exact=test_hex_codec,test_codec_cursor "
+            "--failure-priority=test_hex_codec 2>&1", root, source, exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        ASSERT(capture_command(command, out, sizeof(out)) == 0);
+        ASSERT(capture_command(command, out, sizeof(out)) == 0);
+        ASSERT(strstr(out, "groups_cached=2") != NULL);
+        ASSERT(tgs_dispatch_pos(out, "test_hex_codec") == SIZE_MAX);
+        ASSERT(tgs_dispatch_pos(out, "test_codec_cursor") == SIZE_MAX);
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_runner_build_needs_selection(void)
 {
     int failures = 0;
@@ -3897,6 +3922,7 @@ int test_test_group_selector(void)
     failures += test_dispatch_weights_framing();
     failures += test_runner_dispatches_longest_first();
     failures += test_failure_priority_phase_barrier();
+    failures += test_failure_priority_cached_groups();
     failures += test_assert_macros_report_where_and_what();
     failures += test_assert_messages_name_file_line_and_values();
     failures += test_verdict_json_zero_failures();
