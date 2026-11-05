@@ -543,22 +543,19 @@ static int zv_codec_validate_rules(const uint8_t pr[32], const uint8_t ri[32],
     return failures;
 }
 
-/* Pin complete-prefix failures and the documented partial-output boundaries. */
+/* Pin complete-prefix failures: the header promises *out is zeroed on every
+ * rejection, so a truncated prefix leaves no parsed field behind. */
 static bool zv_codec_prefixes(const uint8_t *wire, size_t len,
                               const struct vcs_package_attest *expected)
 {
+    (void)expected;
+    static const struct vcs_package_attest zero;
     for (size_t n = 0; n < len; n++) {
         struct vcs_package_attest out;
         memset(&out, 0xa5, sizeof(out));
         if (vcs_package_attest_parse(wire, n, &out) !=
             VCS_PACKAGE_ATTEST_ERR_WIRE_TRUNCATED) return false;
-        if (out.schema_version != (n >= 10 ? expected->schema_version : 0)) return false;
-        if (memcmp(out.package_root, n >= 42 ? expected->package_root :
-                   (const uint8_t[32]){0}, 32)) return false;
-        if (memcmp(out.release_id, n >= 74 ? expected->release_id :
-                   (const uint8_t[32]){0}, 32)) return false;
-        if (memcmp(out.recipe_root, n >= 106 ? expected->recipe_root :
-                   (const uint8_t[32]){0}, 32)) return false;
+        if (memcmp(&out, &zero, sizeof(out)) != 0) return false;
     }
     return true;
 }
@@ -569,7 +566,7 @@ static int zv_codec_boundary_wire(const uint8_t *wire, size_t len,
     int failures = 0;
     uint8_t bad[VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES];
     struct vcs_package_attest out;
-    ZV_CHECK("codec: every valid-wire prefix truncates with partial roots",
+    ZV_CHECK("codec: every valid-wire prefix truncates with a zeroed output",
              zv_codec_prefixes(wire, len, expected));
     memcpy(bad, wire, len);
     bad[112] = 0; /* first compiler id, embedded NUL */
