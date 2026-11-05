@@ -23,6 +23,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -343,6 +344,298 @@ static int case_mismatched_install_is_not_warm(void)
     return failures;
 }
 
+
+/* ── mutation-gap tests: every refusal's structured body, the accepted
+ * boundaries, and the exact success / failure reply fields ──────────────── */
+
+struct rfc_refusal {
+    const char *peer, *port, *root, *whole, *size, *filename;
+    const char *code;
+};
+
+#define RFC_HEX_A "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+#define RFC_HEX_63 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+#define RFC_HEX_65 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+#define RFC_HEX_BADTAIL \
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaag"
+
+static void rfc_push_nonempty(struct json_value *in, const char *k,
+                              const char *v)
+{
+    if (v && v[0])
+        (void)json_push_kv_str(in, k, v);
+}
+
+/* Runs the bundle handler on one refusal row; the reply must be the exact
+ * parse-phase INVALID refusal: not retryable, nothing mutated. */
+static bool rfc_refusal_ok(const struct rfc_refusal *r, const char *dir)
+{
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    rfc_push_nonempty(&input, "peer", r->peer);
+    rfc_push_nonempty(&input, "port", r->port);
+    rfc_push_nonempty(&input, "root", r->root);
+    rfc_push_nonempty(&input, "whole_sha3", r->whole);
+    rfc_push_nonempty(&input, "size", r->size);
+    rfc_push_nonempty(&input, "filename", r->filename);
+    (void)json_push_kv_str(&input, "out_dir", dir);
+    struct zcl_command_request request;
+    memset(&request, 0, sizeof(request));
+    request.input = &input;
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.rom_fetch_bundle.v1");
+    zcl_native_handle_rom_fetch_bundle(&request, &reply);
+    bool ok = reply.status == ZCL_COMMAND_STATUS_FAILED &&
+              reply.exit_code == ZCL_COMMAND_EXIT_INVALID &&
+              strcmp(reply.error.code, r->code) == 0 &&
+              strcmp(reply.error.phase, "parse") == 0 &&
+              !reply.error.retryable && !reply.error.mutated &&
+              reply.error.message[0] != '\0';
+    if (!ok)
+        printf("[refusal %s got %s] ", r->code, reply.error.code);
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return ok;
+}
+
+static int case_bundle_refusals_are_exact(void)
+{
+    int failures = 0;
+    TEST("ops.debug.rom_fetch.bundle: every parse refusal returns its own "
+         "code, phase, INVALID exit, not retryable, not mutated") {
+        rom_seed_reset();
+        sync_benchmark_reset_for_test();
+        char dir[PATH_MAX];
+        ASSERT(test_mkdtemp(dir, sizeof(dir), "rfc_refuse") != NULL);
+        char longname[ROM_FETCH_NAME_MAX + 1];
+        memset(longname, 'n', sizeof(longname) - 1);
+        longname[ROM_FETCH_NAME_MAX] = '\0';
+        char longpeer[300];
+        snprintf(longpeer, sizeof(longpeer), "%0150d,%0150d", 1, 2);
+        const char *H = RFC_HEX_A;
+        const char *P = "127.0.0.1";
+        const char *Z = "8192";
+        const struct rfc_refusal rows[] = {
+            { "", "1", H, H, Z, "", "MISSING_PEER" },
+            { P, "0", H, H, Z, "", "BAD_PORT" },
+            { P, "65536", H, H, Z, "", "BAD_PORT" },
+            { P, "-1", H, H, Z, "", "BAD_PORT" },
+            { P, "abc", H, H, Z, "", "BAD_PORT" },
+            { P, "80x", H, H, Z, "", "BAD_PORT" },
+            { P, "1a", H, H, Z, "", "BAD_PORT" },
+            { P, "1", "", H, Z, "", "BAD_ROOT" },
+            { P, "1", RFC_HEX_63, H, Z, "", "BAD_ROOT" },
+            { P, "1", RFC_HEX_65, H, Z, "", "BAD_ROOT" },
+            { P, "1", RFC_HEX_BADTAIL, H, Z, "", "BAD_ROOT" },
+            { P, "1", H, "", Z, "", "BAD_WHOLE_SHA3" },
+            { P, "1", H, RFC_HEX_63, Z, "", "BAD_WHOLE_SHA3" },
+            { P, "1", H, RFC_HEX_65, Z, "", "BAD_WHOLE_SHA3" },
+            { P, "1", H, RFC_HEX_BADTAIL, Z, "", "BAD_WHOLE_SHA3" },
+            { P, "1", H, H, "", "", "MISSING_SIZE" },
+            { P, "1", H, H, "0", "", "BAD_SIZE" },
+            { P, "1", H, H, "12x", "", "BAD_SIZE" },
+            { P, "1", H, H, "abc", "", "BAD_SIZE" },
+            { P, "1", H, H, "999999999999", "", "MANIFEST_NOT_SANE" },
+            { P, "1", H, H, "34359738369", "", "MANIFEST_NOT_SANE" },
+            { P, "1", H, H, Z, longname, "BAD_FILENAME" },
+            { P, "1", H, H, Z, "a/b", "MANIFEST_NOT_SANE" },
+            { P, "1", H, H, Z, "..", "MANIFEST_NOT_SANE" },
+            { ",", "1", H, H, Z, "", "BAD_PEER_LIST" },
+            { " , ", "1", H, H, Z, "", "BAD_PEER_LIST" },
+            { longpeer, "1", H, H, Z, "", "BAD_PEER_LIST" },
+        };
+        for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+            printf("[row %zu] ", i);
+            ASSERT(rfc_refusal_ok(&rows[i], dir));
+        }
+        sync_benchmark_reset_for_test();
+        rmdir(dir);
+    } _test_next:;
+    return failures;
+}
+
+static bool rfc_streq(const struct json_value *v, const char *want)
+{
+    const char *s = v ? json_get_str(v) : NULL;
+    return s && strcmp(s, want) == 0;
+}
+
+/* The warm success body, field by field, for one planted artifact. */
+static bool rfc_warm_body_ok(const struct json_value *d, const char *dir,
+                             const char *name, const struct rom_artifact *a)
+{
+    char want_path[PATH_MAX], root_hex[65], bench[PATH_MAX];
+    snprintf(want_path, sizeof(want_path), "%s/%s", dir, name);
+    snprintf(bench, sizeof(bench), "%s/sync_benchmark.json", dir);
+    HexStr(a->chunk_root, 32, false, root_hex, sizeof(root_hex));
+    const char *next = json_get_str(json_get(d, "next"));
+    return rfc_streq(json_get(d, "installed"), name) &&
+           rfc_streq(json_get(d, "path"), want_path) &&
+           rfc_streq(json_get(d, "chunk_root"), root_hex) &&
+           rfc_streq(json_get(d, "benchmark_receipt"), bench) &&
+           next && strstr(next, "-install-consensus-bundle") != NULL &&
+           json_get_int(json_get(d, "size_bytes")) == (int64_t)a->size_bytes &&
+           json_get_int(json_get(d, "num_chunks")) == (int64_t)a->num_chunks &&
+           json_get_int(json_get(d, "chunks_verified")) ==
+               (int64_t)a->num_chunks &&
+           json_get_int(json_get(d, "chunks_reused_from_journal")) ==
+               (int64_t)a->num_chunks &&
+           json_get_int(json_get(d, "bytes_reused_from_journal")) ==
+               (int64_t)a->size_bytes &&
+           json_get_bool(json_get(d, "verified")) &&
+           json_get_bool(json_get(d, "used_manifest_path")) &&
+           json_get_bool(json_get(d, "warm_identical")) &&
+           !json_get_bool(json_get(d, "fallback_used"));
+}
+
+
+/* Plants `size` bytes under `name`, optionally renames to the digest-derived
+ * name, then runs a warm bundle request with the given port/filename input. */
+static bool rfc_warm_run(const char *name, size_t size, const char *port,
+                         bool omit_filename, uint32_t want_chunks)
+{
+    char dir[PATH_MAX];
+    struct rom_artifact art;
+    memset(&art, 0, sizeof(art));
+    if (!test_mkdtemp(dir, sizeof(dir), "rfc_warm_x") ||
+        !rfc_plant_bundle(dir, name, size, &art) ||
+        art.num_chunks != want_chunks)
+        return false;
+    char use_name[ROM_FETCH_NAME_MAX];
+    snprintf(use_name, sizeof(use_name), "%s", art.filename);
+    char from[PATH_MAX], to[PATH_MAX];
+    if (omit_filename) {
+        char hex[17];
+        HexStr(art.chunk_root, 8, false, hex, sizeof(hex));
+        snprintf(use_name, sizeof(use_name), "rom-artifact-%s", hex);
+        snprintf(from, sizeof(from), "%s/%s", dir, art.filename);
+        snprintf(to, sizeof(to), "%s/%s", dir, use_name);
+        if (rename(from, to) != 0)
+            return false;
+    }
+    struct json_value input;
+    rfc_bundle_request(&input, &art, "127.0.0.1", dir);
+    json_set_str((struct json_value *)json_get(&input, "port"), port);
+    if (omit_filename)
+        json_set_str((struct json_value *)json_get(&input, "filename"), "");
+    struct zcl_command_request request;
+    memset(&request, 0, sizeof(request));
+    request.input = &input;
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.rom_fetch_bundle.v1");
+    sync_benchmark_reset_for_test();
+    zcl_native_handle_rom_fetch_bundle(&request, &reply);
+    bool ok = reply.status == ZCL_COMMAND_STATUS_PASSED &&
+              rfc_warm_body_ok(&reply.data, dir, use_name, &art);
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    snprintf(to, sizeof(to), "%s/%s", dir, use_name);
+    unlink(to);
+    snprintf(to, sizeof(to), "%s/sync_benchmark.json", dir);
+    unlink(to);
+    rmdir(dir);
+    return ok;
+}
+
+static int case_bundle_warm_reply_fields(void)
+{
+    int failures = 0;
+    TEST("ops.debug.rom_fetch.bundle: warm reply carries exact path, "
+         "chunk counts, ports and derived filenames") {
+        rom_seed_reset();
+        const size_t chunk = ROM_SEED_CHUNK_SIZE;
+        ASSERT(rfc_warm_run("consensus-state-bundle-w1.sqlite", 8192, "1",
+                            false, 1));
+        ASSERT(rfc_warm_run("consensus-state-bundle-w2.sqlite", 8192, "65535",
+                            false, 1));
+        ASSERT(rfc_warm_run("consensus-state-bundle-w3.sqlite", 8192, "99",
+                            false, 1));
+        ASSERT(rfc_warm_run("consensus-state-bundle-w4.sqlite", 8192, "",
+                            false, 1));
+        ASSERT(rfc_warm_run("consensus-state-bundle-w5.sqlite", chunk, "1",
+                            false, 1));
+        ASSERT(rfc_warm_run("consensus-state-bundle-w6.sqlite", chunk + 1, "1",
+                            false, 2));
+        /* No input.filename: the digest-derived name is the installed one. */
+        ASSERT(rfc_warm_run("consensus-state-bundle-w7.sqlite", 8192, "1",
+                            true, 1));
+        rom_seed_reset();
+        sync_benchmark_reset_for_test();
+    } _test_next:;
+    return failures;
+}
+
+/* A dead single peer on a cold directory: the exact ROM_FETCH_FAILED body
+ * and the abort receipt left behind. */
+static int case_bundle_fetch_failure_body(void)
+{
+    int failures = 0;
+    TEST("ops.debug.rom_fetch.bundle: a dead peer yields the retryable "
+         "execute-phase ROM_FETCH_FAILED body and an abort receipt") {
+        rom_seed_reset();
+        sync_benchmark_reset_for_test();
+        char dir[PATH_MAX];
+        ASSERT(test_mkdtemp(dir, sizeof(dir), "rfc_dead") != NULL);
+        struct rom_artifact art;
+        memset(&art, 0, sizeof(art));
+        ASSERT(rfc_plant_bundle(dir, "consensus-state-bundle-dead.sqlite",
+                                8192, &art));
+        char src[PATH_MAX], gone[PATH_MAX];
+        snprintf(src, sizeof(src), "%s/%s", dir, art.filename);
+        snprintf(gone, sizeof(gone), "%s/moved-away.bin", dir);
+        ASSERT(rename(src, gone) == 0);
+
+        struct json_value input;
+        rfc_bundle_request(&input, &art, "127.0.0.1", dir);
+        struct zcl_command_request request;
+        memset(&request, 0, sizeof(request));
+        request.input = &input;
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.rom_fetch_bundle.v1");
+        zcl_native_handle_rom_fetch_bundle(&request, &reply);
+
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_FAILED);
+        ASSERT(reply.exit_code == ZCL_COMMAND_EXIT_FAILED);
+        ASSERT(strcmp(reply.error.code, "ROM_FETCH_FAILED") == 0);
+        ASSERT(strcmp(reply.error.phase, "execute") == 0);
+        ASSERT(reply.error.retryable);
+        ASSERT(!reply.error.mutated);
+        ASSERT(strncmp(reply.error.message, "fetch from 127.0.0.1:1 failed: ",
+                       31) == 0);
+        ASSERT(reply.next_count == 1);
+        ASSERT(strcmp(reply.next[0].command,
+                      "ops.debug.rom_fetch.status") == 0);
+        ASSERT(strcmp(reply.next[0].input_json, "{}") == 0);
+
+        char rec[PATH_MAX];
+        snprintf(rec, sizeof(rec), "%s/sync_benchmark.json", dir);
+        FILE *f = fopen(rec, "r");
+        ASSERT(f != NULL);
+        char buf[8192] = {0};
+        size_t got = fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+        ASSERT(got > 0);
+        ASSERT(strstr(buf, "artifact_download_failed") != NULL);
+
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        unlink(rec);
+        unlink(gone);
+        {
+            char part[PATH_MAX], jrnl[PATH_MAX];
+            snprintf(part, sizeof(part), "%s%s", src, ROM_FETCH_PART_SUFFIX);
+            snprintf(jrnl, sizeof(jrnl), "%s.journal", part);
+            unlink(part);
+            unlink(jrnl);
+        }
+        rmdir(dir);
+        rom_seed_reset();
+        sync_benchmark_reset_for_test();
+    } _test_next:;
+    return failures;
+}
+
 int test_rom_fetch_controller(void)
 {
     printf("\n=== rom_fetch_controller ===\n");
@@ -351,6 +644,9 @@ int test_rom_fetch_controller(void)
     failures += case_status_still_reports_rom_fetch_state();
     failures += case_warm_identical_moves_no_payload();
     failures += case_mismatched_install_is_not_warm();
+    failures += case_bundle_refusals_are_exact();
+    failures += case_bundle_warm_reply_fields();
+    failures += case_bundle_fetch_failure_body();
     printf("=== rom_fetch_controller: %d failure(s) ===\n", failures);
     return failures;
 }
