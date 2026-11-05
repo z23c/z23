@@ -918,7 +918,7 @@ static int run_group(const char *name, group_fn fn)
     return n;
 }
 
-int test_dandelion_mutants(void)
+int dandelion_mutation_gap_tests(void)
 {
     int failures = 0;
     failures += run_group("lifecycle", check_lifecycle);
