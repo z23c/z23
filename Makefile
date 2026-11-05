@@ -1749,7 +1749,12 @@ ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ifneq ($(ZCL_PORTABLE_FRONTDOOR_ONLY),1)
 ifneq ($(ZCL_C23_PORTABLE_RELEASE),1)
 ifeq ($(strip $(MAKE_RESTARTS)),)
+# A current verifier checks the existing archives without rebuilding.
+# Any uncertain or stale input takes the mandatory bootstrap path.
+ZCL_TOR_READY_PROBE := $(shell ZCL_CROSS_TRIPLE="$(ZCL_CROSS_TRIPLE)" tools/scripts/tor_archives_ready.sh probe >/dev/null 2>&1 && printf ready)
+ifneq ($(ZCL_TOR_READY_PROBE),ready)
 include $(TOR_BOOTSTRAP_MK)
+endif
 endif
 endif
 endif

@@ -66,7 +66,15 @@ have_all() {
     # tools/tor_provenance.c). A mismatch here -- a stale libtor.a left over
     # from a different compiler, most concretely -- is treated exactly like
     # a missing archive: fall through to a real rebuild.
-    zcl_tor_provenance_ensure_bin "$SCRIPT_ROOT" || return 1
+    if [ "${1:-}" = probe ]; then
+        local bin
+        bin="$(zcl_tor_provenance_bin "$SCRIPT_ROOT")"
+        [ -x "$bin" ] || return 1
+        # Make's parse-time zcc bootstrap can compile even with -q; disable it.
+        make -q -s -C "$SCRIPT_ROOT" "${bin#"$SCRIPT_ROOT"/}" ZCL_USE_CCACHE=0 >/dev/null 2>&1 || return 1
+    else
+        zcl_tor_provenance_ensure_bin "$SCRIPT_ROOT" || return 1
+    fi
     local cc cid
     cc="$(tor_ambient_compiler)"
     command -v "${cc%% *}" >/dev/null 2>&1 || return 1
@@ -173,7 +181,7 @@ link_from() {
 }
 
 usage() {
-    echo "usage: $0 [ready|link-only] [DONOR] | check | --selftest" >&2
+    echo "usage: $0 [ready|link-only] [DONOR] | check | probe | --selftest" >&2
     exit 2
 }
 
@@ -300,6 +308,7 @@ case "${1:-ready}" in
     ready) do_ready ready "${2:-}" ;;
     link-only) do_ready link-only "${2:-}" ;;
     check) do_check ;;
+    probe) have_all probe ;;
     --selftest)
         tor_configure_args_selftest || exit 1
         # The banner must name the knob, the stamp, and the way out. A future
@@ -353,6 +362,41 @@ case "${1:-ready}" in
             "$(printf '%040x' 1)" "$selftest_cid" \
             "$(printf 'selftest-configure-args' | sha256sum | awk '{print $1}')" >/dev/null || {
             echo "tor_archives_ready: selftest FAILED — could not write fixture provenance manifest" >&2
+            exit 1
+        }
+        # Exercise have_all's real non-building freshness query and the
+        # provenance verifier against private copies, never the live helper.
+        (
+            probe_root="$fixture/probe-root"
+            mkdir -p "$probe_root/build/bin" "$probe_root/input"
+            cp "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" "$probe_root/build/bin/z23-tor-provenance"
+            touch -t 200101010000 "$probe_root/build/bin/z23-tor-provenance"
+            mkdir -p "$probe_root/$TOR_TREE"
+            cp -R "$fake_primary/$TOR_TREE/." "$probe_root/$TOR_TREE/"
+            : > "$probe_root/input/source.c"
+            : > "$probe_root/input/header.h"
+            touch -t 200001010000 "$probe_root/input/source.c" "$probe_root/input/header.h"
+            cat > "$probe_root/Makefile" <<'PROBE_MAKE'
+build/bin/z23-tor-provenance: input/source.c input/header.h
+	@echo rebuilt > rebuilt
+PROBE_MAKE
+            SCRIPT_ROOT="$probe_root"
+            ROOT="$probe_root"
+            zcl_tor_compiler_identity_for_cc() { printf '%s\n' "$selftest_cid"; }
+            have_all probe || exit 1
+            mv "$probe_root/build/bin/z23-tor-provenance" "$probe_root/helper.saved"
+            if have_all probe; then exit 1; fi
+            [ ! -e "$probe_root/rebuilt" ] || exit 1
+            mv "$probe_root/helper.saved" "$probe_root/build/bin/z23-tor-provenance"
+            touch -t 200201010000 "$probe_root/input/header.h"
+            if have_all probe; then exit 1; fi
+            [ ! -e "$probe_root/rebuilt" ] || exit 1
+            touch -t 200001010000 "$probe_root/input/header.h"
+            printf corrupt >> "$probe_root/$TOR_TREE/libtor.a"
+            if have_all probe; then exit 1; fi
+            [ ! -e "$probe_root/rebuilt" ] || exit 1
+        ) || {
+            echo 'tor_archives_ready: selftest FAILED — non-building readiness probe' >&2
             exit 1
         }
         (

@@ -1382,24 +1382,29 @@ static int t_tor_ready_before_link(void)
 {
     static const char script[] =
         "set -eu; cd \"$2\"\n"
-        "mkdir -p build/identity\n"
+        "mkdir -p build/identity tools/scripts\n"
+        "printf '#!/bin/sh\\necho probe >> events\\ntest -f ready-marker\\n' > tools/scripts/tor_archives_ready.sh; chmod +x tools/scripts/tor_archives_ready.sh\n"
         "printf '%s\\n' 'ZCL_TOR ?= full' 'ZCL_TOR_LINK_REQUESTED := link' 'TOR_BOOTSTRAP_MK := build/identity/tor-inputs-ready.mk' 'TOR_MISSING_ARCHIVES :=' > Makefile\n"
         "sed -n '/^ifeq ($(ZCL_TOR),full)/,/^# The stub/{ /^# The stub/d; p; }' \"$1/Makefile\" >> Makefile\n"
         "cat >> Makefile <<'MAKE'\n"
         ".PHONY: tor-ready link\n"
-        "tor-ready:\n\t@echo ready >> events; case \"$(STATE)\" in legacy) echo rebuilt >> events ;; valid) : ;; *) exit 1 ;; esac\n"
+        "tor-ready:\n\t@echo ready >> events; case \"$(STATE)\" in legacy) echo rebuilt >> events ;; stale|missing|valid) : ;; *) exit 1 ;; esac\n"
         "$(TOR_BOOTSTRAP_MK): tor-ready\n\t@echo '# ready' > $@\n"
-        "link:\n\t@echo link >> events\n"
+        "link:\n\t@echo link:$(MAKE_RESTARTS) >> events\n"
         "MAKE\n"
         "printf '# old stamp\\n' > build/identity/tor-inputs-ready.mk\n"
         "make --no-print-directory STATE=legacy link > run.log 2>&1\n"
-        "printf 'ready\\nrebuilt\\nlink\\n' > expected; cmp expected events\n"
-        ": > events; make --no-print-directory STATE=valid link > run.log 2>&1\n"
-        "printf 'ready\\nlink\\n' > expected; cmp expected events\n"
+        "printf 'probe\\nready\\nrebuilt\\nlink:1\\n' > expected; cmp expected events\n"
+        ": > events; : > ready-marker; make --no-print-directory STATE=valid link > run.log 2>&1\n"
+        "printf 'probe\\nlink:\\n' > expected; cmp expected events\n"
+        ": > events; rm ready-marker; make --no-print-directory STATE=stale link > run.log 2>&1\n"
+        "printf 'probe\\nready\\nlink:1\\n' > expected; cmp expected events\n"
+        ": > events; make --no-print-directory STATE=missing link > run.log 2>&1\n"
+        "printf 'probe\\nready\\nlink:1\\n' > expected; cmp expected events\n"
         ": > events; if make --no-print-directory STATE=refuse link > run.log 2>&1; then exit 1; fi\n"
-        "printf 'ready\\n' > expected; cmp expected events\n"
+        "printf 'probe\\nready\\n' > expected; cmp expected events\n"
         ": > events; make --no-print-directory ZCL_TOR=stub STATE=refuse link > run.log 2>&1\n"
-        "printf 'link\\n' > expected; cmp expected events\n";
+        "printf 'link:\\n' > expected; cmp expected events\n";
     char fixture[PATH_MAX] = {0};
     test_make_tmpdir(fixture, sizeof(fixture), "tor_ready", "bootstrap");
     int bad = build_needs_fixture_run(repo_root(), fixture, script);
