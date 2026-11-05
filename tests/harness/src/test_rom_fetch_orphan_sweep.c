@@ -13,6 +13,7 @@
  * Deterministic: "idle" fixtures get an explicit past mtime via utimensat.
  * The scratch datadir comes from test_mkdtemp. */
 
+#include "platform/clock.h"
 #include "test/test_core.h"
 
 #include "config/rom_fetch_orphan_sweep.h"
@@ -708,6 +709,30 @@ static int test_orphan_sweep_pair_cap(void)
     return failures;
 }
 
+/* A wall clock that stands still, so idle time in the age test is exact and a
+ * busy host cannot move it. */
+static int64_t os_fixed_wall_ms(void *self)
+{
+    return *(const int64_t *)self;
+}
+
+static int64_t os_fixed_mono_ns(void *self)
+{
+    (void)self;
+    return 1;
+}
+
+static void os_fix_clock(int64_t unix_s)
+{
+    static int64_t wall_ms;
+    static clock_iface_t iface;
+    wall_ms = unix_s * 1000;
+    iface.now_monotonic_ns = os_fixed_mono_ns;
+    iface.now_wall_ms = os_fixed_wall_ms;
+    iface.self = &wall_ms;
+    clock_set_default(&iface);
+}
+
 /* Age boundary: a pair idle for exactly the horizon is stale; one 600
  * seconds inside it is not. Idle time is only ever >= the stamp offset (the
  * sweep reads the wall clock after the stamp), so the first case holds on a
@@ -725,18 +750,19 @@ static int test_orphan_sweep_age_boundary(void)
                             false));
         ASSERT(os_make_pair(bundles, "consensus-state-bundle-951.sqlite",
                             false));
-        time_t now = time(NULL);
+        const time_t now = (time_t)1700000000;
+        os_fix_clock((int64_t)now);
         const char *halves[] = {
             "consensus-state-bundle-950.sqlite.part",
             "consensus-state-bundle-950.sqlite.part.journal"};
-        const char *near[] = {
+        const char *kept[] = {
             "consensus-state-bundle-951.sqlite.part",
             "consensus-state-bundle-951.sqlite.part.journal"};
         for (int i = 0; i < 2; i++) {
             char p[PATH_MAX];
             snprintf(p, sizeof(p), "%s/%s", bundles, halves[i]);
             ASSERT(os_age_path_to(p, now - 3600));
-            snprintf(p, sizeof(p), "%s/%s", bundles, near[i]);
+            snprintf(p, sizeof(p), "%s/%s", bundles, kept[i]);
             ASSERT(os_age_path_to(p, now - 3000));
         }
         struct rom_fetch_orphan_sweep_result r;
@@ -746,12 +772,13 @@ static int test_orphan_sweep_age_boundary(void)
         ASSERT_EQ(r.pairs_kept, 1u);
         ASSERT(!os_exists(bundles, halves[0]));
         ASSERT(!os_exists(bundles, halves[1]));
-        ASSERT(os_exists(bundles, near[0]));
-        ASSERT(os_exists(bundles, near[1]));
+        ASSERT(os_exists(bundles, kept[0]));
+        ASSERT(os_exists(bundles, kept[1]));
         test_cleanup_tmpdir(bundles);
         test_cleanup_tmpdir(dd);
         PASS();
     } _test_next:;
+    clock_reset_default();
     return failures;
 }
 
