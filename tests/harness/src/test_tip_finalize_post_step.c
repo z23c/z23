@@ -47,13 +47,17 @@
 #include "storage/anchor_kv.h"
 #include "sapling/sapling.h"
 #include "wallet/sapling_keys.h"
+#include "coins/coins_view.h"
 #include "storage/progress_store.h"
+#include "util/blocker.h"
+#include "util/sync.h"
 #include "util/stage.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
 #include "validation/process_block.h" /* g_body_pull_active */
 
 #include <errno.h>
+#include <pthread.h>
 #include <sqlite3.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -663,6 +667,284 @@ static int tp_witness_wiring(void)
     return failures;
 }
 
+/* ---- Mutation-sweep gap closers: tripwire verdicts, entry refusals, coins
+ * invalidation and the golden-window walk ---- */
+
+/* The header is not on the include path; mirror its enum and externs. */
+enum tp_tripwire { TP_TW_SKIP = 0, TP_TW_MATCH = 1, TP_TW_MISMATCH = 2 };
+extern enum tp_tripwire sha3_window_tripwire_report(int window_index,
+                                                    bool matched);
+extern enum tp_tripwire sha3_window_tripwire_eval(int window_index,
+                                                  const uint8_t *concat,
+                                                  size_t len);
+extern const size_t g_sha3_windows_count;
+
+static bool tp_mismatch_reason(char *out, size_t size,
+                               struct blocker_snapshot *snap)
+{
+    memset(snap, 0, sizeof(*snap));
+    if (!blocker_find_by_id_prefix("sha3_window_mismatch", snap))
+        return false;
+    snprintf(out, size, "%s", snap->reason);
+    return true;
+}
+
+static int tp_mut_tripwire_skips(int cnt)
+{
+    int failures = 0;
+    TP_CHECK("tripwire: negative window skips",
+             sha3_window_tripwire_report(-1, false) == TP_TW_SKIP);
+    TP_CHECK("tripwire: window == count skips",
+             sha3_window_tripwire_report(cnt, false) == TP_TW_SKIP);
+    TP_CHECK("tripwire: window past count skips",
+             sha3_window_tripwire_report(cnt + 5, true) == TP_TW_SKIP);
+    TP_CHECK("tripwire: skips raise no blocker",
+             !blocker_exists("sha3_window_mismatch"));
+    TP_CHECK("tripwire: window 0 matched is MATCH",
+             sha3_window_tripwire_report(0, true) == TP_TW_MATCH);
+    TP_CHECK("tripwire: last covered window matched is MATCH",
+             sha3_window_tripwire_report(cnt - 1, true) == TP_TW_MATCH);
+    TP_CHECK("tripwire: matches raise no blocker",
+             !blocker_exists("sha3_window_mismatch"));
+    TP_CHECK("tripwire eval: negative window skips",
+             sha3_window_tripwire_eval(-1, (const uint8_t *)"x", 1) ==
+             TP_TW_SKIP);
+    TP_CHECK("tripwire eval: window == count skips",
+             sha3_window_tripwire_eval(cnt, (const uint8_t *)"x", 1) ==
+             TP_TW_SKIP);
+    TP_CHECK("tripwire eval: skips raise no blocker",
+             !blocker_exists("sha3_window_mismatch"));
+    return failures;
+}
+
+static int tp_mut_tripwire_mismatch(int wi, const char *want_range)
+{
+    int failures = 0;
+    char reason[256]; struct blocker_snapshot snap;
+    blocker_clear("sha3_window_mismatch");
+    TP_CHECK("tripwire: unmatched window is MISMATCH",
+             sha3_window_tripwire_report(wi, false) == TP_TW_MISMATCH);
+    TP_CHECK("tripwire: mismatch registers the blocker",
+             tp_mismatch_reason(reason, sizeof(reason), &snap));
+    TP_CHECK("tripwire: reason names window and height range",
+             strstr(reason, want_range) != NULL);
+    TP_CHECK("tripwire: evidence-only permanent blocker",
+             snap.class == BLOCKER_PERMANENT &&
+             snap.escape_action[0] == '\0' &&
+             snap.escape_deadline_us == 0 &&
+             strcmp(snap.owner_subsystem, "sha3_window_tripwire") == 0);
+    blocker_clear("sha3_window_mismatch");
+    return failures;
+}
+
+static int tp_mut_tripwire(void)
+{
+    int failures = 0;
+    blocker_module_init();
+    blocker_clear("sha3_window_mismatch");
+    int cnt = (int)g_sha3_windows_count;
+    TP_CHECK("tripwire: golden table covers several windows", cnt > 1);
+    if (cnt <= 1) return failures;
+    failures += tp_mut_tripwire_skips(cnt);
+    failures += tp_mut_tripwire_mismatch(0, "wi=0 h=0..999");
+    failures += tp_mut_tripwire_mismatch(1, "wi=1 h=1000..1999");
+    TP_CHECK("tripwire eval: wrong bytes for window 0 mismatch",
+             sha3_window_tripwire_eval(0, (const uint8_t *)"abc", 3) ==
+             TP_TW_MISMATCH && blocker_exists("sha3_window_mismatch"));
+    blocker_clear("sha3_window_mismatch");
+    TP_CHECK("tripwire eval: wrong bytes for last window mismatch",
+             sha3_window_tripwire_eval(cnt - 1, (const uint8_t *)"abc", 3) ==
+             TP_TW_MISMATCH);
+    blocker_clear("sha3_window_mismatch");
+    return failures;
+}
+
+/* Entry points refuse NULL and an unreadable body without running effects. */
+static int tp_mut_entry_refusals(const struct block *blk,
+                                 struct block_index *nodata,
+                                 struct block_index *unread)
+{
+    int failures = 0;
+    TP_CHECK("entry: mempool reconcile refuses NULL",
+             !tip_finalize_run_mempool_reconcile(NULL));
+    TP_CHECK("entry: wallet reconcile refuses NULL",
+             !tip_finalize_run_wallet_reconcile(NULL));
+    TP_CHECK("entry: wallet+mempool reconcile refuses NULL",
+             !tip_finalize_run_wallet_mempool_reconcile(NULL));
+    TP_CHECK("entry: mempool reconcile reports no-body",
+             !tip_finalize_run_mempool_reconcile(nodata));
+    TP_CHECK("entry: wallet reconcile reports no-body",
+             !tip_finalize_run_wallet_reconcile(nodata));
+    TP_CHECK("entry: wallet+mempool reconcile reports no-body",
+             !tip_finalize_run_wallet_mempool_reconcile(nodata));
+    TP_CHECK("entry: mempool reconcile reports unreadable body",
+             !tip_finalize_run_mempool_reconcile(unread));
+    TP_CHECK("entry: wallet reconcile reports unreadable body",
+             !tip_finalize_run_wallet_reconcile(unread));
+    TP_CHECK("entry: wallet+mempool reconcile reports unreadable body",
+             !tip_finalize_run_wallet_mempool_reconcile(unread));
+    TP_CHECK("entry: refusals leave the mempool alone",
+             tx_mempool_exists(&g_tp_pool, &blk->vtx[1].hash));
+    return failures;
+}
+
+/* A fake backing store: every txid resolves to one live output, so a cache
+ * lookup loads and keeps an entry the reconcile must then drop. */
+static bool tp_fake_get_coins(void *self, const struct uint256 *txid,
+                              struct coins *out)
+{
+    (void)self; (void)txid;
+    coins_init(out);
+    out->vout = zcl_calloc(1, sizeof(struct tx_out), "tp_fake_vout");
+    if (!out->vout) return false;
+    out->num_vout = 1;
+    out->vout[0].value = 1;
+    out->height = 1;
+    return true;
+}
+
+static void *tp_trylock_thread(void *arg)
+{
+    struct main_state *m = arg;
+    bool got = zcl_mutex_trylock(&m->cs_main);
+    if (got) zcl_mutex_unlock(&m->cs_main);
+    return got ? (void *)1 : NULL;
+}
+
+static bool tp_cs_main_free_for_other_thread(struct main_state *m)
+{
+    pthread_t t;
+    void *got = NULL;
+    if (pthread_create(&t, NULL, tp_trylock_thread, m) != 0) return false;
+    pthread_join(t, &got);
+    return got != NULL;
+}
+
+static bool tp_prime(struct coins_view_cache *c, const struct uint256 *h)
+{
+    struct coins tmp;
+    coins_init(&tmp);
+    bool ok = coins_view_cache_get_coins(c, h, &tmp);
+    coins_free(&tmp);
+    return ok;
+}
+
+/* The reconcile must drop the cached generation of every txid the block
+ * created and every non-coinbase prevout it spent, and nothing else. */
+static int tp_mut_coins_invalidate(struct app_runtime_context *rt,
+                                   struct block *blk,
+                                   struct block_index *bi)
+{
+    int failures = 0;
+    struct coins_view_vtable vt = { .get_coins = tp_fake_get_coins };
+    struct coins_view backing = { .vtable = &vt, .impl = NULL };
+    struct coins_view_cache cache;
+    struct main_state ms;
+    struct uint256 zero;
+    memset(&zero, 0, sizeof(zero));
+    coins_view_cache_init(&cache, &backing);
+    main_state_init(&ms);
+    TP_CHECK("coins: prime coinbase txid",
+             tp_prime(&cache, &blk->vtx[0].hash));
+    TP_CHECK("coins: prime spend txid", tp_prime(&cache, &blk->vtx[1].hash));
+    TP_CHECK("coins: prime spent prevout",
+             tp_prime(&cache, &blk->vtx[1].vin[0].prevout.hash));
+    TP_CHECK("coins: prime an unrelated txid", tp_prime(&cache, &zero));
+    TP_CHECK("coins: four cached entries",
+             coins_map_count(&cache.cache_coins) == 4);
+    rt->coins_tip = &cache;
+    rt->main_state = &ms;
+    TP_CHECK("coins: mempool reconcile runs",
+             tip_finalize_run_mempool_reconcile(bi));
+    TP_CHECK("coins: only the unrelated entry remains",
+             coins_map_count(&cache.cache_coins) == 1 &&
+             coins_map_find(&cache.cache_coins, &zero) != NULL);
+    TP_CHECK("coins: cs_main is released after the reconcile",
+             tp_cs_main_free_for_other_thread(&ms));
+    TP_CHECK("coins: reconcile removed the confirmed spend from the pool",
+             !tx_mempool_exists(&g_tp_pool, &blk->vtx[1].hash));
+    /* Restore the pool state the later probes expect. */
+    TP_CHECK("coins: re-arm the pool", tp_pool_add(&blk->vtx[1]));
+    rt->coins_tip = NULL;
+    rt->main_state = NULL;
+    main_state_free(&ms);
+    coins_view_cache_free(&cache);
+    return failures;
+}
+
+/* Window walk: 1000 on-disk blocks, a tip at the window's last height; the
+ * digest cannot equal the golden one, so a complete walk raises evidence
+ * and any gap or missing body raises none. */
+#define TP_WIN 1000
+
+static bool tp_win_write(struct block_index *bis, int i, const char *netdir)
+{
+    uint8_t nf[32];
+    memset(nf, 0x5a, sizeof(nf));
+    struct block b;
+    bool built = tp_build_block(&b, nf);
+    bool ok = built;
+    if (ok) {
+        b.header.nTime = 1700001000u + (uint32_t)i;
+        if (i == TP_WIN - 1) { /* BIP34 push of 999 so no label shift fires */
+            b.vtx[0].vin[0].script_sig.data[0] = 0x02;
+            b.vtx[0].vin[0].script_sig.data[1] = 0xE7;
+            b.vtx[0].vin[0].script_sig.data[2] = 0x03;
+            b.vtx[0].vin[0].script_sig.size = 3;
+            transaction_compute_hash(&b.vtx[0]);
+        }
+    }
+    struct disk_block_pos pos;
+    disk_block_pos_init(&pos);
+    const struct chain_params *cp = chain_params_get();
+    ok = ok && write_block_to_disk(&b, &pos, netdir, cp->pchMessageStart);
+    if (ok) {
+        block_index_init(&bis[i]);
+        block_get_hash(&b, &bis[i].hashBlock);
+        bis[i].phashBlock = &bis[i].hashBlock;
+        bis[i].nHeight = i;
+        bis[i].nTime = b.header.nTime;
+        bis[i].nBits = b.header.nBits;
+        bis[i].pprev = i > 0 ? &bis[i - 1] : NULL;
+        ok = block_index_set_have_data_verified(&bis[i], &pos, netdir);
+    }
+    if (built) block_free(&b);
+    return ok;
+}
+
+static int tp_mut_window_walk(const char *netdir)
+{
+    int failures = 0;
+    char reason[256]; struct blocker_snapshot snap;
+    struct block_index *bis = zcl_calloc(TP_WIN, sizeof(*bis), "tp_win_bis");
+    bool built = bis != NULL;
+    for (int i = 0; built && i < TP_WIN; i++)
+        built = tp_win_write(bis, i, netdir);
+    TP_CHECK("window: 1000 bodies on disk", built);
+    if (built) {
+        blocker_clear("sha3_window_mismatch");
+        tip_finalize_run_post_finalize(&bis[TP_WIN - 1]);
+        TP_CHECK("window: digest mismatch raises the evidence blocker",
+                 tp_mismatch_reason(reason, sizeof(reason), &snap) &&
+                 strstr(reason, "wi=0 h=0..999") != NULL);
+        blocker_clear("sha3_window_mismatch");
+        int keep = bis[500].nFile;
+        bis[500].nFile = 9999;
+        tip_finalize_run_post_finalize(&bis[TP_WIN - 1]);
+        TP_CHECK("window: a missing body raises no false evidence",
+                 !blocker_exists("sha3_window_mismatch"));
+        bis[500].nFile = keep;
+        bis[200].nHeight = 7;
+        tip_finalize_run_post_finalize(&bis[TP_WIN - 1]);
+        TP_CHECK("window: a mislabelled link raises no false evidence",
+                 !blocker_exists("sha3_window_mismatch"));
+        bis[200].nHeight = 200;
+        blocker_clear("sha3_window_mismatch");
+    }
+    free(bis);
+    return failures;
+}
+
 int test_tip_finalize_post_step(void);
 static int tp_birthday_verdict(struct wallet *w, bool match, bool stepped)
 {
@@ -979,6 +1261,8 @@ int test_tip_finalize_post_step(void)
 
     /* NULL pindex is a guarded no-op. */
     tip_finalize_run_post_finalize(NULL);
+    failures += tp_mut_entry_refusals(&blk, &bi_nodata, &bi_unread);
+    failures += tp_mut_coins_invalidate(&rt, &blk, &bi);
     TP_CHECK("NULL pindex: no crash, MMR unchanged",
              tp_mmr_leaves() == mmr0);
 
@@ -990,6 +1274,8 @@ int test_tip_finalize_post_step(void)
                                       vb_stage, vbdb, &vb_ms);
 
     failures += tp_boundary_root_probe(dir, &bi);
+    failures += tp_mut_tripwire();
+    failures += tp_mut_window_walk(netdir);
 
     app_runtime_set_current(NULL);
     tx_mempool_free(&g_tp_pool);
