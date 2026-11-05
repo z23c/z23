@@ -147,6 +147,25 @@ int test_zpay(void)
         PASS();
     }
 
+    TEST("zpay refusal past the header hands back an empty envelope") {
+        struct zpay_envelope in;
+        zp_fixture(&in);
+        uint8_t memo[ZPAY_MEMO_LEN];
+        struct zpay_envelope out;
+        ASSERT(zpay_memo_encode(memo, &in, NULL));
+        memcpy(memo + 18, memo + 10, 8); /* expires_at == created_at */
+        memset(&out, 0xA5, sizeof(out));
+        ASSERT(!zpay_memo_decode(memo, &out));
+        ASSERT(zp_all_bytes_equal((const uint8_t *)&out, sizeof(out), 0));
+        memset(&out, 0xA5, sizeof(out));
+        ASSERT_EQ(zpay_memo_authenticate(memo, 1700000100, &out),
+                  ZPAY_SENDER_ZID_INVALID);
+        ASSERT_EQ(out.sender_authentication, ZPAY_SENDER_ZID_INVALID);
+        out.sender_authentication = (enum zpay_sender_authentication)0;
+        ASSERT(zp_all_bytes_equal((const uint8_t *)&out, sizeof(out), 0));
+        PASS();
+    }
+
     TEST("zpay refuses ambiguous asset spelling and leaves output untouched") {
         struct zpay_envelope in;
         zp_fixture(&in);

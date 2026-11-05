@@ -153,13 +153,9 @@ static bool zpay_reply_ref_zero_when_unused(const struct zpay_envelope *out)
     return true;
 }
 
-bool zpay_memo_decode(const uint8_t memo[ZPAY_MEMO_LEN],
-                      struct zpay_envelope *out)
+static bool zpay_memo_parse(const uint8_t memo[ZPAY_MEMO_LEN],
+                            struct zpay_envelope *out)
 {
-    if (!memo || !out)
-        LOG_FAIL("zpay", "memo_decode: NULL argument");
-    memset(out, 0, sizeof(*out));
-
     if (!zpay_memo_header_valid(memo))
         return false;
 
@@ -198,14 +194,31 @@ bool zpay_memo_decode(const uint8_t memo[ZPAY_MEMO_LEN],
     return true;
 }
 
+bool zpay_memo_decode(const uint8_t memo[ZPAY_MEMO_LEN],
+                      struct zpay_envelope *out)
+{
+    if (!memo || !out)
+        LOG_FAIL("zpay", "memo_decode: NULL argument");
+    memset(out, 0, sizeof(*out));
+    if (zpay_memo_parse(memo, out))
+        return true;
+    /* The parser fills fields as it goes. A refused memo is untrusted, so a
+     * caller reading the envelope after a refusal must find none of it. */
+    memset(out, 0, sizeof(*out));
+    return false;
+}
+
 enum zpay_sender_authentication
 zpay_memo_authenticate(const uint8_t memo[ZPAY_MEMO_LEN], uint64_t now_unix,
                        struct zpay_envelope *decoded_out)
 {
     struct zpay_envelope local;
     struct zpay_envelope *e = decoded_out ? decoded_out : &local;
-    if (!zpay_memo_decode(memo, e))
+    if (!zpay_memo_decode(memo, e)) {
+        /* All-zero would read as ZPAY_SENDER_ANONYMOUS. */
+        e->sender_authentication = ZPAY_SENDER_ZID_INVALID;
         return ZPAY_SENDER_ZID_INVALID;
+    }
     if (!e->has_identity_doc)
         return ZPAY_SENDER_ANONYMOUS;
 
