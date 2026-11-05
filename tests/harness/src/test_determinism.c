@@ -15,6 +15,7 @@
 #include "determinism/perturbation.h"
 #include "determinism/receipt.h"
 #include "determinism/verdict.h"
+#include "sha3/sha3.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -977,6 +978,457 @@ static int test_receipt_verification(void)
     return failures;
 }
 
+/* ── 6b. the receipt, field by field ──────────────────────────────────────
+ *
+ * The cases above pin the shape. These pin each field's width, offset and
+ * byte order, the domain-separated label digest, every identity refusal in
+ * the checker with its stated reason, and the boundaries of every range and
+ * charset rule the decoder applies. */
+
+#define RC_GROUP_OFF 38u
+#define RC_TOOL_OFF (RC_GROUP_OFF + ZCL_DET_GROUP_MAX)
+#define RC_ENV_OFF (RC_TOOL_OFF + ZCL_DET_DIGEST_LEN)
+#define RC_VERDICT_OFF (RC_ENV_OFF + ZCL_DET_DIGEST_LEN)
+#define RC_PERT_OFF (RC_VERDICT_OFF + 2u)
+#define RC_SPLIT_OFF (RC_PERT_OFF + 2u)
+#define RC_COUNT_OFF (RC_SPLIT_OFF + 4u)
+#define RC_VEC_OFF (RC_COUNT_OFF + 4u)
+#define RC_PROD_OFF (RC_VEC_OFF + ZCL_DET_DIGEST_LEN)
+
+static void rc_wire(uint8_t wire[ZCL_DET_RECEIPT_SIZE])
+{
+    struct zcl_det_receipt r;
+    fill_receipt(&r);
+    size_t len = 0;
+    (void)zcl_det_receipt_encode(&r, wire, ZCL_DET_RECEIPT_SIZE, &len);
+}
+
+static int test_receipt_label_digest(void)
+{
+    int failures = 0;
+    TEST("receipt: label digest is SHA3-256 over the NUL-terminated domain then the label") {
+        static const char domain[] = "zcl.determinism.label.v1";
+        uint8_t got[ZCL_DET_DIGEST_LEN], want[ZCL_DET_DIGEST_LEN];
+        struct sha3_256_ctx c;
+        sha3_256_init(&c);
+        sha3_256_write(&c, (const unsigned char *)domain, sizeof(domain));
+        sha3_256_write(&c, (const unsigned char *)"gate:jobs=8", 11);
+        sha3_256_finalize(&c, want);
+        zcl_det_receipt_label_digest("gate:jobs=8", got);
+        ASSERT(memcmp(got, want, sizeof(want)) == 0);
+
+        /* The domain's terminating NUL is part of the hashed bytes. */
+        sha3_256_init(&c);
+        sha3_256_write(&c, (const unsigned char *)domain, sizeof(domain) - 1);
+        sha3_256_write(&c, (const unsigned char *)"gate:jobs=8", 11);
+        sha3_256_finalize(&c, want);
+        ASSERT(memcmp(got, want, sizeof(want)) != 0);
+
+        /* No label and an empty label both hash the domain alone. */
+        sha3_256_init(&c);
+        sha3_256_write(&c, (const unsigned char *)domain, sizeof(domain));
+        sha3_256_finalize(&c, want);
+        zcl_det_receipt_label_digest(NULL, got);
+        ASSERT(memcmp(got, want, sizeof(want)) == 0);
+        zcl_det_receipt_label_digest("", got);
+        ASSERT(memcmp(got, want, sizeof(want)) == 0);
+
+        /* The whole label is hashed: a last-character difference matters. */
+        uint8_t other[ZCL_DET_DIGEST_LEN];
+        zcl_det_receipt_label_digest("gate:jobs=8", got);
+        zcl_det_receipt_label_digest("gate:jobs=9", other);
+        ASSERT(memcmp(got, other, sizeof(got)) != 0);
+        zcl_det_receipt_label_digest("gate:jobs=", other);
+        ASSERT(memcmp(got, other, sizeof(got)) != 0);
+
+        zcl_det_receipt_label_digest("x", NULL); /* must not crash */
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_receipt_set_commit(void)
+{
+    int failures = 0;
+    TEST("receipt: set_commit takes exactly 40 or 64 hex characters, left-aligned, zero-filled") {
+        struct zcl_det_receipt r;
+        memset(&r, 0, sizeof(r));
+        memset(r.commit, 0xFF, sizeof(r.commit));
+        ASSERT(zcl_det_receipt_set_commit(
+            &r, "000102030405060708090a0b0c0d0e0f10111213"));
+        for (size_t i = 0; i < 20; i++)
+            ASSERT_EQ(r.commit[i], (uint8_t)i);
+        for (size_t i = 20; i < ZCL_DET_RECEIPT_COMMIT_LEN; i++)
+            ASSERT_EQ(r.commit[i], 0); /* a shorter id clears the old tail */
+
+        ASSERT(zcl_det_receipt_set_commit(
+            &r, "000102030405060708090a0b0c0d0e0f"
+                "101112131415161718191a1b1c1d1e1f"));
+        for (size_t i = 0; i < ZCL_DET_RECEIPT_COMMIT_LEN; i++)
+            ASSERT_EQ(r.commit[i], (uint8_t)i);
+
+        /* Operator-facing: upper case decodes to the same bytes. */
+        struct zcl_det_receipt up;
+        memset(&up, 0, sizeof(up));
+        ASSERT(zcl_det_receipt_set_commit(
+            &up, "000102030405060708090A0B0C0D0E0F10111213"));
+        ASSERT(memcmp(up.commit, r.commit, 20) == 0);
+
+        /* Other widths, null arguments and non-hex are refused. */
+        memset(r.commit, 0x77, sizeof(r.commit));
+        ASSERT(!zcl_det_receipt_set_commit(
+            &r, "000102030405060708090a0b0c0d0e0f1011121"));        /* 39 */
+        ASSERT(!zcl_det_receipt_set_commit(
+            &r, "000102030405060708090a0b0c0d0e0f101112131"));      /* 41 */
+        ASSERT(!zcl_det_receipt_set_commit(
+            &r, "000102030405060708090a0b0c0d0e0f"
+                "101112131415161718191a1b1c1d1e1"));                 /* 63 */
+        ASSERT(!zcl_det_receipt_set_commit(
+            &r, "000102030405060708090a0b0c0d0e0f"
+                "101112131415161718191a1b1c1d1e1f0"));               /* 65 */
+        ASSERT(!zcl_det_receipt_set_commit(
+            &r, "000102030405060708090a0b0c0d0e0f"
+                "101112131415161718191a1b1c1d1e1f"
+                "000102030405060708090a0b0c0d0e0f"));                /* 96 */
+        for (size_t i = 0; i < ZCL_DET_RECEIPT_COMMIT_LEN; i++)
+            ASSERT_EQ(r.commit[i], 0x77); /* a refused width changes nothing */
+        ASSERT(!zcl_det_receipt_set_commit(
+            &r, "g00102030405060708090a0b0c0d0e0f10111213"));
+        ASSERT(!zcl_det_receipt_set_commit(NULL, "00"));
+        ASSERT(!zcl_det_receipt_set_commit(&r, NULL));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static void rc_fill_distinct(struct zcl_det_receipt *r)
+{
+    fill_receipt(r);
+    (void)zcl_det_receipt_set_commit(
+        r, "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+    snprintf(r->group, sizeof(r->group), "g");
+    r->verdict = ZCL_DET_CLASS_NONDETERMINISTIC;
+    r->perturbations = 0x0102u;
+    r->split_mask = 0x05060708u;
+    r->check_count = 0x090A0B0Cu;
+    for (size_t i = 0; i < ZCL_DET_DIGEST_LEN; i++) {
+        r->toolchain[i] = (uint8_t)(0x10u + i);
+        r->env_class[i] = (uint8_t)(0x30u + i);
+        r->vector[i] = (uint8_t)(0x55u ^ i);
+        r->producer[i] = (uint8_t)(0x70u + i);
+    }
+}
+
+static int test_receipt_wire_offsets(void)
+{
+    int failures = 0;
+    TEST("receipt: every field sits at its pinned offset, little-endian, magic first") {
+        struct zcl_det_receipt r, back;
+        rc_fill_distinct(&r);
+        uint8_t w[ZCL_DET_RECEIPT_SIZE];
+        size_t len = 0;
+        ASSERT(zcl_det_receipt_encode(&r, w, sizeof(w), &len));
+        ASSERT_EQ(len, (size_t)ZCL_DET_RECEIPT_SIZE);
+        ASSERT(memcmp(w, "ZDR1", 4) == 0);
+        ASSERT_EQ(w[4], 0x01);
+        ASSERT_EQ(w[5], 0x00);
+        for (size_t i = 0; i < ZCL_DET_RECEIPT_COMMIT_LEN; i++)
+            ASSERT_EQ(w[6 + i], (uint8_t)i);
+        ASSERT_EQ(w[RC_GROUP_OFF], 'g');
+        for (size_t i = 1; i < ZCL_DET_GROUP_MAX; i++)
+            ASSERT_EQ(w[RC_GROUP_OFF + i], 0);
+        for (size_t i = 0; i < ZCL_DET_DIGEST_LEN; i++) {
+            ASSERT_EQ(w[RC_TOOL_OFF + i], (uint8_t)(0x10u + i));
+            ASSERT_EQ(w[RC_ENV_OFF + i], (uint8_t)(0x30u + i));
+            ASSERT_EQ(w[RC_VEC_OFF + i], (uint8_t)(0x55u ^ i));
+            ASSERT_EQ(w[RC_PROD_OFF + i], (uint8_t)(0x70u + i));
+        }
+        ASSERT_EQ((int)w[RC_VERDICT_OFF], (int)ZCL_DET_CLASS_NONDETERMINISTIC);
+        ASSERT_EQ((int)w[RC_VERDICT_OFF + 1], (int)ZCL_DET_UNKNOWN_NONE);
+        ASSERT_EQ(w[RC_PERT_OFF], 0x02);
+        ASSERT_EQ(w[RC_PERT_OFF + 1], 0x01);
+        ASSERT_EQ(w[RC_SPLIT_OFF], 0x08);
+        ASSERT_EQ(w[RC_SPLIT_OFF + 1], 0x07);
+        ASSERT_EQ(w[RC_SPLIT_OFF + 2], 0x06);
+        ASSERT_EQ(w[RC_SPLIT_OFF + 3], 0x05);
+        ASSERT_EQ(w[RC_COUNT_OFF], 0x0C);
+        ASSERT_EQ(w[RC_COUNT_OFF + 1], 0x0B);
+        ASSERT_EQ(w[RC_COUNT_OFF + 2], 0x0A);
+        ASSERT_EQ(w[RC_COUNT_OFF + 3], 0x09);
+
+        ASSERT(zcl_det_receipt_decode(w, len, &back));
+        ASSERT_EQ(back.version, ZCL_DET_RECEIPT_VERSION);
+        ASSERT_EQ(back.perturbations, 0x0102u);
+        ASSERT_EQ(back.split_mask, 0x05060708u);
+        ASSERT_EQ(back.check_count, 0x090A0B0Cu);
+        ASSERT_STR_EQ(back.group, "g");
+        ASSERT(memcmp(back.commit, r.commit, sizeof(r.commit)) == 0);
+        ASSERT(memcmp(back.toolchain, r.toolchain, sizeof(r.toolchain)) == 0);
+        ASSERT(memcmp(back.env_class, r.env_class, sizeof(r.env_class)) == 0);
+        ASSERT(memcmp(back.vector, r.vector, sizeof(r.vector)) == 0);
+        ASSERT(memcmp(back.producer, r.producer, sizeof(r.producer)) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_receipt_encode_guards(void)
+{
+    int failures = 0;
+    TEST("receipt: encode refuses a short buffer, null arguments and an unterminated group") {
+        struct zcl_det_receipt r;
+        fill_receipt(&r);
+        uint8_t w[ZCL_DET_RECEIPT_SIZE + 8];
+        size_t len = 99;
+        ASSERT(!zcl_det_receipt_encode(&r, w, ZCL_DET_RECEIPT_SIZE - 1, &len));
+        ASSERT_EQ(len, (size_t)99); /* a refusal reports no length */
+        ASSERT(zcl_det_receipt_encode(&r, w, ZCL_DET_RECEIPT_SIZE, &len));
+        ASSERT_EQ(len, (size_t)ZCL_DET_RECEIPT_SIZE);
+        ASSERT(zcl_det_receipt_encode(&r, w, sizeof(w), NULL));
+        ASSERT(!zcl_det_receipt_encode(NULL, w, sizeof(w), &len));
+        ASSERT(!zcl_det_receipt_encode(&r, NULL, sizeof(w), &len));
+
+        /* The longest group has no room for its terminator: refused at the
+         * width, accepted one short of it, and it round-trips. */
+        memset(r.group, 'a', sizeof(r.group));
+        ASSERT(!zcl_det_receipt_encode(&r, w, sizeof(w), &len));
+        r.group[ZCL_DET_GROUP_MAX - 1] = '\0';
+        ASSERT(zcl_det_receipt_encode(&r, w, sizeof(w), &len));
+        struct zcl_det_receipt back;
+        ASSERT(zcl_det_receipt_decode(w, len, &back));
+        ASSERT_EQ(strlen(back.group), (size_t)(ZCL_DET_GROUP_MAX - 1));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Decode a copy of `base` with one byte replaced. */
+static bool rc_decode_with(const uint8_t base[ZCL_DET_RECEIPT_SIZE],
+                           size_t at, uint8_t v)
+{
+    uint8_t bad[ZCL_DET_RECEIPT_SIZE];
+    struct zcl_det_receipt back;
+    memcpy(bad, base, ZCL_DET_RECEIPT_SIZE);
+    bad[at] = v;
+    return zcl_det_receipt_decode(bad, ZCL_DET_RECEIPT_SIZE, &back);
+}
+
+static int test_receipt_decode_ranges(void)
+{
+    int failures = 0;
+    TEST("receipt: decode range and charset boundaries, verdict/reason pairing") {
+        uint8_t w[ZCL_DET_RECEIPT_SIZE];
+        rc_wire(w);
+        ASSERT(rc_decode_with(w, 4, 0x01));
+        /* every magic byte and both version bytes are checked */
+        for (size_t i = 0; i < 4; i++)
+            ASSERT(!rc_decode_with(w, i, (uint8_t)(w[i] ^ 0x01)));
+        ASSERT(!rc_decode_with(w, 4, 0x00));
+        ASSERT(!rc_decode_with(w, 5, 0x01));
+
+        /* group charset: 0x20..0x7E accepted, outside refused */
+        ASSERT(rc_decode_with(w, RC_GROUP_OFF + 1, 0x20));
+        ASSERT(rc_decode_with(w, RC_GROUP_OFF + 1, 0x7E));
+        ASSERT(!rc_decode_with(w, RC_GROUP_OFF + 1, 0x1F));
+        ASSERT(!rc_decode_with(w, RC_GROUP_OFF + 1, 0x7F));
+        ASSERT(!rc_decode_with(w, RC_GROUP_OFF + 1, 0x80));
+        ASSERT(!rc_decode_with(w, RC_GROUP_OFF + 1, 0xFF));
+        /* padding must be NUL all the way, not just at the ends */
+        ASSERT(!rc_decode_with(w, RC_GROUP_OFF + 40, 'x'));
+
+        /* verdict range: 1..4 accepted (4 needs a cause), 0 and 5 refused */
+        ASSERT(!rc_decode_with(w, RC_VERDICT_OFF, 0));
+        ASSERT(!rc_decode_with(w, RC_VERDICT_OFF, 5));
+        ASSERT(!rc_decode_with(w, RC_VERDICT_OFF, 0xFF));
+        /* reason 0..3 are the enum, 4 is outside it */
+        uint8_t u[ZCL_DET_RECEIPT_SIZE];
+        memcpy(u, w, sizeof(u));
+        u[RC_VERDICT_OFF] = ZCL_DET_CLASS_UNKNOWN;
+        u[RC_VERDICT_OFF + 1] = ZCL_DET_UNKNOWN_PARTIAL;
+        ASSERT(rc_decode_with(u, RC_PERT_OFF, 8));
+        ASSERT(!rc_decode_with(u, RC_VERDICT_OFF + 1, 4));
+        ASSERT(!rc_decode_with(u, RC_VERDICT_OFF + 1, 0)); /* UNKNOWN needs one */
+        /* an UNKNOWN record may not name a splitting perturbation */
+        ASSERT(!rc_decode_with(u, RC_SPLIT_OFF, 1));
+        ASSERT(!rc_decode_with(u, RC_SPLIT_OFF + 3, 0x80));
+        /* a measured record may not carry a reason, and a DETERMINISTIC
+         * one may not carry a cause, in any of the mask's four bytes */
+        ASSERT(!rc_decode_with(w, RC_VERDICT_OFF + 1, 1));
+        ASSERT(!rc_decode_with(w, RC_SPLIT_OFF + 3, 1));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_receipt_decode_refusals_leave_output(void)
+{
+    int failures = 0;
+    TEST("receipt: a refused decode leaves the output untouched and null arguments fail") {
+        uint8_t w[ZCL_DET_RECEIPT_SIZE];
+        rc_wire(w);
+        struct zcl_det_receipt back;
+        memset(&back, 0, sizeof(back));
+        back.check_count = 0xDEADBEEFu;
+        w[RC_SPLIT_OFF] = 4; /* DETERMINISTIC naming a cause */
+        ASSERT(!zcl_det_receipt_decode(w, ZCL_DET_RECEIPT_SIZE, &back));
+        ASSERT_EQ(back.check_count, 0xDEADBEEFu);
+        ASSERT_EQ(back.version, 0);
+        ASSERT(!zcl_det_receipt_decode(NULL, ZCL_DET_RECEIPT_SIZE, &back));
+        rc_wire(w);
+        ASSERT(!zcl_det_receipt_decode(w, ZCL_DET_RECEIPT_SIZE, NULL));
+        ASSERT(!zcl_det_receipt_decode(w, ZCL_DET_RECEIPT_SIZE - 1, &back));
+        ASSERT(zcl_det_receipt_decode(w, ZCL_DET_RECEIPT_SIZE, &back));
+        ASSERT_EQ(back.check_count, 41u);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static enum zcl_det_corroboration rc_check(const struct zcl_det_receipt *a,
+                                           const struct zcl_det_receipt *b,
+                                           char *why, size_t cap)
+{
+    return zcl_det_receipt_check(a, b, why, cap);
+}
+
+static int test_receipt_check_identity(void)
+{
+    int failures = 0;
+    TEST("receipt check: each identity field alone makes the pair INDETERMINATE, with its reason") {
+        struct zcl_det_receipt claim, fresh;
+        char why[200];
+        rc_fill_distinct(&claim);
+        claim.verdict = ZCL_DET_CLASS_DETERMINISTIC;
+        claim.split_mask = 0;
+
+        fresh = claim;
+        fresh.version = 2;
+        fresh.vector[0] ^= 1;
+        ASSERT_EQ((int)rc_check(&claim, &fresh, why, sizeof(why)),
+                  (int)ZCL_DET_INDETERMINATE);
+        ASSERT_STR_EQ(why, "receipt versions differ");
+
+        fresh = claim;
+        snprintf(fresh.group, sizeof(fresh.group), "h");
+        fresh.vector[0] ^= 1;
+        ASSERT_EQ((int)rc_check(&claim, &fresh, why, sizeof(why)),
+                  (int)ZCL_DET_INDETERMINATE);
+        ASSERT_STR_EQ(why, "the receipts are about different groups");
+
+        fresh = claim;
+        fresh.commit[ZCL_DET_RECEIPT_COMMIT_LEN - 1] ^= 1;
+        fresh.vector[0] ^= 1;
+        ASSERT_EQ((int)rc_check(&claim, &fresh, why, sizeof(why)),
+                  (int)ZCL_DET_INDETERMINATE);
+        ASSERT_STR_EQ(why,
+            "the commit the claim names is not the commit that was run");
+
+        fresh = claim;
+        fresh.toolchain[ZCL_DET_DIGEST_LEN - 1] ^= 1;
+        fresh.vector[0] ^= 1;
+        ASSERT_EQ((int)rc_check(&claim, &fresh, why, sizeof(why)),
+                  (int)ZCL_DET_INDETERMINATE);
+        ASSERT_STR_EQ(why,
+            "the toolchain the claim names is not available here");
+
+        fresh = claim;
+        fresh.env_class[ZCL_DET_DIGEST_LEN - 1] ^= 1;
+        fresh.vector[0] ^= 1;
+        ASSERT_EQ((int)rc_check(&claim, &fresh, why, sizeof(why)),
+                  (int)ZCL_DET_INDETERMINATE);
+        ASSERT_STR_EQ(why, "the environment classes differ");
+
+        ASSERT_EQ((int)rc_check(&claim, NULL, why, sizeof(why)),
+                  (int)ZCL_DET_INDETERMINATE);
+        ASSERT_STR_EQ(why, "a receipt was absent");
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_receipt_check_verdicts(void)
+{
+    int failures = 0;
+    TEST("receipt check: every compared field alone refutes; unmeasured and load-sensitive stay INDETERMINATE") {
+        struct zcl_det_receipt claim, fresh;
+        char why[200];
+        fill_receipt(&claim);
+
+        fresh = claim;
+        ASSERT_EQ((int)rc_check(&claim, &fresh, why, sizeof(why)),
+                  (int)ZCL_DET_CORROBORATED);
+        ASSERT_STR_EQ(why, "same commit, same toolchain, same verdict vector");
+
+        fresh = claim; fresh.check_count++;
+        ASSERT_EQ((int)rc_check(&claim, &fresh, why, sizeof(why)),
+                  (int)ZCL_DET_REFUTED);
+        ASSERT_STR_EQ(why,
+            "same commit and toolchain, different verdict vector or verdict");
+        fresh = claim; fresh.split_mask = 1;
+        ASSERT_EQ((int)rc_check(&claim, &fresh, why, sizeof(why)),
+                  (int)ZCL_DET_REFUTED);
+        fresh = claim; fresh.verdict = ZCL_DET_CLASS_NONDETERMINISTIC;
+        ASSERT_EQ((int)rc_check(&claim, &fresh, why, sizeof(why)),
+                  (int)ZCL_DET_REFUTED);
+        fresh = claim; fresh.vector[ZCL_DET_DIGEST_LEN - 1] ^= 1;
+        ASSERT_EQ((int)rc_check(&claim, &fresh, why, sizeof(why)),
+                  (int)ZCL_DET_REFUTED);
+        fresh = claim; fresh.perturbations = 3; fresh.producer[0] ^= 1;
+        ASSERT_EQ((int)rc_check(&claim, &fresh, why, sizeof(why)),
+                  (int)ZCL_DET_CORROBORATED); /* not compared */
+
+        /* An unmeasured claim, or an unmeasured fresh run, decides nothing. */
+        fresh = claim;
+        claim.verdict = ZCL_DET_CLASS_UNKNOWN;
+        claim.reason = ZCL_DET_UNKNOWN_PARTIAL;
+        ASSERT_EQ((int)rc_check(&claim, &fresh, why, sizeof(why)),
+                  (int)ZCL_DET_INDETERMINATE);
+        ASSERT(strstr(why, "could not be measured") != NULL);
+        fresh = claim;
+        fresh.vector[0] ^= 1;
+        ASSERT_EQ((int)rc_check(&claim, &fresh, why, sizeof(why)),
+                  (int)ZCL_DET_INDETERMINATE); /* equal-looking UNKNOWNs too */
+
+        /* Load-sensitive on the fresh side, against a DETERMINISTIC claim. */
+        fill_receipt(&claim);
+        fresh = claim;
+        fresh.verdict = ZCL_DET_CLASS_TIMING_SENSITIVE;
+        fresh.split_mask = 2;
+        ASSERT_EQ((int)rc_check(&claim, &fresh, why, sizeof(why)),
+                  (int)ZCL_DET_INDETERMINATE);
+        ASSERT(strstr(why, "move with machine load") != NULL);
+        /* ... and on the claim side, against a DETERMINISTIC fresh run. */
+        ASSERT_EQ((int)rc_check(&fresh, &claim, why, sizeof(why)),
+                  (int)ZCL_DET_INDETERMINATE);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_receipt_check_why_buffer(void)
+{
+    int failures = 0;
+    TEST("receipt check: the reason buffer is optional, bounded and never written at capacity zero") {
+        struct zcl_det_receipt claim, fresh;
+        fill_receipt(&claim);
+        fresh = claim;
+        char why[4];
+        ASSERT_EQ((int)rc_check(&claim, NULL, why, sizeof(why)),
+                  (int)ZCL_DET_INDETERMINATE);
+        ASSERT_STR_EQ(why, "a r"); /* truncated, terminated, no overrun */
+        char guard[8] = "QQQQQQQ";
+        ASSERT_EQ((int)rc_check(&claim, NULL, guard, 0),
+                  (int)ZCL_DET_INDETERMINATE);
+        ASSERT_STR_EQ(guard, "QQQQQQQ");
+        ASSERT_EQ((int)rc_check(&claim, &fresh, NULL, 16),
+                  (int)ZCL_DET_CORROBORATED);
+        ASSERT_EQ((int)rc_check(&claim, &fresh, NULL, 0),
+                  (int)ZCL_DET_CORROBORATED);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── 7. the perturbation vocabulary is total ──────────────────────────────*/
 
 static int test_perturbation_names(void)
@@ -1041,5 +1493,14 @@ int test_determinism(void)
            test_receipt_golden_bytes() +
            test_receipt_rejects() +
            test_receipt_verification() +
+           test_receipt_label_digest() +
+           test_receipt_set_commit() +
+           test_receipt_wire_offsets() +
+           test_receipt_encode_guards() +
+           test_receipt_decode_ranges() +
+           test_receipt_decode_refusals_leave_output() +
+           test_receipt_check_identity() +
+           test_receipt_check_verdicts() +
+           test_receipt_check_why_buffer() +
            test_perturbation_names();
 }
