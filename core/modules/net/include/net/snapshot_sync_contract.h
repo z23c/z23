@@ -229,7 +229,7 @@ enum snapsync_offer_result {
     SNAPSYNC_OFFER_REJECTED_NO_MMR,    /* no MMR root — can't verify chain */
     SNAPSYNC_OFFER_REJECTED_NOT_AHEAD, /* peer not far enough ahead */
     SNAPSYNC_OFFER_REJECTED_BUSY,      /* already receiving a snapshot */
-    SNAPSYNC_OFFER_REJECTED_BLACKLISTED, /* peer stalled before */
+    SNAPSYNC_OFFER_REJECTED_BLACKLISTED, /* peer stalled or stood us down */
     SNAPSYNC_OFFER_REJECTED_PARSE,     /* malformed wire data */
     SNAPSYNC_OFFER_REJECTED_STALE_SCHEMA, /* unsupported protocol/schema */
     SNAPSYNC_OFFER_REJECTED_UNFINAL,   /* anchor inside peer finality window */
@@ -307,9 +307,11 @@ struct zcl_result snapsync_prepare_serve_step(struct snapsync_serve_step *step,
  * every sampled leaf to the headers under ms->pindex_best_header, which this
  * node validated. If ALL pass, sets fc_verified=true. ms is not const: the walk
  * takes ms->cs_main.
- * Returns SNAPSYNC_FLYCLIENT_UNVERIFIABLE_ERROR_CODE, with the service back at
- * idle, when the proof shows no fault but cannot be checked; any other failure
- * is an offence and leaves the service negotiating.
+ * Returns SNAPSYNC_FLYCLIENT_UNVERIFIABLE_ERROR_CODE when the proof shows no
+ * fault but cannot be checked. The service is then back at idle, or at FAILED
+ * until the failed-reset condition recovers it if our own reset could not
+ * finish, and that peer's offers are ignored for a short cooldown. Any other
+ * failure is an offence and leaves the service negotiating.
  * Router should only send zsnapreq after this returns ok. */
 struct zcl_result snapsync_verify_flyclient(struct snapshot_sync_service *svc,
                                struct main_state *ms,

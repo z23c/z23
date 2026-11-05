@@ -939,3 +939,7 @@ later lane flips it HARD.
 - 2026-11-05T16:20:03Z — REASON: Dandelion: retry a refused stem-peer RNG draw after 60 seconds instead of fluffing for the whole 600 second epoch; relay policy only, no consensus predicate change; owner instruction 2026-11-05 you have authority to unseal core to fix everything, as relayed by the lane brief
   old ROOT: cd033043e85ff2c7030cad8d85442a9e3f4b87b3f28823b90edd8de8bb41a165
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-05T18:03:16Z — REASON: Snapshot offers: read the offered block's hash and chain work from its validated blocks row, since nothing writes node_state tip_hash, and refuse an offer or chunk manifest without one; correct the stand-down contract comment; sync strategy only, no consensus predicate change; owner instruction 2026-11-05 you have authority to unseal core to fix everything, as relayed by the lane brief
+  old ROOT: 457b60267e7e7e89e3126d595fa30be43110c7c3c2c0d3942f57716e9d4665ae
+  by: owner unseal ritual (make core-unseal)

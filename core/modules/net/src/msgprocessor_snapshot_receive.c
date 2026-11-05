@@ -235,7 +235,7 @@ static void mp_zs_offer_react(struct msg_processor *mp,
         break;
     case SNAPSYNC_OFFER_REJECTED_BLACKLISTED:
         printf("[snapsync] Rejected offer from %s "
-               "(peer %u): blacklisted after stall\n",
+               "(peer %u): blacklisted after a stall or stand-down\n",
                node->addr_name, (uint32_t)node->id);
         break;
     case SNAPSYNC_OFFER_REJECTED_NOT_AHEAD:

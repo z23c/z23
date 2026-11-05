@@ -8,6 +8,7 @@
  * to parse/write the offer and FlyClient request envelopes. */
 
 #include "net/snapshot_sync_contract.h"
+#include "models/block.h"
 #include "services/snapshot_manifest.h"
 #include "services/block_source_policy.h"
 #include "chain/mmb.h"
@@ -170,7 +171,7 @@ struct zcl_result snapsync_build_local_recovery_manifest(struct node_db *ndb,
                                             uint32_t peer_id)
 {
     int64_t tip_height = 0;
-    size_t hash_len = 0;
+    struct db_block tip_block;
     uint64_t utxo_count = 0;
 
     if (!ndb || !ndb->open || !out)
@@ -187,11 +188,13 @@ struct zcl_result snapsync_build_local_recovery_manifest(struct node_db *ndb,
     out->protocol_version = FAST_SYNC_PROTOCOL_VERSION;
     out->snapshot_schema_version = FAST_SYNC_SNAPSHOT_SCHEMA_VERSION;
 
-    if (!node_db_state_get(ndb, "tip_hash", out->block_hash, 32,
-                           &hash_len) ||
-        hash_len != 32 ||
-        !snapsync_bytes32_nonzero_internal(out->block_hash))
-        return ZCL_ERR(-3, "build_local_recovery_manifest: missing/invalid tip_hash");
+    /* The validated block row at that height, not node_state tip_hash, which
+     * nothing writes. Its bytes are what a receiver compares with its header. */
+    if (!db_block_find_by_height(ndb, out->height, &tip_block) ||
+        !snapsync_bytes32_nonzero_internal(tip_block.hash))
+        return ZCL_ERR(-3, "build_local_recovery_manifest: no validated block at height %d",
+                       out->height);
+    memcpy(out->block_hash, tip_block.hash, 32);
     if (!snapsync_read_tip_chainwork_internal(ndb, out->block_hash,
                                               out->chain_work))
         return ZCL_ERR(-4, "build_local_recovery_manifest: missing tip chainwork");

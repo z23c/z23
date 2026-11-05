@@ -121,6 +121,34 @@ static void fast_sync_read_tip_height(sqlite3 *db, int32_t *height,
     sqlite3_finalize(s);
 }
 
+/* Copies the hash and chain work of the validated block row at height. Both are
+ * stored as phashBlock->data and nChainWork.pn, the bytes a receiver compares
+ * with its own header. False, with the outputs untouched, for a height that is
+ * not positive or when there is no complete row: no writer of node_state
+ * tip_hash exists, so this row is the only source for the name of the block. */
+static bool fast_sync_read_anchor_block(sqlite3 *db, int32_t height,
+                                        uint8_t hash[32], uint8_t work[32])
+{
+    static const uint8_t zero[32];
+    sqlite3_stmt *s = NULL;
+    bool found = false;
+
+    if (height <= 0 || sqlite3_prepare_v2(db,
+            "SELECT hash, chain_work FROM blocks WHERE height=? AND status>=3 "
+            "AND length(hash)=32 AND length(chain_work)=32",
+            -1, &s, NULL) != SQLITE_OK)
+        return false;
+    sqlite3_bind_int(s, 1, height);
+    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW &&
+        memcmp(sqlite3_column_blob(s, 1), zero, 32) != 0) {
+        memcpy(hash, sqlite3_column_blob(s, 0), 32);
+        memcpy(work, sqlite3_column_blob(s, 1), 32);
+        found = true;
+    }
+    sqlite3_finalize(s);
+    return found;
+}
+
 bool fast_sync_build_offer(const char *datadir,
                             struct snapshot_offer *offer)
 {
@@ -142,27 +170,13 @@ bool fast_sync_build_offer(const char *datadir,
     sqlite3_stmt *s = NULL;
     fast_sync_read_tip_height(db, &offer->height, &offer->peer_tip_height);
 
-    sqlite3_prepare_v2(db,
-        "SELECT value FROM node_state WHERE key='tip_hash'",
-        -1, &s, NULL);
-    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-        const void *h = sqlite3_column_blob(s, 0);
-        if (h && sqlite3_column_bytes(s, 0) >= 32)
-            memcpy(offer->block_hash, h, 32);
-    }
-    sqlite3_finalize(s);
-
-    sqlite3_prepare_v2(db,
-        "SELECT chain_work FROM blocks WHERE hash=?",
-        -1, &s, NULL);
-    sqlite3_bind_blob(s, 1, offer->block_hash, 32, SQLITE_STATIC);
-    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-        const void *cw = sqlite3_column_blob(s, 0);
-        if (cw && sqlite3_column_bytes(s, 0) >= 32)
-            memcpy(offer->chain_work, cw, 32);
-    }
-    sqlite3_finalize(s);
-    if (legacy_chain_rpc_get_chainwork(offer->block_hash, offer->chain_work)) {
+    bool have_anchor = fast_sync_read_anchor_block(
+        db, offer->height, offer->block_hash, offer->chain_work);
+    if (!have_anchor) {
+        printf("Fast sync: no validated block at h=%d, refusing the offer\n",
+               offer->height);
+    } else if (legacy_chain_rpc_get_chainwork(offer->block_hash,
+                                              offer->chain_work)) {
         printf("Fast sync: chainwork refreshed from local zclassicd RPC\n");
     }
 
@@ -193,7 +207,7 @@ bool fast_sync_build_offer(const char *datadir,
     }
 
     sqlite3_close(db);
-    return offer->height > 0;
+    return have_anchor;
 }
 
 /* Internal: compute root from open db handle */
@@ -1189,28 +1203,11 @@ bool fast_sync_build_manifest_db(sqlite3 *db, struct sync_manifest *out)
     /* Live manifests describe the current UTXO set, so block_hash remains
      * the current tip hash. peer_tip_height tells receivers whether that
      * anchor is finality-safe. */
-    sqlite3_prepare_v2(db,
-        "SELECT value FROM node_state WHERE key='tip_hash'",
-        -1, &s, NULL);
-    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-        const void *h = sqlite3_column_blob(s, 0);
-        if (h && sqlite3_column_bytes(s, 0) >= 32) {
-            memcpy(out->block_hash, h, 32);
-            memcpy(out->anchor_block_hash, h, 32);
-        }
-    }
-    sqlite3_finalize(s);
-
-    sqlite3_prepare_v2(db,
-        "SELECT chain_work FROM blocks WHERE hash=?",
-        -1, &s, NULL);
-    sqlite3_bind_blob(s, 1, out->block_hash, 32, SQLITE_STATIC);
-    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-        const void *cw = sqlite3_column_blob(s, 0);
-        if (cw && sqlite3_column_bytes(s, 0) >= 32)
-            memcpy(out->chain_work, cw, 32);
-    }
-    sqlite3_finalize(s);
+    GUARD(fast_sync_read_anchor_block(db, out->height, out->block_hash,
+                                      out->chain_work),
+          "sync", "build_manifest_db: no validated block at height %d",
+          out->height);
+    memcpy(out->anchor_block_hash, out->block_hash, 32);
     if (legacy_chain_rpc_get_chainwork(out->block_hash, out->chain_work)) {
         printf("Chunk manifest: chainwork refreshed from local zclassicd RPC\n");
     }

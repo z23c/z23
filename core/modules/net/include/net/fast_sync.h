@@ -160,7 +160,8 @@ static inline bool peer_supports_fast_sync(uint64_t services)
     return (services & NODE_ZCL23) != 0;
 }
 
-/* Build a snapshot offer from current chain state */
+/* Build a snapshot offer from current chain state. False when the offered
+ * height has no validated block row, rather than offering a zero block hash. */
 bool fast_sync_build_offer(const char *datadir,
                             struct snapshot_offer *offer);
 
