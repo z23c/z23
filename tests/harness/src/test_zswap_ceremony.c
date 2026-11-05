@@ -22,11 +22,14 @@
 #include "keys/key.h"
 #include "keys/key_io.h"
 #include "keys/pubkey.h"
+#include "script/sighashtype.h"
 #include "script/standard.h"
 #include "zswap/zswap_assembly.h"
 #include "zswap/zswap_ceremony.h"
 #include "zswap/zswap_quote.h"
 
+#include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -779,6 +782,694 @@ static int t_ceremony(void)
     return failures;
 }
 
+/* ── mutation-sweep gap tests ──────────────────────────────────────── */
+
+struct zsc_world {
+    struct zswap_quote_v1 ad;
+    struct zswap_buyer_accept buyer;
+    struct zswap_seller_accept seller;
+    struct zswap_accept_v1 accept;
+    struct zswap_partial_v1 partial;
+};
+
+/* The sealed fixture plus the accept and the seller's real partial. */
+static bool zsc_world_init(struct zsc_world *w)
+{
+    memset(w, 0, sizeof(*w));
+    struct zswap_assembly assembly;
+    if (!zsc_assembly(&w->ad, &w->buyer, &w->seller, &assembly)) return false;
+    zswap_assembly_free(&assembly);
+    uint8_t quote_root[32];
+    if (zswap_quote_root(&w->ad, quote_root) != ZSWAP_QUOTE_OK) return false;
+    w->accept.schema_version = ZSWAP_ACCEPT_VERSION;
+    memcpy(w->accept.quote_root, quote_root, 32);
+    w->accept.buyer = w->buyer;
+    struct privkey key;
+    zsc_key(&key, 0x31);
+    return zswap_ceremony_seller_build_partial(
+               &w->ad, &w->accept, &w->seller, &key, ZSC_BRANCH_ID, ZSC_NOW,
+               &w->partial, NULL) == ZSWAP_CEREMONY_OK;
+}
+
+static void zsc_put_u64(uint8_t *p, uint64_t v)
+{
+    for (size_t i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (8 * i));
+}
+
+/* ── error strings ─────────────────────────────────────────────────── */
+
+static int t_error_strings(void)
+{
+    int failures = 0;
+    static const struct { enum zswap_ceremony_error e; const char *s; } tab[] = {
+        { ZSWAP_CEREMONY_OK, "ok" },
+        { ZSWAP_CEREMONY_ERR_NULL, "null-argument" },
+        { ZSWAP_CEREMONY_ERR_VERSION, "schema-version" },
+        { ZSWAP_CEREMONY_ERR_WIRE_SIZE, "wire-size" },
+        { ZSWAP_CEREMONY_ERR_WIRE_MAGIC, "wire-magic" },
+        { ZSWAP_CEREMONY_ERR_ROOT_ZERO, "root-zero" },
+        { ZSWAP_CEREMONY_ERR_ACCEPT, "accept-invalid" },
+        { ZSWAP_CEREMONY_ERR_INPUT_ORDER, "input-order-noncanonical" },
+        { ZSWAP_CEREMONY_ERR_PUBKEY, "pubkey-field-invalid" },
+        { ZSWAP_CEREMONY_ERR_SIG_FIELD, "signature-field-invalid" },
+        { ZSWAP_CEREMONY_ERR_SIGHASH_TYPE, "sighash-type-not-all" },
+        { ZSWAP_CEREMONY_ERR_AD, "ad-invalid" },
+        { ZSWAP_CEREMONY_ERR_EXPIRED, "ceremony-expired" },
+        { ZSWAP_CEREMONY_ERR_QUOTE_ROOT, "quote-root-mismatch" },
+        { ZSWAP_CEREMONY_ERR_DEADLINE, "deadline-mismatch" },
+        { ZSWAP_CEREMONY_ERR_ASSEMBLY_ROOT, "assembly-root-mismatch" },
+        { ZSWAP_CEREMONY_ERR_ASSEMBLY, "assembly-refused" },
+        { ZSWAP_CEREMONY_ERR_TERMS, "terms-mismatch" },
+        { ZSWAP_CEREMONY_ERR_SCRIPT_TYPE, "script-type-unsupported" },
+        { ZSWAP_CEREMONY_ERR_KEY_MISMATCH, "key-mismatch" },
+        { ZSWAP_CEREMONY_ERR_SIGNATURE, "signature-invalid" },
+        { ZSWAP_CEREMONY_ERR_SIGN, "signing-failed" },
+        { ZSWAP_CEREMONY_ERR_INPUT_INDEX, "input-index-out-of-range" },
+    };
+    for (size_t i = 0; i < sizeof(tab) / sizeof(tab[0]); i++) {
+        const char *got = zswap_ceremony_error_string(tab[i].e);
+        ZSC_CHECK(tab[i].s, got != NULL && strcmp(got, tab[i].s) == 0);
+    }
+    const char *past = zswap_ceremony_error_string(
+        (enum zswap_ceremony_error)(ZSWAP_CEREMONY_ERR_INPUT_INDEX + 1));
+    ZSC_CHECK("error string: one past the last is unknown",
+              past != NULL && strcmp(past, "unknown") == 0);
+    return failures;
+}
+
+/* ── accept validate + encode edges ────────────────────────────────── */
+
+static int t_accept_validate(void)
+{
+    int failures = 0;
+    struct zsc_world w;
+    ZSC_CHECK("av: world builds", zsc_world_init(&w));
+    if (failures) return failures;
+
+    struct zswap_accept_v1 a = w.accept;
+    ZSC_CHECK("av: valid accept", zswap_accept_validate(&a) == ZSWAP_CEREMONY_OK);
+    ZSC_CHECK("av: null", zswap_accept_validate(NULL) == ZSWAP_CEREMONY_ERR_NULL);
+    a.schema_version = 2;
+    ZSC_CHECK("av: wrong version",
+              zswap_accept_validate(&a) == ZSWAP_CEREMONY_ERR_VERSION);
+    a = w.accept;
+    memset(a.quote_root, 0, 32);
+    ZSC_CHECK("av: zero quote root",
+              zswap_accept_validate(&a) == ZSWAP_CEREMONY_ERR_ROOT_ZERO);
+    /* The byte after the root is padding: a root check that reads past the
+     * 32 bytes must not take it for root content. */
+    ((uint8_t *)&a)[offsetof(struct zswap_accept_v1, quote_root) + 32] = 0xff;
+    ZSC_CHECK("av: zero root stays zero beside nonzero padding",
+              zswap_accept_validate(&a) == ZSWAP_CEREMONY_ERR_ROOT_ZERO);
+    a = w.accept;
+    memset(a.quote_root, 0, 32);
+    a.quote_root[31] = 1;
+    ZSC_CHECK("av: root set only in its last byte is a root",
+              zswap_accept_validate(&a) == ZSWAP_CEREMONY_OK);
+    a = w.accept;
+    a.buyer.num_inputs = 0;
+    ZSC_CHECK("av: buyer terms refused",
+              zswap_accept_validate(&a) == ZSWAP_CEREMONY_ERR_ACCEPT);
+    return failures;
+}
+
+static int t_accept_encode_edges(void)
+{
+    int failures = 0;
+    struct zsc_world w;
+    ZSC_CHECK("ae: world builds", zsc_world_init(&w));
+    if (failures) return failures;
+
+    uint8_t buf[ZSWAP_ACCEPT_WIRE_MAX_BYTES];
+    size_t len = 0;
+    size_t need = zswap_accept_wire_size(&w.accept);
+    ZSC_CHECK("ae: encodes",
+              zswap_accept_encode(&w.accept, buf, sizeof(buf), &len) ==
+                  ZSWAP_CEREMONY_OK);
+    ZSC_CHECK("ae: wire size is the encoded length", len == need);
+    len = 0;
+    ZSC_CHECK("ae: capacity equal to the size is enough",
+              zswap_accept_encode(&w.accept, buf, need, &len) ==
+                  ZSWAP_CEREMONY_OK && len == need);
+    ZSC_CHECK("ae: one byte short is wire-size",
+              zswap_accept_encode(&w.accept, buf, need - 1, &len) ==
+                  ZSWAP_CEREMONY_ERR_WIRE_SIZE);
+    struct zswap_accept_v1 bad = w.accept;
+    bad.schema_version = 2;
+    ZSC_CHECK("ae: invalid accept names its error",
+              zswap_accept_encode(&bad, buf, sizeof(buf), &len) ==
+                  ZSWAP_CEREMONY_ERR_VERSION);
+    ZSC_CHECK("ae: null out",
+              zswap_accept_encode(&w.accept, NULL, sizeof(buf), &len) ==
+                  ZSWAP_CEREMONY_ERR_NULL);
+    return failures;
+}
+
+/* ── partial validate + encode edges ───────────────────────────────── */
+
+static int t_partial_validate_roots(void)
+{
+    int failures = 0;
+    struct zsc_world w;
+    ZSC_CHECK("pv: world builds", zsc_world_init(&w));
+    if (failures) return failures;
+
+    struct zswap_partial_v1 p = w.partial;
+    ZSC_CHECK("pv: valid partial",
+              zswap_partial_validate(&p) == ZSWAP_CEREMONY_OK);
+    ZSC_CHECK("pv: null",
+              zswap_partial_validate(NULL) == ZSWAP_CEREMONY_ERR_NULL);
+    p.schema_version = 2;
+    ZSC_CHECK("pv: wrong version",
+              zswap_partial_validate(&p) == ZSWAP_CEREMONY_ERR_VERSION);
+    /* Quote root zero with a live assembly root right after it. */
+    p = w.partial;
+    memset(p.quote_root, 0, 32);
+    ZSC_CHECK("pv: zero quote root",
+              zswap_partial_validate(&p) == ZSWAP_CEREMONY_ERR_ROOT_ZERO);
+    /* Assembly root zero with a live quote root, padding set after it. */
+    p = w.partial;
+    memset(p.assembly_root, 0, 32);
+    ((uint8_t *)&p)[offsetof(struct zswap_partial_v1, assembly_root) + 32] =
+        0xff;
+    ZSC_CHECK("pv: zero assembly root",
+              zswap_partial_validate(&p) == ZSWAP_CEREMONY_ERR_ROOT_ZERO);
+    p = w.partial;
+    memset(p.quote_root, 0, 32);
+    p.quote_root[31] = 1;
+    memset(p.assembly_root, 0, 32);
+    p.assembly_root[31] = 1;
+    ZSC_CHECK("pv: roots set only in their last byte are roots",
+              zswap_partial_validate(&p) == ZSWAP_CEREMONY_OK);
+    p = w.partial;
+    p.seller.token_input.value_sats = 0;
+    ZSC_CHECK("pv: seller terms refused",
+              zswap_partial_validate(&p) == ZSWAP_CEREMONY_ERR_ACCEPT);
+    return failures;
+}
+
+static int t_partial_validate_pubkey(void)
+{
+    int failures = 0;
+    struct zsc_world w;
+    ZSC_CHECK("pk: world builds", zsc_world_init(&w));
+    if (failures) return failures;
+
+    struct zswap_partial_v1 p = w.partial;
+    p.seller_pubkey[0] = 0x02;
+    ZSC_CHECK("pk: prefix 02 passes",
+              zswap_partial_validate(&p) == ZSWAP_CEREMONY_OK);
+    p.seller_pubkey[0] = 0x04;
+    ZSC_CHECK("pk: prefix 04 refused",
+              zswap_partial_validate(&p) == ZSWAP_CEREMONY_ERR_PUBKEY);
+    p.seller_pubkey[0] = 0x00;
+    ZSC_CHECK("pk: prefix 00 refused",
+              zswap_partial_validate(&p) == ZSWAP_CEREMONY_ERR_PUBKEY);
+    p = w.partial;
+    p.seller_pubkey[0] = 0x02;
+    memset(p.seller_pubkey + 1, 0, 32);
+    ZSC_CHECK("pk: all-zero x refused",
+              zswap_partial_validate(&p) == ZSWAP_CEREMONY_ERR_PUBKEY);
+    p.seller_pubkey[1] = 1;
+    ZSC_CHECK("pk: x set in its first byte only passes",
+              zswap_partial_validate(&p) == ZSWAP_CEREMONY_OK);
+    p.seller_pubkey[1] = 0;
+    p.seller_pubkey[32] = 1;
+    ZSC_CHECK("pk: x set in its last byte only passes",
+              zswap_partial_validate(&p) == ZSWAP_CEREMONY_OK);
+    return failures;
+}
+
+static int t_partial_validate_sig(void)
+{
+    int failures = 0;
+    struct zsc_world w;
+    ZSC_CHECK("sg: world builds", zsc_world_init(&w));
+    if (failures) return failures;
+
+    struct zswap_partial_v1 p = w.partial;
+    p.sig_len = 0;
+    ZSC_CHECK("sg: sig_len 0 refused",
+              zswap_partial_validate(&p) == ZSWAP_CEREMONY_ERR_SIG_FIELD);
+    p.sig_len = ZSWAP_SIG_MIN_BYTES - 1;
+    ZSC_CHECK("sg: sig_len below the minimum refused",
+              zswap_partial_validate(&p) == ZSWAP_CEREMONY_ERR_SIG_FIELD);
+    p.sig_len = ZSWAP_SIG_FIELD_BYTES + 1;
+    ZSC_CHECK("sg: sig_len above the field refused",
+              zswap_partial_validate(&p) == ZSWAP_CEREMONY_ERR_SIG_FIELD);
+    p = w.partial;
+    memset(p.signature, 0, sizeof(p.signature));
+    p.sig_len = ZSWAP_SIG_MIN_BYTES;
+    p.signature[ZSWAP_SIG_MIN_BYTES - 1] = SIGHASH_ALL;
+    ZSC_CHECK("sg: sig_len at the minimum passes",
+              zswap_partial_validate(&p) == ZSWAP_CEREMONY_OK);
+    memset(p.signature, 0, sizeof(p.signature));
+    p.sig_len = ZSWAP_SIG_FIELD_BYTES;
+    p.signature[ZSWAP_SIG_FIELD_BYTES - 1] = SIGHASH_ALL;
+    ZSC_CHECK("sg: sig_len at the field size passes",
+              zswap_partial_validate(&p) == ZSWAP_CEREMONY_OK);
+    /* Whatever follows the signature field is not signature padding. */
+    const size_t after = offsetof(struct zswap_partial_v1, signature) +
+                         ZSWAP_SIG_FIELD_BYTES;
+    if (after < sizeof(p)) {
+        ((uint8_t *)&p)[after] = 0xff;
+        ZSC_CHECK("sg: bytes past the field are not padding checked",
+                  zswap_partial_validate(&p) == ZSWAP_CEREMONY_OK);
+    }
+    return failures;
+}
+
+static int t_partial_encode_edges(void)
+{
+    int failures = 0;
+    struct zsc_world w;
+    ZSC_CHECK("pe: world builds", zsc_world_init(&w));
+    if (failures) return failures;
+
+    uint8_t buf[ZSWAP_PARTIAL_WIRE_MAX_BYTES];
+    size_t len = 0;
+    size_t need = zswap_partial_wire_size(&w.partial);
+    ZSC_CHECK("pe: encodes",
+              zswap_partial_encode(&w.partial, buf, sizeof(buf), &len) ==
+                  ZSWAP_CEREMONY_OK);
+    ZSC_CHECK("pe: wire size is the encoded length", len == need);
+    len = 0;
+    ZSC_CHECK("pe: capacity equal to the size is enough",
+              zswap_partial_encode(&w.partial, buf, need, &len) ==
+                  ZSWAP_CEREMONY_OK && len == need);
+    ZSC_CHECK("pe: one byte short is wire-size",
+              zswap_partial_encode(&w.partial, buf, need - 1, &len) ==
+                  ZSWAP_CEREMONY_ERR_WIRE_SIZE);
+    struct zswap_partial_v1 bad = w.partial;
+    bad.schema_version = 2;
+    ZSC_CHECK("pe: invalid partial names its error",
+              zswap_partial_encode(&bad, buf, sizeof(buf), &len) ==
+                  ZSWAP_CEREMONY_ERR_VERSION);
+    ZSC_CHECK("pe: null out",
+              zswap_partial_encode(&w.partial, NULL, sizeof(buf), &len) ==
+                  ZSWAP_CEREMONY_ERR_NULL);
+    return failures;
+}
+
+/* ── partial decode size boundaries ────────────────────────────────── */
+
+static int t_partial_decode_sizes(void)
+{
+    int failures = 0;
+    struct zsc_world w;
+    ZSC_CHECK("pd: world builds", zsc_world_init(&w));
+    if (failures) return failures;
+
+    /* The smallest legal partial: a one-byte token script. */
+    struct zswap_partial_v1 p = w.partial;
+    p.seller.token_input.script_len = 1;
+    uint8_t wire[ZSWAP_PARTIAL_WIRE_MAX_BYTES] = {0};
+    size_t len = 0;
+    ZSC_CHECK("pd: minimal partial encodes",
+              zswap_partial_encode(&p, wire, sizeof(wire), &len) ==
+                  ZSWAP_CEREMONY_OK);
+    struct zswap_partial_v1 out;
+    ZSC_CHECK("pd: minimal partial decodes",
+              zswap_partial_decode(wire, len, &out) == ZSWAP_CEREMONY_OK &&
+              out.seller.token_input.script_len == 1);
+
+    /* One byte smaller: the script length byte (offset 118) says zero. */
+    uint8_t shorter[ZSWAP_PARTIAL_WIRE_MAX_BYTES] = {0};
+    memcpy(shorter, wire, len);
+    shorter[118] = 0;
+    memmove(shorter + 119, shorter + 120, len - 120);
+    shorter[len - 1] = 0;
+    ZSC_CHECK("pd: one byte under the minimum is wire-size",
+              zswap_partial_decode(shorter, len - 1, &out) ==
+                  ZSWAP_CEREMONY_ERR_WIRE_SIZE);
+
+    /* A short wire never reaches the field parser: a bad version behind
+     * the magic must not be seen. */
+    uint8_t stub[ZSWAP_PARTIAL_WIRE_MAX_BYTES] = {0};
+    memcpy(stub, wire, 10);
+    stub[8] = 2;
+    ZSC_CHECK("pd: short wire is wire-size, not version",
+              zswap_partial_decode(stub, 20, &out) ==
+                  ZSWAP_CEREMONY_ERR_WIRE_SIZE);
+    return failures;
+}
+
+/* ── accept decode: size, count and truncation boundaries ──────────── */
+
+static int t_accept_decode_sizes(void)
+{
+    int failures = 0;
+    struct zsc_world w;
+    ZSC_CHECK("ad: world builds", zsc_world_init(&w));
+    if (failures) return failures;
+
+    uint8_t wire[ZSWAP_ACCEPT_WIRE_MAX_BYTES] = {0};
+    size_t len = 0;
+    ZSC_CHECK("ad: encodes",
+              zswap_accept_encode(&w.accept, wire, sizeof(wire), &len) ==
+                  ZSWAP_CEREMONY_OK);
+    struct zswap_accept_v1 out;
+    uint8_t cut[ZSWAP_ACCEPT_WIRE_MAX_BYTES] = {0};
+
+    memcpy(cut, wire, 43);
+    cut[42] = 0;
+    ZSC_CHECK("ad: zero inputs refused as accept",
+              zswap_accept_decode(cut, 43, &out) == ZSWAP_CEREMONY_ERR_ACCEPT);
+    cut[42] = 17;
+    ZSC_CHECK("ad: 17 inputs refused as accept",
+              zswap_accept_decode(cut, 43, &out) == ZSWAP_CEREMONY_ERR_ACCEPT);
+    cut[42] = 255;
+    ZSC_CHECK("ad: 255 inputs refused as accept",
+              zswap_accept_decode(cut, 43, &out) == ZSWAP_CEREMONY_ERR_ACCEPT);
+
+    memset(cut, 0, sizeof(cut));
+    memcpy(cut, wire, 10);
+    cut[8] = 2;
+    ZSC_CHECK("ad: short wire is wire-size, not version",
+              zswap_accept_decode(cut, 20, &out) ==
+                  ZSWAP_CEREMONY_ERR_WIRE_SIZE);
+    ZSC_CHECK("ad: null wire",
+              zswap_accept_decode(NULL, 0, &out) == ZSWAP_CEREMONY_ERR_NULL);
+    ZSC_CHECK("ad: null out",
+              zswap_accept_decode(wire, len, NULL) == ZSWAP_CEREMONY_ERR_NULL);
+
+    /* A single-input accept is legal. */
+    struct zswap_accept_v1 one = w.accept;
+    one.buyer.num_inputs = 1;
+    size_t one_len = 0;
+    ZSC_CHECK("ad: single input round trips",
+              zswap_accept_encode(&one, cut, sizeof(cut), &one_len) ==
+                  ZSWAP_CEREMONY_OK &&
+              zswap_accept_decode(cut, one_len, &out) == ZSWAP_CEREMONY_OK &&
+              out.buyer.num_inputs == 1);
+    return failures;
+}
+
+static int t_accept_decode_max(void)
+{
+    int failures = 0;
+    struct zsc_world w;
+    ZSC_CHECK("am: world builds", zsc_world_init(&w));
+    if (failures) return failures;
+
+    /* The largest legal accept: 16 inputs with 128-byte scripts is exactly
+     * ZSWAP_ACCEPT_WIRE_MAX_BYTES, and it must decode. */
+    struct zswap_accept_v1 a = w.accept;
+    memset(a.buyer.inputs, 0, sizeof(a.buyer.inputs));
+    uint8_t script[ZSWAP_MAX_INPUT_SCRIPT_BYTES];
+    memset(script, 0x51, sizeof(script));
+    for (size_t i = 0; i < ZSWAP_MAX_BUYER_INPUTS; i++)
+        zsc_fill_input(&a.buyer.inputs[i], (uint8_t)(0x10 + i), 0, 1000,
+                       script, ZSWAP_MAX_INPUT_SCRIPT_BYTES);
+    a.buyer.num_inputs = ZSWAP_MAX_BUYER_INPUTS;
+    uint8_t wire[ZSWAP_ACCEPT_WIRE_MAX_BYTES] = {0};
+    size_t len = 0;
+    ZSC_CHECK("am: maximal accept encodes to the maximum size",
+              zswap_accept_encode(&a, wire, sizeof(wire), &len) ==
+                  ZSWAP_CEREMONY_OK && len == ZSWAP_ACCEPT_WIRE_MAX_BYTES);
+    struct zswap_accept_v1 out;
+    ZSC_CHECK("am: maximal accept decodes",
+              zswap_accept_decode(wire, len, &out) == ZSWAP_CEREMONY_OK &&
+              out.buyer.num_inputs == ZSWAP_MAX_BUYER_INPUTS);
+    return failures;
+}
+
+static enum zswap_ceremony_error zsc_decode_cut(const uint8_t *wire,
+                                                size_t len)
+{
+    uint8_t buf[ZSWAP_ACCEPT_WIRE_MAX_BYTES] = {0};
+    struct zswap_accept_v1 out;
+    memcpy(buf, wire, len);
+    return zswap_accept_decode(buf, len, &out);
+}
+
+static int t_accept_decode_truncation(void)
+{
+    int failures = 0;
+    struct zsc_world w;
+    ZSC_CHECK("at: world builds", zsc_world_init(&w));
+    if (failures) return failures;
+
+    uint8_t wire[ZSWAP_ACCEPT_WIRE_MAX_BYTES] = {0};
+    size_t len = 0;
+    ZSC_CHECK("at: encodes",
+              zswap_accept_encode(&w.accept, wire, sizeof(wire), &len) ==
+                  ZSWAP_CEREMONY_OK && len == 327);
+    /* Each cut is followed by zeros in the buffer, not the rest of the wire. */
+    ZSC_CHECK("at: cut after the addresses",
+              zsc_decode_cut(wire, len - 16) == ZSWAP_CEREMONY_ERR_WIRE_SIZE);
+    ZSC_CHECK("at: cut after the fee",
+              zsc_decode_cut(wire, len - 8) == ZSWAP_CEREMONY_ERR_WIRE_SIZE);
+    ZSC_CHECK("at: cut inside the second input txid",
+              zsc_decode_cut(wire, 43 + 70 + 20) ==
+                  ZSWAP_CEREMONY_ERR_WIRE_SIZE);
+    ZSC_CHECK("at: cut inside the first input script",
+              zsc_decode_cut(wire, 43 + 45 + 10) ==
+                  ZSWAP_CEREMONY_ERR_WIRE_SIZE);
+    /* Script length 200 with only the terms' 144 bytes left. */
+    uint8_t lie[ZSWAP_ACCEPT_WIRE_MAX_BYTES] = {0};
+    memcpy(lie, wire, 43 + 44);
+    lie[43 + 44] = 200;
+    ZSC_CHECK("at: script length past the end",
+              zsc_decode_cut(lie, 43 + 44 + 1 + 144) ==
+                  ZSWAP_CEREMONY_ERR_WIRE_SIZE);
+    return failures;
+}
+
+/* ── accept decode: numeric field limits ───────────────────────────── */
+
+static enum zswap_ceremony_error zsc_decode_patched(const uint8_t *wire,
+                                                    size_t len, size_t off,
+                                                    uint64_t v)
+{
+    uint8_t buf[ZSWAP_ACCEPT_WIRE_MAX_BYTES] = {0};
+    struct zswap_accept_v1 out;
+    memcpy(buf, wire, len);
+    zsc_put_u64(buf + off, v);
+    return zswap_accept_decode(buf, len, &out);
+}
+
+static int t_accept_decode_limits(void)
+{
+    int failures = 0;
+    struct zsc_world w;
+    ZSC_CHECK("al: world builds", zsc_world_init(&w));
+    if (failures) return failures;
+
+    uint8_t wire[ZSWAP_ACCEPT_WIRE_MAX_BYTES] = {0};
+    size_t len = 0;
+    ZSC_CHECK("al: encodes",
+              zswap_accept_encode(&w.accept, wire, sizeof(wire), &len) ==
+                  ZSWAP_CEREMONY_OK);
+    const uint64_t i64max = (uint64_t)INT64_MAX;
+    const size_t value_off = 43 + 32 + 4;
+    const size_t fee_off = len - 16;
+    const size_t deadline_off = len - 8;
+    ZSC_CHECK("al: input value 0 refused",
+              zsc_decode_patched(wire, len, value_off, 0) ==
+                  ZSWAP_CEREMONY_ERR_ACCEPT);
+    ZSC_CHECK("al: input value 1 accepted",
+              zsc_decode_patched(wire, len, value_off, 1) == ZSWAP_CEREMONY_OK);
+    ZSC_CHECK("al: input value INT64_MAX accepted",
+              zsc_decode_patched(wire, len, value_off, i64max) ==
+                  ZSWAP_CEREMONY_OK);
+    ZSC_CHECK("al: input value INT64_MAX+1 refused",
+              zsc_decode_patched(wire, len, value_off, i64max + 1) ==
+                  ZSWAP_CEREMONY_ERR_ACCEPT);
+    ZSC_CHECK("al: fee INT64_MAX accepted",
+              zsc_decode_patched(wire, len, fee_off, i64max) ==
+                  ZSWAP_CEREMONY_OK);
+    ZSC_CHECK("al: fee INT64_MAX+1 refused",
+              zsc_decode_patched(wire, len, fee_off, i64max + 1) ==
+                  ZSWAP_CEREMONY_ERR_ACCEPT);
+    ZSC_CHECK("al: deadline INT64_MAX accepted",
+              zsc_decode_patched(wire, len, deadline_off, i64max) ==
+                  ZSWAP_CEREMONY_OK);
+    ZSC_CHECK("al: deadline INT64_MAX+1 refused",
+              zsc_decode_patched(wire, len, deadline_off, i64max + 1) ==
+                  ZSWAP_CEREMONY_ERR_ACCEPT);
+    return failures;
+}
+
+/* ── accept decode: output wipe on refusal ─────────────────────────── */
+
+static int t_accept_decode_wipe(void)
+{
+    int failures = 0;
+    struct zsc_world w;
+    ZSC_CHECK("aw: world builds", zsc_world_init(&w));
+    if (failures) return failures;
+
+    uint8_t wire[ZSWAP_ACCEPT_WIRE_MAX_BYTES] = {0};
+    size_t len = 0;
+    ZSC_CHECK("aw: encodes",
+              zswap_accept_encode(&w.accept, wire, sizeof(wire), &len) ==
+                  ZSWAP_CEREMONY_OK);
+    static const struct zswap_accept_v1 zero_accept = {0};
+    struct zswap_accept_v1 out;
+
+    uint8_t bad[ZSWAP_ACCEPT_WIRE_MAX_BYTES] = {0};
+    memcpy(bad, wire, len);
+    bad[0] ^= 0xff;
+    memset(&out, 0xa5, sizeof(out));
+    ZSC_CHECK("aw: bad magic zeroes a dirty out",
+              zswap_accept_decode(bad, len, &out) ==
+                  ZSWAP_CEREMONY_ERR_WIRE_MAGIC &&
+              memcmp(&out, &zero_accept, sizeof(out)) == 0);
+
+    /* Duplicate outpoint: record 1 overwritten with record 0. */
+    memcpy(bad, wire, len);
+    memcpy(bad + 43 + 70, bad + 43, 70);
+    memset(&out, 0xa5, sizeof(out));
+    ZSC_CHECK("aw: duplicate outpoint refused and wiped",
+              zswap_accept_decode(bad, len, &out) ==
+                  ZSWAP_CEREMONY_ERR_INPUT_ORDER &&
+              memcmp(&out, &zero_accept, sizeof(out)) == 0);
+
+    /* Fee past INT64_MAX: refused by the terms range check and wiped. */
+    memcpy(bad, wire, len);
+    zsc_put_u64(bad + len - 16, (uint64_t)INT64_MAX + 1);
+    memset(&out, 0xa5, sizeof(out));
+    ZSC_CHECK("aw: oversize fee refused and wiped",
+              zswap_accept_decode(bad, len, &out) ==
+                  ZSWAP_CEREMONY_ERR_ACCEPT &&
+              memcmp(&out, &zero_accept, sizeof(out)) == 0);
+
+    /* Success: the inputs the wire did not carry stay zero. */
+    static const struct zswap_swap_input zero_inputs[ZSWAP_MAX_BUYER_INPUTS] = {0};
+    memset(&out, 0xa5, sizeof(out));
+    ZSC_CHECK("aw: unused input slots are zero after a good decode",
+              zswap_accept_decode(wire, len, &out) == ZSWAP_CEREMONY_OK &&
+              memcmp(&out.buyer.inputs[2], zero_inputs,
+                     (ZSWAP_MAX_BUYER_INPUTS - 2) * sizeof(zero_inputs[0])) ==
+                  0);
+    return failures;
+}
+
+/* ── canonical input order across txid and vout ────────────────────── */
+
+/* A buyer accept whose two inputs carry the given outpoints. */
+static bool zsc_buyer_pair(struct zswap_buyer_accept *b,
+                           uint8_t last_a, uint32_t vout_a,
+                           uint8_t last_b, uint32_t vout_b)
+{
+    if (!zsc_buyer(b)) return false;
+    uint8_t script[25];
+    memcpy(script, b->inputs[0].script_pub_key, 25);
+    zsc_fill_input(&b->inputs[0], 0x50, vout_a, ZSC_BUYER_IN_A_VALUE,
+                   script, 25);
+    zsc_fill_input(&b->inputs[1], 0x50, vout_b, ZSC_BUYER_IN_B_VALUE,
+                   script, 25);
+    b->inputs[0].txid[31] = last_a;
+    b->inputs[1].txid[31] = last_b;
+    return true;
+}
+
+static size_t zsc_pair_wire(const struct zswap_buyer_accept *b, uint8_t *wire)
+{
+    struct zswap_accept_v1 a;
+    memset(&a, 0, sizeof(a));
+    a.schema_version = ZSWAP_ACCEPT_VERSION;
+    memset(a.quote_root, 0x77, 32);
+    a.buyer = *b;
+    size_t len = 0;
+    if (zswap_accept_encode(&a, wire, ZSWAP_ACCEPT_WIRE_MAX_BYTES, &len) !=
+        ZSWAP_CEREMONY_OK)
+        return 0;
+    return len;
+}
+
+static void zsc_swap_records(uint8_t *wire)
+{
+    uint8_t save[70];
+    memcpy(save, wire + 43, 70);
+    memcpy(wire + 43, wire + 43 + 70, 70);
+    memcpy(wire + 43 + 70, save, 70);
+}
+
+static int t_accept_decode_order(void)
+{
+    int failures = 0;
+    uint8_t wire[ZSWAP_ACCEPT_WIRE_MAX_BYTES] = {0};
+    struct zswap_buyer_accept b;
+
+    /* Same txid, vouts 1 and 256: the low vout byte alone would order them
+     * the wrong way round, so the whole vout must compare. The scratch
+     * words in front are all-ones so a stray read below the inputs would
+     * see a huge vout. */
+    struct { uint8_t pre[512]; struct zswap_accept_v1 a; } slot;
+    memset(slot.pre, 0xff, sizeof(slot.pre));
+    ZSC_CHECK("ao: same-txid pair builds", zsc_buyer_pair(&b, 0x6f, 256, 0x6f, 1));
+    size_t len = zsc_pair_wire(&b, wire);
+    ZSC_CHECK("ao: same-txid vouts 1 then 256 decode in order",
+              len > 0 &&
+              zswap_accept_decode(wire, len, &slot.a) == ZSWAP_CEREMONY_OK &&
+              slot.a.buyer.inputs[0].vout == 1 &&
+              slot.a.buyer.inputs[1].vout == 256);
+    zsc_swap_records(wire);
+    ZSC_CHECK("ao: same-txid vouts 256 then 1 refused",
+              zswap_accept_decode(wire, len, &slot.a) ==
+                  ZSWAP_CEREMONY_ERR_INPUT_ORDER);
+
+    /* Txids that differ only in the last byte decide before the vouts. */
+    ZSC_CHECK("ao: last-byte pair builds", zsc_buyer_pair(&b, 0x10, 5, 0x11, 0));
+    len = zsc_pair_wire(&b, wire);
+    struct zswap_accept_v1 out;
+    ZSC_CHECK("ao: lower last txid byte first decodes",
+              len > 0 && zswap_accept_decode(wire, len, &out) ==
+                             ZSWAP_CEREMONY_OK);
+    zsc_swap_records(wire);
+    ZSC_CHECK("ao: higher last txid byte first refused",
+              zswap_accept_decode(wire, len, &out) ==
+                  ZSWAP_CEREMONY_ERR_INPUT_ORDER);
+    return failures;
+}
+
+/* The seller verifies and the buyer re-verifies with the inputs listed in
+ * the given order; both must land on the canonical sort. */
+static bool zsc_ceremony_with_buyer(const struct zswap_buyer_accept *buyer)
+{
+    struct zsc_world w;
+    if (!zsc_world_init(&w)) return false;
+    w.accept.buyer = *buyer;
+    struct privkey key;
+    zsc_key(&key, 0x31);
+    struct zswap_partial_v1 p;
+    if (zswap_ceremony_seller_build_partial(&w.ad, &w.accept, &w.seller, &key,
+                                            ZSC_BRANCH_ID, ZSC_NOW, &p,
+                                            NULL) != ZSWAP_CEREMONY_OK)
+        return false;
+    struct transaction tx;
+    if (zswap_ceremony_buyer_verify_partial(&w.ad, &w.accept, &p,
+                                            ZSC_BRANCH_ID, ZSC_NOW, &tx) !=
+        ZSWAP_CEREMONY_OK)
+        return false;
+    transaction_free(&tx);
+    return true;
+}
+
+static int t_ceremony_input_sort(void)
+{
+    int failures = 0;
+    struct zswap_buyer_accept b;
+    ZSC_CHECK("cs: vouts ascending",
+              zsc_buyer_pair(&b, 0x6f, 1, 0x6f, 5) &&
+              zsc_ceremony_with_buyer(&b));
+    ZSC_CHECK("cs: vouts descending",
+              zsc_buyer_pair(&b, 0x6f, 5, 0x6f, 1) &&
+              zsc_ceremony_with_buyer(&b));
+    ZSC_CHECK("cs: vout 256 listed before vout 1",
+              zsc_buyer_pair(&b, 0x6f, 256, 0x6f, 1) &&
+              zsc_ceremony_with_buyer(&b));
+    ZSC_CHECK("cs: txids differing in the last byte, ascending",
+              zsc_buyer_pair(&b, 0x10, 9, 0x11, 0) &&
+              zsc_ceremony_with_buyer(&b));
+    ZSC_CHECK("cs: txids differing in the last byte, descending",
+              zsc_buyer_pair(&b, 0x11, 0, 0x10, 9) &&
+              zsc_ceremony_with_buyer(&b));
+    return failures;
+}
+
 int test_zswap_ceremony(void)
 {
     printf("\n=== zswap_ceremony: swap assembly + ceremony wires ===\n");
@@ -788,6 +1479,21 @@ int test_zswap_ceremony(void)
     failures += t_assembly_negatives();
     failures += t_wire_negatives();
     failures += t_ceremony();
+    failures += t_error_strings();
+    failures += t_accept_validate();
+    failures += t_accept_encode_edges();
+    failures += t_partial_validate_roots();
+    failures += t_partial_validate_pubkey();
+    failures += t_partial_validate_sig();
+    failures += t_partial_encode_edges();
+    failures += t_partial_decode_sizes();
+    failures += t_accept_decode_sizes();
+    failures += t_accept_decode_max();
+    failures += t_accept_decode_truncation();
+    failures += t_accept_decode_limits();
+    failures += t_accept_decode_wipe();
+    failures += t_accept_decode_order();
+    failures += t_ceremony_input_sort();
     printf("=== zswap_ceremony complete: %d failure(s) ===\n", failures);
     return failures;
 }
