@@ -412,6 +412,7 @@ static int re_check_imported_snapshot_authority(
 struct re_ev {
     int pages;
     uint32_t peer;
+    uint32_t sync_peer;
     char last[256];
     int syncs;
     char sync[256];
@@ -429,6 +430,7 @@ static void re_ev_obs(enum event_type type, uint32_t peer,
         dst = g_re_ev.last;
     } else {
         g_re_ev.syncs++;
+        g_re_ev.sync_peer = peer;
     }
     uint32_t n = !payload ? 0 : (len < 255 ? len : 255);
     if (n)
@@ -456,30 +458,34 @@ static bool re_paged(const char *reason, int tip_h)
            strcmp(g_re_ev.last, want) == 0;
 }
 
-/* Capture stdout+stderr through a pipe (output here is tiny). Where capture
- * is unavailable the text checks pass vacuously. */
+/* Capture stdout+stderr into a file inside the fixture's throwaway dir, then
+ * read it back whole. A file never blocks the writer, whatever the log level
+ * prints during the run. Where capture is unavailable the text checks pass
+ * vacuously. */
 static bool g_re_cap_live;
+
+enum { RE_OUT_CAP = 1 << 20 };
+static char g_re_out[RE_OUT_CAP];
 
 #ifndef _WIN32
 #include <fcntl.h>
 
-struct re_cap { int saved_out, saved_err, rd; };
+struct re_cap { int saved_out, saved_err; char path[400]; };
 
-static bool re_cap_begin(struct re_cap *c)
+static bool re_cap_begin(struct re_cap *c, const char *dir)
 {
-    int p[2];
     fflush(stdout);
     fflush(stderr);
-    g_re_cap_live = pipe(p) == 0;
+    snprintf(c->path, sizeof(c->path), "%s/capture.txt", dir);
+    int fd = open(c->path, O_CREAT | O_TRUNC | O_WRONLY, 0600);
+    g_re_cap_live = fd >= 0;
     if (!g_re_cap_live)
         return false;
-    (void)fcntl(p[0], F_SETFL, O_NONBLOCK);
     c->saved_out = dup(1);
     c->saved_err = dup(2);
-    (void)dup2(p[1], 1);
-    (void)dup2(p[1], 2);
-    close(p[1]);
-    c->rd = p[0];
+    (void)dup2(fd, 1);
+    (void)dup2(fd, 2);
+    close(fd);
     return true;
 }
 
@@ -492,17 +498,19 @@ static void re_cap_end(struct re_cap *c, char *buf, size_t cap)
     close(c->saved_out);
     close(c->saved_err);
     size_t n = 0;
+    int fd = open(c->path, O_RDONLY);
     ssize_t r;
-    while (n + 1 < cap && (r = read(c->rd, buf + n, cap - 1 - n)) > 0)
+    while (fd >= 0 && n + 1 < cap && (r = read(fd, buf + n, cap - 1 - n)) > 0)
         n += (size_t)r;
     buf[n] = '\0';
-    close(c->rd);
+    if (fd >= 0)
+        close(fd);
 }
 #else
 struct re_cap { int unused; };
-static bool re_cap_begin(struct re_cap *c)
+static bool re_cap_begin(struct re_cap *c, const char *dir)
 {
-    (void)c;
+    (void)c; (void)dir;
     g_re_cap_live = false;
     return false;
 }
@@ -512,8 +520,6 @@ static void re_cap_end(struct re_cap *c, char *buf, size_t cap)
     buf[0] = '\0';
 }
 #endif
-
-enum { RE_OUT_CAP = 8192 };
 
 static bool re_has(const char *out, const char *token)
 {
@@ -856,16 +862,16 @@ static int re_gap_clamp_write_fails(void)
 {
     int failures = 0;
     struct re_gap g;
-    char out[RE_OUT_CAP];
+    char *out = g_re_out;
     struct re_cap c;
     RE_CHECK("gap/clamp: fixture",
              re_gap_open(&g, "clampw", RE_GAP_TIP, true, false));
     RE_CHECK("gap/clamp: write-blocking trigger installs",
              re_gap_applied_trigger(g.pdb, true,
                                     "SELECT RAISE(ABORT,'re');"));
-    re_cap_begin(&c);
+    re_cap_begin(&c, g.dir);
     bool r = re_snap(&g);
-    if (g_re_cap_live) re_cap_end(&c, out, sizeof(out)); else out[0] = '\0';
+    if (g_re_cap_live) re_cap_end(&c, out, RE_OUT_CAP); else out[0] = '\0';
     failures += re_gap_check_clamp_refusal(
         &g, "gap/clamp: a failed applied-height write is refused and paged",
         r, out);
@@ -883,7 +889,7 @@ static int re_gap_clamp_commit_fails(void)
 {
     int failures = 0;
     struct re_gap g;
-    char out[RE_OUT_CAP];
+    char *out = g_re_out;
     struct re_cap c;
     RE_CHECK("gap/clamp: fixture",
              re_gap_open(&g, "clampc", RE_GAP_TIP, true, false));
@@ -896,9 +902,9 @@ static int re_gap_clamp_commit_fails(void)
     RE_CHECK("gap/clamp: orphan-inserting trigger installs",
              re_gap_applied_trigger(g.pdb, false,
                                     "INSERT INTO re_fk_child VALUES(9);"));
-    re_cap_begin(&c);
+    re_cap_begin(&c, g.dir);
     bool r = re_snap(&g);
-    if (g_re_cap_live) re_cap_end(&c, out, sizeof(out)); else out[0] = '\0';
+    if (g_re_cap_live) re_cap_end(&c, out, RE_OUT_CAP); else out[0] = '\0';
     failures += re_gap_check_clamp_refusal(
         &g, "gap/clamp: a failed COMMIT is refused and paged", r, out);
     RE_CHECK("gap/clamp: the failed transaction's rows were rolled back",
@@ -913,7 +919,7 @@ static int re_gap_success_effects(void)
 {
     int failures = 0;
     struct re_gap g;
-    char out[RE_OUT_CAP], want[256];
+    char *out = g_re_out, want[256];
     struct re_cap c;
     struct utxo_commitment stale, fresh, got;
     RE_CHECK("gap/ok: fixture",
@@ -922,9 +928,9 @@ static int re_gap_success_effects(void)
     stale.count = 99;
     RE_CHECK("gap/ok: stale XOR checkpoint planted",
              utxo_commitment_save_checkpoint(g.ndb.db, &stale));
-    re_cap_begin(&c);
+    re_cap_begin(&c, g.dir);
     bool r = re_snap(&g);
-    if (g_re_cap_live) re_cap_end(&c, out, sizeof(out)); else out[0] = '\0';
+    if (g_re_cap_live) re_cap_end(&c, out, RE_OUT_CAP); else out[0] = '\0';
     RE_CHECK("gap/ok: derives", r);
     utxo_commitment_compute_db(g.ndb.db, &fresh);
     RE_CHECK("gap/ok: XOR checkpoint recomputed over the mirror",
@@ -948,10 +954,36 @@ static int re_gap_success_effects(void)
     snprintf(want, sizeof(want),
              "utxo_authority_epilogue source=snapshot_import tip=%d count=3",
              g.tip);
-    RE_CHECK("gap/ok: exactly one sync-state event with source, tip, count",
-             g_re_ev.syncs == 1 && strcmp(g_re_ev.sync, want) == 0);
+    RE_CHECK("gap/ok: one sync-state event, to peer 0, with source, tip, count",
+             g_re_ev.syncs == 1 && g_re_ev.sync_peer == 0 &&
+             strcmp(g_re_ev.sync, want) == 0);
     RE_CHECK("gap/ok: success pages nothing", g_re_ev.pages == 0);
     RE_CHECK("gap/ok: lock released", re_lock_free());
+    re_gap_close(&g);
+    return failures;
+}
+
+static int re_gap_stamp_refused(void)
+{
+    int failures = 0;
+    struct re_gap g;
+    RE_CHECK("gap/stamp: fixture",
+             re_gap_open(&g, "stamp", RE_GAP_TIP, true, false));
+    RE_CHECK("gap/stamp: stamp-blocking trigger installs",
+             re_sql(g.ndb.db,
+                    "CREATE TRIGGER re_stamp BEFORE INSERT ON node_state "
+                    "WHEN NEW.key='utxo_sha3' "
+                    "BEGIN SELECT RAISE(ABORT,'re'); END"));
+    bool r = re_snap(&g);
+    RE_CHECK("gap/stamp: a failed commitment stamp is refused and paged",
+             !r && re_paged("utxo_sha3_stamp_failed", g.tip));
+    RE_CHECK("gap/stamp: nothing past the stamp ran (no applied height)",
+             re_applied(g.pdb) == -1);
+    RE_CHECK("gap/stamp: lock released", re_lock_free());
+    RE_CHECK("gap/stamp: trigger drops",
+             re_sql(g.ndb.db, "DROP TRIGGER re_stamp"));
+    r = re_snap(&g);
+    RE_CHECK("gap/stamp: a rerun after the refusal derives", r);
     re_gap_close(&g);
     return failures;
 }
@@ -960,7 +992,7 @@ static int re_gap_best_block_nonfatal(void)
 {
     int failures = 0;
     struct re_gap g;
-    char out[RE_OUT_CAP];
+    char *out = g_re_out;
     struct re_cap c;
     uint8_t best[40];
     size_t blen = 0;
@@ -971,9 +1003,9 @@ static int re_gap_best_block_nonfatal(void)
                     "CREATE TRIGGER re_bb BEFORE INSERT ON node_state "
                     "WHEN NEW.key='coins_best_block' "
                     "BEGIN SELECT RAISE(ABORT,'re'); END"));
-    re_cap_begin(&c);
+    re_cap_begin(&c, g.dir);
     bool r = re_snap(&g);
-    if (g_re_cap_live) re_cap_end(&c, out, sizeof(out)); else out[0] = '\0';
+    if (g_re_cap_live) re_cap_end(&c, out, RE_OUT_CAP); else out[0] = '\0';
     RE_CHECK("gap/cache: a failed cache write does not fail the epilogue", r);
     RE_CHECK("gap/cache: the failure is logged as a warning",
              re_has(out, "coins_best_block cache write failed"));
@@ -1119,6 +1151,7 @@ static int re_mutation_gap_tests(void)
     failures += re_gap_clamp_write_fails();
     failures += re_gap_clamp_commit_fails();
     failures += re_gap_success_effects();
+    failures += re_gap_stamp_refused();
     failures += re_gap_best_block_nonfatal();
     failures += re_gap_schema_ensure_refused();
     failures += re_gap_seed_anchor_refused();
