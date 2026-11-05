@@ -4,9 +4,9 @@
  *
  * Every verdict the walk finishes must stay what it always was, and no long
  * chain of unsettled ancestors may stop the backfill or cost more than a
- * bounded amount of work per transaction. A walk the
- * bound refuses leaves the transaction UNKNOWN and resolvable, and the ledger
- * does not depend on whether a height was interrupted and applied again.
+ * bounded amount of work per transaction. A transaction whose walk still does
+ * not fit once its height has settled stays UNKNOWN, and the ledger does not
+ * depend on whether a height was interrupted and applied again.
  *
  * Entry point: zslp_validity_walk_tests(), called from test_zslp_ledger().
  * Hermetic: each case builds its own in-memory node.db from seeded
@@ -38,7 +38,7 @@ int zslp_validity_walk_tests(void);
 /* Thread sizes for the cases: a common process default, not a promise about any
  * node's limits; a small one; and a large one that lets the pinned fixture
  * finish as it always could. */
-#define WK_THREAD_DEFAULT  ((size_t)8 * 1024 * 1024)
+#define WK_THREAD_DEFAULT ((size_t)8 * 1024 * 1024)
 #define WK_THREAD_SMALL ((size_t)1024 * 1024)
 #define WK_THREAD_LARGE ((size_t)512 * 1024 * 1024)
 
@@ -58,9 +58,13 @@ enum {
     WK_DEEP_CHAIN = 0x30, WK_GENESIS_DEEP = 0x31, WK_MINT = 0x32,
     WK_FORGED_MINT = 0x33, WK_GENESIS_BATON = 0x34, WK_OVERFULL = 0x35,
     WK_PLAIN_PARENT = 0x36, WK_DIAMOND = 0x37, WK_DIAMOND_PARENT = 0x38,
-    WK_GENESIS_DIAMOND = 0x39, WK_MALFORMED = 0x3A,
+    WK_GENESIS_DIAMOND = 0x39, WK_MALFORMED = 0x3A, WK_LONE = 0x3B,
+    WK_HELD = 0x3C, WK_HELD_TWICE = 0x3D,
     WK_WIDE = 0x40, WK_WIDE_GENESIS = 0x41, WK_WIDE_PARENT = 0x42,
     WK_WIDE_CHILD = 0x43, WK_MANY_EDGES = 0x44, WK_EDGE_PARENT = 0x45,
+    WK_LONE_GENESIS = 0x46, WK_LONE_PARENT = 0x47, WK_LONE_SPENDER = 0x48,
+    WK_HELD_GENESIS = 0x49, WK_HELD_PARENT = 0x4A, WK_HELD_CHAIN = 0x4B,
+    WK_HELD_ROOT = 0x4C,
     WK_CYCLE_A = 0x50, WK_CYCLE_B = 0x51, WK_SELF_LOOP = 0x52
 };
 
@@ -619,7 +623,7 @@ static bool wk_child_deep_on_small_thread(void)
         return false;
     wk_seed_chain(&ndb, 1, WK_GENESIS_DEEP, WK_DEEP_CHAIN, WK_DEEP_LEVELS);
     return wk_backfill_to_tip(&ndb, WK_THREAD_SMALL, 1) &&
-           wk_is(&ndb, WK_DEEP_CHAIN, WK_LEVEL_TOP - WK_DEEP_RESOLVED_LEVELS,
+           wk_is(&ndb, WK_DEEP_CHAIN, WK_LEVEL_TOP - WK_DEEP_LEVELS,
                  ZSLP_VALIDITY_VALID, "valid_send");
 }
 
@@ -689,9 +693,9 @@ static int wk_case_double_inputs(void)
     return failures;
 }
 
-/* T spends more unsettled parents than one walk may judge. Its parents still
- * settle on their own turn in the height, and T settles when a later
- * transaction walks it. */
+/* T spends more unsettled parents than one walk may judge at its turn. Its
+ * parents settle on their own turn in the height, so T then fits and gets the
+ * verdict it always had. */
 static void wk_seed_wide(struct node_db *ndb, int height)
 {
     uint8_t wide[32], parent[32], genesis[32], child[32];
@@ -721,58 +725,203 @@ static int wk_case_wide(void)
     uint8_t digest[32] = {0};
     int failures = wk_check("wide height folds",
                             wk_fold(&ndb, WK_THREAD_LARGE, 0, 1, 0, digest));
-    failures += wk_check("a walk past the work bound is UNKNOWN, not a verdict",
-                         wk_is(&ndb, WK_WIDE, 0, ZSLP_VALIDITY_UNKNOWN,
-                               "ancestry_work_exceeded"));
+    failures += wk_check("a refused walk gets its old verdict in its own height",
+                         wk_is(&ndb, WK_WIDE, 0, ZSLP_VALIDITY_INVALID,
+                               "send_ancestry_invalid"));
     failures += wk_check("a GENESIS needs no ancestry to be judged",
                          wk_is(&ndb, WK_WIDE_GENESIS, 0, ZSLP_VALIDITY_VALID,
                                "valid_genesis"));
     failures += wk_check("parents of a refused walk settle on their own turn",
                          wk_is(&ndb, WK_WIDE_PARENT, WK_WIDE_PARENTS - 1,
                                ZSLP_VALIDITY_VALID, "valid_genesis"));
-    failures += wk_check("a later walk settles the refused transaction",
+    failures += wk_check("a child of the refused transaction keeps that verdict",
                          wk_fold(&ndb, WK_THREAD_LARGE, 2, 2, 0, digest) &&
-                         wk_is(&ndb, WK_WIDE, 0, ZSLP_VALIDITY_INVALID,
-                               "send_ancestry_invalid") &&
                          wk_is(&ndb, WK_WIDE_CHILD, 0, ZSLP_VALIDITY_INVALID,
                                "send_ancestry_invalid"));
     node_db_close(&ndb);
     return failures;
 }
 
-/* Few parents, each with many plain inputs: the bound counts inputs too. */
-static int wk_case_many_edges(void)
+/* A SEND that would be VALID, past the bound at its turn and spent by nothing
+ * that walks it. A transaction without a token spends one of its outputs in the
+ * same height. */
+static void wk_seed_lone(struct node_db *ndb, int height)
+{
+    uint8_t lone[32], genesis[32], parent[32], spender[32];
+    uint64_t split[2] = {10, 5};
+    wk_txid(lone, WK_LONE, 0);
+    wk_txid(genesis, WK_LONE_GENESIS, 0);
+    wk_seed_genesis(ndb, genesis, height, 20, 0);
+    wk_seed_send(ndb, lone, height, genesis, split, 2);
+    wk_spend(ndb, lone, 0, genesis, 1, height);
+    for (uint32_t i = 0; i < WK_WIDE_PARENTS; i++) {
+        wk_txid(parent, WK_LONE_PARENT, i);
+        wk_seed_genesis(ndb, parent, height, 1, 0);
+        wk_spend(ndb, lone, (int)i + 1, parent, 5, height);
+    }
+    wk_txid(spender, WK_LONE_SPENDER, 0);
+    wk_spend(ndb, spender, 0, lone, 2, height);
+}
+
+static bool wk_outpoint_unspent(struct node_db *ndb, uint8_t family, int vout,
+                                bool want_unspent)
+{
+    uint8_t txid[32];
+    wk_txid(txid, family, 0);
+    sqlite3_stmt *s = NULL;
+    bool found = false, unspent = false;
+    if (sqlite3_prepare_v2(ndb->db,
+            "SELECT spent_by_txid IS NULL FROM zslp_ledger "
+            "WHERE txid=? AND vout=?", -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_blob(s, 1, txid, 32, SQLITE_STATIC);
+        sqlite3_bind_int(s, 2, vout);
+        if (sqlite3_step(s) == SQLITE_ROW) {  // raw-sql-ok:test-readonly-probe
+            found = true;
+            unspent = sqlite3_column_int(s, 0) != 0;
+        }
+    }
+    sqlite3_finalize(s);
+    return found && unspent == want_unspent;
+}
+
+static int wk_case_lone(void)
 {
     struct node_db ndb;
     memset(&ndb, 0, sizeof(ndb));
     if (!node_db_open(&ndb, ":memory:"))
-        return wk_check("input-bound fixture opens a database", false);
-    uint8_t top[32], parent[32], plain[32];
-    uint64_t one[1] = {1};
-    wk_txid(top, WK_MANY_EDGES, 0);
-    wk_seed_send(&ndb, top, 1, top, one, 1);
-    for (uint32_t p = 0; p < 20; p++) {
-        wk_txid(parent, WK_EDGE_PARENT, p);
-        wk_seed_send(&ndb, parent, 1, top, one, 1);
-        wk_spend(&ndb, top, (int)p, parent, 1, 1);
-        for (uint32_t i = 0; i < 1000; i++) {
-            wk_txid(plain, WK_PLAIN_PARENT, p * 1000 + i);
-            wk_spend(&ndb, parent, (int)i, plain, 0, 1);
-        }
+        return wk_check("lone fixture opens a database", false);
+    wk_seed_lone(&ndb, 1);
+    uint8_t digest[32] = {0};
+    int failures = wk_check("lone height folds",
+                            wk_fold(&ndb, WK_THREAD_LARGE, 0, 1, 0, digest));
+    failures += wk_check("a refused SEND with no descendant is VALID at its height",
+                         wk_is(&ndb, WK_LONE, 0, ZSLP_VALIDITY_VALID,
+                               "valid_send"));
+    failures += wk_check("its token input is spent",
+                         wk_outpoint_unspent(&ndb, WK_LONE_GENESIS, 1, false));
+    failures += wk_check("its output spent in the same height is spent",
+                         wk_outpoint_unspent(&ndb, WK_LONE, 2, false));
+    failures += wk_check("its other output is unspent",
+                         wk_outpoint_unspent(&ndb, WK_LONE, 1, true));
+    failures += wk_check("every other unspent output is a parent's own",
+                         zslp_ledger_unspent_count(&ndb) ==
+                             WK_WIDE_PARENTS + 1);
+    node_db_close(&ndb);
+    return failures;
+}
+
+/* T holds a real token input, but more parents than one walk may judge stay
+ * UNKNOWN, so nothing in the height can bring its walk within the bound. */
+static void wk_seed_held(struct node_db *ndb, int height)
+{
+    uint8_t held[32], genesis[32], parent[32];
+    uint64_t all[1] = {5};
+    wk_txid(held, WK_HELD, 0);
+    wk_txid(genesis, WK_HELD_GENESIS, 0);
+    wk_seed_genesis(ndb, genesis, height, 5, 0);
+    wk_seed_send(ndb, held, height, genesis, all, 1);
+    wk_spend(ndb, held, 0, genesis, 1, height);
+    for (uint32_t i = 0; i < WK_WIDE_PARENTS; i++) {
+        wk_txid(parent, WK_HELD_PARENT, i);
+        wk_seed_genesis(ndb, parent, height, WK_UNREPRESENTABLE, 0);
+        wk_spend(ndb, held, (int)i + 1, parent, 1, height);
     }
-    struct wk_counts counts;
-    bool folded = wk_fold_counted(&ndb, 1, &counts);
-    printf("zslp walk: input-heavy height ran %ld statements\n",
-           counts.statements);
-    int failures = wk_check("input-heavy height folds", folded);
-    failures += wk_check("a walk past the input bound is UNKNOWN",
-                         wk_is(&ndb, WK_MANY_EDGES, 0, ZSLP_VALIDITY_UNKNOWN,
+}
+
+/* T is past the work bound at its turn and past the depth cap once its other
+ * parents have settled. The reason it keeps is the one from its turn. */
+static void wk_seed_held_twice(struct node_db *ndb, int chain_height, int height)
+{
+    uint8_t held[32], root[32], parent[32], prev[32], tx[32];
+    uint64_t one[1] = {1};
+    wk_txid(root, WK_HELD_ROOT, 0);
+    wk_seed_genesis(ndb, root, chain_height, WK_UNREPRESENTABLE, 0);
+    memcpy(prev, root, 32);
+    for (uint32_t level = 1; level <= WK_DEEP_RESOLVED_LEVELS + 4; level++) {
+        wk_txid(tx, WK_HELD_CHAIN, WK_LEVEL_TOP - level);
+        wk_seed_send(ndb, tx, chain_height, root, one, 1);
+        wk_spend(ndb, tx, 0, prev, 1, chain_height);
+        memcpy(prev, tx, 32);
+    }
+    wk_txid(held, WK_HELD_TWICE, 0);
+    wk_seed_send(ndb, held, height, held, one, 1);
+    for (uint32_t i = 0; i < WK_WIDE_PARENTS; i++) {
+        wk_txid(parent, WK_LONE_PARENT, i);
+        wk_seed_genesis(ndb, parent, height, 1, 0);
+        wk_spend(ndb, held, (int)i, parent, 5, height);
+    }
+    wk_spend(ndb, held, WK_WIDE_PARENTS, prev, 1, height);
+}
+
+static int wk_case_held(void)
+{
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    if (!node_db_open(&ndb, ":memory:"))
+        return wk_check("held fixture opens a database", false);
+    wk_seed_held(&ndb, 1);
+    uint8_t digest[32] = {0};
+    int failures = wk_check("held height folds",
+                            wk_fold(&ndb, WK_THREAD_LARGE, 0, 1, 0, digest));
+    failures += wk_check("a walk still past the work bound stays UNKNOWN",
+                         wk_is(&ndb, WK_HELD, 0, ZSLP_VALIDITY_UNKNOWN,
                                "ancestry_work_exceeded"));
     node_db_close(&ndb);
     return failures;
 }
 
-/* ── Depth: past the cap is UNKNOWN and settles from a later walk ──── */
+/* Few parents, each with many plain inputs: the bound counts inputs too. */
+static void wk_seed_many_edges(struct node_db *ndb, bool parents_stay_unknown)
+{
+    uint8_t top[32], parent[32], plain[32];
+    uint64_t one[1] = {1};
+    wk_txid(top, WK_MANY_EDGES, 0);
+    wk_seed_send(ndb, top, 1, top, one, 1);
+    for (uint32_t p = 0; p < 20; p++) {
+        wk_txid(parent, WK_EDGE_PARENT, p);
+        if (parents_stay_unknown)
+            wk_seed_genesis(ndb, parent, 1, WK_UNREPRESENTABLE, 0);
+        else
+            wk_seed_send(ndb, parent, 1, top, one, 1);
+        wk_spend(ndb, top, (int)p, parent, 1, 1);
+        for (uint32_t i = 0; i < 1000; i++) {
+            wk_txid(plain, WK_PLAIN_PARENT, p * 1000 + i);
+            wk_spend(ndb, parent, (int)i, plain, 0, 1);
+        }
+    }
+}
+
+static int wk_case_many_edges_with(bool parents_stay_unknown,
+                                   enum zslp_validity_status status,
+                                   const char *reason)
+{
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    if (!node_db_open(&ndb, ":memory:"))
+        return wk_check("input-bound fixture opens a database", false);
+    wk_seed_many_edges(&ndb, parents_stay_unknown);
+    struct wk_counts counts;
+    bool folded = wk_fold_counted(&ndb, 1, &counts);
+    printf("zslp walk: input-heavy height ran %ld statements\n",
+           counts.statements);
+    int failures = wk_check("input-heavy height folds", folded);
+    failures += wk_check(parents_stay_unknown
+                             ? "a walk still past the input bound stays UNKNOWN"
+                             : "a walk past the input bound gets its old verdict",
+                         wk_is(&ndb, WK_MANY_EDGES, 0, status, reason));
+    node_db_close(&ndb);
+    return failures;
+}
+
+static int wk_case_many_edges(void)
+{
+    return wk_case_many_edges_with(false, ZSLP_VALIDITY_INVALID,
+                                   "send_ancestry_invalid") +
+           wk_case_many_edges_with(true, ZSLP_VALIDITY_UNKNOWN,
+                                   "ancestry_work_exceeded");
+}
+
+/* ── Depth: a chain past the cap settles in its own height ─────────── */
 
 static void wk_seed_deep_child(struct node_db *ndb, int height)
 {
@@ -785,7 +934,7 @@ static void wk_seed_deep_child(struct node_db *ndb, int height)
     wk_spend(ndb, child, 0, last, 1, height);
 }
 
-static int wk_case_deep_resolves_later(void)
+static int wk_case_deep_settles(void)
 {
     struct node_db ndb;
     memset(&ndb, 0, sizeof(ndb));
@@ -796,25 +945,22 @@ static int wk_case_deep_resolves_later(void)
     uint8_t digest[32] = {0};
     int failures = wk_check("deep chain height folds",
                             wk_fold(&ndb, WK_THREAD_LARGE, 0, 1, 0, digest));
-    failures += wk_check("a walk past the depth cap is UNKNOWN, not a verdict",
+    failures += wk_check("a chain past the depth cap is VALID at its own height",
                          wk_is(&ndb, WK_DEEP_CHAIN,
                                WK_LEVEL_TOP - WK_DEEP_LEVELS,
-                               ZSLP_VALIDITY_UNKNOWN,
-                               "ancestry_depth_exceeded"));
-    failures += wk_check("the first level past the cap is UNKNOWN",
+                               ZSLP_VALIDITY_VALID, "valid_send"));
+    failures += wk_check("the first level past the cap is VALID",
                          wk_is(&ndb, WK_DEEP_CHAIN,
                                WK_LEVEL_TOP - (WK_DEEP_RESOLVED_LEVELS + 1),
-                               ZSLP_VALIDITY_UNKNOWN,
-                               "ancestry_depth_exceeded"));
+                               ZSLP_VALIDITY_VALID, "valid_send"));
     failures += wk_check("the deepest chain within the cap is VALID",
                          wk_is(&ndb, WK_DEEP_CHAIN,
                                WK_LEVEL_TOP - WK_DEEP_RESOLVED_LEVELS,
                                ZSLP_VALIDITY_VALID, "valid_send"));
-    failures += wk_check("a later walk settles every refused level as VALID",
+    failures += wk_check("only the newest output of the height stays unspent",
+                         zslp_ledger_unspent_count(&ndb) == 1);
+    failures += wk_check("a later child is VALID",
                          wk_fold(&ndb, WK_THREAD_LARGE, 2, 2, 0, digest) &&
-                         wk_is(&ndb, WK_DEEP_CHAIN,
-                               WK_LEVEL_TOP - WK_DEEP_LEVELS,
-                               ZSLP_VALIDITY_VALID, "valid_send") &&
                          wk_is(&ndb, WK_WIDE_CHILD, 1, ZSLP_VALIDITY_VALID,
                                "valid_send"));
     failures += wk_check("exactly the newest output stays unspent",
@@ -823,9 +969,93 @@ static int wk_case_deep_resolves_later(void)
     return failures;
 }
 
+/* A chain past the depth cap whose lineage stays UNKNOWN, all in one height, and
+ * a child one height later: no walk from past the cap can ever fit. */
+static void wk_seed_deep_unknown(struct node_db *ndb)
+{
+    uint8_t huge[32], prev[32], tx[32];
+    uint64_t one[1] = {1};
+    wk_txid(huge, WK_GENESIS_HUGE, 0);
+    wk_seed_genesis(ndb, huge, 1, WK_UNREPRESENTABLE, 0);
+    memcpy(prev, huge, 32);
+    for (uint32_t level = 1; level <= WK_DEEP_LEVELS + 1; level++) {
+        wk_txid(tx, WK_UNKNOWN_SEND, WK_LEVEL_TOP - level);
+        int height = level <= WK_DEEP_LEVELS ? 1 : 2;
+        wk_seed_send(ndb, tx, height, huge, one, 1);
+        wk_spend(ndb, tx, 0, prev, 1, height);
+        memcpy(prev, tx, 32);
+    }
+}
+
+static int wk_case_deep_unknown(void)
+{
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    if (!node_db_open(&ndb, ":memory:"))
+        return wk_check("deep UNKNOWN fixture opens a database", false);
+    wk_seed_deep_unknown(&ndb);
+    int failures = wk_check("deep UNKNOWN heights fold",
+                            wk_fold(&ndb, WK_THREAD_LARGE, 0, 2, 0, NULL));
+    failures += wk_check("past the depth cap the row says so",
+                         wk_is(&ndb, WK_UNKNOWN_SEND,
+                               WK_LEVEL_TOP - (WK_DEEP_RESOLVED_LEVELS + 1),
+                               ZSLP_VALIDITY_UNKNOWN,
+                               "ancestry_depth_exceeded"));
+    failures += wk_check("within the depth cap the row names its parent",
+                         wk_is(&ndb, WK_UNKNOWN_SEND,
+                               WK_LEVEL_TOP - WK_DEEP_RESOLVED_LEVELS,
+                               ZSLP_VALIDITY_UNKNOWN, "send_parent_unknown"));
+    failures += wk_check("a child past the depth cap stays UNKNOWN",
+                         wk_is(&ndb, WK_UNKNOWN_SEND,
+                               WK_LEVEL_TOP - (WK_DEEP_LEVELS + 1),
+                               ZSLP_VALIDITY_UNKNOWN,
+                               "ancestry_depth_exceeded"));
+    node_db_close(&ndb);
+    return failures;
+}
+
+/* A row left refused at an earlier height settles from any later walk that
+ * fits. Its own height's sweep has passed, so the fixture sets the row back. */
+static int wk_case_earlier_refusal_settles(void)
+{
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    if (!node_db_open(&ndb, ":memory:"))
+        return wk_check("earlier-refusal fixture opens a database", false);
+    wk_seed_chain(&ndb, 1, WK_GENESIS_DEEP, WK_DEEP_CHAIN, 3);
+    uint8_t digest[32] = {0}, genesis[32], last[32], child[32];
+    uint64_t all[1] = {1000};
+    int failures = wk_check("earlier-refusal height folds",
+                            wk_fold(&ndb, WK_THREAD_LARGE, 0, 1, 0, digest));
+    wk_txid(last, WK_DEEP_CHAIN, WK_LEVEL_TOP - 3);
+    sqlite3_stmt *s = NULL;
+    sqlite3_prepare_v2(ndb.db,
+        "UPDATE zslp_validity SET status=0,reason='ancestry_depth_exceeded' "
+        "WHERE txid=?", -1, &s, NULL);
+    sqlite3_bind_blob(s, 1, last, 32, SQLITE_STATIC);
+    sqlite3_step(s);  // raw-sql-ok:test-fixture-update
+    sqlite3_finalize(s);
+    wk_txid(child, WK_WIDE_CHILD, 2);
+    wk_txid(genesis, WK_GENESIS_DEEP, 0);
+    wk_seed_send(&ndb, child, 2, genesis, all, 1);
+    wk_spend(&ndb, child, 0, last, 1, 2);
+    failures += wk_check("a later walk settles the earlier refusal",
+                         wk_fold(&ndb, WK_THREAD_LARGE, 2, 2, 0, NULL) &&
+                         wk_is(&ndb, WK_DEEP_CHAIN, WK_LEVEL_TOP - 3,
+                               ZSLP_VALIDITY_VALID, "valid_send") &&
+                         wk_is(&ndb, WK_WIDE_CHILD, 2, ZSLP_VALIDITY_VALID,
+                               "valid_send"));
+    node_db_close(&ndb);
+    return failures;
+}
+
 /* ── Interruption: applying a height again changes nothing ─────────── */
 
-#define WK_INTERRUPT_TIP 4
+struct wk_fixture {
+    void (*seed)(struct node_db *ndb);
+    int from;
+    int tip;
+};
 
 struct wk_ledger_state {
     bool ok;
@@ -833,15 +1063,16 @@ struct wk_ledger_state {
     char running[65];
 };
 
-/* Stops the fold at one walk's failed allocation, part way through a height's
- * scan, and retries that height the way the next tick does. */
-static bool wk_fold_stopped_at_walk(struct node_db *ndb, unsigned nth_walk,
-                                    uint8_t digest[32])
+/* Stops the fold at one walk's failed allocation, part way through a height,
+ * and retries that height the way the next tick does. */
+static bool wk_fold_stopped_at_walk(struct node_db *ndb,
+                                    const struct wk_fixture *fixture,
+                                    unsigned nth_walk, uint8_t digest[32])
 {
     uint8_t next[32];
     bool ok = true;
     zcl_alloc_fault_fail_nth("zslp_validity_walk", nth_walk);
-    for (int h = 0; h <= WK_INTERRUPT_TIP && ok; h++) {
+    for (int h = fixture->from; h <= fixture->tip && ok; h++) {
         ok = zslp_ledger_apply_height(ndb, h, digest, next) ||
              zslp_ledger_apply_height(ndb, h, digest, next);
         if (ok)
@@ -852,17 +1083,19 @@ static bool wk_fold_stopped_at_walk(struct node_db *ndb, unsigned nth_walk,
     return ok && stopped;
 }
 
-static bool wk_fold_by_ticks(struct node_db *ndb, uint8_t digest[32])
+static bool wk_fold_by_ticks(struct node_db *ndb, int last_tip,
+                             uint8_t digest[32])
 {
     bool ok = true;
-    for (int tip = 0; tip <= WK_INTERRUPT_TIP && ok; tip++)
+    for (int tip = 0; tip <= last_tip && ok; tip++)
         ok = wk_backfill_to_tip(ndb, WK_THREAD_LARGE, tip);
     return ok && zslp_ledger_get_cursor(ndb, NULL, digest);
 }
 
 /* mode: -1 one fold, -2 every height applied twice, -3 one height per tick,
  * otherwise the walk number to stop at. */
-static struct wk_ledger_state wk_fold_interruptible(int mode)
+static struct wk_ledger_state wk_fold_interruptible(
+    const struct wk_fixture *fixture, int mode)
 {
     struct wk_ledger_state state;
     struct node_db ndb;
@@ -871,49 +1104,140 @@ static struct wk_ledger_state wk_fold_interruptible(int mode)
     memset(&ndb, 0, sizeof(ndb));
     if (!node_db_open(&ndb, ":memory:"))
         return state;
-    wk_seed_chain(&ndb, 1, WK_GENESIS_DEEP, WK_DEEP_CHAIN, WK_DEEP_LEVELS);
-    wk_seed_deep_child(&ndb, 2);
-    wk_seed_wide(&ndb, 3);
+    fixture->seed(&ndb);
     if (mode == -3)
-        state.ok = wk_fold_by_ticks(&ndb, digest);
+        state.ok = wk_fold_by_ticks(&ndb, fixture->tip, digest);
     else if (mode < 0)
-        state.ok = wk_fold(&ndb, WK_THREAD_LARGE, 0, WK_INTERRUPT_TIP,
+        state.ok = wk_fold(&ndb, WK_THREAD_LARGE, fixture->from, fixture->tip,
                            mode == -2 ? 1 : 0, digest);
     else
-        state.ok = wk_fold_stopped_at_walk(&ndb, (unsigned)mode, digest);
+        state.ok = wk_fold_stopped_at_walk(&ndb, fixture, (unsigned)mode,
+                                           digest);
     wk_fingerprint(&ndb, state.print);
     wk_hex(digest, state.running);
     node_db_close(&ndb);
     return state;
 }
 
-static int wk_check_same_ledger(const char *what, int mode,
+static int wk_check_same_ledger(const struct wk_fixture *fixture,
+                                const char *what, int mode,
                                 const struct wk_ledger_state *whole)
 {
-    struct wk_ledger_state state = wk_fold_interruptible(mode);
+    struct wk_ledger_state state = wk_fold_interruptible(fixture, mode);
     return wk_check(what, whole->ok && state.ok &&
                           strcmp(whole->print, state.print) == 0 &&
                           strcmp(whole->running, state.running) == 0);
 }
 
+static int wk_check_stops(const struct wk_fixture *fixture, const int *stops,
+                          size_t count, const struct wk_ledger_state *whole)
+{
+    bool same = true;
+    for (size_t i = 0; i < count; i++)
+        same = wk_check_same_ledger(fixture, "stopping a height part way and "
+                                    "retrying keeps the rows and digest",
+                                    stops[i], whole) == 0 && same;
+    return same ? 0 : 1;
+}
+
+static void wk_seed_interrupted(struct node_db *ndb)
+{
+    wk_seed_chain(ndb, 1, WK_GENESIS_DEEP, WK_DEEP_CHAIN, WK_DEEP_LEVELS);
+    wk_seed_deep_child(ndb, 2);
+    wk_seed_wide(ndb, 3);
+}
+
 static int wk_case_interrupted(void)
 {
-    struct wk_ledger_state whole = wk_fold_interruptible(-1);
+    static const struct wk_fixture fixture = {wk_seed_interrupted, 0, 4};
+    struct wk_ledger_state whole = wk_fold_interruptible(&fixture, -1);
     int failures = wk_check("interruption fixture folds", whole.ok);
-    failures += wk_check_same_ledger(
+    failures += wk_check_same_ledger(&fixture,
         "applying each height twice keeps the rows and digest", -2, &whole);
-    failures += wk_check_same_ledger(
+    failures += wk_check_same_ledger(&fixture,
         "folding one height per tick keeps the rows and digest", -3, &whole);
-    /* Walks 1-44 are refused, 45 settles the chain within the cap, 46 settles
-     * the refused levels from a later height, and 600 is inside the wide
-     * height's scan. */
-    static const int stops[] = {1, 20, 44, 45, 46, 600};
-    bool same = true;
-    for (size_t i = 0; i < sizeof(stops) / sizeof(stops[0]); i++)
-        same = wk_check_same_ledger("stopping a height part way and retrying "
-                                    "keeps the rows and digest",
-                                    stops[i], &whole) == 0 && same;
-    failures += same ? 0 : 1;
+    /* Walks 1-44 are refused, 45 settles the chain within the cap, 46 is the
+     * sweep settling the rest, 600 is inside the wide height's scan and 1150 is
+     * its sweep. */
+    static const int stops[] = {1, 20, 44, 45, 46, 600, 1150};
+    failures += wk_check_stops(&fixture, stops,
+                               sizeof(stops) / sizeof(stops[0]), &whole);
+    return failures;
+}
+
+/* The chain sits below where this fold starts, as rows from before it. */
+static void wk_seed_held_twice_above_chain(struct node_db *ndb)
+{
+    wk_seed_held_twice(ndb, 1, 2);
+}
+
+/* Walk 1 refuses T for work, 2-1101 settle its parents, and 1102 is the sweep
+ * finding T past the depth cap; a retried scan that walked T again would store
+ * that different reason. */
+static int wk_case_refusal_reason_stands(void)
+{
+    static const struct wk_fixture fixture =
+        {wk_seed_held_twice_above_chain, 2, 2};
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    if (!node_db_open(&ndb, ":memory:"))
+        return wk_check("reason fixture opens a database", false);
+    wk_seed_held_twice_above_chain(&ndb);
+    int failures = wk_check("reason fixture folds",
+                            wk_fold(&ndb, WK_THREAD_LARGE, 2, 2, 0, NULL));
+    failures += wk_check("a row that stays refused keeps its reason",
+                         wk_is(&ndb, WK_HELD_TWICE, 0, ZSLP_VALIDITY_UNKNOWN,
+                               "ancestry_work_exceeded"));
+    node_db_close(&ndb);
+    struct wk_ledger_state whole = wk_fold_interruptible(&fixture, -1);
+    failures += wk_check_same_ledger(&fixture,
+        "applying that height twice keeps the rows and digest", -2, &whole);
+    static const int stops[] = {1102};
+    failures += wk_check_stops(&fixture, stops,
+                               sizeof(stops) / sizeof(stops[0]), &whole);
+    return failures;
+}
+
+/* ── Sweep: a height keeps passing while a pass settles something ──── */
+
+#define WK_PASSES_LEVELS 520
+
+static void wk_seed_passes(struct node_db *ndb)
+{
+    wk_seed_chain(ndb, 1, WK_GENESIS_DEEP, WK_DEEP_CHAIN, WK_PASSES_LEVELS);
+}
+
+static int wk_case_sweep_passes(void)
+{
+    static const struct wk_fixture fixture = {wk_seed_passes, 0, 1};
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    if (!node_db_open(&ndb, ":memory:"))
+        return wk_check("multi-pass fixture opens a database", false);
+    wk_seed_passes(&ndb);
+    struct wk_counts counts;
+    bool folded = wk_fold_counted(&ndb, 1, &counts);
+    printf("zslp walk: multi-pass height ran %ld statements\n",
+           counts.statements);
+    int failures = wk_check("multi-pass height folds", folded);
+    failures += wk_check("every level settles in its own height",
+                         wk_count(&ndb, "SELECT COUNT(*) FROM zslp_validity "
+                                        "WHERE status=0") == 0);
+    failures += wk_check("the newest level is VALID",
+                         wk_is(&ndb, WK_DEEP_CHAIN,
+                               WK_LEVEL_TOP - WK_PASSES_LEVELS,
+                               ZSLP_VALIDITY_VALID, "valid_send"));
+    failures += wk_check("only its output stays unspent",
+                         zslp_ledger_unspent_count(&ndb) == 1);
+    node_db_close(&ndb);
+
+    struct wk_ledger_state whole = wk_fold_interruptible(&fixture, -1);
+    /* Walks 1-264 are refused, 265 settles the first levels, 266-272 are the
+     * first pass refused again, 273 settles the next levels, and 274 is the
+     * second pass settling the rest. */
+    static const int stops[] = {274};
+    failures += wk_check_stops(&fixture, stops,
+                               sizeof(stops) / sizeof(stops[0]), &whole);
     return failures;
 }
 
@@ -978,9 +1302,15 @@ int zslp_validity_walk_tests(void)
     failures += wk_case_thread_sizes();
     failures += wk_case_double_inputs();
     failures += wk_case_wide();
+    failures += wk_case_lone();
+    failures += wk_case_held();
     failures += wk_case_many_edges();
-    failures += wk_case_deep_resolves_later();
+    failures += wk_case_deep_settles();
+    failures += wk_case_deep_unknown();
+    failures += wk_case_earlier_refusal_settles();
     failures += wk_case_interrupted();
+    failures += wk_case_refusal_reason_stands();
+    failures += wk_case_sweep_passes();
     failures += wk_case_cycle();
     failures += wk_case_allocation_failure();
     return failures;
