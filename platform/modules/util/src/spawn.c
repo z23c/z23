@@ -1030,10 +1030,15 @@ int zcl_spawn_capture(const char *const argv[], char *buf, size_t cap,
 #if defined(ZCL_TESTING)
 static _Thread_local void (*spawn_evidence_hook)(int, int, void *);
 static _Thread_local void *spawn_evidence_hook_context;
+static _Thread_local bool spawn_evidence_fail_io;
 void zcl_spawn_evidence_test_hook(void (*hook)(int, int, void *), void *context)
 {
     spawn_evidence_hook = hook;
     spawn_evidence_hook_context = context;
+}
+void zcl_spawn_evidence_test_fail_io(bool enabled)
+{
+    spawn_evidence_fail_io = enabled;
 }
 #endif
 
@@ -1089,6 +1094,9 @@ static bool spawn_evidence_read(struct spawn_evidence_capture *c, int which)
     } else {
         spawn_evidence_tail(c->e->stderr_tail, &c->e->stderr_len, data, (size_t)n);
     }
+#if defined(ZCL_TESTING)
+    if (spawn_evidence_fail_io) { spawn_evidence_fail_io = false; errno = EIO; return false; }
+#endif
     return true;
 }
 
@@ -1212,6 +1220,7 @@ static int spawn_evidence_finish(pid_t pid, struct spawn_evidence_capture *c,
     bool reaped = spawn_capture_reap(pid, &status, deadline, NULL, NULL,
                                      &e->timed_out, &cancelled, anchor->enabled, NULL);
     ok = spawn_evidence_drain_pending(c) && ok;
+    if (!ok) { e->stdout_complete = false; e->stderr_complete = false; }
     for (int i = 0; i < 2; i++) if (c->pipes[i].fd >= 0) close(c->pipes[i].fd);
     if (anchor->enabled) close(anchor->hold[1]);
     c->buf[c->used] = '\0'; e->exit_observed = reaped;

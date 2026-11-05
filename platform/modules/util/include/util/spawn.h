@@ -159,8 +159,10 @@ struct zcl_result zcl_spawn_capture_binary_merged(
 int zcl_spawn_capture_observed(const char *const argv[], char *buf, size_t cap,
                                int timeout_ms, bool *timed_out);
 
-/* Diagnostic observation of one trusted child. The caller's stdout prefix
- * and return status match capture_observed; both stream tails are raw bytes. */
+/* Diagnostic observation of one trusted child. Normal stdout prefix, exit,
+ * and timeout behavior matches capture_observed; an I/O error returns -1
+ * after containment cleanup. Tails are raw observed bytes, and complete is
+ * true only after EOF without transport error. Observed totals saturate. */
 #define ZCL_SPAWN_EVIDENCE_TAIL 512u
 struct zcl_spawn_evidence {
     unsigned char stdout_tail[ZCL_SPAWN_EVIDENCE_TAIL];
@@ -175,6 +177,7 @@ int zcl_spawn_capture_evidence(const char *const argv[], char *buf, size_t cap,
                                int timeout_ms, struct zcl_spawn_evidence *evidence);
 #if defined(ZCL_TESTING) && !defined(_WIN32)
 void zcl_spawn_evidence_test_hook(void (*hook)(int, int, void *), void *context);
+void zcl_spawn_evidence_test_fail_io(bool enabled);
 #endif
 
 /* The same capture with the child started in `cwd`. A NULL `cwd` is exactly

@@ -795,6 +795,7 @@ static bool process_capture_finish(struct process_capture_context *c, bool ok)
             e->stdout_complete = c->pipe_closed && remaining == 0;
         if (process_capture_peek(c->error_read, &c->error_closed, &remaining))
             e->stderr_complete = c->error_closed && remaining == 0;
+        if (!ok) { e->stdout_complete = false; e->stderr_complete = false; }
     }
     c->out[c->used] = 0;
     CloseHandle(c->read_handle);

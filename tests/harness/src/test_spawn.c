@@ -757,6 +757,29 @@ static int test_spawn_evidence_exited_buffer(void)
     return failures;
 }
 
+static int test_spawn_evidence_io_failure(void)
+{
+    int failures = 0;
+    TEST("spawn: evidence I/O failure refuses and reaps one child") {
+        const char *argv[] = {"/bin/sh", "-c", "printf '%s\\n' $$; exec sleep 30", NULL};
+        char out[32]; struct zcl_spawn_evidence e;
+        uint64_t before = zcl_spawn_thread_launch_count();
+        zcl_spawn_evidence_test_fail_io(true);
+        int rc = zcl_spawn_capture_evidence(argv, out, sizeof(out), 3000, &e);
+        zcl_spawn_evidence_test_fail_io(false);
+        char *end = NULL;
+        long pid = strtol(out, &end, 10);
+        ASSERT(rc == -1 && e.exit_observed);
+        ASSERT(!e.stdout_complete && !e.stderr_complete);
+        ASSERT(zcl_spawn_thread_launch_count() == before + 1);
+        ASSERT(pid > 0 && end && *end == '\n');
+        int status;
+        ASSERT(waitpid((pid_t)pid, &status, WNOHANG) == -1 && errno == ECHILD);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_spawn_platform_arm(void)
 {
     int failures = 0;
@@ -790,6 +813,7 @@ static int test_spawn_platform_arm(void)
     failures += test_spawn_evidence_flood_timeout();
     failures += test_spawn_evidence_unknown_status();
     failures += test_spawn_evidence_exited_buffer();
+    failures += test_spawn_evidence_io_failure();
     failures += test_spawn_capture_in_dir();
     failures += test_spawn_capture_in_dir_fails_closed();
 
