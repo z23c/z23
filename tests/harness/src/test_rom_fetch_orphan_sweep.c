@@ -779,8 +779,8 @@ static int test_orphan_sweep_unreadable_dir(void)
         if (!can_ignore) {
             ASSERT(!ok);
             ASSERT_EQ(r.pairs_seen, 0u);
+            ASSERT(os_exists(bundles, "consensus-state-bundle-960.sqlite.part"));
         }
-        ASSERT(os_exists(bundles, "consensus-state-bundle-960.sqlite.part"));
         test_cleanup_tmpdir(bundles);
         test_cleanup_tmpdir(dd);
         PASS();
@@ -811,12 +811,12 @@ static int test_orphan_sweep_unwritable_dir(void)
             ASSERT_EQ(r.pairs_failed, 1u);
             ASSERT_EQ(r.pairs_removed, 0u);
             ASSERT_EQ(r.bytes_reclaimed, 0ull);
+            ASSERT(os_size_is(bundles, "consensus-state-bundle-970.sqlite.part",
+                              OS_PART_BYTES));
+            ASSERT(os_size_is(bundles,
+                              "consensus-state-bundle-970.sqlite.part.journal",
+                              OS_JOURNAL_BYTES));
         }
-        ASSERT(os_size_is(bundles, "consensus-state-bundle-970.sqlite.part",
-                          OS_PART_BYTES));
-        ASSERT(os_size_is(bundles,
-                          "consensus-state-bundle-970.sqlite.part.journal",
-                          OS_JOURNAL_BYTES));
         test_cleanup_tmpdir(bundles);
         test_cleanup_tmpdir(dd);
         PASS();
