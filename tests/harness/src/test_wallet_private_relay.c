@@ -38,7 +38,11 @@
 #include "net/onion_v3_address.h"
 #include "net/tor_integration.h"
 #include "net/protocol.h"
+#include "platform/clock.h"
+#include "platform/file_stream.h"
 #include "platform/time_compat.h"
+#include "util/authority_receipt.h"
+#include "util/sync.h"
 #include "primitives/transaction.h"
 #include "rpc/server.h"
 #include "sim/simnet.h"
@@ -59,6 +63,7 @@
 #include "storage/coins_kv.h"
 #include "storage/progress_store.h"
 
+#include <pthread.h>
 #include <sqlite3.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -2526,10 +2531,1014 @@ static int wprt_case_config(void)
     return failures;
 }
 
+/* ── mutation-gap units: a bare relay, no wallet, no peers ──────────────
+ * These cases aim at the boundaries the mutation sweep measured: exact
+ * names, the delay arithmetic, the slot reuse order, the pending file's
+ * exact bytes and the way a hand-written file is read back. */
+
+#define WPRT_U_FILE "wallet_private_relay.pending"
+static const char WPRT_U_HDR[] = "# wallet_private_relay v1\n";
+#define WPRT_U_HDR_LEN (sizeof(WPRT_U_HDR) - 1)
+
+static uint8_t wprt_u_raw[8];
+static bool wprt_u_rng_ok = true;
+static size_t wprt_u_asked;
+static bool wprt_u_rng(uint8_t *out, size_t n)
+{
+    wprt_u_asked = n;
+    if (!wprt_u_rng_ok)
+        return false;
+    memset(out, 0, n);
+    memcpy(out, wprt_u_raw, n < sizeof(wprt_u_raw) ? n : sizeof(wprt_u_raw));
+    return true;
+}
+
+struct wprt_u {
+    struct wpr *r;
+    char dir[256];
+};
+
+static bool wprt_u_open(struct wprt_u *u, bool with_dir)
+{
+    memset(u, 0, sizeof(*u));
+    u->r = zcl_calloc(1, sizeof(*u->r), "wprt_u");
+    if (!u->r)
+        return false;
+    wpr_init(u->r);
+    u->r->now_ms = wprt_clock;
+    u->r->random_bytes = wprt_u_rng;
+    atomic_store(&wprt_now, 5000000);
+    wprt_u_rng_ok = true;
+    memset(wprt_u_raw, 0, sizeof(wprt_u_raw));
+    struct wpr_env env;
+    memset(&env, 0, sizeof(env));
+    env.datadir = "";
+    if (with_dir) {
+        if (!test_mkdtemp(u->dir, sizeof(u->dir), "wprtu"))
+            return false;
+        env.datadir = u->dir;
+    }
+    wpr_configure(u->r, WPR_MODE_PRIVATE, &env);
+    return true;
+}
+
+static void wprt_u_close(struct wprt_u *u)
+{
+    if (u->r) {
+        wpr_free(u->r);
+        free(u->r);
+    }
+    if (u->dir[0])
+        test_rm_rf(u->dir);
+}
+
+static void wprt_u_reconfigure(struct wprt_u *u, const char *datadir)
+{
+    struct wpr_env env;
+    memset(&env, 0, sizeof(env));
+    env.datadir = datadir;
+    wpr_configure(u->r, WPR_MODE_PRIVATE, &env);
+}
+
+static struct uint256 wprt_u_id(uint8_t fill, uint8_t last)
+{
+    struct uint256 id;
+    memset(id.data, fill, sizeof(id.data));
+    id.data[31] = last;
+    return id;
+}
+
+static struct wpr_entry *wprt_u_entry(struct wpr *r, const struct uint256 *id)
+{
+    for (size_t i = 0; i < WPR_MAX_ENTRIES; i++)
+        if (r->entries[i].used &&
+            memcmp(r->entries[i].txid.data, id->data, 32) == 0)
+            return &r->entries[i];
+    return NULL;
+}
+
+static size_t wprt_u_used(const struct wpr *r)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < WPR_MAX_ENTRIES; i++)
+        if (r->entries[i].used)
+            n++;
+    return n;
+}
+
+static size_t wprt_u_count_state(const struct wpr *r, enum wpr_state s)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < WPR_MAX_ENTRIES; i++)
+        if (r->entries[i].used && r->entries[i].state == s)
+            n++;
+    return n;
+}
+
+/* A thread other than the caller can take the relay's lock: nothing leaked it
+ * (the lock is recursive, so the caller's own trylock cannot tell). */
+struct wprt_try {
+    zcl_mutex_t *m;
+    bool got;
+};
+
+static void *wprt_try_main(void *arg)
+{
+    struct wprt_try *t = arg;
+    t->got = zcl_mutex_trylock(t->m);
+    if (t->got)
+        zcl_mutex_unlock(t->m);
+    return NULL;
+}
+
+static bool wprt_mutex_free(zcl_mutex_t *m)
+{
+    struct wprt_try t = { .m = m, .got = false };
+    pthread_t th;
+    if (pthread_create(&th, NULL, wprt_try_main, &t) != 0)
+        return false;
+    pthread_join(th, NULL);
+    return t.got;
+}
+
+static bool wprt_lock_free(struct wpr *r) { return wprt_mutex_free(&r->lock); }
+
+static char wprt_u_buf[20000];
+
+static long wprt_u_slurp(const struct wprt_u *u)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", u->dir, WPRT_U_FILE);
+    FILE *fp = platform_file_stream_open_read(path);
+    if (!fp)
+        return -1;
+    size_t n = fread(wprt_u_buf, 1, sizeof(wprt_u_buf) - 1, fp);
+    fclose(fp);
+    wprt_u_buf[n] = '\0';
+    return (long)n;
+}
+
+static bool wprt_u_put(const struct wprt_u *u, const char *data, size_t len)
+{
+    return authority_receipt_write_atomic(u->dir, WPRT_U_FILE,
+                                          (const uint8_t *)data, len, NULL, 0);
+}
+
+struct wprt_line {
+    char pfx;  /* 0, 'x' (expired) or 'a' (handed) */
+    const struct uint256 *id;
+};
+
+/* The pending file is exactly the header and these lines, byte for byte. */
+static bool wprt_u_file_is(const struct wprt_u *u,
+                           const struct wprt_line *lines, size_t n)
+{
+    static char want[20000];
+    memcpy(want, WPRT_U_HDR, WPRT_U_HDR_LEN);
+    size_t len = WPRT_U_HDR_LEN;
+    for (size_t i = 0; i < n; i++) {
+        if (lines[i].pfx)
+            want[len++] = lines[i].pfx;
+        uint256_get_hex(lines[i].id, want + len);
+        len += 64;
+        want[len++] = '\n';
+    }
+    return wprt_u_slurp(u) == (long)len && memcmp(wprt_u_buf, want, len) == 0;
+}
+
+static int wprt_u_open_failed(struct wprt_u *u, int failures)
+{
+    wprt_report("the unit relay opens", false, &failures);
+    wprt_u_close(u);
+    return failures;
+}
+
+/* ── names, init, argument refusal ──────────────────────────────────── */
+
+static bool wprt_u_names_exact(void)
+{
+    static const struct { enum wpr_state s; const char *name; } t[] = {
+        { WPR_WAITING_FOR_ROUTE, "waiting_for_route" },
+        { WPR_EXPIRED, "expired" },
+        { WPR_PREPARED, "preparing" },
+        { WPR_SCHEDULED, "scheduled" },
+        { WPR_SENT, "sent" },
+        { WPR_SEEN, "seen" },
+    };
+    bool ok = strcmp(wpr_state_name((enum wpr_state)99), "unknown") == 0 &&
+              strcmp(wpr_mode_name(WPR_MODE_PRIVATE), "private") == 0 &&
+              strcmp(wpr_mode_name(WPR_MODE_PUBLIC), "public") == 0;
+    for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++)
+        ok = ok && strcmp(wpr_state_name(t[i].s), t[i].name) == 0;
+    return ok;
+}
+
+static bool wprt_recursive(zcl_mutex_t *m)
+{
+    if (!zcl_mutex_trylock(m))
+        return false;
+    bool again = zcl_mutex_trylock(m);
+    if (again)
+        zcl_mutex_unlock(m);
+    zcl_mutex_unlock(m);
+    return again;
+}
+
+static bool wprt_u_default_clock(const struct wpr *d)
+{
+    int64_t before = clock_now_monotonic_ns() / 1000000;
+    int64_t got = d->now_ms();
+    int64_t after = clock_now_monotonic_ns() / 1000000;
+    return got >= before && got <= after;
+}
+
+static bool wprt_u_init_state(void)
+{
+    struct wpr *d = zcl_calloc(1, sizeof(*d), "wprt_u_init");
+    if (!d)
+        return false;
+    memset(d, 0xA5, sizeof(*d));
+    wpr_init(d);
+    uint8_t raw[8];
+    bool ok = wprt_recursive(&d->lock) && d->pool.min_relay_fee == 0 &&
+              d->mode == WPR_MODE_PUBLIC && wprt_u_used(d) == 0 &&
+              wprt_u_default_clock(d) && d->random_bytes &&
+              d->random_bytes(raw, sizeof(raw));
+    wpr_free(d);
+    free(d);
+    return ok;
+}
+
+static bool wprt_u_no_connman_peers(void)
+{
+    struct connman *cm = zcl_calloc(1, sizeof(*cm), "wprt_u_cm");
+    struct node_signals sigs;
+    memset(&sigs, 0, sizeof(sigs));
+    if (!cm || !connman_init(cm, chain_params_get(), &sigs)) {
+        free(cm);
+        return false;
+    }
+    bool ok = wpr_count_eligible_peers(NULL) == 0 &&
+              wpr_count_eligible_peers(cm) == 0 &&
+              wprt_mutex_free(&cm->manager.cs_nodes);
+    connman_free(cm);
+    free(cm);
+    return ok;
+}
+
+static int wprt_u_case_names_and_init(void)
+{
+    int failures = 0;
+    struct wpr *g = wpr_global();
+    wprt_report("every state and mode name is exact; an unknown state is "
+                "named unknown", wprt_u_names_exact(), &failures);
+    wprt_report("a first-use global relay has a clock and a random source",
+                g && g->now_ms && g->random_bytes, &failures);
+    wprt_report("an initialised relay: recursive lock, free pool fee, public "
+                "mode, no entries, the monotonic millisecond clock, a working "
+                "random source", wprt_u_init_state(), &failures);
+    wprt_report("no connman or an empty one has no eligible peer and the "
+                "node lock is released", wprt_u_no_connman_peers(), &failures);
+    return failures;
+}
+
+static bool wprt_u_null_void_calls(struct wprt_u *u, const struct uint256 *id)
+{
+    struct wpr *r = u->r;
+    wpr_mark_held(r, NULL, true);
+    wpr_mark_held(NULL, id, true);
+    wpr_set_disk_retry(r, NULL, true);
+    wpr_set_disk_retry(NULL, id, true);
+    wpr_note_seen(r, NULL);
+    wpr_note_seen(NULL, id);
+    wpr_mark_expired(r, NULL);
+    wpr_mark_expired(NULL, id);
+    wpr_forget(r, NULL);
+    wpr_forget(NULL, id);
+    return wprt_u_used(r) == 1 && wprt_u_entry(r, id)->state == WPR_PREPARED;
+}
+
+static bool wprt_u_null_results(struct wprt_u *u, const struct uint256 *id)
+{
+    struct wpr *r = u->r;
+    struct transaction tx;
+    transaction_init(&tx);
+    struct zcl_result a = wpr_prepare(r, NULL);
+    struct zcl_result b = wpr_prepare(NULL, id);
+    struct zcl_result c = wpr_enqueue(r, NULL);
+    struct zcl_result d = wpr_enqueue(NULL, &tx);
+    transaction_free(&tx);
+    return !a.ok && a.code == -1 && !b.ok && b.code == -1 && !c.ok &&
+           c.code == -1 && !d.ok && d.code == -1;
+}
+
+static int wprt_u_case_null_arguments(void)
+{
+    int failures = 0;
+    struct wprt_u u;
+    if (!wprt_u_open(&u, false))
+        return wprt_u_open_failed(&u, failures);
+    struct uint256 id = wprt_u_id(0x31, 0);
+    struct uint256 other = wprt_u_id(0x32, 0);
+    bool prepared = wpr_prepare(u.r, &id).ok;
+    wprt_u_entry(u.r, &id)->disk_retry = true;
+    wprt_report("a missing relay or id is refused with code -1 by prepare and "
+                "enqueue", prepared && wprt_u_null_results(&u, &id),
+                &failures);
+    wprt_report("a missing relay or id changes nothing in any other call",
+                wprt_u_null_void_calls(&u, &id), &failures);
+    wprt_report("disk_retry is false for a missing relay, a missing id and an "
+                "unknown id, true for the recorded one",
+                !wpr_disk_retry(NULL, &id) && !wpr_disk_retry(u.r, NULL) &&
+                    !wpr_disk_retry(u.r, &other) && wpr_disk_retry(u.r, &id),
+                &failures);
+    wpr_note_seen(u.r, &other);
+    wpr_mark_expired(u.r, &other);
+    wpr_forget(u.r, &other);
+    wpr_mark_held(u.r, &other, true);
+    wpr_set_disk_retry(u.r, &other, true);
+    wprt_report("calls for an unknown id add nothing and release the lock",
+                wprt_u_used(u.r) == 1 && wprt_lock_free(u.r), &failures);
+    wprt_u_close(&u);
+    return failures;
+}
+
+/* ── the delay draw and the enqueue fields ──────────────────────────── */
+
+static bool wprt_u_delay_is(struct wprt_u *u, uint8_t seed,
+                            const uint8_t raw[8], int64_t want)
+{
+    memcpy(wprt_u_raw, raw, sizeof(wprt_u_raw));
+    wprt_u_asked = 0;
+    struct uint256 id = wprt_u_id(seed, 0);
+    struct transaction tx;
+    transaction_init(&tx);
+    tx.hash = id;
+    struct zcl_result res = wpr_enqueue(u->r, &tx);
+    transaction_free(&tx);
+    struct wpr_entry *e = wprt_u_entry(u->r, &id);
+    return res.ok && e && wprt_u_asked == 8 &&
+           e->due_ms - atomic_load(&wprt_now) == want &&
+           wprt_lock_free(u->r);
+}
+
+static bool wprt_u_expiry_flag(struct wprt_u *u, uint8_t seed, bool overwinter,
+                               uint32_t height, bool want)
+{
+    struct uint256 id = wprt_u_id(seed, 0);
+    struct transaction tx;
+    transaction_init(&tx);
+    tx.hash = id;
+    tx.overwintered = overwinter;
+    tx.expiry_height = height;
+    struct zcl_result res = wpr_enqueue(u->r, &tx);
+    transaction_free(&tx);
+    struct wpr_entry *e = wprt_u_entry(u->r, &id);
+    return res.ok && e && e->has_expiry == want &&
+           e->expiry_height == height && e->last_attempt_ms == -1 &&
+           e->state == WPR_SCHEDULED && e->in_pool;
+}
+
+static bool wprt_u_rng_refused(struct wprt_u *u)
+{
+    struct uint256 id = wprt_u_id(0x45, 0);
+    struct transaction tx;
+    transaction_init(&tx);
+    tx.hash = id;
+    wprt_u_rng_ok = false;
+    size_t before = wprt_u_used(u->r);
+    struct zcl_result res = wpr_enqueue(u->r, &tx);
+    wprt_u_rng_ok = true;
+    transaction_free(&tx);
+    return !res.ok && res.code == -3 && wprt_u_used(u->r) == before &&
+           !wprt_u_entry(u->r, &id) && wprt_lock_free(u->r);
+}
+
+static bool wprt_u_enqueue_twice(struct wprt_u *u)
+{
+    struct uint256 id = wprt_u_id(0x46, 0);
+    struct transaction tx;
+    transaction_init(&tx);
+    tx.hash = id;
+    struct zcl_result first = wpr_enqueue(u->r, &tx);
+    struct wpr_entry *e = wprt_u_entry(u->r, &id);
+    int64_t due = e ? e->due_ms : -5;
+    wprt_u_raw[7] = 77;
+    struct zcl_result again = wpr_enqueue(u->r, &tx);
+    transaction_free(&tx);
+    return first.ok && again.ok && e && e->due_ms == due &&
+           wprt_lock_free(u->r);
+}
+
+static int wprt_u_case_delay_and_fields(void)
+{
+    int failures = 0;
+    struct wprt_u u;
+    if (!wprt_u_open(&u, false))
+        return wprt_u_open_failed(&u, failures);
+    static const uint8_t mixed[8] = { 0x12, 0x34, 0x56, 0x78,
+                                      0x9A, 0xBC, 0xDE, 0xF0 };
+    static const uint8_t top[8] = { 0, 0, 0, 0, 0, 0, 0x46, 0x50 };
+    static const uint8_t over[8] = { 0, 0, 0, 0, 0, 0, 0x46, 0x51 };
+    static const uint8_t zero[8] = { 0 };
+    /* 0x123456789ABCDEF0 mod 18001 = 11306; 18000 is the top of the span. */
+    wprt_report("the delay is the eight random bytes read big-endian, taken "
+                "modulo 18001, plus 2000 ms",
+                wprt_u_delay_is(&u, 0x41, mixed, 2000 + 11306), &failures);
+    wprt_report("the largest delay is exactly 20000 ms",
+                wprt_u_delay_is(&u, 0x42, top, WPR_DELAY_MAX_MS), &failures);
+    wprt_report("one past the span wraps to exactly 2000 ms",
+                wprt_u_delay_is(&u, 0x43, over, WPR_DELAY_MIN_MS), &failures);
+    wprt_report("a zero draw is exactly 2000 ms",
+                wprt_u_delay_is(&u, 0x44, zero, WPR_DELAY_MIN_MS), &failures);
+    wprt_report("an unavailable random source is refused with code -3, "
+                "records nothing and releases the lock",
+                wprt_u_rng_refused(&u), &failures);
+    wprt_report("an overwinter send with expiry 1 carries an expiry",
+                wprt_u_expiry_flag(&u, 0x51, true, 1, true), &failures);
+    wprt_report("an overwinter send with expiry 0 carries none",
+                wprt_u_expiry_flag(&u, 0x52, true, 0, false), &failures);
+    wprt_report("a send that is not overwinter carries none whatever its "
+                "expiry field", wprt_u_expiry_flag(&u, 0x53, false, 5, false),
+                &failures);
+    wprt_report("enqueuing a scheduled send again keeps its schedule and "
+                "releases the lock", wprt_u_enqueue_twice(&u), &failures);
+    wprt_u_close(&u);
+    return failures;
+}
+
+/* ── the pending file, byte for byte ────────────────────────────────── */
+
+struct wprt_ids {
+    struct uint256 a, b, c;
+};
+
+static bool wprt_u_prepare_steps(struct wprt_u *u, const struct wprt_ids *i)
+{
+    struct wpr *r = u->r;
+    const struct wprt_line one[] = { { 0, &i->a } };
+    bool first = wpr_prepare(r, &i->a).ok;
+    struct wpr_entry *ea = wprt_u_entry(r, &i->a);
+    bool ok = first && ea == &r->entries[0] && ea->state == WPR_PREPARED &&
+              ea->last_attempt_ms == -1 &&
+              ea->seen_ms == atomic_load(&wprt_now) &&
+              wprt_u_file_is(u, one, 1) && wprt_lock_free(r);
+    bool again = wpr_prepare(r, &i->a).ok;
+    ok = ok && again && wprt_u_used(r) == 1 && wprt_u_file_is(u, one, 1) &&
+         wprt_lock_free(r);
+    bool second = wpr_prepare(r, &i->b).ok;
+    struct wpr_entry *eb = wprt_u_entry(r, &i->b);
+    return ok && second && eb && eb != ea && wprt_u_used(r) == 2;
+}
+
+static bool wprt_u_expire_steps(struct wprt_u *u, const struct wprt_ids *i)
+{
+    struct wpr *r = u->r;
+    const struct wprt_line two[] = { { 0, &i->a }, { 'x', &i->b } };
+    struct wpr_entry *eb = wprt_u_entry(r, &i->b);
+    eb->held = true;
+    eb->disk_retry = true;
+    eb->expired = true;
+    eb->in_pool = true;
+    wpr_mark_expired(r, &i->b);
+    return eb->state == WPR_EXPIRED && !eb->in_pool && !eb->expired &&
+           !eb->held && !eb->disk_retry &&
+           eb->seen_ms == atomic_load(&wprt_now) &&
+           wprt_u_file_is(u, two, 2) && wprt_lock_free(r);
+}
+
+static bool wprt_u_flag_steps(struct wprt_u *u, const struct wprt_ids *i)
+{
+    struct wpr *r = u->r;
+    struct wpr_entry *ea = wprt_u_entry(r, &i->a);
+    wpr_mark_held(r, &i->a, true);
+    bool held = ea->held && wprt_lock_free(r);
+    wpr_set_disk_retry(r, &i->a, true);
+    bool retry = wpr_disk_retry(r, &i->a) && ea->disk_retry &&
+                 wprt_lock_free(r);
+    wpr_mark_held(r, &i->a, false);
+    wpr_set_disk_retry(r, &i->a, false);
+    return held && retry && !ea->held && !wpr_disk_retry(r, &i->a) &&
+           wprt_lock_free(r);
+}
+
+static bool wprt_u_seen_steps(struct wprt_u *u, const struct wprt_ids *i)
+{
+    struct wpr *r = u->r;
+    const struct wprt_line three[] = { { 'a', &i->a }, { 'x', &i->b },
+                                       { 0, &i->c } };
+    const struct wprt_line after_seen[] = { { 'a', &i->a }, { 'x', &i->b } };
+    wprt_u_entry(r, &i->a)->handed = true;
+    bool third = wpr_prepare(r, &i->c).ok;
+    bool ok = third && wprt_u_file_is(u, three, 3);
+    struct wpr_entry *ec = wprt_u_entry(r, &i->c);
+    ec->in_pool = true;
+    ec->mined = true;
+    wpr_note_seen(r, &i->c);
+    return ok && ec->state == WPR_SEEN && !ec->in_pool && !ec->mined &&
+           ec->seen_ms == atomic_load(&wprt_now) &&
+           wprt_u_file_is(u, after_seen, 2) && wprt_lock_free(r);
+}
+
+static bool wprt_u_forget_steps(struct wprt_u *u, const struct wprt_ids *i)
+{
+    const struct wprt_line left[] = { { 'x', &i->b } };
+    wpr_forget(u->r, &i->a);
+    return !wprt_u_entry(u->r, &i->a) && wprt_u_file_is(u, left, 1) &&
+           wprt_lock_free(u->r);
+}
+
+static int wprt_u_case_pending_file(void)
+{
+    int failures = 0;
+    struct wprt_u u;
+    if (!wprt_u_open(&u, true))
+        return wprt_u_open_failed(&u, failures);
+    struct wprt_ids i = { wprt_u_id(0x11, 0), wprt_u_id(0x11, 1),
+                          wprt_u_id(0x22, 0) };
+    wprt_report("a prepared send takes the first slot, is PREPARED with no "
+                "attempt, is recorded durably, and an id that differs only "
+                "in its last byte is its own send",
+                wprt_u_prepare_steps(&u, &i), &failures);
+    wprt_report("an expired send is recorded with an x prefix and its flags "
+                "are cleared", wprt_u_expire_steps(&u, &i), &failures);
+    wprt_report("held and disk_retry are set and cleared by their calls",
+                wprt_u_flag_steps(&u, &i), &failures);
+    wprt_report("a handed send is recorded with an a prefix; a seen-back send "
+                "leaves the record and loses its pool and mined flags",
+                wprt_u_seen_steps(&u, &i), &failures);
+    wprt_report("a forgotten send leaves the table and the record",
+                wprt_u_forget_steps(&u, &i), &failures);
+    wprt_u_close(&u);
+    return failures;
+}
+
+/* ── a record that cannot be made durable ───────────────────────────── */
+
+static bool wprt_u_refusals(struct wprt_u *u, const struct uint256 *p)
+{
+    struct uint256 q = wprt_u_id(0x62, 0);
+    struct uint256 t = wprt_u_id(0x63, 0);
+    struct zcl_result prep = wpr_prepare(u->r, &q);
+    bool ok = !prep.ok && prep.code == -4 && !wprt_u_entry(u->r, &q) &&
+              wprt_u_used(u->r) == 1 && wprt_lock_free(u->r);
+    struct transaction tx;
+    transaction_init(&tx);
+    tx.hash = t;
+    struct zcl_result enq = wpr_enqueue(u->r, &tx);
+    tx.hash = *p;
+    struct zcl_result over = wpr_enqueue(u->r, &tx);
+    transaction_free(&tx);
+    struct wpr_entry *ep = wprt_u_entry(u->r, p);
+    return ok && !enq.ok && enq.code == -4 && !wprt_u_entry(u->r, &t) &&
+           wprt_u_used(u->r) == 1 && !over.ok && over.code == -4 && ep &&
+           ep->state == WPR_PREPARED && !ep->in_pool && ep->due_ms == 0 &&
+           ep->seen_ms == atomic_load(&wprt_now) && wprt_lock_free(u->r);
+}
+
+static int wprt_u_case_record_refused(void)
+{
+    int failures = 0;
+    struct wprt_u u;
+    if (!wprt_u_open(&u, true))
+        return wprt_u_open_failed(&u, failures);
+    struct uint256 p = wprt_u_id(0x61, 0);
+    bool first = wpr_prepare(u.r, &p).ok;
+    wprt_u_reconfigure(&u, "/nonexistent/wprt-units-refused");
+    wprt_report("when the record cannot be written, prepare and enqueue fail "
+                "with code -4, a new send leaves no entry, a prepared send "
+                "stays as it was, and the lock is released",
+                first && wprt_u_refusals(&u, &p), &failures);
+    wprt_u_close(&u);
+    return failures;
+}
+
+/* ── slot reuse order ───────────────────────────────────────────────── */
+
+static void wprt_u_fill_table(struct wpr *r)
+{
+    for (size_t i = 0; i < WPR_MAX_ENTRIES; i++) {
+        struct wpr_entry *e = &r->entries[i];
+        memset(e, 0, sizeof(*e));
+        e->used = true;
+        e->state = WPR_PREPARED;
+        memset(e->txid.data, 0x90, sizeof(e->txid.data));
+        e->txid.data[0] = (uint8_t)i;
+        e->txid.data[1] = 0xEE;
+        e->last_attempt_ms = -1;
+    }
+}
+
+static void wprt_u_terminal(struct wpr *r, size_t slot, enum wpr_state s,
+                            int64_t seen_ms)
+{
+    r->entries[slot].state = s;
+    r->entries[slot].seen_ms = seen_ms;
+}
+
+static size_t wprt_u_slot_of_new(struct wpr *r, uint8_t seed, bool *ok)
+{
+    struct uint256 id = wprt_u_id(seed, 0x77);
+    struct zcl_result res = wpr_prepare(r, &id);
+    struct wpr_entry *e = wprt_u_entry(r, &id);
+    *ok = res.ok && e && e->state == WPR_PREPARED;
+    return e ? (size_t)(e - r->entries) : WPR_MAX_ENTRIES;
+}
+
+static bool wprt_u_full_refused(struct wprt_u *u)
+{
+    struct uint256 id = wprt_u_id(0x7A, 0x77);
+    struct zcl_result prep = wpr_prepare(u->r, &id);
+    bool ok = !prep.ok && prep.code == -2 && wprt_lock_free(u->r);
+    struct transaction tx;
+    transaction_init(&tx);
+    tx.hash = id;
+    struct zcl_result enq = wpr_enqueue(u->r, &tx);
+    transaction_free(&tx);
+    return ok && !enq.ok && enq.code == -2 && wprt_u_used(u->r) == 256 &&
+           wprt_lock_free(u->r);
+}
+
+static int wprt_u_case_slot_reuse(void)
+{
+    int failures = 0;
+    struct wprt_u u;
+    if (!wprt_u_open(&u, false))
+        return wprt_u_open_failed(&u, failures);
+    wprt_u_fill_table(u.r);
+    /* Scan order: expired 50 (seen 100), seen 100 (500), expired 150 (50),
+     * seen 200 (300), seen 220 (300). Seen records go first, oldest first,
+     * the earlier slot on a tie; then expired records, oldest first. */
+    wprt_u_terminal(u.r, 50, WPR_EXPIRED, 100);
+    wprt_u_terminal(u.r, 100, WPR_SEEN, 500);
+    wprt_u_terminal(u.r, 150, WPR_EXPIRED, 50);
+    wprt_u_terminal(u.r, 200, WPR_SEEN, 300);
+    wprt_u_terminal(u.r, 220, WPR_SEEN, 300);
+    static const size_t want[] = { 200, 220, 100, 150, 50 };
+    bool all_ok = true;
+    bool in_order = true;
+    for (size_t k = 0; k < 5; k++) {
+        bool ok = false;
+        size_t slot = wprt_u_slot_of_new(u.r, (uint8_t)(0x70 + k), &ok);
+        all_ok = all_ok && ok;
+        in_order = in_order && slot == want[k];
+    }
+    wprt_report("a full table reuses the oldest seen-back slot, then the "
+                "oldest expired one, and never a live send",
+                all_ok && in_order, &failures);
+    wprt_report("a full table of live sends refuses both prepare and enqueue "
+                "with code -2 and releases the lock",
+                wprt_u_full_refused(&u), &failures);
+    wprt_u_close(&u);
+    return failures;
+}
+
+/* An unused slot with leftovers is reused clean. */
+static int wprt_u_case_dirty_free_slot(void)
+{
+    int failures = 0;
+    struct wprt_u u;
+    if (!wprt_u_open(&u, false))
+        return wprt_u_open_failed(&u, failures);
+    u.r->entries[0].disk_retry = true;
+    u.r->entries[0].held = true;
+    struct uint256 id = wprt_u_id(0x81, 0);
+    bool ok = wpr_prepare(u.r, &id).ok;
+    struct wpr_entry *e = wprt_u_entry(u.r, &id);
+    wprt_report("a prepared send reuses a free slot without its leftovers",
+                ok && e == &u.r->entries[0] && !e->disk_retry && !e->held,
+                &failures);
+    wprt_u_close(&u);
+    return failures;
+}
+
+/* ── a hand-written record read back ────────────────────────────────── */
+
+struct wprt_hand {
+    const char *pfx;
+    char fill;
+    size_t len;     /* characters after the prefix */
+    size_t bad_at;  /* index of one bad character, or >= len for none */
+    char bad;
+    bool want;      /* restored as an expired send */
+};
+
+static size_t wprt_u_hand_line(char *out, const struct wprt_hand *h)
+{
+    size_t n = 0;
+    while (h->pfx[n]) {
+        out[n] = h->pfx[n];
+        n++;
+    }
+    memset(out + n, h->fill, h->len);
+    if (h->bad_at < h->len)
+        out[n + h->bad_at] = h->bad;
+    return n + h->len;
+}
+
+static struct uint256 wprt_u_hex_id(char fill)
+{
+    char hex[65];
+    struct uint256 id;
+    memset(hex, fill, 64);
+    hex[64] = '\0';
+    uint256_set_hex(&id, hex);
+    return id;
+}
+
+/* Only the three good lines may come back. Every bad one has a character
+ * outside 0-9a-f at an edge of its range, or a wrong length or prefix. The
+ * last good line has no trailing newline. */
+static const struct wprt_hand wprt_hand_lines[] = {
+    { "x", '1', 64, 99, 0, true },
+    { "x", '2', 64, 0, 'g', false },
+    { "x", '3', 64, 63, 'g', false },
+    { "x", '4', 64, 17, '/', false },
+    { "x", '5', 64, 40, ':', false },
+    { "x", '6', 64, 7, 'A', false },
+    { "x", '7', 64, 9, '`', false },
+    { "x", '8', 63, 99, 0, false },
+    { "x", '9', 65, 99, 0, false },
+    { "y", 'a', 64, 99, 0, false },
+    { "X", 'b', 64, 99, 0, false },
+    { "x", 'd', 64, 99, 0, true },
+    { "x", 'e', 64, 99, 0, true },
+};
+
+static size_t wprt_u_hand_file(char *out)
+{
+    memcpy(out, WPRT_U_HDR, WPRT_U_HDR_LEN);
+    size_t len = WPRT_U_HDR_LEN;
+    size_t n = sizeof(wprt_hand_lines) / sizeof(wprt_hand_lines[0]);
+    for (size_t i = 0; i < n; i++) {
+        len += wprt_u_hand_line(out + len, &wprt_hand_lines[i]);
+        if (i + 1 < n)
+            out[len++] = '\n';
+    }
+    return len;
+}
+
+static bool wprt_u_hand_restored(struct wprt_u *u)
+{
+    size_t good = 0;
+    bool ok = true;
+    size_t n = sizeof(wprt_hand_lines) / sizeof(wprt_hand_lines[0]);
+    for (size_t i = 0; i < n; i++) {
+        if (!wprt_hand_lines[i].want)
+            continue;
+        good++;
+        struct uint256 id = wprt_u_hex_id(wprt_hand_lines[i].fill);
+        struct wpr_entry *e = wprt_u_entry(u->r, &id);
+        ok = ok && e && e->state == WPR_EXPIRED && e->last_attempt_ms == -1 &&
+             e->seen_ms == atomic_load(&wprt_now) && !e->in_pool &&
+             !e->handed && !e->held && !e->disk_retry && e->attempts == 0;
+    }
+    return ok && wprt_u_used(u->r) == good &&
+           wprt_u_count_state(u->r, WPR_EXPIRED) == good;
+}
+
+static int wprt_u_case_hand_written(void)
+{
+    int failures = 0;
+    struct wprt_u u;
+    if (!wprt_u_open(&u, true))
+        return wprt_u_open_failed(&u, failures);
+    /* The record 'd' is already in the table with leftovers: reading it
+     * back must reuse its slot and clear them. */
+    struct uint256 d = wprt_u_hex_id('d');
+    bool prepared = wpr_prepare(u.r, &d).ok;
+    struct wpr_entry *ed = wprt_u_entry(u.r, &d);
+    ed->held = true;
+    ed->disk_retry = true;
+    ed->handed = true;
+    ed->attempts = 3;
+    static char file[4096];
+    size_t len = wprt_u_hand_file(file);
+    bool put = wprt_u_put(&u, file, len);
+    bool resumed = prepared && put && wpr_resume(u.r).ok;
+    wprt_report("reading a record back restores exactly the well-formed "
+                "expired lines, however the bad ones are malformed, with a "
+                "clean entry each, including a last line with no newline",
+                resumed && wprt_u_hand_restored(&u), &failures);
+    wprt_report("the restored record is rewritten as three expired lines, "
+                "and the lock is released",
+                resumed && wprt_u_slurp(&u) ==
+                    (long)(WPRT_U_HDR_LEN + 3 * 66) && wprt_lock_free(u.r),
+                &failures);
+    wprt_u_close(&u);
+    return failures;
+}
+
+/* ── a full record, and a longer one than the table ─────────────────── */
+
+static size_t wprt_u_full_file(char *out, char pfx)
+{
+    memcpy(out, WPRT_U_HDR, WPRT_U_HDR_LEN);
+    size_t len = WPRT_U_HDR_LEN;
+    size_t lines = pfx ? WPR_MAX_ENTRIES : WPR_MAX_ENTRIES + 2;
+    for (size_t i = 0; i < lines; i++) {
+        if (pfx)
+            out[len++] = pfx;
+        snprintf(out + len, 3, "%02x", (unsigned)(i & 0xff));
+        memset(out + len + 2, (int)(0x35 + (i >> 8)), 62);
+        len += 64;
+        out[len++] = '\n';
+    }
+    return len;
+}
+
+static int wprt_u_case_full_record(void)
+{
+    int failures = 0;
+    struct wprt_u u;
+    if (!wprt_u_open(&u, true))
+        return wprt_u_open_failed(&u, failures);
+    static char file[20000];
+    size_t len = wprt_u_full_file(file, 'x');
+    bool resumed = wprt_u_put(&u, file, len) && wpr_resume(u.r).ok;
+    long got = wprt_u_slurp(&u);
+    wprt_report("a record of 256 expired lines (the longest the table "
+                "holds) is read back whole",
+                resumed && wprt_u_used(u.r) == WPR_MAX_ENTRIES &&
+                    wprt_u_count_state(u.r, WPR_EXPIRED) == WPR_MAX_ENTRIES,
+                &failures);
+    wprt_report("and is written out again byte for byte",
+                resumed && got == (long)len &&
+                    memcmp(wprt_u_buf, file, len) == 0,
+                &failures);
+    wprt_u_close(&u);
+    return failures;
+}
+
+static int wprt_u_case_overlong_record(void)
+{
+    int failures = 0;
+    struct wprt_u u;
+    if (!wprt_u_open(&u, true))
+        return wprt_u_open_failed(&u, failures);
+    static char file[20000];
+    size_t len = wprt_u_full_file(file, 0);
+    bool resumed = wprt_u_put(&u, file, len) && wpr_resume(u.r).ok;
+    wprt_report("a record with more lines than the table holds is read "
+                "without overrunning it; the wallet holds none of them, so "
+                "none is kept",
+                resumed && wprt_u_used(u.r) == 0 && wprt_lock_free(u.r),
+                &failures);
+    wprt_u_close(&u);
+    return failures;
+}
+
+/* ── nothing to read, and a send the wallet does not hold ───────────── */
+
+/* The next call's locals land on the bytes this one leaves behind. */
+__attribute__((noinline)) static void wprt_u_dirty_stack(void)
+{
+    volatile unsigned char junk[60000];
+    for (size_t i = 0; i < sizeof(junk); i++)
+        junk[i] = 1;
+}
+
+static bool wprt_u_resume_finds_nothing(struct wprt_u *u)
+{
+    wprt_u_dirty_stack();
+    bool ok = wpr_resume(u->r).ok;
+    return ok && wprt_u_used(u->r) == 0 && wprt_lock_free(u->r);
+}
+
+static bool wprt_u_resume_forgets(struct wprt_u *u)
+{
+    struct uint256 id = wprt_u_id(0x91, 0);
+    bool prepared = wpr_prepare(u->r, &id).ok;
+    bool ok = prepared && wprt_u_entry(u->r, &id) && wpr_resume(u->r).ok;
+    return ok && !wprt_u_entry(u->r, &id) && wprt_u_file_is(u, NULL, 0) &&
+           wprt_lock_free(u->r);
+}
+
+static int wprt_u_case_resume_nothing(void)
+{
+    int failures = 0;
+    struct wprt_u none, dir;
+    bool a = wprt_u_open(&none, false);
+    bool b = wprt_u_open(&dir, true);
+    wprt_report("a relay without a data directory resumes nothing",
+                a && wprt_u_resume_finds_nothing(&none), &failures);
+    wprt_report("a data directory without a record resumes nothing",
+                b && wprt_u_resume_finds_nothing(&dir), &failures);
+    wprt_report("a recorded send the wallet does not hold is dropped from "
+                "the table and the record",
+                b && wprt_u_resume_forgets(&dir), &failures);
+    wprt_u_close(&none);
+    wprt_u_close(&dir);
+    return failures;
+}
+
+
+static int wprt_units_run(void)
+{
+    int failures = 0;
+    failures += wprt_u_case_names_and_init();
+    failures += wprt_u_case_null_arguments();
+    failures += wprt_u_case_delay_and_fields();
+    failures += wprt_u_case_pending_file();
+    failures += wprt_u_case_record_refused();
+    failures += wprt_u_case_slot_reuse();
+    failures += wprt_u_case_dirty_free_slot();
+    failures += wprt_u_case_hand_written();
+    failures += wprt_u_case_full_record();
+    failures += wprt_u_case_overlong_record();
+    failures += wprt_u_case_resume_nothing();
+    return failures;
+}
+
+/* ── resume against a real wallet ───────────────────────────────────── */
+
+/* The wallet holds a send the chain has since consumed an input of: the
+ * private pool refuses it, so a resumed relay must not call it scheduled. */
+static int wprt_case_resume_refused_by_pool(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 2, false);
+    struct uint256 id;
+    ok = ok && wprt_add_peer(&f, WPRT_ONION_OUT) &&
+         wprt_rpc_send(&f, false, 10.0, &id);
+    struct outpoint spent;
+    memset(&spent, 0, sizeof(spent));
+    struct wallet_tx held;
+    bool have = ok && wprt_copy_tx(&f, &id, &held);
+    if (have) {
+        have = held.tx.num_vin > 0;
+        if (have)
+            spent = held.tx.vin[0].prevout;
+        transaction_free(&held.tx);
+    }
+    if (have)
+        wprt_chain_consumes(&f, &spent);
+    ok = ok && have;
+    wprt_restart_relay(&f);
+    bool resumed = ok && wpr_resume(wpr_global()).ok;
+    bool found = false;
+    enum wpr_state st = wprt_state(&id, &found);
+    wprt_report("a resumed send whose input the chain has consumed is held "
+                "for a route, never scheduled, and is not in the private pool",
+                resumed && found && st == WPR_WAITING_FOR_ROUTE &&
+                    !tx_mempool_exists(wpr_pool(wpr_global()), &id) &&
+                    tx_mempool_size(&f.main_pool) == 0,
+                &failures);
+    wprt_close(&f);
+    return failures;
+}
+
+/* A send with one confirmation is done: resume must not schedule it. */
+static int wprt_case_resume_confirmed_once(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 2, false);
+    struct uint256 id;
+    ok = ok && wprt_add_peer(&f, WPRT_ONION_OUT) &&
+         wprt_rpc_send(&f, false, 10.0, &id);
+    struct wallet_tx wtx;
+    struct uint256 bh;
+    memset(bh.data, 0xB3, 32);
+    struct block_index bi;
+    memset(&bi, 0, sizeof(bi));
+    bi.nHeight = 50;
+    bi.phashBlock = &bh;
+    bool have = ok && wprt_copy_tx(&f, &id, &wtx);
+    wprt_set_wallet_height(&f, 50);
+    if (have) {
+        wallet_sync_transaction(f.wallet, &wtx.tx, &bi);
+        transaction_free(&wtx.tx);
+    }
+    struct wallet_tx now;
+    bool once = have && wprt_copy_tx(&f, &id, &now) && now.confirms == 1;
+    if (once)
+        transaction_free(&now.tx);
+    wprt_restart_relay(&f);
+    bool recorded = once && wpr_prepare(wpr_global(), &id).ok;
+    bool resumed = recorded && wpr_resume(wpr_global()).ok;
+    bool found = false;
+    enum wpr_state st = wprt_state(&id, &found);
+    wprt_report("the wallet shows the send with exactly one confirmation",
+                once, &failures);
+    wprt_report("a resumed send with one confirmation is not scheduled and "
+                "not in the private pool",
+                resumed && found && st != WPR_SCHEDULED &&
+                    st != WPR_WAITING_FOR_ROUTE &&
+                    !tx_mempool_exists(wpr_pool(wpr_global()), &id),
+                &failures);
+    wprt_close(&f);
+    return failures;
+}
+
 int test_wallet_private_relay(void);
 int test_wallet_private_relay(void)
 {
     int failures = 0;
+    failures += wprt_units_run();
+    failures += wprt_case_resume_refused_by_pool();
+    failures += wprt_case_resume_confirmed_once();
     failures += wprt_case_public_witness();
     failures += wprt_case_private_send();
     failures += wprt_case_delay();
