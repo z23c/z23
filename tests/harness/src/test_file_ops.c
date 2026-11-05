@@ -1,7 +1,14 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
 
 #include "test/test_core.h"
 #include "config/file_ops.h"
+#include <dirent.h>
+#include <fcntl.h>
+#include <stdlib.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static bool write_text_file(const char *path, const char *contents)
@@ -152,6 +159,545 @@ static int test_block_files_copy_rev_failure(void)
     return failures;
 }
 
+/* ---- fixtures for the mutation-measured gaps ---- */
+
+static void fo_path(char *out, size_t cap, const char *dir, const char *name)
+{
+    snprintf(out, cap, "%s/%s", dir, name);
+}
+
+static bool fo_exists(const char *path)
+{
+    return access(path, F_OK) == 0;
+}
+
+/* A fresh private root under its real path, so a path built from it keeps
+ * its length through the destination resolver's realpath. */
+static bool fo_root(char *real, const char *tag)
+{
+    char raw[PATH_MAX];
+    char *dir = test_mkdtemp(raw, sizeof(raw), tag);
+    return dir && realpath(dir, real) != NULL;
+}
+
+static bool fo_write_pattern(const char *path, size_t size)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return false;
+    bool ok = true;
+    for (size_t i = 0; ok && i < size; i++)
+        ok = fputc((int)((i * 31 + 7) & 0xFF), f) != EOF;
+    return fclose(f) == 0 && ok;
+}
+
+static bool fo_check_pattern(const char *path, size_t size)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false;
+    bool ok = true;
+    for (size_t i = 0; ok && i < size; i++)
+        ok = fgetc(f) == (int)((i * 31 + 7) & 0xFF);
+    ok = ok && fgetc(f) == EOF;
+    fclose(f);
+    return ok;
+}
+
+static int fo_fd_count(void)
+{
+    DIR *d = opendir("/proc/self/fd");
+    if (!d)
+        return -1;
+    int n = 0;
+    while (readdir(d))
+        n++;
+    closedir(d);
+    return n;
+}
+
+/* Entries in dir other than . and ..; *staging counts the ones that look
+ * like a leftover staging file. */
+static int fo_entries(const char *dir, int *staging)
+{
+    DIR *d = opendir(dir);
+    if (!d)
+        return -1;
+    int n = 0;
+    *staging = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
+            continue;
+        n++;
+        if (strstr(e->d_name, ".tmp."))
+            (*staging)++;
+    }
+    closedir(d);
+    return n;
+}
+
+/* Capture of stdout and stderr into two files while dir_copy runs. */
+struct fo_capture {
+    int saved[2];
+    int file[2];
+};
+
+static bool fo_capture_begin(struct fo_capture *c, const char *out_path,
+                             const char *err_path)
+{
+    fflush(stdout);
+    fflush(stderr);
+    c->file[0] = open(out_path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    c->file[1] = open(err_path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    c->saved[0] = dup(1);
+    c->saved[1] = dup(2);
+    bool ok = c->file[0] >= 0 && c->file[1] >= 0 && c->saved[0] >= 0 &&
+              c->saved[1] >= 0;
+    return ok && dup2(c->file[0], 1) >= 0 && dup2(c->file[1], 2) >= 0;
+}
+
+static void fo_capture_end(struct fo_capture *c, char *out, size_t out_size,
+                           char *err, size_t err_size)
+{
+    fflush(stdout);
+    fflush(stderr);
+    if (c->saved[0] >= 0)
+        dup2(c->saved[0], 1);
+    if (c->saved[1] >= 0)
+        dup2(c->saved[1], 2);
+    ssize_t n = c->file[0] >= 0 ? pread(c->file[0], out, out_size - 1, 0) : -1;
+    out[n > 0 ? n : 0] = '\0';
+    n = c->file[1] >= 0 ? pread(c->file[1], err, err_size - 1, 0) : -1;
+    err[n > 0 ? n : 0] = '\0';
+    for (int i = 0; i < 2; i++) {
+        if (c->saved[i] >= 0)
+            close(c->saved[i]);
+        if (c->file[i] >= 0)
+            close(c->file[i]);
+    }
+}
+
+/* dir_copy with its stdout and stderr captured. Returns 1 or 0 for the
+ * result, -1 when the capture could not be set up. */
+static int fo_dir_copy_captured(const char *dir, const char *src,
+                                const char *dst, char *out, char *err)
+{
+    char out_path[PATH_MAX], err_path[PATH_MAX];
+    struct fo_capture c = {{-1, -1}, {-1, -1}};
+    fo_path(out_path, sizeof(out_path), dir, "capture.out");
+    fo_path(err_path, sizeof(err_path), dir, "capture.err");
+    bool begun = fo_capture_begin(&c, out_path, err_path);
+    int result = begun ? (dir_copy(src, dst) ? 1 : 0) : -1;
+    fo_capture_end(&c, out, 256, err, 256);
+    return result;
+}
+
+/* mkdir -p style: root/tag followed by components until the path is exactly
+ * total bytes long. */
+static bool fo_long_dir(const char *root, const char *tag, size_t total,
+                        char *out, size_t cap)
+{
+    int n = snprintf(out, cap, "%s/%s", root, tag);
+    if (n <= 0 || (size_t)n > total || total >= cap || mkdir(out, 0700) != 0)
+        return false;
+    size_t len = (size_t)n;
+    while (len < total) {
+        size_t remaining = total - len;
+        if (remaining < 2)
+            return false;
+        size_t comp = remaining - 1 <= 200 ? remaining - 1 : 100;
+        out[len++] = '/';
+        memset(out + len, 'd', comp);
+        len += comp;
+        out[len] = '\0';
+        if (mkdir(out, 0700) != 0)
+            return false;
+    }
+    return len == total;
+}
+
+static bool fo_roundtrip(const char *dir, size_t size)
+{
+    char src[PATH_MAX], dst[PATH_MAX];
+    int staging = 0;
+    fo_path(src, sizeof(src), dir, "src.bin");
+    fo_path(dst, sizeof(dst), dir, "dst.bin");
+    bool ok = fo_write_pattern(src, size) && file_copy(src, dst) &&
+              fo_check_pattern(dst, size);
+    return ok && fo_entries(dir, &staging) == 2 && staging == 0;
+}
+
+static int test_file_copy_chunk_boundaries(void)
+{
+    int failures = 0;
+
+    TEST("file_ops file_copy is byte-exact across chunk edges, leaves no staging, closes its files") {
+        char dir[PATH_MAX];
+        static const size_t sizes[] = {0, 1, 65535, 65536, 65537, 131079};
+        bool ok = fo_root(dir, "zcl_file_copy_chunks");
+        int before = fo_fd_count();
+        for (size_t i = 0; ok && i < sizeof(sizes) / sizeof(sizes[0]); i++)
+            ok = fo_roundtrip(dir, sizes[i]);
+        int after = fo_fd_count();
+        dir_remove_tree(dir);
+        ASSERT(ok);
+        ASSERT(before > 0 && before == after);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
+static int test_file_copy_refusals(void)
+{
+    int failures = 0;
+
+    TEST("file_ops file_copy refuses bad sources and destinations with no residue") {
+        char dir[PATH_MAX];
+        char src[PATH_MAX], empty[PATH_MAX], gone[PATH_MAX], target[PATH_MAX];
+        char nodir[PATH_MAX], out[PATH_MAX];
+        int staging = 0;
+        bool ok = fo_root(dir, "zcl_file_copy_refuse");
+        fo_path(src, sizeof(src), dir, "src.txt");
+        fo_path(empty, sizeof(empty), dir, "empty.txt");
+        fo_path(gone, sizeof(gone), dir, "gone.txt");
+        fo_path(target, sizeof(target), dir, "target");
+        fo_path(out, sizeof(out), dir, "out.txt");
+        snprintf(nodir, sizeof(nodir), "%s/nodir/out", dir);
+        ok = ok && fo_write_pattern(src, 100) && fo_write_pattern(empty, 0);
+        ok = ok && mkdir(target, 0700) == 0;
+        int before = fo_fd_count();
+        bool refused = !file_copy(gone, out) && !file_copy(src, "relative-out.txt") &&
+                       !file_copy(src, nodir) && !file_copy(empty, nodir) &&
+                       !file_copy(src, target) && !file_copy(empty, target);
+        int after = fo_fd_count();
+        bool clean = fo_entries(dir, &staging) == 3 && staging == 0 &&
+                     !fo_exists(out) && !fo_exists("relative-out.txt");
+        dir_remove_tree(dir);
+        ASSERT(ok);
+        ASSERT(refused);
+        ASSERT(clean);
+        ASSERT(before > 0 && before == after);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
+static int test_dir_copy_semantics(void)
+{
+    int failures = 0;
+
+    TEST("file_ops dir_copy empties the destination, skips dot files and LOCK, counts copies") {
+        char dir[PATH_MAX], src[PATH_MAX], dst[PATH_MAX], name[PATH_MAX];
+        char out[256], err[256];
+        bool ok = fo_root(dir, "zcl_dir_copy_sem");
+        fo_path(src, sizeof(src), dir, "src");
+        fo_path(dst, sizeof(dst), dir, "dst");
+        ok = ok && mkdir(src, 0700) == 0 && mkdir(dst, 0700) == 0;
+        const char *names[] = {"one.txt", "two.txt", ".hidden", "LOCK"};
+        for (size_t i = 0; ok && i < 4; i++) {
+            fo_path(name, sizeof(name), src, names[i]);
+            ok = fo_write_pattern(name, 10 + i);
+        }
+        fo_path(name, sizeof(name), dst, "stale.txt");
+        ok = ok && fo_write_pattern(name, 3);
+        int result = ok ? fo_dir_copy_captured(dir, src, dst, out, err) : -1;
+        char one[PATH_MAX], two[PATH_MAX], hidden[PATH_MAX], lock[PATH_MAX];
+        fo_path(one, sizeof(one), dst, "one.txt");
+        fo_path(two, sizeof(two), dst, "two.txt");
+        fo_path(hidden, sizeof(hidden), dst, ".hidden");
+        fo_path(lock, sizeof(lock), dst, "LOCK");
+        bool copied = fo_check_pattern(one, 10) && fo_check_pattern(two, 11);
+        bool skipped = !fo_exists(hidden) && !fo_exists(lock) && !fo_exists(name);
+        dir_remove_tree(dir);
+        ASSERT(ok);
+        ASSERT_EQ(result, 1);
+        ASSERT(copied);
+        ASSERT(skipped);
+        ASSERT(strcmp(out, " 2 files") == 0);
+        ASSERT(strstr(err, "Warning") == NULL);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
+static int test_dir_copy_refusal_reports(void)
+{
+    int failures = 0;
+
+    TEST("file_ops dir_copy refuses a missing source or unusable destination and says so") {
+        char dir[PATH_MAX], src[PATH_MAX], dst[PATH_MAX], file[PATH_MAX];
+        char sub[PATH_MAX], bad[PATH_MAX], out[256], err[256];
+        bool ok = fo_root(dir, "zcl_dir_copy_refuse");
+        fo_path(src, sizeof(src), dir, "src");
+        fo_path(dst, sizeof(dst), dir, "dst");
+        fo_path(file, sizeof(file), dir, "plain");
+        fo_path(sub, sizeof(sub), src, "sub");
+        fo_path(bad, sizeof(bad), file, "child");
+        ok = ok && mkdir(src, 0700) == 0 && fo_write_pattern(file, 1);
+        int missing = ok ? fo_dir_copy_captured(dir, "/nonexistent-src-dir", dst, out, err) : -1;
+        int under_file = ok ? fo_dir_copy_captured(dir, src, bad, out, err) : -1;
+        bool refused_msg = strstr(err, "private directory refused") != NULL;
+        char one[PATH_MAX];
+        fo_path(one, sizeof(one), src, "ok.txt");
+        ok = ok && fo_write_pattern(one, 4) && mkdir(sub, 0700) == 0;
+        int partial = ok ? fo_dir_copy_captured(dir, src, dst, out, err) : -1;
+        bool counted = strcmp(out, " 1 files") == 0 && strstr(err, "1 files failed") != NULL;
+        dir_remove_tree(dir);
+        ASSERT(ok);
+        ASSERT_EQ(missing, 0);
+        ASSERT_EQ(under_file, 0);
+        ASSERT(refused_msg);
+        ASSERT_EQ(partial, 0);
+        ASSERT(counted);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
+static bool fo_series_file(const char *dir, const char *name, size_t size)
+{
+    char path[PATH_MAX];
+    fo_path(path, sizeof(path), dir, name);
+    return fo_write_pattern(path, size);
+}
+
+static bool fo_series_has(const char *dir, const char *name, size_t size)
+{
+    char path[PATH_MAX];
+    fo_path(path, sizeof(path), dir, name);
+    return fo_check_pattern(path, size);
+}
+
+static int test_block_files_copy_series(void)
+{
+    int failures = 0;
+
+    TEST("file_ops block_files_copy copies every pair, treats a gap as the end, refuses a planted directory") {
+        char dir[PATH_MAX], src[PATH_MAX], dst[PATH_MAX], bad[PATH_MAX];
+        char bad_blk[PATH_MAX];
+        bool ok = fo_root(dir, "zcl_block_series");
+        fo_path(src, sizeof(src), dir, "src");
+        fo_path(dst, sizeof(dst), dir, "dst");
+        fo_path(bad, sizeof(bad), dir, "bad");
+        fo_path(bad_blk, sizeof(bad_blk), bad, "blk00000.dat");
+        ok = ok && mkdir(src, 0700) == 0 && mkdir(dst, 0700) == 0 && mkdir(bad, 0700) == 0;
+        ok = ok && fo_series_file(src, "blk00000.dat", 5) &&
+             fo_series_file(src, "rev00000.dat", 6) &&
+             fo_series_file(src, "blk00001.dat", 7) &&
+             fo_series_file(src, "blk00003.dat", 8);
+        int copied = ok ? block_files_copy(src, dst) : -9;
+        bool landed = fo_series_has(dst, "blk00000.dat", 5) &&
+                      fo_series_has(dst, "rev00000.dat", 6) &&
+                      fo_series_has(dst, "blk00001.dat", 7);
+        char absent[PATH_MAX], gap[PATH_MAX];
+        fo_path(absent, sizeof(absent), dst, "rev00001.dat");
+        fo_path(gap, sizeof(gap), dst, "blk00003.dat");
+        bool stopped = !fo_exists(absent) && !fo_exists(gap);
+        int none = block_files_copy(dir, dst);
+        ok = ok && mkdir(bad_blk, 0700) == 0;
+        int planted = ok ? block_files_copy(bad, dst) : -9;
+        dir_remove_tree(dir);
+        ASSERT(ok);
+        ASSERT_EQ(copied, 2);
+        ASSERT(landed);
+        ASSERT(stopped);
+        ASSERT_EQ(none, 0);
+        ASSERT_EQ(planted, -1);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
+static int test_block_files_clean_selection(void)
+{
+    int failures = 0;
+
+    TEST("file_ops block_files_clean removes only blk*.dat and rev*.dat regular files") {
+        char dir[PATH_MAX], sub[PATH_MAX];
+        bool ok = fo_root(dir, "zcl_block_clean");
+        static const char *const gone[] = {"blk00000.dat", "rev00001.dat"};
+        static const char *const kept[] = {"blkx", "blz00.dat", "notes.txt",
+                                           "other.dat", "rez00.dat", "revx"};
+        for (size_t i = 0; ok && i < 2; i++)
+            ok = fo_series_file(dir, gone[i], 4);
+        for (size_t i = 0; ok && i < 6; i++)
+            ok = fo_series_file(dir, kept[i], 4);
+        fo_path(sub, sizeof(sub), dir, "blk99.dat");
+        ok = ok && mkdir(sub, 0700) == 0;
+        if (ok)
+            block_files_clean(dir);
+        bool removed = true, retained = fo_exists(sub);
+        for (size_t i = 0; i < 2; i++) {
+            char path[PATH_MAX];
+            fo_path(path, sizeof(path), dir, gone[i]);
+            removed = removed && !fo_exists(path);
+        }
+        for (size_t i = 0; i < 6; i++)
+            retained = retained && fo_series_has(dir, kept[i], 4);
+        int before = fo_fd_count();
+        if (ok)
+            block_files_clean(dir);
+        int after = fo_fd_count();
+        dir_remove_tree(dir);
+        ASSERT(ok);
+        ASSERT(removed);
+        ASSERT(retained);
+        ASSERT(before > 0 && before == after);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
+/* ---- path-length edges: scratch buffers are exactly 1024 and 4096 ---- */
+
+static bool fo_block_scenario(const char *root, const char *tag, size_t src_len,
+                              size_t dst_len, int expected)
+{
+    char src_tag[16], dst_tag[16], src[PATH_MAX], dst[PATH_MAX];
+    snprintf(src_tag, sizeof(src_tag), "%ss", tag);
+    snprintf(dst_tag, sizeof(dst_tag), "%sd", tag);
+    if (!fo_long_dir(root, src_tag, src_len, src, sizeof(src)) ||
+        !fo_long_dir(root, dst_tag, dst_len, dst, sizeof(dst)) ||
+        !fo_series_file(src, "blk00000.dat", 9))
+        return false;
+    return block_files_copy(src, dst) == expected;
+}
+
+static int test_block_files_copy_path_limits(void)
+{
+    int failures = 0;
+
+    TEST("file_ops block_files_copy joins paths up to 1023 bytes and refuses 1024") {
+        char root[PATH_MAX];
+        bool ok = fo_root(root, "zcl_block_long");
+        /* dir + '/' + "blk00000.dat" (12) is 1023 for a 1010-byte dir. */
+        bool src_fits = ok && fo_block_scenario(root, "a", 1010, 100, 1);
+        bool src_over = ok && fo_block_scenario(root, "b", 1011, 100, -1);
+        bool dst_fits = ok && fo_block_scenario(root, "c", 100, 1010, 1);
+        bool dst_over = ok && fo_block_scenario(root, "e", 100, 1011, -1);
+        dir_remove_tree(root);
+        ASSERT(ok);
+        ASSERT(src_fits);
+        ASSERT(src_over);
+        ASSERT(dst_fits);
+        ASSERT(dst_over);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
+static int fo_dir_scenario(const char *root, const char *tag, size_t src_len,
+                           size_t dst_len)
+{
+    char src_tag[16], dst_tag[16], src[PATH_MAX], dst[PATH_MAX];
+    char out[256], err[256];
+    snprintf(src_tag, sizeof(src_tag), "%ss", tag);
+    snprintf(dst_tag, sizeof(dst_tag), "%sd", tag);
+    if (!fo_long_dir(root, src_tag, src_len, src, sizeof(src)) ||
+        !fo_long_dir(root, dst_tag, dst_len, dst, sizeof(dst)) ||
+        !fo_series_file(src, "f", 9))
+        return -1;
+    return fo_dir_copy_captured(root, src, dst, out, err);
+}
+
+static int test_dir_copy_path_limits(void)
+{
+    int failures = 0;
+
+    TEST("file_ops dir_copy joins entry paths up to 1023 bytes and refuses 1024") {
+        char root[PATH_MAX];
+        bool ok = fo_root(root, "zcl_dir_long");
+        int src_fits = ok ? fo_dir_scenario(root, "a", 1021, 100) : -1;
+        int src_over = ok ? fo_dir_scenario(root, "b", 1022, 100) : -1;
+        int dst_fits = ok ? fo_dir_scenario(root, "c", 100, 1021) : -1;
+        int dst_over = ok ? fo_dir_scenario(root, "e", 100, 1022) : -1;
+        dir_remove_tree(root);
+        ASSERT(ok);
+        ASSERT_EQ(src_fits, 1);
+        ASSERT_EQ(src_over, 0);
+        ASSERT_EQ(dst_fits, 1);
+        ASSERT_EQ(dst_over, 0);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
+static bool fo_clean_scenario(const char *root, const char *tag, size_t len,
+                              bool expect_removed)
+{
+    char dir[PATH_MAX], path[PATH_MAX];
+    if (!fo_long_dir(root, tag, len, dir, sizeof(dir)) ||
+        !fo_series_file(dir, "blk00000.dat", 4))
+        return false;
+    block_files_clean(dir);
+    fo_path(path, sizeof(path), dir, "blk00000.dat");
+    return fo_exists(path) != expect_removed;
+}
+
+static int test_block_files_clean_path_limits(void)
+{
+    int failures = 0;
+
+    TEST("file_ops block_files_clean reaches files at 1023 bytes and leaves 1024") {
+        char root[PATH_MAX];
+        bool ok = fo_root(root, "zcl_clean_long");
+        bool fits = ok && fo_clean_scenario(root, "a", 1010, true);
+        bool over = ok && fo_clean_scenario(root, "b", 1011, false);
+        dir_remove_tree(root);
+        ASSERT(ok);
+        ASSERT(fits);
+        ASSERT(over);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
+static bool fo_stage_scenario(const char *root, const char *tag, size_t dst_len,
+                              bool expect_copy)
+{
+    char dir[PATH_MAX], src[PATH_MAX], dst[PATH_MAX];
+    int staging = 0;
+    /* dst is dir + "/x", so the staging name adds 21 bytes to dst_len. */
+    if (!fo_long_dir(root, tag, dst_len - 2, dir, sizeof(dir)))
+        return false;
+    fo_path(src, sizeof(src), root, "stage-src.bin");
+    fo_path(dst, sizeof(dst), dir, "x");
+    if (!fo_write_pattern(src, 33))
+        return false;
+    bool copied = file_copy(src, dst);
+    bool good = copied == expect_copy && fo_check_pattern(dst, 33) == expect_copy;
+    return good && fo_entries(dir, &staging) == (expect_copy ? 1 : 0) && staging == 0;
+}
+
+static int test_file_copy_staging_name_limit(void)
+{
+    int failures = 0;
+
+    TEST("file_ops file_copy fits its staging name in 4095 bytes and refuses 4096") {
+        char root[PATH_MAX];
+        bool ok = fo_root(root, "zcl_stage_long");
+        bool fits = ok && fo_stage_scenario(root, "a", 4074, true);
+        bool over = ok && fo_stage_scenario(root, "b", 4075, false);
+        dir_remove_tree(root);
+        ASSERT(ok);
+        ASSERT(fits);
+        ASSERT(over);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
 int test_file_ops(void)
 {
     int failures = 0;
@@ -160,6 +706,16 @@ int test_file_ops(void)
     failures += test_dir_copy_success();
     failures += test_dir_copy_partial_failure();
     failures += test_block_files_copy_rev_failure();
+    failures += test_file_copy_chunk_boundaries();
+    failures += test_file_copy_refusals();
+    failures += test_dir_copy_semantics();
+    failures += test_dir_copy_refusal_reports();
+    failures += test_block_files_copy_series();
+    failures += test_block_files_clean_selection();
+    failures += test_block_files_copy_path_limits();
+    failures += test_dir_copy_path_limits();
+    failures += test_block_files_clean_path_limits();
+    failures += test_file_copy_staging_name_limit();
 
     return failures;
 }
