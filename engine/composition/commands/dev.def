@@ -699,6 +699,25 @@ ZCL_COMMAND_DEV_COMMAND(
     "z23-dev dev proof status")
 
 ZCL_COMMAND_DEV_COMMAND(
+    "dev.proof.remote", "dev.proof", "",
+    "Place and prove one owner-supplied remote source in this linked lane",
+    "The local owner supplies an exact source assignment and expected proof "
+    "identity. The registered invocation checkout is the only destination. "
+    "Returns PASS only after independent signed receipt verification; "
+    "retains input observations on failure as well as success.", 0,
+    "dev,proof,remote,foreground,receipt",
+    "zcl.dev_proof_remote_input.v1", "zcl.dev_proof_remote_result.v1",
+    "repository,destination,bundle,offer,local_commit,remote_base,bundle_sha256,git_tree,source_id,signer_pubkey,source_root,source_cas_root,changed_set_root,impact_policy_root", "",
+    "z23-dev dev proof remote --input=<assignment>",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_HIGH, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY, zcl_native_handle_dev_proof_remote,
+    "remote proof requires the dev binary", "z23-dev dev proof status")
+
+ZCL_COMMAND_DEV_COMMAND(
     "dev.proof.step", "dev.proof", "",
     "Execute one explicit proof pair in the foreground without a watcher",
     "Queues only the explicit local commit and remote base if missing, then "
