@@ -1,2 +1,4 @@
 /* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
 ZCL_MODULE_CAPABILITY("tools/command/native_dev_proof_remote_command.c", CAP_FS_READ, "opens the exact bounded native proof receipt beneath the invocation checkout for independent signature and input verification")
+ZCL_MODULE_CAPABILITY("tools/command/native_dev_proof_remote_command.c", CAP_FS_WRITE, "creates private expectation scratch for the existing changed-set and source-plan derivation")
+ZCL_MODULE_CAPABILITY("tools/command/native_dev_proof_remote_command.c", CAP_PROCESS, "runs this native expectation command in a bounded qualified child environment without changing the caller environment")

@@ -13,6 +13,13 @@
 #define ZCL_DEV_PROOF_REMOTE_BUNDLE_MAX_BYTES (256u * 1024u * 1024u)
 #define ZCL_DEV_PROOF_REMOTE_OFFER_MAX_BYTES 16384u
 
+/* Refuse configured lazy fetch and external filters before object/status reads.
+ * Caller must first establish the existing qualified Git environment boundary.
+ * This check does not establish workspace ownership or cleanliness. */
+#if !defined(_WIN32)
+bool zcl_dev_proof_remote_git_policy_check(const char *root, char *why, size_t why_len);
+#endif
+
 /* Supplied by an authenticated caller, never copied from the returned receipt.
  * source_root is the receipt's Git-commit-derived root, NOT a Git tree,
  * captured source_id or ZVCS CAS root. Those identities must stay distinct.

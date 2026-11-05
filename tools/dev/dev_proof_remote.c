@@ -155,8 +155,9 @@ static bool remote_assignment_valid(
         zcl_dev_proof_oid_decode(a->git_tree, oid, &len);
 }
 
-static bool remote_clean(const char *root, char *why, size_t size)
+bool zcl_dev_proof_remote_git_policy_check(const char *root, char *why, size_t size)
 {
+    if (!remote_git_environment(why, size)) return false;
     char output[16384];
     /* Refuse lazy-fetch configuration before status or any object reads. */
     const char *promisor[] = {"config", "--get-regexp",
@@ -169,6 +170,13 @@ static bool remote_clean(const char *root, char *why, size_t size)
     rc = remote_git(root, config, output, sizeof(output));
     if (rc != 1 || output[0])
         return remote_refuse(why, size, "remote_git_external_filter_or_config");
+    return true;
+}
+
+static bool remote_clean(const char *root, char *why, size_t size)
+{
+    char output[16384];
+    if (!zcl_dev_proof_remote_git_policy_check(root, why, size)) return false;
     const char *status[] = {"status", "--porcelain=v1", "--untracked-files=all", NULL};
     if (remote_git(root, status, output, sizeof(output)) != 0 || output[0])
         return remote_refuse(why, size, "remote_destination_dirty_or_unreadable");

@@ -3,6 +3,7 @@
 #include "test/test_core.h"
 #include "test/host_tool_capture.h"
 #include "dev_proof.h"
+#include "base/safe_alloc.h"
 #include "json/json.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -239,6 +240,393 @@ static bool rcmd_recovery(const char *current, const char *binary)
     return ok;
 }
 
+struct rcmd_expect_fixture {
+    char root[1024], primary[1200], linked[1200], binary[1400];
+    char base[65], local[65], tree[65];
+    struct dev_source_record source;
+    uint8_t git_source[32], changed[32], impact[32];
+};
+
+/* A committed capture-helper fixture delegates to the maintained helper,
+ * but can perform one deterministic concurrent-source mutation when armed.
+ * No identity/root output is replaced or synthesized. */
+static bool rcmd_expect_capture_fixture(struct rcmd_expect_fixture *f)
+{
+    char path[1400], original[1400];
+    if (!rpp_path(path, sizeof(path), f->primary, "tools/dev/source-identity.sh") ||
+        !rpp_path(original, sizeof(original), f->root, "capture-original") ||
+        !rcmd_copy(path, original)) return false;
+    FILE *in = fopen(original, "rb"), *out = in ? fopen(path, "wb") : NULL;
+    if (!out) { if (in) fclose(in); return false; }
+    bool ok = fputs("#!/usr/bin/env bash\n"
+        "if test -f .cache/remote-expect-drift; then\n"
+        "  rm .cache/remote-expect-drift\n"
+        "  printf '\\nCapture-time mutation.\\n' >> README.md\n"
+        "fi\n", out) >= 0;
+    char bytes[8192]; size_t n;
+    while ((n = fread(bytes, 1, sizeof(bytes), in)) != 0)
+        if (fwrite(bytes, 1, n, out) != n) { ok = false; break; }
+    if (ferror(in)) ok = false;
+    if (fclose(in) != 0) ok = false;
+    if (fclose(out) != 0) ok = false;
+    return ok;
+}
+
+static bool rcmd_expect_commit(struct rcmd_expect_fixture *f)
+{
+    char readme[1400];
+    if (!rpp_path(readme, sizeof(readme), f->primary, "README.md")) return false;
+    FILE *file = fopen(readme, "ab");
+    if (!file) return false;
+    bool ok = fputs("\nRemote expectation full-source control.\n", file) >= 0;
+    if (fclose(file) != 0) ok = false;
+    return ok && rcmd_expect_capture_fixture(f) &&
+        RPP_GIT(f->primary, NULL, 0, "add", "README.md", "tools/dev/source-identity.sh") &&
+        RPP_GIT(f->primary, NULL, 0, "commit", "--quiet", "-m", "full-source expectation control") &&
+        RPP_GIT(f->primary, f->local, sizeof(f->local), "rev-parse", "HEAD") &&
+        RPP_GIT(f->primary, f->tree, sizeof(f->tree), "rev-parse", "HEAD^{tree}");
+}
+
+/* Source comes from an explicit Git commit, never the caller's dirty files.
+ * Borrow immutable objects only; all checkout, index and private commits are
+ * in this isolated repository. This is the full maintained source tree. */
+static bool rcmd_expect_checkout(struct rcmd_expect_fixture *f, const char *current,
+                                  const char *binary)
+{
+    memset(f, 0, sizeof(*f));
+    test_make_tmpdir(f->root, sizeof(f->root), "dev_proof_remote_command", "full-source-expect");
+    return rpp_path(f->primary, sizeof(f->primary), f->root, "primary") &&
+        rpp_path(f->linked, sizeof(f->linked), f->root, "linked") &&
+        rpp_path(f->binary, sizeof(f->binary), f->primary, "build/bin/z23-dev") &&
+        RPP_GIT(current, f->base, sizeof(f->base), "rev-parse", "HEAD") &&
+        RPP_GIT(current, NULL, 0, "clone", "--quiet", "--shared", "--no-checkout", current, f->primary) &&
+        RPP_GIT(f->primary, NULL, 0, "checkout", "--quiet", "--detach", f->base) &&
+        rcmd_expect_commit(f) &&
+        RPP_GIT(f->primary, NULL, 0, "worktree", "add", "--quiet", "--detach", f->linked, f->local) &&
+        rpp_parents(f->binary) && rcmd_copy(binary, f->binary);
+}
+
+static bool rcmd_expect_native(struct rcmd_expect_fixture *f)
+{
+    char scratch[1400], changed[1400], why[512] = {0};
+    struct dev_source_record before = {0};
+    bool ok = rpp_path(scratch, sizeof(scratch), f->root, "native-raw") &&
+        rpp_path(changed, sizeof(changed), f->root, "native-changed") &&
+        zcl_dev_source_identity_capture(f->linked, &before, why, sizeof(why)) &&
+        zcl_dev_proof_source_plan_roots(f->linked, f->base, f->local, scratch, changed,
+            f->git_source, f->changed, f->impact, why, sizeof(why)) &&
+        zcl_dev_source_identity_capture(f->linked, &f->source, why, sizeof(why));
+    if (!ok) printf("full-source native expectation prerequisite: %s\n", why);
+    return ok && f->source.cas_present && f->source.cas_files_total > 1000u &&
+        !strcmp(before.source_id, f->source.source_id) &&
+        !strcmp(before.cas_root_sha3, f->source.cas_root_sha3) &&
+        !strcmp(before.mutation_id, f->source.mutation_id);
+}
+
+static bool rcmd_expect_input_operation(const struct rcmd_expect_fixture *f, const char *base,
+                              const char *extra, const char *operation, char input[8192])
+{
+    int n = snprintf(input, 8192,
+        "--input={\"operation\":%s,\"repository\":\"%s\","
+        "\"local_commit\":\"%s\",\"remote_base\":\"%s\",\"git_tree\":\"%s\","
+        "\"signer_pubkey\":\"%s\"%s}", operation, f->primary, f->local, base, f->tree, rcmd_hex, extra);
+    return n > 0 && n < 8192;
+}
+
+static bool rcmd_expect_input(const struct rcmd_expect_fixture *f, const char *base,
+                              const char *extra, char input[8192])
+{
+    return rcmd_expect_input_operation(f, base, extra, "\"expect\"", input);
+}
+
+static int rcmd_expect_run(const struct rcmd_expect_fixture *f, const char *input,
+                          const char *extra, char *out, size_t cap)
+{
+    char root[1400], home[1400], path[8192];
+    int n = snprintf(root, sizeof(root), "ZCL_DEV_SOURCE_ROOT=%s", f->linked);
+    int m = snprintf(home, sizeof(home), "HOME=%s", f->linked);
+    int p = snprintf(path, sizeof(path), "PATH=%s", getenv("PATH") ? getenv("PATH") : "");
+    if (n <= 0 || (size_t)n >= sizeof(root) || m <= 0 || (size_t)m >= sizeof(home) ||
+        p <= 0 || (size_t)p >= sizeof(path)) return -1;
+    const char *argv[] = {"/usr/bin/env", "-i", path, "LC_ALL=C",
+        "DEVBUILD_ACTIVE=z23", home, root, extra ? extra : "LC_ALL=C",
+        f->binary, "dev", "proof", "remote", input, NULL};
+    return test_host_tool_capture(argv, out, cap, 120000);
+}
+
+static bool rcmd_expect_no_proof(const struct rcmd_expect_fixture *f)
+{
+    static const char *const names[] = {"receipts", "requests", "attempts"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        char path[1600];
+        int n = snprintf(path, sizeof(path), "%s/.cache/zcl-dev-proof/%s", f->linked, names[i]);
+        if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+        DIR *dir = opendir(path);
+        if (!dir) { if (errno == ENOENT) continue; return false; }
+        bool empty = true;
+        for (;;) {
+            errno = 0; struct dirent *entry = readdir(dir);
+            if (!entry) { if (errno) empty = false; break; }
+            if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) { empty = false; break; }
+        }
+        if (closedir(dir) != 0 || !empty) return false;
+    }
+    return true;
+}
+
+static bool rcmd_expect_no_scratch(const struct rcmd_expect_fixture *f)
+{
+    char path[1600];
+    if (!rpp_path(path, sizeof(path), f->linked, ".cache/zcl-dev-proof")) return false;
+    DIR *dir = opendir(path);
+    if (!dir) return false;
+    bool ok = true;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(dir);
+        if (!entry) { if (errno) ok = false; break; }
+        if (!strncmp(entry->d_name, "remote-expect-", 14)) { ok = false; break; }
+    }
+    if (closedir(dir) != 0) ok = false;
+    return ok;
+}
+
+static bool rcmd_expect_refused(const char *out, const char *reason);
+
+static bool rcmd_expect_git_config(struct rcmd_expect_fixture *f)
+{
+    static const char *const keys[] = {"filter.fixture.clean", "remote.fixture.promisor"};
+    static const char *const reasons[] = {"remote_git_external_filter_or_config", "remote_git_lazy_fetch_config"};
+    char input[8192], out[16384];
+    if (!rcmd_expect_input(f, f->base, "", input)) return false;
+    for (size_t i = 0; i < 2; i++) {
+        if (!RPP_GIT(f->primary, NULL, 0, "config", keys[i], "true")) return false;
+        int rc = rcmd_expect_run(f, input, NULL, out, sizeof(out));
+        bool ok = rc > 0 && rcmd_expect_refused(out, reasons[i]);
+        if (!RPP_GIT(f->primary, NULL, 0, "config", "--unset", keys[i]) || !ok) return false;
+    }
+    return rcmd_expect_no_scratch(f);
+}
+
+static bool rcmd_expect_field(const struct json_value *capsule, const char *key, const char *expected)
+{
+    const struct json_value *v = json_get(capsule, key);
+    return v && v->type == JSON_STR && !strcmp(json_get_str(v), expected);
+}
+
+static bool rcmd_expect_roots(const struct rcmd_expect_fixture *f, const struct json_value *capsule)
+{
+    char source[65], changed[65], impact[65];
+    zcl_hex_encode(f->git_source, 32, source);
+    zcl_hex_encode(f->changed, 32, changed);
+    zcl_hex_encode(f->impact, 32, impact);
+    return rcmd_expect_field(capsule, "source_id", f->source.source_id) &&
+        rcmd_expect_field(capsule, "source_root", source) &&
+        rcmd_expect_field(capsule, "source_cas_root", f->source.cas_root_sha3) &&
+        rcmd_expect_field(capsule, "changed_set_root", changed) &&
+        rcmd_expect_field(capsule, "impact_policy_root", impact) && strcmp(source, f->source.source_id);
+}
+
+static bool rcmd_expect_capsule(const struct rcmd_expect_fixture *f, const char *out)
+{
+    struct json_value envelope = {0};
+    if (!json_read(&envelope, out, strlen(out))) return false;
+    const struct json_value *data = json_get(&envelope, "data");
+    const struct json_value *capsule = json_get(data, "expectation");
+    const struct json_value *executed = json_get(data, "proof_executed");
+    bool ok = json_get_bool(json_get(&envelope, "ok")) &&
+        rcmd_expect_field(data, "operation", "expect") &&
+        rcmd_expect_field(data, "status", "EXPECTATION_READY") &&
+        executed && executed->type == JSON_BOOL && !json_get_bool(executed) &&
+        rcmd_expect_field(capsule, "local_commit", f->local) &&
+        rcmd_expect_field(capsule, "remote_base", f->base) &&
+        rcmd_expect_field(capsule, "git_tree", f->tree) &&
+        rcmd_expect_field(capsule, "signer_pubkey", rcmd_hex) && rcmd_expect_roots(f, capsule);
+    json_free(&envelope);
+    return ok;
+}
+
+static bool rcmd_expect_refused(const char *out, const char *reason)
+{
+    struct json_value envelope = {0};
+    if (!json_read(&envelope, out, strlen(out))) return false;
+    const struct json_value *data = json_get(&envelope, "data");
+    const struct json_value *error = json_get(&envelope, "error");
+    bool ok = !json_get_bool(json_get(&envelope, "ok")) &&
+        !json_get(data, "expectation") && !json_get(data, "source_root") &&
+        rcmd_expect_field(error, "code", "REMOTE_PROOF_REFUSED") &&
+        rcmd_expect_field(error, "evidence", reason) && !strstr(out, "EXPECTATION_READY");
+    if (!ok) printf("expectation refusal mismatch expected=%s actual=%s\n", reason, out);
+    json_free(&envelope);
+    return ok;
+}
+
+static bool rcmd_expect_normalize_refused(const char *out, const char *message)
+{
+    struct json_value envelope = {0};
+    if (!json_read(&envelope, out, strlen(out))) return false;
+    const struct json_value *error = json_get(&envelope, "error");
+    const struct json_value *mutated = json_get(error, "mutated");
+    const struct json_value *data = json_get(&envelope, "data");
+    bool ok = !json_get_bool(json_get(&envelope, "ok")) &&
+        rcmd_expect_field(error, "code", "INVALID_INPUT") &&
+        rcmd_expect_field(error, "phase", "normalize") &&
+        rcmd_expect_field(error, "evidence", "dev.proof.remote") &&
+        !strncmp(json_get_str(json_get(error, "message")), message, strlen(message)) &&
+        mutated && mutated->type == JSON_BOOL && !json_get_bool(mutated) &&
+        !json_get(data, "expectation") && !json_get(data, "source_root");
+    if (!ok) printf("operation normalization mismatch expected=%s actual=%s\n", message, out);
+    json_free(&envelope);
+    return ok;
+}
+
+static bool rcmd_expect_operations(struct rcmd_expect_fixture *f)
+{
+    static const char *const operations[] = {"7", "\"\"", "\"unknown\""};
+    static const char type_error[] = "invalid type or range for input key 'operation';";
+    char input[8192], out[16384];
+    for (size_t i = 0; i < 3; i++) {
+        if (!rcmd_expect_input_operation(f, f->base, "", operations[i], input)) return false;
+        int rc = rcmd_expect_run(f, input, NULL, out, sizeof(out));
+        bool refused = i < 2 ? rcmd_expect_normalize_refused(out, type_error) :
+            rcmd_expect_refused(out, "remote_unknown_operation");
+        if (rc <= 0 || !refused) return false;
+    }
+    return true;
+}
+
+static bool rcmd_expect_authority(struct rcmd_expect_fixture *f)
+{
+    char input[8192], out[16384];
+    if (!rcmd_expect_input(f, f->base, "", input)) return false;
+    int rc = rcmd_expect_run(f, input, "DEVBUILD_ACTIVE=none", out, sizeof(out));
+    if (rc <= 0 || !rcmd_expect_refused(out, "remote_host_admission_required")) return false;
+    if (!rcmd_expect_input(f, f->base, ",\"operation\":\"expect\"", input)) return false;
+    rc = rcmd_expect_run(f, input, NULL, out, sizeof(out));
+    return rc > 0 && rcmd_expect_normalize_refused(out, "duplicate input key 'operation';") &&
+        rcmd_expect_operations(f);
+}
+
+static bool rcmd_expect_sentinel_file(const char *git, const char *marker)
+{
+    FILE *file = fopen(git, "wb");
+    if (!file) return false;
+    bool written = fprintf(file, "#!/bin/sh\nprintf called > '%s'\nexit 87\n", marker) > 0;
+    if (fclose(file) != 0) written = false;
+    return written && chmod(git, 0700) == 0;
+}
+
+static bool rcmd_expect_path_sentinel(struct rcmd_expect_fixture *f)
+{
+    char dir[1400], git[1500], marker[1500], env[10000], input[8192], out[16384];
+    if (!rpp_path(dir, sizeof(dir), f->root, "caller-bin") || mkdir(dir, 0700) != 0 ||
+        !rpp_path(git, sizeof(git), dir, "git") ||
+        !rpp_path(marker, sizeof(marker), f->root, "unexpected-git")) return false;
+    int n = snprintf(env, sizeof(env), "PATH=%s:%s", dir, getenv("PATH") ? getenv("PATH") : "");
+    if (!rcmd_expect_sentinel_file(git, marker) || n <= 0 || (size_t)n >= sizeof(env) ||
+        !rcmd_expect_input(f, f->base, "", input)) return false;
+    int rc = rcmd_expect_run(f, input, env, out, sizeof(out));
+    return rc == 0 && rcmd_expect_capsule(f, out) && access(marker, F_OK) != 0 &&
+        errno == ENOENT && rcmd_expect_no_scratch(f);
+}
+
+static bool rcmd_expect_capture_drift(struct rcmd_expect_fixture *f)
+{
+    char marker[1500], input[8192], out[16384];
+    if (!rpp_path(marker, sizeof(marker), f->linked, ".cache/remote-expect-drift")) return false;
+    FILE *file = fopen(marker, "wb");
+    if (!file) return false;
+    if (fclose(file) != 0 || !rcmd_expect_input(f, f->base, "", input)) return false;
+    int rc = rcmd_expect_run(f, input, NULL, out, sizeof(out));
+    /* README is outside the build-source hash inventory: the mandatory final
+     * exact-clean check must still refuse this real capture-time mutation. */
+    char diff[4096];
+    bool changed = RPP_GIT(f->linked, diff, sizeof(diff), "diff", "--", "README.md") &&
+        strstr(diff, "Capture-time mutation.");
+    bool ok = rc > 0 && rcmd_expect_refused(out, "remote_expect_generation_changed") && changed &&
+        access(marker, F_OK) != 0 && errno == ENOENT && rcmd_expect_no_scratch(f);
+    if (!ok) printf("expectation capture drift rc=%d: %s\n", rc, out);
+    return ok && RPP_GIT(f->linked, NULL, 0, "restore", "--", "README.md");
+}
+
+static bool rcmd_expect_negative(struct rcmd_expect_fixture *f)
+{
+    char input[8192], out[16384], path[1400];
+    if (!rcmd_expect_input(f, f->local, "", input)) return false;
+    int rc = rcmd_expect_run(f, input, NULL, out, sizeof(out));
+    if (rc <= 0 || !rcmd_expect_refused(out, "changed_set_empty")) return false;
+    if (!rpp_path(path, sizeof(path), f->linked, "README.md")) return false;
+    FILE *file = fopen(path, "ab");
+    if (!file) return false;
+    bool dirty = fputs("\nUncommitted expectation drift.\n", file) >= 0;
+    if (fclose(file) != 0) dirty = false;
+    if (!dirty || !rcmd_expect_input(f, f->base, "", input)) return false;
+    rc = rcmd_expect_run(f, input, NULL, out, sizeof(out));
+    bool ok = rc > 0 && rcmd_expect_refused(out, "remote_expect_generation_not_exact_clean");
+    if (!ok) printf("expectation dirty refusal rc=%d: %s\n", rc, out);
+    return ok;
+}
+
+static bool rcmd_expect_control(struct rcmd_expect_fixture *f, const char *name,
+                               bool (*run)(struct rcmd_expect_fixture *))
+{
+    bool ok = run(f);
+    printf("expectation control %s: %s\n", name, ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+static bool rcmd_expect_controls(struct rcmd_expect_fixture *f)
+{
+    if (!rcmd_expect_no_scratch(f)) { puts("expectation scratch retirement: FAIL"); return false; }
+    return rcmd_expect_control(f, "caller PATH sentinel", rcmd_expect_path_sentinel) &&
+        rcmd_expect_control(f, "configured Git refusal", rcmd_expect_git_config) &&
+        rcmd_expect_control(f, "capture-time drift", rcmd_expect_capture_drift) &&
+        rcmd_expect_control(f, "admission and operation", rcmd_expect_authority) &&
+        rcmd_expect_control(f, "empty change and dirty generation", rcmd_expect_negative) &&
+        rcmd_expect_no_proof(f);
+}
+
+static bool rcmd_expect_full_source(const char *current, const char *binary)
+{
+    struct rcmd_expect_fixture *f = zcl_calloc(1, sizeof(*f), "full-source expect fixture");
+    if (!f) return false;
+    bool ok = setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0 &&
+        rcmd_expect_checkout(f, current, binary) && rcmd_expect_native(f);
+    char input[8192], out[16384];
+    if (ok) {
+        ok = rcmd_expect_input(f, f->base, "", input);
+        int rc = ok ? rcmd_expect_run(f, input, NULL, out, sizeof(out)) : -1;
+        printf("full-source expect CLI rc=%d: %s\n", rc, rc >= 0 ? out : "capture failed");
+        ok = rc == 0 && rcmd_expect_capsule(f, out);
+    }
+    if (ok) ok = rcmd_expect_controls(f);
+    if (ok) ok = test_rm_rf_recursive(f->root) == 0;
+    else printf("full-source expectation fixture retained: %s\n", f->root);
+    free(f);
+    return ok;
+}
+
+static int rcmd_test_expect_full_source(const char *current, const char *binary)
+{
+    int failures = 0;
+    TEST("dev.proof.remote: full-source expectation uses native independent roots without executing proof") {
+        fflush(NULL);
+        pid_t child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) {
+            bool ok = rcmd_expect_full_source(current, binary);
+            fflush(NULL);
+            _exit(ok ? 0 : 1);
+        }
+        int status = 0;
+        ASSERT_EQ(waitpid(child, &status, 0), child);
+        ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int test_dev_proof_remote_command(void)
 {
     int failures = 0;
@@ -336,6 +724,7 @@ int test_dev_proof_remote_command(void)
         ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
         PASS();
     }
+    failures += rcmd_test_expect_full_source(current, binary);
 _test_next:;
     return failures;
 }

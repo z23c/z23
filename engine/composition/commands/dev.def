@@ -704,10 +704,15 @@ ZCL_COMMAND_DEV_COMMAND(
     "The local owner supplies an exact source assignment and expected proof "
     "identity. The registered invocation checkout is the only destination. "
     "Returns PASS only after independent signed receipt verification; "
-    "retains input observations on failure as well as success.", 0,
+    "retains input observations on failure as well as success. "
+    "operation=expect independently derives source and plan input roots from "
+    "the exact clean registered invocation generation under host admission. "
+    "It returns EXPECTATION_READY with proof_executed=false, never places "
+    "source or runs proof. Missing planner closure refuses without a refresh build. "
+    "Absent operation keeps execution behavior; operation=execute is explicit.", 0,
     "dev,proof,remote,foreground,receipt",
     "zcl.dev_proof_remote_input.v1", "zcl.dev_proof_remote_result.v1",
-    "repository,destination,bundle,offer,local_commit,remote_base,bundle_sha256,git_tree,source_id,signer_pubkey,source_root,source_cas_root,changed_set_root,impact_policy_root", "",
+    "operation,repository,destination,bundle,offer,local_commit,remote_base,bundle_sha256,git_tree,source_id,signer_pubkey,source_root,source_cas_root,changed_set_root,impact_policy_root", "",
     "z23-dev dev proof remote --input=<assignment>",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER,
