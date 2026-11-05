@@ -112,6 +112,26 @@ static int check_height_boundary_is_mutable(void)
     return failures;
 }
 
+/* Boundary of `immutable >= 0 && h <= immutable`: the height exactly at the
+ * immutable floor is immutable, one above is not, and a tip too young to have
+ * an immutable height (immutable < 0) makes nothing immutable. Kills the
+ * ge_to_gt, int_inc and le_to_lt mutants of height_is_immutable. */
+static int check_height_immutable_exact_boundary(void)
+{
+    int failures = 0;
+    const int tip = ZCL_FINALITY_DEPTH + 1000;  /* immutable == 1000 */
+    const int young = ZCL_FINALITY_DEPTH;       /* immutable == 0 */
+    if (height_is_immutable(tip, 1000) &&
+        !height_is_immutable(tip, 1001) &&
+        height_is_immutable(young, 0) &&
+        !height_is_immutable(young, 1) &&
+        !height_is_immutable(ZCL_FINALITY_DEPTH - 1, 0) &&
+        !height_is_immutable(0, 0))
+        printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
 static int check_finality_immutable_height(void)
 {
     int failures = 0;
@@ -169,6 +189,9 @@ int test_checkpoint(void)
 
     printf("height_is_immutable: tip - MAX_REORG_LENGTH boundary mutable... ");
     failures += check_height_boundary_is_mutable();
+
+    printf("height_is_immutable: exact floor boundary and young tip... ");
+    failures += check_height_immutable_exact_boundary();
 
     printf("sync_evidence_policy: immutable height is tip minus finality... ");
     failures += check_finality_immutable_height();

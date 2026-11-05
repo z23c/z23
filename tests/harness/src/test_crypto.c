@@ -167,7 +167,7 @@ static int x25519_check_dh_example(void)
  * low-order rejection) and yields the all-zero secret that the guard catches. */
 static int x25519_check_small_order_one(const char *u_hex, size_t index)
 {
-    uint8_t scalar[32], u[32], raw[32], safe[32];
+    uint8_t scalar[32], u[32], raw[32], safe[33];
     test_hex_to_bytes(k_dh_alice_priv, scalar, 32);
     test_hex_to_bytes(u_hex, u, 32);
     printf("X25519 small-order u[%zu] raw scalarmult... ", index);
@@ -180,8 +180,11 @@ static int x25519_check_small_order_one(const char *u_hex, size_t index)
     printf("OK\n");
     printf("X25519 small-order u[%zu] refused by x25519_safe... ", index);
     memset(safe, 0xa5, sizeof safe);
-    if (x25519_safe(safe, scalar, u) || !x25519_bytes_zero(safe, 32)) {
-        printf("FAIL (accepted or left non-zero output)\n");
+    /* safe[32] is a guard byte past the 32-byte output: the refusal must
+     * zeroize exactly 32 bytes and not one more. */
+    if (x25519_safe(safe, scalar, u) || !x25519_bytes_zero(safe, 32) ||
+        safe[32] != 0xa5) {
+        printf("FAIL (accepted, left non-zero output, or wrote past it)\n");
         return 1;
     }
     printf("OK\n");

@@ -24,6 +24,10 @@ static int test_sync_reduce_adapter_phase_map(void)
         /* COMPLETE maps to STAGED, never past it — activation stays contained. */
         ASSERT(sync_reduce_adapter_map_phase(SNAPSYNC_COMPLETE) == SYNC_PHASE_STAGED);
         ASSERT(sync_reduce_adapter_map_phase(SNAPSYNC_FAILED) == SYNC_PHASE_FAILED);
+        /* Out-of-range reference states fall back to IDLE, never to a live
+         * phase (the post-switch fallback return). */
+        ASSERT(sync_reduce_adapter_map_phase(SNAPSYNC_NUM_STATES) == SYNC_PHASE_IDLE);
+        ASSERT(sync_reduce_adapter_map_phase((enum snapshot_sync_state)99) == SYNC_PHASE_IDLE);
         PASS();
     } _test_next:;
     return failures;
