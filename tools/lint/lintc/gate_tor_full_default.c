@@ -143,6 +143,24 @@ static int tfd_line_lit(const char *text, const char *needle)
     return 0;
 }
 
+/* A missing or failed bootstrap must stop make; -include is optional. */
+static int tfd_required_include(const char *text)
+{
+    static const char directive[] = "include $(TOR_BOOTSTRAP_MK)";
+    const char *p = text;
+    while (*p) {
+        p += strspn(p, " \t");
+        size_t n = sizeof(directive) - 1;
+        if (strncmp(p, directive, n) == 0 &&
+            (p[n] == '\0' || p[n] == '\n' || p[n] == '\r' ||
+             p[n] == ' ' || p[n] == '\t' || p[n] == '#')) return 1;
+        p = strchr(p, '\n');
+        if (!p) break;
+        p++;
+    }
+    return 0;
+}
+
 static int tfd_line_re(const char *text, const regex_t *re)
 {
     const char *p = text;
@@ -209,9 +227,9 @@ static int tfd_require(struct tfd_state *st, int ok, const char *msg)
 
 static int tfd_check_makefile(struct tfd_state *st, const struct tfd_re *r)
 {
-    int rc = tfd_require(st, tfd_line_lit(g_tfd_raw, "-include $(TOR_BOOTSTRAP_MK)"),
-        "the Makefile never includes $(TOR_BOOTSTRAP_MK), so a plain "
-        "`make` does not establish the Tor archives and links the stub");
+    int rc = tfd_require(st, tfd_required_include(g_tfd_raw),
+        "the Makefile lacks a required include of $(TOR_BOOTSTRAP_MK); "
+        "a Tor readiness failure may be ignored");
     if (rc) return rc;
     rc = tfd_require(st, tfd_line_re(g_tfd_raw, &r->tor_ready),
         "$(TOR_BOOTSTRAP_MK) has no 'tor-ready' prerequisite, so the "
@@ -615,7 +633,9 @@ int check_tor_full_default_selftest(void)
         "refusing to package a tor=stub binary",
         "refusing to install a stub binary", 0);
     bad |= tfd_st_case(tmp, "include", "Makefile",
-        "-include $(TOR_BOOTSTRAP_MK)", "# removed", 0);
+        "include $(TOR_BOOTSTRAP_MK)", "# removed", 0);
+    bad |= tfd_st_case(tmp, "optional-include", "Makefile",
+        "include $(TOR_BOOTSTRAP_MK)", "-include $(TOR_BOOTSTRAP_MK)", 0);
     bad |= tfd_st_case(tmp, "default", "Makefile",
         "ZCL_TOR ?= full", "ZCL_TOR ?= stub", 0);
     bad |= tfd_st_case(tmp, "forced", "tools/scripts/build_c23_portable_release.sh",

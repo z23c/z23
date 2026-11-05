@@ -1375,6 +1375,38 @@ static int t_lint_fast_tor_graph(void)
     return bad;
 }
 
+/* Exercise the real bootstrap conditional with a private readiness oracle.
+ * The oracle models legacy migration, reuse and refusal; Tor's provenance
+ * checker has its own fixtures for the validity of those decisions. */
+static int t_tor_ready_before_link(void)
+{
+    static const char script[] =
+        "set -eu; cd \"$2\"\n"
+        "mkdir -p build/identity\n"
+        "printf '%s\\n' 'ZCL_TOR ?= full' 'ZCL_TOR_LINK_REQUESTED := link' 'TOR_BOOTSTRAP_MK := build/identity/tor-inputs-ready.mk' 'TOR_MISSING_ARCHIVES :=' > Makefile\n"
+        "sed -n '/^ifeq ($(ZCL_TOR),full)/,/^# The stub/{ /^# The stub/d; p; }' \"$1/Makefile\" >> Makefile\n"
+        "cat >> Makefile <<'MAKE'\n"
+        ".PHONY: tor-ready link\n"
+        "tor-ready:\n\t@echo ready >> events; case \"$(STATE)\" in legacy) echo rebuilt >> events ;; valid) : ;; *) exit 1 ;; esac\n"
+        "$(TOR_BOOTSTRAP_MK): tor-ready\n\t@echo '# ready' > $@\n"
+        "link:\n\t@echo link >> events\n"
+        "MAKE\n"
+        "printf '# old stamp\\n' > build/identity/tor-inputs-ready.mk\n"
+        "make --no-print-directory STATE=legacy link > run.log 2>&1\n"
+        "printf 'ready\\nrebuilt\\nlink\\n' > expected; cmp expected events\n"
+        ": > events; make --no-print-directory STATE=valid link > run.log 2>&1\n"
+        "printf 'ready\\nlink\\n' > expected; cmp expected events\n"
+        ": > events; if make --no-print-directory STATE=refuse link > run.log 2>&1; then exit 1; fi\n"
+        "printf 'ready\\n' > expected; cmp expected events\n"
+        ": > events; make --no-print-directory ZCL_TOR=stub STATE=refuse link > run.log 2>&1\n"
+        "printf 'link\\n' > expected; cmp expected events\n";
+    char fixture[PATH_MAX] = {0};
+    test_make_tmpdir(fixture, sizeof(fixture), "tor_ready", "bootstrap");
+    int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    if (test_rm_rf_recursive(fixture) != 0) bad = 1;
+    return bad;
+}
+
 /* The real-worktree read-only lane: git grep / git ls-files / .git/hooks
  * probes. Mutates no tracked path, so it is pool-eligible. */
 int test_make_lint_gates_realroot(void)
@@ -1383,7 +1415,8 @@ int test_make_lint_gates_realroot(void)
     if (lint_resolve_real_root(real_root, sizeof(real_root)) != 0)
         return 1;
     printf("\n=== make_lint_gates real-worktree tests ===\n");
-    return t_lint_fast_tor_graph() + lint_run_owned(LINT_OWNER_REALROOT);
+    return t_lint_fast_tor_graph() + t_tor_ready_before_link() +
+           lint_run_owned(LINT_OWNER_REALROOT);
 }
 
 /* One group per HEAVY check: heavy_01 is import-copy-prove, heavy_02 is

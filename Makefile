@@ -1743,15 +1743,13 @@ TOR_BOOTSTRAP_MK := build/identity/tor-inputs-ready.mk
 # tools/scripts/build_c23_portable_release.sh establishes the archives itself
 # through that toolchain before it ever calls make.
 ifeq ($(ZCL_TOR),full)
-ifneq ($(strip $(TOR_MISSING_ARCHIVES)),)
 ifneq ($(strip $(ZCL_TOR_LINK_REQUESTED)),)
 ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ifneq ($(ZCL_PORTABLE_FRONTDOOR_ONLY),1)
 ifneq ($(ZCL_C23_PORTABLE_RELEASE),1)
 ifeq ($(strip $(MAKE_RESTARTS)),)
--include $(TOR_BOOTSTRAP_MK)
-endif
+include $(TOR_BOOTSTRAP_MK)
 endif
 endif
 endif
