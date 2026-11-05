@@ -22,7 +22,6 @@ local-reader contexts/explorer/modules/presentation/src/model.c 1
 local-reader contexts/wallet/services/src/yardsale_wallet_service.c 1
 local-reader core/modules/net/include/net/https_frontdoor.h 2
 local-reader core/modules/sapling/src/groth16_prover.c 1
-local-reader engine/composition/src/boot_fleet_board_fleet.c 1
 local-reader engine/jobs/src/utxo_apply_delta_undo.c 1
 local-reader engine/models/include/models/op_return_index.h 1
 local-reader engine/modules/appsync/include/appsync/app_event_sync.h 1

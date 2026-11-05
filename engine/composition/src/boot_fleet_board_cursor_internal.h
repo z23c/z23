@@ -26,7 +26,7 @@
  * `carry_min` for the next sweep. So a refused row is offered again until
  * it is stored, refused for good, or no longer served, and no row is ever
  * passed over. */
-struct board_cursor {
+struct board_cursor { // hardening-ok: one peer's sync position; it parses no bytes
     bool used;
     bool epoch_known;
     bool sweep_active;
