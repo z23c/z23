@@ -666,6 +666,36 @@ static int sig_test_trusted_memo(void)
     return failures;
 }
 
+/* A stamp written after a trusted check must drop the stored answer: the
+ * same (height, hash) re-checked after the stamp reads the new stamp, in
+ * both directions (pass -> refusal, refusal -> pass). */
+static int sig_test_stamp_drops_memo(void)
+{
+    int failures = 0;
+    struct node_db ndb = {0};
+    if (!sig_fixture(&ndb))
+        return 1;
+    bool built = sig_add_utxo(&ndb, 0xA1, 0, 5000);
+    uint8_t root[32], bad[32], t[32];
+    uint64_t count = 0;
+    utxo_commitment_sha3_compute(ndb.db, root, &count);
+    memcpy(bad, root, 32);
+    bad[0] ^= 0x01;
+
+    built = built && sig_one_row(&ndb, 150, 0xE0, t);
+    SIG_CHECK("stamp memo: trusted, no stamp: pass", built && sig_gate(150, t, true));
+    built = built && seed_integrity_stamp_utxo_sha3(&ndb, 150, bad, count);
+    SIG_CHECK("stamp memo: wrong stamp after a memoized pass: re-check REFUSED",
+              built && !sig_gate(150, t, true));
+    blocker_clear("seed.linkage_gate");
+    built = built && seed_integrity_stamp_utxo_sha3(&ndb, 150, root, count);
+    SIG_CHECK("stamp memo: right stamp after a memoized refusal: re-check passes",
+              built && sig_gate(150, t, true));
+    blocker_clear("seed.linkage_gate");
+    sig_teardown(&ndb);
+    return failures;
+}
+
 int test_seed_integrity_gate(void)
 {
     printf("\n=== seed_integrity_gate tests ===\n");
@@ -770,6 +800,7 @@ int test_seed_integrity_gate(void)
     failures += sig_test_commitment_refusals();
     failures += sig_test_stamp_args();
     failures += sig_test_trusted_memo();
+    failures += sig_test_stamp_drops_memo();
 
     /* crash-only proof: refusals above were plain false returns;
      * the process (this test) is alive. */
