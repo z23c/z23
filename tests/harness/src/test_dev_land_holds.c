@@ -579,16 +579,17 @@ static bool dlx_extended_native_row(char *body, size_t cap, unsigned members)
     if (!zcl_native_dev_land_test_encode_detail("", false, native, sizeof(native)))
         return false;
     struct json_value doc; json_init(&doc);
-    bool ok = json_read(&doc, native, strlen(native)) && doc.type == JSON_OBJ &&
-              doc.num_children == 37;
+    bool ok = json_read(&doc, native, strlen(native)) && doc.type == JSON_OBJ;
+    size_t native_members = doc.num_children;
     json_free(&doc);
     char *end = strrchr(native, '}');
-    if (!ok || !end || members < 37) return false;
+    if (!ok || !end || members < native_members) return false;
+    printf("land: native row members=%zu, requested members=%u\n", native_members, members);
     size_t used = (size_t)(end - native);
     if (used >= cap) return false;
     memcpy(body, native, used);
-    for (unsigned i = 37; i < members; i++) {
-        int n = snprintf(body + used, cap - used, ",\"extension_%u\":0", i);
+    for (size_t i = native_members; i < members; i++) {
+        int n = snprintf(body + used, cap - used, ",\"extension_%zu\":0", i);
         if (n <= 0 || (size_t)n >= cap - used) return false;
         used += (size_t)n;
     }
@@ -609,6 +610,11 @@ static int dlx_row_member_boundary_case(unsigned members, bool accepted)
         ASSERT(dlx_mkdir_p(land));
         ASSERT(snprintf(path, sizeof(path), "%s/queue.jsonl", land) < (int)sizeof(path));
         ASSERT(dlx_extended_native_row(body, sizeof(body), members));
+        struct json_value row; json_init(&row);
+        bool exact_members = json_read(&row, body, strlen(body)) &&
+                            row.type == JSON_OBJ && row.num_children == members;
+        json_free(&row);
+        ASSERT(exact_members);
         ASSERT(dlx_write(path, body));
         dlx_begin(&c, "status"); ASSERT(dlx_run(&c));
         if (accepted) ASSERT(dlx_ok(&c));
