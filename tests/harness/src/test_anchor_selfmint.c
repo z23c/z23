@@ -285,6 +285,473 @@ static int sm_check_mismatch_unlinks_artifact(
     return failures;
 }
 
+
+/* ------------------------------------------------------------------------
+ * Mutation-gap cases. The hook decides what state a node may trust, so these
+ * pin: when a mint is refused, which values the status binds to, and what the
+ * status reports for missing or inconsistent input.
+ * ------------------------------------------------------------------------ */
+
+#define SM_ENV "ZCL_MINT_ANCHOR_OUT"
+
+struct sm_fix {
+    sqlite3 *pdb;
+    const char *dir;
+    char path[400];
+    struct sha3_utxo_checkpoint cp;
+};
+
+static void sm_hex(const uint8_t *in, char out[65])
+{
+    for (int i = 0; i < 32; i++)
+        snprintf(out + 2 * i, 3, "%02x", in[i]);
+}
+
+static bool sm_hex_is(const char *got, const uint8_t *bytes)
+{
+    char want[65];
+    sm_hex(bytes, want);
+    return strlen(got) == 64 && strcmp(got, want) == 0;
+}
+
+static bool sm_resolve(const char *datadir, size_t cap, char *buf)
+{
+    return anchor_selfmint_resolve_path(datadir, buf, cap);
+}
+
+static bool sm_write_bytes(const char *path, const char *data, size_t n)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return false;
+    bool ok = n == 0 || fwrite(data, 1, n, f) == n;
+    return fclose(f) == 0 && ok;
+}
+
+static bool sm_flip_last_byte(const char *path)
+{
+    FILE *f = fopen(path, "r+b");
+    if (!f)
+        return false;
+    int c = 0;
+    bool ok = fseek(f, -1, SEEK_END) == 0 && (c = fgetc(f)) != EOF &&
+              fseek(f, -1, SEEK_END) == 0 && fputc(c ^ 0xff, f) != EOF;
+    return fclose(f) == 0 && ok;
+}
+
+/* The resolver, env path: the buffer must hold the path plus its NUL. */
+static int sm_case_resolve_env_bounds(void)
+{
+    int failures = 0;
+    char buf[64];
+    setenv(SM_ENV, "x", 1);
+    SM_CHECK("resolve: 1-char env path fits cap 2",
+             sm_resolve("ignored", 2, buf) && strcmp(buf, "x") == 0);
+    memset(buf, 'S', sizeof(buf));
+    SM_CHECK("resolve: env path length == cap is refused",
+             !sm_resolve("ignored", 1, buf) && buf[0] == '\0');
+    setenv(SM_ENV, "xy", 1);
+    SM_CHECK("resolve: 2-char env path fits cap 3",
+             sm_resolve("ignored", 3, buf) && strcmp(buf, "xy") == 0);
+    SM_CHECK("resolve: 2-char env path refused at cap 2",
+             !sm_resolve("ignored", 2, buf));
+    memset(buf, 'S', sizeof(buf));
+    SM_CHECK("resolve: cap 0 refused, buffer untouched",
+             !sm_resolve("ignored", 0, buf) && buf[0] == 'S');
+    SM_CHECK("resolve: NULL buffer refused", !sm_resolve("d", 16, NULL));
+    return failures;
+}
+
+/* The resolver, datadir path (env unset or empty). */
+static int sm_case_resolve_datadir_bounds(void)
+{
+    int failures = 0;
+    char buf[64];
+    const char *want = "d/utxo-anchor.snapshot";
+    size_t len = strlen(want);
+    unsetenv(SM_ENV);
+    SM_CHECK("resolve: 1-char datadir fits at cap len+1",
+             sm_resolve("d", len + 1, buf) && strcmp(buf, want) == 0);
+    SM_CHECK("resolve: datadir path length == cap is refused",
+             !sm_resolve("d", len, buf));
+    SM_CHECK("resolve: NULL datadir means the current directory",
+             sm_resolve(NULL, sizeof(buf), buf) &&
+             strcmp(buf, "./utxo-anchor.snapshot") == 0);
+    SM_CHECK("resolve: empty datadir means the current directory",
+             sm_resolve("", sizeof(buf), buf) &&
+             strcmp(buf, "./utxo-anchor.snapshot") == 0);
+    setenv(SM_ENV, "", 1);
+    SM_CHECK("resolve: empty env falls back to the datadir",
+             sm_resolve("d", sizeof(buf), buf) && strcmp(buf, want) == 0);
+    return failures;
+}
+
+/* An unresolvable path is reported, not an error return. */
+static int sm_case_status_unresolved(void)
+{
+    int failures = 0;
+    static char longp[1300];
+    memset(longp, 'a', 1200);
+    longp[0] = '/';
+    longp[1200] = '\0';
+    setenv(SM_ENV, longp, 1);
+    struct anchor_snapshot_status st;
+    SM_CHECK("status: unresolvable path still returns true",
+             anchor_selfmint_snapshot_status("unused", &st));
+    SM_CHECK("status: unresolvable path is classified",
+             !st.path_resolved && !st.verified && !st.checkpoint_present &&
+             strcmp(st.verification, "path_unresolved") == 0);
+    SM_CHECK("status: unresolvable path error text",
+             strcmp(st.error, "could not resolve anchor snapshot path") == 0);
+    SM_CHECK("status: unresolvable path next action",
+             strcmp(st.next_action,
+                    "fix datadir or ZCL_MINT_ANCHOR_OUT path") == 0);
+    SM_CHECK("status: path source names the env var",
+             strcmp(st.path_source, SM_ENV) == 0);
+    SM_CHECK("status: NULL out is refused",
+             !anchor_selfmint_snapshot_status("unused", NULL));
+    return failures;
+}
+
+/* path_source: env var only when it is set and non-empty. */
+static int sm_case_status_path_source(const char *dir)
+{
+    int failures = 0;
+    char sub[300];
+    snprintf(sub, sizeof(sub), "%s/empty", dir);
+    SM_CHECK("path_source: scratch dir", mkdir(sub, 0700) == 0);
+    struct anchor_snapshot_status st;
+    unsetenv(SM_ENV);
+    SM_CHECK("path_source: unset env reports datadir",
+             anchor_selfmint_snapshot_status(sub, &st) &&
+             strcmp(st.path_source, "datadir") == 0);
+    char want[400];
+    snprintf(want, sizeof(want), "%s/utxo-anchor.snapshot", sub);
+    SM_CHECK("path_source: datadir path is derived from the datadir",
+             strcmp(st.path, want) == 0 && st.path_resolved);
+    setenv(SM_ENV, "", 1);
+    SM_CHECK("path_source: empty env reports datadir",
+             anchor_selfmint_snapshot_status(sub, &st) &&
+             strcmp(st.path_source, "datadir") == 0);
+    setenv(SM_ENV, "x", 1);
+    SM_CHECK("path_source: 1-char env reports the env var",
+             anchor_selfmint_snapshot_status(sub, &st) &&
+             strcmp(st.path_source, SM_ENV) == 0);
+    rmdir(sub);
+    return failures;
+}
+
+static bool sm_cp_fields_match(const struct anchor_snapshot_status *st,
+                               const struct sha3_utxo_checkpoint *cp)
+{
+    return st->checkpoint_present && st->checkpoint_height == cp->height &&
+           st->checkpoint_utxo_count == cp->utxo_count &&
+           st->checkpoint_total_supply == cp->total_supply &&
+           sm_hex_is(st->checkpoint_sha3_hex, cp->sha3_hash) &&
+           sm_hex_is(st->checkpoint_block_hash_hex, cp->block_hash);
+}
+
+static bool sm_status_is(const struct anchor_snapshot_status *st,
+                         const char *verification, bool present, int64_t size)
+{
+    return !st->verified && !st->header_read &&
+           st->stat_present == present && st->stat_size == size &&
+           strcmp(st->verification, verification) == 0;
+}
+
+static bool sm_next_is(const struct anchor_snapshot_status *st,
+                       const char *fmt, const char *path)
+{
+    char want[300];
+    snprintf(want, sizeof(want), fmt, path);
+    return strcmp(st->next_action, want) == 0;
+}
+
+/* A candidate that is absent, empty or not a regular file is "missing" and
+ * is never reported as present. */
+static int sm_case_status_absent_forms(struct sm_fix *f)
+{
+    int failures = 0;
+    struct anchor_snapshot_status st;
+    setenv(SM_ENV, f->path, 1);
+    unlink(f->path);
+    SM_CHECK("absent: status returns true",
+             anchor_selfmint_snapshot_status(f->dir, &st));
+    SM_CHECK("absent: classified missing, checkpoint reported",
+             sm_status_is(&st, "missing", false, 0) &&
+             sm_cp_fields_match(&st, &f->cp));
+    SM_CHECK("absent: error and next action",
+             strcmp(st.error, "anchor snapshot candidate is absent") == 0 &&
+             sm_next_is(&st, "mint or stage %.180s, then run refold copy proof",
+                        f->path));
+    SM_CHECK("absent: empty file is missing, not present",
+             sm_write_bytes(f->path, "", 0) &&
+             anchor_selfmint_snapshot_status(f->dir, &st) &&
+             sm_status_is(&st, "missing", false, 0));
+    unlink(f->path);
+    SM_CHECK("absent: a directory is missing, not present",
+             mkdir(f->path, 0700) == 0 &&
+             anchor_selfmint_snapshot_status(f->dir, &st) &&
+             sm_status_is(&st, "missing", false, 0));
+    rmdir(f->path);
+    return failures;
+}
+
+/* A file too short to carry a header is present but unreadable. */
+static int sm_case_status_header_unreadable(struct sm_fix *f)
+{
+    int failures = 0;
+    struct anchor_snapshot_status st;
+    setenv(SM_ENV, f->path, 1);
+    SM_CHECK("unreadable: 1-byte file written",
+             sm_write_bytes(f->path, "x", 1));
+    SM_CHECK("unreadable: status returns true and is not verified",
+             anchor_selfmint_snapshot_status(f->dir, &st) &&
+             sm_status_is(&st, "header_unreadable", true, 1));
+    SM_CHECK("unreadable: error names a cause, next action names the path",
+             st.error[0] != '\0' &&
+             sm_next_is(&st, "replace %.180s with a minted checkpoint snapshot",
+                        f->path));
+    unlink(f->path);
+    return failures;
+}
+
+static void sm_mint(struct sm_fix *f)
+{
+    setenv(SM_ENV, f->path, 1);
+    unlink(f->path);
+    anchor_selfmint_hook_in_tx(f->pdb, f->dir, f->cp.height);
+}
+
+static bool sm_header_fields_match(const struct anchor_snapshot_status *st,
+                                   const struct sha3_utxo_checkpoint *cp)
+{
+    return st->header_read && st->snapshot_height == (uint32_t)cp->height &&
+           st->snapshot_count == cp->utxo_count &&
+           st->snapshot_total_supply == cp->total_supply &&
+           sm_hex_is(st->snapshot_sha3_hex, cp->sha3_hash) &&
+           sm_hex_is(st->snapshot_block_hash_hex, cp->block_hash);
+}
+
+static bool sm_all_bound(const struct anchor_snapshot_status *st)
+{
+    return st->height_match && st->count_match && st->sha3_match &&
+           st->block_hash_match && st->verified;
+}
+
+/* A minted snapshot is bound to the checkpoint on every axis. */
+static int sm_case_status_minted_fields(struct sm_fix *f)
+{
+    int failures = 0;
+    struct anchor_snapshot_status st;
+    struct stat sb;
+    sm_mint(f);
+    SM_CHECK("minted: file stat succeeds", stat(f->path, &sb) == 0);
+    SM_CHECK("minted: status returns true",
+             anchor_selfmint_snapshot_status(f->dir, &st));
+    SM_CHECK("minted: header and checkpoint fields are reported",
+             sm_header_fields_match(&st, &f->cp) &&
+             sm_cp_fields_match(&st, &f->cp));
+    SM_CHECK("minted: every binding matches and the file is verified",
+             sm_all_bound(&st) && st.stat_present &&
+             st.stat_size == (int64_t)sb.st_size);
+    return failures;
+}
+
+/* A checkpoint whose block hash differs only in its last byte. */
+static int sm_case_variant_block_hash(struct sm_fix *f)
+{
+    int failures = 0;
+    struct anchor_snapshot_status st;
+    f->cp.block_hash[31] ^= 0x01;
+    bool ok = anchor_selfmint_snapshot_status(f->dir, &st);
+    SM_CHECK("variant block hash: only the block-hash binding fails",
+             ok && !st.block_hash_match && st.height_match &&
+             st.count_match && st.sha3_match);
+    SM_CHECK("variant block hash: hex fields show both hashes",
+             sm_hex_is(st.checkpoint_block_hash_hex, f->cp.block_hash) &&
+             strcmp(st.checkpoint_block_hash_hex,
+                    st.snapshot_block_hash_hex) != 0);
+    f->cp.block_hash[31] ^= 0x01;
+    return failures;
+}
+
+/* A checkpoint at another height than the snapshot header. */
+static int sm_case_variant_height(struct sm_fix *f)
+{
+    int failures = 0;
+    struct anchor_snapshot_status st;
+    f->cp.height += 1;
+    bool ok = anchor_selfmint_snapshot_status(f->dir, &st);
+    SM_CHECK("variant height: height binding fails, others hold",
+             ok && !st.height_match && st.count_match && st.sha3_match &&
+             st.block_hash_match);
+    SM_CHECK("variant height: both heights are reported",
+             st.checkpoint_height == TEST_ANCHOR + 1 &&
+             st.snapshot_height == (uint32_t)TEST_ANCHOR);
+    f->cp.height -= 1;
+    return failures;
+}
+
+/* The coins-only commitment matches but the count differs by one. */
+static int sm_case_variant_count(struct sm_fix *f)
+{
+    int failures = 0;
+    struct anchor_snapshot_status st;
+    f->cp.utxo_count += 1;
+    bool ok = anchor_selfmint_snapshot_status(f->dir, &st);
+    SM_CHECK("variant count: count fails, sha3 holds, not verified",
+             ok && !st.count_match && st.sha3_match && !st.verified &&
+             strcmp(st.verification, "count_mismatch") == 0);
+    SM_CHECK("variant count: error text",
+             strcmp(st.error, "snapshot count does not match checkpoint") == 0);
+    char want[300];
+    snprintf(want, sizeof(want),
+             "replace %.170s with a snapshot minted at checkpoint height %d",
+             f->path, f->cp.height);
+    SM_CHECK("variant count: next action", strcmp(st.next_action, want) == 0);
+    f->cp.utxo_count -= 1;
+    return failures;
+}
+
+/* The count matches but the commitment differs in its LAST byte only. */
+static int sm_case_variant_sha3(struct sm_fix *f)
+{
+    int failures = 0;
+    struct anchor_snapshot_status st;
+    f->cp.sha3_hash[31] ^= 0x01;
+    bool ok = anchor_selfmint_snapshot_status(f->dir, &st);
+    SM_CHECK("variant sha3: sha3 fails, count holds, not verified",
+             ok && !st.sha3_match && st.count_match && !st.verified &&
+             strcmp(st.verification, "sha3_mismatch") == 0);
+    SM_CHECK("variant sha3: error text",
+             strcmp(st.error,
+                    "coins-only commitment does not match checkpoint") == 0);
+    char want[300];
+    snprintf(want, sizeof(want),
+             "replace %.170s with a snapshot minted at checkpoint height %d",
+             f->path, f->cp.height);
+    SM_CHECK("variant sha3: next action", strcmp(st.next_action, want) == 0);
+    f->cp.sha3_hash[31] ^= 0x01;
+    return failures;
+}
+
+/* A snapshot whose body was altered after minting: the header still reads,
+ * but the artifact is refused as failing full verification. */
+static int sm_case_status_corrupt_body(struct sm_fix *f)
+{
+    int failures = 0;
+    struct anchor_snapshot_status st;
+    SM_CHECK("corrupt: last byte flipped", sm_flip_last_byte(f->path));
+    bool ok = anchor_selfmint_snapshot_status(f->dir, &st);
+    SM_CHECK("corrupt: header read but the artifact is not verified",
+             ok && st.header_read && !st.verified &&
+             strcmp(st.verification, "sha3_or_format_mismatch") == 0);
+    SM_CHECK("corrupt: error names a cause",
+             st.error[0] != '\0');
+    SM_CHECK("corrupt: next action",
+             sm_next_is(&st,
+                        "replace %.180s with a SHA3/count-verified minted "
+                        "snapshot", f->path));
+    return failures;
+}
+
+/* A refused mint leaves no artifact: above the anchor, and when the folded
+ * set disagrees with the checkpoint in the last hash byte or in the count. */
+static int sm_case_hook_refusals(struct sm_fix *f)
+{
+    int failures = 0;
+    setenv(SM_ENV, f->path, 1);
+    unlink(f->path);
+    anchor_selfmint_hook_in_tx(f->pdb, f->dir, f->cp.height + 1);
+    SM_CHECK("refusal: above the anchor writes nothing",
+             !sm_file_present(f->path));
+    f->cp.sha3_hash[31] ^= 0x01;
+    anchor_selfmint_hook_in_tx(f->pdb, f->dir, f->cp.height);
+    SM_CHECK("refusal: last-byte sha3 mismatch leaves no artifact",
+             !sm_file_present(f->path));
+    f->cp.sha3_hash[31] ^= 0x01;
+    f->cp.utxo_count += 1;
+    anchor_selfmint_hook_in_tx(f->pdb, f->dir, f->cp.height);
+    SM_CHECK("refusal: count mismatch leaves no artifact",
+             !sm_file_present(f->path));
+    f->cp.utxo_count -= 1;
+    return failures;
+}
+
+/* A valid snapshot already on disk is later judged against a checkpoint with
+ * another count: it must not survive as a verified artifact. */
+static int sm_case_hook_removes_stale_valid(struct sm_fix *f)
+{
+    int failures = 0;
+    sm_mint(f);
+    SM_CHECK("stale: valid snapshot minted", sm_file_present(f->path));
+    f->cp.utxo_count += 1;
+    anchor_selfmint_hook_in_tx(f->pdb, f->dir, f->cp.height);
+    SM_CHECK("stale: checkpoint count changed, artifact removed",
+             !sm_file_present(f->path));
+    f->cp.utxo_count -= 1;
+    return failures;
+}
+
+/* A corrupt file at the path is not "already verified": the hook replaces it
+ * with a snapshot that opens under full verification against the checkpoint. */
+static int sm_case_hook_replaces_corrupt(struct sm_fix *f)
+{
+    int failures = 0;
+    sm_mint(f);
+    SM_CHECK("replace: corrupt the minted file", sm_flip_last_byte(f->path));
+    anchor_selfmint_hook_in_tx(f->pdb, f->dir, f->cp.height);
+    char err[128] = {0};
+    struct uss_header hdr;
+    struct uss_handle *h = uss_open(f->path, /*verify_full_sha3=*/true,
+                                    f->cp.sha3_hash, &hdr, err, sizeof(err));
+    SM_CHECK("replace: file verifies against the checkpoint again", h != NULL);
+    if (h)
+        uss_close(h);
+    unlink(f->path);
+    return failures;
+}
+
+static int sm_status_variant_cases(struct sm_fix *f)
+{
+    int failures = 0;
+    failures += sm_case_variant_block_hash(f);
+    failures += sm_case_variant_height(f);
+    failures += sm_case_variant_count(f);
+    failures += sm_case_variant_sha3(f);
+    return failures;
+}
+
+static int sm_gap_cases(sqlite3 *pdb, const char *dir, const char *snap_path,
+                        const struct sha3_utxo_checkpoint *cp_base,
+                        struct sm_fix *f)
+{
+    int failures = 0;
+    f->pdb = pdb;
+    f->dir = dir;
+    snprintf(f->path, sizeof(f->path), "%s", snap_path);
+    f->cp = *cp_base;
+    for (int j = 0; j < 32; j++)
+        f->cp.block_hash[j] = (uint8_t)(0x40 + 3 * j);
+    checkpoints_set_sha3_override_for_test(&f->cp);
+
+    failures += sm_case_resolve_env_bounds();
+    failures += sm_case_resolve_datadir_bounds();
+    failures += sm_case_status_unresolved();
+    failures += sm_case_status_path_source(dir);
+    failures += sm_case_status_absent_forms(f);
+    failures += sm_case_status_header_unreadable(f);
+    failures += sm_case_status_minted_fields(f);
+    failures += sm_status_variant_cases(f);
+    failures += sm_case_status_corrupt_body(f);
+    failures += sm_case_hook_refusals(f);
+    failures += sm_case_hook_removes_stale_valid(f);
+    failures += sm_case_hook_replaces_corrupt(f);
+    setenv(SM_ENV, snap_path, 1);
+    return failures;
+}
+
 int test_anchor_selfmint(void);
 int test_anchor_selfmint(void)
 {
@@ -318,6 +785,10 @@ int test_anchor_selfmint(void)
                                                        snap_path);
     failures += sm_check_mismatch_unlinks_artifact(pdb, dir, snap_path,
                                                    &cp_ovr);
+
+    struct sm_fix fix;
+    memset(&fix, 0, sizeof(fix));
+    failures += sm_gap_cases(pdb, dir, snap_path, &cp_ovr, &fix);
 
     /* Teardown. */
     checkpoints_set_sha3_override_for_test(NULL);
