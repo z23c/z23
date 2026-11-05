@@ -1,5 +1,7 @@
-/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
-/* purpose: Bind and validate the persisted block-index top-up prefix. */
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
+ * purpose: Bind and validate the persisted block-index top-up prefix. */
+// one-result-type-ok:resume-height-best-effort-mark — a failed check resumes at
+// lo and folds the whole window; recording the mark is best effort and logged.
 #include "block_index_topup_clean.h"
 #include "validation/main_state.h"
 #include "chain/chain.h"

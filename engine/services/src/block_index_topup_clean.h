@@ -1,5 +1,5 @@
-/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
-/* purpose: Declare private verified block-index top-up prefix operations. */
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
+ * purpose: Declare private verified block-index top-up prefix operations. */
 #ifndef ZCL_BLOCK_INDEX_TOPUP_CLEAN_H
 #define ZCL_BLOCK_INDEX_TOPUP_CLEAN_H
 #include <stdbool.h>
