@@ -1282,7 +1282,7 @@ static int cas_test_daemon_evidence(void)
     int failures = 0;
     TEST("CLI daemon capture: needle stop preserves observed merged tail") {
         char *argv[] = {"/bin/sh", "-c",
-            "printf READY; sleep 0.05; printf '%0800d-DAEMON_END' 0 >&2; exec sleep 30", NULL};
+            "printf READY; printf '%0800d-DAEMON_END' 0 >&2; exec sleep 30", NULL};
         const char *const needles[] = {"READY", "DAEMON_END", NULL};
         char home[PATH_MAX], out[1024], evidence[TEST_EVIDENCE_CAP + 512];
         ASSERT(test_mkdtemp(home, sizeof(home), "cas_daemon") != NULL);
