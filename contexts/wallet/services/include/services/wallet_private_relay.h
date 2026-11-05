@@ -128,6 +128,9 @@ struct wpr {
     char datadir[1024];
     struct tx_mempool pool;
     struct wpr_entry entries[WPR_MAX_ENTRIES];
+    /* A change to a send's state (seen back, expired) could not be written;
+     * the next tick writes the record again. */
+    bool persist_dirty;
     /* Injection points: tests replace both; production uses the monotonic
      * clock and the kernel CSPRNG. */
     int64_t (*now_ms)(void);

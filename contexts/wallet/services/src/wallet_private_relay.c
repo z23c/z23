@@ -396,6 +396,30 @@ struct zcl_result wpr_enqueue(struct wpr *r, const struct transaction *tx)
     return ZCL_OK;
 }
 
+/* Caller holds r->lock. The in-memory change stands; when the write fails the
+ * record on disk still names the send as live, so it is kept dirty and the
+ * next tick writes it again. */
+static void wpr_persist_or_retry_locked(struct wpr *r,
+                                        const struct uint256 *txid,
+                                        const char *what)
+{
+    if (wpr_persist_locked(r))
+        return;
+    r->persist_dirty = true;
+    char hex[65];
+    uint256_get_hex(txid, hex);
+    LOG_WARN("wallet_private_relay",
+             "pending set not saved after %s %s; will retry", what, hex);
+}
+
+static void wpr_retry_persist(struct wpr *r)
+{
+    zcl_mutex_lock(&r->lock);
+    if (r->persist_dirty && wpr_persist_locked(r))
+        r->persist_dirty = false;
+    zcl_mutex_unlock(&r->lock);
+}
+
 static void wpr_clear_locked(struct wpr *r, struct wpr_entry *e)
 {
     tx_mempool_remove(&r->pool, &e->txid);
@@ -414,7 +438,7 @@ void wpr_note_seen(struct wpr *r, const struct uint256 *txid)
         e->in_pool = false;
         e->mined = false;
         tx_mempool_remove(&r->pool, txid);
-        (void)wpr_persist_locked(r);
+        wpr_persist_or_retry_locked(r, txid, "seen back");
     }
     zcl_mutex_unlock(&r->lock);
 }
@@ -433,7 +457,7 @@ void wpr_mark_expired(struct wpr *r, const struct uint256 *txid)
         e->held = false;
         e->disk_retry = false;
         e->seen_ms = r->now_ms();
-        (void)wpr_persist_locked(r);
+        wpr_persist_or_retry_locked(r, txid, "expiry of");
     }
     zcl_mutex_unlock(&r->lock);
 }
@@ -895,6 +919,7 @@ void wpr_tick(struct wpr *r, int wallet_height, struct wpr_tick_result *out)
     if (!r)
         return;
     int64_t now = r->now_ms();
+    wpr_retry_persist(r);
     for (size_t i = 0; i < WPR_MAX_ENTRIES; i++)
         wpr_tick_entry(r, i, wallet_height, now, out);
 }
