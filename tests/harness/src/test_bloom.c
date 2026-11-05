@@ -3,6 +3,8 @@
 #include "test/test_core.h"
 #include "bloom/merkle.h"
 #include "net/msgprocessor.h"
+#include "core/hash.h"
+#include <math.h>
 
 static int bloom_test_filter_init(void)
 {
@@ -563,6 +565,247 @@ static int bloom_test_hash_func_clamp(void)
     return failures;
 }
 
+/* ---- mutation-sweep closers: Bitcoin Core known answers and a bit model ----- */
+
+/* The 20-byte keys of Bitcoin Core's bloom_create_insert_serialize vectors. */
+static const unsigned char kat_k1[20] = {
+    0x99,0x10,0x8a,0xd8,0xed,0x9b,0xb6,0x27,0x4d,0x39,0x80,0xba,0xb5,0xa8,0x5c,0x04,0x8f,0x09,0x50,0xc8 };
+static const unsigned char kat_miss[20] = {
+    0x19,0x10,0x8a,0xd8,0xed,0x9b,0xb6,0x27,0x4d,0x39,0x80,0xba,0xb5,0xa8,0x5c,0x04,0x8f,0x09,0x50,0xc8 };
+static const unsigned char kat_k2[20] = {
+    0xb5,0xa2,0xc7,0x86,0xd9,0xef,0x46,0x58,0x28,0x7c,0xed,0x59,0x14,0xb3,0x7a,0x1b,0x4a,0xa3,0x2e,0xee };
+static const unsigned char kat_k3[20] = {
+    0xb9,0x30,0x06,0x70,0xb4,0xc5,0x36,0x6e,0x95,0xb2,0x69,0x9e,0x8b,0x18,0xbc,0x75,0xe5,0xf7,0x29,0xc5 };
+
+/* Insert the three keys into a (3, 0.01) filter and compare the whole state
+ * with the Core serialization: data, 5 hash functions, tweak, flags. */
+static bool bloom_kat_case(unsigned int tweak, const unsigned char want[3])
+{
+    struct bloom_filter f = {0};
+    bool ok = bloom_filter_init(&f, 3, 0.01, tweak, BLOOM_UPDATE_ALL);
+    if (ok) {
+        bloom_filter_insert(&f, kat_k1, 20);
+        ok = bloom_filter_contains(&f, kat_k1, 20) && !bloom_filter_contains(&f, kat_miss, 20);
+        bloom_filter_insert(&f, kat_k2, 20);
+        bloom_filter_insert(&f, kat_k3, 20);
+        ok = ok && bloom_filter_contains(&f, kat_k2, 20) && bloom_filter_contains(&f, kat_k3, 20);
+        ok = ok && f.data_size == 3 && memcmp(f.data, want, 3) == 0 &&
+             f.num_hash_funcs == 5 && f.tweak == tweak && f.flags == BLOOM_UPDATE_ALL &&
+             !f.is_empty && !f.is_full;
+    }
+    bloom_filter_free(&f);
+    return ok;
+}
+
+static int bloom_test_mut_known_answer(void)
+{
+    int failures = 0;
+    printf("bloom_filter matches the Bitcoin Core serialization vectors... ");
+    {
+        const unsigned char w0[3] = { 0x61, 0x4e, 0x9b };
+        const unsigned char w1[3] = { 0xce, 0x42, 0x99 };
+        bool a = bloom_kat_case(0, w0);
+        bool b = bloom_kat_case(2147483649u, w1);
+        if (a && b)
+            printf("OK\n");
+        else { printf("FAIL (tweak0=%d tweak2^31+1=%d)\n", a, b); failures++; }
+    }
+    return failures;
+}
+
+/* The bit the spec assigns to hash number i of data under this filter. */
+static unsigned int model_bit(const struct bloom_filter *f, unsigned int i,
+                              const unsigned char *d, size_t n)
+{
+    return murmur_hash3(i * 0xFBA4C795u + f->tweak, d, n) % (unsigned int)(f->data_size * 8);
+}
+
+static bool model_has_bit(const struct bloom_filter *f, unsigned int bit)
+{
+    return (f->data[bit >> 3] >> (bit & 7)) & 1;
+}
+
+/* One insert sets exactly the num_hash_funcs bits the spec names, no more. */
+static bool bloom_model_single_insert(void)
+{
+    struct bloom_filter f = {0};
+    const unsigned char probe[] = "bit-model-probe";
+    bool ok = bloom_filter_init(&f, 10, 0.0001, 77, BLOOM_UPDATE_NONE);
+    if (ok) {
+        unsigned char want[64] = {0};
+        for (unsigned int i = 0; i < f.num_hash_funcs; i++) {
+            unsigned int b = model_bit(&f, i, probe, sizeof(probe));
+            want[b >> 3] |= (unsigned char)(1u << (b & 7));
+        }
+        bloom_filter_insert(&f, probe, sizeof(probe));
+        ok = f.data_size <= sizeof(want) && memcmp(f.data, want, f.data_size) == 0;
+    }
+    bloom_filter_free(&f);
+    return ok;
+}
+
+/* contains must consult hash 0 too: find a key whose other bits are all set. */
+static bool bloom_model_first_hash_counts(void)
+{
+    struct bloom_filter f = {0};
+    bool ok = bloom_filter_init(&f, 20, 0.01, 5, BLOOM_UPDATE_NONE);
+    bool found = false;
+    for (unsigned int k = 0; ok && k < 20; k++) {
+        unsigned char key[4] = { (unsigned char)k, 0xA1, 0xB2, 0xC3 };
+        bloom_filter_insert(&f, key, sizeof(key));
+    }
+    for (unsigned int c = 1000; ok && !found && c < 400000; c++) {
+        unsigned char key[4] = { (unsigned char)c, (unsigned char)(c >> 8),
+                                 (unsigned char)(c >> 16), 0x5E };
+        bool rest = true;
+        for (unsigned int i = 1; rest && i < f.num_hash_funcs; i++)
+            rest = model_has_bit(&f, model_bit(&f, i, key, sizeof(key)));
+        if (rest && !model_has_bit(&f, model_bit(&f, 0, key, sizeof(key)))) {
+            found = true;
+            ok = !bloom_filter_contains(&f, key, sizeof(key));
+        }
+    }
+    bloom_filter_free(&f);
+    return ok && found;
+}
+
+static int bloom_test_mut_bit_model(void)
+{
+    int failures = 0;
+    printf("bloom_filter insert sets exactly the spec bits; contains reads them all... ");
+    {
+        bool a = bloom_model_single_insert();
+        bool b = bloom_model_first_hash_counts();
+        if (a && b)
+            printf("OK\n");
+        else { printf("FAIL (single=%d first_hash=%d)\n", a, b); failures++; }
+    }
+    return failures;
+}
+
+static int bloom_test_mut_state_flags(void)
+{
+    int failures = 0;
+    printf("bloom_filter init/clear/reset/free leave exact state... ");
+    {
+        struct bloom_filter f = {0};
+        const unsigned char d[] = "state";
+        bool ok = bloom_filter_init(&f, 10, 0.0001, 3, BLOOM_UPDATE_NONE);
+        ok = ok && f.is_empty && !f.is_full && !bloom_filter_contains(&f, d, 5);
+        bloom_filter_insert(&f, d, 5);
+        ok = ok && !f.is_empty;
+        f.is_full = true;                           /* a full filter matches everything */
+        ok = ok && bloom_filter_contains(&f, kat_miss, 20);
+        bloom_filter_clear(&f);
+        bool zero = true;
+        for (size_t i = 0; i < f.data_size; i++) zero = zero && f.data[i] == 0;
+        ok = ok && zero && f.is_empty && !f.is_full;
+        bloom_filter_insert(&f, d, 5);
+        bloom_filter_reset(&f, 9);
+        zero = true;
+        for (size_t i = 0; i < f.data_size; i++) zero = zero && f.data[i] == 0;
+        ok = ok && zero && f.is_empty && f.tweak == 9;
+        bloom_filter_free(&f);
+        ok = ok && f.data == NULL && f.data_size == 0;
+        if (ok)
+            printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
+static int bloom_test_mut_sizing(void)
+{
+    int failures = 0;
+    printf("bloom_filter sizing: tiny floor, byte cap, size constraint edges... ");
+    {
+        struct bloom_filter t = {0}, big = {0}, edge = {0};
+        /* 1 element at fp 0.5 asks for 1 bit: floored to one byte, 5 hash funcs */
+        bool ok = bloom_filter_init(&t, 1, 0.5, 0, BLOOM_UPDATE_NONE);
+        ok = ok && t.data != NULL && t.data_size == 1 && t.num_hash_funcs == 5;
+        /* a huge request is cut to exactly the 36000-byte / 50-hash limit, which passes */
+        ok = ok && bloom_filter_init(&big, 3000, 1e-21, 0, BLOOM_UPDATE_NONE);
+        ok = ok && big.data_size == MAX_BLOOM_FILTER_SIZE &&
+             big.num_hash_funcs == MAX_BLOOM_HASH_FUNCS &&
+             bloom_filter_is_within_size_constraints(&big);
+        /* one byte over, or one hash over, fails on its own */
+        edge.data_size = MAX_BLOOM_FILTER_SIZE + 1;
+        edge.num_hash_funcs = 1;
+        ok = ok && !bloom_filter_is_within_size_constraints(&edge);
+        edge.data_size = 1;
+        edge.num_hash_funcs = MAX_BLOOM_HASH_FUNCS + 1;
+        ok = ok && !bloom_filter_is_within_size_constraints(&edge);
+        edge.num_hash_funcs = MAX_BLOOM_HASH_FUNCS;
+        ok = ok && bloom_filter_is_within_size_constraints(&edge);
+        bloom_filter_free(&t);
+        bloom_filter_free(&big);
+        if (ok)
+            printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
+/* Rolling filter, 4 elements: window 8, halves of 4. Oracle = the documented
+ * two-generation scheme (b1 cleared at wrap, b2 at the midpoint, reads from b2
+ * in the first half and from b1 in the second). */
+static bool rolling_model_run(void)
+{
+    struct rolling_bloom_filter rf;
+    bool ok = rolling_bloom_init(&rf, 4, 1e-9);
+    bool s1[64] = {0}, s2[64] = {0};
+    unsigned int ins = 0;
+    for (unsigned int id = 0; ok && id < 20; id++) {
+        unsigned char key[4] = { (unsigned char)id, 0x77, 0x88, 0x99 };
+        if (ins == 0) memset(s1, 0, sizeof(s1));
+        else if (ins == 4) memset(s2, 0, sizeof(s2));
+        s1[id] = s2[id] = true;
+        rolling_bloom_insert(&rf, key, sizeof(key));
+        if (++ins == 8) ins = 0;
+        ok = rf.insertions == ins;
+        for (unsigned int q = 0; ok && q < 24; q++) {
+            unsigned char qk[4] = { (unsigned char)q, 0x77, 0x88, 0x99 };
+            bool want = q < 20 && (ins < 4 ? s2[q] : s1[q]);
+            ok = rolling_bloom_contains(&rf, qk, sizeof(qk)) == want;
+        }
+    }
+    rolling_bloom_free(&rf);
+    return ok;
+}
+
+/* Init: window = 2n, both halves sized for 2n elements with no byte cap. */
+static bool rolling_init_state(void)
+{
+    struct rolling_bloom_filter rf;
+    memset(&rf, 0xFF, sizeof(rf));
+    bool ok = rolling_bloom_init(&rf, 1000, 0.001);
+    if (ok) {
+        size_t bytes = (size_t)(unsigned int)(-1.0 / 0.4804530139182014246671025263266649717305529515945455 *
+                                              2000 * log(0.001)) / 8;
+        unsigned int hashes = (unsigned int)(bytes * 8 / 2000 * 0.6931471805599453094172321214581765680755001343602552);
+        ok = rf.bloom_size == 2000 && rf.insertions == 0 &&
+             rf.b1.data_size == bytes && rf.b2.data_size == bytes &&
+             rf.b1.num_hash_funcs == hashes && rf.b2.num_hash_funcs == hashes &&
+             rf.b1.tweak == rf.b2.tweak && rf.b1.is_empty && rf.b2.is_empty;
+    }
+    rolling_bloom_free(&rf);
+    return ok;
+}
+
+static int bloom_test_mut_rolling(void)
+{
+    int failures = 0;
+    printf("rolling_bloom init state and generation rollover... ");
+    {
+        bool a = rolling_init_state();
+        bool b = rolling_model_run();
+        if (a && b)
+            printf("OK\n");
+        else { printf("FAIL (init=%d model=%d)\n", a, b); failures++; }
+    }
+    return failures;
+}
+
 int test_bloom(void)
 {
     int failures = 0;
@@ -587,6 +830,11 @@ int test_bloom(void)
     failures += bloom_test_node_bloom_service();
     failures += bloom_test_dispatch_filters();
     failures += bloom_test_hash_func_clamp();
+    failures += bloom_test_mut_known_answer();
+    failures += bloom_test_mut_bit_model();
+    failures += bloom_test_mut_state_flags();
+    failures += bloom_test_mut_sizing();
+    failures += bloom_test_mut_rolling();
 
     return failures;
 }
