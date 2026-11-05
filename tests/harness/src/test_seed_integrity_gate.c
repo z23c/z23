@@ -649,6 +649,19 @@ static int sig_test_trusted_memo(void)
     SIG_CHECK("memo trust: trusted call passes", built && sig_gate(141, t, true));
     SIG_CHECK("memo trust: untrusted repeat served from the trusted pass",
               sig_gate(141, t, false) && sig_stat("seed_gate_runs") == r0 + 1);
+    blocker_clear("seed.linkage_gate");
+
+    /* a trusted refusal stays a refusal: an untrusted repeat must neither walk
+     * again nor overwrite it with a linkage-only pass */
+    built = sig_one_row(&ndb, 142, 0xD2, t) &&
+            seed_integrity_stamp_utxo_sha3(&ndb, 142, bad, count);
+    r0 = sig_stat("seed_gate_runs");
+    SIG_CHECK("memo trust: trusted call refused", built && !sig_gate(142, t, true));
+    SIG_CHECK("memo trust: untrusted repeat keeps the trusted refusal",
+              !sig_gate(142, t, false) && sig_stat("seed_gate_runs") == r0 + 1);
+    SIG_CHECK("memo trust: the trusted refusal is still stored",
+              !sig_gate(142, t, true) && sig_stat("seed_gate_runs") == r0 + 1);
+    blocker_clear("seed.linkage_gate");
     sig_teardown(&ndb);
     return failures;
 }
