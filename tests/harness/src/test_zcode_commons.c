@@ -214,7 +214,7 @@ static int test_v2_truthful_activation_status(void)
     TEST("Family policy selection is not reported as effective enforcement") {
         char backlog_workspace[256];
         test_make_tmpdir(backlog_workspace, sizeof(backlog_workspace),
-                         "zcode_commons", "backlog");
+                         "zcode_commons_scratch", "backlog");
         zcl_hotswap_service_reset();
         struct json_value input;
         json_init(&input);

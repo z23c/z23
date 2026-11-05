@@ -306,7 +306,7 @@ static int commons_claim_projection_test(void)
     TEST("signed claim projection rebuilds, orders and filters by cutoff") {
         char workspace[256];
         test_make_tmpdir(workspace, sizeof(workspace),
-                         "zcode_commons_claim_projection", "valid");
+                         "zcode_commons_scratch_claim_projection", "valid");
         ASSERT(vcs_object_store_init(workspace));
         struct vcs_zcode_creation_claim_wire_v2 mature, future, retracted;
         commons_claim_fixture(&future, 12, 300, 3000,
@@ -666,7 +666,7 @@ static int commons_claim_projection_test(void)
 
         char corrupt_workspace[256];
         test_make_tmpdir(corrupt_workspace, sizeof(corrupt_workspace),
-                         "zcode_commons_claim_projection", "corrupt");
+                         "zcode_commons_scratch_claim_projection", "corrupt");
         ASSERT(vcs_object_store_init(corrupt_workspace));
         uint8_t wire[VCS_ZCODE_CREATION_CLAIM_WIRE_BYTES];
         size_t wire_len = 0;
@@ -878,7 +878,7 @@ static int epoch_creation_verify_failclosed_test(void)
     TEST("ZC23 epoch creation: CAS verification fails closed rung by rung") {
         char workspace[256];
         test_make_tmpdir(workspace, sizeof(workspace),
-                         "zcode_epoch_verify", "empty");
+                         "zcode_scratch_epoch_verify", "empty");
         ASSERT(vcs_object_store_init(workspace));
 
         uint8_t roots[1][32];
@@ -965,7 +965,7 @@ static int commons_rebuild_identity_test(void)
     TEST("ZC23 commons projection: rebuild from CAS is byte-identical") {
         char workspace[256];
         test_make_tmpdir(workspace, sizeof(workspace),
-                         "zcode_commons_rebuild", "populated");
+                         "zcode_commons_scratch_rebuild", "populated");
         ASSERT(vcs_object_store_init(workspace));
 
         struct vcs_zcode_creation_attribution_v1 first_attribution,
@@ -1065,7 +1065,7 @@ static int commons_accounting_failures_test(void)
          * flagged, never double-counted silently. */
         char duplicate_workspace[256];
         test_make_tmpdir(duplicate_workspace, sizeof(duplicate_workspace),
-                         "zcode_commons_failure", "duplicate");
+                         "zcode_commons_scratch_failure", "duplicate");
         ASSERT(vcs_object_store_init(duplicate_workspace));
         struct vcs_zcode_creation_attribution_v1 attribution;
         commons_attribution_fixture(&attribution, 27, UINT64_C(125000000));
@@ -1102,7 +1102,7 @@ static int commons_accounting_failures_test(void)
         /* An epoch set referencing an attribution the CAS does not hold. */
         char missing_workspace[256];
         test_make_tmpdir(missing_workspace, sizeof(missing_workspace),
-                         "zcode_commons_failure", "missing");
+                         "zcode_commons_scratch_failure", "missing");
         ASSERT(vcs_object_store_init(missing_workspace));
         uint8_t absent[1][32];
         commons_fill(absent[0], 99);
@@ -1135,7 +1135,7 @@ static int commons_accounting_failures_test(void)
         /* Minted atoms that do not equal the referenced awards. */
         char sum_workspace[256];
         test_make_tmpdir(sum_workspace, sizeof(sum_workspace),
-                         "zcode_commons_failure", "sum");
+                         "zcode_commons_scratch_failure", "sum");
         ASSERT(vcs_object_store_init(sum_workspace));
         ASSERT(commons_store_attribution(sum_workspace, &attribution,
                                          attribution_root));
