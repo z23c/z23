@@ -160,20 +160,28 @@ size_t mesh_game_compose(const struct mesh_game_frame *frame, uint8_t *out,
 
     if (!frame || !out)
         return 0;
-    out[used++] = (uint8_t)frame->kind;
+    /* Each composer checks the kind's own bounds before it writes, so the
+     * kind byte goes in only once a frame is known to fit. */
     switch (frame->kind) {
     case MESH_GAME_KIND_HELLO:
-        return game_compose_hello(frame, out, cap);
+        used = game_compose_hello(frame, out, cap);
+        break;
     case MESH_GAME_KIND_ROSTER:
-        return game_compose_roster(&frame->body.roster, out, cap);
+        used = game_compose_roster(&frame->body.roster, out, cap);
+        break;
     case MESH_GAME_KIND_MATCH_OPEN:
-        return game_compose_match_open(frame, out, cap);
+        used = game_compose_match_open(frame, out, cap);
+        break;
     case MESH_GAME_KIND_MATCH_STATE:
-        return game_compose_match_state(&frame->body.match_state, out, cap);
+        used = game_compose_match_state(&frame->body.match_state, out, cap);
+        break;
     case MESH_GAME_KIND_MATCH_CLOSE:
-        return game_compose_match_close(frame, out, cap);
+        used = game_compose_match_close(frame, out, cap);
+        break;
     }
-    return 0;
+    if (used)
+        out[0] = (uint8_t)frame->kind;
+    return used;
 }
 
 static enum mesh_game_refusal game_parse_hello(const uint8_t *in, size_t len,
@@ -211,7 +219,10 @@ static enum mesh_game_refusal game_parse_roster(const uint8_t *in, size_t len,
     for (uint8_t i = 0; i < r->row_count; i++) {
         memcpy(r->rows[i].noise_fingerprint, in + at, 32);
         at += 32u;
-        r->rows[i].reachable = in[at++] != 0u;
+        /* Compose writes 0 or 1; any other byte is a second wire form. */
+        if (in[at] > 1u)
+            return MESH_GAME_MALFORMED;
+        r->rows[i].reachable = in[at++] == 1u;
         memcpy(r->rows[i].assets, in + at, r->asset_count);
         at += r->asset_count;
     }
@@ -277,12 +288,9 @@ static enum mesh_game_refusal game_parse_match_close(const uint8_t *in,
     return MESH_GAME_OK;
 }
 
-enum mesh_game_refusal mesh_game_parse(const uint8_t *in, size_t len,
-                                       struct mesh_game_frame *out)
+static enum mesh_game_refusal game_parse_kind(const uint8_t *in, size_t len,
+                                               struct mesh_game_frame *out)
 {
-    if (!in || !out || len < 1u)
-        return MESH_GAME_MALFORMED;
-    memset(out, 0, sizeof(*out));
     switch (in[0]) {
     case MESH_GAME_KIND_HELLO:
         return game_parse_hello(in, len, out);
@@ -298,6 +306,21 @@ enum mesh_game_refusal mesh_game_parse(const uint8_t *in, size_t len,
         break;
     }
     return MESH_GAME_UNKNOWN_KIND;
+}
+
+enum mesh_game_refusal mesh_game_parse(const uint8_t *in, size_t len,
+                                       struct mesh_game_frame *out)
+{
+    if (!out)
+        return MESH_GAME_MALFORMED;
+    memset(out, 0, sizeof(*out));
+    if (!in || len < 1u)
+        return MESH_GAME_MALFORMED;
+    enum mesh_game_refusal reason = game_parse_kind(in, len, out);
+    /* One exit for every refusal: no half-written field is left behind. */
+    if (reason != MESH_GAME_OK)
+        memset(out, 0, sizeof(*out));
+    return reason;
 }
 
 /* ── Session ─────────────────────────────────────────────────────────── */

@@ -161,7 +161,8 @@ size_t mesh_game_compose(const struct mesh_game_frame *frame, uint8_t *out,
                          size_t cap);
 
 /* Parse names why it refused. MESH_GAME_OK is the only value that leaves
- * `out` filled. */
+ * `out` filled: `out` is zeroed on entry and again on every refusal, so no
+ * half-parsed field survives a refusal. */
 enum mesh_game_refusal mesh_game_parse(const uint8_t *in, size_t len,
                                        struct mesh_game_frame *out);
 
