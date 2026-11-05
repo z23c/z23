@@ -121,7 +121,9 @@ static const char *vip_route_name(enum vault_intent_route route)
 
 static enum vault_intent_route vip_route_parse(const char *route)
 {
-    if (!route || strcmp(route, "private") == 0)
+    /* json_get_str never returns NULL: a missing or non-string route is ""
+     * and falls through to 0, which the caller refuses as UNSUPPORTED_ROUTE. */
+    if (strcmp(route, "private") == 0)
         return VAULT_INTENT_ROUTE_PRIVATE;
     if (strcmp(route, "shield") == 0)
         return VAULT_INTENT_ROUTE_SHIELD;
@@ -149,6 +151,19 @@ static const char *vip_effect_amount_str(const struct json_value *value)
 static const char *vip_memo_nonempty(const char *memo)
 {
     return memo && memo[0] ? memo : NULL;
+}
+
+/* A memo field that is present must be a string, and at most one of memo and
+ * memo_hex may carry text: json_get_str reads a non-string as "", which would
+ * otherwise drop the memo silently. */
+static bool vip_effect_memo_fields_ok(const struct json_value *value)
+{
+    const struct json_value *hex = json_get(value, "memo_hex");
+    const struct json_value *text = json_get(value, "memo");
+    if ((hex && hex->type != JSON_STR) || (text && text->type != JSON_STR))
+        return false;
+    return !(vip_memo_nonempty(json_get_str(hex)) &&
+             vip_memo_nonempty(json_get_str(text)));
 }
 
 static bool vip_effect_memo_acceptable(const char *memo_hex,
@@ -197,6 +212,8 @@ static bool vip_effect_parse(const struct json_value *value,
         *total > INT64_MAX - zats)
         return false;
 
+    if (!vip_effect_memo_fields_ok(value))
+        return false;
     bool is_z = wallet_addr_is_sapling(to);
     const char *memo_hex = vip_memo_nonempty(
         json_get_str(json_get(value, "memo_hex")));
@@ -270,7 +287,7 @@ static bool vip_parse(const struct json_value *input, struct vip_payload *out,
     }
     if (!requested_route) {
         vip_error(result, "UNSUPPORTED_ROUTE",
-                  "route must be private, shield, unshield, mixed, or transparent");
+                  "route must be private, shield, unshield, or mixed");
         return false;
     }
     if (count == 0 || count > VIP_EFFECTS_MAX) {
@@ -293,7 +310,7 @@ static bool vip_parse(const struct json_value *input, struct vip_payload *out,
     if (actual == VAULT_INTENT_ROUTE_TRANSPARENT || actual != requested_route) {
         vip_error(result, "ROUTE_MISMATCH",
                   actual == VAULT_INTENT_ROUTE_TRANSPARENT
-                      ? "transparent-only fan-out requires route=transparent"
+                      ? "this path needs a Sapling address as from or as a recipient; a transparent-only request has no route here"
                       : "route does not match the from/recipient pool shape");
         return false;
     }

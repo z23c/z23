@@ -309,7 +309,6 @@ static bool vi_effects(const struct json_value *input, struct vi_payload *p,
                        struct json_value *out)
 {
     const char *route = json_get_str(json_get(input, "route"));
-    if (!route) route = "private";
     if (strcmp(route, "transparent") != 0) {
         vi_error(out, strcmp(route, "private") == 0 ?
             "PRIVACY_ROUTE_UNAVAILABLE" : "UNSUPPORTED_ROUTE",
@@ -587,7 +586,7 @@ static bool rpc_vi_plan_checked(const struct json_value *params, bool help,
     s.ctx = wallet_rpc_context_current();
     if (!vi_plan_request_valid(input, result, &s.wallet_scope)) return true;
     const char *route = json_get_str(json_get(input, "route"));
-    if (!route || strcmp(route, "transparent") != 0)
+    if (strcmp(route, "transparent") != 0)
         return vault_intent_private_plan(input, result);
     s.idem = json_get_str(json_get(input, "idempotency_key"));
     if (!vault_intent_idempotency_key_valid(s.idem)) {

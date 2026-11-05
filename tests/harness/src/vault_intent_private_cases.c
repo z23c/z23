@@ -793,6 +793,18 @@ static const struct vp_ref k_refs[] = {
       VSHIELD VEFF(VEM("@U@", "1", "memo", "")), "ROUTE_MISMATCH" },
     { "empty memo_hex on transparent recipient is no memo",
       VSHIELD VEFF(VEM("@U@", "1", "memo_hex", "")), "ROUTE_MISMATCH" },
+    { "memo and memo_hex both set on a Sapling recipient",
+      VSHIELD VEFF("{\"asset\":\"ZCL\",\"to\":\"@Z@\",\"amount\":\"1\","
+                   "\"memo\":\"hi\",\"memo_hex\":\"00\"}"), "INVALID_EFFECT" },
+    { "memo that is a number", VSHIELD VEFF("{\"asset\":\"ZCL\",\"to\":\"@Z@\","
+                                            "\"amount\":\"1\",\"memo\":5}"),
+      "INVALID_EFFECT" },
+    { "memo_hex that is a number", VSHIELD VEFF("{\"asset\":\"ZCL\",\"to\":\"@Z@\","
+                                                "\"amount\":\"1\",\"memo_hex\":5}"),
+      "INVALID_EFFECT" },
+    { "memo that is null", VSHIELD VEFF("{\"asset\":\"ZCL\",\"to\":\"@Z@\","
+                                        "\"amount\":\"1\",\"memo\":null}"),
+      "INVALID_EFFECT" },
     { "transparent to transparent needs another route",
       VSHIELD VEFF(VE("@U@", "1")), "ROUTE_MISMATCH" },
     { "t to z asked as private", VPRE VFROM("@T@") VROUTE("private")
@@ -859,7 +871,8 @@ static bool vp_transparent_only_message(void)
     struct json_value r;
     json_init(&r);
     bool ok = vp_plan_json(json, &r) &&
-        strstr(vp_str(&r, "message"), "transparent-only") != NULL;
+        strstr(vp_str(&r, "message"), "no route here") != NULL &&
+        strstr(vp_str(&r, "message"), "route=transparent") == NULL;
     json_free(&r);
     return ok;
 }
