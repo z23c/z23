@@ -923,3 +923,7 @@ later lane flips it HARD.
 - 2026-11-04T23:20:34Z — REASON: Owner authorized 2026-11-04 onion-only peer bootstrap using configured P2P endpoints and known-self guard; no consensus predicate change
   old ROOT: 36e585df84361875e16bd06cd8ade2f77dc89b7c88816404aa3c40eb9f0dfdaf
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-05T05:54:56Z — REASON: Cancel in-flight onion dialing during orderly node shutdown without changing consensus
+  old ROOT: 67502a564613cb4c7be8dd3acdac85d4c460de5717f923e07538dee1de54e6c6
+  by: owner unseal ritual (make core-unseal)

@@ -1443,6 +1443,8 @@ static void run_full_suite_foundation(int *failures)
       *failures += test_onion_persistence(); }
     { extern int test_onion_stream(void);
       *failures += test_onion_stream(); }
+    { extern int test_onion_stop(void);
+      *failures += test_onion_stop(); }
     { extern int test_onion_bridge(void);
       *failures += test_onion_bridge(); }
     { extern int test_cold_start_sync(void);
@@ -2284,6 +2286,8 @@ static void run_full_suite_late_and_specs(int *failures)
 
 int main(int argc, char **argv)
 {
+    extern void onion_stop_child_exit_if_requested(int, char **);
+    onion_stop_child_exit_if_requested(argc, argv);
     /* Narrow sealed-image process fixture dispatch, before global test init. */
     extern void supervised_fixture_exit_if_requested(int argc, char **argv);
     supervised_fixture_exit_if_requested(argc, argv);

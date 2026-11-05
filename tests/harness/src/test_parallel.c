@@ -4240,6 +4240,8 @@ static int run_report(struct run_ctx *c)
 
 int main(int argc, char **argv)
 {
+    extern void onion_stop_child_exit_if_requested(int, char **);
+    onion_stop_child_exit_if_requested(argc, argv);
     if (!selection_inspection_valid(argc, argv)) return 2;
     /* Narrow sealed-image process fixture dispatch, before runner init. */
     extern void supervised_fixture_exit_if_requested(int argc, char **argv);

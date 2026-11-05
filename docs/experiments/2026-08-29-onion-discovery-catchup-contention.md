@@ -44,3 +44,20 @@ The blog regression verifies that discovery against a missing database leaves
 `node.db`, `node.db-wal`, and `node.db-shm` absent. Live acceptance still
 requires an owner-approved release deployment and observation beyond two onion
 poll intervals; this source-level result does not claim that deployment.
+
+## Onion dial shutdown, 2026-11-05
+
+On AMD Ryzen 9 7950X3D with Ubuntu Clang 20.1.8, local and UTC time
+`2026-11-05T05:59:52+00:00`, an isolated nonterminal backend reproduced a
+2,000 ms dial wait after shutdown on source `99dc6a5f6293`: 2,004 ms and 2,014 ms
+in the two focused attempts. The cancellation change returned in 20 ms for
+both 2,000 ms and 120,000 ms dial budgets, with one open and no circuit timeout
+recorded. These are individual observations, not a latency guarantee.
+
+`make -j16 t-fast-exact ONLY=test_onion_stop,test_onion_stream,test_onion_bridge`
+passed 3/3 groups with no skips. The isolated cases also cover cancellation
+before opening, cancellation around connection and terminal events, ordinary
+retry, a delayed terminal callback, and a callback arriving after the bounded
+teardown wait. The late callback case took 5,029 ms; the bridge retains its
+context when the callback misses the teardown bound. These tests do not establish
+the cause of any particular device shutdown delay.

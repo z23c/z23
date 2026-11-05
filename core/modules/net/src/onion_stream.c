@@ -19,6 +19,7 @@
 #include "platform/time_compat.h"
 #include "platform/socket_compat.h"
 #include "util/safe_alloc.h"
+#include "util/thread_registry.h"
 #include "util/log_macros.h"
 
 #include <pthread.h>
@@ -528,7 +529,8 @@ static int onion_bridge_wait_circuit(struct onion_bridge *b,
                                      int connect_timeout_ms)
 {
     int waited_ms = 0;
-    while (atomic_load(&b->phase) != BRIDGE_CONNECTED &&
+    while (!thread_registry_shutdown_requested() &&
+           atomic_load(&b->phase) != BRIDGE_CONNECTED &&
            !atomic_load(&b->terminal_seen) &&
            waited_ms < connect_timeout_ms) {
         platform_sleep_ms(ONION_CONNECT_POLL_MS);
@@ -544,6 +546,7 @@ static bool onion_stream_connect_once(const struct net_service *svc,
                                       struct onion_stream_dial_record *record)
 {
     *sock_out = ZCL_INVALID_SOCKET;
+    if (thread_registry_shutdown_requested()) return false;
 
     char host[ONION_V3_ADDRESS_LEN + 1];
     if (!onion_v3_address_from_pubkey(svc->addr.torv3, host))
@@ -584,6 +587,14 @@ static bool onion_stream_connect_once(const struct net_service *svc,
     snprintf(b->desc, sizeof(b->desc), "%s:%u", host, svc->port);
 
     int64_t started_ms = platform_time_monotonic_ms();
+    if (thread_registry_shutdown_requested()) {
+        pthread_mutex_destroy(&b->mu);
+        free(b->rxq);
+        free(b);
+        close_socket(&app_fd);
+        close_socket(&pump_fd);
+        return false;
+    }
     b->stream = be->open(host, svc->port, onion_bridge_read,
                          onion_bridge_event, b, ONION_STREAM_LIFETIME_SECS);
     if (!b->stream) {
@@ -603,6 +614,11 @@ static bool onion_stream_connect_once(const struct net_service *svc,
     /* Wait for the circuit: CONNECTED wins, a terminal event or the
      * connect budget ends the attempt. */
     int waited_ms = onion_bridge_wait_circuit(b, connect_timeout_ms);
+
+    if (thread_registry_shutdown_requested()) {
+        onion_bridge_teardown(b, &app_fd);
+        return false;
+    }
 
     /* A stream that reached CONNECTED and then went terminal inside the
      * same wait is NOT a usable circuit. Accepting it handed connman a
@@ -654,10 +670,10 @@ static bool onion_stream_connect_backend(const struct net_service *svc,
     struct onion_stream_dial_record *record = onion_stream_dial_begin(svc);
     int budgets[2];
     size_t attempts = onion_stream_connect_plan(connect_timeout_ms, budgets);
-    for (size_t i = 0; i < attempts; i++) {
+    for (size_t i = 0; i < attempts && !thread_registry_shutdown_requested(); i++) {
         if (onion_stream_connect_once(svc, sock_out, budgets[i], be, record))
             return true;
-        if (i + 1 < attempts)
+        if (i + 1 < attempts && !thread_registry_shutdown_requested())
             LOG_WARN("onion", "first onion circuit attempt failed; "
                               "retrying once with a fresh stream "
                               "(remaining_budget_ms=%d)", budgets[i + 1]);
