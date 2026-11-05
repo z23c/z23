@@ -461,6 +461,10 @@ static int test_board_site_wiki_hardening(void)
         ASSERT(bsw_add(&db, seed, pk, "mixed-page", "Mixed", "lane-a",
                        "FLEETONLY-NEWER", FLEET_BOARD_SCOPE_FLEET, now + 3,
                        NULL, id_fleet));
+        uint8_t id_fonly[32];
+        ASSERT(bsw_add(&db, seed, pk, "fleet-only", "Fleet only", "lane-a",
+                       "FLEETONLY-SOLO", FLEET_BOARD_SCOPE_FLEET, now + 3,
+                       NULL, id_fonly));
         ASSERT(bsw_add(&db, seed, pk, "half-broken", "Half", "lane-a",
                        "good older revision", 0, now + 4, NULL, id_a));
         ASSERT(bsw_add(&db, seed, pk, "half-broken", "Half", "tamper-b",
@@ -480,12 +484,29 @@ static int test_board_site_wiki_hardening(void)
         ASSERT(strstr(resp, "href='/board/wiki/pub-page'"));
         ASSERT(strstr(resp, "href='/board/wiki/bytes-page'"));
         ASSERT(strstr(resp, "href='/board/wiki/healthy'"));
-        /* Public scope rows show; a slug whose newest revision is
-         * fleet-private is absent, text and slug. */
-        ASSERT(!strstr(resp, "mixed-page"));
+        /* A slug whose newest revision is fleet-private still shows its
+         * public revision: the scope filter runs before the ordering. The
+         * fleet text is never served. A slug with only fleet revisions is
+         * a 404 and not listed. */
+        ASSERT(strstr(resp, "href='/board/wiki/mixed-page'"));
         ASSERT(!strstr(resp, "FLEETONLY-NEWER"));
-        ASSERT(strstr(bs_get("/board/wiki/mixed-page", NULL), "404 Not Found"));
-        ASSERT(strstr(bs_get("/board/wiki/mixed-page.json", NULL),
+        ASSERT(!strstr(resp, "fleet-only"));
+        ASSERT(!strstr(resp, "FLEETONLY-SOLO"));
+        resp = bs_get("/board/wiki/mixed-page", NULL);
+        ASSERT(strstr(resp, "200 OK"));
+        ASSERT(strstr(resp, "older public revision"));
+        ASSERT(!strstr(resp, "FLEETONLY-NEWER"));
+        resp = bs_get("/board/wiki/mixed-page.json", NULL);
+        ASSERT(strstr(resp, "200 OK"));
+        ASSERT(strstr(resp, "older public revision"));
+        ASSERT(!strstr(resp, "FLEETONLY-NEWER"));
+        ASSERT(!strstr(resp, "newer_revision_unverified"));
+        resp = bs_get("/board/wiki/fleet-only", NULL);
+        ASSERT(strstr(resp, "404 Not Found"));
+        ASSERT(!strstr(resp, "FLEETONLY-SOLO"));
+        ASSERT(strstr(bs_get("/board/wiki/fleet-only.json", NULL),
+                      "404 Not Found"));
+        ASSERT(strstr(bs_get("/board/wiki/fleet-only.txt", NULL),
                       "404 Not Found"));
         resp = bs_get("/board/wiki/pub-page", NULL);
         ASSERT(strstr(resp, "200 OK"));
@@ -493,7 +514,7 @@ static int test_board_site_wiki_hardening(void)
         struct json_value doc;
         resp = bs_get("/board/wiki.json", NULL);
         ASSERT(bsw_json(resp, &doc));
-        ASSERT_EQ(json_get_int(json_get(&doc, "count")), 4);
+        ASSERT_EQ(json_get_int(json_get(&doc, "count")), 5);
         ASSERT(!json_get_int(json_get(&doc, "truncated")));
         json_free(&doc);
         resp = bs_get("/board/wiki/pub-page.json", NULL);
