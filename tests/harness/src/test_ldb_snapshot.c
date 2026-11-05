@@ -338,6 +338,320 @@ static int ls_check_source_survives(leveldb_t **srcdb, const char *src)
     return failures;
 }
 
+/* ---- plain-directory edge cases: no LevelDB needed, every name is chosen
+ * to sit on one side of a name-classification or error-path boundary ---- */
+
+#define LS_CHECK(label, expression) do {                                  \
+    if (expression) printf("ldb_snapshot: %s... OK\n", label);            \
+    else { printf("ldb_snapshot: %s... FAIL\n", label); failures++; }     \
+} while (0)
+
+static const char *const ls_meta_names[] = {
+    "CURRENT", "MANIFEST-000002", "LOG", "LOG.old"};
+static const char *const ls_ldb_names[] = {".ldb", "000005.ldb"};
+static const char *const ls_skip_names[] = {
+    "LOCK", "000003.log", "OPTIONS", "LOGX", "LOG.older", "MANIFEST_x",
+    "xldb", "a.sst", "ldb"};
+
+static void ls_join(char *out, size_t n, const char *dir, const char *name)
+{
+    snprintf(out, n, "%s/%s", dir, name);
+}
+
+static bool ls_write_file(const char *dir, const char *name, size_t size,
+                          unsigned seed)
+{
+    char p[1024];
+    ls_join(p, sizeof(p), dir, name);
+    FILE *f = fopen(p, "wb");
+    if (!f)
+        return false;
+    bool ok = true;
+    for (size_t i = 0; ok && i < size; i++)
+        ok = fputc((int)((i * 7 + seed) & 0xff), f) != EOF;
+    return fclose(f) == 0 && ok;
+}
+
+static bool ls_build_edge_src(const char *src)
+{
+    test_rm_rf(src);
+    bool ok = mkdir(src, 0700) == 0 &&
+              ls_write_file(src, "CURRENT", 16, 1) &&
+              ls_write_file(src, "MANIFEST-000002", 150000, 2) &&
+              ls_write_file(src, "LOG", 1, 3) &&
+              ls_write_file(src, "LOG.old", 300, 4) &&
+              ls_write_file(src, ".ldb", 100, 5) &&
+              ls_write_file(src, "000005.ldb", 10, 6);
+    for (size_t i = 0; ok && i < sizeof(ls_skip_names) / sizeof(ls_skip_names[0]); i++)
+        ok = ls_write_file(src, ls_skip_names[i], 4 + i, 7);
+    return ok;
+}
+
+static bool ls_same_bytes(const char *a, const char *b)
+{
+    FILE *fa = fopen(a, "rb");
+    FILE *fb = fopen(b, "rb");
+    bool same = fa && fb;
+    while (same) {
+        unsigned char ba[4096], bb[4096];
+        size_t na = fread(ba, 1, sizeof(ba), fa);
+        size_t nb = fread(bb, 1, sizeof(bb), fb);
+        same = na == nb && memcmp(ba, bb, na) == 0;
+        if (na == 0 || !same)
+            break;
+    }
+    if (fa) fclose(fa);
+    if (fb) fclose(fb);
+    return same;
+}
+
+/* 1 = same inode (hard link), 0 = different file, -1 = either is missing. */
+static int ls_same_inode(const char *a, const char *b)
+{
+    struct stat sa, sb;
+    if (stat(a, &sa) != 0 || stat(b, &sb) != 0)
+        return -1;
+    return sa.st_ino == sb.st_ino && sa.st_dev == sb.st_dev;
+}
+
+static bool ls_entry_is(const char *src, const char *dst, const char *name,
+                        int want_link)
+{
+    char a[1024], b[1024];
+    ls_join(a, sizeof(a), src, name);
+    ls_join(b, sizeof(b), dst, name);
+    return ls_same_bytes(a, b) && ls_same_inode(a, b) == want_link;
+}
+
+static bool ls_exists(const char *dir, const char *name)
+{
+    char p[1024];
+    struct stat st;
+    ls_join(p, sizeof(p), dir, name);
+    return lstat(p, &st) == 0;
+}
+
+static bool ls_all_entries(const char *src, const char *dst,
+                           const char *const *names, size_t count,
+                           int want_link)
+{
+    bool ok = true;
+    for (size_t i = 0; i < count; i++)
+        ok = ok && ls_entry_is(src, dst, names[i], want_link);
+    return ok;
+}
+
+static bool ls_none_present(const char *dir, const char *const *names,
+                            size_t count)
+{
+    bool none = true;
+    for (size_t i = 0; i < count; i++)
+        none = none && !ls_exists(dir, names[i]);
+    return none;
+}
+
+/* Metadata names are byte-copied (new inode), *.ldb are hardlinked (same
+ * inode), everything else is skipped, and a stale file in dst is wiped. */
+static int ls_check_name_classes(const char *src, const char *dst)
+{
+    int failures = 0;
+    char err[256] = {0};
+    bool staged = ls_build_edge_src(src);
+    test_rm_rf(dst);
+    staged = staged && mkdir(dst, 0700) == 0 &&
+             ls_write_file(dst, "stale.ldb", 3, 0);
+    LS_CHECK("edge fixture staged", staged);
+    if (!staged)
+        return failures;
+    LS_CHECK("make succeeds on the edge fixture",
+             ldb_snapshot_make(src, dst, err, sizeof(err)));
+    LS_CHECK("metadata files are byte copies with new inodes",
+             ls_all_entries(src, dst, ls_meta_names,
+                            sizeof(ls_meta_names) / sizeof(ls_meta_names[0]), 0));
+    LS_CHECK("*.ldb files (including a bare .ldb) are hard links",
+             ls_all_entries(src, dst, ls_ldb_names,
+                            sizeof(ls_ldb_names) / sizeof(ls_ldb_names[0]), 1));
+    LS_CHECK("other names are not copied",
+             ls_none_present(dst, ls_skip_names,
+                             sizeof(ls_skip_names) / sizeof(ls_skip_names[0])));
+    LS_CHECK("stale dst entry is wiped", !ls_exists(dst, "stale.ldb"));
+    ldb_snapshot_destroy(dst);
+    LS_CHECK("destroy removes the directory itself", !ls_exists(dst, "."));
+    return failures;
+}
+
+static bool ls_fails_with(const char *src, const char *dst, const char *prefix)
+{
+    char err[256] = {0};
+    bool ok = ldb_snapshot_make(src, dst, err, sizeof(err));
+    return !ok && strncmp(err, prefix, strlen(prefix)) == 0;
+}
+
+static int ls_check_arg_errors(const char *src, const char *dst)
+{
+    int failures = 0;
+    char big[64] = "XXXXXXXX";
+    char one[1] = {'X'};
+    bool no_buf = !ldb_snapshot_make(NULL, NULL, NULL, 64);
+    LS_CHECK("NULL args with no error buffer", no_buf);
+    LS_CHECK("NULL src names null args", ls_fails_with(NULL, dst, "null args"));
+    LS_CHECK("NULL dst names null args", ls_fails_with(src, NULL, "null args"));
+    LS_CHECK("error text is written",
+             !ldb_snapshot_make(NULL, dst, big, sizeof(big)) &&
+                 strcmp(big, "null args") == 0);
+    LS_CHECK("one-byte error buffer is terminated",
+             !ldb_snapshot_make(NULL, dst, one, sizeof(one)) && one[0] == '\0');
+    LS_CHECK("regular file as src is missing",
+             ls_fails_with("/dev/null", dst, "src missing: "));
+    LS_CHECK("dst under a missing parent fails at mkdir",
+             ls_fails_with(src, "/no/such/parent/zcl_ldb_dst", "mkdir("));
+    return failures;
+}
+
+static int ls_check_current_errors(const char *src, const char *dst)
+{
+    int failures = 0;
+    char err[256] = {0};
+    test_rm_rf(src);
+    bool staged = mkdir(src, 0700) == 0;
+    LS_CHECK("current fixture staged", staged);
+    if (!staged)
+        return failures;
+    LS_CHECK("missing CURRENT is refused",
+             ls_fails_with(src, dst, "read CURRENT"));
+    ldb_snapshot_destroy(dst);
+    LS_CHECK("empty CURRENT staged", ls_write_file(src, "CURRENT", 0, 0));
+    LS_CHECK("empty CURRENT is refused",
+             ls_fails_with(src, dst, "read CURRENT"));
+    ldb_snapshot_destroy(dst);
+    LS_CHECK("one-byte CURRENT staged", ls_write_file(src, "CURRENT", 1, 9));
+    LS_CHECK("one-byte CURRENT is accepted",
+             ldb_snapshot_make(src, dst, err, sizeof(err)));
+    ldb_snapshot_destroy(dst);
+    return failures;
+}
+
+/* Stage src with a CURRENT and a directory called `dirname` in it. */
+static bool ls_stage_with_dir(const char *src, const char *dirname)
+{
+    char d[1024];
+    test_rm_rf(src);
+    ls_join(d, sizeof(d), src, dirname);
+    return mkdir(src, 0700) == 0 && ls_write_file(src, "CURRENT", 16, 1) &&
+           mkdir(d, 0700) == 0;
+}
+
+/* A directory standing where a file belongs makes link() or read() fail.
+ * The make must fail with the matching message. Whether it also removes its
+ * partial dst is deliberately not asserted here (see the report). */
+static int ls_check_entry_failures(const char *src, const char *dst)
+{
+    int failures = 0;
+    bool staged = ls_stage_with_dir(src, "bad.ldb");
+    LS_CHECK("unlinkable *.ldb fixture staged", staged);
+    if (staged) {
+        LS_CHECK("unlinkable *.ldb entry fails with the link message",
+                 ls_fails_with(src, dst, "link_or_copy(bad.ldb): link("));
+    }
+    staged = ls_stage_with_dir(src, "LOG.old");
+    LS_CHECK("unreadable metadata fixture staged", staged);
+    if (staged) {
+        LS_CHECK("unreadable metadata entry fails with the copy message",
+                 ls_fails_with(src, dst, "copy(LOG.old): read("));
+    }
+    return failures;
+}
+
+/* An undestroyable dst (holds a subdirectory) is tolerated as EEXIST. */
+static int ls_check_existing_dst(const char *src, const char *dst)
+{
+    int failures = 0;
+    char keep[1024];
+    char err[256] = {0};
+    test_rm_rf(src);
+    test_rm_rf(dst);
+    ls_join(keep, sizeof(keep), dst, "keep");
+    bool staged = mkdir(src, 0700) == 0 && ls_write_file(src, "CURRENT", 16, 1) &&
+                  mkdir(dst, 0700) == 0 && mkdir(keep, 0700) == 0;
+    LS_CHECK("existing-dst fixture staged", staged);
+    if (!staged)
+        return failures;
+    LS_CHECK("existing non-empty dst is tolerated",
+             ldb_snapshot_make(src, dst, err, sizeof(err)));
+    LS_CHECK("CURRENT copied into the existing dst",
+             ls_entry_is(src, dst, "CURRENT", 0));
+    test_rm_rf(dst);
+    return failures;
+}
+
+/* Permission-driven failures; a root runner bypasses the modes, so skip. */
+static int ls_check_permission_failures(const char *src, const char *dst)
+{
+    int failures = 0;
+    if (geteuid() == 0) {
+        printf("ldb_snapshot: permission cases skipped (root)\n");
+        return failures;
+    }
+    char p[1024];
+    test_rm_rf(src);
+    bool staged = mkdir(src, 0700) == 0 && ls_write_file(src, "CURRENT", 16, 1) &&
+                  chmod(src, 0300) == 0;
+    LS_CHECK("unlistable src staged", staged);
+    if (!staged) {
+        chmod(src, 0700);
+        return failures;
+    }
+    LS_CHECK("unlistable src fails at opendir",
+             ls_fails_with(src, dst, "opendir("));
+    chmod(src, 0700);
+    ldb_snapshot_destroy(dst);
+    ls_join(p, sizeof(p), src, "LOG");
+    staged = ls_write_file(src, "LOG", 5, 1) && chmod(p, 0) == 0;
+    LS_CHECK("unreadable LOG staged", staged);
+    LS_CHECK("unreadable metadata fails at open",
+             staged && ls_fails_with(src, dst, "copy(LOG): open("));
+    return failures;
+}
+
+static int ls_check_dst_unwritable(const char *src, const char *dst)
+{
+    int failures = 0;
+    if (geteuid() == 0)
+        return failures;
+    char keep[1024];
+    test_rm_rf(src);
+    test_rm_rf(dst);
+    ls_join(keep, sizeof(keep), dst, "keep");
+    bool staged = mkdir(src, 0700) == 0 && ls_write_file(src, "CURRENT", 16, 1) &&
+                  mkdir(dst, 0700) == 0 && mkdir(keep, 0700) == 0 &&
+                  chmod(dst, 0500) == 0;
+    LS_CHECK("read-only dst staged", staged);
+    if (staged)
+        LS_CHECK("uncreatable dst file fails with the create message",
+                 ls_fails_with(src, dst, "copy(CURRENT): create("));
+    chmod(dst, 0700);
+    test_rm_rf(dst);
+    return failures;
+}
+
+static int ldb_snapshot_edge_tests(const char *scratch)
+{
+    int failures = 0;
+    char src[600], dst[600];
+    snprintf(src, sizeof(src), "%s_edge_src", scratch);
+    snprintf(dst, sizeof(dst), "%s_edge_dst", scratch);
+    failures += ls_check_name_classes(src, dst);
+    failures += ls_check_arg_errors(src, dst);
+    failures += ls_check_current_errors(src, dst);
+    failures += ls_check_entry_failures(src, dst);
+    failures += ls_check_existing_dst(src, dst);
+    failures += ls_check_permission_failures(src, dst);
+    failures += ls_check_dst_unwritable(src, dst);
+    test_rm_rf(src);
+    test_rm_rf(dst);
+    return failures;
+}
+
 int test_ldb_snapshot(void)
 {
     int failures = 0;
@@ -355,6 +669,9 @@ int test_ldb_snapshot(void)
 
     /* Destroy of non-existent is safe. */
     ls_check_destroy_nonexistent(scratch);
+
+    /* Name classification and error paths on plain directories. */
+    failures += ldb_snapshot_edge_tests(scratch);
 
     /* ── Self-owned fixture: build a real LevelDB, hold its LOCK, snapshot
      * it, and read the snapshot back. ─────────────────────────────────── */
