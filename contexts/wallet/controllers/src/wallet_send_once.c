@@ -221,7 +221,8 @@ static void wso_key_hash(const char *key, uint8_t out[32])
 }
 
 /* Absorb one request parameter as JSON text, every byte of it: a retry whose
- * tail differs must not share a digest with the send already on record. */
+ * tail differs must not share a digest with the send already on record. A real
+ * can still lose digits in this text; see wso_absorb_lost_reals. */
 static bool wso_absorb_json(struct sha3_256_ctx *c, const struct json_value *v)
 {
     size_t size = json_write(v, NULL, 0) + 1;
@@ -232,6 +233,47 @@ static bool wso_absorb_json(struct sha3_256_ctx *c, const struct json_value *v)
     wso_absorb(c, text);
     free(text);
     return true;
+}
+
+/* JSON text holds a real to eight significant digits, while the send reads it to
+ * eight decimals. True when both name the same amount. Text that cannot be read
+ * back counts as a difference. */
+static bool wso_real_survives_text(const struct json_value *v)
+{
+    char text[64];
+    size_t n = json_write(v, text, sizeof(text));
+    struct json_value shown;
+    json_init(&shown);
+    bool same = n < sizeof(text) && json_read(&shown, text, n) &&
+                parse_amount(&shown) == parse_amount(v);
+    json_free(&shown);
+    return same;
+}
+
+static void wso_absorb_lost_real(struct sha3_256_ctx *c,
+                                 const struct json_value *v, const char *where)
+{
+    if (!v || v->type != JSON_REAL || wso_real_survives_text(v))
+        return;
+    char exact[384];
+    (void)snprintf(exact, sizeof(exact), "%s/%.8f", where, json_get_real(v));
+    wso_absorb(c, exact);
+}
+
+/* Two amounts the text cannot tell apart must not share a digest. Each real the
+ * text loses adds its exact value and position, read where the send reads it.
+ * Every other request keeps its digest bytes. */
+static void wso_absorb_lost_reals(struct sha3_256_ctx *c,
+                                  const struct json_value *params)
+{
+    const struct json_value *recips = json_at(params, 1);
+    size_t count = recips && recips->type == JSON_ARR ? json_size(recips) : 0;
+    for (size_t i = 0; i < count; i++) {
+        char where[32];
+        (void)snprintf(where, sizeof(where), "amount/%zu", i);
+        wso_absorb_lost_real(c, json_get(json_at(recips, i), "amount"), where);
+    }
+    wso_absorb_lost_real(c, json_at(params, WALLET_SEND_ONCE_FEE_PARAM), "fee");
 }
 
 /* Bound to the key, so the digest of a low-entropy request cannot be tested
@@ -254,12 +296,14 @@ static bool wso_digest(const char *key, const struct json_value *params,
     } else {
         wso_absorb(&c, "");
     }
+    wso_absorb_lost_reals(&c, params);
     sha3_256_finalize(&c, out);
     return true;
 }
 
 /* The digest an earlier build stored for this request: each value written into
- * the fixed buffer that build used, so a longer one is cut where it was cut. */
+ * the fixed buffer that build used, so a longer one is cut where it was cut, and
+ * nothing added for a real the text loses. */
 static void wso_legacy_digest(const char *key, const struct json_value *params,
                               uint8_t out[32])
 {
