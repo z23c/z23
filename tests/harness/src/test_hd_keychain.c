@@ -8,6 +8,7 @@
 #include "test/test_core.h"
 #include "wallet/hd_keychain.h"
 #include "chain/chainparams.h"
+#include "domain/encoding/base58.h"
 #include "support/cleanse.h"
 #include "util/safe_alloc.h"
 #include <string.h>
@@ -475,6 +476,150 @@ static int test_hd_keychain_chainparams_version_bytes(void)
     return failures;
 }
 
+/* hd_generate_seed accepts exactly HD_SEED_MIN_BYTES..HD_SEED_MAX_BYTES. */
+static int test_hd_keychain_seed_length_edges(void)
+{
+    printf("hd_generate_seed accepts 16 and 64, refuses 15, 65 and NULL... ");
+    unsigned char buf[128];
+    memset(buf, 0, sizeof(buf));
+    int fail = 0;
+    if (!hd_generate_seed(buf, HD_SEED_MIN_BYTES)) fail = 1;
+    if (!hd_generate_seed(buf, HD_SEED_MAX_BYTES)) fail = 1;
+    if (hd_generate_seed(buf, HD_SEED_MIN_BYTES - 1)) fail = 1;
+    if (hd_generate_seed(buf, HD_SEED_MAX_BYTES + 1)) fail = 1;
+    if (hd_generate_seed(NULL, 32)) fail = 1;
+    memory_cleanse(buf, sizeof(buf));
+    printf(fail ? "FAIL\n" : "OK\n");
+    return fail;
+}
+
+/* The derivation wrappers must report the domain's refusal as false. */
+static int test_hd_keychain_derivation_refusals(void)
+{
+    printf("hd derivation wrappers refuse bad input... ");
+    struct ext_key master, child;
+    struct ext_pubkey epk, epk_child;
+    uint32_t idx[1] = { 0 };
+    unsigned accepted = 0;
+    if (!hd_master_from_seed(&master, tv1_seed, sizeof(tv1_seed))) {
+        printf("FAIL (master)\n");
+        return 1;
+    }
+    ext_key_neuter(&master, &epk);
+    accepted += hd_master_from_seed(&child, tv1_seed, HD_SEED_MIN_BYTES - 1)
+                        ? 1u << 0 : 0;
+    accepted += hd_master_from_seed(NULL, tv1_seed, sizeof(tv1_seed))
+                        ? 1u << 1 : 0;
+    accepted += hd_derive_path(NULL, &child, idx, 1) ? 1u << 2 : 0;
+    accepted += hd_derive_path(&master, &child, idx, -1) ? 1u << 3 : 0;
+    accepted += hd_derive_path_str(&master, &child, NULL) ? 1u << 4 : 0;
+    accepted += hd_derive_path_str(&master, &child, "m/zz") ? 1u << 5 : 0;
+    accepted += hd_derive_child_index(NULL, &child, 0) ? 1u << 6 : 0;
+    accepted += hd_derive_pubkey_path(NULL, &epk_child, idx, 1) ? 1u << 7 : 0;
+    memory_cleanse(&master, sizeof(master));
+    memory_cleanse(&child, sizeof(child));
+    if (accepted == 0) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL (accepted mask=0x%x)\n", accepted);
+    return 1;
+}
+
+/* Tamper with the 78-byte body of the BIP32 vector 1 master xpub and
+ * re-encode it, so each check in hd_deserialize_xpub is hit in isolation. */
+static bool hd_xpub_tampered(char *out, size_t out_size, int variant)
+{
+    static const char master_xpub[] =
+        "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8";
+    unsigned char body[80];
+    size_t len = 0;
+    size_t written = 0;
+    if (!domain_encoding_base58check_decode(master_xpub, body, 78, &len) ||
+        len != 78)
+        return false;
+    if (variant == 0) {          /* one byte too long */
+        body[78] = 0;
+        len = 79;
+    } else if (variant == 1) {   /* one byte too short */
+        len = 77;
+    } else {                     /* version differs in its last byte only */
+        body[3] ^= 0x01;
+    }
+    return domain_encoding_base58check_encode(body, len, out, out_size,
+                                              &written);
+}
+
+static int test_hd_keychain_xpub_deserialize_refusals(void)
+{
+    printf("hd_deserialize_xpub refuses bad length, version, null... ");
+    struct ext_key master;
+    struct ext_pubkey epk, out;
+    char good[HD_XKEY_STRING_SIZE];
+    char bad[HD_XKEY_STRING_SIZE + 8];
+    unsigned char ver5[5] = { 0x04, 0x88, 0xB2, 0x1E, 0xAA };
+    unsigned accepted = 0;
+    int fail = 0;
+    hd_master_from_seed(&master, tv1_seed, sizeof(tv1_seed));
+    ext_key_neuter(&master, &epk);
+    memory_cleanse(&master, sizeof(master));
+    if (!hd_serialize_xpub(&epk, xpub_ver, good, sizeof(good)))
+        fail = 1;
+    /* A 5-byte buffer whose 5th byte differs from the depth byte: only the
+     * first four bytes of the version are compared. */
+    if (!hd_deserialize_xpub(good, ver5, &out))
+        fail = 1;
+    accepted += hd_deserialize_xpub(NULL, xpub_ver, &out) ? 1u << 0 : 0;
+    accepted += hd_deserialize_xpub(good, NULL, &out) ? 1u << 1 : 0;
+    accepted += hd_deserialize_xpub(good, xpub_ver, NULL) ? 1u << 2 : 0;
+    accepted += hd_deserialize_xpub("xpub-not-base58check", xpub_ver, &out)
+                        ? 1u << 3 : 0;
+    for (int v = 0; v < 3; v++) {
+        if (!hd_xpub_tampered(bad, sizeof(bad), v)) {
+            fail = 1;
+            continue;
+        }
+        accepted += hd_deserialize_xpub(bad, xpub_ver, &out)
+                            ? 1u << (4 + v) : 0;
+    }
+    if (accepted != 0 || fail) {
+        printf("FAIL (accepted mask=0x%x fail=%d)\n", accepted, fail);
+        return 1;
+    }
+    printf("OK\n");
+    return 0;
+}
+
+static int test_hd_keychain_xpub_serialize_refusals(void)
+{
+    printf("hd_serialize_xpub refuses null args, short buffer, bad key... ");
+    struct ext_key master;
+    struct ext_pubkey epk, no_key;
+    char out[HD_XKEY_STRING_SIZE];
+    unsigned accepted = 0;
+    int fail = 0;
+    hd_master_from_seed(&master, tv1_seed, sizeof(tv1_seed));
+    ext_key_neuter(&master, &epk);
+    memory_cleanse(&master, sizeof(master));
+    no_key = epk;
+    no_key.pubkey.size = 0;
+    accepted += hd_serialize_xpub(NULL, xpub_ver, out, sizeof(out)) ? 1u : 0;
+    accepted += hd_serialize_xpub(&epk, NULL, out, sizeof(out)) ? 2u : 0;
+    accepted += hd_serialize_xpub(&epk, xpub_ver, NULL, sizeof(out)) ? 4u : 0;
+    accepted += hd_serialize_xpub(&epk, xpub_ver, out, sizeof(out) - 1)
+                        ? 8u : 0;
+    accepted += hd_serialize_xpub(&no_key, xpub_ver, out, sizeof(out))
+                        ? 16u : 0;
+    if (!hd_serialize_xpub(&epk, xpub_ver, out, sizeof(out)))
+        fail = 1;
+    if (accepted != 0 || fail) {
+        printf("FAIL (accepted mask=0x%x fail=%d)\n", accepted, fail);
+        return 1;
+    }
+    printf("OK\n");
+    return 0;
+}
+
 int test_hd_keychain(void)
 {
     int failures = 0;
@@ -540,6 +685,11 @@ int test_hd_keychain(void)
 
     /* ── Test 20: chainparams version bytes match standard ───────── */
     failures += test_hd_keychain_chainparams_version_bytes();
+
+    failures += test_hd_keychain_seed_length_edges();
+    failures += test_hd_keychain_derivation_refusals();
+    failures += test_hd_keychain_xpub_deserialize_refusals();
+    failures += test_hd_keychain_xpub_serialize_refusals();
 
     return failures + hd_xprv_retirement_tests();
 }
