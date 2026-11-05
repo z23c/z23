@@ -17,6 +17,7 @@
 #include "models/database.h"
 #include "platform/clock.h"
 #include "net/snapshot_sync_contract.h"
+#include "services/gap_fill_service.h"
 #include "services/sync_monitor.h"
 #include "storage/coins_kv.h"
 #include "storage/progress_store.h"
@@ -1452,6 +1453,317 @@ static int uap_run_idle_snapshot_wait_case(void)
     return failures;
 }
 
+/* ── utxo_activation_paused: fire/clear boundaries ─────────────────────── */
+
+static void uap_tick_at(struct fake_clock *clock, int64_t unix_s)
+{
+    fake_clock_set(clock, unix_s);
+    condition_engine_tick();
+}
+
+/* Active chain whose tip sits at tip_h: a lone genesis-height block for 0,
+ * otherwise a labelled two-block chain (parent label kept consistent). */
+static bool uap_chain_with_tip(struct main_state *ms, struct uint256 *hashes,
+                               int tip_h)
+{
+    struct block_index *b0 = insert_test_block(
+        ms, hashes, 0, BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA);
+    if (!b0)
+        return false;
+    if (tip_h == 0)
+        return active_chain_move_window_tip(&ms->chain_active, b0);
+    struct block_index *b1 = insert_test_block(
+        ms, hashes, 1, BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA);
+    if (!b1)
+        return false;
+    b1->nHeight = tip_h;
+    b0->nHeight = tip_h - 1;
+    return active_chain_move_window_tip(&ms->chain_active, b1);
+}
+
+static bool uap_snapshot(struct condition_runtime_snapshot *snap)
+{
+    memset(snap, 0, sizeof(*snap));
+    return condition_engine_get_registered_snapshot("utxo_activation_paused",
+                                                    snap);
+}
+
+static int uap_run_registered_contract_case(void)
+{
+    int failures = 0;
+    reset_conditions();
+    register_utxo_activation_paused();
+    struct condition_runtime_snapshot s;
+    bool ok = uap_snapshot(&s);
+    ok = ok && s.severity == COND_CRITICAL;
+    ok = ok && s.poll_secs == 5;
+    ok = ok && s.backoff_secs == 30;
+    ok = ok && s.max_attempts == 2;
+    ok = ok && s.witness_window_secs == 60;
+    UAP_CHECK("registration carries the exact poll/backoff/attempt/witness budget", ok);
+    return failures;
+}
+
+static int uap_run_fire_boundary_case(void)
+{
+    int failures = 0;
+    reset_conditions();
+    struct fake_clock clock;
+    fake_clock_install(&clock, 2000);
+    register_utxo_activation_paused();
+    utxo_activation_paused_test_set_remedy_clear_enabled(false);
+    process_block_test_set_utxo_activation_paused_height(1500);
+    condition_engine_tick();                 /* arms the pause age at 2000 */
+    uap_tick_at(&clock, 2295);               /* age 295: still quiet */
+    bool ok = condition_engine_get_active_count() == 0;
+    uap_tick_at(&clock, 2300);               /* age exactly 300 fires */
+    ok = ok && condition_engine_get_active_count() == 1;
+    ok = ok && utxo_activation_paused_test_resume_calls() == 1;
+    UAP_CHECK("a pause fires at exactly 300s of age, not before", ok);
+    clock_reset_default();
+    return failures;
+}
+
+static int uap_run_poll_gate_case(void)
+{
+    int failures = 0;
+    /* The state reset also drops the stale pause age of the case above. */
+    reset_conditions();
+    struct fake_clock clock;
+    fake_clock_install(&clock, 4000);
+    register_utxo_activation_paused();
+    utxo_activation_paused_test_set_remedy_clear_enabled(false);
+    process_block_test_set_utxo_activation_paused_height(1500);
+    condition_engine_tick();                 /* arms at 4000 */
+    bool ok = condition_engine_get_active_count() == 0;
+    uap_tick_at(&clock, 4296);               /* polls, age 296 */
+    uap_tick_at(&clock, 4300);               /* age 300 but 4s after a poll */
+    ok = ok && condition_engine_get_active_count() == 0;
+    ok = ok && utxo_activation_paused_test_resume_calls() == 0;
+    uap_tick_at(&clock, 4301);               /* 5s after the poll: fires */
+    ok = ok && condition_engine_get_active_count() == 1;
+    UAP_CHECK("an idle condition is polled no more often than every 5s", ok);
+    clock_reset_default();
+    return failures;
+}
+
+static int uap_run_pause_clear_rearms_case(void)
+{
+    int failures = 0;
+    reset_conditions();
+    struct fake_clock clock;
+    fake_clock_install(&clock, 7000);
+    register_utxo_activation_paused();
+    utxo_activation_paused_test_set_remedy_clear_enabled(false);
+    process_block_test_set_utxo_activation_paused_height(1500);
+    condition_engine_tick();                 /* first seen at 7000 */
+    process_block_test_set_utxo_activation_paused_height(-1);
+    uap_tick_at(&clock, 7250);               /* pause gone: age forgotten */
+    bool ok = condition_engine_get_active_count() == 0;
+    process_block_test_set_utxo_activation_paused_height(1500);
+    uap_tick_at(&clock, 7260);               /* re-armed at 7260 */
+    ok = ok && condition_engine_get_active_count() == 0;
+    uap_tick_at(&clock, 7400);               /* only 140s old */
+    ok = ok && condition_engine_get_active_count() == 0;
+    ok = ok && utxo_activation_paused_test_resume_calls() == 0;
+    uap_tick_at(&clock, 7560);               /* 300s after the re-arm */
+    ok = ok && condition_engine_get_active_count() == 1;
+    UAP_CHECK("a cleared pause restarts its 300s age from the next sighting", ok);
+    clock_reset_default();
+    return failures;
+}
+
+/* Pause at height 0 is a real pause; with a genesis-only chain whose tip is
+ * 0 the remedy clears it, kicks gap-fill, and the witness accepts tip 0. */
+static int uap_run_height_zero_resume_case(void)
+{
+    int failures = 0;
+    reset_conditions();
+    struct fake_clock clock;
+    fake_clock_install(&clock, 3000);
+    struct main_state ms;
+    main_state_init(&ms);
+    block_height_census_test_reset();
+    struct uint256 hashes[2];
+    bool ok = uap_chain_with_tip(&ms, hashes, 0);
+    gap_fill_test_set_running(true);
+    condition_engine_set_main_state(&ms);
+    register_utxo_activation_paused();
+    process_block_test_set_utxo_activation_paused_height(0);
+    condition_engine_tick();
+    uap_tick_at(&clock, 3300);
+    ok = ok && utxo_activation_paused_test_resume_calls() == 1;
+    ok = ok && process_block_test_get_utxo_activation_paused_height() == -1;
+    ok = ok && condition_engine_get_active_count() == 0;
+    ok = ok && gap_fill_test_kick_pending();
+    UAP_CHECK("a pause at height 0 fires, is resumed, kicks gap-fill and witnesses at tip 0", ok);
+    gap_fill_test_set_running(false);
+    condition_engine_set_main_state(NULL);
+    main_state_free(&ms);
+    clock_reset_default();
+    return failures;
+}
+
+/* The witness never accepts a pause that is still set, even at height 0. */
+static int uap_run_height_zero_still_paused_case(void)
+{
+    int failures = 0;
+    reset_conditions();
+    struct fake_clock clock;
+    fake_clock_install(&clock, 3000);
+    struct main_state ms;
+    main_state_init(&ms);
+    block_height_census_test_reset();
+    struct uint256 hashes[2];
+    bool ok = uap_chain_with_tip(&ms, hashes, 0);
+    gap_fill_test_set_running(true);
+    condition_engine_set_main_state(&ms);
+    register_utxo_activation_paused();
+    utxo_activation_paused_test_set_remedy_clear_enabled(false);
+    process_block_test_set_utxo_activation_paused_height(0);
+    condition_engine_tick();
+    uap_tick_at(&clock, 3300);
+    struct condition_runtime_snapshot s;
+    ok = ok && uap_snapshot(&s);
+    ok = ok && process_block_test_get_utxo_activation_paused_height() == 0;
+    ok = ok && s.currently_active && s.attempts == 1;
+    ok = ok && s.last_outcome == COND_REMEDY_UNWITNESSED;
+    ok = ok && !gap_fill_test_kick_pending(); /* no clear, no kick */
+    UAP_CHECK("a still-set pause at height 0 is never witnessed and never kicks", ok);
+    gap_fill_test_set_running(false);
+    condition_engine_set_main_state(NULL);
+    main_state_free(&ms);
+    clock_reset_default();
+    return failures;
+}
+
+static int uap_run_tip_not_advanced_case(void)
+{
+    int failures = 0;
+    reset_conditions();
+    struct fake_clock clock;
+    fake_clock_install(&clock, 6000);
+    struct main_state ms;
+    main_state_init(&ms);
+    block_height_census_test_reset();
+    struct uint256 hashes[2];
+    bool ok = uap_chain_with_tip(&ms, hashes, 100);
+    condition_engine_set_main_state(&ms);
+    register_utxo_activation_paused();
+    process_block_test_set_utxo_activation_paused_height(150);
+    condition_engine_tick();
+    uap_tick_at(&clock, 6300);
+    /* The flag is cleared, but the tip (100) neither reached the paused
+     * height (150) nor moved past where it stood at detection (100). */
+    struct condition_runtime_snapshot s;
+    ok = ok && uap_snapshot(&s);
+    ok = ok && utxo_activation_paused_test_resume_calls() == 1;
+    ok = ok && process_block_test_get_utxo_activation_paused_height() == -1;
+    ok = ok && s.currently_active && s.cleared_count == 0 && s.attempts == 1;
+    ok = ok && s.last_outcome == COND_REMEDY_UNWITNESSED;
+    UAP_CHECK("clearing the flag without tip movement stays unwitnessed", ok);
+    condition_engine_set_main_state(NULL);
+    main_state_free(&ms);
+    clock_reset_default();
+    return failures;
+}
+
+static int uap_run_no_main_state_unwitnessed_case(void)
+{
+    int failures = 0;
+    reset_conditions();
+    struct fake_clock clock;
+    fake_clock_install(&clock, 3000);
+    condition_engine_set_main_state(NULL);
+    register_utxo_activation_paused();
+    process_block_test_set_utxo_activation_paused_height(1500);
+    condition_engine_tick();
+    uap_tick_at(&clock, 3300);
+    struct condition_runtime_snapshot s;
+    bool ok = uap_snapshot(&s);
+    ok = ok && utxo_activation_paused_test_resume_calls() == 1;
+    ok = ok && process_block_test_get_utxo_activation_paused_height() == -1;
+    ok = ok && s.currently_active && s.attempts == 1;
+    ok = ok && s.last_outcome == COND_REMEDY_UNWITNESSED;
+    UAP_CHECK("without a chain the witness cannot confirm a resume", ok);
+    clock_reset_default();
+    return failures;
+}
+
+static int uap_run_remedy_skip_when_unpaused_case(void)
+{
+    int failures = 0;
+    reset_conditions();
+    struct fake_clock clock;
+    fake_clock_install(&clock, 5000);
+    condition_engine_set_main_state(NULL);
+    register_utxo_activation_paused();
+    utxo_activation_paused_test_set_remedy_clear_enabled(false);
+    process_block_test_set_utxo_activation_paused_height(1500);
+    condition_engine_tick();
+    uap_tick_at(&clock, 5301);
+    process_block_test_set_utxo_activation_paused_height(-1);
+    uap_tick_at(&clock, 5340);               /* past the 30s backoff */
+    struct condition_runtime_snapshot s;
+    bool ok = uap_snapshot(&s);
+    ok = ok && s.attempts == 2;
+    ok = ok && s.last_outcome == COND_REMEDY_SKIP;
+    ok = ok && utxo_activation_paused_test_resume_calls() == 1;
+    UAP_CHECK("a remedy that finds no pause reports skip and does nothing", ok);
+    clock_reset_default();
+    return failures;
+}
+
+/* The test reset must restore every counter, the reason and the clear
+ * switch: a drift episode with clearing disabled, then a reset, then a plain
+ * resume episode that must clear. */
+static int uap_run_test_reset_restores_case(void)
+{
+    int failures = 0;
+    reset_conditions();
+    struct fake_clock clock;
+    fake_clock_install(&clock, 9000);
+    condition_engine_set_main_state(NULL);
+    register_utxo_activation_paused();
+    utxo_activation_paused_test_set_reason("utxo_audit_drift");
+    utxo_activation_paused_test_set_remedy_clear_enabled(false);
+    process_block_test_set_utxo_activation_paused_height(1500);
+    condition_engine_tick();
+    uap_tick_at(&clock, 9300);
+    bool ok = utxo_activation_paused_test_repair_calls() == 1;
+    ok = ok && utxo_activation_paused_test_resume_calls() == 0;
+
+    reset_conditions();
+    ok = ok && utxo_activation_paused_test_repair_calls() == 0;
+    register_utxo_activation_paused();
+    fake_clock_set(&clock, 9400);
+    process_block_test_set_utxo_activation_paused_height(1500);
+    condition_engine_tick();
+    uap_tick_at(&clock, 9700);
+    ok = ok && utxo_activation_paused_test_resume_calls() == 1;
+    ok = ok && utxo_activation_paused_test_repair_calls() == 0;
+    ok = ok && process_block_test_get_utxo_activation_paused_height() == -1;
+    UAP_CHECK("the test reset restores counters, reason and the clear switch", ok);
+    clock_reset_default();
+    return failures;
+}
+
+static int uap_boundary_cases(void)
+{
+    int failures = 0;
+    failures += uap_run_registered_contract_case();
+    failures += uap_run_fire_boundary_case();
+    failures += uap_run_poll_gate_case();
+    failures += uap_run_pause_clear_rearms_case();
+    failures += uap_run_height_zero_resume_case();
+    failures += uap_run_height_zero_still_paused_case();
+    failures += uap_run_tip_not_advanced_case();
+    failures += uap_run_no_main_state_unwitnessed_case();
+    failures += uap_run_remedy_skip_when_unpaused_case();
+    failures += uap_run_test_reset_restores_case();
+    return failures;
+}
+
 int test_utxo_activation_paused(void)
 {
     printf("\n=== utxo activation paused condition tests ===\n");
@@ -1472,6 +1784,7 @@ int test_utxo_activation_paused(void)
     failures += uap_run_local_import_case();
     failures += uap_run_cooldown_rearm_case();
     failures += uap_run_idle_snapshot_wait_case();
+    failures += uap_boundary_cases();
 
     reset_conditions();
     clock_reset_default();
