@@ -406,6 +406,16 @@ static bool job_cwd_registered(const char *cwd)
     return job_any_worktree(job_wt_is_cwd, cwd);
 }
 
+bool zcl_dev_job_linked_worktree_registered(const char *canonical_path)
+{
+    char primary[ZCL_DEV_JOB_PATH_MAX], canonical[ZCL_DEV_JOB_PATH_MAX];
+    return canonical_path &&
+        platform_directory_canonical_real(canonical_path, canonical, sizeof(canonical)) &&
+        strcmp(canonical_path, canonical) == 0 &&
+        job_primary_checkout(primary, sizeof(primary)) &&
+        strcmp(canonical, primary) != 0 && job_cwd_registered(canonical);
+}
+
 static bool job_head(const char *cwd, char *out, size_t cap)
 {
     const char *argv[] = {"git", "rev-parse", "HEAD", NULL};

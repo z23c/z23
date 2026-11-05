@@ -53,6 +53,10 @@ const struct zcl_dev_job_hooks *zcl_dev_job_hooks(void);
  * worktree listed for this binary's repository, or under the job state root. */
 bool zcl_dev_job_log_allowed(const char *log);
 
+/* True only for a canonical, registered linked worktree of this binary's
+ * repository; the primary checkout is excluded. */
+bool zcl_dev_job_linked_worktree_registered(const char *canonical_path);
+
 /* The string at v, or NULL when v is missing, not a string, or empty
  * (json_get_str() answers "" there). */
 const char *zcl_dev_job_str(const struct json_value *v);
