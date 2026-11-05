@@ -1986,6 +1986,8 @@ static void run_full_suite_crypto_and_wallet(int *failures)
     { extern int test_zcode_dht_delegation(void);
       *failures += test_zcode_dht_delegation(); }
     { extern int test_zcode_dht_msgs(void); *failures += test_zcode_dht_msgs(); }
+    { extern int test_peer_wire_canonical(void);
+      *failures += test_peer_wire_canonical(); }
     { extern int test_zcode_dht_record(void);
       *failures += test_zcode_dht_record(); }
     { extern int test_zcode_sovereignty_policy(void);
