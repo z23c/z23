@@ -27,7 +27,6 @@
 #include <sys/stat.h>
 
 #include "util/log_macros.h"
-#include "util/pprev_walk.h"
 
 /* ActiveRecord-style validation for coins/chain agreement at boot.
  * Detects mismatch between coins_best_block and active chain tip,
@@ -174,29 +173,12 @@ static struct boot_validation_result case_chain_at_genesis(
             r.coins_height = coins_block->nHeight;
             memcpy(&r.coins_hash, &coins_best, sizeof(r.coins_hash));
         } else if (coins_block && coins_block->nHeight == 0) {
-            /* Block exists in index but with nHeight=0 — this happens
-             * after LDB import when block index heights haven't been
-             * fully resolved yet. Walk pprev to find actual height. */
-            struct block_index *walk = NULL;
-            int walk_h = pprev_walk_depth(coins_block, 10000000,
-                "chain_state_validator.coins_resolve", &walk);
-            if (walk_h < 0) walk_h = 0;
-            if (walk_h > 0) {
-                printf("Post-import: coins_best_block resolved to h=%d "
-                       "via pprev walk — restoring chain tip\n", walk_h);
-                event_emitf(EV_RECOVERY_ACTION, 0,
-                    "action=reset_chain_pprev_walk reason=post_import coins_h=%d",
-                    walk_h);
-                coins_block->nHeight = walk_h;
-                r.action = BOOT_RECOVER_RESET_CHAIN;
-                r.coins_height = walk_h;
-                memcpy(&r.coins_hash, &coins_best, sizeof(r.coins_hash));
-            } else {
-                /* Can't resolve height — keep UTXOs, wait for P2P */
-                printf("Post-import: coins_best_block at h=0, no pprev "
-                       "chain — will sync via P2P\n");
-                r.action = BOOT_OK;
-            }
+            /* Genesis, or an entry whose height is still unresolved. Height
+             * repair ran earlier in boot and owns that field; no height can
+             * be derived here. Keep UTXOs, wait for P2P. */
+            printf("Post-import: coins_best_block at h=0, no pprev "
+                   "chain — will sync via P2P\n");
+            r.action = BOOT_OK;
         } else {
             /* coins_best_block not in block map. Ask the recovery
              * executor to move the cursor through CSR instead of
