@@ -227,6 +227,21 @@ static bool vb_seed_swaps(struct node_db *ndb, unsigned first, unsigned count)
     return ok;
 }
 
+static int vb_check_swap_refused(const struct vault_snapshot *snap)
+{
+    const struct vault_row *r = &snap->rows[VAULT_CLASS_SWAP];
+    int failures = 0;
+
+    VRX_CHECK("512 contracts are refused as a partial total",
+              !r->determined && r->populated &&
+              strstr(r->reason, "512 or more swap contracts") &&
+              r->encumbered == 0 && r->pending == 0 && r->spendable == 0 &&
+              r->immature == 0 && r->item_count == 0 &&
+              snap->zcl_encumbered == 0 && snap->zcl_total == 0 &&
+              snap->undetermined_classes == 3);
+    return failures;
+}
+
 static int vb_check_swap_cap(void)
 {
     struct vrx_fix f;
@@ -248,13 +263,7 @@ static int vb_check_swap_cap(void)
               snap.undetermined_classes == 2);
     VRX_CHECK("a 512th contract seeded", vb_seed_swaps(&f.ndb, VB_SWAP_CAP - 1, 1));
     VRX_CHECK("512-swap snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
-    VRX_CHECK("512 contracts are refused as a partial total",
-              !r->determined && r->populated &&
-              strstr(r->reason, "512 or more swap contracts") &&
-              r->encumbered == 0 && r->pending == 0 && r->spendable == 0 &&
-              r->immature == 0 && r->item_count == 0 &&
-              snap.zcl_encumbered == 0 && snap.zcl_total == 0 &&
-              snap.undetermined_classes == 3);
+    failures += vb_check_swap_refused(&snap);
     vrx_close(&f);
     return failures;
 }
@@ -422,6 +431,38 @@ static int vb_check_allocation_failures(void)
 
 /* ── tokens ───────────────────────────────────────────────────────── */
 
+/* The held token of vb_check_token_states, once it has a definition and
+ * then once the definition table cannot be read. */
+static int vb_check_token_defined_phases(struct node_db *ndb)
+{
+    struct vault_snapshot snap;
+    const struct vault_row *r = &snap.rows[VAULT_CLASS_TOKEN];
+    int failures = 0;
+
+    VRX_CHECK("the definition is saved", vrx_token_meta(ndb, 1));
+    VRX_CHECK("snapshot builds with the definition",
+              vault_read_snapshot(ndb, &snap).ok);
+    VRX_CHECK("cursor 0 is a folded height: the row is determined",
+              r->determined && r->item_count == 1 &&
+              strstr(r->reason, "1 token IDs held") &&
+              strstr(r->reason, "folded through h=0") &&
+              snap.token_items[0].metadata_available &&
+              strcmp(snap.token_items[0].ticker, "TK1") == 0 &&
+              strcmp(snap.token_items[0].name, "Vault Token 1") == 0 &&
+              snap.token_items[0].decimals == 2);
+
+    VRX_CHECK("definition table made unreadable",
+              vrx_exec(ndb, "ALTER TABLE zslp_tokens RENAME COLUMN "
+                            "ticker TO tk_x"));
+    VRX_CHECK("snapshot builds with unreadable definitions",
+              vault_read_snapshot(ndb, &snap).ok);
+    VRX_CHECK("a failed definition lookup is counted as a failure",
+              !r->determined &&
+              strstr(r->reason, "0 held token definitions missing and 1 "
+                                "metadata lookups failed"));
+    return failures;
+}
+
 static int vb_check_token_states(void)
 {
     struct vrx_fix f;
@@ -456,27 +497,7 @@ static int vb_check_token_states(void)
               snap.token_item_count == 1 && snap.token_items[0].units == 77 &&
               !snap.token_items[0].metadata_available);
 
-    VRX_CHECK("the definition is saved", vrx_token_meta(&f.ndb, 1));
-    VRX_CHECK("snapshot builds with the definition",
-              vault_read_snapshot(&f.ndb, &snap).ok);
-    VRX_CHECK("cursor 0 is a folded height: the row is determined",
-              r->determined && r->item_count == 1 &&
-              strstr(r->reason, "1 token IDs held") &&
-              strstr(r->reason, "folded through h=0") &&
-              snap.token_items[0].metadata_available &&
-              strcmp(snap.token_items[0].ticker, "TK1") == 0 &&
-              strcmp(snap.token_items[0].name, "Vault Token 1") == 0 &&
-              snap.token_items[0].decimals == 2);
-
-    VRX_CHECK("definition table made unreadable",
-              vrx_exec(&f.ndb, "ALTER TABLE zslp_tokens RENAME COLUMN "
-                               "ticker TO tk_x"));
-    VRX_CHECK("snapshot builds with unreadable definitions",
-              vault_read_snapshot(&f.ndb, &snap).ok);
-    VRX_CHECK("a failed definition lookup is counted as a failure",
-              !r->determined &&
-              strstr(r->reason, "0 held token definitions missing and 1 "
-                                "metadata lookups failed"));
+    failures += vb_check_token_defined_phases(&f.ndb);
     vrx_close(&f);
     return failures;
 }
