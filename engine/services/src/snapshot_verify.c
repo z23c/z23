@@ -910,7 +910,8 @@ static struct zcl_result snapsync_fc_check_self_consistent(
  *
  * Failures that show no fault of the peer stand the service down and return
  * SNAPSYNC_FLYCLIENT_UNVERIFIABLE_ERROR_CODE; every other failure is an
- * offence for the route to score, and leaves the service negotiating. */
+ * offence for the route to score, and leaves the service negotiating, except
+ * the wrong state, which the route does not score. */
 struct zcl_result snapsync_verify_flyclient(struct snapshot_sync_service *svc,
                                struct main_state *ms,
                                const struct fc_response *resp)
@@ -990,5 +991,19 @@ struct zcl_result snapsync_verify_flyclient(struct snapshot_sync_service *svc,
                 resp->num_samples,
                 (unsigned long long)challenge.chain_length);
 
+    return ZCL_OK;
+}
+
+struct zcl_result snapsync_awaiting_flyclient_from(
+    const struct snapshot_sync_service *svc, uint32_t peer_id,
+    bool *out_awaiting)
+{
+    if (!svc || !out_awaiting)
+        return ZCL_ERR(-1, "flyclient wait: invalid arguments");
+
+    snapsync_service_lock_internal();
+    *out_awaiting = svc->state == SNAPSYNC_NEGOTIATING &&
+                    svc->serving_peer_id == peer_id;
+    snapsync_service_unlock_internal();
     return ZCL_OK;
 }

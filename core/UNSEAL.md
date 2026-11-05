@@ -975,3 +975,7 @@ later lane flips it HARD.
 - 2026-11-05T22:32:39Z — REASON: Finish a getdata request past the send budget from the send tick
   old ROOT: 2388ff94fed28ab3e4f67d435f891acc5de210ecc34fc3f0e72b3c3370f18557
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-05T22:32:51Z — REASON: Ignore a FlyClient reply from anyone but the peer asked
+  old ROOT: 29284f6958c0e5aa01f5164997225fb17f243112fd1fbece191d6723bfa9108c
+  by: owner unseal ritual (make core-unseal)

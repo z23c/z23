@@ -29,6 +29,7 @@
 #include "validation/main_state.h"
 #include "util/safe_alloc.h"
 #include "util/log_macros.h"
+#include "support/log_throttle.h"
 #include "util/sync.h"
 #include "util/blocker.h"
 #include "event/event.h"
@@ -530,23 +531,47 @@ static void mp_zs_fc_stand_down(struct p2p_node *node,
                                "snapshot offer not checkable");
 }
 
+/* Is this reply one the service is waiting for: from the peer it asked, while it
+ * still waits? Anything else shows no fault of the sender: another peer on the
+ * same chain can answer, and an honest reply can arrive after the offer stalled,
+ * stood down or was already accepted. It changes nothing and costs nothing. */
+static bool mp_zs_fc_reply_awaited(const struct snapshot_sync_service *svc,
+                                   const struct p2p_node *node)
+{
+    static struct log_throttle ignored_throttle = LOG_THROTTLE_INIT;
+    uint64_t reps = 0;
+    bool awaiting = false;
+
+    if (svc &&
+        snapsync_awaiting_flyclient_from(svc, (uint32_t)node->id, &awaiting).ok &&
+        awaiting)
+        return true;
+    if (log_throttle_should_emit(&ignored_throttle, 0,
+                                 platform_time_wall_unix(), 60, &reps))
+        LOG_INFO("net", "Peer %s: ignoring a FlyClient reply nobody is waiting "
+                 "for (%llu suppressed since last line)",
+                 node->addr_name, (unsigned long long)reps);
+    return false;
+}
+
 /* Route: zfcproofs → snapsync_verify_flyclient */
 void mp_zs_on_fc_proofs(struct msg_processor *mp,
                                struct p2p_node *node,
                                struct byte_stream *s)
 {
+    struct snapshot_sync_service *svc = msg_snapshot_sync(mp);
+    if (!mp_zs_fc_reply_awaited(svc, node))
+        return; // raw-return-ok:reply-nobody-is-waiting-for
+
     struct fc_response resp;
     if (!snapsync_parse_fc_response(&resp, s).ok) {
         peer_scoring_record(mp->net_mgr, node, PEER_OFFENCE_INVALID_PAYLOAD,
             "truncated FlyClient proofs");
     } else {
         struct snapsync_verify_result verify_result = {0};
-        struct zcl_result verified = ZCL_ERR(-1, "no snapshot sync service");
-        struct snapshot_sync_service *svc = msg_snapshot_sync(mp);
-        if (svc) {
-            verified = snapsync_verify_flyclient(svc, mp->main_state, &resp);
-            snapsync_build_verify_result(&verify_result, verified.ok);
-        }
+        struct zcl_result verified =
+            snapsync_verify_flyclient(svc, mp->main_state, &resp);
+        snapsync_build_verify_result(&verify_result, verified.ok);
         if (verify_result.should_send &&
             verify_result.action == SNAPSYNC_FOLLOWUP_SEND_SNAPSHOT_REQ) {
             /* FlyClient passed — now send zsnapreq */
@@ -555,7 +580,9 @@ void mp_zs_on_fc_proofs(struct msg_processor *mp,
             mp_zs_push_snapshot_request(mp, node, our_h);
         } else if (verified.code == SNAPSYNC_FLYCLIENT_UNVERIFIABLE_ERROR_CODE) {
             mp_zs_fc_stand_down(node, &verified);
-        } else {
+        } else if (mp_zs_fc_reply_awaited(svc, node)) {
+            /* A refused proof leaves the service negotiating. If it is not, the
+             * wait ended while we checked: that refusal is no offence either. */
             peer_scoring_record(mp->net_mgr, node, PEER_OFFENCE_INVALID_PROOF,
                 "FlyClient chain verification failed");
         }

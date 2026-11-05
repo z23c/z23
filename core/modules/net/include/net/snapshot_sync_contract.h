@@ -302,6 +302,14 @@ struct zcl_result snapsync_prepare_serve_step(struct snapsync_serve_step *step,
                                               const uint8_t *buf,
                                               int64_t buf_size);
 
+/* Sets *out_awaiting while the service is negotiating with this peer, so a
+ * FlyClient reply from it is one we are waiting for. Both read together under
+ * the service lock; nothing else is touched, so a peer's message costs no
+ * database work here. */
+struct zcl_result snapsync_awaiting_flyclient_from(
+    const struct snapshot_sync_service *svc, uint32_t peer_id,
+    bool *out_awaiting);
+
 /* Action: verify FlyClient proofs from peer.
  * Checks every sample's MMB inclusion proof, then binds the offered anchor and
  * every sampled leaf to the headers under ms->pindex_best_header, which this
