@@ -71,11 +71,11 @@ struct api_rpc_backend g_api_rpc = {
 pthread_mutex_t g_api_worker_generation_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 #ifdef ZCL_TESTING
-static api_test_rpc_call_fn g_api_test_rpc_call;
+static _Atomic(api_test_rpc_call_fn) g_api_test_rpc_call;
 
 void api_test_set_rpc_call(api_test_rpc_call_fn fn)
 {
-    g_api_test_rpc_call = fn;
+    atomic_store(&g_api_test_rpc_call, fn);
 }
 #endif
 
@@ -149,8 +149,9 @@ int api_rpc_call(const char *method, const char *params_json,
                      char *out, size_t outmax)
 {
 #ifdef ZCL_TESTING
-    if (g_api_test_rpc_call)
-        return g_api_test_rpc_call(method, params_json, out, outmax);
+    api_test_rpc_call_fn test_rpc = atomic_load(&g_api_test_rpc_call);
+    if (test_rpc)
+        return test_rpc(method, params_json, out, outmax);
 #endif
 
     /* Credentials absent (no .cookie, no conf pair at boot): send
