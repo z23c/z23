@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define BSFM_CHECK(name, expr) do {                                      \
@@ -336,6 +337,296 @@ static int bsfm_no_marker_still_auto_loads_seed(void)
     return failures;
 }
 
+/* ── mutation-sweep follow-ups: marker path limits, seed height parsing,
+ *    unwritable marker, borrowed-seed quarantine paths, argument guards ── */
+
+static void bsfm_prepare_dir(char *dir, size_t cap, const char *tag,
+                             const char *seed_name)
+{
+    test_make_tmpdir(dir, cap, "boot_snapshot_failure", tag);
+    bsfm_touch_in_dir(dir, "block_index.bin");
+    if (seed_name)
+        bsfm_touch_in_dir(dir, seed_name);
+}
+
+/* A marker path that needs exactly cap bytes with its NUL still fits; one byte
+ * less must refuse the seed and leave no truncated marker file behind. */
+static int bsfm_explicit_cap_boundary(void)
+{
+    int failures = 0;
+    char dir[256], snap[512], want[600], cut[600];
+    char marker[BOOT_SNAPSHOT_FAILURE_MARKER_MAX];
+    struct app_context ctx;
+    bool fa = true;
+
+    test_make_tmpdir(dir, sizeof(dir), "boot_snapshot_failure", "capx");
+    snprintf(snap, sizeof(snap), "%s/utxo-seed-5.snapshot", dir);
+    snprintf(want, sizeof(want), "%s.failed", snap);
+    snprintf(cut, sizeof(cut), "%s.faile", snap);
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.load_snapshot_at_own_height = snap;
+    memset(marker, 'Z', sizeof(marker));
+    bool sel = boot_snapshot_failure_memory_prepare(
+        &ctx, true, -1, &fa, marker, strlen(snap) + 7);
+    BSFM_CHECK("explicit: marker cap one short refuses the seed",
+               !sel && !fa && ctx.load_snapshot_at_own_height == NULL &&
+               marker[0] == '\0' && access(cut, F_OK) != 0);
+
+    ctx.load_snapshot_at_own_height = snap;
+    sel = boot_snapshot_failure_memory_prepare(
+        &ctx, true, -1, &fa, marker, strlen(snap) + 8);
+    BSFM_CHECK("explicit: marker cap that exactly fits keeps the seed",
+               sel && strcmp(marker, want) == 0 && access(want, F_OK) == 0);
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int bsfm_autodetect_cap_boundary(void)
+{
+    int failures = 0;
+    char dir[256], snap[512], cut[600];
+    char marker[BOOT_SNAPSHOT_FAILURE_MARKER_MAX];
+    struct app_context ctx;
+    bool fa = true;
+
+    bsfm_prepare_dir(dir, sizeof(dir), "autocap", "utxo-seed-11.snapshot");
+    snprintf(snap, sizeof(snap), "%s/utxo-seed-11.snapshot", dir);
+    snprintf(cut, sizeof(cut), "%s.faile", snap);
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.datadir = dir;
+    memset(marker, 'Z', sizeof(marker));
+    bool sel = boot_snapshot_failure_memory_prepare(
+        &ctx, false, -1, &fa, marker, strlen(snap) + 7);
+    BSFM_CHECK("autodetect: marker cap one short drops the seed",
+               !sel && !fa && ctx.load_snapshot_at_own_height == NULL &&
+               marker[0] == '\0' && access(cut, F_OK) != 0);
+
+    sel = boot_snapshot_failure_memory_prepare(
+        &ctx, false, -1, &fa, marker, strlen(snap) + 8);
+    BSFM_CHECK("autodetect: marker cap that exactly fits keeps the seed",
+               sel && fa && access(marker, F_OK) == 0);
+    boot_snapshot_failure_memory_clear(marker);
+    free((void *)ctx.load_snapshot_at_own_height);
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
+/* An unwritable marker (its directory does not exist) must drop the explicit
+ * seed: a failure that cannot be remembered would crash-loop. */
+static int bsfm_explicit_unwritable_marker(void)
+{
+    int failures = 0;
+    char dir[256], snap[512];
+    char marker[BOOT_SNAPSHOT_FAILURE_MARKER_MAX];
+    struct app_context ctx;
+    bool fa = true;
+
+    test_make_tmpdir(dir, sizeof(dir), "boot_snapshot_failure", "nowrite");
+    snprintf(snap, sizeof(snap), "%s/missing/utxo-seed-5.snapshot", dir);
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.load_snapshot_at_own_height = snap;
+    bool sel = boot_snapshot_failure_memory_prepare(
+        &ctx, true, -1, &fa, marker, sizeof(marker));
+    BSFM_CHECK("explicit: unwritable marker drops the seed",
+               !sel && !fa && ctx.load_snapshot_at_own_height == NULL &&
+               marker[0] == '\0');
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
+/* An explicit seed wins: a seed lying in the datadir is not autodetected over
+ * it. */
+static int bsfm_explicit_beats_autodetect(void)
+{
+    int failures = 0;
+    char dir[256], snap[512], want[600];
+    char marker[BOOT_SNAPSHOT_FAILURE_MARKER_MAX];
+    struct app_context ctx;
+    bool fa = true;
+
+    bsfm_prepare_dir(dir, sizeof(dir), "explwin", "utxo-seed-3.snapshot");
+    snprintf(snap, sizeof(snap), "%s/explicit.snapshot", dir);
+    snprintf(want, sizeof(want), "%s.failed", snap);
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.datadir = dir;
+    ctx.load_snapshot_at_own_height = snap;
+    bool sel = boot_snapshot_failure_memory_prepare(
+        &ctx, false, -1, &fa, marker, sizeof(marker));
+    BSFM_CHECK("explicit seed is kept over an autodetectable one",
+               sel && !fa && ctx.load_snapshot_at_own_height == snap &&
+               strcmp(marker, want) == 0);
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static bool bsfm_seed_selected(const char *seed_name, int32_t applied,
+                               const char *tag)
+{
+    char dir[256];
+    char marker[BOOT_SNAPSHOT_FAILURE_MARKER_MAX];
+    struct app_context ctx;
+    bool fa = false;
+
+    bsfm_prepare_dir(dir, sizeof(dir), tag, seed_name);
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.datadir = dir;
+    bool sel = boot_snapshot_failure_memory_prepare(
+        &ctx, true, applied, &fa, marker, sizeof(marker));
+    if (sel) {
+        boot_snapshot_failure_memory_clear(marker);
+        free((void *)ctx.load_snapshot_at_own_height);
+    }
+    test_rm_rf_recursive(dir);
+    return sel;
+}
+
+/* The seed height is parsed from the file name and compared with the proven
+ * coins frontier: a seed is reloaded only while the frontier is below it. */
+static int bsfm_seed_height_parse(void)
+{
+    int failures = 0;
+    BSFM_CHECK("height 909 (digits 0 and 9) is read, frontier 500 reloads",
+               bsfm_seed_selected("utxo-seed-909.snapshot", 500, "h909"));
+    BSFM_CHECK("height 12 reloads at frontier 12",
+               bsfm_seed_selected("utxo-seed-12.snapshot", 12, "h12a"));
+    BSFM_CHECK("height 12 is skipped at frontier 13",
+               !bsfm_seed_selected("utxo-seed-12.snapshot", 13, "h12b"));
+    BSFM_CHECK("height INT32_MAX is a valid seed height",
+               bsfm_seed_selected("utxo-seed-2147483647.snapshot", 1, "hmax"));
+    BSFM_CHECK("height INT32_MAX+1 is refused, not reloaded",
+               !bsfm_seed_selected("utxo-seed-2147483648.snapshot", -1,
+                                   "hover"));
+    return failures;
+}
+
+static bool bsfm_enter(const char *dir, char *saved, size_t cap)
+{
+    return getcwd(saved, cap) != NULL && chdir(dir) == 0;
+}
+
+/* One-character relative paths: the snapshot, the marker and the datadir
+ * names are all non-empty even at length one. */
+static int bsfm_one_char_paths(void)
+{
+    int failures = 0;
+    char dir[256], saved[1024];
+    char marker[BOOT_SNAPSHOT_FAILURE_MARKER_MAX];
+    struct app_context ctx;
+    bool fa = true;
+
+    test_make_tmpdir(dir, sizeof(dir), "boot_snapshot_failure", "onechar");
+    if (!bsfm_enter(dir, saved, sizeof(saved))) {
+        BSFM_CHECK("one-char paths: enter fixture dir", false);
+        test_rm_rf_recursive(dir);
+        return failures;
+    }
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.load_snapshot_at_own_height = "s";
+    bool sel = boot_snapshot_failure_memory_prepare(
+        &ctx, true, -1, &fa, marker, sizeof(marker));
+    BSFM_CHECK("one-char snapshot path still gets its marker",
+               sel && strcmp(marker, "s.failed") == 0 &&
+               access("s.failed", F_OK) == 0);
+    boot_snapshot_failure_memory_clear(marker);
+    BSFM_CHECK("clear removes the marker", access("s.failed", F_OK) != 0);
+    bsfm_touch("m");
+    boot_snapshot_failure_memory_clear("m");
+    BSFM_CHECK("clear removes a one-character marker name",
+               access("m", F_OK) != 0);
+
+    uint8_t digest[32] = {0};
+    (void)mkdir("d", 0700);
+    bsfm_touch_in_dir("d", "block_index.bin");
+    bsfm_touch_in_dir("d", "utxo-seed-99.snapshot");
+    BSFM_CHECK("one-char datadir: bundle marker written",
+               boot_consensus_bundle_marker_write("d", 3056758, digest));
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.datadir = "d";
+    sel = boot_snapshot_failure_memory_prepare(
+        &ctx, false, -1, &fa, marker, sizeof(marker));
+    BSFM_CHECK("one-char datadir: borrowed seed is quarantined",
+               !sel && access("d/utxo-seed-99.snapshot", F_OK) != 0 &&
+               access("d/quarantine-borrowed-seed/utxo-seed-99.snapshot",
+                      F_OK) == 0);
+    if (chdir(saved) != 0)
+        BSFM_CHECK("one-char paths: restore cwd", false);
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
+/* A backslash inside the datadir name does not change the seed's file name. */
+static int bsfm_backslash_datadir_quarantine(void)
+{
+    int failures = 0;
+    char base[256], dir[300], moved[600], left[600];
+    char marker[BOOT_SNAPSHOT_FAILURE_MARKER_MAX];
+    uint8_t digest[32] = {0};
+    struct app_context ctx;
+    bool fa = true;
+
+    test_make_tmpdir(base, sizeof(base), "boot_snapshot_failure", "bslash");
+    snprintf(dir, sizeof(dir), "%s/a\\b", base);
+    if (mkdir(dir, 0700) != 0) {
+        BSFM_CHECK("backslash datadir: mkdir", false);
+        test_rm_rf_recursive(base);
+        return failures;
+    }
+    bsfm_touch_in_dir(dir, "block_index.bin");
+    bsfm_touch_in_dir(dir, "utxo-seed-99.snapshot");
+    BSFM_CHECK("backslash datadir: bundle marker written",
+               boot_consensus_bundle_marker_write(dir, 3056758, digest));
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.datadir = dir;
+    bool sel = boot_snapshot_failure_memory_prepare(
+        &ctx, false, -1, &fa, marker, sizeof(marker));
+    snprintf(left, sizeof(left), "%s/utxo-seed-99.snapshot", dir);
+    snprintf(moved, sizeof(moved),
+             "%s/quarantine-borrowed-seed/utxo-seed-99.snapshot", dir);
+    BSFM_CHECK("backslash datadir: seed quarantined under its own name",
+               !sel && access(left, F_OK) != 0 && access(moved, F_OK) == 0);
+    test_rm_rf_recursive(base);
+    return failures;
+}
+
+static int bsfm_argument_guards(void)
+{
+    int failures = 0;
+    struct app_context ctx;
+    char marker[4];
+    bool fa = true;
+
+    memset(&ctx, 0, sizeof(ctx));
+    memset(marker, 'Z', sizeof(marker));
+    BSFM_CHECK("NULL ctx is refused",
+               !boot_snapshot_failure_memory_prepare(NULL, false, -1, &fa,
+                                                     marker, sizeof(marker)) &&
+               !fa && marker[0] == '\0');
+    BSFM_CHECK("NULL marker buffer is refused without a write",
+               !boot_snapshot_failure_memory_prepare(&ctx, false, -1, &fa,
+                                                     NULL, 10));
+    memset(marker, 'Z', sizeof(marker));
+    BSFM_CHECK("zero marker capacity is refused and leaves the buffer",
+               !boot_snapshot_failure_memory_prepare(&ctx, false, -1, &fa,
+                                                     marker, 0) &&
+               marker[0] == 'Z');
+    memset(marker, 'Z', sizeof(marker));
+    BSFM_CHECK("capacity 1 still empties the marker string",
+               !boot_snapshot_failure_memory_prepare(&ctx, false, -1, &fa,
+                                                     marker, 1) &&
+               marker[0] == '\0' && marker[1] == 'Z');
+    boot_snapshot_failure_memory_clear(NULL);
+    boot_snapshot_failure_memory_clear("");
+    return failures;
+}
+
+static int bsfm_mutation_followups(void)
+{
+    return bsfm_explicit_cap_boundary() + bsfm_autodetect_cap_boundary() +
+           bsfm_explicit_unwritable_marker() + bsfm_explicit_beats_autodetect() +
+           bsfm_seed_height_parse() + bsfm_one_char_paths() +
+           bsfm_backslash_datadir_quarantine() + bsfm_argument_guards();
+}
+
 int test_boot_snapshot_failure_memory(void)
 {
     int failures = 0;
@@ -349,6 +640,7 @@ int test_boot_snapshot_failure_memory(void)
     failures += bsfm_null_autodetect_outparam_tolerated();
     failures += bsfm_installed_marker_quarantines_borrowed_seed();
     failures += bsfm_no_marker_still_auto_loads_seed();
+    failures += bsfm_mutation_followups();
 
     return failures;
 }
