@@ -373,6 +373,15 @@ static void fd_check_roster_gate(struct fd_ctx *ctx, struct json_value *checks)
                  "fleet posts follow pairing and role only, and roster "
                  "revocations are not enforced; restart without "
                  "-fleetrostergate=0 to enforce them");
+    } else if (strcmp(ctx->gate_mode, "on") == 0) {
+        fd_check(ctx, checks, "roster_gate", "ok",
+                 "Fleet scope is on and -fleetrostergate is set, but no "
+                 "sealed roster row is held, so the roster gate admits every "
+                 "paired peer with a role.", "",
+                 "fleet posts follow pairing and role only until a sealed "
+                 "roster row arrives; the manager's node publishes the roster "
+                 "within about 30 seconds, so check that the manager runs "
+                 "with -fleetrostergate and has admitted machines");
     } else {
         fd_check(ctx, checks, "roster_gate", "ok",
                  "Fleet scope is on and no sealed roster row is held, so the "

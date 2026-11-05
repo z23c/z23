@@ -313,6 +313,8 @@ this node's chain. It contains no wallet data and never waits on the network.
 | Field | Meaning |
 |---|---|
 | `member` | The node holds a fleet root (it joined, or it is the manager) |
+| `roster_gate` | How the roster gate was set on this node: `on` (`-fleetrostergate`), `off` (`-fleetrostergate=0`) or `default` (no flag) |
+| `roster_enforcing` | `true` when the gate is deciding who may relay fleet notes: a sealed roster is held and verified, or the gate cannot be verified. `false` when no sealed roster row is held (every paired peer with a role is admitted) or the gate is `off`. It is also `true` when the recorded root cannot be read or the database is closed: nothing is relayed then, so it means "refusing", not "a roster is armed" |
 | `machines_total` | Other machines on the verified roster: sealed by the root, not revoked by the head, not this box, one per box key |
 | `machines_connected` | Of those, machines this node dialled over onion and holds a handshaken, not-disconnecting connection to |
 | `machines[].agreement` | `agrees`, `phone_behind`, `machine_behind`, `disagree` or `unknown`, below |

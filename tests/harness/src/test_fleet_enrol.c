@@ -4204,7 +4204,17 @@ static int test_fd_roster_gate_row(void)
         ASSERT(fe_gate_doctor(dir, "{\"member\":true,\"roster_gate\":\"default\","
                                    "\"roster_enforcing\":false}", &reply));
         row = fd_check_row(&reply, "roster_gate");
-        ASSERT(strstr(fd_cstr(row, "warning"), "-fleetrostergate") != NULL);
+        ASSERT(strstr(fd_cstr(row, "warning"), "run the manager with "
+                                               "-fleetrostergate to publish") != NULL);
+        ASSERT_STR_EQ(fd_cstr(&reply.data, "state"), state);
+        zcl_command_reply_free(&reply);
+
+        /* Flag given but no sealed row held: the advice is not to pass it. */
+        ASSERT(fe_gate_doctor(dir, "{\"member\":true,\"roster_gate\":\"on\","
+                                   "\"roster_enforcing\":false}", &reply));
+        row = fd_check_row(&reply, "roster_gate");
+        ASSERT(strstr(fd_cstr(row, "warning"), "until a sealed roster row") != NULL);
+        ASSERT(strstr(fd_cstr(row, "warning"), "run the manager with") == NULL);
         ASSERT_STR_EQ(fd_cstr(&reply.data, "state"), state);
         zcl_command_reply_free(&reply);
 
