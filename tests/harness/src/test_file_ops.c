@@ -402,9 +402,10 @@ static int test_file_copy_refusals(void)
 
     TEST("file_ops file_copy refuses bad sources and destinations with no residue") {
         char dir[PATH_MAX] = "";
-        struct fo_refusal_paths paths = {{0}};
+        struct fo_refusal_paths paths;
         int staging = 0;
         bool restored = true;
+        memset(&paths, 0, sizeof(paths));
         bool ok = fo_root(dir, "zcl_file_copy_refuse");
         ok = ok && fo_refusal_fixture(dir, &paths);
         int before = ok ? fo_fd_count() : -1;
