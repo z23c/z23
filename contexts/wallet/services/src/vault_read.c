@@ -61,7 +61,10 @@ struct vault_ident {
     uint8_t z_raw[VAULT_MAX_Z_IDENT][VAULT_Z_RAW_LEN];
     int     n_z;
 
-    bool    truncated;      /* a cap was hit; matches may be incomplete */
+    int     n_watch;        /* watch-only rows loaded into the set */
+    bool    t_truncated;    /* transparent set capped or unreadable */
+    bool    z_truncated;    /* sapling set capped or unreadable */
+    bool    truncated;      /* either set is incomplete */
     bool    codec_ok;       /* base58 encoding of our own hashes worked */
 };
 
@@ -137,7 +140,7 @@ static void ident_add_transparent(const struct db_wallet_key *key, void *ctx)
     size_t pk_len = 0, sc_len = 0;
 
     if (ids->n_t >= VAULT_MAX_T_IDENT) {
-        ids->truncated = true;
+        ids->truncated = ids->t_truncated = true;
         return;
     }
 
@@ -170,12 +173,12 @@ static void ident_load_watch_only(struct node_db *ndb, struct vault_ident *ids)
 
     if (!vault_prepare(ndb, &s, "SELECT address,address_hash"
                                 " FROM wallet_watch_only")) {
-        ids->truncated = true;   /* identity set is knowingly incomplete */
+        ids->truncated = ids->t_truncated = true;   /* identity set is knowingly incomplete */
         return;
     }
     while (AR_STEP_ROW(s)) {
         if (ids->n_t >= VAULT_MAX_T_IDENT) {
-            ids->truncated = true;
+            ids->truncated = ids->t_truncated = true;
             break;
         }
         AR_READ_STR(s, 0, ids->t_addr[ids->n_t], sizeof(ids->t_addr[0]));
@@ -185,6 +188,7 @@ static void ident_load_watch_only(struct node_db *ndb, struct vault_ident *ids)
         if (ids->t_addr[ids->n_t][0] != '\0') {
             ids->codec_ok = true;
             ids->n_t++;
+            ids->n_watch++;
         }
     }
     AR_FINALIZE(s);
@@ -196,12 +200,12 @@ static void ident_load_sapling(struct node_db *ndb, struct vault_ident *ids)
 
     if (!vault_prepare(ndb, &s, "SELECT diversifier,pk_d"
                                 " FROM wallet_sapling_keys")) {
-        ids->truncated = true;
+        ids->truncated = ids->z_truncated = true;
         return;
     }
     while (AR_STEP_ROW(s)) {
         if (ids->n_z >= VAULT_MAX_Z_IDENT) {
-            ids->truncated = true;
+            ids->truncated = ids->z_truncated = true;
             break;
         }
         const void *d = sqlite3_column_blob(s, 0);
@@ -222,6 +226,17 @@ static bool ident_owns_t_addr(const struct vault_ident *ids, const char *addr)
         return false;
     for (int i = 0; i < ids->n_t; i++)
         if (strcmp(ids->t_addr[i], addr) == 0)
+            return true;
+    return false;
+}
+
+/* True when identity i repeats the address of an earlier identity (a
+ * watch-only row naming a wallet key's own address), so a join over the
+ * set visits each address once. */
+static bool ident_t_addr_seen(const struct vault_ident *ids, int i)
+{
+    for (int j = 0; j < i; j++)
+        if (strcmp(ids->t_addr[j], ids->t_addr[i]) == 0)
             return true;
     return false;
 }
@@ -373,6 +388,7 @@ static void collect_names(struct node_db *ndb, const struct vault_ident *ids,
 {
     struct znam_entry *entries;
     int64_t held = 0;
+    int distinct = 0;
     bool saturated = false;
 
     (void)snap;
@@ -389,6 +405,13 @@ static void collect_names(struct node_db *ndb, const struct vault_ident *ids,
         return;
     }
 
+    if (ids->t_truncated) {
+        row_undetermined(row, "the identity set is incomplete (a key cap or "
+                              "an unreadable table), so an owned-name count "
+                              "would be partial");
+        return;
+    }
+
     entries = zcl_calloc(VAULT_MAX_NAMES, sizeof(*entries), "vault_znam");
     if (!entries) {
         row_undetermined(row, "allocation for %d znam rows failed",
@@ -398,8 +421,9 @@ static void collect_names(struct node_db *ndb, const struct vault_ident *ids,
 
     for (int i = 0; i < ids->n_t; i++) {
         int n;
-        if (ids->t_addr[i][0] == '\0')
+        if (ids->t_addr[i][0] == '\0' || ident_t_addr_seen(ids, i))
             continue;
+        distinct++;
         n = db_znam_list_by_owner(ndb, ids->t_addr[i], entries,
                                   VAULT_MAX_NAMES);
         if (n >= VAULT_MAX_NAMES)
@@ -420,7 +444,7 @@ static void collect_names(struct node_db *ndb, const struct vault_ident *ids,
                    "db_znam_list_by_owner");
     row_note(row, "owner_address matched against %d identities; registration "
                   "expiry is recorded but not enforced by resolution",
-             ids->n_t);
+             distinct);
 }
 
 /* Swap-encumbered ZCL — the class that had no aggregate at all.
@@ -526,6 +550,14 @@ static void collect_market(struct node_db *ndb, const struct vault_ident *ids,
     if (!offers) {
         row_undetermined(row, "allocation for %d file offers failed",
                          VAULT_MAX_OFFERS);
+        return;
+    }
+
+    if (ids->z_truncated) {
+        free(offers);
+        row_undetermined(row, "the identity set is incomplete (a Sapling "
+                              "key cap or an unreadable table), so a "
+                              "z-address match would be partial");
         return;
     }
 
@@ -639,8 +671,7 @@ struct zcl_result vault_read_snapshot(struct node_db *ndb,
     out->identities.transparent_keys = db_wallet_key_each(
         ndb, ident_add_transparent, ids);
     ident_load_watch_only(ndb, ids);
-    out->identities.watch_only =
-        ids->n_t - out->identities.transparent_keys;
+    out->identities.watch_only = ids->n_watch;
     ident_load_sapling(ndb, ids);
     out->identities.sapling_keys = ids->n_z;
     out->identities.truncated    = ids->truncated;
