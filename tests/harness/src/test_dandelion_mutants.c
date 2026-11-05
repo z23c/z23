@@ -553,6 +553,53 @@ static int check_rotate_rng_failure(void)
     return f;
 }
 
+/* One RNG refusal must not mean a whole epoch of fluffing. It waits a minute,
+ * not a call: without the wait a down RNG would log on every call. */
+static int check_rotate_rng_failure_retries_in_a_minute(void)
+{
+    int f = 0;
+    struct dandelion_state ds;
+    const uint64_t word[] = { 2 };
+
+    nm_filter_fixture();
+    dandelion_init(&ds);
+    clock_begin(1000);
+    rng_begin(NULL, 0);
+    dandelion_maybe_rotate_epoch(&ds, &g_nm);
+    mchk(&f, g_rb_pos == 8, "the refused rotation drew");
+    expect_stem(&f, &ds, 0, NO_PEER, NO_PEER, "refused rotation fluffs");
+
+    /* Still down at +60: a second refusal, and a further minute's wait. */
+    atomic_store(&g_now_s, 1000 + 59);
+    rng_begin(NULL, 0);
+    dandelion_maybe_rotate_epoch(&ds, &g_nm);
+    mchk(&f, g_rb_pos == 0, "no draw at +59");
+    atomic_store(&g_now_s, 1000 + 60);
+    dandelion_maybe_rotate_epoch(&ds, &g_nm);
+    mchk(&f, g_rb_pos == 8, "retry draws at +60");
+    expect_stem(&f, &ds, 0, NO_PEER, NO_PEER, "second refusal still fluffs");
+
+    /* Back up: the next retry selects peers and starts a real epoch. */
+    atomic_store(&g_now_s, 1060 + 59);
+    rng_begin(word, 1);
+    dandelion_maybe_rotate_epoch(&ds, &g_nm);
+    mchk(&f, g_rb_pos == 0, "no draw at +59 after the second refusal");
+    atomic_store(&g_now_s, 1060 + 60);
+    dandelion_maybe_rotate_epoch(&ds, &g_nm);
+    mchk(&f, g_rb_pos == 8, "second retry draws");
+    expect_stem(&f, &ds, 2, 12, 11, "second retry selects stem peers");
+    mchk(&f, ds.epoch_start == 1120, "a good rotation stamps a full epoch");
+
+    atomic_store(&g_now_s, 1120 + 599);
+    dandelion_maybe_rotate_epoch(&ds, &g_nm);
+    mchk(&f, g_rb_pos == 8, "the good epoch runs its full length");
+    rng_end();
+    clock_end();
+    dandelion_free(&ds);
+    nm_done();
+    return f;
+}
+
 static int check_rotate_epoch_window(void)
 {
     int f = 0;
@@ -930,6 +977,8 @@ int dandelion_mutation_gap_tests(void)
     failures += run_group("rotate cap", check_rotate_caps_candidates_at_eight);
     failures += run_group("rotate small sets", check_rotate_small_candidate_sets);
     failures += run_group("rotate RNG failure", check_rotate_rng_failure);
+    failures += run_group("rotate RNG retry",
+                          check_rotate_rng_failure_retries_in_a_minute);
     failures += run_group("rotate window", check_rotate_epoch_window);
     failures += run_group("rotate NULL", check_rotate_null_args);
     failures += run_group("embargo bounds", check_pool_embargo_boundaries);
