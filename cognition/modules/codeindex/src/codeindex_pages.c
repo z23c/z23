@@ -12,6 +12,21 @@
 
 enum { CI_PAGE_MANIFEST_MAX = 1024 * 1024, CI_PAGE_BATCH_MAX = 256 };
 
+#if defined(ZCL_TESTING)
+bool codeindex_pages_test_reseal(const char *dbpath)
+{
+    struct ci_store *store = ci_store_open_path(dbpath);
+    if (!store) return false;
+    uint8_t root[32];
+    bool ok = ci_store_begin(store) && ci_store_retrieval_projection_root(store, root) &&
+              ci_store_meta_set(store, CI_RETRIEVAL_PROJECTION_META, root, sizeof(root)) &&
+              ci_store_commit(store);
+    if (!ok) (void)ci_store_rollback(store);
+    ci_store_close(store);
+    return ok;
+}
+#endif
+
 #if defined(_WIN32)
 bool codeindex_pages_import_hints(struct codeindex *ci, const void *manifest,
     size_t manifest_size, const struct ci_page *pages, size_t count,
@@ -234,7 +249,7 @@ static bool page_artifact_ok(const char *root, const struct ci_page *row)
     sha3_256_write(&hash, data, size);
     sha3_256_finalize(&hash, digest);
     bool ok = !memcmp(digest, row->artifact_root, sizeof(digest)) &&
-              page_manifest_line(data, size, row->body);
+              page_hint_valid(data, size, row);
     free(data);
     return ok;
 }

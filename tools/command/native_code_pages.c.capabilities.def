@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_code_pages.c", CAP_FS_WRITE, "Checked allocation failures report to stderr; bounded artifact reads and no-shell Git resolution use platform seams")

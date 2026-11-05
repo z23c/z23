@@ -30,4 +30,7 @@ int codeindex_pages_list(struct codeindex *ci, const char *directory,
 bool codeindex_pages_import_hints(struct codeindex *ci, const void *manifest,
     size_t manifest_size, const struct ci_page *pages, size_t count,
     uint8_t artifact_root[32]);
+#if defined(ZCL_TESTING)
+bool codeindex_pages_test_reseal(const char *dbpath);
+#endif
 #endif

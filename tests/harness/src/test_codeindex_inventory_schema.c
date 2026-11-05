@@ -349,6 +349,22 @@ static bool cis_corrupt_page_artifact(const char *root, const uint8_t artifact[3
     return codeindex_pages_list(ci, "lib/net", &out, 1, &prior_untrusted) == -2;
 }
 
+static bool cis_page_forged_tree(const char *root)
+{
+    char path[PLATFORM_TEMP_PATH_MAX + 32];
+    int n = snprintf(path, sizeof(path), "%s/.codeindex/index.kv", root);
+    if (n <= 0 || (size_t)n >= sizeof(path) ||
+        !cis_exec(root, "UPDATE pages SET tree_oid='cccccccccccccccccccccccccccccccccccccccc'") ||
+        !codeindex_pages_test_reseal(path)) return false;
+    struct codeindex *ci = codeindex_open_retrieval_view(root);
+    struct ci_page out;
+    bool prior_untrusted = false;
+    bool refused = ci && codeindex_pages_list(ci, "lib/net", &out, 1, &prior_untrusted) == -2;
+    codeindex_close(ci);
+    return refused && cis_exec(root, "UPDATE pages SET tree_oid='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'") &&
+           codeindex_pages_test_reseal(path);
+}
+
 static bool cis_native_output(const struct zcl_command_reply *reply, const char *commit,
                               const char *state, int64_t accepted, int64_t stale)
 {
@@ -471,11 +487,14 @@ static bool cis_page_roundtrip(const char *root)
               codeindex_rebuild(older);
     struct codeindex *fresh = ok ? codeindex_open_retrieval_view(root) : NULL;
     ok = ok && fresh && codeindex_pages_list(fresh, "lib/net", &out, 1, &prior_untrusted) == 1 &&
-              strcmp(out.body, body) == 0 && memcmp(out.artifact_root, artifact, 32) == 0 &&
-              cis_corrupt_page_artifact(root, artifact, fresh);
+              strcmp(out.body, body) == 0 && memcmp(out.artifact_root, artifact, 32) == 0;
     codeindex_close(fresh);
     codeindex_close(older);
     codeindex_close(ci);
+    if (ok) ok = cis_page_forged_tree(root);
+    fresh = ok ? codeindex_open_retrieval_view(root) : NULL;
+    if (ok) ok = fresh && cis_corrupt_page_artifact(root, artifact, fresh);
+    codeindex_close(fresh);
     return ok;
 }
 
