@@ -444,5 +444,6 @@ int test_dandelion(void)
     failures += check_dandelion_null_and_stats();
     failures += check_dandelion_shuffle_entropy();
     failures += check_dandelion_fluff_coin_band();
+    failures += test_dandelion_mutants();
     return failures;
 }

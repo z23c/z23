@@ -575,6 +575,7 @@ int test_bloom(void);
 int test_fingerprint(void);
 int test_compact_blocks(void);
 int test_dandelion(void);
+int test_dandelion_mutants(void);
 int test_addrman_rebalance(void);
 int test_addrman_eclipse(void);
 int test_coins(void);
