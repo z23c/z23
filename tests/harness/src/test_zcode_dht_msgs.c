@@ -406,6 +406,56 @@ static int test_trust_roles_split(void)
     return failures;
 }
 
+/* An authority refusal of an otherwise valid record is a delegation
+ * verdict, the same one the transport role gives: it is not a wire-order
+ * defect, which the service scores as a refuted frame. */
+static int test_authority_refusal_reason(void)
+{
+    int failures = 0;
+    TEST("zcode dht msgs: authority refusal of a record reports a delegation error") {
+        struct msg_fixture f;
+        int unused = 0;
+        ASSERT(fixture_init(&f, &unused));
+        struct vcs_zcode_dht_msg_records records;
+        ASSERT(fixture_auth_record(&f, &records));
+        uint8_t rec_wire[VCS_ZCODE_DHT_MAX_FRAME_BYTES + 1];
+        size_t rec_len = 0;
+        ASSERT_EQ(vcs_zcode_dht_msg_serialize_records(
+                      &records, f.transcript, f.online_seed, rec_wire,
+                      sizeof(rec_wire), &rec_len),
+                  VCS_ZCODE_DHT_OK);
+        struct vcs_zcode_dht_msg_store_record store;
+        memset(&store, 0, sizeof(store));
+        store.session_generation = 9;
+        memcpy(store.sender_node_id, f.node_id, 32);
+        fill_query(store.query_id);
+        store.delegation = f.delegation;
+        store.record = records.records[0];
+        uint8_t store_wire[VCS_ZCODE_DHT_MAX_FRAME_BYTES + 1];
+        size_t store_len = 0;
+        ASSERT_EQ(vcs_zcode_dht_msg_serialize_store_record(
+                      &store, f.transcript, f.online_seed, store_wire,
+                      sizeof(store_wire), &store_len),
+                  VCS_ZCODE_DHT_OK);
+        struct role_counts transport = {0, true};
+        struct role_counts authority = {0, false};
+        f.verify.transport_verify = role_stub;
+        f.verify.transport_ctx = &transport;
+        f.verify.authority_verify = role_stub;
+        f.verify.authority_ctx = &authority;
+        struct vcs_zcode_dht_msg parsed;
+        ASSERT_EQ(vcs_zcode_dht_msg_parse(rec_wire, rec_len, &f.verify,
+                                          &parsed),
+                  VCS_ZCODE_DHT_ERR_DELEGATION);
+        ASSERT_EQ(vcs_zcode_dht_msg_parse(store_wire, store_len, &f.verify,
+                                          &parsed),
+                  VCS_ZCODE_DHT_ERR_DELEGATION);
+        ASSERT_EQ(authority.calls, 2);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int zcode_dht_msgs_forged_tests(void); /* test_zcode_dht_msgs_forged.c */
 
 int test_zcode_dht_msgs(void)
@@ -416,6 +466,7 @@ int test_zcode_dht_msgs(void)
     failures += test_rejections();
     failures += test_record_frames();
     failures += test_trust_roles_split();
+    failures += test_authority_refusal_reason();
     failures += zcode_dht_msgs_forged_tests();
     printf("=== zcode_dht_msgs: %d failures ===\n", failures);
     return failures;
