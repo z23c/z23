@@ -619,6 +619,40 @@ static int sig_test_stamp_args(void)
     return failures;
 }
 
+/* A pass memoized by an untrusted call (linkage walk only) must not be
+ * returned to a later trusted call on the same (height, hash): the
+ * commitment check never ran for it. */
+static int sig_test_trusted_memo(void)
+{
+    int failures = 0;
+    struct node_db ndb = {0};
+    if (!sig_fixture(&ndb))
+        return 1;
+    bool built = sig_add_utxo(&ndb, 0xA1, 0, 5000);
+    uint8_t root[32], bad[32], t[32];
+    uint64_t count = 0;
+    utxo_commitment_sha3_compute(ndb.db, root, &count);
+    memcpy(bad, root, 32);
+    bad[0] ^= 0x01;
+
+    built = built && sig_one_row(&ndb, 140, 0xD0, t);
+    SIG_CHECK("memo trust: untrusted call passes", built && sig_gate(140, t, false));
+    built = built && seed_integrity_stamp_utxo_sha3(&ndb, 140, bad, count);
+    SIG_CHECK("memo trust: trusted call after an untrusted pass runs the commitment, REFUSED",
+              built && !sig_gate(140, t, true));
+    blocker_clear("seed.linkage_gate");
+
+    /* the other way: a trusted pass may satisfy an untrusted repeat */
+    built = sig_one_row(&ndb, 141, 0xD1, t) &&
+            seed_integrity_stamp_utxo_sha3(&ndb, 141, root, count);
+    int64_t r0 = sig_stat("seed_gate_runs");
+    SIG_CHECK("memo trust: trusted call passes", built && sig_gate(141, t, true));
+    SIG_CHECK("memo trust: untrusted repeat served from the trusted pass",
+              sig_gate(141, t, false) && sig_stat("seed_gate_runs") == r0 + 1);
+    sig_teardown(&ndb);
+    return failures;
+}
+
 int test_seed_integrity_gate(void)
 {
     printf("\n=== seed_integrity_gate tests ===\n");
@@ -722,6 +756,7 @@ int test_seed_integrity_gate(void)
     failures += sig_test_commitment();
     failures += sig_test_commitment_refusals();
     failures += sig_test_stamp_args();
+    failures += sig_test_trusted_memo();
 
     /* crash-only proof: refusals above were plain false returns;
      * the process (this test) is alive. */

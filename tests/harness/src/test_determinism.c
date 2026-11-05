@@ -1202,6 +1202,22 @@ static int test_receipt_encode_guards(void)
     return failures;
 }
 
+static int test_receipt_encode_empty_group(void)
+{
+    int failures = 0;
+    TEST("receipt: encode refuses an empty group id that decode would refuse") {
+        struct zcl_det_receipt r;
+        fill_receipt(&r);
+        r.group[0] = '\0';
+        uint8_t w[ZCL_DET_RECEIPT_SIZE];
+        size_t len = 99;
+        ASSERT(!zcl_det_receipt_encode(&r, w, sizeof(w), &len));
+        ASSERT_EQ(len, (size_t)99);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* Decode a copy of `base` with one byte replaced. */
 static bool rc_decode_with(const uint8_t base[ZCL_DET_RECEIPT_SIZE],
                            size_t at, uint8_t v)
@@ -1497,6 +1513,7 @@ int test_determinism(void)
            test_receipt_set_commit() +
            test_receipt_wire_offsets() +
            test_receipt_encode_guards() +
+           test_receipt_encode_empty_group() +
            test_receipt_decode_ranges() +
            test_receipt_decode_refusals_leave_output() +
            test_receipt_check_identity() +
