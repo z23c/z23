@@ -35,6 +35,7 @@
 #include "models/wallet_send_once.h"
 #include "primitives/transaction.h"
 #include "util/log_macros.h"
+#include "util/safe_alloc.h"
 #include "util/sync.h"
 #include "wallet/wallet.h"
 
@@ -216,25 +217,40 @@ static void wso_key_hash(const char *key, uint8_t out[32])
     sha3_256_finalize(&c, out);
 }
 
+/* Absorb one request parameter as JSON text, every byte of it: a retry whose
+ * tail differs must not share a digest with the send already on record. */
+static bool wso_absorb_json(struct sha3_256_ctx *c, const struct json_value *v)
+{
+    size_t size = json_write(v, NULL, 0) + 1;
+    char *text = zcl_malloc(size, "wso_digest_param");
+    if (!text)
+        LOG_FAIL(WSO_TAG, "no memory to read the send request");
+    (void)json_write(v, text, size);
+    wso_absorb(c, text);
+    free(text);
+    return true;
+}
+
 /* Bound to the key, so the digest of a low-entropy request cannot be tested
- * against a copy of node.db without the key. */
+ * against a copy of node.db without the key. Absent and null fees absorb the
+ * empty string. */
 static bool wso_digest(const char *key, const struct json_value *params,
                        uint8_t out[32])
 {
-    char from[1024], recips[16384], fee[64] = "";
-    if (json_write(json_at(params, 0), from, sizeof(from)) == 0 ||
-        json_write(json_at(params, 1), recips, sizeof(recips)) == 0)
-        return false;
     const struct json_value *f = json_at(params, WALLET_SEND_ONCE_FEE_PARAM);
-    if (f && !json_is_null(f) && json_write(f, fee, sizeof(fee)) == 0)
-        return false;
     struct sha3_256_ctx c;
     sha3_256_init(&c);
     wso_absorb(&c, "z23/wallet-send-once/request/v1");
     wso_absorb(&c, key);
-    wso_absorb(&c, from);
-    wso_absorb(&c, recips);
-    wso_absorb(&c, fee);
+    if (!wso_absorb_json(&c, json_at(params, 0)) ||
+        !wso_absorb_json(&c, json_at(params, 1)))
+        return false;
+    if (f && !json_is_null(f)) {
+        if (!wso_absorb_json(&c, f))
+            return false;
+    } else {
+        wso_absorb(&c, "");
+    }
     sha3_256_finalize(&c, out);
     return true;
 }
@@ -463,7 +479,8 @@ bool wallet_send_once_dispatch(const struct json_value *params, bool help,
         return false;
     }
     if (!wso_digest(key, params, digest)) {
-        json_set_str(result, "Send request too large; send refused");
+        json_set_str(result,
+                     "Not enough memory to read the send request; send refused");
         return false;
     }
     wso_key_hash(key, kh);
