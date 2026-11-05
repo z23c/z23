@@ -14,6 +14,18 @@ static bool page_oid(const char *s, size_t n)
     return true;
 }
 
+static bool page_component(const char *s, size_t n)
+{
+    return n && !(n == 1 && s[0] == '.') &&
+           !(n == 2 && s[0] == '.' && s[1] == '.');
+}
+
+static bool page_path_char(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+}
+
 static bool page_directory(const char *s)
 {
     if (!s || !s[0] || strlen(s) > 512 || s[0] == '/') return false;
@@ -22,15 +34,27 @@ static bool page_directory(const char *s)
         char c = *p;
         if (c == '/' || c == '\0') {
             size_t n = (size_t)(p - component);
-            if (!n || (n == 1 && component[0] == '.') ||
-                (n == 2 && component[0] == '.' && component[1] == '.')) return false;
+            if (!page_component(component, n)) return false;
             if (!c) return true;
             component = p + 1;
-        } else if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                     (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-')) {
+        } else if (!page_path_char(c)) {
             return false;
         }
     }
+}
+
+static bool page_tree_output(const char *out, size_t n, size_t oid_len,
+                             const char *directory, char tree[65])
+{
+    size_t prefix = sizeof("040000 tree ") - 1, path_len = strlen(directory);
+    if (n != prefix + oid_len + 1 + path_len + 1 ||
+        memcmp(out, "040000 tree ", prefix) || !page_oid(out + prefix, oid_len) ||
+        out[prefix + oid_len] != '\t' ||
+        memcmp(out + prefix + oid_len + 1, directory, path_len) || out[n - 1] != '\0')
+        return false;
+    memcpy(tree, out + prefix, oid_len);
+    tree[oid_len] = '\0';
+    return true;
 }
 
 static bool page_capture(const char *const argv[], char *out, size_t cap, size_t *len)
@@ -62,14 +86,6 @@ bool zcl_code_pages_subject(const char *repo, const char *commit,
         "GIT_ALLOW_PROTOCOL=", "GIT_OPTIONAL_LOCKS=0", "git", "--no-replace-objects",
         "-c", "protocol.allow=never", "-C", repo, "ls-tree", "--full-tree", "-z",
         commit, "--", directory, NULL};
-    size_t prefix = sizeof("040000 tree ") - 1, path_len = strlen(directory);
-    if (!page_capture(tree_argv, out, sizeof(out), &n) ||
-        n != prefix + oid_len + 1 + path_len + 1 ||
-        memcmp(out, "040000 tree ", prefix) || !page_oid(out + prefix, oid_len) ||
-        out[prefix + oid_len] != '\t' ||
-        memcmp(out + prefix + oid_len + 1, directory, path_len) || out[n - 1] != '\0')
-        return false;
-    memcpy(tree, out + prefix, oid_len);
-    tree[oid_len] = '\0';
-    return true;
+    return page_capture(tree_argv, out, sizeof(out), &n) &&
+           page_tree_output(out, n, oid_len, directory, tree);
 }

@@ -243,6 +243,27 @@ static bool cis_doc_limit(void)
     return refused;
 }
 
+static bool cis_page_replacement(const char *root, const char *commit, const char *expected)
+{
+    char output[256], replacement[65], actual[65];
+    const char *add[] = {"git", "-C", root, "add", "--", "module/file.c", NULL};
+    const char *save[] = {"git", "-C", root, "-c", "user.name=Fixture", "-c",
+                          "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+                          "-c", "core.hooksPath=/dev/null", "commit", "-qm", "fixture", NULL};
+    const char *head[] = {"git", "-C", root, "rev-parse", "HEAD", NULL};
+    if (!cis_put(root, "module/file.c", "int other_value;\n") ||
+        zcl_spawn_capture(add, output, sizeof(output), 10000) != 0 ||
+        zcl_spawn_capture(save, output, sizeof(output), 10000) != 0 ||
+        zcl_spawn_capture(head, output, sizeof(output), 10000) != 0) return false;
+    output[strcspn(output, "\r\n")] = '\0';
+    if (strlen(output) != 40) return false;
+    memcpy(replacement, output, 41);
+    const char *replace[] = {"git", "-C", root, "replace", commit, replacement, NULL};
+    return zcl_spawn_capture(replace, output, sizeof(output), 10000) == 0 &&
+           zcl_code_pages_subject(root, commit, "module", actual) &&
+           strcmp(actual, expected) == 0;
+}
+
 static bool cis_page_subject(void)
 {
     char root[PLATFORM_TEMP_PATH_MAX] = {0}, output[256], commit[65], expected[65], actual[65];
@@ -271,18 +292,7 @@ static bool cis_page_subject(void)
            !zcl_code_pages_subject(root, commit, "../module", actual) &&
            !zcl_code_pages_subject(root, "HEAD", "module", actual) &&
            !zcl_code_pages_subject(root, commit, "missing", actual);
-    if (!valid || !cis_put(root, "module/file.c", "int other_value;\n") ||
-        zcl_spawn_capture(add, output, sizeof(output), 10000) != 0 ||
-        zcl_spawn_capture(save, output, sizeof(output), 10000) != 0 ||
-        zcl_spawn_capture(head, output, sizeof(output), 10000) != 0) return false;
-    output[strcspn(output, "\r\n")] = '\0';
-    char replacement[65];
-    if (strlen(output) != 40) return false;
-    memcpy(replacement, output, 41);
-    const char *replace[] = {"git", "-C", root, "replace", commit, replacement, NULL};
-    return zcl_spawn_capture(replace, output, sizeof(output), 10000) == 0 &&
-           zcl_code_pages_subject(root, commit, "module", actual) &&
-           strcmp(actual, expected) == 0;
+    return valid && cis_page_replacement(root, commit, expected);
 }
 
 int test_codeindex_inventory_schema(void)
