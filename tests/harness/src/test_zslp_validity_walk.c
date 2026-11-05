@@ -520,8 +520,10 @@ static const struct wk_expected g_pinned[] = {
 
 /* Taken from the walk as it stood before it was bounded, given all the room
  * it needed to finish. A change here changes a deterministic ledger. */
-#define WK_PINNED_FINGERPRINT "unset"
-#define WK_PINNED_DIGEST      "unset"
+#define WK_PINNED_FINGERPRINT \
+    "e93209ce30d060595db9e0d3dfb8abd6e52cd9106b7b57ece85826b474ad19b5"
+#define WK_PINNED_DIGEST \
+    "07ff583649c91ec72000d1fe4126b4aa307d1ac3ef3b3f5133e0fee1818958ad"
 
 static int wk_case_pinned(void)
 {
