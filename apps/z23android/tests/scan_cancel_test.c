@@ -34,7 +34,7 @@ static void *blocked_commit(void *arg)
 int main(void)
 {
     assert(!pthread_mutex_init(&c.lock, NULL));
-    current = &c; strcpy(c.action, "scan"); c.camera_ticket = 7; c.view.scanning = true;
+    current = &c; memcpy(c.action, "scan", sizeof("scan")); c.camera_ticket = 7; c.view.scanning = true;
     pthread_t worker; assert(!pthread_create(&worker, NULL, blocked_commit, NULL));
     pthread_mutex_lock(&gate); while (!waiting) pthread_cond_wait(&changed, &gate); pthread_mutex_unlock(&gate);
     zapp_controller_cancel_scan();
